@@ -1358,3 +1358,63 @@ Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddH
 - `720p60`은 목표권(대기/지연 허용 범위 내)으로 수렴.
 - `1080p60`은 아직 `p95<=120ms` 게이트 미달이며, decode/render 구간 변동과 프레젠트 갭이 남아 있음.
 - 다음 우선순위는 1080p60 전용 튜닝(코덱 설정/큐 상한/해상도 자동 폴백 정책 고도화).
+
+## 2026-02-24 00:31 (UDP 기본화 후속 + 색변환 최적화)
+
+### Summary
+- 사용자 요청에 따라 `h264` 경로는 UDP 기본, `raw`는 TCP 기본으로 정리.
+- UDP 버퍼 기본값 상향 + 클라이언트 catch-up 임계치 강화.
+- `nv12_to_bgra` CPU 경로를 LUT/2픽셀 처리로 최적화.
+- 로컬 실측 기준 1080p 지연 수치가 개선됨.
+
+### Code changes
+1. `apps/native_poc/src/native_video_host_main.cpp`
+- transport 기본 선택 로직(`h264=udp`, `raw=tcp`).
+- UDP 사용 시 host send buffer 기본 1MB 적용.
+
+2. `apps/native_poc/src/native_video_client_main.cpp`
+- transport 기본 선택 로직(`h264=udp`, `raw=tcp`).
+- UDP 소켓 버퍼 기본값 상향(recv 1MB / send 256KB).
+- catch-up 임계치 조정:
+  - `kCatchupLagDropUs=450000`
+  - `kDecodeQueueLagDropUs=300000`
+
+3. `apps/native_poc/src/mf_h264_codec.cpp`
+- `nv12_to_bgra()` 최적화:
+  - LUT precompute
+  - UV 공유 2픽셀 처리
+  - 홀수 width 안전 처리
+
+4. `automation/run_native_video_with_config.ps1`
+- JSON 항목 반영 추가:
+  - `udpMtu`
+  - `tcpSendBufKb`
+  - `tcpRecvBufKb`
+
+5. `automation/native_video_profile_720p.json`
+- 체감용 저지연 프로필로 조정:
+  - `fps=60`, `fpsHint=60`
+  - `bitrate=2500000`
+  - `keyint=30`
+  - `udpMtu=1200`, `tcpSendBufKb=1024`, `tcpRecvBufKb=1024`
+
+6. `automation/native_video_profile_1080p.json`
+- UDP 버퍼/MTU 항목 추가:
+  - `udpMtu=1200`, `tcpSendBufKb=1024`, `tcpRecvBufKb=1024`
+
+### Verification
+1. 1080p30 UDP baseline
+- Log: `automation/logs/verify-native-video-20260224-002638`
+- `LAT_AVG_US=193513.5`, `LAT_P95_US=215518`
+
+2. 1080p30 UDP (after optimization)
+- Log: `automation/logs/verify-native-video-20260224-003112`
+- `LAT_AVG_US=118596.12`, `LAT_P95_US=125554`
+
+3. 720p60 UDP (recommended profile target)
+- Log: `automation/logs/verify-native-video-20260224-003138`
+- `LAT_AVG_US=63906.25`, `LAT_P95_US=63628`
+
+### Next
+- GPU zero-copy 렌더 경로 구현 전까지는 720p60 프로필을 기본 체감 모드로 권장.
+- Parsec 목표치(저지연 + 고프레임) 달성을 위해 다음 우선순위는 클라이언트 렌더 경로 GPU화.
