@@ -47,6 +47,7 @@ using namespace winrt::Windows::Graphics::DirectX::Direct3D11;
 using remote60::native_poc::ControlInputAckMessage;
 using remote60::native_poc::ControlInputEventMessage;
 using remote60::native_poc::ControlClientMetricsMessage;
+using remote60::native_poc::ControlRequestKeyFrameMessage;
 using remote60::native_poc::ControlPingMessage;
 using remote60::native_poc::ControlPongMessage;
 using remote60::native_poc::EncodedFrameHeader;
@@ -530,6 +531,9 @@ int main(int argc, char** argv) {
   std::atomic<uint64_t> clientMetricsMaxLatencyUs{0};
   std::atomic<uint64_t> clientMetricsAvgDecodeTailUs{0};
   std::atomic<uint64_t> clientMetricsMaxDecodeTailUs{0};
+  std::atomic<bool> clientRequestedKeyFrame{false};
+  std::atomic<uint16_t> clientKeyFrameReason{0};
+  std::atomic<uint64_t> clientKeyFrameRequestCount{0};
   SOCKET controlListenSock = INVALID_SOCKET;
   SOCKET controlClientSock = INVALID_SOCKET;
   std::thread controlThread;
@@ -631,6 +635,21 @@ int main(int argc, char** argv) {
               continue;
             }
 
+            if (type == MessageType::ControlRequestKeyFrame &&
+                header.size == sizeof(ControlRequestKeyFrameMessage)) {
+              ControlRequestKeyFrameMessage req{};
+              req.header = header;
+              if (!recv_all(controlClientSock, &req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+              clientRequestedKeyFrame = true;
+              clientKeyFrameReason = req.reason;
+              const uint64_t reqCount = clientKeyFrameRequestCount.fetch_add(1) + 1;
+              std::cout << "[native-video-host][control] keyframe-request seq=" << req.seq
+                        << " reason=" << req.reason
+                        << " total=" << reqCount
+                        << "\n";
+              continue;
+            }
+
             if (bodySize > 0 && !recv_discard(controlClientSock, bodySize)) break;
           }
         });
@@ -701,6 +720,8 @@ int main(int argc, char** argv) {
 
   const uint32_t abrHighW = encodeW;
   const uint32_t abrHighH = encodeH;
+  const uint32_t abrMidW = abrHighW;
+  const uint32_t abrMidH = abrHighH;
   uint32_t abrLowW = abrHighW;
   uint32_t abrLowH = abrHighH;
   if (useH264) {
@@ -708,12 +729,16 @@ int main(int argc, char** argv) {
   }
   const bool abrHasLowerResolution = (abrLowW < abrHighW || abrLowH < abrHighH);
   const uint32_t abrHighBitrate = args.bitrate;
+  const uint32_t abrMidBitrate = std::min<uint32_t>(
+      abrHighBitrate, std::max<uint32_t>(2000000u, (abrHighBitrate * 75u) / 100u));
   const uint32_t abrLowBitrate = std::min<uint32_t>(
       abrHighBitrate, std::max<uint32_t>(1500000u, (abrHighBitrate * 55u) / 100u));
+  const bool abrHasMidProfile = (abrMidBitrate < abrHighBitrate);
+  const bool abrHasLowProfile = abrHasLowerResolution || (abrLowBitrate < abrMidBitrate);
+  int abrProfile = 0;  // 0: high, 1: mid, 2: low
   uint32_t activeEncodeW = abrHighW;
   uint32_t activeEncodeH = abrHighH;
   uint32_t activeBitrate = abrHighBitrate;
-  bool abrUsingLowProfile = false;
   uint64_t abrCooldownUntilUs = 0;
   uint32_t abrGoodSeconds = 0;
 
@@ -729,6 +754,8 @@ int main(int argc, char** argv) {
               << " captureSize=" << width << "x" << height
               << " encodeSize=" << activeEncodeW << "x" << activeEncodeH
               << " auto720=" << (autoFallback720 ? 1 : 0)
+              << " abrMidProfile=" << abrMidW << "x" << abrMidH
+              << " abrMidBitrate=" << abrMidBitrate
               << " abrLowProfile=" << abrLowW << "x" << abrLowH
               << " abrLowBitrate=" << abrLowBitrate
               << "\n";
@@ -992,6 +1019,11 @@ int main(int argc, char** argv) {
         continue;
       }
 
+      if (clientRequestedKeyFrame.exchange(false)) {
+        const uint16_t reason = clientKeyFrameReason.load();
+        std::cout << "[native-video-host][control] keyframe-request-consumed reason=" << reason << "\n";
+        forceKeyNext = true;
+      }
       const bool forceKeyFrame =
           forceKeyNext || (encodedSeq == 0) || ((args.keyint > 0) && ((seq % args.keyint) == 0));
       const uint64_t encodeStartUs = qpc_now_us();
@@ -1156,6 +1188,7 @@ int main(int argc, char** argv) {
                   << " stalePreEncodeDrops=" << stalePreEncodeDropCount
                   << " staleEncodedDrops=" << staleEncodedDropCount
                   << " encoderResets=" << encoderResetCount
+                  << " keyReqTotal=" << clientKeyFrameRequestCount.load()
                   << " inputEvents=" << inputEvents.load()
                   << " capAgeAvgUs=" << capAgeAvgUs
                   << " capAgeMaxUs=" << captureAgeMaxUs
@@ -1178,48 +1211,96 @@ int main(int argc, char** argv) {
           const uint32_t clWidth = metricsFresh ? clientMetricsWidth.load() : 0;
           const uint32_t clHeight = metricsFresh ? clientMetricsHeight.load() : 0;
 
-          const uint32_t minGoodFpsX100 = args.fps * 90u;
-          const uint32_t minAcceptFpsX100 = args.fps * 75u;
+          const uint32_t minGoodFpsX100 = args.fps * 92u;
+          const uint32_t minOkayFpsX100 = args.fps * 85u;
+          const uint32_t minDegradeFpsX100 = args.fps * 78u;
+          const uint32_t minSevereFpsX100 = args.fps * 65u;
 
-          const bool shouldDownByClient =
+          const bool severeDownByClient =
+              metricsFresh &&
+              (clAvgLatencyUs > 150000ULL ||
+               clAvgDecodeTailUs > 110000ULL ||
+               clDecodedFpsX100 < minSevereFpsX100);
+          const bool moderateDownByClient =
               metricsFresh &&
               (clAvgLatencyUs > 120000ULL ||
                clAvgDecodeTailUs > 90000ULL ||
-               clDecodedFpsX100 < minAcceptFpsX100);
-          const bool shouldDownByHost = (!metricsFresh && cb2eAvgUs > 65000ULL);
-          const bool shouldDown = shouldDownByClient || shouldDownByHost;
+               clDecodedFpsX100 < minDegradeFpsX100);
+          const bool severeDownByHost = (!metricsFresh && cb2eAvgUs > 90000ULL);
+          const bool moderateDownByHost = (!metricsFresh && cb2eAvgUs > 70000ULL);
+          const bool severeDown = severeDownByClient || severeDownByHost;
+          const bool moderateDown = moderateDownByClient || moderateDownByHost;
 
-          const bool goodForUpgrade =
+          const bool goodForLowToMid =
               metricsFresh &&
-              (clAvgLatencyUs < 80000ULL) &&
-              (clAvgDecodeTailUs < 55000ULL) &&
+              (clAvgLatencyUs < 90000ULL) &&
+              (clAvgDecodeTailUs < 65000ULL) &&
+              (clDecodedFpsX100 >= minOkayFpsX100);
+          const bool goodForMidToHigh =
+              metricsFresh &&
+              (clAvgLatencyUs < 75000ULL) &&
+              (clAvgDecodeTailUs < 50000ULL) &&
               (clDecodedFpsX100 >= minGoodFpsX100);
 
-          if (abrUsingLowProfile) {
-            if (goodForUpgrade) {
-              ++abrGoodSeconds;
-            } else {
+          int targetProfile = abrProfile;
+          const char* abrReason = "none";
+          if (t >= abrCooldownUntilUs) {
+            if (abrProfile == 0) {
+              if (moderateDown) {
+                if (severeDown && abrHasLowProfile) {
+                  targetProfile = 2;
+                  abrReason = severeDownByClient ? "client_severe" : "host_severe";
+                } else if (abrHasMidProfile) {
+                  targetProfile = 1;
+                  abrReason = moderateDownByClient ? "client_moderate" : "host_moderate";
+                } else if (abrHasLowProfile) {
+                  targetProfile = 2;
+                  abrReason = moderateDownByClient ? "client_moderate" : "host_moderate";
+                }
+              }
               abrGoodSeconds = 0;
+            } else if (abrProfile == 1) {
+              if (severeDown && abrHasLowProfile) {
+                targetProfile = 2;
+                abrReason = severeDownByClient ? "client_severe" : "host_severe";
+                abrGoodSeconds = 0;
+              } else {
+                if (goodForMidToHigh) {
+                  ++abrGoodSeconds;
+                } else {
+                  abrGoodSeconds = 0;
+                }
+                if (abrGoodSeconds >= 6) {
+                  targetProfile = 0;
+                  abrReason = "client_stable_high";
+                }
+              }
+            } else {  // abrProfile == 2
+              if (goodForLowToMid) {
+                ++abrGoodSeconds;
+              } else {
+                abrGoodSeconds = 0;
+              }
+              if (abrGoodSeconds >= 4) {
+                targetProfile = abrHasMidProfile ? 1 : 0;
+                abrReason = "client_stable_mid";
+              }
             }
-          } else {
-            abrGoodSeconds = 0;
           }
 
-          bool switchToLow = false;
-          bool switchToHigh = false;
-          const bool hasDistinctLowProfile = abrHasLowerResolution || (abrLowBitrate < abrHighBitrate);
-          if (!abrUsingLowProfile) {
-            if (hasDistinctLowProfile && shouldDown && t >= abrCooldownUntilUs) {
-              switchToLow = true;
+          if (targetProfile != abrProfile) {
+            uint32_t targetW = abrHighW;
+            uint32_t targetH = abrHighH;
+            uint32_t targetBitrate = abrHighBitrate;
+            if (targetProfile == 1) {
+              targetW = abrMidW;
+              targetH = abrMidH;
+              targetBitrate = abrMidBitrate;
+            } else if (targetProfile == 2) {
+              targetW = abrLowW;
+              targetH = abrLowH;
+              targetBitrate = abrLowBitrate;
             }
-          } else if (hasDistinctLowProfile && abrGoodSeconds >= 6 && t >= abrCooldownUntilUs) {
-            switchToHigh = true;
-          }
-
-          if (switchToLow || switchToHigh) {
-            const uint32_t targetW = switchToLow ? abrLowW : abrHighW;
-            const uint32_t targetH = switchToLow ? abrLowH : abrHighH;
-            const uint32_t targetBitrate = switchToLow ? abrLowBitrate : abrHighBitrate;
 
             bool switchOk = true;
             if (targetW != activeEncodeW || targetH != activeEncodeH) {
@@ -1245,18 +1326,16 @@ int main(int argc, char** argv) {
             activeEncodeW = targetW;
             activeEncodeH = targetH;
             activeBitrate = targetBitrate;
-            abrUsingLowProfile = switchToLow;
+            abrProfile = targetProfile;
             abrGoodSeconds = 0;
-            abrCooldownUntilUs = t + 3000000ULL;
+            abrCooldownUntilUs = t + 4000000ULL;
             forceKeyNext = true;
 
             std::cout << "[native-video-host][abr] profile="
-                      << (abrUsingLowProfile ? "low" : "high")
+                      << ((abrProfile == 0) ? "high" : ((abrProfile == 1) ? "mid" : "low"))
                       << " encode=" << activeEncodeW << "x" << activeEncodeH
                       << " bitrate=" << activeBitrate
-                      << " reason=" << (abrUsingLowProfile
-                                           ? (shouldDownByClient ? "client_pressure" : "host_encode_pressure")
-                                           : "client_stable")
+                      << " reason=" << abrReason
                       << " clientSize=" << clWidth << "x" << clHeight
                       << " clientDecodedFps=" << (clDecodedFpsX100 / 100.0)
                       << " clientAvgLatUs=" << clAvgLatencyUs

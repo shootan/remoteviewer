@@ -111,6 +111,8 @@ $clientRc = if ($clientProc.HasExited) { [int]$clientProc.ExitCode } else { -999
 
 $clientLines = @()
 if (Test-Path $clientOut) { $clientLines = Get-Content $clientOut }
+$hostLines = @()
+if (Test-Path $hostOut) { $hostLines = Get-Content $hostOut }
 
 $latencyVals = New-Object System.Collections.Generic.List[double]
 $controlRttVals = New-Object System.Collections.Generic.List[double]
@@ -122,6 +124,14 @@ $presentGapOver3s = 0
 $tsSourceMft = 0
 $tsSourceInputFallback = 0
 $tsSourceHeaderFallback = 0
+$abrSwitchCount = 0
+$abrToHighCount = 0
+$abrToMidCount = 0
+$abrToLowCount = 0
+$abrLastProfile = ""
+$keyReqClientSent = 0
+$keyReqHostRecv = 0
+$keyReqHostConsumed = 0
 $prevPresentUs = 0
 $stageValues = [ordered]@{
   c2eUs = (New-Object System.Collections.Generic.List[double])
@@ -172,6 +182,27 @@ foreach ($line in $clientLines) {
         "header_fallback" { $tsSourceHeaderFallback += 1 }
       }
     }
+  }
+  if ($line -match '\[native-video-client\]\[control\] keyframe-request seq=') {
+    $keyReqClientSent += 1
+  }
+}
+
+foreach ($line in $hostLines) {
+  if ($line -match '\[native-video-host\]\[abr\] profile=([a-z]+)') {
+    $abrSwitchCount += 1
+    $abrLastProfile = $Matches[1]
+    switch ($abrLastProfile) {
+      "high" { $abrToHighCount += 1 }
+      "mid" { $abrToMidCount += 1 }
+      "low" { $abrToLowCount += 1 }
+    }
+  }
+  if ($line -match '\[native-video-host\]\[control\] keyframe-request seq=') {
+    $keyReqHostRecv += 1
+  }
+  if ($line -match '\[native-video-host\]\[control\] keyframe-request-consumed ') {
+    $keyReqHostConsumed += 1
   }
 }
 
@@ -235,6 +266,14 @@ Write-Output "PRESENT_GAP_OVER_3S=$presentGapOver3s"
 Write-Output "TS_SOURCE_MFT=$tsSourceMft"
 Write-Output "TS_SOURCE_INPUT_FALLBACK=$tsSourceInputFallback"
 Write-Output "TS_SOURCE_HEADER_FALLBACK=$tsSourceHeaderFallback"
+Write-Output "ABR_SWITCH_COUNT=$abrSwitchCount"
+Write-Output "ABR_TO_HIGH_COUNT=$abrToHighCount"
+Write-Output "ABR_TO_MID_COUNT=$abrToMidCount"
+Write-Output "ABR_TO_LOW_COUNT=$abrToLowCount"
+Write-Output "ABR_LAST_PROFILE=$abrLastProfile"
+Write-Output "KEYREQ_CLIENT_SENT=$keyReqClientSent"
+Write-Output "KEYREQ_HOST_RECV=$keyReqHostRecv"
+Write-Output "KEYREQ_HOST_CONSUMED=$keyReqHostConsumed"
 Write-Output "MBPS_COUNT=$($mb.count)"
 Write-Output "MBPS_AVG=$($mb.avg)"
 Write-Output "MBPS_P95=$($mb.p95)"

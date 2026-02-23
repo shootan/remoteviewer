@@ -63,6 +63,14 @@ bool set_mf_attr_u32(IMFTransform* transform, const GUID& key, uint32_t value) {
   return SUCCEEDED(attrs->SetUINT32(key, value));
 }
 
+uint32_t low_latency_vbv_bytes(uint32_t bitrate) {
+  // Keep VBV short for interactive remote rendering to minimize encoder queue depth.
+  const uint32_t minBytes = 8192;
+  const uint32_t maxBytes = std::max<uint32_t>(32768, bitrate / 8);
+  const uint32_t target = std::max<uint32_t>(minBytes, bitrate / 80);
+  return std::min<uint32_t>(maxBytes, target);
+}
+
 bool annexb_contains_idr(const uint8_t* data, size_t size) {
   if (!data || size < 5) return false;
   for (size_t i = 0; i + 4 < size; ++i) {
@@ -962,9 +970,9 @@ void H264Encoder::apply_low_latency_codec_api() {
   (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVEncCommonRealTime, true);
   (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_CBR);
   (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMeanBitRate, bitrate_);
-  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMaxBitRate, bitrate_);
+  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMaxBitRate, std::max<uint32_t>(bitrate_, (bitrate_ * 11) / 10));
   // Keep encoder VBV short to reduce internal queue growth.
-  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonBufferSize, std::max<uint32_t>(bitrate_ / 40, 16384));
+  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonBufferSize, low_latency_vbv_bytes(bitrate_));
   (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVDefaultBPictureCount, 0);
   (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVEncMPVGOPOpen, false);
   (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVGOPSize, std::max<uint32_t>(1, keyint_));
@@ -1049,8 +1057,8 @@ bool H264Encoder::reconfigure_bitrate(uint32_t bitrate) {
   bitrate_ = std::max<uint32_t>(100000, bitrate);
   bool ok = true;
   ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMeanBitRate, bitrate_) && ok;
-  ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMaxBitRate, bitrate_) && ok;
-  ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonBufferSize, std::max<uint32_t>(bitrate_ / 40, 16384)) && ok;
+  ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMaxBitRate, std::max<uint32_t>(bitrate_, (bitrate_ * 11) / 10)) && ok;
+  ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonBufferSize, low_latency_vbv_bytes(bitrate_)) && ok;
   return ok;
 }
 

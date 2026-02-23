@@ -1466,3 +1466,78 @@ Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddH
 ### Current conclusion
 - 렌더 병목 완화가 실제 수치로 확인됨(특히 1080p).
 - 다음 단계는 외부망/1080p60 조건에서 ABR(1080↔720) + 인코더 동적 제어를 결합해 지연 상한을 유지하는 것.
+
+## 2026-02-24 01:32 (ABR 2차 + 키프레임 복구 + 검증 지표 확장)
+
+### Summary
+- 사용자 요청에 따라 다음 작업을 한 번에 진행:
+  1) ABR 2차 튜닝(비트레이트 우선 + 해상도 폴백)
+  2) UDP 복구용 키프레임 요청 신호
+  3) 인코더 저지연 파라미터 강화
+  4) 검증 스크립트 지표 확장
+- 마일스톤 종료 시점 기준으로 문서/수치 기록 업데이트.
+
+### Code changes
+1. `apps/native_poc/src/poc_protocol.hpp`
+- control 메시지 추가:
+  - `ControlClientMetrics`
+  - `ControlRequestKeyFrame`
+
+2. `apps/native_poc/src/native_video_client_main.cpp`
+- 1초 단위 클라이언트 런타임 메트릭 집계/전송:
+  - latency/decodeTail/decodedFps/recvMbps/skippedFrames/size
+- 키프레임 요청 전송 로직 추가:
+  - catch-up, UDP assembly drop, waiting-keyframe, decode-fail 트리거
+
+3. `apps/native_poc/src/native_video_host_main.cpp`
+- control 채널에서 클라이언트 메트릭 수신 후 ABR 적용.
+- ABR 프로필을 3단계로 확장:
+  - `high`(고해상도+기본 bitrate)
+  - `mid`(고해상도+중간 bitrate)
+  - `low`(720p+저 bitrate)
+- 히스테리시스/쿨다운(4s)으로 전환 핑퐁 완화.
+- 클라이언트 키프레임 요청 수신 시 즉시 다음 프레임 keyframe 강제.
+
+4. `apps/native_poc/src/mf_h264_codec.cpp`
+- 저지연 VBV 정책 강화:
+  - `CODECAPI_AVEncCommonBufferSize`: `bitrate/80` 기반 단축
+  - `CODECAPI_AVEncCommonMaxBitRate`: `~1.1x`로 설정
+- `reconfigure_bitrate()`에도 동일 정책 반영.
+
+5. `automation/verify_native_video_runtime.ps1`
+- 지표 추가:
+  - `ABR_SWITCH_COUNT`, `ABR_TO_HIGH_COUNT`, `ABR_TO_MID_COUNT`, `ABR_TO_LOW_COUNT`, `ABR_LAST_PROFILE`
+  - `KEYREQ_CLIENT_SENT`, `KEYREQ_HOST_RECV`, `KEYREQ_HOST_CONSUMED`
+
+6. `automation/native_video_profile_1080p.json`
+7. `automation/native_video_profile_720p.json`
+- ABR 동작을 위해 기본 `controlPort=43001`로 조정.
+
+### Build
+- `cmake --build build-native2 --config Debug --target remote60_native_video_host_poc remote60_native_video_client_poc` -> PASS
+
+### Verification snapshots
+1. 1080p60 입력 (5.5Mbps)
+- Log: `automation/logs/verify-native-video-20260224-012951`
+- `LAT_AVG_US=57644.78`
+- `LAT_P95_US=64577`
+- `ABR_SWITCH_COUNT=1`, `ABR_LAST_PROFILE=low`
+
+2. 720p60 입력 (2.5Mbps)
+- Log: `automation/logs/verify-native-video-20260224-013011`
+- `LAT_AVG_US=51526.89`
+- `LAT_P95_US=54686`
+- `ABR_SWITCH_COUNT=1`, `ABR_LAST_PROFILE=low`
+
+3. 1080p60 저비트레이트 입력 (1.1Mbps)
+- Log: `automation/logs/verify-native-video-20260224-013033`
+- `LAT_AVG_US=48002.57`
+- `LAT_P95_US=47056`
+- `ABR_SWITCH_COUNT=1`, `ABR_LAST_PROFILE=low`
+
+### Performance note
+- 개선:
+  - 1080p60 시작 조건에서 지연이 빠르게 안정화되며, 전환/복구 이벤트를 수치로 추적 가능.
+- 주의:
+  - 720p60 p95는 이전 대표값(`~51841us`) 대비 이번 측정(`54686us`)으로 소폭 악화(+2.8ms).
+  - 현재 정책은 품질보다 지연 우선이라 `low` 프로필로 빠르게 내려가는 경향이 있음.

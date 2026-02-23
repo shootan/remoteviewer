@@ -40,6 +40,7 @@ namespace {
 using remote60::native_poc::ControlInputAckMessage;
 using remote60::native_poc::ControlInputEventMessage;
 using remote60::native_poc::ControlClientMetricsMessage;
+using remote60::native_poc::ControlRequestKeyFrameMessage;
 using remote60::native_poc::ControlPingMessage;
 using remote60::native_poc::ControlPongMessage;
 using remote60::native_poc::DecodedFrameNv12;
@@ -258,6 +259,15 @@ struct ClientRuntimeMetrics {
 };
 
 ClientRuntimeMetrics gClientMetrics;
+std::atomic<bool> gKeyframeRequestPending{false};
+std::atomic<uint16_t> gKeyframeRequestReason{0};
+std::atomic<uint32_t> gKeyframeRequestCount{0};
+
+void request_keyframe(uint16_t reason) {
+  if (reason == 0) reason = 1;
+  gKeyframeRequestReason = reason;
+  gKeyframeRequestPending = true;
+}
 
 struct Nv12D3dRenderer {
   Microsoft::WRL::ComPtr<ID3D11Device> device;
@@ -990,6 +1000,20 @@ int main(int argc, char** argv) {
               didWork = true;
             }
 
+            if (gKeyframeRequestPending.exchange(false)) {
+              ControlRequestKeyFrameMessage req{};
+              req.header.magic = remote60::native_poc::kMagic;
+              req.header.type = static_cast<uint16_t>(MessageType::ControlRequestKeyFrame);
+              req.header.size = static_cast<uint16_t>(sizeof(req));
+              req.seq = gKeyframeRequestCount.fetch_add(1) + 1;
+              req.reason = gKeyframeRequestReason.load();
+              req.clientSendQpcUs = nowUs;
+              if (!send_all(controlSock, &req, sizeof(req))) break;
+              std::cout << "[native-video-client][control] keyframe-request seq=" << req.seq
+                        << " reason=" << req.reason << "\n";
+              didWork = true;
+            }
+
             ControlInputEventMessage input{};
             bool hasInput = false;
             {
@@ -1134,6 +1158,7 @@ int main(int argc, char** argv) {
         catchupMode = true;
         waitForKeyFrame = true;
         decoder.reset();
+        request_keyframe(1);
         std::cout << "[native-video-client] catchup enter streamLagUs=" << streamLagUs
                   << " decodeQueueLagEstUs=" << decodeQueueLagEstimateUs
                   << " reason="
@@ -1161,6 +1186,9 @@ int main(int argc, char** argv) {
       if (waitForKeyFrame && !keyFrame) {
         ++skippedQueued;
         ++waitingKeyDropCount;
+        if ((waitingKeyDropCount % 30) == 1) {
+          request_keyframe(3);
+        }
         if ((waitingKeyDropCount % 120) == 1) {
           std::cout << "[native-video-client] waiting keyframe drops=" << waitingKeyDropCount << "\n";
         }
@@ -1199,6 +1227,7 @@ int main(int argc, char** argv) {
       if (!decoder.decode_access_unit(*payloadPtr, keyFrame, inputSampleTimeHns, &outFrames)) {
         ++skippedQueued;
         ++decodeFailCount;
+        request_keyframe(4);
         if ((decodeFailCount % 60) == 1) {
           std::cout << "[native-video-client] decode failed count=" << decodeFailCount << "\n";
         }
@@ -1434,6 +1463,9 @@ int main(int argc, char** argv) {
         if (!assembling || u.seq != assemblingSeq || u.chunkOffset != assemblingNextOffset) {
           ++skippedQueued;
           ++assemblyDropped;
+          if ((assemblyDropped % 20) == 1) {
+            request_keyframe(2);
+          }
           if ((assemblyDropped % 120) == 1) {
             std::cout << "[native-video-client] udp assembly drop count=" << assemblyDropped
                       << " seq=" << u.seq
