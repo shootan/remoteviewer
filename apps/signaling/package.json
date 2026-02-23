@@ -1,0 +1,13 @@
+{
+  "name": "remote60-signaling",
+  "private": true,
+  "version": "0.1.0",
+  "description": "M1 signaling server scaffold",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

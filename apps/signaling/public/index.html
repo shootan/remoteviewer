@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>remote60 Web Client</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101318;
+      --panel: #171c24;
+      --line: #2d3542;
+      --txt: #e6ecf2;
+      --muted: #9ea9b7;
+      --ok: #45d483;
+      --warn: #ffbf40;
+    }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      color: var(--txt);
+      background: radial-gradient(circle at 10% 10%, #1f2632, var(--bg));
+    }
+    .wrap {
+      max-width: 1200px;
+      margin: 16px auto;
+      padding: 0 12px;
+      display: grid;
+      gap: 12px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 10px;
+      padding: 12px;
+    }
+    .row {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: 1fr 1fr;
+    }
+    @media (max-width: 900px) {
+      .row {
+        grid-template-columns: 1fr;
+      }
+    }
+    label {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+    input, textarea, button {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #111722;
+      color: var(--txt);
+      padding: 8px 10px;
+      font-size: 14px;
+    }
+    textarea {
+      width: 100%;
+      min-height: 70px;
+      resize: vertical;
+    }
+    .buttons {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    button {
+      cursor: pointer;
+    }
+    #status {
+      color: var(--warn);
+      font-weight: 600;
+    }
+    #status.ok {
+      color: var(--ok);
+    }
+    #remoteVideo {
+      width: 100%;
+      height: auto;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #000;
+      outline: none;
+      aspect-ratio: 16 / 9;
+      touch-action: none;
+      cursor: default;
+    }
+    .help {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    #stats {
+      margin: 0;
+      white-space: pre-wrap;
+      color: #c5d1df;
+      font-size: 12px;
+    }
+    .window-toolbar {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    .window-list {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    }
+    .window-item {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #111722;
+      padding: 8px;
+      text-align: left;
+      cursor: pointer;
+    }
+    .window-item.active {
+      border-color: #4ea1ff;
+      box-shadow: 0 0 0 1px #4ea1ff inset;
+    }
+    .window-item .title {
+      font-size: 13px;
+      font-weight: 600;
+      color: #dbe6f3;
+      word-break: break-word;
+    }
+    .window-item .meta {
+      margin-top: 4px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div><strong>remote60 Web Client</strong></div>
+      <div class="help">Click the video to focus keyboard input.</div>
+      <div style="margin-top:8px">Status: <span id="status">idle</span></div>
+    </div>
+
+    <div class="card row">
+      <div>
+        <label for="signalingUrl">Signaling URL (ws/wss)</label>
+        <input id="signalingUrl" type="text" value="">
+      </div>
+      <div>
+        <label for="token">Auth Token (optional)</label>
+        <input id="token" type="password" value="">
+      </div>
+      <div style="grid-column: 1 / -1;">
+        <label for="iceServers">ICE Servers (comma or newline separated)</label>
+        <textarea id="iceServers" placeholder="stun:stun.l.google.com:19302, turns:turn.example.com:443?transport=tcp"></textarea>
+      </div>
+      <div class="buttons" style="grid-column: 1 / -1;">
+        <button id="connectBtn">Connect</button>
+        <button id="disconnectBtn">Disconnect</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="window-toolbar">
+        <strong>Window Targets</strong>
+        <button id="refreshWindowsBtn" type="button">Refresh</button>
+        <button id="selectDesktopBtn" type="button">Desktop Mode</button>
+      </div>
+      <div id="selectedWindowInfo" class="help">Selected target: desktop (0)</div>
+      <div id="windowList" class="window-list"></div>
+    </div>
+
+    <div class="card">
+      <video id="remoteVideo" autoplay playsinline muted tabindex="0"></video>
+      <div class="help" style="margin-top: 8px;">Input: mouse/drag/wheel/keyboard events are sent to the selected target window.</div>
+    </div>
+
+    <div class="card">
+      <pre id="stats"></pre>
+    </div>
+  </div>
+  <script src="/client.js"></script>
+</body>
+</html>

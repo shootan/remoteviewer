@@ -1,0 +1,29 @@
+# Build outputs
+/build/
+/build-*/
+/build-native/
+/build-native-enc/
+/build-native2/
+/build-native3/
+/build-ninja/
+/build-vcpkg/
+/build-vcpkg-local/
+
+# Package manager cache
+/.vcpkg/
+
+# Runtime logs/state
+/logs/
+/automation/logs/
+/automation/state/
+*.log
+*.out
+*.err
+
+# IDE/editor
+/.vscode/
+
+# Local temp files
+_tmp_*
+*.tmp
+screen-now.png
