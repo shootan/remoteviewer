@@ -3,6 +3,8 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <d3d11.h>
+#include <d3dcompiler.h>
+#include <dxgi.h>
 #ifdef min
 #undef min
 #endif
@@ -19,6 +21,7 @@
 #include <deque>
 #include <array>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -189,7 +192,13 @@ bool recv_discard(SOCKET s, size_t len) {
 }
 
 struct SharedFrame {
+  enum class PixelFormat : uint8_t {
+    Unknown = 0,
+    Bgra32 = 1,
+    Nv12 = 2,
+  };
   std::mutex mu;
+  PixelFormat format = PixelFormat::Unknown;
   uint32_t width = 0;
   uint32_t height = 0;
   uint32_t stride = 0;
@@ -202,7 +211,7 @@ struct SharedFrame {
   uint64_t decodeStartUs = 0;
   uint64_t decodeEndUs = 0;
   uint64_t version = 0;
-  std::vector<uint8_t> bytes;
+  std::shared_ptr<std::vector<uint8_t>> bytes;
 };
 
 SharedFrame gFrame;
@@ -231,6 +240,236 @@ std::atomic<uint32_t> gInputSeq{0};
 std::atomic<uint64_t> gInputDropped{0};
 std::atomic<bool> gInputEnabled{false};
 std::atomic<uint16_t> gMouseButtons{0};
+
+struct Nv12D3dRenderer {
+  Microsoft::WRL::ComPtr<ID3D11Device> device;
+  Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+  Microsoft::WRL::ComPtr<IDXGISwapChain> swapChain;
+  Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
+  Microsoft::WRL::ComPtr<ID3D11VertexShader> vs;
+  Microsoft::WRL::ComPtr<ID3D11PixelShader> ps;
+  Microsoft::WRL::ComPtr<ID3D11SamplerState> sampler;
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> texY;
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> texUV;
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srvY;
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srvUV;
+  uint32_t texW = 0;
+  uint32_t texH = 0;
+  bool ready = false;
+
+  bool init(HWND hwnd) {
+    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0};
+    D3D_FEATURE_LEVEL outLevel = D3D_FEATURE_LEVEL_11_0;
+    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
+                                   levels, ARRAYSIZE(levels), D3D11_SDK_VERSION,
+                                   &device, &outLevel, &context);
+    if (FAILED(hr)) {
+      hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags,
+                             levels, ARRAYSIZE(levels), D3D11_SDK_VERSION,
+                             &device, &outLevel, &context);
+      if (FAILED(hr)) return false;
+    }
+
+    Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
+    if (FAILED(device.As(&dxgiDevice))) return false;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    if (FAILED(dxgiDevice->GetAdapter(&adapter))) return false;
+    Microsoft::WRL::ComPtr<IDXGIFactory> factory;
+    if (FAILED(adapter->GetParent(IID_PPV_ARGS(&factory)))) return false;
+
+    DXGI_SWAP_CHAIN_DESC sd{};
+    sd.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.BufferCount = 2;
+    sd.OutputWindow = hwnd;
+    sd.SampleDesc.Count = 1;
+    sd.Windowed = TRUE;
+    sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    if (FAILED(factory->CreateSwapChain(device.Get(), &sd, &swapChain))) return false;
+    factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
+
+    static const char* kVsSrc =
+        "struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };"
+        "VSOut main(uint id : SV_VertexID) {"
+        "  float2 p = float2((id == 2) ? 3.0 : -1.0, (id == 1) ? 3.0 : -1.0);"
+        "  VSOut o;"
+        "  o.pos = float4(p, 0, 1);"
+        "  o.uv = float2((p.x + 1.0) * 0.5, 1.0 - ((p.y + 1.0) * 0.5));"
+        "  return o;"
+        "}";
+    static const char* kPsSrc =
+        "Texture2D texY : register(t0);"
+        "Texture2D texUV : register(t1);"
+        "SamplerState smp : register(s0);"
+        "float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {"
+        "  float y = texY.Sample(smp, uv).r;"
+        "  float2 c = texUV.Sample(smp, uv).rg;"
+        "  float Y = max(0.0, y - 16.0 / 255.0);"
+        "  float U = c.x - 0.5;"
+        "  float V = c.y - 0.5;"
+        "  float r = 1.16438356 * Y + 1.59602678 * V;"
+        "  float g = 1.16438356 * Y - 0.39176229 * U - 0.81296764 * V;"
+        "  float b = 1.16438356 * Y + 2.01723214 * U;"
+        "  return float4(saturate(b), saturate(g), saturate(r), 1.0);"
+        "}";
+
+    Microsoft::WRL::ComPtr<ID3DBlob> vsBlob;
+    Microsoft::WRL::ComPtr<ID3DBlob> psBlob;
+    Microsoft::WRL::ComPtr<ID3DBlob> errBlob;
+    if (FAILED(D3DCompile(kVsSrc, std::strlen(kVsSrc), nullptr, nullptr, nullptr,
+                          "main", "vs_4_0", 0, 0, &vsBlob, &errBlob))) {
+      return false;
+    }
+    if (FAILED(D3DCompile(kPsSrc, std::strlen(kPsSrc), nullptr, nullptr, nullptr,
+                          "main", "ps_4_0", 0, 0, &psBlob, &errBlob))) {
+      return false;
+    }
+    if (FAILED(device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &vs))) {
+      return false;
+    }
+    if (FAILED(device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &ps))) {
+      return false;
+    }
+
+    D3D11_SAMPLER_DESC sdSamp{};
+    sdSamp.Filter = D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+    sdSamp.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sdSamp.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sdSamp.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sdSamp.MaxLOD = D3D11_FLOAT32_MAX;
+    if (FAILED(device->CreateSamplerState(&sdSamp, &sampler))) return false;
+
+    ready = ensure_rtv(hwnd);
+    return ready;
+  }
+
+  bool ensure_rtv(HWND hwnd) {
+    if (!swapChain || !device) return false;
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    const UINT w = std::max<LONG>(1, rc.right - rc.left);
+    const UINT h = std::max<LONG>(1, rc.bottom - rc.top);
+
+    DXGI_SWAP_CHAIN_DESC sd{};
+    if (FAILED(swapChain->GetDesc(&sd))) return false;
+    if (sd.BufferDesc.Width != w || sd.BufferDesc.Height != h) {
+      rtv.Reset();
+      if (FAILED(swapChain->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0))) return false;
+    }
+
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> backBuffer;
+    if (FAILED(swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer)))) return false;
+    if (FAILED(device->CreateRenderTargetView(backBuffer.Get(), nullptr, &rtv))) return false;
+    return true;
+  }
+
+  bool ensure_nv12_textures(uint32_t w, uint32_t h) {
+    if (!device) return false;
+    if (texY && texUV && texW == w && texH == h) return true;
+
+    texY.Reset();
+    texUV.Reset();
+    srvY.Reset();
+    srvUV.Reset();
+    texW = 0;
+    texH = 0;
+
+    D3D11_TEXTURE2D_DESC yDesc{};
+    yDesc.Width = w;
+    yDesc.Height = h;
+    yDesc.MipLevels = 1;
+    yDesc.ArraySize = 1;
+    yDesc.Format = DXGI_FORMAT_R8_UNORM;
+    yDesc.SampleDesc.Count = 1;
+    yDesc.Usage = D3D11_USAGE_DYNAMIC;
+    yDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    yDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    if (FAILED(device->CreateTexture2D(&yDesc, nullptr, &texY))) return false;
+
+    D3D11_TEXTURE2D_DESC uvDesc{};
+    uvDesc.Width = w / 2;
+    uvDesc.Height = h / 2;
+    uvDesc.MipLevels = 1;
+    uvDesc.ArraySize = 1;
+    uvDesc.Format = DXGI_FORMAT_R8G8_UNORM;
+    uvDesc.SampleDesc.Count = 1;
+    uvDesc.Usage = D3D11_USAGE_DYNAMIC;
+    uvDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    uvDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    if (FAILED(device->CreateTexture2D(&uvDesc, nullptr, &texUV))) return false;
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC ySrvDesc{};
+    ySrvDesc.Format = DXGI_FORMAT_R8_UNORM;
+    ySrvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    ySrvDesc.Texture2D.MipLevels = 1;
+    if (FAILED(device->CreateShaderResourceView(texY.Get(), &ySrvDesc, &srvY))) return false;
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC uvSrvDesc{};
+    uvSrvDesc.Format = DXGI_FORMAT_R8G8_UNORM;
+    uvSrvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    uvSrvDesc.Texture2D.MipLevels = 1;
+    if (FAILED(device->CreateShaderResourceView(texUV.Get(), &uvSrvDesc, &srvUV))) return false;
+
+    texW = w;
+    texH = h;
+    return true;
+  }
+
+  bool render(HWND hwnd, const uint8_t* nv12, uint32_t w, uint32_t h) {
+    if (!ready || !nv12 || w == 0 || h == 0 || (w & 1u) || (h & 1u)) return false;
+    if (!ensure_rtv(hwnd)) return false;
+    if (!ensure_nv12_textures(w, h)) return false;
+
+    const uint8_t* yPlane = nv12;
+    const uint8_t* uvPlane = nv12 + static_cast<size_t>(w) * h;
+
+    D3D11_MAPPED_SUBRESOURCE yMap{};
+    if (FAILED(context->Map(texY.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &yMap))) return false;
+    for (uint32_t row = 0; row < h; ++row) {
+      std::memcpy(reinterpret_cast<uint8_t*>(yMap.pData) + static_cast<size_t>(row) * yMap.RowPitch,
+                  yPlane + static_cast<size_t>(row) * w, w);
+    }
+    context->Unmap(texY.Get(), 0);
+
+    D3D11_MAPPED_SUBRESOURCE uvMap{};
+    if (FAILED(context->Map(texUV.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &uvMap))) return false;
+    for (uint32_t row = 0; row < (h / 2); ++row) {
+      std::memcpy(reinterpret_cast<uint8_t*>(uvMap.pData) + static_cast<size_t>(row) * uvMap.RowPitch,
+                  uvPlane + static_cast<size_t>(row) * w, w);
+    }
+    context->Unmap(texUV.Get(), 0);
+
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    D3D11_VIEWPORT vp{};
+    vp.Width = static_cast<float>(std::max<LONG>(1, rc.right - rc.left));
+    vp.Height = static_cast<float>(std::max<LONG>(1, rc.bottom - rc.top));
+    vp.MinDepth = 0.0f;
+    vp.MaxDepth = 1.0f;
+
+    ID3D11RenderTargetView* rtvs[] = {rtv.Get()};
+    context->OMSetRenderTargets(1, rtvs, nullptr);
+    context->RSSetViewports(1, &vp);
+    const float clearColor[4] = {0, 0, 0, 1};
+    context->ClearRenderTargetView(rtv.Get(), clearColor);
+    context->IASetInputLayout(nullptr);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context->VSSetShader(vs.Get(), nullptr, 0);
+    context->PSSetShader(ps.Get(), nullptr, 0);
+    ID3D11ShaderResourceView* srvs[] = {srvY.Get(), srvUV.Get()};
+    context->PSSetShaderResources(0, 2, srvs);
+    ID3D11SamplerState* samplers[] = {sampler.Get()};
+    context->PSSetSamplers(0, 1, samplers);
+    context->Draw(3, 0);
+    ID3D11ShaderResourceView* nullSrvs[] = {nullptr, nullptr};
+    context->PSSetShaderResources(0, 2, nullSrvs);
+    HRESULT hr = swapChain->Present(0, 0);
+    return SUCCEEDED(hr) || hr == DXGI_STATUS_OCCLUDED;
+  }
+};
+
+Nv12D3dRenderer gNv12Renderer;
 
 void enqueue_input_event(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode) {
   if (kAllInputBlocked) return;
@@ -332,7 +571,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       GetClientRect(hwnd, &rc);
       FillRect(hdc, &rc, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
 
-      std::vector<uint8_t> local;
+      std::shared_ptr<std::vector<uint8_t>> local;
+      SharedFrame::PixelFormat localFormat = SharedFrame::PixelFormat::Unknown;
       uint32_t w = 0, h = 0;
       uint32_t seq = 0;
       uint64_t captureUs = 0;
@@ -345,8 +585,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       uint64_t frameVersion = 0;
       {
         std::lock_guard<std::mutex> lk(gFrame.mu);
-        if (!gFrame.bytes.empty()) {
+        if (gFrame.bytes && !gFrame.bytes->empty()) {
           local = gFrame.bytes;
+          localFormat = gFrame.format;
           w = gFrame.width;
           h = gFrame.height;
           seq = gFrame.seq;
@@ -360,18 +601,46 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           frameVersion = gFrame.version;
         }
       }
-      if (!local.empty() && w > 0 && h > 0) {
-        BITMAPINFO bmi{};
-        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth = static_cast<LONG>(w);
-        bmi.bmiHeader.biHeight = -static_cast<LONG>(h);  // top-down
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-        bmi.bmiHeader.biCompression = BI_RGB;
-        SetStretchBltMode(hdc, COLORONCOLOR);
-        StretchDIBits(hdc, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
-                      0, 0, static_cast<int>(w), static_cast<int>(h),
-                      local.data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
+      bool presented = false;
+      if (local && w > 0 && h > 0) {
+        if (localFormat == SharedFrame::PixelFormat::Nv12) {
+          if (!gNv12Renderer.ready) {
+            (void)gNv12Renderer.init(hwnd);
+          }
+          presented = gNv12Renderer.render(hwnd, local->data(), w, h);
+          if (!presented) {
+            std::vector<uint8_t> bgra;
+            if (nv12_to_bgra(local->data(), w, h, &bgra) && !bgra.empty()) {
+              BITMAPINFO bmi{};
+              bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+              bmi.bmiHeader.biWidth = static_cast<LONG>(w);
+              bmi.bmiHeader.biHeight = -static_cast<LONG>(h);
+              bmi.bmiHeader.biPlanes = 1;
+              bmi.bmiHeader.biBitCount = 32;
+              bmi.bmiHeader.biCompression = BI_RGB;
+              SetStretchBltMode(hdc, COLORONCOLOR);
+              StretchDIBits(hdc, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
+                            0, 0, static_cast<int>(w), static_cast<int>(h),
+                            bgra.data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
+              presented = true;
+            }
+          }
+        } else if (localFormat == SharedFrame::PixelFormat::Bgra32) {
+          BITMAPINFO bmi{};
+          bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+          bmi.bmiHeader.biWidth = static_cast<LONG>(w);
+          bmi.bmiHeader.biHeight = -static_cast<LONG>(h);  // top-down
+          bmi.bmiHeader.biPlanes = 1;
+          bmi.bmiHeader.biBitCount = 32;
+          bmi.bmiHeader.biCompression = BI_RGB;
+          SetStretchBltMode(hdc, COLORONCOLOR);
+          StretchDIBits(hdc, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
+                        0, 0, static_cast<int>(w), static_cast<int>(h),
+                        local->data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
+          presented = true;
+        }
+      }
+      if (presented) {
         const uint64_t presentUs = qpc_now_us();
         const uint32_t traceEvery = gTraceEvery.load();
         const uint32_t traceMax = gTraceMax.load();
@@ -924,27 +1193,33 @@ int main(int argc, char** argv) {
         return true;
       }
 
-      const auto& decoded = outFrames.back();
+      auto& decoded = outFrames.back();
       const bool tsFromMft = decoded.sampleTimeFromOutput && (decoded.sampleTimeHns > 0);
       const bool tsFromInputFallback = (!decoded.sampleTimeFromOutput) && (decoded.sampleTimeHns > 0);
       const bool tsFromHeaderFallback = (decoded.sampleTimeHns <= 0);
       const uint64_t decodedCaptureUs =
           tsFromHeaderFallback ? h.captureQpcUs : static_cast<uint64_t>(decoded.sampleTimeHns / 10);
       const char* tsSource = tsFromMft ? "mft" : (tsFromInputFallback ? "input_fallback" : "header_fallback");
-      std::vector<uint8_t> bgra;
-      if (!nv12_to_bgra(decoded.bytes.data(), decoded.width, decoded.height, &bgra) || bgra.empty()) {
+      if (decoded.bytes.empty()) {
         ++skippedQueued;
         waitForKeyFrame = true;
         return true;
       }
       const uint64_t decodeEndUs = qpc_now_us();
+      auto frameNv12 = std::make_shared<std::vector<uint8_t>>(std::move(decoded.bytes));
+      if (!frameNv12 || frameNv12->empty()) {
+        ++skippedQueued;
+        waitForKeyFrame = true;
+        return true;
+      }
 
       const uint64_t nowUs = qpc_now_us();
       {
         std::lock_guard<std::mutex> lk(gFrame.mu);
+        gFrame.format = SharedFrame::PixelFormat::Nv12;
         gFrame.width = decoded.width;
         gFrame.height = decoded.height;
-        gFrame.stride = decoded.width * 4;
+        gFrame.stride = decoded.width;
         gFrame.seq = h.seq;
         gFrame.captureUs = decodedCaptureUs;
         gFrame.encodeStartUs = h.encodeStartQpcUs;
@@ -954,7 +1229,7 @@ int main(int argc, char** argv) {
         gFrame.decodeStartUs = decodeStartUs;
         gFrame.decodeEndUs = decodeEndUs;
         gFrame.version += 1;
-        gFrame.bytes.swap(bgra);
+        gFrame.bytes = std::move(frameNv12);
       }
       if (gHwnd && !gPaintQueued.exchange(true)) {
         InvalidateRect(gHwnd, nullptr, FALSE);
@@ -1141,8 +1416,14 @@ int main(int argc, char** argv) {
         }
 
         const uint64_t nowUs = qpc_now_us();
+        auto frameBgra = std::make_shared<std::vector<uint8_t>>(std::move(payload));
+        if (!frameBgra || frameBgra->empty()) {
+          ++skippedQueued;
+          continue;
+        }
         {
           std::lock_guard<std::mutex> lk(gFrame.mu);
+          gFrame.format = SharedFrame::PixelFormat::Bgra32;
           gFrame.width = h.width;
           gFrame.height = h.height;
           gFrame.stride = h.stride;
@@ -1155,7 +1436,7 @@ int main(int argc, char** argv) {
           gFrame.decodeStartUs = nowUs;
           gFrame.decodeEndUs = nowUs;
           gFrame.version += 1;
-          gFrame.bytes.swap(payload);
+          gFrame.bytes = std::move(frameBgra);
         }
         if (gHwnd && !gPaintQueued.exchange(true)) {
           InvalidateRect(gHwnd, nullptr, FALSE);

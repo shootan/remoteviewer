@@ -80,6 +80,8 @@ target_link_libraries(remote60_native_video_client_poc PRIVATE
   common
   ws2_32
   d3d11
+  dxgi
+  d3dcompiler
   gdi32
   user32
   mfplat

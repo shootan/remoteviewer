@@ -1418,3 +1418,51 @@ Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddH
 ### Next
 - GPU zero-copy 렌더 경로 구현 전까지는 720p60 프로필을 기본 체감 모드로 권장.
 - Parsec 목표치(저지연 + 고프레임) 달성을 위해 다음 우선순위는 클라이언트 렌더 경로 GPU화.
+
+## 2026-02-24 00:59 (클라이언트 GPU NV12 렌더 경로 구현)
+
+### Summary
+- 사용자 지시로 Phase A 다음 우선순위인 GPU 렌더 경로를 실제 반영.
+- H264 경로에서 CPU `nv12_to_bgra`를 필수 경로에서 제거하고 D3D11 셰이더 렌더로 대체.
+- raw 경로는 기존 GDI 렌더를 유지해 호환성 확보.
+
+### Code changes
+1. `apps/native_poc/src/native_video_client_main.cpp`
+- `Nv12D3dRenderer` 추가:
+  - D3D11 device/context/swapchain 생성
+  - `R8`(Y plane) + `R8G8`(UV plane) 텍스처 업데이트
+  - 풀스크린 삼각형 픽셀 셰이더(YUV->RGB) 렌더
+- `SharedFrame` 확장:
+  - `PixelFormat` (`Bgra32`, `Nv12`)
+  - payload를 `shared_ptr<vector<uint8_t>>`로 전환(페인트 시 추가 대용량 복사 제거)
+- WM_PAINT 분기:
+  - `Nv12`는 GPU 렌더
+  - `Bgra32`는 기존 `StretchDIBits`
+  - GPU 실패 시 `nv12_to_bgra` + GDI 폴백
+- H264 수신 처리:
+  - 디코더 출력 NV12를 그대로 프레임 버퍼에 저장(`format=Nv12`)
+  - 기존 decode 경로 내 BGRA 변환 제거
+
+2. `apps/native_poc/CMakeLists.txt`
+- `remote60_native_video_client_poc`에 `dxgi`, `d3dcompiler` 링크 추가.
+
+### Verification
+1. 1080p30 UDP (4Mbps, mft_hw/mft_hw)
+- Log: `automation/logs/verify-native-video-20260224-005847`
+- `LAT_AVG_US=102131.14`
+- `LAT_P95_US=104530`
+- client log 관찰:
+  - `avgDecodeTailUs`가 기존 수만 us에서 약 `6~12ms`대로 하락.
+
+2. 720p60 UDP (2.5Mbps, mft_hw/mft_hw)
+- Log: `automation/logs/verify-native-video-20260224-005913`
+- `LAT_AVG_US=49335.62`
+- `LAT_P95_US=51841`
+
+3. raw(TCP) 회귀 확인
+- Log: `automation/logs/verify-native-video-20260224-005931`
+- `OVERALL_OK=True`
+
+### Current conclusion
+- 렌더 병목 완화가 실제 수치로 확인됨(특히 1080p).
+- 다음 단계는 외부망/1080p60 조건에서 ABR(1080↔720) + 인코더 동적 제어를 결합해 지연 상한을 유지하는 것.
