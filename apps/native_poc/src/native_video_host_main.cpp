@@ -46,6 +46,7 @@ using namespace winrt::Windows::Graphics::Capture;
 using namespace winrt::Windows::Graphics::DirectX::Direct3D11;
 using remote60::native_poc::ControlInputAckMessage;
 using remote60::native_poc::ControlInputEventMessage;
+using remote60::native_poc::ControlClientMetricsMessage;
 using remote60::native_poc::ControlPingMessage;
 using remote60::native_poc::ControlPongMessage;
 using remote60::native_poc::EncodedFrameHeader;
@@ -235,6 +236,25 @@ void choose_h264_encode_size(const Args& args, uint32_t captureW, uint32_t captu
   *outH = targetH;
 }
 
+void choose_abr_720_size(uint32_t captureW, uint32_t captureH, uint32_t* outW, uint32_t* outH) {
+  if (!outW || !outH) return;
+  uint32_t targetW = captureW;
+  uint32_t targetH = captureH;
+  if (captureW > 1280 || captureH > 720) {
+    const double sx = 1280.0 / static_cast<double>(captureW);
+    const double sy = 720.0 / static_cast<double>(captureH);
+    const double scale = std::min(sx, sy);
+    if (scale > 0.0 && scale < 1.0) {
+      targetW = static_cast<uint32_t>(captureW * scale);
+      targetH = static_cast<uint32_t>(captureH * scale);
+    }
+  }
+  targetW = clamp_even_dim(targetW, 2, captureW);
+  targetH = clamp_even_dim(targetH, 2, captureH);
+  *outW = targetW;
+  *outH = targetH;
+}
+
 bool resize_bgra_nearest(const uint8_t* src, uint32_t srcW, uint32_t srcH, uint32_t srcStride,
                          uint32_t dstW, uint32_t dstH, std::vector<uint8_t>* outBgra) {
   if (!src || srcW == 0 || srcH == 0 || srcStride < (srcW * 4) || dstW == 0 || dstH == 0 || !outBgra) {
@@ -348,6 +368,7 @@ int main(int argc, char** argv) {
   const bool guardStaleEncoded = env_truthy("REMOTE60_NATIVE_GUARD_STALE_ENCODED");
   const bool noPacingH264 = env_truthy("REMOTE60_NATIVE_H264_NO_PACING");
   const bool guardStalePreEncode = env_truthy("REMOTE60_NATIVE_GUARD_STALE_PREENCODE");
+  const bool abrEnabled = useH264 && !env_truthy("REMOTE60_NATIVE_ABR_DISABLE");
   int captureFramePoolBuffers = kCaptureFramePoolBuffersDefault;
   if (const char* poolEnv = std::getenv("REMOTE60_NATIVE_CAPTURE_POOL_BUFFERS")) {
     const int requested = std::atoi(poolEnv);
@@ -395,7 +416,8 @@ int main(int argc, char** argv) {
   if (useH264) {
     std::cout << "[native-video-host] h264 pacing=" << (noPacingH264 ? "off" : "on")
               << " stalePreEncodeGuard=" << (guardStalePreEncode ? 1 : 0)
-              << " capturePoolBuffers=" << captureFramePoolBuffers << "\n";
+              << " capturePoolBuffers=" << captureFramePoolBuffers
+              << " abr=" << (abrEnabled ? "on" : "off") << "\n";
   }
   if (kAllInputBlocked) {
     std::cout << "[native-video-host] all input blocked (view-only)\n";
@@ -497,6 +519,17 @@ int main(int argc, char** argv) {
 
   std::atomic<bool> stop{false};
   std::atomic<uint64_t> inputEvents{0};
+  std::atomic<uint64_t> clientMetricsUpdatedUs{0};
+  std::atomic<uint32_t> clientMetricsWidth{0};
+  std::atomic<uint32_t> clientMetricsHeight{0};
+  std::atomic<uint32_t> clientMetricsRecvFpsX100{0};
+  std::atomic<uint32_t> clientMetricsDecodedFpsX100{0};
+  std::atomic<uint32_t> clientMetricsRecvMbpsX1000{0};
+  std::atomic<uint32_t> clientMetricsSkippedFrames{0};
+  std::atomic<uint64_t> clientMetricsAvgLatencyUs{0};
+  std::atomic<uint64_t> clientMetricsMaxLatencyUs{0};
+  std::atomic<uint64_t> clientMetricsAvgDecodeTailUs{0};
+  std::atomic<uint64_t> clientMetricsMaxDecodeTailUs{0};
   SOCKET controlListenSock = INVALID_SOCKET;
   SOCKET controlClientSock = INVALID_SOCKET;
   std::thread controlThread;
@@ -579,6 +612,25 @@ int main(int argc, char** argv) {
               continue;
             }
 
+            if (type == MessageType::ControlClientMetrics &&
+                header.size == sizeof(ControlClientMetricsMessage)) {
+              ControlClientMetricsMessage metrics{};
+              metrics.header = header;
+              if (!recv_all(controlClientSock, &metrics.seq, sizeof(metrics) - sizeof(MessageHeader))) break;
+              clientMetricsWidth = metrics.width;
+              clientMetricsHeight = metrics.height;
+              clientMetricsRecvFpsX100 = metrics.recvFpsX100;
+              clientMetricsDecodedFpsX100 = metrics.decodedFpsX100;
+              clientMetricsRecvMbpsX1000 = metrics.recvMbpsX1000;
+              clientMetricsSkippedFrames = metrics.skippedFrames;
+              clientMetricsAvgLatencyUs = metrics.avgLatencyUs;
+              clientMetricsMaxLatencyUs = metrics.maxLatencyUs;
+              clientMetricsAvgDecodeTailUs = metrics.avgDecodeTailUs;
+              clientMetricsMaxDecodeTailUs = metrics.maxDecodeTailUs;
+              clientMetricsUpdatedUs = qpc_now_us();
+              continue;
+            }
+
             if (bodySize > 0 && !recv_discard(controlClientSock, bodySize)) break;
           }
         });
@@ -647,8 +699,26 @@ int main(int argc, char** argv) {
     choose_h264_encode_size(args, width, height, &encodeW, &encodeH, &autoFallback720);
   }
 
+  const uint32_t abrHighW = encodeW;
+  const uint32_t abrHighH = encodeH;
+  uint32_t abrLowW = abrHighW;
+  uint32_t abrLowH = abrHighH;
   if (useH264) {
-    if (!encoder.initialize(encodeW, encodeH, args.fps, args.bitrate, args.keyint)) {
+    choose_abr_720_size(abrHighW, abrHighH, &abrLowW, &abrLowH);
+  }
+  const bool abrHasLowerResolution = (abrLowW < abrHighW || abrLowH < abrHighH);
+  const uint32_t abrHighBitrate = args.bitrate;
+  const uint32_t abrLowBitrate = std::min<uint32_t>(
+      abrHighBitrate, std::max<uint32_t>(1500000u, (abrHighBitrate * 55u) / 100u));
+  uint32_t activeEncodeW = abrHighW;
+  uint32_t activeEncodeH = abrHighH;
+  uint32_t activeBitrate = abrHighBitrate;
+  bool abrUsingLowProfile = false;
+  uint64_t abrCooldownUntilUs = 0;
+  uint32_t abrGoodSeconds = 0;
+
+  if (useH264) {
+    if (!encoder.initialize(activeEncodeW, activeEncodeH, args.fps, activeBitrate, args.keyint)) {
       std::cerr << "[native-video-host] H264 encoder initialize failed\n";
       closesocket(clientSock);
       if (mfStarted) MFShutdown();
@@ -657,8 +727,11 @@ int main(int argc, char** argv) {
     std::cout << "[native-video-host] H264 encoder backend=" << encoder.backend_name()
               << " hw=" << (encoder.using_hardware() ? 1 : 0)
               << " captureSize=" << width << "x" << height
-              << " encodeSize=" << encodeW << "x" << encodeH
-              << " auto720=" << (autoFallback720 ? 1 : 0) << "\n";
+              << " encodeSize=" << activeEncodeW << "x" << activeEncodeH
+              << " auto720=" << (autoFallback720 ? 1 : 0)
+              << " abrLowProfile=" << abrLowW << "x" << abrLowH
+              << " abrLowBitrate=" << abrLowBitrate
+              << "\n";
   }
 
   Microsoft::WRL::ComPtr<IDXGIDevice> dxgi;
@@ -890,14 +963,14 @@ int main(int argc, char** argv) {
       uint32_t encodeSrcH = h;
       uint32_t encodeSrcStride = stride;
       std::vector<uint8_t> scaledBgra;
-      if (encodeW != w || encodeH != h) {
-        if (!resize_bgra_nearest(payload->data(), w, h, stride, encodeW, encodeH, &scaledBgra)) {
+      if (activeEncodeW != w || activeEncodeH != h) {
+        if (!resize_bgra_nearest(payload->data(), w, h, stride, activeEncodeW, activeEncodeH, &scaledBgra)) {
           continue;
         }
         encodeSrc = scaledBgra.data();
-        encodeSrcW = encodeW;
-        encodeSrcH = encodeH;
-        encodeSrcStride = encodeW * 4;
+        encodeSrcW = activeEncodeW;
+        encodeSrcH = activeEncodeH;
+        encodeSrcStride = activeEncodeW * 4;
       }
 
       std::vector<uint8_t> nv12;
@@ -961,7 +1034,7 @@ int main(int argc, char** argv) {
             std::cout << "[native-video-host] encoder reset due to stale output age="
                       << encodedAgeUs << "us consecutive=" << consecutiveStaleEncodedFrames << "\n";
             encoder.shutdown();
-            if (!encoder.initialize(encodeW, encodeH, args.fps, args.bitrate, args.keyint)) {
+            if (!encoder.initialize(activeEncodeW, activeEncodeH, args.fps, activeBitrate, args.keyint)) {
               std::cerr << "[native-video-host] encoder reinitialize failed\n";
               sendFailed = true;
               break;
@@ -981,8 +1054,8 @@ int main(int argc, char** argv) {
         hdr.header.type = static_cast<uint16_t>(MessageType::EncodedFrameH264);
         hdr.header.size = static_cast<uint16_t>(sizeof(hdr));
         hdr.seq = ++encodedSeq;
-        hdr.width = encodeW;
-        hdr.height = encodeH;
+        hdr.width = activeEncodeW;
+        hdr.height = activeEncodeH;
         hdr.payloadSize = static_cast<uint32_t>(au.bytes.size());
         hdr.flags = (au.keyFrame || forceKeyFrame || forceKeyNext) ? 1u : 0u;
         hdr.captureQpcUs = auCaptureUs;
@@ -1074,6 +1147,8 @@ int main(int argc, char** argv) {
                   << " size=" << w << "x" << h
                   << "\n";
       } else {
+        const uint64_t capAgeAvgUs = (encodedFrames > 0) ? (captureAgeSumUs / encodedFrames) : 0;
+        const uint64_t cb2eAvgUs = (encodedFrames > 0) ? (callbackToEncodeStartSumUs / encodedFrames) : 0;
         std::cout << "[native-video-host] encodedFrames=" << encodedFrames
                   << " sentFrames=" << sentFrames
                   << " callbackFrames=" << callbackFrames.load()
@@ -1082,14 +1157,114 @@ int main(int argc, char** argv) {
                   << " staleEncodedDrops=" << staleEncodedDropCount
                   << " encoderResets=" << encoderResetCount
                   << " inputEvents=" << inputEvents.load()
-                  << " capAgeAvgUs=" << ((encodedFrames > 0) ? (captureAgeSumUs / encodedFrames) : 0)
+                  << " capAgeAvgUs=" << capAgeAvgUs
                   << " capAgeMaxUs=" << captureAgeMaxUs
-                  << " cb2eAvgUs=" << ((encodedFrames > 0) ? (callbackToEncodeStartSumUs / encodedFrames) : 0)
+                  << " cb2eAvgUs=" << cb2eAvgUs
                   << " cb2eMaxUs=" << callbackToEncodeStartMaxUs
                   << " mbps=" << mbps
-                  << " bitrateTarget=" << args.bitrate
-                  << " size=" << encodeW << "x" << encodeH
+                  << " bitrateTarget=" << activeBitrate
+                  << " size=" << activeEncodeW << "x" << activeEncodeH
                   << "\n";
+
+        if (abrEnabled) {
+          const uint64_t metricsUpdatedUs = clientMetricsUpdatedUs.load();
+          const bool metricsFresh =
+              (metricsUpdatedUs > 0) && (t >= metricsUpdatedUs) && ((t - metricsUpdatedUs) <= 3000000ULL);
+
+          const uint64_t clAvgLatencyUs = metricsFresh ? clientMetricsAvgLatencyUs.load() : 0;
+          const uint64_t clAvgDecodeTailUs = metricsFresh ? clientMetricsAvgDecodeTailUs.load() : 0;
+          const uint32_t clDecodedFpsX100 = metricsFresh ? clientMetricsDecodedFpsX100.load() : 0;
+          const uint32_t clRecvMbpsX1000 = metricsFresh ? clientMetricsRecvMbpsX1000.load() : 0;
+          const uint32_t clWidth = metricsFresh ? clientMetricsWidth.load() : 0;
+          const uint32_t clHeight = metricsFresh ? clientMetricsHeight.load() : 0;
+
+          const uint32_t minGoodFpsX100 = args.fps * 90u;
+          const uint32_t minAcceptFpsX100 = args.fps * 75u;
+
+          const bool shouldDownByClient =
+              metricsFresh &&
+              (clAvgLatencyUs > 120000ULL ||
+               clAvgDecodeTailUs > 90000ULL ||
+               clDecodedFpsX100 < minAcceptFpsX100);
+          const bool shouldDownByHost = (!metricsFresh && cb2eAvgUs > 65000ULL);
+          const bool shouldDown = shouldDownByClient || shouldDownByHost;
+
+          const bool goodForUpgrade =
+              metricsFresh &&
+              (clAvgLatencyUs < 80000ULL) &&
+              (clAvgDecodeTailUs < 55000ULL) &&
+              (clDecodedFpsX100 >= minGoodFpsX100);
+
+          if (abrUsingLowProfile) {
+            if (goodForUpgrade) {
+              ++abrGoodSeconds;
+            } else {
+              abrGoodSeconds = 0;
+            }
+          } else {
+            abrGoodSeconds = 0;
+          }
+
+          bool switchToLow = false;
+          bool switchToHigh = false;
+          const bool hasDistinctLowProfile = abrHasLowerResolution || (abrLowBitrate < abrHighBitrate);
+          if (!abrUsingLowProfile) {
+            if (hasDistinctLowProfile && shouldDown && t >= abrCooldownUntilUs) {
+              switchToLow = true;
+            }
+          } else if (hasDistinctLowProfile && abrGoodSeconds >= 6 && t >= abrCooldownUntilUs) {
+            switchToHigh = true;
+          }
+
+          if (switchToLow || switchToHigh) {
+            const uint32_t targetW = switchToLow ? abrLowW : abrHighW;
+            const uint32_t targetH = switchToLow ? abrLowH : abrHighH;
+            const uint32_t targetBitrate = switchToLow ? abrLowBitrate : abrHighBitrate;
+
+            bool switchOk = true;
+            if (targetW != activeEncodeW || targetH != activeEncodeH) {
+              encoder.shutdown();
+              if (!encoder.initialize(targetW, targetH, args.fps, targetBitrate, args.keyint)) {
+                std::cerr << "[native-video-host][abr] encoder reinitialize failed for profile switch\n";
+                switchOk = false;
+              }
+            } else if (targetBitrate != activeBitrate) {
+              if (!encoder.reconfigure_bitrate(targetBitrate)) {
+                encoder.shutdown();
+                if (!encoder.initialize(targetW, targetH, args.fps, targetBitrate, args.keyint)) {
+                  std::cerr << "[native-video-host][abr] encoder bitrate reconfigure/reinit failed\n";
+                  switchOk = false;
+                }
+              }
+            }
+
+            if (!switchOk) {
+              break;
+            }
+
+            activeEncodeW = targetW;
+            activeEncodeH = targetH;
+            activeBitrate = targetBitrate;
+            abrUsingLowProfile = switchToLow;
+            abrGoodSeconds = 0;
+            abrCooldownUntilUs = t + 3000000ULL;
+            forceKeyNext = true;
+
+            std::cout << "[native-video-host][abr] profile="
+                      << (abrUsingLowProfile ? "low" : "high")
+                      << " encode=" << activeEncodeW << "x" << activeEncodeH
+                      << " bitrate=" << activeBitrate
+                      << " reason=" << (abrUsingLowProfile
+                                           ? (shouldDownByClient ? "client_pressure" : "host_encode_pressure")
+                                           : "client_stable")
+                      << " clientSize=" << clWidth << "x" << clHeight
+                      << " clientDecodedFps=" << (clDecodedFpsX100 / 100.0)
+                      << " clientAvgLatUs=" << clAvgLatencyUs
+                      << " clientAvgTailUs=" << clAvgDecodeTailUs
+                      << " clientMbps=" << (clRecvMbpsX1000 / 1000.0)
+                      << "\n";
+          }
+        }
       }
       sentFrames = 0;
       encodedFrames = 0;

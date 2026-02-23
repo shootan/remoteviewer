@@ -15,6 +15,7 @@ enum class MessageType : uint16_t {
   ControlPong = 21,
   ControlInputEvent = 22,
   ControlInputAck = 23,
+  ControlClientMetrics = 24,
 };
 
 enum class UdpPacketKind : uint16_t {
@@ -105,6 +106,22 @@ struct ControlInputAckMessage {
   uint32_t seq = 0;
   uint64_t hostRecvQpcUs = 0;
   uint64_t hostSendQpcUs = 0;
+};
+
+struct ControlClientMetricsMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint32_t recvFpsX100 = 0;
+  uint32_t decodedFpsX100 = 0;
+  uint32_t recvMbpsX1000 = 0;
+  uint32_t skippedFrames = 0;
+  uint64_t avgLatencyUs = 0;
+  uint64_t maxLatencyUs = 0;
+  uint64_t avgDecodeTailUs = 0;
+  uint64_t maxDecodeTailUs = 0;
+  uint64_t clientSendQpcUs = 0;
 };
 
 struct UdpHelloPacket {

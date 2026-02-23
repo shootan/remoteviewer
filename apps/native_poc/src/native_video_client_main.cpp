@@ -39,6 +39,7 @@ namespace {
 
 using remote60::native_poc::ControlInputAckMessage;
 using remote60::native_poc::ControlInputEventMessage;
+using remote60::native_poc::ControlClientMetricsMessage;
 using remote60::native_poc::ControlPingMessage;
 using remote60::native_poc::ControlPongMessage;
 using remote60::native_poc::DecodedFrameNv12;
@@ -240,6 +241,23 @@ std::atomic<uint32_t> gInputSeq{0};
 std::atomic<uint64_t> gInputDropped{0};
 std::atomic<bool> gInputEnabled{false};
 std::atomic<uint16_t> gMouseButtons{0};
+
+struct ClientRuntimeMetrics {
+  std::atomic<uint32_t> seq{0};
+  std::atomic<uint32_t> width{0};
+  std::atomic<uint32_t> height{0};
+  std::atomic<uint32_t> recvFpsX100{0};
+  std::atomic<uint32_t> decodedFpsX100{0};
+  std::atomic<uint32_t> recvMbpsX1000{0};
+  std::atomic<uint32_t> skippedFrames{0};
+  std::atomic<uint64_t> avgLatencyUs{0};
+  std::atomic<uint64_t> maxLatencyUs{0};
+  std::atomic<uint64_t> avgDecodeTailUs{0};
+  std::atomic<uint64_t> maxDecodeTailUs{0};
+  std::atomic<uint64_t> updatedQpcUs{0};
+};
+
+ClientRuntimeMetrics gClientMetrics;
 
 struct Nv12D3dRenderer {
   Microsoft::WRL::ComPtr<ID3D11Device> device;
@@ -910,6 +928,8 @@ int main(int argc, char** argv) {
         }
         controlThread = std::thread([&]() {
           uint32_t pingSeq = 0;
+          uint32_t metricsSeq = 0;
+          uint64_t lastMetricsSentUs = 0;
           uint64_t inputAckCount = 0;
           uint64_t nextPingUs = qpc_now_us();
           while (gRunning.load()) {
@@ -944,6 +964,29 @@ int main(int argc, char** argv) {
                                                     : 0)
                         << "\n";
               nextPingUs = doneUs + static_cast<uint64_t>(std::max<uint32_t>(20, args.controlIntervalMs)) * 1000ULL;
+              didWork = true;
+            }
+
+            const uint64_t metricsUpdatedUs = gClientMetrics.updatedQpcUs.load();
+            if (metricsUpdatedUs > 0 && metricsUpdatedUs != lastMetricsSentUs) {
+              ControlClientMetricsMessage metrics{};
+              metrics.header.magic = remote60::native_poc::kMagic;
+              metrics.header.type = static_cast<uint16_t>(MessageType::ControlClientMetrics);
+              metrics.header.size = static_cast<uint16_t>(sizeof(metrics));
+              metrics.seq = ++metricsSeq;
+              metrics.width = gClientMetrics.width.load();
+              metrics.height = gClientMetrics.height.load();
+              metrics.recvFpsX100 = gClientMetrics.recvFpsX100.load();
+              metrics.decodedFpsX100 = gClientMetrics.decodedFpsX100.load();
+              metrics.recvMbpsX1000 = gClientMetrics.recvMbpsX1000.load();
+              metrics.skippedFrames = gClientMetrics.skippedFrames.load();
+              metrics.avgLatencyUs = gClientMetrics.avgLatencyUs.load();
+              metrics.maxLatencyUs = gClientMetrics.maxLatencyUs.load();
+              metrics.avgDecodeTailUs = gClientMetrics.avgDecodeTailUs.load();
+              metrics.maxDecodeTailUs = gClientMetrics.maxDecodeTailUs.load();
+              metrics.clientSendQpcUs = nowUs;
+              if (!send_all(controlSock, &metrics, sizeof(metrics))) break;
+              lastMetricsSentUs = metricsUpdatedUs;
               didWork = true;
             }
 
@@ -1011,6 +1054,31 @@ int main(int argc, char** argv) {
     uint64_t lagDropCount = 0;
     bool catchupMode = false;
     uint64_t lastPresentedCaptureUs = 0;
+    auto publish_metrics = [&](uint32_t metricW, uint32_t metricH, uint64_t nowUs,
+                               uint64_t avgLatencyUs, uint64_t maxLatencyUsLocal,
+                               uint64_t avgDecodeTailUs, uint64_t maxDecodeTailUsLocal,
+                               double mbpsLocal) {
+      const uint64_t cappedRecvFpsX100 = std::min<uint64_t>(recvFrames * 100ULL, 0xFFFFFFFFULL);
+      const uint64_t cappedDecodedFpsX100 = std::min<uint64_t>(decodedFrames * 100ULL, 0xFFFFFFFFULL);
+      const double mbpsX1000 = mbpsLocal * 1000.0;
+      uint32_t recvMbpsX1000 = 0;
+      if (mbpsX1000 > 0.0) {
+        recvMbpsX1000 = static_cast<uint32_t>(
+            std::min<double>(mbpsX1000, static_cast<double>(0xFFFFFFFFu)));
+      }
+      gClientMetrics.width = metricW;
+      gClientMetrics.height = metricH;
+      gClientMetrics.recvFpsX100 = static_cast<uint32_t>(cappedRecvFpsX100);
+      gClientMetrics.decodedFpsX100 = static_cast<uint32_t>(cappedDecodedFpsX100);
+      gClientMetrics.recvMbpsX1000 = recvMbpsX1000;
+      gClientMetrics.skippedFrames = static_cast<uint32_t>(std::min<uint64_t>(skippedQueued, 0xFFFFFFFFULL));
+      gClientMetrics.avgLatencyUs = avgLatencyUs;
+      gClientMetrics.maxLatencyUs = maxLatencyUsLocal;
+      gClientMetrics.avgDecodeTailUs = avgDecodeTailUs;
+      gClientMetrics.maxDecodeTailUs = maxDecodeTailUsLocal;
+      gClientMetrics.seq.fetch_add(1);
+      gClientMetrics.updatedQpcUs = nowUs;
+    };
     auto process_h264_frame = [&](const EncodedFrameHeader& h, std::vector<uint8_t>* payloadPtr,
                                   uint64_t packetNowUs) -> bool {
       if (!payloadPtr) return true;
@@ -1100,6 +1168,8 @@ int main(int argc, char** argv) {
           const uint64_t avgLatencyUs = (decodedFrames > 0) ? (sumLatencyUs / decodedFrames) : 0;
           const uint64_t avgDecodeTailUs = (decodedFrames > 0) ? (sumDecodeTailUs / decodedFrames) : 0;
           const double mbps = (recvBytes * 8.0) / (1000.0 * 1000.0);
+          publish_metrics(h.width, h.height, packetNowUs,
+                          avgLatencyUs, maxLatencyUs, avgDecodeTailUs, maxDecodeTailUs, mbps);
           std::cout << "[native-video-client] recvFrames=" << recvFrames
                     << " decodedFrames=" << decodedFrames
                     << " skippedQueued=" << skippedQueued
@@ -1138,6 +1208,8 @@ int main(int argc, char** argv) {
           const uint64_t avgLatencyUs = (decodedFrames > 0) ? (sumLatencyUs / decodedFrames) : 0;
           const uint64_t avgDecodeTailUs = (decodedFrames > 0) ? (sumDecodeTailUs / decodedFrames) : 0;
           const double mbps = (recvBytes * 8.0) / (1000.0 * 1000.0);
+          publish_metrics(h.width, h.height, packetNowUs,
+                          avgLatencyUs, maxLatencyUs, avgDecodeTailUs, maxDecodeTailUs, mbps);
           std::cout << "[native-video-client] recvFrames=" << recvFrames
                     << " decodedFrames=" << decodedFrames
                     << " skippedQueued=" << skippedQueued
@@ -1170,6 +1242,8 @@ int main(int argc, char** argv) {
           const uint64_t avgLatencyUs = (decodedFrames > 0) ? (sumLatencyUs / decodedFrames) : 0;
           const uint64_t avgDecodeTailUs = (decodedFrames > 0) ? (sumDecodeTailUs / decodedFrames) : 0;
           const double mbps = (recvBytes * 8.0) / (1000.0 * 1000.0);
+          publish_metrics(h.width, h.height, packetNowUs,
+                          avgLatencyUs, maxLatencyUs, avgDecodeTailUs, maxDecodeTailUs, mbps);
           std::cout << "[native-video-client] recvFrames=" << recvFrames
                     << " decodedFrames=" << decodedFrames
                     << " skippedQueued=" << skippedQueued
@@ -1275,6 +1349,8 @@ int main(int argc, char** argv) {
         const uint64_t avgLatencyUs = (decodedFrames > 0) ? (sumLatencyUs / decodedFrames) : 0;
         const uint64_t avgDecodeTailUs = (decodedFrames > 0) ? (sumDecodeTailUs / decodedFrames) : 0;
         const double mbps = (recvBytes * 8.0) / (1000.0 * 1000.0);
+        publish_metrics(decoded.width, decoded.height, nowUs,
+                        avgLatencyUs, maxLatencyUs, avgDecodeTailUs, maxDecodeTailUs, mbps);
         std::cout << "[native-video-client] recvFrames=" << recvFrames
                   << " decodedFrames=" << decodedFrames
                   << " skippedQueued=" << skippedQueued
@@ -1479,6 +1555,8 @@ int main(int argc, char** argv) {
           const uint64_t avgLatencyUs = (recvFrames > 0) ? (sumLatencyUs / recvFrames) : 0;
           const uint64_t avgDecodeTailUs = (recvFrames > 0) ? (sumDecodeTailUs / recvFrames) : 0;
           const double mbps = (recvBytes * 8.0) / (1000.0 * 1000.0);
+          publish_metrics(h.width, h.height, nowUs,
+                          avgLatencyUs, maxLatencyUs, avgDecodeTailUs, maxDecodeTailUs, mbps);
           std::cout << "[native-video-client] recvFrames=" << recvFrames
                     << " decodedFrames=" << decodedFrames
                     << " skippedQueued=" << skippedQueued
