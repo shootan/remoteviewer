@@ -741,6 +741,8 @@ int main(int argc, char** argv) {
   uint32_t activeBitrate = abrHighBitrate;
   uint64_t abrCooldownUntilUs = 0;
   uint32_t abrGoodSeconds = 0;
+  uint32_t abrModeratePressureSeconds = 0;
+  uint32_t abrSeverePressureSeconds = 0;
 
   if (useH264) {
     if (!encoder.initialize(activeEncodeW, activeEncodeH, args.fps, activeBitrate, args.keyint)) {
@@ -1197,6 +1199,10 @@ int main(int argc, char** argv) {
                   << " mbps=" << mbps
                   << " bitrateTarget=" << activeBitrate
                   << " size=" << activeEncodeW << "x" << activeEncodeH
+                  << " abrProfile=" << ((abrProfile == 0) ? "high" : ((abrProfile == 1) ? "mid" : "low"))
+                  << " abrModSec=" << abrModeratePressureSeconds
+                  << " abrSevSec=" << abrSeverePressureSeconds
+                  << " abrGoodSec=" << abrGoodSeconds
                   << "\n";
 
         if (abrEnabled) {
@@ -1211,25 +1217,44 @@ int main(int argc, char** argv) {
           const uint32_t clWidth = metricsFresh ? clientMetricsWidth.load() : 0;
           const uint32_t clHeight = metricsFresh ? clientMetricsHeight.load() : 0;
 
-          const uint32_t minGoodFpsX100 = args.fps * 92u;
+          const uint32_t minGoodFpsX100 = args.fps * 93u;
           const uint32_t minOkayFpsX100 = args.fps * 85u;
-          const uint32_t minDegradeFpsX100 = args.fps * 78u;
-          const uint32_t minSevereFpsX100 = args.fps * 65u;
+          const uint32_t minDegradeFpsX100 = args.fps * 45u;
+          const uint32_t minSevereFpsX100 = args.fps * 35u;
+          const bool abrWarmupDone = (t >= (startUs + 4000000ULL));
 
           const bool severeDownByClient =
               metricsFresh &&
               (clAvgLatencyUs > 150000ULL ||
                clAvgDecodeTailUs > 110000ULL ||
-               clDecodedFpsX100 < minSevereFpsX100);
+               (clDecodedFpsX100 < minSevereFpsX100 &&
+                (clAvgLatencyUs > 110000ULL || clAvgDecodeTailUs > 80000ULL)));
           const bool moderateDownByClient =
               metricsFresh &&
-              (clAvgLatencyUs > 120000ULL ||
+              (clAvgLatencyUs > 125000ULL ||
                clAvgDecodeTailUs > 90000ULL ||
-               clDecodedFpsX100 < minDegradeFpsX100);
+               (clDecodedFpsX100 < minDegradeFpsX100 &&
+                (clAvgLatencyUs > 95000ULL || clAvgDecodeTailUs > 70000ULL)));
+          const bool emergencyDownByClient =
+              metricsFresh &&
+              (clAvgLatencyUs > 220000ULL ||
+               clAvgDecodeTailUs > 160000ULL);
           const bool severeDownByHost = (!metricsFresh && cb2eAvgUs > 90000ULL);
           const bool moderateDownByHost = (!metricsFresh && cb2eAvgUs > 70000ULL);
-          const bool severeDown = severeDownByClient || severeDownByHost;
-          const bool moderateDown = moderateDownByClient || moderateDownByHost;
+          const bool severeDown = abrWarmupDone && (severeDownByClient || severeDownByHost);
+          const bool moderateDown = abrWarmupDone && (moderateDownByClient || moderateDownByHost);
+          const bool emergencyDown = abrWarmupDone && emergencyDownByClient;
+
+          if (severeDown) {
+            ++abrSeverePressureSeconds;
+          } else {
+            abrSeverePressureSeconds = 0;
+          }
+          if (moderateDown) {
+            ++abrModeratePressureSeconds;
+          } else {
+            abrModeratePressureSeconds = 0;
+          }
 
           const bool goodForLowToMid =
               metricsFresh &&
@@ -1246,23 +1271,27 @@ int main(int argc, char** argv) {
           const char* abrReason = "none";
           if (t >= abrCooldownUntilUs) {
             if (abrProfile == 0) {
-              if (moderateDown) {
-                if (severeDown && abrHasLowProfile) {
-                  targetProfile = 2;
-                  abrReason = severeDownByClient ? "client_severe" : "host_severe";
-                } else if (abrHasMidProfile) {
+              if (emergencyDown && abrHasLowProfile && abrSeverePressureSeconds >= 1) {
+                targetProfile = 2;
+                abrReason = "client_emergency";
+              } else if ((abrSeverePressureSeconds >= 2) || (abrModeratePressureSeconds >= 4)) {
+                if (abrHasMidProfile) {
                   targetProfile = 1;
-                  abrReason = moderateDownByClient ? "client_moderate" : "host_moderate";
+                  abrReason = (abrSeverePressureSeconds >= 2) ? "high_to_mid_severe" : "high_to_mid_moderate";
                 } else if (abrHasLowProfile) {
                   targetProfile = 2;
-                  abrReason = moderateDownByClient ? "client_moderate" : "host_moderate";
+                  abrReason = (abrSeverePressureSeconds >= 2) ? "high_to_low_severe" : "high_to_low_moderate";
                 }
               }
               abrGoodSeconds = 0;
             } else if (abrProfile == 1) {
-              if (severeDown && abrHasLowProfile) {
+              if (emergencyDown && abrHasLowProfile) {
                 targetProfile = 2;
-                abrReason = severeDownByClient ? "client_severe" : "host_severe";
+                abrReason = "client_emergency";
+                abrGoodSeconds = 0;
+              } else if ((abrSeverePressureSeconds >= 3 || abrModeratePressureSeconds >= 5) && abrHasLowProfile) {
+                targetProfile = 2;
+                abrReason = (abrSeverePressureSeconds >= 3) ? "mid_to_low_severe" : "mid_to_low_moderate";
                 abrGoodSeconds = 0;
               } else {
                 if (goodForMidToHigh) {
@@ -1270,7 +1299,7 @@ int main(int argc, char** argv) {
                 } else {
                   abrGoodSeconds = 0;
                 }
-                if (abrGoodSeconds >= 6) {
+                if (abrGoodSeconds >= 8) {
                   targetProfile = 0;
                   abrReason = "client_stable_high";
                 }
@@ -1281,7 +1310,7 @@ int main(int argc, char** argv) {
               } else {
                 abrGoodSeconds = 0;
               }
-              if (abrGoodSeconds >= 4) {
+              if (abrGoodSeconds >= 5) {
                 targetProfile = abrHasMidProfile ? 1 : 0;
                 abrReason = "client_stable_mid";
               }
@@ -1328,6 +1357,8 @@ int main(int argc, char** argv) {
             activeBitrate = targetBitrate;
             abrProfile = targetProfile;
             abrGoodSeconds = 0;
+            abrModeratePressureSeconds = 0;
+            abrSeverePressureSeconds = 0;
             abrCooldownUntilUs = t + 4000000ULL;
             forceKeyNext = true;
 

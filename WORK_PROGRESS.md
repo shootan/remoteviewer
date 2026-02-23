@@ -1541,3 +1541,46 @@ Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddH
 - 주의:
   - 720p60 p95는 이전 대표값(`~51841us`) 대비 이번 측정(`54686us`)으로 소폭 악화(+2.8ms).
   - 현재 정책은 품질보다 지연 우선이라 `low` 프로필로 빠르게 내려가는 경향이 있음.
+
+## 2026-02-24 01:45 (1080 유지 우선 ABR 재튜닝)
+
+### Summary
+- 사용자 요청(1080 유지시간 확대)에 맞춰 ABR 판정을 보수적으로 재조정.
+- 핵심은 `빠른 low 폴백`을 줄이고, 1080 해상도를 더 오래 유지하도록 한 것.
+
+### Code changes
+1. `apps/native_poc/src/native_video_host_main.cpp`
+- ABR 워밍업 구간(4초) 도입.
+- 강등 판정 로직 변경:
+  - `fps` 단독 조건 축소
+  - `latency/decodeTail` 우선
+  - 연속 압박초(`abrModeratePressureSeconds`, `abrSeverePressureSeconds`) 누적 기반 전환
+- `high -> mid` 우선, `low`는 severe/emergency 조건에서만.
+- host stats 로그에 `abrProfile/abrModSec/abrSevSec/abrGoodSec` 추가.
+
+### Build
+- `cmake --build build-native2 --config Debug --target remote60_native_video_host_poc` -> PASS
+  - 참고: 빌드 ACL 이슈로 관리자 권한 빌드 경로를 사용함.
+
+### Verification snapshots
+1. 1080p60 (5.5Mbps, 16s client)
+- Log: `automation/logs/verify-native-video-20260224-014323`
+- `LAT_AVG_US=72705.4`
+- `LAT_P95_US=77337`
+- `DEC_AVG=15.53`
+- `ABR_SWITCH_COUNT=0` (전 구간 1080 유지)
+- host log: `size=1920x1080`, `abrProfile=high` 지속
+
+2. 720p60 (2.5Mbps)
+- Log: `automation/logs/verify-native-video-20260224-014359`
+- `LAT_AVG_US=46075`
+- `LAT_P95_US=48039`
+- `ABR_SWITCH_COUNT=0`
+
+### Performance note
+- 개선:
+  - 1080 유지시간은 확실히 개선(`ABR_SWITCH_COUNT=0`).
+  - 720p 지연은 이전 측정보다 개선(`P95 54686 -> 48039`).
+- 트레이드오프:
+  - 1080 유지 시 디코드 FPS가 낮아짐(`~22-23 -> ~15-16`).
+  - 즉, 현재 튜닝은 "1080 유지"에 무게를 둔 프로필이며, 부드러움(프레임)과 상충 가능.
