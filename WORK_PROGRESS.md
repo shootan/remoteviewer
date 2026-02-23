@@ -1584,3 +1584,35 @@ Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddH
 - 트레이드오프:
   - 1080 유지 시 디코드 FPS가 낮아짐(`~22-23 -> ~15-16`).
   - 즉, 현재 튜닝은 "1080 유지"에 무게를 둔 프로필이며, 부드러움(프레임)과 상충 가능.
+
+## 2026-02-24 02:18 (내부망 타 PC 멈춤 원인 패치: 클럭 오프셋 보정)
+
+### Summary
+- 내부망에서 "수초 지연/멈춤"이 반복되는 핵심 원인으로, 클라이언트가 `호스트 QPC 타임스탬프`와 `클라이언트 로컬 시간`을 직접 비교하던 문제를 확인.
+- 동일 PC(localhost)에서는 offset이 거의 0이라 드러나지 않지만, 다른 PC에서는 offset만큼 가짜 지연이 생겨 catch-up 진입/키프레임 대기 루프를 유발할 수 있음.
+
+### Code changes
+1. `apps/native_poc/src/native_video_client_main.cpp`
+- 수신 스레드에 원격 타임라인 정렬기(`aligned_lag_us`) 추가.
+- `streamLagUs`, `avgLatencyUs`, `avgDecodeTailUs` 계산을 offset 보정 기반으로 변경.
+- 결과: 타 PC 환경에서도 "클럭 기준 불일치로 인한 오탐 지연"을 제거.
+
+2. `automation/native_video_profile_1080p.json`
+3. `automation/native_video_profile_720p.json`
+4. `automation/native_video_profile_900p_quality.json`
+- 기본 백엔드 강제를 `mft_hw` -> `mft_auto`로 변경.
+- HW 가능 시 HW 우선, 불가 시 SW 폴백으로 실행 실패/정지 케이스 완화.
+
+### Build
+- `cmake --build build-native2 --config Debug --target remote60_native_video_client_poc` -> PASS
+
+### Verification snapshot
+1. 로컬 회귀 확인 (h264/udp/30fps/7Mbps)
+- Log: `automation/logs/verify-native-video-20260224-021847`
+- `HOST_RC=0`, `CLIENT_RC=0`
+- `LAT_AVG_US=12110.29`
+- `PRESENT_GAP_OVER_3S=0`
+
+### Note
+- 이번 패치는 "타 PC에서 발생하던 가짜 지연/멈춤" 안정화 목적.
+- Parsec 대비 화질/프레임 격차(스케일링/인코더 세부튜닝)는 별도 후속 최적화 항목으로 유지.

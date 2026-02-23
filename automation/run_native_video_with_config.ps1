@@ -76,6 +76,7 @@ $h264NoPacing = Get-BoolValue $cfg "h264NoPacing" $false
 $guardStalePreEncode = Get-BoolValue $cfg "guardStalePreEncode" $false
 $capturePoolBuffers = Get-IntValue $cfg "capturePoolBuffers" 0
 $guardStaleEncoded = Get-BoolValue $cfg "guardStaleEncoded" $false
+$abrDisable = Get-BoolValue $cfg "abrDisable" $false
 
 # Ensure old shell env doesn't leak into this run.
 @(
@@ -85,7 +86,8 @@ $guardStaleEncoded = Get-BoolValue $cfg "guardStaleEncoded" $false
   "REMOTE60_NATIVE_H264_NO_PACING",
   "REMOTE60_NATIVE_GUARD_STALE_PREENCODE",
   "REMOTE60_NATIVE_CAPTURE_POOL_BUFFERS",
-  "REMOTE60_NATIVE_GUARD_STALE_ENCODED"
+  "REMOTE60_NATIVE_GUARD_STALE_ENCODED",
+  "REMOTE60_NATIVE_ABR_DISABLE"
 ) | ForEach-Object {
   Remove-Item ("Env:" + $_) -ErrorAction SilentlyContinue
 }
@@ -110,6 +112,9 @@ if ($capturePoolBuffers -ge 1) {
 }
 if ($guardStaleEncoded) {
   $env:REMOTE60_NATIVE_GUARD_STALE_ENCODED = "1"
+}
+if ($abrDisable) {
+  $env:REMOTE60_NATIVE_ABR_DISABLE = "1"
 }
 
 if ($Role -eq "host") {

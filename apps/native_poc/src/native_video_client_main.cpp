@@ -1078,6 +1078,29 @@ int main(int argc, char** argv) {
     uint64_t lagDropCount = 0;
     bool catchupMode = false;
     uint64_t lastPresentedCaptureUs = 0;
+    bool captureTimelineReady = false;
+    uint64_t captureRemoteBaseUs = 0;
+    uint64_t captureLocalBaseUs = 0;
+    bool sendTimelineReady = false;
+    uint64_t sendRemoteBaseUs = 0;
+    uint64_t sendLocalBaseUs = 0;
+    auto aligned_lag_us = [&](uint64_t remoteTsUs, uint64_t localNowUs,
+                              bool& timelineReady, uint64_t& remoteBaseUs, uint64_t& localBaseUs) -> uint64_t {
+      if (!timelineReady || remoteTsUs < remoteBaseUs) {
+        timelineReady = true;
+        remoteBaseUs = remoteTsUs;
+        localBaseUs = localNowUs;
+        return 0;
+      }
+      const uint64_t remoteDeltaUs = remoteTsUs - remoteBaseUs;
+      uint64_t expectedLocalUs = localBaseUs;
+      if (std::numeric_limits<uint64_t>::max() - expectedLocalUs < remoteDeltaUs) {
+        expectedLocalUs = std::numeric_limits<uint64_t>::max();
+      } else {
+        expectedLocalUs += remoteDeltaUs;
+      }
+      return (localNowUs >= expectedLocalUs) ? (localNowUs - expectedLocalUs) : 0;
+    };
     auto publish_metrics = [&](uint32_t metricW, uint32_t metricH, uint64_t nowUs,
                                uint64_t avgLatencyUs, uint64_t maxLatencyUsLocal,
                                uint64_t avgDecodeTailUs, uint64_t maxDecodeTailUsLocal,
@@ -1131,7 +1154,8 @@ int main(int argc, char** argv) {
       }
 
       const bool keyFrame = ((h.flags & 1u) != 0);
-      const uint64_t streamLagUs = (packetNowUs >= h.captureQpcUs) ? (packetNowUs - h.captureQpcUs) : 0;
+      const uint64_t streamLagUs = aligned_lag_us(
+          h.captureQpcUs, packetNowUs, captureTimelineReady, captureRemoteBaseUs, captureLocalBaseUs);
       const uint64_t decodeQueueLagEstimateUs =
           (lastPresentedCaptureUs > 0 && h.captureQpcUs >= lastPresentedCaptureUs)
               ? (h.captureQpcUs - lastPresentedCaptureUs)
@@ -1367,8 +1391,10 @@ int main(int argc, char** argv) {
 
       ++decodedFrames;
       lastPresentedCaptureUs = decodedCaptureUs;
-      const uint64_t latencyUs = (nowUs >= decodedCaptureUs) ? (nowUs - decodedCaptureUs) : 0;
-      const uint64_t decodeTailUs = (nowUs >= h.sendQpcUs) ? (nowUs - h.sendQpcUs) : 0;
+      const uint64_t latencyUs = aligned_lag_us(
+          decodedCaptureUs, nowUs, captureTimelineReady, captureRemoteBaseUs, captureLocalBaseUs);
+      const uint64_t decodeTailUs = aligned_lag_us(
+          h.sendQpcUs, nowUs, sendTimelineReady, sendRemoteBaseUs, sendLocalBaseUs);
       sumLatencyUs += latencyUs;
       sumDecodeTailUs += decodeTailUs;
       maxLatencyUs = std::max(maxLatencyUs, latencyUs);
