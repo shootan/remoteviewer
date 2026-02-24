@@ -117,6 +117,10 @@ if (Test-Path $hostOut) { $hostLines = Get-Content $hostOut }
 $latencyVals = New-Object System.Collections.Generic.List[double]
 $controlRttVals = New-Object System.Collections.Generic.List[double]
 $mbpsVals = New-Object System.Collections.Generic.List[double]
+$decodedRawMbpsVals = New-Object System.Collections.Generic.List[double]
+$decodeRatioVals = New-Object System.Collections.Generic.List[double]
+$rawEquivMbpsVals = New-Object System.Collections.Generic.List[double]
+$encRatioVals = New-Object System.Collections.Generic.List[double]
 $decodedFrameVals = New-Object System.Collections.Generic.List[double]
 $presentGapVals = New-Object System.Collections.Generic.List[double]
 $presentGapOver1s = 0
@@ -157,6 +161,12 @@ foreach ($line in $clientLines) {
   if ($line -match 'mbps=([0-9]+(?:\\.[0-9]+)?)') {
     [void]$mbpsVals.Add([double]$Matches[1])
   }
+  if ($line -match 'decodedRawMbps=([0-9]+(?:\\.[0-9]+)?)') {
+    [void]$decodedRawMbpsVals.Add([double]$Matches[1])
+  }
+  if ($line -match 'decodeRatioX100=([0-9]+)') {
+    [void]$decodeRatioVals.Add([double]$Matches[1])
+  }
   if ($line -match '\[native-video-client\]\[trace_present\]') {
     if ($line -match 'presentUs=([0-9]+)') {
       $presentUs = [int64]$Matches[1]
@@ -189,6 +199,12 @@ foreach ($line in $clientLines) {
 }
 
 foreach ($line in $hostLines) {
+  if ($line -match 'rawEquivMbps=([0-9]+(?:\\.[0-9]+)?)') {
+    [void]$rawEquivMbpsVals.Add([double]$Matches[1])
+  }
+  if ($line -match 'encRatioX100=([0-9]+)') {
+    [void]$encRatioVals.Add([double]$Matches[1])
+  }
   if ($line -match '\[native-video-host\]\[abr\] profile=([a-z]+)') {
     $abrSwitchCount += 1
     $abrLastProfile = $Matches[1]
@@ -224,6 +240,10 @@ function Stats-Summary {
 $lat = Stats-Summary -vals $latencyVals
 $ctl = Stats-Summary -vals $controlRttVals
 $mb = Stats-Summary -vals $mbpsVals
+$decRaw = Stats-Summary -vals $decodedRawMbpsVals
+$decRatio = Stats-Summary -vals $decodeRatioVals
+$encRaw = Stats-Summary -vals $rawEquivMbpsVals
+$encRatio = Stats-Summary -vals $encRatioVals
 $dec = Stats-Summary -vals $decodedFrameVals
 $presentGap = Stats-Summary -vals $presentGapVals
 $stageStats = [ordered]@{}
@@ -278,6 +298,22 @@ Write-Output "MBPS_COUNT=$($mb.count)"
 Write-Output "MBPS_AVG=$($mb.avg)"
 Write-Output "MBPS_P95=$($mb.p95)"
 Write-Output "MBPS_MAX=$($mb.max)"
+Write-Output "DECODED_RAW_MBPS_COUNT=$($decRaw.count)"
+Write-Output "DECODED_RAW_MBPS_AVG=$($decRaw.avg)"
+Write-Output "DECODED_RAW_MBPS_P95=$($decRaw.p95)"
+Write-Output "DECODED_RAW_MBPS_MAX=$($decRaw.max)"
+Write-Output "DECODE_RATIO_X100_COUNT=$($decRatio.count)"
+Write-Output "DECODE_RATIO_X100_AVG=$($decRatio.avg)"
+Write-Output "DECODE_RATIO_X100_P95=$($decRatio.p95)"
+Write-Output "DECODE_RATIO_X100_MAX=$($decRatio.max)"
+Write-Output "ENC_RAW_EQUIV_MBPS_COUNT=$($encRaw.count)"
+Write-Output "ENC_RAW_EQUIV_MBPS_AVG=$($encRaw.avg)"
+Write-Output "ENC_RAW_EQUIV_MBPS_P95=$($encRaw.p95)"
+Write-Output "ENC_RAW_EQUIV_MBPS_MAX=$($encRaw.max)"
+Write-Output "ENC_RATIO_X100_COUNT=$($encRatio.count)"
+Write-Output "ENC_RATIO_X100_AVG=$($encRatio.avg)"
+Write-Output "ENC_RATIO_X100_P95=$($encRatio.p95)"
+Write-Output "ENC_RATIO_X100_MAX=$($encRatio.max)"
 Write-Output "CTRL_RTT_COUNT=$($ctl.count)"
 Write-Output "CTRL_RTT_AVG_US=$($ctl.avg)"
 Write-Output "CTRL_RTT_P95_US=$($ctl.p95)"

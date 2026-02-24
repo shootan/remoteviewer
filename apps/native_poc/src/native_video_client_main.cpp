@@ -1068,6 +1068,7 @@ int main(int argc, char** argv) {
     uint64_t decodedFrames = 0;
     uint64_t skippedQueued = 0;
     uint64_t recvBytes = 0;
+    uint64_t decodedBytes = 0;
     uint64_t sumLatencyUs = 0;
     uint64_t maxLatencyUs = 0;
     uint64_t sumDecodeTailUs = 0;
@@ -1220,6 +1221,9 @@ int main(int argc, char** argv) {
           const uint64_t avgLatencyUs = (decodedFrames > 0) ? (sumLatencyUs / decodedFrames) : 0;
           const uint64_t avgDecodeTailUs = (decodedFrames > 0) ? (sumDecodeTailUs / decodedFrames) : 0;
           const double mbps = (recvBytes * 8.0) / (1000.0 * 1000.0);
+          const double decodedRawMbps = (decodedBytes * 8.0) / (1000.0 * 1000.0);
+          const uint64_t decodeRatioX100 =
+              (recvBytes > 0) ? ((decodedBytes * 100ULL) / recvBytes) : 0;
           publish_metrics(h.width, h.height, packetNowUs,
                           avgLatencyUs, maxLatencyUs, avgDecodeTailUs, maxDecodeTailUs, mbps);
           std::cout << "[native-video-client] recvFrames=" << recvFrames
@@ -1230,12 +1234,15 @@ int main(int argc, char** argv) {
                     << " avgDecodeTailUs=" << avgDecodeTailUs
                     << " maxDecodeTailUs=" << maxDecodeTailUs
                     << " mbps=" << mbps
+                    << " decodedRawMbps=" << decodedRawMbps
+                    << " decodeRatioX100=" << decodeRatioX100
                     << " size=" << h.width << "x" << h.height
                     << "\n";
           recvFrames = 0;
           decodedFrames = 0;
           skippedQueued = 0;
           recvBytes = 0;
+          decodedBytes = 0;
           sumLatencyUs = 0;
           maxLatencyUs = 0;
           sumDecodeTailUs = 0;
@@ -1261,6 +1268,9 @@ int main(int argc, char** argv) {
           const uint64_t avgLatencyUs = (decodedFrames > 0) ? (sumLatencyUs / decodedFrames) : 0;
           const uint64_t avgDecodeTailUs = (decodedFrames > 0) ? (sumDecodeTailUs / decodedFrames) : 0;
           const double mbps = (recvBytes * 8.0) / (1000.0 * 1000.0);
+          const double decodedRawMbps = (decodedBytes * 8.0) / (1000.0 * 1000.0);
+          const uint64_t decodeRatioX100 =
+              (recvBytes > 0) ? ((decodedBytes * 100ULL) / recvBytes) : 0;
           publish_metrics(h.width, h.height, packetNowUs,
                           avgLatencyUs, maxLatencyUs, avgDecodeTailUs, maxDecodeTailUs, mbps);
           std::cout << "[native-video-client] recvFrames=" << recvFrames
@@ -1271,12 +1281,15 @@ int main(int argc, char** argv) {
                     << " avgDecodeTailUs=" << avgDecodeTailUs
                     << " maxDecodeTailUs=" << maxDecodeTailUs
                     << " mbps=" << mbps
+                    << " decodedRawMbps=" << decodedRawMbps
+                    << " decodeRatioX100=" << decodeRatioX100
                     << " size=" << h.width << "x" << h.height
                     << "\n";
           recvFrames = 0;
           decodedFrames = 0;
           skippedQueued = 0;
           recvBytes = 0;
+          decodedBytes = 0;
           sumLatencyUs = 0;
           maxLatencyUs = 0;
           sumDecodeTailUs = 0;
@@ -1295,6 +1308,9 @@ int main(int argc, char** argv) {
           const uint64_t avgLatencyUs = (decodedFrames > 0) ? (sumLatencyUs / decodedFrames) : 0;
           const uint64_t avgDecodeTailUs = (decodedFrames > 0) ? (sumDecodeTailUs / decodedFrames) : 0;
           const double mbps = (recvBytes * 8.0) / (1000.0 * 1000.0);
+          const double decodedRawMbps = (decodedBytes * 8.0) / (1000.0 * 1000.0);
+          const uint64_t decodeRatioX100 =
+              (recvBytes > 0) ? ((decodedBytes * 100ULL) / recvBytes) : 0;
           publish_metrics(h.width, h.height, packetNowUs,
                           avgLatencyUs, maxLatencyUs, avgDecodeTailUs, maxDecodeTailUs, mbps);
           std::cout << "[native-video-client] recvFrames=" << recvFrames
@@ -1305,12 +1321,15 @@ int main(int argc, char** argv) {
                     << " avgDecodeTailUs=" << avgDecodeTailUs
                     << " maxDecodeTailUs=" << maxDecodeTailUs
                     << " mbps=" << mbps
+                    << " decodedRawMbps=" << decodedRawMbps
+                    << " decodeRatioX100=" << decodeRatioX100
                     << " size=" << h.width << "x" << h.height
                     << "\n";
           recvFrames = 0;
           decodedFrames = 0;
           skippedQueued = 0;
           recvBytes = 0;
+          decodedBytes = 0;
           sumLatencyUs = 0;
           maxLatencyUs = 0;
           sumDecodeTailUs = 0;
@@ -1332,6 +1351,7 @@ int main(int argc, char** argv) {
         waitForKeyFrame = true;
         return true;
       }
+      const uint64_t decodedPayloadBytes = static_cast<uint64_t>(decoded.bytes.size());
       const uint64_t decodeEndUs = qpc_now_us();
       auto frameNv12 = std::make_shared<std::vector<uint8_t>>(std::move(decoded.bytes));
       if (!frameNv12 || frameNv12->empty()) {
@@ -1390,6 +1410,7 @@ int main(int argc, char** argv) {
       }
 
       ++decodedFrames;
+      decodedBytes += decodedPayloadBytes;
       lastPresentedCaptureUs = decodedCaptureUs;
       const uint64_t latencyUs = aligned_lag_us(
           decodedCaptureUs, nowUs, captureTimelineReady, captureRemoteBaseUs, captureLocalBaseUs);
@@ -1404,6 +1425,9 @@ int main(int argc, char** argv) {
         const uint64_t avgLatencyUs = (decodedFrames > 0) ? (sumLatencyUs / decodedFrames) : 0;
         const uint64_t avgDecodeTailUs = (decodedFrames > 0) ? (sumDecodeTailUs / decodedFrames) : 0;
         const double mbps = (recvBytes * 8.0) / (1000.0 * 1000.0);
+        const double decodedRawMbps = (decodedBytes * 8.0) / (1000.0 * 1000.0);
+        const uint64_t decodeRatioX100 =
+            (recvBytes > 0) ? ((decodedBytes * 100ULL) / recvBytes) : 0;
         publish_metrics(decoded.width, decoded.height, nowUs,
                         avgLatencyUs, maxLatencyUs, avgDecodeTailUs, maxDecodeTailUs, mbps);
         std::cout << "[native-video-client] recvFrames=" << recvFrames
@@ -1414,12 +1438,15 @@ int main(int argc, char** argv) {
                   << " avgDecodeTailUs=" << avgDecodeTailUs
                   << " maxDecodeTailUs=" << maxDecodeTailUs
                   << " mbps=" << mbps
+                  << " decodedRawMbps=" << decodedRawMbps
+                  << " decodeRatioX100=" << decodeRatioX100
                   << " size=" << decoded.width << "x" << decoded.height
                   << "\n";
         recvFrames = 0;
         decodedFrames = 0;
         skippedQueued = 0;
         recvBytes = 0;
+        decodedBytes = 0;
         sumLatencyUs = 0;
         maxLatencyUs = 0;
         sumDecodeTailUs = 0;
@@ -1602,6 +1629,7 @@ int main(int argc, char** argv) {
         ++recvFrames;
         ++decodedFrames;
         recvBytes += h.payloadSize;
+        decodedBytes += static_cast<uint64_t>(h.payloadSize);
         const uint64_t latencyUs = (nowUs >= h.captureQpcUs) ? (nowUs - h.captureQpcUs) : 0;
         const uint64_t decodeTailUs = (nowUs >= h.sendQpcUs) ? (nowUs - h.sendQpcUs) : 0;
         sumLatencyUs += latencyUs;
@@ -1613,6 +1641,9 @@ int main(int argc, char** argv) {
           const uint64_t avgLatencyUs = (recvFrames > 0) ? (sumLatencyUs / recvFrames) : 0;
           const uint64_t avgDecodeTailUs = (recvFrames > 0) ? (sumDecodeTailUs / recvFrames) : 0;
           const double mbps = (recvBytes * 8.0) / (1000.0 * 1000.0);
+          const double decodedRawMbps = (decodedBytes * 8.0) / (1000.0 * 1000.0);
+          const uint64_t decodeRatioX100 =
+              (recvBytes > 0) ? ((decodedBytes * 100ULL) / recvBytes) : 0;
           publish_metrics(h.width, h.height, nowUs,
                           avgLatencyUs, maxLatencyUs, avgDecodeTailUs, maxDecodeTailUs, mbps);
           std::cout << "[native-video-client] recvFrames=" << recvFrames
@@ -1623,12 +1654,15 @@ int main(int argc, char** argv) {
                     << " avgDecodeTailUs=" << avgDecodeTailUs
                     << " maxDecodeTailUs=" << maxDecodeTailUs
                     << " mbps=" << mbps
+                    << " decodedRawMbps=" << decodedRawMbps
+                    << " decodeRatioX100=" << decodeRatioX100
                     << " size=" << h.width << "x" << h.height
                     << "\n";
           recvFrames = 0;
           decodedFrames = 0;
           skippedQueued = 0;
           recvBytes = 0;
+          decodedBytes = 0;
           sumLatencyUs = 0;
           maxLatencyUs = 0;
           sumDecodeTailUs = 0;

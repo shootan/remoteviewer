@@ -875,6 +875,7 @@ int main(int argc, char** argv) {
   uint64_t sentFrames = 0;
   uint64_t encodedFrames = 0;
   uint64_t sentBytes = 0;
+  uint64_t rawEquivalentBytes = 0;
   uint64_t skippedByOverwrite = 0;
   uint64_t lastVersionSent = 0;
   uint64_t tracePrinted = 0;
@@ -1048,6 +1049,7 @@ int main(int argc, char** argv) {
       callbackToEncodeStartMaxUs = std::max(callbackToEncodeStartMaxUs, callbackToEncodeStartUs);
 
       bool encoderResetTriggered = false;
+      bool countedRawForInput = false;
       for (const auto& au : units) {
         if (au.bytes.empty()) continue;
         const uint64_t auCaptureUs =
@@ -1132,6 +1134,10 @@ int main(int argc, char** argv) {
         ++sentFrames;
         ++encodedFrames;
         sentBytes += au.bytes.size();
+        if (!countedRawForInput) {
+          rawEquivalentBytes += static_cast<uint64_t>(nv12.size());
+          countedRawForInput = true;
+        }
         if ((hdr.flags & 1u) != 0) {
           forceKeyNext = false;
         }
@@ -1183,6 +1189,9 @@ int main(int argc, char** argv) {
       } else {
         const uint64_t capAgeAvgUs = (encodedFrames > 0) ? (captureAgeSumUs / encodedFrames) : 0;
         const uint64_t cb2eAvgUs = (encodedFrames > 0) ? (callbackToEncodeStartSumUs / encodedFrames) : 0;
+        const double rawEquivMbps = (rawEquivalentBytes * 8.0) / (1000.0 * 1000.0);
+        const uint64_t encRatioX100 =
+            (sentBytes > 0) ? ((rawEquivalentBytes * 100ULL) / sentBytes) : 0;
         std::cout << "[native-video-host] encodedFrames=" << encodedFrames
                   << " sentFrames=" << sentFrames
                   << " callbackFrames=" << callbackFrames.load()
@@ -1197,6 +1206,8 @@ int main(int argc, char** argv) {
                   << " cb2eAvgUs=" << cb2eAvgUs
                   << " cb2eMaxUs=" << callbackToEncodeStartMaxUs
                   << " mbps=" << mbps
+                  << " rawEquivMbps=" << rawEquivMbps
+                  << " encRatioX100=" << encRatioX100
                   << " bitrateTarget=" << activeBitrate
                   << " size=" << activeEncodeW << "x" << activeEncodeH
                   << " abrProfile=" << ((abrProfile == 0) ? "high" : ((abrProfile == 1) ? "mid" : "low"))
@@ -1379,6 +1390,7 @@ int main(int argc, char** argv) {
       sentFrames = 0;
       encodedFrames = 0;
       sentBytes = 0;
+      rawEquivalentBytes = 0;
       skippedByOverwrite = 0;
       stalePreEncodeDropCount = 0;
       staleEncodedDropCount = 0;
