@@ -256,27 +256,44 @@ void choose_abr_720_size(uint32_t captureW, uint32_t captureH, uint32_t* outW, u
   *outH = targetH;
 }
 
-bool resize_bgra_nearest(const uint8_t* src, uint32_t srcW, uint32_t srcH, uint32_t srcStride,
-                         uint32_t dstW, uint32_t dstH, std::vector<uint8_t>* outBgra) {
+bool resize_bgra_bilinear(const uint8_t* src, uint32_t srcW, uint32_t srcH, uint32_t srcStride,
+                          uint32_t dstW, uint32_t dstH, std::vector<uint8_t>* outBgra) {
   if (!src || srcW == 0 || srcH == 0 || srcStride < (srcW * 4) || dstW == 0 || dstH == 0 || !outBgra) {
     return false;
   }
   outBgra->resize(static_cast<size_t>(dstW) * static_cast<size_t>(dstH) * 4);
   auto* dst = outBgra->data();
-  const uint64_t xScale = (static_cast<uint64_t>(srcW) << 16) / dstW;
-  const uint64_t yScale = (static_cast<uint64_t>(srcH) << 16) / dstH;
+  const uint64_t xScale =
+      (dstW > 1) ? ((static_cast<uint64_t>(srcW - 1) << 16) / static_cast<uint64_t>(dstW - 1)) : 0;
+  const uint64_t yScale =
+      (dstH > 1) ? ((static_cast<uint64_t>(srcH - 1) << 16) / static_cast<uint64_t>(dstH - 1)) : 0;
   for (uint32_t y = 0; y < dstH; ++y) {
-    const uint32_t sy = std::min<uint32_t>(srcH - 1, static_cast<uint32_t>((y * yScale) >> 16));
-    const uint8_t* srcRow = src + static_cast<size_t>(sy) * srcStride;
+    const uint32_t srcYFixed = static_cast<uint32_t>(static_cast<uint64_t>(y) * yScale);
+    const uint32_t y0 = std::min<uint32_t>(srcH - 1, srcYFixed >> 16);
+    const uint32_t y1 = std::min<uint32_t>(srcH - 1, y0 + 1);
+    const uint32_t wy = (srcYFixed & 0xFFFFu) >> 8;
+    const uint32_t invWy = 256u - wy;
+    const uint8_t* srcRow0 = src + static_cast<size_t>(y0) * srcStride;
+    const uint8_t* srcRow1 = src + static_cast<size_t>(y1) * srcStride;
     uint8_t* dstRow = dst + static_cast<size_t>(y) * dstW * 4;
     for (uint32_t x = 0; x < dstW; ++x) {
-      const uint32_t sx = std::min<uint32_t>(srcW - 1, static_cast<uint32_t>((x * xScale) >> 16));
-      const uint8_t* px = srcRow + static_cast<size_t>(sx) * 4;
+      const uint32_t srcXFixed = static_cast<uint32_t>(static_cast<uint64_t>(x) * xScale);
+      const uint32_t x0 = std::min<uint32_t>(srcW - 1, srcXFixed >> 16);
+      const uint32_t x1 = std::min<uint32_t>(srcW - 1, x0 + 1);
+      const uint32_t wx = (srcXFixed & 0xFFFFu) >> 8;
+      const uint32_t invWx = 256u - wx;
+
+      const uint8_t* p00 = srcRow0 + static_cast<size_t>(x0) * 4;
+      const uint8_t* p10 = srcRow0 + static_cast<size_t>(x1) * 4;
+      const uint8_t* p01 = srcRow1 + static_cast<size_t>(x0) * 4;
+      const uint8_t* p11 = srcRow1 + static_cast<size_t>(x1) * 4;
       uint8_t* outPx = dstRow + static_cast<size_t>(x) * 4;
-      outPx[0] = px[0];
-      outPx[1] = px[1];
-      outPx[2] = px[2];
-      outPx[3] = px[3];
+      for (int c = 0; c < 4; ++c) {
+        const uint32_t top = p00[c] * invWx + p10[c] * wx;
+        const uint32_t bottom = p01[c] * invWx + p11[c] * wx;
+        const uint32_t blended = (top * invWy + bottom * wy + 32768u) >> 16;
+        outPx[c] = static_cast<uint8_t>(blended);
+      }
     }
   }
   return true;
@@ -994,7 +1011,7 @@ int main(int argc, char** argv) {
       uint32_t encodeSrcStride = stride;
       std::vector<uint8_t> scaledBgra;
       if (activeEncodeW != w || activeEncodeH != h) {
-        if (!resize_bgra_nearest(payload->data(), w, h, stride, activeEncodeW, activeEncodeH, &scaledBgra)) {
+        if (!resize_bgra_bilinear(payload->data(), w, h, stride, activeEncodeW, activeEncodeH, &scaledBgra)) {
           continue;
         }
         encodeSrc = scaledBgra.data();
