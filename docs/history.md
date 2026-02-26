@@ -908,3 +908,545 @@ powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.
 - 후속 검증 조건:
   - 동일 장면(`static/scroll/video`) 고정 + 동일 파라미터로 `nearest(기준선)` vs `bilinear(변경)` A/B 2회 이상 비교.
   - 비교 지표: `cb2eAvgUs`, `encodedFrames`, `LAT_P95_US`, `DEC_AVG`.
+
+### 28) 2026-02-24 오후 후속 3 (M1 2차: BGRA->NV12 CPU 루프 최적화)
+적용
+1. BGRA->NV12 변환 루프 최적화
+- 파일: `apps/native_poc/src/mf_h264_codec.cpp`
+- 변경:
+  - 기존 `2-pass`(Y 전체 1회 + UV 전체 1회) 구조를 `2x2 one-pass` 구조로 전환.
+  - 2x2 블록에서 Y(4픽셀) + UV(1쌍) 동시 계산으로 입력 픽셀 재읽기 감소.
+  - Y 계산에 상수 계수 LUT(`BgraToNv12Tables`)를 도입해 곱셈 오버헤드 완화.
+
+2. 빌드 검증
+- 명령:
+```powershell
+cmake --build build-native2 --config Debug --target remote60_native_video_host_poc
+```
+- 결과: 성공.
+
+3. 런타임 측정 (동일 조건 A/B)
+- 공통 실행 조건:
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -Root . -Codec h264 -Transport udp -Bitrate 2500000 -Keyint 15 -Fps 30 -FpsHint 30 -EncodeWidth 1280 -EncodeHeight 720 -HostSeconds 6 -ClientSeconds 4 -NoInputChannel
+```
+- 비교 로그:
+  - 변경 전(Baseline): `automation/logs/verify-native-video-20260224-144228`
+  - 변경 후: `automation/logs/verify-native-video-20260224-155304`
+
+A/B 핵심 수치
+- host `cb2eAvgUs`(1초 통계 4개 평균):
+  - 전: `(53435 + 51404 + 51473 + 47380) / 4 = 50923`
+  - 후: `(51001 + 46393 + 48064 + 44854) / 4 = 47578`
+  - 변화: `-6.6%` (개선)
+- `encodedFrames`(1초 통계 평균):
+  - 전: `(7 + 27 + 27 + 27) / 4 = 22.0`
+  - 후: `(9 + 30 + 29 + 28) / 4 = 24.0`
+  - 변화: `+9.1%` (개선)
+- verify 요약:
+  - `LAT_P95_US`: `47058 -> 49940` (소폭 악화)
+  - `DEC_AVG`: `18.00 -> 20.33` (개선)
+  - `OVERALL_OK`: 둘 다 `True`
+
+유의미성 분석 (M1 2차)
+- 판정: `미미(부분개선)`
+- 근거:
+  - 병목 지표인 `cb2eAvgUs`는 개선됐지만(`-6.6%`), M1 완료조건인 `20% 이상 감소`에는 미달.
+  - `encodedFrames`는 증가했으나, `LAT_P95_US`가 같은 조건에서 소폭 악화되어 체감 개선을 단정하기 어려움.
+- 결정: `코드 유지` (회귀 없음 + 일부 지표 개선), 다음 단계에서 추가 최적화 필요.
+
+다음 액션
+- M1 잔여 항목인 `스케일링 GPU 이전(D3D11)` 우선 진행.
+- 동일 장면 고정 3-scene 반복 측정으로 M1 완료조건(`cb2eAvgUs -20%`) 재검증.
+
+### 29) 2026-02-25 후속 1 (M1 보류 결정 + M2 계측 선행)
+결정
+- M1은 현재 시점에서 `완료`로 닫지 않고 `보류(Open)`로 유지한다.
+- 보류 사유:
+  - 완료조건은 `cb2eAvgUs 20% 이상 감소`인데, 최신 A/B 실측은 `-6.6%` 개선에 그침.
+  - 일부 지표(`encodedFrames`) 개선은 있으나, 동일 조건에서 `LAT_P95_US` 소폭 악화 구간이 있어 단독 효과를 확정하기 어려움.
+
+작업 순서 재정렬
+1. `M2 1차`를 선행:
+- client upload/present 구간의 세부 단계 계측 강화
+- D3D 실패 시 GDI fallback 비율/원인 로그화
+- decode 스레드와 present 스레드 사이 handoff 병목 필드 추가
+2. 위 계측 결과를 근거로 M1(특히 GPU 스케일링 이전) A/B 재검증 후 유지/롤백 재판정.
+
+### 30) 2026-02-25 후속 2 (M2 1차 계측 강화 반영)
+적용
+1. client present 세부 단계 trace 확장
+- 파일: `apps/native_poc/src/native_video_client_main.cpp`
+- `trace_present`에 아래 필드 추가:
+  - `decodeToQueueUs`, `queueWaitUs`, `paintUs`
+  - `uploadYUs`, `uploadUVUs`, `drawUs`, `presentBlockUs`
+  - `renderPath`, `fallbackReason`
+
+2. D3D 실패/GDI fallback 원인 계측
+- 파일: `apps/native_poc/src/native_video_client_main.cpp`
+- D3D 경로 실패/성공, GDI fallback 사용량, 실패 원인 카운터를 1초 통계 로그에 추가:
+  - `d3dPresentSuccess`, `d3dPresentFail`, `gdiFallbackPresented`, `gdiFallbackRateX1000`
+  - `fallbackInitFail`, `fallbackRenderFail`, `fallbackNv12ConvertFail`
+
+3. decode 스레드 <-> present 스레드 handoff 계측
+- 파일: `apps/native_poc/src/native_video_client_main.cpp`
+- 공유 프레임 구조에 `queueSetUs`, `decodeToQueueUs` 추가.
+- present 전에 덮어쓴 프레임과 paint coalescing 카운터 추가:
+  - `overwriteBeforePresent`, `paintCoalesced`
+
+4. verify 집계 확장
+- 파일: `automation/verify_native_video_runtime.ps1`
+- 신규 출력 항목 추가:
+  - `D3D_PRESENT_*`, `GDI_FALLBACK_*`, `FALLBACK_*`, `PAINT_COALESCED_TOTAL`, `OVERWRITE_BEFORE_PRESENT_TOTAL`
+  - stage 집계 확장(`DECODETOQUEUEUS`, `QUEUEWAITUS`, `PAINTUS`, `UPLOADYUS`, `UPLOADUVUS`, `DRAWUS`, `PRESENTBLOCKUS`)
+
+검증
+1. 빌드
+- 명령:
+```powershell
+cmake --build build-native2 --config Debug --target remote60_native_video_client_poc
+```
+- 결과: 성공
+
+2. 런타임 확인
+- 명령:
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -Root . -Codec h264 -Transport udp -Bitrate 2500000 -Keyint 15 -Fps 30 -FpsHint 30 -EncodeWidth 1280 -EncodeHeight 720 -HostSeconds 6 -ClientSeconds 4 -NoInputChannel -TraceEvery 15 -TraceMax 40
+```
+- 로그: `automation/logs/verify-native-video-20260225-155459`
+- 주요 확인값:
+  - `D3D_PRESENT_SUCCESS_TOTAL=44`
+  - `GDI_FALLBACK_PRESENTED_TOTAL=0`
+  - `PAINT_COALESCED_TOTAL=3`
+  - `OVERWRITE_BEFORE_PRESENT_TOTAL=3`
+  - `STAGE_QUEUEWAITUS_AVG_US=3586`
+  - `STAGE_PRESENTBLOCKUS_AVG_US=1160.5`
+
+판정
+- `M2 1차(계측 강화)` 반영 완료.
+- `M1`은 여전히 보류(Open)이며, 이번 계측 데이터를 기준으로 M1 잔여 작업(GPU 스케일링 이전) 재검증을 진행한다.
+
+### 31) 2026-02-25 후속 3 (M1 재검증: scaled vs noscale A/B + 3장면 비교)
+실행
+1. 단일 조건 A/B (각 2회)
+- 조건:
+  - codec=`h264`, transport=`udp`, bitrate=`2.5Mbps`, fps=`30`
+  - host/client=`8s/6s`, no-input-channel
+  - 비교군:
+    - `scaled`: `--encode-width 1280 --encode-height 720`
+    - `noscale`: encode 크기 미지정(캡처 해상도 유지)
+
+2. 3장면 scene-suite 비교
+- `scaled` suite:
+  - `automation/logs/verify-native-video-scenes-20260225-160359`
+- `noscale` suite:
+  - `automation/logs/verify-native-video-scenes-20260225-160547`
+
+A/B 결과 (2회 평균)
+- `scaled`:
+  - `CB2E_AVG_US_AVG=52359.58`
+  - `ENCODED_FRAMES_AVG_AVG=20.67`
+  - `LAT_P95_US_AVG=42408.5`
+- `noscale`:
+  - `CB2E_AVG_US_AVG=38956.16`
+  - `ENCODED_FRAMES_AVG_AVG=27.33`
+  - `LAT_P95_US_AVG=32101.5`
+- 비교:
+  - `cb2eAvgUs`: `-25.6%` (noscale 개선)
+  - `encodedFrames`: `+32.2%` (noscale 개선)
+
+3장면 비교(요약)
+- STATIC:
+  - scaled `CB2E=50145.67`, `ENC_FR=22.33`
+  - noscale `CB2E=34359`, `ENC_FR=27.33`
+- SCROLL:
+  - scaled `CB2E=49917`, `ENC_FR=21.83`
+  - noscale `CB2E=35130.83`, `ENC_FR=27.33`
+- VIDEO:
+  - scaled `CB2E=49059.83`, `ENC_FR=21.83`
+  - noscale `CB2E=38981.5`, `ENC_FR=27.33`
+
+판정
+- `M1`은 여전히 `보류(Open)` 유지.
+- 다만 재검증 근거상 스케일링 경로가 host 병목에 크게 기여하므로, 다음 구현 우선순위는 `M1 잔여: GPU 스케일링 이전(D3D11)`로 확정.
+
+### 32) 2026-02-25 후속 4 (M1 잔여 구현: Host D3D11 GPU 스케일링 + A/B)
+적용
+1. Host GPU 스케일러 구현
+- 파일: `apps/native_poc/src/native_video_host_main.cpp`
+- `GpuBgraScaler` 신규 추가:
+  - D3D11 VideoProcessor 기반 BGRA 리사이즈(`in -> out`) 구현
+  - 실패 시 즉시 CPU bilinear 폴백
+- 활성 조건:
+  - 기본 활성(`h264` + 스케일 필요 시)
+  - `REMOTE60_NATIVE_DISABLE_GPU_SCALER=1`로 강제 비활성 가능
+
+2. 스레드 안정성 보강
+- capture callback과 encode 루프가 동일 D3D immediate context를 공유하므로
+  - `d3dContextMu` 뮤텍스로 `CopyResource/Map/Unmap` 및 GPU 스케일링 경로 직렬화.
+
+3. Host 통계 확장
+- 1초 통계 로그에 아래 항목 추가:
+  - `gpuScaleReq`, `gpuScaleReady`
+  - `gpuScaleAttempts`, `gpuScaleSuccess`, `gpuScaleFail`, `gpuScaleCpuFallback`
+
+4. verify 집계 확장
+- 파일: `automation/verify_native_video_runtime.ps1`
+- host GPU 스케일링 집계 출력 추가:
+  - `GPU_SCALE_ATTEMPTS_*`, `GPU_SCALE_SUCCESS_*`, `GPU_SCALE_FAIL_*`, `GPU_SCALE_CPU_FALLBACK_*`
+
+검증
+1. 빌드
+- 명령:
+```powershell
+cmake --build build-native2 --config Debug --target remote60_native_video_host_poc
+```
+- 결과: 성공
+
+2. 단일 스모크(ON)
+- 로그: `automation/logs/verify-native-video-20260225-163342`
+- host 확인:
+  - `gpuScalerRequested=1 gpuScalerReady=1`
+  - 초당 `gpuScaleAttempts ~= gpuScaleSuccess`, `gpuScaleFail=0`, `gpuScaleCpuFallback=0`
+
+3. A/B (scaled 1280x720, 각 2회)
+- `gpu_on`:
+  - 로그: `...163420`, `...163429`
+  - 평균: `CB2E_AVG_US=29588.96`, `ENC_FR_AVG=27.06`, `LAT_P95_US=42761.5`
+- `gpu_off` (`REMOTE60_NATIVE_DISABLE_GPU_SCALER=1`):
+  - 로그: `...163438`, `...163447`
+  - 평균: `CB2E_AVG_US=54741.25`, `ENC_FR_AVG=20.08`, `LAT_P95_US=55788.5`
+- 비교:
+  - `cb2eAvgUs`: `-45.95%` (gpu_on 개선)
+  - `encodedFrames`: `+34.8%` (gpu_on 개선)
+  - `LAT_P95_US`: 개선
+
+4. 3장면 A/B (scaled 1280x720)
+- `gpu_on` suite: `automation/logs/verify-native-video-scenes-20260225-163508`
+- `gpu_off` suite: `automation/logs/verify-native-video-scenes-20260225-163546`
+- scene 요약:
+  - STATIC: `CB2E 30081.67(on) vs 53619.67(off)`, `DEC_AVG 25.5 vs 18.8`
+  - SCROLL: `CB2E 33787.17(on) vs 51277.5(off)`, `DEC_AVG 25.4 vs 19.4`
+  - VIDEO: `CB2E 29552.5(on) vs 51407(off)`, `DEC_AVG 25.4 vs 19.2`
+
+판정
+- `M1` 잔여 항목(Host GPU 스케일링 이전) 구현 완료 + 유의미 개선 확인.
+- 단, 현재 테스트 환경 캡처 해상도(약 `1762x986`) 한계로 `1080p30` Gate를 동일 환경에서 직접 검증하지 못해 M1 전체 Gate는 `Open` 유지.
+
+### 33) 2026-02-25 재시도 (원격 환경)
+목표
+- `원격 접속` 상태에서 동일한 FHD 조건으로 GPU ON/OFF 재비교 검증.
+
+실행
+- ON
+  - 명령:
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -Codec h264 -EncodeWidth 1920 -EncodeHeight 1080 -HostSeconds 12 -ClientSeconds 8 -Fps 30 -Bitrate 4000000 -Keyint 30 -NoInputChannel
+```
+  - 로그: `automation/logs/verify-native-video-20260225-172913`
+- OFF (`REMOTE60_NATIVE_DISABLE_GPU_SCALER=1`)
+  - 명령:
+```powershell
+$env:REMOTE60_NATIVE_DISABLE_GPU_SCALER=1
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -Codec h264 -EncodeWidth 1920 -EncodeHeight 1080 -HostSeconds 12 -ClientSeconds 8 -Fps 30 -Bitrate 4000000 -Keyint 30 -NoInputChannel
+Remove-Item Env:REMOTE60_NATIVE_DISABLE_GPU_SCALER
+```
+  - 로그: `automation/logs/verify-native-video-20260225-173014`
+
+결과
+- `capture item create failed`로 호스트 캡처 초기화가 실패하여 통계 카운트가 모두 `0` 처리.
+- 클라이언트는 8개 제어 응답만 기록하고 조기 종료.
+- `OVERALL_OK=False`, 병목/latency 비교 지표를 산출하지 못함.
+
+원인(추정)
+- 현재 세션에서 기본 모니터 캡처 객체 생성이 불가하여 `GraphicsCaptureItem` 생성 단계에서 실패한 것으로 판단.
+- 재시험 필요: 원격 세션 해제(또는 실제 콘솔 화면 있는 환경)에서 동일 조건 ON/OFF 재실행 필요.
+
+### 34) 2026-02-25 재실행 완료 (원격 해제 기대)
+목표
+- 동일 FHD 조건에서 `gpu_on` / `gpu_off` 결과 재확인(원격 세션 영향 해제 가정).
+
+실행
+- ON
+  - 명령:
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -Codec h264 -EncodeWidth 1920 -EncodeHeight 1080 -HostSeconds 12 -ClientSeconds 8 -Fps 30 -Bitrate 4000000 -Keyint 30 -NoInputChannel
+```
+  - 로그: `automation/logs/verify-native-video-20260225-183850`
+- OFF (`REMOTE60_NATIVE_DISABLE_GPU_SCALER=1`)
+  - 명령:
+```powershell
+$env:REMOTE60_NATIVE_DISABLE_GPU_SCALER=1
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -Codec h264 -EncodeWidth 1920 -EncodeHeight 1080 -HostSeconds 12 -ClientSeconds 8 -Fps 30 -Bitrate 4000000 -Keyint 30 -NoInputChannel
+Remove-Item Env:REMOTE60_NATIVE_DISABLE_GPU_SCALER
+```
+  - 로그: `automation/logs/verify-native-video-20260225-183911`
+
+결과
+- ON:
+  - `LAT_AVG_US=22249`, `LAT_P95_US=45553`, `DEC_AVG=15.14`, `DEC_P95=21`
+  - `D3D_PRESENT_SUCCESS_TOTAL=102`, `GDI_FALLBACK_PRESENTED_TOTAL=0`, `D3D_PRESENT_FAIL_TOTAL=0`
+  - `OVERALL_OK=True`
+- OFF:
+  - `LAT_AVG_US=59389`, `LAT_P95_US=87552`, `DEC_AVG=14.86`, `DEC_P95=20`
+  - `D3D_PRESENT_SUCCESS_TOTAL=100`, `GDI_FALLBACK_PRESENTED_TOTAL=0`, `D3D_PRESENT_FAIL_TOTAL=0`
+  - `OVERALL_OK=True`
+
+판정
+- 이번 조건에서 FHD 캡처는 정상 동작했고 ON/OFF 모두 수집됨.
+- ON이 OFF 대비 P95 지연에서 개선(`87552 -> 45553`)이 있었지만, 스케일러 관련 지표(`gpuScale*`)는 인코딩 크기와 캡처 크기가 동일(`1920x1080`)해 모두 `0`으로, GPU 스케일러 유무 비교가 아닌 일반 FHD 스트림 비교임.
+
+### 35) 2026-02-25 1280x720 스케일 A/B(2회씩)
+목표
+- `scaled(1280x720)`에서 GPU 스케일링 ON/OFF를 분리 확인.
+
+실행
+- ON (2회)
+  - 명령:
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -Codec h264 -EncodeWidth 1280 -EncodeHeight 720 -HostSeconds 12 -ClientSeconds 8 -Fps 30 -Bitrate 2500000 -Keyint 30 -NoInputChannel
+```
+  - 로그: `automation/logs/verify-native-video-20260225-215016`, `automation/logs/verify-native-video-20260225-215040`
+- OFF (`REMOTE60_NATIVE_DISABLE_GPU_SCALER=1`, 2회)
+  - 명령:
+```powershell
+$env:REMOTE60_NATIVE_DISABLE_GPU_SCALER=1
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -Codec h264 -EncodeWidth 1280 -EncodeHeight 720 -HostSeconds 12 -ClientSeconds 8 -Fps 30 -Bitrate 2500000 -Keyint 30 -NoInputChannel
+Remove-Item Env:REMOTE60_NATIVE_DISABLE_GPU_SCALER
+```
+  - 로그: `automation/logs/verify-native-video-20260225-215055`, `automation/logs/verify-native-video-20260225-215110`
+
+집계(2회 평균)
+- ON:
+  - `LAT_AVG_US=81548.77`, `LAT_P95_US=78636`
+  - `DEC_AVG=26.46`, `DEC_P95=30`
+  - `ENC_RATIO_X100_AVG=26129.44`
+  - host `cb2eAvgUs` 요약 평균: `34835.25`
+  - `GPU_SCALE_SUCCESS` 계측 active, `GPU_SCALE_CPU_FALLBACK=0`
+- OFF:
+  - `LAT_AVG_US=62682.93`, `LAT_P95_US=74420`
+  - `DEC_AVG=19.36`, `DEC_P95=23`
+  - `ENC_RATIO_X100_AVG=22597.44`
+  - host `cb2eAvgUs` 요약 평균: `54651.13`
+  - `gpuScaleReq=0`, `gpuScaleCpuFallback` 지속(22/23)로 CPU 경로 사용
+
+판정
+- `scaled` 경로에서 ON은 client decode/인코딩 대비 지표가 안정적으로 좋음 (`DEC_AVG 26.46 vs 19.36`, `cb2e 34.8ms vs 54.7ms`).
+- 다만 `LAT_AVG_US/LAT_P95_US`는 OFF 1회 런에서 큰 편차가 있어 3회 이상 반복으로 최종 판정 권고.
+
+### 36) 2026-02-25 1280x720 스케일 A/B(ON/OFF 3회 재확인)
+목표
+- `REMOTE60_NATIVE_DISABLE_GPU_SCALER` 상태가 달라졌을 때의 변동성을 줄이기 위해 3회씩 재비교.
+
+실행
+- ON (3회)
+  - 로그: `automation/logs/verify-native-video-20260225-215801`, `automation/logs/verify-native-video-20260225-215812`, `automation/logs/verify-native-video-20260225-215822`
+- OFF (`REMOTE60_NATIVE_DISABLE_GPU_SCALER=1`, 3회)
+  - 로그: `automation/logs/verify-native-video-20260225-215838`, `automation/logs/verify-native-video-20260225-215849`, `automation/logs/verify-native-video-20260225-215900`
+
+집계(요약)
+- ON:
+  - `LAT_AVG_US=80078.09`, `LAT_P95_US=150581`, `DEC_AVG=22.68`, `DEC_P95=30`
+  - `ENC_RATIO_X100_AVG=18171.36`
+  - host `CB2E_AVG_US_AVG=42355.65` (`count=23`), `CB2E_AVG_P95=46227`
+  - `GPU_SCALE_ATTEMPTS_AVG=25.91`, `GPU_SCALE_FAIL_AVG=0`, `GPU_SCALE_CPU_FALLBACK_AVG=0`
+- OFF:
+  - `LAT_AVG_US=44809.43`, `LAT_P95_US=118820`, `DEC_AVG=12.24`, `DEC_P95=23`
+  - `ENC_RATIO_X100_AVG=14991.29`
+  - host `CB2E_AVG_US_AVG=54267.25` (`count=24`), `CB2E_AVG_P95=60306`
+  - `GPU_SCALE_ATTEMPTS_AVG=0`, `GPU_SCALE_CPU_FALLBACK_AVG=16.2`
+  - OFF 2회차에서 `KEYREQ_CLIENT_SENT=84`, `KEYREQ_HOST_RECV=84`, `KEYREQ_HOST_CONSUMED=84` 발생(키프레임 요청 폭증 구간 관측)
+
+판정
+- `cb2eAvgUs`/`encoded throughput`는 ON이 OFF 대비 개선(약 `-22%` 수준)을 유지.
+- `DEC_AVG` 역시 ON이 OFF 대비 높음(더 많은 frame decode/표시로 해석 가능).
+- `LAT`은 ON에서 일부 긴 지연이 누적되어 분산 큼(ON P95/Max 커짐), OFF는 평균은 낮으나 2회차 OFF keyreq 폭주와 함께 저하 구간이 섞임.
+- OFF 3회차에서 `키프레임 요청`이 폭증한 RUN이 있어 ON/OFF 성능 비교 시 해당 조건은 변수를 따로 분리해 추가 실험 필요.
+
+추가 액션
+- M1 보류(Open) 상태 유지: `cb2eAvgUs` 20% Gate와 안정적 `LAT_P95` 하한은 추가 재현 조건 정리 후 판정.
+- 다음으로 `M2 2차(클라 NV12 업로드 경로 최적화)`를 적용하고 재측정.
+
+### 37) 2026-02-25 M2 2차 (클라 NV12 업로드 최적화) 재측정
+목표
+- `native_video_client_main`의 NV12 업로드에서 `RowPitch==width` 구간 단일 `memcpy` 경로가 동작하는지 확인하고, 업로드 단계 계측 수치 반영.
+
+실행
+- ON
+  - 명령:
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -Root . -Codec h264 -Transport udp -Bitrate 2500000 -Keyint 30 -Fps 30 -FpsHint 30 -EncodeWidth 1280 -EncodeHeight 720 -HostSeconds 12 -ClientSeconds 8 -NoInputChannel -TraceEvery 15 -TraceMax 40
+```
+  - 로그: `automation/logs/verify-native-video-20260225-222406`, `automation/logs/verify-native-video-20260225-222437`
+- OFF (`REMOTE60_NATIVE_DISABLE_GPU_SCALER=1`)
+  - 명령:
+```powershell
+$env:REMOTE60_NATIVE_DISABLE_GPU_SCALER='1'
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -Root . -Codec h264 -Transport udp -Bitrate 2500000 -Keyint 30 -Fps 30 -FpsHint 30 -EncodeWidth 1280 -EncodeHeight 720 -HostSeconds 12 -ClientSeconds 8 -NoInputChannel -TraceEvery 15 -TraceMax 40
+Remove-Item Env:REMOTE60_NATIVE_DISABLE_GPU_SCALER
+```
+  - 로그: `automation/logs/verify-native-video-20260225-222421`, `automation/logs/verify-native-video-20260225-222452`
+
+집계(2회 평균)
+- ON:
+  - `LAT_AVG_US=75,204.57`, `LAT_P95_US=104,843.0`
+  - `DEC_AVG=26.21`
+  - Host `cb2eAvgUs` 추정평균: `35,658.84us` (`count=7`, `count=8` 구간 from per-second summaries)
+  - Host `sentFrames` 추정평균: `27.59`
+  - `UPLOADY_AVG`=248.79us, `UPLOADUV_AVG`=104.21us
+  - `D3D_PRESENT_SUCCESS_TOTAL` 합계=`358`, `D3D_PRESENT_FAIL_TOTAL`=`0`, `GDI_FALLBACK_PRESENTED_TOTAL`=`0`
+  - `PAINT_COALESCED_TOTAL` 합계=`10`
+- OFF:
+  - `LAT_AVG_US=27,067.36`, `LAT_P95_US=30,236.5`
+  - `DEC_AVG=19.29`
+  - Host `cb2eAvgUs` 추정평균: `54,686.99us` (`count=8`, `count=8`)
+  - Host `sentFrames` 추정평균: `20.06`
+  - `UPLOADY_AVG`=209.05us, `UPLOADUV_AVG`=85.89us
+  - `D3D_PRESENT_SUCCESS_TOTAL` 합계=`264`, `D3D_PRESENT_FAIL_TOTAL`=`0`, `GDI_FALLBACK_PRESENTED_TOTAL`=`0`
+  - `PAINT_COALESCED_TOTAL` 합계=`6`
+
+판정
+- `UPLOADY/UV` 계측치가 ON/OFF 모두 수치권 안에서 집계되었고, `gdi fallback`은 없었으며 `D3D 경로`는 정상 유지됨.
+- 다만 `LAT`/`DEC` 편차가 크고, OFF 1회(첫 번째)에서 측정 이상치가 있어 `M2 2차`의 latency 개선 판정은 `보류`.
+- 다음 액션: 동일 조건 3회 이상 반복해 `lat` 편차를 수렴시키고 `M2 완료조건`(1080p30)을 위한 재평가로 이관.
+
+### 38) 2026-02-25 M2 2차 추가 3회 반복 재확인(1280x720)
+목표
+- 이전 outlier를 줄이기 위해 ON/OFF 3회씩 고정 반복.
+
+실행
+- ON (3회)
+  - 로그: `automation/logs/verify-native-video-20260225-223204`, `automation/logs/verify-native-video-20260225-223215`, `automation/logs/verify-native-video-20260225-223227`
+- OFF (`REMOTE60_NATIVE_DISABLE_GPU_SCALER=1`, 3회)
+  - 로그: `automation/logs/verify-native-video-20260225-223239`, `automation/logs/verify-native-video-20260225-223250`, `automation/logs/verify-native-video-20260225-223301`
+
+집계(요약)
+- ON:
+  - `LAT_AVG_US=82,170.33`, `LAT_P95_US=127,589.33`, `LAT_MAX_US=191,792`
+  - `DEC_AVG=23.76`, `DEC_P95=29.33`
+  - Host: `CB2E_AVG_US_AVG=40,786` (run별 43,430.14 / 42,572.00 / 36,355.00)
+  - Host `sentFrames` 추정평균: `25.10` (run별 23.43 / 24.00 / 27.88)
+  - `GPU_SCALE_ATTEMPTS_AVG=27.33`, `GPU_SCALE_CPU_FALLBACK_AVG=0`
+  - `UPLOADY_AVG=221.15`, `UPLOADUV_AVG=89.33`
+  - `D3D_PRESENT_SUCCESS_TOTAL=~161.3`, `GDI_FALLBACK_PRESENTED_TOTAL=0`
+- OFF:
+  - `LAT_AVG_US=32,340`, `LAT_P95_US=41,380.33`, `LAT_MAX_US=50,246.33`
+  - `DEC_AVG=19.05`, `DEC_P95=22.67`
+  - Host: `CB2E_AVG_US_AVG=53,926`
+  - Host `sentFrames` 추정평균: `20.08`
+  - `GPU_SCALE_ATTEMPTS_AVG=0`, `GPU_SCALE_CPU_FALLBACK_AVG=22.21`
+  - `UPLOADY_AVG=184.48`, `UPLOADUV_AVG=78.80`
+  - `D3D_PRESENT_SUCCESS_TOTAL=~131.3`, `GDI_FALLBACK_PRESENTED_TOTAL=0`
+
+판정
+- `M2 2차`에서 `GPU_SCALE`과 함께 `CB2E`/`sentFrames`는 ON이 유의미하게 우수(`-24%` 수준)하고, `D3D` 경로도 안정적.
+- 다만 지연은 ON에서 `정규분포가 아닌 장기 tail`이 커져 `LAT_P95`/`LAT_MAX`가 크게 분산(3회 중 1회는 약 112ms/269ms).
+- 이 단계는 `업로드 최적화 동작 확인`은 완료, 그러나 `latency 개선` 판정은 `보류` 유지.
+
+### 39) 2026-02-25 M3 스모크: ABR 품질 유지형 토글 반영
+목표
+- M3에서 추가한 `REMOTE60_NATIVE_ADAPTIVE_QUALITY_FIRST` 토글이 host 로그/ABR 임계치에 반영되는지 확인.
+
+실행
+- 품질우선(quality-first=on)
+  - 명령:
+```powershell
+$env:REMOTE60_NATIVE_ADAPTIVE_QUALITY_FIRST='1'
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -Root . -Codec h264 -Transport udp -Bitrate 2500000 -Keyint 30 -Fps 30 -FpsHint 30 -EncodeWidth 1280 -EncodeHeight 720 -HostSeconds 12 -ClientSeconds 8 -NoInputChannel -TraceEvery 15 -TraceMax 40
+Remove-Item Env:REMOTE60_NATIVE_ADAPTIVE_QUALITY_FIRST
+```
+  - 로그: `automation/logs/verify-native-video-20260225-224122`
+- 기본값 기준(quality-first=off)
+  - 명령:
+```powershell
+$env:REMOTE60_NATIVE_ADAPTIVE_QUALITY_FIRST='0'
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -Root . -Codec h264 -Transport udp -Bitrate 2500000 -Keyint 30 -Fps 30 -FpsHint 30 -EncodeWidth 1280 -EncodeHeight 720 -HostSeconds 12 -ClientSeconds 8 -NoInputChannel -TraceEvery 15 -TraceMax 40
+Remove-Item Env:REMOTE60_NATIVE_ADAPTIVE_QUALITY_FIRST
+```
+  - 로그: `automation/logs/verify-native-video-20260225-224141`
+
+관찰
+- host 로그에서 `abrMode=quality-first` / `abrMode=default` 정상 출력 확인.
+- 품질우선/기본 모드 모두에서 `ABR_SWITCH_COUNT=0`으로 스위치 없음(안정 구간 스모크).
+- 동일 조건에서 `quality-first` + `Fps=60`, `Bitrate=700000`, `HostSeconds=20`으로 부하를 높여도 스위치 없음.
+- 품질우선 토글 적용은 완료되었으나, 부하변동 조건에서의 전환 검증은 추가 실험 필요.
+
+판정
+- M3 구현은 코드/로그 검증 단계 완료.
+- 종료 판정은 스위치 억제/재현성 비교 실험 누적 후 확정(`M3 종료` 보류).
+
+### 40) 2026-02-25 M3 전환 재현(부하 불일치 조건 재시도)
+목표
+- `quality-first` ON/OFF에서 ABR 스위치 억제/발생 경향을 상대 비교.
+- `client decode 성능 저하`를 유발할 수 있는 조건으로 재현성 확보.
+
+실행
+- `host fps=120`, `keyint=240`, `bitrate=2500000`, `encode=1280x720`, `transport=udp`, `host/client=20/16`, `NoInput`, `trace every 15` 조건 기준으로 최신 로그 집계.
+- quality-first=off (11회)
+  - 로그: `225738`, `225830`, `225918`, `225937`, `230038`, `230634`, `230653`, `230713`, `230732`, `230751`, `230811`
+- quality-first=on (11회)
+  - 로그: `225757`, `225850`, `225956`, `230016`, `230058`, `230830`, `230850`, `230909`, `230928`, `230948`, `231007`
+
+관찰
+- off 모드:
+  - 동일 조건에서 `ABR_SWITCH_COUNT=1` 이력은 `225830` 1회만 확인됨 (`ABR_TO_MID=1`, `reason=high_to_mid_moderate`).
+  - 해당 스위치 상세: `profile=mid bitrate=2000000 clientDecodedFps=37 clientAvgLatUs=76501`.
+  - 나머지 off RUN은 스위치 미발생.
+- on 모드:
+  - 11회 모두 `ABR_SWITCH_COUNT=0`, 동일 클래스에서 스위치 미발생.
+  - `LAT_AVG_US`는 오프 대비 일부 구간에서 다소 낮은 편향이 보였으나 run별 편차 큼.
+
+판정
+- `quality-first=on`은 동일/유사 조건에서 스위치 억제 경향이 유지됨(현재 샘플 기준).
+- 오프 모드의 `high_to_mid`는 현재까지 `1/11` 케이스만 간헐적으로 발생해 재현성 보강 전까지 `M3 종료`는 보류.
+
+### 41) 2026-02-26 h264 지연 병목 분해 재측정 (최종 사용자 확인 반영)
+목표
+- `~0.5~1초` 체감 지연이 발생한 원인 구간을 정확히 분해.
+- `capture`, `capture->callback 선택 대기`, `encoder queue`, `encode` 병목을 user-feedback 로그로 분리 수치화.
+
+변경 반영
+- `apps/native_poc/src/native_video_host_main.cpp`
+  - `user-feedback` / `trace`에 아래 항목 추가:
+    - `captureToCallbackUs`, `selectWaitUs`, `queueGapFrames`
+    - `encQueueUs`, `captureToAuUs`, `auCaptureUs`, `cb2eUs`
+  - `host` 병목 기준을 `pipeUs`뿐 아니라 보조 지연 항목으로 추적 가능한 형태로 보강.
+- `automation/verify_native_video_runtime.ps1`
+  - host `user-feedback` 파서에 신규 필드 추가 및 집계/상위 병목 산정 반영.
+  - `USER_FEEDBACK_HOST_TOP*`, `USER_FEEDBACK_UF_H_*` 결과에 `captureToCallback/selectWait/encQueue` 반영.
+- `build-native2` 정리 후 host/client 재빌드 후 측정 진행.
+
+실행
+- 기본: `h264`, `udp`, `-TraceEvery 1`, `-TraceMax 1200`, `HostSeconds 12`, `ClientSeconds 10`, `Bitrate 1100000`, `Keyint 15`
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -Codec h264 -TraceEvery 1 -TraceMax 1200 -HostSeconds 12 -ClientSeconds 10 -Bitrate 1100000 -Keyint 15
+```
+- 로그: `automation/logs/verify-native-video-20260226-142520`
+
+추가 확인(Trace 미사용 스모크)
+- 동일 조건에서 `-TraceEvery` 미사용 재측정 수행.
+- 로그: `automation/logs/verify-native-video-20260226-142543`
+
+결과 요약
+- `USER_FEEDBACK_UF_H_PIPEUS_AVG_US=608,840` (`P95=672,989`, `Max=703,217`)
+- `USER_FEEDBACK_UF_H_C2EUS_AVG_US=607,944` (`P95=671,821`, `Max=702,523`)
+- `USER_FEEDBACK_UF_H_ENCQUEUEUS_AVG_US=607,944` (`P95=671,821`)
+- `USER_FEEDBACK_UF_H_SELECTWAITUS_AVG_US=11,738` (`P95=19,225`)
+- `USER_FEEDBACK_UF_H_CAPTURETOCALLBACKUS_AVG_US=0`
+- `USER_FEEDBACK_UF_H_QUEUEGAPFRAMES_AVG_US=0.1` (`Max=1`)
+- `USER_FEEDBACK_HOST_BOTTLENECK_STAGE=c2eUs`
+- `USER_FEEDBACK_HOST_TOP0_SEQ=181`, `USER_FEEDBACK_HOST_TOP0_PIPE_US=703,217`
+- `presentGap` 0.5~0.7초대 유사 지연보다 작은 구간: `PRESENT_GAP_AVG_US=34,733`, `P95=45,860`, `Max=107,163`
+
+판정
+- `capture->callback`와 `capture 큐 갭`은 사실상 0~미미.
+- 지연의 실질적 병목은 host에서 `capture 이후 encode 큐 적재/처리` 계열 (`c2eUs`, `encQueueUs`)로 집중됨.
+- `-TraceEvery` 유무와 무관하게 값이 유사해, 측정 로그 자체가 병목을 유의미하게 유발했다고 보기 어려움.
+- 사용자 체감 1초 지연은 네트워크 RTT가 아닌, host 인코더 경로의 큐 적체/처리 지연 누적에 기인할 가능성이 높음.
+
+다음 액션 (권장)
+- `encodePath` 병목 축소 실험(우선순위):
+  1) 소프트웨어 인코더 강제/비교
+  2) 인코더 큐 정책/파이프라인 단계 제어 실험
+  3) 해상도/프레임 설정 조합(720p/60, 720p/30, 1080p/30)에서 `C2E/encQueue` 동시 비교
+  4) 동일 시나리오 3회 이상 반복해 `USER_FEEDBACK_UF_H_PIPEUS_P95`를 200ms 이하로 낮추는지 검증

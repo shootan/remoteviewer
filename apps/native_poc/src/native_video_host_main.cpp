@@ -75,15 +75,122 @@ constexpr uint64_t kMaxEncodedFrameAgeUs = 250000;  // 250ms
 constexpr uint32_t kMaxConsecutiveStaleEncodedFrames = 8;
 constexpr int kCaptureFramePoolBuffersDefault = 2;
 constexpr uint64_t kMaxPreEncodeFrameAgeUs = 25000;  // 25ms
+constexpr uint64_t kHostUserFeedbackWarnUs = 90000;  // 90ms
+constexpr uint64_t kHostUserFeedbackMinIntervalUs = 1000000;  // 1s
 
 winrt::Windows::Graphics::Capture::GraphicsCaptureItem CreateItemForPrimaryMonitor() {
-  HMONITOR monitor = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
-  if (!monitor) return nullptr;
   auto interop = winrt::get_activation_factory<winrt::Windows::Graphics::Capture::GraphicsCaptureItem,
                                                IGraphicsCaptureItemInterop>();
   winrt::Windows::Graphics::Capture::GraphicsCaptureItem item{nullptr};
-  interop->CreateForMonitor(monitor, winrt::guid_of<ABI::Windows::Graphics::Capture::IGraphicsCaptureItem>(),
-                            winrt::put_abi(item));
+
+  auto logHresult = [](const char* label, const winrt::hresult_error& e) {
+    std::cerr << "[native-video-host] " << label << ", hr=0x" << std::hex
+              << static_cast<unsigned long>(e.code()) << std::dec << "\n";
+  };
+
+  auto createForMonitor = [&](HMONITOR monitor, const char* source) {
+    if (!monitor) return false;
+    if (!item) {
+      try {
+        interop->CreateForMonitor(monitor, winrt::guid_of<ABI::Windows::Graphics::Capture::IGraphicsCaptureItem>(),
+                                 winrt::put_abi(item));
+      } catch (const winrt::hresult_error& e) {
+        logHresult("CreateForMonitor failed", e);
+        item = nullptr;
+      }
+    }
+    if (!item) {
+      std::cerr << "[native-video-host] CreateForMonitor failed, source=" << source << "\n";
+    } else {
+      std::cout << "[native-video-host] capture item source=" << source << "\n";
+    }
+    return static_cast<bool>(item);
+  };
+
+  auto createForWindow = [&](HWND hwnd, const char* source) {
+    if (!hwnd) return false;
+    if (!item) {
+      try {
+        interop->CreateForWindow(hwnd, winrt::guid_of<ABI::Windows::Graphics::Capture::IGraphicsCaptureItem>(),
+                                winrt::put_abi(item));
+      } catch (const winrt::hresult_error& e) {
+        logHresult("CreateForWindow failed", e);
+        item = nullptr;
+      }
+    }
+    if (!item) {
+      std::cerr << "[native-video-host] CreateForWindow failed, source=" << source << "\n";
+    } else {
+      std::cout << "[native-video-host] capture item source=" << source << "\n";
+    }
+    return static_cast<bool>(item);
+  };
+
+  HMONITOR monitor = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
+
+  createForMonitor(monitor, "MonitorFromWindow(GetDesktopWindow())");
+  if (item) return item;
+
+  monitor = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+  createForMonitor(monitor, "MonitorFromPoint(0,0)");
+  if (item) return item;
+
+  struct EnumFirstMonitorState {
+    HMONITOR monitor = nullptr;
+  };
+  EnumFirstMonitorState enumState{};
+  auto enumCb = [](HMONITOR hMonitor, HDC, LPRECT, LPARAM lParam) -> BOOL {
+    auto* state = reinterpret_cast<EnumFirstMonitorState*>(lParam);
+    if (state && !state->monitor) {
+      state->monitor = hMonitor;
+    }
+    return TRUE;
+  };
+  EnumDisplayMonitors(nullptr, nullptr, enumCb, reinterpret_cast<LPARAM>(&enumState));
+  if (enumState.monitor) {
+    createForMonitor(enumState.monitor, "EnumDisplayMonitors(first)");
+    if (item) return item;
+  }
+
+  createForWindow(GetForegroundWindow(), "CreateForWindow(GetForegroundWindow)");
+  if (item) return item;
+
+  createForWindow(GetDesktopWindow(), "CreateForWindow(GetDesktopWindow())");
+  if (item) return item;
+
+  createForWindow(GetShellWindow(), "CreateForWindow(GetShellWindow())");
+  if (item) return item;
+
+  createForWindow(GetConsoleWindow(), "CreateForWindow(GetConsoleWindow())");
+  if (item) return item;
+
+  struct EnumCaptureWindowState {
+    HWND hwnd = nullptr;
+  };
+  EnumCaptureWindowState enumWindowState{};
+  auto enumWindowCb = [](HWND hwnd, LPARAM lParam) -> BOOL {
+    if (!hwnd) return TRUE;
+    auto* state = reinterpret_cast<EnumCaptureWindowState*>(lParam);
+    if (!state->hwnd) {
+      const LONG style = GetWindowLongPtr(hwnd, GWL_STYLE);
+      if ((style & WS_VISIBLE) && (style & WS_OVERLAPPEDWINDOW)) {
+        state->hwnd = hwnd;
+      }
+    }
+    return state->hwnd ? FALSE : TRUE;
+  };
+  EnumWindows(enumWindowCb, reinterpret_cast<LPARAM>(&enumWindowState));
+  if (enumWindowState.hwnd) {
+    createForWindow(enumWindowState.hwnd, "EnumWindows(first visible overlapped)");
+    if (item) return item;
+  }
+
+  HWND shellWorkerW = FindWindowW(L"Progman", nullptr);
+  if (shellWorkerW) {
+    createForWindow(shellWorkerW, "FindWindowW(Progman)");
+    if (item) return item;
+  }
+
   return item;
 }
 
@@ -299,6 +406,168 @@ bool resize_bgra_bilinear(const uint8_t* src, uint32_t srcW, uint32_t srcH, uint
   return true;
 }
 
+struct GpuBgraScaler {
+  Microsoft::WRL::ComPtr<ID3D11Device> device;
+  Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+  Microsoft::WRL::ComPtr<ID3D11VideoDevice> videoDevice;
+  Microsoft::WRL::ComPtr<ID3D11VideoContext> videoContext;
+  Microsoft::WRL::ComPtr<ID3D11VideoProcessorEnumerator> enumerator;
+  Microsoft::WRL::ComPtr<ID3D11VideoProcessor> processor;
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> srcTexture;
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> dstTexture;
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> dstStaging;
+  Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> inputView;
+  Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> outputView;
+  std::mutex* d3dMutex = nullptr;
+  uint32_t srcW = 0;
+  uint32_t srcH = 0;
+  uint32_t dstW = 0;
+  uint32_t dstH = 0;
+  bool initialized = false;
+
+  bool initialize(ID3D11Device* d, ID3D11DeviceContext* c, std::mutex* mu) {
+    if (!d || !c) return false;
+    device = d;
+    context = c;
+    d3dMutex = mu;
+    if (FAILED(device.As(&videoDevice)) || !videoDevice) return false;
+    if (FAILED(context.As(&videoContext)) || !videoContext) return false;
+    initialized = true;
+    return true;
+  }
+
+  bool ensure_resources(uint32_t inW, uint32_t inH, uint32_t outW, uint32_t outH) {
+    if (!initialized || !videoDevice || !videoContext) return false;
+    if (inW == 0 || inH == 0 || outW == 0 || outH == 0) return false;
+    if (srcTexture && dstTexture && dstStaging && inputView && outputView &&
+        srcW == inW && srcH == inH && dstW == outW && dstH == outH) {
+      return true;
+    }
+
+    enumerator.Reset();
+    processor.Reset();
+    srcTexture.Reset();
+    dstTexture.Reset();
+    dstStaging.Reset();
+    inputView.Reset();
+    outputView.Reset();
+
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC desc{};
+    desc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+    desc.InputWidth = inW;
+    desc.InputHeight = inH;
+    desc.OutputWidth = outW;
+    desc.OutputHeight = outH;
+    desc.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+    if (FAILED(videoDevice->CreateVideoProcessorEnumerator(&desc, &enumerator)) || !enumerator) return false;
+
+    UINT formatSupport = 0;
+    if (FAILED(enumerator->CheckVideoProcessorFormat(
+            DXGI_FORMAT_B8G8R8A8_UNORM, &formatSupport))) {
+      return false;
+    }
+    const UINT requiredFormatSupport =
+        D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT | D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT;
+    if ((formatSupport & requiredFormatSupport) != requiredFormatSupport) return false;
+
+    if (FAILED(videoDevice->CreateVideoProcessor(enumerator.Get(), 0, &processor)) || !processor) return false;
+
+    D3D11_TEXTURE2D_DESC srcDesc{};
+    srcDesc.Width = inW;
+    srcDesc.Height = inH;
+    srcDesc.MipLevels = 1;
+    srcDesc.ArraySize = 1;
+    srcDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    srcDesc.SampleDesc.Count = 1;
+    srcDesc.Usage = D3D11_USAGE_DEFAULT;
+    srcDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    if (FAILED(device->CreateTexture2D(&srcDesc, nullptr, &srcTexture)) || !srcTexture) return false;
+
+    D3D11_TEXTURE2D_DESC dstDesc = srcDesc;
+    dstDesc.Width = outW;
+    dstDesc.Height = outH;
+    if (FAILED(device->CreateTexture2D(&dstDesc, nullptr, &dstTexture)) || !dstTexture) return false;
+
+    D3D11_TEXTURE2D_DESC stagingDesc = dstDesc;
+    stagingDesc.Usage = D3D11_USAGE_STAGING;
+    stagingDesc.BindFlags = 0;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (FAILED(device->CreateTexture2D(&stagingDesc, nullptr, &dstStaging)) || !dstStaging) return false;
+
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inViewDesc{};
+    inViewDesc.FourCC = 0;
+    inViewDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+    inViewDesc.Texture2D.MipSlice = 0;
+    inViewDesc.Texture2D.ArraySlice = 0;
+    if (FAILED(videoDevice->CreateVideoProcessorInputView(
+            srcTexture.Get(), enumerator.Get(), &inViewDesc, &inputView)) || !inputView) {
+      return false;
+    }
+
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outViewDesc{};
+    outViewDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+    outViewDesc.Texture2D.MipSlice = 0;
+    if (FAILED(videoDevice->CreateVideoProcessorOutputView(
+            dstTexture.Get(), enumerator.Get(), &outViewDesc, &outputView)) || !outputView) {
+      return false;
+    }
+
+    srcW = inW;
+    srcH = inH;
+    dstW = outW;
+    dstH = outH;
+    return true;
+  }
+
+  bool scale(const uint8_t* src, uint32_t inW, uint32_t inH, uint32_t srcStride,
+             uint32_t outW, uint32_t outH, std::vector<uint8_t>* outBgra) {
+    if (!src || !outBgra || srcStride < inW * 4) return false;
+    std::lock_guard<std::mutex> lk(*d3dMutex);
+    if (!ensure_resources(inW, inH, outW, outH)) return false;
+
+    context->UpdateSubresource(srcTexture.Get(), 0, nullptr, src, srcStride, 0);
+
+    RECT srcRect{};
+    srcRect.left = 0;
+    srcRect.top = 0;
+    srcRect.right = static_cast<LONG>(inW);
+    srcRect.bottom = static_cast<LONG>(inH);
+    RECT dstRect{};
+    dstRect.left = 0;
+    dstRect.top = 0;
+    dstRect.right = static_cast<LONG>(outW);
+    dstRect.bottom = static_cast<LONG>(outH);
+
+    videoContext->VideoProcessorSetOutputTargetRect(processor.Get(), TRUE, &dstRect);
+    videoContext->VideoProcessorSetStreamSourceRect(processor.Get(), 0, TRUE, &srcRect);
+    videoContext->VideoProcessorSetStreamDestRect(processor.Get(), 0, TRUE, &dstRect);
+    videoContext->VideoProcessorSetStreamFrameFormat(
+        processor.Get(), 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+
+    D3D11_VIDEO_PROCESSOR_STREAM stream{};
+    stream.Enable = TRUE;
+    stream.pInputSurface = inputView.Get();
+    if (FAILED(videoContext->VideoProcessorBlt(processor.Get(), outputView.Get(), 0, 1, &stream))) {
+      return false;
+    }
+
+    context->CopyResource(dstStaging.Get(), dstTexture.Get());
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(context->Map(dstStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return false;
+
+    outBgra->resize(static_cast<size_t>(outW) * static_cast<size_t>(outH) * 4);
+    const uint32_t outStride = outW * 4;
+    auto* dst = outBgra->data();
+    const auto* mappedData = reinterpret_cast<const uint8_t*>(mapped.pData);
+    for (uint32_t row = 0; row < outH; ++row) {
+      std::memcpy(dst + static_cast<size_t>(row) * outStride,
+                  mappedData + static_cast<size_t>(row) * mapped.RowPitch, outStride);
+    }
+    context->Unmap(dstStaging.Get(), 0);
+    return true;
+  }
+};
+
 bool send_all(SOCKET s, const void* data, size_t len) {
   const char* p = reinterpret_cast<const char*>(data);
   size_t sent = 0;
@@ -387,6 +656,8 @@ int main(int argc, char** argv) {
   const bool noPacingH264 = env_truthy("REMOTE60_NATIVE_H264_NO_PACING");
   const bool guardStalePreEncode = env_truthy("REMOTE60_NATIVE_GUARD_STALE_PREENCODE");
   const bool abrEnabled = useH264 && !env_truthy("REMOTE60_NATIVE_ABR_DISABLE");
+  const bool abrQualityFirst = env_truthy("REMOTE60_NATIVE_ADAPTIVE_QUALITY_FIRST");
+  const bool gpuScalerRequested = useH264 && !env_truthy("REMOTE60_NATIVE_DISABLE_GPU_SCALER");
   int captureFramePoolBuffers = kCaptureFramePoolBuffersDefault;
   if (const char* poolEnv = std::getenv("REMOTE60_NATIVE_CAPTURE_POOL_BUFFERS")) {
     const int requested = std::atoi(poolEnv);
@@ -435,7 +706,9 @@ int main(int argc, char** argv) {
     std::cout << "[native-video-host] h264 pacing=" << (noPacingH264 ? "off" : "on")
               << " stalePreEncodeGuard=" << (guardStalePreEncode ? 1 : 0)
               << " capturePoolBuffers=" << captureFramePoolBuffers
-              << " abr=" << (abrEnabled ? "on" : "off") << "\n";
+              << " abr=" << (abrEnabled ? "on" : "off")
+              << " abrMode=" << (abrQualityFirst ? "quality-first" : "default")
+              << "\n";
   }
   if (kAllInputBlocked) {
     std::cout << "[native-video-host] all input blocked (view-only)\n";
@@ -696,6 +969,7 @@ int main(int argc, char** argv) {
 
   Microsoft::WRL::ComPtr<ID3D11Device> d3d;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> ctx;
+  std::mutex d3dContextMu;
   D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
   HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
                                  D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
@@ -708,6 +982,13 @@ int main(int argc, char** argv) {
   }
   if (useH264) {
     (void)encoder.set_d3d11_device(d3d.Get());
+  }
+  GpuBgraScaler gpuScaler;
+  bool gpuScalerHealthy = false;
+  if (gpuScalerRequested) {
+    gpuScalerHealthy = gpuScaler.initialize(d3d.Get(), ctx.Get(), &d3dContextMu);
+    std::cout << "[native-video-host] gpuScalerRequested=1 gpuScalerReady="
+              << (gpuScalerHealthy ? 1 : 0) << "\n";
   }
 
   auto item = CreateItemForPrimaryMonitor();
@@ -825,18 +1106,21 @@ int main(int argc, char** argv) {
 
       auto src = SurfaceToTexture(latest.Surface());
       if (!src) return;
-      ctx->CopyResource(staging.Get(), src.Get());
-      D3D11_MAPPED_SUBRESOURCE map{};
-      if (FAILED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map))) return;
       const uint32_t stride = width * 4;
       auto payload = std::make_shared<std::vector<uint8_t>>(static_cast<size_t>(stride) * height);
-      auto* dst = payload->data();
-      auto* srcRow = reinterpret_cast<const uint8_t*>(map.pData);
-      for (uint32_t y = 0; y < height; ++y) {
-        std::memcpy(dst + static_cast<size_t>(y) * stride,
-                    srcRow + static_cast<size_t>(y) * map.RowPitch, stride);
+      {
+        std::lock_guard<std::mutex> d3dLock(d3dContextMu);
+        ctx->CopyResource(staging.Get(), src.Get());
+        D3D11_MAPPED_SUBRESOURCE map{};
+        if (FAILED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map))) return;
+        auto* dst = payload->data();
+        auto* srcRow = reinterpret_cast<const uint8_t*>(map.pData);
+        for (uint32_t y = 0; y < height; ++y) {
+          std::memcpy(dst + static_cast<size_t>(y) * stride,
+                      srcRow + static_cast<size_t>(y) * map.RowPitch, stride);
+        }
+        ctx->Unmap(staging.Get(), 0);
       }
-      ctx->Unmap(staging.Get(), 0);
       const uint64_t callbackUs = qpc_now_us();
       uint64_t sourceCaptureUs = callbackUs;
       uint64_t captureAgeAtCallbackUs = 0;
@@ -901,6 +1185,10 @@ int main(int argc, char** argv) {
   uint64_t staleEncodedDropCount = 0;
   uint64_t stalePreEncodeDropCount = 0;
   uint64_t encoderResetCount = 0;
+  uint64_t gpuScaleAttempts = 0;
+  uint64_t gpuScaleSuccess = 0;
+  uint64_t gpuScaleFail = 0;
+  uint64_t gpuScaleCpuFallback = 0;
   uint64_t captureAgeSumUs = 0;
   uint64_t captureAgeMaxUs = 0;
   uint64_t callbackToEncodeStartSumUs = 0;
@@ -951,6 +1239,10 @@ int main(int argc, char** argv) {
     }
     const uint64_t frameAgeAtSelectUs =
         (callbackUs > 0 && nowUs >= callbackUs) ? (nowUs - callbackUs) : 0;
+    const uint64_t captureToCallbackUs =
+        (callbackUs > 0 && captureUs > 0 && callbackUs >= captureUs) ? (callbackUs - captureUs) : 0;
+    const uint64_t queueGapFrames =
+        (lastVersionSent > 0 && version > lastVersionSent) ? (version - lastVersionSent - 1) : 0;
     if (useH264 && guardStalePreEncode && frameAgeAtSelectUs > kMaxPreEncodeFrameAgeUs) {
       ++stalePreEncodeDropCount;
       continue;
@@ -962,6 +1254,7 @@ int main(int argc, char** argv) {
     const uint64_t captureStampUs = (callbackUs > 0) ? callbackUs : captureUs;
 
     bool sendFailed = false;
+    static uint64_t lastUserFeedbackUs = 0;
     if (useRaw) {
       RawFrameHeader hdr{};
       hdr.header.magic = remote60::native_poc::kMagic;
@@ -987,8 +1280,8 @@ int main(int argc, char** argv) {
       }
       ++sentFrames;
       sentBytes += payload->size();
-      if (args.traceEvery > 0 && (seq % args.traceEvery) == 0 &&
-          (args.traceMax == 0 || tracePrinted < args.traceMax)) {
+        if (args.traceEvery > 0 && (seq % args.traceEvery) == 0 &&
+            (args.traceMax == 0 || tracePrinted < args.traceMax)) {
         ++tracePrinted;
         const uint64_t c2eUs = (hdr.encodeStartQpcUs >= hdr.captureQpcUs) ? (hdr.encodeStartQpcUs - hdr.captureQpcUs) : 0;
         const uint64_t encUs = (hdr.encodeEndQpcUs >= hdr.encodeStartQpcUs) ? (hdr.encodeEndQpcUs - hdr.encodeStartQpcUs) : 0;
@@ -999,10 +1292,32 @@ int main(int argc, char** argv) {
                   << " encodeEndUs=" << hdr.encodeEndQpcUs
                   << " sendUs=" << hdr.sendQpcUs
                   << " c2eUs=" << c2eUs
+                  << " captureToCallbackUs=" << captureToCallbackUs
+                  << " selectWaitUs=" << frameAgeAtSelectUs
+                  << " queueGapFrames=" << queueGapFrames
                   << " encUs=" << encUs
                   << " e2sUs=" << e2sUs
                   << " payloadBytes=" << hdr.payloadSize
                   << "\n";
+      }
+      const uint64_t c2eUs = (hdr.encodeStartQpcUs >= hdr.captureQpcUs) ? (hdr.encodeStartQpcUs - hdr.captureQpcUs) : 0;
+      const uint64_t encUs = (hdr.encodeEndQpcUs >= hdr.encodeStartQpcUs) ? (hdr.encodeEndQpcUs - hdr.encodeStartQpcUs) : 0;
+      const uint64_t e2sUs = (hdr.sendQpcUs >= hdr.encodeEndQpcUs) ? (hdr.sendQpcUs - hdr.encodeEndQpcUs) : 0;
+      const uint64_t pipeUs = (hdr.sendQpcUs >= hdr.captureQpcUs) ? (hdr.sendQpcUs - hdr.captureQpcUs) : 0;
+      if (pipeUs >= kHostUserFeedbackWarnUs &&
+          (hdr.sendQpcUs >= lastUserFeedbackUs + kHostUserFeedbackMinIntervalUs || lastUserFeedbackUs == 0)) {
+        std::cout << "[native-video-host][user-feedback] seq=" << seq
+                  << " codec=" << "raw"
+                  << " pipeUs=" << pipeUs
+                  << " captureToCallbackUs=" << captureToCallbackUs
+                  << " selectWaitUs=" << frameAgeAtSelectUs
+                  << " queueGapFrames=" << queueGapFrames
+                  << " c2eUs=" << c2eUs
+                  << " encUs=" << encUs
+                  << " e2sUs=" << e2sUs
+                  << " callbackToSendGapUs=" << ((hdr.sendQpcUs >= nowUs) ? (hdr.sendQpcUs - nowUs) : 0)
+                  << "\n";
+        lastUserFeedbackUs = hdr.sendQpcUs;
       }
     } else {
       const uint8_t* encodeSrc = payload->data();
@@ -1011,8 +1326,23 @@ int main(int argc, char** argv) {
       uint32_t encodeSrcStride = stride;
       std::vector<uint8_t> scaledBgra;
       if (activeEncodeW != w || activeEncodeH != h) {
-        if (!resize_bgra_bilinear(payload->data(), w, h, stride, activeEncodeW, activeEncodeH, &scaledBgra)) {
-          continue;
+        bool scaleOk = false;
+        if (gpuScalerHealthy) {
+          ++gpuScaleAttempts;
+          scaleOk = gpuScaler.scale(payload->data(), w, h, stride, activeEncodeW, activeEncodeH, &scaledBgra);
+          if (scaleOk) {
+            ++gpuScaleSuccess;
+          } else {
+            ++gpuScaleFail;
+            gpuScalerHealthy = false;
+            std::cout << "[native-video-host] gpu scaler disabled after failure; fallback=cpu\n";
+          }
+        }
+        if (!scaleOk) {
+          ++gpuScaleCpuFallback;
+          if (!resize_bgra_bilinear(payload->data(), w, h, stride, activeEncodeW, activeEncodeH, &scaledBgra)) {
+            continue;
+          }
         }
         encodeSrc = scaledBgra.data();
         encodeSrcW = activeEncodeW;
@@ -1165,6 +1495,10 @@ int main(int argc, char** argv) {
           const uint64_t c2eUs = (hdr.encodeStartQpcUs >= hdr.captureQpcUs) ? (hdr.encodeStartQpcUs - hdr.captureQpcUs) : 0;
           const uint64_t encQueueUs =
               (encodeStartUs >= auCaptureUs) ? (encodeStartUs - auCaptureUs) : 0;
+          const uint64_t captureToAuUs =
+              (auCaptureUs >= static_cast<int64_t>(hdr.captureQpcUs))
+                  ? static_cast<uint64_t>(auCaptureUs - static_cast<int64_t>(hdr.captureQpcUs))
+                  : 0;
           const uint64_t encUs = (hdr.encodeEndQpcUs >= hdr.encodeStartQpcUs) ? (hdr.encodeEndQpcUs - hdr.encodeStartQpcUs) : 0;
           const uint64_t e2sUs = (hdr.sendQpcUs >= hdr.encodeEndQpcUs) ? (hdr.sendQpcUs - hdr.encodeEndQpcUs) : 0;
           std::cout << "[native-video-host][trace] seq=" << hdr.seq
@@ -1173,7 +1507,12 @@ int main(int argc, char** argv) {
                     << " encodeEndUs=" << hdr.encodeEndQpcUs
                     << " sendUs=" << hdr.sendQpcUs
                     << " c2eUs=" << c2eUs
+                    << " captureToCallbackUs=" << captureToCallbackUs
+                    << " selectWaitUs=" << frameAgeAtSelectUs
+                    << " queueGapFrames=" << queueGapFrames
                     << " encQueueUs=" << encQueueUs
+                    << " captureToAuUs=" << captureToAuUs
+                    << " auCaptureUs=" << auCaptureUs
                     << " cb2eUs=" << callbackToEncodeStartUs
                     << " capAgeUs=" << captureAgeAtCallbackUs
                     << " encUs=" << encUs
@@ -1181,6 +1520,37 @@ int main(int argc, char** argv) {
                     << " payloadBytes=" << hdr.payloadSize
                     << " key=" << ((hdr.flags & 1u) ? 1 : 0)
                     << "\n";
+        }
+        const uint64_t c2eUs = (hdr.encodeStartQpcUs >= hdr.captureQpcUs) ? (hdr.encodeStartQpcUs - hdr.captureQpcUs) : 0;
+        const uint64_t encQueueUs =
+            (encodeStartUs >= auCaptureUs) ? (encodeStartUs - auCaptureUs) : 0;
+        const uint64_t captureToAuUs =
+            (auCaptureUs >= static_cast<int64_t>(hdr.captureQpcUs))
+                ? static_cast<uint64_t>(auCaptureUs - static_cast<int64_t>(hdr.captureQpcUs))
+                : 0;
+        const uint64_t encUs = (hdr.encodeEndQpcUs >= hdr.encodeStartQpcUs) ? (hdr.encodeEndQpcUs - hdr.encodeStartQpcUs) : 0;
+        const uint64_t e2sUs = (hdr.sendQpcUs >= hdr.encodeEndQpcUs) ? (hdr.sendQpcUs - hdr.encodeEndQpcUs) : 0;
+        const uint64_t pipeUs = (hdr.sendQpcUs >= hdr.captureQpcUs) ? (hdr.sendQpcUs - hdr.captureQpcUs) : 0;
+        if (pipeUs >= kHostUserFeedbackWarnUs &&
+            (hdr.sendQpcUs >= lastUserFeedbackUs + kHostUserFeedbackMinIntervalUs || lastUserFeedbackUs == 0)) {
+          std::cout << "[native-video-host][user-feedback] seq=" << hdr.seq
+                    << " codec=" << "h264"
+                    << " pipeUs=" << pipeUs
+                    << " captureToCallbackUs=" << captureToCallbackUs
+                    << " selectWaitUs=" << frameAgeAtSelectUs
+                    << " queueGapFrames=" << queueGapFrames
+                    << " c2eUs=" << c2eUs
+                    << " encQueueUs=" << encQueueUs
+                    << " captureToAuUs=" << captureToAuUs
+                    << " auCaptureUs=" << auCaptureUs
+                    << " cb2eUs=" << callbackToEncodeStartUs
+                    << " capAgeUs=" << captureAgeAtCallbackUs
+                    << " encUs=" << encUs
+                    << " e2sUs=" << e2sUs
+                    << " payloadBytes=" << hdr.payloadSize
+                    << " key=" << ((hdr.flags & 1u) ? 1 : 0)
+                    << "\n";
+          lastUserFeedbackUs = hdr.sendQpcUs;
         }
       }
 
@@ -1227,6 +1597,12 @@ int main(int argc, char** argv) {
                   << " encRatioX100=" << encRatioX100
                   << " bitrateTarget=" << activeBitrate
                   << " size=" << activeEncodeW << "x" << activeEncodeH
+                  << " gpuScaleReq=" << (gpuScalerRequested ? 1 : 0)
+                  << " gpuScaleReady=" << (gpuScalerHealthy ? 1 : 0)
+                  << " gpuScaleAttempts=" << gpuScaleAttempts
+                  << " gpuScaleSuccess=" << gpuScaleSuccess
+                  << " gpuScaleFail=" << gpuScaleFail
+                  << " gpuScaleCpuFallback=" << gpuScaleCpuFallback
                   << " abrProfile=" << ((abrProfile == 0) ? "high" : ((abrProfile == 1) ? "mid" : "low"))
                   << " abrModSec=" << abrModeratePressureSeconds
                   << " abrSevSec=" << abrSeverePressureSeconds
@@ -1245,30 +1621,38 @@ int main(int argc, char** argv) {
           const uint32_t clWidth = metricsFresh ? clientMetricsWidth.load() : 0;
           const uint32_t clHeight = metricsFresh ? clientMetricsHeight.load() : 0;
 
-          const uint32_t minGoodFpsX100 = args.fps * 93u;
-          const uint32_t minOkayFpsX100 = args.fps * 85u;
-          const uint32_t minDegradeFpsX100 = args.fps * 45u;
-          const uint32_t minSevereFpsX100 = args.fps * 35u;
+          const uint32_t minGoodFpsX100 = args.fps * (abrQualityFirst ? 95u : 93u);
+          const uint32_t minOkayFpsX100 = args.fps * (abrQualityFirst ? 90u : 85u);
+          const uint32_t minDegradeFpsX100 = args.fps * (abrQualityFirst ? 55u : 45u);
+          const uint32_t minSevereFpsX100 = args.fps * (abrQualityFirst ? 45u : 35u);
           const bool abrWarmupDone = (t >= (startUs + 4000000ULL));
+
+          const uint64_t severeLatencyUs = abrQualityFirst ? 170000ULL : 150000ULL;
+          const uint64_t severeTailUs = abrQualityFirst ? 140000ULL : 110000ULL;
+          const uint64_t moderateLatencyUs = abrQualityFirst ? 145000ULL : 125000ULL;
+          const uint64_t moderateTailUs = abrQualityFirst ? 120000ULL : 90000ULL;
+          const uint64_t emergencyLatencyUs = abrQualityFirst ? 260000ULL : 220000ULL;
+          const uint64_t emergencyTailUs = abrQualityFirst ? 190000ULL : 160000ULL;
 
           const bool severeDownByClient =
               metricsFresh &&
-              (clAvgLatencyUs > 150000ULL ||
-               clAvgDecodeTailUs > 110000ULL ||
+              (clAvgLatencyUs > severeLatencyUs ||
+               clAvgDecodeTailUs > severeTailUs ||
                (clDecodedFpsX100 < minSevereFpsX100 &&
-                (clAvgLatencyUs > 110000ULL || clAvgDecodeTailUs > 80000ULL)));
+                (clAvgLatencyUs > (severeLatencyUs - 30000ULL) || clAvgDecodeTailUs > (severeTailUs - 40000ULL))));
           const bool moderateDownByClient =
               metricsFresh &&
-              (clAvgLatencyUs > 125000ULL ||
-               clAvgDecodeTailUs > 90000ULL ||
+              (clAvgLatencyUs > moderateLatencyUs ||
+               clAvgDecodeTailUs > moderateTailUs ||
                (clDecodedFpsX100 < minDegradeFpsX100 &&
-                (clAvgLatencyUs > 95000ULL || clAvgDecodeTailUs > 70000ULL)));
+                (clAvgLatencyUs > (moderateLatencyUs - 50000ULL) ||
+                 clAvgDecodeTailUs > (moderateTailUs - 30000ULL))));
           const bool emergencyDownByClient =
               metricsFresh &&
-              (clAvgLatencyUs > 220000ULL ||
-               clAvgDecodeTailUs > 160000ULL);
-          const bool severeDownByHost = (!metricsFresh && cb2eAvgUs > 90000ULL);
-          const bool moderateDownByHost = (!metricsFresh && cb2eAvgUs > 70000ULL);
+              (clAvgLatencyUs > emergencyLatencyUs ||
+               clAvgDecodeTailUs > emergencyTailUs);
+          const bool severeDownByHost = (!metricsFresh && cb2eAvgUs > (abrQualityFirst ? 110000ULL : 90000ULL));
+          const bool moderateDownByHost = (!metricsFresh && cb2eAvgUs > (abrQualityFirst ? 90000ULL : 70000ULL));
           const bool severeDown = abrWarmupDone && (severeDownByClient || severeDownByHost);
           const bool moderateDown = abrWarmupDone && (moderateDownByClient || moderateDownByHost);
           const bool emergencyDown = abrWarmupDone && emergencyDownByClient;
@@ -1298,17 +1682,24 @@ int main(int argc, char** argv) {
           int targetProfile = abrProfile;
           const char* abrReason = "none";
           if (t >= abrCooldownUntilUs) {
+            const uint32_t highToMidSevereSec = abrQualityFirst ? 3u : 2u;
+            const uint32_t highToMidModerateSec = abrQualityFirst ? 6u : 4u;
+            const uint32_t midToLowSevereSec = abrQualityFirst ? 4u : 3u;
+            const uint32_t midToLowModerateSec = abrQualityFirst ? 8u : 5u;
+            const uint32_t lowToMidGoodSec = abrQualityFirst ? 8u : 5u;
+            const uint32_t midToHighGoodSec = abrQualityFirst ? 12u : 8u;
+
             if (abrProfile == 0) {
               if (emergencyDown && abrHasLowProfile && abrSeverePressureSeconds >= 1) {
                 targetProfile = 2;
                 abrReason = "client_emergency";
-              } else if ((abrSeverePressureSeconds >= 2) || (abrModeratePressureSeconds >= 4)) {
+              } else if ((abrSeverePressureSeconds >= highToMidSevereSec) || (abrModeratePressureSeconds >= highToMidModerateSec)) {
                 if (abrHasMidProfile) {
                   targetProfile = 1;
-                  abrReason = (abrSeverePressureSeconds >= 2) ? "high_to_mid_severe" : "high_to_mid_moderate";
+                  abrReason = (abrSeverePressureSeconds >= highToMidSevereSec) ? "high_to_mid_severe" : "high_to_mid_moderate";
                 } else if (abrHasLowProfile) {
                   targetProfile = 2;
-                  abrReason = (abrSeverePressureSeconds >= 2) ? "high_to_low_severe" : "high_to_low_moderate";
+                  abrReason = (abrSeverePressureSeconds >= highToMidSevereSec) ? "high_to_low_severe" : "high_to_low_moderate";
                 }
               }
               abrGoodSeconds = 0;
@@ -1317,9 +1708,9 @@ int main(int argc, char** argv) {
                 targetProfile = 2;
                 abrReason = "client_emergency";
                 abrGoodSeconds = 0;
-              } else if ((abrSeverePressureSeconds >= 3 || abrModeratePressureSeconds >= 5) && abrHasLowProfile) {
+              } else if ((abrSeverePressureSeconds >= midToLowSevereSec || abrModeratePressureSeconds >= midToLowModerateSec) && abrHasLowProfile) {
                 targetProfile = 2;
-                abrReason = (abrSeverePressureSeconds >= 3) ? "mid_to_low_severe" : "mid_to_low_moderate";
+                abrReason = (abrSeverePressureSeconds >= midToLowSevereSec) ? "mid_to_low_severe" : "mid_to_low_moderate";
                 abrGoodSeconds = 0;
               } else {
                 if (goodForMidToHigh) {
@@ -1327,7 +1718,7 @@ int main(int argc, char** argv) {
                 } else {
                   abrGoodSeconds = 0;
                 }
-                if (abrGoodSeconds >= 8) {
+                if (abrGoodSeconds >= midToHighGoodSec) {
                   targetProfile = 0;
                   abrReason = "client_stable_high";
                 }
@@ -1338,7 +1729,7 @@ int main(int argc, char** argv) {
               } else {
                 abrGoodSeconds = 0;
               }
-              if (abrGoodSeconds >= 5) {
+              if (abrGoodSeconds >= lowToMidGoodSec) {
                 targetProfile = abrHasMidProfile ? 1 : 0;
                 abrReason = "client_stable_mid";
               }
@@ -1417,6 +1808,10 @@ int main(int argc, char** argv) {
       captureAgeMaxUs = 0;
       callbackToEncodeStartSumUs = 0;
       callbackToEncodeStartMaxUs = 0;
+      gpuScaleAttempts = 0;
+      gpuScaleSuccess = 0;
+      gpuScaleFail = 0;
+      gpuScaleCpuFallback = 0;
       statAtUs += 1000000ULL;
     }
   }

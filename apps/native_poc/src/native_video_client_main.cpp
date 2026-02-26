@@ -212,6 +212,8 @@ struct SharedFrame {
   uint64_t recvUs = 0;
   uint64_t decodeStartUs = 0;
   uint64_t decodeEndUs = 0;
+  uint64_t queueSetUs = 0;
+  uint64_t decodeToQueueUs = 0;
   uint64_t version = 0;
   std::shared_ptr<std::vector<uint8_t>> bytes;
 };
@@ -235,6 +237,9 @@ constexpr uint64_t kCatchupResumeKeyLagUs = 500000;  // 0.5s
 constexpr uint64_t kDecodeQueueLagDropUs = 300000;   // 0.3s
 constexpr uint64_t kDecodeQueueLagResumeUs = 400000; // 0.4s
 constexpr uint64_t kStaleCaptureDropUs = 50000;      // 50ms
+constexpr uint64_t kUserFeedbackLagWarnUs = 90000;   // 90ms
+constexpr uint64_t kUserFeedbackGapWarnUs = 50000;   // 50ms
+constexpr uint64_t kUserFeedbackMinIntervalUs = 1000000;  // 1s
 
 std::mutex gInputMu;
 std::deque<ControlInputEventMessage> gInputQueue;
@@ -262,12 +267,29 @@ ClientRuntimeMetrics gClientMetrics;
 std::atomic<bool> gKeyframeRequestPending{false};
 std::atomic<uint16_t> gKeyframeRequestReason{0};
 std::atomic<uint32_t> gKeyframeRequestCount{0};
+std::atomic<uint64_t> gLastPresentedVersion{0};
+std::atomic<uint64_t> gPaintCoalescedCount{0};
+std::atomic<uint64_t> gOverwriteBeforePresentCount{0};
+std::atomic<uint64_t> gD3dPresentSuccessCount{0};
+std::atomic<uint64_t> gD3dPresentFailCount{0};
+std::atomic<uint64_t> gGdiFallbackPresentedCount{0};
+std::atomic<uint64_t> gFallbackInitFailCount{0};
+std::atomic<uint64_t> gFallbackRenderFailCount{0};
+std::atomic<uint64_t> gFallbackNv12ConvertFailCount{0};
 
 void request_keyframe(uint16_t reason) {
   if (reason == 0) reason = 1;
   gKeyframeRequestReason = reason;
   gKeyframeRequestPending = true;
 }
+
+struct Nv12RenderTelemetry {
+  uint64_t uploadYUs = 0;
+  uint64_t uploadUVUs = 0;
+  uint64_t drawUs = 0;
+  uint64_t presentBlockUs = 0;
+  const char* failStage = "none";
+};
 
 struct Nv12D3dRenderer {
   Microsoft::WRL::ComPtr<ID3D11Device> device;
@@ -444,29 +466,64 @@ struct Nv12D3dRenderer {
     return true;
   }
 
-  bool render(HWND hwnd, const uint8_t* nv12, uint32_t w, uint32_t h) {
-    if (!ready || !nv12 || w == 0 || h == 0 || (w & 1u) || (h & 1u)) return false;
-    if (!ensure_rtv(hwnd)) return false;
-    if (!ensure_nv12_textures(w, h)) return false;
+  bool render(HWND hwnd, const uint8_t* nv12, uint32_t w, uint32_t h, Nv12RenderTelemetry* telemetry) {
+    if (telemetry) {
+      *telemetry = Nv12RenderTelemetry{};
+    }
+    if (!ready || !nv12 || w == 0 || h == 0 || (w & 1u) || (h & 1u)) {
+      if (telemetry) telemetry->failStage = "invalid_args";
+      return false;
+    }
+    if (!ensure_rtv(hwnd)) {
+      if (telemetry) telemetry->failStage = "ensure_rtv";
+      return false;
+    }
+    if (!ensure_nv12_textures(w, h)) {
+      if (telemetry) telemetry->failStage = "ensure_nv12_textures";
+      return false;
+    }
 
     const uint8_t* yPlane = nv12;
     const uint8_t* uvPlane = nv12 + static_cast<size_t>(w) * h;
 
+    const uint64_t uploadYStartUs = qpc_now_us();
     D3D11_MAPPED_SUBRESOURCE yMap{};
-    if (FAILED(context->Map(texY.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &yMap))) return false;
-    for (uint32_t row = 0; row < h; ++row) {
-      std::memcpy(reinterpret_cast<uint8_t*>(yMap.pData) + static_cast<size_t>(row) * yMap.RowPitch,
-                  yPlane + static_cast<size_t>(row) * w, w);
+    if (FAILED(context->Map(texY.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &yMap))) {
+      if (telemetry) telemetry->failStage = "map_y";
+      return false;
+    }
+    const uint32_t yCopyRowBytes = w;
+    const size_t yCopyBytes = static_cast<size_t>(h) * yCopyRowBytes;
+    if (static_cast<UINT>(yCopyRowBytes) == yMap.RowPitch) {
+      std::memcpy(reinterpret_cast<uint8_t*>(yMap.pData), yPlane, yCopyBytes);
+    } else {
+      for (uint32_t row = 0; row < h; ++row) {
+        std::memcpy(reinterpret_cast<uint8_t*>(yMap.pData) + static_cast<size_t>(row) * yMap.RowPitch,
+                    yPlane + static_cast<size_t>(row) * yCopyRowBytes, yCopyRowBytes);
+      }
     }
     context->Unmap(texY.Get(), 0);
+    if (telemetry) telemetry->uploadYUs = qpc_now_us() - uploadYStartUs;
 
+    const uint64_t uploadUVStartUs = qpc_now_us();
     D3D11_MAPPED_SUBRESOURCE uvMap{};
-    if (FAILED(context->Map(texUV.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &uvMap))) return false;
-    for (uint32_t row = 0; row < (h / 2); ++row) {
-      std::memcpy(reinterpret_cast<uint8_t*>(uvMap.pData) + static_cast<size_t>(row) * uvMap.RowPitch,
-                  uvPlane + static_cast<size_t>(row) * w, w);
+    if (FAILED(context->Map(texUV.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &uvMap))) {
+      if (telemetry) telemetry->failStage = "map_uv";
+      return false;
+    }
+    const uint32_t uvHeight = h / 2;
+    const uint32_t uvCopyRowBytes = w;
+    const size_t uvCopyBytes = static_cast<size_t>(uvHeight) * uvCopyRowBytes;
+    if (static_cast<UINT>(uvCopyRowBytes) == uvMap.RowPitch) {
+      std::memcpy(reinterpret_cast<uint8_t*>(uvMap.pData), uvPlane, uvCopyBytes);
+    } else {
+      for (uint32_t row = 0; row < uvHeight; ++row) {
+        std::memcpy(reinterpret_cast<uint8_t*>(uvMap.pData) + static_cast<size_t>(row) * uvMap.RowPitch,
+                    uvPlane + static_cast<size_t>(row) * uvCopyRowBytes, uvCopyRowBytes);
+      }
     }
     context->Unmap(texUV.Get(), 0);
+    if (telemetry) telemetry->uploadUVUs = qpc_now_us() - uploadUVStartUs;
 
     RECT rc{};
     GetClientRect(hwnd, &rc);
@@ -489,10 +546,20 @@ struct Nv12D3dRenderer {
     context->PSSetShaderResources(0, 2, srvs);
     ID3D11SamplerState* samplers[] = {sampler.Get()};
     context->PSSetSamplers(0, 1, samplers);
+    const uint64_t drawStartUs = qpc_now_us();
     context->Draw(3, 0);
     ID3D11ShaderResourceView* nullSrvs[] = {nullptr, nullptr};
     context->PSSetShaderResources(0, 2, nullSrvs);
+    const uint64_t drawEndUs = qpc_now_us();
+    if (telemetry) telemetry->drawUs = (drawEndUs >= drawStartUs) ? (drawEndUs - drawStartUs) : 0;
+
+    const uint64_t presentStartUs = qpc_now_us();
     HRESULT hr = swapChain->Present(0, 0);
+    const uint64_t presentDoneUs = qpc_now_us();
+    if (telemetry) telemetry->presentBlockUs = (presentDoneUs >= presentStartUs) ? (presentDoneUs - presentStartUs) : 0;
+    if (!(SUCCEEDED(hr) || hr == DXGI_STATUS_OCCLUDED) && telemetry) {
+      telemetry->failStage = "present";
+    }
     return SUCCEEDED(hr) || hr == DXGI_STATUS_OCCLUDED;
   }
 };
@@ -595,6 +662,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       gPaintQueued = false;
       PAINTSTRUCT ps{};
       HDC hdc = BeginPaint(hwnd, &ps);
+      const uint64_t paintStartUs = qpc_now_us();
       RECT rc{};
       GetClientRect(hwnd, &rc);
       FillRect(hdc, &rc, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
@@ -610,6 +678,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       uint64_t recvUs = 0;
       uint64_t decodeStartUs = 0;
       uint64_t decodeEndUs = 0;
+      uint64_t queueSetUs = 0;
+      uint64_t decodeToQueueUs = 0;
       uint64_t frameVersion = 0;
       {
         std::lock_guard<std::mutex> lk(gFrame.mu);
@@ -626,16 +696,35 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           recvUs = gFrame.recvUs;
           decodeStartUs = gFrame.decodeStartUs;
           decodeEndUs = gFrame.decodeEndUs;
+          queueSetUs = gFrame.queueSetUs;
+          decodeToQueueUs = gFrame.decodeToQueueUs;
           frameVersion = gFrame.version;
         }
       }
       bool presented = false;
+      Nv12RenderTelemetry renderTelemetry{};
+      const char* renderPath = "none";
+      const char* fallbackReason = "none";
       if (local && w > 0 && h > 0) {
         if (localFormat == SharedFrame::PixelFormat::Nv12) {
           if (!gNv12Renderer.ready) {
-            (void)gNv12Renderer.init(hwnd);
+            if (!gNv12Renderer.init(hwnd)) {
+              ++gD3dPresentFailCount;
+              ++gFallbackInitFailCount;
+              fallbackReason = "d3d_init_fail";
+            }
           }
-          presented = gNv12Renderer.render(hwnd, local->data(), w, h);
+          if (gNv12Renderer.ready) {
+            presented = gNv12Renderer.render(hwnd, local->data(), w, h, &renderTelemetry);
+            if (presented) {
+              ++gD3dPresentSuccessCount;
+              renderPath = "d3d_nv12";
+            } else {
+              ++gD3dPresentFailCount;
+              ++gFallbackRenderFailCount;
+              fallbackReason = renderTelemetry.failStage;
+            }
+          }
           if (!presented) {
             std::vector<uint8_t> bgra;
             if (nv12_to_bgra(local->data(), w, h, &bgra) && !bgra.empty()) {
@@ -651,6 +740,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                             0, 0, static_cast<int>(w), static_cast<int>(h),
                             bgra.data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
               presented = true;
+              ++gGdiFallbackPresentedCount;
+              renderPath = "gdi_nv12_fallback";
+            } else {
+              ++gFallbackNv12ConvertFailCount;
+              fallbackReason = "nv12_to_bgra_fail";
             }
           }
         } else if (localFormat == SharedFrame::PixelFormat::Bgra32) {
@@ -666,10 +760,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         0, 0, static_cast<int>(w), static_cast<int>(h),
                         local->data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
           presented = true;
+          renderPath = "gdi_bgra";
         }
       }
       if (presented) {
+        static uint64_t lastPresentUs = 0;
+        static uint64_t lastUserFeedbackUs = 0;
+        static uint64_t lastUserFeedbackOverwrite = 0;
+        gLastPresentedVersion.store(frameVersion, std::memory_order_relaxed);
         const uint64_t presentUs = qpc_now_us();
+        const uint64_t presentGapUs = (lastPresentUs > 0) ? (presentUs - lastPresentUs) : 0;
+        const uint64_t queueToPaintUs = (paintStartUs >= queueSetUs) ? (paintStartUs - queueSetUs) : 0;
+        const uint64_t queueToPresentUs = (presentUs >= paintStartUs) ? (presentUs - paintStartUs) : 0;
         const uint32_t traceEvery = gTraceEvery.load();
         const uint32_t traceMax = gTraceMax.load();
         if (traceEvery > 0 && (seq % traceEvery) == 0 &&
@@ -684,6 +786,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             const uint64_t decUs = (decodeEndUs >= decodeStartUs) ? (decodeEndUs - decodeStartUs) : 0;
             const uint64_t d2pUs = (presentUs >= decodeEndUs) ? (presentUs - decodeEndUs) : 0;
             const uint64_t renderUs = (presentUs >= recvUs) ? (presentUs - recvUs) : 0;
+            const uint64_t queueWaitUs = (paintStartUs >= queueSetUs) ? (paintStartUs - queueSetUs) : 0;
+            const uint64_t paintUs = (presentUs >= paintStartUs) ? (presentUs - paintStartUs) : 0;
             const uint64_t totalUs = (presentUs >= captureUs) ? (presentUs - captureUs) : 0;
             std::cout << "[native-video-client][trace_present] seq=" << seq
                       << " captureUs=" << captureUs
@@ -701,11 +805,68 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                       << " r2dUs=" << r2dUs
                       << " decUs=" << decUs
                       << " d2pUs=" << d2pUs
+                      << " decodeToQueueUs=" << decodeToQueueUs
+                      << " queueWaitUs=" << queueWaitUs
+                      << " paintUs=" << paintUs
+                      << " uploadYUs=" << renderTelemetry.uploadYUs
+                      << " uploadUVUs=" << renderTelemetry.uploadUVUs
+                      << " drawUs=" << renderTelemetry.drawUs
+                      << " presentBlockUs=" << renderTelemetry.presentBlockUs
                       << " renderUs=" << renderUs
                       << " totalUs=" << totalUs
+                      << " renderPath=" << renderPath
+                      << " fallbackReason=" << fallbackReason
                       << "\n";
           }
         }
+        const uint64_t totalUs = (presentUs >= captureUs) ? (presentUs - captureUs) : 0;
+        if ((totalUs >= kUserFeedbackLagWarnUs || (presentGapUs >= kUserFeedbackGapWarnUs && lastPresentUs > 0)) &&
+            (presentUs >= lastUserFeedbackUs + kUserFeedbackMinIntervalUs || lastUserFeedbackUs == 0)) {
+          const uint64_t overwriteCountNow = gOverwriteBeforePresentCount.load(std::memory_order_relaxed);
+          const uint64_t overwriteDelta = (overwriteCountNow >= lastUserFeedbackOverwrite)
+                                             ? (overwriteCountNow - lastUserFeedbackOverwrite)
+                                             : 0;
+          const uint64_t d3dSuccess = gD3dPresentSuccessCount.load(std::memory_order_relaxed);
+          const uint64_t d3dFail = gD3dPresentFailCount.load(std::memory_order_relaxed);
+          const uint64_t gdiFallback = gGdiFallbackPresentedCount.load(std::memory_order_relaxed);
+          const uint64_t paintCoalesced = gPaintCoalescedCount.load(std::memory_order_relaxed);
+          const uint64_t queueWaitUs = (paintStartUs >= queueSetUs) ? (paintStartUs - queueSetUs) : 0;
+          const uint64_t paintUs = (presentUs >= paintStartUs) ? (presentUs - paintStartUs) : 0;
+          const uint64_t netUs = (recvUs >= sendUs) ? (recvUs - sendUs) : 0;
+          const uint64_t c2eUs = (encodeStartUs >= captureUs) ? (encodeStartUs - captureUs) : 0;
+          const uint64_t encUs = (encodeEndUs >= encodeStartUs) ? (encodeEndUs - encodeStartUs) : 0;
+          const uint64_t e2sUs = (sendUs >= encodeEndUs) ? (sendUs - encodeEndUs) : 0;
+          const uint64_t r2dUs = (decodeStartUs >= recvUs) ? (decodeStartUs - recvUs) : 0;
+          const uint64_t decUs = (decodeEndUs >= decodeStartUs) ? (decodeEndUs - decodeStartUs) : 0;
+          const uint64_t d2pUs = (presentUs >= decodeEndUs) ? (presentUs - decodeEndUs) : 0;
+          std::cout << "[native-video-client][user-feedback] seq=" << seq
+                    << " totalUs=" << totalUs
+                    << " capGapUs=" << presentGapUs
+                    << " queueToPaintUs=" << queueToPaintUs
+                    << " queueToPresentUs=" << queueToPresentUs
+                    << " d3dPresentSuccess=" << d3dSuccess
+                    << " d3dPresentFail=" << d3dFail
+                    << " gdiFallback=" << gdiFallback
+                    << " paintCoalesced=" << paintCoalesced
+                    << " overwriteDelta=" << overwriteDelta
+                    << " c2eUs=" << c2eUs
+                    << " encUs=" << encUs
+                    << " e2sUs=" << e2sUs
+                    << " netUs=" << netUs
+                    << " r2dUs=" << r2dUs
+                    << " decUs=" << decUs
+                    << " d2pUs=" << d2pUs
+                    << " decodeToQueueUs=" << decodeToQueueUs
+                    << " queueWaitUs=" << queueWaitUs
+                    << " paintUs=" << paintUs
+                    << " presentBlockUs=" << renderTelemetry.presentBlockUs
+                    << " renderPath=" << renderPath
+                    << " fallbackReason=" << fallbackReason
+                    << "\n";
+          lastUserFeedbackUs = presentUs;
+          lastUserFeedbackOverwrite = overwriteCountNow;
+        }
+        lastPresentUs = presentUs;
       }
       EndPaint(hwnd, &ps);
       uint64_t latestVersion = 0;
@@ -713,8 +874,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         std::lock_guard<std::mutex> lk(gFrame.mu);
         latestVersion = gFrame.version;
       }
-      if (latestVersion != frameVersion && !gPaintQueued.exchange(true)) {
-        InvalidateRect(hwnd, nullptr, FALSE);
+      if (latestVersion != frameVersion) {
+        if (!gPaintQueued.exchange(true)) {
+          InvalidateRect(hwnd, nullptr, FALSE);
+        } else {
+          ++gPaintCoalescedCount;
+        }
       }
       return 0;
     }
@@ -1085,6 +1250,57 @@ int main(int argc, char** argv) {
     bool sendTimelineReady = false;
     uint64_t sendRemoteBaseUs = 0;
     uint64_t sendLocalBaseUs = 0;
+    struct PresentCounterSnapshot {
+      uint64_t d3dPresentSuccess = 0;
+      uint64_t d3dPresentFail = 0;
+      uint64_t gdiFallbackPresented = 0;
+      uint64_t fallbackInitFail = 0;
+      uint64_t fallbackRenderFail = 0;
+      uint64_t fallbackNv12ConvertFail = 0;
+      uint64_t paintCoalesced = 0;
+      uint64_t overwriteBeforePresent = 0;
+    };
+    auto load_present_counters = [&]() -> PresentCounterSnapshot {
+      PresentCounterSnapshot s{};
+      s.d3dPresentSuccess = gD3dPresentSuccessCount.load(std::memory_order_relaxed);
+      s.d3dPresentFail = gD3dPresentFailCount.load(std::memory_order_relaxed);
+      s.gdiFallbackPresented = gGdiFallbackPresentedCount.load(std::memory_order_relaxed);
+      s.fallbackInitFail = gFallbackInitFailCount.load(std::memory_order_relaxed);
+      s.fallbackRenderFail = gFallbackRenderFailCount.load(std::memory_order_relaxed);
+      s.fallbackNv12ConvertFail = gFallbackNv12ConvertFailCount.load(std::memory_order_relaxed);
+      s.paintCoalesced = gPaintCoalescedCount.load(std::memory_order_relaxed);
+      s.overwriteBeforePresent = gOverwriteBeforePresentCount.load(std::memory_order_relaxed);
+      return s;
+    };
+    PresentCounterSnapshot lastPresentCounters = load_present_counters();
+    auto append_present_counter_fields = [&](std::ostream& os) {
+      const PresentCounterSnapshot nowCounters = load_present_counters();
+      const uint64_t d3dPresentSuccess = nowCounters.d3dPresentSuccess - lastPresentCounters.d3dPresentSuccess;
+      const uint64_t d3dPresentFail = nowCounters.d3dPresentFail - lastPresentCounters.d3dPresentFail;
+      const uint64_t gdiFallbackPresented =
+          nowCounters.gdiFallbackPresented - lastPresentCounters.gdiFallbackPresented;
+      const uint64_t fallbackInitFail = nowCounters.fallbackInitFail - lastPresentCounters.fallbackInitFail;
+      const uint64_t fallbackRenderFail = nowCounters.fallbackRenderFail - lastPresentCounters.fallbackRenderFail;
+      const uint64_t fallbackNv12ConvertFail =
+          nowCounters.fallbackNv12ConvertFail - lastPresentCounters.fallbackNv12ConvertFail;
+      const uint64_t paintCoalesced = nowCounters.paintCoalesced - lastPresentCounters.paintCoalesced;
+      const uint64_t overwriteBeforePresent =
+          nowCounters.overwriteBeforePresent - lastPresentCounters.overwriteBeforePresent;
+      const uint64_t d3dAttempts = d3dPresentSuccess + d3dPresentFail;
+      const uint64_t gdiFallbackRateX1000 = (d3dAttempts > 0)
+          ? ((gdiFallbackPresented * 1000ULL) / d3dAttempts)
+          : 0;
+      os << " d3dPresentSuccess=" << d3dPresentSuccess
+         << " d3dPresentFail=" << d3dPresentFail
+         << " gdiFallbackPresented=" << gdiFallbackPresented
+         << " gdiFallbackRateX1000=" << gdiFallbackRateX1000
+         << " fallbackInitFail=" << fallbackInitFail
+         << " fallbackRenderFail=" << fallbackRenderFail
+         << " fallbackNv12ConvertFail=" << fallbackNv12ConvertFail
+         << " paintCoalesced=" << paintCoalesced
+         << " overwriteBeforePresent=" << overwriteBeforePresent;
+      lastPresentCounters = nowCounters;
+    };
     auto aligned_lag_us = [&](uint64_t remoteTsUs, uint64_t localNowUs,
                               bool& timelineReady, uint64_t& remoteBaseUs, uint64_t& localBaseUs) -> uint64_t {
       if (!timelineReady || remoteTsUs < remoteBaseUs) {
@@ -1236,8 +1452,9 @@ int main(int argc, char** argv) {
                     << " mbps=" << mbps
                     << " decodedRawMbps=" << decodedRawMbps
                     << " decodeRatioX100=" << decodeRatioX100
-                    << " size=" << h.width << "x" << h.height
-                    << "\n";
+                    << " size=" << h.width << "x" << h.height;
+          append_present_counter_fields(std::cout);
+          std::cout << "\n";
           recvFrames = 0;
           decodedFrames = 0;
           skippedQueued = 0;
@@ -1283,8 +1500,9 @@ int main(int argc, char** argv) {
                     << " mbps=" << mbps
                     << " decodedRawMbps=" << decodedRawMbps
                     << " decodeRatioX100=" << decodeRatioX100
-                    << " size=" << h.width << "x" << h.height
-                    << "\n";
+                    << " size=" << h.width << "x" << h.height;
+          append_present_counter_fields(std::cout);
+          std::cout << "\n";
           recvFrames = 0;
           decodedFrames = 0;
           skippedQueued = 0;
@@ -1323,8 +1541,9 @@ int main(int argc, char** argv) {
                     << " mbps=" << mbps
                     << " decodedRawMbps=" << decodedRawMbps
                     << " decodeRatioX100=" << decodeRatioX100
-                    << " size=" << h.width << "x" << h.height
-                    << "\n";
+                    << " size=" << h.width << "x" << h.height;
+          append_present_counter_fields(std::cout);
+          std::cout << "\n";
           recvFrames = 0;
           decodedFrames = 0;
           skippedQueued = 0;
@@ -1361,8 +1580,15 @@ int main(int argc, char** argv) {
       }
 
       const uint64_t nowUs = qpc_now_us();
+      const uint64_t queueSetUs = nowUs;
+      const uint64_t decodeToQueueUs = (queueSetUs >= decodeEndUs) ? (queueSetUs - decodeEndUs) : 0;
       {
         std::lock_guard<std::mutex> lk(gFrame.mu);
+        const uint64_t prevVersion = gFrame.version;
+        const uint64_t lastPresentedVersion = gLastPresentedVersion.load(std::memory_order_relaxed);
+        if (prevVersion > lastPresentedVersion) {
+          ++gOverwriteBeforePresentCount;
+        }
         gFrame.format = SharedFrame::PixelFormat::Nv12;
         gFrame.width = decoded.width;
         gFrame.height = decoded.height;
@@ -1375,11 +1601,17 @@ int main(int argc, char** argv) {
         gFrame.recvUs = packetNowUs;
         gFrame.decodeStartUs = decodeStartUs;
         gFrame.decodeEndUs = decodeEndUs;
-        gFrame.version += 1;
+        gFrame.queueSetUs = queueSetUs;
+        gFrame.decodeToQueueUs = decodeToQueueUs;
+        gFrame.version = prevVersion + 1;
         gFrame.bytes = std::move(frameNv12);
       }
-      if (gHwnd && !gPaintQueued.exchange(true)) {
-        InvalidateRect(gHwnd, nullptr, FALSE);
+      if (gHwnd) {
+        if (!gPaintQueued.exchange(true)) {
+          InvalidateRect(gHwnd, nullptr, FALSE);
+        } else {
+          ++gPaintCoalescedCount;
+        }
       }
 
       if (args.traceEvery > 0 && (h.seq % args.traceEvery) == 0 &&
@@ -1440,8 +1672,9 @@ int main(int argc, char** argv) {
                   << " mbps=" << mbps
                   << " decodedRawMbps=" << decodedRawMbps
                   << " decodeRatioX100=" << decodeRatioX100
-                  << " size=" << decoded.width << "x" << decoded.height
-                  << "\n";
+                  << " size=" << decoded.width << "x" << decoded.height;
+        append_present_counter_fields(std::cout);
+        std::cout << "\n";
         recvFrames = 0;
         decodedFrames = 0;
         skippedQueued = 0;
@@ -1577,6 +1810,7 @@ int main(int argc, char** argv) {
         }
 
         const uint64_t nowUs = qpc_now_us();
+        const uint64_t queueSetUs = nowUs;
         auto frameBgra = std::make_shared<std::vector<uint8_t>>(std::move(payload));
         if (!frameBgra || frameBgra->empty()) {
           ++skippedQueued;
@@ -1584,6 +1818,11 @@ int main(int argc, char** argv) {
         }
         {
           std::lock_guard<std::mutex> lk(gFrame.mu);
+          const uint64_t prevVersion = gFrame.version;
+          const uint64_t lastPresentedVersion = gLastPresentedVersion.load(std::memory_order_relaxed);
+          if (prevVersion > lastPresentedVersion) {
+            ++gOverwriteBeforePresentCount;
+          }
           gFrame.format = SharedFrame::PixelFormat::Bgra32;
           gFrame.width = h.width;
           gFrame.height = h.height;
@@ -1596,11 +1835,17 @@ int main(int argc, char** argv) {
           gFrame.recvUs = nowUs;
           gFrame.decodeStartUs = nowUs;
           gFrame.decodeEndUs = nowUs;
-          gFrame.version += 1;
+          gFrame.queueSetUs = queueSetUs;
+          gFrame.decodeToQueueUs = 0;
+          gFrame.version = prevVersion + 1;
           gFrame.bytes = std::move(frameBgra);
         }
-        if (gHwnd && !gPaintQueued.exchange(true)) {
-          InvalidateRect(gHwnd, nullptr, FALSE);
+        if (gHwnd) {
+          if (!gPaintQueued.exchange(true)) {
+            InvalidateRect(gHwnd, nullptr, FALSE);
+          } else {
+            ++gPaintCoalescedCount;
+          }
         }
 
         if (args.traceEvery > 0 && (h.seq % args.traceEvery) == 0 &&
@@ -1656,8 +1901,9 @@ int main(int argc, char** argv) {
                     << " mbps=" << mbps
                     << " decodedRawMbps=" << decodedRawMbps
                     << " decodeRatioX100=" << decodeRatioX100
-                    << " size=" << h.width << "x" << h.height
-                    << "\n";
+                    << " size=" << h.width << "x" << h.height;
+          append_present_counter_fields(std::cout);
+          std::cout << "\n";
           recvFrames = 0;
           decodedFrames = 0;
           skippedQueued = 0;

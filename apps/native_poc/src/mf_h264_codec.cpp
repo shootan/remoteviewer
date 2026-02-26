@@ -597,36 +597,61 @@ bool bgra_to_nv12(const uint8_t* bgra, uint32_t width, uint32_t height, uint32_t
   auto* yPlane = outNv12->data();
   auto* uvPlane = outNv12->data() + yPlaneSize;
 
-  for (uint32_t y = 0; y < height; ++y) {
-    const uint8_t* row = bgra + static_cast<size_t>(y) * bgraStride;
-    for (uint32_t x = 0; x < width; ++x) {
-      const uint8_t b = row[x * 4 + 0];
-      const uint8_t g = row[x * 4 + 1];
-      const uint8_t r = row[x * 4 + 2];
-      const int yy = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
-      yPlane[static_cast<size_t>(y) * width + x] = static_cast<uint8_t>(clamp_u8_int(yy));
+  struct BgraToNv12Tables {
+    int yR[256]{};
+    int yG[256]{};
+    int yB[256]{};
+  };
+  static const BgraToNv12Tables kTbl = []() {
+    BgraToNv12Tables t{};
+    for (int i = 0; i < 256; ++i) {
+      t.yR[i] = 66 * i;
+      t.yG[i] = 129 * i;
+      t.yB[i] = 25 * i;
     }
-  }
+    return t;
+  }();
 
   for (uint32_t y = 0; y < height; y += 2) {
+    const uint32_t y1 = std::min<uint32_t>(y + 1, height - 1);
     const uint8_t* row0 = bgra + static_cast<size_t>(y) * bgraStride;
-    const uint8_t* row1 = bgra + static_cast<size_t>(std::min<uint32_t>(y + 1, height - 1)) * bgraStride;
+    const uint8_t* row1 = bgra + static_cast<size_t>(y1) * bgraStride;
+    uint8_t* yRow0 = yPlane + static_cast<size_t>(y) * width;
+    uint8_t* yRow1 = yPlane + static_cast<size_t>(y1) * width;
     uint8_t* uvRow = uvPlane + static_cast<size_t>(y / 2) * width;
+
     for (uint32_t x = 0; x < width; x += 2) {
       const uint32_t x1 = std::min<uint32_t>(x + 1, width - 1);
-      const std::array<const uint8_t*, 4> px = {
-          row0 + x * 4, row0 + x1 * 4, row1 + x * 4, row1 + x1 * 4};
-      int r = 0, g = 0, b = 0;
-      for (const auto* p : px) {
-        b += p[0];
-        g += p[1];
-        r += p[2];
+      const uint8_t* p00 = row0 + static_cast<size_t>(x) * 4;
+      const uint8_t* p10 = row0 + static_cast<size_t>(x1) * 4;
+      const uint8_t* p01 = row1 + static_cast<size_t>(x) * 4;
+      const uint8_t* p11 = row1 + static_cast<size_t>(x1) * 4;
+
+      const int b00 = p00[0], g00 = p00[1], r00 = p00[2];
+      const int b10 = p10[0], g10 = p10[1], r10 = p10[2];
+      const int b01 = p01[0], g01 = p01[1], r01 = p01[2];
+      const int b11 = p11[0], g11 = p11[1], r11 = p11[2];
+
+      const int y00 = ((kTbl.yR[r00] + kTbl.yG[g00] + kTbl.yB[b00] + 128) >> 8) + 16;
+      yRow0[x] = static_cast<uint8_t>(clamp_u8_int(y00));
+      if (x1 != x) {
+        const int y10 = ((kTbl.yR[r10] + kTbl.yG[g10] + kTbl.yB[b10] + 128) >> 8) + 16;
+        yRow0[x1] = static_cast<uint8_t>(clamp_u8_int(y10));
       }
-      r /= 4;
-      g /= 4;
-      b /= 4;
-      const int uu = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
-      const int vv = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+      if (y1 != y) {
+        const int y01 = ((kTbl.yR[r01] + kTbl.yG[g01] + kTbl.yB[b01] + 128) >> 8) + 16;
+        yRow1[x] = static_cast<uint8_t>(clamp_u8_int(y01));
+        if (x1 != x) {
+          const int y11 = ((kTbl.yR[r11] + kTbl.yG[g11] + kTbl.yB[b11] + 128) >> 8) + 16;
+          yRow1[x1] = static_cast<uint8_t>(clamp_u8_int(y11));
+        }
+      }
+
+      const int rAvg = (r00 + r10 + r01 + r11 + 2) >> 2;
+      const int gAvg = (g00 + g10 + g01 + g11 + 2) >> 2;
+      const int bAvg = (b00 + b10 + b01 + b11 + 2) >> 2;
+      const int uu = ((-38 * rAvg - 74 * gAvg + 112 * bAvg + 128) >> 8) + 128;
+      const int vv = ((112 * rAvg - 94 * gAvg - 18 * bAvg + 128) >> 8) + 128;
       uvRow[x] = static_cast<uint8_t>(clamp_u8_int(uu));
       if (x + 1 < width) uvRow[x + 1] = static_cast<uint8_t>(clamp_u8_int(vv));
     }
