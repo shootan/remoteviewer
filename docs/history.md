@@ -1450,3 +1450,339 @@ powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.
   2) 인코더 큐 정책/파이프라인 단계 제어 실험
   3) 해상도/프레임 설정 조합(720p/60, 720p/30, 1080p/30)에서 `C2E/encQueue` 동시 비교
   4) 동일 시나리오 3회 이상 반복해 `USER_FEEDBACK_UF_H_PIPEUS_P95`를 200ms 이하로 낮추는지 검증
+
+### 42) 2026-02-26 host AU 타임스탬프 편차 추적 반영
+목표
+- 사용자 체감 지연의 `~0.5~1초` 구간에서 실제 병목이 AU 타임 정합성 문제인지 인코더 큐 적체인지 구분할 수 있도록 trace를 분해.
+
+변경 반영
+- `apps/native_poc/src/native_video_host_main.cpp`
+  - `trace`/`user-feedback` 로그에 `frameCaptureUs`(큐캡처 시각), `auCaptureUs`(AU sampleTime), `captureToAuSkewUs`를 추가.
+- `automation/verify_native_video_runtime.ps1`
+  - host 피드백 파서에 `captureToAuSkewUs` 집계 반영.
+- 문서:
+  - `docs/구현계획.md`에서 host 병목 추적 우선순위에 `CAPTURE_TO_AU_SKEW` 반영.
+  - 같은 문서에 `docs/history.md`에 모든 재측정 결과 **반드시 append** 규칙을 명시.
+
+실행
+- 동일 변경의 로그 보강 반영은 완료. `USER_FEEDBACK_UF_H_CAPTURETOAUSKEW_*` 계산은 다음 재측정부터 본 채널로 집계 예정.
+
+판정
+- 코드/파서 정합성 적용 완료.
+- 다음 실행부터 각 run의 결과를 위 형식으로 누적 기록.
+
+### 43) 2026-02-26 host 병목 재측정 10회 반복(재빌드 미반영)
+목표
+- `pipeUs/c2eUs/encQueueUs` 재현 분포를 재확인하고 병목 위치 재확정.
+- 문서 규칙(`history append`)대로 측정 결과 누적.
+
+실행
+- 동일 조건 10회 반복:
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -Codec h264 -Transport udp -Fps 30 -FpsHint 30 -HostSeconds 12 -ClientSeconds 10 -Bitrate 1100000 -Keyint 15 -TraceEvery 0 -NoInputChannel
+```
+- 로그:
+  - `automation/logs/verify-native-video-20260226-224328`
+  - `automation/logs/verify-native-video-20260226-224342`
+  - `automation/logs/verify-native-video-20260226-224356`
+  - `automation/logs/verify-native-video-20260226-224410`
+  - `automation/logs/verify-native-video-20260226-224423`
+  - `automation/logs/verify-native-video-20260226-224437`
+  - `automation/logs/verify-native-video-20260226-224501`
+  - `automation/logs/verify-native-video-20260226-224515`
+  - `automation/logs/verify-native-video-20260226-224529`
+  - `automation/logs/verify-native-video-20260226-224542`
+
+주요 수치
+- `USER_FEEDBACK_UF_H_ENCQUEUEUS_AVG_US`: 10회 평균 `~653,531`us, P95 추정 평균 `~705,244`us, 최소~최대 `583,245.5`~`799,343`us
+- `USER_FEEDBACK_UF_H_PIPEUS_AVG_US`:
+  - 정밀 추출 4회: `603,675.9 ~ 617,098.1`us (평균 `610,050.3`us)
+  - 추가 6회: `583,245.5 ~ 750,107.7`us 구간 분포 포함
+- `USER_FEEDBACK_UF_H_C2EUS_AVG_US`: 4회 정밀 추출 `601,598.5 ~ 615,353.2`us (평균 `608,410.9`us)
+- `USER_FEEDBACK_UF_H_CAPTURETOAUSKEW_*`:
+  - 전부 빈값(미수집)
+- `HOST_QUEUE_WAIT_TIMEOUT_COUNT`: 전부 `0`
+- `HOST_QUEUE_WAIT_NOWORK_COUNT`: 전부 `0`
+- `USER_FEEDBACK_HOST_BOTTLENECK_STAGE`: 전부 `pipeUs`
+
+판정
+- 병목은 계속 `pipeUs/c2e/encQueue` 구간에 고정되며, `host queue wait` 계열은 기저적.
+- `CAPTURETOAUSKEW`는 현재 실행 바이너리에서 미집계되어 원인 분리 불가(재빌드 반영 필요).
+- 다음 액션: 재빌드 가능한 환경에서 동일 조건 20회 반복 + `captureToAuSkew` 값을 함께 집계해 `capture timestamp shift` 여부 최종 확정.
+
+### 44) 2026-02-26 host 병목 재측정 20회 반복(재빌드 반영)
+목표
+- `pipeUs`/`c2eUs` 병목을 `captureToAuSkewUs` 분해로 정밀 판정하고, 큐 대기 계열 타임아웃 여부를 동시에 확인.
+
+실행
+- 동일 조건 20회 반복:
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -BuildDir C:\Users\CHO\AppData\Local\Temp\build-native2-test -Codec h264 -Transport udp -Fps 30 -FpsHint 30 -HostSeconds 12 -ClientSeconds 10 -Bitrate 1100000 -Keyint 15 -TraceEvery 0 -NoInputChannel
+```
+- 로그:
+  - `automation/logs/verify-native-video-20260226-225734`
+  - `automation/logs/verify-native-video-20260226-225748`
+  - `automation/logs/verify-native-video-20260226-225802`
+  - `automation/logs/verify-native-video-20260226-225815`
+  - `automation/logs/verify-native-video-20260226-225829`
+  - `automation/logs/verify-native-video-20260226-225842`
+  - `automation/logs/verify-native-video-20260226-225856`
+  - `automation/logs/verify-native-video-20260226-225909`
+  - `automation/logs/verify-native-video-20260226-225923`
+  - `automation/logs/verify-native-video-20260226-225936`
+  - `automation/logs/verify-native-video-20260226-225950`
+  - `automation/logs/verify-native-video-20260226-230003`
+  - `automation/logs/verify-native-video-20260226-230017`
+  - `automation/logs/verify-native-video-20260226-230030`
+  - `automation/logs/verify-native-video-20260226-230044`
+  - `automation/logs/verify-native-video-20260226-230057`
+  - `automation/logs/verify-native-video-20260226-230111`
+  - `automation/logs/verify-native-video-20260226-230124`
+  - `automation/logs/verify-native-video-20260226-230138`
+  - `automation/logs/verify-native-video-20260226-230152`
+
+주요 수치
+- `USER_FEEDBACK_UF_H_PIPEUS_AVG_US` 평균: `617,137.6`us (`min=579,515.4`, `max=735,240.1`)
+- `USER_FEEDBACK_UF_H_C2EUS_AVG_US` 평균: `615,387.4`us (`min~577,714.5`, `max~732,736.5`)
+- `USER_FEEDBACK_UF_H_ENCQUEUEUS_AVG_US` 평균: `615,387.4`us (동일)
+- `USER_FEEDBACK_UF_H_QUEUETOENCODEUS_AVG_US` 평균: `26,311.4`us
+- `USER_FEEDBACK_UF_H_QUEUETOSENDUS_AVG_US` 평균: `28,061.5`us
+- `USER_FEEDBACK_UF_H_CAPTURETOAUSKEW_AVG_US` 평균: `578,147.5`us
+- `USER_FEEDBACK_HOST_BOTTLENECK_STAGE` 모두 `pipeUs`
+- `HOST_QUEUE_WAIT_TIMEOUT_COUNT`: `0`
+- `HOST_QUEUE_WAIT_NOWORK_COUNT`: `0`
+- `HOST_QUEUE_SKIPPED_BY_OVERWRITE`: `234`
+- `USER_FEEDBACK_UF_H_CAPTURETOAUSKEW_COUNT` 합계: `199`
+
+판정
+- 사용자 체감 지연은 큐 대기 타임아웃/무작업(`QUEUE_WAIT_*`)이 아닌 `capture -> AU 타임스탬프 정합성` 경로가 주된 의심으로 확인됨.
+- `Q2E`/`Q2S`는 상대적으로 작고 안정적이어서 인코더 제출 자체 지연보다 타임스탬프 오프셋 축적이 핵심인 정황.
+- 다음 작업: `captureToAuSkewUs` 축소를 1순위로 하여 AU timestamp 정합성 경로 고정/완화 실험 실행.
+
+### 45) 2026-02-26 host 병목 재측정 20회 반복(캡처 기준 타임스탬프 고정 반영)
+목표
+- `EncodedFrameHeader.captureQpcUs`를 AU sample 기준이 아닌 캡처 기준으로 고정한 상태에서 병목 위치를 재확인.
+
+실행
+- 동일 조건 20회 반복:
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -BuildDir C:\Users\CHO\AppData\Local\Temp\build-native2-test2 -Codec h264 -Transport udp -Fps 30 -FpsHint 30 -HostSeconds 12 -ClientSeconds 10 -Bitrate 1100000 -Keyint 15 -TraceEvery 0 -NoInputChannel
+```
+- 로그:
+  - `automation/logs/verify-native-video-20260226-231355`
+  - `automation/logs/verify-native-video-20260226-231410`
+  - `automation/logs/verify-native-video-20260226-231424`
+  - `automation/logs/verify-native-video-20260226-231438`
+  - `automation/logs/verify-native-video-20260226-231452`
+  - `automation/logs/verify-native-video-20260226-231506`
+  - `automation/logs/verify-native-video-20260226-231520`
+  - `automation/logs/verify-native-video-20260226-231534`
+  - `automation/logs/verify-native-video-20260226-231548`
+  - `automation/logs/verify-native-video-20260226-231602`
+  - `automation/logs/verify-native-video-20260226-231616`
+  - `automation/logs/verify-native-video-20260226-231630`
+  - `automation/logs/verify-native-video-20260226-231644`
+  - `automation/logs/verify-native-video-20260226-231658`
+  - `automation/logs/verify-native-video-20260226-231712`
+  - `automation/logs/verify-native-video-20260226-231726`
+  - `automation/logs/verify-native-video-20260226-231740`
+  - `automation/logs/verify-native-video-20260226-231754`
+  - `automation/logs/verify-native-video-20260226-231808`
+  - `automation/logs/verify-native-video-20260226-231822`
+
+주요 수치
+- `USER_FEEDBACK_UF_H_PIPEUS_AVG_US`(user-feedback 존재 구간): 평균 `98,677`us (`count=4`)
+- `USER_FEEDBACK_UF_H_C2EUS_AVG_US`(user-feedback 존재 구간): 평균 `95,816`us (`count=4`)
+- `USER_FEEDBACK_UF_H_ENCQUEUEUS_AVG_US`: `0`~`1xx`ms 구간 미집계(계측 임계 미달 run 다수로 요약치 0)
+- `USER_FEEDBACK_UF_H_CAPTURETOAUSKEW_AVG_US`: 평균 `690,506`us (`count=3`)
+- `HOST_QUEUE_WAIT_TIMEOUT_COUNT`: `0`
+- `HOST_QUEUE_WAIT_NOWORK_COUNT`: `0`
+- `USER_FEEDBACK_UF_H_PIPEUS_COUNT`: `4` (`20` runs 중 16run은 0 집계)
+
+판정
+- `captureQpcUs` 정합을 캡처 기준으로 고정하자 `PIPE_US`/`C2E_US`가 기존 600ms대 → 약 `100ms`대(임계 미달 샘플 제외)로 크게 감소.
+- `captureToAuSkewUs`는 여전히 수백 ms 대로 관측되며, 현재는 체감 지연의 최우선 병목은 아니라는 신호가 큼.
+- 다음 작업:
+  - `captureToAuSkewUs`는 AU timestamp source 분기(encoder `sampleTimeHns` 산출) 원인 분해만 추가로 진행.
+- 사용자 체감 지연 기준 우선순위를 `PIPE_US`/`C2E_US`/`QUEUE_TO_ENCODE`로 재정렬해 추적.
+
+### 46) 2026-02-26 host 병목 재측정 6회 반복(TraceEvery 1, 큐 내부 분해 강화)
+목표
+- `user-feedback` 임계치(90ms) 밖을 벗어나는 구간만 수집되는 편향을 줄이기 위해 `trace` 기반으로 `queue->encode/send` 하위 분해를 재측정.
+- host 병목이 큐 대기인지 AU timestamp 정합성인지 구간별로 분리.
+
+실행
+- 동일 조건 6회 반복:
+```powershell
+powershell -ExecutionPolicy Bypass -File remote60/automation/verify_native_video_runtime.ps1 -BuildDir C:\Users\CHO\AppData\Local\Temp\build-native2-test2 -Codec h264 -Transport udp -Fps 30 -FpsHint 30 -HostSeconds 12 -ClientSeconds 10 -Bitrate 1100000 -Keyint 15 -TraceEvery 1 -TraceMax 0 -NoInputChannel
+```
+- 로그:
+  - `automation/logs/verify-native-video-20260226-233141`
+  - `automation/logs/verify-native-video-20260226-233155`
+  - `automation/logs/verify-native-video-20260226-233209`
+  - `automation/logs/verify-native-video-20260226-233228`
+  - `automation/logs/verify-native-video-20260226-233241`
+  - `automation/logs/verify-native-video-20260226-233255`
+
+주요 수치 (host trace 기반 집계)
+- `c2eUs` 평균/평활: `35.8ms`
+- `queueToEncodeUs` 평균/평활: `25.1ms` (최고 약 `28.5ms`)
+- `queueToSendUs` 평균/평활: `26.9ms` (최고 약 `47.3ms`)
+- `queueWaitUs` 평균/평활: `12.6ms`
+- `selectWaitUs` 평균/평활: `12.6ms`
+- `queueWaitTimeoutCount`: `0` (6/6)
+- `queueWaitNoWorkCount`: `0` (6/6)
+- `queueDepthMax`: `4~5` (대부분 `4`~`5`)
+- `captureToAuSkewUs`는 `720,796us ~ 883,313us` 구간
+- `encQueueUs`는 `~760,000us ~ 930,000us`(`captureToAu` 기준 계산에서 확대)
+- `USER_FEEDBACK` 경보 라인: `PIPE_US`는 임계치 외 5회, 1회만 `~91.8ms` 기록
+- `skippedByOverwrite`: run당 누적 `14~24` 내에서 증가
+
+판정
+- `QUEUE_WAIT` 계열 지연은 수십 ms로 낮고, `PIPE_US` 임계치 미달로 사용자 샘플링이 제한된 상태였던 것이 통계 상 병목 과대해석 원인 중 하나로 확인됨.
+- `captureToAuSkewUs`가 계속 수백 ms대인 점은 남아, 체감 1초대 지연의 주 원인 가능성이 여전히 AU 타임소스 정합성으로 보임.
+
+### 47) 2026-02-26 host 병목 정확도 개선 작업(`captureToAuTimelineSkewUs` 분리)
+목표
+- AU 기반 타임스탬프와 캡처 기반 타임스탬프를 분리해 병목 후보 계산의 오해를 줄임.
+- `encQueueUs` 과대해석 원인을 분리해 실제 큐/인코더 구간 병목만 추적 가능하게 함.
+
+수행
+- `apps/native_poc/src/native_video_host_main.cpp` 수정:
+  - `captureToAuTimelineSkewUs` 및 `encQueueAlignedUs` 로그 항목 추가.
+  - AU/캡처 상대 오차는 `captureTimelineOriginUs`, `auTimelineOriginUs` 기준 앵커로 계산.
+  - 기존 `captureToAuSkewUs`는 진단 보조로 유지하고 병목 후보 계산에서 분리.
+- `automation/verify_native_video_runtime.ps1` 수정:
+  - host 사용자 피드백 집계에 `encQueueAlignedUs`, `captureToAuTimelineSkewUs` 추가.
+  - 병목 후보 스테이지에서 raw `captureToAuSkewUs` 대신 `captureToAuTimelineSkewUs` 반영.
+
+판정
+- 병목 왜곡 원인(타임라인 스큐 오염) 분리 조치 적용 완료.
+- 동일 설정 재측정(TraceEvery 1 권장)에서 `captureToAuTimelineSkewUs`가 낮아지면 큐 병목으로 확정, 유지되면 AU 타임소스 정합 자체 병목으로 추가 분해 예정.
+
+### 48) 2026-02-26 host 병목 재측정 1회(TraceEvery 1, 정합 분리 로깅 반영 후)
+목표
+- `captureToAuTimelineSkewUs`를 정식 병목 후보로 채택한 뒤 실제 병목을 재확인.
+
+실행
+- 동일 조건 1회:
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -BuildDir C:\Users\CHO\AppData\Local\Temp\build-native2-test2 -Codec h264 -Transport udp -Fps 30 -FpsHint 30 -HostSeconds 12 -ClientSeconds 10 -Bitrate 1100000 -Keyint 15 -TraceEvery 1 -TraceMax 0 -NoInputChannel
+```
+- 로그:
+  - `automation/logs/verify-native-video-20260226-234619`
+
+주요 수치
+- `USER_FEEDBACK_UF_H_PIPEUS_AVG_US=35951.87`
+- `USER_FEEDBACK_UF_H_C2EUS_AVG_US=34663.71`
+- `USER_FEEDBACK_UF_H_QUEUETOENCODEUS_AVG_US=22231.15`
+- `USER_FEEDBACK_UF_H_QUEUETOSENDUS_AVG_US=23519.31`
+- `USER_FEEDBACK_UF_H_ENCQUEUEALIGNEDUS_AVG_US=34663.71` (실측 큐-인코드 정렬 기준)
+- `USER_FEEDBACK_UF_H_ENCQUEUEUS_AVG_US=722149.98` (원시 raw AU 기반)
+- `USER_FEEDBACK_UF_H_CAPTURETOAUTIMELINESKEWUS_AVG_US=687486.27` (고정된 AU/캡처 상대 오차)
+- `HOST_QUEUE_WAIT_TIMEOUT_COUNT=0`
+- `HOST_QUEUE_WAIT_NOWORK_COUNT=0`
+- `HOST_QUEUE_SKIPPED_BY_OVERWRITE=19`
+
+판정
+- 큐 적체/인코드 제출 병목은 `22~35ms` 대로 비교적 낮고, `encQueueAlignedUs` 기준으로는 병목 후보보다 작음.
+- `captureToAuTimelineSkewUs`가 지속적으로 매우 높아(약 687ms) 여전히 **AU 타임라인 정합성 자체**가 사용자 체감 0.5~1초 병목의 주요 원인일 가능성이 높음.
+
+### 49) 2026-02-27 host 병목 우선순위 수정 및 재측정(출력타임스탬프 드리프트 가드)
+목표
+- 동일 설정에서 `captureToAuTimelineSkewUs`가 0으로 수렴하는지 확인해 host 병목 후보를 정리.
+- 출력타임스탬프 오차가 50ms 이상일 때 입력타임스탬프로 강제 fallback하는 수정의 효과 검증.
+
+실행
+- 수정된 코드로 동일 조건 1회 재측정:
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -BuildDir C:\Users\CHO\AppData\Local\Temp\build-remote-fix -Codec h264 -Transport udp -Fps 30 -FpsHint 30 -HostSeconds 12 -ClientSeconds 10 -Bitrate 1100000 -Keyint 15 -TraceEvery 1 -TraceMax 0 -NoInputChannel
+```
+- 로그:
+  - `automation/logs/verify-native-video-20260227-000840`
+
+주요 수치
+- `USER_FEEDBACK_UF_H_PIPEUS_AVG_US=37645.05`
+- `USER_FEEDBACK_UF_H_C2EUS_AVG_US=36182.43`
+- `USER_FEEDBACK_UF_H_QUEUETOENCODEUS_AVG_US=23332.44`
+- `USER_FEEDBACK_UF_H_QUEUETOSENDUS_AVG_US=24795.06`
+- `USER_FEEDBACK_UF_H_SENDDONEUS_AVG_US=37890.82`
+- `USER_FEEDBACK_UF_H_CAPTURE_TO_AU_TIMELINESKEW_US=0`
+- `USER_FEEDBACK_UF_H_AU_TS_FROM_OUTPUT=0`
+- `HOST_QUEUE_WAIT_TIMEOUT_COUNT=0`
+- `HOST_QUEUE_WAIT_NOWORK_COUNT=0`
+- `PRESENT_GAP_P95_US=64091`
+- `PRESENT_GAP_OVER_1S=0`
+
+판정
+- host 병목 후보가 `captureToAuTimelineSkewUs`에서 `sendDoneUs`로 전환되며, 타임스탬프 정합성 병목은 해소됨을 확인.
+- 실제 체감 병목은 현재 측면상 `send` 경로(네트워크 송신 지연 + 호스트 스레드 대기/큐 경유 포함)로 정리됨.
+- 다음 액션:
+  - `sendDoneUs`와 `queueWaitUs`를 상대로한 호스트 전송 경로/스레드 스케줄링 정밀 재분해 (패킷 배치/flush, socket 옵션, frame pacing 조정).
+### 50) 2026-02-27 host send 경로 분해 재측정(헤더/페이로드/UDP 청크)
+목표
+- `sendDoneUs` 과다 체감의 실제 원인을 `send` API 처리시간과 큐/대기시간으로 분리 검증.
+
+실행
+- 분해 지표 추가 후 동일 조건 1회 재측정:
+```powershell
+powershell -ExecutionPolicy Bypass -File remote60/automation/verify_native_video_runtime.ps1 -BuildDir C:\Users\CHO\AppData\Local\Temp\build-remote-sendpath -Codec h264 -Transport udp -Fps 30 -FpsHint 30 -HostSeconds 12 -ClientSeconds 10 -Bitrate 1100000 -Keyint 15 -TraceEvery 1 -TraceMax 0 -NoInputChannel
+```
+- 로그:
+  - `automation/logs/verify-native-video-20260227-001536`
+
+주요 수치
+- `USER_FEEDBACK_UF_H_PIPEUS_AVG_US=38967.51`
+- `USER_FEEDBACK_UF_H_SENDDONEUS_AVG_US=39154.72`
+- `USER_FEEDBACK_UF_H_SENDDURUS_AVG_US=265.65`
+- `USER_FEEDBACK_UF_H_SENDPAYLOADUS_AVG_US=244.93`
+- `USER_FEEDBACK_UF_H_SENDCHUNKMAXUS_P95_US=244`
+- `USER_FEEDBACK_UF_H_SENDCALLCOUNT_P95_US=30` (대체로 UDP 청크 수 증가 구간에서 높아짐)
+- `USER_FEEDBACK_UF_H_QUEUETOSENDUS_AVG_US=26247.97`
+- `USER_FEEDBACK_UF_H_C2EUS_AVG_US=37466.96`
+- `HOST_QUEUE_WAIT_TIMEOUT_COUNT=0`
+- `HOST_QUEUE_WAIT_NOWORK_COUNT=0`
+- `HOST_QUEUE_SKIPPED_BY_OVERWRITE=23`
+
+판정
+- `send` API 자체(`sendHeaderUs`/`sendPayloadUs`/`sendChunk*`)는 평균 수백 μs~ms 미만으로, 송신 호출 자체 병목은 아님.
+- `sendDoneUs`/`pipeUs`는 큐 타임 포함값이라 `queueToSendUs`·`queueToEncodeUs` 누적 구간을 함께 판단해야 함.
+- 다음 액션:
+  - 스케줄러 큐/전송 직전 프레임 간격 제어 및 `sendStart` 기준 지연 분해(예: `sendIntervalUs`, wakeup 타임)로 추가 추적 후 `M2.5` 종료 판단.
+
+### 51) 2026-02-27 host send 스케줄링 지연 추적 항목 적용
+목표
+- `sendDoneUs`의 구성요소를 더 분해해 `send` API 처리시간 외에 전송 직전 대기/스케줄 지연을 확정.
+- 특히 `queueToSendUs`가 큰 시점에서 이전 프레임 간격(`sendIntervalUs`) 증가 여부를 함께 확인해 스레드 스케줄링 병목 후보를 검증.
+
+수행
+- `apps/native_poc/src/native_video_host_main.cpp`:
+  - host 전송 시점 기준 전 프레임 대비 간격(`sendIntervalUs`) 및 타겟 프레임 간격 대비 편차(`sendIntervalErrUs`) 계산.
+  - `raw`/`h264`의 `trace` + `user-feedback` 로그에 두 항목 추가.
+  - 정상 전송 완료 시 다음 프레임 비교 기준으로 `lastSendStartUs` 갱신.
+- `automation/verify_native_video_runtime.ps1`:
+  - `sendIntervalUs`, `sendIntervalErrUs`를 host 사용자 피드백 집계/병목 후보/Top3 항목에 반영.
+  - host 병목 후보 후보군에 `sendIntervalUs`, `sendIntervalErrUs` 추가.
+
+판정
+- 코드 레벨 분해는 완료되었고, 재빌드+재측정이 필요. 다음은 즉시 재측정 라운드에서 `sendInterval*`와 기존 `sendDoneUs/queueToSendUs`의 상관관계 판정.
+
+### 52) 2026-02-27 host 큐 대기 이유 분류 추적 반영
+목표
+- `queueWaitUs` 지연이 "timeout/no-work/정상" 중 어떤 경로로 누적되는지 고립.
+
+수행
+- `apps/native_poc/src/native_video_host_main.cpp`:
+  - `queueWaitReason`을 추가:
+    - `0`: 정상 pop(조건 충족으로 wakeup)
+    - `1`: `cv.wait_for` timeout으로 wakeup
+    - `2`: `frame.version == lastVersionSent` 또는 비어있는 payload로 인한 no-work 경로
+  - `raw`/`h264`의 `trace`/`user-feedback` 로그에 `queueWaitReason` 출력 추가.
+- `automation/verify_native_video_runtime.ps1`:
+  - `queueWaitReason` 개수(`HOST_QUEUE_WAIT_REASON_0/1/2_COUNT`) 집계 출력 추가.
+  - Host TOP log에서 `USER_FEEDBACK_HOST_TOP*_QUEUE_WAIT_REASON` 추가.
+  - trace/user-feedback 파싱 루프에서 이유 코드를 동시에 집계하도록 확장.
+
+판정
+- `queueWaitUs` 병목의 원인 분해를 위한 최소 추적 코드가 완료됨.
+- `queueWaitReason` 기반 재측정/상관분석은 다음 런에서 진행 예정.

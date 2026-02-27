@@ -1,4 +1,5 @@
 #include "mf_h264_codec.hpp"
+#include "time_utils.hpp"
 
 #include <algorithm>
 #include <array>
@@ -259,6 +260,16 @@ bool env_truthy_local(const char* key) {
   return (std::strcmp(v, "1") == 0) ||
          (_stricmp(v, "true") == 0) ||
          (_stricmp(v, "on") == 0);
+}
+
+uint32_t env_u32_local(const char* key, uint32_t defaultValue) {
+  if (!key) return defaultValue;
+  const char* v = std::getenv(key);
+  if (!v || !*v) return defaultValue;
+  char* end = nullptr;
+  const unsigned long raw = std::strtoul(v, &end, 10);
+  if (!end || *end != '\0') return defaultValue;
+  return static_cast<uint32_t>(raw);
 }
 
 std::string env_string_local(const char* key) {
@@ -1052,6 +1063,11 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
   (void)enc_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
   codec_debug_log("encoder initialize: stream started");
   started_ = true;
+  sampleTimeOffsetInitialized_ = false;
+  sampleTimeOffsetHns_ = 0;
+  sampleTimeOutputTimestampTrusted_ = true;
+  sampleTimeOutputTimestampTotalSamples_ = 0;
+  sampleTimeOutputTimestampFallbackCount_ = 0;
   frameIndex_ = 0;
   sequenceHeaderAnnexb_.clear();
 
@@ -1088,19 +1104,36 @@ bool H264Encoder::reconfigure_bitrate(uint32_t bitrate) {
 }
 
 bool H264Encoder::encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFrame, int64_t inputSampleTimeHns,
-                               std::vector<H264AccessUnit>* outUnits) {
+                               std::vector<H264AccessUnit>* outUnits, H264EncodeFrameStats* encodeStats) {
   if (!enc_ || !started_ || !outUnits) return false;
+  H264EncodeFrameStats localStats{};
+  if (!encodeStats) {
+    encodeStats = &localStats;
+  }
+  *encodeStats = H264EncodeFrameStats();
+  encodeStats->asyncEnabled = asyncTransform_ ? 1 : 0;
   outUnits->clear();
+  const uint64_t encodeCallStartUs = qpc_now_us();
+  const auto finish_call = [&](bool ok) -> bool {
+    const uint64_t encodeCallEndUs = qpc_now_us();
+    encodeStats->encodeCallUs = (encodeCallEndUs >= encodeCallStartUs) ? (encodeCallEndUs - encodeCallStartUs) : 0;
+    return ok;
+  };
+  constexpr int64_t kEncoderOutputTsSkewUs = 50000;
+  constexpr int64_t kEncoderOutputTsSkewHns = kEncoderOutputTsSkewUs * 10;
 
   Microsoft::WRL::ComPtr<IMFSample> sample;
   IMFSample* inputSample = nullptr;
   const int64_t sampleTime = (inputSampleTimeHns > 0)
                                  ? inputSampleTimeHns
                                  : (static_cast<int64_t>(frameIndex_) * sampleDurationHns_);
+  const uint64_t sampleCreateStartUs = qpc_now_us();
   if (!create_input_sample(nv12, sampleTime,
                            sampleDurationHns_, &inputSample)) {
-    return false;
+    return finish_call(false);
   }
+  const uint64_t sampleCreateEndUs = qpc_now_us();
+  encodeStats->sampleCreateUs = (sampleCreateEndUs >= sampleCreateStartUs) ? (sampleCreateEndUs - sampleCreateStartUs) : 0;
   sample.Attach(inputSample);
 
   if (forceKeyFrame) {
@@ -1108,6 +1141,8 @@ bool H264Encoder::encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFr
   }
 
   auto drain_outputs = [&]() -> bool {
+    const uint64_t drainStartUs = qpc_now_us();
+    ++encodeStats->processOutputDrainLoops;
     while (true) {
       MFT_OUTPUT_STREAM_INFO osi{};
       if (FAILED(enc_->GetOutputStreamInfo(0, &osi))) return false;
@@ -1124,13 +1159,19 @@ bool H264Encoder::encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFr
         odb.pSample = outSample.Get();
       }
       DWORD status = 0;
+      const uint64_t processOutputStartUs = qpc_now_us();
       const HRESULT po = enc_->ProcessOutput(0, 1, &odb, &status);
+      const uint64_t processOutputDoneUs = qpc_now_us();
+      encodeStats->processOutputDrainUs +=
+          (processOutputDoneUs >= processOutputStartUs) ? (processOutputDoneUs - processOutputStartUs) : 0;
       if (po == MF_E_TRANSFORM_NEED_MORE_INPUT) {
         if (odb.pEvents) odb.pEvents->Release();
+        ++encodeStats->processOutputNeedMoreInputCount;
         break;
       }
       if (po == MF_E_TRANSFORM_STREAM_CHANGE) {
         if (odb.pEvents) odb.pEvents->Release();
+        ++encodeStats->processOutputStreamChangeCount;
         if (!configure_types()) return false;
         continue;
       }
@@ -1144,6 +1185,7 @@ bool H264Encoder::encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFr
           codec_debug_log(line.c_str());
         }
         if (odb.pEvents) odb.pEvents->Release();
+        ++encodeStats->processOutputErrorCount;
         return false;
       }
 
@@ -1163,9 +1205,34 @@ bool H264Encoder::encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFr
         const bool maybeKey = sampleKey || annexb_contains_idr(bytes.data(), bytes.size());
         au.keyFrame = maybeKey;
         int64_t outSampleTimeHns = 0;
-        if (SUCCEEDED(produced->GetSampleTime(&outSampleTimeHns))) {
-          au.sampleTimeHns = outSampleTimeHns;
+        bool sampleTimeFromOutput = false;
+        int64_t normalizedAuSampleTimeHns = sampleTime;
+        if (SUCCEEDED(produced->GetSampleTime(&outSampleTimeHns)) && outSampleTimeHns > 0) {
+          ++sampleTimeOutputTimestampTotalSamples_;
+          if (sampleTimeOutputTimestampTrusted_) {
+            sampleTimeFromOutput = true;
+            if (!sampleTimeOffsetInitialized_) {
+              sampleTimeOffsetHns_ = sampleTime - outSampleTimeHns;
+              sampleTimeOffsetInitialized_ = true;
+            }
+            normalizedAuSampleTimeHns = outSampleTimeHns + sampleTimeOffsetHns_;
+            if (std::llabs(sampleTime - normalizedAuSampleTimeHns) > kEncoderOutputTsSkewHns) {
+              sampleTimeOutputTimestampTrusted_ = false;
+              sampleTimeOutputTimestampFallbackCount_++;
+              sampleTimeFromOutput = false;
+              normalizedAuSampleTimeHns = sampleTime;
+              if (env_truthy_local("REMOTE60_NATIVE_DEBUG_CODEC")) {
+                codec_debug_log(("encoder output timestamp drifted >" +
+                                 std::to_string(kEncoderOutputTsSkewUs) +
+                                 "us; fallback to input timestamp").c_str());
+              }
+            }
+          } else {
+            normalizedAuSampleTimeHns = sampleTime;
+          }
         }
+        au.sampleTimeHns = normalizedAuSampleTimeHns;
+        au.sampleTimeFromOutput = sampleTimeFromOutput;
         if (maybeKey && !sequenceHeaderAnnexb_.empty() &&
             !annexb_contains_idr(sequenceHeaderAnnexb_.data(), sequenceHeaderAnnexb_.size())) {
           // Keep existing behavior if sequence blob is malformed.
@@ -1179,35 +1246,56 @@ bool H264Encoder::encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFr
         } else {
           au.bytes = std::move(bytes);
         }
+        ++encodeStats->processOutputSamples;
+        encodeStats->processOutputBytes += static_cast<uint64_t>(au.bytes.size());
         outUnits->push_back(std::move(au));
       }
       if (odb.pEvents) odb.pEvents->Release();
     }
+    const uint64_t drainEndUs = qpc_now_us();
+    encodeStats->processOutputDrainUs += (drainEndUs >= drainStartUs) ? (drainEndUs - drainStartUs) : 0;
     return true;
   };
 
+  const uint64_t processInputStartUs = qpc_now_us();
   HRESULT inHr = enc_->ProcessInput(0, sample.Get(), 0);
+  const uint64_t processInputDoneUs = qpc_now_us();
+  encodeStats->processInputUs += (processInputDoneUs >= processInputStartUs) ? (processInputDoneUs - processInputStartUs) : 0;
   if (inHr == MF_E_NOTACCEPTING) {
     // Some hardware/async encoders require draining queued output before accepting new input.
-    if (!drain_outputs()) return false;
+    ++encodeStats->processInputNotAcceptingCount;
+    if (!drain_outputs()) return finish_call(false);
     inHr = enc_->ProcessInput(0, sample.Get(), 0);
+    const uint64_t processInputRetryDoneUs = qpc_now_us();
+    encodeStats->processInputUs +=
+        (processInputRetryDoneUs >= processInputDoneUs) ? (processInputRetryDoneUs - processInputDoneUs) : 0;
   }
   if (FAILED(inHr)) {
     if (env_truthy_local("REMOTE60_NATIVE_DEBUG_CODEC")) {
       std::string line = "encoder ProcessInput failed hr=" + hr_to_hex(inHr);
       codec_debug_log(line.c_str());
     }
-    return false;
+    return finish_call(false);
   }
   ++frameIndex_;
 
   if (asyncTransform_ && eventGenerator_) {
     bool sawEvent = false;
-    for (int poll = 0; poll < 24; ++poll) {
+    const uint32_t asyncPollMax = env_u32_local("REMOTE60_NATIVE_H264_ASYNC_POLL_MAX", 1);
+    const uint32_t asyncPollSleepUs = env_u32_local("REMOTE60_NATIVE_H264_ASYNC_POLL_SLEEP_US", 0);
+    for (uint32_t poll = 0; poll < std::max<uint32_t>(1, asyncPollMax); ++poll) {
       Microsoft::WRL::ComPtr<IMFMediaEvent> ev;
+      ++encodeStats->asyncPollCount;
       const HRESULT ehr = eventGenerator_->GetEvent(MF_EVENT_FLAG_NO_WAIT, &ev);
       if (ehr == MF_E_NO_EVENTS_AVAILABLE) {
-        Sleep(1);
+        ++encodeStats->asyncPollNoEventCount;
+        if (asyncPollSleepUs > 0) {
+          Sleep(static_cast<DWORD>(asyncPollSleepUs));
+        } else if (poll + 1 < std::max<uint32_t>(1, asyncPollMax)) {
+          continue;
+        } else {
+          break;
+        }
         continue;
       }
       if (FAILED(ehr) || !ev) break;
@@ -1215,20 +1303,22 @@ bool H264Encoder::encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFr
       MediaEventType et = MEUnknown;
       (void)ev->GetType(&et);
       if (et == METransformHaveOutput) {
+        ++encodeStats->asyncPollHaveOutputCount;
         if (!drain_outputs()) return false;
       } else if (et == METransformNeedInput) {
+        ++encodeStats->asyncPollNeedInputCount;
         break;
       }
     }
     if (!sawEvent) {
-      if (!drain_outputs()) return false;
+      if (!drain_outputs()) return finish_call(false);
     }
-    if (!outUnits->empty()) return true;
+    return finish_call(!outUnits->empty());
   }
 
-  if (!drain_outputs()) return false;
+  if (!drain_outputs()) return finish_call(false);
 
-  return true;
+  return finish_call(true);
 }
 
 void H264Encoder::shutdown() {
@@ -1238,6 +1328,11 @@ void H264Encoder::shutdown() {
     enc_.Reset();
   }
   started_ = false;
+  sampleTimeOffsetInitialized_ = false;
+  sampleTimeOffsetHns_ = 0;
+  sampleTimeOutputTimestampTrusted_ = true;
+  sampleTimeOutputTimestampTotalSamples_ = 0;
+  sampleTimeOutputTimestampFallbackCount_ = 0;
   frameIndex_ = 0;
   sequenceHeaderAnnexb_.clear();
   asyncTransform_ = false;

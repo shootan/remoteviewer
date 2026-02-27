@@ -23,6 +23,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -276,6 +277,13 @@ std::atomic<uint64_t> gGdiFallbackPresentedCount{0};
 std::atomic<uint64_t> gFallbackInitFailCount{0};
 std::atomic<uint64_t> gFallbackRenderFailCount{0};
 std::atomic<uint64_t> gFallbackNv12ConvertFailCount{0};
+std::mutex gLogMu;
+
+void log_client_line(const std::string& line) {
+  std::lock_guard<std::mutex> lk(gLogMu);
+  const std::string withNewline = line + "\n";
+  std::cout << withNewline;
+}
 
 void request_keyframe(uint16_t reason) {
   if (reason == 0) reason = 1;
@@ -789,34 +797,35 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             const uint64_t queueWaitUs = (paintStartUs >= queueSetUs) ? (paintStartUs - queueSetUs) : 0;
             const uint64_t paintUs = (presentUs >= paintStartUs) ? (presentUs - paintStartUs) : 0;
             const uint64_t totalUs = (presentUs >= captureUs) ? (presentUs - captureUs) : 0;
-            std::cout << "[native-video-client][trace_present] seq=" << seq
-                      << " captureUs=" << captureUs
-                      << " encodeStartUs=" << encodeStartUs
-                      << " encodeEndUs=" << encodeEndUs
-                      << " sendUs=" << sendUs
-                      << " recvUs=" << recvUs
-                      << " decodeStartUs=" << decodeStartUs
-                      << " decodeEndUs=" << decodeEndUs
-                      << " presentUs=" << presentUs
-                      << " c2eUs=" << c2eUs
-                      << " encUs=" << encUs
-                      << " e2sUs=" << e2sUs
-                      << " netUs=" << netUs
-                      << " r2dUs=" << r2dUs
-                      << " decUs=" << decUs
-                      << " d2pUs=" << d2pUs
-                      << " decodeToQueueUs=" << decodeToQueueUs
-                      << " queueWaitUs=" << queueWaitUs
-                      << " paintUs=" << paintUs
-                      << " uploadYUs=" << renderTelemetry.uploadYUs
-                      << " uploadUVUs=" << renderTelemetry.uploadUVUs
-                      << " drawUs=" << renderTelemetry.drawUs
-                      << " presentBlockUs=" << renderTelemetry.presentBlockUs
-                      << " renderUs=" << renderUs
-                      << " totalUs=" << totalUs
-                      << " renderPath=" << renderPath
-                      << " fallbackReason=" << fallbackReason
-                      << "\n";
+            std::ostringstream oss;
+            oss << "[native-video-client][trace_present] seq=" << seq
+                << " captureUs=" << captureUs
+                << " encodeStartUs=" << encodeStartUs
+                << " encodeEndUs=" << encodeEndUs
+                << " sendUs=" << sendUs
+                << " recvUs=" << recvUs
+                << " decodeStartUs=" << decodeStartUs
+                << " decodeEndUs=" << decodeEndUs
+                << " presentUs=" << presentUs
+                << " c2eUs=" << c2eUs
+                << " encUs=" << encUs
+                << " e2sUs=" << e2sUs
+                << " netUs=" << netUs
+                << " r2dUs=" << r2dUs
+                << " decUs=" << decUs
+                << " d2pUs=" << d2pUs
+                << " decodeToQueueUs=" << decodeToQueueUs
+                << " queueWaitUs=" << queueWaitUs
+                << " paintUs=" << paintUs
+                << " uploadYUs=" << renderTelemetry.uploadYUs
+                << " uploadUVUs=" << renderTelemetry.uploadUVUs
+                << " drawUs=" << renderTelemetry.drawUs
+                << " presentBlockUs=" << renderTelemetry.presentBlockUs
+                << " renderUs=" << renderUs
+                << " totalUs=" << totalUs
+                << " renderPath=" << renderPath
+                << " fallbackReason=" << fallbackReason;
+            log_client_line(oss.str());
           }
         }
         const uint64_t totalUs = (presentUs >= captureUs) ? (presentUs - captureUs) : 0;
@@ -839,30 +848,31 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           const uint64_t r2dUs = (decodeStartUs >= recvUs) ? (decodeStartUs - recvUs) : 0;
           const uint64_t decUs = (decodeEndUs >= decodeStartUs) ? (decodeEndUs - decodeStartUs) : 0;
           const uint64_t d2pUs = (presentUs >= decodeEndUs) ? (presentUs - decodeEndUs) : 0;
-          std::cout << "[native-video-client][user-feedback] seq=" << seq
-                    << " totalUs=" << totalUs
-                    << " capGapUs=" << presentGapUs
-                    << " queueToPaintUs=" << queueToPaintUs
-                    << " queueToPresentUs=" << queueToPresentUs
-                    << " d3dPresentSuccess=" << d3dSuccess
-                    << " d3dPresentFail=" << d3dFail
-                    << " gdiFallback=" << gdiFallback
-                    << " paintCoalesced=" << paintCoalesced
-                    << " overwriteDelta=" << overwriteDelta
-                    << " c2eUs=" << c2eUs
-                    << " encUs=" << encUs
-                    << " e2sUs=" << e2sUs
-                    << " netUs=" << netUs
-                    << " r2dUs=" << r2dUs
-                    << " decUs=" << decUs
-                    << " d2pUs=" << d2pUs
-                    << " decodeToQueueUs=" << decodeToQueueUs
-                    << " queueWaitUs=" << queueWaitUs
-                    << " paintUs=" << paintUs
-                    << " presentBlockUs=" << renderTelemetry.presentBlockUs
-                    << " renderPath=" << renderPath
-                    << " fallbackReason=" << fallbackReason
-                    << "\n";
+          std::ostringstream oss;
+          oss << "[native-video-client][user-feedback] seq=" << seq
+              << " totalUs=" << totalUs
+              << " capGapUs=" << presentGapUs
+              << " queueToPaintUs=" << queueToPaintUs
+              << " queueToPresentUs=" << queueToPresentUs
+              << " d3dPresentSuccess=" << d3dSuccess
+              << " d3dPresentFail=" << d3dFail
+              << " gdiFallback=" << gdiFallback
+              << " paintCoalesced=" << paintCoalesced
+              << " overwriteDelta=" << overwriteDelta
+              << " c2eUs=" << c2eUs
+              << " encUs=" << encUs
+              << " e2sUs=" << e2sUs
+              << " netUs=" << netUs
+              << " r2dUs=" << r2dUs
+              << " decUs=" << decUs
+              << " d2pUs=" << d2pUs
+              << " decodeToQueueUs=" << decodeToQueueUs
+              << " queueWaitUs=" << queueWaitUs
+              << " paintUs=" << paintUs
+              << " presentBlockUs=" << renderTelemetry.presentBlockUs
+              << " renderPath=" << renderPath
+              << " fallbackReason=" << fallbackReason;
+          log_client_line(oss.str());
           lastUserFeedbackUs = presentUs;
           lastUserFeedbackOverwrite = overwriteCountNow;
         }
@@ -1442,19 +1452,20 @@ int main(int argc, char** argv) {
               (recvBytes > 0) ? ((decodedBytes * 100ULL) / recvBytes) : 0;
           publish_metrics(h.width, h.height, packetNowUs,
                           avgLatencyUs, maxLatencyUs, avgDecodeTailUs, maxDecodeTailUs, mbps);
-          std::cout << "[native-video-client] recvFrames=" << recvFrames
-                    << " decodedFrames=" << decodedFrames
-                    << " skippedQueued=" << skippedQueued
-                    << " avgLatencyUs=" << avgLatencyUs
-                    << " maxLatencyUs=" << maxLatencyUs
-                    << " avgDecodeTailUs=" << avgDecodeTailUs
-                    << " maxDecodeTailUs=" << maxDecodeTailUs
-                    << " mbps=" << mbps
-                    << " decodedRawMbps=" << decodedRawMbps
-                    << " decodeRatioX100=" << decodeRatioX100
-                    << " size=" << h.width << "x" << h.height;
-          append_present_counter_fields(std::cout);
-          std::cout << "\n";
+          std::ostringstream oss;
+          oss << "[native-video-client] recvFrames=" << recvFrames
+              << " decodedFrames=" << decodedFrames
+              << " skippedQueued=" << skippedQueued
+              << " avgLatencyUs=" << avgLatencyUs
+              << " maxLatencyUs=" << maxLatencyUs
+              << " avgDecodeTailUs=" << avgDecodeTailUs
+              << " maxDecodeTailUs=" << maxDecodeTailUs
+              << " mbps=" << mbps
+              << " decodedRawMbps=" << decodedRawMbps
+              << " decodeRatioX100=" << decodeRatioX100
+              << " size=" << h.width << "x" << h.height;
+          append_present_counter_fields(oss);
+          log_client_line(oss.str());
           recvFrames = 0;
           decodedFrames = 0;
           skippedQueued = 0;
@@ -1490,19 +1501,20 @@ int main(int argc, char** argv) {
               (recvBytes > 0) ? ((decodedBytes * 100ULL) / recvBytes) : 0;
           publish_metrics(h.width, h.height, packetNowUs,
                           avgLatencyUs, maxLatencyUs, avgDecodeTailUs, maxDecodeTailUs, mbps);
-          std::cout << "[native-video-client] recvFrames=" << recvFrames
-                    << " decodedFrames=" << decodedFrames
-                    << " skippedQueued=" << skippedQueued
-                    << " avgLatencyUs=" << avgLatencyUs
-                    << " maxLatencyUs=" << maxLatencyUs
-                    << " avgDecodeTailUs=" << avgDecodeTailUs
-                    << " maxDecodeTailUs=" << maxDecodeTailUs
-                    << " mbps=" << mbps
-                    << " decodedRawMbps=" << decodedRawMbps
-                    << " decodeRatioX100=" << decodeRatioX100
-                    << " size=" << h.width << "x" << h.height;
-          append_present_counter_fields(std::cout);
-          std::cout << "\n";
+          std::ostringstream oss;
+          oss << "[native-video-client] recvFrames=" << recvFrames
+              << " decodedFrames=" << decodedFrames
+              << " skippedQueued=" << skippedQueued
+              << " avgLatencyUs=" << avgLatencyUs
+              << " maxLatencyUs=" << maxLatencyUs
+              << " avgDecodeTailUs=" << avgDecodeTailUs
+              << " maxDecodeTailUs=" << maxDecodeTailUs
+              << " mbps=" << mbps
+              << " decodedRawMbps=" << decodedRawMbps
+              << " decodeRatioX100=" << decodeRatioX100
+              << " size=" << h.width << "x" << h.height;
+          append_present_counter_fields(oss);
+          log_client_line(oss.str());
           recvFrames = 0;
           decodedFrames = 0;
           skippedQueued = 0;
@@ -1531,19 +1543,20 @@ int main(int argc, char** argv) {
               (recvBytes > 0) ? ((decodedBytes * 100ULL) / recvBytes) : 0;
           publish_metrics(h.width, h.height, packetNowUs,
                           avgLatencyUs, maxLatencyUs, avgDecodeTailUs, maxDecodeTailUs, mbps);
-          std::cout << "[native-video-client] recvFrames=" << recvFrames
-                    << " decodedFrames=" << decodedFrames
-                    << " skippedQueued=" << skippedQueued
-                    << " avgLatencyUs=" << avgLatencyUs
-                    << " maxLatencyUs=" << maxLatencyUs
-                    << " avgDecodeTailUs=" << avgDecodeTailUs
-                    << " maxDecodeTailUs=" << maxDecodeTailUs
-                    << " mbps=" << mbps
-                    << " decodedRawMbps=" << decodedRawMbps
-                    << " decodeRatioX100=" << decodeRatioX100
-                    << " size=" << h.width << "x" << h.height;
-          append_present_counter_fields(std::cout);
-          std::cout << "\n";
+          std::ostringstream oss;
+          oss << "[native-video-client] recvFrames=" << recvFrames
+              << " decodedFrames=" << decodedFrames
+              << " skippedQueued=" << skippedQueued
+              << " avgLatencyUs=" << avgLatencyUs
+              << " maxLatencyUs=" << maxLatencyUs
+              << " avgDecodeTailUs=" << avgDecodeTailUs
+              << " maxDecodeTailUs=" << maxDecodeTailUs
+              << " mbps=" << mbps
+              << " decodedRawMbps=" << decodedRawMbps
+              << " decodeRatioX100=" << decodeRatioX100
+              << " size=" << h.width << "x" << h.height;
+          append_present_counter_fields(oss);
+          log_client_line(oss.str());
           recvFrames = 0;
           decodedFrames = 0;
           skippedQueued = 0;
@@ -1618,26 +1631,27 @@ int main(int argc, char** argv) {
           (args.traceMax == 0 || gTraceRecvPrinted.load() < args.traceMax)) {
         const auto nowPrinted = gTraceRecvPrinted.fetch_add(1) + 1;
         if (args.traceMax == 0 || nowPrinted <= args.traceMax) {
-          std::cout << "[native-video-client][trace_recv] seq=" << h.seq
-                    << " captureUs=" << decodedCaptureUs
-                    << " hdrCaptureUs=" << h.captureQpcUs
-                    << " encodeStartUs=" << h.encodeStartQpcUs
-                    << " encodeEndUs=" << h.encodeEndQpcUs
-                    << " sendUs=" << h.sendQpcUs
-                    << " recvUs=" << packetNowUs
-                    << " decodeStartUs=" << decodeStartUs
-                    << " decodeEndUs=" << decodeEndUs
-                    << " c2eUs=" << ((h.encodeStartQpcUs >= h.captureQpcUs) ? (h.encodeStartQpcUs - h.captureQpcUs) : 0)
-                    << " encUs=" << ((h.encodeEndQpcUs >= h.encodeStartQpcUs) ? (h.encodeEndQpcUs - h.encodeStartQpcUs) : 0)
-                    << " e2sUs=" << ((h.sendQpcUs >= h.encodeEndQpcUs) ? (h.sendQpcUs - h.encodeEndQpcUs) : 0)
-                    << " netUs=" << ((packetNowUs >= h.sendQpcUs) ? (packetNowUs - h.sendQpcUs) : 0)
-                    << " r2dUs=" << ((decodeStartUs >= packetNowUs) ? (decodeStartUs - packetNowUs) : 0)
-                    << " decUs=" << ((decodeEndUs >= decodeStartUs) ? (decodeEndUs - decodeStartUs) : 0)
-                    << " decodeQueueLagUs=" << ((h.captureQpcUs >= decodedCaptureUs) ? (h.captureQpcUs - decodedCaptureUs) : 0)
-                    << " tsSource=" << tsSource
-                    << " bytes=" << h.payloadSize
-                    << " key=" << (keyFrame ? 1 : 0)
-                    << "\n";
+          std::ostringstream oss;
+          oss << "[native-video-client][trace_recv] seq=" << h.seq
+              << " captureUs=" << decodedCaptureUs
+              << " hdrCaptureUs=" << h.captureQpcUs
+              << " encodeStartUs=" << h.encodeStartQpcUs
+              << " encodeEndUs=" << h.encodeEndQpcUs
+              << " sendUs=" << h.sendQpcUs
+              << " recvUs=" << packetNowUs
+              << " decodeStartUs=" << decodeStartUs
+              << " decodeEndUs=" << decodeEndUs
+              << " c2eUs=" << ((h.encodeStartQpcUs >= h.captureQpcUs) ? (h.encodeStartQpcUs - h.captureQpcUs) : 0)
+              << " encUs=" << ((h.encodeEndQpcUs >= h.encodeStartQpcUs) ? (h.encodeEndQpcUs - h.encodeStartQpcUs) : 0)
+              << " e2sUs=" << ((h.sendQpcUs >= h.encodeEndQpcUs) ? (h.sendQpcUs - h.encodeEndQpcUs) : 0)
+              << " netUs=" << ((packetNowUs >= h.sendQpcUs) ? (packetNowUs - h.sendQpcUs) : 0)
+              << " r2dUs=" << ((decodeStartUs >= packetNowUs) ? (decodeStartUs - packetNowUs) : 0)
+              << " decUs=" << ((decodeEndUs >= decodeStartUs) ? (decodeEndUs - decodeStartUs) : 0)
+              << " decodeQueueLagUs=" << ((h.captureQpcUs >= decodedCaptureUs) ? (h.captureQpcUs - decodedCaptureUs) : 0)
+              << " tsSource=" << tsSource
+              << " bytes=" << h.payloadSize
+              << " key=" << (keyFrame ? 1 : 0);
+          log_client_line(oss.str());
         }
       }
 
@@ -1662,19 +1676,20 @@ int main(int argc, char** argv) {
             (recvBytes > 0) ? ((decodedBytes * 100ULL) / recvBytes) : 0;
         publish_metrics(decoded.width, decoded.height, nowUs,
                         avgLatencyUs, maxLatencyUs, avgDecodeTailUs, maxDecodeTailUs, mbps);
-        std::cout << "[native-video-client] recvFrames=" << recvFrames
-                  << " decodedFrames=" << decodedFrames
-                  << " skippedQueued=" << skippedQueued
-                  << " avgLatencyUs=" << avgLatencyUs
-                  << " maxLatencyUs=" << maxLatencyUs
-                  << " avgDecodeTailUs=" << avgDecodeTailUs
-                  << " maxDecodeTailUs=" << maxDecodeTailUs
-                  << " mbps=" << mbps
-                  << " decodedRawMbps=" << decodedRawMbps
-                  << " decodeRatioX100=" << decodeRatioX100
-                  << " size=" << decoded.width << "x" << decoded.height;
-        append_present_counter_fields(std::cout);
-        std::cout << "\n";
+        std::ostringstream oss;
+        oss << "[native-video-client] recvFrames=" << recvFrames
+            << " decodedFrames=" << decodedFrames
+            << " skippedQueued=" << skippedQueued
+            << " avgLatencyUs=" << avgLatencyUs
+            << " maxLatencyUs=" << maxLatencyUs
+            << " avgDecodeTailUs=" << avgDecodeTailUs
+            << " maxDecodeTailUs=" << maxDecodeTailUs
+            << " mbps=" << mbps
+            << " decodedRawMbps=" << decodedRawMbps
+            << " decodeRatioX100=" << decodeRatioX100
+            << " size=" << decoded.width << "x" << decoded.height;
+        append_present_counter_fields(oss);
+        log_client_line(oss.str());
         recvFrames = 0;
         decodedFrames = 0;
         skippedQueued = 0;
@@ -1852,22 +1867,23 @@ int main(int argc, char** argv) {
             (args.traceMax == 0 || gTraceRecvPrinted.load() < args.traceMax)) {
           const auto nowPrinted = gTraceRecvPrinted.fetch_add(1) + 1;
           if (args.traceMax == 0 || nowPrinted <= args.traceMax) {
-            std::cout << "[native-video-client][trace_recv] seq=" << h.seq
-                      << " captureUs=" << h.captureQpcUs
-                      << " encodeStartUs=" << h.encodeStartQpcUs
-                      << " encodeEndUs=" << h.encodeEndQpcUs
-                      << " sendUs=" << h.sendQpcUs
-                      << " recvUs=" << nowUs
-                      << " decodeStartUs=" << nowUs
-                      << " decodeEndUs=" << nowUs
-                      << " c2eUs=" << ((h.encodeStartQpcUs >= h.captureQpcUs) ? (h.encodeStartQpcUs - h.captureQpcUs) : 0)
-                      << " encUs=" << ((h.encodeEndQpcUs >= h.encodeStartQpcUs) ? (h.encodeEndQpcUs - h.encodeStartQpcUs) : 0)
-                      << " e2sUs=" << ((h.sendQpcUs >= h.encodeEndQpcUs) ? (h.sendQpcUs - h.encodeEndQpcUs) : 0)
-                      << " netUs=" << ((nowUs >= h.sendQpcUs) ? (nowUs - h.sendQpcUs) : 0)
-                      << " r2dUs=0"
-                      << " decUs=0"
-                      << " bytes=" << h.payloadSize
-                      << "\n";
+            std::ostringstream oss;
+            oss << "[native-video-client][trace_recv] seq=" << h.seq
+                << " captureUs=" << h.captureQpcUs
+                << " encodeStartUs=" << h.encodeStartQpcUs
+                << " encodeEndUs=" << h.encodeEndQpcUs
+                << " sendUs=" << h.sendQpcUs
+                << " recvUs=" << nowUs
+                << " decodeStartUs=" << nowUs
+                << " decodeEndUs=" << nowUs
+                << " c2eUs=" << ((h.encodeStartQpcUs >= h.captureQpcUs) ? (h.encodeStartQpcUs - h.captureQpcUs) : 0)
+                << " encUs=" << ((h.encodeEndQpcUs >= h.encodeStartQpcUs) ? (h.encodeEndQpcUs - h.encodeStartQpcUs) : 0)
+                << " e2sUs=" << ((h.sendQpcUs >= h.encodeEndQpcUs) ? (h.sendQpcUs - h.encodeEndQpcUs) : 0)
+                << " netUs=" << ((nowUs >= h.sendQpcUs) ? (nowUs - h.sendQpcUs) : 0)
+                << " r2dUs=0"
+                << " decUs=0"
+                << " bytes=" << h.payloadSize;
+            log_client_line(oss.str());
           }
         }
 
@@ -1891,19 +1907,20 @@ int main(int argc, char** argv) {
               (recvBytes > 0) ? ((decodedBytes * 100ULL) / recvBytes) : 0;
           publish_metrics(h.width, h.height, nowUs,
                           avgLatencyUs, maxLatencyUs, avgDecodeTailUs, maxDecodeTailUs, mbps);
-          std::cout << "[native-video-client] recvFrames=" << recvFrames
-                    << " decodedFrames=" << decodedFrames
-                    << " skippedQueued=" << skippedQueued
-                    << " avgLatencyUs=" << avgLatencyUs
-                    << " maxLatencyUs=" << maxLatencyUs
-                    << " avgDecodeTailUs=" << avgDecodeTailUs
-                    << " maxDecodeTailUs=" << maxDecodeTailUs
-                    << " mbps=" << mbps
-                    << " decodedRawMbps=" << decodedRawMbps
-                    << " decodeRatioX100=" << decodeRatioX100
-                    << " size=" << h.width << "x" << h.height;
-          append_present_counter_fields(std::cout);
-          std::cout << "\n";
+          std::ostringstream oss;
+          oss << "[native-video-client] recvFrames=" << recvFrames
+              << " decodedFrames=" << decodedFrames
+              << " skippedQueued=" << skippedQueued
+              << " avgLatencyUs=" << avgLatencyUs
+              << " maxLatencyUs=" << maxLatencyUs
+              << " avgDecodeTailUs=" << avgDecodeTailUs
+              << " maxDecodeTailUs=" << maxDecodeTailUs
+              << " mbps=" << mbps
+              << " decodedRawMbps=" << decodedRawMbps
+              << " decodeRatioX100=" << decodeRatioX100
+              << " size=" << h.width << "x" << h.height;
+          append_present_counter_fields(oss);
+          log_client_line(oss.str());
           recvFrames = 0;
           decodedFrames = 0;
           skippedQueued = 0;

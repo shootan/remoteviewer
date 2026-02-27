@@ -15,6 +15,7 @@ struct H264AccessUnit {
   std::vector<uint8_t> bytes;
   bool keyFrame = false;
   int64_t sampleTimeHns = 0;
+  bool sampleTimeFromOutput = false;
 };
 
 struct DecodedFrameNv12 {
@@ -23,6 +24,25 @@ struct DecodedFrameNv12 {
   int64_t sampleTimeHns = 0;
   bool sampleTimeFromOutput = false;
   std::vector<uint8_t> bytes;
+};
+
+struct H264EncodeFrameStats {
+  uint64_t encodeCallUs = 0;
+  uint64_t sampleCreateUs = 0;
+  uint64_t processInputUs = 0;
+  uint64_t processOutputDrainUs = 0;
+  uint64_t processOutputDrainLoops = 0;
+  uint64_t processOutputSamples = 0;
+  uint64_t processOutputBytes = 0;
+  uint32_t processInputNotAcceptingCount = 0;
+  uint32_t processOutputNeedMoreInputCount = 0;
+  uint32_t processOutputStreamChangeCount = 0;
+  uint32_t processOutputErrorCount = 0;
+  uint32_t asyncPollCount = 0;
+  uint32_t asyncPollNoEventCount = 0;
+  uint32_t asyncPollNeedInputCount = 0;
+  uint32_t asyncPollHaveOutputCount = 0;
+  uint8_t asyncEnabled = 0;
 };
 
 bool bgra_to_nv12(const uint8_t* bgra, uint32_t width, uint32_t height, uint32_t bgraStride,
@@ -38,7 +58,7 @@ class H264Encoder {
   bool initialize(uint32_t width, uint32_t height, uint32_t fps, uint32_t bitrate, uint32_t keyint);
   bool reconfigure_bitrate(uint32_t bitrate);
   bool encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFrame, int64_t inputSampleTimeHns,
-                    std::vector<H264AccessUnit>* outUnits);
+                    std::vector<H264AccessUnit>* outUnits, H264EncodeFrameStats* encodeStats = nullptr);
   const char* backend_name() const { return backendName_; }
   bool using_hardware() const { return usingHardware_; }
   void shutdown();
@@ -61,6 +81,11 @@ class H264Encoder {
   bool asyncTransform_ = false;
   bool usingHardware_ = false;
   const char* backendName_ = "unknown";
+  bool sampleTimeOffsetInitialized_ = false;
+  int64_t sampleTimeOffsetHns_ = 0;
+  bool sampleTimeOutputTimestampTrusted_ = true;
+  uint64_t sampleTimeOutputTimestampTotalSamples_ = 0;
+  uint64_t sampleTimeOutputTimestampFallbackCount_ = 0;
   uint32_t d3dManagerResetToken_ = 0;
   Microsoft::WRL::ComPtr<IMFDXGIDeviceManager> d3dManager_;
   Microsoft::WRL::ComPtr<IMFMediaEventGenerator> eventGenerator_;

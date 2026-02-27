@@ -78,6 +78,40 @@ constexpr uint64_t kMaxPreEncodeFrameAgeUs = 25000;  // 25ms
 constexpr uint64_t kHostUserFeedbackWarnUs = 90000;  // 90ms
 constexpr uint64_t kHostUserFeedbackMinIntervalUs = 1000000;  // 1s
 
+struct HostBottleneckStage {
+  uint32_t code = 0;
+  uint64_t us = 0;
+  const char* name = "none";
+};
+
+void update_host_bottleneck_stage(uint32_t code, uint64_t us, const char* name,
+                                  HostBottleneckStage* stage) {
+  if (!stage || !name) return;
+  if (us > stage->us) {
+    stage->code = code;
+    stage->us = us;
+    stage->name = name;
+  }
+}
+
+HostBottleneckStage detect_host_bottleneck_stage(uint64_t queueWaitUs, uint64_t queueToEncodeUs,
+                                                 uint64_t preEncodePrepUs, uint64_t scaleUs,
+                                                 uint64_t nv12Us, uint64_t encUs,
+                                                 uint64_t queueToSendUs, uint64_t sendDurUs,
+                                                 uint64_t sendIntervalErrUs) {
+  HostBottleneckStage stage{};
+  update_host_bottleneck_stage(1, queueWaitUs, "queue_wait", &stage);
+  update_host_bottleneck_stage(2, queueToEncodeUs, "queue_to_encode", &stage);
+  update_host_bottleneck_stage(3, preEncodePrepUs, "pre_encode_prep", &stage);
+  update_host_bottleneck_stage(4, scaleUs, "scale", &stage);
+  update_host_bottleneck_stage(5, nv12Us, "bgra_to_nv12", &stage);
+  update_host_bottleneck_stage(6, encUs, "encoder", &stage);
+  update_host_bottleneck_stage(7, queueToSendUs, "queue_to_send", &stage);
+  update_host_bottleneck_stage(8, sendDurUs, "send_io", &stage);
+  update_host_bottleneck_stage(9, sendIntervalErrUs, "send_interval_jitter", &stage);
+  return stage;
+}
+
 winrt::Windows::Graphics::Capture::GraphicsCaptureItem CreateItemForPrimaryMonitor() {
   auto interop = winrt::get_activation_factory<winrt::Windows::Graphics::Capture::GraphicsCaptureItem,
                                                IGraphicsCaptureItemInterop>();
@@ -579,6 +613,35 @@ bool send_all(SOCKET s, const void* data, size_t len) {
   return true;
 }
 
+struct SendPathStats {
+  uint64_t headerUs = 0;
+  uint64_t payloadUs = 0;
+  uint64_t headerCallCount = 0;
+  uint64_t payloadCallCount = 0;
+  uint64_t payloadChunkCount = 0;
+  uint64_t payloadChunkMaxUs = 0;
+};
+
+bool send_all_timed(SOCKET s, const void* data, size_t len, uint64_t* outUs,
+                    uint64_t* outCallCount) {
+  const char* p = reinterpret_cast<const char*>(data);
+  size_t sent = 0;
+  uint64_t calls = 0;
+  const uint64_t startUs = qpc_now_us();
+  while (sent < len) {
+    const uint64_t callStartUs = qpc_now_us();
+    const int n = send(s, p + sent, static_cast<int>(len - sent), 0);
+    const uint64_t callDoneUs = qpc_now_us();
+    if (n <= 0) return false;
+    ++calls;
+    sent += static_cast<size_t>(n);
+  }
+  const uint64_t doneUs = qpc_now_us();
+  if (outUs) *outUs = (doneUs >= startUs) ? (doneUs - startUs) : 0;
+  if (outCallCount) *outCallCount = calls;
+  return true;
+}
+
 bool recv_all(SOCKET s, void* out, size_t len) {
   auto* p = reinterpret_cast<uint8_t*>(out);
   size_t got = 0;
@@ -629,6 +692,49 @@ bool send_udp_chunks(SOCKET s, const sockaddr_in& peer, const uint8_t* payload, 
   return true;
 }
 
+bool send_udp_chunks_timed(SOCKET s, const sockaddr_in& peer, const uint8_t* payload, size_t payloadSize,
+                          const UdpVideoChunkHeader& baseHeader, uint32_t mtuBytes,
+                          SendPathStats* stats) {
+  if (!payload || payloadSize == 0 || s == INVALID_SOCKET) return false;
+  const uint64_t startUs = qpc_now_us();
+  const uint32_t safeMtu = clamp_udp_mtu(mtuBytes);
+  if (safeMtu <= sizeof(UdpVideoChunkHeader)) return false;
+  const uint32_t maxChunk = safeMtu - static_cast<uint32_t>(sizeof(UdpVideoChunkHeader));
+  std::vector<uint8_t> datagram(safeMtu);
+  size_t offset = 0;
+  if (!stats) {
+    return send_udp_chunks(s, peer, payload, payloadSize, baseHeader, mtuBytes);
+  }
+
+  while (offset < payloadSize) {
+    const uint32_t chunkSize = static_cast<uint32_t>(std::min<size_t>(maxChunk, payloadSize - offset));
+    UdpVideoChunkHeader h = baseHeader;
+    h.chunkOffset = static_cast<uint32_t>(offset);
+    h.chunkSize = chunkSize;
+    h.flags &= static_cast<uint16_t>(~(0x2u | 0x4u));
+    if (offset == 0) h.flags |= 0x2u;
+    if (offset + chunkSize >= payloadSize) h.flags |= 0x4u;
+    std::memcpy(datagram.data(), &h, sizeof(h));
+    std::memcpy(datagram.data() + sizeof(h), payload + offset, chunkSize);
+
+    const uint64_t callStartUs = qpc_now_us();
+    const int n = sendto(s, reinterpret_cast<const char*>(datagram.data()),
+                         static_cast<int>(sizeof(h) + chunkSize), 0,
+                         reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
+    const uint64_t callDoneUs = qpc_now_us();
+    if (n <= 0) return false;
+    ++stats->payloadChunkCount;
+    ++stats->payloadCallCount;
+    const uint64_t callUs = (callDoneUs >= callStartUs) ? (callDoneUs - callStartUs) : 0;
+    if (callUs > stats->payloadChunkMaxUs) stats->payloadChunkMaxUs = callUs;
+    stats->payloadUs += callUs;
+    offset += chunkSize;
+  }
+  const uint64_t doneUs = qpc_now_us();
+  stats->payloadUs = (doneUs >= startUs) ? (doneUs - startUs) : stats->payloadUs;
+  return true;
+}
+
 struct FrameState {
   std::mutex mu;
   std::condition_variable cv;
@@ -639,7 +745,11 @@ struct FrameState {
   uint32_t stride = 0;
   uint64_t captureUs = 0;
   uint64_t callbackUs = 0;
+  uint64_t callbackIntervalUs = 0;
   uint64_t captureAgeAtCallbackUs = 0;
+  uint64_t captureClockSkewUs = 0;
+  uint64_t queuePushUs = 0;
+  uint64_t captureIntervalUs = 0;
   std::shared_ptr<std::vector<uint8_t>> payload;
 };
 
@@ -1041,6 +1151,12 @@ int main(int argc, char** argv) {
   uint32_t abrGoodSeconds = 0;
   uint32_t abrModeratePressureSeconds = 0;
   uint32_t abrSeverePressureSeconds = 0;
+  int64_t captureTimelineOriginUs = -1;
+  int64_t auTimelineOriginUs = -1;
+  auto resetHostTimelineAnchors = [&]() {
+    captureTimelineOriginUs = -1;
+    auTimelineOriginUs = -1;
+  };
 
   if (useH264) {
     if (!encoder.initialize(activeEncodeW, activeEncodeH, args.fps, activeBitrate, args.keyint)) {
@@ -1049,6 +1165,7 @@ int main(int argc, char** argv) {
       if (mfStarted) MFShutdown();
       return 13;
     }
+    resetHostTimelineAnchors();
     std::cout << "[native-video-host] H264 encoder backend=" << encoder.backend_name()
               << " hw=" << (encoder.using_hardware() ? 1 : 0)
               << " captureSize=" << width << "x" << height
@@ -1090,8 +1207,21 @@ int main(int argc, char** argv) {
   }
 
   FrameState frame;
+  const auto update_u64_max = [](std::atomic<uint64_t>& target, const uint64_t value) {
+    auto old = target.load(std::memory_order_relaxed);
+    while (value > old && !target.compare_exchange_weak(old, value, std::memory_order_release, std::memory_order_relaxed)) {
+    }
+  };
   std::atomic<uint64_t> callbackFrames{0};
   std::atomic<int64_t> captureClockOffsetUs{std::numeric_limits<int64_t>::max()};
+  uint64_t queuePushCount = 0;
+  uint64_t queuePopCount = 0;
+  uint64_t queueWaitTimeoutCount = 0;
+  uint64_t queueWaitNoWorkCount = 0;
+  std::atomic<uint64_t> lastPopFrameVersion{0};
+  std::atomic<uint64_t> queueDepthMax{0};
+  std::atomic<uint64_t> lastCallbackUs{0};
+  std::atomic<uint64_t> lastCaptureUsForInterval{0};
 
   auto token = pool.FrameArrived([&](Direct3D11CaptureFramePool const& sender,
                                      winrt::Windows::Foundation::IInspectable const&) {
@@ -1122,8 +1252,14 @@ int main(int argc, char** argv) {
         ctx->Unmap(staging.Get(), 0);
       }
       const uint64_t callbackUs = qpc_now_us();
+      const uint64_t queuePushUs = qpc_now_us();
+      const uint64_t prevCallbackUs = lastCallbackUs.load(std::memory_order_acquire);
+      const uint64_t prevCaptureUs = lastCaptureUsForInterval.load(std::memory_order_acquire);
       uint64_t sourceCaptureUs = callbackUs;
       uint64_t captureAgeAtCallbackUs = 0;
+      uint64_t captureClockSkewUs = 0;
+      uint64_t callbackIntervalUs = 0;
+      uint64_t captureIntervalUs = 0;
       // Align WGC frame timestamp to qpc_now_us domain using a minimum-offset estimator.
       const auto relTime = latest.SystemRelativeTime();
       const int64_t t100ns = relTime.count();
@@ -1134,18 +1270,36 @@ int main(int argc, char** argv) {
         }
         const int64_t offsetCandidate = static_cast<int64_t>(callbackUs) - wgcUs;
         if (offsetCandidate > 0) {
-          int64_t cur = captureClockOffsetUs.load();
-          while (offsetCandidate < cur && !captureClockOffsetUs.compare_exchange_weak(cur, offsetCandidate)) {
+          int64_t cur = captureClockOffsetUs.load(std::memory_order_acquire);
+          if (cur == std::numeric_limits<int64_t>::max()) {
+            captureClockOffsetUs.store(offsetCandidate, std::memory_order_release);
+            cur = offsetCandidate;
+          } else {
+            while (offsetCandidate < cur &&
+                   !captureClockOffsetUs.compare_exchange_weak(cur, offsetCandidate, std::memory_order_acq_rel,
+                                                             std::memory_order_acquire)) {
+            }
           }
           const int64_t bestOffset = captureClockOffsetUs.load();
           if (bestOffset != std::numeric_limits<int64_t>::max()) {
             const int64_t aligned = wgcUs + bestOffset;
-            if (aligned > 0) {
+            const int64_t alignedSkewUs = aligned - static_cast<int64_t>(callbackUs);
+            if (aligned > 0 && alignedSkewUs >= -500000 && alignedSkewUs <= 500000) {
+              captureClockSkewUs = alignedSkewUs >= 0 ? static_cast<uint64_t>(alignedSkewUs) : static_cast<uint64_t>(-alignedSkewUs);
               sourceCaptureUs = static_cast<uint64_t>(aligned);
             }
           }
         }
       }
+      if (prevCallbackUs > 0 && callbackUs >= prevCallbackUs) {
+        callbackIntervalUs = callbackUs - prevCallbackUs;
+      }
+      if (prevCaptureUs > 0 && sourceCaptureUs >= prevCaptureUs) {
+        captureIntervalUs = sourceCaptureUs - prevCaptureUs;
+      }
+      lastCallbackUs.store(callbackUs, std::memory_order_release);
+      lastCaptureUsForInterval.store(sourceCaptureUs, std::memory_order_release);
+      uint64_t currentVersion = 0;
       {
         std::lock_guard<std::mutex> lk(frame.mu);
         frame.payload = std::move(payload);
@@ -1155,9 +1309,18 @@ int main(int argc, char** argv) {
         frame.captureUs = sourceCaptureUs;
         frame.callbackUs = callbackUs;
         frame.captureAgeAtCallbackUs = captureAgeAtCallbackUs;
+        frame.captureClockSkewUs = captureClockSkewUs;
+        frame.queuePushUs = queuePushUs;
+        frame.callbackIntervalUs = callbackIntervalUs;
+        frame.captureIntervalUs = captureIntervalUs;
         frame.seq += 1;
         frame.version += 1;
+        currentVersion = frame.version;
       }
+      const uint64_t currentPopVersion = lastPopFrameVersion.load(std::memory_order_acquire);
+      const uint64_t depthNow = (currentVersion >= currentPopVersion) ? (currentVersion - currentPopVersion) : 0;
+      update_u64_max(queueDepthMax, depthNow);
+      ++queuePushCount;
       callbackFrames += 1;
       frame.cv.notify_one();
     } catch (...) {
@@ -1195,16 +1358,25 @@ int main(int argc, char** argv) {
   uint64_t callbackToEncodeStartMaxUs = 0;
   uint32_t consecutiveStaleEncodedFrames = 0;
   bool forceKeyNext = true;
+  uint64_t lastSendStartUs = 0;
 
   while (!stop.load()) {
     const uint64_t nowUs = qpc_now_us();
+    uint64_t tickWaitUs = 0;
     if (args.seconds > 0 && nowUs >= startUs + static_cast<uint64_t>(args.seconds) * 1000000ULL) {
       break;
     }
     if (paceByTick) {
       if (nowUs < nextTickUs) {
-        Sleep(1);
+        const uint64_t paceWaitStartUs = qpc_now_us();
+        const uint64_t paceWaitTargetUs = nextTickUs - nowUs;
+        std::this_thread::sleep_for(std::chrono::microseconds(paceWaitTargetUs));
+        const uint64_t paceWaitDoneUs = qpc_now_us();
+        tickWaitUs = (paceWaitDoneUs >= paceWaitStartUs) ? (paceWaitDoneUs - paceWaitStartUs) : 0;
         continue;
+      }
+      if (nowUs > nextTickUs) {
+        nextTickUs = nowUs;
       }
       nextTickUs += frameIntervalUs;
     }
@@ -1216,33 +1388,67 @@ int main(int argc, char** argv) {
     uint32_t stride = 0;
     uint64_t captureUs = 0;
     uint64_t callbackUs = 0;
+    uint64_t queuePushUs = 0;
+    uint64_t callbackIntervalUs = 0;
+    uint64_t captureIntervalUs = 0;
+    uint64_t captureClockSkewUs = 0;
     uint64_t captureAgeAtCallbackUs = 0;
     uint64_t version = 0;
+    uint32_t queueWaitReason = 0;  // 0: normal, 1: timeout, 2: no-work
+    const uint64_t queueSelectStartUs = qpc_now_us();
+    bool queueReady = false;
     {
       std::unique_lock<std::mutex> lk(frame.mu);
-      frame.cv.wait_for(lk, std::chrono::milliseconds(100), [&] {
+      queueReady = frame.cv.wait_for(lk, std::chrono::milliseconds(100), [&] {
         return stop.load() || frame.version != lastVersionSent;
       });
-      if (stop.load()) break;
-      if (frame.version == lastVersionSent || !frame.payload || frame.payload->empty()) {
+      if (!queueReady && !stop.load()) {
+        queueWaitReason = 1;
+        ++queueWaitTimeoutCount;
         continue;
       }
-      version = frame.version;
-      payload = frame.payload;
-      seq = frame.seq;
-      w = frame.width;
-      h = frame.height;
-      stride = frame.stride;
-      captureUs = frame.captureUs;
-      callbackUs = frame.callbackUs;
-      captureAgeAtCallbackUs = frame.captureAgeAtCallbackUs;
-    }
-    const uint64_t frameAgeAtSelectUs =
-        (callbackUs > 0 && nowUs >= callbackUs) ? (nowUs - callbackUs) : 0;
-    const uint64_t captureToCallbackUs =
-        (callbackUs > 0 && captureUs > 0 && callbackUs >= captureUs) ? (callbackUs - captureUs) : 0;
+      if (stop.load()) break;
+      if (frame.version == lastVersionSent || !frame.payload || frame.payload->empty()) {
+        queueWaitReason = 2;
+        ++queueWaitNoWorkCount;
+        continue;
+      }
+    version = frame.version;
+    payload = frame.payload;
+    seq = frame.seq;
+    w = frame.width;
+    h = frame.height;
+    stride = frame.stride;
+    captureUs = frame.captureUs;
+    callbackUs = frame.callbackUs;
+    callbackIntervalUs = frame.callbackIntervalUs;
+    captureIntervalUs = frame.captureIntervalUs;
+    queuePushUs = frame.queuePushUs;
+    captureAgeAtCallbackUs = frame.captureAgeAtCallbackUs;
+    captureClockSkewUs = frame.captureClockSkewUs;
+  }
+  const uint64_t queuePopUs = qpc_now_us();
+  const uint64_t queueSelectWaitUs =
+      (queuePopUs >= queueSelectStartUs) ? (queuePopUs - queueSelectStartUs) : 0;
+  const uint64_t frameAgeAtSelectUs =
+      (callbackUs > 0 && queuePopUs >= callbackUs) ? (queuePopUs - callbackUs) : 0;
+  const uint64_t captureToCallbackUs =
+      (callbackUs > 0 && captureUs > 0)
+          ? (callbackUs >= captureUs ? (callbackUs - captureUs) : (captureUs - callbackUs))
+          : 0;
+  const uint64_t captureToQueueUs =
+      (queuePushUs > 0 && captureUs > 0)
+          ? (queuePushUs >= captureUs ? (queuePushUs - captureUs) : (captureUs - queuePushUs))
+          : 0;
+    const uint64_t queueWaitUs =
+        (queuePopUs > 0 && queuePushUs > 0 && queuePopUs >= queuePushUs) ? (queuePopUs - queuePushUs) : 0;
     const uint64_t queueGapFrames =
         (lastVersionSent > 0 && version > lastVersionSent) ? (version - lastVersionSent - 1) : 0;
+    ++queuePopCount;
+    const uint64_t lastPopVersionAtRead = lastPopFrameVersion.load(std::memory_order_acquire);
+    const uint64_t queueDepthAtPop = (version > lastPopVersionAtRead) ? (version - lastPopVersionAtRead) : 0;
+    update_u64_max(queueDepthMax, queueDepthAtPop);
+    lastPopFrameVersion.store(version, std::memory_order_release);
     if (useH264 && guardStalePreEncode && frameAgeAtSelectUs > kMaxPreEncodeFrameAgeUs) {
       ++stalePreEncodeDropCount;
       continue;
@@ -1268,12 +1474,32 @@ int main(int argc, char** argv) {
       hdr.captureQpcUs = captureStampUs;
       hdr.encodeStartQpcUs = captureStampUs;
       hdr.encodeEndQpcUs = captureStampUs;
-      hdr.sendQpcUs = qpc_now_us();
-
+      SendPathStats sendPathStats{};
+      const uint64_t sendStartUs = qpc_now_us();
+      const uint64_t sendIntervalUs =
+          (lastSendStartUs > 0 && sendStartUs >= lastSendStartUs) ? (sendStartUs - lastSendStartUs) : 0;
+      const uint64_t sendIntervalErrUs =
+          (frameIntervalUs > 0 && sendIntervalUs > 0)
+              ? ((sendIntervalUs >= frameIntervalUs) ? (sendIntervalUs - frameIntervalUs)
+                                                   : (frameIntervalUs - sendIntervalUs))
+              : 0;
+      const uint64_t queueToSendUs = (sendStartUs >= queuePopUs) ? (sendStartUs - queuePopUs) : 0;
+      const uint64_t sendWaitUs = queueToSendUs;
+      const uint64_t callbackToSendStartUs = (sendStartUs >= callbackUs) ? (sendStartUs - callbackUs) : 0;
+      hdr.sendQpcUs = sendStartUs;
       const bool sentOk =
           (transport == VideoTransport::Tcp) &&
-          send_all(clientSock, &hdr, sizeof(hdr)) &&
-          send_all(clientSock, payload->data(), payload->size());
+          send_all_timed(clientSock, &hdr, sizeof(hdr), &sendPathStats.headerUs,
+                         &sendPathStats.headerCallCount) &&
+          send_all_timed(clientSock, payload->data(), payload->size(), &sendPathStats.payloadUs,
+                         &sendPathStats.payloadCallCount);
+      const uint64_t sendDoneUs = qpc_now_us();
+      const uint64_t sendDurUs = (sendDoneUs >= sendStartUs) ? (sendDoneUs - sendStartUs) : 0;
+      const uint64_t sendCallCount = sendPathStats.headerCallCount + sendPathStats.payloadCallCount;
+      if (sentOk) {
+        lastSendStartUs = sendStartUs;
+      }
+
       if (!sentOk) {
         std::cout << "[native-video-host] client disconnected\n";
         break;
@@ -1286,15 +1512,44 @@ int main(int argc, char** argv) {
         const uint64_t c2eUs = (hdr.encodeStartQpcUs >= hdr.captureQpcUs) ? (hdr.encodeStartQpcUs - hdr.captureQpcUs) : 0;
         const uint64_t encUs = (hdr.encodeEndQpcUs >= hdr.encodeStartQpcUs) ? (hdr.encodeEndQpcUs - hdr.encodeStartQpcUs) : 0;
         const uint64_t e2sUs = (hdr.sendQpcUs >= hdr.encodeEndQpcUs) ? (hdr.sendQpcUs - hdr.encodeEndQpcUs) : 0;
-        std::cout << "[native-video-host][trace] seq=" << seq
-                  << " captureUs=" << hdr.captureQpcUs
-                  << " encodeStartUs=" << hdr.encodeStartQpcUs
-                  << " encodeEndUs=" << hdr.encodeEndQpcUs
-                  << " sendUs=" << hdr.sendQpcUs
-                  << " c2eUs=" << c2eUs
-                  << " captureToCallbackUs=" << captureToCallbackUs
-                  << " selectWaitUs=" << frameAgeAtSelectUs
-                  << " queueGapFrames=" << queueGapFrames
+        const HostBottleneckStage bottleneck = detect_host_bottleneck_stage(
+            queueWaitUs, 0, 0, 0, 0, encUs, queueToSendUs, sendDurUs, sendIntervalErrUs);
+          std::cout << "[native-video-host][trace] seq=" << seq
+                    << " captureUs=" << hdr.captureQpcUs
+                    << " encodeStartUs=" << hdr.encodeStartQpcUs
+                    << " encodeEndUs=" << hdr.encodeEndQpcUs
+                    << " sendUs=" << hdr.sendQpcUs
+                    << " bottleneckStageCode=" << bottleneck.code
+                    << " bottleneckStageUs=" << bottleneck.us
+                    << " bottleneckStageName=" << bottleneck.name
+                    << " c2eUs=" << c2eUs
+                    << " captureToCallbackUs=" << captureToCallbackUs
+                    << " callbackIntervalUs=" << callbackIntervalUs
+                    << " captureIntervalUs=" << captureIntervalUs
+                    << " captureClockSkewUs=" << captureClockSkewUs
+                    << " selectWaitUs=" << frameAgeAtSelectUs
+                    << " queueSelectWaitUs=" << queueSelectWaitUs
+                   << " queueGapFrames=" << queueGapFrames
+                   << " queueDepth=" << queueDepthAtPop
+                   << " queueDepthMax=" << queueDepthMax.load(std::memory_order_relaxed)
+                   << " captureToQueueUs=" << captureToQueueUs
+                   << " queueWaitUs=" << queueWaitUs
+                   << " queueWaitReason=" << queueWaitReason
+                   << " queueToSendUs=" << queueToSendUs
+                   << " sendWaitUs=" << sendWaitUs
+                   << " sendIntervalUs=" << sendIntervalUs
+                   << " sendIntervalErrUs=" << sendIntervalErrUs
+                   << " tickWaitUs=" << tickWaitUs
+                   << " sendCallCount=" << sendCallCount
+                   << " sendHeaderUs=" << sendPathStats.headerUs
+                   << " sendPayloadUs=" << sendPathStats.payloadUs
+                   << " sendHeaderCallCount=" << sendPathStats.headerCallCount
+                   << " sendPayloadCallCount=" << sendPathStats.payloadCallCount
+                   << " sendChunkCount=" << sendPathStats.payloadChunkCount
+                   << " sendChunkMaxUs=" << sendPathStats.payloadChunkMaxUs
+                   << " sendStartUs=" << sendStartUs
+                  << " sendDoneUs=" << sendDoneUs
+                  << " sendDurUs=" << sendDurUs
                   << " encUs=" << encUs
                   << " e2sUs=" << e2sUs
                   << " payloadBytes=" << hdr.payloadSize
@@ -1304,28 +1559,63 @@ int main(int argc, char** argv) {
       const uint64_t encUs = (hdr.encodeEndQpcUs >= hdr.encodeStartQpcUs) ? (hdr.encodeEndQpcUs - hdr.encodeStartQpcUs) : 0;
       const uint64_t e2sUs = (hdr.sendQpcUs >= hdr.encodeEndQpcUs) ? (hdr.sendQpcUs - hdr.encodeEndQpcUs) : 0;
       const uint64_t pipeUs = (hdr.sendQpcUs >= hdr.captureQpcUs) ? (hdr.sendQpcUs - hdr.captureQpcUs) : 0;
+      const HostBottleneckStage bottleneck = detect_host_bottleneck_stage(
+          queueWaitUs, 0, 0, 0, 0, encUs, queueToSendUs, sendDurUs, sendIntervalErrUs);
       if (pipeUs >= kHostUserFeedbackWarnUs &&
           (hdr.sendQpcUs >= lastUserFeedbackUs + kHostUserFeedbackMinIntervalUs || lastUserFeedbackUs == 0)) {
         std::cout << "[native-video-host][user-feedback] seq=" << seq
                   << " codec=" << "raw"
                   << " pipeUs=" << pipeUs
+                  << " bottleneckStageCode=" << bottleneck.code
+                  << " bottleneckStageUs=" << bottleneck.us
+                  << " bottleneckStageName=" << bottleneck.name
                   << " captureToCallbackUs=" << captureToCallbackUs
+                  << " callbackIntervalUs=" << callbackIntervalUs
+                  << " captureIntervalUs=" << captureIntervalUs
+                  << " captureClockSkewUs=" << captureClockSkewUs
                   << " selectWaitUs=" << frameAgeAtSelectUs
-                  << " queueGapFrames=" << queueGapFrames
-                  << " c2eUs=" << c2eUs
+                  << " queueSelectWaitUs=" << queueSelectWaitUs
+                  << " captureToQueueUs=" << captureToQueueUs
+                   << " queueWaitUs=" << queueWaitUs
+                   << " queueWaitReason=" << queueWaitReason
+                    << " queueGapFrames=" << queueGapFrames
+                    << " queueDepth=" << queueDepthAtPop
+                    << " queueDepthMax=" << queueDepthMax.load(std::memory_order_relaxed)
+                    << " queueToSendUs=" << queueToSendUs
+                    << " sendIntervalUs=" << sendIntervalUs
+                    << " sendIntervalErrUs=" << sendIntervalErrUs
+                     << " captureClockSkewUs=" << captureClockSkewUs
+                     << " sendWaitUs=" << sendWaitUs
+                   << " tickWaitUs=" << tickWaitUs
+                   << " sendCallCount=" << sendCallCount
+                   << " sendHeaderUs=" << sendPathStats.headerUs
+                   << " sendPayloadUs=" << sendPathStats.payloadUs
+                   << " sendHeaderCallCount=" << sendPathStats.headerCallCount
+                   << " sendPayloadCallCount=" << sendPathStats.payloadCallCount
+                   << " sendChunkCount=" << sendPathStats.payloadChunkCount
+                   << " sendChunkMaxUs=" << sendPathStats.payloadChunkMaxUs
+                   << " c2eUs=" << c2eUs
+                  << " cb2eUs=" << callbackToSendStartUs
                   << " encUs=" << encUs
                   << " e2sUs=" << e2sUs
-                  << " callbackToSendGapUs=" << ((hdr.sendQpcUs >= nowUs) ? (hdr.sendQpcUs - nowUs) : 0)
+                  << " sendStartUs=" << sendStartUs
+                  << " sendDoneUs=" << sendDoneUs
+                  << " sendDurUs=" << sendDurUs
                   << "\n";
         lastUserFeedbackUs = hdr.sendQpcUs;
       }
-    } else {
-      const uint8_t* encodeSrc = payload->data();
+      } else {
+        const uint8_t* encodeSrc = payload->data();
       uint32_t encodeSrcW = w;
       uint32_t encodeSrcH = h;
       uint32_t encodeSrcStride = stride;
       std::vector<uint8_t> scaledBgra;
+      uint64_t preEncodePrepUs = 0;
+      uint64_t scaleUs = 0;
+      uint64_t nv12Us = 0;
+      const uint64_t preEncodeStartUs = qpc_now_us();
       if (activeEncodeW != w || activeEncodeH != h) {
+        const uint64_t scaleStartUs = qpc_now_us();
         bool scaleOk = false;
         if (gpuScalerHealthy) {
           ++gpuScaleAttempts;
@@ -1348,12 +1638,18 @@ int main(int argc, char** argv) {
         encodeSrcW = activeEncodeW;
         encodeSrcH = activeEncodeH;
         encodeSrcStride = activeEncodeW * 4;
+        const uint64_t scaleDoneUs = qpc_now_us();
+        scaleUs = (scaleDoneUs >= scaleStartUs) ? (scaleDoneUs - scaleStartUs) : 0;
       }
 
       std::vector<uint8_t> nv12;
+      const uint64_t nv12StartUs = qpc_now_us();
       if (!bgra_to_nv12(encodeSrc, encodeSrcW, encodeSrcH, encodeSrcStride, &nv12) || nv12.empty()) {
         continue;
       }
+      const uint64_t nv12DoneUs = qpc_now_us();
+      nv12Us = (nv12DoneUs >= nv12StartUs) ? (nv12DoneUs - nv12StartUs) : 0;
+      preEncodePrepUs = (nv12DoneUs >= preEncodeStartUs) ? (nv12DoneUs - preEncodeStartUs) : 0;
 
       const uint64_t beforeEncodeUs = qpc_now_us();
       const uint64_t frameAgeBeforeEncodeUs =
@@ -1369,18 +1665,23 @@ int main(int argc, char** argv) {
         continue;
       }
 
-      if (clientRequestedKeyFrame.exchange(false)) {
+       if (clientRequestedKeyFrame.exchange(false)) {
         const uint16_t reason = clientKeyFrameReason.load();
         std::cout << "[native-video-host][control] keyframe-request-consumed reason=" << reason << "\n";
         forceKeyNext = true;
       }
-      const bool forceKeyFrame =
-          forceKeyNext || (encodedSeq == 0) || ((args.keyint > 0) && ((seq % args.keyint) == 0));
-      const uint64_t encodeStartUs = qpc_now_us();
-      const uint64_t callbackToEncodeStartUs =
-          (encodeStartUs >= callbackUs) ? (encodeStartUs - callbackUs) : 0;
-      std::vector<H264AccessUnit> units;
-      if (!encoder.encode_frame(nv12, forceKeyFrame, static_cast<int64_t>(captureStampUs) * 10, &units)) {
+       const bool forceKeyFrame =
+           forceKeyNext || (encodedSeq == 0) || ((args.keyint > 0) && ((seq % args.keyint) == 0));
+        const uint64_t encodeStartUs = qpc_now_us();
+        const uint64_t encodeInputUs = captureStampUs;
+        if (captureTimelineOriginUs < 0) {
+          captureTimelineOriginUs = static_cast<int64_t>(encodeInputUs);
+        }
+        const uint64_t queueToEncodeUs = (encodeStartUs >= queuePopUs) ? (encodeStartUs - queuePopUs) : 0;
+       const uint64_t callbackToEncodeStartUs =
+            (encodeStartUs >= callbackUs) ? (encodeStartUs - callbackUs) : 0;
+        std::vector<H264AccessUnit> units;
+       if (!encoder.encode_frame(nv12, forceKeyFrame, static_cast<int64_t>(encodeInputUs) * 10, &units)) {
         ++encodeFailCount;
         if ((encodeFailCount % 60) == 1) {
           std::cout << "[native-video-host] encode failed count=" << encodeFailCount << "\n";
@@ -1397,12 +1698,32 @@ int main(int argc, char** argv) {
 
       bool encoderResetTriggered = false;
       bool countedRawForInput = false;
-      for (const auto& au : units) {
-        if (au.bytes.empty()) continue;
-        const uint64_t auCaptureUs =
-            (au.sampleTimeHns > 0) ? static_cast<uint64_t>(au.sampleTimeHns / 10) : captureStampUs;
-        const uint64_t encodedAgeUs =
-            (encodeEndUs >= auCaptureUs) ? (encodeEndUs - auCaptureUs) : 0;
+        for (const auto& au : units) {
+          if (au.bytes.empty()) continue;
+          const int64_t auCaptureUs = (au.sampleTimeHns > 0) ? (au.sampleTimeHns / 10) : static_cast<int64_t>(encodeInputUs);
+          if (auTimelineOriginUs < 0 && captureTimelineOriginUs >= 0) {
+            auTimelineOriginUs = static_cast<int64_t>(auCaptureUs) -
+                                 (static_cast<int64_t>(encodeInputUs) - captureTimelineOriginUs);
+          }
+          const int64_t captureTimelineRelativeUs = static_cast<int64_t>(encodeInputUs) - captureTimelineOriginUs;
+          const int64_t auTimelineRelativeUs = static_cast<int64_t>(auCaptureUs) - auTimelineOriginUs;
+          const int64_t captureToAuTimelineDeltaUs = captureTimelineRelativeUs - auTimelineRelativeUs;
+          const uint64_t captureToAuTimelineSkewUs =
+              (captureToAuTimelineDeltaUs >= 0)
+                  ? static_cast<uint64_t>(captureToAuTimelineDeltaUs)
+                  : static_cast<uint64_t>(-captureToAuTimelineDeltaUs);
+          const int64_t captureToAuSignedDeltaUs = static_cast<int64_t>(auCaptureUs) - static_cast<int64_t>(encodeInputUs);
+          const uint64_t captureToAuSkewUs =
+              (captureToAuSignedDeltaUs >= 0)
+                  ? static_cast<uint64_t>(captureToAuSignedDeltaUs)
+                  : static_cast<uint64_t>(-captureToAuSignedDeltaUs);
+          const uint64_t captureToAuUs = (captureToAuSignedDeltaUs >= 0)
+                                             ? static_cast<uint64_t>(captureToAuSignedDeltaUs)
+                                             : 0;
+          const uint64_t encodedAgeUs =
+              (encodeEndUs >= static_cast<uint64_t>(auCaptureUs))
+                  ? (encodeEndUs - static_cast<uint64_t>(auCaptureUs))
+                  : 0;
         if (guardStaleEncoded && encodedAgeUs > kMaxEncodedFrameAgeUs) {
           ++staleEncodedDropCount;
           ++consecutiveStaleEncodedFrames;
@@ -1418,10 +1739,11 @@ int main(int argc, char** argv) {
                       << encodedAgeUs << "us consecutive=" << consecutiveStaleEncodedFrames << "\n";
             encoder.shutdown();
             if (!encoder.initialize(activeEncodeW, activeEncodeH, args.fps, activeBitrate, args.keyint)) {
-              std::cerr << "[native-video-host] encoder reinitialize failed\n";
+            std::cerr << "[native-video-host] encoder reinitialize failed\n";
               sendFailed = true;
               break;
             }
+            resetHostTimelineAnchors();
             ++encoderResetCount;
             consecutiveStaleEncodedFrames = 0;
             forceKeyNext = true;
@@ -1441,15 +1763,34 @@ int main(int argc, char** argv) {
         hdr.height = activeEncodeH;
         hdr.payloadSize = static_cast<uint32_t>(au.bytes.size());
         hdr.flags = (au.keyFrame || forceKeyFrame || forceKeyNext) ? 1u : 0u;
-        hdr.captureQpcUs = auCaptureUs;
+        hdr.captureQpcUs = encodeInputUs;
         hdr.encodeStartQpcUs = encodeStartUs;
         hdr.encodeEndQpcUs = encodeEndUs;
-        hdr.sendQpcUs = qpc_now_us();
+        SendPathStats sendPathStats{};
+        const uint64_t sendStartUs = qpc_now_us();
+        const uint64_t sendIntervalUs =
+            (lastSendStartUs > 0 && sendStartUs >= lastSendStartUs) ? (sendStartUs - lastSendStartUs) : 0;
+        const uint64_t sendIntervalErrUs =
+            (frameIntervalUs > 0 && sendIntervalUs > 0)
+                ? ((sendIntervalUs >= frameIntervalUs) ? (sendIntervalUs - frameIntervalUs)
+                                                     : (frameIntervalUs - sendIntervalUs))
+                : 0;
+        const uint64_t queueToSendUs = (sendStartUs >= queuePopUs) ? (sendStartUs - queuePopUs) : 0;
+        const uint64_t sendToEncodeUs = (sendStartUs >= encodeEndUs) ? (sendStartUs - encodeEndUs) : 0;
+        const uint64_t encodeSpanUs = (encodeEndUs >= encodeStartUs) ? (encodeEndUs - encodeStartUs) : 0;
+        const uint64_t sendWaitUs =
+            (queueToSendUs >= (queueToEncodeUs + encodeSpanUs))
+                ? (queueToSendUs - queueToEncodeUs - encodeSpanUs)
+                : 0;
+        const uint64_t callbackToSendStartUs = (sendStartUs >= callbackUs) ? (sendStartUs - callbackUs) : 0;
+        hdr.sendQpcUs = sendStartUs;
 
         bool sentOk = false;
         if (transport == VideoTransport::Tcp) {
-          sentOk = send_all(clientSock, &hdr, sizeof(hdr)) &&
-                   send_all(clientSock, au.bytes.data(), au.bytes.size());
+          sentOk = send_all_timed(clientSock, &hdr, sizeof(hdr), &sendPathStats.headerUs,
+                                  &sendPathStats.headerCallCount) &&
+                   send_all_timed(clientSock, au.bytes.data(), au.bytes.size(), &sendPathStats.payloadUs,
+                                 &sendPathStats.payloadCallCount);
         } else {
           if (!udpPeerReady) {
             sentOk = false;
@@ -1469,9 +1810,15 @@ int main(int argc, char** argv) {
             udpHdr.encodeStartQpcUs = hdr.encodeStartQpcUs;
             udpHdr.encodeEndQpcUs = hdr.encodeEndQpcUs;
             udpHdr.sendQpcUs = hdr.sendQpcUs;
-            sentOk = send_udp_chunks(clientSock, udpPeer, au.bytes.data(), au.bytes.size(),
-                                     udpHdr, args.udpMtu);
+            sentOk = send_udp_chunks_timed(clientSock, udpPeer, au.bytes.data(), au.bytes.size(),
+                                          udpHdr, args.udpMtu, &sendPathStats);
           }
+        }
+        const uint64_t sendDoneUs = qpc_now_us();
+        const uint64_t sendDurUs = (sendDoneUs >= sendStartUs) ? (sendDoneUs - sendStartUs) : 0;
+        const uint64_t sendCallCount = sendPathStats.headerCallCount + sendPathStats.payloadCallCount;
+        if (sentOk) {
+          lastSendStartUs = sendStartUs;
         }
         if (!sentOk) {
           sendFailed = true;
@@ -1494,25 +1841,75 @@ int main(int argc, char** argv) {
           ++tracePrinted;
           const uint64_t c2eUs = (hdr.encodeStartQpcUs >= hdr.captureQpcUs) ? (hdr.encodeStartQpcUs - hdr.captureQpcUs) : 0;
           const uint64_t encQueueUs =
-              (encodeStartUs >= auCaptureUs) ? (encodeStartUs - auCaptureUs) : 0;
-          const uint64_t captureToAuUs =
-              (auCaptureUs >= static_cast<int64_t>(hdr.captureQpcUs))
-                  ? static_cast<uint64_t>(auCaptureUs - static_cast<int64_t>(hdr.captureQpcUs))
+              (encodeStartUs >= static_cast<uint64_t>(auCaptureUs))
+                  ? (encodeStartUs - static_cast<uint64_t>(auCaptureUs))
                   : 0;
+          const uint64_t encQueueAlignedUs = (encodeStartUs >= encodeInputUs) ? (encodeStartUs - encodeInputUs) : 0;
+          const uint64_t auTsFromOutput = au.sampleTimeFromOutput ? 1ull : 0ull;
+          const uint64_t auTsSkewUs = (captureToAuSignedDeltaUs >= 0) ? static_cast<uint64_t>(captureToAuSignedDeltaUs)
+                                                                     : static_cast<uint64_t>(-captureToAuSignedDeltaUs);
           const uint64_t encUs = (hdr.encodeEndQpcUs >= hdr.encodeStartQpcUs) ? (hdr.encodeEndQpcUs - hdr.encodeStartQpcUs) : 0;
           const uint64_t e2sUs = (hdr.sendQpcUs >= hdr.encodeEndQpcUs) ? (hdr.sendQpcUs - hdr.encodeEndQpcUs) : 0;
+          const HostBottleneckStage bottleneck = detect_host_bottleneck_stage(
+              queueWaitUs, queueToEncodeUs, preEncodePrepUs, scaleUs, nv12Us, encUs, queueToSendUs,
+              sendDurUs, sendIntervalErrUs);
           std::cout << "[native-video-host][trace] seq=" << hdr.seq
                     << " captureUs=" << hdr.captureQpcUs
                     << " encodeStartUs=" << hdr.encodeStartQpcUs
                     << " encodeEndUs=" << hdr.encodeEndQpcUs
                     << " sendUs=" << hdr.sendQpcUs
+                    << " bottleneckStageCode=" << bottleneck.code
+                    << " bottleneckStageUs=" << bottleneck.us
+                    << " bottleneckStageName=" << bottleneck.name
                     << " c2eUs=" << c2eUs
                     << " captureToCallbackUs=" << captureToCallbackUs
+                    << " callbackIntervalUs=" << callbackIntervalUs
+                    << " captureIntervalUs=" << captureIntervalUs
+                    << " captureClockSkewUs=" << captureClockSkewUs
                     << " selectWaitUs=" << frameAgeAtSelectUs
-                    << " queueGapFrames=" << queueGapFrames
-                    << " encQueueUs=" << encQueueUs
-                    << " captureToAuUs=" << captureToAuUs
-                    << " auCaptureUs=" << auCaptureUs
+                     << " queueSelectWaitUs=" << queueSelectWaitUs
+                     << " queueGapFrames=" << queueGapFrames
+                     << " encQueueUs=" << encQueueUs
+                     << " encQueueAlignedUs=" << encQueueAlignedUs
+                     << " captureToAuSkewUs=" << captureToAuSkewUs
+                     << " captureToAuTimelineDeltaUs="
+                     << (captureToAuTimelineDeltaUs >= 0 ? captureToAuTimelineDeltaUs : 0 - captureToAuTimelineDeltaUs)
+                      << " captureToAuTimelineSkewUs=" << captureToAuTimelineSkewUs
+                      << " auTsFromOutput=" << auTsFromOutput
+                      << " auTsSkewUs=" << auTsSkewUs
+                      << " captureTimelineOriginUs=" << captureTimelineOriginUs
+                     << " auTimelineOriginUs=" << auTimelineOriginUs
+                     << " captureTimelineRelativeUs=" << captureTimelineRelativeUs
+                     << " auTimelineRelativeUs=" << auTimelineRelativeUs
+                      << " frameCaptureUs=" << captureStampUs
+                      << " captureToAuUs=" << captureToAuUs
+                      << " auCaptureUs=" << static_cast<uint64_t>(auCaptureUs)
+                      << " encodeInputUs=" << encodeInputUs
+                      << " captureToQueueUs=" << captureToQueueUs
+                     << " queueWaitUs=" << queueWaitUs
+                     << " queueWaitReason=" << queueWaitReason
+                     << " queueToEncodeUs=" << queueToEncodeUs
+                     << " queueToSendUs=" << queueToSendUs
+                     << " sendIntervalUs=" << sendIntervalUs
+                     << " sendIntervalErrUs=" << sendIntervalErrUs
+                     << " preEncodePrepUs=" << preEncodePrepUs
+                     << " scaleUs=" << scaleUs
+                     << " nv12Us=" << nv12Us
+                     << " sendWaitUs=" << sendWaitUs
+                     << " sendToEncodeUs=" << sendToEncodeUs
+                     << " tickWaitUs=" << tickWaitUs
+                     << " queueDepth=" << queueDepthAtPop
+                    << " queueDepthMax=" << queueDepthMax.load(std::memory_order_relaxed)
+                    << " sendCallCount=" << sendCallCount
+                    << " sendHeaderUs=" << sendPathStats.headerUs
+                    << " sendPayloadUs=" << sendPathStats.payloadUs
+                    << " sendHeaderCallCount=" << sendPathStats.headerCallCount
+                    << " sendPayloadCallCount=" << sendPathStats.payloadCallCount
+                    << " sendChunkCount=" << sendPathStats.payloadChunkCount
+                    << " sendChunkMaxUs=" << sendPathStats.payloadChunkMaxUs
+                    << " sendStartUs=" << sendStartUs
+                    << " sendDoneUs=" << sendDoneUs
+                    << " sendDurUs=" << sendDurUs
                     << " cb2eUs=" << callbackToEncodeStartUs
                     << " capAgeUs=" << captureAgeAtCallbackUs
                     << " encUs=" << encUs
@@ -1523,27 +1920,77 @@ int main(int argc, char** argv) {
         }
         const uint64_t c2eUs = (hdr.encodeStartQpcUs >= hdr.captureQpcUs) ? (hdr.encodeStartQpcUs - hdr.captureQpcUs) : 0;
         const uint64_t encQueueUs =
-            (encodeStartUs >= auCaptureUs) ? (encodeStartUs - auCaptureUs) : 0;
-        const uint64_t captureToAuUs =
-            (auCaptureUs >= static_cast<int64_t>(hdr.captureQpcUs))
-                ? static_cast<uint64_t>(auCaptureUs - static_cast<int64_t>(hdr.captureQpcUs))
-                : 0;
+            (encodeStartUs >= static_cast<uint64_t>(auCaptureUs)) ? (encodeStartUs - static_cast<uint64_t>(auCaptureUs)) : 0;
+        const uint64_t encQueueAlignedUs = (encodeStartUs >= encodeInputUs) ? (encodeStartUs - encodeInputUs) : 0;
+        const uint64_t auTsFromOutput = au.sampleTimeFromOutput ? 1ull : 0ull;
+        const uint64_t auTsSkewUs = (captureToAuSignedDeltaUs >= 0) ? static_cast<uint64_t>(captureToAuSignedDeltaUs)
+                                                                   : static_cast<uint64_t>(-captureToAuSignedDeltaUs);
         const uint64_t encUs = (hdr.encodeEndQpcUs >= hdr.encodeStartQpcUs) ? (hdr.encodeEndQpcUs - hdr.encodeStartQpcUs) : 0;
         const uint64_t e2sUs = (hdr.sendQpcUs >= hdr.encodeEndQpcUs) ? (hdr.sendQpcUs - hdr.encodeEndQpcUs) : 0;
         const uint64_t pipeUs = (hdr.sendQpcUs >= hdr.captureQpcUs) ? (hdr.sendQpcUs - hdr.captureQpcUs) : 0;
+        const HostBottleneckStage bottleneck = detect_host_bottleneck_stage(
+            queueWaitUs, queueToEncodeUs, preEncodePrepUs, scaleUs, nv12Us, encUs, queueToSendUs,
+            sendDurUs, sendIntervalErrUs);
         if (pipeUs >= kHostUserFeedbackWarnUs &&
             (hdr.sendQpcUs >= lastUserFeedbackUs + kHostUserFeedbackMinIntervalUs || lastUserFeedbackUs == 0)) {
-          std::cout << "[native-video-host][user-feedback] seq=" << hdr.seq
-                    << " codec=" << "h264"
-                    << " pipeUs=" << pipeUs
-                    << " captureToCallbackUs=" << captureToCallbackUs
+        std::cout << "[native-video-host][user-feedback] seq=" << hdr.seq
+                  << " codec=" << "h264"
+                  << " pipeUs=" << pipeUs
+                  << " bottleneckStageCode=" << bottleneck.code
+                  << " bottleneckStageUs=" << bottleneck.us
+                  << " bottleneckStageName=" << bottleneck.name
+                  << " captureToCallbackUs=" << captureToCallbackUs
+                    << " callbackIntervalUs=" << callbackIntervalUs
+                    << " captureIntervalUs=" << captureIntervalUs
                     << " selectWaitUs=" << frameAgeAtSelectUs
-                    << " queueGapFrames=" << queueGapFrames
-                    << " c2eUs=" << c2eUs
-                    << " encQueueUs=" << encQueueUs
-                    << " captureToAuUs=" << captureToAuUs
-                    << " auCaptureUs=" << auCaptureUs
-                    << " cb2eUs=" << callbackToEncodeStartUs
+                    << " queueSelectWaitUs=" << queueSelectWaitUs
+                    << " captureClockSkewUs=" << captureClockSkewUs
+                    << " captureToQueueUs=" << captureToQueueUs
+                   << " queueWaitUs=" << queueWaitUs
+                   << " queueWaitReason=" << queueWaitReason
+                     << " queueGapFrames=" << queueGapFrames
+                     << " queueDepth=" << queueDepthAtPop
+                    << " queueDepthMax=" << queueDepthMax.load(std::memory_order_relaxed)
+                    << " queueToEncodeUs=" << queueToEncodeUs
+                    << " queueToSendUs=" << queueToSendUs
+                    << " sendIntervalUs=" << sendIntervalUs
+                    << " sendIntervalErrUs=" << sendIntervalErrUs
+                    << " captureClockSkewUs=" << captureClockSkewUs
+                    << " sendWaitUs=" << sendWaitUs
+                    << " sendToEncodeUs=" << sendToEncodeUs
+                     << " tickWaitUs=" << tickWaitUs
+                     << " preEncodePrepUs=" << preEncodePrepUs
+                     << " scaleUs=" << scaleUs
+                     << " nv12Us=" << nv12Us
+                     << " c2eUs=" << c2eUs
+                      << " encQueueUs=" << encQueueUs
+                     << " encQueueAlignedUs=" << encQueueAlignedUs
+                      << " captureToAuSkewUs=" << captureToAuSkewUs
+                      << " captureToAuTimelineSkewUs=" << captureToAuTimelineSkewUs
+                      << " auTsFromOutput=" << auTsFromOutput
+                      << " auTsSkewUs=" << auTsSkewUs
+                      << " captureToAuTimelineDeltaUs="
+                      << (captureToAuTimelineDeltaUs >= 0 ? captureToAuTimelineDeltaUs : 0 - captureToAuTimelineDeltaUs)
+                      << " captureTimelineOriginUs=" << captureTimelineOriginUs
+                      << " auTimelineOriginUs=" << auTimelineOriginUs
+                      << " captureTimelineRelativeUs=" << captureTimelineRelativeUs
+                      << " auTimelineRelativeUs=" << auTimelineRelativeUs
+                      << " frameCaptureUs=" << captureStampUs
+                      << " captureToAuUs=" << captureToAuUs
+                     << " auCaptureUs=" << static_cast<uint64_t>(auCaptureUs)
+                     << " encodeInputUs=" << encodeInputUs
+                   << " cb2eUs=" << callbackToEncodeStartUs
+                   << " cb2sUs=" << callbackToSendStartUs
+                    << " sendCallCount=" << sendCallCount
+                    << " sendHeaderUs=" << sendPathStats.headerUs
+                    << " sendPayloadUs=" << sendPathStats.payloadUs
+                    << " sendHeaderCallCount=" << sendPathStats.headerCallCount
+                    << " sendPayloadCallCount=" << sendPathStats.payloadCallCount
+                    << " sendChunkCount=" << sendPathStats.payloadChunkCount
+                    << " sendChunkMaxUs=" << sendPathStats.payloadChunkMaxUs
+                    << " sendStartUs=" << sendStartUs
+                    << " sendDoneUs=" << sendDoneUs
+                    << " sendDurUs=" << sendDurUs
                     << " capAgeUs=" << captureAgeAtCallbackUs
                     << " encUs=" << encUs
                     << " e2sUs=" << e2sUs
@@ -1568,6 +2015,11 @@ int main(int argc, char** argv) {
       const double mbps = (sentBytes * 8.0) / (1000.0 * 1000.0);
       if (useRaw) {
         std::cout << "[native-video-host] sentFrames=" << sentFrames
+                  << " queuePushCount=" << queuePushCount
+                  << " queuePopCount=" << queuePopCount
+                  << " queueDepthMax=" << queueDepthMax.load(std::memory_order_relaxed)
+                  << " queueWaitTimeoutCount=" << queueWaitTimeoutCount
+                  << " queueWaitNoWorkCount=" << queueWaitNoWorkCount
                   << " callbackFrames=" << callbackFrames.load()
                   << " skippedByOverwrite=" << skippedByOverwrite
                   << " mbps=" << mbps
@@ -1581,6 +2033,11 @@ int main(int argc, char** argv) {
             (sentBytes > 0) ? ((rawEquivalentBytes * 100ULL) / sentBytes) : 0;
         std::cout << "[native-video-host] encodedFrames=" << encodedFrames
                   << " sentFrames=" << sentFrames
+                  << " queuePushCount=" << queuePushCount
+                  << " queuePopCount=" << queuePopCount
+                  << " queueDepthMax=" << queueDepthMax.load(std::memory_order_relaxed)
+                  << " queueWaitTimeoutCount=" << queueWaitTimeoutCount
+                  << " queueWaitNoWorkCount=" << queueWaitNoWorkCount
                   << " callbackFrames=" << callbackFrames.load()
                   << " skippedByOverwrite=" << skippedByOverwrite
                   << " stalePreEncodeDrops=" << stalePreEncodeDropCount
@@ -1756,6 +2213,8 @@ int main(int argc, char** argv) {
               if (!encoder.initialize(targetW, targetH, args.fps, targetBitrate, args.keyint)) {
                 std::cerr << "[native-video-host][abr] encoder reinitialize failed for profile switch\n";
                 switchOk = false;
+              } else {
+                resetHostTimelineAnchors();
               }
             } else if (targetBitrate != activeBitrate) {
               if (!encoder.reconfigure_bitrate(targetBitrate)) {
@@ -1763,6 +2222,8 @@ int main(int argc, char** argv) {
                 if (!encoder.initialize(targetW, targetH, args.fps, targetBitrate, args.keyint)) {
                   std::cerr << "[native-video-host][abr] encoder bitrate reconfigure/reinit failed\n";
                   switchOk = false;
+                } else {
+                  resetHostTimelineAnchors();
                 }
               }
             }

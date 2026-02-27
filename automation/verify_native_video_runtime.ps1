@@ -15,6 +15,7 @@ param(
   [string]$DecoderBackend = "",
   [int]$FpsHint = 30,
   [switch]$NoInputChannel,
+  [string]$BuildDir = "build-native2",
   [int]$HostSeconds = 12,
   [int]$ClientSeconds = 8,
   [int]$TraceEvery = 0,
@@ -36,8 +37,12 @@ if ([string]::IsNullOrWhiteSpace($effectiveTransport)) {
   }
 }
 
-$hostExe = Join-Path $Root "build-native2/apps/native_poc/Debug/remote60_native_video_host_poc.exe"
-$clientExe = Join-Path $Root "build-native2/apps/native_poc/Debug/remote60_native_video_client_poc.exe"
+$resolvedBuildDir = $BuildDir
+if (-not [System.IO.Path]::IsPathRooted($BuildDir)) {
+  $resolvedBuildDir = Join-Path $Root $BuildDir
+}
+$hostExe = Join-Path $resolvedBuildDir "apps/native_poc/Debug/remote60_native_video_host_poc.exe"
+$clientExe = Join-Path $resolvedBuildDir "apps/native_poc/Debug/remote60_native_video_client_poc.exe"
 if (-not (Test-Path $hostExe)) { throw "host exe not found: $hostExe" }
 if (-not (Test-Path $clientExe)) { throw "client exe not found: $clientExe" }
 
@@ -140,6 +145,24 @@ $abrLastProfile = ""
 $keyReqClientSent = 0
 $keyReqHostRecv = 0
 $keyReqHostConsumed = 0
+$queueWaitTimeoutCount = 0
+$queueWaitNoWorkCount = 0
+$queueWaitReason0Count = 0
+$queueWaitReason1Count = 0
+$queueWaitReason2Count = 0
+$hostBottleneckStageCode0Count = 0
+$hostBottleneckStageCode1Count = 0
+$hostBottleneckStageCode2Count = 0
+$hostBottleneckStageCode3Count = 0
+$hostBottleneckStageCode4Count = 0
+$hostBottleneckStageCode5Count = 0
+$hostBottleneckStageCode6Count = 0
+$hostBottleneckStageCode7Count = 0
+$hostBottleneckStageCode8Count = 0
+$hostBottleneckStageCode9Count = 0
+$queuePushCount = 0
+$queuePopCount = 0
+$hostSkippedByOverwrite = 0
 $d3dPresentSuccessTotal = 0
 $d3dPresentFailTotal = 0
 $gdiFallbackPresentedTotal = 0
@@ -179,17 +202,62 @@ $stageValues = [ordered]@{
 $hostUserFeedbackValues = [ordered]@{
   pipeUs = (New-Object System.Collections.Generic.List[double])
   captureToCallbackUs = (New-Object System.Collections.Generic.List[double])
+  callbackIntervalUs = (New-Object System.Collections.Generic.List[double])
+  captureIntervalUs = (New-Object System.Collections.Generic.List[double])
+  captureClockSkewUs = (New-Object System.Collections.Generic.List[double])
+  preEncodePrepUs = (New-Object System.Collections.Generic.List[double])
+  scaleUs = (New-Object System.Collections.Generic.List[double])
+  nv12Us = (New-Object System.Collections.Generic.List[double])
   selectWaitUs = (New-Object System.Collections.Generic.List[double])
+  queueSelectWaitUs = (New-Object System.Collections.Generic.List[double])
+  queueToEncodeUs = (New-Object System.Collections.Generic.List[double])
+  queueToSendUs = (New-Object System.Collections.Generic.List[double])
   queueGapFrames = (New-Object System.Collections.Generic.List[double])
+  captureToQueueUs = (New-Object System.Collections.Generic.List[double])
+  queueWaitUs = (New-Object System.Collections.Generic.List[double])
+  bottleneckStageCode = (New-Object System.Collections.Generic.List[double])
+  bottleneckStageUs = (New-Object System.Collections.Generic.List[double])
+  tickWaitUs = (New-Object System.Collections.Generic.List[double])
+  queueDepth = (New-Object System.Collections.Generic.List[double])
+  queueDepthMax = (New-Object System.Collections.Generic.List[double])
+  sendStartUs = (New-Object System.Collections.Generic.List[double])
+  sendDoneUs = (New-Object System.Collections.Generic.List[double])
+  sendDurUs = (New-Object System.Collections.Generic.List[double])
+  sendWaitUs = (New-Object System.Collections.Generic.List[double])
+  sendIntervalUs = (New-Object System.Collections.Generic.List[double])
+  sendIntervalErrUs = (New-Object System.Collections.Generic.List[double])
+  sendToEncodeUs = (New-Object System.Collections.Generic.List[double])
+  sendCallCount = (New-Object System.Collections.Generic.List[double])
+  sendHeaderUs = (New-Object System.Collections.Generic.List[double])
+  sendPayloadUs = (New-Object System.Collections.Generic.List[double])
+  sendHeaderCallCount = (New-Object System.Collections.Generic.List[double])
+  sendPayloadCallCount = (New-Object System.Collections.Generic.List[double])
+  sendChunkCount = (New-Object System.Collections.Generic.List[double])
+  sendChunkMaxUs = (New-Object System.Collections.Generic.List[double])
   c2eUs = (New-Object System.Collections.Generic.List[double])
   encQueueUs = (New-Object System.Collections.Generic.List[double])
-  captureToAuUs = (New-Object System.Collections.Generic.List[double])
+  encQueueAlignedUs = (New-Object System.Collections.Generic.List[double])
+    captureToAuUs = (New-Object System.Collections.Generic.List[double])
+    captureToAuSkewUs = (New-Object System.Collections.Generic.List[double])
+    auTsFromOutput = (New-Object System.Collections.Generic.List[double])
+    auTsSkewUs = (New-Object System.Collections.Generic.List[double])
+    captureToAuTimelineDeltaUs = (New-Object System.Collections.Generic.List[double])
+  captureToAuTimelineSkewUs = (New-Object System.Collections.Generic.List[double])
+  captureTimelineRelativeUs = (New-Object System.Collections.Generic.List[double])
+  auTimelineRelativeUs = (New-Object System.Collections.Generic.List[double])
+  captureTimelineOriginUs = (New-Object System.Collections.Generic.List[double])
+  auTimelineOriginUs = (New-Object System.Collections.Generic.List[double])
   callbackToSendGapUs = (New-Object System.Collections.Generic.List[double])
   cb2eUs = (New-Object System.Collections.Generic.List[double])
+  cb2sUs = (New-Object System.Collections.Generic.List[double])
   capAgeUs = (New-Object System.Collections.Generic.List[double])
   encUs = (New-Object System.Collections.Generic.List[double])
   e2sUs = (New-Object System.Collections.Generic.List[double])
 }
+$hostCaptureIntervalVals = New-Object System.Collections.Generic.List[double]
+$hostCaptureIntervalErrUsVals = New-Object System.Collections.Generic.List[double]
+$hostCallbackIntervalVals = New-Object System.Collections.Generic.List[double]
+$hostCallbackIntervalErrUsVals = New-Object System.Collections.Generic.List[double]
 $clientUserFeedbackValues = [ordered]@{
   totalUs = (New-Object System.Collections.Generic.List[double])
   capGapUs = (New-Object System.Collections.Generic.List[double])
@@ -209,6 +277,9 @@ $clientUserFeedbackValues = [ordered]@{
 }
 $hostUserFeedbackTopEntries = New-Object System.Collections.Generic.List[object]
 $clientUserFeedbackTopEntries = New-Object System.Collections.Generic.List[object]
+$hostPrevCaptureUsForInterval = $null
+$hostCaptureIntervalTargetUs = if ($Fps -gt 0) { [double](1000000.0 / [double]$Fps) } else { 0.0 }
+$hostTraceCaptureSeen = $false
 foreach ($line in $clientLines) {
   if ($line -match 'avgLatencyUs=([0-9]+)') {
     [void]$latencyVals.Add([double]$Matches[1])
@@ -353,21 +424,297 @@ foreach ($line in $hostLines) {
   if ($line -match '\[native-video-host\]\[control\] keyframe-request-consumed ') {
     $keyReqHostConsumed += 1
   }
-if ($line -match '\[native-video-host\]\[user-feedback\]') {
-  $seqVal = 0
-  if ($line -match 'seq=([0-9]+)') {
-    $seqVal = [int64]$Matches[1]
+  if ($line -match 'queueWaitTimeoutCount=([0-9]+)') {
+    $queueWaitTimeoutCount = [int64]$Matches[1]
   }
-    foreach ($stageName in $hostUserFeedbackValues.Keys) {
-      if ($line -match ($stageName + '=([0-9]+)')) {
-        [void]$hostUserFeedbackValues[$stageName].Add([double]$Matches[1])
+  if ($line -match 'queueWaitNoWorkCount=([0-9]+)') {
+    $queueWaitNoWorkCount = [int64]$Matches[1]
+  }
+  if ($line -match 'queuePushCount=([0-9]+)') {
+    $queuePushCount = [int64]$Matches[1]
+  }
+  if ($line -match 'queuePopCount=([0-9]+)') {
+    $queuePopCount = [int64]$Matches[1]
+  }
+  if ($line -match 'skippedByOverwrite=([0-9]+)') {
+    $hostSkippedByOverwrite = [int64]$Matches[1]
+  }
+  if ($line -match '\[native-video-host\]\[user-feedback\]') {
+    $seqVal = 0
+    $captureUs = $null
+    $frameCaptureUs = $null
+    $callbackIntervalUs = $null
+    $captureIntervalUs = $null
+    $sendUs = $null
+    $pipeUsFromLine = $null
+    $sendStartUsAbs = $null
+    $sendDoneUsAbs = $null
+      $topEntry = @{
+        seq = 0
+        pipeUs = 0
+      callbackIntervalUs = $null
+      captureIntervalUs = $null
+      sendCallCount = $null
+      sendHeaderUs = $null
+      sendPayloadUs = $null
+      sendHeaderCallCount = $null
+      sendPayloadCallCount = $null
+      sendChunkCount = $null
+      sendChunkMaxUs = $null
+      sendWaitUs = $null
+      sendIntervalUs = $null
+      sendIntervalErrUs = $null
+      sendToEncodeUs = $null
+      tickWaitUs = $null
+      captureToAuTimelineSkewUs = $null
+      captureToAuTimelineDeltaUs = $null
+      captureToAuSkewUs = $null
+      auTsFromOutput = $null
+      auTsSkewUs = $null
+      captureTimelineRelativeUs = $null
+      auTimelineRelativeUs = $null
+      captureTimelineOriginUs = $null
+      auTimelineOriginUs = $null
+      captureToAuUs = $null
+      encodeInputUs = $null
+      auCaptureUs = $null
+      captureToQueueUs = $null
+      captureClockSkewUs = $null
+      preEncodePrepUs = $null
+      scaleUs = $null
+      nv12Us = $null
+        queueToEncodeUs = $null
+        queueToSendUs = $null
+        encQueueAlignedUs = $null
+        bottleneckStageCode = $null
+        bottleneckStageUs = $null
+        queueWaitReason = $null
+      }
+    foreach ($pair in [regex]::Matches($line, '([A-Za-z_][A-Za-z0-9_]*)=([0-9]+)')) {
+      $key = $pair.Groups[1].Value
+      $value = [double]$pair.Groups[2].Value
+      if ($key -eq 'seq') {
+        $seqVal = [int64]$value
+      } elseif ($key -eq 'captureUs') {
+        $captureUs = $value
+      } elseif ($key -eq 'frameCaptureUs') {
+        $frameCaptureUs = $value
+      } elseif ($key -eq 'callbackIntervalUs') {
+        $callbackIntervalUs = $value
+      } elseif ($key -eq 'captureIntervalUs') {
+        $captureIntervalUs = $value
+      } elseif ($key -eq 'sendUs') {
+        $sendUs = $value
+      } elseif ($key -eq 'pipeUs') {
+        $pipeUsFromLine = $value
+      } elseif ($key -eq 'sendStartUs') {
+        $sendStartUsAbs = $value
+      } elseif ($key -eq 'sendDoneUs') {
+        $sendDoneUsAbs = $value
+      } elseif ($key -eq 'queueWaitReason') {
+        $reason = [int]$value
+        switch ($reason) {
+          0 { $queueWaitReason0Count += 1 }
+          1 { $queueWaitReason1Count += 1 }
+          2 { $queueWaitReason2Count += 1 }
+        }
+      } elseif ($key -eq 'bottleneckStageCode') {
+        $stageCode = [int]$value
+        switch ($stageCode) {
+          0 { $hostBottleneckStageCode0Count += 1 }
+          1 { $hostBottleneckStageCode1Count += 1 }
+          2 { $hostBottleneckStageCode2Count += 1 }
+          3 { $hostBottleneckStageCode3Count += 1 }
+          4 { $hostBottleneckStageCode4Count += 1 }
+          5 { $hostBottleneckStageCode5Count += 1 }
+          6 { $hostBottleneckStageCode6Count += 1 }
+          7 { $hostBottleneckStageCode7Count += 1 }
+          8 { $hostBottleneckStageCode8Count += 1 }
+          9 { $hostBottleneckStageCode9Count += 1 }
+        }
+      }
+      if ($hostUserFeedbackValues.Keys -contains $key -and $key -ne 'sendStartUs' -and $key -ne 'sendDoneUs') {
+        [void]$hostUserFeedbackValues[$key].Add($value)
+      }
+      if ($topEntry.ContainsKey($key)) {
+        $topEntry[$key] = $value
       }
     }
-    if ($line -match 'pipeUs=([0-9]+)') {
-      [void]$hostUserFeedbackTopEntries.Add([PSCustomObject]@{
-        seq = $seqVal
-        pipeUs = [double]$Matches[1]
-      })
+    if (-not $hostTraceCaptureSeen) {
+      $captureRefUs = $null
+      if ($captureUs -ne $null) {
+        $captureRefUs = $captureUs
+      } elseif ($frameCaptureUs -ne $null) {
+        $captureRefUs = $frameCaptureUs
+      }
+      if ($captureRefUs -ne $null) {
+        if ($hostPrevCaptureUsForInterval -ne $null -and $captureRefUs -ge $hostPrevCaptureUsForInterval) {
+          $captureIntervalUs = [double]($captureRefUs - $hostPrevCaptureUsForInterval)
+          [void]$hostCaptureIntervalVals.Add($captureIntervalUs)
+          if ($hostCaptureIntervalTargetUs -gt 0) {
+            [void]$hostCaptureIntervalErrUsVals.Add([double][Math]::Abs($captureIntervalUs - $hostCaptureIntervalTargetUs))
+          }
+        }
+        $hostPrevCaptureUsForInterval = $captureRefUs
+      }
+    }
+    if ($callbackIntervalUs -ne $null) {
+      [void]$hostCallbackIntervalVals.Add([double]$callbackIntervalUs)
+      if ($hostCaptureIntervalTargetUs -gt 0) {
+        [void]$hostCallbackIntervalErrUsVals.Add([double][Math]::Abs($callbackIntervalUs - $hostCaptureIntervalTargetUs))
+      }
+    }
+    if ($captureUs -ne $null -and $sendStartUsAbs -ne $null) {
+      [void]$hostUserFeedbackValues['sendStartUs'].Add([double][Math]::Max(0.0, $sendStartUsAbs - $captureUs))
+    }
+    if ($captureUs -ne $null -and $sendDoneUsAbs -ne $null) {
+      [void]$hostUserFeedbackValues['sendDoneUs'].Add([double][Math]::Max(0.0, $sendDoneUsAbs - $captureUs))
+    }
+    if ($pipeUsFromLine -eq $null -and $captureUs -ne $null -and $sendUs -ne $null) {
+      $pipeUsFromLine = [Math]::Max(0.0, $sendUs - $captureUs)
+      [void]$hostUserFeedbackValues['pipeUs'].Add([double]$pipeUsFromLine)
+    }
+    if ($pipeUsFromLine -ne $null) {
+      $topEntry.seq = $seqVal
+      $topEntry.pipeUs = [double]$pipeUsFromLine
+      [void]$hostUserFeedbackTopEntries.Add([PSCustomObject]$topEntry)
+    }
+  } elseif ($line -match '\[native-video-host\]\[trace\]') {
+    $seqVal = 0
+    $captureUs = $null
+    $frameCaptureUs = $null
+    $callbackIntervalUs = $null
+    $captureIntervalUs = $null
+    $sendUs = $null
+    $pipeUsFromLine = $null
+    $sendStartUsAbs = $null
+    $sendDoneUsAbs = $null
+    $topEntry = @{
+      seq = 0
+      pipeUs = 0
+      callbackIntervalUs = $null
+      captureIntervalUs = $null
+      sendCallCount = $null
+      sendHeaderUs = $null
+      sendPayloadUs = $null
+      sendHeaderCallCount = $null
+      sendPayloadCallCount = $null
+      sendChunkCount = $null
+      sendChunkMaxUs = $null
+      sendWaitUs = $null
+      sendIntervalUs = $null
+      sendIntervalErrUs = $null
+      sendToEncodeUs = $null
+      tickWaitUs = $null
+      captureToAuTimelineSkewUs = $null
+      captureToAuTimelineDeltaUs = $null
+      captureToAuSkewUs = $null
+      auTsFromOutput = $null
+      auTsSkewUs = $null
+      captureTimelineRelativeUs = $null
+      auTimelineRelativeUs = $null
+      captureTimelineOriginUs = $null
+      auTimelineOriginUs = $null
+      captureToAuUs = $null
+      encodeInputUs = $null
+      auCaptureUs = $null
+      captureToQueueUs = $null
+      captureClockSkewUs = $null
+      preEncodePrepUs = $null
+      scaleUs = $null
+      nv12Us = $null
+        queueToEncodeUs = $null
+        queueToSendUs = $null
+        encQueueAlignedUs = $null
+        bottleneckStageCode = $null
+        bottleneckStageUs = $null
+        queueWaitReason = $null
+      }
+    foreach ($pair in [regex]::Matches($line, '([A-Za-z_][A-Za-z0-9_]*)=([0-9]+)')) {
+      $key = $pair.Groups[1].Value
+      $value = [double]$pair.Groups[2].Value
+      if ($key -eq 'seq') {
+        $seqVal = [int64]$value
+      } elseif ($key -eq 'captureUs') {
+        $captureUs = $value
+      } elseif ($key -eq 'frameCaptureUs') {
+        $frameCaptureUs = $value
+      } elseif ($key -eq 'callbackIntervalUs') {
+        $callbackIntervalUs = $value
+      } elseif ($key -eq 'captureIntervalUs') {
+        $captureIntervalUs = $value
+      } elseif ($key -eq 'sendUs') {
+        $sendUs = $value
+      } elseif ($key -eq 'sendStartUs') {
+        $sendStartUsAbs = $value
+      } elseif ($key -eq 'sendDoneUs') {
+        $sendDoneUsAbs = $value
+      } elseif ($key -eq 'queueWaitReason') {
+        $reason = [int]$value
+        switch ($reason) {
+          0 { $queueWaitReason0Count += 1 }
+          1 { $queueWaitReason1Count += 1 }
+          2 { $queueWaitReason2Count += 1 }
+        }
+      } elseif ($key -eq 'bottleneckStageCode') {
+        $stageCode = [int]$value
+        switch ($stageCode) {
+          0 { $hostBottleneckStageCode0Count += 1 }
+          1 { $hostBottleneckStageCode1Count += 1 }
+          2 { $hostBottleneckStageCode2Count += 1 }
+          3 { $hostBottleneckStageCode3Count += 1 }
+          4 { $hostBottleneckStageCode4Count += 1 }
+          5 { $hostBottleneckStageCode5Count += 1 }
+          6 { $hostBottleneckStageCode6Count += 1 }
+          7 { $hostBottleneckStageCode7Count += 1 }
+          8 { $hostBottleneckStageCode8Count += 1 }
+          9 { $hostBottleneckStageCode9Count += 1 }
+        }
+      }
+      if ($hostUserFeedbackValues.Keys -contains $key -and $key -ne 'sendStartUs' -and $key -ne 'sendDoneUs') {
+        [void]$hostUserFeedbackValues[$key].Add($value)
+      }
+      if ($topEntry.ContainsKey($key)) {
+        $topEntry[$key] = $value
+      }
+    }
+    $captureRefUs = $null
+    if ($captureUs -ne $null) {
+      $captureRefUs = $captureUs
+    } elseif ($frameCaptureUs -ne $null) {
+      $captureRefUs = $frameCaptureUs
+    }
+    if ($captureRefUs -ne $null) {
+      if ($hostPrevCaptureUsForInterval -ne $null -and $captureRefUs -ge $hostPrevCaptureUsForInterval) {
+        $captureIntervalUs = [double]($captureRefUs - $hostPrevCaptureUsForInterval)
+        [void]$hostCaptureIntervalVals.Add($captureIntervalUs)
+        if ($hostCaptureIntervalTargetUs -gt 0) {
+          [void]$hostCaptureIntervalErrUsVals.Add([double][Math]::Abs($captureIntervalUs - $hostCaptureIntervalTargetUs))
+        }
+      }
+      $hostPrevCaptureUsForInterval = $captureRefUs
+      $hostTraceCaptureSeen = $true
+    }
+    if ($callbackIntervalUs -ne $null) {
+      [void]$hostCallbackIntervalVals.Add([double]$callbackIntervalUs)
+      if ($hostCaptureIntervalTargetUs -gt 0) {
+        [void]$hostCallbackIntervalErrUsVals.Add([double][Math]::Abs($callbackIntervalUs - $hostCaptureIntervalTargetUs))
+      }
+    }
+    if ($captureUs -ne $null -and $sendStartUsAbs -ne $null) {
+      [void]$hostUserFeedbackValues['sendStartUs'].Add([double][Math]::Max(0.0, $sendStartUsAbs - $captureUs))
+    }
+    if ($captureUs -ne $null -and $sendDoneUsAbs -ne $null) {
+      [void]$hostUserFeedbackValues['sendDoneUs'].Add([double][Math]::Max(0.0, $sendDoneUsAbs - $captureUs))
+    }
+    if ($captureUs -ne $null -and $sendUs -ne $null) {
+      $pipeUsFromLine = [Math]::Max(0.0, $sendUs - $captureUs)
+      [void]$hostUserFeedbackValues['pipeUs'].Add([double]$pipeUsFromLine)
+    }
+    if ($pipeUsFromLine -ne $null) {
+      $topEntry.seq = $seqVal
+      $topEntry.pipeUs = [double]$pipeUsFromLine
+      [void]$hostUserFeedbackTopEntries.Add([PSCustomObject]$topEntry)
     }
   }
 }
@@ -413,6 +760,10 @@ $hostUserFeedbackStats = [ordered]@{}
 foreach ($stageName in $hostUserFeedbackValues.Keys) {
   $hostUserFeedbackStats[$stageName] = Stats-Summary -vals $hostUserFeedbackValues[$stageName]
 }
+$hostCaptureIntervalStats = Stats-Summary -vals $hostCaptureIntervalVals
+$hostCaptureIntervalErrStats = Stats-Summary -vals $hostCaptureIntervalErrUsVals
+$hostCallbackIntervalStats = Stats-Summary -vals $hostCallbackIntervalVals
+$hostCallbackIntervalErrStats = Stats-Summary -vals $hostCallbackIntervalErrUsVals
 
 if ($clientUserFeedbackTopEntries.Count -gt 0) {
   $clientUserFeedbackTopEntries = $clientUserFeedbackTopEntries | Sort-Object -Property totalUs -Descending
@@ -441,7 +792,44 @@ foreach ($stageName in @("totalUs", "capGapUs", "queueToPaintUs", "queueToPresen
 }
 $hostUserFeedbackBottleneckStage = "N/A"
 $hostUserFeedbackBottleneckAvgUs = 0
-foreach ($stageName in @("pipeUs", "captureToCallbackUs", "selectWaitUs", "queueGapFrames", "c2eUs", "encQueueUs", "captureToAuUs", "callbackToSendGapUs", "cb2eUs", "capAgeUs", "encUs", "e2sUs")) {
+foreach ($stageName in @(
+  "pipeUs",
+  "captureToCallbackUs",
+  "callbackIntervalUs",
+  "captureIntervalUs",
+  "preEncodePrepUs",
+  "scaleUs",
+  "nv12Us",
+  "selectWaitUs",
+  "queueSelectWaitUs",
+  "queueToEncodeUs",
+  "queueToSendUs",
+  "captureToQueueUs",
+  "captureClockSkewUs",
+  "queueWaitUs",
+  "queueDepth",
+  "queueDepthMax",
+  "sendDurUs",
+  "sendWaitUs",
+  "sendToEncodeUs",
+  "sendIntervalUs",
+  "sendIntervalErrUs",
+  "sendDoneUs",
+  "sendHeaderUs",
+  "sendPayloadUs",
+  "queueGapFrames",
+  "tickWaitUs",
+  "c2eUs",
+  "encQueueAlignedUs",
+  "captureToAuUs",
+  "captureToAuTimelineSkewUs",
+  "callbackToSendGapUs",
+  "cb2sUs",
+  "cb2eUs",
+  "capAgeUs",
+  "encUs",
+  "e2sUs"
+)) {
   $s = $hostUserFeedbackStats[$stageName]
   if ($s.count -gt 0 -and $s.avg -ge $hostUserFeedbackBottleneckAvgUs) {
     $hostUserFeedbackBottleneckStage = $stageName
@@ -482,6 +870,42 @@ Write-Output "ABR_LAST_PROFILE=$abrLastProfile"
 Write-Output "KEYREQ_CLIENT_SENT=$keyReqClientSent"
 Write-Output "KEYREQ_HOST_RECV=$keyReqHostRecv"
 Write-Output "KEYREQ_HOST_CONSUMED=$keyReqHostConsumed"
+Write-Output "HOST_QUEUE_WAIT_TIMEOUT_COUNT=$queueWaitTimeoutCount"
+Write-Output "HOST_QUEUE_WAIT_NOWORK_COUNT=$queueWaitNoWorkCount"
+Write-Output "HOST_QUEUE_PUSH_COUNT=$queuePushCount"
+Write-Output "HOST_QUEUE_POP_COUNT=$queuePopCount"
+Write-Output "HOST_QUEUE_SKIPPED_BY_OVERWRITE=$hostSkippedByOverwrite"
+Write-Output "HOST_CAPTURE_INTERVAL_COUNT=$($hostCaptureIntervalStats.count)"
+Write-Output "HOST_CAPTURE_INTERVAL_TARGET_US=$hostCaptureIntervalTargetUs"
+Write-Output "HOST_CAPTURE_INTERVAL_AVG_US=$($hostCaptureIntervalStats.avg)"
+Write-Output "HOST_CAPTURE_INTERVAL_P95_US=$($hostCaptureIntervalStats.p95)"
+Write-Output "HOST_CAPTURE_INTERVAL_MAX_US=$($hostCaptureIntervalStats.max)"
+Write-Output "HOST_CAPTURE_INTERVAL_ERR_COUNT=$($hostCaptureIntervalErrStats.count)"
+Write-Output "HOST_CAPTURE_INTERVAL_ERR_AVG_US=$($hostCaptureIntervalErrStats.avg)"
+Write-Output "HOST_CALLBACK_INTERVAL_COUNT=$($hostCallbackIntervalStats.count)"
+Write-Output "HOST_CALLBACK_INTERVAL_TARGET_US=$hostCaptureIntervalTargetUs"
+Write-Output "HOST_CALLBACK_INTERVAL_AVG_US=$($hostCallbackIntervalStats.avg)"
+Write-Output "HOST_CALLBACK_INTERVAL_P95_US=$($hostCallbackIntervalStats.p95)"
+Write-Output "HOST_CALLBACK_INTERVAL_MAX_US=$($hostCallbackIntervalStats.max)"
+Write-Output "HOST_CALLBACK_INTERVAL_ERR_COUNT=$($hostCallbackIntervalErrStats.count)"
+Write-Output "HOST_CALLBACK_INTERVAL_ERR_AVG_US=$($hostCallbackIntervalErrStats.avg)"
+$hostWaitReasonTotal = $queueWaitReason0Count + $queueWaitReason1Count + $queueWaitReason2Count
+$hostBottleneckStageTotal = $hostBottleneckStageCode0Count + $hostBottleneckStageCode1Count + $hostBottleneckStageCode2Count + $hostBottleneckStageCode3Count + $hostBottleneckStageCode4Count + $hostBottleneckStageCode5Count + $hostBottleneckStageCode6Count + $hostBottleneckStageCode7Count + $hostBottleneckStageCode8Count + $hostBottleneckStageCode9Count
+Write-Output "HOST_QUEUE_WAIT_REASON_0_COUNT=$queueWaitReason0Count"
+Write-Output "HOST_QUEUE_WAIT_REASON_1_COUNT=$queueWaitReason1Count"
+Write-Output "HOST_QUEUE_WAIT_REASON_2_COUNT=$queueWaitReason2Count"
+Write-Output "HOST_QUEUE_WAIT_REASON_TOTAL=$hostWaitReasonTotal"
+Write-Output "HOST_BOTTLENECK_STAGE_CODE_0_NONE_COUNT=$hostBottleneckStageCode0Count"
+Write-Output "HOST_BOTTLENECK_STAGE_CODE_1_QUEUE_WAIT_COUNT=$hostBottleneckStageCode1Count"
+Write-Output "HOST_BOTTLENECK_STAGE_CODE_2_QUEUE_TO_ENCODE_COUNT=$hostBottleneckStageCode2Count"
+Write-Output "HOST_BOTTLENECK_STAGE_CODE_3_PRE_ENCODE_PREP_COUNT=$hostBottleneckStageCode3Count"
+Write-Output "HOST_BOTTLENECK_STAGE_CODE_4_SCALE_COUNT=$hostBottleneckStageCode4Count"
+Write-Output "HOST_BOTTLENECK_STAGE_CODE_5_BGRA_TO_NV12_COUNT=$hostBottleneckStageCode5Count"
+Write-Output "HOST_BOTTLENECK_STAGE_CODE_6_ENCODER_COUNT=$hostBottleneckStageCode6Count"
+Write-Output "HOST_BOTTLENECK_STAGE_CODE_7_QUEUE_TO_SEND_COUNT=$hostBottleneckStageCode7Count"
+Write-Output "HOST_BOTTLENECK_STAGE_CODE_8_SEND_IO_COUNT=$hostBottleneckStageCode8Count"
+Write-Output "HOST_BOTTLENECK_STAGE_CODE_9_SEND_INTERVAL_JITTER_COUNT=$hostBottleneckStageCode9Count"
+Write-Output "HOST_BOTTLENECK_STAGE_CODE_TOTAL=$hostBottleneckStageTotal"
 Write-Output "D3D_PRESENT_SUCCESS_TOTAL=$d3dPresentSuccessTotal"
 Write-Output "D3D_PRESENT_FAIL_TOTAL=$d3dPresentFailTotal"
 Write-Output "GDI_FALLBACK_PRESENTED_TOTAL=$gdiFallbackPresentedTotal"
@@ -575,6 +999,43 @@ if ($hostUserFeedbackTopEntries.Count -gt 0) {
     $entry = $hostUserFeedbackTopEntries[$i]
     Write-Output "USER_FEEDBACK_HOST_TOP${i}_SEQ=$($entry.seq)"
     Write-Output "USER_FEEDBACK_HOST_TOP${i}_PIPE_US=$($entry.pipeUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_CALLBACK_INTERVAL_US=$($entry.callbackIntervalUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_CAPTURE_INTERVAL_US=$($entry.captureIntervalUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_CAPTURE_TO_AU_TIMELINE_SKEW_US=$($entry.captureToAuTimelineSkewUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_CAPTURE_TO_AU_TIMELINE_DELTA_US=$($entry.captureToAuTimelineDeltaUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_CAPTURE_TO_AU_SKEW_US=$($entry.captureToAuSkewUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_AU_TS_FROM_OUTPUT=$($entry.auTsFromOutput)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_AU_TS_SKEW_US=$($entry.auTsSkewUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_CAPTURE_TIMELINE_RELATIVE_US=$($entry.captureTimelineRelativeUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_AU_TIMELINE_RELATIVE_US=$($entry.auTimelineRelativeUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_CAPTURE_TIMELINE_ORIGIN_US=$($entry.captureTimelineOriginUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_AU_TIMELINE_ORIGIN_US=$($entry.auTimelineOriginUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_CAPTURE_TO_AU_US=$($entry.captureToAuUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_ENCODE_INPUT_US=$($entry.encodeInputUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_AU_CAPTURE_US=$($entry.auCaptureUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_CAPTURE_TO_QUEUE_US=$($entry.captureToQueueUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_CAPTURE_CLOCK_SKEW_US=$($entry.captureClockSkewUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_QUEUE_TO_ENCODE_US=$($entry.queueToEncodeUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_QUEUE_TO_SEND_US=$($entry.queueToSendUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_BOTTLENECK_STAGE_CODE=$($entry.bottleneckStageCode)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_BOTTLENECK_STAGE_US=$($entry.bottleneckStageUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_QUEUE_WAIT_REASON=$($entry.queueWaitReason)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_PRE_ENCODE_PREP_US=$($entry.preEncodePrepUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_SCALE_US=$($entry.scaleUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_NV12_US=$($entry.nv12Us)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_ENC_QUEUE_ALIGNED_US=$($entry.encQueueAlignedUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_SEND_CALL_COUNT=$($entry.sendCallCount)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_SEND_HEADER_US=$($entry.sendHeaderUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_SEND_PAYLOAD_US=$($entry.sendPayloadUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_SEND_HEADER_CALL_COUNT=$($entry.sendHeaderCallCount)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_SEND_PAYLOAD_CALL_COUNT=$($entry.sendPayloadCallCount)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_SEND_INTERVAL_US=$($entry.sendIntervalUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_SEND_INTERVAL_ERR_US=$($entry.sendIntervalErrUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_SEND_CHUNK_COUNT=$($entry.sendChunkCount)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_SEND_CHUNK_MAX_US=$($entry.sendChunkMaxUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_SEND_WAIT_US=$($entry.sendWaitUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_SEND_TO_ENCODE_US=$($entry.sendToEncodeUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_TICK_WAIT_US=$($entry.tickWaitUs)"
   }
 }
 if ($clientUserFeedbackTopEntries.Count -gt 0) {
