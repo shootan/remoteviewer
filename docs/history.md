@@ -1786,3 +1786,224 @@ powershell -ExecutionPolicy Bypass -File remote60/automation/verify_native_video
 판정
 - `queueWaitUs` 병목의 원인 분해를 위한 최소 추적 코드가 완료됨.
 - `queueWaitReason` 기반 재측정/상관분석은 다음 런에서 진행 예정.
+
+### 53) 2026-03-02 환경 정비 + FHD/HW 기준선 재검증
+목표
+- 빌드/의존성 환경을 안정화하고(`vcpkg`, `build-vcpkg-local`) 현재 체감 지연(약 1초)의 주 원인을 실측으로 재확인.
+- 자동 종료/프로세스 잔존 여부를 함께 점검.
+
+수행
+1. 환경 정비
+- `.vcpkg` 로컬 구성 + `vcpkg install --triplet x64-windows` 완료.
+- `cmake --preset windows-vs2022-vcpkg` 통과.
+- `cmake --build --preset debug-vcpkg --parallel` 통과.
+
+2. 지연 원인 재측정 (SW/HW/해상도 비교)
+- H264(기본 수동 실행, 2560x1440):
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -BuildDir build-vcpkg-local -Codec h264 -Transport udp -Fps 30 -FpsHint 30 -HostSeconds 10 -ClientSeconds 6 -Bitrate 1100000 -Keyint 15 -NoInputChannel -TraceEvery 15 -TraceMax 80
+```
+  - 로그: `automation/logs/verify-native-video-20260302-202750`
+- RAW 기준선:
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -BuildDir build-vcpkg-local -Codec raw -Transport tcp -Fps 30 -HostSeconds 10 -ClientSeconds 6 -NoInputChannel -TraceEvery 15 -TraceMax 80
+```
+  - 로그: `automation/logs/verify-native-video-20260302-202824`
+- HW 강제 확인:
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -BuildDir build-vcpkg-local -Codec h264 -Transport udp -Fps 30 -FpsHint 30 -HostSeconds 10 -ClientSeconds 6 -Bitrate 2500000 -Keyint 30 -EncoderBackend mft_hw -DecoderBackend mft_hw -NoInputChannel -TraceEvery 15 -TraceMax 80
+```
+  - 로그: `automation/logs/verify-native-video-20260302-203223`
+  - 백엔드 확인: `encoder backend=mft_enum_hw hw=1`, `decoder backend=mft_enum_hw hw=1`
+
+3. FHD 권장 조건 검증
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -BuildDir build-vcpkg-local -Codec h264 -Transport udp -EncoderBackend mft_hw -DecoderBackend mft_hw -EncodeWidth 1920 -EncodeHeight 1080 -Bitrate 4000000 -Keyint 30 -Fps 30 -FpsHint 30 -HostSeconds 10 -ClientSeconds 6 -NoInputChannel
+```
+- 로그: `automation/logs/verify-native-video-20260302-203424`
+- 추가 3회 반복:
+  - `automation/logs/verify-native-video-20260302-203505`
+  - `automation/logs/verify-native-video-20260302-203514`
+  - `automation/logs/verify-native-video-20260302-203523`
+
+주요 수치
+- H264(초기, 2560x1440): `LAT_AVG_US=51540`, `BOTTLENECK_STAGE=c2eUs`, host 병목 후보 `sendIntervalUs/queue_to_send`.
+- RAW 기준선: `LAT_AVG_US=20730`.
+- FHD+HW(1회): `LAT_AVG_US=39425`, `LAT_P95_US=49317`, `PRESENT_GAP_OVER_1S=0`.
+- FHD+HW(3회 평균):
+  - `LAT_AVG_US_AVG=38104.67`
+  - `LAT_P95_US_AVG=42497`
+  - `LAT_MAX_US` 범위 `59561 ~ 63288`
+  - `PRESENT_GAP_OVER_1S_SUM=0`
+
+자동 종료/안정성
+- `verify_native_video_runtime.ps1`에서 `--seconds` 기반 host/client 자동 종료 동작 확인.
+- 실행 후 `remote60_native_video_host_poc`, `remote60_native_video_client_poc` 프로세스 잔존 없음 확인.
+
+주의/후속
+- 3회 반복 출력 말미에 `verify_native_video_runtime.ps1`의 `hostUserFeedbackTopEntries.Count` 접근 예외 1회 확인(요약 지표는 출력됨).
+  - 후속 패치 필요(StrictMode에서 배열/단일객체 타입 안전 처리).
+
+판정
+- 체감 1초급 지연의 핵심 원인은 `2560x1440 + SW 코덱 경로`에서 발생하는 host-side queue/pacing 누적.
+- `FHD(1920x1080) + mft_hw 강제`로 지연이 유의미하게 안정화(약 38~42ms 평균 구간).
+
+### 54) 2026-03-02 색상 반전(blue->orange) 증상 패치
+목표
+- 클라이언트 렌더 색상 반전(파란색이 주황색으로 보이는 현상) 보정.
+
+수행
+- `apps/native_poc/src/native_video_client_main.cpp` 픽셀 셰이더 출력 채널 순서 수정:
+  - 변경 전: `float4(saturate(b), saturate(g), saturate(r), 1.0)`
+  - 변경 후: `float4(saturate(r), saturate(g), saturate(b), 1.0)`
+- 클라이언트 타깃 재빌드:
+```powershell
+cmake --build --preset debug-vcpkg --target remote60_native_video_client_poc --parallel
+```
+
+수동 확인 세션
+- 패치 전 FHD/HW 수동 실행:
+  - `automation/logs/native-video-manual-fhd-20260302-203703`
+- 패치 후 FHD/HW 수동 실행:
+  - `automation/logs/native-video-manual-fhd-colorfix-20260302-203903`
+
+판정
+- 색상 채널 역전 코드 경로를 직접 수정해 반영 완료.
+- 패치 후 수동 세션 재기동 완료(체감 화질/색감 최종 확인 단계).
+
+### 55) 2026-03-02 지연 체감(150~200ms) 대응 조합 재측정 + 해상도 상향 후보 정리
+목표
+- 체감 지연을 낮추면서 텍스트 선명도를 올릴 수 있는 실행 조합을 실측으로 선별.
+- 이전 후속 이슈였던 `verify_native_video_runtime.ps1` StrictMode 예외를 우선 제거.
+
+수행
+1. `verify_native_video_runtime.ps1` 안정화 패치
+- `host/client top entry` 정렬 결과를 배열로 정규화해 `.Count` 접근이 단일 객체에서도 안전하도록 수정.
+- 파일: `automation/verify_native_video_runtime.ps1`
+
+2. 조합 실측 (build: `build-vcpkg-local`, `h264+udp`, `mft_hw/mft_hw`, `NoInputChannel`)
+- baseline FHD 30: `1920x1080`, `4Mbps`, `keyint=30`
+  - `automation/logs/verify-native-video-20260302-210645`
+- quality FHD 30: `1920x1080`, `8Mbps`, `keyint=30`
+  - `automation/logs/verify-native-video-20260302-210655`
+- quality FHD 30 + async poll(4):
+  - `automation/logs/verify-native-video-20260302-210704`
+- up-res 1296p 30 + async poll(4): `2304x1296`, `10Mbps`
+  - `automation/logs/verify-native-video-20260302-210713`
+- up-res 1440p 30 + async poll(4): `2560x1440`, `12Mbps`
+  - `automation/logs/verify-native-video-20260302-210722`
+
+주요 수치
+- baseline FHD 30 4Mbps:
+  - `LAT_AVG_US=34228`, `LAT_P95_US=36953`, `LAT_MAX_US=54899`, `DEC_AVG=13.4`
+- quality FHD 30 8Mbps:
+  - `LAT_AVG_US=28924.8`, `LAT_P95_US=35132`, `LAT_MAX_US=41782`, `DEC_AVG=14.6`
+- quality FHD 30 8Mbps + async4:
+  - `LAT_AVG_US=40307`, `LAT_P95_US=43929` (악화)
+- up-res 1296p 30 10Mbps + async4:
+  - `LAT_AVG_US=39123.6`, `LAT_P95_US=46741`
+- up-res 1440p 30 12Mbps + async4:
+  - `LAT_AVG_US=57403.2`, `LAT_P95_US=71867`
+
+판정
+- 현재 기준 최적 균형점은 `FHD 30 + 8Mbps + mft_hw/mft_hw` (async poll 튜닝 없음).
+- `REMOTE60_NATIVE_H264_ASYNC_POLL_MAX=4`는 본 실측 조건에서 지연 개선보다 악화 경향.
+- 해상도 상향은 `2304x1296`까지는 수용 가능하나(`~39/47ms`), `2560x1440`는 지연 증가폭이 커 체감 지연 목표와 충돌.
+
+후속 반영
+- 신규 프로필 추가:
+  - `automation/native_video_profile_1080p_lowlat.json`
+  - `automation/native_video_profile_1296p_balanced.json`
+- README 프로필 목록 갱신:
+  - `apps/native_poc/README.md`
+
+### 56) 2026-03-02 1080p 3장면 스모크 완료 + M3 종료 판정(OFF/ON 20회)
+목표
+- 구현계획의 미완료 항목 2개를 실측으로 종료:
+  - `1080p 3개 장면 스모크 LAT_P95<=70ms` 확인
+  - `M3 종료 판정`(quality-first OFF/ON 각 20회 재현성) 완료
+
+수행
+1. 스크립트 보강
+- `automation/verify_native_video_scene_suite.ps1`
+  - `-BuildDir` 인자 추가(기본 `build-native2`) 후 내부 `verify_native_video_runtime.ps1` 호출로 전달.
+- `automation/run_native_video_ablation_suite.ps1`
+  - `-BuildDir`, `-EncoderBackend`, `-DecoderBackend` 인자 추가 및 verify 호출 전달.
+
+2. 1080p 3장면 스모크 실행
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_scene_suite.ps1 -BuildDir build-vcpkg-local -Codec h264 -Transport udp -EncoderBackend mft_hw -DecoderBackend mft_hw -EncodeWidth 1920 -EncodeHeight 1080 -Bitrate 8000000 -Keyint 30 -Fps 30 -FpsHint 30 -NoInputChannel -HostSeconds 10 -ClientSeconds 6 -TraceEvery 15 -TraceMax 80 -NonInteractive -ScenePrepareSeconds 1
+```
+- 로그:
+  - suite: `automation/logs/verify-native-video-scenes-20260302-211915`
+  - static: `automation/logs/verify-native-video-20260302-211916`
+  - scroll: `automation/logs/verify-native-video-20260302-211926`
+  - video: `automation/logs/verify-native-video-20260302-211935`
+
+3. M3 종료 판정 실행(OFF/ON 각 20회)
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/run_native_video_ablation_suite.ps1 -Mode M3 -Iterations 20 -BuildDir build-vcpkg-local -Codec h264 -Transport udp -Fps 30 -FpsHint 30 -Bitrate 8000000 -Keyint 30 -EncodeWidth 1920 -EncodeHeight 1080 -EncoderBackend mft_hw -DecoderBackend mft_hw -HostSeconds 8 -ClientSeconds 6 -TraceEvery 15 -TraceMax 40
+```
+- 로그:
+  - `automation/logs/native-video-ablation-20260302-212009`
+  - summary: `automation/logs/native-video-ablation-20260302-212009/summary.csv`
+
+주요 수치
+- 1080p 3장면:
+  - static: `LAT_P95_US=62480`
+  - scroll: `LAT_P95_US=37784`
+  - video: `LAT_P95_US=48708`
+  - `SUITE_OVERALL_OK=True`
+- M3 OFF/ON 20회:
+  - `quality_first_off`: `lat_p95_avg=55022.8`, `ok=20/20`
+  - `quality_first_on`: `lat_p95_avg=35499.05`, `ok=20/20`
+  - 두 변형 모두 `AbrSwitchCount_Avg=0`
+
+판정
+- 구현계획 항목 `1080p 3개 장면 스모크` 완료.
+- `M3 종료 판정` 완료, 현재 기본 운영은 `quality-first=on` 유지.
+- 비고: 3장면 중 video에서 `PRESENT_GAP_OVER_1S=1` 1회 관측되어 전송 안정화(M6) 항목에서 후속 추적 필요.
+
+### 57) 2026-03-02 ENCODER API 경로별 지연/대기 분기 계측 추가
+목표
+- 구현계획 M2.5 미완료 항목(`ENCODER API 경로별 지연/대기 분기`)을 코드/파서/실측까지 완료.
+
+수행
+1. host 계측 확장
+- 파일: `apps/native_poc/src/native_video_host_main.cpp`
+- `encoder.encode_frame(...)` 호출 시 `H264EncodeFrameStats` 수집 연결.
+- `trace/user-feedback` 로그에 아래 항목 추가:
+  - `encApiPathCode`, `encApiHw`
+  - `encApiInputUs`, `encApiDrainUs`
+  - `encApiNotAcceptingCount`, `encApiNeedMoreInputCount`, `encApiStreamChangeCount`, `encApiOutputErrorCount`
+  - `encApiAsyncEnabled`, `encApiAsyncPollCount`, `encApiAsyncNoEventCount`, `encApiAsyncNeedInputCount`, `encApiAsyncHaveOutputCount`
+- backend 문자열을 API path code로 맵핑하는 함수 추가:
+  - `1=AMF`, `2=NVENC`, `3=QSV`, `4=MFT`, `5=CLSID`, `0/6=unknown/other`
+
+2. verify 파서 확장
+- 파일: `automation/verify_native_video_runtime.ps1`
+- host user-feedback 통계 키에 `encApi*` 항목 추가.
+- path code 분류 집계 출력 추가:
+  - `HOST_ENC_API_PATH_CODE_0..6_*`
+- top entry 출력에 `ENC_API_*` 상세 항목 반영.
+
+3. 빌드 및 스모크 검증
+- 빌드:
+```powershell
+cmake --build --preset debug-vcpkg --parallel
+```
+- 검증:
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -BuildDir build-vcpkg-local -Codec h264 -Transport udp -EncoderBackend mft_hw -DecoderBackend mft_hw -EncodeWidth 1920 -EncodeHeight 1080 -Bitrate 8000000 -Keyint 30 -Fps 30 -FpsHint 30 -HostSeconds 8 -ClientSeconds 6 -NoInputChannel -TraceEvery 15 -TraceMax 40
+```
+
+주요 수치
+- `LAT_P95_US=31615`, `OVERALL_OK=True`
+- `HOST_ENC_API_PATH_CODE_4_MFT_COUNT=8`
+- `USER_FEEDBACK_UF_H_ENCAPIINPUTUS_AVG_US=1859.75`
+- `USER_FEEDBACK_UF_H_ENCAPIDRAINUS_AVG_US=752`
+- `USER_FEEDBACK_UF_H_ENCAPIASYNCPOLLCOUNT_AVG_US=1`
+
+판정
+- ENCODER API path 분기 지표가 host 로그와 verify 요약 모두에서 정상 집계됨.
+- 구현계획 M2.5의 해당 미완료 항목을 완료로 전환.

@@ -50,6 +50,7 @@ using remote60::native_poc::ControlClientMetricsMessage;
 using remote60::native_poc::ControlRequestKeyFrameMessage;
 using remote60::native_poc::ControlPingMessage;
 using remote60::native_poc::ControlPongMessage;
+using remote60::native_poc::H264EncodeFrameStats;
 using remote60::native_poc::EncodedFrameHeader;
 using remote60::native_poc::H264AccessUnit;
 using remote60::native_poc::H264Encoder;
@@ -110,6 +111,17 @@ HostBottleneckStage detect_host_bottleneck_stage(uint64_t queueWaitUs, uint64_t 
   update_host_bottleneck_stage(8, sendDurUs, "send_io", &stage);
   update_host_bottleneck_stage(9, sendIntervalErrUs, "send_interval_jitter", &stage);
   return stage;
+}
+
+uint32_t encoder_api_path_code(const char* backendName) {
+  if (!backendName) return 0;
+  const std::string name = backendName;
+  if (name.find("amf") != std::string::npos) return 1;
+  if (name.find("nvenc") != std::string::npos || name.find("nvidia") != std::string::npos) return 2;
+  if (name.find("qsv") != std::string::npos || name.find("intel") != std::string::npos) return 3;
+  if (name.find("mft") != std::string::npos) return 4;
+  if (name.find("clsid") != std::string::npos) return 5;
+  return 6;
 }
 
 winrt::Windows::Graphics::Capture::GraphicsCaptureItem CreateItemForPrimaryMonitor() {
@@ -1681,7 +1693,9 @@ int main(int argc, char** argv) {
        const uint64_t callbackToEncodeStartUs =
             (encodeStartUs >= callbackUs) ? (encodeStartUs - callbackUs) : 0;
         std::vector<H264AccessUnit> units;
-       if (!encoder.encode_frame(nv12, forceKeyFrame, static_cast<int64_t>(encodeInputUs) * 10, &units)) {
+        H264EncodeFrameStats encodeStats{};
+       if (!encoder.encode_frame(nv12, forceKeyFrame, static_cast<int64_t>(encodeInputUs) * 10, &units,
+                                 &encodeStats)) {
         ++encodeFailCount;
         if ((encodeFailCount % 60) == 1) {
           std::cout << "[native-video-host] encode failed count=" << encodeFailCount << "\n";
@@ -1850,6 +1864,9 @@ int main(int argc, char** argv) {
                                                                      : static_cast<uint64_t>(-captureToAuSignedDeltaUs);
           const uint64_t encUs = (hdr.encodeEndQpcUs >= hdr.encodeStartQpcUs) ? (hdr.encodeEndQpcUs - hdr.encodeStartQpcUs) : 0;
           const uint64_t e2sUs = (hdr.sendQpcUs >= hdr.encodeEndQpcUs) ? (hdr.sendQpcUs - hdr.encodeEndQpcUs) : 0;
+          const char* encBackendName = encoder.backend_name();
+          const uint64_t encApiPathCode = encoder_api_path_code(encBackendName);
+          const uint64_t encApiHw = encoder.using_hardware() ? 1ull : 0ull;
           const HostBottleneckStage bottleneck = detect_host_bottleneck_stage(
               queueWaitUs, queueToEncodeUs, preEncodePrepUs, scaleUs, nv12Us, encUs, queueToSendUs,
               sendDurUs, sendIntervalErrUs);
@@ -1914,6 +1931,19 @@ int main(int argc, char** argv) {
                     << " capAgeUs=" << captureAgeAtCallbackUs
                     << " encUs=" << encUs
                     << " e2sUs=" << e2sUs
+                    << " encApiPathCode=" << encApiPathCode
+                    << " encApiHw=" << encApiHw
+                    << " encApiInputUs=" << encodeStats.processInputUs
+                    << " encApiDrainUs=" << encodeStats.processOutputDrainUs
+                    << " encApiNotAcceptingCount=" << encodeStats.processInputNotAcceptingCount
+                    << " encApiNeedMoreInputCount=" << encodeStats.processOutputNeedMoreInputCount
+                    << " encApiStreamChangeCount=" << encodeStats.processOutputStreamChangeCount
+                    << " encApiOutputErrorCount=" << encodeStats.processOutputErrorCount
+                    << " encApiAsyncEnabled=" << encodeStats.asyncEnabled
+                    << " encApiAsyncPollCount=" << encodeStats.asyncPollCount
+                    << " encApiAsyncNoEventCount=" << encodeStats.asyncPollNoEventCount
+                    << " encApiAsyncNeedInputCount=" << encodeStats.asyncPollNeedInputCount
+                    << " encApiAsyncHaveOutputCount=" << encodeStats.asyncPollHaveOutputCount
                     << " payloadBytes=" << hdr.payloadSize
                     << " key=" << ((hdr.flags & 1u) ? 1 : 0)
                     << "\n";
@@ -1928,6 +1958,9 @@ int main(int argc, char** argv) {
         const uint64_t encUs = (hdr.encodeEndQpcUs >= hdr.encodeStartQpcUs) ? (hdr.encodeEndQpcUs - hdr.encodeStartQpcUs) : 0;
         const uint64_t e2sUs = (hdr.sendQpcUs >= hdr.encodeEndQpcUs) ? (hdr.sendQpcUs - hdr.encodeEndQpcUs) : 0;
         const uint64_t pipeUs = (hdr.sendQpcUs >= hdr.captureQpcUs) ? (hdr.sendQpcUs - hdr.captureQpcUs) : 0;
+        const char* encBackendName = encoder.backend_name();
+        const uint64_t encApiPathCode = encoder_api_path_code(encBackendName);
+        const uint64_t encApiHw = encoder.using_hardware() ? 1ull : 0ull;
         const HostBottleneckStage bottleneck = detect_host_bottleneck_stage(
             queueWaitUs, queueToEncodeUs, preEncodePrepUs, scaleUs, nv12Us, encUs, queueToSendUs,
             sendDurUs, sendIntervalErrUs);
@@ -1994,6 +2027,19 @@ int main(int argc, char** argv) {
                     << " capAgeUs=" << captureAgeAtCallbackUs
                     << " encUs=" << encUs
                     << " e2sUs=" << e2sUs
+                    << " encApiPathCode=" << encApiPathCode
+                    << " encApiHw=" << encApiHw
+                    << " encApiInputUs=" << encodeStats.processInputUs
+                    << " encApiDrainUs=" << encodeStats.processOutputDrainUs
+                    << " encApiNotAcceptingCount=" << encodeStats.processInputNotAcceptingCount
+                    << " encApiNeedMoreInputCount=" << encodeStats.processOutputNeedMoreInputCount
+                    << " encApiStreamChangeCount=" << encodeStats.processOutputStreamChangeCount
+                    << " encApiOutputErrorCount=" << encodeStats.processOutputErrorCount
+                    << " encApiAsyncEnabled=" << encodeStats.asyncEnabled
+                    << " encApiAsyncPollCount=" << encodeStats.asyncPollCount
+                    << " encApiAsyncNoEventCount=" << encodeStats.asyncPollNoEventCount
+                    << " encApiAsyncNeedInputCount=" << encodeStats.asyncPollNeedInputCount
+                    << " encApiAsyncHaveOutputCount=" << encodeStats.asyncPollHaveOutputCount
                     << " payloadBytes=" << hdr.payloadSize
                     << " key=" << ((hdr.flags & 1u) ? 1 : 0)
                     << "\n";

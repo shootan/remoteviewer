@@ -18,6 +18,7 @@ param(
   [string]$EncoderBackend = "",
   [string]$DecoderBackend = "",
   [int]$FpsHint = 30,
+  [string]$BuildDir = "build-native2",
   [switch]$NoInputChannel,
   [int]$HostSeconds = 12,
   [int]$ClientSeconds = 8,
@@ -97,6 +98,7 @@ for ($i = 0; $i -lt $Scenes.Count; $i++) {
     EncoderBackend = $EncoderBackend
     DecoderBackend = $DecoderBackend
     FpsHint = $FpsHint
+    BuildDir = $BuildDir
     HostSeconds = $HostSeconds
     ClientSeconds = $ClientSeconds
     TraceEvery = $TraceEvery

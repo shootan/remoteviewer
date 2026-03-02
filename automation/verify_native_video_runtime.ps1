@@ -160,6 +160,13 @@ $hostBottleneckStageCode6Count = 0
 $hostBottleneckStageCode7Count = 0
 $hostBottleneckStageCode8Count = 0
 $hostBottleneckStageCode9Count = 0
+$encApiPathCode0Count = 0
+$encApiPathCode1Count = 0
+$encApiPathCode2Count = 0
+$encApiPathCode3Count = 0
+$encApiPathCode4Count = 0
+$encApiPathCode5Count = 0
+$encApiPathCode6Count = 0
 $queuePushCount = 0
 $queuePopCount = 0
 $hostSkippedByOverwrite = 0
@@ -234,6 +241,19 @@ $hostUserFeedbackValues = [ordered]@{
   sendPayloadCallCount = (New-Object System.Collections.Generic.List[double])
   sendChunkCount = (New-Object System.Collections.Generic.List[double])
   sendChunkMaxUs = (New-Object System.Collections.Generic.List[double])
+  encApiPathCode = (New-Object System.Collections.Generic.List[double])
+  encApiHw = (New-Object System.Collections.Generic.List[double])
+  encApiInputUs = (New-Object System.Collections.Generic.List[double])
+  encApiDrainUs = (New-Object System.Collections.Generic.List[double])
+  encApiNotAcceptingCount = (New-Object System.Collections.Generic.List[double])
+  encApiNeedMoreInputCount = (New-Object System.Collections.Generic.List[double])
+  encApiStreamChangeCount = (New-Object System.Collections.Generic.List[double])
+  encApiOutputErrorCount = (New-Object System.Collections.Generic.List[double])
+  encApiAsyncEnabled = (New-Object System.Collections.Generic.List[double])
+  encApiAsyncPollCount = (New-Object System.Collections.Generic.List[double])
+  encApiAsyncNoEventCount = (New-Object System.Collections.Generic.List[double])
+  encApiAsyncNeedInputCount = (New-Object System.Collections.Generic.List[double])
+  encApiAsyncHaveOutputCount = (New-Object System.Collections.Generic.List[double])
   c2eUs = (New-Object System.Collections.Generic.List[double])
   encQueueUs = (New-Object System.Collections.Generic.List[double])
   encQueueAlignedUs = (New-Object System.Collections.Generic.List[double])
@@ -461,6 +481,19 @@ foreach ($line in $hostLines) {
       sendPayloadCallCount = $null
       sendChunkCount = $null
       sendChunkMaxUs = $null
+      encApiPathCode = $null
+      encApiHw = $null
+      encApiInputUs = $null
+      encApiDrainUs = $null
+      encApiNotAcceptingCount = $null
+      encApiNeedMoreInputCount = $null
+      encApiStreamChangeCount = $null
+      encApiOutputErrorCount = $null
+      encApiAsyncEnabled = $null
+      encApiAsyncPollCount = $null
+      encApiAsyncNoEventCount = $null
+      encApiAsyncNeedInputCount = $null
+      encApiAsyncHaveOutputCount = $null
       sendWaitUs = $null
       sendIntervalUs = $null
       sendIntervalErrUs = $null
@@ -532,6 +565,17 @@ foreach ($line in $hostLines) {
           8 { $hostBottleneckStageCode8Count += 1 }
           9 { $hostBottleneckStageCode9Count += 1 }
         }
+      } elseif ($key -eq 'encApiPathCode') {
+        $pathCode = [int]$value
+        switch ($pathCode) {
+          0 { $encApiPathCode0Count += 1 }
+          1 { $encApiPathCode1Count += 1 }
+          2 { $encApiPathCode2Count += 1 }
+          3 { $encApiPathCode3Count += 1 }
+          4 { $encApiPathCode4Count += 1 }
+          5 { $encApiPathCode5Count += 1 }
+          6 { $encApiPathCode6Count += 1 }
+        }
       }
       if ($hostUserFeedbackValues.Keys -contains $key -and $key -ne 'sendStartUs' -and $key -ne 'sendDoneUs') {
         [void]$hostUserFeedbackValues[$key].Add($value)
@@ -601,6 +645,19 @@ foreach ($line in $hostLines) {
       sendPayloadCallCount = $null
       sendChunkCount = $null
       sendChunkMaxUs = $null
+      encApiPathCode = $null
+      encApiHw = $null
+      encApiInputUs = $null
+      encApiDrainUs = $null
+      encApiNotAcceptingCount = $null
+      encApiNeedMoreInputCount = $null
+      encApiStreamChangeCount = $null
+      encApiOutputErrorCount = $null
+      encApiAsyncEnabled = $null
+      encApiAsyncPollCount = $null
+      encApiAsyncNoEventCount = $null
+      encApiAsyncNeedInputCount = $null
+      encApiAsyncHaveOutputCount = $null
       sendWaitUs = $null
       sendIntervalUs = $null
       sendIntervalErrUs = $null
@@ -669,6 +726,17 @@ foreach ($line in $hostLines) {
           7 { $hostBottleneckStageCode7Count += 1 }
           8 { $hostBottleneckStageCode8Count += 1 }
           9 { $hostBottleneckStageCode9Count += 1 }
+        }
+      } elseif ($key -eq 'encApiPathCode') {
+        $pathCode = [int]$value
+        switch ($pathCode) {
+          0 { $encApiPathCode0Count += 1 }
+          1 { $encApiPathCode1Count += 1 }
+          2 { $encApiPathCode2Count += 1 }
+          3 { $encApiPathCode3Count += 1 }
+          4 { $encApiPathCode4Count += 1 }
+          5 { $encApiPathCode5Count += 1 }
+          6 { $encApiPathCode6Count += 1 }
         }
       }
       if ($hostUserFeedbackValues.Keys -contains $key -and $key -ne 'sendStartUs' -and $key -ne 'sendDoneUs') {
@@ -765,11 +833,14 @@ $hostCaptureIntervalErrStats = Stats-Summary -vals $hostCaptureIntervalErrUsVals
 $hostCallbackIntervalStats = Stats-Summary -vals $hostCallbackIntervalVals
 $hostCallbackIntervalErrStats = Stats-Summary -vals $hostCallbackIntervalErrUsVals
 
+# Normalize sorted top-entry views to arrays to avoid StrictMode failures when sort output is a single object.
+$clientUserFeedbackTopEntriesArray = @()
+$hostUserFeedbackTopEntriesArray = @()
 if ($clientUserFeedbackTopEntries.Count -gt 0) {
-  $clientUserFeedbackTopEntries = $clientUserFeedbackTopEntries | Sort-Object -Property totalUs -Descending
+  $clientUserFeedbackTopEntriesArray = @($clientUserFeedbackTopEntries | Sort-Object -Property totalUs -Descending)
 }
 if ($hostUserFeedbackTopEntries.Count -gt 0) {
-  $hostUserFeedbackTopEntries = $hostUserFeedbackTopEntries | Sort-Object -Property pipeUs -Descending
+  $hostUserFeedbackTopEntriesArray = @($hostUserFeedbackTopEntries | Sort-Object -Property pipeUs -Descending)
 }
 
 $bottleneckStage = "N/A"
@@ -891,6 +962,7 @@ Write-Output "HOST_CALLBACK_INTERVAL_ERR_COUNT=$($hostCallbackIntervalErrStats.c
 Write-Output "HOST_CALLBACK_INTERVAL_ERR_AVG_US=$($hostCallbackIntervalErrStats.avg)"
 $hostWaitReasonTotal = $queueWaitReason0Count + $queueWaitReason1Count + $queueWaitReason2Count
 $hostBottleneckStageTotal = $hostBottleneckStageCode0Count + $hostBottleneckStageCode1Count + $hostBottleneckStageCode2Count + $hostBottleneckStageCode3Count + $hostBottleneckStageCode4Count + $hostBottleneckStageCode5Count + $hostBottleneckStageCode6Count + $hostBottleneckStageCode7Count + $hostBottleneckStageCode8Count + $hostBottleneckStageCode9Count
+$encApiPathCodeTotal = $encApiPathCode0Count + $encApiPathCode1Count + $encApiPathCode2Count + $encApiPathCode3Count + $encApiPathCode4Count + $encApiPathCode5Count + $encApiPathCode6Count
 Write-Output "HOST_QUEUE_WAIT_REASON_0_COUNT=$queueWaitReason0Count"
 Write-Output "HOST_QUEUE_WAIT_REASON_1_COUNT=$queueWaitReason1Count"
 Write-Output "HOST_QUEUE_WAIT_REASON_2_COUNT=$queueWaitReason2Count"
@@ -906,6 +978,14 @@ Write-Output "HOST_BOTTLENECK_STAGE_CODE_7_QUEUE_TO_SEND_COUNT=$hostBottleneckSt
 Write-Output "HOST_BOTTLENECK_STAGE_CODE_8_SEND_IO_COUNT=$hostBottleneckStageCode8Count"
 Write-Output "HOST_BOTTLENECK_STAGE_CODE_9_SEND_INTERVAL_JITTER_COUNT=$hostBottleneckStageCode9Count"
 Write-Output "HOST_BOTTLENECK_STAGE_CODE_TOTAL=$hostBottleneckStageTotal"
+Write-Output "HOST_ENC_API_PATH_CODE_0_UNKNOWN_COUNT=$encApiPathCode0Count"
+Write-Output "HOST_ENC_API_PATH_CODE_1_AMF_COUNT=$encApiPathCode1Count"
+Write-Output "HOST_ENC_API_PATH_CODE_2_NVENC_COUNT=$encApiPathCode2Count"
+Write-Output "HOST_ENC_API_PATH_CODE_3_QSV_COUNT=$encApiPathCode3Count"
+Write-Output "HOST_ENC_API_PATH_CODE_4_MFT_COUNT=$encApiPathCode4Count"
+Write-Output "HOST_ENC_API_PATH_CODE_5_CLSID_COUNT=$encApiPathCode5Count"
+Write-Output "HOST_ENC_API_PATH_CODE_6_OTHER_COUNT=$encApiPathCode6Count"
+Write-Output "HOST_ENC_API_PATH_CODE_TOTAL=$encApiPathCodeTotal"
 Write-Output "D3D_PRESENT_SUCCESS_TOTAL=$d3dPresentSuccessTotal"
 Write-Output "D3D_PRESENT_FAIL_TOTAL=$d3dPresentFailTotal"
 Write-Output "GDI_FALLBACK_PRESENTED_TOTAL=$gdiFallbackPresentedTotal"
@@ -994,9 +1074,9 @@ Write-Output "USER_FEEDBACK_HOST_BOTTLENECK_STAGE=$hostUserFeedbackBottleneckSta
 Write-Output "USER_FEEDBACK_HOST_BOTTLENECK_AVG_US=$hostUserFeedbackBottleneckAvgUs"
 Write-Output "USER_FEEDBACK_CLIENT_BOTTLENECK_STAGE=$clientUserFeedbackBottleneckStage"
 Write-Output "USER_FEEDBACK_CLIENT_BOTTLENECK_AVG_US=$clientUserFeedbackBottleneckAvgUs"
-if ($hostUserFeedbackTopEntries.Count -gt 0) {
-  for ($i = 0; $i -lt [Math]::Min(3, $hostUserFeedbackTopEntries.Count); $i++) {
-    $entry = $hostUserFeedbackTopEntries[$i]
+if ($hostUserFeedbackTopEntriesArray.Count -gt 0) {
+  for ($i = 0; $i -lt [Math]::Min(3, $hostUserFeedbackTopEntriesArray.Count); $i++) {
+    $entry = $hostUserFeedbackTopEntriesArray[$i]
     Write-Output "USER_FEEDBACK_HOST_TOP${i}_SEQ=$($entry.seq)"
     Write-Output "USER_FEEDBACK_HOST_TOP${i}_PIPE_US=$($entry.pipeUs)"
     Write-Output "USER_FEEDBACK_HOST_TOP${i}_CALLBACK_INTERVAL_US=$($entry.callbackIntervalUs)"
@@ -1036,11 +1116,24 @@ if ($hostUserFeedbackTopEntries.Count -gt 0) {
     Write-Output "USER_FEEDBACK_HOST_TOP${i}_SEND_WAIT_US=$($entry.sendWaitUs)"
     Write-Output "USER_FEEDBACK_HOST_TOP${i}_SEND_TO_ENCODE_US=$($entry.sendToEncodeUs)"
     Write-Output "USER_FEEDBACK_HOST_TOP${i}_TICK_WAIT_US=$($entry.tickWaitUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_ENC_API_PATH_CODE=$($entry.encApiPathCode)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_ENC_API_HW=$($entry.encApiHw)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_ENC_API_INPUT_US=$($entry.encApiInputUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_ENC_API_DRAIN_US=$($entry.encApiDrainUs)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_ENC_API_NOT_ACCEPTING_COUNT=$($entry.encApiNotAcceptingCount)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_ENC_API_NEED_MORE_INPUT_COUNT=$($entry.encApiNeedMoreInputCount)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_ENC_API_STREAM_CHANGE_COUNT=$($entry.encApiStreamChangeCount)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_ENC_API_OUTPUT_ERROR_COUNT=$($entry.encApiOutputErrorCount)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_ENC_API_ASYNC_ENABLED=$($entry.encApiAsyncEnabled)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_ENC_API_ASYNC_POLL_COUNT=$($entry.encApiAsyncPollCount)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_ENC_API_ASYNC_NO_EVENT_COUNT=$($entry.encApiAsyncNoEventCount)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_ENC_API_ASYNC_NEED_INPUT_COUNT=$($entry.encApiAsyncNeedInputCount)"
+    Write-Output "USER_FEEDBACK_HOST_TOP${i}_ENC_API_ASYNC_HAVE_OUTPUT_COUNT=$($entry.encApiAsyncHaveOutputCount)"
   }
 }
-if ($clientUserFeedbackTopEntries.Count -gt 0) {
-  for ($i = 0; $i -lt [Math]::Min(3, $clientUserFeedbackTopEntries.Count); $i++) {
-    $entry = $clientUserFeedbackTopEntries[$i]
+if ($clientUserFeedbackTopEntriesArray.Count -gt 0) {
+  for ($i = 0; $i -lt [Math]::Min(3, $clientUserFeedbackTopEntriesArray.Count); $i++) {
+    $entry = $clientUserFeedbackTopEntriesArray[$i]
     Write-Output "USER_FEEDBACK_CLIENT_TOP${i}_SEQ=$($entry.seq)"
     Write-Output "USER_FEEDBACK_CLIENT_TOP${i}_TOTAL_US=$($entry.totalUs)"
   }

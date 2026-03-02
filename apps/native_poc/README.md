@@ -104,6 +104,8 @@ $env:REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE=1
   - profiles:
     - `automation/native_video_profile_720p.json`
     - `automation/native_video_profile_1080p.json`
+    - `automation/native_video_profile_1080p_lowlat.json`
+    - `automation/native_video_profile_1296p_balanced.json`
 
 ### JSON profile run examples
 Host:
