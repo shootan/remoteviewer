@@ -241,6 +241,7 @@ constexpr uint64_t kStaleCaptureDropUs = 50000;      // 50ms
 constexpr uint64_t kUserFeedbackLagWarnUs = 90000;   // 90ms
 constexpr uint64_t kUserFeedbackGapWarnUs = 50000;   // 50ms
 constexpr uint64_t kUserFeedbackMinIntervalUs = 1000000;  // 1s
+constexpr uint64_t kKeyframeRequestMinIntervalUs = 120000;  // 120ms
 
 std::mutex gInputMu;
 std::deque<ControlInputEventMessage> gInputQueue;
@@ -268,6 +269,7 @@ ClientRuntimeMetrics gClientMetrics;
 std::atomic<bool> gKeyframeRequestPending{false};
 std::atomic<uint16_t> gKeyframeRequestReason{0};
 std::atomic<uint32_t> gKeyframeRequestCount{0};
+std::atomic<uint64_t> gLastKeyframeRequestUs{0};
 std::atomic<uint64_t> gLastPresentedVersion{0};
 std::atomic<uint64_t> gPaintCoalescedCount{0};
 std::atomic<uint64_t> gOverwriteBeforePresentCount{0};
@@ -287,6 +289,18 @@ void log_client_line(const std::string& line) {
 
 void request_keyframe(uint16_t reason) {
   if (reason == 0) reason = 1;
+  const uint64_t nowUs = qpc_now_us();
+  const uint64_t minIntervalUs = kKeyframeRequestMinIntervalUs;
+  uint64_t lastUs = gLastKeyframeRequestUs.load(std::memory_order_relaxed);
+  while (true) {
+    if (lastUs > 0 && nowUs < lastUs + minIntervalUs) {
+      return;
+    }
+    if (gLastKeyframeRequestUs.compare_exchange_weak(
+            lastUs, nowUs, std::memory_order_relaxed, std::memory_order_relaxed)) {
+      break;
+    }
+  }
   gKeyframeRequestReason = reason;
   gKeyframeRequestPending = true;
 }
@@ -666,6 +680,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CHAR:
     case WM_SYSCHAR:
       return kAllInputBlocked ? 0 : DefWindowProc(hwnd, msg, wp, lp);
+    case WM_ERASEBKGND:
+      // Avoid background erase flicker between frames.
+      return 1;
     case WM_PAINT: {
       gPaintQueued = false;
       PAINTSTRUCT ps{};
@@ -673,7 +690,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       const uint64_t paintStartUs = qpc_now_us();
       RECT rc{};
       GetClientRect(hwnd, &rc);
-      FillRect(hdc, &rc, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+      static bool hasPresentedAtLeastOneFrame = false;
 
       std::shared_ptr<std::vector<uint8_t>> local;
       SharedFrame::PixelFormat localFormat = SharedFrame::PixelFormat::Unknown;
@@ -772,6 +789,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
       }
       if (presented) {
+        hasPresentedAtLeastOneFrame = true;
         static uint64_t lastPresentUs = 0;
         static uint64_t lastUserFeedbackUs = 0;
         static uint64_t lastUserFeedbackOverwrite = 0;
@@ -877,6 +895,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           lastUserFeedbackOverwrite = overwriteCountNow;
         }
         lastPresentUs = presentUs;
+      } else if (!hasPresentedAtLeastOneFrame) {
+        // Before first successful frame, keep a deterministic background.
+        FillRect(hdc, &rc, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
       }
       EndPaint(hwnd, &ps);
       uint64_t latestVersion = 0;
@@ -906,7 +927,8 @@ bool create_window() {
   wc.lpfnWndProc = WndProc;
   wc.hInstance = inst;
   wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-  wc.hbrBackground = reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+  // Keep background unmanaged so WM_ERASEBKGND can suppress flicker.
+  wc.hbrBackground = nullptr;
   wc.lpszClassName = cls;
   if (!RegisterClassExW(&wc)) return false;
 
@@ -1250,8 +1272,13 @@ int main(int argc, char** argv) {
     uint64_t maxDecodeTailUs = 0;
     uint64_t decodeFailCount = 0;
     uint64_t decodeEmptyCount = 0;
+    uint64_t decodeEmptyStreak = 0;
+    uint64_t decodeEmptyStreakStartUs = 0;
+    uint64_t decodeEmptyRecoveryCount = 0;
     uint64_t waitingKeyDropCount = 0;
     uint64_t lagDropCount = 0;
+    uint64_t lastPacketRecvUs = 0;
+    uint32_t lagTriggerStreak = 0;
     bool catchupMode = false;
     uint64_t lastPresentedCaptureUs = 0;
     bool captureTimelineReady = false;
@@ -1358,6 +1385,13 @@ int main(int argc, char** argv) {
       if (!payloadPtr) return true;
       ++recvFrames;
       recvBytes += h.payloadSize;
+      const uint64_t recvGapUs =
+          (lastPacketRecvUs > 0 && packetNowUs >= lastPacketRecvUs) ? (packetNowUs - lastPacketRecvUs) : 0;
+      lastPacketRecvUs = packetNowUs;
+      if (recvGapUs > 250000) {
+        // Sparse arrival usually means source/capture stall, not decoder backlog.
+        lagTriggerStreak = 0;
+      }
 
       if (!useH264) {
         ++skippedQueued;
@@ -1403,20 +1437,33 @@ int main(int argc, char** argv) {
         return true;
       }
 
-      if (!catchupMode &&
-          (decodeQueueLagEstimateUs > kDecodeQueueLagDropUs ||
-           (lastPresentedCaptureUs > 0 && streamLagUs > kCatchupLagDropUs))) {
+      const bool lagTrigger =
+          (decodeQueueLagEstimateUs > kDecodeQueueLagDropUs) ||
+          (lastPresentedCaptureUs > 0 && streamLagUs > kCatchupLagDropUs);
+      const bool denseArrival = (recvGapUs == 0 || recvGapUs <= 150000);
+      if (lagTrigger && denseArrival) {
+        if (lagTriggerStreak < std::numeric_limits<uint32_t>::max()) {
+          ++lagTriggerStreak;
+        }
+      } else {
+        lagTriggerStreak = 0;
+      }
+      if (!catchupMode && lagTriggerStreak >= 3) {
         catchupMode = true;
+        lagTriggerStreak = 0;
         waitForKeyFrame = true;
         decoder.reset();
         request_keyframe(1);
         std::cout << "[native-video-client] catchup enter streamLagUs=" << streamLagUs
                   << " decodeQueueLagEstUs=" << decodeQueueLagEstimateUs
+                  << " recvGapUs=" << recvGapUs
                   << " reason="
                   << ((decodeQueueLagEstimateUs > kDecodeQueueLagDropUs) ? "decode_queue" : "stream_lag_emergency")
                   << " seq=" << h.seq << "\n";
       }
       if (catchupMode && !keyFrame) {
+        decodeEmptyStreak = 0;
+        decodeEmptyStreakStartUs = 0;
         ++skippedQueued;
         ++lagDropCount;
         if ((lagDropCount % 120) == 1) {
@@ -1435,6 +1482,8 @@ int main(int argc, char** argv) {
       }
 
       if (waitForKeyFrame && !keyFrame) {
+        decodeEmptyStreak = 0;
+        decodeEmptyStreakStartUs = 0;
         ++skippedQueued;
         ++waitingKeyDropCount;
         if ((waitingKeyDropCount % 30) == 1) {
@@ -1484,6 +1533,8 @@ int main(int argc, char** argv) {
       std::vector<DecodedFrameNv12> outFrames;
       const int64_t inputSampleTimeHns = static_cast<int64_t>(h.captureQpcUs) * 10;
       if (!decoder.decode_access_unit(*payloadPtr, keyFrame, inputSampleTimeHns, &outFrames)) {
+        decodeEmptyStreak = 0;
+        decodeEmptyStreakStartUs = 0;
         ++skippedQueued;
         ++decodeFailCount;
         request_keyframe(4);
@@ -1531,8 +1582,34 @@ int main(int argc, char** argv) {
       waitForKeyFrame = false;
       if (outFrames.empty()) {
         ++decodeEmptyCount;
+        ++decodeEmptyStreak;
+        if (decodeEmptyStreak == 1) {
+          decodeEmptyStreakStartUs = packetNowUs;
+        }
+        const uint64_t emptyStreakUs =
+            (decodeEmptyStreakStartUs > 0 && packetNowUs >= decodeEmptyStreakStartUs)
+                ? (packetNowUs - decodeEmptyStreakStartUs)
+                : 0;
+        if (decodeEmptyStreak >= 12 || emptyStreakUs >= 300000) {
+          ++decodeEmptyRecoveryCount;
+          waitForKeyFrame = true;
+          catchupMode = true;
+          request_keyframe(5);
+          decoder.reset();
+          if ((decodeEmptyRecoveryCount % 10) == 1) {
+            std::cout << "[native-video-client] decode empty recovery count=" << decodeEmptyRecoveryCount
+                      << " streak=" << decodeEmptyStreak
+                      << " emptyUs=" << emptyStreakUs
+                      << "\n";
+          }
+          decodeEmptyStreak = 0;
+          decodeEmptyStreakStartUs = 0;
+        }
         if ((decodeEmptyCount % 120) == 1) {
-          std::cout << "[native-video-client] decode output empty count=" << decodeEmptyCount << "\n";
+          std::cout << "[native-video-client] decode output empty count=" << decodeEmptyCount
+                    << " streak=" << decodeEmptyStreak
+                    << " emptyUs=" << emptyStreakUs
+                    << "\n";
         }
         if (packetNowUs >= statAtUs) {
           const uint64_t avgLatencyUs = (decodedFrames > 0) ? (sumLatencyUs / decodedFrames) : 0;
@@ -1570,6 +1647,8 @@ int main(int argc, char** argv) {
         }
         return true;
       }
+      decodeEmptyStreak = 0;
+      decodeEmptyStreakStartUs = 0;
 
       auto& decoded = outFrames.back();
       const bool tsFromMft = decoded.sampleTimeFromOutput && (decoded.sampleTimeHns > 0);

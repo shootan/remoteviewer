@@ -2007,3 +2007,135 @@ powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.
 판정
 - ENCODER API path 분기 지표가 host 로그와 verify 요약 모두에서 정상 집계됨.
 - 구현계획 M2.5의 해당 미완료 항목을 완료로 전환.
+
+### 58) 2026-03-02 FHD 화질 개선용 비트레이트/Keyint 튜닝 재측정
+목표
+- 사용자 체감 이슈(FHD인데 화질이 낮아 보임) 대응:
+  - 해상도는 FHD 고정
+  - 지연 증가폭을 보면서 화질(압축 강도) 개선 가능한 조합 탐색
+
+수행
+공통 조건:
+- `build-vcpkg-local`, `h264+udp`, `mft_hw/mft_hw`, `1920x1080`, `30fps`, `NoInputChannel`
+- `REMOTE60_NATIVE_ABR_DISABLE=1`, `REMOTE60_NATIVE_ADAPTIVE_QUALITY_FIRST=1`
+
+1) 비트레이트 스윕 (`keyint=30`)
+- `8/10/12 Mbps`, 각 3회
+- 로그:
+  - 8Mbps: `verify-native-video-20260302-214208`, `...214217`, `...214226`
+  - 10Mbps: `verify-native-video-20260302-214235`, `...214244`, `...214254`
+  - 12Mbps: `verify-native-video-20260302-214303`, `...214312`, `...214321`
+
+요약(3회 평균):
+- 8Mbps: `LAT_P95_US=31054.67`, `LAT_AVG_US=32292.07`, `MBPS_AVG=4.53`, `ENC_RATIO_X100_AVG=4929.07`
+- 10Mbps: `LAT_P95_US=43704.33`, `LAT_AVG_US=42722.06`, `MBPS_AVG=5.24`, `ENC_RATIO_X100_AVG=3976.07`
+- 12Mbps: `LAT_P95_US=45763`, `LAT_AVG_US=41776.93`, `MBPS_AVG=6.8`, `ENC_RATIO_X100_AVG=3297.3`
+
+판정:
+- 비트레이트를 올리면 `ENC_RATIO_X100`은 유의미하게 하락(압축 강도 완화, 화질 개선 방향)하지만,
+  `LAT_P95_US`가 크게 상승.
+- 저지연 기준 최적점은 여전히 8Mbps.
+
+2) Keyint 스윕 (`bitrate=8Mbps`)
+- `keyint=30/60/90`, 각 2회
+- 로그:
+  - keyint 30: `verify-native-video-20260302-214407`, `...214416`
+  - keyint 60: `verify-native-video-20260302-214425`, `...214435`
+  - keyint 90: `verify-native-video-20260302-214444`, `...214453`
+
+요약(2회 평균):
+- keyint 30: `LAT_P95_US=30860.5`, `LAT_AVG_US=27827.1`, `DEC_AVG=20.4`, `ENC_RATIO_X100_AVG=4827.07`
+- keyint 60: `LAT_P95_US=22431`, `LAT_AVG_US=20474.81`, `DEC_AVG=21.68`, `ENC_RATIO_X100_AVG=4797.1`
+- keyint 90: `LAT_P95_US=27594.5`, `LAT_AVG_US=21787.52`, `DEC_AVG=22.44`, `ENC_RATIO_X100_AVG=4778.84`
+
+판정:
+- 동일 8Mbps에서 `keyint=60`이 지연 지표가 가장 안정적으로 낮음.
+- 화질 관련 프록시(`ENC_RATIO_X100`) 개선폭은 작지만, 지연 악화 없이 운용 가능.
+
+권장
+- 저지연 우선 + FHD 유지: `1920x1080 / 30fps / 8Mbps / keyint 60 / mft_hw`
+- 화질 우선(지연 증가 허용): `1920x1080 / 30fps / 10Mbps / keyint 60`
+
+### 59) 2026-03-02 외부(WAN) 테스트 준비: 번들 패키징 + JSON 프로필 세트 정리
+목표
+- 외부망 테스트를 바로 수행할 수 있도록 빌드 산출물/스크립트/프로필을 한 번에 전달 가능한 번들 생성.
+- FHD 전용 운영을 위한 현재 권장 설정들을 JSON 프로필로 정리.
+
+수행
+1. JSON 프로필 정리
+- `automation/native_video_profile_1080p_lowlat.json`
+  - `keyint: 60`으로 업데이트(저지연 권장).
+- 신규 추가:
+  - `automation/native_video_profile_1080p_quality_10m_k60.json`
+  - `automation/native_video_profile_1080p_quality_12m_k60.json`
+  - `automation/native_video_profile_1080p_external_template.json` (`remoteHost` 템플릿 포함)
+
+2. 외부 배포 번들 스크립트 추가
+- `automation/package_native_video_external_bundle.ps1`
+  - 입력: `BuildDir`(기본 `build-vcpkg-local`)
+  - 출력: `dist/native-video-external-<timestamp>/` + `.zip`
+  - 포함:
+    - `bin` (host/client exe + dll)
+    - `automation` (실행 스크립트 + JSON 프로필)
+    - `docs/EXTERNAL_WAN_QUICKSTART.md` (포트포워딩/방화벽/주소입력/실행명령)
+
+3. 문서 업데이트
+- `apps/native_poc/README.md`
+  - 외부 번들 스크립트/신규 프로필 목록 추가
+  - WAN 체크리스트(포트/주소 입력/번들 명령) 추가
+- `docs/external_wan_test_guide.md` 신규 추가
+
+4. 번들 생성 검증
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/package_native_video_external_bundle.ps1 -BuildDir build-vcpkg-local
+```
+- 출력 확인:
+  - `BUNDLE_DIR=D:\remote\remote\dist\native-video-external-20260302-214953`
+  - `BUNDLE_ZIP=D:\remote\remote\dist\native-video-external-20260302-214953.zip`
+
+판정
+- 외부 테스트용 산출물/설정/가이드가 자동 생성되는 상태로 정리 완료.
+- 포트포워딩은 현재 UDP 프로필 기준 `UDP 43000`, 컨트롤 채널 `TCP 43001`만 열면 됨.
+
+### 60) 2026-03-02 Host capture stall watchdog + cross-context handoff update
+Goal
+- Improve recovery for intermittent capture callback stalls (LDPlayer/page-like freeze patterns).
+- Make continuation easy from a fresh context using docs snapshot.
+
+Changes
+1. Host capture watchdog/restart
+- File: `apps/native_poc/src/native_video_host_main.cpp`
+- Added stall detection and auto restart:
+  - restart threshold: `kCaptureCallbackStallRestartUs=1200000` (1.2s)
+  - restart cooldown: `kCaptureCallbackRestartCooldownUs=3000000` (3s)
+- Added lifecycle helpers:
+  - `attach_frame_arrived`, `detach_capture_session`, `restart_capture_session`
+- Added stats/log fields:
+  - `captureRestarts=` in periodic host summary
+  - `capture session restarted count=...` on watchdog-triggered recovery
+- Cleanup path unified with `detach_capture_session()`.
+
+2. Verification
+- Build: `cmake --build --preset debug-vcpkg --parallel`
+- Short verify log: `automation/logs/verify-native-video-20260302-233704`
+- Longer verify log: `automation/logs/verify-native-video-20260302-233759`
+- Result: both `HOST_RC=0`, `CLIENT_RC=0`
+- HW encoder confirmed in host log (`mft_enum_hw hw=1`).
+
+3. Bundle sync for real test
+- Synced latest runtime files into `D:\remote\build`:
+  - `bin` host/client exe (latest)
+  - `automation` scripts + `native_video_profile_*.json`
+  - `docs/external_wan_test_guide.md`
+
+4. Plan/handoff doc update
+- File: `docs/구현계획.md`
+- Added `## 7) Context Handoff Snapshot (2026-03-02)` with:
+  - current stable status
+  - latest patch summary
+  - verified log paths
+  - immediate next actions (M5 -> M6 -> M7)
+  - ready-to-run smoke/real-use commands
+
+Notes
+- Freeze class appears reduced in local verify; final confirmation requires user-side repro scenario where callback stall used to occur.

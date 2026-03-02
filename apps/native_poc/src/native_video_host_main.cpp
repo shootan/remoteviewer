@@ -78,6 +78,10 @@ constexpr int kCaptureFramePoolBuffersDefault = 2;
 constexpr uint64_t kMaxPreEncodeFrameAgeUs = 25000;  // 25ms
 constexpr uint64_t kHostUserFeedbackWarnUs = 90000;  // 90ms
 constexpr uint64_t kHostUserFeedbackMinIntervalUs = 1000000;  // 1s
+constexpr uint64_t kCaptureStallKeepaliveStartUs = 700000;  // 0.7s
+constexpr uint64_t kCaptureStallKeepaliveIntervalUs = 1000000;  // 1s
+constexpr uint64_t kCaptureCallbackStallRestartUs = 1200000;  // 1.2s
+constexpr uint64_t kCaptureCallbackRestartCooldownUs = 3000000;  // 3s
 
 struct HostBottleneckStage {
   uint32_t code = 0;
@@ -1196,10 +1200,13 @@ int main(int argc, char** argv) {
   winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(dxgi.Get(), inspectable.put()));
   auto d3dDevice = inspectable.as<IDirect3DDevice>();
 
-  auto pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
-      d3dDevice, winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized,
-      captureFramePoolBuffers, size);
-  auto session = pool.CreateCaptureSession(item);
+  Direct3D11CaptureFramePool pool{nullptr};
+  GraphicsCaptureSession session{nullptr};
+  winrt::event_token token{};
+  std::atomic<bool> captureSessionReady{false};
+  uint64_t captureSessionStartedUs = 0;
+  uint64_t captureRestartCount = 0;
+  uint64_t lastCaptureRestartUs = 0;
 
   D3D11_TEXTURE2D_DESC stDesc{};
   stDesc.Width = width;
@@ -1235,111 +1242,159 @@ int main(int argc, char** argv) {
   std::atomic<uint64_t> lastCallbackUs{0};
   std::atomic<uint64_t> lastCaptureUsForInterval{0};
 
-  auto token = pool.FrameArrived([&](Direct3D11CaptureFramePool const& sender,
-                                     winrt::Windows::Foundation::IInspectable const&) {
-    if (stop.load()) return;
-    try {
-      auto latest = sender.TryGetNextFrame();
-      if (!latest) return;
-      // Drain queued frames and keep only the newest one to avoid stale-frame backlog.
-      while (auto newer = sender.TryGetNextFrame()) {
-        latest = newer;
-      }
+  auto attach_frame_arrived = [&]() {
+    token = pool.FrameArrived([&](Direct3D11CaptureFramePool const& sender,
+                                  winrt::Windows::Foundation::IInspectable const&) {
+      if (stop.load()) return;
+      try {
+        auto latest = sender.TryGetNextFrame();
+        if (!latest) return;
+        // Drain queued frames and keep only the newest one to avoid stale-frame backlog.
+        while (auto newer = sender.TryGetNextFrame()) {
+          latest = newer;
+        }
 
-      auto src = SurfaceToTexture(latest.Surface());
-      if (!src) return;
-      const uint32_t stride = width * 4;
-      auto payload = std::make_shared<std::vector<uint8_t>>(static_cast<size_t>(stride) * height);
-      {
-        std::lock_guard<std::mutex> d3dLock(d3dContextMu);
-        ctx->CopyResource(staging.Get(), src.Get());
-        D3D11_MAPPED_SUBRESOURCE map{};
-        if (FAILED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map))) return;
-        auto* dst = payload->data();
-        auto* srcRow = reinterpret_cast<const uint8_t*>(map.pData);
-        for (uint32_t y = 0; y < height; ++y) {
-          std::memcpy(dst + static_cast<size_t>(y) * stride,
-                      srcRow + static_cast<size_t>(y) * map.RowPitch, stride);
+        auto src = SurfaceToTexture(latest.Surface());
+        if (!src) return;
+        const uint32_t stride = width * 4;
+        auto payload = std::make_shared<std::vector<uint8_t>>(static_cast<size_t>(stride) * height);
+        {
+          std::lock_guard<std::mutex> d3dLock(d3dContextMu);
+          ctx->CopyResource(staging.Get(), src.Get());
+          D3D11_MAPPED_SUBRESOURCE map{};
+          if (FAILED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map))) return;
+          auto* dst = payload->data();
+          auto* srcRow = reinterpret_cast<const uint8_t*>(map.pData);
+          for (uint32_t y = 0; y < height; ++y) {
+            std::memcpy(dst + static_cast<size_t>(y) * stride,
+                        srcRow + static_cast<size_t>(y) * map.RowPitch, stride);
+          }
+          ctx->Unmap(staging.Get(), 0);
         }
-        ctx->Unmap(staging.Get(), 0);
-      }
-      const uint64_t callbackUs = qpc_now_us();
-      const uint64_t queuePushUs = qpc_now_us();
-      const uint64_t prevCallbackUs = lastCallbackUs.load(std::memory_order_acquire);
-      const uint64_t prevCaptureUs = lastCaptureUsForInterval.load(std::memory_order_acquire);
-      uint64_t sourceCaptureUs = callbackUs;
-      uint64_t captureAgeAtCallbackUs = 0;
-      uint64_t captureClockSkewUs = 0;
-      uint64_t callbackIntervalUs = 0;
-      uint64_t captureIntervalUs = 0;
-      // Align WGC frame timestamp to qpc_now_us domain using a minimum-offset estimator.
-      const auto relTime = latest.SystemRelativeTime();
-      const int64_t t100ns = relTime.count();
-      if (t100ns > 0) {
-        const int64_t wgcUs = t100ns / 10;
-        if (static_cast<int64_t>(callbackUs) >= wgcUs) {
-          captureAgeAtCallbackUs = static_cast<uint64_t>(static_cast<int64_t>(callbackUs) - wgcUs);
-        }
-        const int64_t offsetCandidate = static_cast<int64_t>(callbackUs) - wgcUs;
-        if (offsetCandidate > 0) {
-          int64_t cur = captureClockOffsetUs.load(std::memory_order_acquire);
-          if (cur == std::numeric_limits<int64_t>::max()) {
-            captureClockOffsetUs.store(offsetCandidate, std::memory_order_release);
-            cur = offsetCandidate;
-          } else {
-            while (offsetCandidate < cur &&
-                   !captureClockOffsetUs.compare_exchange_weak(cur, offsetCandidate, std::memory_order_acq_rel,
-                                                             std::memory_order_acquire)) {
+        const uint64_t callbackUs = qpc_now_us();
+        const uint64_t queuePushUs = qpc_now_us();
+        const uint64_t prevCallbackUs = lastCallbackUs.load(std::memory_order_acquire);
+        const uint64_t prevCaptureUs = lastCaptureUsForInterval.load(std::memory_order_acquire);
+        uint64_t sourceCaptureUs = callbackUs;
+        uint64_t captureAgeAtCallbackUs = 0;
+        uint64_t captureClockSkewUs = 0;
+        uint64_t callbackIntervalUs = 0;
+        uint64_t captureIntervalUs = 0;
+        // Align WGC frame timestamp to qpc_now_us domain using a minimum-offset estimator.
+        const auto relTime = latest.SystemRelativeTime();
+        const int64_t t100ns = relTime.count();
+        if (t100ns > 0) {
+          const int64_t wgcUs = t100ns / 10;
+          if (static_cast<int64_t>(callbackUs) >= wgcUs) {
+            captureAgeAtCallbackUs = static_cast<uint64_t>(static_cast<int64_t>(callbackUs) - wgcUs);
+          }
+          const int64_t offsetCandidate = static_cast<int64_t>(callbackUs) - wgcUs;
+          if (offsetCandidate > 0) {
+            int64_t cur = captureClockOffsetUs.load(std::memory_order_acquire);
+            if (cur == std::numeric_limits<int64_t>::max()) {
+              captureClockOffsetUs.store(offsetCandidate, std::memory_order_release);
+              cur = offsetCandidate;
+            } else {
+              while (offsetCandidate < cur &&
+                     !captureClockOffsetUs.compare_exchange_weak(cur, offsetCandidate, std::memory_order_acq_rel,
+                                                                std::memory_order_acquire)) {
+              }
+            }
+            const int64_t bestOffset = captureClockOffsetUs.load();
+            if (bestOffset != std::numeric_limits<int64_t>::max()) {
+              const int64_t aligned = wgcUs + bestOffset;
+              const int64_t alignedSkewUs = aligned - static_cast<int64_t>(callbackUs);
+              if (aligned > 0 && alignedSkewUs >= -500000 && alignedSkewUs <= 500000) {
+                captureClockSkewUs = alignedSkewUs >= 0
+                    ? static_cast<uint64_t>(alignedSkewUs)
+                    : static_cast<uint64_t>(-alignedSkewUs);
+                sourceCaptureUs = static_cast<uint64_t>(aligned);
+              }
             }
           }
-          const int64_t bestOffset = captureClockOffsetUs.load();
-          if (bestOffset != std::numeric_limits<int64_t>::max()) {
-            const int64_t aligned = wgcUs + bestOffset;
-            const int64_t alignedSkewUs = aligned - static_cast<int64_t>(callbackUs);
-            if (aligned > 0 && alignedSkewUs >= -500000 && alignedSkewUs <= 500000) {
-              captureClockSkewUs = alignedSkewUs >= 0 ? static_cast<uint64_t>(alignedSkewUs) : static_cast<uint64_t>(-alignedSkewUs);
-              sourceCaptureUs = static_cast<uint64_t>(aligned);
-            }
-          }
         }
+        if (prevCallbackUs > 0 && callbackUs >= prevCallbackUs) {
+          callbackIntervalUs = callbackUs - prevCallbackUs;
+        }
+        if (prevCaptureUs > 0 && sourceCaptureUs >= prevCaptureUs) {
+          captureIntervalUs = sourceCaptureUs - prevCaptureUs;
+        }
+        lastCallbackUs.store(callbackUs, std::memory_order_release);
+        lastCaptureUsForInterval.store(sourceCaptureUs, std::memory_order_release);
+        uint64_t currentVersion = 0;
+        {
+          std::lock_guard<std::mutex> lk(frame.mu);
+          frame.payload = std::move(payload);
+          frame.width = width;
+          frame.height = height;
+          frame.stride = stride;
+          frame.captureUs = sourceCaptureUs;
+          frame.callbackUs = callbackUs;
+          frame.captureAgeAtCallbackUs = captureAgeAtCallbackUs;
+          frame.captureClockSkewUs = captureClockSkewUs;
+          frame.queuePushUs = queuePushUs;
+          frame.callbackIntervalUs = callbackIntervalUs;
+          frame.captureIntervalUs = captureIntervalUs;
+          frame.seq += 1;
+          frame.version += 1;
+          currentVersion = frame.version;
+        }
+        const uint64_t currentPopVersion = lastPopFrameVersion.load(std::memory_order_acquire);
+        const uint64_t depthNow = (currentVersion >= currentPopVersion) ? (currentVersion - currentPopVersion) : 0;
+        update_u64_max(queueDepthMax, depthNow);
+        ++queuePushCount;
+        callbackFrames += 1;
+        frame.cv.notify_one();
+      } catch (...) {
       }
-      if (prevCallbackUs > 0 && callbackUs >= prevCallbackUs) {
-        callbackIntervalUs = callbackUs - prevCallbackUs;
+    });
+  };
+
+  auto detach_capture_session = [&]() {
+    captureSessionReady.store(false, std::memory_order_release);
+    try {
+      if (pool) {
+        pool.FrameArrived(token);
       }
-      if (prevCaptureUs > 0 && sourceCaptureUs >= prevCaptureUs) {
-        captureIntervalUs = sourceCaptureUs - prevCaptureUs;
-      }
-      lastCallbackUs.store(callbackUs, std::memory_order_release);
-      lastCaptureUsForInterval.store(sourceCaptureUs, std::memory_order_release);
-      uint64_t currentVersion = 0;
-      {
-        std::lock_guard<std::mutex> lk(frame.mu);
-        frame.payload = std::move(payload);
-        frame.width = width;
-        frame.height = height;
-        frame.stride = stride;
-        frame.captureUs = sourceCaptureUs;
-        frame.callbackUs = callbackUs;
-        frame.captureAgeAtCallbackUs = captureAgeAtCallbackUs;
-        frame.captureClockSkewUs = captureClockSkewUs;
-        frame.queuePushUs = queuePushUs;
-        frame.callbackIntervalUs = callbackIntervalUs;
-        frame.captureIntervalUs = captureIntervalUs;
-        frame.seq += 1;
-        frame.version += 1;
-        currentVersion = frame.version;
-      }
-      const uint64_t currentPopVersion = lastPopFrameVersion.load(std::memory_order_acquire);
-      const uint64_t depthNow = (currentVersion >= currentPopVersion) ? (currentVersion - currentPopVersion) : 0;
-      update_u64_max(queueDepthMax, depthNow);
-      ++queuePushCount;
-      callbackFrames += 1;
-      frame.cv.notify_one();
     } catch (...) {
     }
-  });
+    token = winrt::event_token{};
+    try {
+      if (session) session.Close();
+    } catch (...) {
+    }
+    try {
+      if (pool) pool.Close();
+    } catch (...) {
+    }
+    session = nullptr;
+    pool = nullptr;
+  };
 
-  session.StartCapture();
+  auto restart_capture_session = [&]() -> bool {
+    detach_capture_session();
+    try {
+      pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
+          d3dDevice, winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized,
+          captureFramePoolBuffers, size);
+      session = pool.CreateCaptureSession(item);
+      attach_frame_arrived();
+      session.StartCapture();
+      captureSessionStartedUs = qpc_now_us();
+      captureSessionReady.store(true, std::memory_order_release);
+      return true;
+    } catch (...) {
+      detach_capture_session();
+      return false;
+    }
+  };
+
+  if (!restart_capture_session()) {
+    std::cerr << "[native-video-host] capture session start failed\n";
+    closesocket(clientSock);
+    if (mfStarted) MFShutdown();
+    return 10;
+  }
 
   const uint64_t frameIntervalUs = std::max<uint64_t>(1, 1000000ULL / args.fps);
   const uint64_t startUs = qpc_now_us();
@@ -1369,6 +1424,13 @@ int main(int argc, char** argv) {
   uint64_t callbackToEncodeStartSumUs = 0;
   uint64_t callbackToEncodeStartMaxUs = 0;
   uint32_t consecutiveStaleEncodedFrames = 0;
+  uint64_t syntheticKeepaliveCount = 0;
+  uint64_t lastSyntheticKeepaliveUs = 0;
+  std::shared_ptr<std::vector<uint8_t>> keepalivePayload;
+  uint32_t keepaliveW = 0;
+  uint32_t keepaliveH = 0;
+  uint32_t keepaliveStride = 0;
+  uint32_t keepaliveSeq = 0;
   bool forceKeyNext = true;
   uint64_t lastSendStartUs = 0;
 
@@ -1377,6 +1439,36 @@ int main(int argc, char** argv) {
     uint64_t tickWaitUs = 0;
     if (args.seconds > 0 && nowUs >= startUs + static_cast<uint64_t>(args.seconds) * 1000000ULL) {
       break;
+    }
+    if (captureSessionReady.load(std::memory_order_acquire)) {
+      const uint64_t lastCbUs = lastCallbackUs.load(std::memory_order_acquire);
+      const uint64_t sessionStartUs = captureSessionStartedUs;
+      const uint64_t stallBaseUs = (lastCbUs > 0) ? lastCbUs : sessionStartUs;
+      const bool restartCooldownDone =
+          (lastCaptureRestartUs == 0 ||
+           nowUs >= (lastCaptureRestartUs + kCaptureCallbackRestartCooldownUs));
+      if (stallBaseUs > 0 && nowUs >= (stallBaseUs + kCaptureCallbackStallRestartUs) &&
+          restartCooldownDone) {
+        const uint64_t stallUs = nowUs - stallBaseUs;
+        lastCaptureRestartUs = nowUs;
+        const bool restarted = restart_capture_session();
+        if (restarted) {
+          ++captureRestartCount;
+          captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+          lastCaptureUsForInterval.store(0, std::memory_order_release);
+          lastCallbackUs.store(0, std::memory_order_release);
+          resetHostTimelineAnchors();
+          forceKeyNext = true;
+          lastSyntheticKeepaliveUs = 0;
+          std::cout << "[native-video-host] capture session restarted count=" << captureRestartCount
+                    << " stallUs=" << stallUs
+                    << " lastCallbackUs=" << lastCbUs
+                    << "\n";
+        } else {
+          std::cerr << "[native-video-host] capture session restart failed stallUs=" << stallUs
+                    << "\n";
+        }
+      }
     }
     if (paceByTick) {
       if (nowUs < nextTickUs) {
@@ -1407,6 +1499,7 @@ int main(int argc, char** argv) {
     uint64_t captureAgeAtCallbackUs = 0;
     uint64_t version = 0;
     uint32_t queueWaitReason = 0;  // 0: normal, 1: timeout, 2: no-work
+    bool syntheticKeepaliveFrame = false;
     const uint64_t queueSelectStartUs = qpc_now_us();
     bool queueReady = false;
     {
@@ -1417,28 +1510,73 @@ int main(int argc, char** argv) {
       if (!queueReady && !stop.load()) {
         queueWaitReason = 1;
         ++queueWaitTimeoutCount;
-        continue;
+        const uint64_t timeoutNowUs = qpc_now_us();
+        const uint64_t lastCbUs = lastCallbackUs.load(std::memory_order_acquire);
+        const bool captureLikelyStalled =
+            (lastCbUs > 0 && timeoutNowUs >= (lastCbUs + kCaptureStallKeepaliveStartUs));
+        const bool keepaliveDue =
+            (lastSyntheticKeepaliveUs == 0 ||
+             timeoutNowUs >= (lastSyntheticKeepaliveUs + kCaptureStallKeepaliveIntervalUs));
+        if (useH264 && captureLikelyStalled && keepaliveDue &&
+            keepalivePayload && !keepalivePayload->empty() &&
+            keepaliveW > 0 && keepaliveH > 0 && keepaliveStride >= (keepaliveW * 4u)) {
+          syntheticKeepaliveFrame = true;
+          payload = keepalivePayload;
+          w = keepaliveW;
+          h = keepaliveH;
+          stride = keepaliveStride;
+          keepaliveSeq = (keepaliveSeq == std::numeric_limits<uint32_t>::max()) ? 1u : (keepaliveSeq + 1u);
+          seq = keepaliveSeq;
+          version = lastVersionSent;
+          captureUs = timeoutNowUs;
+          callbackUs = timeoutNowUs;
+          queuePushUs = timeoutNowUs;
+          callbackIntervalUs = (lastCbUs > 0 && timeoutNowUs >= lastCbUs) ? (timeoutNowUs - lastCbUs) : 0;
+          captureIntervalUs = callbackIntervalUs;
+          captureAgeAtCallbackUs = 0;
+          captureClockSkewUs = 0;
+          ++syntheticKeepaliveCount;
+          if ((syntheticKeepaliveCount % 30) == 1) {
+            const uint64_t noCaptureUs =
+                (lastCbUs > 0 && timeoutNowUs >= lastCbUs) ? (timeoutNowUs - lastCbUs) : 0;
+            std::cout << "[native-video-host] synthetic keepalive count=" << syntheticKeepaliveCount
+                      << " noCaptureUs=" << noCaptureUs
+                      << "\n";
+          }
+        } else {
+          continue;
+        }
       }
       if (stop.load()) break;
-      if (frame.version == lastVersionSent || !frame.payload || frame.payload->empty()) {
+      if (!syntheticKeepaliveFrame &&
+          (frame.version == lastVersionSent || !frame.payload || frame.payload->empty())) {
         queueWaitReason = 2;
         ++queueWaitNoWorkCount;
         continue;
       }
-    version = frame.version;
-    payload = frame.payload;
-    seq = frame.seq;
-    w = frame.width;
-    h = frame.height;
-    stride = frame.stride;
-    captureUs = frame.captureUs;
-    callbackUs = frame.callbackUs;
-    callbackIntervalUs = frame.callbackIntervalUs;
-    captureIntervalUs = frame.captureIntervalUs;
-    queuePushUs = frame.queuePushUs;
-    captureAgeAtCallbackUs = frame.captureAgeAtCallbackUs;
-    captureClockSkewUs = frame.captureClockSkewUs;
-  }
+      if (!syntheticKeepaliveFrame) {
+        version = frame.version;
+        payload = frame.payload;
+        seq = frame.seq;
+        w = frame.width;
+        h = frame.height;
+        stride = frame.stride;
+        captureUs = frame.captureUs;
+        callbackUs = frame.callbackUs;
+        callbackIntervalUs = frame.callbackIntervalUs;
+        captureIntervalUs = frame.captureIntervalUs;
+        queuePushUs = frame.queuePushUs;
+        captureAgeAtCallbackUs = frame.captureAgeAtCallbackUs;
+        captureClockSkewUs = frame.captureClockSkewUs;
+      }
+    }
+    if (!syntheticKeepaliveFrame) {
+      keepalivePayload = payload;
+      keepaliveW = w;
+      keepaliveH = h;
+      keepaliveStride = stride;
+      keepaliveSeq = seq;
+    }
   const uint64_t queuePopUs = qpc_now_us();
   const uint64_t queueSelectWaitUs =
       (queuePopUs >= queueSelectStartUs) ? (queuePopUs - queueSelectStartUs) : 0;
@@ -1683,7 +1821,8 @@ int main(int argc, char** argv) {
         forceKeyNext = true;
       }
        const bool forceKeyFrame =
-           forceKeyNext || (encodedSeq == 0) || ((args.keyint > 0) && ((seq % args.keyint) == 0));
+            syntheticKeepaliveFrame || forceKeyNext || (encodedSeq == 0) ||
+            ((args.keyint > 0) && ((seq % args.keyint) == 0));
         const uint64_t encodeStartUs = qpc_now_us();
         const uint64_t encodeInputUs = captureStampUs;
         if (captureTimelineOriginUs < 0) {
@@ -1833,6 +1972,9 @@ int main(int argc, char** argv) {
         const uint64_t sendCallCount = sendPathStats.headerCallCount + sendPathStats.payloadCallCount;
         if (sentOk) {
           lastSendStartUs = sendStartUs;
+          if (syntheticKeepaliveFrame) {
+            lastSyntheticKeepaliveUs = sendStartUs;
+          }
         }
         if (!sentOk) {
           sendFailed = true;
@@ -2066,6 +2208,8 @@ int main(int argc, char** argv) {
                   << " queueDepthMax=" << queueDepthMax.load(std::memory_order_relaxed)
                   << " queueWaitTimeoutCount=" << queueWaitTimeoutCount
                   << " queueWaitNoWorkCount=" << queueWaitNoWorkCount
+                  << " syntheticKeepaliveCount=" << syntheticKeepaliveCount
+                  << " captureRestarts=" << captureRestartCount
                   << " callbackFrames=" << callbackFrames.load()
                   << " skippedByOverwrite=" << skippedByOverwrite
                   << " mbps=" << mbps
@@ -2084,6 +2228,8 @@ int main(int argc, char** argv) {
                   << " queueDepthMax=" << queueDepthMax.load(std::memory_order_relaxed)
                   << " queueWaitTimeoutCount=" << queueWaitTimeoutCount
                   << " queueWaitNoWorkCount=" << queueWaitNoWorkCount
+                  << " syntheticKeepaliveCount=" << syntheticKeepaliveCount
+                  << " captureRestarts=" << captureRestartCount
                   << " callbackFrames=" << callbackFrames.load()
                   << " skippedByOverwrite=" << skippedByOverwrite
                   << " stalePreEncodeDrops=" << stalePreEncodeDropCount
@@ -2319,6 +2465,7 @@ int main(int argc, char** argv) {
       gpuScaleSuccess = 0;
       gpuScaleFail = 0;
       gpuScaleCpuFallback = 0;
+      syntheticKeepaliveCount = 0;
       statAtUs += 1000000ULL;
     }
   }
@@ -2335,18 +2482,7 @@ int main(int argc, char** argv) {
     controlListenSock = INVALID_SOCKET;
   }
   if (controlThread.joinable()) controlThread.join();
-  try {
-    pool.FrameArrived(token);
-  } catch (...) {
-  }
-  try {
-    session.Close();
-  } catch (...) {
-  }
-  try {
-    pool.Close();
-  } catch (...) {
-  }
+  detach_capture_session();
   closesocket(clientSock);
   if (useH264) {
     encoder.shutdown();

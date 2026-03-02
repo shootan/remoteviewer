@@ -100,11 +100,15 @@ $env:REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE=1
 - Verify (latency summary): `automation/verify_native_video_runtime.ps1`
 - H264 tuning sweep: `automation/tune_native_video_h264.ps1`
 - WAN preflight: `automation/wan_preflight_native_video.ps1`
+- External bundle pack: `automation/package_native_video_external_bundle.ps1`
 - JSON profile runner: `automation/run_native_video_with_config.ps1`
   - profiles:
     - `automation/native_video_profile_720p.json`
     - `automation/native_video_profile_1080p.json`
     - `automation/native_video_profile_1080p_lowlat.json`
+    - `automation/native_video_profile_1080p_quality_10m_k60.json`
+    - `automation/native_video_profile_1080p_quality_12m_k60.json`
+    - `automation/native_video_profile_1080p_external_template.json`
     - `automation/native_video_profile_1296p_balanced.json`
 
 ### JSON profile run examples
@@ -116,6 +120,18 @@ powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config
 Client:
 ```powershell
 powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1 -Role client -ConfigPath automation/native_video_profile_720p.json -ExeDir build-native2/apps/native_poc/Debug -RemoteHost <HOST_IP>
+```
+
+### External WAN checklist (UDP profile default)
+- Port forwarding:
+  - UDP `43000` (video)
+  - TCP `43001` (control)
+- Address input:
+  - pass `-RemoteHost <HOST_PUBLIC_IP_OR_DNS>` on client, or
+  - set `remoteHost` in profile JSON.
+- Bundle output:
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/package_native_video_external_bundle.ps1 -BuildDir build-vcpkg-local
 ```
 
 ## Notes
