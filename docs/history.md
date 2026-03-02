@@ -2257,3 +2257,41 @@ Changes
 Notes
 - Runtime usage remains unified around one canonical profile:
   - `native_video_profile_1080p_lowlat.json` (host/client 공통, client는 `-RemoteHost`로 주소 주입).
+
+### 65) 2026-03-03 WAN practical tuning result (quality/fps recovery)
+Goal
+- Validate real WAN usability (two-PC host/client) and recover fps/quality while preserving acceptable latency.
+
+Execution
+1. WAN capture workflow finalized
+- Added host/client separated log capture workflow under `D:\remote\build\automation`:
+  - `run_wan_host_capture.ps1`
+  - `run_wan_client_capture.ps1`
+  - `summarize_wan_capture.ps1`
+- Logs were collected and summarized from real external runs.
+
+2. Baseline vs tuned profile comparison
+- Baseline pair:
+  - host: `wan-capture-20260303-011441-host-wan1`
+  - client: `wan-capture-20260303-011450-client-wan1`
+- Tuned pair (`wanQ1`):
+  - host: `wan-capture-20260303-012502-host-wanQ1`
+  - client: `wan-capture-20260303-012514-client-wanQ1`
+
+Metrics (baseline -> tuned)
+- Host encoded fps avg: `17.59 -> 27.94` (+58.8%)
+- Client decoded fps avg: `14.58 -> 24.50` (+68.0%)
+- Client latency avg: `29.89ms -> 28.88ms` (3.4% 개선)
+- Client latency p95: `67.60ms -> 44.20ms` (34.6% 개선)
+- UDP assembly drop ratio: `5.36% -> 2.68%` (49.9% 개선)
+- Client mbps avg: `4.65 -> 9.27`
+
+Interpretation
+- Frame/quality bottleneck in WAN baseline was mainly from low bitrate + frame gating policy.
+- Raising bitrate and disabling frame gating recovered visual quality and effective fps without latency regression.
+
+Operational decision
+- Added WAN practical profile:
+  - `automation/native_video_profile_1080p_wan_quality.json`
+  - `10Mbps / keyint 60 / frameGatingDisable=true`
+- Keep `1080p_lowlat` for worst-network or strict-latency preference.

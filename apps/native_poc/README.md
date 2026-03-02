@@ -106,6 +106,7 @@ $env:REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE=1
     - `automation/native_video_profile_720p.json`
     - `automation/native_video_profile_1080p.json`
     - `automation/native_video_profile_1080p_lowlat.json`
+    - `automation/native_video_profile_1080p_wan_quality.json`
     - `automation/native_video_profile_1080p_quality_10m_k60.json`
     - `automation/native_video_profile_1080p_quality_12m_k60.json`
     - `automation/native_video_profile_1080p_external_template.json`

@@ -24,7 +24,8 @@ netsh advfirewall firewall add rule name="Remote60 Native Video TCP43001" dir=in
   - `automation/native_video_profile_1080p_external_template.json`
 
 ## Recommended FHD profiles
-- `automation/native_video_profile_1080p_lowlat.json` (8Mbps, keyint 60)
+- `automation/native_video_profile_1080p_lowlat.json` (8Mbps, low-latency baseline)
+- `automation/native_video_profile_1080p_wan_quality.json` (10Mbps, keyint 60, frame gating off)
 - `automation/native_video_profile_1080p_quality_10m_k60.json`
 - `automation/native_video_profile_1080p_quality_12m_k60.json`
 
