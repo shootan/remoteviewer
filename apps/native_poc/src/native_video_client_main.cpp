@@ -36,12 +36,15 @@
 #include "poc_protocol.hpp"
 #include "time_utils.hpp"
 
+#pragma comment(lib, "Msimg32.lib")
+
 namespace {
 
 using remote60::native_poc::ControlInputAckMessage;
 using remote60::native_poc::ControlInputEventMessage;
 using remote60::native_poc::ControlClientMetricsMessage;
 using remote60::native_poc::ControlRequestKeyFrameMessage;
+using remote60::native_poc::ControlRuntimeEncoderConfigMessage;
 using remote60::native_poc::ControlPingMessage;
 using remote60::native_poc::ControlPongMessage;
 using remote60::native_poc::DecodedFrameNv12;
@@ -92,6 +95,8 @@ struct Args {
   uint32_t fpsHint = 30;
   bool enableInputChannel = false;
   uint32_t inputLogEvery = 120;
+  uint32_t runtimeBitrate = 0;
+  uint32_t runtimeKeyint = 0;
 };
 
 bool parse_u32(const char* s, uint32_t* out) {
@@ -165,6 +170,12 @@ Args parse_args(int argc, char** argv) {
     } else if (k == "--input-log-every" && i + 1 < argc) {
       uint32_t v = 0;
       if (parse_u32(argv[++i], &v)) a.inputLogEvery = std::max<uint32_t>(1, v);
+    } else if (k == "--runtime-bitrate" && i + 1 < argc) {
+      uint32_t v = 0;
+      if (parse_u32(argv[++i], &v)) a.runtimeBitrate = std::max<uint32_t>(100000, v);
+    } else if (k == "--runtime-keyint" && i + 1 < argc) {
+      uint32_t v = 0;
+      if (parse_u32(argv[++i], &v)) a.runtimeKeyint = std::max<uint32_t>(1, v);
     }
   }
   return a;
@@ -299,6 +310,331 @@ std::atomic<uint64_t> gFallbackInitFailCount{0};
 std::atomic<uint64_t> gFallbackRenderFailCount{0};
 std::atomic<uint64_t> gFallbackNv12ConvertFailCount{0};
 std::mutex gLogMu;
+
+struct OverlayConfigSnapshot {
+  std::string host = "127.0.0.1";
+  uint16_t port = 43000;
+  uint16_t controlPort = 0;
+  std::string transport = "tcp";
+  std::string codec = "raw";
+  uint32_t fpsHint = 30;
+  uint32_t controlIntervalMs = 1000;
+  uint32_t tcpRecvBufKb = 0;
+  uint32_t tcpSendBufKb = 0;
+  uint32_t udpMtu = 1200;
+  uint64_t keyReqMinIntervalUs = kKeyframeRequestMinIntervalUsDefault;
+  uint64_t keyReqTokenRefillUs = kKeyframeRequestTokenRefillUsDefault;
+  uint32_t keyReqTokenCapacity = kKeyframeRequestTokenCapacityDefault;
+};
+
+OverlayConfigSnapshot gOverlayConfig;
+std::atomic<bool> gOverlayVisible{false};
+std::atomic<bool> gOverlayButtonDown{false};
+std::atomic<bool> gControlConnected{false};
+std::atomic<bool> gRuntimeTuneEnabled{false};
+std::atomic<bool> gRuntimeTuneDirty{false};
+std::atomic<uint32_t> gRuntimeTuneSeq{0};
+std::atomic<uint32_t> gRuntimeTargetBitrate{0};
+std::atomic<uint32_t> gRuntimeTargetKeyint{0};
+std::atomic<uint64_t> gRuntimeTuneLastSentUs{0};
+
+struct OverlayMetricSample {
+  uint64_t tsUs = 0;
+  uint32_t recvFpsX100 = 0;
+  uint32_t decodedFpsX100 = 0;
+  uint32_t recvMbpsX1000 = 0;
+  uint64_t avgLatencyUs = 0;
+};
+
+struct OverlayMetricAverages {
+  uint32_t recvFpsX100 = 0;
+  uint32_t decodedFpsX100 = 0;
+  uint32_t recvMbpsX1000 = 0;
+  uint64_t avgLatencyUs = 0;
+  uint32_t sampleCount = 0;
+};
+
+std::mutex gOverlayMetricsMu;
+std::deque<OverlayMetricSample> gOverlayMetrics;
+
+constexpr int kOverlayButtonX = 12;
+constexpr int kOverlayButtonY = 12;
+constexpr int kOverlayButtonW = 132;
+constexpr int kOverlayButtonH = 30;
+constexpr int kOverlayPanelX = 12;
+constexpr int kOverlayPanelY = 50;
+constexpr int kOverlayPanelW = 490;
+constexpr int kOverlayPanelH = 330;
+constexpr uint32_t kRuntimeBitrateMin = 300000;
+constexpr uint32_t kRuntimeBitrateMax = 30000000;
+constexpr uint32_t kRuntimeBitrateStep = 250000;
+constexpr uint32_t kRuntimeKeyintMin = 1;
+constexpr uint32_t kRuntimeKeyintMax = 240;
+
+RECT make_rect(int x, int y, int w, int h) {
+  RECT r{};
+  r.left = x;
+  r.top = y;
+  r.right = x + w;
+  r.bottom = y + h;
+  return r;
+}
+
+bool point_in_rect(const RECT& r, int x, int y) {
+  return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
+}
+
+RECT overlay_toggle_rect() {
+  return make_rect(kOverlayButtonX, kOverlayButtonY, kOverlayButtonW, kOverlayButtonH);
+}
+
+RECT overlay_panel_rect() {
+  return make_rect(kOverlayPanelX, kOverlayPanelY, kOverlayPanelW, kOverlayPanelH);
+}
+
+RECT overlay_bitrate_minus_rect() {
+  return make_rect(kOverlayPanelX + 20, kOverlayPanelY + 260, 26, 24);
+}
+
+RECT overlay_bitrate_plus_rect() {
+  return make_rect(kOverlayPanelX + 84, kOverlayPanelY + 260, 26, 24);
+}
+
+RECT overlay_keyint_minus_rect() {
+  return make_rect(kOverlayPanelX + 220, kOverlayPanelY + 260, 26, 24);
+}
+
+RECT overlay_keyint_plus_rect() {
+  return make_rect(kOverlayPanelX + 284, kOverlayPanelY + 260, 26, 24);
+}
+
+void draw_alpha_rect(HDC hdc, const RECT& rect, COLORREF color, BYTE alpha) {
+  const int w = rect.right - rect.left;
+  const int h = rect.bottom - rect.top;
+  if (w <= 0 || h <= 0) return;
+  HDC memDc = CreateCompatibleDC(hdc);
+  if (!memDc) return;
+  HBITMAP bmp = CreateCompatibleBitmap(hdc, w, h);
+  if (!bmp) {
+    DeleteDC(memDc);
+    return;
+  }
+  HGDIOBJ oldBmp = SelectObject(memDc, bmp);
+  HBRUSH brush = CreateSolidBrush(color);
+  RECT fillRc{0, 0, w, h};
+  FillRect(memDc, &fillRc, brush);
+  DeleteObject(brush);
+  BLENDFUNCTION blend{};
+  blend.BlendOp = AC_SRC_OVER;
+  blend.SourceConstantAlpha = alpha;
+  blend.AlphaFormat = 0;
+  AlphaBlend(hdc, rect.left, rect.top, w, h, memDc, 0, 0, w, h, blend);
+  SelectObject(memDc, oldBmp);
+  DeleteObject(bmp);
+  DeleteDC(memDc);
+}
+
+void draw_panel_button(HDC hdc, const RECT& rect, const char* label) {
+  HBRUSH b = CreateSolidBrush(RGB(60, 68, 80));
+  FillRect(hdc, &rect, b);
+  DeleteObject(b);
+  SetBkMode(hdc, TRANSPARENT);
+  SetTextColor(hdc, RGB(240, 240, 240));
+  RECT textRect = rect;
+  DrawTextA(hdc, label, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+void push_overlay_metric_sample(uint32_t recvFpsX100, uint32_t decodedFpsX100, uint32_t recvMbpsX1000,
+                                uint64_t avgLatencyUs, uint64_t nowUs) {
+  std::lock_guard<std::mutex> lk(gOverlayMetricsMu);
+  gOverlayMetrics.push_back({nowUs, recvFpsX100, decodedFpsX100, recvMbpsX1000, avgLatencyUs});
+  const uint64_t keepWindowUs = 12000000ULL;
+  while (!gOverlayMetrics.empty() && nowUs > gOverlayMetrics.front().tsUs &&
+         (nowUs - gOverlayMetrics.front().tsUs) > keepWindowUs) {
+    gOverlayMetrics.pop_front();
+  }
+}
+
+OverlayMetricAverages collect_overlay_averages(uint64_t nowUs, uint64_t windowUs) {
+  OverlayMetricAverages out{};
+  std::lock_guard<std::mutex> lk(gOverlayMetricsMu);
+  uint64_t sumRecvFpsX100 = 0;
+  uint64_t sumDecodedFpsX100 = 0;
+  uint64_t sumRecvMbpsX1000 = 0;
+  uint64_t sumLatencyUs = 0;
+  for (const auto& s : gOverlayMetrics) {
+    if (nowUs >= s.tsUs && (nowUs - s.tsUs) <= windowUs) {
+      ++out.sampleCount;
+      sumRecvFpsX100 += s.recvFpsX100;
+      sumDecodedFpsX100 += s.decodedFpsX100;
+      sumRecvMbpsX1000 += s.recvMbpsX1000;
+      sumLatencyUs += s.avgLatencyUs;
+    }
+  }
+  if (out.sampleCount > 0) {
+    out.recvFpsX100 = static_cast<uint32_t>(sumRecvFpsX100 / out.sampleCount);
+    out.decodedFpsX100 = static_cast<uint32_t>(sumDecodedFpsX100 / out.sampleCount);
+    out.recvMbpsX1000 = static_cast<uint32_t>(sumRecvMbpsX1000 / out.sampleCount);
+    out.avgLatencyUs = sumLatencyUs / out.sampleCount;
+  }
+  return out;
+}
+
+void runtime_tune_set_default_if_needed() {
+  uint32_t bitrate = gRuntimeTargetBitrate.load(std::memory_order_relaxed);
+  if (bitrate == 0) {
+    const uint32_t fromTrafficX1000 = gClientMetrics.recvMbpsX1000.load(std::memory_order_relaxed);
+    uint32_t guessed = 8000000;
+    if (fromTrafficX1000 > 0) {
+      guessed = std::clamp<uint32_t>(fromTrafficX1000 * 1000u, kRuntimeBitrateMin, kRuntimeBitrateMax);
+    }
+    gRuntimeTargetBitrate.store(guessed, std::memory_order_relaxed);
+  }
+  uint32_t keyint = gRuntimeTargetKeyint.load(std::memory_order_relaxed);
+  if (keyint == 0) {
+    gRuntimeTargetKeyint.store(60, std::memory_order_relaxed);
+  }
+}
+
+void apply_runtime_tune_delta(int bitrateStep, int keyintStep) {
+  if (!gRuntimeTuneEnabled.load(std::memory_order_relaxed)) return;
+  runtime_tune_set_default_if_needed();
+  if (bitrateStep != 0) {
+    const uint32_t cur = gRuntimeTargetBitrate.load(std::memory_order_relaxed);
+    const int64_t next = static_cast<int64_t>(cur) + static_cast<int64_t>(bitrateStep) * kRuntimeBitrateStep;
+    gRuntimeTargetBitrate.store(
+        static_cast<uint32_t>(std::clamp<int64_t>(next, kRuntimeBitrateMin, kRuntimeBitrateMax)),
+        std::memory_order_relaxed);
+  }
+  if (keyintStep != 0) {
+    const uint32_t cur = gRuntimeTargetKeyint.load(std::memory_order_relaxed);
+    const int64_t next = static_cast<int64_t>(cur) + static_cast<int64_t>(keyintStep);
+    gRuntimeTargetKeyint.store(
+        static_cast<uint32_t>(std::clamp<int64_t>(next, kRuntimeKeyintMin, kRuntimeKeyintMax)),
+        std::memory_order_relaxed);
+  }
+  gRuntimeTuneDirty.store(true, std::memory_order_release);
+}
+
+void draw_overlay(HDC hdc) {
+  const RECT toggle = overlay_toggle_rect();
+  draw_alpha_rect(hdc, toggle, RGB(18, 20, 26), 165);
+  SetBkMode(hdc, TRANSPARENT);
+  SetTextColor(hdc, RGB(232, 232, 232));
+  RECT toggleText = toggle;
+  const bool visible = gOverlayVisible.load(std::memory_order_relaxed);
+  DrawTextA(hdc, visible ? "Stats: ON" : "Stats: OFF", -1, &toggleText, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+  if (!visible) return;
+
+  const RECT panel = overlay_panel_rect();
+  draw_alpha_rect(hdc, panel, RGB(12, 15, 20), 185);
+
+  const uint64_t nowUs = qpc_now_us();
+  const OverlayMetricAverages avg5s = collect_overlay_averages(nowUs, 5000000ULL);
+  const uint32_t width = gClientMetrics.width.load(std::memory_order_relaxed);
+  const uint32_t height = gClientMetrics.height.load(std::memory_order_relaxed);
+  const uint32_t recvFpsX100 = gClientMetrics.recvFpsX100.load(std::memory_order_relaxed);
+  const uint32_t decFpsX100 = gClientMetrics.decodedFpsX100.load(std::memory_order_relaxed);
+  const uint32_t mbpsX1000 = gClientMetrics.recvMbpsX1000.load(std::memory_order_relaxed);
+  const uint64_t latUs = gClientMetrics.avgLatencyUs.load(std::memory_order_relaxed);
+  const uint32_t dropped = gClientMetrics.skippedFrames.load(std::memory_order_relaxed);
+  const uint64_t updatedUs = gClientMetrics.updatedQpcUs.load(std::memory_order_relaxed);
+  const uint64_t staleMs = (updatedUs > 0 && nowUs >= updatedUs) ? ((nowUs - updatedUs) / 1000ULL) : 0;
+
+  std::vector<std::string> lines;
+  lines.reserve(18);
+  lines.emplace_back("Runtime Overlay");
+  {
+    std::ostringstream oss;
+    oss << "Resolution: " << width << "x" << height
+        << "  stale=" << staleMs << "ms";
+    lines.push_back(oss.str());
+  }
+  {
+    std::ostringstream oss;
+    oss << "FPS recv/dec(1s): " << (recvFpsX100 / 100.0) << " / " << (decFpsX100 / 100.0);
+    lines.push_back(oss.str());
+  }
+  {
+    std::ostringstream oss;
+    oss << "Net Mbps(1s): " << (mbpsX1000 / 1000.0)
+        << "  avgLat(1s): " << (latUs / 1000.0) << "ms"
+        << "  skipped=" << dropped;
+    lines.push_back(oss.str());
+  }
+  {
+    std::ostringstream oss;
+    oss << "FPS recv/dec(5s avg): " << (avg5s.recvFpsX100 / 100.0)
+        << " / " << (avg5s.decodedFpsX100 / 100.0)
+        << "  Net=" << (avg5s.recvMbpsX1000 / 1000.0) << "Mbps";
+    lines.push_back(oss.str());
+  }
+  {
+    std::ostringstream oss;
+    oss << "Transport=" << gOverlayConfig.transport
+        << " Codec=" << gOverlayConfig.codec
+        << " Host=" << gOverlayConfig.host << ":" << gOverlayConfig.port;
+    lines.push_back(oss.str());
+  }
+  {
+    std::ostringstream oss;
+    oss << "CtrlPort=" << gOverlayConfig.controlPort
+        << " CtrlIntMs=" << gOverlayConfig.controlIntervalMs
+        << " FpsHint=" << gOverlayConfig.fpsHint;
+    lines.push_back(oss.str());
+  }
+  {
+    std::ostringstream oss;
+    oss << "SockCfg recv/snd kb=" << gOverlayConfig.tcpRecvBufKb << "/" << gOverlayConfig.tcpSendBufKb
+        << " udpMtu=" << gOverlayConfig.udpMtu;
+    lines.push_back(oss.str());
+  }
+  {
+    std::ostringstream oss;
+    oss << "KeyReqLimiter min=" << gOverlayConfig.keyReqMinIntervalUs
+        << " refill=" << gOverlayConfig.keyReqTokenRefillUs
+        << " cap=" << gOverlayConfig.keyReqTokenCapacity;
+    lines.push_back(oss.str());
+  }
+  {
+    std::ostringstream oss;
+    oss << "Runtime tune: " << (gRuntimeTuneEnabled.load(std::memory_order_relaxed) ? "enabled" : "disabled")
+        << " control=" << (gControlConnected.load(std::memory_order_relaxed) ? "connected" : "off");
+    lines.push_back(oss.str());
+  }
+  {
+    const uint32_t targetBitrate = gRuntimeTargetBitrate.load(std::memory_order_relaxed);
+    const uint32_t targetKeyint = gRuntimeTargetKeyint.load(std::memory_order_relaxed);
+    const uint64_t sentUs = gRuntimeTuneLastSentUs.load(std::memory_order_relaxed);
+    const uint64_t ageMs = (sentUs > 0 && nowUs >= sentUs) ? ((nowUs - sentUs) / 1000ULL) : 0;
+    std::ostringstream oss;
+    oss << "Target bitrate/keyint: " << targetBitrate << " / " << targetKeyint
+        << "  lastSendAgo=" << ageMs << "ms";
+    lines.push_back(oss.str());
+  }
+  lines.emplace_back("Click +/- to tune. Hotkeys: F8(toggle), [ ] bitrate, ; ' keyint");
+
+  SetTextColor(hdc, RGB(230, 235, 240));
+  SetBkMode(hdc, TRANSPARENT);
+  int lineY = panel.top + 12;
+  for (const std::string& line : lines) {
+    TextOutA(hdc, panel.left + 14, lineY, line.c_str(), static_cast<int>(line.size()));
+    lineY += 18;
+  }
+
+  const RECT brMinus = overlay_bitrate_minus_rect();
+  const RECT brPlus = overlay_bitrate_plus_rect();
+  const RECT kiMinus = overlay_keyint_minus_rect();
+  const RECT kiPlus = overlay_keyint_plus_rect();
+  draw_panel_button(hdc, brMinus, "-");
+  draw_panel_button(hdc, brPlus, "+");
+  draw_panel_button(hdc, kiMinus, "-");
+  draw_panel_button(hdc, kiPlus, "+");
+  SetTextColor(hdc, RGB(215, 220, 230));
+  TextOutA(hdc, panel.left + 120, panel.top + 264, "bitrate", 7);
+  TextOutA(hdc, panel.left + 320, panel.top + 264, "keyint", 6);
+}
 
 void log_client_line(const std::string& line) {
   std::lock_guard<std::mutex> lk(gLogMu);
@@ -669,15 +1005,58 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       PostQuitMessage(0);
       return 0;
     case WM_MOUSEMOVE:
+      if (point_in_rect(overlay_toggle_rect(), GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kAllInputBlocked) return 0;
       enqueue_input_event(1, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), 0, 0);
       return 0;
     case WM_LBUTTONDOWN:
+      if (point_in_rect(overlay_toggle_rect(), GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) {
+        gOverlayButtonDown.store(true, std::memory_order_relaxed);
+        return 0;
+      }
+      if (gOverlayVisible.load(std::memory_order_relaxed) &&
+          (point_in_rect(overlay_bitrate_minus_rect(), GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) ||
+           point_in_rect(overlay_bitrate_plus_rect(), GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) ||
+           point_in_rect(overlay_keyint_minus_rect(), GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) ||
+           point_in_rect(overlay_keyint_plus_rect(), GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))) {
+        return 0;
+      }
       if (kAllInputBlocked) return 0;
       gMouseButtons.fetch_or(1);
       enqueue_input_event(2, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), 0, VK_LBUTTON);
       return 0;
     case WM_LBUTTONUP:
+      if (gOverlayButtonDown.exchange(false, std::memory_order_relaxed)) {
+        if (point_in_rect(overlay_toggle_rect(), GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) {
+          gOverlayVisible.store(!gOverlayVisible.load(std::memory_order_relaxed), std::memory_order_relaxed);
+          InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+      }
+      if (gOverlayVisible.load(std::memory_order_relaxed)) {
+        const int x = GET_X_LPARAM(lp);
+        const int y = GET_Y_LPARAM(lp);
+        if (point_in_rect(overlay_bitrate_minus_rect(), x, y)) {
+          apply_runtime_tune_delta(-1, 0);
+          InvalidateRect(hwnd, nullptr, FALSE);
+          return 0;
+        }
+        if (point_in_rect(overlay_bitrate_plus_rect(), x, y)) {
+          apply_runtime_tune_delta(1, 0);
+          InvalidateRect(hwnd, nullptr, FALSE);
+          return 0;
+        }
+        if (point_in_rect(overlay_keyint_minus_rect(), x, y)) {
+          apply_runtime_tune_delta(0, -1);
+          InvalidateRect(hwnd, nullptr, FALSE);
+          return 0;
+        }
+        if (point_in_rect(overlay_keyint_plus_rect(), x, y)) {
+          apply_runtime_tune_delta(0, 1);
+          InvalidateRect(hwnd, nullptr, FALSE);
+          return 0;
+        }
+      }
       if (kAllInputBlocked) return 0;
       gMouseButtons.fetch_and(static_cast<uint16_t>(~1u));
       enqueue_input_event(3, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), 0, VK_LBUTTON);
@@ -710,6 +1089,31 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     }
     case WM_KEYDOWN:
+      if (wp == VK_F8) {
+        gOverlayVisible.store(!gOverlayVisible.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+      }
+      if (wp == VK_OEM_4) {  // [
+        apply_runtime_tune_delta(-1, 0);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+      }
+      if (wp == VK_OEM_6) {  // ]
+        apply_runtime_tune_delta(1, 0);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+      }
+      if (wp == VK_OEM_1) {  // ;
+        apply_runtime_tune_delta(0, -1);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+      }
+      if (wp == VK_OEM_7) {  // '
+        apply_runtime_tune_delta(0, 1);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+      }
       if (kAllInputBlocked) return 0;
       enqueue_input_event(5, 0, 0, 0, static_cast<uint32_t>(wp));
       return 0;
@@ -941,6 +1345,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // Before first successful frame, keep a deterministic background.
         FillRect(hdc, &rc, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
       }
+      draw_overlay(hdc);
       EndPaint(hwnd, &ps);
       uint64_t latestVersion = 0;
       {
@@ -1040,6 +1445,25 @@ int main(int argc, char** argv) {
     std::cerr << "[native-video-client] raw codec over udp is not supported in current phase (use codec=h264)\n";
     return 13;
   }
+
+  gOverlayConfig.host = args.host;
+  gOverlayConfig.port = args.port;
+  gOverlayConfig.controlPort = args.controlPort;
+  gOverlayConfig.transport = video_transport_name(transport);
+  gOverlayConfig.codec = args.codec;
+  gOverlayConfig.fpsHint = args.fpsHint;
+  gOverlayConfig.controlIntervalMs = args.controlIntervalMs;
+  gOverlayConfig.tcpRecvBufKb = args.tcpRecvBufKb;
+  gOverlayConfig.tcpSendBufKb = args.tcpSendBufKb;
+  gOverlayConfig.udpMtu = args.udpMtu;
+  gOverlayConfig.keyReqMinIntervalUs = gKeyframeRequestMinIntervalUs.load(std::memory_order_relaxed);
+  gOverlayConfig.keyReqTokenRefillUs = gKeyframeRequestTokenRefillUs.load(std::memory_order_relaxed);
+  gOverlayConfig.keyReqTokenCapacity = gKeyframeRequestTokenCapacity.load(std::memory_order_relaxed);
+  gRuntimeTargetBitrate.store(args.runtimeBitrate, std::memory_order_relaxed);
+  gRuntimeTargetKeyint.store(args.runtimeKeyint, std::memory_order_relaxed);
+  gRuntimeTuneEnabled.store(false, std::memory_order_relaxed);
+  gRuntimeTuneDirty.store(false, std::memory_order_relaxed);
+  gControlConnected.store(false, std::memory_order_relaxed);
 
   WinsockScope ws;
   if (!ws.ok) {
@@ -1204,6 +1628,7 @@ int main(int argc, char** argv) {
         controlThread = std::thread([&]() {
           uint32_t pingSeq = 0;
           uint32_t metricsSeq = 0;
+          uint32_t runtimeSeq = 0;
           uint64_t lastMetricsSentUs = 0;
           uint64_t inputAckCount = 0;
           uint64_t nextPingUs = qpc_now_us();
@@ -1279,6 +1704,31 @@ int main(int argc, char** argv) {
               didWork = true;
             }
 
+            if (gRuntimeTuneEnabled.load(std::memory_order_relaxed) &&
+                gRuntimeTuneDirty.exchange(false, std::memory_order_acq_rel)) {
+              runtime_tune_set_default_if_needed();
+              ControlRuntimeEncoderConfigMessage tune{};
+              tune.header.magic = remote60::native_poc::kMagic;
+              tune.header.type = static_cast<uint16_t>(MessageType::ControlRuntimeEncoderConfig);
+              tune.header.size = static_cast<uint16_t>(sizeof(tune));
+              tune.seq = ++runtimeSeq;
+              tune.bitrate = gRuntimeTargetBitrate.load(std::memory_order_relaxed);
+              tune.keyint = gRuntimeTargetKeyint.load(std::memory_order_relaxed);
+              if (tune.bitrate > 0) tune.flags |= 0x1u;
+              if (tune.keyint > 0) tune.flags |= 0x2u;
+              tune.clientSendQpcUs = nowUs;
+              if (tune.flags != 0) {
+                if (!send_all(controlSock, &tune, sizeof(tune))) break;
+                gRuntimeTuneLastSentUs.store(nowUs, std::memory_order_relaxed);
+                std::cout << "[native-video-client][control] runtime-config seq=" << tune.seq
+                          << " bitrate=" << tune.bitrate
+                          << " keyint=" << tune.keyint
+                          << " flags=" << tune.flags
+                          << "\n";
+                didWork = true;
+              }
+            }
+
             ControlInputEventMessage input{};
             bool hasInput = false;
             {
@@ -1315,12 +1765,21 @@ int main(int argc, char** argv) {
 
             if (!didWork) Sleep(2);
           }
+          gControlConnected.store(false, std::memory_order_relaxed);
+          gRuntimeTuneEnabled.store(false, std::memory_order_relaxed);
         });
+        gControlConnected.store(true, std::memory_order_relaxed);
+        gRuntimeTuneEnabled.store(useH264, std::memory_order_relaxed);
+        if (useH264 && (args.runtimeBitrate > 0 || args.runtimeKeyint > 0)) {
+          gRuntimeTuneDirty.store(true, std::memory_order_release);
+        }
         std::cout << "[native-video-client] control connected port=" << args.controlPort
                   << " inputChannel=" << (inputChannelEnabled ? 1 : 0) << "\n";
       } else {
         closesocket(controlSock);
         controlSock = INVALID_SOCKET;
+        gControlConnected.store(false, std::memory_order_relaxed);
+        gRuntimeTuneEnabled.store(false, std::memory_order_relaxed);
         std::cout << "[native-video-client] control connect failed port=" << args.controlPort << "\n";
       }
     }
@@ -1455,6 +1914,18 @@ int main(int argc, char** argv) {
       gClientMetrics.maxDecodeTailUs = maxDecodeTailUsLocal;
       gClientMetrics.seq.fetch_add(1);
       gClientMetrics.updatedQpcUs = nowUs;
+      push_overlay_metric_sample(gClientMetrics.recvFpsX100.load(std::memory_order_relaxed),
+                                 gClientMetrics.decodedFpsX100.load(std::memory_order_relaxed),
+                                 gClientMetrics.recvMbpsX1000.load(std::memory_order_relaxed),
+                                 gClientMetrics.avgLatencyUs.load(std::memory_order_relaxed),
+                                 nowUs);
+      if (gOverlayVisible.load(std::memory_order_relaxed) && gHwnd) {
+        if (!gPaintQueued.exchange(true)) {
+          InvalidateRect(gHwnd, nullptr, FALSE);
+        } else {
+          ++gPaintCoalescedCount;
+        }
+      }
     };
     auto process_h264_frame = [&](const EncodedFrameHeader& h, std::vector<uint8_t>* payloadPtr,
                                   uint64_t packetNowUs) -> bool {

@@ -48,6 +48,7 @@ using remote60::native_poc::ControlInputAckMessage;
 using remote60::native_poc::ControlInputEventMessage;
 using remote60::native_poc::ControlClientMetricsMessage;
 using remote60::native_poc::ControlRequestKeyFrameMessage;
+using remote60::native_poc::ControlRuntimeEncoderConfigMessage;
 using remote60::native_poc::ControlPingMessage;
 using remote60::native_poc::ControlPongMessage;
 using remote60::native_poc::H264EncodeFrameStats;
@@ -1019,6 +1020,10 @@ int main(int argc, char** argv) {
   std::atomic<uint16_t> clientKeyFrameReason{0};
   std::atomic<uint64_t> clientKeyFrameRequestCount{0};
   std::atomic<uint64_t> clientKeyFrameRequestDropped{0};
+  std::atomic<bool> runtimeTunePending{false};
+  std::atomic<uint32_t> runtimeTuneBitrate{0};
+  std::atomic<uint32_t> runtimeTuneKeyint{0};
+  std::atomic<uint32_t> runtimeTuneSeq{0};
   double keyReqTokens = static_cast<double>(keyReqTokenCapacity);
   uint64_t keyReqLastRefillUs = 0;
   uint64_t keyReqNextAllowedUs = 0;
@@ -1162,6 +1167,27 @@ int main(int argc, char** argv) {
               continue;
             }
 
+            if (type == MessageType::ControlRuntimeEncoderConfig &&
+                header.size == sizeof(ControlRuntimeEncoderConfigMessage)) {
+              ControlRuntimeEncoderConfigMessage tune{};
+              tune.header = header;
+              if (!recv_all(controlClientSock, &tune.seq, sizeof(tune) - sizeof(MessageHeader))) break;
+              const bool hasBitrate = ((tune.flags & 0x1u) != 0) && tune.bitrate >= 100000;
+              const bool hasKeyint = ((tune.flags & 0x2u) != 0) && tune.keyint >= 1;
+              if (hasBitrate || hasKeyint) {
+                if (hasBitrate) runtimeTuneBitrate.store(tune.bitrate, std::memory_order_release);
+                if (hasKeyint) runtimeTuneKeyint.store(tune.keyint, std::memory_order_release);
+                runtimeTuneSeq.store(tune.seq, std::memory_order_release);
+                runtimeTunePending.store(true, std::memory_order_release);
+                std::cout << "[native-video-host][control] runtime-config seq=" << tune.seq
+                          << " bitrate=" << (hasBitrate ? tune.bitrate : 0)
+                          << " keyint=" << (hasKeyint ? tune.keyint : 0)
+                          << " flags=" << tune.flags
+                          << "\n";
+              }
+              continue;
+            }
+
             if (bodySize > 0 && !recv_discard(controlClientSock, bodySize)) break;
           }
         });
@@ -1259,6 +1285,8 @@ int main(int argc, char** argv) {
   uint32_t activeEncodeW = abrHighW;
   uint32_t activeEncodeH = abrHighH;
   uint32_t activeBitrate = abrHighBitrate;
+  uint32_t activeKeyint = args.keyint;
+  bool runtimeTuneManualOverride = false;
   uint64_t abrCooldownUntilUs = 0;
   uint32_t abrGoodSeconds = 0;
   uint32_t abrModeratePressureSeconds = 0;
@@ -1271,7 +1299,7 @@ int main(int argc, char** argv) {
   };
 
   if (useH264) {
-    if (!encoder.initialize(activeEncodeW, activeEncodeH, args.fps, activeBitrate, args.keyint)) {
+    if (!encoder.initialize(activeEncodeW, activeEncodeH, args.fps, activeBitrate, activeKeyint)) {
       std::cerr << "[native-video-host] H264 encoder initialize failed\n";
       closesocket(clientSock);
       if (mfStarted) MFShutdown();
@@ -1555,6 +1583,51 @@ int main(int argc, char** argv) {
     uint64_t tickWaitUs = 0;
     if (args.seconds > 0 && nowUs >= startUs + static_cast<uint64_t>(args.seconds) * 1000000ULL) {
       break;
+    }
+    if (useH264 && runtimeTunePending.exchange(false, std::memory_order_acq_rel)) {
+      const uint32_t reqSeq = runtimeTuneSeq.load(std::memory_order_acquire);
+      uint32_t targetBitrate = runtimeTuneBitrate.load(std::memory_order_acquire);
+      uint32_t targetKeyint = runtimeTuneKeyint.load(std::memory_order_acquire);
+      if (targetBitrate < 100000) targetBitrate = activeBitrate;
+      if (targetKeyint < 1) targetKeyint = activeKeyint;
+      const bool bitrateChanged = (targetBitrate != activeBitrate);
+      const bool keyintChanged = (targetKeyint != activeKeyint);
+      if (bitrateChanged || keyintChanged) {
+        bool applyOk = true;
+        if (keyintChanged) {
+          encoder.shutdown();
+          if (!encoder.initialize(activeEncodeW, activeEncodeH, args.fps, targetBitrate, targetKeyint)) {
+            applyOk = false;
+          } else {
+            resetHostTimelineAnchors();
+          }
+        } else if (bitrateChanged) {
+          if (!encoder.reconfigure_bitrate(targetBitrate)) {
+            encoder.shutdown();
+            if (!encoder.initialize(activeEncodeW, activeEncodeH, args.fps, targetBitrate, targetKeyint)) {
+              applyOk = false;
+            } else {
+              resetHostTimelineAnchors();
+            }
+          }
+        }
+        if (!applyOk) {
+          std::cerr << "[native-video-host][control] runtime-config apply failed seq=" << reqSeq << "\n";
+          break;
+        }
+        activeBitrate = targetBitrate;
+        activeKeyint = targetKeyint;
+        runtimeTuneManualOverride = true;
+        abrCooldownUntilUs = nowUs + 3000000ULL;
+        abrGoodSeconds = 0;
+        abrModeratePressureSeconds = 0;
+        abrSeverePressureSeconds = 0;
+        forceKeyNext = true;
+        std::cout << "[native-video-host][control] runtime-config-applied seq=" << reqSeq
+                  << " bitrate=" << activeBitrate
+                  << " keyint=" << activeKeyint
+                  << " abrOverride=1\n";
+      }
     }
     if (captureSessionReady.load(std::memory_order_acquire)) {
       const uint64_t lastCbUs = lastCallbackUs.load(std::memory_order_acquire);
@@ -1995,7 +2068,7 @@ int main(int argc, char** argv) {
       }
        const bool forceKeyFrame =
             syntheticKeepaliveFrame || forceKeyNext || (encodedSeq == 0) ||
-            ((args.keyint > 0) && ((seq % args.keyint) == 0));
+            ((activeKeyint > 0) && ((seq % activeKeyint) == 0));
         const uint64_t encodeStartUs = qpc_now_us();
         const uint64_t encodeInputUs = captureStampUs;
         if (captureTimelineOriginUs < 0) {
@@ -2064,7 +2137,7 @@ int main(int argc, char** argv) {
             std::cout << "[native-video-host] encoder reset due to stale output age="
                       << encodedAgeUs << "us consecutive=" << consecutiveStaleEncodedFrames << "\n";
             encoder.shutdown();
-            if (!encoder.initialize(activeEncodeW, activeEncodeH, args.fps, activeBitrate, args.keyint)) {
+            if (!encoder.initialize(activeEncodeW, activeEncodeH, args.fps, activeBitrate, activeKeyint)) {
             std::cerr << "[native-video-host] encoder reinitialize failed\n";
               sendFailed = true;
               break;
@@ -2451,6 +2524,7 @@ int main(int argc, char** argv) {
                   << " udpTxFail=" << udpTxFail
                   << " udpTxNoPeer=" << udpTxNoPeer
                   << " bitrateTarget=" << activeBitrate
+                  << " keyintTarget=" << activeKeyint
                   << " size=" << activeEncodeW << "x" << activeEncodeH
                   << " gpuScaleReq=" << (gpuScalerRequested ? 1 : 0)
                   << " gpuScaleReady=" << (gpuScalerHealthy ? 1 : 0)
@@ -2462,6 +2536,7 @@ int main(int argc, char** argv) {
                   << " abrModSec=" << abrModeratePressureSeconds
                   << " abrSevSec=" << abrSeverePressureSeconds
                   << " abrGoodSec=" << abrGoodSeconds
+                  << " abrOverride=" << (runtimeTuneManualOverride ? 1 : 0)
                   << " frameGatingMode=" << (frameGatingStaticMode ? "static" : "motion")
                   << " frameGatingSkips=" << frameGatingSkipCount
                   << " frameGatingStaticSkips=" << frameGatingStaticSkipCount
@@ -2469,7 +2544,7 @@ int main(int argc, char** argv) {
                   << " frameGatingChangeAvgPm=" << frameGatingChangeAvgPm
                   << "\n";
 
-        if (abrEnabled) {
+        if (abrEnabled && !runtimeTuneManualOverride) {
           const uint64_t metricsUpdatedUs = clientMetricsUpdatedUs.load();
           const bool metricsFresh =
               (metricsUpdatedUs > 0) && (t >= metricsUpdatedUs) && ((t - metricsUpdatedUs) <= 3000000ULL);
@@ -2613,7 +2688,7 @@ int main(int argc, char** argv) {
             bool switchOk = true;
             if (targetW != activeEncodeW || targetH != activeEncodeH) {
               encoder.shutdown();
-              if (!encoder.initialize(targetW, targetH, args.fps, targetBitrate, args.keyint)) {
+              if (!encoder.initialize(targetW, targetH, args.fps, targetBitrate, activeKeyint)) {
                 std::cerr << "[native-video-host][abr] encoder reinitialize failed for profile switch\n";
                 switchOk = false;
               } else {
@@ -2622,7 +2697,7 @@ int main(int argc, char** argv) {
             } else if (targetBitrate != activeBitrate) {
               if (!encoder.reconfigure_bitrate(targetBitrate)) {
                 encoder.shutdown();
-                if (!encoder.initialize(targetW, targetH, args.fps, targetBitrate, args.keyint)) {
+                if (!encoder.initialize(targetW, targetH, args.fps, targetBitrate, activeKeyint)) {
                   std::cerr << "[native-video-host][abr] encoder bitrate reconfigure/reinit failed\n";
                   switchOk = false;
                 } else {
