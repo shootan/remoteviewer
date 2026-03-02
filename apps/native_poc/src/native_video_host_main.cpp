@@ -1503,6 +1503,11 @@ int main(int argc, char** argv) {
   uint64_t encodedFrames = 0;
   uint64_t sentBytes = 0;
   uint64_t rawEquivalentBytes = 0;
+  uint64_t udpTxFrames = 0;
+  uint64_t udpTxChunks = 0;
+  uint64_t udpTxBytes = 0;
+  uint64_t udpTxFail = 0;
+  uint64_t udpTxNoPeer = 0;
   uint64_t skippedByOverwrite = 0;
   uint64_t lastVersionSent = 0;
   uint64_t tracePrinted = 0;
@@ -2114,6 +2119,7 @@ int main(int argc, char** argv) {
                                  &sendPathStats.payloadCallCount);
         } else {
           if (!udpPeerReady) {
+            ++udpTxNoPeer;
             sentOk = false;
           } else {
             UdpVideoChunkHeader udpHdr{};
@@ -2140,6 +2146,11 @@ int main(int argc, char** argv) {
         const uint64_t sendCallCount = sendPathStats.headerCallCount + sendPathStats.payloadCallCount;
         if (sentOk) {
           lastSendStartUs = sendStartUs;
+          if (transport == VideoTransport::Udp) {
+            ++udpTxFrames;
+            udpTxChunks += sendPathStats.payloadChunkCount;
+            udpTxBytes += au.bytes.size();
+          }
           if (frameGatingEnabled && !syntheticKeepaliveFrame && payload && !payload->empty()) {
             frameGatingLastSentUs = sendStartUs;
             frameGatingRefPayload = payload;
@@ -2152,6 +2163,9 @@ int main(int argc, char** argv) {
           }
         }
         if (!sentOk) {
+          if (transport == VideoTransport::Udp) {
+            ++udpTxFail;
+          }
           sendFailed = true;
           break;
         }
@@ -2404,6 +2418,8 @@ int main(int argc, char** argv) {
         const double rawEquivMbps = (rawEquivalentBytes * 8.0) / (1000.0 * 1000.0);
         const uint64_t encRatioX100 =
             (sentBytes > 0) ? ((rawEquivalentBytes * 100ULL) / sentBytes) : 0;
+        const uint64_t udpTxChunkPerFrameX100 =
+            (udpTxFrames > 0) ? ((udpTxChunks * 100ULL) / udpTxFrames) : 0;
         std::cout << "[native-video-host] encodedFrames=" << encodedFrames
                   << " sentFrames=" << sentFrames
                   << " queuePushCount=" << queuePushCount
@@ -2428,6 +2444,12 @@ int main(int argc, char** argv) {
                   << " mbps=" << mbps
                   << " rawEquivMbps=" << rawEquivMbps
                   << " encRatioX100=" << encRatioX100
+                  << " udpTxFrames=" << udpTxFrames
+                  << " udpTxChunks=" << udpTxChunks
+                  << " udpTxChunkPerFrameX100=" << udpTxChunkPerFrameX100
+                  << " udpTxBytes=" << udpTxBytes
+                  << " udpTxFail=" << udpTxFail
+                  << " udpTxNoPeer=" << udpTxNoPeer
                   << " bitrateTarget=" << activeBitrate
                   << " size=" << activeEncodeW << "x" << activeEncodeH
                   << " gpuScaleReq=" << (gpuScalerRequested ? 1 : 0)
@@ -2641,6 +2663,11 @@ int main(int argc, char** argv) {
       encodedFrames = 0;
       sentBytes = 0;
       rawEquivalentBytes = 0;
+      udpTxFrames = 0;
+      udpTxChunks = 0;
+      udpTxBytes = 0;
+      udpTxFail = 0;
+      udpTxNoPeer = 0;
       skippedByOverwrite = 0;
       stalePreEncodeDropCount = 0;
       staleEncodedDropCount = 0;

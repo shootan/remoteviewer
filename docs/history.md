@@ -2194,3 +2194,66 @@ Validation
 
 Deployment sync
 - Updated `D:\remote\build\bin` host/client exes and `D:\remote\build\automation` script/profile files.
+
+### 63) 2026-03-03 M5 tuning decision (staticSceneFps=10 selected)
+Test summary
+- A/B/C with `REMOTE60_NATIVE_STATIC_SCENE_FPS={8,10,12}` under same verify scenario.
+- Best balance observed at `10`.
+
+Selected defaults
+- `staticSceneFps=10`
+- `frameGatingStaticThresholdPm=6`
+- `frameGatingMotionThresholdPm=14`
+- `keyframeReqMinIntervalUs=150000`
+- `keyframeReqTokenRefillUs=250000`
+- `keyframeReqTokenCapacity=3`
+
+Profile usage policy
+- Canonical runtime profile: `automation/native_video_profile_1080p_lowlat.json`
+- External template kept only for handoff convenience: `automation/native_video_profile_1080p_external_template.json`
+
+### 64) 2026-03-03 M6 phase-1: UDP assembly telemetry + catchup re-entry guard
+Goal
+- Reduce repeated keyframe storm patterns (`reason=1/5` loop) and make UDP loss symptoms measurable from verify output.
+
+Changes
+1. Client catchup/keyframe conflict mitigation
+- File: `apps/native_poc/src/native_video_client_main.cpp`
+- Added catchup re-entry minimum interval guard:
+  - env: `REMOTE60_NATIVE_CATCHUP_REENTER_MIN_INTERVAL_US`
+  - default: `600000` (600ms)
+- Applied guard to:
+  - lag-trigger catchup entry (`reason=1`)
+  - decode-empty recovery catchup entry (`reason=5`)
+- Added throttle logs:
+  - `catchup-enter-throttled ...`
+  - `decode-empty-recovery-throttled ...`
+
+2. UDP assembly observability (client)
+- Added per-second UDP assembly log:
+  - `udp-assembly chunks=... completed=... dropped=... dropPm=... malformed=... reorder=... keyReq=...`
+- Added conflict reduction in reorder/drop path:
+  - keyframe request on assembly mismatch is suppressed while `waitForKeyFrame` or `catchupMode` is active.
+
+3. Verify summary support
+- File: `automation/verify_native_video_runtime.ps1`
+- Added output keys:
+  - `UDP_ASSEMBLY_SAMPLE_COUNT`
+  - `UDP_ASSEMBLY_*_TOTAL`
+  - `UDP_ASSEMBLY_DROP_PM_{COUNT,AVG,P95,MAX}`
+
+4. Host UDP tx observability
+- File: `apps/native_poc/src/native_video_host_main.cpp`
+- Added periodic host stats:
+  - `udpTxFrames`, `udpTxChunks`, `udpTxChunkPerFrameX100`, `udpTxBytes`, `udpTxFail`, `udpTxNoPeer`
+
+5. Config wiring
+- File: `automation/run_native_video_with_config.ps1`
+  - JSON -> env mapping added for `catchupReenterMinIntervalUs`.
+- Updated profiles:
+  - `automation/native_video_profile_1080p_lowlat.json`
+  - `automation/native_video_profile_1080p_external_template.json`
+
+Notes
+- Runtime usage remains unified around one canonical profile:
+  - `native_video_profile_1080p_lowlat.json` (host/client 공통, client는 `-RemoteHost`로 주소 주입).

@@ -29,5 +29,6 @@
   "keyframeReqMinIntervalUs": 150000,
   "keyframeReqTokenRefillUs": 250000,
   "keyframeReqTokenCapacity": 3,
+  "catchupReenterMinIntervalUs": 600000,
   "remoteHost": "YOUR_PUBLIC_IP_OR_DNS"
 }

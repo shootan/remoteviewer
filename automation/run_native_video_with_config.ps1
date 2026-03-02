@@ -84,6 +84,7 @@ $frameGatingMotionThresholdPm = Get-IntValue $cfg "frameGatingMotionThresholdPm"
 $keyframeReqMinIntervalUs = Get-IntValue $cfg "keyframeReqMinIntervalUs" 0
 $keyframeReqTokenRefillUs = Get-IntValue $cfg "keyframeReqTokenRefillUs" 0
 $keyframeReqTokenCapacity = Get-IntValue $cfg "keyframeReqTokenCapacity" 0
+$catchupReenterMinIntervalUs = Get-IntValue $cfg "catchupReenterMinIntervalUs" 0
 
 # Ensure old shell env doesn't leak into this run.
 @(
@@ -104,7 +105,8 @@ $keyframeReqTokenCapacity = Get-IntValue $cfg "keyframeReqTokenCapacity" 0
   "REMOTE60_NATIVE_KEYREQ_TOKEN_CAPACITY",
   "REMOTE60_NATIVE_KEYFRAME_REQ_MIN_INTERVAL_US",
   "REMOTE60_NATIVE_KEYFRAME_REQ_TOKEN_REFILL_US",
-  "REMOTE60_NATIVE_KEYFRAME_REQ_TOKEN_CAPACITY"
+  "REMOTE60_NATIVE_KEYFRAME_REQ_TOKEN_CAPACITY",
+  "REMOTE60_NATIVE_CATCHUP_REENTER_MIN_INTERVAL_US"
 ) | ForEach-Object {
   Remove-Item ("Env:" + $_) -ErrorAction SilentlyContinue
 }
@@ -156,6 +158,9 @@ if ($keyframeReqTokenRefillUs -gt 0) {
 if ($keyframeReqTokenCapacity -gt 0) {
   $env:REMOTE60_NATIVE_KEYREQ_TOKEN_CAPACITY = "$keyframeReqTokenCapacity"
   $env:REMOTE60_NATIVE_KEYFRAME_REQ_TOKEN_CAPACITY = "$keyframeReqTokenCapacity"
+}
+if ($catchupReenterMinIntervalUs -gt 0) {
+  $env:REMOTE60_NATIVE_CATCHUP_REENTER_MIN_INTERVAL_US = "$catchupReenterMinIntervalUs"
 }
 
 if ($Role -eq "host") {

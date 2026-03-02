@@ -253,6 +253,7 @@ constexpr uint64_t kUserFeedbackMinIntervalUs = 1000000;  // 1s
 constexpr uint64_t kKeyframeRequestMinIntervalUsDefault = 120000;  // 120ms
 constexpr uint64_t kKeyframeRequestTokenRefillUsDefault = 300000;  // 300ms / token
 constexpr uint32_t kKeyframeRequestTokenCapacityDefault = 3;
+constexpr uint64_t kCatchupReenterMinIntervalUsDefault = 600000;  // 600ms
 
 std::mutex gInputMu;
 std::deque<ControlInputEventMessage> gInputQueue;
@@ -1004,6 +1005,9 @@ int main(int argc, char** argv) {
       env_u32_clamped("REMOTE60_NATIVE_KEYFRAME_REQ_TOKEN_CAPACITY",
                       kKeyframeRequestTokenCapacityDefault, 1, 16),
       std::memory_order_relaxed);
+  const uint64_t catchupReenterMinIntervalUs = env_u32_clamped(
+      "REMOTE60_NATIVE_CATCHUP_REENTER_MIN_INTERVAL_US",
+      static_cast<uint32_t>(kCatchupReenterMinIntervalUsDefault), 100000, 3000000);
   {
     std::lock_guard<std::mutex> lk(gKeyframeLimiterMu);
     gKeyframeLimiterTokens = static_cast<double>(gKeyframeRequestTokenCapacity.load(std::memory_order_relaxed));
@@ -1166,6 +1170,7 @@ int main(int argc, char** argv) {
             << gKeyframeRequestMinIntervalUs.load(std::memory_order_relaxed)
             << " tokenRefillUs=" << gKeyframeRequestTokenRefillUs.load(std::memory_order_relaxed)
             << " tokenCapacity=" << gKeyframeRequestTokenCapacity.load(std::memory_order_relaxed)
+            << " catchupReenterMinUs=" << catchupReenterMinIntervalUs
             << "\n";
   if (kAllInputBlocked) {
     std::cout << "[native-video-client] all input blocked (view-only)\n";
@@ -1340,8 +1345,16 @@ int main(int argc, char** argv) {
     uint64_t decodeEmptyRecoveryCount = 0;
     uint64_t waitingKeyDropCount = 0;
     uint64_t lagDropCount = 0;
+    uint64_t udpChunkRecvCount = 0;
+    uint64_t udpAssemblyCompletedCount = 0;
+    uint64_t udpAssemblyDroppedCount = 0;
+    uint64_t udpAssemblyMalformedCount = 0;
+    uint64_t udpAssemblyReorderCount = 0;
+    uint64_t udpAssemblyKeyReqCount = 0;
     uint64_t lastPacketRecvUs = 0;
     uint32_t lagTriggerStreak = 0;
+    uint64_t lastCatchupEnterUs = 0;
+    uint64_t catchupEnterThrottledCount = 0;
     bool catchupMode = false;
     uint64_t lastPresentedCaptureUs = 0;
     bool captureTimelineReady = false;
@@ -1512,17 +1525,32 @@ int main(int argc, char** argv) {
         lagTriggerStreak = 0;
       }
       if (!catchupMode && lagTriggerStreak >= 3) {
-        catchupMode = true;
         lagTriggerStreak = 0;
-        waitForKeyFrame = true;
-        decoder.reset();
-        request_keyframe(1);
-        std::cout << "[native-video-client] catchup enter streamLagUs=" << streamLagUs
-                  << " decodeQueueLagEstUs=" << decodeQueueLagEstimateUs
-                  << " recvGapUs=" << recvGapUs
-                  << " reason="
-                  << ((decodeQueueLagEstimateUs > kDecodeQueueLagDropUs) ? "decode_queue" : "stream_lag_emergency")
-                  << " seq=" << h.seq << "\n";
+        const bool catchupEnterAllowed =
+            (lastCatchupEnterUs == 0) || (packetNowUs >= (lastCatchupEnterUs + catchupReenterMinIntervalUs));
+        if (!catchupEnterAllowed) {
+          ++catchupEnterThrottledCount;
+          if ((catchupEnterThrottledCount % 120) == 1) {
+            std::cout << "[native-video-client] catchup-enter-throttled count="
+                      << catchupEnterThrottledCount
+                      << " streamLagUs=" << streamLagUs
+                      << " decodeQueueLagEstUs=" << decodeQueueLagEstimateUs
+                      << " minIntervalUs=" << catchupReenterMinIntervalUs
+                      << "\n";
+          }
+        } else {
+          catchupMode = true;
+          lastCatchupEnterUs = packetNowUs;
+          waitForKeyFrame = true;
+          decoder.reset();
+          request_keyframe(1);
+          std::cout << "[native-video-client] catchup enter streamLagUs=" << streamLagUs
+                    << " decodeQueueLagEstUs=" << decodeQueueLagEstimateUs
+                    << " recvGapUs=" << recvGapUs
+                    << " reason="
+                    << ((decodeQueueLagEstimateUs > kDecodeQueueLagDropUs) ? "decode_queue" : "stream_lag_emergency")
+                    << " seq=" << h.seq << "\n";
+        }
       }
       if (catchupMode && !keyFrame) {
         decodeEmptyStreak = 0;
@@ -1654,16 +1682,31 @@ int main(int argc, char** argv) {
                 ? (packetNowUs - decodeEmptyStreakStartUs)
                 : 0;
         if (decodeEmptyStreak >= 12 || emptyStreakUs >= 300000) {
-          ++decodeEmptyRecoveryCount;
-          waitForKeyFrame = true;
-          catchupMode = true;
-          request_keyframe(5);
-          decoder.reset();
-          if ((decodeEmptyRecoveryCount % 10) == 1) {
-            std::cout << "[native-video-client] decode empty recovery count=" << decodeEmptyRecoveryCount
-                      << " streak=" << decodeEmptyStreak
-                      << " emptyUs=" << emptyStreakUs
-                      << "\n";
+          const bool catchupEnterAllowed =
+              (lastCatchupEnterUs == 0) || (packetNowUs >= (lastCatchupEnterUs + catchupReenterMinIntervalUs));
+          if (catchupEnterAllowed) {
+            ++decodeEmptyRecoveryCount;
+            waitForKeyFrame = true;
+            catchupMode = true;
+            lastCatchupEnterUs = packetNowUs;
+            request_keyframe(5);
+            decoder.reset();
+            if ((decodeEmptyRecoveryCount % 10) == 1) {
+              std::cout << "[native-video-client] decode empty recovery count=" << decodeEmptyRecoveryCount
+                        << " streak=" << decodeEmptyStreak
+                        << " emptyUs=" << emptyStreakUs
+                        << "\n";
+            }
+          } else {
+            ++catchupEnterThrottledCount;
+            if ((catchupEnterThrottledCount % 120) == 1) {
+              std::cout << "[native-video-client] decode-empty-recovery-throttled count="
+                        << catchupEnterThrottledCount
+                        << " streak=" << decodeEmptyStreak
+                        << " emptyUs=" << emptyStreakUs
+                        << " minIntervalUs=" << catchupReenterMinIntervalUs
+                        << "\n";
+            }
           }
           decodeEmptyStreak = 0;
           decodeEmptyStreakStartUs = 0;
@@ -1855,6 +1898,13 @@ int main(int argc, char** argv) {
       EncodedFrameHeader assemblingHdr{};
       std::vector<uint8_t> assemblingPayload;
       uint64_t assemblyDropped = 0;
+      uint64_t udpAssemblyStatAtUs = qpc_now_us() + 1000000ULL;
+      uint64_t lastUdpChunkRecvCount = 0;
+      uint64_t lastUdpAssemblyCompletedCount = 0;
+      uint64_t lastUdpAssemblyDroppedCount = 0;
+      uint64_t lastUdpAssemblyMalformedCount = 0;
+      uint64_t lastUdpAssemblyReorderCount = 0;
+      uint64_t lastUdpAssemblyKeyReqCount = 0;
 
       while (gRunning.load()) {
         const int n = recv(gSock, reinterpret_cast<char*>(datagram.data()), static_cast<int>(datagram.size()), 0);
@@ -1872,11 +1922,13 @@ int main(int argc, char** argv) {
           ++skippedQueued;
           continue;
         }
+        ++udpChunkRecvCount;
         if (u.payloadSize == 0 || u.chunkSize == 0 ||
             u.chunkOffset > u.payloadSize ||
             (u.chunkOffset + u.chunkSize) > u.payloadSize ||
             (sizeof(UdpVideoChunkHeader) + u.chunkSize) > static_cast<uint32_t>(n)) {
           ++skippedQueued;
+          ++udpAssemblyMalformedCount;
           assembling = false;
           continue;
         }
@@ -1906,8 +1958,12 @@ int main(int argc, char** argv) {
         if (!assembling || u.seq != assemblingSeq || u.chunkOffset != assemblingNextOffset) {
           ++skippedQueued;
           ++assemblyDropped;
-          if ((assemblyDropped % 20) == 1) {
+          ++udpAssemblyDroppedCount;
+          ++udpAssemblyReorderCount;
+          const bool keyReqAllowed = !waitForKeyFrame && !catchupMode;
+          if (keyReqAllowed && (assemblyDropped % 20) == 1) {
             request_keyframe(2);
+            ++udpAssemblyKeyReqCount;
           }
           if ((assemblyDropped % 120) == 1) {
             std::cout << "[native-video-client] udp assembly drop count=" << assemblyDropped
@@ -1927,17 +1983,49 @@ int main(int argc, char** argv) {
           if (assemblingNextOffset != assemblingExpected) {
             ++skippedQueued;
             ++assemblyDropped;
+            ++udpAssemblyDroppedCount;
+            ++udpAssemblyMalformedCount;
             assembling = false;
             continue;
           }
           assemblingHdr.payloadSize = assemblingExpected;
           std::vector<uint8_t> payload = std::move(assemblingPayload);
           assembling = false;
+          ++udpAssemblyCompletedCount;
           const uint64_t packetNowUs = qpc_now_us();
           if (!process_h264_frame(assemblingHdr, &payload, packetNowUs)) break;
         }
 
         const uint64_t nowUs = qpc_now_us();
+        if (nowUs >= udpAssemblyStatAtUs) {
+          const uint64_t chunksDelta = udpChunkRecvCount - lastUdpChunkRecvCount;
+          const uint64_t completedDelta = udpAssemblyCompletedCount - lastUdpAssemblyCompletedCount;
+          const uint64_t droppedDelta = udpAssemblyDroppedCount - lastUdpAssemblyDroppedCount;
+          const uint64_t malformedDelta = udpAssemblyMalformedCount - lastUdpAssemblyMalformedCount;
+          const uint64_t reorderDelta = udpAssemblyReorderCount - lastUdpAssemblyReorderCount;
+          const uint64_t keyReqDelta = udpAssemblyKeyReqCount - lastUdpAssemblyKeyReqCount;
+          const uint64_t totalFramesDelta = completedDelta + droppedDelta;
+          const uint64_t dropPermille = (totalFramesDelta > 0)
+              ? ((droppedDelta * 1000ULL) / totalFramesDelta)
+              : 0;
+          std::cout << "[native-video-client] udp-assembly chunks=" << chunksDelta
+                    << " completed=" << completedDelta
+                    << " dropped=" << droppedDelta
+                    << " dropPm=" << dropPermille
+                    << " malformed=" << malformedDelta
+                    << " reorder=" << reorderDelta
+                    << " keyReq=" << keyReqDelta
+                    << " waitForKey=" << (waitForKeyFrame ? 1 : 0)
+                    << " catchup=" << (catchupMode ? 1 : 0)
+                    << "\n";
+          lastUdpChunkRecvCount = udpChunkRecvCount;
+          lastUdpAssemblyCompletedCount = udpAssemblyCompletedCount;
+          lastUdpAssemblyDroppedCount = udpAssemblyDroppedCount;
+          lastUdpAssemblyMalformedCount = udpAssemblyMalformedCount;
+          lastUdpAssemblyReorderCount = udpAssemblyReorderCount;
+          lastUdpAssemblyKeyReqCount = udpAssemblyKeyReqCount;
+          udpAssemblyStatAtUs += 1000000ULL;
+        }
         if (args.seconds > 0 && nowUs >= startUs + static_cast<uint64_t>(args.seconds) * 1000000ULL) {
           break;
         }

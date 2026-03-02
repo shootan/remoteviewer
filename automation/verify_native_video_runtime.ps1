@@ -145,6 +145,14 @@ $abrLastProfile = ""
 $keyReqClientSent = 0
 $keyReqHostRecv = 0
 $keyReqHostConsumed = 0
+$udpAssemblyDropPmVals = New-Object System.Collections.Generic.List[double]
+$udpAssemblySampleCount = 0
+$udpAssemblyChunksTotal = 0
+$udpAssemblyCompletedTotal = 0
+$udpAssemblyDroppedTotal = 0
+$udpAssemblyMalformedTotal = 0
+$udpAssemblyReorderTotal = 0
+$udpAssemblyKeyReqTotal = 0
 $queueWaitTimeoutCount = 0
 $queueWaitNoWorkCount = 0
 $queueWaitReason0Count = 0
@@ -407,6 +415,30 @@ foreach ($line in $clientLines) {
   }
   if ($line -match '\[native-video-client\]\[control\] keyframe-request seq=') {
     $keyReqClientSent += 1
+  }
+  if ($line -match '\[native-video-client\] udp-assembly ') {
+    $udpAssemblySampleCount += 1
+    if ($line -match 'chunks=([0-9]+)') {
+      $udpAssemblyChunksTotal += [int64]$Matches[1]
+    }
+    if ($line -match 'completed=([0-9]+)') {
+      $udpAssemblyCompletedTotal += [int64]$Matches[1]
+    }
+    if ($line -match 'dropped=([0-9]+)') {
+      $udpAssemblyDroppedTotal += [int64]$Matches[1]
+    }
+    if ($line -match 'malformed=([0-9]+)') {
+      $udpAssemblyMalformedTotal += [int64]$Matches[1]
+    }
+    if ($line -match 'reorder=([0-9]+)') {
+      $udpAssemblyReorderTotal += [int64]$Matches[1]
+    }
+    if ($line -match 'keyReq=([0-9]+)') {
+      $udpAssemblyKeyReqTotal += [int64]$Matches[1]
+    }
+    if ($line -match 'dropPm=([0-9]+)') {
+      [void]$udpAssemblyDropPmVals.Add([double]$Matches[1])
+    }
   }
 }
 
@@ -814,6 +846,7 @@ $gpuScaleSuccess = Stats-Summary -vals $gpuScaleSuccessVals
 $gpuScaleFail = Stats-Summary -vals $gpuScaleFailVals
 $gpuScaleCpuFallback = Stats-Summary -vals $gpuScaleCpuFallbackVals
 $dec = Stats-Summary -vals $decodedFrameVals
+$udpAssemblyDropPm = Stats-Summary -vals $udpAssemblyDropPmVals
 $presentGap = Stats-Summary -vals $presentGapVals
 $gdiFallbackRate = Stats-Summary -vals $gdiFallbackRateX1000Vals
 $stageStats = [ordered]@{}
@@ -941,6 +974,17 @@ Write-Output "ABR_LAST_PROFILE=$abrLastProfile"
 Write-Output "KEYREQ_CLIENT_SENT=$keyReqClientSent"
 Write-Output "KEYREQ_HOST_RECV=$keyReqHostRecv"
 Write-Output "KEYREQ_HOST_CONSUMED=$keyReqHostConsumed"
+Write-Output "UDP_ASSEMBLY_SAMPLE_COUNT=$udpAssemblySampleCount"
+Write-Output "UDP_ASSEMBLY_CHUNKS_TOTAL=$udpAssemblyChunksTotal"
+Write-Output "UDP_ASSEMBLY_COMPLETED_TOTAL=$udpAssemblyCompletedTotal"
+Write-Output "UDP_ASSEMBLY_DROPPED_TOTAL=$udpAssemblyDroppedTotal"
+Write-Output "UDP_ASSEMBLY_MALFORMED_TOTAL=$udpAssemblyMalformedTotal"
+Write-Output "UDP_ASSEMBLY_REORDER_TOTAL=$udpAssemblyReorderTotal"
+Write-Output "UDP_ASSEMBLY_KEYREQ_TOTAL=$udpAssemblyKeyReqTotal"
+Write-Output "UDP_ASSEMBLY_DROP_PM_COUNT=$($udpAssemblyDropPm.count)"
+Write-Output "UDP_ASSEMBLY_DROP_PM_AVG=$($udpAssemblyDropPm.avg)"
+Write-Output "UDP_ASSEMBLY_DROP_PM_P95=$($udpAssemblyDropPm.p95)"
+Write-Output "UDP_ASSEMBLY_DROP_PM_MAX=$($udpAssemblyDropPm.max)"
 Write-Output "HOST_QUEUE_WAIT_TIMEOUT_COUNT=$queueWaitTimeoutCount"
 Write-Output "HOST_QUEUE_WAIT_NOWORK_COUNT=$queueWaitNoWorkCount"
 Write-Output "HOST_QUEUE_PUSH_COUNT=$queuePushCount"
