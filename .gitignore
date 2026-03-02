@@ -11,6 +11,7 @@
 
 # Package manager cache
 /.vcpkg/
+/vcpkg_installed/
 
 # Runtime logs/state
 /logs/

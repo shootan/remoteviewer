@@ -369,7 +369,7 @@ struct Nv12D3dRenderer {
         "  float r = 1.16438356 * Y + 1.59602678 * V;"
         "  float g = 1.16438356 * Y - 0.39176229 * U - 0.81296764 * V;"
         "  float b = 1.16438356 * Y + 2.01723214 * U;"
-        "  return float4(saturate(b), saturate(g), saturate(r), 1.0);"
+        "  return float4(saturate(r), saturate(g), saturate(b), 1.0);"
         "}";
 
     Microsoft::WRL::ComPtr<ID3DBlob> vsBlob;
