@@ -111,6 +111,15 @@ bool env_truthy(const char* key) {
   return s == "1" || s == "true" || s == "TRUE" || s == "on" || s == "ON";
 }
 
+uint32_t env_u32_clamped(const char* key, uint32_t fallback, uint32_t minValue, uint32_t maxValue) {
+  if (!key) return fallback;
+  const char* raw = std::getenv(key);
+  if (!raw) return fallback;
+  uint32_t parsed = 0;
+  if (!parse_u32(raw, &parsed)) return fallback;
+  return std::clamp<uint32_t>(parsed, minValue, maxValue);
+}
+
 Args parse_args(int argc, char** argv) {
   Args a;
   for (int i = 1; i < argc; ++i) {
@@ -241,7 +250,9 @@ constexpr uint64_t kStaleCaptureDropUs = 50000;      // 50ms
 constexpr uint64_t kUserFeedbackLagWarnUs = 90000;   // 90ms
 constexpr uint64_t kUserFeedbackGapWarnUs = 50000;   // 50ms
 constexpr uint64_t kUserFeedbackMinIntervalUs = 1000000;  // 1s
-constexpr uint64_t kKeyframeRequestMinIntervalUs = 120000;  // 120ms
+constexpr uint64_t kKeyframeRequestMinIntervalUsDefault = 120000;  // 120ms
+constexpr uint64_t kKeyframeRequestTokenRefillUsDefault = 300000;  // 300ms / token
+constexpr uint32_t kKeyframeRequestTokenCapacityDefault = 3;
 
 std::mutex gInputMu;
 std::deque<ControlInputEventMessage> gInputQueue;
@@ -270,6 +281,13 @@ std::atomic<bool> gKeyframeRequestPending{false};
 std::atomic<uint16_t> gKeyframeRequestReason{0};
 std::atomic<uint32_t> gKeyframeRequestCount{0};
 std::atomic<uint64_t> gLastKeyframeRequestUs{0};
+std::atomic<uint64_t> gKeyframeRequestMinIntervalUs{kKeyframeRequestMinIntervalUsDefault};
+std::atomic<uint64_t> gKeyframeRequestTokenRefillUs{kKeyframeRequestTokenRefillUsDefault};
+std::atomic<uint32_t> gKeyframeRequestTokenCapacity{kKeyframeRequestTokenCapacityDefault};
+std::atomic<uint64_t> gKeyframeRequestThrottledCount{0};
+std::mutex gKeyframeLimiterMu;
+double gKeyframeLimiterTokens = static_cast<double>(kKeyframeRequestTokenCapacityDefault);
+uint64_t gKeyframeLimiterLastRefillUs = 0;
 std::atomic<uint64_t> gLastPresentedVersion{0};
 std::atomic<uint64_t> gPaintCoalescedCount{0};
 std::atomic<uint64_t> gOverwriteBeforePresentCount{0};
@@ -290,16 +308,39 @@ void log_client_line(const std::string& line) {
 void request_keyframe(uint16_t reason) {
   if (reason == 0) reason = 1;
   const uint64_t nowUs = qpc_now_us();
-  const uint64_t minIntervalUs = kKeyframeRequestMinIntervalUs;
-  uint64_t lastUs = gLastKeyframeRequestUs.load(std::memory_order_relaxed);
-  while (true) {
+  const uint64_t minIntervalUs = gKeyframeRequestMinIntervalUs.load(std::memory_order_relaxed);
+  const uint64_t refillUs = gKeyframeRequestTokenRefillUs.load(std::memory_order_relaxed);
+  const uint32_t capacity = std::max<uint32_t>(1, gKeyframeRequestTokenCapacity.load(std::memory_order_relaxed));
+  {
+    std::lock_guard<std::mutex> lk(gKeyframeLimiterMu);
+    if (gKeyframeLimiterLastRefillUs == 0) gKeyframeLimiterLastRefillUs = nowUs;
+    if (nowUs > gKeyframeLimiterLastRefillUs && refillUs > 0) {
+      const double refill =
+          static_cast<double>(nowUs - gKeyframeLimiterLastRefillUs) / static_cast<double>(refillUs);
+      if (refill > 0.0) {
+        gKeyframeLimiterTokens = std::min<double>(static_cast<double>(capacity), gKeyframeLimiterTokens + refill);
+        gKeyframeLimiterLastRefillUs = nowUs;
+      }
+    }
+    const uint64_t lastUs = gLastKeyframeRequestUs.load(std::memory_order_relaxed);
     if (lastUs > 0 && nowUs < lastUs + minIntervalUs) {
+      const uint64_t throttled = gKeyframeRequestThrottledCount.fetch_add(1, std::memory_order_relaxed) + 1;
+      if ((throttled % 120) == 1) {
+        std::cout << "[native-video-client][control] keyframe-request-throttled total=" << throttled
+                  << " reason=" << reason << " cause=min_interval\n";
+      }
       return;
     }
-    if (gLastKeyframeRequestUs.compare_exchange_weak(
-            lastUs, nowUs, std::memory_order_relaxed, std::memory_order_relaxed)) {
-      break;
+    if (gKeyframeLimiterTokens < 1.0) {
+      const uint64_t throttled = gKeyframeRequestThrottledCount.fetch_add(1, std::memory_order_relaxed) + 1;
+      if ((throttled % 120) == 1) {
+        std::cout << "[native-video-client][control] keyframe-request-throttled total=" << throttled
+                  << " reason=" << reason << " cause=token_bucket\n";
+      }
+      return;
     }
+    gKeyframeLimiterTokens -= 1.0;
+    gLastKeyframeRequestUs.store(nowUs, std::memory_order_relaxed);
   }
   gKeyframeRequestReason = reason;
   gKeyframeRequestPending = true;
@@ -951,6 +992,23 @@ int main(int argc, char** argv) {
   const Args args = parse_args(argc, argv);
   gTraceEvery = args.traceEvery;
   gTraceMax = args.traceMax;
+  gKeyframeRequestMinIntervalUs.store(
+      env_u32_clamped("REMOTE60_NATIVE_KEYFRAME_REQ_MIN_INTERVAL_US",
+                      static_cast<uint32_t>(kKeyframeRequestMinIntervalUsDefault), 10000, 1000000),
+      std::memory_order_relaxed);
+  gKeyframeRequestTokenRefillUs.store(
+      env_u32_clamped("REMOTE60_NATIVE_KEYFRAME_REQ_TOKEN_REFILL_US",
+                      static_cast<uint32_t>(kKeyframeRequestTokenRefillUsDefault), 10000, 2000000),
+      std::memory_order_relaxed);
+  gKeyframeRequestTokenCapacity.store(
+      env_u32_clamped("REMOTE60_NATIVE_KEYFRAME_REQ_TOKEN_CAPACITY",
+                      kKeyframeRequestTokenCapacityDefault, 1, 16),
+      std::memory_order_relaxed);
+  {
+    std::lock_guard<std::mutex> lk(gKeyframeLimiterMu);
+    gKeyframeLimiterTokens = static_cast<double>(gKeyframeRequestTokenCapacity.load(std::memory_order_relaxed));
+    gKeyframeLimiterLastRefillUs = 0;
+  }
 
   const bool useRaw = (args.codec == "raw");
   const bool useH264 = (args.codec == "h264");
@@ -1104,6 +1162,11 @@ int main(int argc, char** argv) {
             << " transport=" << video_transport_name(transport)
             << " codec=" << args.codec
             << " seconds=" << args.seconds << "\n";
+  std::cout << "[native-video-client] keyframe-request-limiter minIntervalUs="
+            << gKeyframeRequestMinIntervalUs.load(std::memory_order_relaxed)
+            << " tokenRefillUs=" << gKeyframeRequestTokenRefillUs.load(std::memory_order_relaxed)
+            << " tokenCapacity=" << gKeyframeRequestTokenCapacity.load(std::memory_order_relaxed)
+            << "\n";
   if (kAllInputBlocked) {
     std::cout << "[native-video-client] all input blocked (view-only)\n";
   }

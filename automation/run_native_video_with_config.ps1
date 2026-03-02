@@ -77,6 +77,13 @@ $guardStalePreEncode = Get-BoolValue $cfg "guardStalePreEncode" $false
 $capturePoolBuffers = Get-IntValue $cfg "capturePoolBuffers" 0
 $guardStaleEncoded = Get-BoolValue $cfg "guardStaleEncoded" $false
 $abrDisable = Get-BoolValue $cfg "abrDisable" $false
+$frameGatingDisable = Get-BoolValue $cfg "frameGatingDisable" $false
+$staticSceneFps = Get-IntValue $cfg "staticSceneFps" 0
+$frameGatingStaticThresholdPm = Get-IntValue $cfg "frameGatingStaticThresholdPm" 0
+$frameGatingMotionThresholdPm = Get-IntValue $cfg "frameGatingMotionThresholdPm" 0
+$keyframeReqMinIntervalUs = Get-IntValue $cfg "keyframeReqMinIntervalUs" 0
+$keyframeReqTokenRefillUs = Get-IntValue $cfg "keyframeReqTokenRefillUs" 0
+$keyframeReqTokenCapacity = Get-IntValue $cfg "keyframeReqTokenCapacity" 0
 
 # Ensure old shell env doesn't leak into this run.
 @(
@@ -87,7 +94,17 @@ $abrDisable = Get-BoolValue $cfg "abrDisable" $false
   "REMOTE60_NATIVE_GUARD_STALE_PREENCODE",
   "REMOTE60_NATIVE_CAPTURE_POOL_BUFFERS",
   "REMOTE60_NATIVE_GUARD_STALE_ENCODED",
-  "REMOTE60_NATIVE_ABR_DISABLE"
+  "REMOTE60_NATIVE_ABR_DISABLE",
+  "REMOTE60_NATIVE_FRAME_GATING_DISABLE",
+  "REMOTE60_NATIVE_STATIC_SCENE_FPS",
+  "REMOTE60_NATIVE_FRAME_GATING_STATIC_THRESHOLD_PM",
+  "REMOTE60_NATIVE_FRAME_GATING_MOTION_THRESHOLD_PM",
+  "REMOTE60_NATIVE_KEYREQ_MIN_INTERVAL_US",
+  "REMOTE60_NATIVE_KEYREQ_TOKEN_REFILL_US",
+  "REMOTE60_NATIVE_KEYREQ_TOKEN_CAPACITY",
+  "REMOTE60_NATIVE_KEYFRAME_REQ_MIN_INTERVAL_US",
+  "REMOTE60_NATIVE_KEYFRAME_REQ_TOKEN_REFILL_US",
+  "REMOTE60_NATIVE_KEYFRAME_REQ_TOKEN_CAPACITY"
 ) | ForEach-Object {
   Remove-Item ("Env:" + $_) -ErrorAction SilentlyContinue
 }
@@ -115,6 +132,30 @@ if ($guardStaleEncoded) {
 }
 if ($abrDisable) {
   $env:REMOTE60_NATIVE_ABR_DISABLE = "1"
+}
+if ($frameGatingDisable) {
+  $env:REMOTE60_NATIVE_FRAME_GATING_DISABLE = "1"
+}
+if ($staticSceneFps -gt 0) {
+  $env:REMOTE60_NATIVE_STATIC_SCENE_FPS = "$staticSceneFps"
+}
+if ($frameGatingStaticThresholdPm -gt 0) {
+  $env:REMOTE60_NATIVE_FRAME_GATING_STATIC_THRESHOLD_PM = "$frameGatingStaticThresholdPm"
+}
+if ($frameGatingMotionThresholdPm -gt 0) {
+  $env:REMOTE60_NATIVE_FRAME_GATING_MOTION_THRESHOLD_PM = "$frameGatingMotionThresholdPm"
+}
+if ($keyframeReqMinIntervalUs -gt 0) {
+  $env:REMOTE60_NATIVE_KEYREQ_MIN_INTERVAL_US = "$keyframeReqMinIntervalUs"
+  $env:REMOTE60_NATIVE_KEYFRAME_REQ_MIN_INTERVAL_US = "$keyframeReqMinIntervalUs"
+}
+if ($keyframeReqTokenRefillUs -gt 0) {
+  $env:REMOTE60_NATIVE_KEYREQ_TOKEN_REFILL_US = "$keyframeReqTokenRefillUs"
+  $env:REMOTE60_NATIVE_KEYFRAME_REQ_TOKEN_REFILL_US = "$keyframeReqTokenRefillUs"
+}
+if ($keyframeReqTokenCapacity -gt 0) {
+  $env:REMOTE60_NATIVE_KEYREQ_TOKEN_CAPACITY = "$keyframeReqTokenCapacity"
+  $env:REMOTE60_NATIVE_KEYFRAME_REQ_TOKEN_CAPACITY = "$keyframeReqTokenCapacity"
 }
 
 if ($Role -eq "host") {

@@ -2155,3 +2155,42 @@ Resume condition
 - If freeze reappears, resume using existing watchdog checkpoints/log keys:
   - `captureRestarts=`
   - `capture session restarted count=`
+
+### 62) 2026-03-03 M5 phase-1 implemented (frame gating + static-scene downshift + keyframe throttling)
+Goal
+- Start M5 to reduce static-scene bandwidth/latency pressure and prevent keyframe request bursts.
+
+Changes
+1. Host frame gating + static downshift
+- `apps/native_poc/src/native_video_host_main.cpp`
+- Added sampled BGRA change detection and static/motion mode transitions.
+- Added gating skip logic with static-scene send interval downshift.
+- Added metrics in host periodic logs:
+  - `frameGatingMode`, `frameGatingSkips`, `frameGatingStaticSkips`, `frameGatingChangePm`, `frameGatingChangeAvgPm`.
+
+2. Host keyframe request limiter
+- Added token-bucket + min-interval filter in control request handling.
+- Added dropped counter and throttle log (`keyframe-request-throttled`).
+
+3. Client keyframe request limiter
+- `apps/native_poc/src/native_video_client_main.cpp`
+- `request_keyframe()` now uses token-bucket + min-interval guard.
+- Startup log includes limiter parameters.
+
+4. Automation/profile config wiring
+- `automation/run_native_video_with_config.ps1`
+  - added JSON->env mapping for frame-gating and keyframe-limiter parameters.
+- updated profiles:
+  - `automation/native_video_profile_1080p_lowlat.json`
+  - `automation/native_video_profile_1080p_external_template.json`
+
+Validation
+- Build: success (`cmake --build --preset debug-vcpkg --parallel`)
+- Verify log: `automation/logs/verify-native-video-20260303-001616`
+- Result: `HOST_RC=0`, `CLIENT_RC=0`
+- Observed host log:
+  - frame-gating entered static mode and exited to motion as expected.
+  - MBPS reduced significantly during static periods.
+
+Deployment sync
+- Updated `D:\remote\build\bin` host/client exes and `D:\remote\build\automation` script/profile files.

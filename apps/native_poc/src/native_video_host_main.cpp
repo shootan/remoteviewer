@@ -82,6 +82,15 @@ constexpr uint64_t kCaptureStallKeepaliveStartUs = 700000;  // 0.7s
 constexpr uint64_t kCaptureStallKeepaliveIntervalUs = 1000000;  // 1s
 constexpr uint64_t kCaptureCallbackStallRestartUs = 1200000;  // 1.2s
 constexpr uint64_t kCaptureCallbackRestartCooldownUs = 3000000;  // 3s
+constexpr uint32_t kFrameGatingStaticFpsDefault = 8;
+constexpr uint32_t kFrameGatingStaticThresholdPermilleDefault = 6;
+constexpr uint32_t kFrameGatingMotionThresholdPermilleDefault = 14;
+constexpr uint32_t kFrameGatingEnterFramesDefault = 10;
+constexpr uint32_t kFrameGatingExitFramesDefault = 2;
+constexpr uint32_t kFrameGatingSampleTargetDefault = 2048;
+constexpr uint32_t kKeyReqMinIntervalUsDefault = 120000;  // 120ms
+constexpr uint32_t kKeyReqTokenRefillUsDefault = 300000;  // 300ms / token
+constexpr uint32_t kKeyReqTokenCapacityDefault = 3;
 
 struct HostBottleneckStage {
   uint32_t code = 0;
@@ -301,6 +310,15 @@ bool env_truthy(const char* key) {
   return s == "1" || s == "true" || s == "TRUE" || s == "on" || s == "ON";
 }
 
+uint32_t env_u32_clamped(const char* key, uint32_t fallback, uint32_t minValue, uint32_t maxValue) {
+  if (!key) return fallback;
+  const char* raw = std::getenv(key);
+  if (!raw) return fallback;
+  uint32_t parsed = 0;
+  if (!parse_u32(raw, &parsed)) return fallback;
+  return std::clamp<uint32_t>(parsed, minValue, maxValue);
+}
+
 Args parse_args(int argc, char** argv) {
   Args a;
   for (int i = 1; i < argc; ++i) {
@@ -411,6 +429,28 @@ void choose_abr_720_size(uint32_t captureW, uint32_t captureH, uint32_t* outW, u
   targetH = clamp_even_dim(targetH, 2, captureH);
   *outW = targetW;
   *outH = targetH;
+}
+
+uint32_t estimate_bgra_change_permille(const uint8_t* a, const uint8_t* b, size_t sizeBytes,
+                                       uint32_t sampleTarget) {
+  if (!a || !b || sizeBytes < 4) return 1000;
+  const size_t pixels = sizeBytes / 4;
+  if (pixels == 0) return 1000;
+  const size_t stridePixels = std::max<size_t>(1, pixels / std::max<uint32_t>(1, sampleTarget));
+  uint64_t diffSum = 0;
+  uint64_t sampleCount = 0;
+  for (size_t i = 0; i < pixels; i += stridePixels) {
+    const size_t idx = i * 4;
+    const int db = std::abs(static_cast<int>(a[idx + 0]) - static_cast<int>(b[idx + 0]));
+    const int dg = std::abs(static_cast<int>(a[idx + 1]) - static_cast<int>(b[idx + 1]));
+    const int dr = std::abs(static_cast<int>(a[idx + 2]) - static_cast<int>(b[idx + 2]));
+    diffSum += static_cast<uint64_t>((db + dg + dr) / 3);
+    ++sampleCount;
+  }
+  if (sampleCount == 0) return 1000;
+  const uint64_t avgDiff = diffSum / sampleCount;  // 0..255
+  const uint64_t permille = (avgDiff * 1000ULL) / 255ULL;
+  return static_cast<uint32_t>(std::min<uint64_t>(permille, 1000ULL));
 }
 
 bool resize_bgra_bilinear(const uint8_t* src, uint32_t srcW, uint32_t srcH, uint32_t srcStride,
@@ -783,6 +823,28 @@ int main(int argc, char** argv) {
   const bool guardStalePreEncode = env_truthy("REMOTE60_NATIVE_GUARD_STALE_PREENCODE");
   const bool abrEnabled = useH264 && !env_truthy("REMOTE60_NATIVE_ABR_DISABLE");
   const bool abrQualityFirst = env_truthy("REMOTE60_NATIVE_ADAPTIVE_QUALITY_FIRST");
+  const bool frameGatingEnabled = useH264 && !env_truthy("REMOTE60_NATIVE_FRAME_GATING_DISABLE");
+  const uint32_t frameGatingStaticFps = env_u32_clamped(
+      "REMOTE60_NATIVE_STATIC_SCENE_FPS", kFrameGatingStaticFpsDefault, 1, 30);
+  const uint32_t frameGatingStaticThresholdPermille = env_u32_clamped(
+      "REMOTE60_NATIVE_FRAME_GATING_STATIC_THRESHOLD_PM",
+      kFrameGatingStaticThresholdPermilleDefault, 1, 400);
+  const uint32_t frameGatingMotionThresholdPermille = std::max<uint32_t>(
+      frameGatingStaticThresholdPermille + 1,
+      env_u32_clamped("REMOTE60_NATIVE_FRAME_GATING_MOTION_THRESHOLD_PM",
+                      kFrameGatingMotionThresholdPermilleDefault, 2, 500));
+  const uint32_t frameGatingEnterFrames = env_u32_clamped(
+      "REMOTE60_NATIVE_FRAME_GATING_ENTER_FRAMES", kFrameGatingEnterFramesDefault, 1, 120);
+  const uint32_t frameGatingExitFrames = env_u32_clamped(
+      "REMOTE60_NATIVE_FRAME_GATING_EXIT_FRAMES", kFrameGatingExitFramesDefault, 1, 30);
+  const uint32_t frameGatingSampleTarget = env_u32_clamped(
+      "REMOTE60_NATIVE_FRAME_GATING_SAMPLE_TARGET", kFrameGatingSampleTargetDefault, 128, 16384);
+  const uint32_t keyReqMinIntervalUs = env_u32_clamped(
+      "REMOTE60_NATIVE_KEYREQ_MIN_INTERVAL_US", kKeyReqMinIntervalUsDefault, 10000, 1000000);
+  const uint32_t keyReqTokenRefillUs = env_u32_clamped(
+      "REMOTE60_NATIVE_KEYREQ_TOKEN_REFILL_US", kKeyReqTokenRefillUsDefault, 10000, 2000000);
+  const uint32_t keyReqTokenCapacity = env_u32_clamped(
+      "REMOTE60_NATIVE_KEYREQ_TOKEN_CAPACITY", kKeyReqTokenCapacityDefault, 1, 16);
   const bool gpuScalerRequested = useH264 && !env_truthy("REMOTE60_NATIVE_DISABLE_GPU_SCALER");
   int captureFramePoolBuffers = kCaptureFramePoolBuffersDefault;
   if (const char* poolEnv = std::getenv("REMOTE60_NATIVE_CAPTURE_POOL_BUFFERS")) {
@@ -834,6 +896,12 @@ int main(int argc, char** argv) {
               << " capturePoolBuffers=" << captureFramePoolBuffers
               << " abr=" << (abrEnabled ? "on" : "off")
               << " abrMode=" << (abrQualityFirst ? "quality-first" : "default")
+              << " frameGating=" << (frameGatingEnabled ? "on" : "off")
+              << " staticSceneFps=" << frameGatingStaticFps
+              << " gatingStaticPm=" << frameGatingStaticThresholdPermille
+              << " gatingMotionPm=" << frameGatingMotionThresholdPermille
+              << " keyReqMinUs=" << keyReqMinIntervalUs
+              << " keyReqBucketCap=" << keyReqTokenCapacity
               << "\n";
   }
   if (kAllInputBlocked) {
@@ -950,6 +1018,10 @@ int main(int argc, char** argv) {
   std::atomic<bool> clientRequestedKeyFrame{false};
   std::atomic<uint16_t> clientKeyFrameReason{0};
   std::atomic<uint64_t> clientKeyFrameRequestCount{0};
+  std::atomic<uint64_t> clientKeyFrameRequestDropped{0};
+  double keyReqTokens = static_cast<double>(keyReqTokenCapacity);
+  uint64_t keyReqLastRefillUs = 0;
+  uint64_t keyReqNextAllowedUs = 0;
   SOCKET controlListenSock = INVALID_SOCKET;
   SOCKET controlClientSock = INVALID_SOCKET;
   std::thread controlThread;
@@ -1056,13 +1128,37 @@ int main(int argc, char** argv) {
               ControlRequestKeyFrameMessage req{};
               req.header = header;
               if (!recv_all(controlClientSock, &req.seq, sizeof(req) - sizeof(MessageHeader))) break;
-              clientRequestedKeyFrame = true;
-              clientKeyFrameReason = req.reason;
-              const uint64_t reqCount = clientKeyFrameRequestCount.fetch_add(1) + 1;
-              std::cout << "[native-video-host][control] keyframe-request seq=" << req.seq
-                        << " reason=" << req.reason
-                        << " total=" << reqCount
-                        << "\n";
+              const uint64_t nowUs = qpc_now_us();
+              if (keyReqLastRefillUs == 0) keyReqLastRefillUs = nowUs;
+              if (nowUs > keyReqLastRefillUs) {
+                const double refill =
+                    static_cast<double>(nowUs - keyReqLastRefillUs) / static_cast<double>(keyReqTokenRefillUs);
+                if (refill > 0.0) {
+                  keyReqTokens = std::min<double>(static_cast<double>(keyReqTokenCapacity), keyReqTokens + refill);
+                  keyReqLastRefillUs = nowUs;
+                }
+              }
+              const bool minIntervalOk = (keyReqNextAllowedUs == 0 || nowUs >= keyReqNextAllowedUs);
+              if (keyReqTokens >= 1.0 && minIntervalOk) {
+                keyReqTokens -= 1.0;
+                keyReqNextAllowedUs = nowUs + keyReqMinIntervalUs;
+                clientRequestedKeyFrame = true;
+                clientKeyFrameReason = req.reason;
+                const uint64_t reqCount = clientKeyFrameRequestCount.fetch_add(1) + 1;
+                std::cout << "[native-video-host][control] keyframe-request seq=" << req.seq
+                          << " reason=" << req.reason
+                          << " total=" << reqCount
+                          << "\n";
+              } else {
+                const uint64_t dropCount = clientKeyFrameRequestDropped.fetch_add(1) + 1;
+                if ((dropCount % 60) == 1) {
+                  std::cout << "[native-video-host][control] keyframe-request-throttled seq=" << req.seq
+                            << " reason=" << req.reason
+                            << " dropped=" << dropCount
+                            << " tokens=" << keyReqTokens
+                            << "\n";
+                }
+              }
               continue;
             }
 
@@ -1433,6 +1529,21 @@ int main(int argc, char** argv) {
   uint32_t keepaliveSeq = 0;
   bool forceKeyNext = true;
   uint64_t lastSendStartUs = 0;
+  std::shared_ptr<std::vector<uint8_t>> frameGatingRefPayload;
+  uint32_t frameGatingRefW = 0;
+  uint32_t frameGatingRefH = 0;
+  uint32_t frameGatingRefStride = 0;
+  uint32_t frameGatingStaticStreak = 0;
+  uint32_t frameGatingMotionStreak = 0;
+  bool frameGatingStaticMode = false;
+  uint64_t frameGatingLastSentUs = 0;
+  uint64_t frameGatingSkipCount = 0;
+  uint64_t frameGatingStaticSkipCount = 0;
+  uint64_t frameGatingChangePermilleLast = 1000;
+  uint64_t frameGatingChangePermilleSum = 0;
+  uint64_t frameGatingChangePermilleCount = 0;
+  const uint64_t frameGatingStaticIntervalUs =
+      std::max<uint64_t>(frameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGatingStaticFps));
 
   while (!stop.load()) {
     const uint64_t nowUs = qpc_now_us();
@@ -1599,6 +1710,56 @@ int main(int argc, char** argv) {
     const uint64_t queueDepthAtPop = (version > lastPopVersionAtRead) ? (version - lastPopVersionAtRead) : 0;
     update_u64_max(queueDepthMax, queueDepthAtPop);
     lastPopFrameVersion.store(version, std::memory_order_release);
+    if (frameGatingEnabled && useH264 && !syntheticKeepaliveFrame && payload && !payload->empty()) {
+      if (frameGatingRefPayload && !frameGatingRefPayload->empty() &&
+          frameGatingRefW == w && frameGatingRefH == h && frameGatingRefStride == stride) {
+        frameGatingChangePermilleLast = estimate_bgra_change_permille(
+            payload->data(), frameGatingRefPayload->data(), payload->size(), frameGatingSampleTarget);
+        frameGatingChangePermilleSum += frameGatingChangePermilleLast;
+        ++frameGatingChangePermilleCount;
+
+        if (frameGatingChangePermilleLast <= frameGatingStaticThresholdPermille) {
+          frameGatingStaticStreak = std::min<uint32_t>(frameGatingStaticStreak + 1, 60000);
+          frameGatingMotionStreak = 0;
+        } else if (frameGatingChangePermilleLast >= frameGatingMotionThresholdPermille) {
+          frameGatingMotionStreak = std::min<uint32_t>(frameGatingMotionStreak + 1, 60000);
+          frameGatingStaticStreak = 0;
+        } else {
+          if (frameGatingStaticStreak > 0) --frameGatingStaticStreak;
+          if (frameGatingMotionStreak > 0) --frameGatingMotionStreak;
+        }
+      } else {
+        frameGatingStaticStreak = 0;
+        frameGatingMotionStreak = 0;
+        frameGatingChangePermilleLast = 1000;
+      }
+
+      const bool prevStaticMode = frameGatingStaticMode;
+      if (!frameGatingStaticMode && frameGatingStaticStreak >= frameGatingEnterFrames) {
+        frameGatingStaticMode = true;
+      } else if (frameGatingStaticMode && frameGatingMotionStreak >= frameGatingExitFrames) {
+        frameGatingStaticMode = false;
+      }
+      if (prevStaticMode != frameGatingStaticMode) {
+        std::cout << "[native-video-host] frame-gating mode="
+                  << (frameGatingStaticMode ? "static" : "motion")
+                  << " changePm=" << frameGatingChangePermilleLast
+                  << " staticStreak=" << frameGatingStaticStreak
+                  << " motionStreak=" << frameGatingMotionStreak
+                  << "\n";
+      }
+
+      const bool keyReqPending = clientRequestedKeyFrame.load(std::memory_order_acquire);
+      const uint64_t targetIntervalUs = frameGatingStaticMode ? frameGatingStaticIntervalUs : frameIntervalUs;
+      if (!keyReqPending &&
+          frameGatingLastSentUs > 0 &&
+          queuePopUs < (frameGatingLastSentUs + targetIntervalUs)) {
+        ++frameGatingSkipCount;
+        if (frameGatingStaticMode) ++frameGatingStaticSkipCount;
+        lastVersionSent = version;
+        continue;
+      }
+    }
     if (useH264 && guardStalePreEncode && frameAgeAtSelectUs > kMaxPreEncodeFrameAgeUs) {
       ++stalePreEncodeDropCount;
       continue;
@@ -1648,6 +1809,13 @@ int main(int argc, char** argv) {
       const uint64_t sendCallCount = sendPathStats.headerCallCount + sendPathStats.payloadCallCount;
       if (sentOk) {
         lastSendStartUs = sendStartUs;
+        if (frameGatingEnabled && useH264 && !syntheticKeepaliveFrame && payload && !payload->empty()) {
+          frameGatingLastSentUs = sendStartUs;
+          frameGatingRefPayload = payload;
+          frameGatingRefW = w;
+          frameGatingRefH = h;
+          frameGatingRefStride = stride;
+        }
       }
 
       if (!sentOk) {
@@ -1972,6 +2140,13 @@ int main(int argc, char** argv) {
         const uint64_t sendCallCount = sendPathStats.headerCallCount + sendPathStats.payloadCallCount;
         if (sentOk) {
           lastSendStartUs = sendStartUs;
+          if (frameGatingEnabled && !syntheticKeepaliveFrame && payload && !payload->empty()) {
+            frameGatingLastSentUs = sendStartUs;
+            frameGatingRefPayload = payload;
+            frameGatingRefW = w;
+            frameGatingRefH = h;
+            frameGatingRefStride = stride;
+          }
           if (syntheticKeepaliveFrame) {
             lastSyntheticKeepaliveUs = sendStartUs;
           }
@@ -2210,14 +2385,22 @@ int main(int argc, char** argv) {
                   << " queueWaitNoWorkCount=" << queueWaitNoWorkCount
                   << " syntheticKeepaliveCount=" << syntheticKeepaliveCount
                   << " captureRestarts=" << captureRestartCount
+                  << " keyReqDropTotal=" << clientKeyFrameRequestDropped.load()
                   << " callbackFrames=" << callbackFrames.load()
                   << " skippedByOverwrite=" << skippedByOverwrite
+                  << " frameGatingMode=" << (frameGatingStaticMode ? "static" : "motion")
+                  << " frameGatingSkips=" << frameGatingSkipCount
+                  << " frameGatingStaticSkips=" << frameGatingStaticSkipCount
                   << " mbps=" << mbps
                   << " size=" << w << "x" << h
                   << "\n";
       } else {
         const uint64_t capAgeAvgUs = (encodedFrames > 0) ? (captureAgeSumUs / encodedFrames) : 0;
         const uint64_t cb2eAvgUs = (encodedFrames > 0) ? (callbackToEncodeStartSumUs / encodedFrames) : 0;
+        const uint64_t frameGatingChangeAvgPm =
+            (frameGatingChangePermilleCount > 0)
+                ? (frameGatingChangePermilleSum / frameGatingChangePermilleCount)
+                : frameGatingChangePermilleLast;
         const double rawEquivMbps = (rawEquivalentBytes * 8.0) / (1000.0 * 1000.0);
         const uint64_t encRatioX100 =
             (sentBytes > 0) ? ((rawEquivalentBytes * 100ULL) / sentBytes) : 0;
@@ -2236,6 +2419,7 @@ int main(int argc, char** argv) {
                   << " staleEncodedDrops=" << staleEncodedDropCount
                   << " encoderResets=" << encoderResetCount
                   << " keyReqTotal=" << clientKeyFrameRequestCount.load()
+                  << " keyReqDropTotal=" << clientKeyFrameRequestDropped.load()
                   << " inputEvents=" << inputEvents.load()
                   << " capAgeAvgUs=" << capAgeAvgUs
                   << " capAgeMaxUs=" << captureAgeMaxUs
@@ -2256,6 +2440,11 @@ int main(int argc, char** argv) {
                   << " abrModSec=" << abrModeratePressureSeconds
                   << " abrSevSec=" << abrSeverePressureSeconds
                   << " abrGoodSec=" << abrGoodSeconds
+                  << " frameGatingMode=" << (frameGatingStaticMode ? "static" : "motion")
+                  << " frameGatingSkips=" << frameGatingSkipCount
+                  << " frameGatingStaticSkips=" << frameGatingStaticSkipCount
+                  << " frameGatingChangePm=" << frameGatingChangePermilleLast
+                  << " frameGatingChangeAvgPm=" << frameGatingChangeAvgPm
                   << "\n";
 
         if (abrEnabled) {
@@ -2466,6 +2655,10 @@ int main(int argc, char** argv) {
       gpuScaleFail = 0;
       gpuScaleCpuFallback = 0;
       syntheticKeepaliveCount = 0;
+      frameGatingSkipCount = 0;
+      frameGatingStaticSkipCount = 0;
+      frameGatingChangePermilleSum = 0;
+      frameGatingChangePermilleCount = 0;
       statAtUs += 1000000ULL;
     }
   }

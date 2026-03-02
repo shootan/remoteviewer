@@ -22,5 +22,12 @@
   "capturePoolBuffers": 0,
   "guardStaleEncoded": false,
   "abrDisable": true,
+  "frameGatingDisable": false,
+  "staticSceneFps": 10,
+  "frameGatingStaticThresholdPm": 6,
+  "frameGatingMotionThresholdPm": 14,
+  "keyframeReqMinIntervalUs": 150000,
+  "keyframeReqTokenRefillUs": 250000,
+  "keyframeReqTokenCapacity": 3,
   "remoteHost": "127.0.0.1"
 }
