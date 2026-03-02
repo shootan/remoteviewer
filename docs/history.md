@@ -2139,3 +2139,19 @@ Changes
 
 Notes
 - Freeze class appears reduced in local verify; final confirmation requires user-side repro scenario where callback stall used to occur.
+
+### 61) 2026-03-02 Freeze status update (deferred)
+Decision
+- User re-test did not reproduce freeze at this time.
+- Freeze-specific root-cause investigation is deferred.
+
+Execution policy update
+- Move immediate engineering focus to M5:
+  - frame gating
+  - static-scene fps downshift with instant motion recovery
+  - keyframe request storm control
+
+Resume condition
+- If freeze reappears, resume using existing watchdog checkpoints/log keys:
+  - `captureRestarts=`
+  - `capture session restarted count=`
