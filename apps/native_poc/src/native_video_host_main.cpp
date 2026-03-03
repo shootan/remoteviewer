@@ -909,11 +909,12 @@ int main(int argc, char** argv) {
     std::cout << "[native-video-host] all input blocked (view-only)\n";
   }
 
+  SOCKET listenSock = INVALID_SOCKET;
   SOCKET clientSock = INVALID_SOCKET;
   sockaddr_in udpPeer{};
   bool udpPeerReady = false;
   if (transport == VideoTransport::Tcp) {
-    SOCKET listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (listenSock == INVALID_SOCKET) {
       std::cerr << "[native-video-host] listen socket create failed\n";
       return 2;
@@ -937,7 +938,6 @@ int main(int argc, char** argv) {
     sockaddr_in peer{};
     int peerLen = sizeof(peer);
     clientSock = accept(listenSock, reinterpret_cast<sockaddr*>(&peer), &peerLen);
-    closesocket(listenSock);
     if (clientSock == INVALID_SOCKET) {
       std::cerr << "[native-video-host] accept failed\n";
       return 5;
@@ -986,6 +986,8 @@ int main(int argc, char** argv) {
       udpPeerReady = true;
       break;
     }
+    u_long nonBlocking = 1;
+    (void)ioctlsocket(clientSock, FIONBIO, &nonBlocking);
   }
 
   if (transport == VideoTransport::Udp && args.tcpSendBufKb == 0) {
@@ -1047,148 +1049,164 @@ int main(int argc, char** argv) {
       } else {
         std::cout << "[native-video-host] control waiting port=" << args.controlPort << "\n";
         controlThread = std::thread([&]() {
-          sockaddr_in cpeer{};
-          int cpeerLen = sizeof(cpeer);
-          controlClientSock = accept(controlListenSock, reinterpret_cast<sockaddr*>(&cpeer), &cpeerLen);
-          if (controlClientSock == INVALID_SOCKET) return;
-          int ctlNoDelay = 1;
-          setsockopt(controlClientSock, IPPROTO_TCP, TCP_NODELAY,
-                     reinterpret_cast<const char*>(&ctlNoDelay), sizeof(ctlNoDelay));
           while (!stop.load()) {
-            MessageHeader header{};
-            if (!recv_all(controlClientSock, &header, sizeof(header))) break;
-            if (header.magic != remote60::native_poc::kMagic || header.size < sizeof(header)) break;
-            const size_t bodySize = static_cast<size_t>(header.size - sizeof(header));
-            const auto type = static_cast<MessageType>(header.type);
-
-            if (type == MessageType::ControlPing && header.size == sizeof(ControlPingMessage)) {
-              ControlPingMessage ping{};
-              ping.header = header;
-              if (!recv_all(controlClientSock, &ping.seq, sizeof(ping) - sizeof(MessageHeader))) break;
-              ControlPongMessage pong{};
-              pong.header.magic = remote60::native_poc::kMagic;
-              pong.header.type = static_cast<uint16_t>(MessageType::ControlPong);
-              pong.header.size = static_cast<uint16_t>(sizeof(pong));
-              pong.seq = ping.seq;
-              pong.clientSendQpcUs = ping.clientSendQpcUs;
-              pong.hostRecvQpcUs = qpc_now_us();
-              pong.hostSendQpcUs = qpc_now_us();
-              if (!send_all(controlClientSock, &pong, sizeof(pong))) break;
+            sockaddr_in cpeer{};
+            int cpeerLen = sizeof(cpeer);
+            SOCKET acceptedSock = accept(controlListenSock, reinterpret_cast<sockaddr*>(&cpeer), &cpeerLen);
+            if (acceptedSock == INVALID_SOCKET) {
+              if (stop.load()) break;
+              Sleep(50);
               continue;
             }
+            controlClientSock = acceptedSock;
+            int ctlNoDelay = 1;
+            setsockopt(acceptedSock, IPPROTO_TCP, TCP_NODELAY,
+                       reinterpret_cast<const char*>(&ctlNoDelay), sizeof(ctlNoDelay));
+            std::cout << "[native-video-host][control] client connected\n";
+            while (!stop.load()) {
+              MessageHeader header{};
+              if (!recv_all(acceptedSock, &header, sizeof(header))) break;
+              if (header.magic != remote60::native_poc::kMagic || header.size < sizeof(header)) break;
+              const size_t bodySize = static_cast<size_t>(header.size - sizeof(header));
+              const auto type = static_cast<MessageType>(header.type);
 
-            if (type == MessageType::ControlInputEvent && header.size == sizeof(ControlInputEventMessage)) {
-              ControlInputEventMessage input{};
-              input.header = header;
-              if (!recv_all(controlClientSock, &input.seq, sizeof(input) - sizeof(MessageHeader))) break;
-              if (!kAllInputBlocked) {
-                const auto n = inputEvents.fetch_add(1) + 1;
-                if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
-                  std::cout << "[native-video-host][input] seq=" << input.seq
-                            << " kind=" << input.kind
-                            << " x=" << input.x
-                            << " y=" << input.y
-                            << " buttons=" << input.buttons
+              if (type == MessageType::ControlPing && header.size == sizeof(ControlPingMessage)) {
+                ControlPingMessage ping{};
+                ping.header = header;
+                if (!recv_all(acceptedSock, &ping.seq, sizeof(ping) - sizeof(MessageHeader))) break;
+                ControlPongMessage pong{};
+                pong.header.magic = remote60::native_poc::kMagic;
+                pong.header.type = static_cast<uint16_t>(MessageType::ControlPong);
+                pong.header.size = static_cast<uint16_t>(sizeof(pong));
+                pong.seq = ping.seq;
+                pong.clientSendQpcUs = ping.clientSendQpcUs;
+                pong.hostRecvQpcUs = qpc_now_us();
+                pong.hostSendQpcUs = qpc_now_us();
+                if (!send_all(acceptedSock, &pong, sizeof(pong))) break;
+                continue;
+              }
+
+              if (type == MessageType::ControlInputEvent && header.size == sizeof(ControlInputEventMessage)) {
+                ControlInputEventMessage input{};
+                input.header = header;
+                if (!recv_all(acceptedSock, &input.seq, sizeof(input) - sizeof(MessageHeader))) break;
+                if (!kAllInputBlocked) {
+                  const auto n = inputEvents.fetch_add(1) + 1;
+                  if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
+                    std::cout << "[native-video-host][input] seq=" << input.seq
+                              << " kind=" << input.kind
+                              << " x=" << input.x
+                              << " y=" << input.y
+                              << " buttons=" << input.buttons
+                              << " key=" << input.keyCode
+                              << "\n";
+                  }
+                } else if (args.inputLogEvery > 0 && (input.seq % args.inputLogEvery) == 0) {
+                  std::cout << "[native-video-host][input] blocked seq=" << input.seq
                             << " key=" << input.keyCode
+                            << " kind=" << input.kind
                             << "\n";
                 }
-              } else if (args.inputLogEvery > 0 && (input.seq % args.inputLogEvery) == 0) {
-                std::cout << "[native-video-host][input] blocked seq=" << input.seq
-                          << " key=" << input.keyCode
-                          << " kind=" << input.kind
-                          << "\n";
+                ControlInputAckMessage ack{};
+                ack.header.magic = remote60::native_poc::kMagic;
+                ack.header.type = static_cast<uint16_t>(MessageType::ControlInputAck);
+                ack.header.size = static_cast<uint16_t>(sizeof(ack));
+                ack.seq = input.seq;
+                ack.hostRecvQpcUs = qpc_now_us();
+                ack.hostSendQpcUs = qpc_now_us();
+                if (!send_all(acceptedSock, &ack, sizeof(ack))) break;
+                continue;
               }
-              ControlInputAckMessage ack{};
-              ack.header.magic = remote60::native_poc::kMagic;
-              ack.header.type = static_cast<uint16_t>(MessageType::ControlInputAck);
-              ack.header.size = static_cast<uint16_t>(sizeof(ack));
-              ack.seq = input.seq;
-              ack.hostRecvQpcUs = qpc_now_us();
-              ack.hostSendQpcUs = qpc_now_us();
-              if (!send_all(controlClientSock, &ack, sizeof(ack))) break;
-              continue;
-            }
 
-            if (type == MessageType::ControlClientMetrics &&
-                header.size == sizeof(ControlClientMetricsMessage)) {
-              ControlClientMetricsMessage metrics{};
-              metrics.header = header;
-              if (!recv_all(controlClientSock, &metrics.seq, sizeof(metrics) - sizeof(MessageHeader))) break;
-              clientMetricsWidth = metrics.width;
-              clientMetricsHeight = metrics.height;
-              clientMetricsRecvFpsX100 = metrics.recvFpsX100;
-              clientMetricsDecodedFpsX100 = metrics.decodedFpsX100;
-              clientMetricsRecvMbpsX1000 = metrics.recvMbpsX1000;
-              clientMetricsSkippedFrames = metrics.skippedFrames;
-              clientMetricsAvgLatencyUs = metrics.avgLatencyUs;
-              clientMetricsMaxLatencyUs = metrics.maxLatencyUs;
-              clientMetricsAvgDecodeTailUs = metrics.avgDecodeTailUs;
-              clientMetricsMaxDecodeTailUs = metrics.maxDecodeTailUs;
-              clientMetricsUpdatedUs = qpc_now_us();
-              continue;
-            }
+              if (type == MessageType::ControlClientMetrics &&
+                  header.size == sizeof(ControlClientMetricsMessage)) {
+                ControlClientMetricsMessage metrics{};
+                metrics.header = header;
+                if (!recv_all(acceptedSock, &metrics.seq, sizeof(metrics) - sizeof(MessageHeader))) break;
+                clientMetricsWidth = metrics.width;
+                clientMetricsHeight = metrics.height;
+                clientMetricsRecvFpsX100 = metrics.recvFpsX100;
+                clientMetricsDecodedFpsX100 = metrics.decodedFpsX100;
+                clientMetricsRecvMbpsX1000 = metrics.recvMbpsX1000;
+                clientMetricsSkippedFrames = metrics.skippedFrames;
+                clientMetricsAvgLatencyUs = metrics.avgLatencyUs;
+                clientMetricsMaxLatencyUs = metrics.maxLatencyUs;
+                clientMetricsAvgDecodeTailUs = metrics.avgDecodeTailUs;
+                clientMetricsMaxDecodeTailUs = metrics.maxDecodeTailUs;
+                clientMetricsUpdatedUs = qpc_now_us();
+                continue;
+              }
 
-            if (type == MessageType::ControlRequestKeyFrame &&
-                header.size == sizeof(ControlRequestKeyFrameMessage)) {
-              ControlRequestKeyFrameMessage req{};
-              req.header = header;
-              if (!recv_all(controlClientSock, &req.seq, sizeof(req) - sizeof(MessageHeader))) break;
-              const uint64_t nowUs = qpc_now_us();
-              if (keyReqLastRefillUs == 0) keyReqLastRefillUs = nowUs;
-              if (nowUs > keyReqLastRefillUs) {
-                const double refill =
-                    static_cast<double>(nowUs - keyReqLastRefillUs) / static_cast<double>(keyReqTokenRefillUs);
-                if (refill > 0.0) {
-                  keyReqTokens = std::min<double>(static_cast<double>(keyReqTokenCapacity), keyReqTokens + refill);
-                  keyReqLastRefillUs = nowUs;
+              if (type == MessageType::ControlRequestKeyFrame &&
+                  header.size == sizeof(ControlRequestKeyFrameMessage)) {
+                ControlRequestKeyFrameMessage req{};
+                req.header = header;
+                if (!recv_all(acceptedSock, &req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+                const uint64_t nowUs = qpc_now_us();
+                if (keyReqLastRefillUs == 0) keyReqLastRefillUs = nowUs;
+                if (nowUs > keyReqLastRefillUs) {
+                  const double refill =
+                      static_cast<double>(nowUs - keyReqLastRefillUs) / static_cast<double>(keyReqTokenRefillUs);
+                  if (refill > 0.0) {
+                    keyReqTokens = std::min<double>(static_cast<double>(keyReqTokenCapacity), keyReqTokens + refill);
+                    keyReqLastRefillUs = nowUs;
+                  }
                 }
-              }
-              const bool minIntervalOk = (keyReqNextAllowedUs == 0 || nowUs >= keyReqNextAllowedUs);
-              if (keyReqTokens >= 1.0 && minIntervalOk) {
-                keyReqTokens -= 1.0;
-                keyReqNextAllowedUs = nowUs + keyReqMinIntervalUs;
-                clientRequestedKeyFrame = true;
-                clientKeyFrameReason = req.reason;
-                const uint64_t reqCount = clientKeyFrameRequestCount.fetch_add(1) + 1;
-                std::cout << "[native-video-host][control] keyframe-request seq=" << req.seq
-                          << " reason=" << req.reason
-                          << " total=" << reqCount
-                          << "\n";
-              } else {
-                const uint64_t dropCount = clientKeyFrameRequestDropped.fetch_add(1) + 1;
-                if ((dropCount % 60) == 1) {
-                  std::cout << "[native-video-host][control] keyframe-request-throttled seq=" << req.seq
+                const bool minIntervalOk = (keyReqNextAllowedUs == 0 || nowUs >= keyReqNextAllowedUs);
+                if (keyReqTokens >= 1.0 && minIntervalOk) {
+                  keyReqTokens -= 1.0;
+                  keyReqNextAllowedUs = nowUs + keyReqMinIntervalUs;
+                  clientRequestedKeyFrame = true;
+                  clientKeyFrameReason = req.reason;
+                  const uint64_t reqCount = clientKeyFrameRequestCount.fetch_add(1) + 1;
+                  std::cout << "[native-video-host][control] keyframe-request seq=" << req.seq
                             << " reason=" << req.reason
-                            << " dropped=" << dropCount
-                            << " tokens=" << keyReqTokens
+                            << " total=" << reqCount
+                            << "\n";
+                } else {
+                  const uint64_t dropCount = clientKeyFrameRequestDropped.fetch_add(1) + 1;
+                  if ((dropCount % 60) == 1) {
+                    std::cout << "[native-video-host][control] keyframe-request-throttled seq=" << req.seq
+                              << " reason=" << req.reason
+                              << " dropped=" << dropCount
+                              << " tokens=" << keyReqTokens
+                              << "\n";
+                  }
+                }
+                continue;
+              }
+
+              if (type == MessageType::ControlRuntimeEncoderConfig &&
+                  header.size == sizeof(ControlRuntimeEncoderConfigMessage)) {
+                ControlRuntimeEncoderConfigMessage tune{};
+                tune.header = header;
+                if (!recv_all(acceptedSock, &tune.seq, sizeof(tune) - sizeof(MessageHeader))) break;
+                const bool hasBitrate = ((tune.flags & 0x1u) != 0) && tune.bitrate >= 100000;
+                const bool hasKeyint = ((tune.flags & 0x2u) != 0) && tune.keyint >= 1;
+                if (hasBitrate || hasKeyint) {
+                  if (hasBitrate) runtimeTuneBitrate.store(tune.bitrate, std::memory_order_release);
+                  if (hasKeyint) runtimeTuneKeyint.store(tune.keyint, std::memory_order_release);
+                  runtimeTuneSeq.store(tune.seq, std::memory_order_release);
+                  runtimeTunePending.store(true, std::memory_order_release);
+                  std::cout << "[native-video-host][control] runtime-config seq=" << tune.seq
+                            << " bitrate=" << (hasBitrate ? tune.bitrate : 0)
+                            << " keyint=" << (hasKeyint ? tune.keyint : 0)
+                            << " flags=" << tune.flags
                             << "\n";
                 }
+                continue;
               }
-              continue;
-            }
 
-            if (type == MessageType::ControlRuntimeEncoderConfig &&
-                header.size == sizeof(ControlRuntimeEncoderConfigMessage)) {
-              ControlRuntimeEncoderConfigMessage tune{};
-              tune.header = header;
-              if (!recv_all(controlClientSock, &tune.seq, sizeof(tune) - sizeof(MessageHeader))) break;
-              const bool hasBitrate = ((tune.flags & 0x1u) != 0) && tune.bitrate >= 100000;
-              const bool hasKeyint = ((tune.flags & 0x2u) != 0) && tune.keyint >= 1;
-              if (hasBitrate || hasKeyint) {
-                if (hasBitrate) runtimeTuneBitrate.store(tune.bitrate, std::memory_order_release);
-                if (hasKeyint) runtimeTuneKeyint.store(tune.keyint, std::memory_order_release);
-                runtimeTuneSeq.store(tune.seq, std::memory_order_release);
-                runtimeTunePending.store(true, std::memory_order_release);
-                std::cout << "[native-video-host][control] runtime-config seq=" << tune.seq
-                          << " bitrate=" << (hasBitrate ? tune.bitrate : 0)
-                          << " keyint=" << (hasKeyint ? tune.keyint : 0)
-                          << " flags=" << tune.flags
-                          << "\n";
-              }
-              continue;
+              if (bodySize > 0 && !recv_discard(acceptedSock, bodySize)) break;
             }
-
-            if (bodySize > 0 && !recv_discard(controlClientSock, bodySize)) break;
+            if (acceptedSock != INVALID_SOCKET) {
+              shutdown(acceptedSock, SD_BOTH);
+              closesocket(acceptedSock);
+            }
+            if (controlClientSock == acceptedSock) {
+              controlClientSock = INVALID_SOCKET;
+            }
+            std::cout << "[native-video-host][control] client disconnected\n";
           }
         });
       }
@@ -1577,6 +1595,95 @@ int main(int argc, char** argv) {
   uint64_t frameGatingChangePermilleCount = 0;
   const uint64_t frameGatingStaticIntervalUs =
       std::max<uint64_t>(frameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGatingStaticFps));
+  auto pump_udp_hello = [&]() {
+    if (transport != VideoTransport::Udp) return;
+    for (;;) {
+      UdpHelloPacket hello{};
+      sockaddr_in peer{};
+      int peerLen = sizeof(peer);
+      const int n = recvfrom(clientSock, reinterpret_cast<char*>(&hello), sizeof(hello), 0,
+                             reinterpret_cast<sockaddr*>(&peer), &peerLen);
+      if (n <= 0) {
+        const int err = WSAGetLastError();
+        if (err == WSAEWOULDBLOCK || err == WSAETIMEDOUT) break;
+        break;
+      }
+      if (n < static_cast<int>(sizeof(UdpHelloPacket)) ||
+          hello.magic != remote60::native_poc::kMagic ||
+          hello.kind != static_cast<uint16_t>(UdpPacketKind::Hello)) {
+        continue;
+      }
+      UdpHelloPacket ack{};
+      ack.kind = static_cast<uint16_t>(UdpPacketKind::HelloAck);
+      (void)sendto(clientSock, reinterpret_cast<const char*>(&ack), sizeof(ack), 0,
+                   reinterpret_cast<const sockaddr*>(&peer), peerLen);
+      const bool peerChanged =
+          (!udpPeerReady ||
+           (std::memcmp(&udpPeer, &peer, sizeof(sockaddr_in)) != 0));
+      udpPeer = peer;
+      udpPeerReady = true;
+      if (peerChanged) {
+        forceKeyNext = true;
+        std::cout << "[native-video-host] udp peer updated; forcing keyframe\n";
+      }
+    }
+  };
+  auto reconnect_tcp_data_session = [&](const char* reason) -> bool {
+    if (transport != VideoTransport::Tcp) return false;
+    if (args.seconds > 0) return false;
+    if (listenSock == INVALID_SOCKET) return false;
+    if (clientSock != INVALID_SOCKET) {
+      shutdown(clientSock, SD_BOTH);
+      closesocket(clientSock);
+      clientSock = INVALID_SOCKET;
+    }
+    std::cout << "[native-video-host] data disconnected reason="
+              << (reason ? reason : "unknown")
+              << " waiting reconnect\n";
+    while (!stop.load()) {
+      sockaddr_in peer{};
+      int peerLen = sizeof(peer);
+      SOCKET accepted = accept(listenSock, reinterpret_cast<sockaddr*>(&peer), &peerLen);
+      if (accepted == INVALID_SOCKET) {
+        if (stop.load()) return false;
+        Sleep(50);
+        continue;
+      }
+      clientSock = accepted;
+      int noDelay = 1;
+      setsockopt(clientSock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
+      if (args.tcpSendBufKb > 0) {
+        const int sendBuf = static_cast<int>(args.tcpSendBufKb * 1024u);
+        setsockopt(clientSock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sendBuf), sizeof(sendBuf));
+      }
+      int effectiveSendBuf = 0;
+      int effectiveSendBufLen = sizeof(effectiveSendBuf);
+      (void)getsockopt(clientSock, SOL_SOCKET, SO_SNDBUF,
+                       reinterpret_cast<char*>(&effectiveSendBuf), &effectiveSendBufLen);
+      std::cout << "[native-video-host] client reconnected transport=tcp sndbuf="
+                << effectiveSendBuf << " bytes\n";
+      clientMetricsUpdatedUs = 0;
+      clientRequestedKeyFrame = false;
+      clientKeyFrameReason = 0;
+      runtimeTunePending = false;
+      runtimeTuneBitrate = 0;
+      runtimeTuneKeyint = 0;
+      runtimeTuneSeq = 0;
+      keyReqTokens = static_cast<double>(keyReqTokenCapacity);
+      keyReqLastRefillUs = 0;
+      keyReqNextAllowedUs = 0;
+      forceKeyNext = true;
+      encodedSeq = 0;
+      lastSendStartUs = 0;
+      frameGatingLastSentUs = 0;
+      {
+        std::lock_guard<std::mutex> lk(frame.mu);
+        lastVersionSent = frame.version;
+      }
+      return true;
+    }
+    return false;
+  };
 
   while (!stop.load()) {
     const uint64_t nowUs = qpc_now_us();
@@ -1584,6 +1691,7 @@ int main(int argc, char** argv) {
     if (args.seconds > 0 && nowUs >= startUs + static_cast<uint64_t>(args.seconds) * 1000000ULL) {
       break;
     }
+    pump_udp_hello();
     if (useH264 && runtimeTunePending.exchange(false, std::memory_order_acq_rel)) {
       const uint32_t reqSeq = runtimeTuneSeq.load(std::memory_order_acquire);
       uint32_t targetBitrate = runtimeTuneBitrate.load(std::memory_order_acquire);
@@ -1897,6 +2005,9 @@ int main(int argc, char** argv) {
       }
 
       if (!sentOk) {
+        if (reconnect_tcp_data_session("raw_send_fail")) {
+          continue;
+        }
         std::cout << "[native-video-host] client disconnected\n";
         break;
       }
@@ -2096,6 +2207,7 @@ int main(int argc, char** argv) {
       callbackToEncodeStartMaxUs = std::max(callbackToEncodeStartMaxUs, callbackToEncodeStartUs);
 
       bool encoderResetTriggered = false;
+      bool sessionReconnectTriggered = false;
       bool countedRawForInput = false;
         for (const auto& au : units) {
           if (au.bytes.empty()) continue;
@@ -2238,6 +2350,13 @@ int main(int argc, char** argv) {
         if (!sentOk) {
           if (transport == VideoTransport::Udp) {
             ++udpTxFail;
+            if (args.seconds == 0) {
+              sessionReconnectTriggered = true;
+              break;
+            }
+          } else if (reconnect_tcp_data_session("h264_send_fail")) {
+            sessionReconnectTriggered = true;
+            break;
           }
           sendFailed = true;
           break;
@@ -2451,7 +2570,7 @@ int main(int argc, char** argv) {
         }
       }
 
-      if (encoderResetTriggered) {
+      if (encoderResetTriggered || sessionReconnectTriggered) {
         continue;
       }
       if (sendFailed) {
@@ -2778,7 +2897,14 @@ int main(int argc, char** argv) {
   }
   if (controlThread.joinable()) controlThread.join();
   detach_capture_session();
-  closesocket(clientSock);
+  if (clientSock != INVALID_SOCKET) {
+    closesocket(clientSock);
+    clientSock = INVALID_SOCKET;
+  }
+  if (listenSock != INVALID_SOCKET) {
+    closesocket(listenSock);
+    listenSock = INVALID_SOCKET;
+  }
   if (useH264) {
     encoder.shutdown();
     if (mfStarted) MFShutdown();

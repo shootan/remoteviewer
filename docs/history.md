@@ -160,3 +160,68 @@ Operational decision
   - 전체 기존 히스토리를 `docs/history_old.md`로 아카이브.
   - `docs/history.md`는 최근 항목(62~)만 유지하는 경량 파일로 재구성.
 - 기대효과: 다음 컨텍스트에서 히스토리 로드 비용 감소 및 탐색 속도 개선.
+
+### 67) 2026-03-03 M10 phase-1: reconnect hardening (host + soak script)
+Goal
+- Client restart/kill 후 host 재시작 없이 세션을 다시 붙일 수 있게 연결 라이프사이클을 강화.
+
+Changes
+1. Host reconnect lifecycle hardening
+- File: `apps/native_poc/src/native_video_host_main.cpp`
+- Applied:
+  - TCP listen socket lifetime changed to persistent (no one-shot close).
+  - Added TCP data reconnect path on send failure:
+    - log: `data disconnected reason=... waiting reconnect`
+    - log: `client reconnected transport=tcp ...`
+  - Control channel changed from single-accept to multi-accept loop:
+    - reconnecting client can open control channel repeatedly without host restart.
+    - logs:
+      - `[native-video-host][control] client connected`
+      - `[native-video-host][control] client disconnected`
+  - UDP peer rebind support:
+    - socket set to non-blocking after initial hello/ack.
+    - runtime `hello` pump updates peer and re-acks.
+    - log: `udp peer updated; forcing keyframe`
+
+2. Reconnect soak automation
+- Added script:
+  - `automation/soak_native_video_reconnect.ps1`
+- Purpose:
+  - keep host alive
+  - repeatedly launch/exit client (`Cycles`, `ClientRunSec`)
+  - emit pass/fail summary with per-cycle RC.
+
+Validation
+- Build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_host_poc remote60_native_video_client_poc --parallel`
+  - result: success
+- Soak smoke:
+  - UDP: `automation/logs/reconnect-soak-20260303-021117-m10smoke` (3/3 pass)
+  - TCP: `automation/logs/reconnect-soak-20260303-021301-m10tcp` (2/2 pass)
+
+Next
+- Run Gate B full test:
+  - `automation/soak_native_video_reconnect.ps1 -ConfigPath automation/native_video_profile_1080p_lowlat.json -Cycles 20 -ClientRunSec 3 -Tag m10-gateb`
+- If full pass, mark M10 acceptance complete in `docs/구현계획.md`.
+
+### 68) 2026-03-03 M10 Gate B pass (20-cycle reconnect soak)
+Goal
+- Validate M10 acceptance with long reconnect loop while host stays alive.
+
+Execution
+- Command:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/soak_native_video_reconnect.ps1 -ConfigPath automation/native_video_profile_1080p_lowlat.json -RemoteHost 127.0.0.1 -Cycles 20 -ClientRunSec 3 -Tag m10-gateb`
+- Log:
+  - `automation/logs/reconnect-soak-20260303-021557-m10-gateb`
+  - summary: `automation/logs/reconnect-soak-20260303-021557-m10-gateb/summary.txt`
+
+Result
+- `SOAK_CYCLES_REQUESTED=20`
+- `SOAK_CYCLES_EXECUTED=20`
+- `SOAK_OK_COUNT=20`
+- `HOST_RC=0`
+- `RESULT=PASS`
+
+Decision
+- M10 Gate B acceptance condition met (20-cycle reconnect soak pass).
+- Next focus moves to M8 congestion handling + Gate A (`decoded FPS >= 20`) reporting integration.
