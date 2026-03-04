@@ -85,6 +85,14 @@ $keyframeReqMinIntervalUs = Get-IntValue $cfg "keyframeReqMinIntervalUs" 0
 $keyframeReqTokenRefillUs = Get-IntValue $cfg "keyframeReqTokenRefillUs" 0
 $keyframeReqTokenCapacity = Get-IntValue $cfg "keyframeReqTokenCapacity" 0
 $catchupReenterMinIntervalUs = Get-IntValue $cfg "catchupReenterMinIntervalUs" 0
+$staleCaptureDropUs = Get-IntValue $cfg "staleCaptureDropUs" 0
+$congestRecoverMinUs = Get-IntValue $cfg "congestRecoverMinUs" 0
+$congestRecoveryTimeoutUs = Get-IntValue $cfg "congestRecoveryTimeoutUs" 0
+$m9Enable = Get-BoolValue $cfg "m9Enable" $false
+$m9Apply = Get-BoolValue $cfg "m9Apply" $false
+$m9CooldownSec = Get-IntValue $cfg "m9CooldownSec" 0
+$m9DownRequireSec = Get-IntValue $cfg "m9DownRequireSec" 0
+$m9UpRequireSec = Get-IntValue $cfg "m9UpRequireSec" 0
 
 # Ensure old shell env doesn't leak into this run.
 @(
@@ -106,7 +114,15 @@ $catchupReenterMinIntervalUs = Get-IntValue $cfg "catchupReenterMinIntervalUs" 0
   "REMOTE60_NATIVE_KEYFRAME_REQ_MIN_INTERVAL_US",
   "REMOTE60_NATIVE_KEYFRAME_REQ_TOKEN_REFILL_US",
   "REMOTE60_NATIVE_KEYFRAME_REQ_TOKEN_CAPACITY",
-  "REMOTE60_NATIVE_CATCHUP_REENTER_MIN_INTERVAL_US"
+  "REMOTE60_NATIVE_CATCHUP_REENTER_MIN_INTERVAL_US",
+  "REMOTE60_NATIVE_STALE_CAPTURE_DROP_US",
+  "REMOTE60_NATIVE_CONGEST_RECOVER_MIN_US",
+  "REMOTE60_NATIVE_CONGEST_RECOVERY_TIMEOUT_US",
+  "REMOTE60_NATIVE_M9_ENABLE",
+  "REMOTE60_NATIVE_M9_APPLY",
+  "REMOTE60_NATIVE_M9_COOLDOWN_SEC",
+  "REMOTE60_NATIVE_M9_DOWN_REQUIRE_SEC",
+  "REMOTE60_NATIVE_M9_UP_REQUIRE_SEC"
 ) | ForEach-Object {
   Remove-Item ("Env:" + $_) -ErrorAction SilentlyContinue
 }
@@ -161,6 +177,30 @@ if ($keyframeReqTokenCapacity -gt 0) {
 }
 if ($catchupReenterMinIntervalUs -gt 0) {
   $env:REMOTE60_NATIVE_CATCHUP_REENTER_MIN_INTERVAL_US = "$catchupReenterMinIntervalUs"
+}
+if ($staleCaptureDropUs -gt 0) {
+  $env:REMOTE60_NATIVE_STALE_CAPTURE_DROP_US = "$staleCaptureDropUs"
+}
+if ($congestRecoverMinUs -gt 0) {
+  $env:REMOTE60_NATIVE_CONGEST_RECOVER_MIN_US = "$congestRecoverMinUs"
+}
+if ($congestRecoveryTimeoutUs -gt 0) {
+  $env:REMOTE60_NATIVE_CONGEST_RECOVERY_TIMEOUT_US = "$congestRecoveryTimeoutUs"
+}
+if ($m9Enable) {
+  $env:REMOTE60_NATIVE_M9_ENABLE = "1"
+}
+if ($m9Apply) {
+  $env:REMOTE60_NATIVE_M9_APPLY = "1"
+}
+if ($m9CooldownSec -gt 0) {
+  $env:REMOTE60_NATIVE_M9_COOLDOWN_SEC = "$m9CooldownSec"
+}
+if ($m9DownRequireSec -gt 0) {
+  $env:REMOTE60_NATIVE_M9_DOWN_REQUIRE_SEC = "$m9DownRequireSec"
+}
+if ($m9UpRequireSec -gt 0) {
+  $env:REMOTE60_NATIVE_M9_UP_REQUIRE_SEC = "$m9UpRequireSec"
 }
 
 if ($Role -eq "host") {

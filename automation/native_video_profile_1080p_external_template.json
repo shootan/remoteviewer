@@ -30,5 +30,13 @@
   "keyframeReqTokenRefillUs": 250000,
   "keyframeReqTokenCapacity": 3,
   "catchupReenterMinIntervalUs": 600000,
+  "staleCaptureDropUs": 50000,
+  "congestRecoverMinUs": 250000,
+  "congestRecoveryTimeoutUs": 1500000,
+  "m9Enable": true,
+  "m9Apply": false,
+  "m9CooldownSec": 4,
+  "m9DownRequireSec": 2,
+  "m9UpRequireSec": 8,
   "remoteHost": "YOUR_PUBLIC_IP_OR_DNS"
 }

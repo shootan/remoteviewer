@@ -123,6 +123,14 @@ struct ControlClientMetricsMessage {
   uint64_t maxLatencyUs = 0;
   uint64_t avgDecodeTailUs = 0;
   uint64_t maxDecodeTailUs = 0;
+  uint32_t congestionState = 0;           // 0:normal 1:recovering 2:congested
+  uint32_t congestionTransitions = 0;     // cumulative state transitions
+  uint32_t congestionRecoveryCount = 0;   // cumulative recoveries to normal
+  uint32_t congestionRecoveryReq = 0;     // cumulative keyframe/recovery requests
+  uint32_t congestionRecoveryMaxUs = 0;   // max recovery duration (us)
+  uint32_t queueDepthMax = 0;             // max estimated queue depth (frames)
+  uint32_t queueDepthH4p = 0;             // histogram bucket: 4+ frames
+  uint32_t udpAssemblyDropPm = 0;         // latest assembly drop permille
   uint64_t clientSendQpcUs = 0;
 };
 

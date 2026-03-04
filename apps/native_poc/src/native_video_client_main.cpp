@@ -265,6 +265,27 @@ constexpr uint64_t kKeyframeRequestMinIntervalUsDefault = 120000;  // 120ms
 constexpr uint64_t kKeyframeRequestTokenRefillUsDefault = 300000;  // 300ms / token
 constexpr uint32_t kKeyframeRequestTokenCapacityDefault = 3;
 constexpr uint64_t kCatchupReenterMinIntervalUsDefault = 600000;  // 600ms
+constexpr uint64_t kCongestionRecoverMinUsDefault = 250000;  // 250ms
+constexpr uint64_t kCongestionRecoveryTimeoutUsDefault = 1500000;  // 1.5s
+
+enum class ClientCongestionState : uint8_t {
+  Normal = 0,
+  Recovering = 1,
+  Congested = 2,
+};
+
+const char* congestion_state_name(ClientCongestionState state) {
+  switch (state) {
+    case ClientCongestionState::Normal:
+      return "normal";
+    case ClientCongestionState::Recovering:
+      return "recovering";
+    case ClientCongestionState::Congested:
+      return "congested";
+    default:
+      return "unknown";
+  }
+}
 
 std::mutex gInputMu;
 std::deque<ControlInputEventMessage> gInputQueue;
@@ -285,6 +306,14 @@ struct ClientRuntimeMetrics {
   std::atomic<uint64_t> maxLatencyUs{0};
   std::atomic<uint64_t> avgDecodeTailUs{0};
   std::atomic<uint64_t> maxDecodeTailUs{0};
+  std::atomic<uint32_t> congestionState{0};
+  std::atomic<uint32_t> congestionTransitions{0};
+  std::atomic<uint32_t> congestionRecoveryCount{0};
+  std::atomic<uint32_t> congestionRecoveryReq{0};
+  std::atomic<uint32_t> congestionRecoveryMaxUs{0};
+  std::atomic<uint32_t> queueDepthMax{0};
+  std::atomic<uint32_t> queueDepthH4p{0};
+  std::atomic<uint32_t> udpAssemblyDropPm{0};
   std::atomic<uint64_t> updatedQpcUs{0};
 };
 
@@ -1413,6 +1442,15 @@ int main(int argc, char** argv) {
   const uint64_t catchupReenterMinIntervalUs = env_u32_clamped(
       "REMOTE60_NATIVE_CATCHUP_REENTER_MIN_INTERVAL_US",
       static_cast<uint32_t>(kCatchupReenterMinIntervalUsDefault), 100000, 3000000);
+  const uint64_t staleCaptureDropUs = env_u32_clamped(
+      "REMOTE60_NATIVE_STALE_CAPTURE_DROP_US",
+      static_cast<uint32_t>(kStaleCaptureDropUs), 1000, 2000000);
+  const uint64_t congestionRecoverMinUs = env_u32_clamped(
+      "REMOTE60_NATIVE_CONGEST_RECOVER_MIN_US",
+      static_cast<uint32_t>(kCongestionRecoverMinUsDefault), 50000, 5000000);
+  const uint64_t congestionRecoveryTimeoutUs = env_u32_clamped(
+      "REMOTE60_NATIVE_CONGEST_RECOVERY_TIMEOUT_US",
+      static_cast<uint32_t>(kCongestionRecoveryTimeoutUsDefault), 100000, 10000000);
   {
     std::lock_guard<std::mutex> lk(gKeyframeLimiterMu);
     gKeyframeLimiterTokens = static_cast<double>(gKeyframeRequestTokenCapacity.load(std::memory_order_relaxed));
@@ -1595,6 +1633,9 @@ int main(int argc, char** argv) {
             << " tokenRefillUs=" << gKeyframeRequestTokenRefillUs.load(std::memory_order_relaxed)
             << " tokenCapacity=" << gKeyframeRequestTokenCapacity.load(std::memory_order_relaxed)
             << " catchupReenterMinUs=" << catchupReenterMinIntervalUs
+            << " staleCaptureDropUs=" << staleCaptureDropUs
+            << " congestionRecoverMinUs=" << congestionRecoverMinUs
+            << " congestionRecoveryTimeoutUs=" << congestionRecoveryTimeoutUs
             << "\n";
   if (kAllInputBlocked) {
     std::cout << "[native-video-client] all input blocked (view-only)\n";
@@ -1684,6 +1725,14 @@ int main(int argc, char** argv) {
               metrics.maxLatencyUs = gClientMetrics.maxLatencyUs.load();
               metrics.avgDecodeTailUs = gClientMetrics.avgDecodeTailUs.load();
               metrics.maxDecodeTailUs = gClientMetrics.maxDecodeTailUs.load();
+              metrics.congestionState = gClientMetrics.congestionState.load();
+              metrics.congestionTransitions = gClientMetrics.congestionTransitions.load();
+              metrics.congestionRecoveryCount = gClientMetrics.congestionRecoveryCount.load();
+              metrics.congestionRecoveryReq = gClientMetrics.congestionRecoveryReq.load();
+              metrics.congestionRecoveryMaxUs = gClientMetrics.congestionRecoveryMaxUs.load();
+              metrics.queueDepthMax = gClientMetrics.queueDepthMax.load();
+              metrics.queueDepthH4p = gClientMetrics.queueDepthH4p.load();
+              metrics.udpAssemblyDropPm = gClientMetrics.udpAssemblyDropPm.load();
               metrics.clientSendQpcUs = nowUs;
               if (!send_all(controlSock, &metrics, sizeof(metrics))) break;
               lastMetricsSentUs = metricsUpdatedUs;
@@ -1810,6 +1859,7 @@ int main(int argc, char** argv) {
     uint64_t udpAssemblyMalformedCount = 0;
     uint64_t udpAssemblyReorderCount = 0;
     uint64_t udpAssemblyKeyReqCount = 0;
+    uint32_t udpAssemblyDropPmLast = 0;
     uint64_t lastPacketRecvUs = 0;
     uint32_t lagTriggerStreak = 0;
     uint64_t lastCatchupEnterUs = 0;
@@ -1822,6 +1872,77 @@ int main(int argc, char** argv) {
     bool sendTimelineReady = false;
     uint64_t sendRemoteBaseUs = 0;
     uint64_t sendLocalBaseUs = 0;
+    const uint64_t frameIntervalUs = std::max<uint64_t>(
+        1ULL, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, args.fpsHint)));
+    ClientCongestionState congestionState = ClientCongestionState::Normal;
+    uint64_t congestionStateEnterUs = 0;
+    uint64_t congestionTransitionCount = 0;
+    uint64_t congestionRecoveryCount = 0;
+    uint64_t congestionRecoveryTotalUs = 0;
+    uint64_t congestionRecoveryMaxUs = 0;
+    uint64_t congestionRecoveryRequestCount = 0;
+    uint64_t staleDropCount = 0;
+    uint64_t holdLatestDropCount = 0;
+    uint64_t burstDropCount = 0;
+    uint64_t latestCaptureSeenUs = 0;
+    uint64_t queueDepthSampleCount = 0;
+    uint64_t queueDepthHist[5] = {0, 0, 0, 0, 0};
+    uint32_t queueDepthFramesMax = 0;
+    uint64_t recoveringSinceUs = 0;
+    uint32_t recoveringHealthyStreak = 0;
+    uint64_t lastRecoveryRequestUs = 0;
+    auto queue_depth_frames = [&](uint64_t lagUs) -> uint32_t {
+      if (lagUs == 0) return 0;
+      const uint64_t depth64 = (lagUs + frameIntervalUs - 1) / frameIntervalUs;
+      return static_cast<uint32_t>(std::min<uint64_t>(depth64, 1000ULL));
+    };
+    auto sample_queue_depth = [&](uint64_t lagUs) {
+      const uint32_t depthFrames = queue_depth_frames(lagUs);
+      ++queueDepthSampleCount;
+      if (depthFrames > queueDepthFramesMax) queueDepthFramesMax = depthFrames;
+      if (depthFrames == 0) {
+        ++queueDepthHist[0];
+      } else if (depthFrames == 1) {
+        ++queueDepthHist[1];
+      } else if (depthFrames == 2) {
+        ++queueDepthHist[2];
+      } else if (depthFrames == 3) {
+        ++queueDepthHist[3];
+      } else {
+        ++queueDepthHist[4];
+      }
+    };
+    auto transition_congestion_state = [&](ClientCongestionState nextState, uint64_t nowUs, const char* reason,
+                                           uint64_t streamLagUs, uint64_t decodeQueueLagEstimateUs, uint32_t seq) {
+      if (nextState == congestionState) return;
+      const ClientCongestionState prev = congestionState;
+      if (prev != ClientCongestionState::Normal &&
+          nextState == ClientCongestionState::Normal &&
+          congestionStateEnterUs > 0 &&
+          nowUs >= congestionStateEnterUs) {
+        const uint64_t recoverUs = nowUs - congestionStateEnterUs;
+        ++congestionRecoveryCount;
+        congestionRecoveryTotalUs += recoverUs;
+        if (recoverUs > congestionRecoveryMaxUs) congestionRecoveryMaxUs = recoverUs;
+      }
+      congestionState = nextState;
+      congestionStateEnterUs = (nextState == ClientCongestionState::Normal) ? 0 : nowUs;
+      if (nextState == ClientCongestionState::Recovering) {
+        recoveringSinceUs = nowUs;
+        recoveringHealthyStreak = 0;
+      } else if (nextState != ClientCongestionState::Recovering) {
+        recoveringSinceUs = 0;
+        recoveringHealthyStreak = 0;
+      }
+      ++congestionTransitionCount;
+      std::cout << "[native-video-client][congestion] state=" << congestion_state_name(nextState)
+                << " prev=" << congestion_state_name(prev)
+                << " reason=" << reason
+                << " streamLagUs=" << streamLagUs
+                << " decodeQueueLagUs=" << decodeQueueLagEstimateUs
+                << " seq=" << seq
+                << "\n";
+    };
     struct PresentCounterSnapshot {
       uint64_t d3dPresentSuccess = 0;
       uint64_t d3dPresentFail = 0;
@@ -1873,6 +1994,26 @@ int main(int argc, char** argv) {
          << " overwriteBeforePresent=" << overwriteBeforePresent;
       lastPresentCounters = nowCounters;
     };
+    auto append_congestion_fields = [&](std::ostream& os) {
+      const uint64_t recoveryAvgUs =
+          (congestionRecoveryCount > 0) ? (congestionRecoveryTotalUs / congestionRecoveryCount) : 0;
+      os << " congestionState=" << congestion_state_name(congestionState)
+         << " congestionTransitions=" << congestionTransitionCount
+         << " congestionRecoveryCount=" << congestionRecoveryCount
+         << " congestionRecoveryAvgUs=" << recoveryAvgUs
+         << " congestionRecoveryMaxUs=" << congestionRecoveryMaxUs
+         << " congestionRecoveryReq=" << congestionRecoveryRequestCount
+         << " staleDrops=" << staleDropCount
+         << " holdLatestDrops=" << holdLatestDropCount
+         << " burstDrops=" << burstDropCount
+         << " queueDepthSamples=" << queueDepthSampleCount
+         << " queueDepthMax=" << queueDepthFramesMax
+         << " queueDepthH0=" << queueDepthHist[0]
+         << " queueDepthH1=" << queueDepthHist[1]
+         << " queueDepthH2=" << queueDepthHist[2]
+         << " queueDepthH3=" << queueDepthHist[3]
+         << " queueDepthH4p=" << queueDepthHist[4];
+    };
     auto aligned_lag_us = [&](uint64_t remoteTsUs, uint64_t localNowUs,
                               bool& timelineReady, uint64_t& remoteBaseUs, uint64_t& localBaseUs) -> uint64_t {
       if (!timelineReady || remoteTsUs < remoteBaseUs) {
@@ -1912,6 +2053,19 @@ int main(int argc, char** argv) {
       gClientMetrics.maxLatencyUs = maxLatencyUsLocal;
       gClientMetrics.avgDecodeTailUs = avgDecodeTailUs;
       gClientMetrics.maxDecodeTailUs = maxDecodeTailUsLocal;
+      gClientMetrics.congestionState = static_cast<uint32_t>(congestionState);
+      gClientMetrics.congestionTransitions =
+          static_cast<uint32_t>(std::min<uint64_t>(congestionTransitionCount, 0xFFFFFFFFULL));
+      gClientMetrics.congestionRecoveryCount =
+          static_cast<uint32_t>(std::min<uint64_t>(congestionRecoveryCount, 0xFFFFFFFFULL));
+      gClientMetrics.congestionRecoveryReq =
+          static_cast<uint32_t>(std::min<uint64_t>(congestionRecoveryRequestCount, 0xFFFFFFFFULL));
+      gClientMetrics.congestionRecoveryMaxUs =
+          static_cast<uint32_t>(std::min<uint64_t>(congestionRecoveryMaxUs, 0xFFFFFFFFULL));
+      gClientMetrics.queueDepthMax = queueDepthFramesMax;
+      gClientMetrics.queueDepthH4p =
+          static_cast<uint32_t>(std::min<uint64_t>(queueDepthHist[4], 0xFFFFFFFFULL));
+      gClientMetrics.udpAssemblyDropPm = udpAssemblyDropPmLast;
       gClientMetrics.seq.fetch_add(1);
       gClientMetrics.updatedQpcUs = nowUs;
       push_overlay_metric_sample(gClientMetrics.recvFpsX100.load(std::memory_order_relaxed),
@@ -1962,23 +2116,35 @@ int main(int argc, char** argv) {
       }
 
       const bool keyFrame = ((h.flags & 1u) != 0);
+      if (h.captureQpcUs > latestCaptureSeenUs) {
+        latestCaptureSeenUs = h.captureQpcUs;
+      }
       const uint64_t streamLagUs = aligned_lag_us(
           h.captureQpcUs, packetNowUs, captureTimelineReady, captureRemoteBaseUs, captureLocalBaseUs);
       const uint64_t decodeQueueLagEstimateUs =
           (lastPresentedCaptureUs > 0 && h.captureQpcUs >= lastPresentedCaptureUs)
               ? (h.captureQpcUs - lastPresentedCaptureUs)
               : 0;
-      const uint64_t staleBehindUs =
+      sample_queue_depth(decodeQueueLagEstimateUs);
+      const uint64_t staleBehindPresentedUs =
           (lastPresentedCaptureUs > 0 && lastPresentedCaptureUs > h.captureQpcUs)
               ? (lastPresentedCaptureUs - h.captureQpcUs)
               : 0;
-
-      if (staleBehindUs > kStaleCaptureDropUs) {
+      const uint64_t staleBehindLatestUs =
+          (latestCaptureSeenUs > h.captureQpcUs)
+              ? (latestCaptureSeenUs - h.captureQpcUs)
+              : 0;
+      if (staleBehindPresentedUs > staleCaptureDropUs || staleBehindLatestUs > staleCaptureDropUs) {
         ++skippedQueued;
         ++lagDropCount;
+        ++staleDropCount;
+        if (staleBehindLatestUs > staleCaptureDropUs) {
+          ++holdLatestDropCount;
+        }
         if ((lagDropCount % 120) == 1) {
           std::cout << "[native-video-client] stale frame drop count=" << lagDropCount
-                    << " staleBehindUs=" << staleBehindUs
+                    << " staleBehindPresentedUs=" << staleBehindPresentedUs
+                    << " staleBehindLatestUs=" << staleBehindLatestUs
                     << " seq=" << h.seq << "\n";
         }
         return true;
@@ -1995,7 +2161,7 @@ int main(int argc, char** argv) {
       } else {
         lagTriggerStreak = 0;
       }
-      if (!catchupMode && lagTriggerStreak >= 3) {
+      if (congestionState != ClientCongestionState::Congested && lagTriggerStreak >= 3) {
         lagTriggerStreak = 0;
         const bool catchupEnterAllowed =
             (lastCatchupEnterUs == 0) || (packetNowUs >= (lastCatchupEnterUs + catchupReenterMinIntervalUs));
@@ -2010,11 +2176,17 @@ int main(int argc, char** argv) {
                       << "\n";
           }
         } else {
+          transition_congestion_state(ClientCongestionState::Congested, packetNowUs,
+                                      (decodeQueueLagEstimateUs > kDecodeQueueLagDropUs)
+                                          ? "decode_queue"
+                                          : "stream_lag_emergency",
+                                      streamLagUs, decodeQueueLagEstimateUs, h.seq);
           catchupMode = true;
           lastCatchupEnterUs = packetNowUs;
           waitForKeyFrame = true;
           decoder.reset();
           request_keyframe(1);
+          ++congestionRecoveryRequestCount;
           std::cout << "[native-video-client] catchup enter streamLagUs=" << streamLagUs
                     << " decodeQueueLagEstUs=" << decodeQueueLagEstimateUs
                     << " recvGapUs=" << recvGapUs
@@ -2023,11 +2195,12 @@ int main(int argc, char** argv) {
                     << " seq=" << h.seq << "\n";
         }
       }
-      if (catchupMode && !keyFrame) {
+      if (congestionState == ClientCongestionState::Congested && !keyFrame) {
         decodeEmptyStreak = 0;
         decodeEmptyStreakStartUs = 0;
         ++skippedQueued;
         ++lagDropCount;
+        ++burstDropCount;
         if ((lagDropCount % 120) == 1) {
           std::cout << "[native-video-client] catchup drops=" << lagDropCount
                     << " streamLagUs=" << streamLagUs
@@ -2036,11 +2209,47 @@ int main(int argc, char** argv) {
         }
         return true;
       }
-      if (catchupMode && keyFrame) {
+      if (congestionState == ClientCongestionState::Congested && keyFrame) {
         catchupMode = false;
+        transition_congestion_state(ClientCongestionState::Recovering, packetNowUs, "keyframe",
+                                    streamLagUs, decodeQueueLagEstimateUs, h.seq);
         std::cout << "[native-video-client] catchup exit streamLagUs=" << streamLagUs
                   << " decodeQueueLagEstUs=" << decodeQueueLagEstimateUs
                   << " seq=" << h.seq << "\n";
+      }
+      if (congestionState == ClientCongestionState::Recovering) {
+        const bool lagHealthy =
+            decodeQueueLagEstimateUs <= kDecodeQueueLagResumeUs &&
+            streamLagUs <= kCatchupResumeKeyLagUs;
+        if (lagHealthy) {
+          if (recoveringHealthyStreak < std::numeric_limits<uint32_t>::max()) {
+            ++recoveringHealthyStreak;
+          }
+        } else {
+          recoveringHealthyStreak = 0;
+        }
+        const bool recoverMinElapsed =
+            recoveringSinceUs > 0 && packetNowUs >= (recoveringSinceUs + congestionRecoverMinUs);
+        if (lagHealthy && recoverMinElapsed && recoveringHealthyStreak >= 3) {
+          transition_congestion_state(ClientCongestionState::Normal, packetNowUs, "recover_stable",
+                                      streamLagUs, decodeQueueLagEstimateUs, h.seq);
+        } else if (!lagHealthy &&
+                   recoveringSinceUs > 0 &&
+                   packetNowUs >= (recoveringSinceUs + congestionRecoveryTimeoutUs)) {
+          const bool requestAllowed =
+              (lastRecoveryRequestUs == 0) || (packetNowUs >= (lastRecoveryRequestUs + 300000));
+          if (requestAllowed) {
+            request_keyframe(1);
+            ++congestionRecoveryRequestCount;
+            lastRecoveryRequestUs = packetNowUs;
+          }
+          catchupMode = true;
+          waitForKeyFrame = true;
+          decoder.reset();
+          lastCatchupEnterUs = packetNowUs;
+          transition_congestion_state(ClientCongestionState::Congested, packetNowUs, "recover_timeout",
+                                      streamLagUs, decodeQueueLagEstimateUs, h.seq);
+        }
       }
 
       if (waitForKeyFrame && !keyFrame) {
@@ -2048,6 +2257,7 @@ int main(int argc, char** argv) {
         decodeEmptyStreakStartUs = 0;
         ++skippedQueued;
         ++waitingKeyDropCount;
+        ++burstDropCount;
         if ((waitingKeyDropCount % 30) == 1) {
           request_keyframe(3);
         }
@@ -2075,6 +2285,7 @@ int main(int argc, char** argv) {
               << " decodedRawMbps=" << decodedRawMbps
               << " decodeRatioX100=" << decodeRatioX100
               << " size=" << h.width << "x" << h.height;
+          append_congestion_fields(oss);
           append_present_counter_fields(oss);
           log_client_line(oss.str());
           recvFrames = 0;
@@ -2100,11 +2311,16 @@ int main(int argc, char** argv) {
         ++skippedQueued;
         ++decodeFailCount;
         request_keyframe(4);
+        ++congestionRecoveryRequestCount;
         if ((decodeFailCount % 60) == 1) {
           std::cout << "[native-video-client] decode failed count=" << decodeFailCount << "\n";
         }
+        catchupMode = true;
+        lastCatchupEnterUs = packetNowUs;
         waitForKeyFrame = true;
         decoder.reset();
+        transition_congestion_state(ClientCongestionState::Congested, packetNowUs, "decode_fail",
+                                    streamLagUs, decodeQueueLagEstimateUs, h.seq);
         if (packetNowUs >= statAtUs) {
           const uint64_t avgLatencyUs = (decodedFrames > 0) ? (sumLatencyUs / decodedFrames) : 0;
           const uint64_t avgDecodeTailUs = (decodedFrames > 0) ? (sumDecodeTailUs / decodedFrames) : 0;
@@ -2126,6 +2342,7 @@ int main(int argc, char** argv) {
               << " decodedRawMbps=" << decodedRawMbps
               << " decodeRatioX100=" << decodeRatioX100
               << " size=" << h.width << "x" << h.height;
+          append_congestion_fields(oss);
           append_present_counter_fields(oss);
           log_client_line(oss.str());
           recvFrames = 0;
@@ -2161,7 +2378,10 @@ int main(int argc, char** argv) {
             catchupMode = true;
             lastCatchupEnterUs = packetNowUs;
             request_keyframe(5);
+            ++congestionRecoveryRequestCount;
             decoder.reset();
+            transition_congestion_state(ClientCongestionState::Congested, packetNowUs, "decode_empty",
+                                        streamLagUs, decodeQueueLagEstimateUs, h.seq);
             if ((decodeEmptyRecoveryCount % 10) == 1) {
               std::cout << "[native-video-client] decode empty recovery count=" << decodeEmptyRecoveryCount
                         << " streak=" << decodeEmptyStreak
@@ -2209,6 +2429,7 @@ int main(int argc, char** argv) {
               << " decodedRawMbps=" << decodedRawMbps
               << " decodeRatioX100=" << decodeRatioX100
               << " size=" << h.width << "x" << h.height;
+          append_congestion_fields(oss);
           append_present_counter_fields(oss);
           log_client_line(oss.str());
           recvFrames = 0;
@@ -2344,6 +2565,7 @@ int main(int argc, char** argv) {
             << " decodedRawMbps=" << decodedRawMbps
             << " decodeRatioX100=" << decodeRatioX100
             << " size=" << decoded.width << "x" << decoded.height;
+        append_congestion_fields(oss);
         append_present_counter_fields(oss);
         log_client_line(oss.str());
         recvFrames = 0;
@@ -2479,6 +2701,7 @@ int main(int argc, char** argv) {
           const uint64_t dropPermille = (totalFramesDelta > 0)
               ? ((droppedDelta * 1000ULL) / totalFramesDelta)
               : 0;
+          udpAssemblyDropPmLast = static_cast<uint32_t>(std::min<uint64_t>(dropPermille, 1000ULL));
           std::cout << "[native-video-client] udp-assembly chunks=" << chunksDelta
                     << " completed=" << completedDelta
                     << " dropped=" << droppedDelta
@@ -2620,6 +2843,7 @@ int main(int argc, char** argv) {
               << " decodedRawMbps=" << decodedRawMbps
               << " decodeRatioX100=" << decodeRatioX100
               << " size=" << h.width << "x" << h.height;
+          append_congestion_fields(oss);
           append_present_counter_fields(oss);
           log_client_line(oss.str());
           recvFrames = 0;

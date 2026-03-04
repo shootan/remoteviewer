@@ -195,6 +195,29 @@ $fallbackReasonNoneCount = 0
 $fallbackReasonD3dInitFailCount = 0
 $fallbackReasonNv12ToBgraFailCount = 0
 $fallbackReasonOtherCount = 0
+$m9EventCount = 0
+$m9LastMode = ""
+$m9LastAction = ""
+$m9LastFromLevel = -1
+$m9LastToLevel = -1
+$m9ApplyDeferredCount = 0
+$congestionStateLast = "unknown"
+$congestionTransitionEvents = 0
+$congestionTransitionsLast = 0
+$congestionRecoveryCountLast = 0
+$congestionRecoveryAvgUsLast = 0
+$congestionRecoveryMaxUsLast = 0
+$congestionRecoveryReqLast = 0
+$congestionStaleDropsLast = 0
+$congestionHoldLatestDropsLast = 0
+$congestionBurstDropsLast = 0
+$queueDepthSamplesLast = 0
+$queueDepthMaxLast = 0
+$queueDepthH0Last = 0
+$queueDepthH1Last = 0
+$queueDepthH2Last = 0
+$queueDepthH3Last = 0
+$queueDepthH4pLast = 0
 $prevPresentUs = -1
 $stageValues = [ordered]@{
   c2eUs = (New-Object System.Collections.Generic.List[double])
@@ -326,6 +349,58 @@ foreach ($line in $clientLines) {
   }
   if ($line -match 'decodeRatioX100=([0-9]+)') {
     [void]$decodeRatioVals.Add([double]$Matches[1])
+  }
+  if ($line -match '\[native-video-client\]\[congestion\] state=([A-Za-z_]+)') {
+    $congestionTransitionEvents += 1
+    $congestionStateLast = $Matches[1]
+  }
+  if ($line -match 'congestionState=([A-Za-z_]+)') {
+    $congestionStateLast = $Matches[1]
+  }
+  if ($line -match 'congestionTransitions=([0-9]+)') {
+    $congestionTransitionsLast = [int64]$Matches[1]
+  }
+  if ($line -match 'congestionRecoveryCount=([0-9]+)') {
+    $congestionRecoveryCountLast = [int64]$Matches[1]
+  }
+  if ($line -match 'congestionRecoveryAvgUs=([0-9]+)') {
+    $congestionRecoveryAvgUsLast = [int64]$Matches[1]
+  }
+  if ($line -match 'congestionRecoveryMaxUs=([0-9]+)') {
+    $congestionRecoveryMaxUsLast = [int64]$Matches[1]
+  }
+  if ($line -match 'congestionRecoveryReq=([0-9]+)') {
+    $congestionRecoveryReqLast = [int64]$Matches[1]
+  }
+  if ($line -match 'staleDrops=([0-9]+)') {
+    $congestionStaleDropsLast = [int64]$Matches[1]
+  }
+  if ($line -match 'holdLatestDrops=([0-9]+)') {
+    $congestionHoldLatestDropsLast = [int64]$Matches[1]
+  }
+  if ($line -match 'burstDrops=([0-9]+)') {
+    $congestionBurstDropsLast = [int64]$Matches[1]
+  }
+  if ($line -match 'queueDepthSamples=([0-9]+)') {
+    $queueDepthSamplesLast = [int64]$Matches[1]
+  }
+  if ($line -match 'queueDepthMax=([0-9]+)') {
+    $queueDepthMaxLast = [int64]$Matches[1]
+  }
+  if ($line -match 'queueDepthH0=([0-9]+)') {
+    $queueDepthH0Last = [int64]$Matches[1]
+  }
+  if ($line -match 'queueDepthH1=([0-9]+)') {
+    $queueDepthH1Last = [int64]$Matches[1]
+  }
+  if ($line -match 'queueDepthH2=([0-9]+)') {
+    $queueDepthH2Last = [int64]$Matches[1]
+  }
+  if ($line -match 'queueDepthH3=([0-9]+)') {
+    $queueDepthH3Last = [int64]$Matches[1]
+  }
+  if ($line -match 'queueDepthH4p=([0-9]+)') {
+    $queueDepthH4pLast = [int64]$Matches[1]
   }
   if ($line -match 'd3dPresentSuccess=([0-9]+)') {
     $d3dPresentSuccessTotal += [int64]$Matches[1]
@@ -469,6 +544,22 @@ foreach ($line in $hostLines) {
       "mid" { $abrToMidCount += 1 }
       "low" { $abrToLowCount += 1 }
     }
+  }
+  if ($line -match '\[native-video-host\]\[m9\] action=([a-z]+)') {
+    $m9EventCount += 1
+    $m9LastAction = $Matches[1]
+    if ($line -match 'mode=([a-zA-Z0-9_-]+)') {
+      $m9LastMode = $Matches[1]
+    }
+    if ($line -match 'fromLevel=([0-9]+)') {
+      $m9LastFromLevel = [int]$Matches[1]
+    }
+    if ($line -match 'toLevel=([0-9]+)') {
+      $m9LastToLevel = [int]$Matches[1]
+    }
+  }
+  if ($line -match '\[native-video-host\]\[m9\] apply-path-deferred=1') {
+    $m9ApplyDeferredCount += 1
   }
   if ($line -match '\[native-video-host\]\[control\] keyframe-request seq=') {
     $keyReqHostRecv += 1
@@ -943,6 +1034,14 @@ foreach ($stageName in @(
 
 $decodedOk = ($Codec -ine "h264" -or $dec.max -gt 0)
 $overallOk = ($clientRc -eq 0 -and $lat.count -gt 0 -and $decodedOk)
+$gateADecodedFpsTarget = 20
+$gateARecoveryMaxTargetUs = 1000000
+$gateAPresentGapOver1sTarget = 0
+$gateADecodedFpsOk = ($dec.count -gt 0 -and [double]$dec.avg -ge [double]$gateADecodedFpsTarget)
+$gateARecoveryOk = ($congestionRecoveryMaxUsLast -le $gateARecoveryMaxTargetUs)
+$gateAPresentGapOk = ($presentGapOver1s -le $gateAPresentGapOver1sTarget)
+$gateAFreezeOk = ($gateARecoveryOk -and $gateAPresentGapOk)
+$gateAPass = ($clientRc -eq 0 -and $gateADecodedFpsOk -and $gateAFreezeOk)
 
 Write-Output "LOG_DIR=$logDir"
 Write-Output "CODEC=$Codec"
@@ -963,6 +1062,31 @@ Write-Output "PRESENT_GAP_P95_US=$($presentGap.p95)"
 Write-Output "PRESENT_GAP_MAX_US=$($presentGap.max)"
 Write-Output "PRESENT_GAP_OVER_1S=$presentGapOver1s"
 Write-Output "PRESENT_GAP_OVER_3S=$presentGapOver3s"
+Write-Output "CONGESTION_STATE_LAST=$congestionStateLast"
+Write-Output "CONGESTION_TRANSITION_EVENTS=$congestionTransitionEvents"
+Write-Output "CONGESTION_TRANSITIONS_LAST=$congestionTransitionsLast"
+Write-Output "CONGESTION_RECOVERY_COUNT_LAST=$congestionRecoveryCountLast"
+Write-Output "CONGESTION_RECOVERY_AVG_US_LAST=$congestionRecoveryAvgUsLast"
+Write-Output "CONGESTION_RECOVERY_MAX_US_LAST=$congestionRecoveryMaxUsLast"
+Write-Output "CONGESTION_RECOVERY_REQ_LAST=$congestionRecoveryReqLast"
+Write-Output "CONGESTION_STALE_DROPS_LAST=$congestionStaleDropsLast"
+Write-Output "CONGESTION_HOLD_LATEST_DROPS_LAST=$congestionHoldLatestDropsLast"
+Write-Output "CONGESTION_BURST_DROPS_LAST=$congestionBurstDropsLast"
+Write-Output "QUEUE_DEPTH_SAMPLES_LAST=$queueDepthSamplesLast"
+Write-Output "QUEUE_DEPTH_MAX_LAST=$queueDepthMaxLast"
+Write-Output "QUEUE_DEPTH_H0_LAST=$queueDepthH0Last"
+Write-Output "QUEUE_DEPTH_H1_LAST=$queueDepthH1Last"
+Write-Output "QUEUE_DEPTH_H2_LAST=$queueDepthH2Last"
+Write-Output "QUEUE_DEPTH_H3_LAST=$queueDepthH3Last"
+Write-Output "QUEUE_DEPTH_H4P_LAST=$queueDepthH4pLast"
+Write-Output "GATE_A_TARGET_DECODED_FPS=$gateADecodedFpsTarget"
+Write-Output "GATE_A_TARGET_RECOVERY_MAX_US=$gateARecoveryMaxTargetUs"
+Write-Output "GATE_A_TARGET_PRESENT_GAP_OVER_1S=$gateAPresentGapOver1sTarget"
+Write-Output "GATE_A_DECODED_FPS_OK=$gateADecodedFpsOk"
+Write-Output "GATE_A_RECOVERY_OK=$gateARecoveryOk"
+Write-Output "GATE_A_PRESENT_GAP_OK=$gateAPresentGapOk"
+Write-Output "GATE_A_FREEZE_OK=$gateAFreezeOk"
+Write-Output "GATE_A_PASS=$gateAPass"
 Write-Output "TS_SOURCE_MFT=$tsSourceMft"
 Write-Output "TS_SOURCE_INPUT_FALLBACK=$tsSourceInputFallback"
 Write-Output "TS_SOURCE_HEADER_FALLBACK=$tsSourceHeaderFallback"
@@ -971,6 +1095,12 @@ Write-Output "ABR_TO_HIGH_COUNT=$abrToHighCount"
 Write-Output "ABR_TO_MID_COUNT=$abrToMidCount"
 Write-Output "ABR_TO_LOW_COUNT=$abrToLowCount"
 Write-Output "ABR_LAST_PROFILE=$abrLastProfile"
+Write-Output "M9_EVENT_COUNT=$m9EventCount"
+Write-Output "M9_LAST_MODE=$m9LastMode"
+Write-Output "M9_LAST_ACTION=$m9LastAction"
+Write-Output "M9_LAST_FROM_LEVEL=$m9LastFromLevel"
+Write-Output "M9_LAST_TO_LEVEL=$m9LastToLevel"
+Write-Output "M9_APPLY_DEFERRED_COUNT=$m9ApplyDeferredCount"
 Write-Output "KEYREQ_CLIENT_SENT=$keyReqClientSent"
 Write-Output "KEYREQ_HOST_RECV=$keyReqHostRecv"
 Write-Output "KEYREQ_HOST_CONSUMED=$keyReqHostConsumed"

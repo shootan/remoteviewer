@@ -225,3 +225,171 @@ Result
 Decision
 - M10 Gate B acceptance condition met (20-cycle reconnect soak pass).
 - Next focus moves to M8 congestion handling + Gate A (`decoded FPS >= 20`) reporting integration.
+
+### 69) 2026-03-03 M8 phase-1 implemented (client congestion state + Gate A report fields)
+Goal
+- Implement M8 core receive/decode congestion handling and wire measurable Gate A outputs.
+
+Changes
+1. Client congestion state machine
+- File: `apps/native_poc/src/native_video_client_main.cpp`
+- Added explicit states:
+  - `normal`, `recovering`, `congested`
+- Added transition logs:
+  - `[native-video-client][congestion] state=... prev=... reason=...`
+- Added recovery handling:
+  - recover-min window and recover-timeout re-request path.
+
+2. Deterministic stale/hold-latest drop policy
+- Added stale-drop checks against:
+  - last presented capture timestamp
+  - latest seen capture timestamp (hold-to-latest behavior for delayed burst)
+- Added counters:
+  - `staleDrops`, `holdLatestDrops`, `burstDrops`.
+
+3. Queue-depth / recovery telemetry
+- Added per-second telemetry fields in client stats line:
+  - `congestionState`, `congestionTransitions`, `congestionRecoveryCount`,
+    `congestionRecoveryAvgUs`, `congestionRecoveryMaxUs`, `congestionRecoveryReq`,
+    `queueDepthSamples`, `queueDepthMax`, `queueDepthH0..H4p`.
+
+4. Config wiring for M8 knobs
+- File: `automation/run_native_video_with_config.ps1`
+- Added JSON -> env mapping:
+  - `staleCaptureDropUs` -> `REMOTE60_NATIVE_STALE_CAPTURE_DROP_US`
+  - `congestRecoverMinUs` -> `REMOTE60_NATIVE_CONGEST_RECOVER_MIN_US`
+  - `congestRecoveryTimeoutUs` -> `REMOTE60_NATIVE_CONGEST_RECOVERY_TIMEOUT_US`
+- Updated profiles:
+  - `automation/native_video_profile_1080p_lowlat.json`
+  - `automation/native_video_profile_1080p_external_template.json`
+  - `automation/native_video_profile_1080p_wan_quality.json`
+
+5. Gate A report fields
+- File: `automation/verify_native_video_runtime.ps1`
+- Added parsed outputs:
+  - `CONGESTION_*`, `QUEUE_DEPTH_*`
+  - `GATE_A_TARGET_*`, `GATE_A_DECODED_FPS_OK`, `GATE_A_FREEZE_OK`, `GATE_A_PASS`
+
+Validation
+- Build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_host_poc remote60_native_video_client_poc --parallel`
+  - result: success
+- Local short verify script run completed without runtime errors.
+- Note: current local environment produced no capture frames, so Gate A acceptance still requires external two-PC run logs.
+
+### 70) 2026-03-03 M9 stage1~2 implemented (telemetry extension + host dry-run planner)
+Goal
+- Progress M9 without external 2PC dependency:
+  - Stage 1: extend client->host telemetry.
+  - Stage 2: host adaptive policy planner in dry-run mode.
+
+Changes
+1. Protocol / telemetry extension
+- File: `apps/native_poc/src/poc_protocol.hpp`
+- `ControlClientMetricsMessage` extended with:
+  - `congestionState`, `congestionTransitions`, `congestionRecoveryCount`,
+    `congestionRecoveryReq`, `congestionRecoveryMaxUs`,
+    `queueDepthMax`, `queueDepthH4p`, `udpAssemblyDropPm`.
+
+2. Client metrics publish/send update
+- File: `apps/native_poc/src/native_video_client_main.cpp`
+- New M8 congestion/queue counters are now copied into `gClientMetrics` and sent through control channel.
+
+3. Host metrics ingest update
+- File: `apps/native_poc/src/native_video_host_main.cpp`
+- Host now receives/stores the extended telemetry set for policy decisions.
+
+4. M9 dry-run decision engine
+- File: `apps/native_poc/src/native_video_host_main.cpp`
+- Added host-side M9 planner with:
+  - cooldown + down/up pressure windows (`downRequireSec`, `upRequireSec`)
+  - level recommendation ladder (bitrate -> fps -> resolution ordering)
+  - decision logs:
+    - `[native-video-host][m9] action=... mode=dryrun ...`
+- `m9Apply=true` currently logs `apply-path-deferred=1` only (actual apply path deferred to stage 3).
+
+5. Config/runtime wiring + verify outputs
+- File: `automation/run_native_video_with_config.ps1`
+  - Added JSON/env mapping:
+    - `m9Enable`, `m9Apply`, `m9CooldownSec`, `m9DownRequireSec`, `m9UpRequireSec`
+- Updated profiles:
+  - `automation/native_video_profile_1080p_lowlat.json`
+  - `automation/native_video_profile_1080p_external_template.json`
+  - `automation/native_video_profile_1080p_wan_quality.json`
+  - default: `m9Enable=true`, `m9Apply=false` (dry-run)
+- File: `automation/verify_native_video_runtime.ps1`
+  - Added M9 summary keys:
+    - `M9_EVENT_COUNT`, `M9_LAST_MODE`, `M9_LAST_ACTION`,
+      `M9_LAST_FROM_LEVEL`, `M9_LAST_TO_LEVEL`, `M9_APPLY_DEFERRED_COUNT`.
+
+Validation
+- Build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_host_poc remote60_native_video_client_poc --parallel`
+  - result: success
+- Note: external Gate A/B acceptance remains pending (requires user-side 2PC runs).
+
+### 71) 2026-03-03 M9 stage3 implemented (host apply path wired)
+Goal
+- Complete M9 Stage 3 by converting host decision output into actual encoder/pacing apply behavior.
+
+Changes
+1. Unified encoder target apply helper usage
+- File: `apps/native_poc/src/native_video_host_main.cpp`
+- Reused `apply_encoder_target(...)` in runtime tune and ABR switch paths to remove duplicated
+  initialize/reconfigure branches.
+- Runtime tune now applies against active runtime state (`activeEncodeW/H`, `activeFps`).
+
+2. Dynamic FPS pacing integration
+- File: `apps/native_poc/src/native_video_host_main.cpp`
+- Removed fixed `frameIntervalUs` usage from send pacing and interval error metrics.
+- Host tick pacing and frame-gating interval selection now use dynamic `activeFrameIntervalUs`.
+- Host periodic stats now include `fpsTarget=`.
+
+3. M9 apply mode activation
+- File: `apps/native_poc/src/native_video_host_main.cpp`
+- Removed deferred-only path (`apply-path-deferred=1`).
+- When `m9Apply=true`, M9 level transitions now apply target bitrate/fps/resolution through
+  `apply_encoder_target(...)` and trigger keyframe on successful level switch.
+- If apply fails, host logs error and exits loop (same failure posture as ABR apply failures).
+
+4. Policy conflict guard
+- File: `apps/native_poc/src/native_video_host_main.cpp`
+- ABR auto-switch block is now gated off while `m9Apply=true` to avoid ABR vs M9 dual-control conflict.
+
+Validation
+- Build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_host_poc remote60_native_video_client_poc --parallel`
+  - result: success
+
+Next
+- Run external 2PC validation with `m9Apply=true` and compare against `m9Apply=false` baseline:
+  - Gate A (`decoded FPS >= 20`) stability/freeze/readability
+  - M9 transition behavior and QoE impact in WAN logs.
+
+### 72) 2026-03-03 local verify smoke after docs/plan sync
+Goal
+- Record post-stage3 local validation snapshot before moving to external 2PC tests.
+
+Execution
+- Verify script runs (`build-vcpkg-local`, H264 + `mft_hw`):
+  1. `m9Apply=false` baseline run:
+     - log dir: `automation/logs/verify-native-video-20260303-164726`
+  2. `m9Apply=true` apply-mode run:
+     - log dir: `automation/logs/verify-native-video-20260303-164800`
+
+Result
+- Common:
+  - `HOST_RC=0`
+  - `CLIENT_RC=0`
+  - no process hang/timeout during run shutdown
+- Mode check:
+  - baseline host start log: `m9=off m9Mode=dry-run`
+  - apply host start log: `m9=on m9Mode=apply`
+- Encoder path:
+  - both runs report `H264 encoder backend=mft_enum_hw hw=1`
+
+Metrics note
+- This local environment had no captured frame flow:
+  - `DEC_COUNT=0`, `LAT_COUNT=0`, `M9_EVENT_COUNT=0`
+- Therefore, this run validates boot/mode wiring and shutdown stability only.
+- QoE/performance acceptance remains pending external 2PC measurement logs.

@@ -824,6 +824,22 @@ int main(int argc, char** argv) {
   const bool guardStalePreEncode = env_truthy("REMOTE60_NATIVE_GUARD_STALE_PREENCODE");
   const bool abrEnabled = useH264 && !env_truthy("REMOTE60_NATIVE_ABR_DISABLE");
   const bool abrQualityFirst = env_truthy("REMOTE60_NATIVE_ADAPTIVE_QUALITY_FIRST");
+  const bool m9Enabled = useH264 && env_truthy("REMOTE60_NATIVE_M9_ENABLE");
+  const bool m9Apply = m9Enabled && env_truthy("REMOTE60_NATIVE_M9_APPLY");
+  const uint32_t m9CooldownSec = env_u32_clamped("REMOTE60_NATIVE_M9_COOLDOWN_SEC", 4, 1, 60);
+  const uint32_t m9DownRequireSec = env_u32_clamped("REMOTE60_NATIVE_M9_DOWN_REQUIRE_SEC", 2, 1, 20);
+  const uint32_t m9UpRequireSec = env_u32_clamped("REMOTE60_NATIVE_M9_UP_REQUIRE_SEC", 8, 1, 60);
+  const uint32_t m9DecodedFpsFloorX100 = env_u32_clamped("REMOTE60_NATIVE_M9_DECODED_FPS_FLOOR_X100", 2000, 500, 12000);
+  const uint32_t m9DecodedFpsRecoverX100 = env_u32_clamped(
+      "REMOTE60_NATIVE_M9_DECODED_FPS_RECOVER_X100", 2500, 500, 12000);
+  const uint32_t m9QueueDepthHighFrames = env_u32_clamped("REMOTE60_NATIVE_M9_QUEUE_DEPTH_HIGH_FRAMES", 4, 1, 120);
+  const uint32_t m9QueueDepthLowFrames = env_u32_clamped("REMOTE60_NATIVE_M9_QUEUE_DEPTH_LOW_FRAMES", 1, 0, 120);
+  const uint32_t m9UdpDropPmHigh = env_u32_clamped("REMOTE60_NATIVE_M9_UDP_DROP_PM_HIGH", 120, 1, 1000);
+  const uint32_t m9UdpDropPmLow = env_u32_clamped("REMOTE60_NATIVE_M9_UDP_DROP_PM_LOW", 30, 0, 1000);
+  const uint32_t m9LatencyHighUs = env_u32_clamped("REMOTE60_NATIVE_M9_LATENCY_HIGH_US", 140000, 10000, 1000000);
+  const uint32_t m9LatencyLowUs = env_u32_clamped("REMOTE60_NATIVE_M9_LATENCY_LOW_US", 90000, 10000, 1000000);
+  const uint32_t m9TailHighUs = env_u32_clamped("REMOTE60_NATIVE_M9_TAIL_HIGH_US", 110000, 10000, 1000000);
+  const uint32_t m9TailLowUs = env_u32_clamped("REMOTE60_NATIVE_M9_TAIL_LOW_US", 70000, 10000, 1000000);
   const bool frameGatingEnabled = useH264 && !env_truthy("REMOTE60_NATIVE_FRAME_GATING_DISABLE");
   const uint32_t frameGatingStaticFps = env_u32_clamped(
       "REMOTE60_NATIVE_STATIC_SCENE_FPS", kFrameGatingStaticFpsDefault, 1, 30);
@@ -901,6 +917,8 @@ int main(int argc, char** argv) {
               << " staticSceneFps=" << frameGatingStaticFps
               << " gatingStaticPm=" << frameGatingStaticThresholdPermille
               << " gatingMotionPm=" << frameGatingMotionThresholdPermille
+              << " m9=" << (m9Enabled ? "on" : "off")
+              << " m9Mode=" << (m9Apply ? "apply" : "dry-run")
               << " keyReqMinUs=" << keyReqMinIntervalUs
               << " keyReqBucketCap=" << keyReqTokenCapacity
               << "\n";
@@ -1018,6 +1036,14 @@ int main(int argc, char** argv) {
   std::atomic<uint64_t> clientMetricsMaxLatencyUs{0};
   std::atomic<uint64_t> clientMetricsAvgDecodeTailUs{0};
   std::atomic<uint64_t> clientMetricsMaxDecodeTailUs{0};
+  std::atomic<uint32_t> clientMetricsCongestionState{0};
+  std::atomic<uint32_t> clientMetricsCongestionTransitions{0};
+  std::atomic<uint32_t> clientMetricsCongestionRecoveryCount{0};
+  std::atomic<uint32_t> clientMetricsCongestionRecoveryReq{0};
+  std::atomic<uint32_t> clientMetricsCongestionRecoveryMaxUs{0};
+  std::atomic<uint32_t> clientMetricsQueueDepthMax{0};
+  std::atomic<uint32_t> clientMetricsQueueDepthH4p{0};
+  std::atomic<uint32_t> clientMetricsUdpAssemblyDropPm{0};
   std::atomic<bool> clientRequestedKeyFrame{false};
   std::atomic<uint16_t> clientKeyFrameReason{0};
   std::atomic<uint64_t> clientKeyFrameRequestCount{0};
@@ -1133,6 +1159,14 @@ int main(int argc, char** argv) {
                 clientMetricsMaxLatencyUs = metrics.maxLatencyUs;
                 clientMetricsAvgDecodeTailUs = metrics.avgDecodeTailUs;
                 clientMetricsMaxDecodeTailUs = metrics.maxDecodeTailUs;
+                clientMetricsCongestionState = metrics.congestionState;
+                clientMetricsCongestionTransitions = metrics.congestionTransitions;
+                clientMetricsCongestionRecoveryCount = metrics.congestionRecoveryCount;
+                clientMetricsCongestionRecoveryReq = metrics.congestionRecoveryReq;
+                clientMetricsCongestionRecoveryMaxUs = metrics.congestionRecoveryMaxUs;
+                clientMetricsQueueDepthMax = metrics.queueDepthMax;
+                clientMetricsQueueDepthH4p = metrics.queueDepthH4p;
+                clientMetricsUdpAssemblyDropPm = metrics.udpAssemblyDropPm;
                 clientMetricsUpdatedUs = qpc_now_us();
                 continue;
               }
@@ -1299,25 +1333,90 @@ int main(int argc, char** argv) {
       abrHighBitrate, std::max<uint32_t>(1500000u, (abrHighBitrate * 55u) / 100u));
   const bool abrHasMidProfile = (abrMidBitrate < abrHighBitrate);
   const bool abrHasLowProfile = abrHasLowerResolution || (abrLowBitrate < abrMidBitrate);
+  const uint32_t m9BitrateLevel0 = abrHighBitrate;
+  const uint32_t m9BitrateLevel1 = std::min<uint32_t>(
+      m9BitrateLevel0, std::max<uint32_t>(1500000u, (m9BitrateLevel0 * 80u) / 100u));
+  const uint32_t m9BitrateLevel2 = std::min<uint32_t>(
+      m9BitrateLevel1, std::max<uint32_t>(1200000u, (m9BitrateLevel0 * 65u) / 100u));
+  const uint32_t m9BitrateLevel3 = std::min<uint32_t>(
+      m9BitrateLevel2, std::max<uint32_t>(900000u, (m9BitrateLevel0 * 50u) / 100u));
+  const uint32_t m9FpsLevel0 = args.fps;
+  const uint32_t m9FpsLevel1 = args.fps;
+  const uint32_t m9FpsLevel2 = std::max<uint32_t>(20u, (args.fps * 80u) / 100u);
+  const uint32_t m9FpsLevel3 = std::max<uint32_t>(15u, (args.fps * 67u) / 100u);
+  const uint32_t m9WidthLevel0 = abrHighW;
+  const uint32_t m9HeightLevel0 = abrHighH;
+  const uint32_t m9WidthLevel1 = abrHighW;
+  const uint32_t m9HeightLevel1 = abrHighH;
+  const uint32_t m9WidthLevel2 = abrHighW;
+  const uint32_t m9HeightLevel2 = abrHighH;
+  const uint32_t m9WidthLevel3 = abrLowW;
+  const uint32_t m9HeightLevel3 = abrLowH;
   int abrProfile = 0;  // 0: high, 1: mid, 2: low
   uint32_t activeEncodeW = abrHighW;
   uint32_t activeEncodeH = abrHighH;
+  uint32_t activeFps = args.fps;
   uint32_t activeBitrate = abrHighBitrate;
   uint32_t activeKeyint = args.keyint;
+  uint64_t activeFrameIntervalUs =
+      std::max<uint64_t>(1, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, activeFps)));
+  uint64_t frameGatingStaticIntervalUs =
+      std::max<uint64_t>(activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGatingStaticFps));
   bool runtimeTuneManualOverride = false;
   uint64_t abrCooldownUntilUs = 0;
   uint32_t abrGoodSeconds = 0;
   uint32_t abrModeratePressureSeconds = 0;
   uint32_t abrSeverePressureSeconds = 0;
+  int m9Level = 0;
+  uint64_t m9CooldownUntilUs = 0;
+  uint32_t m9DownPressureSeconds = 0;
+  uint32_t m9UpPressureSeconds = 0;
   int64_t captureTimelineOriginUs = -1;
   int64_t auTimelineOriginUs = -1;
   auto resetHostTimelineAnchors = [&]() {
     captureTimelineOriginUs = -1;
     auTimelineOriginUs = -1;
   };
+  auto refresh_frame_intervals = [&]() {
+    activeFrameIntervalUs =
+        std::max<uint64_t>(1, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, activeFps)));
+    frameGatingStaticIntervalUs =
+        std::max<uint64_t>(activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGatingStaticFps));
+  };
+  auto apply_encoder_target = [&](uint32_t targetW, uint32_t targetH, uint32_t targetFps,
+                                  uint32_t targetBitrate, uint32_t targetKeyint) -> bool {
+    const bool keyintChanged = (targetKeyint != activeKeyint);
+    const bool fpsChanged = (targetFps != activeFps);
+    const bool resizeChanged = (targetW != activeEncodeW || targetH != activeEncodeH);
+    const bool bitrateChanged = (targetBitrate != activeBitrate);
+
+    if (keyintChanged || fpsChanged || resizeChanged) {
+      encoder.shutdown();
+      if (!encoder.initialize(targetW, targetH, targetFps, targetBitrate, targetKeyint)) {
+        return false;
+      }
+      resetHostTimelineAnchors();
+    } else if (bitrateChanged) {
+      if (!encoder.reconfigure_bitrate(targetBitrate)) {
+        encoder.shutdown();
+        if (!encoder.initialize(targetW, targetH, targetFps, targetBitrate, targetKeyint)) {
+          return false;
+        }
+        resetHostTimelineAnchors();
+      }
+    }
+
+    activeEncodeW = targetW;
+    activeEncodeH = targetH;
+    activeFps = targetFps;
+    activeBitrate = targetBitrate;
+    activeKeyint = targetKeyint;
+    refresh_frame_intervals();
+    return true;
+  };
 
   if (useH264) {
-    if (!encoder.initialize(activeEncodeW, activeEncodeH, args.fps, activeBitrate, activeKeyint)) {
+    if (!encoder.initialize(activeEncodeW, activeEncodeH, activeFps, activeBitrate, activeKeyint)) {
       std::cerr << "[native-video-host] H264 encoder initialize failed\n";
       closesocket(clientSock);
       if (mfStarted) MFShutdown();
@@ -1538,7 +1637,6 @@ int main(int argc, char** argv) {
     return 10;
   }
 
-  const uint64_t frameIntervalUs = std::max<uint64_t>(1, 1000000ULL / args.fps);
   const uint64_t startUs = qpc_now_us();
   uint64_t nextTickUs = startUs;
   // For encoded path, latency is prioritized over strict send pacing.
@@ -1593,8 +1691,6 @@ int main(int argc, char** argv) {
   uint64_t frameGatingChangePermilleLast = 1000;
   uint64_t frameGatingChangePermilleSum = 0;
   uint64_t frameGatingChangePermilleCount = 0;
-  const uint64_t frameGatingStaticIntervalUs =
-      std::max<uint64_t>(frameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGatingStaticFps));
   auto pump_udp_hello = [&]() {
     if (transport != VideoTransport::Udp) return;
     for (;;) {
@@ -1663,6 +1759,14 @@ int main(int argc, char** argv) {
       std::cout << "[native-video-host] client reconnected transport=tcp sndbuf="
                 << effectiveSendBuf << " bytes\n";
       clientMetricsUpdatedUs = 0;
+      clientMetricsCongestionState = 0;
+      clientMetricsCongestionTransitions = 0;
+      clientMetricsCongestionRecoveryCount = 0;
+      clientMetricsCongestionRecoveryReq = 0;
+      clientMetricsCongestionRecoveryMaxUs = 0;
+      clientMetricsQueueDepthMax = 0;
+      clientMetricsQueueDepthH4p = 0;
+      clientMetricsUdpAssemblyDropPm = 0;
       clientRequestedKeyFrame = false;
       clientKeyFrameReason = 0;
       runtimeTunePending = false;
@@ -1701,30 +1805,10 @@ int main(int argc, char** argv) {
       const bool bitrateChanged = (targetBitrate != activeBitrate);
       const bool keyintChanged = (targetKeyint != activeKeyint);
       if (bitrateChanged || keyintChanged) {
-        bool applyOk = true;
-        if (keyintChanged) {
-          encoder.shutdown();
-          if (!encoder.initialize(activeEncodeW, activeEncodeH, args.fps, targetBitrate, targetKeyint)) {
-            applyOk = false;
-          } else {
-            resetHostTimelineAnchors();
-          }
-        } else if (bitrateChanged) {
-          if (!encoder.reconfigure_bitrate(targetBitrate)) {
-            encoder.shutdown();
-            if (!encoder.initialize(activeEncodeW, activeEncodeH, args.fps, targetBitrate, targetKeyint)) {
-              applyOk = false;
-            } else {
-              resetHostTimelineAnchors();
-            }
-          }
-        }
-        if (!applyOk) {
+        if (!apply_encoder_target(activeEncodeW, activeEncodeH, activeFps, targetBitrate, targetKeyint)) {
           std::cerr << "[native-video-host][control] runtime-config apply failed seq=" << reqSeq << "\n";
           break;
         }
-        activeBitrate = targetBitrate;
-        activeKeyint = targetKeyint;
         runtimeTuneManualOverride = true;
         abrCooldownUntilUs = nowUs + 3000000ULL;
         abrGoodSeconds = 0;
@@ -1779,7 +1863,7 @@ int main(int argc, char** argv) {
       if (nowUs > nextTickUs) {
         nextTickUs = nowUs;
       }
-      nextTickUs += frameIntervalUs;
+      nextTickUs += activeFrameIntervalUs;
     }
 
     std::shared_ptr<std::vector<uint8_t>> payload;
@@ -1936,7 +2020,7 @@ int main(int argc, char** argv) {
       }
 
       const bool keyReqPending = clientRequestedKeyFrame.load(std::memory_order_acquire);
-      const uint64_t targetIntervalUs = frameGatingStaticMode ? frameGatingStaticIntervalUs : frameIntervalUs;
+      const uint64_t targetIntervalUs = frameGatingStaticMode ? frameGatingStaticIntervalUs : activeFrameIntervalUs;
       if (!keyReqPending &&
           frameGatingLastSentUs > 0 &&
           queuePopUs < (frameGatingLastSentUs + targetIntervalUs)) {
@@ -1976,9 +2060,9 @@ int main(int argc, char** argv) {
       const uint64_t sendIntervalUs =
           (lastSendStartUs > 0 && sendStartUs >= lastSendStartUs) ? (sendStartUs - lastSendStartUs) : 0;
       const uint64_t sendIntervalErrUs =
-          (frameIntervalUs > 0 && sendIntervalUs > 0)
-              ? ((sendIntervalUs >= frameIntervalUs) ? (sendIntervalUs - frameIntervalUs)
-                                                   : (frameIntervalUs - sendIntervalUs))
+          (activeFrameIntervalUs > 0 && sendIntervalUs > 0)
+              ? ((sendIntervalUs >= activeFrameIntervalUs) ? (sendIntervalUs - activeFrameIntervalUs)
+                                                           : (activeFrameIntervalUs - sendIntervalUs))
               : 0;
       const uint64_t queueToSendUs = (sendStartUs >= queuePopUs) ? (sendStartUs - queuePopUs) : 0;
       const uint64_t sendWaitUs = queueToSendUs;
@@ -2249,7 +2333,7 @@ int main(int argc, char** argv) {
             std::cout << "[native-video-host] encoder reset due to stale output age="
                       << encodedAgeUs << "us consecutive=" << consecutiveStaleEncodedFrames << "\n";
             encoder.shutdown();
-            if (!encoder.initialize(activeEncodeW, activeEncodeH, args.fps, activeBitrate, activeKeyint)) {
+            if (!encoder.initialize(activeEncodeW, activeEncodeH, activeFps, activeBitrate, activeKeyint)) {
             std::cerr << "[native-video-host] encoder reinitialize failed\n";
               sendFailed = true;
               break;
@@ -2282,9 +2366,9 @@ int main(int argc, char** argv) {
         const uint64_t sendIntervalUs =
             (lastSendStartUs > 0 && sendStartUs >= lastSendStartUs) ? (sendStartUs - lastSendStartUs) : 0;
         const uint64_t sendIntervalErrUs =
-            (frameIntervalUs > 0 && sendIntervalUs > 0)
-                ? ((sendIntervalUs >= frameIntervalUs) ? (sendIntervalUs - frameIntervalUs)
-                                                     : (frameIntervalUs - sendIntervalUs))
+            (activeFrameIntervalUs > 0 && sendIntervalUs > 0)
+                ? ((sendIntervalUs >= activeFrameIntervalUs) ? (sendIntervalUs - activeFrameIntervalUs)
+                                                             : (activeFrameIntervalUs - sendIntervalUs))
                 : 0;
         const uint64_t queueToSendUs = (sendStartUs >= queuePopUs) ? (sendStartUs - queuePopUs) : 0;
         const uint64_t sendToEncodeUs = (sendStartUs >= encodeEndUs) ? (sendStartUs - encodeEndUs) : 0;
@@ -2643,6 +2727,7 @@ int main(int argc, char** argv) {
                   << " udpTxFail=" << udpTxFail
                   << " udpTxNoPeer=" << udpTxNoPeer
                   << " bitrateTarget=" << activeBitrate
+                  << " fpsTarget=" << activeFps
                   << " keyintTarget=" << activeKeyint
                   << " size=" << activeEncodeW << "x" << activeEncodeH
                   << " gpuScaleReq=" << (gpuScalerRequested ? 1 : 0)
@@ -2663,18 +2748,25 @@ int main(int argc, char** argv) {
                   << " frameGatingChangeAvgPm=" << frameGatingChangeAvgPm
                   << "\n";
 
-        if (abrEnabled && !runtimeTuneManualOverride) {
-          const uint64_t metricsUpdatedUs = clientMetricsUpdatedUs.load();
-          const bool metricsFresh =
-              (metricsUpdatedUs > 0) && (t >= metricsUpdatedUs) && ((t - metricsUpdatedUs) <= 3000000ULL);
+        const uint64_t metricsUpdatedUs = clientMetricsUpdatedUs.load();
+        const bool metricsFresh =
+            (metricsUpdatedUs > 0) && (t >= metricsUpdatedUs) && ((t - metricsUpdatedUs) <= 3000000ULL);
+        const uint64_t clAvgLatencyUs = metricsFresh ? clientMetricsAvgLatencyUs.load() : 0;
+        const uint64_t clAvgDecodeTailUs = metricsFresh ? clientMetricsAvgDecodeTailUs.load() : 0;
+        const uint32_t clDecodedFpsX100 = metricsFresh ? clientMetricsDecodedFpsX100.load() : 0;
+        const uint32_t clRecvMbpsX1000 = metricsFresh ? clientMetricsRecvMbpsX1000.load() : 0;
+        const uint32_t clWidth = metricsFresh ? clientMetricsWidth.load() : 0;
+        const uint32_t clHeight = metricsFresh ? clientMetricsHeight.load() : 0;
+        const uint32_t clCongestionState = metricsFresh ? clientMetricsCongestionState.load() : 0;
+        const uint32_t clCongestionTransitions = metricsFresh ? clientMetricsCongestionTransitions.load() : 0;
+        const uint32_t clCongestionRecoveryCount = metricsFresh ? clientMetricsCongestionRecoveryCount.load() : 0;
+        const uint32_t clCongestionRecoveryReq = metricsFresh ? clientMetricsCongestionRecoveryReq.load() : 0;
+        const uint32_t clCongestionRecoveryMaxUs = metricsFresh ? clientMetricsCongestionRecoveryMaxUs.load() : 0;
+        const uint32_t clQueueDepthMax = metricsFresh ? clientMetricsQueueDepthMax.load() : 0;
+        const uint32_t clQueueDepthH4p = metricsFresh ? clientMetricsQueueDepthH4p.load() : 0;
+        const uint32_t clUdpDropPm = metricsFresh ? clientMetricsUdpAssemblyDropPm.load() : 0;
 
-          const uint64_t clAvgLatencyUs = metricsFresh ? clientMetricsAvgLatencyUs.load() : 0;
-          const uint64_t clAvgDecodeTailUs = metricsFresh ? clientMetricsAvgDecodeTailUs.load() : 0;
-          const uint32_t clDecodedFpsX100 = metricsFresh ? clientMetricsDecodedFpsX100.load() : 0;
-          const uint32_t clRecvMbpsX1000 = metricsFresh ? clientMetricsRecvMbpsX1000.load() : 0;
-          const uint32_t clWidth = metricsFresh ? clientMetricsWidth.load() : 0;
-          const uint32_t clHeight = metricsFresh ? clientMetricsHeight.load() : 0;
-
+        if (abrEnabled && !runtimeTuneManualOverride && !m9Apply) {
           const uint32_t minGoodFpsX100 = args.fps * (abrQualityFirst ? 95u : 93u);
           const uint32_t minOkayFpsX100 = args.fps * (abrQualityFirst ? 90u : 85u);
           const uint32_t minDegradeFpsX100 = args.fps * (abrQualityFirst ? 55u : 45u);
@@ -2804,34 +2896,11 @@ int main(int argc, char** argv) {
               targetBitrate = abrLowBitrate;
             }
 
-            bool switchOk = true;
-            if (targetW != activeEncodeW || targetH != activeEncodeH) {
-              encoder.shutdown();
-              if (!encoder.initialize(targetW, targetH, args.fps, targetBitrate, activeKeyint)) {
-                std::cerr << "[native-video-host][abr] encoder reinitialize failed for profile switch\n";
-                switchOk = false;
-              } else {
-                resetHostTimelineAnchors();
-              }
-            } else if (targetBitrate != activeBitrate) {
-              if (!encoder.reconfigure_bitrate(targetBitrate)) {
-                encoder.shutdown();
-                if (!encoder.initialize(targetW, targetH, args.fps, targetBitrate, activeKeyint)) {
-                  std::cerr << "[native-video-host][abr] encoder bitrate reconfigure/reinit failed\n";
-                  switchOk = false;
-                } else {
-                  resetHostTimelineAnchors();
-                }
-              }
-            }
-
-            if (!switchOk) {
+            if (!apply_encoder_target(targetW, targetH, activeFps, targetBitrate, activeKeyint)) {
+              std::cerr << "[native-video-host][abr] encoder profile apply failed\n";
               break;
             }
 
-            activeEncodeW = targetW;
-            activeEncodeH = targetH;
-            activeBitrate = targetBitrate;
             abrProfile = targetProfile;
             abrGoodSeconds = 0;
             abrModeratePressureSeconds = 0;
@@ -2850,6 +2919,115 @@ int main(int argc, char** argv) {
                       << " clientAvgTailUs=" << clAvgDecodeTailUs
                       << " clientMbps=" << (clRecvMbpsX1000 / 1000.0)
                       << "\n";
+          }
+        }
+
+        if (m9Enabled && !runtimeTuneManualOverride) {
+          const bool downByClient =
+              metricsFresh &&
+              (clCongestionState == 2 ||
+               clDecodedFpsX100 < m9DecodedFpsFloorX100 ||
+               clQueueDepthMax >= m9QueueDepthHighFrames ||
+               clUdpDropPm >= m9UdpDropPmHigh ||
+               clAvgLatencyUs >= m9LatencyHighUs ||
+               clAvgDecodeTailUs >= m9TailHighUs);
+          const bool downByHostFallback =
+              (!metricsFresh && cb2eAvgUs >= m9TailHighUs);
+          const bool downPressure = downByClient || downByHostFallback;
+          const bool upPressure =
+              metricsFresh &&
+              clCongestionState == 0 &&
+              clDecodedFpsX100 >= m9DecodedFpsRecoverX100 &&
+              clQueueDepthMax <= m9QueueDepthLowFrames &&
+              clUdpDropPm <= m9UdpDropPmLow &&
+              clAvgLatencyUs <= m9LatencyLowUs &&
+              clAvgDecodeTailUs <= m9TailLowUs;
+
+          if (downPressure) {
+            ++m9DownPressureSeconds;
+          } else {
+            m9DownPressureSeconds = 0;
+          }
+          if (upPressure) {
+            ++m9UpPressureSeconds;
+          } else {
+            m9UpPressureSeconds = 0;
+          }
+
+          int targetLevel = m9Level;
+          const char* m9Reason = "hold";
+          if (t >= m9CooldownUntilUs) {
+            if (downPressure && m9DownPressureSeconds >= m9DownRequireSec && targetLevel < 3) {
+              ++targetLevel;
+              m9Reason = downByClient ? "client_pressure" : "host_fallback_pressure";
+            } else if (upPressure && m9UpPressureSeconds >= m9UpRequireSec && targetLevel > 0) {
+              --targetLevel;
+              m9Reason = "client_recovered";
+            }
+          }
+
+          auto m9_level_bitrate = [&](int level) -> uint32_t {
+            if (level <= 0) return m9BitrateLevel0;
+            if (level == 1) return m9BitrateLevel1;
+            if (level == 2) return m9BitrateLevel2;
+            return m9BitrateLevel3;
+          };
+          auto m9_level_fps = [&](int level) -> uint32_t {
+            if (level <= 0) return m9FpsLevel0;
+            if (level == 1) return m9FpsLevel1;
+            if (level == 2) return m9FpsLevel2;
+            return m9FpsLevel3;
+          };
+          auto m9_level_w = [&](int level) -> uint32_t {
+            if (level <= 0) return m9WidthLevel0;
+            if (level == 1) return m9WidthLevel1;
+            if (level == 2) return m9WidthLevel2;
+            return m9WidthLevel3;
+          };
+          auto m9_level_h = [&](int level) -> uint32_t {
+            if (level <= 0) return m9HeightLevel0;
+            if (level == 1) return m9HeightLevel1;
+            if (level == 2) return m9HeightLevel2;
+            return m9HeightLevel3;
+          };
+
+          if (targetLevel != m9Level) {
+            const char* action = (targetLevel > m9Level) ? "down" : "up";
+            const uint32_t targetBitrate = m9_level_bitrate(targetLevel);
+            const uint32_t targetFps = m9_level_fps(targetLevel);
+            const uint32_t targetW = m9_level_w(targetLevel);
+            const uint32_t targetH = m9_level_h(targetLevel);
+            std::cout << "[native-video-host][m9] action=" << action
+                      << " mode=" << (m9Apply ? "apply" : "dryrun")
+                      << " fromLevel=" << m9Level
+                      << " toLevel=" << targetLevel
+                      << " reason=" << m9Reason
+                      << " targetBitrate=" << targetBitrate
+                      << " targetFps=" << targetFps
+                      << " targetSize=" << targetW << "x" << targetH
+                      << " decodedFps=" << (clDecodedFpsX100 / 100.0)
+                      << " avgLatUs=" << clAvgLatencyUs
+                      << " avgTailUs=" << clAvgDecodeTailUs
+                      << " queueDepthMax=" << clQueueDepthMax
+                      << " queueDepthH4p=" << clQueueDepthH4p
+                      << " udpDropPm=" << clUdpDropPm
+                      << " congState=" << clCongestionState
+                      << " congTrans=" << clCongestionTransitions
+                      << " congRecCnt=" << clCongestionRecoveryCount
+                      << " congRecReq=" << clCongestionRecoveryReq
+                      << " congRecMaxUs=" << clCongestionRecoveryMaxUs
+                      << "\n";
+            if (m9Apply) {
+              if (!apply_encoder_target(targetW, targetH, targetFps, targetBitrate, activeKeyint)) {
+                std::cerr << "[native-video-host][m9] encoder target apply failed level=" << targetLevel << "\n";
+                break;
+              }
+              forceKeyNext = true;
+            }
+            m9Level = targetLevel;
+            m9CooldownUntilUs = t + static_cast<uint64_t>(m9CooldownSec) * 1000000ULL;
+            m9DownPressureSeconds = 0;
+            m9UpPressureSeconds = 0;
           }
         }
       }
