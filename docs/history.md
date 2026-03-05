@@ -768,3 +768,24 @@ Validation
 Next
 - Repeat `automation/validate_m13_mode_switch.ps1` with window placement variants if click target selection becomes unstable.
 - After 2PC is available, run emulator preset sessions and close M13 phase4 acceptance.
+
+### 82) 2026-03-05 workflow policy update (require git MCP for commit step)
+Goal
+- Clarify AGENTS workflow so commit actions use git MCP tools instead of generic shell git commands.
+
+Changes
+1. Updated commit-step wording in agent policy
+- File: `AGENTS.md`
+- Changed workflow step 3 to:
+  - "Commit only task-related changes with a clear Conventional Commit message, using git MCP tools."
+
+2. Progress snapshot sync
+- Files:
+  - `docs/history.md`
+  - `docs/구현계획.md`
+
+Validation
+- Confirmed updated text is present in `AGENTS.md`.
+
+Next
+- Use `mcp__git__*` tools as the default path for staging/commit operations.
