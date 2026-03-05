@@ -478,6 +478,30 @@ Next
   - host `off/on`, client `off/on`, summary `off/on`
   - judge Gate A and M9 transition behavior from summary output.
 
+### 76) 2026-03-05 workflow decision: single wrapup skill with optional gate-report
+Goal
+- Avoid overlap between separate wrapup and gate-report skills.
+- Keep one reusable workflow for post-task documentation + commit.
+
+Decision
+- Use a single skill:
+  - `post-task-wrapup` (global Codex skill)
+- Add optional mode:
+  - `gate-report` for Gate A/B/C judgement only when test artifacts exist.
+
+Implemented
+- Created global skill files under:
+  - `C:\Users\shota\.codex\skills\post-task-wrapup\SKILL.md`
+  - `C:\Users\shota\.codex\skills\post-task-wrapup\agents\openai.yaml`
+  - `C:\Users\shota\.codex\skills\post-task-wrapup\references\gate-report-template.md`
+
+Validation
+- Verified skill directory and files exist.
+
+Next
+- Use `post-task-wrapup` as default after each meaningful task.
+- Invoke gate-report mode only when Gate evidence extraction is needed.
+
 ### 75) 2026-03-05 M13 phase1 start (window-scoped host capture + rebind)
 Goal
 - Start M13 implementation that does not require external 2PC:
