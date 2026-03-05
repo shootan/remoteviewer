@@ -18,3 +18,6 @@ After each meaningful task is completed, do all of the following in order:
 - Do not include unrelated files in commits.
 - Do not revert user changes unless explicitly requested.
 - If no file change is required, state why and skip commit.
+- Keep role separation strict:
+  - write history narrative only in `docs/history.md`
+  - update only checklist/progress status in `docs/구현계획.md`

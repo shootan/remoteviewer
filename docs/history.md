@@ -47,3 +47,27 @@ Validation
 Next
 - Keep future task logs only in `docs/history.md`.
 - Update `docs/구현계획.md` by checkbox/status changes only.
+
+### 84) 2026-03-05 docs rule enforcement (plan cleanup + role separation)
+Goal
+- Enforce strict split: history content in `docs/history.md` only, checklist status in `docs/구현계획.md` only.
+
+Changes
+1. Plan cleanup
+- File: `docs/구현계획.md`
+- Removed tail handoff/history sections (from `## 7) Context Handoff Snapshot ...` onward).
+- Kept initial checklist/priorities and added explicit document-operation rules.
+
+2. Agent policy clarification
+- File: `AGENTS.md`
+- Added explicit line that:
+  - `docs/history.md` keeps history only
+  - `docs/구현계획.md` keeps checklist status updates only
+
+Validation
+- Confirmed `docs/구현계획.md` no longer contains `Context Handoff Snapshot`, `Roadmap Update`, or trailing English roadmap blocks.
+- Confirmed AGENTS workflow now explicitly states history/plan role separation.
+
+Next
+- Continue updating only checklist checkboxes/status in `docs/구현계획.md`.
+- Write all execution narratives and outcomes only to `docs/history.md`.
