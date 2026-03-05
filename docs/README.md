@@ -6,8 +6,8 @@
 3. Read `docs/history.md` for recent context only.
 
 ## History Rule
-- Do **not** read `docs/history_old.md` by default.
-- Use `docs/history_old.md` only when explicitly required for deep legacy context.
+- Do **not** read `docs/history_old.md` or `docs/history_old2.md` by default.
+- Use `docs/history_old.md`/`docs/history_old2.md` only when explicitly required for deep legacy context.
 
 ## Execution Rule
 - Follow `docs/구현계획.md` milestones and priority exactly.
@@ -15,5 +15,5 @@
 
 ## After Work (Mandatory)
 - Append a concise summary to `docs/history.md`.
-- Update completion/progress status in `docs/구현계획.md` for finished items.
+- Update checkbox/progress status only in `docs/구현계획.md` for finished items (no history narrative append).
 - Keep docs synchronized with actual code state before final report.
