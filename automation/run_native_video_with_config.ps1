@@ -93,6 +93,10 @@ $m9Apply = Get-BoolValue $cfg "m9Apply" $false
 $m9CooldownSec = Get-IntValue $cfg "m9CooldownSec" 0
 $m9DownRequireSec = Get-IntValue $cfg "m9DownRequireSec" 0
 $m9UpRequireSec = Get-IntValue $cfg "m9UpRequireSec" 0
+$captureWindowProcess = Get-StringValue $cfg "captureWindowProcess" ""
+$captureWindowTitle = Get-StringValue $cfg "captureWindowTitle" ""
+$captureWindowClientOnly = Get-BoolValue $cfg "captureWindowClientOnly" $false
+$captureWindowRebindIntervalMs = Get-IntValue $cfg "captureWindowRebindIntervalMs" 0
 
 # Ensure old shell env doesn't leak into this run.
 @(
@@ -217,6 +221,18 @@ if ($Role -eq "host") {
     if ($encodeWidth -gt 0 -and $encodeHeight -gt 0) {
       $args += @("--encode-width", "$encodeWidth", "--encode-height", "$encodeHeight")
     }
+  }
+  if (-not [string]::IsNullOrWhiteSpace($captureWindowProcess)) {
+    $args += @("--capture-window-process", $captureWindowProcess)
+  }
+  if (-not [string]::IsNullOrWhiteSpace($captureWindowTitle)) {
+    $args += @("--capture-window-title", $captureWindowTitle)
+  }
+  if ($captureWindowClientOnly) {
+    $args += "--capture-window-client-only"
+  }
+  if ($captureWindowRebindIntervalMs -gt 0) {
+    $args += @("--capture-window-rebind-interval-ms", "$captureWindowRebindIntervalMs")
   }
 
   Write-Output "ROLE=host"

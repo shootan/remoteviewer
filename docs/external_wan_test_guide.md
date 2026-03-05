@@ -23,6 +23,23 @@ netsh advfirewall firewall add rule name="Remote60 Native Video TCP43001" dir=in
 - Option B: edit `remoteHost` in JSON profile
   - `automation/native_video_profile_1080p_external_template.json`
 
+## Optional window-scoped capture (M13 phase1)
+Add these keys in host JSON profile when you want to capture only a target app window:
+- `captureWindowProcess`: comma-separated process names (example: `dnplayer.exe,HD-Player.exe,Nox.exe`)
+- `captureWindowTitle`: substring filter for window title
+- `captureWindowClientOnly`: `true` to crop to client-area
+- `captureWindowRebindIntervalMs`: rebind polling interval (default/recommended `1000`)
+
+Example:
+```json
+{
+  "captureWindowProcess": "dnplayer.exe,HD-Player.exe,Nox.exe",
+  "captureWindowTitle": "LDPlayer",
+  "captureWindowClientOnly": true,
+  "captureWindowRebindIntervalMs": 1000
+}
+```
+
 ## Recommended FHD profiles
 - `automation/native_video_profile_1080p_lowlat.json` (8Mbps, low-latency baseline)
 - `automation/native_video_profile_1080p_wan_quality.json` (10Mbps, keyint 60, frame gating off)

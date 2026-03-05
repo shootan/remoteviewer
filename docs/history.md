@@ -477,3 +477,65 @@ Next
 - Run external 2PC with the short sequence:
   - host `off/on`, client `off/on`, summary `off/on`
   - judge Gate A and M9 transition behavior from summary output.
+
+### 75) 2026-03-05 M13 phase1 start (window-scoped host capture + rebind)
+Goal
+- Start M13 implementation that does not require external 2PC:
+  - window-target selection by process/title
+  - client-area scoped capture path
+  - automatic capture session rebind when target window handle/size changes
+
+Changes
+1. Host window target selection + rebind
+- File: `apps/native_poc/src/native_video_host_main.cpp`
+- Added host args:
+  - `--capture-window-process`
+  - `--capture-window-title`
+  - `--capture-window-client-only`
+  - `--capture-window-rebind-interval-ms`
+- Added window discovery/match logic:
+  - visible/non-minimized top-level candidate filtering
+  - process-name and title-substring filtering
+- Added periodic target re-discovery and session rebind.
+
+2. Capture resource refresh for size changes
+- File: `apps/native_poc/src/native_video_host_main.cpp`
+- Capture callback now detects source size mismatch and requests session restart.
+- Restart path now recreates staging texture + frame pool size from current capture item size.
+- Host periodic stats now include:
+  - `captureTargetPid`
+  - `captureTargetProc`
+  - `captureTargetHwnd`
+
+3. Client-area crop path
+- File: `apps/native_poc/src/native_video_host_main.cpp`
+- Added optional client-area crop in callback when `--capture-window-client-only` is enabled.
+
+4. JSON/runtime wiring
+- File: `automation/run_native_video_with_config.ps1`
+- Added profile keys:
+  - `captureWindowProcess`
+  - `captureWindowTitle`
+  - `captureWindowClientOnly`
+  - `captureWindowRebindIntervalMs`
+- Added host arg wiring for those keys.
+- Updated profiles:
+  - `automation/native_video_profile_1080p_lowlat.json`
+  - `automation/native_video_profile_1080p_wan_quality.json`
+  - `automation/native_video_profile_1080p_external_template.json`
+
+5. Runbook note
+- File: `docs/external_wan_test_guide.md`
+- Added optional section for window-scoped capture keys/example.
+
+Validation
+- Build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_host_poc remote60_native_video_client_poc --parallel`
+  - result: success
+
+Next
+- Run local/real host validation for emulator targets with:
+  - `captureWindowProcess`, `captureWindowTitle`, `captureWindowClientOnly=true`
+- Collect logs for:
+  - `capture-window rebound ...`
+  - `capture-size-updated ...`

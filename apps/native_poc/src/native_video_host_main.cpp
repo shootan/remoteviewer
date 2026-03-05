@@ -23,16 +23,19 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <cwctype>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include "mf_h264_codec.hpp"
@@ -138,7 +141,211 @@ uint32_t encoder_api_path_code(const char* backendName) {
   return 6;
 }
 
-winrt::Windows::Graphics::Capture::GraphicsCaptureItem CreateItemForPrimaryMonitor() {
+std::string trim_ascii(std::string v) {
+  size_t start = 0;
+  while (start < v.size() && std::isspace(static_cast<unsigned char>(v[start])) != 0) {
+    ++start;
+  }
+  size_t end = v.size();
+  while (end > start && std::isspace(static_cast<unsigned char>(v[end - 1])) != 0) {
+    --end;
+  }
+  return v.substr(start, end - start);
+}
+
+std::string ascii_lower(std::string v) {
+  std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return v;
+}
+
+std::wstring utf8_to_wide(const std::string& utf8) {
+  if (utf8.empty()) return std::wstring{};
+  const int n = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+  if (n <= 1) return std::wstring{};
+  std::wstring out(static_cast<size_t>(n - 1), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, out.data(), n);
+  return out;
+}
+
+std::string wide_to_utf8(const std::wstring& wide) {
+  if (wide.empty()) return std::string{};
+  const int n = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, nullptr, 0, nullptr, nullptr);
+  if (n <= 1) return std::string{};
+  std::string out(static_cast<size_t>(n - 1), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, out.data(), n, nullptr, nullptr);
+  return out;
+}
+
+std::wstring wide_lower(std::wstring v) {
+  std::transform(v.begin(), v.end(), v.begin(), [](wchar_t c) {
+    return static_cast<wchar_t>(std::towlower(c));
+  });
+  return v;
+}
+
+std::vector<std::string> parse_csv_lower(const std::string& raw) {
+  std::vector<std::string> out;
+  size_t start = 0;
+  while (start <= raw.size()) {
+    const size_t comma = raw.find(',', start);
+    const size_t end = (comma == std::string::npos) ? raw.size() : comma;
+    const std::string token = trim_ascii(raw.substr(start, end - start));
+    if (!token.empty()) {
+      out.push_back(ascii_lower(token));
+    }
+    if (comma == std::string::npos) break;
+    start = comma + 1;
+  }
+  return out;
+}
+
+std::string base_name_lower(std::string path) {
+  if (path.empty()) return path;
+  const size_t slashPos = path.find_last_of("\\/");
+  if (slashPos != std::string::npos && slashPos + 1 < path.size()) {
+    path = path.substr(slashPos + 1);
+  }
+  return ascii_lower(path);
+}
+
+std::string get_window_process_name(HWND hwnd, uint32_t* outPid) {
+  if (outPid) *outPid = 0;
+  if (!hwnd) return std::string{};
+  DWORD pid = 0;
+  GetWindowThreadProcessId(hwnd, &pid);
+  if (pid == 0) return std::string{};
+  if (outPid) *outPid = static_cast<uint32_t>(pid);
+  HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (!proc) return std::string{};
+  char buf[1024] = {};
+  DWORD len = static_cast<DWORD>(sizeof(buf));
+  std::string out;
+  if (QueryFullProcessImageNameA(proc, 0, buf, &len) != 0 && len > 0) {
+    out.assign(buf, buf + len);
+  }
+  CloseHandle(proc);
+  return base_name_lower(out);
+}
+
+std::wstring get_window_title(HWND hwnd) {
+  if (!hwnd) return std::wstring{};
+  const int len = GetWindowTextLengthW(hwnd);
+  if (len <= 0) return std::wstring{};
+  std::wstring title(static_cast<size_t>(len), L'\0');
+  const int copied = GetWindowTextW(hwnd, title.data(), len + 1);
+  if (copied <= 0) return std::wstring{};
+  title.resize(static_cast<size_t>(copied));
+  return title;
+}
+
+struct CaptureWindowCriteria {
+  std::unordered_set<std::string> processNamesLower;
+  std::wstring titleNeedleLower;
+  bool enabled() const {
+    return !processNamesLower.empty() || !titleNeedleLower.empty();
+  }
+};
+
+struct CaptureWindowInfo {
+  HWND hwnd = nullptr;
+  uint32_t pid = 0;
+  std::string processName;
+  std::wstring title;
+};
+
+bool match_capture_window(HWND hwnd, const CaptureWindowCriteria& criteria, CaptureWindowInfo* outInfo) {
+  if (!hwnd || !IsWindow(hwnd)) return false;
+  if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return false;
+  const LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
+  if ((style & WS_VISIBLE) == 0) return false;
+  if (GetWindow(hwnd, GW_OWNER) != nullptr) return false;
+
+  uint32_t pid = 0;
+  const std::string processName = get_window_process_name(hwnd, &pid);
+  if (!criteria.processNamesLower.empty()) {
+    if (processName.empty()) return false;
+    if (criteria.processNamesLower.find(processName) == criteria.processNamesLower.end()) return false;
+  }
+  const std::wstring title = get_window_title(hwnd);
+  if (!criteria.titleNeedleLower.empty()) {
+    if (title.empty()) return false;
+    const std::wstring titleLower = wide_lower(title);
+    if (titleLower.find(criteria.titleNeedleLower) == std::wstring::npos) return false;
+  }
+
+  if (outInfo) {
+    outInfo->hwnd = hwnd;
+    outInfo->pid = pid;
+    outInfo->processName = processName;
+    outInfo->title = title;
+  }
+  return true;
+}
+
+bool find_capture_window(const CaptureWindowCriteria& criteria, CaptureWindowInfo* outInfo) {
+  if (!criteria.enabled()) return false;
+  struct EnumState {
+    const CaptureWindowCriteria* criteria = nullptr;
+    CaptureWindowInfo info{};
+    bool found = false;
+  } state;
+  state.criteria = &criteria;
+
+  EnumWindows(
+      [](HWND hwnd, LPARAM lParam) -> BOOL {
+        auto* s = reinterpret_cast<EnumState*>(lParam);
+        if (!s || !s->criteria) return TRUE;
+        CaptureWindowInfo candidate{};
+        if (match_capture_window(hwnd, *s->criteria, &candidate)) {
+          s->info = candidate;
+          s->found = true;
+          return FALSE;
+        }
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&state));
+
+  if (!state.found) return false;
+  if (outInfo) *outInfo = state.info;
+  return true;
+}
+
+bool compute_window_client_crop(HWND hwnd, uint32_t frameW, uint32_t frameH, uint32_t* outX,
+                                uint32_t* outY, uint32_t* outW, uint32_t* outH) {
+  if (!hwnd || frameW < 2 || frameH < 2 || !outX || !outY || !outW || !outH) return false;
+  RECT windowRect{};
+  RECT clientRect{};
+  if (!GetWindowRect(hwnd, &windowRect)) return false;
+  if (!GetClientRect(hwnd, &clientRect)) return false;
+  POINT tl{clientRect.left, clientRect.top};
+  POINT br{clientRect.right, clientRect.bottom};
+  if (!ClientToScreen(hwnd, &tl) || !ClientToScreen(hwnd, &br)) return false;
+  const int windowW = windowRect.right - windowRect.left;
+  const int windowH = windowRect.bottom - windowRect.top;
+  const int clientW = br.x - tl.x;
+  const int clientH = br.y - tl.y;
+  if (windowW <= 0 || windowH <= 0 || clientW <= 1 || clientH <= 1) return false;
+  const double scaleX = static_cast<double>(frameW) / static_cast<double>(windowW);
+  const double scaleY = static_cast<double>(frameH) / static_cast<double>(windowH);
+  int cropX = static_cast<int>((tl.x - windowRect.left) * scaleX + 0.5);
+  int cropY = static_cast<int>((tl.y - windowRect.top) * scaleY + 0.5);
+  int cropW = static_cast<int>(clientW * scaleX + 0.5);
+  int cropH = static_cast<int>(clientH * scaleY + 0.5);
+  cropX = std::clamp(cropX, 0, static_cast<int>(frameW) - 1);
+  cropY = std::clamp(cropY, 0, static_cast<int>(frameH) - 1);
+  cropW = std::clamp(cropW, 1, static_cast<int>(frameW) - cropX);
+  cropH = std::clamp(cropH, 1, static_cast<int>(frameH) - cropY);
+  *outX = static_cast<uint32_t>(cropX);
+  *outY = static_cast<uint32_t>(cropY);
+  *outW = static_cast<uint32_t>(cropW);
+  *outH = static_cast<uint32_t>(cropH);
+  return (*outW >= 2 && *outH >= 2);
+}
+
+winrt::Windows::Graphics::Capture::GraphicsCaptureItem CreateItemForPrimaryMonitor(
+    HWND preferredWindow = nullptr, const char* preferredSource = nullptr) {
   auto interop = winrt::get_activation_factory<winrt::Windows::Graphics::Capture::GraphicsCaptureItem,
                                                IGraphicsCaptureItemInterop>();
   winrt::Windows::Graphics::Capture::GraphicsCaptureItem item{nullptr};
@@ -185,6 +392,11 @@ winrt::Windows::Graphics::Capture::GraphicsCaptureItem CreateItemForPrimaryMonit
     }
     return static_cast<bool>(item);
   };
+
+  if (preferredWindow) {
+    createForWindow(preferredWindow, preferredSource ? preferredSource : "CreateForWindow(preferred)");
+    if (item) return item;
+  }
 
   HMONITOR monitor = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
 
@@ -292,6 +504,10 @@ struct Args {
   uint32_t keyint = 15;
   uint32_t encodeWidth = 0;
   uint32_t encodeHeight = 0;
+  std::string captureWindowProcess;
+  std::string captureWindowTitle;
+  bool captureWindowClientOnly = false;
+  uint32_t captureWindowRebindIntervalMs = 1000;
 };
 
 bool parse_u32(const char* s, uint32_t* out) {
@@ -367,6 +583,17 @@ Args parse_args(int argc, char** argv) {
     } else if (k == "--encode-height" && i + 1 < argc) {
       uint32_t v = 0;
       if (parse_u32(argv[++i], &v)) a.encodeHeight = v;
+    } else if (k == "--capture-window-process" && i + 1 < argc) {
+      a.captureWindowProcess = argv[++i];
+    } else if (k == "--capture-window-title" && i + 1 < argc) {
+      a.captureWindowTitle = argv[++i];
+    } else if (k == "--capture-window-client-only") {
+      a.captureWindowClientOnly = true;
+    } else if (k == "--capture-window-rebind-interval-ms" && i + 1 < argc) {
+      uint32_t v = 0;
+      if (parse_u32(argv[++i], &v)) {
+        a.captureWindowRebindIntervalMs = std::clamp<uint32_t>(v, 200, 10000);
+      }
     }
   }
   return a;
@@ -1291,7 +1518,31 @@ int main(int argc, char** argv) {
               << (gpuScalerHealthy ? 1 : 0) << "\n";
   }
 
-  auto item = CreateItemForPrimaryMonitor();
+  CaptureWindowCriteria captureWindowCriteria{};
+  for (const auto& name : parse_csv_lower(args.captureWindowProcess)) {
+    captureWindowCriteria.processNamesLower.insert(name);
+  }
+  captureWindowCriteria.titleNeedleLower = wide_lower(utf8_to_wide(trim_ascii(args.captureWindowTitle)));
+  const bool windowTargetEnabled = captureWindowCriteria.enabled();
+  CaptureWindowInfo captureWindowInfo{};
+  if (windowTargetEnabled && find_capture_window(captureWindowCriteria, &captureWindowInfo)) {
+    std::cout << "[native-video-host] capture-window target hwnd=0x" << std::hex
+              << reinterpret_cast<uintptr_t>(captureWindowInfo.hwnd) << std::dec
+              << " pid=" << captureWindowInfo.pid
+              << " process=" << (captureWindowInfo.processName.empty() ? "unknown" : captureWindowInfo.processName)
+              << " title=" << (captureWindowInfo.title.empty() ? "<empty>" : wide_to_utf8(captureWindowInfo.title))
+              << " clientOnly=" << (args.captureWindowClientOnly ? 1 : 0)
+              << "\n";
+  } else if (windowTargetEnabled) {
+    std::cout << "[native-video-host] capture-window target not found; fallback=monitor"
+              << " processFilter=" << trim_ascii(args.captureWindowProcess)
+              << " titleFilter=" << trim_ascii(args.captureWindowTitle)
+              << "\n";
+  }
+
+  auto item = windowTargetEnabled
+                  ? CreateItemForPrimaryMonitor(captureWindowInfo.hwnd, "CreateForWindow(target-window)")
+                  : CreateItemForPrimaryMonitor();
   if (!item) {
     std::cerr << "[native-video-host] capture item create failed\n";
     closesocket(clientSock);
@@ -1299,21 +1550,21 @@ int main(int argc, char** argv) {
     return 8;
   }
 
-  const auto size = item.Size();
-  const uint32_t width = static_cast<uint32_t>(size.Width);
-  const uint32_t height = static_cast<uint32_t>(size.Height);
-  if (width < 2 || height < 2) {
+  auto captureSize = item.Size();
+  uint32_t captureWidth = static_cast<uint32_t>(captureSize.Width);
+  uint32_t captureHeight = static_cast<uint32_t>(captureSize.Height);
+  if (captureWidth < 2 || captureHeight < 2) {
     std::cerr << "[native-video-host] invalid capture size\n";
     closesocket(clientSock);
     if (mfStarted) MFShutdown();
     return 9;
   }
 
-  uint32_t encodeW = width;
-  uint32_t encodeH = height;
+  uint32_t encodeW = captureWidth;
+  uint32_t encodeH = captureHeight;
   bool autoFallback720 = false;
   if (useH264) {
-    choose_h264_encode_size(args, width, height, &encodeW, &encodeH, &autoFallback720);
+    choose_h264_encode_size(args, captureWidth, captureHeight, &encodeW, &encodeH, &autoFallback720);
   }
 
   const uint32_t abrHighW = encodeW;
@@ -1425,7 +1676,7 @@ int main(int argc, char** argv) {
     resetHostTimelineAnchors();
     std::cout << "[native-video-host] H264 encoder backend=" << encoder.backend_name()
               << " hw=" << (encoder.using_hardware() ? 1 : 0)
-              << " captureSize=" << width << "x" << height
+              << " captureSize=" << captureWidth << "x" << captureHeight
               << " encodeSize=" << activeEncodeW << "x" << activeEncodeH
               << " auto720=" << (autoFallback720 ? 1 : 0)
               << " abrMidProfile=" << abrMidW << "x" << abrMidH
@@ -1449,17 +1700,35 @@ int main(int argc, char** argv) {
   uint64_t captureRestartCount = 0;
   uint64_t lastCaptureRestartUs = 0;
 
-  D3D11_TEXTURE2D_DESC stDesc{};
-  stDesc.Width = width;
-  stDesc.Height = height;
-  stDesc.MipLevels = 1;
-  stDesc.ArraySize = 1;
-  stDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-  stDesc.SampleDesc.Count = 1;
-  stDesc.Usage = D3D11_USAGE_STAGING;
-  stDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+  std::mutex captureResourceMu;
+  std::atomic<uint32_t> captureSizeChangePending{0};
+  std::atomic<uintptr_t> captureTargetHwndRaw{
+      reinterpret_cast<uintptr_t>(captureWindowInfo.hwnd)};
+  std::string captureTargetProcessName =
+      captureWindowInfo.processName.empty() ? std::string("monitor") : captureWindowInfo.processName;
+  std::string captureTargetTitleUtf8 =
+      captureWindowInfo.title.empty() ? std::string{} : wide_to_utf8(captureWindowInfo.title);
+  uint32_t captureWindowPid = captureWindowInfo.pid;
   Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
-  if (FAILED(d3d->CreateTexture2D(&stDesc, nullptr, &staging)) || !staging) {
+  auto create_staging = [&](uint32_t srcW, uint32_t srcH) -> bool {
+    D3D11_TEXTURE2D_DESC stDesc{};
+    stDesc.Width = srcW;
+    stDesc.Height = srcH;
+    stDesc.MipLevels = 1;
+    stDesc.ArraySize = 1;
+    stDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    stDesc.SampleDesc.Count = 1;
+    stDesc.Usage = D3D11_USAGE_STAGING;
+    stDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> nextStaging;
+    if (FAILED(d3d->CreateTexture2D(&stDesc, nullptr, &nextStaging)) || !nextStaging) {
+      return false;
+    }
+    std::lock_guard<std::mutex> lk(captureResourceMu);
+    staging = nextStaging;
+    return true;
+  };
+  if (!create_staging(captureWidth, captureHeight)) {
     std::cerr << "[native-video-host] staging texture create failed\n";
     closesocket(clientSock);
     if (mfStarted) MFShutdown();
@@ -1497,20 +1766,61 @@ int main(int argc, char** argv) {
 
         auto src = SurfaceToTexture(latest.Surface());
         if (!src) return;
-        const uint32_t stride = width * 4;
-        auto payload = std::make_shared<std::vector<uint8_t>>(static_cast<size_t>(stride) * height);
+        uint32_t frameW = 0;
+        uint32_t frameH = 0;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> stagingLocal;
+        {
+          std::lock_guard<std::mutex> lk(captureResourceMu);
+          frameW = captureWidth;
+          frameH = captureHeight;
+          stagingLocal = staging;
+        }
+        if (!stagingLocal || frameW < 2 || frameH < 2) return;
+        D3D11_TEXTURE2D_DESC srcDesc{};
+        src->GetDesc(&srcDesc);
+        if (srcDesc.Width != frameW || srcDesc.Height != frameH) {
+          captureSizeChangePending.store(1, std::memory_order_release);
+          return;
+        }
+        uint32_t stride = frameW * 4;
+        auto payload = std::make_shared<std::vector<uint8_t>>(static_cast<size_t>(stride) * frameH);
         {
           std::lock_guard<std::mutex> d3dLock(d3dContextMu);
-          ctx->CopyResource(staging.Get(), src.Get());
+          ctx->CopyResource(stagingLocal.Get(), src.Get());
           D3D11_MAPPED_SUBRESOURCE map{};
-          if (FAILED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map))) return;
+          if (FAILED(ctx->Map(stagingLocal.Get(), 0, D3D11_MAP_READ, 0, &map))) return;
           auto* dst = payload->data();
           auto* srcRow = reinterpret_cast<const uint8_t*>(map.pData);
-          for (uint32_t y = 0; y < height; ++y) {
+          for (uint32_t y = 0; y < frameH; ++y) {
             std::memcpy(dst + static_cast<size_t>(y) * stride,
                         srcRow + static_cast<size_t>(y) * map.RowPitch, stride);
           }
-          ctx->Unmap(staging.Get(), 0);
+          ctx->Unmap(stagingLocal.Get(), 0);
+        }
+        if (args.captureWindowClientOnly) {
+          const HWND cropHwnd = reinterpret_cast<HWND>(captureTargetHwndRaw.load(std::memory_order_acquire));
+          uint32_t cropX = 0;
+          uint32_t cropY = 0;
+          uint32_t cropW = 0;
+          uint32_t cropH = 0;
+          if (cropHwnd && compute_window_client_crop(cropHwnd, frameW, frameH, &cropX, &cropY, &cropW, &cropH)) {
+            if (cropW < frameW || cropH < frameH || cropX > 0 || cropY > 0) {
+              const uint32_t croppedStride = cropW * 4;
+              auto cropped = std::make_shared<std::vector<uint8_t>>(static_cast<size_t>(croppedStride) * cropH);
+              const auto* srcBase = payload->data();
+              auto* dstBase = cropped->data();
+              for (uint32_t y = 0; y < cropH; ++y) {
+                const size_t srcOff =
+                    static_cast<size_t>(cropY + y) * stride + static_cast<size_t>(cropX) * 4u;
+                const size_t dstOff = static_cast<size_t>(y) * croppedStride;
+                std::memcpy(dstBase + dstOff, srcBase + srcOff, croppedStride);
+              }
+              payload = std::move(cropped);
+              frameW = cropW;
+              frameH = cropH;
+              stride = croppedStride;
+            }
+          }
         }
         const uint64_t callbackUs = qpc_now_us();
         const uint64_t queuePushUs = qpc_now_us();
@@ -1566,8 +1876,8 @@ int main(int argc, char** argv) {
         {
           std::lock_guard<std::mutex> lk(frame.mu);
           frame.payload = std::move(payload);
-          frame.width = width;
-          frame.height = height;
+          frame.width = frameW;
+          frame.height = frameH;
           frame.stride = stride;
           frame.captureUs = sourceCaptureUs;
           frame.callbackUs = callbackUs;
@@ -1615,14 +1925,44 @@ int main(int argc, char** argv) {
   auto restart_capture_session = [&]() -> bool {
     detach_capture_session();
     try {
+      const auto newSize = item.Size();
+      const uint32_t newW = static_cast<uint32_t>(newSize.Width);
+      const uint32_t newH = static_cast<uint32_t>(newSize.Height);
+      if (newW < 2 || newH < 2) {
+        std::cerr << "[native-video-host] invalid capture size on restart\n";
+        return false;
+      }
+      uint32_t prevW = 0;
+      uint32_t prevH = 0;
+      {
+        std::lock_guard<std::mutex> lk(captureResourceMu);
+        prevW = captureWidth;
+        prevH = captureHeight;
+      }
+      if (!create_staging(newW, newH)) {
+        std::cerr << "[native-video-host] staging texture recreate failed size="
+                  << newW << "x" << newH << "\n";
+        return false;
+      }
+      {
+        std::lock_guard<std::mutex> lk(captureResourceMu);
+        captureSize = newSize;
+        captureWidth = newW;
+        captureHeight = newH;
+      }
+      if (prevW != newW || prevH != newH) {
+        std::cout << "[native-video-host] capture-size-updated old=" << prevW << "x" << prevH
+                  << " new=" << newW << "x" << newH << "\n";
+      }
       pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
           d3dDevice, winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized,
-          captureFramePoolBuffers, size);
+          captureFramePoolBuffers, captureSize);
       session = pool.CreateCaptureSession(item);
       attach_frame_arrived();
       session.StartCapture();
       captureSessionStartedUs = qpc_now_us();
       captureSessionReady.store(true, std::memory_order_release);
+      captureSizeChangePending.store(0, std::memory_order_release);
       return true;
     } catch (...) {
       detach_capture_session();
@@ -1642,6 +1982,9 @@ int main(int argc, char** argv) {
   // For encoded path, latency is prioritized over strict send pacing.
   // Raw path keeps legacy pacing to avoid excessive CPU/bandwidth burst.
   const bool paceByTick = useRaw || !noPacingH264;
+  const uint64_t captureWindowRebindIntervalUs =
+      static_cast<uint64_t>(std::max<uint32_t>(200, args.captureWindowRebindIntervalMs)) * 1000ULL;
+  uint64_t nextCaptureWindowCheckUs = startUs + captureWindowRebindIntervalUs;
   uint64_t statAtUs = startUs + 1000000ULL;
   uint64_t sentFrames = 0;
   uint64_t encodedFrames = 0;
@@ -1819,6 +2162,60 @@ int main(int argc, char** argv) {
                   << " bitrate=" << activeBitrate
                   << " keyint=" << activeKeyint
                   << " abrOverride=1\n";
+      }
+    }
+    if (windowTargetEnabled && nowUs >= nextCaptureWindowCheckUs) {
+      nextCaptureWindowCheckUs = nowUs + captureWindowRebindIntervalUs;
+      CaptureWindowInfo latestWindowInfo{};
+      if (find_capture_window(captureWindowCriteria, &latestWindowInfo)) {
+        const uintptr_t currentRaw = captureTargetHwndRaw.load(std::memory_order_acquire);
+        const uintptr_t nextRaw = reinterpret_cast<uintptr_t>(latestWindowInfo.hwnd);
+        if (nextRaw != currentRaw) {
+          const auto nextItem =
+              CreateItemForPrimaryMonitor(latestWindowInfo.hwnd, "CreateForWindow(target-window-rebind)");
+          if (nextItem) {
+            item = nextItem;
+            captureTargetHwndRaw.store(nextRaw, std::memory_order_release);
+            captureTargetProcessName = latestWindowInfo.processName.empty() ? "unknown" : latestWindowInfo.processName;
+            captureTargetTitleUtf8 =
+                latestWindowInfo.title.empty() ? std::string{} : wide_to_utf8(latestWindowInfo.title);
+            captureWindowPid = latestWindowInfo.pid;
+            lastCaptureRestartUs = nowUs;
+            if (restart_capture_session()) {
+              ++captureRestartCount;
+              captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+              lastCaptureUsForInterval.store(0, std::memory_order_release);
+              lastCallbackUs.store(0, std::memory_order_release);
+              resetHostTimelineAnchors();
+              forceKeyNext = true;
+              lastSyntheticKeepaliveUs = 0;
+              std::cout << "[native-video-host] capture-window rebound hwnd=0x" << std::hex << nextRaw << std::dec
+                        << " pid=" << captureWindowPid
+                        << " process=" << captureTargetProcessName
+                        << " title=" << (captureTargetTitleUtf8.empty() ? "<empty>" : captureTargetTitleUtf8)
+                        << " restartCount=" << captureRestartCount
+                        << "\n";
+            } else {
+              std::cerr << "[native-video-host] capture-window rebind restart failed\n";
+            }
+          }
+        }
+      }
+    }
+    if (captureSizeChangePending.exchange(0, std::memory_order_acq_rel) != 0) {
+      lastCaptureRestartUs = nowUs;
+      if (restart_capture_session()) {
+        ++captureRestartCount;
+        captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+        lastCaptureUsForInterval.store(0, std::memory_order_release);
+        lastCallbackUs.store(0, std::memory_order_release);
+        resetHostTimelineAnchors();
+        forceKeyNext = true;
+        lastSyntheticKeepaliveUs = 0;
+        std::cout << "[native-video-host] capture session restarted reason=size-change count="
+                  << captureRestartCount << "\n";
+      } else {
+        std::cerr << "[native-video-host] capture session restart failed reason=size-change\n";
       }
     }
     if (captureSessionReady.load(std::memory_order_acquire)) {
@@ -2675,6 +3072,10 @@ int main(int argc, char** argv) {
                   << " queueWaitNoWorkCount=" << queueWaitNoWorkCount
                   << " syntheticKeepaliveCount=" << syntheticKeepaliveCount
                   << " captureRestarts=" << captureRestartCount
+                  << " captureTargetPid=" << captureWindowPid
+                  << " captureTargetProc=" << captureTargetProcessName
+                  << " captureTargetHwnd=0x" << std::hex
+                  << captureTargetHwndRaw.load(std::memory_order_relaxed) << std::dec
                   << " keyReqDropTotal=" << clientKeyFrameRequestDropped.load()
                   << " callbackFrames=" << callbackFrames.load()
                   << " skippedByOverwrite=" << skippedByOverwrite
@@ -2705,6 +3106,10 @@ int main(int argc, char** argv) {
                   << " queueWaitNoWorkCount=" << queueWaitNoWorkCount
                   << " syntheticKeepaliveCount=" << syntheticKeepaliveCount
                   << " captureRestarts=" << captureRestartCount
+                  << " captureTargetPid=" << captureWindowPid
+                  << " captureTargetProc=" << captureTargetProcessName
+                  << " captureTargetHwnd=0x" << std::hex
+                  << captureTargetHwndRaw.load(std::memory_order_relaxed) << std::dec
                   << " callbackFrames=" << callbackFrames.load()
                   << " skippedByOverwrite=" << skippedByOverwrite
                   << " stalePreEncodeDrops=" << stalePreEncodeDropCount
