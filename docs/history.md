@@ -581,6 +581,48 @@ Validation
 Next
 - Expand phase3 validation to emulator-specific processes/titles (`dnplayer.exe`, `HD-Player.exe`, `Nox.exe`) and collect per-app presets.
 
+### 79) 2026-03-05 M13 phase3 extension (emulator-specific window presets + runbook sync)
+Goal
+- Finish the remaining phase3 follow-up that does not require 2PC execution:
+  - prepare per-emulator M13 window-scoped profiles
+  - sync runbook/plan so the next session can run real emulator validation immediately
+
+Changes
+1. Added emulator-specific presets
+- `automation/native_video_profile_1080p_ldplayer_window.json`
+  - `captureWindowProcess=dnplayer.exe`
+  - `captureWindowTitle=LDPlayer`
+- `automation/native_video_profile_1080p_bluestacks_window.json`
+  - `captureWindowProcess=HD-Player.exe`
+  - `captureWindowTitle=BlueStacks`
+- `automation/native_video_profile_1080p_nox_window.json`
+  - `captureWindowProcess=Nox.exe`
+  - `captureWindowTitle=Nox`
+- Common values:
+  - `captureWindowClientOnly=true`
+  - `captureWindowRebindIntervalMs=1000`
+
+2. Updated runbook
+- `docs/external_wan_test_guide.md`
+  - added "Emulator preset profiles (M13 phase3 extension)" section
+  - added run example using LDPlayer preset
+  - added new M13 preset files to recommended profile list
+
+3. Updated implementation plan status
+- `docs/구현계획.md`
+  - added M13 phase3 preset expansion update with completion status
+  - narrowed next action to real emulator runtime validation/log collection
+
+Validation
+- JSON syntax check pass for all new presets using `ConvertFrom-Json`.
+
+Next
+- Run real emulator sessions with each preset and capture logs for:
+  - `capture-window rebound ...`
+  - `capture-size-updated ...`
+  - client control `hostCapProc=... hostCapRebind=...`
+- Decide default emulator preset after side-by-side comparison.
+
 ### 75) 2026-03-05 M13 phase1 start (window-scoped host capture + rebind)
 Goal
 - Start M13 implementation that does not require external 2PC:

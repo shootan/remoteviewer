@@ -62,11 +62,36 @@ Expected summary keys:
 - `CLIENT_HOSTCAP_EVENT_COUNT>=1`
 - `M13_REBIND_PASS=True`
 
+## Emulator preset profiles (M13 phase3 extension)
+Use these presets when you want window-scoped capture for each emulator app:
+- `automation/native_video_profile_1080p_ldplayer_window.json`
+  - process: `dnplayer.exe`
+  - title filter: `LDPlayer`
+- `automation/native_video_profile_1080p_bluestacks_window.json`
+  - process: `HD-Player.exe`
+  - title filter: `BlueStacks`
+- `automation/native_video_profile_1080p_nox_window.json`
+  - process: `Nox.exe`
+  - title filter: `Nox`
+
+Common preset behavior:
+- `captureWindowClientOnly=true`
+- `captureWindowRebindIntervalMs=1000`
+
+Run example (LDPlayer preset):
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1 -Role host -ConfigPath automation/native_video_profile_1080p_ldplayer_window.json -ExeDir build-vcpkg-local/apps/native_poc/Debug
+powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1 -Role client -ConfigPath automation/native_video_profile_1080p_ldplayer_window.json -ExeDir build-vcpkg-local/apps/native_poc/Debug -RemoteHost <HOST_PUBLIC_IP_OR_DNS>
+```
+
 ## Recommended FHD profiles
 - `automation/native_video_profile_1080p_lowlat.json` (8Mbps, low-latency baseline)
 - `automation/native_video_profile_1080p_wan_quality.json` (10Mbps, keyint 60, frame gating off)
 - `automation/native_video_profile_1080p_quality_10m_k60.json`
 - `automation/native_video_profile_1080p_quality_12m_k60.json`
+- `automation/native_video_profile_1080p_ldplayer_window.json` (M13 window-scoped preset)
+- `automation/native_video_profile_1080p_bluestacks_window.json` (M13 window-scoped preset)
+- `automation/native_video_profile_1080p_nox_window.json` (M13 window-scoped preset)
 
 ## Run examples
 Host:
