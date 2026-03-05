@@ -393,3 +393,87 @@ Metrics note
   - `DEC_COUNT=0`, `LAT_COUNT=0`, `M9_EVENT_COUNT=0`
 - Therefore, this run validates boot/mode wiring and shutdown stability only.
 - QoE/performance acceptance remains pending external 2PC measurement logs.
+
+### 73) 2026-03-04 external M9 A/B execution prep (WAN capture scripts restored)
+Goal
+- Prepare immediate execution path for external 2PC validation of `m9Apply=false` vs `m9Apply=true`.
+
+Changes
+1. WAN capture helpers added
+- `automation/run_wan_host_capture.ps1`
+- `automation/run_wan_client_capture.ps1`
+- Behavior:
+  - create per-run log directories under `automation/logs/wan-capture-<timestamp>-<role>-<tag>`
+  - save role config snapshot (`host.config.json` / `client.config.json`)
+  - run `run_native_video_with_config.ps1` with stdout/stderr redirected to capture logs
+
+2. WAN capture summary helper added
+- `automation/summarize_wan_capture.ps1`
+- Inputs:
+  - host capture dir/file
+  - client capture dir/file
+- Outputs:
+  - decoded/encoded fps averages, latency/mbps aggregates, UDP drop pm stats
+  - `M9_MODE`, `M9_EVENT_COUNT`, `M9_ACTION_*`
+  - `GATE_A_DECODED_FPS_OK`, `GATE_A_PRESENT_GAP_OK`, `GATE_A_PASS`
+
+3. Runbook update
+- `docs/external_wan_test_guide.md`
+  - Added M9 apply A/B workflow:
+    - create `tmp_m9_apply.json` (`m9Apply=true`)
+    - run host/client capture scripts for `m9off` and `m9on`
+    - run summary script for each pair
+
+Validation
+- Parser/syntax checks:
+  - `run_wan_host_capture.ps1`: parse OK
+  - `run_wan_client_capture.ps1`: parse OK
+  - `summarize_wan_capture.ps1`: parse OK
+- Summary script smoke:
+  - command:
+    - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/summarize_wan_capture.ps1 -HostInput automation/logs/verify-native-video-20260303-144249 -ClientInput automation/logs/verify-native-video-20260303-144249`
+  - result:
+    - summary keys emitted normally (`CLIENT_DECODED_FPS_AVG`, `M9_MODE`, `GATE_A_PASS` etc.)
+
+Next
+- Execute external 2PC A/B runs (`m9off` / `m9on`) and attach summary outputs/log dirs for Gate A judgment.
+
+### 74) 2026-03-04 simplify external 2PC execution (single wrapper entrypoint)
+Goal
+- Reduce command length and script confusion for host/client M9 A/B runs.
+
+Changes
+1. Added unified wrapper
+- `automation/m9_easy.ps1`
+- Supported actions:
+  - `prepare`
+  - `host off|on`
+  - `client off|on [HOST]`
+  - `summary off|on`
+- Behavior:
+  - auto-create `automation/tmp_m9_apply.json` when needed
+  - auto-select exe dir:
+    - `bin` if present (bundle layout)
+    - otherwise `build-vcpkg-local/apps/native_poc/Debug`
+  - `summary` auto-selects latest host/client capture dirs by tag (`m9off`/`m9on`)
+  - client host argument is optional; if omitted, uses JSON `remoteHost`
+
+2. Updated runbook with short commands
+- `docs/external_wan_test_guide.md`
+  - Added `Quick Start (short commands)` section using only `m9_easy.ps1`.
+
+3. Synced to bundle runtime tree
+- Copied to `D:\\remote\\build`:
+  - `automation/m9_easy.ps1`
+  - `docs/external_wan_test_guide.md` (updated)
+
+Validation
+- `powershell -NoProfile -ExecutionPolicy Bypass -File automation/m9_easy.ps1 help` -> usage output OK
+- `powershell -NoProfile -ExecutionPolicy Bypass -File automation/m9_easy.ps1 prepare` -> profile handling OK
+- `powershell -NoProfile -ExecutionPolicy Bypass -File ..\\build\\automation\\m9_easy.ps1 help` -> default root/exe dir resolved to `D:\\remote\\build`/`bin`
+- `powershell -NoProfile -ExecutionPolicy Bypass -File ..\\build\\automation\\m9_easy.ps1 prepare` -> `tmp_m9_apply.json` created under `D:\\remote\\build\\automation`
+
+Next
+- Run external 2PC with the short sequence:
+  - host `off/on`, client `off/on`, summary `off/on`
+  - judge Gate A and M9 transition behavior from summary output.

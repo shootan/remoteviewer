@@ -40,6 +40,101 @@ Client:
 powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1 -Role client -ConfigPath automation/native_video_profile_1080p_lowlat.json -ExeDir build-vcpkg-local/apps/native_poc/Debug -RemoteHost <HOST_PUBLIC_IP_OR_DNS>
 ```
 
+## Quick Start (short commands)
+Use one wrapper script:
+- `automation/m9_easy.ps1`
+
+One-time prepare:
+```powershell
+cd D:\remote\build
+powershell -ExecutionPolicy Bypass -File .\automation\m9_easy.ps1 prepare
+```
+
+Host run:
+```powershell
+cd D:\remote\build
+powershell -ExecutionPolicy Bypass -File .\automation\m9_easy.ps1 host off
+powershell -ExecutionPolicy Bypass -File .\automation\m9_easy.ps1 host on
+```
+
+Client run:
+```powershell
+cd D:\remote\build
+powershell -ExecutionPolicy Bypass -File .\automation\m9_easy.ps1 client off [HOST_PUBLIC_IP_OR_DNS]
+powershell -ExecutionPolicy Bypass -File .\automation\m9_easy.ps1 client on [HOST_PUBLIC_IP_OR_DNS]
+```
+
+Summary:
+```powershell
+cd D:\remote\build
+powershell -ExecutionPolicy Bypass -File .\automation\m9_easy.ps1 summary off
+powershell -ExecutionPolicy Bypass -File .\automation\m9_easy.ps1 summary on
+```
+
+Notes:
+- `summary off/on` uses the latest `m9off/m9on` host/client capture directories automatically.
+- `client off/on` without host arg uses `remoteHost` from the selected JSON profile.
+- Default exe path is auto-selected:
+  - `bin` if present (bundle layout like `D:\remote\build`)
+  - otherwise `build-vcpkg-local/apps/native_poc/Debug` (source tree layout)
+
+## M9 apply A/B capture workflow (external 2PC)
+Goal:
+- Compare `m9Apply=false` baseline vs `m9Apply=true` apply mode on real WAN/LAN client sessions.
+- Keep profile/settings identical except `m9Apply`.
+
+### 1) Prepare two profile variants
+Baseline:
+- `automation/native_video_profile_1080p_lowlat.json` (default `m9Apply=false`)
+
+Apply variant (create once):
+```powershell
+$p = Get-Content automation/native_video_profile_1080p_lowlat.json -Raw | ConvertFrom-Json
+$p.m9Apply = $true
+$p | ConvertTo-Json -Depth 8 | Set-Content automation/tmp_m9_apply.json -Encoding UTF8
+```
+
+### 2) Capture host/client logs per variant
+Host machine:
+```powershell
+# baseline
+powershell -ExecutionPolicy Bypass -File automation/run_wan_host_capture.ps1 -ConfigPath automation/native_video_profile_1080p_lowlat.json -ExeDir build-vcpkg-local/apps/native_poc/Debug -Tag m9off
+
+# apply
+powershell -ExecutionPolicy Bypass -File automation/run_wan_host_capture.ps1 -ConfigPath automation/tmp_m9_apply.json -ExeDir build-vcpkg-local/apps/native_poc/Debug -Tag m9on
+```
+
+Client machine:
+```powershell
+# baseline
+powershell -ExecutionPolicy Bypass -File automation/run_wan_client_capture.ps1 -ConfigPath automation/native_video_profile_1080p_lowlat.json -ExeDir build-vcpkg-local/apps/native_poc/Debug -RemoteHost <HOST_PUBLIC_IP_OR_DNS> -Tag m9off
+
+# apply
+powershell -ExecutionPolicy Bypass -File automation/run_wan_client_capture.ps1 -ConfigPath automation/tmp_m9_apply.json -ExeDir build-vcpkg-local/apps/native_poc/Debug -RemoteHost <HOST_PUBLIC_IP_OR_DNS> -Tag m9on
+```
+
+Each run creates:
+- `automation/logs/wan-capture-<timestamp>-host-<tag>/...`
+- `automation/logs/wan-capture-<timestamp>-client-<tag>/...`
+
+### 3) Summarize one run pair
+After copying host/client logs to one machine (if needed):
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/summarize_wan_capture.ps1 `
+  -HostInput automation/logs/wan-capture-<timestamp>-host-m9off `
+  -ClientInput automation/logs/wan-capture-<timestamp>-client-m9off
+```
+
+Key outputs:
+- `CLIENT_DECODED_FPS_AVG` (Gate A primary)
+- `CLIENT_UDP_DROP_PM_AVG/MAX`
+- `M9_MODE`, `M9_EVENT_COUNT`, `M9_ACTION_*`
+- `GATE_A_DECODED_FPS_OK`, `GATE_A_PASS`
+
+Note:
+- `GATE_A_PRESENT_GAP_OK` can be `Unknown` if `presentGapOver1s` is not present in client stats line.
+- In that case, use visual freeze observation plus log traces for final Gate A judgment.
+
 ## Optional preflight
 ```powershell
 powershell -ExecutionPolicy Bypass -File automation/wan_preflight_native_video.ps1 -RemoteHost <HOST_PUBLIC_IP_OR_DNS> -VideoPort 43000 -ControlPort 43001
