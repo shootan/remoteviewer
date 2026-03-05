@@ -53,6 +53,7 @@ using remote60::native_poc::ControlInputEventMessage;
 using remote60::native_poc::ControlClientMetricsMessage;
 using remote60::native_poc::ControlRequestKeyFrameMessage;
 using remote60::native_poc::ControlRuntimeEncoderConfigMessage;
+using remote60::native_poc::ControlCaptureModeRequestMessage;
 using remote60::native_poc::ControlPingMessage;
 using remote60::native_poc::ControlPongMessage;
 using remote60::native_poc::H264EncodeFrameStats;
@@ -311,6 +312,23 @@ bool find_capture_window(const CaptureWindowCriteria& criteria, CaptureWindowInf
   if (!state.found) return false;
   if (outInfo) *outInfo = state.info;
   return true;
+}
+
+bool find_top_level_window_at_point(POINT screenPt, CaptureWindowInfo* outInfo) {
+  CaptureWindowCriteria anyCriteria{};
+  for (HWND hwnd = GetTopWindow(nullptr); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT)) {
+    RECT wr{};
+    if (!GetWindowRect(hwnd, &wr)) continue;
+    if (screenPt.x < wr.left || screenPt.x >= wr.right || screenPt.y < wr.top || screenPt.y >= wr.bottom) {
+      continue;
+    }
+    CaptureWindowInfo info{};
+    if (match_capture_window(hwnd, anyCriteria, &info)) {
+      if (outInfo) *outInfo = info;
+      return true;
+    }
+  }
+  return false;
 }
 
 bool compute_window_client_crop(HWND hwnd, uint32_t frameW, uint32_t frameH, uint32_t* outX,
@@ -1287,6 +1305,11 @@ int main(int argc, char** argv) {
   std::atomic<uint32_t> runtimeTuneBitrate{0};
   std::atomic<uint32_t> runtimeTuneKeyint{0};
   std::atomic<uint32_t> runtimeTuneSeq{0};
+  std::atomic<bool> captureModeReqPending{false};
+  std::atomic<uint32_t> captureModeReqSeq{0};
+  std::atomic<uint16_t> captureModeReqMode{0};
+  std::atomic<uint32_t> captureModeReqXPermille{5000};
+  std::atomic<uint32_t> captureModeReqYPermille{5000};
   double keyReqTokens = static_cast<double>(keyReqTokenCapacity);
   uint64_t keyReqLastRefillUs = 0;
   uint64_t keyReqNextAllowedUs = 0;
@@ -1483,6 +1506,26 @@ int main(int argc, char** argv) {
                 continue;
               }
 
+              if (type == MessageType::ControlCaptureModeRequest &&
+                  header.size == sizeof(ControlCaptureModeRequestMessage)) {
+                ControlCaptureModeRequestMessage req{};
+                req.header = header;
+                if (!recv_all(acceptedSock, &req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+                if (req.mode == 1 || req.mode == 2) {
+                  captureModeReqSeq.store(req.seq, std::memory_order_release);
+                  captureModeReqMode.store(req.mode, std::memory_order_release);
+                  captureModeReqXPermille.store(std::min<uint32_t>(10000u, req.xPermille), std::memory_order_release);
+                  captureModeReqYPermille.store(std::min<uint32_t>(10000u, req.yPermille), std::memory_order_release);
+                  captureModeReqPending.store(true, std::memory_order_release);
+                  std::cout << "[native-video-host][control] capture-mode-request seq=" << req.seq
+                            << " mode=" << req.mode
+                            << " xPermille=" << req.xPermille
+                            << " yPermille=" << req.yPermille
+                            << "\n";
+                }
+                continue;
+              }
+
               if (bodySize > 0 && !recv_discard(acceptedSock, bodySize)) break;
             }
             if (acceptedSock != INVALID_SOCKET) {
@@ -1548,9 +1591,12 @@ int main(int argc, char** argv) {
     captureWindowCriteria.processNamesLower.insert(name);
   }
   captureWindowCriteria.titleNeedleLower = wide_lower(utf8_to_wide(trim_ascii(args.captureWindowTitle)));
-  const bool windowTargetEnabled = captureWindowCriteria.enabled();
+  const bool windowTargetConfigured = captureWindowCriteria.enabled();
+  bool captureWindowModeActive = false;
+  bool captureWindowClientOnlyActive = args.captureWindowClientOnly;
   CaptureWindowInfo captureWindowInfo{};
-  if (windowTargetEnabled && find_capture_window(captureWindowCriteria, &captureWindowInfo)) {
+  if (windowTargetConfigured && find_capture_window(captureWindowCriteria, &captureWindowInfo)) {
+    captureWindowModeActive = true;
     std::cout << "[native-video-host] capture-window target hwnd=0x" << std::hex
               << reinterpret_cast<uintptr_t>(captureWindowInfo.hwnd) << std::dec
               << " pid=" << captureWindowInfo.pid
@@ -1558,25 +1604,29 @@ int main(int argc, char** argv) {
               << " title=" << (captureWindowInfo.title.empty() ? "<empty>" : wide_to_utf8(captureWindowInfo.title))
               << " clientOnly=" << (args.captureWindowClientOnly ? 1 : 0)
               << "\n";
-  } else if (windowTargetEnabled) {
+  } else if (windowTargetConfigured) {
     std::cout << "[native-video-host] capture-window target not found; fallback=monitor"
               << " processFilter=" << trim_ascii(args.captureWindowProcess)
               << " titleFilter=" << trim_ascii(args.captureWindowTitle)
               << "\n";
   }
-  hostCaptureTargetFlags.store((windowTargetEnabled ? 0x1u : 0x0u) |
-                                   (args.captureWindowClientOnly ? 0x2u : 0x0u),
+  hostCaptureTargetFlags.store((captureWindowModeActive ? 0x1u : 0x0u) |
+                                   ((captureWindowModeActive && captureWindowClientOnlyActive) ? 0x2u : 0x0u),
                                std::memory_order_relaxed);
-  hostCaptureTargetPid.store(captureWindowInfo.pid, std::memory_order_relaxed);
-  hostCaptureTargetHwnd.store(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(captureWindowInfo.hwnd)),
+  hostCaptureTargetPid.store(captureWindowModeActive ? captureWindowInfo.pid : 0u, std::memory_order_relaxed);
+  hostCaptureTargetHwnd.store(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(
+                                  captureWindowModeActive ? captureWindowInfo.hwnd : nullptr)),
                               std::memory_order_relaxed);
   {
     std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
-    hostCaptureTargetProcess = captureWindowInfo.processName.empty() ? "monitor" : captureWindowInfo.processName;
-    hostCaptureTargetTitle = captureWindowInfo.title.empty() ? std::string{} : wide_to_utf8(captureWindowInfo.title);
+    hostCaptureTargetProcess =
+        (captureWindowModeActive && !captureWindowInfo.processName.empty()) ? captureWindowInfo.processName : "monitor";
+    hostCaptureTargetTitle =
+        (captureWindowModeActive && !captureWindowInfo.title.empty()) ? wide_to_utf8(captureWindowInfo.title)
+                                                                       : std::string{};
   }
 
-  auto item = windowTargetEnabled
+  auto item = captureWindowModeActive
                   ? CreateItemForPrimaryMonitor(captureWindowInfo.hwnd, "CreateForWindow(target-window)")
                   : CreateItemForPrimaryMonitor();
   if (!item) {
@@ -1658,6 +1708,7 @@ int main(int argc, char** argv) {
   uint64_t m9CooldownUntilUs = 0;
   uint32_t m9DownPressureSeconds = 0;
   uint32_t m9UpPressureSeconds = 0;
+  bool forceKeyNext = true;
   int64_t captureTimelineOriginUs = -1;
   int64_t auTimelineOriginUs = -1;
   auto resetHostTimelineAnchors = [&]() {
@@ -1699,6 +1750,29 @@ int main(int argc, char** argv) {
     activeBitrate = targetBitrate;
     activeKeyint = targetKeyint;
     refresh_frame_intervals();
+    return true;
+  };
+
+  auto apply_capture_ui_quality_mode = [&](bool overviewMode, uint64_t nowUs) -> bool {
+    if (!useH264) return true;
+    const uint32_t targetW = overviewMode ? m9WidthLevel3 : m9WidthLevel0;
+    const uint32_t targetH = overviewMode ? m9HeightLevel3 : m9HeightLevel0;
+    const uint32_t targetFps = overviewMode ? m9FpsLevel3 : m9FpsLevel0;
+    const uint32_t targetBitrate = overviewMode ? m9BitrateLevel3 : m9BitrateLevel0;
+    const uint32_t targetKeyint = overviewMode ? std::max<uint32_t>(activeKeyint, 60u) : args.keyint;
+    if (!apply_encoder_target(targetW, targetH, targetFps, targetBitrate, targetKeyint)) {
+      return false;
+    }
+    runtimeTuneManualOverride = true;
+    abrCooldownUntilUs = nowUs + 3000000ULL;
+    abrGoodSeconds = 0;
+    abrModeratePressureSeconds = 0;
+    abrSeverePressureSeconds = 0;
+    m9Level = overviewMode ? 3 : 0;
+    m9CooldownUntilUs = nowUs + static_cast<uint64_t>(m9CooldownSec) * 1000000ULL;
+    m9DownPressureSeconds = 0;
+    m9UpPressureSeconds = 0;
+    forceKeyNext = true;
     return true;
   };
 
@@ -1826,7 +1900,7 @@ int main(int argc, char** argv) {
           }
           ctx->Unmap(stagingLocal.Get(), 0);
         }
-        if (args.captureWindowClientOnly) {
+        if (captureWindowModeActive && captureWindowClientOnlyActive) {
           const HWND cropHwnd = reinterpret_cast<HWND>(
               static_cast<uintptr_t>(hostCaptureTargetHwnd.load(std::memory_order_acquire)));
           uint32_t cropX = 0;
@@ -2049,7 +2123,6 @@ int main(int argc, char** argv) {
   uint32_t keepaliveH = 0;
   uint32_t keepaliveStride = 0;
   uint32_t keepaliveSeq = 0;
-  bool forceKeyNext = true;
   uint64_t lastSendStartUs = 0;
   std::shared_ptr<std::vector<uint8_t>> frameGatingRefPayload;
   uint32_t frameGatingRefW = 0;
@@ -2194,7 +2267,129 @@ int main(int argc, char** argv) {
                   << " abrOverride=1\n";
       }
     }
-    if (windowTargetEnabled && nowUs >= nextCaptureWindowCheckUs) {
+    if (captureModeReqPending.exchange(false, std::memory_order_acq_rel)) {
+      const uint16_t reqMode = captureModeReqMode.load(std::memory_order_acquire);
+      const uint32_t reqSeq = captureModeReqSeq.load(std::memory_order_acquire);
+      const uint32_t reqXPermille = std::min<uint32_t>(10000u, captureModeReqXPermille.load(std::memory_order_acquire));
+      const uint32_t reqYPermille = std::min<uint32_t>(10000u, captureModeReqYPermille.load(std::memory_order_acquire));
+      if (reqMode == 1) {
+        auto nextItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(control-overview)");
+        if (!nextItem) {
+          std::cerr << "[native-video-host][control] capture-mode overview failed seq=" << reqSeq << "\n";
+        } else {
+          item = nextItem;
+          captureWindowModeActive = false;
+          captureWindowCriteria.processNamesLower.clear();
+          captureWindowCriteria.titleNeedleLower.clear();
+          hostCaptureTargetFlags.store(0u, std::memory_order_release);
+          hostCaptureTargetPid.store(0u, std::memory_order_release);
+          hostCaptureTargetHwnd.store(0u, std::memory_order_release);
+          {
+            std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
+            hostCaptureTargetProcess = "monitor";
+            hostCaptureTargetTitle.clear();
+          }
+          lastCaptureRestartUs = nowUs;
+          if (restart_capture_session()) {
+            ++captureRestartCount;
+            captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+            lastCaptureUsForInterval.store(0, std::memory_order_release);
+            lastCallbackUs.store(0, std::memory_order_release);
+            resetHostTimelineAnchors();
+            lastSyntheticKeepaliveUs = 0;
+            if (!apply_capture_ui_quality_mode(true, nowUs)) {
+              std::cerr << "[native-video-host][control] capture-mode overview quality apply failed seq=" << reqSeq
+                        << "\n";
+              break;
+            }
+            std::cout << "[native-video-host][control] capture-mode applied seq=" << reqSeq
+                      << " mode=overview"
+                      << " bitrate=" << activeBitrate
+                      << " fps=" << activeFps
+                      << " encode=" << activeEncodeW << "x" << activeEncodeH
+                      << "\n";
+          } else {
+            std::cerr << "[native-video-host][control] capture-mode overview restart failed seq=" << reqSeq << "\n";
+          }
+        }
+      } else if (reqMode == 2) {
+        HMONITOR primaryMon = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
+        MONITORINFO monInfo{};
+        monInfo.cbSize = sizeof(monInfo);
+        if (!GetMonitorInfo(primaryMon, &monInfo)) {
+          monInfo.rcMonitor.left = 0;
+          monInfo.rcMonitor.top = 0;
+          monInfo.rcMonitor.right = GetSystemMetrics(SM_CXSCREEN);
+          monInfo.rcMonitor.bottom = GetSystemMetrics(SM_CYSCREEN);
+        }
+        const int monW = std::max<int>(1, monInfo.rcMonitor.right - monInfo.rcMonitor.left);
+        const int monH = std::max<int>(1, monInfo.rcMonitor.bottom - monInfo.rcMonitor.top);
+        POINT focusPt{};
+        focusPt.x = monInfo.rcMonitor.left +
+                    static_cast<int>((static_cast<uint64_t>(reqXPermille) * static_cast<uint64_t>(monW - 1) + 5000ULL) /
+                                     10000ULL);
+        focusPt.y = monInfo.rcMonitor.top +
+                    static_cast<int>((static_cast<uint64_t>(reqYPermille) * static_cast<uint64_t>(monH - 1) + 5000ULL) /
+                                     10000ULL);
+        CaptureWindowInfo selected{};
+        if (!find_top_level_window_at_point(focusPt, &selected)) {
+          std::cerr << "[native-video-host][control] capture-mode focus no-window seq=" << reqSeq
+                    << " xPermille=" << reqXPermille
+                    << " yPermille=" << reqYPermille
+                    << "\n";
+        } else {
+          auto nextItem = CreateItemForPrimaryMonitor(selected.hwnd, "CreateForWindow(control-focus-point)");
+          if (!nextItem) {
+            std::cerr << "[native-video-host][control] capture-mode focus create-item failed seq=" << reqSeq << "\n";
+          } else {
+            item = nextItem;
+            captureWindowModeActive = true;
+            captureWindowClientOnlyActive = true;
+            captureWindowCriteria.processNamesLower.clear();
+            if (!selected.processName.empty()) {
+              captureWindowCriteria.processNamesLower.insert(selected.processName);
+            }
+            captureWindowCriteria.titleNeedleLower.clear();
+            hostCaptureTargetFlags.store(0x1u | 0x2u, std::memory_order_release);
+            hostCaptureTargetPid.store(selected.pid, std::memory_order_release);
+            hostCaptureTargetHwnd.store(
+                static_cast<uint64_t>(reinterpret_cast<uintptr_t>(selected.hwnd)), std::memory_order_release);
+            {
+              std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
+              hostCaptureTargetProcess = selected.processName.empty() ? "unknown" : selected.processName;
+              hostCaptureTargetTitle = selected.title.empty() ? std::string{} : wide_to_utf8(selected.title);
+            }
+            nextCaptureWindowCheckUs = nowUs + captureWindowRebindIntervalUs;
+            lastCaptureRestartUs = nowUs;
+            if (restart_capture_session()) {
+              ++captureRestartCount;
+              captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+              lastCaptureUsForInterval.store(0, std::memory_order_release);
+              lastCallbackUs.store(0, std::memory_order_release);
+              resetHostTimelineAnchors();
+              lastSyntheticKeepaliveUs = 0;
+              if (!apply_capture_ui_quality_mode(false, nowUs)) {
+                std::cerr << "[native-video-host][control] capture-mode focus quality apply failed seq=" << reqSeq
+                          << "\n";
+                break;
+              }
+              std::cout << "[native-video-host][control] capture-mode applied seq=" << reqSeq
+                        << " mode=focus-window"
+                        << " pid=" << selected.pid
+                        << " process=" << (selected.processName.empty() ? "unknown" : selected.processName)
+                        << " title=" << (selected.title.empty() ? "<empty>" : wide_to_utf8(selected.title))
+                        << " bitrate=" << activeBitrate
+                        << " fps=" << activeFps
+                        << " encode=" << activeEncodeW << "x" << activeEncodeH
+                        << "\n";
+            } else {
+              std::cerr << "[native-video-host][control] capture-mode focus restart failed seq=" << reqSeq << "\n";
+            }
+          }
+        }
+      }
+    }
+    if (captureWindowModeActive && captureWindowCriteria.enabled() && nowUs >= nextCaptureWindowCheckUs) {
       nextCaptureWindowCheckUs = nowUs + captureWindowRebindIntervalUs;
       CaptureWindowInfo latestWindowInfo{};
       if (find_capture_window(captureWindowCriteria, &latestWindowInfo)) {
@@ -2215,6 +2410,9 @@ int main(int argc, char** argv) {
                   latestWindowInfo.title.empty() ? std::string{} : wide_to_utf8(latestWindowInfo.title);
             }
             const uint32_t rebindCount = hostCaptureRebindCount.fetch_add(1, std::memory_order_acq_rel) + 1;
+            hostCaptureTargetFlags.store((captureWindowModeActive ? 0x1u : 0x0u) |
+                                             ((captureWindowModeActive && captureWindowClientOnlyActive) ? 0x2u : 0x0u),
+                                         std::memory_order_release);
             std::string targetProc = "unknown";
             std::string targetTitle;
             {

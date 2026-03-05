@@ -18,6 +18,7 @@ enum class MessageType : uint16_t {
   ControlClientMetrics = 24,
   ControlRequestKeyFrame = 25,
   ControlRuntimeEncoderConfig = 26,
+  ControlCaptureModeRequest = 27,
 };
 
 enum class UdpPacketKind : uint16_t {
@@ -154,6 +155,16 @@ struct ControlRuntimeEncoderConfigMessage {
   uint32_t bitrate = 0;  // bps
   uint32_t keyint = 0;   // frames
   uint32_t flags = 0;    // bit0: bitrate valid, bit1: keyint valid
+  uint64_t clientSendQpcUs = 0;
+};
+
+struct ControlCaptureModeRequestMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint16_t mode = 0;   // 1:overview-monitor, 2:focus-window-at-point
+  uint16_t flags = 0;  // reserved
+  uint32_t xPermille = 0;  // 0..10000
+  uint32_t yPermille = 0;  // 0..10000
   uint64_t clientSendQpcUs = 0;
 };
 

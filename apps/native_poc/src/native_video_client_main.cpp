@@ -45,6 +45,7 @@ using remote60::native_poc::ControlInputEventMessage;
 using remote60::native_poc::ControlClientMetricsMessage;
 using remote60::native_poc::ControlRequestKeyFrameMessage;
 using remote60::native_poc::ControlRuntimeEncoderConfigMessage;
+using remote60::native_poc::ControlCaptureModeRequestMessage;
 using remote60::native_poc::ControlPingMessage;
 using remote60::native_poc::ControlPongMessage;
 using remote60::native_poc::DecodedFrameNv12;
@@ -381,6 +382,11 @@ std::atomic<uint32_t> gRuntimeTuneSeq{0};
 std::atomic<uint32_t> gRuntimeTargetBitrate{0};
 std::atomic<uint32_t> gRuntimeTargetKeyint{0};
 std::atomic<uint64_t> gRuntimeTuneLastSentUs{0};
+std::atomic<bool> gCaptureOverviewMode{false};
+std::atomic<bool> gCaptureModeReqPending{false};
+std::atomic<uint16_t> gCaptureModeReqMode{0};
+std::atomic<uint32_t> gCaptureModeReqXPermille{5000};
+std::atomic<uint32_t> gCaptureModeReqYPermille{5000};
 
 struct OverlayMetricSample {
   uint64_t tsUs = 0;
@@ -408,7 +414,7 @@ constexpr int kOverlayButtonH = 30;
 constexpr int kOverlayPanelX = 12;
 constexpr int kOverlayPanelY = 50;
 constexpr int kOverlayPanelW = 490;
-constexpr int kOverlayPanelH = 370;
+constexpr int kOverlayPanelH = 390;
 constexpr uint32_t kRuntimeBitrateMin = 300000;
 constexpr uint32_t kRuntimeBitrateMax = 30000000;
 constexpr uint32_t kRuntimeBitrateStep = 250000;
@@ -452,6 +458,44 @@ RECT overlay_keyint_plus_rect() {
   return make_rect(kOverlayPanelX + 284, kOverlayPanelY + 292, 26, 24);
 }
 
+RECT overlay_mode_overview_rect() {
+  return make_rect(kOverlayPanelX + 20, kOverlayPanelY + 328, 120, 24);
+}
+
+bool point_in_overlay_ui(int x, int y) {
+  if (point_in_rect(overlay_toggle_rect(), x, y)) return true;
+  if (!gOverlayVisible.load(std::memory_order_relaxed)) return false;
+  return point_in_rect(overlay_panel_rect(), x, y);
+}
+
+uint32_t coord_to_permille(int coord, int extent) {
+  if (extent <= 1) return 5000;
+  const int clamped = std::clamp(coord, 0, extent - 1);
+  const uint64_t numerator = static_cast<uint64_t>(clamped) * 10000ULL +
+                             static_cast<uint64_t>((extent - 1) / 2);
+  return static_cast<uint32_t>(numerator / static_cast<uint64_t>(extent - 1));
+}
+
+void enqueue_capture_mode_request(uint16_t mode, uint32_t xPermille, uint32_t yPermille) {
+  if (mode != 1 && mode != 2) return;
+  gCaptureModeReqMode.store(mode, std::memory_order_release);
+  gCaptureModeReqXPermille.store(std::min<uint32_t>(10000u, xPermille), std::memory_order_release);
+  gCaptureModeReqYPermille.store(std::min<uint32_t>(10000u, yPermille), std::memory_order_release);
+  gCaptureModeReqPending.store(true, std::memory_order_release);
+}
+
+void request_capture_overview_mode() {
+  enqueue_capture_mode_request(1, 5000, 5000);
+}
+
+void request_capture_focus_from_client_point(HWND hwnd, int x, int y) {
+  RECT rc{};
+  GetClientRect(hwnd, &rc);
+  const int clientW = std::max<int>(1, static_cast<int>(rc.right - rc.left));
+  const int clientH = std::max<int>(1, static_cast<int>(rc.bottom - rc.top));
+  enqueue_capture_mode_request(2, coord_to_permille(x, clientW), coord_to_permille(y, clientH));
+}
+
 void draw_alpha_rect(HDC hdc, const RECT& rect, COLORREF color, BYTE alpha) {
   const int w = rect.right - rect.left;
   const int h = rect.bottom - rect.top;
@@ -478,8 +522,8 @@ void draw_alpha_rect(HDC hdc, const RECT& rect, COLORREF color, BYTE alpha) {
   DeleteDC(memDc);
 }
 
-void draw_panel_button(HDC hdc, const RECT& rect, const char* label) {
-  HBRUSH b = CreateSolidBrush(RGB(60, 68, 80));
+void draw_panel_button(HDC hdc, const RECT& rect, const char* label, bool active = false) {
+  HBRUSH b = CreateSolidBrush(active ? RGB(48, 96, 62) : RGB(60, 68, 80));
   FillRect(hdc, &rect, b);
   DeleteObject(b);
   SetBkMode(hdc, TRANSPARENT);
@@ -677,6 +721,11 @@ void draw_overlay(HDC hdc) {
     lines.push_back(oss.str());
   }
   {
+    std::ostringstream oss;
+    oss << "Capture mode: " << (gCaptureOverviewMode.load(std::memory_order_relaxed) ? "overview(low)" : "focus(high)");
+    lines.push_back(oss.str());
+  }
+  {
     const uint32_t targetBitrate = gRuntimeTargetBitrate.load(std::memory_order_relaxed);
     const uint32_t targetKeyint = gRuntimeTargetKeyint.load(std::memory_order_relaxed);
     const uint64_t sentUs = gRuntimeTuneLastSentUs.load(std::memory_order_relaxed);
@@ -686,7 +735,8 @@ void draw_overlay(HDC hdc) {
         << "  lastSendAgo=" << ageMs << "ms";
     lines.push_back(oss.str());
   }
-  lines.emplace_back("Click +/- to tune. Hotkeys: F8(toggle), [ ] bitrate, ; ' keyint");
+  lines.emplace_back("Click +/- to tune. Hotkeys: F8(toggle), F9(overview), [ ] bitrate, ; ' keyint");
+  lines.emplace_back("In overview mode, click video area to focus selected window.");
 
   SetTextColor(hdc, RGB(230, 235, 240));
   SetBkMode(hdc, TRANSPARENT);
@@ -700,10 +750,12 @@ void draw_overlay(HDC hdc) {
   const RECT brPlus = overlay_bitrate_plus_rect();
   const RECT kiMinus = overlay_keyint_minus_rect();
   const RECT kiPlus = overlay_keyint_plus_rect();
+  const RECT modeOverview = overlay_mode_overview_rect();
   draw_panel_button(hdc, brMinus, "-");
   draw_panel_button(hdc, brPlus, "+");
   draw_panel_button(hdc, kiMinus, "-");
   draw_panel_button(hdc, kiPlus, "+");
+  draw_panel_button(hdc, modeOverview, "Go Overview", gCaptureOverviewMode.load(std::memory_order_relaxed));
   SetTextColor(hdc, RGB(215, 220, 230));
   TextOutA(hdc, panel.left + 120, panel.top + 296, "bitrate", 7);
   TextOutA(hdc, panel.left + 320, panel.top + 296, "keyint", 6);
@@ -1091,7 +1143,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           (point_in_rect(overlay_bitrate_minus_rect(), GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) ||
            point_in_rect(overlay_bitrate_plus_rect(), GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) ||
            point_in_rect(overlay_keyint_minus_rect(), GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) ||
-           point_in_rect(overlay_keyint_plus_rect(), GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))) {
+           point_in_rect(overlay_keyint_plus_rect(), GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) ||
+           point_in_rect(overlay_mode_overview_rect(), GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))) {
         return 0;
       }
       if (kAllInputBlocked) return 0;
@@ -1129,6 +1182,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           InvalidateRect(hwnd, nullptr, FALSE);
           return 0;
         }
+        if (point_in_rect(overlay_mode_overview_rect(), x, y)) {
+          request_capture_overview_mode();
+          InvalidateRect(hwnd, nullptr, FALSE);
+          return 0;
+        }
+      }
+      if (gCaptureOverviewMode.load(std::memory_order_relaxed) &&
+          !point_in_overlay_ui(GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) {
+        request_capture_focus_from_client_point(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
       }
       if (kAllInputBlocked) return 0;
       gMouseButtons.fetch_and(static_cast<uint16_t>(~1u));
@@ -1164,6 +1228,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_KEYDOWN:
       if (wp == VK_F8) {
         gOverlayVisible.store(!gOverlayVisible.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+      }
+      if (wp == VK_F9) {
+        request_capture_overview_mode();
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
       }
@@ -1546,6 +1615,11 @@ int main(int argc, char** argv) {
   gRuntimeTuneEnabled.store(false, std::memory_order_relaxed);
   gRuntimeTuneDirty.store(false, std::memory_order_relaxed);
   gControlConnected.store(false, std::memory_order_relaxed);
+  gCaptureOverviewMode.store(true, std::memory_order_relaxed);
+  gCaptureModeReqPending.store(false, std::memory_order_relaxed);
+  gCaptureModeReqMode.store(0, std::memory_order_relaxed);
+  gCaptureModeReqXPermille.store(5000, std::memory_order_relaxed);
+  gCaptureModeReqYPermille.store(5000, std::memory_order_relaxed);
 
   WinsockScope ws;
   if (!ws.ok) {
@@ -1714,6 +1788,7 @@ int main(int argc, char** argv) {
           uint32_t pingSeq = 0;
           uint32_t metricsSeq = 0;
           uint32_t runtimeSeq = 0;
+          uint32_t captureModeSeq = 0;
           uint64_t lastMetricsSentUs = 0;
           uint64_t inputAckCount = 0;
           uint64_t nextPingUs = qpc_now_us();
@@ -1745,6 +1820,7 @@ int main(int argc, char** argv) {
               gHostCaptureRebindCount.store(pong.captureRebindCount, std::memory_order_relaxed);
               gHostCaptureTargetHwnd.store(pong.captureTargetHwnd, std::memory_order_relaxed);
               gHostCaptureMetaUpdatedUs.store(doneUs, std::memory_order_relaxed);
+              gCaptureOverviewMode.store((pong.captureTargetFlags & 0x1u) == 0, std::memory_order_relaxed);
               {
                 std::lock_guard<std::mutex> lk(gHostCaptureMetaMu);
                 gHostCaptureTargetProcess =
@@ -1766,6 +1842,28 @@ int main(int argc, char** argv) {
                         << "\n";
               nextPingUs = doneUs + static_cast<uint64_t>(std::max<uint32_t>(20, args.controlIntervalMs)) * 1000ULL;
               didWork = true;
+            }
+
+            if (gCaptureModeReqPending.exchange(false, std::memory_order_acq_rel)) {
+              ControlCaptureModeRequestMessage req{};
+              req.header.magic = remote60::native_poc::kMagic;
+              req.header.type = static_cast<uint16_t>(MessageType::ControlCaptureModeRequest);
+              req.header.size = static_cast<uint16_t>(sizeof(req));
+              req.seq = ++captureModeSeq;
+              req.mode = gCaptureModeReqMode.load(std::memory_order_acquire);
+              req.xPermille = std::min<uint32_t>(10000u, gCaptureModeReqXPermille.load(std::memory_order_acquire));
+              req.yPermille = std::min<uint32_t>(10000u, gCaptureModeReqYPermille.load(std::memory_order_acquire));
+              req.clientSendQpcUs = nowUs;
+              if (req.mode == 1 || req.mode == 2) {
+                if (!send_all(controlSock, &req, sizeof(req))) break;
+                gCaptureOverviewMode.store(req.mode == 1, std::memory_order_relaxed);
+                std::cout << "[native-video-client][control] capture-mode-request seq=" << req.seq
+                          << " mode=" << req.mode
+                          << " xPermille=" << req.xPermille
+                          << " yPermille=" << req.yPermille
+                          << "\n";
+                didWork = true;
+              }
             }
 
             const uint64_t metricsUpdatedUs = gClientMetrics.updatedQpcUs.load();

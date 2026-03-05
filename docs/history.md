@@ -684,3 +684,40 @@ Next
 - Collect logs for:
   - `capture-window rebound ...`
   - `capture-size-updated ...`
+
+### 80) 2026-03-05 M13 phase4 (client-driven overview/focus capture mode switching)
+Goal
+- Complete client-side control path for dynamic capture switching:
+  - overview (monitor, low profile) -> click target -> focus window (high profile)
+  - no host restart, control-channel request only
+
+Changes
+1. Protocol/control integration finished
+- File: `apps/native_poc/src/poc_protocol.hpp`
+  - `ControlCaptureModeRequest` message type/struct finalized for mode + permille click position.
+
+2. Host runtime switch path finalized and build-fixed
+- File: `apps/native_poc/src/native_video_host_main.cpp`
+  - process `ControlCaptureModeRequest` (mode 1 overview, mode 2 focus-at-point)
+  - restart capture session and apply quality profile on each mode switch
+  - runtime mutable capture target state (`captureWindowModeActive`) is used across metadata/rebind/crop paths
+  - fixed compile issue by moving `forceKeyNext` declaration before quality-mode lambda usage
+
+3. Client UI/control send path completed
+- File: `apps/native_poc/src/native_video_client_main.cpp`
+  - added overview button in overlay (`Go Overview`)
+  - added hotkey `F9` to request overview mode
+  - in overview mode, left-click on video area sends focus request with client-point -> permille mapping
+  - control thread now sends `ControlCaptureModeRequestMessage`
+  - client mode indicator synced from host `ControlPong` capture flags
+
+Validation
+- Build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_host_poc remote60_native_video_client_poc --parallel`
+  - result: success
+
+Next
+- Run real 2PC validation for mode switching UX:
+  - overview low-fps/low-quality identification
+  - click-to-focus transition latency and stability
+  - metadata correctness (`hostCapProc`, `hostCapRebind`) during focus/rebind.
