@@ -89,6 +89,12 @@ struct ControlPongMessage {
   uint64_t clientSendQpcUs = 0;
   uint64_t hostRecvQpcUs = 0;
   uint64_t hostSendQpcUs = 0;
+  uint32_t captureTargetPid = 0;
+  uint32_t captureTargetFlags = 0;   // bit0: windowTargetEnabled, bit1: clientAreaOnly
+  uint32_t captureRebindCount = 0;
+  uint64_t captureTargetHwnd = 0;
+  char captureTargetProcess[32] = {};
+  char captureTargetTitle[96] = {};
 };
 
 struct ControlInputEventMessage {

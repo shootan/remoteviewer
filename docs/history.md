@@ -502,6 +502,48 @@ Next
 - Use `post-task-wrapup` as default after each meaningful task.
 - Invoke gate-report mode only when Gate evidence extraction is needed.
 
+### 77) 2026-03-05 M13 phase2 (target metadata to client overlay via control pong)
+Goal
+- Complete remaining M13 visibility path so client can see host capture target metadata in runtime overlay.
+
+Changes
+1. Protocol extension for host->client metadata
+- File: `apps/native_poc/src/poc_protocol.hpp`
+- Extended `ControlPongMessage` with:
+  - `captureTargetPid`
+  - `captureTargetFlags` (window/client-area bits)
+  - `captureRebindCount`
+  - `captureTargetHwnd`
+  - `captureTargetProcess[32]`
+  - `captureTargetTitle[96]`
+
+2. Host control pong publish wiring
+- File: `apps/native_poc/src/native_video_host_main.cpp`
+- Host now publishes current capture target metadata on every control pong.
+- Window rebind path now increments `captureRebindCount`.
+- Host periodic stats now include `captureWindowRebindCount`.
+
+3. Client receive + overlay display
+- File: `apps/native_poc/src/native_video_client_main.cpp`
+- Control thread now stores host capture metadata from pong.
+- Overlay now displays:
+  - host capture pid/process/rebind count/age
+  - hwnd + mode(window/monitor + client-area) + title
+- Overlay panel/button Y layout adjusted to avoid overlap after additional lines.
+
+Validation
+- Build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_host_poc remote60_native_video_client_poc --parallel`
+  - result: success
+- Smoke runtime:
+  - `automation/verify_native_video_runtime.ps1` short runs (20260305-120811, 20260305-120905)
+  - result: `HOST_RC=0`, `CLIENT_RC=0`
+
+Next
+- Run real emulator target session and confirm overlay metadata transitions during:
+  - target recreate
+  - window resize/minimize/restore
+
 ### 75) 2026-03-05 M13 phase1 start (window-scoped host capture + rebind)
 Goal
 - Start M13 implementation that does not require external 2PC:

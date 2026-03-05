@@ -24,6 +24,7 @@
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <cstdio>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
@@ -1271,6 +1272,13 @@ int main(int argc, char** argv) {
   std::atomic<uint32_t> clientMetricsQueueDepthMax{0};
   std::atomic<uint32_t> clientMetricsQueueDepthH4p{0};
   std::atomic<uint32_t> clientMetricsUdpAssemblyDropPm{0};
+  std::atomic<uint32_t> hostCaptureTargetPid{0};
+  std::atomic<uint32_t> hostCaptureTargetFlags{0};
+  std::atomic<uint32_t> hostCaptureRebindCount{0};
+  std::atomic<uint64_t> hostCaptureTargetHwnd{0};
+  std::mutex hostCaptureMetaMu;
+  std::string hostCaptureTargetProcess = "monitor";
+  std::string hostCaptureTargetTitle;
   std::atomic<bool> clientRequestedKeyFrame{false};
   std::atomic<uint16_t> clientKeyFrameReason{0};
   std::atomic<uint64_t> clientKeyFrameRequestCount{0};
@@ -1335,6 +1343,23 @@ int main(int argc, char** argv) {
                 pong.clientSendQpcUs = ping.clientSendQpcUs;
                 pong.hostRecvQpcUs = qpc_now_us();
                 pong.hostSendQpcUs = qpc_now_us();
+                pong.captureTargetPid = hostCaptureTargetPid.load(std::memory_order_relaxed);
+                pong.captureTargetFlags = hostCaptureTargetFlags.load(std::memory_order_relaxed);
+                pong.captureRebindCount = hostCaptureRebindCount.load(std::memory_order_relaxed);
+                pong.captureTargetHwnd = hostCaptureTargetHwnd.load(std::memory_order_relaxed);
+                {
+                  std::string processName;
+                  std::string titleText;
+                  {
+                    std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
+                    processName = hostCaptureTargetProcess;
+                    titleText = hostCaptureTargetTitle;
+                  }
+                  std::snprintf(pong.captureTargetProcess, sizeof(pong.captureTargetProcess), "%s",
+                                processName.c_str());
+                  std::snprintf(pong.captureTargetTitle, sizeof(pong.captureTargetTitle), "%s",
+                                titleText.c_str());
+                }
                 if (!send_all(acceptedSock, &pong, sizeof(pong))) break;
                 continue;
               }
@@ -1539,6 +1564,17 @@ int main(int argc, char** argv) {
               << " titleFilter=" << trim_ascii(args.captureWindowTitle)
               << "\n";
   }
+  hostCaptureTargetFlags.store((windowTargetEnabled ? 0x1u : 0x0u) |
+                                   (args.captureWindowClientOnly ? 0x2u : 0x0u),
+                               std::memory_order_relaxed);
+  hostCaptureTargetPid.store(captureWindowInfo.pid, std::memory_order_relaxed);
+  hostCaptureTargetHwnd.store(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(captureWindowInfo.hwnd)),
+                              std::memory_order_relaxed);
+  {
+    std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
+    hostCaptureTargetProcess = captureWindowInfo.processName.empty() ? "monitor" : captureWindowInfo.processName;
+    hostCaptureTargetTitle = captureWindowInfo.title.empty() ? std::string{} : wide_to_utf8(captureWindowInfo.title);
+  }
 
   auto item = windowTargetEnabled
                   ? CreateItemForPrimaryMonitor(captureWindowInfo.hwnd, "CreateForWindow(target-window)")
@@ -1702,13 +1738,6 @@ int main(int argc, char** argv) {
 
   std::mutex captureResourceMu;
   std::atomic<uint32_t> captureSizeChangePending{0};
-  std::atomic<uintptr_t> captureTargetHwndRaw{
-      reinterpret_cast<uintptr_t>(captureWindowInfo.hwnd)};
-  std::string captureTargetProcessName =
-      captureWindowInfo.processName.empty() ? std::string("monitor") : captureWindowInfo.processName;
-  std::string captureTargetTitleUtf8 =
-      captureWindowInfo.title.empty() ? std::string{} : wide_to_utf8(captureWindowInfo.title);
-  uint32_t captureWindowPid = captureWindowInfo.pid;
   Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
   auto create_staging = [&](uint32_t srcW, uint32_t srcH) -> bool {
     D3D11_TEXTURE2D_DESC stDesc{};
@@ -1798,7 +1827,8 @@ int main(int argc, char** argv) {
           ctx->Unmap(stagingLocal.Get(), 0);
         }
         if (args.captureWindowClientOnly) {
-          const HWND cropHwnd = reinterpret_cast<HWND>(captureTargetHwndRaw.load(std::memory_order_acquire));
+          const HWND cropHwnd = reinterpret_cast<HWND>(
+              static_cast<uintptr_t>(hostCaptureTargetHwnd.load(std::memory_order_acquire)));
           uint32_t cropX = 0;
           uint32_t cropY = 0;
           uint32_t cropW = 0;
@@ -2168,18 +2198,30 @@ int main(int argc, char** argv) {
       nextCaptureWindowCheckUs = nowUs + captureWindowRebindIntervalUs;
       CaptureWindowInfo latestWindowInfo{};
       if (find_capture_window(captureWindowCriteria, &latestWindowInfo)) {
-        const uintptr_t currentRaw = captureTargetHwndRaw.load(std::memory_order_acquire);
+        const uintptr_t currentRaw = static_cast<uintptr_t>(hostCaptureTargetHwnd.load(std::memory_order_acquire));
         const uintptr_t nextRaw = reinterpret_cast<uintptr_t>(latestWindowInfo.hwnd);
         if (nextRaw != currentRaw) {
           const auto nextItem =
               CreateItemForPrimaryMonitor(latestWindowInfo.hwnd, "CreateForWindow(target-window-rebind)");
           if (nextItem) {
             item = nextItem;
-            captureTargetHwndRaw.store(nextRaw, std::memory_order_release);
-            captureTargetProcessName = latestWindowInfo.processName.empty() ? "unknown" : latestWindowInfo.processName;
-            captureTargetTitleUtf8 =
-                latestWindowInfo.title.empty() ? std::string{} : wide_to_utf8(latestWindowInfo.title);
-            captureWindowPid = latestWindowInfo.pid;
+            hostCaptureTargetHwnd.store(static_cast<uint64_t>(nextRaw), std::memory_order_release);
+            hostCaptureTargetPid.store(latestWindowInfo.pid, std::memory_order_release);
+            {
+              std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
+              hostCaptureTargetProcess =
+                  latestWindowInfo.processName.empty() ? std::string("unknown") : latestWindowInfo.processName;
+              hostCaptureTargetTitle =
+                  latestWindowInfo.title.empty() ? std::string{} : wide_to_utf8(latestWindowInfo.title);
+            }
+            const uint32_t rebindCount = hostCaptureRebindCount.fetch_add(1, std::memory_order_acq_rel) + 1;
+            std::string targetProc = "unknown";
+            std::string targetTitle;
+            {
+              std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
+              targetProc = hostCaptureTargetProcess;
+              targetTitle = hostCaptureTargetTitle;
+            }
             lastCaptureRestartUs = nowUs;
             if (restart_capture_session()) {
               ++captureRestartCount;
@@ -2190,9 +2232,10 @@ int main(int argc, char** argv) {
               forceKeyNext = true;
               lastSyntheticKeepaliveUs = 0;
               std::cout << "[native-video-host] capture-window rebound hwnd=0x" << std::hex << nextRaw << std::dec
-                        << " pid=" << captureWindowPid
-                        << " process=" << captureTargetProcessName
-                        << " title=" << (captureTargetTitleUtf8.empty() ? "<empty>" : captureTargetTitleUtf8)
+                        << " pid=" << hostCaptureTargetPid.load(std::memory_order_relaxed)
+                        << " process=" << targetProc
+                        << " title=" << (targetTitle.empty() ? "<empty>" : targetTitle)
+                        << " rebindCount=" << rebindCount
                         << " restartCount=" << captureRestartCount
                         << "\n";
             } else {
@@ -3063,6 +3106,11 @@ int main(int argc, char** argv) {
     const uint64_t t = qpc_now_us();
     if (t >= statAtUs) {
       const double mbps = (sentBytes * 8.0) / (1000.0 * 1000.0);
+      std::string targetProcessName;
+      {
+        std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
+        targetProcessName = hostCaptureTargetProcess;
+      }
       if (useRaw) {
         std::cout << "[native-video-host] sentFrames=" << sentFrames
                   << " queuePushCount=" << queuePushCount
@@ -3072,10 +3120,11 @@ int main(int argc, char** argv) {
                   << " queueWaitNoWorkCount=" << queueWaitNoWorkCount
                   << " syntheticKeepaliveCount=" << syntheticKeepaliveCount
                   << " captureRestarts=" << captureRestartCount
-                  << " captureTargetPid=" << captureWindowPid
-                  << " captureTargetProc=" << captureTargetProcessName
+                  << " captureWindowRebindCount=" << hostCaptureRebindCount.load(std::memory_order_relaxed)
+                  << " captureTargetPid=" << hostCaptureTargetPid.load(std::memory_order_relaxed)
+                  << " captureTargetProc=" << targetProcessName
                   << " captureTargetHwnd=0x" << std::hex
-                  << captureTargetHwndRaw.load(std::memory_order_relaxed) << std::dec
+                  << hostCaptureTargetHwnd.load(std::memory_order_relaxed) << std::dec
                   << " keyReqDropTotal=" << clientKeyFrameRequestDropped.load()
                   << " callbackFrames=" << callbackFrames.load()
                   << " skippedByOverwrite=" << skippedByOverwrite
@@ -3106,10 +3155,11 @@ int main(int argc, char** argv) {
                   << " queueWaitNoWorkCount=" << queueWaitNoWorkCount
                   << " syntheticKeepaliveCount=" << syntheticKeepaliveCount
                   << " captureRestarts=" << captureRestartCount
-                  << " captureTargetPid=" << captureWindowPid
-                  << " captureTargetProc=" << captureTargetProcessName
+                  << " captureWindowRebindCount=" << hostCaptureRebindCount.load(std::memory_order_relaxed)
+                  << " captureTargetPid=" << hostCaptureTargetPid.load(std::memory_order_relaxed)
+                  << " captureTargetProc=" << targetProcessName
                   << " captureTargetHwnd=0x" << std::hex
-                  << captureTargetHwndRaw.load(std::memory_order_relaxed) << std::dec
+                  << hostCaptureTargetHwnd.load(std::memory_order_relaxed) << std::dec
                   << " callbackFrames=" << callbackFrames.load()
                   << " skippedByOverwrite=" << skippedByOverwrite
                   << " stalePreEncodeDrops=" << stalePreEncodeDropCount

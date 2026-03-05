@@ -125,6 +125,13 @@ uint32_t env_u32_clamped(const char* key, uint32_t fallback, uint32_t minValue, 
   return std::clamp<uint32_t>(parsed, minValue, maxValue);
 }
 
+std::string fixed_cstr_to_string(const char* buf, size_t cap) {
+  if (!buf || cap == 0) return std::string{};
+  size_t n = 0;
+  while (n < cap && buf[n] != '\0') ++n;
+  return std::string(buf, buf + n);
+}
+
 Args parse_args(int argc, char** argv) {
   Args a;
   for (int i = 1; i < argc; ++i) {
@@ -360,6 +367,14 @@ OverlayConfigSnapshot gOverlayConfig;
 std::atomic<bool> gOverlayVisible{false};
 std::atomic<bool> gOverlayButtonDown{false};
 std::atomic<bool> gControlConnected{false};
+std::atomic<uint32_t> gHostCaptureTargetPid{0};
+std::atomic<uint32_t> gHostCaptureTargetFlags{0};
+std::atomic<uint32_t> gHostCaptureRebindCount{0};
+std::atomic<uint64_t> gHostCaptureTargetHwnd{0};
+std::atomic<uint64_t> gHostCaptureMetaUpdatedUs{0};
+std::mutex gHostCaptureMetaMu;
+std::string gHostCaptureTargetProcess = "monitor";
+std::string gHostCaptureTargetTitle;
 std::atomic<bool> gRuntimeTuneEnabled{false};
 std::atomic<bool> gRuntimeTuneDirty{false};
 std::atomic<uint32_t> gRuntimeTuneSeq{0};
@@ -393,7 +408,7 @@ constexpr int kOverlayButtonH = 30;
 constexpr int kOverlayPanelX = 12;
 constexpr int kOverlayPanelY = 50;
 constexpr int kOverlayPanelW = 490;
-constexpr int kOverlayPanelH = 330;
+constexpr int kOverlayPanelH = 370;
 constexpr uint32_t kRuntimeBitrateMin = 300000;
 constexpr uint32_t kRuntimeBitrateMax = 30000000;
 constexpr uint32_t kRuntimeBitrateStep = 250000;
@@ -422,19 +437,19 @@ RECT overlay_panel_rect() {
 }
 
 RECT overlay_bitrate_minus_rect() {
-  return make_rect(kOverlayPanelX + 20, kOverlayPanelY + 260, 26, 24);
+  return make_rect(kOverlayPanelX + 20, kOverlayPanelY + 292, 26, 24);
 }
 
 RECT overlay_bitrate_plus_rect() {
-  return make_rect(kOverlayPanelX + 84, kOverlayPanelY + 260, 26, 24);
+  return make_rect(kOverlayPanelX + 84, kOverlayPanelY + 292, 26, 24);
 }
 
 RECT overlay_keyint_minus_rect() {
-  return make_rect(kOverlayPanelX + 220, kOverlayPanelY + 260, 26, 24);
+  return make_rect(kOverlayPanelX + 220, kOverlayPanelY + 292, 26, 24);
 }
 
 RECT overlay_keyint_plus_rect() {
-  return make_rect(kOverlayPanelX + 284, kOverlayPanelY + 260, 26, 24);
+  return make_rect(kOverlayPanelX + 284, kOverlayPanelY + 292, 26, 24);
 }
 
 void draw_alpha_rect(HDC hdc, const RECT& rect, COLORREF color, BYTE alpha) {
@@ -570,6 +585,19 @@ void draw_overlay(HDC hdc) {
   const uint32_t dropped = gClientMetrics.skippedFrames.load(std::memory_order_relaxed);
   const uint64_t updatedUs = gClientMetrics.updatedQpcUs.load(std::memory_order_relaxed);
   const uint64_t staleMs = (updatedUs > 0 && nowUs >= updatedUs) ? ((nowUs - updatedUs) / 1000ULL) : 0;
+  const uint32_t hostCapPid = gHostCaptureTargetPid.load(std::memory_order_relaxed);
+  const uint32_t hostCapFlags = gHostCaptureTargetFlags.load(std::memory_order_relaxed);
+  const uint32_t hostCapRebind = gHostCaptureRebindCount.load(std::memory_order_relaxed);
+  const uint64_t hostCapHwnd = gHostCaptureTargetHwnd.load(std::memory_order_relaxed);
+  const uint64_t hostCapMetaUs = gHostCaptureMetaUpdatedUs.load(std::memory_order_relaxed);
+  const uint64_t hostCapMetaAgeMs = (hostCapMetaUs > 0 && nowUs >= hostCapMetaUs) ? ((nowUs - hostCapMetaUs) / 1000ULL) : 0;
+  std::string hostCapProcess;
+  std::string hostCapTitle;
+  {
+    std::lock_guard<std::mutex> lk(gHostCaptureMetaMu);
+    hostCapProcess = gHostCaptureTargetProcess;
+    hostCapTitle = gHostCaptureTargetTitle;
+  }
 
   std::vector<std::string> lines;
   lines.reserve(18);
@@ -604,6 +632,22 @@ void draw_overlay(HDC hdc) {
     oss << "Transport=" << gOverlayConfig.transport
         << " Codec=" << gOverlayConfig.codec
         << " Host=" << gOverlayConfig.host << ":" << gOverlayConfig.port;
+    lines.push_back(oss.str());
+  }
+  {
+    std::ostringstream oss;
+    oss << "HostCapture pid=" << hostCapPid
+        << " proc=" << (hostCapProcess.empty() ? "monitor" : hostCapProcess)
+        << " rebind=" << hostCapRebind
+        << " age=" << hostCapMetaAgeMs << "ms";
+    lines.push_back(oss.str());
+  }
+  {
+    std::ostringstream oss;
+    oss << "HostCapture hwnd=0x" << std::hex << hostCapHwnd << std::dec
+        << " mode=" << (((hostCapFlags & 0x1u) != 0) ? "window" : "monitor")
+        << (((hostCapFlags & 0x2u) != 0) ? "+client" : "")
+        << " title=" << (hostCapTitle.empty() ? "<empty>" : hostCapTitle);
     lines.push_back(oss.str());
   }
   {
@@ -661,8 +705,8 @@ void draw_overlay(HDC hdc) {
   draw_panel_button(hdc, kiMinus, "-");
   draw_panel_button(hdc, kiPlus, "+");
   SetTextColor(hdc, RGB(215, 220, 230));
-  TextOutA(hdc, panel.left + 120, panel.top + 264, "bitrate", 7);
-  TextOutA(hdc, panel.left + 320, panel.top + 264, "keyint", 6);
+  TextOutA(hdc, panel.left + 120, panel.top + 296, "bitrate", 7);
+  TextOutA(hdc, panel.left + 320, panel.top + 296, "keyint", 6);
 }
 
 void log_client_line(const std::string& line) {
@@ -1695,14 +1739,30 @@ int main(int argc, char** argv) {
               ControlPongMessage pong{};
               pong.header = header;
               if (!recv_all(controlSock, &pong.seq, sizeof(pong) - sizeof(MessageHeader))) break;
-
               const uint64_t doneUs = qpc_now_us();
+              gHostCaptureTargetPid.store(pong.captureTargetPid, std::memory_order_relaxed);
+              gHostCaptureTargetFlags.store(pong.captureTargetFlags, std::memory_order_relaxed);
+              gHostCaptureRebindCount.store(pong.captureRebindCount, std::memory_order_relaxed);
+              gHostCaptureTargetHwnd.store(pong.captureTargetHwnd, std::memory_order_relaxed);
+              gHostCaptureMetaUpdatedUs.store(doneUs, std::memory_order_relaxed);
+              {
+                std::lock_guard<std::mutex> lk(gHostCaptureMetaMu);
+                gHostCaptureTargetProcess =
+                    fixed_cstr_to_string(pong.captureTargetProcess, sizeof(pong.captureTargetProcess));
+                gHostCaptureTargetTitle =
+                    fixed_cstr_to_string(pong.captureTargetTitle, sizeof(pong.captureTargetTitle));
+              }
+
               const uint64_t rttUs = (doneUs >= ping.clientSendQpcUs) ? (doneUs - ping.clientSendQpcUs) : 0;
               std::cout << "[native-video-client][control] seq=" << pong.seq
                         << " rttUs=" << rttUs
                         << " hostQueueUs=" << ((pong.hostSendQpcUs >= pong.hostRecvQpcUs)
                                                     ? (pong.hostSendQpcUs - pong.hostRecvQpcUs)
                                                     : 0)
+                        << " hostCapPid=" << pong.captureTargetPid
+                        << " hostCapProc=" << fixed_cstr_to_string(
+                               pong.captureTargetProcess, sizeof(pong.captureTargetProcess))
+                        << " hostCapRebind=" << pong.captureRebindCount
                         << "\n";
               nextPingUs = doneUs + static_cast<uint64_t>(std::max<uint32_t>(20, args.controlIntervalMs)) * 1000ULL;
               didWork = true;

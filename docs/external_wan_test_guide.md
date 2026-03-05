@@ -40,6 +40,11 @@ Example:
 }
 ```
 
+Overlay check (client):
+- Stats panel now shows `HostCapture ...` lines from control pong metadata:
+  - pid/process/rebind count
+  - hwnd/mode(window|monitor + client-area)/title
+
 ## Recommended FHD profiles
 - `automation/native_video_profile_1080p_lowlat.json` (8Mbps, low-latency baseline)
 - `automation/native_video_profile_1080p_wan_quality.json` (10Mbps, keyint 60, frame gating off)
