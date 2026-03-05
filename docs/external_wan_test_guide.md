@@ -45,6 +45,23 @@ Overlay check (client):
   - pid/process/rebind count
   - hwnd/mode(window|monitor + client-area)/title
 
+Local M13 rebind validation:
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File automation/validate_m13_window_rebind.ps1 `
+  -Root . `
+  -ExeDir build-vcpkg-local/apps/native_poc/Debug `
+  -BaseConfig automation/native_video_profile_1080p_lowlat.json `
+  -HostClientSeconds 14 `
+  -TargetProcess notepad.exe `
+  -RemoteHost 127.0.0.1
+```
+
+Expected summary keys:
+- `TARGET_FOUND_COUNT>=1`
+- `REBIND_EVENT_COUNT>=1` (or `REBIND_STATS_MAX>=1`)
+- `CLIENT_HOSTCAP_EVENT_COUNT>=1`
+- `M13_REBIND_PASS=True`
+
 ## Recommended FHD profiles
 - `automation/native_video_profile_1080p_lowlat.json` (8Mbps, low-latency baseline)
 - `automation/native_video_profile_1080p_wan_quality.json` (10Mbps, keyint 60, frame gating off)

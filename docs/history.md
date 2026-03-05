@@ -544,6 +544,43 @@ Next
   - target recreate
   - window resize/minimize/restore
 
+### 78) 2026-03-05 M13 phase3 validation (target recreate/rebind + client metadata propagation)
+Goal
+- Validate M13 on real runtime behavior, not just build/smoke:
+  - target window recreate -> host rebind
+  - host metadata propagation -> client control/overlay path
+
+Changes
+1. Added repeatable validation script
+- `automation/validate_m13_window_rebind.ps1`
+- Flow:
+  - generate temp profile with window-scope options
+  - launch host/client
+  - launch target app (`notepad.exe`), then kill/relaunch to force hwnd change
+  - summarize key signals and PASS flag
+
+2. Added runbook command
+- `docs/external_wan_test_guide.md`
+  - local M13 rebind validation command + expected summary keys.
+
+Validation
+- Command:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/validate_m13_window_rebind.ps1 -Root . -ExeDir build-vcpkg-local/apps/native_poc/Debug -BaseConfig automation/native_video_profile_1080p_lowlat.json -HostClientSeconds 14 -TargetProcess notepad.exe -RemoteHost 127.0.0.1`
+- Output:
+  - `HOST_RC=0`
+  - `CLIENT_RC=0`
+  - `TARGET_FOUND_COUNT=1`
+  - `REBIND_EVENT_COUNT=1`
+  - `CLIENT_HOSTCAP_EVENT_COUNT=14`
+  - `M13_REBIND_PASS=True`
+- Log checks:
+  - host: `capture-window rebound ... rebindCount=1`
+  - host stats: `captureWindowRebindCount=1`
+  - client control: `hostCapProc=notepad.exe hostCapRebind=1`
+
+Next
+- Expand phase3 validation to emulator-specific processes/titles (`dnplayer.exe`, `HD-Player.exe`, `Nox.exe`) and collect per-app presets.
+
 ### 75) 2026-03-05 M13 phase1 start (window-scoped host capture + rebind)
 Goal
 - Start M13 implementation that does not require external 2PC:
