@@ -62,6 +62,23 @@ Expected summary keys:
 - `CLIENT_HOSTCAP_EVENT_COUNT>=1`
 - `M13_REBIND_PASS=True`
 
+Local M13 phase4 mode-switch validation (no 2PC required):
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File automation/validate_m13_mode_switch.ps1 `
+  -Root . `
+  -ExeDir build-vcpkg-local/apps/native_poc/Debug `
+  -BaseConfig automation/native_video_profile_1080p_lowlat.json `
+  -HostClientSeconds 18 `
+  -TargetProcess notepad.exe `
+  -RemoteHost 127.0.0.1
+```
+
+Expected summary keys:
+- `MODE_SWITCH_EVENT_COUNT>=2` (overview + focus applied)
+- `FOCUS_APPLY_COUNT>=1`
+- `HOSTCAP_METADATA_EVENT_COUNT>=1`
+- `M13_MODE_SWITCH_PASS=True`
+
 ## Emulator preset profiles (M13 phase3 extension)
 Use these presets when you want window-scoped capture for each emulator app:
 - `automation/native_video_profile_1080p_ldplayer_window.json`

@@ -721,3 +721,50 @@ Next
   - overview low-fps/low-quality identification
   - click-to-focus transition latency and stability
   - metadata correctness (`hostCapProc`, `hostCapRebind`) during focus/rebind.
+
+### 81) 2026-03-05 M13 phase4 local preflight automation (no-2PC mode-switch validation)
+Goal
+- Keep M13 phase4 progress moving without 2PC by adding a deterministic local mode-switch validation path.
+
+Changes
+1. Added local validation script
+- File: `automation/validate_m13_mode_switch.ps1`
+- Flow:
+  - create temp profile from base config (`captureWindowProcess`, local host, seconds)
+  - launch host/client and target app (`notepad.exe` by default)
+  - auto-send `F9` (overview request) and video-area click (focus request) to client window
+  - parse host/client logs and emit summary keys + PASS flag
+- Output keys:
+  - `MODE_SWITCH_EVENT_COUNT`
+  - `FOCUS_APPLY_COUNT`
+  - `HOSTCAP_METADATA_EVENT_COUNT`
+  - `M13_MODE_SWITCH_PASS`
+
+2. Updated runbook
+- File: `docs/external_wan_test_guide.md`
+- Added local command and expected summary keys for M13 phase4 no-2PC validation.
+
+3. Updated implementation snapshot
+- File: `docs/구현계획.md`
+- Added M13 phase4 local automation update and superseded immediate-next guidance for no-2PC periods.
+
+Validation
+- Script parse/syntax check: pass (`automation/validate_m13_mode_switch.ps1` loaded by PowerShell).
+- Runtime precondition check: pass (`remote60_native_video_host_poc.exe`, `remote60_native_video_client_poc.exe` exist in `build-vcpkg-local/apps/native_poc/Debug`).
+- Full runtime execution: pass (local 1PC smoke).
+  - command:
+    - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/validate_m13_mode_switch.ps1 -Root . -ExeDir build-vcpkg-local/apps/native_poc/Debug -BaseConfig automation/native_video_profile_1080p_lowlat.json -HostClientSeconds 14 -TargetProcess notepad.exe -RemoteHost 127.0.0.1`
+  - log:
+    - `automation/logs/m13-mode-switch-20260305-202852`
+  - result:
+    - `HOST_RC=0`, `CLIENT_RC=0`
+    - `CLIENT_MODE_REQ_OVERVIEW_COUNT=1`
+    - `CLIENT_MODE_REQ_FOCUS_COUNT=1`
+    - `MODE_SWITCH_EVENT_COUNT=2`
+    - `FOCUS_APPLY_COUNT=1`
+    - `HOSTCAP_METADATA_EVENT_COUNT=14`
+    - `M13_MODE_SWITCH_PASS=True`
+
+Next
+- Repeat `automation/validate_m13_mode_switch.ps1` with window placement variants if click target selection becomes unstable.
+- After 2PC is available, run emulator preset sessions and close M13 phase4 acceptance.
