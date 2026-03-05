@@ -71,3 +71,36 @@ Validation
 Next
 - Continue updating only checklist checkboxes/status in `docs/구현계획.md`.
 - Write all execution narratives and outcomes only to `docs/history.md`.
+
+### 85) 2026-03-05 direct app JSON config support (`--config`)
+Goal
+- Run native video host/client directly from app executable using JSON profile, without PowerShell wrapper dependency.
+
+Changes
+1. Added shared JSON profile loader/env mapper
+- File: `apps/native_poc/src/json_profile.hpp`
+- Added lightweight JSON key readers (string/u32/bool) and runtime env override mapping previously handled by script.
+
+2. Host app direct config support
+- File: `apps/native_poc/src/native_video_host_main.cpp`
+- Added `--config <path>` handling.
+- Parse order: JSON defaults first, then CLI flags override.
+
+3. Client app direct config support
+- File: `apps/native_poc/src/native_video_client_main.cpp`
+- Added `--config <path>` handling.
+- Supports `remoteHost/host` from JSON, with CLI `--host` override.
+
+4. Usage docs update
+- File: `apps/native_poc/README.md`
+- Added direct executable examples using `--config`.
+
+Validation
+- Build passed:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_host_poc remote60_native_video_client_poc --parallel`
+- Output binaries:
+  - `build-vcpkg-local/apps/native_poc/Debug/remote60_native_video_host_poc.exe`
+  - `build-vcpkg-local/apps/native_poc/Debug/remote60_native_video_client_poc.exe`
+
+Next
+- Run 2PC smoke with direct `--config` flow and confirm gate logs are equivalent to PowerShell wrapper execution.

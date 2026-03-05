@@ -123,6 +123,21 @@ Client:
 powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1 -Role client -ConfigPath automation/native_video_profile_720p.json -ExeDir build-native2/apps/native_poc/Debug -RemoteHost <HOST_IP>
 ```
 
+### Direct app JSON run (no PowerShell wrapper)
+Host:
+```powershell
+.\build-native2\apps\native_poc\Debug\remote60_native_video_host_poc.exe --config automation/native_video_profile_720p.json
+```
+
+Client:
+```powershell
+.\build-native2\apps\native_poc\Debug\remote60_native_video_client_poc.exe --config automation/native_video_profile_720p.json --host <HOST_IP>
+```
+
+Notes:
+- `--config` sets defaults from JSON first, then explicit CLI flags override those values.
+- `--host` on client can override JSON `remoteHost`.
+
 ### External WAN checklist (UDP profile default)
 - Port forwarding:
   - UDP `43000` (video)

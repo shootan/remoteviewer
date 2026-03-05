@@ -40,6 +40,7 @@
 #include <vector>
 
 #include "mf_h264_codec.hpp"
+#include "json_profile.hpp"
 #include "native_video_transport.hpp"
 #include "poc_protocol.hpp"
 #include "time_utils.hpp"
@@ -73,6 +74,7 @@ using remote60::native_poc::clamp_udp_mtu;
 using remote60::native_poc::parse_video_transport;
 using remote60::native_poc::qpc_now_us;
 using remote60::native_poc::video_transport_name;
+namespace json_profile = remote60::native_poc::json_profile;
 
 #ifndef REMOTE60_NATIVE_ENCODED_EXPERIMENT
 #define REMOTE60_NATIVE_ENCODED_EXPERIMENT 0
@@ -557,8 +559,66 @@ uint32_t env_u32_clamped(const char* key, uint32_t fallback, uint32_t minValue, 
 
 Args parse_args(int argc, char** argv) {
   Args a;
+  std::string configPath;
   for (int i = 1; i < argc; ++i) {
     const std::string k = argv[i];
+    if (k == "--config" && i + 1 < argc) {
+      configPath = argv[++i];
+    }
+  }
+  if (!configPath.empty()) {
+    std::string jsonText;
+    std::string errorText;
+    if (!json_profile::load_json_text_file(configPath, &jsonText, &errorText)) {
+      std::cerr << "[native-video-host] failed to load --config file: " << configPath
+                << " (" << errorText << ")\n";
+    } else {
+      uint32_t v = 0;
+      std::string s;
+      bool b = false;
+      if (json_profile::json_get_u32(jsonText, "port", &v)) {
+        a.bindPort = static_cast<uint16_t>(std::min<uint32_t>(v, 65535));
+      }
+      if (json_profile::json_get_u32(jsonText, "bindPort", &v)) {
+        a.bindPort = static_cast<uint16_t>(std::min<uint32_t>(v, 65535));
+      }
+      if (json_profile::json_get_u32(jsonText, "controlPort", &v)) {
+        a.controlPort = static_cast<uint16_t>(std::min<uint32_t>(v, 65535));
+      }
+      if (json_profile::json_get_u32(jsonText, "tcpSendBufKb", &v)) a.tcpSendBufKb = v;
+      if (json_profile::json_get_u32(jsonText, "udpMtu", &v)) a.udpMtu = clamp_udp_mtu(v);
+      if (json_profile::json_get_u32(jsonText, "traceEvery", &v)) a.traceEvery = v;
+      if (json_profile::json_get_u32(jsonText, "traceMax", &v)) a.traceMax = v;
+      if (json_profile::json_get_u32(jsonText, "inputLogEvery", &v)) {
+        a.inputLogEvery = std::max<uint32_t>(1, v);
+      }
+      if (json_profile::json_get_string(jsonText, "codec", &s)) a.codec = s;
+      if (json_profile::json_get_string(jsonText, "transport", &s)) a.transport = s;
+      if (json_profile::json_get_u32(jsonText, "fps", &v)) a.fps = std::clamp<uint32_t>(v, 1, 120);
+      if (json_profile::json_get_u32(jsonText, "seconds", &v)) a.seconds = v;
+      if (json_profile::json_get_u32(jsonText, "bitrate", &v)) {
+        a.bitrate = std::max<uint32_t>(100000, v);
+      }
+      if (json_profile::json_get_u32(jsonText, "keyint", &v)) a.keyint = std::max<uint32_t>(1, v);
+      if (json_profile::json_get_u32(jsonText, "encodeWidth", &v)) a.encodeWidth = v;
+      if (json_profile::json_get_u32(jsonText, "encodeHeight", &v)) a.encodeHeight = v;
+      if (json_profile::json_get_string(jsonText, "captureWindowProcess", &s)) a.captureWindowProcess = s;
+      if (json_profile::json_get_string(jsonText, "captureWindowTitle", &s)) a.captureWindowTitle = s;
+      if (json_profile::json_get_bool(jsonText, "captureWindowClientOnly", &b)) {
+        a.captureWindowClientOnly = b;
+      }
+      if (json_profile::json_get_u32(jsonText, "captureWindowRebindIntervalMs", &v)) {
+        a.captureWindowRebindIntervalMs = std::clamp<uint32_t>(v, 200, 10000);
+      }
+      json_profile::apply_runtime_env_overrides_from_json(jsonText);
+    }
+  }
+  for (int i = 1; i < argc; ++i) {
+    const std::string k = argv[i];
+    if (k == "--config" && i + 1 < argc) {
+      ++i;
+      continue;
+    }
     if (k == "--bind-port" && i + 1 < argc) {
       uint32_t v = 0;
       if (parse_u32(argv[++i], &v)) a.bindPort = static_cast<uint16_t>(std::min<uint32_t>(v, 65535));
