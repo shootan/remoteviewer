@@ -104,3 +104,27 @@ Validation
 
 Next
 - Run 2PC smoke with direct `--config` flow and confirm gate logs are equivalent to PowerShell wrapper execution.
+
+### 86) 2026-03-05 plan update: highest priority set to background input injection
+Goal
+- Reflect new top-priority work in `docs/구현계획.md`: background input injection without real cursor movement.
+
+Changes
+1. Priority notice added
+- File: `docs/구현계획.md`
+- Added `긴급 우선순위 공지 (2026-03-05)` with constraints:
+  - no real OS cursor move
+  - click/drag/keyboard only
+  - input must work for occluded target window (direct HWND injection)
+
+2. Milestone priority updated
+- File: `docs/구현계획.md`
+- Changed current top milestone to `M3.5 Background 입력 주입 (우선)`.
+- Added new section `M3.5. Background 입력 주입 (최우선)` checklist.
+- Added this item to the top of execution order as highest priority.
+
+Validation
+- Docs-only change; no build/test required.
+
+Next
+- Start M3.5 implementation in host input path with `background_message` injection mode.
