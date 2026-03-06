@@ -243,3 +243,49 @@ Validation
 Next
 - When interactive/2PC environment is available, execute items in `docs/수동확인_체크리스트.md` from P0 to P2 order.
 - After each manual pass, update checkbox in that document and append detailed evidence to `docs/history.md`.
+
+### 90) 2026-03-06 구현계획 정리: 코드 작업/검증 분리 + 미구현 코드 항목 식별
+Goal
+- 미완료 항목을 `코드 작업`과 `검증`으로 분리해 한 번에 필터링 가능하게 만든다.
+- 체크되지 않은 항목 중 실제 코드 미구현 항목을 구분해 우선순위 판단 비용을 줄인다.
+
+Changes
+1. Plan 체크리스트 구조 개편
+- File: `docs/구현계획.md`
+- `미완료 항목 빠른 필터` 추가:
+  - 코드 작업 필요
+  - 검증/판정 필요(코드 완료 또는 부분 완료)
+  - 검증 전용(추가 코드 작업 없음)
+- `M3.5/M4/M5/M6/M7`을 `코드 작업`/`검증`(또는 `검증/설계`)으로 분리.
+- `M5`는 코드 항목을 완료(`[x]`)로 반영하고 검증 항목만 잔여로 유지.
+- 실행 순서 0번을 `코드 완료, 검증만 잔여` 상태로 명시.
+
+2. 코드 대조 결과를 체크리스트에 반영
+- 코드 미구현(작업 필요)로 분류:
+  - `M4 NVIDIA NVENC 전용 경로`
+  - `M4 Intel QSV 전용 경로`
+  - `M6 FEC/NACK/RTX 채택안 구현(조건부)`
+- 코드 존재(검증 대기)로 분류:
+  - `M5 frame gating / static downshift / keyframe throttling`
+  - `M4 backend auto/fallback 골격`
+  - `M3.5 background 입력 주입` 최종 수동 검증
+
+Validation
+- Command:
+  - `rg -n "frameGatingEnabled|frame-gating mode=|keyframe-request-throttled" apps/native_poc/src/native_video_host_main.cpp -S`
+  - `rg -n "request_keyframe|keyframe-request-throttled|gKeyframeRequest" apps/native_poc/src/native_video_client_main.cpp -S`
+  - `rg -n "MftBackendMode|amf_mft|mft_hw_unavailable|mft_enum_sw" apps/native_poc/src/mf_h264_codec.cpp -S`
+  - `rg -n "nvenc|qsv" apps/native_poc/src/mf_h264_codec.cpp apps/native_poc/src/native_video_host_main.cpp apps/native_poc/src/native_video_client_main.cpp -S`
+  - `rg -n "FEC|NACK|RTX|retransmit|retransmission|negative ack|repair" apps/native_poc/src -S`
+- Result:
+  - `M5` 관련 코드 심볼 다수 확인(host/client).
+  - `M4`의 AMF 진입 경로 및 auto/fallback 골격 심볼 확인.
+  - NVENC/QSV 전용 구현 심볼은 미확인(분류용 문자열 매칭만 존재).
+  - FEC/NACK/RTX 구현 심볼 미확인.
+- Build/Test:
+  - 문서 정리 작업으로 빌드/런타임 테스트는 수행하지 않음.
+
+Next
+- `M3.5` 수동 검증 1차 시나리오 완료 후 검증 체크 반영.
+- `M4`는 AMD 기본화 마무리 vs NVENC/QSV 전용 경로 중 우선순위를 확정.
+- `M5`는 추가 코드보다 완료조건(`MBPS_AVG`, 화질/응답성) 검증을 우선 수행.
