@@ -216,3 +216,30 @@ Next
   - cursor does not move
   - occluded target window still receives click/drag/keyboard input
 - If manual checks pass, mark M3.5 verification scenario complete in `docs/구현계획.md`.
+
+### 89) 2026-03-06 수동확인 항목 통합 정리 (pending-only checklist)
+Goal
+- 지금까지 남아있던 수동확인 대기 항목을 한 문서로 모아, 나중에 한 번에 확인 가능하게 만든다.
+
+Changes
+1. Manual-only checklist document added
+- File: `docs/수동확인_체크리스트.md`
+- Added pending manual verification items only:
+  - M3.5 background input final manual checks
+  - direct `--config` 2PC smoke confirmation
+  - freeze user-side repro final confirmation
+  - M9 external 2PC Gate A/B acceptance
+  - M13 phase3 emulator rebind validation
+  - M13 phase4 2PC mode-switch acceptance
+
+2. Plan checkbox update
+- File: `docs/구현계획.md`
+- Added completed checkbox for manual-pending checklist documentation.
+
+Validation
+- Confirmed `docs/수동확인_체크리스트.md` exists and contains manual-only pending items with source references.
+- Confirmed `docs/구현계획.md` reflects the documentation task as completed status update.
+
+Next
+- When interactive/2PC environment is available, execute items in `docs/수동확인_체크리스트.md` from P0 to P2 order.
+- After each manual pass, update checkbox in that document and append detailed evidence to `docs/history.md`.
