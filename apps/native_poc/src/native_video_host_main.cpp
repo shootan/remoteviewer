@@ -79,7 +79,7 @@ namespace json_profile = remote60::native_poc::json_profile;
 #ifndef REMOTE60_NATIVE_ENCODED_EXPERIMENT
 #define REMOTE60_NATIVE_ENCODED_EXPERIMENT 0
 #endif
-constexpr bool kAllInputBlocked = true;
+constexpr bool kInputPolicyForceBlock = false;
 constexpr uint64_t kMaxEncodedFrameAgeUs = 250000;  // 250ms
 constexpr uint32_t kMaxConsecutiveStaleEncodedFrames = 8;
 constexpr int kCaptureFramePoolBuffersDefault = 2;
@@ -333,6 +333,155 @@ bool find_top_level_window_at_point(POINT screenPt, CaptureWindowInfo* outInfo) 
   return false;
 }
 
+enum class InputInjectionMode : uint8_t {
+  Disabled = 0,
+  BackgroundMessage = 1,
+};
+
+InputInjectionMode parse_input_injection_mode(std::string raw) {
+  raw = ascii_lower(trim_ascii(raw));
+  if (raw.empty() || raw == "none" || raw == "disabled" || raw == "off") {
+    return InputInjectionMode::Disabled;
+  }
+  if (raw == "background_message") {
+    return InputInjectionMode::BackgroundMessage;
+  }
+  return InputInjectionMode::Disabled;
+}
+
+const char* input_injection_mode_name(InputInjectionMode mode) {
+  switch (mode) {
+    case InputInjectionMode::Disabled:
+      return "disabled";
+    case InputInjectionMode::BackgroundMessage:
+      return "background_message";
+    default:
+      return "unknown";
+  }
+}
+
+WPARAM mouse_button_wparam(uint16_t buttons) {
+  WPARAM wp = 0;
+  if ((buttons & 0x1u) != 0) wp |= MK_LBUTTON;
+  if ((buttons & 0x2u) != 0) wp |= MK_RBUTTON;
+  if ((buttons & 0x4u) != 0) wp |= MK_MBUTTON;
+  return wp;
+}
+
+uint16_t mouse_vk_to_mask(uint32_t vk) {
+  switch (vk) {
+    case VK_LBUTTON:
+      return 0x1u;
+    case VK_RBUTTON:
+      return 0x2u;
+    case VK_MBUTTON:
+      return 0x4u;
+    default:
+      return 0x0u;
+  }
+}
+
+UINT mouse_vk_to_message(uint16_t kind, uint32_t vk) {
+  if (kind == 2) {
+    if (vk == VK_RBUTTON) return WM_RBUTTONDOWN;
+    if (vk == VK_MBUTTON) return WM_MBUTTONDOWN;
+    return WM_LBUTTONDOWN;
+  }
+  if (kind == 3) {
+    if (vk == VK_RBUTTON) return WM_RBUTTONUP;
+    if (vk == VK_MBUTTON) return WM_MBUTTONUP;
+    return WM_LBUTTONUP;
+  }
+  return 0;
+}
+
+LPARAM key_event_lparam(uint32_t keyCode, bool keyUp) {
+  const UINT scanCode = MapVirtualKeyW(static_cast<UINT>(keyCode), MAPVK_VK_TO_VSC);
+  DWORD lp = 1u | ((scanCode & 0xFFu) << 16);
+  if (keyUp) lp |= (1u << 30) | (1u << 31);
+  return static_cast<LPARAM>(lp);
+}
+
+int clamp_input_coord_to_client(int32_t coord, int extent) {
+  if (extent <= 1) return 0;
+  return std::clamp<int>(coord, 0, extent - 1);
+}
+
+bool make_client_lparam(HWND hwnd, int32_t x, int32_t y, LPARAM* outLp) {
+  if (!outLp || !hwnd || !IsWindow(hwnd)) return false;
+  RECT rc{};
+  if (!GetClientRect(hwnd, &rc)) return false;
+  const int w = std::max<int>(1, rc.right - rc.left);
+  const int h = std::max<int>(1, rc.bottom - rc.top);
+  const int cx = clamp_input_coord_to_client(x, w);
+  const int cy = clamp_input_coord_to_client(y, h);
+  *outLp = MAKELPARAM(cx, cy);
+  return true;
+}
+
+bool resolve_input_target_window(const CaptureWindowCriteria& explicitCriteria,
+                                 const std::atomic<uint64_t>& captureTargetHwnd,
+                                 HWND* outHwnd) {
+  if (!outHwnd) return false;
+  *outHwnd = nullptr;
+  if (explicitCriteria.enabled()) {
+    CaptureWindowInfo explicitTarget{};
+    if (!find_capture_window(explicitCriteria, &explicitTarget)) return false;
+    if (!explicitTarget.hwnd || !IsWindow(explicitTarget.hwnd) || IsIconic(explicitTarget.hwnd)) return false;
+    *outHwnd = explicitTarget.hwnd;
+    return true;
+  }
+  const uintptr_t hwndRaw = static_cast<uintptr_t>(captureTargetHwnd.load(std::memory_order_acquire));
+  HWND captureHwnd = reinterpret_cast<HWND>(hwndRaw);
+  if (!captureHwnd || !IsWindow(captureHwnd) || IsIconic(captureHwnd)) return false;
+  *outHwnd = captureHwnd;
+  return true;
+}
+
+enum class InputInjectResult : uint8_t {
+  Injected = 0,
+  IgnoredMove = 1,
+  NoTarget = 2,
+  Unsupported = 3,
+  Failed = 4,
+};
+
+InputInjectResult inject_background_input_event(const ControlInputEventMessage& input, HWND targetHwnd) {
+  if (!targetHwnd || !IsWindow(targetHwnd)) return InputInjectResult::NoTarget;
+  if (input.kind == 1) {
+    if ((input.buttons & 0x7u) == 0) return InputInjectResult::IgnoredMove;
+    LPARAM lp = 0;
+    if (!make_client_lparam(targetHwnd, input.x, input.y, &lp)) return InputInjectResult::Failed;
+    const WPARAM wp = mouse_button_wparam(static_cast<uint16_t>(input.buttons & 0x7u));
+    return PostMessageW(targetHwnd, WM_MOUSEMOVE, wp, lp) ? InputInjectResult::Injected : InputInjectResult::Failed;
+  }
+  if (input.kind == 2 || input.kind == 3) {
+    const UINT msg = mouse_vk_to_message(input.kind, input.keyCode);
+    if (msg == 0) return InputInjectResult::Unsupported;
+    LPARAM lp = 0;
+    if (!make_client_lparam(targetHwnd, input.x, input.y, &lp)) return InputInjectResult::Failed;
+    uint16_t buttons = static_cast<uint16_t>(input.buttons & 0x7u);
+    const uint16_t eventMask = mouse_vk_to_mask(input.keyCode);
+    if (input.kind == 2) {
+      buttons = static_cast<uint16_t>(buttons | eventMask);
+    } else if (input.kind == 3) {
+      buttons = static_cast<uint16_t>(buttons & static_cast<uint16_t>(~eventMask));
+    }
+    const WPARAM wp = mouse_button_wparam(buttons);
+    return PostMessageW(targetHwnd, msg, wp, lp) ? InputInjectResult::Injected : InputInjectResult::Failed;
+  }
+  if (input.kind == 5 || input.kind == 6) {
+    const bool keyUp = (input.kind == 6);
+    const UINT msg = keyUp ? WM_KEYUP : WM_KEYDOWN;
+    const LPARAM lp = key_event_lparam(input.keyCode, keyUp);
+    return PostMessageW(targetHwnd, msg, static_cast<WPARAM>(input.keyCode), lp)
+               ? InputInjectResult::Injected
+               : InputInjectResult::Failed;
+  }
+  // Mouse wheel is intentionally excluded in this phase.
+  return InputInjectResult::Unsupported;
+}
+
 bool compute_window_client_crop(HWND hwnd, uint32_t frameW, uint32_t frameH, uint32_t* outX,
                                 uint32_t* outY, uint32_t* outW, uint32_t* outH) {
   if (!hwnd || frameW < 2 || frameH < 2 || !outX || !outY || !outW || !outH) return false;
@@ -517,6 +666,10 @@ struct Args {
   uint32_t traceEvery = 0;
   uint32_t traceMax = 0;
   uint32_t inputLogEvery = 120;
+  bool enableInputInjection = false;
+  std::string inputInjectionMode = "background_message";
+  std::string inputTargetProcess;
+  std::string inputTargetTitle;
   std::string transport;
   std::string codec = "raw";
   uint32_t fps = 30;
@@ -592,6 +745,10 @@ Args parse_args(int argc, char** argv) {
       if (json_profile::json_get_u32(jsonText, "inputLogEvery", &v)) {
         a.inputLogEvery = std::max<uint32_t>(1, v);
       }
+      if (json_profile::json_get_bool(jsonText, "enableInputInjection", &b)) a.enableInputInjection = b;
+      if (json_profile::json_get_string(jsonText, "inputInjectionMode", &s)) a.inputInjectionMode = s;
+      if (json_profile::json_get_string(jsonText, "inputTargetProcess", &s)) a.inputTargetProcess = s;
+      if (json_profile::json_get_string(jsonText, "inputTargetTitle", &s)) a.inputTargetTitle = s;
       if (json_profile::json_get_string(jsonText, "codec", &s)) a.codec = s;
       if (json_profile::json_get_string(jsonText, "transport", &s)) a.transport = s;
       if (json_profile::json_get_u32(jsonText, "fps", &v)) a.fps = std::clamp<uint32_t>(v, 1, 120);
@@ -640,6 +797,14 @@ Args parse_args(int argc, char** argv) {
     } else if (k == "--input-log-every" && i + 1 < argc) {
       uint32_t v = 0;
       if (parse_u32(argv[++i], &v)) a.inputLogEvery = std::max<uint32_t>(1, v);
+    } else if (k == "--enable-input-injection") {
+      a.enableInputInjection = true;
+    } else if (k == "--input-injection-mode" && i + 1 < argc) {
+      a.inputInjectionMode = argv[++i];
+    } else if (k == "--input-target-process" && i + 1 < argc) {
+      a.inputTargetProcess = argv[++i];
+    } else if (k == "--input-target-title" && i + 1 < argc) {
+      a.inputTargetTitle = argv[++i];
     } else if (k == "--codec" && i + 1 < argc) {
       a.codec = argv[++i];
     } else if (k == "--transport" && i + 1 < argc) {
@@ -1123,6 +1288,11 @@ int main(int argc, char** argv) {
   std::cerr.setf(std::ios::unitbuf);
 
   const Args args = parse_args(argc, argv);
+  const InputInjectionMode configuredInputInjectionMode = parse_input_injection_mode(args.inputInjectionMode);
+  const bool inputInjectionEnabled =
+      args.enableInputInjection &&
+      (configuredInputInjectionMode == InputInjectionMode::BackgroundMessage) &&
+      !kInputPolicyForceBlock;
   const bool useRaw = (args.codec == "raw");
   const bool useH264 = (args.codec == "h264");
   const bool guardStaleEncoded = env_truthy("REMOTE60_NATIVE_GUARD_STALE_ENCODED");
@@ -1229,8 +1399,19 @@ int main(int argc, char** argv) {
               << " keyReqBucketCap=" << keyReqTokenCapacity
               << "\n";
   }
-  if (kAllInputBlocked) {
-    std::cout << "[native-video-host] all input blocked (view-only)\n";
+  if (kInputPolicyForceBlock) {
+    std::cout << "[native-video-host] input injection blocked by compile-time policy\n";
+  } else if (!args.enableInputInjection) {
+    std::cout << "[native-video-host] input injection disabled (enableInputInjection=false)\n";
+  } else if (!inputInjectionEnabled) {
+    std::cout << "[native-video-host] input injection disabled (unsupported mode) mode="
+              << args.inputInjectionMode << "\n";
+  } else {
+    std::cout << "[native-video-host] input injection enabled mode="
+              << input_injection_mode_name(configuredInputInjectionMode)
+              << " targetProcess=" << trim_ascii(args.inputTargetProcess)
+              << " targetTitle=" << trim_ascii(args.inputTargetTitle)
+              << "\n";
   }
 
   SOCKET listenSock = INVALID_SOCKET;
@@ -1373,6 +1554,15 @@ int main(int argc, char** argv) {
   double keyReqTokens = static_cast<double>(keyReqTokenCapacity);
   uint64_t keyReqLastRefillUs = 0;
   uint64_t keyReqNextAllowedUs = 0;
+  CaptureWindowCriteria inputTargetCriteria{};
+  for (const auto& name : parse_csv_lower(args.inputTargetProcess)) {
+    inputTargetCriteria.processNamesLower.insert(name);
+  }
+  inputTargetCriteria.titleNeedleLower = wide_lower(utf8_to_wide(trim_ascii(args.inputTargetTitle)));
+  std::atomic<uint64_t> inputIgnoredMove{0};
+  std::atomic<uint64_t> inputNoTarget{0};
+  std::atomic<uint64_t> inputUnsupported{0};
+  std::atomic<uint64_t> inputInjectFail{0};
   SOCKET controlListenSock = INVALID_SOCKET;
   SOCKET controlClientSock = INVALID_SOCKET;
   std::thread controlThread;
@@ -1451,16 +1641,53 @@ int main(int argc, char** argv) {
                 ControlInputEventMessage input{};
                 input.header = header;
                 if (!recv_all(acceptedSock, &input.seq, sizeof(input) - sizeof(MessageHeader))) break;
-                if (!kAllInputBlocked) {
-                  const auto n = inputEvents.fetch_add(1) + 1;
-                  if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
-                    std::cout << "[native-video-host][input] seq=" << input.seq
-                              << " kind=" << input.kind
-                              << " x=" << input.x
-                              << " y=" << input.y
-                              << " buttons=" << input.buttons
-                              << " key=" << input.keyCode
-                              << "\n";
+                if (inputInjectionEnabled) {
+                  HWND inputTargetHwnd = nullptr;
+                  const bool hasTarget =
+                      resolve_input_target_window(inputTargetCriteria, hostCaptureTargetHwnd, &inputTargetHwnd);
+                  const InputInjectResult injectResult =
+                      hasTarget ? inject_background_input_event(input, inputTargetHwnd) : InputInjectResult::NoTarget;
+                  if (injectResult == InputInjectResult::Injected) {
+                    const uint64_t n = inputEvents.fetch_add(1) + 1;
+                    if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
+                      std::cout << "[native-video-host][input] injected seq=" << input.seq
+                                << " kind=" << input.kind
+                                << " x=" << input.x
+                                << " y=" << input.y
+                                << " buttons=" << input.buttons
+                                << " key=" << input.keyCode
+                                << " target=0x" << std::hex
+                                << static_cast<uint64_t>(reinterpret_cast<uintptr_t>(inputTargetHwnd))
+                                << std::dec
+                                << "\n";
+                    }
+                  } else if (injectResult == InputInjectResult::IgnoredMove) {
+                    inputIgnoredMove.fetch_add(1, std::memory_order_relaxed);
+                  } else if (injectResult == InputInjectResult::NoTarget) {
+                    const uint64_t n = inputNoTarget.fetch_add(1, std::memory_order_relaxed) + 1;
+                    if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
+                      std::cout << "[native-video-host][input] no-target seq=" << input.seq
+                                << " kind=" << input.kind
+                                << " filterProc=" << trim_ascii(args.inputTargetProcess)
+                                << " filterTitle=" << trim_ascii(args.inputTargetTitle)
+                                << "\n";
+                    }
+                  } else if (injectResult == InputInjectResult::Unsupported) {
+                    const uint64_t n = inputUnsupported.fetch_add(1, std::memory_order_relaxed) + 1;
+                    if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
+                      std::cout << "[native-video-host][input] unsupported seq=" << input.seq
+                                << " kind=" << input.kind
+                                << " key=" << input.keyCode
+                                << "\n";
+                    }
+                  } else {
+                    const uint64_t n = inputInjectFail.fetch_add(1, std::memory_order_relaxed) + 1;
+                    if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
+                      std::cout << "[native-video-host][input] inject-fail seq=" << input.seq
+                                << " kind=" << input.kind
+                                << " key=" << input.keyCode
+                                << "\n";
+                    }
                   }
                 } else if (args.inputLogEvery > 0 && (input.seq % args.inputLogEvery) == 0) {
                   std::cout << "[native-video-host][input] blocked seq=" << input.seq
@@ -3383,6 +3610,11 @@ int main(int argc, char** argv) {
                   << " captureTargetProc=" << targetProcessName
                   << " captureTargetHwnd=0x" << std::hex
                   << hostCaptureTargetHwnd.load(std::memory_order_relaxed) << std::dec
+                  << " inputEvents=" << inputEvents.load()
+                  << " inputIgnoredMove=" << inputIgnoredMove.load(std::memory_order_relaxed)
+                  << " inputNoTarget=" << inputNoTarget.load(std::memory_order_relaxed)
+                  << " inputUnsupported=" << inputUnsupported.load(std::memory_order_relaxed)
+                  << " inputInjectFail=" << inputInjectFail.load(std::memory_order_relaxed)
                   << " keyReqDropTotal=" << clientKeyFrameRequestDropped.load()
                   << " callbackFrames=" << callbackFrames.load()
                   << " skippedByOverwrite=" << skippedByOverwrite
@@ -3426,6 +3658,10 @@ int main(int argc, char** argv) {
                   << " keyReqTotal=" << clientKeyFrameRequestCount.load()
                   << " keyReqDropTotal=" << clientKeyFrameRequestDropped.load()
                   << " inputEvents=" << inputEvents.load()
+                  << " inputIgnoredMove=" << inputIgnoredMove.load(std::memory_order_relaxed)
+                  << " inputNoTarget=" << inputNoTarget.load(std::memory_order_relaxed)
+                  << " inputUnsupported=" << inputUnsupported.load(std::memory_order_relaxed)
+                  << " inputInjectFail=" << inputInjectFail.load(std::memory_order_relaxed)
                   << " capAgeAvgUs=" << capAgeAvgUs
                   << " capAgeMaxUs=" << captureAgeMaxUs
                   << " cb2eAvgUs=" << cb2eAvgUs

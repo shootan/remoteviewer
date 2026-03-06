@@ -128,3 +128,48 @@ Validation
 
 Next
 - Start M3.5 implementation in host input path with `background_message` injection mode.
+
+### 87) 2026-03-06 M3.5 1차 구현: background_message 입력 주입 경로 추가
+Goal
+- M3.5 최우선 항목 중 코드 구현 파트를 먼저 완료한다.
+- 실 커서 이동 없이(HWND 메시지 주입) 클릭/드래그/키보드 입력을 주입한다.
+
+Changes
+1. Host 입력 주입 구현
+- File: `apps/native_poc/src/native_video_host_main.cpp`
+- `enableInputInjection`, `inputInjectionMode`, `inputTargetProcess`, `inputTargetTitle` 인자/JSON 파싱 추가.
+- `background_message` 모드에서만 입력 주입 활성화.
+- `PostMessageW` 기반 입력 주입 추가:
+  - 마우스: down/up + drag(move with button only)
+  - 키보드: key down/up
+  - wheel 이벤트는 현재 단계에서 의도적으로 미주입.
+- 타겟 HWND 해석:
+  - `inputTargetProcess`/`inputTargetTitle` 지정 시 해당 윈도우 우선.
+  - 미지정 시 현재 capture target HWND 사용.
+- 입력 통계 카운터(`inputEvents`, `inputNoTarget`, `inputInjectFail` 등) 로그 반영.
+
+2. Client 입력 전송 정책 정리
+- File: `apps/native_poc/src/native_video_client_main.cpp`
+- compile-time 입력 하드블록 상수 제거(기본 허용 + 런타임 설정으로 제어).
+- `WM_MOUSEMOVE`는 드래그 중(버튼 눌림 상태)일 때만 전송하도록 변경.
+- JSON/CLI에 `enableInputInjection`/`--enable-input-injection`를 입력 채널 활성 alias로 추가.
+
+3. 문서 업데이트
+- File: `apps/native_poc/README.md`
+- background 입력 주입 가능 상태 및 JSON 키 설명 추가.
+- File: `docs/구현계획.md`
+- M3.5 구현 체크리스트 중 구현 완료 항목 체크 반영.
+
+Validation
+- Build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_host_poc remote60_native_video_client_poc --parallel`
+  - 결과: 성공
+- Static check:
+  - `rg -n \"SendInput|SetCursorPos\" apps/native_poc/src/native_video_host_main.cpp apps/native_poc/src/native_video_client_main.cpp`
+  - 결과: 매치 없음
+
+Next
+- M3.5 1차 검증 시나리오 수행:
+  - 백그라운드 Notepad 대상 클릭/드래그/키입력 확인
+  - OS 커서 비이동 확인
+  - occluded 상태 입력 반영 확인

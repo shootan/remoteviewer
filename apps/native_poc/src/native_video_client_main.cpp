@@ -176,6 +176,7 @@ Args parse_args(int argc, char** argv) {
       if (json_profile::json_get_u32(jsonText, "fpsHint", &v)) a.fpsHint = std::clamp<uint32_t>(v, 1, 120);
       if (json_profile::json_get_bool(jsonText, "noInputChannel", &b)) a.enableInputChannel = !b;
       if (json_profile::json_get_bool(jsonText, "enableInputChannel", &b)) a.enableInputChannel = b;
+      if (json_profile::json_get_bool(jsonText, "enableInputInjection", &b)) a.enableInputChannel = b;
       if (json_profile::json_get_u32(jsonText, "inputLogEvery", &v)) {
         a.inputLogEvery = std::max<uint32_t>(1, v);
       }
@@ -232,6 +233,10 @@ Args parse_args(int argc, char** argv) {
       if (parse_u32(argv[++i], &v)) a.fpsHint = std::clamp<uint32_t>(v, 1, 120);
     } else if (k == "--no-input-channel") {
       a.enableInputChannel = false;
+    } else if (k == "--enable-input-channel") {
+      a.enableInputChannel = true;
+    } else if (k == "--enable-input-injection") {
+      a.enableInputChannel = true;
     } else if (k == "--input-log-every" && i + 1 < argc) {
       uint32_t v = 0;
       if (parse_u32(argv[++i], &v)) a.inputLogEvery = std::max<uint32_t>(1, v);
@@ -315,7 +320,7 @@ std::atomic<uint32_t> gTraceEvery{0};
 std::atomic<uint32_t> gTraceMax{0};
 std::atomic<uint64_t> gTracePresentPrinted{0};
 std::atomic<uint64_t> gTraceRecvPrinted{0};
-constexpr bool kAllInputBlocked = true;
+constexpr bool kInputPolicyForceBlock = false;
 // Catch-up defaults tuned for software codec path: avoid runaway multi-second lag,
 // but still clamp perceived latency quickly for interactive remote use.
 constexpr uint64_t kCatchupLagDropUs = 450000;       // 0.45s
@@ -1149,7 +1154,7 @@ struct Nv12D3dRenderer {
 Nv12D3dRenderer gNv12Renderer;
 
 void enqueue_input_event(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode) {
-  if (kAllInputBlocked) return;
+  if (kInputPolicyForceBlock) return;
   if (!gInputEnabled.load()) return;
   ControlInputEventMessage msg{};
   msg.header.magic = remote60::native_poc::kMagic;
@@ -1188,7 +1193,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     case WM_MOUSEMOVE:
       if (point_in_rect(overlay_toggle_rect(), GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
-      if (kAllInputBlocked) return 0;
+      if (kInputPolicyForceBlock) return 0;
+      if ((gMouseButtons.load(std::memory_order_relaxed) & 0x7u) == 0) return 0;
       enqueue_input_event(1, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), 0, 0);
       return 0;
     case WM_LBUTTONDOWN:
@@ -1204,7 +1210,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
            point_in_rect(overlay_mode_overview_rect(), GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))) {
         return 0;
       }
-      if (kAllInputBlocked) return 0;
+      if (kInputPolicyForceBlock) return 0;
       gMouseButtons.fetch_or(1);
       enqueue_input_event(2, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), 0, VK_LBUTTON);
       return 0;
@@ -1251,32 +1257,32 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
       }
-      if (kAllInputBlocked) return 0;
+      if (kInputPolicyForceBlock) return 0;
       gMouseButtons.fetch_and(static_cast<uint16_t>(~1u));
       enqueue_input_event(3, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), 0, VK_LBUTTON);
       return 0;
     case WM_RBUTTONDOWN:
-      if (kAllInputBlocked) return 0;
+      if (kInputPolicyForceBlock) return 0;
       gMouseButtons.fetch_or(2);
       enqueue_input_event(2, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), 0, VK_RBUTTON);
       return 0;
     case WM_RBUTTONUP:
-      if (kAllInputBlocked) return 0;
+      if (kInputPolicyForceBlock) return 0;
       gMouseButtons.fetch_and(static_cast<uint16_t>(~2u));
       enqueue_input_event(3, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), 0, VK_RBUTTON);
       return 0;
     case WM_MBUTTONDOWN:
-      if (kAllInputBlocked) return 0;
+      if (kInputPolicyForceBlock) return 0;
       gMouseButtons.fetch_or(4);
       enqueue_input_event(2, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), 0, VK_MBUTTON);
       return 0;
     case WM_MBUTTONUP:
-      if (kAllInputBlocked) return 0;
+      if (kInputPolicyForceBlock) return 0;
       gMouseButtons.fetch_and(static_cast<uint16_t>(~4u));
       enqueue_input_event(3, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), 0, VK_MBUTTON);
       return 0;
     case WM_MOUSEWHEEL: {
-      if (kAllInputBlocked) return 0;
+      if (kInputPolicyForceBlock) return 0;
       POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
       ScreenToClient(hwnd, &p);
       enqueue_input_event(4, p.x, p.y, GET_WHEEL_DELTA_WPARAM(wp), 0);
@@ -1313,18 +1319,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
       }
-      if (kAllInputBlocked) return 0;
+      if (kInputPolicyForceBlock) return 0;
       enqueue_input_event(5, 0, 0, 0, static_cast<uint32_t>(wp));
       return 0;
     case WM_KEYUP:
-      if (kAllInputBlocked) return 0;
+      if (kInputPolicyForceBlock) return 0;
       enqueue_input_event(6, 0, 0, 0, static_cast<uint32_t>(wp));
       return 0;
     case WM_SYSKEYDOWN:
     case WM_SYSKEYUP:
     case WM_CHAR:
     case WM_SYSCHAR:
-      return kAllInputBlocked ? 0 : DefWindowProc(hwnd, msg, wp, lp);
+      return kInputPolicyForceBlock ? 0 : DefWindowProc(hwnd, msg, wp, lp);
     case WM_ERASEBKGND:
       // Avoid background erase flicker between frames.
       return 1;
@@ -1812,8 +1818,8 @@ int main(int argc, char** argv) {
             << " congestionRecoverMinUs=" << congestionRecoverMinUs
             << " congestionRecoveryTimeoutUs=" << congestionRecoveryTimeoutUs
             << "\n";
-  if (kAllInputBlocked) {
-    std::cout << "[native-video-client] all input blocked (view-only)\n";
+  if (kInputPolicyForceBlock) {
+    std::cout << "[native-video-client] input channel blocked by compile-time policy\n";
   }
   int effectiveRecvBuf = 0;
   int effectiveRecvBufLen = sizeof(effectiveRecvBuf);
@@ -1836,11 +1842,8 @@ int main(int argc, char** argv) {
       ctlAddr.sin_port = htons(args.controlPort);
       if (inet_pton(AF_INET, args.host.c_str(), &ctlAddr.sin_addr) == 1 &&
           connect(controlSock, reinterpret_cast<const sockaddr*>(&ctlAddr), sizeof(ctlAddr)) == 0) {
-        const bool inputChannelEnabled = args.enableInputChannel && !kAllInputBlocked;
+        const bool inputChannelEnabled = args.enableInputChannel && !kInputPolicyForceBlock;
         gInputEnabled = inputChannelEnabled;
-        if (inputChannelEnabled) {
-          enqueue_input_event(1, 0, 0, 0, 0);
-        }
         controlThread = std::thread([&]() {
           uint32_t pingSeq = 0;
           uint32_t metricsSeq = 0;

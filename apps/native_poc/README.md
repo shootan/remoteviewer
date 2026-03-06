@@ -23,7 +23,8 @@ This directory is intentionally isolated from the existing web signaling/web cli
   - `--codec h264` (experiment gate)
 - Client receives and renders in a native Win32 window.
 - Separate control/input channel is available on a dedicated port.
-  - Input injection into host OS is still excluded in this PoC.
+  - Background input injection is available with HWND message mode (`background_message`).
+  - Injection scope in current phase: click/drag/keyboard (no global cursor move).
 
 ## Existing host code reuse
 - `remote60_native_host_poc` links existing capture runtime source from `apps/host/src/capture_runtime.cpp`.
@@ -137,6 +138,10 @@ Client:
 Notes:
 - `--config` sets defaults from JSON first, then explicit CLI flags override those values.
 - `--host` on client can override JSON `remoteHost`.
+- Input injection JSON keys (host/client shared profile):
+  - `enableInputInjection` (bool)
+  - `inputInjectionMode` (`background_message`)
+  - `inputTargetProcess`, `inputTargetTitle` (host target filter)
 
 ### External WAN checklist (UDP profile default)
 - Port forwarding:
