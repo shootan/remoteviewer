@@ -173,3 +173,46 @@ Next
   - 백그라운드 Notepad 대상 클릭/드래그/키입력 확인
   - OS 커서 비이동 확인
   - occluded 상태 입력 반영 확인
+
+### 88) 2026-03-06 M3.5 검증 보조 자동화 추가 (background input)
+Goal
+- M3.5 1차 검증을 빠르게 반복할 수 있도록 자동 실행/로그 판정 스크립트를 추가한다.
+
+Changes
+1. Validation helper script added
+- File: `automation/validate_background_input_injection.ps1`
+- Added end-to-end helper that:
+  - builds temporary JSON profile with `enableInputInjection=true`, `inputInjectionMode=background_message`
+  - sets target/capture filter to Notepad
+  - runs host/client with `--config`
+  - parses host log counters (`inputEvents`, `inputNoTarget`, `inputInjectFail`, `inputUnsupported`, `inputIgnoredMove`)
+  - writes summary output (`summary.txt`) including manual-check checklist.
+
+2. README usage update
+- File: `apps/native_poc/README.md`
+- Added script entry and usage section for M3.5 validation helper.
+- Added note that interactive desktop session is required (`CLIENT_HWND=0x0` means auto input-burst binding failed).
+
+3. Plan checklist status update
+- File: `docs/구현계획.md`
+- Marked validation-helper script addition as completed.
+- Kept M3.5 manual verification scenario unchecked.
+
+Validation
+- Command:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation\\validate_background_input_injection.ps1 -DurationSec 8`
+- Result snapshot (latest run):
+  - `AUTO_PASS=0`
+  - `CLIENT_HWND=0x0`
+  - `INPUT_EVENTS=0`
+  - `INPUT_NO_TARGET=0`
+  - `INPUT_INJECT_FAIL=0`
+- Interpretation:
+  - Script path works and host metric parsing is valid.
+  - Current execution context could not bind to native client window (`CLIENT_HWND=0x0`), so automatic input burst was not injected in this run.
+
+Next
+- Run the same helper in an interactive desktop session and complete manual checks:
+  - cursor does not move
+  - occluded target window still receives click/drag/keyboard input
+- If manual checks pass, mark M3.5 verification scenario complete in `docs/구현계획.md`.

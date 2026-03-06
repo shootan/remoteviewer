@@ -103,6 +103,7 @@ $env:REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE=1
 - WAN preflight: `automation/wan_preflight_native_video.ps1`
 - External bundle pack: `automation/package_native_video_external_bundle.ps1`
 - JSON profile runner: `automation/run_native_video_with_config.ps1`
+- M3.5 input validation helper: `automation/validate_background_input_injection.ps1`
   - profiles:
     - `automation/native_video_profile_720p.json`
     - `automation/native_video_profile_1080p.json`
@@ -112,6 +113,23 @@ $env:REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE=1
     - `automation/native_video_profile_1080p_quality_12m_k60.json`
     - `automation/native_video_profile_1080p_external_template.json`
     - `automation/native_video_profile_1296p_balanced.json`
+
+### M3.5 background input validation helper
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/validate_background_input_injection.ps1 -DurationSec 20
+```
+
+Notes:
+- This helper creates a temporary profile with:
+  - `enableInputInjection=true`
+  - `inputInjectionMode=background_message`
+  - target/capture window filters for Notepad
+- It prints auto-check metrics from host logs:
+  - `INPUT_EVENTS`, `INPUT_NO_TARGET`, `INPUT_INJECT_FAIL`
+- Manual checks are still required:
+  - cursor did not move
+  - occluded target window still received click/drag/keyboard input
+- Run this in an interactive desktop session; if `CLIENT_HWND=0x0`, input burst automation could not bind to the client window.
 
 ### JSON profile run examples
 Host:
