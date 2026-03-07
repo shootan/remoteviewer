@@ -309,9 +309,9 @@ enum class MftBackendMode {
 };
 
 MftBackendMode parse_mft_backend_mode(const std::string& mode) {
-  // Keep default path stable: explicit backend is required to force hardware probing.
+  // Default to auto so production/runtime picks hardware when available and falls back to SW.
   if (mode.empty()) {
-    return MftBackendMode::SoftwareOnly;
+    return MftBackendMode::Auto;
   }
   if (_stricmp(mode.c_str(), "mft_auto") == 0 || _stricmp(mode.c_str(), "auto") == 0) {
     return MftBackendMode::Auto;

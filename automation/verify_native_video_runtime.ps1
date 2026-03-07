@@ -181,6 +181,7 @@ $encApiPathCode4Count = 0
 $encApiPathCode5Count = 0
 $encApiPathCode6Count = 0
 $queuePushCount = 0
+$syntheticKeepaliveTotal = 0
 $queuePopCount = 0
 $hostSkippedByOverwrite = 0
 $d3dPresentSuccessTotal = 0
@@ -598,6 +599,9 @@ foreach ($line in $hostLines) {
   }
   if ($line -match 'queuePushCount=([0-9]+)') {
     $queuePushCount = [int64]$Matches[1]
+  }
+  if ($line -match 'syntheticKeepaliveTotal=([0-9]+)') {
+    $syntheticKeepaliveTotal = [int64]$Matches[1]
   }
   if ($line -match 'queuePopCount=([0-9]+)') {
     $queuePopCount = [int64]$Matches[1]
@@ -1087,6 +1091,21 @@ $m7DecodedFpsOk = (-not $m7Applicable -or ($dec.count -gt 0 -and [double]$dec.av
 $m7LatencyP95Ok = (-not $m7Applicable -or ($lat.count -gt 0 -and [double]$lat.p95 -le [double]$m7LatencyP95TargetUs))
 $m7PresentGapOk = ($presentGapOver1s -le 0)
 $m7Pass = ($overallOk -and $m7Applicable -and $m7DecodedFpsOk -and $m7LatencyP95Ok -and $m7PresentGapOk)
+$captureInputExpectedPushMin = [Math]::Max(30, [int][Math]::Floor([double]([Math]::Max(1, $HostSeconds) * [Math]::Max(1, $Fps)) * 0.35))
+$captureInputEffectivePushCount = [int64]$queuePushCount + [int64]$syntheticKeepaliveTotal
+$captureInputStallReasons = New-Object System.Collections.Generic.List[string]
+if ($captureInputEffectivePushCount -gt 0 -and $captureInputEffectivePushCount -lt $captureInputExpectedPushMin) {
+  [void]$captureInputStallReasons.Add("queue_push_low")
+}
+if ($mb.count -gt 0 -and [double]$mb.avg -le 0.05) {
+  [void]$captureInputStallReasons.Add("mbps_near_zero")
+}
+$captureInputStallDetected = ($captureInputStallReasons.Count -gt 0)
+$captureInputStallReason = if ($captureInputStallReasons.Count -gt 0) {
+  [string]::Join(",", $captureInputStallReasons.ToArray())
+} else {
+  "none"
+}
 $iconGreen = ([char]0xD83D) + ([char]0xDFE2)
 $iconOrange = ([char]0xD83D) + ([char]0xDFE0)
 $iconRedX = [string][char]0x274C
@@ -1098,26 +1117,33 @@ if (-not $overallOk) {
   $m7StatusIcon = $iconRedX
   [void]$m7StatusReasons.Add("overall_not_ok")
 } else {
-  if (-not $m7Applicable) {
-    [void]$m7StatusReasons.Add("profile_not_applicable")
-  }
-  if (-not $m7DecodedFpsOk) {
-    [void]$m7StatusReasons.Add("decoded_fps_below_target")
-  }
-  if (-not $m7LatencyP95Ok) {
-    [void]$m7StatusReasons.Add("latency_p95_above_target")
-  }
-  if (-not $m7PresentGapOk) {
-    [void]$m7StatusReasons.Add("present_gap_over_1s")
-  }
-  if ($m7Pass) {
-    $m7Status = "SUCCESS"
-    $m7StatusIcon = $iconGreen
-    $m7StatusReasons.Clear()
-    [void]$m7StatusReasons.Add("ok")
-  } elseif ($presentGapOver3s -gt 0 -or ($m7Applicable -and $lat.count -gt 0 -and [double]$lat.p95 -gt ([double]$m7LatencyP95TargetUs * 1.5))) {
+  if ($captureInputStallDetected) {
     $m7Status = "FAIL"
     $m7StatusIcon = $iconRedX
+    [void]$m7StatusReasons.Add("capture_input_stall")
+    [void]$m7StatusReasons.Add($captureInputStallReason)
+  } else {
+    if (-not $m7Applicable) {
+      [void]$m7StatusReasons.Add("profile_not_applicable")
+    }
+    if (-not $m7DecodedFpsOk) {
+      [void]$m7StatusReasons.Add("decoded_fps_below_target")
+    }
+    if (-not $m7LatencyP95Ok) {
+      [void]$m7StatusReasons.Add("latency_p95_above_target")
+    }
+    if (-not $m7PresentGapOk) {
+      [void]$m7StatusReasons.Add("present_gap_over_1s")
+    }
+    if ($m7Pass) {
+      $m7Status = "SUCCESS"
+      $m7StatusIcon = $iconGreen
+      $m7StatusReasons.Clear()
+      [void]$m7StatusReasons.Add("ok")
+    } elseif ($presentGapOver3s -gt 0 -or ($m7Applicable -and $lat.count -gt 0 -and [double]$lat.p95 -gt ([double]$m7LatencyP95TargetUs * 1.5))) {
+      $m7Status = "FAIL"
+      $m7StatusIcon = $iconRedX
+    }
   }
 }
 $m7StatusReason = if ($m7StatusReasons.Count -gt 0) { [string]::Join(",", $m7StatusReasons.ToArray()) } else { "ok" }
@@ -1181,6 +1207,10 @@ Write-Output "M7_PASS=$m7Pass"
 Write-Output "M7_STATUS=$m7Status"
 Write-Output "M7_STATUS_ICON=$m7StatusIcon"
 Write-Output "M7_STATUS_REASON=$m7StatusReason"
+Write-Output "CAPTURE_INPUT_STALL_DETECTED=$captureInputStallDetected"
+Write-Output "CAPTURE_INPUT_STALL_REASON=$captureInputStallReason"
+Write-Output "HOST_QUEUE_PUSH_EXPECTED_MIN=$captureInputExpectedPushMin"
+Write-Output "HOST_CAPTURE_EFFECTIVE_PUSH_COUNT=$captureInputEffectivePushCount"
 Write-Output "TS_SOURCE_MFT=$tsSourceMft"
 Write-Output "TS_SOURCE_INPUT_FALLBACK=$tsSourceInputFallback"
 Write-Output "TS_SOURCE_HEADER_FALLBACK=$tsSourceHeaderFallback"
@@ -1217,6 +1247,7 @@ Write-Output "UDP_SIM_DROP_PM_MAX=$($udpSimDropPm.max)"
 Write-Output "HOST_QUEUE_WAIT_TIMEOUT_COUNT=$queueWaitTimeoutCount"
 Write-Output "HOST_QUEUE_WAIT_NOWORK_COUNT=$queueWaitNoWorkCount"
 Write-Output "HOST_QUEUE_PUSH_COUNT=$queuePushCount"
+Write-Output "HOST_SYNTHETIC_KEEPALIVE_TOTAL=$syntheticKeepaliveTotal"
 Write-Output "HOST_QUEUE_POP_COUNT=$queuePopCount"
 Write-Output "HOST_QUEUE_SKIPPED_BY_OVERWRITE=$hostSkippedByOverwrite"
 Write-Output "HOST_CAPTURE_INTERVAL_COUNT=$($hostCaptureIntervalStats.count)"

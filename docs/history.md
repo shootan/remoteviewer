@@ -818,3 +818,38 @@ Validation / build / test result
 Next action
 - M6 완료 판정은 `MBPS_AVG>0`가 보장되는 시퀀스에서 재측정(최소 5회)으로 확정한다.
 - 현재 자동 진행은 환경 블로커 해소 전까지 문서상 보류 상태를 유지한다.
+
+### 106) 2026-03-07 M7 블로커 해소: capture 입력 저하 복구 + Gate A 통과
+Goal
+- AMD/RDNA 환경에서 반복되던 `capture_input_stall` 실패를 코드로 완화하고, 자동 검증 기준에서 `FAIL` 상태를 해소한다.
+- M7 전 단계인 Gate A(`decoded fps>=20`, `present gap 0`)를 회복한다.
+
+Files changed
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `apps/native_poc/src/mf_h264_codec.cpp`
+- `apps/native_poc/src/native_video_client_main.cpp`
+- `automation/verify_native_video_runtime.ps1`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_host_poc remote60_native_video_client_poc --parallel`
+  - 결과: 성공
+- Verify command (공통):
+  - `./automation/verify_native_video_runtime.ps1 -BuildDir build-vcpkg-local -Codec h264 -Transport udp -Fps 30 -HostSeconds 14 -ClientSeconds 10 -Bitrate 5000000 -Keyint 30 -EncodeWidth 1280 -EncodeHeight 720`
+- Baseline (수정 전, `verify-native-video-20260307-203002`):
+  - `DEC_AVG=3.33`, `LAT_P95_US=339654`
+  - `M7_STATUS=FAIL`, `M7_STATUS_REASON=capture_input_stall,queue_push_low`
+  - `HOST_CAPTURE_EFFECTIVE_PUSH_COUNT=133`
+- Final (수정 후, `verify-native-video-20260307-203722`):
+  - `DEC_AVG=22.89` ( +19.56 )
+  - `LAT_P95_US=41280` ( -298374 )
+  - `GATE_A_PASS=True`
+  - `M7_STATUS=AMBIGUOUS`, `M7_STATUS_REASON=decoded_fps_below_target`
+  - `CAPTURE_INPUT_STALL_DETECTED=False`
+  - `HOST_CAPTURE_EFFECTIVE_PUSH_COUNT=306`
+
+Next action
+- M7 `decodedFrames>=28` 잔여 갭(현재 `DEC_AVG=22.89`) 축소를 위해 720p30 기준 전송/렌더 경로 미세 튜닝 조합을 5회 반복 검증한다.
+- `M7_STATUS=SUCCESS` 조합 확정 후 720p/1080p Pass 로그(각 5회) 수집으로 Gate를 마감한다.

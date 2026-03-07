@@ -2435,9 +2435,9 @@ int main(int argc, char** argv) {
                     << "\n";
           return false;
         }
-        const std::string requestedDecoderBackend = env_string_or_empty("REMOTE60_NATIVE_DECODER_BACKEND");
-        const std::string requestedDecoderBackendPrint =
-            requestedDecoderBackend.empty() ? "default(mft_sw)" : requestedDecoderBackend;
+    const std::string requestedDecoderBackend = env_string_or_empty("REMOTE60_NATIVE_DECODER_BACKEND");
+    const std::string requestedDecoderBackendPrint =
+        requestedDecoderBackend.empty() ? "default(mft_auto)" : requestedDecoderBackend;
         const std::string backendFallbackReason =
             backend_fallback_reason(requestedDecoderBackend, decoder.backend_name());
         std::cout << "[native-video-client] H264 decoder backend=" << decoder.backend_name()

@@ -90,6 +90,11 @@ constexpr uint64_t kCaptureStallKeepaliveStartUs = 700000;  // 0.7s
 constexpr uint64_t kCaptureStallKeepaliveIntervalUs = 1000000;  // 1s
 constexpr uint64_t kCaptureCallbackStallRestartUs = 1200000;  // 1.2s
 constexpr uint64_t kCaptureCallbackRestartCooldownUs = 3000000;  // 3s
+constexpr uint64_t kQueueWaitTimeoutUsDefault = 100000;  // 100ms
+constexpr uint64_t kQueueWaitTimeoutUsMin = 5000;  // 5ms
+constexpr uint32_t kCaptureInputMinPushPerSecDefault = 10;
+constexpr uint32_t kCaptureInputStallConsecutiveSecDefault = 3;
+constexpr uint32_t kCaptureInputStallWarmupSecDefault = 4;
 constexpr uint32_t kFrameGatingStaticFpsDefault = 8;
 constexpr uint32_t kFrameGatingStaticThresholdPermilleDefault = 6;
 constexpr uint32_t kFrameGatingMotionThresholdPermilleDefault = 14;
@@ -1446,6 +1451,18 @@ int main(int argc, char** argv) {
       "REMOTE60_NATIVE_KEYREQ_TOKEN_REFILL_US", kKeyReqTokenRefillUsDefault, 10000, 2000000);
   const uint32_t keyReqTokenCapacity = env_u32_clamped(
       "REMOTE60_NATIVE_KEYREQ_TOKEN_CAPACITY", kKeyReqTokenCapacityDefault, 1, 16);
+  const uint32_t captureInputMinPushPerSec = env_u32_clamped(
+      "REMOTE60_NATIVE_CAPTURE_INPUT_MIN_PUSH_PER_SEC", kCaptureInputMinPushPerSecDefault, 1, 120);
+  const uint32_t captureInputStallConsecutiveSec = env_u32_clamped(
+      "REMOTE60_NATIVE_CAPTURE_INPUT_STALL_SEC", kCaptureInputStallConsecutiveSecDefault, 1, 30);
+  const uint32_t captureInputStallWarmupSec = env_u32_clamped(
+      "REMOTE60_NATIVE_CAPTURE_INPUT_STALL_WARMUP_SEC", kCaptureInputStallWarmupSecDefault, 0, 60);
+  const uint32_t captureStallKeepaliveIntervalUsOverride = env_u32_clamped(
+      "REMOTE60_NATIVE_CAPTURE_STALL_KEEPALIVE_INTERVAL_US", 0, 0,
+      static_cast<uint32_t>(kCaptureStallKeepaliveIntervalUs));
+  const uint32_t queueWaitTimeoutUsOverride = env_u32_clamped(
+      "REMOTE60_NATIVE_QUEUE_WAIT_TIMEOUT_US", 0, 0,
+      static_cast<uint32_t>(kQueueWaitTimeoutUsDefault));
   const bool gpuScalerRequested = useH264 && !env_truthy("REMOTE60_NATIVE_DISABLE_GPU_SCALER");
   int captureFramePoolBuffers = kCaptureFramePoolBuffersDefault;
   if (const char* poolEnv = std::getenv("REMOTE60_NATIVE_CAPTURE_POOL_BUFFERS")) {
@@ -1505,6 +1522,18 @@ int main(int argc, char** argv) {
               << " m9Mode=" << (m9Apply ? "apply" : "dry-run")
               << " keyReqMinUs=" << keyReqMinIntervalUs
               << " keyReqBucketCap=" << keyReqTokenCapacity
+              << " captureInputMinPushPerSec=" << captureInputMinPushPerSec
+              << " captureInputStallSec=" << captureInputStallConsecutiveSec
+              << " captureInputWarmupSec=" << captureInputStallWarmupSec
+              << " captureKeepaliveIntervalUs="
+              << (captureStallKeepaliveIntervalUsOverride > 0
+                      ? static_cast<uint64_t>(captureStallKeepaliveIntervalUsOverride)
+                      : std::max<uint64_t>(kQueueWaitTimeoutUsMin, (1000000ULL / std::max<uint64_t>(1, args.fps))))
+              << " queueWaitTimeoutUs="
+              << (queueWaitTimeoutUsOverride > 0 ? static_cast<uint64_t>(queueWaitTimeoutUsOverride)
+                                                : std::max<uint64_t>(kQueueWaitTimeoutUsMin,
+                                                                     (1000000ULL / std::max<uint64_t>(1, args.fps)) /
+                                                                         4ULL))
               << "\n";
   }
   if (kInputPolicyForceBlock) {
@@ -2186,7 +2215,7 @@ int main(int argc, char** argv) {
     resetHostTimelineAnchors();
     const std::string requestedEncoderBackend = env_string_or_empty("REMOTE60_NATIVE_ENCODER_BACKEND");
     const std::string requestedEncoderBackendPrint =
-        requestedEncoderBackend.empty() ? "default(mft_sw)" : requestedEncoderBackend;
+        requestedEncoderBackend.empty() ? "default(mft_auto)" : requestedEncoderBackend;
     const std::string backendFallbackReason =
         backend_fallback_reason(requestedEncoderBackend, encoder.backend_name());
     std::cout << "[native-video-host] H264 encoder backend=" << encoder.backend_name()
@@ -2255,6 +2284,10 @@ int main(int argc, char** argv) {
   std::atomic<uint64_t> callbackFrames{0};
   std::atomic<int64_t> captureClockOffsetUs{std::numeric_limits<int64_t>::max()};
   uint64_t queuePushCount = 0;
+  uint64_t queuePushCountLastSample = 0;
+  uint64_t queuePushPerSecLatest = 0;
+  uint32_t captureInputLowPushStreakSec = 0;
+  uint64_t captureInputStallRestartCount = 0;
   uint64_t queuePopCount = 0;
   uint64_t queueWaitTimeoutCount = 0;
   uint64_t queueWaitNoWorkCount = 0;
@@ -2437,6 +2470,21 @@ int main(int argc, char** argv) {
   auto restart_capture_session = [&]() -> bool {
     detach_capture_session();
     try {
+      if (captureWindowModeActive) {
+        const uintptr_t hwndRaw = static_cast<uintptr_t>(hostCaptureTargetHwnd.load(std::memory_order_relaxed));
+        HWND targetHwnd = reinterpret_cast<HWND>(hwndRaw);
+        if (targetHwnd && IsWindow(targetHwnd)) {
+          auto refreshedItem = CreateItemForPrimaryMonitor(targetHwnd, "CreateForWindow(restart-refresh)");
+          if (refreshedItem) {
+            item = refreshedItem;
+          }
+        }
+      } else {
+        auto refreshedItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(restart-refresh)");
+        if (refreshedItem) {
+          item = refreshedItem;
+        }
+      }
       const auto newSize = item.Size();
       const uint32_t newW = static_cast<uint32_t>(newSize.Width);
       const uint32_t newH = static_cast<uint32_t>(newSize.Height);
@@ -2525,6 +2573,7 @@ int main(int argc, char** argv) {
   uint64_t callbackToEncodeStartMaxUs = 0;
   uint32_t consecutiveStaleEncodedFrames = 0;
   uint64_t syntheticKeepaliveCount = 0;
+  uint64_t syntheticKeepaliveTotalCount = 0;
   uint64_t lastSyntheticKeepaliveUs = 0;
   std::shared_ptr<std::vector<uint8_t>> keepalivePayload;
   uint32_t keepaliveW = 0;
@@ -2545,6 +2594,21 @@ int main(int argc, char** argv) {
   uint64_t frameGatingChangePermilleLast = 1000;
   uint64_t frameGatingChangePermilleSum = 0;
   uint64_t frameGatingChangePermilleCount = 0;
+  auto effective_keepalive_interval_us = [&]() -> uint64_t {
+    if (captureStallKeepaliveIntervalUsOverride > 0) {
+      return std::max<uint64_t>(kQueueWaitTimeoutUsMin, captureStallKeepaliveIntervalUsOverride);
+    }
+    return std::max<uint64_t>(kQueueWaitTimeoutUsMin, activeFrameIntervalUs);
+  };
+  auto effective_queue_wait_timeout_us = [&]() -> uint64_t {
+    if (queueWaitTimeoutUsOverride > 0) {
+      return std::max<uint64_t>(kQueueWaitTimeoutUsMin, queueWaitTimeoutUsOverride);
+    }
+    const uint64_t keepaliveIntervalUs = effective_keepalive_interval_us();
+    const uint64_t dynamicTimeoutUs =
+        std::max<uint64_t>(kQueueWaitTimeoutUsMin, keepaliveIntervalUs / 4ULL);
+    return std::min<uint64_t>(kQueueWaitTimeoutUsDefault, dynamicTimeoutUs);
+  };
   auto pump_udp_hello = [&]() {
     if (transport != VideoTransport::Udp) return;
     for (;;) {
@@ -2931,7 +2995,7 @@ int main(int argc, char** argv) {
     bool queueReady = false;
     {
       std::unique_lock<std::mutex> lk(frame.mu);
-      queueReady = frame.cv.wait_for(lk, std::chrono::milliseconds(100), [&] {
+      queueReady = frame.cv.wait_for(lk, std::chrono::microseconds(effective_queue_wait_timeout_us()), [&] {
         return stop.load() || frame.version != lastVersionSent;
       });
       if (!queueReady && !stop.load()) {
@@ -2943,8 +3007,8 @@ int main(int argc, char** argv) {
             (lastCbUs > 0 && timeoutNowUs >= (lastCbUs + kCaptureStallKeepaliveStartUs));
         const bool keepaliveDue =
             (lastSyntheticKeepaliveUs == 0 ||
-             timeoutNowUs >= (lastSyntheticKeepaliveUs + kCaptureStallKeepaliveIntervalUs));
-        if (useH264 && captureLikelyStalled && keepaliveDue &&
+             timeoutNowUs >= (lastSyntheticKeepaliveUs + effective_keepalive_interval_us()));
+        if (useH264 && keepaliveDue &&
             keepalivePayload && !keepalivePayload->empty() &&
             keepaliveW > 0 && keepaliveH > 0 && keepaliveStride >= (keepaliveW * 4u)) {
           syntheticKeepaliveFrame = true;
@@ -2963,10 +3027,12 @@ int main(int argc, char** argv) {
           captureAgeAtCallbackUs = 0;
           captureClockSkewUs = 0;
           ++syntheticKeepaliveCount;
+          ++syntheticKeepaliveTotalCount;
           if ((syntheticKeepaliveCount % 30) == 1) {
             const uint64_t noCaptureUs =
                 (lastCbUs > 0 && timeoutNowUs >= lastCbUs) ? (timeoutNowUs - lastCbUs) : 0;
             std::cout << "[native-video-host] synthetic keepalive count=" << syntheticKeepaliveCount
+                      << " captureLikelyStalled=" << (captureLikelyStalled ? 1 : 0)
                       << " noCaptureUs=" << noCaptureUs
                       << "\n";
           }
@@ -3066,8 +3132,10 @@ int main(int argc, char** argv) {
       }
 
       const bool keyReqPending = clientRequestedKeyFrame.load(std::memory_order_acquire);
+      const bool allowFrameGatingSkip = (syntheticKeepaliveTotalCount == 0);
       const uint64_t targetIntervalUs = frameGatingStaticMode ? frameGatingStaticIntervalUs : activeFrameIntervalUs;
-      if (!keyReqPending &&
+      if (allowFrameGatingSkip &&
+          !keyReqPending &&
           frameGatingLastSentUs > 0 &&
           queuePopUs < (frameGatingLastSentUs + targetIntervalUs)) {
         ++frameGatingSkipCount;
@@ -3717,14 +3785,69 @@ int main(int argc, char** argv) {
         std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
         targetProcessName = hostCaptureTargetProcess;
       }
+      const uint64_t queuePushPerSec =
+          (queuePushCount >= queuePushCountLastSample) ? (queuePushCount - queuePushCountLastSample) : 0;
+      queuePushCountLastSample = queuePushCount;
+      queuePushPerSecLatest = queuePushPerSec;
+      const uint64_t captureFeedPerSec = queuePushPerSec + syntheticKeepaliveCount;
+      if (useH264 && captureSessionReady.load(std::memory_order_acquire)) {
+        const bool warmupDone =
+            (captureInputStallWarmupSec == 0 ||
+             t >= (startUs + static_cast<uint64_t>(captureInputStallWarmupSec) * 1000000ULL));
+        if (warmupDone) {
+          if (captureFeedPerSec < static_cast<uint64_t>(captureInputMinPushPerSec)) {
+            captureInputLowPushStreakSec += 1;
+          } else {
+            captureInputLowPushStreakSec = 0;
+          }
+          const bool restartCooldownDone =
+              (lastCaptureRestartUs == 0 ||
+               t >= (lastCaptureRestartUs + kCaptureCallbackRestartCooldownUs));
+          if (captureInputLowPushStreakSec >= captureInputStallConsecutiveSec && restartCooldownDone) {
+            lastCaptureRestartUs = t;
+            const bool restarted = restart_capture_session();
+            if (restarted) {
+              ++captureRestartCount;
+              ++captureInputStallRestartCount;
+              captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+              lastCaptureUsForInterval.store(0, std::memory_order_release);
+              lastCallbackUs.store(0, std::memory_order_release);
+              resetHostTimelineAnchors();
+              forceKeyNext = true;
+              lastSyntheticKeepaliveUs = 0;
+              captureInputLowPushStreakSec = 0;
+              std::cout << "[native-video-host] capture session restarted reason=capture-input-stall"
+                        << " restartCount=" << captureRestartCount
+                        << " captureInputStallRestarts=" << captureInputStallRestartCount
+                        << " queuePushPerSec=" << queuePushPerSec
+                        << " syntheticKeepalivePerSec=" << syntheticKeepaliveCount
+                        << " minPushPerSec=" << captureInputMinPushPerSec
+                        << " stallStreakSec=" << captureInputStallConsecutiveSec
+                        << "\n";
+            } else {
+              std::cerr << "[native-video-host] capture session restart failed reason=capture-input-stall"
+                        << " queuePushPerSec=" << queuePushPerSec
+                        << " minPushPerSec=" << captureInputMinPushPerSec
+                        << " streakSec=" << captureInputLowPushStreakSec
+                        << "\n";
+            }
+          }
+        }
+      }
       if (useRaw) {
         std::cout << "[native-video-host] sentFrames=" << sentFrames
                   << " queuePushCount=" << queuePushCount
                   << " queuePopCount=" << queuePopCount
+                  << " queuePushPerSec=" << queuePushPerSecLatest
+                  << " syntheticKeepalivePerSec=" << syntheticKeepaliveCount
+                  << " captureFeedPerSec=" << captureFeedPerSec
+                  << " captureInputLowPushStreakSec=" << captureInputLowPushStreakSec
+                  << " captureInputStallRestarts=" << captureInputStallRestartCount
                   << " queueDepthMax=" << queueDepthMax.load(std::memory_order_relaxed)
                   << " queueWaitTimeoutCount=" << queueWaitTimeoutCount
                   << " queueWaitNoWorkCount=" << queueWaitNoWorkCount
                   << " syntheticKeepaliveCount=" << syntheticKeepaliveCount
+                  << " syntheticKeepaliveTotal=" << syntheticKeepaliveTotalCount
                   << " captureRestarts=" << captureRestartCount
                   << " captureWindowRebindCount=" << hostCaptureRebindCount.load(std::memory_order_relaxed)
                   << " captureTargetPid=" << hostCaptureTargetPid.load(std::memory_order_relaxed)
@@ -3761,10 +3884,16 @@ int main(int argc, char** argv) {
                   << " sentFrames=" << sentFrames
                   << " queuePushCount=" << queuePushCount
                   << " queuePopCount=" << queuePopCount
+                  << " queuePushPerSec=" << queuePushPerSecLatest
+                  << " syntheticKeepalivePerSec=" << syntheticKeepaliveCount
+                  << " captureFeedPerSec=" << captureFeedPerSec
+                  << " captureInputLowPushStreakSec=" << captureInputLowPushStreakSec
+                  << " captureInputStallRestarts=" << captureInputStallRestartCount
                   << " queueDepthMax=" << queueDepthMax.load(std::memory_order_relaxed)
                   << " queueWaitTimeoutCount=" << queueWaitTimeoutCount
                   << " queueWaitNoWorkCount=" << queueWaitNoWorkCount
                   << " syntheticKeepaliveCount=" << syntheticKeepaliveCount
+                  << " syntheticKeepaliveTotal=" << syntheticKeepaliveTotalCount
                   << " captureRestarts=" << captureRestartCount
                   << " captureWindowRebindCount=" << hostCaptureRebindCount.load(std::memory_order_relaxed)
                   << " captureTargetPid=" << hostCaptureTargetPid.load(std::memory_order_relaxed)
