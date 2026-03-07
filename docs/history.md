@@ -591,3 +591,34 @@ Validation / build / test result
 Next action
 - M4 완료 판정을 위해 NVIDIA/Intel 실장비에서 전용 backend 고정(`nvenc_mft_*`, `qsv_mft_*`) 검증을 추가 수행한다.
 - 동일 장면 기준 generic MFT 대비 성능 개선(지표 2개 이상)을 만족하도록 M4 성능 검증을 이어간다.
+
+### 99) 2026-03-07 M5 1차 자동 검증: frame gating ON/OFF A/B
+Goal
+- M5 완료조건 중 `정적 장면 MBPS 30% 절감` 충족 여부를 자동 지표로 판정한다.
+- 동일 조건에서 `화질/응답성 악화 없음` 항목의 위험 신호를 확인한다.
+
+Files changed
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Validation command (공통 조건: `h264+udp`, `1080p30`, `8Mbps`, `mft_auto/mft_auto`, `Host 14s / Client 10s`, `NoInputChannel`):
+  - `automation/verify_native_video_runtime.ps1 -BuildDir build-vcpkg-local ...`
+- A/B results:
+  - frame gating ON:
+    - run1: `OVERALL_OK=True`, `LAT_P95_US=490207`, `DEC_AVG=2.44`, `MBPS_AVG=0.44`
+    - run2: `OVERALL_OK=True`, `LAT_P95_US=380204`, `DEC_AVG=2.33`, `MBPS_AVG=0.44`
+    - logs: `automation/logs/verify-native-video-20260307-191344`, `...191357`
+    - host: `frameGatingMode=static`, `frameGatingSkips>0`
+  - frame gating OFF:
+    - run1: `OVERALL_OK=True`, `LAT_P95_US=49382`, `DEC_AVG=24.2`, `MBPS_AVG=6.5`
+    - run2: `OVERALL_OK=True`, `LAT_P95_US=49879`, `DEC_AVG=21.89`, `MBPS_AVG=5.78`
+    - logs: `automation/logs/verify-native-video-20260307-191409`, `...191422`
+    - host: `frameGatingMode=motion`, `frameGatingSkips=0`
+- Derived metrics:
+  - `MBPS_AVG` 절감률(ON 대비 OFF 평균): 약 `92.8%` 절감 (`0.44` vs `6.14`)
+  - 동시에 `DEC_AVG` 및 `LAT_P95_US`는 동일 조건에서 ON이 크게 열세(응답성 악화 신호)
+
+Next action
+- M5 `화질/응답성 악화 없음` 완료조건은 미충족으로 유지하고, scene 분리(static/scroll/video) 기준 추가 검증을 수행한다.
+- 완료조건 충족 전까지는 M5를 부분완료 상태로 유지하고, 다음 코드 마일스톤(M4 AMD 기본화/안정화)을 병행 진행한다.
