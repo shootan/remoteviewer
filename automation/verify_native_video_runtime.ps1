@@ -146,6 +146,7 @@ $keyReqClientSent = 0
 $keyReqHostRecv = 0
 $keyReqHostConsumed = 0
 $udpAssemblyDropPmVals = New-Object System.Collections.Generic.List[double]
+$udpSimDropPmVals = New-Object System.Collections.Generic.List[double]
 $udpAssemblySampleCount = 0
 $udpAssemblyChunksTotal = 0
 $udpAssemblyCompletedTotal = 0
@@ -153,6 +154,7 @@ $udpAssemblyDroppedTotal = 0
 $udpAssemblyMalformedTotal = 0
 $udpAssemblyReorderTotal = 0
 $udpAssemblyKeyReqTotal = 0
+$udpSimDropTotal = 0
 $queueWaitTimeoutCount = 0
 $queueWaitNoWorkCount = 0
 $queueWaitReason0Count = 0
@@ -513,6 +515,12 @@ foreach ($line in $clientLines) {
     }
     if ($line -match 'dropPm=([0-9]+)') {
       [void]$udpAssemblyDropPmVals.Add([double]$Matches[1])
+    }
+    if ($line -match 'simDropPm=([0-9]+)') {
+      [void]$udpSimDropPmVals.Add([double]$Matches[1])
+    }
+    if ($line -match 'simDropTotal=([0-9]+)') {
+      $udpSimDropTotal += [int64]$Matches[1]
     }
   }
 }
@@ -938,6 +946,7 @@ $gpuScaleFail = Stats-Summary -vals $gpuScaleFailVals
 $gpuScaleCpuFallback = Stats-Summary -vals $gpuScaleCpuFallbackVals
 $dec = Stats-Summary -vals $decodedFrameVals
 $udpAssemblyDropPm = Stats-Summary -vals $udpAssemblyDropPmVals
+$udpSimDropPm = Stats-Summary -vals $udpSimDropPmVals
 $presentGap = Stats-Summary -vals $presentGapVals
 $gdiFallbackRate = Stats-Summary -vals $gdiFallbackRateX1000Vals
 $stageStats = [ordered]@{}
@@ -1115,6 +1124,11 @@ Write-Output "UDP_ASSEMBLY_DROP_PM_COUNT=$($udpAssemblyDropPm.count)"
 Write-Output "UDP_ASSEMBLY_DROP_PM_AVG=$($udpAssemblyDropPm.avg)"
 Write-Output "UDP_ASSEMBLY_DROP_PM_P95=$($udpAssemblyDropPm.p95)"
 Write-Output "UDP_ASSEMBLY_DROP_PM_MAX=$($udpAssemblyDropPm.max)"
+Write-Output "UDP_SIM_DROP_TOTAL=$udpSimDropTotal"
+Write-Output "UDP_SIM_DROP_PM_COUNT=$($udpSimDropPm.count)"
+Write-Output "UDP_SIM_DROP_PM_AVG=$($udpSimDropPm.avg)"
+Write-Output "UDP_SIM_DROP_PM_P95=$($udpSimDropPm.p95)"
+Write-Output "UDP_SIM_DROP_PM_MAX=$($udpSimDropPm.max)"
 Write-Output "HOST_QUEUE_WAIT_TIMEOUT_COUNT=$queueWaitTimeoutCount"
 Write-Output "HOST_QUEUE_WAIT_NOWORK_COUNT=$queueWaitNoWorkCount"
 Write-Output "HOST_QUEUE_PUSH_COUNT=$queuePushCount"

@@ -650,3 +650,43 @@ Validation / build / test result
 Next action
 - M5 남은 완료조건(화질/응답성 악화 없음) 검증을 scene 분리(static/scroll/video) 기준으로 이어간다.
 - 다음 미완 코드 마일스톤(M6 FEC/NACK/RTX 설계+구현)으로 자동 전환한다.
+
+### 101) 2026-03-07 M6 코드/검증: 최소 NACK 채택 + 손실 시뮬레이션 계측 추가
+Goal
+- M6의 `FEC/NACK/RTX 필요성 판정`을 자동 지표로 완료하고, 채택안이 필요한 경우 최소 구현을 반영한다.
+- 단일 장비에서도 재현 가능한 손실 실험을 위해 UDP 수신 손실 시뮬레이션/지표를 추가한다.
+
+Files changed
+- `apps/native_poc/src/native_video_client_main.cpp`
+- `automation/verify_native_video_runtime.ps1`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_host_poc remote60_native_video_client_poc --parallel`
+  - result: success
+- Code changes:
+  - client에 `REMOTE60_NATIVE_UDP_SIM_DROP_PM`/`REMOTE60_NATIVE_UDP_SIM_DROP_SEED` 기반 UDP 수신 손실 시뮬레이션 추가.
+  - client `udp-assembly` 로그에 `simDropPm`, `simDropTotal` 추가.
+  - verify 스크립트에 `UDP_SIM_DROP_TOTAL`, `UDP_SIM_DROP_PM_*` 집계 추가.
+  - assembly drop 시 keyframe 요청을 wait/catchup 상태에서도 limiter 기반으로 지속 요청하도록 조정(최소 NACK 채택).
+- Runtime verify (공통: `h264+udp`, `1080p30`, `8Mbps`, `mft_auto/mft_auto`, `NoInputChannel`, `frameGatingDisable=1`):
+  - baseline (sim 0%):
+    - log: `automation/logs/verify-native-video-20260307-192634`
+    - `OVERALL_OK=True`, `LAT_P95_US=46549`, `DEC_AVG=19.43`, `KEYREQ_CLIENT_SENT=0`, `UDP_SIM_DROP_PM_AVG=0`
+  - sim 3% after patch:
+    - log: `automation/logs/verify-native-video-20260307-192756`
+    - `OVERALL_OK=True`, `LAT_P95_US=202334`, `DEC_AVG=4`, `KEYREQ_CLIENT_SENT=15`, `UDP_ASSEMBLY_KEYREQ_TOTAL=22`, `UDP_SIM_DROP_PM_AVG=31.57`
+  - sim 5% before/after keyframe-request policy patch:
+    - before log: `automation/logs/verify-native-video-20260307-192654`
+      - `OVERALL_OK=False`, `DEC_AVG=0`, `KEYREQ_CLIENT_SENT=1`, `UDP_ASSEMBLY_KEYREQ_TOTAL=0`
+    - after log: `automation/logs/verify-native-video-20260307-192858`
+      - `OVERALL_OK=True`, `DEC_AVG=0.6`, `KEYREQ_CLIENT_SENT=9`, `UDP_ASSEMBLY_KEYREQ_TOTAL=14`
+- Interpretation:
+  - 손실 구간에서 최소 NACK(지속 keyframe 요청) 채택이 없으면 5% 시뮬레이션에서 세션 실패(`OVERALL_OK=False`)가 발생.
+  - 최소 NACK 채택 후 동일 5% 조건에서 세션 유지(`OVERALL_OK=True`)로 전환되어 M6 채택안의 필요성과 효과를 확인.
+
+Next action
+- M6 잔여 항목(`채택안 적용 시 PRESENT_GAP_OVER_1S=0 유지 + 손실 구간 복구시간 단축 검증`)을 반복 측정(최소 5회)으로 고정한다.
+- 다음 마일스톤으로 M7 검증(1080p30/720p30 Pass 로그 5회 확보)을 자동 진행한다.

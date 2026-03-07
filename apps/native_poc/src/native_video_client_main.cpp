@@ -24,6 +24,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -524,6 +525,7 @@ struct OverlayConfigSnapshot {
   uint32_t tcpRecvBufKb = 0;
   uint32_t tcpSendBufKb = 0;
   uint32_t udpMtu = 1200;
+  uint32_t udpSimDropPm = 0;
   uint64_t keyReqMinIntervalUs = kKeyframeRequestMinIntervalUsDefault;
   uint64_t keyReqTokenRefillUs = kKeyframeRequestTokenRefillUsDefault;
   uint32_t keyReqTokenCapacity = kKeyframeRequestTokenCapacityDefault;
@@ -869,7 +871,8 @@ void draw_overlay(HDC hdc) {
   {
     std::ostringstream oss;
     oss << "SockCfg recv/snd kb=" << gOverlayConfig.tcpRecvBufKb << "/" << gOverlayConfig.tcpSendBufKb
-        << " udpMtu=" << gOverlayConfig.udpMtu;
+        << " udpMtu=" << gOverlayConfig.udpMtu
+        << " udpSimDropPm=" << gOverlayConfig.udpSimDropPm;
     lines.push_back(oss.str());
   }
   {
@@ -1730,6 +1733,10 @@ int main(int argc, char** argv) {
   const uint64_t congestionRecoveryTimeoutUs = env_u32_clamped(
       "REMOTE60_NATIVE_CONGEST_RECOVERY_TIMEOUT_US",
       static_cast<uint32_t>(kCongestionRecoveryTimeoutUsDefault), 100000, 10000000);
+  const uint32_t udpSimDropPm = env_u32_clamped(
+      "REMOTE60_NATIVE_UDP_SIM_DROP_PM", 0, 0, 1000);
+  const uint32_t udpSimDropSeed = env_u32_clamped(
+      "REMOTE60_NATIVE_UDP_SIM_DROP_SEED", 0, 0, 0x7fffffffu);
   {
     std::lock_guard<std::mutex> lk(gKeyframeLimiterMu);
     gKeyframeLimiterTokens = static_cast<double>(gKeyframeRequestTokenCapacity.load(std::memory_order_relaxed));
@@ -1776,6 +1783,7 @@ int main(int argc, char** argv) {
   gOverlayConfig.keyReqMinIntervalUs = gKeyframeRequestMinIntervalUs.load(std::memory_order_relaxed);
   gOverlayConfig.keyReqTokenRefillUs = gKeyframeRequestTokenRefillUs.load(std::memory_order_relaxed);
   gOverlayConfig.keyReqTokenCapacity = gKeyframeRequestTokenCapacity.load(std::memory_order_relaxed);
+  gOverlayConfig.udpSimDropPm = udpSimDropPm;
   gRuntimeTargetBitrate.store(args.runtimeBitrate, std::memory_order_relaxed);
   gRuntimeTargetKeyint.store(args.runtimeKeyint, std::memory_order_relaxed);
   gRuntimeTuneEnabled.store(false, std::memory_order_relaxed);
@@ -2913,6 +2921,11 @@ int main(int argc, char** argv) {
 
     if (transport == VideoTransport::Udp) {
       std::array<uint8_t, 1600> datagram{};
+      const uint32_t effectiveUdpSimDropSeed = (udpSimDropSeed > 0)
+                                                   ? udpSimDropSeed
+                                                   : static_cast<uint32_t>(qpc_now_us() & 0x7fffffffu);
+      std::minstd_rand udpSimRng(effectiveUdpSimDropSeed);
+      std::uniform_int_distribution<uint32_t> udpSimDropDist(0, 999);
       bool assembling = false;
       uint32_t assemblingSeq = 0;
       uint32_t assemblingExpected = 0;
@@ -2920,6 +2933,8 @@ int main(int argc, char** argv) {
       EncodedFrameHeader assemblingHdr{};
       std::vector<uint8_t> assemblingPayload;
       uint64_t assemblyDropped = 0;
+      uint64_t udpSimDroppedCount = 0;
+      uint64_t udpSimAcceptedCount = 0;
       uint64_t udpAssemblyStatAtUs = qpc_now_us() + 1000000ULL;
       uint64_t lastUdpChunkRecvCount = 0;
       uint64_t lastUdpAssemblyCompletedCount = 0;
@@ -2927,6 +2942,8 @@ int main(int argc, char** argv) {
       uint64_t lastUdpAssemblyMalformedCount = 0;
       uint64_t lastUdpAssemblyReorderCount = 0;
       uint64_t lastUdpAssemblyKeyReqCount = 0;
+      uint64_t lastUdpSimDroppedCount = 0;
+      uint64_t lastUdpSimAcceptedCount = 0;
 
       while (gRunning.load()) {
         const int n = recv(gSock, reinterpret_cast<char*>(datagram.data()), static_cast<int>(datagram.size()), 0);
@@ -2944,6 +2961,15 @@ int main(int argc, char** argv) {
           ++skippedQueued;
           continue;
         }
+        if (udpSimDropPm > 0) {
+          const uint32_t samplePm = udpSimDropDist(udpSimRng);
+          if (samplePm < udpSimDropPm) {
+            ++udpSimDroppedCount;
+            ++skippedQueued;
+            continue;
+          }
+        }
+        ++udpSimAcceptedCount;
         ++udpChunkRecvCount;
         if (u.payloadSize == 0 || u.chunkSize == 0 ||
             u.chunkOffset > u.payloadSize ||
@@ -2982,8 +3008,8 @@ int main(int argc, char** argv) {
           ++assemblyDropped;
           ++udpAssemblyDroppedCount;
           ++udpAssemblyReorderCount;
-          const bool keyReqAllowed = !waitForKeyFrame && !catchupMode;
-          if (keyReqAllowed && (assemblyDropped % 20) == 1) {
+          // Keep requesting keyframes on sustained assembly drops; rate-limit is handled in request_keyframe().
+          if ((assemblyDropped % 20) == 1) {
             request_keyframe(2);
             ++udpAssemblyKeyReqCount;
           }
@@ -3026,6 +3052,12 @@ int main(int argc, char** argv) {
           const uint64_t malformedDelta = udpAssemblyMalformedCount - lastUdpAssemblyMalformedCount;
           const uint64_t reorderDelta = udpAssemblyReorderCount - lastUdpAssemblyReorderCount;
           const uint64_t keyReqDelta = udpAssemblyKeyReqCount - lastUdpAssemblyKeyReqCount;
+          const uint64_t simDroppedDelta = udpSimDroppedCount - lastUdpSimDroppedCount;
+          const uint64_t simAcceptedDelta = udpSimAcceptedCount - lastUdpSimAcceptedCount;
+          const uint64_t simTotalDelta = simDroppedDelta + simAcceptedDelta;
+          const uint64_t simDropPermille = (simTotalDelta > 0)
+              ? ((simDroppedDelta * 1000ULL) / simTotalDelta)
+              : 0;
           const uint64_t totalFramesDelta = completedDelta + droppedDelta;
           const uint64_t dropPermille = (totalFramesDelta > 0)
               ? ((droppedDelta * 1000ULL) / totalFramesDelta)
@@ -3038,6 +3070,8 @@ int main(int argc, char** argv) {
                     << " malformed=" << malformedDelta
                     << " reorder=" << reorderDelta
                     << " keyReq=" << keyReqDelta
+                    << " simDropPm=" << simDropPermille
+                    << " simDropTotal=" << simDroppedDelta
                     << " waitForKey=" << (waitForKeyFrame ? 1 : 0)
                     << " catchup=" << (catchupMode ? 1 : 0)
                     << "\n";
@@ -3047,6 +3081,8 @@ int main(int argc, char** argv) {
           lastUdpAssemblyMalformedCount = udpAssemblyMalformedCount;
           lastUdpAssemblyReorderCount = udpAssemblyReorderCount;
           lastUdpAssemblyKeyReqCount = udpAssemblyKeyReqCount;
+          lastUdpSimDroppedCount = udpSimDroppedCount;
+          lastUdpSimAcceptedCount = udpSimAcceptedCount;
           udpAssemblyStatAtUs += 1000000ULL;
         }
         if (args.seconds > 0 && nowUs >= startUs + static_cast<uint64_t>(args.seconds) * 1000000ULL) {
