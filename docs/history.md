@@ -381,3 +381,42 @@ Next action
 - NVIDIA/Intel 실장비(해당 HW MFT 존재 환경)에서 동일 커맨드 재측정하여:
   - backend requested/resolved/fallbackReason 표기 검증
   - generic MFT 대비 fps/latency/mbps 2개 이상 개선 여부 판정
+
+### 93) 2026-03-07 M4 RDP 비연결(콘솔 세션) 재검증
+Goal
+- `nvenc_hw`/`qsv_hw` 실패가 RDP 세션 영향인지 확인한다.
+- 콘솔 활성 세션에서 동일 조건 재실행 후 성공/실패 지표를 비교한다.
+
+Files changed
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Session check:
+  - `query session`
+  - result: `console ... Active`, `rdp-tcp ... Listen` (활성 RDP 사용자 세션 없음)
+- Command (동일 조건: `h264+udp`, `1080p30`, `8Mbps`, `NoInputChannel`, `HostSeconds=14`, `ClientSeconds=10`, `build-vcpkg-local`):
+  - `automation/verify_native_video_runtime.ps1 ... -EncoderBackend mft_hw -DecoderBackend mft_hw`
+  - `automation/verify_native_video_runtime.ps1 ... -EncoderBackend nvenc_hw -DecoderBackend nvenc_hw`
+  - `automation/verify_native_video_runtime.ps1 ... -EncoderBackend qsv_hw -DecoderBackend qsv_hw`
+- Result summary:
+  - `mft_hw` (log: `automation/logs/verify-native-video-20260307-155357`)
+    - `OVERALL_OK=True`
+    - `DEC_AVG=4.33`
+    - `LAT_P95_US=258663`
+    - `MBPS_AVG=0.78`
+  - `nvenc_hw` (log: `automation/logs/verify-native-video-20260307-155418`)
+    - `OVERALL_OK=False`
+    - `DEC_AVG=0`, `LAT_P95_US=0`, `MBPS_AVG=0`
+    - host stderr: `[mf_h264_codec] encoder backend=nvenc_hw unavailable` -> `H264 encoder initialize failed`
+  - `qsv_hw` (log: `automation/logs/verify-native-video-20260307-155441`)
+    - `OVERALL_OK=False`
+    - `DEC_AVG=0`, `LAT_P95_US=0`, `MBPS_AVG=0`
+    - host stderr: `[mf_h264_codec] encoder backend=qsv_hw unavailable` -> `H264 encoder initialize failed`
+- Interpretation:
+  - RDP 비연결(콘솔)에서도 `nvenc_hw`/`qsv_hw` 실패가 동일하게 재현됨.
+  - 실패 원인은 세션 타입보다 "요청 backend의 MFT 가용성/초기화 실패"에 수렴.
+
+Next action
+- `nvenc_hw`/`qsv_hw` 전용 요청 실패 시 `mft_enum_hw`(필요 시 `mft_enum_sw`)로 정책적 폴백 허용 여부를 결정한다.
+- 가용성 로그(탐색한 MFT friendly name/clsid) 추가로 실패 원인 가시성을 강화한다.
