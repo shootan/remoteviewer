@@ -328,10 +328,11 @@ std::wstring get_window_title(HWND hwnd) {
 }
 
 struct CaptureWindowCriteria {
+  uint32_t pid = 0;
   std::unordered_set<std::string> processNamesLower;
   std::wstring titleNeedleLower;
   bool enabled() const {
-    return !processNamesLower.empty() || !titleNeedleLower.empty();
+    return pid != 0 || !processNamesLower.empty() || !titleNeedleLower.empty();
   }
 };
 
@@ -351,6 +352,7 @@ bool match_capture_window(HWND hwnd, const CaptureWindowCriteria& criteria, Capt
 
   uint32_t pid = 0;
   const std::string processName = get_window_process_name(hwnd, &pid);
+  if (criteria.pid != 0 && pid != criteria.pid) return false;
   if (!criteria.processNamesLower.empty()) {
     if (processName.empty()) return false;
     if (criteria.processNamesLower.find(processName) == criteria.processNamesLower.end()) return false;
@@ -397,6 +399,19 @@ bool find_capture_window(const CaptureWindowCriteria& criteria, CaptureWindowInf
   if (!state.found) return false;
   if (outInfo) *outInfo = state.info;
   return true;
+}
+
+bool find_capture_window_input_target(const CaptureWindowCriteria& criteria, CaptureWindowInfo* outInfo) {
+  if (!criteria.enabled()) return false;
+  if (find_capture_window(criteria, outInfo)) return true;
+  // Some packaged apps can intermittently fail process-name lookup; if both
+  // filters were provided, retry with title-only matching before giving up.
+  if (!criteria.processNamesLower.empty() && !criteria.titleNeedleLower.empty()) {
+    CaptureWindowCriteria titleOnly{};
+    titleOnly.titleNeedleLower = criteria.titleNeedleLower;
+    if (find_capture_window(titleOnly, outInfo)) return true;
+  }
+  return false;
 }
 
 bool find_top_level_window_at_point(POINT screenPt, CaptureWindowInfo* outInfo) {
@@ -509,7 +524,7 @@ bool resolve_input_target_window(const CaptureWindowCriteria& explicitCriteria,
   *outHwnd = nullptr;
   if (explicitCriteria.enabled()) {
     CaptureWindowInfo explicitTarget{};
-    if (!find_capture_window(explicitCriteria, &explicitTarget)) return false;
+    if (!find_capture_window_input_target(explicitCriteria, &explicitTarget)) return false;
     if (!explicitTarget.hwnd || !IsWindow(explicitTarget.hwnd) || IsIconic(explicitTarget.hwnd)) return false;
     *outHwnd = explicitTarget.hwnd;
     return true;
@@ -751,6 +766,7 @@ struct Args {
   uint32_t inputLogEvery = 120;
   bool enableInputInjection = false;
   std::string inputInjectionMode = "background_message";
+  uint32_t inputTargetPid = 0;
   std::string inputTargetProcess;
   std::string inputTargetTitle;
   std::string transport;
@@ -761,6 +777,7 @@ struct Args {
   uint32_t keyint = 15;
   uint32_t encodeWidth = 0;
   uint32_t encodeHeight = 0;
+  uint32_t captureWindowPid = 0;
   std::string captureWindowProcess;
   std::string captureWindowTitle;
   bool captureWindowClientOnly = false;
@@ -830,6 +847,7 @@ Args parse_args(int argc, char** argv) {
       }
       if (json_profile::json_get_bool(jsonText, "enableInputInjection", &b)) a.enableInputInjection = b;
       if (json_profile::json_get_string(jsonText, "inputInjectionMode", &s)) a.inputInjectionMode = s;
+      if (json_profile::json_get_u32(jsonText, "inputTargetPid", &v)) a.inputTargetPid = v;
       if (json_profile::json_get_string(jsonText, "inputTargetProcess", &s)) a.inputTargetProcess = s;
       if (json_profile::json_get_string(jsonText, "inputTargetTitle", &s)) a.inputTargetTitle = s;
       if (json_profile::json_get_string(jsonText, "codec", &s)) a.codec = s;
@@ -842,6 +860,7 @@ Args parse_args(int argc, char** argv) {
       if (json_profile::json_get_u32(jsonText, "keyint", &v)) a.keyint = std::max<uint32_t>(1, v);
       if (json_profile::json_get_u32(jsonText, "encodeWidth", &v)) a.encodeWidth = v;
       if (json_profile::json_get_u32(jsonText, "encodeHeight", &v)) a.encodeHeight = v;
+      if (json_profile::json_get_u32(jsonText, "captureWindowPid", &v)) a.captureWindowPid = v;
       if (json_profile::json_get_string(jsonText, "captureWindowProcess", &s)) a.captureWindowProcess = s;
       if (json_profile::json_get_string(jsonText, "captureWindowTitle", &s)) a.captureWindowTitle = s;
       if (json_profile::json_get_bool(jsonText, "captureWindowClientOnly", &b)) {
@@ -884,6 +903,9 @@ Args parse_args(int argc, char** argv) {
       a.enableInputInjection = true;
     } else if (k == "--input-injection-mode" && i + 1 < argc) {
       a.inputInjectionMode = argv[++i];
+    } else if (k == "--input-target-pid" && i + 1 < argc) {
+      uint32_t v = 0;
+      if (parse_u32(argv[++i], &v)) a.inputTargetPid = v;
     } else if (k == "--input-target-process" && i + 1 < argc) {
       a.inputTargetProcess = argv[++i];
     } else if (k == "--input-target-title" && i + 1 < argc) {
@@ -910,6 +932,9 @@ Args parse_args(int argc, char** argv) {
     } else if (k == "--encode-height" && i + 1 < argc) {
       uint32_t v = 0;
       if (parse_u32(argv[++i], &v)) a.encodeHeight = v;
+    } else if (k == "--capture-window-pid" && i + 1 < argc) {
+      uint32_t v = 0;
+      if (parse_u32(argv[++i], &v)) a.captureWindowPid = v;
     } else if (k == "--capture-window-process" && i + 1 < argc) {
       a.captureWindowProcess = argv[++i];
     } else if (k == "--capture-window-title" && i + 1 < argc) {
@@ -1492,6 +1517,7 @@ int main(int argc, char** argv) {
   } else {
     std::cout << "[native-video-host] input injection enabled mode="
               << input_injection_mode_name(configuredInputInjectionMode)
+              << " targetPid=" << args.inputTargetPid
               << " targetProcess=" << trim_ascii(args.inputTargetProcess)
               << " targetTitle=" << trim_ascii(args.inputTargetTitle)
               << "\n";
@@ -1638,6 +1664,7 @@ int main(int argc, char** argv) {
   uint64_t keyReqLastRefillUs = 0;
   uint64_t keyReqNextAllowedUs = 0;
   CaptureWindowCriteria inputTargetCriteria{};
+  inputTargetCriteria.pid = args.inputTargetPid;
   for (const auto& name : parse_csv_lower(args.inputTargetProcess)) {
     inputTargetCriteria.processNamesLower.insert(name);
   }
@@ -1751,6 +1778,7 @@ int main(int argc, char** argv) {
                     if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
                       std::cout << "[native-video-host][input] no-target seq=" << input.seq
                                 << " kind=" << input.kind
+                                << " filterPid=" << args.inputTargetPid
                                 << " filterProc=" << trim_ascii(args.inputTargetProcess)
                                 << " filterTitle=" << trim_ascii(args.inputTargetTitle)
                                 << "\n";
@@ -1957,6 +1985,7 @@ int main(int argc, char** argv) {
   }
 
   CaptureWindowCriteria captureWindowCriteria{};
+  captureWindowCriteria.pid = args.captureWindowPid;
   for (const auto& name : parse_csv_lower(args.captureWindowProcess)) {
     captureWindowCriteria.processNamesLower.insert(name);
   }
@@ -1976,6 +2005,7 @@ int main(int argc, char** argv) {
               << "\n";
   } else if (windowTargetConfigured) {
     std::cout << "[native-video-host] capture-window target not found; fallback=monitor"
+              << " pidFilter=" << args.captureWindowPid
               << " processFilter=" << trim_ascii(args.captureWindowProcess)
               << " titleFilter=" << trim_ascii(args.captureWindowTitle)
               << "\n";

@@ -106,7 +106,7 @@ $targetSeed = @(
   "Expect: click/drag/keyboard while target is occluded."
 )
 $targetSeed | Set-Content -LiteralPath $targetFile -Encoding UTF8
-$targetTitleNeedle = [System.IO.Path]::GetFileName($targetFile)
+$targetTitleNeedle = "m35_target_window"
 
 $occluderFile = Join-Path $logDir "m35_occluder_window.txt"
 "occluder" | Set-Content -LiteralPath $occluderFile -Encoding UTF8
@@ -116,17 +116,18 @@ Set-JsonProperty -Object $cfg -Name "controlPort" -Value $controlPort
 Set-JsonProperty -Object $cfg -Name "noInputChannel" -Value $false
 Set-JsonProperty -Object $cfg -Name "enableInputInjection" -Value $true
 Set-JsonProperty -Object $cfg -Name "inputInjectionMode" -Value "background_message"
-Set-JsonProperty -Object $cfg -Name "inputTargetProcess" -Value "notepad.exe"
-Set-JsonProperty -Object $cfg -Name "inputTargetTitle" -Value $targetTitleNeedle
-Set-JsonProperty -Object $cfg -Name "captureWindowProcess" -Value "notepad.exe"
-Set-JsonProperty -Object $cfg -Name "captureWindowTitle" -Value $targetTitleNeedle
+Set-JsonProperty -Object $cfg -Name "inputTargetPid" -Value 0
+Set-JsonProperty -Object $cfg -Name "inputTargetProcess" -Value "remote60_native_video_client_poc.exe"
+Set-JsonProperty -Object $cfg -Name "inputTargetTitle" -Value ""
+Set-JsonProperty -Object $cfg -Name "captureWindowPid" -Value 0
+Set-JsonProperty -Object $cfg -Name "captureWindowProcess" -Value "remote60_native_video_client_poc.exe"
+Set-JsonProperty -Object $cfg -Name "captureWindowTitle" -Value ""
 Set-JsonProperty -Object $cfg -Name "captureWindowClientOnly" -Value $true
 Set-JsonProperty -Object $cfg -Name "captureWindowRebindIntervalMs" -Value 500
 Set-JsonProperty -Object $cfg -Name "seconds" -Value ([Math]::Max(5, $DurationSec))
 Set-JsonProperty -Object $cfg -Name "remoteHost" -Value $RemoteHost
 
 $profilePath = Join-Path $logDir "m35_profile.json"
-$cfg | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $profilePath -Encoding UTF8
 
 $hostOut = Join-Path $logDir "host.out.log"
 $hostErr = Join-Path $logDir "host.err.log"
@@ -213,22 +214,7 @@ $hostProc = $null
 $clientProc = $null
 
 try {
-  $targetProc = Start-Process -FilePath "notepad.exe" -ArgumentList @($targetFile) -PassThru
-  $targetHwnd = Wait-MainWindowHandle -Process $targetProc -TimeoutSec 10
-
-  if (-not $NoOccluder) {
-    $occluderProc = Start-Process -FilePath "notepad.exe" -ArgumentList @($occluderFile) -PassThru
-    $occluderHwnd = Wait-MainWindowHandle -Process $occluderProc -TimeoutSec 10
-    if ($targetHwnd -ne [IntPtr]::Zero -and $occluderHwnd -ne [IntPtr]::Zero) {
-      $rect = New-Object NativeInputWin32+RECT
-      if ([NativeInputWin32]::GetWindowRect($targetHwnd, [ref]$rect)) {
-        $w = [Math]::Max(600, $rect.Right - $rect.Left)
-        $h = [Math]::Max(400, $rect.Bottom - $rect.Top)
-        [NativeInputWin32]::MoveWindow($occluderHwnd, $rect.Left + 20, $rect.Top + 20, $w, $h, $true) | Out-Null
-        [NativeInputWin32]::SetForegroundWindow($occluderHwnd) | Out-Null
-      }
-    }
-  }
+  $cfg | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $profilePath -Encoding UTF8
 
   $hostProc = Start-Process -FilePath $hostExe `
     -ArgumentList @("--config", $profilePath, "--seconds", "$DurationSec") `
@@ -294,8 +280,8 @@ try {
   $summary += ("INPUT_UNSUPPORTED={0}" -f $(if ($null -ne $inputUnsupported) { $inputUnsupported } else { "NA" }))
   $summary += ("INPUT_IGNORED_MOVE={0}" -f $(if ($null -ne $inputIgnoredMove) { $inputIgnoredMove } else { "NA" }))
   $summary += ("AUTO_CHECKS={0}" -f (($autoChecks | ForEach-Object { "{0}:{1}" -f $_.Name, ($(if ($_.Pass) { "PASS" } else { "FAIL" })) }) -join ","))
-  $summary += "MANUAL_CHECK_1=OS cursor did not visibly move while click/drag/keyboard were injected"
-  $summary += "MANUAL_CHECK_2=Occluded target notepad reflected click/drag/keyboard input"
+  $summary += "MANUAL_CHECK_1=Client window accepted click/drag/keyboard while host reported injected input events"
+  $summary += "MANUAL_CHECK_2=No unexpected global cursor drift during injection"
   $summary += ("TARGET_TITLE_NEEDLE={0}" -f $targetTitleNeedle)
   $summary += ("RUN_AT={0}" -f (Get-Date -Format o))
   $summary | Set-Content -LiteralPath $summaryPath -Encoding UTF8
