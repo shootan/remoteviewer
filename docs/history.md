@@ -690,3 +690,35 @@ Validation / build / test result
 Next action
 - M6 잔여 항목(`채택안 적용 시 PRESENT_GAP_OVER_1S=0 유지 + 손실 구간 복구시간 단축 검증`)을 반복 측정(최소 5회)으로 고정한다.
 - 다음 마일스톤으로 M7 검증(1080p30/720p30 Pass 로그 5회 확보)을 자동 진행한다.
+
+### 102) 2026-03-07 M7 1차 스모크: 1080p/720p Pass 가능성 점검
+Goal
+- M7의 `1080p30/720p30 Pass 로그 5회 확보` 전, 현재 런타임에서 Pass 가능한 조합인지 1차 스모크로 판정한다.
+
+Files changed
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Validation command (공통: `h264+udp`, `mft_hw/mft_hw`, `NoInputChannel`, `frameGatingDisable=1`, `Host 14s / Client 10s`):
+  - 1080p: `-EncodeWidth 1920 -EncodeHeight 1080 -Bitrate 8000000`
+  - 720p: `-EncodeWidth 1280 -EncodeHeight 720 -Bitrate 5000000`
+- 1080p result:
+  - log: `automation/logs/m7-smoke-1080.txt` (`verify-native-video-20260307-193104`)
+  - `OVERALL_OK=True`
+  - `DEC_AVG=17.33` (목표 `>=27` 미달)
+  - `LAT_P95_US=108496` (목표 `<=70000` 미달)
+  - `PRESENT_GAP_OVER_1S=0`
+- 720p result:
+  - log: `automation/logs/m7-smoke-720.txt` (`verify-native-video-20260307-193128`)
+  - `OVERALL_OK=True`
+  - `DEC_AVG=23.11` (목표 `>=28` 미달)
+  - `LAT_P95_US=64353` (목표 `<=55000` 미달)
+  - `PRESENT_GAP_OVER_1S=0`
+- 판정:
+  - 1차 스모크 기준 `Pass 로그`는 1080/720 모두 `0/5`.
+  - 현재 병목은 freeze가 아니라 fps/latency 목표 미달 구간으로 수렴.
+
+Next action
+- M7 Pass 확보 전에 720p 우선으로 fps/latency 튜닝 조합(backend/bitrate/frame-gating/ABR 토글) 탐색 A/B를 자동 실행한다.
+- 목표치에 들어오는 조합을 찾으면 해당 조합으로 720p 5회, 이후 1080p 5회 반복 로그를 수집한다.
