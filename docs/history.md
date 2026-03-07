@@ -722,3 +722,30 @@ Validation / build / test result
 Next action
 - M7 Pass 확보 전에 720p 우선으로 fps/latency 튜닝 조합(backend/bitrate/frame-gating/ABR 토글) 탐색 A/B를 자동 실행한다.
 - 목표치에 들어오는 조합을 찾으면 해당 조합으로 720p 5회, 이후 1080p 5회 반복 로그를 수집한다.
+
+### 103) 2026-03-07 M7 판정 가시화: 성공/애매/실패 아이콘 출력 + 실패 케이스 정리 완료
+Goal
+- `verify_native_video_runtime.ps1` 결과에 즉시 판별 가능한 상태 아이콘(`🟢/🟠/❌`)을 추가한다.
+- M7 체크리스트의 실패 케이스/회귀 로그 정리 항목을 자동 판정 필드 기반으로 완료 처리한다.
+
+Files changed
+- `automation/verify_native_video_runtime.ps1`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Validation command (공통: `h264+udp`, `mft_hw/mft_hw`, `NoInputChannel`, `Host 14s / Client 10s`):
+  - 720p: `-EncodeWidth 1280 -EncodeHeight 720 -Bitrate 5000000`
+    - output: `automation/logs/m7-icon-smoke-720.txt` (`verify-native-video-20260307-193946`)
+    - `OVERALL_OK=True`, `DEC_AVG=2.78`, `LAT_P95_US=884789`, `PRESENT_GAP_OVER_1S=0`
+    - `M7_STATUS=FAIL`, `M7_STATUS_ICON=❌`, `M7_STATUS_REASON=decoded_fps_below_target,latency_p95_above_target`
+  - 1080p: `-EncodeWidth 1920 -EncodeHeight 1080 -Bitrate 8000000`
+    - output: `automation/logs/m7-icon-smoke-1080.txt` (`verify-native-video-20260307-194007`)
+    - `OVERALL_OK=True`, `DEC_AVG=2.75`, `LAT_P95_US=531581`, `PRESENT_GAP_OVER_1S=0`
+    - `M7_STATUS=FAIL`, `M7_STATUS_ICON=❌`, `M7_STATUS_REASON=decoded_fps_below_target,latency_p95_above_target`
+- Implementation note:
+  - PowerShell 코드페이지 이슈로 이모지 리터럴이 깨지는 문제를 확인했고, 아이콘은 유니코드 코드포인트 조합(`char`)으로 안전하게 생성하도록 수정했다.
+
+Next action
+- M7 `기본 실행 프로필 확정`을 위해 720p 우선 안정 조합(backend/bitrate/keyint + 필요 시 runtime env) 탐색을 재수행한다.
+- `M7_STATUS=SUCCESS(🟢)` 조합 발견 시 720p 5회 Pass 로그부터 채운다.

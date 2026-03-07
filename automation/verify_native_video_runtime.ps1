@@ -1052,6 +1052,60 @@ $gateAPresentGapOk = ($presentGapOver1s -le $gateAPresentGapOver1sTarget)
 $gateAFreezeOk = ($gateARecoveryOk -and $gateAPresentGapOk)
 $gateAPass = ($clientRc -eq 0 -and $gateADecodedFpsOk -and $gateAFreezeOk)
 
+$m7Profile = "none"
+$m7DecodedFpsTarget = 0
+$m7LatencyP95TargetUs = 0
+if ($Codec -ieq "h264") {
+  if ($EncodeWidth -ge 1920 -or $EncodeHeight -ge 1080) {
+    $m7Profile = "1080p30"
+    $m7DecodedFpsTarget = 27
+    $m7LatencyP95TargetUs = 70000
+  } elseif ($EncodeWidth -ge 1280 -or $EncodeHeight -ge 720) {
+    $m7Profile = "720p30"
+    $m7DecodedFpsTarget = 28
+    $m7LatencyP95TargetUs = 55000
+  }
+}
+$m7Applicable = ($m7DecodedFpsTarget -gt 0 -and $m7LatencyP95TargetUs -gt 0)
+$m7DecodedFpsOk = (-not $m7Applicable -or ($dec.count -gt 0 -and [double]$dec.avg -ge [double]$m7DecodedFpsTarget))
+$m7LatencyP95Ok = (-not $m7Applicable -or ($lat.count -gt 0 -and [double]$lat.p95 -le [double]$m7LatencyP95TargetUs))
+$m7PresentGapOk = ($presentGapOver1s -le 0)
+$m7Pass = ($overallOk -and $m7Applicable -and $m7DecodedFpsOk -and $m7LatencyP95Ok -and $m7PresentGapOk)
+$iconGreen = ([char]0xD83D) + ([char]0xDFE2)
+$iconOrange = ([char]0xD83D) + ([char]0xDFE0)
+$iconRedX = [string][char]0x274C
+$m7Status = "AMBIGUOUS"
+$m7StatusIcon = $iconOrange
+$m7StatusReasons = New-Object System.Collections.Generic.List[string]
+if (-not $overallOk) {
+  $m7Status = "FAIL"
+  $m7StatusIcon = $iconRedX
+  [void]$m7StatusReasons.Add("overall_not_ok")
+} else {
+  if (-not $m7Applicable) {
+    [void]$m7StatusReasons.Add("profile_not_applicable")
+  }
+  if (-not $m7DecodedFpsOk) {
+    [void]$m7StatusReasons.Add("decoded_fps_below_target")
+  }
+  if (-not $m7LatencyP95Ok) {
+    [void]$m7StatusReasons.Add("latency_p95_above_target")
+  }
+  if (-not $m7PresentGapOk) {
+    [void]$m7StatusReasons.Add("present_gap_over_1s")
+  }
+  if ($m7Pass) {
+    $m7Status = "SUCCESS"
+    $m7StatusIcon = $iconGreen
+    $m7StatusReasons.Clear()
+    [void]$m7StatusReasons.Add("ok")
+  } elseif ($presentGapOver3s -gt 0 -or ($m7Applicable -and $lat.count -gt 0 -and [double]$lat.p95 -gt ([double]$m7LatencyP95TargetUs * 1.5))) {
+    $m7Status = "FAIL"
+    $m7StatusIcon = $iconRedX
+  }
+}
+$m7StatusReason = if ($m7StatusReasons.Count -gt 0) { [string]::Join(",", $m7StatusReasons.ToArray()) } else { "ok" }
+
 Write-Output "LOG_DIR=$logDir"
 Write-Output "CODEC=$Codec"
 Write-Output "TRANSPORT=$effectiveTransport"
@@ -1096,6 +1150,16 @@ Write-Output "GATE_A_RECOVERY_OK=$gateARecoveryOk"
 Write-Output "GATE_A_PRESENT_GAP_OK=$gateAPresentGapOk"
 Write-Output "GATE_A_FREEZE_OK=$gateAFreezeOk"
 Write-Output "GATE_A_PASS=$gateAPass"
+Write-Output "M7_PROFILE=$m7Profile"
+Write-Output "M7_TARGET_DECODED_FPS=$m7DecodedFpsTarget"
+Write-Output "M7_TARGET_LAT_P95_US=$m7LatencyP95TargetUs"
+Write-Output "M7_DECODED_FPS_OK=$m7DecodedFpsOk"
+Write-Output "M7_LAT_P95_OK=$m7LatencyP95Ok"
+Write-Output "M7_PRESENT_GAP_OK=$m7PresentGapOk"
+Write-Output "M7_PASS=$m7Pass"
+Write-Output "M7_STATUS=$m7Status"
+Write-Output "M7_STATUS_ICON=$m7StatusIcon"
+Write-Output "M7_STATUS_REASON=$m7StatusReason"
 Write-Output "TS_SOURCE_MFT=$tsSourceMft"
 Write-Output "TS_SOURCE_INPUT_FALLBACK=$tsSourceInputFallback"
 Write-Output "TS_SOURCE_HEADER_FALLBACK=$tsSourceHeaderFallback"
