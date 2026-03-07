@@ -420,3 +420,36 @@ Validation / build / test result
 Next action
 - `nvenc_hw`/`qsv_hw` 전용 요청 실패 시 `mft_enum_hw`(필요 시 `mft_enum_sw`)로 정책적 폴백 허용 여부를 결정한다.
 - 가용성 로그(탐색한 MFT friendly name/clsid) 추가로 실패 원인 가시성을 강화한다.
+
+### 94) 2026-03-07 중간 크래시 의심 재현 점검
+Goal
+- 사용자 제보("중간에 크래시")에 대해 자동 재현 여부를 점검한다.
+- 실제 크래시인지, 또는 backend 초기화 실패로 인한 조기 종료인지 구분한다.
+
+Files changed
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Crash keyword scan:
+  - 대상: `automation/logs/verify-native-video-*/*.log`
+  - 패턴: `crash|exception|access violation|fatal|Unhandled|abort`
+  - 결과: 일치 항목 없음
+- Windows Application Event(최근 6시간):
+  - ID `1000/1001` + `remote60_native_video_host_poc|remote60_native_video_client_poc` 필터
+  - 결과: 크래시 이벤트 없음
+- 장시간 재현(`mft_hw/mft_hw`, 1080p30, 8Mbps, udp, host 70s/client 60s):
+  - log: `automation/logs/verify-native-video-20260307-155720`
+  - `HOST_RC=0`, `CLIENT_RC=0`, `OVERALL_OK=True`
+  - `DEC_AVG=3.92`, `LAT_P95_US=281025`, `MBPS_AVG=0.17`
+- 반복 재현 5회(`mft_hw/mft_hw`, host 24s/client 18s):
+  - run1~run5 모두 `HOST_RC=0`, `CLIENT_RC=0`, `OVERALL_OK=True`
+  - `LAT_P95_US`: `188916`, `261262`, `362504`, `237375`, `281199`
+  - `DEC_AVG`: `4.71`, `4.18`, `4.00`, `4.18`, `4.29`
+- 해석:
+  - `mft_hw` 경로에서는 현재 자동 재현 기준으로 크래시가 재현되지 않음.
+  - 문제로 관측되는 "중간 종료"는 `nvenc_hw`/`qsv_hw` 요청 시 `backend unavailable`에 따른 인코더 초기화 실패 가능성이 더 높음.
+
+Next action
+- `nvenc_hw`/`qsv_hw` 요청 실패를 하드 실패 대신 정책적 폴백(`mft_enum_hw` -> `mft_enum_sw`)으로 전환할지 결정한다.
+- 필요 시 WER LocalDumps 활성화 후 `nvenc/qsv` 경로 재실행으로 실제 크래시 덤프 존재 여부를 추가 확인한다.
