@@ -622,3 +622,31 @@ Validation / build / test result
 Next action
 - M5 `화질/응답성 악화 없음` 완료조건은 미충족으로 유지하고, scene 분리(static/scroll/video) 기준 추가 검증을 수행한다.
 - 완료조건 충족 전까지는 M5를 부분완료 상태로 유지하고, 다음 코드 마일스톤(M4 AMD 기본화/안정화)을 병행 진행한다.
+
+### 100) 2026-03-07 M4 코드: AMD 기본화(mft_auto -> AMF 우선) 적용
+Goal
+- AMD 장비에서 `mft_auto` 요청 시 generic MFT 대신 AMF 인코더를 기본 우선 선택해 M4 기본화를 완료한다.
+- 필요 시 기존 동작으로 되돌릴 수 있도록 opt-out 스위치를 제공한다.
+
+Files changed
+- `apps/native_poc/src/mf_h264_codec.cpp`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_host_poc remote60_native_video_client_poc --parallel`
+  - result: success
+- Runtime verify (`mft_auto/mft_auto`, `h264+udp`, `1080p30`, `8Mbps`, `Host 14s / Client 10s`, `NoInputChannel`):
+  - log: `automation/logs/verify-native-video-20260307-191705`
+  - `OVERALL_OK=True`, `LAT_P95_US=373223`, `DEC_AVG=3.44`, `MBPS_AVG=0.44`
+  - host: `backendRequested=mft_auto`, `backendResolved=amf_mft_h264enc`, `backendFallbackReason=none`
+  - client: `backendRequested=mft_auto`, `backendResolved=mft_enum_hw`, `backendFallbackReason=none`
+- Opt-out verify (`REMOTE60_NATIVE_AUTO_BACKEND_DISABLE_VENDOR_PREFERENCE=1`):
+  - log: `automation/logs/verify-native-video-20260307-191734`
+  - host: `backendRequested=mft_auto`, `backendResolved=mft_enum_hw`, `backendFallbackReason=none`
+  - `OVERALL_OK=True`
+
+Next action
+- M5 남은 완료조건(화질/응답성 악화 없음) 검증을 scene 분리(static/scroll/video) 기준으로 이어간다.
+- 다음 미완 코드 마일스톤(M6 FEC/NACK/RTX 설계+구현)으로 자동 전환한다.

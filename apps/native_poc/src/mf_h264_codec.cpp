@@ -497,6 +497,12 @@ bool backend_is_any(const std::string& backendRaw, const char* const* values, si
   return false;
 }
 
+bool backend_is_auto_request(const std::string& backendRaw) {
+  static const char* const kAutoBackendNames[] = {"mft_auto", "auto"};
+  return backend_is_any(backendRaw, kAutoBackendNames,
+                        sizeof(kAutoBackendNames) / sizeof(kAutoBackendNames[0]));
+}
+
 bool create_h264_encoder_transform_from_mode(MftBackendMode backendMode, IMFTransform** outTransform,
                                              bool* outUsingHardware, const char** outBackendName) {
   if (!outTransform || !outUsingHardware || !outBackendName) return false;
@@ -589,12 +595,7 @@ bool create_h264_encoder_transform(IMFTransform** outTransform, bool* outUsingHa
 
   IMFTransform* transform = nullptr;
   const std::string backendRaw = env_string_local("REMOTE60_NATIVE_ENCODER_BACKEND");
-  // AMD-specific direct backend (AMF MFT) to avoid generic hw enum ambiguity.
-  static const char* const kAmfBackendNames[] = {
-      "amf_hw", "amf_mft", "amd_hw", "amd_mft", "amd"};
-  if (backend_is_any(backendRaw, kAmfBackendNames,
-                     sizeof(kAmfBackendNames) / sizeof(kAmfBackendNames[0]))) {
-    codec_debug_log("encoder backend=amf_hw begin");
+  auto try_create_amf_encoder = [&](bool markUnavailable) -> bool {
     constexpr DWORD kEnumFlagsHw = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
     if (create_video_mft_from_enum_matching_name(MFT_CATEGORY_VIDEO_ENCODER, MFVideoFormat_NV12, MFVideoFormat_H264,
                                                  kEnumFlagsHw, L"AMDh264Encoder", &transform)) {
@@ -609,9 +610,31 @@ bool create_h264_encoder_transform(IMFTransform** outTransform, bool* outUsingHa
       *outBackendName = "amf_mft_h264enc";
       return true;
     }
-    *outBackendName = "amf_mft_h264enc_unavailable";
-    codec_debug_log("encoder backend=amf_hw unavailable");
+    if (markUnavailable) {
+      *outBackendName = "amf_mft_h264enc_unavailable";
+    }
     return false;
+  };
+
+  if (backend_is_auto_request(backendRaw) &&
+      !env_truthy_local("REMOTE60_NATIVE_AUTO_BACKEND_DISABLE_VENDOR_PREFERENCE")) {
+    codec_debug_log("encoder backend=auto prefer-amf begin");
+    if (try_create_amf_encoder(false)) {
+      codec_debug_log("encoder backend=auto prefer-amf selected");
+      return true;
+    }
+    codec_debug_log("encoder backend=auto prefer-amf unavailable");
+  }
+
+  // AMD-specific direct backend (AMF MFT) to avoid generic hw enum ambiguity.
+  static const char* const kAmfBackendNames[] = {
+      "amf_hw", "amf_mft", "amd_hw", "amd_mft", "amd"};
+  if (backend_is_any(backendRaw, kAmfBackendNames,
+                     sizeof(kAmfBackendNames) / sizeof(kAmfBackendNames[0]))) {
+    codec_debug_log("encoder backend=amf_hw begin");
+    const bool ok = try_create_amf_encoder(true);
+    if (!ok) codec_debug_log("encoder backend=amf_hw unavailable");
+    return ok;
   }
   {
     static const char* const kNvencBackendNames[] = {
