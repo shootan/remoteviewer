@@ -131,6 +131,9 @@ $gpuScaleSuccessVals = New-Object System.Collections.Generic.List[double]
 $gpuScaleFailVals = New-Object System.Collections.Generic.List[double]
 $gpuScaleCpuFallbackVals = New-Object System.Collections.Generic.List[double]
 $decodedFrameVals = New-Object System.Collections.Generic.List[double]
+$decodeRecoverySecVals = New-Object System.Collections.Generic.List[double]
+$decodeZeroStreakCurrentSec = 0
+$decodeZeroStreakMaxSec = 0
 $presentGapVals = New-Object System.Collections.Generic.List[double]
 $presentGapOver1s = 0
 $presentGapOver3s = 0
@@ -338,7 +341,19 @@ foreach ($line in $clientLines) {
     [void]$latencyVals.Add([double]$Matches[1])
   }
   if ($line -match 'decodedFrames=([0-9]+)') {
-    [void]$decodedFrameVals.Add([double]$Matches[1])
+    $decodedFramesThisSec = [double]$Matches[1]
+    [void]$decodedFrameVals.Add($decodedFramesThisSec)
+    if ($decodedFramesThisSec -le 0) {
+      $decodeZeroStreakCurrentSec += 1
+      if ($decodeZeroStreakCurrentSec -gt $decodeZeroStreakMaxSec) {
+        $decodeZeroStreakMaxSec = $decodeZeroStreakCurrentSec
+      }
+    } else {
+      if ($decodeZeroStreakCurrentSec -gt 0) {
+        [void]$decodeRecoverySecVals.Add([double]$decodeZeroStreakCurrentSec)
+        $decodeZeroStreakCurrentSec = 0
+      }
+    }
   }
   if ($line -match 'rttUs=([0-9]+)') {
     [void]$controlRttVals.Add([double]$Matches[1])
@@ -945,6 +960,7 @@ $gpuScaleSuccess = Stats-Summary -vals $gpuScaleSuccessVals
 $gpuScaleFail = Stats-Summary -vals $gpuScaleFailVals
 $gpuScaleCpuFallback = Stats-Summary -vals $gpuScaleCpuFallbackVals
 $dec = Stats-Summary -vals $decodedFrameVals
+$decodeRecoverySec = Stats-Summary -vals $decodeRecoverySecVals
 $udpAssemblyDropPm = Stats-Summary -vals $udpAssemblyDropPmVals
 $udpSimDropPm = Stats-Summary -vals $udpSimDropPmVals
 $presentGap = Stats-Summary -vals $presentGapVals
@@ -1119,6 +1135,11 @@ Write-Output "DEC_COUNT=$($dec.count)"
 Write-Output "DEC_AVG=$($dec.avg)"
 Write-Output "DEC_P95=$($dec.p95)"
 Write-Output "DEC_MAX=$($dec.max)"
+Write-Output "DECODE_ZERO_STREAK_MAX_SEC=$decodeZeroStreakMaxSec"
+Write-Output "DECODE_RECOVERY_COUNT=$($decodeRecoverySec.count)"
+Write-Output "DECODE_RECOVERY_AVG_SEC=$($decodeRecoverySec.avg)"
+Write-Output "DECODE_RECOVERY_P95_SEC=$($decodeRecoverySec.p95)"
+Write-Output "DECODE_RECOVERY_MAX_SEC=$($decodeRecoverySec.max)"
 Write-Output "PRESENT_GAP_COUNT=$($presentGap.count)"
 Write-Output "PRESENT_GAP_AVG_US=$($presentGap.avg)"
 Write-Output "PRESENT_GAP_P95_US=$($presentGap.p95)"

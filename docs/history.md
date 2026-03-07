@@ -781,3 +781,40 @@ Validation / build / test result
 Next action
 - M7은 `환경 블로커` 상태로 유지하고, 자동 작업은 M6 잔여 항목(`손실 구간 복구시간 단축 검증`)으로 전환한다.
 - M7 재개 조건: `MBPS_AVG>0` 및 `HOST_QUEUE_PUSH_COUNT`가 목표 fps 대역으로 회복된 로그 확보.
+
+### 105) 2026-03-07 M6 잔여 검증 준비: 복구시간 지표 추가 + 손실 시퀀스 재측정
+Goal
+- M6 잔여 항목(손실 구간 복구시간 단축 검증)을 위해 `verify_native_video_runtime.ps1`에 복구시간 지표를 추가한다.
+- 손실 시뮬레이션(3%/5%)에서 `PRESENT_GAP_OVER_1S` 및 복구시간 지표가 수집되는지 확인한다.
+
+Files changed
+- `automation/verify_native_video_runtime.ps1`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Added metrics:
+  - `DECODE_ZERO_STREAK_MAX_SEC`
+  - `DECODE_RECOVERY_COUNT`
+  - `DECODE_RECOVERY_AVG_SEC`
+  - `DECODE_RECOVERY_P95_SEC`
+  - `DECODE_RECOVERY_MAX_SEC`
+- Smoke verify:
+  - output: `automation/logs/m6-recovery-metric-smoke.txt` (`verify-native-video-20260307-194650`)
+  - `OVERALL_OK=True`, `DEC_AVG=2.6`, `DECODE_RECOVERY_COUNT=0`, `PRESENT_GAP_OVER_1S=0`
+- Loss simulation (sequential):
+  - 3%: `automation/logs/m6-recovery-drop30-seq.txt` (`verify-native-video-20260307-194743`)
+    - `OVERALL_OK=True`, `DEC_AVG=0.83`, `LAT_P95_US=1198641`, `PRESENT_GAP_OVER_1S=0`
+    - `DECODE_ZERO_STREAK_MAX_SEC=1`, `DECODE_RECOVERY_COUNT=1`, `DECODE_RECOVERY_MAX_SEC=1`
+    - `KEYREQ_CLIENT_SENT=6`, `UDP_ASSEMBLY_KEYREQ_TOTAL=7`, `UDP_SIM_DROP_PM_AVG=23`
+  - 5%: `automation/logs/m6-recovery-drop50-seq.txt` (`verify-native-video-20260307-194807`)
+    - `OVERALL_OK=True`, `DEC_AVG=0.71`, `LAT_P95_US=1887184`, `PRESENT_GAP_OVER_1S=0`
+    - `DECODE_ZERO_STREAK_MAX_SEC=1`, `DECODE_RECOVERY_COUNT=2`, `DECODE_RECOVERY_MAX_SEC=1`
+    - `KEYREQ_CLIENT_SENT=7`, `UDP_ASSEMBLY_KEYREQ_TOTAL=11`, `UDP_SIM_DROP_PM_AVG=57.67`
+- Interpretation:
+  - 복구시간 지표 수집 파이프라인은 정상 동작한다.
+  - 다만 동일 시점 환경에서 `MBPS_AVG=0` 구간이 반복되어 절대 성능/복구시간 단축 판정은 보류한다.
+
+Next action
+- M6 완료 판정은 `MBPS_AVG>0`가 보장되는 시퀀스에서 재측정(최소 5회)으로 확정한다.
+- 현재 자동 진행은 환경 블로커 해소 전까지 문서상 보류 상태를 유지한다.
