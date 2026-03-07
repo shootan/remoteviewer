@@ -749,3 +749,35 @@ Validation / build / test result
 Next action
 - M7 `기본 실행 프로필 확정`을 위해 720p 우선 안정 조합(backend/bitrate/keyint + 필요 시 runtime env) 탐색을 재수행한다.
 - `M7_STATUS=SUCCESS(🟢)` 조합 발견 시 720p 5회 Pass 로그부터 채운다.
+
+### 104) 2026-03-07 M7 프로필 탐색 2차: 환경 블로커 확인 및 Gate 전환
+Goal
+- M7 `기본 실행 프로필 확정`을 위해 720p/1080p 후보를 순차 재측정하고 `M7_STATUS`로 합격 가능성을 점검한다.
+- 실패 원인이 튜닝 변수인지, 캡처 입력 환경인지 분리한다.
+
+Files changed
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Validation command (순차 실행, `h264+udp`, `mft_auto/mft_auto`, `NoInputChannel`, `Host 14s / Client 10s`):
+  - `automation/logs/m7-profile-e_720_auto_default_seq.txt`
+    - `LOG_DIR=verify-native-video-20260307-194340`
+    - `OVERALL_OK=True`, `DEC_AVG=2.56`, `LAT_P95_US=378592`, `MBPS_AVG=0`
+    - `HOST_QUEUE_PUSH_COUNT=27`, `HOST_QUEUE_POP_COUNT=27`
+    - `M7_STATUS=FAIL`, `M7_STATUS_REASON=decoded_fps_below_target,latency_p95_above_target`
+  - `automation/logs/m7-profile-f_720_auto_fgOff_seq.txt`
+    - `LOG_DIR=verify-native-video-20260307-194402`
+    - `OVERALL_OK=True`, `DEC_AVG=2.78`, `LAT_P95_US=532992`
+    - `M7_STATUS=FAIL`
+  - `automation/logs/m7-profile-g_1080_auto_default_seq.txt`
+    - `LOG_DIR=verify-native-video-20260307-194425`
+    - `OVERALL_OK=True`, `DEC_AVG=2.56`, `LAT_P95_US=519331`
+    - `M7_STATUS=FAIL`
+- Interpretation:
+  - 최근 시퀀스는 튜닝 조합과 무관하게 `MBPS_AVG=0`/`queue push 저하`가 먼저 발생해 M7 성능 Gate 판정이 환경에 의해 오염되고 있다.
+  - 현재 단계에서는 프로필 튜닝보다 캡처 입력 소스 정상화가 선행되어야 한다.
+
+Next action
+- M7은 `환경 블로커` 상태로 유지하고, 자동 작업은 M6 잔여 항목(`손실 구간 복구시간 단축 검증`)으로 전환한다.
+- M7 재개 조건: `MBPS_AVG>0` 및 `HOST_QUEUE_PUSH_COUNT`가 목표 fps 대역으로 회복된 로그 확보.
