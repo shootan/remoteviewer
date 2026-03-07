@@ -289,3 +289,59 @@ Next
 - `M3.5` 수동 검증 1차 시나리오 완료 후 검증 체크 반영.
 - `M4`는 AMD 기본화 마무리 vs NVENC/QSV 전용 경로 중 우선순위를 확정.
 - `M5`는 추가 코드보다 완료조건(`MBPS_AVG`, 화질/응답성) 검증을 우선 수행.
+
+### 91) 2026-03-07 M4 코드 작업: NVENC/QSV 전용 backend 경로 + backend 요청/해결/폴백 로그 표준화
+Goal
+- M4에서 남아 있던 코드 작업 중 `NVIDIA NVENC 전용 경로`, `Intel QSV 전용 경로`를 구현한다.
+- host/client 로그에 backend `requested/resolved/fallbackReason` 필드를 추가해 검증 단계 준비를 마친다.
+
+Changes
+1. Codec backend selection 확장 (NVENC/QSV + AMD alias)
+- File: `apps/native_poc/src/mf_h264_codec.cpp`
+- Added vendor-name matching helper (`create_video_mft_from_enum_matching_names`) and backend alias matcher.
+- Added encoder dedicated backend requests:
+  - `nvenc_hw`/`nvenc_mft`/`nvenc`/`nvidia_*` -> `nvenc_mft_h264enc`
+  - `qsv_hw`/`qsv_mft`/`qsv`/`intel_*` -> `qsv_mft_h264enc`
+- Added decoder dedicated backend requests:
+  - `nvenc_*`/`nvidia_*` -> `nvenc_mft_h264dec`
+  - `qsv_*`/`intel_*` -> `qsv_mft_h264dec`
+- Unavailable cases are explicitly named (`*_unavailable`) and fail fast for dedicated request mode.
+- Added AMD alias support (`amd_hw`/`amd_mft`/`amd`) to map to AMF dedicated path.
+
+2. Host backend log 표준 필드 추가
+- File: `apps/native_poc/src/native_video_host_main.cpp`
+- Added backend resolution helpers and extended startup log with:
+  - `backendRequested`
+  - `backendResolved`
+  - `backendFallbackReason`
+- Preserved existing `backend=`/`hw=` fields for compatibility with existing parsers.
+
+3. Client backend log 표준 필드 추가
+- File: `apps/native_poc/src/native_video_client_main.cpp`
+- Added same backend resolution helpers and decoder init log fields:
+  - `backendRequested`
+  - `backendResolved`
+  - `backendFallbackReason`
+- Preserved existing `backend=`/`hw=` fields.
+
+4. Plan checkbox sync
+- File: `docs/구현계획.md`
+- Marked M4 code tasks completed:
+  - NVIDIA NVENC dedicated backend path `[x]`
+  - Intel QSV dedicated backend path `[x]`
+- Kept AMD stabilization/defaultization and M4 validation items as pending.
+
+Validation
+- Static search:
+  - `rg -n "nvenc_mft_h264|qsv_mft_h264|amd_hw|backendRequested=|backendFallbackReason=" apps/native_poc/src -S`
+  - Result: new backend symbols and log fields confirmed in codec/host/client.
+- Build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_host_poc remote60_native_video_client_poc --parallel`
+  - Result: success (both host/client executables generated).
+- Runtime validation:
+  - Not executed in this task (interactive GPU/vendor environment required).
+
+Next
+- Run per-vendor verification matrix for M4:
+  - Requested backend vs resolved backend/fallbackReason correctness (AMD/NVIDIA/Intel each).
+  - Same-scene comparison vs generic MFT to satisfy M4 completion criteria (fps/latency/mbps 2개 이상 개선).

@@ -214,6 +214,71 @@ std::string base_name_lower(std::string path) {
   return ascii_lower(path);
 }
 
+std::string env_string_or_empty(const char* key) {
+  if (!key) return std::string{};
+  const char* v = std::getenv(key);
+  return v ? std::string(v) : std::string{};
+}
+
+bool backend_request_is_any(const std::string& requestLower, const char* const* values,
+                            size_t valueCount) {
+  if (!values || valueCount == 0) return false;
+  for (size_t i = 0; i < valueCount; ++i) {
+    const char* v = values[i];
+    if (v && requestLower == v) return true;
+  }
+  return false;
+}
+
+bool backend_request_satisfied(const std::string& requestLower, const std::string& resolvedLower) {
+  if (requestLower.empty()) return true;
+  if (requestLower == "auto" || requestLower == "mft_auto") return true;
+  if (requestLower == "hw" || requestLower == "mft_hw") {
+    return resolvedLower.find("mft_enum_hw") != std::string::npos;
+  }
+  if (requestLower == "sw" || requestLower == "mft_sw") {
+    return resolvedLower.find("mft_enum_sw") != std::string::npos ||
+           resolvedLower.find("clsid_cmsh264") != std::string::npos;
+  }
+  static const char* const kAmfAliases[] = {"amf_hw", "amf_mft", "amd_hw", "amd_mft", "amd"};
+  static const char* const kNvencAliases[] = {
+      "nvenc_hw", "nvenc_mft", "nvenc", "nvidia_hw", "nvidia_mft", "nvidia"};
+  static const char* const kQsvAliases[] = {
+      "qsv_hw", "qsv_mft", "qsv", "intel_hw", "intel_mft", "intel"};
+  if (backend_request_is_any(requestLower, kAmfAliases, sizeof(kAmfAliases) / sizeof(kAmfAliases[0]))) {
+    return resolvedLower.find("amf") != std::string::npos;
+  }
+  if (backend_request_is_any(requestLower, kNvencAliases,
+                             sizeof(kNvencAliases) / sizeof(kNvencAliases[0]))) {
+    return resolvedLower.find("nvenc") != std::string::npos ||
+           resolvedLower.find("nvidia") != std::string::npos;
+  }
+  if (backend_request_is_any(requestLower, kQsvAliases, sizeof(kQsvAliases) / sizeof(kQsvAliases[0]))) {
+    return resolvedLower.find("qsv") != std::string::npos ||
+           resolvedLower.find("intel") != std::string::npos;
+  }
+  return resolvedLower.find(requestLower) != std::string::npos;
+}
+
+std::string backend_fallback_reason(const std::string& requestedRaw, const char* resolvedBackendRaw) {
+  const std::string requestLower = ascii_lower(trim_ascii(requestedRaw));
+  const std::string resolvedLower =
+      ascii_lower(trim_ascii(resolvedBackendRaw ? std::string(resolvedBackendRaw) : std::string{}));
+  if (requestLower.empty()) return "default_policy";
+  if (backend_request_satisfied(requestLower, resolvedLower)) return "none";
+  if (resolvedLower.find("_unavailable") != std::string::npos) {
+    return "requested_backend_unavailable";
+  }
+  if (resolvedLower.find("mft_enum_sw") != std::string::npos ||
+      resolvedLower.find("clsid_cmsh264") != std::string::npos) {
+    return "fallback_to_software";
+  }
+  if (resolvedLower.find("mft_enum_hw") != std::string::npos) {
+    return "fallback_to_generic_hw";
+  }
+  return "requested_backend_mismatch";
+}
+
 std::string get_window_process_name(HWND hwnd, uint32_t* outPid) {
   if (outPid) *outPid = 0;
   if (!hwnd) return std::string{};
@@ -2071,7 +2136,15 @@ int main(int argc, char** argv) {
       return 13;
     }
     resetHostTimelineAnchors();
+    const std::string requestedEncoderBackend = env_string_or_empty("REMOTE60_NATIVE_ENCODER_BACKEND");
+    const std::string requestedEncoderBackendPrint =
+        requestedEncoderBackend.empty() ? "default(mft_sw)" : requestedEncoderBackend;
+    const std::string backendFallbackReason =
+        backend_fallback_reason(requestedEncoderBackend, encoder.backend_name());
     std::cout << "[native-video-host] H264 encoder backend=" << encoder.backend_name()
+              << " backendRequested=" << requestedEncoderBackendPrint
+              << " backendResolved=" << encoder.backend_name()
+              << " backendFallbackReason=" << backendFallbackReason
               << " hw=" << (encoder.using_hardware() ? 1 : 0)
               << " captureSize=" << captureWidth << "x" << captureHeight
               << " encodeSize=" << activeEncodeW << "x" << activeEncodeH

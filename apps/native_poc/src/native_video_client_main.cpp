@@ -15,6 +15,7 @@
 #include <atomic>
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -126,6 +127,90 @@ uint32_t env_u32_clamped(const char* key, uint32_t fallback, uint32_t minValue, 
   uint32_t parsed = 0;
   if (!parse_u32(raw, &parsed)) return fallback;
   return std::clamp<uint32_t>(parsed, minValue, maxValue);
+}
+
+std::string trim_ascii(std::string v) {
+  size_t start = 0;
+  while (start < v.size() && std::isspace(static_cast<unsigned char>(v[start])) != 0) {
+    ++start;
+  }
+  size_t end = v.size();
+  while (end > start && std::isspace(static_cast<unsigned char>(v[end - 1])) != 0) {
+    --end;
+  }
+  return v.substr(start, end - start);
+}
+
+std::string ascii_lower(std::string v) {
+  std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return v;
+}
+
+std::string env_string_or_empty(const char* key) {
+  if (!key) return std::string{};
+  const char* v = std::getenv(key);
+  return v ? std::string(v) : std::string{};
+}
+
+bool backend_request_is_any(const std::string& requestLower, const char* const* values,
+                            size_t valueCount) {
+  if (!values || valueCount == 0) return false;
+  for (size_t i = 0; i < valueCount; ++i) {
+    const char* v = values[i];
+    if (v && requestLower == v) return true;
+  }
+  return false;
+}
+
+bool backend_request_satisfied(const std::string& requestLower, const std::string& resolvedLower) {
+  if (requestLower.empty()) return true;
+  if (requestLower == "auto" || requestLower == "mft_auto") return true;
+  if (requestLower == "hw" || requestLower == "mft_hw") {
+    return resolvedLower.find("mft_enum_hw") != std::string::npos;
+  }
+  if (requestLower == "sw" || requestLower == "mft_sw") {
+    return resolvedLower.find("mft_enum_sw") != std::string::npos ||
+           resolvedLower.find("clsid_cmsh264") != std::string::npos;
+  }
+  static const char* const kAmfAliases[] = {"amf_hw", "amf_mft", "amd_hw", "amd_mft", "amd"};
+  static const char* const kNvencAliases[] = {
+      "nvenc_hw", "nvenc_mft", "nvenc", "nvidia_hw", "nvidia_mft", "nvidia"};
+  static const char* const kQsvAliases[] = {
+      "qsv_hw", "qsv_mft", "qsv", "intel_hw", "intel_mft", "intel"};
+  if (backend_request_is_any(requestLower, kAmfAliases, sizeof(kAmfAliases) / sizeof(kAmfAliases[0]))) {
+    return resolvedLower.find("amf") != std::string::npos;
+  }
+  if (backend_request_is_any(requestLower, kNvencAliases,
+                             sizeof(kNvencAliases) / sizeof(kNvencAliases[0]))) {
+    return resolvedLower.find("nvenc") != std::string::npos ||
+           resolvedLower.find("nvidia") != std::string::npos;
+  }
+  if (backend_request_is_any(requestLower, kQsvAliases, sizeof(kQsvAliases) / sizeof(kQsvAliases[0]))) {
+    return resolvedLower.find("qsv") != std::string::npos ||
+           resolvedLower.find("intel") != std::string::npos;
+  }
+  return resolvedLower.find(requestLower) != std::string::npos;
+}
+
+std::string backend_fallback_reason(const std::string& requestedRaw, const char* resolvedBackendRaw) {
+  const std::string requestLower = ascii_lower(trim_ascii(requestedRaw));
+  const std::string resolvedLower =
+      ascii_lower(trim_ascii(resolvedBackendRaw ? std::string(resolvedBackendRaw) : std::string{}));
+  if (requestLower.empty()) return "default_policy";
+  if (backend_request_satisfied(requestLower, resolvedLower)) return "none";
+  if (resolvedLower.find("_unavailable") != std::string::npos) {
+    return "requested_backend_unavailable";
+  }
+  if (resolvedLower.find("mft_enum_sw") != std::string::npos ||
+      resolvedLower.find("clsid_cmsh264") != std::string::npos) {
+    return "fallback_to_software";
+  }
+  if (resolvedLower.find("mft_enum_hw") != std::string::npos) {
+    return "fallback_to_generic_hw";
+  }
+  return "requested_backend_mismatch";
 }
 
 std::string fixed_cstr_to_string(const char* buf, size_t cap) {
@@ -2324,7 +2409,15 @@ int main(int argc, char** argv) {
                     << "\n";
           return false;
         }
+        const std::string requestedDecoderBackend = env_string_or_empty("REMOTE60_NATIVE_DECODER_BACKEND");
+        const std::string requestedDecoderBackendPrint =
+            requestedDecoderBackend.empty() ? "default(mft_sw)" : requestedDecoderBackend;
+        const std::string backendFallbackReason =
+            backend_fallback_reason(requestedDecoderBackend, decoder.backend_name());
         std::cout << "[native-video-client] H264 decoder backend=" << decoder.backend_name()
+                  << " backendRequested=" << requestedDecoderBackendPrint
+                  << " backendResolved=" << decoder.backend_name()
+                  << " backendFallbackReason=" << backendFallbackReason
                   << " hw=" << (decoder.using_hardware() ? 1 : 0)
                   << " size=" << h.width << "x" << h.height << "\n";
         decoderReady = true;

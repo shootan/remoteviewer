@@ -372,6 +372,41 @@ bool try_activate_matching_name(IMFActivate** activates, UINT32 count, const wch
   return false;
 }
 
+bool try_activate_matching_names(IMFActivate** activates, UINT32 count,
+                                 const wchar_t* const* nameNeedles, size_t needleCount,
+                                 IMFTransform** outTransform) {
+  if (!activates || !nameNeedles || needleCount == 0 || !outTransform) return false;
+  *outTransform = nullptr;
+  for (UINT32 i = 0; i < count; ++i) {
+    if (!activates[i]) continue;
+    WCHAR* friendly = nullptr;
+    UINT32 cch = 0;
+    const HRESULT hrName =
+        activates[i]->GetAllocatedString(MFT_FRIENDLY_NAME_Attribute, &friendly, &cch);
+    bool nameMatch = false;
+    if (SUCCEEDED(hrName) && friendly) {
+      for (size_t n = 0; n < needleCount; ++n) {
+        const wchar_t* needle = nameNeedles[n];
+        if (needle && *needle != L'\0' && std::wcsstr(friendly, needle) != nullptr) {
+          nameMatch = true;
+          break;
+        }
+      }
+    }
+    if (friendly) {
+      CoTaskMemFree(friendly);
+      friendly = nullptr;
+    }
+    if (!nameMatch) continue;
+    IMFTransform* candidate = nullptr;
+    if (SUCCEEDED(activates[i]->ActivateObject(IID_PPV_ARGS(&candidate))) && candidate) {
+      *outTransform = candidate;
+      return true;
+    }
+  }
+  return false;
+}
+
 bool create_mft_from_clsid_string(const wchar_t* clsidString, IMFTransform** outTransform) {
   if (!clsidString || !outTransform) return false;
   *outTransform = nullptr;
@@ -417,10 +452,11 @@ bool create_video_mft_from_enum(const GUID& category, const GUID& inSubtype, con
   return true;
 }
 
-bool create_video_mft_from_enum_matching_name(const GUID& category, const GUID& inSubtype, const GUID& outSubtype,
-                                              DWORD flags, const wchar_t* nameNeedle,
-                                              IMFTransform** outTransform) {
-  if (!outTransform || !nameNeedle) return false;
+bool create_video_mft_from_enum_matching_names(const GUID& category, const GUID& inSubtype,
+                                               const GUID& outSubtype, DWORD flags,
+                                               const wchar_t* const* nameNeedles, size_t needleCount,
+                                               IMFTransform** outTransform) {
+  if (!outTransform || !nameNeedles || needleCount == 0) return false;
   *outTransform = nullptr;
   MFT_REGISTER_TYPE_INFO inputInfo{};
   inputInfo.guidMajorType = MFMediaType_Video;
@@ -435,11 +471,30 @@ bool create_video_mft_from_enum_matching_name(const GUID& category, const GUID& 
   if (FAILED(hr) || count == 0 || !activates) return false;
 
   IMFTransform* transform = nullptr;
-  const bool ok = try_activate_matching_name(activates, count, nameNeedle, &transform);
+  const bool ok =
+      try_activate_matching_names(activates, count, nameNeedles, needleCount, &transform);
   release_activate_array(activates, count);
   if (!ok || !transform) return false;
   *outTransform = transform;
   return true;
+}
+
+bool create_video_mft_from_enum_matching_name(const GUID& category, const GUID& inSubtype, const GUID& outSubtype,
+                                              DWORD flags, const wchar_t* nameNeedle,
+                                              IMFTransform** outTransform) {
+  if (!outTransform || !nameNeedle) return false;
+  const wchar_t* needles[1] = {nameNeedle};
+  return create_video_mft_from_enum_matching_names(category, inSubtype, outSubtype, flags, needles, 1,
+                                                   outTransform);
+}
+
+bool backend_is_any(const std::string& backendRaw, const char* const* values, size_t valueCount) {
+  if (!values || valueCount == 0) return false;
+  for (size_t i = 0; i < valueCount; ++i) {
+    const char* v = values[i];
+    if (v && _stricmp(backendRaw.c_str(), v) == 0) return true;
+  }
+  return false;
 }
 
 bool create_h264_encoder_transform(IMFTransform** outTransform, bool* outUsingHardware, const char** outBackendName) {
@@ -451,7 +506,10 @@ bool create_h264_encoder_transform(IMFTransform** outTransform, bool* outUsingHa
   IMFTransform* transform = nullptr;
   const std::string backendRaw = env_string_local("REMOTE60_NATIVE_ENCODER_BACKEND");
   // AMD-specific direct backend (AMF MFT) to avoid generic hw enum ambiguity.
-  if (_stricmp(backendRaw.c_str(), "amf_hw") == 0 || _stricmp(backendRaw.c_str(), "amf_mft") == 0) {
+  static const char* const kAmfBackendNames[] = {
+      "amf_hw", "amf_mft", "amd_hw", "amd_mft", "amd"};
+  if (backend_is_any(backendRaw, kAmfBackendNames,
+                     sizeof(kAmfBackendNames) / sizeof(kAmfBackendNames[0]))) {
     codec_debug_log("encoder backend=amf_hw begin");
     constexpr DWORD kEnumFlagsHw = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
     if (create_video_mft_from_enum_matching_name(MFT_CATEGORY_VIDEO_ENCODER, MFVideoFormat_NV12, MFVideoFormat_H264,
@@ -470,6 +528,56 @@ bool create_h264_encoder_transform(IMFTransform** outTransform, bool* outUsingHa
     *outBackendName = "amf_mft_h264enc_unavailable";
     codec_debug_log("encoder backend=amf_hw unavailable");
     return false;
+  }
+  {
+    static const char* const kNvencBackendNames[] = {
+        "nvenc_hw", "nvenc_mft", "nvenc", "nvidia_hw", "nvidia_mft", "nvidia"};
+    if (backend_is_any(backendRaw, kNvencBackendNames,
+                       sizeof(kNvencBackendNames) / sizeof(kNvencBackendNames[0]))) {
+      codec_debug_log("encoder backend=nvenc_hw begin");
+      constexpr DWORD kEnumFlagsHw =
+          MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
+      static const wchar_t* const kNvencFriendlyNeedles[] = {L"NVIDIA", L"NVENC"};
+      if (create_video_mft_from_enum_matching_names(MFT_CATEGORY_VIDEO_ENCODER, MFVideoFormat_NV12,
+                                                    MFVideoFormat_H264, kEnumFlagsHw,
+                                                    kNvencFriendlyNeedles,
+                                                    sizeof(kNvencFriendlyNeedles) /
+                                                        sizeof(kNvencFriendlyNeedles[0]),
+                                                    &transform)) {
+        *outTransform = transform;
+        *outUsingHardware = true;
+        *outBackendName = "nvenc_mft_h264enc";
+        return true;
+      }
+      *outBackendName = "nvenc_mft_h264enc_unavailable";
+      codec_debug_log("encoder backend=nvenc_hw unavailable");
+      return false;
+    }
+  }
+  {
+    static const char* const kQsvBackendNames[] = {
+        "qsv_hw", "qsv_mft", "qsv", "intel_hw", "intel_mft", "intel"};
+    if (backend_is_any(backendRaw, kQsvBackendNames,
+                       sizeof(kQsvBackendNames) / sizeof(kQsvBackendNames[0]))) {
+      codec_debug_log("encoder backend=qsv_hw begin");
+      constexpr DWORD kEnumFlagsHw =
+          MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
+      static const wchar_t* const kQsvFriendlyNeedles[] = {L"Intel", L"Quick Sync", L"QSV"};
+      if (create_video_mft_from_enum_matching_names(MFT_CATEGORY_VIDEO_ENCODER, MFVideoFormat_NV12,
+                                                    MFVideoFormat_H264, kEnumFlagsHw,
+                                                    kQsvFriendlyNeedles,
+                                                    sizeof(kQsvFriendlyNeedles) /
+                                                        sizeof(kQsvFriendlyNeedles[0]),
+                                                    &transform)) {
+        *outTransform = transform;
+        *outUsingHardware = true;
+        *outBackendName = "qsv_mft_h264enc";
+        return true;
+      }
+      *outBackendName = "qsv_mft_h264enc_unavailable";
+      codec_debug_log("encoder backend=qsv_hw unavailable");
+      return false;
+    }
   }
 
   const MftBackendMode backendMode = parse_mft_backend_mode(backendRaw);
@@ -521,7 +629,10 @@ bool create_h264_decoder_transform(IMFTransform** outTransform, bool* outUsingHa
   IMFTransform* transform = nullptr;
   const std::string backendRaw = env_string_local("REMOTE60_NATIVE_DECODER_BACKEND");
   // AMD-specific direct backend (AMF D3D11 decoder MFT).
-  if (_stricmp(backendRaw.c_str(), "amf_hw") == 0 || _stricmp(backendRaw.c_str(), "amf_mft") == 0) {
+  static const char* const kAmfBackendNames[] = {
+      "amf_hw", "amf_mft", "amd_hw", "amd_mft", "amd"};
+  if (backend_is_any(backendRaw, kAmfBackendNames,
+                     sizeof(kAmfBackendNames) / sizeof(kAmfBackendNames[0]))) {
     codec_debug_log("decoder backend=amf_hw begin");
     constexpr DWORD kEnumFlagsHw = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
     if (create_video_mft_from_enum_matching_name(MFT_CATEGORY_VIDEO_DECODER, MFVideoFormat_H264, MFVideoFormat_NV12,
@@ -556,6 +667,64 @@ bool create_h264_decoder_transform(IMFTransform** outTransform, bool* outUsingHa
     *outBackendName = "amf_mft_h264dec_unavailable";
     codec_debug_log("decoder backend=amf_hw unavailable");
     return false;
+  }
+  {
+    static const char* const kNvencBackendNames[] = {
+        "nvenc_hw", "nvenc_mft", "nvenc", "nvidia_hw", "nvidia_mft", "nvidia"};
+    if (backend_is_any(backendRaw, kNvencBackendNames,
+                       sizeof(kNvencBackendNames) / sizeof(kNvencBackendNames[0]))) {
+      codec_debug_log("decoder backend=nvenc_hw begin");
+      constexpr DWORD kEnumFlagsHw =
+          MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
+      static const wchar_t* const kNvdecFriendlyNeedles[] = {L"NVIDIA", L"NVDEC"};
+      if (create_video_mft_from_enum_matching_names(MFT_CATEGORY_VIDEO_DECODER, MFVideoFormat_H264,
+                                                    MFVideoFormat_NV12, kEnumFlagsHw,
+                                                    kNvdecFriendlyNeedles,
+                                                    sizeof(kNvdecFriendlyNeedles) /
+                                                        sizeof(kNvdecFriendlyNeedles[0]),
+                                                    &transform)) {
+        if (decoder_supports_h264_input(transform)) {
+          *outTransform = transform;
+          *outUsingHardware = true;
+          *outBackendName = "nvenc_mft_h264dec";
+          return true;
+        }
+        transform->Release();
+        transform = nullptr;
+      }
+      *outBackendName = "nvenc_mft_h264dec_unavailable";
+      codec_debug_log("decoder backend=nvenc_hw unavailable");
+      return false;
+    }
+  }
+  {
+    static const char* const kQsvBackendNames[] = {
+        "qsv_hw", "qsv_mft", "qsv", "intel_hw", "intel_mft", "intel"};
+    if (backend_is_any(backendRaw, kQsvBackendNames,
+                       sizeof(kQsvBackendNames) / sizeof(kQsvBackendNames[0]))) {
+      codec_debug_log("decoder backend=qsv_hw begin");
+      constexpr DWORD kEnumFlagsHw =
+          MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
+      static const wchar_t* const kQsvFriendlyNeedles[] = {L"Intel", L"Quick Sync", L"QSV"};
+      if (create_video_mft_from_enum_matching_names(MFT_CATEGORY_VIDEO_DECODER, MFVideoFormat_H264,
+                                                    MFVideoFormat_NV12, kEnumFlagsHw,
+                                                    kQsvFriendlyNeedles,
+                                                    sizeof(kQsvFriendlyNeedles) /
+                                                        sizeof(kQsvFriendlyNeedles[0]),
+                                                    &transform)) {
+        if (decoder_supports_h264_input(transform)) {
+          *outTransform = transform;
+          *outUsingHardware = true;
+          *outBackendName = "qsv_mft_h264dec";
+          return true;
+        }
+        transform->Release();
+        transform = nullptr;
+      }
+      *outBackendName = "qsv_mft_h264dec_unavailable";
+      codec_debug_log("decoder backend=qsv_hw unavailable");
+      return false;
+    }
   }
 
   const MftBackendMode backendMode = parse_mft_backend_mode(backendRaw);
