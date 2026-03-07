@@ -260,6 +260,18 @@ bool backend_request_satisfied(const std::string& requestLower, const std::strin
   return resolvedLower.find(requestLower) != std::string::npos;
 }
 
+bool backend_request_is_vendor_specific(const std::string& requestLower) {
+  static const char* const kAmfAliases[] = {"amf_hw", "amf_mft", "amd_hw", "amd_mft", "amd"};
+  static const char* const kNvencAliases[] = {
+      "nvenc_hw", "nvenc_mft", "nvenc", "nvidia_hw", "nvidia_mft", "nvidia"};
+  static const char* const kQsvAliases[] = {
+      "qsv_hw", "qsv_mft", "qsv", "intel_hw", "intel_mft", "intel"};
+  return backend_request_is_any(requestLower, kAmfAliases, sizeof(kAmfAliases) / sizeof(kAmfAliases[0])) ||
+         backend_request_is_any(requestLower, kNvencAliases,
+                                sizeof(kNvencAliases) / sizeof(kNvencAliases[0])) ||
+         backend_request_is_any(requestLower, kQsvAliases, sizeof(kQsvAliases) / sizeof(kQsvAliases[0]));
+}
+
 std::string backend_fallback_reason(const std::string& requestedRaw, const char* resolvedBackendRaw) {
   const std::string requestLower = ascii_lower(trim_ascii(requestedRaw));
   const std::string resolvedLower =
@@ -267,6 +279,12 @@ std::string backend_fallback_reason(const std::string& requestedRaw, const char*
   if (requestLower.empty()) return "default_policy";
   if (backend_request_satisfied(requestLower, resolvedLower)) return "none";
   if (resolvedLower.find("_unavailable") != std::string::npos) {
+    return "requested_backend_unavailable";
+  }
+  if (backend_request_is_vendor_specific(requestLower) &&
+      (resolvedLower.find("mft_enum_hw") != std::string::npos ||
+       resolvedLower.find("mft_enum_sw") != std::string::npos ||
+       resolvedLower.find("clsid_cmsh264") != std::string::npos)) {
     return "requested_backend_unavailable";
   }
   if (resolvedLower.find("mft_enum_sw") != std::string::npos ||

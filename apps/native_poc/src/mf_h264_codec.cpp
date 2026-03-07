@@ -497,6 +497,90 @@ bool backend_is_any(const std::string& backendRaw, const char* const* values, si
   return false;
 }
 
+bool create_h264_encoder_transform_from_mode(MftBackendMode backendMode, IMFTransform** outTransform,
+                                             bool* outUsingHardware, const char** outBackendName) {
+  if (!outTransform || !outUsingHardware || !outBackendName) return false;
+  IMFTransform* transform = nullptr;
+
+  if (backendMode != MftBackendMode::SoftwareOnly) {
+    // Prefer synchronous hardware MFT first. Async encoder MFTs may require an event-driven
+    // pipeline and can stall in this polling-style POC path.
+    constexpr DWORD kEnumFlagsHw = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
+    if (create_video_mft_from_enum(MFT_CATEGORY_VIDEO_ENCODER, MFVideoFormat_NV12, MFVideoFormat_H264,
+                                   kEnumFlagsHw, &transform)) {
+      *outTransform = transform;
+      *outUsingHardware = true;
+      *outBackendName = "mft_enum_hw";
+      return true;
+    }
+  }
+
+  if (backendMode == MftBackendMode::HardwareOnly) {
+    *outBackendName = "mft_hw_unavailable";
+    return false;
+  }
+
+  if (backendMode != MftBackendMode::HardwareOnly) {
+    constexpr DWORD kEnumFlagsSw = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER | MFT_ENUM_FLAG_LOCALMFT;
+    if (create_video_mft_from_enum(MFT_CATEGORY_VIDEO_ENCODER, MFVideoFormat_NV12, MFVideoFormat_H264,
+                                   kEnumFlagsSw, &transform)) {
+      *outTransform = transform;
+      *outUsingHardware = false;
+      *outBackendName = "mft_enum_sw";
+      return true;
+    }
+  }
+
+  HRESULT hr = CoCreateInstance(CLSID_CMSH264EncoderMFT, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&transform));
+  if (FAILED(hr) || !transform) return false;
+  *outTransform = transform;
+  *outUsingHardware = false;
+  *outBackendName = "clsid_cmsh264enc";
+  return true;
+}
+
+bool create_h264_decoder_transform_from_mode(MftBackendMode backendMode, IMFTransform** outTransform,
+                                             bool* outUsingHardware, const char** outBackendName) {
+  if (!outTransform || !outUsingHardware || !outBackendName) return false;
+  IMFTransform* transform = nullptr;
+
+  if (backendMode != MftBackendMode::SoftwareOnly) {
+    constexpr DWORD kEnumFlagsHw = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
+    if (create_video_mft_from_enum(MFT_CATEGORY_VIDEO_DECODER, MFVideoFormat_H264, MFVideoFormat_NV12,
+                                   kEnumFlagsHw, &transform)) {
+      *outTransform = transform;
+      *outUsingHardware = true;
+      *outBackendName = "mft_enum_hw";
+      return true;
+    }
+  }
+
+  if (backendMode == MftBackendMode::HardwareOnly) {
+    *outBackendName = "mft_hw_unavailable";
+    return false;
+  }
+
+  if (backendMode != MftBackendMode::HardwareOnly) {
+    constexpr DWORD kEnumFlagsSw = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER | MFT_ENUM_FLAG_LOCALMFT;
+    if (create_video_mft_from_enum(MFT_CATEGORY_VIDEO_DECODER, MFVideoFormat_H264, MFVideoFormat_NV12,
+                                   kEnumFlagsSw, &transform)) {
+      *outTransform = transform;
+      *outUsingHardware = false;
+      *outBackendName = "mft_enum_sw";
+      return true;
+    }
+  }
+
+  HRESULT hr = CoCreateInstance(CLSID_CMSH264DecoderMFT, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&transform));
+  if (FAILED(hr) || !transform) return false;
+  *outTransform = transform;
+  *outUsingHardware = false;
+  *outBackendName = "clsid_cmsh264dec";
+  return true;
+}
+
 bool create_h264_encoder_transform(IMFTransform** outTransform, bool* outUsingHardware, const char** outBackendName) {
   if (!outTransform || !outUsingHardware || !outBackendName) return false;
   *outTransform = nullptr;
@@ -549,8 +633,15 @@ bool create_h264_encoder_transform(IMFTransform** outTransform, bool* outUsingHa
         *outBackendName = "nvenc_mft_h264enc";
         return true;
       }
-      *outBackendName = "nvenc_mft_h264enc_unavailable";
       codec_debug_log("encoder backend=nvenc_hw unavailable");
+      if (create_h264_encoder_transform_from_mode(MftBackendMode::Auto, outTransform, outUsingHardware,
+                                                  outBackendName)) {
+        std::string line =
+            std::string("encoder backend=nvenc_hw fallback=") + (*outBackendName ? *outBackendName : "unknown");
+        codec_debug_log(line.c_str());
+        return true;
+      }
+      *outBackendName = "nvenc_mft_h264enc_unavailable";
       return false;
     }
   }
@@ -574,50 +665,21 @@ bool create_h264_encoder_transform(IMFTransform** outTransform, bool* outUsingHa
         *outBackendName = "qsv_mft_h264enc";
         return true;
       }
-      *outBackendName = "qsv_mft_h264enc_unavailable";
       codec_debug_log("encoder backend=qsv_hw unavailable");
+      if (create_h264_encoder_transform_from_mode(MftBackendMode::Auto, outTransform, outUsingHardware,
+                                                  outBackendName)) {
+        std::string line =
+            std::string("encoder backend=qsv_hw fallback=") + (*outBackendName ? *outBackendName : "unknown");
+        codec_debug_log(line.c_str());
+        return true;
+      }
+      *outBackendName = "qsv_mft_h264enc_unavailable";
       return false;
     }
   }
 
   const MftBackendMode backendMode = parse_mft_backend_mode(backendRaw);
-
-  if (backendMode != MftBackendMode::SoftwareOnly) {
-    // Prefer synchronous hardware MFT first. Async encoder MFTs may require an event-driven
-    // pipeline and can stall in this polling-style POC path.
-    constexpr DWORD kEnumFlagsHw = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
-    if (create_video_mft_from_enum(MFT_CATEGORY_VIDEO_ENCODER, MFVideoFormat_NV12, MFVideoFormat_H264,
-                                   kEnumFlagsHw, &transform)) {
-      *outTransform = transform;
-      *outUsingHardware = true;
-      *outBackendName = "mft_enum_hw";
-      return true;
-    }
-  }
-
-  if (backendMode == MftBackendMode::HardwareOnly) {
-    *outBackendName = "mft_hw_unavailable";
-    return false;
-  }
-
-  if (backendMode != MftBackendMode::HardwareOnly) {
-    constexpr DWORD kEnumFlagsSw = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER | MFT_ENUM_FLAG_LOCALMFT;
-    if (create_video_mft_from_enum(MFT_CATEGORY_VIDEO_ENCODER, MFVideoFormat_NV12, MFVideoFormat_H264,
-                                   kEnumFlagsSw, &transform)) {
-      *outTransform = transform;
-      *outUsingHardware = false;
-      *outBackendName = "mft_enum_sw";
-      return true;
-    }
-  }
-
-  HRESULT hr = CoCreateInstance(CLSID_CMSH264EncoderMFT, nullptr, CLSCTX_INPROC_SERVER,
-                                IID_PPV_ARGS(&transform));
-  if (FAILED(hr) || !transform) return false;
-  *outTransform = transform;
-  *outUsingHardware = false;
-  *outBackendName = "clsid_cmsh264enc";
-  return true;
+  return create_h264_encoder_transform_from_mode(backendMode, outTransform, outUsingHardware, outBackendName);
 }
 
 bool create_h264_decoder_transform(IMFTransform** outTransform, bool* outUsingHardware, const char** outBackendName) {
@@ -692,8 +754,15 @@ bool create_h264_decoder_transform(IMFTransform** outTransform, bool* outUsingHa
         transform->Release();
         transform = nullptr;
       }
-      *outBackendName = "nvenc_mft_h264dec_unavailable";
       codec_debug_log("decoder backend=nvenc_hw unavailable");
+      if (create_h264_decoder_transform_from_mode(MftBackendMode::Auto, outTransform, outUsingHardware,
+                                                  outBackendName)) {
+        std::string line =
+            std::string("decoder backend=nvenc_hw fallback=") + (*outBackendName ? *outBackendName : "unknown");
+        codec_debug_log(line.c_str());
+        return true;
+      }
+      *outBackendName = "nvenc_mft_h264dec_unavailable";
       return false;
     }
   }
@@ -721,48 +790,21 @@ bool create_h264_decoder_transform(IMFTransform** outTransform, bool* outUsingHa
         transform->Release();
         transform = nullptr;
       }
-      *outBackendName = "qsv_mft_h264dec_unavailable";
       codec_debug_log("decoder backend=qsv_hw unavailable");
+      if (create_h264_decoder_transform_from_mode(MftBackendMode::Auto, outTransform, outUsingHardware,
+                                                  outBackendName)) {
+        std::string line =
+            std::string("decoder backend=qsv_hw fallback=") + (*outBackendName ? *outBackendName : "unknown");
+        codec_debug_log(line.c_str());
+        return true;
+      }
+      *outBackendName = "qsv_mft_h264dec_unavailable";
       return false;
     }
   }
 
   const MftBackendMode backendMode = parse_mft_backend_mode(backendRaw);
-
-  if (backendMode != MftBackendMode::SoftwareOnly) {
-    constexpr DWORD kEnumFlagsHw = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
-    if (create_video_mft_from_enum(MFT_CATEGORY_VIDEO_DECODER, MFVideoFormat_H264, MFVideoFormat_NV12,
-                                   kEnumFlagsHw, &transform)) {
-      *outTransform = transform;
-      *outUsingHardware = true;
-      *outBackendName = "mft_enum_hw";
-      return true;
-    }
-  }
-
-  if (backendMode == MftBackendMode::HardwareOnly) {
-    *outBackendName = "mft_hw_unavailable";
-    return false;
-  }
-
-  if (backendMode != MftBackendMode::HardwareOnly) {
-    constexpr DWORD kEnumFlagsSw = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER | MFT_ENUM_FLAG_LOCALMFT;
-    if (create_video_mft_from_enum(MFT_CATEGORY_VIDEO_DECODER, MFVideoFormat_H264, MFVideoFormat_NV12,
-                                   kEnumFlagsSw, &transform)) {
-      *outTransform = transform;
-      *outUsingHardware = false;
-      *outBackendName = "mft_enum_sw";
-      return true;
-    }
-  }
-
-  HRESULT hr = CoCreateInstance(CLSID_CMSH264DecoderMFT, nullptr, CLSCTX_INPROC_SERVER,
-                                IID_PPV_ARGS(&transform));
-  if (FAILED(hr) || !transform) return false;
-  *outTransform = transform;
-  *outUsingHardware = false;
-  *outBackendName = "clsid_cmsh264dec";
-  return true;
+  return create_h264_decoder_transform_from_mode(backendMode, outTransform, outUsingHardware, outBackendName);
 }
 
 }  // namespace

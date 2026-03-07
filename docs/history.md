@@ -483,3 +483,47 @@ Validation / build / test result
 Next action
 - `nvenc_hw`/`qsv_hw` 요청이 미지원 장비에서 들어오면 `mft_enum_hw`(필요 시 `mft_enum_sw`)로 자동 폴백하도록 정책 변경.
 - 로그에 `requested/resolved/fallbackReason=vendor_unavailable`를 강제 표기해 원인 오해(크래시/버그) 방지.
+
+### 96) 2026-03-07 M4 후속 코드: NVENC/QSV 미지원 시 graceful fallback 적용
+Goal
+- AMD 장비에서 `nvenc_hw`/`qsv_hw` 요청이 하드 실패로 종료되는 문제를 제거한다.
+- 요청 backend가 미지원일 때 스트리밍은 유지하고 로그에서 원인을 명확히 표기한다.
+
+Files changed
+- `apps/native_poc/src/mf_h264_codec.cpp`
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `apps/native_poc/src/native_video_client_main.cpp`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_host_poc remote60_native_video_client_poc --parallel`
+  - result: success
+- Runtime verify (동일 조건: `h264+udp`, `1080p30`, `8Mbps`, `NoInputChannel`, `host 14s/client 10s`):
+  - `nvenc_hw/nvenc_hw`:
+    - log: `automation/logs/verify-native-video-20260307-162558`
+    - `OVERALL_OK=True`, `DEC_AVG=3.22`, `LAT_P95_US=332357`, `MBPS_AVG=0.44`
+    - host/client startup log:
+      - `backendRequested=nvenc_hw`
+      - `backendResolved=mft_enum_hw`
+      - `backendFallbackReason=requested_backend_unavailable`
+    - codec debug: `encoder/decoder backend=nvenc_hw fallback=mft_enum_hw`
+  - `qsv_hw/qsv_hw`:
+    - log: `automation/logs/verify-native-video-20260307-162619`
+    - `OVERALL_OK=True`, `DEC_AVG=4.33`, `LAT_P95_US=345750`, `MBPS_AVG=0.78`
+    - host/client startup log:
+      - `backendRequested=qsv_hw`
+      - `backendResolved=mft_enum_hw`
+      - `backendFallbackReason=requested_backend_unavailable`
+    - codec debug: `encoder/decoder backend=qsv_hw fallback=mft_enum_hw`
+  - `amf_hw/amf_hw` 회귀 확인(호환성 확인용, host 10s/client 6s):
+    - log: `automation/logs/verify-native-video-20260307-162723`
+    - `OVERALL_OK=True`, `DEC_AVG=3.00`, `LAT_P95_US=94896`, `MBPS_AVG=0.75`
+- Outcome:
+  - 패치 전: `nvenc_hw/qsv_hw`는 `backend unavailable`로 초기화 실패(`OVERALL_OK=False`).
+  - 패치 후: 동일 요청이 `mft_enum_hw`로 자동 폴백되어 스트리밍 성공(`OVERALL_OK=True`).
+
+Next action
+- NVIDIA/Intel 실장비에서 실제 `backendResolved=nvenc_mft_* / qsv_mft_*`로 고정되는지 확인한다.
+- 실장비 기준으로 generic MFT 대비 fps/latency/mbps 개선(2개 이상) 검증을 진행한다.
