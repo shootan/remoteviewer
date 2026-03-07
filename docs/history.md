@@ -453,3 +453,33 @@ Validation / build / test result
 Next action
 - `nvenc_hw`/`qsv_hw` 요청 실패를 하드 실패 대신 정책적 폴백(`mft_enum_hw` -> `mft_enum_sw`)으로 전환할지 결정한다.
 - 필요 시 WER LocalDumps 활성화 후 `nvenc/qsv` 경로 재실행으로 실제 크래시 덤프 존재 여부를 추가 확인한다.
+
+### 95) 2026-03-07 원인 확정: 장비 벤더 미지원 요청 + AMF 정상 동작 확인
+Goal
+- `nvenc/qsv` 실패 원인이 코드 결함인지, 장비/벤더 미지원 요청인지 구분한다.
+- AMD 경로(`amf_hw`)의 실제 동작 여부를 확인한다.
+
+Files changed
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- GPU 확인(`dxdiag /whql:off /t`):
+  - `Card name: AMD Radeon(TM) Graphics`
+  - `Card name: Virtual Display Driver` / `Parsec Virtual Display Adapter` 동시 존재
+  - NVIDIA/Intel 물리 GPU 식별 항목은 확인되지 않음
+- 코드 확인(`apps/native_poc/src/mf_h264_codec.cpp`):
+  - `nvenc_hw`/`qsv_hw` 요청 시 vendor MFT 미탐색이면 `*_unavailable`로 설정 후 초기화 실패 반환
+- AMD 실측(`amf_hw/amf_hw`, 1080p30, 8Mbps, udp, host 14s/client 10s):
+  - log: `automation/logs/verify-native-video-20260307-160431`
+  - `OVERALL_OK=True`
+  - `DEC_AVG=4.00`
+  - `LAT_P95_US=289780`
+  - `MBPS_AVG=0.56`
+- Interpretation:
+  - 현재 장비에서는 `nvenc/qsv`가 실패하는 것이 정상(벤더 미지원 요청)이며, AMF 경로는 실제 동작.
+  - 따라서 "포기"가 아니라, 요청/장비 불일치 시 graceful fallback 정책을 넣으면 운영상 해결 가능.
+
+Next action
+- `nvenc_hw`/`qsv_hw` 요청이 미지원 장비에서 들어오면 `mft_enum_hw`(필요 시 `mft_enum_sw`)로 자동 폴백하도록 정책 변경.
+- 로그에 `requested/resolved/fallbackReason=vendor_unavailable`를 강제 표기해 원인 오해(크래시/버그) 방지.
