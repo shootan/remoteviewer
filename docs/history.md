@@ -853,3 +853,42 @@ Validation / build / test result
 Next action
 - M7 `decodedFrames>=28` 잔여 갭(현재 `DEC_AVG=22.89`) 축소를 위해 720p30 기준 전송/렌더 경로 미세 튜닝 조합을 5회 반복 검증한다.
 - `M7_STATUS=SUCCESS` 조합 확정 후 720p/1080p Pass 로그(각 5회) 수집으로 Gate를 마감한다.
+
+### 107) 2026-03-08 M7 720p 튜닝 재반복: 프로필 고정 조합 확정(5/5)
+Goal
+- 720p M7를 `반복 시도 -> 성공 고정` 상태로 만들고, 재현 가능한 실행 조합을 기본 프로필에 반영한다.
+
+Files changed
+- `automation/native_video_profile_720p.json`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - 코드 변경 없음(프로필/문서 갱신), 빌드 생략
+- 재검증 1차(기존 후보 재확인):
+  - summary: `automation/logs/m7-tune-confirm-20260308-092044/summary.csv`
+  - 설정: `720p30`, `h264+udp`, `5Mbps`, `keyint30`, `h264NoPacing=1`, `frameGatingDisable=1`
+  - 결과: `M7_SUCCESS_COUNT=3/5`, `DEC_AVG_MEAN=28.51`, `LAT_P95_US_MEAN=16090.4`
+  - 판정: 평균은 목표 내지만 반복 안정성 부족
+- 후보 스윕(조합별 3회):
+  - summary: `automation/logs/m7-tune-sweep-20260308-092230/sweep.csv`
+  - 핵심 결과:
+    - `c1_br4000_k30_np1`: `0/3`
+    - `c2_br4500_k30_np1`: `1/3`
+    - `c3_br5000_k30_np1`: `3/3`
+    - `c4_br4000_k60_np1`: `3/3`
+    - `c5_br4500_k60_np1`: `3/3`
+    - `c6_br5000_k60_np1`: `3/3`
+- 최종 고정 검증(선정 조합 `5Mbps + keyint60 + h264NoPacing=1 + frameGatingDisable=1`):
+  - summary: `automation/logs/m7-tune-final-20260308-092650/summary.csv`
+  - 결과: `M7_SUCCESS_COUNT=5/5`, `M7_AMBIGUOUS_COUNT=0`, `M7_FAIL_COUNT=0`
+  - 지표: `DEC_AVG_MEAN=33.01`(min `29.56`), `LAT_P95_US_MEAN=21614`, `LAT_P95_US_MAX=28612`
+- 보조 확인(QUEUE_WAIT/KEEPALIVE env 미적용):
+  - summary: `automation/logs/m7-tune-noqwait-20260308-092833/summary.csv`
+  - 결과: `M7_SUCCESS_COUNT=5/5`, `DEC_AVG_MEAN=33.4`, `LAT_P95_US_MEAN=19959.4`
+  - 해석: 720p 고정 조합은 `queue wait/keepalive` env 의존 없이 재현 가능
+
+Next action
+- M7 잔여 Gate인 `1080p30`에서 동일 방식으로 고정 조합 스윕 후 `Pass 5회`를 확보한다.
+- 1080p까지 고정되면 M7 `Pass 로그 5회 확보` 및 `기본 실행 프로필 확정`을 완료 처리한다.
