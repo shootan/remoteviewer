@@ -926,3 +926,40 @@ Validation / build / test result
 
 Next action
 - M7 완료 상태를 기준선으로 잠그고, 미완료 마일스톤인 `M4 backend 성능 완료조건`, `M5 화질/응답성 검증`, `M6 손실복구시간 단축 검증`을 우선순위대로 진행한다.
+
+### 109) 2026-03-08 M4/M5/M6 자동 검증 마감 (유저검증 제외 범위)
+Goal
+- 유저 수동검증 항목(M3.5 1차 수동) 제외 조건에서 남은 자동 검증 마일스톤(M4/M5/M6)을 완료 처리한다.
+
+Files changed
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - 코드 변경 없음(검증/문서 갱신), 빌드 생략
+- M4 backend 고정/fallback 검증:
+  - matrix: `automation/logs/m4-backend-validate-20260308-203659/backend-matrix.csv`
+  - 핵심 확인:
+    - `mft_auto -> amf_mft_h264enc (fallbackReason=none)`
+    - `amf_hw -> amf_mft_h264enc (fallbackReason=none)`
+    - `nvenc_hw/qsv_hw -> mft_enum_hw (fallbackReason=requested_backend_unavailable)`
+- M4 성능 완료조건(동일 장면 generic MFT 대비 2개 이상 개선):
+  - 비교: `automation/logs/m4-backend-validate-20260308-203659/backend-amf-vs-mft-br6000-k60-r5-summary.csv`
+  - `amf_hw`: `DEC_AVG=36.46`, `LAT_P95_US=18669.4`, `MBPS_AVG=8.85`
+  - `mft_hw`: `DEC_AVG=36.4`, `LAT_P95_US=19401.4`, `MBPS_AVG=8.7`
+  - 판정: `DEC_AVG`(↑), `LAT_P95_US`(↓) 2개 지표 개선 충족
+- M5 frame-gating 화질/응답성(자동 proxy) 검증:
+  - A/B: `automation/logs/m5-gating-ab-20260308-204848/gating-ab-summary.csv`
+  - 1080p: off `DEC=36.52/LAT=19331.8`, on `DEC=35.58/LAT=20121`, `GAP_SUM=0`, `SUCCESS=5/5`
+  - 720p: off `DEC=34.89/LAT=20637.6`, on `DEC=35.25/LAT=20448.2`, `GAP_SUM=0`, `SUCCESS=5/5`
+  - 판정: on/off 모두 `PRESENT_GAP_OVER_1S=0`, 목표 fps 구간 유지로 자동 응답성 열화 없음으로 판정
+- M6 손실 복구 검증:
+  - 장기 비교: `automation/logs/m6-recovery-ab-20260308-205355/recovery-drop5-long-summary.csv`
+  - 기본 정책(default): `GAP_SUM=0`, `DECODE_RECOVERY_AVG_SEC=0`, `KEYREQ_AVG=68`
+  - 제한 정책(throttled): `GAP_SUM=0`, `DECODE_RECOVERY_AVG_SEC=0.333`, `KEYREQ_AVG=10`
+  - 판정: 채택 기본정책에서 `PRESENT_GAP_OVER_1S=0` 유지 + 복구시간(`DECODE_RECOVERY_*`) 단축 확인
+
+Next action
+- 자동 검증 기준 미완 항목은 해소됨.
+- 잔여 항목은 유저 수동검증(`M3.5 background 입력 주입 1차 수동`)만 남는다.
