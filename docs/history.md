@@ -892,3 +892,37 @@ Validation / build / test result
 Next action
 - M7 잔여 Gate인 `1080p30`에서 동일 방식으로 고정 조합 스윕 후 `Pass 5회`를 확보한다.
 - 1080p까지 고정되면 M7 `Pass 로그 5회 확보` 및 `기본 실행 프로필 확정`을 완료 처리한다.
+
+### 108) 2026-03-08 M7 1080p 튜닝 반복 완료: Pass 5회 확보 + Gate 충족
+Goal
+- 1080p M7도 반복 성공 상태로 고정해 720p와 함께 제품화 Gate(`1080/720 각 Pass 5회`)를 충족한다.
+
+Files changed
+- `automation/native_video_profile_1080p.json`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - 코드 변경 없음(프로필/문서 갱신), 빌드 생략
+- 1080p 후보 스윕(조합별 3회):
+  - summary: `automation/logs/m7-1080-sweep-20260308-093140/sweep.csv`
+  - 공통 설정: `1920x1080`, `h264+udp`, `NoInputChannel`, `frameGatingDisable=1`
+  - 결과:
+    - `a_br8000_k30_np1`: `SUCCESS 3/3`, `DEC_MEAN=35.78`, `LAT_MEAN=18100.33`
+    - `b_br8000_k60_np1`: `SUCCESS 3/3`, `DEC_MEAN=36.36`, `LAT_MEAN=18436.67`
+    - `c_br10000_k60_np1`: `SUCCESS 3/3`, `DEC_MEAN=35.19`, `LAT_MEAN=19274.67`
+    - `d_br12000_k60_np1`: `SUCCESS 3/3`, `DEC_MEAN=37.15`, `LAT_MEAN=19114.33`
+    - `e_br10000_k30_np1`: `SUCCESS 3/3`, `DEC_MEAN=36.48`, `LAT_MEAN=20646`
+    - `f_br8000_k30_np0`: `SUCCESS 0/3`, `AMBIGUOUS 3/3`, `DEC_MEAN=22.39`, `LAT_MEAN=26598.33`
+- 최종 고정 검증(선정 조합 `8Mbps + keyint30 + h264NoPacing=1 + frameGatingDisable=1`):
+  - summary: `automation/logs/m7-1080-final-20260308-093555/summary.csv`
+  - 결과: `M7_SUCCESS_COUNT=5/5`, `M7_AMBIGUOUS_COUNT=0`, `M7_FAIL_COUNT=0`, `OVERALL_OK_COUNT=5/5`
+  - 지표: `DEC_AVG_MEAN=36.68`(min `35.22`), `LAT_P95_US_MEAN=16759.8`, `LAT_P95_US_MAX=20389`
+- M7 Gate 종합 상태(2026-03-08 기준):
+  - 720p: `Pass 5/5` (`m7-tune-final-20260308-092650`)
+  - 1080p: `Pass 5/5` (`m7-1080-final-20260308-093555`)
+  - 결론: M7의 `Pass 로그 5회 확보` 완료조건 충족
+
+Next action
+- M7 완료 상태를 기준선으로 잠그고, 미완료 마일스톤인 `M4 backend 성능 완료조건`, `M5 화질/응답성 검증`, `M6 손실복구시간 단축 검증`을 우선순위대로 진행한다.

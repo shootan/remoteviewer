@@ -8,8 +8,8 @@
   "tcpRecvBufKb": 1024,
   "fps": 30,
   "fpsHint": 30,
-  "bitrate": 10000000,
-  "keyint": 15,
+  "bitrate": 8000000,
+  "keyint": 30,
   "encodeWidth": 1920,
   "encodeHeight": 1080,
   "seconds": 0,
@@ -17,10 +17,11 @@
   "forceEncodedExperiment": true,
   "encoderBackend": "mft_auto",
   "decoderBackend": "mft_auto",
-  "h264NoPacing": false,
+  "h264NoPacing": true,
   "guardStalePreEncode": false,
   "capturePoolBuffers": 0,
   "guardStaleEncoded": false,
   "abrDisable": true,
+  "frameGatingDisable": true,
   "remoteHost": "127.0.0.1"
 }
