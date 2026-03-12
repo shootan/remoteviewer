@@ -1393,11 +1393,7 @@ bool H264Encoder::encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFr
         odb.pSample = outSample.Get();
       }
       DWORD status = 0;
-      const uint64_t processOutputStartUs = qpc_now_us();
       const HRESULT po = enc_->ProcessOutput(0, 1, &odb, &status);
-      const uint64_t processOutputDoneUs = qpc_now_us();
-      encodeStats->processOutputDrainUs +=
-          (processOutputDoneUs >= processOutputStartUs) ? (processOutputDoneUs - processOutputStartUs) : 0;
       if (po == MF_E_TRANSFORM_NEED_MORE_INPUT) {
         if (odb.pEvents) odb.pEvents->Release();
         ++encodeStats->processOutputNeedMoreInputCount;
@@ -1423,6 +1419,12 @@ bool H264Encoder::encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFr
         return false;
       }
 
+      // If the MFT provided its own sample (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES),
+      // odb.pSample has an outstanding reference we must release.
+      Microsoft::WRL::ComPtr<IMFSample> mftProvidedSample;
+      if (odb.pSample && odb.pSample != outSample.Get()) {
+        mftProvidedSample.Attach(odb.pSample);  // take ownership without AddRef
+      }
       IMFSample* produced = odb.pSample ? odb.pSample : outSample.Get();
       std::vector<uint8_t> bytes;
       if (produced && sample_to_bytes(produced, &bytes) && !bytes.empty()) {
@@ -1547,7 +1549,8 @@ bool H264Encoder::encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFr
     if (!sawEvent) {
       if (!drain_outputs()) return finish_call(false);
     }
-    return finish_call(!outUnits->empty());
+    // Async MFTs may legitimately delay output; empty outUnits is not an error.
+    return finish_call(true);
   }
 
   if (!drain_outputs()) return finish_call(false);
@@ -1573,6 +1576,8 @@ void H264Encoder::shutdown() {
   eventGenerator_.Reset();
   usingHardware_ = false;
   backendName_ = "unknown";
+  d3dManager_.Reset();
+  d3dManagerResetToken_ = 0;
 }
 
 H264Decoder::~H264Decoder() {
@@ -1783,6 +1788,12 @@ bool H264Decoder::decode_access_unit(const std::vector<uint8_t>& annexb, bool ke
         return false;
       }
 
+      // If the MFT provided its own sample (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES),
+      // odb.pSample has an outstanding reference we must release.
+      Microsoft::WRL::ComPtr<IMFSample> mftProvidedSample;
+      if (odb.pSample && odb.pSample != outSample.Get()) {
+        mftProvidedSample.Attach(odb.pSample);  // take ownership without AddRef
+      }
       IMFSample* produced = odb.pSample ? odb.pSample : outSample.Get();
       if (produced) {
         uint32_t outW = width_;

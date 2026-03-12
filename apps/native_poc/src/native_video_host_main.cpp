@@ -498,9 +498,25 @@ UINT mouse_vk_to_message(uint16_t kind, uint32_t vk) {
   return 0;
 }
 
+bool is_extended_vk(uint32_t vk) {
+  switch (vk) {
+    case VK_INSERT: case VK_DELETE: case VK_HOME: case VK_END:
+    case VK_PRIOR: case VK_NEXT:  // Page Up / Page Down
+    case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN:
+    case VK_NUMLOCK: case VK_SNAPSHOT: case VK_CANCEL:  // Print Screen / Break
+    case VK_DIVIDE:   // Numpad /
+    case VK_RCONTROL: case VK_RMENU:  // Right Ctrl / Right Alt
+    case VK_RETURN:   // Numpad Enter shares VK_RETURN but scan code differs
+      return true;
+    default:
+      return false;
+  }
+}
+
 LPARAM key_event_lparam(uint32_t keyCode, bool keyUp) {
   const UINT scanCode = MapVirtualKeyW(static_cast<UINT>(keyCode), MAPVK_VK_TO_VSC);
   DWORD lp = 1u | ((scanCode & 0xFFu) << 16);
+  if (is_extended_vk(keyCode)) lp |= (1u << 24);  // extended key flag
   if (keyUp) lp |= (1u << 30) | (1u << 31);
   return static_cast<LPARAM>(lp);
 }
@@ -1583,6 +1599,8 @@ int main(int argc, char** argv) {
     clientSock = accept(listenSock, reinterpret_cast<sockaddr*>(&peer), &peerLen);
     if (clientSock == INVALID_SOCKET) {
       std::cerr << "[native-video-host] accept failed\n";
+      closesocket(listenSock);
+      listenSock = INVALID_SOCKET;
       return 5;
     }
 
@@ -1703,7 +1721,7 @@ int main(int argc, char** argv) {
   std::atomic<uint64_t> inputUnsupported{0};
   std::atomic<uint64_t> inputInjectFail{0};
   SOCKET controlListenSock = INVALID_SOCKET;
-  SOCKET controlClientSock = INVALID_SOCKET;
+  std::atomic<SOCKET> controlClientSock{INVALID_SOCKET};
   std::thread controlThread;
   if (args.controlPort > 0) {
     controlListenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -1959,8 +1977,9 @@ int main(int argc, char** argv) {
               shutdown(acceptedSock, SD_BOTH);
               closesocket(acceptedSock);
             }
-            if (controlClientSock == acceptedSock) {
-              controlClientSock = INVALID_SOCKET;
+            {
+              SOCKET expected = acceptedSock;
+              controlClientSock.compare_exchange_strong(expected, INVALID_SOCKET);
             }
             std::cout << "[native-video-host][control] client disconnected\n";
           }
@@ -1973,6 +1992,7 @@ int main(int argc, char** argv) {
   if (!GraphicsCaptureSession::IsSupported()) {
     std::cerr << "[native-video-host] WGC not supported\n";
     closesocket(clientSock);
+    if (listenSock != INVALID_SOCKET) closesocket(listenSock);
     return 6;
   }
 
@@ -1984,6 +2004,7 @@ int main(int argc, char** argv) {
       std::cerr << "[native-video-host] MFStartup failed hr=0x" << std::hex << static_cast<unsigned long>(hr)
                 << std::dec << "\n";
       closesocket(clientSock);
+      if (listenSock != INVALID_SOCKET) closesocket(listenSock);
       return 12;
     }
     mfStarted = true;
@@ -1999,6 +2020,7 @@ int main(int argc, char** argv) {
   if (FAILED(hr)) {
     std::cerr << "[native-video-host] D3D11CreateDevice failed\n";
     closesocket(clientSock);
+    if (listenSock != INVALID_SOCKET) closesocket(listenSock);
     if (mfStarted) MFShutdown();
     return 7;
   }
@@ -2020,8 +2042,8 @@ int main(int argc, char** argv) {
   }
   captureWindowCriteria.titleNeedleLower = wide_lower(utf8_to_wide(trim_ascii(args.captureWindowTitle)));
   const bool windowTargetConfigured = captureWindowCriteria.enabled();
-  bool captureWindowModeActive = false;
-  bool captureWindowClientOnlyActive = args.captureWindowClientOnly;
+  std::atomic<bool> captureWindowModeActive{false};
+  std::atomic<bool> captureWindowClientOnlyActive{args.captureWindowClientOnly};
   CaptureWindowInfo captureWindowInfo{};
   if (windowTargetConfigured && find_capture_window(captureWindowCriteria, &captureWindowInfo)) {
     captureWindowModeActive = true;
@@ -2061,6 +2083,7 @@ int main(int argc, char** argv) {
   if (!item) {
     std::cerr << "[native-video-host] capture item create failed\n";
     closesocket(clientSock);
+    if (listenSock != INVALID_SOCKET) closesocket(listenSock);
     if (mfStarted) MFShutdown();
     return 8;
   }
@@ -2071,6 +2094,7 @@ int main(int argc, char** argv) {
   if (captureWidth < 2 || captureHeight < 2) {
     std::cerr << "[native-video-host] invalid capture size\n";
     closesocket(clientSock);
+    if (listenSock != INVALID_SOCKET) closesocket(listenSock);
     if (mfStarted) MFShutdown();
     return 9;
   }
@@ -2209,6 +2233,7 @@ int main(int argc, char** argv) {
     if (!encoder.initialize(activeEncodeW, activeEncodeH, activeFps, activeBitrate, activeKeyint)) {
       std::cerr << "[native-video-host] H264 encoder initialize failed\n";
       closesocket(clientSock);
+      if (listenSock != INVALID_SOCKET) closesocket(listenSock);
       if (mfStarted) MFShutdown();
       return 13;
     }
@@ -2271,6 +2296,7 @@ int main(int argc, char** argv) {
   if (!create_staging(captureWidth, captureHeight)) {
     std::cerr << "[native-video-host] staging texture create failed\n";
     closesocket(clientSock);
+    if (listenSock != INVALID_SOCKET) closesocket(listenSock);
     if (mfStarted) MFShutdown();
     return 10;
   }
@@ -2283,8 +2309,8 @@ int main(int argc, char** argv) {
   };
   std::atomic<uint64_t> callbackFrames{0};
   std::atomic<int64_t> captureClockOffsetUs{std::numeric_limits<int64_t>::max()};
-  uint64_t queuePushCount = 0;
-  uint64_t queuePushCountLastSample = 0;
+  std::atomic<uint64_t> queuePushCount{0};
+  uint64_t queuePushCountLastSample = 0;  // only read from main thread
   uint64_t queuePushPerSecLatest = 0;
   uint32_t captureInputLowPushStreakSec = 0;
   uint64_t captureInputStallRestartCount = 0;
@@ -2533,6 +2559,7 @@ int main(int argc, char** argv) {
   if (!restart_capture_session()) {
     std::cerr << "[native-video-host] capture session start failed\n";
     closesocket(clientSock);
+    if (listenSock != INVALID_SOCKET) closesocket(listenSock);
     if (mfStarted) MFShutdown();
     return 10;
   }
@@ -3132,7 +3159,9 @@ int main(int argc, char** argv) {
       }
 
       const bool keyReqPending = clientRequestedKeyFrame.load(std::memory_order_acquire);
-      const bool allowFrameGatingSkip = (syntheticKeepaliveTotalCount == 0);
+      // Use recent-interval keepalive count instead of lifetime total to avoid permanently
+      // disabling frame gating skip after a single brief capture stall.
+      const bool allowFrameGatingSkip = (syntheticKeepaliveCount == 0);
       const uint64_t targetIntervalUs = frameGatingStaticMode ? frameGatingStaticIntervalUs : activeFrameIntervalUs;
       if (allowFrameGatingSkip &&
           !keyReqPending &&
@@ -4263,10 +4292,12 @@ int main(int argc, char** argv) {
 
   stop = true;
   frame.cv.notify_all();
-  if (controlClientSock != INVALID_SOCKET) {
-    shutdown(controlClientSock, SD_BOTH);
-    closesocket(controlClientSock);
-    controlClientSock = INVALID_SOCKET;
+  {
+    SOCKET ctlSock = controlClientSock.exchange(INVALID_SOCKET);
+    if (ctlSock != INVALID_SOCKET) {
+      shutdown(ctlSock, SD_BOTH);
+      closesocket(ctlSock);
+    }
   }
   if (controlListenSock != INVALID_SOCKET) {
     closesocket(controlListenSock);

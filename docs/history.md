@@ -963,3 +963,27 @@ Validation / build / test result
 Next action
 - 자동 검증 기준 미완 항목은 해소됨.
 - 잔여 항목은 유저 수동검증(`M3.5 background 입력 주입 1차 수동`)만 남는다.
+
+### 110) 2026-03-12 런타임 코드 품질 결함 보강 + 남은 TCP listen socket leak 마감
+Goal
+- 심층 코드 검증에서 식별된 런타임 결함 묶음을 반영하고, 남아 있던 TCP 초기 `accept` 실패 경로의 `listenSock` 누수를 마감한다.
+
+Files changed
+- `apps/native_poc/src/mf_h264_codec.cpp`
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `apps/native_poc/src/native_video_client_main.cpp`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_host_poc remote60_native_video_client_poc --parallel`
+  - 결과: 성공 (`build-vcpkg-local/apps/native_poc/Debug` host/client 재빌드 완료)
+- Runtime smoke verify:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -BuildDir build-vcpkg-local -Codec h264 -Transport udp -Fps 30 -FpsHint 30 -HostSeconds 8 -ClientSeconds 6 -Bitrate 5000000 -Keyint 30 -NoInputChannel`
+  - 로그: `automation/logs/verify-native-video-20260312-122925`
+  - 결과: `HOST_RC=0`, `CLIENT_RC=0`, `OVERALL_OK=True`, `PRESENT_GAP_OVER_1S=0`, `UDP_ASSEMBLY_DROPPED_TOTAL=0`
+  - 비고: 이번 verify는 수정 반영 후 회귀 스모크 목적이며, M7 성능 Gate 재판정용 프로필/지속시간은 아님 (`DEC_AVG=9.4`, `LAT_P95_US=41672`)
+
+Next action
+- 실제 데스크톱 세션에서 수동 입력/확장키 시나리오와 장시간 reconnect/soak를 한 번 더 확인해, 이번 안정성 보강이 장기 런에서도 회귀 없이 유지되는지 검증한다.

@@ -504,6 +504,7 @@ std::mutex gKeyframeLimiterMu;
 double gKeyframeLimiterTokens = static_cast<double>(kKeyframeRequestTokenCapacityDefault);
 uint64_t gKeyframeLimiterLastRefillUs = 0;
 std::atomic<uint64_t> gLastPresentedVersion{0};
+std::atomic<uint64_t> gLastPresentedCaptureUs{0};  // updated after actual present, not at queue time
 std::atomic<uint64_t> gPaintCoalescedCount{0};
 std::atomic<uint64_t> gOverwriteBeforePresentCount{0};
 std::atomic<uint64_t> gD3dPresentSuccessCount{0};
@@ -741,7 +742,8 @@ void runtime_tune_set_default_if_needed() {
     const uint32_t fromTrafficX1000 = gClientMetrics.recvMbpsX1000.load(std::memory_order_relaxed);
     uint32_t guessed = 8000000;
     if (fromTrafficX1000 > 0) {
-      guessed = std::clamp<uint32_t>(fromTrafficX1000 * 1000u, kRuntimeBitrateMin, kRuntimeBitrateMax);
+      guessed = static_cast<uint32_t>(std::clamp<uint64_t>(
+          static_cast<uint64_t>(fromTrafficX1000) * 1000ULL, kRuntimeBitrateMin, kRuntimeBitrateMax));
     }
     gRuntimeTargetBitrate.store(guessed, std::memory_order_relaxed);
   }
@@ -1551,6 +1553,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         static uint64_t lastUserFeedbackUs = 0;
         static uint64_t lastUserFeedbackOverwrite = 0;
         gLastPresentedVersion.store(frameVersion, std::memory_order_relaxed);
+        gLastPresentedCaptureUs.store(captureUs, std::memory_order_relaxed);
         const uint64_t presentUs = qpc_now_us();
         const uint64_t presentGapUs = (lastPresentUs > 0) ? (presentUs - lastPresentUs) : 0;
         const uint64_t queueToPaintUs = (paintStartUs >= queueSetUs) ? (paintStartUs - queueSetUs) : 0;
@@ -2194,7 +2197,7 @@ int main(int argc, char** argv) {
     uint64_t lastCatchupEnterUs = 0;
     uint64_t catchupEnterThrottledCount = 0;
     bool catchupMode = false;
-    uint64_t lastPresentedCaptureUs = 0;
+    // lastPresentedCaptureUs is now gLastPresentedCaptureUs (atomic, updated after actual present)
     bool captureTimelineReady = false;
     uint64_t captureRemoteBaseUs = 0;
     uint64_t captureLocalBaseUs = 0;
@@ -2458,14 +2461,15 @@ int main(int argc, char** argv) {
       }
       const uint64_t streamLagUs = aligned_lag_us(
           h.captureQpcUs, packetNowUs, captureTimelineReady, captureRemoteBaseUs, captureLocalBaseUs);
+      const uint64_t presentedCapUs = gLastPresentedCaptureUs.load(std::memory_order_relaxed);
       const uint64_t decodeQueueLagEstimateUs =
-          (lastPresentedCaptureUs > 0 && h.captureQpcUs >= lastPresentedCaptureUs)
-              ? (h.captureQpcUs - lastPresentedCaptureUs)
+          (presentedCapUs > 0 && h.captureQpcUs >= presentedCapUs)
+              ? (h.captureQpcUs - presentedCapUs)
               : 0;
       sample_queue_depth(decodeQueueLagEstimateUs);
       const uint64_t staleBehindPresentedUs =
-          (lastPresentedCaptureUs > 0 && lastPresentedCaptureUs > h.captureQpcUs)
-              ? (lastPresentedCaptureUs - h.captureQpcUs)
+          (presentedCapUs > 0 && presentedCapUs > h.captureQpcUs)
+              ? (presentedCapUs - h.captureQpcUs)
               : 0;
       const uint64_t staleBehindLatestUs =
           (latestCaptureSeenUs > h.captureQpcUs)
@@ -2489,7 +2493,7 @@ int main(int argc, char** argv) {
 
       const bool lagTrigger =
           (decodeQueueLagEstimateUs > kDecodeQueueLagDropUs) ||
-          (lastPresentedCaptureUs > 0 && streamLagUs > kCatchupLagDropUs);
+          (presentedCapUs > 0 && streamLagUs > kCatchupLagDropUs);
       const bool denseArrival = (recvGapUs == 0 || recvGapUs <= 150000);
       if (lagTrigger && denseArrival) {
         if (lagTriggerStreak < std::numeric_limits<uint32_t>::max()) {
@@ -2871,7 +2875,7 @@ int main(int argc, char** argv) {
 
       ++decodedFrames;
       decodedBytes += decodedPayloadBytes;
-      lastPresentedCaptureUs = decodedCaptureUs;
+      // lastPresentedCaptureUs is now updated by render thread via gLastPresentedCaptureUs
       const uint64_t latencyUs = aligned_lag_us(
           decodedCaptureUs, nowUs, captureTimelineReady, captureRemoteBaseUs, captureLocalBaseUs);
       const uint64_t decodeTailUs = aligned_lag_us(
@@ -2984,6 +2988,11 @@ int main(int argc, char** argv) {
         const bool firstChunk = ((u.flags & 0x2u) != 0);
         const bool lastChunk = ((u.flags & 0x4u) != 0);
         if (firstChunk) {
+          // Count the previous incomplete assembly as a drop if we were mid-assembly
+          if (assembling && assemblingNextOffset < assemblingExpected) {
+            ++assemblyDropped;
+            ++udpAssemblyDroppedCount;
+          }
           assembling = true;
           assemblingSeq = u.seq;
           assemblingExpected = u.payloadSize;
