@@ -987,3 +987,29 @@ Validation / build / test result
 
 Next action
 - 실제 데스크톱 세션에서 수동 입력/확장키 시나리오와 장시간 reconnect/soak를 한 번 더 확인해, 이번 안정성 보강이 장기 런에서도 회귀 없이 유지되는지 검증한다.
+
+### 111) 2026-03-12 장시간 루프백 검증: 720p/1080p 프레임·지연·프리즈 재확인
+Goal
+- 최신 안정성 보강 이후 현재 기준선 프로필에서 장시간 루프백으로 프레임, 지연, 프리즈/복구, UDP assembly drop 지표를 다시 확인한다.
+
+Files changed
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - 이번 턴은 검증 전용 작업으로 코드 변경 없음
+  - 직전 빌드 산출물 `build-vcpkg-local/apps/native_poc/Debug` 사용
+- Long-run verify 720p30 (60초):
+  - 명령: `REMOTE60_NATIVE_H264_NO_PACING=1`, `REMOTE60_NATIVE_FRAME_GATING_DISABLE=1`, `REMOTE60_NATIVE_ABR_DISABLE=1` + `automation/verify_native_video_runtime.ps1 -BuildDir build-vcpkg-local -Codec h264 -Transport udp -Fps 30 -FpsHint 30 -HostSeconds 65 -ClientSeconds 60 -Bitrate 5000000 -Keyint 60 -EncodeWidth 1280 -EncodeHeight 720 -EncoderBackend mft_auto -DecoderBackend mft_auto -NoInputChannel`
+  - 로그: `automation/logs/verify-native-video-20260312-133741`
+  - 결과: `HOST_RC=0`, `CLIENT_RC=0`, `DEC_AVG=31.82`, `LAT_P95_US=9909`, `PRESENT_GAP_OVER_1S=0`, `DECODE_ZERO_STREAK_MAX_SEC=0`, `UDP_ASSEMBLY_DROPPED_TOTAL=0`, `M7_PASS=True`
+- Long-run verify 1080p30 (60초):
+  - 명령: `REMOTE60_NATIVE_H264_NO_PACING=1`, `REMOTE60_NATIVE_FRAME_GATING_DISABLE=1`, `REMOTE60_NATIVE_ABR_DISABLE=1` + `automation/verify_native_video_runtime.ps1 -BuildDir build-vcpkg-local -Codec h264 -Transport udp -Fps 30 -FpsHint 30 -HostSeconds 65 -ClientSeconds 60 -Bitrate 8000000 -Keyint 30 -EncodeWidth 1920 -EncodeHeight 1080 -EncoderBackend mft_auto -DecoderBackend mft_auto -NoInputChannel`
+  - 로그: `automation/logs/verify-native-video-20260312-133852`
+  - 결과: `HOST_RC=0`, `CLIENT_RC=0`, `DEC_AVG=35.58`, `LAT_P95_US=13692`, `PRESENT_GAP_OVER_1S=0`, `DECODE_ZERO_STREAK_MAX_SEC=0`, `UDP_ASSEMBLY_DROPPED_TOTAL=0`, `M7_PASS=True`
+- 종합 판정:
+  - 현재 루프백 장시간 검증 범위에서는 720p/1080p 모두 fps/latency 목표치 이내이며, 프리즈/복구 이벤트와 assembly drop이 관찰되지 않았다.
+
+Next action
+- 동일 기준선으로 WAN 또는 reconnect soak를 추가 실행해, 루프백 외 조건에서도 이번 안정성 보강의 지속성을 확인한다.
