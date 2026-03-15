@@ -184,14 +184,22 @@ function Send-ClientInputBurst {
   $WM_KEYUP = 0x0101
   $MK_LBUTTON = 0x0001
 
-  $clickLp = New-LParam -X 140 -Y 120
+  $rect = New-Object NativeInputWin32+RECT
+  [void][NativeInputWin32]::GetWindowRect($Hwnd, [ref]$rect)
+  $windowW = [Math]::Max(640, $rect.Right - $rect.Left)
+  $windowH = [Math]::Max(480, $rect.Bottom - $rect.Top)
+  $videoLeft = [Math]::Max(220, [int]($windowW * 0.28))
+  $clickX = [Math]::Min($windowW - 60, $videoLeft + [int](($windowW - $videoLeft) * 0.18))
+  $clickY = [Math]::Min($windowH - 60, [Math]::Max(120, [int]($windowH * 0.22)))
+  $dragStartX = [Math]::Min($windowW - 160, $videoLeft + [int](($windowW - $videoLeft) * 0.24))
+  $dragEndX = [Math]::Min($windowW - 40, $videoLeft + [int](($windowW - $videoLeft) * 0.72))
+  $dragY = [Math]::Min($windowH - 80, [Math]::Max(180, [int]($windowH * 0.42)))
+
+  $clickLp = New-LParam -X $clickX -Y $clickY
   [NativeInputWin32]::PostMessage($Hwnd, $WM_LBUTTONDOWN, [IntPtr]$MK_LBUTTON, $clickLp) | Out-Null
   Start-Sleep -Milliseconds 30
   [NativeInputWin32]::PostMessage($Hwnd, $WM_LBUTTONUP, [IntPtr]0, $clickLp) | Out-Null
 
-  $dragStartX = 180
-  $dragEndX = 420
-  $dragY = 220
   [NativeInputWin32]::PostMessage($Hwnd, $WM_LBUTTONDOWN, [IntPtr]$MK_LBUTTON, (New-LParam -X $dragStartX -Y $dragY)) | Out-Null
   for ($x = $dragStartX + 30; $x -le $dragEndX; $x += 30) {
     [NativeInputWin32]::PostMessage($Hwnd, $WM_MOUSEMOVE, [IntPtr]$MK_LBUTTON, (New-LParam -X $x -Y $dragY)) | Out-Null

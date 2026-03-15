@@ -34,6 +34,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -55,6 +56,11 @@ using remote60::native_poc::ControlClientMetricsMessage;
 using remote60::native_poc::ControlRequestKeyFrameMessage;
 using remote60::native_poc::ControlRuntimeEncoderConfigMessage;
 using remote60::native_poc::ControlCaptureModeRequestMessage;
+using remote60::native_poc::ControlWindowEntry;
+using remote60::native_poc::ControlWindowListMessage;
+using remote60::native_poc::ControlWindowListRequestMessage;
+using remote60::native_poc::ControlWindowSelectMessage;
+using remote60::native_poc::ControlWindowSelectedMessage;
 using remote60::native_poc::ControlPingMessage;
 using remote60::native_poc::ControlPongMessage;
 using remote60::native_poc::H264EncodeFrameStats;
@@ -217,6 +223,108 @@ std::string base_name_lower(std::string path) {
     path = path.substr(slashPos + 1);
   }
   return ascii_lower(path);
+}
+
+uint64_t hwnd_to_id(HWND hwnd) {
+  return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(hwnd));
+}
+
+HWND window_id_to_hwnd(uint64_t id) {
+  return reinterpret_cast<HWND>(static_cast<uintptr_t>(id));
+}
+
+struct WindowListEntry {
+  uint64_t id = 0;
+  HWND hwnd = nullptr;
+  uint32_t pid = 0;
+  int width = 0;
+  int height = 0;
+  bool minimized = false;
+  std::string title;
+};
+
+bool should_include_window(HWND hwnd) {
+  if (!hwnd || !IsWindow(hwnd)) return false;
+  if (hwnd == GetShellWindow()) return false;
+  if (GetWindow(hwnd, GW_OWNER) != nullptr) return false;
+  if (!IsWindowVisible(hwnd)) return false;
+  if (GetWindowTextLengthW(hwnd) <= 0) return false;
+  const LONG exStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
+  if ((exStyle & WS_EX_TOOLWINDOW) != 0) return false;
+  DWORD pid = 0;
+  GetWindowThreadProcessId(hwnd, &pid);
+  if (pid == GetCurrentProcessId()) return false;
+  RECT r{};
+  if (!GetWindowRect(hwnd, &r)) return false;
+  const int w = r.right - r.left;
+  const int h = r.bottom - r.top;
+  if (w < 60 || h < 60) return false;
+  return true;
+}
+
+BOOL CALLBACK enum_window_collect_proc(HWND hwnd, LPARAM lparam) {
+  auto* out = reinterpret_cast<std::vector<WindowListEntry>*>(lparam);
+  if (!out) return TRUE;
+  if (!should_include_window(hwnd)) return TRUE;
+
+  RECT r{};
+  if (!GetWindowRect(hwnd, &r)) return TRUE;
+
+  DWORD pid = 0;
+  GetWindowThreadProcessId(hwnd, &pid);
+  const int titleLen = GetWindowTextLengthW(hwnd);
+  if (titleLen <= 0) return TRUE;
+  std::wstring wtitle(static_cast<size_t>(titleLen) + 1, L'\0');
+  const int got = GetWindowTextW(hwnd, wtitle.data(), titleLen + 1);
+  if (got <= 0) return TRUE;
+  wtitle.resize(static_cast<size_t>(got));
+  const std::string title = wide_to_utf8(wtitle);
+  if (title.empty()) return TRUE;
+
+  WindowListEntry e;
+  e.id = hwnd_to_id(hwnd);
+  e.hwnd = hwnd;
+  e.pid = static_cast<uint32_t>(pid);
+  e.width = r.right - r.left;
+  e.height = r.bottom - r.top;
+  e.minimized = (IsIconic(hwnd) != 0);
+  e.title = title;
+  out->push_back(std::move(e));
+  return TRUE;
+}
+
+std::vector<WindowListEntry> enumerate_shareable_windows() {
+  std::vector<WindowListEntry> out;
+  EnumWindows(enum_window_collect_proc, reinterpret_cast<LPARAM>(&out));
+  std::sort(out.begin(), out.end(), [](const WindowListEntry& a, const WindowListEntry& b) {
+    return a.title < b.title;
+  });
+  return out;
+}
+
+std::optional<WindowListEntry> find_window_by_id(uint64_t id) {
+  if (id == 0) return std::nullopt;
+  const HWND hwnd = window_id_to_hwnd(id);
+  if (!should_include_window(hwnd)) return std::nullopt;
+  RECT r{};
+  if (!GetWindowRect(hwnd, &r)) return std::nullopt;
+  DWORD pid = 0;
+  GetWindowThreadProcessId(hwnd, &pid);
+  const int titleLen = GetWindowTextLengthW(hwnd);
+  if (titleLen <= 0) return std::nullopt;
+  std::wstring wtitle(static_cast<size_t>(titleLen) + 1, L'\0');
+  const int got = GetWindowTextW(hwnd, wtitle.data(), titleLen + 1);
+  if (got <= 0) return std::nullopt;
+  wtitle.resize(static_cast<size_t>(got));
+  WindowListEntry e;
+  e.id = id;
+  e.hwnd = hwnd;
+  e.pid = static_cast<uint32_t>(pid);
+  e.width = r.right - r.left;
+  e.height = r.bottom - r.top;
+  e.minimized = (IsIconic(hwnd) != 0);
+  e.title = wide_to_utf8(wtitle);
+  return e;
 }
 
 std::string env_string_or_empty(const char* key) {
@@ -521,39 +629,82 @@ LPARAM key_event_lparam(uint32_t keyCode, bool keyUp) {
   return static_cast<LPARAM>(lp);
 }
 
-int clamp_input_coord_to_client(int32_t coord, int extent) {
-  if (extent <= 1) return 0;
-  return std::clamp<int>(coord, 0, extent - 1);
+int scale_input_coord(int32_t coord, uint32_t inputExtent, int outputExtent) {
+  if (outputExtent <= 1) return 0;
+  if (inputExtent <= 1) return std::clamp<int>(coord, 0, outputExtent - 1);
+  const int32_t clamped = std::clamp<int32_t>(coord, 0, static_cast<int32_t>(inputExtent - 1));
+  const uint64_t numerator = static_cast<uint64_t>(clamped) * static_cast<uint64_t>(outputExtent - 1) +
+                             static_cast<uint64_t>((inputExtent - 1) / 2);
+  return static_cast<int>(numerator / static_cast<uint64_t>(inputExtent - 1));
 }
 
-bool make_client_lparam(HWND hwnd, int32_t x, int32_t y, LPARAM* outLp) {
+bool make_scaled_client_lparam(HWND hwnd, int32_t x, int32_t y, uint32_t inputW, uint32_t inputH,
+                               LPARAM* outLp, POINT* outClientPt = nullptr) {
   if (!outLp || !hwnd || !IsWindow(hwnd)) return false;
   RECT rc{};
   if (!GetClientRect(hwnd, &rc)) return false;
   const int w = std::max<int>(1, rc.right - rc.left);
   const int h = std::max<int>(1, rc.bottom - rc.top);
-  const int cx = clamp_input_coord_to_client(x, w);
-  const int cy = clamp_input_coord_to_client(y, h);
+  const int cx = scale_input_coord(x, inputW, w);
+  const int cy = scale_input_coord(y, inputH, h);
+  if (outClientPt) {
+    outClientPt->x = cx;
+    outClientPt->y = cy;
+  }
   *outLp = MAKELPARAM(cx, cy);
   return true;
 }
 
-bool resolve_input_target_window(const CaptureWindowCriteria& explicitCriteria,
-                                 const std::atomic<uint64_t>& captureTargetHwnd,
-                                 HWND* outHwnd) {
-  if (!outHwnd) return false;
-  *outHwnd = nullptr;
-  if (explicitCriteria.enabled()) {
-    CaptureWindowInfo explicitTarget{};
-    if (!find_capture_window_input_target(explicitCriteria, &explicitTarget)) return false;
-    if (!explicitTarget.hwnd || !IsWindow(explicitTarget.hwnd) || IsIconic(explicitTarget.hwnd)) return false;
-    *outHwnd = explicitTarget.hwnd;
-    return true;
+struct DesktopInputState {
+  std::mutex mu;
+  HWND lastHwnd = nullptr;
+  POINT lastScreenPt{};
+  bool hasLastScreenPt = false;
+};
+
+bool resolve_message_target_at_screen_point(HWND seedHwnd, const POINT& screenPt, HWND* outHwnd,
+                                            POINT* outClientPt) {
+  if (!outHwnd || !outClientPt) return false;
+  HWND hwnd = seedHwnd;
+  if (!hwnd || !IsWindow(hwnd)) hwnd = WindowFromPoint(screenPt);
+  if (!hwnd || !IsWindow(hwnd)) return false;
+
+  POINT clientPt = screenPt;
+  if (!ScreenToClient(hwnd, &clientPt)) return false;
+
+  HWND target = hwnd;
+  POINT targetClient = clientPt;
+  for (int depth = 0; depth < 16; ++depth) {
+    HWND child = ChildWindowFromPointEx(target, targetClient,
+                                        CWP_SKIPINVISIBLE | CWP_SKIPDISABLED | CWP_SKIPTRANSPARENT);
+    if (!child || child == target) break;
+    POINT nextClient = screenPt;
+    if (!ScreenToClient(child, &nextClient)) break;
+    target = child;
+    targetClient = nextClient;
   }
-  const uintptr_t hwndRaw = static_cast<uintptr_t>(captureTargetHwnd.load(std::memory_order_acquire));
-  HWND captureHwnd = reinterpret_cast<HWND>(hwndRaw);
-  if (!captureHwnd || !IsWindow(captureHwnd) || IsIconic(captureHwnd)) return false;
-  *outHwnd = captureHwnd;
+
+  *outHwnd = target;
+  *outClientPt = targetClient;
+  return true;
+}
+
+bool map_input_to_primary_monitor_point(int32_t x, int32_t y, uint32_t inputW, uint32_t inputH,
+                                        POINT* outPt) {
+  if (!outPt) return false;
+  HMONITOR primaryMon = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
+  MONITORINFO monInfo{};
+  monInfo.cbSize = sizeof(monInfo);
+  if (!GetMonitorInfo(primaryMon, &monInfo)) {
+    monInfo.rcMonitor.left = 0;
+    monInfo.rcMonitor.top = 0;
+    monInfo.rcMonitor.right = GetSystemMetrics(SM_CXSCREEN);
+    monInfo.rcMonitor.bottom = GetSystemMetrics(SM_CYSCREEN);
+  }
+  const int monW = std::max<int>(1, monInfo.rcMonitor.right - monInfo.rcMonitor.left);
+  const int monH = std::max<int>(1, monInfo.rcMonitor.bottom - monInfo.rcMonitor.top);
+  outPt->x = monInfo.rcMonitor.left + scale_input_coord(x, inputW, monW);
+  outPt->y = monInfo.rcMonitor.top + scale_input_coord(y, inputH, monH);
   return true;
 }
 
@@ -565,20 +716,127 @@ enum class InputInjectResult : uint8_t {
   Failed = 4,
 };
 
-InputInjectResult inject_background_input_event(const ControlInputEventMessage& input, HWND targetHwnd) {
-  if (!targetHwnd || !IsWindow(targetHwnd)) return InputInjectResult::NoTarget;
+InputInjectResult inject_background_input_event(const ControlInputEventMessage& input,
+                                                const CaptureWindowCriteria& explicitCriteria,
+                                                const std::atomic<uint64_t>& captureTargetHwnd,
+                                                bool desktopMode,
+                                                uint32_t inputDomainW,
+                                                uint32_t inputDomainH,
+                                                DesktopInputState* desktopInputState) {
+  if (inputDomainW == 0 || inputDomainH == 0) return InputInjectResult::Failed;
+
+  CaptureWindowInfo explicitTarget{};
+  const bool explicitTargetEnabled = explicitCriteria.enabled();
+  if (explicitTargetEnabled) {
+    if (!find_capture_window_input_target(explicitCriteria, &explicitTarget)) return InputInjectResult::NoTarget;
+    if (!explicitTarget.hwnd || !IsWindow(explicitTarget.hwnd) || IsIconic(explicitTarget.hwnd)) {
+      return InputInjectResult::NoTarget;
+    }
+    desktopMode = false;
+  }
+
+  if (!desktopMode) {
+    HWND targetHwnd = explicitTargetEnabled ? explicitTarget.hwnd
+                                            : reinterpret_cast<HWND>(static_cast<uintptr_t>(
+                                                  captureTargetHwnd.load(std::memory_order_acquire)));
+    if (!targetHwnd || !IsWindow(targetHwnd)) return InputInjectResult::NoTarget;
+    if (input.kind == 1) {
+      if ((input.buttons & 0x7u) == 0) return InputInjectResult::IgnoredMove;
+      LPARAM lp = 0;
+      if (!make_scaled_client_lparam(targetHwnd, input.x, input.y, inputDomainW, inputDomainH, &lp)) {
+        return InputInjectResult::Failed;
+      }
+      const WPARAM wp = mouse_button_wparam(static_cast<uint16_t>(input.buttons & 0x7u));
+      return PostMessageW(targetHwnd, WM_MOUSEMOVE, wp, lp) ? InputInjectResult::Injected
+                                                            : InputInjectResult::Failed;
+    }
+    if (input.kind == 2 || input.kind == 3) {
+      const UINT msg = mouse_vk_to_message(input.kind, input.keyCode);
+      if (msg == 0) return InputInjectResult::Unsupported;
+      LPARAM lp = 0;
+      if (!make_scaled_client_lparam(targetHwnd, input.x, input.y, inputDomainW, inputDomainH, &lp)) {
+        return InputInjectResult::Failed;
+      }
+      uint16_t buttons = static_cast<uint16_t>(input.buttons & 0x7u);
+      const uint16_t eventMask = mouse_vk_to_mask(input.keyCode);
+      if (input.kind == 2) {
+        buttons = static_cast<uint16_t>(buttons | eventMask);
+      } else if (input.kind == 3) {
+        buttons = static_cast<uint16_t>(buttons & static_cast<uint16_t>(~eventMask));
+      }
+      const WPARAM wp = mouse_button_wparam(buttons);
+      return PostMessageW(targetHwnd, msg, wp, lp) ? InputInjectResult::Injected
+                                                    : InputInjectResult::Failed;
+    }
+    if (input.kind == 4) {
+      POINT clientPt{};
+      LPARAM lp = 0;
+      if (!make_scaled_client_lparam(targetHwnd, input.x, input.y, inputDomainW, inputDomainH, &lp, &clientPt)) {
+        return InputInjectResult::Failed;
+      }
+      POINT screenPt = clientPt;
+      if (!ClientToScreen(targetHwnd, &screenPt)) return InputInjectResult::Failed;
+      const WPARAM wp =
+          MAKEWPARAM(mouse_button_wparam(static_cast<uint16_t>(input.buttons & 0x7u)),
+                     static_cast<WORD>(static_cast<SHORT>(input.wheelDelta)));
+      const LPARAM screenLp =
+          MAKELPARAM(static_cast<short>(screenPt.x), static_cast<short>(screenPt.y));
+      return PostMessageW(targetHwnd, WM_MOUSEWHEEL, wp, screenLp) ? InputInjectResult::Injected
+                                                                   : InputInjectResult::Failed;
+    }
+    if (input.kind == 5 || input.kind == 6) {
+      const bool keyUp = (input.kind == 6);
+      const UINT msg = keyUp ? WM_KEYUP : WM_KEYDOWN;
+      const LPARAM lp = key_event_lparam(input.keyCode, keyUp);
+      return PostMessageW(targetHwnd, msg, static_cast<WPARAM>(input.keyCode), lp)
+                 ? InputInjectResult::Injected
+                 : InputInjectResult::Failed;
+    }
+    return InputInjectResult::Unsupported;
+  }
+
+  POINT screenPt{};
+  if (!map_input_to_primary_monitor_point(input.x, input.y, inputDomainW, inputDomainH, &screenPt)) {
+    return InputInjectResult::Failed;
+  }
+
+  auto resolve_desktop_target = [&](HWND* outHwnd, POINT* outClientPt) -> bool {
+    if (!outHwnd || !outClientPt || !desktopInputState) return false;
+    HWND seed = nullptr;
+    {
+      std::lock_guard<std::mutex> lk(desktopInputState->mu);
+      seed = desktopInputState->lastHwnd;
+    }
+    HWND resolved = nullptr;
+    POINT clientPt{};
+    if (!resolve_message_target_at_screen_point(seed, screenPt, &resolved, &clientPt)) return false;
+    {
+      std::lock_guard<std::mutex> lk(desktopInputState->mu);
+      desktopInputState->lastHwnd = resolved;
+      desktopInputState->lastScreenPt = screenPt;
+      desktopInputState->hasLastScreenPt = true;
+    }
+    *outHwnd = resolved;
+    *outClientPt = clientPt;
+    return true;
+  };
+
   if (input.kind == 1) {
     if ((input.buttons & 0x7u) == 0) return InputInjectResult::IgnoredMove;
-    LPARAM lp = 0;
-    if (!make_client_lparam(targetHwnd, input.x, input.y, &lp)) return InputInjectResult::Failed;
+    HWND targetHwnd = nullptr;
+    POINT clientPt{};
+    if (!resolve_desktop_target(&targetHwnd, &clientPt)) return InputInjectResult::NoTarget;
     const WPARAM wp = mouse_button_wparam(static_cast<uint16_t>(input.buttons & 0x7u));
-    return PostMessageW(targetHwnd, WM_MOUSEMOVE, wp, lp) ? InputInjectResult::Injected : InputInjectResult::Failed;
+    const LPARAM lp = MAKELPARAM(static_cast<short>(clientPt.x), static_cast<short>(clientPt.y));
+    return PostMessageW(targetHwnd, WM_MOUSEMOVE, wp, lp) ? InputInjectResult::Injected
+                                                          : InputInjectResult::Failed;
   }
   if (input.kind == 2 || input.kind == 3) {
     const UINT msg = mouse_vk_to_message(input.kind, input.keyCode);
     if (msg == 0) return InputInjectResult::Unsupported;
-    LPARAM lp = 0;
-    if (!make_client_lparam(targetHwnd, input.x, input.y, &lp)) return InputInjectResult::Failed;
+    HWND targetHwnd = nullptr;
+    POINT clientPt{};
+    if (!resolve_desktop_target(&targetHwnd, &clientPt)) return InputInjectResult::NoTarget;
     uint16_t buttons = static_cast<uint16_t>(input.buttons & 0x7u);
     const uint16_t eventMask = mouse_vk_to_mask(input.keyCode);
     if (input.kind == 2) {
@@ -587,9 +845,32 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
       buttons = static_cast<uint16_t>(buttons & static_cast<uint16_t>(~eventMask));
     }
     const WPARAM wp = mouse_button_wparam(buttons);
-    return PostMessageW(targetHwnd, msg, wp, lp) ? InputInjectResult::Injected : InputInjectResult::Failed;
+    const LPARAM lp = MAKELPARAM(static_cast<short>(clientPt.x), static_cast<short>(clientPt.y));
+    return PostMessageW(targetHwnd, msg, wp, lp) ? InputInjectResult::Injected
+                                                  : InputInjectResult::Failed;
+  }
+  if (input.kind == 4) {
+    HWND targetHwnd = nullptr;
+    POINT clientPt{};
+    if (!resolve_desktop_target(&targetHwnd, &clientPt)) return InputInjectResult::NoTarget;
+    const WPARAM wp =
+        MAKEWPARAM(mouse_button_wparam(static_cast<uint16_t>(input.buttons & 0x7u)),
+                   static_cast<WORD>(static_cast<SHORT>(input.wheelDelta)));
+    const LPARAM screenLp =
+        MAKELPARAM(static_cast<short>(screenPt.x), static_cast<short>(screenPt.y));
+    return PostMessageW(targetHwnd, WM_MOUSEWHEEL, wp, screenLp) ? InputInjectResult::Injected
+                                                                 : InputInjectResult::Failed;
   }
   if (input.kind == 5 || input.kind == 6) {
+    HWND targetHwnd = nullptr;
+    if (desktopInputState) {
+      std::lock_guard<std::mutex> lk(desktopInputState->mu);
+      targetHwnd = desktopInputState->lastHwnd;
+    }
+    if (!targetHwnd || !IsWindow(targetHwnd)) {
+      targetHwnd = GetForegroundWindow();
+    }
+    if (!targetHwnd || !IsWindow(targetHwnd)) return InputInjectResult::NoTarget;
     const bool keyUp = (input.kind == 6);
     const UINT msg = keyUp ? WM_KEYUP : WM_KEYDOWN;
     const LPARAM lp = key_event_lparam(input.keyCode, keyUp);
@@ -597,7 +878,6 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
                ? InputInjectResult::Injected
                : InputInjectResult::Failed;
   }
-  // Mouse wheel is intentionally excluded in this phase.
   return InputInjectResult::Unsupported;
 }
 
@@ -1694,6 +1974,11 @@ int main(int argc, char** argv) {
   std::mutex hostCaptureMetaMu;
   std::string hostCaptureTargetProcess = "monitor";
   std::string hostCaptureTargetTitle;
+  std::atomic<uint64_t> selectedWindowIdState{0};
+  std::atomic<bool> windowSelectionLocked{false};
+  std::atomic<uint32_t> inputDomainW{0};
+  std::atomic<uint32_t> inputDomainH{0};
+  DesktopInputState desktopInputState;
   std::atomic<bool> clientRequestedKeyFrame{false};
   std::atomic<uint16_t> clientKeyFrameReason{0};
   std::atomic<uint64_t> clientKeyFrameRequestCount{0};
@@ -1707,6 +1992,18 @@ int main(int argc, char** argv) {
   std::atomic<uint16_t> captureModeReqMode{0};
   std::atomic<uint32_t> captureModeReqXPermille{5000};
   std::atomic<uint32_t> captureModeReqYPermille{5000};
+  struct WindowSelectionTxn {
+    std::mutex mu;
+    std::condition_variable cv;
+    bool pending = false;
+    bool completed = false;
+    uint32_t reqSeq = 0;
+    uint64_t requestedWindowId = 0;
+    uint32_t responseFlags = 0;
+    uint64_t responseWindowId = 0;
+    std::string responseReason;
+    std::string responseTitle;
+  } windowSelectionTxn;
   double keyReqTokens = static_cast<double>(keyReqTokenCapacity);
   uint64_t keyReqLastRefillUs = 0;
   uint64_t keyReqNextAllowedUs = 0;
@@ -1754,6 +2051,30 @@ int main(int argc, char** argv) {
             setsockopt(acceptedSock, IPPROTO_TCP, TCP_NODELAY,
                        reinterpret_cast<const char*>(&ctlNoDelay), sizeof(ctlNoDelay));
             std::cout << "[native-video-host][control] client connected\n";
+            auto send_window_list = [&](uint32_t seq) -> bool {
+              ControlWindowListMessage rsp{};
+              rsp.header.magic = remote60::native_poc::kMagic;
+              rsp.header.type = static_cast<uint16_t>(MessageType::ControlWindowList);
+              rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
+              rsp.seq = seq;
+              if (windowSelectionLocked.load(std::memory_order_relaxed)) rsp.flags |= 0x1u;
+              rsp.selectedWindowId = selectedWindowIdState.load(std::memory_order_relaxed);
+              const auto windows = enumerate_shareable_windows();
+              rsp.itemCount = std::min<uint32_t>(
+                  static_cast<uint32_t>(windows.size()), remote60::native_poc::kControlWindowListMaxEntries);
+              for (uint32_t i = 0; i < rsp.itemCount; ++i) {
+                const auto& src = windows[i];
+                auto& dst = rsp.items[i];
+                dst.id = src.id;
+                dst.pid = src.pid;
+                dst.width = static_cast<uint32_t>(std::max<int>(0, src.width));
+                dst.height = static_cast<uint32_t>(std::max<int>(0, src.height));
+                if (src.minimized) dst.flags |= 0x1u;
+                std::snprintf(dst.title, sizeof(dst.title), "%s", src.title.c_str());
+              }
+              return send_all(acceptedSock, &rsp, sizeof(rsp));
+            };
+
             while (!stop.load()) {
               MessageHeader header{};
               if (!recv_all(acceptedSock, &header, sizeof(header))) break;
@@ -1799,11 +2120,14 @@ int main(int argc, char** argv) {
                 input.header = header;
                 if (!recv_all(acceptedSock, &input.seq, sizeof(input) - sizeof(MessageHeader))) break;
                 if (inputInjectionEnabled) {
-                  HWND inputTargetHwnd = nullptr;
-                  const bool hasTarget =
-                      resolve_input_target_window(inputTargetCriteria, hostCaptureTargetHwnd, &inputTargetHwnd);
+                  const bool desktopMode =
+                      !inputTargetCriteria.enabled() &&
+                      (selectedWindowIdState.load(std::memory_order_acquire) == 0);
                   const InputInjectResult injectResult =
-                      hasTarget ? inject_background_input_event(input, inputTargetHwnd) : InputInjectResult::NoTarget;
+                      inject_background_input_event(input, inputTargetCriteria, hostCaptureTargetHwnd, desktopMode,
+                                                    inputDomainW.load(std::memory_order_acquire),
+                                                    inputDomainH.load(std::memory_order_acquire),
+                                                    &desktopInputState);
                   if (injectResult == InputInjectResult::Injected) {
                     const uint64_t n = inputEvents.fetch_add(1) + 1;
                     if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
@@ -1813,9 +2137,7 @@ int main(int argc, char** argv) {
                                 << " y=" << input.y
                                 << " buttons=" << input.buttons
                                 << " key=" << input.keyCode
-                                << " target=0x" << std::hex
-                                << static_cast<uint64_t>(reinterpret_cast<uintptr_t>(inputTargetHwnd))
-                                << std::dec
+                                << " mode=" << (desktopMode ? "desktop" : "window")
                                 << "\n";
                     }
                   } else if (injectResult == InputInjectResult::IgnoredMove) {
@@ -1861,6 +2183,64 @@ int main(int argc, char** argv) {
                 ack.hostRecvQpcUs = qpc_now_us();
                 ack.hostSendQpcUs = qpc_now_us();
                 if (!send_all(acceptedSock, &ack, sizeof(ack))) break;
+                continue;
+              }
+
+              if (type == MessageType::ControlWindowListRequest &&
+                  header.size == sizeof(ControlWindowListRequestMessage)) {
+                ControlWindowListRequestMessage req{};
+                req.header = header;
+                if (!recv_all(acceptedSock, &req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+                if (!send_window_list(req.seq)) break;
+                continue;
+              }
+
+              if (type == MessageType::ControlWindowSelect &&
+                  header.size == sizeof(ControlWindowSelectMessage)) {
+                ControlWindowSelectMessage req{};
+                req.header = header;
+                if (!recv_all(acceptedSock, &req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+
+                ControlWindowSelectedMessage rsp{};
+                rsp.header.magic = remote60::native_poc::kMagic;
+                rsp.header.type = static_cast<uint16_t>(MessageType::ControlWindowSelected);
+                rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
+                rsp.seq = req.seq;
+                rsp.windowId = req.windowId;
+                rsp.hostSendQpcUs = qpc_now_us();
+
+                if (windowSelectionLocked.load(std::memory_order_acquire)) {
+                  rsp.flags |= 0x2u;
+                  std::snprintf(rsp.reason, sizeof(rsp.reason), "%s", "selection_locked_by_config");
+                  if (req.windowId == 0) {
+                    std::snprintf(rsp.title, sizeof(rsp.title), "%s", "desktop");
+                  }
+                } else {
+                  {
+                    std::lock_guard<std::mutex> lk(windowSelectionTxn.mu);
+                    windowSelectionTxn.pending = true;
+                    windowSelectionTxn.completed = false;
+                    windowSelectionTxn.reqSeq = req.seq;
+                    windowSelectionTxn.requestedWindowId = req.windowId;
+                    windowSelectionTxn.responseFlags = 0;
+                    windowSelectionTxn.responseWindowId = req.windowId;
+                    windowSelectionTxn.responseReason.clear();
+                    windowSelectionTxn.responseTitle.clear();
+                  }
+                  windowSelectionTxn.cv.notify_all();
+
+                  std::unique_lock<std::mutex> lk(windowSelectionTxn.mu);
+                  windowSelectionTxn.cv.wait(lk, [&]() {
+                    return stop.load() || windowSelectionTxn.completed;
+                  });
+                  rsp.flags = windowSelectionTxn.responseFlags;
+                  rsp.windowId = windowSelectionTxn.responseWindowId;
+                  rsp.hostSendQpcUs = qpc_now_us();
+                  std::snprintf(rsp.reason, sizeof(rsp.reason), "%s", windowSelectionTxn.responseReason.c_str());
+                  std::snprintf(rsp.title, sizeof(rsp.title), "%s", windowSelectionTxn.responseTitle.c_str());
+                }
+
+                if (!send_all(acceptedSock, &rsp, sizeof(rsp))) break;
                 continue;
               }
 
@@ -2041,6 +2421,8 @@ int main(int argc, char** argv) {
     captureWindowCriteria.processNamesLower.insert(name);
   }
   captureWindowCriteria.titleNeedleLower = wide_lower(utf8_to_wide(trim_ascii(args.captureWindowTitle)));
+  const bool selectionLockedByConfig = captureWindowCriteria.enabled() || inputTargetCriteria.enabled();
+  windowSelectionLocked.store(selectionLockedByConfig, std::memory_order_release);
   const bool windowTargetConfigured = captureWindowCriteria.enabled();
   std::atomic<bool> captureWindowModeActive{false};
   std::atomic<bool> captureWindowClientOnlyActive{args.captureWindowClientOnly};
@@ -2061,6 +2443,8 @@ int main(int argc, char** argv) {
               << " titleFilter=" << trim_ascii(args.captureWindowTitle)
               << "\n";
   }
+  selectedWindowIdState.store(captureWindowModeActive ? hwnd_to_id(captureWindowInfo.hwnd) : 0u,
+                              std::memory_order_release);
   hostCaptureTargetFlags.store((captureWindowModeActive ? 0x1u : 0x0u) |
                                    ((captureWindowModeActive && captureWindowClientOnlyActive) ? 0x2u : 0x0u),
                                std::memory_order_relaxed);
@@ -2152,6 +2536,8 @@ int main(int argc, char** argv) {
       std::max<uint64_t>(1, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, activeFps)));
   uint64_t frameGatingStaticIntervalUs =
       std::max<uint64_t>(activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGatingStaticFps));
+  inputDomainW.store(activeEncodeW, std::memory_order_release);
+  inputDomainH.store(activeEncodeH, std::memory_order_release);
   bool runtimeTuneManualOverride = false;
   uint64_t abrCooldownUntilUs = 0;
   uint32_t abrGoodSeconds = 0;
@@ -2202,6 +2588,8 @@ int main(int argc, char** argv) {
     activeFps = targetFps;
     activeBitrate = targetBitrate;
     activeKeyint = targetKeyint;
+    inputDomainW.store(activeEncodeW, std::memory_order_release);
+    inputDomainH.store(activeEncodeH, std::memory_order_release);
     refresh_frame_intervals();
     return true;
   };
@@ -2734,6 +3122,144 @@ int main(int argc, char** argv) {
     return false;
   };
 
+  auto apply_selected_window_capture = [&](uint64_t requestedWindowId, uint64_t nowUs,
+                                           uint32_t* outFlags, uint64_t* outWindowId,
+                                           std::string* outReason, std::string* outTitle) -> bool {
+    if (outFlags) *outFlags = 0;
+    if (outWindowId) *outWindowId = requestedWindowId;
+    if (outReason) outReason->clear();
+    if (outTitle) outTitle->clear();
+    if (windowSelectionLocked.load(std::memory_order_acquire)) {
+      if (outFlags) *outFlags |= 0x2u;
+      if (outReason) *outReason = "selection_locked_by_config";
+      if (requestedWindowId == 0 && outTitle) *outTitle = "desktop";
+      return false;
+    }
+
+    const auto prevItem = item;
+    const bool prevCaptureWindowModeActive = captureWindowModeActive.load(std::memory_order_acquire);
+    const bool prevCaptureWindowClientOnlyActive =
+        captureWindowClientOnlyActive.load(std::memory_order_acquire);
+    const auto prevCaptureWindowCriteria = captureWindowCriteria;
+    const auto prevCaptureWindowInfo = captureWindowInfo;
+    const uint64_t prevSelectedWindowId = selectedWindowIdState.load(std::memory_order_acquire);
+    const uint32_t prevHostCaptureFlags = hostCaptureTargetFlags.load(std::memory_order_acquire);
+    const uint32_t prevHostCapturePid = hostCaptureTargetPid.load(std::memory_order_acquire);
+    const uint64_t prevHostCaptureHwnd = hostCaptureTargetHwnd.load(std::memory_order_acquire);
+    const uint32_t prevHostCaptureRebindCount = hostCaptureRebindCount.load(std::memory_order_acquire);
+    std::string prevHostCaptureProcess;
+    std::string prevHostCaptureTitle;
+    {
+      std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
+      prevHostCaptureProcess = hostCaptureTargetProcess;
+      prevHostCaptureTitle = hostCaptureTargetTitle;
+    }
+
+    auto restore_previous_target = [&]() {
+      item = prevItem;
+      captureWindowModeActive.store(prevCaptureWindowModeActive, std::memory_order_release);
+      captureWindowClientOnlyActive.store(prevCaptureWindowClientOnlyActive, std::memory_order_release);
+      captureWindowCriteria = prevCaptureWindowCriteria;
+      captureWindowInfo = prevCaptureWindowInfo;
+      selectedWindowIdState.store(prevSelectedWindowId, std::memory_order_release);
+      hostCaptureTargetFlags.store(prevHostCaptureFlags, std::memory_order_release);
+      hostCaptureTargetPid.store(prevHostCapturePid, std::memory_order_release);
+      hostCaptureTargetHwnd.store(prevHostCaptureHwnd, std::memory_order_release);
+      hostCaptureRebindCount.store(prevHostCaptureRebindCount, std::memory_order_release);
+      {
+        std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
+        hostCaptureTargetProcess = prevHostCaptureProcess;
+        hostCaptureTargetTitle = prevHostCaptureTitle;
+      }
+    };
+
+    winrt::Windows::Graphics::Capture::GraphicsCaptureItem nextItem{nullptr};
+    CaptureWindowInfo nextCaptureWindowInfo{};
+    bool nextCaptureWindowModeActive = false;
+    bool nextCaptureWindowClientOnlyActive = false;
+    CaptureWindowCriteria nextCaptureWindowCriteria{};
+    uint64_t nextSelectedWindowId = requestedWindowId;
+    std::string nextReason = "ok";
+    std::string nextTitle;
+    std::string nextProcess = "monitor";
+    uint32_t nextPid = 0;
+    uint64_t nextHwnd = 0;
+    uint32_t nextFlags = 0;
+
+    if (requestedWindowId == 0) {
+      nextItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(window-select-desktop)");
+      if (!nextItem) {
+        if (outReason) *outReason = "desktop_capture_item_failed";
+        if (outTitle) *outTitle = "desktop";
+        return false;
+      }
+      nextReason = "desktop_mode_selected";
+      nextTitle = "desktop";
+    } else {
+      const auto selected = find_window_by_id(requestedWindowId);
+      if (!selected.has_value()) {
+        if (outReason) *outReason = "window_not_found_or_not_shareable";
+        return false;
+      }
+      nextItem = CreateItemForPrimaryMonitor(selected->hwnd, "CreateForWindow(window-select)");
+      if (!nextItem) {
+        if (outReason) *outReason = "window_capture_item_failed";
+        if (outTitle) *outTitle = selected->title;
+        return false;
+      }
+      nextCaptureWindowModeActive = true;
+      nextCaptureWindowClientOnlyActive = false;
+      nextCaptureWindowInfo.hwnd = selected->hwnd;
+      nextCaptureWindowInfo.pid = selected->pid;
+      nextCaptureWindowInfo.processName = get_window_process_name(selected->hwnd, nullptr);
+      nextCaptureWindowInfo.title = utf8_to_wide(selected->title);
+      nextSelectedWindowId = selected->id;
+      nextReason = "ok";
+      nextTitle = selected->title;
+      nextProcess = nextCaptureWindowInfo.processName.empty() ? "unknown" : nextCaptureWindowInfo.processName;
+      nextPid = selected->pid;
+      nextHwnd = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(selected->hwnd));
+      nextFlags = 0x1u;
+    }
+
+    item = nextItem;
+    captureWindowModeActive.store(nextCaptureWindowModeActive, std::memory_order_release);
+    captureWindowClientOnlyActive.store(nextCaptureWindowClientOnlyActive, std::memory_order_release);
+    captureWindowCriteria = nextCaptureWindowCriteria;
+    captureWindowInfo = nextCaptureWindowInfo;
+    selectedWindowIdState.store(nextSelectedWindowId, std::memory_order_release);
+    hostCaptureTargetFlags.store(nextFlags, std::memory_order_release);
+    hostCaptureTargetPid.store(nextPid, std::memory_order_release);
+    hostCaptureTargetHwnd.store(nextHwnd, std::memory_order_release);
+    {
+      std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
+      hostCaptureTargetProcess = nextProcess;
+      hostCaptureTargetTitle = nextTitle == "desktop" ? std::string{} : nextTitle;
+    }
+    nextCaptureWindowCheckUs = nowUs + captureWindowRebindIntervalUs;
+    lastCaptureRestartUs = nowUs;
+    if (!restart_capture_session()) {
+      restore_previous_target();
+      if (outReason) *outReason = "capture_restart_failed";
+      if (outTitle) *outTitle = nextTitle;
+      return false;
+    }
+
+    captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+    lastCaptureUsForInterval.store(0, std::memory_order_release);
+    lastCallbackUs.store(0, std::memory_order_release);
+    resetHostTimelineAnchors();
+    forceKeyNext = true;
+    lastSyntheticKeepaliveUs = 0;
+    ++captureRestartCount;
+
+    if (outFlags) *outFlags = 0x1u;
+    if (outWindowId) *outWindowId = nextSelectedWindowId;
+    if (outReason) *outReason = nextReason;
+    if (outTitle) *outTitle = nextTitle;
+    return true;
+  };
+
   while (!stop.load()) {
     const uint64_t nowUs = qpc_now_us();
     uint64_t tickWaitUs = 0;
@@ -2766,6 +3292,45 @@ int main(int argc, char** argv) {
                   << " abrOverride=1\n";
       }
     }
+    {
+      uint32_t reqSeq = 0;
+      uint64_t requestedWindowId = 0;
+      bool hasWindowSelectRequest = false;
+      {
+        std::lock_guard<std::mutex> lk(windowSelectionTxn.mu);
+        if (windowSelectionTxn.pending) {
+          reqSeq = windowSelectionTxn.reqSeq;
+          requestedWindowId = windowSelectionTxn.requestedWindowId;
+          hasWindowSelectRequest = true;
+          windowSelectionTxn.pending = false;
+        }
+      }
+      if (hasWindowSelectRequest) {
+        uint32_t responseFlags = 0;
+        uint64_t responseWindowId = requestedWindowId;
+        std::string responseReason;
+        std::string responseTitle;
+        const bool applied = apply_selected_window_capture(
+            requestedWindowId, nowUs, &responseFlags, &responseWindowId, &responseReason, &responseTitle);
+        {
+          std::lock_guard<std::mutex> lk(windowSelectionTxn.mu);
+          windowSelectionTxn.responseFlags = responseFlags;
+          windowSelectionTxn.responseWindowId = responseWindowId;
+          windowSelectionTxn.responseReason = responseReason;
+          windowSelectionTxn.responseTitle = responseTitle;
+          windowSelectionTxn.completed = true;
+        }
+        windowSelectionTxn.cv.notify_all();
+
+        std::cout << "[native-video-host][control] window-select seq=" << reqSeq
+                  << " requestedId=" << requestedWindowId
+                  << " applied=" << (applied ? 1 : 0)
+                  << " selectedId=" << responseWindowId
+                  << " reason=" << (responseReason.empty() ? "none" : responseReason)
+                  << " title=" << (responseTitle.empty() ? "<empty>" : responseTitle)
+                  << "\n";
+      }
+    }
     if (captureModeReqPending.exchange(false, std::memory_order_acq_rel)) {
       const uint16_t reqMode = captureModeReqMode.load(std::memory_order_acquire);
       const uint32_t reqSeq = captureModeReqSeq.load(std::memory_order_acquire);
@@ -2780,6 +3345,7 @@ int main(int argc, char** argv) {
           captureWindowModeActive = false;
           captureWindowCriteria.processNamesLower.clear();
           captureWindowCriteria.titleNeedleLower.clear();
+          selectedWindowIdState.store(0u, std::memory_order_release);
           hostCaptureTargetFlags.store(0u, std::memory_order_release);
           hostCaptureTargetPid.store(0u, std::memory_order_release);
           hostCaptureTargetHwnd.store(0u, std::memory_order_release);
@@ -2849,6 +3415,7 @@ int main(int argc, char** argv) {
               captureWindowCriteria.processNamesLower.insert(selected.processName);
             }
             captureWindowCriteria.titleNeedleLower.clear();
+            selectedWindowIdState.store(hwnd_to_id(selected.hwnd), std::memory_order_release);
             hostCaptureTargetFlags.store(0x1u | 0x2u, std::memory_order_release);
             hostCaptureTargetPid.store(selected.pid, std::memory_order_release);
             hostCaptureTargetHwnd.store(
@@ -2899,6 +3466,7 @@ int main(int argc, char** argv) {
               CreateItemForPrimaryMonitor(latestWindowInfo.hwnd, "CreateForWindow(target-window-rebind)");
           if (nextItem) {
             item = nextItem;
+            selectedWindowIdState.store(hwnd_to_id(latestWindowInfo.hwnd), std::memory_order_release);
             hostCaptureTargetHwnd.store(static_cast<uint64_t>(nextRaw), std::memory_order_release);
             hostCaptureTargetPid.store(latestWindowInfo.pid, std::memory_order_release);
             {
@@ -4292,6 +4860,7 @@ int main(int argc, char** argv) {
 
   stop = true;
   frame.cv.notify_all();
+  windowSelectionTxn.cv.notify_all();
   {
     SOCKET ctlSock = controlClientSock.exchange(INVALID_SOCKET);
     if (ctlSock != INVALID_SOCKET) {

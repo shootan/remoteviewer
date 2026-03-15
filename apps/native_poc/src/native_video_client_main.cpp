@@ -49,6 +49,11 @@ using remote60::native_poc::ControlClientMetricsMessage;
 using remote60::native_poc::ControlRequestKeyFrameMessage;
 using remote60::native_poc::ControlRuntimeEncoderConfigMessage;
 using remote60::native_poc::ControlCaptureModeRequestMessage;
+using remote60::native_poc::ControlWindowEntry;
+using remote60::native_poc::ControlWindowListMessage;
+using remote60::native_poc::ControlWindowListRequestMessage;
+using remote60::native_poc::ControlWindowSelectMessage;
+using remote60::native_poc::ControlWindowSelectedMessage;
 using remote60::native_poc::ControlPingMessage;
 using remote60::native_poc::ControlPongMessage;
 using remote60::native_poc::DecodedFrameNv12;
@@ -417,8 +422,8 @@ SharedFrame gFrame;
 std::atomic<bool> gRunning{true};
 SOCKET gSock = INVALID_SOCKET;
 HWND gHwnd = nullptr;
-uint32_t gWindowW = 1280;
-uint32_t gWindowH = 720;
+uint32_t gWindowW = 1600;
+uint32_t gWindowH = 900;
 std::atomic<bool> gPaintQueued{false};
 std::atomic<uint32_t> gTraceEvery{0};
 std::atomic<uint32_t> gTraceMax{0};
@@ -533,8 +538,6 @@ struct OverlayConfigSnapshot {
 };
 
 OverlayConfigSnapshot gOverlayConfig;
-std::atomic<bool> gOverlayVisible{false};
-std::atomic<bool> gOverlayButtonDown{false};
 std::atomic<bool> gControlConnected{false};
 std::atomic<uint32_t> gHostCaptureTargetPid{0};
 std::atomic<uint32_t> gHostCaptureTargetFlags{0};
@@ -574,20 +577,62 @@ struct OverlayMetricAverages {
 
 std::mutex gOverlayMetricsMu;
 std::deque<OverlayMetricSample> gOverlayMetrics;
+void log_client_line(const std::string& line);
 
-constexpr int kOverlayButtonX = 12;
-constexpr int kOverlayButtonY = 12;
-constexpr int kOverlayButtonW = 132;
-constexpr int kOverlayButtonH = 30;
-constexpr int kOverlayPanelX = 12;
-constexpr int kOverlayPanelY = 50;
-constexpr int kOverlayPanelW = 490;
-constexpr int kOverlayPanelH = 390;
+struct WindowTargetUiEntry {
+  uint64_t id = 0;
+  uint32_t pid = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  bool minimized = false;
+  std::string title;
+};
+
+struct WindowPanelState {
+  std::vector<WindowTargetUiEntry> items;
+  uint64_t selectedId = 0;
+  std::string selectedTitle = "desktop";
+  bool selectionLocked = false;
+  bool listRequestPending = false;
+  bool selectRequestPending = false;
+  uint64_t pendingSelectId = 0;
+  uint32_t nextRequestSeq = 1;
+  std::string status = "waiting_control";
+  int scrollIndex = 0;
+};
+
+std::mutex gWindowPanelMu;
+WindowPanelState gWindowPanel;
+std::atomic<uint64_t> gSuppressMouseUntilUs{0};
+std::atomic<uint32_t> gActiveTouchPointerId{0};
+std::atomic<bool> gActiveTouchDown{false};
+
+constexpr int kPanelPreferredWidth = 340;
+constexpr int kPanelMinWidth = 260;
+constexpr int kPanelMargin = 12;
+constexpr int kPanelButtonHeight = 30;
+constexpr int kPanelButtonGap = 8;
+constexpr int kPanelSectionGap = 12;
+constexpr int kPanelInfoHeight = 64;
+constexpr int kPanelStatsHeight = 128;
+constexpr int kPanelItemHeight = 28;
+constexpr int kPanelItemGap = 4;
 constexpr uint32_t kRuntimeBitrateMin = 300000;
 constexpr uint32_t kRuntimeBitrateMax = 30000000;
 constexpr uint32_t kRuntimeBitrateStep = 250000;
 constexpr uint32_t kRuntimeKeyintMin = 1;
 constexpr uint32_t kRuntimeKeyintMax = 240;
+
+struct ClientLayout {
+  RECT clientRect{};
+  RECT panelRect{};
+  RECT videoRect{};
+  RECT refreshButtonRect{};
+  RECT desktopButtonRect{};
+  RECT selectedInfoRect{};
+  RECT listRect{};
+  RECT statsRect{};
+};
 
 RECT make_rect(int x, int y, int w, int h) {
   RECT r{};
@@ -602,38 +647,83 @@ bool point_in_rect(const RECT& r, int x, int y) {
   return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
 }
 
-RECT overlay_toggle_rect() {
-  return make_rect(kOverlayButtonX, kOverlayButtonY, kOverlayButtonW, kOverlayButtonH);
+ClientLayout compute_client_layout(HWND hwnd) {
+  ClientLayout layout{};
+  if (hwnd && IsWindow(hwnd)) {
+    GetClientRect(hwnd, &layout.clientRect);
+  } else {
+    layout.clientRect = make_rect(0, 0, static_cast<int>(gWindowW), static_cast<int>(gWindowH));
+  }
+  const int clientW =
+      std::max<int>(1, static_cast<int>(layout.clientRect.right - layout.clientRect.left));
+  const int clientH =
+      std::max<int>(1, static_cast<int>(layout.clientRect.bottom - layout.clientRect.top));
+  const int panelW = std::clamp(clientW / 4, kPanelMinWidth, kPanelPreferredWidth);
+  layout.panelRect = make_rect(0, 0, std::min(clientW, panelW), clientH);
+  layout.videoRect = make_rect(static_cast<int>(layout.panelRect.right), 0,
+                               std::max<int>(1, clientW - static_cast<int>(layout.panelRect.right)), clientH);
+
+  const int buttonY = kPanelMargin;
+  const int buttonW = std::max<int>(
+      80, (static_cast<int>(layout.panelRect.right) - (kPanelMargin * 2) - kPanelButtonGap) / 2);
+  layout.refreshButtonRect = make_rect(kPanelMargin, buttonY, buttonW, kPanelButtonHeight);
+  layout.desktopButtonRect = make_rect(layout.refreshButtonRect.right + kPanelButtonGap, buttonY,
+                                       buttonW, kPanelButtonHeight);
+
+  const int infoY = layout.refreshButtonRect.bottom + kPanelSectionGap;
+  layout.selectedInfoRect = make_rect(kPanelMargin, infoY,
+                                      std::max<int>(1, static_cast<int>(layout.panelRect.right) - (kPanelMargin * 2)),
+                                      kPanelInfoHeight);
+
+  const int listY = layout.selectedInfoRect.bottom + kPanelSectionGap;
+  const int listH = std::max<int>(80, clientH - listY - kPanelStatsHeight - kPanelMargin - kPanelSectionGap);
+  layout.listRect = make_rect(kPanelMargin, listY,
+                              std::max<int>(1, static_cast<int>(layout.panelRect.right) - (kPanelMargin * 2)), listH);
+
+  const int statsY = layout.listRect.bottom + kPanelSectionGap;
+  layout.statsRect = make_rect(kPanelMargin, statsY,
+                               std::max<int>(1, static_cast<int>(layout.panelRect.right) - (kPanelMargin * 2)),
+                               std::max<int>(40, clientH - statsY - kPanelMargin));
+  return layout;
 }
 
-RECT overlay_panel_rect() {
-  return make_rect(kOverlayPanelX, kOverlayPanelY, kOverlayPanelW, kOverlayPanelH);
+bool point_in_panel_ui(HWND hwnd, int x, int y) {
+  const ClientLayout layout = compute_client_layout(hwnd);
+  return point_in_rect(layout.panelRect, x, y);
 }
 
-RECT overlay_bitrate_minus_rect() {
-  return make_rect(kOverlayPanelX + 20, kOverlayPanelY + 292, 26, 24);
+bool point_in_video_rect(HWND hwnd, int x, int y) {
+  const ClientLayout layout = compute_client_layout(hwnd);
+  return point_in_rect(layout.videoRect, x, y);
 }
 
-RECT overlay_bitrate_plus_rect() {
-  return make_rect(kOverlayPanelX + 84, kOverlayPanelY + 292, 26, 24);
-}
-
-RECT overlay_keyint_minus_rect() {
-  return make_rect(kOverlayPanelX + 220, kOverlayPanelY + 292, 26, 24);
-}
-
-RECT overlay_keyint_plus_rect() {
-  return make_rect(kOverlayPanelX + 284, kOverlayPanelY + 292, 26, 24);
-}
-
-RECT overlay_mode_overview_rect() {
-  return make_rect(kOverlayPanelX + 20, kOverlayPanelY + 328, 120, 24);
-}
-
-bool point_in_overlay_ui(int x, int y) {
-  if (point_in_rect(overlay_toggle_rect(), x, y)) return true;
-  if (!gOverlayVisible.load(std::memory_order_relaxed)) return false;
-  return point_in_rect(overlay_panel_rect(), x, y);
+bool map_client_point_to_video_coords(HWND hwnd, int x, int y, int32_t* outVideoX, int32_t* outVideoY) {
+  if (!outVideoX || !outVideoY) return false;
+  const ClientLayout layout = compute_client_layout(hwnd);
+  if (!point_in_rect(layout.videoRect, x, y)) return false;
+  uint32_t frameW = gClientMetrics.width.load(std::memory_order_relaxed);
+  uint32_t frameH = gClientMetrics.height.load(std::memory_order_relaxed);
+  if (frameW == 0 || frameH == 0) {
+    std::lock_guard<std::mutex> lk(gFrame.mu);
+    frameW = gFrame.width;
+    frameH = gFrame.height;
+  }
+  if (frameW == 0 || frameH == 0) return false;
+  const int relX =
+      std::clamp<int>(x - layout.videoRect.left, 0,
+                      std::max<int>(0, static_cast<int>(layout.videoRect.right - layout.videoRect.left - 1)));
+  const int relY =
+      std::clamp<int>(y - layout.videoRect.top, 0,
+                      std::max<int>(0, static_cast<int>(layout.videoRect.bottom - layout.videoRect.top - 1)));
+  const int videoW = std::max<int>(1, static_cast<int>(layout.videoRect.right - layout.videoRect.left));
+  const int videoH = std::max<int>(1, static_cast<int>(layout.videoRect.bottom - layout.videoRect.top));
+  *outVideoX = static_cast<int32_t>((static_cast<uint64_t>(relX) * static_cast<uint64_t>(frameW - 1) +
+                                     static_cast<uint64_t>(videoW / 2)) /
+                                    static_cast<uint64_t>(videoW));
+  *outVideoY = static_cast<int32_t>((static_cast<uint64_t>(relY) * static_cast<uint64_t>(frameH - 1) +
+                                     static_cast<uint64_t>(videoH / 2)) /
+                                    static_cast<uint64_t>(videoH));
+  return true;
 }
 
 uint32_t coord_to_permille(int coord, int extent) {
@@ -642,6 +732,122 @@ uint32_t coord_to_permille(int coord, int extent) {
   const uint64_t numerator = static_cast<uint64_t>(clamped) * 10000ULL +
                              static_cast<uint64_t>((extent - 1) / 2);
   return static_cast<uint32_t>(numerator / static_cast<uint64_t>(extent - 1));
+}
+
+void queue_window_list_request(const char* statusText = nullptr) {
+  std::lock_guard<std::mutex> lk(gWindowPanelMu);
+  gWindowPanel.listRequestPending = true;
+  if (statusText) gWindowPanel.status = statusText;
+}
+
+void queue_window_select_request(uint64_t windowId, const char* statusText = nullptr) {
+  std::lock_guard<std::mutex> lk(gWindowPanelMu);
+  if (gWindowPanel.selectionLocked) return;
+  gWindowPanel.selectRequestPending = true;
+  gWindowPanel.pendingSelectId = windowId;
+  if (statusText) gWindowPanel.status = statusText;
+}
+
+void set_window_panel_status(const std::string& status) {
+  std::lock_guard<std::mutex> lk(gWindowPanelMu);
+  gWindowPanel.status = status;
+}
+
+void apply_window_list_snapshot(const ControlWindowListMessage& msg) {
+  std::lock_guard<std::mutex> lk(gWindowPanelMu);
+  gWindowPanel.items.clear();
+  const uint32_t count = std::min<uint32_t>(msg.itemCount, remote60::native_poc::kControlWindowListMaxEntries);
+  gWindowPanel.items.reserve(count);
+  for (uint32_t i = 0; i < count; ++i) {
+    const auto& src = msg.items[i];
+    WindowTargetUiEntry item{};
+    item.id = src.id;
+    item.pid = src.pid;
+    item.width = src.width;
+    item.height = src.height;
+    item.minimized = ((src.flags & 0x1u) != 0);
+    item.title = fixed_cstr_to_string(src.title, sizeof(src.title));
+    if (item.title.empty()) item.title = "(untitled)";
+    gWindowPanel.items.push_back(std::move(item));
+  }
+  gWindowPanel.selectedId = msg.selectedWindowId;
+  gWindowPanel.selectionLocked = ((msg.flags & 0x1u) != 0);
+  if (msg.selectedWindowId == 0) {
+    gWindowPanel.selectedTitle = "desktop";
+  } else {
+    auto it = std::find_if(gWindowPanel.items.begin(), gWindowPanel.items.end(),
+                           [&](const WindowTargetUiEntry& entry) {
+                             return entry.id == msg.selectedWindowId;
+                           });
+    gWindowPanel.selectedTitle = (it != gWindowPanel.items.end()) ? it->title : "window";
+  }
+  const ClientLayout layout = compute_client_layout(gHwnd);
+  const int visibleCount =
+      std::max<int>(1, (layout.listRect.bottom - layout.listRect.top) / (kPanelItemHeight + kPanelItemGap));
+  const int maxScroll = std::max<int>(0, static_cast<int>(gWindowPanel.items.size()) - visibleCount);
+  gWindowPanel.scrollIndex = std::clamp(gWindowPanel.scrollIndex, 0, maxScroll);
+  gWindowPanel.status = std::string("window_list_received count=") + std::to_string(count);
+  std::ostringstream oss;
+  oss << "[native-video-client][control] window-list seq=" << msg.seq
+      << " count=" << count
+      << " selectedId=" << msg.selectedWindowId
+      << " locked=" << (((msg.flags & 0x1u) != 0) ? 1 : 0);
+  if (!gWindowPanel.items.empty()) {
+    oss << " firstId=" << gWindowPanel.items.front().id
+        << " firstTitle=" << gWindowPanel.items.front().title;
+  }
+  log_client_line(oss.str());
+}
+
+void apply_window_selected_result(const ControlWindowSelectedMessage& msg) {
+  std::lock_guard<std::mutex> lk(gWindowPanelMu);
+  const bool ok = ((msg.flags & 0x1u) != 0);
+  const bool locked = ((msg.flags & 0x2u) != 0);
+  gWindowPanel.selectionLocked = gWindowPanel.selectionLocked || locked;
+  const std::string reason = fixed_cstr_to_string(msg.reason, sizeof(msg.reason));
+  const std::string title = fixed_cstr_to_string(msg.title, sizeof(msg.title));
+  if (ok) {
+    gWindowPanel.selectedId = msg.windowId;
+    gWindowPanel.selectedTitle = (msg.windowId == 0) ? "desktop" : (title.empty() ? "window" : title);
+    gWindowPanel.status = std::string("window_selected: ") + gWindowPanel.selectedTitle;
+  } else {
+    gWindowPanel.status = std::string("window_select_failed: ") + (reason.empty() ? "unknown" : reason);
+  }
+  std::ostringstream oss;
+  oss << "[native-video-client][control] window-selected seq=" << msg.seq
+      << " ok=" << (ok ? 1 : 0)
+      << " windowId=" << msg.windowId
+      << " reason=" << (reason.empty() ? "none" : reason)
+      << " title=" << (title.empty() ? "<empty>" : title)
+      << " locked=" << (locked ? 1 : 0);
+  log_client_line(oss.str());
+}
+
+void scroll_window_list(HWND hwnd, int deltaSteps) {
+  const ClientLayout layout = compute_client_layout(hwnd);
+  const int visibleCount =
+      std::max<int>(1, (layout.listRect.bottom - layout.listRect.top) / (kPanelItemHeight + kPanelItemGap));
+  std::lock_guard<std::mutex> lk(gWindowPanelMu);
+  const int maxScroll = std::max<int>(0, static_cast<int>(gWindowPanel.items.size()) - visibleCount);
+  gWindowPanel.scrollIndex = std::clamp(gWindowPanel.scrollIndex + deltaSteps, 0, maxScroll);
+}
+
+bool try_hit_window_list_item(HWND hwnd, int x, int y, uint64_t* outWindowId) {
+  if (!outWindowId) return false;
+  const ClientLayout layout = compute_client_layout(hwnd);
+  if (!point_in_rect(layout.listRect, x, y)) return false;
+  const int itemStep = kPanelItemHeight + kPanelItemGap;
+  const int row = (y - layout.listRect.top - 6) / itemStep;
+  if (row < 0) return false;
+
+  std::lock_guard<std::mutex> lk(gWindowPanelMu);
+  const int visibleCount = std::max<int>(1, (layout.listRect.bottom - layout.listRect.top - 8) / itemStep);
+  const int scrollIndex = std::clamp(gWindowPanel.scrollIndex, 0,
+                                     std::max<int>(0, static_cast<int>(gWindowPanel.items.size()) - visibleCount));
+  const int itemIndex = scrollIndex + row;
+  if (itemIndex < 0 || itemIndex >= static_cast<int>(gWindowPanel.items.size())) return false;
+  *outWindowId = gWindowPanel.items[itemIndex].id;
+  return true;
 }
 
 void enqueue_capture_mode_request(uint16_t mode, uint32_t xPermille, uint32_t yPermille) {
@@ -690,12 +896,19 @@ void draw_alpha_rect(HDC hdc, const RECT& rect, COLORREF color, BYTE alpha) {
   DeleteDC(memDc);
 }
 
-void draw_panel_button(HDC hdc, const RECT& rect, const char* label, bool active = false) {
-  HBRUSH b = CreateSolidBrush(active ? RGB(48, 96, 62) : RGB(60, 68, 80));
+void draw_panel_button(HDC hdc, const RECT& rect, const char* label, bool active = false,
+                       bool disabled = false) {
+  COLORREF fill = RGB(60, 68, 80);
+  if (disabled) {
+    fill = RGB(42, 46, 54);
+  } else if (active) {
+    fill = RGB(48, 96, 62);
+  }
+  HBRUSH b = CreateSolidBrush(fill);
   FillRect(hdc, &rect, b);
   DeleteObject(b);
   SetBkMode(hdc, TRANSPARENT);
-  SetTextColor(hdc, RGB(240, 240, 240));
+  SetTextColor(hdc, disabled ? RGB(160, 165, 170) : RGB(240, 240, 240));
   RECT textRect = rect;
   DrawTextA(hdc, label, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
@@ -774,19 +987,9 @@ void apply_runtime_tune_delta(int bitrateStep, int keyintStep) {
 }
 
 void draw_overlay(HDC hdc) {
-  const RECT toggle = overlay_toggle_rect();
-  draw_alpha_rect(hdc, toggle, RGB(18, 20, 26), 165);
-  SetBkMode(hdc, TRANSPARENT);
-  SetTextColor(hdc, RGB(232, 232, 232));
-  RECT toggleText = toggle;
-  const bool visible = gOverlayVisible.load(std::memory_order_relaxed);
-  DrawTextA(hdc, visible ? "Stats: ON" : "Stats: OFF", -1, &toggleText, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-  if (!visible) return;
-
-  const RECT panel = overlay_panel_rect();
-  draw_alpha_rect(hdc, panel, RGB(12, 15, 20), 185);
-
+  const ClientLayout layout = compute_client_layout(gHwnd);
+  const RECT panel = layout.panelRect;
+  draw_alpha_rect(hdc, panel, RGB(12, 15, 20), 235);
   const uint64_t nowUs = qpc_now_us();
   const OverlayMetricAverages avg5s = collect_overlay_averages(nowUs, 5000000ULL);
   const uint32_t width = gClientMetrics.width.load(std::memory_order_relaxed);
@@ -811,124 +1014,127 @@ void draw_overlay(HDC hdc) {
     hostCapProcess = gHostCaptureTargetProcess;
     hostCapTitle = gHostCaptureTargetTitle;
   }
+  std::vector<WindowTargetUiEntry> windowItems;
+  uint64_t selectedId = 0;
+  std::string selectedTitle = "desktop";
+  std::string panelStatus = "waiting_control";
+  bool selectionLocked = false;
+  int scrollIndex = 0;
+  {
+    std::lock_guard<std::mutex> lk(gWindowPanelMu);
+    windowItems = gWindowPanel.items;
+    selectedId = gWindowPanel.selectedId;
+    selectedTitle = gWindowPanel.selectedTitle;
+    panelStatus = gWindowPanel.status;
+    selectionLocked = gWindowPanel.selectionLocked;
+    scrollIndex = gWindowPanel.scrollIndex;
+  }
 
-  std::vector<std::string> lines;
-  lines.reserve(18);
-  lines.emplace_back("Runtime Overlay");
-  {
-    std::ostringstream oss;
-    oss << "Resolution: " << width << "x" << height
-        << "  stale=" << staleMs << "ms";
-    lines.push_back(oss.str());
-  }
-  {
-    std::ostringstream oss;
-    oss << "FPS recv/dec(1s): " << (recvFpsX100 / 100.0) << " / " << (decFpsX100 / 100.0);
-    lines.push_back(oss.str());
-  }
-  {
-    std::ostringstream oss;
-    oss << "Net Mbps(1s): " << (mbpsX1000 / 1000.0)
-        << "  avgLat(1s): " << (latUs / 1000.0) << "ms"
-        << "  skipped=" << dropped;
-    lines.push_back(oss.str());
-  }
-  {
-    std::ostringstream oss;
-    oss << "FPS recv/dec(5s avg): " << (avg5s.recvFpsX100 / 100.0)
-        << " / " << (avg5s.decodedFpsX100 / 100.0)
-        << "  Net=" << (avg5s.recvMbpsX1000 / 1000.0) << "Mbps";
-    lines.push_back(oss.str());
-  }
-  {
-    std::ostringstream oss;
-    oss << "Transport=" << gOverlayConfig.transport
-        << " Codec=" << gOverlayConfig.codec
-        << " Host=" << gOverlayConfig.host << ":" << gOverlayConfig.port;
-    lines.push_back(oss.str());
-  }
-  {
-    std::ostringstream oss;
-    oss << "HostCapture pid=" << hostCapPid
-        << " proc=" << (hostCapProcess.empty() ? "monitor" : hostCapProcess)
-        << " rebind=" << hostCapRebind
-        << " age=" << hostCapMetaAgeMs << "ms";
-    lines.push_back(oss.str());
-  }
-  {
-    std::ostringstream oss;
-    oss << "HostCapture hwnd=0x" << std::hex << hostCapHwnd << std::dec
-        << " mode=" << (((hostCapFlags & 0x1u) != 0) ? "window" : "monitor")
-        << (((hostCapFlags & 0x2u) != 0) ? "+client" : "")
-        << " title=" << (hostCapTitle.empty() ? "<empty>" : hostCapTitle);
-    lines.push_back(oss.str());
-  }
-  {
-    std::ostringstream oss;
-    oss << "CtrlPort=" << gOverlayConfig.controlPort
-        << " CtrlIntMs=" << gOverlayConfig.controlIntervalMs
-        << " FpsHint=" << gOverlayConfig.fpsHint;
-    lines.push_back(oss.str());
-  }
-  {
-    std::ostringstream oss;
-    oss << "SockCfg recv/snd kb=" << gOverlayConfig.tcpRecvBufKb << "/" << gOverlayConfig.tcpSendBufKb
-        << " udpMtu=" << gOverlayConfig.udpMtu
-        << " udpSimDropPm=" << gOverlayConfig.udpSimDropPm;
-    lines.push_back(oss.str());
-  }
-  {
-    std::ostringstream oss;
-    oss << "KeyReqLimiter min=" << gOverlayConfig.keyReqMinIntervalUs
-        << " refill=" << gOverlayConfig.keyReqTokenRefillUs
-        << " cap=" << gOverlayConfig.keyReqTokenCapacity;
-    lines.push_back(oss.str());
-  }
-  {
-    std::ostringstream oss;
-    oss << "Runtime tune: " << (gRuntimeTuneEnabled.load(std::memory_order_relaxed) ? "enabled" : "disabled")
-        << " control=" << (gControlConnected.load(std::memory_order_relaxed) ? "connected" : "off");
-    lines.push_back(oss.str());
-  }
-  {
-    std::ostringstream oss;
-    oss << "Capture mode: " << (gCaptureOverviewMode.load(std::memory_order_relaxed) ? "overview(low)" : "focus(high)");
-    lines.push_back(oss.str());
-  }
-  {
-    const uint32_t targetBitrate = gRuntimeTargetBitrate.load(std::memory_order_relaxed);
-    const uint32_t targetKeyint = gRuntimeTargetKeyint.load(std::memory_order_relaxed);
-    const uint64_t sentUs = gRuntimeTuneLastSentUs.load(std::memory_order_relaxed);
-    const uint64_t ageMs = (sentUs > 0 && nowUs >= sentUs) ? ((nowUs - sentUs) / 1000ULL) : 0;
-    std::ostringstream oss;
-    oss << "Target bitrate/keyint: " << targetBitrate << " / " << targetKeyint
-        << "  lastSendAgo=" << ageMs << "ms";
-    lines.push_back(oss.str());
-  }
-  lines.emplace_back("Click +/- to tune. Hotkeys: F8(toggle), F9(overview), [ ] bitrate, ; ' keyint");
-  lines.emplace_back("In overview mode, click video area to focus selected window.");
+  draw_panel_button(hdc, layout.refreshButtonRect, "Refresh", false, !gControlConnected.load(std::memory_order_relaxed));
+  draw_panel_button(hdc, layout.desktopButtonRect, "Desktop Mode", selectedId == 0,
+                    !gControlConnected.load(std::memory_order_relaxed) || selectionLocked);
 
-  SetTextColor(hdc, RGB(230, 235, 240));
+  draw_alpha_rect(hdc, layout.selectedInfoRect, RGB(24, 29, 36), 220);
+  draw_alpha_rect(hdc, layout.listRect, RGB(18, 22, 28), 210);
+  draw_alpha_rect(hdc, layout.statsRect, RGB(20, 24, 30), 200);
+
   SetBkMode(hdc, TRANSPARENT);
-  int lineY = panel.top + 12;
-  for (const std::string& line : lines) {
-    TextOutA(hdc, panel.left + 14, lineY, line.c_str(), static_cast<int>(line.size()));
-    lineY += 18;
+  SetTextColor(hdc, RGB(235, 238, 242));
+  RECT textRect = layout.selectedInfoRect;
+  textRect.left += 10;
+  textRect.right -= 10;
+  textRect.top += 8;
+  DrawTextA(hdc, "Native Window Targets", -1, &textRect, DT_LEFT | DT_SINGLELINE);
+
+  textRect.top += 20;
+  std::string selectedLine = std::string("Selected: ") + selectedTitle;
+  DrawTextA(hdc, selectedLine.c_str(), -1, &textRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+  textRect.top += 18;
+  std::string statusLine = selectionLocked ? std::string("Mode: locked by config") : panelStatus;
+  DrawTextA(hdc, statusLine.c_str(), -1, &textRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+  const int itemStep = kPanelItemHeight + kPanelItemGap;
+  const int visibleCount = std::max<int>(1, (layout.listRect.bottom - layout.listRect.top - 8) / itemStep);
+  const int clampedScroll = std::clamp(scrollIndex, 0, std::max<int>(0, static_cast<int>(windowItems.size()) - visibleCount));
+  if (windowItems.empty()) {
+    RECT emptyRect = layout.listRect;
+    emptyRect.left += 10;
+    emptyRect.top += 10;
+    emptyRect.right -= 10;
+    SetTextColor(hdc, RGB(180, 185, 190));
+    DrawTextA(hdc, selectionLocked ? "Window list hidden by config lock" : "No shareable windows. Click Refresh.",
+              -1, &emptyRect, DT_LEFT | DT_WORDBREAK);
+  } else {
+    for (int visibleIndex = 0; visibleIndex < visibleCount; ++visibleIndex) {
+      const int itemIndex = clampedScroll + visibleIndex;
+      if (itemIndex >= static_cast<int>(windowItems.size())) break;
+      const auto& entry = windowItems[itemIndex];
+      RECT itemRect = make_rect(layout.listRect.left + 6,
+                                layout.listRect.top + 6 + visibleIndex * itemStep,
+                                std::max<int>(1, static_cast<int>(layout.listRect.right - layout.listRect.left) - 12),
+                                kPanelItemHeight);
+      const bool active = (entry.id == selectedId);
+      draw_panel_button(hdc, itemRect, entry.title.c_str(), active, selectionLocked);
+      RECT itemText = itemRect;
+      itemText.left += 8;
+      itemText.right -= 8;
+      SetTextColor(hdc, selectionLocked ? RGB(165, 170, 175) : RGB(235, 238, 242));
+      DrawTextA(hdc, entry.title.c_str(), -1, &itemText,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
   }
 
-  const RECT brMinus = overlay_bitrate_minus_rect();
-  const RECT brPlus = overlay_bitrate_plus_rect();
-  const RECT kiMinus = overlay_keyint_minus_rect();
-  const RECT kiPlus = overlay_keyint_plus_rect();
-  const RECT modeOverview = overlay_mode_overview_rect();
-  draw_panel_button(hdc, brMinus, "-");
-  draw_panel_button(hdc, brPlus, "+");
-  draw_panel_button(hdc, kiMinus, "-");
-  draw_panel_button(hdc, kiPlus, "+");
-  draw_panel_button(hdc, modeOverview, "Go Overview", gCaptureOverviewMode.load(std::memory_order_relaxed));
-  SetTextColor(hdc, RGB(215, 220, 230));
-  TextOutA(hdc, panel.left + 120, panel.top + 296, "bitrate", 7);
-  TextOutA(hdc, panel.left + 320, panel.top + 296, "keyint", 6);
+  std::vector<std::string> statsLines;
+  statsLines.reserve(8);
+  {
+    std::ostringstream oss;
+    oss << "Frame: " << width << "x" << height
+        << "  recv/dec=" << (recvFpsX100 / 100.0) << "/" << (decFpsX100 / 100.0);
+    statsLines.push_back(oss.str());
+  }
+  {
+    std::ostringstream oss;
+    oss << "Net=" << (mbpsX1000 / 1000.0) << "Mbps  avgLat=" << (latUs / 1000.0)
+        << "ms  stale=" << staleMs << "ms";
+    statsLines.push_back(oss.str());
+  }
+  {
+    std::ostringstream oss;
+    oss << "5s avg dec=" << (avg5s.decodedFpsX100 / 100.0)
+        << "  host=" << gOverlayConfig.host << ":" << gOverlayConfig.port;
+    statsLines.push_back(oss.str());
+  }
+  {
+    std::ostringstream oss;
+    oss << "Capture=" << (((hostCapFlags & 0x1u) != 0) ? "window" : "desktop")
+        << "  proc=" << (hostCapProcess.empty() ? "monitor" : hostCapProcess)
+        << "  rebind=" << hostCapRebind;
+    statsLines.push_back(oss.str());
+  }
+  {
+    std::ostringstream oss;
+    oss << "Title=" << (hostCapTitle.empty() ? "<empty>" : hostCapTitle);
+    statsLines.push_back(oss.str());
+  }
+  {
+    std::ostringstream oss;
+    oss << "Control=" << (gControlConnected.load(std::memory_order_relaxed) ? "connected" : "off")
+        << "  input=" << (gInputEnabled.load(std::memory_order_relaxed) ? "on" : "off")
+        << "  dropped=" << dropped;
+    statsLines.push_back(oss.str());
+  }
+
+  RECT statsText = layout.statsRect;
+  statsText.left += 10;
+  statsText.right -= 10;
+  statsText.top += 8;
+  SetTextColor(hdc, RGB(220, 225, 230));
+  for (const auto& line : statsLines) {
+    RECT lineRect = statsText;
+    DrawTextA(hdc, line.c_str(), -1, &lineRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    statsText.top += 18;
+    if (statsText.top >= layout.statsRect.bottom - 16) break;
+  }
 }
 
 void log_client_line(const std::string& line) {
@@ -1161,7 +1367,8 @@ struct Nv12D3dRenderer {
     return true;
   }
 
-  bool render(HWND hwnd, const uint8_t* nv12, uint32_t w, uint32_t h, Nv12RenderTelemetry* telemetry) {
+  bool render(HWND hwnd, const RECT& destRect, const uint8_t* nv12, uint32_t w, uint32_t h,
+              Nv12RenderTelemetry* telemetry) {
     if (telemetry) {
       *telemetry = Nv12RenderTelemetry{};
     }
@@ -1222,9 +1429,15 @@ struct Nv12D3dRenderer {
 
     RECT rc{};
     GetClientRect(hwnd, &rc);
+    RECT drawRect = destRect;
+    if (drawRect.right <= drawRect.left || drawRect.bottom <= drawRect.top) {
+      drawRect = rc;
+    }
     D3D11_VIEWPORT vp{};
-    vp.Width = static_cast<float>(std::max<LONG>(1, rc.right - rc.left));
-    vp.Height = static_cast<float>(std::max<LONG>(1, rc.bottom - rc.top));
+    vp.TopLeftX = static_cast<float>(drawRect.left);
+    vp.TopLeftY = static_cast<float>(drawRect.top);
+    vp.Width = static_cast<float>(std::max<LONG>(1, drawRect.right - drawRect.left));
+    vp.Height = static_cast<float>(std::max<LONG>(1, drawRect.bottom - drawRect.top));
     vp.MinDepth = 0.0f;
     vp.MaxDepth = 1.0f;
 
@@ -1300,105 +1513,172 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       PostQuitMessage(0);
       return 0;
     case WM_MOUSEMOVE:
-      if (point_in_rect(overlay_toggle_rect(), GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
+      if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
       if ((gMouseButtons.load(std::memory_order_relaxed) & 0x7u) == 0) return 0;
-      enqueue_input_event(1, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), 0, 0);
+      {
+        int32_t vx = 0;
+        int32_t vy = 0;
+        if (!map_client_point_to_video_coords(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &vx, &vy)) return 0;
+        enqueue_input_event(1, vx, vy, 0, 0);
+      }
       return 0;
     case WM_LBUTTONDOWN:
-      if (point_in_rect(overlay_toggle_rect(), GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) {
-        gOverlayButtonDown.store(true, std::memory_order_relaxed);
-        return 0;
-      }
-      if (gOverlayVisible.load(std::memory_order_relaxed) &&
-          (point_in_rect(overlay_bitrate_minus_rect(), GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) ||
-           point_in_rect(overlay_bitrate_plus_rect(), GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) ||
-           point_in_rect(overlay_keyint_minus_rect(), GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) ||
-           point_in_rect(overlay_keyint_plus_rect(), GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) ||
-           point_in_rect(overlay_mode_overview_rect(), GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))) {
-        return 0;
-      }
+      if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
-      gMouseButtons.fetch_or(1);
-      enqueue_input_event(2, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), 0, VK_LBUTTON);
+      SetFocus(hwnd);
+      {
+        int32_t vx = 0;
+        int32_t vy = 0;
+        if (!map_client_point_to_video_coords(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &vx, &vy)) return 0;
+        gMouseButtons.fetch_or(1);
+        enqueue_input_event(2, vx, vy, 0, VK_LBUTTON);
+      }
       return 0;
-    case WM_LBUTTONUP:
-      if (gOverlayButtonDown.exchange(false, std::memory_order_relaxed)) {
-        if (point_in_rect(overlay_toggle_rect(), GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) {
-          gOverlayVisible.store(!gOverlayVisible.load(std::memory_order_relaxed), std::memory_order_relaxed);
-          InvalidateRect(hwnd, nullptr, FALSE);
-        }
-        return 0;
-      }
-      if (gOverlayVisible.load(std::memory_order_relaxed)) {
-        const int x = GET_X_LPARAM(lp);
-        const int y = GET_Y_LPARAM(lp);
-        if (point_in_rect(overlay_bitrate_minus_rect(), x, y)) {
-          apply_runtime_tune_delta(-1, 0);
-          InvalidateRect(hwnd, nullptr, FALSE);
-          return 0;
-        }
-        if (point_in_rect(overlay_bitrate_plus_rect(), x, y)) {
-          apply_runtime_tune_delta(1, 0);
-          InvalidateRect(hwnd, nullptr, FALSE);
-          return 0;
-        }
-        if (point_in_rect(overlay_keyint_minus_rect(), x, y)) {
-          apply_runtime_tune_delta(0, -1);
-          InvalidateRect(hwnd, nullptr, FALSE);
-          return 0;
-        }
-        if (point_in_rect(overlay_keyint_plus_rect(), x, y)) {
-          apply_runtime_tune_delta(0, 1);
-          InvalidateRect(hwnd, nullptr, FALSE);
-          return 0;
-        }
-        if (point_in_rect(overlay_mode_overview_rect(), x, y)) {
-          request_capture_overview_mode();
-          InvalidateRect(hwnd, nullptr, FALSE);
-          return 0;
-        }
-      }
-      if (gCaptureOverviewMode.load(std::memory_order_relaxed) &&
-          !point_in_overlay_ui(GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) {
-        request_capture_focus_from_client_point(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+    case WM_LBUTTONUP: {
+      if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      const int x = GET_X_LPARAM(lp);
+      const int y = GET_Y_LPARAM(lp);
+      const ClientLayout layout = compute_client_layout(hwnd);
+      if (point_in_rect(layout.refreshButtonRect, x, y)) {
+        queue_window_list_request("window_list_request pending");
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
       }
+      if (point_in_rect(layout.desktopButtonRect, x, y)) {
+        queue_window_select_request(0, "desktop_select_requested");
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+      }
+      uint64_t hitWindowId = 0;
+      if (try_hit_window_list_item(hwnd, x, y, &hitWindowId)) {
+        queue_window_select_request(hitWindowId, "window_select_requested");
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+      }
+      if (point_in_panel_ui(hwnd, x, y)) return 0;
       if (kInputPolicyForceBlock) return 0;
-      gMouseButtons.fetch_and(static_cast<uint16_t>(~1u));
-      enqueue_input_event(3, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), 0, VK_LBUTTON);
+      {
+        int32_t vx = 0;
+        int32_t vy = 0;
+        if (!map_client_point_to_video_coords(hwnd, x, y, &vx, &vy)) return 0;
+        gMouseButtons.fetch_and(static_cast<uint16_t>(~1u));
+        enqueue_input_event(3, vx, vy, 0, VK_LBUTTON);
+      }
       return 0;
+    }
     case WM_RBUTTONDOWN:
+      if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
-      gMouseButtons.fetch_or(2);
-      enqueue_input_event(2, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), 0, VK_RBUTTON);
+      {
+        int32_t vx = 0;
+        int32_t vy = 0;
+        if (!map_client_point_to_video_coords(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &vx, &vy)) return 0;
+        gMouseButtons.fetch_or(2);
+        enqueue_input_event(2, vx, vy, 0, VK_RBUTTON);
+      }
       return 0;
     case WM_RBUTTONUP:
+      if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
-      gMouseButtons.fetch_and(static_cast<uint16_t>(~2u));
-      enqueue_input_event(3, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), 0, VK_RBUTTON);
+      {
+        int32_t vx = 0;
+        int32_t vy = 0;
+        if (!map_client_point_to_video_coords(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &vx, &vy)) return 0;
+        gMouseButtons.fetch_and(static_cast<uint16_t>(~2u));
+        enqueue_input_event(3, vx, vy, 0, VK_RBUTTON);
+      }
       return 0;
     case WM_MBUTTONDOWN:
+      if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
-      gMouseButtons.fetch_or(4);
-      enqueue_input_event(2, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), 0, VK_MBUTTON);
+      {
+        int32_t vx = 0;
+        int32_t vy = 0;
+        if (!map_client_point_to_video_coords(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &vx, &vy)) return 0;
+        gMouseButtons.fetch_or(4);
+        enqueue_input_event(2, vx, vy, 0, VK_MBUTTON);
+      }
       return 0;
     case WM_MBUTTONUP:
+      if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
-      gMouseButtons.fetch_and(static_cast<uint16_t>(~4u));
-      enqueue_input_event(3, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), 0, VK_MBUTTON);
+      {
+        int32_t vx = 0;
+        int32_t vy = 0;
+        if (!map_client_point_to_video_coords(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &vx, &vy)) return 0;
+        gMouseButtons.fetch_and(static_cast<uint16_t>(~4u));
+        enqueue_input_event(3, vx, vy, 0, VK_MBUTTON);
+      }
       return 0;
     case WM_MOUSEWHEEL: {
-      if (kInputPolicyForceBlock) return 0;
+      if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
       ScreenToClient(hwnd, &p);
-      enqueue_input_event(4, p.x, p.y, GET_WHEEL_DELTA_WPARAM(wp), 0);
+      const ClientLayout layout = compute_client_layout(hwnd);
+      if (point_in_rect(layout.listRect, p.x, p.y)) {
+        const int wheel = GET_WHEEL_DELTA_WPARAM(wp);
+        scroll_window_list(hwnd, (wheel < 0) ? 1 : -1);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+      }
+      if (point_in_panel_ui(hwnd, p.x, p.y)) return 0;
+      if (kInputPolicyForceBlock) return 0;
+      int32_t vx = 0;
+      int32_t vy = 0;
+      if (!map_client_point_to_video_coords(hwnd, p.x, p.y, &vx, &vy)) return 0;
+      enqueue_input_event(4, vx, vy, GET_WHEEL_DELTA_WPARAM(wp), 0);
+      return 0;
+    }
+    case WM_POINTERDOWN:
+    case WM_POINTERUPDATE:
+    case WM_POINTERUP: {
+      UINT32 pointerId = GET_POINTERID_WPARAM(wp);
+      POINTER_INPUT_TYPE pointerType = PT_POINTER;
+      if (!GetPointerType(pointerId, &pointerType) || pointerType != PT_TOUCH) {
+        return DefWindowProc(hwnd, msg, wp, lp);
+      }
+      POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+      ScreenToClient(hwnd, &p);
+      gSuppressMouseUntilUs.store(qpc_now_us() + 300000ULL, std::memory_order_relaxed);
+      if (point_in_panel_ui(hwnd, p.x, p.y)) return 0;
+      int32_t vx = 0;
+      int32_t vy = 0;
+      if (!map_client_point_to_video_coords(hwnd, p.x, p.y, &vx, &vy)) return 0;
+      if (msg == WM_POINTERDOWN) {
+        if (gActiveTouchDown.load(std::memory_order_relaxed)) return 0;
+        SetFocus(hwnd);
+        gActiveTouchPointerId.store(pointerId, std::memory_order_relaxed);
+        gActiveTouchDown.store(true, std::memory_order_relaxed);
+        gMouseButtons.fetch_or(1);
+        enqueue_input_event(2, vx, vy, 0, VK_LBUTTON);
+      } else if (msg == WM_POINTERUPDATE) {
+        if (!gActiveTouchDown.load(std::memory_order_relaxed) ||
+            gActiveTouchPointerId.load(std::memory_order_relaxed) != pointerId) {
+          return 0;
+        }
+        enqueue_input_event(1, vx, vy, 0, 0);
+      } else {
+        if (!gActiveTouchDown.load(std::memory_order_relaxed) ||
+            gActiveTouchPointerId.load(std::memory_order_relaxed) != pointerId) {
+          return 0;
+        }
+        gMouseButtons.fetch_and(static_cast<uint16_t>(~1u));
+        gActiveTouchDown.store(false, std::memory_order_relaxed);
+        gActiveTouchPointerId.store(0, std::memory_order_relaxed);
+        enqueue_input_event(3, vx, vy, 0, VK_LBUTTON);
+      }
       return 0;
     }
     case WM_KEYDOWN:
-      if (wp == VK_F8) {
-        gOverlayVisible.store(!gOverlayVisible.load(std::memory_order_relaxed), std::memory_order_relaxed);
+      if (wp == VK_F5) {
+        queue_window_list_request("window_list_request pending");
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
       }
@@ -1447,8 +1727,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       PAINTSTRUCT ps{};
       HDC hdc = BeginPaint(hwnd, &ps);
       const uint64_t paintStartUs = qpc_now_us();
-      RECT rc{};
-      GetClientRect(hwnd, &rc);
+      const ClientLayout layout = compute_client_layout(hwnd);
+      const RECT& videoRect = layout.videoRect;
       static bool hasPresentedAtLeastOneFrame = false;
 
       std::shared_ptr<std::vector<uint8_t>> local;
@@ -1499,7 +1779,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
           }
           if (gNv12Renderer.ready) {
-            presented = gNv12Renderer.render(hwnd, local->data(), w, h, &renderTelemetry);
+            presented = gNv12Renderer.render(hwnd, videoRect, local->data(), w, h, &renderTelemetry);
             if (presented) {
               ++gD3dPresentSuccessCount;
               renderPath = "d3d_nv12";
@@ -1520,7 +1800,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
               bmi.bmiHeader.biBitCount = 32;
               bmi.bmiHeader.biCompression = BI_RGB;
               SetStretchBltMode(hdc, COLORONCOLOR);
-              StretchDIBits(hdc, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
+              StretchDIBits(hdc, videoRect.left, videoRect.top,
+                            videoRect.right - videoRect.left, videoRect.bottom - videoRect.top,
                             0, 0, static_cast<int>(w), static_cast<int>(h),
                             bgra.data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
               presented = true;
@@ -1540,7 +1821,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           bmi.bmiHeader.biBitCount = 32;
           bmi.bmiHeader.biCompression = BI_RGB;
           SetStretchBltMode(hdc, COLORONCOLOR);
-          StretchDIBits(hdc, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
+          StretchDIBits(hdc, videoRect.left, videoRect.top,
+                        videoRect.right - videoRect.left, videoRect.bottom - videoRect.top,
                         0, 0, static_cast<int>(w), static_cast<int>(h),
                         local->data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
           presented = true;
@@ -1657,7 +1939,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         lastPresentUs = presentUs;
       } else if (!hasPresentedAtLeastOneFrame) {
         // Before first successful frame, keep a deterministic background.
-        FillRect(hdc, &rc, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+        FillRect(hdc, &videoRect, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
       }
       draw_overlay(hdc);
       EndPaint(hwnd, &ps);
@@ -1797,6 +2079,13 @@ int main(int argc, char** argv) {
   gCaptureModeReqMode.store(0, std::memory_order_relaxed);
   gCaptureModeReqXPermille.store(5000, std::memory_order_relaxed);
   gCaptureModeReqYPermille.store(5000, std::memory_order_relaxed);
+  {
+    std::lock_guard<std::mutex> lk(gWindowPanelMu);
+    gWindowPanel = WindowPanelState{};
+  }
+  gSuppressMouseUntilUs.store(0, std::memory_order_relaxed);
+  gActiveTouchPointerId.store(0, std::memory_order_relaxed);
+  gActiveTouchDown.store(false, std::memory_order_relaxed);
 
   WinsockScope ws;
   if (!ws.ok) {
@@ -1963,6 +2252,8 @@ int main(int argc, char** argv) {
           uint32_t metricsSeq = 0;
           uint32_t runtimeSeq = 0;
           uint32_t captureModeSeq = 0;
+          uint32_t windowReqSeq = 0;
+          uint32_t windowSelectSeq = 0;
           uint64_t lastMetricsSentUs = 0;
           uint64_t inputAckCount = 0;
           uint64_t nextPingUs = qpc_now_us();
@@ -2015,6 +2306,74 @@ int main(int argc, char** argv) {
                         << " hostCapRebind=" << pong.captureRebindCount
                         << "\n";
               nextPingUs = doneUs + static_cast<uint64_t>(std::max<uint32_t>(20, args.controlIntervalMs)) * 1000ULL;
+              didWork = true;
+            }
+
+            bool sendWindowListRequest = false;
+            {
+              std::lock_guard<std::mutex> lk(gWindowPanelMu);
+              if (gWindowPanel.listRequestPending) {
+                gWindowPanel.listRequestPending = false;
+                sendWindowListRequest = true;
+              }
+            }
+            if (sendWindowListRequest) {
+              ControlWindowListRequestMessage req{};
+              req.header.magic = remote60::native_poc::kMagic;
+              req.header.type = static_cast<uint16_t>(MessageType::ControlWindowListRequest);
+              req.header.size = static_cast<uint16_t>(sizeof(req));
+              req.seq = ++windowReqSeq;
+              req.clientSendQpcUs = nowUs;
+              if (!send_all(controlSock, &req, sizeof(req))) break;
+
+              MessageHeader header{};
+              if (!recv_all(controlSock, &header, sizeof(header))) break;
+              if (header.magic != remote60::native_poc::kMagic ||
+                  header.type != static_cast<uint16_t>(MessageType::ControlWindowList) ||
+                  header.size != sizeof(ControlWindowListMessage)) {
+                break;
+              }
+              ControlWindowListMessage rsp{};
+              rsp.header = header;
+              if (!recv_all(controlSock, &rsp.seq, sizeof(rsp) - sizeof(MessageHeader))) break;
+              apply_window_list_snapshot(rsp);
+              InvalidateRect(gHwnd, nullptr, FALSE);
+              didWork = true;
+            }
+
+            bool sendWindowSelect = false;
+            uint64_t pendingWindowId = 0;
+            {
+              std::lock_guard<std::mutex> lk(gWindowPanelMu);
+              if (gWindowPanel.selectRequestPending) {
+                gWindowPanel.selectRequestPending = false;
+                pendingWindowId = gWindowPanel.pendingSelectId;
+                sendWindowSelect = true;
+              }
+            }
+            if (sendWindowSelect) {
+              ControlWindowSelectMessage req{};
+              req.header.magic = remote60::native_poc::kMagic;
+              req.header.type = static_cast<uint16_t>(MessageType::ControlWindowSelect);
+              req.header.size = static_cast<uint16_t>(sizeof(req));
+              req.seq = ++windowSelectSeq;
+              req.windowId = pendingWindowId;
+              req.clientSendQpcUs = nowUs;
+              if (!send_all(controlSock, &req, sizeof(req))) break;
+
+              MessageHeader header{};
+              if (!recv_all(controlSock, &header, sizeof(header))) break;
+              if (header.magic != remote60::native_poc::kMagic ||
+                  header.type != static_cast<uint16_t>(MessageType::ControlWindowSelected) ||
+                  header.size != sizeof(ControlWindowSelectedMessage)) {
+                break;
+              }
+              ControlWindowSelectedMessage rsp{};
+              rsp.header = header;
+              if (!recv_all(controlSock, &rsp.seq, sizeof(rsp) - sizeof(MessageHeader))) break;
+              apply_window_selected_result(rsp);
+              queue_window_list_request("window_list_request pending");
+              InvalidateRect(gHwnd, nullptr, FALSE);
               didWork = true;
             }
 
@@ -2148,9 +2507,12 @@ int main(int argc, char** argv) {
           }
           gControlConnected.store(false, std::memory_order_relaxed);
           gRuntimeTuneEnabled.store(false, std::memory_order_relaxed);
+          set_window_panel_status("control_disconnected");
+          InvalidateRect(gHwnd, nullptr, FALSE);
         });
         gControlConnected.store(true, std::memory_order_relaxed);
         gRuntimeTuneEnabled.store(useH264, std::memory_order_relaxed);
+        queue_window_list_request("window_list_request pending");
         if (useH264 && (args.runtimeBitrate > 0 || args.runtimeKeyint > 0)) {
           gRuntimeTuneDirty.store(true, std::memory_order_release);
         }
@@ -2161,6 +2523,7 @@ int main(int argc, char** argv) {
         controlSock = INVALID_SOCKET;
         gControlConnected.store(false, std::memory_order_relaxed);
         gRuntimeTuneEnabled.store(false, std::memory_order_relaxed);
+        set_window_panel_status("control_connect_failed");
         std::cout << "[native-video-client] control connect failed port=" << args.controlPort << "\n";
       }
     }
@@ -2405,7 +2768,7 @@ int main(int argc, char** argv) {
                                  gClientMetrics.recvMbpsX1000.load(std::memory_order_relaxed),
                                  gClientMetrics.avgLatencyUs.load(std::memory_order_relaxed),
                                  nowUs);
-      if (gOverlayVisible.load(std::memory_order_relaxed) && gHwnd) {
+      if (gHwnd) {
         if (!gPaintQueued.exchange(true)) {
           InvalidateRect(gHwnd, nullptr, FALSE);
         } else {
@@ -3304,4 +3667,3 @@ int main(int argc, char** argv) {
   std::cout << "[native-video-client] done\n";
   return 0;
 }
-

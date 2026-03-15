@@ -19,6 +19,10 @@ enum class MessageType : uint16_t {
   ControlRequestKeyFrame = 25,
   ControlRuntimeEncoderConfig = 26,
   ControlCaptureModeRequest = 27,
+  ControlWindowListRequest = 28,
+  ControlWindowList = 29,
+  ControlWindowSelect = 30,
+  ControlWindowSelected = 31,
 };
 
 enum class UdpPacketKind : uint16_t {
@@ -31,6 +35,8 @@ enum class UdpCodec : uint16_t {
   Raw = 1,
   H264 = 2,
 };
+
+constexpr uint32_t kControlWindowListMaxEntries = 64;
 
 #pragma pack(push, 1)
 struct MessageHeader {
@@ -166,6 +172,50 @@ struct ControlCaptureModeRequestMessage {
   uint32_t xPermille = 0;  // 0..10000
   uint32_t yPermille = 0;  // 0..10000
   uint64_t clientSendQpcUs = 0;
+};
+
+struct ControlWindowListRequestMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t flags = 0;
+  uint64_t clientSendQpcUs = 0;
+};
+
+struct ControlWindowEntry {
+  uint64_t id = 0;
+  uint32_t pid = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint32_t flags = 0;  // bit0:minimized
+  char title[96] = {};
+};
+
+struct ControlWindowListMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t flags = 0;  // bit0: selection locked by config
+  uint64_t selectedWindowId = 0;
+  uint32_t itemCount = 0;
+  uint32_t reserved = 0;
+  ControlWindowEntry items[kControlWindowListMaxEntries] = {};
+};
+
+struct ControlWindowSelectMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t flags = 0;
+  uint64_t windowId = 0;
+  uint64_t clientSendQpcUs = 0;
+};
+
+struct ControlWindowSelectedMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t flags = 0;  // bit0: ok, bit1: selection locked by config
+  uint64_t windowId = 0;
+  char reason[64] = {};
+  char title[96] = {};
+  uint64_t hostSendQpcUs = 0;
 };
 
 struct UdpHelloPacket {

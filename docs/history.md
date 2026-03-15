@@ -1,6 +1,6 @@
 ﻿# remote60 작업 히스토리 (NEW)
 
-업데이트: 2026-03-15
+업데이트: 2026-03-16
 
 목적
 - 이 파일은 최근 작업만 유지해서 컨텍스트 소모를 줄인다.
@@ -1144,3 +1144,48 @@ Validation / build / test result
 Next action
 - `desktop / window list / touch UI` 검증은 `web-runtime-external-v2-20260315-234022.zip` 기준으로 진행한다.
 - native bundle은 low-latency PoC/video-only + window-target input 용도로만 유지한다.
+
+### 116) 2026-03-16 native window GUI parity v1 구현
+Goal
+- native host/client에 web과 유사한 선택형 GUI를 붙여 `Desktop Mode`, 창 목록, 현재 선택 타깃 표시, 선택 타깃 기준 캡처/입력 라우팅을 지원한다.
+- 기존 `overview -> 클릭한 창 확대`를 기본 UX에서 제거하고, video 클릭은 항상 입력으로 보내도록 정리한다.
+
+Files changed
+- `apps/native_poc/src/poc_protocol.hpp`
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `apps/native_poc/src/native_video_client_main.cpp`
+- `automation/validate_background_input_injection.ps1`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_host_poc remote60_native_video_client_poc --parallel`
+  - 결과: 성공
+- Native input regression check:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/validate_background_input_injection.ps1 -DurationSec 12`
+  - 결과:
+    - `AUTO_PASS=1`
+    - `INPUT_EVENTS=961`
+    - `INPUT_NO_TARGET=0`
+    - `INPUT_INJECT_FAIL=0`
+  - 비고: 새 좌측 panel layout에 맞춰 client input burst 좌표를 video 영역 기준으로 보정
+- Native control/window GUI smoke:
+  - 로컬 host/client 실행 후 client panel 자동 refresh 확인
+  - client log: `tmp/native-gui-smoke4/client.out.log`
+    - `[native-video-client][control] window-list seq=1 count=12 selectedId=0 locked=0 firstId=788396 ...`
+  - selection smoke:
+    - host log: `tmp/native-gui-smoke5/host.out.log`
+      - `[native-video-host][control] window-select seq=1 requestedId=788396 applied=1 selectedId=788396 reason=ok ...`
+    - client log: `tmp/native-gui-smoke5/client.out.log`
+      - `[native-video-client][control] window-selected seq=1 ok=1 windowId=788396 reason=ok ...`
+- 구현 요약:
+  - native control protocol에 `ControlWindowListRequest`, `ControlWindowList`, `ControlWindowSelect`, `ControlWindowSelected` 추가
+  - host에 shareable window enumeration + selected window state + desktop/window 캡처 전환 추가
+  - client에 상시 좌측 panel(`Refresh`, `Desktop Mode`, selected target, window list, stats) 추가
+  - client 입력 좌표를 video 영역 기준으로 정규화해 desktop/window 모드 모두 일관된 입력 라우팅이 가능하도록 수정
+  - `WM_POINTER*` 기반 단일 touch tap/drag 입력 추가
+
+Next action
+- 실제 외부 2PC에서 창 목록 UI, 특정 창 선택, Desktop Mode 복귀, 작업표시줄 클릭 입력을 수동으로 1차 확인한다.
+- 필요 시 panel hit area/scroll UX와 selection visual polish를 후속 미세조정한다.
