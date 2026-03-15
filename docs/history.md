@@ -1,6 +1,6 @@
 ﻿# remote60 작업 히스토리 (NEW)
 
-업데이트: 2026-03-05
+업데이트: 2026-03-15
 
 목적
 - 이 파일은 최근 작업만 유지해서 컨텍스트 소모를 줄인다.
@@ -1013,3 +1013,33 @@ Validation / build / test result
 
 Next action
 - 동일 기준선으로 WAN 또는 reconnect soak를 추가 실행해, 루프백 외 조건에서도 이번 안정성 보강의 지속성을 확인한다.
+
+### 112) 2026-03-15 외부 2PC 테스트 준비물 최신화 (번들 + 커맨드 정리)
+Goal
+- 다른 디바이스 간 테스트에 바로 사용할 수 있도록 최신 host/client 빌드 산출물과 실행 커맨드를 portable bundle 기준으로 정리한다.
+
+Files changed
+- `automation/package_native_video_external_bundle.ps1`
+- `docs/external_wan_test_guide.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_host_poc remote60_native_video_client_poc --parallel`
+  - 결과: 성공
+- Bundle package:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/package_native_video_external_bundle.ps1 -BuildDir build-vcpkg-local`
+  - 결과:
+    - `BUNDLE_DIR=D:\remote\remote\dist\native-video-external-20260315-230003`
+    - `BUNDLE_ZIP=D:\remote\remote\dist\native-video-external-20260315-230003.zip`
+- Bundle validation:
+  - 번들 `automation/`에 `m9_easy.ps1`, `run_wan_host_capture.ps1`, `run_wan_client_capture.ps1`, `summarize_wan_capture.ps1` 포함 확인
+  - 번들 `docs/EXTERNAL_WAN_QUICKSTART.md` 생성 및 최신 프로필 기준 커맨드 반영 확인
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File dist\native-video-external-20260315-230003\automation\m9_easy.ps1 help` 성공
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File dist\native-video-external-20260315-230003\automation\m9_easy.ps1 prepare` 성공 (`tmp_m9_apply.json` 생성 확인)
+
+Next action
+- host PC에서는 번들 루트에서 `run_native_video_with_config.ps1` 또는 `m9_easy.ps1 host off/on`으로 실행한다.
+- client PC에서는 동일 번들을 복사해 `run_native_video_with_config.ps1 -Role client` 또는 `m9_easy.ps1 client off/on <HOST_PUBLIC_IP_OR_DNS>`로 연결한다.
+- 실제 외부 2PC 실행 후 `CFG-2PC-01`, `M9-2PC-GATE-01` 수동 확인 결과를 별도로 기록한다.

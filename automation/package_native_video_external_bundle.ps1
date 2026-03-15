@@ -46,7 +46,11 @@ Get-ChildItem -Path $binSrc -File | Where-Object { $copyExt -contains $_.Extensi
 }
 
 $scriptsToCopy = @(
+  "m9_easy.ps1",
   "run_native_video_with_config.ps1",
+  "run_wan_host_capture.ps1",
+  "run_wan_client_capture.ps1",
+  "summarize_wan_capture.ps1",
   "wan_preflight_native_video.ps1",
   "start_native_video_runtime.ps1",
   "stop_native_video_runtime.ps1",
@@ -67,12 +71,24 @@ $guidePath = Join-Path $docsDst "EXTERNAL_WAN_QUICKSTART.md"
 $guide = @'
 # External WAN Quickstart
 
-## 1) Port Forwarding (router -> host PC)
+## 1) Bundle Layout
+- `bin/`
+  - `remote60_native_video_host_poc.exe`
+  - `remote60_native_video_client_poc.exe`
+- `automation/`
+  - `run_native_video_with_config.ps1`
+  - `m9_easy.ps1`
+  - `run_wan_host_capture.ps1`
+  - `run_wan_client_capture.ps1`
+  - `summarize_wan_capture.ps1`
+- `docs/EXTERNAL_WAN_QUICKSTART.md`
+
+## 2) Port Forwarding (router -> host PC)
 - UDP `43000` -> host LAN IP (video channel, current profiles use UDP)
 - TCP `43001` -> host LAN IP (control channel)
 - If you switch to TCP media transport, also forward TCP `43000`.
 
-## 2) Windows Firewall (host PC)
+## 3) Windows Firewall (host PC)
 - Allow inbound UDP `43000`
 - Allow inbound TCP `43001`
 
@@ -82,24 +98,68 @@ netsh advfirewall firewall add rule name="Remote60 Native Video UDP43000" dir=in
 netsh advfirewall firewall add rule name="Remote60 Native Video TCP43001" dir=in action=allow protocol=TCP localport=43001
 ```
 
-## 3) Host Start
+## 4) Recommended Profiles
+- `native_video_profile_1080p_lowlat.json`
+  - 1080p30, `8Mbps`, `keyint=30`, `mft_hw/mft_hw`
+- `native_video_profile_1080p_wan_quality.json`
+  - 1080p30, `10Mbps`, `keyint=60`, frame gating off
+- `native_video_profile_720p.json`
+  - 720p30, `5Mbps`, `keyint=60`, `h264NoPacing=1`
+
+## 5) Quick 2PC Run
+Host:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_with_config.ps1 -Role host -ConfigPath .\automation\native_video_profile_1080p_lowlat.json -ExeDir .\bin
 ```
 
-## 4) Client Start
-- Option A: pass address in command
+Client:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_with_config.ps1 -Role client -ConfigPath .\automation\native_video_profile_1080p_lowlat.json -ExeDir .\bin -RemoteHost <HOST_PUBLIC_IP_OR_DNS>
 ```
-- Option B: edit `remoteHost` in `native_video_profile_1080p_external_template.json` and run without `-RemoteHost`.
 
-## 5) Recommended FHD Profiles
-- low latency: `native_video_profile_1080p_lowlat.json` (8Mbps, keyint 60)
-- quality up: `native_video_profile_1080p_quality_10m_k60.json`
-- quality max: `native_video_profile_1080p_quality_12m_k60.json`
+If you prefer editing JSON once, set `remoteHost` in `native_video_profile_1080p_external_template.json`.
 
-## 6) Preflight Check
+## 6) Quick M9 A/B Capture
+One-time prepare:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\automation\m9_easy.ps1 prepare
+```
+
+Host:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\automation\m9_easy.ps1 host off
+powershell -ExecutionPolicy Bypass -File .\automation\m9_easy.ps1 host on
+```
+
+Client:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\automation\m9_easy.ps1 client off <HOST_PUBLIC_IP_OR_DNS>
+powershell -ExecutionPolicy Bypass -File .\automation\m9_easy.ps1 client on <HOST_PUBLIC_IP_OR_DNS>
+```
+
+Summary:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\automation\m9_easy.ps1 summary off
+powershell -ExecutionPolicy Bypass -File .\automation\m9_easy.ps1 summary on
+```
+
+## 7) Manual WAN Capture Commands
+Host:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\automation\run_wan_host_capture.ps1 -ConfigPath .\automation\native_video_profile_1080p_lowlat.json -ExeDir .\bin -Tag manual
+```
+
+Client:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\automation\run_wan_client_capture.ps1 -ConfigPath .\automation\native_video_profile_1080p_lowlat.json -ExeDir .\bin -RemoteHost <HOST_PUBLIC_IP_OR_DNS> -Tag manual
+```
+
+Summary:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\automation\summarize_wan_capture.ps1 -HostInput .\automation\logs\wan-capture-<timestamp>-host-manual -ClientInput .\automation\logs\wan-capture-<timestamp>-client-manual
+```
+
+## 8) Preflight Check
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\automation\wan_preflight_native_video.ps1 -RemoteHost <HOST_PUBLIC_IP_OR_DNS> -VideoPort 43000 -ControlPort 43001
 ```

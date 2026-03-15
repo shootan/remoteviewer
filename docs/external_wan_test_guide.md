@@ -121,8 +121,19 @@ Client:
 powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1 -Role client -ConfigPath automation/native_video_profile_1080p_lowlat.json -ExeDir build-vcpkg-local/apps/native_poc/Debug -RemoteHost <HOST_PUBLIC_IP_OR_DNS>
 ```
 
+## Portable bundle
+Create a portable bundle with current binaries, profiles, and helper scripts:
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/package_native_video_external_bundle.ps1 -BuildDir build-vcpkg-local
+```
+
+Bundle contents:
+- `bin/`: host/client exe + dependent dll files
+- `automation/`: `run_native_video_with_config.ps1`, `m9_easy.ps1`, WAN capture/summarize scripts, profile JSONs
+- `docs/EXTERNAL_WAN_QUICKSTART.md`: copy-ready commands for host/client and M9 A/B capture
+
 ## Quick Start (short commands)
-Use one wrapper script:
+From the bundle root or source tree, use one wrapper script:
 - `automation/m9_easy.ps1`
 
 One-time prepare:
