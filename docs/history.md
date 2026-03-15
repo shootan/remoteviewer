@@ -1299,3 +1299,34 @@ Validation / build / test result
 Next action
 - 실제 외부 2PC에서 `Desktop Mode -> fullscreen`, `Targets 버튼 -> picker reopen`, 특정 창 선택 후 fullscreen 전환을 수동으로 확인한다.
 - mouse input 체감이 여전히 비정상이면 selected window/desktop 각각에서 별도 repro 로그를 추가 수집한다.
+
+### 120) 2026-03-16 native home scene polish: centered picker layout + static scene + desktop default close
+Goal
+- home picker를 더 `scene`처럼 보이게 다듬고, picker가 켜져 있을 때 뒤 영상 때문에 깜빡이던 문제를 줄인다.
+- `Desktop Mode`가 이미 기본 선택일 때는 버튼 한 번으로 바로 picker를 닫게 해 UX를 단순화한다.
+- mouse click 경로는 old runtime처럼 `move -> click` 순서를 보내도록 보강한다.
+
+Files changed
+- `apps/native_poc/src/native_video_client_main.cpp`
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_host_poc remote60_native_video_client_poc --parallel`
+  - 결과: 성공
+- Input regression:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/validate_background_input_injection.ps1 -DurationSec 12`
+  - 결과:
+    - `AUTO_PASS=1`
+    - `INPUT_EVENTS=954`
+    - `INPUT_NO_TARGET=0`
+    - `INPUT_INJECT_FAIL=0`
+- Native smoke:
+  - picker/home overlay 상태에서 client control 연결 및 `window-list seq=1 ...` 확인
+  - 자동 클릭 smoke로는 desktop button -> video click 경로를 안정적으로 재현하지 못해 `desktop mode 실제 클릭`은 여전히 수동 2PC 확인이 필요
+
+Next action
+- 실제 외부 2PC에서 `Desktop Mode` 버튼으로 picker가 바로 닫히는지, 이후 desktop 클릭/작업표시줄 클릭이 먹는지 먼저 확인한다.
+- mouse가 여전히 안 먹으면 `desktop mode`와 `selected window mode`를 분리해서 repro 로그를 따로 수집한다.

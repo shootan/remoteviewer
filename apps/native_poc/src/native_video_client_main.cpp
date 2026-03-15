@@ -677,9 +677,9 @@ ClientLayout compute_client_layout(HWND hwnd) {
   const int clientH =
       std::max<int>(1, static_cast<int>(layout.clientRect.bottom - layout.clientRect.top));
   layout.videoRect = make_rect(0, 0, clientW, clientH);
-  layout.toggleButtonRect = make_rect(kPanelMargin, kPanelMargin, 120, kPanelButtonHeight);
 
   if (!gWindowPickerVisible.load(std::memory_order_relaxed)) {
+    layout.toggleButtonRect = make_rect(kPanelMargin, kPanelMargin, 120, kPanelButtonHeight);
     layout.panelRect = make_rect(0, 0, 0, 0);
     layout.refreshButtonRect = make_rect(0, 0, 0, 0);
     layout.desktopButtonRect = make_rect(0, 0, 0, 0);
@@ -694,10 +694,12 @@ ClientLayout compute_client_layout(HWND hwnd) {
   const int panelX = std::max<int>(kPanelMargin, (clientW - panelW) / 2);
   const int panelY = std::max<int>(kPanelMargin, (clientH - panelH) / 2);
   layout.panelRect = make_rect(panelX, panelY, panelW, panelH);
+  layout.toggleButtonRect = make_rect(0, 0, 0, 0);
+
+  const int panelInnerW = std::max<int>(1, panelW - (kPanelMargin * 2));
 
   const int buttonY = kPanelMargin;
-  const int buttonW = std::max<int>(
-      80, (static_cast<int>(layout.panelRect.right) - (kPanelMargin * 2) - kPanelButtonGap) / 2);
+  const int buttonW = std::max<int>(100, (panelInnerW - kPanelButtonGap) / 2);
   layout.refreshButtonRect = make_rect(layout.panelRect.left + kPanelMargin, layout.panelRect.top + buttonY,
                                        buttonW, kPanelButtonHeight);
   layout.desktopButtonRect = make_rect(layout.refreshButtonRect.right + kPanelButtonGap,
@@ -705,17 +707,17 @@ ClientLayout compute_client_layout(HWND hwnd) {
 
   const int infoY = layout.refreshButtonRect.bottom + kPanelSectionGap;
   layout.selectedInfoRect = make_rect(layout.panelRect.left + kPanelMargin, infoY,
-                                      std::max<int>(1, static_cast<int>(layout.panelRect.right - layout.panelRect.left) - (kPanelMargin * 2)),
+                                      panelInnerW,
                                       kPanelInfoHeight);
 
   const int listY = layout.selectedInfoRect.bottom + kPanelSectionGap;
   const int listH = std::max<int>(120, layout.panelRect.bottom - listY - kPanelStatsHeight - kPanelMargin - kPanelSectionGap);
   layout.listRect = make_rect(layout.panelRect.left + kPanelMargin, listY,
-                              std::max<int>(1, static_cast<int>(layout.panelRect.right - layout.panelRect.left) - (kPanelMargin * 2)), listH);
+                              panelInnerW, listH);
 
   const int statsY = layout.listRect.bottom + kPanelSectionGap;
   layout.statsRect = make_rect(layout.panelRect.left + kPanelMargin, statsY,
-                               std::max<int>(1, static_cast<int>(layout.panelRect.right - layout.panelRect.left) - (kPanelMargin * 2)),
+                               panelInnerW,
                                std::max<int>(40, layout.panelRect.bottom - statsY - kPanelMargin));
   return layout;
 }
@@ -1028,15 +1030,15 @@ void apply_runtime_tune_delta(int bitrateStep, int keyintStep) {
 
 void draw_overlay(HDC hdc) {
   const ClientLayout layout = compute_client_layout(gHwnd);
-  draw_panel_button(hdc, layout.toggleButtonRect,
-                    gWindowPickerVisible.load(std::memory_order_relaxed) ? "Hide" : "Targets");
-  if (!gWindowPickerVisible.load(std::memory_order_relaxed)) {
+  const bool pickerVisible = gWindowPickerVisible.load(std::memory_order_relaxed);
+  if (!pickerVisible) {
+    draw_panel_button(hdc, layout.toggleButtonRect, "Targets");
     return;
   }
 
-  draw_alpha_rect(hdc, layout.clientRect, RGB(8, 10, 14), 110);
+  draw_alpha_rect(hdc, layout.clientRect, RGB(10, 12, 16), 255);
   const RECT panel = layout.panelRect;
-  draw_alpha_rect(hdc, panel, RGB(12, 15, 20), 242);
+  draw_alpha_rect(hdc, panel, RGB(18, 21, 28), 248);
   const uint64_t nowUs = qpc_now_us();
   const OverlayMetricAverages avg5s = collect_overlay_averages(nowUs, 5000000ULL);
   const uint32_t width = gClientMetrics.width.load(std::memory_order_relaxed);
@@ -1091,10 +1093,10 @@ void draw_overlay(HDC hdc) {
   textRect.left += 10;
   textRect.right -= 10;
   textRect.top += 8;
-  draw_text_utf8(hdc, "Choose Target", &textRect, DT_LEFT | DT_SINGLELINE);
+  draw_text_utf8(hdc, "Home", &textRect, DT_LEFT | DT_SINGLELINE);
 
   textRect.top += 20;
-  std::string selectedLine = std::string("Selected: ") + selectedTitle;
+  std::string selectedLine = std::string("Selected target: ") + selectedTitle;
   draw_text_utf8(hdc, selectedLine, &textRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
   textRect.top += 18;
   std::string statusLine = selectionLocked ? std::string("Mode: locked by config") : panelStatus;
@@ -1136,35 +1138,33 @@ void draw_overlay(HDC hdc) {
   statsLines.reserve(6);
   {
     std::ostringstream oss;
-    oss << "Desktop first, then pick a window.";
+    oss << "1. Pick Desktop or a window.";
     statsLines.push_back(oss.str());
   }
   {
     std::ostringstream oss;
-    oss << "After selection, video becomes fullscreen.";
+    oss << "2. Selection closes Home and opens fullscreen video.";
     statsLines.push_back(oss.str());
   }
   {
     std::ostringstream oss;
-    oss << "Click video to send mouse/keyboard input.";
+    oss << "3. Use the top-left Targets button to come back.";
+    statsLines.push_back(oss.str());
+  }
+  {
+    std::ostringstream oss;
+    oss << "Desktop mode sends input by screen point.";
+    statsLines.push_back(oss.str());
+  }
+  {
+    std::ostringstream oss;
+    oss << "Window mode sends input to the selected window.";
     statsLines.push_back(oss.str());
   }
   {
     std::ostringstream oss;
     oss << "Control=" << (gControlConnected.load(std::memory_order_relaxed) ? "connected" : "off")
         << "  input=" << (gInputEnabled.load(std::memory_order_relaxed) ? "on" : "off");
-    statsLines.push_back(oss.str());
-  }
-  {
-    std::ostringstream oss;
-    oss << "Current host target: " << (hostCapTitle.empty() ? hostCapProcess : hostCapTitle);
-    statsLines.push_back(oss.str());
-  }
-  {
-    std::ostringstream oss;
-    oss << "Frame " << width << "x" << height
-        << "  recv/dec=" << (recvFpsX100 / 100.0) << "/" << (decFpsX100 / 100.0)
-        << "  latency=" << (latUs / 1000.0) << "ms";
     statsLines.push_back(oss.str());
   }
 
@@ -1607,7 +1607,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           return 0;
         }
         if (point_in_rect(layout.desktopButtonRect, x, y)) {
-          queue_window_select_request(0, "desktop_select_requested");
+          bool alreadyDesktop = false;
+          {
+            std::lock_guard<std::mutex> lk(gWindowPanelMu);
+            alreadyDesktop = (gWindowPanel.selectedId == 0);
+          }
+          if (alreadyDesktop) {
+            gWindowPickerVisible.store(false, std::memory_order_relaxed);
+          } else {
+            queue_window_select_request(0, "desktop_select_requested");
+          }
           InvalidateRect(hwnd, nullptr, FALSE);
           return 0;
         }
@@ -1757,7 +1766,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             queue_window_list_request("window_list_request pending");
             InvalidateRect(hwnd, nullptr, FALSE);
           } else if (point_in_rect(layout.desktopButtonRect, p.x, p.y)) {
-            queue_window_select_request(0, "desktop_select_requested");
+            bool alreadyDesktop = false;
+            {
+              std::lock_guard<std::mutex> lk(gWindowPanelMu);
+              alreadyDesktop = (gWindowPanel.selectedId == 0);
+            }
+            if (alreadyDesktop) {
+              gWindowPickerVisible.store(false, std::memory_order_relaxed);
+            } else {
+              queue_window_select_request(0, "desktop_select_requested");
+            }
             InvalidateRect(hwnd, nullptr, FALSE);
           } else {
             uint64_t hitWindowId = 0;
@@ -1851,6 +1869,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       const uint64_t paintStartUs = qpc_now_us();
       const ClientLayout layout = compute_client_layout(hwnd);
       const RECT& videoRect = layout.videoRect;
+      const bool pickerVisible = gWindowPickerVisible.load(std::memory_order_relaxed);
       static bool hasPresentedAtLeastOneFrame = false;
 
       std::shared_ptr<std::vector<uint8_t>> local;
@@ -1891,7 +1910,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       Nv12RenderTelemetry renderTelemetry{};
       const char* renderPath = "none";
       const char* fallbackReason = "none";
-      if (local && w > 0 && h > 0) {
+      if (!pickerVisible && local && w > 0 && h > 0) {
         if (localFormat == SharedFrame::PixelFormat::Nv12) {
           if (!gNv12Renderer.ready) {
             if (!gNv12Renderer.init(hwnd)) {
@@ -2059,7 +2078,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           lastUserFeedbackOverwrite = overwriteCountNow;
         }
         lastPresentUs = presentUs;
-      } else if (!hasPresentedAtLeastOneFrame) {
+      } else if (pickerVisible || !hasPresentedAtLeastOneFrame) {
         // Before first successful frame, keep a deterministic background.
         FillRect(hdc, &videoRect, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
       }
@@ -2070,7 +2089,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         std::lock_guard<std::mutex> lk(gFrame.mu);
         latestVersion = gFrame.version;
       }
-      if (latestVersion != frameVersion) {
+      if (!pickerVisible && latestVersion != frameVersion) {
         if (!gPaintQueued.exchange(true)) {
           InvalidateRect(hwnd, nullptr, FALSE);
         } else {
@@ -2890,7 +2909,7 @@ int main(int argc, char** argv) {
                                  gClientMetrics.recvMbpsX1000.load(std::memory_order_relaxed),
                                  gClientMetrics.avgLatencyUs.load(std::memory_order_relaxed),
                                  nowUs);
-      if (gHwnd) {
+      if (gHwnd && !gWindowPickerVisible.load(std::memory_order_relaxed)) {
         if (!gPaintQueued.exchange(true)) {
           InvalidateRect(gHwnd, nullptr, FALSE);
         } else {

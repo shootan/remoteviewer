@@ -813,8 +813,9 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
       }
       const WPARAM wp = mouse_button_wparam(buttons);
       const LPARAM lp = MAKELPARAM(static_cast<short>(resolvedClientPt.x), static_cast<short>(resolvedClientPt.y));
-      return PostMessageW(resolvedTargetHwnd, msg, wp, lp) ? InputInjectResult::Injected
-                                                            : InputInjectResult::Failed;
+      const bool moved = PostMessageW(resolvedTargetHwnd, WM_MOUSEMOVE, wp, lp) != 0;
+      const bool clicked = PostMessageW(resolvedTargetHwnd, msg, wp, lp) != 0;
+      return (moved && clicked) ? InputInjectResult::Injected : InputInjectResult::Failed;
     }
     if (input.kind == 4) {
       const WPARAM wp =
@@ -902,8 +903,9 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
     }
     const WPARAM wp = mouse_button_wparam(buttons);
     const LPARAM lp = MAKELPARAM(static_cast<short>(clientPt.x), static_cast<short>(clientPt.y));
-    return PostMessageW(targetHwnd, msg, wp, lp) ? InputInjectResult::Injected
-                                                  : InputInjectResult::Failed;
+    const bool moved = PostMessageW(targetHwnd, WM_MOUSEMOVE, wp, lp) != 0;
+    const bool clicked = PostMessageW(targetHwnd, msg, wp, lp) != 0;
+    return (moved && clicked) ? InputInjectResult::Injected : InputInjectResult::Failed;
   }
   if (input.kind == 4) {
     HWND targetHwnd = nullptr;
