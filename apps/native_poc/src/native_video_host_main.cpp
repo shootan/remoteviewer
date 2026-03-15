@@ -629,6 +629,39 @@ LPARAM key_event_lparam(uint32_t keyCode, bool keyUp) {
   return static_cast<LPARAM>(lp);
 }
 
+bool keycode_to_unicode_char(uint32_t keyCode, wchar_t* outCh) {
+  if (!outCh) return false;
+  *outCh = 0;
+  BYTE keyboardState[256] = {};
+  if (!GetKeyboardState(keyboardState)) {
+    std::memset(keyboardState, 0, sizeof(keyboardState));
+  }
+  const UINT scanCode = MapVirtualKeyW(static_cast<UINT>(keyCode), MAPVK_VK_TO_VSC);
+  WCHAR buffer[8] = {};
+  const int rc = ToUnicodeEx(static_cast<UINT>(keyCode), scanCode, keyboardState, buffer,
+                             static_cast<int>(std::size(buffer)), 0, GetKeyboardLayout(0));
+  if (rc == 1 && buffer[0] >= 0x20) {
+    *outCh = buffer[0];
+    return true;
+  }
+  switch (keyCode) {
+    case VK_SPACE:
+      *outCh = L' ';
+      return true;
+    case VK_RETURN:
+      *outCh = L'\r';
+      return true;
+    case VK_TAB:
+      *outCh = L'\t';
+      return true;
+    case VK_BACK:
+      *outCh = L'\b';
+      return true;
+    default:
+      return false;
+  }
+}
+
 int scale_input_coord(int32_t coord, uint32_t inputExtent, int outputExtent) {
   if (outputExtent <= 1) return 0;
   if (inputExtent <= 1) return std::clamp<int>(coord, 0, outputExtent - 1);
@@ -708,6 +741,14 @@ bool map_input_to_primary_monitor_point(int32_t x, int32_t y, uint32_t inputW, u
   return true;
 }
 
+void remember_input_target(DesktopInputState* state, HWND hwnd, const POINT& screenPt) {
+  if (!state) return;
+  std::lock_guard<std::mutex> lk(state->mu);
+  state->lastHwnd = hwnd;
+  state->lastScreenPt = screenPt;
+  state->hasLastScreenPt = true;
+}
+
 enum class InputInjectResult : uint8_t {
   Injected = 0,
   IgnoredMove = 1,
@@ -740,23 +781,29 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
                                             : reinterpret_cast<HWND>(static_cast<uintptr_t>(
                                                   captureTargetHwnd.load(std::memory_order_acquire)));
     if (!targetHwnd || !IsWindow(targetHwnd)) return InputInjectResult::NoTarget;
+    POINT rootClientPt{};
+    LPARAM rootLp = 0;
+    if (!make_scaled_client_lparam(targetHwnd, input.x, input.y, inputDomainW, inputDomainH, &rootLp, &rootClientPt)) {
+      return InputInjectResult::Failed;
+    }
+    POINT screenPt = rootClientPt;
+    if (!ClientToScreen(targetHwnd, &screenPt)) return InputInjectResult::Failed;
+    HWND resolvedTargetHwnd = targetHwnd;
+    POINT resolvedClientPt = rootClientPt;
+    if (!resolve_message_target_at_screen_point(targetHwnd, screenPt, &resolvedTargetHwnd, &resolvedClientPt)) {
+      return InputInjectResult::NoTarget;
+    }
+    remember_input_target(desktopInputState, resolvedTargetHwnd, screenPt);
     if (input.kind == 1) {
       if ((input.buttons & 0x7u) == 0) return InputInjectResult::IgnoredMove;
-      LPARAM lp = 0;
-      if (!make_scaled_client_lparam(targetHwnd, input.x, input.y, inputDomainW, inputDomainH, &lp)) {
-        return InputInjectResult::Failed;
-      }
       const WPARAM wp = mouse_button_wparam(static_cast<uint16_t>(input.buttons & 0x7u));
-      return PostMessageW(targetHwnd, WM_MOUSEMOVE, wp, lp) ? InputInjectResult::Injected
-                                                            : InputInjectResult::Failed;
+      const LPARAM lp = MAKELPARAM(static_cast<short>(resolvedClientPt.x), static_cast<short>(resolvedClientPt.y));
+      return PostMessageW(resolvedTargetHwnd, WM_MOUSEMOVE, wp, lp) ? InputInjectResult::Injected
+                                                                    : InputInjectResult::Failed;
     }
     if (input.kind == 2 || input.kind == 3) {
       const UINT msg = mouse_vk_to_message(input.kind, input.keyCode);
       if (msg == 0) return InputInjectResult::Unsupported;
-      LPARAM lp = 0;
-      if (!make_scaled_client_lparam(targetHwnd, input.x, input.y, inputDomainW, inputDomainH, &lp)) {
-        return InputInjectResult::Failed;
-      }
       uint16_t buttons = static_cast<uint16_t>(input.buttons & 0x7u);
       const uint16_t eventMask = mouse_vk_to_mask(input.keyCode);
       if (input.kind == 2) {
@@ -765,32 +812,41 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
         buttons = static_cast<uint16_t>(buttons & static_cast<uint16_t>(~eventMask));
       }
       const WPARAM wp = mouse_button_wparam(buttons);
-      return PostMessageW(targetHwnd, msg, wp, lp) ? InputInjectResult::Injected
-                                                    : InputInjectResult::Failed;
+      const LPARAM lp = MAKELPARAM(static_cast<short>(resolvedClientPt.x), static_cast<short>(resolvedClientPt.y));
+      return PostMessageW(resolvedTargetHwnd, msg, wp, lp) ? InputInjectResult::Injected
+                                                            : InputInjectResult::Failed;
     }
     if (input.kind == 4) {
-      POINT clientPt{};
-      LPARAM lp = 0;
-      if (!make_scaled_client_lparam(targetHwnd, input.x, input.y, inputDomainW, inputDomainH, &lp, &clientPt)) {
-        return InputInjectResult::Failed;
-      }
-      POINT screenPt = clientPt;
-      if (!ClientToScreen(targetHwnd, &screenPt)) return InputInjectResult::Failed;
       const WPARAM wp =
           MAKEWPARAM(mouse_button_wparam(static_cast<uint16_t>(input.buttons & 0x7u)),
                      static_cast<WORD>(static_cast<SHORT>(input.wheelDelta)));
       const LPARAM screenLp =
           MAKELPARAM(static_cast<short>(screenPt.x), static_cast<short>(screenPt.y));
-      return PostMessageW(targetHwnd, WM_MOUSEWHEEL, wp, screenLp) ? InputInjectResult::Injected
-                                                                   : InputInjectResult::Failed;
+      return PostMessageW(resolvedTargetHwnd, WM_MOUSEWHEEL, wp, screenLp) ? InputInjectResult::Injected
+                                                                           : InputInjectResult::Failed;
     }
     if (input.kind == 5 || input.kind == 6) {
+      HWND keyTargetHwnd = targetHwnd;
+      if (desktopInputState) {
+        std::lock_guard<std::mutex> lk(desktopInputState->mu);
+        if (desktopInputState->lastHwnd && IsWindow(desktopInputState->lastHwnd)) {
+          keyTargetHwnd = desktopInputState->lastHwnd;
+        }
+      }
       const bool keyUp = (input.kind == 6);
       const UINT msg = keyUp ? WM_KEYUP : WM_KEYDOWN;
       const LPARAM lp = key_event_lparam(input.keyCode, keyUp);
-      return PostMessageW(targetHwnd, msg, static_cast<WPARAM>(input.keyCode), lp)
-                 ? InputInjectResult::Injected
-                 : InputInjectResult::Failed;
+      if (!PostMessageW(keyTargetHwnd, msg, static_cast<WPARAM>(input.keyCode), lp)) {
+        return InputInjectResult::Failed;
+      }
+      if (!keyUp) {
+        wchar_t ch = 0;
+        if (keycode_to_unicode_char(input.keyCode, &ch)) {
+          const LPARAM charLp = key_event_lparam(input.keyCode, false);
+          (void)PostMessageW(keyTargetHwnd, WM_CHAR, static_cast<WPARAM>(ch), charLp);
+        }
+      }
+      return InputInjectResult::Injected;
     }
     return InputInjectResult::Unsupported;
   }
@@ -874,9 +930,17 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
     const bool keyUp = (input.kind == 6);
     const UINT msg = keyUp ? WM_KEYUP : WM_KEYDOWN;
     const LPARAM lp = key_event_lparam(input.keyCode, keyUp);
-    return PostMessageW(targetHwnd, msg, static_cast<WPARAM>(input.keyCode), lp)
-               ? InputInjectResult::Injected
-               : InputInjectResult::Failed;
+    if (!PostMessageW(targetHwnd, msg, static_cast<WPARAM>(input.keyCode), lp)) {
+      return InputInjectResult::Failed;
+    }
+    if (!keyUp) {
+      wchar_t ch = 0;
+      if (keycode_to_unicode_char(input.keyCode, &ch)) {
+        const LPARAM charLp = key_event_lparam(input.keyCode, false);
+        (void)PostMessageW(targetHwnd, WM_CHAR, static_cast<WPARAM>(ch), charLp);
+      }
+    }
+    return InputInjectResult::Injected;
   }
   return InputInjectResult::Unsupported;
 }

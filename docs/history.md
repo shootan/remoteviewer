@@ -1226,3 +1226,37 @@ Next action
 - host PC에는 `native-video-external-v3-20260316-005313.zip`를 풀고 `run_native_video_with_config.ps1 -Role host`로 실행한다.
 - client PC에는 같은 번들을 풀고 `run_native_video_with_config.ps1 -Role client -RemoteHost <HOST_PUBLIC_IP_OR_DNS>`로 연결한다.
 - 실제 외부 2PC에서 `Desktop Mode`, 특정 창 선택, 키/마우스/휠 입력, 작업표시줄 클릭을 순서대로 수동 확인한다.
+
+### 118) 2026-03-16 native GUI polish: UTF-8 title rendering + keyboard target routing
+Goal
+- native 좌측 panel에서 한글 창 제목이 깨져 보이던 문제를 줄이고, 선택된 타깃에 키 입력이 전달되지 않던 경로를 보강한다.
+
+Files changed
+- `apps/native_poc/src/native_video_client_main.cpp`
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `docs/history.md`
+
+Validation / build / test result
+- Build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_host_poc remote60_native_video_client_poc --parallel`
+  - 결과: 성공
+- Input regression:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/validate_background_input_injection.ps1 -DurationSec 12`
+  - 결과:
+    - `AUTO_PASS=1`
+    - `INPUT_EVENTS=293`
+    - `INPUT_NO_TARGET=0`
+    - `INPUT_INJECT_FAIL=0`
+- Native GUI/control smoke:
+  - `tmp/title-key-smoke/client.out.log`
+    - `control connected port=43001 inputChannel=1`
+    - `window-list seq=1 ...`
+- Bundle refresh:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/package_native_video_external_bundle.ps1 -BuildDir build-vcpkg-local -BundleName native-video-external-v4`
+  - 결과:
+    - `BUNDLE_DIR=D:\remote\remote\dist\native-video-external-v4-20260316-010834`
+    - `BUNDLE_ZIP=D:\remote\remote\dist\native-video-external-v4-20260316-010834.zip`
+
+Next action
+- 외부 2PC에서 한글 제목 표시와 실제 텍스트 입력(예: 메모장/노트패드++)을 수동으로 재확인한다.
+- 필요 시 `WM_CHAR` 확장 범위와 key target selection fallback을 추가 보정한다.

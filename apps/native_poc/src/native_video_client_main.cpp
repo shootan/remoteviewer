@@ -244,6 +244,21 @@ std::string fixed_cstr_to_string(const char* buf, size_t cap) {
   return std::string(buf, buf + n);
 }
 
+std::wstring utf8_to_wide(const std::string& utf8) {
+  if (utf8.empty()) return std::wstring{};
+  const int n = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+  if (n <= 1) return std::wstring{};
+  std::wstring out(static_cast<size_t>(n - 1), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, out.data(), n);
+  return out;
+}
+
+void draw_text_utf8(HDC hdc, const std::string& text, RECT* rect, UINT format) {
+  if (!rect) return;
+  const std::wstring wide = utf8_to_wide(text);
+  DrawTextW(hdc, wide.c_str(), static_cast<int>(wide.size()), rect, format);
+}
+
 Args parse_args(int argc, char** argv) {
   Args a;
   std::string configPath;
@@ -910,7 +925,8 @@ void draw_panel_button(HDC hdc, const RECT& rect, const char* label, bool active
   SetBkMode(hdc, TRANSPARENT);
   SetTextColor(hdc, disabled ? RGB(160, 165, 170) : RGB(240, 240, 240));
   RECT textRect = rect;
-  DrawTextA(hdc, label, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+  draw_text_utf8(hdc, label ? std::string(label) : std::string{}, &textRect,
+                 DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
 void push_overlay_metric_sample(uint32_t recvFpsX100, uint32_t decodedFpsX100, uint32_t recvMbpsX1000,
@@ -1044,14 +1060,14 @@ void draw_overlay(HDC hdc) {
   textRect.left += 10;
   textRect.right -= 10;
   textRect.top += 8;
-  DrawTextA(hdc, "Native Window Targets", -1, &textRect, DT_LEFT | DT_SINGLELINE);
+  draw_text_utf8(hdc, "Native Window Targets", &textRect, DT_LEFT | DT_SINGLELINE);
 
   textRect.top += 20;
   std::string selectedLine = std::string("Selected: ") + selectedTitle;
-  DrawTextA(hdc, selectedLine.c_str(), -1, &textRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+  draw_text_utf8(hdc, selectedLine, &textRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
   textRect.top += 18;
   std::string statusLine = selectionLocked ? std::string("Mode: locked by config") : panelStatus;
-  DrawTextA(hdc, statusLine.c_str(), -1, &textRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+  draw_text_utf8(hdc, statusLine, &textRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
   const int itemStep = kPanelItemHeight + kPanelItemGap;
   const int visibleCount = std::max<int>(1, (layout.listRect.bottom - layout.listRect.top - 8) / itemStep);
@@ -1062,8 +1078,10 @@ void draw_overlay(HDC hdc) {
     emptyRect.top += 10;
     emptyRect.right -= 10;
     SetTextColor(hdc, RGB(180, 185, 190));
-    DrawTextA(hdc, selectionLocked ? "Window list hidden by config lock" : "No shareable windows. Click Refresh.",
-              -1, &emptyRect, DT_LEFT | DT_WORDBREAK);
+    draw_text_utf8(hdc,
+                   selectionLocked ? std::string("Window list hidden by config lock")
+                                   : std::string("No shareable windows. Click Refresh."),
+                   &emptyRect, DT_LEFT | DT_WORDBREAK);
   } else {
     for (int visibleIndex = 0; visibleIndex < visibleCount; ++visibleIndex) {
       const int itemIndex = clampedScroll + visibleIndex;
@@ -1079,8 +1097,7 @@ void draw_overlay(HDC hdc) {
       itemText.left += 8;
       itemText.right -= 8;
       SetTextColor(hdc, selectionLocked ? RGB(165, 170, 175) : RGB(235, 238, 242));
-      DrawTextA(hdc, entry.title.c_str(), -1, &itemText,
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+      draw_text_utf8(hdc, entry.title, &itemText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
   }
 
@@ -1131,7 +1148,7 @@ void draw_overlay(HDC hdc) {
   SetTextColor(hdc, RGB(220, 225, 230));
   for (const auto& line : statsLines) {
     RECT lineRect = statsText;
-    DrawTextA(hdc, line.c_str(), -1, &lineRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    draw_text_utf8(hdc, line, &lineRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
     statsText.top += 18;
     if (statsText.top >= layout.statsRect.bottom - 16) break;
   }
