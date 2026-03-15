@@ -1080,3 +1080,39 @@ Validation / build / test result
 Next action
 - 일반 외부 2PC 스모크는 `native_video_profile_1080p_external_template.json` 또는 `native_video_profile_1080p.json` 기준으로 실행한다.
 - `m9_easy.ps1`는 M9 A/B 전용으로만 사용하고, static scene 10fps는 정상 동작으로 해석한다.
+
+### 114) 2026-03-15 native 입력 설정 전달 복구 + native/web GUI 경로 분리
+Goal
+- 외부 테스트에서 키/마우스 입력이 전혀 동작하지 않던 원인을 수정하고, native bundle과 web GUI 경로의 역할 차이를 명확히 문서화한다.
+
+Files changed
+- `automation/run_native_video_with_config.ps1`
+- `automation/native_video_profile_1080p_window_input_template.json`
+- `automation/package_native_video_external_bundle.ps1`
+- `docs/external_wan_test_guide.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Root cause check:
+  - `run_native_video_with_config.ps1`가 exe에 `--config`를 넘기지 않아 JSON의 `enableInputInjection`, `inputTarget*`, `noInputChannel=false`가 native host/client에 전달되지 않던 문제 확인
+  - native bundle 자체는 browser GUI path가 아니므로 `desktop / window list / touch UI`는 포함하지 않는 구조임을 코드/문서 기준으로 재확인
+- Runtime smoke (config passthrough):
+  - 사용 config: `automation/logs/m35-input-validate-20260307-172012/m35_profile.json`
+  - 결과 로그: `tmp/config-pass-smoke/host.out.log`, `tmp/config-pass-smoke/client.out.log`
+  - 확인 사항:
+    - host wrapper args에 `--config ...m35_profile.json` 포함
+    - host 로그에 `input injection enabled mode=background_message targetProcess=remote60_native_video_client_poc.exe` 출력
+    - client 로그에 `control connected port=43001 inputChannel=1` 출력
+- Bundle refresh:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/package_native_video_external_bundle.ps1 -BuildDir build-vcpkg-local -BundleName native-video-external-v2`
+  - 결과:
+    - `BUNDLE_DIR=D:\remote\remote\dist\native-video-external-v2-20260315-232939`
+    - `BUNDLE_ZIP=D:\remote\remote\dist\native-video-external-v2-20260315-232939.zip`
+  - 번들 확인:
+    - `native_video_profile_1080p_window_input_template.json` 포함
+    - `EXTERNAL_WAN_QUICKSTART.md`에 native window-target input 섹션 + web GUI path 안내 추가
+
+Next action
+- native 경로에서 키/마우스 입력이 필요하면 `native_video_profile_1080p_window_input_template.json`을 수정해 특정 HWND 대상(window-target)으로 실행한다.
+- `desktop / window list / touch UI`가 필요하면 native bundle이 아니라 `automation/run_web_runtime.ps1` 기반 web runtime으로 테스트한다.

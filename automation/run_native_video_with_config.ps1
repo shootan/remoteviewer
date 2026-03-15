@@ -211,7 +211,7 @@ if ($Role -eq "host") {
   $exe = Join-Path $exeDirResolved "remote60_native_video_host_poc.exe"
   if (-not (Test-Path -LiteralPath $exe)) { throw "host exe not found: $exe" }
 
-  $args = @("--bind-port", "$port", "--codec", $codec, "--fps", "$fps", "--transport", $transport)
+  $args = @("--config", $resolvedConfig, "--bind-port", "$port", "--codec", $codec, "--fps", "$fps", "--transport", $transport)
   if ($udpMtu -gt 0) { $args += @("--udp-mtu", "$udpMtu") }
   if ($tcpSendBufKb -gt 0) { $args += @("--tcp-sendbuf-kb", "$tcpSendBufKb") }
   if ($seconds -gt 0) { $args += @("--seconds", "$seconds") }
@@ -250,7 +250,7 @@ if ([string]::IsNullOrWhiteSpace($effectiveHost)) {
   $effectiveHost = Get-StringValue $cfg "remoteHost" "127.0.0.1"
 }
 
-$args = @("--host", $effectiveHost, "--port", "$port", "--codec", $codec, "--transport", $transport, "--fps-hint", "$fpsHint")
+$args = @("--config", $resolvedConfig, "--host", $effectiveHost, "--port", "$port", "--codec", $codec, "--transport", $transport, "--fps-hint", "$fpsHint")
 if ($udpMtu -gt 0) { $args += @("--udp-mtu", "$udpMtu") }
 if ($tcpRecvBufKb -gt 0) { $args += @("--tcp-recvbuf-kb", "$tcpRecvBufKb") }
 if ($tcpSendBufKb -gt 0) { $args += @("--tcp-sendbuf-kb", "$tcpSendBufKb") }

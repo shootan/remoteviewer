@@ -101,6 +101,8 @@ netsh advfirewall firewall add rule name="Remote60 Native Video TCP43001" dir=in
 ## 4) Recommended Profiles
 - `native_video_profile_1080p_external_template.json`
   - default external smoke, 1080p30 fixed, `8Mbps`, `mft_auto/mft_auto`, frame gating off
+- `native_video_profile_1080p_window_input_template.json`
+  - native window-target input template, not desktop-wide input
 - `native_video_profile_1080p_lowlat.json`
   - adaptive low-latency tuning, static scene can downshift to `10fps`
 - `native_video_profile_1080p_wan_quality.json`
@@ -151,7 +153,26 @@ Note:
 - That baseline keeps frame gating enabled, so static scenes can intentionally downshift to `10fps`.
 - For generic fixed-30fps external smoke, use the Quick 2PC Run commands above instead.
 
-## 7) Manual WAN Capture Commands
+## 7) Native Window-Target Input
+Use `native_video_profile_1080p_window_input_template.json` only when you want click/drag/keyboard input into a specific HWND-backed app window.
+
+Edit these keys first:
+- `inputTargetProcess` or `inputTargetTitle`
+- `captureWindowProcess` or `captureWindowTitle`
+- `remoteHost`
+
+Run:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_with_config.ps1 -Role host -ConfigPath .\automation\native_video_profile_1080p_window_input_template.json -ExeDir .\bin
+powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_with_config.ps1 -Role client -ConfigPath .\automation\native_video_profile_1080p_window_input_template.json -ExeDir .\bin -RemoteHost <HOST_PUBLIC_IP_OR_DNS>
+```
+
+Notes:
+- Native bundle input is window-targeted only in this phase.
+- Desktop-wide input to the primary monitor is not supported here.
+- `run_native_video_with_config.ps1` passes `--config` through to the exe, so input/capture JSON keys are preserved.
+
+## 8) Manual WAN Capture Commands
 Host:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\automation\run_wan_host_capture.ps1 -ConfigPath .\automation\native_video_profile_1080p_external_template.json -ExeDir .\bin -Tag manual
@@ -167,7 +188,17 @@ Summary:
 powershell -ExecutionPolicy Bypass -File .\automation\summarize_wan_capture.ps1 -HostInput .\automation\logs\wan-capture-<timestamp>-host-manual -ClientInput .\automation\logs\wan-capture-<timestamp>-client-manual
 ```
 
-## 8) Preflight Check
+## 9) Browser GUI Path
+This bundle is the native path only.
+If you need the browser GUI with `desktop / window list / touch input`, run the web runtime from the source tree instead:
+```powershell
+powershell -ExecutionPolicy Bypass -File automation\run_web_runtime.ps1 -Port 3000
+```
+
+Then open:
+- `http://<HOST_PUBLIC_IP_OR_DNS>:3000`
+
+## 10) Preflight Check
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\automation\wan_preflight_native_video.ps1 -RemoteHost <HOST_PUBLIC_IP_OR_DNS> -VideoPort 43000 -ControlPort 43001
 ```

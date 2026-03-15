@@ -103,6 +103,7 @@ powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config
 
 ## Recommended FHD profiles
 - `automation/native_video_profile_1080p_external_template.json` (external smoke default, 30fps fixed, frame gating off)
+- `automation/native_video_profile_1080p_window_input_template.json` (native window-target input template, not desktop-wide input)
 - `automation/native_video_profile_1080p_lowlat.json` (8Mbps, low-latency baseline)
 - `automation/native_video_profile_1080p_wan_quality.json` (10Mbps, keyint 60, frame gating off)
 - `automation/native_video_profile_1080p_quality_10m_k60.json`
@@ -126,6 +127,42 @@ Note:
 - `native_video_profile_1080p_lowlat.json` is not a fixed-30fps smoke profile.
 - It leaves frame gating enabled and can intentionally downshift to `10fps` on static scenes (`staticSceneFps=10`).
 - For generic external 2PC connectivity/perf smoke, use `native_video_profile_1080p_external_template.json` or `automation/native_video_profile_1080p.json`.
+
+## Native Input Scope
+- The native bundle path is not the browser GUI path.
+- It does not provide the web client's `desktop / window list / touch UI`.
+- Native input in current phase is window-targeted only.
+- Desktop-wide input to the primary monitor is not supported in this native bundle.
+
+## Native Window-Target Input
+Use `automation/native_video_profile_1080p_window_input_template.json` when you want click/drag/keyboard injection into a specific target window.
+
+Edit these keys first:
+- `inputTargetProcess` or `inputTargetTitle`
+- `captureWindowProcess` or `captureWindowTitle`
+- `remoteHost`
+
+Example:
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1 -Role host -ConfigPath automation/native_video_profile_1080p_window_input_template.json -ExeDir build-vcpkg-local/apps/native_poc/Debug
+powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1 -Role client -ConfigPath automation/native_video_profile_1080p_window_input_template.json -ExeDir build-vcpkg-local/apps/native_poc/Debug -RemoteHost <HOST_PUBLIC_IP_OR_DNS>
+```
+
+Notes:
+- `run_native_video_with_config.ps1` now passes `--config` through to the native host/client exe, so `enableInputInjection`, `inputTarget*`, `captureWindow*`, and `noInputChannel=false` are preserved.
+- For validation, `automation/validate_background_input_injection.ps1` remains the shortest local check.
+
+## Browser GUI Path
+If you need the browser UI with `desktop / window list / touch input`, use the web runtime instead of the native bundle.
+
+Host machine:
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/run_web_runtime.ps1 -Port 3000
+```
+
+Client device:
+- Open `http://<HOST_PUBLIC_IP_OR_DNS>:3000`
+- This is the path that contains the web client's window list UI and touch handlers.
 
 ## Portable bundle
 Create a portable bundle with current binaries, profiles, and helper scripts:
