@@ -164,6 +164,15 @@ Client device:
 - Open `http://<HOST_PUBLIC_IP_OR_DNS>:3000`
 - This is the path that contains the web client's window list UI and touch handlers.
 
+Portable web bundle:
+```powershell
+powershell -ExecutionPolicy Bypass -File automation/package_web_runtime_external_bundle.ps1 -BuildDir build-vcpkg-local
+```
+
+Notes:
+- This bundle packages `remote60_host.exe`, `apps/signaling`, and web runtime scripts.
+- Node.js is still required on the host machine.
+
 ## Portable bundle
 Create a portable bundle with current binaries, profiles, and helper scripts:
 ```powershell

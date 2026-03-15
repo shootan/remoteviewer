@@ -89,6 +89,7 @@ $hostProc = $null
 $effectiveWebUrl = ""
 
 try {
+  $env:PORT = "$Port"
   $sigProc = Start-Process -FilePath "node" -ArgumentList @("apps/signaling/server.js") `
     -WorkingDirectory $Root -RedirectStandardOutput $sigOut -RedirectStandardError $sigErr -PassThru
 

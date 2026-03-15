@@ -1116,3 +1116,31 @@ Validation / build / test result
 Next action
 - native 경로에서 키/마우스 입력이 필요하면 `native_video_profile_1080p_window_input_template.json`을 수정해 특정 HWND 대상(window-target)으로 실행한다.
 - `desktop / window list / touch UI`가 필요하면 native bundle이 아니라 `automation/run_web_runtime.ps1` 기반 web runtime으로 테스트한다.
+
+### 115) 2026-03-15 web GUI 외부 테스트 준비물 추가 + run_web_runtime 포트 전달 수정
+Goal
+- `desktop / window list / touch UI`를 실제로 포함하는 web runtime 외부 테스트 경로를 별도 bundle로 준비하고, `run_web_runtime.ps1 -Port`가 signaling 서버에 반영되지 않던 버그를 수정한다.
+
+Files changed
+- `automation/run_web_runtime.ps1`
+- `automation/package_web_runtime_external_bundle.ps1`
+- `docs/external_wan_test_guide.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Web runtime local smoke:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/run_web_runtime.ps1 -Port 3001 -AutoStopSec 5`
+  - 결과: `READY=1`, `WEB_URL=http://127.0.0.1:3001`
+- Web bundle package:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/package_web_runtime_external_bundle.ps1 -BuildDir build-vcpkg-local -BundleName web-runtime-external-v2`
+  - 결과:
+    - `BUNDLE_DIR=D:\remote\remote\dist\web-runtime-external-v2-20260315-234022`
+    - `BUNDLE_ZIP=D:\remote\remote\dist\web-runtime-external-v2-20260315-234022.zip`
+- Bundled runtime smoke:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File dist\web-runtime-external-v2-20260315-234022\automation\run_web_runtime.ps1 -Port 3002 -AutoStopSec 5`
+  - 결과: `READY=1`, `WEB_URL=http://127.0.0.1:3002`
+
+Next action
+- `desktop / window list / touch UI` 검증은 `web-runtime-external-v2-20260315-234022.zip` 기준으로 진행한다.
+- native bundle은 low-latency PoC/video-only + window-target input 용도로만 유지한다.
