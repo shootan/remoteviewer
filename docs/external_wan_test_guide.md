@@ -102,7 +102,7 @@ powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config
 ```
 
 ## Recommended FHD profiles
-- `automation/native_video_profile_1080p_external_template.json` (external smoke default, 30fps fixed, frame gating off)
+- `automation/native_video_profile_1080p_external_template.json` (native 2PC GUI default, 30fps fixed, input/control on)
 - `automation/native_video_profile_1080p_window_input_template.json` (native window-target input template, not desktop-wide input)
 - `automation/native_video_profile_1080p_lowlat.json` (8Mbps, low-latency baseline)
 - `automation/native_video_profile_1080p_wan_quality.json` (10Mbps, keyint 60, frame gating off)
@@ -127,12 +127,15 @@ Note:
 - `native_video_profile_1080p_lowlat.json` is not a fixed-30fps smoke profile.
 - It leaves frame gating enabled and can intentionally downshift to `10fps` on static scenes (`staticSceneFps=10`).
 - For generic external 2PC connectivity/perf smoke, use `native_video_profile_1080p_external_template.json` or `automation/native_video_profile_1080p.json`.
+- `native_video_profile_1080p_external_template.json` now enables control/input so the native client panel can drive `Desktop Mode` and window selection directly.
 
 ## Native Input Scope
 - The native bundle path is not the browser GUI path.
-- It does not provide the web client's `desktop / window list / touch UI`.
-- Native input in current phase is window-targeted only.
-- Desktop-wide input to the primary monitor is not supported in this native bundle.
+- It does not provide the old browser page, but it now provides equivalent native panel controls for `Desktop Mode`, window list, and selected-target input.
+- Native input in current phase supports:
+  - desktop mode: screen-point based input routing
+  - selected window mode: fixed target window input routing
+- The separate `window_input_template` profile remains for config-locked/fixed-target automation.
 
 ## Native Window-Target Input
 Use `automation/native_video_profile_1080p_window_input_template.json` when you want click/drag/keyboard injection into a specific target window.

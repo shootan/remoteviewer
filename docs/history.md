@@ -1189,3 +1189,40 @@ Validation / build / test result
 Next action
 - 실제 외부 2PC에서 창 목록 UI, 특정 창 선택, Desktop Mode 복귀, 작업표시줄 클릭 입력을 수동으로 1차 확인한다.
 - 필요 시 panel hit area/scroll UX와 selection visual polish를 후속 미세조정한다.
+
+### 117) 2026-03-16 native 2PC 테스트 번들/커맨드 최신화
+Goal
+- 바로 다른 장비에서 2PC 테스트를 할 수 있도록 최신 native GUI 기준 bundle과 실행 커맨드를 다시 고정한다.
+
+Files changed
+- `automation/native_video_profile_1080p_external_template.json`
+- `automation/package_native_video_external_bundle.ps1`
+- `docs/external_wan_test_guide.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_host_poc remote60_native_video_client_poc --parallel`
+  - 결과: 성공
+- External template smoke:
+  - local host/client short run with `automation/native_video_profile_1080p_external_template.json`
+  - client log: `tmp/native-2pc-ready-smoke/client.out.log`
+    - `control connected port=43001 inputChannel=1`
+    - `window-list seq=1 count=12 selectedId=0 locked=0 ...`
+  - host log: `tmp/native-2pc-ready-smoke/host.out.log`
+    - `input injection enabled mode=background_message`
+- Bundle package:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/package_native_video_external_bundle.ps1 -BuildDir build-vcpkg-local -BundleName native-video-external-v3`
+  - 결과:
+    - `BUNDLE_DIR=D:\remote\remote\dist\native-video-external-v3-20260316-005313`
+    - `BUNDLE_ZIP=D:\remote\remote\dist\native-video-external-v3-20260316-005313.zip`
+  - 번들 가이드 확인:
+    - 기본 profile이 `native_video_profile_1080p_external_template.json`
+    - left panel(`Refresh`, `Desktop Mode`, `Window list`) 사용 안내 포함
+    - `input/control on` 동작 안내 포함
+
+Next action
+- host PC에는 `native-video-external-v3-20260316-005313.zip`를 풀고 `run_native_video_with_config.ps1 -Role host`로 실행한다.
+- client PC에는 같은 번들을 풀고 `run_native_video_with_config.ps1 -Role client -RemoteHost <HOST_PUBLIC_IP_OR_DNS>`로 연결한다.
+- 실제 외부 2PC에서 `Desktop Mode`, 특정 창 선택, 키/마우스/휠 입력, 작업표시줄 클릭을 순서대로 수동 확인한다.

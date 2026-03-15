@@ -100,9 +100,9 @@ netsh advfirewall firewall add rule name="Remote60 Native Video TCP43001" dir=in
 
 ## 4) Recommended Profiles
 - `native_video_profile_1080p_external_template.json`
-  - default external smoke, 1080p30 fixed, `8Mbps`, `mft_auto/mft_auto`, frame gating off
+  - default native 2PC GUI smoke, 1080p30 fixed, `8Mbps`, `mft_auto/mft_auto`, input/control on
 - `native_video_profile_1080p_window_input_template.json`
-  - native window-target input template, not desktop-wide input
+  - config-locked window-target input template for fixed app HWND testing
 - `native_video_profile_1080p_lowlat.json`
   - adaptive low-latency tuning, static scene can downshift to `10fps`
 - `native_video_profile_1080p_wan_quality.json`
@@ -123,6 +123,16 @@ powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_with_conf
 
 If you prefer editing JSON once, set `remoteHost` in `native_video_profile_1080p_external_template.json`.
 Use `native_video_profile_1080p_lowlat.json` only when you intentionally want adaptive/frame-gating behavior.
+
+After connect, use the native client's left panel:
+- `Refresh`
+- `Desktop Mode`
+- `Window list`
+
+In this profile:
+- video click/drag/wheel/keyboard input is on
+- `Desktop Mode` routes input by screen point
+- selecting a window routes input to that window
 
 ## 6) Quick M9 A/B Capture
 One-time prepare:
@@ -168,8 +178,8 @@ powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_with_conf
 ```
 
 Notes:
-- Native bundle input is window-targeted only in this phase.
-- Desktop-wide input to the primary monitor is not supported here.
+- `native_video_profile_1080p_external_template.json` is the general GUI profile.
+- `native_video_profile_1080p_window_input_template.json` is for fixed-target automation or app-specific validation.
 - `run_native_video_with_config.ps1` passes `--config` through to the exe, so input/capture JSON keys are preserved.
 
 ## 8) Manual WAN Capture Commands
