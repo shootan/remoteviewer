@@ -1260,3 +1260,42 @@ Validation / build / test result
 Next action
 - 외부 2PC에서 한글 제목 표시와 실제 텍스트 입력(예: 메모장/노트패드++)을 수동으로 재확인한다.
 - 필요 시 `WM_CHAR` 확장 범위와 key target selection fallback을 추가 보정한다.
+
+### 119) 2026-03-16 native UI 전환: 상시 사이드바 -> home picker overlay + Targets 토글
+Goal
+- 상시 좌측 사이드바 때문에 video 영역이 줄어드는 문제를 줄이기 위해, native client를 `처음엔 홈 선택 화면, 선택 후엔 전체화면 영상` 구조로 바꾼다.
+
+Files changed
+- `apps/native_poc/src/native_video_client_main.cpp`
+- `automation/package_native_video_external_bundle.ps1`
+- `docs/external_wan_test_guide.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_client_poc --parallel`
+  - 결과: 성공
+- Input regression:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/validate_background_input_injection.ps1 -DurationSec 12`
+  - 결과:
+    - `AUTO_PASS=1`
+    - `INPUT_EVENTS=720`
+    - `INPUT_NO_TARGET=0`
+    - `INPUT_INJECT_FAIL=0`
+- Native GUI smoke:
+  - `tmp/native-home-smoke/client.out.log`
+    - `window-list seq=1 ...` 확인
+  - 비고: 자동 클릭 smoke에서는 `window-select`까지 안정적으로 재현하지 못했고, 실제 picker UX는 수동 2PC 확인이 필요
+- Bundle refresh:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/package_native_video_external_bundle.ps1 -BuildDir build-vcpkg-local -BundleName native-video-external-v6`
+  - 결과:
+    - `BUNDLE_DIR=D:\remote\remote\dist\native-video-external-v6-20260316-012420`
+    - `BUNDLE_ZIP=D:\remote\remote\dist\native-video-external-v6-20260316-012420.zip`
+  - 가이드 반영:
+    - 시작 화면이 home picker overlay임을 명시
+    - 선택 후 fullscreen video + top-left `Targets` 버튼으로 다시 열기 동작 명시
+
+Next action
+- 실제 외부 2PC에서 `Desktop Mode -> fullscreen`, `Targets 버튼 -> picker reopen`, 특정 창 선택 후 fullscreen 전환을 수동으로 확인한다.
+- mouse input 체감이 여전히 비정상이면 selected window/desktop 각각에서 별도 repro 로그를 추가 수집한다.

@@ -618,12 +618,14 @@ struct WindowPanelState {
 
 std::mutex gWindowPanelMu;
 WindowPanelState gWindowPanel;
+std::atomic<bool> gWindowPickerVisible{true};
+std::atomic<bool> gWindowPickerToggleDown{false};
 std::atomic<uint64_t> gSuppressMouseUntilUs{0};
 std::atomic<uint32_t> gActiveTouchPointerId{0};
 std::atomic<bool> gActiveTouchDown{false};
 
-constexpr int kPanelPreferredWidth = 340;
-constexpr int kPanelMinWidth = 260;
+constexpr int kPickerPanelPreferredWidth = 560;
+constexpr int kPickerPanelMinWidth = 420;
 constexpr int kPanelMargin = 12;
 constexpr int kPanelButtonHeight = 30;
 constexpr int kPanelButtonGap = 8;
@@ -640,6 +642,7 @@ constexpr uint32_t kRuntimeKeyintMax = 240;
 
 struct ClientLayout {
   RECT clientRect{};
+  RECT toggleButtonRect{};
   RECT panelRect{};
   RECT videoRect{};
   RECT refreshButtonRect{};
@@ -673,33 +676,53 @@ ClientLayout compute_client_layout(HWND hwnd) {
       std::max<int>(1, static_cast<int>(layout.clientRect.right - layout.clientRect.left));
   const int clientH =
       std::max<int>(1, static_cast<int>(layout.clientRect.bottom - layout.clientRect.top));
-  const int panelW = std::clamp(clientW / 4, kPanelMinWidth, kPanelPreferredWidth);
-  layout.panelRect = make_rect(0, 0, std::min(clientW, panelW), clientH);
-  layout.videoRect = make_rect(static_cast<int>(layout.panelRect.right), 0,
-                               std::max<int>(1, clientW - static_cast<int>(layout.panelRect.right)), clientH);
+  layout.videoRect = make_rect(0, 0, clientW, clientH);
+  layout.toggleButtonRect = make_rect(kPanelMargin, kPanelMargin, 120, kPanelButtonHeight);
+
+  if (!gWindowPickerVisible.load(std::memory_order_relaxed)) {
+    layout.panelRect = make_rect(0, 0, 0, 0);
+    layout.refreshButtonRect = make_rect(0, 0, 0, 0);
+    layout.desktopButtonRect = make_rect(0, 0, 0, 0);
+    layout.selectedInfoRect = make_rect(0, 0, 0, 0);
+    layout.listRect = make_rect(0, 0, 0, 0);
+    layout.statsRect = make_rect(0, 0, 0, 0);
+    return layout;
+  }
+
+  const int panelW = std::clamp(clientW - 80, kPickerPanelMinWidth, kPickerPanelPreferredWidth);
+  const int panelH = std::max<int>(360, clientH - 80);
+  const int panelX = std::max<int>(kPanelMargin, (clientW - panelW) / 2);
+  const int panelY = std::max<int>(kPanelMargin, (clientH - panelH) / 2);
+  layout.panelRect = make_rect(panelX, panelY, panelW, panelH);
 
   const int buttonY = kPanelMargin;
   const int buttonW = std::max<int>(
       80, (static_cast<int>(layout.panelRect.right) - (kPanelMargin * 2) - kPanelButtonGap) / 2);
-  layout.refreshButtonRect = make_rect(kPanelMargin, buttonY, buttonW, kPanelButtonHeight);
-  layout.desktopButtonRect = make_rect(layout.refreshButtonRect.right + kPanelButtonGap, buttonY,
+  layout.refreshButtonRect = make_rect(layout.panelRect.left + kPanelMargin, layout.panelRect.top + buttonY,
                                        buttonW, kPanelButtonHeight);
+  layout.desktopButtonRect = make_rect(layout.refreshButtonRect.right + kPanelButtonGap,
+                                       layout.panelRect.top + buttonY, buttonW, kPanelButtonHeight);
 
   const int infoY = layout.refreshButtonRect.bottom + kPanelSectionGap;
-  layout.selectedInfoRect = make_rect(kPanelMargin, infoY,
-                                      std::max<int>(1, static_cast<int>(layout.panelRect.right) - (kPanelMargin * 2)),
+  layout.selectedInfoRect = make_rect(layout.panelRect.left + kPanelMargin, infoY,
+                                      std::max<int>(1, static_cast<int>(layout.panelRect.right - layout.panelRect.left) - (kPanelMargin * 2)),
                                       kPanelInfoHeight);
 
   const int listY = layout.selectedInfoRect.bottom + kPanelSectionGap;
-  const int listH = std::max<int>(80, clientH - listY - kPanelStatsHeight - kPanelMargin - kPanelSectionGap);
-  layout.listRect = make_rect(kPanelMargin, listY,
-                              std::max<int>(1, static_cast<int>(layout.panelRect.right) - (kPanelMargin * 2)), listH);
+  const int listH = std::max<int>(120, layout.panelRect.bottom - listY - kPanelStatsHeight - kPanelMargin - kPanelSectionGap);
+  layout.listRect = make_rect(layout.panelRect.left + kPanelMargin, listY,
+                              std::max<int>(1, static_cast<int>(layout.panelRect.right - layout.panelRect.left) - (kPanelMargin * 2)), listH);
 
   const int statsY = layout.listRect.bottom + kPanelSectionGap;
-  layout.statsRect = make_rect(kPanelMargin, statsY,
-                               std::max<int>(1, static_cast<int>(layout.panelRect.right) - (kPanelMargin * 2)),
-                               std::max<int>(40, clientH - statsY - kPanelMargin));
+  layout.statsRect = make_rect(layout.panelRect.left + kPanelMargin, statsY,
+                               std::max<int>(1, static_cast<int>(layout.panelRect.right - layout.panelRect.left) - (kPanelMargin * 2)),
+                               std::max<int>(40, layout.panelRect.bottom - statsY - kPanelMargin));
   return layout;
+}
+
+bool point_in_toggle_button(HWND hwnd, int x, int y) {
+  const ClientLayout layout = compute_client_layout(hwnd);
+  return point_in_rect(layout.toggleButtonRect, x, y);
 }
 
 bool point_in_panel_ui(HWND hwnd, int x, int y) {
@@ -825,6 +848,7 @@ void apply_window_selected_result(const ControlWindowSelectedMessage& msg) {
     gWindowPanel.selectedId = msg.windowId;
     gWindowPanel.selectedTitle = (msg.windowId == 0) ? "desktop" : (title.empty() ? "window" : title);
     gWindowPanel.status = std::string("window_selected: ") + gWindowPanel.selectedTitle;
+    gWindowPickerVisible.store(false, std::memory_order_relaxed);
   } else {
     gWindowPanel.status = std::string("window_select_failed: ") + (reason.empty() ? "unknown" : reason);
   }
@@ -1004,8 +1028,15 @@ void apply_runtime_tune_delta(int bitrateStep, int keyintStep) {
 
 void draw_overlay(HDC hdc) {
   const ClientLayout layout = compute_client_layout(gHwnd);
+  draw_panel_button(hdc, layout.toggleButtonRect,
+                    gWindowPickerVisible.load(std::memory_order_relaxed) ? "Hide" : "Targets");
+  if (!gWindowPickerVisible.load(std::memory_order_relaxed)) {
+    return;
+  }
+
+  draw_alpha_rect(hdc, layout.clientRect, RGB(8, 10, 14), 110);
   const RECT panel = layout.panelRect;
-  draw_alpha_rect(hdc, panel, RGB(12, 15, 20), 235);
+  draw_alpha_rect(hdc, panel, RGB(12, 15, 20), 242);
   const uint64_t nowUs = qpc_now_us();
   const OverlayMetricAverages avg5s = collect_overlay_averages(nowUs, 5000000ULL);
   const uint32_t width = gClientMetrics.width.load(std::memory_order_relaxed);
@@ -1050,9 +1081,9 @@ void draw_overlay(HDC hdc) {
   draw_panel_button(hdc, layout.desktopButtonRect, "Desktop Mode", selectedId == 0,
                     !gControlConnected.load(std::memory_order_relaxed) || selectionLocked);
 
-  draw_alpha_rect(hdc, layout.selectedInfoRect, RGB(24, 29, 36), 220);
-  draw_alpha_rect(hdc, layout.listRect, RGB(18, 22, 28), 210);
-  draw_alpha_rect(hdc, layout.statsRect, RGB(20, 24, 30), 200);
+  draw_alpha_rect(hdc, layout.selectedInfoRect, RGB(24, 29, 36), 228);
+  draw_alpha_rect(hdc, layout.listRect, RGB(18, 22, 28), 218);
+  draw_alpha_rect(hdc, layout.statsRect, RGB(20, 24, 30), 208);
 
   SetBkMode(hdc, TRANSPARENT);
   SetTextColor(hdc, RGB(235, 238, 242));
@@ -1060,7 +1091,7 @@ void draw_overlay(HDC hdc) {
   textRect.left += 10;
   textRect.right -= 10;
   textRect.top += 8;
-  draw_text_utf8(hdc, "Native Window Targets", &textRect, DT_LEFT | DT_SINGLELINE);
+  draw_text_utf8(hdc, "Choose Target", &textRect, DT_LEFT | DT_SINGLELINE);
 
   textRect.top += 20;
   std::string selectedLine = std::string("Selected: ") + selectedTitle;
@@ -1102,42 +1133,38 @@ void draw_overlay(HDC hdc) {
   }
 
   std::vector<std::string> statsLines;
-  statsLines.reserve(8);
+  statsLines.reserve(6);
   {
     std::ostringstream oss;
-    oss << "Frame: " << width << "x" << height
-        << "  recv/dec=" << (recvFpsX100 / 100.0) << "/" << (decFpsX100 / 100.0);
+    oss << "Desktop first, then pick a window.";
     statsLines.push_back(oss.str());
   }
   {
     std::ostringstream oss;
-    oss << "Net=" << (mbpsX1000 / 1000.0) << "Mbps  avgLat=" << (latUs / 1000.0)
-        << "ms  stale=" << staleMs << "ms";
+    oss << "After selection, video becomes fullscreen.";
     statsLines.push_back(oss.str());
   }
   {
     std::ostringstream oss;
-    oss << "5s avg dec=" << (avg5s.decodedFpsX100 / 100.0)
-        << "  host=" << gOverlayConfig.host << ":" << gOverlayConfig.port;
-    statsLines.push_back(oss.str());
-  }
-  {
-    std::ostringstream oss;
-    oss << "Capture=" << (((hostCapFlags & 0x1u) != 0) ? "window" : "desktop")
-        << "  proc=" << (hostCapProcess.empty() ? "monitor" : hostCapProcess)
-        << "  rebind=" << hostCapRebind;
-    statsLines.push_back(oss.str());
-  }
-  {
-    std::ostringstream oss;
-    oss << "Title=" << (hostCapTitle.empty() ? "<empty>" : hostCapTitle);
+    oss << "Click video to send mouse/keyboard input.";
     statsLines.push_back(oss.str());
   }
   {
     std::ostringstream oss;
     oss << "Control=" << (gControlConnected.load(std::memory_order_relaxed) ? "connected" : "off")
-        << "  input=" << (gInputEnabled.load(std::memory_order_relaxed) ? "on" : "off")
-        << "  dropped=" << dropped;
+        << "  input=" << (gInputEnabled.load(std::memory_order_relaxed) ? "on" : "off");
+    statsLines.push_back(oss.str());
+  }
+  {
+    std::ostringstream oss;
+    oss << "Current host target: " << (hostCapTitle.empty() ? hostCapProcess : hostCapTitle);
+    statsLines.push_back(oss.str());
+  }
+  {
+    std::ostringstream oss;
+    oss << "Frame " << width << "x" << height
+        << "  recv/dec=" << (recvFpsX100 / 100.0) << "/" << (decFpsX100 / 100.0)
+        << "  latency=" << (latUs / 1000.0) << "ms";
     statsLines.push_back(oss.str());
   }
 
@@ -1531,6 +1558,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     case WM_MOUSEMOVE:
       if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
+      if (gWindowPickerVisible.load(std::memory_order_relaxed)) return 0;
       if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
       if ((gMouseButtons.load(std::memory_order_relaxed) & 0x7u) == 0) return 0;
@@ -1543,6 +1572,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     case WM_LBUTTONDOWN:
       if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) {
+        gWindowPickerToggleDown.store(true, std::memory_order_relaxed);
+        return 0;
+      }
+      if (gWindowPickerVisible.load(std::memory_order_relaxed)) return 0;
       if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
       SetFocus(hwnd);
@@ -1559,6 +1593,32 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       const int x = GET_X_LPARAM(lp);
       const int y = GET_Y_LPARAM(lp);
       const ClientLayout layout = compute_client_layout(hwnd);
+      if (gWindowPickerToggleDown.exchange(false, std::memory_order_relaxed)) {
+        if (point_in_rect(layout.toggleButtonRect, x, y)) {
+          gWindowPickerVisible.store(!gWindowPickerVisible.load(std::memory_order_relaxed), std::memory_order_relaxed);
+          InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+      }
+      if (gWindowPickerVisible.load(std::memory_order_relaxed)) {
+        if (point_in_rect(layout.refreshButtonRect, x, y)) {
+          queue_window_list_request("window_list_request pending");
+          InvalidateRect(hwnd, nullptr, FALSE);
+          return 0;
+        }
+        if (point_in_rect(layout.desktopButtonRect, x, y)) {
+          queue_window_select_request(0, "desktop_select_requested");
+          InvalidateRect(hwnd, nullptr, FALSE);
+          return 0;
+        }
+        uint64_t hitWindowId = 0;
+        if (try_hit_window_list_item(hwnd, x, y, &hitWindowId)) {
+          queue_window_select_request(hitWindowId, "window_select_requested");
+          InvalidateRect(hwnd, nullptr, FALSE);
+          return 0;
+        }
+        return 0;
+      }
       if (point_in_rect(layout.refreshButtonRect, x, y)) {
         queue_window_list_request("window_list_request pending");
         InvalidateRect(hwnd, nullptr, FALSE);
@@ -1588,6 +1648,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_RBUTTONDOWN:
       if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
+      if (gWindowPickerVisible.load(std::memory_order_relaxed)) return 0;
       if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
       {
@@ -1600,6 +1662,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     case WM_RBUTTONUP:
       if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
+      if (gWindowPickerVisible.load(std::memory_order_relaxed)) return 0;
       if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
       {
@@ -1612,6 +1676,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     case WM_MBUTTONDOWN:
       if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
+      if (gWindowPickerVisible.load(std::memory_order_relaxed)) return 0;
       if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
       {
@@ -1624,6 +1690,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     case WM_MBUTTONUP:
       if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
+      if (gWindowPickerVisible.load(std::memory_order_relaxed)) return 0;
       if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
       {
@@ -1639,6 +1707,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
       ScreenToClient(hwnd, &p);
       const ClientLayout layout = compute_client_layout(hwnd);
+      if (point_in_rect(layout.toggleButtonRect, p.x, p.y)) return 0;
+      if (gWindowPickerVisible.load(std::memory_order_relaxed)) {
+        if (point_in_rect(layout.listRect, p.x, p.y)) {
+          const int wheel = GET_WHEEL_DELTA_WPARAM(wp);
+          scroll_window_list(hwnd, (wheel < 0) ? 1 : -1);
+          InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+      }
       if (point_in_rect(layout.listRect, p.x, p.y)) {
         const int wheel = GET_WHEEL_DELTA_WPARAM(wp);
         scroll_window_list(hwnd, (wheel < 0) ? 1 : -1);
@@ -1664,6 +1741,34 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
       ScreenToClient(hwnd, &p);
       gSuppressMouseUntilUs.store(qpc_now_us() + 300000ULL, std::memory_order_relaxed);
+      const ClientLayout layout = compute_client_layout(hwnd);
+      if (point_in_rect(layout.toggleButtonRect, p.x, p.y)) {
+        if (msg == WM_POINTERDOWN) {
+          gWindowPickerToggleDown.store(true, std::memory_order_relaxed);
+        } else if (msg == WM_POINTERUP && gWindowPickerToggleDown.exchange(false, std::memory_order_relaxed)) {
+          gWindowPickerVisible.store(!gWindowPickerVisible.load(std::memory_order_relaxed), std::memory_order_relaxed);
+          InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+      }
+      if (gWindowPickerVisible.load(std::memory_order_relaxed)) {
+        if (msg == WM_POINTERUP) {
+          if (point_in_rect(layout.refreshButtonRect, p.x, p.y)) {
+            queue_window_list_request("window_list_request pending");
+            InvalidateRect(hwnd, nullptr, FALSE);
+          } else if (point_in_rect(layout.desktopButtonRect, p.x, p.y)) {
+            queue_window_select_request(0, "desktop_select_requested");
+            InvalidateRect(hwnd, nullptr, FALSE);
+          } else {
+            uint64_t hitWindowId = 0;
+            if (try_hit_window_list_item(hwnd, p.x, p.y, &hitWindowId)) {
+              queue_window_select_request(hitWindowId, "window_select_requested");
+              InvalidateRect(hwnd, nullptr, FALSE);
+            }
+          }
+        }
+        return 0;
+      }
       if (point_in_panel_ui(hwnd, p.x, p.y)) return 0;
       int32_t vx = 0;
       int32_t vy = 0;

@@ -124,10 +124,14 @@ powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_with_conf
 If you prefer editing JSON once, set `remoteHost` in `native_video_profile_1080p_external_template.json`.
 Use `native_video_profile_1080p_lowlat.json` only when you intentionally want adaptive/frame-gating behavior.
 
-After connect, use the native client's left panel:
-- `Refresh`
-- `Desktop Mode`
-- `Window list`
+After connect, the native client starts in a home picker overlay:
+- `Desktop Mode` first
+- `Window list` below
+- `Refresh` button in the picker
+
+After you select a target:
+- video becomes fullscreen
+- use the small `Targets` button at the top-left to open the picker again
 
 In this profile:
 - video click/drag/wheel/keyboard input is on
