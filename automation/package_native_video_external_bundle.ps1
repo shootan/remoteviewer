@@ -99,8 +99,10 @@ netsh advfirewall firewall add rule name="Remote60 Native Video TCP43001" dir=in
 ```
 
 ## 4) Recommended Profiles
+- `native_video_profile_1080p_external_template.json`
+  - default external smoke, 1080p30 fixed, `8Mbps`, `mft_auto/mft_auto`, frame gating off
 - `native_video_profile_1080p_lowlat.json`
-  - 1080p30, `8Mbps`, `keyint=30`, `mft_hw/mft_hw`
+  - adaptive low-latency tuning, static scene can downshift to `10fps`
 - `native_video_profile_1080p_wan_quality.json`
   - 1080p30, `10Mbps`, `keyint=60`, frame gating off
 - `native_video_profile_720p.json`
@@ -109,15 +111,16 @@ netsh advfirewall firewall add rule name="Remote60 Native Video TCP43001" dir=in
 ## 5) Quick 2PC Run
 Host:
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_with_config.ps1 -Role host -ConfigPath .\automation\native_video_profile_1080p_lowlat.json -ExeDir .\bin
+powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_with_config.ps1 -Role host -ConfigPath .\automation\native_video_profile_1080p_external_template.json -ExeDir .\bin
 ```
 
 Client:
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_with_config.ps1 -Role client -ConfigPath .\automation\native_video_profile_1080p_lowlat.json -ExeDir .\bin -RemoteHost <HOST_PUBLIC_IP_OR_DNS>
+powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_with_config.ps1 -Role client -ConfigPath .\automation\native_video_profile_1080p_external_template.json -ExeDir .\bin -RemoteHost <HOST_PUBLIC_IP_OR_DNS>
 ```
 
 If you prefer editing JSON once, set `remoteHost` in `native_video_profile_1080p_external_template.json`.
+Use `native_video_profile_1080p_lowlat.json` only when you intentionally want adaptive/frame-gating behavior.
 
 ## 6) Quick M9 A/B Capture
 One-time prepare:
@@ -143,15 +146,20 @@ powershell -ExecutionPolicy Bypass -File .\automation\m9_easy.ps1 summary off
 powershell -ExecutionPolicy Bypass -File .\automation\m9_easy.ps1 summary on
 ```
 
+Note:
+- `m9_easy.ps1` is for M9 A/B capture and uses `native_video_profile_1080p_lowlat.json`.
+- That baseline keeps frame gating enabled, so static scenes can intentionally downshift to `10fps`.
+- For generic fixed-30fps external smoke, use the Quick 2PC Run commands above instead.
+
 ## 7) Manual WAN Capture Commands
 Host:
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\automation\run_wan_host_capture.ps1 -ConfigPath .\automation\native_video_profile_1080p_lowlat.json -ExeDir .\bin -Tag manual
+powershell -ExecutionPolicy Bypass -File .\automation\run_wan_host_capture.ps1 -ConfigPath .\automation\native_video_profile_1080p_external_template.json -ExeDir .\bin -Tag manual
 ```
 
 Client:
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\automation\run_wan_client_capture.ps1 -ConfigPath .\automation\native_video_profile_1080p_lowlat.json -ExeDir .\bin -RemoteHost <HOST_PUBLIC_IP_OR_DNS> -Tag manual
+powershell -ExecutionPolicy Bypass -File .\automation\run_wan_client_capture.ps1 -ConfigPath .\automation\native_video_profile_1080p_external_template.json -ExeDir .\bin -RemoteHost <HOST_PUBLIC_IP_OR_DNS> -Tag manual
 ```
 
 Summary:

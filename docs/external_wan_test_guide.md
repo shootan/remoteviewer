@@ -102,6 +102,7 @@ powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config
 ```
 
 ## Recommended FHD profiles
+- `automation/native_video_profile_1080p_external_template.json` (external smoke default, 30fps fixed, frame gating off)
 - `automation/native_video_profile_1080p_lowlat.json` (8Mbps, low-latency baseline)
 - `automation/native_video_profile_1080p_wan_quality.json` (10Mbps, keyint 60, frame gating off)
 - `automation/native_video_profile_1080p_quality_10m_k60.json`
@@ -113,13 +114,18 @@ powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config
 ## Run examples
 Host:
 ```powershell
-powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1 -Role host -ConfigPath automation/native_video_profile_1080p_lowlat.json -ExeDir build-vcpkg-local/apps/native_poc/Debug
+powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1 -Role host -ConfigPath automation/native_video_profile_1080p_external_template.json -ExeDir build-vcpkg-local/apps/native_poc/Debug
 ```
 
 Client:
 ```powershell
-powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1 -Role client -ConfigPath automation/native_video_profile_1080p_lowlat.json -ExeDir build-vcpkg-local/apps/native_poc/Debug -RemoteHost <HOST_PUBLIC_IP_OR_DNS>
+powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1 -Role client -ConfigPath automation/native_video_profile_1080p_external_template.json -ExeDir build-vcpkg-local/apps/native_poc/Debug -RemoteHost <HOST_PUBLIC_IP_OR_DNS>
 ```
+
+Note:
+- `native_video_profile_1080p_lowlat.json` is not a fixed-30fps smoke profile.
+- It leaves frame gating enabled and can intentionally downshift to `10fps` on static scenes (`staticSceneFps=10`).
+- For generic external 2PC connectivity/perf smoke, use `native_video_profile_1080p_external_template.json` or `automation/native_video_profile_1080p.json`.
 
 ## Portable bundle
 Create a portable bundle with current binaries, profiles, and helper scripts:
@@ -164,6 +170,9 @@ powershell -ExecutionPolicy Bypass -File .\automation\m9_easy.ps1 summary on
 ```
 
 Notes:
+- `m9_easy.ps1` is an M9 A/B helper and uses `native_video_profile_1080p_lowlat.json` internally.
+- That baseline keeps frame gating enabled, so static scenes can intentionally appear around `10fps`.
+- For generic fixed-30fps external smoke, use the `run_native_video_with_config.ps1` examples above with `native_video_profile_1080p_external_template.json`.
 - `summary off/on` uses the latest `m9off/m9on` host/client capture directories automatically.
 - `client off/on` without host arg uses `remoteHost` from the selected JSON profile.
 - Default exe path is auto-selected:

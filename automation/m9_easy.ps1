@@ -105,6 +105,11 @@ if ($Action -eq "help") {
   Write-Output "  Root=$Root"
   Write-Output "  ExeDir=$resolvedExeDir"
   Write-Output "  Mode=$Mode Tag=$tag"
+  Write-Output ""
+  Write-Output "NOTE:"
+  Write-Output "  m9_easy uses native_video_profile_1080p_lowlat.json as the baseline."
+  Write-Output "  That profile keeps frame gating enabled and static scenes can drop to 10fps."
+  Write-Output "  For fixed 30fps external smoke, use run_native_video_with_config.ps1 with native_video_profile_1080p_external_template.json."
   exit 0
 }
 

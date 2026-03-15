@@ -1043,3 +1043,40 @@ Next action
 - host PC에서는 번들 루트에서 `run_native_video_with_config.ps1` 또는 `m9_easy.ps1 host off/on`으로 실행한다.
 - client PC에서는 동일 번들을 복사해 `run_native_video_with_config.ps1 -Role client` 또는 `m9_easy.ps1 client off/on <HOST_PUBLIC_IP_OR_DNS>`로 연결한다.
 - 실제 외부 2PC 실행 후 `CFG-2PC-01`, `M9-2PC-GATE-01` 수동 확인 결과를 별도로 기록한다.
+
+### 113) 2026-03-15 외부 2PC 기본 프로필 수정: 10fps downshift 오해 제거
+Goal
+- 외부 2PC 기본 실행 예제가 정적 장면에서 10fps로 내려가 보이던 원인을 제거하고, generic smoke 기준을 fixed 30fps 프로필로 분리한다.
+
+Files changed
+- `automation/native_video_profile_1080p_external_template.json`
+- `automation/m9_easy.ps1`
+- `automation/package_native_video_external_bundle.ps1`
+- `docs/external_wan_test_guide.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Root cause check:
+  - 기존 외부 예제 기본값으로 사용하던 `native_video_profile_1080p_lowlat.json`은 `frameGatingDisable=false`, `staticSceneFps=10`으로 확인
+  - 해석: 정적 장면에서는 의도적으로 10fps까지 downshift 가능
+- Profile fix:
+  - `native_video_profile_1080p_external_template.json`을 external smoke 기본값으로 재정의
+  - 핵심 설정:
+    - `encoderBackend=mft_auto`
+    - `decoderBackend=mft_auto`
+    - `h264NoPacing=true`
+    - `frameGatingDisable=true`
+- Bundle refresh:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/package_native_video_external_bundle.ps1 -BuildDir build-vcpkg-local`
+  - 결과:
+    - `BUNDLE_DIR=D:\remote\remote\dist\native-video-external-20260315-231325`
+    - `BUNDLE_ZIP=D:\remote\remote\dist\native-video-external-20260315-231325.zip`
+- Output validation:
+  - 새 번들 `docs/EXTERNAL_WAN_QUICKSTART.md`에서 Quick 2PC Run 기본 프로필이 `native_video_profile_1080p_external_template.json`으로 바뀐 것 확인
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/m9_easy.ps1 help` 성공, lowlat baseline이 static scene에서 10fps로 내려갈 수 있다는 안내 문구 추가 확인
+  - 번들 내부 `powershell -NoProfile -ExecutionPolicy Bypass -File dist\native-video-external-20260315-231325\automation\m9_easy.ps1 help` 성공
+
+Next action
+- 일반 외부 2PC 스모크는 `native_video_profile_1080p_external_template.json` 또는 `native_video_profile_1080p.json` 기준으로 실행한다.
+- `m9_easy.ps1`는 M9 A/B 전용으로만 사용하고, static scene 10fps는 정상 동작으로 해석한다.
