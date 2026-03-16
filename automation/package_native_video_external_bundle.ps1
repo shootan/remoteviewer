@@ -111,17 +111,24 @@ netsh advfirewall firewall add rule name="Remote60 Native Video TCP43001" dir=in
   - 720p30, `5Mbps`, `keyint=60`, `h264NoPacing=1`
 
 ## 5) Quick 2PC Run
-Host:
+Host machine:
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_with_config.ps1 -Role host -ConfigPath .\automation\native_video_profile_1080p_external_template.json -ExeDir .\bin
+Copy-Item .\automation\native_video_profile_1080p_external_template.json .\automation\run_native_video_with_config.json
+# edit .\automation\run_native_video_with_config.json and add: "role": "host"
+powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_with_config.ps1
 ```
 
-Client:
+Client machine:
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_with_config.ps1 -Role client -ConfigPath .\automation\native_video_profile_1080p_external_template.json -ExeDir .\bin -RemoteHost <HOST_PUBLIC_IP_OR_DNS>
+Copy-Item .\automation\native_video_profile_1080p_external_template.json .\automation\run_native_video_with_config.json
+# edit .\automation\run_native_video_with_config.json and add:
+#   "role": "client"
+#   "remoteHost": "<HOST_PUBLIC_IP_OR_DNS>"
+powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_with_config.ps1
 ```
 
-If you prefer editing JSON once, set `remoteHost` in `native_video_profile_1080p_external_template.json`.
+`run_native_video_with_config.ps1` now defaults to `automation\run_native_video_with_config.json` and passes only `--config` through to the exe.
+If you want the old explicit style, `-Role`, `-ConfigPath`, `-ExeDir`, `-RemoteHost` still work as overrides.
 Use `native_video_profile_1080p_lowlat.json` only when you intentionally want adaptive/frame-gating behavior.
 
 After connect, the native client starts in a home picker overlay:
@@ -177,14 +184,16 @@ Edit these keys first:
 
 Run:
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_with_config.ps1 -Role host -ConfigPath .\automation\native_video_profile_1080p_window_input_template.json -ExeDir .\bin
-powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_with_config.ps1 -Role client -ConfigPath .\automation\native_video_profile_1080p_window_input_template.json -ExeDir .\bin -RemoteHost <HOST_PUBLIC_IP_OR_DNS>
+Copy-Item .\automation\native_video_profile_1080p_window_input_template.json .\automation\run_native_video_with_config.json
+# host: add "role": "host"
+# client: add "role": "client", "remoteHost": "<HOST_PUBLIC_IP_OR_DNS>"
+powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_with_config.ps1
 ```
 
 Notes:
 - `native_video_profile_1080p_external_template.json` is the general GUI profile.
 - `native_video_profile_1080p_window_input_template.json` is for fixed-target automation or app-specific validation.
-- `run_native_video_with_config.ps1` passes `--config` through to the exe, so input/capture JSON keys are preserved.
+- `run_native_video_with_config.ps1` uses config-first defaults, so input/capture JSON keys are preserved without repeating CLI args.
 
 ## 8) Manual WAN Capture Commands
 Host:

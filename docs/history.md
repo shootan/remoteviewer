@@ -1369,3 +1369,36 @@ Validation / build / test result
 Next action
 - 실제 외부 2PC에서 `Shift`/`Alt` 조합 문자, `[` `]` `;` `'`, drag 후 창 밖 release, 우클릭/휠을 수동으로 확인한다.
 - `automation/validate_background_input_injection.ps1`는 여전히 occluded 타깃 창을 직접 생성하지 않으므로, 실제 가려진 앱 대상 수동 검증 또는 스크립트 확장이 추가로 필요하다.
+
+### 122) 2026-03-16 config-first launcher 정리
+Goal
+- native host/client 실행 시 PowerShell wrapper가 JSON 값을 다시 CLI/env로 재조합하지 않도록 정리한다.
+- `config 1개 + 실행 파일 1개` 형태에 맞춰 `run_native_video_with_config.ps1`가 기본 config 파일만으로도 실행될 수 있게 단순화한다.
+
+Files changed
+- `automation/run_native_video_with_config.ps1`
+- `automation/package_native_video_external_bundle.ps1`
+- `docs/external_wan_test_guide.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Launcher smoke:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1 -Role host -ConfigPath automation/logs/m35-input-validate-20260316-123208/m35_profile.json`
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1 -Role client -ConfigPath automation/logs/m35-input-validate-20260316-123208/m35_profile.json`
+  - 결과:
+    - host log: `tmp/launcher-smoke2/host.out.log`
+      - `ROLE=host`, `CONFIG=...m35_profile.json`, `EXE=...remote60_native_video_host_poc.exe`
+      - runtime completed with `client connected`, `control connected`, `done`
+    - client log: `tmp/launcher-smoke2/client.out.log`
+      - `ROLE=client`, `CONFIG=...m35_profile.json`, `EXE=...remote60_native_video_client_poc.exe`
+      - runtime completed with `connected host=127.0.0.1`, `control connected`, `done`
+- 구현 요약:
+  - `run_native_video_with_config.ps1`를 thin wrapper로 재작성
+  - wrapper는 이제 기본적으로 exe에 `--config`만 전달하고, 역할은 `role` 키 또는 선택적 `-Role` override로 결정
+  - 기본 config 파일명 `automation/run_native_video_with_config.json`, 기본 exe 경로 auto-detect(`..\bin` 우선, source tree는 `build-vcpkg-local/apps/native_poc/Debug`)
+  - bundle/source guide를 config-first 흐름 기준으로 갱신
+
+Next action
+- bundle 실사용 기준으로 `automation/run_native_video_with_config.json` 기본 파일명 흐름을 한 번 더 짧게 수동 확인한다.
+- 필요 시 host/client 전용 convenience launcher(`run_native_video_host.ps1`, `run_native_video_client.ps1`)를 추가해 role 설정조차 숨길지 결정한다.

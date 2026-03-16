@@ -23,6 +23,16 @@ netsh advfirewall firewall add rule name="Remote60 Native Video TCP43001" dir=in
 - Option B: edit `remoteHost` in JSON profile
   - `automation/native_video_profile_1080p_external_template.json`
 
+## Config-first launch
+- `automation/run_native_video_with_config.ps1` can now run with config only.
+- Default config file name: `automation/run_native_video_with_config.json`
+- Recommended flow:
+  - copy a profile JSON to `automation/run_native_video_with_config.json`
+  - add `"role": "host"` or `"role": "client"`
+  - for client, set `"remoteHost": "<HOST_PUBLIC_IP_OR_DNS>"`
+  - run `powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1`
+- Old explicit overrides (`-Role`, `-ConfigPath`, `-ExeDir`, `-RemoteHost`) still work when needed.
+
 ## Optional window-scoped capture (M13 phase1)
 Add these keys in host JSON profile when you want to capture only a target app window:
 - `captureWindowProcess`: comma-separated process names (example: `dnplayer.exe,HD-Player.exe,Nox.exe`)
@@ -97,8 +107,10 @@ Common preset behavior:
 
 Run example (LDPlayer preset):
 ```powershell
-powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1 -Role host -ConfigPath automation/native_video_profile_1080p_ldplayer_window.json -ExeDir build-vcpkg-local/apps/native_poc/Debug
-powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1 -Role client -ConfigPath automation/native_video_profile_1080p_ldplayer_window.json -ExeDir build-vcpkg-local/apps/native_poc/Debug -RemoteHost <HOST_PUBLIC_IP_OR_DNS>
+Copy-Item automation/native_video_profile_1080p_ldplayer_window.json automation/run_native_video_with_config.json
+# host: add "role": "host"
+# client: add "role": "client", "remoteHost": "<HOST_PUBLIC_IP_OR_DNS>"
+powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1
 ```
 
 ## Recommended FHD profiles
@@ -115,12 +127,17 @@ powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config
 ## Run examples
 Host:
 ```powershell
-powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1 -Role host -ConfigPath automation/native_video_profile_1080p_external_template.json -ExeDir build-vcpkg-local/apps/native_poc/Debug
+Copy-Item automation/native_video_profile_1080p_external_template.json automation/run_native_video_with_config.json
+# add "role": "host"
+powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1
 ```
 
 Client:
 ```powershell
-powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1 -Role client -ConfigPath automation/native_video_profile_1080p_external_template.json -ExeDir build-vcpkg-local/apps/native_poc/Debug -RemoteHost <HOST_PUBLIC_IP_OR_DNS>
+Copy-Item automation/native_video_profile_1080p_external_template.json automation/run_native_video_with_config.json
+# add "role": "client"
+# set "remoteHost": "<HOST_PUBLIC_IP_OR_DNS>"
+powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1
 ```
 
 Note:
@@ -152,12 +169,14 @@ Edit these keys first:
 
 Example:
 ```powershell
-powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1 -Role host -ConfigPath automation/native_video_profile_1080p_window_input_template.json -ExeDir build-vcpkg-local/apps/native_poc/Debug
-powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1 -Role client -ConfigPath automation/native_video_profile_1080p_window_input_template.json -ExeDir build-vcpkg-local/apps/native_poc/Debug -RemoteHost <HOST_PUBLIC_IP_OR_DNS>
+Copy-Item automation/native_video_profile_1080p_window_input_template.json automation/run_native_video_with_config.json
+# host: add "role": "host"
+# client: add "role": "client", "remoteHost": "<HOST_PUBLIC_IP_OR_DNS>"
+powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1
 ```
 
 Notes:
-- `run_native_video_with_config.ps1` now passes `--config` through to the native host/client exe, so `enableInputInjection`, `inputTarget*`, `captureWindow*`, and `noInputChannel=false` are preserved.
+- `run_native_video_with_config.ps1` now uses config-first defaults and passes only `--config` unless you explicitly override.
 - For validation, `automation/validate_background_input_injection.ps1` remains the shortest local check.
 
 ## Browser GUI Path
