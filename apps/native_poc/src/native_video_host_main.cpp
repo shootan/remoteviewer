@@ -629,16 +629,69 @@ LPARAM key_event_lparam(uint32_t keyCode, bool keyUp) {
   return static_cast<LPARAM>(lp);
 }
 
-bool keycode_to_unicode_char(uint32_t keyCode, wchar_t* outCh) {
+void set_keyboard_state_flag(BYTE* keyboardState, uint32_t keyCode, bool down) {
+  if (!keyboardState || keyCode >= 256) return;
+  if (down) {
+    keyboardState[keyCode] = static_cast<BYTE>(keyboardState[keyCode] | 0x80u);
+  } else {
+    keyboardState[keyCode] = static_cast<BYTE>(keyboardState[keyCode] & ~0x80u);
+  }
+}
+
+void update_synthetic_keyboard_state(BYTE* keyboardState, uint32_t keyCode, bool keyUp) {
+  if (!keyboardState || keyCode >= 256) return;
+  const bool down = !keyUp;
+  set_keyboard_state_flag(keyboardState, keyCode, down);
+  switch (keyCode) {
+    case VK_SHIFT:
+      set_keyboard_state_flag(keyboardState, VK_SHIFT, down);
+      set_keyboard_state_flag(keyboardState, VK_LSHIFT, down);
+      set_keyboard_state_flag(keyboardState, VK_RSHIFT, down);
+      break;
+    case VK_LSHIFT:
+    case VK_RSHIFT:
+      set_keyboard_state_flag(keyboardState, VK_SHIFT, down);
+      break;
+    case VK_CONTROL:
+      set_keyboard_state_flag(keyboardState, VK_CONTROL, down);
+      set_keyboard_state_flag(keyboardState, VK_LCONTROL, down);
+      set_keyboard_state_flag(keyboardState, VK_RCONTROL, down);
+      break;
+    case VK_LCONTROL:
+    case VK_RCONTROL:
+      set_keyboard_state_flag(keyboardState, VK_CONTROL, down);
+      break;
+    case VK_MENU:
+      set_keyboard_state_flag(keyboardState, VK_MENU, down);
+      set_keyboard_state_flag(keyboardState, VK_LMENU, down);
+      set_keyboard_state_flag(keyboardState, VK_RMENU, down);
+      break;
+    case VK_LMENU:
+    case VK_RMENU:
+      set_keyboard_state_flag(keyboardState, VK_MENU, down);
+      break;
+    case VK_CAPITAL:
+      if (down) {
+        keyboardState[VK_CAPITAL] = static_cast<BYTE>(keyboardState[VK_CAPITAL] ^ 0x01u);
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+bool keycode_to_unicode_char(uint32_t keyCode, const BYTE* keyboardState, wchar_t* outCh) {
   if (!outCh) return false;
   *outCh = 0;
-  BYTE keyboardState[256] = {};
-  if (!GetKeyboardState(keyboardState)) {
-    std::memset(keyboardState, 0, sizeof(keyboardState));
+  BYTE localKeyboardState[256] = {};
+  if (keyboardState) {
+    std::memcpy(localKeyboardState, keyboardState, sizeof(localKeyboardState));
+  } else if (!GetKeyboardState(localKeyboardState)) {
+    std::memset(localKeyboardState, 0, sizeof(localKeyboardState));
   }
   const UINT scanCode = MapVirtualKeyW(static_cast<UINT>(keyCode), MAPVK_VK_TO_VSC);
   WCHAR buffer[8] = {};
-  const int rc = ToUnicodeEx(static_cast<UINT>(keyCode), scanCode, keyboardState, buffer,
+  const int rc = ToUnicodeEx(static_cast<UINT>(keyCode), scanCode, localKeyboardState, buffer,
                              static_cast<int>(std::size(buffer)), 0, GetKeyboardLayout(0));
   if (rc == 1 && buffer[0] >= 0x20) {
     *outCh = buffer[0];
@@ -693,6 +746,7 @@ struct DesktopInputState {
   HWND lastHwnd = nullptr;
   POINT lastScreenPt{};
   bool hasLastScreenPt = false;
+  BYTE keyState[256] = {};
 };
 
 bool resolve_message_target_at_screen_point(HWND seedHwnd, const POINT& screenPt, HWND* outHwnd,
@@ -828,11 +882,13 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
     }
     if (input.kind == 5 || input.kind == 6) {
       HWND keyTargetHwnd = targetHwnd;
+      BYTE keyboardState[256] = {};
       if (desktopInputState) {
         std::lock_guard<std::mutex> lk(desktopInputState->mu);
         if (desktopInputState->lastHwnd && IsWindow(desktopInputState->lastHwnd)) {
           keyTargetHwnd = desktopInputState->lastHwnd;
         }
+        std::memcpy(keyboardState, desktopInputState->keyState, sizeof(keyboardState));
       }
       const bool keyUp = (input.kind == 6);
       const UINT msg = keyUp ? WM_KEYUP : WM_KEYDOWN;
@@ -842,10 +898,14 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
       }
       if (!keyUp) {
         wchar_t ch = 0;
-        if (keycode_to_unicode_char(input.keyCode, &ch)) {
+        if (keycode_to_unicode_char(input.keyCode, keyboardState, &ch)) {
           const LPARAM charLp = key_event_lparam(input.keyCode, false);
           (void)PostMessageW(keyTargetHwnd, WM_CHAR, static_cast<WPARAM>(ch), charLp);
         }
+      }
+      if (desktopInputState) {
+        std::lock_guard<std::mutex> lk(desktopInputState->mu);
+        update_synthetic_keyboard_state(desktopInputState->keyState, input.keyCode, keyUp);
       }
       return InputInjectResult::Injected;
     }
@@ -921,9 +981,11 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
   }
   if (input.kind == 5 || input.kind == 6) {
     HWND targetHwnd = nullptr;
+    BYTE keyboardState[256] = {};
     if (desktopInputState) {
       std::lock_guard<std::mutex> lk(desktopInputState->mu);
       targetHwnd = desktopInputState->lastHwnd;
+      std::memcpy(keyboardState, desktopInputState->keyState, sizeof(keyboardState));
     }
     if (!targetHwnd || !IsWindow(targetHwnd)) {
       targetHwnd = GetForegroundWindow();
@@ -937,10 +999,14 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
     }
     if (!keyUp) {
       wchar_t ch = 0;
-      if (keycode_to_unicode_char(input.keyCode, &ch)) {
+      if (keycode_to_unicode_char(input.keyCode, keyboardState, &ch)) {
         const LPARAM charLp = key_event_lparam(input.keyCode, false);
         (void)PostMessageW(targetHwnd, WM_CHAR, static_cast<WPARAM>(ch), charLp);
       }
+    }
+    if (desktopInputState) {
+      std::lock_guard<std::mutex> lk(desktopInputState->mu);
+      update_synthetic_keyboard_state(desktopInputState->keyState, input.keyCode, keyUp);
     }
     return InputInjectResult::Injected;
   }

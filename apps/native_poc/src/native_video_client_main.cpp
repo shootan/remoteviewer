@@ -487,6 +487,8 @@ std::atomic<uint32_t> gInputSeq{0};
 std::atomic<uint64_t> gInputDropped{0};
 std::atomic<bool> gInputEnabled{false};
 std::atomic<uint16_t> gMouseButtons{0};
+std::atomic<int32_t> gLastInputVideoX{0};
+std::atomic<int32_t> gLastInputVideoY{0};
 
 struct ClientRuntimeMetrics {
   std::atomic<uint32_t> seq{0};
@@ -763,7 +765,31 @@ bool map_client_point_to_video_coords(HWND hwnd, int x, int y, int32_t* outVideo
   *outVideoY = static_cast<int32_t>((static_cast<uint64_t>(relY) * static_cast<uint64_t>(frameH - 1) +
                                      static_cast<uint64_t>(videoH / 2)) /
                                     static_cast<uint64_t>(videoH));
+  gLastInputVideoX.store(*outVideoX, std::memory_order_relaxed);
+  gLastInputVideoY.store(*outVideoY, std::memory_order_relaxed);
   return true;
+}
+
+void enqueue_input_event(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode);
+
+bool local_hotkey_modifiers_active() {
+  return (GetKeyState(VK_CONTROL) < 0) && (GetKeyState(VK_MENU) < 0);
+}
+
+void release_mouse_capture_if_idle(HWND hwnd) {
+  if ((gMouseButtons.load(std::memory_order_relaxed) & 0x7u) == 0 && GetCapture() == hwnd) {
+    ReleaseCapture();
+  }
+}
+
+void enqueue_release_for_pressed_mouse_buttons() {
+  const uint16_t buttons = gMouseButtons.exchange(0, std::memory_order_acq_rel);
+  if ((buttons & 0x7u) == 0) return;
+  const int32_t vx = gLastInputVideoX.load(std::memory_order_relaxed);
+  const int32_t vy = gLastInputVideoY.load(std::memory_order_relaxed);
+  if ((buttons & 0x4u) != 0) enqueue_input_event(3, vx, vy, 0, VK_MBUTTON);
+  if ((buttons & 0x2u) != 0) enqueue_input_event(3, vx, vy, 0, VK_RBUTTON);
+  if ((buttons & 0x1u) != 0) enqueue_input_event(3, vx, vy, 0, VK_LBUTTON);
 }
 
 uint32_t coord_to_permille(int coord, int extent) {
@@ -1584,6 +1610,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int32_t vx = 0;
         int32_t vy = 0;
         if (!map_client_point_to_video_coords(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &vx, &vy)) return 0;
+        SetCapture(hwnd);
         gMouseButtons.fetch_or(1);
         enqueue_input_event(2, vx, vy, 0, VK_LBUTTON);
       }
@@ -1652,6 +1679,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (!map_client_point_to_video_coords(hwnd, x, y, &vx, &vy)) return 0;
         gMouseButtons.fetch_and(static_cast<uint16_t>(~1u));
         enqueue_input_event(3, vx, vy, 0, VK_LBUTTON);
+        release_mouse_capture_if_idle(hwnd);
       }
       return 0;
     }
@@ -1665,6 +1693,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int32_t vx = 0;
         int32_t vy = 0;
         if (!map_client_point_to_video_coords(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &vx, &vy)) return 0;
+        SetCapture(hwnd);
         gMouseButtons.fetch_or(2);
         enqueue_input_event(2, vx, vy, 0, VK_RBUTTON);
       }
@@ -1681,6 +1710,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (!map_client_point_to_video_coords(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &vx, &vy)) return 0;
         gMouseButtons.fetch_and(static_cast<uint16_t>(~2u));
         enqueue_input_event(3, vx, vy, 0, VK_RBUTTON);
+        release_mouse_capture_if_idle(hwnd);
       }
       return 0;
     case WM_MBUTTONDOWN:
@@ -1693,6 +1723,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int32_t vx = 0;
         int32_t vy = 0;
         if (!map_client_point_to_video_coords(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &vx, &vy)) return 0;
+        SetCapture(hwnd);
         gMouseButtons.fetch_or(4);
         enqueue_input_event(2, vx, vy, 0, VK_MBUTTON);
       }
@@ -1709,6 +1740,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (!map_client_point_to_video_coords(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &vx, &vy)) return 0;
         gMouseButtons.fetch_and(static_cast<uint16_t>(~4u));
         enqueue_input_event(3, vx, vy, 0, VK_MBUTTON);
+        release_mouse_capture_if_idle(hwnd);
       }
       return 0;
     case WM_MOUSEWHEEL: {
@@ -1794,6 +1826,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       if (msg == WM_POINTERDOWN) {
         if (gActiveTouchDown.load(std::memory_order_relaxed)) return 0;
         SetFocus(hwnd);
+        SetCapture(hwnd);
         gActiveTouchPointerId.store(pointerId, std::memory_order_relaxed);
         gActiveTouchDown.store(true, std::memory_order_relaxed);
         gMouseButtons.fetch_or(1);
@@ -1813,36 +1846,43 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         gActiveTouchDown.store(false, std::memory_order_relaxed);
         gActiveTouchPointerId.store(0, std::memory_order_relaxed);
         enqueue_input_event(3, vx, vy, 0, VK_LBUTTON);
+        release_mouse_capture_if_idle(hwnd);
       }
       return 0;
     }
+    case WM_CAPTURECHANGED:
+    case WM_CANCELMODE:
+      enqueue_release_for_pressed_mouse_buttons();
+      gActiveTouchDown.store(false, std::memory_order_relaxed);
+      gActiveTouchPointerId.store(0, std::memory_order_relaxed);
+      return 0;
     case WM_KEYDOWN:
-      if (wp == VK_F5) {
+      if (local_hotkey_modifiers_active() && wp == VK_F5) {
         queue_window_list_request("window_list_request pending");
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
       }
-      if (wp == VK_F9) {
+      if (local_hotkey_modifiers_active() && wp == VK_F9) {
         request_capture_overview_mode();
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
       }
-      if (wp == VK_OEM_4) {  // [
+      if (local_hotkey_modifiers_active() && wp == VK_OEM_4) {  // [
         apply_runtime_tune_delta(-1, 0);
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
       }
-      if (wp == VK_OEM_6) {  // ]
+      if (local_hotkey_modifiers_active() && wp == VK_OEM_6) {  // ]
         apply_runtime_tune_delta(1, 0);
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
       }
-      if (wp == VK_OEM_1) {  // ;
+      if (local_hotkey_modifiers_active() && wp == VK_OEM_1) {  // ;
         apply_runtime_tune_delta(0, -1);
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
       }
-      if (wp == VK_OEM_7) {  // '
+      if (local_hotkey_modifiers_active() && wp == VK_OEM_7) {  // '
         apply_runtime_tune_delta(0, 1);
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
@@ -1855,10 +1895,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       enqueue_input_event(6, 0, 0, 0, static_cast<uint32_t>(wp));
       return 0;
     case WM_SYSKEYDOWN:
+      if (kInputPolicyForceBlock) return 0;
+      enqueue_input_event(5, 0, 0, 0, static_cast<uint32_t>(wp));
+      return 0;
     case WM_SYSKEYUP:
+      if (kInputPolicyForceBlock) return 0;
+      enqueue_input_event(6, 0, 0, 0, static_cast<uint32_t>(wp));
+      return 0;
     case WM_CHAR:
     case WM_SYSCHAR:
-      return kInputPolicyForceBlock ? 0 : DefWindowProc(hwnd, msg, wp, lp);
+      return 0;
     case WM_ERASEBKGND:
       // Avoid background erase flicker between frames.
       return 1;

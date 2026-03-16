@@ -1330,3 +1330,42 @@ Validation / build / test result
 Next action
 - 실제 외부 2PC에서 `Desktop Mode` 버튼으로 picker가 바로 닫히는지, 이후 desktop 클릭/작업표시줄 클릭이 먹는지 먼저 확인한다.
 - mouse가 여전히 안 먹으면 `desktop mode`와 `selected window mode`를 분리해서 repro 로그를 따로 수집한다.
+
+### 121) 2026-03-16 native input polish: drag capture + syskey forwarding + modifier-aware char synthesis
+Goal
+- native 입력 경로를 다시 점검해 drag 중 버튼 해제 누락 가능성을 줄이고, 로컬 단축키 충돌 없이 키보드 입력 범위를 넓힌다.
+- background message 주입에서 `Shift`/`Alt` 계열 modifier가 실제 문자 생성에 반영되도록 보강한다.
+
+Files changed
+- `apps/native_poc/src/native_video_client_main.cpp`
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_host_poc remote60_native_video_client_poc --parallel`
+  - 결과: 성공
+- Input regression:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/validate_background_input_injection.ps1 -DurationSec 12`
+  - 결과:
+    - `AUTO_PASS=1`
+    - `INPUT_EVENTS=337`
+    - `INPUT_NO_TARGET=0`
+    - `INPUT_INJECT_FAIL=0`
+    - `INPUT_UNSUPPORTED=0`
+    - `INPUT_IGNORED_MOVE=0`
+- 로그 확인:
+  - host log: `automation/logs/m35-input-validate-20260316-123208/host.out.log`
+    - `inputNoTarget=0`, `inputInjectFail=0`, `inputUnsupported=0` 유지
+  - client log: `automation/logs/m35-input-validate-20260316-123208/client.out.log`
+    - `ackSeq=1080`, `dropped=0`
+- 구현 요약:
+  - client에서 mouse/touch down 시 `SetCapture`를 사용하고 `WM_CAPTURECHANGED`/`WM_CANCELMODE`에서 눌린 버튼 release event를 보정
+  - plain `F5`, `[`, `]`, `;`, `'`를 더 이상 로컬 튜닝 단축키로 가로채지 않고, 로컬 단축키는 `Ctrl+Alt+...` 조합으로 제한
+  - `WM_SYSKEYDOWN/WM_SYSKEYUP`도 remote input으로 전달되게 수정
+  - host가 synthetic modifier key state를 유지하면서 `WM_CHAR`를 생성하도록 바꿔 `Shift`/`Alt` 조합 문자 입력 정합성을 보강
+
+Next action
+- 실제 외부 2PC에서 `Shift`/`Alt` 조합 문자, `[` `]` `;` `'`, drag 후 창 밖 release, 우클릭/휠을 수동으로 확인한다.
+- `automation/validate_background_input_injection.ps1`는 여전히 occluded 타깃 창을 직접 생성하지 않으므로, 실제 가려진 앱 대상 수동 검증 또는 스크립트 확장이 추가로 필요하다.
