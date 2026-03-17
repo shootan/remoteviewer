@@ -1402,3 +1402,27 @@ Validation / build / test result
 Next action
 - bundle 실사용 기준으로 `automation/run_native_video_with_config.json` 기본 파일명 흐름을 한 번 더 짧게 수동 확인한다.
 - 필요 시 host/client 전용 convenience launcher(`run_native_video_host.ps1`, `run_native_video_client.ps1`)를 추가해 role 설정조차 숨길지 결정한다.
+
+### 123) 2026-03-17 config-first native external bundle 재패키징
+Goal
+- config-first launcher가 반영된 최신 native external bundle을 다시 생성해 바로 테스트 가능한 산출물을 고정한다.
+
+Files changed
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Bundle package:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/package_native_video_external_bundle.ps1 -BuildDir build-vcpkg-local -BundleName native-video-external-v9`
+  - 결과:
+    - `BUNDLE_DIR=D:\remote\remote\dist\native-video-external-v9-20260317-234839`
+    - `BUNDLE_ZIP=D:\remote\remote\dist\native-video-external-v9-20260317-234839.zip`
+- Bundle content spot check:
+  - `dist/native-video-external-v9-20260317-234839/automation/run_native_video_with_config.ps1`
+    - config-first launcher(`run_native_video_with_config.json` 기본 탐색, exe auto-detect) 반영 확인
+  - `dist/native-video-external-v9-20260317-234839/docs/EXTERNAL_WAN_QUICKSTART.md`
+    - host/client 모두 `config 1개 + launcher 1개` 흐름으로 가이드 반영 확인
+
+Next action
+- 테스트는 `D:\remote\remote\dist\native-video-external-v9-20260317-234839` 기준으로 진행한다.
+- 각 장비에서 `automation\run_native_video_with_config.json`만 준비하고 `powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_with_config.ps1`로 host/client를 실행한다.
