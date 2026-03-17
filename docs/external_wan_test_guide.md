@@ -114,7 +114,7 @@ powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config
 ```
 
 ## Recommended FHD profiles
-- `automation/native_video_profile_1080p_external_template.json` (native 2PC GUI default, 30fps fixed, input/control on)
+- `automation/native_video_profile_1080p_external_template.json` (native 2PC GUI default, 30fps fixed, input/control on, `stable_text` encoder tune)
 - `automation/native_video_profile_1080p_window_input_template.json` (native window-target input template, not desktop-wide input)
 - `automation/native_video_profile_1080p_lowlat.json` (8Mbps, low-latency baseline)
 - `automation/native_video_profile_1080p_wan_quality.json` (10Mbps, keyint 60, frame gating off)
@@ -145,6 +145,7 @@ Note:
 - It leaves frame gating enabled and can intentionally downshift to `10fps` on static scenes (`staticSceneFps=10`).
 - For generic external 2PC connectivity/perf smoke, use `native_video_profile_1080p_external_template.json` or `automation/native_video_profile_1080p.json`.
 - `native_video_profile_1080p_external_template.json` now enables control/input so the native client home picker can drive `Desktop Mode` and window selection directly.
+- `native_video_profile_1080p_external_template.json` also uses `encoderTuneMode=stable_text` to reduce static dark-text blur/pumping without changing bitrate.
 
 ## Native Input Scope
 - The native bundle path is not the browser GUI path.

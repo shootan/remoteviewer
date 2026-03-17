@@ -80,6 +80,7 @@ class H264Encoder {
   bool started_ = false;
   bool asyncTransform_ = false;
   bool usingHardware_ = false;
+  bool stableTextTune_ = false;
   const char* backendName_ = "unknown";
   bool sampleTimeOffsetInitialized_ = false;
   int64_t sampleTimeOffsetHns_ = 0;

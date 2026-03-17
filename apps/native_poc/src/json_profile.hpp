@@ -110,6 +110,7 @@ inline void set_env_or_unset(const char* key, const std::string& value, bool set
 inline void clear_runtime_env_overrides() {
   static const char* kKeys[] = {
       "REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE",
+      "REMOTE60_NATIVE_ENCODER_TUNE_MODE",
       "REMOTE60_NATIVE_ENCODER_BACKEND",
       "REMOTE60_NATIVE_DECODER_BACKEND",
       "REMOTE60_NATIVE_H264_NO_PACING",
@@ -165,6 +166,7 @@ inline void apply_runtime_env_overrides_from_json(const std::string& json) {
   };
 
   set_bool_flag("forceEncodedExperiment", "REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE");
+  set_str_if_nonempty("encoderTuneMode", "REMOTE60_NATIVE_ENCODER_TUNE_MODE");
   set_str_if_nonempty("encoderBackend", "REMOTE60_NATIVE_ENCODER_BACKEND");
   set_str_if_nonempty("decoderBackend", "REMOTE60_NATIVE_DECODER_BACKEND");
   set_bool_flag("h264NoPacing", "REMOTE60_NATIVE_H264_NO_PACING");

@@ -3,7 +3,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <cstddef>
 #include <cstdio>
 #include <cstdint>
@@ -70,6 +72,26 @@ uint32_t low_latency_vbv_bytes(uint32_t bitrate) {
   const uint32_t maxBytes = std::max<uint32_t>(32768, bitrate / 8);
   const uint32_t target = std::max<uint32_t>(minBytes, bitrate / 80);
   return std::min<uint32_t>(maxBytes, target);
+}
+
+uint32_t stable_text_vbv_bytes(uint32_t bitrate) {
+  const uint32_t minBytes = 16384;
+  const uint32_t maxBytes = std::max<uint32_t>(65536, bitrate / 6);
+  const uint32_t target = std::max<uint32_t>(minBytes, bitrate / 40);
+  return std::min<uint32_t>(maxBytes, target);
+}
+
+bool env_string_equals_ci(const char* key, const char* expected) {
+  if (!key || !expected) return false;
+  const char* value = std::getenv(key);
+  if (!value || !*value) return false;
+  std::string lhs(value);
+  std::string rhs(expected);
+  std::transform(lhs.begin(), lhs.end(), lhs.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  std::transform(rhs.begin(), rhs.end(), rhs.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return lhs == rhs;
 }
 
 bool annexb_contains_idr(const uint8_t* data, size_t size) {
@@ -1240,13 +1262,17 @@ void H264Encoder::apply_low_latency_codec_api() {
   (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVEncCommonRealTime, true);
   (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_CBR);
   (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMeanBitRate, bitrate_);
-  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMaxBitRate, std::max<uint32_t>(bitrate_, (bitrate_ * 11) / 10));
-  // Keep encoder VBV short to reduce internal queue growth.
-  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonBufferSize, low_latency_vbv_bytes(bitrate_));
+  const uint32_t maxBitrate = stableTextTune_
+                                  ? std::max<uint32_t>(bitrate_, (bitrate_ * 13) / 10)
+                                  : std::max<uint32_t>(bitrate_, (bitrate_ * 11) / 10);
+  const uint32_t vbvBytes = stableTextTune_ ? stable_text_vbv_bytes(bitrate_)
+                                            : low_latency_vbv_bytes(bitrate_);
+  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMaxBitRate, maxBitrate);
+  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonBufferSize, vbvBytes);
   (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVDefaultBPictureCount, 0);
   (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVEncMPVGOPOpen, false);
   (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVGOPSize, std::max<uint32_t>(1, keyint_));
-  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonQualityVsSpeed, 100);
+  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonQualityVsSpeed, stableTextTune_ ? 68u : 100u);
 }
 
 bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint32_t bitrate, uint32_t keyint) {
@@ -1257,6 +1283,7 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
   fps_ = std::max<uint32_t>(1, fps);
   bitrate_ = std::max<uint32_t>(100000, bitrate);
   keyint_ = std::max<uint32_t>(1, keyint);
+  stableTextTune_ = env_string_equals_ci("REMOTE60_NATIVE_ENCODER_TUNE_MODE", "stable_text");
   sampleDurationHns_ = std::max<int64_t>(1, 10000000LL / static_cast<int64_t>(fps_));
 
   IMFTransform* encRaw = nullptr;
@@ -1332,8 +1359,15 @@ bool H264Encoder::reconfigure_bitrate(uint32_t bitrate) {
   bitrate_ = std::max<uint32_t>(100000, bitrate);
   bool ok = true;
   ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMeanBitRate, bitrate_) && ok;
-  ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMaxBitRate, std::max<uint32_t>(bitrate_, (bitrate_ * 11) / 10)) && ok;
-  ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonBufferSize, low_latency_vbv_bytes(bitrate_)) && ok;
+  ok = set_codecapi_u32(
+           enc_.Get(), CODECAPI_AVEncCommonMaxBitRate,
+           stableTextTune_ ? std::max<uint32_t>(bitrate_, (bitrate_ * 13) / 10)
+                           : std::max<uint32_t>(bitrate_, (bitrate_ * 11) / 10)) &&
+       ok;
+  ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonBufferSize,
+                        stableTextTune_ ? stable_text_vbv_bytes(bitrate_)
+                                        : low_latency_vbv_bytes(bitrate_)) &&
+       ok;
   return ok;
 }
 

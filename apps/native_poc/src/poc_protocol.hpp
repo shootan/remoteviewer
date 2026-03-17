@@ -23,6 +23,7 @@ enum class MessageType : uint16_t {
   ControlWindowList = 29,
   ControlWindowSelect = 30,
   ControlWindowSelected = 31,
+  ControlInputText = 32,
 };
 
 enum class UdpPacketKind : uint16_t {
@@ -37,6 +38,7 @@ enum class UdpCodec : uint16_t {
 };
 
 constexpr uint32_t kControlWindowListMaxEntries = 64;
+constexpr uint32_t kControlInputTextMaxUtf16 = 64;
 
 #pragma pack(push, 1)
 struct MessageHeader {
@@ -121,6 +123,15 @@ struct ControlInputAckMessage {
   uint32_t seq = 0;
   uint64_t hostRecvQpcUs = 0;
   uint64_t hostSendQpcUs = 0;
+};
+
+struct ControlInputTextMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint16_t utf16Count = 0;
+  uint16_t reserved = 0;
+  uint16_t utf16[kControlInputTextMaxUtf16] = {};
+  uint64_t clientSendQpcUs = 0;
 };
 
 struct ControlClientMetricsMessage {

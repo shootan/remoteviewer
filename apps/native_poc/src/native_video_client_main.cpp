@@ -2,6 +2,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <windowsx.h>
+#include <imm.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <dxgi.h>
@@ -40,11 +41,13 @@
 #include "time_utils.hpp"
 
 #pragma comment(lib, "Msimg32.lib")
+#pragma comment(lib, "Imm32.lib")
 
 namespace {
 
 using remote60::native_poc::ControlInputAckMessage;
 using remote60::native_poc::ControlInputEventMessage;
+using remote60::native_poc::ControlInputTextMessage;
 using remote60::native_poc::ControlClientMetricsMessage;
 using remote60::native_poc::ControlRequestKeyFrameMessage;
 using remote60::native_poc::ControlRuntimeEncoderConfigMessage;
@@ -482,13 +485,19 @@ const char* congestion_state_name(ClientCongestionState state) {
 }
 
 std::mutex gInputMu;
-std::deque<ControlInputEventMessage> gInputQueue;
+struct QueuedControlInputMessage {
+  MessageType type = MessageType::ControlInputEvent;
+  ControlInputEventMessage inputEvent{};
+  ControlInputTextMessage inputText{};
+};
+std::deque<QueuedControlInputMessage> gInputQueue;
 std::atomic<uint32_t> gInputSeq{0};
 std::atomic<uint64_t> gInputDropped{0};
 std::atomic<bool> gInputEnabled{false};
 std::atomic<uint16_t> gMouseButtons{0};
 std::atomic<int32_t> gLastInputVideoX{0};
 std::atomic<int32_t> gLastInputVideoY{0};
+std::atomic<uint32_t> gSuppressedImeCharCount{0};
 
 struct ClientRuntimeMetrics {
   std::atomic<uint32_t> seq{0};
@@ -771,9 +780,77 @@ bool map_client_point_to_video_coords(HWND hwnd, int x, int y, int32_t* outVideo
 }
 
 void enqueue_input_event(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode);
+void enqueue_input_text_units(const uint16_t* text, size_t count);
+
+void enqueue_control_input_message(const QueuedControlInputMessage& msg) {
+  std::lock_guard<std::mutex> lk(gInputMu);
+  if (msg.type == MessageType::ControlInputEvent &&
+      msg.inputEvent.kind == 1 &&
+      !gInputQueue.empty() &&
+      gInputQueue.back().type == MessageType::ControlInputEvent &&
+      gInputQueue.back().inputEvent.kind == 1) {
+    gInputQueue.back() = msg;
+    return;
+  }
+  if (gInputQueue.size() >= 256) {
+    gInputQueue.pop_front();
+    gInputDropped.fetch_add(1);
+  }
+  gInputQueue.push_back(msg);
+}
+
+void enqueue_input_text_units(const uint16_t* text, size_t count) {
+  if (kInputPolicyForceBlock) return;
+  if (!gInputEnabled.load()) return;
+  if (!text || count == 0) return;
+  size_t offset = 0;
+  while (offset < count) {
+    const size_t remaining = count - offset;
+    const size_t chunk = std::min<size_t>(remaining, remote60::native_poc::kControlInputTextMaxUtf16);
+    QueuedControlInputMessage msg{};
+    msg.type = MessageType::ControlInputText;
+    msg.inputText.header.magic = remote60::native_poc::kMagic;
+    msg.inputText.header.type = static_cast<uint16_t>(MessageType::ControlInputText);
+    msg.inputText.header.size = static_cast<uint16_t>(sizeof(msg.inputText));
+    msg.inputText.seq = gInputSeq.fetch_add(1) + 1;
+    msg.inputText.utf16Count = static_cast<uint16_t>(chunk);
+    std::memcpy(msg.inputText.utf16, text + offset, chunk * sizeof(uint16_t));
+    msg.inputText.clientSendQpcUs = qpc_now_us();
+    enqueue_control_input_message(msg);
+    offset += chunk;
+  }
+}
 
 bool local_hotkey_modifiers_active() {
   return (GetKeyState(VK_CONTROL) < 0) && (GetKeyState(VK_MENU) < 0);
+}
+
+bool is_committed_text_code_unit(uint16_t ch) {
+  return (ch >= 0x20u) || ch == static_cast<uint16_t>('\r') ||
+         ch == static_cast<uint16_t>('\t') || ch == static_cast<uint16_t>('\b');
+}
+
+void enqueue_committed_text_unit(uint16_t ch) {
+  if (!is_committed_text_code_unit(ch)) return;
+  enqueue_input_text_units(&ch, 1);
+}
+
+bool send_ime_result_text(HWND hwnd, LPARAM imeFlags) {
+  if ((imeFlags & GCS_RESULTSTR) == 0) return false;
+  HIMC imc = ImmGetContext(hwnd);
+  if (!imc) return false;
+  const LONG bytes = ImmGetCompositionStringW(imc, GCS_RESULTSTR, nullptr, 0);
+  if (bytes <= 0) {
+    ImmReleaseContext(hwnd, imc);
+    return false;
+  }
+  std::vector<uint16_t> text(static_cast<size_t>(bytes) / sizeof(uint16_t));
+  const LONG copied = ImmGetCompositionStringW(imc, GCS_RESULTSTR, text.data(), bytes);
+  ImmReleaseContext(hwnd, imc);
+  if (copied <= 0 || text.empty()) return false;
+  enqueue_input_text_units(text.data(), text.size());
+  gSuppressedImeCharCount.fetch_add(static_cast<uint32_t>(text.size()), std::memory_order_relaxed);
+  return true;
 }
 
 void release_mouse_capture_if_idle(HWND hwnd) {
@@ -1547,29 +1624,20 @@ Nv12D3dRenderer gNv12Renderer;
 void enqueue_input_event(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode) {
   if (kInputPolicyForceBlock) return;
   if (!gInputEnabled.load()) return;
-  ControlInputEventMessage msg{};
-  msg.header.magic = remote60::native_poc::kMagic;
-  msg.header.type = static_cast<uint16_t>(MessageType::ControlInputEvent);
-  msg.header.size = static_cast<uint16_t>(sizeof(msg));
-  msg.seq = gInputSeq.fetch_add(1) + 1;
-  msg.kind = kind;
-  msg.buttons = gMouseButtons.load();
-  msg.x = x;
-  msg.y = y;
-  msg.wheelDelta = wheelDelta;
-  msg.keyCode = keyCode;
-  msg.clientSendQpcUs = qpc_now_us();
-
-  std::lock_guard<std::mutex> lk(gInputMu);
-  if (kind == 1 && !gInputQueue.empty() && gInputQueue.back().kind == 1) {
-    gInputQueue.back() = msg;
-    return;
-  }
-  if (gInputQueue.size() >= 256) {
-    gInputQueue.pop_front();
-    gInputDropped.fetch_add(1);
-  }
-  gInputQueue.push_back(msg);
+  QueuedControlInputMessage msg{};
+  msg.type = MessageType::ControlInputEvent;
+  msg.inputEvent.header.magic = remote60::native_poc::kMagic;
+  msg.inputEvent.header.type = static_cast<uint16_t>(MessageType::ControlInputEvent);
+  msg.inputEvent.header.size = static_cast<uint16_t>(sizeof(msg.inputEvent));
+  msg.inputEvent.seq = gInputSeq.fetch_add(1) + 1;
+  msg.inputEvent.kind = kind;
+  msg.inputEvent.buttons = gMouseButtons.load();
+  msg.inputEvent.x = x;
+  msg.inputEvent.y = y;
+  msg.inputEvent.wheelDelta = wheelDelta;
+  msg.inputEvent.keyCode = keyCode;
+  msg.inputEvent.clientSendQpcUs = qpc_now_us();
+  enqueue_control_input_message(msg);
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -1856,6 +1924,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       gActiveTouchDown.store(false, std::memory_order_relaxed);
       gActiveTouchPointerId.store(0, std::memory_order_relaxed);
       return 0;
+    case WM_IME_SETCONTEXT: {
+      const LPARAM masked =
+          lp & ~(static_cast<LPARAM>(ISC_SHOWUICOMPOSITIONWINDOW) |
+                 static_cast<LPARAM>(ISC_SHOWUICANDIDATEWINDOW << 0) |
+                 static_cast<LPARAM>(ISC_SHOWUICANDIDATEWINDOW << 1) |
+                 static_cast<LPARAM>(ISC_SHOWUICANDIDATEWINDOW << 2) |
+                 static_cast<LPARAM>(ISC_SHOWUICANDIDATEWINDOW << 3) |
+                 static_cast<LPARAM>(ISC_SHOWUIGUIDELINE));
+      return DefWindowProc(hwnd, msg, wp, masked);
+    }
+    case WM_IME_STARTCOMPOSITION:
+    case WM_IME_ENDCOMPOSITION:
+    case WM_IME_CHAR:
+      return 0;
+    case WM_IME_COMPOSITION:
+      if (kInputPolicyForceBlock) return 0;
+      (void)send_ime_result_text(hwnd, lp);
+      return 0;
     case WM_KEYDOWN:
       if (local_hotkey_modifiers_active() && wp == VK_F5) {
         queue_window_list_request("window_list_request pending");
@@ -1903,6 +1989,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       enqueue_input_event(6, 0, 0, 0, static_cast<uint32_t>(wp));
       return 0;
     case WM_CHAR:
+      if (kInputPolicyForceBlock) return 0;
+      {
+        uint32_t suppress = gSuppressedImeCharCount.load(std::memory_order_relaxed);
+        while (suppress > 0) {
+          if (gSuppressedImeCharCount.compare_exchange_weak(
+                  suppress, suppress - 1, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+            return 0;
+          }
+        }
+      }
+      enqueue_committed_text_unit(static_cast<uint16_t>(wp & 0xFFFFu));
+      return 0;
     case WM_SYSCHAR:
       return 0;
     case WM_ERASEBKGND:
@@ -2273,6 +2371,7 @@ int main(int argc, char** argv) {
   gSuppressMouseUntilUs.store(0, std::memory_order_relaxed);
   gActiveTouchPointerId.store(0, std::memory_order_relaxed);
   gActiveTouchDown.store(false, std::memory_order_relaxed);
+  gSuppressedImeCharCount.store(0, std::memory_order_relaxed);
 
   WinsockScope ws;
   if (!ws.ok) {
@@ -2656,19 +2755,26 @@ int main(int argc, char** argv) {
               }
             }
 
-            ControlInputEventMessage input{};
+            QueuedControlInputMessage outbound{};
             bool hasInput = false;
             {
               std::lock_guard<std::mutex> lk(gInputMu);
               if (!gInputQueue.empty()) {
-                input = gInputQueue.front();
+                outbound = gInputQueue.front();
                 gInputQueue.pop_front();
                 hasInput = true;
               }
             }
             if (hasInput) {
-              input.clientSendQpcUs = qpc_now_us();
-              if (!send_all(controlSock, &input, sizeof(input))) break;
+              if (outbound.type == MessageType::ControlInputEvent) {
+                outbound.inputEvent.clientSendQpcUs = qpc_now_us();
+                if (!send_all(controlSock, &outbound.inputEvent, sizeof(outbound.inputEvent))) break;
+              } else if (outbound.type == MessageType::ControlInputText) {
+                outbound.inputText.clientSendQpcUs = qpc_now_us();
+                if (!send_all(controlSock, &outbound.inputText, sizeof(outbound.inputText))) break;
+              } else {
+                continue;
+              }
 
               MessageHeader header{};
               if (!recv_all(controlSock, &header, sizeof(header))) break;

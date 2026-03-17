@@ -52,6 +52,7 @@ using namespace winrt::Windows::Graphics::Capture;
 using namespace winrt::Windows::Graphics::DirectX::Direct3D11;
 using remote60::native_poc::ControlInputAckMessage;
 using remote60::native_poc::ControlInputEventMessage;
+using remote60::native_poc::ControlInputTextMessage;
 using remote60::native_poc::ControlClientMetricsMessage;
 using remote60::native_poc::ControlRequestKeyFrameMessage;
 using remote60::native_poc::ControlRuntimeEncoderConfigMessage;
@@ -429,6 +430,31 @@ std::string get_window_process_name(HWND hwnd, uint32_t* outPid) {
   return base_name_lower(out);
 }
 
+std::string get_window_class_name(HWND hwnd) {
+  if (!hwnd) return std::string{};
+  wchar_t buf[256] = {};
+  const int copied = GetClassNameW(hwnd, buf, static_cast<int>(std::size(buf)));
+  if (copied <= 0) return std::string{};
+  return wide_to_utf8(std::wstring(buf, buf + copied));
+}
+
+std::wstring get_window_title(HWND hwnd);
+
+std::string describe_input_target(HWND hwnd) {
+  if (!hwnd || !IsWindow(hwnd)) return "target=<invalid>";
+  uint32_t pid = 0;
+  const std::string processName = get_window_process_name(hwnd, &pid);
+  const std::wstring title = get_window_title(hwnd);
+  const std::string className = get_window_class_name(hwnd);
+  std::ostringstream oss;
+  oss << " targetHwnd=0x" << std::hex << reinterpret_cast<uintptr_t>(hwnd) << std::dec
+      << " targetPid=" << pid
+      << " targetProc=" << (processName.empty() ? "<unknown>" : processName)
+      << " targetClass=" << (className.empty() ? "<unknown>" : className)
+      << " targetTitle=" << (title.empty() ? "<empty>" : wide_to_utf8(title));
+  return oss.str();
+}
+
 std::wstring get_window_title(HWND hwnd) {
   if (!hwnd) return std::wstring{};
   const int len = GetWindowTextLengthW(hwnd);
@@ -749,6 +775,29 @@ struct DesktopInputState {
   BYTE keyState[256] = {};
 };
 
+HWND choose_desktop_seed_window(const POINT& screenPt, DesktopInputState* state) {
+  CaptureWindowInfo topLevel{};
+  if (find_top_level_window_at_point(screenPt, &topLevel) && topLevel.hwnd && IsWindow(topLevel.hwnd)) {
+    return topLevel.hwnd;
+  }
+  if (state) {
+    std::lock_guard<std::mutex> lk(state->mu);
+    if (state->lastHwnd && IsWindow(state->lastHwnd)) return state->lastHwnd;
+  }
+  const HWND pointHwnd = WindowFromPoint(screenPt);
+  return (pointHwnd && IsWindow(pointHwnd)) ? pointHwnd : nullptr;
+}
+
+HWND choose_text_target_window(HWND fallbackHwnd, DesktopInputState* state) {
+  if (state) {
+    std::lock_guard<std::mutex> lk(state->mu);
+    if (state->lastHwnd && IsWindow(state->lastHwnd)) return state->lastHwnd;
+  }
+  if (fallbackHwnd && IsWindow(fallbackHwnd)) return fallbackHwnd;
+  const HWND foreground = GetForegroundWindow();
+  return (foreground && IsWindow(foreground)) ? foreground : nullptr;
+}
+
 bool resolve_message_target_at_screen_point(HWND seedHwnd, const POINT& screenPt, HWND* outHwnd,
                                             POINT* outClientPt) {
   if (!outHwnd || !outClientPt) return false;
@@ -817,7 +866,8 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
                                                 bool desktopMode,
                                                 uint32_t inputDomainW,
                                                 uint32_t inputDomainH,
-                                                DesktopInputState* desktopInputState) {
+                                                DesktopInputState* desktopInputState,
+                                                std::string* resolvedTargetOut = nullptr) {
   if (inputDomainW == 0 || inputDomainH == 0) return InputInjectResult::Failed;
 
   CaptureWindowInfo explicitTarget{};
@@ -847,6 +897,7 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
     if (!resolve_message_target_at_screen_point(targetHwnd, screenPt, &resolvedTargetHwnd, &resolvedClientPt)) {
       return InputInjectResult::NoTarget;
     }
+    if (resolvedTargetOut) *resolvedTargetOut = describe_input_target(resolvedTargetHwnd);
     remember_input_target(desktopInputState, resolvedTargetHwnd, screenPt);
     if (input.kind == 1) {
       if ((input.buttons & 0x7u) == 0) return InputInjectResult::IgnoredMove;
@@ -881,27 +932,14 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
                                                                            : InputInjectResult::Failed;
     }
     if (input.kind == 5 || input.kind == 6) {
-      HWND keyTargetHwnd = targetHwnd;
-      BYTE keyboardState[256] = {};
-      if (desktopInputState) {
-        std::lock_guard<std::mutex> lk(desktopInputState->mu);
-        if (desktopInputState->lastHwnd && IsWindow(desktopInputState->lastHwnd)) {
-          keyTargetHwnd = desktopInputState->lastHwnd;
-        }
-        std::memcpy(keyboardState, desktopInputState->keyState, sizeof(keyboardState));
-      }
+      HWND keyTargetHwnd = choose_text_target_window(targetHwnd, desktopInputState);
+      if (!keyTargetHwnd || !IsWindow(keyTargetHwnd)) return InputInjectResult::NoTarget;
+      if (resolvedTargetOut) *resolvedTargetOut = describe_input_target(keyTargetHwnd);
       const bool keyUp = (input.kind == 6);
       const UINT msg = keyUp ? WM_KEYUP : WM_KEYDOWN;
       const LPARAM lp = key_event_lparam(input.keyCode, keyUp);
       if (!PostMessageW(keyTargetHwnd, msg, static_cast<WPARAM>(input.keyCode), lp)) {
         return InputInjectResult::Failed;
-      }
-      if (!keyUp) {
-        wchar_t ch = 0;
-        if (keycode_to_unicode_char(input.keyCode, keyboardState, &ch)) {
-          const LPARAM charLp = key_event_lparam(input.keyCode, false);
-          (void)PostMessageW(keyTargetHwnd, WM_CHAR, static_cast<WPARAM>(ch), charLp);
-        }
       }
       if (desktopInputState) {
         std::lock_guard<std::mutex> lk(desktopInputState->mu);
@@ -919,11 +957,7 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
 
   auto resolve_desktop_target = [&](HWND* outHwnd, POINT* outClientPt) -> bool {
     if (!outHwnd || !outClientPt || !desktopInputState) return false;
-    HWND seed = nullptr;
-    {
-      std::lock_guard<std::mutex> lk(desktopInputState->mu);
-      seed = desktopInputState->lastHwnd;
-    }
+    const HWND seed = choose_desktop_seed_window(screenPt, desktopInputState);
     HWND resolved = nullptr;
     POINT clientPt{};
     if (!resolve_message_target_at_screen_point(seed, screenPt, &resolved, &clientPt)) return false;
@@ -943,6 +977,7 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
     HWND targetHwnd = nullptr;
     POINT clientPt{};
     if (!resolve_desktop_target(&targetHwnd, &clientPt)) return InputInjectResult::NoTarget;
+    if (resolvedTargetOut) *resolvedTargetOut = describe_input_target(targetHwnd);
     const WPARAM wp = mouse_button_wparam(static_cast<uint16_t>(input.buttons & 0x7u));
     const LPARAM lp = MAKELPARAM(static_cast<short>(clientPt.x), static_cast<short>(clientPt.y));
     return PostMessageW(targetHwnd, WM_MOUSEMOVE, wp, lp) ? InputInjectResult::Injected
@@ -954,6 +989,7 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
     HWND targetHwnd = nullptr;
     POINT clientPt{};
     if (!resolve_desktop_target(&targetHwnd, &clientPt)) return InputInjectResult::NoTarget;
+    if (resolvedTargetOut) *resolvedTargetOut = describe_input_target(targetHwnd);
     uint16_t buttons = static_cast<uint16_t>(input.buttons & 0x7u);
     const uint16_t eventMask = mouse_vk_to_mask(input.keyCode);
     if (input.kind == 2) {
@@ -971,6 +1007,7 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
     HWND targetHwnd = nullptr;
     POINT clientPt{};
     if (!resolve_desktop_target(&targetHwnd, &clientPt)) return InputInjectResult::NoTarget;
+    if (resolvedTargetOut) *resolvedTargetOut = describe_input_target(targetHwnd);
     const WPARAM wp =
         MAKEWPARAM(mouse_button_wparam(static_cast<uint16_t>(input.buttons & 0x7u)),
                    static_cast<WORD>(static_cast<SHORT>(input.wheelDelta)));
@@ -981,28 +1018,14 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
   }
   if (input.kind == 5 || input.kind == 6) {
     HWND targetHwnd = nullptr;
-    BYTE keyboardState[256] = {};
-    if (desktopInputState) {
-      std::lock_guard<std::mutex> lk(desktopInputState->mu);
-      targetHwnd = desktopInputState->lastHwnd;
-      std::memcpy(keyboardState, desktopInputState->keyState, sizeof(keyboardState));
-    }
-    if (!targetHwnd || !IsWindow(targetHwnd)) {
-      targetHwnd = GetForegroundWindow();
-    }
+    targetHwnd = choose_text_target_window(targetHwnd, desktopInputState);
     if (!targetHwnd || !IsWindow(targetHwnd)) return InputInjectResult::NoTarget;
+    if (resolvedTargetOut) *resolvedTargetOut = describe_input_target(targetHwnd);
     const bool keyUp = (input.kind == 6);
     const UINT msg = keyUp ? WM_KEYUP : WM_KEYDOWN;
     const LPARAM lp = key_event_lparam(input.keyCode, keyUp);
     if (!PostMessageW(targetHwnd, msg, static_cast<WPARAM>(input.keyCode), lp)) {
       return InputInjectResult::Failed;
-    }
-    if (!keyUp) {
-      wchar_t ch = 0;
-      if (keycode_to_unicode_char(input.keyCode, keyboardState, &ch)) {
-        const LPARAM charLp = key_event_lparam(input.keyCode, false);
-        (void)PostMessageW(targetHwnd, WM_CHAR, static_cast<WPARAM>(ch), charLp);
-      }
     }
     if (desktopInputState) {
       std::lock_guard<std::mutex> lk(desktopInputState->mu);
@@ -1011,6 +1034,32 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
     return InputInjectResult::Injected;
   }
   return InputInjectResult::Unsupported;
+}
+
+InputInjectResult apply_input_text_message(const ControlInputTextMessage& text,
+                                           const std::atomic<uint64_t>& captureTargetHwnd,
+                                           bool desktopMode,
+                                           DesktopInputState* desktopInputState,
+                                           std::string* resolvedTargetOut = nullptr) {
+  if (text.utf16Count == 0 || text.utf16Count > remote60::native_poc::kControlInputTextMaxUtf16) {
+    return InputInjectResult::Unsupported;
+  }
+  HWND fallbackHwnd = nullptr;
+  if (!desktopMode) {
+    fallbackHwnd = reinterpret_cast<HWND>(static_cast<uintptr_t>(
+        captureTargetHwnd.load(std::memory_order_acquire)));
+  }
+  HWND targetHwnd = choose_text_target_window(fallbackHwnd, desktopInputState);
+  if (!targetHwnd || !IsWindow(targetHwnd)) return InputInjectResult::NoTarget;
+  if (resolvedTargetOut) *resolvedTargetOut = describe_input_target(targetHwnd);
+  for (uint16_t i = 0; i < text.utf16Count; ++i) {
+    const uint16_t ch = text.utf16[i];
+    if (ch == 0) continue;
+    if (!PostMessageW(targetHwnd, WM_CHAR, static_cast<WPARAM>(ch), 1)) {
+      return InputInjectResult::Failed;
+    }
+  }
+  return InputInjectResult::Injected;
 }
 
 bool compute_window_client_crop(HWND hwnd, uint32_t frameW, uint32_t frameH, uint32_t* outX,
@@ -1901,6 +1950,11 @@ int main(int argc, char** argv) {
   }
   const bool encodedExperimentEnabled =
       (REMOTE60_NATIVE_ENCODED_EXPERIMENT != 0) || env_truthy("REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE");
+  const std::string encoderTuneMode = [&]() {
+    const char* raw = std::getenv("REMOTE60_NATIVE_ENCODER_TUNE_MODE");
+    if (!raw || !*raw) return std::string("low_latency");
+    return ascii_lower(trim_ascii(std::string(raw)));
+  }();
 
   if (!useRaw && !useH264) {
     std::cerr << "[native-video-host] unsupported codec: " << args.codec << " (supported: raw,h264)\n";
@@ -1940,6 +1994,7 @@ int main(int argc, char** argv) {
     std::cout << "[native-video-host] h264 pacing=" << (noPacingH264 ? "off" : "on")
               << " stalePreEncodeGuard=" << (guardStalePreEncode ? 1 : 0)
               << " capturePoolBuffers=" << captureFramePoolBuffers
+              << " encoderTuneMode=" << encoderTuneMode
               << " abr=" << (abrEnabled ? "on" : "off")
               << " abrMode=" << (abrQualityFirst ? "quality-first" : "default")
               << " frameGating=" << (frameGatingEnabled ? "on" : "off")
@@ -2206,6 +2261,16 @@ int main(int argc, char** argv) {
               }
               return send_all(acceptedSock, &rsp, sizeof(rsp));
             };
+            auto send_input_ack = [&](uint32_t seq) -> bool {
+              ControlInputAckMessage ack{};
+              ack.header.magic = remote60::native_poc::kMagic;
+              ack.header.type = static_cast<uint16_t>(MessageType::ControlInputAck);
+              ack.header.size = static_cast<uint16_t>(sizeof(ack));
+              ack.seq = seq;
+              ack.hostRecvQpcUs = qpc_now_us();
+              ack.hostSendQpcUs = qpc_now_us();
+              return send_all(acceptedSock, &ack, sizeof(ack));
+            };
 
             while (!stop.load()) {
               MessageHeader header{};
@@ -2251,6 +2316,7 @@ int main(int argc, char** argv) {
                 ControlInputEventMessage input{};
                 input.header = header;
                 if (!recv_all(acceptedSock, &input.seq, sizeof(input) - sizeof(MessageHeader))) break;
+                std::string resolvedTarget;
                 if (inputInjectionEnabled) {
                   const bool desktopMode =
                       !inputTargetCriteria.enabled() &&
@@ -2259,7 +2325,7 @@ int main(int argc, char** argv) {
                       inject_background_input_event(input, inputTargetCriteria, hostCaptureTargetHwnd, desktopMode,
                                                     inputDomainW.load(std::memory_order_acquire),
                                                     inputDomainH.load(std::memory_order_acquire),
-                                                    &desktopInputState);
+                                                    &desktopInputState, &resolvedTarget);
                   if (injectResult == InputInjectResult::Injected) {
                     const uint64_t n = inputEvents.fetch_add(1) + 1;
                     if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
@@ -2270,6 +2336,7 @@ int main(int argc, char** argv) {
                                 << " buttons=" << input.buttons
                                 << " key=" << input.keyCode
                                 << " mode=" << (desktopMode ? "desktop" : "window")
+                                << resolvedTarget
                                 << "\n";
                     }
                   } else if (injectResult == InputInjectResult::IgnoredMove) {
@@ -2282,6 +2349,7 @@ int main(int argc, char** argv) {
                                 << " filterPid=" << args.inputTargetPid
                                 << " filterProc=" << trim_ascii(args.inputTargetProcess)
                                 << " filterTitle=" << trim_ascii(args.inputTargetTitle)
+                                << resolvedTarget
                                 << "\n";
                     }
                   } else if (injectResult == InputInjectResult::Unsupported) {
@@ -2298,6 +2366,7 @@ int main(int argc, char** argv) {
                       std::cout << "[native-video-host][input] inject-fail seq=" << input.seq
                                 << " kind=" << input.kind
                                 << " key=" << input.keyCode
+                                << resolvedTarget
                                 << "\n";
                     }
                   }
@@ -2307,14 +2376,57 @@ int main(int argc, char** argv) {
                             << " kind=" << input.kind
                             << "\n";
                 }
-                ControlInputAckMessage ack{};
-                ack.header.magic = remote60::native_poc::kMagic;
-                ack.header.type = static_cast<uint16_t>(MessageType::ControlInputAck);
-                ack.header.size = static_cast<uint16_t>(sizeof(ack));
-                ack.seq = input.seq;
-                ack.hostRecvQpcUs = qpc_now_us();
-                ack.hostSendQpcUs = qpc_now_us();
-                if (!send_all(acceptedSock, &ack, sizeof(ack))) break;
+                if (!send_input_ack(input.seq)) break;
+                continue;
+              }
+
+              if (type == MessageType::ControlInputText && header.size == sizeof(ControlInputTextMessage)) {
+                ControlInputTextMessage text{};
+                text.header = header;
+                if (!recv_all(acceptedSock, &text.seq, sizeof(text) - sizeof(MessageHeader))) break;
+                std::string resolvedTarget;
+                if (inputInjectionEnabled) {
+                  const bool desktopMode =
+                      !inputTargetCriteria.enabled() &&
+                      (selectedWindowIdState.load(std::memory_order_acquire) == 0);
+                  const InputInjectResult injectResult =
+                      apply_input_text_message(text, hostCaptureTargetHwnd, desktopMode,
+                                               &desktopInputState, &resolvedTarget);
+                  if (injectResult == InputInjectResult::Injected) {
+                    const uint64_t n = inputEvents.fetch_add(1) + 1;
+                    if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
+                      std::cout << "[native-video-host][input-text] injected seq=" << text.seq
+                                << " utf16Count=" << text.utf16Count
+                                << " mode=" << (desktopMode ? "desktop" : "window")
+                                << resolvedTarget
+                                << "\n";
+                    }
+                  } else if (injectResult == InputInjectResult::NoTarget) {
+                    const uint64_t n = inputNoTarget.fetch_add(1, std::memory_order_relaxed) + 1;
+                    if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
+                      std::cout << "[native-video-host][input-text] no-target seq=" << text.seq
+                                << " utf16Count=" << text.utf16Count
+                                << resolvedTarget
+                                << "\n";
+                    }
+                  } else if (injectResult == InputInjectResult::Unsupported) {
+                    const uint64_t n = inputUnsupported.fetch_add(1, std::memory_order_relaxed) + 1;
+                    if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
+                      std::cout << "[native-video-host][input-text] unsupported seq=" << text.seq
+                                << " utf16Count=" << text.utf16Count
+                                << "\n";
+                    }
+                  } else {
+                    const uint64_t n = inputInjectFail.fetch_add(1, std::memory_order_relaxed) + 1;
+                    if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
+                      std::cout << "[native-video-host][input-text] inject-fail seq=" << text.seq
+                                << " utf16Count=" << text.utf16Count
+                                << resolvedTarget
+                                << "\n";
+                    }
+                  }
+                }
+                if (!send_input_ack(text.seq)) break;
                 continue;
               }
 

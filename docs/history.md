@@ -1426,3 +1426,63 @@ Validation / build / test result
 Next action
 - 테스트는 `D:\remote\remote\dist\native-video-external-v9-20260317-234839` 기준으로 진행한다.
 - 각 장비에서 `automation\run_native_video_with_config.json`만 준비하고 `powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_with_config.ps1`로 host/client를 실행한다.
+
+### 124) 2026-03-18 native desktop input + committed text/IME + stable_text tune
+Goal
+- `desktop mode` 클릭 무반응, 영문 2중 입력, 한글/IME 조합창 문제를 함께 정리한다.
+- external 기본 profile의 정지 텍스트/어두운 장면 blur 펌핑을 줄이기 위해 `stable_text` encoder tune을 추가하고 최신 bundle로 다시 패키징한다.
+
+Files changed
+- `apps/native_poc/src/poc_protocol.hpp`
+- `apps/native_poc/src/native_video_client_main.cpp`
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `apps/native_poc/src/json_profile.hpp`
+- `apps/native_poc/src/mf_h264_codec.hpp`
+- `apps/native_poc/src/mf_h264_codec.cpp`
+- `automation/native_video_profile_1080p_external_template.json`
+- `automation/package_native_video_external_bundle.ps1`
+- `docs/external_wan_test_guide.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_host_poc remote60_native_video_client_poc --parallel`
+  - 결과: 성공
+- Input regression:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/validate_background_input_injection.ps1 -DurationSec 12`
+  - 결과:
+    - `AUTO_PASS=1`
+    - `INPUT_EVENTS=418`
+    - `INPUT_NO_TARGET=0`
+    - `INPUT_INJECT_FAIL=0`
+    - `INPUT_UNSUPPORTED=0`
+    - `INPUT_IGNORED_MOVE=0`
+- External stable_text smoke:
+  - temp config: `tmp/external-stable-text-smoke/cfg.json`
+  - host/client launch:
+    - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1 -Role host -ConfigPath tmp/external-stable-text-smoke/cfg.json`
+    - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1 -Role client -ConfigPath tmp/external-stable-text-smoke/cfg.json`
+  - 결과:
+    - host log: `tmp/external-stable-text-smoke/host.out.log`
+      - `encoderTuneMode=stable_text`
+      - `keyintTarget=60`
+      - runtime completed with `done`
+    - client log: `tmp/external-stable-text-smoke/client.out.log`
+      - `control connected`
+      - runtime completed with `done`
+- Bundle package:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/package_native_video_external_bundle.ps1 -BuildDir build-vcpkg-local -BundleName native-video-external-v10`
+  - 결과:
+    - `BUNDLE_DIR=D:\remote\remote\dist\native-video-external-v10-20260318-004248`
+    - `BUNDLE_ZIP=D:\remote\remote\dist\native-video-external-v10-20260318-004248.zip`
+- 구현 요약:
+  - protocol에 committed text message 추가
+  - client는 `WM_CHAR`/`WM_IME_COMPOSITION(GCS_RESULTSTR)`를 text message로 보내고 local IME UI를 suppress
+  - host raw key path의 `WM_CHAR` 합성을 제거하고 text message만 `WM_CHAR`로 주입
+  - desktop mode는 top-level visible window 기준으로 target을 다시 잡도록 수정
+  - external 기본 profile을 `encoderTuneMode=stable_text`, `keyint=60`으로 변경
+
+Next action
+- 실제 외부 2PC에서 `Desktop Mode` taskbar/start click, 영문 1회 입력, 한글 committed text, 로컬 IME 조합창 미표시를 수동 확인한다.
+- blur/clean pumping이 실제 체감에서 충분히 줄었는지 dark text 장면 기준으로 bundle `v10`에서 확인한다.

@@ -100,7 +100,7 @@ netsh advfirewall firewall add rule name="Remote60 Native Video TCP43001" dir=in
 
 ## 4) Recommended Profiles
 - `native_video_profile_1080p_external_template.json`
-  - default native 2PC GUI smoke, 1080p30 fixed, `8Mbps`, `mft_auto/mft_auto`, input/control on
+  - default native 2PC GUI smoke, 1080p30 fixed, `8Mbps`, `mft_auto/mft_auto`, input/control on, `stable_text` encoder tune
 - `native_video_profile_1080p_window_input_template.json`
   - config-locked window-target input template for fixed app HWND testing
 - `native_video_profile_1080p_lowlat.json`
@@ -144,6 +144,7 @@ In this profile:
 - video click/drag/wheel/keyboard input is on
 - `Desktop Mode` routes input by screen point
 - selecting a window routes input to that window
+- static/dark text quality is tuned toward `stable_text` instead of the old extreme low-latency encoder preset
 
 ## 6) Quick M9 A/B Capture
 One-time prepare:
