@@ -93,7 +93,6 @@ constexpr int kCaptureFramePoolBuffersDefault = 2;
 constexpr uint64_t kMaxPreEncodeFrameAgeUs = 25000;  // 25ms
 constexpr uint64_t kHostUserFeedbackWarnUs = 90000;  // 90ms
 constexpr uint64_t kHostUserFeedbackMinIntervalUs = 1000000;  // 1s
-constexpr uint64_t kCaptureStallKeepaliveStartUs = 700000;  // 0.7s
 constexpr uint64_t kCaptureStallKeepaliveIntervalUs = 1000000;  // 1s
 constexpr uint64_t kCaptureCallbackStallRestartUs = 1200000;  // 1.2s
 constexpr uint64_t kCaptureCallbackRestartCooldownUs = 3000000;  // 3s
@@ -852,6 +851,41 @@ void remember_input_target(DesktopInputState* state, HWND hwnd, const POINT& scr
   state->hasLastScreenPt = true;
 }
 
+bool resolve_desktop_input_target(const POINT& screenPt, DesktopInputState* state, HWND* outHwnd = nullptr,
+                                  POINT* outClientPt = nullptr, std::string* resolvedTargetOut = nullptr) {
+  const HWND seed = choose_desktop_seed_window(screenPt, state);
+  HWND resolved = nullptr;
+  POINT clientPt{};
+  if (!resolve_message_target_at_screen_point(seed, screenPt, &resolved, &clientPt)) return false;
+  remember_input_target(state, resolved, screenPt);
+  if (outHwnd) *outHwnd = resolved;
+  if (outClientPt) *outClientPt = clientPt;
+  if (resolvedTargetOut) *resolvedTargetOut = describe_input_target(resolved);
+  return true;
+}
+
+DWORD mouse_vk_to_sendinput_flag(uint16_t kind, uint32_t vk) {
+  if (kind == 2) {
+    if (vk == VK_RBUTTON) return MOUSEEVENTF_RIGHTDOWN;
+    if (vk == VK_MBUTTON) return MOUSEEVENTF_MIDDLEDOWN;
+    return MOUSEEVENTF_LEFTDOWN;
+  }
+  if (kind == 3) {
+    if (vk == VK_RBUTTON) return MOUSEEVENTF_RIGHTUP;
+    if (vk == VK_MBUTTON) return MOUSEEVENTF_MIDDLEUP;
+    return MOUSEEVENTF_LEFTUP;
+  }
+  return 0;
+}
+
+bool send_desktop_mouse_input(DWORD flags, DWORD mouseData = 0) {
+  INPUT in{};
+  in.type = INPUT_MOUSE;
+  in.mi.dwFlags = flags;
+  in.mi.mouseData = mouseData;
+  return SendInput(1, &in, sizeof(INPUT)) == 1;
+}
+
 enum class InputInjectResult : uint8_t {
   Injected = 0,
   IgnoredMove = 1,
@@ -954,67 +988,24 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
   if (!map_input_to_primary_monitor_point(input.x, input.y, inputDomainW, inputDomainH, &screenPt)) {
     return InputInjectResult::Failed;
   }
-
-  auto resolve_desktop_target = [&](HWND* outHwnd, POINT* outClientPt) -> bool {
-    if (!outHwnd || !outClientPt || !desktopInputState) return false;
-    const HWND seed = choose_desktop_seed_window(screenPt, desktopInputState);
-    HWND resolved = nullptr;
-    POINT clientPt{};
-    if (!resolve_message_target_at_screen_point(seed, screenPt, &resolved, &clientPt)) return false;
-    {
-      std::lock_guard<std::mutex> lk(desktopInputState->mu);
-      desktopInputState->lastHwnd = resolved;
-      desktopInputState->lastScreenPt = screenPt;
-      desktopInputState->hasLastScreenPt = true;
-    }
-    *outHwnd = resolved;
-    *outClientPt = clientPt;
-    return true;
-  };
+  resolve_desktop_input_target(screenPt, desktopInputState, nullptr, nullptr, resolvedTargetOut);
 
   if (input.kind == 1) {
     if ((input.buttons & 0x7u) == 0) return InputInjectResult::IgnoredMove;
-    HWND targetHwnd = nullptr;
-    POINT clientPt{};
-    if (!resolve_desktop_target(&targetHwnd, &clientPt)) return InputInjectResult::NoTarget;
-    if (resolvedTargetOut) *resolvedTargetOut = describe_input_target(targetHwnd);
-    const WPARAM wp = mouse_button_wparam(static_cast<uint16_t>(input.buttons & 0x7u));
-    const LPARAM lp = MAKELPARAM(static_cast<short>(clientPt.x), static_cast<short>(clientPt.y));
-    return PostMessageW(targetHwnd, WM_MOUSEMOVE, wp, lp) ? InputInjectResult::Injected
-                                                          : InputInjectResult::Failed;
+    return SetCursorPos(screenPt.x, screenPt.y) ? InputInjectResult::Injected : InputInjectResult::Failed;
   }
   if (input.kind == 2 || input.kind == 3) {
-    const UINT msg = mouse_vk_to_message(input.kind, input.keyCode);
-    if (msg == 0) return InputInjectResult::Unsupported;
-    HWND targetHwnd = nullptr;
-    POINT clientPt{};
-    if (!resolve_desktop_target(&targetHwnd, &clientPt)) return InputInjectResult::NoTarget;
-    if (resolvedTargetOut) *resolvedTargetOut = describe_input_target(targetHwnd);
-    uint16_t buttons = static_cast<uint16_t>(input.buttons & 0x7u);
-    const uint16_t eventMask = mouse_vk_to_mask(input.keyCode);
-    if (input.kind == 2) {
-      buttons = static_cast<uint16_t>(buttons | eventMask);
-    } else if (input.kind == 3) {
-      buttons = static_cast<uint16_t>(buttons & static_cast<uint16_t>(~eventMask));
-    }
-    const WPARAM wp = mouse_button_wparam(buttons);
-    const LPARAM lp = MAKELPARAM(static_cast<short>(clientPt.x), static_cast<short>(clientPt.y));
-    const bool moved = PostMessageW(targetHwnd, WM_MOUSEMOVE, wp, lp) != 0;
-    const bool clicked = PostMessageW(targetHwnd, msg, wp, lp) != 0;
-    return (moved && clicked) ? InputInjectResult::Injected : InputInjectResult::Failed;
+    const DWORD mouseFlag = mouse_vk_to_sendinput_flag(input.kind, input.keyCode);
+    if (mouseFlag == 0) return InputInjectResult::Unsupported;
+    if (!SetCursorPos(screenPt.x, screenPt.y)) return InputInjectResult::Failed;
+    return send_desktop_mouse_input(mouseFlag) ? InputInjectResult::Injected : InputInjectResult::Failed;
   }
   if (input.kind == 4) {
-    HWND targetHwnd = nullptr;
-    POINT clientPt{};
-    if (!resolve_desktop_target(&targetHwnd, &clientPt)) return InputInjectResult::NoTarget;
-    if (resolvedTargetOut) *resolvedTargetOut = describe_input_target(targetHwnd);
-    const WPARAM wp =
-        MAKEWPARAM(mouse_button_wparam(static_cast<uint16_t>(input.buttons & 0x7u)),
-                   static_cast<WORD>(static_cast<SHORT>(input.wheelDelta)));
-    const LPARAM screenLp =
-        MAKELPARAM(static_cast<short>(screenPt.x), static_cast<short>(screenPt.y));
-    return PostMessageW(targetHwnd, WM_MOUSEWHEEL, wp, screenLp) ? InputInjectResult::Injected
-                                                                 : InputInjectResult::Failed;
+    if (!SetCursorPos(screenPt.x, screenPt.y)) return InputInjectResult::Failed;
+    return send_desktop_mouse_input(MOUSEEVENTF_WHEEL,
+                                    static_cast<DWORD>(static_cast<SHORT>(input.wheelDelta)))
+               ? InputInjectResult::Injected
+               : InputInjectResult::Failed;
   }
   if (input.kind == 5 || input.kind == 6) {
     HWND targetHwnd = nullptr;
@@ -2008,7 +1999,7 @@ int main(int argc, char** argv) {
               << " captureInputMinPushPerSec=" << captureInputMinPushPerSec
               << " captureInputStallSec=" << captureInputStallConsecutiveSec
               << " captureInputWarmupSec=" << captureInputStallWarmupSec
-              << " captureKeepaliveIntervalUs="
+              << " captureIdlePollIntervalUs="
               << (captureStallKeepaliveIntervalUsOverride > 0
                       ? static_cast<uint64_t>(captureStallKeepaliveIntervalUsOverride)
                       : std::max<uint64_t>(kQueueWaitTimeoutUsMin, (1000000ULL / std::max<uint64_t>(1, args.fps))))
@@ -2945,7 +2936,7 @@ int main(int argc, char** argv) {
   uint64_t queuePushCountLastSample = 0;  // only read from main thread
   uint64_t queuePushPerSecLatest = 0;
   uint32_t captureInputLowPushStreakSec = 0;
-  uint64_t captureInputStallRestartCount = 0;
+  uint64_t captureDeadRestartCount = 0;
   uint64_t queuePopCount = 0;
   uint64_t queueWaitTimeoutCount = 0;
   uint64_t queueWaitNoWorkCount = 0;
@@ -3231,14 +3222,7 @@ int main(int argc, char** argv) {
   uint64_t callbackToEncodeStartSumUs = 0;
   uint64_t callbackToEncodeStartMaxUs = 0;
   uint32_t consecutiveStaleEncodedFrames = 0;
-  uint64_t syntheticKeepaliveCount = 0;
-  uint64_t syntheticKeepaliveTotalCount = 0;
-  uint64_t lastSyntheticKeepaliveUs = 0;
-  std::shared_ptr<std::vector<uint8_t>> keepalivePayload;
-  uint32_t keepaliveW = 0;
-  uint32_t keepaliveH = 0;
-  uint32_t keepaliveStride = 0;
-  uint32_t keepaliveSeq = 0;
+  uint64_t idleHoldTotal = 0;
   uint64_t lastSendStartUs = 0;
   std::shared_ptr<std::vector<uint8_t>> frameGatingRefPayload;
   uint32_t frameGatingRefW = 0;
@@ -3253,17 +3237,14 @@ int main(int argc, char** argv) {
   uint64_t frameGatingChangePermilleLast = 1000;
   uint64_t frameGatingChangePermilleSum = 0;
   uint64_t frameGatingChangePermilleCount = 0;
-  auto effective_keepalive_interval_us = [&]() -> uint64_t {
-    if (captureStallKeepaliveIntervalUsOverride > 0) {
-      return std::max<uint64_t>(kQueueWaitTimeoutUsMin, captureStallKeepaliveIntervalUsOverride);
-    }
-    return std::max<uint64_t>(kQueueWaitTimeoutUsMin, activeFrameIntervalUs);
-  };
   auto effective_queue_wait_timeout_us = [&]() -> uint64_t {
     if (queueWaitTimeoutUsOverride > 0) {
       return std::max<uint64_t>(kQueueWaitTimeoutUsMin, queueWaitTimeoutUsOverride);
     }
-    const uint64_t keepaliveIntervalUs = effective_keepalive_interval_us();
+    const uint64_t keepaliveIntervalUs =
+        (captureStallKeepaliveIntervalUsOverride > 0)
+            ? std::max<uint64_t>(kQueueWaitTimeoutUsMin, captureStallKeepaliveIntervalUsOverride)
+            : std::max<uint64_t>(kQueueWaitTimeoutUsMin, activeFrameIntervalUs);
     const uint64_t dynamicTimeoutUs =
         std::max<uint64_t>(kQueueWaitTimeoutUsMin, keepaliveIntervalUs / 4ULL);
     return std::min<uint64_t>(kQueueWaitTimeoutUsDefault, dynamicTimeoutUs);
@@ -3494,7 +3475,6 @@ int main(int argc, char** argv) {
     lastCallbackUs.store(0, std::memory_order_release);
     resetHostTimelineAnchors();
     forceKeyNext = true;
-    lastSyntheticKeepaliveUs = 0;
     ++captureRestartCount;
 
     if (outFlags) *outFlags = 0x1u;
@@ -3605,7 +3585,6 @@ int main(int argc, char** argv) {
             lastCaptureUsForInterval.store(0, std::memory_order_release);
             lastCallbackUs.store(0, std::memory_order_release);
             resetHostTimelineAnchors();
-            lastSyntheticKeepaliveUs = 0;
             if (!apply_capture_ui_quality_mode(true, nowUs)) {
               std::cerr << "[native-video-host][control] capture-mode overview quality apply failed seq=" << reqSeq
                         << "\n";
@@ -3677,7 +3656,6 @@ int main(int argc, char** argv) {
               lastCaptureUsForInterval.store(0, std::memory_order_release);
               lastCallbackUs.store(0, std::memory_order_release);
               resetHostTimelineAnchors();
-              lastSyntheticKeepaliveUs = 0;
               if (!apply_capture_ui_quality_mode(false, nowUs)) {
                 std::cerr << "[native-video-host][control] capture-mode focus quality apply failed seq=" << reqSeq
                           << "\n";
@@ -3739,7 +3717,6 @@ int main(int argc, char** argv) {
               lastCallbackUs.store(0, std::memory_order_release);
               resetHostTimelineAnchors();
               forceKeyNext = true;
-              lastSyntheticKeepaliveUs = 0;
               std::cout << "[native-video-host] capture-window rebound hwnd=0x" << std::hex << nextRaw << std::dec
                         << " pid=" << hostCaptureTargetPid.load(std::memory_order_relaxed)
                         << " process=" << targetProc
@@ -3763,7 +3740,6 @@ int main(int argc, char** argv) {
         lastCallbackUs.store(0, std::memory_order_release);
         resetHostTimelineAnchors();
         forceKeyNext = true;
-        lastSyntheticKeepaliveUs = 0;
         std::cout << "[native-video-host] capture session restarted reason=size-change count="
                   << captureRestartCount << "\n";
       } else {
@@ -3789,8 +3765,9 @@ int main(int argc, char** argv) {
           lastCallbackUs.store(0, std::memory_order_release);
           resetHostTimelineAnchors();
           forceKeyNext = true;
-          lastSyntheticKeepaliveUs = 0;
+          ++captureDeadRestartCount;
           std::cout << "[native-video-host] capture session restarted count=" << captureRestartCount
+                    << " captureDeadRestartCount=" << captureDeadRestartCount
                     << " stallUs=" << stallUs
                     << " lastCallbackUs=" << lastCbUs
                     << "\n";
@@ -3829,7 +3806,6 @@ int main(int argc, char** argv) {
     uint64_t captureAgeAtCallbackUs = 0;
     uint64_t version = 0;
     uint32_t queueWaitReason = 0;  // 0: normal, 1: timeout, 2: no-work
-    bool syntheticKeepaliveFrame = false;
     const uint64_t queueSelectStartUs = qpc_now_us();
     bool queueReady = false;
     {
@@ -3840,74 +3816,27 @@ int main(int argc, char** argv) {
       if (!queueReady && !stop.load()) {
         queueWaitReason = 1;
         ++queueWaitTimeoutCount;
-        const uint64_t timeoutNowUs = qpc_now_us();
-        const uint64_t lastCbUs = lastCallbackUs.load(std::memory_order_acquire);
-        const bool captureLikelyStalled =
-            (lastCbUs > 0 && timeoutNowUs >= (lastCbUs + kCaptureStallKeepaliveStartUs));
-        const bool keepaliveDue =
-            (lastSyntheticKeepaliveUs == 0 ||
-             timeoutNowUs >= (lastSyntheticKeepaliveUs + effective_keepalive_interval_us()));
-        if (useH264 && keepaliveDue &&
-            keepalivePayload && !keepalivePayload->empty() &&
-            keepaliveW > 0 && keepaliveH > 0 && keepaliveStride >= (keepaliveW * 4u)) {
-          syntheticKeepaliveFrame = true;
-          payload = keepalivePayload;
-          w = keepaliveW;
-          h = keepaliveH;
-          stride = keepaliveStride;
-          keepaliveSeq = (keepaliveSeq == std::numeric_limits<uint32_t>::max()) ? 1u : (keepaliveSeq + 1u);
-          seq = keepaliveSeq;
-          version = lastVersionSent;
-          captureUs = timeoutNowUs;
-          callbackUs = timeoutNowUs;
-          queuePushUs = timeoutNowUs;
-          callbackIntervalUs = (lastCbUs > 0 && timeoutNowUs >= lastCbUs) ? (timeoutNowUs - lastCbUs) : 0;
-          captureIntervalUs = callbackIntervalUs;
-          captureAgeAtCallbackUs = 0;
-          captureClockSkewUs = 0;
-          ++syntheticKeepaliveCount;
-          ++syntheticKeepaliveTotalCount;
-          if ((syntheticKeepaliveCount % 30) == 1) {
-            const uint64_t noCaptureUs =
-                (lastCbUs > 0 && timeoutNowUs >= lastCbUs) ? (timeoutNowUs - lastCbUs) : 0;
-            std::cout << "[native-video-host] synthetic keepalive count=" << syntheticKeepaliveCount
-                      << " captureLikelyStalled=" << (captureLikelyStalled ? 1 : 0)
-                      << " noCaptureUs=" << noCaptureUs
-                      << "\n";
-          }
-        } else {
-          continue;
-        }
+        continue;
       }
       if (stop.load()) break;
-      if (!syntheticKeepaliveFrame &&
-          (frame.version == lastVersionSent || !frame.payload || frame.payload->empty())) {
+      if (frame.version == lastVersionSent || !frame.payload || frame.payload->empty()) {
         queueWaitReason = 2;
         ++queueWaitNoWorkCount;
         continue;
       }
-      if (!syntheticKeepaliveFrame) {
-        version = frame.version;
-        payload = frame.payload;
-        seq = frame.seq;
-        w = frame.width;
-        h = frame.height;
-        stride = frame.stride;
-        captureUs = frame.captureUs;
-        callbackUs = frame.callbackUs;
-        callbackIntervalUs = frame.callbackIntervalUs;
-        captureIntervalUs = frame.captureIntervalUs;
-        queuePushUs = frame.queuePushUs;
-        captureAgeAtCallbackUs = frame.captureAgeAtCallbackUs;
-        captureClockSkewUs = frame.captureClockSkewUs;
-      }
-    }
-    if (!syntheticKeepaliveFrame) {
-      keepalivePayload = payload;
-      keepaliveW = w;
-      keepaliveH = h;
-      keepaliveStride = stride;
-      keepaliveSeq = seq;
+      version = frame.version;
+      payload = frame.payload;
+      seq = frame.seq;
+      w = frame.width;
+      h = frame.height;
+      stride = frame.stride;
+      captureUs = frame.captureUs;
+      callbackUs = frame.callbackUs;
+      callbackIntervalUs = frame.callbackIntervalUs;
+      captureIntervalUs = frame.captureIntervalUs;
+      queuePushUs = frame.queuePushUs;
+      captureAgeAtCallbackUs = frame.captureAgeAtCallbackUs;
+      captureClockSkewUs = frame.captureClockSkewUs;
     }
   const uint64_t queuePopUs = qpc_now_us();
   const uint64_t queueSelectWaitUs =
@@ -3931,7 +3860,7 @@ int main(int argc, char** argv) {
     const uint64_t queueDepthAtPop = (version > lastPopVersionAtRead) ? (version - lastPopVersionAtRead) : 0;
     update_u64_max(queueDepthMax, queueDepthAtPop);
     lastPopFrameVersion.store(version, std::memory_order_release);
-    if (frameGatingEnabled && useH264 && !syntheticKeepaliveFrame && payload && !payload->empty()) {
+    if (frameGatingEnabled && useH264 && payload && !payload->empty()) {
       if (frameGatingRefPayload && !frameGatingRefPayload->empty() &&
           frameGatingRefW == w && frameGatingRefH == h && frameGatingRefStride == stride) {
         frameGatingChangePermilleLast = estimate_bgra_change_permille(
@@ -3971,12 +3900,8 @@ int main(int argc, char** argv) {
       }
 
       const bool keyReqPending = clientRequestedKeyFrame.load(std::memory_order_acquire);
-      // Use recent-interval keepalive count instead of lifetime total to avoid permanently
-      // disabling frame gating skip after a single brief capture stall.
-      const bool allowFrameGatingSkip = (syntheticKeepaliveCount == 0);
       const uint64_t targetIntervalUs = frameGatingStaticMode ? frameGatingStaticIntervalUs : activeFrameIntervalUs;
-      if (allowFrameGatingSkip &&
-          !keyReqPending &&
+      if (!keyReqPending &&
           frameGatingLastSentUs > 0 &&
           queuePopUs < (frameGatingLastSentUs + targetIntervalUs)) {
         ++frameGatingSkipCount;
@@ -4034,7 +3959,7 @@ int main(int argc, char** argv) {
       const uint64_t sendCallCount = sendPathStats.headerCallCount + sendPathStats.payloadCallCount;
       if (sentOk) {
         lastSendStartUs = sendStartUs;
-        if (frameGatingEnabled && useH264 && !syntheticKeepaliveFrame && payload && !payload->empty()) {
+        if (frameGatingEnabled && useH264 && payload && !payload->empty()) {
           frameGatingLastSentUs = sendStartUs;
           frameGatingRefPayload = payload;
           frameGatingRefW = w;
@@ -4217,7 +4142,7 @@ int main(int argc, char** argv) {
         forceKeyNext = true;
       }
        const bool forceKeyFrame =
-            syntheticKeepaliveFrame || forceKeyNext || (encodedSeq == 0) ||
+            forceKeyNext || (encodedSeq == 0) ||
             ((activeKeyint > 0) && ((seq % activeKeyint) == 0));
         const uint64_t encodeStartUs = qpc_now_us();
         const uint64_t encodeInputUs = captureStampUs;
@@ -4375,15 +4300,12 @@ int main(int argc, char** argv) {
             udpTxChunks += sendPathStats.payloadChunkCount;
             udpTxBytes += au.bytes.size();
           }
-          if (frameGatingEnabled && !syntheticKeepaliveFrame && payload && !payload->empty()) {
+          if (frameGatingEnabled && payload && !payload->empty()) {
             frameGatingLastSentUs = sendStartUs;
             frameGatingRefPayload = payload;
             frameGatingRefW = w;
             frameGatingRefH = h;
             frameGatingRefStride = stride;
-          }
-          if (syntheticKeepaliveFrame) {
-            lastSyntheticKeepaliveUs = sendStartUs;
           }
         }
         if (!sentOk) {
@@ -4630,13 +4552,16 @@ int main(int argc, char** argv) {
           (queuePushCount >= queuePushCountLastSample) ? (queuePushCount - queuePushCountLastSample) : 0;
       queuePushCountLastSample = queuePushCount;
       queuePushPerSecLatest = queuePushPerSec;
-      const uint64_t captureFeedPerSec = queuePushPerSec + syntheticKeepaliveCount;
+      const uint64_t callbackFramesPerSec = callbackFrames.load(std::memory_order_relaxed);
+      const uint64_t idleHoldPerSec =
+          (useH264 && captureSessionReady.load(std::memory_order_acquire) && callbackFramesPerSec == 0) ? 1ULL : 0ULL;
+      idleHoldTotal += idleHoldPerSec;
       if (useH264 && captureSessionReady.load(std::memory_order_acquire)) {
         const bool warmupDone =
             (captureInputStallWarmupSec == 0 ||
              t >= (startUs + static_cast<uint64_t>(captureInputStallWarmupSec) * 1000000ULL));
         if (warmupDone) {
-          if (captureFeedPerSec < static_cast<uint64_t>(captureInputMinPushPerSec)) {
+          if (callbackFramesPerSec < static_cast<uint64_t>(captureInputMinPushPerSec)) {
             captureInputLowPushStreakSec += 1;
           } else {
             captureInputLowPushStreakSec = 0;
@@ -4649,25 +4574,23 @@ int main(int argc, char** argv) {
             const bool restarted = restart_capture_session();
             if (restarted) {
               ++captureRestartCount;
-              ++captureInputStallRestartCount;
+              ++captureDeadRestartCount;
               captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
               lastCaptureUsForInterval.store(0, std::memory_order_release);
               lastCallbackUs.store(0, std::memory_order_release);
               resetHostTimelineAnchors();
               forceKeyNext = true;
-              lastSyntheticKeepaliveUs = 0;
               captureInputLowPushStreakSec = 0;
               std::cout << "[native-video-host] capture session restarted reason=capture-input-stall"
                         << " restartCount=" << captureRestartCount
-                        << " captureInputStallRestarts=" << captureInputStallRestartCount
-                        << " queuePushPerSec=" << queuePushPerSec
-                        << " syntheticKeepalivePerSec=" << syntheticKeepaliveCount
+                        << " captureDeadRestartCount=" << captureDeadRestartCount
+                        << " callbackFramesPerSec=" << callbackFramesPerSec
                         << " minPushPerSec=" << captureInputMinPushPerSec
                         << " stallStreakSec=" << captureInputStallConsecutiveSec
                         << "\n";
             } else {
               std::cerr << "[native-video-host] capture session restart failed reason=capture-input-stall"
-                        << " queuePushPerSec=" << queuePushPerSec
+                        << " callbackFramesPerSec=" << callbackFramesPerSec
                         << " minPushPerSec=" << captureInputMinPushPerSec
                         << " streakSec=" << captureInputLowPushStreakSec
                         << "\n";
@@ -4680,15 +4603,13 @@ int main(int argc, char** argv) {
                   << " queuePushCount=" << queuePushCount
                   << " queuePopCount=" << queuePopCount
                   << " queuePushPerSec=" << queuePushPerSecLatest
-                  << " syntheticKeepalivePerSec=" << syntheticKeepaliveCount
-                  << " captureFeedPerSec=" << captureFeedPerSec
+                  << " idleHoldPerSec=" << idleHoldPerSec
+                  << " idleHoldTotal=" << idleHoldTotal
                   << " captureInputLowPushStreakSec=" << captureInputLowPushStreakSec
-                  << " captureInputStallRestarts=" << captureInputStallRestartCount
+                  << " captureDeadRestartCount=" << captureDeadRestartCount
                   << " queueDepthMax=" << queueDepthMax.load(std::memory_order_relaxed)
                   << " queueWaitTimeoutCount=" << queueWaitTimeoutCount
                   << " queueWaitNoWorkCount=" << queueWaitNoWorkCount
-                  << " syntheticKeepaliveCount=" << syntheticKeepaliveCount
-                  << " syntheticKeepaliveTotal=" << syntheticKeepaliveTotalCount
                   << " captureRestarts=" << captureRestartCount
                   << " captureWindowRebindCount=" << hostCaptureRebindCount.load(std::memory_order_relaxed)
                   << " captureTargetPid=" << hostCaptureTargetPid.load(std::memory_order_relaxed)
@@ -4701,7 +4622,7 @@ int main(int argc, char** argv) {
                   << " inputUnsupported=" << inputUnsupported.load(std::memory_order_relaxed)
                   << " inputInjectFail=" << inputInjectFail.load(std::memory_order_relaxed)
                   << " keyReqDropTotal=" << clientKeyFrameRequestDropped.load()
-                  << " callbackFrames=" << callbackFrames.load()
+                  << " callbackFrames=" << callbackFramesPerSec
                   << " skippedByOverwrite=" << skippedByOverwrite
                   << " frameGatingMode=" << (frameGatingStaticMode ? "static" : "motion")
                   << " frameGatingSkips=" << frameGatingSkipCount
@@ -4726,22 +4647,20 @@ int main(int argc, char** argv) {
                   << " queuePushCount=" << queuePushCount
                   << " queuePopCount=" << queuePopCount
                   << " queuePushPerSec=" << queuePushPerSecLatest
-                  << " syntheticKeepalivePerSec=" << syntheticKeepaliveCount
-                  << " captureFeedPerSec=" << captureFeedPerSec
+                  << " idleHoldPerSec=" << idleHoldPerSec
+                  << " idleHoldTotal=" << idleHoldTotal
                   << " captureInputLowPushStreakSec=" << captureInputLowPushStreakSec
-                  << " captureInputStallRestarts=" << captureInputStallRestartCount
+                  << " captureDeadRestartCount=" << captureDeadRestartCount
                   << " queueDepthMax=" << queueDepthMax.load(std::memory_order_relaxed)
                   << " queueWaitTimeoutCount=" << queueWaitTimeoutCount
                   << " queueWaitNoWorkCount=" << queueWaitNoWorkCount
-                  << " syntheticKeepaliveCount=" << syntheticKeepaliveCount
-                  << " syntheticKeepaliveTotal=" << syntheticKeepaliveTotalCount
                   << " captureRestarts=" << captureRestartCount
                   << " captureWindowRebindCount=" << hostCaptureRebindCount.load(std::memory_order_relaxed)
                   << " captureTargetPid=" << hostCaptureTargetPid.load(std::memory_order_relaxed)
                   << " captureTargetProc=" << targetProcessName
                   << " captureTargetHwnd=0x" << std::hex
                   << hostCaptureTargetHwnd.load(std::memory_order_relaxed) << std::dec
-                  << " callbackFrames=" << callbackFrames.load()
+                  << " callbackFrames=" << callbackFramesPerSec
                   << " skippedByOverwrite=" << skippedByOverwrite
                   << " stalePreEncodeDrops=" << stalePreEncodeDropCount
                   << " staleEncodedDrops=" << staleEncodedDropCount
@@ -5093,7 +5012,6 @@ int main(int argc, char** argv) {
       gpuScaleSuccess = 0;
       gpuScaleFail = 0;
       gpuScaleCpuFallback = 0;
-      syntheticKeepaliveCount = 0;
       frameGatingSkipCount = 0;
       frameGatingStaticSkipCount = 0;
       frameGatingChangePermilleSum = 0;

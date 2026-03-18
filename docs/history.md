@@ -1486,3 +1486,51 @@ Validation / build / test result
 Next action
 - 실제 외부 2PC에서 `Desktop Mode` taskbar/start click, 영문 1회 입력, 한글 committed text, 로컬 IME 조합창 미표시를 수동 확인한다.
 - blur/clean pumping이 실제 체감에서 충분히 줄었는지 dark text 장면 기준으로 bundle `v10`에서 확인한다.
+
+### 125) 2026-03-18 desktop actual click + static idle-hold
+Goal
+- `desktop mode` mouse 입력을 실제 OS cursor 이동 + 실제 click/wheel/drag로 분리하고, selected-window `background_message` 경로는 그대로 유지한다.
+- static capture idle 시 synthetic keepalive 재인코딩을 제거하고 마지막 decoded frame hold 기준의 관측 지표로 바꾼다.
+
+Files changed
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_host_poc remote60_native_video_client_poc --parallel`
+  - 결과: 성공
+- Window-mode regression:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/validate_background_input_injection.ps1 -DurationSec 20`
+  - 결과:
+    - `AUTO_PASS=1`
+    - `INPUT_EVENTS=25406`
+    - `INPUT_NO_TARGET=0`
+    - `INPUT_INJECT_FAIL=0`
+    - selected-window 경로는 계속 `mode=window`로 주입됨
+- Desktop actual click smoke (source tree):
+  - temp config/log: `tmp/desktop-actual-click-smoke-src`
+  - 결과:
+    - host log에 `mode=desktop` 입력 13건 기록
+    - `CURSOR_BEFORE=1666,0` -> `CURSOR_AFTER=210,1141`
+    - `HAS_SYNTHETIC_LOGS=0`
+- Idle-hold observability spot checks:
+  - `automation/logs/m35-input-validate-20260318-172840/host.out.log`
+    - `idleHoldPerSec=1 idleHoldTotal=1`
+    - `syntheticKeepalive*` 로그 없음
+  - 전용 static notepad/self-capture smoke(`tmp/idle-hold-static-smoke`, `tmp/idle-hold-self-capture-smoke`)에서는 이 장비에서 실제 callback이 계속 들어와 `idleHoldTotal`이 증가하지 않았음
+    - 해석: idle-hold는 `callbackFrames==0`일 때만 증가하도록 바뀌었고, real callback이 유지된 케이스에서는 synthetic 대체 인코딩 없이 그대로 동작함
+- Bundle refresh + desktop smoke:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/package_native_video_external_bundle.ps1 -BuildDir build-vcpkg-local -BundleName native-video-external-v11`
+  - 결과:
+    - `BUNDLE_DIR=D:\remote\remote\dist\native-video-external-v11-20260318-173446`
+    - `BUNDLE_ZIP=D:\remote\remote\dist\native-video-external-v11-20260318-173446.zip`
+  - bundle smoke log: `tmp/desktop-actual-click-smoke-bundle`
+    - `CURSOR_BEFORE=960,540` -> `CURSOR_AFTER=191,1000`
+    - host log에 `mode=desktop` 입력 14건 기록
+    - `HAS_SYNTHETIC_LOGS=0`
+
+Next action
+- 실제 외부 2PC bundle `v11`에서 `Desktop Mode` taskbar/start/title bar drag/close `X`를 수동으로 확인한다.
+- static dark/text-heavy 장면을 30~60초 고정한 실장비 세션에서 `idleHoldTotal` 증가 여부와 체감 선명도 유지 여부를 한 번 더 확인한다.
