@@ -1534,3 +1534,43 @@ Validation / build / test result
 Next action
 - 실제 외부 2PC bundle `v11`에서 `Desktop Mode` taskbar/start/title bar drag/close `X`를 수동으로 확인한다.
 - static dark/text-heavy 장면을 30~60초 고정한 실장비 세션에서 `idleHoldTotal` 증가 여부와 체감 선명도 유지 여부를 한 번 더 확인한다.
+
+### 126) 2026-04-01 native external bundle test-ready wrapper 정리
+Goal
+- native external bundle을 푼 직후 host/client를 가장 짧은 명령으로 바로 테스트할 수 있게 준비한다.
+- bundle 안에서 호출되는 런타임 보조 스크립트 누락도 함께 정리한다.
+
+Files changed
+- `automation/run_native_video_host.ps1`
+- `automation/run_native_video_client.ps1`
+- `automation/package_native_video_external_bundle.ps1`
+- `docs/external_wan_test_guide.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Wrapper smoke (source tree, existing binaries reuse):
+  - temp config: `tmp/wrapper-smoke-20260401-210757/cfg.json`
+  - host:
+    - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/run_native_video_host.ps1 -ConfigPath tmp/wrapper-smoke-20260401-210757/cfg.json -ExeDir build-vcpkg-local/apps/native_poc/Debug`
+    - 결과: `ROLE=host`, `client connected`, `control connected`, `done`
+  - client:
+    - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/run_native_video_client.ps1 -ConfigPath tmp/wrapper-smoke-20260401-210757/cfg.json -ExeDir build-vcpkg-local/apps/native_poc/Debug -RemoteHost 127.0.0.1`
+    - 결과: `ROLE=client`, `connected host=127.0.0.1`, `control connected`, `done`
+- Bundle package:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/package_native_video_external_bundle.ps1 -BuildDir build-vcpkg-local -BundleName native-video-external-v12`
+  - 결과:
+    - `BUNDLE_DIR=D:\remote\remote\dist\native-video-external-v12-20260401-210825`
+    - `BUNDLE_ZIP=D:\remote\remote\dist\native-video-external-v12-20260401-210825.zip`
+  - bundle spot-check:
+    - `automation/run_native_video_host.ps1` 포함
+    - `automation/run_native_video_client.ps1` 포함
+    - `automation/start_native_video_runtime_impl.ps1` 포함
+    - `docs/EXTERNAL_WAN_QUICKSTART.md`에 one-command host/client 실행 예시 반영
+- Build:
+  - 코드 컴파일 변경이 없어 추가 빌드는 수행하지 않음
+
+Next action
+- 외부 host PC에서는 bundle `v12` 기준으로 `automation/run_native_video_host.ps1`를 바로 실행한다.
+- client PC에서는 `automation/run_native_video_client.ps1 -RemoteHost <HOST_PUBLIC_IP_OR_DNS>`로 바로 접속 테스트를 시작한다.
+- 실제 외부 2PC에서 `Desktop Mode`, window picker, 입력 전달을 수동 확인한다.

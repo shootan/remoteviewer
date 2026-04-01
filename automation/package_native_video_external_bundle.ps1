@@ -47,12 +47,15 @@ Get-ChildItem -Path $binSrc -File | Where-Object { $copyExt -contains $_.Extensi
 
 $scriptsToCopy = @(
   "m9_easy.ps1",
+  "run_native_video_host.ps1",
+  "run_native_video_client.ps1",
   "run_native_video_with_config.ps1",
   "run_wan_host_capture.ps1",
   "run_wan_client_capture.ps1",
   "summarize_wan_capture.ps1",
   "wan_preflight_native_video.ps1",
   "start_native_video_runtime.ps1",
+  "start_native_video_runtime_impl.ps1",
   "stop_native_video_runtime.ps1",
   "status_native_video_runtime.ps1"
 )
@@ -76,6 +79,8 @@ $guide = @'
   - `remote60_native_video_host_poc.exe`
   - `remote60_native_video_client_poc.exe`
 - `automation/`
+  - `run_native_video_host.ps1`
+  - `run_native_video_client.ps1`
   - `run_native_video_with_config.ps1`
   - `m9_easy.ps1`
   - `run_wan_host_capture.ps1`
@@ -111,24 +116,18 @@ netsh advfirewall firewall add rule name="Remote60 Native Video TCP43001" dir=in
   - 720p30, `5Mbps`, `keyint=60`, `h264NoPacing=1`
 
 ## 5) Quick 2PC Run
-Host machine:
+Fastest host command:
 ```powershell
-Copy-Item .\automation\native_video_profile_1080p_external_template.json .\automation\run_native_video_with_config.json
-# edit .\automation\run_native_video_with_config.json and add: "role": "host"
-powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_with_config.ps1
+powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_host.ps1
 ```
 
-Client machine:
+Fastest client command:
 ```powershell
-Copy-Item .\automation\native_video_profile_1080p_external_template.json .\automation\run_native_video_with_config.json
-# edit .\automation\run_native_video_with_config.json and add:
-#   "role": "client"
-#   "remoteHost": "<HOST_PUBLIC_IP_OR_DNS>"
-powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_with_config.ps1
+powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_client.ps1 -RemoteHost <HOST_PUBLIC_IP_OR_DNS>
 ```
 
-`run_native_video_with_config.ps1` now defaults to `automation\run_native_video_with_config.json` and passes only `--config` through to the exe.
-If you want the old explicit style, `-Role`, `-ConfigPath`, `-ExeDir`, `-RemoteHost` still work as overrides.
+The wrapper scripts default to `native_video_profile_1080p_external_template.json`.
+If you want to swap profiles, both wrappers accept `-ConfigPath`, and `run_native_video_with_config.ps1` still supports `-Role`, `-ConfigPath`, `-ExeDir`, `-RemoteHost`.
 Use `native_video_profile_1080p_lowlat.json` only when you intentionally want adaptive/frame-gating behavior.
 
 After connect, the native client starts in a home picker overlay:

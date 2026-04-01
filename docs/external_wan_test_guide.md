@@ -26,6 +26,10 @@ netsh advfirewall firewall add rule name="Remote60 Native Video TCP43001" dir=in
 ## Config-first launch
 - `automation/run_native_video_with_config.ps1` can now run with config only.
 - Default config file name: `automation/run_native_video_with_config.json`
+- Fastest test path:
+  - host: `powershell -ExecutionPolicy Bypass -File automation/run_native_video_host.ps1`
+  - client: `powershell -ExecutionPolicy Bypass -File automation/run_native_video_client.ps1 -RemoteHost <HOST_PUBLIC_IP_OR_DNS>`
+- Those wrapper scripts default to `automation/native_video_profile_1080p_external_template.json`.
 - Recommended flow:
   - copy a profile JSON to `automation/run_native_video_with_config.json`
   - add `"role": "host"` or `"role": "client"`
@@ -127,17 +131,12 @@ powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config
 ## Run examples
 Host:
 ```powershell
-Copy-Item automation/native_video_profile_1080p_external_template.json automation/run_native_video_with_config.json
-# add "role": "host"
-powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1
+powershell -ExecutionPolicy Bypass -File automation/run_native_video_host.ps1
 ```
 
 Client:
 ```powershell
-Copy-Item automation/native_video_profile_1080p_external_template.json automation/run_native_video_with_config.json
-# add "role": "client"
-# set "remoteHost": "<HOST_PUBLIC_IP_OR_DNS>"
-powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config.ps1
+powershell -ExecutionPolicy Bypass -File automation/run_native_video_client.ps1 -RemoteHost <HOST_PUBLIC_IP_OR_DNS>
 ```
 
 Note:
@@ -146,6 +145,7 @@ Note:
 - For generic external 2PC connectivity/perf smoke, use `native_video_profile_1080p_external_template.json` or `automation/native_video_profile_1080p.json`.
 - `native_video_profile_1080p_external_template.json` now enables control/input so the native client home picker can drive `Desktop Mode` and window selection directly.
 - `native_video_profile_1080p_external_template.json` also uses `encoderTuneMode=stable_text` to reduce static dark-text blur/pumping without changing bitrate.
+- If you need another profile or binary folder, both wrapper scripts accept `-ConfigPath` and `-ExeDir`.
 
 ## Native Input Scope
 - The native bundle path is not the browser GUI path.
@@ -209,7 +209,7 @@ powershell -ExecutionPolicy Bypass -File automation/package_native_video_externa
 
 Bundle contents:
 - `bin/`: host/client exe + dependent dll files
-- `automation/`: `run_native_video_with_config.ps1`, `m9_easy.ps1`, WAN capture/summarize scripts, profile JSONs
+- `automation/`: `run_native_video_host.ps1`, `run_native_video_client.ps1`, `run_native_video_with_config.ps1`, `m9_easy.ps1`, WAN capture/summarize scripts, profile JSONs
 - `docs/EXTERNAL_WAN_QUICKSTART.md`: copy-ready commands for host/client and M9 A/B capture
 
 ## Quick Start (short commands)
