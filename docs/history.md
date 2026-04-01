@@ -1604,3 +1604,42 @@ Validation / build / test result
 Next action
 - 이후 외부 bundle 재생성이 필요하면 저장소 내부가 아니라 `D:\share\package_native_video_external_bundle.ps1 -Root D:\remote\remote` 경로를 사용한다.
 - 다른 자동화 문서/스크립트가 repo 내부 pack script를 직접 가리키지 않는지 추가 정리가 필요하면 후속 반영한다.
+
+### 128) 2026-04-01 minimal bundle layout rewrite
+Goal
+- external bundle을 테스트 최소 세트만 남는 형태로 다시 정리한다.
+- 결과물은 `실행파일 + config + host.ps1 + client.ps1`만 보이게 하고, `bin/docs/automation` 하위 폴더 구조를 제거한다.
+
+Files changed
+- `D:\share\package_native_video_external_bundle.ps1`
+- `apps/native_poc/README.md`
+- `docs/external_wan_test_guide.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Minimal bundle package:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File D:\share\package_native_video_external_bundle.ps1 -Root D:\remote\remote -BuildDir build-vcpkg-local -BundleName native-video-min2`
+  - 결과:
+    - `BUNDLE_DIR=D:\remote\remote\dist\native-video-min2-20260401-211955`
+    - `BUNDLE_ZIP=D:\remote\remote\dist\native-video-min2-20260401-211955.zip`
+  - bundle root contents:
+    - `remote60_native_video_host_poc.exe`
+    - `remote60_native_video_client_poc.exe`
+    - `config.json`
+    - `host.ps1`
+    - `client.ps1`
+- Bundle script smoke:
+  - 테스트용으로 생성된 bundle의 `config.json`에 `seconds=6`, `remoteHost=127.0.0.1`만 임시 반영 후 실행
+  - host:
+    - `powershell -NoProfile -ExecutionPolicy Bypass -File D:\remote\remote\dist\native-video-min2-20260401-211955\host.ps1`
+    - 결과: `client connected`, `control connected`, `done`
+  - client:
+    - `powershell -NoProfile -ExecutionPolicy Bypass -File D:\remote\remote\dist\native-video-min2-20260401-211955\client.ps1 -RemoteHost 127.0.0.1`
+    - 결과: `connected host=127.0.0.1`, `control connected`, `done`
+- Build:
+  - 코드 변경이 없어 추가 컴파일은 수행하지 않음
+
+Next action
+- 이후 전달용 번들은 `D:\share\package_native_video_external_bundle.ps1`로 생성한다.
+- 사용자는 번들 루트에서 `host.ps1` 또는 `client.ps1 -RemoteHost <IP>`만 실행하면 된다.

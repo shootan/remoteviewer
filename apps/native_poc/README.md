@@ -101,7 +101,7 @@ $env:REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE=1
 - Verify (latency summary): `automation/verify_native_video_runtime.ps1`
 - H264 tuning sweep: `automation/tune_native_video_h264.ps1`
 - WAN preflight: `automation/wan_preflight_native_video.ps1`
-- External bundle pack: `D:\share\package_native_video_external_bundle.ps1` (`-Root D:\remote\remote` required)
+- External bundle pack: `D:\share\package_native_video_external_bundle.ps1` (`-Root D:\remote\remote` required, minimal layout only)
 - JSON profile runner: `automation/run_native_video_with_config.ps1`
 - M3.5 input validation helper: `automation/validate_background_input_injection.ps1`
   - profiles:
@@ -172,6 +172,12 @@ Notes:
 ```powershell
 powershell -ExecutionPolicy Bypass -File D:\share\package_native_video_external_bundle.ps1 -Root D:\remote\remote -BuildDir build-vcpkg-local
 ```
+- Output layout:
+  - host/client video exe
+  - required dll if present
+  - `config.json`
+  - `host.ps1`
+  - `client.ps1`
 
 ## Notes
 - Phase 0 is transport baseline only.

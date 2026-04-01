@@ -208,9 +208,12 @@ powershell -ExecutionPolicy Bypass -File D:\share\package_native_video_external_
 ```
 
 Bundle contents:
-- `bin/`: host/client exe + dependent dll files
-- `automation/`: `host.ps1`, `client.ps1`, `run_native_video_with_config.ps1`, `m9_easy.ps1`, WAN capture/summarize scripts, profile JSONs
-- `docs/EXTERNAL_WAN_QUICKSTART.md`: copy-ready commands for host/client and M9 A/B capture
+- bundle root only:
+  - host/client video exe
+  - required dll if present
+  - `config.json`
+  - `host.ps1`
+  - `client.ps1`
 
 ## Quick Start (short commands)
 From the bundle root or source tree, use one wrapper script:
