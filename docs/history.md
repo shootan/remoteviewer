@@ -1643,3 +1643,34 @@ Validation / build / test result
 Next action
 - 이후 전달용 번들은 `D:\share\package_native_video_external_bundle.ps1`로 생성한다.
 - 사용자는 번들 루트에서 `host.ps1` 또는 `client.ps1 -RemoteHost <IP>`만 실행하면 된다.
+
+### 129) 2026-04-01 share bundle config cleanup
+Goal
+- `D:\share`로 옮긴 minimal bundle에 테스트용 종료 설정이 남아 host/client가 자동 종료되던 문제를 바로잡는다.
+
+Files changed
+- `D:\share\native-video-min2-20260401-211955\config.json`
+- `D:\share\native-video-min2-20260401-211955.zip`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Root cause:
+  - shared bundle `config.json`에 테스트값 `seconds=6`, `encodeWidth=1280`, `encodeHeight=720`, `bitrate=5000000`, `remoteHost=192.168.0.76`가 남아 있었음
+- Fix applied:
+  - `seconds=0`
+  - `encodeWidth=1920`
+  - `encodeHeight=1080`
+  - `bitrate=8000000`
+  - `remoteHost=YOUR_PUBLIC_IP_OR_DNS`
+  - bundle 내부 `*.log` 제거 후 zip 재생성
+- Final shared bundle contents:
+  - `remote60_native_video_host_poc.exe`
+  - `remote60_native_video_client_poc.exe`
+  - `config.json`
+  - `host.ps1`
+  - `client.ps1`
+
+Next action
+- shared bundle는 이제 시간 제한 없이 실행된다.
+- client 실행 시에는 `client.ps1 -RemoteHost <HOST_PUBLIC_IP_OR_DNS>`만 넣어 사용하면 된다.
