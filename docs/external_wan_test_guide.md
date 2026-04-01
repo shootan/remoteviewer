@@ -204,7 +204,7 @@ Notes:
 ## Portable bundle
 Create a portable bundle with current binaries, profiles, and helper scripts:
 ```powershell
-powershell -ExecutionPolicy Bypass -File automation/package_native_video_external_bundle.ps1 -BuildDir build-vcpkg-local
+powershell -ExecutionPolicy Bypass -File D:\share\package_native_video_external_bundle.ps1 -Root D:\remote\remote -BuildDir build-vcpkg-local
 ```
 
 Bundle contents:

@@ -1576,3 +1576,31 @@ Next action
 - 외부 host PC에서는 bundle `v13` 기준으로 `automation/host.ps1`를 바로 실행한다.
 - client PC에서는 `automation/client.ps1 -RemoteHost <HOST_PUBLIC_IP_OR_DNS>`로 바로 접속 테스트를 시작한다.
 - 실제 외부 2PC에서 `Desktop Mode`, window picker, 입력 전달을 수동 확인한다.
+
+### 127) 2026-04-01 package script moved to D:\share
+Goal
+- 사용 요청대로 `automation/package_native_video_external_bundle.ps1`를 저장소 밖 `D:\share`로 이동한다.
+- 이동 후에도 shared path에서 실제 패키징이 가능한지 확인하고, 현재 문서의 실행 경로를 맞춘다.
+
+Files changed
+- `automation/package_native_video_external_bundle.ps1` (repo에서 제거, `D:\share\package_native_video_external_bundle.ps1`로 이동)
+- `apps/native_poc/README.md`
+- `docs/external_wan_test_guide.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- File move:
+  - `SOURCE_REMOVED=True`
+  - `SHARE_EXISTS=True`
+- Shared-path packaging smoke:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File D:\share\package_native_video_external_bundle.ps1 -Root D:\remote\remote -BuildDir build-vcpkg-local -BundleName native-video-external-v14`
+  - 결과:
+    - `BUNDLE_DIR=D:\remote\remote\dist\native-video-external-v14-20260401-211511`
+    - `BUNDLE_ZIP=D:\remote\remote\dist\native-video-external-v14-20260401-211511.zip`
+- Build:
+  - 코드 변경이 없어 추가 컴파일은 수행하지 않음
+
+Next action
+- 이후 외부 bundle 재생성이 필요하면 저장소 내부가 아니라 `D:\share\package_native_video_external_bundle.ps1 -Root D:\remote\remote` 경로를 사용한다.
+- 다른 자동화 문서/스크립트가 repo 내부 pack script를 직접 가리키지 않는지 추가 정리가 필요하면 후속 반영한다.

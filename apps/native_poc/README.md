@@ -101,7 +101,7 @@ $env:REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE=1
 - Verify (latency summary): `automation/verify_native_video_runtime.ps1`
 - H264 tuning sweep: `automation/tune_native_video_h264.ps1`
 - WAN preflight: `automation/wan_preflight_native_video.ps1`
-- External bundle pack: `automation/package_native_video_external_bundle.ps1`
+- External bundle pack: `D:\share\package_native_video_external_bundle.ps1` (`-Root D:\remote\remote` required)
 - JSON profile runner: `automation/run_native_video_with_config.ps1`
 - M3.5 input validation helper: `automation/validate_background_input_injection.ps1`
   - profiles:
@@ -170,7 +170,7 @@ Notes:
   - set `remoteHost` in profile JSON.
 - Bundle output:
 ```powershell
-powershell -ExecutionPolicy Bypass -File automation/package_native_video_external_bundle.ps1 -BuildDir build-vcpkg-local
+powershell -ExecutionPolicy Bypass -File D:\share\package_native_video_external_bundle.ps1 -Root D:\remote\remote -BuildDir build-vcpkg-local
 ```
 
 ## Notes
