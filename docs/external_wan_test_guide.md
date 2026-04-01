@@ -27,8 +27,8 @@ netsh advfirewall firewall add rule name="Remote60 Native Video TCP43001" dir=in
 - `automation/run_native_video_with_config.ps1` can now run with config only.
 - Default config file name: `automation/run_native_video_with_config.json`
 - Fastest test path:
-  - host: `powershell -ExecutionPolicy Bypass -File automation/run_native_video_host.ps1`
-  - client: `powershell -ExecutionPolicy Bypass -File automation/run_native_video_client.ps1 -RemoteHost <HOST_PUBLIC_IP_OR_DNS>`
+  - host: `powershell -ExecutionPolicy Bypass -File automation/host.ps1`
+  - client: `powershell -ExecutionPolicy Bypass -File automation/client.ps1 -RemoteHost <HOST_PUBLIC_IP_OR_DNS>`
 - Those wrapper scripts default to `automation/native_video_profile_1080p_external_template.json`.
 - Recommended flow:
   - copy a profile JSON to `automation/run_native_video_with_config.json`
@@ -131,12 +131,12 @@ powershell -ExecutionPolicy Bypass -File automation/run_native_video_with_config
 ## Run examples
 Host:
 ```powershell
-powershell -ExecutionPolicy Bypass -File automation/run_native_video_host.ps1
+powershell -ExecutionPolicy Bypass -File automation/host.ps1
 ```
 
 Client:
 ```powershell
-powershell -ExecutionPolicy Bypass -File automation/run_native_video_client.ps1 -RemoteHost <HOST_PUBLIC_IP_OR_DNS>
+powershell -ExecutionPolicy Bypass -File automation/client.ps1 -RemoteHost <HOST_PUBLIC_IP_OR_DNS>
 ```
 
 Note:
@@ -209,7 +209,7 @@ powershell -ExecutionPolicy Bypass -File automation/package_native_video_externa
 
 Bundle contents:
 - `bin/`: host/client exe + dependent dll files
-- `automation/`: `run_native_video_host.ps1`, `run_native_video_client.ps1`, `run_native_video_with_config.ps1`, `m9_easy.ps1`, WAN capture/summarize scripts, profile JSONs
+- `automation/`: `host.ps1`, `client.ps1`, `run_native_video_with_config.ps1`, `m9_easy.ps1`, WAN capture/summarize scripts, profile JSONs
 - `docs/EXTERNAL_WAN_QUICKSTART.md`: copy-ready commands for host/client and M9 A/B capture
 
 ## Quick Start (short commands)

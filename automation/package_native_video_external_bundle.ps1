@@ -47,8 +47,8 @@ Get-ChildItem -Path $binSrc -File | Where-Object { $copyExt -contains $_.Extensi
 
 $scriptsToCopy = @(
   "m9_easy.ps1",
-  "run_native_video_host.ps1",
-  "run_native_video_client.ps1",
+  "host.ps1",
+  "client.ps1",
   "run_native_video_with_config.ps1",
   "run_wan_host_capture.ps1",
   "run_wan_client_capture.ps1",
@@ -79,8 +79,8 @@ $guide = @'
   - `remote60_native_video_host_poc.exe`
   - `remote60_native_video_client_poc.exe`
 - `automation/`
-  - `run_native_video_host.ps1`
-  - `run_native_video_client.ps1`
+  - `host.ps1`
+  - `client.ps1`
   - `run_native_video_with_config.ps1`
   - `m9_easy.ps1`
   - `run_wan_host_capture.ps1`
@@ -118,12 +118,12 @@ netsh advfirewall firewall add rule name="Remote60 Native Video TCP43001" dir=in
 ## 5) Quick 2PC Run
 Fastest host command:
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_host.ps1
+powershell -ExecutionPolicy Bypass -File .\automation\host.ps1
 ```
 
 Fastest client command:
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\automation\run_native_video_client.ps1 -RemoteHost <HOST_PUBLIC_IP_OR_DNS>
+powershell -ExecutionPolicy Bypass -File .\automation\client.ps1 -RemoteHost <HOST_PUBLIC_IP_OR_DNS>
 ```
 
 The wrapper scripts default to `native_video_profile_1080p_external_template.json`.

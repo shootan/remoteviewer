@@ -1541,6 +1541,8 @@ Goal
 - bundle 안에서 호출되는 런타임 보조 스크립트 누락도 함께 정리한다.
 
 Files changed
+- `automation/host.ps1`
+- `automation/client.ps1`
 - `automation/run_native_video_host.ps1`
 - `automation/run_native_video_client.ps1`
 - `automation/package_native_video_external_bundle.ps1`
@@ -1550,27 +1552,27 @@ Files changed
 
 Validation / build / test result
 - Wrapper smoke (source tree, existing binaries reuse):
-  - temp config: `tmp/wrapper-smoke-20260401-210757/cfg.json`
+  - temp config: `tmp/wrapper-smoke-20260401-211139/cfg.json`
   - host:
-    - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/run_native_video_host.ps1 -ConfigPath tmp/wrapper-smoke-20260401-210757/cfg.json -ExeDir build-vcpkg-local/apps/native_poc/Debug`
+    - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/host.ps1 -ConfigPath tmp/wrapper-smoke-20260401-211139/cfg.json -ExeDir build-vcpkg-local/apps/native_poc/Debug`
     - 결과: `ROLE=host`, `client connected`, `control connected`, `done`
   - client:
-    - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/run_native_video_client.ps1 -ConfigPath tmp/wrapper-smoke-20260401-210757/cfg.json -ExeDir build-vcpkg-local/apps/native_poc/Debug -RemoteHost 127.0.0.1`
+    - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/client.ps1 -ConfigPath tmp/wrapper-smoke-20260401-211139/cfg.json -ExeDir build-vcpkg-local/apps/native_poc/Debug -RemoteHost 127.0.0.1`
     - 결과: `ROLE=client`, `connected host=127.0.0.1`, `control connected`, `done`
 - Bundle package:
-  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/package_native_video_external_bundle.ps1 -BuildDir build-vcpkg-local -BundleName native-video-external-v12`
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/package_native_video_external_bundle.ps1 -BuildDir build-vcpkg-local -BundleName native-video-external-v13`
   - 결과:
-    - `BUNDLE_DIR=D:\remote\remote\dist\native-video-external-v12-20260401-210825`
-    - `BUNDLE_ZIP=D:\remote\remote\dist\native-video-external-v12-20260401-210825.zip`
+    - `BUNDLE_DIR=D:\remote\remote\dist\native-video-external-v13-20260401-211156`
+    - `BUNDLE_ZIP=D:\remote\remote\dist\native-video-external-v13-20260401-211156.zip`
   - bundle spot-check:
-    - `automation/run_native_video_host.ps1` 포함
-    - `automation/run_native_video_client.ps1` 포함
+    - `automation/host.ps1` 포함
+    - `automation/client.ps1` 포함
     - `automation/start_native_video_runtime_impl.ps1` 포함
     - `docs/EXTERNAL_WAN_QUICKSTART.md`에 one-command host/client 실행 예시 반영
 - Build:
   - 코드 컴파일 변경이 없어 추가 빌드는 수행하지 않음
 
 Next action
-- 외부 host PC에서는 bundle `v12` 기준으로 `automation/run_native_video_host.ps1`를 바로 실행한다.
-- client PC에서는 `automation/run_native_video_client.ps1 -RemoteHost <HOST_PUBLIC_IP_OR_DNS>`로 바로 접속 테스트를 시작한다.
+- 외부 host PC에서는 bundle `v13` 기준으로 `automation/host.ps1`를 바로 실행한다.
+- client PC에서는 `automation/client.ps1 -RemoteHost <HOST_PUBLIC_IP_OR_DNS>`로 바로 접속 테스트를 시작한다.
 - 실제 외부 2PC에서 `Desktop Mode`, window picker, 입력 전달을 수동 확인한다.
