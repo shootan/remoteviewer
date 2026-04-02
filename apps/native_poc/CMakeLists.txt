@@ -70,6 +70,7 @@ target_compile_definitions(remote60_native_video_host_poc PRIVATE
 add_executable(remote60_native_video_client_poc
   src/native_video_client_main.cpp
   src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
   src/mf_h264_codec.cpp
 )
 

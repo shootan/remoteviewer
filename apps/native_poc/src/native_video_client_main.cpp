@@ -37,6 +37,7 @@
 #include "mf_h264_codec.hpp"
 #include "json_profile.hpp"
 #include "native_video_client_shared_core.hpp"
+#include "native_video_client_tcp_control.hpp"
 #include "native_video_transport.hpp"
 #include "poc_protocol.hpp"
 #include "time_utils.hpp"
@@ -75,6 +76,8 @@ using remote60::native_poc::ControlOutboundActionKind;
 using remote60::native_poc::RawFrameHeader;
 using remote60::native_poc::QueuedControlInputMessage;
 using remote60::native_poc::RuntimeTuneState;
+using remote60::native_poc::TcpControlResponse;
+using remote60::native_poc::TcpControlResponseKind;
 using remote60::native_poc::UdpH264AssemblyDisposition;
 using remote60::native_poc::UdpH264FrameAssembler;
 using remote60::native_poc::UdpCodec;
@@ -424,32 +427,6 @@ bool recv_discard(SOCKET s, size_t len) {
     left -= chunk;
   }
   return true;
-}
-
-bool send_control_action(SOCKET controlSock, const ControlOutboundAction& action) {
-  switch (action.kind) {
-    case ControlOutboundActionKind::Ping:
-      return send_all(controlSock, &action.ping, sizeof(action.ping));
-    case ControlOutboundActionKind::WindowListRequest:
-      return send_all(controlSock, &action.windowListRequest, sizeof(action.windowListRequest));
-    case ControlOutboundActionKind::WindowSelect:
-      return send_all(controlSock, &action.windowSelect, sizeof(action.windowSelect));
-    case ControlOutboundActionKind::CaptureMode:
-      return send_all(controlSock, &action.captureMode, sizeof(action.captureMode));
-    case ControlOutboundActionKind::Metrics:
-      return send_all(controlSock, &action.metrics, sizeof(action.metrics));
-    case ControlOutboundActionKind::KeyframeRequest:
-      return send_all(controlSock, &action.keyframe, sizeof(action.keyframe));
-    case ControlOutboundActionKind::RuntimeTune:
-      return send_all(controlSock, &action.runtimeTune, sizeof(action.runtimeTune));
-    case ControlOutboundActionKind::InputEvent:
-      return send_all(controlSock, &action.inputEvent, sizeof(action.inputEvent));
-    case ControlOutboundActionKind::InputText:
-      return send_all(controlSock, &action.inputText, sizeof(action.inputText));
-    case ControlOutboundActionKind::None:
-    default:
-      return false;
-  }
 }
 
 struct SharedFrame {
@@ -2390,7 +2367,8 @@ int main(int argc, char** argv) {
                     nowUs, capture_client_control_metrics_snapshot(), &gWindowPanelState,
                     &gCaptureModeRequests, &gKeyframeRequests, &gRuntimeTuneState,
                     &gInputQueueState, &action)) {
-              if (!send_control_action(controlSock, action)) break;
+              TcpControlResponse response{};
+              if (!execute_tcp_control_action(controlSock, action, &response)) break;
               didWork = true;
 
               if (action.kind == ControlOutboundActionKind::CaptureMode) {
@@ -2411,100 +2389,60 @@ int main(int argc, char** argv) {
                           << "\n";
               }
 
-              if (action.expectedResponseType.has_value()) {
-                MessageHeader header{};
-                if (!recv_all(controlSock, &header, sizeof(header))) break;
-                if (header.magic != remote60::native_poc::kMagic ||
-                    header.type != static_cast<uint16_t>(*action.expectedResponseType) ||
-                    header.size != action.expectedResponseSize) {
+              switch (response.kind) {
+                case TcpControlResponseKind::Pong: {
+                  const auto& pong = response.pong;
+                  const uint64_t doneUs = qpc_now_us();
+                  gControlScheduler.OnPingCompleted(doneUs);
+                  gHostCaptureTargetPid.store(pong.captureTargetPid, std::memory_order_relaxed);
+                  gHostCaptureTargetFlags.store(pong.captureTargetFlags, std::memory_order_relaxed);
+                  gHostCaptureRebindCount.store(pong.captureRebindCount, std::memory_order_relaxed);
+                  gHostCaptureTargetHwnd.store(pong.captureTargetHwnd, std::memory_order_relaxed);
+                  gHostCaptureMetaUpdatedUs.store(doneUs, std::memory_order_relaxed);
+                  gCaptureOverviewMode.store((pong.captureTargetFlags & 0x1u) == 0, std::memory_order_relaxed);
+                  {
+                    std::lock_guard<std::mutex> lk(gHostCaptureMetaMu);
+                    gHostCaptureTargetProcess =
+                        fixed_cstr_to_string(pong.captureTargetProcess, sizeof(pong.captureTargetProcess));
+                    gHostCaptureTargetTitle =
+                        fixed_cstr_to_string(pong.captureTargetTitle, sizeof(pong.captureTargetTitle));
+                  }
+                  const uint64_t rttUs =
+                      (doneUs >= action.ping.clientSendQpcUs) ? (doneUs - action.ping.clientSendQpcUs) : 0;
+                  std::cout << "[native-video-client][control] seq=" << pong.seq
+                            << " rttUs=" << rttUs
+                            << " hostQueueUs=" << ((pong.hostSendQpcUs >= pong.hostRecvQpcUs)
+                                                        ? (pong.hostSendQpcUs - pong.hostRecvQpcUs)
+                                                        : 0)
+                            << " hostCapPid=" << pong.captureTargetPid
+                            << " hostCapProc=" << fixed_cstr_to_string(
+                                   pong.captureTargetProcess, sizeof(pong.captureTargetProcess))
+                            << " hostCapRebind=" << pong.captureRebindCount
+                            << "\n";
                   break;
                 }
-
-                bool responseOk = true;
-                switch (*action.expectedResponseType) {
-                  case MessageType::ControlPong: {
-                    ControlPongMessage pong{};
-                    pong.header = header;
-                    if (!recv_all(controlSock, &pong.seq, sizeof(pong) - sizeof(MessageHeader))) {
-                      responseOk = false;
-                      break;
-                    }
-                    const uint64_t doneUs = qpc_now_us();
-                    gControlScheduler.OnPingCompleted(doneUs);
-                    gHostCaptureTargetPid.store(pong.captureTargetPid, std::memory_order_relaxed);
-                    gHostCaptureTargetFlags.store(pong.captureTargetFlags, std::memory_order_relaxed);
-                    gHostCaptureRebindCount.store(pong.captureRebindCount, std::memory_order_relaxed);
-                    gHostCaptureTargetHwnd.store(pong.captureTargetHwnd, std::memory_order_relaxed);
-                    gHostCaptureMetaUpdatedUs.store(doneUs, std::memory_order_relaxed);
-                    gCaptureOverviewMode.store((pong.captureTargetFlags & 0x1u) == 0, std::memory_order_relaxed);
-                    {
-                      std::lock_guard<std::mutex> lk(gHostCaptureMetaMu);
-                      gHostCaptureTargetProcess =
-                          fixed_cstr_to_string(pong.captureTargetProcess, sizeof(pong.captureTargetProcess));
-                      gHostCaptureTargetTitle =
-                          fixed_cstr_to_string(pong.captureTargetTitle, sizeof(pong.captureTargetTitle));
-                    }
-                    const uint64_t rttUs =
-                        (doneUs >= action.ping.clientSendQpcUs) ? (doneUs - action.ping.clientSendQpcUs) : 0;
-                    std::cout << "[native-video-client][control] seq=" << pong.seq
-                              << " rttUs=" << rttUs
-                              << " hostQueueUs=" << ((pong.hostSendQpcUs >= pong.hostRecvQpcUs)
-                                                          ? (pong.hostSendQpcUs - pong.hostRecvQpcUs)
-                                                          : 0)
-                              << " hostCapPid=" << pong.captureTargetPid
-                              << " hostCapProc=" << fixed_cstr_to_string(
-                                     pong.captureTargetProcess, sizeof(pong.captureTargetProcess))
-                              << " hostCapRebind=" << pong.captureRebindCount
+                case TcpControlResponseKind::WindowList:
+                  apply_window_list_snapshot(response.windowList);
+                  InvalidateRect(gHwnd, nullptr, FALSE);
+                  break;
+                case TcpControlResponseKind::WindowSelected:
+                  apply_window_selected_result(response.windowSelected);
+                  queue_window_list_request("window_list_request pending");
+                  InvalidateRect(gHwnd, nullptr, FALSE);
+                  break;
+                case TcpControlResponseKind::InputAck: {
+                  const uint64_t ackCount = gControlScheduler.RecordInputAck(args.inputLogEvery);
+                  if (ackCount > 0) {
+                    std::cout << "[native-video-client][input] ackSeq=" << response.inputAck.seq
+                              << " sent=" << ackCount
+                              << " dropped=" << gInputQueueState.dropped_count()
                               << "\n";
-                    break;
                   }
-                  case MessageType::ControlWindowList: {
-                    ControlWindowListMessage rsp{};
-                    rsp.header = header;
-                    if (!recv_all(controlSock, &rsp.seq, sizeof(rsp) - sizeof(MessageHeader))) {
-                      responseOk = false;
-                      break;
-                    }
-                    apply_window_list_snapshot(rsp);
-                    InvalidateRect(gHwnd, nullptr, FALSE);
-                    break;
-                  }
-                  case MessageType::ControlWindowSelected: {
-                    ControlWindowSelectedMessage rsp{};
-                    rsp.header = header;
-                    if (!recv_all(controlSock, &rsp.seq, sizeof(rsp) - sizeof(MessageHeader))) {
-                      responseOk = false;
-                      break;
-                    }
-                    apply_window_selected_result(rsp);
-                    queue_window_list_request("window_list_request pending");
-                    InvalidateRect(gHwnd, nullptr, FALSE);
-                    break;
-                  }
-                  case MessageType::ControlInputAck: {
-                    ControlInputAckMessage ack{};
-                    ack.header = header;
-                    if (!recv_all(controlSock, &ack.seq, sizeof(ack) - sizeof(MessageHeader))) {
-                      responseOk = false;
-                      break;
-                    }
-                    const uint64_t ackCount = gControlScheduler.RecordInputAck(args.inputLogEvery);
-                    if (ackCount > 0) {
-                      std::cout << "[native-video-client][input] ackSeq=" << ack.seq
-                                << " sent=" << ackCount
-                                << " dropped=" << gInputQueueState.dropped_count()
-                                << "\n";
-                    }
-                    break;
-                  }
-                  default:
-                    if (!recv_discard(controlSock, header.size - sizeof(MessageHeader))) {
-                      responseOk = false;
-                      break;
-                    }
-                    break;
+                  break;
                 }
-                if (!responseOk) break;
+                case TcpControlResponseKind::None:
+                default:
+                  break;
               }
             }
 

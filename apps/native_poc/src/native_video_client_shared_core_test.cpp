@@ -207,6 +207,7 @@ bool test_udp_assembler() {
 
   assembler.Reset();
   header->flags = 0x2u;
+  header->seq = 42;
   header->payloadSize = 8;
   header->chunkOffset = 0;
   header->chunkSize = 4;
@@ -215,7 +216,8 @@ bool test_udp_assembler() {
               "udp assembler should enter partial state")) return false;
 
   header->flags = 0x4u;
-  header->chunkOffset = 6;
+  header->seq = 43;
+  header->chunkOffset = 4;
   result = assembler.PushDatagram(datagram.data(), datagram.size());
   if (!expect(result.disposition == UdpH264AssemblyDisposition::Dropped && result.reorderDetected,
               "udp assembler should detect reorder/drop")) return false;
