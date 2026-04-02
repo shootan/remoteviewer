@@ -1674,3 +1674,25 @@ Validation / build / test result
 Next action
 - shared bundle는 이제 시간 제한 없이 실행된다.
 - client 실행 시에는 `client.ps1 -RemoteHost <HOST_PUBLIC_IP_OR_DNS>`만 넣어 사용하면 된다.
+
+### 130) 2026-04-02 android direct client plan document split
+Goal
+- Android direct client 작업을 기존 성능/운영 체크리스트와 분리해 별도 구현계획 문서로 정리한다.
+- 계획은 `한 번에 전체 구현`이 아니라 `공용 client core 분리 -> Windows 회귀 고정 -> Android 단계별 확장` 순서로 안정적으로 나누는 것을 기준으로 고정한다.
+
+Files changed
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- 문서 검토 기준:
+  - Android direct client 목표/범위/제외 범위를 한국어로 고정
+  - 기존 Windows native client와 함께 쓸 공용 core 재사용 전략 명시
+  - `Phase A~G` 단계와 각 단계 gate/완료조건을 명시
+- Build/Test:
+  - 문서 작업만 수행했으므로 추가 빌드/테스트는 실행하지 않음
+
+Next action
+- `Phase A. 공용 core 추출 범위 고정`부터 착수한다.
+- 구현 시작 전 Windows client에서 core로 이동할 함수/상태 묶음을 먼저 잘라내고, direct-connect 회귀 기준을 선행 정리한다.
