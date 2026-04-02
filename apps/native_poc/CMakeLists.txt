@@ -94,3 +94,16 @@ target_link_libraries(remote60_native_video_client_poc PRIVATE
 target_compile_definitions(remote60_native_video_client_poc PRIVATE
   REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
 )
+
+add_executable(remote60_native_video_client_shared_core_test
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_shared_core_test.cpp
+)
+
+target_include_directories(remote60_native_video_client_shared_core_test PRIVATE
+  src
+)
+
+target_link_libraries(remote60_native_video_client_shared_core_test PRIVATE
+  common
+)

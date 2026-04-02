@@ -1751,3 +1751,33 @@ Validation / build / test result
 Next action
 - `TCP control loop`의 메시지 송수신 절차 자체를 shared core helper로 옮긴다.
 - 이후 `UDP handshake/assembly` 분리와 Windows localhost 회귀 확인으로 `Phase B`를 더 진행한다.
+
+### 133) 2026-04-02 android prework control scheduler and test
+Goal
+- Android/향후 UDP 전환을 고려해 Windows native video client의 control loop에서 `무엇을 언제 보내는지`를 transport-independent scheduler로 분리한다.
+- shared core용 테스트 실행 파일을 추가해 ping/window/input/runtime-tune/keyframe action 흐름을 코드 레벨에서 검증한다.
+
+Files changed
+- `apps/native_poc/CMakeLists.txt`
+- `apps/native_poc/src/native_video_client_main.cpp`
+- `apps/native_poc/src/native_video_client_shared_core.hpp`
+- `apps/native_poc/src/native_video_client_shared_core.cpp`
+- `apps/native_poc/src/native_video_client_shared_core_test.cpp`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - `cmake --build build-vcpkg-local --target remote60_native_video_client_poc remote60_native_video_client_shared_core_test --config Debug`
+  - 결과: 성공
+- Test:
+  - `build-vcpkg-local/apps/native_poc/Debug/remote60_native_video_client_shared_core_test.exe`
+  - 결과: `PASS`
+- Code/structure:
+  - shared core에 `ClientControlScheduler` 추가
+  - scheduler가 ping/window-select/metrics/keyframe/runtime-tune/input action과 expected response를 결정
+  - Windows main은 TCP adapter처럼 action send + typed response consume만 담당
+
+Next action
+- `TCP adapter` 자체를 helper로 정리해 `send/recv` 절차를 main에서 더 걷어낸다.
+- 그 다음 `UDP handshake/assembly` 분리와 Windows localhost direct-connect 회귀 확인을 진행한다.

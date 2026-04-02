@@ -62,14 +62,16 @@ using remote60::native_poc::ControlPingMessage;
 using remote60::native_poc::ControlPongMessage;
 using remote60::native_poc::ClientInputQueue;
 using remote60::native_poc::CaptureModeRequestState;
+using remote60::native_poc::ClientControlMetricsSnapshot;
+using remote60::native_poc::ClientControlScheduler;
 using remote60::native_poc::DecodedFrameNv12;
 using remote60::native_poc::EncodedFrameHeader;
 using remote60::native_poc::H264Decoder;
 using remote60::native_poc::KeyframeRequestState;
 using remote60::native_poc::MessageHeader;
 using remote60::native_poc::MessageType;
-using remote60::native_poc::PendingCaptureModeRequest;
-using remote60::native_poc::PendingRuntimeTuneRequest;
+using remote60::native_poc::ControlOutboundAction;
+using remote60::native_poc::ControlOutboundActionKind;
 using remote60::native_poc::RawFrameHeader;
 using remote60::native_poc::QueuedControlInputMessage;
 using remote60::native_poc::RuntimeTuneState;
@@ -422,6 +424,32 @@ bool recv_discard(SOCKET s, size_t len) {
   return true;
 }
 
+bool send_control_action(SOCKET controlSock, const ControlOutboundAction& action) {
+  switch (action.kind) {
+    case ControlOutboundActionKind::Ping:
+      return send_all(controlSock, &action.ping, sizeof(action.ping));
+    case ControlOutboundActionKind::WindowListRequest:
+      return send_all(controlSock, &action.windowListRequest, sizeof(action.windowListRequest));
+    case ControlOutboundActionKind::WindowSelect:
+      return send_all(controlSock, &action.windowSelect, sizeof(action.windowSelect));
+    case ControlOutboundActionKind::CaptureMode:
+      return send_all(controlSock, &action.captureMode, sizeof(action.captureMode));
+    case ControlOutboundActionKind::Metrics:
+      return send_all(controlSock, &action.metrics, sizeof(action.metrics));
+    case ControlOutboundActionKind::KeyframeRequest:
+      return send_all(controlSock, &action.keyframe, sizeof(action.keyframe));
+    case ControlOutboundActionKind::RuntimeTune:
+      return send_all(controlSock, &action.runtimeTune, sizeof(action.runtimeTune));
+    case ControlOutboundActionKind::InputEvent:
+      return send_all(controlSock, &action.inputEvent, sizeof(action.inputEvent));
+    case ControlOutboundActionKind::InputText:
+      return send_all(controlSock, &action.inputText, sizeof(action.inputText));
+    case ControlOutboundActionKind::None:
+    default:
+      return false;
+  }
+}
+
 struct SharedFrame {
   enum class PixelFormat : uint8_t {
     Unknown = 0,
@@ -577,6 +605,34 @@ RuntimeTuneState gRuntimeTuneState{
     240};
 std::atomic<bool> gCaptureOverviewMode{false};
 CaptureModeRequestState gCaptureModeRequests;
+ClientControlScheduler gControlScheduler;
+
+ClientControlMetricsSnapshot capture_client_control_metrics_snapshot() {
+  ClientControlMetricsSnapshot snapshot{};
+  snapshot.updatedQpcUs = gClientMetrics.updatedQpcUs.load(std::memory_order_relaxed);
+  snapshot.message.width = gClientMetrics.width.load(std::memory_order_relaxed);
+  snapshot.message.height = gClientMetrics.height.load(std::memory_order_relaxed);
+  snapshot.message.recvFpsX100 = gClientMetrics.recvFpsX100.load(std::memory_order_relaxed);
+  snapshot.message.decodedFpsX100 = gClientMetrics.decodedFpsX100.load(std::memory_order_relaxed);
+  snapshot.message.recvMbpsX1000 = gClientMetrics.recvMbpsX1000.load(std::memory_order_relaxed);
+  snapshot.message.skippedFrames = gClientMetrics.skippedFrames.load(std::memory_order_relaxed);
+  snapshot.message.avgLatencyUs = gClientMetrics.avgLatencyUs.load(std::memory_order_relaxed);
+  snapshot.message.maxLatencyUs = gClientMetrics.maxLatencyUs.load(std::memory_order_relaxed);
+  snapshot.message.avgDecodeTailUs = gClientMetrics.avgDecodeTailUs.load(std::memory_order_relaxed);
+  snapshot.message.maxDecodeTailUs = gClientMetrics.maxDecodeTailUs.load(std::memory_order_relaxed);
+  snapshot.message.congestionState = gClientMetrics.congestionState.load(std::memory_order_relaxed);
+  snapshot.message.congestionTransitions = gClientMetrics.congestionTransitions.load(std::memory_order_relaxed);
+  snapshot.message.congestionRecoveryCount =
+      gClientMetrics.congestionRecoveryCount.load(std::memory_order_relaxed);
+  snapshot.message.congestionRecoveryReq =
+      gClientMetrics.congestionRecoveryReq.load(std::memory_order_relaxed);
+  snapshot.message.congestionRecoveryMaxUs =
+      gClientMetrics.congestionRecoveryMaxUs.load(std::memory_order_relaxed);
+  snapshot.message.queueDepthMax = gClientMetrics.queueDepthMax.load(std::memory_order_relaxed);
+  snapshot.message.queueDepthH4p = gClientMetrics.queueDepthH4p.load(std::memory_order_relaxed);
+  snapshot.message.udpAssemblyDropPm = gClientMetrics.udpAssemblyDropPm.load(std::memory_order_relaxed);
+  return snapshot;
+}
 
 struct OverlayMetricSample {
   uint64_t tsUs = 0;
@@ -2322,233 +2378,132 @@ int main(int argc, char** argv) {
           connect(controlSock, reinterpret_cast<const sockaddr*>(&ctlAddr), sizeof(ctlAddr)) == 0) {
         const bool inputChannelEnabled = args.enableInputChannel && !kInputPolicyForceBlock;
         gInputEnabled = inputChannelEnabled;
+        gControlScheduler.Reset(args.controlIntervalMs, qpc_now_us());
         controlThread = std::thread([&]() {
-          uint32_t pingSeq = 0;
-          uint32_t metricsSeq = 0;
-          uint32_t windowReqSeq = 0;
-          uint32_t windowSelectSeq = 0;
-          uint64_t lastMetricsSentUs = 0;
-          uint64_t inputAckCount = 0;
-          uint64_t nextPingUs = qpc_now_us();
           while (gRunning.load()) {
             bool didWork = false;
             const uint64_t nowUs = qpc_now_us();
-            if (nowUs >= nextPingUs) {
-              ControlPingMessage ping{};
-              ping.header.magic = remote60::native_poc::kMagic;
-              ping.header.type = static_cast<uint16_t>(MessageType::ControlPing);
-              ping.header.size = static_cast<uint16_t>(sizeof(ping));
-              ping.seq = ++pingSeq;
-              ping.clientSendQpcUs = nowUs;
-              if (!send_all(controlSock, &ping, sizeof(ping))) break;
-
-              MessageHeader header{};
-              if (!recv_all(controlSock, &header, sizeof(header))) break;
-              if (header.magic != remote60::native_poc::kMagic ||
-                  header.type != static_cast<uint16_t>(MessageType::ControlPong) ||
-                  header.size != sizeof(ControlPongMessage)) {
-                break;
-              }
-              ControlPongMessage pong{};
-              pong.header = header;
-              if (!recv_all(controlSock, &pong.seq, sizeof(pong) - sizeof(MessageHeader))) break;
-              const uint64_t doneUs = qpc_now_us();
-              gHostCaptureTargetPid.store(pong.captureTargetPid, std::memory_order_relaxed);
-              gHostCaptureTargetFlags.store(pong.captureTargetFlags, std::memory_order_relaxed);
-              gHostCaptureRebindCount.store(pong.captureRebindCount, std::memory_order_relaxed);
-              gHostCaptureTargetHwnd.store(pong.captureTargetHwnd, std::memory_order_relaxed);
-              gHostCaptureMetaUpdatedUs.store(doneUs, std::memory_order_relaxed);
-              gCaptureOverviewMode.store((pong.captureTargetFlags & 0x1u) == 0, std::memory_order_relaxed);
-              {
-                std::lock_guard<std::mutex> lk(gHostCaptureMetaMu);
-                gHostCaptureTargetProcess =
-                    fixed_cstr_to_string(pong.captureTargetProcess, sizeof(pong.captureTargetProcess));
-                gHostCaptureTargetTitle =
-                    fixed_cstr_to_string(pong.captureTargetTitle, sizeof(pong.captureTargetTitle));
-              }
-
-              const uint64_t rttUs = (doneUs >= ping.clientSendQpcUs) ? (doneUs - ping.clientSendQpcUs) : 0;
-              std::cout << "[native-video-client][control] seq=" << pong.seq
-                        << " rttUs=" << rttUs
-                        << " hostQueueUs=" << ((pong.hostSendQpcUs >= pong.hostRecvQpcUs)
-                                                    ? (pong.hostSendQpcUs - pong.hostRecvQpcUs)
-                                                    : 0)
-                        << " hostCapPid=" << pong.captureTargetPid
-                        << " hostCapProc=" << fixed_cstr_to_string(
-                               pong.captureTargetProcess, sizeof(pong.captureTargetProcess))
-                        << " hostCapRebind=" << pong.captureRebindCount
-                        << "\n";
-              nextPingUs = doneUs + static_cast<uint64_t>(std::max<uint32_t>(20, args.controlIntervalMs)) * 1000ULL;
+            ControlOutboundAction action{};
+            if (gControlScheduler.NextAction(
+                    nowUs, capture_client_control_metrics_snapshot(), &gWindowPanelState,
+                    &gCaptureModeRequests, &gKeyframeRequests, &gRuntimeTuneState,
+                    &gInputQueueState, &action)) {
+              if (!send_control_action(controlSock, action)) break;
               didWork = true;
-            }
 
-            bool sendWindowListRequest = false;
-            sendWindowListRequest = gWindowPanelState.TakeListRequest();
-            if (sendWindowListRequest) {
-              ControlWindowListRequestMessage req{};
-              req.header.magic = remote60::native_poc::kMagic;
-              req.header.type = static_cast<uint16_t>(MessageType::ControlWindowListRequest);
-              req.header.size = static_cast<uint16_t>(sizeof(req));
-              req.seq = ++windowReqSeq;
-              req.clientSendQpcUs = nowUs;
-              if (!send_all(controlSock, &req, sizeof(req))) break;
-
-              MessageHeader header{};
-              if (!recv_all(controlSock, &header, sizeof(header))) break;
-              if (header.magic != remote60::native_poc::kMagic ||
-                  header.type != static_cast<uint16_t>(MessageType::ControlWindowList) ||
-                  header.size != sizeof(ControlWindowListMessage)) {
-                break;
-              }
-              ControlWindowListMessage rsp{};
-              rsp.header = header;
-              if (!recv_all(controlSock, &rsp.seq, sizeof(rsp) - sizeof(MessageHeader))) break;
-              apply_window_list_snapshot(rsp);
-              InvalidateRect(gHwnd, nullptr, FALSE);
-              didWork = true;
-            }
-
-            bool sendWindowSelect = false;
-            uint64_t pendingWindowId = 0;
-            sendWindowSelect = gWindowPanelState.TakeSelectRequest(&pendingWindowId);
-            if (sendWindowSelect) {
-              ControlWindowSelectMessage req{};
-              req.header.magic = remote60::native_poc::kMagic;
-              req.header.type = static_cast<uint16_t>(MessageType::ControlWindowSelect);
-              req.header.size = static_cast<uint16_t>(sizeof(req));
-              req.seq = ++windowSelectSeq;
-              req.windowId = pendingWindowId;
-              req.clientSendQpcUs = nowUs;
-              if (!send_all(controlSock, &req, sizeof(req))) break;
-
-              MessageHeader header{};
-              if (!recv_all(controlSock, &header, sizeof(header))) break;
-              if (header.magic != remote60::native_poc::kMagic ||
-                  header.type != static_cast<uint16_t>(MessageType::ControlWindowSelected) ||
-                  header.size != sizeof(ControlWindowSelectedMessage)) {
-                break;
-              }
-              ControlWindowSelectedMessage rsp{};
-              rsp.header = header;
-              if (!recv_all(controlSock, &rsp.seq, sizeof(rsp) - sizeof(MessageHeader))) break;
-              apply_window_selected_result(rsp);
-              queue_window_list_request("window_list_request pending");
-              InvalidateRect(gHwnd, nullptr, FALSE);
-              didWork = true;
-            }
-
-            PendingCaptureModeRequest pendingCaptureMode{};
-            if (gCaptureModeRequests.ConsumePending(&pendingCaptureMode)) {
-              ControlCaptureModeRequestMessage req{};
-              req.header.magic = remote60::native_poc::kMagic;
-              req.header.type = static_cast<uint16_t>(MessageType::ControlCaptureModeRequest);
-              req.header.size = static_cast<uint16_t>(sizeof(req));
-              req.seq = pendingCaptureMode.seq;
-              req.mode = pendingCaptureMode.mode;
-              req.xPermille = pendingCaptureMode.xPermille;
-              req.yPermille = pendingCaptureMode.yPermille;
-              req.clientSendQpcUs = nowUs;
-              if (req.mode == 1 || req.mode == 2) {
-                if (!send_all(controlSock, &req, sizeof(req))) break;
-                gCaptureOverviewMode.store(req.mode == 1, std::memory_order_relaxed);
-                std::cout << "[native-video-client][control] capture-mode-request seq=" << req.seq
-                          << " mode=" << req.mode
-                          << " xPermille=" << req.xPermille
-                          << " yPermille=" << req.yPermille
+              if (action.kind == ControlOutboundActionKind::CaptureMode) {
+                gCaptureOverviewMode.store(action.captureMode.mode == 1, std::memory_order_relaxed);
+                std::cout << "[native-video-client][control] capture-mode-request seq=" << action.captureMode.seq
+                          << " mode=" << action.captureMode.mode
+                          << " xPermille=" << action.captureMode.xPermille
+                          << " yPermille=" << action.captureMode.yPermille
                           << "\n";
-                didWork = true;
-              }
-            }
-
-            const uint64_t metricsUpdatedUs = gClientMetrics.updatedQpcUs.load();
-            if (metricsUpdatedUs > 0 && metricsUpdatedUs != lastMetricsSentUs) {
-              ControlClientMetricsMessage metrics{};
-              metrics.header.magic = remote60::native_poc::kMagic;
-              metrics.header.type = static_cast<uint16_t>(MessageType::ControlClientMetrics);
-              metrics.header.size = static_cast<uint16_t>(sizeof(metrics));
-              metrics.seq = ++metricsSeq;
-              metrics.width = gClientMetrics.width.load();
-              metrics.height = gClientMetrics.height.load();
-              metrics.recvFpsX100 = gClientMetrics.recvFpsX100.load();
-              metrics.decodedFpsX100 = gClientMetrics.decodedFpsX100.load();
-              metrics.recvMbpsX1000 = gClientMetrics.recvMbpsX1000.load();
-              metrics.skippedFrames = gClientMetrics.skippedFrames.load();
-              metrics.avgLatencyUs = gClientMetrics.avgLatencyUs.load();
-              metrics.maxLatencyUs = gClientMetrics.maxLatencyUs.load();
-              metrics.avgDecodeTailUs = gClientMetrics.avgDecodeTailUs.load();
-              metrics.maxDecodeTailUs = gClientMetrics.maxDecodeTailUs.load();
-              metrics.congestionState = gClientMetrics.congestionState.load();
-              metrics.congestionTransitions = gClientMetrics.congestionTransitions.load();
-              metrics.congestionRecoveryCount = gClientMetrics.congestionRecoveryCount.load();
-              metrics.congestionRecoveryReq = gClientMetrics.congestionRecoveryReq.load();
-              metrics.congestionRecoveryMaxUs = gClientMetrics.congestionRecoveryMaxUs.load();
-              metrics.queueDepthMax = gClientMetrics.queueDepthMax.load();
-              metrics.queueDepthH4p = gClientMetrics.queueDepthH4p.load();
-              metrics.udpAssemblyDropPm = gClientMetrics.udpAssemblyDropPm.load();
-              metrics.clientSendQpcUs = nowUs;
-              if (!send_all(controlSock, &metrics, sizeof(metrics))) break;
-              lastMetricsSentUs = metricsUpdatedUs;
-              didWork = true;
-            }
-
-            uint16_t pendingKeyframeReason = 0;
-            if (gKeyframeRequests.ConsumePending(&pendingKeyframeReason)) {
-              ControlRequestKeyFrameMessage req{};
-              req.header.magic = remote60::native_poc::kMagic;
-              req.header.type = static_cast<uint16_t>(MessageType::ControlRequestKeyFrame);
-              req.header.size = static_cast<uint16_t>(sizeof(req));
-              req.seq = gKeyframeRequests.NextSequence();
-              req.reason = pendingKeyframeReason;
-              req.clientSendQpcUs = nowUs;
-              if (!send_all(controlSock, &req, sizeof(req))) break;
-              std::cout << "[native-video-client][control] keyframe-request seq=" << req.seq
-                        << " reason=" << req.reason << "\n";
-              didWork = true;
-            }
-
-            PendingRuntimeTuneRequest pendingTune{};
-            if (gRuntimeTuneState.ConsumePending(
-                    nowUs, gClientMetrics.recvMbpsX1000.load(std::memory_order_relaxed), &pendingTune)) {
-              if (!send_all(controlSock, &pendingTune.message, sizeof(pendingTune.message))) break;
-              std::cout << "[native-video-client][control] runtime-config seq=" << pendingTune.message.seq
-                        << " bitrate=" << pendingTune.message.bitrate
-                        << " keyint=" << pendingTune.message.keyint
-                        << " flags=" << pendingTune.message.flags
-                          << "\n";
-              didWork = true;
-            }
-
-            QueuedControlInputMessage outbound{};
-            const bool hasInput = gInputQueueState.TryDequeue(&outbound);
-            if (hasInput) {
-              if (outbound.type == MessageType::ControlInputEvent) {
-                outbound.inputEvent.clientSendQpcUs = qpc_now_us();
-                if (!send_all(controlSock, &outbound.inputEvent, sizeof(outbound.inputEvent))) break;
-              } else if (outbound.type == MessageType::ControlInputText) {
-                outbound.inputText.clientSendQpcUs = qpc_now_us();
-                if (!send_all(controlSock, &outbound.inputText, sizeof(outbound.inputText))) break;
-              } else {
-                continue;
-              }
-
-              MessageHeader header{};
-              if (!recv_all(controlSock, &header, sizeof(header))) break;
-              if (header.magic != remote60::native_poc::kMagic ||
-                  header.type != static_cast<uint16_t>(MessageType::ControlInputAck) ||
-                  header.size != sizeof(ControlInputAckMessage)) {
-                break;
-              }
-              ControlInputAckMessage ack{};
-              ack.header = header;
-              if (!recv_all(controlSock, &ack.seq, sizeof(ack) - sizeof(MessageHeader))) break;
-              ++inputAckCount;
-              if (args.inputLogEvery > 0 && (inputAckCount % args.inputLogEvery) == 0) {
-                std::cout << "[native-video-client][input] ackSeq=" << ack.seq
-                          << " sent=" << inputAckCount
-                          << " dropped=" << gInputQueueState.dropped_count()
+              } else if (action.kind == ControlOutboundActionKind::KeyframeRequest) {
+                std::cout << "[native-video-client][control] keyframe-request seq=" << action.keyframe.seq
+                          << " reason=" << action.keyframe.reason << "\n";
+              } else if (action.kind == ControlOutboundActionKind::RuntimeTune) {
+                std::cout << "[native-video-client][control] runtime-config seq=" << action.runtimeTune.seq
+                          << " bitrate=" << action.runtimeTune.bitrate
+                          << " keyint=" << action.runtimeTune.keyint
+                          << " flags=" << action.runtimeTune.flags
                           << "\n";
               }
-              didWork = true;
+
+              if (action.expectedResponseType.has_value()) {
+                MessageHeader header{};
+                if (!recv_all(controlSock, &header, sizeof(header))) break;
+                if (header.magic != remote60::native_poc::kMagic ||
+                    header.type != static_cast<uint16_t>(*action.expectedResponseType) ||
+                    header.size != action.expectedResponseSize) {
+                  break;
+                }
+
+                bool responseOk = true;
+                switch (*action.expectedResponseType) {
+                  case MessageType::ControlPong: {
+                    ControlPongMessage pong{};
+                    pong.header = header;
+                    if (!recv_all(controlSock, &pong.seq, sizeof(pong) - sizeof(MessageHeader))) {
+                      responseOk = false;
+                      break;
+                    }
+                    const uint64_t doneUs = qpc_now_us();
+                    gControlScheduler.OnPingCompleted(doneUs);
+                    gHostCaptureTargetPid.store(pong.captureTargetPid, std::memory_order_relaxed);
+                    gHostCaptureTargetFlags.store(pong.captureTargetFlags, std::memory_order_relaxed);
+                    gHostCaptureRebindCount.store(pong.captureRebindCount, std::memory_order_relaxed);
+                    gHostCaptureTargetHwnd.store(pong.captureTargetHwnd, std::memory_order_relaxed);
+                    gHostCaptureMetaUpdatedUs.store(doneUs, std::memory_order_relaxed);
+                    gCaptureOverviewMode.store((pong.captureTargetFlags & 0x1u) == 0, std::memory_order_relaxed);
+                    {
+                      std::lock_guard<std::mutex> lk(gHostCaptureMetaMu);
+                      gHostCaptureTargetProcess =
+                          fixed_cstr_to_string(pong.captureTargetProcess, sizeof(pong.captureTargetProcess));
+                      gHostCaptureTargetTitle =
+                          fixed_cstr_to_string(pong.captureTargetTitle, sizeof(pong.captureTargetTitle));
+                    }
+                    const uint64_t rttUs =
+                        (doneUs >= action.ping.clientSendQpcUs) ? (doneUs - action.ping.clientSendQpcUs) : 0;
+                    std::cout << "[native-video-client][control] seq=" << pong.seq
+                              << " rttUs=" << rttUs
+                              << " hostQueueUs=" << ((pong.hostSendQpcUs >= pong.hostRecvQpcUs)
+                                                          ? (pong.hostSendQpcUs - pong.hostRecvQpcUs)
+                                                          : 0)
+                              << " hostCapPid=" << pong.captureTargetPid
+                              << " hostCapProc=" << fixed_cstr_to_string(
+                                     pong.captureTargetProcess, sizeof(pong.captureTargetProcess))
+                              << " hostCapRebind=" << pong.captureRebindCount
+                              << "\n";
+                    break;
+                  }
+                  case MessageType::ControlWindowList: {
+                    ControlWindowListMessage rsp{};
+                    rsp.header = header;
+                    if (!recv_all(controlSock, &rsp.seq, sizeof(rsp) - sizeof(MessageHeader))) {
+                      responseOk = false;
+                      break;
+                    }
+                    apply_window_list_snapshot(rsp);
+                    InvalidateRect(gHwnd, nullptr, FALSE);
+                    break;
+                  }
+                  case MessageType::ControlWindowSelected: {
+                    ControlWindowSelectedMessage rsp{};
+                    rsp.header = header;
+                    if (!recv_all(controlSock, &rsp.seq, sizeof(rsp) - sizeof(MessageHeader))) {
+                      responseOk = false;
+                      break;
+                    }
+                    apply_window_selected_result(rsp);
+                    queue_window_list_request("window_list_request pending");
+                    InvalidateRect(gHwnd, nullptr, FALSE);
+                    break;
+                  }
+                  case MessageType::ControlInputAck: {
+                    ControlInputAckMessage ack{};
+                    ack.header = header;
+                    if (!recv_all(controlSock, &ack.seq, sizeof(ack) - sizeof(MessageHeader))) {
+                      responseOk = false;
+                      break;
+                    }
+                    const uint64_t ackCount = gControlScheduler.RecordInputAck(args.inputLogEvery);
+                    if (ackCount > 0) {
+                      std::cout << "[native-video-client][input] ackSeq=" << ack.seq
+                                << " sent=" << ackCount
+                                << " dropped=" << gInputQueueState.dropped_count()
+                                << "\n";
+                    }
+                    break;
+                  }
+                  default:
+                    if (!recv_discard(controlSock, header.size - sizeof(MessageHeader))) {
+                      responseOk = false;
+                      break;
+                    }
+                    break;
+                }
+                if (!responseOk) break;
+              }
             }
 
             if (!didWork) Sleep(2);

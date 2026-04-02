@@ -4,12 +4,15 @@
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "poc_protocol.hpp"
 
 namespace remote60::native_poc {
+
+class WindowPanelStateModel;
 
 struct QueuedControlInputMessage {
   MessageType type = MessageType::ControlInputEvent;
@@ -116,6 +119,64 @@ class RuntimeTuneState {
   std::atomic<uint32_t> targetBitrate_{0};
   std::atomic<uint32_t> targetKeyint_{0};
   std::atomic<uint64_t> lastSentUs_{0};
+};
+
+struct ClientControlMetricsSnapshot {
+  ControlClientMetricsMessage message{};
+  uint64_t updatedQpcUs = 0;
+};
+
+enum class ControlOutboundActionKind : uint8_t {
+  None = 0,
+  Ping,
+  WindowListRequest,
+  WindowSelect,
+  CaptureMode,
+  Metrics,
+  KeyframeRequest,
+  RuntimeTune,
+  InputEvent,
+  InputText,
+};
+
+struct ControlOutboundAction {
+  ControlOutboundActionKind kind = ControlOutboundActionKind::None;
+  std::optional<MessageType> expectedResponseType;
+  uint16_t expectedResponseSize = 0;
+  ControlPingMessage ping{};
+  ControlWindowListRequestMessage windowListRequest{};
+  ControlWindowSelectMessage windowSelect{};
+  ControlCaptureModeRequestMessage captureMode{};
+  ControlClientMetricsMessage metrics{};
+  ControlRequestKeyFrameMessage keyframe{};
+  ControlRuntimeEncoderConfigMessage runtimeTune{};
+  ControlInputEventMessage inputEvent{};
+  ControlInputTextMessage inputText{};
+};
+
+class ClientControlScheduler {
+ public:
+  void Reset(uint32_t controlIntervalMs, uint64_t nowUs);
+  void OnPingCompleted(uint64_t doneUs);
+  bool NextAction(uint64_t nowUs,
+                  const ClientControlMetricsSnapshot& metrics,
+                  WindowPanelStateModel* windowPanel,
+                  CaptureModeRequestState* captureMode,
+                  KeyframeRequestState* keyframeRequests,
+                  RuntimeTuneState* runtimeTune,
+                  ClientInputQueue* inputQueue,
+                  ControlOutboundAction* out);
+  uint64_t RecordInputAck(uint32_t inputLogEvery);
+
+ private:
+  uint32_t nextPingSeq_ = 0;
+  uint32_t nextMetricsSeq_ = 0;
+  uint32_t nextWindowListSeq_ = 0;
+  uint32_t nextWindowSelectSeq_ = 0;
+  uint64_t nextPingUs_ = 0;
+  uint64_t lastMetricsSentUs_ = 0;
+  uint64_t inputAckCount_ = 0;
+  uint32_t controlIntervalMs_ = 1000;
 };
 
 struct WindowTargetUiEntry {

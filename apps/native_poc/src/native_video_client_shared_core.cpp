@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <sstream>
 
 namespace remote60::native_poc {
@@ -15,6 +16,21 @@ std::string fixed_cstr_to_string(const char* buf, size_t cap) {
   size_t n = 0;
   while (n < cap && buf[n] != '\0') ++n;
   return std::string(buf, buf + n);
+}
+
+uint16_t expected_message_size(MessageType type) {
+  switch (type) {
+    case MessageType::ControlPong:
+      return static_cast<uint16_t>(sizeof(ControlPongMessage));
+    case MessageType::ControlWindowList:
+      return static_cast<uint16_t>(sizeof(ControlWindowListMessage));
+    case MessageType::ControlWindowSelected:
+      return static_cast<uint16_t>(sizeof(ControlWindowSelectedMessage));
+    case MessageType::ControlInputAck:
+      return static_cast<uint16_t>(sizeof(ControlInputAckMessage));
+    default:
+      return 0;
+  }
 }
 
 }  // namespace
@@ -255,6 +271,144 @@ bool RuntimeTuneState::ConsumePending(uint64_t nowUs, uint32_t observedRecvMbpsX
   out->message = message;
   lastSentUs_.store(nowUs, std::memory_order_relaxed);
   return true;
+}
+
+void ClientControlScheduler::Reset(uint32_t controlIntervalMs, uint64_t nowUs) {
+  nextPingSeq_ = 0;
+  nextMetricsSeq_ = 0;
+  nextWindowListSeq_ = 0;
+  nextWindowSelectSeq_ = 0;
+  nextPingUs_ = nowUs;
+  lastMetricsSentUs_ = 0;
+  inputAckCount_ = 0;
+  controlIntervalMs_ = std::clamp<uint32_t>(controlIntervalMs, 20, 10000);
+}
+
+void ClientControlScheduler::OnPingCompleted(uint64_t doneUs) {
+  nextPingUs_ = doneUs + static_cast<uint64_t>(controlIntervalMs_) * 1000ULL;
+}
+
+bool ClientControlScheduler::NextAction(uint64_t nowUs,
+                                        const ClientControlMetricsSnapshot& metrics,
+                                        WindowPanelStateModel* windowPanel,
+                                        CaptureModeRequestState* captureMode,
+                                        KeyframeRequestState* keyframeRequests,
+                                        RuntimeTuneState* runtimeTune,
+                                        ClientInputQueue* inputQueue,
+                                        ControlOutboundAction* out) {
+  if (!windowPanel || !captureMode || !keyframeRequests || !runtimeTune || !inputQueue || !out) {
+    return false;
+  }
+  *out = ControlOutboundAction{};
+
+  if (nowUs >= nextPingUs_) {
+    out->kind = ControlOutboundActionKind::Ping;
+    out->expectedResponseType = MessageType::ControlPong;
+    out->expectedResponseSize = expected_message_size(MessageType::ControlPong);
+    out->ping.header.magic = kMagic;
+    out->ping.header.type = static_cast<uint16_t>(MessageType::ControlPing);
+    out->ping.header.size = static_cast<uint16_t>(sizeof(out->ping));
+    out->ping.seq = ++nextPingSeq_;
+    out->ping.clientSendQpcUs = nowUs;
+    return true;
+  }
+
+  if (windowPanel->TakeListRequest()) {
+    out->kind = ControlOutboundActionKind::WindowListRequest;
+    out->expectedResponseType = MessageType::ControlWindowList;
+    out->expectedResponseSize = expected_message_size(MessageType::ControlWindowList);
+    out->windowListRequest.header.magic = kMagic;
+    out->windowListRequest.header.type = static_cast<uint16_t>(MessageType::ControlWindowListRequest);
+    out->windowListRequest.header.size = static_cast<uint16_t>(sizeof(out->windowListRequest));
+    out->windowListRequest.seq = ++nextWindowListSeq_;
+    out->windowListRequest.clientSendQpcUs = nowUs;
+    return true;
+  }
+
+  uint64_t pendingWindowId = 0;
+  if (windowPanel->TakeSelectRequest(&pendingWindowId)) {
+    out->kind = ControlOutboundActionKind::WindowSelect;
+    out->expectedResponseType = MessageType::ControlWindowSelected;
+    out->expectedResponseSize = expected_message_size(MessageType::ControlWindowSelected);
+    out->windowSelect.header.magic = kMagic;
+    out->windowSelect.header.type = static_cast<uint16_t>(MessageType::ControlWindowSelect);
+    out->windowSelect.header.size = static_cast<uint16_t>(sizeof(out->windowSelect));
+    out->windowSelect.seq = ++nextWindowSelectSeq_;
+    out->windowSelect.windowId = pendingWindowId;
+    out->windowSelect.clientSendQpcUs = nowUs;
+    return true;
+  }
+
+  PendingCaptureModeRequest pendingCaptureMode{};
+  if (captureMode->ConsumePending(&pendingCaptureMode)) {
+    out->kind = ControlOutboundActionKind::CaptureMode;
+    out->captureMode.header.magic = kMagic;
+    out->captureMode.header.type = static_cast<uint16_t>(MessageType::ControlCaptureModeRequest);
+    out->captureMode.header.size = static_cast<uint16_t>(sizeof(out->captureMode));
+    out->captureMode.seq = pendingCaptureMode.seq;
+    out->captureMode.mode = pendingCaptureMode.mode;
+    out->captureMode.xPermille = pendingCaptureMode.xPermille;
+    out->captureMode.yPermille = pendingCaptureMode.yPermille;
+    out->captureMode.clientSendQpcUs = nowUs;
+    return true;
+  }
+
+  if (metrics.updatedQpcUs > 0 && metrics.updatedQpcUs != lastMetricsSentUs_) {
+    out->kind = ControlOutboundActionKind::Metrics;
+    out->metrics = metrics.message;
+    out->metrics.header.magic = kMagic;
+    out->metrics.header.type = static_cast<uint16_t>(MessageType::ControlClientMetrics);
+    out->metrics.header.size = static_cast<uint16_t>(sizeof(out->metrics));
+    out->metrics.seq = ++nextMetricsSeq_;
+    out->metrics.clientSendQpcUs = nowUs;
+    lastMetricsSentUs_ = metrics.updatedQpcUs;
+    return true;
+  }
+
+  uint16_t pendingKeyframeReason = 0;
+  if (keyframeRequests->ConsumePending(&pendingKeyframeReason)) {
+    out->kind = ControlOutboundActionKind::KeyframeRequest;
+    out->keyframe.header.magic = kMagic;
+    out->keyframe.header.type = static_cast<uint16_t>(MessageType::ControlRequestKeyFrame);
+    out->keyframe.header.size = static_cast<uint16_t>(sizeof(out->keyframe));
+    out->keyframe.seq = keyframeRequests->NextSequence();
+    out->keyframe.reason = pendingKeyframeReason;
+    out->keyframe.clientSendQpcUs = nowUs;
+    return true;
+  }
+
+  PendingRuntimeTuneRequest pendingTune{};
+  if (runtimeTune->ConsumePending(nowUs, metrics.message.recvMbpsX1000, &pendingTune)) {
+    out->kind = ControlOutboundActionKind::RuntimeTune;
+    out->runtimeTune = pendingTune.message;
+    return true;
+  }
+
+  QueuedControlInputMessage outbound{};
+  if (inputQueue->TryDequeue(&outbound)) {
+    out->expectedResponseType = MessageType::ControlInputAck;
+    out->expectedResponseSize = expected_message_size(MessageType::ControlInputAck);
+    if (outbound.type == MessageType::ControlInputEvent) {
+      out->kind = ControlOutboundActionKind::InputEvent;
+      out->inputEvent = outbound.inputEvent;
+      out->inputEvent.clientSendQpcUs = nowUs;
+      return true;
+    }
+    if (outbound.type == MessageType::ControlInputText) {
+      out->kind = ControlOutboundActionKind::InputText;
+      out->inputText = outbound.inputText;
+      out->inputText.clientSendQpcUs = nowUs;
+      return true;
+    }
+  }
+
+  return false;
+}
+
+uint64_t ClientControlScheduler::RecordInputAck(uint32_t inputLogEvery) {
+  ++inputAckCount_;
+  if (inputLogEvery == 0) return 0;
+  return (inputAckCount_ % inputLogEvery) == 0 ? inputAckCount_ : 0;
 }
 
 void WindowPanelStateModel::Reset() {
