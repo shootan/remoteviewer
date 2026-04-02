@@ -61,14 +61,18 @@ using remote60::native_poc::ControlWindowSelectedMessage;
 using remote60::native_poc::ControlPingMessage;
 using remote60::native_poc::ControlPongMessage;
 using remote60::native_poc::ClientInputQueue;
+using remote60::native_poc::CaptureModeRequestState;
 using remote60::native_poc::DecodedFrameNv12;
 using remote60::native_poc::EncodedFrameHeader;
 using remote60::native_poc::H264Decoder;
 using remote60::native_poc::KeyframeRequestState;
 using remote60::native_poc::MessageHeader;
 using remote60::native_poc::MessageType;
+using remote60::native_poc::PendingCaptureModeRequest;
+using remote60::native_poc::PendingRuntimeTuneRequest;
 using remote60::native_poc::RawFrameHeader;
 using remote60::native_poc::QueuedControlInputMessage;
+using remote60::native_poc::RuntimeTuneState;
 using remote60::native_poc::UdpCodec;
 using remote60::native_poc::UdpHelloPacket;
 using remote60::native_poc::UdpPacketKind;
@@ -565,17 +569,14 @@ std::atomic<uint64_t> gHostCaptureMetaUpdatedUs{0};
 std::mutex gHostCaptureMetaMu;
 std::string gHostCaptureTargetProcess = "monitor";
 std::string gHostCaptureTargetTitle;
-std::atomic<bool> gRuntimeTuneEnabled{false};
-std::atomic<bool> gRuntimeTuneDirty{false};
-std::atomic<uint32_t> gRuntimeTuneSeq{0};
-std::atomic<uint32_t> gRuntimeTargetBitrate{0};
-std::atomic<uint32_t> gRuntimeTargetKeyint{0};
-std::atomic<uint64_t> gRuntimeTuneLastSentUs{0};
+RuntimeTuneState gRuntimeTuneState{
+    300000,
+    30000000,
+    250000,
+    1,
+    240};
 std::atomic<bool> gCaptureOverviewMode{false};
-std::atomic<bool> gCaptureModeReqPending{false};
-std::atomic<uint16_t> gCaptureModeReqMode{0};
-std::atomic<uint32_t> gCaptureModeReqXPermille{5000};
-std::atomic<uint32_t> gCaptureModeReqYPermille{5000};
+CaptureModeRequestState gCaptureModeRequests;
 
 struct OverlayMetricSample {
   uint64_t tsUs = 0;
@@ -881,11 +882,7 @@ bool try_hit_window_list_item(HWND hwnd, int x, int y, uint64_t* outWindowId) {
 }
 
 void enqueue_capture_mode_request(uint16_t mode, uint32_t xPermille, uint32_t yPermille) {
-  if (mode != 1 && mode != 2) return;
-  gCaptureModeReqMode.store(mode, std::memory_order_release);
-  gCaptureModeReqXPermille.store(std::min<uint32_t>(10000u, xPermille), std::memory_order_release);
-  gCaptureModeReqYPermille.store(std::min<uint32_t>(10000u, yPermille), std::memory_order_release);
-  gCaptureModeReqPending.store(true, std::memory_order_release);
+  gCaptureModeRequests.Request(mode, xPermille, yPermille);
 }
 
 void request_capture_overview_mode() {
@@ -980,41 +977,9 @@ OverlayMetricAverages collect_overlay_averages(uint64_t nowUs, uint64_t windowUs
   return out;
 }
 
-void runtime_tune_set_default_if_needed() {
-  uint32_t bitrate = gRuntimeTargetBitrate.load(std::memory_order_relaxed);
-  if (bitrate == 0) {
-    const uint32_t fromTrafficX1000 = gClientMetrics.recvMbpsX1000.load(std::memory_order_relaxed);
-    uint32_t guessed = 8000000;
-    if (fromTrafficX1000 > 0) {
-      guessed = static_cast<uint32_t>(std::clamp<uint64_t>(
-          static_cast<uint64_t>(fromTrafficX1000) * 1000ULL, kRuntimeBitrateMin, kRuntimeBitrateMax));
-    }
-    gRuntimeTargetBitrate.store(guessed, std::memory_order_relaxed);
-  }
-  uint32_t keyint = gRuntimeTargetKeyint.load(std::memory_order_relaxed);
-  if (keyint == 0) {
-    gRuntimeTargetKeyint.store(60, std::memory_order_relaxed);
-  }
-}
-
 void apply_runtime_tune_delta(int bitrateStep, int keyintStep) {
-  if (!gRuntimeTuneEnabled.load(std::memory_order_relaxed)) return;
-  runtime_tune_set_default_if_needed();
-  if (bitrateStep != 0) {
-    const uint32_t cur = gRuntimeTargetBitrate.load(std::memory_order_relaxed);
-    const int64_t next = static_cast<int64_t>(cur) + static_cast<int64_t>(bitrateStep) * kRuntimeBitrateStep;
-    gRuntimeTargetBitrate.store(
-        static_cast<uint32_t>(std::clamp<int64_t>(next, kRuntimeBitrateMin, kRuntimeBitrateMax)),
-        std::memory_order_relaxed);
-  }
-  if (keyintStep != 0) {
-    const uint32_t cur = gRuntimeTargetKeyint.load(std::memory_order_relaxed);
-    const int64_t next = static_cast<int64_t>(cur) + static_cast<int64_t>(keyintStep);
-    gRuntimeTargetKeyint.store(
-        static_cast<uint32_t>(std::clamp<int64_t>(next, kRuntimeKeyintMin, kRuntimeKeyintMax)),
-        std::memory_order_relaxed);
-  }
-  gRuntimeTuneDirty.store(true, std::memory_order_release);
+  gRuntimeTuneState.ApplyDelta(
+      bitrateStep, keyintStep, gClientMetrics.recvMbpsX1000.load(std::memory_order_relaxed));
 }
 
 void draw_overlay(HDC hdc) {
@@ -2187,16 +2152,10 @@ int main(int argc, char** argv) {
   gOverlayConfig.keyReqTokenRefillUs = gKeyframeRequests.token_refill_us();
   gOverlayConfig.keyReqTokenCapacity = gKeyframeRequests.token_capacity();
   gOverlayConfig.udpSimDropPm = udpSimDropPm;
-  gRuntimeTargetBitrate.store(args.runtimeBitrate, std::memory_order_relaxed);
-  gRuntimeTargetKeyint.store(args.runtimeKeyint, std::memory_order_relaxed);
-  gRuntimeTuneEnabled.store(false, std::memory_order_relaxed);
-  gRuntimeTuneDirty.store(false, std::memory_order_relaxed);
+  gRuntimeTuneState.Reset(args.runtimeBitrate, args.runtimeKeyint);
   gControlConnected.store(false, std::memory_order_relaxed);
   gCaptureOverviewMode.store(true, std::memory_order_relaxed);
-  gCaptureModeReqPending.store(false, std::memory_order_relaxed);
-  gCaptureModeReqMode.store(0, std::memory_order_relaxed);
-  gCaptureModeReqXPermille.store(5000, std::memory_order_relaxed);
-  gCaptureModeReqYPermille.store(5000, std::memory_order_relaxed);
+  gCaptureModeRequests.Reset();
   gWindowPanelState.Reset();
   gSuppressMouseUntilUs.store(0, std::memory_order_relaxed);
   gActiveTouchPointerId.store(0, std::memory_order_relaxed);
@@ -2366,8 +2325,6 @@ int main(int argc, char** argv) {
         controlThread = std::thread([&]() {
           uint32_t pingSeq = 0;
           uint32_t metricsSeq = 0;
-          uint32_t runtimeSeq = 0;
-          uint32_t captureModeSeq = 0;
           uint32_t windowReqSeq = 0;
           uint32_t windowSelectSeq = 0;
           uint64_t lastMetricsSentUs = 0;
@@ -2480,15 +2437,16 @@ int main(int argc, char** argv) {
               didWork = true;
             }
 
-            if (gCaptureModeReqPending.exchange(false, std::memory_order_acq_rel)) {
+            PendingCaptureModeRequest pendingCaptureMode{};
+            if (gCaptureModeRequests.ConsumePending(&pendingCaptureMode)) {
               ControlCaptureModeRequestMessage req{};
               req.header.magic = remote60::native_poc::kMagic;
               req.header.type = static_cast<uint16_t>(MessageType::ControlCaptureModeRequest);
               req.header.size = static_cast<uint16_t>(sizeof(req));
-              req.seq = ++captureModeSeq;
-              req.mode = gCaptureModeReqMode.load(std::memory_order_acquire);
-              req.xPermille = std::min<uint32_t>(10000u, gCaptureModeReqXPermille.load(std::memory_order_acquire));
-              req.yPermille = std::min<uint32_t>(10000u, gCaptureModeReqYPermille.load(std::memory_order_acquire));
+              req.seq = pendingCaptureMode.seq;
+              req.mode = pendingCaptureMode.mode;
+              req.xPermille = pendingCaptureMode.xPermille;
+              req.yPermille = pendingCaptureMode.yPermille;
               req.clientSendQpcUs = nowUs;
               if (req.mode == 1 || req.mode == 2) {
                 if (!send_all(controlSock, &req, sizeof(req))) break;
@@ -2548,29 +2506,16 @@ int main(int argc, char** argv) {
               didWork = true;
             }
 
-            if (gRuntimeTuneEnabled.load(std::memory_order_relaxed) &&
-                gRuntimeTuneDirty.exchange(false, std::memory_order_acq_rel)) {
-              runtime_tune_set_default_if_needed();
-              ControlRuntimeEncoderConfigMessage tune{};
-              tune.header.magic = remote60::native_poc::kMagic;
-              tune.header.type = static_cast<uint16_t>(MessageType::ControlRuntimeEncoderConfig);
-              tune.header.size = static_cast<uint16_t>(sizeof(tune));
-              tune.seq = ++runtimeSeq;
-              tune.bitrate = gRuntimeTargetBitrate.load(std::memory_order_relaxed);
-              tune.keyint = gRuntimeTargetKeyint.load(std::memory_order_relaxed);
-              if (tune.bitrate > 0) tune.flags |= 0x1u;
-              if (tune.keyint > 0) tune.flags |= 0x2u;
-              tune.clientSendQpcUs = nowUs;
-              if (tune.flags != 0) {
-                if (!send_all(controlSock, &tune, sizeof(tune))) break;
-                gRuntimeTuneLastSentUs.store(nowUs, std::memory_order_relaxed);
-                std::cout << "[native-video-client][control] runtime-config seq=" << tune.seq
-                          << " bitrate=" << tune.bitrate
-                          << " keyint=" << tune.keyint
-                          << " flags=" << tune.flags
+            PendingRuntimeTuneRequest pendingTune{};
+            if (gRuntimeTuneState.ConsumePending(
+                    nowUs, gClientMetrics.recvMbpsX1000.load(std::memory_order_relaxed), &pendingTune)) {
+              if (!send_all(controlSock, &pendingTune.message, sizeof(pendingTune.message))) break;
+              std::cout << "[native-video-client][control] runtime-config seq=" << pendingTune.message.seq
+                        << " bitrate=" << pendingTune.message.bitrate
+                        << " keyint=" << pendingTune.message.keyint
+                        << " flags=" << pendingTune.message.flags
                           << "\n";
-                didWork = true;
-              }
+              didWork = true;
             }
 
             QueuedControlInputMessage outbound{};
@@ -2609,15 +2554,15 @@ int main(int argc, char** argv) {
             if (!didWork) Sleep(2);
           }
           gControlConnected.store(false, std::memory_order_relaxed);
-          gRuntimeTuneEnabled.store(false, std::memory_order_relaxed);
+          gRuntimeTuneState.SetEnabled(false);
           set_window_panel_status("control_disconnected");
           InvalidateRect(gHwnd, nullptr, FALSE);
         });
         gControlConnected.store(true, std::memory_order_relaxed);
-        gRuntimeTuneEnabled.store(useH264, std::memory_order_relaxed);
+        gRuntimeTuneState.SetEnabled(useH264);
         queue_window_list_request("window_list_request pending");
         if (useH264 && (args.runtimeBitrate > 0 || args.runtimeKeyint > 0)) {
-          gRuntimeTuneDirty.store(true, std::memory_order_release);
+          gRuntimeTuneState.MarkDirty();
         }
         std::cout << "[native-video-client] control connected port=" << args.controlPort
                   << " inputChannel=" << (inputChannelEnabled ? 1 : 0) << "\n";
@@ -2625,7 +2570,7 @@ int main(int argc, char** argv) {
         closesocket(controlSock);
         controlSock = INVALID_SOCKET;
         gControlConnected.store(false, std::memory_order_relaxed);
-        gRuntimeTuneEnabled.store(false, std::memory_order_relaxed);
+        gRuntimeTuneState.SetEnabled(false);
         set_window_panel_status("control_connect_failed");
         std::cout << "[native-video-client] control connect failed port=" << args.controlPort << "\n";
       }

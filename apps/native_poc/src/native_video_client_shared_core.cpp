@@ -143,6 +143,120 @@ uint32_t KeyframeRequestState::token_capacity() const {
   return tokenCapacity_.load(std::memory_order_relaxed);
 }
 
+void CaptureModeRequestState::Reset() {
+  pending_.store(false, std::memory_order_relaxed);
+  nextSeq_.store(0, std::memory_order_relaxed);
+  mode_.store(0, std::memory_order_relaxed);
+  xPermille_.store(5000, std::memory_order_relaxed);
+  yPermille_.store(5000, std::memory_order_relaxed);
+}
+
+void CaptureModeRequestState::Request(uint16_t mode, uint32_t xPermille, uint32_t yPermille) {
+  if (mode != 1 && mode != 2) return;
+  mode_.store(mode, std::memory_order_release);
+  xPermille_.store(std::min<uint32_t>(10000u, xPermille), std::memory_order_release);
+  yPermille_.store(std::min<uint32_t>(10000u, yPermille), std::memory_order_release);
+  pending_.store(true, std::memory_order_release);
+}
+
+bool CaptureModeRequestState::ConsumePending(PendingCaptureModeRequest* out) {
+  if (!out) return false;
+  if (!pending_.exchange(false, std::memory_order_acq_rel)) return false;
+  out->seq = nextSeq_.fetch_add(1, std::memory_order_relaxed) + 1;
+  out->mode = mode_.load(std::memory_order_acquire);
+  out->xPermille = std::min<uint32_t>(10000u, xPermille_.load(std::memory_order_acquire));
+  out->yPermille = std::min<uint32_t>(10000u, yPermille_.load(std::memory_order_acquire));
+  return (out->mode == 1 || out->mode == 2);
+}
+
+RuntimeTuneState::RuntimeTuneState(uint32_t bitrateMin, uint32_t bitrateMax, uint32_t bitrateStep,
+                                   uint32_t keyintMin, uint32_t keyintMax)
+    : bitrateMin_(bitrateMin),
+      bitrateMax_(std::max<uint32_t>(bitrateMin, bitrateMax)),
+      bitrateStep_(std::max<uint32_t>(1, bitrateStep)),
+      keyintMin_(std::max<uint32_t>(1, keyintMin)),
+      keyintMax_(std::max<uint32_t>(std::max<uint32_t>(1, keyintMin), keyintMax)) {}
+
+void RuntimeTuneState::Reset(uint32_t bitrate, uint32_t keyint) {
+  enabled_.store(false, std::memory_order_relaxed);
+  dirty_.store(false, std::memory_order_relaxed);
+  nextSeq_.store(0, std::memory_order_relaxed);
+  targetBitrate_.store(bitrate, std::memory_order_relaxed);
+  targetKeyint_.store(keyint, std::memory_order_relaxed);
+  lastSentUs_.store(0, std::memory_order_relaxed);
+}
+
+void RuntimeTuneState::SetEnabled(bool enabled) {
+  enabled_.store(enabled, std::memory_order_relaxed);
+}
+
+bool RuntimeTuneState::enabled() const {
+  return enabled_.load(std::memory_order_relaxed);
+}
+
+void RuntimeTuneState::MarkDirty() {
+  dirty_.store(true, std::memory_order_release);
+}
+
+void RuntimeTuneState::EnsureDefaults(uint32_t observedRecvMbpsX1000) {
+  uint32_t bitrate = targetBitrate_.load(std::memory_order_relaxed);
+  if (bitrate == 0) {
+    uint32_t guessed = 8000000;
+    if (observedRecvMbpsX1000 > 0) {
+      guessed = static_cast<uint32_t>(std::clamp<uint64_t>(
+          static_cast<uint64_t>(observedRecvMbpsX1000) * 1000ULL, bitrateMin_, bitrateMax_));
+    }
+    targetBitrate_.store(guessed, std::memory_order_relaxed);
+  }
+  uint32_t keyint = targetKeyint_.load(std::memory_order_relaxed);
+  if (keyint == 0) {
+    targetKeyint_.store(std::clamp<uint32_t>(60, keyintMin_, keyintMax_), std::memory_order_relaxed);
+  }
+}
+
+void RuntimeTuneState::ApplyDelta(int bitrateStepCount, int keyintStepCount, uint32_t observedRecvMbpsX1000) {
+  if (!enabled()) return;
+  EnsureDefaults(observedRecvMbpsX1000);
+  if (bitrateStepCount != 0) {
+    const uint32_t cur = targetBitrate_.load(std::memory_order_relaxed);
+    const int64_t next =
+        static_cast<int64_t>(cur) + static_cast<int64_t>(bitrateStepCount) * static_cast<int64_t>(bitrateStep_);
+    targetBitrate_.store(
+        static_cast<uint32_t>(std::clamp<int64_t>(next, bitrateMin_, bitrateMax_)),
+        std::memory_order_relaxed);
+  }
+  if (keyintStepCount != 0) {
+    const uint32_t cur = targetKeyint_.load(std::memory_order_relaxed);
+    const int64_t next = static_cast<int64_t>(cur) + static_cast<int64_t>(keyintStepCount);
+    targetKeyint_.store(
+        static_cast<uint32_t>(std::clamp<int64_t>(next, keyintMin_, keyintMax_)),
+        std::memory_order_relaxed);
+  }
+  MarkDirty();
+}
+
+bool RuntimeTuneState::ConsumePending(uint64_t nowUs, uint32_t observedRecvMbpsX1000, PendingRuntimeTuneRequest* out) {
+  if (!out) return false;
+  if (!enabled()) return false;
+  if (!dirty_.exchange(false, std::memory_order_acq_rel)) return false;
+  EnsureDefaults(observedRecvMbpsX1000);
+
+  ControlRuntimeEncoderConfigMessage message{};
+  message.header.magic = kMagic;
+  message.header.type = static_cast<uint16_t>(MessageType::ControlRuntimeEncoderConfig);
+  message.header.size = static_cast<uint16_t>(sizeof(message));
+  message.seq = nextSeq_.fetch_add(1, std::memory_order_relaxed) + 1;
+  message.bitrate = targetBitrate_.load(std::memory_order_relaxed);
+  message.keyint = targetKeyint_.load(std::memory_order_relaxed);
+  if (message.bitrate > 0) message.flags |= 0x1u;
+  if (message.keyint > 0) message.flags |= 0x2u;
+  if (message.flags == 0) return false;
+  message.clientSendQpcUs = nowUs;
+  out->message = message;
+  lastSentUs_.store(nowUs, std::memory_order_relaxed);
+  return true;
+}
+
 void WindowPanelStateModel::Reset() {
   std::lock_guard<std::mutex> lk(mu_);
   state_ = WindowPanelSnapshot{};

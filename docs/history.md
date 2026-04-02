@@ -1724,3 +1724,30 @@ Validation / build / test result
 Next action
 - `Phase B` 범위로 `UDP handshake/assembly`, `TCP control loop`, `window list/select`, `input ack`를 계속 core 쪽으로 이동한다.
 - 이후 Windows localhost direct-connect 회귀와 남아 있는 `M3.5 background 입력 주입 1차 수동 검증`을 진행한다.
+
+### 132) 2026-04-02 android prework control state extraction
+Goal
+- Android direct client 선행 작업으로 Windows native video client의 control-thread 상태를 추가로 shared core로 이동한다.
+- `capture mode request`와 `runtime tune state`를 공용 상태기계로 분리해 이후 `TCP control loop` 자체 분리에 필요한 경계를 더 선명하게 만든다.
+
+Files changed
+- `apps/native_poc/src/native_video_client_main.cpp`
+- `apps/native_poc/src/native_video_client_shared_core.hpp`
+- `apps/native_poc/src/native_video_client_shared_core.cpp`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - `cmake --build build-vcpkg-local --target remote60_native_video_client_poc --config Debug`
+  - 결과: 성공
+- Code/structure:
+  - `capture mode request` pending/sequence 관리가 shared core로 이동
+  - `runtime tune` enable/dirty/default/consume 로직이 shared core로 이동
+  - Windows main/control thread는 shared core 객체를 소비하는 glue 역할로 축소
+- Test:
+  - direct-connect 런타임 smoke와 수동 입력 검증은 이번 턴에 수행하지 않음
+
+Next action
+- `TCP control loop`의 메시지 송수신 절차 자체를 shared core helper로 옮긴다.
+- 이후 `UDP handshake/assembly` 분리와 Windows localhost 회귀 확인으로 `Phase B`를 더 진행한다.

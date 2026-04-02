@@ -65,6 +65,59 @@ class KeyframeRequestState {
   uint64_t lastRefillUs_ = 0;
 };
 
+struct PendingCaptureModeRequest {
+  uint32_t seq = 0;
+  uint16_t mode = 0;
+  uint32_t xPermille = 5000;
+  uint32_t yPermille = 5000;
+};
+
+class CaptureModeRequestState {
+ public:
+  void Reset();
+  void Request(uint16_t mode, uint32_t xPermille, uint32_t yPermille);
+  bool ConsumePending(PendingCaptureModeRequest* out);
+
+ private:
+  std::atomic<bool> pending_{false};
+  std::atomic<uint32_t> nextSeq_{0};
+  std::atomic<uint16_t> mode_{0};
+  std::atomic<uint32_t> xPermille_{5000};
+  std::atomic<uint32_t> yPermille_{5000};
+};
+
+struct PendingRuntimeTuneRequest {
+  ControlRuntimeEncoderConfigMessage message{};
+};
+
+class RuntimeTuneState {
+ public:
+  RuntimeTuneState(uint32_t bitrateMin, uint32_t bitrateMax, uint32_t bitrateStep,
+                   uint32_t keyintMin, uint32_t keyintMax);
+
+  void Reset(uint32_t bitrate, uint32_t keyint);
+  void SetEnabled(bool enabled);
+  bool enabled() const;
+  void MarkDirty();
+  void ApplyDelta(int bitrateStepCount, int keyintStepCount, uint32_t observedRecvMbpsX1000);
+  bool ConsumePending(uint64_t nowUs, uint32_t observedRecvMbpsX1000, PendingRuntimeTuneRequest* out);
+
+ private:
+  void EnsureDefaults(uint32_t observedRecvMbpsX1000);
+
+  const uint32_t bitrateMin_;
+  const uint32_t bitrateMax_;
+  const uint32_t bitrateStep_;
+  const uint32_t keyintMin_;
+  const uint32_t keyintMax_;
+  std::atomic<bool> enabled_{false};
+  std::atomic<bool> dirty_{false};
+  std::atomic<uint32_t> nextSeq_{0};
+  std::atomic<uint32_t> targetBitrate_{0};
+  std::atomic<uint32_t> targetKeyint_{0};
+  std::atomic<uint64_t> lastSentUs_{0};
+};
+
 struct WindowTargetUiEntry {
   uint64_t id = 0;
   uint32_t pid = 0;
