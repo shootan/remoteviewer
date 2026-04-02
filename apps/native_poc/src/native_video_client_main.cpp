@@ -75,6 +75,8 @@ using remote60::native_poc::ControlOutboundActionKind;
 using remote60::native_poc::RawFrameHeader;
 using remote60::native_poc::QueuedControlInputMessage;
 using remote60::native_poc::RuntimeTuneState;
+using remote60::native_poc::UdpH264AssemblyDisposition;
+using remote60::native_poc::UdpH264FrameAssembler;
 using remote60::native_poc::UdpCodec;
 using remote60::native_poc::UdpHelloPacket;
 using remote60::native_poc::UdpPacketKind;
@@ -3296,12 +3298,7 @@ int main(int argc, char** argv) {
                                                    : static_cast<uint32_t>(qpc_now_us() & 0x7fffffffu);
       std::minstd_rand udpSimRng(effectiveUdpSimDropSeed);
       std::uniform_int_distribution<uint32_t> udpSimDropDist(0, 999);
-      bool assembling = false;
-      uint32_t assemblingSeq = 0;
-      uint32_t assemblingExpected = 0;
-      uint32_t assemblingNextOffset = 0;
-      EncodedFrameHeader assemblingHdr{};
-      std::vector<uint8_t> assemblingPayload;
+      UdpH264FrameAssembler assembler;
       uint64_t assemblyDropped = 0;
       uint64_t udpSimDroppedCount = 0;
       uint64_t udpSimAcceptedCount = 0;
@@ -3341,48 +3338,24 @@ int main(int argc, char** argv) {
         }
         ++udpSimAcceptedCount;
         ++udpChunkRecvCount;
-        if (u.payloadSize == 0 || u.chunkSize == 0 ||
-            u.chunkOffset > u.payloadSize ||
-            (u.chunkOffset + u.chunkSize) > u.payloadSize ||
-            (sizeof(UdpVideoChunkHeader) + u.chunkSize) > static_cast<uint32_t>(n)) {
+
+        const auto assembleResult = assembler.PushDatagram(datagram.data(), static_cast<size_t>(n));
+        if (assembleResult.droppedPreviousIncomplete) {
+          ++assemblyDropped;
+          ++udpAssemblyDroppedCount;
+        }
+
+        if (assembleResult.disposition == UdpH264AssemblyDisposition::Malformed) {
           ++skippedQueued;
           ++udpAssemblyMalformedCount;
-          assembling = false;
           continue;
         }
 
-        const bool firstChunk = ((u.flags & 0x2u) != 0);
-        const bool lastChunk = ((u.flags & 0x4u) != 0);
-        if (firstChunk) {
-          // Count the previous incomplete assembly as a drop if we were mid-assembly
-          if (assembling && assemblingNextOffset < assemblingExpected) {
-            ++assemblyDropped;
-            ++udpAssemblyDroppedCount;
-          }
-          assembling = true;
-          assemblingSeq = u.seq;
-          assemblingExpected = u.payloadSize;
-          assemblingNextOffset = 0;
-          assemblingPayload.assign(assemblingExpected, 0);
-          assemblingHdr = {};
-          assemblingHdr.header.magic = remote60::native_poc::kMagic;
-          assemblingHdr.header.type = static_cast<uint16_t>(MessageType::EncodedFrameH264);
-          assemblingHdr.header.size = static_cast<uint16_t>(sizeof(assemblingHdr));
-          assemblingHdr.seq = u.seq;
-          assemblingHdr.width = u.width;
-          assemblingHdr.height = u.height;
-          assemblingHdr.flags = (u.flags & 0x1u) ? 1u : 0u;
-          assemblingHdr.captureQpcUs = u.captureQpcUs;
-          assemblingHdr.encodeStartQpcUs = u.encodeStartQpcUs;
-          assemblingHdr.encodeEndQpcUs = u.encodeEndQpcUs;
-          assemblingHdr.sendQpcUs = u.sendQpcUs;
-        }
-
-        if (!assembling || u.seq != assemblingSeq || u.chunkOffset != assemblingNextOffset) {
+        if (assembleResult.disposition == UdpH264AssemblyDisposition::Dropped) {
           ++skippedQueued;
           ++assemblyDropped;
           ++udpAssemblyDroppedCount;
-          ++udpAssemblyReorderCount;
+          if (assembleResult.reorderDetected) ++udpAssemblyReorderCount;
           // Keep requesting keyframes on sustained assembly drops; rate-limit is handled in request_keyframe().
           if ((assemblyDropped % 20) == 1) {
             request_keyframe(2);
@@ -3391,32 +3364,19 @@ int main(int argc, char** argv) {
           if ((assemblyDropped % 120) == 1) {
             std::cout << "[native-video-client] udp assembly drop count=" << assemblyDropped
                       << " seq=" << u.seq
-                      << " expectedSeq=" << assemblingSeq
+                      << " expectedSeq=" << assembleResult.expectedSeq
                       << " chunkOffset=" << u.chunkOffset
-                      << " nextOffset=" << assemblingNextOffset
+                      << " nextOffset=" << assembleResult.expectedNextOffset
                       << "\n";
           }
           continue;
         }
 
-        std::memcpy(assemblingPayload.data() + u.chunkOffset,
-                    datagram.data() + sizeof(UdpVideoChunkHeader), u.chunkSize);
-        assemblingNextOffset += u.chunkSize;
-        if (lastChunk) {
-          if (assemblingNextOffset != assemblingExpected) {
-            ++skippedQueued;
-            ++assemblyDropped;
-            ++udpAssemblyDroppedCount;
-            ++udpAssemblyMalformedCount;
-            assembling = false;
-            continue;
-          }
-          assemblingHdr.payloadSize = assemblingExpected;
-          std::vector<uint8_t> payload = std::move(assemblingPayload);
-          assembling = false;
+        if (assembleResult.disposition == UdpH264AssemblyDisposition::Completed) {
           ++udpAssemblyCompletedCount;
           const uint64_t packetNowUs = qpc_now_us();
-          if (!process_h264_frame(assemblingHdr, &payload, packetNowUs)) break;
+          auto payload = std::move(assembleResult.frame.payload);
+          if (!process_h264_frame(assembleResult.frame.header, &payload, packetNowUs)) break;
         }
 
         const uint64_t nowUs = qpc_now_us();

@@ -179,6 +179,45 @@ class ClientControlScheduler {
   uint32_t controlIntervalMs_ = 1000;
 };
 
+enum class UdpH264AssemblyDisposition : uint8_t {
+  Ignored = 0,
+  Partial,
+  Completed,
+  Malformed,
+  Dropped,
+};
+
+struct UdpH264AssembledFrame {
+  EncodedFrameHeader header{};
+  std::vector<uint8_t> payload;
+};
+
+struct UdpH264AssemblyStepResult {
+  UdpH264AssemblyDisposition disposition = UdpH264AssemblyDisposition::Ignored;
+  bool startedNewAssembly = false;
+  bool droppedPreviousIncomplete = false;
+  bool reorderDetected = false;
+  uint32_t packetSeq = 0;
+  uint32_t expectedSeq = 0;
+  uint32_t packetChunkOffset = 0;
+  uint32_t expectedNextOffset = 0;
+  UdpH264AssembledFrame frame{};
+};
+
+class UdpH264FrameAssembler {
+ public:
+  void Reset();
+  UdpH264AssemblyStepResult PushDatagram(const uint8_t* data, size_t len);
+
+ private:
+  bool assembling_ = false;
+  uint32_t assemblingSeq_ = 0;
+  uint32_t assemblingExpected_ = 0;
+  uint32_t assemblingNextOffset_ = 0;
+  EncodedFrameHeader assemblingHeader_{};
+  std::vector<uint8_t> assemblingPayload_;
+};
+
 struct WindowTargetUiEntry {
   uint64_t id = 0;
   uint32_t pid = 0;

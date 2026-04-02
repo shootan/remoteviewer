@@ -18,6 +18,11 @@ using remote60::native_poc::KeyframeRequestState;
 using remote60::native_poc::MessageType;
 using remote60::native_poc::QueuedControlInputMessage;
 using remote60::native_poc::RuntimeTuneState;
+using remote60::native_poc::UdpCodec;
+using remote60::native_poc::UdpH264AssemblyDisposition;
+using remote60::native_poc::UdpH264FrameAssembler;
+using remote60::native_poc::UdpPacketKind;
+using remote60::native_poc::UdpVideoChunkHeader;
 using remote60::native_poc::WindowPanelStateModel;
 
 bool expect(bool condition, const std::string& message) {
@@ -173,12 +178,58 @@ bool test_capture_runtime_and_keyframe_actions() {
   return true;
 }
 
+bool test_udp_assembler() {
+  UdpH264FrameAssembler assembler;
+  std::vector<uint8_t> datagram(sizeof(UdpVideoChunkHeader) + 4, 0);
+  auto* header = reinterpret_cast<UdpVideoChunkHeader*>(datagram.data());
+  header->magic = remote60::native_poc::kMagic;
+  header->kind = static_cast<uint16_t>(UdpPacketKind::VideoChunk);
+  header->size = static_cast<uint16_t>(sizeof(UdpVideoChunkHeader));
+  header->seq = 42;
+  header->codec = static_cast<uint16_t>(UdpCodec::H264);
+  header->flags = 0x1u | 0x2u | 0x4u;
+  header->width = 1280;
+  header->height = 720;
+  header->payloadSize = 4;
+  header->chunkOffset = 0;
+  header->chunkSize = 4;
+  datagram[sizeof(UdpVideoChunkHeader) + 0] = 1;
+  datagram[sizeof(UdpVideoChunkHeader) + 1] = 2;
+  datagram[sizeof(UdpVideoChunkHeader) + 2] = 3;
+  datagram[sizeof(UdpVideoChunkHeader) + 3] = 4;
+
+  auto result = assembler.PushDatagram(datagram.data(), datagram.size());
+  if (!expect(result.disposition == UdpH264AssemblyDisposition::Completed,
+              "udp assembler should complete single-chunk frame")) return false;
+  if (!expect(result.frame.header.seq == 42, "udp assembler should preserve seq")) return false;
+  if (!expect(result.frame.payload.size() == 4 && result.frame.payload[3] == 4,
+              "udp assembler payload mismatch")) return false;
+
+  assembler.Reset();
+  header->flags = 0x2u;
+  header->payloadSize = 8;
+  header->chunkOffset = 0;
+  header->chunkSize = 4;
+  result = assembler.PushDatagram(datagram.data(), datagram.size());
+  if (!expect(result.disposition == UdpH264AssemblyDisposition::Partial,
+              "udp assembler should enter partial state")) return false;
+
+  header->flags = 0x4u;
+  header->chunkOffset = 6;
+  result = assembler.PushDatagram(datagram.data(), datagram.size());
+  if (!expect(result.disposition == UdpH264AssemblyDisposition::Dropped && result.reorderDetected,
+              "udp assembler should detect reorder/drop")) return false;
+
+  return true;
+}
+
 }  // namespace
 
 int main() {
   if (!test_ping_and_metrics_order()) return 1;
   if (!test_window_and_input_actions()) return 1;
   if (!test_capture_runtime_and_keyframe_actions()) return 1;
+  if (!test_udp_assembler()) return 1;
   std::cout << "[shared-core-test] PASS\n";
   return 0;
 }

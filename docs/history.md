@@ -1703,7 +1703,6 @@ Goal
 - Windows 전용 UI/렌더링은 유지하고, Android/Windows 공통 후보인 `input queue`, `window panel state`, `keyframe request limiter`를 core 파일로 이동한다.
 
 Files changed
-- `apps/native_poc/CMakeLists.txt`
 - `apps/native_poc/src/native_video_client_main.cpp`
 - `apps/native_poc/src/native_video_client_shared_core.hpp`
 - `apps/native_poc/src/native_video_client_shared_core.cpp`
@@ -1781,3 +1780,41 @@ Validation / build / test result
 Next action
 - `TCP adapter` 자체를 helper로 정리해 `send/recv` 절차를 main에서 더 걷어낸다.
 - 그 다음 `UDP handshake/assembly` 분리와 Windows localhost direct-connect 회귀 확인을 진행한다.
+
+### 134) 2026-04-02 android prework udp assembly helper and localhost smoke
+Goal
+- Android/향후 transport 분리를 위해 Windows native video client의 UDP H.264 assembly 상태를 shared core helper로 이동한다.
+- shared core 테스트와 localhost runtime smoke를 다시 실행해 scheduler/assembler refactor 이후 최소 자동 경로를 확인한다.
+
+Files changed
+- `apps/native_poc/CMakeLists.txt`
+- `apps/native_poc/src/native_video_client_main.cpp`
+- `apps/native_poc/src/native_video_client_shared_core.hpp`
+- `apps/native_poc/src/native_video_client_shared_core.cpp`
+- `apps/native_poc/src/native_video_client_shared_core_test.cpp`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - `cmake --build build-vcpkg-local --target remote60_native_video_client_poc remote60_native_video_client_shared_core_test --config Debug`
+  - 결과: 성공
+- Shared core test:
+  - `build-vcpkg-local/apps/native_poc/Debug/remote60_native_video_client_shared_core_test.exe`
+  - 결과: `PASS`
+- Localhost smoke:
+  - `powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -Root . -BuildDir build-vcpkg-local -Codec h264 -Transport udp -Fps 30 -FpsHint 30 -HostSeconds 10 -ClientSeconds 6 -Bitrate 1100000 -Keyint 15 -TraceEvery 0 -NoInputChannel`
+  - 결과:
+    - `HOST_RC=0`, `CLIENT_RC=0`
+    - `UDP_ASSEMBLY_DROPPED_TOTAL=0`
+    - `CTRL_RTT_AVG_US=294.67`
+    - `OVERALL_OK=True`
+    - 단, `DEC_AVG=6.2`, `GATE_A_PASS=False`, `CAPTURE_INPUT_STALL_DETECTED=True`
+- Code/structure:
+  - shared core에 `UdpH264FrameAssembler` 추가
+  - recv thread가 assembly 상태를 직접 들지 않고 helper 결과만 소비
+  - shared core test에 UDP assembler 케이스 추가
+
+Next action
+- `TCP adapter`의 send/recv/typed-response 처리도 별도 helper로 옮겨 main을 더 얇게 만든다.
+- 이후 실제 Gate A 판정용 localhost/2PC 회귀는 capture stall 원인을 분리한 뒤 다시 본다.
