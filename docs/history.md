@@ -1696,3 +1696,31 @@ Validation / build / test result
 Next action
 - `Phase A. 공용 core 추출 범위 고정`부터 착수한다.
 - 구현 시작 전 Windows client에서 core로 이동할 함수/상태 묶음을 먼저 잘라내고, direct-connect 회귀 기준을 선행 정리한다.
+
+### 131) 2026-04-02 android prework shared client core slice
+Goal
+- Android direct client 착수 전에 Windows native video client에서 공용 core로 분리 가능한 첫 상태 묶음을 실제 코드로 추출한다.
+- Windows 전용 UI/렌더링은 유지하고, Android/Windows 공통 후보인 `input queue`, `window panel state`, `keyframe request limiter`를 core 파일로 이동한다.
+
+Files changed
+- `apps/native_poc/CMakeLists.txt`
+- `apps/native_poc/src/native_video_client_main.cpp`
+- `apps/native_poc/src/native_video_client_shared_core.hpp`
+- `apps/native_poc/src/native_video_client_shared_core.cpp`
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - `cmake --build build-vcpkg-local --target remote60_native_video_client_poc --config Debug`
+  - 결과: 성공
+- Code/structure:
+  - `native_video_client_main.cpp`에서 공용 후보 상태기계 일부를 새 shared core로 치환
+  - Windows 클라이언트는 새 core 객체를 통해 기존 input/window/keyframe 흐름을 계속 사용
+- Test:
+  - 로컬 서버를 띄운 direct-connect 런타임 smoke 및 `M3.5 background 입력 주입 1차 수동 검증`은 이번 턴에서 수행하지 않음
+
+Next action
+- `Phase B` 범위로 `UDP handshake/assembly`, `TCP control loop`, `window list/select`, `input ack`를 계속 core 쪽으로 이동한다.
+- 이후 Windows localhost direct-connect 회귀와 남아 있는 `M3.5 background 입력 주입 1차 수동 검증`을 진행한다.

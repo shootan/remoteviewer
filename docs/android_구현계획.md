@@ -1,5 +1,5 @@
 # Android Direct Client 구현계획
-Updated: 2026-04-02 15:55
+Updated: 2026-04-02 17:53
 
 이 문서는 Android direct client 작업의 단일 기준(Source of Truth)으로 사용한다.
 
@@ -194,4 +194,4 @@ Updated: 2026-04-02 15:55
 - [x] 공용 client core 재사용 전략 명시
 - [x] 단계별 작업 순서와 gate 정의
 - [x] v1 범위와 제외 범위 고정
-- [ ] Phase A 구현 착수
+- [x] Phase A 구현 착수

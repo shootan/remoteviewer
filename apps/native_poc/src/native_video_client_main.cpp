@@ -36,6 +36,7 @@
 
 #include "mf_h264_codec.hpp"
 #include "json_profile.hpp"
+#include "native_video_client_shared_core.hpp"
 #include "native_video_transport.hpp"
 #include "poc_protocol.hpp"
 #include "time_utils.hpp"
@@ -59,17 +60,23 @@ using remote60::native_poc::ControlWindowSelectMessage;
 using remote60::native_poc::ControlWindowSelectedMessage;
 using remote60::native_poc::ControlPingMessage;
 using remote60::native_poc::ControlPongMessage;
+using remote60::native_poc::ClientInputQueue;
 using remote60::native_poc::DecodedFrameNv12;
 using remote60::native_poc::EncodedFrameHeader;
 using remote60::native_poc::H264Decoder;
+using remote60::native_poc::KeyframeRequestState;
 using remote60::native_poc::MessageHeader;
 using remote60::native_poc::MessageType;
 using remote60::native_poc::RawFrameHeader;
+using remote60::native_poc::QueuedControlInputMessage;
 using remote60::native_poc::UdpCodec;
 using remote60::native_poc::UdpHelloPacket;
 using remote60::native_poc::UdpPacketKind;
 using remote60::native_poc::UdpVideoChunkHeader;
 using remote60::native_poc::VideoTransport;
+using remote60::native_poc::WindowPanelSnapshot;
+using remote60::native_poc::WindowPanelStateModel;
+using remote60::native_poc::WindowTargetUiEntry;
 using remote60::native_poc::nv12_to_bgra;
 using remote60::native_poc::clamp_udp_mtu;
 using remote60::native_poc::parse_video_transport;
@@ -484,15 +491,7 @@ const char* congestion_state_name(ClientCongestionState state) {
   }
 }
 
-std::mutex gInputMu;
-struct QueuedControlInputMessage {
-  MessageType type = MessageType::ControlInputEvent;
-  ControlInputEventMessage inputEvent{};
-  ControlInputTextMessage inputText{};
-};
-std::deque<QueuedControlInputMessage> gInputQueue;
-std::atomic<uint32_t> gInputSeq{0};
-std::atomic<uint64_t> gInputDropped{0};
+ClientInputQueue gInputQueueState;
 std::atomic<bool> gInputEnabled{false};
 std::atomic<uint16_t> gMouseButtons{0};
 std::atomic<int32_t> gLastInputVideoX{0};
@@ -523,17 +522,10 @@ struct ClientRuntimeMetrics {
 };
 
 ClientRuntimeMetrics gClientMetrics;
-std::atomic<bool> gKeyframeRequestPending{false};
-std::atomic<uint16_t> gKeyframeRequestReason{0};
-std::atomic<uint32_t> gKeyframeRequestCount{0};
-std::atomic<uint64_t> gLastKeyframeRequestUs{0};
-std::atomic<uint64_t> gKeyframeRequestMinIntervalUs{kKeyframeRequestMinIntervalUsDefault};
-std::atomic<uint64_t> gKeyframeRequestTokenRefillUs{kKeyframeRequestTokenRefillUsDefault};
-std::atomic<uint32_t> gKeyframeRequestTokenCapacity{kKeyframeRequestTokenCapacityDefault};
-std::atomic<uint64_t> gKeyframeRequestThrottledCount{0};
-std::mutex gKeyframeLimiterMu;
-double gKeyframeLimiterTokens = static_cast<double>(kKeyframeRequestTokenCapacityDefault);
-uint64_t gKeyframeLimiterLastRefillUs = 0;
+KeyframeRequestState gKeyframeRequests{
+    kKeyframeRequestMinIntervalUsDefault,
+    kKeyframeRequestTokenRefillUsDefault,
+    kKeyframeRequestTokenCapacityDefault};
 std::atomic<uint64_t> gLastPresentedVersion{0};
 std::atomic<uint64_t> gLastPresentedCaptureUs{0};  // updated after actual present, not at queue time
 std::atomic<uint64_t> gPaintCoalescedCount{0};
@@ -605,30 +597,7 @@ std::mutex gOverlayMetricsMu;
 std::deque<OverlayMetricSample> gOverlayMetrics;
 void log_client_line(const std::string& line);
 
-struct WindowTargetUiEntry {
-  uint64_t id = 0;
-  uint32_t pid = 0;
-  uint32_t width = 0;
-  uint32_t height = 0;
-  bool minimized = false;
-  std::string title;
-};
-
-struct WindowPanelState {
-  std::vector<WindowTargetUiEntry> items;
-  uint64_t selectedId = 0;
-  std::string selectedTitle = "desktop";
-  bool selectionLocked = false;
-  bool listRequestPending = false;
-  bool selectRequestPending = false;
-  uint64_t pendingSelectId = 0;
-  uint32_t nextRequestSeq = 1;
-  std::string status = "waiting_control";
-  int scrollIndex = 0;
-};
-
-std::mutex gWindowPanelMu;
-WindowPanelState gWindowPanel;
+WindowPanelStateModel gWindowPanelState;
 std::atomic<bool> gWindowPickerVisible{true};
 std::atomic<bool> gWindowPickerToggleDown{false};
 std::atomic<uint64_t> gSuppressMouseUntilUs{0};
@@ -783,20 +752,7 @@ void enqueue_input_event(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta
 void enqueue_input_text_units(const uint16_t* text, size_t count);
 
 void enqueue_control_input_message(const QueuedControlInputMessage& msg) {
-  std::lock_guard<std::mutex> lk(gInputMu);
-  if (msg.type == MessageType::ControlInputEvent &&
-      msg.inputEvent.kind == 1 &&
-      !gInputQueue.empty() &&
-      gInputQueue.back().type == MessageType::ControlInputEvent &&
-      gInputQueue.back().inputEvent.kind == 1) {
-    gInputQueue.back() = msg;
-    return;
-  }
-  if (gInputQueue.size() >= 256) {
-    gInputQueue.pop_front();
-    gInputDropped.fetch_add(1);
-  }
-  gInputQueue.push_back(msg);
+  gInputQueueState.Enqueue(msg);
 }
 
 void enqueue_input_text_units(const uint16_t* text, size_t count) {
@@ -812,7 +768,7 @@ void enqueue_input_text_units(const uint16_t* text, size_t count) {
     msg.inputText.header.magic = remote60::native_poc::kMagic;
     msg.inputText.header.type = static_cast<uint16_t>(MessageType::ControlInputText);
     msg.inputText.header.size = static_cast<uint16_t>(sizeof(msg.inputText));
-    msg.inputText.seq = gInputSeq.fetch_add(1) + 1;
+    msg.inputText.seq = gInputQueueState.NextSequence();
     msg.inputText.utf16Count = static_cast<uint16_t>(chunk);
     std::memcpy(msg.inputText.utf16, text + offset, chunk * sizeof(uint16_t));
     msg.inputText.clientSendQpcUs = qpc_now_us();
@@ -878,102 +834,38 @@ uint32_t coord_to_permille(int coord, int extent) {
 }
 
 void queue_window_list_request(const char* statusText = nullptr) {
-  std::lock_guard<std::mutex> lk(gWindowPanelMu);
-  gWindowPanel.listRequestPending = true;
-  if (statusText) gWindowPanel.status = statusText;
+  gWindowPanelState.RequestList(statusText);
 }
 
 void queue_window_select_request(uint64_t windowId, const char* statusText = nullptr) {
-  std::lock_guard<std::mutex> lk(gWindowPanelMu);
-  if (gWindowPanel.selectionLocked) return;
-  gWindowPanel.selectRequestPending = true;
-  gWindowPanel.pendingSelectId = windowId;
-  if (statusText) gWindowPanel.status = statusText;
+  gWindowPanelState.RequestSelect(windowId, statusText);
 }
 
 void set_window_panel_status(const std::string& status) {
-  std::lock_guard<std::mutex> lk(gWindowPanelMu);
-  gWindowPanel.status = status;
+  gWindowPanelState.SetStatus(status);
 }
 
 void apply_window_list_snapshot(const ControlWindowListMessage& msg) {
-  std::lock_guard<std::mutex> lk(gWindowPanelMu);
-  gWindowPanel.items.clear();
-  const uint32_t count = std::min<uint32_t>(msg.itemCount, remote60::native_poc::kControlWindowListMaxEntries);
-  gWindowPanel.items.reserve(count);
-  for (uint32_t i = 0; i < count; ++i) {
-    const auto& src = msg.items[i];
-    WindowTargetUiEntry item{};
-    item.id = src.id;
-    item.pid = src.pid;
-    item.width = src.width;
-    item.height = src.height;
-    item.minimized = ((src.flags & 0x1u) != 0);
-    item.title = fixed_cstr_to_string(src.title, sizeof(src.title));
-    if (item.title.empty()) item.title = "(untitled)";
-    gWindowPanel.items.push_back(std::move(item));
-  }
-  gWindowPanel.selectedId = msg.selectedWindowId;
-  gWindowPanel.selectionLocked = ((msg.flags & 0x1u) != 0);
-  if (msg.selectedWindowId == 0) {
-    gWindowPanel.selectedTitle = "desktop";
-  } else {
-    auto it = std::find_if(gWindowPanel.items.begin(), gWindowPanel.items.end(),
-                           [&](const WindowTargetUiEntry& entry) {
-                             return entry.id == msg.selectedWindowId;
-                           });
-    gWindowPanel.selectedTitle = (it != gWindowPanel.items.end()) ? it->title : "window";
-  }
   const ClientLayout layout = compute_client_layout(gHwnd);
   const int visibleCount =
       std::max<int>(1, (layout.listRect.bottom - layout.listRect.top) / (kPanelItemHeight + kPanelItemGap));
-  const int maxScroll = std::max<int>(0, static_cast<int>(gWindowPanel.items.size()) - visibleCount);
-  gWindowPanel.scrollIndex = std::clamp(gWindowPanel.scrollIndex, 0, maxScroll);
-  gWindowPanel.status = std::string("window_list_received count=") + std::to_string(count);
-  std::ostringstream oss;
-  oss << "[native-video-client][control] window-list seq=" << msg.seq
-      << " count=" << count
-      << " selectedId=" << msg.selectedWindowId
-      << " locked=" << (((msg.flags & 0x1u) != 0) ? 1 : 0);
-  if (!gWindowPanel.items.empty()) {
-    oss << " firstId=" << gWindowPanel.items.front().id
-        << " firstTitle=" << gWindowPanel.items.front().title;
-  }
-  log_client_line(oss.str());
+  const auto result = gWindowPanelState.ApplyWindowList(msg, visibleCount);
+  log_client_line(result.logLine);
 }
 
 void apply_window_selected_result(const ControlWindowSelectedMessage& msg) {
-  std::lock_guard<std::mutex> lk(gWindowPanelMu);
-  const bool ok = ((msg.flags & 0x1u) != 0);
-  const bool locked = ((msg.flags & 0x2u) != 0);
-  gWindowPanel.selectionLocked = gWindowPanel.selectionLocked || locked;
-  const std::string reason = fixed_cstr_to_string(msg.reason, sizeof(msg.reason));
-  const std::string title = fixed_cstr_to_string(msg.title, sizeof(msg.title));
-  if (ok) {
-    gWindowPanel.selectedId = msg.windowId;
-    gWindowPanel.selectedTitle = (msg.windowId == 0) ? "desktop" : (title.empty() ? "window" : title);
-    gWindowPanel.status = std::string("window_selected: ") + gWindowPanel.selectedTitle;
+  const auto result = gWindowPanelState.ApplyWindowSelected(msg);
+  if (result.ok) {
     gWindowPickerVisible.store(false, std::memory_order_relaxed);
-  } else {
-    gWindowPanel.status = std::string("window_select_failed: ") + (reason.empty() ? "unknown" : reason);
   }
-  std::ostringstream oss;
-  oss << "[native-video-client][control] window-selected seq=" << msg.seq
-      << " ok=" << (ok ? 1 : 0)
-      << " windowId=" << msg.windowId
-      << " reason=" << (reason.empty() ? "none" : reason)
-      << " title=" << (title.empty() ? "<empty>" : title)
-      << " locked=" << (locked ? 1 : 0);
-  log_client_line(oss.str());
+  log_client_line(result.logLine);
 }
 
 void scroll_window_list(HWND hwnd, int deltaSteps) {
   const ClientLayout layout = compute_client_layout(hwnd);
   const int visibleCount =
       std::max<int>(1, (layout.listRect.bottom - layout.listRect.top) / (kPanelItemHeight + kPanelItemGap));
-  std::lock_guard<std::mutex> lk(gWindowPanelMu);
-  const int maxScroll = std::max<int>(0, static_cast<int>(gWindowPanel.items.size()) - visibleCount);
-  gWindowPanel.scrollIndex = std::clamp(gWindowPanel.scrollIndex + deltaSteps, 0, maxScroll);
+  gWindowPanelState.Scroll(deltaSteps, visibleCount);
 }
 
 bool try_hit_window_list_item(HWND hwnd, int x, int y, uint64_t* outWindowId) {
@@ -984,14 +876,8 @@ bool try_hit_window_list_item(HWND hwnd, int x, int y, uint64_t* outWindowId) {
   const int row = (y - layout.listRect.top - 6) / itemStep;
   if (row < 0) return false;
 
-  std::lock_guard<std::mutex> lk(gWindowPanelMu);
   const int visibleCount = std::max<int>(1, (layout.listRect.bottom - layout.listRect.top - 8) / itemStep);
-  const int scrollIndex = std::clamp(gWindowPanel.scrollIndex, 0,
-                                     std::max<int>(0, static_cast<int>(gWindowPanel.items.size()) - visibleCount));
-  const int itemIndex = scrollIndex + row;
-  if (itemIndex < 0 || itemIndex >= static_cast<int>(gWindowPanel.items.size())) return false;
-  *outWindowId = gWindowPanel.items[itemIndex].id;
-  return true;
+  return gWindowPanelState.TryResolveWindowIdForVisibleRow(row, visibleCount, outWindowId);
 }
 
 void enqueue_capture_mode_request(uint16_t mode, uint32_t xPermille, uint32_t yPermille) {
@@ -1166,21 +1052,13 @@ void draw_overlay(HDC hdc) {
     hostCapProcess = gHostCaptureTargetProcess;
     hostCapTitle = gHostCaptureTargetTitle;
   }
-  std::vector<WindowTargetUiEntry> windowItems;
-  uint64_t selectedId = 0;
-  std::string selectedTitle = "desktop";
-  std::string panelStatus = "waiting_control";
-  bool selectionLocked = false;
-  int scrollIndex = 0;
-  {
-    std::lock_guard<std::mutex> lk(gWindowPanelMu);
-    windowItems = gWindowPanel.items;
-    selectedId = gWindowPanel.selectedId;
-    selectedTitle = gWindowPanel.selectedTitle;
-    panelStatus = gWindowPanel.status;
-    selectionLocked = gWindowPanel.selectionLocked;
-    scrollIndex = gWindowPanel.scrollIndex;
-  }
+  const WindowPanelSnapshot windowPanel = gWindowPanelState.Snapshot();
+  const std::vector<WindowTargetUiEntry>& windowItems = windowPanel.items;
+  const uint64_t selectedId = windowPanel.selectedId;
+  const std::string& selectedTitle = windowPanel.selectedTitle;
+  const std::string& panelStatus = windowPanel.status;
+  const bool selectionLocked = windowPanel.selectionLocked;
+  const int scrollIndex = windowPanel.scrollIndex;
 
   draw_panel_button(hdc, layout.refreshButtonRect, "Refresh", false, !gControlConnected.load(std::memory_order_relaxed));
   draw_panel_button(hdc, layout.desktopButtonRect, "Desktop Mode", selectedId == 0,
@@ -1291,44 +1169,13 @@ void log_client_line(const std::string& line) {
 }
 
 void request_keyframe(uint16_t reason) {
-  if (reason == 0) reason = 1;
   const uint64_t nowUs = qpc_now_us();
-  const uint64_t minIntervalUs = gKeyframeRequestMinIntervalUs.load(std::memory_order_relaxed);
-  const uint64_t refillUs = gKeyframeRequestTokenRefillUs.load(std::memory_order_relaxed);
-  const uint32_t capacity = std::max<uint32_t>(1, gKeyframeRequestTokenCapacity.load(std::memory_order_relaxed));
-  {
-    std::lock_guard<std::mutex> lk(gKeyframeLimiterMu);
-    if (gKeyframeLimiterLastRefillUs == 0) gKeyframeLimiterLastRefillUs = nowUs;
-    if (nowUs > gKeyframeLimiterLastRefillUs && refillUs > 0) {
-      const double refill =
-          static_cast<double>(nowUs - gKeyframeLimiterLastRefillUs) / static_cast<double>(refillUs);
-      if (refill > 0.0) {
-        gKeyframeLimiterTokens = std::min<double>(static_cast<double>(capacity), gKeyframeLimiterTokens + refill);
-        gKeyframeLimiterLastRefillUs = nowUs;
-      }
-    }
-    const uint64_t lastUs = gLastKeyframeRequestUs.load(std::memory_order_relaxed);
-    if (lastUs > 0 && nowUs < lastUs + minIntervalUs) {
-      const uint64_t throttled = gKeyframeRequestThrottledCount.fetch_add(1, std::memory_order_relaxed) + 1;
-      if ((throttled % 120) == 1) {
-        std::cout << "[native-video-client][control] keyframe-request-throttled total=" << throttled
-                  << " reason=" << reason << " cause=min_interval\n";
-      }
-      return;
-    }
-    if (gKeyframeLimiterTokens < 1.0) {
-      const uint64_t throttled = gKeyframeRequestThrottledCount.fetch_add(1, std::memory_order_relaxed) + 1;
-      if ((throttled % 120) == 1) {
-        std::cout << "[native-video-client][control] keyframe-request-throttled total=" << throttled
-                  << " reason=" << reason << " cause=token_bucket\n";
-      }
-      return;
-    }
-    gKeyframeLimiterTokens -= 1.0;
-    gLastKeyframeRequestUs.store(nowUs, std::memory_order_relaxed);
+  const auto attempt = gKeyframeRequests.Request(reason, nowUs);
+  if (!attempt.queued && (attempt.throttledCount % 120) == 1) {
+    std::cout << "[native-video-client][control] keyframe-request-throttled total=" << attempt.throttledCount
+              << " reason=" << (reason == 0 ? 1 : reason)
+              << " cause=" << attempt.throttleCause << "\n";
   }
-  gKeyframeRequestReason = reason;
-  gKeyframeRequestPending = true;
 }
 
 struct Nv12RenderTelemetry {
@@ -1629,7 +1476,7 @@ void enqueue_input_event(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta
   msg.inputEvent.header.magic = remote60::native_poc::kMagic;
   msg.inputEvent.header.type = static_cast<uint16_t>(MessageType::ControlInputEvent);
   msg.inputEvent.header.size = static_cast<uint16_t>(sizeof(msg.inputEvent));
-  msg.inputEvent.seq = gInputSeq.fetch_add(1) + 1;
+  msg.inputEvent.seq = gInputQueueState.NextSequence();
   msg.inputEvent.kind = kind;
   msg.inputEvent.buttons = gMouseButtons.load();
   msg.inputEvent.x = x;
@@ -1702,11 +1549,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           return 0;
         }
         if (point_in_rect(layout.desktopButtonRect, x, y)) {
-          bool alreadyDesktop = false;
-          {
-            std::lock_guard<std::mutex> lk(gWindowPanelMu);
-            alreadyDesktop = (gWindowPanel.selectedId == 0);
-          }
+          const bool alreadyDesktop = gWindowPanelState.IsDesktopSelected();
           if (alreadyDesktop) {
             gWindowPickerVisible.store(false, std::memory_order_relaxed);
           } else {
@@ -1866,11 +1709,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             queue_window_list_request("window_list_request pending");
             InvalidateRect(hwnd, nullptr, FALSE);
           } else if (point_in_rect(layout.desktopButtonRect, p.x, p.y)) {
-            bool alreadyDesktop = false;
-            {
-              std::lock_guard<std::mutex> lk(gWindowPanelMu);
-              alreadyDesktop = (gWindowPanel.selectedId == 0);
-            }
+            const bool alreadyDesktop = gWindowPanelState.IsDesktopSelected();
             if (alreadyDesktop) {
               gWindowPickerVisible.store(false, std::memory_order_relaxed);
             } else {
@@ -2279,18 +2118,16 @@ int main(int argc, char** argv) {
   const Args args = parse_args(argc, argv);
   gTraceEvery = args.traceEvery;
   gTraceMax = args.traceMax;
-  gKeyframeRequestMinIntervalUs.store(
-      env_u32_clamped("REMOTE60_NATIVE_KEYFRAME_REQ_MIN_INTERVAL_US",
-                      static_cast<uint32_t>(kKeyframeRequestMinIntervalUsDefault), 10000, 1000000),
-      std::memory_order_relaxed);
-  gKeyframeRequestTokenRefillUs.store(
-      env_u32_clamped("REMOTE60_NATIVE_KEYFRAME_REQ_TOKEN_REFILL_US",
-                      static_cast<uint32_t>(kKeyframeRequestTokenRefillUsDefault), 10000, 2000000),
-      std::memory_order_relaxed);
-  gKeyframeRequestTokenCapacity.store(
-      env_u32_clamped("REMOTE60_NATIVE_KEYFRAME_REQ_TOKEN_CAPACITY",
-                      kKeyframeRequestTokenCapacityDefault, 1, 16),
-      std::memory_order_relaxed);
+  const uint64_t keyframeReqMinIntervalUs = env_u32_clamped(
+      "REMOTE60_NATIVE_KEYFRAME_REQ_MIN_INTERVAL_US",
+      static_cast<uint32_t>(kKeyframeRequestMinIntervalUsDefault), 10000, 1000000);
+  const uint64_t keyframeReqTokenRefillUs = env_u32_clamped(
+      "REMOTE60_NATIVE_KEYFRAME_REQ_TOKEN_REFILL_US",
+      static_cast<uint32_t>(kKeyframeRequestTokenRefillUsDefault), 10000, 2000000);
+  const uint32_t keyframeReqTokenCapacity = env_u32_clamped(
+      "REMOTE60_NATIVE_KEYFRAME_REQ_TOKEN_CAPACITY",
+      kKeyframeRequestTokenCapacityDefault, 1, 16);
+  gKeyframeRequests.Configure(keyframeReqMinIntervalUs, keyframeReqTokenRefillUs, keyframeReqTokenCapacity);
   const uint64_t catchupReenterMinIntervalUs = env_u32_clamped(
       "REMOTE60_NATIVE_CATCHUP_REENTER_MIN_INTERVAL_US",
       static_cast<uint32_t>(kCatchupReenterMinIntervalUsDefault), 100000, 3000000);
@@ -2307,11 +2144,7 @@ int main(int argc, char** argv) {
       "REMOTE60_NATIVE_UDP_SIM_DROP_PM", 0, 0, 1000);
   const uint32_t udpSimDropSeed = env_u32_clamped(
       "REMOTE60_NATIVE_UDP_SIM_DROP_SEED", 0, 0, 0x7fffffffu);
-  {
-    std::lock_guard<std::mutex> lk(gKeyframeLimiterMu);
-    gKeyframeLimiterTokens = static_cast<double>(gKeyframeRequestTokenCapacity.load(std::memory_order_relaxed));
-    gKeyframeLimiterLastRefillUs = 0;
-  }
+  gKeyframeRequests.Reset();
 
   const bool useRaw = (args.codec == "raw");
   const bool useH264 = (args.codec == "h264");
@@ -2350,9 +2183,9 @@ int main(int argc, char** argv) {
   gOverlayConfig.tcpRecvBufKb = args.tcpRecvBufKb;
   gOverlayConfig.tcpSendBufKb = args.tcpSendBufKb;
   gOverlayConfig.udpMtu = args.udpMtu;
-  gOverlayConfig.keyReqMinIntervalUs = gKeyframeRequestMinIntervalUs.load(std::memory_order_relaxed);
-  gOverlayConfig.keyReqTokenRefillUs = gKeyframeRequestTokenRefillUs.load(std::memory_order_relaxed);
-  gOverlayConfig.keyReqTokenCapacity = gKeyframeRequestTokenCapacity.load(std::memory_order_relaxed);
+  gOverlayConfig.keyReqMinIntervalUs = gKeyframeRequests.min_interval_us();
+  gOverlayConfig.keyReqTokenRefillUs = gKeyframeRequests.token_refill_us();
+  gOverlayConfig.keyReqTokenCapacity = gKeyframeRequests.token_capacity();
   gOverlayConfig.udpSimDropPm = udpSimDropPm;
   gRuntimeTargetBitrate.store(args.runtimeBitrate, std::memory_order_relaxed);
   gRuntimeTargetKeyint.store(args.runtimeKeyint, std::memory_order_relaxed);
@@ -2364,10 +2197,7 @@ int main(int argc, char** argv) {
   gCaptureModeReqMode.store(0, std::memory_order_relaxed);
   gCaptureModeReqXPermille.store(5000, std::memory_order_relaxed);
   gCaptureModeReqYPermille.store(5000, std::memory_order_relaxed);
-  {
-    std::lock_guard<std::mutex> lk(gWindowPanelMu);
-    gWindowPanel = WindowPanelState{};
-  }
+  gWindowPanelState.Reset();
   gSuppressMouseUntilUs.store(0, std::memory_order_relaxed);
   gActiveTouchPointerId.store(0, std::memory_order_relaxed);
   gActiveTouchDown.store(false, std::memory_order_relaxed);
@@ -2499,9 +2329,9 @@ int main(int argc, char** argv) {
             << " codec=" << args.codec
             << " seconds=" << args.seconds << "\n";
   std::cout << "[native-video-client] keyframe-request-limiter minIntervalUs="
-            << gKeyframeRequestMinIntervalUs.load(std::memory_order_relaxed)
-            << " tokenRefillUs=" << gKeyframeRequestTokenRefillUs.load(std::memory_order_relaxed)
-            << " tokenCapacity=" << gKeyframeRequestTokenCapacity.load(std::memory_order_relaxed)
+            << gKeyframeRequests.min_interval_us()
+            << " tokenRefillUs=" << gKeyframeRequests.token_refill_us()
+            << " tokenCapacity=" << gKeyframeRequests.token_capacity()
             << " catchupReenterMinUs=" << catchupReenterMinIntervalUs
             << " staleCaptureDropUs=" << staleCaptureDropUs
             << " congestionRecoverMinUs=" << congestionRecoverMinUs
@@ -2596,13 +2426,7 @@ int main(int argc, char** argv) {
             }
 
             bool sendWindowListRequest = false;
-            {
-              std::lock_guard<std::mutex> lk(gWindowPanelMu);
-              if (gWindowPanel.listRequestPending) {
-                gWindowPanel.listRequestPending = false;
-                sendWindowListRequest = true;
-              }
-            }
+            sendWindowListRequest = gWindowPanelState.TakeListRequest();
             if (sendWindowListRequest) {
               ControlWindowListRequestMessage req{};
               req.header.magic = remote60::native_poc::kMagic;
@@ -2629,14 +2453,7 @@ int main(int argc, char** argv) {
 
             bool sendWindowSelect = false;
             uint64_t pendingWindowId = 0;
-            {
-              std::lock_guard<std::mutex> lk(gWindowPanelMu);
-              if (gWindowPanel.selectRequestPending) {
-                gWindowPanel.selectRequestPending = false;
-                pendingWindowId = gWindowPanel.pendingSelectId;
-                sendWindowSelect = true;
-              }
-            }
+            sendWindowSelect = gWindowPanelState.TakeSelectRequest(&pendingWindowId);
             if (sendWindowSelect) {
               ControlWindowSelectMessage req{};
               req.header.magic = remote60::native_poc::kMagic;
@@ -2716,13 +2533,14 @@ int main(int argc, char** argv) {
               didWork = true;
             }
 
-            if (gKeyframeRequestPending.exchange(false)) {
+            uint16_t pendingKeyframeReason = 0;
+            if (gKeyframeRequests.ConsumePending(&pendingKeyframeReason)) {
               ControlRequestKeyFrameMessage req{};
               req.header.magic = remote60::native_poc::kMagic;
               req.header.type = static_cast<uint16_t>(MessageType::ControlRequestKeyFrame);
               req.header.size = static_cast<uint16_t>(sizeof(req));
-              req.seq = gKeyframeRequestCount.fetch_add(1) + 1;
-              req.reason = gKeyframeRequestReason.load();
+              req.seq = gKeyframeRequests.NextSequence();
+              req.reason = pendingKeyframeReason;
               req.clientSendQpcUs = nowUs;
               if (!send_all(controlSock, &req, sizeof(req))) break;
               std::cout << "[native-video-client][control] keyframe-request seq=" << req.seq
@@ -2756,15 +2574,7 @@ int main(int argc, char** argv) {
             }
 
             QueuedControlInputMessage outbound{};
-            bool hasInput = false;
-            {
-              std::lock_guard<std::mutex> lk(gInputMu);
-              if (!gInputQueue.empty()) {
-                outbound = gInputQueue.front();
-                gInputQueue.pop_front();
-                hasInput = true;
-              }
-            }
+            const bool hasInput = gInputQueueState.TryDequeue(&outbound);
             if (hasInput) {
               if (outbound.type == MessageType::ControlInputEvent) {
                 outbound.inputEvent.clientSendQpcUs = qpc_now_us();
@@ -2790,7 +2600,7 @@ int main(int argc, char** argv) {
               if (args.inputLogEvery > 0 && (inputAckCount % args.inputLogEvery) == 0) {
                 std::cout << "[native-video-client][input] ackSeq=" << ack.seq
                           << " sent=" << inputAckCount
-                          << " dropped=" << gInputDropped.load()
+                          << " dropped=" << gInputQueueState.dropped_count()
                           << "\n";
               }
               didWork = true;
