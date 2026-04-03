@@ -165,6 +165,8 @@ Updated: 2026-04-02 17:53
 ### Windows 회귀
 - localhost direct-connect
 - `video=udp`, `control=tcp`, `codec=h264`
+- Gate A localhost 기준은 `frame gating off`, `ABR off`, `h264 no pacing` 고정
+- Gate A 실패 시 `HOST_CAPTURE_SOURCE_LAST`가 `CreateForWindow(GetShellWindow())`인지 먼저 확인
 - Desktop Mode / window list / selected target / input ack
 
 ### Android 기능

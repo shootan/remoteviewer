@@ -19,7 +19,8 @@ param(
   [int]$HostSeconds = 12,
   [int]$ClientSeconds = 8,
   [int]$TraceEvery = 0,
-  [int]$TraceMax = 0
+  [int]$TraceMax = 0,
+  [switch]$GateAProfile
 )
 
 Set-StrictMode -Version Latest
@@ -91,10 +92,18 @@ if ($TraceMax -gt 0) { $clientArgs += @("--trace-max", "$TraceMax") }
 
 if ($Codec -ieq "h264") {
   $env:REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE = "1"
+  if ($GateAProfile) {
+    $env:REMOTE60_NATIVE_H264_NO_PACING = "1"
+    $env:REMOTE60_NATIVE_FRAME_GATING_DISABLE = "1"
+    $env:REMOTE60_NATIVE_ABR_DISABLE = "1"
+  }
 } else {
   Remove-Item Env:REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE -ErrorAction SilentlyContinue
   Remove-Item Env:REMOTE60_NATIVE_ENCODER_BACKEND -ErrorAction SilentlyContinue
   Remove-Item Env:REMOTE60_NATIVE_DECODER_BACKEND -ErrorAction SilentlyContinue
+  Remove-Item Env:REMOTE60_NATIVE_H264_NO_PACING -ErrorAction SilentlyContinue
+  Remove-Item Env:REMOTE60_NATIVE_FRAME_GATING_DISABLE -ErrorAction SilentlyContinue
+  Remove-Item Env:REMOTE60_NATIVE_ABR_DISABLE -ErrorAction SilentlyContinue
 }
 
 $hostProc = Start-Process -FilePath $hostExe -ArgumentList $hostArgs -WorkingDirectory $Root `
@@ -337,6 +346,7 @@ $clientUserFeedbackTopEntries = New-Object System.Collections.Generic.List[objec
 $hostPrevCaptureUsForInterval = $null
 $hostCaptureIntervalTargetUs = if ($Fps -gt 0) { [double](1000000.0 / [double]$Fps) } else { 0.0 }
 $hostTraceCaptureSeen = $false
+$hostCaptureSourceLast = ""
 foreach ($line in $clientLines) {
   if ($line -match 'avgLatencyUs=([0-9]+)') {
     [void]$latencyVals.Add([double]$Matches[1])
@@ -542,6 +552,9 @@ foreach ($line in $clientLines) {
 }
 
 foreach ($line in $hostLines) {
+  if ($line -match 'capture item source=(.+)$') {
+    $hostCaptureSourceLast = $Matches[1].Trim()
+  }
   if ($line -match 'rawEquivMbps=([0-9]+(?:\\.[0-9]+)?)') {
     [void]$rawEquivMbpsVals.Add([double]$Matches[1])
   }
@@ -1106,6 +1119,12 @@ $captureInputStallReason = if ($captureInputStallReasons.Count -gt 0) {
 } else {
   "none"
 }
+$gateACaptureSourceMonitorOk = [string]::IsNullOrWhiteSpace($hostCaptureSourceLast) -or
+  $hostCaptureSourceLast.Contains("MonitorFromWindow") -or
+  $hostCaptureSourceLast.Contains("MonitorFromPoint") -or
+  $hostCaptureSourceLast.Contains("EnumDisplayMonitors")
+$gateAShellWindowFallbackDetected = (-not [string]::IsNullOrWhiteSpace($hostCaptureSourceLast)) -and
+  $hostCaptureSourceLast.Contains("GetShellWindow")
 $iconGreen = ([char]0xD83D) + ([char]0xDFE2)
 $iconOrange = ([char]0xD83D) + ([char]0xDFE0)
 $iconRedX = [string][char]0x274C
@@ -1122,6 +1141,10 @@ if (-not $overallOk) {
     $m7StatusIcon = $iconRedX
     [void]$m7StatusReasons.Add("capture_input_stall")
     [void]$m7StatusReasons.Add($captureInputStallReason)
+  } elseif ($GateAProfile -and $gateAShellWindowFallbackDetected -and $dec.count -eq 0) {
+    $m7Status = "FAIL"
+    $m7StatusIcon = $iconRedX
+    [void]$m7StatusReasons.Add("capture_source_shellwindow")
   } else {
     if (-not $m7Applicable) {
       [void]$m7StatusReasons.Add("profile_not_applicable")
@@ -1151,6 +1174,10 @@ $m7StatusReason = if ($m7StatusReasons.Count -gt 0) { [string]::Join(",", $m7Sta
 Write-Output "LOG_DIR=$logDir"
 Write-Output "CODEC=$Codec"
 Write-Output "TRANSPORT=$effectiveTransport"
+Write-Output "GATE_A_PROFILE_APPLIED=$($GateAProfile.IsPresent)"
+Write-Output "GATE_A_PROFILE_H264_NO_PACING=$(if ($env:REMOTE60_NATIVE_H264_NO_PACING) { $env:REMOTE60_NATIVE_H264_NO_PACING } else { 0 })"
+Write-Output "GATE_A_PROFILE_FRAME_GATING_DISABLE=$(if ($env:REMOTE60_NATIVE_FRAME_GATING_DISABLE) { $env:REMOTE60_NATIVE_FRAME_GATING_DISABLE } else { 0 })"
+Write-Output "GATE_A_PROFILE_ABR_DISABLE=$(if ($env:REMOTE60_NATIVE_ABR_DISABLE) { $env:REMOTE60_NATIVE_ABR_DISABLE } else { 0 })"
 Write-Output "HOST_RC=$hostRc"
 Write-Output "CLIENT_RC=$clientRc"
 Write-Output "LAT_COUNT=$($lat.count)"
@@ -1211,6 +1238,9 @@ Write-Output "CAPTURE_INPUT_STALL_DETECTED=$captureInputStallDetected"
 Write-Output "CAPTURE_INPUT_STALL_REASON=$captureInputStallReason"
 Write-Output "HOST_QUEUE_PUSH_EXPECTED_MIN=$captureInputExpectedPushMin"
 Write-Output "HOST_CAPTURE_EFFECTIVE_PUSH_COUNT=$captureInputEffectivePushCount"
+Write-Output "HOST_CAPTURE_SOURCE_LAST=$hostCaptureSourceLast"
+Write-Output "GATE_A_CAPTURE_SOURCE_MONITOR_OK=$gateACaptureSourceMonitorOk"
+Write-Output "GATE_A_SHELLWINDOW_FALLBACK_DETECTED=$gateAShellWindowFallbackDetected"
 Write-Output "TS_SOURCE_MFT=$tsSourceMft"
 Write-Output "TS_SOURCE_INPUT_FALLBACK=$tsSourceInputFallback"
 Write-Output "TS_SOURCE_HEADER_FALLBACK=$tsSourceHeaderFallback"

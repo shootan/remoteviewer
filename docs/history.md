@@ -1852,3 +1852,32 @@ Validation / build / test result
 Next action
 - 실제 남은 큰 작업은 `capture_input_stall` 원인 분리다. Gate A가 아직 실패하므로 Android 기능 단계로 넘어가면 안 된다.
 - 그 다음 `TCP/UDP transport adapter` 경계를 더 일반화하거나, stall 해소 후 localhost/2PC 회귀를 다시 돌린다.
+
+### 136) 2026-04-03 gate-a localhost profile fixed + shell fallback diagnosis
+Goal
+- Android 선행 검증용 Gate A localhost 프로필을 `frame gating off`, `ABR off`, `h264 no pacing`으로 고정한다.
+- 같은 프로필에서도 host capture source가 `GetShellWindow()`로 떨어지면 무효 판정이 나오는 점을 진단 출력으로 분리한다.
+
+Files changed
+- `automation/verify_native_video_runtime.ps1`
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - `cmake --build build-vcpkg-local --target remote60_native_video_client_poc remote60_native_video_client_shared_core_test --config Debug`
+  - 결과: 성공
+- Gate A profile run (`-GateAProfile`):
+  - 결과: `HOST_CAPTURE_SOURCE_LAST=CreateForWindow(GetShellWindow())`
+  - `GATE_A_SHELLWINDOW_FALLBACK_DETECTED=True`
+  - `GATE_A_PASS=False`
+- Direct env run (`REMOTE60_NATIVE_H264_NO_PACING=1`, `REMOTE60_NATIVE_FRAME_GATING_DISABLE=1`, `REMOTE60_NATIVE_ABR_DISABLE=1`):
+  - 결과: `DEC_AVG=26.6`, `GATE_A_PASS=True`, `CAPTURE_INPUT_STALL_DETECTED=False`
+- 결론:
+  - 이전 `capture_input_stall`은 기본 frame gating/static scene 검증 충돌이 주원인
+  - 현재 남은 불안정성은 Gate A profile 자체가 아니라 host capture source가 `ShellWindow`로 fallback되는 환경 케이스
+
+Next action
+- Gate A 자동 검증에서 monitor capture source를 더 안정적으로 고정하거나, `ShellWindow` fallback 시 재시도/실패 사유 분리 정책을 추가한다.
+- 그 다음 Gate A pass 로그를 재현성 있게 1회 더 확보하고 Android `Phase B` 종료 판정을 정리한다.
