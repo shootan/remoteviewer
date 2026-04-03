@@ -167,6 +167,7 @@ Updated: 2026-04-02 17:53
 - `video=udp`, `control=tcp`, `codec=h264`
 - Gate A localhost 기준은 `frame gating off`, `ABR off`, `h264 no pacing` 고정
 - Gate A 실패 시 `HOST_CAPTURE_SOURCE_LAST`가 `CreateForWindow(GetShellWindow())`인지 먼저 확인
+- Gate A 자동 검증은 `ShellWindow fallback + decoded=0`일 때 monitor capture 확보를 위해 재시도 허용
 - Desktop Mode / window list / selected target / input ack
 
 ### Android 기능

@@ -20,7 +20,8 @@ param(
   [int]$ClientSeconds = 8,
   [int]$TraceEvery = 0,
   [int]$TraceMax = 0,
-  [switch]$GateAProfile
+  [switch]$GateAProfile,
+  [int]$GateAProfileRetryCount = 0
 )
 
 Set-StrictMode -Version Latest
@@ -1170,6 +1171,37 @@ if (-not $overallOk) {
   }
 }
 $m7StatusReason = if ($m7StatusReasons.Count -gt 0) { [string]::Join(",", $m7StatusReasons.ToArray()) } else { "ok" }
+
+if ($GateAProfile -and $gateAShellWindowFallbackDetected -and $dec.count -eq 0 -and $GateAProfileRetryCount -lt 2) {
+  Write-Output "GATE_A_PROFILE_RETRYING=True"
+  Write-Output "GATE_A_PROFILE_RETRY_COUNT=$GateAProfileRetryCount"
+  Write-Output "HOST_CAPTURE_SOURCE_LAST=$hostCaptureSourceLast"
+  & $PSCommandPath `
+    -Root $Root `
+    -RemoteHost $RemoteHost `
+    -Port $Port `
+    -ControlPort $ControlPort `
+    -Transport $Transport `
+    -UdpMtu $UdpMtu `
+    -Fps $Fps `
+    -Codec $Codec `
+    -Bitrate $Bitrate `
+    -Keyint $Keyint `
+    -EncodeWidth $EncodeWidth `
+    -EncodeHeight $EncodeHeight `
+    -EncoderBackend $EncoderBackend `
+    -DecoderBackend $DecoderBackend `
+    -FpsHint $FpsHint `
+    -BuildDir $BuildDir `
+    -HostSeconds $HostSeconds `
+    -ClientSeconds $ClientSeconds `
+    -TraceEvery $TraceEvery `
+    -TraceMax $TraceMax `
+    -GateAProfile `
+    -GateAProfileRetryCount ($GateAProfileRetryCount + 1) `
+    -NoInputChannel:$NoInputChannel.IsPresent
+  exit $LASTEXITCODE
+}
 
 Write-Output "LOG_DIR=$logDir"
 Write-Output "CODEC=$Codec"

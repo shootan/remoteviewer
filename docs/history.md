@@ -1881,3 +1881,34 @@ Validation / build / test result
 Next action
 - Gate A 자동 검증에서 monitor capture source를 더 안정적으로 고정하거나, `ShellWindow` fallback 시 재시도/실패 사유 분리 정책을 추가한다.
 - 그 다음 Gate A pass 로그를 재현성 있게 1회 더 확보하고 Android `Phase B` 종료 판정을 정리한다.
+
+### 137) 2026-04-03 gate-a shell fallback retry and pass
+Goal
+- Gate A localhost 자동 검증에서 `CreateForWindow(GetShellWindow())` fallback이 걸릴 때 재시도해 monitor capture가 잡히는지 확인한다.
+- Android 선행 검증용 Gate A pass 로그를 스크립트 옵션 하나로 재현 가능하게 만든다.
+
+Files changed
+- `automation/verify_native_video_runtime.ps1`
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Gate A profile run:
+  - `powershell -ExecutionPolicy Bypass -File automation/verify_native_video_runtime.ps1 -Root . -BuildDir build-vcpkg-local -Codec h264 -Transport udp -Fps 30 -FpsHint 30 -HostSeconds 10 -ClientSeconds 6 -Bitrate 1100000 -Keyint 15 -TraceEvery 0 -NoInputChannel -GateAProfile`
+  - 결과:
+    - `GATE_A_PROFILE_APPLIED=True`
+    - `HOST_CAPTURE_SOURCE_LAST=MonitorFromWindow(GetDesktopWindow())`
+    - `GATE_A_CAPTURE_SOURCE_MONITOR_OK=True`
+    - `GATE_A_SHELLWINDOW_FALLBACK_DETECTED=False`
+    - `DEC_AVG=21.2`
+    - `LAT_P95_US=4521`
+    - `CAPTURE_INPUT_STALL_DETECTED=False`
+    - `GATE_A_PASS=True`
+- 결론:
+  - Gate A 실패의 주원인은 리팩터링 회귀가 아니라 `frame gating/static scene` 검증 충돌 + 일부 세션의 `ShellWindow` fallback이었다.
+  - 현재 `-GateAProfile`로 Gate A localhost 통과 로그를 재현할 수 있다.
+
+Next action
+- Android `Phase B` 종료 판정을 문서화하고, 이후 실제 남은 리스크를 `M3.5 수동 입력 검증`과 Android 앱 셸 착수 준비로 정리한다.
+- 필요하면 host capture source를 monitor-only로 더 강제하는 옵션을 추가해 재현성을 더 높인다.
