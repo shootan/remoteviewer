@@ -1912,3 +1912,40 @@ Validation / build / test result
 Next action
 - Android `Phase B` 종료 판정을 문서화하고, 이후 실제 남은 리스크를 `M3.5 수동 입력 검증`과 Android 앱 셸 착수 준비로 정리한다.
 - 필요하면 host capture source를 monitor-only로 더 강제하는 옵션을 추가해 재현성을 더 높인다.
+
+### 138) 2026-04-03 android phase-c shell scaffold
+Goal
+- Android direct client `Phase C` 착수를 위해 Android 앱 프로젝트 최소 골격을 추가한다.
+- Kotlin UI와 JNI bridge stub를 통해 host/port 입력, connect/disconnect, status/error 표시 흐름의 뼈대를 만든다.
+
+Files changed
+- `apps/android_direct_client/settings.gradle.kts`
+- `apps/android_direct_client/build.gradle.kts`
+- `apps/android_direct_client/gradle.properties`
+- `apps/android_direct_client/app/build.gradle.kts`
+- `apps/android_direct_client/app/proguard-rules.pro`
+- `apps/android_direct_client/app/src/main/AndroidManifest.xml`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/NativeSessionBridge.kt`
+- `apps/android_direct_client/app/src/main/res/layout/activity_main.xml`
+- `apps/android_direct_client/app/src/main/res/values/strings.xml`
+- `apps/android_direct_client/app/src/main/res/values/themes.xml`
+- `apps/android_direct_client/app/src/main/cpp/CMakeLists.txt`
+- `apps/android_direct_client/app/src/main/cpp/native_bridge.cpp`
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- File structure:
+  - `rg --files apps/android_direct_client`
+  - 결과: Gradle/Kotlin/JNI scaffold 파일 생성 확인
+- Static review:
+  - `app/build.gradle.kts`, `MainActivity.kt`, `native_bridge.cpp` 내용 확인
+- Build/Test:
+  - 현재 환경에는 `java`, `gradle`, `ANDROID_HOME/ANDROID_SDK_ROOT`가 없어 Android build는 실행하지 못함
+  - 따라서 이번 단계 검증은 파일 정합성과 scaffold 존재 확인까지 수행
+
+Next action
+- Android toolchain이 있는 환경에서 `apps/android_direct_client` Gradle sync/build를 실제로 돌려 Phase C 골격이 컴파일되는지 확인한다.
+- 그 다음 JNI stub를 현재 공용 client core 연결 지점으로 교체하고 실제 connect/disconnect 상태를 native session으로 넘긴다.

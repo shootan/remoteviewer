@@ -1,5 +1,5 @@
 # Android Direct Client 구현계획
-Updated: 2026-04-02 17:53
+Updated: 2026-04-03 16:19
 
 이 문서는 Android direct client 작업의 단일 기준(Source of Truth)으로 사용한다.
 
@@ -198,3 +198,4 @@ Updated: 2026-04-02 17:53
 - [x] 단계별 작업 순서와 gate 정의
 - [x] v1 범위와 제외 범위 고정
 - [x] Phase A 구현 착수
+- [x] Phase C 앱 셸 골격 착수
