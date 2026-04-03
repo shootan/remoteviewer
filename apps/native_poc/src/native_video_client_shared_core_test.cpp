@@ -3,6 +3,7 @@
 #include <string>
 
 #include "native_video_client_shared_core.hpp"
+#include "native_video_client_session.hpp"
 
 namespace {
 
@@ -15,6 +16,9 @@ using remote60::native_poc::ControlOutboundActionKind;
 using remote60::native_poc::ControlWindowListMessage;
 using remote60::native_poc::ControlWindowSelectedMessage;
 using remote60::native_poc::KeyframeRequestState;
+using remote60::native_poc::ClientSessionConnectArgs;
+using remote60::native_poc::ClientSessionController;
+using remote60::native_poc::ClientSessionState;
 using remote60::native_poc::MessageType;
 using remote60::native_poc::QueuedControlInputMessage;
 using remote60::native_poc::RuntimeTuneState;
@@ -225,6 +229,37 @@ bool test_udp_assembler() {
   return true;
 }
 
+bool test_session_controller() {
+  ClientSessionController controller;
+
+  ClientSessionConnectArgs invalid{};
+  invalid.host = "";
+  invalid.videoPort = 43000;
+  invalid.controlPort = 43001;
+  if (!expect(!controller.Connect(invalid), "session connect should reject empty host")) return false;
+  auto snapshot = controller.Snapshot();
+  if (!expect(snapshot.state == ClientSessionState::Error, "invalid connect should set error state")) return false;
+  if (!expect(snapshot.lastError == "host is required", "invalid connect should expose host error")) return false;
+
+  ClientSessionConnectArgs valid{};
+  valid.host = "192.168.0.10";
+  valid.videoPort = 43000;
+  valid.controlPort = 43001;
+  if (!expect(controller.Connect(valid), "session connect should accept valid args")) return false;
+  snapshot = controller.Snapshot();
+  if (!expect(snapshot.state == ClientSessionState::Connected, "valid connect should set connected state")) return false;
+  if (!expect(snapshot.host == "192.168.0.10", "snapshot should preserve host")) return false;
+  if (!expect(snapshot.videoPort == 43000 && snapshot.controlPort == 43001,
+              "snapshot should preserve ports")) return false;
+
+  controller.Disconnect();
+  snapshot = controller.Snapshot();
+  if (!expect(snapshot.state == ClientSessionState::Disconnected,
+              "disconnect should return to disconnected state")) return false;
+
+  return true;
+}
+
 }  // namespace
 
 int main() {
@@ -232,6 +267,7 @@ int main() {
   if (!test_window_and_input_actions()) return 1;
   if (!test_capture_runtime_and_keyframe_actions()) return 1;
   if (!test_udp_assembler()) return 1;
+  if (!test_session_controller()) return 1;
   std::cout << "[shared-core-test] PASS\n";
   return 0;
 }

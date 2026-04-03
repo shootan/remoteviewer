@@ -1949,3 +1949,37 @@ Validation / build / test result
 Next action
 - Android toolchain이 있는 환경에서 `apps/android_direct_client` Gradle sync/build를 실제로 돌려 Phase C 골격이 컴파일되는지 확인한다.
 - 그 다음 JNI stub를 현재 공용 client core 연결 지점으로 교체하고 실제 connect/disconnect 상태를 native session으로 넘긴다.
+
+### 139) 2026-04-03 android phase-c shared session controller
+Goal
+- Android JNI bridge가 임시 전역 문자열 상태 대신 공용 C++ session controller를 사용하도록 교체한다.
+- 이후 Android/Windows 양쪽에서 재사용 가능한 최소 session 상태 API를 고정한다.
+
+Files changed
+- `apps/native_poc/src/native_video_client_session.hpp`
+- `apps/native_poc/src/native_video_client_session.cpp`
+- `apps/native_poc/CMakeLists.txt`
+- `apps/native_poc/src/native_video_client_shared_core_test.cpp`
+- `apps/android_direct_client/app/src/main/cpp/CMakeLists.txt`
+- `apps/android_direct_client/app/src/main/cpp/native_bridge.cpp`
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - `cmake --build build-vcpkg-local --target remote60_native_video_client_shared_core_test --config Debug`
+  - 결과: 성공
+- Test:
+  - `build-vcpkg-local/apps/native_poc/Debug/remote60_native_video_client_shared_core_test.exe`
+  - 결과: `PASS`
+  - session controller 유효성(빈 host/포트 검증, connect/disconnect snapshot) 포함
+- Android scaffold check:
+  - `rg --files apps/android_direct_client`
+  - 결과: Android project/JNI scaffold 파일 유지 확인
+- Build/Test limitation:
+  - 현재 환경에는 `java`, `gradle`, `ANDROID_HOME/ANDROID_SDK_ROOT`가 없어 Android app build는 실행하지 못함
+
+Next action
+- Android toolchain 환경에서 `apps/android_direct_client` Gradle sync/build를 실행해 JNI/controller 연결이 실제로 컴파일되는지 확인한다.
+- 그 다음 session controller를 실제 native session 구현으로 확장해 connect/disconnect가 stub가 아니라 공용 transport/session core를 타도록 바꾼다.

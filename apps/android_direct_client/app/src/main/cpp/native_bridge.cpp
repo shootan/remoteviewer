@@ -1,23 +1,12 @@
 #include <jni.h>
 
-#include <mutex>
 #include <string>
+
+#include "native_video_client_session.hpp"
 
 namespace {
 
-std::mutex g_state_mutex;
-bool g_connected = false;
-std::string g_status = "disconnected";
-std::string g_last_error;
-
-bool is_valid_port(jint port) {
-  return port > 0 && port <= 65535;
-}
-
-void set_error(const std::string& message) {
-  std::lock_guard<std::mutex> lock(g_state_mutex);
-  g_last_error = message;
-}
+remote60::native_poc::ClientSessionController g_session_controller;
 
 jstring to_jstring(JNIEnv* env, const std::string& value) {
   return env->NewStringUTF(value.c_str());
@@ -34,45 +23,27 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeConnect(
     env->ReleaseStringUTFChars(host, host_chars);
   }
 
-  if (host_value.empty()) {
-    set_error("host is required");
-    return JNI_FALSE;
-  }
-  if (!is_valid_port(video_port)) {
-    set_error("video port is invalid");
-    return JNI_FALSE;
-  }
-  if (!is_valid_port(control_port)) {
-    set_error("control port is invalid");
-    return JNI_FALSE;
-  }
-
-  std::lock_guard<std::mutex> lock(g_state_mutex);
-  g_connected = true;
-  g_last_error.clear();
-  g_status = "connected(shell-stub): " + host_value + ":" + std::to_string(video_port) +
-             " control=" + std::to_string(control_port);
-  return JNI_TRUE;
+  remote60::native_poc::ClientSessionConnectArgs args{};
+  args.host = host_value;
+  args.videoPort = video_port;
+  args.controlPort = control_port;
+  return g_session_controller.Connect(args) ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeDisconnect(
     JNIEnv* /* env */, jobject /* this */) {
-  std::lock_guard<std::mutex> lock(g_state_mutex);
-  g_connected = false;
-  g_status = "disconnected";
+  g_session_controller.Disconnect();
 }
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetStatus(
     JNIEnv* env, jobject /* this */) {
-  std::lock_guard<std::mutex> lock(g_state_mutex);
-  return to_jstring(env, g_status);
+  return to_jstring(env, g_session_controller.Snapshot().status);
 }
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetLastError(
     JNIEnv* env, jobject /* this */) {
-  std::lock_guard<std::mutex> lock(g_state_mutex);
-  return to_jstring(env, g_last_error);
+  return to_jstring(env, g_session_controller.Snapshot().lastError);
 }
