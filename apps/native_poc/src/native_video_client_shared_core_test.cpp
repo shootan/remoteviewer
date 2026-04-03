@@ -245,6 +245,8 @@ bool test_session_controller() {
   valid.host = "192.168.0.10";
   valid.videoPort = 43000;
   valid.controlPort = 43001;
+  valid.requireTcpControl = false;
+  valid.requireUdpHello = false;
   if (!expect(controller.Connect(valid), "session connect should accept valid args")) return false;
   snapshot = controller.Snapshot();
   if (!expect(snapshot.state == ClientSessionState::Connected, "valid connect should set connected state")) return false;

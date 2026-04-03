@@ -1,5 +1,5 @@
 # Android Direct Client 구현계획
-Updated: 2026-04-03 16:46
+Updated: 2026-04-03 17:30
 
 이 문서는 Android direct client 작업의 단일 기준(Source of Truth)으로 사용한다.
 
@@ -200,3 +200,4 @@ Updated: 2026-04-03 16:46
 - [x] Phase A 구현 착수
 - [x] Phase C 앱 셸 골격 착수
 - [x] Phase C JNI stub를 공용 session controller로 교체
+- [x] Phase C session controller에 실제 TCP/UDP probe 연결

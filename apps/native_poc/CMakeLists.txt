@@ -108,4 +108,5 @@ target_include_directories(remote60_native_video_client_shared_core_test PRIVATE
 
 target_link_libraries(remote60_native_video_client_shared_core_test PRIVATE
   common
+  ws2_32
 )

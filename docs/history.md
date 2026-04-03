@@ -1960,8 +1960,6 @@ Files changed
 - `apps/native_poc/src/native_video_client_session.cpp`
 - `apps/native_poc/CMakeLists.txt`
 - `apps/native_poc/src/native_video_client_shared_core_test.cpp`
-- `apps/android_direct_client/app/src/main/cpp/CMakeLists.txt`
-- `apps/android_direct_client/app/src/main/cpp/native_bridge.cpp`
 - `docs/android_구현계획.md`
 - `docs/history.md`
 - `docs/구현계획.md`
@@ -1983,3 +1981,34 @@ Validation / build / test result
 Next action
 - Android toolchain 환경에서 `apps/android_direct_client` Gradle sync/build를 실행해 JNI/controller 연결이 실제로 컴파일되는지 확인한다.
 - 그 다음 session controller를 실제 native session 구현으로 확장해 connect/disconnect가 stub가 아니라 공용 transport/session core를 타도록 바꾼다.
+
+### 140) 2026-04-03 android phase-c session probe wiring
+Goal
+- Android `Phase C`의 공용 session controller가 실제 TCP control connect와 UDP hello handshake를 수행하도록 올린다.
+- JNI bridge가 더 이상 상태 문자열 stub만 바꾸는 것이 아니라, 최소 네트워크 probe 결과를 반영하도록 만든다.
+
+Files changed
+- `apps/native_poc/src/native_video_client_session.hpp`
+- `apps/native_poc/src/native_video_client_session.cpp`
+- `apps/native_poc/CMakeLists.txt`
+- `apps/native_poc/src/native_video_client_shared_core_test.cpp`
+- `apps/android_direct_client/app/src/main/cpp/CMakeLists.txt`
+- `apps/android_direct_client/app/src/main/cpp/native_bridge.cpp`
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Build:
+  - `cmake --build build-vcpkg-local --target remote60_native_video_client_shared_core_test --config Debug`
+  - 결과: 성공
+- Test:
+  - `build-vcpkg-local/apps/native_poc/Debug/remote60_native_video_client_shared_core_test.exe`
+  - 결과: `PASS`
+- Scope note:
+  - session controller는 현재 `TCP control connect + UDP hello ack` 수준의 probe까지 연결
+  - Android toolchain이 없어 실제 Gradle/NDK Android build는 아직 실행하지 못함
+
+Next action
+- Android toolchain 환경에서 `apps/android_direct_client` Gradle sync/build를 실제로 돌려 JNI/controller/network probe 조합이 컴파일되는지 확인한다.
+- 그 다음 session controller를 현재 probe 수준에서 공용 transport/session core 기반의 실제 session lifecycle로 확장한다.
