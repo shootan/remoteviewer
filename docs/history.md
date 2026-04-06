@@ -2441,3 +2441,45 @@ Validation / build / test result
 Next action
 - desktop path capture source 검증을 분리해 `Devices/Desktop` scene 흐름도 안정화한다.
 - 그 다음 `Phase F` 입력 착수 전 gate를 재확인한다.
+
+### 151) 2026-04-06 host recursive emulator target filter
+Goal
+- Android viewer freeze 원인이던 recursive capture 경로를 줄인다.
+- LDPlayer 창(`dnplayer.exe`)이 shareable windows에 섞여 선택되는 것을 host에서 막는다.
+
+Files changed
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Native build:
+  - `cmake --build d:\remote\remote\build-vcpkg-local --target remote60_native_video_host_poc --config Debug`
+  - 결과: 성공
+- Background host restart:
+  - old host stop 후 new host PID: `40348`
+  - log: `d:\remote\remote\tmp\bg_host\host_stdout.log`
+- LDPlayer 2 runtime:
+  - targets scene screenshot:
+    - `filter_targets.png`
+    - `window_list_received count=7`
+    - 이전에 보이던 recursive candidate(`1 • 1000x575` / emulator window)가 목록에서 제거됨
+  - safe viewer screenshot:
+    - `safe_viewer.png`
+    - selected non-emulator window가 정상 표시됨
+  - host log:
+    - filter 적용 후 steady state에서 `captureTargetProc=monitor`, `captureDeadRestartCount=0`
+    - selected-window path에서도 emulator 대신 일반 window 위주로 선택 가능
+  - Android log:
+    - `MediaCodec started width=1280 height=720`
+    - `bind video surface buffer=1280x720 video=1280x720 view=960x516`
+    - `released output frame count=151`
+- Scope note:
+  - `should_include_window()`에서 `dnplayer.exe`, `dnmultiplayer.exe`, `ldplayer.exe`, `hd-player.exe`를 제외했다.
+  - 이 수정은 Android client가 emulator 자기 자신을 다시 캡처하는 recursive target을 고르지 못하게 하는 목적이다.
+  - desktop path의 `GetShellWindow()` fallback 문제는 별도 이슈로 남아 있다.
+
+Next action
+- desktop path capture source 검증을 분리해 `Devices/Desktop` scene 흐름도 안정화한다.
+- 그 다음 `Phase F` 입력 착수 전 gate를 재확인한다.

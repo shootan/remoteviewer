@@ -1,5 +1,5 @@
 # Android Direct Client 구현계획
-Updated: 2026-04-06 17:36
+Updated: 2026-04-06 21:59
 
 이 문서는 Android direct client 작업의 단일 기준(Source of Truth)으로 사용한다.
 
@@ -205,6 +205,7 @@ Updated: 2026-04-06 17:36
    - 남은 것은 scene 구조 위에서 selection UX를 더 다듬고, 그 다음 입력 작업에 들어가는 것이다.
 2. Phase E selection UX 보정
    - 현재는 list scene에서 텍스트 목록을 탭해 viewer scene으로 들어가는 구조이므로, 필요 시 썸네일/카드형 목록 또는 정렬/필터 UX를 추가한다.
+   - recursive capture를 막기 위해 emulator window(`dnplayer.exe`)는 shareable windows에서 제외했다.
    - monitor list는 현 프로토콜 범위 밖이므로, 필요 시 `디바이스` 탭 semantics와 실제 데이터 공급 경계를 다시 정리한다.
 3. Phase F 착수 전 Gate 고정
    - 입력 작업에 들어가기 전에 `full-frame video`, `window select`, `viewer -> list 복귀`, `background/foreground 후 surface 재연결` 네 항목을 실기기 기준으로 재확인한다.
@@ -241,3 +242,4 @@ Updated: 2026-04-06 17:36
 - [x] Phase E 탭/선택 UI 1차 (`LDPlayer/Devices`, Desktop Mode 버튼, Spinner 기반 window list/select 표시)
 - [x] Phase E connected compact mode (`Show Panel` toolbar, connected screenshot 기준 viewport `936x172 -> 936x310`)
 - [x] Phase E scene split (`connect scene -> targets scene -> fullscreen viewer scene`, hidden top-left back button)
+- [x] Phase E recursive target filter (`dnplayer.exe` 등 emulator window를 shareable windows에서 제외)

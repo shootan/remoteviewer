@@ -243,6 +243,16 @@ struct WindowListEntry {
   std::string title;
 };
 
+std::string get_window_process_name(HWND hwnd, uint32_t* outPid);
+
+bool should_exclude_recursive_window_process(const std::string& processName) {
+  if (processName.empty()) return false;
+  return processName == "dnplayer.exe" ||
+         processName == "dnmultiplayer.exe" ||
+         processName == "ldplayer.exe" ||
+         processName == "hd-player.exe";
+}
+
 bool should_include_window(HWND hwnd) {
   if (!hwnd || !IsWindow(hwnd)) return false;
   if (hwnd == GetShellWindow()) return false;
@@ -254,6 +264,7 @@ bool should_include_window(HWND hwnd) {
   DWORD pid = 0;
   GetWindowThreadProcessId(hwnd, &pid);
   if (pid == GetCurrentProcessId()) return false;
+  if (should_exclude_recursive_window_process(get_window_process_name(hwnd, nullptr))) return false;
   RECT r{};
   if (!GetWindowRect(hwnd, &r)) return false;
   const int w = r.right - r.left;
