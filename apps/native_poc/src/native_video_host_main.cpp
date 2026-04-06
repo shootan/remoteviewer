@@ -250,7 +250,8 @@ bool should_exclude_recursive_window_process(const std::string& processName) {
   return processName == "dnplayer.exe" ||
          processName == "dnmultiplayer.exe" ||
          processName == "ldplayer.exe" ||
-         processName == "hd-player.exe";
+         processName == "hd-player.exe" ||
+         processName == "textinputhost.exe";
 }
 
 bool should_include_window(HWND hwnd) {

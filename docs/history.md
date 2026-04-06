@@ -2479,6 +2479,38 @@ Next action
 - `targets -> viewer -> back` 반복 soak을 추가로 돌려 장시간 freeze 재현 여부를 본다.
 - desktop path capture source 검증을 분리해 `Devices/Desktop` 흐름도 안정화한다.
 
+### 153) 2026-04-06 host utility window filter extension
+Goal
+- recursive freeze와 잘못된 선택을 줄이기 위해 shareable windows 목록에서 helper window를 더 제외한다.
+- `textinputhost.exe`가 Android targets scene에 섞여 들어오는 케이스를 막는다.
+
+Files changed
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Native build:
+  - `cmake --build d:\remote\remote\build-vcpkg-local --target remote60_native_video_host_poc --config Debug`
+  - 결과: 성공
+- Background host restart:
+  - new host PID: `36640`
+  - log: `d:\remote\remote\tmp\bg_host\host_stdout.log`
+- LDPlayer 2 runtime:
+  - targets scene screenshot:
+    - `filter_targets2.png`
+    - `window_list_received count=8`
+    - recursive/self candidate로 보이던 emulator/input helper window가 목록에서 제거됨
+- Scope note:
+  - `should_exclude_recursive_window_process()`에 `textinputhost.exe`를 추가했다.
+  - 현재 targets scene 목록은 일반 top-level windows 위주로 유지된다.
+  - 장시간 반복 soak은 아직 별도 검증으로 남겨둔다.
+
+Next action
+- `targets -> viewer -> back` 반복 soak을 추가로 돌려 장시간 freeze 재현 여부를 본다.
+- desktop path capture source 검증을 분리해 `Devices/Desktop` 흐름도 안정화한다.
+
 ### 151) 2026-04-06 host recursive emulator target filter
 Goal
 - Android viewer freeze 원인이던 recursive capture 경로를 줄인다.
