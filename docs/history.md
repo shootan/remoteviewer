@@ -2201,3 +2201,26 @@ Validation / build / test result
 Next action
 - `TextureView` 표시 영역이 전체 프레임을 채우도록 surface sizing/transform을 보정한다.
 - 그 다음 Android window list/select UI를 열어 desktop 외 실제 window target으로 visible content를 재검증한다.
+
+### 145) 2026-04-06 android ui reference tab semantics docs
+Goal
+- Android 구현계획 문서에 목표 UI 레퍼런스 이미지와 탭 의미를 명시해 다음 세션 구현 기준을 고정한다.
+
+Files changed
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Docs only:
+  - `D:\remote\remote\image\f3c9df0d83454ce1ba78a2fd6cb7e7801735893664.webp`를 확인해 목표 UI 기준 이미지로 명시
+  - 탭 의미를 문서에 고정:
+    - 첫 번째 탭 = 각 윈도우별 화면
+    - 두 번째 탭 = 전체 데스크탑 화면
+- Build/Test:
+  - 코드 변경 없음
+  - 추가 빌드/테스트 없음
+
+Next action
+- Android window list/select UI를 위 레퍼런스 탭 구조에 맞춰 구현한다.
+- 첫 번째 탭은 window grid/list, 두 번째 탭은 desktop view로 연결한다.
