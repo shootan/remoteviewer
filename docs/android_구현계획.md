@@ -1,5 +1,5 @@
 # Android Direct Client 구현계획
-Updated: 2026-04-06 11:21
+Updated: 2026-04-06 15:57
 
 이 문서는 Android direct client 작업의 단일 기준(Source of Truth)으로 사용한다.
 
@@ -197,7 +197,24 @@ Updated: 2026-04-06 11:21
 - manual IP/DNS 입력 direct-connect
 - 장애 시 로그로 실패 지점 분리
 
-## 7) 리스크와 대응
+## 7) 다음 실행 순서
+1. Phase D 표시 보정 마감
+   - `TextureView`에 들어가는 decoded frame이 상단 일부만 보이는 상태를 먼저 해소한다.
+   - `TextureView`/surface sizing/transform 계산을 decoded size와 view size 기준으로 정리한다.
+   - 완료조건은 LDPlayer screenshot 기준으로 full-frame visible content가 보이고, `surface=on codec=on size=... in/out` 상태가 유지되는 것이다.
+2. Phase E session/JNI 제어 브리지 추가
+   - 공용 core에는 이미 `WindowPanelStateModel`과 `window list/select` 상태기가 있으므로, Android는 이를 호출할 수 있는 얇은 제어 API만 노출한다.
+   - `refresh`, `window select`, `Desktop Mode` 요청과 window list snapshot을 `ClientSessionController -> JNI -> Kotlin`으로 연결한다.
+   - 완료조건은 Android UI에서 요청을 보내고, `selected target` 상태가 session snapshot과 함께 즉시 갱신되는 것이다.
+3. Phase E 레퍼런스 UI 1차 구현
+   - `LD플레이어`/`디바이스` 탭 구조를 먼저 만들고, 1차는 새 프로토콜 없이 기존 window list 메타데이터만 사용한다.
+   - 즉, 1차 범위는 썸네일 생성보다 `title/resolution/selected badge/refresh/select`가 보이는 카드형 목록이다.
+   - 완료조건은 Android에서 window list 조회, 선택, selected target 표시가 가능한 것이다.
+4. Phase F 착수 전 Gate 고정
+   - 입력 작업에 들어가기 전에 `full-frame video`, `window select`, `background/foreground 후 surface 재연결` 세 항목을 실기기 기준으로 재확인한다.
+   - 위 Gate를 통과한 뒤 `tap/drag`, 마지막으로 `committed text`를 붙인다.
+
+## 8) 리스크와 대응
 - 리스크: Windows client에 로직이 과도하게 뭉쳐 있어 core 추출 중 회귀 가능성 높음
   - 대응: Android보다 먼저 Windows core 전환을 끝내고 회귀 확인
 - 리스크: Android decode/render와 lifecycle 결합부에서 surface reset 이슈 발생 가능
@@ -205,7 +222,7 @@ Updated: 2026-04-06 11:21
 - 리스크: 입력을 먼저 붙이면 디버깅 경계가 무너짐
   - 대응: 영상 수신과 control UI 안정화 이후 입력 착수
 
-## 8) 이번 문서화 완료 기준
+## 9) 이번 문서화 완료 기준
 - [x] Android direct client를 별도 계획 문서로 분리
 - [x] 공용 client core 재사용 전략 명시
 - [x] 단계별 작업 순서와 gate 정의

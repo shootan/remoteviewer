@@ -2224,3 +2224,37 @@ Validation / build / test result
 Next action
 - Android window list/select UI를 위 레퍼런스 탭 구조에 맞춰 구현한다.
 - `LD플레이어` 탭은 window grid/list로, `디바이스` 탭은 monitor view로 연결한다.
+
+### 146) 2026-04-06 android next-work plan freeze
+Goal
+- Android direct client의 현재 완료 상태를 기준으로 다음 구현 순서를 고정한다.
+- `Phase D` 마감과 `Phase E` 착수 사이의 실제 선행조건을 문서에 남긴다.
+
+Files changed
+- `docs/android_구현계획.md`
+- `docs/구현계획.md`
+- `docs/history.md`
+
+Validation / build / test result
+- Docs/code review only:
+  - `docs/android_구현계획.md`
+  - `docs/구현계획.md`
+  - `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+  - `apps/android_direct_client/app/src/main/res/layout/activity_main.xml`
+  - `apps/android_direct_client/app/src/main/cpp/android_video_decoder.cpp`
+  - `apps/android_direct_client/app/src/main/cpp/native_bridge.cpp`
+  - `apps/native_poc/src/native_video_client_session.hpp`
+  - `apps/native_poc/src/native_video_client_session.cpp`
+  - `apps/native_poc/src/native_video_client_shared_core.hpp`
+  - `apps/native_poc/src/poc_protocol.hpp`
+- 결론:
+  - 현재 Android 앱은 `connect/disconnect + decoder debug` 셸 수준이며, `TextureView` full-frame 보정이 아직 남아 있다.
+  - 공용 core에는 `window list/select` 상태기와 요청 모델이 이미 있으나 Android JNI는 아직 `connect/disconnect/status`만 노출한다.
+  - 현재 `ControlWindowListMessage`는 title/size 중심 메타데이터만 주므로, `Phase E` 1차는 썸네일 생성보다 `refresh/select/Desktop Mode` 흐름을 먼저 닫는 것이 맞다.
+- Build/Test:
+  - 코드 변경 없음
+  - 추가 빌드/테스트 없음
+
+Next action
+- `TextureView` full-frame 보정으로 `Phase D` 완료조건을 먼저 닫는다.
+- 그 다음 `ClientSessionController -> JNI -> Kotlin` 제어 브리지를 추가해 `refresh/select/Desktop Mode`와 레퍼런스 탭 UI 1차를 진행한다.
