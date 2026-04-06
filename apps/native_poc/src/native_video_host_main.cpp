@@ -245,13 +245,39 @@ struct WindowListEntry {
 
 std::string get_window_process_name(HWND hwnd, uint32_t* outPid);
 
-bool should_exclude_recursive_window_process(const std::string& processName) {
+bool should_exclude_window_process(uint32_t pid, const std::string& processName) {
   if (processName.empty()) return false;
-  return processName == "dnplayer.exe" ||
-         processName == "dnmultiplayer.exe" ||
-         processName == "ldplayer.exe" ||
-         processName == "hd-player.exe" ||
-         processName == "textinputhost.exe";
+  if (processName == "textinputhost.exe") return true;
+  if (processName != "dnplayer.exe" &&
+      processName != "dnmultiplayer.exe" &&
+      processName != "ldplayer.exe" &&
+      processName != "hd-player.exe") {
+    return false;
+  }
+
+  static const std::unordered_set<uint32_t> excludedPids = []() {
+    std::unordered_set<uint32_t> out;
+    const char* raw = std::getenv("REMOTE60_NATIVE_WINDOWLIST_EXCLUDE_PIDS");
+    if (!raw) return out;
+    const std::string csv(raw);
+    size_t start = 0;
+    while (start <= csv.size()) {
+      const size_t comma = csv.find(',', start);
+      const size_t end = (comma == std::string::npos) ? csv.size() : comma;
+      const std::string token = trim_ascii(csv.substr(start, end - start));
+      if (!token.empty()) {
+        try {
+          const auto parsed = static_cast<uint32_t>(std::stoul(token));
+          if (parsed != 0) out.insert(parsed);
+        } catch (...) {
+        }
+      }
+      if (comma == std::string::npos) break;
+      start = comma + 1;
+    }
+    return out;
+  }();
+  return pid != 0 && excludedPids.find(pid) != excludedPids.end();
 }
 
 bool should_include_window(HWND hwnd) {
@@ -265,7 +291,7 @@ bool should_include_window(HWND hwnd) {
   DWORD pid = 0;
   GetWindowThreadProcessId(hwnd, &pid);
   if (pid == GetCurrentProcessId()) return false;
-  if (should_exclude_recursive_window_process(get_window_process_name(hwnd, nullptr))) return false;
+  if (should_exclude_window_process(static_cast<uint32_t>(pid), get_window_process_name(hwnd, nullptr))) return false;
   RECT r{};
   if (!GetWindowRect(hwnd, &r)) return false;
   const int w = r.right - r.left;

@@ -2479,6 +2479,45 @@ Next action
 - `targets -> viewer -> back` 반복 soak을 추가로 돌려 장시간 freeze 재현 여부를 본다.
 - desktop path capture source 검증을 분리해 `Devices/Desktop` 흐름도 안정화한다.
 
+### 154) 2026-04-06 ldplayer list restore with pid-scoped exclude
+Goal
+- `LDPlayer`를 targets 목록에 다시 보이게 한다.
+- blanket `dnplayer.exe` 제외를 풀고, 현재 Android client를 띄운 LDPlayer instance만 좁게 제외한다.
+
+Files changed
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Native build:
+  - `cmake --build d:\remote\remote\build-vcpkg-local --target remote60_native_video_host_poc --config Debug`
+  - 결과: 성공
+- Background host restart:
+  - current host PID: `47284`
+  - env: `REMOTE60_NATIVE_WINDOWLIST_EXCLUDE_PIDS=15124`
+  - note:
+    - `dnplayer.exe index=1` PID `8256`
+    - `dnplayer.exe index=2` PID `15124`
+    - current Android client instance는 `index=2` / PID `15124`로 보고 해당 PID만 제외
+- LDPlayer 2 runtime:
+  - targets scene screenshot:
+    - `ldplayer_list_back.png`
+    - `window_list_received count=9`
+    - `1 • 1000x575` LDPlayer window가 목록에 다시 노출됨
+  - viewer screenshot:
+    - `ldplayer_viewer.png`
+    - LDPlayer game content가 full-screen viewer에 실제 표시됨
+- Scope note:
+  - blanket `dnplayer.exe` exclusion은 과도했으므로 되돌리고, `REMOTE60_NATIVE_WINDOWLIST_EXCLUDE_PIDS` 기반으로 현재 client instance만 제외하는 방식으로 운영했다.
+  - `textinputhost.exe` exclusion은 유지한다.
+  - 현재는 session-local env 방식이라 emulator instance PID가 바뀌면 host 재기동 시 다시 맞춰야 한다.
+
+Next action
+- `REMOTE60_NATIVE_WINDOWLIST_EXCLUDE_PIDS`를 current emulator instance와 자동 동기화하는 방식으로 다듬는다.
+- 그 다음 `targets -> viewer -> back` 반복 soak을 추가로 돌려 장시간 freeze 재현 여부를 본다.
+
 ### 153) 2026-04-06 host utility window filter extension
 Goal
 - recursive freeze와 잘못된 선택을 줄이기 위해 shareable windows 목록에서 helper window를 더 제외한다.
