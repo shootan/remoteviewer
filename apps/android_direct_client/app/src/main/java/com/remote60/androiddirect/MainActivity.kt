@@ -9,10 +9,12 @@ import android.os.Looper
 import android.util.Log
 import android.view.Surface
 import android.view.TextureView
+import android.view.View
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.Spinner
 import android.widget.TextView
 import org.json.JSONException
@@ -61,15 +63,23 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var errorText: TextView
     private lateinit var videoDebugText: TextView
     private lateinit var videoTextureView: TextureView
+    private lateinit var controlsPanel: LinearLayout
+    private lateinit var compactToolbar: LinearLayout
     private lateinit var targetWindowsButton: Button
     private lateinit var targetDevicesButton: Button
     private lateinit var desktopModeButton: Button
+    private lateinit var panelToggleButton: Button
+    private lateinit var disconnectCompactButton: Button
+    private lateinit var refreshCompactButton: Button
+    private lateinit var desktopModeCompactButton: Button
     private lateinit var targetSpinner: Spinner
     private lateinit var targetSpinnerAdapter: ArrayAdapter<String>
     private val targetSpinnerLabels = mutableListOf<String>()
     private val targetSpinnerIds = mutableListOf<Long>()
     private var suppressTargetSpinnerSelection = false
     private var activeTargetTab = TargetTab.WINDOWS
+    private var controlsExpanded = true
+    private var wasConnected = false
     private var videoSurface: Surface? = null
     private var videoWidth = 0
     private var videoHeight = 0
@@ -95,9 +105,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         errorText = findViewById(R.id.errorText)
         videoDebugText = findViewById(R.id.videoDebugText)
         videoTextureView = findViewById(R.id.videoTextureView)
+        controlsPanel = findViewById(R.id.controlsPanel)
+        compactToolbar = findViewById(R.id.compactToolbar)
         targetWindowsButton = findViewById(R.id.targetWindowsButton)
         targetDevicesButton = findViewById(R.id.targetDevicesButton)
         desktopModeButton = findViewById(R.id.desktopModeButton)
+        panelToggleButton = findViewById(R.id.panelToggleButton)
+        disconnectCompactButton = findViewById(R.id.disconnectCompactButton)
+        refreshCompactButton = findViewById(R.id.refreshCompactButton)
+        desktopModeCompactButton = findViewById(R.id.desktopModeCompactButton)
         targetSpinner = findViewById(R.id.targetSpinner)
 
         videoTextureView.surfaceTextureListener = this
@@ -186,6 +202,26 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             NativeSessionBridge.nativeSelectDesktopMode()
             renderStatus()
         }
+
+        panelToggleButton.setOnClickListener {
+            controlsExpanded = !controlsExpanded
+            renderStatus()
+        }
+
+        disconnectCompactButton.setOnClickListener {
+            NativeSessionBridge.nativeDisconnect()
+            renderStatus()
+        }
+
+        refreshCompactButton.setOnClickListener {
+            NativeSessionBridge.nativeRequestWindowList()
+            renderStatus()
+        }
+
+        desktopModeCompactButton.setOnClickListener {
+            NativeSessionBridge.nativeSelectDesktopMode()
+            renderStatus()
+        }
     }
 
     override fun onResume() {
@@ -262,11 +298,18 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val statusValue = NativeSessionBridge.nativeGetStatus()
         val lastErrorValue = NativeSessionBridge.nativeGetLastError()
         val panelSnapshot = parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson())
+        val isConnected = statusValue.startsWith("connected")
+
+        if (isConnected != wasConnected) {
+            controlsExpanded = !isConnected
+            wasConnected = isConnected
+        }
 
         statusText.text = statusValue
         errorText.text = lastErrorValue
         syncVideoSurface(forceRebind = false)
-        renderTargetPanel(statusValue.startsWith("connected"), panelSnapshot)
+        renderTargetPanel(isConnected, panelSnapshot)
+        renderCompactControls(isConnected, panelSnapshot)
         videoDebugText.text =
             NativeSessionBridge.nativeGetVideoDebugStatus() +
                 " view=${videoTextureView.width}x${videoTextureView.height}" +
@@ -275,6 +318,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun renderTargetPanel(isConnected: Boolean, panelSnapshot: WindowPanelUiSnapshot) {
+        controlsPanel.visibility = if (isConnected && !controlsExpanded) View.GONE else View.VISIBLE
         targetWindowsButton.text =
             if (activeTargetTab == TargetTab.WINDOWS) "[LDPlayer]" else getString(R.string.target_windows_button)
         targetDevicesButton.text =
@@ -325,6 +369,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         suppressTargetSpinnerSelection = false
         targetSpinner.isEnabled = isConnected && targetSpinnerIds.isNotEmpty() && !panelSnapshot.selectionLocked
+    }
+
+    private fun renderCompactControls(isConnected: Boolean, panelSnapshot: WindowPanelUiSnapshot) {
+        compactToolbar.visibility = if (isConnected) View.VISIBLE else View.GONE
+        panelToggleButton.text =
+            if (controlsExpanded) getString(R.string.panel_hide_button) else getString(R.string.panel_show_button)
+        disconnectCompactButton.isEnabled = isConnected
+        refreshCompactButton.isEnabled = isConnected
+        desktopModeCompactButton.isEnabled = isConnected && !panelSnapshot.selectionLocked
     }
 
     private fun parseWindowPanelSnapshot(rawJson: String): WindowPanelUiSnapshot {

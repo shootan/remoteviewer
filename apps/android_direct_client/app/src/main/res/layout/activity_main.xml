@@ -20,60 +20,136 @@
         android:textSize="12sp" />
 
     <LinearLayout
+        android:id="@+id/controlsPanel"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="10dp"
-        android:baselineAligned="false"
-        android:orientation="horizontal">
+        android:orientation="vertical">
 
-        <EditText
-            android:id="@+id/hostInput"
-            android:layout_width="0dp"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="2"
-            android:hint="@string/host_hint"
-            android:inputType="textUri"
-            android:maxLines="1"
-            android:text="192.168.0.10" />
+            android:baselineAligned="false"
+            android:orientation="horizontal">
 
-        <EditText
-            android:id="@+id/videoPortInput"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:layout_weight="1"
-            android:hint="@string/video_port_hint"
-            android:inputType="number"
-            android:maxLines="1"
-            android:text="43000" />
+            <EditText
+                android:id="@+id/hostInput"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="2"
+                android:hint="@string/host_hint"
+                android:inputType="textUri"
+                android:maxLines="1"
+                android:text="192.168.0.10" />
 
-        <EditText
-            android:id="@+id/controlPortInput"
-            android:layout_width="0dp"
+            <EditText
+                android:id="@+id/videoPortInput"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:hint="@string/video_port_hint"
+                android:inputType="number"
+                android:maxLines="1"
+                android:text="43000" />
+
+            <EditText
+                android:id="@+id/controlPortInput"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:hint="@string/control_port_hint"
+                android:inputType="number"
+                android:maxLines="1"
+                android:text="43001" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:layout_weight="1"
-            android:hint="@string/control_port_hint"
-            android:inputType="number"
-            android:maxLines="1"
-            android:text="43001" />
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/connectButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/connect_button" />
+
+            <Button
+                android:id="@+id/disconnectButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:text="@string/disconnect_button" />
+
+            <Button
+                android:id="@+id/refreshButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:text="@string/refresh_button" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/targetWindowsButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/target_windows_button" />
+
+            <Button
+                android:id="@+id/targetDevicesButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:text="@string/target_devices_button" />
+
+            <Button
+                android:id="@+id/desktopModeButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:text="@string/desktop_mode_button" />
+        </LinearLayout>
+
+        <Spinner
+            android:id="@+id/targetSpinner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:spinnerMode="dropdown" />
     </LinearLayout>
 
     <LinearLayout
+        android:id="@+id/compactToolbar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
-        android:orientation="horizontal">
+        android:orientation="horizontal"
+        android:visibility="gone">
 
         <Button
-            android:id="@+id/connectButton"
+            android:id="@+id/panelToggleButton"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="@string/connect_button" />
+            android:text="@string/panel_show_button" />
 
         <Button
-            android:id="@+id/disconnectButton"
+            android:id="@+id/disconnectCompactButton"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_marginStart="8dp"
@@ -81,37 +157,15 @@
             android:text="@string/disconnect_button" />
 
         <Button
-            android:id="@+id/refreshButton"
+            android:id="@+id/refreshCompactButton"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_marginStart="8dp"
             android:layout_weight="1"
             android:text="@string/refresh_button" />
-    </LinearLayout>
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:orientation="horizontal">
 
         <Button
-            android:id="@+id/targetWindowsButton"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="@string/target_windows_button" />
-
-        <Button
-            android:id="@+id/targetDevicesButton"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:layout_weight="1"
-            android:text="@string/target_devices_button" />
-
-        <Button
-            android:id="@+id/desktopModeButton"
+            android:id="@+id/desktopModeCompactButton"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_marginStart="8dp"
@@ -139,13 +193,6 @@
         android:layout_marginTop="8dp"
         android:maxLines="1"
         android:textStyle="bold" />
-
-    <Spinner
-        android:id="@+id/targetSpinner"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="2dp"
-        android:spinnerMode="dropdown" />
 
     <TextView
         android:id="@+id/errorText"

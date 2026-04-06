@@ -11,4 +11,6 @@
     <string name="target_windows_button">LDPlayer</string>
     <string name="target_devices_button">Devices</string>
     <string name="desktop_mode_button">Desktop Mode</string>
+    <string name="panel_show_button">Show Panel</string>
+    <string name="panel_hide_button">Hide Panel</string>
 </resources>

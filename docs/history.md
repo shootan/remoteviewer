@@ -2348,3 +2348,45 @@ Validation / build / test result
 Next action
 - LDPlayer screenshot/실기기 기준으로 `full-frame video`와 `Refresh/Desktop Mode/window select` live verify를 마저 한다.
 - 그 다음 `Phase F` 입력 착수 전 gate를 재확인한다.
+
+### 149) 2026-04-06 android connected compact mode
+Goal
+- 연결 후 상단 설정/타깃 패널을 기본으로 접어 video viewport를 더 확보한다.
+- background host를 유지한 상태에서 compact mode screenshot으로 실제 viewport 개선을 확인한다.
+
+Files changed
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `apps/android_direct_client/app/src/main/res/layout/activity_main.xml`
+- `apps/android_direct_client/app/src/main/res/values/strings.xml`
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Android build:
+  - `D:\remote\remote\tmp\gradle\gradle-8.7\bin\gradle.bat assembleDebug`
+  - 결과: 성공
+- Background host:
+  - process: `remote60_native_video_host_poc` PID `46776`
+  - log: `d:\remote\remote\tmp\bg_host\host_stdout.log`
+  - start command:
+    - `REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE=1`
+    - `build-vcpkg-local\\apps\\native_poc\\Debug\\remote60_native_video_host_poc.exe --bind-port 43000 --control-port 43001 --codec h264`
+- LDPlayer 2 runtime:
+  - connect screenshot:
+    - `compact_mode_connected.png`
+    - connected compact toolbar visible: `Show Panel / Disconnect / Refresh / Desktop Mode`
+    - status: `connected window_list_received count=9 selected=desktop`
+    - viewport: `view=936x310`
+  - previous Phase E screenshot baseline:
+    - connected full panel viewport: `view=936x172`
+  - host log:
+    - `window-select seq=1 requestedId=0 applied=1 selectedId=0 reason=desktop_mode_selected title=desktop`
+- Scope note:
+  - compact toolbar는 connected 상태에서만 보이고, full controls panel은 기본 collapse된다.
+  - `Show Panel`로 host/port, target buttons, spinner를 다시 펼칠 수 있다.
+  - background host는 유지 중이지만 현재 capture source가 `CreateForWindow(GetShellWindow())`로 fallback되어 있어 video는 계속 black이며, 이는 이번 client-only 작업 범위 밖의 runtime blocker다.
+
+Next action
+- valid capture source 환경에서 `full-frame video`와 `Refresh/Desktop Mode/window select` live verify를 다시 수행한다.
+- 그 다음 `Phase F` 입력 착수 전 gate를 재확인한다.
