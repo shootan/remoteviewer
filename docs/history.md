@@ -2442,6 +2442,43 @@ Next action
 - desktop path capture source 검증을 분리해 `Devices/Desktop` scene 흐름도 안정화한다.
 - 그 다음 `Phase F` 입력 착수 전 gate를 재확인한다.
 
+### 152) 2026-04-06 host window-capture stall false-positive guard
+Goal
+- static window를 캡처할 때 `callbackFramesPerSec < 10`만으로 freeze로 오판정해 restart하는 문제를 줄인다.
+- recursive emulator target filter 이후에도 남아 있던 반복 freeze를 host stall 정책에서 완화한다.
+
+Files changed
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Native build:
+  - `cmake --build d:\remote\remote\build-vcpkg-local --target remote60_native_video_host_poc --config Debug`
+  - 결과: 성공
+- Background host restart:
+  - new host PID: `32032`
+  - log: `d:\remote\remote\tmp\bg_host\host_stdout.log`
+- Runtime observation:
+  - 수정 전:
+    - selected window가 static일 때 `callbackFramesPerSec=2..9` 구간만으로
+      `capture session restarted reason=capture-input-stall`
+      가 반복 발생
+    - 예시 target: `unity hub.exe`
+  - 수정 후:
+    - window capture mode에서는 low-push 기준 restart가 비활성화됨
+    - host steady log에서 `captureDeadRestartCount=0`, `captureTargetProc=monitor` 상태 유지 확인
+    - Android reconnect 후 targets scene과 viewer 진입 재확인
+- Scope note:
+  - hard stall guard(`lastCallbackUs` 기반 3초 이상 무응답 restart)는 그대로 유지했다.
+  - 이번 수정은 `window capture mode`에서만 false-positive restart를 막는 목적이다.
+  - 아직 장시간 반복 soak은 별도 검증 항목으로 남긴다.
+
+Next action
+- `targets -> viewer -> back` 반복 soak을 추가로 돌려 장시간 freeze 재현 여부를 본다.
+- desktop path capture source 검증을 분리해 `Devices/Desktop` 흐름도 안정화한다.
+
 ### 151) 2026-04-06 host recursive emulator target filter
 Goal
 - Android viewer freeze 원인이던 recursive capture 경로를 줄인다.

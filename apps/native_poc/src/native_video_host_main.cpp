@@ -4567,7 +4567,9 @@ int main(int argc, char** argv) {
       const uint64_t idleHoldPerSec =
           (useH264 && captureSessionReady.load(std::memory_order_acquire) && callbackFramesPerSec == 0) ? 1ULL : 0ULL;
       idleHoldTotal += idleHoldPerSec;
-      if (useH264 && captureSessionReady.load(std::memory_order_acquire)) {
+      if (useH264 &&
+          captureSessionReady.load(std::memory_order_acquire) &&
+          !captureWindowModeActive) {
         const bool warmupDone =
             (captureInputStallWarmupSec == 0 ||
              t >= (startUs + static_cast<uint64_t>(captureInputStallWarmupSec) * 1000000ULL));
