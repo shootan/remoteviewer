@@ -2258,3 +2258,46 @@ Validation / build / test result
 Next action
 - `TextureView` full-frame 보정으로 `Phase D` 완료조건을 먼저 닫는다.
 - 그 다음 `ClientSessionController -> JNI -> Kotlin` 제어 브리지를 추가해 `refresh/select/Desktop Mode`와 레퍼런스 탭 UI 1차를 진행한다.
+
+### 147) 2026-04-06 android phase-d surface buffer rebind and viewport expansion
+Goal
+- `TextureView`가 영상 실제 크기를 모른 채 작은 기본 buffer로 붙는 문제를 줄인다.
+- LDPlayer 2에서 Android shell layout이 video viewport를 과도하게 눌러 `상단 일부만` 보이던 상태를 완화한다.
+
+Files changed
+- `apps/android_direct_client/app/src/main/cpp/android_video_decoder.hpp`
+- `apps/android_direct_client/app/src/main/cpp/android_video_decoder.cpp`
+- `apps/android_direct_client/app/src/main/cpp/native_bridge.cpp`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/NativeSessionBridge.kt`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `apps/android_direct_client/app/src/main/res/layout/activity_main.xml`
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Android build:
+  - `D:\remote\remote\tmp\gradle\gradle-8.7\bin\gradle.bat assembleDebug`
+  - 결과: 성공
+- LDPlayer 2 runtime:
+  - host:
+    - `REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE=1`
+    - `build-vcpkg-local\\apps\\native_poc\\Debug\\remote60_native_video_host_poc.exe --bind-port 43000 --control-port 43001 --codec h264`
+  - app:
+    - `adb -s emulator-5558 install -r app-debug.apk`
+    - `adb -s emulator-5558 shell am start -W -n com.remote60.androiddirect/.MainActivity --es host 192.168.0.76 --ei videoPort 43000 --ei controlPort 43001`
+  - runtime log:
+    - 이전 shell layout 기준 초기 viewport: `bind video surface buffer=928x86 video=0x0 view=928x86`
+    - compact shell layout 적용 후 초기 viewport: `bind video surface buffer=936x254 video=0x0 view=936x254`
+    - video size 수신 후 재바인딩: `bind video surface buffer=1234x720 video=1234x720 view=936x254`
+    - decoder log: `updated codec config`, `MediaCodec started width=1234 height=720`
+    - host log: `client connected transport=udp`, `[control] client connected`
+- Scope note:
+  - Android JNI에 `nativeGetVideoSizePacked`를 추가해 Kotlin이 decoder output size를 polling할 수 있게 했다.
+  - `MainActivity`는 video size가 바뀌면 `TextureView.setDefaultBufferSize(...)` 기준으로 surface를 재바인딩하고 fit-center transform을 적용한다.
+  - shell layout은 host/video/control 입력을 1행으로 압축해 LDPlayer 2 기준 video viewport 높이를 `86px -> 254px`로 늘렸다.
+  - `uiautomator dump`가 idle state에서 반복 실패해 screenshot 기반 full-frame 최종 판정은 이번 턴에서 닫지 못했다.
+
+Next action
+- LDPlayer screenshot 또는 실기기에서 full-frame visible content 최종 확인을 마저 한다.
+- 그 다음 `ClientSessionController -> JNI -> Kotlin` 제어 브리지와 `Phase E` 탭 UI 1차 구현으로 넘어간다.

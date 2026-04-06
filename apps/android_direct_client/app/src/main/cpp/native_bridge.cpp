@@ -62,3 +62,9 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetVideoDebugStatus(
     JNIEnv* env, jobject /* this */) {
   return to_jstring(env, g_video_decoder_sink.DebugStatus());
 }
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetVideoSizePacked(
+    JNIEnv* /* env */, jobject /* this */) {
+  return static_cast<jlong>(g_video_decoder_sink.VideoSizePacked());
+}

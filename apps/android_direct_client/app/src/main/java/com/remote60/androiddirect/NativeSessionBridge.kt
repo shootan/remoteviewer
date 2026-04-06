@@ -13,4 +13,5 @@ object NativeSessionBridge {
     external fun nativeGetStatus(): String
     external fun nativeGetLastError(): String
     external fun nativeGetVideoDebugStatus(): String
+    external fun nativeGetVideoSizePacked(): Long
 }

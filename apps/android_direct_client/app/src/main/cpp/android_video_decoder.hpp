@@ -22,12 +22,14 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   void OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& frame) override;
   void OnVideoStreamReset() override;
   std::string DebugStatus();
+  uint64_t VideoSizePacked();
 
  private:
   bool EnsureCodecLocked(uint32_t width, uint32_t height);
   void ResetCodecLocked();
   void ReleaseSurfaceLocked();
   bool UpdateCodecConfigLocked(const std::vector<uint8_t>& annexb);
+  void UpdateOutputFormatLocked();
   void DrainOutputLocked();
 
   std::mutex mu_;
@@ -35,6 +37,8 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   AMediaCodec* codec_ = nullptr;
   uint32_t configuredWidth_ = 0;
   uint32_t configuredHeight_ = 0;
+  uint32_t outputWidth_ = 0;
+  uint32_t outputHeight_ = 0;
   uint64_t inputFrameCount_ = 0;
   uint64_t outputFrameCount_ = 0;
   std::vector<uint8_t> csd0_;

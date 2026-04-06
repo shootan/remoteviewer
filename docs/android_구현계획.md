@@ -1,5 +1,5 @@
 # Android Direct Client 구현계획
-Updated: 2026-04-06 15:57
+Updated: 2026-04-06 16:11
 
 이 문서는 Android direct client 작업의 단일 기준(Source of Truth)으로 사용한다.
 
@@ -198,10 +198,10 @@ Updated: 2026-04-06 15:57
 - 장애 시 로그로 실패 지점 분리
 
 ## 7) 다음 실행 순서
-1. Phase D 표시 보정 마감
-   - `TextureView`에 들어가는 decoded frame이 상단 일부만 보이는 상태를 먼저 해소한다.
-   - `TextureView`/surface sizing/transform 계산을 decoded size와 view size 기준으로 정리한다.
-   - 완료조건은 LDPlayer screenshot 기준으로 full-frame visible content가 보이고, `surface=on codec=on size=... in/out` 상태가 유지되는 것이다.
+1. Phase D 최종 시각 검증
+   - `nativeGetVideoSizePacked`, `TextureView.setDefaultBufferSize`, fit-center transform, compact shell layout 적용은 끝냈다.
+   - 남은 것은 LDPlayer screenshot/실기기 기준으로 full-frame visible content가 실제로 보이는지 최종 확인하는 작업이다.
+   - 완료조건은 `surface buffer=1234x720 video=1234x720` 재바인딩 이후 full-frame visible content가 확인되는 것이다.
 2. Phase E session/JNI 제어 브리지 추가
    - 공용 core에는 이미 `WindowPanelStateModel`과 `window list/select` 상태기가 있으므로, Android는 이를 호출할 수 있는 얇은 제어 API만 노출한다.
    - `refresh`, `window select`, `Desktop Mode` 요청과 window list snapshot을 `ClientSessionController -> JNI -> Kotlin`으로 연결한다.
@@ -240,3 +240,4 @@ Updated: 2026-04-06 15:57
 - [x] Phase D TextureView 가시화 디버깅 (`SurfaceView` 대신 `TextureView`, screenshot에 일부 frame 노출)
 - [x] decoder debug 상태를 Android UI에 노출 (`surface/codec/csd/in/out`)
 - [x] Android 목표 UI 레퍼런스/탭 의미 명시 (`image/...webp`, `LD플레이어`=각 윈도우별 화면, `디바이스`=각 모니터 화면, 예시용 화면)
+- [x] Phase D surface buffer 실제 크기 재바인딩 + compact shell layout (`nativeGetVideoSizePacked`, `TextureView.setDefaultBufferSize`, LDPlayer viewport `928x86 -> 936x254`)

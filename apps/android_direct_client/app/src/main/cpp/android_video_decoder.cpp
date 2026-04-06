@@ -170,6 +170,8 @@ void AndroidVideoDecoderSink::OnVideoStreamReset() {
   ResetCodecLocked();
   configuredWidth_ = 0;
   configuredHeight_ = 0;
+  outputWidth_ = 0;
+  outputHeight_ = 0;
   inputFrameCount_ = 0;
   outputFrameCount_ = 0;
   csd0_.clear();
@@ -183,10 +185,18 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
   status += " codec=";
   status += codec_ ? "on" : "off";
   status += " size=" + std::to_string(configuredWidth_) + "x" + std::to_string(configuredHeight_);
+  status += " output=" + std::to_string(outputWidth_) + "x" + std::to_string(outputHeight_);
   status += " csd=" + std::to_string(csd0_.empty() ? 0 : 1) + "/" + std::to_string(csd1_.empty() ? 0 : 1);
   status += " in=" + std::to_string(inputFrameCount_);
   status += " out=" + std::to_string(outputFrameCount_);
   return status;
+}
+
+uint64_t AndroidVideoDecoderSink::VideoSizePacked() {
+  std::lock_guard<std::mutex> lock(mu_);
+  const uint32_t width = outputWidth_ > 0 ? outputWidth_ : configuredWidth_;
+  const uint32_t height = outputHeight_ > 0 ? outputHeight_ : configuredHeight_;
+  return (static_cast<uint64_t>(width) << 32u) | static_cast<uint64_t>(height);
 }
 
 bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height) {
@@ -227,6 +237,8 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height)
 
   configuredWidth_ = width;
   configuredHeight_ = height;
+  outputWidth_ = width;
+  outputHeight_ = height;
   char line[128];
   std::snprintf(line, sizeof(line), "MediaCodec started width=%u height=%u csd0=%zu csd1=%zu",
                 width, height, csd0_.size(), csd1_.size());
@@ -280,6 +292,42 @@ bool AndroidVideoDecoderSink::UpdateCodecConfigLocked(const std::vector<uint8_t>
   return updated;
 }
 
+void AndroidVideoDecoderSink::UpdateOutputFormatLocked() {
+  if (!codec_) return;
+
+  AMediaFormat* format = AMediaCodec_getOutputFormat(codec_);
+  if (!format) return;
+
+  int32_t width = 0;
+  int32_t height = 0;
+  if (AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_WIDTH, &width) && width > 0) {
+    outputWidth_ = static_cast<uint32_t>(width);
+  }
+  if (AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_HEIGHT, &height) && height > 0) {
+    outputHeight_ = static_cast<uint32_t>(height);
+  }
+
+  int32_t cropLeft = 0;
+  int32_t cropRight = 0;
+  int32_t cropTop = 0;
+  int32_t cropBottom = 0;
+  const bool hasCrop =
+      AMediaFormat_getInt32(format, "crop-left", &cropLeft) &&
+      AMediaFormat_getInt32(format, "crop-right", &cropRight) &&
+      AMediaFormat_getInt32(format, "crop-top", &cropTop) &&
+      AMediaFormat_getInt32(format, "crop-bottom", &cropBottom);
+  if (hasCrop && cropRight >= cropLeft && cropBottom >= cropTop) {
+    outputWidth_ = static_cast<uint32_t>(cropRight - cropLeft + 1);
+    outputHeight_ = static_cast<uint32_t>(cropBottom - cropTop + 1);
+  }
+
+  char line[160];
+  std::snprintf(line, sizeof(line), "output format width=%u height=%u crop=%d,%d,%d,%d",
+                outputWidth_, outputHeight_, cropLeft, cropTop, cropRight, cropBottom);
+  log_info(line);
+  AMediaFormat_delete(format);
+}
+
 void AndroidVideoDecoderSink::DrainOutputLocked() {
   if (!codec_) return;
 
@@ -297,8 +345,11 @@ void AndroidVideoDecoderSink::DrainOutputLocked() {
       }
       continue;
     }
-    if (outputIndex == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED ||
-        outputIndex == AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED) {
+    if (outputIndex == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) {
+      UpdateOutputFormatLocked();
+      continue;
+    }
+    if (outputIndex == AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED) {
       continue;
     }
     break;
