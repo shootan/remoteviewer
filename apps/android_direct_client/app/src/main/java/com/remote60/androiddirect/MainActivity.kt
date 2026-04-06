@@ -9,13 +9,49 @@ import android.os.Looper
 import android.util.Log
 import android.view.Surface
 import android.view.TextureView
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
+import android.widget.Spinner
 import android.widget.TextView
+import org.json.JSONException
+import org.json.JSONObject
 
 class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     companion object {
         private const val LOG_TAG = "remote60_android_direct"
+    }
+
+    private enum class TargetTab {
+        WINDOWS,
+        DEVICES,
+    }
+
+    private data class WindowPanelItem(
+        val id: Long,
+        val title: String,
+        val width: Int,
+        val height: Int,
+        val minimized: Boolean,
+    )
+
+    private data class WindowPanelUiSnapshot(
+        val selectedId: Long,
+        val selectedTitle: String,
+        val selectionLocked: Boolean,
+        val status: String,
+        val items: List<WindowPanelItem>,
+    ) {
+        companion object {
+            val EMPTY = WindowPanelUiSnapshot(
+                selectedId = 0L,
+                selectedTitle = "desktop",
+                selectionLocked = false,
+                status = "waiting_control",
+                items = emptyList(),
+            )
+        }
     }
 
     private lateinit var hostEdit: EditText
@@ -25,6 +61,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var errorText: TextView
     private lateinit var videoDebugText: TextView
     private lateinit var videoTextureView: TextureView
+    private lateinit var targetWindowsButton: Button
+    private lateinit var targetDevicesButton: Button
+    private lateinit var desktopModeButton: Button
+    private lateinit var targetSpinner: Spinner
+    private lateinit var targetSpinnerAdapter: ArrayAdapter<String>
+    private val targetSpinnerLabels = mutableListOf<String>()
+    private val targetSpinnerIds = mutableListOf<Long>()
+    private var suppressTargetSpinnerSelection = false
+    private var activeTargetTab = TargetTab.WINDOWS
     private var videoSurface: Surface? = null
     private var videoWidth = 0
     private var videoHeight = 0
@@ -50,10 +95,39 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         errorText = findViewById(R.id.errorText)
         videoDebugText = findViewById(R.id.videoDebugText)
         videoTextureView = findViewById(R.id.videoTextureView)
+        targetWindowsButton = findViewById(R.id.targetWindowsButton)
+        targetDevicesButton = findViewById(R.id.targetDevicesButton)
+        desktopModeButton = findViewById(R.id.desktopModeButton)
+        targetSpinner = findViewById(R.id.targetSpinner)
+
         videoTextureView.surfaceTextureListener = this
         videoTextureView.isOpaque = true
         videoTextureView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
             syncVideoSurface(forceRebind = false)
+        }
+
+        targetSpinnerAdapter =
+            ArrayAdapter(this, android.R.layout.simple_spinner_item, targetSpinnerLabels).also {
+                it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+                targetSpinner.adapter = it
+            }
+        targetSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                if (suppressTargetSpinnerSelection) return
+                if (position < 0 || position >= targetSpinnerIds.size) return
+                val ok = when (activeTargetTab) {
+                    TargetTab.WINDOWS -> NativeSessionBridge.nativeSelectWindow(targetSpinnerIds[position])
+                    TargetTab.DEVICES -> NativeSessionBridge.nativeSelectDesktopMode()
+                }
+                if (!ok) {
+                    renderStatus()
+                    return
+                }
+                renderStatus()
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) {
+            }
         }
 
         intent.getStringExtra("host")?.trim()?.takeIf { it.isNotEmpty() }?.let {
@@ -79,6 +153,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             val videoPort = videoPortEdit.text?.toString()?.toIntOrNull() ?: 0
             val controlPort = controlPortEdit.text?.toString()?.toIntOrNull() ?: 0
             val ok = NativeSessionBridge.nativeConnect(host, videoPort, controlPort)
+            if (ok) {
+                NativeSessionBridge.nativeRequestWindowList()
+            }
             renderStatus()
             if (!ok) {
                 errorText.text = NativeSessionBridge.nativeGetLastError()
@@ -91,6 +168,22 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
 
         refreshButton.setOnClickListener {
+            NativeSessionBridge.nativeRequestWindowList()
+            renderStatus()
+        }
+
+        targetWindowsButton.setOnClickListener {
+            activeTargetTab = TargetTab.WINDOWS
+            renderStatus()
+        }
+
+        targetDevicesButton.setOnClickListener {
+            activeTargetTab = TargetTab.DEVICES
+            renderStatus()
+        }
+
+        desktopModeButton.setOnClickListener {
+            NativeSessionBridge.nativeSelectDesktopMode()
             renderStatus()
         }
     }
@@ -166,14 +259,105 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun renderStatus() {
-        statusText.text = NativeSessionBridge.nativeGetStatus()
-        errorText.text = NativeSessionBridge.nativeGetLastError()
+        val statusValue = NativeSessionBridge.nativeGetStatus()
+        val lastErrorValue = NativeSessionBridge.nativeGetLastError()
+        val panelSnapshot = parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson())
+
+        statusText.text = statusValue
+        errorText.text = lastErrorValue
         syncVideoSurface(forceRebind = false)
+        renderTargetPanel(statusValue.startsWith("connected"), panelSnapshot)
         videoDebugText.text =
             NativeSessionBridge.nativeGetVideoDebugStatus() +
                 " view=${videoTextureView.width}x${videoTextureView.height}" +
                 " buffer=${surfaceBufferWidth}x${surfaceBufferHeight}" +
                 " video=${videoWidth}x${videoHeight}"
+    }
+
+    private fun renderTargetPanel(isConnected: Boolean, panelSnapshot: WindowPanelUiSnapshot) {
+        targetWindowsButton.text =
+            if (activeTargetTab == TargetTab.WINDOWS) "[LDPlayer]" else getString(R.string.target_windows_button)
+        targetDevicesButton.text =
+            if (activeTargetTab == TargetTab.DEVICES) "[Devices]" else getString(R.string.target_devices_button)
+        targetWindowsButton.isEnabled = activeTargetTab != TargetTab.WINDOWS
+        targetDevicesButton.isEnabled = activeTargetTab != TargetTab.DEVICES
+        desktopModeButton.isEnabled = isConnected && !panelSnapshot.selectionLocked
+
+        val labels = mutableListOf<String>()
+        val ids = mutableListOf<Long>()
+        var selectedIndex = 0
+
+        when (activeTargetTab) {
+            TargetTab.WINDOWS -> {
+                if (panelSnapshot.items.isEmpty()) {
+                    labels.add("No shareable windows. Tap Refresh.")
+                } else {
+                    panelSnapshot.items.forEach { item ->
+                        val prefix = if (item.id == panelSnapshot.selectedId) "* " else ""
+                        val minimizedSuffix = if (item.minimized) " • minimized" else ""
+                        labels.add(prefix + item.title + " • " + item.width + "x" + item.height + minimizedSuffix)
+                        ids.add(item.id)
+                    }
+                    selectedIndex = ids.indexOf(panelSnapshot.selectedId).coerceAtLeast(0)
+                }
+            }
+
+            TargetTab.DEVICES -> {
+                labels.add(
+                    if (panelSnapshot.selectedId == 0L) {
+                        "* Desktop Mode • overview capture"
+                    } else {
+                        "Desktop Mode • overview capture"
+                    }
+                )
+                ids.add(0L)
+            }
+        }
+
+        suppressTargetSpinnerSelection = true
+        targetSpinnerLabels.clear()
+        targetSpinnerLabels.addAll(labels)
+        targetSpinnerIds.clear()
+        targetSpinnerIds.addAll(ids)
+        targetSpinnerAdapter.notifyDataSetChanged()
+        if (targetSpinnerLabels.isNotEmpty()) {
+            targetSpinner.setSelection(selectedIndex, false)
+        }
+        suppressTargetSpinnerSelection = false
+        targetSpinner.isEnabled = isConnected && targetSpinnerIds.isNotEmpty() && !panelSnapshot.selectionLocked
+    }
+
+    private fun parseWindowPanelSnapshot(rawJson: String): WindowPanelUiSnapshot {
+        if (rawJson.isBlank()) return WindowPanelUiSnapshot.EMPTY
+        return try {
+            val root = JSONObject(rawJson)
+            val itemsJson = root.optJSONArray("items")
+            val items = buildList {
+                if (itemsJson != null) {
+                    for (index in 0 until itemsJson.length()) {
+                        val item = itemsJson.optJSONObject(index) ?: continue
+                        add(
+                            WindowPanelItem(
+                                id = item.optLong("id"),
+                                title = item.optString("title", "window"),
+                                width = item.optInt("width"),
+                                height = item.optInt("height"),
+                                minimized = item.optBoolean("minimized"),
+                            )
+                        )
+                    }
+                }
+            }
+            WindowPanelUiSnapshot(
+                selectedId = root.optLong("selectedId"),
+                selectedTitle = root.optString("selectedTitle", "desktop"),
+                selectionLocked = root.optBoolean("selectionLocked"),
+                status = root.optString("status", "waiting_control"),
+                items = items,
+            )
+        } catch (_: JSONException) {
+            WindowPanelUiSnapshot.EMPTY
+        }
     }
 
     private fun syncVideoSurface(forceRebind: Boolean) {

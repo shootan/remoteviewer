@@ -8,4 +8,7 @@
     <string name="connect_button">Connect</string>
     <string name="disconnect_button">Disconnect</string>
     <string name="refresh_button">Refresh</string>
+    <string name="target_windows_button">LDPlayer</string>
+    <string name="target_devices_button">Devices</string>
+    <string name="desktop_mode_button">Desktop Mode</string>
 </resources>

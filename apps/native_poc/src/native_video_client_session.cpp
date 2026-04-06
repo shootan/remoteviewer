@@ -114,6 +114,48 @@ ClientSessionSnapshot ClientSessionController::Snapshot() const {
   return snapshot_;
 }
 
+WindowPanelSnapshot ClientSessionController::WindowPanelSnapshotCopy() const {
+  return windowPanel_.Snapshot();
+}
+
+bool ClientSessionController::RequestWindowList() {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+
+  windowPanel_.RequestList("window_list_request pending");
+  const auto panelSnapshot = windowPanel_.Snapshot();
+  std::lock_guard<std::mutex> lock(mu_);
+  if (!CanQueueControlRequestLocked()) return false;
+  SyncWindowPanelSnapshotLocked(panelSnapshot);
+  UpdateConnectedStatusLocked(panelSnapshot.status);
+  return true;
+}
+
+bool ClientSessionController::RequestWindowSelect(uint64_t windowId) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+
+  const char* statusText = (windowId == 0) ? "desktop_select_requested" : "window_select_requested";
+  if (!windowPanel_.RequestSelect(windowId, statusText)) {
+    return false;
+  }
+
+  const auto panelSnapshot = windowPanel_.Snapshot();
+  std::lock_guard<std::mutex> lock(mu_);
+  if (!CanQueueControlRequestLocked()) return false;
+  SyncWindowPanelSnapshotLocked(panelSnapshot);
+  UpdateConnectedStatusLocked(panelSnapshot.status);
+  return true;
+}
+
+bool ClientSessionController::RequestDesktopMode() {
+  return RequestWindowSelect(0);
+}
+
 bool ClientSessionController::IsValidPort(int port) {
   return port > 0 && port <= 65535;
 }
@@ -414,6 +456,12 @@ bool ClientSessionController::ConnectUdpVideo(const ClientSessionConnectArgs& ar
   udpVideoSocket_ = connected;
   snapshot_.transport.udpVideoReady = true;
   return true;
+}
+
+bool ClientSessionController::CanQueueControlRequestLocked() const {
+  return snapshot_.state == ClientSessionState::Connected &&
+         snapshot_.controlLoopActive &&
+         tcpControlSocket_ != kInvalidSocket;
 }
 
 void ClientSessionController::UpdateConnectedStatusLocked(const std::string& detail) {

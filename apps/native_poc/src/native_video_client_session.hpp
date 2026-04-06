@@ -64,6 +64,10 @@ class ClientSessionController {
   bool Connect(const ClientSessionConnectArgs& args);
   void Disconnect();
   ClientSessionSnapshot Snapshot() const;
+  WindowPanelSnapshot WindowPanelSnapshotCopy() const;
+  bool RequestWindowList();
+  bool RequestWindowSelect(uint64_t windowId);
+  bool RequestDesktopMode();
 
  private:
   ClientSessionController(const ClientSessionController&) = delete;
@@ -78,6 +82,7 @@ class ClientSessionController {
   bool ConnectTcpControlWithRetry(const ClientSessionConnectArgs& args, std::string* error);
   bool ConnectTcpControl(const ClientSessionConnectArgs& args, std::string* error);
   bool ConnectUdpVideo(const ClientSessionConnectArgs& args, std::string* error);
+  bool CanQueueControlRequestLocked() const;
   void UpdateConnectedStatusLocked(const std::string& detail);
   void SyncWindowPanelSnapshotLocked(const WindowPanelSnapshot& panelSnapshot);
   void CloseSocketsUnlocked();

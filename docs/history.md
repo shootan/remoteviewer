@@ -2301,3 +2301,50 @@ Validation / build / test result
 Next action
 - LDPlayer screenshot 또는 실기기에서 full-frame visible content 최종 확인을 마저 한다.
 - 그 다음 `ClientSessionController -> JNI -> Kotlin` 제어 브리지와 `Phase E` 탭 UI 1차 구현으로 넘어간다.
+
+### 148) 2026-04-06 android phase-e control bridge and target panel ui
+Goal
+- Android에 `window list/select`와 `Desktop Mode`를 붙일 최소 JNI 제어 브리지를 추가한다.
+- `LDPlayer/Devices` 탭과 target selector를 붙여 `Phase E` 1차 UI를 시작한다.
+
+Files changed
+- `apps/native_poc/src/native_video_client_session.hpp`
+- `apps/native_poc/src/native_video_client_session.cpp`
+- `apps/android_direct_client/app/src/main/cpp/native_bridge.cpp`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/NativeSessionBridge.kt`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `apps/android_direct_client/app/src/main/res/layout/activity_main.xml`
+- `apps/android_direct_client/app/src/main/res/values/strings.xml`
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Native build/test:
+  - `cmake --build d:\remote\remote\build-vcpkg-local --target remote60_native_video_client_shared_core_test --config Debug`
+  - `d:\remote\remote\build-vcpkg-local\apps\native_poc\Debug\remote60_native_video_client_shared_core_test.exe`
+  - 결과: `PASS`
+- Android build:
+  - `D:\remote\remote\tmp\gradle\gradle-8.7\bin\gradle.bat assembleDebug`
+  - 결과: 성공
+- LDPlayer 2 runtime:
+  - app launch:
+    - `adb -s emulator-5558 install -r app-debug.apk`
+    - `adb -s emulator-5558 shell am start -W -n com.remote60.androiddirect/.MainActivity --es host 192.168.0.76 --ei videoPort 43000 --ei controlPort 43001`
+  - host:
+    - `REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE=1`
+    - `build-vcpkg-local\\apps\\native_poc\\Debug\\remote60_native_video_host_poc.exe --bind-port 43000 --control-port 43001 --codec h264`
+  - runtime log:
+    - JNI/session bridge added: `nativeRequestWindowList`, `nativeSelectWindow`, `nativeSelectDesktopMode`, `nativeGetWindowPanelJson`
+    - Android launch 후 connect tap 기준 host log: `client connected transport=udp`, `[control] client connected`
+    - Android logcat 기준 viewport: `bind video surface buffer=936x172 video=0x0 view=936x172`
+    - video size 수신 후 재바인딩: `bind video surface buffer=1234x720 video=1234x720 view=936x172`
+- Scope note:
+  - `ClientSessionController`에 window panel snapshot 복사와 refresh/select/Desktop Mode 요청 API를 추가했다.
+  - Android JNI는 window panel 상태를 JSON으로 노출하고, Kotlin은 이를 polling해 `LDPlayer/Devices` 탭과 `Spinner` 기반 target selector를 그린다.
+  - `selected target` 상태는 native status와 spinner label prefix(`*`)에 반영되도록 정리했다.
+  - LDPlayer 자동 탭으로 connect/live video는 재현했지만, `Refresh/Desktop Mode/window select`의 최종 live verify는 이번 턴에서 닫지 못했다.
+
+Next action
+- LDPlayer screenshot/실기기 기준으로 `full-frame video`와 `Refresh/Desktop Mode/window select` live verify를 마저 한다.
+- 그 다음 `Phase F` 입력 착수 전 gate를 재확인한다.

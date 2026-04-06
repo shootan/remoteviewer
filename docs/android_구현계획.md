@@ -1,5 +1,5 @@
 # Android Direct Client 구현계획
-Updated: 2026-04-06 16:11
+Updated: 2026-04-06 16:47
 
 이 문서는 Android direct client 작업의 단일 기준(Source of Truth)으로 사용한다.
 
@@ -198,19 +198,14 @@ Updated: 2026-04-06 16:11
 - 장애 시 로그로 실패 지점 분리
 
 ## 7) 다음 실행 순서
-1. Phase D 최종 시각 검증
-   - `nativeGetVideoSizePacked`, `TextureView.setDefaultBufferSize`, fit-center transform, compact shell layout 적용은 끝냈다.
-   - 남은 것은 LDPlayer screenshot/실기기 기준으로 full-frame visible content가 실제로 보이는지 최종 확인하는 작업이다.
-   - 완료조건은 `surface buffer=1234x720 video=1234x720` 재바인딩 이후 full-frame visible content가 확인되는 것이다.
-2. Phase E session/JNI 제어 브리지 추가
-   - 공용 core에는 이미 `WindowPanelStateModel`과 `window list/select` 상태기가 있으므로, Android는 이를 호출할 수 있는 얇은 제어 API만 노출한다.
-   - `refresh`, `window select`, `Desktop Mode` 요청과 window list snapshot을 `ClientSessionController -> JNI -> Kotlin`으로 연결한다.
-   - 완료조건은 Android UI에서 요청을 보내고, `selected target` 상태가 session snapshot과 함께 즉시 갱신되는 것이다.
-3. Phase E 레퍼런스 UI 1차 구현
-   - `LD플레이어`/`디바이스` 탭 구조를 먼저 만들고, 1차는 새 프로토콜 없이 기존 window list 메타데이터만 사용한다.
-   - 즉, 1차 범위는 썸네일 생성보다 `title/resolution/selected badge/refresh/select`가 보이는 카드형 목록이다.
-   - 완료조건은 Android에서 window list 조회, 선택, selected target 표시가 가능한 것이다.
-4. Phase F 착수 전 Gate 고정
+1. Phase D / Phase E live verify
+   - `nativeGetVideoSizePacked`, `TextureView.setDefaultBufferSize`, `window panel JSON`, `refresh/select/Desktop Mode`, `LDPlayer/Devices` 탭 UI 1차 구현은 끝냈다.
+   - 남은 것은 LDPlayer screenshot/실기기 기준으로 full-frame visible content와 target panel 동작이 실제로 맞는지 최종 확인하는 작업이다.
+   - 완료조건은 `surface buffer=1234x720 video=1234x720` 재바인딩 이후 full-frame visible content가 확인되고, `Refresh/Desktop Mode/window select`가 host/UI 상태에 반영되는 것이다.
+2. Phase E selection UX 보정
+   - 현재 1차 UI는 `Spinner` 기반 선택 UI이므로, live verify 결과에 따라 `Apply` 버튼 분리 또는 카드형 목록으로 다듬을지 결정한다.
+   - monitor list는 현 프로토콜 범위 밖이므로, 필요 시 `디바이스` 탭 semantics와 실제 데이터 공급 경계를 다시 정리한다.
+3. Phase F 착수 전 Gate 고정
    - 입력 작업에 들어가기 전에 `full-frame video`, `window select`, `background/foreground 후 surface 재연결` 세 항목을 실기기 기준으로 재확인한다.
    - 위 Gate를 통과한 뒤 `tap/drag`, 마지막으로 `committed text`를 붙인다.
 
@@ -241,3 +236,5 @@ Updated: 2026-04-06 16:11
 - [x] decoder debug 상태를 Android UI에 노출 (`surface/codec/csd/in/out`)
 - [x] Android 목표 UI 레퍼런스/탭 의미 명시 (`image/...webp`, `LD플레이어`=각 윈도우별 화면, `디바이스`=각 모니터 화면, 예시용 화면)
 - [x] Phase D surface buffer 실제 크기 재바인딩 + compact shell layout (`nativeGetVideoSizePacked`, `TextureView.setDefaultBufferSize`, LDPlayer viewport `928x86 -> 936x254`)
+- [x] Phase E session/JNI 제어 브리지 1차 (`nativeRequestWindowList`, `nativeSelectWindow`, `nativeSelectDesktopMode`, window panel JSON snapshot)
+- [x] Phase E 탭/선택 UI 1차 (`LDPlayer/Devices`, Desktop Mode 버튼, Spinner 기반 window list/select 표시)

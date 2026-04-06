@@ -89,6 +89,36 @@
             android:text="@string/refresh_button" />
     </LinearLayout>
 
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/targetWindowsButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/target_windows_button" />
+
+        <Button
+            android:id="@+id/targetDevicesButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_weight="1"
+            android:text="@string/target_devices_button" />
+
+        <Button
+            android:id="@+id/desktopModeButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_weight="1"
+            android:text="@string/desktop_mode_button" />
+    </LinearLayout>
+
     <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
@@ -109,6 +139,13 @@
         android:layout_marginTop="8dp"
         android:maxLines="1"
         android:textStyle="bold" />
+
+    <Spinner
+        android:id="@+id/targetSpinner"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:spinnerMode="dropdown" />
 
     <TextView
         android:id="@+id/errorText"
