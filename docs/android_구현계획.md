@@ -28,10 +28,10 @@ Updated: 2026-04-06 11:21
 
 ### UI reference
 - Android 목표 화면 레퍼런스는 `D:\remote\remote\image\f3c9df0d83454ce1ba78a2fd6cb7e7801735893664.webp`를 기준으로 한다.
-- 위 이미지는 구현해야 할 Android 앱 화면의 기준 시안으로 취급한다.
+- 위 이미지는 구현 방향을 설명하기 위한 예시용 화면으로 취급한다.
 - 탭 의미는 아래처럼 고정한다.
-  - 첫 번째 탭: 각 윈도우별 화면
-  - 두 번째 탭: 전체 데스크탑 화면
+  - `LD플레이어` 탭: 각 윈도우별 화면
+  - `디바이스` 탭: 각 모니터 화면
 - 이후 Android UI 구현은 색/여백/세부 배치는 조정할 수 있어도, 위 레퍼런스의 정보 구조와 탭 의미는 유지한다.
 
 ## 3) 재사용 전략
@@ -127,8 +127,8 @@ Updated: 2026-04-06 11:21
   - Android에서 Desktop Mode 및 window list/select를 사용할 수 있게 한다.
 - 작업:
   - `D:\remote\remote\image\f3c9df0d83454ce1ba78a2fd6cb7e7801735893664.webp` 기준으로 탭/카드 구조를 맞춘다.
-  - 첫 번째 탭은 각 윈도우별 화면 목록/썸네일을 보여준다.
-  - 두 번째 탭은 전체 데스크탑 화면을 보여준다.
+  - `LD플레이어` 탭은 각 윈도우별 화면 목록/썸네일을 보여준다.
+  - `디바이스` 탭은 각 모니터 화면을 보여준다.
   - `Refresh`, `Desktop Mode`, window list, selected target UI 추가
   - control message를 기존 wire format 그대로 사용
 - 완료조건:
@@ -222,4 +222,4 @@ Updated: 2026-04-06 11:21
 - [x] LDPlayer 2에서 real host decode path/log 검증 (`MediaCodec started`, output release, disconnect/error 재확인)
 - [x] Phase D TextureView 가시화 디버깅 (`SurfaceView` 대신 `TextureView`, screenshot에 일부 frame 노출)
 - [x] decoder debug 상태를 Android UI에 노출 (`surface/codec/csd/in/out`)
-- [x] Android 목표 UI 레퍼런스/탭 의미 명시 (`image/...webp`, 탭1=각 윈도우별 화면, 탭2=전체 데스크탑 화면)
+- [x] Android 목표 UI 레퍼런스/탭 의미 명시 (`image/...webp`, `LD플레이어`=각 윈도우별 화면, `디바이스`=각 모니터 화면, 예시용 화면)

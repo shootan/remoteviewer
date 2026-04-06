@@ -2213,14 +2213,14 @@ Files changed
 
 Validation / build / test result
 - Docs only:
-  - `D:\remote\remote\image\f3c9df0d83454ce1ba78a2fd6cb7e7801735893664.webp`를 확인해 목표 UI 기준 이미지로 명시
+  - `D:\remote\remote\image\f3c9df0d83454ce1ba78a2fd6cb7e7801735893664.webp`를 확인해 목표 UI 예시 이미지로 명시
   - 탭 의미를 문서에 고정:
-    - 첫 번째 탭 = 각 윈도우별 화면
-    - 두 번째 탭 = 전체 데스크탑 화면
+    - `LD플레이어` 탭 = 각 윈도우별 화면
+    - `디바이스` 탭 = 각 모니터 화면
 - Build/Test:
   - 코드 변경 없음
   - 추가 빌드/테스트 없음
 
 Next action
 - Android window list/select UI를 위 레퍼런스 탭 구조에 맞춰 구현한다.
-- 첫 번째 탭은 window grid/list, 두 번째 탭은 desktop view로 연결한다.
+- `LD플레이어` 탭은 window grid/list로, `디바이스` 탭은 monitor view로 연결한다.
