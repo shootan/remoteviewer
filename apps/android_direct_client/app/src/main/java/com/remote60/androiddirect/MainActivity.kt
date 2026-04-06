@@ -2,6 +2,8 @@ package com.remote60.androiddirect
 
 import android.app.Activity
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
@@ -12,6 +14,13 @@ class MainActivity : Activity() {
     private lateinit var controlPortEdit: EditText
     private lateinit var statusText: TextView
     private lateinit var errorText: TextView
+    private val statusHandler = Handler(Looper.getMainLooper())
+    private val statusPollRunnable = object : Runnable {
+        override fun run() {
+            renderStatus()
+            statusHandler.postDelayed(this, 250L)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -22,6 +31,18 @@ class MainActivity : Activity() {
         controlPortEdit = findViewById(R.id.controlPortInput)
         statusText = findViewById(R.id.statusText)
         errorText = findViewById(R.id.errorText)
+
+        intent.getStringExtra("host")?.trim()?.takeIf { it.isNotEmpty() }?.let {
+            hostEdit.setText(it)
+        }
+        val launchVideoPort = intent.getIntExtra("videoPort", 0)
+        if (launchVideoPort > 0) {
+            videoPortEdit.setText(launchVideoPort.toString())
+        }
+        val launchControlPort = intent.getIntExtra("controlPort", 0)
+        if (launchControlPort > 0) {
+            controlPortEdit.setText(launchControlPort.toString())
+        }
 
         val connectButton: Button = findViewById(R.id.connectButton)
         val disconnectButton: Button = findViewById(R.id.disconnectButton)
@@ -50,10 +71,19 @@ class MainActivity : Activity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        statusHandler.removeCallbacks(statusPollRunnable)
+        statusHandler.post(statusPollRunnable)
+    }
+
+    override fun onPause() {
+        statusHandler.removeCallbacks(statusPollRunnable)
+        super.onPause()
+    }
+
     private fun renderStatus() {
         statusText.text = NativeSessionBridge.nativeGetStatus()
-        if (errorText.text.isNullOrBlank()) {
-            errorText.text = NativeSessionBridge.nativeGetLastError()
-        }
+        errorText.text = NativeSessionBridge.nativeGetLastError()
     }
 }

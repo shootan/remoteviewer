@@ -1,116 +1,35 @@
 #include "native_video_client_session.hpp"
 
+#include "native_video_client_tcp_control.hpp"
 #include "poc_protocol.hpp"
 
-#include <cstring>
+#include <chrono>
 #include <string>
-
-#if defined(_WIN32)
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#else
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <unistd.h>
-#endif
+#include <thread>
 
 namespace remote60::native_poc {
 
 namespace {
 
-#if defined(_WIN32)
-using SocketHandle = SOCKET;
-constexpr SocketHandle kInvalidSocket = INVALID_SOCKET;
-#else
-using SocketHandle = int;
-constexpr SocketHandle kInvalidSocket = -1;
-#endif
+constexpr uint32_t kDefaultControlResponseTimeoutMs = 1000;
 
-#if defined(_WIN32)
-struct WinsockScope {
-  WinsockScope() {
-    WSADATA wsa{};
-    ok = (WSAStartup(MAKEWORD(2, 2), &wsa) == 0);
-  }
-  ~WinsockScope() {
-    if (ok) WSACleanup();
-  }
-  bool ok = false;
-};
-#endif
-
-bool initialize_sockets(std::string* error) {
-#if defined(_WIN32)
-  static WinsockScope scope;
-  if (!scope.ok) {
-    if (error) *error = "winsock startup failed";
-    return false;
-  }
-#else
-  (void)error;
-#endif
-  return true;
+uint64_t now_us() {
+  using namespace std::chrono;
+  return static_cast<uint64_t>(
+      duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count());
 }
 
-void close_socket(SocketHandle* socketHandle) {
-  if (!socketHandle || *socketHandle == kInvalidSocket) return;
-#if defined(_WIN32)
-  closesocket(*socketHandle);
-#else
-  close(*socketHandle);
-#endif
-  *socketHandle = kInvalidSocket;
-}
-
-bool set_recv_timeout(SocketHandle socketHandle, uint32_t timeoutMs) {
-#if defined(_WIN32)
-  const DWORD timeout = timeoutMs;
-  return setsockopt(socketHandle, SOL_SOCKET, SO_RCVTIMEO,
-                    reinterpret_cast<const char*>(&timeout), sizeof(timeout)) == 0;
-#else
-  timeval tv{};
-  tv.tv_sec = static_cast<long>(timeoutMs / 1000u);
-  tv.tv_usec = static_cast<long>((timeoutMs % 1000u) * 1000u);
-  return setsockopt(socketHandle, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0;
-#endif
-}
-
-bool resolve_endpoint(const std::string& host, int port, int socktype, int protocol,
-                      addrinfo** out, std::string* error) {
-  if (!out) return false;
-  *out = nullptr;
-  addrinfo hints{};
-  hints.ai_family = AF_UNSPEC;
-  hints.ai_socktype = socktype;
-  hints.ai_protocol = protocol;
-  const std::string service = std::to_string(port);
-  const int rc = getaddrinfo(host.c_str(), service.c_str(), &hints, out);
-  if (rc != 0 || !*out) {
-    if (error) {
-#if defined(_WIN32)
-      *error = "getaddrinfo failed";
-#else
-      *error = gai_strerror(rc);
-#endif
-    }
-    return false;
-  }
-  return true;
-}
-
-std::string connected_status_text(const ClientSessionSnapshot& snapshot) {
-  std::string status = "connected: " + snapshot.host + ":" + std::to_string(snapshot.videoPort);
-  status += " control=" + std::to_string(snapshot.controlPort);
-  status += " tcp=" + std::string(snapshot.transport.tcpControlConnected ? "on" : "off");
-  status += " udp=" + std::string(snapshot.transport.udpVideoReady ? "on" : "off");
-  return status;
+bool should_append_selected_title(const std::string& detail) {
+  return detail.rfind("window_list_received", 0) == 0 ||
+         detail.rfind("window_selected", 0) == 0 ||
+         detail.rfind("window_select_failed", 0) == 0;
 }
 
 }  // namespace
 
-ClientSessionController::ClientSessionController() = default;
+ClientSessionController::ClientSessionController()
+    : keyframeRequests_(120000, 300000, 3),
+      runtimeTune_(300000, 30000000, 250000, 1, 240) {}
 
 ClientSessionController::~ClientSessionController() {
   Disconnect();
@@ -120,64 +39,68 @@ bool ClientSessionController::Connect(const ClientSessionConnectArgs& args) {
   std::string error;
   if (!initialize_sockets(&error)) {
     std::lock_guard<std::mutex> lock(mu_);
+    ResetUnlocked();
     snapshot_.state = ClientSessionState::Error;
     snapshot_.status = "error";
     snapshot_.lastError = error;
     return false;
   }
 
-  std::lock_guard<std::mutex> lock(mu_);
-
-  ResetUnlocked();
-  snapshot_.state = ClientSessionState::Connecting;
-  snapshot_.status = "connecting";
-
   if (args.host.empty()) {
+    std::lock_guard<std::mutex> lock(mu_);
+    ResetUnlocked();
     snapshot_.state = ClientSessionState::Error;
     snapshot_.status = "error";
     snapshot_.lastError = "host is required";
     return false;
   }
   if (!IsValidPort(args.videoPort)) {
+    std::lock_guard<std::mutex> lock(mu_);
+    ResetUnlocked();
     snapshot_.state = ClientSessionState::Error;
     snapshot_.status = "error";
     snapshot_.lastError = "video port is invalid";
     return false;
   }
   if (!IsValidPort(args.controlPort)) {
+    std::lock_guard<std::mutex> lock(mu_);
+    ResetUnlocked();
     snapshot_.state = ClientSessionState::Error;
     snapshot_.status = "error";
     snapshot_.lastError = "control port is invalid";
     return false;
   }
 
-  snapshot_.host = args.host;
-  snapshot_.videoPort = args.videoPort;
-  snapshot_.controlPort = args.controlPort;
+  StopWorker();
 
-  if (args.requireTcpControl && !ConnectTcpControl(args, &snapshot_.lastError)) {
-    const std::string errorMessage = snapshot_.lastError;
-    CloseSocketsUnlocked();
-    snapshot_.state = ClientSessionState::Error;
-    snapshot_.status = "error";
-    snapshot_.lastError = errorMessage;
-    return false;
-  }
-  if (args.requireUdpHello && !ConnectUdpVideo(args, &snapshot_.lastError)) {
-    const std::string errorMessage = snapshot_.lastError;
-    CloseSocketsUnlocked();
-    snapshot_.state = ClientSessionState::Error;
-    snapshot_.status = "error";
-    snapshot_.lastError = errorMessage;
-    return false;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    ResetUnlocked();
+    snapshot_.state = ClientSessionState::Connecting;
+    snapshot_.status = "connecting";
+    snapshot_.host = args.host;
+    snapshot_.videoPort = args.videoPort;
+    snapshot_.controlPort = args.controlPort;
+    snapshot_.sessionThreadActive = true;
+    encodedFrameSink_ = args.encodedFrameSink;
   }
 
-  snapshot_.state = ClientSessionState::Connected;
-  snapshot_.status = connected_status_text(snapshot_);
+  stopRequested_.store(false, std::memory_order_release);
+  try {
+    workerThread_ = std::thread(&ClientSessionController::WorkerMain, this, args);
+  } catch (...) {
+    std::lock_guard<std::mutex> lock(mu_);
+    ResetUnlocked();
+    snapshot_.state = ClientSessionState::Error;
+    snapshot_.status = "error";
+    snapshot_.lastError = "failed to start session worker";
+    return false;
+  }
   return true;
 }
 
 void ClientSessionController::Disconnect() {
+  StopWorker();
   std::lock_guard<std::mutex> lock(mu_);
   ResetUnlocked();
 }
@@ -191,26 +114,151 @@ bool ClientSessionController::IsValidPort(int port) {
   return port > 0 && port <= 65535;
 }
 
+void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
+  if (args.requireTcpControl) {
+    std::string error;
+    if (!ConnectTcpControl(args, &error)) {
+      if (!stopRequested_.load(std::memory_order_acquire)) FailWorker(error);
+      FinalizeWorkerExit();
+      return;
+    }
+  }
+
+  if (args.requireUdpHello) {
+    std::string error;
+    if (!ConnectUdpVideo(args, &error)) {
+      if (!stopRequested_.load(std::memory_order_acquire)) FailWorker(error);
+      FinalizeWorkerExit();
+      return;
+    }
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    controlScheduler_.Reset(args.controlIntervalMs, now_us());
+    windowPanel_.RequestList("window_list_request pending");
+    snapshot_.state = ClientSessionState::Connected;
+    snapshot_.lastError.clear();
+    snapshot_.controlLoopActive = args.requireTcpControl;
+    UpdateConnectedStatusLocked("");
+  }
+
+  if (!args.requireTcpControl) {
+    while (!stopRequested_.load(std::memory_order_acquire)) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    FinalizeWorkerExit();
+    return;
+  }
+
+  while (!stopRequested_.load(std::memory_order_acquire)) {
+    bool didWork = false;
+    const uint64_t loopNowUs = now_us();
+    ControlOutboundAction action{};
+    ClientControlMetricsSnapshot metrics{};
+    if (controlScheduler_.NextAction(loopNowUs, metrics, &windowPanel_, &captureMode_,
+                                     &keyframeRequests_, &runtimeTune_, &inputQueue_, &action)) {
+      SocketHandle controlSocket = kInvalidSocket;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        controlSocket = tcpControlSocket_;
+      }
+      if (controlSocket == kInvalidSocket) {
+        if (!stopRequested_.load(std::memory_order_acquire)) FailWorker("tcp control socket closed");
+        break;
+      }
+
+      TcpControlResponse response{};
+      if (!execute_tcp_control_action(controlSocket, action, &response)) {
+        if (!stopRequested_.load(std::memory_order_acquire)) FailWorker("tcp control loop failed");
+        break;
+      }
+      didWork = true;
+
+      switch (response.kind) {
+        case TcpControlResponseKind::Pong:
+          controlScheduler_.OnPingCompleted(now_us());
+          break;
+        case TcpControlResponseKind::WindowList: {
+          windowPanel_.ApplyWindowList(response.windowList, 4);
+          const auto panelSnapshot = windowPanel_.Snapshot();
+          std::lock_guard<std::mutex> lock(mu_);
+          SyncWindowPanelSnapshotLocked(panelSnapshot);
+          UpdateConnectedStatusLocked(panelSnapshot.status);
+          break;
+        }
+        case TcpControlResponseKind::WindowSelected: {
+          windowPanel_.ApplyWindowSelected(response.windowSelected);
+          const auto panelSnapshot = windowPanel_.Snapshot();
+          std::lock_guard<std::mutex> lock(mu_);
+          SyncWindowPanelSnapshotLocked(panelSnapshot);
+          UpdateConnectedStatusLocked(panelSnapshot.status);
+          break;
+        }
+        case TcpControlResponseKind::InputAck:
+        case TcpControlResponseKind::None:
+        default:
+          break;
+      }
+    }
+
+    if (!didWork) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
+
+  FinalizeWorkerExit();
+}
+
+void ClientSessionController::StopWorker() {
+  stopRequested_.store(true, std::memory_order_release);
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    snapshot_.controlLoopActive = false;
+    shutdown_socket(&tcpControlSocket_);
+    shutdown_socket(&udpVideoSocket_);
+  }
+  if (workerThread_.joinable()) {
+    workerThread_.join();
+  }
+  stopRequested_.store(false, std::memory_order_release);
+}
+
+void ClientSessionController::FinalizeWorkerExit() {
+  std::lock_guard<std::mutex> lock(mu_);
+  CloseSocketsUnlocked();
+  snapshot_.transport = {};
+  snapshot_.controlLoopActive = false;
+  snapshot_.sessionThreadActive = false;
+}
+
+void ClientSessionController::FailWorker(const std::string& error) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (stopRequested_.load(std::memory_order_acquire)) return;
+  snapshot_.state = ClientSessionState::Error;
+  snapshot_.status = "error";
+  snapshot_.lastError = error.empty() ? "session failed" : error;
+  snapshot_.controlLoopActive = false;
+}
+
 bool ClientSessionController::ConnectTcpControl(const ClientSessionConnectArgs& args, std::string* error) {
-  addrinfo* results = nullptr;
-  if (!resolve_endpoint(args.host, args.controlPort, SOCK_STREAM, IPPROTO_TCP, &results, error)) {
+  SocketHandle connected =
+      connect_first_endpoint(args.host, args.controlPort, SOCK_STREAM, IPPROTO_TCP, error);
+  if (connected == kInvalidSocket) {
+    if (error && error->empty()) *error = "tcp control connect failed";
     return false;
   }
 
-  SocketHandle connected = kInvalidSocket;
-  for (addrinfo* it = results; it != nullptr; it = it->ai_next) {
-    SocketHandle candidate = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
-    if (candidate == kInvalidSocket) continue;
-    if (connect(candidate, it->ai_addr, static_cast<int>(it->ai_addrlen)) == 0) {
-      connected = candidate;
-      break;
-    }
-    close_socket(&candidate);
+  (void)set_tcp_nodelay(connected);
+  (void)set_recv_timeout(connected, kDefaultControlResponseTimeoutMs);
+  if (stopRequested_.load(std::memory_order_acquire)) {
+    close_socket(&connected);
+    return false;
   }
-  freeaddrinfo(results);
 
-  if (connected == kInvalidSocket) {
-    if (error) *error = "tcp control connect failed";
+  std::lock_guard<std::mutex> lock(mu_);
+  if (stopRequested_.load(std::memory_order_acquire)) {
+    close_socket(&connected);
     return false;
   }
   tcpControlSocket_ = connected;
@@ -219,25 +267,10 @@ bool ClientSessionController::ConnectTcpControl(const ClientSessionConnectArgs& 
 }
 
 bool ClientSessionController::ConnectUdpVideo(const ClientSessionConnectArgs& args, std::string* error) {
-  addrinfo* results = nullptr;
-  if (!resolve_endpoint(args.host, args.videoPort, SOCK_DGRAM, IPPROTO_UDP, &results, error)) {
-    return false;
-  }
-
-  SocketHandle connected = kInvalidSocket;
-  for (addrinfo* it = results; it != nullptr; it = it->ai_next) {
-    SocketHandle candidate = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
-    if (candidate == kInvalidSocket) continue;
-    if (connect(candidate, it->ai_addr, static_cast<int>(it->ai_addrlen)) == 0) {
-      connected = candidate;
-      break;
-    }
-    close_socket(&candidate);
-  }
-  freeaddrinfo(results);
-
+  SocketHandle connected =
+      connect_first_endpoint(args.host, args.videoPort, SOCK_DGRAM, IPPROTO_UDP, error);
   if (connected == kInvalidSocket) {
-    if (error) *error = "udp video connect failed";
+    if (error && error->empty()) *error = "udp video connect failed";
     return false;
   }
 
@@ -260,28 +293,54 @@ bool ClientSessionController::ConnectUdpVideo(const ClientSessionConnectArgs& ar
     return false;
   }
 
+  if (stopRequested_.load(std::memory_order_acquire)) {
+    close_socket(&connected);
+    return false;
+  }
+
+  std::lock_guard<std::mutex> lock(mu_);
+  if (stopRequested_.load(std::memory_order_acquire)) {
+    close_socket(&connected);
+    return false;
+  }
   udpVideoSocket_ = connected;
   snapshot_.transport.udpVideoReady = true;
   return true;
 }
 
+void ClientSessionController::UpdateConnectedStatusLocked(const std::string& detail) {
+  snapshot_.status = "connected";
+  if (!detail.empty()) {
+    snapshot_.status += " ";
+    snapshot_.status += detail;
+    if (should_append_selected_title(detail)) {
+      snapshot_.status += " selected=";
+      snapshot_.status += snapshot_.selectedWindowTitle;
+    }
+  }
+}
+
+void ClientSessionController::SyncWindowPanelSnapshotLocked(const WindowPanelSnapshot& panelSnapshot) {
+  snapshot_.latestWindowListCount = static_cast<uint32_t>(panelSnapshot.items.size());
+  snapshot_.selectedWindowId = panelSnapshot.selectedId;
+  snapshot_.selectedWindowTitle =
+      panelSnapshot.selectedTitle.empty() ? std::string("desktop") : panelSnapshot.selectedTitle;
+}
+
 void ClientSessionController::ResetUnlocked() {
   CloseSocketsUnlocked();
   snapshot_ = ClientSessionSnapshot{};
+  windowPanel_.Reset();
+  captureMode_.Reset();
+  keyframeRequests_.Reset();
+  runtimeTune_.Reset(0, 0);
+  inputQueue_.Reset();
+  encodedFrameSink_ = nullptr;
 }
 
 void ClientSessionController::CloseSocketsUnlocked() {
-#if defined(_WIN32)
-  SocketHandle tcp = static_cast<SocketHandle>(tcpControlSocket_);
-  SocketHandle udp = static_cast<SocketHandle>(udpVideoSocket_);
-  close_socket(&tcp);
-  close_socket(&udp);
-  tcpControlSocket_ = static_cast<uintptr_t>(kInvalidSocket);
-  udpVideoSocket_ = static_cast<uintptr_t>(kInvalidSocket);
-#else
   close_socket(&tcpControlSocket_);
   close_socket(&udpVideoSocket_);
-#endif
 }
 
 }  // namespace remote60::native_poc

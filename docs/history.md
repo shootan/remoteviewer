@@ -2061,3 +2061,51 @@ Validation / build / test result
 Next action
 - `ClientSessionController`를 현재 TCP/UDP probe에서 실제 공용 transport/session core 연결로 확장한다.
 - 그 다음 Android `Phase D` 영상 수신용 decoder/surface adapter 경계를 정의한다.
+
+### 142) 2026-04-06 android phase-c real session lifecycle wiring
+Goal
+- Android `Phase C` 버튼이 probe가 아니라 실제 공용 session core의 비동기 lifecycle/control loop를 타도록 올린다.
+- LDPlayer 2에서 `connecting -> connected/error -> disconnected` 상태 변화가 자동 polling으로 보이도록 검증한다.
+
+Files changed
+- `apps/native_poc/src/native_socket.hpp`
+- `apps/native_poc/src/native_video_client_tcp_control.hpp`
+- `apps/native_poc/src/native_video_client_tcp_control.cpp`
+- `apps/native_poc/src/native_video_client_session.hpp`
+- `apps/native_poc/src/native_video_client_session.cpp`
+- `apps/native_poc/src/native_video_client_shared_core_test.cpp`
+- `apps/native_poc/CMakeLists.txt`
+- `apps/android_direct_client/app/src/main/AndroidManifest.xml`
+- `apps/android_direct_client/app/src/main/cpp/CMakeLists.txt`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Native build:
+  - `cmake --build build-vcpkg-local --target remote60_native_video_client_shared_core_test --config Debug`
+  - 결과: 성공
+- Native test:
+  - `build-vcpkg-local/apps/native_poc/Debug/remote60_native_video_client_shared_core_test.exe`
+  - 결과: `PASS`
+  - fake UDP hello + TCP control server 기준으로 async connect, window list summary, control loop failure, disconnect 복귀 검증
+- Android build/install:
+  - `gradle-8.7/bin/gradle.bat clean assembleDebug` with Android Studio JBR + local SDK
+  - 결과: 성공
+  - `adb -s emulator-5558 install -r app-debug.apk`
+  - 결과: 성공
+- LDPlayer 2 runtime:
+  - `adb -s emulator-5558 shell am start -W -n com.remote60.androiddirect/.MainActivity --es host 192.168.0.76 --ei videoPort 43000 --ei controlPort 43001`
+  - 결과: launch extra 기반 host/port prefill 성공
+  - validation fake host(`UDP hello ack + ControlPong + ControlWindowList`) 기준:
+    - `CONNECT` 후 status=`connected window_list_received count=2 selected=desktop`
+    - 잘못된 control port(`43009`) 기준 status=`connecting -> error`, error=`connect failed`
+    - `DISCONNECT` 후 status=`disconnected`
+- Scope note:
+  - Android manifest에 `INTERNET`/`ACCESS_NETWORK_STATE` 권한 추가
+  - Phase D 준비로 `ClientEncodedFrameSink` 경계만 추가했고 실제 MediaCodec/Surface wiring은 아직 미구현
+
+Next action
+- `ClientEncodedFrameSink`를 실제 UDP frame receive path와 연결하고 Android `MediaCodec + Surface` adapter를 붙인다.
+- 그 다음 Android window list/select UI와 decoder reset 경계를 `Phase D/E` 범위로 확장한다.

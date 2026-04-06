@@ -1,7 +1,11 @@
 #include <cstdio>
+#include <chrono>
+#include <functional>
 #include <iostream>
 #include <string>
+#include <thread>
 
+#include "native_socket.hpp"
 #include "native_video_client_shared_core.hpp"
 #include "native_video_client_session.hpp"
 
@@ -11,23 +15,28 @@ using remote60::native_poc::CaptureModeRequestState;
 using remote60::native_poc::ClientControlMetricsSnapshot;
 using remote60::native_poc::ClientControlScheduler;
 using remote60::native_poc::ClientInputQueue;
-using remote60::native_poc::ControlOutboundAction;
-using remote60::native_poc::ControlOutboundActionKind;
-using remote60::native_poc::ControlWindowListMessage;
-using remote60::native_poc::ControlWindowSelectedMessage;
-using remote60::native_poc::KeyframeRequestState;
 using remote60::native_poc::ClientSessionConnectArgs;
 using remote60::native_poc::ClientSessionController;
 using remote60::native_poc::ClientSessionState;
+using remote60::native_poc::ControlOutboundAction;
+using remote60::native_poc::ControlOutboundActionKind;
+using remote60::native_poc::ControlPingMessage;
+using remote60::native_poc::ControlPongMessage;
+using remote60::native_poc::ControlWindowListMessage;
+using remote60::native_poc::KeyframeRequestState;
+using remote60::native_poc::MessageHeader;
 using remote60::native_poc::MessageType;
 using remote60::native_poc::QueuedControlInputMessage;
 using remote60::native_poc::RuntimeTuneState;
+using remote60::native_poc::SocketHandle;
 using remote60::native_poc::UdpCodec;
 using remote60::native_poc::UdpH264AssemblyDisposition;
 using remote60::native_poc::UdpH264FrameAssembler;
+using remote60::native_poc::UdpHelloPacket;
 using remote60::native_poc::UdpPacketKind;
 using remote60::native_poc::UdpVideoChunkHeader;
 using remote60::native_poc::WindowPanelStateModel;
+using remote60::native_poc::kInvalidSocket;
 
 bool expect(bool condition, const std::string& message) {
   if (!condition) {
@@ -36,6 +45,173 @@ bool expect(bool condition, const std::string& message) {
   }
   return true;
 }
+
+bool wait_until(const std::function<bool()>& predicate, int timeoutMs) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (predicate()) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  return predicate();
+}
+
+struct FakeSessionServer {
+  bool Start(bool closeControlAfterWindowList) {
+    closeAfterWindowList = closeControlAfterWindowList;
+    std::string error;
+    if (!remote60::native_poc::initialize_sockets(&error)) {
+      std::cerr << "[shared-core-test] socket init failed: " << error << "\n";
+      return false;
+    }
+
+    tcpListen = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    udpSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (tcpListen == kInvalidSocket || udpSock == kInvalidSocket) {
+      Stop();
+      return false;
+    }
+
+    sockaddr_in loopback{};
+    loopback.sin_family = AF_INET;
+    loopback.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    sockaddr_in tcpAddr = loopback;
+    tcpAddr.sin_port = 0;
+    if (bind(tcpListen, reinterpret_cast<const sockaddr*>(&tcpAddr), sizeof(tcpAddr)) != 0 ||
+        listen(tcpListen, 1) != 0) {
+      Stop();
+      return false;
+    }
+
+    sockaddr_in udpAddr = loopback;
+    udpAddr.sin_port = 0;
+    if (bind(udpSock, reinterpret_cast<const sockaddr*>(&udpAddr), sizeof(udpAddr)) != 0) {
+      Stop();
+      return false;
+    }
+
+    sockaddr_in boundTcp{};
+    int boundTcpLen = sizeof(boundTcp);
+    if (getsockname(tcpListen, reinterpret_cast<sockaddr*>(&boundTcp), &boundTcpLen) != 0) {
+      Stop();
+      return false;
+    }
+    sockaddr_in boundUdp{};
+    int boundUdpLen = sizeof(boundUdp);
+    if (getsockname(udpSock, reinterpret_cast<sockaddr*>(&boundUdp), &boundUdpLen) != 0) {
+      Stop();
+      return false;
+    }
+
+    controlPort = ntohs(boundTcp.sin_port);
+    videoPort = ntohs(boundUdp.sin_port);
+
+    tcpThread = std::thread([this]() { RunTcp(); });
+    udpThread = std::thread([this]() { RunUdp(); });
+    return true;
+  }
+
+  void Stop() {
+    stop = true;
+    remote60::native_poc::shutdown_socket(&acceptedTcp);
+    remote60::native_poc::shutdown_socket(&tcpListen);
+    remote60::native_poc::shutdown_socket(&udpSock);
+    if (tcpThread.joinable()) tcpThread.join();
+    if (udpThread.joinable()) udpThread.join();
+  }
+
+  ~FakeSessionServer() {
+    Stop();
+  }
+
+  void RunUdp() {
+    sockaddr_in peer{};
+    int peerLen = sizeof(peer);
+    UdpHelloPacket hello{};
+    const int received = recvfrom(udpSock, reinterpret_cast<char*>(&hello), sizeof(hello), 0,
+                                  reinterpret_cast<sockaddr*>(&peer), &peerLen);
+    if (received >= static_cast<int>(sizeof(hello)) &&
+        hello.magic == remote60::native_poc::kMagic &&
+        hello.kind == static_cast<uint16_t>(UdpPacketKind::Hello)) {
+      UdpHelloPacket ack{};
+      ack.kind = static_cast<uint16_t>(UdpPacketKind::HelloAck);
+      sendto(udpSock, reinterpret_cast<const char*>(&ack), sizeof(ack), 0,
+             reinterpret_cast<const sockaddr*>(&peer), peerLen);
+    }
+  }
+
+  void RunTcp() {
+    sockaddr_in peer{};
+    int peerLen = sizeof(peer);
+    acceptedTcp = accept(tcpListen, reinterpret_cast<sockaddr*>(&peer), &peerLen);
+    if (acceptedTcp == kInvalidSocket) return;
+    remote60::native_poc::set_recv_timeout(acceptedTcp, 500);
+    remote60::native_poc::set_tcp_nodelay(acceptedTcp);
+
+    while (!stop.load(std::memory_order_acquire)) {
+      MessageHeader header{};
+      if (!remote60::native_poc::recv_all(acceptedTcp, &header, sizeof(header))) break;
+      if (header.magic != remote60::native_poc::kMagic || header.size < sizeof(header)) break;
+
+      const auto type = static_cast<MessageType>(header.type);
+      if (type == MessageType::ControlPing && header.size == sizeof(ControlPingMessage)) {
+        ControlPingMessage ping{};
+        ping.header = header;
+        if (!remote60::native_poc::recv_all(acceptedTcp, &ping.seq, sizeof(ping) - sizeof(ping.header))) break;
+        ControlPongMessage pong{};
+        pong.header.magic = remote60::native_poc::kMagic;
+        pong.header.type = static_cast<uint16_t>(MessageType::ControlPong);
+        pong.header.size = static_cast<uint16_t>(sizeof(pong));
+        pong.seq = ping.seq;
+        pong.clientSendQpcUs = ping.clientSendQpcUs;
+        if (!remote60::native_poc::send_all(acceptedTcp, &pong, sizeof(pong))) break;
+        continue;
+      }
+
+      if (type == MessageType::ControlWindowListRequest &&
+          header.size == sizeof(remote60::native_poc::ControlWindowListRequestMessage)) {
+        remote60::native_poc::ControlWindowListRequestMessage request{};
+        request.header = header;
+        if (!remote60::native_poc::recv_all(acceptedTcp, &request.seq, sizeof(request) - sizeof(request.header))) {
+          break;
+        }
+
+        ControlWindowListMessage response{};
+        response.header.magic = remote60::native_poc::kMagic;
+        response.header.type = static_cast<uint16_t>(MessageType::ControlWindowList);
+        response.header.size = static_cast<uint16_t>(sizeof(response));
+        response.seq = request.seq;
+        response.selectedWindowId = 0;
+        response.itemCount = 2;
+        response.items[0].id = 1001;
+        std::snprintf(response.items[0].title, sizeof(response.items[0].title), "%s", "Desktop Mirror");
+        response.items[1].id = 1002;
+        std::snprintf(response.items[1].title, sizeof(response.items[1].title), "%s", "Editor");
+        if (!remote60::native_poc::send_all(acceptedTcp, &response, sizeof(response))) break;
+        windowListSent = true;
+        if (closeAfterWindowList) {
+          remote60::native_poc::shutdown_socket(&acceptedTcp);
+          break;
+        }
+        continue;
+      }
+
+      const size_t discard = static_cast<size_t>(header.size - sizeof(header));
+      if (!remote60::native_poc::recv_discard(acceptedTcp, discard)) break;
+    }
+  }
+
+  int controlPort = 0;
+  int videoPort = 0;
+  std::atomic<bool> stop{false};
+  std::atomic<bool> windowListSent{false};
+  bool closeAfterWindowList = false;
+  SocketHandle tcpListen = kInvalidSocket;
+  SocketHandle acceptedTcp = kInvalidSocket;
+  SocketHandle udpSock = kInvalidSocket;
+  std::thread tcpThread;
+  std::thread udpThread;
+};
 
 bool test_ping_and_metrics_order() {
   ClientControlScheduler scheduler;
@@ -241,23 +417,57 @@ bool test_session_controller() {
   if (!expect(snapshot.state == ClientSessionState::Error, "invalid connect should set error state")) return false;
   if (!expect(snapshot.lastError == "host is required", "invalid connect should expose host error")) return false;
 
+  FakeSessionServer successServer;
+  if (!expect(successServer.Start(false), "fake session server should start")) return false;
+
   ClientSessionConnectArgs valid{};
-  valid.host = "192.168.0.10";
-  valid.videoPort = 43000;
-  valid.controlPort = 43001;
-  valid.requireTcpControl = false;
-  valid.requireUdpHello = false;
-  if (!expect(controller.Connect(valid), "session connect should accept valid args")) return false;
+  valid.host = "127.0.0.1";
+  valid.videoPort = successServer.videoPort;
+  valid.controlPort = successServer.controlPort;
+  valid.controlIntervalMs = 50;
+  if (!expect(controller.Connect(valid), "session connect should start worker")) return false;
+  if (!expect(wait_until([&]() {
+                const auto current = controller.Snapshot();
+                return current.state == ClientSessionState::Connected &&
+                       current.latestWindowListCount == 2 &&
+                       current.controlLoopActive;
+              }, 2000), "session should connect and receive window list")) {
+    return false;
+  }
+
   snapshot = controller.Snapshot();
-  if (!expect(snapshot.state == ClientSessionState::Connected, "valid connect should set connected state")) return false;
-  if (!expect(snapshot.host == "192.168.0.10", "snapshot should preserve host")) return false;
-  if (!expect(snapshot.videoPort == 43000 && snapshot.controlPort == 43001,
+  if (!expect(snapshot.host == "127.0.0.1", "snapshot should preserve host")) return false;
+  if (!expect(snapshot.videoPort == successServer.videoPort &&
+                  snapshot.controlPort == successServer.controlPort,
               "snapshot should preserve ports")) return false;
+  if (!expect(snapshot.transport.tcpControlConnected && snapshot.transport.udpVideoReady,
+              "snapshot should reflect transport readiness")) return false;
+  if (!expect(snapshot.latestWindowListCount == 2, "window list count should update")) return false;
+  if (!expect(snapshot.selectedWindowTitle == "desktop", "selected window title should summarize desktop")) {
+    return false;
+  }
+  if (!expect(snapshot.status.find("window_list_received count=2") != std::string::npos,
+              "connected status should include window list summary")) return false;
 
   controller.Disconnect();
   snapshot = controller.Snapshot();
   if (!expect(snapshot.state == ClientSessionState::Disconnected,
               "disconnect should return to disconnected state")) return false;
+  if (!expect(!snapshot.sessionThreadActive && !snapshot.controlLoopActive,
+              "disconnect should stop worker activity")) return false;
+
+  FakeSessionServer failureServer;
+  if (!expect(failureServer.Start(true), "failure server should start")) return false;
+  valid.videoPort = failureServer.videoPort;
+  valid.controlPort = failureServer.controlPort;
+  if (!expect(controller.Connect(valid), "session connect should restart worker")) return false;
+  if (!expect(wait_until([&]() {
+                const auto current = controller.Snapshot();
+                return current.state == ClientSessionState::Error &&
+                       current.lastError == "tcp control loop failed";
+              }, 3000), "control socket close should surface as error")) {
+    return false;
+  }
 
   return true;
 }

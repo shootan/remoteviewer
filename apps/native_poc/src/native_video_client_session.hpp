@@ -1,10 +1,22 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <thread>
+
+#include "native_socket.hpp"
+#include "native_video_client_shared_core.hpp"
 
 namespace remote60::native_poc {
+
+class ClientEncodedFrameSink {
+ public:
+  virtual ~ClientEncodedFrameSink() = default;
+  virtual void OnEncodedH264Frame(UdpH264AssembledFrame&& frame) = 0;
+  virtual void OnVideoStreamReset() = 0;
+};
 
 enum class ClientSessionState : uint8_t {
   Disconnected = 0,
@@ -24,7 +36,9 @@ struct ClientSessionConnectArgs {
   int controlPort = 0;
   bool requireUdpHello = true;
   bool requireTcpControl = true;
+  uint32_t controlIntervalMs = 1000;
   uint32_t udpHandshakeTimeoutMs = 800;
+  ClientEncodedFrameSink* encodedFrameSink = nullptr;
 };
 
 struct ClientSessionSnapshot {
@@ -35,6 +49,11 @@ struct ClientSessionSnapshot {
   int videoPort = 0;
   int controlPort = 0;
   ClientSessionTransportStatus transport{};
+  bool sessionThreadActive = false;
+  bool controlLoopActive = false;
+  uint32_t latestWindowListCount = 0;
+  uint64_t selectedWindowId = 0;
+  std::string selectedWindowTitle = "desktop";
 };
 
 class ClientSessionController {
@@ -50,22 +69,31 @@ class ClientSessionController {
   ClientSessionController(const ClientSessionController&) = delete;
   ClientSessionController& operator=(const ClientSessionController&) = delete;
 
+  void WorkerMain(ClientSessionConnectArgs args);
+  void StopWorker();
+  void FinalizeWorkerExit();
+  void FailWorker(const std::string& error);
   bool ConnectTcpControl(const ClientSessionConnectArgs& args, std::string* error);
   bool ConnectUdpVideo(const ClientSessionConnectArgs& args, std::string* error);
+  void UpdateConnectedStatusLocked(const std::string& detail);
+  void SyncWindowPanelSnapshotLocked(const WindowPanelSnapshot& panelSnapshot);
   void CloseSocketsUnlocked();
   void ResetUnlocked();
   static bool IsValidPort(int port);
 
   mutable std::mutex mu_;
   ClientSessionSnapshot snapshot_;
-
-#if defined(_WIN32)
-  uintptr_t tcpControlSocket_ = static_cast<uintptr_t>(~0ULL);
-  uintptr_t udpVideoSocket_ = static_cast<uintptr_t>(~0ULL);
-#else
-  int tcpControlSocket_ = -1;
-  int udpVideoSocket_ = -1;
-#endif
+  WindowPanelStateModel windowPanel_;
+  CaptureModeRequestState captureMode_;
+  KeyframeRequestState keyframeRequests_;
+  RuntimeTuneState runtimeTune_;
+  ClientInputQueue inputQueue_;
+  ClientControlScheduler controlScheduler_;
+  ClientEncodedFrameSink* encodedFrameSink_ = nullptr;
+  std::thread workerThread_;
+  std::atomic<bool> stopRequested_{false};
+  SocketHandle tcpControlSocket_ = kInvalidSocket;
+  SocketHandle udpVideoSocket_ = kInvalidSocket;
 };
 
 }  // namespace remote60::native_poc

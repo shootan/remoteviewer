@@ -203,3 +203,6 @@ Updated: 2026-04-06 11:21
 - [x] Phase C 앱 셸 골격 착수
 - [x] Phase C JNI stub를 공용 session controller로 교체
 - [x] Phase C session controller에 실제 TCP/UDP probe 연결
+- [x] Phase C real session lifecycle wiring (`ClientSessionController` async worker/control loop/window list status summary)
+- [x] LDPlayer 2에서 real session 상태 변화 검증 (`connecting -> connected/error -> disconnected`)
+- [x] Phase D decoder/surface adapter placeholder 고정 (`ClientEncodedFrameSink`, JNI/Kotlin 미연결)

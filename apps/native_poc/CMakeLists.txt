@@ -98,6 +98,7 @@ target_compile_definitions(remote60_native_video_client_poc PRIVATE
 
 add_executable(remote60_native_video_client_shared_core_test
   src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
   src/native_video_client_session.cpp
   src/native_video_client_shared_core_test.cpp
 )
