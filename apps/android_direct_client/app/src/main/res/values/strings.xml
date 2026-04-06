@@ -1,16 +1,16 @@
 <resources>
     <string name="app_name">Remote60 Android Direct</string>
-    <string name="shell_title">Android Direct Client Shell</string>
-    <string name="shell_subtitle">Phase C scaffold for manual host IP or DNS input and JNI session control.</string>
+    <string name="shell_title">Android Direct Client</string>
+    <string name="shell_subtitle">Enter a host, connect, choose a target, then switch into full screen viewer mode.</string>
     <string name="host_hint">Host IP or DNS</string>
     <string name="video_port_hint">Video Port</string>
     <string name="control_port_hint">Control Port</string>
     <string name="connect_button">Connect</string>
     <string name="disconnect_button">Disconnect</string>
     <string name="refresh_button">Refresh</string>
-    <string name="target_windows_button">LDPlayer</string>
+    <string name="target_windows_button">Windows</string>
     <string name="target_devices_button">Devices</string>
-    <string name="desktop_mode_button">Desktop Mode</string>
-    <string name="panel_show_button">Show Panel</string>
-    <string name="panel_hide_button">Hide Panel</string>
+    <string name="desktop_mode_button">Desktop</string>
+    <string name="targets_title">Select A Target</string>
+    <string name="viewer_back_button">LIST</string>
 </resources>

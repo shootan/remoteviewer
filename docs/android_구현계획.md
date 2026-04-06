@@ -1,5 +1,5 @@
 # Android Direct Client 구현계획
-Updated: 2026-04-06 17:07
+Updated: 2026-04-06 17:36
 
 이 문서는 Android direct client 작업의 단일 기준(Source of Truth)으로 사용한다.
 
@@ -199,15 +199,15 @@ Updated: 2026-04-06 17:07
 
 ## 7) 다음 실행 순서
 1. Phase D / Phase E live verify
-   - `nativeGetVideoSizePacked`, `TextureView.setDefaultBufferSize`, `window panel JSON`, `refresh/select/Desktop Mode`, `LDPlayer/Devices` 탭 UI 1차, connected compact mode 구현은 끝냈다.
-   - LDPlayer screenshot 기준으로 compact toolbar와 selected target/status 반영은 확인했다.
-   - 남은 것은 valid capture source 환경에서 full-frame visible content와 `Refresh/Desktop Mode/window select` 전체 흐름을 최종 확인하는 작업이다.
-   - 완료조건은 `surface buffer=1234x720 video=1234x720` 재바인딩 이후 full-frame visible content가 확인되고, `Refresh/Desktop Mode/window select`가 host/UI 상태에 반영되는 것이다.
+   - `nativeGetVideoSizePacked`, `TextureView.setDefaultBufferSize`, `window panel JSON`, `refresh/select/Desktop Mode`, `LDPlayer/Devices` 탭 UI 1차, scene split(`connect -> targets -> viewer`) 구현은 끝냈다.
+   - LDPlayer screenshot 기준으로 `scene_connect -> scene_targets -> scene_window_viewer -> scene_back_to_list` 전환과 hidden back button 복귀를 확인했다.
+   - selected-window path에서는 `CreateForWindow(window-select)` capture source와 full-frame viewer content까지 확인했다.
+   - 남은 것은 scene 구조 위에서 selection UX를 더 다듬고, 그 다음 입력 작업에 들어가는 것이다.
 2. Phase E selection UX 보정
-   - 현재 1차 UI는 `Spinner` 기반 선택 UI + compact toolbar 구조이므로, live verify 결과에 따라 `Apply` 버튼 분리 또는 카드형 목록으로 다듬을지 결정한다.
+   - 현재는 list scene에서 텍스트 목록을 탭해 viewer scene으로 들어가는 구조이므로, 필요 시 썸네일/카드형 목록 또는 정렬/필터 UX를 추가한다.
    - monitor list는 현 프로토콜 범위 밖이므로, 필요 시 `디바이스` 탭 semantics와 실제 데이터 공급 경계를 다시 정리한다.
 3. Phase F 착수 전 Gate 고정
-   - 입력 작업에 들어가기 전에 `full-frame video`, `window select`, `background/foreground 후 surface 재연결` 세 항목을 실기기 기준으로 재확인한다.
+   - 입력 작업에 들어가기 전에 `full-frame video`, `window select`, `viewer -> list 복귀`, `background/foreground 후 surface 재연결` 네 항목을 실기기 기준으로 재확인한다.
    - 위 Gate를 통과한 뒤 `tap/drag`, 마지막으로 `committed text`를 붙인다.
 
 ## 8) 리스크와 대응
@@ -240,3 +240,4 @@ Updated: 2026-04-06 17:07
 - [x] Phase E session/JNI 제어 브리지 1차 (`nativeRequestWindowList`, `nativeSelectWindow`, `nativeSelectDesktopMode`, window panel JSON snapshot)
 - [x] Phase E 탭/선택 UI 1차 (`LDPlayer/Devices`, Desktop Mode 버튼, Spinner 기반 window list/select 표시)
 - [x] Phase E connected compact mode (`Show Panel` toolbar, connected screenshot 기준 viewport `936x172 -> 936x310`)
+- [x] Phase E scene split (`connect scene -> targets scene -> fullscreen viewer scene`, hidden top-left back button)

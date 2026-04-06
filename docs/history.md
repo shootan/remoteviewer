@@ -2390,3 +2390,54 @@ Validation / build / test result
 Next action
 - valid capture source 환경에서 `full-frame video`와 `Refresh/Desktop Mode/window select` live verify를 다시 수행한다.
 - 그 다음 `Phase F` 입력 착수 전 gate를 재확인한다.
+
+### 150) 2026-04-06 android split scenes connect-targets-viewer
+Goal
+- Android UI를 `connect scene -> targets scene -> fullscreen viewer scene` 흐름으로 완전히 분리한다.
+- viewer scene 좌상단에 숨겨진 back button을 두고 다시 targets scene으로 복귀하게 만든다.
+
+Files changed
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `apps/android_direct_client/app/src/main/res/layout/activity_main.xml`
+- `apps/android_direct_client/app/src/main/res/values/strings.xml`
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Android build:
+  - `D:\remote\remote\tmp\gradle\gradle-8.7\bin\gradle.bat assembleDebug`
+  - 결과: 성공
+- Background host:
+  - process: `remote60_native_video_host_poc` PID `46776`
+  - log: `d:\remote\remote\tmp\bg_host\host_stdout.log`
+- LDPlayer 2 runtime screenshots:
+  - connect scene:
+    - `scene_connect2.png`
+    - host/ports 입력 + `CONNECT` 버튼 확인
+  - targets scene:
+    - `scene_targets.png`
+    - `Select A Target`, `DISCONNECT`, `WINDOWS/DEVICES/REFRESH`, window list 확인
+  - viewer scene:
+    - `scene_window_viewer.png`
+    - selected window full-screen 표시 확인
+    - 좌상단 hidden button `LIST` 확인
+    - 하단 overlay status 확인
+  - back to list:
+    - `scene_back_to_list.png`
+    - hidden back button 탭 후 targets scene 복귀 확인
+- Runtime log / host log:
+  - Android log: `MediaCodec started width=1234 height=720`
+  - Android log: `bind video surface buffer=1234x720 video=1234x720 view=960x516`
+  - Android log: `released output frame count=1`
+  - host log: `[control] window-select seq=2 requestedId=67382 applied=1 selectedId=67382 reason=ok title=1`
+  - host log: `capture item source=CreateForWindow(window-select)`
+- Scope note:
+  - connect scene에서는 host/port와 connect만 노출한다.
+  - connect 성공 후 targets scene으로 이동하고, list item 탭 시 viewer scene으로 전환한다.
+  - viewer scene에서는 좌상단 hidden back button 외의 제어를 제거해 전체 화면 viewer 구조를 유지한다.
+  - desktop path는 환경에 따라 `GetShellWindow()` fallback이 남아 있어, desktop full-screen 검증은 별도 후속 항목으로 남긴다.
+
+Next action
+- desktop path capture source 검증을 분리해 `Devices/Desktop` scene 흐름도 안정화한다.
+- 그 다음 `Phase F` 입력 착수 전 gate를 재확인한다.

@@ -10,12 +10,10 @@ import android.util.Log
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
-import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.Spinner
+import android.widget.ListView
 import android.widget.TextView
 import org.json.JSONException
 import org.json.JSONObject
@@ -23,6 +21,12 @@ import org.json.JSONObject
 class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     companion object {
         private const val LOG_TAG = "remote60_android_direct"
+    }
+
+    private enum class UiScene {
+        CONNECT,
+        TARGETS,
+        VIEWER,
     }
 
     private enum class TargetTab {
@@ -56,30 +60,31 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
+    private lateinit var connectScene: View
+    private lateinit var targetsScene: View
+    private lateinit var viewerScene: View
     private lateinit var hostEdit: EditText
     private lateinit var videoPortEdit: EditText
     private lateinit var controlPortEdit: EditText
-    private lateinit var statusText: TextView
-    private lateinit var errorText: TextView
-    private lateinit var videoDebugText: TextView
+    private lateinit var connectStatusText: TextView
+    private lateinit var connectErrorText: TextView
+    private lateinit var listSelectedText: TextView
+    private lateinit var listStatusText: TextView
+    private lateinit var targetListEmptyText: TextView
+    private lateinit var targetListView: ListView
+    private lateinit var listDisconnectButton: Button
+    private lateinit var listWindowsButton: Button
+    private lateinit var listDevicesButton: Button
+    private lateinit var listRefreshButton: Button
+    private lateinit var viewerBackButton: Button
+    private lateinit var viewerOverlayStatusText: TextView
     private lateinit var videoTextureView: TextureView
-    private lateinit var controlsPanel: LinearLayout
-    private lateinit var compactToolbar: LinearLayout
-    private lateinit var targetWindowsButton: Button
-    private lateinit var targetDevicesButton: Button
-    private lateinit var desktopModeButton: Button
-    private lateinit var panelToggleButton: Button
-    private lateinit var disconnectCompactButton: Button
-    private lateinit var refreshCompactButton: Button
-    private lateinit var desktopModeCompactButton: Button
-    private lateinit var targetSpinner: Spinner
-    private lateinit var targetSpinnerAdapter: ArrayAdapter<String>
-    private val targetSpinnerLabels = mutableListOf<String>()
-    private val targetSpinnerIds = mutableListOf<Long>()
-    private var suppressTargetSpinnerSelection = false
+    private lateinit var targetListAdapter: ArrayAdapter<String>
+    private val targetListLabels = mutableListOf<String>()
+    private val targetListIds = mutableListOf<Long>()
+    private var currentScene = UiScene.CONNECT
     private var activeTargetTab = TargetTab.WINDOWS
-    private var controlsExpanded = true
-    private var wasConnected = false
+    private var connectFlowActive = false
     private var videoSurface: Surface? = null
     private var videoWidth = 0
     private var videoHeight = 0
@@ -98,23 +103,25 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        connectScene = findViewById(R.id.connectScene)
+        targetsScene = findViewById(R.id.targetsScene)
+        viewerScene = findViewById(R.id.viewerScene)
         hostEdit = findViewById(R.id.hostInput)
         videoPortEdit = findViewById(R.id.videoPortInput)
         controlPortEdit = findViewById(R.id.controlPortInput)
-        statusText = findViewById(R.id.statusText)
-        errorText = findViewById(R.id.errorText)
-        videoDebugText = findViewById(R.id.videoDebugText)
+        connectStatusText = findViewById(R.id.connectStatusText)
+        connectErrorText = findViewById(R.id.connectErrorText)
+        listSelectedText = findViewById(R.id.listSelectedText)
+        listStatusText = findViewById(R.id.listStatusText)
+        targetListEmptyText = findViewById(R.id.targetListEmptyText)
+        targetListView = findViewById(R.id.targetListView)
+        listDisconnectButton = findViewById(R.id.listDisconnectButton)
+        listWindowsButton = findViewById(R.id.listWindowsButton)
+        listDevicesButton = findViewById(R.id.listDevicesButton)
+        listRefreshButton = findViewById(R.id.listRefreshButton)
+        viewerBackButton = findViewById(R.id.viewerBackButton)
+        viewerOverlayStatusText = findViewById(R.id.viewerOverlayStatusText)
         videoTextureView = findViewById(R.id.videoTextureView)
-        controlsPanel = findViewById(R.id.controlsPanel)
-        compactToolbar = findViewById(R.id.compactToolbar)
-        targetWindowsButton = findViewById(R.id.targetWindowsButton)
-        targetDevicesButton = findViewById(R.id.targetDevicesButton)
-        desktopModeButton = findViewById(R.id.desktopModeButton)
-        panelToggleButton = findViewById(R.id.panelToggleButton)
-        disconnectCompactButton = findViewById(R.id.disconnectCompactButton)
-        refreshCompactButton = findViewById(R.id.refreshCompactButton)
-        desktopModeCompactButton = findViewById(R.id.desktopModeCompactButton)
-        targetSpinner = findViewById(R.id.targetSpinner)
 
         videoTextureView.surfaceTextureListener = this
         videoTextureView.isOpaque = true
@@ -122,106 +129,73 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             syncVideoSurface(forceRebind = false)
         }
 
-        targetSpinnerAdapter =
-            ArrayAdapter(this, android.R.layout.simple_spinner_item, targetSpinnerLabels).also {
-                it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-                targetSpinner.adapter = it
+        targetListAdapter =
+            ArrayAdapter(this, android.R.layout.simple_list_item_1, targetListLabels).also {
+                targetListView.adapter = it
             }
-        targetSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
-                if (suppressTargetSpinnerSelection) return
-                if (position < 0 || position >= targetSpinnerIds.size) return
-                val ok = when (activeTargetTab) {
-                    TargetTab.WINDOWS -> NativeSessionBridge.nativeSelectWindow(targetSpinnerIds[position])
-                    TargetTab.DEVICES -> NativeSessionBridge.nativeSelectDesktopMode()
-                }
-                if (!ok) {
-                    renderStatus()
-                    return
-                }
+        targetListView.emptyView = targetListEmptyText
+        targetListView.setOnItemClickListener { _, _, position, _ ->
+            if (position < 0 || position >= targetListIds.size) return@setOnItemClickListener
+            val ok = when (activeTargetTab) {
+                TargetTab.WINDOWS -> NativeSessionBridge.nativeSelectWindow(targetListIds[position])
+                TargetTab.DEVICES -> NativeSessionBridge.nativeSelectDesktopMode()
+            }
+            if (!ok) {
                 renderStatus()
+                return@setOnItemClickListener
             }
-
-            override fun onNothingSelected(parent: AdapterView<*>?) {
-            }
+            currentScene = UiScene.VIEWER
+            renderStatus()
         }
 
-        intent.getStringExtra("host")?.trim()?.takeIf { it.isNotEmpty() }?.let {
-            hostEdit.setText(it)
-        }
-        val launchVideoPort = intent.getIntExtra("videoPort", 0)
-        if (launchVideoPort > 0) {
-            videoPortEdit.setText(launchVideoPort.toString())
-        }
-        val launchControlPort = intent.getIntExtra("controlPort", 0)
-        if (launchControlPort > 0) {
-            controlPortEdit.setText(launchControlPort.toString())
-        }
+        intent.getStringExtra("host")?.trim()?.takeIf { it.isNotEmpty() }?.let(hostEdit::setText)
+        intent.getIntExtra("videoPort", 0).takeIf { it > 0 }?.let { videoPortEdit.setText(it.toString()) }
+        intent.getIntExtra("controlPort", 0).takeIf { it > 0 }?.let { controlPortEdit.setText(it.toString()) }
 
-        val connectButton: Button = findViewById(R.id.connectButton)
-        val disconnectButton: Button = findViewById(R.id.disconnectButton)
-        val refreshButton: Button = findViewById(R.id.refreshButton)
-
-        renderStatus()
-
-        connectButton.setOnClickListener {
+        findViewById<Button>(R.id.connectButton).setOnClickListener {
             val host = hostEdit.text?.toString()?.trim().orEmpty()
             val videoPort = videoPortEdit.text?.toString()?.toIntOrNull() ?: 0
             val controlPort = controlPortEdit.text?.toString()?.toIntOrNull() ?: 0
             val ok = NativeSessionBridge.nativeConnect(host, videoPort, controlPort)
             if (ok) {
+                connectFlowActive = true
+                currentScene = UiScene.TARGETS
                 NativeSessionBridge.nativeRequestWindowList()
             }
             renderStatus()
             if (!ok) {
-                errorText.text = NativeSessionBridge.nativeGetLastError()
+                connectErrorText.text = NativeSessionBridge.nativeGetLastError()
             }
         }
 
-        disconnectButton.setOnClickListener {
+        listDisconnectButton.setOnClickListener {
             NativeSessionBridge.nativeDisconnect()
+            connectFlowActive = false
+            currentScene = UiScene.CONNECT
             renderStatus()
         }
 
-        refreshButton.setOnClickListener {
+        listRefreshButton.setOnClickListener {
             NativeSessionBridge.nativeRequestWindowList()
             renderStatus()
         }
 
-        targetWindowsButton.setOnClickListener {
+        listWindowsButton.setOnClickListener {
             activeTargetTab = TargetTab.WINDOWS
             renderStatus()
         }
 
-        targetDevicesButton.setOnClickListener {
+        listDevicesButton.setOnClickListener {
             activeTargetTab = TargetTab.DEVICES
             renderStatus()
         }
 
-        desktopModeButton.setOnClickListener {
-            NativeSessionBridge.nativeSelectDesktopMode()
+        viewerBackButton.setOnClickListener {
+            currentScene = UiScene.TARGETS
             renderStatus()
         }
 
-        panelToggleButton.setOnClickListener {
-            controlsExpanded = !controlsExpanded
-            renderStatus()
-        }
-
-        disconnectCompactButton.setOnClickListener {
-            NativeSessionBridge.nativeDisconnect()
-            renderStatus()
-        }
-
-        refreshCompactButton.setOnClickListener {
-            NativeSessionBridge.nativeRequestWindowList()
-            renderStatus()
-        }
-
-        desktopModeCompactButton.setOnClickListener {
-            NativeSessionBridge.nativeSelectDesktopMode()
-            renderStatus()
-        }
+        renderStatus()
     }
 
     override fun onResume() {
@@ -255,6 +229,82 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
+    }
+
+    private fun renderStatus() {
+        val statusValue = NativeSessionBridge.nativeGetStatus()
+        val errorValue = NativeSessionBridge.nativeGetLastError()
+        val panelSnapshot = parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson())
+        val isConnecting = statusValue.startsWith("connecting")
+        val isConnected = statusValue.startsWith("connected")
+
+        if (!isConnecting && !isConnected && currentScene != UiScene.CONNECT) {
+            currentScene = UiScene.CONNECT
+        } else if (connectFlowActive && currentScene == UiScene.CONNECT && (isConnecting || isConnected)) {
+            currentScene = UiScene.TARGETS
+        }
+
+        connectStatusText.text = statusValue
+        connectErrorText.text = errorValue
+        renderTargetsScene(isConnected, panelSnapshot)
+        renderViewerScene(statusValue, panelSnapshot)
+        applySceneVisibility()
+        syncVideoSurface(forceRebind = false)
+    }
+
+    private fun renderTargetsScene(isConnected: Boolean, panelSnapshot: WindowPanelUiSnapshot) {
+        listWindowsButton.text =
+            if (activeTargetTab == TargetTab.WINDOWS) "[Windows]" else getString(R.string.target_windows_button)
+        listDevicesButton.text =
+            if (activeTargetTab == TargetTab.DEVICES) "[Devices]" else getString(R.string.target_devices_button)
+        listWindowsButton.isEnabled = activeTargetTab != TargetTab.WINDOWS
+        listDevicesButton.isEnabled = activeTargetTab != TargetTab.DEVICES
+        listRefreshButton.isEnabled = isConnected
+        listDisconnectButton.isEnabled = isConnected || connectFlowActive
+
+        listSelectedText.text = "Selected: ${panelSnapshot.selectedTitle}"
+        listStatusText.text = panelSnapshot.status
+
+        val labels = mutableListOf<String>()
+        val ids = mutableListOf<Long>()
+
+        when (activeTargetTab) {
+            TargetTab.WINDOWS -> {
+                panelSnapshot.items.forEach { item ->
+                    val prefix = if (item.id == panelSnapshot.selectedId) "* " else ""
+                    val minimizedSuffix = if (item.minimized) " • minimized" else ""
+                    labels.add(prefix + item.title + " • " + item.width + "x" + item.height + minimizedSuffix)
+                    ids.add(item.id)
+                }
+                targetListEmptyText.text = "No shareable windows yet. Tap Refresh."
+            }
+
+            TargetTab.DEVICES -> {
+                val prefix = if (panelSnapshot.selectedId == 0L) "* " else ""
+                labels.add(prefix + getString(R.string.desktop_mode_button) + " • full desktop capture")
+                ids.add(0L)
+                targetListEmptyText.text = ""
+            }
+        }
+
+        targetListLabels.clear()
+        targetListLabels.addAll(labels)
+        targetListIds.clear()
+        targetListIds.addAll(ids)
+        targetListAdapter.notifyDataSetChanged()
+    }
+
+    private fun renderViewerScene(statusValue: String, panelSnapshot: WindowPanelUiSnapshot) {
+        viewerOverlayStatusText.text = panelSnapshot.selectedTitle + " • " + statusValue
+    }
+
+    private fun applySceneVisibility() {
+        connectScene.visibility = if (currentScene == UiScene.CONNECT) View.VISIBLE else View.GONE
+        targetsScene.visibility = if (currentScene == UiScene.TARGETS) View.VISIBLE else View.GONE
+        viewerScene.visibility = if (currentScene == UiScene.VIEWER) View.VISIBLE else View.GONE
+        if (currentScene != UiScene.VIEWER) {
+            releaseVideoSurface()
+        }
     }
 
     private fun bindVideoSurface(surfaceTexture: SurfaceTexture?) {
@@ -294,90 +344,78 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         videoSurface = null
     }
 
-    private fun renderStatus() {
-        val statusValue = NativeSessionBridge.nativeGetStatus()
-        val lastErrorValue = NativeSessionBridge.nativeGetLastError()
-        val panelSnapshot = parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson())
-        val isConnected = statusValue.startsWith("connected")
-
-        if (isConnected != wasConnected) {
-            controlsExpanded = !isConnected
-            wasConnected = isConnected
+    private fun syncVideoSurface(forceRebind: Boolean) {
+        if (currentScene != UiScene.VIEWER) {
+            releaseVideoSurface()
+            return
         }
 
-        statusText.text = statusValue
-        errorText.text = lastErrorValue
-        syncVideoSurface(forceRebind = false)
-        renderTargetPanel(isConnected, panelSnapshot)
-        renderCompactControls(isConnected, panelSnapshot)
-        videoDebugText.text =
-            NativeSessionBridge.nativeGetVideoDebugStatus() +
-                " view=${videoTextureView.width}x${videoTextureView.height}" +
-                " buffer=${surfaceBufferWidth}x${surfaceBufferHeight}" +
-                " video=${videoWidth}x${videoHeight}"
+        val packedSize = NativeSessionBridge.nativeGetVideoSizePacked()
+        val latestVideoWidth = (packedSize ushr 32).toInt()
+        val latestVideoHeight = (packedSize and 0xffffffffL).toInt()
+        val videoSizeChanged = latestVideoWidth != videoWidth || latestVideoHeight != videoHeight
+        if (videoSizeChanged) {
+            videoWidth = latestVideoWidth
+            videoHeight = latestVideoHeight
+        }
+
+        if (!videoTextureView.isAvailable) {
+            return
+        }
+
+        val targetBufferWidth = resolveSurfaceBufferWidth()
+        val targetBufferHeight = resolveSurfaceBufferHeight()
+        if (targetBufferWidth <= 0 || targetBufferHeight <= 0) {
+            return
+        }
+
+        if (forceRebind ||
+            videoSizeChanged ||
+            surfaceBufferWidth != targetBufferWidth ||
+            surfaceBufferHeight != targetBufferHeight) {
+            bindVideoSurface(videoTextureView.surfaceTexture)
+            return
+        }
+
+        applyVideoTransform()
     }
 
-    private fun renderTargetPanel(isConnected: Boolean, panelSnapshot: WindowPanelUiSnapshot) {
-        controlsPanel.visibility = if (isConnected && !controlsExpanded) View.GONE else View.VISIBLE
-        targetWindowsButton.text =
-            if (activeTargetTab == TargetTab.WINDOWS) "[LDPlayer]" else getString(R.string.target_windows_button)
-        targetDevicesButton.text =
-            if (activeTargetTab == TargetTab.DEVICES) "[Devices]" else getString(R.string.target_devices_button)
-        targetWindowsButton.isEnabled = activeTargetTab != TargetTab.WINDOWS
-        targetDevicesButton.isEnabled = activeTargetTab != TargetTab.DEVICES
-        desktopModeButton.isEnabled = isConnected && !panelSnapshot.selectionLocked
-
-        val labels = mutableListOf<String>()
-        val ids = mutableListOf<Long>()
-        var selectedIndex = 0
-
-        when (activeTargetTab) {
-            TargetTab.WINDOWS -> {
-                if (panelSnapshot.items.isEmpty()) {
-                    labels.add("No shareable windows. Tap Refresh.")
-                } else {
-                    panelSnapshot.items.forEach { item ->
-                        val prefix = if (item.id == panelSnapshot.selectedId) "* " else ""
-                        val minimizedSuffix = if (item.minimized) " • minimized" else ""
-                        labels.add(prefix + item.title + " • " + item.width + "x" + item.height + minimizedSuffix)
-                        ids.add(item.id)
-                    }
-                    selectedIndex = ids.indexOf(panelSnapshot.selectedId).coerceAtLeast(0)
-                }
-            }
-
-            TargetTab.DEVICES -> {
-                labels.add(
-                    if (panelSnapshot.selectedId == 0L) {
-                        "* Desktop Mode • overview capture"
-                    } else {
-                        "Desktop Mode • overview capture"
-                    }
-                )
-                ids.add(0L)
-            }
-        }
-
-        suppressTargetSpinnerSelection = true
-        targetSpinnerLabels.clear()
-        targetSpinnerLabels.addAll(labels)
-        targetSpinnerIds.clear()
-        targetSpinnerIds.addAll(ids)
-        targetSpinnerAdapter.notifyDataSetChanged()
-        if (targetSpinnerLabels.isNotEmpty()) {
-            targetSpinner.setSelection(selectedIndex, false)
-        }
-        suppressTargetSpinnerSelection = false
-        targetSpinner.isEnabled = isConnected && targetSpinnerIds.isNotEmpty() && !panelSnapshot.selectionLocked
+    private fun resolveSurfaceBufferWidth(): Int {
+        if (videoWidth > 0) return videoWidth
+        if (videoTextureView.width > 0) return videoTextureView.width
+        return 0
     }
 
-    private fun renderCompactControls(isConnected: Boolean, panelSnapshot: WindowPanelUiSnapshot) {
-        compactToolbar.visibility = if (isConnected) View.VISIBLE else View.GONE
-        panelToggleButton.text =
-            if (controlsExpanded) getString(R.string.panel_hide_button) else getString(R.string.panel_show_button)
-        disconnectCompactButton.isEnabled = isConnected
-        refreshCompactButton.isEnabled = isConnected
-        desktopModeCompactButton.isEnabled = isConnected && !panelSnapshot.selectionLocked
+    private fun resolveSurfaceBufferHeight(): Int {
+        if (videoHeight > 0) return videoHeight
+        if (videoTextureView.height > 0) return videoTextureView.height
+        return 0
+    }
+
+    private fun applyVideoTransform() {
+        val viewWidth = videoTextureView.width.toFloat()
+        val viewHeight = videoTextureView.height.toFloat()
+        val contentWidth = if (videoWidth > 0) videoWidth.toFloat() else surfaceBufferWidth.toFloat()
+        val contentHeight = if (videoHeight > 0) videoHeight.toFloat() else surfaceBufferHeight.toFloat()
+        val matrix = Matrix()
+        if (viewWidth <= 0f || viewHeight <= 0f || contentWidth <= 0f || contentHeight <= 0f) {
+            videoTextureView.setTransform(matrix)
+            return
+        }
+
+        val viewAspect = viewWidth / viewHeight
+        val contentAspect = contentWidth / contentHeight
+        val scaleX: Float
+        val scaleY: Float
+        if (contentAspect > viewAspect) {
+            scaleX = 1f
+            scaleY = viewAspect / contentAspect
+        } else {
+            scaleX = contentAspect / viewAspect
+            scaleY = 1f
+        }
+        matrix.setScale(scaleX, scaleY, viewWidth / 2f, viewHeight / 2f)
+        videoTextureView.setTransform(matrix)
     }
 
     private fun parseWindowPanelSnapshot(rawJson: String): WindowPanelUiSnapshot {
@@ -411,82 +449,5 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         } catch (_: JSONException) {
             WindowPanelUiSnapshot.EMPTY
         }
-    }
-
-    private fun syncVideoSurface(forceRebind: Boolean) {
-        val packedSize = NativeSessionBridge.nativeGetVideoSizePacked()
-        val latestVideoWidth = (packedSize ushr 32).toInt()
-        val latestVideoHeight = (packedSize and 0xffffffffL).toInt()
-        val videoSizeChanged = latestVideoWidth != videoWidth || latestVideoHeight != videoHeight
-        if (videoSizeChanged) {
-            videoWidth = latestVideoWidth
-            videoHeight = latestVideoHeight
-        }
-
-        if (!videoTextureView.isAvailable) {
-            return
-        }
-
-        val targetBufferWidth = resolveSurfaceBufferWidth()
-        val targetBufferHeight = resolveSurfaceBufferHeight()
-        if (targetBufferWidth <= 0 || targetBufferHeight <= 0) {
-            return
-        }
-
-        if (forceRebind ||
-            videoSizeChanged ||
-            surfaceBufferWidth != targetBufferWidth ||
-            surfaceBufferHeight != targetBufferHeight) {
-            bindVideoSurface(videoTextureView.surfaceTexture)
-            return
-        }
-
-        applyVideoTransform()
-    }
-
-    private fun resolveSurfaceBufferWidth(): Int {
-        if (videoWidth > 0) {
-            return videoWidth
-        }
-        if (videoTextureView.width > 0) {
-            return videoTextureView.width
-        }
-        return 0
-    }
-
-    private fun resolveSurfaceBufferHeight(): Int {
-        if (videoHeight > 0) {
-            return videoHeight
-        }
-        if (videoTextureView.height > 0) {
-            return videoTextureView.height
-        }
-        return 0
-    }
-
-    private fun applyVideoTransform() {
-        val viewWidth = videoTextureView.width.toFloat()
-        val viewHeight = videoTextureView.height.toFloat()
-        val contentWidth = if (videoWidth > 0) videoWidth.toFloat() else surfaceBufferWidth.toFloat()
-        val contentHeight = if (videoHeight > 0) videoHeight.toFloat() else surfaceBufferHeight.toFloat()
-        val matrix = Matrix()
-        if (viewWidth <= 0f || viewHeight <= 0f || contentWidth <= 0f || contentHeight <= 0f) {
-            videoTextureView.setTransform(matrix)
-            return
-        }
-
-        val viewAspect = viewWidth / viewHeight
-        val contentAspect = contentWidth / contentHeight
-        val scaleX: Float
-        val scaleY: Float
-        if (contentAspect > viewAspect) {
-            scaleX = 1f
-            scaleY = viewAspect / contentAspect
-        } else {
-            scaleX = contentAspect / viewAspect
-            scaleY = 1f
-        }
-        matrix.setScale(scaleX, scaleY, viewWidth / 2f, viewHeight / 2f)
-        videoTextureView.setTransform(matrix)
     }
 }

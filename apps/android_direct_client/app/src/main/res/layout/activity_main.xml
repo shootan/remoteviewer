@@ -1,214 +1,252 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:padding="12dp">
-
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="@string/shell_title"
-        android:textSize="20sp"
-        android:textStyle="bold" />
-
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:text="@string/shell_subtitle"
-        android:textSize="12sp" />
+    android:background="#F5F3EE">
 
     <LinearLayout
-        android:id="@+id/controlsPanel"
+        android:id="@+id/connectScene"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="10dp"
-        android:orientation="vertical">
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/shell_title"
+            android:textColor="#1A1A1A"
+            android:textSize="28sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/shell_subtitle"
+            android:textColor="#666666"
+            android:textSize="13sp" />
+
+            <EditText
+                android:id="@+id/hostInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="28dp"
+                android:background="#FFFFFF"
+                android:hint="@string/host_hint"
+                android:inputType="textUri"
+                android:maxLines="1"
+                android:padding="12dp"
+                android:textColor="#1A1A1A"
+                android:textColorHint="#777777"
+                android:text="192.168.0.10" />
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:baselineAligned="false"
+            android:layout_marginTop="12dp"
             android:orientation="horizontal">
-
-            <EditText
-                android:id="@+id/hostInput"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="2"
-                android:hint="@string/host_hint"
-                android:inputType="textUri"
-                android:maxLines="1"
-                android:text="192.168.0.10" />
 
             <EditText
                 android:id="@+id/videoPortInput"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
+                android:background="#FFFFFF"
                 android:layout_weight="1"
                 android:hint="@string/video_port_hint"
                 android:inputType="number"
                 android:maxLines="1"
+                android:padding="12dp"
+                android:textColor="#1A1A1A"
+                android:textColorHint="#777777"
                 android:text="43000" />
 
             <EditText
                 android:id="@+id/controlPortInput"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
+                android:layout_marginStart="10dp"
+                android:background="#FFFFFF"
                 android:layout_weight="1"
                 android:hint="@string/control_port_hint"
                 android:inputType="number"
                 android:maxLines="1"
+                android:padding="12dp"
+                android:textColor="#1A1A1A"
+                android:textColorHint="#777777"
                 android:text="43001" />
         </LinearLayout>
 
-        <LinearLayout
+        <Button
+            android:id="@+id/connectButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:background="#D8D2C6"
+            android:textColor="#1A1A1A"
+            android:text="@string/connect_button" />
+
+        <TextView
+            android:id="@+id/connectStatusText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:maxLines="2"
+            android:textColor="#1A1A1A"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/connectErrorText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:orientation="horizontal">
-
-            <Button
-                android:id="@+id/connectButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="@string/connect_button" />
-
-            <Button
-                android:id="@+id/disconnectButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:layout_weight="1"
-                android:text="@string/disconnect_button" />
-
-            <Button
-                android:id="@+id/refreshButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:layout_weight="1"
-                android:text="@string/refresh_button" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:orientation="horizontal">
-
-            <Button
-                android:id="@+id/targetWindowsButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="@string/target_windows_button" />
-
-            <Button
-                android:id="@+id/targetDevicesButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:layout_weight="1"
-                android:text="@string/target_devices_button" />
-
-            <Button
-                android:id="@+id/desktopModeButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:layout_weight="1"
-                android:text="@string/desktop_mode_button" />
-        </LinearLayout>
-
-        <Spinner
-            android:id="@+id/targetSpinner"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="2dp"
-            android:spinnerMode="dropdown" />
+            android:maxLines="3"
+            android:textColor="#B00020" />
     </LinearLayout>
 
     <LinearLayout
-        android:id="@+id/compactToolbar"
+        android:id="@+id/targetsScene"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:orientation="horizontal"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:padding="16dp"
         android:visibility="gone">
 
-        <Button
-            android:id="@+id/panelToggleButton"
-            android:layout_width="0dp"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="@string/panel_show_button" />
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
 
-        <Button
-            android:id="@+id/disconnectCompactButton"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:layout_weight="1"
-            android:text="@string/disconnect_button" />
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/targets_title"
+                android:textColor="#1A1A1A"
+                android:textSize="24sp"
+                android:textStyle="bold" />
 
-        <Button
-            android:id="@+id/refreshCompactButton"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:layout_weight="1"
-            android:text="@string/refresh_button" />
+            <Button
+                android:id="@+id/listDisconnectButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="#D8D2C6"
+                android:textColor="#1A1A1A"
+                android:text="@string/disconnect_button" />
+        </LinearLayout>
 
-        <Button
-            android:id="@+id/desktopModeCompactButton"
-            android:layout_width="0dp"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
+            android:layout_marginTop="14dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/listWindowsButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:background="#D8D2C6"
+                android:textColor="#1A1A1A"
+                android:text="@string/target_windows_button" />
+
+            <Button
+                android:id="@+id/listDevicesButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:background="#D8D2C6"
+                android:textColor="#1A1A1A"
+                android:text="@string/target_devices_button" />
+
+            <Button
+                android:id="@+id/listRefreshButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:background="#D8D2C6"
+                android:textColor="#1A1A1A"
+                android:text="@string/refresh_button" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/listSelectedText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:maxLines="1"
+            android:textColor="#1A1A1A"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/listStatusText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:maxLines="2"
+            android:textColor="#666666"
+            android:textSize="12sp" />
+
+        <ListView
+            android:id="@+id/targetListView"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_marginTop="12dp"
             android:layout_weight="1"
-            android:text="@string/desktop_mode_button" />
+            android:background="#FFFFFF"
+            android:divider="#D8D2C6"
+            android:dividerHeight="1dp" />
+
+        <TextView
+            android:id="@+id/targetListEmptyText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:gravity="center"
+            android:textColor="#666666"
+            android:textSize="13sp"
+            android:visibility="gone" />
     </LinearLayout>
 
     <FrameLayout
+        android:id="@+id/viewerScene"
         android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_marginTop="8dp"
-        android:layout_weight="1"
-        android:background="#101010">
+        android:layout_height="match_parent"
+        android:background="#050505"
+        android:visibility="gone">
 
         <TextureView
             android:id="@+id/videoTextureView"
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
+
+        <Button
+            android:id="@+id/viewerBackButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|start"
+            android:layout_marginStart="12dp"
+            android:layout_marginTop="12dp"
+            android:alpha="0.22"
+            android:background="#55111111"
+            android:paddingLeft="12dp"
+            android:paddingTop="8dp"
+            android:paddingRight="12dp"
+            android:paddingBottom="8dp"
+            android:text="@string/viewer_back_button" />
+
+        <TextView
+            android:id="@+id/viewerOverlayStatusText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:background="#66000000"
+            android:ellipsize="end"
+            android:maxLines="2"
+            android:padding="12dp"
+            android:textColor="#F2F2F2"
+            android:textSize="12sp" />
     </FrameLayout>
-
-    <TextView
-        android:id="@+id/statusText"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:maxLines="1"
-        android:textStyle="bold" />
-
-    <TextView
-        android:id="@+id/errorText"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:maxLines="1"
-        android:textColor="#B00020" />
-
-    <TextView
-        android:id="@+id/videoDebugText"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:ellipsize="end"
-        android:maxLines="2"
-        android:textColor="#666666"
-        android:textSize="11sp" />
-</LinearLayout>
+</FrameLayout>
