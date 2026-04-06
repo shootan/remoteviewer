@@ -209,3 +209,5 @@ Updated: 2026-04-06 11:21
 - [x] Phase D UDP H.264 receive + `SurfaceView/MediaCodec` wiring
 - [x] real host 순서 호환 수정 (`UDP hello` 후 `TCP control` retry 연결)
 - [x] LDPlayer 2에서 real host decode path/log 검증 (`MediaCodec started`, output release, disconnect/error 재확인)
+- [x] Phase D TextureView 가시화 디버깅 (`SurfaceView` 대신 `TextureView`, screenshot에 일부 frame 노출)
+- [x] decoder debug 상태를 Android UI에 노출 (`surface/codec/csd/in/out`)

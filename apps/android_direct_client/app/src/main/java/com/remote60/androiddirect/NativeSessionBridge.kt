@@ -12,4 +12,5 @@ object NativeSessionBridge {
     external fun nativeSetSurface(surface: Surface?)
     external fun nativeGetStatus(): String
     external fun nativeGetLastError(): String
+    external fun nativeGetVideoDebugStatus(): String
 }

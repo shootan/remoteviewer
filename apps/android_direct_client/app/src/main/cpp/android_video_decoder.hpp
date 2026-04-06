@@ -3,6 +3,7 @@
 #include <jni.h>
 
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include "native_video_client_session.hpp"
@@ -20,6 +21,7 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   void SetSurface(JNIEnv* env, jobject surface);
   void OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& frame) override;
   void OnVideoStreamReset() override;
+  std::string DebugStatus();
 
  private:
   bool EnsureCodecLocked(uint32_t width, uint32_t height);

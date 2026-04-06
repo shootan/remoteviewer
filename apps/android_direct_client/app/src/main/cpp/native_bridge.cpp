@@ -56,3 +56,9 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetLastError(
     JNIEnv* env, jobject /* this */) {
   return to_jstring(env, g_session_controller.Snapshot().lastError);
 }
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetVideoDebugStatus(
+    JNIEnv* env, jobject /* this */) {
+  return to_jstring(env, g_video_decoder_sink.DebugStatus());
+}

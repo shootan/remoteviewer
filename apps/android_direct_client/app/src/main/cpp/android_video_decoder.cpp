@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <string>
 
 namespace remote60::android_direct {
 
@@ -173,6 +174,19 @@ void AndroidVideoDecoderSink::OnVideoStreamReset() {
   outputFrameCount_ = 0;
   csd0_.clear();
   csd1_.clear();
+}
+
+std::string AndroidVideoDecoderSink::DebugStatus() {
+  std::lock_guard<std::mutex> lock(mu_);
+  std::string status = "surface=";
+  status += window_ ? "on" : "off";
+  status += " codec=";
+  status += codec_ ? "on" : "off";
+  status += " size=" + std::to_string(configuredWidth_) + "x" + std::to_string(configuredHeight_);
+  status += " csd=" + std::to_string(csd0_.empty() ? 0 : 1) + "/" + std::to_string(csd1_.empty() ? 0 : 1);
+  status += " in=" + std::to_string(inputFrameCount_);
+  status += " out=" + std::to_string(outputFrameCount_);
+  return status;
 }
 
 bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height) {

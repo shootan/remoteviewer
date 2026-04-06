@@ -1,22 +1,26 @@
 package com.remote60.androiddirect
 
 import android.app.Activity
+import android.graphics.SurfaceTexture
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.view.SurfaceHolder
-import android.view.SurfaceView
+import android.view.Surface
+import android.view.TextureView
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
 
-class MainActivity : Activity(), SurfaceHolder.Callback {
+class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var hostEdit: EditText
     private lateinit var videoPortEdit: EditText
     private lateinit var controlPortEdit: EditText
     private lateinit var statusText: TextView
     private lateinit var errorText: TextView
-    private lateinit var videoSurfaceView: SurfaceView
+    private lateinit var videoDebugText: TextView
+    private lateinit var videoTextureView: TextureView
+    private var videoSurface: Surface? = null
+
     private val statusHandler = Handler(Looper.getMainLooper())
     private val statusPollRunnable = object : Runnable {
         override fun run() {
@@ -34,8 +38,10 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         controlPortEdit = findViewById(R.id.controlPortInput)
         statusText = findViewById(R.id.statusText)
         errorText = findViewById(R.id.errorText)
-        videoSurfaceView = findViewById(R.id.videoSurfaceView)
-        videoSurfaceView.holder.addCallback(this)
+        videoDebugText = findViewById(R.id.videoDebugText)
+        videoTextureView = findViewById(R.id.videoTextureView)
+        videoTextureView.surfaceTextureListener = this
+        videoTextureView.isOpaque = true
 
         intent.getStringExtra("host")?.trim()?.takeIf { it.isNotEmpty() }?.let {
             hostEdit.setText(it)
@@ -80,6 +86,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         super.onResume()
         statusHandler.removeCallbacks(statusPollRunnable)
         statusHandler.post(statusPollRunnable)
+        if (videoTextureView.isAvailable) {
+            bindVideoSurface(videoTextureView.surfaceTexture)
+        }
     }
 
     override fun onPause() {
@@ -87,20 +96,47 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         super.onPause()
     }
 
-    override fun surfaceCreated(holder: SurfaceHolder) {
-        NativeSessionBridge.nativeSetSurface(holder.surface)
+    override fun onDestroy() {
+        releaseVideoSurface()
+        super.onDestroy()
     }
 
-    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        NativeSessionBridge.nativeSetSurface(holder.surface)
+    override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+        bindVideoSurface(surface)
     }
 
-    override fun surfaceDestroyed(holder: SurfaceHolder) {
+    override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
+        bindVideoSurface(surface)
+    }
+
+    override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+        releaseVideoSurface()
+        return true
+    }
+
+    override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
+    }
+
+    private fun bindVideoSurface(surfaceTexture: SurfaceTexture?) {
+        releaseVideoSurface()
+        if (surfaceTexture == null) {
+            NativeSessionBridge.nativeSetSurface(null)
+            return
+        }
+        val surface = Surface(surfaceTexture)
+        videoSurface = surface
+        NativeSessionBridge.nativeSetSurface(surface)
+    }
+
+    private fun releaseVideoSurface() {
         NativeSessionBridge.nativeSetSurface(null)
+        videoSurface?.release()
+        videoSurface = null
     }
 
     private fun renderStatus() {
         statusText.text = NativeSessionBridge.nativeGetStatus()
         errorText.text = NativeSessionBridge.nativeGetLastError()
+        videoDebugText.text = NativeSessionBridge.nativeGetVideoDebugStatus()
     }
 }

@@ -2158,3 +2158,46 @@ Validation / build / test result
 Next action
 - Android window list/select UI를 실제로 열고 capture target을 desktop 외 다른 shareable window로 바꿔 visible content를 검증한다.
 - 그 다음 touch/input 경로를 Android surface 좌표계와 연결해 `Phase E/F`로 진행한다.
+
+### 144) 2026-04-06 android textureview render visibility debug
+Goal
+- Android `Phase D`에서 black surface 원인을 줄이기 위해 `SurfaceView` 대신 `TextureView` 경로로 바꾸고, 스크린샷에서도 실제 디코드 출력이 보이는지 확인한다.
+- decoder 상태를 UI에 직접 노출해 `surface/codec/csd/in/out` 값을 LDPlayer에서 바로 확인 가능하게 만든다.
+
+Files changed
+- `apps/android_direct_client/app/src/main/cpp/android_video_decoder.hpp`
+- `apps/android_direct_client/app/src/main/cpp/android_video_decoder.cpp`
+- `apps/android_direct_client/app/src/main/cpp/native_bridge.cpp`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/NativeSessionBridge.kt`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `apps/android_direct_client/app/src/main/res/layout/activity_main.xml`
+- `docs/history.md`
+- `docs/구현계획.md`
+- `docs/android_구현계획.md`
+
+Validation / build / test result
+- Android build/install:
+  - `gradle-8.7/bin/gradle.bat assembleDebug`
+  - 결과: 성공
+  - `adb -s emulator-5558 install -r app-debug.apk`
+  - 결과: 성공
+- LDPlayer 2 runtime:
+  - launch: `adb -s emulator-5558 shell am start -W -n com.remote60.androiddirect/.MainActivity --es host 192.168.0.76 --ei videoPort 43000 --ei controlPort 43001`
+  - 결과: 실행 성공
+  - screenshot:
+    - `textureview-check2.png`에서 기존 완전 검은 영역 대신 좌상단 video content 일부가 캡처됨
+    - status=`connected window_list_received count=9 selected=desktop`
+    - debug=`surface=on codec=on size=1234x720 csd=1/1 in=2 out=2`
+  - Android logcat:
+    - `updated codec config`
+    - `MediaCodec started width=1234 height=720`
+    - `queued h264 frame count=1`
+    - `released output frame count=1`
+- Scope note:
+  - `TextureView`는 배경 drawable을 직접 지원하지 않아, `FrameLayout` 배경으로 우회했다.
+  - 스크린샷에 video content 일부가 잡히기 시작했으므로 기존 `SurfaceView` 별도 composition 문제는 사실상 해소됐다.
+  - 아직 full-frame이 아니라 상단 일부만 보이는 상태라 `TextureView`/surface sizing 또는 crop/transform 보정이 추가로 필요하다.
+
+Next action
+- `TextureView` 표시 영역이 전체 프레임을 채우도록 surface sizing/transform을 보정한다.
+- 그 다음 Android window list/select UI를 열어 desktop 외 실제 window target으로 visible content를 재검증한다.
