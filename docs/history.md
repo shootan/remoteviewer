@@ -2012,3 +2012,52 @@ Validation / build / test result
 Next action
 - Android toolchain 환경에서 `apps/android_direct_client` Gradle sync/build를 실제로 돌려 JNI/controller/network probe 조합이 컴파일되는지 확인한다.
 - 그 다음 session controller를 현재 probe 수준에서 공용 transport/session core 기반의 실제 session lifecycle로 확장한다.
+
+### 141) 2026-04-06 android ldplayer2 build install smoke
+Goal
+- Android Studio/SDK/NDK/CMake 설치 후 Android direct client를 실제로 빌드한다.
+- LDPlayer 인스턴스 `2`에 APK를 설치하고 앱 셸 실행과 `CONNECT`/`DISCONNECT` UI 반응을 확인한다.
+
+Files changed
+- `apps/android_direct_client/app/build.gradle.kts`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `apps/android_direct_client/app/src/main/res/values/themes.xml`
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Environment confirmed:
+  - Android SDK: `C:\Users\shota\AppData\Local\Android\Sdk`
+  - NDK: `30.0.14904198`
+  - CMake: `4.1.2`
+  - LDPlayer device: `emulator-5558`
+- Build:
+  - `gradle clean assembleDebug` with Android Studio JBR + local SDK
+  - 결과: 성공
+- Install:
+  - `adb -s emulator-5558 install -r app-debug.apk`
+  - 결과: 성공
+- Launch/runtime:
+  - `adb -s emulator-5558 shell am start -W -n com.remote60.androiddirect/.MainActivity`
+  - 결과: 실행 성공
+  - `pidof com.remote60.androiddirect` -> 프로세스 확인
+  - `dumpsys activity activities` -> `MainActivity` task/resumed 확인
+- UI check:
+  - `uiautomator dump` 결과에서 shell UI 요소 확인:
+    - `Android Direct Client Shell`
+    - host `192.168.0.10`
+    - ports `43000` / `43001`
+    - `CONNECT` / `DISCONNECT` / `REFRESH`
+  - `CONNECT` 탭 후:
+    - status=`error`
+    - error=`tcp control connect failed`
+  - `DISCONNECT` 탭 후:
+    - status=`disconnected`
+    - error cleared
+- Fix applied during verification:
+  - LDPlayer Android 9 호환을 위해 AppCompat/Material inflater 경로를 제거하고 기본 `Activity` + platform theme로 낮춤
+
+Next action
+- `ClientSessionController`를 현재 TCP/UDP probe에서 실제 공용 transport/session core 연결로 확장한다.
+- 그 다음 Android `Phase D` 영상 수신용 decoder/surface adapter 경계를 정의한다.

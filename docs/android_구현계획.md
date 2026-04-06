@@ -1,5 +1,5 @@
 # Android Direct Client 구현계획
-Updated: 2026-04-03 17:30
+Updated: 2026-04-06 11:21
 
 이 문서는 Android direct client 작업의 단일 기준(Source of Truth)으로 사용한다.
 
@@ -171,6 +171,8 @@ Updated: 2026-04-03 17:30
 - Desktop Mode / window list / selected target / input ack
 
 ### Android 기능
+- LDPlayer는 `Phase C` 앱 셸/JNI/session probe 수준 확인에 사용 가능
+- 단, `MediaCodec`, `Surface`, lifecycle, touch/IME, 성능은 실기기 확인 필요
 - 실기기 connect/disconnect 반복
 - 잘못된 host/port에서 오류 노출
 - 영상 수신/표시

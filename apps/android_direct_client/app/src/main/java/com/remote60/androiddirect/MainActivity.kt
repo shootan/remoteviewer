@@ -1,12 +1,12 @@
 package com.remote60.androiddirect
 
+import android.app.Activity
 import android.os.Bundle
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
-import androidx.appcompat.app.AppCompatActivity
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : Activity() {
     private lateinit var hostEdit: EditText
     private lateinit var videoPortEdit: EditText
     private lateinit var controlPortEdit: EditText
