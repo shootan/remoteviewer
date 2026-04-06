@@ -70,9 +70,12 @@ class ClientSessionController {
   ClientSessionController& operator=(const ClientSessionController&) = delete;
 
   void WorkerMain(ClientSessionConnectArgs args);
+  void VideoReceiveMain();
   void StopWorker();
   void FinalizeWorkerExit();
   void FailWorker(const std::string& error);
+  void SignalRuntimeFailure(const std::string& error);
+  bool ConnectTcpControlWithRetry(const ClientSessionConnectArgs& args, std::string* error);
   bool ConnectTcpControl(const ClientSessionConnectArgs& args, std::string* error);
   bool ConnectUdpVideo(const ClientSessionConnectArgs& args, std::string* error);
   void UpdateConnectedStatusLocked(const std::string& detail);
@@ -91,6 +94,7 @@ class ClientSessionController {
   ClientControlScheduler controlScheduler_;
   ClientEncodedFrameSink* encodedFrameSink_ = nullptr;
   std::thread workerThread_;
+  std::thread videoThread_;
   std::atomic<bool> stopRequested_{false};
   SocketHandle tcpControlSocket_ = kInvalidSocket;
   SocketHandle udpVideoSocket_ = kInvalidSocket;

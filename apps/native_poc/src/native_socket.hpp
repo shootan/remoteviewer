@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cerrno>
 #include <string>
 #include <vector>
 
@@ -177,6 +178,15 @@ inline bool recv_discard(SocketHandle socketHandle, size_t len) {
     left -= chunk;
   }
   return true;
+}
+
+inline bool last_socket_error_is_retryable() {
+#if defined(_WIN32)
+  const int err = WSAGetLastError();
+  return err == WSAEWOULDBLOCK || err == WSAETIMEDOUT || err == WSAEINTR;
+#else
+  return errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT || errno == EINTR;
+#endif
 }
 
 }  // namespace remote60::native_poc

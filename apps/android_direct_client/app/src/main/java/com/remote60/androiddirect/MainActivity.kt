@@ -4,16 +4,19 @@ import android.app.Activity
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
 
-class MainActivity : Activity() {
+class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var hostEdit: EditText
     private lateinit var videoPortEdit: EditText
     private lateinit var controlPortEdit: EditText
     private lateinit var statusText: TextView
     private lateinit var errorText: TextView
+    private lateinit var videoSurfaceView: SurfaceView
     private val statusHandler = Handler(Looper.getMainLooper())
     private val statusPollRunnable = object : Runnable {
         override fun run() {
@@ -31,6 +34,8 @@ class MainActivity : Activity() {
         controlPortEdit = findViewById(R.id.controlPortInput)
         statusText = findViewById(R.id.statusText)
         errorText = findViewById(R.id.errorText)
+        videoSurfaceView = findViewById(R.id.videoSurfaceView)
+        videoSurfaceView.holder.addCallback(this)
 
         intent.getStringExtra("host")?.trim()?.takeIf { it.isNotEmpty() }?.let {
             hostEdit.setText(it)
@@ -80,6 +85,18 @@ class MainActivity : Activity() {
     override fun onPause() {
         statusHandler.removeCallbacks(statusPollRunnable)
         super.onPause()
+    }
+
+    override fun surfaceCreated(holder: SurfaceHolder) {
+        NativeSessionBridge.nativeSetSurface(holder.surface)
+    }
+
+    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+        NativeSessionBridge.nativeSetSurface(holder.surface)
+    }
+
+    override fun surfaceDestroyed(holder: SurfaceHolder) {
+        NativeSessionBridge.nativeSetSurface(null)
     }
 
     private fun renderStatus() {

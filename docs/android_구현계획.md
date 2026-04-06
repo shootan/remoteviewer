@@ -206,3 +206,6 @@ Updated: 2026-04-06 11:21
 - [x] Phase C real session lifecycle wiring (`ClientSessionController` async worker/control loop/window list status summary)
 - [x] LDPlayer 2에서 real session 상태 변화 검증 (`connecting -> connected/error -> disconnected`)
 - [x] Phase D decoder/surface adapter placeholder 고정 (`ClientEncodedFrameSink`, JNI/Kotlin 미연결)
+- [x] Phase D UDP H.264 receive + `SurfaceView/MediaCodec` wiring
+- [x] real host 순서 호환 수정 (`UDP hello` 후 `TCP control` retry 연결)
+- [x] LDPlayer 2에서 real host decode path/log 검증 (`MediaCodec started`, output release, disconnect/error 재확인)

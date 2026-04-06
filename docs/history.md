@@ -2109,3 +2109,52 @@ Validation / build / test result
 Next action
 - `ClientEncodedFrameSink`를 실제 UDP frame receive path와 연결하고 Android `MediaCodec + Surface` adapter를 붙인다.
 - 그 다음 Android window list/select UI와 decoder reset 경계를 `Phase D/E` 범위로 확장한다.
+
+### 143) 2026-04-06 android phase-d video receive wiring
+Goal
+- `ClientEncodedFrameSink` 뒤에 실제 UDP H.264 receive path를 연결하고 Android `SurfaceView + MediaCodec` decode/render 경계를 붙인다.
+- 실제 UDP host 순서(`UDP hello -> control listen`)에 맞춰 Android session core가 real host에도 붙도록 control connect 순서를 정정한다.
+
+Files changed
+- `apps/native_poc/src/native_socket.hpp`
+- `apps/native_poc/src/native_video_client_session.hpp`
+- `apps/native_poc/src/native_video_client_session.cpp`
+- `apps/android_direct_client/app/src/main/cpp/CMakeLists.txt`
+- `apps/android_direct_client/app/src/main/cpp/native_bridge.cpp`
+- `apps/android_direct_client/app/src/main/cpp/android_video_decoder.hpp`
+- `apps/android_direct_client/app/src/main/cpp/android_video_decoder.cpp`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/NativeSessionBridge.kt`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `apps/android_direct_client/app/src/main/res/layout/activity_main.xml`
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Native build/test:
+  - `cmake --build build-vcpkg-local --target remote60_native_video_client_shared_core_test --config Debug`
+  - `build-vcpkg-local/apps/native_poc/Debug/remote60_native_video_client_shared_core_test.exe`
+  - 결과: `PASS`
+- Android build/install:
+  - `gradle-8.7/bin/gradle.bat assembleDebug` with Android Studio JBR + local SDK
+  - 결과: 성공
+  - `adb -s emulator-5558 install -r app-debug.apk`
+  - 결과: 성공
+- LDPlayer 2 runtime:
+  - real host(`remote60_native_video_host_poc --bind-port 43000 --control-port 43001 --codec h264`) 기준
+    - host log: `client connected transport=udp`, `control waiting port=43001`, `[control] client connected`
+    - app screenshot: status=`connected window_list_received count=9 selected=desktop`
+    - Android logcat: `updated codec config`, `MediaCodec started width=1280 height=720`, `released output frame count=1`
+  - disconnect 검증:
+    - status=`disconnected`
+  - 잘못된 control port(`43009`) 검증:
+    - status=`error`
+    - error=`connect failed`
+- Scope note:
+  - Android session controller는 이제 real host 순서에 맞게 `UDP hello` 후 video receive thread를 시작하고, 그 다음 `TCP control`을 retry 연결한다.
+  - LDPlayer screenshot 상 surface는 검게 보였지만, host UDP 송신/Android `MediaCodec started`/output release 로그까지 확인되어 decode 경로 자체는 동작한다.
+  - 현재 환경의 host capture source가 `MonitorFromWindow(GetDesktopWindow())`로 잡혀 있어 표시 내용이 검게 들어오는지 추가 확인이 필요하다.
+
+Next action
+- Android window list/select UI를 실제로 열고 capture target을 desktop 외 다른 shareable window로 바꿔 visible content를 검증한다.
+- 그 다음 touch/input 경로를 Android surface 좌표계와 연결해 `Phase E/F`로 진행한다.

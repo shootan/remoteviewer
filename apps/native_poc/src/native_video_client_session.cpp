@@ -3,6 +3,7 @@
 #include "native_video_client_tcp_control.hpp"
 #include "poc_protocol.hpp"
 
+#include <array>
 #include <chrono>
 #include <string>
 #include <thread>
@@ -12,6 +13,9 @@ namespace remote60::native_poc {
 namespace {
 
 constexpr uint32_t kDefaultControlResponseTimeoutMs = 1000;
+constexpr uint32_t kVideoReceiveTimeoutMs = 100;
+constexpr uint32_t kTcpControlConnectRetryMs = 4000;
+constexpr uint32_t kTcpControlConnectRetrySleepMs = 50;
 
 uint64_t now_us() {
   using namespace std::chrono;
@@ -115,13 +119,8 @@ bool ClientSessionController::IsValidPort(int port) {
 }
 
 void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
-  if (args.requireTcpControl) {
-    std::string error;
-    if (!ConnectTcpControl(args, &error)) {
-      if (!stopRequested_.load(std::memory_order_acquire)) FailWorker(error);
-      FinalizeWorkerExit();
-      return;
-    }
+  if (encodedFrameSink_) {
+    encodedFrameSink_->OnVideoStreamReset();
   }
 
   if (args.requireUdpHello) {
@@ -133,10 +132,33 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
     }
   }
 
+  if (encodedFrameSink_ && udpVideoSocket_ != kInvalidSocket) {
+    try {
+      videoThread_ = std::thread(&ClientSessionController::VideoReceiveMain, this);
+    } catch (...) {
+      if (!stopRequested_.load(std::memory_order_acquire)) {
+        FailWorker("failed to start video receive worker");
+      }
+      FinalizeWorkerExit();
+      return;
+    }
+  }
+
+  if (args.requireTcpControl) {
+    std::string error;
+    if (!ConnectTcpControlWithRetry(args, &error)) {
+      if (!stopRequested_.load(std::memory_order_acquire)) FailWorker(error);
+      FinalizeWorkerExit();
+      return;
+    }
+  }
+
   {
     std::lock_guard<std::mutex> lock(mu_);
     controlScheduler_.Reset(args.controlIntervalMs, now_us());
-    windowPanel_.RequestList("window_list_request pending");
+    if (args.requireTcpControl) {
+      windowPanel_.RequestList("window_list_request pending");
+    }
     snapshot_.state = ClientSessionState::Connected;
     snapshot_.lastError.clear();
     snapshot_.controlLoopActive = args.requireTcpControl;
@@ -164,13 +186,17 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
         controlSocket = tcpControlSocket_;
       }
       if (controlSocket == kInvalidSocket) {
-        if (!stopRequested_.load(std::memory_order_acquire)) FailWorker("tcp control socket closed");
+        if (!stopRequested_.load(std::memory_order_acquire)) {
+          SignalRuntimeFailure("tcp control socket closed");
+        }
         break;
       }
 
       TcpControlResponse response{};
       if (!execute_tcp_control_action(controlSocket, action, &response)) {
-        if (!stopRequested_.load(std::memory_order_acquire)) FailWorker("tcp control loop failed");
+        if (!stopRequested_.load(std::memory_order_acquire)) {
+          SignalRuntimeFailure("tcp control loop failed");
+        }
         break;
       }
       didWork = true;
@@ -210,6 +236,51 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
   FinalizeWorkerExit();
 }
 
+void ClientSessionController::VideoReceiveMain() {
+  UdpH264FrameAssembler assembler;
+  std::array<uint8_t, 1600> datagram{};
+  uint64_t assemblyDropped = 0;
+
+  while (!stopRequested_.load(std::memory_order_acquire)) {
+    SocketHandle udpSocket = kInvalidSocket;
+    ClientEncodedFrameSink* sink = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      udpSocket = udpVideoSocket_;
+      sink = encodedFrameSink_;
+    }
+    if (udpSocket == kInvalidSocket || !sink) break;
+
+    const int n = recv(udpSocket, reinterpret_cast<char*>(datagram.data()), static_cast<int>(datagram.size()), 0);
+    if (n <= 0) {
+      if (stopRequested_.load(std::memory_order_acquire)) break;
+      if (last_socket_error_is_retryable()) continue;
+      SignalRuntimeFailure("udp video receive failed");
+      break;
+    }
+    if (n < static_cast<int>(sizeof(UdpVideoChunkHeader))) continue;
+
+    auto assembleResult = assembler.PushDatagram(datagram.data(), static_cast<size_t>(n));
+    if (assembleResult.droppedPreviousIncomplete) {
+      ++assemblyDropped;
+    }
+    if (assembleResult.disposition == UdpH264AssemblyDisposition::Malformed) {
+      ++assemblyDropped;
+      continue;
+    }
+    if (assembleResult.disposition == UdpH264AssemblyDisposition::Dropped) {
+      ++assemblyDropped;
+      if ((assemblyDropped % 20) == 1) {
+        (void)keyframeRequests_.Request(2, now_us());
+      }
+      continue;
+    }
+    if (assembleResult.disposition == UdpH264AssemblyDisposition::Completed) {
+      sink->OnEncodedH264Frame(std::move(assembleResult.frame));
+    }
+  }
+}
+
 void ClientSessionController::StopWorker() {
   stopRequested_.store(true, std::memory_order_release);
   {
@@ -220,6 +291,9 @@ void ClientSessionController::StopWorker() {
   }
   if (workerThread_.joinable()) {
     workerThread_.join();
+  }
+  if (videoThread_.joinable()) {
+    videoThread_.join();
   }
   stopRequested_.store(false, std::memory_order_release);
 }
@@ -239,6 +313,38 @@ void ClientSessionController::FailWorker(const std::string& error) {
   snapshot_.status = "error";
   snapshot_.lastError = error.empty() ? "session failed" : error;
   snapshot_.controlLoopActive = false;
+}
+
+void ClientSessionController::SignalRuntimeFailure(const std::string& error) {
+  bool expected = false;
+  if (!stopRequested_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(mu_);
+  snapshot_.state = ClientSessionState::Error;
+  snapshot_.status = "error";
+  snapshot_.lastError = error.empty() ? "session failed" : error;
+  snapshot_.controlLoopActive = false;
+  shutdown_socket(&tcpControlSocket_);
+  shutdown_socket(&udpVideoSocket_);
+}
+
+bool ClientSessionController::ConnectTcpControlWithRetry(const ClientSessionConnectArgs& args, std::string* error) {
+  const uint64_t deadlineUs = now_us() + (static_cast<uint64_t>(kTcpControlConnectRetryMs) * 1000ULL);
+  std::string lastError;
+  while (!stopRequested_.load(std::memory_order_acquire)) {
+    if (ConnectTcpControl(args, &lastError)) {
+      if (error) error->clear();
+      return true;
+    }
+    if (now_us() >= deadlineUs) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(kTcpControlConnectRetrySleepMs));
+  }
+  if (error) {
+    *error = lastError.empty() ? "tcp control connect failed" : lastError;
+  }
+  return false;
 }
 
 bool ClientSessionController::ConnectTcpControl(const ClientSessionConnectArgs& args, std::string* error) {
@@ -261,6 +367,7 @@ bool ClientSessionController::ConnectTcpControl(const ClientSessionConnectArgs& 
     close_socket(&connected);
     return false;
   }
+  close_socket(&tcpControlSocket_);
   tcpControlSocket_ = connected;
   snapshot_.transport.tcpControlConnected = true;
   return true;
@@ -293,6 +400,7 @@ bool ClientSessionController::ConnectUdpVideo(const ClientSessionConnectArgs& ar
     return false;
   }
 
+  (void)set_recv_timeout(connected, kVideoReceiveTimeoutMs);
   if (stopRequested_.load(std::memory_order_acquire)) {
     close_socket(&connected);
     return false;
@@ -335,6 +443,9 @@ void ClientSessionController::ResetUnlocked() {
   keyframeRequests_.Reset();
   runtimeTune_.Reset(0, 0);
   inputQueue_.Reset();
+  if (encodedFrameSink_) {
+    encodedFrameSink_->OnVideoStreamReset();
+  }
   encodedFrameSink_ = nullptr;
 }
 

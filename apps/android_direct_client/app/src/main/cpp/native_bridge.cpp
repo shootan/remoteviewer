@@ -2,11 +2,13 @@
 
 #include <string>
 
+#include "android_video_decoder.hpp"
 #include "native_video_client_session.hpp"
 
 namespace {
 
 remote60::native_poc::ClientSessionController g_session_controller;
+remote60::android_direct::AndroidVideoDecoderSink g_video_decoder_sink;
 
 jstring to_jstring(JNIEnv* env, const std::string& value) {
   return env->NewStringUTF(value.c_str());
@@ -27,6 +29,7 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeConnect(
   args.host = host_value;
   args.videoPort = video_port;
   args.controlPort = control_port;
+  args.encodedFrameSink = &g_video_decoder_sink;
   return g_session_controller.Connect(args) ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -34,6 +37,12 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeDisconnect(
     JNIEnv* /* env */, jobject /* this */) {
   g_session_controller.Disconnect();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeSetSurface(
+    JNIEnv* env, jobject /* this */, jobject surface) {
+  g_video_decoder_sink.SetSurface(env, surface);
 }
 
 extern "C" JNIEXPORT jstring JNICALL
