@@ -89,6 +89,23 @@ class CaptureModeRequestState {
   std::atomic<uint32_t> yPermille_{5000};
 };
 
+struct PendingStreamStateRequest {
+  uint32_t seq = 0;
+  bool active = false;
+};
+
+class StreamStateControl {
+ public:
+  void Reset();
+  void Request(bool active);
+  bool ConsumePending(PendingStreamStateRequest* out);
+
+ private:
+  std::atomic<bool> pending_{false};
+  std::atomic<uint32_t> nextSeq_{0};
+  std::atomic<bool> active_{false};
+};
+
 struct PendingRuntimeTuneRequest {
   ControlRuntimeEncoderConfigMessage message{};
 };
@@ -133,6 +150,7 @@ enum class ControlOutboundActionKind : uint8_t {
   Ping,
   WindowListRequest,
   WindowSelect,
+  StreamState,
   CaptureMode,
   Metrics,
   KeyframeRequest,
@@ -148,6 +166,7 @@ struct ControlOutboundAction {
   ControlPingMessage ping{};
   ControlWindowListRequestMessage windowListRequest{};
   ControlWindowSelectMessage windowSelect{};
+  ControlStreamStateMessage streamState{};
   ControlCaptureModeRequestMessage captureMode{};
   ControlClientMetricsMessage metrics{};
   ControlRequestKeyFrameMessage keyframe{};
@@ -161,12 +180,13 @@ class ClientControlScheduler {
   void Reset(uint32_t controlIntervalMs, uint64_t nowUs);
   void OnPingCompleted(uint64_t doneUs);
   bool NextAction(uint64_t nowUs,
-                  const ClientControlMetricsSnapshot& metrics,
-                  WindowPanelStateModel* windowPanel,
-                  CaptureModeRequestState* captureMode,
-                  KeyframeRequestState* keyframeRequests,
-                  RuntimeTuneState* runtimeTune,
-                  ClientInputQueue* inputQueue,
+                 const ClientControlMetricsSnapshot& metrics,
+                 WindowPanelStateModel* windowPanel,
+                 StreamStateControl* streamState,
+                 CaptureModeRequestState* captureMode,
+                 KeyframeRequestState* keyframeRequests,
+                 RuntimeTuneState* runtimeTune,
+                 ClientInputQueue* inputQueue,
                   ControlOutboundAction* out);
   uint64_t RecordInputAck(uint32_t inputLogEvery);
 

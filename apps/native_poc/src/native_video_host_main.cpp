@@ -53,6 +53,7 @@ using namespace winrt::Windows::Graphics::DirectX::Direct3D11;
 using remote60::native_poc::ControlInputAckMessage;
 using remote60::native_poc::ControlInputEventMessage;
 using remote60::native_poc::ControlInputTextMessage;
+using remote60::native_poc::ControlStreamStateMessage;
 using remote60::native_poc::ControlClientMetricsMessage;
 using remote60::native_poc::ControlRequestKeyFrameMessage;
 using remote60::native_poc::ControlRuntimeEncoderConfigMessage;
@@ -2201,6 +2202,7 @@ int main(int argc, char** argv) {
   std::atomic<uint16_t> clientKeyFrameReason{0};
   std::atomic<uint64_t> clientKeyFrameRequestCount{0};
   std::atomic<uint64_t> clientKeyFrameRequestDropped{0};
+  std::atomic<bool> streamControlActive{true};
   std::atomic<bool> runtimeTunePending{false};
   std::atomic<uint32_t> runtimeTuneBitrate{0};
   std::atomic<uint32_t> runtimeTuneKeyint{0};
@@ -2614,6 +2616,19 @@ int main(int argc, char** argv) {
                 continue;
               }
 
+              if (type == MessageType::ControlStreamState &&
+                  header.size == sizeof(ControlStreamStateMessage)) {
+                ControlStreamStateMessage req{};
+                req.header = header;
+                if (!recv_all(acceptedSock, &req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+                const bool active = ((req.flags & 0x1u) != 0);
+                streamControlActive.store(active, std::memory_order_release);
+                std::cout << "[native-video-host][control] stream-state seq=" << req.seq
+                          << " active=" << (active ? 1 : 0)
+                          << "\n";
+                continue;
+              }
+
               if (type == MessageType::ControlCaptureModeRequest &&
                   header.size == sizeof(ControlCaptureModeRequestMessage)) {
                 ControlCaptureModeRequestMessage req{};
@@ -2644,6 +2659,7 @@ int main(int argc, char** argv) {
               SOCKET expected = acceptedSock;
               controlClientSock.compare_exchange_strong(expected, INVALID_SOCKET);
             }
+            streamControlActive.store(false, std::memory_order_release);
             std::cout << "[native-video-host][control] client disconnected\n";
           }
         });
@@ -3024,6 +3040,7 @@ int main(int argc, char** argv) {
         while (auto newer = sender.TryGetNextFrame()) {
           latest = newer;
         }
+        if (!streamControlActive.load(std::memory_order_acquire)) return;
 
         auto src = SurfaceToTexture(latest.Surface());
         if (!src) return;
@@ -3319,6 +3336,7 @@ int main(int argc, char** argv) {
   uint64_t frameGatingChangePermilleSum = 0;
   uint64_t frameGatingChangePermilleCount = 0;
   uint64_t firstSentLoggedGeneration = 0;
+  bool streamActiveApplied = true;
   auto effective_queue_wait_timeout_us = [&]() -> uint64_t {
     if (queueWaitTimeoutUsOverride > 0) {
       return std::max<uint64_t>(kQueueWaitTimeoutUsMin, queueWaitTimeoutUsOverride);
@@ -3636,6 +3654,21 @@ int main(int argc, char** argv) {
       break;
     }
     pump_udp_hello();
+    const bool streamActive = streamControlActive.load(std::memory_order_acquire);
+    if (!streamActive) {
+      if (streamActiveApplied) {
+        flush_capture_pipeline_state("stream-inactive");
+        streamActiveApplied = false;
+        std::cout << "[native-video-host] stream inactive\n";
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      continue;
+    }
+    if (!streamActiveApplied) {
+      streamActiveApplied = true;
+      forceKeyNext = true;
+      std::cout << "[native-video-host] stream active; forcing keyframe\n";
+    }
     if (useH264 && runtimeTunePending.exchange(false, std::memory_order_acq_rel)) {
       const uint32_t reqSeq = runtimeTuneSeq.load(std::memory_order_acquire);
       uint32_t targetBitrate = runtimeTuneBitrate.load(std::memory_order_acquire);

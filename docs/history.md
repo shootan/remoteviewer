@@ -2550,6 +2550,49 @@ Next action
 - 실기기에서 `Settings` 탭으로 bitrate/fps를 바꾼 뒤 체감 화질/트래픽 tradeoff를 몇 개 프리셋으로 정리한다.
 - 이후 `targets -> viewer -> back` soak과 LD current-instance exclude 자동화를 이어서 닫는다.
 
+### 158) 2026-04-07 android settings persistence and viewer-only host streaming
+Goal
+- Android `Settings` 탭 값(bitrate/fps)을 endpoint처럼 저장해 다음 접속에서도 자동으로 host에 적용한다.
+- viewer를 벗어나 targets/list scene으로 돌아가면 host가 계속 video를 보내지 않도록 client-host stream active control을 추가한다.
+
+Files changed
+- `apps/android_direct_client/app/src/main/cpp/native_bridge.cpp`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/NativeSessionBridge.kt`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/SessionPersistence.kt`
+- `apps/native_poc/src/native_video_client_main.cpp`
+- `apps/native_poc/src/native_video_client_session.cpp`
+- `apps/native_poc/src/native_video_client_session.hpp`
+- `apps/native_poc/src/native_video_client_shared_core.cpp`
+- `apps/native_poc/src/native_video_client_shared_core.hpp`
+- `apps/native_poc/src/native_video_client_shared_core_test.cpp`
+- `apps/native_poc/src/native_video_client_tcp_control.cpp`
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `apps/native_poc/src/poc_protocol.hpp`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Native build:
+  - `cmake --build d:\remote\remote\build-vcpkg-local --target remote60_native_video_host_poc remote60_native_video_client_poc remote60_native_video_client_shared_core_test --config Debug --parallel`
+  - 결과: 성공
+- Shared core test:
+  - `d:\remote\remote\build-vcpkg-local\apps\native_poc\Debug\remote60_native_video_client_shared_core_test.exe`
+  - 결과: `PASS`
+- Android build:
+  - `JAVA_HOME=C:\Program Files\Android\Android Studio\jbr`
+  - `d:\remote\remote\tmp\gradle\gradle-8.7\bin\gradle.bat assembleDebug`
+  - 결과: 성공
+- Scope note:
+  - `SessionPersistence`에 `bitrateKbps/fps`를 추가해 endpoint와 함께 저장/복원한다.
+  - Android client는 connect 성공 후 saved bitrate/fps를 한 번 자동으로 host runtime config로 보내고, 이후 viewer/switching에서는 `stream active=true`, targets/list에서는 `stream active=false`를 보낸다.
+  - host는 `ControlStreamState` 수신 시 encode/send loop를 멈추고, stream 재활성화 시 keyframe을 강제한다.
+  - host process 자체를 내리지 않고 stream on/off와 runtime config만 바꾼다.
+
+Next action
+- 실기기에서 `viewer -> list` 전환 후 host 트래픽이 실제로 멈추는지 로그/네트워크 지표로 한번 확인한다.
+- saved bitrate/fps auto-apply가 connect 직후 체감 화질에 반영되는지 실기기에서 재확인한다.
+
 ### 152) 2026-04-06 host window-capture stall false-positive guard
 Goal
 - static window를 캡처할 때 `callbackFramesPerSec < 10`만으로 freeze로 오판정해 restart하는 문제를 줄인다.

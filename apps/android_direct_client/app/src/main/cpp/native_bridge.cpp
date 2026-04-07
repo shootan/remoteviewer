@@ -196,6 +196,12 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeRequestRuntimeConfig(
              : JNI_FALSE;
 }
 
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeRequestStreamActive(
+    JNIEnv* /* env */, jobject /* this */, jboolean active) {
+  return g_session_controller.RequestStreamActive(active == JNI_TRUE) ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetWindowPanelJson(
     JNIEnv* env, jobject /* this */) {

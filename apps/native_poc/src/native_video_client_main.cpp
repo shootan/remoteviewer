@@ -583,6 +583,7 @@ RuntimeTuneState gRuntimeTuneState{
     1,
     240};
 std::atomic<bool> gCaptureOverviewMode{false};
+remote60::native_poc::StreamStateControl gStreamStateControl;
 CaptureModeRequestState gCaptureModeRequests;
 ClientControlScheduler gControlScheduler;
 
@@ -2365,7 +2366,7 @@ int main(int argc, char** argv) {
             ControlOutboundAction action{};
             if (gControlScheduler.NextAction(
                     nowUs, capture_client_control_metrics_snapshot(), &gWindowPanelState,
-                    &gCaptureModeRequests, &gKeyframeRequests, &gRuntimeTuneState,
+                    &gStreamStateControl, &gCaptureModeRequests, &gKeyframeRequests, &gRuntimeTuneState,
                     &gInputQueueState, &action)) {
               TcpControlResponse response{};
               if (!execute_tcp_control_action(controlSock, action, &response)) break;

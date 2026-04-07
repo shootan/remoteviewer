@@ -185,6 +185,25 @@ bool CaptureModeRequestState::ConsumePending(PendingCaptureModeRequest* out) {
   return (out->mode == 1 || out->mode == 2);
 }
 
+void StreamStateControl::Reset() {
+  pending_.store(false, std::memory_order_relaxed);
+  nextSeq_.store(0, std::memory_order_relaxed);
+  active_.store(false, std::memory_order_relaxed);
+}
+
+void StreamStateControl::Request(bool active) {
+  active_.store(active, std::memory_order_release);
+  pending_.store(true, std::memory_order_release);
+}
+
+bool StreamStateControl::ConsumePending(PendingStreamStateRequest* out) {
+  if (!out) return false;
+  if (!pending_.exchange(false, std::memory_order_acq_rel)) return false;
+  out->seq = nextSeq_.fetch_add(1, std::memory_order_relaxed) + 1;
+  out->active = active_.load(std::memory_order_acquire);
+  return true;
+}
+
 RuntimeTuneState::RuntimeTuneState(uint32_t bitrateMin, uint32_t bitrateMax, uint32_t bitrateStep,
                                    uint32_t keyintMin, uint32_t keyintMax)
     : bitrateMin_(bitrateMin),
@@ -307,12 +326,13 @@ void ClientControlScheduler::OnPingCompleted(uint64_t doneUs) {
 bool ClientControlScheduler::NextAction(uint64_t nowUs,
                                         const ClientControlMetricsSnapshot& metrics,
                                         WindowPanelStateModel* windowPanel,
+                                        StreamStateControl* streamState,
                                         CaptureModeRequestState* captureMode,
                                         KeyframeRequestState* keyframeRequests,
                                         RuntimeTuneState* runtimeTune,
                                         ClientInputQueue* inputQueue,
                                         ControlOutboundAction* out) {
-  if (!windowPanel || !captureMode || !keyframeRequests || !runtimeTune || !inputQueue || !out) {
+  if (!windowPanel || !streamState || !captureMode || !keyframeRequests || !runtimeTune || !inputQueue || !out) {
     return false;
   }
   *out = ControlOutboundAction{};
@@ -352,6 +372,18 @@ bool ClientControlScheduler::NextAction(uint64_t nowUs,
     out->windowSelect.seq = ++nextWindowSelectSeq_;
     out->windowSelect.windowId = pendingWindowId;
     out->windowSelect.clientSendQpcUs = nowUs;
+    return true;
+  }
+
+  PendingStreamStateRequest pendingStreamState{};
+  if (streamState->ConsumePending(&pendingStreamState)) {
+    out->kind = ControlOutboundActionKind::StreamState;
+    out->streamState.header.magic = kMagic;
+    out->streamState.header.type = static_cast<uint16_t>(MessageType::ControlStreamState);
+    out->streamState.header.size = static_cast<uint16_t>(sizeof(out->streamState));
+    out->streamState.seq = pendingStreamState.seq;
+    out->streamState.flags = pendingStreamState.active ? 0x1u : 0u;
+    out->streamState.clientSendQpcUs = nowUs;
     return true;
   }
 

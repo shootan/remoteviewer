@@ -132,6 +132,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var requestedRuntimeBitrateKbps = 8000
     private var requestedRuntimeFps = 30
     private var settingsStatusMessage = "Current request: 8000 kbps / 30 fps"
+    private var pendingRuntimeConfigSync = false
+    private var desiredStreamActive = false
+    private var lastAppliedStreamActive: Boolean? = null
     private var videoSurface: Surface? = null
     private var videoWidth = 0
     private var videoHeight = 0
@@ -202,6 +205,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         hostEdit.setText(if (launchHost.isNotEmpty()) launchHost else savedEndpoint.host.ifEmpty { "192.168.0.10" })
         videoPortEdit.setText(if (launchVideoPort > 0) launchVideoPort.toString() else savedEndpoint.videoPort.toString())
         controlPortEdit.setText(if (launchControlPort > 0) launchControlPort.toString() else savedEndpoint.controlPort.toString())
+        requestedRuntimeBitrateKbps = savedEndpoint.bitrateKbps
+        requestedRuntimeFps = savedEndpoint.fps
+        settingsStatusMessage = "Current request: ${requestedRuntimeBitrateKbps} kbps / ${requestedRuntimeFps} fps"
         settingsBitrateInput.setText(requestedRuntimeBitrateKbps.toString())
         settingsFpsInput.setText(requestedRuntimeFps.toString())
         settingsAppliedText.text = settingsStatusMessage
@@ -216,12 +222,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             val host = hostEdit.text?.toString()?.trim().orEmpty()
             val videoPort = videoPortEdit.text?.toString()?.toIntOrNull() ?: 0
             val controlPort = controlPortEdit.text?.toString()?.toIntOrNull() ?: 0
-            SessionPersistence.save(this, host, videoPort, controlPort)
+            saveCurrentEndpoint()
             diagnosticsLog.log("connect_tap", "host=$host videoPort=$videoPort controlPort=$controlPort")
 
             val ok = NativeSessionBridge.nativeConnect(host, videoPort, controlPort)
             if (ok) {
                 connectFlowActive = true
+                pendingRuntimeConfigSync = true
+                desiredStreamActive = false
+                lastAppliedStreamActive = null
                 clearPendingSelection()
                 currentScene = UiScene.TARGETS
                 NativeSessionBridge.nativeRequestWindowList()
@@ -233,6 +242,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         listDisconnectButton.setOnClickListener {
             diagnosticsLog.log("disconnect_tap", "scene=$currentScene")
+            desiredStreamActive = false
+            pendingRuntimeConfigSync = false
+            lastAppliedStreamActive = null
             NativeSessionBridge.nativeDisconnect()
             connectFlowActive = false
             clearPendingSelection()
@@ -281,6 +293,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 requestedRuntimeFps = fps
                 settingsStatusMessage = "Requested: ${bitrateKbps} kbps / ${fps} fps"
                 settingsAppliedText.text = settingsStatusMessage
+                saveCurrentEndpoint()
                 diagnosticsLog.log("runtime_config_request", "bitrateBps=$bitrateBps fps=$fps")
             } else {
                 settingsStatusMessage = "Runtime config request failed."
@@ -358,8 +371,46 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         pendingSelectionAckLogged = false
     }
 
+    private fun requestStreamActive(active: Boolean, reason: String): Boolean {
+        val ok = NativeSessionBridge.nativeRequestStreamActive(active)
+        if (ok) {
+            lastAppliedStreamActive = active
+            diagnosticsLog.log("stream_state_request", "active=$active reason=$reason")
+        } else {
+            diagnosticsLog.log("stream_state_failed", "active=$active reason=$reason")
+        }
+        return ok
+    }
+
+    private fun syncConnectedClientPreferences(isConnected: Boolean) {
+        if (!isConnected) {
+            lastAppliedStreamActive = null
+            return
+        }
+
+        if (pendingRuntimeConfigSync) {
+            val bitrateBps = requestedRuntimeBitrateKbps * 1000
+            if (NativeSessionBridge.nativeRequestRuntimeConfig(bitrateBps, requestedRuntimeFps)) {
+                pendingRuntimeConfigSync = false
+                settingsStatusMessage =
+                    "Current request: ${requestedRuntimeBitrateKbps} kbps / ${requestedRuntimeFps} fps"
+                settingsAppliedText.text = settingsStatusMessage
+                diagnosticsLog.log(
+                    "runtime_config_sync",
+                    "bitrateBps=$bitrateBps fps=$requestedRuntimeFps"
+                )
+            }
+        }
+
+        if (lastAppliedStreamActive != desiredStreamActive) {
+            requestStreamActive(desiredStreamActive, "connected_sync")
+        }
+    }
+
     private fun moveToTargets(reason: String, abortPendingSwitch: Boolean) {
         diagnosticsLog.log("targets_return", "reason=$reason scene=$currentScene")
+        desiredStreamActive = false
+        requestStreamActive(false, reason)
         if (abortPendingSwitch) {
             NativeSessionBridge.nativeAbortVideoSwitch()
         } else {
@@ -372,6 +423,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun startSelectionTransition(targetId: Long, label: String, tab: TargetTab, origin: String): Boolean {
         val selectionGeneration = ++selectionGenerationCounter
+        desiredStreamActive = true
+        if (!requestStreamActive(true, "selection_$origin")) {
+            desiredStreamActive = false
+            currentScene = UiScene.TARGETS
+            return false
+        }
         resetViewerObservability()
         NativeSessionBridge.nativePrepareVideoSwitch(selectionGeneration)
         val ok = when (tab) {
@@ -380,6 +437,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             TargetTab.SETTINGS -> false
         }
         if (!ok) {
+            desiredStreamActive = false
+            requestStreamActive(false, "selection_failed")
             NativeSessionBridge.nativeAbortVideoSwitch()
             diagnosticsLog.log(
                 "select_request_failed",
@@ -418,6 +477,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         if (!isConnecting && !isConnected && currentScene != UiScene.CONNECT) {
             currentScene = UiScene.CONNECT
+            desiredStreamActive = false
             clearPendingSelection()
             resetViewerObservability()
         } else if (connectFlowActive && currentScene == UiScene.CONNECT && (isConnecting || isConnected)) {
@@ -464,6 +524,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         } else if (currentScene == UiScene.SWITCHING) {
             currentScene = UiScene.VIEWER
         }
+
+        syncConnectedClientPreferences(isConnected)
 
         connectStatusText.text = statusValue
         connectErrorText.text =
@@ -837,6 +899,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val host = hostEdit.text?.toString()?.trim().orEmpty()
         val videoPort = videoPortEdit.text?.toString()?.toIntOrNull() ?: 43000
         val controlPort = controlPortEdit.text?.toString()?.toIntOrNull() ?: 43001
-        SessionPersistence.save(this, host, videoPort, controlPort)
+        val bitrateKbps = settingsBitrateInput.text?.toString()?.toIntOrNull() ?: requestedRuntimeBitrateKbps
+        val fps = settingsFpsInput.text?.toString()?.toIntOrNull() ?: requestedRuntimeFps
+        SessionPersistence.save(this, host, videoPort, controlPort, bitrateKbps, fps)
     }
 }

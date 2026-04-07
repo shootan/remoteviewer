@@ -156,6 +156,15 @@ bool ClientSessionController::RequestDesktopMode() {
   return RequestWindowSelect(0);
 }
 
+bool ClientSessionController::RequestStreamActive(bool active) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+  streamState_.Request(active);
+  return true;
+}
+
 bool ClientSessionController::RequestRuntimeConfig(uint32_t bitrate, uint32_t fps) {
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -231,7 +240,7 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
     const uint64_t loopNowUs = now_us();
     ControlOutboundAction action{};
     ClientControlMetricsSnapshot metrics{};
-    if (controlScheduler_.NextAction(loopNowUs, metrics, &windowPanel_, &captureMode_,
+    if (controlScheduler_.NextAction(loopNowUs, metrics, &windowPanel_, &streamState_, &captureMode_,
                                      &keyframeRequests_, &runtimeTune_, &inputQueue_, &action)) {
       SocketHandle controlSocket = kInvalidSocket;
       {
@@ -501,6 +510,7 @@ void ClientSessionController::ResetUnlocked() {
   CloseSocketsUnlocked();
   snapshot_ = ClientSessionSnapshot{};
   windowPanel_.Reset();
+  streamState_.Reset();
   captureMode_.Reset();
   keyframeRequests_.Reset();
   runtimeTune_.Reset(0, 0);

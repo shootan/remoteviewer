@@ -22,6 +22,7 @@ object NativeSessionBridge {
     external fun nativeSelectWindow(windowId: Long): Boolean
     external fun nativeSelectDesktopMode(): Boolean
     external fun nativeRequestRuntimeConfig(bitrateBps: Int, fps: Int): Boolean
+    external fun nativeRequestStreamActive(active: Boolean): Boolean
     external fun nativeGetWindowPanelJson(): String
     external fun nativeResetVideoStream()
 }

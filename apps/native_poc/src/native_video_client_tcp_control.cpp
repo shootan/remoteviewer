@@ -10,6 +10,8 @@ bool send_tcp_control_action(SocketHandle controlSock, const ControlOutboundActi
       return send_all(controlSock, &action.windowListRequest, sizeof(action.windowListRequest));
     case ControlOutboundActionKind::WindowSelect:
       return send_all(controlSock, &action.windowSelect, sizeof(action.windowSelect));
+    case ControlOutboundActionKind::StreamState:
+      return send_all(controlSock, &action.streamState, sizeof(action.streamState));
     case ControlOutboundActionKind::CaptureMode:
       return send_all(controlSock, &action.captureMode, sizeof(action.captureMode));
     case ControlOutboundActionKind::Metrics:

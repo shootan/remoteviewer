@@ -24,6 +24,7 @@ enum class MessageType : uint16_t {
   ControlWindowSelect = 30,
   ControlWindowSelected = 31,
   ControlInputText = 32,
+  ControlStreamState = 33,
 };
 
 enum class UdpPacketKind : uint16_t {
@@ -133,6 +134,13 @@ struct ControlInputTextMessage {
   uint16_t utf16Count = 0;
   uint16_t reserved = 0;
   uint16_t utf16[kControlInputTextMaxUtf16] = {};
+  uint64_t clientSendQpcUs = 0;
+};
+
+struct ControlStreamStateMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t flags = 0;  // bit0: stream active
   uint64_t clientSendQpcUs = 0;
 };
 

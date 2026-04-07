@@ -69,6 +69,7 @@ class ClientSessionController {
   bool RequestWindowList();
   bool RequestWindowSelect(uint64_t windowId);
   bool RequestDesktopMode();
+  bool RequestStreamActive(bool active);
   bool RequestRuntimeConfig(uint32_t bitrate, uint32_t fps);
 
  private:
@@ -94,6 +95,7 @@ class ClientSessionController {
   mutable std::mutex mu_;
   ClientSessionSnapshot snapshot_;
   WindowPanelStateModel windowPanel_;
+  StreamStateControl streamState_;
   CaptureModeRequestState captureMode_;
   KeyframeRequestState keyframeRequests_;
   RuntimeTuneState runtimeTune_;

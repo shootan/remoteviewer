@@ -29,6 +29,7 @@ using remote60::native_poc::MessageType;
 using remote60::native_poc::QueuedControlInputMessage;
 using remote60::native_poc::RuntimeTuneState;
 using remote60::native_poc::SocketHandle;
+using remote60::native_poc::StreamStateControl;
 using remote60::native_poc::UdpCodec;
 using remote60::native_poc::UdpH264AssemblyDisposition;
 using remote60::native_poc::UdpH264FrameAssembler;
@@ -216,6 +217,7 @@ struct FakeSessionServer {
 bool test_ping_and_metrics_order() {
   ClientControlScheduler scheduler;
   WindowPanelStateModel windowPanel;
+  StreamStateControl streamState;
   CaptureModeRequestState captureMode;
   KeyframeRequestState keyframe(120000, 300000, 3);
   RuntimeTuneState runtimeTune(300000, 30000000, 250000, 1, 240);
@@ -227,7 +229,7 @@ bool test_ping_and_metrics_order() {
   metrics.updatedQpcUs = 1500;
   metrics.message.recvMbpsX1000 = 5000;
 
-  if (!expect(scheduler.NextAction(1000, metrics, &windowPanel, &captureMode, &keyframe,
+  if (!expect(scheduler.NextAction(1000, metrics, &windowPanel, &streamState, &captureMode, &keyframe,
                                    &runtimeTune, &inputQueue, &action),
               "initial ping action missing")) return false;
   if (!expect(action.kind == ControlOutboundActionKind::Ping, "first action should be ping")) return false;
@@ -237,12 +239,12 @@ bool test_ping_and_metrics_order() {
 
   scheduler.OnPingCompleted(1100);
 
-  if (!expect(scheduler.NextAction(1200, metrics, &windowPanel, &captureMode, &keyframe,
+  if (!expect(scheduler.NextAction(1200, metrics, &windowPanel, &streamState, &captureMode, &keyframe,
                                    &runtimeTune, &inputQueue, &action),
               "metrics action missing after ping")) return false;
   if (!expect(action.kind == ControlOutboundActionKind::Metrics, "second action should be metrics")) return false;
 
-  if (!expect(!scheduler.NextAction(1300, metrics, &windowPanel, &captureMode, &keyframe,
+  if (!expect(!scheduler.NextAction(1300, metrics, &windowPanel, &streamState, &captureMode, &keyframe,
                                     &runtimeTune, &inputQueue, &action),
               "metrics should not resend without updated timestamp")) return false;
 
@@ -252,6 +254,7 @@ bool test_ping_and_metrics_order() {
 bool test_window_and_input_actions() {
   ClientControlScheduler scheduler;
   WindowPanelStateModel windowPanel;
+  StreamStateControl streamState;
   CaptureModeRequestState captureMode;
   KeyframeRequestState keyframe(120000, 300000, 3);
   RuntimeTuneState runtimeTune(300000, 30000000, 250000, 1, 240);
@@ -262,7 +265,7 @@ bool test_window_and_input_actions() {
   scheduler.OnPingCompleted(0);
 
   windowPanel.RequestList("pending");
-  if (!expect(scheduler.NextAction(100, {}, &windowPanel, &captureMode, &keyframe,
+  if (!expect(scheduler.NextAction(100, {}, &windowPanel, &streamState, &captureMode, &keyframe,
                                    &runtimeTune, &inputQueue, &action),
               "window-list action missing")) return false;
   if (!expect(action.kind == ControlOutboundActionKind::WindowListRequest,
@@ -280,7 +283,7 @@ bool test_window_and_input_actions() {
   windowPanel.ApplyWindowList(list, 4);
   if (!expect(windowPanel.RequestSelect(77, "select"), "window select should queue")) return false;
 
-  if (!expect(scheduler.NextAction(200, {}, &windowPanel, &captureMode, &keyframe,
+  if (!expect(scheduler.NextAction(200, {}, &windowPanel, &streamState, &captureMode, &keyframe,
                                    &runtimeTune, &inputQueue, &action),
               "window-select action missing")) return false;
   if (!expect(action.kind == ControlOutboundActionKind::WindowSelect,
@@ -294,7 +297,7 @@ bool test_window_and_input_actions() {
   input.inputEvent.kind = 2;
   inputQueue.Enqueue(input);
 
-  if (!expect(scheduler.NextAction(300, {}, &windowPanel, &captureMode, &keyframe,
+  if (!expect(scheduler.NextAction(300, {}, &windowPanel, &streamState, &captureMode, &keyframe,
                                    &runtimeTune, &inputQueue, &action),
               "input action missing")) return false;
   if (!expect(action.kind == ControlOutboundActionKind::InputEvent,
@@ -312,6 +315,7 @@ bool test_window_and_input_actions() {
 bool test_capture_runtime_and_keyframe_actions() {
   ClientControlScheduler scheduler;
   WindowPanelStateModel windowPanel;
+  StreamStateControl streamState;
   CaptureModeRequestState captureMode;
   KeyframeRequestState keyframe(120000, 300000, 3);
   RuntimeTuneState runtimeTune(300000, 30000000, 250000, 1, 240);
@@ -322,7 +326,7 @@ bool test_capture_runtime_and_keyframe_actions() {
   scheduler.OnPingCompleted(0);
 
   captureMode.Request(2, 4200, 7300);
-  if (!expect(scheduler.NextAction(100, {}, &windowPanel, &captureMode, &keyframe,
+  if (!expect(scheduler.NextAction(100, {}, &windowPanel, &streamState, &captureMode, &keyframe,
                                    &runtimeTune, &inputQueue, &action),
               "capture-mode action missing")) return false;
   if (!expect(action.kind == ControlOutboundActionKind::CaptureMode,
@@ -337,7 +341,7 @@ bool test_capture_runtime_and_keyframe_actions() {
   runtimeTune.MarkDirty();
   ClientControlMetricsSnapshot metrics{};
   metrics.message.recvMbpsX1000 = 6000;
-  if (!expect(scheduler.NextAction(200, metrics, &windowPanel, &captureMode, &keyframe,
+  if (!expect(scheduler.NextAction(200, metrics, &windowPanel, &streamState, &captureMode, &keyframe,
                                    &runtimeTune, &inputQueue, &action),
               "runtime-tune action missing")) return false;
   if (!expect(action.kind == ControlOutboundActionKind::RuntimeTune,
@@ -348,7 +352,7 @@ bool test_capture_runtime_and_keyframe_actions() {
   keyframe.Reset();
   const auto queued = keyframe.Request(3, 500);
   if (!expect(queued.queued, "keyframe request should queue")) return false;
-  if (!expect(scheduler.NextAction(600, {}, &windowPanel, &captureMode, &keyframe,
+  if (!expect(scheduler.NextAction(600, {}, &windowPanel, &streamState, &captureMode, &keyframe,
                                    &runtimeTune, &inputQueue, &action),
               "keyframe action missing")) return false;
   if (!expect(action.kind == ControlOutboundActionKind::KeyframeRequest,
