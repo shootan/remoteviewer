@@ -6,6 +6,7 @@ import android.graphics.SurfaceTexture
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import android.view.TextureView
@@ -60,6 +61,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
+    private lateinit var diagnosticsLog: SessionDiagnosticsLog
     private lateinit var connectScene: View
     private lateinit var targetsScene: View
     private lateinit var viewerScene: View
@@ -85,6 +87,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var currentScene = UiScene.CONNECT
     private var activeTargetTab = TargetTab.WINDOWS
     private var connectFlowActive = false
+    private var pendingSelectionId: Long? = null
+    private var pendingSelectionLabel = ""
+    private var lastLoggedScene = UiScene.CONNECT
+    private var lastLoggedStatus = ""
+    private var lastLoggedPanelStatus = ""
+    private var lastLoggedVideoDebug = ""
+    private var lastViewerOutCount = -1
+    private var lastViewerOutChangeAtMs = 0L
+    private var lastViewerStallLogAtMs = 0L
     private var videoSurface: Surface? = null
     private var videoWidth = 0
     private var videoHeight = 0
@@ -103,6 +114,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        diagnosticsLog = SessionDiagnosticsLog(this)
         connectScene = findViewById(R.id.connectScene)
         targetsScene = findViewById(R.id.targetsScene)
         viewerScene = findViewById(R.id.viewerScene)
@@ -136,61 +148,93 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         targetListView.emptyView = targetListEmptyText
         targetListView.setOnItemClickListener { _, _, position, _ ->
             if (position < 0 || position >= targetListIds.size) return@setOnItemClickListener
+            val targetId = targetListIds[position]
+            NativeSessionBridge.nativeResetVideoStream()
+            videoWidth = 0
+            videoHeight = 0
+            lastViewerOutCount = -1
+            lastViewerOutChangeAtMs = 0L
+            lastViewerStallLogAtMs = 0L
             val ok = when (activeTargetTab) {
-                TargetTab.WINDOWS -> NativeSessionBridge.nativeSelectWindow(targetListIds[position])
+                TargetTab.WINDOWS -> NativeSessionBridge.nativeSelectWindow(targetId)
                 TargetTab.DEVICES -> NativeSessionBridge.nativeSelectDesktopMode()
             }
             if (!ok) {
+                diagnosticsLog.log("select_request_failed", "targetId=$targetId tab=$activeTargetTab")
                 renderStatus()
                 return@setOnItemClickListener
             }
-            currentScene = UiScene.VIEWER
+            pendingSelectionId = targetId
+            pendingSelectionLabel = targetListLabels[position]
+            diagnosticsLog.log("select_request", "targetId=$targetId label=$pendingSelectionLabel tab=$activeTargetTab")
             renderStatus()
         }
 
-        intent.getStringExtra("host")?.trim()?.takeIf { it.isNotEmpty() }?.let(hostEdit::setText)
-        intent.getIntExtra("videoPort", 0).takeIf { it > 0 }?.let { videoPortEdit.setText(it.toString()) }
-        intent.getIntExtra("controlPort", 0).takeIf { it > 0 }?.let { controlPortEdit.setText(it.toString()) }
+        val savedEndpoint = SessionPersistence.load(this)
+        val launchHost = intent.getStringExtra("host")?.trim().orEmpty()
+        val launchVideoPort = intent.getIntExtra("videoPort", 0)
+        val launchControlPort = intent.getIntExtra("controlPort", 0)
+        hostEdit.setText(if (launchHost.isNotEmpty()) launchHost else savedEndpoint.host.ifEmpty { "192.168.0.10" })
+        videoPortEdit.setText(if (launchVideoPort > 0) launchVideoPort.toString() else savedEndpoint.videoPort.toString())
+        controlPortEdit.setText(if (launchControlPort > 0) launchControlPort.toString() else savedEndpoint.controlPort.toString())
+
+        diagnosticsLog.log(
+            "app_start",
+            "savedHost=${savedEndpoint.host} savedVideoPort=${savedEndpoint.videoPort} " +
+                "savedControlPort=${savedEndpoint.controlPort} logFile=${diagnosticsLog.filePath()}"
+        )
 
         findViewById<Button>(R.id.connectButton).setOnClickListener {
             val host = hostEdit.text?.toString()?.trim().orEmpty()
             val videoPort = videoPortEdit.text?.toString()?.toIntOrNull() ?: 0
             val controlPort = controlPortEdit.text?.toString()?.toIntOrNull() ?: 0
+            SessionPersistence.save(this, host, videoPort, controlPort)
+            diagnosticsLog.log("connect_tap", "host=$host videoPort=$videoPort controlPort=$controlPort")
+
             val ok = NativeSessionBridge.nativeConnect(host, videoPort, controlPort)
             if (ok) {
                 connectFlowActive = true
+                pendingSelectionId = null
+                pendingSelectionLabel = ""
                 currentScene = UiScene.TARGETS
                 NativeSessionBridge.nativeRequestWindowList()
+            } else {
+                diagnosticsLog.log("connect_failed", NativeSessionBridge.nativeGetLastError())
             }
             renderStatus()
-            if (!ok) {
-                connectErrorText.text = NativeSessionBridge.nativeGetLastError()
-            }
         }
 
         listDisconnectButton.setOnClickListener {
+            diagnosticsLog.log("disconnect_tap", "scene=$currentScene")
             NativeSessionBridge.nativeDisconnect()
             connectFlowActive = false
+            pendingSelectionId = null
+            pendingSelectionLabel = ""
             currentScene = UiScene.CONNECT
             renderStatus()
         }
 
         listRefreshButton.setOnClickListener {
+            diagnosticsLog.log("refresh_tap", "scene=$currentScene")
             NativeSessionBridge.nativeRequestWindowList()
             renderStatus()
         }
 
         listWindowsButton.setOnClickListener {
             activeTargetTab = TargetTab.WINDOWS
+            diagnosticsLog.log("tab_switch", "tab=windows")
             renderStatus()
         }
 
         listDevicesButton.setOnClickListener {
             activeTargetTab = TargetTab.DEVICES
+            diagnosticsLog.log("tab_switch", "tab=devices")
             renderStatus()
         }
 
         viewerBackButton.setOnClickListener {
+            diagnosticsLog.log("viewer_back", "selected=$pendingSelectionLabel currentScene=$currentScene")
+            NativeSessionBridge.nativeResetVideoStream()
             currentScene = UiScene.TARGETS
             renderStatus()
         }
@@ -206,11 +250,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     override fun onPause() {
+        saveCurrentEndpoint()
         statusHandler.removeCallbacks(statusPollRunnable)
         super.onPause()
     }
 
     override fun onDestroy() {
+        saveCurrentEndpoint()
         releaseVideoSurface()
         super.onDestroy()
     }
@@ -232,38 +278,72 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun renderStatus() {
+        val nowMs = SystemClock.elapsedRealtime()
         val statusValue = NativeSessionBridge.nativeGetStatus()
         val errorValue = NativeSessionBridge.nativeGetLastError()
         val panelSnapshot = parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson())
+        val videoDebugValue = NativeSessionBridge.nativeGetVideoDebugStatus()
         val isConnecting = statusValue.startsWith("connecting")
         val isConnected = statusValue.startsWith("connected")
 
         if (!isConnecting && !isConnected && currentScene != UiScene.CONNECT) {
             currentScene = UiScene.CONNECT
+            pendingSelectionId = null
+            pendingSelectionLabel = ""
         } else if (connectFlowActive && currentScene == UiScene.CONNECT && (isConnecting || isConnected)) {
             currentScene = UiScene.TARGETS
         }
 
+        if (pendingSelectionId != null) {
+            if (panelSnapshot.status.startsWith("window_select_failed")) {
+                diagnosticsLog.log("select_failed", "targetId=$pendingSelectionId status=${panelSnapshot.status}")
+                pendingSelectionId = null
+                pendingSelectionLabel = ""
+            } else if (panelSnapshot.selectedId == pendingSelectionId) {
+                diagnosticsLog.log(
+                    "select_applied",
+                    "targetId=$pendingSelectionId title=${panelSnapshot.selectedTitle} scene=viewer"
+                )
+                currentScene = UiScene.VIEWER
+                pendingSelectionId = null
+                pendingSelectionLabel = ""
+            }
+        }
+
         connectStatusText.text = statusValue
-        connectErrorText.text = errorValue
+        connectErrorText.text =
+            if (errorValue.isNotBlank()) {
+                errorValue + "\nlog: " + diagnosticsLog.filePath()
+            } else {
+                "log: " + diagnosticsLog.filePath()
+            }
+
         renderTargetsScene(isConnected, panelSnapshot)
-        renderViewerScene(statusValue, panelSnapshot)
+        renderViewerScene(statusValue, panelSnapshot, videoDebugValue)
         applySceneVisibility()
         syncVideoSurface(forceRebind = false)
+        observeDiagnostics(nowMs, statusValue, panelSnapshot, videoDebugValue)
     }
 
     private fun renderTargetsScene(isConnected: Boolean, panelSnapshot: WindowPanelUiSnapshot) {
+        val selectionPending = pendingSelectionId != null
         listWindowsButton.text =
             if (activeTargetTab == TargetTab.WINDOWS) "[Windows]" else getString(R.string.target_windows_button)
         listDevicesButton.text =
             if (activeTargetTab == TargetTab.DEVICES) "[Devices]" else getString(R.string.target_devices_button)
-        listWindowsButton.isEnabled = activeTargetTab != TargetTab.WINDOWS
-        listDevicesButton.isEnabled = activeTargetTab != TargetTab.DEVICES
-        listRefreshButton.isEnabled = isConnected
+        listWindowsButton.isEnabled = activeTargetTab != TargetTab.WINDOWS && !selectionPending
+        listDevicesButton.isEnabled = activeTargetTab != TargetTab.DEVICES && !selectionPending
+        listRefreshButton.isEnabled = isConnected && !selectionPending
         listDisconnectButton.isEnabled = isConnected || connectFlowActive
+        targetListView.isEnabled = isConnected && !selectionPending
 
         listSelectedText.text = "Selected: ${panelSnapshot.selectedTitle}"
-        listStatusText.text = panelSnapshot.status
+        listStatusText.text =
+            if (selectionPending) {
+                "selecting $pendingSelectionLabel..."
+            } else {
+                panelSnapshot.status
+            }
 
         val labels = mutableListOf<String>()
         val ids = mutableListOf<Long>()
@@ -294,25 +374,22 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         targetListAdapter.notifyDataSetChanged()
     }
 
-    private fun renderViewerScene(statusValue: String, panelSnapshot: WindowPanelUiSnapshot) {
-        viewerOverlayStatusText.text = panelSnapshot.selectedTitle + " • " + statusValue
+    private fun renderViewerScene(statusValue: String, panelSnapshot: WindowPanelUiSnapshot, videoDebugValue: String) {
+        viewerOverlayStatusText.text = panelSnapshot.selectedTitle + " • " + statusValue + "\n" + videoDebugValue
     }
 
     private fun applySceneVisibility() {
         connectScene.visibility = if (currentScene == UiScene.CONNECT) View.VISIBLE else View.GONE
         targetsScene.visibility = if (currentScene == UiScene.TARGETS) View.VISIBLE else View.GONE
         viewerScene.visibility = if (currentScene == UiScene.VIEWER) View.VISIBLE else View.GONE
-        if (currentScene != UiScene.VIEWER) {
+        if (currentScene != UiScene.VIEWER && videoSurface != null) {
             releaseVideoSurface()
         }
     }
 
     private fun bindVideoSurface(surfaceTexture: SurfaceTexture?) {
-        releaseVideoSurface()
         if (surfaceTexture == null) {
-            surfaceBufferWidth = 0
-            surfaceBufferHeight = 0
-            NativeSessionBridge.nativeSetSurface(null)
+            releaseVideoSurface()
             return
         }
 
@@ -323,30 +400,38 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             return
         }
 
-        surfaceTexture.setDefaultBufferSize(targetBufferWidth, targetBufferHeight)
-        surfaceBufferWidth = targetBufferWidth
-        surfaceBufferHeight = targetBufferHeight
-
-        val surface = Surface(surfaceTexture)
-        videoSurface = surface
-        NativeSessionBridge.nativeSetSurface(surface)
-        Log.i(
-            LOG_TAG,
-            "bind video surface buffer=${surfaceBufferWidth}x${surfaceBufferHeight} " +
-                "video=${videoWidth}x${videoHeight} view=${videoTextureView.width}x${videoTextureView.height}"
-        )
+        if (videoSurface == null || surfaceBufferWidth != targetBufferWidth || surfaceBufferHeight != targetBufferHeight) {
+            releaseVideoSurface()
+            surfaceTexture.setDefaultBufferSize(targetBufferWidth, targetBufferHeight)
+            surfaceBufferWidth = targetBufferWidth
+            surfaceBufferHeight = targetBufferHeight
+            val surface = Surface(surfaceTexture)
+            videoSurface = surface
+            NativeSessionBridge.nativeSetSurface(surface)
+            diagnosticsLog.log(
+                "viewer_surface_bound",
+                "buffer=${surfaceBufferWidth}x${surfaceBufferHeight} video=${videoWidth}x${videoHeight} " +
+                    "view=${videoTextureView.width}x${videoTextureView.height}"
+            )
+        }
         applyVideoTransform()
     }
 
     private fun releaseVideoSurface() {
+        if (videoSurface == null) return
         NativeSessionBridge.nativeSetSurface(null)
         videoSurface?.release()
         videoSurface = null
+        surfaceBufferWidth = 0
+        surfaceBufferHeight = 0
+        diagnosticsLog.log("viewer_surface_released", "scene=$currentScene")
     }
 
     private fun syncVideoSurface(forceRebind: Boolean) {
         if (currentScene != UiScene.VIEWER) {
-            releaseVideoSurface()
+            if (videoSurface != null) {
+                releaseVideoSurface()
+            }
             return
         }
 
@@ -357,6 +442,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (videoSizeChanged) {
             videoWidth = latestVideoWidth
             videoHeight = latestVideoHeight
+            diagnosticsLog.log("video_size", "video=${videoWidth}x${videoHeight}")
         }
 
         if (!videoTextureView.isAvailable) {
@@ -371,6 +457,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         if (forceRebind ||
             videoSizeChanged ||
+            videoSurface == null ||
             surfaceBufferWidth != targetBufferWidth ||
             surfaceBufferHeight != targetBufferHeight) {
             bindVideoSurface(videoTextureView.surfaceTexture)
@@ -449,5 +536,80 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         } catch (_: JSONException) {
             WindowPanelUiSnapshot.EMPTY
         }
+    }
+
+    private fun observeDiagnostics(
+        nowMs: Long,
+        statusValue: String,
+        panelSnapshot: WindowPanelUiSnapshot,
+        videoDebugValue: String,
+    ) {
+        if (currentScene != lastLoggedScene) {
+            diagnosticsLog.log("scene", currentScene.name)
+            lastLoggedScene = currentScene
+        }
+        if (statusValue != lastLoggedStatus) {
+            diagnosticsLog.log("status", statusValue)
+            lastLoggedStatus = statusValue
+        }
+        if (panelSnapshot.status != lastLoggedPanelStatus) {
+            diagnosticsLog.log(
+                "panel_status",
+                panelSnapshot.status + " selectedId=" + panelSnapshot.selectedId + " selectedTitle=" + panelSnapshot.selectedTitle
+            )
+            lastLoggedPanelStatus = panelSnapshot.status
+        }
+        if (videoDebugValue != lastLoggedVideoDebug && currentScene == UiScene.VIEWER) {
+            diagnosticsLog.log("video_debug", videoDebugValue)
+            lastLoggedVideoDebug = videoDebugValue
+        }
+
+        if (currentScene == UiScene.VIEWER && statusValue.startsWith("connected")) {
+            val outCount = parseVideoCounter(videoDebugValue, "out")
+            if (outCount >= 0) {
+                if (outCount != lastViewerOutCount) {
+                    lastViewerOutCount = outCount
+                    lastViewerOutChangeAtMs = nowMs
+                    lastViewerStallLogAtMs = 0L
+                } else {
+                    if (lastViewerOutChangeAtMs == 0L) {
+                        lastViewerOutChangeAtMs = nowMs
+                    }
+                    val stalledForMs = nowMs - lastViewerOutChangeAtMs
+                    if (stalledForMs >= 5000L && nowMs - lastViewerStallLogAtMs >= 5000L) {
+                        diagnosticsLog.log(
+                            "viewer_stall",
+                            "stalledMs=$stalledForMs out=$outCount status=$statusValue " +
+                                "selected=${panelSnapshot.selectedTitle} debug=$videoDebugValue"
+                        )
+                        lastViewerStallLogAtMs = nowMs
+                    }
+                }
+            }
+        } else {
+            lastViewerOutCount = -1
+            lastViewerOutChangeAtMs = 0L
+            lastViewerStallLogAtMs = 0L
+        }
+    }
+
+    private fun parseVideoCounter(debugLine: String, key: String): Int {
+        val needle = "$key="
+        val start = debugLine.indexOf(needle)
+        if (start < 0) return -1
+        val valueStart = start + needle.length
+        var valueEnd = valueStart
+        while (valueEnd < debugLine.length && debugLine[valueEnd].isDigit()) {
+            valueEnd += 1
+        }
+        if (valueEnd <= valueStart) return -1
+        return debugLine.substring(valueStart, valueEnd).toIntOrNull() ?: -1
+    }
+
+    private fun saveCurrentEndpoint() {
+        val host = hostEdit.text?.toString()?.trim().orEmpty()
+        val videoPort = videoPortEdit.text?.toString()?.toIntOrNull() ?: 43000
+        val controlPort = controlPortEdit.text?.toString()?.toIntOrNull() ?: 43001
+        SessionPersistence.save(this, host, videoPort, controlPort)
     }
 }

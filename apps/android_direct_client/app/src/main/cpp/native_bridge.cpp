@@ -161,3 +161,9 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetWindowPanelJson(
     JNIEnv* env, jobject /* this */) {
   return to_jstring(env, window_panel_snapshot_json(g_session_controller.WindowPanelSnapshotCopy()));
 }
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeResetVideoStream(
+    JNIEnv* /* env */, jobject /* this */) {
+  g_video_decoder_sink.OnVideoStreamReset();
+}

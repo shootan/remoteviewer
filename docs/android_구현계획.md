@@ -1,5 +1,5 @@
 # Android Direct Client 구현계획
-Updated: 2026-04-06 22:35
+Updated: 2026-04-07 11:24
 
 이 문서는 Android direct client 작업의 단일 기준(Source of Truth)으로 사용한다.
 
@@ -202,11 +202,13 @@ Updated: 2026-04-06 22:35
    - `nativeGetVideoSizePacked`, `TextureView.setDefaultBufferSize`, `window panel JSON`, `refresh/select/Desktop Mode`, `LDPlayer/Devices` 탭 UI 1차, scene split(`connect -> targets -> viewer`) 구현은 끝냈다.
    - LDPlayer screenshot 기준으로 `scene_connect -> scene_targets -> scene_window_viewer -> scene_back_to_list` 전환과 hidden back button 복귀를 확인했다.
    - selected-window path에서는 `CreateForWindow(window-select)` capture source와 full-frame viewer content까지 확인했다.
-   - 남은 것은 scene 구조 위에서 selection UX를 더 다듬고, 그 다음 입력 작업에 들어가는 것이다.
+   - Android 설정 persistence와 diagnostics log file도 붙였고, 첫 선택 후 두 번째 선택 재진입까지 확인했다.
+   - 남은 것은 장시간 반복 soak과 desktop path 안정화다.
 2. Phase E selection UX 보정
    - 현재는 list scene에서 텍스트 목록을 탭해 viewer scene으로 들어가는 구조이므로, 필요 시 썸네일/카드형 목록 또는 정렬/필터 UX를 추가한다.
    - recursive capture를 막기 위해 helper input window(`textinputhost.exe`)는 제외하고, emulator window는 blanket 제외 대신 현재 Android client instance PID만 좁게 제외한다.
    - static window를 freeze로 오판정하던 `capture-input-stall` low-push restart는 window capture mode에서 비활성화했다.
+   - window 선택 시 viewer scene 전환은 selection ack 이후로 미루고, target 변경 시 decoder reset을 명시적으로 호출한다.
    - monitor list는 현 프로토콜 범위 밖이므로, 필요 시 `디바이스` 탭 semantics와 실제 데이터 공급 경계를 다시 정리한다.
 3. Phase F 착수 전 Gate 고정
    - 입력 작업에 들어가기 전에 `full-frame video`, `window select`, `viewer -> list 복귀`, `background/foreground 후 surface 재연결` 네 항목을 실기기 기준으로 재확인한다.
@@ -245,3 +247,6 @@ Updated: 2026-04-06 22:35
 - [x] Phase E scene split (`connect scene -> targets scene -> fullscreen viewer scene`, hidden top-left back button)
 - [x] Phase E recursive target filter (`textinputhost.exe` 제외 + current Android client LDPlayer PID만 window list에서 제외)
 - [x] Phase E window-capture stall false-positive 완화 (`captureInputLowPushStreakSec` 기반 restart를 window capture mode에서 비활성화)
+- [x] Android endpoint persistence (`host/videoPort/controlPort` SharedPreferences 저장/복원)
+- [x] Android diagnostics log file (`android_direct_client_session.log`, scene/status/video stall 기록)
+- [x] Phase E second-selection re-entry guard (selection ack 후 viewer 전환 + target switch 시 decoder reset)

@@ -2518,6 +2518,58 @@ Next action
 - `REMOTE60_NATIVE_WINDOWLIST_EXCLUDE_PIDS`를 current emulator instance와 자동 동기화하는 방식으로 다듬는다.
 - 그 다음 `targets -> viewer -> back` 반복 soak을 추가로 돌려 장시간 freeze 재현 여부를 본다.
 
+### 155) 2026-04-07 android endpoint persistence diagnostics and second-selection guard
+Goal
+- Android에서 마지막으로 사용한 `host/videoPort/controlPort`를 다음 실행에도 복원한다.
+- freeze 분석용 diagnostics log file을 남기고, 첫 선택 후 다른 윈도우 재선택 시 viewer 진입을 안정화한다.
+
+Files changed
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/NativeSessionBridge.kt`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/SessionPersistence.kt`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/SessionDiagnosticsLog.kt`
+- `apps/android_direct_client/app/src/main/cpp/native_bridge.cpp`
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Android build:
+  - `D:\remote\remote\tmp\gradle\gradle-8.7\bin\gradle.bat assembleDebug`
+  - 결과: 성공
+- Persistence verify:
+  - app relaunch without extras 기준 screenshot `persist_check.png`
+  - host `192.168.0.76`, ports `43000/43001`이 복원됨
+- Diagnostics log verify:
+  - file path: `/storage/emulated/0/Android/data/com.remote60.androiddirect/files/android_direct_client_session.log`
+  - pulled file: `d:\remote\remote\tmp\android_direct_client_session.log`
+  - log contains:
+    - `app_start`
+    - `connect_tap`
+    - `select_request`
+    - `select_applied`
+    - `viewer_surface_bound`
+    - `video_debug`
+- Second-selection verify:
+  - first viewer screenshot: `select_first.png` (`1 • 1000x575`)
+  - second viewer screenshot: `select_second.png` (`Codex`)
+  - diagnostics log shows second selection path:
+    - `select_request targetId=330458`
+    - `select_applied title=Codex`
+    - `video_debug ... out=18 out=2` progression
+  - short repeat scenario:
+    - `repeat_after_android_fix.png`
+    - same session에서 `viewer -> list -> viewer` 왕복 후 최종 viewer 유지 확인
+- Scope note:
+  - persistence는 `SharedPreferences`로 저장한다.
+  - diagnostics는 `android_direct_client_session.log`에 append하며, viewer freeze 의심 시 `viewer_stall` 이벤트를 남긴다.
+  - list item tap 시 바로 viewer scene으로 들어가지 않고, `window_select_requested`가 실제 `selectedId`에 반영된 뒤 viewer로 전환한다.
+  - target switch 시 `nativeResetVideoStream()`으로 decoder를 초기화해 이전 프레임 잔상/오염을 줄인다.
+
+Next action
+- `REMOTE60_NATIVE_WINDOWLIST_EXCLUDE_PIDS`를 current emulator instance와 자동 동기화하는 방식으로 다듬는다.
+- 그 다음 `targets -> viewer -> back` 반복 soak을 추가로 돌려 장시간 freeze 재현 여부를 본다.
+
 ### 153) 2026-04-06 host utility window filter extension
 Goal
 - recursive freeze와 잘못된 선택을 줄이기 위해 shareable windows 목록에서 helper window를 더 제외한다.
