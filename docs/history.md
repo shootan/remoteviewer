@@ -2593,6 +2593,33 @@ Next action
 - 실기기에서 `viewer -> list` 전환 후 host 트래픽이 실제로 멈추는지 로그/네트워크 지표로 한번 확인한다.
 - saved bitrate/fps auto-apply가 connect 직후 체감 화질에 반영되는지 실기기에서 재확인한다.
 
+### 159) 2026-04-07 host stream-inactive stall guard
+Goal
+- `stream active=false` 상태에서 host가 `capture-input-stall`로 반복 restart하지 않도록 막아 list scene idle 상태를 안정화한다.
+
+Files changed
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Native build:
+  - `cmake --build d:\remote\remote\build-vcpkg-local --target remote60_native_video_host_poc remote60_native_video_client_poc remote60_native_video_client_shared_core_test --config Debug --parallel`
+  - 결과: 성공
+- Shared core test:
+  - `d:\remote\remote\build-vcpkg-local\apps\native_poc\Debug\remote60_native_video_client_shared_core_test.exe`
+  - 결과: `PASS`
+- Runtime restart:
+  - host PID: `61048`
+  - host log: `d:\remote\remote\tmp\android_live_host\host.out.log`
+- Scope note:
+  - `stream active=false`일 때 capture callback stall watchdog과 low-push restart 경로를 함께 건너뛰도록 바꿨다.
+  - list scene idle 상태에서는 host가 stream을 멈춘 채 불필요한 capture session restart를 반복하지 않는다.
+
+Next action
+- 실기기에서 다시 `connect -> windows list -> desktop/window select`를 확인해 control channel 안정성이 실제로 좋아졌는지 본다.
+- 이어서 `viewer -> list` 전환 시 트래픽/host log가 예상대로 quiet 상태로 유지되는지 확인한다.
+
 ### 152) 2026-04-06 host window-capture stall false-positive guard
 Goal
 - static window를 캡처할 때 `callbackFramesPerSec < 10`만으로 freeze로 오판정해 restart하는 문제를 줄인다.

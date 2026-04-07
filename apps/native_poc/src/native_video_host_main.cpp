@@ -3932,7 +3932,8 @@ int main(int argc, char** argv) {
         std::cerr << "[native-video-host] capture session restart failed reason=size-change\n";
       }
     }
-    if (captureSessionReady.load(std::memory_order_acquire)) {
+    if (captureSessionReady.load(std::memory_order_acquire) &&
+        streamControlActive.load(std::memory_order_acquire)) {
       const uint64_t lastCbUs = lastCallbackUs.load(std::memory_order_acquire);
       const uint64_t sessionStartUs = captureSessionStartedUs;
       const uint64_t stallBaseUs = (lastCbUs > 0) ? lastCbUs : sessionStartUs;
@@ -4749,10 +4750,14 @@ int main(int argc, char** argv) {
       queuePushPerSecLatest = queuePushPerSec;
       const uint64_t callbackFramesPerSec = callbackFrames.load(std::memory_order_relaxed);
       const uint64_t idleHoldPerSec =
-          (useH264 && captureSessionReady.load(std::memory_order_acquire) && callbackFramesPerSec == 0) ? 1ULL : 0ULL;
+          (useH264 &&
+           captureSessionReady.load(std::memory_order_acquire) &&
+           streamControlActive.load(std::memory_order_acquire) &&
+           callbackFramesPerSec == 0) ? 1ULL : 0ULL;
       idleHoldTotal += idleHoldPerSec;
       if (useH264 &&
           captureSessionReady.load(std::memory_order_acquire) &&
+          streamControlActive.load(std::memory_order_acquire) &&
           !captureWindowModeActive) {
         const bool warmupDone =
             (captureInputStallWarmupSec == 0 ||
