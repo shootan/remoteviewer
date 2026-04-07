@@ -2294,6 +2294,10 @@ int main(int argc, char** argv) {
                 if (src.minimized) dst.flags |= 0x1u;
                 std::snprintf(dst.title, sizeof(dst.title), "%s", src.title.c_str());
               }
+              std::cout << "[native-video-host][control] window-list seq=" << seq
+                        << " count=" << rsp.itemCount
+                        << " selectedId=" << rsp.selectedWindowId
+                        << "\n";
               return send_all(acceptedSock, &rsp, sizeof(rsp));
             };
             auto send_input_ack = [&](uint32_t seq) -> bool {

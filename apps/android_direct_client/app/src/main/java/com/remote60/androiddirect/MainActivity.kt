@@ -262,6 +262,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         listWindowsButton.setOnClickListener {
             activeTargetTab = TargetTab.WINDOWS
             diagnosticsLog.log("tab_switch", "tab=windows")
+            NativeSessionBridge.nativeRequestWindowList()
             renderStatus()
         }
 
@@ -419,6 +420,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         clearPendingSelection()
         currentScene = UiScene.TARGETS
         resetViewerObservability()
+        NativeSessionBridge.nativeRequestWindowList()
     }
 
     private fun startSelectionTransition(targetId: Long, label: String, tab: TargetTab, origin: String): Boolean {

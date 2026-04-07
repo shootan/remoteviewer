@@ -349,6 +349,18 @@ bool ClientControlScheduler::NextAction(uint64_t nowUs,
     return true;
   }
 
+  PendingStreamStateRequest pendingStreamState{};
+  if (streamState->ConsumePending(&pendingStreamState)) {
+    out->kind = ControlOutboundActionKind::StreamState;
+    out->streamState.header.magic = kMagic;
+    out->streamState.header.type = static_cast<uint16_t>(MessageType::ControlStreamState);
+    out->streamState.header.size = static_cast<uint16_t>(sizeof(out->streamState));
+    out->streamState.seq = pendingStreamState.seq;
+    out->streamState.flags = pendingStreamState.active ? 0x1u : 0u;
+    out->streamState.clientSendQpcUs = nowUs;
+    return true;
+  }
+
   if (windowPanel->TakeListRequest()) {
     out->kind = ControlOutboundActionKind::WindowListRequest;
     out->expectedResponseType = MessageType::ControlWindowList;
@@ -372,18 +384,6 @@ bool ClientControlScheduler::NextAction(uint64_t nowUs,
     out->windowSelect.seq = ++nextWindowSelectSeq_;
     out->windowSelect.windowId = pendingWindowId;
     out->windowSelect.clientSendQpcUs = nowUs;
-    return true;
-  }
-
-  PendingStreamStateRequest pendingStreamState{};
-  if (streamState->ConsumePending(&pendingStreamState)) {
-    out->kind = ControlOutboundActionKind::StreamState;
-    out->streamState.header.magic = kMagic;
-    out->streamState.header.type = static_cast<uint16_t>(MessageType::ControlStreamState);
-    out->streamState.header.size = static_cast<uint16_t>(sizeof(out->streamState));
-    out->streamState.seq = pendingStreamState.seq;
-    out->streamState.flags = pendingStreamState.active ? 0x1u : 0u;
-    out->streamState.clientSendQpcUs = nowUs;
     return true;
   }
 

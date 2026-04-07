@@ -2620,6 +2620,41 @@ Next action
 - 실기기에서 다시 `connect -> windows list -> desktop/window select`를 확인해 control channel 안정성이 실제로 좋아졌는지 본다.
 - 이어서 `viewer -> list` 전환 시 트래픽/host log가 예상대로 quiet 상태로 유지되는지 확인한다.
 
+### 160) 2026-04-07 stream-state ordering and list refresh fix
+Goal
+- 첫 접속 후 window list는 보이지만 window 선택/복귀 뒤 목록이 다시 안 보이던 회귀를 줄인다.
+- `stream active`와 `window select` 제어 순서를 바로잡고, list 복귀 시 window list를 다시 요청해 target scene을 안정화한다.
+
+Files changed
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `apps/native_poc/src/native_video_client_shared_core.cpp`
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Native build:
+  - `cmake --build d:\remote\remote\build-vcpkg-local --target remote60_native_video_host_poc remote60_native_video_client_poc remote60_native_video_client_shared_core_test --config Debug --parallel`
+  - 결과: 성공
+- Shared core test:
+  - `d:\remote\remote\build-vcpkg-local\apps\native_poc\Debug\remote60_native_video_client_shared_core_test.exe`
+  - 결과: `PASS`
+- Android build:
+  - `JAVA_HOME=C:\Program Files\Android\Android Studio\jbr`
+  - `d:\remote\remote\tmp\gradle\gradle-8.7\bin\gradle.bat assembleDebug`
+  - 결과: 성공
+- Runtime restart:
+  - host PID: `54960`
+  - host log: `d:\remote\remote\tmp\android_live_host\host.out.log`
+- Scope note:
+  - control scheduler에서 `stream-state`를 `window list / window select`보다 먼저 보낸다.
+  - Android `LIST` 복귀와 `Windows` 탭 진입 시 `nativeRequestWindowList()`를 다시 보내 목록을 재동기화한다.
+  - host는 `window-list seq=... count=...` 로그를 남겨 이후 재현 시 control/list 경계를 바로 볼 수 있게 했다.
+
+Next action
+- 실기기에서 `connect -> windows list -> select -> LIST -> windows list`를 다시 확인해 회귀가 사라졌는지 본다.
+- 여전히 control TCP가 끊기면, Android diagnostics/logcat을 받아 control disconnect 원인을 추가 추적한다.
+
 ### 152) 2026-04-06 host window-capture stall false-positive guard
 Goal
 - static window를 캡처할 때 `callbackFramesPerSec < 10`만으로 freeze로 오판정해 restart하는 문제를 줄인다.
