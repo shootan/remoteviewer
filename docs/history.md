@@ -2442,6 +2442,73 @@ Next action
 - desktop path capture source 검증을 분리해 `Devices/Desktop` scene 흐름도 안정화한다.
 - 그 다음 `Phase F` 입력 착수 전 gate를 재확인한다.
 
+### 156) 2026-04-07 android selection generation gating and ldplayer fps investigation
+Goal
+- Android target 전환을 `request -> ack -> first-frame -> viewer` 상태기계로 고정해 stale frame 섞임과 재선택 freeze를 줄인다.
+- host/window-select 경로에 stream generation, capture flush, first callback/frame 로그를 넣어 전환 경계를 명확히 한다.
+- LDPlayer에서 보이던 저프레임이 host 송신 병목인지 emulator/client 병목인지 기준선을 잡아 확인한다.
+
+Files changed
+- `apps/android_direct_client/app/src/main/cpp/android_video_decoder.cpp`
+- `apps/android_direct_client/app/src/main/cpp/android_video_decoder.hpp`
+- `apps/android_direct_client/app/src/main/cpp/native_bridge.cpp`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/NativeSessionBridge.kt`
+- `apps/native_poc/src/native_video_client_main.cpp`
+- `apps/native_poc/src/native_video_client_session.cpp`
+- `apps/native_poc/src/native_video_client_session.hpp`
+- `apps/native_poc/src/native_video_client_shared_core.cpp`
+- `apps/native_poc/src/native_video_client_shared_core.hpp`
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `apps/native_poc/src/poc_protocol.hpp`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Native build:
+  - `cmake --build d:\remote\remote\build-vcpkg-local --target remote60_native_video_host_poc remote60_native_video_client_poc --config Debug --parallel`
+  - 결과: 성공
+- Shared core test:
+  - `cmake --build d:\remote\remote\build-vcpkg-local --target remote60_native_video_client_shared_core_test --config Debug --parallel`
+  - `d:\remote\remote\build-vcpkg-local\apps\native_poc\Debug\remote60_native_video_client_shared_core_test.exe`
+  - 결과: `PASS`
+- Android build:
+  - `JAVA_HOME=C:\Program Files\Android\Android Studio\jbr`
+  - `d:\remote\remote\tmp\gradle\gradle-8.7\bin\gradle.bat assembleDebug`
+  - 결과: 성공
+- Windows baseline probe:
+  - host log: `d:\remote\remote\tmp\ld_fps_probe\host.out.log`
+  - client log: `d:\remote\remote\tmp\ld_fps_probe\windows_client.out.log`
+  - `frameGating=off`, `abr=off` 기준 host average:
+    - `callbackFrames ~= 30.71 fps`
+    - `sentFrames ~= 20.00 fps`
+  - same host에서 Windows native client average:
+    - `recvFrames ~= 18.71 fps`
+    - `decodedFrames ~= 14.57 fps`
+- LDPlayer fps investigation:
+  - logcat dump: `d:\remote\remote\tmp\ld_logcat.txt`
+  - prior LDPlayer Android session(`size=1280x720`) sample window:
+    - `13:32:22.031 -> 13:33:46.882`
+    - `in/out delta = 802 / 84.851s`
+    - `Android in/out ~= 9.45 fps`
+  - same day slow/stall sample:
+    - `13:29:33.269 -> 13:31:28.311`
+    - `in/out delta = 58 / 115.042s`
+    - `Android in/out ~= 0.50 fps`
+  - fresh rebuilt APK live rerun은 LDPlayer에서 `connect_tap -> status=connecting -> status=error`로 끝났고, 새 host에는 connect event가 찍히지 않았다.
+  - 결론:
+    - 기존 LDPlayer low-fps 현상은 host가 20fps 안팎으로 보내던 조건에서도 Android emulator 쪽 `in/out`이 9~10fps 수준으로 묶인 로그가 있어, host만의 병목으로 보기 어렵다.
+    - 특히 low-fps 구간에서 `in`과 `out`이 거의 같이 움직여 decoder drop보다 emulator/client-side scheduling 또는 capture/render 환경 영향이 더 커 보인다.
+    - 위 결론은 today log evidence 기반 추론이며, rebuilt app/live rerun은 네트워크 경로 문제 때문에 재확인하지 못했다.
+- Scope note:
+  - Android decoder는 pending local selection generation과 host stream generation이 맞는 프레임만 받도록 바뀌었다.
+  - viewer는 `SWITCHING` scene에서 surface를 먼저 붙이고, first-frame ready generation이 확인될 때만 실제 viewer로 노출된다.
+  - host는 window-select 성공 시 capture pipeline을 flush하고, 새 generation 기준 first callback/frame 로그를 남긴다.
+
+Next action
+- LDPlayer에서 rebuilt APK live rerun이 다시 붙도록 host inbound path(방화벽/포트 경로)를 확인한 뒤, `targets -> viewer -> back` 10회 이상 soak으로 freeze 재현 여부를 다시 본다.
+- `REMOTE60_NATIVE_WINDOWLIST_EXCLUDE_PIDS`를 current Android client instance와 자동 동기화하는 경로를 남은 별도 작업으로 마무리한다.
+
 ### 152) 2026-04-06 host window-capture stall false-positive guard
 Goal
 - static window를 캡처할 때 `callbackFramesPerSec < 10`만으로 freeze로 오판정해 restart하는 문제를 줄인다.

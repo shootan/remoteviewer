@@ -3370,16 +3370,16 @@ int main(int argc, char** argv) {
 
     while (gRunning.load()) {
       MessageHeader header{};
-      if (!recv_all(gSock, &header, sizeof(header))) break;
+      if (!::recv_all(gSock, &header, sizeof(header))) break;
       if (header.magic != remote60::native_poc::kMagic || header.size < sizeof(header)) break;
       const auto msgType = static_cast<MessageType>(header.type);
 
       if (msgType == MessageType::RawFrameBgra && header.size == sizeof(RawFrameHeader)) {
         RawFrameHeader h{};
         h.header = header;
-        if (!recv_all(gSock, &h.seq, sizeof(h) - sizeof(MessageHeader))) break;
+        if (!::recv_all(gSock, &h.seq, sizeof(h) - sizeof(MessageHeader))) break;
         std::vector<uint8_t> payload(h.payloadSize);
-        if (!recv_all(gSock, payload.data(), payload.size())) break;
+        if (!::recv_all(gSock, payload.data(), payload.size())) break;
 
         if (!useRaw) {
           ++skippedQueued;
@@ -3498,9 +3498,9 @@ int main(int argc, char** argv) {
       } else if (msgType == MessageType::EncodedFrameH264 && header.size == sizeof(EncodedFrameHeader)) {
         EncodedFrameHeader h{};
         h.header = header;
-        if (!recv_all(gSock, &h.seq, sizeof(h) - sizeof(MessageHeader))) break;
+        if (!::recv_all(gSock, &h.seq, sizeof(h) - sizeof(MessageHeader))) break;
         std::vector<uint8_t> payload(h.payloadSize);
-        if (!recv_all(gSock, payload.data(), payload.size())) break;
+        if (!::recv_all(gSock, payload.data(), payload.size())) break;
         const uint64_t packetNowUs = qpc_now_us();
         if (!process_h264_frame(h, &payload, packetNowUs)) break;
       } else {

@@ -1890,6 +1890,7 @@ struct FrameState {
   uint32_t width = 0;
   uint32_t height = 0;
   uint32_t stride = 0;
+  uint64_t streamGeneration = 0;
   uint64_t captureUs = 0;
   uint64_t callbackUs = 0;
   uint64_t callbackIntervalUs = 0;
@@ -2191,6 +2192,7 @@ int main(int argc, char** argv) {
   std::string hostCaptureTargetProcess = "monitor";
   std::string hostCaptureTargetTitle;
   std::atomic<uint64_t> selectedWindowIdState{0};
+  std::atomic<uint64_t> captureStreamGenerationState{1};
   std::atomic<bool> windowSelectionLocked{false};
   std::atomic<uint32_t> inputDomainW{0};
   std::atomic<uint32_t> inputDomainH{0};
@@ -2217,6 +2219,7 @@ int main(int argc, char** argv) {
     uint64_t requestedWindowId = 0;
     uint32_t responseFlags = 0;
     uint64_t responseWindowId = 0;
+    uint64_t responseStreamGeneration = 0;
     std::string responseReason;
     std::string responseTitle;
   } windowSelectionTxn;
@@ -2480,6 +2483,7 @@ int main(int argc, char** argv) {
                 rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
                 rsp.seq = req.seq;
                 rsp.windowId = req.windowId;
+                rsp.streamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
                 rsp.hostSendQpcUs = qpc_now_us();
 
                 if (windowSelectionLocked.load(std::memory_order_acquire)) {
@@ -2497,6 +2501,7 @@ int main(int argc, char** argv) {
                     windowSelectionTxn.requestedWindowId = req.windowId;
                     windowSelectionTxn.responseFlags = 0;
                     windowSelectionTxn.responseWindowId = req.windowId;
+                    windowSelectionTxn.responseStreamGeneration = 0;
                     windowSelectionTxn.responseReason.clear();
                     windowSelectionTxn.responseTitle.clear();
                   }
@@ -2508,6 +2513,7 @@ int main(int argc, char** argv) {
                   });
                   rsp.flags = windowSelectionTxn.responseFlags;
                   rsp.windowId = windowSelectionTxn.responseWindowId;
+                  rsp.streamGeneration = windowSelectionTxn.responseStreamGeneration;
                   rsp.hostSendQpcUs = qpc_now_us();
                   std::snprintf(rsp.reason, sizeof(rsp.reason), "%s", windowSelectionTxn.responseReason.c_str());
                   std::snprintf(rsp.title, sizeof(rsp.title), "%s", windowSelectionTxn.responseTitle.c_str());
@@ -2982,6 +2988,26 @@ int main(int argc, char** argv) {
   std::atomic<uint64_t> queueDepthMax{0};
   std::atomic<uint64_t> lastCallbackUs{0};
   std::atomic<uint64_t> lastCaptureUsForInterval{0};
+  std::atomic<uint64_t> firstCallbackLoggedGeneration{0};
+  auto describe_active_capture_target = [&]() -> std::string {
+    const uint64_t targetHwnd = hostCaptureTargetHwnd.load(std::memory_order_acquire);
+    const uint32_t targetPid = hostCaptureTargetPid.load(std::memory_order_acquire);
+    std::string targetProcess = "monitor";
+    std::string targetTitle;
+    {
+      std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
+      targetProcess = hostCaptureTargetProcess;
+      targetTitle = hostCaptureTargetTitle;
+    }
+    std::ostringstream oss;
+    oss << " streamGen=" << captureStreamGenerationState.load(std::memory_order_acquire)
+        << " selectedId=" << selectedWindowIdState.load(std::memory_order_acquire)
+        << " targetHwnd=0x" << std::hex << targetHwnd << std::dec
+        << " pid=" << targetPid
+        << " process=" << targetProcess
+        << " title=" << (targetTitle.empty() ? "<empty>" : targetTitle);
+    return oss.str();
+  };
 
   auto attach_frame_arrived = [&]() {
     token = pool.FrameArrived([&](Direct3D11CaptureFramePool const& sender,
@@ -3104,6 +3130,7 @@ int main(int argc, char** argv) {
         }
         lastCallbackUs.store(callbackUs, std::memory_order_release);
         lastCaptureUsForInterval.store(sourceCaptureUs, std::memory_order_release);
+        const uint64_t streamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
         uint64_t currentVersion = 0;
         {
           std::lock_guard<std::mutex> lk(frame.mu);
@@ -3111,6 +3138,7 @@ int main(int argc, char** argv) {
           frame.width = frameW;
           frame.height = frameH;
           frame.stride = stride;
+          frame.streamGeneration = streamGeneration;
           frame.captureUs = sourceCaptureUs;
           frame.callbackUs = callbackUs;
           frame.captureAgeAtCallbackUs = captureAgeAtCallbackUs;
@@ -3127,6 +3155,17 @@ int main(int argc, char** argv) {
         update_u64_max(queueDepthMax, depthNow);
         ++queuePushCount;
         callbackFrames += 1;
+        uint64_t loggedGeneration = firstCallbackLoggedGeneration.load(std::memory_order_acquire);
+        if (streamGeneration != 0 && loggedGeneration != streamGeneration &&
+            firstCallbackLoggedGeneration.compare_exchange_strong(
+                loggedGeneration, streamGeneration,
+                std::memory_order_acq_rel, std::memory_order_acquire)) {
+          std::cout << "[native-video-host] capture-switch first-callback"
+                    << describe_active_capture_target()
+                    << " callbackUs=" << callbackUs
+                    << " captureUs=" << sourceCaptureUs
+                    << "\n";
+        }
         frame.cv.notify_one();
       } catch (...) {
       }
@@ -3275,6 +3314,7 @@ int main(int argc, char** argv) {
   uint64_t frameGatingChangePermilleLast = 1000;
   uint64_t frameGatingChangePermilleSum = 0;
   uint64_t frameGatingChangePermilleCount = 0;
+  uint64_t firstSentLoggedGeneration = 0;
   auto effective_queue_wait_timeout_us = [&]() -> uint64_t {
     if (queueWaitTimeoutUsOverride > 0) {
       return std::max<uint64_t>(kQueueWaitTimeoutUsMin, queueWaitTimeoutUsOverride);
@@ -3384,12 +3424,68 @@ int main(int argc, char** argv) {
     }
     return false;
   };
+  auto flush_capture_pipeline_state = [&](const char* reason) {
+    frameGatingRefPayload.reset();
+    frameGatingRefW = 0;
+    frameGatingRefH = 0;
+    frameGatingRefStride = 0;
+    frameGatingStaticStreak = 0;
+    frameGatingMotionStreak = 0;
+    frameGatingStaticMode = false;
+    frameGatingLastSentUs = 0;
+    firstSentLoggedGeneration = 0;
+    firstCallbackLoggedGeneration.store(0, std::memory_order_release);
+
+    uint64_t flushedVersion = 0;
+    {
+      std::lock_guard<std::mutex> lk(frame.mu);
+      frame.payload.reset();
+      frame.width = 0;
+      frame.height = 0;
+      frame.stride = 0;
+      frame.streamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
+      frame.captureUs = 0;
+      frame.callbackUs = 0;
+      frame.callbackIntervalUs = 0;
+      frame.captureAgeAtCallbackUs = 0;
+      frame.captureClockSkewUs = 0;
+      frame.queuePushUs = 0;
+      frame.captureIntervalUs = 0;
+      frame.seq += 1;
+      frame.version += 1;
+      flushedVersion = frame.version;
+      lastVersionSent = flushedVersion;
+    }
+    lastPopFrameVersion.store(flushedVersion, std::memory_order_release);
+    frame.cv.notify_all();
+    std::cout << "[native-video-host] capture-pipeline-flushed reason="
+              << (reason ? reason : "unknown")
+              << describe_active_capture_target()
+              << " version=" << flushedVersion
+              << "\n";
+  };
+  auto log_first_sent_generation = [&](const char* path, uint64_t streamGeneration, uint64_t sendStartUs,
+                                       uint64_t captureStampUs, uint32_t width, uint32_t height) {
+    if (streamGeneration == 0 || firstSentLoggedGeneration == streamGeneration) return;
+    firstSentLoggedGeneration = streamGeneration;
+    std::cout << "[native-video-host] capture-switch first-frame"
+              << " path=" << (path ? path : "unknown")
+              << describe_active_capture_target()
+              << " sendQpcUs=" << sendStartUs
+              << " captureQpcUs=" << captureStampUs
+              << " size=" << width << "x" << height
+              << "\n";
+  };
 
   auto apply_selected_window_capture = [&](uint64_t requestedWindowId, uint64_t nowUs,
                                            uint32_t* outFlags, uint64_t* outWindowId,
+                                           uint64_t* outStreamGeneration,
                                            std::string* outReason, std::string* outTitle) -> bool {
     if (outFlags) *outFlags = 0;
     if (outWindowId) *outWindowId = requestedWindowId;
+    if (outStreamGeneration) {
+      *outStreamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
+    }
     if (outReason) outReason->clear();
     if (outTitle) outTitle->clear();
     if (windowSelectionLocked.load(std::memory_order_acquire)) {
@@ -3406,6 +3502,7 @@ int main(int argc, char** argv) {
     const auto prevCaptureWindowCriteria = captureWindowCriteria;
     const auto prevCaptureWindowInfo = captureWindowInfo;
     const uint64_t prevSelectedWindowId = selectedWindowIdState.load(std::memory_order_acquire);
+    const uint64_t prevCaptureStreamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
     const uint32_t prevHostCaptureFlags = hostCaptureTargetFlags.load(std::memory_order_acquire);
     const uint32_t prevHostCapturePid = hostCaptureTargetPid.load(std::memory_order_acquire);
     const uint64_t prevHostCaptureHwnd = hostCaptureTargetHwnd.load(std::memory_order_acquire);
@@ -3425,6 +3522,7 @@ int main(int argc, char** argv) {
       captureWindowCriteria = prevCaptureWindowCriteria;
       captureWindowInfo = prevCaptureWindowInfo;
       selectedWindowIdState.store(prevSelectedWindowId, std::memory_order_release);
+      captureStreamGenerationState.store(prevCaptureStreamGeneration, std::memory_order_release);
       hostCaptureTargetFlags.store(prevHostCaptureFlags, std::memory_order_release);
       hostCaptureTargetPid.store(prevHostCapturePid, std::memory_order_release);
       hostCaptureTargetHwnd.store(prevHostCaptureHwnd, std::memory_order_release);
@@ -3448,6 +3546,7 @@ int main(int argc, char** argv) {
     uint32_t nextPid = 0;
     uint64_t nextHwnd = 0;
     uint32_t nextFlags = 0;
+    const uint64_t nextCaptureStreamGeneration = prevCaptureStreamGeneration + 1;
 
     if (requestedWindowId == 0) {
       nextItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(window-select-desktop)");
@@ -3491,6 +3590,7 @@ int main(int argc, char** argv) {
     captureWindowCriteria = nextCaptureWindowCriteria;
     captureWindowInfo = nextCaptureWindowInfo;
     selectedWindowIdState.store(nextSelectedWindowId, std::memory_order_release);
+    captureStreamGenerationState.store(nextCaptureStreamGeneration, std::memory_order_release);
     hostCaptureTargetFlags.store(nextFlags, std::memory_order_release);
     hostCaptureTargetPid.store(nextPid, std::memory_order_release);
     hostCaptureTargetHwnd.store(nextHwnd, std::memory_order_release);
@@ -3514,9 +3614,11 @@ int main(int argc, char** argv) {
     resetHostTimelineAnchors();
     forceKeyNext = true;
     ++captureRestartCount;
+    flush_capture_pipeline_state("window-select");
 
     if (outFlags) *outFlags = 0x1u;
     if (outWindowId) *outWindowId = nextSelectedWindowId;
+    if (outStreamGeneration) *outStreamGeneration = nextCaptureStreamGeneration;
     if (outReason) *outReason = nextReason;
     if (outTitle) *outTitle = nextTitle;
     return true;
@@ -3570,14 +3672,17 @@ int main(int argc, char** argv) {
       if (hasWindowSelectRequest) {
         uint32_t responseFlags = 0;
         uint64_t responseWindowId = requestedWindowId;
+        uint64_t responseStreamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
         std::string responseReason;
         std::string responseTitle;
         const bool applied = apply_selected_window_capture(
-            requestedWindowId, nowUs, &responseFlags, &responseWindowId, &responseReason, &responseTitle);
+            requestedWindowId, nowUs, &responseFlags, &responseWindowId, &responseStreamGeneration,
+            &responseReason, &responseTitle);
         {
           std::lock_guard<std::mutex> lk(windowSelectionTxn.mu);
           windowSelectionTxn.responseFlags = responseFlags;
           windowSelectionTxn.responseWindowId = responseWindowId;
+          windowSelectionTxn.responseStreamGeneration = responseStreamGeneration;
           windowSelectionTxn.responseReason = responseReason;
           windowSelectionTxn.responseTitle = responseTitle;
           windowSelectionTxn.completed = true;
@@ -3588,6 +3693,7 @@ int main(int argc, char** argv) {
                   << " requestedId=" << requestedWindowId
                   << " applied=" << (applied ? 1 : 0)
                   << " selectedId=" << responseWindowId
+                  << " streamGen=" << responseStreamGeneration
                   << " reason=" << (responseReason.empty() ? "none" : responseReason)
                   << " title=" << (responseTitle.empty() ? "<empty>" : responseTitle)
                   << "\n";
@@ -3835,6 +3941,7 @@ int main(int argc, char** argv) {
     uint32_t w = 0;
     uint32_t h = 0;
     uint32_t stride = 0;
+    uint64_t streamGeneration = 0;
     uint64_t captureUs = 0;
     uint64_t callbackUs = 0;
     uint64_t queuePushUs = 0;
@@ -3868,6 +3975,7 @@ int main(int argc, char** argv) {
       w = frame.width;
       h = frame.height;
       stride = frame.stride;
+      streamGeneration = frame.streamGeneration;
       captureUs = frame.captureUs;
       callbackUs = frame.callbackUs;
       callbackIntervalUs = frame.callbackIntervalUs;
@@ -3970,6 +4078,7 @@ int main(int argc, char** argv) {
       hdr.height = h;
       hdr.stride = stride;
       hdr.payloadSize = static_cast<uint32_t>(payload->size());
+      hdr.streamGeneration = streamGeneration;
       hdr.captureQpcUs = captureStampUs;
       hdr.encodeStartQpcUs = captureStampUs;
       hdr.encodeEndQpcUs = captureStampUs;
@@ -3997,6 +4106,7 @@ int main(int argc, char** argv) {
       const uint64_t sendCallCount = sendPathStats.headerCallCount + sendPathStats.payloadCallCount;
       if (sentOk) {
         lastSendStartUs = sendStartUs;
+        log_first_sent_generation("raw", streamGeneration, sendStartUs, hdr.captureQpcUs, hdr.width, hdr.height);
         if (frameGatingEnabled && useH264 && payload && !payload->empty()) {
           frameGatingLastSentUs = sendStartUs;
           frameGatingRefPayload = payload;
@@ -4276,6 +4386,7 @@ int main(int argc, char** argv) {
         hdr.height = activeEncodeH;
         hdr.payloadSize = static_cast<uint32_t>(au.bytes.size());
         hdr.flags = (au.keyFrame || forceKeyFrame || forceKeyNext) ? 1u : 0u;
+        hdr.streamGeneration = streamGeneration;
         hdr.captureQpcUs = encodeInputUs;
         hdr.encodeStartQpcUs = encodeStartUs;
         hdr.encodeEndQpcUs = encodeEndUs;
@@ -4320,6 +4431,7 @@ int main(int argc, char** argv) {
             udpHdr.height = hdr.height;
             udpHdr.stride = 0;
             udpHdr.payloadSize = hdr.payloadSize;
+            udpHdr.streamGeneration = hdr.streamGeneration;
             udpHdr.captureQpcUs = hdr.captureQpcUs;
             udpHdr.encodeStartQpcUs = hdr.encodeStartQpcUs;
             udpHdr.encodeEndQpcUs = hdr.encodeEndQpcUs;
@@ -4333,6 +4445,9 @@ int main(int argc, char** argv) {
         const uint64_t sendCallCount = sendPathStats.headerCallCount + sendPathStats.payloadCallCount;
         if (sentOk) {
           lastSendStartUs = sendStartUs;
+          log_first_sent_generation(
+              transport == VideoTransport::Tcp ? "h264-tcp" : "h264-udp",
+              streamGeneration, sendStartUs, hdr.captureQpcUs, hdr.width, hdr.height);
           if (transport == VideoTransport::Udp) {
             ++udpTxFrames;
             udpTxChunks += sendPathStats.payloadChunkCount;

@@ -117,6 +117,26 @@ void AndroidVideoDecoderSink::SetSurface(JNIEnv* env, jobject surface) {
 void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& frame) {
   std::lock_guard<std::mutex> lock(mu_);
 
+  if (pendingSelectionGeneration_ != 0 && (awaitingSelectionAck_ || expectedStreamGeneration_ == 0)) {
+    ++staleFrameDropCount_;
+    return;
+  }
+  if (expectedStreamGeneration_ != 0 && frame.header.streamGeneration != expectedStreamGeneration_) {
+    ++staleFrameDropCount_;
+    if ((staleFrameDropCount_ % 30u) == 1u) {
+      char line[192];
+      std::snprintf(line, sizeof(line),
+                    "dropped stale frame streamGen=%llu expected=%llu pendingSel=%llu drops=%llu",
+                    static_cast<unsigned long long>(frame.header.streamGeneration),
+                    static_cast<unsigned long long>(expectedStreamGeneration_),
+                    static_cast<unsigned long long>(pendingSelectionGeneration_),
+                    static_cast<unsigned long long>(staleFrameDropCount_));
+      log_info(line);
+    }
+    return;
+  }
+
+  latestInputStreamGeneration_ = frame.header.streamGeneration;
   configuredWidth_ = frame.header.width;
   configuredHeight_ = frame.header.height;
   const bool codecConfigUpdated = UpdateCodecConfigLocked(frame.payload);
@@ -174,8 +194,89 @@ void AndroidVideoDecoderSink::OnVideoStreamReset() {
   outputHeight_ = 0;
   inputFrameCount_ = 0;
   outputFrameCount_ = 0;
+  pendingSelectionGeneration_ = 0;
+  readySelectionGeneration_ = 0;
+  expectedStreamGeneration_ = 0;
+  latestInputStreamGeneration_ = 0;
+  latestOutputStreamGeneration_ = 0;
+  lastOutputPresentationUs_ = 0;
+  staleFrameDropCount_ = 0;
+  awaitingSelectionAck_ = false;
   csd0_.clear();
   csd1_.clear();
+}
+
+void AndroidVideoDecoderSink::OnWindowSelectionControlResult(
+    const remote60::native_poc::ControlWindowSelectedMessage& msg) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if ((msg.flags & 0x1u) != 0 && pendingSelectionGeneration_ != 0) {
+    expectedStreamGeneration_ = msg.streamGeneration;
+    awaitingSelectionAck_ = false;
+    char line[192];
+    std::snprintf(line, sizeof(line),
+                  "selection ack localGen=%llu streamGen=%llu hostSendQpcUs=%llu",
+                  static_cast<unsigned long long>(pendingSelectionGeneration_),
+                  static_cast<unsigned long long>(expectedStreamGeneration_),
+                  static_cast<unsigned long long>(msg.hostSendQpcUs));
+    log_info(line);
+    return;
+  }
+
+  awaitingSelectionAck_ = false;
+  expectedStreamGeneration_ = 0;
+  char line[160];
+  std::snprintf(line, sizeof(line),
+                "selection ack failed localGen=%llu flags=%u",
+                static_cast<unsigned long long>(pendingSelectionGeneration_),
+                msg.flags);
+  log_info(line);
+}
+
+void AndroidVideoDecoderSink::PrepareForWindowSelection(uint64_t selectionGeneration) {
+  std::lock_guard<std::mutex> lock(mu_);
+  ResetCodecLocked();
+  configuredWidth_ = 0;
+  configuredHeight_ = 0;
+  outputWidth_ = 0;
+  outputHeight_ = 0;
+  inputFrameCount_ = 0;
+  outputFrameCount_ = 0;
+  pendingSelectionGeneration_ = selectionGeneration;
+  expectedStreamGeneration_ = 0;
+  latestInputStreamGeneration_ = 0;
+  latestOutputStreamGeneration_ = 0;
+  lastOutputPresentationUs_ = 0;
+  staleFrameDropCount_ = 0;
+  awaitingSelectionAck_ = true;
+  csd0_.clear();
+  csd1_.clear();
+
+  char line[160];
+  std::snprintf(line, sizeof(line), "selection prepare localGen=%llu",
+                static_cast<unsigned long long>(pendingSelectionGeneration_));
+  log_info(line);
+}
+
+void AndroidVideoDecoderSink::AbortWindowSelection() {
+  std::lock_guard<std::mutex> lock(mu_);
+  ResetCodecLocked();
+  configuredWidth_ = 0;
+  configuredHeight_ = 0;
+  outputWidth_ = 0;
+  outputHeight_ = 0;
+  inputFrameCount_ = 0;
+  outputFrameCount_ = 0;
+  pendingSelectionGeneration_ = 0;
+  readySelectionGeneration_ = 0;
+  expectedStreamGeneration_ = 0;
+  latestInputStreamGeneration_ = 0;
+  latestOutputStreamGeneration_ = 0;
+  lastOutputPresentationUs_ = 0;
+  staleFrameDropCount_ = 0;
+  awaitingSelectionAck_ = false;
+  csd0_.clear();
+  csd1_.clear();
+  log_info("selection aborted");
 }
 
 std::string AndroidVideoDecoderSink::DebugStatus() {
@@ -189,6 +290,14 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
   status += " csd=" + std::to_string(csd0_.empty() ? 0 : 1) + "/" + std::to_string(csd1_.empty() ? 0 : 1);
   status += " in=" + std::to_string(inputFrameCount_);
   status += " out=" + std::to_string(outputFrameCount_);
+  status += " sel=" + std::to_string(pendingSelectionGeneration_);
+  status += " readySel=" + std::to_string(readySelectionGeneration_);
+  status += " expectGen=" + std::to_string(expectedStreamGeneration_);
+  status += " inGen=" + std::to_string(latestInputStreamGeneration_);
+  status += " outGen=" + std::to_string(latestOutputStreamGeneration_);
+  status += " stale=" + std::to_string(staleFrameDropCount_);
+  status += " lastOutUs=" + std::to_string(lastOutputPresentationUs_);
+  status += " awaitingAck=" + std::to_string(awaitingSelectionAck_ ? 1 : 0);
   return status;
 }
 
@@ -197,6 +306,16 @@ uint64_t AndroidVideoDecoderSink::VideoSizePacked() {
   const uint32_t width = outputWidth_ > 0 ? outputWidth_ : configuredWidth_;
   const uint32_t height = outputHeight_ > 0 ? outputHeight_ : configuredHeight_;
   return (static_cast<uint64_t>(width) << 32u) | static_cast<uint64_t>(height);
+}
+
+uint64_t AndroidVideoDecoderSink::ReadySelectionGeneration() {
+  std::lock_guard<std::mutex> lock(mu_);
+  return readySelectionGeneration_;
+}
+
+uint64_t AndroidVideoDecoderSink::LastOutputPresentationUs() {
+  std::lock_guard<std::mutex> lock(mu_);
+  return lastOutputPresentationUs_;
 }
 
 bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height) {
@@ -335,8 +454,23 @@ void AndroidVideoDecoderSink::DrainOutputLocked() {
   for (;;) {
     const ssize_t outputIndex = AMediaCodec_dequeueOutputBuffer(codec_, &info, 0);
     if (outputIndex >= 0) {
+      lastOutputPresentationUs_ =
+          (info.presentationTimeUs > 0) ? static_cast<uint64_t>(info.presentationTimeUs) : 0;
+      latestOutputStreamGeneration_ = expectedStreamGeneration_;
       AMediaCodec_releaseOutputBuffer(codec_, outputIndex, true);
       ++outputFrameCount_;
+      if (pendingSelectionGeneration_ != 0 &&
+          readySelectionGeneration_ != pendingSelectionGeneration_) {
+        readySelectionGeneration_ = pendingSelectionGeneration_;
+        char line[192];
+        std::snprintf(line, sizeof(line),
+                      "selection first output localGen=%llu streamGen=%llu ptsUs=%llu out=%llu",
+                      static_cast<unsigned long long>(readySelectionGeneration_),
+                      static_cast<unsigned long long>(latestOutputStreamGeneration_),
+                      static_cast<unsigned long long>(lastOutputPresentationUs_),
+                      static_cast<unsigned long long>(outputFrameCount_));
+        log_info(line);
+      }
       if ((outputFrameCount_ % 30) == 1) {
         char line[128];
         std::snprintf(line, sizeof(line), "released output frame count=%llu flags=%u",

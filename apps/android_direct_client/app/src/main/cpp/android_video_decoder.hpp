@@ -21,8 +21,14 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   void SetSurface(JNIEnv* env, jobject surface);
   void OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& frame) override;
   void OnVideoStreamReset() override;
+  void OnWindowSelectionControlResult(
+      const remote60::native_poc::ControlWindowSelectedMessage& msg) override;
+  void PrepareForWindowSelection(uint64_t selectionGeneration);
+  void AbortWindowSelection();
   std::string DebugStatus();
   uint64_t VideoSizePacked();
+  uint64_t ReadySelectionGeneration();
+  uint64_t LastOutputPresentationUs();
 
  private:
   bool EnsureCodecLocked(uint32_t width, uint32_t height);
@@ -41,6 +47,14 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint32_t outputHeight_ = 0;
   uint64_t inputFrameCount_ = 0;
   uint64_t outputFrameCount_ = 0;
+  uint64_t pendingSelectionGeneration_ = 0;
+  uint64_t readySelectionGeneration_ = 0;
+  uint64_t expectedStreamGeneration_ = 0;
+  uint64_t latestInputStreamGeneration_ = 0;
+  uint64_t latestOutputStreamGeneration_ = 0;
+  uint64_t lastOutputPresentationUs_ = 0;
+  uint64_t staleFrameDropCount_ = 0;
+  bool awaitingSelectionAck_ = false;
   std::vector<uint8_t> csd0_;
   std::vector<uint8_t> csd1_;
 };

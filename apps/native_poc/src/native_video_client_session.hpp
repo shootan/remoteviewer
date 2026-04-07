@@ -16,6 +16,7 @@ class ClientEncodedFrameSink {
   virtual ~ClientEncodedFrameSink() = default;
   virtual void OnEncodedH264Frame(UdpH264AssembledFrame&& frame) = 0;
   virtual void OnVideoStreamReset() = 0;
+  virtual void OnWindowSelectionControlResult(const ControlWindowSelectedMessage& /* msg */) {}
 };
 
 enum class ClientSessionState : uint8_t {

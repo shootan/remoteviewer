@@ -14,6 +14,10 @@ object NativeSessionBridge {
     external fun nativeGetLastError(): String
     external fun nativeGetVideoDebugStatus(): String
     external fun nativeGetVideoSizePacked(): Long
+    external fun nativePrepareVideoSwitch(selectionGeneration: Long)
+    external fun nativeAbortVideoSwitch()
+    external fun nativeGetReadySelectionGeneration(): Long
+    external fun nativeGetLastOutputPresentationUs(): Long
     external fun nativeRequestWindowList(): Boolean
     external fun nativeSelectWindow(windowId: Long): Boolean
     external fun nativeSelectDesktopMode(): Boolean

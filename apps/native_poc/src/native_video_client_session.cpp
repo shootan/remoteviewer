@@ -257,6 +257,9 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
         }
         case TcpControlResponseKind::WindowSelected: {
           windowPanel_.ApplyWindowSelected(response.windowSelected);
+          if (encodedFrameSink_) {
+            encodedFrameSink_->OnWindowSelectionControlResult(response.windowSelected);
+          }
           const auto panelSnapshot = windowPanel_.Snapshot();
           std::lock_guard<std::mutex> lock(mu_);
           SyncWindowPanelSnapshotLocked(panelSnapshot);

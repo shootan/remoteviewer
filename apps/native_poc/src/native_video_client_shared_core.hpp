@@ -233,6 +233,11 @@ struct WindowPanelSnapshot {
   std::string selectedTitle = "desktop";
   bool selectionLocked = false;
   std::string status = "waiting_control";
+  uint32_t lastSelectSeq = 0;
+  bool lastSelectOk = false;
+  uint64_t lastSelectWindowId = 0;
+  uint64_t lastSelectStreamGeneration = 0;
+  uint64_t lastSelectHostSendQpcUs = 0;
   int scrollIndex = 0;
 };
 

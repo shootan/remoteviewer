@@ -467,6 +467,7 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* dat
     assemblingHeader_.width = packet.width;
     assemblingHeader_.height = packet.height;
     assemblingHeader_.flags = (packet.flags & 0x1u) ? 1u : 0u;
+    assemblingHeader_.streamGeneration = packet.streamGeneration;
     assemblingHeader_.captureQpcUs = packet.captureQpcUs;
     assemblingHeader_.encodeStartQpcUs = packet.encodeStartQpcUs;
     assemblingHeader_.encodeEndQpcUs = packet.encodeEndQpcUs;
@@ -603,6 +604,11 @@ WindowSelectApplyResult WindowPanelStateModel::ApplyWindowSelected(const Control
   const bool ok = ((msg.flags & 0x1u) != 0);
   const bool locked = ((msg.flags & 0x2u) != 0);
   state_.selectionLocked = state_.selectionLocked || locked;
+  state_.lastSelectSeq = msg.seq;
+  state_.lastSelectOk = ok;
+  state_.lastSelectWindowId = msg.windowId;
+  state_.lastSelectStreamGeneration = msg.streamGeneration;
+  state_.lastSelectHostSendQpcUs = msg.hostSendQpcUs;
   const std::string reason = fixed_cstr_to_string(msg.reason, sizeof(msg.reason));
   const std::string title = fixed_cstr_to_string(msg.title, sizeof(msg.title));
   if (ok) {
@@ -617,9 +623,11 @@ WindowSelectApplyResult WindowPanelStateModel::ApplyWindowSelected(const Control
   oss << "[native-video-client][control] window-selected seq=" << msg.seq
       << " ok=" << (ok ? 1 : 0)
       << " windowId=" << msg.windowId
+      << " streamGen=" << msg.streamGeneration
       << " reason=" << (reason.empty() ? "none" : reason)
       << " title=" << (title.empty() ? "<empty>" : title)
-      << " locked=" << (locked ? 1 : 0);
+      << " locked=" << (locked ? 1 : 0)
+      << " hostSendQpcUs=" << msg.hostSendQpcUs;
   result.logLine = oss.str();
   result.ok = ok;
   return result;

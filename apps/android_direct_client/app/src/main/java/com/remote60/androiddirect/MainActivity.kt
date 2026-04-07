@@ -27,12 +27,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private enum class UiScene {
         CONNECT,
         TARGETS,
+        SWITCHING,
         VIEWER,
     }
 
     private enum class TargetTab {
         WINDOWS,
         DEVICES,
+    }
+
+    private enum class SelectionStage {
+        IDLE,
+        REQUESTING,
+        WAITING_FIRST_FRAME,
     }
 
     private data class WindowPanelItem(
@@ -48,6 +55,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val selectedTitle: String,
         val selectionLocked: Boolean,
         val status: String,
+        val lastSelectSeq: Int,
+        val lastSelectOk: Boolean,
+        val lastSelectWindowId: Long,
+        val lastSelectStreamGeneration: Long,
+        val lastSelectHostSendQpcUs: Long,
         val items: List<WindowPanelItem>,
     ) {
         companion object {
@@ -56,6 +68,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 selectedTitle = "desktop",
                 selectionLocked = false,
                 status = "waiting_control",
+                lastSelectSeq = 0,
+                lastSelectOk = false,
+                lastSelectWindowId = 0L,
+                lastSelectStreamGeneration = 0L,
+                lastSelectHostSendQpcUs = 0L,
                 items = emptyList(),
             )
         }
@@ -87,8 +104,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var currentScene = UiScene.CONNECT
     private var activeTargetTab = TargetTab.WINDOWS
     private var connectFlowActive = false
+    private var selectionStage = SelectionStage.IDLE
+    private var selectionGenerationCounter = 0L
     private var pendingSelectionId: Long? = null
     private var pendingSelectionLabel = ""
+    private var pendingSelectionTab = TargetTab.WINDOWS
+    private var pendingSelectionGeneration = 0L
+    private var pendingSelectionStartedAtMs = 0L
+    private var pendingSelectionAckLogged = false
     private var lastLoggedScene = UiScene.CONNECT
     private var lastLoggedStatus = ""
     private var lastLoggedPanelStatus = ""
@@ -96,6 +119,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var lastViewerOutCount = -1
     private var lastViewerOutChangeAtMs = 0L
     private var lastViewerStallLogAtMs = 0L
+    private var lastViewerRecoveryTargetId = Long.MIN_VALUE
+    private var lastViewerRecoveryAtMs = 0L
+    private var lastViewerRecoveryAttempts = 0
     private var videoSurface: Surface? = null
     private var videoWidth = 0
     private var videoHeight = 0
@@ -149,24 +175,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         targetListView.setOnItemClickListener { _, _, position, _ ->
             if (position < 0 || position >= targetListIds.size) return@setOnItemClickListener
             val targetId = targetListIds[position]
-            NativeSessionBridge.nativeResetVideoStream()
-            videoWidth = 0
-            videoHeight = 0
-            lastViewerOutCount = -1
-            lastViewerOutChangeAtMs = 0L
-            lastViewerStallLogAtMs = 0L
-            val ok = when (activeTargetTab) {
-                TargetTab.WINDOWS -> NativeSessionBridge.nativeSelectWindow(targetId)
-                TargetTab.DEVICES -> NativeSessionBridge.nativeSelectDesktopMode()
-            }
-            if (!ok) {
-                diagnosticsLog.log("select_request_failed", "targetId=$targetId tab=$activeTargetTab")
-                renderStatus()
-                return@setOnItemClickListener
-            }
-            pendingSelectionId = targetId
-            pendingSelectionLabel = targetListLabels[position]
-            diagnosticsLog.log("select_request", "targetId=$targetId label=$pendingSelectionLabel tab=$activeTargetTab")
+            startSelectionTransition(targetId, targetListLabels[position], activeTargetTab, "tap")
             renderStatus()
         }
 
@@ -194,8 +203,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             val ok = NativeSessionBridge.nativeConnect(host, videoPort, controlPort)
             if (ok) {
                 connectFlowActive = true
-                pendingSelectionId = null
-                pendingSelectionLabel = ""
+                clearPendingSelection()
                 currentScene = UiScene.TARGETS
                 NativeSessionBridge.nativeRequestWindowList()
             } else {
@@ -208,8 +216,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             diagnosticsLog.log("disconnect_tap", "scene=$currentScene")
             NativeSessionBridge.nativeDisconnect()
             connectFlowActive = false
-            pendingSelectionId = null
-            pendingSelectionLabel = ""
+            clearPendingSelection()
+            resetViewerObservability()
             currentScene = UiScene.CONNECT
             renderStatus()
         }
@@ -233,9 +241,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
 
         viewerBackButton.setOnClickListener {
-            diagnosticsLog.log("viewer_back", "selected=$pendingSelectionLabel currentScene=$currentScene")
-            NativeSessionBridge.nativeResetVideoStream()
-            currentScene = UiScene.TARGETS
+            diagnosticsLog.log(
+                "viewer_back",
+                "selected=${pendingSelectionLabel.ifBlank { "none" }} currentScene=$currentScene stage=$selectionStage"
+            )
+            moveToTargets("viewer_back", abortPendingSwitch = selectionStage != SelectionStage.IDLE)
             renderStatus()
         }
 
@@ -277,37 +287,131 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
     }
 
+    private fun resetViewerObservability() {
+        videoWidth = 0
+        videoHeight = 0
+        lastViewerOutCount = -1
+        lastViewerOutChangeAtMs = 0L
+        lastViewerStallLogAtMs = 0L
+        lastViewerRecoveryTargetId = Long.MIN_VALUE
+        lastViewerRecoveryAtMs = 0L
+        lastViewerRecoveryAttempts = 0
+    }
+
+    private fun clearPendingSelection() {
+        selectionStage = SelectionStage.IDLE
+        pendingSelectionId = null
+        pendingSelectionLabel = ""
+        pendingSelectionTab = activeTargetTab
+        pendingSelectionGeneration = 0L
+        pendingSelectionStartedAtMs = 0L
+        pendingSelectionAckLogged = false
+    }
+
+    private fun moveToTargets(reason: String, abortPendingSwitch: Boolean) {
+        diagnosticsLog.log("targets_return", "reason=$reason scene=$currentScene")
+        if (abortPendingSwitch) {
+            NativeSessionBridge.nativeAbortVideoSwitch()
+        } else {
+            NativeSessionBridge.nativeResetVideoStream()
+        }
+        clearPendingSelection()
+        currentScene = UiScene.TARGETS
+        resetViewerObservability()
+    }
+
+    private fun startSelectionTransition(targetId: Long, label: String, tab: TargetTab, origin: String): Boolean {
+        val selectionGeneration = ++selectionGenerationCounter
+        resetViewerObservability()
+        NativeSessionBridge.nativePrepareVideoSwitch(selectionGeneration)
+        val ok = when (tab) {
+            TargetTab.WINDOWS -> NativeSessionBridge.nativeSelectWindow(targetId)
+            TargetTab.DEVICES -> NativeSessionBridge.nativeSelectDesktopMode()
+        }
+        if (!ok) {
+            NativeSessionBridge.nativeAbortVideoSwitch()
+            diagnosticsLog.log(
+                "select_request_failed",
+                "targetId=$targetId label=$label tab=$tab gen=$selectionGeneration origin=$origin"
+            )
+            clearPendingSelection()
+            currentScene = UiScene.TARGETS
+            return false
+        }
+
+        selectionStage = SelectionStage.REQUESTING
+        pendingSelectionId = targetId
+        pendingSelectionLabel = label
+        pendingSelectionTab = tab
+        pendingSelectionGeneration = selectionGeneration
+        pendingSelectionStartedAtMs = SystemClock.elapsedRealtime()
+        pendingSelectionAckLogged = false
+        currentScene = UiScene.SWITCHING
+        diagnosticsLog.log(
+            "select_request",
+            "targetId=$targetId label=$label tab=$tab gen=$selectionGeneration origin=$origin"
+        )
+        return true
+    }
+
     private fun renderStatus() {
         val nowMs = SystemClock.elapsedRealtime()
         val statusValue = NativeSessionBridge.nativeGetStatus()
         val errorValue = NativeSessionBridge.nativeGetLastError()
         val panelSnapshot = parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson())
         val videoDebugValue = NativeSessionBridge.nativeGetVideoDebugStatus()
+        val readySelectionGeneration = NativeSessionBridge.nativeGetReadySelectionGeneration()
+        val lastOutputPresentationUs = NativeSessionBridge.nativeGetLastOutputPresentationUs()
         val isConnecting = statusValue.startsWith("connecting")
         val isConnected = statusValue.startsWith("connected")
 
         if (!isConnecting && !isConnected && currentScene != UiScene.CONNECT) {
             currentScene = UiScene.CONNECT
-            pendingSelectionId = null
-            pendingSelectionLabel = ""
+            clearPendingSelection()
+            resetViewerObservability()
         } else if (connectFlowActive && currentScene == UiScene.CONNECT && (isConnecting || isConnected)) {
             currentScene = UiScene.TARGETS
         }
 
-        if (pendingSelectionId != null) {
+        if (selectionStage != SelectionStage.IDLE) {
             if (panelSnapshot.status.startsWith("window_select_failed")) {
-                diagnosticsLog.log("select_failed", "targetId=$pendingSelectionId status=${panelSnapshot.status}")
-                pendingSelectionId = null
-                pendingSelectionLabel = ""
-            } else if (panelSnapshot.selectedId == pendingSelectionId) {
                 diagnosticsLog.log(
-                    "select_applied",
-                    "targetId=$pendingSelectionId title=${panelSnapshot.selectedTitle} scene=viewer"
+                    "select_failed",
+                    "targetId=$pendingSelectionId gen=$pendingSelectionGeneration " +
+                        "seq=${panelSnapshot.lastSelectSeq} status=${panelSnapshot.status}"
                 )
-                currentScene = UiScene.VIEWER
-                pendingSelectionId = null
-                pendingSelectionLabel = ""
+                moveToTargets("select_failed", abortPendingSwitch = true)
+            } else {
+                if (!pendingSelectionAckLogged && panelSnapshot.status.startsWith("window_selected")) {
+                    selectionStage = SelectionStage.WAITING_FIRST_FRAME
+                    pendingSelectionAckLogged = true
+                    diagnosticsLog.log(
+                        "select_ack",
+                        "targetId=$pendingSelectionId gen=$pendingSelectionGeneration " +
+                            "streamGen=${panelSnapshot.lastSelectStreamGeneration} " +
+                            "hostSendQpcUs=${panelSnapshot.lastSelectHostSendQpcUs} " +
+                            "title=${panelSnapshot.selectedTitle}"
+                    )
+                }
+                if (readySelectionGeneration == pendingSelectionGeneration && pendingSelectionGeneration != 0L) {
+                    diagnosticsLog.log(
+                        "select_ready",
+                        "targetId=$pendingSelectionId gen=$pendingSelectionGeneration " +
+                            "lastOutUs=$lastOutputPresentationUs title=${panelSnapshot.selectedTitle}"
+                    )
+                    clearPendingSelection()
+                    currentScene = UiScene.VIEWER
+                } else if (pendingSelectionStartedAtMs > 0L && nowMs - pendingSelectionStartedAtMs >= 6000L) {
+                    diagnosticsLog.log(
+                        "select_timeout",
+                        "targetId=$pendingSelectionId gen=$pendingSelectionGeneration " +
+                            "scene=$currentScene status=${panelSnapshot.status} debug=$videoDebugValue"
+                    )
+                    moveToTargets("select_timeout", abortPendingSwitch = true)
+                }
             }
+        } else if (currentScene == UiScene.SWITCHING) {
+            currentScene = UiScene.VIEWER
         }
 
         connectStatusText.text = statusValue
@@ -322,11 +426,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         renderViewerScene(statusValue, panelSnapshot, videoDebugValue)
         applySceneVisibility()
         syncVideoSurface(forceRebind = false)
-        observeDiagnostics(nowMs, statusValue, panelSnapshot, videoDebugValue)
+        observeDiagnostics(nowMs, statusValue, panelSnapshot, videoDebugValue, lastOutputPresentationUs)
     }
 
     private fun renderTargetsScene(isConnected: Boolean, panelSnapshot: WindowPanelUiSnapshot) {
-        val selectionPending = pendingSelectionId != null
+        val selectionPending = selectionStage != SelectionStage.IDLE
         listWindowsButton.text =
             if (activeTargetTab == TargetTab.WINDOWS) "[Windows]" else getString(R.string.target_windows_button)
         listDevicesButton.text =
@@ -339,10 +443,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         listSelectedText.text = "Selected: ${panelSnapshot.selectedTitle}"
         listStatusText.text =
-            if (selectionPending) {
-                "selecting $pendingSelectionLabel..."
-            } else {
-                panelSnapshot.status
+            when (selectionStage) {
+                SelectionStage.REQUESTING -> "selecting $pendingSelectionLabel..."
+                SelectionStage.WAITING_FIRST_FRAME -> "waiting first frame for $pendingSelectionLabel..."
+                SelectionStage.IDLE -> panelSnapshot.status
             }
 
         val labels = mutableListOf<String>()
@@ -375,14 +479,23 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun renderViewerScene(statusValue: String, panelSnapshot: WindowPanelUiSnapshot, videoDebugValue: String) {
+        if (currentScene == UiScene.SWITCHING) {
+            viewerOverlayStatusText.text =
+                "Switching to ${pendingSelectionLabel.ifBlank { panelSnapshot.selectedTitle }}...\n" +
+                    panelSnapshot.status + "\n" + videoDebugValue
+            videoTextureView.alpha = 0.0f
+            return
+        }
+        videoTextureView.alpha = 1.0f
         viewerOverlayStatusText.text = panelSnapshot.selectedTitle + " • " + statusValue + "\n" + videoDebugValue
     }
 
     private fun applySceneVisibility() {
         connectScene.visibility = if (currentScene == UiScene.CONNECT) View.VISIBLE else View.GONE
         targetsScene.visibility = if (currentScene == UiScene.TARGETS) View.VISIBLE else View.GONE
-        viewerScene.visibility = if (currentScene == UiScene.VIEWER) View.VISIBLE else View.GONE
-        if (currentScene != UiScene.VIEWER && videoSurface != null) {
+        viewerScene.visibility =
+            if (currentScene == UiScene.VIEWER || currentScene == UiScene.SWITCHING) View.VISIBLE else View.GONE
+        if (currentScene != UiScene.VIEWER && currentScene != UiScene.SWITCHING && videoSurface != null) {
             releaseVideoSurface()
         }
     }
@@ -428,7 +541,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun syncVideoSurface(forceRebind: Boolean) {
-        if (currentScene != UiScene.VIEWER) {
+        if (currentScene != UiScene.VIEWER && currentScene != UiScene.SWITCHING) {
             if (videoSurface != null) {
                 releaseVideoSurface()
             }
@@ -531,6 +644,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 selectedTitle = root.optString("selectedTitle", "desktop"),
                 selectionLocked = root.optBoolean("selectionLocked"),
                 status = root.optString("status", "waiting_control"),
+                lastSelectSeq = root.optInt("lastSelectSeq"),
+                lastSelectOk = root.optBoolean("lastSelectOk"),
+                lastSelectWindowId = root.optLong("lastSelectWindowId"),
+                lastSelectStreamGeneration = root.optLong("lastSelectStreamGeneration"),
+                lastSelectHostSendQpcUs = root.optLong("lastSelectHostSendQpcUs"),
                 items = items,
             )
         } catch (_: JSONException) {
@@ -543,6 +661,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         statusValue: String,
         panelSnapshot: WindowPanelUiSnapshot,
         videoDebugValue: String,
+        lastOutputPresentationUs: Long,
     ) {
         if (currentScene != lastLoggedScene) {
             diagnosticsLog.log("scene", currentScene.name)
@@ -559,7 +678,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             )
             lastLoggedPanelStatus = panelSnapshot.status
         }
-        if (videoDebugValue != lastLoggedVideoDebug && currentScene == UiScene.VIEWER) {
+        if (videoDebugValue != lastLoggedVideoDebug &&
+            (currentScene == UiScene.VIEWER || currentScene == UiScene.SWITCHING)
+        ) {
             diagnosticsLog.log("video_debug", videoDebugValue)
             lastLoggedVideoDebug = videoDebugValue
         }
@@ -571,6 +692,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     lastViewerOutCount = outCount
                     lastViewerOutChangeAtMs = nowMs
                     lastViewerStallLogAtMs = 0L
+                    lastViewerRecoveryAttempts = 0
                 } else {
                     if (lastViewerOutChangeAtMs == 0L) {
                         lastViewerOutChangeAtMs = nowMs
@@ -579,10 +701,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     if (stalledForMs >= 5000L && nowMs - lastViewerStallLogAtMs >= 5000L) {
                         diagnosticsLog.log(
                             "viewer_stall",
-                            "stalledMs=$stalledForMs out=$outCount status=$statusValue " +
-                                "selected=${panelSnapshot.selectedTitle} debug=$videoDebugValue"
+                            "stalledMs=$stalledForMs out=$outCount scene=$currentScene " +
+                                "selectedId=${panelSnapshot.selectedId} selected=${panelSnapshot.selectedTitle} " +
+                                "lastOutChangeMs=$lastViewerOutChangeAtMs lastOutPtsUs=$lastOutputPresentationUs " +
+                                "hostStatus=${panelSnapshot.status} status=$statusValue debug=$videoDebugValue"
                         )
                         lastViewerStallLogAtMs = nowMs
+                        recoverFromViewerStall(nowMs, panelSnapshot, statusValue, videoDebugValue, lastOutputPresentationUs)
                     }
                 }
             }
@@ -590,7 +715,43 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             lastViewerOutCount = -1
             lastViewerOutChangeAtMs = 0L
             lastViewerStallLogAtMs = 0L
+            lastViewerRecoveryAttempts = 0
         }
+    }
+
+    private fun recoverFromViewerStall(
+        nowMs: Long,
+        panelSnapshot: WindowPanelUiSnapshot,
+        statusValue: String,
+        videoDebugValue: String,
+        lastOutputPresentationUs: Long,
+    ) {
+        if (selectionStage != SelectionStage.IDLE) return
+
+        val targetId = panelSnapshot.selectedId
+        val targetLabel = panelSnapshot.selectedTitle.ifBlank { if (targetId == 0L) "desktop" else "window" }
+        val targetTab = if (targetId == 0L) TargetTab.DEVICES else TargetTab.WINDOWS
+
+        if (lastViewerRecoveryTargetId != targetId || nowMs - lastViewerRecoveryAtMs >= 15000L) {
+            lastViewerRecoveryTargetId = targetId
+            lastViewerRecoveryAtMs = nowMs
+            lastViewerRecoveryAttempts = 1
+            diagnosticsLog.log(
+                "viewer_stall_recover",
+                "action=reselect targetId=$targetId label=$targetLabel status=$statusValue " +
+                    "hostStatus=${panelSnapshot.status} lastOutPtsUs=$lastOutputPresentationUs"
+            )
+            startSelectionTransition(targetId, targetLabel, targetTab, "watchdog")
+            return
+        }
+
+        lastViewerRecoveryAttempts += 1
+        diagnosticsLog.log(
+            "viewer_stall_recover",
+            "action=targets targetId=$targetId attempts=$lastViewerRecoveryAttempts " +
+                "status=$statusValue hostStatus=${panelSnapshot.status} debug=$videoDebugValue"
+        )
+        moveToTargets("viewer_stall", abortPendingSwitch = false)
     }
 
     private fun parseVideoCounter(debugLine: String, key: String): Int {

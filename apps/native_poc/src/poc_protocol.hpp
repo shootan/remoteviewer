@@ -67,6 +67,7 @@ struct RawFrameHeader {
   uint32_t height = 0;
   uint32_t stride = 0;
   uint32_t payloadSize = 0;
+  uint64_t streamGeneration = 0;
   uint64_t captureQpcUs = 0;
   uint64_t encodeStartQpcUs = 0;
   uint64_t encodeEndQpcUs = 0;
@@ -80,6 +81,7 @@ struct EncodedFrameHeader {
   uint32_t height = 0;
   uint32_t payloadSize = 0;
   uint32_t flags = 0;  // bit0: keyFrame
+  uint64_t streamGeneration = 0;
   uint64_t captureQpcUs = 0;
   uint64_t encodeStartQpcUs = 0;
   uint64_t encodeEndQpcUs = 0;
@@ -224,6 +226,7 @@ struct ControlWindowSelectedMessage {
   uint32_t seq = 0;
   uint32_t flags = 0;  // bit0: ok, bit1: selection locked by config
   uint64_t windowId = 0;
+  uint64_t streamGeneration = 0;
   char reason[64] = {};
   char title[96] = {};
   uint64_t hostSendQpcUs = 0;
@@ -250,6 +253,7 @@ struct UdpVideoChunkHeader {
   uint32_t payloadSize = 0;
   uint32_t chunkOffset = 0;
   uint32_t chunkSize = 0;
+  uint64_t streamGeneration = 0;
   uint64_t captureQpcUs = 0;
   uint64_t encodeStartQpcUs = 0;
   uint64_t encodeEndQpcUs = 0;

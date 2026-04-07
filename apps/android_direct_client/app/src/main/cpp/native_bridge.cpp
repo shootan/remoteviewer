@@ -64,6 +64,11 @@ std::string window_panel_snapshot_json(const remote60::native_poc::WindowPanelSn
   oss << "\"status\":\"";
   append_json_escaped(oss, snapshot.status);
   oss << "\",";
+  oss << "\"lastSelectSeq\":" << snapshot.lastSelectSeq << ",";
+  oss << "\"lastSelectOk\":" << (snapshot.lastSelectOk ? "true" : "false") << ",";
+  oss << "\"lastSelectWindowId\":" << snapshot.lastSelectWindowId << ",";
+  oss << "\"lastSelectStreamGeneration\":" << snapshot.lastSelectStreamGeneration << ",";
+  oss << "\"lastSelectHostSendQpcUs\":" << snapshot.lastSelectHostSendQpcUs << ",";
   oss << "\"items\":[";
   for (size_t i = 0; i < snapshot.items.size(); ++i) {
     const auto& item = snapshot.items[i];
@@ -136,6 +141,30 @@ extern "C" JNIEXPORT jlong JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetVideoSizePacked(
     JNIEnv* /* env */, jobject /* this */) {
   return static_cast<jlong>(g_video_decoder_sink.VideoSizePacked());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativePrepareVideoSwitch(
+    JNIEnv* /* env */, jobject /* this */, jlong selection_generation) {
+  g_video_decoder_sink.PrepareForWindowSelection(static_cast<uint64_t>(selection_generation));
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeAbortVideoSwitch(
+    JNIEnv* /* env */, jobject /* this */) {
+  g_video_decoder_sink.AbortWindowSelection();
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetReadySelectionGeneration(
+    JNIEnv* /* env */, jobject /* this */) {
+  return static_cast<jlong>(g_video_decoder_sink.ReadySelectionGeneration());
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetLastOutputPresentationUs(
+    JNIEnv* /* env */, jobject /* this */) {
+  return static_cast<jlong>(g_video_decoder_sink.LastOutputPresentationUs());
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
