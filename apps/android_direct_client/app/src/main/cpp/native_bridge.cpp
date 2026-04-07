@@ -1,5 +1,6 @@
 #include <jni.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <sstream>
 #include <string>
@@ -183,6 +184,16 @@ extern "C" JNIEXPORT jboolean JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeSelectDesktopMode(
     JNIEnv* /* env */, jobject /* this */) {
   return g_session_controller.RequestDesktopMode() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeRequestRuntimeConfig(
+    JNIEnv* /* env */, jobject /* this */, jint bitrate_bps, jint fps) {
+  return g_session_controller.RequestRuntimeConfig(
+             static_cast<uint32_t>(std::max<jint>(0, bitrate_bps)),
+             static_cast<uint32_t>(std::max<jint>(0, fps)))
+             ? JNI_TRUE
+             : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jstring JNICALL

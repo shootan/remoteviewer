@@ -69,6 +69,7 @@ class ClientSessionController {
   bool RequestWindowList();
   bool RequestWindowSelect(uint64_t windowId);
   bool RequestDesktopMode();
+  bool RequestRuntimeConfig(uint32_t bitrate, uint32_t fps);
 
  private:
   ClientSessionController(const ClientSessionController&) = delete;

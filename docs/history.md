@@ -2509,6 +2509,47 @@ Next action
 - LDPlayer에서 rebuilt APK live rerun이 다시 붙도록 host inbound path(방화벽/포트 경로)를 확인한 뒤, `targets -> viewer -> back` 10회 이상 soak으로 freeze 재현 여부를 다시 본다.
 - `REMOTE60_NATIVE_WINDOWLIST_EXCLUDE_PIDS`를 current Android client instance와 자동 동기화하는 경로를 남은 별도 작업으로 마무리한다.
 
+### 157) 2026-04-07 android settings tab and runtime bitrate-fps control
+Goal
+- Android target scene를 `Windows / Desktop / Settings` 3탭으로 나눠 target 선택과 품질 조절 공간을 분리한다.
+- client control channel에서 host `bitrate / fps`를 런타임에 바꿔 host process 재시작 없이 encoder target을 바꿀 수 있게 한다.
+
+Files changed
+- `apps/android_direct_client/app/src/main/cpp/native_bridge.cpp`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/NativeSessionBridge.kt`
+- `apps/android_direct_client/app/src/main/res/layout/activity_main.xml`
+- `apps/android_direct_client/app/src/main/res/values/strings.xml`
+- `apps/native_poc/src/native_video_client_session.cpp`
+- `apps/native_poc/src/native_video_client_session.hpp`
+- `apps/native_poc/src/native_video_client_shared_core.cpp`
+- `apps/native_poc/src/native_video_client_shared_core.hpp`
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `apps/native_poc/src/poc_protocol.hpp`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Native build:
+  - `cmake --build d:\remote\remote\build-vcpkg-local --target remote60_native_video_host_poc remote60_native_video_client_poc remote60_native_video_client_shared_core_test --config Debug --parallel`
+  - 결과: 성공
+- Shared core test:
+  - `d:\remote\remote\build-vcpkg-local\apps\native_poc\Debug\remote60_native_video_client_shared_core_test.exe`
+  - 결과: `PASS`
+- Android build:
+  - `JAVA_HOME=C:\Program Files\Android\Android Studio\jbr`
+  - `d:\remote\remote\tmp\gradle\gradle-8.7\bin\gradle.bat assembleDebug`
+  - 결과: 성공
+- Scope note:
+  - `ControlRuntimeEncoderConfigMessage`에 `fps`와 `flags bit2`를 추가했다.
+  - host는 runtime control 수신 시 `apply_encoder_target(...)`로 bitrate/keyint/fps를 갱신하고, host process 자체는 재시작하지 않는다.
+  - bitrate-only 변경은 가능한 경우 encoder bitrate reconfigure만 타고, fps 변경은 encoder 재초기화가 있을 수 있으나 host process restart는 아니다.
+  - Android UI는 기존 `Devices` 의미를 `Desktop`으로 명확히 바꾸고, `Settings` 탭에서 bitrate kbps / fps 값을 입력 후 apply하도록 했다.
+
+Next action
+- 실기기에서 `Settings` 탭으로 bitrate/fps를 바꾼 뒤 체감 화질/트래픽 tradeoff를 몇 개 프리셋으로 정리한다.
+- 이후 `targets -> viewer -> back` soak과 LD current-instance exclude 자동화를 이어서 닫는다.
+
 ### 152) 2026-04-06 host window-capture stall false-positive guard
 Goal
 - static window를 캡처할 때 `callbackFramesPerSec < 10`만으로 freeze로 오판정해 restart하는 문제를 줄인다.

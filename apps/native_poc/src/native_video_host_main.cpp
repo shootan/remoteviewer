@@ -2204,6 +2204,7 @@ int main(int argc, char** argv) {
   std::atomic<bool> runtimeTunePending{false};
   std::atomic<uint32_t> runtimeTuneBitrate{0};
   std::atomic<uint32_t> runtimeTuneKeyint{0};
+  std::atomic<uint32_t> runtimeTuneFps{0};
   std::atomic<uint32_t> runtimeTuneSeq{0};
   std::atomic<bool> captureModeReqPending{false};
   std::atomic<uint32_t> captureModeReqSeq{0};
@@ -2596,14 +2597,17 @@ int main(int argc, char** argv) {
                 if (!recv_all(acceptedSock, &tune.seq, sizeof(tune) - sizeof(MessageHeader))) break;
                 const bool hasBitrate = ((tune.flags & 0x1u) != 0) && tune.bitrate >= 100000;
                 const bool hasKeyint = ((tune.flags & 0x2u) != 0) && tune.keyint >= 1;
-                if (hasBitrate || hasKeyint) {
+                const bool hasFps = ((tune.flags & 0x4u) != 0) && tune.fps >= 1;
+                if (hasBitrate || hasKeyint || hasFps) {
                   if (hasBitrate) runtimeTuneBitrate.store(tune.bitrate, std::memory_order_release);
                   if (hasKeyint) runtimeTuneKeyint.store(tune.keyint, std::memory_order_release);
+                  if (hasFps) runtimeTuneFps.store(tune.fps, std::memory_order_release);
                   runtimeTuneSeq.store(tune.seq, std::memory_order_release);
                   runtimeTunePending.store(true, std::memory_order_release);
                   std::cout << "[native-video-host][control] runtime-config seq=" << tune.seq
                             << " bitrate=" << (hasBitrate ? tune.bitrate : 0)
                             << " keyint=" << (hasKeyint ? tune.keyint : 0)
+                            << " fps=" << (hasFps ? tune.fps : 0)
                             << " flags=" << tune.flags
                             << "\n";
                 }
@@ -3408,6 +3412,7 @@ int main(int argc, char** argv) {
       runtimeTunePending = false;
       runtimeTuneBitrate = 0;
       runtimeTuneKeyint = 0;
+      runtimeTuneFps = 0;
       runtimeTuneSeq = 0;
       keyReqTokens = static_cast<double>(keyReqTokenCapacity);
       keyReqLastRefillUs = 0;
@@ -3635,12 +3640,15 @@ int main(int argc, char** argv) {
       const uint32_t reqSeq = runtimeTuneSeq.load(std::memory_order_acquire);
       uint32_t targetBitrate = runtimeTuneBitrate.load(std::memory_order_acquire);
       uint32_t targetKeyint = runtimeTuneKeyint.load(std::memory_order_acquire);
+      uint32_t targetFps = runtimeTuneFps.load(std::memory_order_acquire);
       if (targetBitrate < 100000) targetBitrate = activeBitrate;
       if (targetKeyint < 1) targetKeyint = activeKeyint;
+      if (targetFps < 1) targetFps = activeFps;
       const bool bitrateChanged = (targetBitrate != activeBitrate);
       const bool keyintChanged = (targetKeyint != activeKeyint);
-      if (bitrateChanged || keyintChanged) {
-        if (!apply_encoder_target(activeEncodeW, activeEncodeH, activeFps, targetBitrate, targetKeyint)) {
+      const bool fpsChanged = (targetFps != activeFps);
+      if (bitrateChanged || keyintChanged || fpsChanged) {
+        if (!apply_encoder_target(activeEncodeW, activeEncodeH, targetFps, targetBitrate, targetKeyint)) {
           std::cerr << "[native-video-host][control] runtime-config apply failed seq=" << reqSeq << "\n";
           break;
         }
@@ -3653,6 +3661,7 @@ int main(int argc, char** argv) {
         std::cout << "[native-video-host][control] runtime-config-applied seq=" << reqSeq
                   << " bitrate=" << activeBitrate
                   << " keyint=" << activeKeyint
+                  << " fps=" << activeFps
                   << " abrOverride=1\n";
       }
     }

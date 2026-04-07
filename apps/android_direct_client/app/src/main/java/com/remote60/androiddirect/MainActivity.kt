@@ -33,7 +33,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private enum class TargetTab {
         WINDOWS,
-        DEVICES,
+        DESKTOP,
+        SETTINGS,
     }
 
     private enum class SelectionStage {
@@ -94,7 +95,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var listDisconnectButton: Button
     private lateinit var listWindowsButton: Button
     private lateinit var listDevicesButton: Button
+    private lateinit var listSettingsButton: Button
     private lateinit var listRefreshButton: Button
+    private lateinit var settingsPanel: View
+    private lateinit var settingsBitrateInput: EditText
+    private lateinit var settingsFpsInput: EditText
+    private lateinit var settingsApplyButton: Button
+    private lateinit var settingsAppliedText: TextView
     private lateinit var viewerBackButton: Button
     private lateinit var viewerOverlayStatusText: TextView
     private lateinit var videoTextureView: TextureView
@@ -122,6 +129,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var lastViewerRecoveryTargetId = Long.MIN_VALUE
     private var lastViewerRecoveryAtMs = 0L
     private var lastViewerRecoveryAttempts = 0
+    private var requestedRuntimeBitrateKbps = 8000
+    private var requestedRuntimeFps = 30
+    private var settingsStatusMessage = "Current request: 8000 kbps / 30 fps"
     private var videoSurface: Surface? = null
     private var videoWidth = 0
     private var videoHeight = 0
@@ -156,7 +166,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         listDisconnectButton = findViewById(R.id.listDisconnectButton)
         listWindowsButton = findViewById(R.id.listWindowsButton)
         listDevicesButton = findViewById(R.id.listDevicesButton)
+        listSettingsButton = findViewById(R.id.listSettingsButton)
         listRefreshButton = findViewById(R.id.listRefreshButton)
+        settingsPanel = findViewById(R.id.settingsPanel)
+        settingsBitrateInput = findViewById(R.id.settingsBitrateInput)
+        settingsFpsInput = findViewById(R.id.settingsFpsInput)
+        settingsApplyButton = findViewById(R.id.settingsApplyButton)
+        settingsAppliedText = findViewById(R.id.settingsAppliedText)
         viewerBackButton = findViewById(R.id.viewerBackButton)
         viewerOverlayStatusText = findViewById(R.id.viewerOverlayStatusText)
         videoTextureView = findViewById(R.id.videoTextureView)
@@ -186,6 +202,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         hostEdit.setText(if (launchHost.isNotEmpty()) launchHost else savedEndpoint.host.ifEmpty { "192.168.0.10" })
         videoPortEdit.setText(if (launchVideoPort > 0) launchVideoPort.toString() else savedEndpoint.videoPort.toString())
         controlPortEdit.setText(if (launchControlPort > 0) launchControlPort.toString() else savedEndpoint.controlPort.toString())
+        settingsBitrateInput.setText(requestedRuntimeBitrateKbps.toString())
+        settingsFpsInput.setText(requestedRuntimeFps.toString())
+        settingsAppliedText.text = settingsStatusMessage
 
         diagnosticsLog.log(
             "app_start",
@@ -235,8 +254,39 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
 
         listDevicesButton.setOnClickListener {
-            activeTargetTab = TargetTab.DEVICES
-            diagnosticsLog.log("tab_switch", "tab=devices")
+            activeTargetTab = TargetTab.DESKTOP
+            diagnosticsLog.log("tab_switch", "tab=desktop")
+            renderStatus()
+        }
+
+        listSettingsButton.setOnClickListener {
+            activeTargetTab = TargetTab.SETTINGS
+            diagnosticsLog.log("tab_switch", "tab=settings")
+            renderStatus()
+        }
+
+        settingsApplyButton.setOnClickListener {
+            val bitrateKbps = settingsBitrateInput.text?.toString()?.trim()?.toIntOrNull() ?: 0
+            val fps = settingsFpsInput.text?.toString()?.trim()?.toIntOrNull() ?: 0
+            if (bitrateKbps < 300 || fps !in 1..120) {
+                settingsStatusMessage = "Use bitrate >= 300 kbps and fps between 1 and 120."
+                settingsAppliedText.text = settingsStatusMessage
+                diagnosticsLog.log("runtime_config_invalid", "bitrateKbps=$bitrateKbps fps=$fps")
+                return@setOnClickListener
+            }
+            val bitrateBps = bitrateKbps * 1000
+            val ok = NativeSessionBridge.nativeRequestRuntimeConfig(bitrateBps, fps)
+            if (ok) {
+                requestedRuntimeBitrateKbps = bitrateKbps
+                requestedRuntimeFps = fps
+                settingsStatusMessage = "Requested: ${bitrateKbps} kbps / ${fps} fps"
+                settingsAppliedText.text = settingsStatusMessage
+                diagnosticsLog.log("runtime_config_request", "bitrateBps=$bitrateBps fps=$fps")
+            } else {
+                settingsStatusMessage = "Runtime config request failed."
+                settingsAppliedText.text = settingsStatusMessage
+                diagnosticsLog.log("runtime_config_failed", "bitrateBps=$bitrateBps fps=$fps")
+            }
             renderStatus()
         }
 
@@ -326,7 +376,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         NativeSessionBridge.nativePrepareVideoSwitch(selectionGeneration)
         val ok = when (tab) {
             TargetTab.WINDOWS -> NativeSessionBridge.nativeSelectWindow(targetId)
-            TargetTab.DEVICES -> NativeSessionBridge.nativeSelectDesktopMode()
+            TargetTab.DESKTOP -> NativeSessionBridge.nativeSelectDesktopMode()
+            TargetTab.SETTINGS -> false
         }
         if (!ok) {
             NativeSessionBridge.nativeAbortVideoSwitch()
@@ -431,15 +482,25 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun renderTargetsScene(isConnected: Boolean, panelSnapshot: WindowPanelUiSnapshot) {
         val selectionPending = selectionStage != SelectionStage.IDLE
+        val settingsActive = activeTargetTab == TargetTab.SETTINGS
         listWindowsButton.text =
             if (activeTargetTab == TargetTab.WINDOWS) "[Windows]" else getString(R.string.target_windows_button)
         listDevicesButton.text =
-            if (activeTargetTab == TargetTab.DEVICES) "[Devices]" else getString(R.string.target_devices_button)
+            if (activeTargetTab == TargetTab.DESKTOP) "[Desktop]" else getString(R.string.target_desktop_button)
+        listSettingsButton.text =
+            if (settingsActive) "[Settings]" else getString(R.string.target_settings_button)
         listWindowsButton.isEnabled = activeTargetTab != TargetTab.WINDOWS && !selectionPending
-        listDevicesButton.isEnabled = activeTargetTab != TargetTab.DEVICES && !selectionPending
-        listRefreshButton.isEnabled = isConnected && !selectionPending
+        listDevicesButton.isEnabled = activeTargetTab != TargetTab.DESKTOP && !selectionPending
+        listSettingsButton.isEnabled = !settingsActive && !selectionPending
+        listRefreshButton.isEnabled = isConnected && !selectionPending && !settingsActive
+        listRefreshButton.visibility = if (settingsActive) View.GONE else View.VISIBLE
         listDisconnectButton.isEnabled = isConnected || connectFlowActive
-        targetListView.isEnabled = isConnected && !selectionPending
+        targetListView.isEnabled = isConnected && !selectionPending && !settingsActive
+        settingsPanel.visibility = if (settingsActive) View.VISIBLE else View.GONE
+        settingsBitrateInput.isEnabled = isConnected && !selectionPending
+        settingsFpsInput.isEnabled = isConnected && !selectionPending
+        settingsApplyButton.isEnabled = isConnected && !selectionPending
+        targetListView.visibility = if (settingsActive) View.GONE else View.VISIBLE
 
         listSelectedText.text = "Selected: ${panelSnapshot.selectedTitle}"
         listStatusText.text =
@@ -463,11 +524,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 targetListEmptyText.text = "No shareable windows yet. Tap Refresh."
             }
 
-            TargetTab.DEVICES -> {
+            TargetTab.DESKTOP -> {
                 val prefix = if (panelSnapshot.selectedId == 0L) "* " else ""
                 labels.add(prefix + getString(R.string.desktop_mode_button) + " • full desktop capture")
                 ids.add(0L)
                 targetListEmptyText.text = ""
+            }
+            TargetTab.SETTINGS -> {
+                settingsAppliedText.text = settingsStatusMessage
             }
         }
 
@@ -476,6 +540,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         targetListIds.clear()
         targetListIds.addAll(ids)
         targetListAdapter.notifyDataSetChanged()
+        targetListEmptyText.visibility =
+            if (settingsActive) View.GONE else if (targetListLabels.isEmpty()) View.VISIBLE else View.GONE
     }
 
     private fun renderViewerScene(statusValue: String, panelSnapshot: WindowPanelUiSnapshot, videoDebugValue: String) {
@@ -730,7 +796,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         val targetId = panelSnapshot.selectedId
         val targetLabel = panelSnapshot.selectedTitle.ifBlank { if (targetId == 0L) "desktop" else "window" }
-        val targetTab = if (targetId == 0L) TargetTab.DEVICES else TargetTab.WINDOWS
+        val targetTab = if (targetId == 0L) TargetTab.DESKTOP else TargetTab.WINDOWS
 
         if (lastViewerRecoveryTargetId != targetId || nowMs - lastViewerRecoveryAtMs >= 15000L) {
             lastViewerRecoveryTargetId = targetId

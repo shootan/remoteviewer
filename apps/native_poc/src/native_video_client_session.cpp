@@ -156,6 +156,17 @@ bool ClientSessionController::RequestDesktopMode() {
   return RequestWindowSelect(0);
 }
 
+bool ClientSessionController::RequestRuntimeConfig(uint32_t bitrate, uint32_t fps) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+  if (bitrate == 0 && fps == 0) return false;
+  runtimeTune_.SetEnabled(true);
+  runtimeTune_.SetTargets(bitrate, 0, fps);
+  return true;
+}
+
 bool ClientSessionController::IsValidPort(int port) {
   return port > 0 && port <= 65535;
 }

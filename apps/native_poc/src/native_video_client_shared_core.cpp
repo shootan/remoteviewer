@@ -193,12 +193,13 @@ RuntimeTuneState::RuntimeTuneState(uint32_t bitrateMin, uint32_t bitrateMax, uin
       keyintMin_(std::max<uint32_t>(1, keyintMin)),
       keyintMax_(std::max<uint32_t>(std::max<uint32_t>(1, keyintMin), keyintMax)) {}
 
-void RuntimeTuneState::Reset(uint32_t bitrate, uint32_t keyint) {
+void RuntimeTuneState::Reset(uint32_t bitrate, uint32_t keyint, uint32_t fps) {
   enabled_.store(false, std::memory_order_relaxed);
   dirty_.store(false, std::memory_order_relaxed);
   nextSeq_.store(0, std::memory_order_relaxed);
   targetBitrate_.store(bitrate, std::memory_order_relaxed);
   targetKeyint_.store(keyint, std::memory_order_relaxed);
+  targetFps_.store(fps, std::memory_order_relaxed);
   lastSentUs_.store(0, std::memory_order_relaxed);
 }
 
@@ -212,6 +213,19 @@ bool RuntimeTuneState::enabled() const {
 
 void RuntimeTuneState::MarkDirty() {
   dirty_.store(true, std::memory_order_release);
+}
+
+void RuntimeTuneState::SetTargets(uint32_t bitrate, uint32_t keyint, uint32_t fps) {
+  if (bitrate > 0) {
+    targetBitrate_.store(std::clamp<uint32_t>(bitrate, bitrateMin_, bitrateMax_), std::memory_order_relaxed);
+  }
+  if (keyint > 0) {
+    targetKeyint_.store(std::clamp<uint32_t>(keyint, keyintMin_, keyintMax_), std::memory_order_relaxed);
+  }
+  if (fps > 0) {
+    targetFps_.store(std::clamp<uint32_t>(fps, 1u, 120u), std::memory_order_relaxed);
+  }
+  MarkDirty();
 }
 
 void RuntimeTuneState::EnsureDefaults(uint32_t observedRecvMbpsX1000) {
@@ -264,8 +278,10 @@ bool RuntimeTuneState::ConsumePending(uint64_t nowUs, uint32_t observedRecvMbpsX
   message.seq = nextSeq_.fetch_add(1, std::memory_order_relaxed) + 1;
   message.bitrate = targetBitrate_.load(std::memory_order_relaxed);
   message.keyint = targetKeyint_.load(std::memory_order_relaxed);
+  message.fps = targetFps_.load(std::memory_order_relaxed);
   if (message.bitrate > 0) message.flags |= 0x1u;
   if (message.keyint > 0) message.flags |= 0x2u;
+  if (message.fps > 0) message.flags |= 0x4u;
   if (message.flags == 0) return false;
   message.clientSendQpcUs = nowUs;
   out->message = message;

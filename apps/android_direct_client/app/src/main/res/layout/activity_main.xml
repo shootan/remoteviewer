@@ -159,17 +159,28 @@
                 android:layout_weight="1"
                 android:background="#D8D2C6"
                 android:textColor="#1A1A1A"
-                android:text="@string/target_devices_button" />
+                android:text="@string/target_desktop_button" />
 
             <Button
-                android:id="@+id/listRefreshButton"
-                android:layout_width="wrap_content"
+                android:id="@+id/listSettingsButton"
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="8dp"
+                android:layout_weight="1"
                 android:background="#D8D2C6"
                 android:textColor="#1A1A1A"
-                android:text="@string/refresh_button" />
+                android:text="@string/target_settings_button" />
         </LinearLayout>
+
+        <Button
+            android:id="@+id/listRefreshButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="end"
+            android:layout_marginTop="8dp"
+            android:background="#D8D2C6"
+            android:textColor="#1A1A1A"
+            android:text="@string/refresh_button" />
 
         <TextView
             android:id="@+id/listSelectedText"
@@ -188,6 +199,86 @@
             android:maxLines="2"
             android:textColor="#666666"
             android:textSize="12sp" />
+
+        <LinearLayout
+            android:id="@+id/settingsPanel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:background="#FFFFFF"
+            android:orientation="vertical"
+            android:padding="12dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/settings_title"
+                android:textColor="#1A1A1A"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="@string/settings_hint"
+                android:textColor="#666666"
+                android:textSize="12sp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:orientation="horizontal">
+
+                <EditText
+                    android:id="@+id/settingsBitrateInput"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:background="#F5F3EE"
+                    android:hint="@string/settings_bitrate_hint"
+                    android:inputType="number"
+                    android:maxLines="1"
+                    android:padding="12dp"
+                    android:textColor="#1A1A1A"
+                    android:textColorHint="#777777"
+                    android:text="8000" />
+
+                <EditText
+                    android:id="@+id/settingsFpsInput"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:layout_weight="1"
+                    android:background="#F5F3EE"
+                    android:hint="@string/settings_fps_hint"
+                    android:inputType="number"
+                    android:maxLines="1"
+                    android:padding="12dp"
+                    android:textColor="#1A1A1A"
+                    android:textColorHint="#777777"
+                    android:text="30" />
+            </LinearLayout>
+
+            <Button
+                android:id="@+id/settingsApplyButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="#D8D2C6"
+                android:text="@string/settings_apply_button"
+                android:textColor="#1A1A1A" />
+
+            <TextView
+                android:id="@+id/settingsAppliedText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/settings_apply_idle"
+                android:textColor="#666666"
+                android:textSize="12sp" />
+        </LinearLayout>
 
         <ListView
             android:id="@+id/targetListView"

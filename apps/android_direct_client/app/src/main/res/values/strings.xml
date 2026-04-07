@@ -9,8 +9,15 @@
     <string name="disconnect_button">Disconnect</string>
     <string name="refresh_button">Refresh</string>
     <string name="target_windows_button">Windows</string>
-    <string name="target_devices_button">Devices</string>
+    <string name="target_desktop_button">Desktop</string>
+    <string name="target_settings_button">Settings</string>
     <string name="desktop_mode_button">Desktop</string>
     <string name="targets_title">Select A Target</string>
+    <string name="settings_title">Runtime Quality</string>
+    <string name="settings_hint">Apply bitrate and FPS without restarting the host process.</string>
+    <string name="settings_bitrate_hint">Bitrate Kbps</string>
+    <string name="settings_fps_hint">FPS</string>
+    <string name="settings_apply_button">Apply</string>
+    <string name="settings_apply_idle">Current request: none</string>
     <string name="viewer_back_button">LIST</string>
 </resources>

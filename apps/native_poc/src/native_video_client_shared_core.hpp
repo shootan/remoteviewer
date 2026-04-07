@@ -98,10 +98,11 @@ class RuntimeTuneState {
   RuntimeTuneState(uint32_t bitrateMin, uint32_t bitrateMax, uint32_t bitrateStep,
                    uint32_t keyintMin, uint32_t keyintMax);
 
-  void Reset(uint32_t bitrate, uint32_t keyint);
+  void Reset(uint32_t bitrate, uint32_t keyint, uint32_t fps = 0);
   void SetEnabled(bool enabled);
   bool enabled() const;
   void MarkDirty();
+  void SetTargets(uint32_t bitrate, uint32_t keyint, uint32_t fps);
   void ApplyDelta(int bitrateStepCount, int keyintStepCount, uint32_t observedRecvMbpsX1000);
   bool ConsumePending(uint64_t nowUs, uint32_t observedRecvMbpsX1000, PendingRuntimeTuneRequest* out);
 
@@ -118,6 +119,7 @@ class RuntimeTuneState {
   std::atomic<uint32_t> nextSeq_{0};
   std::atomic<uint32_t> targetBitrate_{0};
   std::atomic<uint32_t> targetKeyint_{0};
+  std::atomic<uint32_t> targetFps_{0};
   std::atomic<uint64_t> lastSentUs_{0};
 };
 
