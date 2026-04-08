@@ -252,3 +252,5 @@ Updated: 2026-04-08 17:32
 - [x] Phase E second-selection re-entry guard (selection ack 후 viewer 전환 + target switch 시 decoder reset)
 - [x] Phase E polish (`immersive fullscreen`, system back `viewer -> list`, connect/targets exit confirm, orientation recreate 방지)
 - [x] Phase E LDPlayer manual verify (`connect` fullscreen screenshot, `targets/connect` exit dialog, `system back -> list`)
+- [x] Phase F touch input bridge 1차 (`TextureView` tap/drag -> existing control input queue, scene 전환/취소 시 release guard)
+- [ ] Phase F tap/drag 실기기 검증 (`Desktop Mode`, selected window mode)

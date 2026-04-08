@@ -202,6 +202,21 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeRequestStreamActive(
   return g_session_controller.RequestStreamActive(active == JNI_TRUE) ? JNI_TRUE : JNI_FALSE;
 }
 
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeQueueInputEvent(
+    JNIEnv* /* env */, jobject /* this */, jint kind, jint x, jint y, jint wheel_delta,
+    jint key_code, jint buttons) {
+  return g_session_controller.QueueInputEvent(
+             static_cast<uint16_t>(std::clamp<jint>(kind, 0, 0xffff)),
+             static_cast<int32_t>(x),
+             static_cast<int32_t>(y),
+             static_cast<int32_t>(wheel_delta),
+             static_cast<uint32_t>(std::max<jint>(0, key_code)),
+             static_cast<uint16_t>(buttons & 0x7))
+             ? JNI_TRUE
+             : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetWindowPanelJson(
     JNIEnv* env, jobject /* this */) {

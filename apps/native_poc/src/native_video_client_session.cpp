@@ -176,6 +176,31 @@ bool ClientSessionController::RequestRuntimeConfig(uint32_t bitrate, uint32_t fp
   return true;
 }
 
+bool ClientSessionController::QueueInputEvent(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta,
+                                              uint32_t keyCode, uint16_t buttons) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+  if (kind < 1 || kind > 6) return false;
+
+  QueuedControlInputMessage msg{};
+  msg.type = MessageType::ControlInputEvent;
+  msg.inputEvent.header.magic = kMagic;
+  msg.inputEvent.header.type = static_cast<uint16_t>(MessageType::ControlInputEvent);
+  msg.inputEvent.header.size = static_cast<uint16_t>(sizeof(msg.inputEvent));
+  msg.inputEvent.seq = inputQueue_.NextSequence();
+  msg.inputEvent.kind = kind;
+  msg.inputEvent.buttons = static_cast<uint16_t>(buttons & 0x7u);
+  msg.inputEvent.x = x;
+  msg.inputEvent.y = y;
+  msg.inputEvent.wheelDelta = wheelDelta;
+  msg.inputEvent.keyCode = keyCode;
+  msg.inputEvent.clientSendQpcUs = now_us();
+  inputQueue_.Enqueue(msg);
+  return true;
+}
+
 bool ClientSessionController::IsValidPort(int port) {
   return port > 0 && port <= 65535;
 }

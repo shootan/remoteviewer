@@ -23,6 +23,14 @@ object NativeSessionBridge {
     external fun nativeSelectDesktopMode(): Boolean
     external fun nativeRequestRuntimeConfig(bitrateBps: Int, fps: Int): Boolean
     external fun nativeRequestStreamActive(active: Boolean): Boolean
+    external fun nativeQueueInputEvent(
+        kind: Int,
+        x: Int,
+        y: Int,
+        wheelDelta: Int,
+        keyCode: Int,
+        buttons: Int,
+    ): Boolean
     external fun nativeGetWindowPanelJson(): String
     external fun nativeResetVideoStream()
 }

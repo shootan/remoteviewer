@@ -2442,6 +2442,37 @@ Next action
 - desktop path capture source 검증을 분리해 `Devices/Desktop` scene 흐름도 안정화한다.
 - 그 다음 `Phase F` 입력 착수 전 gate를 재확인한다.
 
+### 164) 2026-04-08 android phase-f touch input bridge
+Goal
+- Android direct client viewer에서 안 먹던 `tap/drag` 입력을 기존 control input 경로로 연결한다.
+- scene 전환, pause, cancel 시 left button이 눌린 채 남지 않도록 release guard를 추가한다.
+
+Files changed
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/NativeSessionBridge.kt`
+- `apps/android_direct_client/app/src/main/cpp/native_bridge.cpp`
+- `apps/native_poc/src/native_video_client_session.hpp`
+- `apps/native_poc/src/native_video_client_session.cpp`
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Shared core/native client build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_client_shared_core_test --parallel`
+  - 결과: 성공
+- Android JNI/native bridge rebuild:
+  - `cmake --build d:\remote\remote\apps\android_direct_client\app\.cxx\Debug\3m5je1h6\x86_64 --parallel`
+  - `cmake --build d:\remote\remote\apps\android_direct_client\app\.cxx\Debug\3m5je1h6\arm64-v8a --parallel`
+  - 결과: 둘 다 성공
+- Android Gradle/APK rebuild:
+  - 실행 안 함
+  - 사유: 저장소에 `gradlew`가 없고 로컬 `gradle`도 PATH에 없음
+
+Next action
+- LDPlayer/실기기에서 `Desktop Mode`, selected-window 각각 tap/drag가 실제 host 입력으로 반영되는지 확인한다.
+- 그 다음 `committed text -> existing UTF-16 text message` 브리지를 같은 세션 컨트롤러 경로에 추가한다.
+
 ### 156) 2026-04-07 android selection generation gating and ldplayer fps investigation
 Goal
 - Android target 전환을 `request -> ack -> first-frame -> viewer` 상태기계로 고정해 stale frame 섞임과 재선택 freeze를 줄인다.

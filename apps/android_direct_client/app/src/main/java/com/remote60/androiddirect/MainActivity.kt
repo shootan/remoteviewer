@@ -11,6 +11,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import android.view.MotionEvent
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
@@ -23,10 +24,16 @@ import android.widget.ListView
 import android.widget.TextView
 import org.json.JSONException
 import org.json.JSONObject
+import kotlin.math.roundToInt
 
 class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     companion object {
         private const val LOG_TAG = "remote60_android_direct"
+        private const val INPUT_KIND_MOUSE_MOVE = 1
+        private const val INPUT_KIND_MOUSE_DOWN = 2
+        private const val INPUT_KIND_MOUSE_UP = 3
+        private const val INPUT_BUTTON_PRIMARY = 0x1
+        private const val INPUT_VK_LBUTTON = 0x01
     }
 
     private enum class UiScene {
@@ -83,6 +90,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             )
         }
     }
+
+    private data class ViewerContentRect(
+        val left: Float,
+        val top: Float,
+        val width: Float,
+        val height: Float,
+        val contentWidth: Int,
+        val contentHeight: Int,
+    )
 
     private lateinit var diagnosticsLog: SessionDiagnosticsLog
     private lateinit var connectScene: View
@@ -146,6 +162,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var surfaceBufferWidth = 0
     private var surfaceBufferHeight = 0
     private var exitDialog: AlertDialog? = null
+    private var activeTouchPointerId = MotionEvent.INVALID_POINTER_ID
+    private var activeTouchButtons = 0
+    private var lastTouchVideoX = 0
+    private var lastTouchVideoY = 0
 
     private val statusHandler = Handler(Looper.getMainLooper())
     private val statusPollRunnable = object : Runnable {
@@ -189,6 +209,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         videoTextureView.surfaceTextureListener = this
         videoTextureView.isOpaque = true
+        videoTextureView.isFocusableInTouchMode = true
+        videoTextureView.setOnTouchListener { view, event ->
+            handleViewerTouch(view, event)
+        }
         videoTextureView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
             syncVideoSurface(forceRebind = false)
         }
@@ -249,6 +273,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         listDisconnectButton.setOnClickListener {
             diagnosticsLog.log("disconnect_tap", "scene=$currentScene")
+            cancelActiveViewerTouch("disconnect")
             desiredStreamActive = false
             pendingRuntimeConfigSync = false
             lastAppliedStreamActive = null
@@ -333,6 +358,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     override fun onPause() {
         saveCurrentEndpoint()
         statusHandler.removeCallbacks(statusPollRunnable)
+        cancelActiveViewerTouch("pause")
         super.onPause()
     }
 
@@ -439,6 +465,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun exitApplication() {
         diagnosticsLog.log("exit_confirmed", "scene=$currentScene status=${NativeSessionBridge.nativeGetStatus()}")
+        cancelActiveViewerTouch("exit")
         desiredStreamActive = false
         pendingRuntimeConfigSync = false
         lastAppliedStreamActive = null
@@ -463,6 +490,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         lastViewerRecoveryTargetId = Long.MIN_VALUE
         lastViewerRecoveryAtMs = 0L
         lastViewerRecoveryAttempts = 0
+        resetViewerTouchState()
     }
 
     private fun clearPendingSelection() {
@@ -513,6 +541,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun moveToTargets(reason: String, abortPendingSwitch: Boolean) {
         diagnosticsLog.log("targets_return", "reason=$reason scene=$currentScene")
+        cancelActiveViewerTouch(reason)
         desiredStreamActive = false
         requestStreamActive(false, reason)
         if (abortPendingSwitch) {
@@ -567,6 +596,199 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             "targetId=$targetId label=$label tab=$tab gen=$selectionGeneration origin=$origin"
         )
         return true
+    }
+
+    private fun handleViewerTouch(view: View, event: MotionEvent): Boolean {
+        if (currentScene != UiScene.VIEWER) return false
+
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN,
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                if (activeTouchPointerId != MotionEvent.INVALID_POINTER_ID) return true
+                val pointerIndex = event.actionIndex
+                val mapped = mapTouchToVideoCoords(
+                    event.getX(pointerIndex),
+                    event.getY(pointerIndex),
+                    clampToContent = false
+                ) ?: return false
+                view.requestFocus()
+                activeTouchPointerId = event.getPointerId(pointerIndex)
+                activeTouchButtons = INPUT_BUTTON_PRIMARY
+                lastTouchVideoX = mapped.first
+                lastTouchVideoY = mapped.second
+                val queued = NativeSessionBridge.nativeQueueInputEvent(
+                    INPUT_KIND_MOUSE_DOWN,
+                    mapped.first,
+                    mapped.second,
+                    0,
+                    INPUT_VK_LBUTTON,
+                    activeTouchButtons
+                )
+                if (!queued) {
+                    resetViewerTouchState()
+                }
+                return queued
+            }
+
+            MotionEvent.ACTION_MOVE -> {
+                val pointerId = activeTouchPointerId
+                if (pointerId == MotionEvent.INVALID_POINTER_ID) return false
+                val pointerIndex = event.findPointerIndex(pointerId)
+                if (pointerIndex < 0) return true
+                val mapped = mapTouchToVideoCoords(
+                    event.getX(pointerIndex),
+                    event.getY(pointerIndex),
+                    clampToContent = true
+                ) ?: return true
+                if (mapped.first == lastTouchVideoX && mapped.second == lastTouchVideoY) {
+                    return true
+                }
+                lastTouchVideoX = mapped.first
+                lastTouchVideoY = mapped.second
+                NativeSessionBridge.nativeQueueInputEvent(
+                    INPUT_KIND_MOUSE_MOVE,
+                    mapped.first,
+                    mapped.second,
+                    0,
+                    0,
+                    activeTouchButtons
+                )
+                return true
+            }
+
+            MotionEvent.ACTION_UP,
+            MotionEvent.ACTION_POINTER_UP -> {
+                val pointerIndex = event.actionIndex
+                if (event.getPointerId(pointerIndex) != activeTouchPointerId) return true
+                val mapped = mapTouchToVideoCoords(
+                    event.getX(pointerIndex),
+                    event.getY(pointerIndex),
+                    clampToContent = true
+                ) ?: Pair(lastTouchVideoX, lastTouchVideoY)
+                lastTouchVideoX = mapped.first
+                lastTouchVideoY = mapped.second
+                val queued = NativeSessionBridge.nativeQueueInputEvent(
+                    INPUT_KIND_MOUSE_UP,
+                    mapped.first,
+                    mapped.second,
+                    0,
+                    INPUT_VK_LBUTTON,
+                    0
+                )
+                resetViewerTouchState()
+                view.performClick()
+                return queued
+            }
+
+            MotionEvent.ACTION_CANCEL -> {
+                cancelActiveViewerTouch("touch_cancel")
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private fun cancelActiveViewerTouch(reason: String) {
+        if (activeTouchPointerId == MotionEvent.INVALID_POINTER_ID || activeTouchButtons == 0) {
+            resetViewerTouchState()
+            return
+        }
+
+        val queued = NativeSessionBridge.nativeQueueInputEvent(
+            INPUT_KIND_MOUSE_UP,
+            lastTouchVideoX,
+            lastTouchVideoY,
+            0,
+            INPUT_VK_LBUTTON,
+            0
+        )
+        if (!queued) {
+            diagnosticsLog.log(
+                "touch_release_skipped",
+                "reason=$reason x=$lastTouchVideoX y=$lastTouchVideoY"
+            )
+        }
+        resetViewerTouchState()
+    }
+
+    private fun resetViewerTouchState() {
+        activeTouchPointerId = MotionEvent.INVALID_POINTER_ID
+        activeTouchButtons = 0
+        lastTouchVideoX = 0
+        lastTouchVideoY = 0
+    }
+
+    private fun resolveViewerContentRect(): ViewerContentRect? {
+        val viewWidth = videoTextureView.width.toFloat()
+        val viewHeight = videoTextureView.height.toFloat()
+        val contentWidth = videoWidth
+        val contentHeight = videoHeight
+        if (viewWidth <= 0f || viewHeight <= 0f || contentWidth <= 0 || contentHeight <= 0) {
+            return null
+        }
+
+        val viewAspect = viewWidth / viewHeight
+        val contentAspect = contentWidth.toFloat() / contentHeight.toFloat()
+        return if (contentAspect > viewAspect) {
+            val displayHeight = viewWidth / contentAspect
+            ViewerContentRect(
+                left = 0f,
+                top = (viewHeight - displayHeight) * 0.5f,
+                width = viewWidth,
+                height = displayHeight,
+                contentWidth = contentWidth,
+                contentHeight = contentHeight
+            )
+        } else {
+            val displayWidth = viewHeight * contentAspect
+            ViewerContentRect(
+                left = (viewWidth - displayWidth) * 0.5f,
+                top = 0f,
+                width = displayWidth,
+                height = viewHeight,
+                contentWidth = contentWidth,
+                contentHeight = contentHeight
+            )
+        }
+    }
+
+    private fun mapTouchToVideoCoords(touchX: Float, touchY: Float, clampToContent: Boolean): Pair<Int, Int>? {
+        val contentRect = resolveViewerContentRect() ?: return null
+        val minX = contentRect.left
+        val maxX = contentRect.left + contentRect.width
+        val minY = contentRect.top
+        val maxY = contentRect.top + contentRect.height
+        val mappedX =
+            if (clampToContent) {
+                touchX.coerceIn(minX, maxX)
+            } else {
+                if (touchX < minX || touchX > maxX) return null
+                touchX
+            }
+        val mappedY =
+            if (clampToContent) {
+                touchY.coerceIn(minY, maxY)
+            } else {
+                if (touchY < minY || touchY > maxY) return null
+                touchY
+            }
+
+        val relX =
+            ((mappedX - contentRect.left) / contentRect.width)
+                .coerceIn(0f, 1f)
+        val relY =
+            ((mappedY - contentRect.top) / contentRect.height)
+                .coerceIn(0f, 1f)
+        val videoX =
+            (relX * (contentRect.contentWidth - 1).toFloat())
+                .roundToInt()
+                .coerceIn(0, contentRect.contentWidth - 1)
+        val videoY =
+            (relY * (contentRect.contentHeight - 1).toFloat())
+                .roundToInt()
+                .coerceIn(0, contentRect.contentHeight - 1)
+        return Pair(videoX, videoY)
     }
 
     private fun renderStatus() {
