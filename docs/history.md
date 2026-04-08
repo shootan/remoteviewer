@@ -2655,6 +2655,49 @@ Next action
 - 실기기에서 `connect -> windows list -> select -> LIST -> windows list`를 다시 확인해 회귀가 사라졌는지 본다.
 - 여전히 control TCP가 끊기면, Android diagnostics/logcat을 받아 control disconnect 원인을 추가 추적한다.
 
+### 161) 2026-04-08 ldplayer direct deploy verify after stream/list fixes
+Goal
+- LDPlayer에 최신 APK를 직접 설치해 `Connect -> Windows list -> select -> viewer -> LIST -> list`가 실제로 복구됐는지 확인한다.
+
+Files changed
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Deploy:
+  - `adb -s emulator-5558 install -r D:\remote\remote\apps\android_direct_client\app\build\outputs\apk\debug\app-debug.apk`
+  - 결과: 성공
+- Host runtime:
+  - host PID: `54960`
+  - log: `d:\remote\remote\tmp\android_live_host\host.out.log`
+- LDPlayer runtime:
+  - connect screenshot: `d:\remote\remote\tmp\ld_after_connect.png`
+    - `window_list_received count=14`
+  - select screenshot: `d:\remote\remote\tmp\ld_after_select.png`
+    - `select_request targetId=67382`
+    - `select_ack streamGen=2`
+    - `select_ready`
+    - `scene=VIEWER`
+    - `video_debug ... in=62 out=4 -> in=1118 out=1046`
+  - back-to-list screenshot: `d:\remote\remote\tmp\ld_after_back.png`
+    - `viewer_back`
+    - `targets_return reason=viewer_back`
+    - `stream_state_request active=false`
+    - `window_list_request pending`
+    - `window_list_received count=14`
+- Host log confirms same flow:
+  - `[control] window-list seq=1 count=14`
+  - `[control] stream-state seq=2 active=1`
+  - `[control] window-select seq=1 ... streamGen=2`
+  - selected target viewer streaming continued with steady `sentFrames`
+- Scope note:
+  - latest fixes restored target list visibility after viewer roundtrip on LDPlayer.
+  - selection to viewer and viewer back to list both reproduced directly on emulator, not inferred from code only.
+
+Next action
+- 실기기에서도 같은 roundtrip이 유지되는지 한 번 더 확인한다.
+- 이후 `Desktop` path와 traffic stop behavior를 실제 네트워크 지표로 다시 본다.
+
 ### 152) 2026-04-06 host window-capture stall false-positive guard
 Goal
 - static window를 캡처할 때 `callbackFramesPerSec < 10`만으로 freeze로 오판정해 restart하는 문제를 줄인다.
