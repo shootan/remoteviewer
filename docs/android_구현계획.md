@@ -253,4 +253,6 @@ Updated: 2026-04-08 17:32
 - [x] Phase E polish (`immersive fullscreen`, system back `viewer -> list`, connect/targets exit confirm, orientation recreate 방지)
 - [x] Phase E LDPlayer manual verify (`connect` fullscreen screenshot, `targets/connect` exit dialog, `system back -> list`)
 - [x] Phase F touch input bridge 1차 (`TextureView` tap/drag -> existing control input queue, scene 전환/취소 시 release guard)
+- [x] Phase F keyboard/text bridge 1차 (`viewer` auto-dim control bar + keyboard button + hidden IME capture -> existing UTF-16 text queue)
 - [ ] Phase F tap/drag 실기기 검증 (`Desktop Mode`, selected window mode)
+- [ ] Phase F soft keyboard 실기기 검증 (`committed text`, backspace/enter, control bar discoverability)

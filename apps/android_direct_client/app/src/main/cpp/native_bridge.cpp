@@ -217,6 +217,20 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeQueueInputEvent(
              : JNI_FALSE;
 }
 
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeQueueInputText(
+    JNIEnv* env, jobject /* this */, jstring text) {
+  if (!text) return JNI_FALSE;
+  const jsize length = env->GetStringLength(text);
+  if (length <= 0) return JNI_FALSE;
+  const jchar* chars = env->GetStringChars(text, nullptr);
+  if (!chars) return JNI_FALSE;
+  const bool ok = g_session_controller.QueueInputText(
+      reinterpret_cast<const uint16_t*>(chars), static_cast<size_t>(length));
+  env->ReleaseStringChars(text, chars);
+  return ok ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetWindowPanelJson(
     JNIEnv* env, jobject /* this */) {

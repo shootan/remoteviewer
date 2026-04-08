@@ -31,6 +31,7 @@ object NativeSessionBridge {
         keyCode: Int,
         buttons: Int,
     ): Boolean
+    external fun nativeQueueInputText(text: String): Boolean
     external fun nativeGetWindowPanelJson(): String
     external fun nativeResetVideoStream()
 }

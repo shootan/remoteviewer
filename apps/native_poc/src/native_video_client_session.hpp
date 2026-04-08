@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <atomic>
 #include <cstdint>
 #include <mutex>
@@ -73,6 +74,7 @@ class ClientSessionController {
   bool RequestRuntimeConfig(uint32_t bitrate, uint32_t fps);
   bool QueueInputEvent(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta,
                        uint32_t keyCode, uint16_t buttons);
+  bool QueueInputText(const uint16_t* text, size_t count);
 
  private:
   ClientSessionController(const ClientSessionController&) = delete;

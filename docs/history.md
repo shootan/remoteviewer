@@ -2442,6 +2442,46 @@ Next action
 - desktop path capture source 검증을 분리해 `Devices/Desktop` scene 흐름도 안정화한다.
 - 그 다음 `Phase F` 입력 착수 전 gate를 재확인한다.
 
+### 165) 2026-04-08 android phase-f keyboard button and soft text bridge
+Goal
+- viewer에 keyboard 모양 버튼을 추가해 soft keyboard를 바로 띄울 수 있게 한다.
+- hidden IME capture view를 통해 `committed text`와 기본 특수키를 기존 control input 경로로 보낸다.
+- 메뉴 버튼은 상시 노출 대신 top rail이 옅게 남아 있다가 터치 시 다시 또렷해지는 방식으로 정리한다.
+
+Files changed
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/ImeCaptureView.kt`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/NativeSessionBridge.kt`
+- `apps/android_direct_client/app/src/main/cpp/native_bridge.cpp`
+- `apps/android_direct_client/app/src/main/res/layout/activity_main.xml`
+- `apps/android_direct_client/app/src/main/res/values/strings.xml`
+- `apps/android_direct_client/app/src/main/res/drawable/viewer_control_bar_background.xml`
+- `apps/android_direct_client/app/src/main/res/drawable/viewer_control_button_background.xml`
+- `apps/native_poc/src/native_video_client_session.hpp`
+- `apps/native_poc/src/native_video_client_session.cpp`
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Shared core/native client build:
+  - `cmake --build --preset debug-vcpkg --target remote60_native_video_client_shared_core_test --parallel`
+  - 결과: 성공
+- Android JNI/native bridge rebuild:
+  - `cmake --build d:\remote\remote\apps\android_direct_client\app\.cxx\Debug\3m5je1h6\x86_64 --parallel`
+  - `cmake --build d:\remote\remote\apps\android_direct_client\app\.cxx\Debug\3m5je1h6\arm64-v8a --parallel`
+  - 결과: 둘 다 성공
+- Android resource compile:
+  - `aapt2 compile --dir d:\remote\remote\apps\android_direct_client\app\src\main\res -o d:\remote\remote\tmp\android-direct-res.zip`
+  - 결과: 성공
+- Full APK rebuild:
+  - 실행 안 함
+  - 사유: 저장소에 `gradlew`가 없고 로컬 `gradle`도 PATH에 없음
+
+Next action
+- LDPlayer/실기기에서 keyboard 버튼 -> IME open -> committed text/backspace/enter가 실제 host 입력으로 반영되는지 확인한다.
+- 그 다음 `Desktop Mode`, selected-window mode 각각에서 touch + text를 묶어 Phase F runtime verify를 닫는다.
+
 ### 164) 2026-04-08 android phase-f touch input bridge
 Goal
 - Android direct client viewer에서 안 먹던 `tap/drag` 입력을 기존 control input 경로로 연결한다.

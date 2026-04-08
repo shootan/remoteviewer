@@ -3,8 +3,10 @@
 #include "native_video_client_tcp_control.hpp"
 #include "poc_protocol.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstring>
 #include <string>
 #include <thread>
 
@@ -198,6 +200,32 @@ bool ClientSessionController::QueueInputEvent(uint16_t kind, int32_t x, int32_t 
   msg.inputEvent.keyCode = keyCode;
   msg.inputEvent.clientSendQpcUs = now_us();
   inputQueue_.Enqueue(msg);
+  return true;
+}
+
+bool ClientSessionController::QueueInputText(const uint16_t* text, size_t count) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+  if (!text || count == 0) return false;
+
+  size_t offset = 0;
+  while (offset < count) {
+    const size_t remaining = count - offset;
+    const size_t chunk = std::min<size_t>(remaining, kControlInputTextMaxUtf16);
+    QueuedControlInputMessage msg{};
+    msg.type = MessageType::ControlInputText;
+    msg.inputText.header.magic = kMagic;
+    msg.inputText.header.type = static_cast<uint16_t>(MessageType::ControlInputText);
+    msg.inputText.header.size = static_cast<uint16_t>(sizeof(msg.inputText));
+    msg.inputText.seq = inputQueue_.NextSequence();
+    msg.inputText.utf16Count = static_cast<uint16_t>(chunk);
+    std::memcpy(msg.inputText.utf16, text + offset, chunk * sizeof(uint16_t));
+    msg.inputText.clientSendQpcUs = now_us();
+    inputQueue_.Enqueue(msg);
+    offset += chunk;
+  }
   return true;
 }
 

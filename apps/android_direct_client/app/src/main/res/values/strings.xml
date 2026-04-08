@@ -20,6 +20,8 @@
     <string name="settings_apply_button">Apply</string>
     <string name="settings_apply_idle">Current request: none</string>
     <string name="viewer_back_button">LIST</string>
+    <string name="viewer_keyboard_button">⌨</string>
+    <string name="viewer_keyboard_description">Show keyboard</string>
     <string name="exit_confirm_message">종료하시겠습니까?</string>
     <string name="exit_confirm_yes">Yes</string>
     <string name="exit_confirm_no">No</string>

@@ -11,12 +11,14 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
+import android.view.inputmethod.InputMethodManager
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
@@ -32,8 +34,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         private const val INPUT_KIND_MOUSE_MOVE = 1
         private const val INPUT_KIND_MOUSE_DOWN = 2
         private const val INPUT_KIND_MOUSE_UP = 3
+        private const val INPUT_KIND_KEY_DOWN = 5
+        private const val INPUT_KIND_KEY_UP = 6
         private const val INPUT_BUTTON_PRIMARY = 0x1
         private const val INPUT_VK_LBUTTON = 0x01
+        private const val INPUT_VK_BACK = 0x08
     }
 
     private enum class UiScene {
@@ -123,8 +128,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var settingsFpsInput: EditText
     private lateinit var settingsApplyButton: Button
     private lateinit var settingsAppliedText: TextView
+    private lateinit var viewerControlsBar: View
     private lateinit var viewerBackButton: Button
+    private lateinit var viewerKeyboardButton: Button
     private lateinit var viewerOverlayStatusText: TextView
+    private lateinit var viewerImeCaptureView: ImeCaptureView
     private lateinit var videoTextureView: TextureView
     private lateinit var targetListAdapter: ArrayAdapter<String>
     private val targetListLabels = mutableListOf<String>()
@@ -166,6 +174,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var activeTouchButtons = 0
     private var lastTouchVideoX = 0
     private var lastTouchVideoY = 0
+    private val viewerControlsDimAlpha = 0.34f
+    private val viewerControlsFadeRunnable = Runnable {
+        if (currentScene == UiScene.VIEWER) {
+            viewerControlsBar.animate().alpha(viewerControlsDimAlpha).setDuration(220L).start()
+        }
+    }
 
     private val statusHandler = Handler(Looper.getMainLooper())
     private val statusPollRunnable = object : Runnable {
@@ -203,8 +217,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         settingsFpsInput = findViewById(R.id.settingsFpsInput)
         settingsApplyButton = findViewById(R.id.settingsApplyButton)
         settingsAppliedText = findViewById(R.id.settingsAppliedText)
+        viewerControlsBar = findViewById(R.id.viewerControlsBar)
         viewerBackButton = findViewById(R.id.viewerBackButton)
+        viewerKeyboardButton = findViewById(R.id.viewerKeyboardButton)
         viewerOverlayStatusText = findViewById(R.id.viewerOverlayStatusText)
+        viewerImeCaptureView = findViewById(R.id.viewerImeCaptureView)
         videoTextureView = findViewById(R.id.videoTextureView)
 
         videoTextureView.surfaceTextureListener = this
@@ -216,6 +233,24 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         videoTextureView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
             syncVideoSurface(forceRebind = false)
         }
+        viewerImeCaptureView.listener =
+            object : ImeCaptureView.Listener {
+                override fun onCommitText(text: CharSequence) {
+                    queueViewerCommittedText(text)
+                }
+
+                override fun onDeleteBackward(count: Int) {
+                    repeat(count.coerceAtMost(8)) {
+                        queueViewerSpecialKey(INPUT_VK_BACK, KeyEvent.ACTION_DOWN)
+                        queueViewerSpecialKey(INPUT_VK_BACK, KeyEvent.ACTION_UP)
+                    }
+                }
+
+                override fun onSpecialKey(keyCode: Int, action: Int) {
+                    val windowsVk = mapAndroidKeyCodeToWindowsVk(keyCode) ?: return
+                    queueViewerSpecialKey(windowsVk, action)
+                }
+            }
 
         targetListAdapter =
             ArrayAdapter(this, android.R.layout.simple_list_item_1, targetListLabels).also {
@@ -274,6 +309,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         listDisconnectButton.setOnClickListener {
             diagnosticsLog.log("disconnect_tap", "scene=$currentScene")
             cancelActiveViewerTouch("disconnect")
+            hideViewerKeyboard("disconnect")
             desiredStreamActive = false
             pendingRuntimeConfigSync = false
             lastAppliedStreamActive = null
@@ -337,7 +373,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
 
         viewerBackButton.setOnClickListener {
+            showViewerControls(emphasized = true)
             handleViewerBack("viewer_back")
+        }
+        viewerKeyboardButton.setOnClickListener {
+            toggleViewerKeyboard()
         }
 
         renderStatus()
@@ -359,6 +399,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         saveCurrentEndpoint()
         statusHandler.removeCallbacks(statusPollRunnable)
         cancelActiveViewerTouch("pause")
+        hideViewerKeyboard("pause")
         super.onPause()
     }
 
@@ -386,6 +427,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         saveCurrentEndpoint()
         exitDialog?.dismiss()
         exitDialog = null
+        hideViewerKeyboard("destroy")
         releaseVideoSurface()
         super.onDestroy()
     }
@@ -429,7 +471,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun handleSystemBack() {
         when (currentScene) {
-            UiScene.VIEWER, UiScene.SWITCHING -> handleViewerBack("system_back")
+            UiScene.VIEWER, UiScene.SWITCHING -> {
+                if (viewerImeCaptureView.hasFocus()) {
+                    hideViewerKeyboard("system_back")
+                    showViewerControls(emphasized = true)
+                    return
+                }
+                handleViewerBack("system_back")
+            }
             UiScene.TARGETS, UiScene.CONNECT -> showExitConfirmDialog()
         }
     }
@@ -466,6 +515,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun exitApplication() {
         diagnosticsLog.log("exit_confirmed", "scene=$currentScene status=${NativeSessionBridge.nativeGetStatus()}")
         cancelActiveViewerTouch("exit")
+        hideViewerKeyboard("exit")
         desiredStreamActive = false
         pendingRuntimeConfigSync = false
         lastAppliedStreamActive = null
@@ -542,6 +592,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun moveToTargets(reason: String, abortPendingSwitch: Boolean) {
         diagnosticsLog.log("targets_return", "reason=$reason scene=$currentScene")
         cancelActiveViewerTouch(reason)
+        hideViewerKeyboard(reason)
         desiredStreamActive = false
         requestStreamActive(false, reason)
         if (abortPendingSwitch) {
@@ -600,6 +651,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun handleViewerTouch(view: View, event: MotionEvent): Boolean {
         if (currentScene != UiScene.VIEWER) return false
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            showViewerControls()
+        }
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN,
@@ -718,6 +772,91 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         lastTouchVideoX = 0
         lastTouchVideoY = 0
     }
+
+    private fun toggleViewerKeyboard() {
+        showViewerControls(emphasized = true)
+        if (viewerImeCaptureView.hasFocus()) {
+            hideViewerKeyboard("toolbar_toggle")
+            return
+        }
+        diagnosticsLog.log("viewer_keyboard_tap", "scene=$currentScene")
+        viewerImeCaptureView.requestFocus()
+        viewerImeCaptureView.post {
+            val imm = getSystemService(InputMethodManager::class.java)
+            imm?.showSoftInput(viewerImeCaptureView, InputMethodManager.SHOW_IMPLICIT)
+        }
+    }
+
+    private fun hideViewerKeyboard(reason: String) {
+        if (!::viewerImeCaptureView.isInitialized) return
+        val hadFocus = viewerImeCaptureView.hasFocus()
+        val imm = getSystemService(InputMethodManager::class.java)
+        imm?.hideSoftInputFromWindow(viewerImeCaptureView.windowToken, 0)
+        viewerImeCaptureView.clearFocus()
+        if (hadFocus) {
+            diagnosticsLog.log("viewer_keyboard_hide", "reason=$reason")
+        }
+    }
+
+    private fun showViewerControls(emphasized: Boolean = false) {
+        if (!::viewerControlsBar.isInitialized) return
+        val targetAlpha = if (emphasized) 0.96f else 0.88f
+        viewerControlsBar.animate().alpha(targetAlpha).setDuration(120L).start()
+        statusHandler.removeCallbacks(viewerControlsFadeRunnable)
+        val delayMs = if (emphasized) 3200L else 2400L
+        statusHandler.postDelayed(viewerControlsFadeRunnable, delayMs)
+    }
+
+    private fun queueViewerCommittedText(text: CharSequence) {
+        if (currentScene != UiScene.VIEWER || text.isEmpty()) return
+        val ok = NativeSessionBridge.nativeQueueInputText(text.toString())
+        if (!ok) {
+            diagnosticsLog.log("viewer_text_queue_failed", "len=${text.length}")
+        }
+    }
+
+    private fun queueViewerSpecialKey(windowsVk: Int, action: Int): Boolean {
+        if (currentScene != UiScene.VIEWER) return false
+        val inputKind =
+            when (action) {
+                KeyEvent.ACTION_DOWN -> INPUT_KIND_KEY_DOWN
+                KeyEvent.ACTION_UP -> INPUT_KIND_KEY_UP
+                else -> return false
+            }
+        val x = resolveKeyboardVideoCoord(lastTouchVideoX, videoWidth)
+        val y = resolveKeyboardVideoCoord(lastTouchVideoY, videoHeight)
+        return NativeSessionBridge.nativeQueueInputEvent(
+            inputKind,
+            x,
+            y,
+            0,
+            windowsVk,
+            activeTouchButtons
+        )
+    }
+
+    private fun resolveKeyboardVideoCoord(lastCoord: Int, extent: Int): Int {
+        if (extent <= 0) return 0
+        return lastCoord.coerceIn(0, extent - 1)
+    }
+
+    private fun mapAndroidKeyCodeToWindowsVk(keyCode: Int): Int? =
+        when (keyCode) {
+            KeyEvent.KEYCODE_ENTER,
+            KeyEvent.KEYCODE_NUMPAD_ENTER -> 0x0D
+            KeyEvent.KEYCODE_TAB -> 0x09
+            KeyEvent.KEYCODE_ESCAPE -> 0x1B
+            KeyEvent.KEYCODE_FORWARD_DEL -> 0x2E
+            KeyEvent.KEYCODE_DPAD_LEFT -> 0x25
+            KeyEvent.KEYCODE_DPAD_UP -> 0x26
+            KeyEvent.KEYCODE_DPAD_RIGHT -> 0x27
+            KeyEvent.KEYCODE_DPAD_DOWN -> 0x28
+            KeyEvent.KEYCODE_MOVE_HOME -> 0x24
+            KeyEvent.KEYCODE_MOVE_END -> 0x23
+            KeyEvent.KEYCODE_PAGE_UP -> 0x21
+            KeyEvent.KEYCODE_PAGE_DOWN -> 0x22
+            else -> null
+        }
 
     private fun resolveViewerContentRect(): ViewerContentRect? {
         val viewWidth = videoTextureView.width.toFloat()
@@ -840,6 +979,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     )
                     clearPendingSelection()
                     currentScene = UiScene.VIEWER
+                    showViewerControls(emphasized = true)
                 } else if (pendingSelectionStartedAtMs > 0L && nowMs - pendingSelectionStartedAtMs >= 6000L) {
                     diagnosticsLog.log(
                         "select_timeout",
@@ -851,6 +991,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
         } else if (currentScene == UiScene.SWITCHING) {
             currentScene = UiScene.VIEWER
+            showViewerControls(emphasized = true)
         }
 
         syncConnectedClientPreferences(isConnected)
@@ -953,6 +1094,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             if (currentScene == UiScene.VIEWER || currentScene == UiScene.SWITCHING) View.VISIBLE else View.GONE
         if (currentScene != UiScene.VIEWER && currentScene != UiScene.SWITCHING && videoSurface != null) {
             releaseVideoSurface()
+        }
+        if (currentScene != UiScene.VIEWER) {
+            statusHandler.removeCallbacks(viewerControlsFadeRunnable)
         }
     }
 
