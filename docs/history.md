@@ -2727,6 +2727,58 @@ Next action
 - LDPlayer나 실기기에서 `connect -> select -> viewer -> system back -> list`와 `connect/list -> system back -> exit dialog`를 직접 확인한다.
 - 세로/가로 전환 중 연결 유지와 viewer surface 재바인딩이 실제 장비에서 안정적인지 추가 검증한다.
 
+### 163) 2026-04-08 ldplayer fullscreen and back-flow verify
+Goal
+- LDPlayer에서 Android direct client의 fullscreen/back UX를 직접 눌러 확인한다.
+- connect scene과 targets scene의 종료 팝업, fullscreen 복원, system back 복귀 경로를 검증한다.
+
+Files changed
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- LDPlayer runtime:
+  - device: `emulator-5558`
+  - app launch: `adb -s emulator-5558 shell am start -W -n com.remote60.androiddirect/.MainActivity --es host 192.168.0.76 --ei videoPort 43000 --ei controlPort 43001`
+  - connect scene screenshot:
+    - `d:\remote\remote\tmp\ld_verify_app_connect2.png`
+    - 상태바 없는 fullscreen shell 확인
+  - targets scene screenshot:
+    - `d:\remote\remote\tmp\ld_verify_targets.png`
+    - `connected window_list_received count=14`
+  - targets exit dialog:
+    - `d:\remote\remote\tmp\ld_verify_targets_exit_dialog.png`
+    - `종료하시겠습니까?` + `NO/YES` 확인
+  - targets dialog dismiss after `NO`:
+    - `d:\remote\remote\tmp\ld_verify_targets_after_no.png`
+    - fullscreen targets scene 복원 확인
+  - switching/system back path:
+    - `d:\remote\remote\tmp\ld_verify_back_from_switching.png`
+    - log:
+      - `viewer_back reason=system_back`
+      - `targets_return reason=system_back`
+      - `window_list_received count=14`
+  - connect scene exit dialog:
+    - `d:\remote\remote\tmp\ld_verify_connect_exit_dialog.png`
+    - `종료하시겠습니까?` + `NO/YES` 확인
+- Runtime limitation:
+  - selected-window path 재검증 중 `AGENTS.md - remote - Visual Studio Code` 선택은 `select_timeout`으로 viewer first frame까지는 재도달하지 못함
+  - log:
+    - `select_request targetId=1903738`
+    - `select_ack streamGen=12`
+    - `select_timeout ... codec=off in=0 out=0`
+
+Scope note
+- connect scene과 targets scene에서 뒤로가기 종료 팝업은 직접 캡처로 확인했다.
+- targets scene에서 `NO`를 누르면 dialog 종료 뒤 fullscreen list 화면으로 복원된다.
+- viewer 전환 중(`SWITCHING`) system back은 list 복귀로 정상 라우팅되며 reconnect 없이 window list가 다시 채워진다.
+- 이번 턴에서는 rotation은 LDPlayer에서 강제 재현하지 못했고, user가 별도로 회전 정상 동작을 확인했다고 전달함.
+
+Next action
+- viewer first-frame가 재현되는 대상(window 또는 desktop)을 기준으로 `VIEWER` 진입 상태의 system back까지 다시 한 번 확인한다.
+- user가 확인한 rotation 결과를 포함해 실기기 기준 최종 폴리싱 체크를 마무리한다.
+
 ### 152) 2026-04-06 host window-capture stall false-positive guard
 Goal
 - static window를 캡처할 때 `callbackFramesPerSec < 10`만으로 freeze로 오판정해 restart하는 문제를 줄인다.

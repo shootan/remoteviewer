@@ -1,5 +1,5 @@
 # Android Direct Client 구현계획
-Updated: 2026-04-08 17:15
+Updated: 2026-04-08 17:32
 
 이 문서는 Android direct client 작업의 단일 기준(Source of Truth)으로 사용한다.
 
@@ -251,3 +251,4 @@ Updated: 2026-04-08 17:15
 - [x] Android diagnostics log file (`android_direct_client_session.log`, scene/status/video stall 기록)
 - [x] Phase E second-selection re-entry guard (selection ack 후 viewer 전환 + target switch 시 decoder reset)
 - [x] Phase E polish (`immersive fullscreen`, system back `viewer -> list`, connect/targets exit confirm, orientation recreate 방지)
+- [x] Phase E LDPlayer manual verify (`connect` fullscreen screenshot, `targets/connect` exit dialog, `system back -> list`)
