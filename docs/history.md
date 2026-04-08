@@ -2698,6 +2698,35 @@ Next action
 - 실기기에서도 같은 roundtrip이 유지되는지 한 번 더 확인한다.
 - 이후 `Desktop` path와 traffic stop behavior를 실제 네트워크 지표로 다시 본다.
 
+### 162) 2026-04-08 android fullscreen/back/rotation polish
+Goal
+- Android direct client를 폴리싱 단계로 올리기 위해 viewer/fullscreen, 시스템 뒤로가기, 회전 안정성을 함께 정리한다.
+
+Files changed
+- `apps/android_direct_client/app/src/main/AndroidManifest.xml`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `apps/android_direct_client/app/src/main/res/values/strings.xml`
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Android build:
+  - `$env:JAVA_HOME='C:\Program Files\Android\Android Studio\jbr'; $env:Path=\"$env:JAVA_HOME\\bin;$env:Path\"; & d:\remote\remote\tmp\gradle\gradle-8.7\bin\gradle.bat assembleDebug`
+  - 결과: 성공
+- Runtime note:
+  - 이번 턴에서는 LDPlayer/실기기 수동 검증은 아직 수행하지 않음
+
+Scope note
+- `MainActivity`가 resume/focus/config change마다 immersive fullscreen을 다시 적용해 상단 상태바/시스템 바가 기본적으로 숨겨진다.
+- 시스템 뒤로가기 입력을 scene-aware로 라우팅해 viewer/switching에서는 list로 복귀하고, connect/targets에서는 `종료하시겠습니까?` 확인 다이얼로그를 띄운다.
+- `AndroidManifest.xml`에 `configChanges`를 추가해 회전 시 액티비티 재생성을 막고, 구성 변경 시 surface/UI를 재동기화한다.
+- `renderStatus()`가 네이티브 세션 상태로 `connectFlowActive`를 복원하도록 보강해 lifecycle 경계에서도 UI scene 복구 여지를 늘렸다.
+
+Next action
+- LDPlayer나 실기기에서 `connect -> select -> viewer -> system back -> list`와 `connect/list -> system back -> exit dialog`를 직접 확인한다.
+- 세로/가로 전환 중 연결 유지와 viewer surface 재바인딩이 실제 장비에서 안정적인지 추가 검증한다.
+
 ### 152) 2026-04-06 host window-capture stall false-positive guard
 Goal
 - static window를 캡처할 때 `callbackFramesPerSec < 10`만으로 freeze로 오판정해 restart하는 문제를 줄인다.

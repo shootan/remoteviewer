@@ -1,8 +1,11 @@
 package com.remote60.androiddirect
 
 import android.app.Activity
+import android.app.AlertDialog
+import android.content.res.Configuration
 import android.graphics.Matrix
 import android.graphics.SurfaceTexture
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -11,6 +14,8 @@ import android.util.Log
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
@@ -140,6 +145,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var videoHeight = 0
     private var surfaceBufferWidth = 0
     private var surfaceBufferHeight = 0
+    private var exitDialog: AlertDialog? = null
 
     private val statusHandler = Handler(Looper.getMainLooper())
     private val statusPollRunnable = object : Runnable {
@@ -152,6 +158,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        applyImmersiveMode()
 
         diagnosticsLog = SessionDiagnosticsLog(this)
         connectScene = findViewById(R.id.connectScene)
@@ -305,21 +312,21 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
 
         viewerBackButton.setOnClickListener {
-            diagnosticsLog.log(
-                "viewer_back",
-                "selected=${pendingSelectionLabel.ifBlank { "none" }} currentScene=$currentScene stage=$selectionStage"
-            )
-            moveToTargets("viewer_back", abortPendingSwitch = selectionStage != SelectionStage.IDLE)
-            renderStatus()
+            handleViewerBack("viewer_back")
         }
 
         renderStatus()
+    }
+
+    override fun onBackPressed() {
+        handleSystemBack()
     }
 
     override fun onResume() {
         super.onResume()
         statusHandler.removeCallbacks(statusPollRunnable)
         statusHandler.post(statusPollRunnable)
+        applyImmersiveMode()
         syncVideoSurface(forceRebind = false)
     }
 
@@ -329,8 +336,30 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         super.onPause()
     }
 
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            applyImmersiveMode()
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        diagnosticsLog.log(
+            "configuration_changed",
+            "orientation=${if (newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE) "landscape" else "portrait"}"
+        )
+        applyImmersiveMode()
+        videoTextureView.post {
+            renderStatus()
+            syncVideoSurface(forceRebind = true)
+        }
+    }
+
     override fun onDestroy() {
         saveCurrentEndpoint()
+        exitDialog?.dismiss()
+        exitDialog = null
         releaseVideoSurface()
         super.onDestroy()
     }
@@ -349,6 +378,80 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
+    }
+
+    private fun applyImmersiveMode() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.setDecorFitsSystemWindows(false)
+            window.insetsController?.let { controller ->
+                controller.hide(WindowInsets.Type.systemBars())
+                controller.systemBarsBehavior =
+                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+            return
+        }
+
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility =
+            View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+    }
+
+    private fun handleSystemBack() {
+        when (currentScene) {
+            UiScene.VIEWER, UiScene.SWITCHING -> handleViewerBack("system_back")
+            UiScene.TARGETS, UiScene.CONNECT -> showExitConfirmDialog()
+        }
+    }
+
+    private fun handleViewerBack(reason: String) {
+        diagnosticsLog.log(
+            "viewer_back",
+            "reason=$reason selected=${pendingSelectionLabel.ifBlank { "none" }} " +
+                "currentScene=$currentScene stage=$selectionStage"
+        )
+        moveToTargets(reason, abortPendingSwitch = selectionStage != SelectionStage.IDLE)
+        renderStatus()
+    }
+
+    private fun showExitConfirmDialog() {
+        if (exitDialog?.isShowing == true) return
+
+        exitDialog = AlertDialog.Builder(this)
+            .setMessage(R.string.exit_confirm_message)
+            .setPositiveButton(R.string.exit_confirm_yes) { _, _ ->
+                exitDialog = null
+                exitApplication()
+            }
+            .setNegativeButton(R.string.exit_confirm_no) { dialog, _ ->
+                dialog.dismiss()
+            }
+            .setOnDismissListener {
+                exitDialog = null
+                applyImmersiveMode()
+            }
+            .show()
+    }
+
+    private fun exitApplication() {
+        diagnosticsLog.log("exit_confirmed", "scene=$currentScene status=${NativeSessionBridge.nativeGetStatus()}")
+        desiredStreamActive = false
+        pendingRuntimeConfigSync = false
+        lastAppliedStreamActive = null
+        if (selectionStage != SelectionStage.IDLE) {
+            NativeSessionBridge.nativeAbortVideoSwitch()
+        } else {
+            NativeSessionBridge.nativeResetVideoStream()
+        }
+        NativeSessionBridge.nativeDisconnect()
+        connectFlowActive = false
+        clearPendingSelection()
+        resetViewerObservability()
+        finishAffinity()
     }
 
     private fun resetViewerObservability() {
@@ -476,13 +579,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val lastOutputPresentationUs = NativeSessionBridge.nativeGetLastOutputPresentationUs()
         val isConnecting = statusValue.startsWith("connecting")
         val isConnected = statusValue.startsWith("connected")
+        connectFlowActive = isConnecting || isConnected
 
         if (!isConnecting && !isConnected && currentScene != UiScene.CONNECT) {
             currentScene = UiScene.CONNECT
             desiredStreamActive = false
             clearPendingSelection()
             resetViewerObservability()
-        } else if (connectFlowActive && currentScene == UiScene.CONNECT && (isConnecting || isConnected)) {
+        } else if (currentScene == UiScene.CONNECT && connectFlowActive) {
             currentScene = UiScene.TARGETS
         }
 
