@@ -2442,6 +2442,32 @@ Next action
 - desktop path capture source 검증을 분리해 `Devices/Desktop` scene 흐름도 안정화한다.
 - 그 다음 `Phase F` 입력 착수 전 gate를 재확인한다.
 
+### 167) 2026-04-09 buffering/gpu contention analysis review
+Goal
+- `docs/버퍼링_GPU경합_분석_20260409.md`의 주장 중 현재 코드 기준으로 인정 가능한 부분과 인정하기 어려운 부분을 분리한다.
+- 인정하는 부분을 실제 후속 수정 방향으로 어떻게 바꿔 써야 하는지 별도 검토 문서로 남긴다.
+
+Files changed
+- `docs/버퍼링_GPU경합_검토_20260409.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Static code inspection only:
+  - `docs/버퍼링_GPU경합_분석_20260409.md` 본문 검토
+  - `apps/native_poc/src/native_video_host_main.cpp`에서 D3D device/context 생성, `d3dContextMu`, capture callback, `GpuBgraScaler::scale()` 구간 대조
+  - `apps/native_poc/src/mf_h264_codec.cpp`에서 `H264Encoder::set_d3d11_device()`, `encode_frame()` 입력 샘플 생성 경로 대조
+- Conclusion:
+  - capture readback + GPU scaler shared immediate context/mutex 경합 가능성은 인정
+  - MFT encoder가 같은 mutex direct contender라는 주장, 단일 staging 구조에서 안 (C)가 바로 안전하다는 주장, 런타임 근거 없는 원인 확정 톤은 비인정
+- Build/test:
+  - 문서화 작업만 수행
+  - 추가 빌드/런타임 테스트 없음
+
+Next action
+- 실제 수정에 들어가려면 먼저 capture/scaler의 `d3dContextMu` wait/hold 시간을 분리 계측한다.
+- short-term fix는 단일 staging 공유를 유지한 채 memcpy만 lock 밖으로 빼는 방식이 아니라, staging ring/ownership 분리까지 포함해 설계한다.
+
 ### 166) 2026-04-09 H264 stability hardening follow-up
 Goal
 - `docs/h264_코드리뷰_20260409.md`에서 지적된 즉시 대응 항목(C1/C2/C3)과 후속 안정성 항목(H1/H2)을 현재 코드에 반영한다.
