@@ -54,6 +54,7 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint64_t latestOutputStreamGeneration_ = 0;
   uint64_t lastOutputPresentationUs_ = 0;
   uint64_t staleFrameDropCount_ = 0;
+  uint64_t oversizedInputFrameDropCount_ = 0;
   bool awaitingSelectionAck_ = false;
   std::vector<uint8_t> csd0_;
   std::vector<uint8_t> csd1_;

@@ -406,6 +406,18 @@ bool test_udp_assembler() {
   if (!expect(result.disposition == UdpH264AssemblyDisposition::Dropped && result.reorderDetected,
               "udp assembler should detect reorder/drop")) return false;
 
+  assembler.Reset();
+  header->seq = 44;
+  header->flags = 0x2u;
+  header->payloadSize = (16u * 1024u * 1024u) + 1u;
+  header->chunkOffset = 0;
+  header->chunkSize = 4;
+  result = assembler.PushDatagram(datagram.data(), datagram.size());
+  if (!expect(result.disposition == UdpH264AssemblyDisposition::Malformed && result.oversizePayload,
+              "udp assembler should reject oversized payloads")) return false;
+  if (!expect(result.rejectedPayloadSize == ((16u * 1024u * 1024u) + 1u),
+              "udp assembler should report rejected payload size")) return false;
+
   return true;
 }
 

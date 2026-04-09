@@ -1,6 +1,6 @@
 ﻿# remote60 작업 히스토리 (NEW)
 
-업데이트: 2026-03-16
+업데이트: 2026-04-09
 
 목적
 - 이 파일은 최근 작업만 유지해서 컨텍스트 소모를 줄인다.
@@ -2441,6 +2441,45 @@ Validation / build / test result
 Next action
 - desktop path capture source 검증을 분리해 `Devices/Desktop` scene 흐름도 안정화한다.
 - 그 다음 `Phase F` 입력 착수 전 gate를 재확인한다.
+
+### 166) 2026-04-09 H264 stability hardening follow-up
+Goal
+- `docs/h264_코드리뷰_20260409.md`에서 지적된 즉시 대응 항목(C1/C2/C3)과 후속 안정성 항목(H1/H2)을 현재 코드에 반영한다.
+- silent corruption과 oversized payload/input에 대한 무방비 경로를 없애고, Windows/native와 Android 양쪽에 최소 진단을 남긴다.
+
+Files changed
+- `apps/android_direct_client/app/src/main/cpp/android_video_decoder.cpp`
+- `apps/android_direct_client/app/src/main/cpp/android_video_decoder.hpp`
+- `apps/native_poc/src/mf_h264_codec.cpp`
+- `apps/native_poc/src/mf_h264_codec.hpp`
+- `apps/native_poc/src/native_video_client_main.cpp`
+- `apps/native_poc/src/native_video_client_session.cpp`
+- `apps/native_poc/src/native_video_client_shared_core.cpp`
+- `apps/native_poc/src/native_video_client_shared_core.hpp`
+- `apps/native_poc/src/native_video_client_shared_core_test.cpp`
+- `docs/android_구현계획.md`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Native Debug build:
+  - `cmake --build D:\remote\remote\build-vcpkg-local --config Debug --target remote60_native_video_host_poc remote60_native_video_client_poc remote60_native_video_client_shared_core_test`
+  - 결과: 성공
+- Shared core test:
+  - `D:\remote\remote\build-vcpkg-local\apps\native_poc\Debug\remote60_native_video_client_shared_core_test.exe`
+  - 결과: `PASS`
+  - 추가 검증: oversized UDP payload가 `Malformed + oversizePayload + rejectedPayloadSize`로 거부됨
+- Localhost H264 smoke:
+  - `powershell -ExecutionPolicy Bypass -File D:\remote\remote\automation\verify_native_video_runtime.ps1 -Root D:\remote\remote -BuildDir build-vcpkg-local -Codec h264 -Transport udp -Fps 30 -FpsHint 30 -HostSeconds 12 -ClientSeconds 8 -Bitrate 5000000 -Keyint 60 -EncodeWidth 1280 -EncodeHeight 720 -EncoderBackend mft_auto -DecoderBackend mft_auto -NoInputChannel -GateAProfile`
+  - log: `D:\remote\remote\automation\logs\verify-native-video-20260409-160801`
+  - 결과: `HOST_RC=0`, `CLIENT_RC=0`, `OVERALL_OK=True`, `GATE_A_PASS=True`, `UDP_ASSEMBLY_MALFORMED_TOTAL=0`
+- Android build/runtime:
+  - 실행 안 함
+  - 사유: 저장소에 `gradlew`가 없고 현재 셸에서 `gradle`도 사용 불가
+
+Next action
+- Android Studio 기준 `:app:assembleDebug`와 `connect -> select -> viewer` 1회로 oversized input log/drop 경로를 실제 런타임에서 확인한다.
+- 그 다음 남은 Android 실기기 검증(`Phase F tap/drag`, `soft keyboard`)과 별도로 desktop capture source/soak 항목을 이어간다.
 
 ### 165) 2026-04-08 android phase-f keyboard button and soft text bridge
 Goal

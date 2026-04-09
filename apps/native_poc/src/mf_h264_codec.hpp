@@ -87,6 +87,8 @@ class H264Encoder {
   bool sampleTimeOutputTimestampTrusted_ = true;
   uint64_t sampleTimeOutputTimestampTotalSamples_ = 0;
   uint64_t sampleTimeOutputTimestampFallbackCount_ = 0;
+  uint32_t sampleTimeOutputTimestampRecoveryStreak_ = 0;
+  int64_t sampleTimeOutputTimestampRecoveryOffsetHns_ = 0;
   uint32_t d3dManagerResetToken_ = 0;
   Microsoft::WRL::ComPtr<IMFDXGIDeviceManager> d3dManager_;
   Microsoft::WRL::ComPtr<IMFMediaEventGenerator> eventGenerator_;
@@ -101,7 +103,8 @@ class H264Decoder {
   bool initialize(uint32_t width, uint32_t height, uint32_t fps);
   bool decode_access_unit(const std::vector<uint8_t>& annexb, bool keyFrame,
                           int64_t inputSampleTimeHns,
-                          std::vector<DecodedFrameNv12>* outFrames);
+                          std::vector<DecodedFrameNv12>* outFrames,
+                          bool* outPendingTimestampOverflow = nullptr);
   const char* backend_name() const { return backendName_; }
   bool using_hardware() const { return usingHardware_; }
   void reset();

@@ -2486,6 +2486,7 @@ int main(int argc, char** argv) {
     uint64_t sumDecodeTailUs = 0;
     uint64_t maxDecodeTailUs = 0;
     uint64_t decodeFailCount = 0;
+    uint64_t decodeTimestampOverflowCount = 0;
     uint64_t decodeEmptyCount = 0;
     uint64_t decodeEmptyStreak = 0;
     uint64_t decodeEmptyStreakStartUs = 0;
@@ -2953,7 +2954,9 @@ int main(int argc, char** argv) {
       const uint64_t decodeStartUs = qpc_now_us();
       std::vector<DecodedFrameNv12> outFrames;
       const int64_t inputSampleTimeHns = static_cast<int64_t>(h.captureQpcUs) * 10;
-      if (!decoder.decode_access_unit(*payloadPtr, keyFrame, inputSampleTimeHns, &outFrames)) {
+      bool pendingTimestampOverflow = false;
+      if (!decoder.decode_access_unit(*payloadPtr, keyFrame, inputSampleTimeHns, &outFrames,
+                                      &pendingTimestampOverflow)) {
         decodeEmptyStreak = 0;
         decodeEmptyStreakStartUs = 0;
         ++skippedQueued;
@@ -3004,6 +3007,25 @@ int main(int argc, char** argv) {
           maxDecodeTailUs = 0;
           statAtUs += 1000000ULL;
         }
+        return true;
+      }
+      if (pendingTimestampOverflow) {
+        decodeEmptyStreak = 0;
+        decodeEmptyStreakStartUs = 0;
+        ++skippedQueued;
+        ++decodeTimestampOverflowCount;
+        request_keyframe(4);
+        ++congestionRecoveryRequestCount;
+        if ((decodeTimestampOverflowCount % 10ULL) == 1ULL) {
+          std::cout << "[native-video-client] decoder timestamp queue overflow count="
+                    << decodeTimestampOverflowCount << "\n";
+        }
+        catchupMode = true;
+        lastCatchupEnterUs = packetNowUs;
+        waitForKeyFrame = true;
+        decoder.reset();
+        transition_congestion_state(ClientCongestionState::Congested, packetNowUs, "decode_ts_overflow",
+                                    streamLagUs, decodeQueueLagEstimateUs, h.seq);
         return true;
       }
       waitForKeyFrame = false;
@@ -3239,6 +3261,7 @@ int main(int argc, char** argv) {
       std::uniform_int_distribution<uint32_t> udpSimDropDist(0, 999);
       UdpH264FrameAssembler assembler;
       uint64_t assemblyDropped = 0;
+      uint64_t oversizePayloadDropCount = 0;
       uint64_t udpSimDroppedCount = 0;
       uint64_t udpSimAcceptedCount = 0;
       uint64_t udpAssemblyStatAtUs = qpc_now_us() + 1000000ULL;
@@ -3287,6 +3310,11 @@ int main(int argc, char** argv) {
         if (assembleResult.disposition == UdpH264AssemblyDisposition::Malformed) {
           ++skippedQueued;
           ++udpAssemblyMalformedCount;
+          if (assembleResult.oversizePayload && ((++oversizePayloadDropCount % 30ULL) == 1ULL)) {
+            std::cout << "[native-video-client] dropped oversized udp payload bytes="
+                      << assembleResult.rejectedPayloadSize
+                      << " count=" << oversizePayloadDropCount << "\n";
+          }
           continue;
         }
 

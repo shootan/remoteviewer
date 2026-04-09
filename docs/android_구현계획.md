@@ -1,5 +1,5 @@
 # Android Direct Client 구현계획
-Updated: 2026-04-08 17:32
+Updated: 2026-04-09 16:12
 
 이 문서는 Android direct client 작업의 단일 기준(Source of Truth)으로 사용한다.
 
@@ -254,5 +254,8 @@ Updated: 2026-04-08 17:32
 - [x] Phase E LDPlayer manual verify (`connect` fullscreen screenshot, `targets/connect` exit dialog, `system back -> list`)
 - [x] Phase F touch input bridge 1차 (`TextureView` tap/drag -> existing control input queue, scene 전환/취소 시 release guard)
 - [x] Phase F keyboard/text bridge 1차 (`viewer` auto-dim control bar + keyboard button + hidden IME capture -> existing UTF-16 text queue)
+- [x] Android decoder oversized input guard (`MediaCodec` input oversize log/drop + codec reset, debug status counter)
+- [x] Android codec config CSD pointer invariant 고정 (`csd0/csd1` pointer capture + assert before `AMediaCodec_configure`)
+- [ ] Android stability runtime verify (`Android Studio :app:assembleDebug`, oversized input log/drop, `connect -> select -> viewer`)
 - [ ] Phase F tap/drag 실기기 검증 (`Desktop Mode`, selected window mode)
 - [ ] Phase F soft keyboard 실기기 검증 (`committed text`, backspace/enter, control bar discoverability)

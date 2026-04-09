@@ -6,6 +6,7 @@
 #include <media/NdkMediaFormat.h>
 
 #include <algorithm>
+#include <cassert>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -156,8 +157,22 @@ void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264As
 
   size_t inputBufferSize = 0;
   uint8_t* inputBuffer = AMediaCodec_getInputBuffer(codec_, inputIndex, &inputBufferSize);
-  if (!inputBuffer || frame.payload.size() > inputBufferSize) {
-    AMediaCodec_queueInputBuffer(codec_, inputIndex, 0, 0, 0, 0);
+  if (!inputBuffer) {
+    log_error("AMediaCodec_getInputBuffer returned null");
+    ResetCodecLocked();
+    return;
+  }
+  if (frame.payload.size() > inputBufferSize) {
+    ++oversizedInputFrameDropCount_;
+    char line[192];
+    std::snprintf(line, sizeof(line),
+                  "dropping oversized codec input bytes=%zu inputBuffer=%zu drops=%llu",
+                  frame.payload.size(), inputBufferSize,
+                  static_cast<unsigned long long>(oversizedInputFrameDropCount_));
+    log_error(line);
+    // MediaCodec has no cancel-input-buffer path; reset the codec to release the slot
+    // after dropping this oversized access unit instead of queuing an empty buffer.
+    ResetCodecLocked();
     return;
   }
 
@@ -296,6 +311,7 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
   status += " inGen=" + std::to_string(latestInputStreamGeneration_);
   status += " outGen=" + std::to_string(latestOutputStreamGeneration_);
   status += " stale=" + std::to_string(staleFrameDropCount_);
+  status += " oversize=" + std::to_string(oversizedInputFrameDropCount_);
   status += " lastOutUs=" + std::to_string(lastOutputPresentationUs_);
   status += " awaitingAck=" + std::to_string(awaitingSelectionAck_ ? 1 : 0);
   return status;
@@ -338,8 +354,16 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height)
   AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, kMimeTypeAvc);
   AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_WIDTH, static_cast<int32_t>(width));
   AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_HEIGHT, static_cast<int32_t>(height));
-  AMediaFormat_setBuffer(format, AMEDIAFORMAT_KEY_CSD_0, csd0_.data(), csd0_.size());
-  AMediaFormat_setBuffer(format, AMEDIAFORMAT_KEY_CSD_1, csd1_.data(), csd1_.size());
+  const uint8_t* csd0Data = csd0_.data();
+  const uint8_t* csd1Data = csd1_.data();
+  const size_t csd0Size = csd0_.size();
+  const size_t csd1Size = csd1_.size();
+  // Capture stable pointers once and keep the backing vectors immutable until configure().
+  assert(csd0Data != nullptr && csd1Data != nullptr);
+  assert(csd0_.capacity() >= csd0Size);
+  assert(csd1_.capacity() >= csd1Size);
+  AMediaFormat_setBuffer(format, AMEDIAFORMAT_KEY_CSD_0, csd0Data, csd0Size);
+  AMediaFormat_setBuffer(format, AMEDIAFORMAT_KEY_CSD_1, csd1Data, csd1Size);
 
   media_status_t status = AMediaCodec_configure(codec_, format, window_, nullptr, 0);
   AMediaFormat_delete(format);

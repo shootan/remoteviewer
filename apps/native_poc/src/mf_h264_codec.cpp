@@ -1329,6 +1329,8 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
   sampleTimeOutputTimestampTrusted_ = true;
   sampleTimeOutputTimestampTotalSamples_ = 0;
   sampleTimeOutputTimestampFallbackCount_ = 0;
+  sampleTimeOutputTimestampRecoveryStreak_ = 0;
+  sampleTimeOutputTimestampRecoveryOffsetHns_ = 0;
   frameIndex_ = 0;
   sequenceHeaderAnnexb_.clear();
 
@@ -1389,6 +1391,7 @@ bool H264Encoder::encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFr
   };
   constexpr int64_t kEncoderOutputTsSkewUs = 50000;
   constexpr int64_t kEncoderOutputTsSkewHns = kEncoderOutputTsSkewUs * 10;
+  constexpr uint32_t kEncoderOutputTsRecoverySamples = 8;
 
   Microsoft::WRL::ComPtr<IMFSample> sample;
   IMFSample* inputSample = nullptr;
@@ -1479,15 +1482,17 @@ bool H264Encoder::encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFr
         int64_t normalizedAuSampleTimeHns = sampleTime;
         if (SUCCEEDED(produced->GetSampleTime(&outSampleTimeHns)) && outSampleTimeHns > 0) {
           ++sampleTimeOutputTimestampTotalSamples_;
+          const int64_t candidateOffsetHns = sampleTime - outSampleTimeHns;
           if (sampleTimeOutputTimestampTrusted_) {
-            sampleTimeFromOutput = true;
             if (!sampleTimeOffsetInitialized_) {
-              sampleTimeOffsetHns_ = sampleTime - outSampleTimeHns;
+              sampleTimeOffsetHns_ = candidateOffsetHns;
               sampleTimeOffsetInitialized_ = true;
             }
             normalizedAuSampleTimeHns = outSampleTimeHns + sampleTimeOffsetHns_;
             if (std::llabs(sampleTime - normalizedAuSampleTimeHns) > kEncoderOutputTsSkewHns) {
               sampleTimeOutputTimestampTrusted_ = false;
+              sampleTimeOutputTimestampRecoveryStreak_ = 0;
+              sampleTimeOutputTimestampRecoveryOffsetHns_ = 0;
               sampleTimeOutputTimestampFallbackCount_++;
               sampleTimeFromOutput = false;
               normalizedAuSampleTimeHns = sampleTime;
@@ -1496,9 +1501,29 @@ bool H264Encoder::encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFr
                                  std::to_string(kEncoderOutputTsSkewUs) +
                                  "us; fallback to input timestamp").c_str());
               }
+            } else {
+              sampleTimeFromOutput = true;
+              sampleTimeOutputTimestampRecoveryStreak_ = 0;
             }
           } else {
             normalizedAuSampleTimeHns = sampleTime;
+            if (sampleTimeOutputTimestampRecoveryStreak_ == 0 ||
+                std::llabs(candidateOffsetHns - sampleTimeOutputTimestampRecoveryOffsetHns_) >
+                    kEncoderOutputTsSkewHns) {
+              sampleTimeOutputTimestampRecoveryOffsetHns_ = candidateOffsetHns;
+              sampleTimeOutputTimestampRecoveryStreak_ = 1;
+            } else {
+              ++sampleTimeOutputTimestampRecoveryStreak_;
+              if (sampleTimeOutputTimestampRecoveryStreak_ >= kEncoderOutputTsRecoverySamples) {
+                sampleTimeOffsetHns_ = sampleTimeOutputTimestampRecoveryOffsetHns_;
+                sampleTimeOffsetInitialized_ = true;
+                sampleTimeOutputTimestampTrusted_ = true;
+                sampleTimeOutputTimestampRecoveryStreak_ = 0;
+                if (env_truthy_local("REMOTE60_NATIVE_DEBUG_CODEC")) {
+                  codec_debug_log("encoder output timestamp trust recovered after consecutive matches");
+                }
+              }
+            }
           }
         }
         au.sampleTimeHns = normalizedAuSampleTimeHns;
@@ -1604,6 +1629,8 @@ void H264Encoder::shutdown() {
   sampleTimeOutputTimestampTrusted_ = true;
   sampleTimeOutputTimestampTotalSamples_ = 0;
   sampleTimeOutputTimestampFallbackCount_ = 0;
+  sampleTimeOutputTimestampRecoveryStreak_ = 0;
+  sampleTimeOutputTimestampRecoveryOffsetHns_ = 0;
   frameIndex_ = 0;
   sequenceHeaderAnnexb_.clear();
   asyncTransform_ = false;
@@ -1768,8 +1795,10 @@ bool H264Decoder::initialize(uint32_t width, uint32_t height, uint32_t fps) {
 
 bool H264Decoder::decode_access_unit(const std::vector<uint8_t>& annexb, bool keyFrame,
                                      int64_t inputSampleTimeHns,
-                                     std::vector<DecodedFrameNv12>* outFrames) {
+                                     std::vector<DecodedFrameNv12>* outFrames,
+                                     bool* outPendingTimestampOverflow) {
   if (!dec_ || !started_ || !outFrames) return false;
+  if (outPendingTimestampOverflow) *outPendingTimestampOverflow = false;
   outFrames->clear();
 
   Microsoft::WRL::ComPtr<IMFSample> sample;
@@ -1886,6 +1915,11 @@ bool H264Decoder::decode_access_unit(const std::vector<uint8_t>& annexb, bool ke
   constexpr size_t kPendingInputTimestampMax = 512;
   if (pendingInputSampleTimesHns_.size() > kPendingInputTimestampMax) {
     pendingInputSampleTimesHns_.pop_front();
+    if (outPendingTimestampOverflow) *outPendingTimestampOverflow = true;
+    if (env_truthy_local("REMOTE60_NATIVE_DEBUG_CODEC")) {
+      codec_debug_log("decoder pending input timestamp queue overflowed; caller must recover");
+    }
+    return true;
   }
 
   return drain_outputs();

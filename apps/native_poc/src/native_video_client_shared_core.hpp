@@ -219,10 +219,12 @@ struct UdpH264AssemblyStepResult {
   bool startedNewAssembly = false;
   bool droppedPreviousIncomplete = false;
   bool reorderDetected = false;
+  bool oversizePayload = false;
   uint32_t packetSeq = 0;
   uint32_t expectedSeq = 0;
   uint32_t packetChunkOffset = 0;
   uint32_t expectedNextOffset = 0;
+  uint32_t rejectedPayloadSize = 0;
   UdpH264AssembledFrame frame{};
 };
 

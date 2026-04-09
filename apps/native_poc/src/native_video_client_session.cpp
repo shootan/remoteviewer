@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -358,6 +359,7 @@ void ClientSessionController::VideoReceiveMain() {
   UdpH264FrameAssembler assembler;
   std::array<uint8_t, 1600> datagram{};
   uint64_t assemblyDropped = 0;
+  uint64_t oversizePayloadDropCount = 0;
 
   while (!stopRequested_.load(std::memory_order_acquire)) {
     SocketHandle udpSocket = kInvalidSocket;
@@ -384,6 +386,12 @@ void ClientSessionController::VideoReceiveMain() {
     }
     if (assembleResult.disposition == UdpH264AssemblyDisposition::Malformed) {
       ++assemblyDropped;
+      if (assembleResult.oversizePayload && ((++oversizePayloadDropCount % 30ULL) == 1ULL)) {
+        std::fprintf(stderr,
+                     "[native-video-client-session] dropped oversized udp payload bytes=%u count=%llu\n",
+                     assembleResult.rejectedPayloadSize,
+                     static_cast<unsigned long long>(oversizePayloadDropCount));
+      }
       continue;
     }
     if (assembleResult.disposition == UdpH264AssemblyDisposition::Dropped) {

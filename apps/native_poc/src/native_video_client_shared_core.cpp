@@ -10,6 +10,7 @@ namespace remote60::native_poc {
 namespace {
 
 constexpr size_t kMaxInputQueueSize = 256;
+constexpr uint32_t kMaxUdpAssembledPayloadBytes = 16u * 1024u * 1024u;
 
 std::string fixed_cstr_to_string(const char* buf, size_t cap) {
   if (!buf || cap == 0) return std::string{};
@@ -493,6 +494,13 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* dat
       (sizeof(UdpVideoChunkHeader) + packet.chunkSize) > len) {
     assembling_ = false;
     result.disposition = UdpH264AssemblyDisposition::Malformed;
+    return result;
+  }
+  if (packet.payloadSize > kMaxUdpAssembledPayloadBytes) {
+    assembling_ = false;
+    result.disposition = UdpH264AssemblyDisposition::Malformed;
+    result.oversizePayload = true;
+    result.rejectedPayloadSize = packet.payloadSize;
     return result;
   }
 
