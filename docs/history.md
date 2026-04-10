@@ -2442,6 +2442,59 @@ Next action
 - desktop path capture source 검증을 분리해 `Devices/Desktop` scene 흐름도 안정화한다.
 - 그 다음 `Phase F` 입력 착수 전 gate를 재확인한다.
 
+### 164) 2026-04-10 desktop fullscreen dxgi backend split and ldplayer2 rerun
+Goal
+- desktop full-screen 경로를 DXGI desktop duplication으로 분리하고, window mode는 기존 WGC를 유지한다.
+- `REMOTE60_DESKTOP_CAPTURE_BACKEND=dxgi|wgc` 토글과 desktop DXGI 실패 시 same-session WGC fallback을 넣는다.
+- LDPlayer 인스턴스 `2`(`emulator-5558`)에 Android direct client를 재설치하고 desktop path를 다시 붙여 본다.
+
+Files changed
+- `apps/host/CMakeLists.txt`
+- `apps/host/src/capture_backend_dxgi.hpp`
+- `apps/host/src/capture_backend_dxgi.cpp`
+- `apps/host/src/realtime_runtime.cpp`
+- `apps/native_poc/CMakeLists.txt`
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Host build:
+  - `cmake --build d:\remote\remote\build-vcpkg-local --config Debug --target remote60_host`
+  - 결과: 성공
+- Native host build:
+  - `cmake --build d:\remote\remote\build-vcpkg-local --config Debug --target remote60_native_video_host_poc`
+  - 결과: 성공
+- Native localhost smoke:
+  - host:
+    - `REMOTE60_DESKTOP_CAPTURE_BACKEND=dxgi`
+    - `REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE=1`
+    - `remote60_native_video_host_poc.exe --bind-port 43000 --control-port 43001 --transport udp --codec h264 --fps 30`
+  - client:
+    - `REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE=1`
+    - `remote60_native_video_client_poc.exe --host 127.0.0.1 --port 43000 --control-port 43001 --codec h264 --fps-hint 30 --seconds 3`
+  - 결과:
+    - client는 `control connected`, `window-list seq=1 count=13`까지 성공
+    - host는 `desktop_backend=dxgi capture=2112x1232`까지 진입했지만, 현재 세션에서 `fallback_reason=dxgi_no_output_found`로 내려가 `CreateForWindow(GetShellWindow())` WGC desktop fallback이 걸렸다.
+- LDPlayer 2 rerun:
+  - APK reinstall:
+    - `C:\Users\shota\AppData\Local\Android\Sdk\platform-tools\adb.exe -s emulator-5558 install -r d:\remote\remote\apps\android_direct_client\app\build\outputs\apk\debug\app-debug.apk`
+    - 결과: 성공
+  - launch:
+    - `adb -s emulator-5558 shell am start -W -n com.remote60.androiddirect/.MainActivity --es host 192.168.0.76 --ei videoPort 43000 --ei controlPort 43001`
+    - 결과: 성공
+  - runtime:
+    - `dumpsys window windows` 기준 `mCurrentFocus=com.remote60.androiddirect/.MainActivity`
+    - session log에서 `connect_tap -> connected window_list_received count=12 selected=desktop` 1회 재확인
+    - 다만 이번 DXGI build 재기동 이후 동일 LDPlayer 재연결은 `connect_tap -> status=error`로 끝나 desktop viewer 진입까지는 닫지 못함
+- Scope note:
+  - `apps/host`와 `apps/native_poc` 모두 desktop mode에서 DXGI desktop duplication을 우선 시도하고, window mode는 기존 WGC를 그대로 유지한다.
+  - 현재 RDP 세션에서는 DXGI output enumeration이 실제 primary output을 못 잡아 `dxgi_no_output_found -> WGC ShellWindow fallback`이 남는다.
+
+Next action
+- 실제 console/physical desktop 또는 output enumeration이 살아 있는 세션에서 `desktop_backend=dxgi`가 fallback 없이 유지되는지 다시 검증한다.
+- LDPlayer 2에서 `Desktop` 탭 진입 후 viewer first-frame까지 이어지는 재연결 불안정성을 분리해 다시 본다.
+
 ### 170) 2026-04-10 portrait/landscape viewer aspect-fit parity
 Goal
 - 세로 창을 선택해도 Windows/Android 클라이언트가 가로로 강제 stretch 하지 않도록 viewer 비율 처리를 맞춘다.

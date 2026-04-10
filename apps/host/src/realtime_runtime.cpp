@@ -57,6 +57,7 @@
 #include "common/opus_rtp_packetizer.hpp"
 #include "common/signaling_protocol.hpp"
 #include "common/ws_rtc_signaling_client.hpp"
+#include "capture_backend_dxgi.hpp"
 
 #ifndef REMOTE60_ENABLE_WINDOW_MODE
 #define REMOTE60_ENABLE_WINDOW_MODE 1
@@ -403,6 +404,97 @@ bool env_bool(const char* key, bool fallback) {
   if (s == "1" || s == "true" || s == "yes" || s == "on") return true;
   if (s == "0" || s == "false" || s == "no" || s == "off") return false;
   return fallback;
+}
+
+const char* desktop_capture_backend_name(DesktopCaptureBackend backend) {
+  switch (backend) {
+    case DesktopCaptureBackend::Dxgi: return "dxgi";
+    case DesktopCaptureBackend::Wgc: return "wgc";
+  }
+  return "unknown";
+}
+
+DesktopCaptureBackend desktop_capture_backend_from_env() {
+  const char* raw = std::getenv("REMOTE60_DESKTOP_CAPTURE_BACKEND");
+  if (!raw || !*raw) return DesktopCaptureBackend::Dxgi;
+  std::string s(raw);
+  std::transform(s.begin(), s.end(), s.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (s == "wgc") return DesktopCaptureBackend::Wgc;
+  return DesktopCaptureBackend::Dxgi;
+}
+
+struct PrimaryMonitorInfo {
+  HMONITOR monitor = nullptr;
+  uint32_t width = 0;
+  uint32_t height = 0;
+};
+
+std::optional<PrimaryMonitorInfo> primary_monitor_info() {
+  const HMONITOR monitor = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
+  if (!monitor) return std::nullopt;
+  MONITORINFO info{};
+  info.cbSize = sizeof(info);
+  if (!GetMonitorInfoA(monitor, &info)) return std::nullopt;
+  const LONG width = info.rcMonitor.right - info.rcMonitor.left;
+  const LONG height = info.rcMonitor.bottom - info.rcMonitor.top;
+  if (width <= 0 || height <= 0) return std::nullopt;
+  PrimaryMonitorInfo out;
+  out.monitor = monitor;
+  out.width = static_cast<uint32_t>(width);
+  out.height = static_cast<uint32_t>(height);
+  return out;
+}
+
+HRESULT create_d3d11_device_for_primary_monitor(Microsoft::WRL::ComPtr<ID3D11Device>* outDevice,
+                                                Microsoft::WRL::ComPtr<ID3D11DeviceContext>* outContext,
+                                                D3D_FEATURE_LEVEL* outLevel) {
+  if (!outDevice || !outContext) return E_INVALIDARG;
+  outDevice->Reset();
+  outContext->Reset();
+
+  Microsoft::WRL::ComPtr<IDXGIAdapter1> targetAdapter;
+  Microsoft::WRL::ComPtr<IDXGIAdapter1> fallbackAdapter;
+  const HMONITOR targetMonitor = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
+  if (targetMonitor) {
+    Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+    if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) && factory) {
+      for (UINT adapterIndex = 0; !targetAdapter; ++adapterIndex) {
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+        if (factory->EnumAdapters1(adapterIndex, &adapter) == DXGI_ERROR_NOT_FOUND) break;
+        if (!adapter) continue;
+        for (UINT outputIndex = 0;; ++outputIndex) {
+          Microsoft::WRL::ComPtr<IDXGIOutput> output;
+          if (adapter->EnumOutputs(outputIndex, &output) == DXGI_ERROR_NOT_FOUND) break;
+          if (!output) continue;
+          if (!fallbackAdapter) fallbackAdapter = adapter;
+          DXGI_OUTPUT_DESC desc{};
+          if (FAILED(output->GetDesc(&desc))) continue;
+          if (desc.Monitor == targetMonitor) {
+            targetAdapter = adapter;
+            break;
+          }
+        }
+      }
+    }
+  }
+  if (!targetAdapter && fallbackAdapter) {
+    targetAdapter = fallbackAdapter;
+  }
+
+  D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_11_0;
+  const HRESULT hr = D3D11CreateDevice(targetAdapter.Get(),
+                                       targetAdapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE,
+                                       nullptr,
+                                       D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                       nullptr,
+                                       0,
+                                       D3D11_SDK_VERSION,
+                                       outDevice->GetAddressOf(),
+                                       &level,
+                                       outContext->GetAddressOf());
+  if (SUCCEEDED(hr) && outLevel) *outLevel = level;
+  return hr;
 }
 
 POINT clamp_to_screen_point(int x, int y) {
@@ -1239,10 +1331,7 @@ RealtimeRuntimeStats run_realtime_runtime_host(int seconds) {
   using remote60::common::signaling::MessageType;
 
   winrt::init_apartment(winrt::apartment_type::multi_threaded);
-  if (!GraphicsCaptureSession::IsSupported()) {
-    out.detail = "wgc_not_supported";
-    return out;
-  }
+  const bool wgcSupported = GraphicsCaptureSession::IsSupported();
 
   HRESULT hr = MFStartup(MF_VERSION);
   if (FAILED(hr)) {
@@ -1253,8 +1342,7 @@ RealtimeRuntimeStats run_realtime_runtime_host(int seconds) {
   Microsoft::WRL::ComPtr<ID3D11Device> d3d;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> ctx;
   D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
-  hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                         nullptr, 0, D3D11_SDK_VERSION, &d3d, &fl, &ctx);
+  hr = create_d3d11_device_for_primary_monitor(&d3d, &ctx, &fl);
   if (FAILED(hr)) {
     out.detail = "d3d11_create_failed";
     MFShutdown();
@@ -1262,9 +1350,12 @@ RealtimeRuntimeStats run_realtime_runtime_host(int seconds) {
   }
 
   const bool windowModeEnabledRuntime = kWindowModeCompiled && env_bool("REMOTE60_WINDOW_MODE", true);
+  const DesktopCaptureBackend requestedDesktopBackend = desktop_capture_backend_from_env();
   HWND captureWindow = nullptr;
   uint64_t captureWindowId = 0;
   std::string captureTarget = "desktop_primary_monitor";
+  DesktopCaptureBackend activeDesktopBackend = requestedDesktopBackend;
+  std::string desktopBackendFallbackReason;
   if (windowModeEnabledRuntime) {
     captureWindow = selected_window_hwnd();
     if (captureWindow) {
@@ -1281,38 +1372,98 @@ RealtimeRuntimeStats run_realtime_runtime_host(int seconds) {
     }
   }
 
-  auto item = (captureWindow != nullptr) ? CreateItemForWindow(captureWindow) : CreateItemForPrimaryMonitor();
-  if (!item && captureWindow != nullptr) {
-    // Selected window may be minimized/invalid; keep host alive by falling back to desktop.
+  winrt::Windows::Graphics::Capture::GraphicsCaptureItem item{nullptr};
+  std::optional<PrimaryMonitorInfo> monitorInfo;
+  auto switch_to_desktop_mode = [&](const char* reason) {
     captureWindow = nullptr;
     captureWindowId = 0;
-    captureTarget = "desktop_fallback_window_item_failed";
-    item = CreateItemForPrimaryMonitor();
+    captureTarget = reason;
+  };
+
+  if (captureWindow != nullptr) {
+    if (!wgcSupported) {
+      out.detail = "wgc_not_supported";
+      MFShutdown();
+      return out;
+    }
+    item = CreateItemForWindow(captureWindow);
+    if (!item) {
+      switch_to_desktop_mode("desktop_fallback_window_item_failed");
+    }
   }
-  if (!item) {
-    out.detail = "capture_item_failed";
-    MFShutdown();
-    return out;
+
+  if (captureWindow == nullptr) {
+    monitorInfo = primary_monitor_info();
+    if (!monitorInfo.has_value()) {
+      out.detail = "primary_monitor_missing";
+      MFShutdown();
+      return out;
+    }
+    if (requestedDesktopBackend == DesktopCaptureBackend::Dxgi && monitorInfo->width < monitorInfo->height) {
+      activeDesktopBackend = DesktopCaptureBackend::Wgc;
+      desktopBackendFallbackReason = "rotation_unsupported";
+    }
+    if (activeDesktopBackend == DesktopCaptureBackend::Wgc) {
+      if (!wgcSupported) {
+        out.detail = "wgc_not_supported";
+        MFShutdown();
+        return out;
+      }
+      item = CreateItemForPrimaryMonitor();
+      if (!item) {
+        out.detail = "capture_item_failed";
+        MFShutdown();
+        return out;
+      }
+    }
   }
-  auto size = item.Size();
-  uint32_t captureW = static_cast<uint32_t>(size.Width);
-  uint32_t captureH = static_cast<uint32_t>(size.Height);
+
+  uint32_t captureW = 0;
+  uint32_t captureH = 0;
+  if (item) {
+    const auto size = item.Size();
+    captureW = static_cast<uint32_t>(size.Width);
+    captureH = static_cast<uint32_t>(size.Height);
+  } else if (monitorInfo.has_value()) {
+    captureW = monitorInfo->width;
+    captureH = monitorInfo->height;
+  }
   // NV12 texture/encoder dimensions must be even numbers.
   uint32_t w = (captureW >= 2) ? (captureW & ~1u) : 0;
   uint32_t h = (captureH >= 2) ? (captureH & ~1u) : 0;
   if ((w < 2 || h < 2) && captureWindow != nullptr) {
-    captureWindow = nullptr;
-    captureWindowId = 0;
-    captureTarget = "desktop_fallback_window_size_invalid";
-    item = CreateItemForPrimaryMonitor();
-    if (!item) {
-      out.detail = "capture_item_failed";
+    switch_to_desktop_mode("desktop_fallback_window_size_invalid");
+    monitorInfo = primary_monitor_info();
+    if (!monitorInfo.has_value()) {
+      out.detail = "primary_monitor_missing";
       MFShutdown();
       return out;
     }
-    size = item.Size();
-    captureW = static_cast<uint32_t>(size.Width);
-    captureH = static_cast<uint32_t>(size.Height);
+    activeDesktopBackend = requestedDesktopBackend;
+    if (requestedDesktopBackend == DesktopCaptureBackend::Dxgi && monitorInfo->width < monitorInfo->height) {
+      activeDesktopBackend = DesktopCaptureBackend::Wgc;
+      desktopBackendFallbackReason = "rotation_unsupported";
+    }
+    if (activeDesktopBackend == DesktopCaptureBackend::Wgc) {
+      if (!wgcSupported) {
+        out.detail = "wgc_not_supported";
+        MFShutdown();
+        return out;
+      }
+      item = CreateItemForPrimaryMonitor();
+      if (!item) {
+        out.detail = "capture_item_failed";
+        MFShutdown();
+        return out;
+      }
+      const auto size = item.Size();
+      captureW = static_cast<uint32_t>(size.Width);
+      captureH = static_cast<uint32_t>(size.Height);
+    } else {
+      item = nullptr;
+      captureW = monitorInfo->width;
+      captureH = monitorInfo->height;
+    }
     w = (captureW >= 2) ? (captureW & ~1u) : 0;
     h = (captureH >= 2) ? (captureH & ~1u) : 0;
   }
@@ -1327,10 +1478,6 @@ RealtimeRuntimeStats run_realtime_runtime_host(int seconds) {
   winrt::com_ptr<::IInspectable> inspectable;
   winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(dxgi.Get(), inspectable.put()));
   auto d3dDevice = inspectable.as<IDirect3DDevice>();
-
-  auto pool = Direct3D11CaptureFramePool::CreateFreeThreaded(d3dDevice,
-      winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
-  auto session = pool.CreateCaptureSession(item);
 
   Microsoft::WRL::ComPtr<ID3D11VideoDevice> videoDevice;
   Microsoft::WRL::ComPtr<ID3D11VideoContext> videoContext;
@@ -1404,21 +1551,7 @@ RealtimeRuntimeStats run_realtime_runtime_host(int seconds) {
 
   const auto runtimeStartedAt = std::chrono::steady_clock::now();
   const std::string sessionId = std::to_string(::GetCurrentProcessId()) + "-" + std::to_string(::GetTickCount64());
-  try {
-    // Best-effort request to suppress the OS capture border. On systems that do not allow it,
-    // this may be ignored by Windows.
-    session.IsBorderRequired(false);
-    runtime_diag_log(sessionId, runtimeStartedAt, "capture", "border_request=hidden");
-  } catch (...) {
-    runtime_diag_log(sessionId, runtimeStartedAt, "capture", "border_request=failed");
-  }
-  try {
-    // Hide host-side cursor in captured stream to avoid double-cursor effect on web client.
-    session.IsCursorCaptureEnabled(false);
-    runtime_diag_log(sessionId, runtimeStartedAt, "capture", "cursor_capture=disabled");
-  } catch (...) {
-    runtime_diag_log(sessionId, runtimeStartedAt, "capture", "cursor_capture=disable_failed");
-  }
+  const bool desktopModeRuntime = (captureWindow == nullptr);
   release_mouse_capture_guard();
   runtime_diag_log(sessionId, runtimeStartedAt, "lifecycle", "begin run_realtime_runtime_host seconds=" + std::to_string(seconds));
   runtime_diag_log(sessionId, runtimeStartedAt, "input_guard", "mouse_release_guard applied=1");
@@ -1427,12 +1560,21 @@ RealtimeRuntimeStats run_realtime_runtime_host(int seconds) {
                         " preserveLocalCursor=" + (env_bool("REMOTE60_PRESERVE_LOCAL_CURSOR", true) ? "1" : "0") +
                         " safeClickMode=" + (env_bool("REMOTE60_SAFE_CLICK_MODE", true) ? "1" : "0") +
                         " messageClickMode=" + (env_bool("REMOTE60_MESSAGE_CLICK_MODE", false) ? "1" : "0") +
-                        " hideLocalCursorForInput=" + (env_bool("REMOTE60_HIDE_LOCAL_CURSOR_FOR_INPUT", true) ? "1" : "0") +
-                        " windowModeEnabled=" + (windowModeEnabledRuntime ? "1" : "0") +
-                        " captureWindowId=" + std::to_string(captureWindowId) +
-                        " captureSize=" + std::to_string(captureW) + "x" + std::to_string(captureH) +
-                        " encodeSize=" + std::to_string(w) + "x" + std::to_string(h) +
-                        " captureTarget=" + captureTarget);
+                         " hideLocalCursorForInput=" + (env_bool("REMOTE60_HIDE_LOCAL_CURSOR_FOR_INPUT", true) ? "1" : "0") +
+                         " windowModeEnabled=" + (windowModeEnabledRuntime ? "1" : "0") +
+                         " captureWindowId=" + std::to_string(captureWindowId) +
+                         " desktopBackendRequested=" + std::string(desktop_capture_backend_name(requestedDesktopBackend)) +
+                         " desktopBackendConfigured=" + std::string(desktop_capture_backend_name(activeDesktopBackend)) +
+                         " captureSize=" + std::to_string(captureW) + "x" + std::to_string(captureH) +
+                         " encodeSize=" + std::to_string(w) + "x" + std::to_string(h) +
+                         " captureTarget=" + captureTarget);
+  runtime_diag_log(sessionId, runtimeStartedAt, "capture",
+                   std::string("desktop_backend=") +
+                       (desktopModeRuntime ? desktop_capture_backend_name(activeDesktopBackend) : "wgc_window"));
+  if (!desktopBackendFallbackReason.empty()) {
+    runtime_diag_log(sessionId, runtimeStartedAt, "capture",
+                     "fallback_reason=" + desktopBackendFallbackReason);
+  }
 
   std::shared_ptr<rtc::PeerConnection> pc;
   std::shared_ptr<rtc::Track> vtrack;
@@ -1524,6 +1666,209 @@ RealtimeRuntimeStats run_realtime_runtime_host(int seconds) {
   std::vector<uint8_t> latestNv12;
   std::atomic<uint64_t> frameCount{0};
   uint64_t frameVersion = 0;
+  Direct3D11CaptureFramePool pool{nullptr};
+  GraphicsCaptureSession session{nullptr};
+  winrt::event_token captureToken{};
+  bool wgcCaptureCallbackAttached = false;
+  bool wgcCaptureStarted = false;
+  bool dxgiCaptureStarted = false;
+  DxgiDesktopCaptureSession dxgiCapture;
+  std::atomic<bool> dxgiFallbackRequested{false};
+  std::mutex dxgiFallbackMu;
+  std::string dxgiFallbackReason;
+
+  auto submit_captured_texture = [&](ID3D11Texture2D* srcTex, uint32_t srcWidth, uint32_t srcHeight) {
+    if (!srcTex || srcWidth != captureW || srcHeight != captureH) return;
+    try {
+      D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC iv{};
+      iv.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+      Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> inView;
+      if (FAILED(videoDevice->CreateVideoProcessorInputView(srcTex, vpEnum.Get(), &iv, &inView))) return;
+      RECT srcRect{0, 0, static_cast<LONG>(captureW), static_cast<LONG>(captureH)};
+      RECT dstRect{0, 0, static_cast<LONG>(w), static_cast<LONG>(h)};
+      videoContext->VideoProcessorSetStreamSourceRect(vp.Get(), 0, TRUE, &srcRect);
+      videoContext->VideoProcessorSetStreamDestRect(vp.Get(), 0, TRUE, &dstRect);
+      videoContext->VideoProcessorSetOutputTargetRect(vp.Get(), TRUE, &dstRect);
+      D3D11_VIDEO_PROCESSOR_STREAM stm{};
+      stm.Enable = TRUE;
+      stm.pInputSurface = inView.Get();
+      if (FAILED(videoContext->VideoProcessorBlt(vp.Get(), outView.Get(), 0, 1, &stm))) return;
+      ctx->CopyResource(stTex.Get(), nv12Tex.Get());
+      D3D11_MAPPED_SUBRESOURCE map{};
+      if (FAILED(ctx->Map(stTex.Get(), 0, D3D11_MAP_READ, 0, &map))) return;
+      std::vector<uint8_t> nv12(w * h * 3 / 2);
+      uint8_t* dstY = nv12.data();
+      for (uint32_t y = 0; y < h; ++y) memcpy(dstY + y * w, static_cast<uint8_t*>(map.pData) + y * map.RowPitch, w);
+      uint8_t* dstUV = nv12.data() + w * h;
+      uint8_t* srcUV = static_cast<uint8_t*>(map.pData) + map.RowPitch * h;
+      for (uint32_t y = 0; y < h / 2; ++y) memcpy(dstUV + y * w, srcUV + y * map.RowPitch, w);
+      ctx->Unmap(stTex.Get(), 0);
+      {
+        std::lock_guard<std::mutex> lk(frameMu);
+        latestNv12.swap(nv12);
+        ++frameVersion;
+      }
+      ++frameCount;
+      frameCv.notify_one();
+    } catch (...) {
+    }
+  };
+
+  auto stop_wgc_capture = [&]() {
+    if (wgcCaptureCallbackAttached) {
+      try {
+        pool.FrameArrived(captureToken);
+      } catch (...) {
+      }
+      wgcCaptureCallbackAttached = false;
+    }
+    if (wgcCaptureStarted) {
+      try {
+        session.Close();
+      } catch (...) {
+      }
+      wgcCaptureStarted = false;
+    }
+    if (pool) {
+      try {
+        pool.Close();
+      } catch (...) {
+      }
+      pool = nullptr;
+    }
+    session = nullptr;
+  };
+
+  auto ensure_wgc_item = [&]() -> bool {
+    if (item) return true;
+    if (captureWindow != nullptr) {
+      item = CreateItemForWindow(captureWindow);
+    } else {
+      item = CreateItemForPrimaryMonitor();
+    }
+    return static_cast<bool>(item);
+  };
+
+  auto start_wgc_capture = [&](const char* reason) -> bool {
+    if (!wgcSupported) return false;
+    if (!ensure_wgc_item()) return false;
+    const auto size = item.Size();
+    if (static_cast<uint32_t>(size.Width) != captureW || static_cast<uint32_t>(size.Height) != captureH) {
+      runtime_diag_log(sessionId, runtimeStartedAt, "capture",
+                       std::string("wgc_size_mismatch reason=") + reason +
+                           " expected=" + std::to_string(captureW) + "x" + std::to_string(captureH) +
+                           " actual=" + std::to_string(size.Width) + "x" + std::to_string(size.Height));
+      return false;
+    }
+    pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
+        d3dDevice, winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
+    session = pool.CreateCaptureSession(item);
+    captureToken = pool.FrameArrived([&](Direct3D11CaptureFramePool const& sender,
+                                         winrt::Windows::Foundation::IInspectable const&) {
+      if (shuttingDown.load() || !acceptCaptureCallbacks.load()) return;
+      while (auto frame = sender.TryGetNextFrame()) {
+        if (shuttingDown.load() || !acceptCaptureCallbacks.load()) break;
+        try {
+          auto src = SurfaceToTexture(frame.Surface());
+          submit_captured_texture(src.Get(), captureW, captureH);
+        } catch (...) {
+        }
+      }
+    });
+    wgcCaptureCallbackAttached = true;
+    try {
+      session.IsBorderRequired(false);
+      runtime_diag_log(sessionId, runtimeStartedAt, "capture",
+                       std::string("border_request=hidden backend=") +
+                           (captureWindow == nullptr ? "wgc_desktop" : "wgc_window"));
+    } catch (...) {
+      runtime_diag_log(sessionId, runtimeStartedAt, "capture",
+                       std::string("border_request=failed backend=") +
+                           (captureWindow == nullptr ? "wgc_desktop" : "wgc_window"));
+    }
+    try {
+      session.IsCursorCaptureEnabled(false);
+      runtime_diag_log(sessionId, runtimeStartedAt, "capture",
+                       std::string("cursor_capture=disabled backend=") +
+                           (captureWindow == nullptr ? "wgc_desktop" : "wgc_window"));
+    } catch (...) {
+      runtime_diag_log(sessionId, runtimeStartedAt, "capture",
+                       std::string("cursor_capture=disable_failed backend=") +
+                           (captureWindow == nullptr ? "wgc_desktop" : "wgc_window"));
+    }
+    runtime_diag_log(sessionId, runtimeStartedAt, "capture",
+                     std::string("start_begin backend=") +
+                         (captureWindow == nullptr ? "wgc_desktop" : "wgc_window") +
+                         " reason=" + reason);
+    session.StartCapture();
+    wgcCaptureStarted = true;
+    runtime_diag_log(sessionId, runtimeStartedAt, "capture",
+                     std::string("start_end success=1 backend=") +
+                         (captureWindow == nullptr ? "wgc_desktop" : "wgc_window"));
+    return true;
+  };
+
+  auto stop_dxgi_capture = [&]() {
+    if (!dxgiCaptureStarted) return;
+    dxgiCapture.Stop();
+    dxgiCaptureStarted = false;
+  };
+
+  auto start_dxgi_capture = [&](const char* reason) -> bool {
+    if (!monitorInfo.has_value()) return false;
+    DxgiDesktopCaptureConfig config;
+    config.d3dDevice = d3d.Get();
+    config.monitor = monitorInfo->monitor;
+    config.landscapeOnly = true;
+    std::string detail;
+    runtime_diag_log(sessionId, runtimeStartedAt, "capture",
+                     std::string("start_begin backend=dxgi reason=") + reason);
+    const bool started = dxgiCapture.Start(
+        config,
+        [&](ID3D11Texture2D* texture, uint32_t width, uint32_t height) {
+          submit_captured_texture(texture, width, height);
+        },
+        [&](const std::string& phase, const std::string& message) {
+          runtime_diag_log(sessionId, runtimeStartedAt, phase, std::string("backend=dxgi ") + message);
+        },
+        [&](const std::string& reasonText) {
+          {
+            std::lock_guard<std::mutex> lk(dxgiFallbackMu);
+            dxgiFallbackReason = reasonText;
+          }
+          dxgiFallbackRequested = true;
+          frameCv.notify_all();
+          controlCv.notify_all();
+        },
+        &detail);
+    if (!started) {
+      runtime_diag_log(sessionId, runtimeStartedAt, "capture",
+                       "start_end success=0 backend=dxgi detail=" + detail);
+      desktopBackendFallbackReason = detail;
+      return false;
+    }
+    dxgiCaptureStarted = true;
+    runtime_diag_log(sessionId, runtimeStartedAt, "capture", "start_end success=1 backend=dxgi");
+    return true;
+  };
+
+  auto start_capture_backend = [&](const char* reason) -> bool {
+    if (captureWindow != nullptr) {
+      return start_wgc_capture(reason);
+    }
+    if (activeDesktopBackend == DesktopCaptureBackend::Dxgi) {
+      if (start_dxgi_capture(reason)) return true;
+      activeDesktopBackend = DesktopCaptureBackend::Wgc;
+      runtime_diag_log(sessionId, runtimeStartedAt, "capture",
+                       "fallback_reason=" + desktopBackendFallbackReason);
+    }
+    return start_wgc_capture(reason);
+  };
+
+  auto stop_capture_backend = [&]() {
+    stop_dxgi_capture();
+    stop_wgc_capture();
+  };
 
   auto push_control_and_wake = [&](ControlEvent ev) {
     if (shuttingDown.load() || !acceptPeerCallbacks.load()) return;
@@ -1974,52 +2319,9 @@ RealtimeRuntimeStats run_realtime_runtime_host(int seconds) {
     }
   });
 
-  auto token = pool.FrameArrived([&](Direct3D11CaptureFramePool const& sender, winrt::Windows::Foundation::IInspectable const&) {
-    if (shuttingDown.load() || !acceptCaptureCallbacks.load()) {
-      return;
-    }
-    while (auto frame = sender.TryGetNextFrame()) {
-      if (shuttingDown.load() || !acceptCaptureCallbacks.load()) {
-        break;
-      }
-      try {
-        auto src = SurfaceToTexture(frame.Surface());
-        D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC iv{};
-        iv.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
-        Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> inView;
-        if (FAILED(videoDevice->CreateVideoProcessorInputView(src.Get(), vpEnum.Get(), &iv, &inView))) continue;
-        RECT srcRect{0, 0, static_cast<LONG>(captureW), static_cast<LONG>(captureH)};
-        RECT dstRect{0, 0, static_cast<LONG>(w), static_cast<LONG>(h)};
-        videoContext->VideoProcessorSetStreamSourceRect(vp.Get(), 0, TRUE, &srcRect);
-        videoContext->VideoProcessorSetStreamDestRect(vp.Get(), 0, TRUE, &dstRect);
-        videoContext->VideoProcessorSetOutputTargetRect(vp.Get(), TRUE, &dstRect);
-        D3D11_VIDEO_PROCESSOR_STREAM stm{}; stm.Enable = TRUE; stm.pInputSurface = inView.Get();
-        if (FAILED(videoContext->VideoProcessorBlt(vp.Get(), outView.Get(), 0, 1, &stm))) continue;
-        ctx->CopyResource(stTex.Get(), nv12Tex.Get());
-        D3D11_MAPPED_SUBRESOURCE map{};
-        if (FAILED(ctx->Map(stTex.Get(), 0, D3D11_MAP_READ, 0, &map))) continue;
-        std::vector<uint8_t> nv12(w * h * 3 / 2);
-        uint8_t* dstY = nv12.data();
-        for (uint32_t y = 0; y < h; ++y) memcpy(dstY + y * w, (uint8_t*)map.pData + y * map.RowPitch, w);
-        uint8_t* dstUV = nv12.data() + w * h;
-        uint8_t* srcUV = (uint8_t*)map.pData + map.RowPitch * h;
-        for (uint32_t y = 0; y < h / 2; ++y) memcpy(dstUV + y * w, srcUV + y * map.RowPitch, w);
-        ctx->Unmap(stTex.Get(), 0);
-        {
-          std::lock_guard<std::mutex> lk(frameMu);
-          latestNv12.swap(nv12);
-          ++frameVersion;
-        }
-        ++frameCount;
-        frameCv.notify_one();
-      } catch (...) {
-      }
-    }
-  });
-
   runtime_diag_log(sessionId, runtimeStartedAt, "signaling",
                    "connect_begin url=" + signalingUrl + " role=host iceServers=" +
-                       std::to_string(cfg.iceServers.size()));
+                        std::to_string(cfg.iceServers.size()));
   if (!sig.connect(signalingUrl) || !sig.register_role("host")) {
     runtime_diag_log(sessionId, runtimeStartedAt, "signaling", "connect_end success=0");
     enc->Release(); MFShutdown(); out.detail = "signaling_failed"; return out;
@@ -2027,10 +2329,13 @@ RealtimeRuntimeStats run_realtime_runtime_host(int seconds) {
   runtime_diag_log(sessionId, runtimeStartedAt, "signaling", "connect_end success=1");
   set_state(RuntimeState::Waiting, "host_registered");
 
-  runtime_diag_log(sessionId, runtimeStartedAt, "capture", "start_begin");
-  session.StartCapture();
+  if (!start_capture_backend("host_registered")) {
+    enc->Release();
+    MFShutdown();
+    out.detail = "capture_start_failed";
+    return out;
+  }
   out.captureReady = true;
-  runtime_diag_log(sessionId, runtimeStartedAt, "capture", "start_end success=1");
 
   std::atomic<uint64_t> encodedFrames{0};
   std::atomic<uint64_t> sentPkts{0};
@@ -2620,6 +2925,24 @@ RealtimeRuntimeStats run_realtime_runtime_host(int seconds) {
       release_stale_pressed_mouse_buttons(1500);
       nextCursorGuardTick = now + std::chrono::milliseconds(250);
     }
+    if (dxgiFallbackRequested.exchange(false)) {
+      std::string reason = "dxgi_runtime_fallback";
+      {
+        std::lock_guard<std::mutex> lk(dxgiFallbackMu);
+        if (!dxgiFallbackReason.empty()) reason = dxgiFallbackReason;
+      }
+      runtime_diag_log(sessionId, runtimeStartedAt, "capture",
+                       "fallback_reason=" + reason);
+      stop_dxgi_capture();
+      activeDesktopBackend = DesktopCaptureBackend::Wgc;
+      if (!start_wgc_capture("dxgi_runtime_fallback")) {
+        out.detail = "capture_fallback_failed";
+        stop = true;
+        sessionRestartRequested = true;
+        controlCv.notify_all();
+        frameCv.notify_all();
+      }
+    }
     if (serverMode && sessionRestartRequested.exchange(false)) {
       cycleRestartRequested = true;
       runtime_diag_log(sessionId, runtimeStartedAt, "lifecycle",
@@ -2650,28 +2973,9 @@ RealtimeRuntimeStats run_realtime_runtime_host(int seconds) {
   out.inputEventsApplied = inputEventsApplied.load();
 
   detach_current_peer("runtime_stop");
-  runtime_diag_log(sessionId, runtimeStartedAt, "disconnect_cleanup", "step=frame_handler_unsubscribe begin");
-  try {
-    pool.FrameArrived(token);
-  } catch (...) {
-    runtime_diag_log(sessionId, runtimeStartedAt, "disconnect_cleanup",
-                     "step=frame_handler_unsubscribe exception=1");
-  }
-  runtime_diag_log(sessionId, runtimeStartedAt, "disconnect_cleanup", "step=frame_handler_unsubscribe end");
-  runtime_diag_log(sessionId, runtimeStartedAt, "disconnect_cleanup", "step=session_close begin");
-  try {
-    session.Close();
-  } catch (...) {
-    runtime_diag_log(sessionId, runtimeStartedAt, "disconnect_cleanup", "step=session_close exception=1");
-  }
-  runtime_diag_log(sessionId, runtimeStartedAt, "disconnect_cleanup", "step=session_close end");
-  runtime_diag_log(sessionId, runtimeStartedAt, "disconnect_cleanup", "step=pool_close begin");
-  try {
-    pool.Close();
-  } catch (...) {
-    runtime_diag_log(sessionId, runtimeStartedAt, "disconnect_cleanup", "step=pool_close exception=1");
-  }
-  runtime_diag_log(sessionId, runtimeStartedAt, "disconnect_cleanup", "step=pool_close end");
+  runtime_diag_log(sessionId, runtimeStartedAt, "disconnect_cleanup", "step=capture_backend_stop begin");
+  stop_capture_backend();
+  runtime_diag_log(sessionId, runtimeStartedAt, "disconnect_cleanup", "step=capture_backend_stop end");
   runtime_diag_log(sessionId, runtimeStartedAt, "disconnect_cleanup", "step=signaling_disconnect begin");
   sig.set_on_message({});
   sig.set_on_state({});
@@ -2680,10 +2984,12 @@ RealtimeRuntimeStats run_realtime_runtime_host(int seconds) {
   out.connected = connected.load();
   out.videoTrackOpen = trackOpen.load();
   out.audioTrackOpen = audioTrackOpen.load();
-  if (serverMode && cycleRestartRequested) {
-    out.detail = "cycle_restart";
-  } else {
-    out.detail = (out.connected && out.videoRtpSent > 0) ? "ok" : "runtime_no_video";
+  if (out.detail.empty()) {
+    if (serverMode && cycleRestartRequested) {
+      out.detail = "cycle_restart";
+    } else {
+      out.detail = (out.connected && out.videoRtpSent > 0) ? "ok" : "runtime_no_video";
+    }
   }
 
   runtime_diag_log(sessionId, runtimeStartedAt, "disconnect_cleanup", "step=encoder_release begin");

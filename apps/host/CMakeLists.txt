@@ -29,7 +29,11 @@ target_compile_definitions(remote60_host PRIVATE REMOTE60_ENABLE_WINDOW_MODE=$<I
 find_package(LibDataChannel CONFIG QUIET)
 find_package(Opus CONFIG QUIET)
 if (LibDataChannel_FOUND AND Opus_FOUND)
-  target_sources(remote60_host PRIVATE src/realtime_media_probe.cpp src/realtime_runtime.cpp)
+  target_sources(remote60_host PRIVATE
+    src/realtime_media_probe.cpp
+    src/realtime_runtime.cpp
+    src/capture_backend_dxgi.cpp
+  )
   target_link_libraries(remote60_host PRIVATE LibDataChannel::LibDataChannel Opus::opus)
   target_compile_definitions(remote60_host PRIVATE REMOTE60_HAS_REALTIME_MEDIA=1)
 endif()

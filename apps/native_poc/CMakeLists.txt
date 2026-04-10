@@ -45,10 +45,12 @@ target_link_libraries(remote60_native_client_poc PRIVATE
 add_executable(remote60_native_video_host_poc
   src/native_video_host_main.cpp
   src/mf_h264_codec.cpp
+  ../host/src/capture_backend_dxgi.cpp
 )
 
 target_include_directories(remote60_native_video_host_poc PRIVATE
   src
+  ../host/src
 )
 
 target_link_libraries(remote60_native_video_host_poc PRIVATE
