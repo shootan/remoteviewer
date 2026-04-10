@@ -12,6 +12,20 @@ namespace {
 constexpr size_t kMaxInputQueueSize = 256;
 constexpr uint32_t kMaxUdpAssembledPayloadBytes = 16u * 1024u * 1024u;
 
+void set_selected_target_dimensions(WindowPanelSnapshot* snapshot) {
+  if (!snapshot) return;
+  snapshot->selectedWidth = 0;
+  snapshot->selectedHeight = 0;
+  if (snapshot->selectedId == 0) return;
+  const auto it = std::find_if(snapshot->items.begin(), snapshot->items.end(),
+                               [&](const WindowTargetUiEntry& entry) {
+                                 return entry.id == snapshot->selectedId;
+                               });
+  if (it == snapshot->items.end()) return;
+  snapshot->selectedWidth = it->width;
+  snapshot->selectedHeight = it->height;
+}
+
 std::string fixed_cstr_to_string(const char* buf, size_t cap) {
   if (!buf || cap == 0) return std::string{};
   size_t n = 0;
@@ -636,6 +650,7 @@ WindowListApplyResult WindowPanelStateModel::ApplyWindowList(const ControlWindow
                                  });
     state_.selectedTitle = (it != state_.items.end()) ? it->title : "window";
   }
+  set_selected_target_dimensions(&state_);
   const int clampedVisibleCount = std::max(1, visibleCount);
   const int maxScroll = std::max<int>(0, static_cast<int>(state_.items.size()) - clampedVisibleCount);
   state_.scrollIndex = std::clamp(state_.scrollIndex, 0, maxScroll);
@@ -670,6 +685,7 @@ WindowSelectApplyResult WindowPanelStateModel::ApplyWindowSelected(const Control
   if (ok) {
     state_.selectedId = msg.windowId;
     state_.selectedTitle = (msg.windowId == 0) ? "desktop" : (title.empty() ? "window" : title);
+    set_selected_target_dimensions(&state_);
     state_.status = std::string("window_selected: ") + state_.selectedTitle;
   } else {
     state_.status = std::string("window_select_failed: ") + (reason.empty() ? "unknown" : reason);

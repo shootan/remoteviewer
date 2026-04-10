@@ -71,6 +71,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private data class WindowPanelUiSnapshot(
         val selectedId: Long,
         val selectedTitle: String,
+        val selectedWidth: Int,
+        val selectedHeight: Int,
         val selectionLocked: Boolean,
         val status: String,
         val lastSelectSeq: Int,
@@ -84,6 +86,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             val EMPTY = WindowPanelUiSnapshot(
                 selectedId = 0L,
                 selectedTitle = "desktop",
+                selectedWidth = 0,
+                selectedHeight = 0,
                 selectionLocked = false,
                 status = "waiting_control",
                 lastSelectSeq = 0,
@@ -167,6 +171,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var videoSurface: Surface? = null
     private var videoWidth = 0
     private var videoHeight = 0
+    private var expectedContentWidth = 0
+    private var expectedContentHeight = 0
     private var surfaceBufferWidth = 0
     private var surfaceBufferHeight = 0
     private var exitDialog: AlertDialog? = null
@@ -534,6 +540,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun resetViewerObservability() {
         videoWidth = 0
         videoHeight = 0
+        expectedContentWidth = 0
+        expectedContentHeight = 0
         lastViewerOutCount = -1
         lastViewerOutChangeAtMs = 0L
         lastViewerStallLogAtMs = 0L
@@ -551,6 +559,47 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         pendingSelectionGeneration = 0L
         pendingSelectionStartedAtMs = 0L
         pendingSelectionAckLogged = false
+    }
+
+    private fun updateExpectedContentSize(width: Int, height: Int, reason: String) {
+        val nextWidth = width.coerceAtLeast(0)
+        val nextHeight = height.coerceAtLeast(0)
+        if (expectedContentWidth == nextWidth && expectedContentHeight == nextHeight) {
+            return
+        }
+        expectedContentWidth = nextWidth
+        expectedContentHeight = nextHeight
+        diagnosticsLog.log(
+            "content_hint",
+            "reason=$reason expected=${expectedContentWidth}x${expectedContentHeight} decoded=${videoWidth}x${videoHeight}"
+        )
+    }
+
+    private fun syncExpectedContentSize(panelSnapshot: WindowPanelUiSnapshot, reason: String) {
+        val nextSize =
+            if (selectionStage != SelectionStage.IDLE) {
+                when (pendingSelectionTab) {
+                    TargetTab.WINDOWS -> {
+                        val pendingId = pendingSelectionId
+                        panelSnapshot.items.firstOrNull { it.id == pendingId }?.let { Pair(it.width, it.height) }
+                            ?: Pair(expectedContentWidth, expectedContentHeight)
+                    }
+                    TargetTab.DESKTOP,
+                    TargetTab.SETTINGS -> Pair(0, 0)
+                }
+            } else {
+                Pair(panelSnapshot.selectedWidth, panelSnapshot.selectedHeight)
+            }
+        updateExpectedContentSize(nextSize.first, nextSize.second, reason)
+    }
+
+    private fun resolveSelectionHintSize(targetId: Long, tab: TargetTab): Pair<Int, Int> {
+        if (tab != TargetTab.WINDOWS) {
+            return Pair(0, 0)
+        }
+        val panelSnapshot = parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson())
+        val item = panelSnapshot.items.firstOrNull { it.id == targetId }
+        return if (item != null) Pair(item.width, item.height) else Pair(0, 0)
     }
 
     private fun requestStreamActive(active: Boolean, reason: String): Boolean {
@@ -615,6 +664,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             return false
         }
         resetViewerObservability()
+        val expectedSize = resolveSelectionHintSize(targetId, tab)
+        updateExpectedContentSize(expectedSize.first, expectedSize.second, "selection_request")
         NativeSessionBridge.nativePrepareVideoSwitch(selectionGeneration)
         val ok = when (tab) {
             TargetTab.WINDOWS -> NativeSessionBridge.nativeSelectWindow(targetId)
@@ -644,7 +695,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         currentScene = UiScene.SWITCHING
         diagnosticsLog.log(
             "select_request",
-            "targetId=$targetId label=$label tab=$tab gen=$selectionGeneration origin=$origin"
+            "targetId=$targetId label=$label tab=$tab gen=$selectionGeneration origin=$origin " +
+                "expected=${expectedContentWidth}x${expectedContentHeight}"
         )
         return true
     }
@@ -861,8 +913,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun resolveViewerContentRect(): ViewerContentRect? {
         val viewWidth = videoTextureView.width.toFloat()
         val viewHeight = videoTextureView.height.toFloat()
-        val contentWidth = videoWidth
-        val contentHeight = videoHeight
+        val contentWidth = if (videoWidth > 0) videoWidth else expectedContentWidth
+        val contentHeight = if (videoHeight > 0) videoHeight else expectedContentHeight
         if (viewWidth <= 0f || viewHeight <= 0f || contentWidth <= 0 || contentHeight <= 0) {
             return null
         }
@@ -935,6 +987,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val statusValue = NativeSessionBridge.nativeGetStatus()
         val errorValue = NativeSessionBridge.nativeGetLastError()
         val panelSnapshot = parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson())
+        syncExpectedContentSize(panelSnapshot, if (selectionStage != SelectionStage.IDLE) "selection_pending" else "panel_snapshot")
         val videoDebugValue = NativeSessionBridge.nativeGetVideoDebugStatus()
         val readySelectionGeneration = NativeSessionBridge.nativeGetReadySelectionGeneration()
         val lastOutputPresentationUs = NativeSessionBridge.nativeGetLastOutputPresentationUs()
@@ -1124,6 +1177,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             diagnosticsLog.log(
                 "viewer_surface_bound",
                 "buffer=${surfaceBufferWidth}x${surfaceBufferHeight} video=${videoWidth}x${videoHeight} " +
+                    "expected=${expectedContentWidth}x${expectedContentHeight} " +
                     "view=${videoTextureView.width}x${videoTextureView.height}"
             )
         }
@@ -1155,7 +1209,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (videoSizeChanged) {
             videoWidth = latestVideoWidth
             videoHeight = latestVideoHeight
-            diagnosticsLog.log("video_size", "video=${videoWidth}x${videoHeight}")
+            diagnosticsLog.log(
+                "video_size",
+                "video=${videoWidth}x${videoHeight} expected=${expectedContentWidth}x${expectedContentHeight}"
+            )
         }
 
         if (!videoTextureView.isAvailable) {
@@ -1182,12 +1239,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun resolveSurfaceBufferWidth(): Int {
         if (videoWidth > 0) return videoWidth
+        if (expectedContentWidth > 0) return expectedContentWidth
         if (videoTextureView.width > 0) return videoTextureView.width
         return 0
     }
 
     private fun resolveSurfaceBufferHeight(): Int {
         if (videoHeight > 0) return videoHeight
+        if (expectedContentHeight > 0) return expectedContentHeight
         if (videoTextureView.height > 0) return videoTextureView.height
         return 0
     }
@@ -1195,8 +1254,20 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun applyVideoTransform() {
         val viewWidth = videoTextureView.width.toFloat()
         val viewHeight = videoTextureView.height.toFloat()
-        val contentWidth = if (videoWidth > 0) videoWidth.toFloat() else surfaceBufferWidth.toFloat()
-        val contentHeight = if (videoHeight > 0) videoHeight.toFloat() else surfaceBufferHeight.toFloat()
+        val resolvedContentWidth =
+            when {
+                videoWidth > 0 -> videoWidth
+                expectedContentWidth > 0 -> expectedContentWidth
+                else -> surfaceBufferWidth
+            }
+        val resolvedContentHeight =
+            when {
+                videoHeight > 0 -> videoHeight
+                expectedContentHeight > 0 -> expectedContentHeight
+                else -> surfaceBufferHeight
+            }
+        val contentWidth = resolvedContentWidth.toFloat()
+        val contentHeight = resolvedContentHeight.toFloat()
         val matrix = Matrix()
         if (viewWidth <= 0f || viewHeight <= 0f || contentWidth <= 0f || contentHeight <= 0f) {
             videoTextureView.setTransform(matrix)
@@ -1242,6 +1313,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             WindowPanelUiSnapshot(
                 selectedId = root.optLong("selectedId"),
                 selectedTitle = root.optString("selectedTitle", "desktop"),
+                selectedWidth = root.optInt("selectedWidth"),
+                selectedHeight = root.optInt("selectedHeight"),
                 selectionLocked = root.optBoolean("selectionLocked"),
                 status = root.optString("status", "waiting_control"),
                 lastSelectSeq = root.optInt("lastSelectSeq"),

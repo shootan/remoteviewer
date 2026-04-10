@@ -2442,6 +2442,41 @@ Next action
 - desktop path capture source 검증을 분리해 `Devices/Desktop` scene 흐름도 안정화한다.
 - 그 다음 `Phase F` 입력 착수 전 gate를 재확인한다.
 
+### 170) 2026-04-10 portrait/landscape viewer aspect-fit parity
+Goal
+- 세로 창을 선택해도 Windows/Android 클라이언트가 가로로 강제 stretch 하지 않도록 viewer 비율 처리를 맞춘다.
+- 선택 직후에는 타깃 해상도 힌트를 쓰고, 첫 디코드 프레임 이후에는 실제 프레임 크기로 자연스럽게 전환한다.
+
+Files changed
+- `apps/native_poc/src/native_video_client_shared_core.hpp`
+- `apps/native_poc/src/native_video_client_shared_core.cpp`
+- `apps/native_poc/src/native_video_client_main.cpp`
+- `apps/android_direct_client/app/src/main/cpp/native_bridge.cpp`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Windows native build:
+  - `cmake --build d:\remote\remote\build-vcpkg-local --config Debug --target remote60_native_video_client_poc remote60_native_video_client_shared_core_test`
+  - 결과: 성공
+- Shared core test:
+  - `d:\remote\remote\build-vcpkg-local\apps\native_poc\Debug\remote60_native_video_client_shared_core_test.exe`
+  - 결과: PASS
+- Android build:
+  - `set JAVA_HOME=C:\Program Files\Android\Android Studio\jbr`
+  - `d:\remote\remote\tmp\gradle\gradle-8.7\bin\gradle.bat assembleDebug`
+  - 결과: 성공
+- Scope note:
+  - wire protocol은 그대로 두고, 기존 window list entry의 `width/height`를 shared snapshot의 `selectedWidth/selectedHeight`로 승격했다.
+  - Windows native client는 실제 프레임 세대가 새 selection과 맞지 않으면 선택 타깃 비율을 우선해 letterbox/pillarbox rect를 계산하고, 동일 rect를 입력 좌표 매핑에도 재사용한다.
+  - Android client는 선택 요청 직후 예상 타깃 크기를 `TextureView` transform/buffer 크기 힌트로 사용하고, 디코더 output size가 들어오면 실제 frame size로 전환한다.
+  - diagnostics log에는 expected content size와 decoded video size를 함께 남기도록 보강했다.
+
+Next action
+- LDPlayer/실기기에서 `1000x575`와 `580x995`를 각각 선택해 실제 viewer screenshot으로 letterbox/pillarbox 동작을 확인한다.
+- 만약 portrait target 선택 후에도 decoded size가 landscape로 고정되면 host capture/encode 경로에서 세대별 실제 frame size를 추가 조사한다.
+
 ### 169) 2026-04-10 android debug build + visible host launch
 Goal
 - 사용자가 바로 동작 테스트할 수 있도록 최신 Android debug APK를 다시 빌드하고, native video host를 로그가 보이는 별도 PowerShell 창으로 실행한다.

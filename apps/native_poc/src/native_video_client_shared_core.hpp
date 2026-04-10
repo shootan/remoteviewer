@@ -255,6 +255,8 @@ struct WindowPanelSnapshot {
   std::vector<WindowTargetUiEntry> items;
   uint64_t selectedId = 0;
   std::string selectedTitle = "desktop";
+  uint32_t selectedWidth = 0;
+  uint32_t selectedHeight = 0;
   bool selectionLocked = false;
   std::string status = "waiting_control";
   uint32_t lastSelectSeq = 0;

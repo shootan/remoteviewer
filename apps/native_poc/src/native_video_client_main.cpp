@@ -22,6 +22,7 @@
 #include <cstring>
 #include <deque>
 #include <array>
+#include <cmath>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -450,6 +451,7 @@ struct SharedFrame {
   uint64_t decodeEndUs = 0;
   uint64_t queueSetUs = 0;
   uint64_t decodeToQueueUs = 0;
+  uint64_t streamGeneration = 0;
   uint64_t version = 0;
   std::shared_ptr<std::vector<uint8_t>> bytes;
 };
@@ -682,6 +684,92 @@ bool point_in_rect(const RECT& r, int x, int y) {
   return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
 }
 
+RECT aspect_fit_rect(const RECT& containerRect, uint32_t contentWidth, uint32_t contentHeight) {
+  const int containerWidth =
+      std::max<int>(1, static_cast<int>(containerRect.right - containerRect.left));
+  const int containerHeight =
+      std::max<int>(1, static_cast<int>(containerRect.bottom - containerRect.top));
+  if (contentWidth == 0 || contentHeight == 0) {
+    return containerRect;
+  }
+
+  const double containerAspect =
+      static_cast<double>(containerWidth) / static_cast<double>(containerHeight);
+  const double contentAspect =
+      static_cast<double>(contentWidth) / static_cast<double>(contentHeight);
+  int drawWidth = containerWidth;
+  int drawHeight = containerHeight;
+  if (contentAspect > containerAspect) {
+    drawHeight = std::max<int>(1, static_cast<int>(std::lround(
+        static_cast<double>(containerWidth) / contentAspect)));
+  } else {
+    drawWidth = std::max<int>(1, static_cast<int>(std::lround(
+        static_cast<double>(containerHeight) * contentAspect)));
+  }
+
+  const int offsetX = (containerWidth - drawWidth) / 2;
+  const int offsetY = (containerHeight - drawHeight) / 2;
+  return make_rect(containerRect.left + offsetX, containerRect.top + offsetY, drawWidth, drawHeight);
+}
+
+bool resolve_active_video_content_size(uint32_t* outWidth, uint32_t* outHeight) {
+  if (!outWidth || !outHeight) return false;
+  *outWidth = 0;
+  *outHeight = 0;
+
+  const WindowPanelSnapshot panelSnapshot = gWindowPanelState.Snapshot();
+  const uint32_t selectedWidth = panelSnapshot.selectedWidth;
+  const uint32_t selectedHeight = panelSnapshot.selectedHeight;
+  const uint64_t selectedStreamGeneration = panelSnapshot.lastSelectStreamGeneration;
+
+  uint32_t frameWidth = 0;
+  uint32_t frameHeight = 0;
+  uint64_t frameStreamGeneration = 0;
+  {
+    std::lock_guard<std::mutex> lk(gFrame.mu);
+    frameWidth = gFrame.width;
+    frameHeight = gFrame.height;
+    frameStreamGeneration = gFrame.streamGeneration;
+  }
+
+  if (selectedWidth > 0 && selectedHeight > 0) {
+    if (frameWidth > 0 && frameHeight > 0 &&
+        (selectedStreamGeneration == 0 || frameStreamGeneration == selectedStreamGeneration)) {
+      *outWidth = frameWidth;
+      *outHeight = frameHeight;
+    } else {
+      *outWidth = selectedWidth;
+      *outHeight = selectedHeight;
+    }
+    return true;
+  }
+
+  const uint32_t metricWidth = gClientMetrics.width.load(std::memory_order_relaxed);
+  const uint32_t metricHeight = gClientMetrics.height.load(std::memory_order_relaxed);
+  if (metricWidth > 0 && metricHeight > 0) {
+    *outWidth = metricWidth;
+    *outHeight = metricHeight;
+    return true;
+  }
+
+  if (frameWidth > 0 && frameHeight > 0) {
+    *outWidth = frameWidth;
+    *outHeight = frameHeight;
+    return true;
+  }
+  return false;
+}
+
+RECT resolve_video_content_rect(HWND hwnd, const RECT& containerRect) {
+  (void)hwnd;
+  uint32_t contentWidth = 0;
+  uint32_t contentHeight = 0;
+  if (!resolve_active_video_content_size(&contentWidth, &contentHeight)) {
+    return containerRect;
+  }
+  return aspect_fit_rect(containerRect, contentWidth, contentHeight);
+}
+
 ClientLayout compute_client_layout(HWND hwnd) {
   ClientLayout layout{};
   if (hwnd && IsWindow(hwnd)) {
@@ -757,23 +845,19 @@ bool point_in_video_rect(HWND hwnd, int x, int y) {
 bool map_client_point_to_video_coords(HWND hwnd, int x, int y, int32_t* outVideoX, int32_t* outVideoY) {
   if (!outVideoX || !outVideoY) return false;
   const ClientLayout layout = compute_client_layout(hwnd);
-  if (!point_in_rect(layout.videoRect, x, y)) return false;
-  uint32_t frameW = gClientMetrics.width.load(std::memory_order_relaxed);
-  uint32_t frameH = gClientMetrics.height.load(std::memory_order_relaxed);
-  if (frameW == 0 || frameH == 0) {
-    std::lock_guard<std::mutex> lk(gFrame.mu);
-    frameW = gFrame.width;
-    frameH = gFrame.height;
-  }
-  if (frameW == 0 || frameH == 0) return false;
+  const RECT contentRect = resolve_video_content_rect(hwnd, layout.videoRect);
+  if (!point_in_rect(contentRect, x, y)) return false;
+  uint32_t frameW = 0;
+  uint32_t frameH = 0;
+  if (!resolve_active_video_content_size(&frameW, &frameH)) return false;
   const int relX =
-      std::clamp<int>(x - layout.videoRect.left, 0,
-                      std::max<int>(0, static_cast<int>(layout.videoRect.right - layout.videoRect.left - 1)));
+      std::clamp<int>(x - contentRect.left, 0,
+                      std::max<int>(0, static_cast<int>(contentRect.right - contentRect.left - 1)));
   const int relY =
-      std::clamp<int>(y - layout.videoRect.top, 0,
-                      std::max<int>(0, static_cast<int>(layout.videoRect.bottom - layout.videoRect.top - 1)));
-  const int videoW = std::max<int>(1, static_cast<int>(layout.videoRect.right - layout.videoRect.left));
-  const int videoH = std::max<int>(1, static_cast<int>(layout.videoRect.bottom - layout.videoRect.top));
+      std::clamp<int>(y - contentRect.top, 0,
+                      std::max<int>(0, static_cast<int>(contentRect.bottom - contentRect.top - 1)));
+  const int videoW = std::max<int>(1, static_cast<int>(contentRect.right - contentRect.left));
+  const int videoH = std::max<int>(1, static_cast<int>(contentRect.bottom - contentRect.top));
   *outVideoX = static_cast<int32_t>((static_cast<uint64_t>(relX) * static_cast<uint64_t>(frameW - 1) +
                                      static_cast<uint64_t>(videoW / 2)) /
                                     static_cast<uint64_t>(videoW));
@@ -1853,6 +1937,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       const uint64_t paintStartUs = qpc_now_us();
       const ClientLayout layout = compute_client_layout(hwnd);
       const RECT& videoRect = layout.videoRect;
+      const RECT contentRect = resolve_video_content_rect(hwnd, videoRect);
       const bool pickerVisible = gWindowPickerVisible.load(std::memory_order_relaxed);
       static bool hasPresentedAtLeastOneFrame = false;
 
@@ -1904,7 +1989,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
           }
           if (gNv12Renderer.ready) {
-            presented = gNv12Renderer.render(hwnd, videoRect, local->data(), w, h, &renderTelemetry);
+            presented = gNv12Renderer.render(hwnd, contentRect, local->data(), w, h, &renderTelemetry);
             if (presented) {
               ++gD3dPresentSuccessCount;
               renderPath = "d3d_nv12";
@@ -1925,8 +2010,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
               bmi.bmiHeader.biBitCount = 32;
               bmi.bmiHeader.biCompression = BI_RGB;
               SetStretchBltMode(hdc, COLORONCOLOR);
-              StretchDIBits(hdc, videoRect.left, videoRect.top,
-                            videoRect.right - videoRect.left, videoRect.bottom - videoRect.top,
+              FillRect(hdc, &videoRect, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+              StretchDIBits(hdc, contentRect.left, contentRect.top,
+                            contentRect.right - contentRect.left, contentRect.bottom - contentRect.top,
                             0, 0, static_cast<int>(w), static_cast<int>(h),
                             bgra.data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
               presented = true;
@@ -1946,8 +2032,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           bmi.bmiHeader.biBitCount = 32;
           bmi.bmiHeader.biCompression = BI_RGB;
           SetStretchBltMode(hdc, COLORONCOLOR);
-          StretchDIBits(hdc, videoRect.left, videoRect.top,
-                        videoRect.right - videoRect.left, videoRect.bottom - videoRect.top,
+          FillRect(hdc, &videoRect, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+          StretchDIBits(hdc, contentRect.left, contentRect.top,
+                        contentRect.right - contentRect.left, contentRect.bottom - contentRect.top,
                         0, 0, static_cast<int>(w), static_cast<int>(h),
                         local->data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
           presented = true;
@@ -3163,6 +3250,7 @@ int main(int argc, char** argv) {
         gFrame.decodeEndUs = decodeEndUs;
         gFrame.queueSetUs = queueSetUs;
         gFrame.decodeToQueueUs = decodeToQueueUs;
+        gFrame.streamGeneration = h.streamGeneration;
         gFrame.version = prevVersion + 1;
         gFrame.bytes = std::move(frameNv12);
       }
@@ -3443,6 +3531,7 @@ int main(int argc, char** argv) {
           gFrame.decodeEndUs = nowUs;
           gFrame.queueSetUs = queueSetUs;
           gFrame.decodeToQueueUs = 0;
+          gFrame.streamGeneration = h.streamGeneration;
           gFrame.version = prevVersion + 1;
           gFrame.bytes = std::move(frameBgra);
         }

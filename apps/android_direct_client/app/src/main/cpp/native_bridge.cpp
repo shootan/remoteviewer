@@ -61,6 +61,8 @@ std::string window_panel_snapshot_json(const remote60::native_poc::WindowPanelSn
   oss << "\"selectedTitle\":\"";
   append_json_escaped(oss, snapshot.selectedTitle);
   oss << "\",";
+  oss << "\"selectedWidth\":" << snapshot.selectedWidth << ",";
+  oss << "\"selectedHeight\":" << snapshot.selectedHeight << ",";
   oss << "\"selectionLocked\":" << (snapshot.selectionLocked ? "true" : "false") << ",";
   oss << "\"status\":\"";
   append_json_escaped(oss, snapshot.status);
