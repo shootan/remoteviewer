@@ -2442,6 +2442,41 @@ Next action
 - desktop path capture source 검증을 분리해 `Devices/Desktop` scene 흐름도 안정화한다.
 - 그 다음 `Phase F` 입력 착수 전 gate를 재확인한다.
 
+### 169) 2026-04-10 android debug build + visible host launch
+Goal
+- 사용자가 바로 동작 테스트할 수 있도록 최신 Android debug APK를 다시 빌드하고, native video host를 로그가 보이는 별도 PowerShell 창으로 실행한다.
+
+Files changed
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Native build:
+  - `cmake --build D:\remote\remote\build-vcpkg-local --config Debug --target remote60_native_video_host_poc remote60_native_video_client_poc remote60_native_video_client_shared_core_test`
+  - 결과: 성공
+- Shared core test:
+  - `D:\remote\remote\build-vcpkg-local\apps\native_poc\Debug\remote60_native_video_client_shared_core_test.exe`
+  - 결과: `PASS`
+- Android build:
+  - `JAVA_HOME=C:\Program Files\Android\Android Studio\jbr`
+  - `D:\remote\remote\tmp\gradle\gradle-8.7\bin\gradle.bat -p D:\remote\remote\apps\android_direct_client assembleDebug`
+  - 결과: 성공
+  - APK: `D:\remote\remote\apps\android_direct_client\app\build\outputs\apk\debug\app-debug.apk`
+  - APK timestamp: `2026-04-10 14:06:03`
+- Host visible launch:
+  - process: `remote60_native_video_host_poc.exe`
+  - PID: `57056`
+  - mode: visible PowerShell window, `h264 + udp`, port `43000`, control port `43001`
+  - env: `REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE=1`, `REMOTE60_NATIVE_H264_NO_PACING=1`, `REMOTE60_NATIVE_FRAME_GATING_DISABLE=1`, `REMOTE60_NATIVE_ABR_DISABLE=1`, `REMOTE60_NATIVE_ENCODER_BACKEND=mft_auto`
+- ADB/device state:
+  - `C:\Users\shota\AppData\Local\Android\Sdk\platform-tools\adb.exe devices`
+  - 결과: `emulator-5554 offline`
+  - 따라서 APK 자동 설치는 수행하지 않음
+
+Next action
+- 에뮬레이터 또는 실기기 `adb` 상태가 `device`로 올라오면 최신 `app-debug.apk`를 설치한다.
+- 현재 떠 있는 visible host 창 상태에서 Android client를 연결해 수동 동작 테스트를 진행한다.
+
 ### 168) 2026-04-10 D3D capture/scaler contention mitigation v1
 Goal
 - capture readback와 GPU scaler가 같은 D3D11 immediate context를 오래 점유하는 구간을 줄여 host-side buffering 악화 가능성을 낮춘다.
