@@ -118,6 +118,19 @@ struct HostBottleneckStage {
   const char* name = "none";
 };
 
+struct D3DReadbackTiming {
+  uint64_t d3dWaitUs = 0;
+  uint64_t copyMapUs = 0;
+  uint64_t memcpyUs = 0;
+  uint64_t unmapWaitUs = 0;
+  uint64_t unmapUs = 0;
+};
+
+struct CaptureStagingSlot {
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+  std::atomic<bool> busy{false};
+};
+
 void update_host_bottleneck_stage(uint32_t code, uint64_t us, const char* name,
                                   HostBottleneckStage* stage) {
   if (!stage || !name) return;
@@ -1702,50 +1715,77 @@ struct GpuBgraScaler {
   }
 
   bool scale(const uint8_t* src, uint32_t inW, uint32_t inH, uint32_t srcStride,
-             uint32_t outW, uint32_t outH, std::vector<uint8_t>* outBgra) {
+             uint32_t outW, uint32_t outH, std::vector<uint8_t>* outBgra,
+             D3DReadbackTiming* outTiming = nullptr) {
     if (!src || !outBgra || srcStride < inW * 4) return false;
-    std::lock_guard<std::mutex> lk(*d3dMutex);
-    if (!ensure_resources(inW, inH, outW, outH)) return false;
-
-    context->UpdateSubresource(srcTexture.Get(), 0, nullptr, src, srcStride, 0);
-
-    RECT srcRect{};
-    srcRect.left = 0;
-    srcRect.top = 0;
-    srcRect.right = static_cast<LONG>(inW);
-    srcRect.bottom = static_cast<LONG>(inH);
-    RECT dstRect{};
-    dstRect.left = 0;
-    dstRect.top = 0;
-    dstRect.right = static_cast<LONG>(outW);
-    dstRect.bottom = static_cast<LONG>(outH);
-
-    videoContext->VideoProcessorSetOutputTargetRect(processor.Get(), TRUE, &dstRect);
-    videoContext->VideoProcessorSetStreamSourceRect(processor.Get(), 0, TRUE, &srcRect);
-    videoContext->VideoProcessorSetStreamDestRect(processor.Get(), 0, TRUE, &dstRect);
-    videoContext->VideoProcessorSetStreamFrameFormat(
-        processor.Get(), 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
-
-    D3D11_VIDEO_PROCESSOR_STREAM stream{};
-    stream.Enable = TRUE;
-    stream.pInputSurface = inputView.Get();
-    if (FAILED(videoContext->VideoProcessorBlt(processor.Get(), outputView.Get(), 0, 1, &stream))) {
-      return false;
-    }
-
-    context->CopyResource(dstStaging.Get(), dstTexture.Get());
+    D3DReadbackTiming localTiming{};
     D3D11_MAPPED_SUBRESOURCE mapped{};
-    if (FAILED(context->Map(dstStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return false;
+    {
+      const uint64_t lockWaitStartUs = qpc_now_us();
+      std::lock_guard<std::mutex> lk(*d3dMutex);
+      const uint64_t lockAcquiredUs = qpc_now_us();
+      localTiming.d3dWaitUs =
+          (lockAcquiredUs >= lockWaitStartUs) ? (lockAcquiredUs - lockWaitStartUs) : 0;
+      if (!ensure_resources(inW, inH, outW, outH)) return false;
 
+      context->UpdateSubresource(srcTexture.Get(), 0, nullptr, src, srcStride, 0);
+
+      RECT srcRect{};
+      srcRect.left = 0;
+      srcRect.top = 0;
+      srcRect.right = static_cast<LONG>(inW);
+      srcRect.bottom = static_cast<LONG>(inH);
+      RECT dstRect{};
+      dstRect.left = 0;
+      dstRect.top = 0;
+      dstRect.right = static_cast<LONG>(outW);
+      dstRect.bottom = static_cast<LONG>(outH);
+
+      videoContext->VideoProcessorSetOutputTargetRect(processor.Get(), TRUE, &dstRect);
+      videoContext->VideoProcessorSetStreamSourceRect(processor.Get(), 0, TRUE, &srcRect);
+      videoContext->VideoProcessorSetStreamDestRect(processor.Get(), 0, TRUE, &dstRect);
+      videoContext->VideoProcessorSetStreamFrameFormat(
+          processor.Get(), 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+
+      D3D11_VIDEO_PROCESSOR_STREAM stream{};
+      stream.Enable = TRUE;
+      stream.pInputSurface = inputView.Get();
+      if (FAILED(videoContext->VideoProcessorBlt(processor.Get(), outputView.Get(), 0, 1, &stream))) {
+        return false;
+      }
+
+      context->CopyResource(dstStaging.Get(), dstTexture.Get());
+      if (FAILED(context->Map(dstStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return false;
+      const uint64_t copyMapDoneUs = qpc_now_us();
+      localTiming.copyMapUs =
+          (copyMapDoneUs >= lockAcquiredUs) ? (copyMapDoneUs - lockAcquiredUs) : 0;
+    }
     outBgra->resize(static_cast<size_t>(outW) * static_cast<size_t>(outH) * 4);
     const uint32_t outStride = outW * 4;
     auto* dst = outBgra->data();
     const auto* mappedData = reinterpret_cast<const uint8_t*>(mapped.pData);
+    const uint64_t memcpyStartUs = qpc_now_us();
     for (uint32_t row = 0; row < outH; ++row) {
       std::memcpy(dst + static_cast<size_t>(row) * outStride,
                   mappedData + static_cast<size_t>(row) * mapped.RowPitch, outStride);
     }
-    context->Unmap(dstStaging.Get(), 0);
+    const uint64_t memcpyDoneUs = qpc_now_us();
+    localTiming.memcpyUs =
+        (memcpyDoneUs >= memcpyStartUs) ? (memcpyDoneUs - memcpyStartUs) : 0;
+    {
+      const uint64_t unmapWaitStartUs = qpc_now_us();
+      std::lock_guard<std::mutex> lk(*d3dMutex);
+      const uint64_t unmapLockAcquiredUs = qpc_now_us();
+      localTiming.unmapWaitUs =
+          (unmapLockAcquiredUs >= unmapWaitStartUs) ? (unmapLockAcquiredUs - unmapWaitStartUs) : 0;
+      context->Unmap(dstStaging.Get(), 0);
+      const uint64_t unmapDoneUs = qpc_now_us();
+      localTiming.unmapUs =
+          (unmapDoneUs >= unmapLockAcquiredUs) ? (unmapDoneUs - unmapLockAcquiredUs) : 0;
+    }
+    if (outTiming) {
+      *outTiming = localTiming;
+    }
     return true;
   }
 };
@@ -1899,6 +1939,11 @@ struct FrameState {
   uint64_t captureClockSkewUs = 0;
   uint64_t queuePushUs = 0;
   uint64_t captureIntervalUs = 0;
+  uint64_t captureD3DWaitUs = 0;
+  uint64_t captureCopyMapUs = 0;
+  uint64_t captureMemcpyUs = 0;
+  uint64_t captureUnmapWaitUs = 0;
+  uint64_t captureUnmapUs = 0;
   std::shared_ptr<std::vector<uint8_t>> payload;
 };
 
@@ -2965,7 +3010,11 @@ int main(int argc, char** argv) {
 
   std::mutex captureResourceMu;
   std::atomic<uint32_t> captureSizeChangePending{0};
-  Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
+  const uint32_t captureStagingSlotCount =
+      std::max<uint32_t>(3u, static_cast<uint32_t>(captureFramePoolBuffers + 1));
+  std::vector<std::shared_ptr<CaptureStagingSlot>> captureStagingSlots;
+  std::atomic<uint32_t> captureStagingSlotCursor{0};
+  std::atomic<uint64_t> captureStagingBusyDropCount{0};
   auto create_staging = [&](uint32_t srcW, uint32_t srcH) -> bool {
     D3D11_TEXTURE2D_DESC stDesc{};
     stDesc.Width = srcW;
@@ -2976,12 +3025,19 @@ int main(int argc, char** argv) {
     stDesc.SampleDesc.Count = 1;
     stDesc.Usage = D3D11_USAGE_STAGING;
     stDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> nextStaging;
-    if (FAILED(d3d->CreateTexture2D(&stDesc, nullptr, &nextStaging)) || !nextStaging) {
-      return false;
+    std::vector<std::shared_ptr<CaptureStagingSlot>> nextSlots;
+    nextSlots.reserve(captureStagingSlotCount);
+    for (uint32_t slotIndex = 0; slotIndex < captureStagingSlotCount; ++slotIndex) {
+      auto slot = std::make_shared<CaptureStagingSlot>();
+      if (!slot) return false;
+      if (FAILED(d3d->CreateTexture2D(&stDesc, nullptr, &slot->texture)) || !slot->texture) {
+        return false;
+      }
+      nextSlots.push_back(std::move(slot));
     }
     std::lock_guard<std::mutex> lk(captureResourceMu);
-    staging = nextStaging;
+    captureStagingSlots = std::move(nextSlots);
+    captureStagingSlotCursor.store(0, std::memory_order_release);
     return true;
   };
   if (!create_staging(captureWidth, captureHeight)) {
@@ -3050,14 +3106,14 @@ int main(int argc, char** argv) {
         if (!src) return;
         uint32_t frameW = 0;
         uint32_t frameH = 0;
-        Microsoft::WRL::ComPtr<ID3D11Texture2D> stagingLocal;
+        std::vector<std::shared_ptr<CaptureStagingSlot>> stagingSlotsLocal;
         {
           std::lock_guard<std::mutex> lk(captureResourceMu);
           frameW = captureWidth;
           frameH = captureHeight;
-          stagingLocal = staging;
+          stagingSlotsLocal = captureStagingSlots;
         }
-        if (!stagingLocal || frameW < 2 || frameH < 2) return;
+        if (stagingSlotsLocal.empty() || frameW < 2 || frameH < 2) return;
         D3D11_TEXTURE2D_DESC srcDesc{};
         src->GetDesc(&srcDesc);
         if (srcDesc.Width != frameW || srcDesc.Height != frameH) {
@@ -3066,19 +3122,61 @@ int main(int argc, char** argv) {
         }
         uint32_t stride = frameW * 4;
         auto payload = std::make_shared<std::vector<uint8_t>>(static_cast<size_t>(stride) * frameH);
-        {
-          std::lock_guard<std::mutex> d3dLock(d3dContextMu);
-          ctx->CopyResource(stagingLocal.Get(), src.Get());
-          D3D11_MAPPED_SUBRESOURCE map{};
-          if (FAILED(ctx->Map(stagingLocal.Get(), 0, D3D11_MAP_READ, 0, &map))) return;
-          auto* dst = payload->data();
-          auto* srcRow = reinterpret_cast<const uint8_t*>(map.pData);
-          for (uint32_t y = 0; y < frameH; ++y) {
-            std::memcpy(dst + static_cast<size_t>(y) * stride,
-                        srcRow + static_cast<size_t>(y) * map.RowPitch, stride);
+        std::shared_ptr<CaptureStagingSlot> stagingSlot;
+        const uint32_t startIndex = captureStagingSlotCursor.fetch_add(1, std::memory_order_acq_rel);
+        for (uint32_t attempt = 0; attempt < stagingSlotsLocal.size(); ++attempt) {
+          const auto& candidate = stagingSlotsLocal[(startIndex + attempt) % stagingSlotsLocal.size()];
+          if (!candidate || !candidate->texture) continue;
+          bool expected = false;
+          if (candidate->busy.compare_exchange_strong(
+                  expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
+            stagingSlot = candidate;
+            break;
           }
-          ctx->Unmap(stagingLocal.Get(), 0);
         }
+        if (!stagingSlot) {
+          captureStagingBusyDropCount.fetch_add(1, std::memory_order_relaxed);
+          return;
+        }
+        D3DReadbackTiming captureReadbackTiming{};
+        D3D11_MAPPED_SUBRESOURCE map{};
+        {
+          const uint64_t lockWaitStartUs = qpc_now_us();
+          std::lock_guard<std::mutex> d3dLock(d3dContextMu);
+          const uint64_t lockAcquiredUs = qpc_now_us();
+          captureReadbackTiming.d3dWaitUs =
+              (lockAcquiredUs >= lockWaitStartUs) ? (lockAcquiredUs - lockWaitStartUs) : 0;
+          ctx->CopyResource(stagingSlot->texture.Get(), src.Get());
+          if (FAILED(ctx->Map(stagingSlot->texture.Get(), 0, D3D11_MAP_READ, 0, &map))) {
+            stagingSlot->busy.store(false, std::memory_order_release);
+            return;
+          }
+          const uint64_t copyMapDoneUs = qpc_now_us();
+          captureReadbackTiming.copyMapUs =
+              (copyMapDoneUs >= lockAcquiredUs) ? (copyMapDoneUs - lockAcquiredUs) : 0;
+        }
+        auto* dst = payload->data();
+        auto* srcRow = reinterpret_cast<const uint8_t*>(map.pData);
+        const uint64_t memcpyStartUs = qpc_now_us();
+        for (uint32_t y = 0; y < frameH; ++y) {
+          std::memcpy(dst + static_cast<size_t>(y) * stride,
+                      srcRow + static_cast<size_t>(y) * map.RowPitch, stride);
+        }
+        const uint64_t memcpyDoneUs = qpc_now_us();
+        captureReadbackTiming.memcpyUs =
+            (memcpyDoneUs >= memcpyStartUs) ? (memcpyDoneUs - memcpyStartUs) : 0;
+        {
+          const uint64_t unmapWaitStartUs = qpc_now_us();
+          std::lock_guard<std::mutex> d3dLock(d3dContextMu);
+          const uint64_t unmapLockAcquiredUs = qpc_now_us();
+          captureReadbackTiming.unmapWaitUs =
+              (unmapLockAcquiredUs >= unmapWaitStartUs) ? (unmapLockAcquiredUs - unmapWaitStartUs) : 0;
+          ctx->Unmap(stagingSlot->texture.Get(), 0);
+          const uint64_t unmapDoneUs = qpc_now_us();
+          captureReadbackTiming.unmapUs =
+              (unmapDoneUs >= unmapLockAcquiredUs) ? (unmapDoneUs - unmapLockAcquiredUs) : 0;
+        }
+        stagingSlot->busy.store(false, std::memory_order_release);
         if (captureWindowModeActive && captureWindowClientOnlyActive) {
           const HWND cropHwnd = reinterpret_cast<HWND>(
               static_cast<uintptr_t>(hostCaptureTargetHwnd.load(std::memory_order_acquire)));
@@ -3171,6 +3269,11 @@ int main(int argc, char** argv) {
           frame.queuePushUs = queuePushUs;
           frame.callbackIntervalUs = callbackIntervalUs;
           frame.captureIntervalUs = captureIntervalUs;
+          frame.captureD3DWaitUs = captureReadbackTiming.d3dWaitUs;
+          frame.captureCopyMapUs = captureReadbackTiming.copyMapUs;
+          frame.captureMemcpyUs = captureReadbackTiming.memcpyUs;
+          frame.captureUnmapWaitUs = captureReadbackTiming.unmapWaitUs;
+          frame.captureUnmapUs = captureReadbackTiming.unmapUs;
           frame.seq += 1;
           frame.version += 1;
           currentVersion = frame.version;
@@ -3319,6 +3422,28 @@ int main(int argc, char** argv) {
   uint64_t gpuScaleSuccess = 0;
   uint64_t gpuScaleFail = 0;
   uint64_t gpuScaleCpuFallback = 0;
+  uint64_t captureReadbackSamples = 0;
+  uint64_t captureD3DWaitSumUs = 0;
+  uint64_t captureD3DWaitMaxUs = 0;
+  uint64_t captureCopyMapSumUs = 0;
+  uint64_t captureCopyMapMaxUs = 0;
+  uint64_t captureMemcpySumUs = 0;
+  uint64_t captureMemcpyMaxUs = 0;
+  uint64_t captureUnmapWaitSumUs = 0;
+  uint64_t captureUnmapWaitMaxUs = 0;
+  uint64_t captureUnmapSumUs = 0;
+  uint64_t captureUnmapMaxUs = 0;
+  uint64_t gpuScaleTimedCount = 0;
+  uint64_t gpuScaleD3DWaitSumUs = 0;
+  uint64_t gpuScaleD3DWaitMaxUs = 0;
+  uint64_t gpuScaleCopyMapSumUs = 0;
+  uint64_t gpuScaleCopyMapMaxUs = 0;
+  uint64_t gpuScaleMemcpySumUs = 0;
+  uint64_t gpuScaleMemcpyMaxUs = 0;
+  uint64_t gpuScaleUnmapWaitSumUs = 0;
+  uint64_t gpuScaleUnmapWaitMaxUs = 0;
+  uint64_t gpuScaleUnmapSumUs = 0;
+  uint64_t gpuScaleUnmapMaxUs = 0;
   uint64_t captureAgeSumUs = 0;
   uint64_t captureAgeMaxUs = 0;
   uint64_t callbackToEncodeStartSumUs = 0;
@@ -3478,6 +3603,11 @@ int main(int argc, char** argv) {
       frame.captureClockSkewUs = 0;
       frame.queuePushUs = 0;
       frame.captureIntervalUs = 0;
+      frame.captureD3DWaitUs = 0;
+      frame.captureCopyMapUs = 0;
+      frame.captureMemcpyUs = 0;
+      frame.captureUnmapWaitUs = 0;
+      frame.captureUnmapUs = 0;
       frame.seq += 1;
       frame.version += 1;
       flushedVersion = frame.version;
@@ -3996,6 +4126,11 @@ int main(int argc, char** argv) {
     uint64_t captureIntervalUs = 0;
     uint64_t captureClockSkewUs = 0;
     uint64_t captureAgeAtCallbackUs = 0;
+    uint64_t captureD3DWaitUs = 0;
+    uint64_t captureCopyMapUs = 0;
+    uint64_t captureMemcpyUs = 0;
+    uint64_t captureUnmapWaitUs = 0;
+    uint64_t captureUnmapUs = 0;
     uint64_t version = 0;
     uint32_t queueWaitReason = 0;  // 0: normal, 1: timeout, 2: no-work
     const uint64_t queueSelectStartUs = qpc_now_us();
@@ -4030,6 +4165,11 @@ int main(int argc, char** argv) {
       queuePushUs = frame.queuePushUs;
       captureAgeAtCallbackUs = frame.captureAgeAtCallbackUs;
       captureClockSkewUs = frame.captureClockSkewUs;
+      captureD3DWaitUs = frame.captureD3DWaitUs;
+      captureCopyMapUs = frame.captureCopyMapUs;
+      captureMemcpyUs = frame.captureMemcpyUs;
+      captureUnmapWaitUs = frame.captureUnmapWaitUs;
+      captureUnmapUs = frame.captureUnmapUs;
     }
   const uint64_t queuePopUs = qpc_now_us();
   const uint64_t queueSelectWaitUs =
@@ -4044,6 +4184,17 @@ int main(int argc, char** argv) {
       (queuePushUs > 0 && captureUs > 0)
           ? (queuePushUs >= captureUs ? (queuePushUs - captureUs) : (captureUs - queuePushUs))
           : 0;
+    ++captureReadbackSamples;
+    captureD3DWaitSumUs += captureD3DWaitUs;
+    captureD3DWaitMaxUs = std::max(captureD3DWaitMaxUs, captureD3DWaitUs);
+    captureCopyMapSumUs += captureCopyMapUs;
+    captureCopyMapMaxUs = std::max(captureCopyMapMaxUs, captureCopyMapUs);
+    captureMemcpySumUs += captureMemcpyUs;
+    captureMemcpyMaxUs = std::max(captureMemcpyMaxUs, captureMemcpyUs);
+    captureUnmapWaitSumUs += captureUnmapWaitUs;
+    captureUnmapWaitMaxUs = std::max(captureUnmapWaitMaxUs, captureUnmapWaitUs);
+    captureUnmapSumUs += captureUnmapUs;
+    captureUnmapMaxUs = std::max(captureUnmapMaxUs, captureUnmapUs);
     const uint64_t queueWaitUs =
         (queuePopUs > 0 && queuePushUs > 0 && queuePopUs >= queuePushUs) ? (queuePopUs - queuePushUs) : 0;
     const uint64_t queueGapFrames =
@@ -4193,6 +4344,11 @@ int main(int argc, char** argv) {
                     << " callbackIntervalUs=" << callbackIntervalUs
                     << " captureIntervalUs=" << captureIntervalUs
                     << " captureClockSkewUs=" << captureClockSkewUs
+                    << " captureD3DWaitUs=" << captureD3DWaitUs
+                    << " captureCopyMapUs=" << captureCopyMapUs
+                    << " captureMemcpyUs=" << captureMemcpyUs
+                    << " captureUnmapWaitUs=" << captureUnmapWaitUs
+                    << " captureUnmapUs=" << captureUnmapUs
                     << " selectWaitUs=" << frameAgeAtSelectUs
                     << " queueSelectWaitUs=" << queueSelectWaitUs
                    << " queueGapFrames=" << queueGapFrames
@@ -4239,6 +4395,11 @@ int main(int argc, char** argv) {
                   << " callbackIntervalUs=" << callbackIntervalUs
                   << " captureIntervalUs=" << captureIntervalUs
                   << " captureClockSkewUs=" << captureClockSkewUs
+                  << " captureD3DWaitUs=" << captureD3DWaitUs
+                  << " captureCopyMapUs=" << captureCopyMapUs
+                  << " captureMemcpyUs=" << captureMemcpyUs
+                  << " captureUnmapWaitUs=" << captureUnmapWaitUs
+                  << " captureUnmapUs=" << captureUnmapUs
                   << " selectWaitUs=" << frameAgeAtSelectUs
                   << " queueSelectWaitUs=" << queueSelectWaitUs
                   << " captureToQueueUs=" << captureToQueueUs
@@ -4276,6 +4437,7 @@ int main(int argc, char** argv) {
       uint32_t encodeSrcH = h;
       uint32_t encodeSrcStride = stride;
       std::vector<uint8_t> scaledBgra;
+      D3DReadbackTiming scaleReadbackTiming{};
       uint64_t preEncodePrepUs = 0;
       uint64_t scaleUs = 0;
       uint64_t nv12Us = 0;
@@ -4285,9 +4447,21 @@ int main(int argc, char** argv) {
         bool scaleOk = false;
         if (gpuScalerHealthy) {
           ++gpuScaleAttempts;
-          scaleOk = gpuScaler.scale(payload->data(), w, h, stride, activeEncodeW, activeEncodeH, &scaledBgra);
+          scaleOk = gpuScaler.scale(payload->data(), w, h, stride, activeEncodeW, activeEncodeH,
+                                    &scaledBgra, &scaleReadbackTiming);
           if (scaleOk) {
             ++gpuScaleSuccess;
+            ++gpuScaleTimedCount;
+            gpuScaleD3DWaitSumUs += scaleReadbackTiming.d3dWaitUs;
+            gpuScaleD3DWaitMaxUs = std::max(gpuScaleD3DWaitMaxUs, scaleReadbackTiming.d3dWaitUs);
+            gpuScaleCopyMapSumUs += scaleReadbackTiming.copyMapUs;
+            gpuScaleCopyMapMaxUs = std::max(gpuScaleCopyMapMaxUs, scaleReadbackTiming.copyMapUs);
+            gpuScaleMemcpySumUs += scaleReadbackTiming.memcpyUs;
+            gpuScaleMemcpyMaxUs = std::max(gpuScaleMemcpyMaxUs, scaleReadbackTiming.memcpyUs);
+            gpuScaleUnmapWaitSumUs += scaleReadbackTiming.unmapWaitUs;
+            gpuScaleUnmapWaitMaxUs = std::max(gpuScaleUnmapWaitMaxUs, scaleReadbackTiming.unmapWaitUs);
+            gpuScaleUnmapSumUs += scaleReadbackTiming.unmapUs;
+            gpuScaleUnmapMaxUs = std::max(gpuScaleUnmapMaxUs, scaleReadbackTiming.unmapUs);
           } else {
             ++gpuScaleFail;
             gpuScalerHealthy = false;
@@ -4567,6 +4741,11 @@ int main(int argc, char** argv) {
                     << " callbackIntervalUs=" << callbackIntervalUs
                     << " captureIntervalUs=" << captureIntervalUs
                     << " captureClockSkewUs=" << captureClockSkewUs
+                    << " captureD3DWaitUs=" << captureD3DWaitUs
+                    << " captureCopyMapUs=" << captureCopyMapUs
+                    << " captureMemcpyUs=" << captureMemcpyUs
+                    << " captureUnmapWaitUs=" << captureUnmapWaitUs
+                    << " captureUnmapUs=" << captureUnmapUs
                     << " selectWaitUs=" << frameAgeAtSelectUs
                      << " queueSelectWaitUs=" << queueSelectWaitUs
                      << " queueGapFrames=" << queueGapFrames
@@ -4595,6 +4774,11 @@ int main(int argc, char** argv) {
                      << " sendIntervalErrUs=" << sendIntervalErrUs
                      << " preEncodePrepUs=" << preEncodePrepUs
                      << " scaleUs=" << scaleUs
+                     << " scaleD3DWaitUs=" << scaleReadbackTiming.d3dWaitUs
+                     << " scaleCopyMapUs=" << scaleReadbackTiming.copyMapUs
+                     << " scaleMemcpyUs=" << scaleReadbackTiming.memcpyUs
+                     << " scaleUnmapWaitUs=" << scaleReadbackTiming.unmapWaitUs
+                     << " scaleUnmapUs=" << scaleReadbackTiming.unmapUs
                      << " nv12Us=" << nv12Us
                      << " sendWaitUs=" << sendWaitUs
                      << " sendToEncodeUs=" << sendToEncodeUs
@@ -4662,6 +4846,11 @@ int main(int argc, char** argv) {
                     << " selectWaitUs=" << frameAgeAtSelectUs
                     << " queueSelectWaitUs=" << queueSelectWaitUs
                     << " captureClockSkewUs=" << captureClockSkewUs
+                    << " captureD3DWaitUs=" << captureD3DWaitUs
+                    << " captureCopyMapUs=" << captureCopyMapUs
+                    << " captureMemcpyUs=" << captureMemcpyUs
+                    << " captureUnmapWaitUs=" << captureUnmapWaitUs
+                    << " captureUnmapUs=" << captureUnmapUs
                     << " captureToQueueUs=" << captureToQueueUs
                    << " queueWaitUs=" << queueWaitUs
                    << " queueWaitReason=" << queueWaitReason
@@ -4678,6 +4867,11 @@ int main(int argc, char** argv) {
                      << " tickWaitUs=" << tickWaitUs
                      << " preEncodePrepUs=" << preEncodePrepUs
                      << " scaleUs=" << scaleUs
+                     << " scaleD3DWaitUs=" << scaleReadbackTiming.d3dWaitUs
+                     << " scaleCopyMapUs=" << scaleReadbackTiming.copyMapUs
+                     << " scaleMemcpyUs=" << scaleReadbackTiming.memcpyUs
+                     << " scaleUnmapWaitUs=" << scaleReadbackTiming.unmapWaitUs
+                     << " scaleUnmapUs=" << scaleReadbackTiming.unmapUs
                      << " nv12Us=" << nv12Us
                      << " c2eUs=" << c2eUs
                       << " encQueueUs=" << encQueueUs
@@ -4839,6 +5033,26 @@ int main(int argc, char** argv) {
       } else {
         const uint64_t capAgeAvgUs = (encodedFrames > 0) ? (captureAgeSumUs / encodedFrames) : 0;
         const uint64_t cb2eAvgUs = (encodedFrames > 0) ? (callbackToEncodeStartSumUs / encodedFrames) : 0;
+        const uint64_t captureD3DWaitAvgUs =
+            (captureReadbackSamples > 0) ? (captureD3DWaitSumUs / captureReadbackSamples) : 0;
+        const uint64_t captureCopyMapAvgUs =
+            (captureReadbackSamples > 0) ? (captureCopyMapSumUs / captureReadbackSamples) : 0;
+        const uint64_t captureMemcpyAvgUs =
+            (captureReadbackSamples > 0) ? (captureMemcpySumUs / captureReadbackSamples) : 0;
+        const uint64_t captureUnmapWaitAvgUs =
+            (captureReadbackSamples > 0) ? (captureUnmapWaitSumUs / captureReadbackSamples) : 0;
+        const uint64_t captureUnmapAvgUs =
+            (captureReadbackSamples > 0) ? (captureUnmapSumUs / captureReadbackSamples) : 0;
+        const uint64_t gpuScaleD3DWaitAvgUs =
+            (gpuScaleTimedCount > 0) ? (gpuScaleD3DWaitSumUs / gpuScaleTimedCount) : 0;
+        const uint64_t gpuScaleCopyMapAvgUs =
+            (gpuScaleTimedCount > 0) ? (gpuScaleCopyMapSumUs / gpuScaleTimedCount) : 0;
+        const uint64_t gpuScaleMemcpyAvgUs =
+            (gpuScaleTimedCount > 0) ? (gpuScaleMemcpySumUs / gpuScaleTimedCount) : 0;
+        const uint64_t gpuScaleUnmapWaitAvgUs =
+            (gpuScaleTimedCount > 0) ? (gpuScaleUnmapWaitSumUs / gpuScaleTimedCount) : 0;
+        const uint64_t gpuScaleUnmapAvgUs =
+            (gpuScaleTimedCount > 0) ? (gpuScaleUnmapSumUs / gpuScaleTimedCount) : 0;
         const uint64_t frameGatingChangeAvgPm =
             (frameGatingChangePermilleCount > 0)
                 ? (frameGatingChangePermilleSum / frameGatingChangePermilleCount)
@@ -4882,6 +5096,18 @@ int main(int argc, char** argv) {
                   << " capAgeMaxUs=" << captureAgeMaxUs
                   << " cb2eAvgUs=" << cb2eAvgUs
                   << " cb2eMaxUs=" << callbackToEncodeStartMaxUs
+                  << " captureReadbackSamples=" << captureReadbackSamples
+                  << " captureStagingBusyDrops=" << captureStagingBusyDropCount.load(std::memory_order_relaxed)
+                  << " captureD3DWaitAvgUs=" << captureD3DWaitAvgUs
+                  << " captureD3DWaitMaxUs=" << captureD3DWaitMaxUs
+                  << " captureCopyMapAvgUs=" << captureCopyMapAvgUs
+                  << " captureCopyMapMaxUs=" << captureCopyMapMaxUs
+                  << " captureMemcpyAvgUs=" << captureMemcpyAvgUs
+                  << " captureMemcpyMaxUs=" << captureMemcpyMaxUs
+                  << " captureUnmapWaitAvgUs=" << captureUnmapWaitAvgUs
+                  << " captureUnmapWaitMaxUs=" << captureUnmapWaitMaxUs
+                  << " captureUnmapAvgUs=" << captureUnmapAvgUs
+                  << " captureUnmapMaxUs=" << captureUnmapMaxUs
                   << " mbps=" << mbps
                   << " rawEquivMbps=" << rawEquivMbps
                   << " encRatioX100=" << encRatioX100
@@ -4901,6 +5127,17 @@ int main(int argc, char** argv) {
                   << " gpuScaleSuccess=" << gpuScaleSuccess
                   << " gpuScaleFail=" << gpuScaleFail
                   << " gpuScaleCpuFallback=" << gpuScaleCpuFallback
+                  << " gpuScaleTimedCount=" << gpuScaleTimedCount
+                  << " gpuScaleD3DWaitAvgUs=" << gpuScaleD3DWaitAvgUs
+                  << " gpuScaleD3DWaitMaxUs=" << gpuScaleD3DWaitMaxUs
+                  << " gpuScaleCopyMapAvgUs=" << gpuScaleCopyMapAvgUs
+                  << " gpuScaleCopyMapMaxUs=" << gpuScaleCopyMapMaxUs
+                  << " gpuScaleMemcpyAvgUs=" << gpuScaleMemcpyAvgUs
+                  << " gpuScaleMemcpyMaxUs=" << gpuScaleMemcpyMaxUs
+                  << " gpuScaleUnmapWaitAvgUs=" << gpuScaleUnmapWaitAvgUs
+                  << " gpuScaleUnmapWaitMaxUs=" << gpuScaleUnmapWaitMaxUs
+                  << " gpuScaleUnmapAvgUs=" << gpuScaleUnmapAvgUs
+                  << " gpuScaleUnmapMaxUs=" << gpuScaleUnmapMaxUs
                   << " abrProfile=" << ((abrProfile == 0) ? "high" : ((abrProfile == 1) ? "mid" : "low"))
                   << " abrModSec=" << abrModeratePressureSeconds
                   << " abrSevSec=" << abrSeverePressureSeconds
@@ -5218,6 +5455,28 @@ int main(int argc, char** argv) {
       gpuScaleSuccess = 0;
       gpuScaleFail = 0;
       gpuScaleCpuFallback = 0;
+      captureReadbackSamples = 0;
+      captureD3DWaitSumUs = 0;
+      captureD3DWaitMaxUs = 0;
+      captureCopyMapSumUs = 0;
+      captureCopyMapMaxUs = 0;
+      captureMemcpySumUs = 0;
+      captureMemcpyMaxUs = 0;
+      captureUnmapWaitSumUs = 0;
+      captureUnmapWaitMaxUs = 0;
+      captureUnmapSumUs = 0;
+      captureUnmapMaxUs = 0;
+      gpuScaleTimedCount = 0;
+      gpuScaleD3DWaitSumUs = 0;
+      gpuScaleD3DWaitMaxUs = 0;
+      gpuScaleCopyMapSumUs = 0;
+      gpuScaleCopyMapMaxUs = 0;
+      gpuScaleMemcpySumUs = 0;
+      gpuScaleMemcpyMaxUs = 0;
+      gpuScaleUnmapWaitSumUs = 0;
+      gpuScaleUnmapWaitMaxUs = 0;
+      gpuScaleUnmapSumUs = 0;
+      gpuScaleUnmapMaxUs = 0;
       frameGatingSkipCount = 0;
       frameGatingStaticSkipCount = 0;
       frameGatingChangePermilleSum = 0;

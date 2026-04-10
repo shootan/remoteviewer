@@ -2442,6 +2442,43 @@ Next action
 - desktop path capture source 검증을 분리해 `Devices/Desktop` scene 흐름도 안정화한다.
 - 그 다음 `Phase F` 입력 착수 전 gate를 재확인한다.
 
+### 168) 2026-04-10 D3D capture/scaler contention mitigation v1
+Goal
+- capture readback와 GPU scaler가 같은 D3D11 immediate context를 오래 점유하는 구간을 줄여 host-side buffering 악화 가능성을 낮춘다.
+- `single staging` 구조에서 바로 lock만 쪼개지 않고, safe staging slot ring과 readback timing metrics를 함께 넣어 회귀 가능성을 낮춘다.
+
+Files changed
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `automation/verify_native_video_runtime.ps1`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Native Debug build:
+  - `cmake --build D:\remote\remote\build-vcpkg-local --config Debug --target remote60_native_video_host_poc remote60_native_video_client_poc remote60_native_video_client_shared_core_test`
+  - 결과: 성공
+- Shared core test:
+  - `D:\remote\remote\build-vcpkg-local\apps\native_poc\Debug\remote60_native_video_client_shared_core_test.exe`
+  - 결과: `PASS`
+- Runtime smoke 1:
+  - `automation/verify_native_video_runtime.ps1 ... -GateAProfile -TraceEvery 30 -TraceMax 6`
+  - 결과: 실패
+  - 원인: capture source가 `CreateForWindow(GetShellWindow())`로 fallback되어 callback이 생성되지 않음
+- Runtime smoke 2:
+  - host/client 직접 실행 + `--capture-window-pid 13608` (`Codex Plan - Server - Visual Studio Code`)
+  - 결과: control attach는 성공했지만 capture callback이 들어오지 않아 `capture session restarted` 반복
+- Runtime smoke 3:
+  - host/client 직접 실행 + `--capture-window-pid 39980` (Chrome)
+  - 결과: target lookup 실패로 monitor fallback, 이후 `GetShellWindow()` capture source로 callback 미생성
+- Scope note:
+  - capture callback은 shared staging 단일 객체 대신 slot ring에서 free slot을 점유한 뒤 `CopyResource -> Map`만 lock 안에서 수행하고, memcpy는 lock 밖에서 처리한다.
+  - `GpuBgraScaler`는 내부 `dstStaging`이 encode thread 단독 소유이므로 같은 방식으로 `Map` memcpy 구간을 lock 밖으로 이동했다.
+  - host trace/user-feedback와 verify parser에 `captureD3DWaitUs`, `captureCopyMapUs`, `captureMemcpyUs`, `captureUnmapWaitUs`, `scaleD3DWaitUs`, `scaleCopyMapUs`, `scaleMemcpyUs`, `scaleUnmapWaitUs` 필드를 추가했다.
+
+Next action
+- interactive desktop 세션에서 `non-ShellWindow` capture source를 명시적으로 잡아 새 timing 필드가 실제로 찍히는 smoke를 다시 수행한다.
+- 그 뒤 `cb2eAvgUs`와 새 D3D wait/copy/memcpy 지표를 기준으로 개선 여부를 판정한다.
+
 ### 167) 2026-04-09 buffering/gpu contention analysis review
 Goal
 - `docs/버퍼링_GPU경합_분석_20260409.md`의 주장 중 현재 코드 기준으로 인정 가능한 부분과 인정하기 어려운 부분을 분리한다.
