@@ -32,6 +32,8 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
 
  private:
   bool EnsureCodecLocked(uint32_t width, uint32_t height);
+  uint64_t ComputeQueuedPtsUsLocked(const remote60::native_poc::UdpH264AssembledFrame& frame);
+  void ResetPtsStateLocked();
   void ResetCodecLocked();
   void ReleaseSurfaceLocked();
   bool UpdateCodecConfigLocked(const std::vector<uint8_t>& annexb);
@@ -53,6 +55,14 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint64_t latestInputStreamGeneration_ = 0;
   uint64_t latestOutputStreamGeneration_ = 0;
   uint64_t lastOutputPresentationUs_ = 0;
+  uint64_t ptsStreamGeneration_ = 0;
+  uint64_t ptsRemoteBaseUs_ = 0;
+  uint64_t ptsLocalBaseUs_ = 0;
+  uint64_t lastQueuedPtsUs_ = 0;
+  uint64_t lastRemoteCaptureUs_ = 0;
+  uint64_t ptsReanchorCount_ = 0;
+  uint64_t ptsMonotonicClampCount_ = 0;
+  uint64_t ptsFallbackCount_ = 0;
   uint64_t staleFrameDropCount_ = 0;
   uint64_t oversizedInputFrameDropCount_ = 0;
   bool awaitingSelectionAck_ = false;

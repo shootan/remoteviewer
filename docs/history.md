@@ -3276,3 +3276,67 @@ Validation / build / test result
 Next action
 - desktop path capture source 검증을 분리해 `Devices/Desktop` scene 흐름도 안정화한다.
 - 그 다음 `Phase F` 입력 착수 전 gate를 재확인한다.
+
+### 171) 2026-04-13 android direct timestamp and first-keyframe recovery
+Goal
+- Android direct client의 실기기/LDPlayer 저프레임 및 무출력 원인 후보 중 timestamp overflow와 selection 직후 first-frame 경계를 먼저 교정한다.
+- host absolute QPC를 Android decoder PTS로 직접 쓰지 않게 바꾸고, selection generation에서 첫 송신 frame이 keyframe인지 host에서 강제한다.
+
+Files changed
+- `apps/native_poc/src/time_utils.hpp`
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `apps/android_direct_client/app/src/main/cpp/android_video_decoder.hpp`
+- `apps/android_direct_client/app/src/main/cpp/android_video_decoder.cpp`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Native build:
+  - `cmake --build D:\remote\remote\build-vcpkg-local --config Debug --target remote60_native_video_host_poc remote60_native_video_client_poc remote60_native_video_client_shared_core_test`
+  - 결과: 성공
+- Native shared-core test:
+  - `D:\remote\remote\build-vcpkg-local\apps\native_poc\Debug\remote60_native_video_client_shared_core_test.exe`
+  - 결과: `PASS`
+- Native localhost smoke:
+  - `powershell -ExecutionPolicy Bypass -File D:\remote\remote\automation\verify_native_video_runtime.ps1 -Root D:\remote\remote -BuildDir build-vcpkg-local -Codec h264 -Transport udp -GateAProfile -HostSeconds 12 -ClientSeconds 8`
+  - 결과:
+    - `OVERALL_OK=True`
+    - `UDP_ASSEMBLY_MALFORMED_TOTAL=0`
+    - `GATE_A_PASS=False` (`capture_input_stall`, 기존 capture source/host 환경 영향)
+- Android build/deploy:
+  - `D:\remote\remote\tmp\gradle\gradle-8.7\bin\gradle.bat -p D:\remote\remote\apps\android_direct_client assembleDebug`
+  - `adb -s emulator-5558 install -r D:\remote\remote\apps\android_direct_client\app\build\outputs\apk\debug\app-debug.apk`
+  - 결과: 성공
+- LDPlayer 2 runtime:
+  - device: `emulator-5558`
+  - host launch note:
+    - H264 runtime 검증은 `REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE=1`
+    - 추가 비교로 `--encode-width 1280 --encode-height 720` variant도 실행
+  - connect:
+    - external host IP(`175.209.236.194`) 기준 `connect_tap -> connected window_list_received` 확인
+  - desktop select:
+    - host log:
+      - `window-select ... streamGen=2`
+      - `selection first keyframe sent streamGen=2`
+    - Android diagnostics/logcat:
+      - `pts reanchor reason=init ...`
+      - `viewer_surface_buffer_resize`
+      - `video_debug ... in=1 out=0` (full-res)
+      - `video_debug ... in=2 out=0 ptsClamp=1` (same-path retry)
+      - `video_debug ... in=1 out=0` (`1280x720` encode variant)
+      - `select_timeout`은 계속 재현
+  - window select (`C:\WINDOWS\system32\cmd.exe`):
+    - `select_ack ... streamGen=3`
+    - `video_debug ... in=0 out=0`
+    - `select_timeout` 재현
+  - timestamp evidence:
+    - host/Android 로그에서 `9223372036854775807` 또는 overflow성 절대 timestamp sentinel은 관측되지 않음
+    - Android debug/status에 local PTS rebase 상태(`ptsBaseRemote`, `ptsBaseLocal`, `ptsReanchor`, `ptsClamp`)가 반영됨
+- Physical device:
+  - `adb devices` 기준 실기기 없음
+  - 이번 턴 검증은 LDPlayer 2만 수행
+
+Next action
+- Android `MediaCodec`가 selection 이후 queued keyframe을 받아도 first output을 못 여는 원인을 추가 분해한다.
+- desktop path의 host WGC restart/stall과 window path `in=0` 경계를 나눠서 보고, 필요하면 decoder output polling/flush 또는 host post-select streaming cadence를 더 보강한다.

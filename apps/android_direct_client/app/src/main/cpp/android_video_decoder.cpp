@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -18,6 +19,7 @@ namespace {
 
 constexpr const char* kLogTag = "remote60_android_direct";
 constexpr const char* kMimeTypeAvc = "video/avc";
+constexpr uint64_t kPtsDiscontinuityUs = 500000ULL;
 
 struct NalUnitView {
   const uint8_t* data = nullptr;
@@ -31,6 +33,12 @@ void log_info(const char* message) {
 
 void log_error(const char* message) {
   __android_log_write(ANDROID_LOG_ERROR, kLogTag, message);
+}
+
+uint64_t steady_now_us() {
+  using namespace std::chrono;
+  return static_cast<uint64_t>(
+      duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count());
 }
 
 bool find_start_code(const std::vector<uint8_t>& data, size_t offset, size_t* outPos, size_t* outCodeSize) {
@@ -137,6 +145,10 @@ void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264As
     return;
   }
 
+  if (latestInputStreamGeneration_ != 0 &&
+      latestInputStreamGeneration_ != frame.header.streamGeneration) {
+    ResetPtsStateLocked();
+  }
   latestInputStreamGeneration_ = frame.header.streamGeneration;
   configuredWidth_ = frame.header.width;
   configuredHeight_ = frame.header.height;
@@ -177,9 +189,7 @@ void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264As
   }
 
   std::memcpy(inputBuffer, frame.payload.data(), frame.payload.size());
-  const int64_t ptsUs = (frame.header.captureQpcUs > 0)
-      ? static_cast<int64_t>(frame.header.captureQpcUs)
-      : static_cast<int64_t>(frame.header.seq);
+  const int64_t ptsUs = static_cast<int64_t>(ComputeQueuedPtsUsLocked(frame));
   if (AMediaCodec_queueInputBuffer(codec_, inputIndex, 0,
                                    static_cast<size_t>(frame.payload.size()),
                                    ptsUs, 0) != AMEDIA_OK) {
@@ -189,11 +199,12 @@ void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264As
   }
   ++inputFrameCount_;
   if ((inputFrameCount_ % 30) == 1) {
-    char line[128];
-    std::snprintf(line, sizeof(line), "queued h264 frame count=%llu bytes=%zu key=%u",
+    char line[192];
+    std::snprintf(line, sizeof(line), "queued h264 frame count=%llu bytes=%zu key=%u ptsUs=%lld",
                   static_cast<unsigned long long>(inputFrameCount_),
                   frame.payload.size(),
-                  (frame.header.flags & 1u) ? 1u : 0u);
+                  (frame.header.flags & 1u) ? 1u : 0u,
+                  static_cast<long long>(ptsUs));
     log_info(line);
   }
 
@@ -227,6 +238,7 @@ void AndroidVideoDecoderSink::OnWindowSelectionControlResult(
   if ((msg.flags & 0x1u) != 0 && pendingSelectionGeneration_ != 0) {
     expectedStreamGeneration_ = msg.streamGeneration;
     awaitingSelectionAck_ = false;
+    ResetPtsStateLocked();
     char line[192];
     std::snprintf(line, sizeof(line),
                   "selection ack localGen=%llu streamGen=%llu hostSendQpcUs=%llu",
@@ -312,6 +324,14 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
   status += " outGen=" + std::to_string(latestOutputStreamGeneration_);
   status += " stale=" + std::to_string(staleFrameDropCount_);
   status += " oversize=" + std::to_string(oversizedInputFrameDropCount_);
+  status += " ptsGen=" + std::to_string(ptsStreamGeneration_);
+  status += " ptsBaseRemote=" + std::to_string(ptsRemoteBaseUs_);
+  status += " ptsBaseLocal=" + std::to_string(ptsLocalBaseUs_);
+  status += " lastInPtsUs=" + std::to_string(lastQueuedPtsUs_);
+  status += " lastRemoteUs=" + std::to_string(lastRemoteCaptureUs_);
+  status += " ptsReanchor=" + std::to_string(ptsReanchorCount_);
+  status += " ptsClamp=" + std::to_string(ptsMonotonicClampCount_);
+  status += " ptsFallback=" + std::to_string(ptsFallbackCount_);
   status += " lastOutUs=" + std::to_string(lastOutputPresentationUs_);
   status += " awaitingAck=" + std::to_string(awaitingSelectionAck_ ? 1 : 0);
   return status;
@@ -389,7 +409,97 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height)
   return true;
 }
 
+uint64_t AndroidVideoDecoderSink::ComputeQueuedPtsUsLocked(
+    const remote60::native_poc::UdpH264AssembledFrame& frame) {
+  const uint64_t localNowUs = steady_now_us();
+  const uint64_t remoteCaptureUs = frame.header.captureQpcUs;
+  const bool hadPtsBase = (ptsLocalBaseUs_ != 0);
+  bool reanchor = !hadPtsBase;
+  const char* reanchorReason = "init";
+
+  if (!reanchor && ptsStreamGeneration_ != 0 &&
+      frame.header.streamGeneration != ptsStreamGeneration_) {
+    reanchor = true;
+    reanchorReason = "stream_generation";
+  }
+  if (!reanchor && remoteCaptureUs == 0) {
+    reanchor = true;
+    reanchorReason = "zero_capture";
+    ++ptsFallbackCount_;
+  }
+  if (!reanchor && ptsRemoteBaseUs_ == 0) {
+    reanchor = true;
+    reanchorReason = "remote_base_missing";
+    ++ptsFallbackCount_;
+  }
+  if (!reanchor && lastRemoteCaptureUs_ != 0 && remoteCaptureUs < lastRemoteCaptureUs_) {
+    reanchor = true;
+    reanchorReason = "capture_backwards";
+    ++ptsFallbackCount_;
+  }
+
+  uint64_t rebasedPtsUs = localNowUs;
+  if (!reanchor) {
+    if (remoteCaptureUs < ptsRemoteBaseUs_) {
+      reanchor = true;
+      reanchorReason = "capture_before_base";
+      ++ptsFallbackCount_;
+    } else {
+      const uint64_t remoteDeltaUs = remoteCaptureUs - ptsRemoteBaseUs_;
+      if (lastRemoteCaptureUs_ != 0) {
+        const uint64_t remoteStepUs = remoteCaptureUs - lastRemoteCaptureUs_;
+        if (remoteStepUs > kPtsDiscontinuityUs) {
+          reanchor = true;
+          reanchorReason = "capture_gap";
+          ++ptsFallbackCount_;
+        }
+      }
+      if (!reanchor) {
+        rebasedPtsUs = ptsLocalBaseUs_ + remoteDeltaUs;
+      }
+    }
+  }
+
+  if (reanchor) {
+    ptsStreamGeneration_ = frame.header.streamGeneration;
+    ptsRemoteBaseUs_ = remoteCaptureUs;
+    ptsLocalBaseUs_ = localNowUs;
+    rebasedPtsUs = localNowUs;
+    ++ptsReanchorCount_;
+    if (hadPtsBase || ptsReanchorCount_ == 1 || (ptsReanchorCount_ % 30u) == 1u) {
+      char line[224];
+      std::snprintf(line, sizeof(line),
+                    "pts reanchor reason=%s streamGen=%llu remoteUs=%llu localUs=%llu count=%llu",
+                    reanchorReason,
+                    static_cast<unsigned long long>(frame.header.streamGeneration),
+                    static_cast<unsigned long long>(remoteCaptureUs),
+                    static_cast<unsigned long long>(localNowUs),
+                    static_cast<unsigned long long>(ptsReanchorCount_));
+      log_info(line);
+    }
+  }
+
+  if (lastQueuedPtsUs_ > 0 && rebasedPtsUs <= lastQueuedPtsUs_) {
+    rebasedPtsUs = lastQueuedPtsUs_ + 1;
+    ++ptsMonotonicClampCount_;
+  }
+
+  ptsStreamGeneration_ = frame.header.streamGeneration;
+  lastQueuedPtsUs_ = rebasedPtsUs;
+  lastRemoteCaptureUs_ = remoteCaptureUs;
+  return rebasedPtsUs;
+}
+
+void AndroidVideoDecoderSink::ResetPtsStateLocked() {
+  ptsStreamGeneration_ = 0;
+  ptsRemoteBaseUs_ = 0;
+  ptsLocalBaseUs_ = 0;
+  lastQueuedPtsUs_ = 0;
+  lastRemoteCaptureUs_ = 0;
+}
+
 void AndroidVideoDecoderSink::ResetCodecLocked() {
+  ResetPtsStateLocked();
   if (codec_) {
     AMediaCodec_stop(codec_);
     AMediaCodec_delete(codec_);

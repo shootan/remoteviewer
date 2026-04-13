@@ -3679,6 +3679,8 @@ int main(int argc, char** argv) {
   uint64_t frameGatingChangePermilleSum = 0;
   uint64_t frameGatingChangePermilleCount = 0;
   uint64_t firstSentLoggedGeneration = 0;
+  uint64_t selectionFirstKeyframePendingGeneration = 0;
+  uint64_t selectionFirstKeyframeDropCount = 0;
   bool streamActiveApplied = true;
   auto effective_queue_wait_timeout_us = [&]() -> uint64_t {
     if (queueWaitTimeoutUsOverride > 0) {
@@ -3779,6 +3781,7 @@ int main(int argc, char** argv) {
       keyReqLastRefillUs = 0;
       keyReqNextAllowedUs = 0;
       forceKeyNext = true;
+      selectionFirstKeyframeDropCount = 0;
       encodedSeq = 0;
       lastSendStartUs = 0;
       frameGatingLastSentUs = 0;
@@ -3989,6 +3992,8 @@ int main(int argc, char** argv) {
     lastCallbackUs.store(0, std::memory_order_release);
     resetHostTimelineAnchors();
     forceKeyNext = true;
+    selectionFirstKeyframePendingGeneration = nextCaptureStreamGeneration;
+    selectionFirstKeyframeDropCount = 0;
     ++captureRestartCount;
     flush_capture_pipeline_state("window-select");
 
@@ -4832,6 +4837,21 @@ int main(int argc, char** argv) {
         }
         consecutiveStaleEncodedFrames = 0;
 
+        const bool encodedKeyFrame = (au.keyFrame || forceKeyFrame || forceKeyNext);
+        if (selectionFirstKeyframePendingGeneration != 0 &&
+            streamGeneration == selectionFirstKeyframePendingGeneration &&
+            !encodedKeyFrame) {
+          ++selectionFirstKeyframeDropCount;
+          if ((selectionFirstKeyframeDropCount % 30ULL) == 1ULL) {
+            std::cout << "[native-video-host] selection generation waiting keyframe streamGen="
+                      << streamGeneration
+                      << " droppedAu=" << selectionFirstKeyframeDropCount
+                      << " forceKeyNext=" << (forceKeyNext ? 1 : 0)
+                      << "\n";
+          }
+          continue;
+        }
+
         EncodedFrameHeader hdr{};
         hdr.header.magic = remote60::native_poc::kMagic;
         hdr.header.type = static_cast<uint16_t>(MessageType::EncodedFrameH264);
@@ -4840,7 +4860,7 @@ int main(int argc, char** argv) {
         hdr.width = activeEncodeW;
         hdr.height = activeEncodeH;
         hdr.payloadSize = static_cast<uint32_t>(au.bytes.size());
-        hdr.flags = (au.keyFrame || forceKeyFrame || forceKeyNext) ? 1u : 0u;
+        hdr.flags = encodedKeyFrame ? 1u : 0u;
         hdr.streamGeneration = streamGeneration;
         hdr.captureQpcUs = encodeInputUs;
         hdr.encodeStartQpcUs = encodeStartUs;
@@ -4903,6 +4923,18 @@ int main(int argc, char** argv) {
           log_first_sent_generation(
               transport == VideoTransport::Tcp ? "h264-tcp" : "h264-udp",
               streamGeneration, sendStartUs, hdr.captureQpcUs, hdr.width, hdr.height);
+          if (selectionFirstKeyframePendingGeneration != 0 &&
+              streamGeneration == selectionFirstKeyframePendingGeneration &&
+              (hdr.flags & 1u) != 0) {
+            std::cout << "[native-video-host] selection first keyframe sent streamGen="
+                      << streamGeneration
+                      << " captureQpcUs=" << hdr.captureQpcUs
+                      << " sendQpcUs=" << hdr.sendQpcUs
+                      << " key=1"
+                      << "\n";
+            selectionFirstKeyframePendingGeneration = 0;
+            selectionFirstKeyframeDropCount = 0;
+          }
           if (transport == VideoTransport::Udp) {
             ++udpTxFrames;
             udpTxChunks += sendPathStats.payloadChunkCount;

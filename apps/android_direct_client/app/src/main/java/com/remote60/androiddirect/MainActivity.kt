@@ -443,7 +443,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
-        syncVideoSurface(forceRebind = true)
+        syncVideoSurface(forceRebind = false)
     }
 
     override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
@@ -1166,8 +1166,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             return
         }
 
-        if (videoSurface == null || surfaceBufferWidth != targetBufferWidth || surfaceBufferHeight != targetBufferHeight) {
-            releaseVideoSurface()
+        val bufferSizeChanged =
+            surfaceBufferWidth != targetBufferWidth || surfaceBufferHeight != targetBufferHeight
+        if (videoSurface == null) {
             surfaceTexture.setDefaultBufferSize(targetBufferWidth, targetBufferHeight)
             surfaceBufferWidth = targetBufferWidth
             surfaceBufferHeight = targetBufferHeight
@@ -1176,6 +1177,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             NativeSessionBridge.nativeSetSurface(surface)
             diagnosticsLog.log(
                 "viewer_surface_bound",
+                "buffer=${surfaceBufferWidth}x${surfaceBufferHeight} video=${videoWidth}x${videoHeight} " +
+                    "expected=${expectedContentWidth}x${expectedContentHeight} " +
+                    "view=${videoTextureView.width}x${videoTextureView.height}"
+            )
+        } else if (bufferSizeChanged) {
+            surfaceTexture.setDefaultBufferSize(targetBufferWidth, targetBufferHeight)
+            surfaceBufferWidth = targetBufferWidth
+            surfaceBufferHeight = targetBufferHeight
+            diagnosticsLog.log(
+                "viewer_surface_buffer_resize",
                 "buffer=${surfaceBufferWidth}x${surfaceBufferHeight} video=${videoWidth}x${videoHeight} " +
                     "expected=${expectedContentWidth}x${expectedContentHeight} " +
                     "view=${videoTextureView.width}x${videoTextureView.height}"
@@ -1216,6 +1227,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
 
         if (!videoTextureView.isAvailable) {
+            return
+        }
+
+        if (currentScene == UiScene.SWITCHING &&
+            videoSurface != null &&
+            videoSizeChanged &&
+            !forceRebind
+        ) {
+            diagnosticsLog.log(
+                "viewer_surface_resize_deferred",
+                "video=${videoWidth}x${videoHeight} buffer=${surfaceBufferWidth}x${surfaceBufferHeight}"
+            )
+            applyVideoTransform()
             return
         }
 
