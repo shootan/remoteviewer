@@ -218,6 +218,12 @@ std::wstring wide_lower(std::wstring v) {
   return v;
 }
 
+std::string hr_hex(HRESULT hr) {
+  char buf[32];
+  std::snprintf(buf, sizeof(buf), "0x%08lX", static_cast<unsigned long>(hr));
+  return std::string(buf);
+}
+
 std::vector<std::string> parse_csv_lower(const std::string& raw) {
   std::vector<std::string> out;
   size_t start = 0;
@@ -3142,24 +3148,76 @@ int main(int argc, char** argv) {
   std::atomic<uint32_t> captureStagingSlotCursor{0};
   std::atomic<uint64_t> captureStagingBusyDropCount{0};
   auto create_staging = [&](uint32_t srcW, uint32_t srcH) -> bool {
-    D3D11_TEXTURE2D_DESC stDesc{};
-    stDesc.Width = srcW;
-    stDesc.Height = srcH;
-    stDesc.MipLevels = 1;
-    stDesc.ArraySize = 1;
-    stDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    stDesc.SampleDesc.Count = 1;
-    stDesc.Usage = D3D11_USAGE_STAGING;
-    stDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    auto try_create_staging_slots = [&](std::vector<std::shared_ptr<CaptureStagingSlot>>* outSlots,
+                                        HRESULT* outHr) -> bool {
+      if (!outSlots) return false;
+      D3D11_TEXTURE2D_DESC stDesc{};
+      stDesc.Width = srcW;
+      stDesc.Height = srcH;
+      stDesc.MipLevels = 1;
+      stDesc.ArraySize = 1;
+      stDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+      stDesc.SampleDesc.Count = 1;
+      stDesc.Usage = D3D11_USAGE_STAGING;
+      stDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      outSlots->clear();
+      outSlots->reserve(captureStagingSlotCount);
+      for (uint32_t slotIndex = 0; slotIndex < captureStagingSlotCount; ++slotIndex) {
+        auto slot = std::make_shared<CaptureStagingSlot>();
+        if (!slot) {
+          if (outHr) *outHr = E_OUTOFMEMORY;
+          return false;
+        }
+        const HRESULT createHr = d3d->CreateTexture2D(&stDesc, nullptr, &slot->texture);
+        if (FAILED(createHr) || !slot->texture) {
+          if (outHr) *outHr = createHr;
+          const HRESULT removedHr = d3d ? d3d->GetDeviceRemovedReason() : E_FAIL;
+          std::cerr << "[native-video-host] staging texture CreateTexture2D failed slot="
+                    << slotIndex
+                    << " size=" << srcW << "x" << srcH
+                    << " hr=" << hr_hex(createHr)
+                    << " removedReason=" << hr_hex(removedHr)
+                    << "\n";
+          return false;
+        }
+        outSlots->push_back(std::move(slot));
+      }
+      if (outHr) *outHr = S_OK;
+      return true;
+    };
+
     std::vector<std::shared_ptr<CaptureStagingSlot>> nextSlots;
-    nextSlots.reserve(captureStagingSlotCount);
-    for (uint32_t slotIndex = 0; slotIndex < captureStagingSlotCount; ++slotIndex) {
-      auto slot = std::make_shared<CaptureStagingSlot>();
-      if (!slot) return false;
-      if (FAILED(d3d->CreateTexture2D(&stDesc, nullptr, &slot->texture)) || !slot->texture) {
+    HRESULT createHr = S_OK;
+    if (!try_create_staging_slots(&nextSlots, &createHr)) {
+      std::cerr << "[native-video-host] recreating D3D device after staging failure hr="
+                << hr_hex(createHr)
+                << " size=" << srcW << "x" << srcH
+                << "\n";
+      d3d.Reset();
+      ctx.Reset();
+      const HRESULT recreateHr = create_d3d11_device_for_primary_monitor(&d3d, &ctx, &fl);
+      if (FAILED(recreateHr) || !d3d || !ctx) {
+        std::cerr << "[native-video-host] D3D11 device recreate failed hr="
+                  << hr_hex(recreateHr) << "\n";
         return false;
       }
-      nextSlots.push_back(std::move(slot));
+      if (useH264) {
+        (void)encoder.set_d3d11_device(d3d.Get());
+      }
+      gpuScaler = GpuBgraScaler();
+      gpuScalerHealthy = false;
+      if (gpuScalerRequested) {
+        gpuScalerHealthy = gpuScaler.initialize(d3d.Get(), ctx.Get(), &d3dContextMu);
+        std::cout << "[native-video-host] gpu scaler reinit after device recreate ready="
+                  << (gpuScalerHealthy ? 1 : 0) << "\n";
+      }
+      if (!try_create_staging_slots(&nextSlots, &createHr)) {
+        std::cerr << "[native-video-host] staging recreate retry failed hr="
+                  << hr_hex(createHr)
+                  << " size=" << srcW << "x" << srcH
+                  << "\n";
+        return false;
+      }
     }
     std::lock_guard<std::mutex> lk(captureResourceMu);
     captureStagingSlots = std::move(nextSlots);

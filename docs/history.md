@@ -3390,3 +3390,52 @@ Scope note
 Next action
 - `restart_capture_session()`에서 window-select 시 staging texture recreate 실패 원인을 직접 수정한다.
 - 그 후 LDPlayer 2에서 `Windows -> select -> viewer`까지 다시 닫고, 가능하면 실기기 재확인을 이어간다.
+
+### 173) 2026-04-13 host staging recreate retry + LDPlayer window-select closeout
+Goal
+- window-select 잔여 실패 원인이던 host `capture_restart_failed` / `staging texture recreate failed`를 직접 완화한다.
+- 콘솔 세션에서 LDPlayer 2 desktop/window select를 모두 viewer 진입까지 다시 닫고, AMD 이벤트가 새로 추가되는지도 같이 확인한다.
+
+Files changed
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Session state:
+  - `quser` / `qwinsta` 기준 `console` active
+  - RDP active session 아님
+- Native build:
+  - `cmake --build D:\remote\remote\build-vcpkg-local --config Debug --target remote60_native_video_host_poc`
+  - 결과: 성공
+- LDPlayer 2 desktop select (console session):
+  - Android diagnostics:
+    - `select_ack ... streamGen=2`
+    - `select_ready ...`
+    - `scene=VIEWER`
+    - `video_debug ... in=2 out=2`
+  - 결과: 성공
+- LDPlayer 2 window select (console session):
+  - target:
+    - `D:\remote\remote\build-vcpkg-local\apps\native_poc\Debug\remote60_native_video_host_poc.exe`
+  - Android diagnostics:
+    - `select_ack ... streamGen=2`
+    - `select_ready ...`
+    - `scene=VIEWER`
+    - `video_debug ... in=1 out=1 -> in=19 out=19`
+  - 결과: 성공
+- Host-side recovery evidence:
+  - `CreateTexture2D` staging failure 경로에 hr/removal logging 추가
+  - failure 시 D3D11 device/context recreate + encoder/gpu scaler rebind 후 staging recreate retry 수행
+  - window-select closeout run에서는 `capture_restart_failed` 재현되지 않음
+- AMD / Event Viewer:
+  - 최근 재시험 구간에서 새 `atidxx64.dll` / `remote60_native_video_host_poc.exe` / `LiveKernelEvent` 추가 이벤트는 관측되지 않음
+  - 보이는 AMD 관련 이벤트는 `18:32` 시점의 과거 crash/live-kernel 기록
+
+Scope note
+- 이번 수정은 window-select failure를 Android decoder 문제가 아니라 host D3D resource recreate 문제로 분리한 뒤, host에서 직접 복구 경로를 넣은 것이다.
+- 현재 기준 LDPlayer 2에서는 desktop/window 둘 다 viewer first output이 실제로 열린다.
+
+Next action
+- 실기기에서도 같은 외부 IP 경로로 `desktop -> viewer`, `window -> viewer`가 유지되는지 재확인한다.
+- AMD driver warning popup이 실제 콘솔 재현에서도 다시 뜨는지 장시간 반복 select soak으로 본다.
