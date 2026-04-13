@@ -3,6 +3,7 @@
 #include <jni.h>
 
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -31,6 +32,8 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint64_t LastOutputPresentationUs();
 
  private:
+  void PumpCodecLocked();
+  bool TryQueueFrameLocked(remote60::native_poc::UdpH264AssembledFrame& frame);
   bool EnsureCodecLocked(uint32_t width, uint32_t height);
   uint64_t ComputeQueuedPtsUsLocked(const remote60::native_poc::UdpH264AssembledFrame& frame);
   void ResetPtsStateLocked();
@@ -63,9 +66,15 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint64_t ptsReanchorCount_ = 0;
   uint64_t ptsMonotonicClampCount_ = 0;
   uint64_t ptsFallbackCount_ = 0;
+  uint64_t pendingFrameCount_ = 0;
+  uint64_t pendingFrameQueueRetryCount_ = 0;
+  uint64_t lastInputQueueSteadyUs_ = 0;
+  uint64_t bootstrapReplayCount_ = 0;
   uint64_t staleFrameDropCount_ = 0;
   uint64_t oversizedInputFrameDropCount_ = 0;
   bool awaitingSelectionAck_ = false;
+  std::optional<remote60::native_poc::UdpH264AssembledFrame> pendingFrame_;
+  std::optional<remote60::native_poc::UdpH264AssembledFrame> bootstrapFrame_;
   std::vector<uint8_t> csd0_;
   std::vector<uint8_t> csd1_;
 };

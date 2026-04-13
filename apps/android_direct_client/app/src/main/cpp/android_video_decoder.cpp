@@ -20,6 +20,8 @@ namespace {
 constexpr const char* kLogTag = "remote60_android_direct";
 constexpr const char* kMimeTypeAvc = "video/avc";
 constexpr uint64_t kPtsDiscontinuityUs = 500000ULL;
+constexpr uint64_t kBootstrapReplayIntervalUs = 250000ULL;
+constexpr uint64_t kBootstrapReplayMaxCount = 2ULL;
 
 struct NalUnitView {
   const uint8_t* data = nullptr;
@@ -126,6 +128,8 @@ void AndroidVideoDecoderSink::SetSurface(JNIEnv* env, jobject surface) {
 void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& frame) {
   std::lock_guard<std::mutex> lock(mu_);
 
+  PumpCodecLocked();
+
   if (pendingSelectionGeneration_ != 0 && (awaitingSelectionAck_ || expectedStreamGeneration_ == 0)) {
     ++staleFrameDropCount_;
     return;
@@ -159,56 +163,25 @@ void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264As
   if (!EnsureCodecLocked(frame.header.width, frame.header.height)) {
     return;
   }
-  if (!codec_) return;
-
-  const ssize_t inputIndex = AMediaCodec_dequeueInputBuffer(codec_, 1000);
-  if (inputIndex < 0) {
-    DrainOutputLocked();
+  if (!codec_) {
     return;
   }
 
-  size_t inputBufferSize = 0;
-  uint8_t* inputBuffer = AMediaCodec_getInputBuffer(codec_, inputIndex, &inputBufferSize);
-  if (!inputBuffer) {
-    log_error("AMediaCodec_getInputBuffer returned null");
-    ResetCodecLocked();
-    return;
+  if (!TryQueueFrameLocked(frame)) {
+    if (!pendingFrame_.has_value()) {
+      pendingFrame_ = std::move(frame);
+      pendingFrameCount_ = 1;
+      pendingFrameQueueRetryCount_ = 0;
+    } else {
+      const bool replacePending =
+          ((frame.header.flags & 1u) != 0) || pendingFrame_->payload.empty();
+      if (replacePending) {
+        pendingFrame_ = std::move(frame);
+      }
+      pendingFrameCount_ = 1;
+    }
   }
-  if (frame.payload.size() > inputBufferSize) {
-    ++oversizedInputFrameDropCount_;
-    char line[192];
-    std::snprintf(line, sizeof(line),
-                  "dropping oversized codec input bytes=%zu inputBuffer=%zu drops=%llu",
-                  frame.payload.size(), inputBufferSize,
-                  static_cast<unsigned long long>(oversizedInputFrameDropCount_));
-    log_error(line);
-    // MediaCodec has no cancel-input-buffer path; reset the codec to release the slot
-    // after dropping this oversized access unit instead of queuing an empty buffer.
-    ResetCodecLocked();
-    return;
-  }
-
-  std::memcpy(inputBuffer, frame.payload.data(), frame.payload.size());
-  const int64_t ptsUs = static_cast<int64_t>(ComputeQueuedPtsUsLocked(frame));
-  if (AMediaCodec_queueInputBuffer(codec_, inputIndex, 0,
-                                   static_cast<size_t>(frame.payload.size()),
-                                   ptsUs, 0) != AMEDIA_OK) {
-    log_error("AMediaCodec_queueInputBuffer failed");
-    ResetCodecLocked();
-    return;
-  }
-  ++inputFrameCount_;
-  if ((inputFrameCount_ % 30) == 1) {
-    char line[192];
-    std::snprintf(line, sizeof(line), "queued h264 frame count=%llu bytes=%zu key=%u ptsUs=%lld",
-                  static_cast<unsigned long long>(inputFrameCount_),
-                  frame.payload.size(),
-                  (frame.header.flags & 1u) ? 1u : 0u,
-                  static_cast<long long>(ptsUs));
-    log_info(line);
-  }
-
-  DrainOutputLocked();
+  PumpCodecLocked();
 }
 
 void AndroidVideoDecoderSink::OnVideoStreamReset() {
@@ -332,6 +305,9 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
   status += " ptsReanchor=" + std::to_string(ptsReanchorCount_);
   status += " ptsClamp=" + std::to_string(ptsMonotonicClampCount_);
   status += " ptsFallback=" + std::to_string(ptsFallbackCount_);
+  status += " pending=" + std::to_string(pendingFrame_.has_value() ? 1 : 0);
+  status += " pendingRetry=" + std::to_string(pendingFrameQueueRetryCount_);
+  status += " bootstrapReplay=" + std::to_string(bootstrapReplayCount_);
   status += " lastOutUs=" + std::to_string(lastOutputPresentationUs_);
   status += " awaitingAck=" + std::to_string(awaitingSelectionAck_ ? 1 : 0);
   return status;
@@ -339,6 +315,7 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
 
 uint64_t AndroidVideoDecoderSink::VideoSizePacked() {
   std::lock_guard<std::mutex> lock(mu_);
+  PumpCodecLocked();
   const uint32_t width = outputWidth_ > 0 ? outputWidth_ : configuredWidth_;
   const uint32_t height = outputHeight_ > 0 ? outputHeight_ : configuredHeight_;
   return (static_cast<uint64_t>(width) << 32u) | static_cast<uint64_t>(height);
@@ -346,11 +323,13 @@ uint64_t AndroidVideoDecoderSink::VideoSizePacked() {
 
 uint64_t AndroidVideoDecoderSink::ReadySelectionGeneration() {
   std::lock_guard<std::mutex> lock(mu_);
+  PumpCodecLocked();
   return readySelectionGeneration_;
 }
 
 uint64_t AndroidVideoDecoderSink::LastOutputPresentationUs() {
   std::lock_guard<std::mutex> lock(mu_);
+  PumpCodecLocked();
   return lastOutputPresentationUs_;
 }
 
@@ -406,6 +385,98 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height)
   std::snprintf(line, sizeof(line), "MediaCodec started width=%u height=%u csd0=%zu csd1=%zu",
                 width, height, csd0_.size(), csd1_.size());
   log_info(line);
+  return true;
+}
+
+void AndroidVideoDecoderSink::PumpCodecLocked() {
+  const uint64_t nowUs = steady_now_us();
+
+  if (pendingFrame_.has_value() && codec_) {
+    if (TryQueueFrameLocked(*pendingFrame_)) {
+      pendingFrame_.reset();
+      pendingFrameCount_ = 0;
+      pendingFrameQueueRetryCount_ = 0;
+    } else {
+      ++pendingFrameQueueRetryCount_;
+    }
+  }
+
+  if (codec_ &&
+      bootstrapFrame_.has_value() &&
+      pendingSelectionGeneration_ != 0 &&
+      readySelectionGeneration_ != pendingSelectionGeneration_ &&
+      outputFrameCount_ == 0 &&
+      bootstrapReplayCount_ < kBootstrapReplayMaxCount &&
+      lastInputQueueSteadyUs_ > 0 &&
+      nowUs >= lastInputQueueSteadyUs_ + kBootstrapReplayIntervalUs) {
+    auto replayFrame = *bootstrapFrame_;
+    if (TryQueueFrameLocked(replayFrame)) {
+      ++bootstrapReplayCount_;
+      char line[192];
+      std::snprintf(line, sizeof(line),
+                    "bootstrap replay queued localGen=%llu streamGen=%llu replay=%llu",
+                    static_cast<unsigned long long>(pendingSelectionGeneration_),
+                    static_cast<unsigned long long>(expectedStreamGeneration_),
+                    static_cast<unsigned long long>(bootstrapReplayCount_));
+      log_info(line);
+    }
+  }
+
+  DrainOutputLocked();
+}
+
+bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264AssembledFrame& frame) {
+  if (!codec_) return false;
+
+  const ssize_t inputIndex = AMediaCodec_dequeueInputBuffer(codec_, 0);
+  if (inputIndex < 0) {
+    return false;
+  }
+
+  size_t inputBufferSize = 0;
+  uint8_t* inputBuffer = AMediaCodec_getInputBuffer(codec_, inputIndex, &inputBufferSize);
+  if (!inputBuffer) {
+    log_error("AMediaCodec_getInputBuffer returned null");
+    ResetCodecLocked();
+    return false;
+  }
+  if (frame.payload.size() > inputBufferSize) {
+    ++oversizedInputFrameDropCount_;
+    char line[192];
+    std::snprintf(line, sizeof(line),
+                  "dropping oversized codec input bytes=%zu inputBuffer=%zu drops=%llu",
+                  frame.payload.size(), inputBufferSize,
+                  static_cast<unsigned long long>(oversizedInputFrameDropCount_));
+    log_error(line);
+    ResetCodecLocked();
+    return false;
+  }
+
+  std::memcpy(inputBuffer, frame.payload.data(), frame.payload.size());
+  const int64_t ptsUs = static_cast<int64_t>(ComputeQueuedPtsUsLocked(frame));
+  if (AMediaCodec_queueInputBuffer(codec_, inputIndex, 0,
+                                   static_cast<size_t>(frame.payload.size()),
+                                   ptsUs, 0) != AMEDIA_OK) {
+    log_error("AMediaCodec_queueInputBuffer failed");
+    ResetCodecLocked();
+    return false;
+  }
+
+  ++inputFrameCount_;
+  lastInputQueueSteadyUs_ = steady_now_us();
+  if ((frame.header.flags & 1u) != 0 && pendingSelectionGeneration_ != 0 &&
+      readySelectionGeneration_ != pendingSelectionGeneration_) {
+    bootstrapFrame_ = frame;
+  }
+  if ((inputFrameCount_ % 30) == 1) {
+    char line[192];
+    std::snprintf(line, sizeof(line), "queued h264 frame count=%llu bytes=%zu key=%u ptsUs=%lld",
+                  static_cast<unsigned long long>(inputFrameCount_),
+                  frame.payload.size(),
+                  (frame.header.flags & 1u) ? 1u : 0u,
+                  static_cast<long long>(ptsUs));
+    log_info(line);
+  }
   return true;
 }
 
@@ -500,6 +571,12 @@ void AndroidVideoDecoderSink::ResetPtsStateLocked() {
 
 void AndroidVideoDecoderSink::ResetCodecLocked() {
   ResetPtsStateLocked();
+  pendingFrame_.reset();
+  pendingFrameCount_ = 0;
+  pendingFrameQueueRetryCount_ = 0;
+  bootstrapFrame_.reset();
+  lastInputQueueSteadyUs_ = 0;
+  bootstrapReplayCount_ = 0;
   if (codec_) {
     AMediaCodec_stop(codec_);
     AMediaCodec_delete(codec_);
@@ -596,6 +673,8 @@ void AndroidVideoDecoderSink::DrainOutputLocked() {
       if (pendingSelectionGeneration_ != 0 &&
           readySelectionGeneration_ != pendingSelectionGeneration_) {
         readySelectionGeneration_ = pendingSelectionGeneration_;
+        bootstrapFrame_.reset();
+        bootstrapReplayCount_ = 0;
         char line[192];
         std::snprintf(line, sizeof(line),
                       "selection first output localGen=%llu streamGen=%llu ptsUs=%llu out=%llu",

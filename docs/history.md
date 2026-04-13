@@ -3340,3 +3340,53 @@ Validation / build / test result
 Next action
 - Android `MediaCodec`가 selection 이후 queued keyframe을 받아도 first output을 못 여는 원인을 추가 분해한다.
 - desktop path의 host WGC restart/stall과 window path `in=0` 경계를 나눠서 보고, 필요하면 decoder output polling/flush 또는 host post-select streaming cadence를 더 보강한다.
+
+### 172) 2026-04-13 android direct first-output bootstrap replay + desktop closeout
+Goal
+- selection 직후 첫 queued keyframe만 들어오고 output drain이 열리지 않던 Android decoder 경로를 계속 보강한다.
+- LDPlayer 2에서 desktop select는 실제 viewer 진입까지 닫고, window select는 host-side restart failure로 잔여 원인을 분리한다.
+
+Files changed
+- `apps/android_direct_client/app/src/main/cpp/android_video_decoder.hpp`
+- `apps/android_direct_client/app/src/main/cpp/android_video_decoder.cpp`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Android build/deploy:
+  - `D:\remote\remote\tmp\gradle\gradle-8.7\bin\gradle.bat -p D:\remote\remote\apps\android_direct_client assembleDebug`
+  - `adb -s emulator-5558 install -r D:\remote\remote\apps\android_direct_client\app\build\outputs\apk\debug\app-debug.apk`
+  - 결과: 성공
+- LDPlayer 2 runtime:
+  - device: `emulator-5558`
+  - host runtime:
+    - `REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE=1`
+    - `REMOTE60_NATIVE_H264_NO_PACING=1`
+    - `REMOTE60_NATIVE_FRAME_GATING_DISABLE=1`
+    - `REMOTE60_NATIVE_ABR_DISABLE=1`
+    - `--encode-width 1280 --encode-height 720`
+  - desktop select:
+    - Android diagnostics:
+      - `select_ack ... streamGen=2`
+      - `select_ready targetId=0 gen=1 lastOutUs=10504406643`
+      - `video_debug ... in=2 out=2 ... lastOutUs=10504406643`
+    - 결과:
+      - `scene=VIEWER` 진입
+      - `select_timeout` 해소
+      - `video_debug out` 실제 증가
+  - window select:
+    - `cmd.exe`와 `Codex Plan - remote - Visual Studio Code` 모두 `window_select_failed: capture_restart_failed`
+    - host stderr:
+      - `staging texture recreate failed size=1115x628`
+      - `staging texture recreate failed size=2246x1184`
+    - 결과:
+      - window path 실패 원인이 Android decoder output이 아니라 host capture restart/staging recreate로 분리됨
+
+Scope note
+- Android decoder에 pending frame retry와 selection bootstrap replay를 추가해, 새 frame 유입이 없더라도 status poll 경로에서 input/output pump가 계속 돌게 했다.
+- desktop path는 이제 LDPlayer 2에서 실제 first output이 열리는 수준까지 복구됐다.
+- window path는 별도 host D3D/staging restart 이슈로 남았다.
+
+Next action
+- `restart_capture_session()`에서 window-select 시 staging texture recreate 실패 원인을 직접 수정한다.
+- 그 후 LDPlayer 2에서 `Windows -> select -> viewer`까지 다시 닫고, 가능하면 실기기 재확인을 이어간다.
