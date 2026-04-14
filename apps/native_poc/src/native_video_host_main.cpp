@@ -5277,10 +5277,12 @@ int main(int argc, char** argv) {
            streamControlActive.load(std::memory_order_acquire) &&
            callbackFramesPerSec == 0) ? 1ULL : 0ULL;
       idleHoldTotal += idleHoldPerSec;
+      const bool desktopDxgiLowPushRestartEnabled =
+          !captureWindowModeActive && activeDesktopBackend != DesktopCaptureBackend::Dxgi;
       if (useH264 &&
           captureSessionReady.load(std::memory_order_acquire) &&
           streamControlActive.load(std::memory_order_acquire) &&
-          !captureWindowModeActive) {
+          desktopDxgiLowPushRestartEnabled) {
         const bool warmupDone =
             (captureInputStallWarmupSec == 0 ||
              t >= (startUs + static_cast<uint64_t>(captureInputStallWarmupSec) * 1000000ULL));

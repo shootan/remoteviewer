@@ -3535,3 +3535,48 @@ Scope note
 Next action
 - 실기기 또는 표준 Android Emulator(LatinIME/Gboard 계열)에서 `committed text`/backspace/enter를 다시 검증해 `Android Phase F soft keyboard runtime verify`를 닫는다.
 - 필요하면 debug build 한정 text-injection verify hook을 추가해 `nativeQueueInputText` end-to-end를 자동화한다.
+
+### 176) 2026-04-14 android special-key fallback + desktop dxgi flicker guard
+Goal
+- Android soft keyboard에서 빠지던 `Backspace`/`Enter`/`Space` 경로를 더 넓게 받아 host key/text 주입으로 연결한다.
+- desktop mode에서 보이던 검은 깜빡임 후보 원인인 DXGI desktop `capture-input-stall` restart를 막는다.
+
+Files changed
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/ImeCaptureView.kt`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Android input patch:
+  - `ImeCaptureView`:
+    - `TYPE_TEXT_FLAG_NO_SUGGESTIONS`
+    - `IME_FLAG_NO_ENTER_ACTION`, `IME_ACTION_NONE`
+    - `deleteSurroundingTextInCodePoints()` 추가
+    - `sendKeyEvent(KEYCODE_DEL)`을 backspace callback으로 처리
+    - `performEditorAction()`을 enter down/up으로 처리
+  - `MainActivity`:
+    - committed text에서 `\n -> \r`, `NBSP -> space` 정규화
+    - `KEYCODE_SPACE -> VK_SPACE`
+- Desktop flicker guard:
+  - `native_video_host_main.cpp`에서 `desktop + dxgi` 경로는 low-push `capture-input-stall` restart 대상에서 제외
+  - 근거 로그:
+    - `tmp/android-input-verify-20260414-142229/host.out.log`
+    - desktop mode steady 구간에서 `capture session restarted reason=capture-input-stall` 반복 관측
+    - 해당 restart가 black flicker와 직접 연동되는 후보로 판단
+- Native build:
+  - `cmake --build D:\remote\remote\build-vcpkg-local --config Debug --target remote60_native_video_host_poc`
+  - 결과: 성공
+- Android build:
+  - `JAVA_HOME=C:\Program Files\Android\Android Studio\jbr`
+  - `D:\remote\remote\tmp\gradle\gradle-8.7\bin\gradle.bat -p D:\remote\remote\apps\android_direct_client assembleDebug`
+  - 결과: 성공
+
+Scope note
+- 이번 수정은 runtime symptom 기반 보강이다.
+- soft keyboard는 LDPlayer IME가 `committed text`를 불안정하게 보내는 점을 고려해 key-event/editor-action/delete fallback을 추가했고, desktop 깜빡임은 DXGI desktop low-push false positive를 먼저 제거했다.
+
+Next action
+- 현재 빌드로 `Backspace`/`Enter`/`Space`를 실기기 또는 LDPlayer에서 다시 수동 검증한다.
+- desktop viewer black flicker가 사라졌는지 `host_dxgi.ps1` 경로에서 바로 재확인한다.

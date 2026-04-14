@@ -861,9 +861,21 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun queueViewerCommittedText(text: CharSequence) {
         if (currentScene != UiScene.VIEWER || text.isEmpty()) return
-        val ok = NativeSessionBridge.nativeQueueInputText(text.toString())
+        val normalized =
+            buildString(text.length) {
+                text.forEach { ch ->
+                    when (ch) {
+                        '\u0000' -> {}
+                        '\n' -> append('\r')
+                        '\u00A0' -> append(' ')
+                        else -> append(ch)
+                    }
+                }
+            }
+        if (normalized.isEmpty()) return
+        val ok = NativeSessionBridge.nativeQueueInputText(normalized)
         if (!ok) {
-            diagnosticsLog.log("viewer_text_queue_failed", "len=${text.length}")
+            diagnosticsLog.log("viewer_text_queue_failed", "len=${normalized.length}")
         }
     }
 
@@ -896,6 +908,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         when (keyCode) {
             KeyEvent.KEYCODE_ENTER,
             KeyEvent.KEYCODE_NUMPAD_ENTER -> 0x0D
+            KeyEvent.KEYCODE_SPACE -> 0x20
             KeyEvent.KEYCODE_TAB -> 0x09
             KeyEvent.KEYCODE_ESCAPE -> 0x1B
             KeyEvent.KEYCODE_FORWARD_DEL -> 0x2E

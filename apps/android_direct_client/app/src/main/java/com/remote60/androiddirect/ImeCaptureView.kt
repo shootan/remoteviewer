@@ -32,9 +32,13 @@ class ImeCaptureView @JvmOverloads constructor(
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
         outAttrs.inputType =
             InputType.TYPE_CLASS_TEXT or
+                InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or
                 InputType.TYPE_TEXT_FLAG_MULTI_LINE or
                 InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-        outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI
+        outAttrs.imeOptions =
+            EditorInfo.IME_FLAG_NO_EXTRACT_UI or
+                EditorInfo.IME_FLAG_NO_ENTER_ACTION or
+                EditorInfo.IME_ACTION_NONE
         outAttrs.initialSelStart = 0
         outAttrs.initialSelEnd = 0
 
@@ -61,10 +65,27 @@ class ImeCaptureView @JvmOverloads constructor(
                 return true
             }
 
-            override fun sendKeyEvent(event: KeyEvent): Boolean {
-                if (event.keyCode != KeyEvent.KEYCODE_DEL) {
-                    listener?.onSpecialKey(event.keyCode, event.action)
+            override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean {
+                if (beforeLength > 0) {
+                    listener?.onDeleteBackward(beforeLength)
                 }
+                return true
+            }
+
+            override fun sendKeyEvent(event: KeyEvent): Boolean {
+                if (event.keyCode == KeyEvent.KEYCODE_DEL) {
+                    if (event.action == KeyEvent.ACTION_DOWN) {
+                        listener?.onDeleteBackward(1)
+                    }
+                    return true
+                }
+                listener?.onSpecialKey(event.keyCode, event.action)
+                return true
+            }
+
+            override fun performEditorAction(actionCode: Int): Boolean {
+                listener?.onSpecialKey(KeyEvent.KEYCODE_ENTER, KeyEvent.ACTION_DOWN)
+                listener?.onSpecialKey(KeyEvent.KEYCODE_ENTER, KeyEvent.ACTION_UP)
                 return true
             }
         }
