@@ -3439,3 +3439,33 @@ Scope note
 Next action
 - 실기기에서도 같은 외부 IP 경로로 `desktop -> viewer`, `window -> viewer`가 유지되는지 재확인한다.
 - AMD driver warning popup이 실제 콘솔 재현에서도 다시 뜨는지 장시간 반복 select soak으로 본다.
+
+### 174) 2026-04-14 visible host input-disabled launch path fix
+Goal
+- Android manual test에 쓰던 visible host 직접 실행 경로에서 `enableInputInjection=false`로 뜨던 원인을 제거한다.
+- DXGI visible launch도 config-first wrapper를 타도록 고정해 클릭/키 입력이 꺼진 상태로 올라오는 회귀를 막는다.
+
+Files changed
+- `automation/host_dxgi.ps1`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Root cause check:
+  - `tmp/host_manual_run/host.out.log`
+  - `tmp/android_ts_verify_720p_live/host.out.log`
+  - `tmp/android_ts_verify_window2/host.out.log`
+  - 결과: 모두 시작 직후 `input injection disabled (enableInputInjection=false)` 확인
+- Launch path check:
+  - `tmp/run_visible_native_host_dxgi.cmd`
+  - 결과: `--config` 없이 exe를 직접 실행하고 있어 profile의 `enableInputInjection=true`를 우회하고 있었음
+- Config sanity:
+  - `automation/native_video_profile_1080p_external_template.json`
+  - 결과: `enableInputInjection=true`, `inputInjectionMode=background_message`
+- Wrapper smoke:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/host_dxgi.ps1 -ExeDir build-vcpkg-local/apps/native_poc/Debug`
+  - 결과: startup 로그에서 `REMOTE60_DESKTOP_CAPTURE_BACKEND=dxgi`와 `input injection enabled mode=background_message` 확인 후 프로세스 종료
+
+Next action
+- Android/LDPlayer에서 `automation/host_dxgi.ps1`로 host를 띄운 뒤 viewer tap + soft keyboard 입력이 실제 `inputEvents` 증가로 이어지는지 한 번 더 닫는다.
+- 기존 직접 exe 실행 메모/임시 cmd 대신 config-first wrapper만 사용하도록 수동 테스트 동선을 정리한다.
