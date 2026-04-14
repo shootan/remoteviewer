@@ -66,7 +66,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         companion object {
             fun fromCode(code: Int): DesktopCaptureBackendOption =
-                values().firstOrNull { it.code == code } ?: DXGI
+                values().firstOrNull { it.code == code } ?: WGC
         }
     }
 
@@ -176,8 +176,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var lastViewerRecoveryAttempts = 0
     private var requestedRuntimeBitrateKbps = 8000
     private var requestedRuntimeFps = 30
-    private var requestedDesktopBackend = DesktopCaptureBackendOption.DXGI
-    private var settingsStatusMessage = "Current request: 8000 kbps / 30 fps / desktop DXGI"
+    private var requestedDesktopBackend = DesktopCaptureBackendOption.WGC
+    private var settingsStatusMessage = "Current request: 8000 kbps / 30 fps / desktop WGC"
     private var pendingRuntimeConfigSync = false
     private var pendingDesktopBackendSync = false
     private var desiredStreamActive = false

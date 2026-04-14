@@ -3637,3 +3637,52 @@ Scope note
 Next action
 - Android settings에서 `DXGI/WGC`를 바꿔 desktop viewer black flicker 차이를 바로 비교 확인한다.
 - BlueStacks 배경 입력이 꼭 필요하면 `background_message` 외 별도 injection mode(포인터 이동 허용 `SendInput` 계열 또는 대상별 foreground fallback) 채택 여부를 따로 결정한다.
+
+### 178) 2026-04-14 default desktop backend -> WGC + DXGI root-cause note
+Goal
+- desktop capture 기본 경로를 `WGC`로 바꿔 AMD 환경의 DXGI crash risk를 기본 동선에서 제거한다.
+- DXGI issue 원인을 공식 자료와 로컬 crash evidence 기준으로 정리한다.
+
+Files changed
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/SessionPersistence.kt`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `apps/native_poc/src/native_video_client_shared_core.hpp`
+- `apps/native_poc/src/native_video_client_shared_core.cpp`
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Default switch:
+  - Android saved/default desktop backend code `2 (WGC)`로 변경
+  - Android in-memory default backend도 `WGC`로 변경
+  - host `desktop_capture_backend_from_env()` 기본 반환값을 `WGC`로 변경
+  - client shared-core desktop-backend control default도 `WGC`로 변경
+- Native build:
+  - `cmake --build D:\remote\remote\build-vcpkg-local --config Debug --target remote60_native_video_host_poc remote60_native_video_client_shared_core_test`
+  - 결과: 성공
+- Shared core test:
+  - `D:\remote\remote\build-vcpkg-local\apps\native_poc\Debug\remote60_native_video_client_shared_core_test.exe`
+  - 결과: `PASS`
+- Android build / install:
+  - `JAVA_HOME=C:\Program Files\Android\Android Studio\jbr`
+  - `D:\remote\remote\tmp\gradle\gradle-8.7\bin\gradle.bat -p D:\remote\remote\apps\android_direct_client assembleDebug`
+  - `adb -s emulator-5558 install -r D:\remote\remote\apps\android_direct_client\app\build\outputs\apk\debug\app-debug.apk`
+  - 결과: 성공
+- Local crash evidence:
+  - Windows Event Log `Application Error 1000`
+  - faulting module: `atidxx64.dll`
+  - faulting app: `remote60_native_video_host_poc.exe`
+  - same time range `LiveKernelEvent 141` 발생
+- Official source note:
+  - Microsoft Desktop Duplication/DDA는 DXGI 기반이며, 일부 GPU/topology 조건에서 `DuplicateOutput`이 `DXGI_ERROR_UNSUPPORTED`로 실패할 수 있음
+  - Microsoft TDR 문서상 GPU가 timeout/reset되면 flicker/driver reset/app failure가 함께 나타날 수 있음
+  - 이번 케이스의 정확한 내부 fault는 AMD 비공개 드라이버 코드 영역(`atidxx64.dll`)이라 공개 문서로 세부 root cause를 특정할 수는 없고, “AMD driver instability in DXGI desktop duplication path”로 판단하는 것이 현재 가장 강한 설명임
+
+Scope note
+- 이번 변경은 “기본 경로를 안정 쪽으로 돌리는” 조치다.
+- DXGI는 계속 settings에서 수동으로 켤 수는 있지만, 기본값은 `WGC`로 내려 안정 동선을 우선한다.
+
+Next action
+- 기본값 `WGC` 상태에서 desktop viewer 안정성을 다시 본다.
+- DXGI는 실험용으로만 유지하고, 필요하면 UI에 `experimental` 경고를 추가한다.

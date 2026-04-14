@@ -222,7 +222,7 @@ bool StreamStateControl::ConsumePending(PendingStreamStateRequest* out) {
 void DesktopBackendControl::Reset() {
   pending_.store(false, std::memory_order_relaxed);
   nextSeq_.store(0, std::memory_order_relaxed);
-  backend_.store(1, std::memory_order_relaxed);
+  backend_.store(2, std::memory_order_relaxed);
 }
 
 void DesktopBackendControl::Request(uint16_t backend) {

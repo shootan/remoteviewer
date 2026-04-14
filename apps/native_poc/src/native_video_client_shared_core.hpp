@@ -117,10 +117,10 @@ class DesktopBackendControl {
   void Request(uint16_t backend);
   bool ConsumePending(PendingDesktopBackendRequest* out);
 
- private:
+private:
   std::atomic<bool> pending_{false};
   std::atomic<uint32_t> nextSeq_{0};
-  std::atomic<uint16_t> backend_{1};
+  std::atomic<uint16_t> backend_{2};
 };
 
 struct PendingRuntimeTuneRequest {

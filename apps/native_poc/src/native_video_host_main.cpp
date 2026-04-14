@@ -1348,7 +1348,7 @@ uint32_t env_u32_clamped(const char* key, uint32_t fallback, uint32_t minValue, 
 
 DesktopCaptureBackend desktop_capture_backend_from_env() {
   const char* raw = std::getenv("REMOTE60_DESKTOP_CAPTURE_BACKEND");
-  if (!raw || !*raw) return DesktopCaptureBackend::Dxgi;
+  if (!raw || !*raw) return DesktopCaptureBackend::Wgc;
   std::string s(raw);
   std::transform(s.begin(), s.end(), s.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
