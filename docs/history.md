@@ -3469,3 +3469,69 @@ Validation / build / test result
 Next action
 - Android/LDPlayer에서 `automation/host_dxgi.ps1`로 host를 띄운 뒤 viewer tap + soft keyboard 입력이 실제 `inputEvents` 증가로 이어지는지 한 번 더 닫는다.
 - 기존 직접 exe 실행 메모/임시 cmd 대신 config-first wrapper만 사용하도록 수동 테스트 동선을 정리한다.
+
+### 175) 2026-04-14 android build + click verify + keyboard focus verify
+Goal
+- 최신 Android debug APK를 다시 빌드/설치하고, LDPlayer에서 현재 클릭/키입력 경로가 실제로 어디까지 정상인지 다시 닫는다.
+- `host_dxgi.ps1` 경로 기준으로 desktop viewer click과 keyboard focus/IME 상태를 분리해서 확인한다.
+
+Files changed
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Android build / install:
+  - `JAVA_HOME=C:\Program Files\Android\Android Studio\jbr`
+  - `D:\remote\remote\tmp\gradle\gradle-8.7\bin\gradle.bat -p D:\remote\remote\apps\android_direct_client assembleDebug`
+  - `adb -s emulator-5558 install -r D:\remote\remote\apps\android_direct_client\app\build\outputs\apk\debug\app-debug.apk`
+  - 결과: 성공
+- Device / network:
+  - `adb devices`: `emulator-5558 device`, `emulator-5554 offline`
+  - `adb -s emulator-5558 shell ping -c 1 192.168.0.76`
+  - 결과: host reachability 성공
+- Manual verify workspace:
+  - temp dir: `tmp/android-input-verify-20260414-142229`
+  - host config: external template 기반 + `inputLogEvery=1`
+  - probe window: `Remote60 Android Input Probe` (`button_click`, textbox event를 파일로 기록)
+- Host launch:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File automation/host_dxgi.ps1 -ConfigPath tmp/android-input-verify-20260414-142229/host_config.json -ExeDir build-vcpkg-local/apps/native_poc/Debug`
+  - 결과: `input injection enabled mode=background_message`
+- Android desktop viewer / click:
+  - Android diagnostics:
+    - `connect_tap host=192.168.0.76 ...`
+    - `tab_switch tab=desktop`
+    - `scene=VIEWER`
+    - `select_ready ...`
+  - probe log:
+    - `button_click`
+  - host log:
+    - desktop mode input `seq=7/8` injected to `targetTitle=Remote60 Android Input Probe`
+  - 결과: Android click path end-to-end 성공
+- Android keyboard button / IME focus:
+  - Android diagnostics:
+    - `viewer_keyboard_tap scene=VIEWER`
+  - `dumpsys activity top`:
+    - `viewerKeyboardButton` bounds `65,8-109,52`
+    - `ImeCaptureView ... .F......`
+  - `dumpsys input_method`:
+    - `mServedView=com.remote60.androiddirect.ImeCaptureView`
+    - `mInputShown=true`, `mIsInputViewShown=true`
+  - 결과: keyboard button tap과 IME served-view focus는 성공
+- Keyboard text commit:
+  - 시도:
+    - `adb shell input text hello42`
+    - bottom-half keyboard grid tap
+    - Windows `AppActivate(14248)` + `SendKeys('hello42')`
+    - `adb shell input keyevent 66/61`
+  - 결과:
+    - `probe_events.log`에 `textbox_text=...` 추가 없음
+    - host log에 `input-text` 또는 `kind=5/6` keyboard injection evidence 없음
+    - LDPlayer 기본 IME `com.android.inputmethod.pinyin/.InputService` 환경에서는 text/special-key commit을 자동화로 재현하지 못함
+
+Scope note
+- 이번 턴은 코드 수정이 아니라 Android build와 실제 런타임 경로 재검증이다.
+- click은 host probe log까지 닫혔고, keyboard는 `button -> IME focus`까지는 닫혔지만 text commit은 LDPlayer IME 한계로 이번 환경에서 미확인 상태다.
+
+Next action
+- 실기기 또는 표준 Android Emulator(LatinIME/Gboard 계열)에서 `committed text`/backspace/enter를 다시 검증해 `Android Phase F soft keyboard runtime verify`를 닫는다.
+- 필요하면 debug build 한정 text-injection verify hook을 추가해 `nativeQueueInputText` end-to-end를 자동화한다.
