@@ -219,6 +219,26 @@ bool StreamStateControl::ConsumePending(PendingStreamStateRequest* out) {
   return true;
 }
 
+void DesktopBackendControl::Reset() {
+  pending_.store(false, std::memory_order_relaxed);
+  nextSeq_.store(0, std::memory_order_relaxed);
+  backend_.store(1, std::memory_order_relaxed);
+}
+
+void DesktopBackendControl::Request(uint16_t backend) {
+  if (backend < 1 || backend > 2) return;
+  backend_.store(backend, std::memory_order_release);
+  pending_.store(true, std::memory_order_release);
+}
+
+bool DesktopBackendControl::ConsumePending(PendingDesktopBackendRequest* out) {
+  if (!out) return false;
+  if (!pending_.exchange(false, std::memory_order_acq_rel)) return false;
+  out->seq = nextSeq_.fetch_add(1, std::memory_order_relaxed) + 1;
+  out->backend = backend_.load(std::memory_order_acquire);
+  return true;
+}
+
 RuntimeTuneState::RuntimeTuneState(uint32_t bitrateMin, uint32_t bitrateMax, uint32_t bitrateStep,
                                    uint32_t keyintMin, uint32_t keyintMax)
     : bitrateMin_(bitrateMin),
@@ -346,7 +366,8 @@ bool ClientControlScheduler::NextAction(uint64_t nowUs,
                                         KeyframeRequestState* keyframeRequests,
                                         RuntimeTuneState* runtimeTune,
                                         ClientInputQueue* inputQueue,
-                                        ControlOutboundAction* out) {
+                                        ControlOutboundAction* out,
+                                        DesktopBackendControl* desktopBackend) {
   if (!windowPanel || !streamState || !captureMode || !keyframeRequests || !runtimeTune || !inputQueue || !out) {
     return false;
   }
@@ -444,6 +465,19 @@ bool ClientControlScheduler::NextAction(uint64_t nowUs,
   if (runtimeTune->ConsumePending(nowUs, metrics.message.recvMbpsX1000, &pendingTune)) {
     out->kind = ControlOutboundActionKind::RuntimeTune;
     out->runtimeTune = pendingTune.message;
+    return true;
+  }
+
+  PendingDesktopBackendRequest pendingDesktopBackend{};
+  if (desktopBackend && desktopBackend->ConsumePending(&pendingDesktopBackend)) {
+    out->kind = ControlOutboundActionKind::DesktopBackend;
+    out->desktopBackend.header.magic = kMagic;
+    out->desktopBackend.header.type =
+        static_cast<uint16_t>(MessageType::ControlDesktopBackendRequest);
+    out->desktopBackend.header.size = static_cast<uint16_t>(sizeof(out->desktopBackend));
+    out->desktopBackend.seq = pendingDesktopBackend.seq;
+    out->desktopBackend.backend = pendingDesktopBackend.backend;
+    out->desktopBackend.clientSendQpcUs = nowUs;
     return true;
   }
 

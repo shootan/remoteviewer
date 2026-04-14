@@ -60,6 +60,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         WAITING_FIRST_FRAME,
     }
 
+    private enum class DesktopCaptureBackendOption(val code: Int, val label: String) {
+        DXGI(1, "DXGI"),
+        WGC(2, "WGC");
+
+        companion object {
+            fun fromCode(code: Int): DesktopCaptureBackendOption =
+                values().firstOrNull { it.code == code } ?: DXGI
+        }
+    }
+
     private data class WindowPanelItem(
         val id: Long,
         val title: String,
@@ -130,6 +140,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var settingsPanel: View
     private lateinit var settingsBitrateInput: EditText
     private lateinit var settingsFpsInput: EditText
+    private lateinit var settingsDesktopBackendDxgiButton: Button
+    private lateinit var settingsDesktopBackendWgcButton: Button
     private lateinit var settingsApplyButton: Button
     private lateinit var settingsAppliedText: TextView
     private lateinit var viewerControlsBar: View
@@ -164,8 +176,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var lastViewerRecoveryAttempts = 0
     private var requestedRuntimeBitrateKbps = 8000
     private var requestedRuntimeFps = 30
-    private var settingsStatusMessage = "Current request: 8000 kbps / 30 fps"
+    private var requestedDesktopBackend = DesktopCaptureBackendOption.DXGI
+    private var settingsStatusMessage = "Current request: 8000 kbps / 30 fps / desktop DXGI"
     private var pendingRuntimeConfigSync = false
+    private var pendingDesktopBackendSync = false
     private var desiredStreamActive = false
     private var lastAppliedStreamActive: Boolean? = null
     private var videoSurface: Surface? = null
@@ -221,6 +235,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         settingsPanel = findViewById(R.id.settingsPanel)
         settingsBitrateInput = findViewById(R.id.settingsBitrateInput)
         settingsFpsInput = findViewById(R.id.settingsFpsInput)
+        settingsDesktopBackendDxgiButton = findViewById(R.id.settingsDesktopBackendDxgiButton)
+        settingsDesktopBackendWgcButton = findViewById(R.id.settingsDesktopBackendWgcButton)
         settingsApplyButton = findViewById(R.id.settingsApplyButton)
         settingsAppliedText = findViewById(R.id.settingsAppliedText)
         viewerControlsBar = findViewById(R.id.viewerControlsBar)
@@ -279,10 +295,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         controlPortEdit.setText(if (launchControlPort > 0) launchControlPort.toString() else savedEndpoint.controlPort.toString())
         requestedRuntimeBitrateKbps = savedEndpoint.bitrateKbps
         requestedRuntimeFps = savedEndpoint.fps
-        settingsStatusMessage = "Current request: ${requestedRuntimeBitrateKbps} kbps / ${requestedRuntimeFps} fps"
+        requestedDesktopBackend = DesktopCaptureBackendOption.fromCode(savedEndpoint.desktopBackendCode)
+        settingsStatusMessage =
+            "Current request: ${requestedRuntimeBitrateKbps} kbps / ${requestedRuntimeFps} fps / " +
+                "desktop ${requestedDesktopBackend.label}"
         settingsBitrateInput.setText(requestedRuntimeBitrateKbps.toString())
         settingsFpsInput.setText(requestedRuntimeFps.toString())
         settingsAppliedText.text = settingsStatusMessage
+        updateDesktopBackendButtons()
 
         diagnosticsLog.log(
             "app_start",
@@ -301,6 +321,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             if (ok) {
                 connectFlowActive = true
                 pendingRuntimeConfigSync = true
+                pendingDesktopBackendSync = true
                 desiredStreamActive = false
                 lastAppliedStreamActive = null
                 clearPendingSelection()
@@ -352,29 +373,59 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             renderStatus()
         }
 
+        settingsDesktopBackendDxgiButton.setOnClickListener {
+            requestedDesktopBackend = DesktopCaptureBackendOption.DXGI
+            updateDesktopBackendButtons()
+        }
+        settingsDesktopBackendWgcButton.setOnClickListener {
+            requestedDesktopBackend = DesktopCaptureBackendOption.WGC
+            updateDesktopBackendButtons()
+        }
+
         settingsApplyButton.setOnClickListener {
             val bitrateKbps = settingsBitrateInput.text?.toString()?.trim()?.toIntOrNull() ?: 0
             val fps = settingsFpsInput.text?.toString()?.trim()?.toIntOrNull() ?: 0
+            val messages = mutableListOf<String>()
             if (bitrateKbps < 300 || fps !in 1..120) {
-                settingsStatusMessage = "Use bitrate >= 300 kbps and fps between 1 and 120."
-                settingsAppliedText.text = settingsStatusMessage
+                messages += "Use bitrate >= 300 kbps and fps between 1 and 120."
                 diagnosticsLog.log("runtime_config_invalid", "bitrateKbps=$bitrateKbps fps=$fps")
-                return@setOnClickListener
-            }
-            val bitrateBps = bitrateKbps * 1000
-            val ok = NativeSessionBridge.nativeRequestRuntimeConfig(bitrateBps, fps)
-            if (ok) {
-                requestedRuntimeBitrateKbps = bitrateKbps
-                requestedRuntimeFps = fps
-                settingsStatusMessage = "Requested: ${bitrateKbps} kbps / ${fps} fps"
-                settingsAppliedText.text = settingsStatusMessage
-                saveCurrentEndpoint()
-                diagnosticsLog.log("runtime_config_request", "bitrateBps=$bitrateBps fps=$fps")
             } else {
-                settingsStatusMessage = "Runtime config request failed."
-                settingsAppliedText.text = settingsStatusMessage
-                diagnosticsLog.log("runtime_config_failed", "bitrateBps=$bitrateBps fps=$fps")
+                val bitrateBps = bitrateKbps * 1000
+                val runtimeOk = NativeSessionBridge.nativeRequestRuntimeConfig(bitrateBps, fps)
+                if (runtimeOk) {
+                    requestedRuntimeBitrateKbps = bitrateKbps
+                    requestedRuntimeFps = fps
+                    diagnosticsLog.log("runtime_config_request", "bitrateBps=$bitrateBps fps=$fps")
+                } else {
+                    messages += "Runtime config request failed."
+                    diagnosticsLog.log("runtime_config_failed", "bitrateBps=$bitrateBps fps=$fps")
+                }
             }
+
+            val backendOk =
+                NativeSessionBridge.nativeRequestDesktopCaptureBackend(requestedDesktopBackend.code)
+            if (backendOk) {
+                pendingDesktopBackendSync = false
+                diagnosticsLog.log(
+                    "desktop_backend_request",
+                    "backend=${requestedDesktopBackend.label.lowercase()}"
+                )
+            } else {
+                messages += "Desktop backend request failed."
+                diagnosticsLog.log(
+                    "desktop_backend_failed",
+                    "backend=${requestedDesktopBackend.label.lowercase()}"
+                )
+            }
+            if (messages.isEmpty()) {
+                settingsStatusMessage =
+                    "Requested: ${requestedRuntimeBitrateKbps} kbps / ${requestedRuntimeFps} fps / " +
+                        "desktop ${requestedDesktopBackend.label}"
+            } else {
+                settingsStatusMessage = messages.joinToString(" / ")
+            }
+            settingsAppliedText.text = settingsStatusMessage
+            saveCurrentEndpoint()
             renderStatus()
         }
 
@@ -613,6 +664,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         return ok
     }
 
+    private fun updateDesktopBackendButtons() {
+        val dxgiSelected = requestedDesktopBackend == DesktopCaptureBackendOption.DXGI
+        settingsDesktopBackendDxgiButton.text =
+            if (dxgiSelected) "[DXGI]" else "DXGI"
+        settingsDesktopBackendWgcButton.text =
+            if (dxgiSelected) "WGC" else "[WGC]"
+    }
+
     private fun syncConnectedClientPreferences(isConnected: Boolean) {
         if (!isConnected) {
             lastAppliedStreamActive = null
@@ -624,11 +683,26 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             if (NativeSessionBridge.nativeRequestRuntimeConfig(bitrateBps, requestedRuntimeFps)) {
                 pendingRuntimeConfigSync = false
                 settingsStatusMessage =
-                    "Current request: ${requestedRuntimeBitrateKbps} kbps / ${requestedRuntimeFps} fps"
+                    "Current request: ${requestedRuntimeBitrateKbps} kbps / ${requestedRuntimeFps} fps / " +
+                        "desktop ${requestedDesktopBackend.label}"
                 settingsAppliedText.text = settingsStatusMessage
                 diagnosticsLog.log(
                     "runtime_config_sync",
                     "bitrateBps=$bitrateBps fps=$requestedRuntimeFps"
+                )
+            }
+        }
+
+        if (pendingDesktopBackendSync) {
+            if (NativeSessionBridge.nativeRequestDesktopCaptureBackend(requestedDesktopBackend.code)) {
+                pendingDesktopBackendSync = false
+                settingsStatusMessage =
+                    "Current request: ${requestedRuntimeBitrateKbps} kbps / ${requestedRuntimeFps} fps / " +
+                        "desktop ${requestedDesktopBackend.label}"
+                settingsAppliedText.text = settingsStatusMessage
+                diagnosticsLog.log(
+                    "desktop_backend_sync",
+                    "backend=${requestedDesktopBackend.label.lowercase()}"
                 )
             }
         }
@@ -1096,8 +1170,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         settingsPanel.visibility = if (settingsActive) View.VISIBLE else View.GONE
         settingsBitrateInput.isEnabled = isConnected && !selectionPending
         settingsFpsInput.isEnabled = isConnected && !selectionPending
+        settingsDesktopBackendDxgiButton.isEnabled = isConnected && !selectionPending
+        settingsDesktopBackendWgcButton.isEnabled = isConnected && !selectionPending
         settingsApplyButton.isEnabled = isConnected && !selectionPending
         targetListView.visibility = if (settingsActive) View.GONE else View.VISIBLE
+        updateDesktopBackendButtons()
 
         listSelectedText.text = "Selected: ${panelSnapshot.selectedTitle}"
         listStatusText.text =
@@ -1483,6 +1560,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val controlPort = controlPortEdit.text?.toString()?.toIntOrNull() ?: 43001
         val bitrateKbps = settingsBitrateInput.text?.toString()?.toIntOrNull() ?: requestedRuntimeBitrateKbps
         val fps = settingsFpsInput.text?.toString()?.toIntOrNull() ?: requestedRuntimeFps
-        SessionPersistence.save(this, host, videoPort, controlPort, bitrateKbps, fps)
+        SessionPersistence.save(
+            this,
+            host,
+            videoPort,
+            controlPort,
+            bitrateKbps,
+            fps,
+            requestedDesktopBackend.code
+        )
     }
 }

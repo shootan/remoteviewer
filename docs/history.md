@@ -3580,3 +3580,60 @@ Scope note
 Next action
 - 현재 빌드로 `Backspace`/`Enter`/`Space`를 실기기 또는 LDPlayer에서 다시 수동 검증한다.
 - desktop viewer black flicker가 사라졌는지 `host_dxgi.ps1` 경로에서 바로 재확인한다.
+
+### 177) 2026-04-14 android desktop backend setting + host runtime switch
+Goal
+- Android settings 탭에서 desktop capture backend를 `DXGI/WGC` 중 선택할 수 있게 한다.
+- 선택값이 저장되고, connect 직후 host로 sync되며, desktop mode일 때는 host capture backend가 런타임 전환되도록 만든다.
+
+Files changed
+- `apps/native_poc/src/poc_protocol.hpp`
+- `apps/native_poc/src/native_video_client_shared_core.hpp`
+- `apps/native_poc/src/native_video_client_shared_core.cpp`
+- `apps/native_poc/src/native_video_client_session.hpp`
+- `apps/native_poc/src/native_video_client_session.cpp`
+- `apps/native_poc/src/native_video_client_tcp_control.cpp`
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `apps/android_direct_client/app/src/main/cpp/native_bridge.cpp`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/NativeSessionBridge.kt`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/SessionPersistence.kt`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `apps/android_direct_client/app/src/main/res/layout/activity_main.xml`
+- `apps/android_direct_client/app/src/main/res/values/strings.xml`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Protocol / host runtime:
+  - control message `ControlDesktopBackendRequest` 추가
+  - Android/native client session에서 queued request 전송 지원
+  - host에서 request 수신 시 `requestedDesktopBackend` 갱신
+  - desktop mode active 상태에서는 backend 차이가 있을 때 `restart_capture_session()`으로 즉시 재적용
+  - window-target mode에서는 다음 desktop selection용 preference로만 저장
+- Android UI / persistence:
+  - settings panel에 `DXGI` / `WGC` 버튼 추가
+  - 선택값 `SharedPreferences` 저장/복원 추가
+  - connect 직후 saved backend auto-sync 추가
+  - Apply 시 runtime bitrate/fps와 desktop backend를 함께 요청
+- Native build:
+  - `cmake --build D:\remote\remote\build-vcpkg-local --config Debug --target remote60_native_video_host_poc`
+  - 결과: 성공
+- Native client/shared core build:
+  - `cmake --build D:\remote\remote\build-vcpkg-local --config Debug --target remote60_native_video_client_shared_core_test remote60_native_video_client_poc`
+  - 결과: 성공
+- Shared core test:
+  - `D:\remote\remote\build-vcpkg-local\apps\native_poc\Debug\remote60_native_video_client_shared_core_test.exe`
+  - 결과: `PASS`
+- Android build / install:
+  - `JAVA_HOME=C:\Program Files\Android\Android Studio\jbr`
+  - `D:\remote\remote\tmp\gradle\gradle-8.7\bin\gradle.bat -p D:\remote\remote\apps\android_direct_client assembleDebug`
+  - `adb -s emulator-5558 install -r D:\remote\remote\apps\android_direct_client\app\build\outputs\apk\debug\app-debug.apk`
+  - 결과: 성공
+
+Scope note
+- 이번 턴은 “settings에서 backend 선택” 요청을 protocol부터 host runtime까지 실제 동작하도록 연결한 것이다.
+- background click 차이는 여전히 app별 입력 경로 차이로 남는다. 현재 host는 `background_message`로 `WM_MOUSE*` / `WM_KEY*` / `WM_CHAR`를 보내므로, LDPlayer처럼 Win32 message를 직접 처리하는 창은 background click이 먹지만, BlueStacks처럼 foreground/raw-input 성격이 강한 창은 앞에 올라와야 반응할 수 있다.
+
+Next action
+- Android settings에서 `DXGI/WGC`를 바꿔 desktop viewer black flicker 차이를 바로 비교 확인한다.
+- BlueStacks 배경 입력이 꼭 필요하면 `background_message` 외 별도 injection mode(포인터 이동 허용 `SendInput` 계열 또는 대상별 foreground fallback) 채택 여부를 따로 결정한다.

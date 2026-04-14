@@ -8,6 +8,7 @@ data class SavedEndpoint(
     val controlPort: Int = 43001,
     val bitrateKbps: Int = 8000,
     val fps: Int = 30,
+    val desktopBackendCode: Int = 1,
 )
 
 object SessionPersistence {
@@ -17,6 +18,7 @@ object SessionPersistence {
     private const val KEY_CONTROL_PORT = "control_port"
     private const val KEY_BITRATE_KBPS = "bitrate_kbps"
     private const val KEY_FPS = "fps"
+    private const val KEY_DESKTOP_BACKEND = "desktop_backend"
 
     fun load(context: Context): SavedEndpoint {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -26,6 +28,7 @@ object SessionPersistence {
             controlPort = prefs.getInt(KEY_CONTROL_PORT, 43001),
             bitrateKbps = prefs.getInt(KEY_BITRATE_KBPS, 8000),
             fps = prefs.getInt(KEY_FPS, 30),
+            desktopBackendCode = prefs.getInt(KEY_DESKTOP_BACKEND, 1),
         )
     }
 
@@ -36,6 +39,7 @@ object SessionPersistence {
         controlPort: Int,
         bitrateKbps: Int,
         fps: Int,
+        desktopBackendCode: Int,
     ) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
@@ -44,6 +48,7 @@ object SessionPersistence {
             .putInt(KEY_CONTROL_PORT, controlPort)
             .putInt(KEY_BITRATE_KBPS, bitrateKbps)
             .putInt(KEY_FPS, fps)
+            .putInt(KEY_DESKTOP_BACKEND, desktopBackendCode)
             .apply()
     }
 }

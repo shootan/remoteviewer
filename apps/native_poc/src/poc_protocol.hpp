@@ -25,6 +25,7 @@ enum class MessageType : uint16_t {
   ControlWindowSelected = 31,
   ControlInputText = 32,
   ControlStreamState = 33,
+  ControlDesktopBackendRequest = 34,
 };
 
 enum class UdpPacketKind : uint16_t {
@@ -183,6 +184,14 @@ struct ControlRuntimeEncoderConfigMessage {
   uint32_t keyint = 0;   // frames
   uint32_t fps = 0;      // frames per second
   uint32_t flags = 0;    // bit0: bitrate valid, bit1: keyint valid, bit2: fps valid
+  uint64_t clientSendQpcUs = 0;
+};
+
+struct ControlDesktopBackendRequestMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint16_t backend = 0;  // 1:dxgi, 2:wgc
+  uint16_t flags = 0;
   uint64_t clientSendQpcUs = 0;
 };
 

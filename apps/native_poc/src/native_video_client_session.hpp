@@ -72,6 +72,7 @@ class ClientSessionController {
   bool RequestDesktopMode();
   bool RequestStreamActive(bool active);
   bool RequestRuntimeConfig(uint32_t bitrate, uint32_t fps);
+  bool RequestDesktopCaptureBackend(uint16_t backend);
   bool QueueInputEvent(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta,
                        uint32_t keyCode, uint16_t buttons);
   bool QueueInputText(const uint16_t* text, size_t count);
@@ -103,6 +104,7 @@ class ClientSessionController {
   CaptureModeRequestState captureMode_;
   KeyframeRequestState keyframeRequests_;
   RuntimeTuneState runtimeTune_;
+  DesktopBackendControl desktopBackend_;
   ClientInputQueue inputQueue_;
   ClientControlScheduler controlScheduler_;
   ClientEncodedFrameSink* encodedFrameSink_ = nullptr;

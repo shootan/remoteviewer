@@ -106,6 +106,23 @@ class StreamStateControl {
   std::atomic<bool> active_{false};
 };
 
+struct PendingDesktopBackendRequest {
+  uint32_t seq = 0;
+  uint16_t backend = 1;  // 1:dxgi, 2:wgc
+};
+
+class DesktopBackendControl {
+ public:
+  void Reset();
+  void Request(uint16_t backend);
+  bool ConsumePending(PendingDesktopBackendRequest* out);
+
+ private:
+  std::atomic<bool> pending_{false};
+  std::atomic<uint32_t> nextSeq_{0};
+  std::atomic<uint16_t> backend_{1};
+};
+
 struct PendingRuntimeTuneRequest {
   ControlRuntimeEncoderConfigMessage message{};
 };
@@ -155,6 +172,7 @@ enum class ControlOutboundActionKind : uint8_t {
   Metrics,
   KeyframeRequest,
   RuntimeTune,
+  DesktopBackend,
   InputEvent,
   InputText,
 };
@@ -171,6 +189,7 @@ struct ControlOutboundAction {
   ControlClientMetricsMessage metrics{};
   ControlRequestKeyFrameMessage keyframe{};
   ControlRuntimeEncoderConfigMessage runtimeTune{};
+  ControlDesktopBackendRequestMessage desktopBackend{};
   ControlInputEventMessage inputEvent{};
   ControlInputTextMessage inputText{};
 };
@@ -187,7 +206,8 @@ class ClientControlScheduler {
                  KeyframeRequestState* keyframeRequests,
                  RuntimeTuneState* runtimeTune,
                  ClientInputQueue* inputQueue,
-                  ControlOutboundAction* out);
+                  ControlOutboundAction* out,
+                 DesktopBackendControl* desktopBackend = nullptr);
   uint64_t RecordInputAck(uint32_t inputLogEvery);
 
  private:

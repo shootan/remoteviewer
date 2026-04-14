@@ -199,6 +199,15 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeRequestRuntimeConfig(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeRequestDesktopCaptureBackend(
+    JNIEnv* /* env */, jobject /* this */, jint backend) {
+  return g_session_controller.RequestDesktopCaptureBackend(
+             static_cast<uint16_t>(std::clamp<jint>(backend, 0, 0xffff)))
+             ? JNI_TRUE
+             : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeRequestStreamActive(
     JNIEnv* /* env */, jobject /* this */, jboolean active) {
   return g_session_controller.RequestStreamActive(active == JNI_TRUE) ? JNI_TRUE : JNI_FALSE;

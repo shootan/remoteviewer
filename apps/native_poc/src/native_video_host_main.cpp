@@ -58,6 +58,7 @@ using remote60::native_poc::ControlStreamStateMessage;
 using remote60::native_poc::ControlClientMetricsMessage;
 using remote60::native_poc::ControlRequestKeyFrameMessage;
 using remote60::native_poc::ControlRuntimeEncoderConfigMessage;
+using remote60::native_poc::ControlDesktopBackendRequestMessage;
 using remote60::native_poc::ControlCaptureModeRequestMessage;
 using remote60::native_poc::ControlWindowEntry;
 using remote60::native_poc::ControlWindowListMessage;
@@ -1355,6 +1356,30 @@ DesktopCaptureBackend desktop_capture_backend_from_env() {
   return DesktopCaptureBackend::Dxgi;
 }
 
+bool desktop_capture_backend_from_code(uint16_t code, DesktopCaptureBackend* out) {
+  if (!out) return false;
+  switch (code) {
+    case 1:
+      *out = DesktopCaptureBackend::Dxgi;
+      return true;
+    case 2:
+      *out = DesktopCaptureBackend::Wgc;
+      return true;
+    default:
+      return false;
+  }
+}
+
+uint16_t desktop_capture_backend_code(DesktopCaptureBackend backend) {
+  switch (backend) {
+    case DesktopCaptureBackend::Dxgi:
+      return 1;
+    case DesktopCaptureBackend::Wgc:
+      return 2;
+  }
+  return 1;
+}
+
 const char* desktop_capture_backend_name(DesktopCaptureBackend backend) {
   switch (backend) {
     case DesktopCaptureBackend::Dxgi: return "dxgi";
@@ -2354,6 +2379,10 @@ int main(int argc, char** argv) {
   std::atomic<uint32_t> runtimeTuneKeyint{0};
   std::atomic<uint32_t> runtimeTuneFps{0};
   std::atomic<uint32_t> runtimeTuneSeq{0};
+  std::atomic<bool> desktopBackendReqPending{false};
+  std::atomic<uint32_t> desktopBackendReqSeq{0};
+  std::atomic<uint16_t> desktopBackendReqValue{
+      desktop_capture_backend_code(desktop_capture_backend_from_env())};
   std::atomic<bool> captureModeReqPending{false};
   std::atomic<uint32_t> captureModeReqSeq{0};
   std::atomic<uint16_t> captureModeReqMode{0};
@@ -2766,6 +2795,23 @@ int main(int argc, char** argv) {
                 continue;
               }
 
+              if (type == MessageType::ControlDesktopBackendRequest &&
+                  header.size == sizeof(ControlDesktopBackendRequestMessage)) {
+                ControlDesktopBackendRequestMessage req{};
+                req.header = header;
+                if (!recv_all(acceptedSock, &req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+                if (req.backend == 1 || req.backend == 2) {
+                  desktopBackendReqSeq.store(req.seq, std::memory_order_release);
+                  desktopBackendReqValue.store(req.backend, std::memory_order_release);
+                  desktopBackendReqPending.store(true, std::memory_order_release);
+                  std::cout << "[native-video-host][control] desktop-backend-request seq=" << req.seq
+                            << " backend="
+                            << (req.backend == 2 ? "wgc" : "dxgi")
+                            << "\n";
+                }
+                continue;
+              }
+
               if (type == MessageType::ControlStreamState &&
                   header.size == sizeof(ControlStreamStateMessage)) {
                 ControlStreamStateMessage req{};
@@ -2871,7 +2917,7 @@ int main(int argc, char** argv) {
   const bool selectionLockedByConfig = captureWindowCriteria.enabled() || inputTargetCriteria.enabled();
   windowSelectionLocked.store(selectionLockedByConfig, std::memory_order_release);
   const bool windowTargetConfigured = captureWindowCriteria.enabled();
-  const DesktopCaptureBackend requestedDesktopBackend = desktop_capture_backend_from_env();
+  DesktopCaptureBackend requestedDesktopBackend = desktop_capture_backend_from_env();
   DesktopCaptureBackend activeDesktopBackend = requestedDesktopBackend;
   std::atomic<bool> captureWindowModeActive{false};
   std::atomic<bool> captureWindowClientOnlyActive{args.captureWindowClientOnly};
@@ -4070,6 +4116,45 @@ int main(int argc, char** argv) {
       break;
     }
     pump_udp_hello();
+    if (desktopBackendReqPending.exchange(false, std::memory_order_acq_rel)) {
+      const uint32_t reqSeq = desktopBackendReqSeq.load(std::memory_order_acquire);
+      DesktopCaptureBackend nextRequested = requestedDesktopBackend;
+      const uint16_t requestedCode = desktopBackendReqValue.load(std::memory_order_acquire);
+      if (desktop_capture_backend_from_code(requestedCode, &nextRequested)) {
+        requestedDesktopBackend = nextRequested;
+        const bool desktopActive = !captureWindowModeActive.load(std::memory_order_acquire);
+        const bool restartNeeded = desktopActive && activeDesktopBackend != requestedDesktopBackend;
+        if (restartNeeded) {
+          const DesktopCaptureBackend prevActiveBackend = activeDesktopBackend;
+          activeDesktopBackend = requestedDesktopBackend;
+          if (!restart_capture_session()) {
+            activeDesktopBackend = prevActiveBackend;
+            std::cerr << "[native-video-host][control] desktop-backend-apply failed seq=" << reqSeq
+                      << " requested=" << desktop_capture_backend_name(requestedDesktopBackend)
+                      << " active=" << desktop_capture_backend_name(activeDesktopBackend)
+                      << "\n";
+          } else {
+            ++captureRestartCount;
+            captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+            lastCaptureUsForInterval.store(0, std::memory_order_release);
+            lastCallbackUs.store(0, std::memory_order_release);
+            resetHostTimelineAnchors();
+            forceKeyNext = true;
+            flush_capture_pipeline_state("desktop-backend-switch");
+            std::cout << "[native-video-host][control] desktop-backend-applied seq=" << reqSeq
+                      << " requested=" << desktop_capture_backend_name(requestedDesktopBackend)
+                      << " active=" << desktop_capture_backend_name(activeDesktopBackend)
+                      << " desktopActive=1\n";
+          }
+        } else {
+          std::cout << "[native-video-host][control] desktop-backend-stored seq=" << reqSeq
+                    << " requested=" << desktop_capture_backend_name(requestedDesktopBackend)
+                    << " active=" << desktop_capture_backend_name(activeDesktopBackend)
+                    << " desktopActive=" << (desktopActive ? 1 : 0)
+                    << "\n";
+        }
+      }
+    }
     const bool streamActive = streamControlActive.load(std::memory_order_acquire);
     if (!streamActive) {
       if (streamActiveApplied) {

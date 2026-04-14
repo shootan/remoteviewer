@@ -20,6 +20,8 @@ bool send_tcp_control_action(SocketHandle controlSock, const ControlOutboundActi
       return send_all(controlSock, &action.keyframe, sizeof(action.keyframe));
     case ControlOutboundActionKind::RuntimeTune:
       return send_all(controlSock, &action.runtimeTune, sizeof(action.runtimeTune));
+    case ControlOutboundActionKind::DesktopBackend:
+      return send_all(controlSock, &action.desktopBackend, sizeof(action.desktopBackend));
     case ControlOutboundActionKind::InputEvent:
       return send_all(controlSock, &action.inputEvent, sizeof(action.inputEvent));
     case ControlOutboundActionKind::InputText:

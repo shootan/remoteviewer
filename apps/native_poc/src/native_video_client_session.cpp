@@ -179,6 +179,16 @@ bool ClientSessionController::RequestRuntimeConfig(uint32_t bitrate, uint32_t fp
   return true;
 }
 
+bool ClientSessionController::RequestDesktopCaptureBackend(uint16_t backend) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+  if (backend < 1 || backend > 2) return false;
+  desktopBackend_.Request(backend);
+  return true;
+}
+
 bool ClientSessionController::QueueInputEvent(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta,
                                               uint32_t keyCode, uint16_t buttons) {
   {
@@ -295,7 +305,8 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
     ControlOutboundAction action{};
     ClientControlMetricsSnapshot metrics{};
     if (controlScheduler_.NextAction(loopNowUs, metrics, &windowPanel_, &streamState_, &captureMode_,
-                                     &keyframeRequests_, &runtimeTune_, &inputQueue_, &action)) {
+                                     &keyframeRequests_, &runtimeTune_, &inputQueue_, &action,
+                                     &desktopBackend_)) {
       SocketHandle controlSocket = kInvalidSocket;
       {
         std::lock_guard<std::mutex> lock(mu_);
@@ -575,6 +586,7 @@ void ClientSessionController::ResetUnlocked() {
   captureMode_.Reset();
   keyframeRequests_.Reset();
   runtimeTune_.Reset(0, 0);
+  desktopBackend_.Reset();
   inputQueue_.Reset();
   if (encodedFrameSink_) {
     encodedFrameSink_->OnVideoStreamReset();
