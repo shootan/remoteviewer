@@ -395,6 +395,40 @@
                 android:textAllCaps="false"
                 android:textColor="#F4F0E8"
                 android:textSize="18sp" />
+
+            <Button
+                android:id="@+id/viewerScrollButton"
+                android:layout_width="wrap_content"
+                android:layout_height="44dp"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/viewer_control_button_background"
+                android:contentDescription="@string/viewer_scroll_description"
+                android:minWidth="0dp"
+                android:paddingLeft="12dp"
+                android:paddingTop="8dp"
+                android:paddingRight="12dp"
+                android:paddingBottom="8dp"
+                android:text="@string/viewer_scroll_button"
+                android:textAllCaps="false"
+                android:textColor="#F4F0E8"
+                android:textSize="12sp" />
+
+            <Button
+                android:id="@+id/viewerLogButton"
+                android:layout_width="wrap_content"
+                android:layout_height="44dp"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/viewer_control_button_background"
+                android:contentDescription="@string/viewer_log_description"
+                android:minWidth="0dp"
+                android:paddingLeft="12dp"
+                android:paddingTop="8dp"
+                android:paddingRight="12dp"
+                android:paddingBottom="8dp"
+                android:text="@string/viewer_log_button"
+                android:textAllCaps="false"
+                android:textColor="#F4F0E8"
+                android:textSize="12sp" />
         </LinearLayout>
 
         <com.remote60.androiddirect.ImeCaptureView
@@ -414,6 +448,7 @@
             android:maxLines="2"
             android:padding="12dp"
             android:textColor="#F2F2F2"
-            android:textSize="12sp" />
+            android:textSize="12sp"
+            android:visibility="gone" />
     </FrameLayout>
 </FrameLayout>

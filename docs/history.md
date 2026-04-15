@@ -3713,3 +3713,43 @@ Validation / build / test result
 Next action
 - Android/Windows client로 다시 붙여 실제 tap/keyboard가 `inputEventsApplied` 증가와 함께 유지되는지 한 번 더 확인한다.
 - manual host를 직접 exe로 띄우는 안내가 남아 있으면 config-first 또는 default-on 전제와 맞게 문서/메모를 정리한다.
+
+### 180) 2026-04-15 Android viewer scroll-hold/log overlay + local artifact cleanup
+Goal
+- Android direct viewer에서 desktop/window mode 공통으로 고정 포인트 휠 스크롤 제스처를 추가해 터치만으로 스크롤 입력을 보낼 수 있게 한다.
+- 하단 고정 로그를 없애고 toolbar `LOG` 버튼으로 반투명 전체 로그 오버레이를 띄우도록 바꾼다.
+- 저장소 내 안드로이드/로컬 빌드 산출물과 임시 폴더가 계속 워크트리에 남지 않도록 정리하고 ignore 규칙을 보강한다.
+
+Files changed
+- `.gitignore`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/SessionDiagnosticsLog.kt`
+- `apps/android_direct_client/app/src/main/res/layout/activity_main.xml`
+- `apps/android_direct_client/app/src/main/res/layout/viewer_log_dialog.xml`
+- `apps/android_direct_client/app/src/main/res/drawable/viewer_log_dialog_background.xml`
+- `apps/android_direct_client/app/src/main/res/values/strings.xml`
+- `query`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Android build:
+  - `JAVA_HOME=C:\Program Files\Android\Android Studio\jbr`
+  - `D:\remote\remote\tmp\gradle\gradle-8.7\bin\gradle.bat assembleDebug`
+  - 결과: 성공
+- Android install / launch:
+  - `adb -s emulator-5558 install -r D:\remote\remote\apps\android_direct_client\app\build\outputs\apk\debug\app-debug.apk`
+  - `adb -s emulator-5558 shell am start -n com.remote60.androiddirect/.MainActivity`
+  - `adb -s emulator-5558 shell dumpsys activity activities`
+  - 결과: install 성공, `com.remote60.androiddirect/.MainActivity` resumed 확인
+- Visual evidence:
+  - `Logs/verification/2026-04-15/android-direct-viewer-ui/connect-scene.png`
+  - `Logs/verification/2026-04-15/android-direct-viewer-ui/uidump.xml`
+  - 결과: 앱 launch 증적은 남겼지만, 이번 턴에는 실제 host session을 붙이지 않아 viewer 내부 `SCROLL`/`LOG` 버튼의 런타임 화면 검증은 미완료
+- Cleanup:
+  - Android `.gradle`, `app/.cxx`, `app/build`, top-level `.vcpkg`, `vcpkg_installed`, `build-vcpkg-local`, `dist`, `tmp`, `image`, stray `*.out/*.err/*.pdb`, tracked scratch file `query` 삭제
+  - `.gitignore`에 Android local build/temp/log artifact 경로 추가
+
+Next action
+- 실제 host에 연결해 viewer 상태에서 `SCROLL` hold 제스처가 고정 포인트 wheel 입력으로 원하는 속도로 동작하는지 확인한다.
+- `LOG` 오버레이가 viewer 상태/diagnostics 전체 로그를 충분히 보여주는지 실기기 또는 LDPlayer viewer 화면 기준으로 한 번 더 캡처 검증한다.

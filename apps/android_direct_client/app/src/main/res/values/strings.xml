@@ -26,6 +26,14 @@
     <string name="viewer_back_button">LIST</string>
     <string name="viewer_keyboard_button">⌨</string>
     <string name="viewer_keyboard_description">Show keyboard</string>
+    <string name="viewer_scroll_button">SCROLL</string>
+    <string name="viewer_scroll_description">Hold to scroll at a fixed cursor point</string>
+    <string name="viewer_log_button">LOG</string>
+    <string name="viewer_log_description">Open diagnostics log</string>
+    <string name="viewer_log_title">Viewer Diagnostics</string>
+    <string name="viewer_log_refresh_button">Refresh</string>
+    <string name="viewer_log_close_button">Close</string>
+    <string name="viewer_log_empty">No diagnostics yet.</string>
     <string name="exit_confirm_message">종료하시겠습니까?</string>
     <string name="exit_confirm_yes">Yes</string>
     <string name="exit_confirm_no">No</string>

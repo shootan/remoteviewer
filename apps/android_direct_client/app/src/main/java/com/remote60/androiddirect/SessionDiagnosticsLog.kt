@@ -31,6 +31,22 @@ class SessionDiagnosticsLog(context: Context) {
         }
     }
 
+    fun readAllText(): String =
+        synchronized(lock) {
+            try {
+                val blocks = mutableListOf<String>()
+                if (rotatedFile.exists() && rotatedFile.length() > 0L) {
+                    blocks += "--- previous session chunk ---\n" + rotatedFile.readText()
+                }
+                if (logFile.exists() && logFile.length() > 0L) {
+                    blocks += logFile.readText()
+                }
+                blocks.joinToString("\n\n").trim()
+            } catch (t: Throwable) {
+                "failed to read diagnostics log: ${t.message ?: t::class.java.simpleName}"
+            }
+        }
+
     private fun rotateIfNeeded() {
         if (!logFile.exists()) return
         if (logFile.length() < MAX_LOG_BYTES) return

@@ -3,8 +3,10 @@ package com.remote60.androiddirect
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.res.Configuration
+import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.SurfaceTexture
+import android.graphics.drawable.ColorDrawable
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -16,6 +18,7 @@ import android.view.MotionEvent
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.inputmethod.InputMethodManager
@@ -26,6 +29,7 @@ import android.widget.ListView
 import android.widget.TextView
 import org.json.JSONException
 import org.json.JSONObject
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 class MainActivity : Activity(), TextureView.SurfaceTextureListener {
@@ -34,11 +38,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         private const val INPUT_KIND_MOUSE_MOVE = 1
         private const val INPUT_KIND_MOUSE_DOWN = 2
         private const val INPUT_KIND_MOUSE_UP = 3
+        private const val INPUT_KIND_MOUSE_WHEEL = 4
         private const val INPUT_KIND_KEY_DOWN = 5
         private const val INPUT_KIND_KEY_UP = 6
         private const val INPUT_BUTTON_PRIMARY = 0x1
         private const val INPUT_VK_LBUTTON = 0x01
         private const val INPUT_VK_BACK = 0x08
+        private const val INPUT_WHEEL_DELTA_STEP = 120
+        private const val SCROLL_GESTURE_STEP_PX = 42f
     }
 
     private enum class UiScene {
@@ -58,6 +65,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         IDLE,
         REQUESTING,
         WAITING_FIRST_FRAME,
+    }
+
+    private enum class ViewerTouchMode {
+        DIRECT,
+        SCROLL,
     }
 
     private enum class DesktopCaptureBackendOption(val code: Int, val label: String) {
@@ -147,6 +159,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var viewerControlsBar: View
     private lateinit var viewerBackButton: Button
     private lateinit var viewerKeyboardButton: Button
+    private lateinit var viewerScrollButton: Button
+    private lateinit var viewerLogButton: Button
     private lateinit var viewerOverlayStatusText: TextView
     private lateinit var viewerImeCaptureView: ImeCaptureView
     private lateinit var videoTextureView: TextureView
@@ -190,10 +204,17 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var surfaceBufferWidth = 0
     private var surfaceBufferHeight = 0
     private var exitDialog: AlertDialog? = null
+    private var viewerLogDialog: AlertDialog? = null
+    private var viewerLogStatusText: TextView? = null
+    private var viewerLogTextView: TextView? = null
     private var activeTouchPointerId = MotionEvent.INVALID_POINTER_ID
+    private var activeViewerTouchMode = ViewerTouchMode.DIRECT
     private var activeTouchButtons = 0
     private var lastTouchVideoX = 0
     private var lastTouchVideoY = 0
+    private var viewerScrollModeArmed = false
+    private var scrollLastTouchY = 0f
+    private var scrollWheelCarryPx = 0f
     private val viewerControlsDimAlpha = 0.34f
     private val viewerControlsFadeRunnable = Runnable {
         if (currentScene == UiScene.VIEWER) {
@@ -242,6 +263,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerControlsBar = findViewById(R.id.viewerControlsBar)
         viewerBackButton = findViewById(R.id.viewerBackButton)
         viewerKeyboardButton = findViewById(R.id.viewerKeyboardButton)
+        viewerScrollButton = findViewById(R.id.viewerScrollButton)
+        viewerLogButton = findViewById(R.id.viewerLogButton)
         viewerOverlayStatusText = findViewById(R.id.viewerOverlayStatusText)
         viewerImeCaptureView = findViewById(R.id.viewerImeCaptureView)
         videoTextureView = findViewById(R.id.videoTextureView)
@@ -436,6 +459,24 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerKeyboardButton.setOnClickListener {
             toggleViewerKeyboard()
         }
+        viewerScrollButton.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    showViewerControls(emphasized = true)
+                    setViewerScrollModeArmed(true)
+                }
+
+                MotionEvent.ACTION_UP,
+                MotionEvent.ACTION_CANCEL -> {
+                    setViewerScrollModeArmed(false)
+                }
+            }
+            false
+        }
+        viewerLogButton.setOnClickListener {
+            toggleViewerLogDialog()
+        }
+        updateViewerControlButtons()
 
         renderStatus()
     }
@@ -455,6 +496,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     override fun onPause() {
         saveCurrentEndpoint()
         statusHandler.removeCallbacks(statusPollRunnable)
+        dismissViewerLogDialog()
+        setViewerScrollModeArmed(false)
         cancelActiveViewerTouch("pause")
         hideViewerKeyboard("pause")
         super.onPause()
@@ -484,6 +527,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         saveCurrentEndpoint()
         exitDialog?.dismiss()
         exitDialog = null
+        dismissViewerLogDialog()
+        setViewerScrollModeArmed(false)
         hideViewerKeyboard("destroy")
         releaseVideoSurface()
         super.onDestroy()
@@ -571,6 +616,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun exitApplication() {
         diagnosticsLog.log("exit_confirmed", "scene=$currentScene status=${NativeSessionBridge.nativeGetStatus()}")
+        dismissViewerLogDialog()
+        setViewerScrollModeArmed(false)
         cancelActiveViewerTouch("exit")
         hideViewerKeyboard("exit")
         desiredStreamActive = false
@@ -714,6 +761,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun moveToTargets(reason: String, abortPendingSwitch: Boolean) {
         diagnosticsLog.log("targets_return", "reason=$reason scene=$currentScene")
+        dismissViewerLogDialog()
+        setViewerScrollModeArmed(false)
         cancelActiveViewerTouch(reason)
         hideViewerKeyboard(reason)
         desiredStreamActive = false
@@ -792,7 +841,29 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     clampToContent = false
                 ) ?: return false
                 view.requestFocus()
+                if (viewerScrollModeArmed) {
+                    activeTouchPointerId = event.getPointerId(pointerIndex)
+                    activeViewerTouchMode = ViewerTouchMode.SCROLL
+                    activeTouchButtons = 0
+                    lastTouchVideoX = mapped.first
+                    lastTouchVideoY = mapped.second
+                    scrollLastTouchY = event.getY(pointerIndex)
+                    scrollWheelCarryPx = 0f
+                    val queued = NativeSessionBridge.nativeQueueInputEvent(
+                        INPUT_KIND_MOUSE_MOVE,
+                        mapped.first,
+                        mapped.second,
+                        0,
+                        0,
+                        0
+                    )
+                    if (!queued) {
+                        resetViewerTouchState()
+                    }
+                    return queued
+                }
                 activeTouchPointerId = event.getPointerId(pointerIndex)
+                activeViewerTouchMode = ViewerTouchMode.DIRECT
                 activeTouchButtons = INPUT_BUTTON_PRIMARY
                 lastTouchVideoX = mapped.first
                 lastTouchVideoY = mapped.second
@@ -815,6 +886,39 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 if (pointerId == MotionEvent.INVALID_POINTER_ID) return false
                 val pointerIndex = event.findPointerIndex(pointerId)
                 if (pointerIndex < 0) return true
+                if (activeViewerTouchMode == ViewerTouchMode.SCROLL) {
+                    val touchY = event.getY(pointerIndex)
+                    scrollWheelCarryPx += scrollLastTouchY - touchY
+                    scrollLastTouchY = touchY
+                    val direction =
+                        when {
+                            scrollWheelCarryPx > 0f -> 1
+                            scrollWheelCarryPx < 0f -> -1
+                            else -> 0
+                        }
+                    val stepCount =
+                        if (direction == 0) {
+                            0
+                        } else {
+                            (abs(scrollWheelCarryPx) / SCROLL_GESTURE_STEP_PX).toInt()
+                        }
+                    if (stepCount > 0) {
+                        val queued = NativeSessionBridge.nativeQueueInputEvent(
+                            INPUT_KIND_MOUSE_WHEEL,
+                            lastTouchVideoX,
+                            lastTouchVideoY,
+                            direction * stepCount * INPUT_WHEEL_DELTA_STEP,
+                            0,
+                            0
+                        )
+                        if (!queued) {
+                            resetViewerTouchState()
+                            return false
+                        }
+                        scrollWheelCarryPx -= direction * stepCount * SCROLL_GESTURE_STEP_PX
+                    }
+                    return true
+                }
                 val mapped = mapTouchToVideoCoords(
                     event.getX(pointerIndex),
                     event.getY(pointerIndex),
@@ -845,6 +949,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     event.getY(pointerIndex),
                     clampToContent = true
                 ) ?: Pair(lastTouchVideoX, lastTouchVideoY)
+                if (activeViewerTouchMode == ViewerTouchMode.SCROLL) {
+                    resetViewerTouchState()
+                    view.performClick()
+                    return true
+                }
                 lastTouchVideoX = mapped.first
                 lastTouchVideoY = mapped.second
                 val queued = NativeSessionBridge.nativeQueueInputEvent(
@@ -870,6 +979,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun cancelActiveViewerTouch(reason: String) {
+        if (activeViewerTouchMode == ViewerTouchMode.SCROLL) {
+            resetViewerTouchState()
+            return
+        }
         if (activeTouchPointerId == MotionEvent.INVALID_POINTER_ID || activeTouchButtons == 0) {
             resetViewerTouchState()
             return
@@ -894,9 +1007,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun resetViewerTouchState() {
         activeTouchPointerId = MotionEvent.INVALID_POINTER_ID
+        activeViewerTouchMode = ViewerTouchMode.DIRECT
         activeTouchButtons = 0
         lastTouchVideoX = 0
         lastTouchVideoY = 0
+        scrollLastTouchY = 0f
+        scrollWheelCarryPx = 0f
     }
 
     private fun toggleViewerKeyboard() {
@@ -931,6 +1047,121 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         statusHandler.removeCallbacks(viewerControlsFadeRunnable)
         val delayMs = if (emphasized) 3200L else 2400L
         statusHandler.postDelayed(viewerControlsFadeRunnable, delayMs)
+    }
+
+    private fun setViewerScrollModeArmed(armed: Boolean) {
+        if (viewerScrollModeArmed == armed) return
+        viewerScrollModeArmed = armed
+        if (!armed && activeViewerTouchMode == ViewerTouchMode.SCROLL) {
+            resetViewerTouchState()
+        }
+        updateViewerControlButtons()
+    }
+
+    private fun updateViewerControlButtons() {
+        if (::viewerScrollButton.isInitialized) {
+            viewerScrollButton.text =
+                if (viewerScrollModeArmed) {
+                    "[${getString(R.string.viewer_scroll_button)}]"
+                } else {
+                    getString(R.string.viewer_scroll_button)
+                }
+        }
+        if (::viewerLogButton.isInitialized) {
+            val logOpen = viewerLogDialog?.isShowing == true
+            viewerLogButton.text =
+                if (logOpen) {
+                    "[${getString(R.string.viewer_log_button)}]"
+                } else {
+                    getString(R.string.viewer_log_button)
+                }
+        }
+    }
+
+    private fun toggleViewerLogDialog() {
+        showViewerControls(emphasized = true)
+        val existing = viewerLogDialog
+        if (existing?.isShowing == true) {
+            existing.dismiss()
+            return
+        }
+
+        val contentView = layoutInflater.inflate(R.layout.viewer_log_dialog, null)
+        viewerLogStatusText = contentView.findViewById(R.id.viewerLogStatusText)
+        viewerLogTextView = contentView.findViewById(R.id.viewerLogText)
+        contentView.findViewById<Button>(R.id.viewerLogRefreshButton).setOnClickListener {
+            refreshViewerLogBody()
+            renderStatus()
+        }
+        contentView.findViewById<Button>(R.id.viewerLogCloseButton).setOnClickListener {
+            dismissViewerLogDialog()
+        }
+
+        val dialog = AlertDialog.Builder(this).setView(contentView).create()
+        dialog.setOnDismissListener {
+            viewerLogDialog = null
+            viewerLogStatusText = null
+            viewerLogTextView = null
+            updateViewerControlButtons()
+            applyImmersiveMode()
+        }
+        dialog.show()
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        viewerLogDialog = dialog
+        updateViewerControlButtons()
+        refreshViewerLogBody()
+        updateViewerLogHeader(
+            NativeSessionBridge.nativeGetStatus(),
+            parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson()),
+            NativeSessionBridge.nativeGetVideoDebugStatus(),
+            NativeSessionBridge.nativeGetLastError()
+        )
+    }
+
+    private fun dismissViewerLogDialog() {
+        viewerLogDialog?.dismiss()
+    }
+
+    private fun refreshViewerLogBody() {
+        val currentLog = diagnosticsLog.readAllText()
+        viewerLogTextView?.text =
+            if (currentLog.isBlank()) {
+                getString(R.string.viewer_log_empty)
+            } else {
+                currentLog
+            }
+    }
+
+    private fun updateViewerLogHeader(
+        statusValue: String,
+        panelSnapshot: WindowPanelUiSnapshot,
+        videoDebugValue: String,
+        errorValue: String,
+    ) {
+        val headerView = viewerLogStatusText ?: return
+        headerView.text =
+            buildString {
+                append("selected: ")
+                append(panelSnapshot.selectedTitle)
+                append('\n')
+                append("status: ")
+                append(statusValue)
+                append('\n')
+                append("panel: ")
+                append(panelSnapshot.status)
+                append('\n')
+                append("video: ")
+                append(if (videoDebugValue.isBlank()) "n/a" else videoDebugValue)
+                if (errorValue.isNotBlank()) {
+                    append('\n')
+                    append("error: ")
+                    append(errorValue)
+                }
+                append('\n')
+                append("file: ")
+                append(diagnosticsLog.filePath())
+            }
     }
 
     private fun queueViewerCommittedText(text: CharSequence) {
@@ -1146,6 +1377,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         renderTargetsScene(isConnected, panelSnapshot)
         renderViewerScene(statusValue, panelSnapshot, videoDebugValue)
+        updateViewerLogHeader(statusValue, panelSnapshot, videoDebugValue, errorValue)
         applySceneVisibility()
         syncVideoSurface(forceRebind = false)
         observeDiagnostics(nowMs, statusValue, panelSnapshot, videoDebugValue, lastOutputPresentationUs)
@@ -1235,6 +1467,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         targetsScene.visibility = if (currentScene == UiScene.TARGETS) View.VISIBLE else View.GONE
         viewerScene.visibility =
             if (currentScene == UiScene.VIEWER || currentScene == UiScene.SWITCHING) View.VISIBLE else View.GONE
+        if (currentScene != UiScene.VIEWER && currentScene != UiScene.SWITCHING) {
+            dismissViewerLogDialog()
+            setViewerScrollModeArmed(false)
+        }
         if (currentScene != UiScene.VIEWER && currentScene != UiScene.SWITCHING && videoSurface != null) {
             releaseVideoSurface()
         }

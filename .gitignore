@@ -23,8 +23,18 @@
 
 # IDE/editor
 /.vscode/
+apps/android_direct_client/.gradle/
+apps/android_direct_client/app/.cxx/
+apps/android_direct_client/app/build/
+apps/android_direct_client/local.properties
 
 # Local temp files
 _tmp_*
 *.tmp
 screen-now.png
+/dist/
+/tmp/
+/image/
+/Logs/
+/$null
+/*.pdb
