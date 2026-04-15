@@ -3686,3 +3686,30 @@ Scope note
 Next action
 - 기본값 `WGC` 상태에서 desktop viewer 안정성을 다시 본다.
 - DXGI는 실험용으로만 유지하고, 필요하면 UI에 `experimental` 경고를 추가한다.
+
+### 179) 2026-04-15 native host input injection default-on
+Goal
+- direct exe/manual launch 경로에서도 터치/키 입력이 기본 동작이 되도록 native host의 입력 주입 기본값을 상시 활성화로 바꾼다.
+- 표준 1080p 프로필에도 입력 활성 의도를 명시해 실행 경로에 따라 터치가 빠지는 혼선을 줄인다.
+
+Files changed
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `automation/native_video_profile_1080p.json`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Code change:
+  - `Args.enableInputInjection` 기본값을 `true`로 변경
+  - 표준 profile `automation/native_video_profile_1080p.json`에 `enableInputInjection=true`, `inputInjectionMode=background_message` 명시
+- Native build:
+  - `cmake --build D:\remote\remote\build-vcpkg-local --config Debug --target remote60_native_video_host_poc`
+  - 결과: 성공
+- Runtime smoke:
+  - `D:\remote\remote\build-vcpkg-local\apps\native_poc\Debug\remote60_native_video_host_poc.exe --bind-port 43000 --control-port 43001 --transport udp --codec h264 --fps 30 --bitrate 8000000 --keyint 30 --encode-width 1920 --encode-height 1080`
+  - 환경변수: `REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE=1`, `REMOTE60_NATIVE_ENCODER_BACKEND=mft_auto`
+  - 결과: `43000/UDP`, `43001/TCP` listen 확인, startup 로그에서 `input injection enabled mode=background_message` 확인
+
+Next action
+- Android/Windows client로 다시 붙여 실제 tap/keyboard가 `inputEventsApplied` 증가와 함께 유지되는지 한 번 더 확인한다.
+- manual host를 직접 exe로 띄우는 안내가 남아 있으면 config-first 또는 default-on 전제와 맞게 문서/메모를 정리한다.

@@ -1300,7 +1300,7 @@ struct Args {
   uint32_t traceEvery = 0;
   uint32_t traceMax = 0;
   uint32_t inputLogEvery = 120;
-  bool enableInputInjection = false;
+  bool enableInputInjection = true;
   std::string inputInjectionMode = "background_message";
   uint32_t inputTargetPid = 0;
   std::string inputTargetProcess;

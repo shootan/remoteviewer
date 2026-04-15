@@ -13,6 +13,8 @@
   "encodeWidth": 1920,
   "encodeHeight": 1080,
   "seconds": 0,
+  "enableInputInjection": true,
+  "inputInjectionMode": "background_message",
   "noInputChannel": true,
   "forceEncodedExperiment": true,
   "encoderBackend": "mft_auto",
