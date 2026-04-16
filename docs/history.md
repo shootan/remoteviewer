@@ -3777,3 +3777,25 @@ Next action
 - 1차: capture callback에서는 GPU copy까지만 처리하고, staging texture map/readback은 별도 worker가 늦은 슬롯을 읽도록 분리한다.
 - 2차: window client crop과 resize를 CPU가 아니라 GPU source/dest rect 또는 texture crop으로 앞당겨 readback 바이트 수를 줄인다.
 - 3차: BGRA->NV12를 CPU 변환 대신 GPU/NV12 입력 경로로 바꿔 resize 시 발생하는 두 번째 readback을 제거한다.
+
+### 182) 2026-04-16 window capture tuning milestone planning
+Goal
+- 다음 작업으로 바로 착수할 수 있도록 window capture 개선 항목을 구현계획의 독립 마일스톤으로 승격한다.
+- `callback copy-only -> worker readback ring`, `GPU-front crop/resize`, `GPU NV12 path`를 단계별 체크리스트와 검증 조건으로 고정한다.
+
+Files changed
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Docs update:
+  - `docs/구현계획.md`에 `M1.6 Window capture zero/low-readback pipeline (2026-04-16)` 마일스톤 추가
+  - 코드 작업, 검증 항목, 완료조건, 다음 작업 계획을 체크리스트로 분리
+  - 현재 최우선 마일스톤을 `M1.6`으로 갱신하고 실행 순서 상단에 다음 작업 계획을 고정
+- Runtime/build:
+  - 이번 턴은 계획 문서화만 수행
+  - 코드 변경, 빌드, 런타임 검증은 수행하지 않음
+
+Next action
+- `M1.6-1`부터 착수: capture callback에서는 `CopyResource`만 수행하고 `Map/readback`은 worker/staging ring consumer로 분리한다.
+- 이후 `M1.6-2`, `M1.6-3`를 순서대로 적용하면서 `captureD3DWaitUs`, `captureCopyMapUs`, `captureMemcpyUs`, `cb2eAvgUs`를 A/B 비교한다.
