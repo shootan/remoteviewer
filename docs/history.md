@@ -3753,3 +3753,27 @@ Validation / build / test result
 Next action
 - 실제 host에 연결해 viewer 상태에서 `SCROLL` hold 제스처가 고정 포인트 wheel 입력으로 원하는 속도로 동작하는지 확인한다.
 - `LOG` 오버레이가 viewer 상태/diagnostics 전체 로그를 충분히 보여주는지 실기기 또는 LDPlayer viewer 화면 기준으로 한 번 더 캡처 검증한다.
+
+### 181) 2026-04-16 pre-window-capture-tuning snapshot + bottleneck review
+Goal
+- 윈도우 캡처 체감 렉 개선 작업 전에 현재 기준점을 안전하게 되돌릴 수 있도록 git 스냅샷 브랜치를 만든다.
+- 현재 host window capture 경로를 확인해 창 이동 시 버벅임을 만들 가능성이 큰 병목 지점을 정리한다.
+
+Files changed
+- `docs/history.md`
+- `docs/구현계획.md`
+
+Validation / build / test result
+- Git snapshot:
+  - branch: `snapshot/pre-window-capture-tuning-20260416`
+  - base commit: `c62cec61290b8e12800159b6573d23f0e082c158`
+  - 결과: 현재 `main` HEAD 기준 롤백 포인트 생성 완료
+- Code inspection:
+  - `apps/native_poc/src/native_video_host_main.cpp`의 `publish_captured_texture(...)`가 capture callback 안에서 `CopyResource -> Map(D3D11_MAP_READ) -> memcpy -> Unmap`를 바로 수행한다.
+  - 같은 파일의 encode 경로는 해상도가 다를 때 `GpuBgraScaler::scale(...)`에서 다시 `CopyResource -> Map -> memcpy -> Unmap` readback을 수행한 뒤 `bgra_to_nv12(...)` CPU 변환까지 이어진다.
+  - 현재 구조상 window capture에서는 프레임당 GPU->CPU readback과 CPU 메모리 복사가 최소 1회, resize 시 사실상 2회 발생할 수 있어 창 이동/리사이즈 중 compositor/GPU contention과 callback stall을 만들 가능성이 높다.
+
+Next action
+- 1차: capture callback에서는 GPU copy까지만 처리하고, staging texture map/readback은 별도 worker가 늦은 슬롯을 읽도록 분리한다.
+- 2차: window client crop과 resize를 CPU가 아니라 GPU source/dest rect 또는 texture crop으로 앞당겨 readback 바이트 수를 줄인다.
+- 3차: BGRA->NV12를 CPU 변환 대신 GPU/NV12 입력 경로로 바꿔 resize 시 발생하는 두 번째 readback을 제거한다.
