@@ -3915,3 +3915,53 @@ Validation / build / test result
 Next action
 - LDPlayer/실기기에서 Android 카드 그리드와 썸네일 로딩 확인.
 - 창 리사이즈 드래그 중 refit 디바운스 체감 확인(호스트 hitch 없어야 함).
+
+### 185) 2026-07-27 실기기 리포트 대응: Wi-Fi 화면 깨짐 + 한글 IME 입력 중단
+Goal
+- 실기기 접속에서 보고된 2건을 원인까지 규명해 수정한다.
+  1. 가끔 화면이 깨졌다가 흐릿하게 복구된 뒤 서서히 선명해짐
+  2. 한글 입력 시 몇 글자 뒤 입력 중단("유튜브" -> "유튜"), 백스페이스 무반응
+
+원인 1: UDP 버스트 + 작은 수신 버퍼 (양쪽 동시 원인)
+- 호스트가 한 프레임의 모든 UDP 조각을 지연 없이 연속 전송한다 (`native_video_host_main.cpp` `send_udp_chunks`).
+  1080p 키프레임은 200KB 내외 = 1200바이트 데이터그램 약 170개가 순간 버스트로 나간다.
+  유선/로컬호스트에서는 문제없지만 Wi-Fi에서는 AP와 단말 버퍼를 넘겨 손실이 난다.
+- Android 클라이언트(`native_video_client_session.cpp`)에는 `setsockopt`가 하나도 없어
+  OS 기본 UDP 수신 버퍼(약 100KB)를 그대로 쓴다. Windows 클라이언트는 튜닝하는데 Android만 누락되어 있었다.
+- 손실 -> 프레임 손상 -> 키프레임 복구 -> CBR/VBV 상한에 눌린 소프트한 I-프레임 -> 이후 P-프레임이
+  점진 보정. 사용자가 말한 "겹치면서 선명해지는" 현상이 정확히 이 progressive refinement다.
+
+수정 1
+- 호스트에 intra-frame 패킷 페이싱 추가. 평균 비트레이트의 배수를 피크로 삼아 한 프레임의
+  데이터그램을 시간에 분산한다. `REMOTE60_NATIVE_UDP_PACE_PEAK_PERCENT` (기본 250 = 2.5배, 0이면 비활성).
+  조각 8개 이하 소형 프레임은 페이싱을 건너뛰어 지연 오버헤드를 만들지 않는다.
+  Windows 타이머 해상도가 부족하므로 긴 대기만 sleep하고 나머지는 yield 스핀으로 처리한다.
+- Android UDP 비디오 소켓에 `SO_RCVBUF` 4MB(실패 시 1MB) 설정.
+
+원인 2: 조합 중 텍스트(composing text) 전량 폐기
+- `ImeCaptureView.setComposingText`가 아무 동작 없이 true만 반환했다.
+  한글 IME는 음절을 조합 중에 setComposingText로 계속 갱신하고, 다음 음절이 시작될 때에야 commitText를 부른다.
+  따라서 마지막 음절은 커밋 이벤트가 오지 않아 영원히 전송되지 않는다 -> "유튜브"가 "유튜"로 전달됨.
+- 조합 중 백스페이스도 IME가 내부에서 음절을 분해해 setComposingText로 보고하므로,
+  이를 무시하면 백스페이스가 완전히 죽은 것처럼 보인다.
+
+수정 2
+- 호스트에 현재 표시 중인 조합 문자열을 추적하고, 변경 시 최소 편집만 전송한다.
+  공통 접두사 이후를 코드포인트 단위 백스페이스로 지우고 새 꼬리를 보낸다.
+  commitText가 같은 문자열로 오면 공통 접두사 로직이 자연히 중복 입력을 막는다.
+- 조합 중 `deleteSurroundingText`/`sendKeyEvent(DEL)`은 무시한다(IME가 setComposingText로 이미 보고하므로 이중 삭제 방지).
+- 서로게이트 페어를 쪼개지 않도록 공통 접두사 계산에 가드를 둔다.
+- 텍스트와 키 이벤트가 동일한 `ClientInputQueue`(단일 deque)를 공유하므로 백스페이스/문자 순서는 보장된다.
+
+Validation / build / test result
+- Windows Release/Debug 빌드 성공, `shared_core_test` PASS
+- Android `clean assembleDebug` 성공, `dist/remote60-android-20260727.apk` 갱신
+- localhost 게이트(화면 모션 생성 상태): 페이싱 활성 확인
+  `udpPacePeakPercent=250 udpPacePeakBps=20000000`
+  `UDP_ASSEMBLY_DROPPED_TOTAL=0`, `MALFORMED_TOTAL=0`, `REORDER_TOTAL=0`
+  지연 회귀 없음: `avgLatencyUs=11997`, `maxLatencyUs=81304`
+
+Next action
+- 실기기에서 Wi-Fi 재확인. 여전히 깨지면 `REMOTE60_NATIVE_UDP_PACE_PEAK_PERCENT=150`으로 더 조여본다.
+- 한글 조합이 호스트에서 음절 단위로 실시간 갱신되는지, 백스페이스가 분해로 동작하는지 확인.
+- 손실이 사라진 뒤에도 복구 흐림이 남으면 그때 키프레임 비트 여유(VBV/peak) 조정을 A/B로 판단한다.

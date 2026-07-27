@@ -623,6 +623,20 @@ bool ClientSessionController::ConnectUdpVideo(const ClientSessionConnectArgs& ar
     return false;
   }
 
+  // A single 1080p keyframe arrives as a burst of well over a hundred datagrams. Android's
+  // default UDP receive buffer is around 100 KB, so the tail of that burst was being dropped
+  // by the kernel before the receive thread could drain it, which showed up as the picture
+  // breaking up and then slowly recovering.
+  {
+    int recvBuf = 4 * 1024 * 1024;
+    if (setsockopt(connected, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&recvBuf),
+                   sizeof(recvBuf)) != 0) {
+      recvBuf = 1024 * 1024;
+      (void)setsockopt(connected, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&recvBuf),
+                       sizeof(recvBuf));
+    }
+  }
+
   (void)set_recv_timeout(connected, args.udpHandshakeTimeoutMs);
   UdpHelloPacket hello{};
   const int sent = send(connected, reinterpret_cast<const char*>(&hello), sizeof(hello), 0);

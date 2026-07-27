@@ -2193,6 +2193,35 @@ bool recv_discard(SOCKET s, size_t len) {
   return true;
 }
 
+// Peak send rate used to spread one frame's datagrams over time, as a multiple of the
+// configured average bitrate. Sending a whole keyframe as an unthrottled burst overruns the
+// Wi-Fi buffer on the AP and on the phone, which is the usual cause of the picture breaking
+// up on an otherwise healthy link.
+std::atomic<uint32_t> gUdpPacePeakBitrateBps{0};  // 0 disables intra-frame pacing
+
+void udp_pace_wait_until(uint64_t targetUs) {
+  for (;;) {
+    const uint64_t nowUs = qpc_now_us();
+    if (nowUs >= targetUs) return;
+    const uint64_t remainUs = targetUs - nowUs;
+    // Windows timer granularity is far coarser than the sub-millisecond gaps we need, so
+    // sleep only the bulk of a long wait and spin out the remainder.
+    if (remainUs > 2000) {
+      std::this_thread::sleep_for(std::chrono::microseconds(remainUs - 1500));
+    } else {
+      std::this_thread::yield();
+    }
+  }
+}
+
+// Returns the per-frame send budget in microseconds, or 0 when the frame should go out as
+// fast as possible (small frames are not worth the pacing overhead).
+uint64_t udp_pace_budget_us(size_t payloadSize, uint32_t chunkCount) {
+  const uint32_t peakBps = gUdpPacePeakBitrateBps.load(std::memory_order_relaxed);
+  if (peakBps == 0 || chunkCount <= 8) return 0;
+  return (static_cast<uint64_t>(payloadSize) * 8ULL * 1000000ULL) / static_cast<uint64_t>(peakBps);
+}
+
 bool send_udp_chunks(SOCKET s, const sockaddr_in& peer, const uint8_t* payload, size_t payloadSize,
                      const UdpVideoChunkHeader& baseHeader, uint32_t mtuBytes) {
   if (!payload || payloadSize == 0 || s == INVALID_SOCKET) return false;
@@ -2201,6 +2230,11 @@ bool send_udp_chunks(SOCKET s, const sockaddr_in& peer, const uint8_t* payload, 
   const uint32_t maxChunk = safeMtu - static_cast<uint32_t>(sizeof(UdpVideoChunkHeader));
   std::vector<uint8_t> datagram(safeMtu);
   size_t offset = 0;
+  const uint32_t chunkCount =
+      static_cast<uint32_t>((payloadSize + maxChunk - 1) / maxChunk);
+  const uint64_t budgetUs = udp_pace_budget_us(payloadSize, chunkCount);
+  const uint64_t paceStartUs = budgetUs > 0 ? qpc_now_us() : 0;
+  uint32_t chunkIndex = 0;
 
   while (offset < payloadSize) {
     const uint32_t chunkSize = static_cast<uint32_t>(std::min<size_t>(maxChunk, payloadSize - offset));
@@ -2212,11 +2246,15 @@ bool send_udp_chunks(SOCKET s, const sockaddr_in& peer, const uint8_t* payload, 
     if (offset + chunkSize >= payloadSize) h.flags |= 0x4u;
     std::memcpy(datagram.data(), &h, sizeof(h));
     std::memcpy(datagram.data() + sizeof(h), payload + offset, chunkSize);
+    if (budgetUs > 0 && chunkIndex > 0) {
+      udp_pace_wait_until(paceStartUs + (budgetUs * chunkIndex) / chunkCount);
+    }
     const int n = sendto(s, reinterpret_cast<const char*>(datagram.data()),
                          static_cast<int>(sizeof(h) + chunkSize), 0,
                          reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
     if (n <= 0) return false;
     offset += chunkSize;
+    ++chunkIndex;
   }
   return true;
 }
@@ -2234,6 +2272,10 @@ bool send_udp_chunks_timed(SOCKET s, const sockaddr_in& peer, const uint8_t* pay
   if (!stats) {
     return send_udp_chunks(s, peer, payload, payloadSize, baseHeader, mtuBytes);
   }
+  const uint32_t chunkCount =
+      static_cast<uint32_t>((payloadSize + maxChunk - 1) / maxChunk);
+  const uint64_t budgetUs = udp_pace_budget_us(payloadSize, chunkCount);
+  uint32_t chunkIndex = 0;
 
   while (offset < payloadSize) {
     const uint32_t chunkSize = static_cast<uint32_t>(std::min<size_t>(maxChunk, payloadSize - offset));
@@ -2245,6 +2287,10 @@ bool send_udp_chunks_timed(SOCKET s, const sockaddr_in& peer, const uint8_t* pay
     if (offset + chunkSize >= payloadSize) h.flags |= 0x4u;
     std::memcpy(datagram.data(), &h, sizeof(h));
     std::memcpy(datagram.data() + sizeof(h), payload + offset, chunkSize);
+    if (budgetUs > 0 && chunkIndex > 0) {
+      udp_pace_wait_until(startUs + (budgetUs * chunkIndex) / chunkCount);
+    }
+    ++chunkIndex;
 
     const uint64_t callStartUs = qpc_now_us();
     const int n = sendto(s, reinterpret_cast<const char*>(datagram.data()),
@@ -2304,6 +2350,11 @@ int main(int argc, char** argv) {
   const bool useH264 = (args.codec == "h264");
   const bool guardStaleEncoded = env_truthy("REMOTE60_NATIVE_GUARD_STALE_ENCODED");
   const bool noPacingH264 = env_truthy("REMOTE60_NATIVE_H264_NO_PACING");
+  // Spread each frame's datagrams over the wire instead of bursting them. Expressed as a
+  // percentage of the average bitrate: 250 means a frame may leave at up to 2.5x the
+  // average rate. 0 restores the old unthrottled burst.
+  const uint32_t udpPacePeakPercent =
+      env_u32_clamped("REMOTE60_NATIVE_UDP_PACE_PEAK_PERCENT", 250, 0, 2000);
   const bool guardStalePreEncode = env_truthy("REMOTE60_NATIVE_GUARD_STALE_PREENCODE");
   const bool abrEnabled = useH264 && !env_truthy("REMOTE60_NATIVE_ABR_DISABLE");
   const bool abrQualityFirst = env_truthy("REMOTE60_NATIVE_ADAPTIVE_QUALITY_FIRST");
@@ -2408,7 +2459,14 @@ int main(int argc, char** argv) {
   if (useH264) std::cout << " bitrate=" << args.bitrate;
   std::cout << " seconds=" << args.seconds << "\n";
   if (useH264) {
+    const uint64_t pacePeakBps =
+        (static_cast<uint64_t>(args.bitrate) * udpPacePeakPercent) / 100ULL;
+    gUdpPacePeakBitrateBps.store(
+        static_cast<uint32_t>(std::min<uint64_t>(pacePeakBps, 4000000000ULL)),
+        std::memory_order_relaxed);
     std::cout << "[native-video-host] h264 pacing=" << (noPacingH264 ? "off" : "on")
+              << " udpPacePeakPercent=" << udpPacePeakPercent
+              << " udpPacePeakBps=" << gUdpPacePeakBitrateBps.load(std::memory_order_relaxed)
               << " stalePreEncodeGuard=" << (guardStalePreEncode ? 1 : 0)
               << " capturePoolBuffers=" << captureFramePoolBuffers
               << " encoderTuneMode=" << encoderTuneMode
