@@ -67,19 +67,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var quickSettingsDialog: AlertDialog? = null
 
     /**
-     * Match the device orientation to the remote screen and lay the control rail out along the
-     * long edge, so the buttons sit beside the video instead of on top of it.
+     * Lay the control rail along the device's short edge. Always safe to call: it only
+     * reflows views and never touches the requested orientation.
      */
-    private fun applyViewerOrientation() {
-        val landscapeContent = videoWidth > 0 && videoHeight > 0 && videoWidth >= videoHeight
-        val wantLandscape = landscapeContent && !forcePortrait
-        if (lastAppliedLandscape != wantLandscape) {
-            lastAppliedLandscape = wantLandscape
-            requestedOrientation =
-                if (wantLandscape) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                else ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
-        }
-        // Rail goes on the short edge: right side in landscape, bottom in portrait.
+    private fun applyViewerRailLayout() {
+        if (!::viewerSplit.isInitialized) return
         val deviceLandscape =
             resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         viewerSplit.orientation =
@@ -97,6 +89,32 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerControlsBar.layoutParams = lp
         viewerRotateButton.text =
             if (forcePortrait) "PORT" else getString(R.string.viewer_rotate_button)
+    }
+
+    /**
+     * Match the device orientation to the remote screen.
+     *
+     * Only runs once a frame has actually decoded and the viewer is settled. Rotating the
+     * device destroys and recreates the TextureView's SurfaceTexture, which drops the
+     * decoder's output surface; doing that while a selection is still waiting for its first
+     * frame made the handshake time out and bounced the user back to the target list.
+     */
+    private fun applyViewerOrientation() {
+        applyViewerRailLayout()
+        if (currentScene != UiScene.VIEWER) return
+        if (videoWidth <= 0 || videoHeight <= 0) return
+        val wantLandscape = videoWidth >= videoHeight && !forcePortrait
+        if (lastAppliedLandscape == wantLandscape) return
+        lastAppliedLandscape = wantLandscape
+        requestedOrientation =
+            if (wantLandscape) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            else ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+    }
+
+    /** Let the next viewer entry re-evaluate orientation from scratch. */
+    private fun resetViewerOrientationState() {
+        lastAppliedLandscape = null
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
     }
 
     private fun formatMegabytes(bytes: Long): String {
@@ -129,6 +147,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     2 -> applyQuickPreset(8000, 30)
                     3 -> {
                         forcePortrait = !forcePortrait
+                        lastAppliedLandscape = null
                         applyViewerOrientation()
                     }
                 }
@@ -450,6 +469,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerDataUsageText = findViewById(R.id.viewerDataUsageText)
         viewerRotateButton.setOnClickListener {
             forcePortrait = !forcePortrait
+            lastAppliedLandscape = null
             applyViewerOrientation()
             renderStatus()
         }
@@ -701,7 +721,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         if (currentScene == UiScene.VIEWER || currentScene == UiScene.SWITCHING) {
-            applyViewerOrientation()
+            applyViewerRailLayout()
         }
         diagnosticsLog.log(
             "configuration_changed",
@@ -966,6 +986,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         clearPendingSelection()
         currentScene = UiScene.TARGETS
         resetViewerObservability()
+        // Leaving the viewer releases the orientation lock so the target list is usable in
+        // whichever way the phone is held, and so the next selection re-evaluates cleanly.
+        resetViewerOrientationState()
         NativeSessionBridge.nativeRequestWindowList()
     }
 

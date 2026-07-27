@@ -4098,3 +4098,38 @@ Validation / build / test result
 Next action
 - 실기기에서 가로/세로 자동 전환, 레일이 영상을 가리지 않는지, MENU 프리셋 즉시 반영, MB 카운터 확인.
 - 계정/호스트 등록 서버(디렉터리 서비스)는 별도 설계 필요. 미착수.
+
+### 189) 2026-07-27 회귀 수정: 자동 회전이 첫 프레임 핸드셰이크를 깨뜨림
+Goal
+- 사용자 리포트: "화면 누르면 검은 화면에 있다가 다시 목록으로 간다".
+  직전 커밋(f559a2a)에서 넣은 뷰어 자동 회전의 회귀.
+
+원인
+- `applyViewerOrientation()`이 `renderViewerScene`에서 무조건 호출되었다.
+- 타깃 선택 직후에는 아직 디코드된 프레임이 없어 `videoWidth/videoHeight`가 0이다.
+  따라서 `landscapeContent=false` -> `wantLandscape=false`가 되어 **세로로 강제 회전**을 요청한다.
+- 기기가 가로 상태였다면 실제 회전이 일어나고, 회전은 `TextureView`의 `SurfaceTexture`를
+  파괴/재생성한다. `onSurfaceTextureDestroyed` -> `releaseVideoSurface()`로 디코더가 출력 서피스를
+  잃고 첫 프레임이 나오지 않는다.
+- `readySelectionGeneration`이 끝내 일치하지 않아 6초 후 `select_timeout` ->
+  `moveToTargets(abortPendingSwitch=true)`로 목록에 되돌아간다.
+  사용자가 본 "검은 화면 -> 목록 복귀"가 정확히 이 경로다.
+
+수정
+- 함수를 둘로 분리했다.
+  - `applyViewerRailLayout()`: 레일 방향/배치만 갱신. 항상 안전하며 config 변경 시에도 이것만 호출.
+  - `applyViewerOrientation()`: **`currentScene == VIEWER`이고 디코드 크기가 확정된 경우에만**
+    `requestedOrientation`을 변경. SWITCHING 중에는 절대 회전하지 않는다.
+- `onConfigurationChanged`는 `applyViewerRailLayout()`만 호출하도록 변경.
+- 뷰어를 벗어날 때 `resetViewerOrientationState()`로 방향 잠금을 해제(`SCREEN_ORIENTATION_UNSPECIFIED`)해
+  목록 화면이 자유 회전 가능하고 다음 선택이 깨끗하게 재평가되도록 했다.
+- ROTATE 버튼/메뉴 토글은 `lastAppliedLandscape = null`로 초기화해 즉시 반영되게 했다.
+
+Validation / build / test result
+- Android `clean assembleDebug` 성공, `dist/remote60-android-20260727.apk` 갱신
+- 실기기 재확인 필요(카드 선택 -> 뷰어 진입이 목록으로 되돌아가지 않는지)
+
+Next action
+- 실기기에서 선택 -> 뷰어 진입 정상 여부 확인.
+- 가로 원격 화면에서 첫 프레임 이후 자동 가로 전환이 일어나는지, 그때 영상이 끊기지 않는지 확인.
+  (회전 시 서피스 재생성은 여전히 발생하므로, 끊김이 보이면 회전 후 재바인딩 경로를 추가 보강해야 한다.)
