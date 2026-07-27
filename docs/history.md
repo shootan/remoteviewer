@@ -4133,3 +4133,32 @@ Next action
 - 실기기에서 선택 -> 뷰어 진입 정상 여부 확인.
 - 가로 원격 화면에서 첫 프레임 이후 자동 가로 전환이 일어나는지, 그때 영상이 끊기지 않는지 확인.
   (회전 시 서피스 재생성은 여전히 발생하므로, 끊김이 보이면 회전 후 재바인딩 경로를 추가 보강해야 한다.)
+
+### 190) 2026-07-27 방향 전환을 선택 시점으로 앞당김 (사용자 제안)
+Goal
+- 사용자 제안: "화면이 뜨고 가로로 돌리지 말고, 가로 비율이면 가로로 돌린 채로 뜨게 하자."
+- 189에서 회전을 뷰어 진입 이후로 미뤘지만, 여전히 스트림 도중 회전이 발생해
+  서피스 재생성으로 끊길 여지가 남아 있었다.
+
+접근
+- window list에는 이미 각 대상의 client 크기가 들어 있고(`window_content_extent`로 host가 채움),
+  클라이언트는 선택 시점에 `resolveSelectionHintSize()`로 이를 읽는다.
+  즉 **첫 프레임을 기다리지 않아도 대상의 가로/세로 비율을 알 수 있다.**
+- 따라서 `startSelectionTransition`에서 `applyOrientationForContent()`를 호출해
+  **뷰어 서피스가 만들어지기 전에** 방향을 확정한다.
+  결과적으로 서피스는 최종 방향에서 단 한 번 생성되고, 스트리밍 중 회전이 아예 일어나지 않는다.
+- Desktop 대상은 목록에 크기가 없으므로 모니터 특성상 가로를 기본값으로 둔다.
+- `applyViewerOrientation()`은 남겨두되 역할을 축소했다:
+  목록이 알려준 크기와 실제 디코드 크기가 어긋난 드문 경우만 보정한다(`orientation_corrected` 로그).
+- ROTATE 버튼과 빠른 설정의 방향 토글은 디코드 크기(없으면 expected 크기)를 근거로
+  `applyOrientationForContent()`를 다시 호출한다.
+- 진단 로그 추가: `orientation_preset`(선택 시 확정), `orientation_corrected`(사후 보정).
+
+Validation / build / test result
+- Android `clean assembleDebug` 성공, `dist/remote60-android-20260727.apk` 갱신
+- 실기기 확인 필요: 가로 PC 카드를 누르면 **처음부터 가로로** 뷰어가 열리는지,
+  진입 후 추가 회전이 없는지(`orientation_corrected`가 로그에 안 찍혀야 정상)
+
+Next action
+- 실기기 확인 후, `orientation_corrected`가 자주 찍히면 host가 보고하는 window 크기와
+  실제 인코드 크기의 불일치를 따로 조사한다.

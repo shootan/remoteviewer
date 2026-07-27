@@ -103,12 +103,43 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         applyViewerRailLayout()
         if (currentScene != UiScene.VIEWER) return
         if (videoWidth <= 0 || videoHeight <= 0) return
+        // Normally applyOrientationForContent already settled this at selection time; this
+        // only corrects the rare case where the listed size disagreed with what decoded.
         val wantLandscape = videoWidth >= videoHeight && !forcePortrait
         if (lastAppliedLandscape == wantLandscape) return
         lastAppliedLandscape = wantLandscape
         requestedOrientation =
             if (wantLandscape) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
             else ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+        diagnosticsLog.log(
+            "orientation_corrected",
+            "decoded=${videoWidth}x${videoHeight} landscape=$wantLandscape"
+        )
+    }
+
+    /**
+     * Point the device at the shape of the target before opening the viewer.
+     *
+     * The window list already carries each target's client size, so the orientation is known
+     * at selection time. Committing to it here means the viewer surface is created once, in
+     * its final orientation, and no rotation happens while video is flowing. Desktop targets
+     * have no listed size and monitors are landscape, so they default that way.
+     */
+    private fun applyOrientationForContent(width: Int, height: Int, tab: TargetTab) {
+        val landscapeContent = when {
+            width > 0 && height > 0 -> width >= height
+            tab == TargetTab.DESKTOP -> true
+            else -> return
+        }
+        val wantLandscape = landscapeContent && !forcePortrait
+        lastAppliedLandscape = wantLandscape
+        requestedOrientation =
+            if (wantLandscape) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            else ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+        diagnosticsLog.log(
+            "orientation_preset",
+            "expected=${width}x${height} tab=$tab landscape=$wantLandscape forcePortrait=$forcePortrait"
+        )
     }
 
     /** Let the next viewer entry re-evaluate orientation from scratch. */
@@ -148,7 +179,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     3 -> {
                         forcePortrait = !forcePortrait
                         lastAppliedLandscape = null
-                        applyViewerOrientation()
+                        applyOrientationForContent(
+                            if (videoWidth > 0) videoWidth else expectedContentWidth,
+                            if (videoHeight > 0) videoHeight else expectedContentHeight,
+                            pendingSelectionTab,
+                        )
+                        applyViewerRailLayout()
                     }
                 }
                 renderStatus()
@@ -470,7 +506,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerRotateButton.setOnClickListener {
             forcePortrait = !forcePortrait
             lastAppliedLandscape = null
-            applyViewerOrientation()
+            applyOrientationForContent(
+                if (videoWidth > 0) videoWidth else expectedContentWidth,
+                if (videoHeight > 0) videoHeight else expectedContentHeight,
+                pendingSelectionTab,
+            )
+            applyViewerRailLayout()
             renderStatus()
         }
         viewerMenuButton.setOnClickListener { showQuickSettingsDialog() }
@@ -1003,6 +1044,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         resetViewerObservability()
         val expectedSize = resolveSelectionHintSize(targetId, tab)
         updateExpectedContentSize(expectedSize.first, expectedSize.second, "selection_request")
+        // Rotate now, while the viewer surface does not exist yet. Rotating later would
+        // destroy and recreate the TextureView's SurfaceTexture mid-stream.
+        applyOrientationForContent(expectedSize.first, expectedSize.second, tab)
         NativeSessionBridge.nativePrepareVideoSwitch(selectionGeneration)
         val ok = when (tab) {
             TargetTab.WINDOWS -> NativeSessionBridge.nativeSelectWindow(targetId)
