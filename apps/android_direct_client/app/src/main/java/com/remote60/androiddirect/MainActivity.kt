@@ -2,6 +2,7 @@ package com.remote60.androiddirect
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Matrix
@@ -29,11 +30,13 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.GridView
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
 import org.json.JSONException
 import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -57,6 +60,98 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private var lastVideoOutputPtsUs = 0L
+    /** User override: keep the phone upright even when the remote screen is landscape. */
+    private var forcePortrait = false
+    private var lastAppliedLandscape: Boolean? = null
+    private var sessionBytesReceived = 0L
+    private var quickSettingsDialog: AlertDialog? = null
+
+    /**
+     * Match the device orientation to the remote screen and lay the control rail out along the
+     * long edge, so the buttons sit beside the video instead of on top of it.
+     */
+    private fun applyViewerOrientation() {
+        val landscapeContent = videoWidth > 0 && videoHeight > 0 && videoWidth >= videoHeight
+        val wantLandscape = landscapeContent && !forcePortrait
+        if (lastAppliedLandscape != wantLandscape) {
+            lastAppliedLandscape = wantLandscape
+            requestedOrientation =
+                if (wantLandscape) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                else ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+        }
+        // Rail goes on the short edge: right side in landscape, bottom in portrait.
+        val deviceLandscape =
+            resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        viewerSplit.orientation =
+            if (deviceLandscape) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+        val lp = viewerControlsBar.layoutParams as LinearLayout.LayoutParams
+        if (deviceLandscape) {
+            lp.width = LinearLayout.LayoutParams.WRAP_CONTENT
+            lp.height = LinearLayout.LayoutParams.MATCH_PARENT
+            viewerControlsBar.orientation = LinearLayout.VERTICAL
+        } else {
+            lp.width = LinearLayout.LayoutParams.MATCH_PARENT
+            lp.height = LinearLayout.LayoutParams.WRAP_CONTENT
+            viewerControlsBar.orientation = LinearLayout.HORIZONTAL
+        }
+        viewerControlsBar.layoutParams = lp
+        viewerRotateButton.text =
+            if (forcePortrait) "PORT" else getString(R.string.viewer_rotate_button)
+    }
+
+    private fun formatMegabytes(bytes: Long): String {
+        val mb = bytes.toDouble() / 1_000_000.0
+        return if (mb >= 100) String.format(Locale.US, "%.0f", mb)
+        else String.format(Locale.US, "%.1f", mb)
+    }
+
+    private fun renderDataUsage() {
+        sessionBytesReceived = NativeSessionBridge.nativeGetSessionBytesReceived()
+        viewerDataUsageText.text = getString(R.string.viewer_data_usage, formatMegabytes(sessionBytesReceived))
+    }
+
+    /** Quick settings popup: bitrate/fps presets and the orientation override in one place. */
+    private fun showQuickSettingsDialog() {
+        if (quickSettingsDialog?.isShowing == true) return
+        val items = arrayOf(
+            getString(R.string.quick_preset_mobile),
+            getString(R.string.quick_preset_balanced),
+            getString(R.string.quick_preset_sharp),
+            if (forcePortrait) getString(R.string.quick_orientation_portrait)
+            else getString(R.string.quick_orientation_auto),
+        )
+        quickSettingsDialog = AlertDialog.Builder(this)
+            .setTitle(R.string.quick_settings_title)
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> applyQuickPreset(3000, 15)
+                    1 -> applyQuickPreset(6000, 30)
+                    2 -> applyQuickPreset(8000, 30)
+                    3 -> {
+                        forcePortrait = !forcePortrait
+                        applyViewerOrientation()
+                    }
+                }
+                renderStatus()
+            }
+            .setNegativeButton(R.string.quick_close, null)
+            .create()
+        quickSettingsDialog?.setOnDismissListener { quickSettingsDialog = null }
+        quickSettingsDialog?.show()
+    }
+
+    private fun applyQuickPreset(bitrateKbps: Int, fps: Int) {
+        requestedRuntimeBitrateKbps = bitrateKbps
+        requestedRuntimeFps = fps
+        settingsBitrateInput.setText(bitrateKbps.toString())
+        settingsFpsInput.setText(fps.toString())
+        NativeSessionBridge.nativeRequestRuntimeConfig(bitrateKbps * 1000, fps)
+        settingsStatusMessage =
+            "Current request: ${bitrateKbps} kbps / ${fps} fps / desktop ${requestedDesktopBackend.label}"
+        saveCurrentEndpoint()
+        diagnosticsLog.log("quick-preset", "bitrateKbps=$bitrateKbps fps=$fps")
+    }
+
     private var lastVideoOutputSeenUs = 0L
 
     private val scrollGestureStepPx: Float
@@ -171,12 +266,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var settingsDesktopBackendWgcButton: Button
     private lateinit var settingsApplyButton: Button
     private lateinit var settingsAppliedText: TextView
-    private lateinit var viewerControlsBar: View
+    private lateinit var viewerControlsBar: LinearLayout
     private lateinit var viewerBackButton: Button
     private lateinit var viewerKeyboardButton: Button
     private lateinit var viewerScrollButton: Button
     private lateinit var viewerLogButton: Button
     private lateinit var viewerOverlayStatusText: TextView
+    private lateinit var viewerSplit: LinearLayout
+    private lateinit var viewerRotateButton: Button
+    private lateinit var viewerMenuButton: Button
+    private lateinit var viewerDataUsageText: TextView
     private lateinit var viewerLoadingPanel: View
     private lateinit var viewerLoadingText: TextView
     private lateinit var viewerImeCaptureView: ImeCaptureView
@@ -293,7 +392,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var viewerScrollModeArmed = false
     private var scrollLastTouchY = 0f
     private var scrollWheelCarryPx = 0f
-    private val viewerControlsDimAlpha = 0.34f
+    private val viewerControlsDimAlpha = 1.0f  // rail sits beside the video, nothing to uncover
     private val viewerControlsFadeRunnable = Runnable {
         if (currentScene == UiScene.VIEWER) {
             viewerControlsBar.animate().alpha(viewerControlsDimAlpha).setDuration(220L).start()
@@ -344,6 +443,17 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerScrollButton = findViewById(R.id.viewerScrollButton)
         viewerLogButton = findViewById(R.id.viewerLogButton)
         viewerOverlayStatusText = findViewById(R.id.viewerOverlayStatusText)
+        viewerSplit = findViewById(R.id.viewerSplit)
+        viewerControlsBar = findViewById(R.id.viewerControlsBar)
+        viewerRotateButton = findViewById(R.id.viewerRotateButton)
+        viewerMenuButton = findViewById(R.id.viewerMenuButton)
+        viewerDataUsageText = findViewById(R.id.viewerDataUsageText)
+        viewerRotateButton.setOnClickListener {
+            forcePortrait = !forcePortrait
+            applyViewerOrientation()
+            renderStatus()
+        }
+        viewerMenuButton.setOnClickListener { showQuickSettingsDialog() }
         viewerLoadingPanel = findViewById(R.id.viewerLoadingPanel)
         viewerLoadingText = findViewById(R.id.viewerLoadingText)
         viewerImeCaptureView = findViewById(R.id.viewerImeCaptureView)
@@ -590,6 +700,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        if (currentScene == UiScene.VIEWER || currentScene == UiScene.SWITCHING) {
+            applyViewerOrientation()
+        }
         diagnosticsLog.log(
             "configuration_changed",
             "orientation=${if (newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE) "landscape" else "portrait"}"
@@ -1120,7 +1233,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun showViewerControls(emphasized: Boolean = false) {
         if (!::viewerControlsBar.isInitialized) return
-        val targetAlpha = if (emphasized) 0.96f else 0.88f
+        val targetAlpha = 1.0f
         viewerControlsBar.animate().alpha(targetAlpha).setDuration(120L).start()
         statusHandler.removeCallbacks(viewerControlsFadeRunnable)
         val delayMs = if (emphasized) 3200L else 2400L
@@ -1580,6 +1693,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         viewerLoadingPanel.visibility = View.GONE
         videoTextureView.alpha = 1.0f
+        applyViewerOrientation()
+        renderDataUsage()
         val hasFrame = videoWidth > 0 && videoHeight > 0
         // A frozen last frame with no overlay looks like a live desktop. Treat a stalled
         // decoder or a dropped connection as reasons to bring the status text back.

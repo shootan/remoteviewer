@@ -465,6 +465,10 @@ bool ClientSessionController::CopyWindowThumbnail(uint64_t windowId, WindowThumb
   return true;
 }
 
+uint64_t ClientSessionController::SessionBytesReceived() const {
+  return sessionBytesReceived_.load(std::memory_order_relaxed);
+}
+
 uint64_t ClientSessionController::WindowThumbnailVersion(uint64_t windowId) const {
   std::lock_guard<std::mutex> lk(thumbMu_);
   const auto it = thumbs_.find(windowId);
@@ -496,6 +500,7 @@ void ClientSessionController::VideoReceiveMain() {
     }
     if (n < static_cast<int>(sizeof(UdpVideoChunkHeader))) continue;
 
+    sessionBytesReceived_.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
     auto assembleResult = assembler.PushDatagram(datagram.data(), static_cast<size_t>(n));
     if (assembleResult.droppedPreviousIncomplete) {
       ++assemblyDropped;
@@ -713,6 +718,7 @@ void ClientSessionController::ResetUnlocked() {
     thumbFetchQueue_.clear();
   }
   hostSupportsThumbnails_.store(false, std::memory_order_relaxed);
+  sessionBytesReceived_.store(0, std::memory_order_relaxed);
   if (encodedFrameSink_) {
     encodedFrameSink_->OnVideoStreamReset();
   }

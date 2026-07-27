@@ -90,6 +90,8 @@ class ClientSessionController {
   bool CopyWindowThumbnail(uint64_t windowId, WindowThumbnail* out) const;
   // Cheap change marker so the UI can skip re-decoding unchanged previews.
   uint64_t WindowThumbnailVersion(uint64_t windowId) const;
+  /** Total UDP video bytes received this session, for the on-screen data meter. */
+  uint64_t SessionBytesReceived() const;
 
  private:
   ClientSessionController(const ClientSessionController&) = delete;
@@ -134,6 +136,7 @@ class ClientSessionController {
   std::unordered_map<uint64_t, WindowThumbnail> thumbs_;
   std::deque<uint64_t> thumbFetchQueue_;
   std::atomic<bool> hostSupportsThumbnails_{false};
+  std::atomic<uint64_t> sessionBytesReceived_{0};
 };
 
 }  // namespace remote60::native_poc

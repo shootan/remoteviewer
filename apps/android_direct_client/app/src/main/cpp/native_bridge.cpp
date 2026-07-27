@@ -274,3 +274,9 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetWindowThumbnail(
                           reinterpret_cast<const jbyte*>(thumb.rgba.data()));
   return out;
 }
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetSessionBytesReceived(
+    JNIEnv* /* env */, jobject /* this */) {
+  return static_cast<jlong>(g_session_controller.SessionBytesReceived());
+}

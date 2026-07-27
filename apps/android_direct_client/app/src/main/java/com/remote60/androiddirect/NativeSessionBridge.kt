@@ -40,5 +40,8 @@ object NativeSessionBridge {
      * Layout: [width:int32 LE][height:int32 LE][RGBA bytes]; null when not fetched yet.
      */
     external fun nativeGetWindowThumbnail(windowId: Long): ByteArray?
+
+    /** Total UDP video bytes received this session. */
+    external fun nativeGetSessionBytesReceived(): Long
     external fun nativeResetVideoStream()
 }

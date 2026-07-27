@@ -356,145 +356,184 @@
             android:visibility="gone" />
     </LinearLayout>
 
-    <FrameLayout
+    <!-- Viewer: the video gets its own box and the controls sit in a rail beside it, so a
+         button never covers the remote screen. The split flips orientation with the device. -->
+    <LinearLayout
         android:id="@+id/viewerScene"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:background="#050505"
         android:visibility="gone">
 
-        <TextureView
-            android:id="@+id/videoTextureView"
+        <LinearLayout
+            android:id="@+id/viewerSplit"
             android:layout_width="match_parent"
-            android:layout_height="match_parent" />
+            android:layout_height="match_parent"
+            android:orientation="horizontal">
 
-        <LinearLayout
-            android:id="@+id/viewerControlsBar"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="top|start"
-            android:layout_marginStart="12dp"
-            android:layout_marginTop="12dp"
-            android:alpha="0.84"
-            android:background="@drawable/viewer_control_bar_background"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:padding="6dp">
+            <FrameLayout
+                android:id="@+id/viewerVideoFrame"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1">
 
-            <Button
-                android:id="@+id/viewerBackButton"
+                <TextureView
+                    android:id="@+id/videoTextureView"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent" />
+
+                <com.remote60.androiddirect.ImeCaptureView
+                    android:id="@+id/viewerImeCaptureView"
+                    android:layout_width="1dp"
+                    android:layout_height="1dp"
+                    android:layout_gravity="top|end"
+                    android:alpha="0.01" />
+
+                <LinearLayout
+                    android:id="@+id/viewerLoadingPanel"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center"
+                    android:background="@drawable/viewer_log_dialog_background"
+                    android:gravity="center"
+                    android:orientation="vertical"
+                    android:paddingStart="28dp"
+                    android:paddingTop="24dp"
+                    android:paddingEnd="28dp"
+                    android:paddingBottom="24dp"
+                    android:visibility="gone">
+
+                    <ProgressBar
+                        android:id="@+id/viewerLoadingSpinner"
+                        style="?android:attr/progressBarStyle"
+                        android:layout_width="48dp"
+                        android:layout_height="48dp" />
+
+                    <TextView
+                        android:id="@+id/viewerLoadingText"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="16dp"
+                        android:ellipsize="end"
+                        android:gravity="center"
+                        android:maxLines="3"
+                        android:maxWidth="280dp"
+                        android:textColor="#F2F2F2"
+                        android:textSize="14sp" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/viewerOverlayStatusText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="bottom"
+                    android:background="#66000000"
+                    android:ellipsize="end"
+                    android:maxLines="2"
+                    android:padding="12dp"
+                    android:textColor="#F2F2F2"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
+            </FrameLayout>
+
+            <LinearLayout
+                android:id="@+id/viewerControlsBar"
                 android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:background="@drawable/viewer_control_button_background"
-                android:minWidth="0dp"
-                android:paddingLeft="12dp"
-                android:paddingTop="8dp"
-                android:paddingRight="12dp"
-                android:paddingBottom="8dp"
-                android:text="@string/viewer_back_button"
-                android:textAllCaps="false"
-                android:textColor="#F4F0E8"
-                android:textSize="13sp" />
-
-            <Button
-                android:id="@+id/viewerKeyboardButton"
-                android:layout_width="48dp"
-                android:layout_height="48dp"
-                android:layout_marginStart="8dp"
-                android:background="@drawable/viewer_control_button_background"
-                android:contentDescription="@string/viewer_keyboard_description"
-                android:minWidth="0dp"
-                android:text="@string/viewer_keyboard_button"
-                android:textAllCaps="false"
-                android:textColor="#F4F0E8"
-                android:textSize="18sp" />
-
-            <Button
-                android:id="@+id/viewerScrollButton"
-                android:layout_width="wrap_content"
-                android:layout_height="48dp"
-                android:layout_marginStart="8dp"
-                android:background="@drawable/viewer_control_button_background"
-                android:contentDescription="@string/viewer_scroll_description"
-                android:minWidth="0dp"
-                android:paddingLeft="12dp"
-                android:paddingTop="8dp"
-                android:paddingRight="12dp"
-                android:paddingBottom="8dp"
-                android:text="@string/viewer_scroll_button"
-                android:textAllCaps="false"
-                android:textColor="#F4F0E8"
-                android:textSize="12sp" />
-
-            <Button
-                android:id="@+id/viewerLogButton"
-                android:layout_width="wrap_content"
-                android:layout_height="48dp"
-                android:layout_marginStart="8dp"
-                android:background="@drawable/viewer_control_button_background"
-                android:contentDescription="@string/viewer_log_description"
-                android:minWidth="0dp"
-                android:paddingLeft="12dp"
-                android:paddingTop="8dp"
-                android:paddingRight="12dp"
-                android:paddingBottom="8dp"
-                android:text="@string/viewer_log_button"
-                android:textAllCaps="false"
-                android:textColor="#F4F0E8"
-                android:textSize="12sp" />
-        </LinearLayout>
-
-        <com.remote60.androiddirect.ImeCaptureView
-            android:id="@+id/viewerImeCaptureView"
-            android:layout_width="1dp"
-            android:layout_height="1dp"
-            android:layout_gravity="top|end"
-            android:alpha="0.01" />
-
-        <LinearLayout
-            android:id="@+id/viewerLoadingPanel"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center"
-            android:background="@drawable/viewer_log_dialog_background"
-            android:gravity="center"
-            android:orientation="vertical"
-            android:paddingStart="28dp"
-            android:paddingTop="24dp"
-            android:paddingEnd="28dp"
-            android:paddingBottom="24dp"
-            android:visibility="gone">
-
-            <ProgressBar
-                android:id="@+id/viewerLoadingSpinner"
-                style="?android:attr/progressBarStyle"
-                android:layout_width="48dp"
-                android:layout_height="48dp" />
-
-            <TextView
-                android:id="@+id/viewerLoadingText"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
-                android:ellipsize="end"
+                android:layout_height="match_parent"
+                android:background="#12151C"
                 android:gravity="center"
-                android:maxLines="3"
-                android:maxWidth="280dp"
-                android:textColor="#F2F2F2"
-                android:textSize="14sp" />
-        </LinearLayout>
+                android:orientation="vertical"
+                android:paddingStart="6dp"
+                android:paddingTop="10dp"
+                android:paddingEnd="6dp"
+                android:paddingBottom="10dp">
 
-        <TextView
-            android:id="@+id/viewerOverlayStatusText"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_gravity="bottom"
-            android:background="#66000000"
-            android:ellipsize="end"
-            android:maxLines="2"
-            android:padding="12dp"
-            android:textColor="#F2F2F2"
-            android:textSize="12sp"
-            android:visibility="gone" />
-    </FrameLayout>
+                <Button
+                    android:id="@+id/viewerBackButton"
+                    android:layout_width="56dp"
+                    android:layout_height="48dp"
+                    android:background="@drawable/viewer_control_button_background"
+                    android:minWidth="0dp"
+                    android:text="@string/viewer_back_button"
+                    android:textAllCaps="false"
+                    android:textColor="#F4F0E8"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/viewerKeyboardButton"
+                    android:layout_width="56dp"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/viewer_control_button_background"
+                    android:contentDescription="@string/viewer_keyboard_description"
+                    android:minWidth="0dp"
+                    android:text="@string/viewer_keyboard_button"
+                    android:textAllCaps="false"
+                    android:textColor="#F4F0E8"
+                    android:textSize="18sp" />
+
+                <Button
+                    android:id="@+id/viewerScrollButton"
+                    android:layout_width="56dp"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/viewer_control_button_background"
+                    android:contentDescription="@string/viewer_scroll_description"
+                    android:minWidth="0dp"
+                    android:text="@string/viewer_scroll_button"
+                    android:textAllCaps="false"
+                    android:textColor="#F4F0E8"
+                    android:textSize="10sp" />
+
+                <Button
+                    android:id="@+id/viewerLogButton"
+                    android:layout_width="56dp"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/viewer_control_button_background"
+                    android:contentDescription="@string/viewer_log_description"
+                    android:minWidth="0dp"
+                    android:text="@string/viewer_log_button"
+                    android:textAllCaps="false"
+                    android:textColor="#F4F0E8"
+                    android:textSize="10sp" />
+
+                <Button
+                    android:id="@+id/viewerRotateButton"
+                    android:layout_width="56dp"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/viewer_control_button_background"
+                    android:contentDescription="@string/viewer_rotate_description"
+                    android:minWidth="0dp"
+                    android:text="@string/viewer_rotate_button"
+                    android:textAllCaps="false"
+                    android:textColor="#F4F0E8"
+                    android:textSize="10sp" />
+
+                <Button
+                    android:id="@+id/viewerMenuButton"
+                    android:layout_width="56dp"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/viewer_control_button_background"
+                    android:contentDescription="@string/viewer_menu_description"
+                    android:minWidth="0dp"
+                    android:text="@string/viewer_menu_button"
+                    android:textAllCaps="false"
+                    android:textColor="#F4F0E8"
+                    android:textSize="10sp" />
+
+                <TextView
+                    android:id="@+id/viewerDataUsageText"
+                    android:layout_width="56dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:gravity="center"
+                    android:maxLines="2"
+                    android:textColor="#9AA3B2"
+                    android:textSize="9sp" />
+            </LinearLayout>
+        </LinearLayout>
+    </LinearLayout>
 </FrameLayout>

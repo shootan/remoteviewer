@@ -33,4 +33,13 @@
     <string name="exit_confirm_message">종료하시겠습니까?</string>
     <string name="exit_confirm_yes">예</string>
     <string name="exit_confirm_no">아니오</string>
+    <string name="viewer_rotate_description">세로 고정 또는 원격 화면 따르기</string>
+    <string name="viewer_menu_description">빠른 설정</string>
+    <string name="quick_settings_title">빠른 설정</string>
+    <string name="quick_preset_mobile">모바일 데이터  (3 Mbps / 15 fps)</string>
+    <string name="quick_preset_balanced">균형  (6 Mbps / 30 fps)</string>
+    <string name="quick_preset_sharp">선명  (8 Mbps / 30 fps)</string>
+    <string name="quick_orientation_auto">화면 방향: 원격 화면 따르기</string>
+    <string name="quick_orientation_portrait">화면 방향: 세로 고정</string>
+    <string name="quick_close">닫기</string>
 </resources>

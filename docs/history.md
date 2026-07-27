@@ -4058,3 +4058,43 @@ Next action
 - 실기기에서 크롬 주소창에 한글/영문 입력 재확인.
 - window 모드(창 목록에서 선택) 상태에서도 입력이 되는지 별도 확인 필요.
   포그라운드가 아닌 배경 창은 여전히 PostMessage 경로이므로 Chrome 대상이면 실패할 수 있다.
+
+### 188) 2026-07-27 뷰어 UI 재구성: 사이드 레일 + 자동 회전 + 빠른 설정 + 데이터 사용량
+Goal
+- 사용자 요청(OSLink 스크린샷 대조): 버튼이 영상을 가리지 않도록 하고, 원격 화면 비율에 따라
+  자동 회전, 빠른 프리셋 팝업, 실시간 데이터 사용량(MB) 표시.
+
+변경
+1. 뷰어 레이아웃 재구성 (`activity_main.xml`)
+   - 기존: `FrameLayout` 안에서 `TextureView`가 전체를 채우고 컨트롤 바가 좌상단에 겹쳐 떠 있었다.
+     가로 모드에서 버튼이 영상 위를 덮는다는 지적 그대로였다.
+   - 변경: `viewerSplit`(LinearLayout) = [영상 프레임 weight=1][컨트롤 레일 wrap].
+     레일이 영상 바깥 여백에 위치하므로 어떤 방향에서도 화면을 가리지 않는다.
+   - 기기가 가로면 레일을 오른쪽 세로 배치, 세로면 하단 가로 배치로 런타임 전환.
+   - 레일이 더 이상 영상을 덮지 않으므로 자동 페이드(0.34 알파)를 제거하고 항상 표시로 변경.
+2. 자동 회전 (`applyViewerOrientation`)
+   - 디코드된 영상이 가로(w>=h)면 `SCREEN_ORIENTATION_SENSOR_LANDSCAPE`,
+     아니면 `SENSOR_PORTRAIT`로 기기 방향을 맞춘다.
+   - `forcePortrait` 토글(레일의 ROTATE 버튼, 빠른 설정 메뉴에도 동일 항목)로 세로 강제 가능.
+   - 중복 호출 방지를 위해 `lastAppliedLandscape`로 변경 시에만 `requestedOrientation`을 세팅.
+3. 빠른 설정 팝업 (`showQuickSettingsDialog`)
+   - 레일의 MENU 버튼 -> `AlertDialog` 목록: 모바일(3Mbps/15fps) / 균형(6/30) / 선명(8/30) / 화면 방향 토글.
+   - 선택 시 즉시 `nativeRequestRuntimeConfig` 적용 + 설정 탭 입력값 동기화 + `saveCurrentEndpoint()`로 영속화.
+   - 별도 프리셋 버튼을 두지 말고 메뉴로 달라는 요청 반영.
+4. 실시간 데이터 사용량
+   - `ClientSessionController`에 `sessionBytesReceived_` 원자 카운터 추가.
+     UDP 수신 루프에서 수신 바이트를 누적하고 세션 리셋 시 0으로 초기화.
+   - JNI `nativeGetSessionBytesReceived()` 추가, 레일 하단에 MB 단위로 표시(100MB 이상은 정수).
+
+Validation / build / test result
+- Android `clean assembleDebug` 성공, `dist/remote60-android-20260727.apk` 갱신(8.9MB)
+- Windows Release 빌드 성공, `shared_core_test` PASS
+- 빌드 중 발견해 수정: `viewerControlsBar` 중복 선언(View/LinearLayout), 레이아웃 재작성 시 누락된 LOG 버튼 복원
+
+보안 메모
+- 사용자가 대화 중 외부 서버 자격증명을 평문으로 제공했다. 저장소에 기록하지 않았고 접속도 하지 않았다.
+  해당 비밀번호는 노출된 것으로 간주하고 변경이 필요하다.
+
+Next action
+- 실기기에서 가로/세로 자동 전환, 레일이 영상을 가리지 않는지, MENU 프리셋 즉시 반영, MB 카운터 확인.
+- 계정/호스트 등록 서버(디렉터리 서비스)는 별도 설계 필요. 미착수.

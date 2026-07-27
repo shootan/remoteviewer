@@ -40,4 +40,16 @@
     <string name="exit_confirm_message">Exit the app?</string>
     <string name="exit_confirm_yes">Yes</string>
     <string name="exit_confirm_no">No</string>
+    <string name="viewer_rotate_button">ROTATE</string>
+    <string name="viewer_rotate_description">Force portrait or follow the remote screen</string>
+    <string name="viewer_menu_button">MENU</string>
+    <string name="viewer_menu_description">Quick settings</string>
+    <string name="quick_settings_title">Quick settings</string>
+    <string name="quick_preset_mobile">Mobile data  (3 Mbps / 15 fps)</string>
+    <string name="quick_preset_balanced">Balanced  (6 Mbps / 30 fps)</string>
+    <string name="quick_preset_sharp">Sharp  (8 Mbps / 30 fps)</string>
+    <string name="quick_orientation_auto">Orientation: follow remote screen</string>
+    <string name="quick_orientation_portrait">Orientation: force portrait</string>
+    <string name="quick_close">Close</string>
+    <string name="viewer_data_usage">%1$s MB</string>
 </resources>
