@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
+#include <iostream>
 #include <limits>
 #include <string>
 #include <utility>
@@ -66,11 +67,39 @@ bool set_mf_attr_u32(IMFTransform* transform, const GUID& key, uint32_t value) {
   return SUCCEEDED(attrs->SetUINT32(key, value));
 }
 
+// The whole pipeline (CPU bgra_to_nv12, client D3D shader, client GDI fallback) uses
+// BT.709 limited range. Decoders that see no VUI colour description guess, and Android
+// MediaCodec guesses BT.709 for HD, so stamp it explicitly to keep every renderer aligned.
+void apply_video_colorimetry(IMFMediaType* type) {
+  if (!type) return;
+  (void)type->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709);
+  (void)type->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
+  (void)type->SetUINT32(MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709);
+  (void)type->SetUINT32(MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709);
+  (void)type->SetUINT32(MF_MT_VIDEO_CHROMA_SITING,
+                        MFVideoChromaSubsampling_MPEG2);
+}
+
+// H.264 High profile enables CABAC and the 8x8 transform. Without an explicit request the
+// MFTs fall back to Baseline, which visibly softens small text at a fixed screen-share bitrate.
+uint32_t h264_level_for(uint32_t width, uint32_t height, uint32_t fps) {
+  const uint64_t mbps = (static_cast<uint64_t>((width + 15) / 16) *
+                         static_cast<uint64_t>((height + 15) / 16) *
+                         static_cast<uint64_t>(fps == 0 ? 30 : fps));
+  if (mbps <= 108000) return eAVEncH264VLevel3_1;   // 720p30
+  if (mbps <= 216000) return eAVEncH264VLevel3_2;
+  if (mbps <= 245760) return eAVEncH264VLevel4;     // 1080p30
+  if (mbps <= 522240) return eAVEncH264VLevel4_2;   // 1080p60+
+  return eAVEncH264VLevel5_1;
+}
+
 uint32_t low_latency_vbv_bytes(uint32_t bitrate) {
-  // Keep VBV short for interactive remote rendering to minimize encoder queue depth.
-  const uint32_t minBytes = 8192;
-  const uint32_t maxBytes = std::max<uint32_t>(32768, bitrate / 8);
-  const uint32_t target = std::max<uint32_t>(minBytes, bitrate / 80);
+  // Keep VBV short for interactive remote rendering to minimize encoder queue depth, but
+  // leave enough headroom for one scene change. bitrate/80 was ~12.5 ms of video, which under
+  // CBR forced the encoder to hit target every single frame and smeared any screen change.
+  const uint32_t minBytes = 16384;
+  const uint32_t maxBytes = std::max<uint32_t>(65536, bitrate / 8);
+  const uint32_t target = std::max<uint32_t>(minBytes, bitrate / 20);  // ~50 ms
   return std::min<uint32_t>(maxBytes, target);
 }
 
@@ -869,12 +898,14 @@ bool bgra_to_nv12(const uint8_t* bgra, uint32_t width, uint32_t height, uint32_t
     int yG[256]{};
     int yB[256]{};
   };
+  // BT.709 limited range (16-235 luma / 16-240 chroma). Must stay in lockstep with
+  // nv12_to_bgra below, the client D3D pixel shader, and apply_video_colorimetry.
   static const BgraToNv12Tables kTbl = []() {
     BgraToNv12Tables t{};
     for (int i = 0; i < 256; ++i) {
-      t.yR[i] = 66 * i;
-      t.yG[i] = 129 * i;
-      t.yB[i] = 25 * i;
+      t.yR[i] = 47 * i;
+      t.yG[i] = 157 * i;
+      t.yB[i] = 16 * i;
     }
     return t;
   }();
@@ -917,8 +948,8 @@ bool bgra_to_nv12(const uint8_t* bgra, uint32_t width, uint32_t height, uint32_t
       const int rAvg = (r00 + r10 + r01 + r11 + 2) >> 2;
       const int gAvg = (g00 + g10 + g01 + g11 + 2) >> 2;
       const int bAvg = (b00 + b10 + b01 + b11 + 2) >> 2;
-      const int uu = ((-38 * rAvg - 74 * gAvg + 112 * bAvg + 128) >> 8) + 128;
-      const int vv = ((112 * rAvg - 94 * gAvg - 18 * bAvg + 128) >> 8) + 128;
+      const int uu = ((-26 * rAvg - 87 * gAvg + 113 * bAvg + 128) >> 8) + 128;
+      const int vv = ((112 * rAvg - 102 * gAvg - 10 * bAvg + 128) >> 8) + 128;
       uvRow[x] = static_cast<uint8_t>(clamp_u8_int(uu));
       if (x + 1 < width) uvRow[x + 1] = static_cast<uint8_t>(clamp_u8_int(vv));
     }
@@ -941,16 +972,17 @@ bool nv12_to_bgra(const uint8_t* nv12, uint32_t width, uint32_t height, std::vec
     int gv[256]{};
     int bu[256]{};
   };
+  // BT.709 limited range inverse of bgra_to_nv12.
   static const Nv12Tables kTbl = []() {
     Nv12Tables t{};
     for (int i = 0; i < 256; ++i) {
       const int y = std::max(0, i - 16);
       const int uv = i - 128;
       t.yScale[i] = 298 * y;
-      t.rv[i] = 409 * uv;
-      t.gu[i] = -100 * uv;
-      t.gv[i] = -208 * uv;
-      t.bu[i] = 516 * uv;
+      t.rv[i] = 459 * uv;
+      t.gu[i] = -55 * uv;
+      t.gv[i] = -136 * uv;
+      t.bu[i] = 541 * uv;
     }
     return t;
   }();
@@ -1039,6 +1071,9 @@ bool H264Encoder::configure_types() {
     (void)MFSetAttributeRatio(outType.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
     (void)outType->SetUINT32(MF_MT_AVG_BITRATE, bitrate_);
     (void)outType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    (void)outType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High);
+    (void)outType->SetUINT32(MF_MT_MPEG2_LEVEL, h264_level_for(width_, height_, fps_));
+    apply_video_colorimetry(outType.Get());
     return outType;
   };
 
@@ -1051,6 +1086,7 @@ bool H264Encoder::configure_types() {
     (void)MFSetAttributeRatio(inType.Get(), MF_MT_FRAME_RATE, fps_, 1);
     (void)MFSetAttributeRatio(inType.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
     (void)inType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    apply_video_colorimetry(inType.Get());
     return inType;
   };
 
@@ -1130,9 +1166,21 @@ bool H264Encoder::configure_types() {
       (void)MFSetAttributeRatio(outType.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
       (void)outType->SetUINT32(MF_MT_AVG_BITRATE, bitrate_);
       (void)outType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+      apply_video_colorimetry(outType.Get());
+      (void)outType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High);
+      (void)outType->SetUINT32(MF_MT_MPEG2_LEVEL, h264_level_for(width_, height_, fps_));
       if (SUCCEEDED(enc_->SetOutputType(0, outType.Get(), 0))) {
         outConfigured = true;
-        codec_debug_log("encoder amf: output type configured by enum");
+        codec_debug_log("encoder amf: output type configured by enum (high profile)");
+        break;
+      }
+      // Not every enumerated type accepts an explicit profile/level; fall back to the
+      // MFT's own defaults rather than losing the whole type.
+      (void)outType->DeleteItem(MF_MT_MPEG2_PROFILE);
+      (void)outType->DeleteItem(MF_MT_MPEG2_LEVEL);
+      if (SUCCEEDED(enc_->SetOutputType(0, outType.Get(), 0))) {
+        outConfigured = true;
+        codec_debug_log("encoder amf: output type configured by enum (default profile)");
         break;
       }
     }
@@ -1154,6 +1202,7 @@ bool H264Encoder::configure_types() {
       (void)MFSetAttributeRatio(inType.Get(), MF_MT_FRAME_RATE, fps_, 1);
       (void)MFSetAttributeRatio(inType.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
       (void)inType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+      apply_video_colorimetry(inType.Get());
       if (SUCCEEDED(enc_->SetInputType(0, inType.Get(), 0))) {
         inConfigured = true;
         codec_debug_log("encoder amf: input type configured by enum");
@@ -1233,6 +1282,12 @@ bool H264Encoder::configure_types() {
     (void)MFSetAttributeRatio(outType.Get(), MF_MT_FRAME_RATE, fps_, 1);
     (void)outType->SetUINT32(MF_MT_AVG_BITRATE, bitrate_);
     (void)outType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    apply_video_colorimetry(outType.Get());
+    (void)outType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High);
+    (void)outType->SetUINT32(MF_MT_MPEG2_LEVEL, h264_level_for(width_, height_, fps_));
+    if (SUCCEEDED(enc_->SetOutputType(0, outType.Get(), 0))) break;
+    (void)outType->DeleteItem(MF_MT_MPEG2_PROFILE);
+    (void)outType->DeleteItem(MF_MT_MPEG2_LEVEL);
     if (SUCCEEDED(enc_->SetOutputType(0, outType.Get(), 0))) break;
   }
 
@@ -1250,6 +1305,7 @@ bool H264Encoder::configure_types() {
     (void)MFSetAttributeRatio(inType.Get(), MF_MT_FRAME_RATE, fps_, 1);
     (void)MFSetAttributeRatio(inType.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
     (void)inType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    apply_video_colorimetry(inType.Get());
     if (SUCCEEDED(enc_->SetInputType(0, inType.Get(), 0))) return true;
   }
 }
@@ -1348,6 +1404,9 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
     }
   }
 
+  spsProfileReported_ = false;
+  report_sps_profile_once(sequenceHeaderAnnexb_.data(), sequenceHeaderAnnexb_.size());
+
   MFT_OUTPUT_STREAM_INFO osi{};
   if (SUCCEEDED(enc_->GetOutputStreamInfo(0, &osi))) {
     outBufferBytes_ = (osi.cbSize > 0) ? static_cast<uint32_t>(osi.cbSize) : (1u << 20);
@@ -1355,6 +1414,26 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
     outBufferBytes_ = 1u << 20;
   }
   return true;
+}
+
+// The requested High profile is only a hint; a vendor MFT may silently downgrade it. Read
+// profile_idc/level_idc back off the first SPS actually emitted so the log states the truth.
+void H264Encoder::report_sps_profile_once(const uint8_t* data, size_t size) {
+  if (spsProfileReported_ || !data || size < 8) return;
+  for (size_t i = 0; i + 6 < size; ++i) {
+    if (data[i] != 0 || data[i + 1] != 0 || data[i + 2] != 1) continue;
+    if ((data[i + 3] & 0x1Fu) != 7u) continue;  // SPS
+    const unsigned profileIdc = data[i + 4];
+    const unsigned levelIdc = data[i + 6];
+    const char* profileName = (profileIdc == 100)  ? "high"
+                              : (profileIdc == 77) ? "main"
+                              : (profileIdc == 66) ? "baseline"
+                                                   : "other";
+    std::cout << "[native-video-host] h264 sps profile_idc=" << profileIdc << " (" << profileName
+              << ") level_idc=" << levelIdc << " colorimetry=bt709/limited\n";
+    spsProfileReported_ = true;
+    return;
+  }
 }
 
 bool H264Encoder::reconfigure_bitrate(uint32_t bitrate) {
@@ -1541,6 +1620,7 @@ bool H264Encoder::encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFr
         } else {
           au.bytes = std::move(bytes);
         }
+        report_sps_profile_once(au.bytes.data(), au.bytes.size());
         ++encodeStats->processOutputSamples;
         encodeStats->processOutputBytes += static_cast<uint64_t>(au.bytes.size());
         outUnits->push_back(std::move(au));

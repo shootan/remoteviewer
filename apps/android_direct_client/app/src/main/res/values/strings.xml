@@ -34,7 +34,10 @@
     <string name="viewer_log_refresh_button">Refresh</string>
     <string name="viewer_log_close_button">Close</string>
     <string name="viewer_log_empty">No diagnostics yet.</string>
-    <string name="exit_confirm_message">종료하시겠습니까?</string>
+    <string name="viewer_switching_to">Switching to %1$s…</string>
+    <string name="viewer_connecting">Waiting for the first frame…</string>
+    <string name="targets_empty">No shareable windows yet. Tap Refresh.</string>
+    <string name="exit_confirm_message">Exit the app?</string>
     <string name="exit_confirm_yes">Yes</string>
     <string name="exit_confirm_no">No</string>
 </resources>

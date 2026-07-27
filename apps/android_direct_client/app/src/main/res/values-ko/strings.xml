@@ -1,0 +1,36 @@
+<resources>
+    <string name="shell_subtitle">호스트를 입력해 연결한 뒤 대상을 선택하면 전체 화면 뷰어로 전환됩니다.</string>
+    <string name="host_hint">호스트 IP 또는 DNS</string>
+    <string name="video_port_hint">비디오 포트</string>
+    <string name="control_port_hint">제어 포트</string>
+    <string name="connect_button">연결</string>
+    <string name="disconnect_button">연결 해제</string>
+    <string name="refresh_button">새로 고침</string>
+    <string name="target_windows_button">창</string>
+    <string name="target_desktop_button">데스크톱</string>
+    <string name="target_settings_button">설정</string>
+    <string name="desktop_mode_button">데스크톱</string>
+    <string name="targets_title">대상 선택</string>
+    <string name="settings_title">실시간 품질</string>
+    <string name="settings_hint">호스트를 재시작하지 않고 비트레이트와 FPS를 적용합니다.</string>
+    <string name="settings_desktop_backend_label">데스크톱 캡처 백엔드</string>
+    <string name="settings_desktop_backend_hint">데스크톱 모드에만 적용됩니다. 창 캡처는 WGC를 유지합니다.</string>
+    <string name="settings_bitrate_hint">비트레이트 Kbps</string>
+    <string name="settings_fps_hint">FPS</string>
+    <string name="settings_apply_button">적용</string>
+    <string name="settings_apply_idle">현재 요청: 없음</string>
+    <string name="viewer_back_button">목록</string>
+    <string name="viewer_keyboard_description">키보드 표시</string>
+    <string name="viewer_scroll_description">길게 눌러 고정 지점에서 스크롤</string>
+    <string name="viewer_log_description">진단 로그 열기</string>
+    <string name="viewer_log_title">뷰어 진단</string>
+    <string name="viewer_log_refresh_button">새로 고침</string>
+    <string name="viewer_log_close_button">닫기</string>
+    <string name="viewer_log_empty">진단 기록이 없습니다.</string>
+    <string name="viewer_switching_to">%1$s(으)로 전환 중…</string>
+    <string name="viewer_connecting">첫 프레임을 기다리는 중…</string>
+    <string name="targets_empty">공유 가능한 창이 없습니다. 새로 고침을 누르세요.</string>
+    <string name="exit_confirm_message">종료하시겠습니까?</string>
+    <string name="exit_confirm_yes">예</string>
+    <string name="exit_confirm_no">아니오</string>
+</resources>

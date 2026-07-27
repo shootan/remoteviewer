@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Setting a flat android:background color replaces the framework StateListDrawable, which
+     is why buttons used to look identical whether enabled, pressed, or disabled. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_enabled="false">
+        <shape android:shape="rectangle">
+            <solid android:color="#EDEAE3" />
+            <stroke android:width="1dp" android:color="#E0DCD3" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="#BDB5A4" />
+            <stroke android:width="1dp" android:color="#A8A091" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#D8D2C6" />
+            <stroke android:width="1dp" android:color="#C6BFB0" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+</selector>

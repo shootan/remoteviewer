@@ -325,6 +325,22 @@ bool should_include_window(HWND hwnd) {
   return true;
 }
 
+// Report the client extent, not the outer window rect. The stream is cropped to the client
+// area, so advertising the outer size made the viewer letterbox and map touches against a
+// slightly wrong aspect until the first frame decoded.
+void window_content_extent(HWND hwnd, const RECT& windowRect, int* outW, int* outH) {
+  *outW = windowRect.right - windowRect.left;
+  *outH = windowRect.bottom - windowRect.top;
+  RECT clientRect{};
+  if (!GetClientRect(hwnd, &clientRect)) return;
+  const int clientW = clientRect.right - clientRect.left;
+  const int clientH = clientRect.bottom - clientRect.top;
+  if (clientW > 1 && clientH > 1) {
+    *outW = clientW;
+    *outH = clientH;
+  }
+}
+
 BOOL CALLBACK enum_window_collect_proc(HWND hwnd, LPARAM lparam) {
   auto* out = reinterpret_cast<std::vector<WindowListEntry>*>(lparam);
   if (!out) return TRUE;
@@ -348,8 +364,7 @@ BOOL CALLBACK enum_window_collect_proc(HWND hwnd, LPARAM lparam) {
   e.id = hwnd_to_id(hwnd);
   e.hwnd = hwnd;
   e.pid = static_cast<uint32_t>(pid);
-  e.width = r.right - r.left;
-  e.height = r.bottom - r.top;
+  window_content_extent(hwnd, r, &e.width, &e.height);
   e.minimized = (IsIconic(hwnd) != 0);
   e.title = title;
   out->push_back(std::move(e));
@@ -383,8 +398,7 @@ std::optional<WindowListEntry> find_window_by_id(uint64_t id) {
   e.id = id;
   e.hwnd = hwnd;
   e.pid = static_cast<uint32_t>(pid);
-  e.width = r.right - r.left;
-  e.height = r.bottom - r.top;
+  window_content_extent(hwnd, r, &e.width, &e.height);
   e.minimized = (IsIconic(hwnd) != 0);
   e.title = wide_to_utf8(wtitle);
   return e;
@@ -1141,6 +1155,10 @@ bool compute_window_client_crop(HWND hwnd, uint32_t frameW, uint32_t frameH, uin
   cropY = std::clamp(cropY, 0, static_cast<int>(frameH) - 1);
   cropW = std::clamp(cropW, 1, static_cast<int>(frameW) - cropX);
   cropH = std::clamp(cropH, 1, static_cast<int>(frameH) - cropY);
+  // NV12 is 4:2:0, so an odd crop leaves the trailing chroma column/row unwritten and shows
+  // as a coloured edge line. Round the extent down to even.
+  cropW &= ~1;
+  cropH &= ~1;
   *outX = static_cast<uint32_t>(cropX);
   *outY = static_cast<uint32_t>(cropY);
   *outW = static_cast<uint32_t>(cropW);
@@ -1309,8 +1327,10 @@ struct Args {
   std::string codec = "raw";
   uint32_t fps = 30;
   uint32_t seconds = 0;  // 0: infinite
-  uint32_t bitrate = 1100000;
-  uint32_t keyint = 15;
+  // M7-confirmed 1080p defaults. The old 1.1 Mbps default also silently tripped the
+  // <=1.5 Mbps auto-720p downscale in choose_h264_encode_size on any larger display.
+  uint32_t bitrate = 8000000;
+  uint32_t keyint = 30;
   uint32_t encodeWidth = 0;
   uint32_t encodeHeight = 0;
   uint32_t captureWindowPid = 0;
@@ -1615,6 +1635,22 @@ uint32_t clamp_even_dim(uint32_t v, uint32_t minValue, uint32_t maxValue) {
   return v;
 }
 
+// Fit a source frame inside a target box without changing its aspect ratio. Encoding a
+// 4:3 window into a 16:9 box (the shipped profiles) otherwise stretches the picture.
+void fit_size_preserving_aspect(uint32_t srcW, uint32_t srcH, uint32_t boxW, uint32_t boxH,
+                                uint32_t* outW, uint32_t* outH) {
+  if (!outW || !outH) return;
+  if (srcW == 0 || srcH == 0 || boxW == 0 || boxH == 0) {
+    *outW = boxW;
+    *outH = boxH;
+    return;
+  }
+  const double scale = std::min({static_cast<double>(boxW) / static_cast<double>(srcW),
+                                 static_cast<double>(boxH) / static_cast<double>(srcH), 1.0});
+  *outW = clamp_even_dim(static_cast<uint32_t>(std::lround(srcW * scale)), 2, srcW);
+  *outH = clamp_even_dim(static_cast<uint32_t>(std::lround(srcH * scale)), 2, srcH);
+}
+
 void choose_h264_encode_size(const Args& args, uint32_t captureW, uint32_t captureH,
                              uint32_t* outW, uint32_t* outH, bool* outAutoFallback720) {
   if (!outW || !outH || !outAutoFallback720) return;
@@ -1622,8 +1658,18 @@ void choose_h264_encode_size(const Args& args, uint32_t captureW, uint32_t captu
   uint32_t targetW = captureW;
   uint32_t targetH = captureH;
   if (args.encodeWidth > 0 && args.encodeHeight > 0) {
-    targetW = clamp_even_dim(args.encodeWidth, 2, captureW);
-    targetH = clamp_even_dim(args.encodeHeight, 2, captureH);
+    // Treat the configured size as a bounding box and fit the capture inside it. Clamping
+    // each axis on its own squashes the picture whenever the source is not the same aspect
+    // as the profile (a 16:10 or 3:2 monitor against the shipped 1920x1080 profiles).
+    const double sx = static_cast<double>(args.encodeWidth) / static_cast<double>(captureW);
+    const double sy = static_cast<double>(args.encodeHeight) / static_cast<double>(captureH);
+    const double scale = std::min({sx, sy, 1.0});
+    if (scale > 0.0) {
+      targetW = static_cast<uint32_t>(std::lround(captureW * scale));
+      targetH = static_cast<uint32_t>(std::lround(captureH * scale));
+    }
+    targetW = clamp_even_dim(targetW, 2, captureW);
+    targetH = clamp_even_dim(targetH, 2, captureH);
   } else {
     // At low bitrate, avoid encoder queue buildup by auto-falling back toward 720p.
     if (args.bitrate <= 1500000 && (captureW > 1280 || captureH > 720)) {
@@ -1684,10 +1730,60 @@ uint32_t estimate_bgra_change_permille(const uint8_t* a, const uint8_t* b, size_
   return static_cast<uint32_t>(std::min<uint64_t>(permille, 1000ULL));
 }
 
+// Average 2x2 blocks into one pixel. Bilinear alone only samples 2 taps per axis, so a
+// >2x downscale (4K->1080p, 1440p->720p) drops most source pixels and aliases hard on text.
+void box_halve_bgra(const uint8_t* src, uint32_t srcW, uint32_t srcH, uint32_t srcStride,
+                    std::vector<uint8_t>* out, uint32_t* outW, uint32_t* outH) {
+  const uint32_t dstW = std::max<uint32_t>(1, srcW / 2);
+  const uint32_t dstH = std::max<uint32_t>(1, srcH / 2);
+  out->resize(static_cast<size_t>(dstW) * static_cast<size_t>(dstH) * 4);
+  uint8_t* dst = out->data();
+  for (uint32_t y = 0; y < dstH; ++y) {
+    const uint8_t* row0 = src + static_cast<size_t>(std::min(srcH - 1, y * 2)) * srcStride;
+    const uint8_t* row1 = src + static_cast<size_t>(std::min(srcH - 1, y * 2 + 1)) * srcStride;
+    uint8_t* dstRow = dst + static_cast<size_t>(y) * dstW * 4;
+    for (uint32_t x = 0; x < dstW; ++x) {
+      const uint32_t x0 = std::min(srcW - 1, x * 2);
+      const uint32_t x1 = std::min(srcW - 1, x * 2 + 1);
+      const uint8_t* p00 = row0 + static_cast<size_t>(x0) * 4;
+      const uint8_t* p10 = row0 + static_cast<size_t>(x1) * 4;
+      const uint8_t* p01 = row1 + static_cast<size_t>(x0) * 4;
+      const uint8_t* p11 = row1 + static_cast<size_t>(x1) * 4;
+      uint8_t* outPx = dstRow + static_cast<size_t>(x) * 4;
+      for (int c = 0; c < 4; ++c) {
+        outPx[c] = static_cast<uint8_t>((p00[c] + p10[c] + p01[c] + p11[c] + 2) >> 2);
+      }
+    }
+  }
+  *outW = dstW;
+  *outH = dstH;
+}
+
 bool resize_bgra_bilinear(const uint8_t* src, uint32_t srcW, uint32_t srcH, uint32_t srcStride,
                           uint32_t dstW, uint32_t dstH, std::vector<uint8_t>* outBgra) {
   if (!src || srcW == 0 || srcH == 0 || srcStride < (srcW * 4) || dstW == 0 || dstH == 0 || !outBgra) {
     return false;
+  }
+
+  std::vector<uint8_t> reduced;
+  while (srcW >= dstW * 2 && srcH >= dstH * 2 && srcW > 1 && srcH > 1) {
+    std::vector<uint8_t> next;
+    uint32_t nextW = 0;
+    uint32_t nextH = 0;
+    box_halve_bgra(src, srcW, srcH, srcStride, &next, &nextW, &nextH);
+    reduced.swap(next);
+    src = reduced.data();
+    srcW = nextW;
+    srcH = nextH;
+    srcStride = nextW * 4;
+  }
+  if (srcW == dstW && srcH == dstH) {
+    outBgra->resize(static_cast<size_t>(dstW) * static_cast<size_t>(dstH) * 4);
+    for (uint32_t y = 0; y < dstH; ++y) {
+      std::memcpy(outBgra->data() + static_cast<size_t>(y) * dstW * 4,
+                  src + static_cast<size_t>(y) * srcStride, static_cast<size_t>(dstW) * 4);
+    }
+    return true;
   }
   outBgra->resize(static_cast<size_t>(dstW) * static_cast<size_t>(dstH) * 4);
   auto* dst = outBgra->data();
@@ -1872,6 +1968,19 @@ struct GpuBgraScaler {
       videoContext->VideoProcessorSetStreamDestRect(processor.Get(), 0, TRUE, &dstRect);
       videoContext->VideoProcessorSetStreamFrameFormat(
           processor.Get(), 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+
+      // This blt is BGRA->BGRA, so both ends must be declared full-range RGB. Leaving the
+      // color spaces unset lets the driver assume studio range on one side and crush levels.
+      D3D11_VIDEO_PROCESSOR_COLOR_SPACE colorSpace{};
+      colorSpace.Usage = 0;             // playback (full precision)
+      colorSpace.RGB_Range = 0;         // 0 = full range (0-255)
+      colorSpace.YCbCr_Matrix = 1;      // BT.709, matches apply_video_colorimetry
+      colorSpace.Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255;
+      videoContext->VideoProcessorSetStreamColorSpace(processor.Get(), 0, &colorSpace);
+      videoContext->VideoProcessorSetOutputColorSpace(processor.Get(), &colorSpace);
+      // Vendor auto-processing (edge enhancement / denoise) is tuned for video, not text,
+      // and produces ringing around UI glyphs.
+      videoContext->VideoProcessorSetStreamAutoProcessingMode(processor.Get(), 0, FALSE);
 
       D3D11_VIDEO_PROCESSOR_STREAM stream{};
       stream.Enable = TRUE;
@@ -3051,6 +3160,12 @@ int main(int argc, char** argv) {
   int abrProfile = 0;  // 0: high, 1: mid, 2: low
   uint32_t activeEncodeW = abrHighW;
   uint32_t activeEncodeH = abrHighH;
+  // Nominal (pre-aspect-fit) encode box of the current quality level, and the source size
+  // the active encode dimensions were fitted against.
+  uint32_t nominalEncodeW = abrHighW;
+  uint32_t nominalEncodeH = abrHighH;
+  uint32_t encodeSourceW = captureWidth;
+  uint32_t encodeSourceH = captureHeight;
   uint32_t activeFps = args.fps;
   uint32_t activeBitrate = abrHighBitrate;
   uint32_t activeKeyint = args.keyint;
@@ -3084,6 +3199,12 @@ int main(int argc, char** argv) {
   };
   auto apply_encoder_target = [&](uint32_t targetW, uint32_t targetH, uint32_t targetFps,
                                   uint32_t targetBitrate, uint32_t targetKeyint) -> bool {
+    // Callers pass the nominal box for the current ABR/M9 level. Remember it so a later
+    // source-size change can be re-fitted against the same budget instead of ratcheting down.
+    nominalEncodeW = targetW;
+    nominalEncodeH = targetH;
+    fit_size_preserving_aspect(encodeSourceW, encodeSourceH, targetW, targetH, &targetW, &targetH);
+
     const bool keyintChanged = (targetKeyint != activeKeyint);
     const bool fpsChanged = (targetFps != activeFps);
     const bool resizeChanged = (targetW != activeEncodeW || targetH != activeEncodeH);
@@ -3687,6 +3808,20 @@ int main(int argc, char** argv) {
           d3dDevice, winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized,
           captureFramePoolBuffers, captureSize);
       session = pool.CreateCaptureSession(item);
+      // Windows draws a yellow "being captured" border on the session by default; it lands
+      // inside the encoded frame and reads as a rendering artifact on the viewer.
+      try {
+        session.IsBorderRequired(false);
+      } catch (...) {
+        std::cout << "[native-video-host] wgc_border_hide=unsupported\n";
+      }
+      // A remote-control viewer needs to see the pointer to aim clicks, so keep the cursor
+      // composited unless it is explicitly turned off.
+      try {
+        session.IsCursorCaptureEnabled(!env_truthy("REMOTE60_NATIVE_HIDE_CURSOR"));
+      } catch (...) {
+        std::cout << "[native-video-host] wgc_cursor_toggle=unsupported\n";
+      }
       attach_frame_arrived();
       session.StartCapture();
       captureSessionStartedUs = qpc_now_us();
@@ -4824,6 +4959,28 @@ int main(int argc, char** argv) {
       uint64_t scaleUs = 0;
       uint64_t nv12Us = 0;
       const uint64_t preEncodeStartUs = qpc_now_us();
+      // A window selection or a resize changes the source geometry; re-fit the encode size
+      // to the new aspect so the scaler never has to stretch.
+      if (w > 0 && h > 0 && (w != encodeSourceW || h != encodeSourceH)) {
+        encodeSourceW = w;
+        encodeSourceH = h;
+        uint32_t refitW = activeEncodeW;
+        uint32_t refitH = activeEncodeH;
+        fit_size_preserving_aspect(w, h, nominalEncodeW, nominalEncodeH, &refitW, &refitH);
+        if (refitW != activeEncodeW || refitH != activeEncodeH) {
+          const uint32_t prevW = activeEncodeW;
+          const uint32_t prevH = activeEncodeH;
+          if (apply_encoder_target(nominalEncodeW, nominalEncodeH, activeFps, activeBitrate,
+                                   activeKeyint)) {
+            forceKeyNext = true;
+            std::cout << "[native-video-host] encode-refit source=" << w << "x" << h
+                      << " encode=" << prevW << "x" << prevH << " -> " << activeEncodeW << "x"
+                      << activeEncodeH << "\n";
+          } else {
+            std::cerr << "[native-video-host] encode-refit failed source=" << w << "x" << h << "\n";
+          }
+        }
+      }
       if (activeEncodeW != w || activeEncodeH != h) {
         const uint64_t scaleStartUs = qpc_now_us();
         bool scaleOk = false;

@@ -3799,3 +3799,82 @@ Validation / build / test result
 Next action
 - `M1.6-1`부터 착수: capture callback에서는 `CopyResource`만 수행하고 `Map/readback`은 worker/staging ring consumer로 분리한다.
 - 이후 `M1.6-2`, `M1.6-3`를 순서대로 적용하면서 `captureD3DWaitUs`, `captureCopyMapUs`, `captureMemcpyUs`, `cb2eAvgUs`를 A/B 비교한다.
+
+### 183) 2026-07-27 화질/UI 실사용 품질 개선 (color, profile, aspect, DPI, Android UX)
+Goal
+- 사용자 보고("이미지가 이상하다 / UI가 이상하다") 원인을 코드 근거로 규명하고 실사용 가능한 수준으로 끌어올린다.
+- 기술 스택과 구현계획 대비 실제 구현 상태를 재확인한다.
+
+Files changed
+- `apps/native_poc/src/mf_h264_codec.cpp`, `apps/native_poc/src/mf_h264_codec.hpp`
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `apps/native_poc/src/native_video_client_main.cpp`
+- `apps/host/src/realtime_runtime.cpp`
+- `apps/android_direct_client/app/src/main/AndroidManifest.xml`
+- `apps/android_direct_client/app/src/main/cpp/android_video_decoder.cpp`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/SessionDiagnosticsLog.kt`
+- `apps/android_direct_client/app/src/main/res/layout/activity_main.xml`
+- `apps/android_direct_client/app/src/main/res/values/strings.xml`
+- `apps/android_direct_client/app/src/main/res/values-ko/strings.xml` (신규)
+- `apps/android_direct_client/app/src/main/res/drawable/panel_button_background.xml` (신규)
+- `apps/android_direct_client/app/src/main/res/drawable/panel_input_background.xml` (신규)
+- `apps/android_direct_client/app/src/main/res/color/panel_button_text.xml` (신규)
+- `docs/history.md`, `docs/구현계획.md`
+
+확인한 기술 스택
+- Host(Windows): C++20 / D3D11 / Windows.Graphics.Capture + DXGI Desktop Duplication / Media Foundation H.264(AMF·NVENC·QSV·MFT) / TCP 제어 + UDP 영상
+- Client(Windows): C++20 / D3D11 NV12 셰이더 렌더 + GDI fallback / MF H.264 디코더
+- Client(Android): Kotlin(minSdk 28, targetSdk 34) / NDK C++20 / MediaCodec(mediandk) / TextureView
+- Web 경로: Node.js + ws 시그널링 / libdatachannel(WebRTC) / Opus
+- 빌드: CMake + vcpkg(nlohmann-json, libdatachannel, opus), Gradle 8.5.2 / Kotlin 1.9.24
+- 검증: PowerShell 자동화(`automation/verify_native_video_runtime.ps1` 등)
+
+화질 결함 수정 (근거: 코드 조사 + 런타임 A/B)
+- 색공간 불일치: host CPU `bgra_to_nv12`는 BT.601 limited였고 스트림에 VUI 색상 정보가 전무했다. Android MediaCodec은 HD에서 BT.709를 가정하므로 색이 틀어졌다.
+  → 전 경로를 BT.709 limited로 통일(`bgra_to_nv12`, `nv12_to_bgra`, 클라이언트 D3D 셰이더) + `MF_MT_YUV_MATRIX`/`VIDEO_NOMINAL_RANGE`/`VIDEO_PRIMARIES`/`TRANSFER_FUNCTION` 명시.
+- H.264 프로파일 미지정 → MFT 기본값 사용. `MF_MT_MPEG2_PROFILE=High` + 해상도/fps 기반 level 지정(수용 실패 시 기본값으로 폴백).
+- WGC 캡처 세션의 노란 "캡처 중" 테두리가 인코딩 프레임에 포함되던 문제 → `IsBorderRequired(false)`. 커서는 원격 조작에 필요하므로 명시적으로 유지(`REMOTE60_NATIVE_HIDE_CURSOR`로 opt-out).
+- 종횡비 왜곡: `encodeWidth/Height`를 축별로 독립 클램프해 16:10/3:2 모니터와 창 캡처에서 화면이 눌렸다. → 바운딩 박스 fit으로 변경하고, 소스 크기 변경 시 `nominalEncode*` 기준으로 재적합(`encode-refit` 로그).
+- 창 클라이언트 크롭이 홀수 크기를 낼 수 있어 NV12 마지막 크로마 열이 미기록 → 짝수로 내림.
+- GPU 스케일러가 색공간/auto-processing 미설정이라 드라이버별 레벨·샤프닝 편차 발생 → full-range RGB/BT.709 명시 + `SetStreamAutoProcessingMode(FALSE)`. `apps/host`의 WebRTC 경로에도 동일 적용.
+- CPU 리사이즈가 순수 bilinear라 2배 초과 축소(4K→1080p 등)에서 앨리어싱 → 2x2 박스 프리필터 반복 후 bilinear.
+- 기본 비트레이트 1.1Mbps/keyint 15 → 720p 자동 강등이 상시 발동. M7 확정값(8Mbps/keyint 30)으로 교체.
+- CBR VBV가 약 12.5ms로 과도하게 짧아 장면 전환이 뭉개짐 → 약 50ms로 확대.
+- 창 목록이 외곽 window rect를 보고해 뷰어의 첫 프레임 전 레터박스/터치 매핑 기준이 어긋남 → client rect 기준으로 변경.
+
+Windows 클라이언트 UI 수정
+- DPI 인식 없음 → OS가 창 전체를 비트맵 확대해 텍스트/영상이 흐림. `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)` + `WM_DPICHANGED` 처리 + 패널 메트릭 DPI 스케일링.
+- GDI 기본 System 비트맵 폰트 사용 → 한글 등 유니코드 창 제목 깨짐. Segoe UI 폰트 생성/선택.
+- 창 목록 항목의 제목이 가운데 정렬로 한 번, 왼쪽 정렬로 또 한 번 겹쳐 그려지던 버그 제거.
+- GDI fallback의 `COLORONCOLOR`(픽셀 드롭) → `HALFTONE` + `SetBrushOrgEx`.
+
+Android 클라이언트 수정
+- 타깃 전환(SWITCHING) 중 상태 오버레이가 `visibility="gone"`으로 고정되어 최대 6초간 순수 검은 화면만 보이던 문제 → ProgressBar + 안내 문구를 가진 로딩 패널 신설.
+- connect/targets 화면에 스크롤 컨테이너가 없어 가로 모드에서 Connect 버튼이 잘려 접근 불가 → `ScrollView(fillViewport)` 적용.
+- `android:background` 단색 지정이 프레임워크 StateListDrawable을 대체해 활성/비활성/눌림이 시각적으로 동일하던 문제 → 상태별 drawable + `ColorStateList` 도입.
+- `maxLines`만 있고 `ellipsize`가 없어 문자 중간에서 잘리던 텍스트 보정, 오류 라인에서 로그 절대경로 제거.
+- 터치 타깃 44dp → 48dp, `windowSoftInputMode=adjustResize` 추가.
+- 스크롤 제스처 상수가 원시 픽셀이라 밀도별 감도가 달라지던 문제 → dp 기반으로 변환.
+- MediaCodec 저지연 키(`low-latency`, 벤더 키, `PRIORITY=0`) 추가.
+- Annex-B 시작코드 탐색이 버퍼 끝 경계를 놓쳐 프레임 마지막 NAL을 흘리던 버그 수정.
+- 입력 보강: 수정자키(Shift/Ctrl/Alt/Meta)·F1~F12·A~Z·0~9 매핑 추가, `dispatchKeyEvent`로 물리/블루투스 키보드 지원.
+- 진단 로그 append/read를 단일 백그라운드 스레드로 이동(메인 스레드 I/O 제거), 250ms 폴링마다 무조건 리스트를 재구성하던 동작을 변경 시에만 수행하도록 수정.
+- 하드코딩 한국어 문자열을 `values-ko/`로 분리하고 기본 로케일을 영어로 정리.
+
+Validation / build / test result
+- Windows 빌드: `cmake --build D:\remote\remote\build-local --config Release/Debug --target remote60_native_video_host_poc remote60_native_video_client_poc remote60_native_video_client_shared_core_test` → 성공
+- 단위 테스트: `remote60_native_video_client_shared_core_test.exe` → `[shared-core-test] PASS`
+- Android 빌드: `gradle clean assembleDebug` (JBR 17, offline) → `BUILD SUCCESSFUL`, `app-debug.apk` 생성
+- 런타임 게이트: `automation/verify_native_video_runtime.ps1 -BuildDir build-local -Codec h264 -Bitrate 8000000 -Keyint 30 -EncodeWidth 1920 -EncodeHeight 1080`
+  - `OVERALL_OK=True`, `encodeSize=1920x1080 auto720=0`(기본 비트레이트 상향으로 720p 자동 강등 미발생)
+  - UDP 조립 `dropped=0 malformed=0`, `encoderResets=0`
+- 인코더 프로파일 A/B (동일 조건, `git worktree`로 HEAD 베이스라인 별도 빌드):
+  - 베이스라인(HEAD): `h264 sps profile_idc=77 (main) level_idc=40`
+  - 수정본: `h264 sps profile_idc=100 (high) level_idc=40`
+- 회귀 확인: `GATE_A_DECODED_FPS_OK=False`는 베이스라인에서도 동일하게 재현됨(현재 원격/헤드리스 세션에서 WGC 콜백이 초당 수 프레임만 발생하는 환경 제약이며 이번 변경과 무관). 처리량은 `DECODED_RAW_MBPS_AVG` 86.11(baseline) → 88.89(modified)로 동등 이상.
+
+Next action
+- 실제 Android 기기 또는 LDPlayer에서 연결 → 타깃 선택 → 뷰어 흐름을 돌려 로딩 패널, 버튼 상태, 가로 모드 스크롤, 물리 키보드 입력을 눈으로 확인한다.
+- 물리 디스플레이가 연결된 세션에서 `GATE_A_DECODED_FPS_OK`를 다시 측정해 30fps 목표 달성 여부를 판정한다.
+- 색상 정확도는 컬러바를 띄운 상태에서 host 원본과 Android 뷰어를 나란히 캡처해 육안/픽셀 비교로 확정한다.

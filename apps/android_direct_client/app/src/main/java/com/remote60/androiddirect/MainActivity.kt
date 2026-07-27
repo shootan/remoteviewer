@@ -13,6 +13,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
@@ -45,8 +46,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         private const val INPUT_VK_LBUTTON = 0x01
         private const val INPUT_VK_BACK = 0x08
         private const val INPUT_WHEEL_DELTA_STEP = 120
-        private const val SCROLL_GESTURE_STEP_PX = 42f
+        // Authored in dp; converted per-device below. As a raw pixel constant one wheel
+        // notch needed 4x more finger travel on a 4x-density phone than on a 1x tablet.
+        private const val SCROLL_GESTURE_STEP_DP = 28f
     }
+
+    private val scrollGestureStepPx: Float
+        get() = SCROLL_GESTURE_STEP_DP * resources.displayMetrics.density
 
     private enum class UiScene {
         CONNECT,
@@ -162,6 +168,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var viewerScrollButton: Button
     private lateinit var viewerLogButton: Button
     private lateinit var viewerOverlayStatusText: TextView
+    private lateinit var viewerLoadingPanel: View
+    private lateinit var viewerLoadingText: TextView
     private lateinit var viewerImeCaptureView: ImeCaptureView
     private lateinit var videoTextureView: TextureView
     private lateinit var targetListAdapter: ArrayAdapter<String>
@@ -266,6 +274,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerScrollButton = findViewById(R.id.viewerScrollButton)
         viewerLogButton = findViewById(R.id.viewerLogButton)
         viewerOverlayStatusText = findViewById(R.id.viewerOverlayStatusText)
+        viewerLoadingPanel = findViewById(R.id.viewerLoadingPanel)
+        viewerLoadingText = findViewById(R.id.viewerLoadingText)
         viewerImeCaptureView = findViewById(R.id.viewerImeCaptureView)
         videoTextureView = findViewById(R.id.videoTextureView)
 
@@ -900,7 +910,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                         if (direction == 0) {
                             0
                         } else {
-                            (abs(scrollWheelCarryPx) / SCROLL_GESTURE_STEP_PX).toInt()
+                            (abs(scrollWheelCarryPx) / scrollGestureStepPx).toInt()
                         }
                     if (stepCount > 0) {
                         val queued = NativeSessionBridge.nativeQueueInputEvent(
@@ -915,7 +925,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                             resetViewerTouchState()
                             return false
                         }
-                        scrollWheelCarryPx -= direction * stepCount * SCROLL_GESTURE_STEP_PX
+                        scrollWheelCarryPx -= direction * stepCount * scrollGestureStepPx
                     }
                     return true
                 }
@@ -1124,13 +1134,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun refreshViewerLogBody() {
-        val currentLog = diagnosticsLog.readAllText()
-        viewerLogTextView?.text =
-            if (currentLog.isBlank()) {
-                getString(R.string.viewer_log_empty)
-            } else {
-                currentLog
-            }
+        // Up to 512 KB off the main thread; the callback lands back on it.
+        diagnosticsLog.readAllTextAsync { currentLog ->
+            viewerLogTextView?.text =
+                if (currentLog.isBlank()) {
+                    getString(R.string.viewer_log_empty)
+                } else {
+                    currentLog
+                }
+        }
     }
 
     private fun updateViewerLogHeader(
@@ -1225,8 +1237,48 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             KeyEvent.KEYCODE_MOVE_END -> 0x23
             KeyEvent.KEYCODE_PAGE_UP -> 0x21
             KeyEvent.KEYCODE_PAGE_DOWN -> 0x22
+            KeyEvent.KEYCODE_DEL -> 0x08
+            KeyEvent.KEYCODE_INSERT -> 0x2D
+            // Modifiers, so host-side shortcuts (Ctrl+C, Alt+Tab, Shift-select) work at all.
+            KeyEvent.KEYCODE_SHIFT_LEFT -> 0xA0
+            KeyEvent.KEYCODE_SHIFT_RIGHT -> 0xA1
+            KeyEvent.KEYCODE_CTRL_LEFT -> 0xA2
+            KeyEvent.KEYCODE_CTRL_RIGHT -> 0xA3
+            KeyEvent.KEYCODE_ALT_LEFT -> 0xA4
+            KeyEvent.KEYCODE_ALT_RIGHT -> 0xA5
+            KeyEvent.KEYCODE_META_LEFT -> 0x5B
+            KeyEvent.KEYCODE_META_RIGHT -> 0x5C
+            in KeyEvent.KEYCODE_F1..KeyEvent.KEYCODE_F12 ->
+                0x70 + (keyCode - KeyEvent.KEYCODE_F1)
+            in KeyEvent.KEYCODE_A..KeyEvent.KEYCODE_Z ->
+                0x41 + (keyCode - KeyEvent.KEYCODE_A)
+            in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 ->
+                0x30 + (keyCode - KeyEvent.KEYCODE_0)
             else -> null
         }
+
+    // Key events only ever arrived through InputConnection.sendKeyEvent, so a physical or
+    // Bluetooth keyboard attached to the tablet was silently ignored in the viewer.
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (currentScene == UiScene.VIEWER && event.deviceId != KeyCharacterMap.VIRTUAL_KEYBOARD) {
+            if (event.keyCode == KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(event)
+            val vk = mapAndroidKeyCodeToWindowsVk(event.keyCode)
+            if (vk != null && queueViewerSpecialKey(vk, event.action)) {
+                if (event.action == KeyEvent.ACTION_DOWN) {
+                    val unicode = event.unicodeChar
+                    // Emit the character only when no modifier is held; otherwise the host
+                    // would receive both the shortcut and a stray literal character.
+                    if (unicode != 0 && !event.isCtrlPressed && !event.isAltPressed &&
+                        !event.isMetaPressed
+                    ) {
+                        NativeSessionBridge.nativeQueueInputText(unicode.toChar().toString())
+                    }
+                }
+                return true
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
 
     private fun resolveViewerContentRect(): ViewerContentRect? {
         val viewWidth = videoTextureView.width.toFloat()
@@ -1368,12 +1420,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         syncConnectedClientPreferences(isConnected)
 
         connectStatusText.text = statusValue
-        connectErrorText.text =
-            if (errorValue.isNotBlank()) {
-                errorValue + "\nlog: " + diagnosticsLog.filePath()
-            } else {
-                "log: " + diagnosticsLog.filePath()
-            }
+        // The log path is developer detail; surfacing it as the permanent error line pushed
+        // the real message out of the 3-line box. It stays available in the LOG overlay.
+        connectErrorText.text = errorValue
+        connectErrorText.visibility = if (errorValue.isNotBlank()) View.VISIBLE else View.GONE
 
         renderTargetsScene(isConnected, panelSnapshot)
         renderViewerScene(statusValue, panelSnapshot, videoDebugValue)
@@ -1427,7 +1477,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     labels.add(prefix + item.title + " • " + item.width + "x" + item.height + minimizedSuffix)
                     ids.add(item.id)
                 }
-                targetListEmptyText.text = "No shareable windows yet. Tap Refresh."
+                targetListEmptyText.text = getString(R.string.targets_empty)
             }
 
             TargetTab.DESKTOP -> {
@@ -1441,25 +1491,40 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
         }
 
-        targetListLabels.clear()
-        targetListLabels.addAll(labels)
-        targetListIds.clear()
-        targetListIds.addAll(ids)
-        targetListAdapter.notifyDataSetChanged()
+        // renderStatus runs on a 250 ms poll. Rebuilding the adapter unconditionally reset the
+        // list four times a second and fought the user's scroll, so only publish real changes.
+        if (targetListLabels != labels || targetListIds != ids) {
+            targetListLabels.clear()
+            targetListLabels.addAll(labels)
+            targetListIds.clear()
+            targetListIds.addAll(ids)
+            targetListAdapter.notifyDataSetChanged()
+        }
         targetListEmptyText.visibility =
             if (settingsActive) View.GONE else if (targetListLabels.isEmpty()) View.VISIBLE else View.GONE
     }
 
     private fun renderViewerScene(statusValue: String, panelSnapshot: WindowPanelUiSnapshot, videoDebugValue: String) {
         if (currentScene == UiScene.SWITCHING) {
-            viewerOverlayStatusText.text =
-                "Switching to ${pendingSelectionLabel.ifBlank { panelSnapshot.selectedTitle }}...\n" +
-                    panelSnapshot.status + "\n" + videoDebugValue
+            // Before this panel existed the switch showed a plain black screen with no
+            // feedback for up to the 6 s selection timeout.
+            val target = pendingSelectionLabel.ifBlank { panelSnapshot.selectedTitle }
+            viewerLoadingText.text = getString(R.string.viewer_switching_to, target)
+            viewerLoadingPanel.visibility = View.VISIBLE
+            viewerOverlayStatusText.visibility = View.GONE
             videoTextureView.alpha = 0.0f
             return
         }
+        viewerLoadingPanel.visibility = View.GONE
         videoTextureView.alpha = 1.0f
-        viewerOverlayStatusText.text = panelSnapshot.selectedTitle + " • " + statusValue + "\n" + videoDebugValue
+        val hasFrame = videoWidth > 0 && videoHeight > 0
+        if (hasFrame) {
+            viewerOverlayStatusText.visibility = View.GONE
+        } else {
+            viewerOverlayStatusText.visibility = View.VISIBLE
+            viewerOverlayStatusText.text =
+                panelSnapshot.selectedTitle + " • " + statusValue + "\n" + videoDebugValue
+        }
     }
 
     private fun applySceneVisibility() {

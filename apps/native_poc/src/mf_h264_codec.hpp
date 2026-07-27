@@ -66,6 +66,7 @@ class H264Encoder {
  private:
   bool configure_types();
   void apply_low_latency_codec_api();
+  void report_sps_profile_once(const uint8_t* data, size_t size);
 
   Microsoft::WRL::ComPtr<IMFTransform> enc_;
   uint32_t width_ = 0;
@@ -77,6 +78,7 @@ class H264Encoder {
   uint64_t frameIndex_ = 0;
   int64_t sampleDurationHns_ = 0;
   std::vector<uint8_t> sequenceHeaderAnnexb_;
+  bool spsProfileReported_ = false;
   bool started_ = false;
   bool asyncTransform_ = false;
   bool usingHardware_ = false;

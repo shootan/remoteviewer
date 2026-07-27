@@ -1689,6 +1689,24 @@ RealtimeRuntimeStats run_realtime_runtime_host(int seconds) {
       videoContext->VideoProcessorSetStreamSourceRect(vp.Get(), 0, TRUE, &srcRect);
       videoContext->VideoProcessorSetStreamDestRect(vp.Get(), 0, TRUE, &dstRect);
       videoContext->VideoProcessorSetOutputTargetRect(vp.Get(), TRUE, &dstRect);
+      // This blt is the RGB->YCbCr conversion. With the color spaces unset the driver picks
+      // its own matrix and range, so the same capture looked different per GPU vendor.
+      // Input is full-range RGB; output is BT.709 limited, which is what browsers assume
+      // for HD H.264 with no VUI colour description.
+      D3D11_VIDEO_PROCESSOR_COLOR_SPACE inColor{};
+      inColor.Usage = 0;
+      inColor.RGB_Range = 0;  // full range
+      inColor.YCbCr_Matrix = 1;
+      inColor.Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255;
+      videoContext->VideoProcessorSetStreamColorSpace(vp.Get(), 0, &inColor);
+      D3D11_VIDEO_PROCESSOR_COLOR_SPACE outColor{};
+      outColor.Usage = 0;
+      outColor.RGB_Range = 0;
+      outColor.YCbCr_Matrix = 1;  // BT.709
+      outColor.Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235;
+      videoContext->VideoProcessorSetOutputColorSpace(vp.Get(), &outColor);
+      videoContext->VideoProcessorSetStreamAutoProcessingMode(vp.Get(), 0, FALSE);
+
       D3D11_VIDEO_PROCESSOR_STREAM stm{};
       stm.Enable = TRUE;
       stm.pInputSurface = inView.Get();

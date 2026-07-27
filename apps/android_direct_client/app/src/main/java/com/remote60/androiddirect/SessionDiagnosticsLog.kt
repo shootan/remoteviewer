@@ -1,11 +1,14 @@
 package com.remote60.androiddirect
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.Executors
 
 class SessionDiagnosticsLog(context: Context) {
     companion object {
@@ -15,19 +18,39 @@ class SessionDiagnosticsLog(context: Context) {
 
     private val timestampFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
     private val lock = Any()
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val logDir = context.getExternalFilesDir(null) ?: context.filesDir
     private val logFile = File(logDir, "android_direct_client_session.log")
     private val rotatedFile = File(logDir, "android_direct_client_session.log.1")
 
     fun filePath(): String = logFile.absolutePath
 
+    // log() is called from click handlers and the 250 ms UI poll, so the file append runs on
+    // a single background thread instead of blocking the main thread on storage.
+    private val writer = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "remote60-diag-log").apply { isDaemon = true }
+    }
+
     fun log(tag: String, message: String) {
         val line = timestampFormat.format(Date()) + " [" + tag + "] " + message
         Log.i(LOG_TAG, line)
-        synchronized(lock) {
-            rotateIfNeeded()
-            logFile.parentFile?.mkdirs()
-            logFile.appendText(line + "\n")
+        writer.execute {
+            synchronized(lock) {
+                try {
+                    rotateIfNeeded()
+                    logFile.parentFile?.mkdirs()
+                    logFile.appendText(line + "\n")
+                } catch (t: Throwable) {
+                    Log.w(LOG_TAG, "diagnostics append failed: ${t.message}")
+                }
+            }
+        }
+    }
+
+    fun readAllTextAsync(onResult: (String) -> Unit) {
+        writer.execute {
+            val text = readAllText()
+            mainHandler.post { onResult(text) }
         }
     }
 

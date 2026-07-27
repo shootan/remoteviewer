@@ -275,10 +275,41 @@ std::wstring utf8_to_wide(const std::string& utf8) {
   return out;
 }
 
+// GDI defaults to the legacy System bitmap font, which is unscalable and cannot render
+// non-Latin window titles. Everything drawn through draw_text_utf8 selects this instead.
+HFONT gUiFont = nullptr;
+int gUiDpi = 96;
+
+int dpi_scale(int value) { return MulDiv(value, gUiDpi, 96); }
+
+void ensure_ui_font(HWND hwnd) {
+  int dpi = 96;
+  if (hwnd) {
+    const UINT windowDpi = GetDpiForWindow(hwnd);
+    if (windowDpi > 0) dpi = static_cast<int>(windowDpi);
+  }
+  if (gUiFont && dpi == gUiDpi) return;
+  if (gUiFont) {
+    DeleteObject(gUiFont);
+    gUiFont = nullptr;
+  }
+  gUiDpi = dpi;
+  LOGFONTW lf{};
+  lf.lfHeight = -MulDiv(9, dpi, 72);
+  lf.lfWeight = FW_NORMAL;
+  lf.lfCharSet = DEFAULT_CHARSET;
+  lf.lfQuality = CLEARTYPE_QUALITY;
+  lf.lfPitchAndFamily = DEFAULT_PITCH | FF_DONTCARE;
+  std::wcscpy(lf.lfFaceName, L"Segoe UI");
+  gUiFont = CreateFontIndirectW(&lf);
+}
+
 void draw_text_utf8(HDC hdc, const std::string& text, RECT* rect, UINT format) {
   if (!rect) return;
   const std::wstring wide = utf8_to_wide(text);
+  HGDIOBJ oldFont = gUiFont ? SelectObject(hdc, gUiFont) : nullptr;
   DrawTextW(hdc, wide.c_str(), static_cast<int>(wide.size()), rect, format);
+  if (oldFont) SelectObject(hdc, oldFont);
 }
 
 Args parse_args(int argc, char** argv) {
@@ -643,16 +674,18 @@ std::atomic<uint64_t> gSuppressMouseUntilUs{0};
 std::atomic<uint32_t> gActiveTouchPointerId{0};
 std::atomic<bool> gActiveTouchDown{false};
 
-constexpr int kPickerPanelPreferredWidth = 560;
-constexpr int kPickerPanelMinWidth = 420;
-constexpr int kPanelMargin = 12;
-constexpr int kPanelButtonHeight = 30;
-constexpr int kPanelButtonGap = 8;
-constexpr int kPanelSectionGap = 12;
-constexpr int kPanelInfoHeight = 64;
-constexpr int kPanelStatsHeight = 128;
-constexpr int kPanelItemHeight = 28;
-constexpr int kPanelItemGap = 4;
+// Panel metrics are authored at 96 DPI and scaled per monitor; the process is
+// per-monitor DPI aware, so raw pixel constants would render tiny on a scaled display.
+inline int kPickerPanelPreferredWidth() { return dpi_scale(560); }
+inline int kPickerPanelMinWidth() { return dpi_scale(420); }
+inline int kPanelMargin() { return dpi_scale(12); }
+inline int kPanelButtonHeight() { return dpi_scale(30); }
+inline int kPanelButtonGap() { return dpi_scale(8); }
+inline int kPanelSectionGap() { return dpi_scale(12); }
+inline int kPanelInfoHeight() { return dpi_scale(64); }
+inline int kPanelStatsHeight() { return dpi_scale(128); }
+inline int kPanelItemHeight() { return dpi_scale(28); }
+inline int kPanelItemGap() { return dpi_scale(4); }
 constexpr uint32_t kRuntimeBitrateMin = 300000;
 constexpr uint32_t kRuntimeBitrateMax = 30000000;
 constexpr uint32_t kRuntimeBitrateStep = 250000;
@@ -784,7 +817,7 @@ ClientLayout compute_client_layout(HWND hwnd) {
   layout.videoRect = make_rect(0, 0, clientW, clientH);
 
   if (!gWindowPickerVisible.load(std::memory_order_relaxed)) {
-    layout.toggleButtonRect = make_rect(kPanelMargin, kPanelMargin, 120, kPanelButtonHeight);
+    layout.toggleButtonRect = make_rect(kPanelMargin(), kPanelMargin(), dpi_scale(120), kPanelButtonHeight());
     layout.panelRect = make_rect(0, 0, 0, 0);
     layout.refreshButtonRect = make_rect(0, 0, 0, 0);
     layout.desktopButtonRect = make_rect(0, 0, 0, 0);
@@ -794,36 +827,36 @@ ClientLayout compute_client_layout(HWND hwnd) {
     return layout;
   }
 
-  const int panelW = std::clamp(clientW - 80, kPickerPanelMinWidth, kPickerPanelPreferredWidth);
-  const int panelH = std::max<int>(360, clientH - 80);
-  const int panelX = std::max<int>(kPanelMargin, (clientW - panelW) / 2);
-  const int panelY = std::max<int>(kPanelMargin, (clientH - panelH) / 2);
+  const int panelW = std::clamp(clientW - dpi_scale(80), kPickerPanelMinWidth(), kPickerPanelPreferredWidth());
+  const int panelH = std::max<int>(dpi_scale(360), clientH - dpi_scale(80));
+  const int panelX = std::max<int>(kPanelMargin(), (clientW - panelW) / 2);
+  const int panelY = std::max<int>(kPanelMargin(), (clientH - panelH) / 2);
   layout.panelRect = make_rect(panelX, panelY, panelW, panelH);
   layout.toggleButtonRect = make_rect(0, 0, 0, 0);
 
-  const int panelInnerW = std::max<int>(1, panelW - (kPanelMargin * 2));
+  const int panelInnerW = std::max<int>(1, panelW - (kPanelMargin() * 2));
 
-  const int buttonY = kPanelMargin;
-  const int buttonW = std::max<int>(100, (panelInnerW - kPanelButtonGap) / 2);
-  layout.refreshButtonRect = make_rect(layout.panelRect.left + kPanelMargin, layout.panelRect.top + buttonY,
-                                       buttonW, kPanelButtonHeight);
-  layout.desktopButtonRect = make_rect(layout.refreshButtonRect.right + kPanelButtonGap,
-                                       layout.panelRect.top + buttonY, buttonW, kPanelButtonHeight);
+  const int buttonY = kPanelMargin();
+  const int buttonW = std::max<int>(dpi_scale(100), (panelInnerW - kPanelButtonGap()) / 2);
+  layout.refreshButtonRect = make_rect(layout.panelRect.left + kPanelMargin(), layout.panelRect.top + buttonY,
+                                       buttonW, kPanelButtonHeight());
+  layout.desktopButtonRect = make_rect(layout.refreshButtonRect.right + kPanelButtonGap(),
+                                       layout.panelRect.top + buttonY, buttonW, kPanelButtonHeight());
 
-  const int infoY = layout.refreshButtonRect.bottom + kPanelSectionGap;
-  layout.selectedInfoRect = make_rect(layout.panelRect.left + kPanelMargin, infoY,
+  const int infoY = layout.refreshButtonRect.bottom + kPanelSectionGap();
+  layout.selectedInfoRect = make_rect(layout.panelRect.left + kPanelMargin(), infoY,
                                       panelInnerW,
-                                      kPanelInfoHeight);
+                                      kPanelInfoHeight());
 
-  const int listY = layout.selectedInfoRect.bottom + kPanelSectionGap;
-  const int listH = std::max<int>(120, layout.panelRect.bottom - listY - kPanelStatsHeight - kPanelMargin - kPanelSectionGap);
-  layout.listRect = make_rect(layout.panelRect.left + kPanelMargin, listY,
+  const int listY = layout.selectedInfoRect.bottom + kPanelSectionGap();
+  const int listH = std::max<int>(dpi_scale(120), layout.panelRect.bottom - listY - kPanelStatsHeight() - kPanelMargin() - kPanelSectionGap());
+  layout.listRect = make_rect(layout.panelRect.left + kPanelMargin(), listY,
                               panelInnerW, listH);
 
-  const int statsY = layout.listRect.bottom + kPanelSectionGap;
-  layout.statsRect = make_rect(layout.panelRect.left + kPanelMargin, statsY,
+  const int statsY = layout.listRect.bottom + kPanelSectionGap();
+  layout.statsRect = make_rect(layout.panelRect.left + kPanelMargin(), statsY,
                                panelInnerW,
-                               std::max<int>(40, layout.panelRect.bottom - statsY - kPanelMargin));
+                               std::max<int>(dpi_scale(40), layout.panelRect.bottom - statsY - kPanelMargin()));
   return layout;
 }
 
@@ -969,7 +1002,7 @@ void set_window_panel_status(const std::string& status) {
 void apply_window_list_snapshot(const ControlWindowListMessage& msg) {
   const ClientLayout layout = compute_client_layout(gHwnd);
   const int visibleCount =
-      std::max<int>(1, (layout.listRect.bottom - layout.listRect.top) / (kPanelItemHeight + kPanelItemGap));
+      std::max<int>(1, (layout.listRect.bottom - layout.listRect.top) / (kPanelItemHeight() + kPanelItemGap()));
   const auto result = gWindowPanelState.ApplyWindowList(msg, visibleCount);
   log_client_line(result.logLine);
 }
@@ -985,7 +1018,7 @@ void apply_window_selected_result(const ControlWindowSelectedMessage& msg) {
 void scroll_window_list(HWND hwnd, int deltaSteps) {
   const ClientLayout layout = compute_client_layout(hwnd);
   const int visibleCount =
-      std::max<int>(1, (layout.listRect.bottom - layout.listRect.top) / (kPanelItemHeight + kPanelItemGap));
+      std::max<int>(1, (layout.listRect.bottom - layout.listRect.top) / (kPanelItemHeight() + kPanelItemGap()));
   gWindowPanelState.Scroll(deltaSteps, visibleCount);
 }
 
@@ -993,7 +1026,7 @@ bool try_hit_window_list_item(HWND hwnd, int x, int y, uint64_t* outWindowId) {
   if (!outWindowId) return false;
   const ClientLayout layout = compute_client_layout(hwnd);
   if (!point_in_rect(layout.listRect, x, y)) return false;
-  const int itemStep = kPanelItemHeight + kPanelItemGap;
+  const int itemStep = kPanelItemHeight() + kPanelItemGap();
   const int row = (y - layout.listRect.top - 6) / itemStep;
   if (row < 0) return false;
 
@@ -1168,7 +1201,7 @@ void draw_overlay(HDC hdc) {
   std::string statusLine = selectionLocked ? std::string("Mode: locked by config") : panelStatus;
   draw_text_utf8(hdc, statusLine, &textRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-  const int itemStep = kPanelItemHeight + kPanelItemGap;
+  const int itemStep = kPanelItemHeight() + kPanelItemGap();
   const int visibleCount = std::max<int>(1, (layout.listRect.bottom - layout.listRect.top - 8) / itemStep);
   const int clampedScroll = std::clamp(scrollIndex, 0, std::max<int>(0, static_cast<int>(windowItems.size()) - visibleCount));
   if (windowItems.empty()) {
@@ -1189,9 +1222,11 @@ void draw_overlay(HDC hdc) {
       RECT itemRect = make_rect(layout.listRect.left + 6,
                                 layout.listRect.top + 6 + visibleIndex * itemStep,
                                 std::max<int>(1, static_cast<int>(layout.listRect.right - layout.listRect.left) - 12),
-                                kPanelItemHeight);
+                                kPanelItemHeight());
       const bool active = (entry.id == selectedId);
-      draw_panel_button(hdc, itemRect, entry.title.c_str(), active, selectionLocked);
+      // Draw the row chrome only; the label is rendered left-aligned below so long window
+      // titles can ellipsize instead of being centred and clipped on both sides.
+      draw_panel_button(hdc, itemRect, nullptr, active, selectionLocked);
       RECT itemText = itemRect;
       itemText.left += 8;
       itemText.right -= 8;
@@ -1338,9 +1373,10 @@ struct Nv12D3dRenderer {
         "  float Y = max(0.0, y - 16.0 / 255.0);"
         "  float U = c.x - 0.5;"
         "  float V = c.y - 0.5;"
-        "  float r = 1.16438356 * Y + 1.59602678 * V;"
-        "  float g = 1.16438356 * Y - 0.39176229 * U - 0.81296764 * V;"
-        "  float b = 1.16438356 * Y + 2.01723214 * U;"
+        // BT.709 limited range; must match bgra_to_nv12/nv12_to_bgra in mf_h264_codec.cpp.
+        "  float r = 1.16438356 * Y + 1.79274107 * V;"
+        "  float g = 1.16438356 * Y - 0.21324861 * U - 0.53290933 * V;"
+        "  float b = 1.16438356 * Y + 2.11240178 * U;"
         "  return float4(saturate(r), saturate(g), saturate(b), 1.0);"
         "}";
 
@@ -1582,6 +1618,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DESTROY:
       PostQuitMessage(0);
       return 0;
+    case WM_DPICHANGED: {
+      ensure_ui_font(hwnd);
+      const RECT* suggested = reinterpret_cast<const RECT*>(lp);
+      if (suggested) {
+        SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                     suggested->right - suggested->left, suggested->bottom - suggested->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+      }
+      InvalidateRect(hwnd, nullptr, TRUE);
+      return 0;
+    }
     case WM_MOUSEMOVE:
       if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
@@ -2009,7 +2056,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
               bmi.bmiHeader.biPlanes = 1;
               bmi.bmiHeader.biBitCount = 32;
               bmi.bmiHeader.biCompression = BI_RGB;
-              SetStretchBltMode(hdc, COLORONCOLOR);
+              SetStretchBltMode(hdc, HALFTONE);
+              SetBrushOrgEx(hdc, 0, 0, nullptr);
               FillRect(hdc, &videoRect, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
               StretchDIBits(hdc, contentRect.left, contentRect.top,
                             contentRect.right - contentRect.left, contentRect.bottom - contentRect.top,
@@ -2031,7 +2079,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           bmi.bmiHeader.biPlanes = 1;
           bmi.bmiHeader.biBitCount = 32;
           bmi.bmiHeader.biCompression = BI_RGB;
-          SetStretchBltMode(hdc, COLORONCOLOR);
+          SetStretchBltMode(hdc, HALFTONE);
+              SetBrushOrgEx(hdc, 0, 0, nullptr);
           FillRect(hdc, &videoRect, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
           StretchDIBits(hdc, contentRect.left, contentRect.top,
                         contentRect.right - contentRect.left, contentRect.bottom - contentRect.top,
@@ -2187,11 +2236,12 @@ bool create_window() {
   wc.lpszClassName = cls;
   if (!RegisterClassExW(&wc)) return false;
 
-  gHwnd = CreateWindowExW(0, cls, L"remote60 native video client poc",
+  gHwnd = CreateWindowExW(0, cls, L"remote60 native video client",
                           WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                           static_cast<int>(gWindowW), static_cast<int>(gWindowH),
                           nullptr, nullptr, inst, nullptr);
   if (!gHwnd) return false;
+  ensure_ui_font(gHwnd);
   ShowWindow(gHwnd, SW_SHOW);
   UpdateWindow(gHwnd);
   return true;
@@ -2202,6 +2252,12 @@ bool create_window() {
 int main(int argc, char** argv) {
   std::cout.setf(std::ios::unitbuf);
   std::cerr.setf(std::ios::unitbuf);
+
+  // Without this the OS bitmap-stretches the whole window on a scaled display, which blurs
+  // both the panel text and the decoded video. Must run before any window is created.
+  if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
+    (void)SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE);
+  }
 
   const Args args = parse_args(argc, argv);
   gTraceEvery = args.traceEvery;

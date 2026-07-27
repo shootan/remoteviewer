@@ -45,14 +45,17 @@ uint64_t steady_now_us() {
 
 bool find_start_code(const std::vector<uint8_t>& data, size_t offset, size_t* outPos, size_t* outCodeSize) {
   if (!outPos || !outCodeSize) return false;
-  for (size_t i = offset; i + 3 < data.size(); ++i) {
+  // Bounds are inclusive of the last byte: a start code ending exactly at the buffer tail
+  // is still a start code, and skipping it dropped the final NAL of a frame.
+  if (data.size() < 3) return false;
+  for (size_t i = offset; i + 2 < data.size(); ++i) {
     if (data[i] != 0 || data[i + 1] != 0) continue;
     if (data[i + 2] == 1) {
       *outPos = i;
       *outCodeSize = 3;
       return true;
     }
-    if (i + 4 < data.size() && data[i + 2] == 0 && data[i + 3] == 1) {
+    if (i + 3 < data.size() && data[i + 2] == 0 && data[i + 3] == 1) {
       *outPos = i;
       *outCodeSize = 4;
       return true;
@@ -363,6 +366,14 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height)
   assert(csd1_.capacity() >= csd1Size);
   AMediaFormat_setBuffer(format, AMEDIAFORMAT_KEY_CSD_0, csd0Data, csd0Size);
   AMediaFormat_setBuffer(format, AMEDIAFORMAT_KEY_CSD_1, csd1Data, csd1Size);
+  // Remote control is interactive, so ask the decoder not to build an output reorder queue.
+  // "low-latency" is API 30+; older or non-supporting codecs ignore unknown keys, and the
+  // vendor spellings cover devices that shipped the behaviour before it was standardised.
+  AMediaFormat_setInt32(format, "low-latency", 1);
+  AMediaFormat_setInt32(format, "vendor.low-latency.enable", 1);
+  AMediaFormat_setInt32(format, "vdec-lowlatency", 1);
+  // 0 selects realtime priority.
+  AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_PRIORITY, 0);
 
   media_status_t status = AMediaCodec_configure(codec_, format, window_, nullptr, 0);
   AMediaFormat_delete(format);
