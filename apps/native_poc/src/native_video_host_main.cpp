@@ -965,6 +965,42 @@ bool send_desktop_mouse_input(DWORD flags, DWORD mouseData = 0) {
   return SendInput(1, &in, sizeof(INPUT)) == 1;
 }
 
+// Real keyboard events for the focused window.
+//
+// Chrome, Electron apps and anything UWP-backed ignore a synthetic WM_CHAR/WM_KEYDOWN that
+// was PostMessage'd at them: they route keyboard through their own focus manager and consult
+// real key state, which a posted message never establishes. Desktop mode already drives the
+// real cursor with SendInput, so the keyboard has to travel the same way to reach them.
+bool send_desktop_unicode_char(wchar_t ch) {
+  INPUT in[2]{};
+  for (int i = 0; i < 2; ++i) {
+    in[i].type = INPUT_KEYBOARD;
+    in[i].ki.wVk = 0;
+    in[i].ki.wScan = static_cast<WORD>(ch);
+    in[i].ki.dwFlags = KEYEVENTF_UNICODE | (i == 1 ? KEYEVENTF_KEYUP : 0);
+  }
+  return SendInput(2, in, sizeof(INPUT)) == 2;
+}
+
+bool send_desktop_virtual_key(uint32_t vk, bool keyUp) {
+  INPUT in{};
+  in.type = INPUT_KEYBOARD;
+  in.ki.wVk = static_cast<WORD>(vk);
+  in.ki.wScan = static_cast<WORD>(MapVirtualKeyW(vk, MAPVK_VK_TO_VSC));
+  in.ki.dwFlags = keyUp ? KEYEVENTF_KEYUP : 0;
+  // Extended keys need the flag or the target sees the numpad twin instead.
+  switch (vk) {
+    case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN:
+    case VK_HOME: case VK_END: case VK_PRIOR: case VK_NEXT:
+    case VK_INSERT: case VK_DELETE: case VK_RCONTROL: case VK_RMENU:
+      in.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+      break;
+    default:
+      break;
+  }
+  return SendInput(1, &in, sizeof(INPUT)) == 1;
+}
+
 enum class InputInjectResult : uint8_t {
   Injected = 0,
   IgnoredMove = 1,
@@ -1087,16 +1123,13 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
                : InputInjectResult::Failed;
   }
   if (input.kind == 5 || input.kind == 6) {
-    HWND targetHwnd = nullptr;
-    targetHwnd = choose_text_target_window(targetHwnd, desktopInputState);
-    if (!targetHwnd || !IsWindow(targetHwnd)) return InputInjectResult::NoTarget;
-    if (resolvedTargetOut) *resolvedTargetOut = describe_input_target(targetHwnd);
+    // Desktop mode drives the real cursor, so keyboard goes to the real focus too.
     const bool keyUp = (input.kind == 6);
-    const UINT msg = keyUp ? WM_KEYUP : WM_KEYDOWN;
-    const LPARAM lp = key_event_lparam(input.keyCode, keyUp);
-    if (!PostMessageW(targetHwnd, msg, static_cast<WPARAM>(input.keyCode), lp)) {
-      return InputInjectResult::Failed;
+    if (resolvedTargetOut) {
+      HWND focusHwnd = GetForegroundWindow();
+      *resolvedTargetOut = focusHwnd ? describe_input_target(focusHwnd) : std::string("sendinput");
     }
+    if (!send_desktop_virtual_key(input.keyCode, keyUp)) return InputInjectResult::Failed;
     if (desktopInputState) {
       std::lock_guard<std::mutex> lk(desktopInputState->mu);
       update_synthetic_keyboard_state(desktopInputState->keyState, input.keyCode, keyUp);
@@ -1114,18 +1147,39 @@ InputInjectResult apply_input_text_message(const ControlInputTextMessage& text,
   if (text.utf16Count == 0 || text.utf16Count > remote60::native_poc::kControlInputTextMaxUtf16) {
     return InputInjectResult::Unsupported;
   }
-  HWND fallbackHwnd = nullptr;
-  if (!desktopMode) {
-    fallbackHwnd = reinterpret_cast<HWND>(static_cast<uintptr_t>(
-        captureTargetHwnd.load(std::memory_order_acquire)));
+  if (desktopMode) {
+    // Real keystrokes to the focused window; WM_CHAR posted at a top-level window is ignored
+    // by Chrome and other apps that own their own input routing.
+    if (resolvedTargetOut) {
+      HWND focusHwnd = GetForegroundWindow();
+      *resolvedTargetOut = focusHwnd ? describe_input_target(focusHwnd) : std::string("sendinput");
+    }
+    for (uint16_t i = 0; i < text.utf16Count; ++i) {
+      const uint16_t ch = text.utf16[i];
+      if (ch == 0) continue;
+      if (!send_desktop_unicode_char(static_cast<wchar_t>(ch))) return InputInjectResult::Failed;
+    }
+    return InputInjectResult::Injected;
   }
+
+  HWND fallbackHwnd = reinterpret_cast<HWND>(static_cast<uintptr_t>(
+      captureTargetHwnd.load(std::memory_order_acquire)));
   HWND targetHwnd = choose_text_target_window(fallbackHwnd, desktopInputState);
   if (!targetHwnd || !IsWindow(targetHwnd)) return InputInjectResult::NoTarget;
   if (resolvedTargetOut) *resolvedTargetOut = describe_input_target(targetHwnd);
+  // Window mode targets a specific window without stealing focus, so posted messages are the
+  // deliberate mechanism. If that window already holds focus, real keystrokes reach far more
+  // applications, so prefer them.
+  const HWND foreground = GetForegroundWindow();
+  const bool targetHasFocus =
+      foreground && (foreground == targetHwnd || IsChild(foreground, targetHwnd) ||
+                     GetAncestor(targetHwnd, GA_ROOT) == foreground);
   for (uint16_t i = 0; i < text.utf16Count; ++i) {
     const uint16_t ch = text.utf16[i];
     if (ch == 0) continue;
-    if (!PostMessageW(targetHwnd, WM_CHAR, static_cast<WPARAM>(ch), 1)) {
+    if (targetHasFocus) {
+      if (!send_desktop_unicode_char(static_cast<wchar_t>(ch))) return InputInjectResult::Failed;
+    } else if (!PostMessageW(targetHwnd, WM_CHAR, static_cast<WPARAM>(ch), 1)) {
       return InputInjectResult::Failed;
     }
   }

@@ -4018,3 +4018,43 @@ Next action
 - 실기기에서 타이핑 반응성 확인(게이팅 켠 상태에서 지연 없어야 함).
 - 유휴 시 대역폭이 실제로 떨어지는지 폰 기준으로 확인.
 - `구현계획.md`의 RDP/DXGI 미검증 항목을 닫는다.
+
+### 187) 2026-07-27 키보드 입력 먹통 근본 원인: PostMessage(WM_CHAR)를 최신 앱이 무시
+Goal
+- 실기기 리포트("크롬에 글씨가 안 써진다, 키보드 계속 먹통") 재현 및 수정.
+
+원인
+- 호스트의 텍스트 주입이 `PostMessageW(targetHwnd, WM_CHAR, ch, 1)`이었다
+  (`native_video_host_main.cpp` `apply_input_text_message`).
+  특수키도 `PostMessageW(WM_KEYDOWN/WM_KEYUP)`.
+- Chrome/Electron/UWP 계열은 자체 focus manager로 키보드를 라우팅하고 실제 키 상태를 참조하므로,
+  최상위 창에 post된 합성 WM_CHAR를 무시한다. 대상 HWND도 마지막 클릭 위치에서 해석한 창이라
+  실제 포커스된 입력 필드가 아니다.
+- 즉 앞서 고친 Android IME 조합 문제와 무관하게, **호스트 단에서 애초에 아무 글자도 전달되지 않고 있었다.**
+
+실측 증거 (메모장, 동일 창에 두 방식 각각 주입 후 WM_GETTEXT로 회수)
+- `PostMessage(WM_CHAR)` 최상위 창 -> 결과 `''` (전달 안 됨)
+- `SendInput(KEYEVENTF_UNICODE)`   -> 결과 `'SENDINPUT-한글'` (한글 포함 정상)
+- 메모장이 이 정도이므로 Chrome은 더 엄격하다.
+
+수정
+- desktop 모드: 텍스트는 `SendInput` + `KEYEVENTF_UNICODE`, 특수키는 `SendInput` 가상키로 전환.
+  desktop 모드는 이미 실제 커서를 움직이므로 키보드도 실제 포커스로 가는 것이 일관적이다.
+  확장키(방향키/Home/End/PgUp/PgDn/Insert/Delete/우Ctrl/우Alt)는 `KEYEVENTF_EXTENDEDKEY` 부여.
+- window 모드: 배경 창에 포커스를 뺏지 않고 넣는 것이 설계 의도이므로 PostMessage를 유지하되,
+  대상 창이 이미 포그라운드면(자기 자신/조상 일치) `SendInput`을 우선 사용한다.
+  실제 사용에서 "보고 있는 창을 클릭하고 타이핑"하는 흔한 경우를 커버한다.
+
+Validation / build / test result
+- Windows Release/Debug 빌드 성공, `shared_core_test` PASS
+- localhost 게이트 `OVERALL_OK=True`, `UDP_ASSEMBLY_DROPPED_TOTAL=0`
+- 주입 방식 A/B는 위 실측 증거로 확정
+
+정정
+- 직전 항목(186)에서 "RDP 때문에 성능이 낮게 측정됐다"고 기록했으나, 사용자는 평소 RDP를 끄고 사용해 왔다.
+  해당 발견은 **이 세션의 측정 환경에만 해당**하며 사용자 체감 성능과는 무관하다. 과대해석이었다.
+
+Next action
+- 실기기에서 크롬 주소창에 한글/영문 입력 재확인.
+- window 모드(창 목록에서 선택) 상태에서도 입력이 되는지 별도 확인 필요.
+  포그라운드가 아닌 배경 창은 여전히 PostMessage 경로이므로 Chrome 대상이면 실패할 수 있다.
