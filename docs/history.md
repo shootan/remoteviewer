@@ -4196,3 +4196,42 @@ Validation / build / test result
 Next action
 - 실기기 확인. 단축키 실제 동작 여부는 host의 SendInput 경로(187)와 함께 검증된다.
 - 필요 시 단축키 목록을 사용자 편집 가능하게 확장(OSLink의 "단축키 추가"에 해당).
+
+### 192) 2026-07-27 키 패널 미동작 수정(창 모드 경로) + 키보드 배열을 실제 키보드 형태로 재작성
+Goal
+- 사용자 리포트: "키보드 만든 거 동작 안 한다, 복사/붙여넣기 안 된다",
+  "키보드 배치가 아니다 — 스크린샷처럼 키보드처럼 만들어야 한다".
+
+원인 1: 창(window) 모드에서 키가 여전히 PostMessage로 나감
+- 187에서 desktop 모드 kind 5/6만 `SendInput`으로 전환했고, window 모드 분기는
+  `PostMessageW(WM_KEYDOWN/WM_KEYUP)`를 그대로 유지하고 있었다.
+- 사용자가 Windows 탭에서 크롬 창을 직접 선택한 상태였다면 모든 키가 무시된다.
+  특히 조합키는 posted message로는 실제 키 상태를 만들지 못하므로 Ctrl+C가 성립할 수 없다.
+- 수정: window 모드에서도 대상 창이 포그라운드면 `send_desktop_virtual_key`(SendInput)를 사용하고,
+  포커스가 없는 배경 창일 때만 기존 PostMessage 경로를 유지한다(배경 주입 설계 의도 보존).
+
+원인 2: 키 배열이 키보드 모양이 아니었음
+- 첫 구현이 `wrap_content` 버튼을 가로로 나열해 라벨 길이에 따라 키 폭이 제각각이었다.
+- 재작성: 각 행을 `layout_weight` 기반 그리드로 구성. 일반 키 1 유닛,
+  Tab 1.5 / Caps 1.75 / Enter 2.25 / Shift 2.25·1.75 / Space 5 / Back 2 등 실제 키보드 비율을 따른다.
+  행이 서로 정렬되어 키보드 형태가 나온다.
+- 스크린샷과 동일하게 키에 한글 자모 병기(두벌식): Q/ㅂ W/ㅈ E/ㄷ ... M/ㅡ,
+  숫자열은 shift 기호 병기(1/! 2/@ ...), 기호키는 OEM 가상키로 매핑
+  (`;:` OEM_1, `=+` OEM_PLUS, `,<` OEM_COMMA, `-_` OEM_MINUS, `.>` OEM_PERIOD,
+   `/?` OEM_2, `` `~ `` OEM_3, `[{` OEM_4, `\|` OEM_5, `]}` OEM_6, `'"` OEM_7).
+- 행 구성: Esc+F1~F12+PrtSc/Scr/Pause / 숫자열+Back / Tab+QWERTY / Caps+ASDF+Enter /
+  Shift+ZXCV+Shift+↑ / Ctrl·Win·Alt·Space·Alt·Menu·Ctrl+←↓→ / Ins·Home·PgUp·Del·End·PgDn.
+- 조합키 버튼은 눌린 상태를 alpha로 표시하고, 같은 vk의 좌/우 키가 함께 갱신되도록 버튼 목록을 유지한다.
+- 기본 탭을 `키보드`로 변경(단축키는 보조).
+- 단축키 목록 확장: 다시실행(Ctrl+Y), 찾기(Ctrl+F), 바탕화면(Win+D), 창 캡처(Alt+PrtSc) 추가.
+
+Validation / build / test result
+- Windows Release/Debug 빌드 성공, `shared_core_test` PASS
+- Android `clean assembleDebug` 성공, `dist/remote60-android-20260727.apk` 갱신(8.95MB)
+- 호스트 재빌드를 위해 실행 중이던 호스트를 종료함(접속된 클라이언트 없음 확인 후).
+  **새 호스트 실행 필요** — 키 입력 수정은 호스트 측 변경이므로 재시작해야 반영된다.
+
+Next action
+- 실기기 확인: 단축키 탭 복사/붙여넣기, 키보드 탭 Ctrl+C, 배열이 키보드 형태로 보이는지.
+- 여전히 안 되면 host 로그의 `inputEvents`/`inputInjectFail`/resolved target을 확인해
+  desktop/window 어느 경로로 들어가는지 판별한다.

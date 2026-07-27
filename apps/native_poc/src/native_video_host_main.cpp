@@ -1085,11 +1085,22 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
       if (!keyTargetHwnd || !IsWindow(keyTargetHwnd)) return InputInjectResult::NoTarget;
       if (resolvedTargetOut) *resolvedTargetOut = describe_input_target(keyTargetHwnd);
       const bool keyUp = (input.kind == 6);
-      const UINT msg = keyUp ? WM_KEYUP : WM_KEYDOWN;
-      const LPARAM lp = key_event_lparam(input.keyCode, keyUp);
-      if (!PostMessageW(keyTargetHwnd, msg, static_cast<WPARAM>(input.keyCode), lp)) {
-        return InputInjectResult::Failed;
+      // Same reasoning as the text path: a posted WM_KEYDOWN never reaches Chrome and
+      // friends, and a modifier posted this way does not establish real key state, so
+      // Ctrl+C could never work. Use real keystrokes whenever the target holds focus.
+      const HWND foreground = GetForegroundWindow();
+      const bool targetHasFocus =
+          foreground && (foreground == keyTargetHwnd ||
+                         GetAncestor(keyTargetHwnd, GA_ROOT) == foreground);
+      bool ok = false;
+      if (targetHasFocus) {
+        ok = send_desktop_virtual_key(input.keyCode, keyUp);
+      } else {
+        const UINT msg = keyUp ? WM_KEYUP : WM_KEYDOWN;
+        const LPARAM lp = key_event_lparam(input.keyCode, keyUp);
+        ok = PostMessageW(keyTargetHwnd, msg, static_cast<WPARAM>(input.keyCode), lp) != 0;
       }
+      if (!ok) return InputInjectResult::Failed;
       if (desktopInputState) {
         std::lock_guard<std::mutex> lk(desktopInputState->mu);
         update_synthetic_keyboard_state(desktopInputState->keyState, input.keyCode, keyUp);
