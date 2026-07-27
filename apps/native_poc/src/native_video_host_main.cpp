@@ -1710,26 +1710,30 @@ void choose_abr_720_size(uint32_t captureW, uint32_t captureH, uint32_t* outW, u
   *outH = targetH;
 }
 
+// Fraction of the frame that differs from the previous one, in permille.
+//
+// Returns 0 if and only if the two frames are byte-identical, so callers can use "0" as an
+// exact "nothing moved" test. Anything else reports at least 1.
+//
+// This deliberately does a full blockwise compare rather than sampling pixels. The previous
+// version sampled a few thousand pixels and averaged their intensity delta, which reports 0
+// for small localised edits: typing one character changes ~200 of 2 million pixels, so the
+// average barely moves and the frame looks static. Gating on that throttles typing. memcmp is
+// SIMD-optimised in the CRT and costs far less than the frame copy already being done.
 uint32_t estimate_bgra_change_permille(const uint8_t* a, const uint8_t* b, size_t sizeBytes,
-                                       uint32_t sampleTarget) {
-  if (!a || !b || sizeBytes < 4) return 1000;
-  const size_t pixels = sizeBytes / 4;
-  if (pixels == 0) return 1000;
-  const size_t stridePixels = std::max<size_t>(1, pixels / std::max<uint32_t>(1, sampleTarget));
-  uint64_t diffSum = 0;
-  uint64_t sampleCount = 0;
-  for (size_t i = 0; i < pixels; i += stridePixels) {
-    const size_t idx = i * 4;
-    const int db = std::abs(static_cast<int>(a[idx + 0]) - static_cast<int>(b[idx + 0]));
-    const int dg = std::abs(static_cast<int>(a[idx + 1]) - static_cast<int>(b[idx + 1]));
-    const int dr = std::abs(static_cast<int>(a[idx + 2]) - static_cast<int>(b[idx + 2]));
-    diffSum += static_cast<uint64_t>((db + dg + dr) / 3);
-    ++sampleCount;
+                                       uint32_t /*sampleTarget*/) {
+  if (!a || !b || sizeBytes == 0) return 1000;
+  constexpr size_t kBlockBytes = 4096;
+  const size_t blockCount = (sizeBytes + kBlockBytes - 1) / kBlockBytes;
+  size_t changedBlocks = 0;
+  for (size_t i = 0; i < blockCount; ++i) {
+    const size_t offset = i * kBlockBytes;
+    const size_t len = std::min(kBlockBytes, sizeBytes - offset);
+    if (std::memcmp(a + offset, b + offset, len) != 0) ++changedBlocks;
   }
-  if (sampleCount == 0) return 1000;
-  const uint64_t avgDiff = diffSum / sampleCount;  // 0..255
-  const uint64_t permille = (avgDiff * 1000ULL) / 255ULL;
-  return static_cast<uint32_t>(std::min<uint64_t>(permille, 1000ULL));
+  if (changedBlocks == 0) return 0;
+  const uint64_t permille = (static_cast<uint64_t>(changedBlocks) * 1000ULL) / blockCount;
+  return static_cast<uint32_t>(std::clamp<uint64_t>(permille, 1, 1000));
 }
 
 // Average 2x2 blocks into one pixel. Bilinear alone only samples 2 taps per axis, so a
@@ -4959,15 +4963,12 @@ int main(int argc, char** argv) {
         frameGatingChangePermilleSum += frameGatingChangePermilleLast;
         ++frameGatingChangePermilleCount;
 
-        if (frameGatingChangePermilleLast <= frameGatingStaticThresholdPermille) {
+        if (frameGatingChangePermilleLast == 0) {
           frameGatingStaticStreak = std::min<uint32_t>(frameGatingStaticStreak + 1, 60000);
           frameGatingMotionStreak = 0;
-        } else if (frameGatingChangePermilleLast >= frameGatingMotionThresholdPermille) {
+        } else {
           frameGatingMotionStreak = std::min<uint32_t>(frameGatingMotionStreak + 1, 60000);
           frameGatingStaticStreak = 0;
-        } else {
-          if (frameGatingStaticStreak > 0) --frameGatingStaticStreak;
-          if (frameGatingMotionStreak > 0) --frameGatingMotionStreak;
         }
       } else {
         frameGatingStaticStreak = 0;
@@ -4976,9 +4977,14 @@ int main(int argc, char** argv) {
       }
 
       const bool prevStaticMode = frameGatingStaticMode;
+      // Any difference at all counts as motion. estimate_bgra_change_permille returns 0 only
+      // for a byte-identical frame, so this both leaves static mode on the first changed
+      // frame and never throttles an edit that is too small to move a percentage threshold.
+      const bool motionNow = frameGatingChangePermilleLast > 0;
       if (!frameGatingStaticMode && frameGatingStaticStreak >= frameGatingEnterFrames) {
         frameGatingStaticMode = true;
-      } else if (frameGatingStaticMode && frameGatingMotionStreak >= frameGatingExitFrames) {
+      } else if (frameGatingStaticMode &&
+                 (motionNow || frameGatingMotionStreak >= frameGatingExitFrames)) {
         frameGatingStaticMode = false;
       }
       if (prevStaticMode != frameGatingStaticMode) {
@@ -4992,7 +4998,9 @@ int main(int argc, char** argv) {
 
       const bool keyReqPending = clientRequestedKeyFrame.load(std::memory_order_acquire);
       const uint64_t targetIntervalUs = frameGatingStaticMode ? frameGatingStaticIntervalUs : activeFrameIntervalUs;
-      if (!keyReqPending &&
+      // The static interval throttles idle scenes; it must never hold back a frame that
+      // actually changed, or the first interaction after idle arrives late.
+      if (!keyReqPending && !motionNow &&
           frameGatingLastSentUs > 0 &&
           queuePopUs < (frameGatingLastSentUs + targetIntervalUs)) {
         ++frameGatingSkipCount;

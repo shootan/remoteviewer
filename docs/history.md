@@ -3965,3 +3965,56 @@ Next action
 - 실기기에서 Wi-Fi 재확인. 여전히 깨지면 `REMOTE60_NATIVE_UDP_PACE_PEAK_PERCENT=150`으로 더 조여본다.
 - 한글 조합이 호스트에서 음절 단위로 실시간 갱신되는지, 백스페이스가 분해로 동작하는지 확인.
 - 손실이 사라진 뒤에도 복구 흐림이 남으면 그때 키프레임 비트 여유(VBV/peak) 조정을 A/B로 판단한다.
+
+### 186) 2026-07-27 프레임 게이팅 정확도 수정 + 콘솔 세션 DXGI 검증
+Goal
+- 사용자 제안("이전 화면과 비교해 변화 없으면 전송 중단") 검토 및 반영.
+- 기능은 이미 M5 frame gating으로 존재했으나 프로파일에서 꺼져 있었고, 켜기 전에 검출기 정확도를 먼저 확인했다.
+
+발견한 결함 1: 변화 검출기가 작은 변화를 전혀 감지하지 못함
+- `estimate_bgra_change_permille`는 수천 개 샘플 픽셀의 **평균 밝기 차이**를 permille로 환산했다.
+- 1920x1080에서 글자 한 개(약 200픽셀)가 바뀌어도 평균은 거의 움직이지 않아 결과가 0이 된다.
+  즉 타이핑이 "정적"으로 분류되어 5~8fps로 눌린다. 이 상태로 게이팅을 켜면 명백한 회귀였다.
+- 수정: 4KB 블록 단위 `memcmp` 전수 비교로 교체. 두 프레임이 바이트 단위로 동일할 때만 0을 반환하고,
+  그 외에는 변경 블록 비율(최소 1)을 반환한다. memcmp는 CRT에서 SIMD 최적화되어 있어
+  이미 수행 중인 프레임 복사보다 훨씬 싸다.
+
+발견한 결함 2: 정적 모드에서 움직임이 최대 125ms 지연됨
+- 기존 skip 조건이 변화 여부와 무관하게 `staticInterval`(8fps=125ms) 내 프레임을 전부 버렸고,
+  정적 모드 탈출도 motion streak 2프레임을 요구했다.
+  결과적으로 유휴 상태에서 첫 클릭/키입력이 최대 125~250ms 늦게 전송된다. 사용자가 우려한 그대로다.
+- 수정: `motionNow`(= 변화가 조금이라도 있음)이면 즉시 정적 모드를 벗어나고 interval skip도 우회한다.
+  이제 유휴 구간만 throttle되고, 변화는 항상 즉시 전송된다.
+
+프로파일
+- `automation/native_video_profile_android_lan.json`: `frameGatingDisable=false`, `staticSceneFps=5`.
+- permille 임계값은 사실상 레거시 노브가 되었다(게이트가 "동일 여부"로 판정).
+
+참고: 대역폭 관점의 실제 이득
+- H.264 inter prediction이 이미 정적 화면을 처리한다. 실측에서 정적 장면은 `mbps=0.12`,
+  `encRatioX100=20247`(약 202배 압축)까지 떨어진다.
+  따라서 게이팅의 주된 이득은 대역폭보다 **캡처 readback/스케일/NV12 변환/인코딩을 통째로 건너뛰는 CPU·GPU 절감**이다.
+- 사용자가 언급한 "변경된 부분만 전송"은 H.264가 이미 하고 있는 일이므로 별도 구현은 중복이다.
+
+콘솔 세션 DXGI 검증 (RDP 종료 후)
+- 사용자가 RDP를 끊고 물리 콘솔에서 로그인하면서 세션 구조가 바뀌었다:
+  이전 `console 9 Conn`(무인, 잠금화면) + `shotan 2 Disc`(RDP) -> 현재 `console shotan 2 Active`.
+- 이 상태에서 DXGI를 강제해 측정한 결과 **fallback 없이 성공**했다:
+  `desktop_backend=dxgi capture=1920x1080`, `capture-started=1`, `dxgi_no_output_found` 없음.
+  `callbackFrames`가 초당 44프레임으로, RDP 세션에서 WGC가 내주던 2~5프레임과 크게 다르다.
+- 즉 `docs/구현계획.md`에 장기 미해결로 남아 있던 `current RDP session: dxgi_no_output_found -> WGC fallback`은
+  코드 결함이 아니라 **RDP 세션 환경 제약**이었음이 확정되었다.
+  같은 이유로 그동안 `GATE_A_DECODED_FPS_OK=False`가 계속 나온 것도 설명된다.
+- 이는 잠금화면 설계(S2)에도 직접적인 근거다: 콘솔 세션에서는 DXGI가 정상 동작하므로
+  보안 데스크톱 캡처의 전제가 성립한다.
+
+Validation / build / test result
+- Windows Release/Debug 빌드 성공, `shared_core_test` PASS
+- localhost 게이트: `OVERALL_OK=True`, `UDP_ASSEMBLY_DROPPED_TOTAL=0`, `MALFORMED_TOTAL=0`
+- 게이팅 동작 확인: 유휴 시 초당 15~19프레임 skip, 변화 발생 시 `motionStreak=1`에서 즉시 탈출
+- 새 검출기가 클라이언트 창이 화면에 있는 상황을 올바르게 `motion`으로 유지(기존 검출기는 static으로 오판)
+
+Next action
+- 실기기에서 타이핑 반응성 확인(게이팅 켠 상태에서 지연 없어야 함).
+- 유휴 시 대역폭이 실제로 떨어지는지 폰 기준으로 확인.
+- `구현계획.md`의 RDP/DXGI 미검증 항목을 닫는다.
