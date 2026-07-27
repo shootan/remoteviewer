@@ -30,6 +30,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <mfapi.h>
@@ -670,6 +671,38 @@ void log_client_line(const std::string& line);
 WindowPanelStateModel gWindowPanelState;
 std::atomic<bool> gWindowPickerVisible{true};
 std::atomic<bool> gWindowPickerToggleDown{false};
+std::atomic<int> gGridScrollRow{0};  // card grid scroll, in whole rows
+
+// Preview thumbnails for the target picker, fetched over the control channel when the host
+// advertises kControlWindowListFlagThumbnails. Keyed by window id; id 0 is the desktop.
+struct WindowThumb {
+  uint32_t width = 0;
+  uint32_t height = 0;
+  std::vector<uint8_t> bgra;
+  uint64_t fetchedUs = 0;
+};
+std::mutex gThumbMu;
+std::unordered_map<uint64_t, WindowThumb> gThumbs;
+std::deque<uint64_t> gThumbFetchQueue;
+std::atomic<bool> gHostSupportsThumbnails{false};
+constexpr uint64_t kThumbRefreshUs = 5000000;  // refresh a preview after 5 s
+
+void queue_thumbnail_fetches_from_panel() {
+  if (!gHostSupportsThumbnails.load(std::memory_order_relaxed)) return;
+  const WindowPanelSnapshot snap = gWindowPanelState.Snapshot();
+  const uint64_t nowUs = qpc_now_us();
+  std::lock_guard<std::mutex> lk(gThumbMu);
+  auto want = [&](uint64_t id) {
+    const auto it = gThumbs.find(id);
+    if (it != gThumbs.end() && nowUs - it->second.fetchedUs < kThumbRefreshUs) return;
+    if (std::find(gThumbFetchQueue.begin(), gThumbFetchQueue.end(), id) != gThumbFetchQueue.end()) {
+      return;
+    }
+    gThumbFetchQueue.push_back(id);
+  };
+  want(0);
+  for (const auto& item : snap.items) want(item.id);
+}
 std::atomic<uint64_t> gSuppressMouseUntilUs{0};
 std::atomic<uint32_t> gActiveTouchPointerId{0};
 std::atomic<bool> gActiveTouchDown{false};
@@ -716,6 +749,41 @@ RECT make_rect(int x, int y, int w, int h) {
 bool point_in_rect(const RECT& r, int x, int y) {
   return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
 }
+
+// Geometry of the card grid inside ClientLayout::listRect. Cards hold a 16:10 preview and a
+// one-line caption, laid out left-to-right then top-to-bottom.
+struct CardGridMetrics {
+  int cols = 1;
+  int cardW = 0;
+  int cardH = 0;
+  int thumbH = 0;
+  int gap = 0;
+  int visibleRows = 1;
+  int visibleCards = 1;
+};
+
+CardGridMetrics compute_card_grid(const RECT& gridRect) {
+  CardGridMetrics m;
+  m.gap = dpi_scale(14);
+  const int gridW = std::max<int>(1, gridRect.right - gridRect.left);
+  const int gridH = std::max<int>(1, gridRect.bottom - gridRect.top);
+  const int preferredCardW = dpi_scale(232);
+  m.cols = std::max<int>(1, (gridW + m.gap) / (preferredCardW + m.gap));
+  m.cardW = std::max<int>(dpi_scale(140), (gridW - (m.cols - 1) * m.gap) / m.cols);
+  m.thumbH = (m.cardW * 10) / 16;
+  m.cardH = m.thumbH + dpi_scale(30);
+  m.visibleRows = std::max<int>(1, (gridH + m.gap) / (m.cardH + m.gap));
+  m.visibleCards = m.visibleRows * m.cols;
+  return m;
+}
+
+RECT card_rect_for_slot(const RECT& gridRect, const CardGridMetrics& m, int slot) {
+  const int row = slot / m.cols;
+  const int col = slot % m.cols;
+  return make_rect(gridRect.left + col * (m.cardW + m.gap),
+                   gridRect.top + row * (m.cardH + m.gap), m.cardW, m.cardH);
+}
+
 
 RECT aspect_fit_rect(const RECT& containerRect, uint32_t contentWidth, uint32_t contentHeight) {
   const int containerWidth =
@@ -827,36 +895,31 @@ ClientLayout compute_client_layout(HWND hwnd) {
     return layout;
   }
 
-  const int panelW = std::clamp(clientW - dpi_scale(80), kPickerPanelMinWidth(), kPickerPanelPreferredWidth());
-  const int panelH = std::max<int>(dpi_scale(360), clientH - dpi_scale(80));
-  const int panelX = std::max<int>(kPanelMargin(), (clientW - panelW) / 2);
-  const int panelY = std::max<int>(kPanelMargin(), (clientH - panelH) / 2);
-  layout.panelRect = make_rect(panelX, panelY, panelW, panelH);
+  // The home screen owns the whole window: a header band with the actions, a card grid of
+  // capture targets, and a one-line status footer.
+  layout.panelRect = layout.clientRect;
   layout.toggleButtonRect = make_rect(0, 0, 0, 0);
 
-  const int panelInnerW = std::max<int>(1, panelW - (kPanelMargin() * 2));
+  const int margin = dpi_scale(24);
+  const int headerH = dpi_scale(56);
+  const int footerH = dpi_scale(36);
+  const int buttonW = dpi_scale(130);
 
-  const int buttonY = kPanelMargin();
-  const int buttonW = std::max<int>(dpi_scale(100), (panelInnerW - kPanelButtonGap()) / 2);
-  layout.refreshButtonRect = make_rect(layout.panelRect.left + kPanelMargin(), layout.panelRect.top + buttonY,
-                                       buttonW, kPanelButtonHeight());
-  layout.desktopButtonRect = make_rect(layout.refreshButtonRect.right + kPanelButtonGap(),
-                                       layout.panelRect.top + buttonY, buttonW, kPanelButtonHeight());
+  layout.desktopButtonRect =
+      make_rect(clientW - margin - buttonW, margin / 2 + (headerH - kPanelButtonHeight()) / 2,
+                buttonW, kPanelButtonHeight());
+  layout.refreshButtonRect =
+      make_rect(layout.desktopButtonRect.left - kPanelButtonGap() - dpi_scale(96),
+                layout.desktopButtonRect.top, dpi_scale(96), kPanelButtonHeight());
+  layout.selectedInfoRect = make_rect(margin, margin / 2,
+                                      std::max<int>(1, layout.refreshButtonRect.left - margin * 2),
+                                      headerH);
 
-  const int infoY = layout.refreshButtonRect.bottom + kPanelSectionGap();
-  layout.selectedInfoRect = make_rect(layout.panelRect.left + kPanelMargin(), infoY,
-                                      panelInnerW,
-                                      kPanelInfoHeight());
-
-  const int listY = layout.selectedInfoRect.bottom + kPanelSectionGap();
-  const int listH = std::max<int>(dpi_scale(120), layout.panelRect.bottom - listY - kPanelStatsHeight() - kPanelMargin() - kPanelSectionGap());
-  layout.listRect = make_rect(layout.panelRect.left + kPanelMargin(), listY,
-                              panelInnerW, listH);
-
-  const int statsY = layout.listRect.bottom + kPanelSectionGap();
-  layout.statsRect = make_rect(layout.panelRect.left + kPanelMargin(), statsY,
-                               panelInnerW,
-                               std::max<int>(dpi_scale(40), layout.panelRect.bottom - statsY - kPanelMargin()));
+  const int gridY = margin / 2 + headerH + dpi_scale(10);
+  layout.listRect = make_rect(margin, gridY, std::max<int>(1, clientW - margin * 2),
+                              std::max<int>(dpi_scale(120), clientH - gridY - footerH - dpi_scale(10)));
+  layout.statsRect = make_rect(margin, layout.listRect.bottom + dpi_scale(6),
+                               std::max<int>(1, clientW - margin * 2), footerH);
   return layout;
 }
 
@@ -1001,9 +1064,12 @@ void set_window_panel_status(const std::string& status) {
 
 void apply_window_list_snapshot(const ControlWindowListMessage& msg) {
   const ClientLayout layout = compute_client_layout(gHwnd);
-  const int visibleCount =
-      std::max<int>(1, (layout.listRect.bottom - layout.listRect.top) / (kPanelItemHeight() + kPanelItemGap()));
-  const auto result = gWindowPanelState.ApplyWindowList(msg, visibleCount);
+  const CardGridMetrics grid = compute_card_grid(layout.listRect);
+  const auto result = gWindowPanelState.ApplyWindowList(msg, grid.visibleCards);
+  gHostSupportsThumbnails.store(
+      (msg.flags & remote60::native_poc::kControlWindowListFlagThumbnails) != 0,
+      std::memory_order_relaxed);
+  queue_thumbnail_fetches_from_panel();
   log_client_line(result.logLine);
 }
 
@@ -1017,21 +1083,39 @@ void apply_window_selected_result(const ControlWindowSelectedMessage& msg) {
 
 void scroll_window_list(HWND hwnd, int deltaSteps) {
   const ClientLayout layout = compute_client_layout(hwnd);
-  const int visibleCount =
-      std::max<int>(1, (layout.listRect.bottom - layout.listRect.top) / (kPanelItemHeight() + kPanelItemGap()));
-  gWindowPanelState.Scroll(deltaSteps, visibleCount);
+  const CardGridMetrics grid = compute_card_grid(layout.listRect);
+  const int totalCards = 1 + static_cast<int>(gWindowPanelState.Snapshot().items.size());
+  const int totalRows = (totalCards + grid.cols - 1) / grid.cols;
+  const int maxScrollRow = std::max(0, totalRows - grid.visibleRows);
+  const int cur = gGridScrollRow.load(std::memory_order_relaxed);
+  gGridScrollRow.store(std::clamp(cur + deltaSteps, 0, maxScrollRow), std::memory_order_relaxed);
 }
 
+// Hit-test a grid card. Card index 0 is the pinned Desktop card; window items follow.
 bool try_hit_window_list_item(HWND hwnd, int x, int y, uint64_t* outWindowId) {
   if (!outWindowId) return false;
   const ClientLayout layout = compute_client_layout(hwnd);
   if (!point_in_rect(layout.listRect, x, y)) return false;
-  const int itemStep = kPanelItemHeight() + kPanelItemGap();
-  const int row = (y - layout.listRect.top - 6) / itemStep;
-  if (row < 0) return false;
-
-  const int visibleCount = std::max<int>(1, (layout.listRect.bottom - layout.listRect.top - 8) / itemStep);
-  return gWindowPanelState.TryResolveWindowIdForVisibleRow(row, visibleCount, outWindowId);
+  const CardGridMetrics grid = compute_card_grid(layout.listRect);
+  const int relX = x - layout.listRect.left;
+  const int relY = y - layout.listRect.top;
+  const int col = relX / (grid.cardW + grid.gap);
+  const int row = relY / (grid.cardH + grid.gap);
+  if (col < 0 || col >= grid.cols || row < 0 || row >= grid.visibleRows) return false;
+  // Reject clicks that land in the gaps between cards.
+  if (relX - col * (grid.cardW + grid.gap) >= grid.cardW) return false;
+  if (relY - row * (grid.cardH + grid.gap) >= grid.cardH) return false;
+  const WindowPanelSnapshot snap = gWindowPanelState.Snapshot();
+  const int cardIndex =
+      gGridScrollRow.load(std::memory_order_relaxed) * grid.cols + row * grid.cols + col;
+  if (cardIndex == 0) {
+    *outWindowId = 0;
+    return true;
+  }
+  const int itemIndex = cardIndex - 1;
+  if (itemIndex < 0 || itemIndex >= static_cast<int>(snap.items.size())) return false;
+  *outWindowId = snap.items[static_cast<size_t>(itemIndex)].id;
+  return true;
 }
 
 void enqueue_capture_mode_request(uint16_t mode, uint32_t xPermille, uint32_t yPermille) {
@@ -1135,6 +1219,73 @@ void apply_runtime_tune_delta(int bitrateStep, int keyintStep) {
       bitrateStep, keyintStep, gClientMetrics.recvMbpsX1000.load(std::memory_order_relaxed));
 }
 
+void draw_thumbnail_into(HDC hdc, const RECT& dst, const WindowThumb& thumb) {
+  if (thumb.bgra.empty() || thumb.width == 0 || thumb.height == 0) return;
+  BITMAPINFO bmi{};
+  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bmi.bmiHeader.biWidth = static_cast<LONG>(thumb.width);
+  bmi.bmiHeader.biHeight = -static_cast<LONG>(thumb.height);
+  bmi.bmiHeader.biPlanes = 1;
+  bmi.bmiHeader.biBitCount = 32;
+  bmi.bmiHeader.biCompression = BI_RGB;
+  const RECT fit = aspect_fit_rect(dst, thumb.width, thumb.height);
+  // Thumbnails repaint rarely, so the quality mode is affordable here.
+  SetStretchBltMode(hdc, HALFTONE);
+  SetBrushOrgEx(hdc, 0, 0, nullptr);
+  StretchDIBits(hdc, fit.left, fit.top, fit.right - fit.left, fit.bottom - fit.top, 0, 0,
+                static_cast<int>(thumb.width), static_cast<int>(thumb.height), thumb.bgra.data(),
+                &bmi, DIB_RGB_COLORS, SRCCOPY);
+}
+
+void draw_target_card(HDC hdc, const RECT& card, const CardGridMetrics& grid,
+                      uint64_t windowId, const std::string& title, bool active, bool disabled) {
+  const RECT thumbRect = make_rect(card.left, card.top, card.right - card.left, grid.thumbH);
+  const RECT captionRect = make_rect(card.left, card.top + grid.thumbH, card.right - card.left,
+                                     card.bottom - card.top - grid.thumbH);
+
+  HBRUSH bg = CreateSolidBrush(RGB(24, 28, 36));
+  FillRect(hdc, &thumbRect, bg);
+  DeleteObject(bg);
+  HBRUSH cap = CreateSolidBrush(active ? RGB(38, 70, 52) : RGB(32, 37, 46));
+  FillRect(hdc, &captionRect, cap);
+  DeleteObject(cap);
+
+  bool haveThumb = false;
+  {
+    std::lock_guard<std::mutex> lk(gThumbMu);
+    const auto it = gThumbs.find(windowId);
+    if (it != gThumbs.end()) {
+      draw_thumbnail_into(hdc, thumbRect, it->second);
+      haveThumb = true;
+    }
+  }
+  if (!haveThumb) {
+    RECT ph = thumbRect;
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, RGB(110, 118, 130));
+    draw_text_utf8(hdc, windowId == 0 ? std::string("Desktop") : std::string("Loading preview..."),
+                   &ph, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+  }
+
+  SetBkMode(hdc, TRANSPARENT);
+  SetTextColor(hdc, disabled ? RGB(150, 155, 162) : RGB(236, 239, 243));
+  RECT text = captionRect;
+  text.left += dpi_scale(10);
+  text.right -= dpi_scale(10);
+  draw_text_utf8(hdc, title, &text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+  HBRUSH border = CreateSolidBrush(active ? RGB(88, 178, 122) : RGB(52, 58, 70));
+  RECT frame = card;
+  FrameRect(hdc, &frame, border);
+  DeleteObject(border);
+  if (active) {
+    HBRUSH accent = CreateSolidBrush(RGB(88, 178, 122));
+    RECT inner{card.left + 1, card.top + 1, card.right - 1, card.bottom - 1};
+    FrameRect(hdc, &inner, accent);
+    DeleteObject(accent);
+  }
+}
+
 void draw_overlay(HDC hdc) {
   const ClientLayout layout = compute_client_layout(gHwnd);
   const bool pickerVisible = gWindowPickerVisible.load(std::memory_order_relaxed);
@@ -1143,143 +1294,89 @@ void draw_overlay(HDC hdc) {
     return;
   }
 
-  draw_alpha_rect(hdc, layout.clientRect, RGB(10, 12, 16), 255);
-  const RECT panel = layout.panelRect;
-  draw_alpha_rect(hdc, panel, RGB(18, 21, 28), 248);
-  const uint64_t nowUs = qpc_now_us();
-  const OverlayMetricAverages avg5s = collect_overlay_averages(nowUs, 5000000ULL);
-  const uint32_t width = gClientMetrics.width.load(std::memory_order_relaxed);
-  const uint32_t height = gClientMetrics.height.load(std::memory_order_relaxed);
-  const uint32_t recvFpsX100 = gClientMetrics.recvFpsX100.load(std::memory_order_relaxed);
-  const uint32_t decFpsX100 = gClientMetrics.decodedFpsX100.load(std::memory_order_relaxed);
-  const uint32_t mbpsX1000 = gClientMetrics.recvMbpsX1000.load(std::memory_order_relaxed);
-  const uint64_t latUs = gClientMetrics.avgLatencyUs.load(std::memory_order_relaxed);
-  const uint32_t dropped = gClientMetrics.skippedFrames.load(std::memory_order_relaxed);
-  const uint64_t updatedUs = gClientMetrics.updatedQpcUs.load(std::memory_order_relaxed);
-  const uint64_t staleMs = (updatedUs > 0 && nowUs >= updatedUs) ? ((nowUs - updatedUs) / 1000ULL) : 0;
-  const uint32_t hostCapPid = gHostCaptureTargetPid.load(std::memory_order_relaxed);
-  const uint32_t hostCapFlags = gHostCaptureTargetFlags.load(std::memory_order_relaxed);
-  const uint32_t hostCapRebind = gHostCaptureRebindCount.load(std::memory_order_relaxed);
-  const uint64_t hostCapHwnd = gHostCaptureTargetHwnd.load(std::memory_order_relaxed);
-  const uint64_t hostCapMetaUs = gHostCaptureMetaUpdatedUs.load(std::memory_order_relaxed);
-  const uint64_t hostCapMetaAgeMs = (hostCapMetaUs > 0 && nowUs >= hostCapMetaUs) ? ((nowUs - hostCapMetaUs) / 1000ULL) : 0;
-  std::string hostCapProcess;
-  std::string hostCapTitle;
-  {
-    std::lock_guard<std::mutex> lk(gHostCaptureMetaMu);
-    hostCapProcess = gHostCaptureTargetProcess;
-    hostCapTitle = gHostCaptureTargetTitle;
-  }
+  draw_alpha_rect(hdc, layout.clientRect, RGB(13, 15, 20), 255);
+
   const WindowPanelSnapshot windowPanel = gWindowPanelState.Snapshot();
   const std::vector<WindowTargetUiEntry>& windowItems = windowPanel.items;
   const uint64_t selectedId = windowPanel.selectedId;
-  const std::string& selectedTitle = windowPanel.selectedTitle;
   const std::string& panelStatus = windowPanel.status;
   const bool selectionLocked = windowPanel.selectionLocked;
-  const int scrollIndex = windowPanel.scrollIndex;
 
-  draw_panel_button(hdc, layout.refreshButtonRect, "Refresh", false, !gControlConnected.load(std::memory_order_relaxed));
-  draw_panel_button(hdc, layout.desktopButtonRect, "Desktop Mode", selectedId == 0,
+  // Header: product title and status on the left, actions on the right.
+  SetBkMode(hdc, TRANSPARENT);
+  SetTextColor(hdc, RGB(240, 243, 247));
+  RECT titleRect = layout.selectedInfoRect;
+  {
+    HFONT big = CreateFontW(-MulDiv(15, gUiDpi, 72), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HGDIOBJ old = big ? SelectObject(hdc, big) : nullptr;
+    RECT t = titleRect;
+    DrawTextW(hdc, L"Remote60", -1, &t, DT_LEFT | DT_SINGLELINE);
+    if (old) SelectObject(hdc, old);
+    if (big) DeleteObject(big);
+  }
+  RECT subRect = titleRect;
+  subRect.top += dpi_scale(28);
+  SetTextColor(hdc, RGB(150, 158, 170));
+  std::string statusLine =
+      selectionLocked ? std::string("Target locked by host config") : panelStatus;
+  if (!gControlConnected.load(std::memory_order_relaxed)) statusLine = "Connecting to host...";
+  draw_text_utf8(hdc, statusLine, &subRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+  draw_panel_button(hdc, layout.refreshButtonRect, "Refresh", false,
+                    !gControlConnected.load(std::memory_order_relaxed));
+  draw_panel_button(hdc, layout.desktopButtonRect, "Desktop", selectedId == 0,
                     !gControlConnected.load(std::memory_order_relaxed) || selectionLocked);
 
-  draw_alpha_rect(hdc, layout.selectedInfoRect, RGB(24, 29, 36), 228);
-  draw_alpha_rect(hdc, layout.listRect, RGB(18, 22, 28), 218);
-  draw_alpha_rect(hdc, layout.statsRect, RGB(20, 24, 30), 208);
+  // Card grid: desktop preview first, then one card per shareable window.
+  const CardGridMetrics grid = compute_card_grid(layout.listRect);
+  const int totalCards = 1 + static_cast<int>(windowItems.size());
+  const int totalRows = (totalCards + grid.cols - 1) / grid.cols;
+  const int maxScrollRow = std::max(0, totalRows - grid.visibleRows);
+  int scrollRow = std::clamp(gGridScrollRow.load(std::memory_order_relaxed), 0, maxScrollRow);
+  gGridScrollRow.store(scrollRow, std::memory_order_relaxed);
+  const int firstCard = scrollRow * grid.cols;
 
-  SetBkMode(hdc, TRANSPARENT);
-  SetTextColor(hdc, RGB(235, 238, 242));
-  RECT textRect = layout.selectedInfoRect;
-  textRect.left += 10;
-  textRect.right -= 10;
-  textRect.top += 8;
-  draw_text_utf8(hdc, "Home", &textRect, DT_LEFT | DT_SINGLELINE);
-
-  textRect.top += 20;
-  std::string selectedLine = std::string("Selected target: ") + selectedTitle;
-  draw_text_utf8(hdc, selectedLine, &textRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-  textRect.top += 18;
-  std::string statusLine = selectionLocked ? std::string("Mode: locked by config") : panelStatus;
-  draw_text_utf8(hdc, statusLine, &textRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-  const int itemStep = kPanelItemHeight() + kPanelItemGap();
-  const int visibleCount = std::max<int>(1, (layout.listRect.bottom - layout.listRect.top - 8) / itemStep);
-  const int clampedScroll = std::clamp(scrollIndex, 0, std::max<int>(0, static_cast<int>(windowItems.size()) - visibleCount));
-  if (windowItems.empty()) {
-    RECT emptyRect = layout.listRect;
-    emptyRect.left += 10;
-    emptyRect.top += 10;
-    emptyRect.right -= 10;
-    SetTextColor(hdc, RGB(180, 185, 190));
-    draw_text_utf8(hdc,
-                   selectionLocked ? std::string("Window list hidden by config lock")
-                                   : std::string("No shareable windows. Click Refresh."),
-                   &emptyRect, DT_LEFT | DT_WORDBREAK);
-  } else {
-    for (int visibleIndex = 0; visibleIndex < visibleCount; ++visibleIndex) {
-      const int itemIndex = clampedScroll + visibleIndex;
-      if (itemIndex >= static_cast<int>(windowItems.size())) break;
-      const auto& entry = windowItems[itemIndex];
-      RECT itemRect = make_rect(layout.listRect.left + 6,
-                                layout.listRect.top + 6 + visibleIndex * itemStep,
-                                std::max<int>(1, static_cast<int>(layout.listRect.right - layout.listRect.left) - 12),
-                                kPanelItemHeight());
-      const bool active = (entry.id == selectedId);
-      // Draw the row chrome only; the label is rendered left-aligned below so long window
-      // titles can ellipsize instead of being centred and clipped on both sides.
-      draw_panel_button(hdc, itemRect, nullptr, active, selectionLocked);
-      RECT itemText = itemRect;
-      itemText.left += 8;
-      itemText.right -= 8;
-      SetTextColor(hdc, selectionLocked ? RGB(165, 170, 175) : RGB(235, 238, 242));
-      draw_text_utf8(hdc, entry.title, &itemText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  for (int slot = 0; slot < grid.visibleCards; ++slot) {
+    const int cardIndex = firstCard + slot;
+    if (cardIndex >= totalCards) break;
+    const RECT card = card_rect_for_slot(layout.listRect, grid, slot);
+    if (cardIndex == 0) {
+      draw_target_card(hdc, card, grid, 0, "Desktop (full screen)", selectedId == 0,
+                       selectionLocked);
+    } else {
+      const auto& entry = windowItems[static_cast<size_t>(cardIndex - 1)];
+      draw_target_card(hdc, card, grid, entry.id, entry.title, entry.id == selectedId,
+                       selectionLocked);
     }
   }
 
-  std::vector<std::string> statsLines;
-  statsLines.reserve(6);
-  {
-    std::ostringstream oss;
-    oss << "1. Pick Desktop or a window.";
-    statsLines.push_back(oss.str());
-  }
-  {
-    std::ostringstream oss;
-    oss << "2. Selection closes Home and opens fullscreen video.";
-    statsLines.push_back(oss.str());
-  }
-  {
-    std::ostringstream oss;
-    oss << "3. Use the top-left Targets button to come back.";
-    statsLines.push_back(oss.str());
-  }
-  {
-    std::ostringstream oss;
-    oss << "Desktop mode sends input by screen point.";
-    statsLines.push_back(oss.str());
-  }
-  {
-    std::ostringstream oss;
-    oss << "Window mode sends input to the selected window.";
-    statsLines.push_back(oss.str());
-  }
-  {
-    std::ostringstream oss;
-    oss << "Control=" << (gControlConnected.load(std::memory_order_relaxed) ? "connected" : "off")
-        << "  input=" << (gInputEnabled.load(std::memory_order_relaxed) ? "on" : "off");
-    statsLines.push_back(oss.str());
+  if (windowItems.empty()) {
+    RECT emptyRect = layout.listRect;
+    emptyRect.top += grid.cardH + dpi_scale(18);
+    SetTextColor(hdc, RGB(150, 158, 170));
+    draw_text_utf8(hdc,
+                   selectionLocked ? std::string("Window list hidden by host config")
+                                   : std::string("No shareable windows yet. Click Refresh."),
+                   &emptyRect, DT_CENTER | DT_SINGLELINE);
   }
 
-  RECT statsText = layout.statsRect;
-  statsText.left += 10;
-  statsText.right -= 10;
-  statsText.top += 8;
-  SetTextColor(hdc, RGB(220, 225, 230));
-  for (const auto& line : statsLines) {
-    RECT lineRect = statsText;
-    draw_text_utf8(hdc, line, &lineRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-    statsText.top += 18;
-    if (statsText.top >= layout.statsRect.bottom - 16) break;
+  // Footer: connection and input state in one quiet line.
+  std::ostringstream foot;
+  foot << (gControlConnected.load(std::memory_order_relaxed) ? "Connected" : "Disconnected")
+       << "   Input " << (gInputEnabled.load(std::memory_order_relaxed) ? "on" : "off");
+  const uint32_t decFpsX100 = gClientMetrics.decodedFpsX100.load(std::memory_order_relaxed);
+  if (decFpsX100 > 0) foot << "   " << (decFpsX100 / 100) << " fps";
+  if (totalRows > grid.visibleRows) {
+    foot << "   Rows " << (scrollRow + 1) << "-"
+         << std::min(totalRows, scrollRow + grid.visibleRows) << " / " << totalRows
+         << " (wheel to scroll)";
   }
+  RECT footRect = layout.statsRect;
+  SetTextColor(hdc, RGB(140, 148, 160));
+  draw_text_utf8(hdc, foot.str(), &footRect,
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
 void log_client_line(const std::string& line) {
@@ -1371,8 +1468,8 @@ struct Nv12D3dRenderer {
         "  float y = texY.Sample(smp, uv).r;"
         "  float2 c = texUV.Sample(smp, uv).rg;"
         "  float Y = max(0.0, y - 16.0 / 255.0);"
-        "  float U = c.x - 0.5;"
-        "  float V = c.y - 0.5;"
+        "  float U = c.x - 128.0 / 255.0;"
+        "  float V = c.y - 128.0 / 255.0;"
         // BT.709 limited range; must match bgra_to_nv12/nv12_to_bgra in mf_h264_codec.cpp.
         "  float r = 1.16438356 * Y + 1.79274107 * V;"
         "  float g = 1.16438356 * Y - 0.21324861 * U - 0.53290933 * V;"
@@ -1820,7 +1917,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       UINT32 pointerId = GET_POINTERID_WPARAM(wp);
       POINTER_INPUT_TYPE pointerType = PT_POINTER;
       if (!GetPointerType(pointerId, &pointerType) || pointerType != PT_TOUCH) {
-        return DefWindowProc(hwnd, msg, wp, lp);
+        return DefWindowProcW(hwnd, msg, wp, lp);
       }
       POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
       ScreenToClient(hwnd, &p);
@@ -1903,7 +2000,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                  static_cast<LPARAM>(ISC_SHOWUICANDIDATEWINDOW << 2) |
                  static_cast<LPARAM>(ISC_SHOWUICANDIDATEWINDOW << 3) |
                  static_cast<LPARAM>(ISC_SHOWUIGUIDELINE));
-      return DefWindowProc(hwnd, msg, wp, masked);
+      return DefWindowProcW(hwnd, msg, wp, masked);
     }
     case WM_IME_STARTCOMPOSITION:
     case WM_IME_ENDCOMPOSITION:
@@ -2056,8 +2153,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
               bmi.bmiHeader.biPlanes = 1;
               bmi.bmiHeader.biBitCount = 32;
               bmi.bmiHeader.biCompression = BI_RGB;
-              SetStretchBltMode(hdc, HALFTONE);
-              SetBrushOrgEx(hdc, 0, 0, nullptr);
+              SetStretchBltMode(hdc, COLORONCOLOR);
               FillRect(hdc, &videoRect, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
               StretchDIBits(hdc, contentRect.left, contentRect.top,
                             contentRect.right - contentRect.left, contentRect.bottom - contentRect.top,
@@ -2079,8 +2175,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           bmi.bmiHeader.biPlanes = 1;
           bmi.bmiHeader.biBitCount = 32;
           bmi.bmiHeader.biCompression = BI_RGB;
-          SetStretchBltMode(hdc, HALFTONE);
-              SetBrushOrgEx(hdc, 0, 0, nullptr);
+          SetStretchBltMode(hdc, COLORONCOLOR);
           FillRect(hdc, &videoRect, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
           StretchDIBits(hdc, contentRect.left, contentRect.top,
                         contentRect.right - contentRect.left, contentRect.bottom - contentRect.top,
@@ -2219,13 +2314,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     }
     default:
-      return DefWindowProc(hwnd, msg, wp, lp);
+      return DefWindowProcW(hwnd, msg, wp, lp);
   }
 }
 
+// UNICODE is not defined for this target, so the generic Win32 names resolve to the ANSI
+// entry points. This window is registered and created wide, so every message API it touches
+// must be the explicit *W form -- DefWindowProcA on a Unicode window read the wide title as
+// ANSI and truncated it to "r", and delivered WM_CHAR as ANSI.
 bool create_window() {
   HINSTANCE inst = GetModuleHandle(nullptr);
-  const wchar_t* cls = L"Remote60NativeVideoClientPoc";
+  const wchar_t* cls = L"Remote60NativeVideoClient";
   WNDCLASSEXW wc{};
   wc.cbSize = sizeof(wc);
   wc.lpfnWndProc = WndProc;
@@ -2242,6 +2341,12 @@ bool create_window() {
                           nullptr, nullptr, inst, nullptr);
   if (!gHwnd) return false;
   ensure_ui_font(gHwnd);
+  // The process is per-monitor DPI aware, so the requested size is physical pixels; rescale
+  // to keep the intended logical size on scaled displays.
+  if (gUiDpi != 96) {
+    SetWindowPos(gHwnd, nullptr, 0, 0, dpi_scale(static_cast<int>(gWindowW)),
+                 dpi_scale(static_cast<int>(gWindowH)), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+  }
   ShowWindow(gHwnd, SW_SHOW);
   UpdateWindow(gHwnd);
   return true;
@@ -2503,6 +2608,55 @@ int main(int argc, char** argv) {
         gInputEnabled = inputChannelEnabled;
         gControlScheduler.Reset(args.controlIntervalMs, qpc_now_us());
         controlThread = std::thread([&]() {
+        // Fetch one queued preview over the control socket. Runs between scheduler
+        // actions on the same strict request/response pipeline, one card per call so a
+        // large backlog cannot starve input events. Only invoked when the host advertised
+        // the capability, because an older host would drain the request and never reply.
+        // Returns: 1 fetched, 0 nothing to do, -1 socket failure (stream desynced).
+        auto fetch_one_thumbnail = [&]() -> int {
+          if (!gHostSupportsThumbnails.load(std::memory_order_relaxed)) return 0;
+          uint64_t id = 0;
+          {
+            std::lock_guard<std::mutex> lk(gThumbMu);
+            if (gThumbFetchQueue.empty()) return 0;
+            id = gThumbFetchQueue.front();
+            gThumbFetchQueue.pop_front();
+          }
+          remote60::native_poc::ControlWindowThumbnailRequestMessage req{};
+          req.header.magic = remote60::native_poc::kMagic;
+          req.header.type =
+              static_cast<uint16_t>(MessageType::ControlWindowThumbnailRequest);
+          req.header.size = static_cast<uint16_t>(sizeof(req));
+          req.seq = 0;
+          req.windowId = id;
+          req.maxWidth = 256;
+          req.maxHeight = 160;
+          req.clientSendQpcUs = qpc_now_us();
+          if (!remote60::native_poc::send_all(controlSock, &req, sizeof(req))) return -1;
+          remote60::native_poc::ControlWindowThumbnailHeader rsp{};
+          if (!remote60::native_poc::recv_all(controlSock, &rsp, sizeof(rsp))) return -1;
+          if (rsp.header.magic != remote60::native_poc::kMagic ||
+              rsp.header.type != static_cast<uint16_t>(MessageType::ControlWindowThumbnail) ||
+              rsp.payloadSize > remote60::native_poc::kWindowThumbnailMaxPayloadBytes) {
+            return -1;
+          }
+          std::vector<uint8_t> payload(rsp.payloadSize);
+          if (rsp.payloadSize > 0 &&
+              !remote60::native_poc::recv_all(controlSock, payload.data(), payload.size())) {
+            return -1;
+          }
+          if ((rsp.flags & 0x1u) != 0 && rsp.width > 0 && rsp.height > 0 &&
+              payload.size() == static_cast<size_t>(rsp.width) * rsp.height * 4u) {
+            std::lock_guard<std::mutex> lk(gThumbMu);
+            auto& t = gThumbs[id];
+            t.width = rsp.width;
+            t.height = rsp.height;
+            t.bgra = std::move(payload);
+            t.fetchedUs = qpc_now_us();
+            InvalidateRect(gHwnd, nullptr, FALSE);
+          }
+          return 1;
+        };
           while (gRunning.load()) {
             bool didWork = false;
             const uint64_t nowUs = qpc_now_us();
@@ -2590,6 +2744,11 @@ int main(int argc, char** argv) {
               }
             }
 
+            if (!didWork && gWindowPickerVisible.load(std::memory_order_relaxed)) {
+              const int fetched = fetch_one_thumbnail();
+              if (fetched < 0) break;
+              didWork = (fetched > 0);
+            }
             if (!didWork) Sleep(2);
           }
           gControlConnected.store(false, std::memory_order_relaxed);
@@ -3537,7 +3696,7 @@ int main(int argc, char** argv) {
       }
 
       gRunning = false;
-      if (gHwnd) PostMessage(gHwnd, WM_CLOSE, 0, 0);
+      if (gHwnd) PostMessageW(gHwnd, WM_CLOSE, 0, 0);
       return;
     }
 
@@ -3689,20 +3848,20 @@ int main(int argc, char** argv) {
       }
     }
     gRunning = false;
-    if (gHwnd) PostMessage(gHwnd, WM_CLOSE, 0, 0);
+    if (gHwnd) PostMessageW(gHwnd, WM_CLOSE, 0, 0);
   });
 
   MSG msg{};
   while (gRunning.load()) {
     bool hadMessage = false;
-    while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
       hadMessage = true;
       if (msg.message == WM_QUIT) {
         gRunning = false;
         break;
       }
       TranslateMessage(&msg);
-      DispatchMessage(&msg);
+      DispatchMessageW(&msg);
     }
     if (!gRunning.load()) break;
 

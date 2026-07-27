@@ -128,6 +128,12 @@ bool ClientSessionController::RequestWindowList() {
   }
 
   windowPanel_.RequestList("window_list_request pending");
+  {
+    // A manual refresh should also refresh the previews.
+    std::lock_guard<std::mutex> lk(thumbMu_);
+    thumbs_.clear();
+    thumbFetchQueue_.clear();
+  }
   const auto panelSnapshot = windowPanel_.Snapshot();
   std::lock_guard<std::mutex> lock(mu_);
   if (!CanQueueControlRequestLocked()) return false;
@@ -334,6 +340,10 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
           break;
         case TcpControlResponseKind::WindowList: {
           windowPanel_.ApplyWindowList(response.windowList, 4);
+          hostSupportsThumbnails_.store(
+              (response.windowList.flags & kControlWindowListFlagThumbnails) != 0,
+              std::memory_order_relaxed);
+          QueueThumbnailFetchesFromPanel();
           const auto panelSnapshot = windowPanel_.Snapshot();
           std::lock_guard<std::mutex> lock(mu_);
           SyncWindowPanelSnapshotLocked(panelSnapshot);
@@ -359,11 +369,106 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
     }
 
     if (!didWork) {
+      SocketHandle controlSocket = kInvalidSocket;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        controlSocket = tcpControlSocket_;
+      }
+      if (controlSocket != kInvalidSocket) {
+        const int fetched = FetchOneThumbnailLocked(controlSocket);
+        if (fetched < 0) {
+          if (!stopRequested_.load(std::memory_order_acquire)) {
+            SignalRuntimeFailure("thumbnail fetch failed");
+          }
+          break;
+        }
+        didWork = (fetched > 0);
+      }
+    }
+    if (!didWork) {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
   }
 
   FinalizeWorkerExit();
+}
+
+void ClientSessionController::QueueThumbnailFetchesFromPanel() {
+  if (!hostSupportsThumbnails_.load(std::memory_order_relaxed)) return;
+  const WindowPanelSnapshot snap = windowPanel_.Snapshot();
+  std::lock_guard<std::mutex> lk(thumbMu_);
+  auto want = [&](uint64_t id) {
+    if (thumbs_.count(id) != 0) return;  // refreshed on the next list roundtrip instead
+    if (std::find(thumbFetchQueue_.begin(), thumbFetchQueue_.end(), id) !=
+        thumbFetchQueue_.end()) {
+      return;
+    }
+    thumbFetchQueue_.push_back(id);
+  };
+  want(0);
+  for (const auto& item : snap.items) want(item.id);
+}
+
+// Returns 1 if a preview was fetched, 0 if there was nothing to do, -1 on a socket error
+// (the strict request/response stream is then desynced and the session must drop).
+int ClientSessionController::FetchOneThumbnailLocked(SocketHandle controlSocket) {
+  if (!hostSupportsThumbnails_.load(std::memory_order_relaxed)) return 0;
+  uint64_t id = 0;
+  {
+    std::lock_guard<std::mutex> lk(thumbMu_);
+    if (thumbFetchQueue_.empty()) return 0;
+    id = thumbFetchQueue_.front();
+    thumbFetchQueue_.pop_front();
+  }
+  ControlWindowThumbnailRequestMessage req{};
+  req.header.magic = kMagic;
+  req.header.type = static_cast<uint16_t>(MessageType::ControlWindowThumbnailRequest);
+  req.header.size = static_cast<uint16_t>(sizeof(req));
+  req.windowId = id;
+  req.maxWidth = 256;
+  req.maxHeight = 160;
+  req.clientSendQpcUs = now_us();
+  if (!send_all(controlSocket, &req, sizeof(req))) return -1;
+  ControlWindowThumbnailHeader rsp{};
+  if (!recv_all(controlSocket, &rsp, sizeof(rsp))) return -1;
+  if (rsp.header.magic != kMagic ||
+      rsp.header.type != static_cast<uint16_t>(MessageType::ControlWindowThumbnail) ||
+      rsp.payloadSize > kWindowThumbnailMaxPayloadBytes) {
+    return -1;
+  }
+  std::vector<uint8_t> payload(rsp.payloadSize);
+  if (rsp.payloadSize > 0 && !recv_all(controlSocket, payload.data(), payload.size())) {
+    return -1;
+  }
+  if ((rsp.flags & 0x1u) != 0 && rsp.width > 0 && rsp.height > 0 &&
+      payload.size() == static_cast<size_t>(rsp.width) * rsp.height * 4u) {
+    // Wire format is BGRA; Android Bitmap.copyPixelsFromBuffer wants RGBA byte order.
+    for (size_t i = 0; i + 3 < payload.size(); i += 4) {
+      std::swap(payload[i], payload[i + 2]);
+    }
+    std::lock_guard<std::mutex> lk(thumbMu_);
+    auto& t = thumbs_[id];
+    t.width = rsp.width;
+    t.height = rsp.height;
+    t.version = rsp.version;
+    t.rgba = std::move(payload);
+  }
+  return 1;
+}
+
+bool ClientSessionController::CopyWindowThumbnail(uint64_t windowId, WindowThumbnail* out) const {
+  if (!out) return false;
+  std::lock_guard<std::mutex> lk(thumbMu_);
+  const auto it = thumbs_.find(windowId);
+  if (it == thumbs_.end() || it->second.rgba.empty()) return false;
+  *out = it->second;
+  return true;
+}
+
+uint64_t ClientSessionController::WindowThumbnailVersion(uint64_t windowId) const {
+  std::lock_guard<std::mutex> lk(thumbMu_);
+  const auto it = thumbs_.find(windowId);
+  return (it == thumbs_.end()) ? 0 : it->second.version;
 }
 
 void ClientSessionController::VideoReceiveMain() {
@@ -588,6 +693,12 @@ void ClientSessionController::ResetUnlocked() {
   runtimeTune_.Reset(0, 0);
   desktopBackend_.Reset();
   inputQueue_.Reset();
+  {
+    std::lock_guard<std::mutex> lk(thumbMu_);
+    thumbs_.clear();
+    thumbFetchQueue_.clear();
+  }
+  hostSupportsThumbnails_.store(false, std::memory_order_relaxed);
   if (encodedFrameSink_) {
     encodedFrameSink_->OnVideoStreamReset();
   }

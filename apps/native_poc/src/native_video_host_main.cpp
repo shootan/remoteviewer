@@ -65,6 +65,8 @@ using remote60::native_poc::ControlWindowListMessage;
 using remote60::native_poc::ControlWindowListRequestMessage;
 using remote60::native_poc::ControlWindowSelectMessage;
 using remote60::native_poc::ControlWindowSelectedMessage;
+using remote60::native_poc::ControlWindowThumbnailHeader;
+using remote60::native_poc::ControlWindowThumbnailRequestMessage;
 using remote60::native_poc::ControlPingMessage;
 using remote60::native_poc::ControlPongMessage;
 using remote60::native_poc::H264EncodeFrameStats;
@@ -1823,6 +1825,110 @@ bool resize_bgra_bilinear(const uint8_t* src, uint32_t srcW, uint32_t srcH, uint
   return true;
 }
 
+#ifndef PW_RENDERFULLCONTENT
+#define PW_RENDERFULLCONTENT 0x00000002
+#endif
+
+// Grab a still preview of one window for the target picker. The capture pipeline only ever
+// streams a single target, so previews for the *other* listed windows have no pixel source --
+// PrintWindow renders a window into our own DC even while it is occluded, which is what makes
+// a thumbnail grid possible without spinning up a capture session per window.
+bool capture_window_thumbnail(HWND hwnd, uint32_t maxW, uint32_t maxH,
+                              std::vector<uint8_t>* outBgra, uint32_t* outW, uint32_t* outH) {
+  if (!outBgra || !outW || !outH) return false;
+  outBgra->clear();
+  *outW = 0;
+  *outH = 0;
+  if (maxW == 0 || maxH == 0) return false;
+
+  int srcW = 0;
+  int srcH = 0;
+  const bool desktop = (hwnd == nullptr);
+  if (desktop) {
+    srcW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    srcH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+  } else {
+    if (!IsWindow(hwnd) || IsIconic(hwnd)) return false;
+    RECT rc{};
+    if (!GetClientRect(hwnd, &rc)) return false;
+    srcW = rc.right - rc.left;
+    srcH = rc.bottom - rc.top;
+    if (srcW <= 1 || srcH <= 1) {
+      RECT wr{};
+      if (!GetWindowRect(hwnd, &wr)) return false;
+      srcW = wr.right - wr.left;
+      srcH = wr.bottom - wr.top;
+    }
+  }
+  if (srcW <= 1 || srcH <= 1) return false;
+
+  HDC screenDc = GetDC(nullptr);
+  if (!screenDc) return false;
+  HDC memDc = CreateCompatibleDC(screenDc);
+  if (!memDc) {
+    ReleaseDC(nullptr, screenDc);
+    return false;
+  }
+
+  BITMAPINFO bmi{};
+  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bmi.bmiHeader.biWidth = srcW;
+  bmi.bmiHeader.biHeight = -srcH;  // top-down
+  bmi.bmiHeader.biPlanes = 1;
+  bmi.bmiHeader.biBitCount = 32;
+  bmi.bmiHeader.biCompression = BI_RGB;
+  void* bits = nullptr;
+  HBITMAP dib = CreateDIBSection(screenDc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+  if (!dib || !bits) {
+    if (dib) DeleteObject(dib);
+    DeleteDC(memDc);
+    ReleaseDC(nullptr, screenDc);
+    return false;
+  }
+  HGDIOBJ oldBmp = SelectObject(memDc, dib);
+
+  bool captured = false;
+  if (desktop) {
+    captured = (BitBlt(memDc, 0, 0, srcW, srcH, screenDc, GetSystemMetrics(SM_XVIRTUALSCREEN),
+                       GetSystemMetrics(SM_YVIRTUALSCREEN), SRCCOPY | CAPTUREBLT) != FALSE);
+  } else {
+    // PW_RENDERFULLCONTENT is needed for DirectComposition/UWP-backed windows; without it
+    // those render blank. It is ignored on older systems.
+    captured = (PrintWindow(hwnd, memDc, PW_CLIENTONLY | PW_RENDERFULLCONTENT) != FALSE);
+    if (!captured) captured = (PrintWindow(hwnd, memDc, PW_RENDERFULLCONTENT) != FALSE);
+  }
+
+  std::vector<uint8_t> full;
+  if (captured) {
+    full.resize(static_cast<size_t>(srcW) * static_cast<size_t>(srcH) * 4u);
+    std::memcpy(full.data(), bits, full.size());
+    // PrintWindow leaves alpha at 0 for many windows; force opaque so clients can blit it.
+    for (size_t i = 3; i < full.size(); i += 4) full[i] = 0xFF;
+  }
+
+  SelectObject(memDc, oldBmp);
+  DeleteObject(dib);
+  DeleteDC(memDc);
+  ReleaseDC(nullptr, screenDc);
+  if (!captured || full.empty()) return false;
+
+  uint32_t dstW = 0;
+  uint32_t dstH = 0;
+  fit_size_preserving_aspect(static_cast<uint32_t>(srcW), static_cast<uint32_t>(srcH), maxW, maxH,
+                             &dstW, &dstH);
+  if (dstW == 0 || dstH == 0) return false;
+  if (dstW == static_cast<uint32_t>(srcW) && dstH == static_cast<uint32_t>(srcH)) {
+    *outBgra = std::move(full);
+  } else if (!resize_bgra_bilinear(full.data(), static_cast<uint32_t>(srcW),
+                                   static_cast<uint32_t>(srcH), static_cast<uint32_t>(srcW) * 4u,
+                                   dstW, dstH, outBgra)) {
+    return false;
+  }
+  *outW = dstW;
+  *outH = dstH;
+  return true;
+}
+
 struct GpuBgraScaler {
   Microsoft::WRL::ComPtr<ID3D11Device> device;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
@@ -2563,7 +2669,12 @@ int main(int argc, char** argv) {
               rsp.header.type = static_cast<uint16_t>(MessageType::ControlWindowList);
               rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
               rsp.seq = seq;
-              if (windowSelectionLocked.load(std::memory_order_relaxed)) rsp.flags |= 0x1u;
+              if (windowSelectionLocked.load(std::memory_order_relaxed)) {
+                rsp.flags |= remote60::native_poc::kControlWindowListFlagSelectionLocked;
+              }
+              // Tells the client it may ask for previews; older hosts leave this clear and
+              // older clients ignore the bit, so both directions stay compatible.
+              rsp.flags |= remote60::native_poc::kControlWindowListFlagThumbnails;
               rsp.selectedWindowId = selectedWindowIdState.load(std::memory_order_relaxed);
               const auto windows = enumerate_shareable_windows();
               rsp.itemCount = std::min<uint32_t>(
@@ -2583,6 +2694,49 @@ int main(int argc, char** argv) {
                         << " selectedId=" << rsp.selectedWindowId
                         << "\n";
               return send_all(acceptedSock, &rsp, sizeof(rsp));
+            };
+            auto send_window_thumbnail =
+                [&](const ControlWindowThumbnailRequestMessage& req) -> bool {
+              const uint32_t maxW = std::clamp<uint32_t>(
+                  req.maxWidth == 0 ? 256u : req.maxWidth, 16u,
+                  remote60::native_poc::kWindowThumbnailMaxWidth);
+              const uint32_t maxH = std::clamp<uint32_t>(
+                  req.maxHeight == 0 ? 160u : req.maxHeight, 16u,
+                  remote60::native_poc::kWindowThumbnailMaxHeight);
+
+              std::vector<uint8_t> bgra;
+              uint32_t tw = 0;
+              uint32_t th = 0;
+              bool ok = false;
+              if (req.windowId == 0) {
+                ok = capture_window_thumbnail(nullptr, maxW, maxH, &bgra, &tw, &th);
+              } else {
+                HWND hwnd = window_id_to_hwnd(req.windowId);
+                if (should_include_window(hwnd)) {
+                  ok = capture_window_thumbnail(hwnd, maxW, maxH, &bgra, &tw, &th);
+                }
+              }
+              if (bgra.size() > remote60::native_poc::kWindowThumbnailMaxPayloadBytes) {
+                ok = false;
+              }
+
+              ControlWindowThumbnailHeader rsp{};
+              rsp.header.magic = remote60::native_poc::kMagic;
+              rsp.header.type = static_cast<uint16_t>(MessageType::ControlWindowThumbnail);
+              rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
+              rsp.seq = req.seq;
+              rsp.windowId = req.windowId;
+              if (ok) {
+                rsp.flags |= 0x1u;
+                rsp.width = tw;
+                rsp.height = th;
+                rsp.stride = tw * 4u;
+                rsp.payloadSize = static_cast<uint32_t>(bgra.size());
+                rsp.version = qpc_now_us();
+              }
+              if (!send_all(acceptedSock, &rsp, sizeof(rsp))) return false;
+              if (rsp.payloadSize == 0) return true;
+              return send_all(acceptedSock, bgra.data(), bgra.size());
             };
             auto send_input_ack = [&](uint32_t seq) -> bool {
               ControlInputAckMessage ack{};
@@ -2759,6 +2913,15 @@ int main(int argc, char** argv) {
                 req.header = header;
                 if (!recv_all(acceptedSock, &req.seq, sizeof(req) - sizeof(MessageHeader))) break;
                 if (!send_window_list(req.seq)) break;
+                continue;
+              }
+
+              if (type == MessageType::ControlWindowThumbnailRequest &&
+                  header.size == sizeof(ControlWindowThumbnailRequestMessage)) {
+                ControlWindowThumbnailRequestMessage req{};
+                req.header = header;
+                if (!recv_all(acceptedSock, &req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+                if (!send_window_thumbnail(req)) break;
                 continue;
               }
 
@@ -3166,6 +3329,11 @@ int main(int argc, char** argv) {
   uint32_t nominalEncodeH = abrHighH;
   uint32_t encodeSourceW = captureWidth;
   uint32_t encodeSourceH = captureHeight;
+  // Refit debounce: candidate geometry and how long it has been stable.
+  uint32_t pendingRefitW = 0;
+  uint32_t pendingRefitH = 0;
+  uint64_t pendingRefitSinceUs = 0;
+  constexpr uint64_t kEncodeRefitSettleUs = 400000;  // 0.4 s of stable size before re-init
   uint32_t activeFps = args.fps;
   uint32_t activeBitrate = abrHighBitrate;
   uint32_t activeKeyint = args.keyint;
@@ -4332,7 +4500,11 @@ int main(int argc, char** argv) {
       const bool keyintChanged = (targetKeyint != activeKeyint);
       const bool fpsChanged = (targetFps != activeFps);
       if (bitrateChanged || keyintChanged || fpsChanged) {
-        if (!apply_encoder_target(activeEncodeW, activeEncodeH, targetFps, targetBitrate, targetKeyint)) {
+        // Pass the nominal box, not the fitted activeEncode size: apply_encoder_target
+        // records its width/height arguments as the new nominal budget, and feeding the
+        // already-fitted size back in would permanently shrink the box for every later
+        // target switch.
+        if (!apply_encoder_target(nominalEncodeW, nominalEncodeH, targetFps, targetBitrate, targetKeyint)) {
           std::cerr << "[native-video-host][control] runtime-config apply failed seq=" << reqSeq << "\n";
           break;
         }
@@ -4960,26 +5132,51 @@ int main(int argc, char** argv) {
       uint64_t nv12Us = 0;
       const uint64_t preEncodeStartUs = qpc_now_us();
       // A window selection or a resize changes the source geometry; re-fit the encode size
-      // to the new aspect so the scaler never has to stretch.
+      // to the new aspect so the scaler never has to stretch. The source size changes on
+      // EVERY frame of an interactive window drag, and apply_encoder_target tears the MFT
+      // down, so two guards keep this from thrashing: the geometry must hold steady for a
+      // settle period, and near-identical aspect (letterboxing under 2%) is left alone.
       if (w > 0 && h > 0 && (w != encodeSourceW || h != encodeSourceH)) {
-        encodeSourceW = w;
-        encodeSourceH = h;
-        uint32_t refitW = activeEncodeW;
-        uint32_t refitH = activeEncodeH;
-        fit_size_preserving_aspect(w, h, nominalEncodeW, nominalEncodeH, &refitW, &refitH);
-        if (refitW != activeEncodeW || refitH != activeEncodeH) {
-          const uint32_t prevW = activeEncodeW;
-          const uint32_t prevH = activeEncodeH;
-          if (apply_encoder_target(nominalEncodeW, nominalEncodeH, activeFps, activeBitrate,
-                                   activeKeyint)) {
-            forceKeyNext = true;
-            std::cout << "[native-video-host] encode-refit source=" << w << "x" << h
-                      << " encode=" << prevW << "x" << prevH << " -> " << activeEncodeW << "x"
-                      << activeEncodeH << "\n";
-          } else {
-            std::cerr << "[native-video-host] encode-refit failed source=" << w << "x" << h << "\n";
+        const uint64_t nowRefitUs = qpc_now_us();
+        if (w != pendingRefitW || h != pendingRefitH) {
+          pendingRefitW = w;
+          pendingRefitH = h;
+          pendingRefitSinceUs = nowRefitUs;
+        } else if (nowRefitUs - pendingRefitSinceUs >= kEncodeRefitSettleUs) {
+          uint32_t refitW = activeEncodeW;
+          uint32_t refitH = activeEncodeH;
+          fit_size_preserving_aspect(w, h, nominalEncodeW, nominalEncodeH, &refitW, &refitH);
+          const double activeAspect =
+              static_cast<double>(activeEncodeW) / static_cast<double>(std::max(1u, activeEncodeH));
+          const double refitAspect =
+              static_cast<double>(refitW) / static_cast<double>(std::max(1u, refitH));
+          const bool aspectClose =
+              std::abs(refitAspect - activeAspect) <= activeAspect * 0.02;
+          encodeSourceW = w;
+          encodeSourceH = h;
+          if ((refitW != activeEncodeW || refitH != activeEncodeH) && !aspectClose) {
+            const uint32_t prevW = activeEncodeW;
+            const uint32_t prevH = activeEncodeH;
+            const uint32_t keepNominalW = nominalEncodeW;
+            const uint32_t keepNominalH = nominalEncodeH;
+            if (apply_encoder_target(keepNominalW, keepNominalH, activeFps, activeBitrate,
+                                     activeKeyint)) {
+              forceKeyNext = true;
+              std::cout << "[native-video-host] encode-refit source=" << w << "x" << h
+                        << " encode=" << prevW << "x" << prevH << " -> " << activeEncodeW << "x"
+                        << activeEncodeH << "\n";
+            } else {
+              // apply_encoder_target already shut the encoder down; without a working encoder
+              // every later frame fails silently, so treat this like the other callers do.
+              std::cerr << "[native-video-host] encode-refit failed source=" << w << "x" << h
+                        << "; stopping stream\n";
+              break;
+            }
           }
         }
+      } else {
+        pendingRefitW = 0;
+        pendingRefitH = 0;
       }
       if (activeEncodeW != w || activeEncodeH != h) {
         const uint64_t scaleStartUs = qpc_now_us();

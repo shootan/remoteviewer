@@ -3,9 +3,12 @@
 #include <cstddef>
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <vector>
 
 #include "native_socket.hpp"
 #include "native_video_client_shared_core.hpp"
@@ -77,6 +80,17 @@ class ClientSessionController {
                        uint32_t keyCode, uint16_t buttons);
   bool QueueInputText(const uint16_t* text, size_t count);
 
+  struct WindowThumbnail {
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint64_t version = 0;  // host timestamp; changes when the preview content changes
+    std::vector<uint8_t> rgba;
+  };
+  // Copies the cached preview for a window id (0 = desktop). Returns false if none yet.
+  bool CopyWindowThumbnail(uint64_t windowId, WindowThumbnail* out) const;
+  // Cheap change marker so the UI can skip re-decoding unchanged previews.
+  uint64_t WindowThumbnailVersion(uint64_t windowId) const;
+
  private:
   ClientSessionController(const ClientSessionController&) = delete;
   ClientSessionController& operator=(const ClientSessionController&) = delete;
@@ -113,6 +127,13 @@ class ClientSessionController {
   std::atomic<bool> stopRequested_{false};
   SocketHandle tcpControlSocket_ = kInvalidSocket;
   SocketHandle udpVideoSocket_ = kInvalidSocket;
+
+  int FetchOneThumbnailLocked(SocketHandle controlSocket);
+  void QueueThumbnailFetchesFromPanel();
+  mutable std::mutex thumbMu_;
+  std::unordered_map<uint64_t, WindowThumbnail> thumbs_;
+  std::deque<uint64_t> thumbFetchQueue_;
+  std::atomic<bool> hostSupportsThumbnails_{false};
 };
 
 }  // namespace remote60::native_poc

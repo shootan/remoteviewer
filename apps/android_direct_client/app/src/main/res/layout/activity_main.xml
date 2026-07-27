@@ -332,15 +332,18 @@
                 android:textSize="12sp" />
         </LinearLayout>
 
-        <ListView
+        <GridView
             android:id="@+id/targetListView"
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_marginTop="12dp"
             android:layout_weight="1"
-            android:background="@drawable/panel_input_background"
-            android:divider="#D8D2C6"
-            android:dividerHeight="1dp" />
+            android:horizontalSpacing="10dp"
+            android:listSelector="@android:color/transparent"
+            android:numColumns="auto_fit"
+            android:columnWidth="164dp"
+            android:stretchMode="columnWidth"
+            android:verticalSpacing="10dp" />
 
         <TextView
             android:id="@+id/targetListEmptyText"

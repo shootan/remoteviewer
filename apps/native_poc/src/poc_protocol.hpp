@@ -26,6 +26,8 @@ enum class MessageType : uint16_t {
   ControlInputText = 32,
   ControlStreamState = 33,
   ControlDesktopBackendRequest = 34,
+  ControlWindowThumbnailRequest = 35,
+  ControlWindowThumbnail = 36,
 };
 
 enum class UdpPacketKind : uint16_t {
@@ -41,6 +43,17 @@ enum class UdpCodec : uint16_t {
 
 constexpr uint32_t kControlWindowListMaxEntries = 64;
 constexpr uint32_t kControlInputTextMaxUtf16 = 64;
+
+// Window preview thumbnails. There is no version handshake on the control channel, so a peer
+// that predates these messages must never be sent one: unknown opcodes are drained without a
+// reply, which would stall the requester's strict request/response loop. The host therefore
+// advertises support via kControlWindowListFlagThumbnails and clients only ask when it is set.
+constexpr uint32_t kControlWindowListFlagSelectionLocked = 0x1u;
+constexpr uint32_t kControlWindowListFlagThumbnails = 0x2u;
+constexpr uint32_t kWindowThumbnailMaxWidth = 320;
+constexpr uint32_t kWindowThumbnailMaxHeight = 320;
+// BGRA, so the cap covers the largest thumbnail plus slack. Nothing else bounds payloadSize.
+constexpr uint32_t kWindowThumbnailMaxPayloadBytes = 320u * 320u * 4u;
 
 #pragma pack(push, 1)
 struct MessageHeader {
@@ -229,6 +242,30 @@ struct ControlWindowListMessage {
   uint32_t itemCount = 0;
   uint32_t reserved = 0;
   ControlWindowEntry items[kControlWindowListMaxEntries] = {};
+};
+
+struct ControlWindowThumbnailRequestMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t flags = 0;
+  uint64_t windowId = 0;  // 0 selects the desktop preview
+  uint32_t maxWidth = 0;
+  uint32_t maxHeight = 0;
+  uint64_t clientSendQpcUs = 0;
+};
+
+// header.size describes only this fixed part; payloadSize bytes of BGRA follow, matching the
+// RawFrameHeader/EncodedFrameHeader convention used on the video path.
+struct ControlWindowThumbnailHeader {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t flags = 0;  // bit0: ok, bit1: unchanged since requested version
+  uint64_t windowId = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint32_t stride = 0;
+  uint32_t payloadSize = 0;
+  uint64_t version = 0;
 };
 
 struct ControlWindowSelectMessage {

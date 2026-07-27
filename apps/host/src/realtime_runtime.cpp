@@ -1262,6 +1262,12 @@ bool configure_encoder(IMFTransform* enc, uint32_t w, uint32_t h, uint32_t fps, 
       MFSetAttributeRatio(outType, MF_MT_FRAME_RATE, fps, 1);
       outType->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
       outType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+      // The VideoProcessor upstream converts with BT.709 limited; stamp the same
+      // colorimetry on the stream or browsers guess BT.601 for sub-HD encodes.
+      outType->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709);
+      outType->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
+      outType->SetUINT32(MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709);
+      outType->SetUINT32(MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709);
       if (SUCCEEDED(enc->SetOutputType(0, outType, 0))) {
         outType->Release();
         break;
@@ -1280,6 +1286,8 @@ bool configure_encoder(IMFTransform* enc, uint32_t w, uint32_t h, uint32_t fps, 
       MFSetAttributeRatio(inType, MF_MT_FRAME_RATE, fps, 1);
       MFSetAttributeRatio(inType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
       inType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+      inType->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709);
+      inType->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
       if (SUCCEEDED(enc->SetInputType(0, inType, 0))) {
         inType->Release();
         return true;

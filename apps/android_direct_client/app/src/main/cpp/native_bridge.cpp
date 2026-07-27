@@ -82,6 +82,7 @@ std::string window_panel_snapshot_json(const remote60::native_poc::WindowPanelSn
     oss << "\"width\":" << item.width << ",";
     oss << "\"height\":" << item.height << ",";
     oss << "\"minimized\":" << (item.minimized ? "true" : "false") << ",";
+    oss << "\"thumbVersion\":" << g_session_controller.WindowThumbnailVersion(item.id) << ",";
     oss << "\"title\":\"";
     append_json_escaped(oss, item.title);
     oss << "\"}";
@@ -252,4 +253,24 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeResetVideoStream(
     JNIEnv* /* env */, jobject /* this */) {
   g_video_decoder_sink.OnVideoStreamReset();
+}
+
+// Preview pixels for one target card. Layout: [width:int32][height:int32][rgba bytes...],
+// little-endian, RGBA byte order ready for Bitmap.copyPixelsFromBuffer. Null if no preview
+// has been fetched yet for this window id (0 = desktop).
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetWindowThumbnail(
+    JNIEnv* env, jobject /* this */, jlong window_id) {
+  remote60::native_poc::ClientSessionController::WindowThumbnail thumb;
+  if (!g_session_controller.CopyWindowThumbnail(static_cast<uint64_t>(window_id), &thumb)) {
+    return nullptr;
+  }
+  const jsize total = static_cast<jsize>(8 + thumb.rgba.size());
+  jbyteArray out = env->NewByteArray(total);
+  if (!out) return nullptr;
+  const int32_t dims[2] = {static_cast<int32_t>(thumb.width), static_cast<int32_t>(thumb.height)};
+  env->SetByteArrayRegion(out, 0, 8, reinterpret_cast<const jbyte*>(dims));
+  env->SetByteArrayRegion(out, 8, static_cast<jsize>(thumb.rgba.size()),
+                          reinterpret_cast<const jbyte*>(thumb.rgba.data()));
+  return out;
 }

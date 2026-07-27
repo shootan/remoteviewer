@@ -23,13 +23,17 @@ import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.inputmethod.InputMethodManager
-import android.widget.ArrayAdapter
+import android.graphics.Bitmap
+import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
-import android.widget.ListView
+import android.widget.GridView
+import android.widget.ImageView
 import android.widget.TextView
 import org.json.JSONException
 import org.json.JSONObject
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -49,7 +53,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // Authored in dp; converted per-device below. As a raw pixel constant one wheel
         // notch needed 4x more finger travel on a 4x-density phone than on a 1x tablet.
         private const val SCROLL_GESTURE_STEP_DP = 28f
+        private const val VIEWER_STALL_OVERLAY_US = 3_000_000L
     }
+
+    private var lastVideoOutputPtsUs = 0L
+    private var lastVideoOutputSeenUs = 0L
 
     private val scrollGestureStepPx: Float
         get() = SCROLL_GESTURE_STEP_DP * resources.displayMetrics.density
@@ -94,6 +102,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val width: Int,
         val height: Int,
         val minimized: Boolean,
+        val thumbVersion: Long = 0L,
     )
 
     private data class WindowPanelUiSnapshot(
@@ -149,7 +158,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var listSelectedText: TextView
     private lateinit var listStatusText: TextView
     private lateinit var targetListEmptyText: TextView
-    private lateinit var targetListView: ListView
+    private lateinit var targetListView: GridView
     private lateinit var listDisconnectButton: Button
     private lateinit var listWindowsButton: Button
     private lateinit var listDevicesButton: Button
@@ -172,9 +181,70 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var viewerLoadingText: TextView
     private lateinit var viewerImeCaptureView: ImeCaptureView
     private lateinit var videoTextureView: TextureView
-    private lateinit var targetListAdapter: ArrayAdapter<String>
+    private lateinit var targetListAdapter: TargetCardAdapter
     private val targetListLabels = mutableListOf<String>()
     private val targetListIds = mutableListOf<Long>()
+    private var targetListSelectedId = 0L
+    private val thumbnailBitmaps = HashMap<Long, Bitmap>()
+    private val thumbnailVersions = HashMap<Long, Long>()
+
+    /** Card grid adapter: preview image on top, one-line title underneath. */
+    private inner class TargetCardAdapter : BaseAdapter() {
+        override fun getCount(): Int = targetListIds.size
+        override fun getItem(position: Int): Any = targetListLabels[position]
+        override fun getItemId(position: Int): Long = targetListIds[position]
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+            val view = convertView
+                ?: layoutInflater.inflate(R.layout.target_card, parent, false)
+            val id = targetListIds[position]
+            view.findViewById<TextView>(R.id.targetCardTitle).text = targetListLabels[position]
+            val image = view.findViewById<ImageView>(R.id.targetCardThumbnail)
+            val bmp = thumbnailBitmaps[id]
+            if (bmp != null) {
+                image.setImageBitmap(bmp)
+            } else {
+                image.setImageDrawable(null)
+            }
+            view.isActivated = id == targetListSelectedId
+            return view
+        }
+    }
+
+    /** Pull changed previews across JNI and decode them into reusable bitmaps. */
+    private fun refreshThumbnails(items: List<WindowPanelItem>) {
+        var changed = false
+        val wanted = HashSet<Long>()
+        val entries = ArrayList<Pair<Long, Long>>(items.size + 1)
+        entries.add(0L to 0L)  // desktop preview has no version marker; fetch when absent
+        items.forEach { entries.add(it.id to it.thumbVersion) }
+        for ((id, version) in entries) {
+            wanted.add(id)
+            val known = thumbnailVersions[id]
+            if (known != null && known == version && thumbnailBitmaps.containsKey(id)) continue
+            if (version == 0L && thumbnailBitmaps.containsKey(id)) continue
+            val raw = NativeSessionBridge.nativeGetWindowThumbnail(id) ?: continue
+            if (raw.size < 8) continue
+            val buf = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN)
+            val w = buf.int
+            val h = buf.int
+            if (w <= 0 || h <= 0 || raw.size < 8 + w * h * 4) continue
+            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            bmp.copyPixelsFromBuffer(buf)
+            thumbnailBitmaps[id] = bmp
+            thumbnailVersions[id] = version
+            changed = true
+        }
+        val stale = thumbnailBitmaps.keys.filter { it !in wanted }
+        if (stale.isNotEmpty()) {
+            stale.forEach {
+                thumbnailBitmaps.remove(it)
+                thumbnailVersions.remove(it)
+            }
+            changed = true
+        }
+        if (changed) targetListAdapter.notifyDataSetChanged()
+    }
     private var currentScene = UiScene.CONNECT
     private var activeTargetTab = TargetTab.WINDOWS
     private var connectFlowActive = false
@@ -307,10 +377,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 }
             }
 
-        targetListAdapter =
-            ArrayAdapter(this, android.R.layout.simple_list_item_1, targetListLabels).also {
-                targetListView.adapter = it
-            }
+        targetListAdapter = TargetCardAdapter()
+        targetListView.adapter = targetListAdapter
         targetListView.emptyView = targetListEmptyText
         targetListView.setOnItemClickListener { _, _, position, _ ->
             if (position < 0 || position >= targetListIds.size) return@setOnItemClickListener
@@ -1263,17 +1331,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (currentScene == UiScene.VIEWER && event.deviceId != KeyCharacterMap.VIRTUAL_KEYBOARD) {
             if (event.keyCode == KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(event)
             val vk = mapAndroidKeyCodeToWindowsVk(event.keyCode)
+            // VK down/up only. The host posts a real WM_KEYDOWN with a scan code, and the
+            // target app's own TranslateMessage synthesises WM_CHAR from it — sending the
+            // character here as well doubled every keystroke ("hello" -> "hheelllloo").
             if (vk != null && queueViewerSpecialKey(vk, event.action)) {
-                if (event.action == KeyEvent.ACTION_DOWN) {
-                    val unicode = event.unicodeChar
-                    // Emit the character only when no modifier is held; otherwise the host
-                    // would receive both the shortcut and a stray literal character.
-                    if (unicode != 0 && !event.isCtrlPressed && !event.isAltPressed &&
-                        !event.isMetaPressed
-                    ) {
-                        NativeSessionBridge.nativeQueueInputText(unicode.toChar().toString())
-                    }
-                }
                 return true
             }
         }
@@ -1472,17 +1533,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         when (activeTargetTab) {
             TargetTab.WINDOWS -> {
                 panelSnapshot.items.forEach { item ->
-                    val prefix = if (item.id == panelSnapshot.selectedId) "* " else ""
                     val minimizedSuffix = if (item.minimized) " • minimized" else ""
-                    labels.add(prefix + item.title + " • " + item.width + "x" + item.height + minimizedSuffix)
+                    labels.add(item.title + minimizedSuffix)
                     ids.add(item.id)
                 }
                 targetListEmptyText.text = getString(R.string.targets_empty)
             }
 
             TargetTab.DESKTOP -> {
-                val prefix = if (panelSnapshot.selectedId == 0L) "* " else ""
-                labels.add(prefix + getString(R.string.desktop_mode_button) + " • full desktop capture")
+                labels.add(getString(R.string.desktop_mode_button))
                 ids.add(0L)
                 targetListEmptyText.text = ""
             }
@@ -1493,13 +1552,17 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         // renderStatus runs on a 250 ms poll. Rebuilding the adapter unconditionally reset the
         // list four times a second and fought the user's scroll, so only publish real changes.
-        if (targetListLabels != labels || targetListIds != ids) {
+        if (targetListLabels != labels || targetListIds != ids ||
+            targetListSelectedId != panelSnapshot.selectedId
+        ) {
             targetListLabels.clear()
             targetListLabels.addAll(labels)
             targetListIds.clear()
             targetListIds.addAll(ids)
+            targetListSelectedId = panelSnapshot.selectedId
             targetListAdapter.notifyDataSetChanged()
         }
+        if (!settingsActive) refreshThumbnails(panelSnapshot.items)
         targetListEmptyText.visibility =
             if (settingsActive) View.GONE else if (targetListLabels.isEmpty()) View.VISIBLE else View.GONE
     }
@@ -1518,7 +1581,18 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerLoadingPanel.visibility = View.GONE
         videoTextureView.alpha = 1.0f
         val hasFrame = videoWidth > 0 && videoHeight > 0
-        if (hasFrame) {
+        // A frozen last frame with no overlay looks like a live desktop. Treat a stalled
+        // decoder or a dropped connection as reasons to bring the status text back.
+        val lastOutputUs = NativeSessionBridge.nativeGetLastOutputPresentationUs()
+        val nowUs = SystemClock.elapsedRealtime() * 1000L
+        if (lastOutputUs != lastVideoOutputPtsUs) {
+            lastVideoOutputPtsUs = lastOutputUs
+            lastVideoOutputSeenUs = nowUs
+        }
+        val videoStalled = hasFrame && lastVideoOutputSeenUs > 0L &&
+            nowUs - lastVideoOutputSeenUs > VIEWER_STALL_OVERLAY_US
+        val disconnected = !statusValue.startsWith("connected")
+        if (hasFrame && !videoStalled && !disconnected) {
             viewerOverlayStatusText.visibility = View.GONE
         } else {
             viewerOverlayStatusText.visibility = View.VISIBLE
@@ -1720,6 +1794,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                                 width = item.optInt("width"),
                                 height = item.optInt("height"),
                                 minimized = item.optBoolean("minimized"),
+                                thumbVersion = item.optLong("thumbVersion"),
                             )
                         )
                     }

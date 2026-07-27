@@ -3878,3 +3878,40 @@ Next action
 - 실제 Android 기기 또는 LDPlayer에서 연결 → 타깃 선택 → 뷰어 흐름을 돌려 로딩 패널, 버튼 상태, 가로 모드 스크롤, 물리 키보드 입력을 눈으로 확인한다.
 - 물리 디스플레이가 연결된 세션에서 `GATE_A_DECODED_FPS_OK`를 다시 측정해 30fps 목표 달성 여부를 판정한다.
 - 색상 정확도는 컬러바를 띄운 상태에서 host 원본과 Android 뷰어를 나란히 캡처해 육안/픽셀 비교로 확정한다.
+
+### 184) 2026-07-27 전체 재점검 2차 + OSLink형 카드 그리드 UI 재설계
+Goal
+- 사용자 재점검 요청("UI가 OSLink처럼 되면 좋겠다, 전체 점검 다시") 대응.
+- 직전 커밋(9886b2d)을 포함한 전체 코드 재감사와, 타깃 선택 화면의 전면 재설계.
+
+재감사에서 발견/수정한 결함
+- [Critical] encode-refit이 창 리사이즈 드래그 중 매 프레임 인코더를 재초기화(초당 최대 60회 MFT teardown). → 0.4초 settle 디바운스 + 종횡비 2% 이내 변화 무시.
+- [Critical] refit 실패 시 encoder.shutdown()만 되고 스트림이 조용히 사망. → 다른 호출부와 동일하게 루프 종료로 전환.
+- [High] Windows 클라이언트가 Unicode 창에 ANSI DefWindowProc/PeekMessage를 사용 — 창 제목이 "r" 한 글자로 깨지고 WM_CHAR가 ANSI로 전달. → 전부 *W 명시형으로 교체(실행 화면으로 확인).
+- [High] Android 물리 키보드가 VK와 unicode 텍스트를 모두 전송해 모든 문자가 이중 입력("hheelllloo"). → VK만 전송(호스트측 TranslateMessage가 WM_CHAR 생성).
+- [High] DPI 스케일 디스플레이에서 패널 텍스트 줄 간격이 원시 픽셀이라 줄이 겹침. → dpi_scale 적용.
+- [Medium] runtime-config 핸들러가 fitted 크기를 nominal로 되돌려 써서 타깃 전환 후 해상도가 영구 축소(래칫). → nominal 박스 전달로 수정.
+- [Medium] h264_level_for가 MaxFS 미검증 — 1080p 저fps에서 level 3.2 선언(규격 위반). → MaxMBPS+MaxFS 동시 검사 테이블.
+- [Medium] VBV 계산이 비트/바이트 혼동으로 의도(50ms)와 달리 400ms. → bitrate/40(=200ms)로 정정, 주석의 수치 오류도 정정.
+- [Medium] Android 뷰어가 첫 프레임 후 상태 오버레이를 영구 숨김 — 연결이 죽어도 마지막 프레임이 "살아있는 화면"처럼 보임. → PTS 정체 3초/연결 끊김 시 오버레이 복귀.
+- [Medium] configChanges에 keyboard 누락 — 블루투스 키보드 연결 시 Activity 재생성. → keyboard 추가.
+- [Medium] GDI fallback HALFTONE이 매 프레임 소프트웨어 리샘플로 GPU 없는 환경에서 프레임률 저하. → 비디오 경로는 COLORONCOLOR 복귀(썸네일 렌더에만 HALFTONE 유지).
+- [Low] apps/host WebRTC 인코더 VUI 미명시, 크로마 시팅 선언(MPEG2)과 실제 필터(2x2 박스=MPEG1) 불일치, 셰이더 크로마 영점 0.5(≠128/255), DPI-aware 전환 후 창 크기 물리픽셀 고정 — 전부 수정.
+- 검증 완료 항목: BT.709 정수 계수 수학적 검증 통과(감사자 독립 재계산), box_halve/bilinear 메모리 안전, find_start_code 경계 수정 확인.
+
+UI 재설계 (OSLink 스타일, docs/android_구현계획.md의 "탭/카드+창별 썸네일" 사양 이행)
+- 프로토콜: `ControlWindowThumbnailRequest(35)`/`ControlWindowThumbnail(36)` 신설. 기존 메시지는 바이트 단위 불변 유지, 호스트가 window list flags bit1로 capability 광고, 클라이언트는 광고 시에만 요청(구버전 피어와 상호 호환).
+- 호스트: `capture_window_thumbnail` — PrintWindow(PW_RENDERFULLCONTENT)로 가려진 창 포함 창별 미리보기, 데스크톱은 BitBlt, aspect-fit 축소 후 BGRA 전송(최대 320x320, payload 상한 검증).
+- Windows 클라이언트: 홈 화면을 창 전체를 쓰는 카드 그리드로 재설계(헤더 타이틀+Refresh/Desktop, 16:10 썸네일 카드+캡션, 선택 카드 초록 강조, 행 단위 휠 스크롤, 상태 푸터). 썸네일은 control 스레드가 스케줄러 유휴 시간에 1장씩 페치(입력 이벤트 기아 방지), 소켓 오류 시 세션 정리.
+- Android: ListView → GridView 카드(target_card.xml, 96dp 썸네일+캡션, activated 상태로 선택 표시). 세션 컨트롤러에 썸네일 캐시/페치 추가, JNI `nativeGetWindowThumbnail`(RGBA, Bitmap.copyPixelsFromBuffer 호환), JSON에 thumbVersion 마커로 재디코드 회피.
+
+Validation / build / test result
+- Windows Release/Debug 전체 빌드 성공, `shared_core_test` PASS (fake host는 thumbnail 미광고 → 신규 경로 하위호환 확인).
+- Android `assembleDebug` 성공.
+- localhost 게이트: `OVERALL_OK=True`, `UDP_ASSEMBLY_MALFORMED_TOTAL=0`, 썸네일 트래픽 활성 상태에서 control rtt 100~170us 정상, `sps profile_idc=100(high)` 유지.
+- 실행 스크린샷: `Logs/ui-shots/client-02-picker.png` — 12개 창의 라이브 썸네일 카드 그리드, 선택 강조, 한글 제목 정상 렌더 확인.
+- ANSI/유니코드 버그는 실행 중 창 열거로 before(`title='r'`)/after(`title='remote60 native video client'`) 실측 확인.
+
+Next action
+- LDPlayer/실기기에서 Android 카드 그리드와 썸네일 로딩 확인.
+- 창 리사이즈 드래그 중 refit 디바운스 체감 확인(호스트 hitch 없어야 함).

@@ -76,30 +76,47 @@ void apply_video_colorimetry(IMFMediaType* type) {
   (void)type->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
   (void)type->SetUINT32(MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709);
   (void)type->SetUINT32(MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709);
+  // bgra_to_nv12 box-averages 2x2 blocks, which is interstitial siting on both axes
+  // (MPEG-1 style); declaring MPEG-2 cosited here would shift chroma half a sample.
   (void)type->SetUINT32(MF_MT_VIDEO_CHROMA_SITING,
-                        MFVideoChromaSubsampling_MPEG2);
+                        MFVideoChromaSubsampling_MPEG1);
 }
 
 // H.264 High profile enables CABAC and the 8x8 transform. Without an explicit request the
 // MFTs fall back to Baseline, which visibly softens small text at a fixed screen-share bitrate.
+// The level must satisfy BOTH MaxMBPS (throughput) and MaxFS (frame size): checking only
+// MBPS lets 1080p at a lowered fps claim level 3.2, which strict decoders refuse.
 uint32_t h264_level_for(uint32_t width, uint32_t height, uint32_t fps) {
-  const uint64_t mbps = (static_cast<uint64_t>((width + 15) / 16) *
-                         static_cast<uint64_t>((height + 15) / 16) *
-                         static_cast<uint64_t>(fps == 0 ? 30 : fps));
-  if (mbps <= 108000) return eAVEncH264VLevel3_1;   // 720p30
-  if (mbps <= 216000) return eAVEncH264VLevel3_2;
-  if (mbps <= 245760) return eAVEncH264VLevel4;     // 1080p30
-  if (mbps <= 522240) return eAVEncH264VLevel4_2;   // 1080p60+
-  return eAVEncH264VLevel5_1;
+  const uint64_t frameMbs = static_cast<uint64_t>((width + 15) / 16) *
+                            static_cast<uint64_t>((height + 15) / 16);
+  const uint64_t mbps = frameMbs * static_cast<uint64_t>(fps == 0 ? 30 : fps);
+  struct LevelCap {
+    uint32_t level;
+    uint64_t maxMbps;
+    uint64_t maxFs;
+  };
+  static constexpr LevelCap kCaps[] = {
+      {eAVEncH264VLevel3_1, 108000, 3600},    // 720p30
+      {eAVEncH264VLevel3_2, 216000, 5120},
+      {eAVEncH264VLevel4, 245760, 8192},      // 1080p30
+      {eAVEncH264VLevel4_2, 522240, 8704},    // 1080p60
+      {eAVEncH264VLevel5, 589824, 22080},
+      {eAVEncH264VLevel5_1, 983040, 36864},   // 4K30
+  };
+  for (const auto& cap : kCaps) {
+    if (mbps <= cap.maxMbps && frameMbs <= cap.maxFs) return cap.level;
+  }
+  return eAVEncH264VLevel5_2;
 }
 
 uint32_t low_latency_vbv_bytes(uint32_t bitrate) {
-  // Keep VBV short for interactive remote rendering to minimize encoder queue depth, but
-  // leave enough headroom for one scene change. bitrate/80 was ~12.5 ms of video, which under
-  // CBR forced the encoder to hit target every single frame and smeared any screen change.
+  // AVEncCommonBufferSize is in BYTES; T seconds of video is bitrate/8*T bytes. The
+  // original bitrate/80 was 100 ms, which under CBR smeared scene changes; bitrate/40 gives
+  // 200 ms of headroom for one large frame without letting worst-case burst latency grow
+  // past what the UDP path absorbs.
   const uint32_t minBytes = 16384;
-  const uint32_t maxBytes = std::max<uint32_t>(65536, bitrate / 8);
-  const uint32_t target = std::max<uint32_t>(minBytes, bitrate / 20);  // ~50 ms
+  const uint32_t maxBytes = std::max<uint32_t>(65536, bitrate / 8);  // hard cap at 1 s
+  const uint32_t target = std::max<uint32_t>(minBytes, bitrate / 40);
   return std::min<uint32_t>(maxBytes, target);
 }
 

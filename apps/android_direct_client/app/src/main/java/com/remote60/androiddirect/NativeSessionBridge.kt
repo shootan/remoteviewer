@@ -34,5 +34,11 @@ object NativeSessionBridge {
     ): Boolean
     external fun nativeQueueInputText(text: String): Boolean
     external fun nativeGetWindowPanelJson(): String
+
+    /**
+     * Preview pixels for a target card (windowId 0 = desktop).
+     * Layout: [width:int32 LE][height:int32 LE][RGBA bytes]; null when not fetched yet.
+     */
+    external fun nativeGetWindowThumbnail(windowId: Long): ByteArray?
     external fun nativeResetVideoStream()
 }

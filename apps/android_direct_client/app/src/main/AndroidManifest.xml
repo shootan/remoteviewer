@@ -11,7 +11,7 @@
         android:theme="@style/Theme.Remote60AndroidDirect">
         <activity
             android:name=".MainActivity"
-            android:configChanges="keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize"
             android:exported="true"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
