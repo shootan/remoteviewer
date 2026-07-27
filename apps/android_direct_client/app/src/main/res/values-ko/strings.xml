@@ -42,4 +42,10 @@
     <string name="quick_orientation_auto">화면 방향: 원격 화면 따르기</string>
     <string name="quick_orientation_portrait">화면 방향: 세로 고정</string>
     <string name="quick_close">닫기</string>
+    <string name="key_panel_description">PC 키/단축키</string>
+    <string name="key_panel_tab_shortcut">단축키</string>
+    <string name="key_panel_tab_keys">키보드</string>
+    <string name="key_panel_close">닫기</string>
+    <string name="key_panel_modifiers_none">조합키 없음</string>
+    <string name="key_panel_modifiers">조합키: %1$s</string>
 </resources>

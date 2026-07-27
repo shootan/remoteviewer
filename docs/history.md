@@ -4162,3 +4162,37 @@ Validation / build / test result
 Next action
 - 실기기 확인 후, `orientation_corrected`가 자주 찍히면 host가 보고하는 window 크기와
   실제 인코드 크기의 불일치를 따로 조사한다.
+
+### 191) 2026-07-27 키보드 먹통 원인(포커스 탈취) 수정 + PC 키/단축키 패널 추가
+Goal
+- 사용자 리포트: "키보드가 뜬 채로 칠 곳을 터치해서 이동하는 순간 키보드가 먹통".
+- 사용자 제안: OSLink처럼 커스텀 키보드(단축키/키보드 탭) 추가.
+
+원인: 삼성 키보드 문제가 아니라 포커스 탈취
+- `videoTextureView`가 `isFocusableInTouchMode = true`이고,
+  ACTION_DOWN 처리에서 `view.requestFocus()`를 무조건 호출했다.
+- 소프트 키보드는 숨은 `ImeCaptureView`가 포커스를 보유해야 살아 있다.
+  영상 터치로 캐럿을 옮기는 순간 포커스가 `videoTextureView`로 넘어가
+  `InputConnection`이 해제되고, 키보드는 화면에 남아 있지만 보낼 대상이 없어 먹통이 된다.
+- 수정: `if (!viewerImeCaptureView.hasFocus()) view.requestFocus()`
+  즉 IME가 포커스를 쥐고 있으면 빼앗지 않는다.
+
+PC 키/단축키 패널 (`ViewerKeyPanel.kt`, `viewer_key_panel.xml`)
+- 소프트 키보드는 원리적으로 텍스트만 만든다. Ctrl/Alt/Win, F1~F12, Ctrl+C 같은 조합은
+  표현 자체가 불가능하므로 IME를 우회해 **Windows 가상키 down/up을 직접 전송**한다.
+- 레일에 `KEYS` 버튼 추가 -> 하단 패널 토글. 탭 2개:
+  - `단축키`: 복사/붙여넣기/잘라내기/전체선택/실행취소/저장/창닫기/새로고침/삭제/이름바꾸기/
+    실행(Win+R)/탐색기(Win+E)/작업관리자(Ctrl+Shift+Esc)/창전환(Alt+Tab)/화면잠금(Win+L)/검색(Win+Q)
+  - `키보드`: Esc+F1~F12, 숫자열, QWERTY 3행, Ctrl/Win/Alt/Space/Ins/Home/End/PgUp/PgDn/PrtSc, 방향키
+- 조합키는 sticky 방식: Ctrl 탭하면 눌린 상태 유지 -> 다음 일반키 입력 시 자동 해제.
+  한 손가락 터치로 코드를 표현하기 위한 선택이며, 현재 눌린 조합키를 패널 상단에 표시한다.
+- 뷰어를 벗어나거나 패널을 닫으면 눌린 조합키를 모두 up으로 해제해 호스트에 키가 눌린 채 남지 않게 한다.
+- 한글 텍스트 입력은 여전히 시스템 IME 담당(조합 필요). 패널은 키/조합 전용으로 역할 분리.
+
+Validation / build / test result
+- Android `clean assembleDebug` 성공, `dist/remote60-android-20260727.apk` 갱신(8.95MB)
+- 실기기 확인 필요: 타이핑 중 화면 터치 후에도 키보드 유지, 단축키 탭 동작, sticky 조합키 동작
+
+Next action
+- 실기기 확인. 단축키 실제 동작 여부는 host의 SendInput 경로(187)와 함께 검증된다.
+- 필요 시 단축키 목록을 사용자 편집 가능하게 확장(OSLink의 "단축키 추가"에 해당).

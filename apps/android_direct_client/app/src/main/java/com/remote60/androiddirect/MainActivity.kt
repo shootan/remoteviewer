@@ -329,6 +329,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var viewerOverlayStatusText: TextView
     private lateinit var viewerSplit: LinearLayout
     private lateinit var viewerRotateButton: Button
+    private lateinit var viewerKeysButton: Button
+    private var viewerKeyPanel: ViewerKeyPanel? = null
     private lateinit var viewerMenuButton: Button
     private lateinit var viewerDataUsageText: TextView
     private lateinit var viewerLoadingPanel: View
@@ -515,6 +517,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             renderStatus()
         }
         viewerMenuButton.setOnClickListener { showQuickSettingsDialog() }
+        viewerKeysButton = findViewById(R.id.viewerKeysButton)
+        viewerKeyPanel = ViewerKeyPanel(this, findViewById(R.id.viewerKeyPanel)) { vk, down ->
+            queueViewerSpecialKey(vk, if (down) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP)
+        }
+        viewerKeysButton.setOnClickListener {
+            showViewerControls(emphasized = true)
+            viewerKeyPanel?.toggle()
+        }
         viewerLoadingPanel = findViewById(R.id.viewerLoadingPanel)
         viewerLoadingText = findViewById(R.id.viewerLoadingText)
         viewerImeCaptureView = findViewById(R.id.viewerImeCaptureView)
@@ -1017,6 +1027,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         setViewerScrollModeArmed(false)
         cancelActiveViewerTouch(reason)
         hideViewerKeyboard(reason)
+        viewerKeyPanel?.hide()
         desiredStreamActive = false
         requestStreamActive(false, reason)
         if (abortPendingSwitch) {
@@ -1098,7 +1109,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     event.getY(pointerIndex),
                     clampToContent = false
                 ) ?: return false
-                view.requestFocus()
+                // Never take focus away from the IME capture view: tapping the remote screen
+                // to place the caret would otherwise tear down the InputConnection and leave
+                // the soft keyboard visible but dead.
+                if (!viewerImeCaptureView.hasFocus()) view.requestFocus()
                 if (viewerScrollModeArmed) {
                     activeTouchPointerId = event.getPointerId(pointerIndex)
                     activeViewerTouchMode = ViewerTouchMode.SCROLL

@@ -52,4 +52,11 @@
     <string name="quick_orientation_portrait">Orientation: force portrait</string>
     <string name="quick_close">Close</string>
     <string name="viewer_data_usage">%1$s MB</string>
+    <string name="key_panel_button">KEYS</string>
+    <string name="key_panel_description">PC keys and shortcuts</string>
+    <string name="key_panel_tab_shortcut">Shortcuts</string>
+    <string name="key_panel_tab_keys">Keyboard</string>
+    <string name="key_panel_close">Close</string>
+    <string name="key_panel_modifiers_none">No modifier held</string>
+    <string name="key_panel_modifiers">Held: %1$s</string>
 </resources>

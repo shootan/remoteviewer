@@ -422,6 +422,8 @@
                         android:textSize="14sp" />
                 </LinearLayout>
 
+                <include layout="@layout/viewer_key_panel" />
+
                 <TextView
                     android:id="@+id/viewerOverlayStatusText"
                     android:layout_width="match_parent"
@@ -481,6 +483,19 @@
                     android:contentDescription="@string/viewer_scroll_description"
                     android:minWidth="0dp"
                     android:text="@string/viewer_scroll_button"
+                    android:textAllCaps="false"
+                    android:textColor="#F4F0E8"
+                    android:textSize="10sp" />
+
+                <Button
+                    android:id="@+id/viewerKeysButton"
+                    android:layout_width="56dp"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/viewer_control_button_background"
+                    android:contentDescription="@string/key_panel_description"
+                    android:minWidth="0dp"
+                    android:text="@string/key_panel_button"
                     android:textAllCaps="false"
                     android:textColor="#F4F0E8"
                     android:textSize="10sp" />
