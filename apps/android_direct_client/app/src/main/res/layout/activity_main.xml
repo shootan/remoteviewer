@@ -363,12 +363,14 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:background="#050505"
+        android:orientation="vertical"
         android:visibility="gone">
 
         <LinearLayout
             android:id="@+id/viewerSplit"
             android:layout_width="match_parent"
-            android:layout_height="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
             android:orientation="horizontal">
 
             <FrameLayout
@@ -421,8 +423,6 @@
                         android:textColor="#F2F2F2"
                         android:textSize="14sp" />
                 </LinearLayout>
-
-                <include layout="@layout/viewer_key_panel" />
 
                 <TextView
                     android:id="@+id/viewerOverlayStatusText"
@@ -550,5 +550,7 @@
                     android:textSize="9sp" />
             </LinearLayout>
         </LinearLayout>
+
+        <include layout="@layout/viewer_key_panel" />
     </LinearLayout>
 </FrameLayout>

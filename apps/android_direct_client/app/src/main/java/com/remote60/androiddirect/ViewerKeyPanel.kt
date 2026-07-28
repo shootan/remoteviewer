@@ -181,10 +181,25 @@ class ViewerKeyPanel(
 
     fun show() {
         root.visibility = View.VISIBLE
+        // The panel pushes the video up rather than covering it, so cap its height or a
+        // seven-row keyboard would leave almost no picture on a phone held sideways.
+        root.post {
+            val parentHeight = (root.parent as? View)?.height ?: 0
+            if (parentHeight > 0) {
+                val cap = (parentHeight * 0.55f).toInt()
+                if (root.height > cap) {
+                    root.layoutParams = root.layoutParams.also { it.height = cap }
+                    root.requestLayout()
+                }
+            }
+        }
     }
 
     fun hide() {
         releaseHeldModifiers()
+        root.layoutParams = root.layoutParams.also {
+            it.height = LinearLayout.LayoutParams.WRAP_CONTENT
+        }
         root.visibility = View.GONE
     }
 

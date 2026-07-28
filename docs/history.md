@@ -4235,3 +4235,31 @@ Next action
 - 실기기 확인: 단축키 탭 복사/붙여넣기, 키보드 탭 Ctrl+C, 배열이 키보드 형태로 보이는지.
 - 여전히 안 되면 host 로그의 `inputEvents`/`inputInjectFail`/resolved target을 확인해
   desktop/window 어느 경로로 들어가는지 판별한다.
+
+### 193) 2026-07-28 키패널이 영상을 덮던 문제 수정
+Goal
+- 사용자 확인: "키보드 아주 잘 먹는다"(한글/기호/공백 모두 전달 확인).
+- 남은 문제: "내가 무슨 글을 썼는지 볼 수가 없네" — 입력 결과가 보이지 않는다.
+
+원인
+- 191에서 키패널을 `viewerVideoFrame`(FrameLayout) 안에 `layout_gravity="bottom"`으로 넣었다.
+  즉 영상 위에 겹쳐 뜨는 구조라, 타이핑 대상이 있는 화면 하단을 그대로 가린다.
+- 188에서 "버튼이 영상을 가리면 안 된다"는 요구로 컨트롤 바를 레일로 빼놓고도,
+  키패널에서 같은 실수를 반복했다.
+
+수정
+- 키패널을 `viewerVideoFrame` 밖으로 꺼내 `viewerScene`의 형제로 이동.
+  `viewerScene`을 세로 방향으로 두고 `viewerSplit`(영상+레일)에 `weight=1`,
+  키패널은 그 아래 `wrap_content`로 배치했다.
+  이제 패널을 열면 영상이 위로 밀려 올라가며 축소될 뿐, 가려지지 않는다.
+  영상은 기존 aspect-fit 로직이 레이아웃 변경에 반응해 새 영역에 다시 맞춘다.
+- 높이 상한 추가: 7행 키보드는 가로 모드 폰에서 화면 대부분을 차지할 수 있으므로,
+  `show()`에서 부모 높이의 55%로 제한한다. `hide()`에서 `WRAP_CONTENT`로 되돌린다.
+- 세로 LinearLayout에서 무의미해진 `layout_gravity="bottom"` 제거.
+
+Validation / build / test result
+- Android `clean assembleDebug` 성공, `dist/remote60-android-20260727.apk` 갱신
+- 실기기 확인 필요: 키패널을 열었을 때 입력 중인 내용이 보이는지, 영상이 축소되어도 조작 가능한지
+
+Next action
+- 확인 후, 가로 모드에서 55% 상한이 적절한지 조정(키 높이 축소 또는 행 접기 옵션 검토).
