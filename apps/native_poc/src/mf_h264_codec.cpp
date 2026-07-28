@@ -127,6 +127,15 @@ uint32_t stable_text_vbv_bytes(uint32_t bitrate) {
   return std::min<uint32_t>(maxBytes, target);
 }
 
+uint32_t env_u32_or(const char* key, uint32_t fallback) {
+  const char* v = key ? std::getenv(key) : nullptr;
+  if (!v || !*v) return fallback;
+  char* end = nullptr;
+  const unsigned long parsed = std::strtoul(v, &end, 10);
+  if (end == v) return fallback;
+  return static_cast<uint32_t>(parsed);
+}
+
 bool env_string_equals_ci(const char* key, const char* expected) {
   if (!key || !expected) return false;
   const char* value = std::getenv(key);
@@ -1333,19 +1342,52 @@ void H264Encoder::apply_low_latency_codec_api() {
   (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVLowLatencyMode, true);
   (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVEncCommonLowLatency, true);
   (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVEncCommonRealTime, true);
-  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_CBR);
-  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMeanBitRate, bitrate_);
-  const uint32_t maxBitrate = stableTextTune_
-                                  ? std::max<uint32_t>(bitrate_, (bitrate_ * 13) / 10)
-                                  : std::max<uint32_t>(bitrate_, (bitrate_ * 11) / 10);
+
+  // Screen content is bursty: a text-heavy scene change needs several times the average
+  // bitrate for one frame, and strict CBR cannot give it. The encoder's only remaining lever
+  // is quantiser, so it blurs the text to fit the budget and then sharpens again over the
+  // following second. Peak-constrained VBR lets that frame borrow bits instead, and a
+  // quantiser ceiling stops it degrading past legibility even when the peak is exhausted.
+  // Set REMOTE60_NATIVE_RATE_CONTROL=cbr to restore the old behaviour.
+  const bool useCbr = env_string_equals_ci("REMOTE60_NATIVE_RATE_CONTROL", "cbr");
+  const uint32_t peakMultiplierPercent =
+      env_u32_or("REMOTE60_NATIVE_PEAK_BITRATE_PERCENT", useCbr ? 110u : 300u);
+  const uint32_t maxBitrate = static_cast<uint32_t>(std::min<uint64_t>(
+      (static_cast<uint64_t>(bitrate_) * std::max<uint32_t>(100u, peakMultiplierPercent)) / 100ULL,
+      200000000ULL));
   const uint32_t vbvBytes = stableTextTune_ ? stable_text_vbv_bytes(bitrate_)
                                             : low_latency_vbv_bytes(bitrate_);
+
+  const bool rcSet = set_codecapi_u32(
+      enc_.Get(), CODECAPI_AVEncCommonRateControlMode,
+      useCbr ? eAVEncCommonRateControlMode_CBR
+             : eAVEncCommonRateControlMode_PeakConstrainedVBR);
+  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMeanBitRate, bitrate_);
   (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMaxBitRate, maxBitrate);
   (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonBufferSize, vbvBytes);
+
+  // 0 disables the ceiling. 32 keeps small text readable; higher values blur sooner.
+  const uint32_t maxQp = env_u32_or("REMOTE60_NATIVE_MAX_QP", 32u);
+  bool qpSet = false;
+  if (maxQp > 0 && maxQp <= 51) {
+    qpSet = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncVideoMaxQP, maxQp);
+  }
+
   (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVDefaultBPictureCount, 0);
   (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVEncMPVGOPOpen, false);
   (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVGOPSize, std::max<uint32_t>(1, keyint_));
   (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonQualityVsSpeed, stableTextTune_ ? 68u : 100u);
+
+  // Not every MFT honours these, and a rejected call leaves the previous mode in place, so
+  // report what actually stuck rather than what was asked for.
+  std::cout << "[native-video-host] h264 rate-control mode=" << (useCbr ? "cbr" : "vbr_peak")
+            << " modeAccepted=" << (rcSet ? 1 : 0)
+            << " mean=" << bitrate_
+            << " peak=" << maxBitrate
+            << " vbvBytes=" << vbvBytes
+            << " maxQp=" << maxQp
+            << " maxQpAccepted=" << (qpSet ? 1 : 0)
+            << "\n";
 }
 
 bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint32_t bitrate, uint32_t keyint) {

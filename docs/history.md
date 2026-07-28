@@ -4298,3 +4298,44 @@ Validation / build / test result
 Next action
 - 세로 모드에서는 여백이 좌우가 아니라 상하에 생기므로, 실제 사용감 확인 후
   필요하면 안내 문구를 방향에 맞게 조정한다.
+
+### 195) 2026-07-28 텍스트 화면 흐림 원인: CBR + QP 상한 부재
+Goal
+- 사용자 리포트: "아직도 한 번씩 화면이 엄청 흐린데, 특히 텍스트 많은 화면에서.
+  그러고 다시 정상으로 돌아온다."
+
+원인
+- 인코더가 `eAVEncCommonRateControlMode_CBR`(고정 비트레이트)로 동작하고 있었고,
+  `AVEncCommonMaxBitRate`가 평균의 1.1배(stable_text는 1.3배)에 불과했다.
+- 화면 콘텐츠는 본질적으로 버스트다. 텍스트가 빽빽한 장면 전환은 한 프레임에
+  평균의 수 배에 달하는 비트를 요구하는데, CBR은 이를 허용하지 않는다.
+- 인코더에 남은 유일한 수단은 양자화 계수(QP) 상향뿐이므로,
+  **텍스트를 뭉개서 용량을 맞추고** 이후 P-프레임이 1초에 걸쳐 디테일을 복원한다.
+  사용자가 본 "흐려졌다가 다시 선명해짐"이 정확히 이 과정이다.
+- `AVEncVideoMaxQP`가 설정되어 있지 않아 화질 하한선도 없었다.
+
+수정
+- 기본 rate control을 `PeakConstrainedVBR`로 전환. 평균은 목표 비트레이트, 피크는 3배.
+  버스트 프레임이 비트를 빌려 쓸 수 있고, 정적 장면에서는 오히려 덜 쓴다.
+- `CODECAPI_AVEncVideoMaxQP = 32` 설정으로 화질 하한선을 둔다.
+  피크마저 소진돼도 가독성 이하로는 떨어지지 않는다.
+- 세 값 모두 환경변수로 조정 가능:
+  `REMOTE60_NATIVE_RATE_CONTROL=cbr`(구동작 복귀),
+  `REMOTE60_NATIVE_PEAK_BITRATE_PERCENT`(기본 300),
+  `REMOTE60_NATIVE_MAX_QP`(기본 32, 0이면 미설정).
+- MFT마다 지원 여부가 다르고 거부되면 이전 모드가 그대로 남으므로,
+  **요청값이 아니라 실제 수용 여부를 로그로 출력**한다.
+
+Validation / build / test result
+- 실측(AMD 하드웨어 인코더, 1080p/8Mbps/keyint60):
+  `rate-control mode=vbr_peak modeAccepted=1 mean=8000000 peak=24000000 vbvBytes=200000
+   maxQp=32 maxQpAccepted=1`
+  -> **두 설정 모두 수용됨**.
+- 비트레이트가 콘텐츠에 따라 0.55~2.7 Mbps로 변동(VBR 정상 동작, 정적 구간에서 절약).
+- Windows Release/Debug 빌드 성공, `shared_core_test` PASS
+- localhost 게이트 `OVERALL_OK=True`, UDP 드롭/malformed 0
+
+Next action
+- 실기기에서 텍스트 많은 화면 전환 시 흐림이 사라졌는지 확인.
+- 여전하면 `REMOTE60_NATIVE_MAX_QP=28`로 더 조이거나 피크를 400%로 올려 A/B.
+- 반대로 모바일 데이터에서 피크 3배가 부담되면 `PEAK_BITRATE_PERCENT=180` 권장.
