@@ -93,7 +93,7 @@ class ViewerKeyPanel(
             Key("F9", vk = Vk.F1 + 8), Key("F10", vk = Vk.F1 + 9),
             Key("F11", vk = Vk.F1 + 10), Key("F12", vk = Vk.F1 + 11),
             Key("PrtSc", vk = Vk.PRTSC), Key("Scr", vk = Vk.SCROLL), Key("Pause", vk = Vk.PAUSE),
-        ),
+        ),  // 16 units
         listOf(
             Key("`", "~", Vk.OEM_3),
             Key("1", "!", '1'.code), Key("2", "@", '2'.code), Key("3", "#", '3'.code),
@@ -102,6 +102,7 @@ class ViewerKeyPanel(
             Key("0", ")", '0'.code),
             Key("-", "_", Vk.OEM_MINUS), Key("=", "+", Vk.OEM_PLUS),
             Key("Back", vk = Vk.BACK, units = 2f),
+            Key("", vk = 0, units = 1f),
         ),
         listOf(
             Key("Tab", vk = Vk.TAB, units = 1.5f),
@@ -111,6 +112,7 @@ class ViewerKeyPanel(
             Key("P", "ㅔ", 'P'.code),
             Key("[", "{", Vk.OEM_4), Key("]", "}", Vk.OEM_6),
             Key("\\", "|", Vk.OEM_5, units = 1.5f),
+            Key("", vk = 0, units = 1f),
         ),
         listOf(
             Key("Caps", vk = Vk.CAPS, units = 1.75f),
@@ -119,6 +121,7 @@ class ViewerKeyPanel(
             Key("J", "ㅓ", 'J'.code), Key("K", "ㅏ", 'K'.code), Key("L", "ㅣ", 'L'.code),
             Key(";", ":", Vk.OEM_1), Key("'", "\"", Vk.OEM_7),
             Key("Enter", vk = Vk.ENTER, units = 2.25f),
+            Key("", vk = 0, units = 1f),
         ),
         listOf(
             Key("Shift", vk = Vk.SHIFT, units = 2.25f),
@@ -128,6 +131,7 @@ class ViewerKeyPanel(
             Key(",", "<", Vk.OEM_COMMA), Key(".", ">", Vk.OEM_PERIOD), Key("/", "?", Vk.OEM_2),
             Key("Shift", vk = Vk.SHIFT, units = 1.75f),
             Key("↑", vk = Vk.UP),
+            Key("", vk = 0, units = 1f),
         ),
         listOf(
             Key("Ctrl", vk = Vk.CTRL, units = 1.4f),
@@ -138,10 +142,12 @@ class ViewerKeyPanel(
             Key("Menu", vk = Vk.APPS, units = 1.2f),
             Key("Ctrl", vk = Vk.CTRL, units = 1.4f),
             Key("←", vk = Vk.LEFT), Key("↓", vk = Vk.DOWN), Key("→", vk = Vk.RIGHT),
+            Key("", vk = 0, units = 0.4f),
         ),
         listOf(
             Key("Ins", vk = Vk.INSERT), Key("Home", vk = Vk.HOME), Key("PgUp", vk = Vk.PGUP),
             Key("Del", vk = Vk.DELETE), Key("End", vk = Vk.END), Key("PgDn", vk = Vk.PGDN),
+            Key("", vk = 0, units = 10f),
         ),
     )
 
@@ -216,6 +222,12 @@ class ViewerKeyPanel(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
             )
             for (key in row) {
+                if (key.vk == 0) {
+                    val filler = View(context)
+                    filler.layoutParams = LinearLayout.LayoutParams(0, dp(42f), key.units)
+                    line.addView(filler)
+                    continue
+                }
                 val b = Button(context)
                 b.text = if (key.sub != null) "${key.label}\n${key.sub}" else key.label
                 b.isAllCaps = false
