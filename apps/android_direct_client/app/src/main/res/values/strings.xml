@@ -59,4 +59,5 @@
     <string name="key_panel_close">Close</string>
     <string name="key_panel_modifiers_none">No modifier held</string>
     <string name="key_panel_modifiers">Held: %1$s</string>
+    <string name="viewer_right_click_hint">Right click: hold a finger on the black margin, then tap the screen</string>
 </resources>

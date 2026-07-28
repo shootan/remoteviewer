@@ -4263,3 +4263,38 @@ Validation / build / test result
 
 Next action
 - 확인 후, 가로 모드에서 55% 상한이 적절한지 조정(키 높이 축소 또는 행 접기 옵션 검토).
+
+### 194) 2026-07-28 우클릭 지원 (레터박스 여백을 조합키로 사용)
+Goal
+- 사용자 요청: "우측 클릭 버튼을 할 수가 없다. 왼쪽 여백 공간을 클릭한 채로 터치하면
+  마우스 오른쪽 버튼 효과가 나면 좋겠다."
+
+배경
+- 기존 터치 경로는 단일 포인터 + 좌클릭 고정이었다.
+  `mapTouchToVideoCoords(clampToContent=false)`가 콘텐츠 밖(레터박스 여백) 터치에 null을 반환하고
+  그대로 버려서, 여백은 완전한 사각지대였다.
+- 호스트는 이미 우클릭을 지원한다:
+  `mouse_vk_to_sendinput_flag`가 `VK_RBUTTON`을 `MOUSEEVENTF_RIGHTDOWN/RIGHTUP`으로,
+  window 모드에서는 `mouse_vk_to_message`가 `WM_RBUTTONDOWN/UP`으로 매핑한다.
+  즉 클라이언트가 우클릭을 보내지 않았을 뿐이다.
+
+구현
+- 여백 터치를 버리지 않고 **조합키로 사용**한다. 콘텐츠 밖에 내려온 포인터를
+  `rightClickModifierPointerId`로 붙잡아 두고, 그 상태에서 화면(콘텐츠)에 내려오는 터치는
+  좌클릭 대신 우클릭으로 전송한다.
+- 눌림/드래그/뗌 전 구간에서 같은 버튼을 유지하도록 `activeTouchIsSecondary`를 도입해
+  DOWN/UP/취소 경로가 모두 동일 버튼(`INPUT_VK_RBUTTON`/`INPUT_BUTTON_SECONDARY`)을 쓴다.
+- 여백 손가락을 떼거나 제스처가 취소되면 조합키를 해제한다.
+- 여백 터치가 이제 유효 이벤트이므로 `ACTION_POINTER_DOWN`에서 기존 포인터 유무 검사보다
+  먼저 여백 판정을 수행하도록 순서를 조정했다.
+- 발견성 문제: 여백을 누르는 제스처는 화면에 아무 단서가 없다.
+  뷰어 진입 시 세션당 1회 Toast로 안내한다(`viewer_right_click_hint`, 한국어 리소스 포함).
+
+Validation / build / test result
+- Android `clean assembleDebug` 성공, `dist/remote60-android-20260727.apk` 갱신
+- 호스트 측 우클릭 매핑은 기존 코드로 확인(추가 변경 없음)
+- 실기기 확인 필요: 여백 누른 채 터치 시 컨텍스트 메뉴가 뜨는지, 여백에서 손을 떼면 좌클릭으로 복귀하는지
+
+Next action
+- 세로 모드에서는 여백이 좌우가 아니라 상하에 생기므로, 실제 사용감 확인 후
+  필요하면 안내 문구를 방향에 맞게 조정한다.

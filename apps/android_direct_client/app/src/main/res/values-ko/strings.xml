@@ -48,4 +48,5 @@
     <string name="key_panel_close">닫기</string>
     <string name="key_panel_modifiers_none">조합키 없음</string>
     <string name="key_panel_modifiers">조합키: %1$s</string>
+    <string name="viewer_right_click_hint">우클릭: 검은 여백을 손가락으로 누른 채 화면을 터치하세요</string>
 </resources>

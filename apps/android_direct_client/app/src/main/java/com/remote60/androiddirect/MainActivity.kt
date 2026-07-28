@@ -32,6 +32,7 @@ import android.widget.GridView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import org.json.JSONException
 import org.json.JSONObject
 import java.nio.ByteBuffer
@@ -50,7 +51,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         private const val INPUT_KIND_KEY_DOWN = 5
         private const val INPUT_KIND_KEY_UP = 6
         private const val INPUT_BUTTON_PRIMARY = 0x1
+        private const val INPUT_BUTTON_SECONDARY = 0x2
         private const val INPUT_VK_LBUTTON = 0x01
+        private const val INPUT_VK_RBUTTON = 0x02
         private const val INPUT_VK_BACK = 0x08
         private const val INPUT_WHEEL_DELTA_STEP = 120
         // Authored in dp; converted per-device below. As a raw pixel constant one wheel
@@ -60,6 +63,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private var lastVideoOutputPtsUs = 0L
+    /**
+     * Pointer id of a finger held in the letterbox margin, which arms the right mouse button.
+     *
+     * The bars beside the picture are dead space — taps there map to nothing — so holding one
+     * is a free modifier: keep a finger on the margin and the next touch on the picture is a
+     * right click instead of a left one.
+     */
+    private var rightClickModifierPointerId = MotionEvent.INVALID_POINTER_ID
+    private var rightClickHintShown = false
     /** User override: keep the phone upright even when the remote screen is landscape. */
     private var forcePortrait = false
     private var lastAppliedLandscape: Boolean? = null
@@ -444,6 +456,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var activeTouchPointerId = MotionEvent.INVALID_POINTER_ID
     private var activeViewerTouchMode = ViewerTouchMode.DIRECT
     private var activeTouchButtons = 0
+    private var activeTouchIsSecondary = false
     private var lastTouchVideoX = 0
     private var lastTouchVideoY = 0
     private var viewerScrollModeArmed = false
@@ -1102,13 +1115,23 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN,
             MotionEvent.ACTION_POINTER_DOWN -> {
-                if (activeTouchPointerId != MotionEvent.INVALID_POINTER_ID) return true
                 val pointerIndex = event.actionIndex
-                val mapped = mapTouchToVideoCoords(
+                val mappedOrNull = mapTouchToVideoCoords(
                     event.getX(pointerIndex),
                     event.getY(pointerIndex),
                     clampToContent = false
-                ) ?: return false
+                )
+                if (mappedOrNull == null) {
+                    // Landed in the letterbox margin: hold it to arm the right button.
+                    if (rightClickModifierPointerId == MotionEvent.INVALID_POINTER_ID) {
+                        rightClickModifierPointerId = event.getPointerId(pointerIndex)
+                        showViewerControls(emphasized = true)
+                        diagnosticsLog.log("right_click_armed", "pointer=$rightClickModifierPointerId")
+                    }
+                    return true
+                }
+                if (activeTouchPointerId != MotionEvent.INVALID_POINTER_ID) return true
+                val mapped = mappedOrNull
                 // Never take focus away from the IME capture view: tapping the remote screen
                 // to place the caret would otherwise tear down the InputConnection and leave
                 // the soft keyboard visible but dead.
@@ -1136,7 +1159,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 }
                 activeTouchPointerId = event.getPointerId(pointerIndex)
                 activeViewerTouchMode = ViewerTouchMode.DIRECT
-                activeTouchButtons = INPUT_BUTTON_PRIMARY
+                activeTouchIsSecondary =
+                    rightClickModifierPointerId != MotionEvent.INVALID_POINTER_ID
+                activeTouchButtons =
+                    if (activeTouchIsSecondary) INPUT_BUTTON_SECONDARY else INPUT_BUTTON_PRIMARY
                 lastTouchVideoX = mapped.first
                 lastTouchVideoY = mapped.second
                 val queued = NativeSessionBridge.nativeQueueInputEvent(
@@ -1144,7 +1170,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     mapped.first,
                     mapped.second,
                     0,
-                    INPUT_VK_LBUTTON,
+                    if (activeTouchIsSecondary) INPUT_VK_RBUTTON else INPUT_VK_LBUTTON,
                     activeTouchButtons
                 )
                 if (!queued) {
@@ -1215,6 +1241,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             MotionEvent.ACTION_UP,
             MotionEvent.ACTION_POINTER_UP -> {
                 val pointerIndex = event.actionIndex
+                if (event.getPointerId(pointerIndex) == rightClickModifierPointerId) {
+                    rightClickModifierPointerId = MotionEvent.INVALID_POINTER_ID
+                    diagnosticsLog.log("right_click_released", "reason=pointer_up")
+                    return true
+                }
                 if (event.getPointerId(pointerIndex) != activeTouchPointerId) return true
                 val mapped = mapTouchToVideoCoords(
                     event.getX(pointerIndex),
@@ -1233,7 +1264,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     mapped.first,
                     mapped.second,
                     0,
-                    INPUT_VK_LBUTTON,
+                    if (activeTouchIsSecondary) INPUT_VK_RBUTTON else INPUT_VK_LBUTTON,
                     0
                 )
                 resetViewerTouchState()
@@ -1242,6 +1273,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
 
             MotionEvent.ACTION_CANCEL -> {
+                rightClickModifierPointerId = MotionEvent.INVALID_POINTER_ID
                 cancelActiveViewerTouch("touch_cancel")
                 return true
             }
@@ -1265,7 +1297,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             lastTouchVideoX,
             lastTouchVideoY,
             0,
-            INPUT_VK_LBUTTON,
+            if (activeTouchIsSecondary) INPUT_VK_RBUTTON else INPUT_VK_LBUTTON,
             0
         )
         if (!queued) {
@@ -1277,7 +1309,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         resetViewerTouchState()
     }
 
+    /** The margin-hold right click has no visible affordance, so say it once per session. */
+    private fun showRightClickHintOnce() {
+        if (rightClickHintShown) return
+        rightClickHintShown = true
+        Toast.makeText(this, R.string.viewer_right_click_hint, Toast.LENGTH_LONG).show()
+    }
+
     private fun resetViewerTouchState() {
+        activeTouchIsSecondary = false
         activeTouchPointerId = MotionEvent.INVALID_POINTER_ID
         activeViewerTouchMode = ViewerTouchMode.DIRECT
         activeTouchButtons = 0
@@ -1658,6 +1698,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     clearPendingSelection()
                     currentScene = UiScene.VIEWER
                     showViewerControls(emphasized = true)
+                    showRightClickHintOnce()
                 } else if (pendingSelectionStartedAtMs > 0L && nowMs - pendingSelectionStartedAtMs >= 6000L) {
                     diagnosticsLog.log(
                         "select_timeout",
