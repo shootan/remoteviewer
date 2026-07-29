@@ -34,7 +34,23 @@ enum class UdpPacketKind : uint16_t {
   Hello = 300,
   HelloAck = 301,
   VideoChunk = 302,
+  // Sent only to open a NAT mapping towards a peer whose address came from the directory
+  // service. It carries no state and the receiver discards it; the real session still starts
+  // with Hello/HelloAck.
+  Punch = 303,
+  // Control traffic carried over the media socket. A separate TCP control connection cannot
+  // survive hole punching -- only the punched UDP path reaches a host behind NAT -- so the
+  // control protocol is tunnelled through these, message-framed and made reliable.
+  ControlData = 304,
+  ControlAck = 305,
+  ControlNack = 306,
 };
+
+// Control messages are numbered per direction so a peer can tell a retransmission from a new
+// message. Stream ids are fixed by role rather than negotiated.
+constexpr uint32_t kUdpControlStreamClientToHost = 1;
+constexpr uint32_t kUdpControlStreamHostToClient = 2;
+constexpr uint16_t kUdpControlMaxMissingPerNack = 64;
 
 enum class UdpCodec : uint16_t {
   Raw = 1,
@@ -287,12 +303,45 @@ struct ControlWindowSelectedMessage {
   uint64_t hostSendQpcUs = 0;
 };
 
+// Capabilities each side advertises in its Hello. Unknown bits must be ignored, so a peer can
+// gain a feature without breaking older peers. Media encryption is not implemented yet; the bit
+// is claimed now so that adding it later is a field to fill in rather than a format change.
+constexpr uint32_t kUdpFeatureEncryptedMedia = 0x1u;
+
 struct UdpHelloPacket {
   uint32_t magic = kMagic;
   uint16_t kind = static_cast<uint16_t>(UdpPacketKind::Hello);
   uint16_t size = static_cast<uint16_t>(sizeof(UdpHelloPacket));
   uint32_t version = 1;
-  uint32_t reserved = 0;
+  uint32_t features = 0;
+};
+
+// One fragment of a control message. Fragments of a message are sent back to back; the
+// receiver asks for what is missing rather than the sender waiting for each piece.
+struct UdpControlChunkHeader {
+  uint32_t magic = kMagic;
+  uint16_t kind = static_cast<uint16_t>(UdpPacketKind::ControlData);
+  uint16_t size = static_cast<uint16_t>(sizeof(UdpControlChunkHeader));
+  uint32_t streamId = 0;
+  uint32_t messageSeq = 0;
+  uint32_t totalSize = 0;
+  uint16_t fragIndex = 0;
+  uint16_t fragCount = 0;
+  uint32_t fragOffset = 0;
+  uint32_t fragSize = 0;
+};
+
+// Acknowledges a fully assembled message (kind ControlAck), or asks for the fragments listed
+// in missing[] (kind ControlNack). Both carry the same shape so one handler covers them.
+struct UdpControlAckPacket {
+  uint32_t magic = kMagic;
+  uint16_t kind = static_cast<uint16_t>(UdpPacketKind::ControlAck);
+  uint16_t size = static_cast<uint16_t>(sizeof(UdpControlAckPacket));
+  uint32_t streamId = 0;
+  uint32_t messageSeq = 0;
+  uint16_t missingCount = 0;
+  uint16_t reserved = 0;
+  uint16_t missing[kUdpControlMaxMissingPerNack] = {};
 };
 
 struct UdpVideoChunkHeader {
@@ -301,7 +350,8 @@ struct UdpVideoChunkHeader {
   uint16_t size = static_cast<uint16_t>(sizeof(UdpVideoChunkHeader));
   uint32_t seq = 0;
   uint16_t codec = static_cast<uint16_t>(UdpCodec::H264);
-  uint16_t flags = 0;  // bit0:keyFrame bit1:firstChunk bit2:lastChunk
+  // bit0:keyFrame bit1:firstChunk bit2:lastChunk bit3:reserved for encrypted payload
+  uint16_t flags = 0;
   uint32_t width = 0;
   uint32_t height = 0;
   uint32_t stride = 0;

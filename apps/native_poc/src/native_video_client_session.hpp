@@ -12,6 +12,7 @@
 
 #include "native_socket.hpp"
 #include "native_video_client_shared_core.hpp"
+#include "udp_control_channel.hpp"
 
 namespace remote60::native_poc {
 
@@ -41,6 +42,9 @@ struct ClientSessionConnectArgs {
   int controlPort = 0;
   bool requireUdpHello = true;
   bool requireTcpControl = true;
+  // Tunnels control through the video socket instead of opening a TCP connection. Required
+  // when the host was reached by hole punching, since only that one socket has a path.
+  bool controlOverUdp = false;
   uint32_t controlIntervalMs = 1000;
   uint32_t udpHandshakeTimeoutMs = 800;
   ClientEncodedFrameSink* encodedFrameSink = nullptr;
@@ -129,8 +133,10 @@ class ClientSessionController {
   std::atomic<bool> stopRequested_{false};
   SocketHandle tcpControlSocket_ = kInvalidSocket;
   SocketHandle udpVideoSocket_ = kInvalidSocket;
+  UdpControlChannel udpControl_;
+  std::atomic<bool> controlOverUdp_{false};
 
-  int FetchOneThumbnailLocked(SocketHandle controlSocket);
+  int FetchOneThumbnailLocked(ControlLink& link);
   void QueueThumbnailFetchesFromPanel();
   mutable std::mutex thumbMu_;
   std::unordered_map<uint64_t, WindowThumbnail> thumbs_;

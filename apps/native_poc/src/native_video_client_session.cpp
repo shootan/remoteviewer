@@ -19,6 +19,9 @@ constexpr uint32_t kDefaultControlResponseTimeoutMs = 1000;
 constexpr uint32_t kVideoReceiveTimeoutMs = 100;
 constexpr uint32_t kTcpControlConnectRetryMs = 4000;
 constexpr uint32_t kTcpControlConnectRetrySleepMs = 50;
+// Generous: a window list or thumbnail crossing a slow link may need several retransmit
+// rounds, and giving up early would drop a session that was about to recover.
+constexpr uint32_t kUdpControlReadTimeoutMs = 12000;
 
 uint64_t now_us() {
   using namespace std::chrono;
@@ -285,19 +288,41 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
     }
   }
 
+  // Control rides the video socket when there is no way to open a second connection to the
+  // host. The video receive thread is already reading that socket, so it hands control
+  // datagrams to the channel and this loop drives the exchange.
+  std::unique_ptr<ControlLink> controlLink;
+  if (args.controlOverUdp && udpVideoSocket_ != kInvalidSocket) {
+    const SocketHandle videoSocket = udpVideoSocket_;
+    udpControl_.Configure(
+        [videoSocket](const void* data, size_t len) -> bool {
+          return send(videoSocket, static_cast<const char*>(data), static_cast<int>(len), 0) > 0;
+        },
+        kUdpControlStreamClientToHost, kUdpControlStreamHostToClient, 1200);
+    controlOverUdp_.store(true, std::memory_order_release);
+    controlLink = std::make_unique<UdpControlLink>(&udpControl_, kUdpControlReadTimeoutMs);
+  } else if (args.requireTcpControl) {
+    controlLink = std::make_unique<TcpControlLink>([this]() {
+      std::lock_guard<std::mutex> lock(mu_);
+      return tcpControlSocket_;
+    });
+  }
+
+  const bool controlActive = controlLink != nullptr;
+
   {
     std::lock_guard<std::mutex> lock(mu_);
     controlScheduler_.Reset(args.controlIntervalMs, now_us());
-    if (args.requireTcpControl) {
+    if (controlActive) {
       windowPanel_.RequestList("window_list_request pending");
     }
     snapshot_.state = ClientSessionState::Connected;
     snapshot_.lastError.clear();
-    snapshot_.controlLoopActive = args.requireTcpControl;
+    snapshot_.controlLoopActive = controlActive;
     UpdateConnectedStatusLocked("");
   }
 
-  if (!args.requireTcpControl) {
+  if (!controlActive) {
     while (!stopRequested_.load(std::memory_order_acquire)) {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
@@ -313,22 +338,17 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
     if (controlScheduler_.NextAction(loopNowUs, metrics, &windowPanel_, &streamState_, &captureMode_,
                                      &keyframeRequests_, &runtimeTune_, &inputQueue_, &action,
                                      &desktopBackend_)) {
-      SocketHandle controlSocket = kInvalidSocket;
-      {
-        std::lock_guard<std::mutex> lock(mu_);
-        controlSocket = tcpControlSocket_;
-      }
-      if (controlSocket == kInvalidSocket) {
+      if (!controlLink->Alive()) {
         if (!stopRequested_.load(std::memory_order_acquire)) {
-          SignalRuntimeFailure("tcp control socket closed");
+          SignalRuntimeFailure("control link closed");
         }
         break;
       }
 
       TcpControlResponse response{};
-      if (!execute_tcp_control_action(controlSocket, action, &response)) {
+      if (!execute_control_action(*controlLink, action, &response)) {
         if (!stopRequested_.load(std::memory_order_acquire)) {
-          SignalRuntimeFailure("tcp control loop failed");
+          SignalRuntimeFailure("control loop failed");
         }
         break;
       }
@@ -368,22 +388,15 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
       }
     }
 
-    if (!didWork) {
-      SocketHandle controlSocket = kInvalidSocket;
-      {
-        std::lock_guard<std::mutex> lock(mu_);
-        controlSocket = tcpControlSocket_;
-      }
-      if (controlSocket != kInvalidSocket) {
-        const int fetched = FetchOneThumbnailLocked(controlSocket);
-        if (fetched < 0) {
-          if (!stopRequested_.load(std::memory_order_acquire)) {
-            SignalRuntimeFailure("thumbnail fetch failed");
-          }
-          break;
+    if (!didWork && controlLink->Alive()) {
+      const int fetched = FetchOneThumbnailLocked(*controlLink);
+      if (fetched < 0) {
+        if (!stopRequested_.load(std::memory_order_acquire)) {
+          SignalRuntimeFailure("thumbnail fetch failed");
         }
-        didWork = (fetched > 0);
+        break;
       }
+      didWork = (fetched > 0);
     }
     if (!didWork) {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -411,7 +424,7 @@ void ClientSessionController::QueueThumbnailFetchesFromPanel() {
 
 // Returns 1 if a preview was fetched, 0 if there was nothing to do, -1 on a socket error
 // (the strict request/response stream is then desynced and the session must drop).
-int ClientSessionController::FetchOneThumbnailLocked(SocketHandle controlSocket) {
+int ClientSessionController::FetchOneThumbnailLocked(ControlLink& link) {
   if (!hostSupportsThumbnails_.load(std::memory_order_relaxed)) return 0;
   uint64_t id = 0;
   {
@@ -428,16 +441,16 @@ int ClientSessionController::FetchOneThumbnailLocked(SocketHandle controlSocket)
   req.maxWidth = 256;
   req.maxHeight = 160;
   req.clientSendQpcUs = now_us();
-  if (!send_all(controlSocket, &req, sizeof(req))) return -1;
+  if (!link.Write(&req, sizeof(req)) || !link.EndMessage()) return -1;
   ControlWindowThumbnailHeader rsp{};
-  if (!recv_all(controlSocket, &rsp, sizeof(rsp))) return -1;
+  if (!link.Read(&rsp, sizeof(rsp))) return -1;
   if (rsp.header.magic != kMagic ||
       rsp.header.type != static_cast<uint16_t>(MessageType::ControlWindowThumbnail) ||
       rsp.payloadSize > kWindowThumbnailMaxPayloadBytes) {
     return -1;
   }
   std::vector<uint8_t> payload(rsp.payloadSize);
-  if (rsp.payloadSize > 0 && !recv_all(controlSocket, payload.data(), payload.size())) {
+  if (rsp.payloadSize > 0 && !link.Read(payload.data(), payload.size())) {
     return -1;
   }
   if ((rsp.flags & 0x1u) != 0 && rsp.width > 0 && rsp.height > 0 &&
@@ -494,9 +507,20 @@ void ClientSessionController::VideoReceiveMain() {
     const int n = recv(udpSocket, reinterpret_cast<char*>(datagram.data()), static_cast<int>(datagram.size()), 0);
     if (n <= 0) {
       if (stopRequested_.load(std::memory_order_acquire)) break;
-      if (last_socket_error_is_retryable()) continue;
+      if (last_socket_error_is_retryable()) {
+        // The read timeout is also the channel's heartbeat: without it a stalled control
+        // transfer would sit unrecovered on an otherwise silent link.
+        if (controlOverUdp_.load(std::memory_order_acquire)) udpControl_.Tick();
+        continue;
+      }
       SignalRuntimeFailure("udp video receive failed");
       break;
+    }
+
+    if (controlOverUdp_.load(std::memory_order_acquire) &&
+        udpControl_.OnPacket(datagram.data(), static_cast<size_t>(n))) {
+      sessionBytesReceived_.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
+      continue;
     }
     if (n < static_cast<int>(sizeof(UdpVideoChunkHeader))) continue;
 
@@ -530,6 +554,8 @@ void ClientSessionController::VideoReceiveMain() {
 
 void ClientSessionController::StopWorker() {
   stopRequested_.store(true, std::memory_order_release);
+  // Wakes the control loop out of a blocking read before the sockets go away.
+  udpControl_.Close();
   {
     std::lock_guard<std::mutex> lock(mu_);
     snapshot_.controlLoopActive = false;
@@ -678,9 +704,13 @@ bool ClientSessionController::ConnectUdpVideo(const ClientSessionConnectArgs& ar
 }
 
 bool ClientSessionController::CanQueueControlRequestLocked() const {
+  // What matters is that a control link exists, not which transport carries it. Checking the
+  // TCP socket alone silently refused every request once control moved onto the video socket.
+  const bool haveTransport =
+      tcpControlSocket_ != kInvalidSocket ||
+      (controlOverUdp_.load(std::memory_order_acquire) && udpVideoSocket_ != kInvalidSocket);
   return snapshot_.state == ClientSessionState::Connected &&
-         snapshot_.controlLoopActive &&
-         tcpControlSocket_ != kInvalidSocket;
+         snapshot_.controlLoopActive && haveTransport;
 }
 
 void ClientSessionController::UpdateConnectedStatusLocked(const std::string& detail) {
@@ -719,6 +749,8 @@ void ClientSessionController::ResetUnlocked() {
   }
   hostSupportsThumbnails_.store(false, std::memory_order_relaxed);
   sessionBytesReceived_.store(0, std::memory_order_relaxed);
+  controlOverUdp_.store(false, std::memory_order_release);
+  udpControl_.Reset();
   if (encodedFrameSink_) {
     encodedFrameSink_->OnVideoStreamReset();
   }

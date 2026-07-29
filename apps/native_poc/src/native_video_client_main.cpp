@@ -2666,7 +2666,10 @@ int main(int argc, char** argv) {
                     &gStreamStateControl, &gCaptureModeRequests, &gKeyframeRequests, &gRuntimeTuneState,
                     &gInputQueueState, &action)) {
               TcpControlResponse response{};
-              if (!execute_tcp_control_action(controlSock, action, &response)) break;
+              // The desktop client only ever talks to a host it can reach directly, so it
+              // stays on TCP; the link wrapper is stateless for that transport.
+              remote60::native_poc::TcpControlLink controlLink(controlSock);
+              if (!execute_control_action(controlLink, action, &response)) break;
               didWork = true;
 
               if (action.kind == ControlOutboundActionKind::CaptureMode) {

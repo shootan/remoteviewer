@@ -41,16 +41,22 @@
 #include <vector>
 
 #include "mf_h264_codec.hpp"
+#include "directory_client.hpp"
 #include "json_profile.hpp"
 #include "native_video_transport.hpp"
 #include "poc_protocol.hpp"
 #include "time_utils.hpp"
+#include "udp_control_channel.hpp"
 #include "capture_backend_dxgi.hpp"
 
 namespace {
 
 using namespace winrt::Windows::Graphics::Capture;
 using namespace winrt::Windows::Graphics::DirectX::Direct3D11;
+using remote60::native_poc::ControlLink;
+using remote60::native_poc::TcpControlLink;
+using remote60::native_poc::UdpControlChannel;
+using remote60::native_poc::UdpControlLink;
 using remote60::native_poc::ControlInputAckMessage;
 using remote60::native_poc::ControlInputEventMessage;
 using remote60::native_poc::ControlInputTextMessage;
@@ -1405,6 +1411,13 @@ struct Args {
   std::string captureWindowTitle;
   bool captureWindowClientOnly = false;
   uint32_t captureWindowRebindIntervalMs = 1000;
+  // Directory service. Empty url keeps the host on the current LAN-only behaviour: it simply
+  // waits for a client that already knows its address.
+  std::string directoryUrl;
+  std::string directoryId;
+  std::string directoryPw;
+  std::string directoryHostName;
+  uint16_t directoryObservePort = 0;
 };
 
 bool parse_u32(const char* s, uint32_t* out) {
@@ -1607,6 +1620,13 @@ Args parse_args(int argc, char** argv) {
       if (json_profile::json_get_u32(jsonText, "captureWindowRebindIntervalMs", &v)) {
         a.captureWindowRebindIntervalMs = std::clamp<uint32_t>(v, 200, 10000);
       }
+      if (json_profile::json_get_string(jsonText, "directoryUrl", &s)) a.directoryUrl = s;
+      if (json_profile::json_get_string(jsonText, "directoryId", &s)) a.directoryId = s;
+      if (json_profile::json_get_string(jsonText, "directoryHostName", &s)) a.directoryHostName = s;
+      if (json_profile::json_get_u32(jsonText, "directoryObservePort", &v)) {
+        a.directoryObservePort = static_cast<uint16_t>(std::min<uint32_t>(v, 65535));
+      }
+      // Deliberately no directoryPw here: profiles are committed, passwords are not.
       json_profile::apply_runtime_env_overrides_from_json(jsonText);
     }
   }
@@ -1639,6 +1659,19 @@ Args parse_args(int argc, char** argv) {
       if (parse_u32(argv[++i], &v)) a.inputLogEvery = std::max<uint32_t>(1, v);
     } else if (k == "--enable-input-injection") {
       a.enableInputInjection = true;
+    } else if (k == "--directory-url" && i + 1 < argc) {
+      a.directoryUrl = argv[++i];
+    } else if (k == "--directory-id" && i + 1 < argc) {
+      a.directoryId = argv[++i];
+    } else if (k == "--directory-pw" && i + 1 < argc) {
+      a.directoryPw = argv[++i];
+    } else if (k == "--host-name" && i + 1 < argc) {
+      a.directoryHostName = argv[++i];
+    } else if (k == "--directory-observe-port" && i + 1 < argc) {
+      uint32_t v = 0;
+      if (parse_u32(argv[++i], &v)) {
+        a.directoryObservePort = static_cast<uint16_t>(std::min<uint32_t>(v, 65535));
+      }
     } else if (k == "--input-injection-mode" && i + 1 < argc) {
       a.inputInjectionMode = argv[++i];
     } else if (k == "--input-target-pid" && i + 1 < argc) {
@@ -2266,6 +2299,10 @@ bool recv_discard(SOCKET s, size_t len) {
 // configured average bitrate. Sending a whole keyframe as an unthrottled burst overruns the
 // Wi-Fi buffer on the AP and on the phone, which is the usual cause of the picture breaking
 // up on an otherwise healthy link.
+// Must exceed the largest datagram the peer can send. A datagram that does not fit is dropped
+// with WSAEMSGSIZE, which looked like a handshake failure the first time it happened.
+constexpr size_t kUdpReceiveBufferBytes = 4096;
+
 std::atomic<uint32_t> gUdpPacePeakBitrateBps{0};  // 0 disables intra-frame pacing
 
 void udp_pace_wait_until(uint64_t targetUs) {
@@ -2579,10 +2616,29 @@ int main(int argc, char** argv) {
               << "\n";
   }
 
+  // Credentials may come from the command line or the environment. The environment is the
+  // better place for the password: a command line is readable by any process on the machine.
+  auto arg_or_env = [](const std::string& fromArgs, const char* envKey) -> std::string {
+    if (!fromArgs.empty()) return fromArgs;
+    const char* v = std::getenv(envKey);
+    return v ? std::string(v) : std::string();
+  };
+  const std::string directoryUrl = arg_or_env(args.directoryUrl, "REMOTE60_DIRECTORY_URL");
+  const std::string directoryId = arg_or_env(args.directoryId, "REMOTE60_DIRECTORY_ID");
+  const std::string directoryPw = arg_or_env(args.directoryPw, "REMOTE60_DIRECTORY_PW");
+  remote60::native_poc::directory::HostAgent directoryAgent;
+  if (!directoryUrl.empty() && transport != VideoTransport::Udp) {
+    std::cerr << "[native-video-host] directory requires transport=udp; ignoring directory url\n";
+  }
+
   SOCKET listenSock = INVALID_SOCKET;
   SOCKET clientSock = INVALID_SOCKET;
   sockaddr_in udpPeer{};
   bool udpPeerReady = false;
+  // The reader thread owns the peer address; the render loop picks up changes through these.
+  std::atomic<uint32_t> udpPeerIpNet{0};
+  std::atomic<uint16_t> udpPeerPortNet{0};
+  std::atomic<bool> udpPeerChanged{false};
   if (transport == VideoTransport::Tcp) {
     listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (listenSock == INVALID_SOCKET) {
@@ -2633,20 +2689,56 @@ int main(int argc, char** argv) {
       return 3;
     }
 
+    // The directory agent shares this socket on purpose: the public address it publishes has
+    // to be the one NAT maps for the media stream, and that is a property of this socket.
+    if (!directoryUrl.empty()) {
+      remote60::native_poc::directory::HostAgentConfig dirCfg;
+      dirCfg.url = directoryUrl;
+      dirCfg.accountId = directoryId;
+      dirCfg.password = directoryPw;
+      dirCfg.hostName = args.directoryHostName;
+      dirCfg.observeUdpPort = args.directoryObservePort;
+      dirCfg.heartbeatSeconds = env_u32_clamped("REMOTE60_DIRECTORY_HEARTBEAT_SEC", 25, 5, 300);
+      std::string dirError;
+      const bool started = directoryAgent.Start(
+          dirCfg,
+          [clientSock](const void* data, size_t len, const sockaddr_in& to) {
+            (void)sendto(clientSock, static_cast<const char*>(data), static_cast<int>(len), 0,
+                         reinterpret_cast<const sockaddr*>(&to), sizeof(to));
+          },
+          &dirError);
+      if (!started) {
+        // Not fatal: direct LAN connections still work, so say why and carry on.
+        std::cerr << "[native-video-host] directory disabled: " << dirError << "\n";
+      } else {
+        std::cout << "[native-video-host] directory agent started url=" << directoryUrl << "\n";
+      }
+    }
+
     for (;;) {
-      UdpHelloPacket hello{};
+      // Big enough for the directory's observation reply; a datagram larger than the buffer
+      // would be dropped with WSAEMSGSIZE and taken for a handshake failure.
+      uint8_t rx[kUdpReceiveBufferBytes];
       sockaddr_in peer{};
       int peerLen = sizeof(peer);
-      const int n = recvfrom(clientSock, reinterpret_cast<char*>(&hello), sizeof(hello), 0,
+      const int n = recvfrom(clientSock, reinterpret_cast<char*>(rx), sizeof(rx), 0,
                              reinterpret_cast<sockaddr*>(&peer), &peerLen);
       if (n <= 0) {
-        std::cerr << "[native-video-host] udp handshake recv failed\n";
+        const int err = WSAGetLastError();
+        if (err == WSAEMSGSIZE || err == WSAECONNRESET) continue;
+        std::cerr << "[native-video-host] udp handshake recv failed err=" << err << "\n";
         closesocket(clientSock);
         return 5;
       }
-      if (n < static_cast<int>(sizeof(UdpHelloPacket)) ||
-          hello.magic != remote60::native_poc::kMagic ||
-          hello.kind != static_cast<uint16_t>(UdpPacketKind::Hello)) {
+      UdpHelloPacket hello{};
+      bool isHello = n >= static_cast<int>(sizeof(UdpHelloPacket));
+      if (isHello) {
+        std::memcpy(&hello, rx, sizeof(hello));
+        isHello = hello.magic == remote60::native_poc::kMagic &&
+                  hello.kind == static_cast<uint16_t>(UdpPacketKind::Hello);
+      }
+      if (!isHello) {
+        (void)directoryAgent.ConsumeUdpPacket(rx, static_cast<size_t>(n), peer);
         continue;
       }
 
@@ -2656,10 +2748,14 @@ int main(int argc, char** argv) {
                    reinterpret_cast<const sockaddr*>(&peer), peerLen);
       udpPeer = peer;
       udpPeerReady = true;
+      udpPeerIpNet.store(peer.sin_addr.s_addr, std::memory_order_release);
+      udpPeerPortNet.store(peer.sin_port, std::memory_order_release);
       break;
     }
-    u_long nonBlocking = 1;
-    (void)ioctlsocket(clientSock, FIONBIO, &nonBlocking);
+    // Stays blocking: a dedicated reader thread now owns receives, and control messages must
+    // not wait for the next render-loop iteration. The timeout only exists so that thread can
+    // notice shutdown.
+    (void)remote60::native_poc::set_recv_timeout(clientSock, 200);
   }
 
   if (transport == VideoTransport::Udp && args.tcpSendBufKb == 0) {
@@ -2756,6 +2852,479 @@ int main(int argc, char** argv) {
   std::atomic<uint64_t> inputNoTarget{0};
   std::atomic<uint64_t> inputUnsupported{0};
   std::atomic<uint64_t> inputInjectFail{0};
+  // One control conversation, independent of how the bytes travel. TCP works on a LAN;
+  // a host behind NAT is only reachable over the punched UDP socket, so the same dispatch
+  // has to serve both.
+  // Closes the outbound message when the dispatch arm returns, however it returns.
+  struct FlushControlMessageOnExit {
+    ControlLink* link = nullptr;
+    ~FlushControlMessageOnExit() {
+      if (link) (void)link->EndMessage();
+    }
+  };
+
+  auto serve_control_session = [&](ControlLink& link) {
+    auto send_window_list = [&](uint32_t seq) -> bool {
+      ControlWindowListMessage rsp{};
+      rsp.header.magic = remote60::native_poc::kMagic;
+      rsp.header.type = static_cast<uint16_t>(MessageType::ControlWindowList);
+      rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
+      rsp.seq = seq;
+      if (windowSelectionLocked.load(std::memory_order_relaxed)) {
+        rsp.flags |= remote60::native_poc::kControlWindowListFlagSelectionLocked;
+      }
+      // Tells the client it may ask for previews; older hosts leave this clear and
+      // older clients ignore the bit, so both directions stay compatible.
+      rsp.flags |= remote60::native_poc::kControlWindowListFlagThumbnails;
+      rsp.selectedWindowId = selectedWindowIdState.load(std::memory_order_relaxed);
+      const auto windows = enumerate_shareable_windows();
+      rsp.itemCount = std::min<uint32_t>(
+          static_cast<uint32_t>(windows.size()), remote60::native_poc::kControlWindowListMaxEntries);
+      for (uint32_t i = 0; i < rsp.itemCount; ++i) {
+        const auto& src = windows[i];
+        auto& dst = rsp.items[i];
+        dst.id = src.id;
+        dst.pid = src.pid;
+        dst.width = static_cast<uint32_t>(std::max<int>(0, src.width));
+        dst.height = static_cast<uint32_t>(std::max<int>(0, src.height));
+        if (src.minimized) dst.flags |= 0x1u;
+        std::snprintf(dst.title, sizeof(dst.title), "%s", src.title.c_str());
+      }
+      std::cout << "[native-video-host][control] window-list seq=" << seq
+                << " count=" << rsp.itemCount
+                << " selectedId=" << rsp.selectedWindowId
+                << "\n";
+      return link.Write(&rsp, sizeof(rsp));
+    };
+    auto send_window_thumbnail =
+        [&](const ControlWindowThumbnailRequestMessage& req) -> bool {
+      const uint32_t maxW = std::clamp<uint32_t>(
+          req.maxWidth == 0 ? 256u : req.maxWidth, 16u,
+          remote60::native_poc::kWindowThumbnailMaxWidth);
+      const uint32_t maxH = std::clamp<uint32_t>(
+          req.maxHeight == 0 ? 160u : req.maxHeight, 16u,
+          remote60::native_poc::kWindowThumbnailMaxHeight);
+
+      std::vector<uint8_t> bgra;
+      uint32_t tw = 0;
+      uint32_t th = 0;
+      bool ok = false;
+      if (req.windowId == 0) {
+        ok = capture_window_thumbnail(nullptr, maxW, maxH, &bgra, &tw, &th);
+      } else {
+        HWND hwnd = window_id_to_hwnd(req.windowId);
+        if (should_include_window(hwnd)) {
+          ok = capture_window_thumbnail(hwnd, maxW, maxH, &bgra, &tw, &th);
+        }
+      }
+      if (bgra.size() > remote60::native_poc::kWindowThumbnailMaxPayloadBytes) {
+        ok = false;
+      }
+
+      ControlWindowThumbnailHeader rsp{};
+      rsp.header.magic = remote60::native_poc::kMagic;
+      rsp.header.type = static_cast<uint16_t>(MessageType::ControlWindowThumbnail);
+      rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
+      rsp.seq = req.seq;
+      rsp.windowId = req.windowId;
+      if (ok) {
+        rsp.flags |= 0x1u;
+        rsp.width = tw;
+        rsp.height = th;
+        rsp.stride = tw * 4u;
+        rsp.payloadSize = static_cast<uint32_t>(bgra.size());
+        rsp.version = qpc_now_us();
+      }
+      if (!link.Write(&rsp, sizeof(rsp))) return false;
+      if (rsp.payloadSize == 0) return true;
+      return link.Write(bgra.data(), bgra.size());
+    };
+    auto send_input_ack = [&](uint32_t seq) -> bool {
+      ControlInputAckMessage ack{};
+      ack.header.magic = remote60::native_poc::kMagic;
+      ack.header.type = static_cast<uint16_t>(MessageType::ControlInputAck);
+      ack.header.size = static_cast<uint16_t>(sizeof(ack));
+      ack.seq = seq;
+      ack.hostRecvQpcUs = qpc_now_us();
+      ack.hostSendQpcUs = qpc_now_us();
+      return link.Write(&ack, sizeof(ack));
+    };
+
+    while (!stop.load()) {
+      MessageHeader header{};
+      if (!link.Read(&header, sizeof(header))) break;
+      // Marks the response boundary the UDP transport needs; a no-op over TCP.
+      const FlushControlMessageOnExit flushResponse{&link};
+      if (header.magic != remote60::native_poc::kMagic || header.size < sizeof(header)) break;
+      const size_t bodySize = static_cast<size_t>(header.size - sizeof(header));
+      const auto type = static_cast<MessageType>(header.type);
+
+      if (type == MessageType::ControlPing && header.size == sizeof(ControlPingMessage)) {
+        ControlPingMessage ping{};
+        ping.header = header;
+        if (!link.Read(&ping.seq, sizeof(ping) - sizeof(MessageHeader))) break;
+        ControlPongMessage pong{};
+        pong.header.magic = remote60::native_poc::kMagic;
+        pong.header.type = static_cast<uint16_t>(MessageType::ControlPong);
+        pong.header.size = static_cast<uint16_t>(sizeof(pong));
+        pong.seq = ping.seq;
+        pong.clientSendQpcUs = ping.clientSendQpcUs;
+        pong.hostRecvQpcUs = qpc_now_us();
+        pong.hostSendQpcUs = qpc_now_us();
+        pong.captureTargetPid = hostCaptureTargetPid.load(std::memory_order_relaxed);
+        pong.captureTargetFlags = hostCaptureTargetFlags.load(std::memory_order_relaxed);
+        pong.captureRebindCount = hostCaptureRebindCount.load(std::memory_order_relaxed);
+        pong.captureTargetHwnd = hostCaptureTargetHwnd.load(std::memory_order_relaxed);
+        {
+          std::string processName;
+          std::string titleText;
+          {
+            std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
+            processName = hostCaptureTargetProcess;
+            titleText = hostCaptureTargetTitle;
+          }
+          std::snprintf(pong.captureTargetProcess, sizeof(pong.captureTargetProcess), "%s",
+                        processName.c_str());
+          std::snprintf(pong.captureTargetTitle, sizeof(pong.captureTargetTitle), "%s",
+                        titleText.c_str());
+        }
+        if (!link.Write(&pong, sizeof(pong))) break;
+        continue;
+      }
+
+      if (type == MessageType::ControlInputEvent && header.size == sizeof(ControlInputEventMessage)) {
+        ControlInputEventMessage input{};
+        input.header = header;
+        if (!link.Read(&input.seq, sizeof(input) - sizeof(MessageHeader))) break;
+        std::string resolvedTarget;
+        if (inputInjectionEnabled) {
+          const bool desktopMode =
+              !inputTargetCriteria.enabled() &&
+              (selectedWindowIdState.load(std::memory_order_acquire) == 0);
+          const InputInjectResult injectResult =
+              inject_background_input_event(input, inputTargetCriteria, hostCaptureTargetHwnd, desktopMode,
+                                            inputDomainW.load(std::memory_order_acquire),
+                                            inputDomainH.load(std::memory_order_acquire),
+                                            &desktopInputState, &resolvedTarget);
+          if (injectResult == InputInjectResult::Injected) {
+            const uint64_t n = inputEvents.fetch_add(1) + 1;
+            if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
+              std::cout << "[native-video-host][input] injected seq=" << input.seq
+                        << " kind=" << input.kind
+                        << " x=" << input.x
+                        << " y=" << input.y
+                        << " buttons=" << input.buttons
+                        << " key=" << input.keyCode
+                        << " mode=" << (desktopMode ? "desktop" : "window")
+                        << resolvedTarget
+                        << "\n";
+            }
+          } else if (injectResult == InputInjectResult::IgnoredMove) {
+            inputIgnoredMove.fetch_add(1, std::memory_order_relaxed);
+          } else if (injectResult == InputInjectResult::NoTarget) {
+            const uint64_t n = inputNoTarget.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
+              std::cout << "[native-video-host][input] no-target seq=" << input.seq
+                        << " kind=" << input.kind
+                        << " filterPid=" << args.inputTargetPid
+                        << " filterProc=" << trim_ascii(args.inputTargetProcess)
+                        << " filterTitle=" << trim_ascii(args.inputTargetTitle)
+                        << resolvedTarget
+                        << "\n";
+            }
+          } else if (injectResult == InputInjectResult::Unsupported) {
+            const uint64_t n = inputUnsupported.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
+              std::cout << "[native-video-host][input] unsupported seq=" << input.seq
+                        << " kind=" << input.kind
+                        << " key=" << input.keyCode
+                        << "\n";
+            }
+          } else {
+            const uint64_t n = inputInjectFail.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
+              std::cout << "[native-video-host][input] inject-fail seq=" << input.seq
+                        << " kind=" << input.kind
+                        << " key=" << input.keyCode
+                        << resolvedTarget
+                        << "\n";
+            }
+          }
+        } else if (args.inputLogEvery > 0 && (input.seq % args.inputLogEvery) == 0) {
+          std::cout << "[native-video-host][input] blocked seq=" << input.seq
+                    << " key=" << input.keyCode
+                    << " kind=" << input.kind
+                    << "\n";
+        }
+        if (!send_input_ack(input.seq)) break;
+        continue;
+      }
+
+      if (type == MessageType::ControlInputText && header.size == sizeof(ControlInputTextMessage)) {
+        ControlInputTextMessage text{};
+        text.header = header;
+        if (!link.Read(&text.seq, sizeof(text) - sizeof(MessageHeader))) break;
+        std::string resolvedTarget;
+        if (inputInjectionEnabled) {
+          const bool desktopMode =
+              !inputTargetCriteria.enabled() &&
+              (selectedWindowIdState.load(std::memory_order_acquire) == 0);
+          const InputInjectResult injectResult =
+              apply_input_text_message(text, hostCaptureTargetHwnd, desktopMode,
+                                       &desktopInputState, &resolvedTarget);
+          if (injectResult == InputInjectResult::Injected) {
+            const uint64_t n = inputEvents.fetch_add(1) + 1;
+            if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
+              std::cout << "[native-video-host][input-text] injected seq=" << text.seq
+                        << " utf16Count=" << text.utf16Count
+                        << " mode=" << (desktopMode ? "desktop" : "window")
+                        << resolvedTarget
+                        << "\n";
+            }
+          } else if (injectResult == InputInjectResult::NoTarget) {
+            const uint64_t n = inputNoTarget.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
+              std::cout << "[native-video-host][input-text] no-target seq=" << text.seq
+                        << " utf16Count=" << text.utf16Count
+                        << resolvedTarget
+                        << "\n";
+            }
+          } else if (injectResult == InputInjectResult::Unsupported) {
+            const uint64_t n = inputUnsupported.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
+              std::cout << "[native-video-host][input-text] unsupported seq=" << text.seq
+                        << " utf16Count=" << text.utf16Count
+                        << "\n";
+            }
+          } else {
+            const uint64_t n = inputInjectFail.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
+              std::cout << "[native-video-host][input-text] inject-fail seq=" << text.seq
+                        << " utf16Count=" << text.utf16Count
+                        << resolvedTarget
+                        << "\n";
+            }
+          }
+        }
+        if (!send_input_ack(text.seq)) break;
+        continue;
+      }
+
+      if (type == MessageType::ControlWindowListRequest &&
+          header.size == sizeof(ControlWindowListRequestMessage)) {
+        ControlWindowListRequestMessage req{};
+        req.header = header;
+        if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+        if (!send_window_list(req.seq)) break;
+        continue;
+      }
+
+      if (type == MessageType::ControlWindowThumbnailRequest &&
+          header.size == sizeof(ControlWindowThumbnailRequestMessage)) {
+        ControlWindowThumbnailRequestMessage req{};
+        req.header = header;
+        if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+        if (!send_window_thumbnail(req)) break;
+        continue;
+      }
+
+      if (type == MessageType::ControlWindowSelect &&
+          header.size == sizeof(ControlWindowSelectMessage)) {
+        ControlWindowSelectMessage req{};
+        req.header = header;
+        if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+
+        ControlWindowSelectedMessage rsp{};
+        rsp.header.magic = remote60::native_poc::kMagic;
+        rsp.header.type = static_cast<uint16_t>(MessageType::ControlWindowSelected);
+        rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
+        rsp.seq = req.seq;
+        rsp.windowId = req.windowId;
+        rsp.streamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
+        rsp.hostSendQpcUs = qpc_now_us();
+
+        if (windowSelectionLocked.load(std::memory_order_acquire)) {
+          rsp.flags |= 0x2u;
+          std::snprintf(rsp.reason, sizeof(rsp.reason), "%s", "selection_locked_by_config");
+          if (req.windowId == 0) {
+            std::snprintf(rsp.title, sizeof(rsp.title), "%s", "desktop");
+          }
+        } else {
+          {
+            std::lock_guard<std::mutex> lk(windowSelectionTxn.mu);
+            windowSelectionTxn.pending = true;
+            windowSelectionTxn.completed = false;
+            windowSelectionTxn.reqSeq = req.seq;
+            windowSelectionTxn.requestedWindowId = req.windowId;
+            windowSelectionTxn.responseFlags = 0;
+            windowSelectionTxn.responseWindowId = req.windowId;
+            windowSelectionTxn.responseStreamGeneration = 0;
+            windowSelectionTxn.responseReason.clear();
+            windowSelectionTxn.responseTitle.clear();
+          }
+          windowSelectionTxn.cv.notify_all();
+
+          std::unique_lock<std::mutex> lk(windowSelectionTxn.mu);
+          windowSelectionTxn.cv.wait(lk, [&]() {
+            return stop.load() || windowSelectionTxn.completed;
+          });
+          rsp.flags = windowSelectionTxn.responseFlags;
+          rsp.windowId = windowSelectionTxn.responseWindowId;
+          rsp.streamGeneration = windowSelectionTxn.responseStreamGeneration;
+          rsp.hostSendQpcUs = qpc_now_us();
+          std::snprintf(rsp.reason, sizeof(rsp.reason), "%s", windowSelectionTxn.responseReason.c_str());
+          std::snprintf(rsp.title, sizeof(rsp.title), "%s", windowSelectionTxn.responseTitle.c_str());
+        }
+
+        if (!link.Write(&rsp, sizeof(rsp))) break;
+        continue;
+      }
+
+      if (type == MessageType::ControlClientMetrics &&
+          header.size == sizeof(ControlClientMetricsMessage)) {
+        ControlClientMetricsMessage metrics{};
+        metrics.header = header;
+        if (!link.Read(&metrics.seq, sizeof(metrics) - sizeof(MessageHeader))) break;
+        clientMetricsWidth = metrics.width;
+        clientMetricsHeight = metrics.height;
+        clientMetricsRecvFpsX100 = metrics.recvFpsX100;
+        clientMetricsDecodedFpsX100 = metrics.decodedFpsX100;
+        clientMetricsRecvMbpsX1000 = metrics.recvMbpsX1000;
+        clientMetricsSkippedFrames = metrics.skippedFrames;
+        clientMetricsAvgLatencyUs = metrics.avgLatencyUs;
+        clientMetricsMaxLatencyUs = metrics.maxLatencyUs;
+        clientMetricsAvgDecodeTailUs = metrics.avgDecodeTailUs;
+        clientMetricsMaxDecodeTailUs = metrics.maxDecodeTailUs;
+        clientMetricsCongestionState = metrics.congestionState;
+        clientMetricsCongestionTransitions = metrics.congestionTransitions;
+        clientMetricsCongestionRecoveryCount = metrics.congestionRecoveryCount;
+        clientMetricsCongestionRecoveryReq = metrics.congestionRecoveryReq;
+        clientMetricsCongestionRecoveryMaxUs = metrics.congestionRecoveryMaxUs;
+        clientMetricsQueueDepthMax = metrics.queueDepthMax;
+        clientMetricsQueueDepthH4p = metrics.queueDepthH4p;
+        clientMetricsUdpAssemblyDropPm = metrics.udpAssemblyDropPm;
+        clientMetricsUpdatedUs = qpc_now_us();
+        continue;
+      }
+
+      if (type == MessageType::ControlRequestKeyFrame &&
+          header.size == sizeof(ControlRequestKeyFrameMessage)) {
+        ControlRequestKeyFrameMessage req{};
+        req.header = header;
+        if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+        const uint64_t nowUs = qpc_now_us();
+        if (keyReqLastRefillUs == 0) keyReqLastRefillUs = nowUs;
+        if (nowUs > keyReqLastRefillUs) {
+          const double refill =
+              static_cast<double>(nowUs - keyReqLastRefillUs) / static_cast<double>(keyReqTokenRefillUs);
+          if (refill > 0.0) {
+            keyReqTokens = std::min<double>(static_cast<double>(keyReqTokenCapacity), keyReqTokens + refill);
+            keyReqLastRefillUs = nowUs;
+          }
+        }
+        const bool minIntervalOk = (keyReqNextAllowedUs == 0 || nowUs >= keyReqNextAllowedUs);
+        if (keyReqTokens >= 1.0 && minIntervalOk) {
+          keyReqTokens -= 1.0;
+          keyReqNextAllowedUs = nowUs + keyReqMinIntervalUs;
+          clientRequestedKeyFrame = true;
+          clientKeyFrameReason = req.reason;
+          const uint64_t reqCount = clientKeyFrameRequestCount.fetch_add(1) + 1;
+          std::cout << "[native-video-host][control] keyframe-request seq=" << req.seq
+                    << " reason=" << req.reason
+                    << " total=" << reqCount
+                    << "\n";
+        } else {
+          const uint64_t dropCount = clientKeyFrameRequestDropped.fetch_add(1) + 1;
+          if ((dropCount % 60) == 1) {
+            std::cout << "[native-video-host][control] keyframe-request-throttled seq=" << req.seq
+                      << " reason=" << req.reason
+                      << " dropped=" << dropCount
+                      << " tokens=" << keyReqTokens
+                      << "\n";
+          }
+        }
+        continue;
+      }
+
+      if (type == MessageType::ControlRuntimeEncoderConfig &&
+          header.size == sizeof(ControlRuntimeEncoderConfigMessage)) {
+        ControlRuntimeEncoderConfigMessage tune{};
+        tune.header = header;
+        if (!link.Read(&tune.seq, sizeof(tune) - sizeof(MessageHeader))) break;
+        const bool hasBitrate = ((tune.flags & 0x1u) != 0) && tune.bitrate >= 100000;
+        const bool hasKeyint = ((tune.flags & 0x2u) != 0) && tune.keyint >= 1;
+        const bool hasFps = ((tune.flags & 0x4u) != 0) && tune.fps >= 1;
+        if (hasBitrate || hasKeyint || hasFps) {
+          if (hasBitrate) runtimeTuneBitrate.store(tune.bitrate, std::memory_order_release);
+          if (hasKeyint) runtimeTuneKeyint.store(tune.keyint, std::memory_order_release);
+          if (hasFps) runtimeTuneFps.store(tune.fps, std::memory_order_release);
+          runtimeTuneSeq.store(tune.seq, std::memory_order_release);
+          runtimeTunePending.store(true, std::memory_order_release);
+          std::cout << "[native-video-host][control] runtime-config seq=" << tune.seq
+                    << " bitrate=" << (hasBitrate ? tune.bitrate : 0)
+                    << " keyint=" << (hasKeyint ? tune.keyint : 0)
+                    << " fps=" << (hasFps ? tune.fps : 0)
+                    << " flags=" << tune.flags
+                    << "\n";
+        }
+        continue;
+      }
+
+      if (type == MessageType::ControlDesktopBackendRequest &&
+          header.size == sizeof(ControlDesktopBackendRequestMessage)) {
+        ControlDesktopBackendRequestMessage req{};
+        req.header = header;
+        if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+        if (req.backend == 1 || req.backend == 2) {
+          desktopBackendReqSeq.store(req.seq, std::memory_order_release);
+          desktopBackendReqValue.store(req.backend, std::memory_order_release);
+          desktopBackendReqPending.store(true, std::memory_order_release);
+          std::cout << "[native-video-host][control] desktop-backend-request seq=" << req.seq
+                    << " backend="
+                    << (req.backend == 2 ? "wgc" : "dxgi")
+                    << "\n";
+        }
+        continue;
+      }
+
+      if (type == MessageType::ControlStreamState &&
+          header.size == sizeof(ControlStreamStateMessage)) {
+        ControlStreamStateMessage req{};
+        req.header = header;
+        if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+        const bool active = ((req.flags & 0x1u) != 0);
+        streamControlActive.store(active, std::memory_order_release);
+        std::cout << "[native-video-host][control] stream-state seq=" << req.seq
+                  << " active=" << (active ? 1 : 0)
+                  << "\n";
+        continue;
+      }
+
+      if (type == MessageType::ControlCaptureModeRequest &&
+          header.size == sizeof(ControlCaptureModeRequestMessage)) {
+        ControlCaptureModeRequestMessage req{};
+        req.header = header;
+        if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+        if (req.mode == 1 || req.mode == 2) {
+          captureModeReqSeq.store(req.seq, std::memory_order_release);
+          captureModeReqMode.store(req.mode, std::memory_order_release);
+          captureModeReqXPermille.store(std::min<uint32_t>(10000u, req.xPermille), std::memory_order_release);
+          captureModeReqYPermille.store(std::min<uint32_t>(10000u, req.yPermille), std::memory_order_release);
+          captureModeReqPending.store(true, std::memory_order_release);
+          std::cout << "[native-video-host][control] capture-mode-request seq=" << req.seq
+                    << " mode=" << req.mode
+                    << " xPermille=" << req.xPermille
+                    << " yPermille=" << req.yPermille
+                    << "\n";
+        }
+        continue;
+      }
+
+      if (bodySize > 0 && !link.Discard(bodySize)) break;
+    }
+    streamControlActive.store(false, std::memory_order_release);
+  };
+
   SOCKET controlListenSock = INVALID_SOCKET;
   std::atomic<SOCKET> controlClientSock{INVALID_SOCKET};
   std::thread controlThread;
@@ -2790,461 +3359,9 @@ int main(int argc, char** argv) {
             setsockopt(acceptedSock, IPPROTO_TCP, TCP_NODELAY,
                        reinterpret_cast<const char*>(&ctlNoDelay), sizeof(ctlNoDelay));
             std::cout << "[native-video-host][control] client connected\n";
-            auto send_window_list = [&](uint32_t seq) -> bool {
-              ControlWindowListMessage rsp{};
-              rsp.header.magic = remote60::native_poc::kMagic;
-              rsp.header.type = static_cast<uint16_t>(MessageType::ControlWindowList);
-              rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
-              rsp.seq = seq;
-              if (windowSelectionLocked.load(std::memory_order_relaxed)) {
-                rsp.flags |= remote60::native_poc::kControlWindowListFlagSelectionLocked;
-              }
-              // Tells the client it may ask for previews; older hosts leave this clear and
-              // older clients ignore the bit, so both directions stay compatible.
-              rsp.flags |= remote60::native_poc::kControlWindowListFlagThumbnails;
-              rsp.selectedWindowId = selectedWindowIdState.load(std::memory_order_relaxed);
-              const auto windows = enumerate_shareable_windows();
-              rsp.itemCount = std::min<uint32_t>(
-                  static_cast<uint32_t>(windows.size()), remote60::native_poc::kControlWindowListMaxEntries);
-              for (uint32_t i = 0; i < rsp.itemCount; ++i) {
-                const auto& src = windows[i];
-                auto& dst = rsp.items[i];
-                dst.id = src.id;
-                dst.pid = src.pid;
-                dst.width = static_cast<uint32_t>(std::max<int>(0, src.width));
-                dst.height = static_cast<uint32_t>(std::max<int>(0, src.height));
-                if (src.minimized) dst.flags |= 0x1u;
-                std::snprintf(dst.title, sizeof(dst.title), "%s", src.title.c_str());
-              }
-              std::cout << "[native-video-host][control] window-list seq=" << seq
-                        << " count=" << rsp.itemCount
-                        << " selectedId=" << rsp.selectedWindowId
-                        << "\n";
-              return send_all(acceptedSock, &rsp, sizeof(rsp));
-            };
-            auto send_window_thumbnail =
-                [&](const ControlWindowThumbnailRequestMessage& req) -> bool {
-              const uint32_t maxW = std::clamp<uint32_t>(
-                  req.maxWidth == 0 ? 256u : req.maxWidth, 16u,
-                  remote60::native_poc::kWindowThumbnailMaxWidth);
-              const uint32_t maxH = std::clamp<uint32_t>(
-                  req.maxHeight == 0 ? 160u : req.maxHeight, 16u,
-                  remote60::native_poc::kWindowThumbnailMaxHeight);
-
-              std::vector<uint8_t> bgra;
-              uint32_t tw = 0;
-              uint32_t th = 0;
-              bool ok = false;
-              if (req.windowId == 0) {
-                ok = capture_window_thumbnail(nullptr, maxW, maxH, &bgra, &tw, &th);
-              } else {
-                HWND hwnd = window_id_to_hwnd(req.windowId);
-                if (should_include_window(hwnd)) {
-                  ok = capture_window_thumbnail(hwnd, maxW, maxH, &bgra, &tw, &th);
-                }
-              }
-              if (bgra.size() > remote60::native_poc::kWindowThumbnailMaxPayloadBytes) {
-                ok = false;
-              }
-
-              ControlWindowThumbnailHeader rsp{};
-              rsp.header.magic = remote60::native_poc::kMagic;
-              rsp.header.type = static_cast<uint16_t>(MessageType::ControlWindowThumbnail);
-              rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
-              rsp.seq = req.seq;
-              rsp.windowId = req.windowId;
-              if (ok) {
-                rsp.flags |= 0x1u;
-                rsp.width = tw;
-                rsp.height = th;
-                rsp.stride = tw * 4u;
-                rsp.payloadSize = static_cast<uint32_t>(bgra.size());
-                rsp.version = qpc_now_us();
-              }
-              if (!send_all(acceptedSock, &rsp, sizeof(rsp))) return false;
-              if (rsp.payloadSize == 0) return true;
-              return send_all(acceptedSock, bgra.data(), bgra.size());
-            };
-            auto send_input_ack = [&](uint32_t seq) -> bool {
-              ControlInputAckMessage ack{};
-              ack.header.magic = remote60::native_poc::kMagic;
-              ack.header.type = static_cast<uint16_t>(MessageType::ControlInputAck);
-              ack.header.size = static_cast<uint16_t>(sizeof(ack));
-              ack.seq = seq;
-              ack.hostRecvQpcUs = qpc_now_us();
-              ack.hostSendQpcUs = qpc_now_us();
-              return send_all(acceptedSock, &ack, sizeof(ack));
-            };
-
-            while (!stop.load()) {
-              MessageHeader header{};
-              if (!recv_all(acceptedSock, &header, sizeof(header))) break;
-              if (header.magic != remote60::native_poc::kMagic || header.size < sizeof(header)) break;
-              const size_t bodySize = static_cast<size_t>(header.size - sizeof(header));
-              const auto type = static_cast<MessageType>(header.type);
-
-              if (type == MessageType::ControlPing && header.size == sizeof(ControlPingMessage)) {
-                ControlPingMessage ping{};
-                ping.header = header;
-                if (!recv_all(acceptedSock, &ping.seq, sizeof(ping) - sizeof(MessageHeader))) break;
-                ControlPongMessage pong{};
-                pong.header.magic = remote60::native_poc::kMagic;
-                pong.header.type = static_cast<uint16_t>(MessageType::ControlPong);
-                pong.header.size = static_cast<uint16_t>(sizeof(pong));
-                pong.seq = ping.seq;
-                pong.clientSendQpcUs = ping.clientSendQpcUs;
-                pong.hostRecvQpcUs = qpc_now_us();
-                pong.hostSendQpcUs = qpc_now_us();
-                pong.captureTargetPid = hostCaptureTargetPid.load(std::memory_order_relaxed);
-                pong.captureTargetFlags = hostCaptureTargetFlags.load(std::memory_order_relaxed);
-                pong.captureRebindCount = hostCaptureRebindCount.load(std::memory_order_relaxed);
-                pong.captureTargetHwnd = hostCaptureTargetHwnd.load(std::memory_order_relaxed);
-                {
-                  std::string processName;
-                  std::string titleText;
-                  {
-                    std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
-                    processName = hostCaptureTargetProcess;
-                    titleText = hostCaptureTargetTitle;
-                  }
-                  std::snprintf(pong.captureTargetProcess, sizeof(pong.captureTargetProcess), "%s",
-                                processName.c_str());
-                  std::snprintf(pong.captureTargetTitle, sizeof(pong.captureTargetTitle), "%s",
-                                titleText.c_str());
-                }
-                if (!send_all(acceptedSock, &pong, sizeof(pong))) break;
-                continue;
-              }
-
-              if (type == MessageType::ControlInputEvent && header.size == sizeof(ControlInputEventMessage)) {
-                ControlInputEventMessage input{};
-                input.header = header;
-                if (!recv_all(acceptedSock, &input.seq, sizeof(input) - sizeof(MessageHeader))) break;
-                std::string resolvedTarget;
-                if (inputInjectionEnabled) {
-                  const bool desktopMode =
-                      !inputTargetCriteria.enabled() &&
-                      (selectedWindowIdState.load(std::memory_order_acquire) == 0);
-                  const InputInjectResult injectResult =
-                      inject_background_input_event(input, inputTargetCriteria, hostCaptureTargetHwnd, desktopMode,
-                                                    inputDomainW.load(std::memory_order_acquire),
-                                                    inputDomainH.load(std::memory_order_acquire),
-                                                    &desktopInputState, &resolvedTarget);
-                  if (injectResult == InputInjectResult::Injected) {
-                    const uint64_t n = inputEvents.fetch_add(1) + 1;
-                    if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
-                      std::cout << "[native-video-host][input] injected seq=" << input.seq
-                                << " kind=" << input.kind
-                                << " x=" << input.x
-                                << " y=" << input.y
-                                << " buttons=" << input.buttons
-                                << " key=" << input.keyCode
-                                << " mode=" << (desktopMode ? "desktop" : "window")
-                                << resolvedTarget
-                                << "\n";
-                    }
-                  } else if (injectResult == InputInjectResult::IgnoredMove) {
-                    inputIgnoredMove.fetch_add(1, std::memory_order_relaxed);
-                  } else if (injectResult == InputInjectResult::NoTarget) {
-                    const uint64_t n = inputNoTarget.fetch_add(1, std::memory_order_relaxed) + 1;
-                    if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
-                      std::cout << "[native-video-host][input] no-target seq=" << input.seq
-                                << " kind=" << input.kind
-                                << " filterPid=" << args.inputTargetPid
-                                << " filterProc=" << trim_ascii(args.inputTargetProcess)
-                                << " filterTitle=" << trim_ascii(args.inputTargetTitle)
-                                << resolvedTarget
-                                << "\n";
-                    }
-                  } else if (injectResult == InputInjectResult::Unsupported) {
-                    const uint64_t n = inputUnsupported.fetch_add(1, std::memory_order_relaxed) + 1;
-                    if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
-                      std::cout << "[native-video-host][input] unsupported seq=" << input.seq
-                                << " kind=" << input.kind
-                                << " key=" << input.keyCode
-                                << "\n";
-                    }
-                  } else {
-                    const uint64_t n = inputInjectFail.fetch_add(1, std::memory_order_relaxed) + 1;
-                    if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
-                      std::cout << "[native-video-host][input] inject-fail seq=" << input.seq
-                                << " kind=" << input.kind
-                                << " key=" << input.keyCode
-                                << resolvedTarget
-                                << "\n";
-                    }
-                  }
-                } else if (args.inputLogEvery > 0 && (input.seq % args.inputLogEvery) == 0) {
-                  std::cout << "[native-video-host][input] blocked seq=" << input.seq
-                            << " key=" << input.keyCode
-                            << " kind=" << input.kind
-                            << "\n";
-                }
-                if (!send_input_ack(input.seq)) break;
-                continue;
-              }
-
-              if (type == MessageType::ControlInputText && header.size == sizeof(ControlInputTextMessage)) {
-                ControlInputTextMessage text{};
-                text.header = header;
-                if (!recv_all(acceptedSock, &text.seq, sizeof(text) - sizeof(MessageHeader))) break;
-                std::string resolvedTarget;
-                if (inputInjectionEnabled) {
-                  const bool desktopMode =
-                      !inputTargetCriteria.enabled() &&
-                      (selectedWindowIdState.load(std::memory_order_acquire) == 0);
-                  const InputInjectResult injectResult =
-                      apply_input_text_message(text, hostCaptureTargetHwnd, desktopMode,
-                                               &desktopInputState, &resolvedTarget);
-                  if (injectResult == InputInjectResult::Injected) {
-                    const uint64_t n = inputEvents.fetch_add(1) + 1;
-                    if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
-                      std::cout << "[native-video-host][input-text] injected seq=" << text.seq
-                                << " utf16Count=" << text.utf16Count
-                                << " mode=" << (desktopMode ? "desktop" : "window")
-                                << resolvedTarget
-                                << "\n";
-                    }
-                  } else if (injectResult == InputInjectResult::NoTarget) {
-                    const uint64_t n = inputNoTarget.fetch_add(1, std::memory_order_relaxed) + 1;
-                    if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
-                      std::cout << "[native-video-host][input-text] no-target seq=" << text.seq
-                                << " utf16Count=" << text.utf16Count
-                                << resolvedTarget
-                                << "\n";
-                    }
-                  } else if (injectResult == InputInjectResult::Unsupported) {
-                    const uint64_t n = inputUnsupported.fetch_add(1, std::memory_order_relaxed) + 1;
-                    if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
-                      std::cout << "[native-video-host][input-text] unsupported seq=" << text.seq
-                                << " utf16Count=" << text.utf16Count
-                                << "\n";
-                    }
-                  } else {
-                    const uint64_t n = inputInjectFail.fetch_add(1, std::memory_order_relaxed) + 1;
-                    if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
-                      std::cout << "[native-video-host][input-text] inject-fail seq=" << text.seq
-                                << " utf16Count=" << text.utf16Count
-                                << resolvedTarget
-                                << "\n";
-                    }
-                  }
-                }
-                if (!send_input_ack(text.seq)) break;
-                continue;
-              }
-
-              if (type == MessageType::ControlWindowListRequest &&
-                  header.size == sizeof(ControlWindowListRequestMessage)) {
-                ControlWindowListRequestMessage req{};
-                req.header = header;
-                if (!recv_all(acceptedSock, &req.seq, sizeof(req) - sizeof(MessageHeader))) break;
-                if (!send_window_list(req.seq)) break;
-                continue;
-              }
-
-              if (type == MessageType::ControlWindowThumbnailRequest &&
-                  header.size == sizeof(ControlWindowThumbnailRequestMessage)) {
-                ControlWindowThumbnailRequestMessage req{};
-                req.header = header;
-                if (!recv_all(acceptedSock, &req.seq, sizeof(req) - sizeof(MessageHeader))) break;
-                if (!send_window_thumbnail(req)) break;
-                continue;
-              }
-
-              if (type == MessageType::ControlWindowSelect &&
-                  header.size == sizeof(ControlWindowSelectMessage)) {
-                ControlWindowSelectMessage req{};
-                req.header = header;
-                if (!recv_all(acceptedSock, &req.seq, sizeof(req) - sizeof(MessageHeader))) break;
-
-                ControlWindowSelectedMessage rsp{};
-                rsp.header.magic = remote60::native_poc::kMagic;
-                rsp.header.type = static_cast<uint16_t>(MessageType::ControlWindowSelected);
-                rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
-                rsp.seq = req.seq;
-                rsp.windowId = req.windowId;
-                rsp.streamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
-                rsp.hostSendQpcUs = qpc_now_us();
-
-                if (windowSelectionLocked.load(std::memory_order_acquire)) {
-                  rsp.flags |= 0x2u;
-                  std::snprintf(rsp.reason, sizeof(rsp.reason), "%s", "selection_locked_by_config");
-                  if (req.windowId == 0) {
-                    std::snprintf(rsp.title, sizeof(rsp.title), "%s", "desktop");
-                  }
-                } else {
-                  {
-                    std::lock_guard<std::mutex> lk(windowSelectionTxn.mu);
-                    windowSelectionTxn.pending = true;
-                    windowSelectionTxn.completed = false;
-                    windowSelectionTxn.reqSeq = req.seq;
-                    windowSelectionTxn.requestedWindowId = req.windowId;
-                    windowSelectionTxn.responseFlags = 0;
-                    windowSelectionTxn.responseWindowId = req.windowId;
-                    windowSelectionTxn.responseStreamGeneration = 0;
-                    windowSelectionTxn.responseReason.clear();
-                    windowSelectionTxn.responseTitle.clear();
-                  }
-                  windowSelectionTxn.cv.notify_all();
-
-                  std::unique_lock<std::mutex> lk(windowSelectionTxn.mu);
-                  windowSelectionTxn.cv.wait(lk, [&]() {
-                    return stop.load() || windowSelectionTxn.completed;
-                  });
-                  rsp.flags = windowSelectionTxn.responseFlags;
-                  rsp.windowId = windowSelectionTxn.responseWindowId;
-                  rsp.streamGeneration = windowSelectionTxn.responseStreamGeneration;
-                  rsp.hostSendQpcUs = qpc_now_us();
-                  std::snprintf(rsp.reason, sizeof(rsp.reason), "%s", windowSelectionTxn.responseReason.c_str());
-                  std::snprintf(rsp.title, sizeof(rsp.title), "%s", windowSelectionTxn.responseTitle.c_str());
-                }
-
-                if (!send_all(acceptedSock, &rsp, sizeof(rsp))) break;
-                continue;
-              }
-
-              if (type == MessageType::ControlClientMetrics &&
-                  header.size == sizeof(ControlClientMetricsMessage)) {
-                ControlClientMetricsMessage metrics{};
-                metrics.header = header;
-                if (!recv_all(acceptedSock, &metrics.seq, sizeof(metrics) - sizeof(MessageHeader))) break;
-                clientMetricsWidth = metrics.width;
-                clientMetricsHeight = metrics.height;
-                clientMetricsRecvFpsX100 = metrics.recvFpsX100;
-                clientMetricsDecodedFpsX100 = metrics.decodedFpsX100;
-                clientMetricsRecvMbpsX1000 = metrics.recvMbpsX1000;
-                clientMetricsSkippedFrames = metrics.skippedFrames;
-                clientMetricsAvgLatencyUs = metrics.avgLatencyUs;
-                clientMetricsMaxLatencyUs = metrics.maxLatencyUs;
-                clientMetricsAvgDecodeTailUs = metrics.avgDecodeTailUs;
-                clientMetricsMaxDecodeTailUs = metrics.maxDecodeTailUs;
-                clientMetricsCongestionState = metrics.congestionState;
-                clientMetricsCongestionTransitions = metrics.congestionTransitions;
-                clientMetricsCongestionRecoveryCount = metrics.congestionRecoveryCount;
-                clientMetricsCongestionRecoveryReq = metrics.congestionRecoveryReq;
-                clientMetricsCongestionRecoveryMaxUs = metrics.congestionRecoveryMaxUs;
-                clientMetricsQueueDepthMax = metrics.queueDepthMax;
-                clientMetricsQueueDepthH4p = metrics.queueDepthH4p;
-                clientMetricsUdpAssemblyDropPm = metrics.udpAssemblyDropPm;
-                clientMetricsUpdatedUs = qpc_now_us();
-                continue;
-              }
-
-              if (type == MessageType::ControlRequestKeyFrame &&
-                  header.size == sizeof(ControlRequestKeyFrameMessage)) {
-                ControlRequestKeyFrameMessage req{};
-                req.header = header;
-                if (!recv_all(acceptedSock, &req.seq, sizeof(req) - sizeof(MessageHeader))) break;
-                const uint64_t nowUs = qpc_now_us();
-                if (keyReqLastRefillUs == 0) keyReqLastRefillUs = nowUs;
-                if (nowUs > keyReqLastRefillUs) {
-                  const double refill =
-                      static_cast<double>(nowUs - keyReqLastRefillUs) / static_cast<double>(keyReqTokenRefillUs);
-                  if (refill > 0.0) {
-                    keyReqTokens = std::min<double>(static_cast<double>(keyReqTokenCapacity), keyReqTokens + refill);
-                    keyReqLastRefillUs = nowUs;
-                  }
-                }
-                const bool minIntervalOk = (keyReqNextAllowedUs == 0 || nowUs >= keyReqNextAllowedUs);
-                if (keyReqTokens >= 1.0 && minIntervalOk) {
-                  keyReqTokens -= 1.0;
-                  keyReqNextAllowedUs = nowUs + keyReqMinIntervalUs;
-                  clientRequestedKeyFrame = true;
-                  clientKeyFrameReason = req.reason;
-                  const uint64_t reqCount = clientKeyFrameRequestCount.fetch_add(1) + 1;
-                  std::cout << "[native-video-host][control] keyframe-request seq=" << req.seq
-                            << " reason=" << req.reason
-                            << " total=" << reqCount
-                            << "\n";
-                } else {
-                  const uint64_t dropCount = clientKeyFrameRequestDropped.fetch_add(1) + 1;
-                  if ((dropCount % 60) == 1) {
-                    std::cout << "[native-video-host][control] keyframe-request-throttled seq=" << req.seq
-                              << " reason=" << req.reason
-                              << " dropped=" << dropCount
-                              << " tokens=" << keyReqTokens
-                              << "\n";
-                  }
-                }
-                continue;
-              }
-
-              if (type == MessageType::ControlRuntimeEncoderConfig &&
-                  header.size == sizeof(ControlRuntimeEncoderConfigMessage)) {
-                ControlRuntimeEncoderConfigMessage tune{};
-                tune.header = header;
-                if (!recv_all(acceptedSock, &tune.seq, sizeof(tune) - sizeof(MessageHeader))) break;
-                const bool hasBitrate = ((tune.flags & 0x1u) != 0) && tune.bitrate >= 100000;
-                const bool hasKeyint = ((tune.flags & 0x2u) != 0) && tune.keyint >= 1;
-                const bool hasFps = ((tune.flags & 0x4u) != 0) && tune.fps >= 1;
-                if (hasBitrate || hasKeyint || hasFps) {
-                  if (hasBitrate) runtimeTuneBitrate.store(tune.bitrate, std::memory_order_release);
-                  if (hasKeyint) runtimeTuneKeyint.store(tune.keyint, std::memory_order_release);
-                  if (hasFps) runtimeTuneFps.store(tune.fps, std::memory_order_release);
-                  runtimeTuneSeq.store(tune.seq, std::memory_order_release);
-                  runtimeTunePending.store(true, std::memory_order_release);
-                  std::cout << "[native-video-host][control] runtime-config seq=" << tune.seq
-                            << " bitrate=" << (hasBitrate ? tune.bitrate : 0)
-                            << " keyint=" << (hasKeyint ? tune.keyint : 0)
-                            << " fps=" << (hasFps ? tune.fps : 0)
-                            << " flags=" << tune.flags
-                            << "\n";
-                }
-                continue;
-              }
-
-              if (type == MessageType::ControlDesktopBackendRequest &&
-                  header.size == sizeof(ControlDesktopBackendRequestMessage)) {
-                ControlDesktopBackendRequestMessage req{};
-                req.header = header;
-                if (!recv_all(acceptedSock, &req.seq, sizeof(req) - sizeof(MessageHeader))) break;
-                if (req.backend == 1 || req.backend == 2) {
-                  desktopBackendReqSeq.store(req.seq, std::memory_order_release);
-                  desktopBackendReqValue.store(req.backend, std::memory_order_release);
-                  desktopBackendReqPending.store(true, std::memory_order_release);
-                  std::cout << "[native-video-host][control] desktop-backend-request seq=" << req.seq
-                            << " backend="
-                            << (req.backend == 2 ? "wgc" : "dxgi")
-                            << "\n";
-                }
-                continue;
-              }
-
-              if (type == MessageType::ControlStreamState &&
-                  header.size == sizeof(ControlStreamStateMessage)) {
-                ControlStreamStateMessage req{};
-                req.header = header;
-                if (!recv_all(acceptedSock, &req.seq, sizeof(req) - sizeof(MessageHeader))) break;
-                const bool active = ((req.flags & 0x1u) != 0);
-                streamControlActive.store(active, std::memory_order_release);
-                std::cout << "[native-video-host][control] stream-state seq=" << req.seq
-                          << " active=" << (active ? 1 : 0)
-                          << "\n";
-                continue;
-              }
-
-              if (type == MessageType::ControlCaptureModeRequest &&
-                  header.size == sizeof(ControlCaptureModeRequestMessage)) {
-                ControlCaptureModeRequestMessage req{};
-                req.header = header;
-                if (!recv_all(acceptedSock, &req.seq, sizeof(req) - sizeof(MessageHeader))) break;
-                if (req.mode == 1 || req.mode == 2) {
-                  captureModeReqSeq.store(req.seq, std::memory_order_release);
-                  captureModeReqMode.store(req.mode, std::memory_order_release);
-                  captureModeReqXPermille.store(std::min<uint32_t>(10000u, req.xPermille), std::memory_order_release);
-                  captureModeReqYPermille.store(std::min<uint32_t>(10000u, req.yPermille), std::memory_order_release);
-                  captureModeReqPending.store(true, std::memory_order_release);
-                  std::cout << "[native-video-host][control] capture-mode-request seq=" << req.seq
-                            << " mode=" << req.mode
-                            << " xPermille=" << req.xPermille
-                            << " yPermille=" << req.yPermille
-                            << "\n";
-                }
-                continue;
-              }
-
-              if (bodySize > 0 && !recv_discard(acceptedSock, bodySize)) break;
+            {
+              TcpControlLink link(acceptedSock);
+              serve_control_session(link);
             }
             if (acceptedSock != INVALID_SOCKET) {
               shutdown(acceptedSock, SD_BOTH);
@@ -3254,12 +3371,90 @@ int main(int argc, char** argv) {
               SOCKET expected = acceptedSock;
               controlClientSock.compare_exchange_strong(expected, INVALID_SOCKET);
             }
-            streamControlActive.store(false, std::memory_order_release);
-            std::cout << "[native-video-host][control] client disconnected\n";
+            std::cout << "[native-video-host][control] tcp client disconnected\n";
           }
         });
       }
     }
+  }
+
+  // Control over the media socket. A client that arrived through the directory service has no
+  // way to open a TCP connection back to us, so the same dispatch is also served here; a LAN
+  // client that prefers TCP simply never sends control datagrams and this stays idle.
+  UdpControlChannel udpControlChannel;
+  std::thread udpControlThread;
+  std::thread udpReaderThread;
+  if (transport == VideoTransport::Udp) {
+    udpControlChannel.Configure(
+        [&](const void* data, size_t len) -> bool {
+          const uint32_t ip = udpPeerIpNet.load(std::memory_order_acquire);
+          const uint16_t port = udpPeerPortNet.load(std::memory_order_acquire);
+          if (ip == 0 || port == 0) return false;
+          sockaddr_in to{};
+          to.sin_family = AF_INET;
+          to.sin_addr.s_addr = ip;
+          to.sin_port = port;
+          return sendto(clientSock, static_cast<const char*>(data), static_cast<int>(len), 0,
+                        reinterpret_cast<const sockaddr*>(&to), sizeof(to)) > 0;
+        },
+        remote60::native_poc::kUdpControlStreamHostToClient,
+        remote60::native_poc::kUdpControlStreamClientToHost, args.udpMtu);
+
+    udpReaderThread = std::thread([&]() {
+      while (!stop.load()) {
+        uint8_t rx[kUdpReceiveBufferBytes];
+        sockaddr_in peer{};
+        int peerLen = sizeof(peer);
+        const int n = recvfrom(clientSock, reinterpret_cast<char*>(rx), sizeof(rx), 0,
+                               reinterpret_cast<sockaddr*>(&peer), &peerLen);
+        if (n <= 0) {
+          const int err = WSAGetLastError();
+          if (err == WSAETIMEDOUT || err == WSAEWOULDBLOCK || err == WSAEMSGSIZE ||
+              err == WSAECONNRESET) {
+            // Nothing arrived, or one datagram was malformed. Keep the retransmit timers moving
+            // so a stalled transfer still recovers while the link is quiet.
+            udpControlChannel.Tick();
+            continue;
+          }
+          break;
+        }
+        const size_t len = static_cast<size_t>(n);
+
+        UdpHelloPacket hello{};
+        if (len >= sizeof(UdpHelloPacket)) {
+          std::memcpy(&hello, rx, sizeof(hello));
+          if (hello.magic == remote60::native_poc::kMagic &&
+              hello.kind == static_cast<uint16_t>(UdpPacketKind::Hello)) {
+            UdpHelloPacket ack{};
+            ack.kind = static_cast<uint16_t>(UdpPacketKind::HelloAck);
+            (void)sendto(clientSock, reinterpret_cast<const char*>(&ack), sizeof(ack), 0,
+                         reinterpret_cast<const sockaddr*>(&peer), peerLen);
+            const bool changed =
+                udpPeerIpNet.load(std::memory_order_acquire) != peer.sin_addr.s_addr ||
+                udpPeerPortNet.load(std::memory_order_acquire) != peer.sin_port;
+            if (changed) {
+              udpPeerIpNet.store(peer.sin_addr.s_addr, std::memory_order_release);
+              udpPeerPortNet.store(peer.sin_port, std::memory_order_release);
+              // A different peer means a different decoder; the control channel's sequence
+              // numbers would otherwise continue from the previous session.
+              udpControlChannel.Reset();
+              udpPeerChanged.store(true, std::memory_order_release);
+            }
+            continue;
+          }
+        }
+
+        if (udpControlChannel.OnPacket(rx, len)) continue;
+        (void)directoryAgent.ConsumeUdpPacket(rx, len, peer);
+      }
+      udpControlChannel.Close();
+    });
+
+    udpControlThread = std::thread([&]() {
+      UdpControlLink link(&udpControlChannel, 0);
+      serve_control_session(link);
+      std::cout << "[native-video-host][control] udp control session ended\n";
+    });
   }
 
   winrt::init_apartment(winrt::apartment_type::multi_threaded);
@@ -4228,38 +4423,19 @@ int main(int argc, char** argv) {
         std::max<uint64_t>(kQueueWaitTimeoutUsMin, keepaliveIntervalUs / 4ULL);
     return std::min<uint64_t>(kQueueWaitTimeoutUsDefault, dynamicTimeoutUs);
   };
+  // Receives now happen on their own thread so a control message never waits for the next
+  // frame; this just adopts a peer change the reader has already handled.
   auto pump_udp_hello = [&]() {
     if (transport != VideoTransport::Udp) return;
-    for (;;) {
-      UdpHelloPacket hello{};
-      sockaddr_in peer{};
-      int peerLen = sizeof(peer);
-      const int n = recvfrom(clientSock, reinterpret_cast<char*>(&hello), sizeof(hello), 0,
-                             reinterpret_cast<sockaddr*>(&peer), &peerLen);
-      if (n <= 0) {
-        const int err = WSAGetLastError();
-        if (err == WSAEWOULDBLOCK || err == WSAETIMEDOUT) break;
-        break;
-      }
-      if (n < static_cast<int>(sizeof(UdpHelloPacket)) ||
-          hello.magic != remote60::native_poc::kMagic ||
-          hello.kind != static_cast<uint16_t>(UdpPacketKind::Hello)) {
-        continue;
-      }
-      UdpHelloPacket ack{};
-      ack.kind = static_cast<uint16_t>(UdpPacketKind::HelloAck);
-      (void)sendto(clientSock, reinterpret_cast<const char*>(&ack), sizeof(ack), 0,
-                   reinterpret_cast<const sockaddr*>(&peer), peerLen);
-      const bool peerChanged =
-          (!udpPeerReady ||
-           (std::memcmp(&udpPeer, &peer, sizeof(sockaddr_in)) != 0));
-      udpPeer = peer;
-      udpPeerReady = true;
-      if (peerChanged) {
-        forceKeyNext = true;
-        std::cout << "[native-video-host] udp peer updated; forcing keyframe\n";
-      }
-    }
+    if (!udpPeerChanged.exchange(false, std::memory_order_acq_rel)) return;
+    sockaddr_in peer{};
+    peer.sin_family = AF_INET;
+    peer.sin_addr.s_addr = udpPeerIpNet.load(std::memory_order_acquire);
+    peer.sin_port = udpPeerPortNet.load(std::memory_order_acquire);
+    udpPeer = peer;
+    udpPeerReady = true;
+    forceKeyNext = true;
+    std::cout << "[native-video-host] udp peer updated; forcing keyframe\n";
   };
   auto reconnect_tcp_data_session = [&](const char* reason) -> bool {
     if (transport != VideoTransport::Tcp) return false;
@@ -6396,6 +6572,11 @@ int main(int argc, char** argv) {
     controlListenSock = INVALID_SOCKET;
   }
   if (controlThread.joinable()) controlThread.join();
+  // Close before joining: the control session is parked in a blocking read, and the reader
+  // thread is parked in recvfrom until its receive timeout expires.
+  udpControlChannel.Close();
+  if (udpControlThread.joinable()) udpControlThread.join();
+  if (udpReaderThread.joinable()) udpReaderThread.join();
   detach_capture_session();
   if (clientSock != INVALID_SOCKET) {
     closesocket(clientSock);

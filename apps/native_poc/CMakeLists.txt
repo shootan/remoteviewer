@@ -44,6 +44,8 @@ target_link_libraries(remote60_native_client_poc PRIVATE
 
 add_executable(remote60_native_video_host_poc
   src/native_video_host_main.cpp
+  src/directory_client.cpp
+  src/udp_control_channel.cpp
   src/mf_h264_codec.cpp
   ../host/src/capture_backend_dxgi.cpp
 )
@@ -73,6 +75,7 @@ add_executable(remote60_native_video_client_poc
   src/native_video_client_main.cpp
   src/native_video_client_shared_core.cpp
   src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
   src/mf_h264_codec.cpp
 )
 
@@ -101,6 +104,7 @@ target_compile_definitions(remote60_native_video_client_poc PRIVATE
 add_executable(remote60_native_video_client_shared_core_test
   src/native_video_client_shared_core.cpp
   src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
   src/native_video_client_session.cpp
   src/native_video_client_shared_core_test.cpp
 )
@@ -111,5 +115,35 @@ target_include_directories(remote60_native_video_client_shared_core_test PRIVATE
 
 target_link_libraries(remote60_native_video_client_shared_core_test PRIVATE
   common
+  ws2_32
+)
+
+add_executable(remote60_udp_control_e2e_test
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+  src/udp_control_e2e_test.cpp
+)
+
+target_include_directories(remote60_udp_control_e2e_test PRIVATE
+  src
+)
+
+target_link_libraries(remote60_udp_control_e2e_test PRIVATE
+  common
+  ws2_32
+)
+
+add_executable(remote60_udp_control_channel_test
+  src/udp_control_channel.cpp
+  src/udp_control_channel_test.cpp
+)
+
+target_include_directories(remote60_udp_control_channel_test PRIVATE
+  src
+)
+
+target_link_libraries(remote60_udp_control_channel_test PRIVATE
   ws2_32
 )

@@ -2,43 +2,44 @@
 
 namespace remote60::native_poc {
 
-bool send_tcp_control_action(SocketHandle controlSock, const ControlOutboundAction& action) {
+bool send_control_action(ControlLink& link, const ControlOutboundAction& action) {
   switch (action.kind) {
     case ControlOutboundActionKind::Ping:
-      return send_all(controlSock, &action.ping, sizeof(action.ping));
+      return link.Write(&action.ping, sizeof(action.ping));
     case ControlOutboundActionKind::WindowListRequest:
-      return send_all(controlSock, &action.windowListRequest, sizeof(action.windowListRequest));
+      return link.Write(&action.windowListRequest, sizeof(action.windowListRequest));
     case ControlOutboundActionKind::WindowSelect:
-      return send_all(controlSock, &action.windowSelect, sizeof(action.windowSelect));
+      return link.Write(&action.windowSelect, sizeof(action.windowSelect));
     case ControlOutboundActionKind::StreamState:
-      return send_all(controlSock, &action.streamState, sizeof(action.streamState));
+      return link.Write(&action.streamState, sizeof(action.streamState));
     case ControlOutboundActionKind::CaptureMode:
-      return send_all(controlSock, &action.captureMode, sizeof(action.captureMode));
+      return link.Write(&action.captureMode, sizeof(action.captureMode));
     case ControlOutboundActionKind::Metrics:
-      return send_all(controlSock, &action.metrics, sizeof(action.metrics));
+      return link.Write(&action.metrics, sizeof(action.metrics));
     case ControlOutboundActionKind::KeyframeRequest:
-      return send_all(controlSock, &action.keyframe, sizeof(action.keyframe));
+      return link.Write(&action.keyframe, sizeof(action.keyframe));
     case ControlOutboundActionKind::RuntimeTune:
-      return send_all(controlSock, &action.runtimeTune, sizeof(action.runtimeTune));
+      return link.Write(&action.runtimeTune, sizeof(action.runtimeTune));
     case ControlOutboundActionKind::DesktopBackend:
-      return send_all(controlSock, &action.desktopBackend, sizeof(action.desktopBackend));
+      return link.Write(&action.desktopBackend, sizeof(action.desktopBackend));
     case ControlOutboundActionKind::InputEvent:
-      return send_all(controlSock, &action.inputEvent, sizeof(action.inputEvent));
+      return link.Write(&action.inputEvent, sizeof(action.inputEvent));
     case ControlOutboundActionKind::InputText:
-      return send_all(controlSock, &action.inputText, sizeof(action.inputText));
+      return link.Write(&action.inputText, sizeof(action.inputText));
     case ControlOutboundActionKind::None:
     default:
       return false;
   }
 }
 
-bool recv_tcp_control_response(SocketHandle controlSock, const ControlOutboundAction& action, TcpControlResponse* out) {
+bool recv_control_response(ControlLink& link, const ControlOutboundAction& action,
+                           TcpControlResponse* out) {
   if (!out) return false;
   *out = TcpControlResponse{};
   if (!action.expectedResponseType.has_value()) return true;
 
   MessageHeader header{};
-  if (!recv_all(controlSock, &header, sizeof(header))) return false;
+  if (!link.Read(&header, sizeof(header))) return false;
   if (header.magic != kMagic ||
       header.type != static_cast<uint16_t>(*action.expectedResponseType) ||
       header.size != action.expectedResponseSize) {
@@ -49,29 +50,31 @@ bool recv_tcp_control_response(SocketHandle controlSock, const ControlOutboundAc
     case MessageType::ControlPong:
       out->kind = TcpControlResponseKind::Pong;
       out->pong.header = header;
-      return recv_all(controlSock, &out->pong.seq, sizeof(out->pong) - sizeof(MessageHeader));
+      return link.Read(&out->pong.seq, sizeof(out->pong) - sizeof(MessageHeader));
     case MessageType::ControlWindowList:
       out->kind = TcpControlResponseKind::WindowList;
       out->windowList.header = header;
-      return recv_all(controlSock, &out->windowList.seq, sizeof(out->windowList) - sizeof(MessageHeader));
+      return link.Read(&out->windowList.seq, sizeof(out->windowList) - sizeof(MessageHeader));
     case MessageType::ControlWindowSelected:
       out->kind = TcpControlResponseKind::WindowSelected;
       out->windowSelected.header = header;
-      return recv_all(controlSock, &out->windowSelected.seq,
-                      sizeof(out->windowSelected) - sizeof(MessageHeader));
+      return link.Read(&out->windowSelected.seq,
+                       sizeof(out->windowSelected) - sizeof(MessageHeader));
     case MessageType::ControlInputAck:
       out->kind = TcpControlResponseKind::InputAck;
       out->inputAck.header = header;
-      return recv_all(controlSock, &out->inputAck.seq, sizeof(out->inputAck) - sizeof(MessageHeader));
+      return link.Read(&out->inputAck.seq, sizeof(out->inputAck) - sizeof(MessageHeader));
     default:
       out->kind = TcpControlResponseKind::None;
-      return recv_discard(controlSock, header.size - sizeof(MessageHeader));
+      return link.Discard(header.size - sizeof(MessageHeader));
   }
 }
 
-bool execute_tcp_control_action(SocketHandle controlSock, const ControlOutboundAction& action, TcpControlResponse* out) {
-  if (!send_tcp_control_action(controlSock, action)) return false;
-  return recv_tcp_control_response(controlSock, action, out);
+bool execute_control_action(ControlLink& link, const ControlOutboundAction& action,
+                            TcpControlResponse* out) {
+  // One request is one message; the boundary matters to UDP and is free over TCP.
+  if (!send_control_action(link, action) || !link.EndMessage()) return false;
+  return recv_control_response(link, action, out);
 }
 
 }  // namespace remote60::native_poc

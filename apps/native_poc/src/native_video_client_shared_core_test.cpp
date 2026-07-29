@@ -480,7 +480,7 @@ bool test_session_controller() {
   if (!expect(wait_until([&]() {
                 const auto current = controller.Snapshot();
                 return current.state == ClientSessionState::Error &&
-                       current.lastError == "tcp control loop failed";
+                       current.lastError == "control loop failed";
               }, 3000), "control socket close should surface as error")) {
     return false;
   }
