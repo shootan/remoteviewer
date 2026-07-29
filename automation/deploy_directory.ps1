@@ -29,10 +29,28 @@ if (-not (Test-Path (Join-Path $sourceDir "server.js"))) {
 $sshArgs = @("-i", $KeyPath, "-p", "$Port", "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes")
 $target = "$User@$ServerHost"
 
+# stderr is deliberately not merged into the pipeline: Windows PowerShell turns a native
+# command's stderr into error records, so a harmless banner like "your password will expire"
+# would abort the deployment. The exit code is the only signal that matters here.
+#
+# Scripts travel as a file rather than as an ssh argument. Windows PowerShell rewrites quoting
+# when it builds a native command line -- an empty `""` disappears entirely -- which silently
+# corrupted every multi-line script sent this way.
+$scpArgs = @("-i", $KeyPath, "-P", "$Port", "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes")
+$stepScript = Join-Path ([System.IO.Path]::GetTempPath()) "remote60-deploy-step.sh"
+
 function Invoke-Remote([string]$Command) {
-  $output = & ssh @sshArgs $target $Command 2>&1
+  $body = ($Command -replace "`r`n", "`n")
+  if (-not $body.EndsWith("`n")) { $body += "`n" }
+  # No BOM and LF endings: bash treats either as part of the first command.
+  [System.IO.File]::WriteAllText($stepScript, $body, (New-Object System.Text.UTF8Encoding($false)))
+
+  & scp @scpArgs $stepScript "${target}:.remote60-deploy-step.sh"
+  if ($LASTEXITCODE -ne 0) { throw "failed to upload deploy step" }
+
+  $output = & ssh @sshArgs $target "bash .remote60-deploy-step.sh"
   if ($LASTEXITCODE -ne 0) {
-    throw "remote command failed ($LASTEXITCODE): $Command`n$output"
+    throw "remote command failed ($LASTEXITCODE):`n$Command`n---`n$output"
   }
   return $output
 }
@@ -44,7 +62,7 @@ Write-Host "[deploy] connected as: $($whoami -join ' / ')"
 # --- node runtime -----------------------------------------------------------------
 # A distro package would need sudo and drags in a random version; the official tarball
 # unpacked into the user's home works everywhere and needs no privileges.
-$nodeCheck = & ssh @sshArgs $target "command -v node >/dev/null 2>&1 && node -v || echo MISSING" 2>&1
+$nodeCheck = & ssh @sshArgs $target "command -v node >/dev/null 2>&1 && node -v || echo MISSING"
 $nodeVersion = ($nodeCheck | Select-Object -Last 1).ToString().Trim()
 if ($nodeVersion -eq "MISSING" -or $nodeVersion -notmatch '^v(1[89]|2[0-9])') {
   Write-Host "[deploy] installing a local node runtime (found: $nodeVersion)"
@@ -72,19 +90,18 @@ fi
   $nodeBin = "`$HOME/node-v20.18.1/bin/node"
 } else {
   Write-Host "[deploy] using existing node $nodeVersion"
-  $nodeBin = (& ssh @sshArgs $target "command -v node" 2>&1 | Select-Object -Last 1).ToString().Trim()
+  $nodeBin = (& ssh @sshArgs $target "command -v node" | Select-Object -Last 1).ToString().Trim()
 }
 
 # --- sources ----------------------------------------------------------------------
 # Staged under the home directory first: the install dir may be root-owned.
 Write-Host "[deploy] copying sources"
 Invoke-Remote "rm -rf ~/remote60-directory-stage && mkdir -p ~/remote60-directory-stage"
-$scpArgs = @("-i", $KeyPath, "-P", "$Port", "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes")
 & scp @scpArgs (Join-Path $sourceDir "server.js") (Join-Path $sourceDir "package.json") (Join-Path $sourceDir "README.md") "${target}:~/remote60-directory-stage/"
 if ($LASTEXITCODE -ne 0) { throw "scp failed" }
 
 $canSudo = $false
-& ssh @sshArgs $target "sudo -n true" 2>&1 | Out-Null
+& ssh @sshArgs $target "sudo -n true" | Out-Null
 if ($LASTEXITCODE -eq 0) { $canSudo = $true }
 Write-Host "[deploy] passwordless sudo: $canSudo"
 
@@ -166,7 +183,7 @@ Write-Host "[deploy] registering service"
 $state = Invoke-Remote ($serviceScript -replace "`r`n", "`n")
 Write-Host "[deploy] service state: $($state | Select-Object -Last 1)"
 
-$health = & ssh @sshArgs $target "curl -fsS --max-time 5 http://127.0.0.1:$HttpPort/healthz || echo UNREACHABLE" 2>&1
+$health = & ssh @sshArgs $target "curl -fsS --max-time 5 http://127.0.0.1:$HttpPort/healthz || echo UNREACHABLE"
 Write-Host "[deploy] healthz: $($health | Select-Object -Last 1)"
 Write-Host "[deploy] done. http=$HttpPort udp=$UdpPort"
 Write-Host "[deploy] the cloud firewall (ACG) must allow inbound TCP $HttpPort and UDP $UdpPort"
