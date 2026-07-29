@@ -59,6 +59,8 @@ enum ControlId : int {
   IdCreateAccount,
   IdSignupKey,
   IdSignupKeyLabel,
+  IdSignOut,
+  IdSwitchAccount,
 };
 
 enum MenuId : int {
@@ -301,6 +303,8 @@ struct AppState {
   HWND createAccountCheck = nullptr;
   HWND signupKeyLabel = nullptr;
   HWND signupKeyEdit = nullptr;
+  HWND signOutButton = nullptr;
+  HWND switchAccountButton = nullptr;
   HFONT font = nullptr;
   NOTIFYICONDATAW tray{};
   bool trayAdded = false;
@@ -436,6 +440,9 @@ void apply_signed_in_ui(bool signedIn) {
   ShowWindow(g.signupKeyLabel, creating ? SW_SHOW : SW_HIDE);
   ShowWindow(g.signupKeyEdit, creating ? SW_SHOW : SW_HIDE);
   ShowWindow(g.startWithWindowsCheck, signedIn ? SW_SHOW : SW_HIDE);
+  // Signing out belonged in the window, not buried in the tray menu where nobody looks.
+  ShowWindow(g.signOutButton, signedIn ? SW_SHOW : SW_HIDE);
+  ShowWindow(g.switchAccountButton, signedIn ? SW_SHOW : SW_HIDE);
   update_tray_tip();
 }
 
@@ -579,6 +586,16 @@ void build_controls(HWND window) {
                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdSignIn)),
                                    nullptr, nullptr);
   SendMessageW(g.signInButton, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
+
+  // Occupy the same row as Sign in: only one of the two states is ever on screen.
+  g.switchAccountButton = CreateWindowExW(
+      0, L"BUTTON", L"Switch account", WS_CHILD | WS_TABSTOP, fieldX, y, 140, 30, window,
+      reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdSwitchAccount)), nullptr, nullptr);
+  SendMessageW(g.switchAccountButton, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
+  g.signOutButton = CreateWindowExW(
+      0, L"BUTTON", L"Sign out", WS_CHILD | WS_TABSTOP, fieldX + 150, y, 120, 30, window,
+      reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdSignOut)), nullptr, nullptr);
+  SendMessageW(g.signOutButton, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
   y += 40;
 
   g.statusLabel = make_label(window, IdStatus, L"", margin, y, fieldX + fieldW - margin, 40);
@@ -658,14 +675,14 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         SetForegroundWindow(window);
         return 0;
       }
-      if (id == IdMenuChangeAccount) {
+      if (id == IdSwitchAccount || id == IdMenuChangeAccount) {
         sign_out(/*keepAccount=*/true);
         ShowWindow(window, SW_SHOW);
         SetForegroundWindow(window);
         SetFocus(g.passwordEdit);
         return 0;
       }
-      if (id == IdMenuSignOut) {
+      if (id == IdSignOut || id == IdMenuSignOut) {
         sign_out(/*keepAccount=*/false);
         ShowWindow(window, SW_SHOW);
         SetForegroundWindow(window);
