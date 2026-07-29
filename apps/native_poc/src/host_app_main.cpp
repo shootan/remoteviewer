@@ -574,7 +574,8 @@ void build_controls(HWND window) {
   SendMessageW(g.createAccountCheck, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
   y += 26;
 
-  g.signupKeyLabel = make_label(window, IdSignupKeyLabel, L"Signup key", margin, y + 4, labelW, 20);
+  g.signupKeyLabel =
+      make_label(window, IdSignupKeyLabel, L"Signup key", margin, y + 4, labelW, 20);
   g.signupKeyEdit = make_edit(window, IdSignupKey, fieldX, y, fieldW, rowH, 0);
   ShowWindow(g.signupKeyLabel, SW_HIDE);
   ShowWindow(g.signupKeyEdit, SW_HIDE);
@@ -601,10 +602,11 @@ void build_controls(HWND window) {
   g.statusLabel = make_label(window, IdStatus, L"", margin, y, fieldX + fieldW - margin, 40);
   y += 44;
 
+  // Three lines: the account-creation explanation is the longest thing shown here.
   g.hintLabel = make_label(window, IdHint,
                            L"Sign in once. This PC then appears in the phone app "
                            L"wherever you are.",
-                           margin, y, fieldX + fieldW - margin, 40);
+                           margin, y, fieldX + fieldW - margin, 58);
 
   g.startWithWindowsCheck = CreateWindowExW(
       0, L"BUTTON", L"Start automatically when Windows starts",
@@ -666,8 +668,15 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         ShowWindow(g.signupKeyLabel, checked ? SW_SHOW : SW_HIDE);
         ShowWindow(g.signupKeyEdit, checked ? SW_SHOW : SW_HIDE);
         SetWindowTextW(g.signInButton, checked ? L"Create and sign in" : L"Sign in");
-        set_status(checked ? L"Pick any ID and password you like."
-                           : L"Sign in to make this PC reachable.");
+        // Spelling out which field is which: "Signup key" on its own reads like somewhere to
+        // put the account details, and there is no second chance to explain it.
+        SetWindowTextW(g.hintLabel,
+                       checked ? L"The ID and password above become your new account - pick "
+                                 L"anything you like. The signup key is a separate password "
+                                 L"for the server itself."
+                               : L"Sign in once. This PC then appears in the phone app "
+                                 L"wherever you are.");
+        set_status(checked ? L"" : L"Sign in to make this PC reachable.");
         return 0;
       }
       if (id == IdMenuOpen) {

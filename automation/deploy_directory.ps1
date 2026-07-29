@@ -17,6 +17,7 @@ param(
   # Enables account creation from the app. Kept as a parameter so it never lands in the
   # repository; the deployer supplies it and hands it to whoever should be able to sign up.
   [string]$SignupKey = "",
+  [int]$MinPasswordLength = 8,
   [switch]$SkipService
 )
 
@@ -142,6 +143,7 @@ Environment=REMOTE60_DIR_PORT=$HttpPort
 Environment=REMOTE60_DIR_UDP_PORT=$UdpPort
 Environment=REMOTE60_DIR_DATA=DATA_PATH_PLACEHOLDER
 Environment=REMOTE60_DIR_SIGNUP_KEY=SIGNUP_KEY_PLACEHOLDER
+Environment=REMOTE60_DIR_MIN_PASSWORD=MIN_PASSWORD_PLACEHOLDER
 ExecStart=NODE_PLACEHOLDER INSTALL_PLACEHOLDER/server.js
 Restart=always
 RestartSec=3
@@ -158,7 +160,7 @@ INSTALL_DIR="$InstallDir"
 cat > /tmp/remote60-directory.service <<'UNIT'
 $unitBody
 UNIT
-sed -i "s#NODE_PLACEHOLDER#$nodeBin#g; s#INSTALL_PLACEHOLDER#`$INSTALL_DIR#g; s#DATA_PATH_PLACEHOLDER#`$INSTALL_DIR/directory-data.json#g; s#WANTED_PLACEHOLDER#multi-user.target#g; s#SIGNUP_KEY_PLACEHOLDER#$SignupKey#g" /tmp/remote60-directory.service
+sed -i "s#NODE_PLACEHOLDER#$nodeBin#g; s#INSTALL_PLACEHOLDER#`$INSTALL_DIR#g; s#DATA_PATH_PLACEHOLDER#`$INSTALL_DIR/directory-data.json#g; s#WANTED_PLACEHOLDER#multi-user.target#g; s#SIGNUP_KEY_PLACEHOLDER#$SignupKey#g; s#MIN_PASSWORD_PLACEHOLDER#$MinPasswordLength#g" /tmp/remote60-directory.service
 sudo mv /tmp/remote60-directory.service /etc/systemd/system/remote60-directory.service
 sudo systemctl daemon-reload
 sudo systemctl enable remote60-directory
@@ -174,7 +176,7 @@ mkdir -p "`$HOME/.config/systemd/user"
 cat > "`$HOME/.config/systemd/user/remote60-directory.service" <<'UNIT'
 $unitBody
 UNIT
-sed -i "s#NODE_PLACEHOLDER#$nodeBin#g; s#INSTALL_PLACEHOLDER#`$INSTALL_DIR#g; s#DATA_PATH_PLACEHOLDER#`$INSTALL_DIR/directory-data.json#g; s#WANTED_PLACEHOLDER#default.target#g; s#SIGNUP_KEY_PLACEHOLDER#$SignupKey#g" "`$HOME/.config/systemd/user/remote60-directory.service"
+sed -i "s#NODE_PLACEHOLDER#$nodeBin#g; s#INSTALL_PLACEHOLDER#`$INSTALL_DIR#g; s#DATA_PATH_PLACEHOLDER#`$INSTALL_DIR/directory-data.json#g; s#WANTED_PLACEHOLDER#default.target#g; s#SIGNUP_KEY_PLACEHOLDER#$SignupKey#g; s#MIN_PASSWORD_PLACEHOLDER#$MinPasswordLength#g" "`$HOME/.config/systemd/user/remote60-directory.service"
 # Without this the user service dies at logout, which would stop the host from being findable.
 loginctl enable-linger "`$(id -un)" 2>/dev/null || true
 systemctl --user daemon-reload

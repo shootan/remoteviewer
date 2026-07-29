@@ -15,6 +15,7 @@
  *   REMOTE60_DIR_TLS_KEY     PEM key  — enables HTTPS when both are set
  *   REMOTE60_DIR_TLS_CERT    PEM cert
  *   REMOTE60_DIR_SIGNUP_KEY  shared secret that allows account creation; unset = no signup
+ *   REMOTE60_DIR_MIN_PASSWORD  shortest password signup will accept (default 8)
  */
 
 const http = require('http');
@@ -32,6 +33,9 @@ const TLS_CERT = process.env.REMOTE60_DIR_TLS_CERT || '';
 // Account creation is off unless a key is configured: this server is reachable from the
 // internet, and an open signup endpoint would let anyone register on it.
 const SIGNUP_KEY = process.env.REMOTE60_DIR_SIGNUP_KEY || '';
+// The operator's call, not ours. Short passwords are genuinely weak on a server that
+// grants remote control of a PC, so the default stays at 8 and lowering it is explicit.
+const MIN_PASSWORD = Math.max(1, Number(process.env.REMOTE60_DIR_MIN_PASSWORD || 8));
 
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;   // 12 h
 const HOST_OFFLINE_MS = 90 * 1000;            // no heartbeat for 90 s = offline
@@ -223,8 +227,8 @@ async function handleSignup(req, res) {
   if (!/^[a-z0-9._-]{3,32}$/.test(id)) {
     return sendJson(res, 400, { error: 'id must be 3-32 characters: letters, digits, . _ -' });
   }
-  if (pw.length < 8) {
-    return sendJson(res, 400, { error: 'password must be at least 8 characters' });
+  if (pw.length < MIN_PASSWORD) {
+    return sendJson(res, 400, { error: `password must be at least ${MIN_PASSWORD} characters` });
   }
   if (store.accounts[id]) {
     return sendJson(res, 409, { error: 'that id is already taken' });
