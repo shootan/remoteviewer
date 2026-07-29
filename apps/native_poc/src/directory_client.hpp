@@ -70,6 +70,15 @@ bool register_host(const std::string& url, const std::string& accountId,
                    const std::string& machineId, std::string* outHostId,
                    std::string* outHostToken, std::string* outError);
 
+/**
+ * Creates an account, so a user can choose their own id and password rather than asking the
+ * person who runs the server. The signup key is what stops an internet-facing server from
+ * accepting registrations from anyone.
+ */
+bool create_account(const std::string& url, const std::string& accountId,
+                    const std::string& password, const std::string& signupKey,
+                    std::string* outError);
+
 /** Splits http://host[:port] into its parts; rejects https, which is not supported yet. */
 bool parse_directory_url(const std::string& url, std::string* outHost, uint16_t* outPort,
                          std::string* outError);

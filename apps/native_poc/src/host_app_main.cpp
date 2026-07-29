@@ -56,6 +56,9 @@ enum ControlId : int {
   IdStatus,
   IdHint,
   IdStartWithWindows,
+  IdCreateAccount,
+  IdSignupKey,
+  IdSignupKeyLabel,
 };
 
 enum MenuId : int {
@@ -295,6 +298,9 @@ struct AppState {
   HWND statusLabel = nullptr;
   HWND hintLabel = nullptr;
   HWND startWithWindowsCheck = nullptr;
+  HWND createAccountCheck = nullptr;
+  HWND signupKeyLabel = nullptr;
+  HWND signupKeyEdit = nullptr;
   HFONT font = nullptr;
   NOTIFYICONDATAW tray{};
   bool trayAdded = false;
@@ -424,6 +430,11 @@ void apply_signed_in_ui(bool signedIn) {
   ShowWindow(g.hostNameEdit, hide);
   ShowWindow(g.signInButton, hide);
   ShowWindow(g.hintLabel, hide);
+  ShowWindow(g.createAccountCheck, hide);
+  const bool creating =
+      !signedIn && SendMessageW(g.createAccountCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+  ShowWindow(g.signupKeyLabel, creating ? SW_SHOW : SW_HIDE);
+  ShowWindow(g.signupKeyEdit, creating ? SW_SHOW : SW_HIDE);
   ShowWindow(g.startWithWindowsCheck, signedIn ? SW_SHOW : SW_HIDE);
   update_tray_tip();
 }
@@ -454,12 +465,26 @@ void perform_sign_in() {
     return;
   }
 
-  set_status(L"Signing in...");
+  const bool creating =
+      SendMessageW(g.createAccountCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+  const std::string signupKey = creating ? narrow(window_text(g.signupKeyEdit)) : std::string();
+  if (creating && signupKey.empty()) {
+    set_status(L"Enter the signup key from whoever set up the server.");
+    g.signInBusy.store(false);
+    return;
+  }
+
+  set_status(creating ? L"Creating the account..." : L"Signing in...");
   EnableWindow(g.signInButton, FALSE);
 
   // Off the UI thread: this makes a network round trip and the window must stay responsive.
-  std::thread([url, account, password, hostName]() {
+  std::thread([url, account, password, hostName, creating, signupKey]() {
     std::string hostId, token, error;
+    if (creating && !directory::create_account(url, account, password, signupKey, &error)) {
+      PostMessageW(g.window, WM_APP + 2, 0,
+                   reinterpret_cast<LPARAM>(new std::wstring(widen(error))));
+      return;
+    }
     const bool ok = directory::register_host(url, account, password, hostName,
                                              directory::machine_id(), &hostId, &token, &error);
     if (ok) {
@@ -531,6 +556,21 @@ void build_controls(HWND window) {
 
   make_label(window, 0, L"This PC's name", margin, y + 4, labelW, 20);
   g.hostNameEdit = make_edit(window, IdHostName, fieldX, y, fieldW, rowH, 0);
+  y += rowH + 8;
+
+  // Without this the only accounts that work are ones somebody created on the server by hand,
+  // and picking your own id gets rejected as "not correct", which reads like a typo.
+  g.createAccountCheck = CreateWindowExW(
+      0, L"BUTTON", L"I don't have an account yet - create one",
+      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, fieldX, y, fieldW, 22, window,
+      reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdCreateAccount)), nullptr, nullptr);
+  SendMessageW(g.createAccountCheck, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
+  y += 26;
+
+  g.signupKeyLabel = make_label(window, IdSignupKeyLabel, L"Signup key", margin, y + 4, labelW, 20);
+  g.signupKeyEdit = make_edit(window, IdSignupKey, fieldX, y, fieldW, rowH, 0);
+  ShowWindow(g.signupKeyLabel, SW_HIDE);
+  ShowWindow(g.signupKeyEdit, SW_HIDE);
   y += rowH + 14;
 
   g.signInButton = CreateWindowExW(0, L"BUTTON", L"Sign in",
@@ -601,6 +641,16 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         const bool checked =
             SendMessageW(g.startWithWindowsCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         set_autostart(checked);
+        return 0;
+      }
+      if (id == IdCreateAccount) {
+        const bool checked =
+            SendMessageW(g.createAccountCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        ShowWindow(g.signupKeyLabel, checked ? SW_SHOW : SW_HIDE);
+        ShowWindow(g.signupKeyEdit, checked ? SW_SHOW : SW_HIDE);
+        SetWindowTextW(g.signInButton, checked ? L"Create and sign in" : L"Sign in");
+        set_status(checked ? L"Pick any ID and password you like."
+                           : L"Sign in to make this PC reachable.");
         return 0;
       }
       if (id == IdMenuOpen) {
@@ -702,7 +752,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR commandLine, int) {
   wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
   RegisterClassExW(&wc);
 
-  RECT desired{0, 0, 470, 330};
+  // Tall enough for the sign-in form with the account-creation row expanded.
+  RECT desired{0, 0, 470, 400};
   AdjustWindowRect(&desired, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE);
   HWND window = CreateWindowExW(0, kWindowClass, L"remote60",
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,

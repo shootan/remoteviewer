@@ -396,6 +396,37 @@ bool register_host(const std::string& url, const std::string& accountId,
   return true;
 }
 
+bool create_account(const std::string& url, const std::string& accountId,
+                    const std::string& password, const std::string& signupKey,
+                    std::string* outError) {
+  std::string host;
+  uint16_t port = 0;
+  if (!parse_directory_url(url, &host, &port, outError)) return false;
+
+  std::ostringstream body;
+  body << "{\"id\":\"" << json_escape(accountId) << "\","
+       << "\"pw\":\"" << json_escape(password) << "\","
+       << "\"signupKey\":\"" << json_escape(signupKey) << "\"}";
+
+  uint32_t status = 0;
+  std::string resp;
+  if (!post_json(host, port, "/api/signup", body.str(), &status, &resp)) {
+    if (outError) *outError = "cannot reach the server";
+    return false;
+  }
+  if (status == 200) return true;
+
+  // The server's message is the useful one here: it says which rule was broken.
+  std::string serverError;
+  json_get_string(resp, "error", &serverError);
+  if (outError) {
+    *outError = serverError.empty()
+                    ? "could not create the account (http " + std::to_string(status) + ")"
+                    : serverError;
+  }
+  return false;
+}
+
 bool load_host_cache(const std::string& path, HostCache* out) {
   if (!out) return false;
   std::ifstream ifs(path, std::ios::binary);

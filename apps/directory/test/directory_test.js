@@ -52,7 +52,29 @@ function observe(token) {
 }
 
 (async () => {
-  let r = await api('POST', '/api/login', { id: 'tester', pw: 'wrong-password' });
+  // Account creation: without it the only working accounts are ones made by hand on the
+  // server, and choosing your own id comes back as "not correct", which reads like a typo.
+  let r = await api('POST', '/api/signup',
+    { id: 'newcomer', pw: 'a-good-password', signupKey: 'test-signup-key' });
+  check('signup creates an account', r.status === 200, `status=${r.status}`);
+
+  r = await api('POST', '/api/login', { id: 'newcomer', pw: 'a-good-password' });
+  check('the new account can log in', r.status === 200 && !!r.body.sessionToken, `status=${r.status}`);
+
+  r = await api('POST', '/api/signup', { id: 'intruder', pw: 'a-good-password', signupKey: 'wrong' });
+  check('signup refuses a wrong key', r.status === 403, `status=${r.status}`);
+
+  // The key must not become a way to take over an id that already exists.
+  r = await api('POST', '/api/signup',
+    { id: 'newcomer', pw: 'different-password', signupKey: 'test-signup-key' });
+  check('signup refuses an id already taken', r.status === 409, `status=${r.status}`);
+  r = await api('POST', '/api/login', { id: 'newcomer', pw: 'a-good-password' });
+  check('the original password still works', r.status === 200, `status=${r.status}`);
+
+  r = await api('POST', '/api/signup', { id: 'shorty', pw: 'short', signupKey: 'test-signup-key' });
+  check('signup refuses a weak password', r.status === 400, `status=${r.status}`);
+
+  r = await api('POST', '/api/login', { id: 'tester', pw: 'wrong-password' });
   check('wrong password rejected', r.status === 401, `status=${r.status}`);
 
   r = await api('POST', '/api/login', { id: 'tester', pw: 'test-pass-1234' });

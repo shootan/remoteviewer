@@ -14,6 +14,7 @@
  *   REMOTE60_DIR_DATA        account/host store path         (default ./directory-data.json)
  *   REMOTE60_DIR_TLS_KEY     PEM key  — enables HTTPS when both are set
  *   REMOTE60_DIR_TLS_CERT    PEM cert
+ *   REMOTE60_DIR_SIGNUP_KEY  shared secret that allows account creation; unset = no signup
  */
 
 const http = require('http');
@@ -28,6 +29,9 @@ const UDP_PORT = Number(process.env.REMOTE60_DIR_UDP_PORT || 8081);
 const DATA_PATH = process.env.REMOTE60_DIR_DATA || path.join(__dirname, 'directory-data.json');
 const TLS_KEY = process.env.REMOTE60_DIR_TLS_KEY || '';
 const TLS_CERT = process.env.REMOTE60_DIR_TLS_CERT || '';
+// Account creation is off unless a key is configured: this server is reachable from the
+// internet, and an open signup endpoint would let anyone register on it.
+const SIGNUP_KEY = process.env.REMOTE60_DIR_SIGNUP_KEY || '';
 
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;   // 12 h
 const HOST_OFFLINE_MS = 90 * 1000;            // no heartbeat for 90 s = offline
@@ -197,6 +201,42 @@ function sessionFor(req) {
 
 // ---------------------------------------------------------------- routes
 
+/**
+ * Creates an account so people can choose their own id and password instead of asking whoever
+ * runs the server to make one for them. Gated by a shared key rather than left open, and it
+ * refuses to overwrite an existing account so the key alone cannot take one over.
+ */
+async function handleSignup(req, res) {
+  if (!SIGNUP_KEY) {
+    return sendJson(res, 403, { error: 'account creation is disabled on this server' });
+  }
+  const body = await readJsonBody(req);
+  const key = String(body.signupKey || '');
+  const keyBuf = Buffer.from(key);
+  const expected = Buffer.from(SIGNUP_KEY);
+  if (keyBuf.length !== expected.length || !crypto.timingSafeEqual(keyBuf, expected)) {
+    return sendJson(res, 403, { error: 'signup key is not correct' });
+  }
+
+  const id = String(body.id || '').trim().toLowerCase();
+  const pw = String(body.pw || '');
+  if (!/^[a-z0-9._-]{3,32}$/.test(id)) {
+    return sendJson(res, 400, { error: 'id must be 3-32 characters: letters, digits, . _ -' });
+  }
+  if (pw.length < 8) {
+    return sendJson(res, 400, { error: 'password must be at least 8 characters' });
+  }
+  if (store.accounts[id]) {
+    return sendJson(res, 409, { error: 'that id is already taken' });
+  }
+
+  const { salt, hash } = hashPassword(pw);
+  store.accounts[id] = { id, salt, hash, createdAt: Date.now() };
+  saveStoreNow();
+  console.log(`[directory] account '${id}' created via signup`);
+  sendJson(res, 200, { ok: true, id });
+}
+
 async function handleLogin(req, res) {
   const body = await readJsonBody(req);
   const id = String(body.id || '').trim().toLowerCase();
@@ -343,6 +383,7 @@ async function handleConnect(req, res) {
 }
 
 const routes = {
+  'POST /api/signup': handleSignup,
   'POST /api/login': handleLogin,
   'POST /api/host/register': handleHostRegister,
   'POST /api/host/heartbeat': handleHostHeartbeat,

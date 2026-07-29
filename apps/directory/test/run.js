@@ -9,6 +9,7 @@ const serverPath = path.join(__dirname, '..', 'server.js');
 const dataPath = path.join(os.tmpdir(), `remote60-directory-test-${process.pid}.json`);
 const env = { ...process.env, REMOTE60_DIR_DATA: dataPath,
               REMOTE60_DIR_PORT: '18080', REMOTE60_DIR_UDP_PORT: '18081',
+              REMOTE60_DIR_SIGNUP_KEY: 'test-signup-key',
               T_PORT: '18080', T_UDP: '18081' };
 
 fs.rmSync(dataPath, { force: true });
