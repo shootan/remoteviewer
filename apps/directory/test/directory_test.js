@@ -68,13 +68,21 @@ function observe(token) {
   r = await api('POST', '/api/host/register',
     { id: 'tester', pw: 'test-pass-1234', hostName: 'Office PC', machineId: 'machine-aaa' });
   check('host registers', r.status === 200 && !!r.body.hostToken, `status=${r.status}`);
-  const hostToken = r.body.hostToken;
+  let hostToken = r.body.hostToken;
   const hostId = r.body.hostId;
 
-  // Same machine registering twice must not create a second entry.
+  // Same machine registering twice must not create a second entry, and the fresh token
+  // replaces the old one: re-registering is how a host recovers, so the previous token has
+  // to stop working.
   r = await api('POST', '/api/host/register',
     { id: 'tester', pw: 'test-pass-1234', hostName: 'Office PC', machineId: 'machine-aaa' });
   check('re-register keeps one host', r.body.hostId === hostId, `hostId=${r.body.hostId}`);
+  check('re-register issues a new token', r.body.hostToken !== hostToken);
+
+  const staleHeartbeat = await api('POST', '/api/host/heartbeat', { hostToken });
+  check('previous token stops working', staleHeartbeat.status === 401,
+    `status=${staleHeartbeat.status}`);
+  hostToken = r.body.hostToken;
 
   const hostObs = await observe('host-observe-1');
   check('udp observation returns the socket port',
@@ -107,6 +115,7 @@ function observe(token) {
 
   r = await api('POST', '/api/connect', { hostId: 'does-not-exist', observeToken: 'client-observe-1' }, session);
   check('unknown host rejected', r.status === 404, `status=${r.status}`);
+
 
   console.log(failures === 0 ? '\nRESULT: ALL PASS' : `\nRESULT: ${failures} FAILED`);
   process.exit(failures === 0 ? 0 : 1);

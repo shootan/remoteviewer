@@ -146,7 +146,40 @@ class StreamingHostProcess {
   uint32_t Restarts() const { return restarts_.load(std::memory_order_relaxed); }
   bool ChildAlive() const { return childAlive_.load(std::memory_order_relaxed); }
 
+  /**
+   * Last thing the streaming host said about the directory, verbatim.
+   *
+   * Without this the window reported "running" whether or not the PC was actually reachable,
+   * which is the worst possible answer: the user believes they are set up and only finds out
+   * when the phone shows nothing.
+   */
+  std::string DirectoryStatus() const {
+    std::lock_guard<std::mutex> lock(statusMu_);
+    return directoryStatus_;
+  }
+
  private:
+  void ReadChildOutput(HANDLE readEnd) {
+    std::string pending;
+    char buffer[512];
+    DWORD read = 0;
+    while (ReadFile(readEnd, buffer, sizeof(buffer), &read, nullptr) && read > 0) {
+      pending.append(buffer, read);
+      size_t newline;
+      while ((newline = pending.find('\n')) != std::string::npos) {
+        std::string line = pending.substr(0, newline);
+        pending.erase(0, newline + 1);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const size_t marker = line.find("directory ");
+        if (marker != std::string::npos) {
+          std::lock_guard<std::mutex> lock(statusMu_);
+          directoryStatus_ = line.substr(marker + 10);
+        }
+      }
+      if (pending.size() > 4096) pending.clear();
+    }
+  }
+
   void TerminateChild() {
     std::lock_guard<std::mutex> lock(mu_);
     if (child_.hProcess) {
@@ -166,10 +199,25 @@ class StreamingHostProcess {
                              L" --directory-id \"" + accountId_ + L"\"" +
                              L" --host-name \"" + hostName_ + L"\"";
 
+      // The child's stdout is the only place the directory result is reported, so it is piped
+      // back here rather than discarded.
+      SECURITY_ATTRIBUTES sa{};
+      sa.nLength = sizeof(sa);
+      sa.bInheritHandle = TRUE;
+      HANDLE readEnd = nullptr;
+      HANDLE writeEnd = nullptr;
+      if (!CreatePipe(&readEnd, &writeEnd, &sa, 0)) {
+        readEnd = writeEnd = nullptr;
+      } else {
+        SetHandleInformation(readEnd, HANDLE_FLAG_INHERIT, 0);
+      }
+
       STARTUPINFOW si{};
       si.cb = sizeof(si);
-      si.dwFlags = STARTF_USESHOWWINDOW;
+      si.dwFlags = STARTF_USESHOWWINDOW | (writeEnd ? STARTF_USESTDHANDLES : 0);
       si.wShowWindow = SW_HIDE;
+      si.hStdOutput = writeEnd;
+      si.hStdError = writeEnd;
       PROCESS_INFORMATION pi{};
       std::vector<wchar_t> mutableCommand(command.begin(), command.end());
       mutableCommand.push_back(L'\0');
@@ -179,14 +227,25 @@ class StreamingHostProcess {
       // path, so the switch is turned on for the child rather than left to how it was built.
       SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
 
-      if (!CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, FALSE,
+      if (!CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, TRUE,
                           CREATE_NO_WINDOW, nullptr, executable_dir().c_str(), &si, &pi)) {
+        if (readEnd) CloseHandle(readEnd);
+        if (writeEnd) CloseHandle(writeEnd);
         childAlive_.store(false, std::memory_order_relaxed);
+        {
+          std::lock_guard<std::mutex> lock(statusMu_);
+          directoryStatus_ = "cannot start the streaming host";
+        }
         for (int i = 0; i < 30 && running_.load(std::memory_order_relaxed); ++i) {
           Sleep(100);
         }
         continue;
       }
+
+      // Ours must close or the reader never sees end-of-file when the child exits.
+      if (writeEnd) CloseHandle(writeEnd);
+      std::thread reader;
+      if (readEnd) reader = std::thread([this, readEnd] { ReadChildOutput(readEnd); });
 
       {
         std::lock_guard<std::mutex> lock(mu_);
@@ -195,6 +254,8 @@ class StreamingHostProcess {
       childAlive_.store(true, std::memory_order_relaxed);
       WaitForSingleObject(pi.hProcess, INFINITE);
       childAlive_.store(false, std::memory_order_relaxed);
+      if (reader.joinable()) reader.join();
+      if (readEnd) CloseHandle(readEnd);
       {
         std::lock_guard<std::mutex> lock(mu_);
         if (child_.hProcess) {
@@ -213,6 +274,8 @@ class StreamingHostProcess {
   std::wstring accountId_;
   std::wstring hostName_;
   std::mutex mu_;
+  mutable std::mutex statusMu_;
+  std::string directoryStatus_ = "starting";
   PROCESS_INFORMATION child_{};
   std::thread supervisor_;
   std::atomic<bool> running_{false};
@@ -286,12 +349,24 @@ void set_autostart(bool enabled) {
 
 // ---------------------------------------------------------------- tray
 
+/** True when the directory has stopped accepting us and only a password can fix it. */
+bool needs_sign_in_again(const std::string& directoryStatus);
+
 void update_tray_tip() {
   if (!g.trayAdded) return;
   std::wstring tip = L"remote60";
   if (g.signedIn) {
+    const std::string directoryStatus = g.streaming.DirectoryStatus();
     tip += L" - " + widen(g.cache.hostName);
-    tip += g.streaming.ChildAlive() ? L" (online)" : L" (starting)";
+    if (!g.streaming.ChildAlive()) {
+      tip += L" (starting)";
+    } else if (directoryStatus.rfind("online", 0) == 0) {
+      tip += L" (online)";
+    } else if (needs_sign_in_again(directoryStatus)) {
+      tip += L" (sign in again)";
+    } else {
+      tip += L" (not reachable)";
+    }
   } else {
     tip += L" - signed out";
   }
@@ -482,11 +557,27 @@ void build_controls(HWND window) {
   SendMessageW(g.startWithWindowsCheck, BM_SETCHECK, autostart_enabled() ? BST_CHECKED : BST_UNCHECKED, 0);
 }
 
+bool needs_sign_in_again(const std::string& directoryStatus) {
+  return directoryStatus.find("token rejected") != std::string::npos ||
+         directoryStatus.find("registration needs") != std::string::npos;
+}
+
 void refresh_status_text() {
   if (!g.signedIn) return;
+  const std::string directoryStatus = g.streaming.DirectoryStatus();
+
   std::wstring text = L"Signed in as " + widen(g.cache.accountId) + L"\n";
   text += L"This PC: " + widen(g.cache.hostName) + L"\n";
-  text += g.streaming.ChildAlive() ? L"Status: running" : L"Status: starting...";
+  if (!g.streaming.ChildAlive()) {
+    text += L"Status: starting...";
+  } else if (directoryStatus.rfind("online", 0) == 0) {
+    text += L"Status: reachable from your phone";
+  } else if (needs_sign_in_again(directoryStatus)) {
+    // Saying "running" here would be a lie the user only discovers on the phone.
+    text += L"Status: signed out by the server - use Change account to sign in again";
+  } else {
+    text += L"Status: " + widen(directoryStatus);
+  }
   const uint32_t restarts = g.streaming.Restarts();
   if (restarts > 0) text += L"  (restarts: " + std::to_wstring(restarts) + L")";
   set_status(text);

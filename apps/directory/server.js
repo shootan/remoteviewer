@@ -49,6 +49,20 @@ function loadStore() {
     if (err.code !== 'ENOENT') console.error('[directory] store read failed:', err.message);
     store = { accounts: {}, hosts: {} };
   }
+  indexHostTokens();
+}
+
+/**
+ * Host tokens have to survive a restart. They used to live only in memory, so every deploy or
+ * reboot invalidated them; each PC would then be told its token was unknown and would need a
+ * password typed in again, which the host app deliberately does not keep. The store holds only
+ * the hash, so a stolen store file still yields no usable credential.
+ */
+function indexHostTokens() {
+  hostTokens.clear();
+  for (const host of Object.values(store.hosts)) {
+    if (host.tokenHash) hostTokens.set(host.tokenHash, host.hostId);
+  }
 }
 
 let saveTimer = null;
@@ -64,6 +78,21 @@ function saveStoreSoon() {
       console.error('[directory] store write failed:', err.message);
     }
   }, 200);
+}
+
+/** For changes where losing the last 200 ms means a manual re-sign-in on the host. */
+function saveStoreNow() {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  const tmp = DATA_PATH + '.tmp';
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(store, null, 2));
+    fs.renameSync(tmp, DATA_PATH);
+  } catch (err) {
+    console.error('[directory] store write failed:', err.message);
+  }
 }
 
 // ---------------------------------------------------------------- credentials
@@ -86,10 +115,14 @@ function randomToken() {
   return crypto.randomBytes(32).toString('hex');
 }
 
+function hashToken(token) {
+  return crypto.createHash('sha256').update(String(token)).digest('hex');
+}
+
 // ---------------------------------------------------------------- volatile state
 
 const sessions = new Map();      // sessionToken -> {accountId, expiresAt}
-const hostTokens = new Map();    // hostToken    -> hostId
+const hostTokens = new Map();    // sha256(hostToken) -> hostId, rebuilt from the store
 const pendingPunch = new Map();  // hostId       -> [{ip, port, punchToken, expiresAt}]
 const observed = new Map();      // observeToken -> {ip, port, at}
 const loginFailures = new Map(); // accountId    -> {count, nextAllowedAt}
@@ -217,25 +250,31 @@ async function handleHostRegister(req, res) {
   );
   if (!hostId) hostId = crypto.randomBytes(8).toString('hex');
 
+  // Re-registering issues a new token; the previous one must stop working.
+  const previous = store.hosts[hostId];
+  if (previous && previous.tokenHash) hostTokens.delete(previous.tokenHash);
+
   const hostToken = randomToken();
+  const tokenHash = hashToken(hostToken);
   store.hosts[hostId] = {
     hostId,
     accountId: id,
     machineId,
     hostName,
-    lastSeen: 0,
-    publicIp: '',
-    publicUdpPort: 0,
+    tokenHash,
+    lastSeen: previous ? previous.lastSeen : 0,
+    publicIp: previous ? previous.publicIp : '',
+    publicUdpPort: previous ? previous.publicUdpPort : 0,
   };
-  hostTokens.set(hostToken, hostId);
-  saveStoreSoon();
+  hostTokens.set(tokenHash, hostId);
+  saveStoreNow();
   sendJson(res, 200, { hostId, hostToken, hostName });
 }
 
 async function handleHostHeartbeat(req, res) {
   const body = await readJsonBody(req);
   const hostToken = String(body.hostToken || '');
-  const hostId = hostTokens.get(hostToken);
+  const hostId = hostToken ? hostTokens.get(hashToken(hostToken)) : undefined;
   const host = hostId ? store.hosts[hostId] : null;
   if (!host) return sendJson(res, 401, { error: 'unknown host token' });
 

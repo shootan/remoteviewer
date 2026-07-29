@@ -157,7 +157,8 @@ UNIT
 sed -i "s#NODE_PLACEHOLDER#$nodeBin#g; s#INSTALL_PLACEHOLDER#`$INSTALL_DIR#g; s#DATA_PATH_PLACEHOLDER#`$INSTALL_DIR/directory-data.json#g; s#WANTED_PLACEHOLDER#multi-user.target#g" /tmp/remote60-directory.service
 sudo mv /tmp/remote60-directory.service /etc/systemd/system/remote60-directory.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now remote60-directory
+sudo systemctl enable remote60-directory
+sudo systemctl restart remote60-directory
 sleep 2
 sudo systemctl is-active remote60-directory
 "@
@@ -173,7 +174,9 @@ sed -i "s#NODE_PLACEHOLDER#$nodeBin#g; s#INSTALL_PLACEHOLDER#`$INSTALL_DIR#g; s#
 # Without this the user service dies at logout, which would stop the host from being findable.
 loginctl enable-linger "`$(id -un)" 2>/dev/null || true
 systemctl --user daemon-reload
-systemctl --user enable --now remote60-directory
+systemctl --user enable remote60-directory
+# restart, not `enable --now`: the latter leaves an already-running old build serving.
+systemctl --user restart remote60-directory
 sleep 2
 systemctl --user is-active remote60-directory
 "@
