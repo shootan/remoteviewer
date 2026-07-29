@@ -60,4 +60,24 @@
     <string name="key_panel_modifiers_none">No modifier held</string>
     <string name="key_panel_modifiers">Held: %1$s</string>
     <string name="viewer_right_click_hint">Right click: hold a finger on the black margin, then tap the screen</string>
+    <string name="login_title">Sign In</string>
+    <string name="login_subtitle">Sign in and your PCs appear here, wherever they are. No IP address needed.</string>
+    <string name="login_server_hint">Server address</string>
+    <string name="login_id_hint">ID</string>
+    <string name="login_password_hint">Password</string>
+    <string name="login_button">Sign In</string>
+    <string name="login_manual_button">Connect by IP instead</string>
+    <string name="login_signing_in">Signing in…</string>
+    <string name="login_needs_server">Enter the server address</string>
+    <string name="login_needs_credentials">Enter your ID and password</string>
+    <string name="hosts_title">My PCs</string>
+    <string name="hosts_logout_button">Sign out</string>
+    <string name="hosts_empty">No PCs registered yet. Sign in on the PC with the same account.</string>
+    <string name="hosts_loading">Loading…</string>
+    <string name="hosts_online">ONLINE</string>
+    <string name="hosts_offline">OFFLINE</string>
+    <string name="hosts_offline_detail">Offline — the PC is not reachable</string>
+    <string name="hosts_connecting">Connecting to %1$s…</string>
+    <string name="hosts_connect_failed">Could not connect: %1$s</string>
+    <string name="hosts_manual_button">Connect by IP instead</string>
 </resources>

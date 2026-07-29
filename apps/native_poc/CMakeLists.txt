@@ -118,6 +118,22 @@ target_link_libraries(remote60_native_video_client_shared_core_test PRIVATE
   ws2_32
 )
 
+# The thing a user installs: sign-in window plus tray, supervising the streaming host.
+add_executable(remote60_host_app WIN32
+  src/host_app_main.cpp
+  src/directory_client.cpp
+)
+
+target_include_directories(remote60_host_app PRIVATE
+  src
+)
+
+target_link_libraries(remote60_host_app PRIVATE
+  ws2_32
+  comctl32
+  shlwapi
+)
+
 add_executable(remote60_udp_control_e2e_test
   src/native_video_client_shared_core.cpp
   src/native_video_client_tcp_control.cpp

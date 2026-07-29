@@ -31,6 +31,7 @@ import android.widget.EditText
 import android.widget.GridView
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
 import org.json.JSONException
@@ -38,6 +39,7 @@ import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Locale
+import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -225,6 +227,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         get() = SCROLL_GESTURE_STEP_DP * resources.displayMetrics.density
 
     private enum class UiScene {
+        LOGIN,
+        HOSTS,
         CONNECT,
         TARGETS,
         SWITCHING,
@@ -309,9 +313,23 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     )
 
     private lateinit var diagnosticsLog: SessionDiagnosticsLog
+    private lateinit var loginScene: View
+    private lateinit var hostsScene: View
     private lateinit var connectScene: View
     private lateinit var targetsScene: View
     private lateinit var viewerScene: View
+    private lateinit var loginServerInput: EditText
+    private lateinit var loginIdInput: EditText
+    private lateinit var loginPasswordInput: EditText
+    private lateinit var loginButton: Button
+    private lateinit var loginErrorText: TextView
+    private lateinit var loginManualButton: Button
+    private lateinit var hostsTitleText: TextView
+    private lateinit var hostsStatusText: TextView
+    private lateinit var hostsListView: ListView
+    private lateinit var hostsEmptyText: TextView
+    private lateinit var hostsRefreshButton: Button
+    private lateinit var hostsLogoutButton: Button
     private lateinit var hostEdit: EditText
     private lateinit var videoPortEdit: EditText
     private lateinit var controlPortEdit: EditText
@@ -413,7 +431,18 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         if (changed) targetListAdapter.notifyDataSetChanged()
     }
-    private var currentScene = UiScene.CONNECT
+    private var currentScene = UiScene.LOGIN
+    private val directoryExecutor = Executors.newSingleThreadExecutor()
+    private var directoryHosts: List<DirectoryClient.Host> = emptyList()
+    private lateinit var hostListAdapter: HostCardAdapter
+    private var directoryBusy = false
+    /** Set while a directory-brokered connection is being established, to keep the UI honest. */
+    private var directoryConnectingName = ""
+    /**
+     * The user asked to type an address instead of signing in. Remembered so that hanging up
+     * returns them to the manual form rather than to a PC list they chose not to use.
+     */
+    private var manualConnectMode = false
     private var activeTargetTab = TargetTab.WINDOWS
     private var connectFlowActive = false
     private var selectionStage = SelectionStage.IDLE
@@ -483,6 +512,20 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         applyImmersiveMode()
 
         diagnosticsLog = SessionDiagnosticsLog(this)
+        loginScene = findViewById(R.id.loginScene)
+        hostsScene = findViewById(R.id.hostsScene)
+        loginServerInput = findViewById(R.id.loginServerInput)
+        loginIdInput = findViewById(R.id.loginIdInput)
+        loginPasswordInput = findViewById(R.id.loginPasswordInput)
+        loginButton = findViewById(R.id.loginButton)
+        loginErrorText = findViewById(R.id.loginErrorText)
+        loginManualButton = findViewById(R.id.loginManualButton)
+        hostsTitleText = findViewById(R.id.hostsTitleText)
+        hostsStatusText = findViewById(R.id.hostsStatusText)
+        hostsListView = findViewById(R.id.hostsListView)
+        hostsEmptyText = findViewById(R.id.hostsEmptyText)
+        hostsRefreshButton = findViewById(R.id.hostsRefreshButton)
+        hostsLogoutButton = findViewById(R.id.hostsLogoutButton)
         connectScene = findViewById(R.id.connectScene)
         targetsScene = findViewById(R.id.targetsScene)
         viewerScene = findViewById(R.id.viewerScene)
@@ -581,6 +624,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             renderStatus()
         }
 
+        initDirectoryUi()
+
         val savedEndpoint = SessionPersistence.load(this)
         val launchHost = intent.getStringExtra("host")?.trim().orEmpty()
         val launchVideoPort = intent.getIntExtra("videoPort", 0)
@@ -639,7 +684,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             connectFlowActive = false
             clearPendingSelection()
             resetViewerObservability()
-            currentScene = UiScene.CONNECT
+            currentScene = homeScene()
+            if (currentScene == UiScene.HOSTS) loadHosts("disconnect")
             renderStatus()
         }
 
@@ -800,6 +846,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     override fun onDestroy() {
         saveCurrentEndpoint()
+        directoryExecutor.shutdownNow()
         exitDialog?.dismiss()
         exitDialog = null
         dismissViewerLogDialog()
@@ -856,7 +903,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 }
                 handleViewerBack("system_back")
             }
-            UiScene.TARGETS, UiScene.CONNECT -> showExitConfirmDialog()
+            UiScene.CONNECT ->
+                // Typing an address was a detour from signing in; back should undo the detour.
+                if (manualConnectMode && DirectoryClient.savedUrl(this).isNotEmpty()) {
+                    manualConnectMode = false
+                    currentScene = homeScene()
+                    renderStatus()
+                } else {
+                    showExitConfirmDialog()
+                }
+            UiScene.TARGETS, UiScene.LOGIN, UiScene.HOSTS -> showExitConfirmDialog()
         }
     }
 
@@ -1660,12 +1716,17 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val isConnected = statusValue.startsWith("connected")
         connectFlowActive = isConnecting || isConnected
 
-        if (!isConnecting && !isConnected && currentScene != UiScene.CONNECT) {
-            currentScene = UiScene.CONNECT
-            desiredStreamActive = false
-            clearPendingSelection()
-            resetViewerObservability()
-        } else if (currentScene == UiScene.CONNECT && connectFlowActive) {
+        val idleScene = homeScene()
+        val onIdleScreen = currentScene == UiScene.LOGIN || currentScene == UiScene.HOSTS ||
+            currentScene == UiScene.CONNECT
+        if (!isConnecting && !isConnected) {
+            if (!onIdleScreen) {
+                currentScene = idleScene
+                desiredStreamActive = false
+                clearPendingSelection()
+                resetViewerObservability()
+            }
+        } else if (onIdleScreen && connectFlowActive) {
             currentScene = UiScene.TARGETS
         }
 
@@ -1838,7 +1899,240 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
+    // ---------------------------------------------------------------- directory sign-in
+
+    /**
+     * Starts on the sign-in screen, or straight on the PC list when a stored session is still
+     * valid. Connecting by IP stays available for a LAN where no server is running.
+     */
+    private fun initDirectoryUi() {
+        hostListAdapter = HostCardAdapter()
+        hostsListView.adapter = hostListAdapter
+        hostsListView.setOnItemClickListener { _, _, position, _ ->
+            directoryHosts.getOrNull(position)?.let { connectToDirectoryHost(it) }
+        }
+
+        loginServerInput.setText(DirectoryClient.savedUrl(this))
+        loginIdInput.setText(DirectoryClient.savedAccountId(this))
+
+        loginButton.setOnClickListener { performLogin() }
+        loginManualButton.setOnClickListener {
+            diagnosticsLog.log("login_manual", "scene=$currentScene")
+            manualConnectMode = true
+            currentScene = UiScene.CONNECT
+            renderStatus()
+        }
+        hostsRefreshButton.setOnClickListener { loadHosts("refresh") }
+        hostsLogoutButton.setOnClickListener {
+            manualConnectMode = false
+            DirectoryClient.clearSession(this)
+            directoryHosts = emptyList()
+            hostListAdapter.notifyDataSetChanged()
+            currentScene = UiScene.LOGIN
+            loginErrorText.text = ""
+            renderStatus()
+        }
+
+        if (DirectoryClient.savedSessionToken(this).isNotEmpty()) {
+            currentScene = UiScene.HOSTS
+            loadHosts("resume")
+        }
+    }
+
+    /** Where the app sits when no session is running. */
+    private fun homeScene(): UiScene = when {
+        manualConnectMode -> UiScene.CONNECT
+        DirectoryClient.savedSessionToken(this).isNotEmpty() -> UiScene.HOSTS
+        else -> UiScene.LOGIN
+    }
+
+    private fun performLogin() {
+        if (directoryBusy) return
+        val url = loginServerInput.text?.toString()?.trim().orEmpty()
+        val id = loginIdInput.text?.toString()?.trim().orEmpty()
+        val password = loginPasswordInput.text?.toString().orEmpty()
+        if (url.isEmpty()) {
+            loginErrorText.text = getString(R.string.login_needs_server)
+            return
+        }
+        if (id.isEmpty() || password.isEmpty()) {
+            loginErrorText.text = getString(R.string.login_needs_credentials)
+            return
+        }
+
+        setDirectoryBusy(true)
+        loginErrorText.text = getString(R.string.login_signing_in)
+        diagnosticsLog.log("login_attempt", "server=$url id=$id")
+        directoryExecutor.execute {
+            try {
+                val (token, expiresAt) = DirectoryClient.login(url, id, password)
+                DirectoryClient.saveSession(this, url, id, token, expiresAt)
+                runOnUiThread {
+                    setDirectoryBusy(false)
+                    manualConnectMode = false
+                    // Nothing keeps the password around once it has been exchanged for a token.
+                    loginPasswordInput.setText("")
+                    loginErrorText.text = ""
+                    currentScene = UiScene.HOSTS
+                    loadHosts("login")
+                    renderStatus()
+                }
+            } catch (e: Exception) {
+                diagnosticsLog.log("login_failed", e.message.orEmpty())
+                runOnUiThread {
+                    setDirectoryBusy(false)
+                    loginErrorText.text = e.message ?: "로그인에 실패했습니다"
+                }
+            }
+        }
+    }
+
+    private fun loadHosts(reason: String) {
+        val url = DirectoryClient.savedUrl(this)
+        val token = DirectoryClient.savedSessionToken(this)
+        if (url.isEmpty() || token.isEmpty()) {
+            currentScene = UiScene.LOGIN
+            renderStatus()
+            return
+        }
+        setDirectoryBusy(true)
+        hostsStatusText.text = getString(R.string.hosts_loading)
+        directoryExecutor.execute {
+            try {
+                val list = DirectoryClient.hosts(url, token)
+                runOnUiThread {
+                    setDirectoryBusy(false)
+                    directoryHosts = list
+                    hostListAdapter.notifyDataSetChanged()
+                    hostsStatusText.text = DirectoryClient.savedAccountId(this)
+                    renderStatus()
+                }
+            } catch (e: Exception) {
+                diagnosticsLog.log("hosts_failed", "reason=$reason error=${e.message}")
+                runOnUiThread {
+                    setDirectoryBusy(false)
+                    // An expired or revoked token is the common case; ask for the password again
+                    // rather than leaving an empty list that looks like "no PCs registered".
+                    if (e is DirectoryClient.DirectoryException && e.message?.contains("로그인") == true) {
+                        DirectoryClient.clearSession(this)
+                        currentScene = UiScene.LOGIN
+                        loginErrorText.text = e.message
+                    } else {
+                        hostsStatusText.text = e.message ?: ""
+                    }
+                    renderStatus()
+                }
+            }
+        }
+    }
+
+    /**
+     * Address exchange, then punch, then the ordinary session. The address probe has to run on
+     * the media socket, so it lives in native code; only the HTTP call happens here.
+     */
+    private fun connectToDirectoryHost(host: DirectoryClient.Host) {
+        if (directoryBusy) return
+        if (!host.online) {
+            hostsStatusText.text = getString(R.string.hosts_offline_detail)
+            return
+        }
+        val url = DirectoryClient.savedUrl(this)
+        val token = DirectoryClient.savedSessionToken(this)
+        if (url.isEmpty() || token.isEmpty()) {
+            currentScene = UiScene.LOGIN
+            renderStatus()
+            return
+        }
+
+        setDirectoryBusy(true)
+        directoryConnectingName = host.hostName
+        hostsStatusText.text = getString(R.string.hosts_connecting, host.hostName)
+        diagnosticsLog.log("directory_connect", "host=${host.hostName} id=${host.hostId}")
+
+        val observeToken = DirectoryClient.newObserveToken()
+        val directoryHost = DirectoryClient.hostFor(url)
+        val observePort = DirectoryClient.observePortFor(url)
+
+        directoryExecutor.execute {
+            try {
+                val observed = NativeSessionBridge.nativeDirectoryObserve(
+                    directoryHost, observePort, observeToken
+                )
+                if (observed.isEmpty()) {
+                    throw DirectoryClient.DirectoryException(
+                        NativeSessionBridge.nativeDirectoryLastError().ifEmpty { "주소 확인 실패" }
+                    )
+                }
+                diagnosticsLog.log("directory_observed", observed)
+
+                val target = DirectoryClient.connect(url, token, host.hostId, observeToken)
+                diagnosticsLog.log("directory_target", "${target.ip}:${target.port}")
+
+                val started = NativeSessionBridge.nativeDirectoryConnect(target.ip, target.port, 4000)
+                if (!started) {
+                    throw DirectoryClient.DirectoryException(
+                        NativeSessionBridge.nativeDirectoryLastError().ifEmpty { "연결을 시작하지 못했습니다" }
+                    )
+                }
+                runOnUiThread {
+                    setDirectoryBusy(false)
+                    directoryConnectingName = ""
+                    connectFlowActive = true
+                    pendingRuntimeConfigSync = true
+                    pendingDesktopBackendSync = true
+                    desiredStreamActive = false
+                    lastAppliedStreamActive = null
+                    clearPendingSelection()
+                    currentScene = UiScene.TARGETS
+                    NativeSessionBridge.nativeRequestWindowList()
+                    renderStatus()
+                }
+            } catch (e: Exception) {
+                diagnosticsLog.log("directory_connect_failed", e.message.orEmpty())
+                runOnUiThread {
+                    setDirectoryBusy(false)
+                    directoryConnectingName = ""
+                    hostsStatusText.text = getString(R.string.hosts_connect_failed, e.message.orEmpty())
+                    renderStatus()
+                }
+            }
+        }
+    }
+
+    private fun setDirectoryBusy(busy: Boolean) {
+        directoryBusy = busy
+        loginButton.isEnabled = !busy
+        hostsRefreshButton.isEnabled = !busy
+        hostsListView.isEnabled = !busy
+    }
+
+    private inner class HostCardAdapter : BaseAdapter() {
+        override fun getCount(): Int = directoryHosts.size
+
+        override fun getItem(position: Int): Any = directoryHosts[position]
+
+        override fun getItemId(position: Int): Long = position.toLong()
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+            val view = convertView ?: layoutInflater.inflate(R.layout.host_card, parent, false)
+            val host = directoryHosts[position]
+            view.findViewById<TextView>(R.id.hostCardName).text = host.hostName
+            view.findViewById<TextView>(R.id.hostCardDetail).text =
+                if (host.online) getString(R.string.hosts_title) else getString(R.string.hosts_offline_detail)
+            val state = view.findViewById<TextView>(R.id.hostCardState)
+            state.text =
+                if (host.online) getString(R.string.hosts_online) else getString(R.string.hosts_offline)
+            state.setTextColor(if (host.online) Color.parseColor("#1B7F3B") else Color.parseColor("#8A8A8A"))
+            view.alpha = if (host.online) 1.0f else 0.55f
+            return view
+        }
+    }
+
     private fun applySceneVisibility() {
+        loginScene.visibility = if (currentScene == UiScene.LOGIN) View.VISIBLE else View.GONE
+        hostsScene.visibility = if (currentScene == UiScene.HOSTS) View.VISIBLE else View.GONE
+        hostsEmptyText.visibility =
+            if (currentScene == UiScene.HOSTS && directoryHosts.isEmpty()) View.VISIBLE else View.GONE
         connectScene.visibility = if (currentScene == UiScene.CONNECT) View.VISIBLE else View.GONE
         targetsScene.visibility = if (currentScene == UiScene.TARGETS) View.VISIBLE else View.GONE
         viewerScene.visibility =

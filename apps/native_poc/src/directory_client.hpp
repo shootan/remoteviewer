@@ -46,6 +46,35 @@ std::string default_host_cache_path();
 std::string machine_id();
 
 /**
+ * What the host remembers between runs. The password is deliberately absent: a token can be
+ * revoked from the server, a stored password cannot.
+ */
+struct HostCache {
+  std::string directoryUrl;
+  std::string accountId;
+  std::string machineId;
+  std::string hostName;
+  std::string hostId;
+  std::string hostToken;
+};
+
+bool load_host_cache(const std::string& path, HostCache* out);
+bool save_host_cache(const std::string& path, const HostCache& cache);
+
+/**
+ * Exchanges an id and password for a host token. Also the only way to check credentials
+ * without starting a session, which is what the sign-in window needs.
+ */
+bool register_host(const std::string& url, const std::string& accountId,
+                   const std::string& password, const std::string& hostName,
+                   const std::string& machineId, std::string* outHostId,
+                   std::string* outHostToken, std::string* outError);
+
+/** Splits http://host[:port] into its parts; rejects https, which is not supported yet. */
+bool parse_directory_url(const std::string& url, std::string* outHost, uint16_t* outPort,
+                         std::string* outError);
+
+/**
  * Keeps the host registered and reachable.
  *
  * Runs one background thread that registers, refreshes its public address, heartbeats, and

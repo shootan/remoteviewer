@@ -49,4 +49,24 @@
     <string name="key_panel_modifiers_none">조합키 없음</string>
     <string name="key_panel_modifiers">조합키: %1$s</string>
     <string name="viewer_right_click_hint">우클릭: 검은 여백을 손가락으로 누른 채 화면을 터치하세요</string>
+    <string name="login_title">로그인</string>
+    <string name="login_subtitle">로그인하면 어디에 있든 내 PC 목록이 뜹니다. IP를 몰라도 됩니다.</string>
+    <string name="login_server_hint">서버 주소</string>
+    <string name="login_id_hint">아이디</string>
+    <string name="login_password_hint">비밀번호</string>
+    <string name="login_button">로그인</string>
+    <string name="login_manual_button">IP로 직접 연결</string>
+    <string name="login_signing_in">로그인 중…</string>
+    <string name="login_needs_server">서버 주소를 입력하세요</string>
+    <string name="login_needs_credentials">아이디와 비밀번호를 입력하세요</string>
+    <string name="hosts_title">내 PC</string>
+    <string name="hosts_logout_button">로그아웃</string>
+    <string name="hosts_empty">등록된 PC가 없습니다. PC에서 같은 계정으로 로그인하세요.</string>
+    <string name="hosts_loading">불러오는 중…</string>
+    <string name="hosts_online">온라인</string>
+    <string name="hosts_offline">오프라인</string>
+    <string name="hosts_offline_detail">오프라인 — PC가 켜져 있지 않습니다</string>
+    <string name="hosts_connecting">%1$s에 연결 중…</string>
+    <string name="hosts_connect_failed">연결하지 못했습니다: %1$s</string>
+    <string name="hosts_manual_button">IP로 직접 연결</string>
 </resources>

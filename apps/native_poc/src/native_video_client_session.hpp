@@ -45,6 +45,10 @@ struct ClientSessionConnectArgs {
   // Tunnels control through the video socket instead of opening a TCP connection. Required
   // when the host was reached by hole punching, since only that one socket has a path.
   bool controlOverUdp = false;
+  // An already-punched socket to adopt instead of opening a new one. It must be the socket the
+  // punch was performed with: a fresh one would sit behind a different NAT mapping and the
+  // host's packets would be dropped. The session takes ownership.
+  SocketHandle preparedUdpSocket = kInvalidSocket;
   uint32_t controlIntervalMs = 1000;
   uint32_t udpHandshakeTimeoutMs = 800;
   ClientEncodedFrameSink* encodedFrameSink = nullptr;

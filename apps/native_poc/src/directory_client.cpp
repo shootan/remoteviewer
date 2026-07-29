@@ -74,9 +74,11 @@ std::string random_token(size_t bytes) {
   return out;
 }
 
+}  // namespace
+
 /** http://host[:port][/...] -> host, port. Anything else is refused with a reason. */
-bool parse_http_url(const std::string& url, std::string* outHost, uint16_t* outPort,
-                    std::string* outError) {
+bool parse_directory_url(const std::string& url, std::string* outHost, uint16_t* outPort,
+                         std::string* outError) {
   std::string rest = trim(url);
   if (rest.rfind("https://", 0) == 0) {
     if (outError) {
@@ -116,6 +118,8 @@ bool parse_http_url(const std::string& url, std::string* outHost, uint16_t* outP
   *outPort = port;
   return true;
 }
+
+namespace {
 
 bool resolve_ipv4(const std::string& host, uint16_t port, sockaddr_in* out) {
   addrinfo hints{};
@@ -220,7 +224,7 @@ bool HostAgent::Start(const HostAgentConfig& cfg, SendFn send, std::string* outE
   }
   if (cfg_.heartbeatSeconds < 5) cfg_.heartbeatSeconds = 5;
 
-  if (!parse_http_url(cfg_.url, &httpHost_, &httpPort_, outError)) return false;
+  if (!parse_directory_url(cfg_.url, &httpHost_, &httpPort_, outError)) return false;
 
   const uint16_t observePort = cfg_.observeUdpPort ? cfg_.observeUdpPort
                                                    : static_cast<uint16_t>(httpPort_ + 1);
@@ -292,8 +296,10 @@ bool HostAgent::ConsumeUdpPacket(const void* data, size_t len, const sockaddr_in
   return true;
 }
 
-bool HostAgent::HttpPostJson(const std::string& path, const std::string& body, uint32_t* outStatus,
-                             std::string* outResponse) {
+namespace {
+
+bool post_json(const std::string& httpHost_, uint16_t httpPort_, const std::string& path,
+               const std::string& body, uint32_t* outStatus, std::string* outResponse) {
   sockaddr_in addr{};
   if (!resolve_ipv4(httpHost_, httpPort_, &addr)) return false;
   SOCKET s = connect_with_timeout(addr, kHttpTimeoutMs);
@@ -340,51 +346,116 @@ bool HostAgent::HttpPostJson(const std::string& path, const std::string& body, u
   return true;
 }
 
-bool HostAgent::LoadCache() {
-  std::ifstream ifs(cfg_.cachePath, std::ios::binary);
+}  // namespace
+
+bool HostAgent::HttpPostJson(const std::string& path, const std::string& body, uint32_t* outStatus,
+                             std::string* outResponse) {
+  return post_json(httpHost_, httpPort_, path, body, outStatus, outResponse);
+}
+
+bool register_host(const std::string& url, const std::string& accountId,
+                   const std::string& password, const std::string& hostName,
+                   const std::string& machineId, std::string* outHostId,
+                   std::string* outHostToken, std::string* outError) {
+  std::string host;
+  uint16_t port = 0;
+  if (!parse_directory_url(url, &host, &port, outError)) return false;
+
+  std::ostringstream body;
+  body << "{\"id\":\"" << json_escape(accountId) << "\","
+       << "\"pw\":\"" << json_escape(password) << "\","
+       << "\"hostName\":\"" << json_escape(hostName) << "\","
+       << "\"machineId\":\"" << json_escape(machineId) << "\"}";
+
+  uint32_t status = 0;
+  std::string resp;
+  if (!post_json(host, port, "/api/host/register", body.str(), &status, &resp)) {
+    if (outError) *outError = "cannot reach the server";
+    return false;
+  }
+  if (status == 401 || status == 403) {
+    // The server will not say which of the two was wrong, and neither should we.
+    if (outError) *outError = "id or password is not correct";
+    return false;
+  }
+  if (status == 429) {
+    if (outError) *outError = "too many attempts; wait a moment";
+    return false;
+  }
+  if (status != 200) {
+    if (outError) *outError = "server rejected the registration (http " + std::to_string(status) + ")";
+    return false;
+  }
+  std::string token;
+  if (!json_get_string(resp, "hostToken", &token) || token.empty()) {
+    if (outError) *outError = "server response was malformed";
+    return false;
+  }
+  if (outHostToken) *outHostToken = token;
+  if (outHostId) json_get_string(resp, "hostId", outHostId);
+  return true;
+}
+
+bool load_host_cache(const std::string& path, HostCache* out) {
+  if (!out) return false;
+  std::ifstream ifs(path, std::ios::binary);
   if (!ifs.is_open()) return false;
   const std::string text((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+  json_get_string(text, "directoryUrl", &out->directoryUrl);
+  json_get_string(text, "accountId", &out->accountId);
+  json_get_string(text, "machineId", &out->machineId);
+  json_get_string(text, "hostName", &out->hostName);
+  json_get_string(text, "hostId", &out->hostId);
+  json_get_string(text, "hostToken", &out->hostToken);
+  return !out->hostToken.empty();
+}
 
-  std::string cachedUrl, cachedAccount, cachedMachine, cachedToken, cachedHostId;
-  json_get_string(text, "directoryUrl", &cachedUrl);
-  json_get_string(text, "accountId", &cachedAccount);
-  json_get_string(text, "machineId", &cachedMachine);
-  json_get_string(text, "hostToken", &cachedToken);
-  json_get_string(text, "hostId", &cachedHostId);
+bool save_host_cache(const std::string& path, const HostCache& cache) {
+  const size_t slash = path.find_last_of("\\/");
+  if (slash != std::string::npos) {
+    (void)CreateDirectoryA(path.substr(0, slash).c_str(), nullptr);
+  }
+  std::ostringstream os;
+  os << "{\n"
+     << "  \"directoryUrl\": \"" << json_escape(cache.directoryUrl) << "\",\n"
+     << "  \"accountId\": \"" << json_escape(cache.accountId) << "\",\n"
+     << "  \"machineId\": \"" << json_escape(cache.machineId) << "\",\n"
+     << "  \"hostName\": \"" << json_escape(cache.hostName) << "\",\n"
+     << "  \"hostId\": \"" << json_escape(cache.hostId) << "\",\n"
+     << "  \"hostToken\": \"" << json_escape(cache.hostToken) << "\"\n"
+     << "}\n";
+  const std::string tmp = path + ".tmp";
+  {
+    std::ofstream ofs(tmp, std::ios::binary | std::ios::trunc);
+    if (!ofs.is_open()) return false;
+    ofs << os.str();
+  }
+  return MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+}
+
+bool HostAgent::LoadCache() {
+  HostCache cached;
+  if (!load_host_cache(cfg_.cachePath, &cached)) return false;
 
   // A token is only meaningful for the account, server and machine it was issued against.
-  if (cachedToken.empty() || cachedUrl != cfg_.url || cachedMachine != machineId_) return false;
-  if (!cfg_.accountId.empty() && cachedAccount != cfg_.accountId) return false;
+  if (cached.directoryUrl != cfg_.url || cached.machineId != machineId_) return false;
+  if (!cfg_.accountId.empty() && cached.accountId != cfg_.accountId) return false;
 
-  hostToken_ = cachedToken;
-  hostId_ = cachedHostId;
-  if (cfg_.accountId.empty()) cfg_.accountId = cachedAccount;
+  hostToken_ = cached.hostToken;
+  hostId_ = cached.hostId;
+  if (cfg_.accountId.empty()) cfg_.accountId = cached.accountId;
   return true;
 }
 
 void HostAgent::SaveCache() const {
-  const size_t slash = cfg_.cachePath.find_last_of("\\/");
-  if (slash != std::string::npos) {
-    const std::string dir = cfg_.cachePath.substr(0, slash);
-    (void)CreateDirectoryA(dir.c_str(), nullptr);
-  }
-  // The password is deliberately absent: the token is revocable, the password is not.
-  std::ostringstream os;
-  os << "{\n"
-     << "  \"directoryUrl\": \"" << json_escape(cfg_.url) << "\",\n"
-     << "  \"accountId\": \"" << json_escape(cfg_.accountId) << "\",\n"
-     << "  \"machineId\": \"" << json_escape(machineId_) << "\",\n"
-     << "  \"hostName\": \"" << json_escape(cfg_.hostName) << "\",\n"
-     << "  \"hostId\": \"" << json_escape(hostId_) << "\",\n"
-     << "  \"hostToken\": \"" << json_escape(hostToken_) << "\"\n"
-     << "}\n";
-  const std::string tmp = cfg_.cachePath + ".tmp";
-  {
-    std::ofstream ofs(tmp, std::ios::binary | std::ios::trunc);
-    if (!ofs.is_open()) return;
-    ofs << os.str();
-  }
-  (void)MoveFileExA(tmp.c_str(), cfg_.cachePath.c_str(), MOVEFILE_REPLACE_EXISTING);
+  HostCache cache;
+  cache.directoryUrl = cfg_.url;
+  cache.accountId = cfg_.accountId;
+  cache.machineId = machineId_;
+  cache.hostName = cfg_.hostName;
+  cache.hostId = hostId_;
+  cache.hostToken = hostToken_;
+  (void)save_host_cache(cfg_.cachePath, cache);
 }
 
 bool HostAgent::EnsureRegistered() {
@@ -393,29 +464,12 @@ bool HostAgent::EnsureRegistered() {
     SetStatus("registration needs id/pw");
     return false;
   }
-  std::ostringstream body;
-  body << "{\"id\":\"" << json_escape(cfg_.accountId) << "\","
-       << "\"pw\":\"" << json_escape(cfg_.password) << "\","
-       << "\"hostName\":\"" << json_escape(cfg_.hostName) << "\","
-       << "\"machineId\":\"" << json_escape(machineId_) << "\"}";
-
-  uint32_t status = 0;
-  std::string resp;
-  if (!HttpPostJson("/api/host/register", body.str(), &status, &resp)) {
-    SetStatus("directory unreachable");
+  std::string token, id, error;
+  if (!register_host(cfg_.url, cfg_.accountId, cfg_.password, cfg_.hostName, machineId_, &id,
+                     &token, &error)) {
+    SetStatus(error);
     return false;
   }
-  if (status != 200) {
-    // 401 here means the account or password is wrong; the server does not say which.
-    SetStatus("registration rejected (http " + std::to_string(status) + ")");
-    return false;
-  }
-  std::string token, id;
-  if (!json_get_string(resp, "hostToken", &token) || token.empty()) {
-    SetStatus("registration response malformed");
-    return false;
-  }
-  json_get_string(resp, "hostId", &id);
   hostToken_ = token;
   hostId_ = id;
   SaveCache();

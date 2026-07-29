@@ -647,8 +647,33 @@ bool ClientSessionController::ConnectTcpControl(const ClientSessionConnectArgs& 
 }
 
 bool ClientSessionController::ConnectUdpVideo(const ClientSessionConnectArgs& args, std::string* error) {
-  SocketHandle connected =
-      connect_first_endpoint(args.host, args.videoPort, SOCK_DGRAM, IPPROTO_UDP, error);
+  SocketHandle connected = kInvalidSocket;
+  if (args.preparedUdpSocket != kInvalidSocket) {
+    // Already punched. connect() only fixes the default peer for send/recv; it leaves the
+    // local binding, and therefore the NAT mapping the host was told about, untouched.
+    connected = args.preparedUdpSocket;
+    addrinfo* results = nullptr;
+    if (!resolve_endpoint(args.host, args.videoPort, SOCK_DGRAM, IPPROTO_UDP, &results, error)) {
+      close_socket(&connected);
+      if (error && error->empty()) *error = "cannot resolve punched host address";
+      return false;
+    }
+    bool bound = false;
+    for (addrinfo* it = results; it != nullptr; it = it->ai_next) {
+      if (connect(connected, it->ai_addr, static_cast<int>(it->ai_addrlen)) == 0) {
+        bound = true;
+        break;
+      }
+    }
+    freeaddrinfo(results);
+    if (!bound) {
+      close_socket(&connected);
+      if (error) *error = "punched socket connect failed";
+      return false;
+    }
+  } else {
+    connected = connect_first_endpoint(args.host, args.videoPort, SOCK_DGRAM, IPPROTO_UDP, error);
+  }
   if (connected == kInvalidSocket) {
     if (error && error->empty()) *error = "udp video connect failed";
     return false;

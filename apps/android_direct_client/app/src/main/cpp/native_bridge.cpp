@@ -6,12 +6,25 @@
 #include <string>
 
 #include "android_video_decoder.hpp"
+#include "directory_rendezvous.hpp"
 #include "native_video_client_session.hpp"
 
 namespace {
 
 remote60::native_poc::ClientSessionController g_session_controller;
 remote60::android_direct::AndroidVideoDecoderSink g_video_decoder_sink;
+// Holds the punched socket between the two halves of the directory connect, which are split so
+// that the HTTP calls can stay in the app where sessions and errors are already handled.
+remote60::native_poc::DirectoryRendezvous g_rendezvous;
+std::string g_rendezvous_error;
+
+std::string jstring_to_string(JNIEnv* env, jstring value) {
+  if (!value) return {};
+  const char* chars = env->GetStringUTFChars(value, nullptr);
+  std::string out = chars ? chars : "";
+  if (chars) env->ReleaseStringUTFChars(value, chars);
+  return out;
+}
 
 jstring to_jstring(JNIEnv* env, const std::string& value) {
   return env->NewStringUTF(value.c_str());
@@ -115,6 +128,58 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeDisconnect(
     JNIEnv* /* env */, jobject /* this */) {
   g_session_controller.Disconnect();
+  g_rendezvous.Close();
+}
+
+// Returns "ip:port" as the directory sees this device, or "" with the reason available from
+// nativeDirectoryLastError. The socket stays open for the punch that follows.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeDirectoryObserve(
+    JNIEnv* env, jobject /* this */, jstring directory_host, jint directory_udp_port,
+    jstring observe_token) {
+  std::string observed;
+  g_rendezvous_error.clear();
+  const bool ok = g_rendezvous.Observe(jstring_to_string(env, directory_host),
+                                       directory_udp_port,
+                                       jstring_to_string(env, observe_token), &observed,
+                                       &g_rendezvous_error);
+  return to_jstring(env, ok ? observed : std::string());
+}
+
+// Punches towards the host and starts the session on that same socket. A punch that times out
+// is not fatal: the hello handshake still gets a chance, and reporting failure here would give
+// up on NATs that would have worked.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeDirectoryConnect(
+    JNIEnv* env, jobject /* this */, jstring host_ip, jint host_port, jint punch_budget_ms) {
+  const std::string host = jstring_to_string(env, host_ip);
+  g_rendezvous_error.clear();
+  (void)g_rendezvous.Punch(host, host_port,
+                           punch_budget_ms > 0 ? static_cast<uint32_t>(punch_budget_ms) : 4000u,
+                           &g_rendezvous_error);
+
+  const remote60::native_poc::SocketHandle prepared = g_rendezvous.Release();
+  if (prepared == remote60::native_poc::kInvalidSocket) {
+    if (g_rendezvous_error.empty()) g_rendezvous_error = "no prepared socket";
+    return JNI_FALSE;
+  }
+
+  remote60::native_poc::ClientSessionConnectArgs args{};
+  args.host = host;
+  args.videoPort = host_port;
+  // Never dialled on this path; the session only rejects a zero port.
+  args.controlPort = host_port;
+  args.requireTcpControl = false;
+  args.controlOverUdp = true;
+  args.preparedUdpSocket = prepared;
+  args.encodedFrameSink = &g_video_decoder_sink;
+  return g_session_controller.Connect(args) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeDirectoryLastError(
+    JNIEnv* env, jobject /* this */) {
+  return to_jstring(env, g_rendezvous_error);
 }
 
 extern "C" JNIEXPORT void JNICALL

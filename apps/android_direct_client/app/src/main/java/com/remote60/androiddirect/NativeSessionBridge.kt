@@ -9,6 +9,22 @@ object NativeSessionBridge {
 
     external fun nativeConnect(host: String, videoPort: Int, controlPort: Int): Boolean
     external fun nativeDisconnect()
+
+    /**
+     * Asks the directory what public address this device's media socket presents, returning
+     * "ip:port" or "" on failure. The socket is kept open for [nativeDirectoryConnect], because
+     * NAT maps each socket separately and a different one would be punched to the wrong port.
+     */
+    external fun nativeDirectoryObserve(
+        directoryHost: String,
+        directoryUdpPort: Int,
+        observeToken: String,
+    ): String
+
+    /** Punches towards the host on the observed socket and starts the session on it. */
+    external fun nativeDirectoryConnect(hostIp: String, hostPort: Int, punchBudgetMs: Int): Boolean
+
+    external fun nativeDirectoryLastError(): String
     external fun nativeSetSurface(surface: Surface?)
     external fun nativeGetStatus(): String
     external fun nativeGetLastError(): String
