@@ -1962,6 +1962,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         setDirectoryBusy(true)
         loginErrorText.text = getString(R.string.login_signing_in)
+        // Kept whatever the outcome, so a failed attempt does not wipe the form.
+        DirectoryClient.rememberEndpoint(this, url, id)
         diagnosticsLog.log("login_attempt", "server=$url id=$id")
         directoryExecutor.execute {
             try {

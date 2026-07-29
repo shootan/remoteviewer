@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android blocks plain HTTP by default from API 28 onwards, and the directory service does not
+  speak TLS yet, so sign-in fails with "Cleartext HTTP traffic not permitted".
+
+  Cleartext is allowed here rather than pinned to a host because the server address is typed in
+  by the user and cannot be listed ahead of time. This is a stopgap: the account password and
+  session token cross the internet in the clear until the directory serves HTTPS, at which point
+  this file should be reduced to the default (cleartext denied).
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

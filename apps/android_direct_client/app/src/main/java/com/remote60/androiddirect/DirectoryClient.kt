@@ -88,6 +88,19 @@ object DirectoryClient {
         return p.getString(KEY_SESSION, "").orEmpty()
     }
 
+    /**
+     * Remembers where the user was signing in to, before knowing whether it worked.
+     *
+     * These are not secrets, and tying them to a successful login meant every failed attempt
+     * threw away the server address and made the next try start from an empty form.
+     */
+    fun rememberEndpoint(context: Context, url: String, accountId: String) {
+        prefs(context).edit()
+            .putString(KEY_URL, normalize(url))
+            .putString(KEY_ACCOUNT, accountId)
+            .apply()
+    }
+
     fun saveSession(context: Context, url: String, accountId: String, token: String, expiresAt: Long) {
         prefs(context).edit()
             .putString(KEY_URL, normalize(url))

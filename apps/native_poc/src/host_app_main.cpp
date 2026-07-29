@@ -481,6 +481,19 @@ void perform_sign_in() {
     return;
   }
 
+  // Remember where they were signing in to before knowing whether it worked; retyping the
+  // server address after every failed attempt is needless. The token goes with the account it
+  // was issued for, so it is dropped when either the account or the server changes.
+  if (g.cache.accountId != account || g.cache.directoryUrl != url) {
+    g.cache.hostToken.clear();
+    g.cache.hostId.clear();
+  }
+  g.cache.directoryUrl = url;
+  g.cache.accountId = account;
+  g.cache.hostName = hostName;
+  g.cache.machineId = directory::machine_id();
+  (void)directory::save_host_cache(g.cachePath, g.cache);
+
   set_status(creating ? L"Creating the account..." : L"Signing in...");
   EnableWindow(g.signInButton, FALSE);
 
