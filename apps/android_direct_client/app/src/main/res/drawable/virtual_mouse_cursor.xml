@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The ordinary arrow cursor, drawn so its tip is exactly at (0,0) of the drawable.
+
+  A ring marked a region; an arrow marks a point. The tip is what decides which pixel a click
+  lands on, so the widget is positioned by that corner rather than by its centre - which is why
+  the path starts there and grows down and right.
+
+  White fill with a dark outline, the same reason Windows draws it that way: it has to stay
+  visible over a black terminal and a white document alike.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="26dp"
+    android:height="40dp"
+    android:viewportWidth="13"
+    android:viewportHeight="20">
+
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:strokeColor="#FF101418"
+        android:strokeWidth="1"
+        android:pathData="M0.5,0.7 L0.5,16.2 L4.4,12.6 L6.9,18.9 L9.3,17.9 L6.9,11.8 L11.6,11.8 Z" />
+</vector>

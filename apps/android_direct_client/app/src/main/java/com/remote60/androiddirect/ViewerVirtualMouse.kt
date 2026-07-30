@@ -10,8 +10,8 @@ import kotlin.math.abs
  *
  * Touching the picture puts the pointer wherever the finger landed, which is fine for a button
  * and hopeless for a scrollbar or a 16-pixel close box. Here aiming and clicking are separate
- * acts: dragging the centre pad walks the pointer at a fraction of the finger's speed, a ring
- * marks exactly where it is, and only then does a button press happen -- so the aim cannot drift
+ * acts: dragging the centre pad walks the pointer at a fraction of the finger's speed, an arrow
+ * shows exactly where its tip sits, and only then does a button press happen -- so the aim cannot drift
  * at the moment it matters.
  *
  * The marker and the button cluster both travel with the pointer. That is the whole point: a
@@ -90,15 +90,17 @@ class ViewerVirtualMouse(
     /**
      * Puts the marker on [viewX], [viewY] and parks the cluster beside it.
      *
-     * Called every time the pointer moves, so the ring is always over the pixel that a button
-     * press would hit.
+     * Called every time the pointer moves, so the arrow tip is always on the pixel that a
+     * button press would hit.
      */
     fun moveTo(viewX: Float, viewY: Float) {
         if (!isOpen) return
         root.post {
             if (marker.width <= 0 || cluster.width <= 0) return@post
-            marker.x = viewX - marker.width / 2f
-            marker.y = viewY - marker.height / 2f
+            // The arrow's tip is at the drawable's own origin, so no centring offset: the
+            // point being aimed at and the point that gets clicked are the same pixel.
+            marker.x = viewX
+            marker.y = viewY
             placeCluster(viewX, viewY)
         }
     }
@@ -111,19 +113,20 @@ class ViewerVirtualMouse(
      */
     private fun placeCluster(viewX: Float, viewY: Float) {
         val parent = root
-        val halfMarker = marker.width / 2f
-        val roomRight = parent.width - (viewX + halfMarker + clusterGapPx)
-        val roomBelow = parent.height - (viewY + halfMarker + clusterGapPx)
+        // The arrow occupies the space down and right of its tip, so the cluster clears the
+        // whole glyph on those sides and only the gap on the others.
+        val rightOfArrow = viewX + marker.width + clusterGapPx
+        val belowArrow = viewY + marker.height + clusterGapPx
 
-        val x = if (roomRight >= cluster.width) {
-            viewX + halfMarker + clusterGapPx
+        val x = if (parent.width - rightOfArrow >= cluster.width) {
+            rightOfArrow
         } else {
-            viewX - halfMarker - clusterGapPx - cluster.width
+            viewX - clusterGapPx - cluster.width
         }
-        val y = if (roomBelow >= cluster.height) {
-            viewY + halfMarker + clusterGapPx
+        val y = if (parent.height - belowArrow >= cluster.height) {
+            belowArrow
         } else {
-            viewY - halfMarker - clusterGapPx - cluster.height
+            viewY - clusterGapPx - cluster.height
         }
         // Clamped as a last resort: on a short screen neither side fits, and a cluster half off
         // the display cannot be pressed at all.

@@ -14,13 +14,13 @@
     android:layout_height="match_parent"
     android:visibility="gone">
 
-    <!-- A ring, not a filled cursor: the real remote cursor shows through the middle, so what
-         is about to be clicked stays visible. -->
+    <!-- An arrow, positioned by its tip. That tip is the pixel a click lands on, so it is what
+         the user aims with. -->
     <View
         android:id="@+id/virtualMousePointer"
-        android:layout_width="44dp"
-        android:layout_height="44dp"
-        android:background="@drawable/virtual_mouse_reticle" />
+        android:layout_width="26dp"
+        android:layout_height="40dp"
+        android:background="@drawable/virtual_mouse_cursor" />
 
     <RelativeLayout
         android:id="@+id/virtualMouseCluster"
