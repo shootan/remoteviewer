@@ -204,6 +204,101 @@ int main() {
     check("stop ends playback", !macro.IsPlaying());
   }
 
+  // --- pause ----------------------------------------------------------------------
+  {
+    // Pausing a recording must leave no trace: events during it are dropped, and the pause
+    // duration does not stretch the next step's delay.
+    InputMacro macro;
+    macro.StartRecording(1000);
+    macro.RecordEvent(event(2, 10, 10, 0x01, 1), 1000);
+    macro.SetPaused(true, 1050);
+    macro.RecordEvent(event(1, 999, 999, 0, 1), 3000);   // during the pause; must vanish
+    check("paused recording reports paused", macro.IsPaused());
+    macro.SetPaused(false, 5000);
+    macro.RecordEvent(event(3, 10, 10, 0x01, 0), 5030);
+    macro.StopRecording();
+    const auto steps = macro.Steps();
+    check("events during a recording pause are dropped", steps.size() == 2,
+          "count=" + std::to_string(steps.size()));
+    check("pause time is not written into the delay",
+          steps.size() == 2 && steps[1].delayMs == 30,
+          steps.size() == 2 ? "delay=" + std::to_string(steps[1].delayMs) : "");
+  }
+
+  {
+    // Pausing playback holds the schedule; resuming shifts it by exactly the paused time.
+    InputMacro macro;
+    record_a_click(macro);   // gaps: 0, 50, 40
+    MacroPlaybackOptions options;
+    options.repeatCount = 1;
+    macro.StartPlayback(options, 0, 3);
+    MacroStep step;
+    check("first step plays before the pause", macro.PollDueStep(1, &step));
+    macro.SetPaused(true, 10);
+    check("nothing plays while paused", !macro.PollDueStep(500, &step));
+    check("still counted as playing while paused", macro.IsPlaying() && macro.IsPaused());
+    macro.SetPaused(false, 1000);   // paused for 990; second step was due at 51 -> now 1041
+    check("resume does not fire early", !macro.PollDueStep(1040, &step));
+    const auto rest = drain(macro, 1041, 3000);
+    check("resumed playback finishes the pass", rest.size() == 2 && !macro.IsPlaying(),
+          "count=" + std::to_string(rest.size()));
+  }
+
+  // --- editing --------------------------------------------------------------------
+  {
+    InputMacro macro;
+    record_a_click(macro);   // press(0) drag(+50) release(+40)
+    check("removing mid step merges its delay into the next", macro.RemoveStep(1));
+    auto steps = macro.Steps();
+    check("removed step is gone", steps.size() == 2 && steps[1].kind == 3);
+    check("surrounding timing is preserved", steps.size() == 2 && steps[1].delayMs == 90,
+          steps.size() == 2 ? "delay=" + std::to_string(steps[1].delayMs) : "");
+
+    check("removing the first step clears the leading wait", macro.RemoveStep(0));
+    steps = macro.Steps();
+    check("new first step starts immediately", steps.size() == 1 && steps[0].delayMs == 0);
+
+    check("out-of-range remove is refused", !macro.RemoveStep(5));
+    check("update rewrites position and delay", macro.UpdateStep(0, 300, 400, 77));
+    steps = macro.Steps();
+    check("updated values are held",
+          steps[0].x == 300 && steps[0].y == 400 && steps[0].delayMs == 77);
+  }
+
+  {
+    InputMacro macro;
+    record_a_click(macro);
+    macro.StartPlayback(MacroPlaybackOptions{}, 0, 1);
+    check("editing while playing is refused",
+          !macro.RemoveStep(0) && !macro.UpdateStep(0, 1, 1, 1));
+    macro.StopPlayback();
+  }
+
+  // --- save and load --------------------------------------------------------------
+  {
+    InputMacro macro;
+    record_a_click(macro);
+    const std::string text = macro.Serialize();
+
+    InputMacro other;
+    check("serialized macro loads elsewhere", other.LoadSerialized(text));
+    const auto original = macro.Steps();
+    const auto loaded = other.Steps();
+    bool same = original.size() == loaded.size();
+    for (size_t i = 0; same && i < original.size(); ++i) {
+      same = original[i].kind == loaded[i].kind && original[i].x == loaded[i].x &&
+             original[i].y == loaded[i].y && original[i].keyCode == loaded[i].keyCode &&
+             original[i].buttons == loaded[i].buttons && original[i].delayMs == loaded[i].delayMs;
+    }
+    check("load reproduces every step exactly", same,
+          "count=" + std::to_string(loaded.size()));
+
+    check("garbage is refused", !other.LoadSerialized("not a macro"));
+    check("an empty body is refused", !other.LoadSerialized("gnlink-macro-v1\n"));
+    check("a bad line is refused", !other.LoadSerialized("gnlink-macro-v1\n2 xx yy\n"));
+    check("refusal leaves the held macro intact", other.StepCount() == original.size());
+  }
+
   // --- the list a user reads ------------------------------------------------------
   {
     InputMacro macro;

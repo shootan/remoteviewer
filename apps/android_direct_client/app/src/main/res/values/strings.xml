@@ -26,8 +26,6 @@
     <string name="viewer_back_button">LIST</string>
     <string name="viewer_keyboard_button">⌨</string>
     <string name="viewer_keyboard_description">Show keyboard</string>
-    <string name="viewer_scroll_button">SCROLL</string>
-    <string name="viewer_scroll_description">Hold to scroll at a fixed cursor point</string>
     <string name="viewer_log_button">LOG</string>
     <string name="viewer_log_description">Open diagnostics log</string>
     <string name="viewer_log_title">Viewer Diagnostics</string>
@@ -106,4 +104,28 @@
     <string name="macro_empty">Nothing recorded yet. Press Record, act on the screen, then Stop.</string>
     <string name="macro_idle_summary">%1$d actions recorded</string>
     <string name="macro_playing_summary">Playing - %1$d repeats done</string>
+    <string name="macro_pause">Pause</string>
+    <string name="macro_resume">Resume</string>
+    <string name="macro_paused_recording">Recording paused - %1$d captured</string>
+    <string name="macro_paused_playing">Playback paused</string>
+    <string name="macro_save">Save</string>
+    <string name="macro_load">Load</string>
+    <string name="macro_save_title">Save macro</string>
+    <string name="macro_save_hint">Macro name</string>
+    <string name="macro_saved_toast">Saved: %1$s</string>
+    <string name="macro_load_title">Saved macros (long-press to delete)</string>
+    <string name="macro_load_empty">No saved macros.</string>
+    <string name="macro_loaded_toast">Loaded: %1$s</string>
+    <string name="macro_load_failed">Could not load</string>
+    <string name="macro_delete_confirm">Delete %1$s?</string>
+    <string name="macro_step_edit_title">Edit action %1$d</string>
+    <string name="macro_step_x">X position</string>
+    <string name="macro_step_y">Y position</string>
+    <string name="macro_step_delay">Delay before this action, ms</string>
+    <string name="macro_step_delete">Delete this action</string>
+    <string name="macro_edit_hint">Tap an action to edit or delete it</string>
+    <string name="macro_list_truncated">…%1$d more actions</string>
+    <string name="zone_right_click">R-CLK</string>
+    <string name="zone_tablet">TABLET</string>
+    <string name="zone_mouse">MOUSE</string>
 </resources>

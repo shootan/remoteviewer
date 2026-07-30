@@ -1,7 +1,9 @@
 #include "input_macro.hpp"
 
 #include <algorithm>
+#include <cinttypes>
 #include <cstdio>
+#include <sstream>
 
 namespace remote60::native_poc {
 namespace {
@@ -13,6 +15,12 @@ constexpr size_t kMaxSteps = 20000;
 // Two actions closer together than a display refresh are one action as far as a person is
 // concerned, and a replay that waits 0 ms between them just floods the queue.
 constexpr uint32_t kMinDelayMs = 1;
+
+constexpr uint32_t kMaxDelayMs = 600000;
+
+// First line of a serialized macro. Versioned so a future format change can refuse cleanly
+// instead of half-loading.
+constexpr const char* kSerializeHeader = "gnlink-macro-v1";
 
 /** Symmetric jitter in [-range, +range]; 0 range yields 0. */
 int32_t jitter(std::mt19937& rng, uint32_t range) {
@@ -47,6 +55,7 @@ void InputMacro::StartRecording(uint64_t nowMs) {
   std::lock_guard<std::mutex> lock(mu_);
   steps_.clear();
   state_ = State::Recording;
+  paused_ = false;
   lastRecordMs_ = nowMs;
   nextIndex_ = 0;
   completedRepeats_ = 0;
@@ -54,7 +63,7 @@ void InputMacro::StartRecording(uint64_t nowMs) {
 
 void InputMacro::RecordEvent(const ControlInputEventMessage& event, uint64_t nowMs) {
   std::lock_guard<std::mutex> lock(mu_);
-  if (state_ != State::Recording) return;
+  if (state_ != State::Recording || paused_) return;
   // Pointer actions only. Keys and typed text belong to the keyboard path, and replaying them
   // into whatever happens to be focused later does more harm than good.
   if (event.kind < 1 || event.kind > 4) return;
@@ -76,7 +85,32 @@ void InputMacro::RecordEvent(const ControlInputEventMessage& event, uint64_t now
 
 void InputMacro::StopRecording() {
   std::lock_guard<std::mutex> lock(mu_);
-  if (state_ == State::Recording) state_ = State::Idle;
+  if (state_ == State::Recording) {
+    state_ = State::Idle;
+    paused_ = false;
+  }
+}
+
+void InputMacro::SetPaused(bool paused, uint64_t nowMs) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (state_ == State::Idle || paused == paused_) return;
+  paused_ = paused;
+  if (paused) {
+    pauseStartMs_ = nowMs;
+    return;
+  }
+  const uint64_t pausedFor = nowMs >= pauseStartMs_ ? nowMs - pauseStartMs_ : 0;
+  if (state_ == State::Recording) {
+    // The next event's delay is measured from here, not from before the pause.
+    lastRecordMs_ = nowMs;
+  } else if (state_ == State::Playing) {
+    nextDueMs_ += pausedFor;
+  }
+}
+
+bool InputMacro::IsPaused() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return paused_ && state_ != State::Idle;
 }
 
 bool InputMacro::StartPlayback(const MacroPlaybackOptions& options, uint64_t nowMs, uint32_t seed) {
@@ -88,6 +122,7 @@ bool InputMacro::StartPlayback(const MacroPlaybackOptions& options, uint64_t now
   }
   rng_.seed(seed);
   state_ = State::Playing;
+  paused_ = false;
   nextIndex_ = 0;
   completedRepeats_ = 0;
   // The first step's recorded delay is 0, so playback starts immediately.
@@ -97,7 +132,10 @@ bool InputMacro::StartPlayback(const MacroPlaybackOptions& options, uint64_t now
 
 void InputMacro::StopPlayback() {
   std::lock_guard<std::mutex> lock(mu_);
-  if (state_ == State::Playing) state_ = State::Idle;
+  if (state_ == State::Playing) {
+    state_ = State::Idle;
+    paused_ = false;
+  }
 }
 
 uint64_t InputMacro::ScheduleNext(uint64_t fromMs) {
@@ -109,7 +147,7 @@ uint64_t InputMacro::ScheduleNext(uint64_t fromMs) {
 
 bool InputMacro::PollDueStep(uint64_t nowMs, MacroStep* out) {
   std::lock_guard<std::mutex> lock(mu_);
-  if (state_ != State::Playing || !out) return false;
+  if (state_ != State::Playing || paused_ || !out) return false;
   if (nextIndex_ >= steps_.size()) return false;
   if (nowMs < nextDueMs_) return false;
 
@@ -164,8 +202,86 @@ void InputMacro::Clear() {
   std::lock_guard<std::mutex> lock(mu_);
   steps_.clear();
   state_ = State::Idle;
+  paused_ = false;
   nextIndex_ = 0;
   completedRepeats_ = 0;
+}
+
+bool InputMacro::RemoveStep(size_t index) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (state_ != State::Idle || index >= steps_.size()) return false;
+  if (index + 1 < steps_.size()) {
+    const uint64_t merged =
+        static_cast<uint64_t>(steps_[index].delayMs) + steps_[index + 1].delayMs;
+    steps_[index + 1].delayMs = static_cast<uint32_t>(std::min<uint64_t>(merged, kMaxDelayMs));
+  }
+  steps_.erase(steps_.begin() + static_cast<ptrdiff_t>(index));
+  // A leading delay would replay as a silent wait before anything visible happens, which
+  // reads as a hang rather than as timing.
+  if (index == 0 && !steps_.empty()) steps_.front().delayMs = 0;
+  return true;
+}
+
+bool InputMacro::UpdateStep(size_t index, int32_t x, int32_t y, uint32_t delayMs) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (state_ != State::Idle || index >= steps_.size()) return false;
+  MacroStep& step = steps_[index];
+  step.x = std::max(0, x);
+  step.y = std::max(0, y);
+  step.delayMs = std::min(delayMs, kMaxDelayMs);
+  return true;
+}
+
+std::string InputMacro::Serialize() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  std::ostringstream out;
+  out << kSerializeHeader << '\n';
+  for (const MacroStep& s : steps_) {
+    out << s.kind << ' ' << s.x << ' ' << s.y << ' ' << s.wheelDelta << ' ' << s.keyCode << ' '
+        << s.buttons << ' ' << s.delayMs << '\n';
+  }
+  return out.str();
+}
+
+bool InputMacro::LoadSerialized(const std::string& text) {
+  std::istringstream in(text);
+  std::string header;
+  if (!std::getline(in, header)) return false;
+  // Tolerate a trailing \r from files that passed through Windows line endings.
+  if (!header.empty() && header.back() == '\r') header.pop_back();
+  if (header != kSerializeHeader) return false;
+
+  std::vector<MacroStep> loaded;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty() || line == "\r") continue;
+    MacroStep s;
+    unsigned kind = 0;
+    unsigned key = 0;
+    unsigned buttons = 0;
+    unsigned delay = 0;
+    if (std::sscanf(line.c_str(), "%u %d %d %d %u %u %u", &kind, &s.x, &s.y, &s.wheelDelta,
+                    &key, &buttons, &delay) != 7) {
+      return false;
+    }
+    if (kind < 1 || kind > 4) return false;
+    s.kind = static_cast<uint16_t>(kind);
+    s.keyCode = key;
+    s.buttons = static_cast<uint16_t>(buttons & 0x7u);
+    s.delayMs = std::min<unsigned>(delay, kMaxDelayMs);
+    s.x = std::max(0, s.x);
+    s.y = std::max(0, s.y);
+    if (loaded.size() >= kMaxSteps) return false;
+    loaded.push_back(s);
+  }
+  if (loaded.empty()) return false;
+
+  std::lock_guard<std::mutex> lock(mu_);
+  if (state_ != State::Idle) return false;
+  steps_ = std::move(loaded);
+  nextIndex_ = 0;
+  completedRepeats_ = 0;
+  return true;
 }
 
 size_t InputMacro::PlaybackPosition() const {

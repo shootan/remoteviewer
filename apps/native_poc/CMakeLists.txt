@@ -73,6 +73,7 @@ target_compile_definitions(remote60_native_video_host_poc PRIVATE
 
 add_executable(remote60_native_video_client_poc
   src/native_video_client_main.cpp
+  src/client_macro_window.cpp
   src/input_macro.cpp
   src/native_video_client_shared_core.cpp
   src/native_video_client_tcp_control.cpp
@@ -92,6 +93,7 @@ target_link_libraries(remote60_native_video_client_poc PRIVATE
   d3dcompiler
   gdi32
   user32
+  shell32
   mfplat
   mf
   mfuuid

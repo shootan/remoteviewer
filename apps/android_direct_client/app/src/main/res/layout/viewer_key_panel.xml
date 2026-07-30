@@ -103,22 +103,14 @@
     </HorizontalScrollView>
 
     <!-- Takes whatever height is left and divides it between the rows, so the keyboard is
-         always whole. It used to be wrap_content inside a scroll view, which meant the bottom
-         rows simply fell off the screen and looked broken rather than scrollable. -->
-    <ScrollView
-        android:id="@+id/keyPanelKeysScroll"
+         always whole. Inside a scroll view the rows refused to shrink below their natural
+         height and the bottom ones were clipped; keys must share the space, never scroll. -->
+    <LinearLayout
+        android:id="@+id/keyPanelKeysRoot"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_marginTop="6dp"
         android:layout_weight="1"
-        android:fillViewport="true"
-        android:scrollbars="none"
-        android:visibility="gone">
-
-        <LinearLayout
-            android:id="@+id/keyPanelKeysRoot"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:orientation="vertical" />
-    </ScrollView>
+        android:orientation="vertical"
+        android:visibility="gone" />
 </LinearLayout>

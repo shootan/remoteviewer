@@ -77,6 +77,16 @@ class InputMacro {
   void StopPlayback();
 
   /**
+   * Suspends the current recording or playback without ending it.
+   *
+   * The paused stretch leaves no trace: a recording resumes as if the pause had not happened
+   * (events during it are dropped and its duration is not written into the next step's delay),
+   * and a playback's schedule shifts by exactly the paused time.
+   */
+  void SetPaused(bool paused, uint64_t nowMs);
+  bool IsPaused() const;
+
+  /**
    * Returns the next step if it is due, having advanced past it.
    *
    * Called repeatedly by the caller's loop. Steps that are late are returned immediately rather
@@ -91,6 +101,25 @@ class InputMacro {
   std::vector<MacroStep> Steps() const;
   size_t StepCount() const;
   void Clear();
+
+  /**
+   * Drops one step. The removed step's delay folds into its successor so the surrounding
+   * timing is preserved; deleting the first step starts the macro immediately rather than
+   * silently waiting out an invisible gap. Refused while recording or playing.
+   */
+  bool RemoveStep(size_t index);
+
+  /** Rewrites a step's position and preceding delay in place. Refused unless idle. */
+  bool UpdateStep(size_t index, int32_t x, int32_t y, uint32_t delayMs);
+
+  /** The whole macro as text, for writing to a file. */
+  std::string Serialize() const;
+
+  /**
+   * Replaces the held macro with a serialized one. False (and no change) when the text is not
+   * a macro or the state is not idle.
+   */
+  bool LoadSerialized(const std::string& text);
 
   /** 1-based index of the step played next, for progress display. */
   size_t PlaybackPosition() const;
@@ -107,6 +136,8 @@ class InputMacro {
   std::vector<MacroStep> steps_;
 
   uint64_t lastRecordMs_ = 0;
+  bool paused_ = false;
+  uint64_t pauseStartMs_ = 0;
 
   MacroPlaybackOptions options_;
   std::mt19937 rng_;

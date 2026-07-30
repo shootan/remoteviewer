@@ -6,7 +6,6 @@ import android.view.View
 import android.widget.Button
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
 
 /**
@@ -166,7 +165,6 @@ class ViewerKeyPanel(
 
     private val shortcutRow: LinearLayout = root.findViewById(R.id.keyPanelShortcutRow)
     private val shortcutScroll: HorizontalScrollView = root.findViewById(R.id.keyPanelShortcutScroll)
-    private val keysScroll: ScrollView = root.findViewById(R.id.keyPanelKeysScroll)
     private val keysRoot: LinearLayout = root.findViewById(R.id.keyPanelKeysRoot)
     private val modifierText: TextView = root.findViewById(R.id.keyPanelModifierText)
     private val tabShortcut: Button = root.findViewById(R.id.keyPanelTabShortcut)
@@ -183,6 +181,9 @@ class ViewerKeyPanel(
             buildKeyboard()
             renderModifiers()
             showShortcuts(false)
+            // Two more rows need more of the screen; without this the seven rows squeeze into
+            // the five-row height and every key turns into a sliver.
+            if (isOpen) applyPanelHeight()
         }
         buildShortcuts()
         buildKeyboard()
@@ -198,9 +199,13 @@ class ViewerKeyPanel(
 
     fun show() {
         root.visibility = View.VISIBLE
-        // The panel pushes the picture up rather than covering it, so it gets a fixed share of
-        // the screen and the rows divide whatever that comes to. Setting the height here rather
-        // than measuring afterwards avoids the panel appearing at full size and then snapping.
+        applyPanelHeight()
+    }
+
+    // The panel pushes the picture up rather than covering it, so it gets a fixed share of
+    // the screen and the rows divide whatever that comes to. Setting the height here rather
+    // than measuring afterwards avoids the panel appearing at full size and then snapping.
+    private fun applyPanelHeight() {
         root.post {
             val parentHeight = (root.parent as? View)?.height ?: 0
             if (parentHeight > 0) {
@@ -296,7 +301,7 @@ class ViewerKeyPanel(
 
     private fun showShortcuts(shortcuts: Boolean) {
         shortcutScroll.visibility = if (shortcuts) View.VISIBLE else View.GONE
-        keysScroll.visibility = if (shortcuts) View.GONE else View.VISIBLE
+        keysRoot.visibility = if (shortcuts) View.GONE else View.VISIBLE
         tabShortcut.alpha = if (shortcuts) 1.0f else 0.55f
         tabKeys.alpha = if (shortcuts) 0.55f else 1.0f
     }

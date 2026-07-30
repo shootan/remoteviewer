@@ -91,6 +91,21 @@ object NativeSessionBridge {
     /** The recorded actions as readable lines, newline separated. */
     external fun nativeMacroStepLines(): String
 
+    /** Pauses/resumes whichever of recording or playback is active; the gap leaves no trace. */
+    external fun nativeMacroSetPaused(paused: Boolean)
+    external fun nativeMacroIsPaused(): Boolean
+
+    /** Editing is only possible while idle; both return false otherwise. */
+    external fun nativeMacroRemoveStep(index: Int): Boolean
+    external fun nativeMacroUpdateStep(index: Int, x: Int, y: Int, delayMs: Int): Boolean
+
+    /** "kind x y wheel key buttons delay" for one step, or "" out of range. */
+    external fun nativeMacroStepFields(index: Int): String
+
+    /** The whole macro as text for a save file, and back. */
+    external fun nativeMacroSerialize(): String
+    external fun nativeMacroLoadSerialized(text: String): Boolean
+
     /** Total UDP video bytes received this session. */
     external fun nativeGetSessionBytesReceived(): Long
     external fun nativeResetVideoStream()

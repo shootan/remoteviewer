@@ -540,6 +540,60 @@
             android:layout_weight="1"
             android:orientation="horizontal">
 
+            <!-- OSLink-style modifier strip. A letterbox margin only exists when the remote
+                 screen's shape differs from this one's, so these zones get a lane of their own
+                 and work on every screen. Top and middle are held; the bottom is a tap. -->
+            <LinearLayout
+                android:id="@+id/viewerZoneBar"
+                android:layout_width="34dp"
+                android:layout_height="match_parent"
+                android:background="#0A0A0A"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/viewerZoneRightClick"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1"
+                    android:alpha="0.55"
+                    android:gravity="center"
+                    android:text="@string/zone_right_click"
+                    android:textColor="#8A93A5"
+                    android:textSize="9sp" />
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:background="#22FFFFFF" />
+
+                <TextView
+                    android:id="@+id/viewerZoneTablet"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1"
+                    android:alpha="0.55"
+                    android:gravity="center"
+                    android:text="@string/zone_tablet"
+                    android:textColor="#8A93A5"
+                    android:textSize="9sp" />
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:background="#22FFFFFF" />
+
+                <TextView
+                    android:id="@+id/viewerZoneMouse"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1"
+                    android:alpha="0.55"
+                    android:gravity="center"
+                    android:text="@string/zone_mouse"
+                    android:textColor="#8A93A5"
+                    android:textSize="9sp" />
+            </LinearLayout>
+
             <FrameLayout
                 android:id="@+id/viewerVideoFrame"
                 android:layout_width="0dp"
@@ -597,10 +651,24 @@
                         android:textStyle="bold" />
 
                     <Button
-                        android:id="@+id/macroRecordBarStop"
+                        android:id="@+id/macroRecordBarPause"
                         android:layout_width="wrap_content"
                         android:layout_height="36dp"
                         android:layout_marginStart="10dp"
+                        android:background="@drawable/viewer_control_button_background"
+                        android:minWidth="0dp"
+                        android:paddingStart="14dp"
+                        android:paddingEnd="14dp"
+                        android:text="@string/macro_pause"
+                        android:textAllCaps="false"
+                        android:textColor="#F4F0E8"
+                        android:textSize="12sp" />
+
+                    <Button
+                        android:id="@+id/macroRecordBarStop"
+                        android:layout_width="wrap_content"
+                        android:layout_height="36dp"
+                        android:layout_marginStart="8dp"
                         android:background="@drawable/viewer_control_button_background"
                         android:minWidth="0dp"
                         android:paddingStart="14dp"
@@ -701,22 +769,8 @@
                     android:textColor="#F4F0E8"
                     android:textSize="18sp" />
 
-                <Button
-                    android:id="@+id/viewerScrollButton"
-                    android:layout_width="56dp"
-                    android:layout_height="48dp"
-                    android:layout_marginTop="8dp"
-                    android:background="@drawable/viewer_control_button_background"
-                    android:contentDescription="@string/viewer_scroll_description"
-                    android:minWidth="0dp"
-                    android:text="@string/viewer_scroll_button"
-                    android:textAllCaps="false"
-                    android:textColor="#F4F0E8"
-                    android:textSize="10sp" />
-
-                <!-- Also reachable by pressing the bottom of the letterbox margin, but that
-                     margin does not exist when the remote screen matches the phone's shape, so
-                     the rail carries it too. -->
+                <!-- Also reachable from the zone strip's bottom third; the rail carries it too
+                     so it survives any future strip changes. -->
                 <Button
                     android:id="@+id/viewerMouseButton"
                     android:layout_width="56dp"

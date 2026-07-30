@@ -1,4 +1,4 @@
-package com.remote60.androiddirect
+﻿package com.remote60.androiddirect
 
 import android.app.Activity
 import android.app.AlertDialog
@@ -73,6 +73,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         private const val MACRO_STATE_IDLE = 0
         private const val MACRO_STATE_RECORDING = 1
         private const val MACRO_STATE_PLAYING = 2
+        private const val MACRO_LIST_MAX_ROWS = 300
         private const val VIEWER_STALL_OVERLAY_US = 3_000_000L
     }
 
@@ -372,7 +373,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var viewerControlsBar: LinearLayout
     private lateinit var viewerBackButton: Button
     private lateinit var viewerKeyboardButton: Button
-    private lateinit var viewerScrollButton: Button
     private lateinit var viewerLogButton: Button
     private lateinit var viewerOverlayStatusText: TextView
     private lateinit var viewerSplit: LinearLayout
@@ -524,9 +524,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var activeTouchIsSecondary = false
     private var lastTouchVideoX = 0
     private var lastTouchVideoY = 0
-    private var viewerScrollModeArmed = false
     private var scrollLastTouchY = 0f
     private var scrollWheelCarryPx = 0f
+
+    // The dedicated left strip. Its finger lives in a different view's event stream than the
+    // picture's, so holding a zone cannot disturb the touch bookkeeping above -- which is also
+    // why these are booleans and not pointer ids.
+    private lateinit var viewerZoneRightClick: TextView
+    private lateinit var viewerZoneTablet: TextView
+    private var zoneRightClickHeld = false
+    private var zoneTabletHeld = false
     private val viewerControlsDimAlpha = 1.0f  // rail sits beside the video, nothing to uncover
     private val viewerControlsFadeRunnable = Runnable {
         if (currentScene == UiScene.VIEWER) {
@@ -544,11 +551,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private var macroDialog: AlertDialog? = null
     private var macroStatusText: TextView? = null
-    private var macroStepList: TextView? = null
+    private var macroStepListContainer: LinearLayout? = null
     private var macroRecordButton: Button? = null
     private var macroPlayButton: Button? = null
+    private var macroPauseButton: Button? = null
     private lateinit var macroRecordBar: View
     private lateinit var macroRecordBarText: TextView
+    private lateinit var macroRecordBarPause: Button
 
     /**
      * Drives macro playback from the UI thread at a fine cadence.
@@ -572,6 +581,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
     private var macroPumpScheduled = false
+
+    /** What the step list currently shows; rebuilding 16 times a second would jank the pump. */
+    private var macroListRenderedSignature: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -620,7 +632,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerControlsBar = findViewById(R.id.viewerControlsBar)
         viewerBackButton = findViewById(R.id.viewerBackButton)
         viewerKeyboardButton = findViewById(R.id.viewerKeyboardButton)
-        viewerScrollButton = findViewById(R.id.viewerScrollButton)
         viewerLogButton = findViewById(R.id.viewerLogButton)
         viewerOverlayStatusText = findViewById(R.id.viewerOverlayStatusText)
         viewerSplit = findViewById(R.id.viewerSplit)
@@ -693,9 +704,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         viewerModeBanner = findViewById(R.id.viewerModeBanner)
         initVirtualMouse()
+        initZoneBar()
         findViewById<Button>(R.id.viewerMouseButton).setOnClickListener { toggleVirtualMouse() }
         macroRecordBar = findViewById(R.id.macroRecordBar)
         macroRecordBarText = findViewById(R.id.macroRecordBarText)
+        macroRecordBarPause = findViewById(R.id.macroRecordBarPause)
+        macroRecordBarPause.setOnClickListener { toggleMacroPause() }
         findViewById<Button>(R.id.macroRecordBarStop).setOnClickListener { stopMacroRecording() }
         findViewById<Button>(R.id.viewerMacroButton).setOnClickListener { showMacroDialog() }
         initDirectoryUi()
@@ -851,20 +865,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerKeyboardButton.setOnClickListener {
             toggleViewerKeyboard()
         }
-        viewerScrollButton.setOnTouchListener { _, event ->
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    showViewerControls(emphasized = true)
-                    setViewerScrollModeArmed(true)
-                }
-
-                MotionEvent.ACTION_UP,
-                MotionEvent.ACTION_CANCEL -> {
-                    setViewerScrollModeArmed(false)
-                }
-            }
-            false
-        }
         viewerLogButton.setOnClickListener {
             toggleViewerLogDialog()
         }
@@ -889,7 +889,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         saveCurrentEndpoint()
         statusHandler.removeCallbacks(statusPollRunnable)
         dismissViewerLogDialog()
-        setViewerScrollModeArmed(false)
+        releaseViewerModifiers()
         cancelActiveViewerTouch("pause")
         hideViewerKeyboard("pause")
         super.onPause()
@@ -924,7 +924,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         exitDialog?.dismiss()
         exitDialog = null
         dismissViewerLogDialog()
-        setViewerScrollModeArmed(false)
+        releaseViewerModifiers()
         hideViewerKeyboard("destroy")
         releaseVideoSurface()
         super.onDestroy()
@@ -1022,7 +1022,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun exitApplication() {
         diagnosticsLog.log("exit_confirmed", "scene=$currentScene status=${NativeSessionBridge.nativeGetStatus()}")
         dismissViewerLogDialog()
-        setViewerScrollModeArmed(false)
+        releaseViewerModifiers()
         cancelActiveViewerTouch("exit")
         hideViewerKeyboard("exit")
         desiredStreamActive = false
@@ -1167,7 +1167,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun moveToTargets(reason: String, abortPendingSwitch: Boolean) {
         diagnosticsLog.log("targets_return", "reason=$reason scene=$currentScene")
         dismissViewerLogDialog()
-        setViewerScrollModeArmed(false)
+        releaseViewerModifiers()
         cancelActiveViewerTouch(reason)
         hideViewerKeyboard(reason)
         viewerKeyPanel?.hide()
@@ -1262,7 +1262,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 // to place the caret would otherwise tear down the InputConnection and leave
                 // the soft keyboard visible but dead.
                 if (!viewerImeCaptureView.hasFocus()) view.requestFocus()
-                if (viewerScrollModeArmed || tabletModePointerId != MotionEvent.INVALID_POINTER_ID) {
+                if (isTabletModeActive()) {
                     activeTouchPointerId = event.getPointerId(pointerIndex)
                     activeViewerTouchMode = ViewerTouchMode.SCROLL
                     activeTouchButtons = 0
@@ -1285,8 +1285,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 }
                 activeTouchPointerId = event.getPointerId(pointerIndex)
                 activeViewerTouchMode = ViewerTouchMode.DIRECT
-                activeTouchIsSecondary =
-                    rightClickModifierPointerId != MotionEvent.INVALID_POINTER_ID
+                activeTouchIsSecondary = isRightClickModeActive()
                 activeTouchButtons =
                     if (activeTouchIsSecondary) INPUT_BUTTON_SECONDARY else INPUT_BUTTON_PRIMARY
                 lastTouchVideoX = mapped.first
@@ -1306,11 +1305,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
 
             MotionEvent.ACTION_MOVE -> {
-                // A second finger on the picture while the middle zone is held means zoom, which
+                // A second finger on the picture while tablet mode is held means zoom, which
                 // the remote side has no notion of; Ctrl+wheel is what applications understand.
-                if (tabletModePointerId != MotionEvent.INVALID_POINTER_ID &&
-                    handlePinchZoom(event)
-                ) {
+                if (isTabletModeActive() && handlePinchZoom(event)) {
                     return true
                 }
                 val pointerId = activeTouchPointerId
@@ -1563,17 +1560,85 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
-    /** Shows which margin modifier is currently held, so the mode is never a guess. */
+    /** A modifier counts whether it came from the strip or from a letterbox margin. */
+    private fun isRightClickModeActive(): Boolean =
+        zoneRightClickHeld || rightClickModifierPointerId != MotionEvent.INVALID_POINTER_ID
+
+    private fun isTabletModeActive(): Boolean =
+        zoneTabletHeld || tabletModePointerId != MotionEvent.INVALID_POINTER_ID
+
+    /**
+     * The left strip. Because it is its own view, the finger holding it never enters the
+     * picture's gesture, which is what let a held margin finger masquerade as a pinch.
+     */
+    private fun initZoneBar() {
+        viewerZoneRightClick = findViewById(R.id.viewerZoneRightClick)
+        viewerZoneTablet = findViewById(R.id.viewerZoneTablet)
+        val bar = findViewById<LinearLayout>(R.id.viewerZoneBar)
+        bar.setOnTouchListener { view, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    val height = view.height.toFloat()
+                    when {
+                        height <= 0f || event.y < height / 3f -> {
+                            zoneRightClickHeld = true
+                            diagnosticsLog.log("right_click_armed", "source=zone_bar")
+                        }
+                        event.y < height * 2f / 3f -> {
+                            zoneTabletHeld = true
+                            pinchStartSpan = 0f
+                            pinchZoomCarry = 0f
+                            diagnosticsLog.log("tablet_mode_armed", "source=zone_bar")
+                        }
+                        else -> {
+                            // A tap, not a hold: both hands are needed on the mouse itself.
+                            toggleVirtualMouse()
+                        }
+                    }
+                    showViewerControls(emphasized = true)
+                    renderViewerModeBanner()
+                    true
+                }
+
+                MotionEvent.ACTION_UP,
+                MotionEvent.ACTION_CANCEL -> {
+                    releaseZoneBarModifiers()
+                    view.performClick()
+                    true
+                }
+
+                else -> true
+            }
+        }
+    }
+
+    private fun releaseZoneBarModifiers() {
+        if (!zoneRightClickHeld && !zoneTabletHeld) return
+        zoneRightClickHeld = false
+        zoneTabletHeld = false
+        pinchStartSpan = 0f
+        if (::viewerModeBanner.isInitialized) renderViewerModeBanner()
+    }
+
+    /** Shows which modifier is currently held, so the mode is never a guess. */
     private fun renderViewerModeBanner() {
         val text = when {
-            tabletModePointerId != MotionEvent.INVALID_POINTER_ID ->
-                getString(R.string.viewer_mode_tablet)
-            rightClickModifierPointerId != MotionEvent.INVALID_POINTER_ID ->
-                getString(R.string.viewer_mode_right_click)
+            isTabletModeActive() -> getString(R.string.viewer_mode_tablet)
+            isRightClickModeActive() -> getString(R.string.viewer_mode_right_click)
             else -> ""
         }
         viewerModeBanner.text = text
         viewerModeBanner.visibility = if (text.isEmpty()) View.GONE else View.VISIBLE
+        if (::viewerZoneRightClick.isInitialized) {
+            viewerZoneRightClick.alpha = if (isRightClickModeActive()) 1.0f else 0.55f
+            viewerZoneRightClick.setBackgroundColor(
+                if (isRightClickModeActive()) 0x3345E08C else 0x00000000,
+            )
+            viewerZoneTablet.alpha = if (isTabletModeActive()) 1.0f else 0.55f
+            viewerZoneTablet.setBackgroundColor(
+                if (isTabletModeActive()) 0x3345E08C else 0x00000000,
+            )
+        }
     }
 
     /**
@@ -1581,13 +1646,22 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
      * browsers, editors and image viewers all spell zoom.
      */
     private fun handlePinchZoom(event: MotionEvent): Boolean {
-        if (event.pointerCount < 2) {
+        // Only fingers that are actually on the picture can pinch. When tablet mode is held
+        // via a letterbox margin, that margin finger shares this event stream, and counting it
+        // turned every one-finger drag into a phantom zoom that ate the scroll gesture.
+        val pinchIndices = (0 until event.pointerCount).filter {
+            val id = event.getPointerId(it)
+            id != tabletModePointerId && id != rightClickModifierPointerId
+        }
+        if (pinchIndices.size < 2) {
             pinchStartSpan = 0f
             return false
         }
+        val a = pinchIndices[0]
+        val b = pinchIndices[1]
         val span = kotlin.math.hypot(
-            (event.getX(1) - event.getX(0)).toDouble(),
-            (event.getY(1) - event.getY(0)).toDouble(),
+            (event.getX(b) - event.getX(a)).toDouble(),
+            (event.getY(b) - event.getY(a)).toDouble(),
         ).toFloat()
         if (pinchStartSpan <= 0f) {
             pinchStartSpan = span
@@ -1633,9 +1707,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (macroDialog?.isShowing == true) return
         val view = layoutInflater.inflate(R.layout.viewer_macro_dialog, null)
         macroStatusText = view.findViewById(R.id.macroStatusText)
-        macroStepList = view.findViewById(R.id.macroStepList)
+        macroStepListContainer = view.findViewById(R.id.macroStepListContainer)
         macroRecordButton = view.findViewById(R.id.macroRecordButton)
         macroPlayButton = view.findViewById(R.id.macroPlayButton)
+        macroPauseButton = view.findViewById(R.id.macroPauseButton)
+        macroListRenderedSignature = null
 
         macroRecordButton?.setOnClickListener {
             if (NativeSessionBridge.nativeMacroState() == MACRO_STATE_RECORDING) {
@@ -1653,11 +1729,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
             renderMacroUi()
         }
+        macroPauseButton?.setOnClickListener { toggleMacroPause() }
         view.findViewById<Button>(R.id.macroClearButton).setOnClickListener {
             NativeSessionBridge.nativeMacroStopPlayback()
             NativeSessionBridge.nativeMacroClear()
             renderMacroUi()
         }
+        view.findViewById<Button>(R.id.macroSaveButton).setOnClickListener { showMacroSaveDialog() }
+        view.findViewById<Button>(R.id.macroLoadButton).setOnClickListener { showMacroLoadDialog() }
         view.findViewById<Button>(R.id.macroCloseButton).setOnClickListener {
             macroDialog?.dismiss()
         }
@@ -1669,9 +1748,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 // being recorded happen on the picture this window is covering.
                 macroDialog = null
                 macroStatusText = null
-                macroStepList = null
+                macroStepListContainer = null
                 macroRecordButton = null
                 macroPlayButton = null
+                macroPauseButton = null
                 applyImmersiveMode()
             }
             .create()
@@ -1718,14 +1798,26 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         statusHandler.post(macroPumpRunnable)
     }
 
+    private fun toggleMacroPause() {
+        val paused = NativeSessionBridge.nativeMacroIsPaused()
+        NativeSessionBridge.nativeMacroSetPaused(!paused)
+        diagnosticsLog.log("macro", if (paused) "resumed" else "paused")
+        renderMacroUi()
+    }
+
     private fun renderMacroUi() {
         val state = NativeSessionBridge.nativeMacroState()
         val count = NativeSessionBridge.nativeMacroStepCount()
+        val paused = NativeSessionBridge.nativeMacroIsPaused()
+        val pauseLabel = getString(if (paused) R.string.macro_resume else R.string.macro_pause)
 
         macroRecordBar.visibility =
             if (state == MACRO_STATE_RECORDING) View.VISIBLE else View.GONE
         if (state == MACRO_STATE_RECORDING) {
-            macroRecordBarText.text = getString(R.string.macro_recording, count)
+            macroRecordBarText.text =
+                if (paused) getString(R.string.macro_paused_recording, count)
+                else getString(R.string.macro_recording, count)
+            macroRecordBarPause.text = pauseLabel
         }
 
         macroRecordButton?.text =
@@ -1735,18 +1827,191 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             if (state == MACRO_STATE_PLAYING) getString(R.string.macro_stop)
             else getString(R.string.macro_play)
         macroPlayButton?.isEnabled = count > 0
+        macroPauseButton?.text = pauseLabel
+        macroPauseButton?.isEnabled = state != MACRO_STATE_IDLE
 
-        macroStatusText?.text = when (state) {
-            MACRO_STATE_RECORDING -> getString(R.string.macro_recording, count)
-            MACRO_STATE_PLAYING -> getString(
+        macroStatusText?.text = when {
+            state == MACRO_STATE_RECORDING && paused ->
+                getString(R.string.macro_paused_recording, count)
+            state == MACRO_STATE_RECORDING -> getString(R.string.macro_recording, count)
+            state == MACRO_STATE_PLAYING && paused -> getString(R.string.macro_paused_playing)
+            state == MACRO_STATE_PLAYING -> getString(
                 R.string.macro_playing_summary,
                 NativeSessionBridge.nativeMacroCompletedRepeats(),
             )
             else -> getString(R.string.macro_idle_summary, count)
         }
-        macroStepList?.text =
-            if (count == 0) getString(R.string.macro_empty)
-            else NativeSessionBridge.nativeMacroStepLines()
+        renderMacroSteps(state, count)
+    }
+
+    /** Rebuilds the row list only when its contents actually changed. */
+    private fun renderMacroSteps(state: Int, count: Int) {
+        val container = macroStepListContainer ?: return
+        val signature = "$state/$count"
+        if (signature == macroListRenderedSignature) return
+        macroListRenderedSignature = signature
+
+        container.removeAllViews()
+        fun addLine(text: String, dim: Boolean = false): TextView {
+            val row = TextView(this)
+            row.text = text
+            row.textSize = 11f
+            row.typeface = android.graphics.Typeface.MONOSPACE
+            row.setTextColor(if (dim) 0xFF9AA3B2.toInt() else 0xFFD8DEE9.toInt())
+            row.setPadding(dp(4f), dp(5f), dp(4f), dp(5f))
+            container.addView(row)
+            return row
+        }
+
+        if (count == 0) {
+            addLine(getString(R.string.macro_empty), dim = true)
+            return
+        }
+        addLine(getString(R.string.macro_edit_hint), dim = true)
+        val lines = NativeSessionBridge.nativeMacroStepLines().split('\n')
+        val editable = state == MACRO_STATE_IDLE
+        // A runaway recording can hold thousands of steps; a dialog list stops being a review
+        // tool long before that, and building the views would stall the UI thread.
+        val shown = lines.take(MACRO_LIST_MAX_ROWS)
+        shown.forEachIndexed { index, line ->
+            val row = addLine(line)
+            if (editable) {
+                row.setBackgroundResource(android.R.drawable.list_selector_background)
+                row.setOnClickListener { showMacroStepEditDialog(index) }
+            }
+        }
+        if (lines.size > shown.size) {
+            addLine(getString(R.string.macro_list_truncated, lines.size - shown.size), dim = true)
+        }
+    }
+
+    private fun dp(v: Float): Int = (v * resources.displayMetrics.density).toInt()
+
+    /** One action: adjust where it lands and how long it waits, or drop it entirely. */
+    private fun showMacroStepEditDialog(index: Int) {
+        val fields = NativeSessionBridge.nativeMacroStepFields(index).split(' ')
+        if (fields.size < 7) return
+        val container = LinearLayout(this)
+        container.orientation = LinearLayout.VERTICAL
+        container.setPadding(dp(20f), dp(8f), dp(20f), dp(0f))
+
+        fun labelled(labelRes: Int, value: String): EditText {
+            val label = TextView(this)
+            label.text = getString(labelRes)
+            label.textSize = 12f
+            container.addView(label)
+            val edit = EditText(this)
+            edit.inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            edit.setText(value)
+            container.addView(edit)
+            return edit
+        }
+
+        val xEdit = labelled(R.string.macro_step_x, fields[1])
+        val yEdit = labelled(R.string.macro_step_y, fields[2])
+        val delayEdit = labelled(R.string.macro_step_delay, fields[6])
+
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.macro_step_edit_title, index + 1))
+            .setView(container)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                NativeSessionBridge.nativeMacroUpdateStep(
+                    index,
+                    xEdit.text.toString().toIntOrNull() ?: 0,
+                    yEdit.text.toString().toIntOrNull() ?: 0,
+                    delayEdit.text.toString().toIntOrNull() ?: 0,
+                )
+                macroListRenderedSignature = null
+                renderMacroUi()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .setNeutralButton(R.string.macro_step_delete) { _, _ ->
+                NativeSessionBridge.nativeMacroRemoveStep(index)
+                macroListRenderedSignature = null
+                renderMacroUi()
+            }
+            .show()
+    }
+
+    // ------------------------------------------------------------ macro save/load
+
+    private fun macroDir(): java.io.File =
+        java.io.File(filesDir, "macros").apply { mkdirs() }
+
+    private fun showMacroSaveDialog() {
+        if (NativeSessionBridge.nativeMacroStepCount() == 0) return
+        val nameEdit = EditText(this)
+        nameEdit.hint = getString(R.string.macro_save_hint)
+        nameEdit.maxLines = 1
+        val wrapper = LinearLayout(this)
+        wrapper.setPadding(dp(20f), dp(8f), dp(20f), dp(0f))
+        wrapper.addView(
+            nameEdit,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+        )
+        AlertDialog.Builder(this)
+            .setTitle(R.string.macro_save_title)
+            .setView(wrapper)
+            .setPositiveButton(R.string.macro_save) { _, _ ->
+                val raw = nameEdit.text.toString().trim()
+                // The name becomes a file name; strip anything the filesystem might interpret.
+                val name = raw.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(40)
+                if (name.isEmpty()) return@setPositiveButton
+                java.io.File(macroDir(), "$name.gnmacro")
+                    .writeText(NativeSessionBridge.nativeMacroSerialize())
+                diagnosticsLog.log("macro", "saved name=$name")
+                Toast.makeText(this, getString(R.string.macro_saved_toast, name), Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun showMacroLoadDialog() {
+        val files = macroDir().listFiles { f -> f.isFile && f.name.endsWith(".gnmacro") }
+            ?.sortedByDescending { it.lastModified() }
+            .orEmpty()
+        if (files.isEmpty()) {
+            Toast.makeText(this, R.string.macro_load_empty, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val names = files.map { it.name.removeSuffix(".gnmacro") }
+        val list = ListView(this)
+        list.adapter = android.widget.ArrayAdapter(
+            this, android.R.layout.simple_list_item_1, names,
+        )
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(R.string.macro_load_title)
+            .setView(list)
+            .setNegativeButton(android.R.string.cancel, null)
+            .create()
+        list.setOnItemClickListener { _, _, position, _ ->
+            val ok = runCatching { files[position].readText() }
+                .map { NativeSessionBridge.nativeMacroLoadSerialized(it) }
+                .getOrDefault(false)
+            if (ok) {
+                diagnosticsLog.log("macro", "loaded name=${names[position]}")
+                Toast.makeText(
+                    this, getString(R.string.macro_loaded_toast, names[position]), Toast.LENGTH_SHORT,
+                ).show()
+                macroListRenderedSignature = null
+                renderMacroUi()
+            } else {
+                Toast.makeText(this, R.string.macro_load_failed, Toast.LENGTH_SHORT).show()
+            }
+            dialog.dismiss()
+        }
+        list.setOnItemLongClickListener { _, _, position, _ ->
+            AlertDialog.Builder(this)
+                .setMessage(getString(R.string.macro_delete_confirm, names[position]))
+                .setPositiveButton(android.R.string.ok) { _, _ ->
+                    files[position].delete()
+                    dialog.dismiss()
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+            true
+        }
+        dialog.show()
     }
 
     private fun cancelActiveViewerTouch(reason: String) {
@@ -1828,24 +2093,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         statusHandler.postDelayed(viewerControlsFadeRunnable, delayMs)
     }
 
-    private fun setViewerScrollModeArmed(armed: Boolean) {
-        if (viewerScrollModeArmed == armed) return
-        viewerScrollModeArmed = armed
-        if (!armed && activeViewerTouchMode == ViewerTouchMode.SCROLL) {
+    /** Drops every held modifier and any scroll gesture that depended on one. */
+    private fun releaseViewerModifiers() {
+        releaseZoneBarModifiers()
+        if (activeViewerTouchMode == ViewerTouchMode.SCROLL) {
             resetViewerTouchState()
         }
-        updateViewerControlButtons()
     }
 
     private fun updateViewerControlButtons() {
-        if (::viewerScrollButton.isInitialized) {
-            viewerScrollButton.text =
-                if (viewerScrollModeArmed) {
-                    "[${getString(R.string.viewer_scroll_button)}]"
-                } else {
-                    getString(R.string.viewer_scroll_button)
-                }
-        }
         if (::viewerLogButton.isInitialized) {
             val logOpen = viewerLogDialog?.isShowing == true
             viewerLogButton.text =
@@ -2552,7 +2808,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             if (currentScene == UiScene.VIEWER || currentScene == UiScene.SWITCHING) View.VISIBLE else View.GONE
         if (currentScene != UiScene.VIEWER && currentScene != UiScene.SWITCHING) {
             dismissViewerLogDialog()
-            setViewerScrollModeArmed(false)
+            releaseViewerModifiers()
         }
         if (currentScene != UiScene.VIEWER && currentScene != UiScene.SWITCHING && videoSurface != null) {
             releaseVideoSurface()

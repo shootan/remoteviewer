@@ -410,6 +410,62 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeMacroStepLines(
   return to_jstring(env, out);
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeMacroSetPaused(
+    JNIEnv* /* env */, jobject /* this */, jboolean paused) {
+  g_macro.SetPaused(paused == JNI_TRUE, now_ms());
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeMacroIsPaused(
+    JNIEnv* /* env */, jobject /* this */) {
+  return g_macro.IsPaused() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeMacroRemoveStep(
+    JNIEnv* /* env */, jobject /* this */, jint index) {
+  if (index < 0) return JNI_FALSE;
+  return g_macro.RemoveStep(static_cast<size_t>(index)) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeMacroUpdateStep(
+    JNIEnv* /* env */, jobject /* this */, jint index, jint x, jint y, jint delay_ms) {
+  if (index < 0) return JNI_FALSE;
+  return g_macro.UpdateStep(static_cast<size_t>(index), static_cast<int32_t>(x),
+                            static_cast<int32_t>(y),
+                            static_cast<uint32_t>(std::max<jint>(0, delay_ms)))
+             ? JNI_TRUE
+             : JNI_FALSE;
+}
+
+/** One step as "kind x y wheel key buttons delay", for the edit dialog to prefill. */
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeMacroStepFields(
+    JNIEnv* env, jobject /* this */, jint index) {
+  const auto steps = g_macro.Steps();
+  if (index < 0 || static_cast<size_t>(index) >= steps.size()) return to_jstring(env, "");
+  const auto& s = steps[static_cast<size_t>(index)];
+  char buffer[128];
+  std::snprintf(buffer, sizeof(buffer), "%u %d %d %d %u %u %u", s.kind, s.x, s.y, s.wheelDelta,
+                s.keyCode, s.buttons, s.delayMs);
+  return to_jstring(env, buffer);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeMacroSerialize(
+    JNIEnv* env, jobject /* this */) {
+  return to_jstring(env, g_macro.Serialize());
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeMacroLoadSerialized(
+    JNIEnv* env, jobject /* this */, jstring text) {
+  if (!text) return JNI_FALSE;
+  return g_macro.LoadSerialized(jstring_to_string(env, text)) ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeQueueInputText(
     JNIEnv* env, jobject /* this */, jstring text) {

@@ -36,6 +36,8 @@
 #include <mfapi.h>
 #include <wrl/client.h>
 
+#include "client_macro_window.hpp"
+#include "input_macro.hpp"
 #include "mf_h264_codec.hpp"
 #include "json_profile.hpp"
 #include "native_video_client_shared_core.hpp"
@@ -728,6 +730,7 @@ constexpr uint32_t kRuntimeKeyintMax = 240;
 struct ClientLayout {
   RECT clientRect{};
   RECT toggleButtonRect{};
+  RECT macroButtonRect{};
   RECT panelRect{};
   RECT videoRect{};
   RECT refreshButtonRect{};
@@ -886,6 +889,9 @@ ClientLayout compute_client_layout(HWND hwnd) {
 
   if (!gWindowPickerVisible.load(std::memory_order_relaxed)) {
     layout.toggleButtonRect = make_rect(kPanelMargin(), kPanelMargin(), dpi_scale(120), kPanelButtonHeight());
+    layout.macroButtonRect =
+        make_rect(kPanelMargin() + dpi_scale(120) + kPanelButtonGap(), kPanelMargin(),
+                  dpi_scale(90), kPanelButtonHeight());
     layout.panelRect = make_rect(0, 0, 0, 0);
     layout.refreshButtonRect = make_rect(0, 0, 0, 0);
     layout.desktopButtonRect = make_rect(0, 0, 0, 0);
@@ -899,6 +905,7 @@ ClientLayout compute_client_layout(HWND hwnd) {
   // capture targets, and a one-line status footer.
   layout.panelRect = layout.clientRect;
   layout.toggleButtonRect = make_rect(0, 0, 0, 0);
+  layout.macroButtonRect = make_rect(0, 0, 0, 0);
 
   const int margin = dpi_scale(24);
   const int headerH = dpi_scale(56);
@@ -926,6 +933,11 @@ ClientLayout compute_client_layout(HWND hwnd) {
 bool point_in_toggle_button(HWND hwnd, int x, int y) {
   const ClientLayout layout = compute_client_layout(hwnd);
   return point_in_rect(layout.toggleButtonRect, x, y);
+}
+
+bool point_in_macro_button(HWND hwnd, int x, int y) {
+  const ClientLayout layout = compute_client_layout(hwnd);
+  return point_in_rect(layout.macroButtonRect, x, y);
 }
 
 bool point_in_panel_ui(HWND hwnd, int x, int y) {
@@ -1291,6 +1303,8 @@ void draw_overlay(HDC hdc) {
   const bool pickerVisible = gWindowPickerVisible.load(std::memory_order_relaxed);
   if (!pickerVisible) {
     draw_panel_button(hdc, layout.toggleButtonRect, "Targets");
+    draw_panel_button(hdc, layout.macroButtonRect, "Macro",
+                      remote60::native_poc::macro_window_visible());
     return;
   }
 
@@ -1686,6 +1700,8 @@ struct Nv12D3dRenderer {
 
 Nv12D3dRenderer gNv12Renderer;
 
+remote60::native_poc::InputMacro gInputMacro;
+
 void enqueue_input_event(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode) {
   if (kInputPolicyForceBlock) return;
   if (!gInputEnabled.load()) return;
@@ -1702,8 +1718,43 @@ void enqueue_input_event(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta
   msg.inputEvent.wheelDelta = wheelDelta;
   msg.inputEvent.keyCode = keyCode;
   msg.inputEvent.clientSendQpcUs = qpc_now_us();
+  // Recording taps the send path, so the macro sees exactly what the host will see -- the
+  // engine keeps pointer actions and drops keys on its own.
+  if (gInputMacro.IsRecording()) {
+    gInputMacro.RecordEvent(msg.inputEvent, GetTickCount64());
+  }
   enqueue_control_input_message(msg);
 }
+
+/** A replayed step carries its own recorded button state instead of today's live one. */
+void enqueue_macro_step(const remote60::native_poc::MacroStep& step) {
+  if (kInputPolicyForceBlock) return;
+  if (!gInputEnabled.load()) return;
+  QueuedControlInputMessage msg{};
+  msg.type = MessageType::ControlInputEvent;
+  msg.inputEvent.header.magic = remote60::native_poc::kMagic;
+  msg.inputEvent.header.type = static_cast<uint16_t>(MessageType::ControlInputEvent);
+  msg.inputEvent.header.size = static_cast<uint16_t>(sizeof(msg.inputEvent));
+  msg.inputEvent.seq = gInputQueueState.NextSequence();
+  msg.inputEvent.kind = step.kind;
+  msg.inputEvent.buttons = step.buttons;
+  msg.inputEvent.x = step.x;
+  msg.inputEvent.y = step.y;
+  msg.inputEvent.wheelDelta = step.wheelDelta;
+  msg.inputEvent.keyCode = step.keyCode;
+  msg.inputEvent.clientSendQpcUs = qpc_now_us();
+  enqueue_control_input_message(msg);
+}
+
+void toggle_macro_window(HWND owner) {
+  remote60::native_poc::MacroWindowHooks hooks;
+  hooks.macro = &gInputMacro;
+  hooks.sendStep = [](const remote60::native_poc::MacroStep& step) { enqueue_macro_step(step); };
+  remote60::native_poc::macro_window_toggle(GetModuleHandleW(nullptr), owner, hooks);
+  if (owner) InvalidateRect(owner, nullptr, FALSE);
+}
+
+std::atomic<bool> gMacroButtonDown{false};
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   switch (msg) {
@@ -1729,6 +1780,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE:
       if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
+      if (point_in_macro_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (gWindowPickerVisible.load(std::memory_order_relaxed)) return 0;
       if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
@@ -1744,6 +1796,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) {
         gWindowPickerToggleDown.store(true, std::memory_order_relaxed);
+        return 0;
+      }
+      if (point_in_macro_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) {
+        gMacroButtonDown.store(true, std::memory_order_relaxed);
         return 0;
       }
       if (gWindowPickerVisible.load(std::memory_order_relaxed)) return 0;
@@ -1768,6 +1824,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (point_in_rect(layout.toggleButtonRect, x, y)) {
           gWindowPickerVisible.store(!gWindowPickerVisible.load(std::memory_order_relaxed), std::memory_order_relaxed);
           InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+      }
+      if (gMacroButtonDown.exchange(false, std::memory_order_relaxed)) {
+        if (point_in_rect(layout.macroButtonRect, x, y)) {
+          toggle_macro_window(hwnd);
         }
         return 0;
       }
@@ -1826,6 +1888,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_RBUTTONDOWN:
       if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
+      if (point_in_macro_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (gWindowPickerVisible.load(std::memory_order_relaxed)) return 0;
       if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
@@ -1841,6 +1904,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_RBUTTONUP:
       if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
+      if (point_in_macro_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (gWindowPickerVisible.load(std::memory_order_relaxed)) return 0;
       if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
@@ -1856,6 +1920,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MBUTTONDOWN:
       if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
+      if (point_in_macro_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (gWindowPickerVisible.load(std::memory_order_relaxed)) return 0;
       if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
@@ -1871,6 +1936,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MBUTTONUP:
       if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
+      if (point_in_macro_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (gWindowPickerVisible.load(std::memory_order_relaxed)) return 0;
       if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
@@ -1889,6 +1955,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       ScreenToClient(hwnd, &p);
       const ClientLayout layout = compute_client_layout(hwnd);
       if (point_in_rect(layout.toggleButtonRect, p.x, p.y)) return 0;
+      if (point_in_rect(layout.macroButtonRect, p.x, p.y)) return 0;
       if (gWindowPickerVisible.load(std::memory_order_relaxed)) {
         if (point_in_rect(layout.listRect, p.x, p.y)) {
           const int wheel = GET_WHEEL_DELTA_WPARAM(wp);
@@ -1929,6 +1996,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         } else if (msg == WM_POINTERUP && gWindowPickerToggleDown.exchange(false, std::memory_order_relaxed)) {
           gWindowPickerVisible.store(!gWindowPickerVisible.load(std::memory_order_relaxed), std::memory_order_relaxed);
           InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+      }
+      if (point_in_rect(layout.macroButtonRect, p.x, p.y)) {
+        if (msg == WM_POINTERDOWN) {
+          gMacroButtonDown.store(true, std::memory_order_relaxed);
+        } else if (msg == WM_POINTERUP &&
+                   gMacroButtonDown.exchange(false, std::memory_order_relaxed)) {
+          toggle_macro_window(hwnd);
         }
         return 0;
       }
@@ -3883,6 +3959,9 @@ int main(int argc, char** argv) {
 
   gRunning = false;
   gInputEnabled = false;
+  gInputMacro.StopPlayback();
+  gInputMacro.StopRecording();
+  remote60::native_poc::macro_window_destroy();
   if (gSock != INVALID_SOCKET) {
     shutdown(gSock, SD_BOTH);
     closesocket(gSock);
