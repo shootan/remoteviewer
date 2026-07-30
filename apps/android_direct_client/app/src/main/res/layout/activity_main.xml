@@ -551,6 +551,26 @@
                     android:layout_width="match_parent"
                     android:layout_height="match_parent" />
 
+                <!-- Tells the user which margin modifier is held; without it the mode is a
+                     guess, and holding the wrong third does something unexpected. -->
+                <TextView
+                    android:id="@+id/viewerModeBanner"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="top|center_horizontal"
+                    android:layout_marginTop="10dp"
+                    android:background="@drawable/viewer_control_bar_background"
+                    android:paddingStart="16dp"
+                    android:paddingTop="8dp"
+                    android:paddingEnd="16dp"
+                    android:paddingBottom="8dp"
+                    android:textColor="#F4F0E8"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    android:visibility="gone" />
+
+                <include layout="@layout/viewer_virtual_mouse" />
+
                 <com.remote60.androiddirect.ImeCaptureView
                     android:id="@+id/viewerImeCaptureView"
                     android:layout_width="1dp"
@@ -650,6 +670,22 @@
                     android:contentDescription="@string/viewer_scroll_description"
                     android:minWidth="0dp"
                     android:text="@string/viewer_scroll_button"
+                    android:textAllCaps="false"
+                    android:textColor="#F4F0E8"
+                    android:textSize="10sp" />
+
+                <!-- Also reachable by pressing the bottom of the letterbox margin, but that
+                     margin does not exist when the remote screen matches the phone's shape, so
+                     the rail carries it too. -->
+                <Button
+                    android:id="@+id/viewerMouseButton"
+                    android:layout_width="56dp"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/viewer_control_button_background"
+                    android:contentDescription="@string/viewer_mouse_description"
+                    android:minWidth="0dp"
+                    android:text="@string/viewer_mouse_button"
                     android:textAllCaps="false"
                     android:textColor="#F4F0E8"
                     android:textSize="10sp" />

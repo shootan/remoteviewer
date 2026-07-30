@@ -81,4 +81,15 @@
     <string name="hosts_connect_failed">Could not connect: %1$s</string>
     <string name="hosts_manual_button">Connect by IP instead</string>
     <string name="key_panel_tab_extra">F keys</string>
+    <string name="virtual_mouse_roll">Roll</string>
+    <string name="virtual_mouse_left">Left</string>
+    <string name="virtual_mouse_right">Right</string>
+    <string name="virtual_mouse_middle">Middle</string>
+    <string name="virtual_mouse_pad">✥</string>
+    <string name="virtual_mouse_close">✕</string>
+    <string name="virtual_mouse_handle">✣</string>
+    <string name="viewer_mode_right_click">Right click on next touch</string>
+    <string name="viewer_mode_tablet">Tablet mode</string>
+    <string name="viewer_mouse_button">MOUSE</string>
+    <string name="viewer_mouse_description">Show the on-screen mouse for precise clicks</string>
 </resources>

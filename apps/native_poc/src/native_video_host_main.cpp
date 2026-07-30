@@ -1055,7 +1055,10 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
     if (resolvedTargetOut) *resolvedTargetOut = describe_input_target(resolvedTargetHwnd);
     remember_input_target(desktopInputState, resolvedTargetHwnd, screenPt);
     if (input.kind == 1) {
-      if ((input.buttons & 0x7u) == 0) return InputInjectResult::IgnoredMove;
+      // Button-less moves used to be dropped, on the assumption that a finger not touching
+      // cannot hover. The on-screen mouse breaks that assumption: it exists precisely to place
+      // the pointer before pressing anything, and dropping those moves made it do nothing at
+      // all. WM_MOUSEMOVE with no buttons is what a real mouse sends while hovering.
       const WPARAM wp = mouse_button_wparam(static_cast<uint16_t>(input.buttons & 0x7u));
       const LPARAM lp = MAKELPARAM(static_cast<short>(resolvedClientPt.x), static_cast<short>(resolvedClientPt.y));
       return PostMessageW(resolvedTargetHwnd, WM_MOUSEMOVE, wp, lp) ? InputInjectResult::Injected
@@ -1123,7 +1126,10 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
   resolve_desktop_input_target(screenPt, desktopInputState, nullptr, nullptr, resolvedTargetOut);
 
   if (input.kind == 1) {
-    if ((input.buttons & 0x7u) == 0) return InputInjectResult::IgnoredMove;
+    // A move with no button held is honoured here, unlike window mode. Desktop mode drives the
+    // real cursor, and the client only sends these when it means to place the pointer: the
+    // on-screen mouse positions before clicking, and scroll mode positions before scrolling.
+    // Dropping them made both silently do nothing.
     return SetCursorPos(screenPt.x, screenPt.y) ? InputInjectResult::Injected : InputInjectResult::Failed;
   }
   if (input.kind == 2 || input.kind == 3) {

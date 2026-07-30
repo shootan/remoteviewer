@@ -54,9 +54,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         private const val INPUT_KIND_KEY_UP = 6
         private const val INPUT_BUTTON_PRIMARY = 0x1
         private const val INPUT_BUTTON_SECONDARY = 0x2
+        private const val INPUT_BUTTON_MIDDLE = 0x4
         private const val INPUT_VK_LBUTTON = 0x01
         private const val INPUT_VK_RBUTTON = 0x02
+        private const val INPUT_VK_MBUTTON = 0x04
         private const val INPUT_VK_BACK = 0x08
+
+        /** Held around a wheel event to turn scrolling into zooming, as applications expect. */
+        private const val INPUT_VK_CONTROL = 0x11
         private const val INPUT_WHEEL_DELTA_STEP = 120
         // Authored in dp; converted per-device below. As a raw pixel constant one wheel
         // notch needed 4x more finger travel on a 4x-density phone than on a 1x tablet.
@@ -69,13 +74,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private var lastVideoOutputPtsUs = 0L
     /**
-     * Pointer id of a finger held in the letterbox margin, which arms the right mouse button.
+     * What the letterbox margin does, split by where along it you press.
      *
-     * The bars beside the picture are dead space — taps there map to nothing — so holding one
-     * is a free modifier: keep a finger on the margin and the next touch on the picture is a
-     * right click instead of a left one.
+     * The bars beside the picture are dead space -- taps there map to nothing -- so they are free
+     * modifiers. One behaviour for the whole bar wasted that: three zones give right-click,
+     * tablet gestures and the on-screen mouse without stealing any room from the picture.
      */
+    private enum class MarginZone { TOP, MIDDLE, BOTTOM }
+
+    /** Pointer held in the top zone: the next touch on the picture is a right click. */
     private var rightClickModifierPointerId = MotionEvent.INVALID_POINTER_ID
+
+    /** Pointer held in the middle zone: touches behave like a tablet (scroll, pinch zoom). */
+    private var tabletModePointerId = MotionEvent.INVALID_POINTER_ID
     private var rightClickHintShown = false
     /** User override: keep the phone upright even when the remote screen is landscape. */
     private var forcePortrait = false
@@ -369,6 +380,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var viewerLoadingPanel: View
     private lateinit var viewerLoadingText: TextView
     private lateinit var viewerImeCaptureView: ImeCaptureView
+    private lateinit var viewerModeBanner: TextView
     private lateinit var videoTextureView: TextureView
     private lateinit var targetListAdapter: TargetCardAdapter
     private val targetListLabels = mutableListOf<String>()
@@ -497,6 +509,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var viewerLogTextView: TextView? = null
     private var activeTouchPointerId = MotionEvent.INVALID_POINTER_ID
     private var activeViewerTouchMode = ViewerTouchMode.DIRECT
+    private var virtualMouse: ViewerVirtualMouse? = null
+    /** Where the on-screen mouse thinks the remote pointer is, in remote pixels. */
+    private var virtualPointerX = -1
+    private var virtualPointerY = -1
+    /** Finger spread at the start of a pinch, for the zoom gesture in tablet mode. */
+    private var pinchStartSpan = 0f
+    private var pinchZoomCarry = 0f
     private var activeTouchButtons = 0
     private var activeTouchIsSecondary = false
     private var lastTouchVideoX = 0
@@ -637,6 +656,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             renderStatus()
         }
 
+        viewerModeBanner = findViewById(R.id.viewerModeBanner)
+        initVirtualMouse()
+        findViewById<Button>(R.id.viewerMouseButton).setOnClickListener { toggleVirtualMouse() }
         initDirectoryUi()
 
         val savedEndpoint = SessionPersistence.load(this)
@@ -1191,12 +1213,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     clampToContent = false
                 )
                 if (mappedOrNull == null) {
-                    // Landed in the letterbox margin: hold it to arm the right button.
-                    if (rightClickModifierPointerId == MotionEvent.INVALID_POINTER_ID) {
-                        rightClickModifierPointerId = event.getPointerId(pointerIndex)
-                        showViewerControls(emphasized = true)
-                        diagnosticsLog.log("right_click_armed", "pointer=$rightClickModifierPointerId")
-                    }
+                    handleMarginPress(view, event.getPointerId(pointerIndex),
+                                      event.getY(pointerIndex))
                     return true
                 }
                 if (activeTouchPointerId != MotionEvent.INVALID_POINTER_ID) return true
@@ -1205,7 +1223,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 // to place the caret would otherwise tear down the InputConnection and leave
                 // the soft keyboard visible but dead.
                 if (!viewerImeCaptureView.hasFocus()) view.requestFocus()
-                if (viewerScrollModeArmed) {
+                if (viewerScrollModeArmed || tabletModePointerId != MotionEvent.INVALID_POINTER_ID) {
                     activeTouchPointerId = event.getPointerId(pointerIndex)
                     activeViewerTouchMode = ViewerTouchMode.SCROLL
                     activeTouchButtons = 0
@@ -1249,6 +1267,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
 
             MotionEvent.ACTION_MOVE -> {
+                // A second finger on the picture while the middle zone is held means zoom, which
+                // the remote side has no notion of; Ctrl+wheel is what applications understand.
+                if (tabletModePointerId != MotionEvent.INVALID_POINTER_ID &&
+                    handlePinchZoom(event)
+                ) {
+                    return true
+                }
                 val pointerId = activeTouchPointerId
                 if (pointerId == MotionEvent.INVALID_POINTER_ID) return false
                 val pointerIndex = event.findPointerIndex(pointerId)
@@ -1312,7 +1337,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 val pointerIndex = event.actionIndex
                 if (event.getPointerId(pointerIndex) == rightClickModifierPointerId) {
                     rightClickModifierPointerId = MotionEvent.INVALID_POINTER_ID
+                    renderViewerModeBanner()
                     diagnosticsLog.log("right_click_released", "reason=pointer_up")
+                    return true
+                }
+                if (event.getPointerId(pointerIndex) == tabletModePointerId) {
+                    tabletModePointerId = MotionEvent.INVALID_POINTER_ID
+                    pinchStartSpan = 0f
+                    renderViewerModeBanner()
+                    diagnosticsLog.log("tablet_mode_released", "reason=pointer_up")
                     return true
                 }
                 if (event.getPointerId(pointerIndex) != activeTouchPointerId) return true
@@ -1343,12 +1376,193 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
             MotionEvent.ACTION_CANCEL -> {
                 rightClickModifierPointerId = MotionEvent.INVALID_POINTER_ID
+                tabletModePointerId = MotionEvent.INVALID_POINTER_ID
+                pinchStartSpan = 0f
+                renderViewerModeBanner()
                 cancelActiveViewerTouch("touch_cancel")
                 return true
             }
         }
 
         return false
+    }
+
+    /**
+     * Wires the on-screen mouse. It reports intent in relative terms; the absolute position is
+     * kept here because that is what the wire protocol carries.
+     */
+    private fun initVirtualMouse() {
+        val overlay = findViewById<android.widget.FrameLayout>(R.id.viewerVirtualMouse)
+        virtualMouse = ViewerVirtualMouse(overlay, object : ViewerVirtualMouse.Listener {
+            override fun onMoveBy(dx: Int, dy: Int) {
+                val contentRect = resolveViewerContentRect()
+                if (contentRect == null) {
+                    diagnosticsLog.log("virtual_mouse_move", "no_content_rect dx=$dx dy=$dy")
+                    return
+                }
+                if (virtualPointerX < 0) {
+                    virtualPointerX = contentRect.contentWidth / 2
+                    virtualPointerY = contentRect.contentHeight / 2
+                }
+                virtualPointerX = (virtualPointerX + dx).coerceIn(0, contentRect.contentWidth - 1)
+                virtualPointerY = (virtualPointerY + dy).coerceIn(0, contentRect.contentHeight - 1)
+                // Kept in step with direct touches, so releasing a button here lands where the
+                // last real touch was if the two are mixed.
+                lastTouchVideoX = virtualPointerX
+                lastTouchVideoY = virtualPointerY
+                NativeSessionBridge.nativeQueueInputEvent(
+                    INPUT_KIND_MOUSE_MOVE, virtualPointerX, virtualPointerY, 0, 0, activeTouchButtons,
+                )
+            }
+
+            override fun onButtonDown(button: ViewerVirtualMouse.Button) {
+                val vk = virtualButtonVk(button)
+                activeTouchButtons = virtualButtonMask(button)
+                NativeSessionBridge.nativeQueueInputEvent(
+                    INPUT_KIND_MOUSE_DOWN, virtualPointerX.coerceAtLeast(0),
+                    virtualPointerY.coerceAtLeast(0), 0, vk, activeTouchButtons,
+                )
+            }
+
+            override fun onButtonUp(button: ViewerVirtualMouse.Button) {
+                val vk = virtualButtonVk(button)
+                activeTouchButtons = 0
+                NativeSessionBridge.nativeQueueInputEvent(
+                    INPUT_KIND_MOUSE_UP, virtualPointerX.coerceAtLeast(0),
+                    virtualPointerY.coerceAtLeast(0), 0, vk, 0,
+                )
+            }
+
+            override fun onWheel(notches: Int) {
+                NativeSessionBridge.nativeQueueInputEvent(
+                    INPUT_KIND_MOUSE_WHEEL, virtualPointerX.coerceAtLeast(0),
+                    virtualPointerY.coerceAtLeast(0), notches * INPUT_WHEEL_DELTA_STEP, 0, 0,
+                )
+            }
+        })
+    }
+
+    private fun virtualButtonVk(button: ViewerVirtualMouse.Button): Int = when (button) {
+        ViewerVirtualMouse.Button.LEFT -> INPUT_VK_LBUTTON
+        ViewerVirtualMouse.Button.RIGHT -> INPUT_VK_RBUTTON
+        ViewerVirtualMouse.Button.MIDDLE -> INPUT_VK_MBUTTON
+    }
+
+    private fun virtualButtonMask(button: ViewerVirtualMouse.Button): Int = when (button) {
+        ViewerVirtualMouse.Button.LEFT -> INPUT_BUTTON_PRIMARY
+        ViewerVirtualMouse.Button.RIGHT -> INPUT_BUTTON_SECONDARY
+        ViewerVirtualMouse.Button.MIDDLE -> INPUT_BUTTON_MIDDLE
+    }
+
+    /**
+     * The margin is split into thirds. Top and middle are held modifiers; the bottom is a tap,
+     * because the on-screen mouse has to stay up while both hands are used on it.
+     */
+    private fun handleMarginPress(view: View, pointerId: Int, y: Float) {
+        val height = view.height.toFloat()
+        val zone = when {
+            height <= 0f -> MarginZone.TOP
+            y < height / 3f -> MarginZone.TOP
+            y < height * 2f / 3f -> MarginZone.MIDDLE
+            else -> MarginZone.BOTTOM
+        }
+        when (zone) {
+            MarginZone.TOP -> {
+                if (rightClickModifierPointerId == MotionEvent.INVALID_POINTER_ID) {
+                    rightClickModifierPointerId = pointerId
+                    showViewerControls(emphasized = true)
+                    renderViewerModeBanner()
+                    diagnosticsLog.log("right_click_armed", "pointer=$pointerId")
+                }
+            }
+            MarginZone.MIDDLE -> {
+                if (tabletModePointerId == MotionEvent.INVALID_POINTER_ID) {
+                    tabletModePointerId = pointerId
+                    pinchStartSpan = 0f
+                    pinchZoomCarry = 0f
+                    showViewerControls(emphasized = true)
+                    renderViewerModeBanner()
+                    diagnosticsLog.log("tablet_mode_armed", "pointer=$pointerId")
+                }
+            }
+            MarginZone.BOTTOM -> {
+                toggleVirtualMouse()
+            }
+        }
+    }
+
+    /** Shows which margin modifier is currently held, so the mode is never a guess. */
+    private fun renderViewerModeBanner() {
+        val text = when {
+            tabletModePointerId != MotionEvent.INVALID_POINTER_ID ->
+                getString(R.string.viewer_mode_tablet)
+            rightClickModifierPointerId != MotionEvent.INVALID_POINTER_ID ->
+                getString(R.string.viewer_mode_right_click)
+            else -> ""
+        }
+        viewerModeBanner.text = text
+        viewerModeBanner.visibility = if (text.isEmpty()) View.GONE else View.VISIBLE
+    }
+
+    /**
+     * Two fingers on the picture: turn the change in spread into Ctrl+wheel, which is how
+     * browsers, editors and image viewers all spell zoom.
+     */
+    private fun handlePinchZoom(event: MotionEvent): Boolean {
+        if (event.pointerCount < 2) {
+            pinchStartSpan = 0f
+            return false
+        }
+        val span = kotlin.math.hypot(
+            (event.getX(1) - event.getX(0)).toDouble(),
+            (event.getY(1) - event.getY(0)).toDouble(),
+        ).toFloat()
+        if (pinchStartSpan <= 0f) {
+            pinchStartSpan = span
+            pinchZoomCarry = 0f
+            return true
+        }
+        pinchZoomCarry += span - pinchStartSpan
+        pinchStartSpan = span
+        val step = scrollGestureStepPx * 2f
+        val notches = (abs(pinchZoomCarry) / step).toInt()
+        if (notches > 0) {
+            val direction = if (pinchZoomCarry > 0f) 1 else -1
+            pinchZoomCarry -= direction * notches * step
+            queueViewerSpecialKey(INPUT_VK_CONTROL, KeyEvent.ACTION_DOWN)
+            NativeSessionBridge.nativeQueueInputEvent(
+                INPUT_KIND_MOUSE_WHEEL,
+                lastTouchVideoX,
+                lastTouchVideoY,
+                direction * notches * INPUT_WHEEL_DELTA_STEP,
+                0,
+                0,
+            )
+            queueViewerSpecialKey(INPUT_VK_CONTROL, KeyEvent.ACTION_UP)
+        }
+        return true
+    }
+
+    private fun toggleVirtualMouse() {
+        val mouse = virtualMouse ?: return
+        if (mouse.isOpen) {
+            mouse.hide()
+            diagnosticsLog.log("virtual_mouse", "state=hidden")
+            return
+        }
+        // Start from the middle of the remote screen rather than nowhere, so the first drag has
+        // a defined starting point.
+        val contentRect = resolveViewerContentRect()
+        if (contentRect != null && virtualPointerX < 0) {
+            virtualPointerX = contentRect.contentWidth / 2
+            virtualPointerY = contentRect.contentHeight / 2
+            NativeSessionBridge.nativeQueueInputEvent(
+                INPUT_KIND_MOUSE_MOVE, virtualPointerX, virtualPointerY, 0, 0, 0,
+            )
+        }
+        mouse.show()
+        showViewerControls(emphasized = true)
+        diagnosticsLog.log("virtual_mouse", "state=shown at=$virtualPointerX,$virtualPointerY")
     }
 
     private fun cancelActiveViewerTouch(reason: String) {
@@ -2161,6 +2375,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         if (currentScene != UiScene.VIEWER) {
             statusHandler.removeCallbacks(viewerControlsFadeRunnable)
+            virtualMouse?.hide()
+            renderViewerModeBanner()
         }
     }
 
