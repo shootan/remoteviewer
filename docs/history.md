@@ -4482,3 +4482,32 @@ Validation
 - P0 Windows stream-state 결함과 Host signed-in UI를 먼저 수정한다.
 - 이후 M1.6을 callback copy-only → worker readback ring → GPU crop/resize/NV12 순서로
   한 단계씩 적용하고 동일 장면 5회 A/B 측정을 수행한다.
+
+### 200) 2026-07-30 Host/Client 최적화·UI 상세 구현계획
+
+현재 작업 목표
+- 감사 결과를 실제 구현자가 파일·함수·검증 기준에 따라 순차 작업할 수 있는 상세 계획으로 전환한다.
+
+변경 사항
+- `docs/Host_Client_최적화_UI_상세계획_20260730.md`를 추가했다.
+- Windows stream-state 결함, Host signed-in UI, Release 기준선 자동화,
+  Host callback/readback/GPU NV12, Windows 렌더, Android 상태·썸네일,
+  공통 UI와 HTTPS/미디어 암호화를 F1~G1 작업 ID로 분리했다.
+- 각 작업에 수정 파일, 구현 순서, 테스트, 성능 완료 기준과 롤백 조건을 기록했다.
+- 현재 자동 검증의 Debug 경로 고정과 동일 이름 프로세스 일괄 종료 문제를 B1 선행 작업에 포함했다.
+
+완료 결과
+- 기능 수정은 F1/U1, 성능 수정은 B1/H1~H4/C1~C2/A1~A2,
+  제품 UI는 U2, 외부 배포 보안은 S1~S2 순서로 착수할 수 있다.
+- M1.6은 callback copy-only, GPU-front crop/resize, NV12 D3D surface 직접 인코딩으로
+  독립 검증·롤백 가능한 단계가 됐다.
+
+검증
+- 계획에 적은 source, test target, automation script 경로 존재 확인
+- 최신 shared scheduler가 stream-state를 window-select보다 먼저 소비하는 순서 확인
+- 기존 D3D manager, CPU NV12 sample copy, Android 250ms poll과 thumbnail cache 조건 재확인
+- 문서 변경만 수행했으므로 코드 build/test는 재실행하지 않음
+
+다음 작업
+- F1 Windows stream-state 검은 화면 결함부터 구현한다.
+- 이어서 U1 Host signed-in UI를 수정하고 B1 Release 격리 기준선을 수집한다.
