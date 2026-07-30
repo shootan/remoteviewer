@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  A little screen with a face: the thing you reach for, being friendly about it.
+
+  Everything sits inside the 18..90 safe area of the 108 viewport, because a launcher may mask
+  the icon to a circle, a squircle or a teardrop and anything outside that band can be cut off.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Stand, drawn first so the body overlaps it cleanly. -->
+    <path
+        android:fillColor="#FF2E4A5B"
+        android:pathData="M49,62 h10 v14 h-10 z" />
+    <path
+        android:fillColor="#FF2E4A5B"
+        android:pathData="M38,76 h32 a4,4 0 0,1 0,8 h-32 a4,4 0 0,1 0,-8 z" />
+
+    <!-- Body. -->
+    <path
+        android:fillColor="#FFFFFDF7"
+        android:strokeColor="#FF2E4A5B"
+        android:strokeWidth="3"
+        android:pathData="M37,22 h34 a13,13 0 0,1 13,13 v20 a13,13 0 0,1 -13,13 h-34 a13,13 0 0,1 -13,-13 v-20 a13,13 0 0,1 13,-13 z" />
+
+    <!-- Blush. -->
+    <path
+        android:fillColor="#FFFFB3C1"
+        android:fillAlpha="0.75"
+        android:pathData="M31.5,50 a4.5,4.5 0 1,0 9,0 a4.5,4.5 0 1,0 -9,0 z" />
+    <path
+        android:fillColor="#FFFFB3C1"
+        android:fillAlpha="0.75"
+        android:pathData="M67.5,50 a4.5,4.5 0 1,0 9,0 a4.5,4.5 0 1,0 -9,0 z" />
+
+    <!-- Eyes. -->
+    <path
+        android:fillColor="#FF2E4A5B"
+        android:pathData="M39.6,40 a4.4,4.4 0 1,0 8.8,0 a4.4,4.4 0 1,0 -8.8,0 z" />
+    <path
+        android:fillColor="#FF2E4A5B"
+        android:pathData="M59.6,40 a4.4,4.4 0 1,0 8.8,0 a4.4,4.4 0 1,0 -8.8,0 z" />
+
+    <!-- Smile. -->
+    <path
+        android:strokeColor="#FF2E4A5B"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M47,50 q7,7 14,0" />
+
+    <!-- A signal blip, because the whole point is that it is reachable from far away. -->
+    <path
+        android:strokeColor="#FFFFFDF7"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M84,26 a9,9 0 0,1 0,12" />
+    <path
+        android:strokeColor="#FFFFFDF7"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M89,21 a15,15 0 0,1 0,22" />
+</vector>

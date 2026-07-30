@@ -1,6 +1,6 @@
 <resources>
-    <string name="app_name">Remote60 Android Direct</string>
-    <string name="shell_title">Android Direct Client</string>
+    <string name="app_name">GNLink</string>
+    <string name="shell_title">GNLink</string>
     <string name="shell_subtitle">Enter a host, connect, choose a target, then switch into full screen viewer mode.</string>
     <string name="host_hint">Host IP or DNS</string>
     <string name="video_port_hint">Video Port</string>
