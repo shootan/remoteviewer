@@ -4447,3 +4447,38 @@ Validation
 - **안드로이드 APK 빌드 불가**: 이 PC에 Gradle과 JDK가 없다. Kotlin/JNI 코드는 컴파일 검증되지 않았다.
 - **네이버클라우드 배포 대기**: `automation/deploy_directory.ps1` 준비 완료.
   공개키를 서버에 한 번 등록해야 자동 배포가 가능하다.
+
+### 199) 2026-07-30 Host/Client 최적화·UI 전수 감사
+
+현재 작업 목표
+- Host 관리 앱·영상 Host·Windows Client·Android GNLink Client를 각각 검토하고,
+  성능 병목과 UI 개선 필요 사항을 구현 우선순위로 정리한다.
+
+변경 사항
+- `docs/Host_Client_최적화_UI_감사_20260730.md`에 코드 감사, 실행 화면 판정,
+  1080p30 진단 수치, 우선순위와 다음 성능 Gate를 기록했다.
+- Windows Client가 이미 선택된 대상으로 진입할 때 stream-state 활성화 요청을 보내지 않는
+  검은 화면 결함을 P0로 분류했다.
+- Host 캡처의 동기 readback, CPU crop/NV12, 반복 할당·복사를 M1.6 핵심 병목으로 재확인했다.
+- Host 로그인 후 잔여 라벨·상태 잘림, Windows viewer 상태 정보 부족,
+  Android 설정/landscape rail 과밀과 썸네일 갱신 문제를 UI 개선 항목으로 분류했다.
+- 평문 directory API와 미암호화 영상·제어를 외부 배포 전 P0 보안 항목으로 기록했다.
+
+완료 결과
+- 격리 포트 1080p30 진단은 평균 19.42fps로 목표 27fps에 미달했다.
+- Host 약 49.65%, Windows Client 약 23.73%의 단일 코어 사용량을 확인했다.
+- Host 관리 앱과 Android 로그인 화면 idle은 CPU 0% 표본으로, 우선 최적화 대상에서 제외했다.
+- Android MediaCodec Surface 출력과 Windows 대상 카드 UI는 유지할 구조로 판정했다.
+
+검증
+- CMake Debug Host/Windows Client/shared core/UDP control/input macro target build: PASS
+- `remote60_native_video_client_shared_core_test.exe`: PASS
+- `remote60_udp_control_channel_test.exe`: 5/5 PASS
+- `remote60_input_macro_test.exe`: 23개 검사 PASS
+- `node apps/directory/test/run.js`: 전체 PASS
+- Android `:app:assembleDebug`: PASS, 4 ABI native build 포함
+
+다음 작업
+- P0 Windows stream-state 결함과 Host signed-in UI를 먼저 수정한다.
+- 이후 M1.6을 callback copy-only → worker readback ring → GPU crop/resize/NV12 순서로
+  한 단계씩 적용하고 동일 장면 5회 A/B 측정을 수행한다.
