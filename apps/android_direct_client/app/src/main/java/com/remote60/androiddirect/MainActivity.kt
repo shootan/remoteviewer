@@ -61,6 +61,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // Authored in dp; converted per-device below. As a raw pixel constant one wheel
         // notch needed 4x more finger travel on a 4x-density phone than on a 1x tablet.
         private const val SCROLL_GESTURE_STEP_DP = 28f
+
+        /** Matches kWindowThumbnailMaxWidth/Height in the wire protocol. */
+        private const val THUMBNAIL_MAX_EDGE = 320
         private const val VIEWER_STALL_OVERLAY_US = 3_000_000L
     }
 
@@ -411,12 +414,22 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             if (version == 0L && thumbnailBitmaps.containsKey(id)) continue
             val raw = NativeSessionBridge.nativeGetWindowThumbnail(id) ?: continue
             if (raw.size < 8) continue
-            val buf = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN)
-            val w = buf.int
-            val h = buf.int
-            if (w <= 0 || h <= 0 || raw.size < 8 + w * h * 4) continue
+            val header = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN)
+            val w = header.int
+            val h = header.int
+            // Long arithmetic, and an upper bound from the protocol: a corrupt header would
+            // otherwise overflow the size check or ask for an absurd allocation.
+            val pixelBytes = w.toLong() * h.toLong() * 4L
+            if (w <= 0 || h <= 0 || w > THUMBNAIL_MAX_EDGE || h > THUMBNAIL_MAX_EDGE) continue
+            if (raw.size < 8L + pixelBytes) continue
             val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-            bmp.copyPixelsFromBuffer(buf)
+            // Copied into a direct buffer starting at zero rather than handing over the wrapped
+            // array with its position at 8. That form crashed inside the framework's critical
+            // array release, taking the whole app down as soon as a preview arrived.
+            val pixels = ByteBuffer.allocateDirect(pixelBytes.toInt()).order(ByteOrder.LITTLE_ENDIAN)
+            pixels.put(raw, 8, pixelBytes.toInt())
+            pixels.rewind()
+            bmp.copyPixelsFromBuffer(pixels)
             thumbnailBitmaps[id] = bmp
             thumbnailVersions[id] = version
             changed = true
