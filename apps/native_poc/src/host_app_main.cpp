@@ -626,7 +626,10 @@ void build_controls(HWND window) {
                            margin, y, fieldX + fieldW - margin, 58);
 
   g.startWithWindowsCheck = CreateWindowExW(
-      0, L"BUTTON", L"Start automatically when Windows starts",
+      // Says "sign in" rather than "starts": this is an HKCU\Run entry, so it fires when this
+      // user logs on, not at boot. Promising boot-time start would be a lie -- reaching a PC
+      // sitting at the lock screen needs a service, which does not exist yet.
+      0, L"BUTTON", L"Start automatically when I sign in to Windows",
       WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX, margin, y, fieldX + fieldW - margin, 24, window,
       reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdStartWithWindows)), nullptr, nullptr);
   SendMessageW(g.startWithWindowsCheck, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
