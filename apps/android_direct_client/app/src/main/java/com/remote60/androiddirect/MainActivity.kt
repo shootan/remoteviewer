@@ -1395,17 +1395,23 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val overlay = findViewById<android.widget.FrameLayout>(R.id.viewerVirtualMouse)
         virtualMouse = ViewerVirtualMouse(overlay, object : ViewerVirtualMouse.Listener {
             override fun onMoveBy(dx: Int, dy: Int) {
-                val contentRect = resolveViewerContentRect()
-                if (contentRect == null) {
-                    diagnosticsLog.log("virtual_mouse_move", "no_content_rect dx=$dx dy=$dy")
-                    return
-                }
+                val contentRect = resolveViewerContentRect() ?: return
                 if (virtualPointerX < 0) {
                     virtualPointerX = contentRect.contentWidth / 2
                     virtualPointerY = contentRect.contentHeight / 2
                 }
-                virtualPointerX = (virtualPointerX + dx).coerceIn(0, contentRect.contentWidth - 1)
-                virtualPointerY = (virtualPointerY + dy).coerceIn(0, contentRect.contentHeight - 1)
+                // The widget speaks in view pixels; the pointer lives in remote pixels. A 1920
+                // wide screen shown in a 700 wide box means one view pixel is nearly three
+                // remote ones, and applying the delta raw made the pointer crawl at a fifth of
+                // the intended speed.
+                val viewToRemoteX =
+                    if (contentRect.width > 0f) contentRect.contentWidth / contentRect.width else 1f
+                val viewToRemoteY =
+                    if (contentRect.height > 0f) contentRect.contentHeight / contentRect.height else 1f
+                virtualPointerX = (virtualPointerX + (dx * viewToRemoteX).roundToInt())
+                    .coerceIn(0, contentRect.contentWidth - 1)
+                virtualPointerY = (virtualPointerY + (dy * viewToRemoteY).roundToInt())
+                    .coerceIn(0, contentRect.contentHeight - 1)
                 // Kept in step with direct touches, so releasing a button here lands where the
                 // last real touch was if the two are mixed.
                 lastTouchVideoX = virtualPointerX
@@ -1413,6 +1419,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 NativeSessionBridge.nativeQueueInputEvent(
                     INPUT_KIND_MOUSE_MOVE, virtualPointerX, virtualPointerY, 0, 0, activeTouchButtons,
                 )
+                syncVirtualMouseMarker()
+            }
+
+            override fun onRequestInitialPosition() {
+                val contentRect = resolveViewerContentRect() ?: return
+                if (virtualPointerX < 0) {
+                    virtualPointerX = contentRect.contentWidth / 2
+                    virtualPointerY = contentRect.contentHeight / 2
+                    NativeSessionBridge.nativeQueueInputEvent(
+                        INPUT_KIND_MOUSE_MOVE, virtualPointerX, virtualPointerY, 0, 0, 0,
+                    )
+                }
+                syncVirtualMouseMarker()
             }
 
             override fun onButtonDown(button: ViewerVirtualMouse.Button) {
@@ -1440,6 +1459,20 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 )
             }
         })
+    }
+
+    /** Places the ring on the pointer, converting remote pixels back into view pixels. */
+    private fun syncVirtualMouseMarker() {
+        val mouse = virtualMouse ?: return
+        val contentRect = resolveViewerContentRect() ?: return
+        if (virtualPointerX < 0 || contentRect.contentWidth <= 1 || contentRect.contentHeight <= 1) {
+            return
+        }
+        val viewX = contentRect.left +
+            (virtualPointerX.toFloat() / (contentRect.contentWidth - 1)) * contentRect.width
+        val viewY = contentRect.top +
+            (virtualPointerY.toFloat() / (contentRect.contentHeight - 1)) * contentRect.height
+        mouse.moveTo(viewX, viewY)
     }
 
     private fun virtualButtonVk(button: ViewerVirtualMouse.Button): Int = when (button) {
@@ -1549,16 +1582,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             mouse.hide()
             diagnosticsLog.log("virtual_mouse", "state=hidden")
             return
-        }
-        // Start from the middle of the remote screen rather than nowhere, so the first drag has
-        // a defined starting point.
-        val contentRect = resolveViewerContentRect()
-        if (contentRect != null && virtualPointerX < 0) {
-            virtualPointerX = contentRect.contentWidth / 2
-            virtualPointerY = contentRect.contentHeight / 2
-            NativeSessionBridge.nativeQueueInputEvent(
-                INPUT_KIND_MOUSE_MOVE, virtualPointerX, virtualPointerY, 0, 0, 0,
-            )
         }
         mouse.show()
         showViewerControls(emphasized = true)

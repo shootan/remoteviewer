@@ -1,75 +1,84 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  On-screen mouse for precise work.
+  On-screen mouse, anchored to the pointer.
 
-  A fingertip covers far more than one pixel, so tapping a 16px close button or a scrollbar is
-  guesswork. Here the pointer is moved by dragging the centre pad, at a fraction of the finger's
-  speed, and the click happens on a button afterwards - so the aim never shifts at the moment of
-  clicking. The whole widget can be dragged out of the way by its handle.
+  Fills the video frame but consumes nothing itself, so touches that miss the marker and the
+  button cluster still reach the picture underneath. The two pieces are positioned separately in
+  code: the marker sits exactly on the remote pointer, and the cluster sits beside it, pushed
+  back inside the frame when the pointer is near an edge. Keeping them apart is what lets the
+  cluster stay reachable while the pointer goes right to the corner.
 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/viewerVirtualMouse"
-    android:layout_width="wrap_content"
-    android:layout_height="wrap_content"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
     android:visibility="gone">
 
-    <RelativeLayout
-        android:layout_width="220dp"
-        android:layout_height="220dp">
+    <!-- A ring, not a filled cursor: the real remote cursor shows through the middle, so what
+         is about to be clicked stays visible. -->
+    <View
+        android:id="@+id/virtualMousePointer"
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:background="@drawable/virtual_mouse_reticle" />
 
-        <!-- Wheel. Drag it rather than tapping: a wheel is a continuous control. -->
+    <RelativeLayout
+        android:id="@+id/virtualMouseCluster"
+        android:layout_width="196dp"
+        android:layout_height="196dp">
+
         <TextView
             android:id="@+id/virtualMouseRoll"
-            android:layout_width="86dp"
-            android:layout_height="52dp"
+            android:layout_width="76dp"
+            android:layout_height="46dp"
             android:layout_centerHorizontal="true"
             android:background="@drawable/virtual_mouse_button"
             android:gravity="center"
             android:text="@string/virtual_mouse_roll"
             android:textColor="#F4F0E8"
-            android:textSize="13sp" />
+            android:textSize="12sp" />
 
         <TextView
             android:id="@+id/virtualMouseLeft"
-            android:layout_width="62dp"
-            android:layout_height="76dp"
+            android:layout_width="58dp"
+            android:layout_height="68dp"
             android:layout_alignParentStart="true"
             android:layout_centerVertical="true"
             android:background="@drawable/virtual_mouse_button"
             android:gravity="center"
             android:text="@string/virtual_mouse_left"
             android:textColor="#F4F0E8"
-            android:textSize="13sp" />
+            android:textSize="12sp" />
 
         <TextView
             android:id="@+id/virtualMouseRight"
-            android:layout_width="62dp"
-            android:layout_height="76dp"
+            android:layout_width="58dp"
+            android:layout_height="68dp"
             android:layout_alignParentEnd="true"
             android:layout_centerVertical="true"
             android:background="@drawable/virtual_mouse_button"
             android:gravity="center"
             android:text="@string/virtual_mouse_right"
             android:textColor="#F4F0E8"
-            android:textSize="13sp" />
+            android:textSize="12sp" />
 
         <TextView
             android:id="@+id/virtualMouseMiddle"
-            android:layout_width="86dp"
-            android:layout_height="52dp"
+            android:layout_width="76dp"
+            android:layout_height="46dp"
             android:layout_alignParentBottom="true"
             android:layout_centerHorizontal="true"
             android:background="@drawable/virtual_mouse_button"
             android:gravity="center"
             android:text="@string/virtual_mouse_middle"
             android:textColor="#F4F0E8"
-            android:textSize="13sp" />
+            android:textSize="12sp" />
 
-        <!-- Centre: drag to steer the remote pointer. -->
+        <!-- Drag this and the pointer, the marker and this whole cluster travel together. -->
         <TextView
             android:id="@+id/virtualMousePad"
-            android:layout_width="76dp"
-            android:layout_height="76dp"
+            android:layout_width="70dp"
+            android:layout_height="70dp"
             android:layout_centerInParent="true"
             android:background="@drawable/virtual_mouse_pad"
             android:gravity="center"
@@ -79,27 +88,14 @@
 
         <TextView
             android:id="@+id/virtualMouseClose"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
+            android:layout_width="38dp"
+            android:layout_height="38dp"
             android:layout_alignParentTop="true"
             android:layout_alignParentEnd="true"
             android:background="@drawable/virtual_mouse_button"
             android:gravity="center"
             android:text="@string/virtual_mouse_close"
             android:textColor="#F4F0E8"
-            android:textSize="16sp" />
-
-        <!-- Moves the widget itself, so it can be pushed off whatever it is covering. -->
-        <TextView
-            android:id="@+id/virtualMouseHandle"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
-            android:layout_alignParentTop="true"
-            android:layout_alignParentStart="true"
-            android:background="@drawable/virtual_mouse_button"
-            android:gravity="center"
-            android:text="@string/virtual_mouse_handle"
-            android:textColor="#F4F0E8"
-            android:textSize="16sp" />
+            android:textSize="15sp" />
     </RelativeLayout>
 </FrameLayout>

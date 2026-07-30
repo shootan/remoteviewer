@@ -87,7 +87,6 @@
     <string name="virtual_mouse_middle">Middle</string>
     <string name="virtual_mouse_pad">✥</string>
     <string name="virtual_mouse_close">✕</string>
-    <string name="virtual_mouse_handle">✣</string>
     <string name="viewer_mode_right_click">Right click on next touch</string>
     <string name="viewer_mode_tablet">Tablet mode</string>
     <string name="viewer_mouse_button">MOUSE</string>
