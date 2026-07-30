@@ -83,7 +83,13 @@ class ViewerKeyPanel(
     )
 
     // Two-beolsik jamo, matching the layout printed on a Korean keyboard.
-    private val rows: List<List<Key>> = listOf(
+    /**
+     * The function-key and navigation rows, hidden unless asked for.
+     *
+     * Every row costs height that comes straight off the picture, and on a phone held sideways
+     * seven rows leaves keys too thin to hit. These two are the ones people rarely need.
+     */
+    private val extraRows: List<List<Key>> = listOf(
         listOf(
             Key("Esc", vk = Vk.ESC),
             Key("F1", vk = Vk.F1), Key("F2", vk = Vk.F1 + 1),
@@ -95,7 +101,15 @@ class ViewerKeyPanel(
             Key("PrtSc", vk = Vk.PRTSC), Key("Scr", vk = Vk.SCROLL), Key("Pause", vk = Vk.PAUSE),
         ),  // 16 units
         listOf(
-            Key("`", "~", Vk.OEM_3),
+            Key("Ins", vk = Vk.INSERT), Key("Home", vk = Vk.HOME), Key("PgUp", vk = Vk.PGUP),
+            Key("Del", vk = Vk.DELETE), Key("End", vk = Vk.END), Key("PgDn", vk = Vk.PGDN),
+            Key("", vk = 0, units = 10f),
+        ),
+    )
+
+    private val coreRows: List<List<Key>> = listOf(
+        listOf(
+            Key("Esc", vk = Vk.ESC),
             Key("1", "!", '1'.code), Key("2", "@", '2'.code), Key("3", "#", '3'.code),
             Key("4", "$", '4'.code), Key("5", "%", '5'.code), Key("6", "^", '6'.code),
             Key("7", "&", '7'.code), Key("8", "*", '8'.code), Key("9", "(", '9'.code),
@@ -144,11 +158,6 @@ class ViewerKeyPanel(
             Key("←", vk = Vk.LEFT), Key("↓", vk = Vk.DOWN), Key("→", vk = Vk.RIGHT),
             Key("", vk = 0, units = 0.4f),
         ),
-        listOf(
-            Key("Ins", vk = Vk.INSERT), Key("Home", vk = Vk.HOME), Key("PgUp", vk = Vk.PGUP),
-            Key("Del", vk = Vk.DELETE), Key("End", vk = Vk.END), Key("PgDn", vk = Vk.PGDN),
-            Key("", vk = 0, units = 10f),
-        ),
     )
 
     private val modifierKeys = setOf(Vk.CTRL, Vk.SHIFT, Vk.ALT, Vk.WIN)
@@ -162,11 +171,19 @@ class ViewerKeyPanel(
     private val modifierText: TextView = root.findViewById(R.id.keyPanelModifierText)
     private val tabShortcut: Button = root.findViewById(R.id.keyPanelTabShortcut)
     private val tabKeys: Button = root.findViewById(R.id.keyPanelTabKeys)
+    private val tabExtra: Button = root.findViewById(R.id.keyPanelTabExtra)
+    private var showExtraRows = false
 
     init {
         root.findViewById<Button>(R.id.keyPanelCloseButton).setOnClickListener { hide() }
         tabShortcut.setOnClickListener { showShortcuts(true) }
         tabKeys.setOnClickListener { showShortcuts(false) }
+        tabExtra.setOnClickListener {
+            showExtraRows = !showExtraRows
+            buildKeyboard()
+            renderModifiers()
+            showShortcuts(false)
+        }
         buildShortcuts()
         buildKeyboard()
         showShortcuts(false)
@@ -181,16 +198,17 @@ class ViewerKeyPanel(
 
     fun show() {
         root.visibility = View.VISIBLE
-        // The panel pushes the video up rather than covering it, so cap its height or a
-        // seven-row keyboard would leave almost no picture on a phone held sideways.
+        // The panel pushes the picture up rather than covering it, so it gets a fixed share of
+        // the screen and the rows divide whatever that comes to. Setting the height here rather
+        // than measuring afterwards avoids the panel appearing at full size and then snapping.
         root.post {
             val parentHeight = (root.parent as? View)?.height ?: 0
             if (parentHeight > 0) {
-                val cap = (parentHeight * 0.55f).toInt()
-                if (root.height > cap) {
-                    root.layoutParams = root.layoutParams.also { it.height = cap }
-                    root.requestLayout()
+                val share = if (showExtraRows) 0.62f else 0.5f
+                root.layoutParams = root.layoutParams.also {
+                    it.height = (parentHeight * share).toInt()
                 }
+                root.requestLayout()
             }
         }
     }
@@ -229,17 +247,21 @@ class ViewerKeyPanel(
     private fun buildKeyboard() {
         keysRoot.removeAllViews()
         modifierButtons.clear()
+        tabExtra.alpha = if (showExtraRows) 1.0f else 0.55f
+        val rows = if (showExtraRows) extraRows + coreRows else coreRows
         for (row in rows) {
             val line = LinearLayout(context)
             line.orientation = LinearLayout.HORIZONTAL
+            // Equal weight per row, so however much height the panel gets, the whole keyboard
+            // is visible instead of the last rows dropping off the bottom.
             line.layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f,
             )
             for (key in row) {
                 if (key.vk == 0) {
                     val filler = View(context)
-                    filler.layoutParams = LinearLayout.LayoutParams(0, dp(42f), key.units)
+                    filler.layoutParams =
+                        LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, key.units)
                     line.addView(filler)
                     continue
                 }
@@ -257,7 +279,9 @@ class ViewerKeyPanel(
                 b.gravity = Gravity.CENTER
                 // Width comes from the weight, so every ordinary key is exactly one unit and
                 // the rows line up like a real keyboard.
-                val lp = LinearLayout.LayoutParams(0, dp(42f), key.units)
+                val lp = LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.MATCH_PARENT, key.units,
+                )
                 lp.setMargins(dp(1.5f), dp(1.5f), dp(1.5f), dp(1.5f))
                 b.layoutParams = lp
                 b.setOnClickListener { onKeyTapped(key.vk) }

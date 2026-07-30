@@ -80,4 +80,5 @@
     <string name="hosts_connecting">Connecting to %1$s…</string>
     <string name="hosts_connect_failed">Could not connect: %1$s</string>
     <string name="hosts_manual_button">Connect by IP instead</string>
+    <string name="key_panel_tab_extra">F keys</string>
 </resources>

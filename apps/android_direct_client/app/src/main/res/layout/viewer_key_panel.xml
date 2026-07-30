@@ -46,6 +46,23 @@
             android:textColor="#F4F0E8"
             android:textSize="12sp" />
 
+        <!-- Function and navigation keys are off by default: they cost two of seven rows, and
+             in landscape those two rows are the difference between a usable keyboard and a
+             row of slivers. -->
+        <Button
+            android:id="@+id/keyPanelTabExtra"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:layout_marginStart="8dp"
+            android:background="@drawable/viewer_control_button_background"
+            android:minWidth="0dp"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:text="@string/key_panel_tab_extra"
+            android:textAllCaps="false"
+            android:textColor="#F4F0E8"
+            android:textSize="12sp" />
+
         <TextView
             android:id="@+id/keyPanelModifierText"
             android:layout_width="0dp"
@@ -85,18 +102,23 @@
             android:orientation="horizontal" />
     </HorizontalScrollView>
 
+    <!-- Takes whatever height is left and divides it between the rows, so the keyboard is
+         always whole. It used to be wrap_content inside a scroll view, which meant the bottom
+         rows simply fell off the screen and looked broken rather than scrollable. -->
     <ScrollView
         android:id="@+id/keyPanelKeysScroll"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
+        android:layout_height="0dp"
+        android:layout_marginTop="6dp"
+        android:layout_weight="1"
+        android:fillViewport="true"
         android:scrollbars="none"
         android:visibility="gone">
 
         <LinearLayout
             android:id="@+id/keyPanelKeysRoot"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
+            android:layout_height="match_parent"
             android:orientation="vertical" />
     </ScrollView>
 </LinearLayout>

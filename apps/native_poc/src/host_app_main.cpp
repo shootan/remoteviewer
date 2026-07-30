@@ -198,8 +198,12 @@ class StreamingHostProcess {
   void Supervise() {
     const std::wstring exe = executable_dir() + L"\\remote60_native_video_host_poc.exe";
     while (running_.load(std::memory_order_relaxed)) {
+      // The control port serves clients on the same network that dial this PC directly. One
+      // arriving through the directory tunnels control over the media socket instead, but with
+      // no port open a LAN connection showed a picture that could not be controlled.
       std::wstring command = L"\"" + exe + L"\"" +
                              L" --transport udp --codec h264 --bind-port 43000" +
+                             L" --control-port 43001" +
                              L" --directory-url \"" + directoryUrl_ + L"\"" +
                              L" --directory-id \"" + accountId_ + L"\"" +
                              L" --host-name \"" + hostName_ + L"\"";
