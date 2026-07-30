@@ -69,6 +69,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         /** Matches kWindowThumbnailMaxWidth/Height in the wire protocol. */
         private const val THUMBNAIL_MAX_EDGE = 320
+
+        private const val MACRO_STATE_IDLE = 0
+        private const val MACRO_STATE_RECORDING = 1
+        private const val MACRO_STATE_PLAYING = 2
         private const val VIEWER_STALL_OVERLAY_US = 3_000_000L
     }
 
@@ -538,6 +542,37 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
+    private var macroDialog: AlertDialog? = null
+    private var macroStatusText: TextView? = null
+    private var macroStepList: TextView? = null
+    private var macroRecordButton: Button? = null
+    private var macroPlayButton: Button? = null
+    private lateinit var macroRecordBar: View
+    private lateinit var macroRecordBarText: TextView
+
+    /**
+     * Drives macro playback from the UI thread at a fine cadence.
+     *
+     * A macro's steps are milliseconds apart, so the 250 ms status poll is far too coarse to
+     * dispatch them. Running here rather than on a thread of its own means playback cannot
+     * outlive the screen it belongs to.
+     */
+    private val macroPumpRunnable = object : Runnable {
+        override fun run() {
+            val state = NativeSessionBridge.nativeMacroState()
+            if (state == MACRO_STATE_PLAYING) {
+                NativeSessionBridge.nativeMacroPump()
+            }
+            renderMacroUi()
+            if (state != MACRO_STATE_IDLE) {
+                statusHandler.postDelayed(this, 16L)
+            } else {
+                macroPumpScheduled = false
+            }
+        }
+    }
+    private var macroPumpScheduled = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -659,6 +694,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerModeBanner = findViewById(R.id.viewerModeBanner)
         initVirtualMouse()
         findViewById<Button>(R.id.viewerMouseButton).setOnClickListener { toggleVirtualMouse() }
+        macroRecordBar = findViewById(R.id.macroRecordBar)
+        macroRecordBarText = findViewById(R.id.macroRecordBarText)
+        findViewById<Button>(R.id.macroRecordBarStop).setOnClickListener { stopMacroRecording() }
+        findViewById<Button>(R.id.viewerMacroButton).setOnClickListener { showMacroDialog() }
         initDirectoryUi()
 
         val savedEndpoint = SessionPersistence.load(this)
@@ -1588,6 +1627,128 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         diagnosticsLog.log("virtual_mouse", "state=shown at=$virtualPointerX,$virtualPointerY")
     }
 
+    // ---------------------------------------------------------------- macro
+
+    private fun showMacroDialog() {
+        if (macroDialog?.isShowing == true) return
+        val view = layoutInflater.inflate(R.layout.viewer_macro_dialog, null)
+        macroStatusText = view.findViewById(R.id.macroStatusText)
+        macroStepList = view.findViewById(R.id.macroStepList)
+        macroRecordButton = view.findViewById(R.id.macroRecordButton)
+        macroPlayButton = view.findViewById(R.id.macroPlayButton)
+
+        macroRecordButton?.setOnClickListener {
+            if (NativeSessionBridge.nativeMacroState() == MACRO_STATE_RECORDING) {
+                stopMacroRecording()
+            } else {
+                startMacroRecording()
+            }
+        }
+        macroPlayButton?.setOnClickListener {
+            if (NativeSessionBridge.nativeMacroState() == MACRO_STATE_PLAYING) {
+                NativeSessionBridge.nativeMacroStopPlayback()
+                diagnosticsLog.log("macro", "playback_stopped")
+            } else {
+                startMacroPlayback(view)
+            }
+            renderMacroUi()
+        }
+        view.findViewById<Button>(R.id.macroClearButton).setOnClickListener {
+            NativeSessionBridge.nativeMacroStopPlayback()
+            NativeSessionBridge.nativeMacroClear()
+            renderMacroUi()
+        }
+        view.findViewById<Button>(R.id.macroCloseButton).setOnClickListener {
+            macroDialog?.dismiss()
+        }
+
+        macroDialog = AlertDialog.Builder(this)
+            .setView(view)
+            .setOnDismissListener {
+                // Recording and playback deliberately survive the window closing: the actions
+                // being recorded happen on the picture this window is covering.
+                macroDialog = null
+                macroStatusText = null
+                macroStepList = null
+                macroRecordButton = null
+                macroPlayButton = null
+                applyImmersiveMode()
+            }
+            .create()
+        macroDialog?.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        macroDialog?.show()
+        renderMacroUi()
+    }
+
+    private fun startMacroRecording() {
+        NativeSessionBridge.nativeMacroStopPlayback()
+        NativeSessionBridge.nativeMacroStartRecording()
+        diagnosticsLog.log("macro", "recording_started")
+        // Out of the way, so the actions can be performed on the picture.
+        macroDialog?.dismiss()
+        scheduleMacroPump()
+        renderMacroUi()
+    }
+
+    private fun stopMacroRecording() {
+        NativeSessionBridge.nativeMacroStopRecording()
+        diagnosticsLog.log("macro", "recorded=${NativeSessionBridge.nativeMacroStepCount()}")
+        renderMacroUi()
+        showMacroDialog()
+    }
+
+    private fun startMacroPlayback(view: View) {
+        fun field(id: Int, fallback: Int): Int =
+            view.findViewById<EditText>(id).text?.toString()?.trim()?.toIntOrNull() ?: fallback
+
+        val started = NativeSessionBridge.nativeMacroStartPlayback(
+            field(R.id.macroTimingJitterInput, 0),
+            field(R.id.macroPositionJitterInput, 0),
+            field(R.id.macroRepeatInput, 1),
+            field(R.id.macroGapMinInput, 0),
+            field(R.id.macroGapMaxInput, 0),
+        )
+        diagnosticsLog.log("macro", "playback_started=$started")
+        if (started) scheduleMacroPump()
+    }
+
+    private fun scheduleMacroPump() {
+        if (macroPumpScheduled) return
+        macroPumpScheduled = true
+        statusHandler.post(macroPumpRunnable)
+    }
+
+    private fun renderMacroUi() {
+        val state = NativeSessionBridge.nativeMacroState()
+        val count = NativeSessionBridge.nativeMacroStepCount()
+
+        macroRecordBar.visibility =
+            if (state == MACRO_STATE_RECORDING) View.VISIBLE else View.GONE
+        if (state == MACRO_STATE_RECORDING) {
+            macroRecordBarText.text = getString(R.string.macro_recording, count)
+        }
+
+        macroRecordButton?.text =
+            if (state == MACRO_STATE_RECORDING) getString(R.string.macro_stop)
+            else getString(R.string.macro_record)
+        macroPlayButton?.text =
+            if (state == MACRO_STATE_PLAYING) getString(R.string.macro_stop)
+            else getString(R.string.macro_play)
+        macroPlayButton?.isEnabled = count > 0
+
+        macroStatusText?.text = when (state) {
+            MACRO_STATE_RECORDING -> getString(R.string.macro_recording, count)
+            MACRO_STATE_PLAYING -> getString(
+                R.string.macro_playing_summary,
+                NativeSessionBridge.nativeMacroCompletedRepeats(),
+            )
+            else -> getString(R.string.macro_idle_summary, count)
+        }
+        macroStepList?.text =
+            if (count == 0) getString(R.string.macro_empty)
+            else NativeSessionBridge.nativeMacroStepLines()
+    }
+
     private fun cancelActiveViewerTouch(reason: String) {
         if (activeViewerTouchMode == ViewerTouchMode.SCROLL) {
             resetViewerTouchState()
@@ -2400,6 +2561,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             statusHandler.removeCallbacks(viewerControlsFadeRunnable)
             virtualMouse?.hide()
             renderViewerModeBanner()
+            if (NativeSessionBridge.nativeMacroState() != MACRO_STATE_IDLE) {
+                NativeSessionBridge.nativeMacroStopPlayback()
+                NativeSessionBridge.nativeMacroStopRecording()
+                renderMacroUi()
+            }
         }
     }
 

@@ -571,6 +571,46 @@
 
                 <include layout="@layout/viewer_virtual_mouse" />
 
+                <!-- Recording has to be stoppable without the macro window in the way, since the
+                     actions being recorded are on the picture underneath it. -->
+                <LinearLayout
+                    android:id="@+id/macroRecordBar"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="top|center_horizontal"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/viewer_control_bar_background"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingStart="12dp"
+                    android:paddingTop="6dp"
+                    android:paddingEnd="12dp"
+                    android:paddingBottom="6dp"
+                    android:visibility="gone">
+
+                    <TextView
+                        android:id="@+id/macroRecordBarText"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:textColor="#FF8A8A"
+                        android:textSize="12sp"
+                        android:textStyle="bold" />
+
+                    <Button
+                        android:id="@+id/macroRecordBarStop"
+                        android:layout_width="wrap_content"
+                        android:layout_height="36dp"
+                        android:layout_marginStart="10dp"
+                        android:background="@drawable/viewer_control_button_background"
+                        android:minWidth="0dp"
+                        android:paddingStart="14dp"
+                        android:paddingEnd="14dp"
+                        android:text="@string/macro_stop"
+                        android:textAllCaps="false"
+                        android:textColor="#F4F0E8"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
                 <com.remote60.androiddirect.ImeCaptureView
                     android:id="@+id/viewerImeCaptureView"
                     android:layout_width="1dp"
@@ -686,6 +726,19 @@
                     android:contentDescription="@string/viewer_mouse_description"
                     android:minWidth="0dp"
                     android:text="@string/viewer_mouse_button"
+                    android:textAllCaps="false"
+                    android:textColor="#F4F0E8"
+                    android:textSize="10sp" />
+
+                <Button
+                    android:id="@+id/viewerMacroButton"
+                    android:layout_width="56dp"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/viewer_control_button_background"
+                    android:contentDescription="@string/macro_description"
+                    android:minWidth="0dp"
+                    android:text="@string/macro_button"
                     android:textAllCaps="false"
                     android:textColor="#F4F0E8"
                     android:textSize="10sp" />

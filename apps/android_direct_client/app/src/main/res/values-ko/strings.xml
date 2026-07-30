@@ -78,4 +78,19 @@
     <string name="viewer_mode_tablet">태블릿 모드</string>
     <string name="viewer_mouse_button">마우스</string>
     <string name="viewer_mouse_description">정밀 클릭용 화면 마우스</string>
+    <string name="macro_title">매크로</string>
+    <string name="macro_button">매크로</string>
+    <string name="macro_description">터치 동작을 녹화하고 재생합니다</string>
+    <string name="macro_record">녹화</string>
+    <string name="macro_stop">중지</string>
+    <string name="macro_play">재생</string>
+    <string name="macro_clear">지우기</string>
+    <string name="macro_repeat_label">반복 횟수 (0 = 계속)</string>
+    <string name="macro_gap_label">반복 간격 ms (최소 / 최대)</string>
+    <string name="macro_timing_jitter_label">시간 흔들기 ms</string>
+    <string name="macro_position_jitter_label">위치 흔들기 px</string>
+    <string name="macro_recording">녹화 중 %1$d</string>
+    <string name="macro_empty">아직 녹화된 게 없습니다. 녹화를 누르고 화면을 조작한 뒤 중지하세요.</string>
+    <string name="macro_idle_summary">%1$d개 동작 녹화됨</string>
+    <string name="macro_playing_summary">재생 중 - %1$d회 반복 완료</string>
 </resources>

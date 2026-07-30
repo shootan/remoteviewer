@@ -1,12 +1,14 @@
 #include <jni.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <sstream>
 #include <string>
 
 #include "android_video_decoder.hpp"
 #include "directory_rendezvous.hpp"
+#include "input_macro.hpp"
 #include "native_video_client_session.hpp"
 
 namespace {
@@ -17,6 +19,17 @@ remote60::android_direct::AndroidVideoDecoderSink g_video_decoder_sink;
 // that the HTTP calls can stay in the app where sessions and errors are already handled.
 remote60::native_poc::DirectoryRendezvous g_rendezvous;
 std::string g_rendezvous_error;
+
+// One macro per session. Recording taps the same events the client is about to send, so what is
+// captured is exactly what the host saw.
+remote60::native_poc::InputMacro g_macro;
+
+uint64_t now_ms() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
 
 std::string jstring_to_string(JNIEnv* env, jstring value) {
   if (!value) return {};
@@ -283,8 +296,19 @@ extern "C" JNIEXPORT jboolean JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeQueueInputEvent(
     JNIEnv* /* env */, jobject /* this */, jint kind, jint x, jint y, jint wheel_delta,
     jint key_code, jint buttons) {
+  const uint16_t safe_kind = static_cast<uint16_t>(std::clamp<jint>(kind, 0, 0xffff));
+  if (g_macro.IsRecording()) {
+    remote60::native_poc::ControlInputEventMessage event{};
+    event.kind = safe_kind;
+    event.x = static_cast<int32_t>(x);
+    event.y = static_cast<int32_t>(y);
+    event.wheelDelta = static_cast<int32_t>(wheel_delta);
+    event.keyCode = static_cast<uint32_t>(std::max<jint>(0, key_code));
+    event.buttons = static_cast<uint16_t>(buttons & 0x7);
+    g_macro.RecordEvent(event, now_ms());
+  }
   return g_session_controller.QueueInputEvent(
-             static_cast<uint16_t>(std::clamp<jint>(kind, 0, 0xffff)),
+             safe_kind,
              static_cast<int32_t>(x),
              static_cast<int32_t>(y),
              static_cast<int32_t>(wheel_delta),
@@ -292,6 +316,98 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeQueueInputEvent(
              static_cast<uint16_t>(buttons & 0x7))
              ? JNI_TRUE
              : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeMacroStartRecording(
+    JNIEnv* /* env */, jobject /* this */) {
+  g_macro.StartRecording(now_ms());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeMacroStopRecording(
+    JNIEnv* /* env */, jobject /* this */) {
+  g_macro.StopRecording();
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeMacroStartPlayback(
+    JNIEnv* /* env */, jobject /* this */, jint timing_jitter_ms, jint position_jitter_px,
+    jint repeat_count, jint gap_min_ms, jint gap_max_ms) {
+  remote60::native_poc::MacroPlaybackOptions options;
+  options.timingJitterMs = static_cast<uint32_t>(std::max<jint>(0, timing_jitter_ms));
+  options.positionJitterPx = static_cast<uint32_t>(std::max<jint>(0, position_jitter_px));
+  options.repeatCount = static_cast<uint32_t>(std::max<jint>(0, repeat_count));
+  options.repeatGapMinMs = static_cast<uint32_t>(std::max<jint>(0, gap_min_ms));
+  options.repeatGapMaxMs = static_cast<uint32_t>(std::max<jint>(0, gap_max_ms));
+  const uint32_t seed = static_cast<uint32_t>(now_ms());
+  return g_macro.StartPlayback(options, now_ms(), seed) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeMacroStopPlayback(
+    JNIEnv* /* env */, jobject /* this */) {
+  g_macro.StopPlayback();
+}
+
+/**
+ * Sends whatever the macro says is due. Driven by the app's own ticker rather than a thread of
+ * its own, so playback stops the moment the UI does and cannot outlive the session.
+ */
+extern "C" JNIEXPORT jint JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeMacroPump(
+    JNIEnv* /* env */, jobject /* this */) {
+  int sent = 0;
+  remote60::native_poc::MacroStep step;
+  const uint64_t now = now_ms();
+  while (g_macro.PollDueStep(now, &step)) {
+    g_session_controller.QueueInputEvent(step.kind, step.x, step.y, step.wheelDelta,
+                                         step.keyCode, step.buttons);
+    ++sent;
+    if (sent > 64) break;   // one pump must not monopolise the UI thread
+  }
+  return sent;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeMacroState(
+    JNIEnv* /* env */, jobject /* this */) {
+  switch (g_macro.state()) {
+    case remote60::native_poc::InputMacro::State::Recording: return 1;
+    case remote60::native_poc::InputMacro::State::Playing: return 2;
+    default: return 0;
+  }
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeMacroStepCount(
+    JNIEnv* /* env */, jobject /* this */) {
+  return static_cast<jint>(g_macro.StepCount());
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeMacroCompletedRepeats(
+    JNIEnv* /* env */, jobject /* this */) {
+  return static_cast<jint>(g_macro.CompletedRepeats());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeMacroClear(
+    JNIEnv* /* env */, jobject /* this */) {
+  g_macro.Clear();
+}
+
+/** The recorded actions as readable lines, newline separated. */
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeMacroStepLines(
+    JNIEnv* env, jobject /* this */) {
+  const auto steps = g_macro.Steps();
+  std::string out;
+  for (size_t i = 0; i < steps.size(); ++i) {
+    if (i > 0) out.push_back('\n');
+    out += remote60::native_poc::InputMacro::DescribeStep(steps[i], i);
+  }
+  return to_jstring(env, out);
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

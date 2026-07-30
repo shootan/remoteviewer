@@ -10,6 +10,7 @@ add_library(remote60_android_direct SHARED
   ../../../../../native_poc/src/native_video_client_session.cpp
   ../../../../../native_poc/src/udp_control_channel.cpp
   ../../../../../native_poc/src/directory_rendezvous.cpp
+  ../../../../../native_poc/src/input_macro.cpp
 )
 
 find_library(log-lib log)

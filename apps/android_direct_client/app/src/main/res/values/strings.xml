@@ -91,4 +91,19 @@
     <string name="viewer_mode_tablet">Tablet mode</string>
     <string name="viewer_mouse_button">MOUSE</string>
     <string name="viewer_mouse_description">Show the on-screen mouse for precise clicks</string>
+    <string name="macro_title">Macro</string>
+    <string name="macro_button">MACRO</string>
+    <string name="macro_description">Record and replay pointer actions</string>
+    <string name="macro_record">Record</string>
+    <string name="macro_stop">Stop</string>
+    <string name="macro_play">Play</string>
+    <string name="macro_clear">Clear</string>
+    <string name="macro_repeat_label">Repeats (0 = until stopped)</string>
+    <string name="macro_gap_label">Gap between repeats, ms (min / max)</string>
+    <string name="macro_timing_jitter_label">Timing jitter, ms</string>
+    <string name="macro_position_jitter_label">Position jitter, px</string>
+    <string name="macro_recording">Recording %1$d</string>
+    <string name="macro_empty">Nothing recorded yet. Press Record, act on the screen, then Stop.</string>
+    <string name="macro_idle_summary">%1$d actions recorded</string>
+    <string name="macro_playing_summary">Playing - %1$d repeats done</string>
 </resources>

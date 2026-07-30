@@ -73,6 +73,7 @@ target_compile_definitions(remote60_native_video_host_poc PRIVATE
 
 add_executable(remote60_native_video_client_poc
   src/native_video_client_main.cpp
+  src/input_macro.cpp
   src/native_video_client_shared_core.cpp
   src/native_video_client_tcp_control.cpp
   src/udp_control_channel.cpp
@@ -149,6 +150,15 @@ target_include_directories(remote60_udp_control_e2e_test PRIVATE
 target_link_libraries(remote60_udp_control_e2e_test PRIVATE
   common
   ws2_32
+)
+
+add_executable(remote60_input_macro_test
+  src/input_macro.cpp
+  src/input_macro_test.cpp
+)
+
+target_include_directories(remote60_input_macro_test PRIVATE
+  src
 )
 
 add_executable(remote60_udp_control_channel_test

@@ -57,6 +57,40 @@ object NativeSessionBridge {
      */
     external fun nativeGetWindowThumbnail(windowId: Long): ByteArray?
 
+    // --- input macro ---------------------------------------------------------------
+    // Recording taps the send path, so anything that produces input is captured the same way:
+    // a direct touch, the on-screen mouse, a gesture.
+
+    external fun nativeMacroStartRecording()
+    external fun nativeMacroStopRecording()
+
+    /**
+     * @param repeatCount 0 repeats until stopped.
+     * @param gapMinMs lower bound of the random wait between repeats.
+     * @param gapMaxMs upper bound of that wait.
+     */
+    external fun nativeMacroStartPlayback(
+        timingJitterMs: Int,
+        positionJitterPx: Int,
+        repeatCount: Int,
+        gapMinMs: Int,
+        gapMaxMs: Int,
+    ): Boolean
+
+    external fun nativeMacroStopPlayback()
+
+    /** Sends whatever is due; call from a ticker. Returns how many events went out. */
+    external fun nativeMacroPump(): Int
+
+    /** 0 idle, 1 recording, 2 playing. */
+    external fun nativeMacroState(): Int
+    external fun nativeMacroStepCount(): Int
+    external fun nativeMacroCompletedRepeats(): Int
+    external fun nativeMacroClear()
+
+    /** The recorded actions as readable lines, newline separated. */
+    external fun nativeMacroStepLines(): String
+
     /** Total UDP video bytes received this session. */
     external fun nativeGetSessionBytesReceived(): Long
     external fun nativeResetVideoStream()
