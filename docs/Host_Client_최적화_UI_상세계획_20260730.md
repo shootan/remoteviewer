@@ -22,9 +22,11 @@
 2026-07-31에 성능 항목(B1, H1~H4, C1~C2, A1~A2) 전부를 코드와 대조 검증했다. 감사 진단은
 A2와 A1의 어댑터 부분(이미 변경 게이트 존재)을 빼면 큰 방향이 정확했다. 이어진 2차 검증에서
 Windows의 1080→1088 가시 영역 오류, 런타임 bitrate 재설정 시 rate-control/pacing 불일치,
-제품 Host의 암묵적 encoder tune 차이도 확인했다. 또한 H2의 구현 수단, H3 surface lifetime,
-A1의 scene별 JNI 횟수, A2의 version 의미를 코드에 맞게 정정했다. 각 근거와 조치는 Q1 및
-관련 작업 절의 "검증 결과/추가 확인" 소절에 반영돼 있다.
+제품 Host의 암묵적 encoder tune 차이도 확인했다. 또한 H2의 구현 수단(shader가 아니라
+`ID3D11VideoProcessor`), H3 surface lifetime, A2의 version 의미(콘텐츠 버전이 아니라 캡처
+시각)를 코드에 맞게 정정했다. A1의 JNI 횟수는 3차 확인 결과 "기본 6회"가 아니라 **비뷰어
+씬에서도 9회**가 맞다(13장 참조). 각 근거와 조치는 Q1 및 관련 작업 절의 "검증 결과" 소절에
+반영돼 있다.
 
 ## 1. 목표
 
@@ -291,6 +293,9 @@ Host가 세션 시작 시 스트림을 켜 주므로 영상은 나오지만, 목
 H1~H3 구조 변경 전에, 현재 화질을 불필요하게 흐리거나 실행 경로별 결과를 다르게 만드는
 정합성 문제를 먼저 고친다. 이 항목은 bitrate를 올리는 튜닝이 아니라 geometry와 기존 설정을
 의도대로 적용하는 correctness 작업이다.
+
+Q1은 인코더 rate-control과 클라이언트 렌더 기하를 바꾸므로, **Q1 병합 후 B1 기준선을 다시
+수집**하고 그것을 H1부터의 A/B 비교 기준으로 삼는다. Q1 이전 수치와는 비교하지 않는다.
 
 ### 수정 파일
 
@@ -732,11 +737,16 @@ H1~H3과 C1 후에도 Windows Client CPU가 단일 코어 환산 15% 이상이�
 
 ### 검증 결과 (2026-07-31, 코드 확인)
 
-- 250ms 폴은 씬과 무관하게 돈다. 직접 호출은 기본 6회이고 stable VIEWER에서는
-  data usage·중복 presentation timestamp·video size 조회가 더해져 9회다. pending config,
-  thumbnail 변화 등 상태에 따라 더 늘 수 있다(상태/오류 각각 스냅샷 전체 딥카피,
-  디코더 뮤텍스 아래 ~28필드 디버그 문자열 생성, panel JSON 생성→`NewStringUTF`→Kotlin
-  `org.json` 재파싱·객체 재할당 포함). 기존의 모든 scene "8~9회" 표현을 정정한다.
+- 250ms 폴은 씬과 무관하게 돈다. JNI 호출은 무조건 실행되는 6회에 더해,
+  `renderViewerScene()`이 **모든 씬에서 무조건 호출**되고 SWITCHING만 조기 반환하므로
+  (`renderStatus`가 씬 구분 없이 호출, 조기 반환 조건은 SWITCHING뿐) data usage와 중복
+  presentation timestamp 조회가 LOGIN/HOSTS/CONNECT/TARGETS에서도 돈다. 실측 씬별:
+  **비뷰어 씬 9회**(6+bytes+presentation 중복+macroState), **stable VIEWER 9회**
+  (6+bytes+presentation 중복+videoSizePacked), **SWITCHING 8회**. pending config,
+  thumbnail 변화에 따라 더 늘 수 있다(상태/오류 각각 스냅샷 전체 딥카피, 디코더 뮤텍스
+  아래 ~28필드 디버그 문자열 생성, panel JSON 생성→`NewStringUTF`→Kotlin `org.json`
+  재파싱·객체 재할당 포함). "기본 6회, VIEWER만 9회"라는 표현은 코드와 다르므로 쓰지
+  않는다 — viewer 전용 조회가 비뷰어 씬에서도 도는 것 자체가 A1이 고칠 결함이다.
 - 씬 visibility 6개와 targets 위젯 ~18개 속성은 변경 여부와 무관하게 매 틱 재설정된다. 확인.
 - **감사 정정**: 대상 목록 어댑터는 이미 변경 게이트가 있다(라벨/id/selectedId 비교 후에만
   `notifyDataSetChanged`). 다만 비교용 리스트는 매 틱 새로 할당된다.
