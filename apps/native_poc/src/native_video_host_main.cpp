@@ -2657,6 +2657,35 @@ int main(int argc, char** argv) {
   SOCKET clientSock = INVALID_SOCKET;
   sockaddr_in udpPeer{};
   bool udpPeerReady = false;
+
+  // H4: the encode thread hands encoded frames to this sender instead of pacing the wire
+  // inline. Pacing a 60ms keyframe used to stall the next frame's encode start directly.
+  // Depth is 2: an arriving keyframe supersedes the whole backlog, and a delta that would
+  // overflow the queue drops the backlog and requests a fresh keyframe -- an encoded delta
+  // must never be skipped silently or the reference chain corrupts until the next IDR.
+  struct EncodedSendItem {
+    std::vector<uint8_t> bytes;
+    UdpVideoChunkHeader udpHdr{};
+    bool keyFrame = false;
+  };
+  std::mutex senderMu;
+  std::condition_variable senderCv;
+  std::deque<EncodedSendItem> senderQueue;
+  sockaddr_in senderPeer{};
+  bool senderPeerReady = false;
+  std::atomic<bool> senderStop{false};
+  std::atomic<bool> senderSendFailed{false};
+  std::atomic<bool> senderRequestKey{false};
+  std::atomic<uint64_t> senderDropCount{0};
+  std::atomic<uint64_t> senderTxFrames{0};
+  std::atomic<uint64_t> senderTxChunks{0};
+  std::atomic<uint64_t> senderTxBytes{0};
+  std::atomic<uint64_t> senderTxNoPeer{0};
+  std::atomic<uint64_t> senderLastSendStartUs{0};
+  std::atomic<uint64_t> senderSendDurSumUs{0};
+  std::atomic<uint64_t> senderSendDurMaxUs{0};
+  std::atomic<uint64_t> senderSendCount{0};
+  std::thread senderThread;
   // The reader thread owns the peer address; the render loop picks up changes through these.
   std::atomic<uint32_t> udpPeerIpNet{0};
   std::atomic<uint16_t> udpPeerPortNet{0};
@@ -2773,6 +2802,11 @@ int main(int argc, char** argv) {
                    reinterpret_cast<const sockaddr*>(&peer), peerLen);
       udpPeer = peer;
       udpPeerReady = true;
+      {
+        std::lock_guard<std::mutex> lk(senderMu);
+        senderPeer = peer;
+        senderPeerReady = true;
+      }
       udpPeerIpNet.store(peer.sin_addr.s_addr, std::memory_order_release);
       udpPeerPortNet.store(peer.sin_port, std::memory_order_release);
       break;
@@ -4447,9 +4481,66 @@ int main(int argc, char** argv) {
     peer.sin_port = udpPeerPortNet.load(std::memory_order_acquire);
     udpPeer = peer;
     udpPeerReady = true;
+    {
+      std::lock_guard<std::mutex> lk(senderMu);
+      senderPeer = peer;
+      senderPeerReady = true;
+    }
     forceKeyNext = true;
     std::cout << "[native-video-host] udp peer updated; forcing keyframe\n";
   };
+
+  auto start_encoded_sender = [&]() {
+    if (transport != VideoTransport::Udp || !useH264) return;
+    senderThread = std::thread([&]() {
+      while (true) {
+        EncodedSendItem item;
+        sockaddr_in peer{};
+        bool peerReady = false;
+        {
+          std::unique_lock<std::mutex> lk(senderMu);
+          senderCv.wait(lk, [&] { return senderStop.load(std::memory_order_acquire) ||
+                                         !senderQueue.empty(); });
+          if (senderQueue.empty()) {
+            if (senderStop.load(std::memory_order_acquire)) return;
+            continue;
+          }
+          item = std::move(senderQueue.front());
+          senderQueue.pop_front();
+          peer = senderPeer;
+          peerReady = senderPeerReady;
+        }
+        if (!peerReady) {
+          senderTxNoPeer.fetch_add(1, std::memory_order_relaxed);
+          continue;
+        }
+        const uint64_t sendStartUs = qpc_now_us();
+        item.udpHdr.sendQpcUs = sendStartUs;
+        SendPathStats pathStats{};
+        const bool ok = send_udp_chunks_timed(clientSock, peer, item.bytes.data(),
+                                              item.bytes.size(), item.udpHdr, args.udpMtu,
+                                              &pathStats);
+        const uint64_t sendDoneUs = qpc_now_us();
+        if (ok) {
+          const uint64_t durUs = (sendDoneUs >= sendStartUs) ? (sendDoneUs - sendStartUs) : 0;
+          senderLastSendStartUs.store(sendStartUs, std::memory_order_relaxed);
+          senderTxFrames.fetch_add(1, std::memory_order_relaxed);
+          senderTxChunks.fetch_add(pathStats.payloadChunkCount, std::memory_order_relaxed);
+          senderTxBytes.fetch_add(item.bytes.size(), std::memory_order_relaxed);
+          senderSendDurSumUs.fetch_add(durUs, std::memory_order_relaxed);
+          senderSendCount.fetch_add(1, std::memory_order_relaxed);
+          uint64_t prevMax = senderSendDurMaxUs.load(std::memory_order_relaxed);
+          while (durUs > prevMax &&
+                 !senderSendDurMaxUs.compare_exchange_weak(prevMax, durUs,
+                                                           std::memory_order_relaxed)) {
+          }
+        } else {
+          senderSendFailed.store(true, std::memory_order_release);
+        }
+      }
+    });
+  };
+  start_encoded_sender();
   auto reconnect_tcp_data_session = [&](const char* reason) -> bool {
     if (transport != VideoTransport::Tcp) return false;
     if (args.seconds > 0) return false;
@@ -5589,6 +5680,10 @@ int main(int argc, char** argv) {
         std::cout << "[native-video-host][control] keyframe-request-consumed reason=" << reason << "\n";
         forceKeyNext = true;
       }
+      if (senderRequestKey.exchange(false, std::memory_order_acq_rel)) {
+        // The sender dropped a backlog; the stream needs an IDR to resynchronize.
+        forceKeyNext = true;
+      }
        const bool forceKeyFrame =
             forceKeyNext || (encodedSeq == 0) ||
             ((activeKeyint > 0) && ((seq % activeKeyint) == 0));
@@ -5672,6 +5767,14 @@ int main(int argc, char** argv) {
       bool encoderResetTriggered = false;
       bool sessionReconnectTriggered = false;
       bool countedRawForInput = false;
+      if (senderSendFailed.exchange(false, std::memory_order_acq_rel)) {
+        // Same policy the inline path had: a UDP send failure on an endless session waits
+        // for the peer to re-Hello rather than exiting.
+        ++udpTxFail;
+        if (args.seconds == 0) {
+          continue;
+        }
+      }
         for (const auto& au : units) {
           if (au.bytes.empty()) continue;
           const int64_t auCaptureUs = (au.sampleTimeHns > 0) ? (au.sampleTimeHns / 10) : static_cast<int64_t>(encodeInputUs);
@@ -5786,24 +5889,41 @@ int main(int argc, char** argv) {
             ++udpTxNoPeer;
             sentOk = false;
           } else {
-            UdpVideoChunkHeader udpHdr{};
-            udpHdr.magic = remote60::native_poc::kMagic;
-            udpHdr.kind = static_cast<uint16_t>(UdpPacketKind::VideoChunk);
-            udpHdr.size = static_cast<uint16_t>(sizeof(udpHdr));
-            udpHdr.seq = hdr.seq;
-            udpHdr.codec = static_cast<uint16_t>(UdpCodec::H264);
-            udpHdr.flags = (hdr.flags & 1u) ? 0x1u : 0u;
-            udpHdr.width = hdr.width;
-            udpHdr.height = hdr.height;
-            udpHdr.stride = 0;
-            udpHdr.payloadSize = hdr.payloadSize;
-            udpHdr.streamGeneration = hdr.streamGeneration;
-            udpHdr.captureQpcUs = hdr.captureQpcUs;
-            udpHdr.encodeStartQpcUs = hdr.encodeStartQpcUs;
-            udpHdr.encodeEndQpcUs = hdr.encodeEndQpcUs;
-            udpHdr.sendQpcUs = hdr.sendQpcUs;
-            sentOk = send_udp_chunks_timed(clientSock, udpPeer, au.bytes.data(), au.bytes.size(),
-                                          udpHdr, args.udpMtu, &sendPathStats);
+            EncodedSendItem item;
+            item.keyFrame = (hdr.flags & 1u) != 0;
+            item.udpHdr.magic = remote60::native_poc::kMagic;
+            item.udpHdr.kind = static_cast<uint16_t>(UdpPacketKind::VideoChunk);
+            item.udpHdr.size = static_cast<uint16_t>(sizeof(item.udpHdr));
+            item.udpHdr.seq = hdr.seq;
+            item.udpHdr.codec = static_cast<uint16_t>(UdpCodec::H264);
+            item.udpHdr.flags = (hdr.flags & 1u) ? 0x1u : 0u;
+            item.udpHdr.width = hdr.width;
+            item.udpHdr.height = hdr.height;
+            item.udpHdr.stride = 0;
+            item.udpHdr.payloadSize = hdr.payloadSize;
+            item.udpHdr.streamGeneration = hdr.streamGeneration;
+            item.udpHdr.captureQpcUs = hdr.captureQpcUs;
+            item.udpHdr.encodeStartQpcUs = hdr.encodeStartQpcUs;
+            item.udpHdr.encodeEndQpcUs = hdr.encodeEndQpcUs;
+            item.udpHdr.sendQpcUs = hdr.sendQpcUs;  // sender restamps at wire time
+            item.bytes = std::move(au.bytes);
+            {
+              std::lock_guard<std::mutex> lk(senderMu);
+              if (item.keyFrame) {
+                // A new IDR makes every queued frame irrelevant.
+                senderDropCount.fetch_add(senderQueue.size(), std::memory_order_relaxed);
+                senderQueue.clear();
+              } else if (senderQueue.size() >= 2) {
+                // Backlogged: ship nothing stale, ask for a keyframe to resync instead of
+                // silently skipping a delta and corrupting the reference chain.
+                senderDropCount.fetch_add(senderQueue.size(), std::memory_order_relaxed);
+                senderQueue.clear();
+                senderRequestKey.store(true, std::memory_order_release);
+              }
+              senderQueue.push_back(std::move(item));
+            }
+            senderCv.notify_one();
+            sentOk = true;
           }
         }
         const uint64_t sendDoneUs = qpc_now_us();
@@ -5826,11 +5946,7 @@ int main(int argc, char** argv) {
             selectionFirstKeyframePendingGeneration = 0;
             selectionFirstKeyframeDropCount = 0;
           }
-          if (transport == VideoTransport::Udp) {
-            ++udpTxFrames;
-            udpTxChunks += sendPathStats.payloadChunkCount;
-            udpTxBytes += au.bytes.size();
-          }
+          // UDP tx counters are owned by the sender thread now; nothing to count here.
           if (frameGatingEnabled && payload && !payload->empty()) {
             frameGatingLastSentUs = sendStartUs;
             frameGatingRefPayload = payload;
@@ -5856,7 +5972,7 @@ int main(int argc, char** argv) {
 
         ++sentFrames;
         ++encodedFrames;
-        sentBytes += au.bytes.size();
+        sentBytes += hdr.payloadSize;
         if (!countedRawForInput) {
           rawEquivalentBytes += static_cast<uint64_t>(nv12.size());
           countedRawForInput = true;
@@ -6219,8 +6335,20 @@ int main(int argc, char** argv) {
         const double rawEquivMbps = (rawEquivalentBytes * 8.0) / (1000.0 * 1000.0);
         const uint64_t encRatioX100 =
             (sentBytes > 0) ? ((rawEquivalentBytes * 100ULL) / sentBytes) : 0;
+        // The sender thread owns the UDP wire counters now.
+        if (transport == VideoTransport::Udp) {
+          udpTxFrames = senderTxFrames.load(std::memory_order_relaxed);
+          udpTxChunks = senderTxChunks.load(std::memory_order_relaxed);
+          udpTxBytes = senderTxBytes.load(std::memory_order_relaxed);
+          udpTxNoPeer += senderTxNoPeer.exchange(0, std::memory_order_relaxed);
+        }
         const uint64_t udpTxChunkPerFrameX100 =
             (udpTxFrames > 0) ? ((udpTxChunks * 100ULL) / udpTxFrames) : 0;
+        const uint64_t senderSendCountNow = senderSendCount.load(std::memory_order_relaxed);
+        const uint64_t senderSendDurAvgUs =
+            (senderSendCountNow > 0)
+                ? (senderSendDurSumUs.load(std::memory_order_relaxed) / senderSendCountNow)
+                : 0;
         std::cout << "[native-video-host] encodedFrames=" << encodedFrames
                   << " sentFrames=" << sentFrames
                   << " queuePushCount=" << queuePushCount
@@ -6283,6 +6411,9 @@ int main(int argc, char** argv) {
                   << " udpTxBytes=" << udpTxBytes
                   << " udpTxFail=" << udpTxFail
                   << " udpTxNoPeer=" << udpTxNoPeer
+                  << " senderQueueDrops=" << senderDropCount.load(std::memory_order_relaxed)
+                  << " senderSendDurAvgUs=" << senderSendDurAvgUs
+                  << " senderSendDurMaxUs=" << senderSendDurMaxUs.load(std::memory_order_relaxed)
                   << " bitrateTarget=" << activeBitrate
                   << " fpsTarget=" << activeFps
                   << " keyintTarget=" << activeKeyint
@@ -6675,6 +6806,10 @@ int main(int argc, char** argv) {
   // Stop the readback worker while everything its publish callback touches is still alive;
   // relying on destructor order would tear down FrameState first.
   captureReadback.Shutdown();
+  // The sender still holds clientSock; stop it before the socket closes.
+  senderStop.store(true, std::memory_order_release);
+  senderCv.notify_all();
+  if (senderThread.joinable()) senderThread.join();
   if (clientSock != INVALID_SOCKET) {
     closesocket(clientSock);
     clientSock = INVALID_SOCKET;

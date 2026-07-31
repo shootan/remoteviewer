@@ -5151,3 +5151,39 @@ H3 A/B (1080p-scroll Release, 건강한 드라이버)
   않는다(기본 OFF + 자동 폴백 유지가 정답). 어제의 드라이버 붕괴 연쇄에도 H3 개발 중
   테스트가 기여했을 가능성이 높다.
 - H3 재평가 조건: 외장 NVENC/QSV GPU 머신에서 프로브 통과 시.
+
+
+### 218) 2026-07-31 H4 전송/pacing 분리 - 인코드 스레드에서 와이어를 떼어냄
+
+작업 ID: H4
+
+변경 파일
+- `apps/native_poc/src/native_video_host_main.cpp`
+
+변경 전 문제
+- 인코드→패킷화→pacing 대기→sendto가 전부 인코드 스레드 인라인이라, 20Mbps pacing
+  기준 키프레임 하나가 최대 60~96ms 동안 다음 인코드 시작을 직접 막았다
+  (queue-to-send 평균 45~52ms).
+
+구현 내용
+- UDP h264 경로에 전송 스레드 + 깊이 2 큐. 인코드 스레드는 enqueue 후 즉시 다음
+  프레임으로. 드랍 정책: (1) 키프레임 도착 시 백로그 전체 폐기(새 IDR이 이전 프레임을
+  무의미화), (2) 델타가 백로그를 넘치면 백로그 폐기 + keyframe 재동기 요청 - 인코딩된
+  델타를 조용히 건너뛰면 참조 체인이 깨지므로 반드시 IDR로 복구한다.
+- UDP 피어는 senderMu로 보호된 복사본(최초 Hello + pump_udp_hello 갱신). 전송 실패는
+  기존 인라인 정책 그대로(무한 세션은 피어 re-Hello 대기). 종료 시 clientSock을 닫기
+  전에 sender join.
+- 지표: senderQueueDrops / senderSendDurAvg·MaxUs 추가, udpTx 카운터는 sender 소유로
+  이관. queueToSendUs의 의미는 "enqueue까지"로 변경(전송은 병렬).
+
+실행한 build/test
+- 단위 3스위트 + e2e 13체크 ALL PASS. 첫 e2e에서 video FAIL 1건 - 최초 Hello 수락
+  지점의 sender 피어 복사 누락이 원인, 수정 후 ALL PASS.
+
+Before/After (1080p-scroll Release 5회, 오늘 H4-off 대비)
+- DEC 22.3~23.4 → **26.1~26.6fps (+14%, 목표 27 사실상 도달)**
+- LAT_P95 2~18ms → 0.8~5.2ms
+- 인코드 스레드의 전송 구간 45~52ms → 11.3ms(핸드오프+인코드), 와이어 12.3ms는 병렬
+- MBPS 5.4 → 6.2 (더 많은 프레임 출하), PRESENT_GAP 0
+- Host CPU 65 → 72~78%: 초당 인코드 프레임 증가분의 정직한 비용(프레임당 비용 유사)
+- senderQueueDrops 5회/10초: 키프레임 supersede + 재동기 정상 작동
