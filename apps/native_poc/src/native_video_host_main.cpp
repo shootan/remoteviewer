@@ -2673,6 +2673,10 @@ int main(int argc, char** argv) {
   std::deque<EncodedSendItem> senderQueue;
   sockaddr_in senderPeer{};
   bool senderPeerReady = false;
+  // After a backlog drop every delta references frames that never went out; shipping them
+  // paints macroblock corruption on the client until the next IDR. They are held back here
+  // until the requested keyframe actually passes through.
+  bool senderWaitingForKey = false;
   std::atomic<bool> senderStop{false};
   std::atomic<bool> senderSendFailed{false};
   std::atomic<bool> senderRequestKey{false};
@@ -5879,7 +5883,9 @@ int main(int argc, char** argv) {
         hdr.sendQpcUs = sendStartUs;
 
         bool sentOk = false;
+        bool enqueuedForSend = false;
         if (transport == VideoTransport::Tcp) {
+          enqueuedForSend = true;
           sentOk = send_all_timed(clientSock, &hdr, sizeof(hdr), &sendPathStats.headerUs,
                                   &sendPathStats.headerCallCount) &&
                    send_all_timed(clientSock, au.bytes.data(), au.bytes.size(), &sendPathStats.payloadUs,
@@ -5910,19 +5916,30 @@ int main(int argc, char** argv) {
             {
               std::lock_guard<std::mutex> lk(senderMu);
               if (item.keyFrame) {
-                // A new IDR makes every queued frame irrelevant.
+                // A new IDR makes every queued frame irrelevant and re-anchors the stream.
                 senderDropCount.fetch_add(senderQueue.size(), std::memory_order_relaxed);
                 senderQueue.clear();
-              } else if (senderQueue.size() >= 2) {
-                // Backlogged: ship nothing stale, ask for a keyframe to resync instead of
-                // silently skipping a delta and corrupting the reference chain.
-                senderDropCount.fetch_add(senderQueue.size(), std::memory_order_relaxed);
-                senderQueue.clear();
+                senderWaitingForKey = false;
+                senderQueue.push_back(std::move(item));
+                enqueuedForSend = true;
+              } else if (senderWaitingForKey) {
+                // This delta references dropped frames; sending it would decode into
+                // block garbage. Hold everything until the forced keyframe arrives.
+                senderDropCount.fetch_add(1, std::memory_order_relaxed);
                 senderRequestKey.store(true, std::memory_order_release);
+              } else if (senderQueue.size() >= 2) {
+                // Backlogged: drop the stale frames AND this delta -- it references what
+                // was just dropped -- then resync with a fresh IDR.
+                senderDropCount.fetch_add(senderQueue.size() + 1, std::memory_order_relaxed);
+                senderQueue.clear();
+                senderWaitingForKey = true;
+                senderRequestKey.store(true, std::memory_order_release);
+              } else {
+                senderQueue.push_back(std::move(item));
+                enqueuedForSend = true;
               }
-              senderQueue.push_back(std::move(item));
             }
-            senderCv.notify_one();
+            if (enqueuedForSend) senderCv.notify_one();
             sentOk = true;
           }
         }
@@ -5947,7 +5964,7 @@ int main(int argc, char** argv) {
             selectionFirstKeyframeDropCount = 0;
           }
           // UDP tx counters are owned by the sender thread now; nothing to count here.
-          if (frameGatingEnabled && payload && !payload->empty()) {
+          if (frameGatingEnabled && enqueuedForSend && payload && !payload->empty()) {
             frameGatingLastSentUs = sendStartUs;
             frameGatingRefPayload = payload;
             frameGatingRefW = w;
