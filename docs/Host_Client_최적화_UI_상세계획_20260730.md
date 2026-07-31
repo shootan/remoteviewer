@@ -1,9 +1,23 @@
 # Host / Client 최적화·UI 상세 구현 계획
 
 - 작성일: 2026-07-30
+- 현행화: 2026-07-31 (F1 결함 해소·U2 Android 뷰어 현황 반영)
 - 기준 감사: `docs/Host_Client_최적화_UI_감사_20260730.md`
 - 상태: 구현 전 계획
 - 적용 대상: Host 관리 앱, 영상 Host, Windows Client, Android GNLink Client, Directory/UDP 보안
+
+## 0. 현행화 메모 (2026-07-31)
+
+이 계획이 참조하는 감사 이후 다음이 이미 반영됐다. 해당 절은 다시 구현하지 않는다.
+
+- 검은 화면 결함은 Host 쪽에서 해소됐다(`bf19eee`). 새 제어 세션이 시작되면 스트림을 기본
+  활성으로 복원하고, UDP 리더 스레드가 길이 0 데이터그램·비정상 recv 오류에 죽지 않게 됐다.
+  F1은 결함 수정이 아니라 절전용 선택 과제로 축소됐다. 4장 참조.
+- Android 뷰어 UI가 사용자 결정으로 크게 바뀌었다: 좌측 존 바(우클릭/태블릿+잠금/마우스),
+  태블릿 모드 자연 스크롤, 화면 마우스 클러스터 고정·드래그 배치, 레일 축소(MOUSE/LOG 제거,
+  로그는 MENU로), 세로 회전 레이아웃 수정. U2의 Android 뷰어 항목은 15장의 현행 기준을 따른다.
+- 매크로는 일시정지/스텝 편집/저장·불러오기와 Windows 매크로 창까지 완료됐고 엔진 테스트는
+  46개다(감사 시점 23개).
 
 ## 1. 목표
 
@@ -53,7 +67,7 @@
 
 | 순서 | 작업 ID | 내용 | 선행조건 |
 |---:|---|---|---|
-| 1 | F1 | Windows stream-state 검은 화면 수정 | 없음 |
+| 1 | F1 | (결함은 해소됨) Windows stream-state 절전 동기화 | 없음 |
 | 2 | U1 | Host signed-in UI 수정 | 없음 |
 | 3 | B1 | Release 성능 기준선·격리 실행기 고정 | 없음 |
 | 4 | H1 | callback copy-only + worker readback ring | B1 |
@@ -72,16 +86,28 @@
 `S1`, `S2`는 구현 순서상 뒤에 있어도 외부 공개 기준으로는 P0이다. 완료 전 인터넷 제품 배포를
 허용하지 않는다.
 
-## 4. F1 — Windows stream-state 검은 화면 수정
+## 4. F1 — Windows stream-state 절전 동기화 (검은 화면 결함은 해소됨)
 
-### 현재 원인
+### 2026-07-31 현행화
+
+감사가 지목한 검은 화면 결함은 Host 쪽 수정으로 해소됐다(`bf19eee`).
+
+- Host는 새 제어 세션이 시작될 때 스트림을 기본 활성으로 복원한다. stream-state 메시지를
+  보내지 않는 Windows Client도 재연결 후 영상을 받는다.
+- 같은 커밋에서 UDP 리더 스레드가 길이 0 데이터그램(NAT keepalive, 포트 스캐너)이나 알 수
+  없는 recv 오류로 조용히 종료하던 문제도 고쳐졌다. 리더가 죽으면 Hello를 읽지 못해 영상
+  피어를 새 클라이언트로 넘기지 못했고, 이것이 "제어는 되는데 영상은 검다"의 다른 절반이었다.
+- 재현 검증: A 스트리밍 → 길이 0 데이터그램 주입 → A 강제 종료 → B 접속만으로 영상 수신.
+
+따라서 이 절의 남은 범위는 결함 수정이 아니라 **절전 동기화**다: Windows Client가 대상 목록에
+있는 동안 Host가 인코딩을 계속하는 것을 멈추게 한다. 우선순위는 낮으며 C1과 묶어 진행해도 된다.
+
+### 남은 원인 (절전 관점)
 
 `apps/native_poc/src/native_video_client_main.cpp`의 `gStreamStateControl`은
 `ClientControlScheduler`에 연결돼 있지만 Windows UI에서 `Request()`를 호출하지 않는다.
-이미 선택된 Desktop을 클릭하면 `gWindowPickerVisible=false`만 적용된다. Host는 목록 화면에서
-stream inactive 상태이므로 viewer가 검은 화면이 된다.
-
-Android의 `ClientSessionController::RequestStreamActive()`는 이미 올바른 비교 기준이다.
+Host가 세션 시작 시 스트림을 켜 주므로 영상은 나오지만, 목록 화면에서도 인코딩과 전송이
+계속된다. Android의 `ClientSessionController::RequestStreamActive()`가 비교 기준이다.
 
 ### 수정 파일
 
@@ -623,21 +649,19 @@ queue하지 않는다. 주석과 달리 다음 list roundtrip에서도 세션 ca
 - DXGI/WGC와 raw bitrate/fps는 `고급 설정`에 배치
 - 적용 결과는 성공/실패/현재값으로 구분
 
-### Android viewer
+### Android viewer (2026-07-31 현행 기준)
 
-- landscape rail primary action:
-  - Back
-  - Keyboard
-  - Mouse
-  - More
-- More 메뉴:
-  - Scroll mode
-  - special keys
-  - macro
-  - rotate
-  - quality
-  - diagnostics log
-- 최소 48dp touch target과 TalkBack content description 유지
+아래는 이미 구현된 현행 구조이며, 계획 초안의 rail/More 재편안은 사용자 결정으로 폐기됐다.
+
+- 좌측 존 바: 우클릭(홀드) / 태블릿(홀드, 🔒 잠금 버튼으로 고정 가능) / 마우스(탭)
+  - 세로 모드에서는 상단 가로 띠로 재배치된다
+- 태블릿 모드 스크롤은 자연 방향(내용이 손가락을 따라옴)
+- 화면 마우스: 화살표만 포인터를 따라가고, 버튼 클러스터는 고정·드래그 배치
+- rail: 목록 / 키보드 / 매크로 / KEYS / ROTATE / MENU
+  - 진단 로그는 MENU(빠른 설정) 안으로 이동, SCROLL·MOUSE·LOG 버튼은 제거됨
+- 남은 개선 항목:
+  - 최소 48dp touch target과 TalkBack content description 점검
+  - 품질 preset의 MENU 노출 정리 (현재 MENU에 preset 3종 존재)
 
 ### UI 완료 기준
 
