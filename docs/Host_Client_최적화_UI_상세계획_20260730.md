@@ -789,6 +789,10 @@ H1~H3과 C1 후에도 Windows Client CPU가 단일 코어 환산 15% 이상이�
    - VIEWER stable: 500ms
 7. selection timeout과 stall 판단은 시간이 지나야 하므로 version이 같아도 timer 판단은 실행한다.
 8. macro playback 16ms runnable은 status poll과 분리된 현재 구조를 유지한다.
+9. `renderViewerScene()`을 VIEWER/SWITCHING 전용으로 바꾸면 stall tracker
+   (`lastVideoOutputPtsUs`/`lastVideoOutputSeenUs`)가 비뷰어 씬에서 갱신을 멈추므로,
+   viewer 재진입 transition에서 두 값을 리셋해 이전 세션 잔존값으로 인한 1-tick
+   가짜 stall overlay를 막는다.
 
 ### 완료 기준
 
