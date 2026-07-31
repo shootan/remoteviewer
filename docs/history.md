@@ -5198,3 +5198,12 @@ Before/After (1080p-scroll Release 5회, 오늘 H4-off 대비)
   폴백). 하네스는 픽커 화면이라 present 경로를 측정하지 못함 - fps 무변화 확인 +
   뷰어 컬러 블록 시각 검증으로 무회귀 확인. present 비용 개선은 구조상 이득(블릿 제거,
   DWM 참조 합성)이며 인터랙티브 실사용 대상.
+
+
+### 220) 2026-07-31 제품 호스트 신 바이너리 교체 + host_app 로그 공유 열기 수정
+
+- build-local Release 재빌드(host_app/host_poc/client_poc) 후 실호스트 재시작. 새 child가
+  tune=low_latency 명시로 기동, directory online 등록 확인 - Q1/H1/H2/H4/C1이 이제 실제
+  제품 경로에서 동작한다.
+- U1 후속 결함 수정: host_app.log를 _SH_DENYNO 공유로 열도록 변경 - 이전에는 스트리밍
+  중 Open log 버튼/외부 tail이 잠겨서 읽지 못했다(실사용에서 발견).

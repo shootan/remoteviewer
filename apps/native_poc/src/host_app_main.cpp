@@ -221,9 +221,9 @@ class StreamingHostProcess {
   FILE* OpenLog() {
     const std::wstring path = log_file_path();
     if (path.empty()) return nullptr;
-    FILE* f = nullptr;
-    _wfopen_s(&f, path.c_str(), L"ab");
-    return f;
+    // Shared open: the whole point of this file is reading it while the host runs, and the
+    // Open log button (or a curious tail) must not be locked out by our writer handle.
+    return _wfsopen(path.c_str(), L"ab", _SH_DENYNO);
   }
 
   void ReadChildOutput(HANDLE readEnd, FILE* log) {
