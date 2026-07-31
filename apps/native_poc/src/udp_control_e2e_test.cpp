@@ -105,6 +105,23 @@ int main(int argc, char** argv) {
   check("video still flows while control shares the socket", videoFlowed,
         "frames=" + std::to_string(sink.frames()) + " bytes=" + std::to_string(sink.bytes()));
 
+  // Runtime bitrate changes used to leave the encoder with a hardcoded 110%/130% peak and a
+  // stale pacing budget. The host applies these asynchronously; the assertion here is that
+  // both requests go out and the session survives them, and the host log carries the
+  // "rate-control reason=reconfigure" and "pacing update" lines a harness can grep.
+  // The control loop ticks every 200ms; disconnecting immediately after the request would
+  // tear the session down before the tune message ever left, which is exactly the false-pass
+  // this block exists to avoid. Two requests with a real gap also prove the second change
+  // does not coalesce away the first.
+  check("runtime bitrate down request accepted", controller.RequestRuntimeConfig(4000000, 30));
+  std::this_thread::sleep_for(std::chrono::milliseconds(800));
+  check("session survives bitrate downshift",
+        controller.Snapshot().state == ClientSessionState::Connected);
+  check("runtime bitrate up request accepted", controller.RequestRuntimeConfig(10000000, 30));
+  std::this_thread::sleep_for(std::chrono::milliseconds(800));
+  check("session survives bitrate upshift",
+        controller.Snapshot().state == ClientSessionState::Connected);
+
   // Input is the latency-sensitive traffic; it must survive the same path.
   bool inputOk = true;
   for (int i = 0; i < 20; ++i) {

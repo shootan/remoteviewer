@@ -74,6 +74,7 @@ class H264Encoder {
  private:
   bool configure_types();
   void apply_low_latency_codec_api();
+  bool apply_rate_control(const char* reason);
   void report_sps_profile_once(const uint8_t* data, size_t size);
 
   Microsoft::WRL::ComPtr<IMFTransform> enc_;

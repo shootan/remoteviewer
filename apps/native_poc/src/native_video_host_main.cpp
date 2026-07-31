@@ -3754,6 +3754,18 @@ int main(int argc, char** argv) {
     activeKeyint = targetKeyint;
     inputDomainW.store(activeEncodeW, std::memory_order_release);
     inputDomainH.store(activeEncodeH, std::memory_order_release);
+    // The pacing budget follows the active bitrate. It used to be computed once at startup,
+    // so after an ABR downshift frames kept leaving at the launch rate (bursts the network
+    // just asked us to stop), and after an upshift sends were throttled below the new rate.
+    const uint64_t pacePeakBps =
+        (static_cast<uint64_t>(activeBitrate) * udpPacePeakPercent) / 100ULL;
+    const uint32_t pacePeakBpsClamped =
+        static_cast<uint32_t>(std::min<uint64_t>(pacePeakBps, 4000000000ULL));
+    if (gUdpPacePeakBitrateBps.load(std::memory_order_relaxed) != pacePeakBpsClamped) {
+      gUdpPacePeakBitrateBps.store(pacePeakBpsClamped, std::memory_order_relaxed);
+      std::cout << "[native-video-host] pacing update udpPacePeakBps=" << pacePeakBpsClamped
+                << " bitrate=" << activeBitrate << "\n";
+    }
     refresh_frame_intervals();
     return true;
   };

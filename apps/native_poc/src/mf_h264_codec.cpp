@@ -1343,12 +1343,31 @@ void H264Encoder::apply_low_latency_codec_api() {
   (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVEncCommonLowLatency, true);
   (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVEncCommonRealTime, true);
 
-  // Screen content is bursty: a text-heavy scene change needs several times the average
-  // bitrate for one frame, and strict CBR cannot give it. The encoder's only remaining lever
-  // is quantiser, so it blurs the text to fit the budget and then sharpens again over the
-  // following second. Peak-constrained VBR lets that frame borrow bits instead, and a
-  // quantiser ceiling stops it degrading past legibility even when the peak is exhausted.
-  // Set REMOTE60_NATIVE_RATE_CONTROL=cbr to restore the old behaviour.
+  (void)apply_rate_control("init");
+
+  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVDefaultBPictureCount, 0);
+  (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVEncMPVGOPOpen, false);
+  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVGOPSize, std::max<uint32_t>(1, keyint_));
+  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonQualityVsSpeed, stableTextTune_ ? 68u : 100u);
+}
+
+/**
+ * One rate-control policy for the whole encoder lifetime.
+ *
+ * Screen content is bursty: a text-heavy scene change needs several times the average
+ * bitrate for one frame, and strict CBR cannot give it. The encoder's only remaining lever
+ * is quantiser, so it blurs the text to fit the budget and then sharpens again over the
+ * following second. Peak-constrained VBR lets that frame borrow bits instead, and a
+ * quantiser ceiling stops it degrading past legibility even when the peak is exhausted.
+ * Set REMOTE60_NATIVE_RATE_CONTROL=cbr to restore the old behaviour.
+ *
+ * Runtime bitrate changes go through here too: the old reconfigure path hardcoded a
+ * 110%/130% peak, so the first settings change silently cut the scene-change headroom to a
+ * third and text degraded only after a change -- the policy must not depend on when the
+ * bitrate was set.
+ */
+bool H264Encoder::apply_rate_control(const char* reason) {
+  if (!enc_) return false;
   const bool useCbr = env_string_equals_ci("REMOTE60_NATIVE_RATE_CONTROL", "cbr");
   const uint32_t peakMultiplierPercent =
       env_u32_or("REMOTE60_NATIVE_PEAK_BITRATE_PERCENT", useCbr ? 110u : 300u);
@@ -1362,9 +1381,10 @@ void H264Encoder::apply_low_latency_codec_api() {
       enc_.Get(), CODECAPI_AVEncCommonRateControlMode,
       useCbr ? eAVEncCommonRateControlMode_CBR
              : eAVEncCommonRateControlMode_PeakConstrainedVBR);
-  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMeanBitRate, bitrate_);
-  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMaxBitRate, maxBitrate);
-  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonBufferSize, vbvBytes);
+  bool ok = true;
+  ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMeanBitRate, bitrate_) && ok;
+  ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMaxBitRate, maxBitrate) && ok;
+  ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonBufferSize, vbvBytes) && ok;
 
   // 0 disables the ceiling. 32 keeps small text readable; higher values blur sooner.
   const uint32_t maxQp = env_u32_or("REMOTE60_NATIVE_MAX_QP", 32u);
@@ -1373,21 +1393,19 @@ void H264Encoder::apply_low_latency_codec_api() {
     qpSet = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncVideoMaxQP, maxQp);
   }
 
-  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVDefaultBPictureCount, 0);
-  (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVEncMPVGOPOpen, false);
-  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVGOPSize, std::max<uint32_t>(1, keyint_));
-  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonQualityVsSpeed, stableTextTune_ ? 68u : 100u);
-
   // Not every MFT honours these, and a rejected call leaves the previous mode in place, so
   // report what actually stuck rather than what was asked for.
-  std::cout << "[native-video-host] h264 rate-control mode=" << (useCbr ? "cbr" : "vbr_peak")
+  std::cout << "[native-video-host] h264 rate-control reason=" << reason
+            << " mode=" << (useCbr ? "cbr" : "vbr_peak")
             << " modeAccepted=" << (rcSet ? 1 : 0)
             << " mean=" << bitrate_
             << " peak=" << maxBitrate
             << " vbvBytes=" << vbvBytes
             << " maxQp=" << maxQp
             << " maxQpAccepted=" << (qpSet ? 1 : 0)
+            << " valuesAccepted=" << (ok ? 1 : 0)
             << "\n";
+  return ok;
 }
 
 bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint32_t bitrate, uint32_t keyint) {
@@ -1496,19 +1514,9 @@ void H264Encoder::report_sps_profile_once(const uint8_t* data, size_t size) {
 }
 
 bool H264Encoder::reconfigure_bitrate(uint32_t bitrate) {
+  if (!enc_) return false;
   bitrate_ = std::max<uint32_t>(100000, bitrate);
-  bool ok = true;
-  ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMeanBitRate, bitrate_) && ok;
-  ok = set_codecapi_u32(
-           enc_.Get(), CODECAPI_AVEncCommonMaxBitRate,
-           stableTextTune_ ? std::max<uint32_t>(bitrate_, (bitrate_ * 13) / 10)
-                           : std::max<uint32_t>(bitrate_, (bitrate_ * 11) / 10)) &&
-       ok;
-  ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonBufferSize,
-                        stableTextTune_ ? stable_text_vbv_bytes(bitrate_)
-                                        : low_latency_vbv_bytes(bitrate_)) &&
-       ok;
-  return ok;
+  return apply_rate_control("reconfigure");
 }
 
 bool H264Encoder::encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFrame, int64_t inputSampleTimeHns,

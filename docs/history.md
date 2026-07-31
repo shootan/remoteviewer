@@ -4760,3 +4760,44 @@ fallback/부작용: aperture가 없거나 비정상인 디코더에서는 coded 
 미완료: 없음.
 
 다음 작업: Q1-2 rate-control/pacing 동기화.
+
+### 207) 2026-07-31 Q1-2 runtime bitrate의 rate-control·UDP pacing 동기화
+
+작업 ID: Q1-2
+
+변경 파일
+- `apps/native_poc/src/mf_h264_codec.hpp/.cpp`
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `apps/native_poc/src/udp_control_e2e_test.cpp`
+
+변경 전 문제
+- 초기화는 env 정책(PeakConstrainedVBR, peak 300%/CBR 110%, tune별 VBV)을 쓰는데
+  `reconfigure_bitrate()`는 peak를 110%/130%로 하드코딩해, 런타임 설정/ABR로 bitrate만
+  바뀌면 scene-change 비트 여유가 1/3 이하로 조용히 무너졌다.
+- `gUdpPacePeakBitrateBps`는 시작 시 한 번만 계산돼 ABR 하향 후 과도 burst, 상향 후
+  불필요한 전송 지연을 만들었다.
+
+구현 내용
+- `H264Encoder::apply_rate_control(reason)` 공용 함수로 mode/mean/peak/VBV/MaxQP 정책을
+  일원화. 초기화와 `reconfigure_bitrate()`가 같은 정책을 적용하고 reason과 수용 여부를
+  로그로 남긴다.
+- `apply_encoder_target()` 성공 시 active bitrate × udpPacePeakPercent로
+  `gUdpPacePeakBitrateBps`를 재계산·갱신(변경 시 로그).
+- e2e 테스트에 runtime bitrate 8M→4M→10M 시나리오 추가. 제어 틱(200ms)이 메시지를
+  보내기 전에 세션을 닫으면 거짓 통과가 되므로 요청 후 800ms 대기.
+
+실행한 build/test
+- e2e 13체크 ALL PASS(격리 포트 44100). 호스트 로그 검증:
+  init 8M: peak=24M(300%) vbv=200000 / 4M 적용: peak=12M(300%) vbv=100000,
+  pacing 10M(250%) / 10M reconfigure: peak=30M(300%) vbv=250000, pacing 25M(250%).
+  변경 전엔 4M 변경 시 peak가 4.4M(110%)로 떨어졌을 값이다.
+
+Before/After 지표: 정합성 작업. 화질 영향은 "변경 직후 텍스트 뭉개짐" 소멸로 나타나며
+Q1 재기준선에서 회귀 없음을 확인한다.
+
+fallback/부작용: keyint/fps가 함께 바뀌면 기존대로 encoder 재초기화 경로(init reason)를
+탄다 - 정책은 동일하게 적용된다.
+
+미완료: 없음.
+
+다음 작업: Q1-3 제품 encoder tune 명시.
