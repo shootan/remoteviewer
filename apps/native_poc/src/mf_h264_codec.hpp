@@ -67,6 +67,11 @@ class H264Encoder {
   bool reconfigure_bitrate(uint32_t bitrate);
   bool encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFrame, int64_t inputSampleTimeHns,
                     std::vector<H264AccessUnit>* outUnits, H264EncodeFrameStats* encodeStats = nullptr);
+  /** Zero-copy variant: wraps an NV12 texture in a DXGI surface buffer. The texture must not
+   *  be written again until the MFT releases it (tracked by the caller). */
+  bool encode_frame_surface(ID3D11Texture2D* texture, bool forceKeyFrame,
+                            int64_t inputSampleTimeHns, std::vector<H264AccessUnit>* outUnits,
+                            H264EncodeFrameStats* encodeStats = nullptr);
   const char* backend_name() const { return backendName_; }
   bool using_hardware() const { return usingHardware_; }
   void shutdown();
@@ -75,6 +80,9 @@ class H264Encoder {
   bool configure_types();
   void apply_low_latency_codec_api();
   bool apply_rate_control(const char* reason);
+  bool encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime, bool forceKeyFrame,
+                            std::vector<H264AccessUnit>* outUnits,
+                            H264EncodeFrameStats* encodeStats, uint64_t encodeCallStartUs);
   void report_sps_profile_once(const uint8_t* data, size_t size);
 
   Microsoft::WRL::ComPtr<IMFTransform> enc_;

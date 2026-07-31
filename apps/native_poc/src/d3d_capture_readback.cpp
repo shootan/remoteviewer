@@ -82,7 +82,12 @@ bool D3dCaptureReadbackPipeline::Initialize(ID3D11Device* device, ID3D11DeviceCo
                                             std::mutex* contextMu, uint32_t width,
                                             uint32_t height, uint32_t slotCount,
                                             PublishFn publish) {
-  if (!device || !context || !contextMu || !publish || slotCount == 0) return false;
+  if (!device || !context || !contextMu || !publish || slotCount == 0) {
+    std::fprintf(stderr,
+                 "[readback] init precondition failed dev=%d ctx=%d mu=%d publish=%d slots=%u\n",
+                 device ? 1 : 0, context ? 1 : 0, contextMu ? 1 : 0, publish ? 1 : 0, slotCount);
+    return false;
+  }
   Shutdown();
   device_ = device;
   context_ = context;
@@ -115,10 +120,21 @@ bool D3dCaptureReadbackPipeline::CreateSlotsLocked(uint32_t width, uint32_t heig
     desc.SampleDesc.Count = 1;
     desc.Usage = D3D11_USAGE_STAGING;
     desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    if (FAILED(device_->CreateTexture2D(&desc, nullptr, &slot.staging))) return false;
+    const HRESULT texHr = device_->CreateTexture2D(&desc, nullptr, &slot.staging);
+    if (FAILED(texHr)) {
+      std::fprintf(stderr, "[readback] staging create failed hr=0x%08lx removed=0x%08lx\n",
+                   static_cast<unsigned long>(texHr),
+                   static_cast<unsigned long>(device_->GetDeviceRemovedReason()));
+      return false;
+    }
     D3D11_QUERY_DESC queryDesc{};
     queryDesc.Query = D3D11_QUERY_EVENT;
-    if (FAILED(device_->CreateQuery(&queryDesc, &slot.query))) return false;
+    const HRESULT queryHr = device_->CreateQuery(&queryDesc, &slot.query);
+    if (FAILED(queryHr)) {
+      std::fprintf(stderr, "[readback] query create failed hr=0x%08lx\n",
+                   static_cast<unsigned long>(queryHr));
+      return false;
+    }
   }
   return true;
 }
@@ -206,7 +222,84 @@ bool D3dCaptureReadbackPipeline::EnsurePreprocessLocked(uint32_t srcW, uint32_t 
   vpSrcH_ = srcH;
   vpDstW_ = dstW;
   vpDstH_ = dstH;
+  ++vpConfigVersion_;
   return true;
+}
+
+void D3dCaptureReadbackPipeline::SetNv12Enabled(bool enabled) {
+  std::lock_guard<std::mutex> lk(slotMu_);
+  nv12Enabled_ = enabled;
+}
+
+bool D3dCaptureReadbackPipeline::EnsureNv12Locked(uint32_t outW, uint32_t outH) {
+  if (nv12Broken_ || !vpEnumerator_) return false;
+  constexpr size_t kNv12Slots = 4;
+  if (!nv12Slots_.empty() && nv12W_ == outW && nv12H_ == outH &&
+      nv12ViewsConfigVersion_ == vpConfigVersion_) {
+    return true;
+  }
+  UINT formatSupport = 0;
+  if (FAILED(vpEnumerator_->CheckVideoProcessorFormat(DXGI_FORMAT_NV12, &formatSupport)) ||
+      (formatSupport & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT) == 0) {
+    nv12Broken_ = true;
+    return false;
+  }
+  // A new generation invalidates every outstanding slot reference; late releases with the
+  // old generation become no-ops.
+  ++nv12Generation_;
+  nv12Slots_.clear();
+  nv12Slots_.resize(kNv12Slots);
+  for (auto& slot : nv12Slots_) {
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = outW;
+    desc.Height = outH;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_NV12;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(device_->CreateTexture2D(&desc, nullptr, &slot.texture))) {
+      nv12Slots_.clear();
+      nv12Broken_ = true;
+      return false;
+    }
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outView{};
+    outView.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+    if (FAILED(videoDevice_->CreateVideoProcessorOutputView(slot.texture.Get(),
+                                                            vpEnumerator_.Get(), &outView,
+                                                            &slot.outputView))) {
+      nv12Slots_.clear();
+      nv12Broken_ = true;
+      return false;
+    }
+  }
+  nv12W_ = outW;
+  nv12H_ = outH;
+  nv12ViewsConfigVersion_ = vpConfigVersion_;
+  return true;
+}
+
+void D3dCaptureReadbackPipeline::ReleaseNv12SlotLocked(int32_t slot, uint64_t generation) {
+  if (slot < 0 || generation != nv12Generation_) return;
+  if (static_cast<size_t>(slot) < nv12Slots_.size()) {
+    nv12Slots_[static_cast<size_t>(slot)].busy = false;
+  }
+}
+
+void D3dCaptureReadbackPipeline::ReleaseNv12Slot(int32_t slot, uint64_t generation) {
+  std::lock_guard<std::mutex> lk(slotMu_);
+  ReleaseNv12SlotLocked(slot, generation);
+}
+
+Microsoft::WRL::ComPtr<ID3D11Texture2D> D3dCaptureReadbackPipeline::Nv12SlotTexture(
+    int32_t slot, uint64_t generation) {
+  std::lock_guard<std::mutex> lk(slotMu_);
+  if (slot < 0 || generation != nv12Generation_ ||
+      static_cast<size_t>(slot) >= nv12Slots_.size()) {
+    return nullptr;
+  }
+  return nv12Slots_[static_cast<size_t>(slot)].texture;
 }
 
 bool D3dCaptureReadbackPipeline::Reconfigure(uint32_t width, uint32_t height) {
@@ -234,6 +327,10 @@ void D3dCaptureReadbackPipeline::Shutdown() {
   videoContext_.Reset();
   vpSrcW_ = vpSrcH_ = vpDstW_ = vpDstH_ = 0;
   preprocessBroken_ = false;
+  nv12Slots_.clear();
+  nv12W_ = nv12H_ = 0;
+  nv12Broken_ = false;
+  ++nv12Generation_;
   device_.Reset();
   context_.Reset();
   contextMu_ = nullptr;
@@ -252,6 +349,7 @@ bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrame
   bool preprocess = false;
   uint32_t outW = 0;
   uint32_t outH = 0;
+  Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> nv12OutView;
   {
     std::lock_guard<std::mutex> lk(slotMu_);
     if (meta.width != width_ || meta.height != height_) return false;
@@ -274,15 +372,38 @@ bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrame
     outH = outputH_;
     const bool sizeDiffers = (srcContentW != outW || srcContentH != outH);
     const bool cropNeeded = meta.cropActive;
-    if (outW >= 2 && outH >= 2 && (sizeDiffers || cropNeeded) && srcContentW >= outW &&
-        srcContentH >= outH && !preprocessBroken_) {
+    bool aspectOk = false;
+    if (outW >= 2 && outH >= 2 && srcContentW >= outW && srcContentH >= outH) {
       const int64_t aspectDelta =
           static_cast<int64_t>(srcContentW) * outH - static_cast<int64_t>(srcContentH) * outW;
       const int64_t aspectTolerance = static_cast<int64_t>((std::max)(outW, outH));
-      if (aspectDelta >= -aspectTolerance && aspectDelta <= aspectTolerance) {
-        preprocess = EnsurePreprocessLocked(meta.width, meta.height, outW, outH);
-        if (!preprocess) {
-          preprocessFallbacks_.fetch_add(1, std::memory_order_relaxed);
+      aspectOk = (aspectDelta >= -aspectTolerance && aspectDelta <= aspectTolerance);
+    }
+    if (aspectOk && (sizeDiffers || cropNeeded) && !preprocessBroken_) {
+      preprocess = EnsurePreprocessLocked(meta.width, meta.height, outW, outH);
+      if (!preprocess) {
+        preprocessFallbacks_.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+    // NV12 conversion also covers the same-size case (color conversion only). The slot stays
+    // busy until the frame consumer releases it, so a full ring simply means this frame
+    // encodes from CPU bytes.
+    if (nv12Enabled_ && !nv12Broken_ && aspectOk) {
+      if (EnsurePreprocessLocked(meta.width, meta.height, outW, outH) &&
+          EnsureNv12Locked(outW, outH)) {
+        for (size_t i = 0; i < nv12Slots_.size(); ++i) {
+          if (!nv12Slots_[i].busy) {
+            nv12Slots_[i].busy = true;
+            slotMeta.nv12Slot = static_cast<int32_t>(i);
+            slotMeta.nv12Generation = nv12Generation_;
+            slotMeta.nv12W = outW;
+            slotMeta.nv12H = outH;
+            nv12OutView = nv12Slots_[i].outputView;
+            break;
+          }
+        }
+        if (slotMeta.nv12Slot < 0) {
+          nv12RingBusy_.fetch_add(1, std::memory_order_relaxed);
         }
       }
     }
@@ -326,7 +447,8 @@ bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrame
     const uint64_t lockAcquiredUs = qpc_us();
     lockWaitUs = lockAcquiredUs - lockWaitStartUs;
     bool preprocessedOk = false;
-    if (preprocess) {
+    bool nv12Ok = false;
+    if (preprocess || nv12OutView) {
       // Crop and scale in one blt: source rect selects the window client area, the
       // destination is the whole encode-size texture. Own-texture copy first, because
       // capture textures do not reliably accept video processor input views.
@@ -336,7 +458,7 @@ bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrame
       srcRect.top = static_cast<LONG>(slotMeta.cropY);
       srcRect.right = static_cast<LONG>(slotMeta.cropX + slotMeta.cropW);
       srcRect.bottom = static_cast<LONG>(slotMeta.cropY + slotMeta.cropH);
-      if (!slotMeta.cropW || !slotMeta.cropH) {
+      if (!preprocess || !slotMeta.cropW || !slotMeta.cropH) {
         srcRect = RECT{0, 0, static_cast<LONG>(meta.width), static_cast<LONG>(meta.height)};
       }
       RECT dstRect{0, 0, static_cast<LONG>(outW), static_cast<LONG>(outH)};
@@ -345,27 +467,45 @@ bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrame
       videoContext_->VideoProcessorSetStreamDestRect(vpProcessor_.Get(), 0, TRUE, &dstRect);
       videoContext_->VideoProcessorSetStreamFrameFormat(vpProcessor_.Get(), 0,
                                                         D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
-      // BGRA->BGRA: both ends full-range RGB, or the driver assumes studio range on one
-      // side and crushes levels. Auto-processing rings around UI text; keep it off.
-      D3D11_VIDEO_PROCESSOR_COLOR_SPACE colorSpace{};
-      colorSpace.RGB_Range = 0;
-      colorSpace.YCbCr_Matrix = 1;
-      colorSpace.Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255;
-      videoContext_->VideoProcessorSetStreamColorSpace(vpProcessor_.Get(), 0, &colorSpace);
-      videoContext_->VideoProcessorSetOutputColorSpace(vpProcessor_.Get(), &colorSpace);
+      // Input is full-range RGB either way. Leaving color spaces unset lets the driver
+      // assume studio range on one side and crush levels. Auto-processing rings around UI
+      // text; keep it off.
+      D3D11_VIDEO_PROCESSOR_COLOR_SPACE inputSpace{};
+      inputSpace.RGB_Range = 0;
+      inputSpace.YCbCr_Matrix = 1;
+      inputSpace.Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255;
+      videoContext_->VideoProcessorSetStreamColorSpace(vpProcessor_.Get(), 0, &inputSpace);
       videoContext_->VideoProcessorSetStreamAutoProcessingMode(vpProcessor_.Get(), 0, FALSE);
       D3D11_VIDEO_PROCESSOR_STREAM stream{};
       stream.Enable = TRUE;
       stream.pInputSurface = vpInputView_.Get();
-      if (SUCCEEDED(videoContext_->VideoProcessorBlt(vpProcessor_.Get(), vpOutputView_.Get(),
-                                                     0, 1, &stream))) {
-        D3D11_BOX box{0, 0, 0, outW, outH, 1};
-        context_->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, preDstTexture_.Get(), 0,
-                                        &box);
-        preprocessedOk = true;
-        preprocessCount_.fetch_add(1, std::memory_order_relaxed);
-      } else {
-        preprocessFallbacks_.fetch_add(1, std::memory_order_relaxed);
+
+      if (preprocess) {
+        videoContext_->VideoProcessorSetOutputColorSpace(vpProcessor_.Get(), &inputSpace);
+        if (SUCCEEDED(videoContext_->VideoProcessorBlt(vpProcessor_.Get(), vpOutputView_.Get(),
+                                                       0, 1, &stream))) {
+          D3D11_BOX box{0, 0, 0, outW, outH, 1};
+          context_->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, preDstTexture_.Get(), 0,
+                                          &box);
+          preprocessedOk = true;
+          preprocessCount_.fetch_add(1, std::memory_order_relaxed);
+        } else {
+          preprocessFallbacks_.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+      if (nv12OutView) {
+        // BGRA -> NV12 for the zero-copy encoder input: BT.709, limited range, matching
+        // what apply_video_colorimetry declares on the encoder input type.
+        D3D11_VIDEO_PROCESSOR_COLOR_SPACE nv12Space{};
+        nv12Space.RGB_Range = 0;
+        nv12Space.YCbCr_Matrix = 1;
+        nv12Space.Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235;
+        videoContext_->VideoProcessorSetOutputColorSpace(vpProcessor_.Get(), &nv12Space);
+        nv12Ok = SUCCEEDED(videoContext_->VideoProcessorBlt(vpProcessor_.Get(),
+                                                            nv12OutView.Get(), 0, 1, &stream));
+        if (nv12Ok) {
+          nv12Converted_.fetch_add(1, std::memory_order_relaxed);
+        }
       }
     }
     if (!preprocessedOk) {
@@ -377,11 +517,12 @@ bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrame
     // also submits the copy to the GPU before the DXGI duplication frame is released, which
     // preserves ordering against the next desktop update.
     context_->Flush();
-    if (preprocess && !preprocessedOk) {
-      // The blt failed after the meta was already stamped as preprocessed; fix it up so the
-      // worker reads capture-size bytes and applies the CPU crop.
+    if ((preprocess && !preprocessedOk) || (nv12OutView && !nv12Ok)) {
       std::lock_guard<std::mutex> lk(slotMu_);
-      if (generation_ == generationAtSubmit && slot->staging == staging) {
+      if (preprocess && !preprocessedOk && generation_ == generationAtSubmit &&
+          slot->staging == staging) {
+        // The blt failed after the meta was already stamped as preprocessed; fix it up so
+        // the worker reads capture-size bytes and applies the CPU crop.
         slot->meta.payloadW = meta.width;
         slot->meta.payloadH = meta.height;
         slot->meta.preprocessed = false;
@@ -389,6 +530,16 @@ bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrame
         slot->meta.cropY = meta.cropY;
         slot->meta.cropW = meta.cropW;
         slot->meta.cropH = meta.cropH;
+      }
+      if (nv12OutView && !nv12Ok) {
+        // One failed conversion disables the path for the session; retrying per frame would
+        // burn a blt per frame for nothing.
+        ReleaseNv12SlotLocked(slotMeta.nv12Slot, slotMeta.nv12Generation);
+        nv12Broken_ = true;
+        RB_DEBUG("nv12 blt failed; surface path disabled");
+        if (generation_ == generationAtSubmit && slot->staging == staging) {
+          slot->meta.nv12Slot = -1;
+        }
       }
     }
   }
@@ -437,6 +588,15 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
           const HRESULT hr =
               context_->GetData(slots_[i].query.Get(), &done, sizeof(done), 0);
           ready[i] = (hr == S_OK && done);
+          if (FAILED(hr) && hr != S_FALSE) {
+            // Device loss: this query will never signal. Free the slot instead of leaving it
+            // GpuPending forever -- a frozen ring is what turned one driver hiccup into a
+            // dead capture pipeline.
+            ReleaseNv12SlotLocked(slots_[i].meta.nv12Slot, slots_[i].meta.nv12Generation);
+            slots_[i].meta.nv12Slot = -1;
+            slots_[i].state = SlotState::Free;
+            seq[i] = 0;
+          }
         }
       }
       size_t pendingCount = 0;
@@ -460,6 +620,9 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
       }
       for (size_t i = 0; i < slots_.size(); ++i) {
         if (i != pick && ready[i]) {
+          // A superseded frame's NV12 slot would otherwise leak busy forever.
+          ReleaseNv12SlotLocked(slots_[i].meta.nv12Slot, slots_[i].meta.nv12Generation);
+          slots_[i].meta.nv12Slot = -1;
           slots_[i].state = SlotState::Free;
         }
       }

@@ -4958,3 +4958,47 @@ fallback/부작용: 720p 화질 screenshot 승인은 미수행(16:9 정합은 as
 미완료: 없음.
 
 다음 작업: H3 GPU NV12 → MF encoder.
+
+### 212) 2026-07-31 H3 GPU NV12 surface → MF encoder (opt-in으로 랜딩)
+
+작업 ID: H3
+
+변경 파일
+- `apps/native_poc/src/mf_h264_codec.hpp/.cpp` (encode_sample_common 추출,
+  encode_frame_surface 추가 - MFCreateDXGISurfaceBuffer, 무 memcpy)
+- `apps/native_poc/src/d3d_capture_readback.hpp/.cpp` (NV12 4-slot 링, BGRA→NV12
+  VideoProcessorBlt BT.709 limited, 소유권 있는 슬롯 수명)
+- `apps/native_poc/src/native_video_host_main.cpp` (표면 인코드 분기, 지연 해제 큐,
+  인코더 재초기화 시 일괄 해제, 통계)
+
+구현 내용
+- 캡처 파이프라인이 aspect-fit 조건에서 프레임마다 NV12 텍스처(4-slot 링)를 GPU 변환.
+  slot은 프레임을 pop한 소비자가 소유하고, 인코더의 누적 출력 수가 제출 시점을 넘어야
+  해제된다(async MFT가 아직 읽는 텍스처를 절대 재기록하지 않음). 게이팅 skip/초과
+  드랍/재적합 경합 등 모든 경로에서 해제를 보장(worker superseded 해제, publish
+  overwrite 해제, loop-top 해제).
+- 인코더는 표면 sample을 거부하면 세션 단위로 CPU 경로 폴백(1프레임 손실 후 지속).
+- 디바이스 손실 견고성: GetData가 실패한 쿼리는 즉시 slot을 해제 - 이전에는 드라이버
+  오류 1번이 링 동결→캡처 사망으로 번졌다(실측 재현).
+
+검증
+- 단위 4스위트 + e2e ALL PASS. Debug 실동작: 정상 구간에서 인코드 전량이 표면 경로
+  (nv12SurfaceFrames=encodedFrames, rejected 0), 클라이언트 d3d_nv12 렌더.
+- 색상 검증: video 장면 컬러 블록을 뷰어 미러로 실화소 비교 - 색조 정확, 물빠짐/크러시
+  없음(BT.709 limited 출력 + full-range RGB 입력 명시).
+
+**측정 판정: 오늘 이 머신에서는 불가.** Release 5런 중 fps 12~15로 오히려 저하 + 1런
+실패였는데, 로그상 원인은 mid-run DXGI_ERROR_DRIVER_INTERNAL_ERROR로 인한 디바이스
+제거(시작 시 staging 생성조차 첫 시도 실패 후 재생성으로만 성공). 이 머신의 GPU
+스택은 세션 내내 누적 저하됐고(WGC 사망 → 디스플레이 절전 시 DXGI 사망 → 디바이스
+제거) H3의 프레임당 NV12 blt가 유발자인지 환경인지 분리할 수 없다.
+
+**결정: 기본 OFF(opt-in REMOTE60_NATIVE_NV12_SURFACE=1).** 제품 경로는 H1/H2 검증
+상태를 유지하며(off 재확인: 23.8fps/기준선 동등), 건강한 드라이버(재부팅 후)에서
+A/B로 켠다. 계획의 "성능 수치 없는 최적화는 완료로 치지 않는다" 원칙에 따라 H3
+성능 항목은 미완으로 남긴다.
+
+미완료: 건강 환경 A/B 및 기본화 여부 판정, gating 비교 입력의 GPU 이관.
+
+다음 작업: C1. H4는 착수 조건(H1~H3 후 측정) 자체가 현 환경에서 판정 불가라 동일하게
+보류하고 G1 전에 재평가한다.

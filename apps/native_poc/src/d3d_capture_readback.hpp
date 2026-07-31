@@ -47,6 +47,12 @@ struct CaptureFrameMeta {
   uint32_t payloadW = 0;
   uint32_t payloadH = 0;
   bool preprocessed = false;
+  // GPU NV12 conversion result for the zero-copy encode path. -1 when this frame has none;
+  // ownership passes to whoever pops the frame, who must release the slot.
+  int32_t nv12Slot = -1;
+  uint64_t nv12Generation = 0;
+  uint32_t nv12W = 0;
+  uint32_t nv12H = 0;
 };
 
 /**
@@ -108,7 +114,16 @@ class D3dCaptureReadbackPipeline {
    */
   void SetOutputSize(uint32_t width, uint32_t height);
 
+  /** Enables the BGRA->NV12 GPU conversion that feeds the zero-copy encoder path. */
+  void SetNv12Enabled(bool enabled);
+  /** The slot texture, or null when the slot/generation no longer exists. */
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> Nv12SlotTexture(int32_t slot, uint64_t generation);
+  /** Returns a slot to the ring; safe to call with stale generation or -1. */
+  void ReleaseNv12Slot(int32_t slot, uint64_t generation);
+
   uint64_t BusyDrops() const { return busyDrops_.load(std::memory_order_relaxed); }
+  uint64_t Nv12Converted() const { return nv12Converted_.load(std::memory_order_relaxed); }
+  uint64_t Nv12RingBusy() const { return nv12RingBusy_.load(std::memory_order_relaxed); }
   uint64_t SupersededDrops() const { return supersededDrops_.load(std::memory_order_relaxed); }
   uint64_t BufferReuseCount() const { return bufferPool_.ReuseCount(); }
   uint64_t PreprocessCount() const { return preprocessCount_.load(std::memory_order_relaxed); }
@@ -129,6 +144,8 @@ class D3dCaptureReadbackPipeline {
 
   bool CreateSlotsLocked(uint32_t width, uint32_t height);
   bool EnsurePreprocessLocked(uint32_t srcW, uint32_t srcH, uint32_t dstW, uint32_t dstH);
+  bool EnsureNv12Locked(uint32_t outW, uint32_t outH);
+  void ReleaseNv12SlotLocked(int32_t slot, uint64_t generation);
   void WorkerLoop();
 
   Microsoft::WRL::ComPtr<ID3D11Device> device_;
@@ -161,6 +178,22 @@ class D3dCaptureReadbackPipeline {
   uint32_t vpDstW_ = 0;
   uint32_t vpDstH_ = 0;
   bool preprocessBroken_ = false;
+  uint64_t vpConfigVersion_ = 0;
+
+  // NV12 ring for the zero-copy encoder path. Slots stay busy until released by the frame
+  // consumer, so an MFT still reading a texture can never see it rewritten.
+  struct Nv12Slot {
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+    Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> outputView;
+    bool busy = false;
+  };
+  bool nv12Enabled_ = false;
+  bool nv12Broken_ = false;
+  std::vector<Nv12Slot> nv12Slots_;
+  uint32_t nv12W_ = 0;
+  uint32_t nv12H_ = 0;
+  uint64_t nv12Generation_ = 0;
+  uint64_t nv12ViewsConfigVersion_ = 0;
 
   CaptureBufferPool bufferPool_;
   std::thread worker_;
@@ -169,6 +202,8 @@ class D3dCaptureReadbackPipeline {
   std::atomic<uint64_t> supersededDrops_{0};
   std::atomic<uint64_t> preprocessCount_{0};
   std::atomic<uint64_t> preprocessFallbacks_{0};
+  std::atomic<uint64_t> nv12Converted_{0};
+  std::atomic<uint64_t> nv12RingBusy_{0};
 };
 
 }  // namespace remote60::native_poc

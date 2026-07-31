@@ -1553,6 +1553,70 @@ bool H264Encoder::encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFr
   encodeStats->sampleCreateUs = (sampleCreateEndUs >= sampleCreateStartUs) ? (sampleCreateEndUs - sampleCreateStartUs) : 0;
   sample.Attach(inputSample);
 
+  return encode_sample_common(sample.Get(), sampleTime, forceKeyFrame, outUnits, encodeStats,
+                              encodeCallStartUs);
+}
+
+bool H264Encoder::encode_frame_surface(ID3D11Texture2D* texture, bool forceKeyFrame,
+                                       int64_t inputSampleTimeHns,
+                                       std::vector<H264AccessUnit>* outUnits,
+                                       H264EncodeFrameStats* encodeStats) {
+  if (!enc_ || !started_ || !outUnits || !texture) return false;
+  H264EncodeFrameStats localStats{};
+  if (!encodeStats) {
+    encodeStats = &localStats;
+  }
+  *encodeStats = H264EncodeFrameStats();
+  encodeStats->asyncEnabled = asyncTransform_ ? 1 : 0;
+  outUnits->clear();
+  const uint64_t encodeCallStartUs = qpc_now_us();
+  const int64_t sampleTime = (inputSampleTimeHns > 0)
+                                 ? inputSampleTimeHns
+                                 : (static_cast<int64_t>(frameIndex_) * sampleDurationHns_);
+
+  // The sample wraps the caller's texture; no pixel is copied. The caller must not write
+  // that texture again until the MFT has released it -- the host tracks in-flight surfaces
+  // against the encoder's output count and falls back to the CPU path when unsure.
+  const uint64_t sampleCreateStartUs = qpc_now_us();
+  Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
+  if (FAILED(MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D), texture, 0, FALSE, &buffer)) ||
+      !buffer) {
+    return false;
+  }
+  Microsoft::WRL::ComPtr<IMF2DBuffer> buffer2d;
+  DWORD contiguousLength = 0;
+  if (SUCCEEDED(buffer.As(&buffer2d)) && buffer2d &&
+      SUCCEEDED(buffer2d->GetContiguousLength(&contiguousLength)) && contiguousLength > 0) {
+    (void)buffer->SetCurrentLength(contiguousLength);
+  }
+  Microsoft::WRL::ComPtr<IMFSample> sample;
+  if (FAILED(MFCreateSample(&sample)) || !sample) return false;
+  if (FAILED(sample->AddBuffer(buffer.Get()))) return false;
+  (void)sample->SetSampleTime(sampleTime);
+  (void)sample->SetSampleDuration(sampleDurationHns_);
+  const uint64_t sampleCreateEndUs = qpc_now_us();
+  encodeStats->sampleCreateUs =
+      (sampleCreateEndUs >= sampleCreateStartUs) ? (sampleCreateEndUs - sampleCreateStartUs) : 0;
+
+  return encode_sample_common(sample.Get(), sampleTime, forceKeyFrame, outUnits, encodeStats,
+                              encodeCallStartUs);
+}
+
+bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
+                                       bool forceKeyFrame,
+                                       std::vector<H264AccessUnit>* outUnits,
+                                       H264EncodeFrameStats* encodeStats,
+                                       uint64_t encodeCallStartUs) {
+  Microsoft::WRL::ComPtr<IMFSample> sample = sampleRaw;
+  const auto finish_call = [&](bool ok) -> bool {
+    const uint64_t encodeCallEndUs = qpc_now_us();
+    encodeStats->encodeCallUs = (encodeCallEndUs >= encodeCallStartUs) ? (encodeCallEndUs - encodeCallStartUs) : 0;
+    return ok;
+  };
+  constexpr int64_t kEncoderOutputTsSkewUs = 50000;
+  constexpr int64_t kEncoderOutputTsSkewHns = kEncoderOutputTsSkewUs * 10;
+  constexpr uint32_t kEncoderOutputTsRecoverySamples = 8;
+
   if (forceKeyFrame) {
     (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncVideoForceKeyFrame, 1);
   }

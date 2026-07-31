@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <cstdlib>
 #include <cstring>
 #include <cwctype>
@@ -2453,6 +2454,12 @@ struct FrameState {
   uint64_t captureMemcpyUs = 0;
   uint64_t captureUnmapWaitUs = 0;
   uint64_t captureUnmapUs = 0;
+  // GPU NV12 conversion of this frame for the zero-copy encode path; -1 when absent.
+  // Whoever pops the frame claims the slot and must release it.
+  int32_t nv12Slot = -1;
+  uint64_t nv12Generation = 0;
+  uint32_t nv12W = 0;
+  uint32_t nv12H = 0;
   std::shared_ptr<std::vector<uint8_t>> payload;
 };
 
@@ -3731,6 +3738,20 @@ int main(int argc, char** argv) {
   // first create_staging call.
   remote60::native_poc::D3dCaptureReadbackPipeline captureReadback;
   remote60::native_poc::D3dCaptureReadbackPipeline::PublishFn capturePublishFn;
+  // Zero-copy encode bookkeeping. A surface handed to the MFT stays reserved until the
+  // encoder's total output count passes the frame's submission -- only then is its texture
+  // provably no longer being read.
+  struct Nv12PendingRelease {
+    int32_t slot = -1;
+    uint64_t generation = 0;
+    uint64_t requiredOutputs = 0;
+  };
+  std::deque<Nv12PendingRelease> nv12PendingReleases;
+  bool surfaceEncodeHealthy = true;
+  uint64_t encoderOutputSamplesTotal = 0;
+  uint64_t nv12SurfaceEncodeCount = 0;
+  int32_t poppedNv12Slot = -1;
+  uint64_t poppedNv12Generation = 0;
 
   auto apply_encoder_target = [&](uint32_t targetW, uint32_t targetH, uint32_t targetFps,
                                   uint32_t targetBitrate, uint32_t targetKeyint) -> bool {
@@ -3747,6 +3768,12 @@ int main(int argc, char** argv) {
 
     if (keyintChanged || fpsChanged || resizeChanged) {
       encoder.shutdown();
+      // The shutdown flushed the MFT, so every in-flight surface is released.
+      for (const auto& pending : nv12PendingReleases) {
+        captureReadback.ReleaseNv12Slot(pending.slot, pending.generation);
+      }
+      nv12PendingReleases.clear();
+      surfaceEncodeHealthy = true;
       if (!encoder.initialize(targetW, targetH, targetFps, targetBitrate, targetKeyint)) {
         return false;
       }
@@ -3892,6 +3919,11 @@ int main(int argc, char** argv) {
     }
     if (useH264) {
       captureReadback.SetOutputSize(activeEncodeW, activeEncodeH);
+      // Opt-in until a healthy-driver A/B lands: the path is functionally verified (color,
+      // e2e), but on the bring-up machine the driver threw internal errors mid-run and an
+      // H3-triggered cause could not be ruled out. The product path stays the H1/H2 one.
+      captureReadback.SetNv12Enabled(
+          encoder.using_hardware() && env_truthy("REMOTE60_NATIVE_NV12_SURFACE"));
     }
     return true;
   };
@@ -3960,6 +3992,15 @@ int main(int argc, char** argv) {
     uint64_t currentVersion = 0;
     {
       std::lock_guard<std::mutex> lk(frame.mu);
+      if (frame.nv12Slot >= 0) {
+        // The consumer never claimed the previous frame's conversion (latest-wins overwrite);
+        // give the slot back or the ring drains to nothing.
+        captureReadback.ReleaseNv12Slot(frame.nv12Slot, frame.nv12Generation);
+      }
+      frame.nv12Slot = meta.nv12Slot;
+      frame.nv12Generation = meta.nv12Generation;
+      frame.nv12W = meta.nv12W;
+      frame.nv12H = meta.nv12H;
       frame.payload = std::move(payload);
       frame.width = frameW;
       frame.height = frameH;
@@ -5090,6 +5131,10 @@ int main(int argc, char** argv) {
     uint64_t captureUnmapWaitUs = 0;
     uint64_t captureUnmapUs = 0;
     uint64_t version = 0;
+    int32_t nv12Slot = -1;
+    uint64_t nv12Generation = 0;
+    uint32_t nv12W = 0;
+    uint32_t nv12H = 0;
     uint32_t queueWaitReason = 0;  // 0: normal, 1: timeout, 2: no-work
     const uint64_t queueSelectStartUs = qpc_now_us();
     bool queueReady = false;
@@ -5128,7 +5173,19 @@ int main(int argc, char** argv) {
       captureMemcpyUs = frame.captureMemcpyUs;
       captureUnmapWaitUs = frame.captureUnmapWaitUs;
       captureUnmapUs = frame.captureUnmapUs;
+      nv12Slot = frame.nv12Slot;
+      nv12Generation = frame.nv12Generation;
+      nv12W = frame.nv12W;
+      nv12H = frame.nv12H;
+      frame.nv12Slot = -1;  // claimed; this loop now owns the release
     }
+    if (poppedNv12Slot >= 0) {
+      // The previous iteration bailed out before encoding (gating skip, stale drop);
+      // release its claimed conversion now.
+      captureReadback.ReleaseNv12Slot(poppedNv12Slot, poppedNv12Generation);
+    }
+    poppedNv12Slot = nv12Slot;
+    poppedNv12Generation = nv12Generation;
   const uint64_t queuePopUs = qpc_now_us();
   const uint64_t queueSelectWaitUs =
       (queuePopUs >= queueSelectStartUs) ? (queuePopUs - queueSelectStartUs) : 0;
@@ -5451,7 +5508,9 @@ int main(int argc, char** argv) {
         pendingRefitW = 0;
         pendingRefitH = 0;
       }
-      if (activeEncodeW != w || activeEncodeH != h) {
+      const bool wantSurfaceEncode = useH264 && nv12Slot >= 0 && surfaceEncodeHealthy &&
+                                     nv12W == activeEncodeW && nv12H == activeEncodeH;
+      if (!wantSurfaceEncode && (activeEncodeW != w || activeEncodeH != h)) {
         const uint64_t scaleStartUs = qpc_now_us();
         bool scaleOk = false;
         if (gpuScalerHealthy) {
@@ -5492,13 +5551,18 @@ int main(int argc, char** argv) {
       }
 
       std::vector<uint8_t> nv12;
-      const uint64_t nv12StartUs = qpc_now_us();
-      if (!bgra_to_nv12(encodeSrc, encodeSrcW, encodeSrcH, encodeSrcStride, &nv12) || nv12.empty()) {
-        continue;
+      if (!wantSurfaceEncode) {
+        const uint64_t nv12StartUs = qpc_now_us();
+        if (!bgra_to_nv12(encodeSrc, encodeSrcW, encodeSrcH, encodeSrcStride, &nv12) || nv12.empty()) {
+          continue;
+        }
+        const uint64_t nv12DoneUs = qpc_now_us();
+        nv12Us = (nv12DoneUs >= nv12StartUs) ? (nv12DoneUs - nv12StartUs) : 0;
+        preEncodePrepUs = (nv12DoneUs >= preEncodeStartUs) ? (nv12DoneUs - preEncodeStartUs) : 0;
+      } else {
+        const uint64_t prepDoneUs = qpc_now_us();
+        preEncodePrepUs = (prepDoneUs >= preEncodeStartUs) ? (prepDoneUs - preEncodeStartUs) : 0;
       }
-      const uint64_t nv12DoneUs = qpc_now_us();
-      nv12Us = (nv12DoneUs >= nv12StartUs) ? (nv12DoneUs - nv12StartUs) : 0;
-      preEncodePrepUs = (nv12DoneUs >= preEncodeStartUs) ? (nv12DoneUs - preEncodeStartUs) : 0;
 
       const uint64_t beforeEncodeUs = qpc_now_us();
       const uint64_t frameAgeBeforeEncodeUs =
@@ -5532,13 +5596,45 @@ int main(int argc, char** argv) {
             (encodeStartUs >= callbackUs) ? (encodeStartUs - callbackUs) : 0;
         std::vector<H264AccessUnit> units;
         H264EncodeFrameStats encodeStats{};
-       if (!encoder.encode_frame(nv12, forceKeyFrame, static_cast<int64_t>(encodeInputUs) * 10, &units,
+        bool surfaceEncoded = false;
+        if (wantSurfaceEncode) {
+          auto nv12Tex = captureReadback.Nv12SlotTexture(nv12Slot, nv12Generation);
+          if (nv12Tex &&
+              encoder.encode_frame_surface(nv12Tex.Get(), forceKeyFrame,
+                                           static_cast<int64_t>(encodeInputUs) * 10, &units,
+                                           &encodeStats)) {
+            surfaceEncoded = true;
+            ++nv12SurfaceEncodeCount;
+            Nv12PendingRelease pending;
+            pending.slot = nv12Slot;
+            pending.generation = nv12Generation;
+            pending.requiredOutputs = encoderOutputSamplesTotal + 1;
+            nv12PendingReleases.push_back(pending);
+            poppedNv12Slot = -1;  // ownership moved to the deferred-release queue
+          } else {
+            // One rejection turns the path off for the session; this frame is dropped and
+            // the next one takes the CPU route. Its slot is released at the next loop top.
+            surfaceEncodeHealthy = false;
+            std::cout << "[native-video-host] nv12 surface encode rejected backend="
+                      << encoder.backend_name() << "; falling back to cpu nv12\n";
+            continue;
+          }
+        }
+       if (!surfaceEncoded &&
+           !encoder.encode_frame(nv12, forceKeyFrame, static_cast<int64_t>(encodeInputUs) * 10, &units,
                                  &encodeStats)) {
         ++encodeFailCount;
         if ((encodeFailCount % 60) == 1) {
           std::cout << "[native-video-host] encode failed count=" << encodeFailCount << "\n";
         }
         continue;
+      }
+      encoderOutputSamplesTotal += encodeStats.processOutputSamples;
+      while (!nv12PendingReleases.empty() &&
+             nv12PendingReleases.front().requiredOutputs <= encoderOutputSamplesTotal) {
+        captureReadback.ReleaseNv12Slot(nv12PendingReleases.front().slot,
+                                        nv12PendingReleases.front().generation);
+        nv12PendingReleases.pop_front();
       }
       const uint64_t encodeEndUs = qpc_now_us();
       if (units.empty()) continue;
@@ -6140,6 +6236,9 @@ int main(int argc, char** argv) {
                   << " captureCpuBufferReuse=" << captureReadback.BufferReuseCount()
                   << " capturePreprocessed=" << captureReadback.PreprocessCount()
                   << " capturePreprocessFallbacks=" << captureReadback.PreprocessFallbacks()
+                  << " nv12Converted=" << captureReadback.Nv12Converted()
+                  << " nv12RingBusy=" << captureReadback.Nv12RingBusy()
+                  << " nv12SurfaceFrames=" << nv12SurfaceEncodeCount
                   << " captureD3DWaitAvgUs=" << captureD3DWaitAvgUs
                   << " captureD3DWaitMaxUs=" << captureD3DWaitMaxUs
                   << " captureCopyMapAvgUs=" << captureCopyMapAvgUs
