@@ -5072,3 +5072,38 @@ Before/After (1080p-scroll Release 3회, post-Q1 기준선 대비)
 직접 getter 6회→1회 통합, 씬별 JNI 카운터 실측(9/9/8→목표) - 기기 검증 가능 시점에.
 
 다음 작업: A2.
+
+### 215) 2026-07-31 최적화 실행 세션 마감 - 완료/보류 정리
+
+이 세션에서 완료(커밋 f9b5435..646f821, 11 커밋)
+- U1 Host signed-in UI (204), B1 기준선 인프라+1차 수집 (205), Q1-1/2/3 (206~208),
+  Q1 후 재기준선 (209), H1 (210), H2 (211), H3 구현/opt-in (212), C1+F1 배선 (213),
+  A1 1단계 (214).
+
+측정 성과 요약 (post-Q1 DXGI 기준선 대비, Release 5회 중앙값)
+- 1080p-scroll: Host CPU 67.6→58.9%(H1), 콜백 비용 991→129us, LAT p95 -33%,
+  Client CPU 54.3→44.2%(C1). 720p-scroll: Host CPU 67.1→52.6%, CPU scale 4.47ms→0(H2),
+  LAT p95 19.5→1.5ms.
+- 디코드 fps는 22~24에서 정체(목표 27 미달) - 남은 병목은 queue-to-send(pacing 인라인,
+  H4 대상)와 NV12 6.7ms(H3 활성화 대상)로 특정돼 있으며 둘 다 환경 회복 후 항목.
+
+보류 항목과 차단 사유 (다음 세션 착수 순서)
+1. [재부팅 후] H3 활성화 A/B(REMOTE60_NATIVE_NV12_SURFACE=1) → 기대: NV12 6.7ms 제거,
+   디코드 27fps 달성 여부 판정. 이어서 H4 착수 조건 재평가.
+   - 이 머신의 GPU 스택이 세션 중 누적 붕괴(WGC 사망 → 디스플레이 절전 연동 DXGI 사망
+     → DXGI_ERROR_DRIVER_INTERNAL_ERROR 디바이스 제거, AMD 버그 신고 창 출현).
+     재부팅 전 측정은 신뢰 불가.
+2. [재부팅 후] F1 인코드 정지/재개 실측, C1-2 후속(썸네일 전송을 제어 채널과 분리).
+3. [기기 확보 시] A1 2단계(nativeGetUiSnapshotJson 통합 + 씬별 JNI 카운터 실측), A2
+   (thumbnail TTL+버퍼 재사용). LDPlayer 인스턴스 pm 무응답으로 이번 세션 설치 불가,
+   /data/local/tmp/gnlink_a1.apk 잔여.
+4. [사용자 결정 필요] U2 잔여(Windows picker/Android 로그인 재배치 - 뷰어부는 기존
+   사용자 결정으로 현행 유지), S1 HTTPS(서버 TLS 종단: 도메인/인증서 확보 필요),
+   S2 미디어 암호화(계획이 요구하는 protocol decision record를 먼저 작성해 검토 후 구현).
+5. G1 최종 게이트는 위 항목 정리 후.
+
+시스템 상태 원복
+- 디스플레이 타임아웃 AC 5분 복원(DC는 원값 미기록으로 5분 설정 - 확인 요망).
+- keep-alive/scene/테스트 프로세스 전부 종료, 사용자 실호스트(PID 10852)만 유지.
+- 참고: 사용자 실호스트는 build-local Release 구버전 바이너리로 계속 실행 중 -
+  재시작해야 이 세션의 Q1/H1/H2/C1 수정이 제품 경로에 반영된다.
