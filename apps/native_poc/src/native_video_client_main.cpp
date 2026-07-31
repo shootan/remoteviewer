@@ -472,8 +472,15 @@ struct SharedFrame {
   };
   std::mutex mu;
   PixelFormat format = PixelFormat::Unknown;
+  // Visible content size -- what aspect fit, input mapping, and rendering treat as the
+  // picture. For H.264 this is the display aperture (1080), not the coded plane (1088).
   uint32_t width = 0;
   uint32_t height = 0;
+  // Coded plane the byte buffer is actually laid out in, plus where the visible rect starts.
+  uint32_t codedWidth = 0;
+  uint32_t codedHeight = 0;
+  uint32_t visibleLeft = 0;
+  uint32_t visibleTop = 0;
   uint32_t stride = 0;
   uint32_t seq = 0;
   uint64_t captureUs = 0;
@@ -1593,12 +1600,21 @@ struct Nv12D3dRenderer {
     return true;
   }
 
-  bool render(HWND hwnd, const RECT& destRect, const uint8_t* nv12, uint32_t w, uint32_t h,
+  /**
+   * Draws the visible rect (w x h at visLeft/visTop) out of a coded NV12 plane. The textures
+   * are sized to the visible picture, so the shader never samples the coded padding rows --
+   * uploading the full 1088-row plane stretched 8 garbage rows into a 1080p picture and
+   * distorted the aspect by 0.74%.
+   */
+  bool render(HWND hwnd, const RECT& destRect, const uint8_t* nv12, uint32_t codedW,
+              uint32_t codedH, uint32_t visLeft, uint32_t visTop, uint32_t w, uint32_t h,
               Nv12RenderTelemetry* telemetry) {
     if (telemetry) {
       *telemetry = Nv12RenderTelemetry{};
     }
-    if (!ready || !nv12 || w == 0 || h == 0 || (w & 1u) || (h & 1u)) {
+    if (!ready || !nv12 || codedW == 0 || codedH == 0 || w == 0 || h == 0 || (codedW & 1u) ||
+        (codedH & 1u) || (w & 1u) || (h & 1u) || (visLeft & 1u) || (visTop & 1u) ||
+        visLeft + w > codedW || visTop + h > codedH) {
       if (telemetry) telemetry->failStage = "invalid_args";
       return false;
     }
@@ -1611,8 +1627,9 @@ struct Nv12D3dRenderer {
       return false;
     }
 
-    const uint8_t* yPlane = nv12;
-    const uint8_t* uvPlane = nv12 + static_cast<size_t>(w) * h;
+    const uint8_t* yPlane = nv12 + static_cast<size_t>(visTop) * codedW + visLeft;
+    const uint8_t* uvPlane = nv12 + static_cast<size_t>(codedW) * codedH +
+                             static_cast<size_t>(visTop / 2) * codedW + visLeft;
 
     const uint64_t uploadYStartUs = qpc_now_us();
     D3D11_MAPPED_SUBRESOURCE yMap{};
@@ -1620,14 +1637,12 @@ struct Nv12D3dRenderer {
       if (telemetry) telemetry->failStage = "map_y";
       return false;
     }
-    const uint32_t yCopyRowBytes = w;
-    const size_t yCopyBytes = static_cast<size_t>(h) * yCopyRowBytes;
-    if (static_cast<UINT>(yCopyRowBytes) == yMap.RowPitch) {
-      std::memcpy(reinterpret_cast<uint8_t*>(yMap.pData), yPlane, yCopyBytes);
+    if (codedW == w && static_cast<UINT>(w) == yMap.RowPitch) {
+      std::memcpy(reinterpret_cast<uint8_t*>(yMap.pData), yPlane, static_cast<size_t>(h) * w);
     } else {
       for (uint32_t row = 0; row < h; ++row) {
         std::memcpy(reinterpret_cast<uint8_t*>(yMap.pData) + static_cast<size_t>(row) * yMap.RowPitch,
-                    yPlane + static_cast<size_t>(row) * yCopyRowBytes, yCopyRowBytes);
+                    yPlane + static_cast<size_t>(row) * codedW, w);
       }
     }
     context->Unmap(texY.Get(), 0);
@@ -1640,14 +1655,13 @@ struct Nv12D3dRenderer {
       return false;
     }
     const uint32_t uvHeight = h / 2;
-    const uint32_t uvCopyRowBytes = w;
-    const size_t uvCopyBytes = static_cast<size_t>(uvHeight) * uvCopyRowBytes;
-    if (static_cast<UINT>(uvCopyRowBytes) == uvMap.RowPitch) {
-      std::memcpy(reinterpret_cast<uint8_t*>(uvMap.pData), uvPlane, uvCopyBytes);
+    if (codedW == w && static_cast<UINT>(w) == uvMap.RowPitch) {
+      std::memcpy(reinterpret_cast<uint8_t*>(uvMap.pData), uvPlane,
+                  static_cast<size_t>(uvHeight) * w);
     } else {
       for (uint32_t row = 0; row < uvHeight; ++row) {
         std::memcpy(reinterpret_cast<uint8_t*>(uvMap.pData) + static_cast<size_t>(row) * uvMap.RowPitch,
-                    uvPlane + static_cast<size_t>(row) * uvCopyRowBytes, uvCopyRowBytes);
+                    uvPlane + static_cast<size_t>(row) * codedW, w);
       }
     }
     context->Unmap(texUV.Get(), 0);
@@ -2164,6 +2178,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       std::shared_ptr<std::vector<uint8_t>> local;
       SharedFrame::PixelFormat localFormat = SharedFrame::PixelFormat::Unknown;
       uint32_t w = 0, h = 0;
+      uint32_t codedW = 0, codedH = 0;
+      uint32_t visL = 0, visT = 0;
       uint32_t seq = 0;
       uint64_t captureUs = 0;
       uint64_t encodeStartUs = 0;
@@ -2182,6 +2198,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           localFormat = gFrame.format;
           w = gFrame.width;
           h = gFrame.height;
+          codedW = (gFrame.codedWidth > 0) ? gFrame.codedWidth : gFrame.width;
+          codedH = (gFrame.codedHeight > 0) ? gFrame.codedHeight : gFrame.height;
+          visL = gFrame.visibleLeft;
+          visT = gFrame.visibleTop;
           seq = gFrame.seq;
           captureUs = gFrame.captureUs;
           encodeStartUs = gFrame.encodeStartUs;
@@ -2209,7 +2229,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
           }
           if (gNv12Renderer.ready) {
-            presented = gNv12Renderer.render(hwnd, contentRect, local->data(), w, h, &renderTelemetry);
+            presented = gNv12Renderer.render(hwnd, contentRect, local->data(), codedW, codedH,
+                                             visL, visT, w, h, &renderTelemetry);
             if (presented) {
               ++gD3dPresentSuccessCount;
               renderPath = "d3d_nv12";
@@ -2221,10 +2242,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           }
           if (!presented) {
             std::vector<uint8_t> bgra;
-            if (nv12_to_bgra(local->data(), w, h, &bgra) && !bgra.empty()) {
+            if (nv12_to_bgra(local->data(), codedW, codedH, &bgra) && !bgra.empty()) {
+              // The DIB carries the coded plane; the source rect and a row-offset base
+              // pointer select only the visible picture out of it.
               BITMAPINFO bmi{};
               bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-              bmi.bmiHeader.biWidth = static_cast<LONG>(w);
+              bmi.bmiHeader.biWidth = static_cast<LONG>(codedW);
               bmi.bmiHeader.biHeight = -static_cast<LONG>(h);
               bmi.bmiHeader.biPlanes = 1;
               bmi.bmiHeader.biBitCount = 32;
@@ -2233,8 +2256,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
               FillRect(hdc, &videoRect, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
               StretchDIBits(hdc, contentRect.left, contentRect.top,
                             contentRect.right - contentRect.left, contentRect.bottom - contentRect.top,
-                            0, 0, static_cast<int>(w), static_cast<int>(h),
-                            bgra.data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
+                            static_cast<int>(visL), 0, static_cast<int>(w), static_cast<int>(h),
+                            bgra.data() + static_cast<size_t>(visT) * codedW * 4, &bmi,
+                            DIB_RGB_COLORS, SRCCOPY);
               presented = true;
               ++gGdiFallbackPresentedCount;
               renderPath = "gdi_nv12_fallback";
@@ -3531,8 +3555,12 @@ int main(int argc, char** argv) {
           ++gOverwriteBeforePresentCount;
         }
         gFrame.format = SharedFrame::PixelFormat::Nv12;
-        gFrame.width = decoded.width;
-        gFrame.height = decoded.height;
+        gFrame.width = (decoded.visibleWidth > 0) ? decoded.visibleWidth : decoded.width;
+        gFrame.height = (decoded.visibleHeight > 0) ? decoded.visibleHeight : decoded.height;
+        gFrame.codedWidth = decoded.width;
+        gFrame.codedHeight = decoded.height;
+        gFrame.visibleLeft = decoded.visibleLeft;
+        gFrame.visibleTop = decoded.visibleTop;
         gFrame.stride = decoded.width;
         gFrame.seq = h.seq;
         gFrame.captureUs = decodedCaptureUs;
@@ -3603,7 +3631,9 @@ int main(int argc, char** argv) {
         const double decodedRawMbps = (decodedBytes * 8.0) / (1000.0 * 1000.0);
         const uint64_t decodeRatioX100 =
             (recvBytes > 0) ? ((decodedBytes * 100ULL) / recvBytes) : 0;
-        publish_metrics(decoded.width, decoded.height, nowUs,
+        const uint32_t visibleW = (decoded.visibleWidth > 0) ? decoded.visibleWidth : decoded.width;
+        const uint32_t visibleH = (decoded.visibleHeight > 0) ? decoded.visibleHeight : decoded.height;
+        publish_metrics(visibleW, visibleH, nowUs,
                         avgLatencyUs, maxLatencyUs, avgDecodeTailUs, maxDecodeTailUs, mbps);
         std::ostringstream oss;
         oss << "[native-video-client] recvFrames=" << recvFrames
@@ -3616,7 +3646,8 @@ int main(int argc, char** argv) {
             << " mbps=" << mbps
             << " decodedRawMbps=" << decodedRawMbps
             << " decodeRatioX100=" << decodeRatioX100
-            << " size=" << decoded.width << "x" << decoded.height;
+            << " size=" << visibleW << "x" << visibleH
+            << " codedSize=" << decoded.width << "x" << decoded.height;
         append_congestion_fields(oss);
         append_present_counter_fields(oss);
         log_client_line(oss.str());
@@ -3814,6 +3845,10 @@ int main(int argc, char** argv) {
           gFrame.format = SharedFrame::PixelFormat::Bgra32;
           gFrame.width = h.width;
           gFrame.height = h.height;
+          gFrame.codedWidth = h.width;
+          gFrame.codedHeight = h.height;
+          gFrame.visibleLeft = 0;
+          gFrame.visibleTop = 0;
           gFrame.stride = h.stride;
           gFrame.seq = h.seq;
           gFrame.captureUs = h.captureQpcUs;

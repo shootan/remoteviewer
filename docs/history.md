@@ -4715,3 +4715,48 @@ fallback/부작용: 기준선 원본은 automation/logs/baseline-b1-pre-q1 (giti
 미완료: 없음.
 
 다음 작업: Q1-1 visible aperture.
+
+### 206) 2026-07-31 Q1-1 Windows visible aperture와 coded size 분리
+
+작업 ID: Q1-1
+
+변경 파일
+- `apps/native_poc/src/mf_h264_codec.hpp/.cpp`
+- `apps/native_poc/src/native_video_client_main.cpp`
+
+변경 전 문제
+- H.264 coded height는 16행 정렬이라 1080p가 1088행 평면으로 디코드되는데,
+  `query_output_size()`가 `MF_MT_FRAME_SIZE`만 읽어 1088이 콘텐츠 크기로 흘렀다.
+  aspect-fit·입력 좌표·렌더가 전부 1920×1088을 기준으로 동작해 세로 0.74% 왜곡과
+  하단 8행 쓰레기 표시, 불필요한 재샘플링이 발생했다.
+
+구현 내용
+- `H264Decoder::query_output_geometry()`: `MF_MT_MINIMUM_DISPLAY_APERTURE` →
+  `MF_MT_GEOMETRIC_APERTURE` → coded 전체 순서로 aperture를 읽고, coded 평면 밖이면
+  거부, NV12 2x2 서브샘플링 때문에 좌표·크기를 짝수 정렬한다.
+- `DecodedFrameNv12`에 visibleLeft/Top/Width/Height 추가. width/height는 buffer layout
+  (coded) 의미를 유지한다.
+- `SharedFrame`: width/height는 visible(콘텐츠), codedWidth/Height와 visibleLeft/Top을
+  별도 보관. aspect-fit과 입력 좌표는 visible을 그대로 쓰게 된다(코드 변경 불필요 -
+  resolve_active_video_content_size가 gFrame.width를 읽으므로).
+- D3D NV12 렌더러: 텍스처를 visible 크기로 만들고 coded stride 평면에서 visible 행만
+  업로드. 셰이더가 padding 행을 아예 샘플링하지 않는다.
+- GDI 폴백: coded 평면을 변환 후 소스 rect(visibleLeft, 행 오프셋 포인터)로 visible만
+  StretchDIBits.
+- 통계/로그: size=visible로 보고하고 codedSize를 별도 표기.
+
+실행한 build/test
+- Debug 빌드 후 unit 3종 ALL PASS. verify 격리 실행 OVERALL_OK=True.
+- 실동작 검증: 격리 host+client를 띄워 Desktop 선택 후 뷰어 스크린샷 - renderPath=
+  d3d_nv12, fallback 0, d3dPresentSuccess 41+, 클라이언트 로그 size=1920x1080
+  codedSize=1920x1088. 1600x900 창에 16:9 콘텐츠가 정확히 맞고 하단 쓰레기 행 없음.
+
+Before/After 지표: 화질 정확성 작업(성능 목적 아님). 성능 지표는 Q1 완료 후 재기준선에서
+일괄 수집.
+
+fallback/부작용: aperture가 없거나 비정상인 디코더에서는 coded 전체를 visible로 사용
+(기존 동작과 동일). Android는 이미 crop을 읽으므로 변경 없음.
+
+미완료: 없음.
+
+다음 작업: Q1-2 rate-control/pacing 동기화.

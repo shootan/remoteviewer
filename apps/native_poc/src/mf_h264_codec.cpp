@@ -1872,6 +1872,77 @@ bool H264Decoder::query_output_size(uint32_t* outWidth, uint32_t* outHeight) con
   return true;
 }
 
+bool H264Decoder::query_output_geometry(uint32_t* codedWidth, uint32_t* codedHeight,
+                                        uint32_t* visibleLeft, uint32_t* visibleTop,
+                                        uint32_t* visibleWidth, uint32_t* visibleHeight) const {
+  if (!dec_ || !codedWidth || !codedHeight || !visibleLeft || !visibleTop || !visibleWidth ||
+      !visibleHeight) {
+    return false;
+  }
+  Microsoft::WRL::ComPtr<IMFMediaType> outType;
+  if (FAILED(dec_->GetOutputCurrentType(0, &outType)) || !outType) return false;
+  UINT32 w = 0;
+  UINT32 h = 0;
+  if (FAILED(MFGetAttributeSize(outType.Get(), MF_MT_FRAME_SIZE, &w, &h)) || w == 0 || h == 0) {
+    return false;
+  }
+  *codedWidth = w;
+  *codedHeight = h;
+
+  // MF_MT_FRAME_SIZE is the coded plane; the picture the encoder was fed lives in the display
+  // aperture. Preference order per Media Foundation: minimum display, then geometric.
+  uint32_t left = 0;
+  uint32_t top = 0;
+  uint32_t visW = w;
+  uint32_t visH = h;
+  MFVideoArea area{};
+  UINT32 blobSize = 0;
+  bool haveArea =
+      SUCCEEDED(outType->GetBlob(MF_MT_MINIMUM_DISPLAY_APERTURE,
+                                 reinterpret_cast<UINT8*>(&area), sizeof(area), &blobSize)) &&
+      blobSize == sizeof(area);
+  if (!haveArea) {
+    blobSize = 0;
+    haveArea = SUCCEEDED(outType->GetBlob(MF_MT_GEOMETRIC_APERTURE,
+                                          reinterpret_cast<UINT8*>(&area), sizeof(area),
+                                          &blobSize)) &&
+               blobSize == sizeof(area);
+  }
+  if (haveArea) {
+    const int32_t offsetX = area.OffsetX.value;
+    const int32_t offsetY = area.OffsetY.value;
+    const int32_t areaW = area.Area.cx;
+    const int32_t areaH = area.Area.cy;
+    // Only accept an aperture that stays inside the coded plane; a decoder reporting
+    // nonsense must not shrink or shift the picture.
+    if (offsetX >= 0 && offsetY >= 0 && areaW > 0 && areaH > 0 &&
+        offsetX + areaW <= static_cast<int32_t>(w) && offsetY + areaH <= static_cast<int32_t>(h)) {
+      left = static_cast<uint32_t>(offsetX);
+      top = static_cast<uint32_t>(offsetY);
+      visW = static_cast<uint32_t>(areaW);
+      visH = static_cast<uint32_t>(areaH);
+    }
+  }
+
+  // NV12 chroma is 2x2 subsampled, so everything must stay even or the UV plane splits a
+  // sample pair. Rounding an odd aperture down loses at most one row/column of padding.
+  left &= ~1u;
+  top &= ~1u;
+  visW &= ~1u;
+  visH &= ~1u;
+  if (visW == 0 || visH == 0) {
+    left = 0;
+    top = 0;
+    visW = w;
+    visH = h;
+  }
+  *visibleLeft = left;
+  *visibleTop = top;
+  *visibleWidth = visW;
+  *visibleHeight = visH;
+  return true;
+}
+
 bool H264Decoder::initialize(uint32_t width, uint32_t height, uint32_t fps) {
   shutdown();
   codec_debug_log("decoder initialize: start");
@@ -2000,7 +2071,15 @@ bool H264Decoder::decode_access_unit(const std::vector<uint8_t>& annexb, bool ke
       if (produced) {
         uint32_t outW = width_;
         uint32_t outH = height_;
-        (void)query_output_size(&outW, &outH);
+        uint32_t visLeft = 0;
+        uint32_t visTop = 0;
+        uint32_t visW = 0;
+        uint32_t visH = 0;
+        if (!query_output_geometry(&outW, &outH, &visLeft, &visTop, &visW, &visH)) {
+          (void)query_output_size(&outW, &outH);
+          visW = outW;
+          visH = outH;
+        }
         int64_t mappedInputSampleTimeHns = 0;
         if (!pendingInputSampleTimesHns_.empty()) {
           mappedInputSampleTimeHns = pendingInputSampleTimesHns_.front();
@@ -2015,6 +2094,10 @@ bool H264Decoder::decode_access_unit(const std::vector<uint8_t>& annexb, bool ke
           DecodedFrameNv12 frame{};
           frame.width = outW;
           frame.height = outH;
+          frame.visibleLeft = visLeft;
+          frame.visibleTop = visTop;
+          frame.visibleWidth = (visW > 0) ? visW : outW;
+          frame.visibleHeight = (visH > 0) ? visH : outH;
 
           int64_t outSampleTimeHns = 0;
           if (SUCCEEDED(produced->GetSampleTime(&outSampleTimeHns)) && outSampleTimeHns > 0) {

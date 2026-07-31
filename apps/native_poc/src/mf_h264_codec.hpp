@@ -19,8 +19,16 @@ struct H264AccessUnit {
 };
 
 struct DecodedFrameNv12 {
+  // Coded plane geometry -- the byte-buffer layout. H.264 aligns the coded height to 16
+  // rows, so a 1080p stream decodes into a 1088-row plane whose bottom 8 rows are padding.
   uint32_t width = 0;
   uint32_t height = 0;
+  // Display aperture -- the pixels that are real content. Always inside the coded plane and
+  // even-aligned; equals the coded size when the decoder reports no aperture.
+  uint32_t visibleLeft = 0;
+  uint32_t visibleTop = 0;
+  uint32_t visibleWidth = 0;
+  uint32_t visibleHeight = 0;
   int64_t sampleTimeHns = 0;
   bool sampleTimeFromOutput = false;
   std::vector<uint8_t> bytes;
@@ -116,6 +124,9 @@ class H264Decoder {
   bool configure_input_type();
   bool configure_output_type();
   bool query_output_size(uint32_t* outWidth, uint32_t* outHeight) const;
+  bool query_output_geometry(uint32_t* codedWidth, uint32_t* codedHeight, uint32_t* visibleLeft,
+                             uint32_t* visibleTop, uint32_t* visibleWidth,
+                             uint32_t* visibleHeight) const;
 
   Microsoft::WRL::ComPtr<IMFTransform> dec_;
   uint32_t width_ = 0;
