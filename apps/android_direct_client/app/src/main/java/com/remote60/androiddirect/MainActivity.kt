@@ -120,6 +120,42 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             viewerControlsBar.orientation = LinearLayout.HORIZONTAL
         }
         viewerControlsBar.layoutParams = lp
+
+        // Every direct child of the split carries sizes written for one orientation. Left as
+        // they were, a portrait split gave the 34dp-wide, full-height zone strip the entire
+        // column and the video a width of zero: a black screen with no controls and no way
+        // back, which is exactly what the rotate button used to produce.
+        val videoFrame = findViewById<View>(R.id.viewerVideoFrame)
+        videoFrame.layoutParams = if (deviceLandscape) {
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+        } else {
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+        }
+
+        val zoneBar = findViewById<LinearLayout>(R.id.viewerZoneBar)
+        val stripPx = dp(34f)
+        zoneBar.orientation =
+            if (deviceLandscape) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+        zoneBar.layoutParams = if (deviceLandscape) {
+            LinearLayout.LayoutParams(stripPx, LinearLayout.LayoutParams.MATCH_PARENT)
+        } else {
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, stripPx)
+        }
+        for (i in 0 until zoneBar.childCount) {
+            val child = zoneBar.getChildAt(i)
+            val divider = child !is TextView
+            child.layoutParams = when {
+                deviceLandscape && divider ->
+                    LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1f))
+                deviceLandscape ->
+                    LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+                divider ->
+                    LinearLayout.LayoutParams(dp(1f), LinearLayout.LayoutParams.MATCH_PARENT)
+                else ->
+                    LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+            }
+        }
+
         viewerRotateButton.text =
             if (forcePortrait) "PORT" else getString(R.string.viewer_rotate_button)
     }
@@ -1587,13 +1623,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         bar.setOnTouchListener { view, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    val height = view.height.toFloat()
+                    // The strip lies along the left edge in landscape and along the top in
+                    // portrait, so the thirds are measured along whichever way it runs.
+                    val extent =
+                        if (bar.orientation == LinearLayout.VERTICAL) view.height.toFloat()
+                        else view.width.toFloat()
+                    val position =
+                        if (bar.orientation == LinearLayout.VERTICAL) event.y else event.x
                     when {
-                        height <= 0f || event.y < height / 3f -> {
+                        extent <= 0f || position < extent / 3f -> {
                             zoneRightClickHeld = true
                             diagnosticsLog.log("right_click_armed", "source=zone_bar")
                         }
-                        event.y < height * 2f / 3f -> {
+                        position < extent * 2f / 3f -> {
                             zoneTabletHeld = true
                             pinchStartSpan = 0f
                             pinchZoomCarry = 0f
