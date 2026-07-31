@@ -1,5 +1,6 @@
 #include "d3d_capture_readback.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -122,6 +123,92 @@ bool D3dCaptureReadbackPipeline::CreateSlotsLocked(uint32_t width, uint32_t heig
   return true;
 }
 
+void D3dCaptureReadbackPipeline::SetOutputSize(uint32_t width, uint32_t height) {
+  std::lock_guard<std::mutex> lk(slotMu_);
+  outputW_ = width;
+  outputH_ = height;
+}
+
+bool D3dCaptureReadbackPipeline::EnsurePreprocessLocked(uint32_t srcW, uint32_t srcH,
+                                                        uint32_t dstW, uint32_t dstH) {
+  if (preprocessBroken_) return false;
+  if (vpProcessor_ && preSrcTexture_ && preDstTexture_ && vpInputView_ && vpOutputView_ &&
+      vpSrcW_ == srcW && vpSrcH_ == srcH && vpDstW_ == dstW && vpDstH_ == dstH) {
+    return true;
+  }
+  if (!videoDevice_) {
+    if (FAILED(device_.As(&videoDevice_)) || !videoDevice_ ||
+        FAILED(context_.As(&videoContext_)) || !videoContext_) {
+      preprocessBroken_ = true;
+      return false;
+    }
+  }
+  vpEnumerator_.Reset();
+  vpProcessor_.Reset();
+  preSrcTexture_.Reset();
+  preDstTexture_.Reset();
+  vpInputView_.Reset();
+  vpOutputView_.Reset();
+
+  D3D11_VIDEO_PROCESSOR_CONTENT_DESC desc{};
+  desc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+  desc.InputWidth = srcW;
+  desc.InputHeight = srcH;
+  desc.OutputWidth = dstW;
+  desc.OutputHeight = dstH;
+  desc.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+  if (FAILED(videoDevice_->CreateVideoProcessorEnumerator(&desc, &vpEnumerator_)) ||
+      !vpEnumerator_) {
+    return false;
+  }
+  UINT formatSupport = 0;
+  if (FAILED(vpEnumerator_->CheckVideoProcessorFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                                                      &formatSupport))) {
+    return false;
+  }
+  const UINT required =
+      D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT | D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT;
+  if ((formatSupport & required) != required) return false;
+  if (FAILED(videoDevice_->CreateVideoProcessor(vpEnumerator_.Get(), 0, &vpProcessor_)) ||
+      !vpProcessor_) {
+    return false;
+  }
+
+  D3D11_TEXTURE2D_DESC texDesc{};
+  texDesc.Width = srcW;
+  texDesc.Height = srcH;
+  texDesc.MipLevels = 1;
+  texDesc.ArraySize = 1;
+  texDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+  texDesc.SampleDesc.Count = 1;
+  texDesc.Usage = D3D11_USAGE_DEFAULT;
+  texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+  if (FAILED(device_->CreateTexture2D(&texDesc, nullptr, &preSrcTexture_))) return false;
+  texDesc.Width = dstW;
+  texDesc.Height = dstH;
+  if (FAILED(device_->CreateTexture2D(&texDesc, nullptr, &preDstTexture_))) return false;
+
+  D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inView{};
+  inView.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+  if (FAILED(videoDevice_->CreateVideoProcessorInputView(preSrcTexture_.Get(),
+                                                         vpEnumerator_.Get(), &inView,
+                                                         &vpInputView_))) {
+    return false;
+  }
+  D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outView{};
+  outView.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+  if (FAILED(videoDevice_->CreateVideoProcessorOutputView(preDstTexture_.Get(),
+                                                          vpEnumerator_.Get(), &outView,
+                                                          &vpOutputView_))) {
+    return false;
+  }
+  vpSrcW_ = srcW;
+  vpSrcH_ = srcH;
+  vpDstW_ = dstW;
+  vpDstH_ = dstH;
+  return true;
+}
+
 bool D3dCaptureReadbackPipeline::Reconfigure(uint32_t width, uint32_t height) {
   if (!device_) return false;
   std::lock_guard<std::mutex> lk(slotMu_);
@@ -137,6 +224,16 @@ void D3dCaptureReadbackPipeline::Shutdown() {
   }
   std::lock_guard<std::mutex> lk(slotMu_);
   slots_.clear();
+  vpEnumerator_.Reset();
+  vpProcessor_.Reset();
+  preSrcTexture_.Reset();
+  preDstTexture_.Reset();
+  vpInputView_.Reset();
+  vpOutputView_.Reset();
+  videoDevice_.Reset();
+  videoContext_.Reset();
+  vpSrcW_ = vpSrcH_ = vpDstW_ = vpDstH_ = 0;
+  preprocessBroken_ = false;
   device_.Reset();
   context_.Reset();
   contextMu_ = nullptr;
@@ -151,9 +248,58 @@ bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrame
   Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
   Microsoft::WRL::ComPtr<ID3D11Query> query;
   uint64_t generationAtSubmit = 0;
+  CaptureFrameMeta slotMeta = meta;
+  bool preprocess = false;
+  uint32_t outW = 0;
+  uint32_t outH = 0;
   {
     std::lock_guard<std::mutex> lk(slotMu_);
     if (meta.width != width_ || meta.height != height_) return false;
+
+    // The GPU front end runs only when the encode box is an exact aspect fit of the source
+    // content and never upscales; anything else takes the plain path so the consumer sees
+    // the true content size and re-fits the encode target like before.
+    uint32_t srcContentW = meta.width;
+    uint32_t srcContentH = meta.height;
+    uint32_t cropX = 0;
+    uint32_t cropY = 0;
+    if (meta.cropActive && meta.cropW >= 2 && meta.cropH >= 2 &&
+        meta.cropX + meta.cropW <= meta.width && meta.cropY + meta.cropH <= meta.height) {
+      srcContentW = meta.cropW & ~1u;
+      srcContentH = meta.cropH & ~1u;
+      cropX = meta.cropX & ~1u;
+      cropY = meta.cropY & ~1u;
+    }
+    outW = outputW_;
+    outH = outputH_;
+    const bool sizeDiffers = (srcContentW != outW || srcContentH != outH);
+    const bool cropNeeded = meta.cropActive;
+    if (outW >= 2 && outH >= 2 && (sizeDiffers || cropNeeded) && srcContentW >= outW &&
+        srcContentH >= outH && !preprocessBroken_) {
+      const int64_t aspectDelta =
+          static_cast<int64_t>(srcContentW) * outH - static_cast<int64_t>(srcContentH) * outW;
+      const int64_t aspectTolerance = static_cast<int64_t>((std::max)(outW, outH));
+      if (aspectDelta >= -aspectTolerance && aspectDelta <= aspectTolerance) {
+        preprocess = EnsurePreprocessLocked(meta.width, meta.height, outW, outH);
+        if (!preprocess) {
+          preprocessFallbacks_.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+    }
+    if (preprocess) {
+      slotMeta.payloadW = outW;
+      slotMeta.payloadH = outH;
+      slotMeta.preprocessed = true;
+      slotMeta.cropX = cropX;
+      slotMeta.cropY = cropY;
+      slotMeta.cropW = srcContentW;
+      slotMeta.cropH = srcContentH;
+    } else {
+      slotMeta.payloadW = meta.width;
+      slotMeta.payloadH = meta.height;
+      slotMeta.preprocessed = false;
+    }
+
     for (auto& candidate : slots_) {
       if (candidate.state == SlotState::Free) {
         slot = &candidate;
@@ -166,7 +312,7 @@ bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrame
     }
     slot->state = SlotState::GpuPending;
     slot->submitSeq = ++submitSeq_;
-    slot->meta = meta;
+    slot->meta = slotMeta;
     staging = slot->staging;
     query = slot->query;
     generationAtSubmit = generation_;
@@ -179,13 +325,72 @@ bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrame
     std::lock_guard<std::mutex> d3dLock(*contextMu_);
     const uint64_t lockAcquiredUs = qpc_us();
     lockWaitUs = lockAcquiredUs - lockWaitStartUs;
-    context_->CopyResource(staging.Get(), src);
+    bool preprocessedOk = false;
+    if (preprocess) {
+      // Crop and scale in one blt: source rect selects the window client area, the
+      // destination is the whole encode-size texture. Own-texture copy first, because
+      // capture textures do not reliably accept video processor input views.
+      context_->CopyResource(preSrcTexture_.Get(), src);
+      RECT srcRect{};
+      srcRect.left = static_cast<LONG>(slotMeta.cropX);
+      srcRect.top = static_cast<LONG>(slotMeta.cropY);
+      srcRect.right = static_cast<LONG>(slotMeta.cropX + slotMeta.cropW);
+      srcRect.bottom = static_cast<LONG>(slotMeta.cropY + slotMeta.cropH);
+      if (!slotMeta.cropW || !slotMeta.cropH) {
+        srcRect = RECT{0, 0, static_cast<LONG>(meta.width), static_cast<LONG>(meta.height)};
+      }
+      RECT dstRect{0, 0, static_cast<LONG>(outW), static_cast<LONG>(outH)};
+      videoContext_->VideoProcessorSetOutputTargetRect(vpProcessor_.Get(), TRUE, &dstRect);
+      videoContext_->VideoProcessorSetStreamSourceRect(vpProcessor_.Get(), 0, TRUE, &srcRect);
+      videoContext_->VideoProcessorSetStreamDestRect(vpProcessor_.Get(), 0, TRUE, &dstRect);
+      videoContext_->VideoProcessorSetStreamFrameFormat(vpProcessor_.Get(), 0,
+                                                        D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+      // BGRA->BGRA: both ends full-range RGB, or the driver assumes studio range on one
+      // side and crushes levels. Auto-processing rings around UI text; keep it off.
+      D3D11_VIDEO_PROCESSOR_COLOR_SPACE colorSpace{};
+      colorSpace.RGB_Range = 0;
+      colorSpace.YCbCr_Matrix = 1;
+      colorSpace.Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255;
+      videoContext_->VideoProcessorSetStreamColorSpace(vpProcessor_.Get(), 0, &colorSpace);
+      videoContext_->VideoProcessorSetOutputColorSpace(vpProcessor_.Get(), &colorSpace);
+      videoContext_->VideoProcessorSetStreamAutoProcessingMode(vpProcessor_.Get(), 0, FALSE);
+      D3D11_VIDEO_PROCESSOR_STREAM stream{};
+      stream.Enable = TRUE;
+      stream.pInputSurface = vpInputView_.Get();
+      if (SUCCEEDED(videoContext_->VideoProcessorBlt(vpProcessor_.Get(), vpOutputView_.Get(),
+                                                     0, 1, &stream))) {
+        D3D11_BOX box{0, 0, 0, outW, outH, 1};
+        context_->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, preDstTexture_.Get(), 0,
+                                        &box);
+        preprocessedOk = true;
+        preprocessCount_.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        preprocessFallbacks_.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+    if (!preprocessedOk) {
+      context_->CopyResource(staging.Get(), src);
+    }
     context_->End(query.Get());
     // Without a flush the copy can sit in the command buffer indefinitely on an otherwise
     // idle context: the query never signals and no frame is ever published. Flushing here
     // also submits the copy to the GPU before the DXGI duplication frame is released, which
     // preserves ordering against the next desktop update.
     context_->Flush();
+    if (preprocess && !preprocessedOk) {
+      // The blt failed after the meta was already stamped as preprocessed; fix it up so the
+      // worker reads capture-size bytes and applies the CPU crop.
+      std::lock_guard<std::mutex> lk(slotMu_);
+      if (generation_ == generationAtSubmit && slot->staging == staging) {
+        slot->meta.payloadW = meta.width;
+        slot->meta.payloadH = meta.height;
+        slot->meta.preprocessed = false;
+        slot->meta.cropX = meta.cropX;
+        slot->meta.cropY = meta.cropY;
+        slot->meta.cropW = meta.cropW;
+        slot->meta.cropH = meta.cropH;
+      }
+    }
   }
   const uint64_t submitDoneUs = qpc_us();
   {
@@ -270,8 +475,10 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
     const CaptureFrameMeta& meta = slotCopy.meta;
     const uint64_t gpuPendingUs =
         (meta.submitUs > 0) ? (qpc_us() > meta.submitUs ? qpc_us() - meta.submitUs : 0) : 0;
-    const uint32_t stride = meta.width * 4;
-    auto payload = bufferPool_.Acquire(static_cast<size_t>(stride) * meta.height);
+    const uint32_t payloadW = (meta.payloadW >= 2) ? meta.payloadW : meta.width;
+    const uint32_t payloadH = (meta.payloadH >= 2) ? meta.payloadH : meta.height;
+    const uint32_t stride = payloadW * 4;
+    auto payload = bufferPool_.Acquire(static_cast<size_t>(stride) * payloadH);
     uint64_t mapUs = 0;
     uint64_t memcpyUs = 0;
     bool mapped = false;
@@ -285,9 +492,9 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
         const auto* srcRow = reinterpret_cast<const uint8_t*>(map.pData);
         auto* dst = payload->data();
         if (map.RowPitch == stride) {
-          std::memcpy(dst, srcRow, static_cast<size_t>(stride) * meta.height);
+          std::memcpy(dst, srcRow, static_cast<size_t>(stride) * payloadH);
         } else {
-          for (uint32_t y = 0; y < meta.height; ++y) {
+          for (uint32_t y = 0; y < payloadH; ++y) {
             std::memcpy(dst + static_cast<size_t>(y) * stride,
                         srcRow + static_cast<size_t>(y) * map.RowPitch, stride);
           }
@@ -298,10 +505,10 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
       }
     }
 
-    uint32_t outW = meta.width;
-    uint32_t outH = meta.height;
+    uint32_t outW = payloadW;
+    uint32_t outH = payloadH;
     uint32_t outStride = stride;
-    if (mapped && meta.cropActive && meta.cropW >= 2 && meta.cropH >= 2 &&
+    if (mapped && !meta.preprocessed && meta.cropActive && meta.cropW >= 2 && meta.cropH >= 2 &&
         meta.cropX + meta.cropW <= meta.width && meta.cropY + meta.cropH <= meta.height &&
         (meta.cropW < meta.width || meta.cropH < meta.height || meta.cropX > 0 ||
          meta.cropY > 0)) {

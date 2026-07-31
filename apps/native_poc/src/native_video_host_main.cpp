@@ -3723,6 +3723,15 @@ int main(int argc, char** argv) {
     frameGatingStaticIntervalUs =
         std::max<uint64_t>(activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGatingStaticFps));
   };
+  // Declared before every lambda that references them. FrameState precedes the pipeline so
+  // the worker's publish callback never outlives what it writes into.
+  FrameState frame;
+  // Asynchronous readback ring: the capture callback only submits a GPU copy; a worker maps
+  // finished copies and publishes them. The publish function is assigned below, before the
+  // first create_staging call.
+  remote60::native_poc::D3dCaptureReadbackPipeline captureReadback;
+  remote60::native_poc::D3dCaptureReadbackPipeline::PublishFn capturePublishFn;
+
   auto apply_encoder_target = [&](uint32_t targetW, uint32_t targetH, uint32_t targetFps,
                                   uint32_t targetBitrate, uint32_t targetKeyint) -> bool {
     // Callers pass the nominal box for the current ABR/M9 level. Remember it so a later
@@ -3771,6 +3780,7 @@ int main(int argc, char** argv) {
       std::cout << "[native-video-host] pacing update udpPacePeakBps=" << pacePeakBpsClamped
                 << " bitrate=" << activeBitrate << "\n";
     }
+    captureReadback.SetOutputSize(activeEncodeW, activeEncodeH);
     refresh_frame_intervals();
     return true;
   };
@@ -3845,18 +3855,10 @@ int main(int argc, char** argv) {
   bool dxgiCaptureStarted = false;
   std::string dxgiFallbackReason;
 
-  // Declared before the readback pipeline: the worker's publish callback writes into this,
-  // so it must outlive the pipeline on every exit path.
-  FrameState frame;
   std::mutex captureResourceMu;
   std::atomic<uint32_t> captureSizeChangePending{0};
   const uint32_t captureStagingSlotCount =
       std::max<uint32_t>(3u, static_cast<uint32_t>(captureFramePoolBuffers + 1));
-  // Asynchronous readback ring: the capture callback only submits a GPU copy; a worker maps
-  // finished copies and publishes them. The publish function is assigned below, before the
-  // first create_staging call.
-  remote60::native_poc::D3dCaptureReadbackPipeline captureReadback;
-  remote60::native_poc::D3dCaptureReadbackPipeline::PublishFn capturePublishFn;
   auto create_staging = [&](uint32_t srcW, uint32_t srcH) -> bool {
     captureReadback.Shutdown();
     if (!captureReadback.Initialize(d3d.Get(), ctx.Get(), &d3dContextMu, srcW, srcH,
@@ -3887,6 +3889,9 @@ int main(int argc, char** argv) {
                   << srcW << "x" << srcH << "\n";
         return false;
       }
+    }
+    if (useH264) {
+      captureReadback.SetOutputSize(activeEncodeW, activeEncodeH);
     }
     return true;
   };
@@ -6133,6 +6138,8 @@ int main(int argc, char** argv) {
                   << " captureStagingBusyDrops=" << captureReadback.BusyDrops()
                   << " captureSupersededDrops=" << captureReadback.SupersededDrops()
                   << " captureCpuBufferReuse=" << captureReadback.BufferReuseCount()
+                  << " capturePreprocessed=" << captureReadback.PreprocessCount()
+                  << " capturePreprocessFallbacks=" << captureReadback.PreprocessFallbacks()
                   << " captureD3DWaitAvgUs=" << captureD3DWaitAvgUs
                   << " captureD3DWaitMaxUs=" << captureD3DWaitMaxUs
                   << " captureCopyMapAvgUs=" << captureCopyMapAvgUs

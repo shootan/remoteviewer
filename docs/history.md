@@ -4916,3 +4916,45 @@ fallback/부작용: 10분 resize/창 전환 소크는 미수행(e2e의 선택 �
 미완료: gating 비교 입력의 GPU 이관(H3에서).
 
 다음 작업: H2 GPU-front crop/resize.
+
+### 211) 2026-07-31 H2 GPU-front crop/resize
+
+작업 ID: H2
+
+변경 파일
+- `apps/native_poc/src/d3d_capture_readback.hpp/.cpp` (파이프라인에 GPU 전처리 단계)
+- `apps/native_poc/src/native_video_host_main.cpp` (SetOutputSize 연결, 통계)
+
+변경 전 문제
+- 다운스케일 경로가 원본 해상도 전체를 CPU로 읽고, GpuBgraScaler가 CPU 업로드→blt→CPU
+  재독으로 프레임당 full-frame 전송 leg 3개를 만들었다(720p scroll 실측 scaleUs 4.47ms).
+
+구현 내용
+- Submit에서 인코드 박스가 소스 콘텐츠의 정확한 aspect-fit이고 업스케일이 아닐 때만
+  GPU 전처리: 소유 텍스처로 CopyResource → VideoProcessorBlt(crop rect + scale, full-range
+  RGB, auto-processing off) → 인코드 크기만 staging에 region copy. 조건 미충족(창 crop
+  비율 변화 등)이나 blt 실패 시 기존 경로로 폴백해 소비자의 재적합 로직이 그대로 동작
+  - 스트레치 프레임이 나갈 수 없는 구조.
+- staging slot은 캡처 크기로 유지하고 CopySubresourceRegion으로 인코드 영역만 복사,
+  meta.payloadW/H가 워커의 읽기 크기를 지정. 전처리 시 창 crop도 blt가 수행(원패스).
+- 통계: capturePreprocessed / capturePreprocessFallbacks.
+
+실행한 build/test
+- capture_readback_test ALL PASS, e2e ALL PASS.
+- Debug 1080p→720p: 전 프레임 preprocessed(480), fallback 0, 레거시 gpuScaleAttempts 0,
+  첫 프레임부터 size=1280x720 직행.
+
+Before/After (720p-scroll Release 5회 중앙값, post-Q1 기준선 대비)
+- Host CPU 67.14% → 52.64% (-21.6%)
+- CPU scale(scaleUs) 4469us → 0
+- 콜백 submit 1005 → 389us, 워커 memcpy 777 → 368us (readback bytes가 encode 크기로 축소)
+- LAT_P95 19.5ms → 1.5ms (-92%)
+- DEC 24.11 → 25.11 (+4.1%)
+- 1080p 동일 크기 경로는 전처리를 건너뛰므로 무영향(H1 결과 유지).
+
+fallback/부작용: 720p 화질 screenshot 승인은 미수행(16:9 정합은 aspect-fit 가드로 구조
+보장, 뷰어 육안 확인은 1080p에서 수행) - G1 화질 체크리스트에 포함.
+
+미완료: 없음.
+
+다음 작업: H3 GPU NV12 → MF encoder.

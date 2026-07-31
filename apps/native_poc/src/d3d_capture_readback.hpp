@@ -36,12 +36,17 @@ struct CaptureFrameMeta {
   uint64_t submitCopyUs = 0;
   uint64_t submitUs = 0;
   // Snapshot of the window-client crop taken on the callback thread (a cheap rect query);
-  // the pixel work happens on the worker.
+  // the pixel work happens on the worker or, when the GPU preprocessor runs, in the blt.
   bool cropActive = false;
   uint32_t cropX = 0;
   uint32_t cropY = 0;
   uint32_t cropW = 0;
   uint32_t cropH = 0;
+  // Dimensions of the bytes the worker will read out of the staging slot. Equal to the
+  // capture size on the plain path, the encode size when the GPU preprocessor ran.
+  uint32_t payloadW = 0;
+  uint32_t payloadH = 0;
+  bool preprocessed = false;
 };
 
 /**
@@ -96,9 +101,20 @@ class D3dCaptureReadbackPipeline {
    */
   bool Submit(ID3D11Texture2D* src, const CaptureFrameMeta& meta);
 
+  /**
+   * Encode-size target for the GPU crop/scale front end. Submit preprocesses only when the
+   * source content aspect-fits the target exactly (no stretch); otherwise frames take the
+   * plain path at capture size and the consumer's refit logic runs as before. 0x0 disables.
+   */
+  void SetOutputSize(uint32_t width, uint32_t height);
+
   uint64_t BusyDrops() const { return busyDrops_.load(std::memory_order_relaxed); }
   uint64_t SupersededDrops() const { return supersededDrops_.load(std::memory_order_relaxed); }
   uint64_t BufferReuseCount() const { return bufferPool_.ReuseCount(); }
+  uint64_t PreprocessCount() const { return preprocessCount_.load(std::memory_order_relaxed); }
+  uint64_t PreprocessFallbacks() const {
+    return preprocessFallbacks_.load(std::memory_order_relaxed);
+  }
 
  private:
   enum class SlotState : uint8_t { Free, GpuPending };
@@ -112,6 +128,7 @@ class D3dCaptureReadbackPipeline {
   };
 
   bool CreateSlotsLocked(uint32_t width, uint32_t height);
+  bool EnsurePreprocessLocked(uint32_t srcW, uint32_t srcH, uint32_t dstW, uint32_t dstH);
   void WorkerLoop();
 
   Microsoft::WRL::ComPtr<ID3D11Device> device_;
@@ -127,11 +144,31 @@ class D3dCaptureReadbackPipeline {
   uint64_t generation_ = 0;
   uint64_t submitSeq_ = 0;
 
+  // GPU crop/scale front end (D3D11 video processor); guarded by slotMu_ for configuration
+  // and contextMu_ for use, like everything touching the immediate context.
+  uint32_t outputW_ = 0;
+  uint32_t outputH_ = 0;
+  Microsoft::WRL::ComPtr<ID3D11VideoDevice> videoDevice_;
+  Microsoft::WRL::ComPtr<ID3D11VideoContext> videoContext_;
+  Microsoft::WRL::ComPtr<ID3D11VideoProcessorEnumerator> vpEnumerator_;
+  Microsoft::WRL::ComPtr<ID3D11VideoProcessor> vpProcessor_;
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> preSrcTexture_;
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> preDstTexture_;
+  Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> vpInputView_;
+  Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> vpOutputView_;
+  uint32_t vpSrcW_ = 0;
+  uint32_t vpSrcH_ = 0;
+  uint32_t vpDstW_ = 0;
+  uint32_t vpDstH_ = 0;
+  bool preprocessBroken_ = false;
+
   CaptureBufferPool bufferPool_;
   std::thread worker_;
   std::atomic<bool> running_{false};
   std::atomic<uint64_t> busyDrops_{0};
   std::atomic<uint64_t> supersededDrops_{0};
+  std::atomic<uint64_t> preprocessCount_{0};
+  std::atomic<uint64_t> preprocessFallbacks_{0};
 };
 
 }  // namespace remote60::native_poc
