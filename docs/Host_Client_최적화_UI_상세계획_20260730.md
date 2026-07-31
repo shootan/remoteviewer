@@ -19,22 +19,10 @@
 - 매크로는 일시정지/스텝 편집/저장·불러오기와 Windows 매크로 창까지 완료됐고 엔진 테스트는
   46개다(감사 시점 23개).
 
-2026-07-31 코드 대조 검증에서 확인된, 계획에 없던 주의점:
-
-- **H1/H2 선행 조건 — frame gating 재설계**: 현재 gating은 원본 해상도 CPU BGRA payload를
-  블록 memcmp로 비교하고(`estimate_bgra_change_permille`), 이전 프레임 payload의 참조를
-  프레임 사이에 계속 쥔다. H1(콜백 readback 제거)과 H2(GPU 전처리)는 이 비교 입력 자체를
-  없애므로, gating을 encode 해상도 버퍼 비교나 GPU 히스토그램 등으로 옮기는 작업을 H1
-  범위에 포함해야 한다. 버퍼 풀 재사용(H1)도 gating이 쥔 참조와 충돌하지 않게 설계한다.
-  참고로 `gatingMotionPm` 임계값은 시작 로그 외에는 사용되지 않는 죽은 설정이다
-  (실제 판정은 changePermille > 0).
-- **C2 선행 조건 — 디바이스 통합**: Windows Client의 디코더 D3D 디바이스와 렌더러
-  디바이스가 서로 다른 `ID3D11Device`다. 디코더 surface 직접 렌더는 디바이스 공유(또는
-  shared handle)부터 해결해야 한다.
-- **A2 범위 축소**: "다음 list roundtrip에서도 cache 유지"라는 감사 진단은 틀렸다.
-  `RequestWindowList()`가 `thumbs_`를 항상 비우므로 목록 재진입 시 리프레시는 이미
-  동작하고, Kotlin 쪽 thumbVersion 게이팅도 이미 있다. 남는 것은 TARGETS 화면을 계속
-  열어둔 동안의 갱신(TTL)과 Bitmap/direct buffer 재사용뿐이다. 우선순위를 낮춘다.
+2026-07-31에 성능 항목(B1, H1~H4, C1~C2, A1~A2) 전부를 코드와 대조 검증했다. 감사 진단은
+A2(절반 오류)와 A1의 어댑터 부분(이미 변경 게이트 존재)을 빼면 코드 레벨에서 정확했다.
+검증에서 확인된 사실, 감사가 놓친 함정(H1의 frame gating 의존성, C2의 디코더/렌더러
+디바이스 분리), 진단 정정은 각 작업 절의 "검증 결과" 소절에 반영돼 있다.
 
 ## 1. 목표
 
@@ -233,11 +221,18 @@ Host가 세션 시작 시 스트림을 켜 주므로 영상은 나오지만, 목
 
 ## 6. B1 — Release 성능 기준선과 자동화 수정
 
-### 현재 문제
+### 현재 문제 (2026-07-31 코드 검증 완료)
 
-`automation/verify_native_video_runtime.ps1`은 실행 파일 경로가 Debug로 고정돼 있고,
-동일 이름의 Host/Client 프로세스를 모두 종료한다. 최적화 비교는 Release여야 하며, 사용자가 실행 중인
-Host를 건드리지 않는 격리 실행이 필요하다.
+`automation/verify_native_video_runtime.ps1:46-49`는 실행 파일 경로의 `Debug` 구성이 리터럴로
+박혀 있고 `-Configuration` 인자가 없다. `:51-52`는 시작 전에
+`remote60_native_video_host_poc`/`remote60_native_video_client_poc` 이름의 프로세스를 PID 구분
+없이 전부 강제 종료한다(와일드카드는 아니고 정확히 이 두 이름). 종료 시 정리는 이미 PID 기준으로
+올바르다. scene suite는 이 스크립트에 BuildDir만 넘기므로 같은 제약을 그대로 상속한다.
+
+이 문제는 이미 실제 사고를 냈다: 2026-07-30 감사 실행이 사용자가 쓰던 Host를 종료시켰고, 그
+직후 좀비 클라이언트/스트림 상태가 겹쳐 "제어는 되는데 영상이 검은" 장애로 이어졌다
+(`bf19eee`로 호스트 내성은 확보했지만, 스크립트가 남의 프로세스를 죽이는 것 자체를 없애야 한다).
+최적화 비교는 Release여야 하며, 사용자가 실행 중인 Host를 건드리지 않는 격리 실행이 필요하다.
 
 ### 수정 파일
 
@@ -291,6 +286,31 @@ Host를 건드리지 않는 격리 실행이 필요하다.
 ### 목표
 
 캡처 callback에서 `Map`, 전체 프레임 memcpy, CPU crop, heap allocation을 제거한다.
+
+### 검증 결과 (2026-07-31, 코드 확인)
+
+- `publish_captured_texture`가 callback 스레드에서 `CopyResource` 직후 flags 0(블로킹)
+  `Map`과 전행 memcpy를 인라인 수행한다. 실측 CopyMap 평균 ~1.0ms, memcpy 평균 ~0.8ms.
+- **DXGI 경로는 더 나쁘다**: frame handler가 `AcquireNextFrame`과 `ReleaseFrame` 사이에서
+  호출되므로, duplication 프레임을 쥔 채 GPU 동기 readback을 기다린다. H1 구현 시
+  `CopyResource`까지만 하고 프레임을 먼저 release하는 순서를 명시해야 한다.
+- staging 텍스처 ring(3개 이상, busy CAS)은 이미 있으나 Map/memcpy가 동기라 의미가 없다.
+  readback worker 스레드는 현재 존재하지 않는다(스레드는 제어용 3개뿐).
+- `captureD3DWaitUs`는 GPU 대기가 아니라 `d3dContextMu` 뮤텍스 경합 시간이다. 지표 해석과
+  이름을 정리한다.
+
+### 추가 범위 — frame gating 재설계 (필수 선행)
+
+현재 gating은 원본 해상도 CPU BGRA payload를 4KB 블록 memcmp로 비교하고
+(`estimate_bgra_change_permille`), 이전 프레임 payload의 `shared_ptr` 참조를 프레임 사이에
+계속 쥔다. H1은 이 비교 입력을 없애므로 gating을 함께 옮기지 않으면 정지 화면 절전이 조용히
+죽는다.
+
+- gating 비교를 readback 이후 단계(worker가 만든 encode 크기 CPU 버퍼)로 이동하거나,
+  GPU 단계의 저비용 차이 검출로 대체한다. 어느 쪽이든 A/B로 확인한다.
+- 버퍼 풀 재사용은 gating이 쥔 이전 프레임 참조와 충돌하지 않게 lease 수명을 설계한다.
+- `gatingMotionPm`(`frameGatingMotionThresholdPermille`)은 시작 로그 외에는 읽히지 않는
+  죽은 설정이다(실판정은 `changePermille > 0`). 삭제하거나 실제 판정에 연결한다.
 
 ### 수정 파일
 
@@ -388,6 +408,14 @@ context를 동시에 호출하지 않게 한다.
 원본 해상도 전체를 CPU로 읽은 뒤 crop/resize하는 경로를 제거하고, encode 크기의 BGRA만 한 번
 readback한다.
 
+### 검증 결과 (2026-07-31, 코드 확인)
+
+- 창 crop은 callback 스레드에서 전체 크기 버퍼를 새로 할당해 행 단위로 재복사한다(확인).
+- `GpuBgraScaler::scale()`은 입력이 `const uint8_t*`뿐이고(`ID3D11Texture2D*` 오버로드 없음),
+  `UpdateSubresource`로 업로드한 뒤 결과를 staging `Map`으로 다시 CPU에 읽는다. 즉 GPU
+  스케일을 써도 프레임당 GPU↔CPU 왕복이 캡처 readback까지 합쳐 3회다(확인).
+- H1의 gating 재설계와 입력/출력 버퍼 소유권을 공유하므로 H1과 인터페이스를 같이 설계한다.
+
 ### 수정 파일
 
 - 신규 `apps/native_poc/src/d3d_frame_preprocessor.hpp/.cpp`
@@ -427,6 +455,18 @@ readback한다.
 ### 목표
 
 CPU `bgra_to_nv12`와 `MFCreateMemoryBuffer` memcpy를 제거한다.
+
+### 검증 결과 (2026-07-31, 코드 확인)
+
+- `bgra_to_nv12`는 SIMD 없는 스칼라 per-pixel 루프이고 출력 vector를 매 호출 재할당한다.
+  감사 로그 재계산 결과 프레임당 평균 8.1ms, 최대 11.5ms — 1080p30 예산 33.3ms의 약 4분의 1로,
+  단일 항목 중 기대 이득이 가장 크다.
+- `create_input_sample`이 매 프레임 `MFCreateMemoryBuffer`를 새로 만들고 NV12 전체를 다시
+  memcpy한다(확인).
+- 전제 성립 확인: `IMFDXGIDeviceManager`가 초기화 시(`MFT_MESSAGE_SET_D3D_MANAGER`)와 device
+  재생성 후 모두 하드웨어 MFT에 이미 연결돼 있고, 감사 실행도 hardware backend
+  (`amf_mft_h264enc`, hw=1)였다. `MFCreateDXGISurfaceBuffer`는 코드 어디에도 없으며 texture를
+  받는 encode 변형도 없다 — 계획대로 신규 추가가 맞다.
 
 ### 수정 파일
 
@@ -480,6 +520,15 @@ CPU `bgra_to_nv12`와 `MFCreateMemoryBuffer` memcpy를 제거한다.
 
 H1~H3 이후에도 latency p95 또는 decoded fps가 목표에 미달할 때만 착수한다.
 
+### 검증 결과 (2026-07-31, 코드 확인)
+
+- 인코드→패킷화→pacing 대기→`sendto`가 전부 main 스레드 인라인이다. pacing 대기는
+  `send_udp_chunks_timed` 내부의 sleep+스핀 루프(`udp_pace_wait_until`, 2ms 미만은 yield 스핀)
+  라서 한 프레임의 전송 예산이 다음 프레임 인코드 시작을 직접 늦춘다(확인).
+- 인코드와 전송 사이에 큐는 없고, 영상 경로 전체의 유일한 생산자/소비자 핸드오프는 캡처
+  callback→인코드 루프의 최신 프레임 1칸(`FrameState`, latest-wins)뿐이다. 감사의
+  queue-to-send 평균 16.8ms는 이 구조와 부합한다.
+
 ### 수정 파일
 
 - `apps/native_poc/src/native_video_host_main.cpp`
@@ -501,6 +550,21 @@ H1~H3 이후에도 latency p95 또는 decoded fps가 목표에 미달할 때만 
 - queue 분리 시 메모리 무한 증가와 오래된 frame 전송 없음
 
 ## 11. C1 — Windows Client 저위험 최적화
+
+### 검증 결과 (2026-07-31, 코드 확인)
+
+- `ensure_rtv()`는 매 프레임 무조건 `GetBuffer`+`CreateRenderTargetView`를 호출한다. 크기
+  검사는 `ResizeBuffers`만 막고 RTV 재생성은 못 막으며, `GetClientRect`+`GetDesc`도 매
+  프레임 실행된다(확인).
+- `draw_target_card`가 `gThumbMu`를 쥔 채 HALFTONE `StretchDIBits`를 그리고, 썸네일 수신
+  스레드는 같은 락을 쥔 채 `InvalidateRect`까지 호출한다(확인). C1-2에 "락 안
+  `InvalidateRect` 제거"를 포함한다.
+- 브러시는 카드당 3~4개, 버튼당 1개, 오버레이 알파 사각형은 DC/비트맵/브러시 3개를 매
+  페인트 생성/파괴하고, 제목 폰트도 매 페인트 재생성한다(확인). 본문 폰트 `gUiFont`만 DPI
+  기준으로 캐시돼 있다.
+- swapchain은 레거시 `DXGI_SWAP_EFFECT_DISCARD` + 레거시 `CreateSwapChain`이며 waitable
+  frame-latency object는 없다. flip-discard 전환은 감사의 후보 그대로 C1 이후 A/B 항목으로
+  유지한다.
 
 ### C1-1 RTV 캐시
 
@@ -541,8 +605,18 @@ H1~H3 이후에도 latency p95 또는 decoded fps가 목표에 미달할 때만 
 H1~H3과 C1 후에도 Windows Client CPU가 단일 코어 환산 15% 이상이거나 1080p30 목표를 막을 때만
 착수한다.
 
+### 검증 결과 (2026-07-31, 코드 확인)
+
+- 현재 디코더 출력은 CPU bytes(`DecodedFrameNv12.bytes`)이고, 매 프레임 Y/UV dynamic texture
+  2장에 `Map(WRITE_DISCARD)`+행별 memcpy로 업로드된다(확인). 디코더에 DXGI 디바이스 매니저는
+  설정돼 있어 내부 DXVA는 쓰지만 출력 샘플은 즉시 시스템 메모리로 복사된다.
+- **감사가 놓친 선행 조건**: 디코더의 D3D 디바이스와 렌더러의 디바이스가 서로 다른
+  `ID3D11Device`다. surface 직접 렌더는 두 디바이스를 통합하거나 shared handle로 텍스처를
+  넘기는 작업이 먼저다. spike 견적에 이 비용을 포함한다.
+
 ### spike 내용
 
+- 디코더와 렌더러의 D3D 디바이스 통합(또는 shared handle) 설계
 - `H264Decoder`가 `DecodedFrameNv12.bytes` 대신 DXGI surface output을 선택할 수 있는지 확인
 - `IMFDXGIBuffer`에서 texture/subresource 획득
 - renderer가 NV12 plane SRV 또는 video processor로 swapchain에 직접 출력
@@ -557,6 +631,21 @@ H1~H3과 C1 후에도 Windows Client CPU가 단일 코어 환산 15% 이상이�
 효과가 기준 미만이면 spike code는 제품 경로에 합치지 않는다.
 
 ## 13. A1 — Android dirty snapshot과 adaptive poll
+
+### 검증 결과 (2026-07-31, 코드 확인)
+
+- 250ms 폴은 씬과 무관하게 돌며, 틱당 JNI 호출이 8~9회다(상태/오류 각각 스냅샷 전체 딥카피,
+  디코더 뮤텍스 아래 ~28필드 디버그 문자열 생성, panel JSON 생성→`NewStringUTF`→Kotlin
+  `org.json` 재파싱·객체 재할당, `lastOutputPresentationUs` 중복 호출 포함). 확인.
+- 씬 visibility 6개와 targets 위젯 ~18개 속성은 변경 여부와 무관하게 매 틱 재설정된다. 확인.
+- **감사 정정**: 대상 목록 어댑터는 이미 변경 게이트가 있다(라벨/id/selectedId 비교 후에만
+  `notifyDataSetChanged`). 다만 비교용 리스트는 매 틱 새로 할당된다.
+- native에 세션/panel 수준 version 카운터는 없다. 재사용 가능한 것: per-thumbnail
+  `WindowThumbnailVersion`, atomic `sessionBytesReceived_`, 디코더의
+  `ReadySelectionGeneration`/`LastOutputPresentationUs`.
+- 구현 순서 권장: snapshot JSON보다 **초경량 version getter를 먼저** 추가하고(단일 atomic
+  read), version이 변했을 때만 snapshot JSON을 가져온다. JSON 직렬화 자체도 틱 비용이기
+  때문이다.
 
 ### 수정 파일
 
@@ -592,12 +681,23 @@ H1~H3과 C1 후에도 Windows Client CPU가 단일 코어 환산 15% 이상이�
 - 연결/선택 timeout과 stall recovery 동작 무회귀
 - 로그인·목록·viewer 각각 10분 실행 시 CPU/jank가 기준선 이하
 
-## 14. A2 — Android thumbnail 수명과 버퍼 재사용
+## 14. A2 — Android thumbnail 수명과 버퍼 재사용 (범위 축소, P2)
 
-### 현재 원인
+### 현재 원인 (2026-07-31 검증으로 정정)
 
-`ClientSessionController::QueueThumbnailFetchesFromPanel()`은 `thumbs_.count(id)`가 있으면 다시
-queue하지 않는다. 주석과 달리 다음 list roundtrip에서도 세션 cache가 유지돼 썸네일이 낡는다.
+감사의 "다음 list roundtrip에서도 세션 cache가 유지된다"는 진단은 **틀렸다**.
+`RequestWindowList()`가 요청 시마다 `thumbs_`와 fetch queue를 비우므로 목록 재진입/새로 고침
+리프레시는 이미 동작하고, Kotlin 쪽도 `thumbVersion` 게이팅이 있어 안 변한 썸네일에는 JNI
+호출조차 없다.
+
+실제 남는 문제만 다룬다:
+
+- TARGETS 화면을 계속 열어둔 동안에는 같은 list 세대 안에서 갱신이 없다(TTL 부재).
+- 썸네일이 갱신될 때 native vector → `NewByteArray` → direct ByteBuffer → Bitmap의 3중
+  복사와 신규 할당이 일어나고 교체된 Bitmap을 recycle하지 않는다.
+- BGRA→RGBA 스위즐이 control 스레드의 스칼라 per-pixel 루프다.
+
+우선순위는 P2로 낮춘다.
 
 ### 수정 파일
 
