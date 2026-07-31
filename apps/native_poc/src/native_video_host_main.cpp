@@ -2729,7 +2729,10 @@ int main(int argc, char** argv) {
       int peerLen = sizeof(peer);
       const int n = recvfrom(clientSock, reinterpret_cast<char*>(rx), sizeof(rx), 0,
                              reinterpret_cast<sockaddr*>(&peer), &peerLen);
-      if (n <= 0) {
+      // Zero-length datagrams are legal (NAT keepalives, scanners) and must not end the
+      // process while it waits for a real client.
+      if (n == 0) continue;
+      if (n < 0) {
         const int err = WSAGetLastError();
         if (err == WSAEMSGSIZE || err == WSAECONNRESET) continue;
         std::cerr << "[native-video-host] udp handshake recv failed err=" << err << "\n";
@@ -2870,6 +2873,13 @@ int main(int argc, char** argv) {
   };
 
   auto serve_control_session = [&](ControlLink& link) {
+    // A new session starts with the stream on, exactly like the first client of a fresh
+    // process. The previous session's disconnect turned it off, and a client that never
+    // sends stream-state (the Windows client) would otherwise stare at a black screen
+    // forever after any reconnect. Clients that manage the state explicitly still can.
+    if (!streamControlActive.exchange(true, std::memory_order_acq_rel)) {
+      std::cout << "[native-video-host][control] stream restored for new session\n";
+    }
     auto send_window_list = [&](uint32_t seq) -> bool {
       ControlWindowListMessage rsp{};
       rsp.header.magic = remote60::native_poc::kMagic;
@@ -3407,13 +3417,19 @@ int main(int argc, char** argv) {
         remote60::native_poc::kUdpControlStreamClientToHost, args.udpMtu);
 
     udpReaderThread = std::thread([&]() {
+      int lastLoggedRecvError = 0;
       while (!stop.load()) {
         uint8_t rx[kUdpReceiveBufferBytes];
         sockaddr_in peer{};
         int peerLen = sizeof(peer);
         const int n = recvfrom(clientSock, reinterpret_cast<char*>(rx), sizeof(rx), 0,
                                reinterpret_cast<sockaddr*>(&peer), &peerLen);
-        if (n <= 0) {
+        // A zero-length datagram is legal and arrives from NAT keepalives and port scanners.
+        // It used to fall into the error path below and end this thread, after which no Hello
+        // was ever read again: video kept streaming to the previous peer while every new
+        // client connected its control channel and then watched nothing arrive.
+        if (n == 0) continue;
+        if (n < 0) {
           const int err = WSAGetLastError();
           if (err == WSAETIMEDOUT || err == WSAEWOULDBLOCK || err == WSAEMSGSIZE ||
               err == WSAECONNRESET) {
@@ -3422,7 +3438,16 @@ int main(int argc, char** argv) {
             udpControlChannel.Tick();
             continue;
           }
-          break;
+          // This thread is the only reader of hellos; while the process lives it must too.
+          // Whatever went wrong with one receive, the socket itself outlives it.
+          if (err != lastLoggedRecvError) {
+            lastLoggedRecvError = err;
+            std::cout << "[native-video-host] udp reader recv error err=" << err
+                      << " (continuing)\n";
+          }
+          udpControlChannel.Tick();
+          Sleep(50);
+          continue;
         }
         const size_t len = static_cast<size_t>(n);
 
