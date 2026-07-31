@@ -775,18 +775,26 @@ H1~H3과 C1 후에도 Windows Client CPU가 단일 코어 환산 15% 이상이�
    - last output presentation timestamp
 2. 상태가 실제로 바뀔 때 version을 증가시킨다.
 3. JNI 여러 getter 대신 `nativeGetUiSnapshotJson()` 한 번으로 일관된 snapshot을 가져온다.
-4. Kotlin은 마지막 version과 같으면 scene 전체를 다시 그리지 않는다.
-5. poll 간격을 scene별로 조정한다.
+4. 현재 scene의 renderer만 호출한다.
+   - `renderTargetsScene()`은 TARGETS에서만 호출
+   - `renderViewerScene()`은 VIEWER/SWITCHING에서만 호출
+   - LOGIN/HOSTS/CONNECT에서는 data usage, presentation timestamp, video size를 조회하지 않음
+   - viewer 이탈 시 macro 정리는 scene transition에서 한 번 수행하고
+     `applySceneVisibility()`의 매 tick `nativeMacroState()` 조회는 제거
+5. Kotlin은 마지막 version과 같으면 scene 전체를 다시 그리지 않는다.
+6. poll 간격을 scene별로 조정한다.
    - LOGIN/HOSTS: 1000ms
    - TARGETS stable: 750~1000ms
    - CONNECTING/SWITCHING/stall recovery: 250ms
    - VIEWER stable: 500ms
-6. selection timeout과 stall 판단은 시간이 지나야 하므로 version이 같아도 timer 판단은 실행한다.
-7. macro playback 16ms runnable은 status poll과 분리된 현재 구조를 유지한다.
+7. selection timeout과 stall 판단은 시간이 지나야 하므로 version이 같아도 timer 판단은 실행한다.
+8. macro playback 16ms runnable은 status poll과 분리된 현재 구조를 유지한다.
 
 ### 완료 기준
 
 - JNI 상태 조회가 poll당 1회
+- LOGIN/HOSTS/CONNECT/TARGETS 안정 tick에서 viewer data/presentation/video-size JNI 호출 0회
+- scene 변화가 없는 tick에서 `nativeMacroState()` 호출 0회
 - 동일 version에서 adapter notify, scene visibility 재적용, Surface rebind 없음
 - 연결/선택 timeout과 stall recovery 동작 무회귀
 - 로그인·목록·viewer 각각 10분 실행 시 CPU/jank가 기준선 이하

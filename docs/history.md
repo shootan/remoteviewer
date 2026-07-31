@@ -4559,7 +4559,8 @@ Validation
     leg 3개를 정확히 기록했다.
   - H3 surface pool 수명을 `ProcessInput` 반환이 아니라 async MFT 참조 해제까지 보장하도록
     수정하고, C2 direct surface에도 visible rect를 적용하도록 연결했다.
-  - A1 JNI 횟수를 모든 scene 8~9회가 아니라 기본 6회/stable viewer 9회로 정정했다.
+  - A1 JNI 직접 호출 6회를 확인했으나 전체 `renderStatus()` 호출 그래프의 scene별 합계는
+    후속 3차 검증에서 비뷰어 9회/VIEWER 9회/SWITCHING 8회로 재정정했다(203번 참조).
   - A2의 Host version이 콘텐츠 버전이 아닌 매 fetch 시각임을 확인해, TTL 갱신 시 wire BGRA
     content hash 기반 로컬 동일성 비교와 negotiated conditional-fetch 확장을 구분했다.
 - `docs/구현계획.md`
@@ -4574,11 +4575,41 @@ Validation
 - `host_app_main.cpp`: child에 encoded experiment만 설정하고 encoder tune은 지정하지 않음을 확인했다.
 - `native_video_client_session.*`/`poc_protocol.hpp`: request/list에 이전 thumbnail version이 없고,
   기존 cache version은 Host timestamp를 그대로 저장함을 확인했다.
-- `MainActivity.kt`: 상태 poll 직접 호출 기본 6회, stable viewer 추가 3회와 기존 thumbnail
-  version gate를 확인했다.
+- `MainActivity.kt`: `renderStatus()` 직접 호출 6회와 기존 thumbnail version gate를 확인했다.
+  scene별 전체 합계는 후속 3차 검증에서 비뷰어 9회/VIEWER 9회/SWITCHING 8회로 확정했다.
 - 문서 전용 변경이므로 C++/Android build와 런타임 성능 테스트는 실행하지 않았다.
 
 다음 작업
 - B1 격리 Release 기준선을 먼저 고정한다.
 - 이어서 Q1-1 visible aperture, Q1-2 rate-control/pacing, Q1-3 제품 preset A/B를 순서대로
   구현·측정한 뒤 H1~H3 GPU 경로 최적화에 착수한다.
+
+### 203) 2026-07-31 Android A1 JNI 씬별 호출 수 재정정
+
+현재 작업 목표
+- 2차 검증에서 "기본 6회, VIEWER 9회"로 적은 A1 JNI 호출 수가 전체 호출 그래프 기준으로
+  맞는지 다시 확인하고, 잘못된 수치와 구현 계획을 정정한다.
+
+변경 사항
+- `docs/Host_Client_최적화_UI_상세계획_20260730.md`
+  - 씬별 안정 tick을 비뷰어 9회, VIEWER 9회, SWITCHING 8회로 확정한 3차 검증 결과를 유지했다.
+  - `renderTargetsScene()`/`renderViewerScene()`을 활성 scene에서만 호출하도록 A1 구현 단계를
+    추가했다.
+  - 비뷰어 tick의 viewer data/presentation/video-size 조회와
+    `applySceneVisibility()`의 매 tick `nativeMacroState()` 조회 제거를 완료 기준에 추가했다.
+- `docs/구현계획.md`
+  - 기존 검증 체크 항목을 2·3차 검증과 A1 재정정 내용을 포함하도록 현행화했다.
+- 202번 이력의 잘못된 A1 합계 표현에 후속 정정 참조를 남겼다.
+
+검증
+- `renderStatus()`의 직접 JNI getter 6회 확인.
+- `renderViewerScene()`은 모든 scene에서 호출되고 SWITCHING만 조기 반환함을 확인:
+  비뷰어와 VIEWER에서 data usage/presentation 조회 2회 추가.
+- `applySceneVisibility()`는 비VIEWER에서 `nativeMacroState()`를 1회 호출함을 확인.
+- `syncVideoSurface()`는 VIEWER/SWITCHING에서 `nativeGetVideoSizePacked()`를 1회 호출함을 확인.
+- 따라서 안정 tick 합계는 LOGIN/HOSTS/CONNECT/TARGETS 9회, VIEWER 9회, SWITCHING 8회다.
+- 문서 전용 변경이므로 Android build/runtime test는 실행하지 않았다.
+
+다음 작업
+- A1 구현 시 snapshot/version 통합 전에 inactive-scene renderer 호출 차단을 독립 커밋으로
+  적용하고, scene별 JNI 카운터 또는 trace로 9/9/8 → 목표값 감소를 검증한다.
