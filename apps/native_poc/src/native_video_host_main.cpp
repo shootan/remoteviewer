@@ -3754,6 +3754,8 @@ int main(int argc, char** argv) {
   bool surfaceEncodeHealthy = true;
   uint64_t encoderOutputSamplesTotal = 0;
   uint64_t nv12SurfaceEncodeCount = 0;
+  uint32_t surfaceEncodeProbeCount = 0;
+  uint64_t surfaceEncodeProbeSumUs = 0;
   int32_t poppedNv12Slot = -1;
   uint64_t poppedNv12Generation = 0;
 
@@ -5615,6 +5617,25 @@ int main(int argc, char** argv) {
             pending.requiredOutputs = encoderOutputSamplesTotal + 1;
             nv12PendingReleases.push_back(pending);
             poppedNv12Slot = -1;  // ownership moved to the deferred-release queue
+            // Accepting a DXGI sample is no proof the vendor path is fast: AMF accepts them
+            // and then takes ~68ms a frame on internal synchronization (measured; the CPU
+            // path runs 4.5ms). Probe the first frames and drop back for the session when
+            // the surface path costs more than half the 33ms frame budget on average.
+            surfaceEncodeProbeSumUs += encodeStats.encodeCallUs;
+            if (++surfaceEncodeProbeCount == 30) {
+              const uint64_t avgUs = surfaceEncodeProbeSumUs / surfaceEncodeProbeCount;
+              if (avgUs > 16000) {
+                surfaceEncodeHealthy = false;
+                std::cout << "[native-video-host] nv12 surface encode too slow avgUs=" << avgUs
+                          << " backend=" << encoder.backend_name()
+                          << "; reverting to cpu nv12\n";
+              } else {
+                std::cout << "[native-video-host] nv12 surface encode probe ok avgUs=" << avgUs
+                          << " backend=" << encoder.backend_name() << "\n";
+              }
+              surfaceEncodeProbeCount = 0;
+              surfaceEncodeProbeSumUs = 0;
+            }
           } else {
             // One rejection turns the path off for the session; this frame is dropped and
             // the next one takes the CPU route. Its slot is released at the next loop top.

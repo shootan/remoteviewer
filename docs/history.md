@@ -5107,3 +5107,33 @@ Before/After (1080p-scroll Release 3회, post-Q1 기준선 대비)
 - keep-alive/scene/테스트 프로세스 전부 종료, 사용자 실호스트(PID 10852)만 유지.
 - 참고: 사용자 실호스트는 build-local Release 구버전 바이너리로 계속 실행 중 -
   재시작해야 이 세션의 Q1/H1/H2/C1 수정이 제품 경로에 반영된다.
+
+
+### 216) 2026-07-31 (재부팅 후) H3 최종 판정 - AMF 벤더 경로 느림 확정, 자동 폴백 추가
+
+작업 ID: H3 후속
+
+재부팅 후 환경 검증
+- 캡처 스택 완전 회복: DXGI 52~63cb/s, WGC 49~55cb/s, 디바이스 오류 0. 어제의 WGC/DXGI
+  사망과 디바이스 제거는 전부 드라이버 상태였음이 확정(어제 "정상" 측정치도 저하 상태
+  - 콜백이 어제 20~25/s vs 오늘 50~63/s).
+
+H3 A/B (1080p-scroll Release, 건강한 드라이버)
+- OFF: 22.3~23.4fps, Host CPU ~65%
+- ON: 5.4~9.4fps로 붕괴, encUs 평균 68ms(max 211ms), 매 프레임 MF_E_NOTACCEPTING.
+  async poll 노브(POLL_MAX=16, SLEEP=500us)로도 6~13fps.
+- 결론: 환경 문제가 아니라 AMF MFT의 DXGI 입력 샘플 경로가 이 GPU에서 프레임당
+  수십 ms의 내부 동기화 비용을 가진다(CPU 입력 경로는 4.5ms). 어제의 기본 OFF 판단이
+  옳았다.
+
+구현 (자동 성능 폴백)
+- 표면 인코드 첫 30프레임의 encodeCallUs를 프로브해 평균 16ms 초과 시 세션 내 CPU
+  경로로 자동 복귀 + 로그. 실측: "too slow avgUs=18619 ... reverting" 후 fps 18~20
+  회복. 샘플 수락 여부만으로는 벤더 경로 품질을 알 수 없다는 것이 핵심 교훈.
+- 기본값은 opt-in 유지: AMF에서는 켜도 세션 시작 1~2초 프로브 비용 후 어차피 CPU로
+  돌아오므로 이득이 없고, encoder 재초기화마다 재프로브 비용이 반복된다. NVENC/QSV
+  머신에서 프로브가 통과하면 그때 기본화를 재논의(백엔드별 verdict 기억 개선 포함).
+
+시사점
+- 디코드 fps 27 목표의 남은 병목은 H4(pacing 인라인 전송, queue-to-send 45ms)가 유력.
+  H3는 이 머신에서는 닫힌 카드.
