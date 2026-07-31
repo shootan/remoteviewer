@@ -5187,3 +5187,14 @@ Before/After (1080p-scroll Release 5회, 오늘 H4-off 대비)
 - MBPS 5.4 → 6.2 (더 많은 프레임 출하), PRESENT_GAP 0
 - Host CPU 65 → 72~78%: 초당 인코드 프레임 증가분의 정직한 비용(프레임당 비용 유사)
 - senderQueueDrops 5회/10초: 키프레임 supersede + 재동기 정상 작동
+
+
+### 219) 2026-07-31 H4 전체 매트릭스 확인 + 클라이언트 flip-discard 스왑체인
+
+- H4 전체 매트릭스(4구성×5회, 20/20 OK): 1080p-static 21.7~24.2 / 1080p-scroll
+  24.8~26.4 / **1080p-video 24.2~27.0(목표 27 도달)** / 720p-scroll 24.8~26.1.
+  전 장면 LAT_P95 1.3~13.8ms(기준 70ms), PRESENT_GAP 0, 회귀 없음.
+- 클라이언트 스왑체인을 DXGI_SWAP_EFFECT_FLIP_DISCARD로 전환(거부 시 legacy discard
+  폴백). 하네스는 픽커 화면이라 present 경로를 측정하지 못함 - fps 무변화 확인 +
+  뷰어 컬러 블록 시각 검증으로 무회귀 확인. present 비용 개선은 구조상 이득(블릿 제거,
+  DWM 참조 합성)이며 인터랙티브 실사용 대상.

@@ -1503,8 +1503,14 @@ struct Nv12D3dRenderer {
     sd.OutputWindow = hwnd;
     sd.SampleDesc.Count = 1;
     sd.Windowed = TRUE;
-    sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-    if (FAILED(factory->CreateSwapChain(device.Get(), &sd, &swapChain))) return false;
+    // Flip-discard presents by reference through DWM instead of blitting the whole frame;
+    // the legacy discard model costs a full-frame copy per present. Falls back for the
+    // rare pre-Win10 driver that rejects the flip model.
+    sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    if (FAILED(factory->CreateSwapChain(device.Get(), &sd, &swapChain))) {
+      sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+      if (FAILED(factory->CreateSwapChain(device.Get(), &sd, &swapChain))) return false;
+    }
     factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
 
     static const char* kVsSrc =
