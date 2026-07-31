@@ -4801,3 +4801,46 @@ fallback/부작용: keyint/fps가 함께 바뀌면 기존대로 encoder 재초�
 미완료: 없음.
 
 다음 작업: Q1-3 제품 encoder tune 명시.
+
+### 208) 2026-07-31 Q1-3 제품 encoder tune 명시 + A/B (low_latency 확정)
+
+작업 ID: Q1-3
+
+변경 파일
+- `apps/native_poc/src/host_app_main.cpp` (자식에 REMOTE60_NATIVE_ENCODER_TUNE_MODE=
+  low_latency 명시)
+- `automation/native_video_profile_android_lan.json`,
+  `automation/native_video_profile_1080p_external_template.json` (stable_text →
+  low_latency, 제품 preset과 일치)
+- `apps/native_poc/src/native_video_host_main.cpp` (--bind-address 인자)
+- `automation/verify_native_video_runtime.ps1` (로컬 실행 시 루프백 바인드)
+- `automation/run_perf_baseline.ps1` (-TuneMode, -CaptureBackend 파라미터)
+
+변경 전 문제
+- 제품 host_app이 tune을 지정하지 않아 native 기본 low_latency로 돌고, 검증 프로필은
+  stable_text라 제품과 검증의 화질 결론이 달랐다.
+
+A/B 결과 (1080p30 scroll, Release, DXGI, 각 3회 중앙값)
+- decoded fps: low_latency 22.78 vs stable_text 22.33 (-2%, 노이즈 범위)
+- LAT_P95: 13.9ms vs 28.9ms (stable_text +109%)
+- Host CPU 동일, Client CPU stable_text +8.9%
+- 결론: **low_latency를 제품 기본으로 확정**. stable_text의 텍스트 보호 목적은 Q1-2로
+  고정된 PeakConstrainedVBR(300% peak)+MaxQP 32가 이미 담당하며, fps 이득 없이 지연
+  꼬리만 나빠진다. 검증 프로필을 제품과 동일하게 맞췄다.
+
+측정 인프라 이슈 2건 (이번 세션에서 해결)
+- 새 빌드 경로의 exe가 0.0.0.0에 바인드하면 Windows 방화벽 동의 대화상자가 실행마다
+  떠서 측정을 방해한다. 호스트에 --bind-address를 추가하고 로컬 검증은 127.0.0.1에
+  바인드해 대화상자 자체를 차단했다.
+- 16:00경부터 WGC 프레임 공급이 시스템 수준에서 2~5fps로 저하됐다(같은 장면에서 DXGI는
+  20fps+ 정상, 15:52까지는 WGC도 정상). scene 애니메이션은 픽셀 diff로 확인된 상태라
+  WGC 세션 레벨 문제로 판단 - 재부팅 전까지 지속될 수 있어 기준선·A/B는 DXGI 백엔드로
+  수행한다(제품 지원 백엔드이자 H1이 최적화하는 바로 그 경로). 사용자 실호스트(10:35
+  시작, WGC)는 저하 이전에 세션을 만들었으므로 즉시 영향은 불명.
+
+실행한 build/test
+- host_app/host_poc/client_poc Debug+Release(build-perf) 빌드, A/B 6런 전부 OVERALL_OK.
+
+미완료: WGC 저하 근본 원인(재부팅 후 재확인 필요).
+
+다음 작업: Q1 완료 기준선 재수집(DXGI).

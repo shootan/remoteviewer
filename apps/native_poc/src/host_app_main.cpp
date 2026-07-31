@@ -298,9 +298,14 @@ class StreamingHostProcess {
       // build without it refuses --codec h264 and exits immediately. The product has no other
       // path, so the switch is turned on for the child rather than left to how it was built.
       SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
+      // The product encoder preset, stated instead of inherited: whatever happens to be in
+      // the parent environment must not silently change how every session encodes. Chosen by
+      // A/B on 1080p30 scroll (2026-07-31): stable_text bought no decoded fps and doubled
+      // latency p95; text legibility is already protected by the peak-constrained VBR policy.
+      SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODER_TUNE_MODE", L"low_latency");
 
       FILE* log = OpenLog();
-      AppendLogLine(log, "[host-app] starting the streaming host");
+      AppendLogLine(log, "[host-app] starting the streaming host (tune=low_latency)");
 
       if (!CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, TRUE,
                           CREATE_NO_WINDOW, nullptr, executable_dir().c_str(), &si, &pi)) {

@@ -82,6 +82,11 @@ $clientOut = Join-Path $logDir "client.out.log"
 $clientErr = Join-Path $logDir "client.err.log"
 
 $hostArgs = @("--bind-port", "$Port", "--fps", "$Fps", "--codec", "$Codec", "--seconds", "$HostSeconds")
+# Loopback runs bind loopback: binding 0.0.0.0 from a fresh build path summons the Windows
+# Firewall consent dialog, which dims the screen and starves WGC for the whole run.
+if ($RemoteHost -eq "127.0.0.1" -or $RemoteHost -ieq "localhost") {
+  $hostArgs += @("--bind-address", "127.0.0.1")
+}
 if (-not [string]::IsNullOrWhiteSpace($effectiveTransport)) { $hostArgs += @("--transport", "$effectiveTransport") }
 if ($UdpMtu -gt 0) { $hostArgs += @("--udp-mtu", "$UdpMtu") }
 if ($Codec -ieq "h264") {

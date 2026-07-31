@@ -1389,8 +1389,21 @@ struct WinsockScope {
   }
 };
 
+/** Network-order address for bind(); 0.0.0.0 when unset. A typo must not bind nowhere silently. */
+ULONG resolve_bind_address(const std::string& bindAddress) {
+  if (bindAddress.empty()) return htonl(INADDR_ANY);
+  in_addr parsed{};
+  if (inet_pton(AF_INET, bindAddress.c_str(), &parsed) == 1) return parsed.s_addr;
+  std::cerr << "[native-video-host] invalid --bind-address " << bindAddress << ", using 0.0.0.0\n";
+  return htonl(INADDR_ANY);
+}
+
 struct Args {
   uint16_t bindPort = 43000;
+  // Empty binds every interface. Test harnesses pass 127.0.0.1: a loopback bind never
+  // triggers the Windows Firewall consent dialog, which dims the whole screen and starves
+  // WGC capture for as long as it is up -- every measurement taken behind it is garbage.
+  std::string bindAddress;
   uint16_t controlPort = 0;
   uint32_t tcpSendBufKb = 0;
   uint32_t udpMtu = 1200;
@@ -1645,6 +1658,8 @@ Args parse_args(int argc, char** argv) {
     if (k == "--bind-port" && i + 1 < argc) {
       uint32_t v = 0;
       if (parse_u32(argv[++i], &v)) a.bindPort = static_cast<uint16_t>(std::min<uint32_t>(v, 65535));
+    } else if (k == "--bind-address" && i + 1 < argc) {
+      a.bindAddress = argv[++i];
     } else if (k == "--control-port" && i + 1 < argc) {
       uint32_t v = 0;
       if (parse_u32(argv[++i], &v)) a.controlPort = static_cast<uint16_t>(std::min<uint32_t>(v, 65535));
@@ -2655,7 +2670,7 @@ int main(int argc, char** argv) {
     sockaddr_in local{};
     local.sin_family = AF_INET;
     local.sin_port = htons(args.bindPort);
-    local.sin_addr.s_addr = htonl(INADDR_ANY);
+    local.sin_addr.s_addr = resolve_bind_address(args.bindAddress);
     if (bind(listenSock, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0) {
       std::cerr << "[native-video-host] bind failed port=" << args.bindPort << "\n";
       closesocket(listenSock);
@@ -2688,7 +2703,7 @@ int main(int argc, char** argv) {
     sockaddr_in local{};
     local.sin_family = AF_INET;
     local.sin_port = htons(args.bindPort);
-    local.sin_addr.s_addr = htonl(INADDR_ANY);
+    local.sin_addr.s_addr = resolve_bind_address(args.bindAddress);
     if (bind(clientSock, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0) {
       std::cerr << "[native-video-host] udp bind failed port=" << args.bindPort << "\n";
       closesocket(clientSock);
@@ -3352,7 +3367,7 @@ int main(int argc, char** argv) {
       sockaddr_in ctlLocal{};
       ctlLocal.sin_family = AF_INET;
       ctlLocal.sin_port = htons(args.controlPort);
-      ctlLocal.sin_addr.s_addr = htonl(INADDR_ANY);
+      ctlLocal.sin_addr.s_addr = resolve_bind_address(args.bindAddress);
       if (bind(controlListenSock, reinterpret_cast<const sockaddr*>(&ctlLocal), sizeof(ctlLocal)) != 0 ||
           listen(controlListenSock, 1) != 0) {
         std::cerr << "[native-video-host] control bind/listen failed port=" << args.controlPort << "\n";

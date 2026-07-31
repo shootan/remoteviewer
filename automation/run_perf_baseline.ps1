@@ -15,7 +15,14 @@ param(
   [int]$HostSeconds = 14,
   [int]$ClientSeconds = 10,
   [string]$OutDir = "",
-  [string[]]$Only = @()   # e.g. "1080p-scroll" to run a single matrix entry
+  [string[]]$Only = @(),   # e.g. "1080p-scroll" to run a single matrix entry
+  [ValidateSet("", "low_latency", "stable_text")]
+  [string]$TuneMode = "",   # empty inherits the host default
+  # dxgi by default: on this machine WGC frame delivery degraded system-wide mid-session
+  # (2-5 callbacks/s while DXGI does 20+ on the same animated scene) and only a reboot is
+  # likely to restore it. DXGI is a supported product backend and the path H1 optimizes.
+  [ValidateSet("dxgi", "wgc")]
+  [string]$CaptureBackend = "dxgi"
 )
 
 Set-StrictMode -Version Latest
@@ -32,6 +39,13 @@ if ([string]::IsNullOrWhiteSpace($OutDir)) {
   $OutDir = Join-Path $Root ("automation/logs/baseline-" + $ts)
 }
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+
+if (-not [string]::IsNullOrWhiteSpace($TuneMode)) {
+  $env:REMOTE60_NATIVE_ENCODER_TUNE_MODE = $TuneMode
+} else {
+  Remove-Item Env:REMOTE60_NATIVE_ENCODER_TUNE_MODE -ErrorAction SilentlyContinue
+}
+$env:REMOTE60_DESKTOP_CAPTURE_BACKEND = $CaptureBackend
 
 # The primary comparison scene for optimization work is 1080p30 scroll.
 $matrix = @(
@@ -109,6 +123,8 @@ foreach ($entry in $matrix) {
       scene = $entry.scene
       iteration = $i
       configuration = $Configuration
+      tuneMode = $TuneMode
+      captureBackend = $CaptureBackend
       encodeWidth = $entry.width
       encodeHeight = $entry.height
       bitrate = $entry.bitrate

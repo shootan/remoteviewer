@@ -20,7 +20,7 @@
   "inputTargetProcess": "",
   "inputTargetTitle": "",
   "forceEncodedExperiment": true,
-  "encoderTuneMode": "stable_text",
+  "encoderTuneMode": "low_latency",
   "encoderBackend": "mft_auto",
   "decoderBackend": "mft_auto",
   "h264NoPacing": true,
