@@ -201,6 +201,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             getString(R.string.quick_preset_sharp),
             if (forcePortrait) getString(R.string.quick_orientation_portrait)
             else getString(R.string.quick_orientation_auto),
+            // The rail ran out of room, so the rarely-needed diagnostics live here now.
+            getString(R.string.quick_diagnostics_log),
         )
         quickSettingsDialog = AlertDialog.Builder(this)
             .setTitle(R.string.quick_settings_title)
@@ -219,6 +221,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                         )
                         applyViewerRailLayout()
                     }
+                    4 -> toggleViewerLogDialog()
                 }
                 renderStatus()
             }
@@ -373,7 +376,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var viewerControlsBar: LinearLayout
     private lateinit var viewerBackButton: Button
     private lateinit var viewerKeyboardButton: Button
-    private lateinit var viewerLogButton: Button
     private lateinit var viewerOverlayStatusText: TextView
     private lateinit var viewerSplit: LinearLayout
     private lateinit var viewerRotateButton: Button
@@ -636,7 +638,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerControlsBar = findViewById(R.id.viewerControlsBar)
         viewerBackButton = findViewById(R.id.viewerBackButton)
         viewerKeyboardButton = findViewById(R.id.viewerKeyboardButton)
-        viewerLogButton = findViewById(R.id.viewerLogButton)
         viewerOverlayStatusText = findViewById(R.id.viewerOverlayStatusText)
         viewerSplit = findViewById(R.id.viewerSplit)
         viewerControlsBar = findViewById(R.id.viewerControlsBar)
@@ -709,7 +710,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerModeBanner = findViewById(R.id.viewerModeBanner)
         initVirtualMouse()
         initZoneBar()
-        findViewById<Button>(R.id.viewerMouseButton).setOnClickListener { toggleVirtualMouse() }
         macroRecordBar = findViewById(R.id.macroRecordBar)
         macroRecordBarText = findViewById(R.id.macroRecordBarText)
         macroRecordBarPause = findViewById(R.id.macroRecordBarPause)
@@ -869,11 +869,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerKeyboardButton.setOnClickListener {
             toggleViewerKeyboard()
         }
-        viewerLogButton.setOnClickListener {
-            toggleViewerLogDialog()
-        }
-        updateViewerControlButtons()
-
         renderStatus()
     }
 
@@ -1319,8 +1314,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 val pointerIndex = event.findPointerIndex(pointerId)
                 if (pointerIndex < 0) return true
                 if (activeViewerTouchMode == ViewerTouchMode.SCROLL) {
+                    // Natural scrolling: the content follows the finger, as it does everywhere
+                    // else on a phone. Dragging up shows what is further down, so it becomes
+                    // wheel-down on the remote side.
                     val touchY = event.getY(pointerIndex)
-                    scrollWheelCarryPx += scrollLastTouchY - touchY
+                    scrollWheelCarryPx += touchY - scrollLastTouchY
                     scrollLastTouchY = touchY
                     val direction =
                         when {
@@ -2122,18 +2120,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
-    private fun updateViewerControlButtons() {
-        if (::viewerLogButton.isInitialized) {
-            val logOpen = viewerLogDialog?.isShowing == true
-            viewerLogButton.text =
-                if (logOpen) {
-                    "[${getString(R.string.viewer_log_button)}]"
-                } else {
-                    getString(R.string.viewer_log_button)
-                }
-        }
-    }
-
     private fun toggleViewerLogDialog() {
         showViewerControls(emphasized = true)
         val existing = viewerLogDialog
@@ -2158,14 +2144,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             viewerLogDialog = null
             viewerLogStatusText = null
             viewerLogTextView = null
-            updateViewerControlButtons()
             applyImmersiveMode()
         }
         dialog.show()
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         viewerLogDialog = dialog
-        updateViewerControlButtons()
         refreshViewerLogBody()
         updateViewerLogHeader(
             NativeSessionBridge.nativeGetStatus(),

@@ -784,21 +784,6 @@
                     android:textColor="#F4F0E8"
                     android:textSize="18sp" />
 
-                <!-- Also reachable from the zone strip's bottom third; the rail carries it too
-                     so it survives any future strip changes. -->
-                <Button
-                    android:id="@+id/viewerMouseButton"
-                    android:layout_width="56dp"
-                    android:layout_height="48dp"
-                    android:layout_marginTop="8dp"
-                    android:background="@drawable/viewer_control_button_background"
-                    android:contentDescription="@string/viewer_mouse_description"
-                    android:minWidth="0dp"
-                    android:text="@string/viewer_mouse_button"
-                    android:textAllCaps="false"
-                    android:textColor="#F4F0E8"
-                    android:textSize="10sp" />
-
                 <Button
                     android:id="@+id/viewerMacroButton"
                     android:layout_width="56dp"
@@ -821,19 +806,6 @@
                     android:contentDescription="@string/key_panel_description"
                     android:minWidth="0dp"
                     android:text="@string/key_panel_button"
-                    android:textAllCaps="false"
-                    android:textColor="#F4F0E8"
-                    android:textSize="10sp" />
-
-                <Button
-                    android:id="@+id/viewerLogButton"
-                    android:layout_width="56dp"
-                    android:layout_height="48dp"
-                    android:layout_marginTop="8dp"
-                    android:background="@drawable/viewer_control_button_background"
-                    android:contentDescription="@string/viewer_log_description"
-                    android:minWidth="0dp"
-                    android:text="@string/viewer_log_button"
                     android:textAllCaps="false"
                     android:textColor="#F4F0E8"
                     android:textSize="10sp" />

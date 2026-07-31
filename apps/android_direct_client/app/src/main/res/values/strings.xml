@@ -128,6 +128,7 @@
     <string name="zone_right_click">R-CLK</string>
     <string name="zone_tablet">TABLET</string>
     <string name="zone_mouse">MOUSE</string>
+    <string name="quick_diagnostics_log">Diagnostics log</string>
     <string name="tablet_lock_open">🔓</string>
     <string name="tablet_lock_closed">🔒</string>
     <string name="viewer_mode_tablet_locked">Tablet mode locked - tap 🔒 to release</string>

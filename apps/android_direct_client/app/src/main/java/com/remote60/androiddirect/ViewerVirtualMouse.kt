@@ -14,10 +14,10 @@ import kotlin.math.abs
  * shows exactly where its tip sits, and only then does a button press happen -- so the aim cannot drift
  * at the moment it matters.
  *
- * The marker and the button cluster both travel with the pointer. That is the whole point: a
- * cluster parked in a corner would tell you nothing about what you are about to click. They are
- * positioned independently so the cluster can be pushed back inside the frame while the pointer
- * carries on into a corner.
+ * Only the arrow travels with the pointer. The button cluster stays where it was put -- a
+ * cluster that chased the pointer meant the buttons were somewhere new by the time the aim was
+ * right, so the clicking hand could never rest. Dragging the cluster's background moves it;
+ * otherwise it holds its place until the viewer closes.
  *
  * The class owns no protocol knowledge. It reports intent through [Listener]; the activity keeps
  * the pointer's real position and turns intent into input events.
@@ -63,14 +63,15 @@ class ViewerVirtualMouse(
     /** Drag on the wheel strip that counts as one notch. */
     private val wheelStepPx = 26f * density
 
-    /** How far the cluster sits from the pointer, so it never covers the target. */
-    private val clusterGapPx = 26f * density
+    /** Whether the cluster has a position yet; the first open gives it its default corner. */
+    private var clusterPlaced = false
 
     val isOpen: Boolean get() = root.visibility == View.VISIBLE
 
     init {
         bindPad()
         bindWheel()
+        bindClusterDrag()
         bindButton(leftButton, Button.LEFT)
         bindButton(rightButton, Button.RIGHT)
         bindButton(middleButton, Button.MIDDLE)
@@ -81,6 +82,7 @@ class ViewerVirtualMouse(
         root.visibility = View.VISIBLE
         root.bringToFront()
         listener.onRequestInitialPosition()
+        root.post { settleCluster() }
     }
 
     fun hide() {
@@ -88,50 +90,62 @@ class ViewerVirtualMouse(
     }
 
     /**
-     * Puts the marker on [viewX], [viewY] and parks the cluster beside it.
-     *
-     * Called every time the pointer moves, so the arrow tip is always on the pixel that a
-     * button press would hit.
+     * Puts the arrow's tip on [viewX], [viewY]. The cluster deliberately stays where it is.
      */
     fun moveTo(viewX: Float, viewY: Float) {
         if (!isOpen) return
         root.post {
-            if (marker.width <= 0 || cluster.width <= 0) return@post
+            if (marker.width <= 0) return@post
             // The arrow's tip is at the drawable's own origin, so no centring offset: the
             // point being aimed at and the point that gets clicked are the same pixel.
             marker.x = viewX
             marker.y = viewY
-            placeCluster(viewX, viewY)
         }
     }
 
     /**
-     * Beside the pointer, on whichever side has room.
-     *
-     * Down-right by default; it flips when the pointer nears an edge, which is what keeps the
-     * buttons usable when aiming at the taskbar or the window close box in a corner.
+     * First open parks the cluster in the lower right, out of the picture's way; after that it
+     * keeps whatever place the user dragged it to, pulled back inside if the frame shrank.
      */
-    private fun placeCluster(viewX: Float, viewY: Float) {
-        val parent = root
-        // The arrow occupies the space down and right of its tip, so the cluster clears the
-        // whole glyph on those sides and only the gap on the others.
-        val rightOfArrow = viewX + marker.width + clusterGapPx
-        val belowArrow = viewY + marker.height + clusterGapPx
+    private fun settleCluster() {
+        if (cluster.width <= 0 || root.width <= 0) return
+        val margin = 16f * density
+        val maxX = (root.width - cluster.width).toFloat().coerceAtLeast(0f)
+        val maxY = (root.height - cluster.height).toFloat().coerceAtLeast(0f)
+        if (!clusterPlaced) {
+            cluster.x = (maxX - margin).coerceAtLeast(0f)
+            cluster.y = (maxY - margin).coerceAtLeast(0f)
+            clusterPlaced = true
+        } else {
+            cluster.x = cluster.x.coerceIn(0f, maxX)
+            cluster.y = cluster.y.coerceIn(0f, maxY)
+        }
+    }
 
-        val x = if (parent.width - rightOfArrow >= cluster.width) {
-            rightOfArrow
-        } else {
-            viewX - clusterGapPx - cluster.width
+    /** The cluster's own background is its handle: drag it to wherever the hand rests. */
+    private fun bindClusterDrag() {
+        var lastX = 0f
+        var lastY = 0f
+        cluster.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    lastX = event.rawX
+                    lastY = event.rawY
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    cluster.x = (cluster.x + (event.rawX - lastX))
+                        .coerceIn(0f, (root.width - cluster.width).toFloat().coerceAtLeast(0f))
+                    cluster.y = (cluster.y + (event.rawY - lastY))
+                        .coerceIn(0f, (root.height - cluster.height).toFloat().coerceAtLeast(0f))
+                    lastX = event.rawX
+                    lastY = event.rawY
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> true
+                else -> false
+            }
         }
-        val y = if (parent.height - belowArrow >= cluster.height) {
-            belowArrow
-        } else {
-            viewY - clusterGapPx - cluster.height
-        }
-        // Clamped as a last resort: on a short screen neither side fits, and a cluster half off
-        // the display cannot be pressed at all.
-        cluster.x = x.coerceIn(0f, (parent.width - cluster.width).toFloat().coerceAtLeast(0f))
-        cluster.y = y.coerceIn(0f, (parent.height - cluster.height).toFloat().coerceAtLeast(0f))
     }
 
     private fun bindPad() {
