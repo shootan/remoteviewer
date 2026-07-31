@@ -19,6 +19,23 @@
 - 매크로는 일시정지/스텝 편집/저장·불러오기와 Windows 매크로 창까지 완료됐고 엔진 테스트는
   46개다(감사 시점 23개).
 
+2026-07-31 코드 대조 검증에서 확인된, 계획에 없던 주의점:
+
+- **H1/H2 선행 조건 — frame gating 재설계**: 현재 gating은 원본 해상도 CPU BGRA payload를
+  블록 memcmp로 비교하고(`estimate_bgra_change_permille`), 이전 프레임 payload의 참조를
+  프레임 사이에 계속 쥔다. H1(콜백 readback 제거)과 H2(GPU 전처리)는 이 비교 입력 자체를
+  없애므로, gating을 encode 해상도 버퍼 비교나 GPU 히스토그램 등으로 옮기는 작업을 H1
+  범위에 포함해야 한다. 버퍼 풀 재사용(H1)도 gating이 쥔 참조와 충돌하지 않게 설계한다.
+  참고로 `gatingMotionPm` 임계값은 시작 로그 외에는 사용되지 않는 죽은 설정이다
+  (실제 판정은 changePermille > 0).
+- **C2 선행 조건 — 디바이스 통합**: Windows Client의 디코더 D3D 디바이스와 렌더러
+  디바이스가 서로 다른 `ID3D11Device`다. 디코더 surface 직접 렌더는 디바이스 공유(또는
+  shared handle)부터 해결해야 한다.
+- **A2 범위 축소**: "다음 list roundtrip에서도 cache 유지"라는 감사 진단은 틀렸다.
+  `RequestWindowList()`가 `thumbs_`를 항상 비우므로 목록 재진입 시 리프레시는 이미
+  동작하고, Kotlin 쪽 thumbVersion 게이팅도 이미 있다. 남는 것은 TARGETS 화면을 계속
+  열어둔 동안의 갱신(TTL)과 Bitmap/direct buffer 재사용뿐이다. 우선순위를 낮춘다.
+
 ## 1. 목표
 
 이 문서는 감사에서 발견한 항목을 실제 구현 단위로 바꾼다. “최적화한다”가 아니라 어떤 파일과
