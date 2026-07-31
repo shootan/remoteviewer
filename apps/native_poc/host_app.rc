@@ -1,0 +1,7 @@
+// GNLink Host application resources.
+#include <windows.h>
+
+// Keep in sync with kIconResource in host_app_main.cpp.
+#define IDI_GNLINK 101
+
+IDI_GNLINK ICON "res\\gnlink.ico"

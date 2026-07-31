@@ -125,6 +125,7 @@ target_link_libraries(remote60_native_video_client_shared_core_test PRIVATE
 add_executable(remote60_host_app WIN32
   src/host_app_main.cpp
   src/directory_client.cpp
+  host_app.rc
 )
 
 target_include_directories(remote60_host_app PRIVATE

@@ -4613,3 +4613,55 @@ Validation
 다음 작업
 - A1 구현 시 snapshot/version 통합 전에 inactive-scene renderer 호출 차단을 독립 커밋으로
   적용하고, scene별 JNI 카운터 또는 trace로 9/9/8 → 목표값 감소를 검증한다.
+
+### 204) 2026-07-31 U1 Host signed-in UI 수정
+
+작업 ID: U1
+
+변경 파일
+- `apps/native_poc/src/host_app_main.cpp`
+- 신규 `apps/native_poc/host_app.rc`, `apps/native_poc/res/gnlink.ico`
+- `apps/native_poc/CMakeLists.txt`
+
+변경 전 문제
+- 로그인 라벨 4개(Server/ID/Password/PC name)가 control id 0의 익명 라벨이라 AppState가
+  참조를 갖지 못했고, signed-in 전환 시 숨길 수 없어 상태 카드 위에 그대로 남았다.
+- statusLabel 고정 40px에 3줄 상태 문구가 잘렸고, 레이아웃이 96dpi 픽셀 하드코딩이라
+  DPI 변경 시 재배치가 없었다. 창 제목/트레이가 "remote60"이었고 아이콘은 기본
+  IDI_APPLICATION이었다.
+
+구현 내용
+- 모든 control(라벨 포함)을 AppState 소유로 만들고 `layout_signed_out()` /
+  `layout_signed_in()`으로 상태별 배치와 창 높이를 분리했다. 전 좌표를 DPI 스케일
+  `sc()`로 계산하고 `WM_DPICHANGED`에서 폰트 재생성 + 재배치한다.
+- signed-out: 제목/설명, ID·비밀번호·PC 이름, 기본 접힘 "Advanced settings" 안의
+  Server 주소, 계정 생성 체크+signup key, 기본 버튼 Sign in. 빈 서버 주소로 로그인
+  시 고급 설정을 자동으로 펼친다.
+- signed-in: 계정/PC 이름, 상태 badge(STARTING/REACHABLE/SIGN IN AGAIN/NOT
+  REACHABLE - 텍스트가 상태를 전달하고 색은 보조), 3줄 상세, 자동 시작, Change
+  account/Sign out/Open log. 창 높이가 카드 크기로 줄어든다.
+- 자식 스트리밍 호스트 stdout을 `%LOCALAPPDATA%\GNLink\host_app.log`에 기록(2MB
+  rotate)하고 Open log 버튼으로 연다. 토큰만 기록되는 기존 원칙 유지, 비밀번호는
+  로그/캐시 어디에도 남지 않는다.
+- 사용자 노출 명칭을 GNLink Host로 통일(창 제목/트레이/메뉴). 내부 식별자(창 클래스,
+  Run value, 캐시 경로)는 remote60 유지. gnlink.ico(16~256px)를 .rc로 연결해 창/트레이
+  아이콘에 사용.
+- `--ui-preview[=signedin]` 플래그: 캐시를 읽지 않고 자식도 띄우지 않는 레이아웃 검증
+  전용 모드.
+
+실행한 build/test
+- Debug 빌드 경고 0. input_macro(46) / shared_core / udp_control_channel 테스트 ALL PASS.
+- udp_control_e2e_test는 기본 포트 43000이 실행 중인 실제 Host라 접속해 버리는 문제를
+  확인, 격리 포트 44100에 전용 host poc를 띄워 실행해 ALL PASS(9/9). B1에서 이 격리
+  실행을 스크립트로 굳힌다.
+- `--ui-preview` 스크린샷으로 signed-out(접힘/펼침), signed-in 카드 검증: signed-in
+  화면에 로그인 control 잔존 0, 문구 잘림 없음, 상태별 창 높이 전환 확인.
+
+Before/After 지표: UI 작업으로 성능 지표 변화 없음(성능 무영향).
+
+fallback/부작용: 아이콘 로드 실패 시 기존 기본 아이콘 경로 유지. DPI 150/200% 실측은
+현 모니터 DPI 제약으로 코드 검증만 수행 - 실기기 확인 필요 시 후속.
+
+미완료: 없음.
+
+다음 작업: B1 Release 기준선·격리 실행기.
