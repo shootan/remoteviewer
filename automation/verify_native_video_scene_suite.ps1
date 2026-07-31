@@ -19,6 +19,8 @@ param(
   [string]$DecoderBackend = "",
   [int]$FpsHint = 30,
   [string]$BuildDir = "build-native2",
+  [ValidateSet("Debug", "Release")]
+  [string]$Configuration = "Debug",
   [switch]$NoInputChannel,
   [int]$HostSeconds = 12,
   [int]$ClientSeconds = 8,
@@ -99,6 +101,7 @@ for ($i = 0; $i -lt $Scenes.Count; $i++) {
     DecoderBackend = $DecoderBackend
     FpsHint = $FpsHint
     BuildDir = $BuildDir
+    Configuration = $Configuration
     HostSeconds = $HostSeconds
     ClientSeconds = $ClientSeconds
     TraceEvery = $TraceEvery

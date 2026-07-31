@@ -16,6 +16,8 @@ param(
   [int]$FpsHint = 30,
   [switch]$NoInputChannel,
   [string]$BuildDir = "build-native2",
+  [ValidateSet("Debug", "Release")]
+  [string]$Configuration = "Debug",
   [int]$HostSeconds = 12,
   [int]$ClientSeconds = 8,
   [int]$TraceEvery = 0,
@@ -43,13 +45,33 @@ $resolvedBuildDir = $BuildDir
 if (-not [System.IO.Path]::IsPathRooted($BuildDir)) {
   $resolvedBuildDir = Join-Path $Root $BuildDir
 }
-$hostExe = Join-Path $resolvedBuildDir "apps/native_poc/Debug/remote60_native_video_host_poc.exe"
-$clientExe = Join-Path $resolvedBuildDir "apps/native_poc/Debug/remote60_native_video_client_poc.exe"
+$hostExe = Join-Path $resolvedBuildDir "apps/native_poc/$Configuration/remote60_native_video_host_poc.exe"
+$clientExe = Join-Path $resolvedBuildDir "apps/native_poc/$Configuration/remote60_native_video_client_poc.exe"
 if (-not (Test-Path $hostExe)) { throw "host exe not found: $hostExe" }
 if (-not (Test-Path $clientExe)) { throw "client exe not found: $clientExe" }
 
-Get-Process remote60_native_video_host_poc -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-Get-Process remote60_native_video_client_poc -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+# Never kill processes by name: a 2026-07-30 audit run took down the host the user was
+# actively streaming from. If the requested ports are busy, name their owner and stop so the
+# caller can pick isolated ports instead.
+$portOwners = @()
+try {
+  $portOwners += @(Get-NetUDPEndpoint -LocalPort $Port -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty OwningProcess -Unique)
+} catch {}
+if ($ControlPort -gt 0) {
+  try {
+    $portOwners += @(Get-NetTCPConnection -LocalPort $ControlPort -State Listen -ErrorAction SilentlyContinue |
+      Select-Object -ExpandProperty OwningProcess -Unique)
+  } catch {}
+}
+$portOwners = @($portOwners | Where-Object { $_ } | Sort-Object -Unique)
+if ($portOwners.Count -gt 0) {
+  foreach ($ownerPid in $portOwners) {
+    $ownerName = try { (Get-Process -Id $ownerPid -ErrorAction Stop).ProcessName } catch { "unknown" }
+    Write-Output "PORT_IN_USE port=$Port controlPort=$ControlPort ownerPid=$ownerPid ownerName=$ownerName"
+  }
+  throw "ports $Port/$ControlPort are in use; pass isolated ports (e.g. -Port 44100 -ControlPort 44101)"
+}
 
 $ts = Get-Date -Format "yyyyMMdd-HHmmss"
 $logDir = Join-Path $Root ("automation/logs/verify-native-video-" + $ts)
@@ -113,9 +135,39 @@ Start-Sleep -Seconds 2
 $clientProc = Start-Process -FilePath $clientExe -ArgumentList $clientArgs -WorkingDirectory $Root `
   -RedirectStandardOutput $clientOut -RedirectStandardError $clientErr -PassThru
 
-$clientProc.WaitForExit()
+# Poll instead of a blocking wait so CPU time and working set can be sampled while both
+# processes are still alive; the numbers become unreadable once they exit.
+$hostCpuSeconds = 0.0
+$clientCpuSeconds = 0.0
+$hostPeakWsBytes = 0
+$clientPeakWsBytes = 0
+$sampleWatch = [System.Diagnostics.Stopwatch]::StartNew()
+while (-not $clientProc.HasExited) {
+  Start-Sleep -Milliseconds 500
+  try {
+    $hostProc.Refresh()
+    if (-not $hostProc.HasExited) {
+      $hostCpuSeconds = $hostProc.TotalProcessorTime.TotalSeconds
+      if ($hostProc.WorkingSet64 -gt $hostPeakWsBytes) { $hostPeakWsBytes = $hostProc.WorkingSet64 }
+    }
+  } catch {}
+  try {
+    $clientProc.Refresh()
+    if (-not $clientProc.HasExited) {
+      $clientCpuSeconds = $clientProc.TotalProcessorTime.TotalSeconds
+      if ($clientProc.WorkingSet64 -gt $clientPeakWsBytes) { $clientPeakWsBytes = $clientProc.WorkingSet64 }
+    }
+  } catch {}
+}
+$sampleWatch.Stop()
+$cpuSampleSeconds = [Math]::Max(0.001, $sampleWatch.Elapsed.TotalSeconds)
 Start-Sleep -Milliseconds 200
 if (-not $hostProc.HasExited) {
+  try {
+    $hostProc.Refresh()
+    $hostCpuSeconds = $hostProc.TotalProcessorTime.TotalSeconds
+    if ($hostProc.WorkingSet64 -gt $hostPeakWsBytes) { $hostPeakWsBytes = $hostProc.WorkingSet64 }
+  } catch {}
   try { Stop-Process -Id $hostProc.Id -Force -ErrorAction SilentlyContinue } catch {}
 }
 
@@ -1203,6 +1255,7 @@ if ($GateAProfile -and $gateAShellWindowFallbackDetected -and $dec.count -eq 0 -
     -DecoderBackend $DecoderBackend `
     -FpsHint $FpsHint `
     -BuildDir $BuildDir `
+    -Configuration $Configuration `
     -HostSeconds $HostSeconds `
     -ClientSeconds $ClientSeconds `
     -TraceEvery $TraceEvery `
@@ -1213,7 +1266,51 @@ if ($GateAProfile -and $gateAShellWindowFallbackDetected -and $dec.count -eq 0 -
   exit $LASTEXITCODE
 }
 
+$gitCommit = ""
+try { $gitCommit = (& git -C $Root rev-parse --short HEAD 2>$null | Select-Object -First 1) } catch {}
+$logicalCores = [Environment]::ProcessorCount
+$hostCpuSingleCorePct = [Math]::Round(100.0 * $hostCpuSeconds / $cpuSampleSeconds, 2)
+$clientCpuSingleCorePct = [Math]::Round(100.0 * $clientCpuSeconds / $cpuSampleSeconds, 2)
+
+# Machine-readable record of what exactly ran; numbers without this are not comparable.
+$runMetadata = [ordered]@{
+  timestamp = $ts
+  gitCommit = "$gitCommit"
+  configuration = $Configuration
+  buildDir = $resolvedBuildDir
+  os = [System.Environment]::OSVersion.VersionString
+  logicalCores = $logicalCores
+  codec = $Codec
+  transport = $effectiveTransport
+  port = $Port
+  controlPort = $ControlPort
+  fps = $Fps
+  bitrate = $Bitrate
+  keyint = $Keyint
+  encodeWidth = $EncodeWidth
+  encodeHeight = $EncodeHeight
+  encoderBackend = $EncoderBackend
+  decoderBackend = $DecoderBackend
+  hostSeconds = $HostSeconds
+  clientSeconds = $ClientSeconds
+  gateAProfile = $GateAProfile.IsPresent
+  hostPid = $hostProc.Id
+  clientPid = $clientProc.Id
+}
+try {
+  $runMetadata | ConvertTo-Json | Out-File -FilePath (Join-Path $logDir "run-metadata.json") -Encoding utf8
+} catch {}
+
 Write-Output "LOG_DIR=$logDir"
+Write-Output "CONFIGURATION=$Configuration"
+Write-Output "GIT_COMMIT=$gitCommit"
+Write-Output "HOST_CPU_SECONDS=$([Math]::Round($hostCpuSeconds, 3))"
+Write-Output "HOST_CPU_SINGLE_CORE_PCT=$hostCpuSingleCorePct"
+Write-Output "HOST_PEAK_WS_MB=$([Math]::Round($hostPeakWsBytes / 1MB, 1))"
+Write-Output "CLIENT_CPU_SECONDS=$([Math]::Round($clientCpuSeconds, 3))"
+Write-Output "CLIENT_CPU_SINGLE_CORE_PCT=$clientCpuSingleCorePct"
+Write-Output "CLIENT_PEAK_WS_MB=$([Math]::Round($clientPeakWsBytes / 1MB, 1))"
+Write-Output "CPU_SAMPLE_SECONDS=$([Math]::Round($cpuSampleSeconds, 3))"
 Write-Output "CODEC=$Codec"
 Write-Output "TRANSPORT=$effectiveTransport"
 Write-Output "GATE_A_PROFILE_APPLIED=$($GateAProfile.IsPresent)"

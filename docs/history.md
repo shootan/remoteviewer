@@ -4665,3 +4665,53 @@ fallback/부작용: 아이콘 로드 실패 시 기존 기본 아이콘 경로 �
 미완료: 없음.
 
 다음 작업: B1 Release 기준선·격리 실행기.
+
+### 205) 2026-07-31 B1 Release 성능 기준선·격리 실행기
+
+작업 ID: B1
+
+변경 파일
+- `automation/verify_native_video_runtime.ps1` (-Configuration 인자, 포트 소유자 검사로
+  이름 기반 일괄 종료 제거, 실행 중 CPU/working set 샘플링, run-metadata.json)
+- `automation/verify_native_video_scene_suite.ps1` (-Configuration 전달)
+- 신규 `automation/run_perf_baseline.ps1` (매트릭스 × 반복, run별 JSON)
+- 신규 `automation/perf_scene_generator.ps1` (합성 scroll/video 장면)
+- 신규 `automation/perf_display_keepalive.ps1` (ES_DISPLAY_REQUIRED)
+- 신규 `automation/compare_optimization_runs.ps1` (중앙값/최소/최대, before/after delta)
+
+변경 전 문제
+- 실행 파일 경로에 Debug가 리터럴로 박혀 Release 측정 불가. 시작 시 이름으로
+  remote60_* 프로세스를 전부 강제 종료해 2026-07-30 감사가 사용자 Host를 죽였다.
+- CPU/메모리 지표가 없고 결과가 stdout 텍스트뿐이라 회귀 비교가 수작업이었다.
+
+구현 내용
+- 포트 사용 중이면 소유 PID를 출력하고 실패(격리 포트 안내). 스크립트가 시작한 PID만 종료.
+- 클라이언트 생존 중 500ms 간격으로 host/client TotalProcessorTime·WorkingSet 샘플링 →
+  HOST/CLIENT_CPU_SINGLE_CORE_PCT, PEAK_WS_MB 지표 추가. commit/구성/HW/포트/PID를
+  run-metadata.json으로 보존.
+- 기준선 러너: 1080p30 static/scroll/video + 720p30 scroll × 5회, 격리 포트 44100/44101,
+  장면은 합성 생성기(사전 렌더 비트맵 DrawImage)로 재현 가능하게 고정.
+- 함정 2개를 수정하며 배웠다: (1) PowerShell Paint 핸들러에서 프레임마다 GDI+ 호출
+  40여 개를 그리면 ~250ms/frame이라 "30fps 장면"이 실제로는 4fps가 된다 - 사전 렌더
+  비트맵 1~2회 DrawImage로 교체. (2) 입력 유휴로 디스플레이가 꺼지면 WGC가 프레임을
+  안 밀어주므로 keep-alive가 기준선 수집의 전제다.
+
+실행한 build/test
+- Release host/client 빌드. 스모크 1회 → 20/20 런 전부 OVERALL_OK=True.
+
+Before/After 지표 (1차 Release 기준선, baseline-b1-pre-q1, commit f9b5435)
+- 1080p-scroll(주 비교): DEC 중앙값 22.44fps(21.11~23), Host CPU 63.19%, Client CPU
+  52.29%, NV12 6.77ms, enc 4.87ms, captureCopyMap 1.09ms, captureMemcpy 0.84ms,
+  queueToSend 52.1ms, LAT_P95 4.65ms
+- 1080p-static: DEC 19.67, Host CPU 57.46%, queueToSend 36.4ms
+- 1080p-video: DEC 25.44, Host CPU 54.43%, queueToSend 15.8ms
+- 720p-scroll: DEC 22.78, Host CPU 62.3%, scale 4.34ms(다운스케일 경로), NV12 3.19ms
+- Debug 감사 수치(19.42fps/NV12 8.38ms)와 방향 일치. queue-to-send가 Release에서도
+  최대 병목으로 확인 - Q1-2/H4의 근거가 강화됐다.
+
+fallback/부작용: 기준선 원본은 automation/logs/baseline-b1-pre-q1 (gitignore 대상,
+로컬 보존). Q1 병합 후 재수집 예정이라 이 수치는 Q1 이후 작업과 비교하지 않는다.
+
+미완료: 없음.
+
+다음 작업: Q1-1 visible aperture.
