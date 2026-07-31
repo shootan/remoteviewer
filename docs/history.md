@@ -5041,3 +5041,34 @@ Before/After (1080p-scroll Release 3회, post-Q1 기준선 대비)
   C1-2 후속으로 U2/G1 전에 재평가.
 
 다음 작업: C2는 착수 조건(H3 채택 후) 미충족으로 보류. A1 Android로 진행.
+
+### 214) 2026-07-31 A1 1단계 - inactive-scene renderer 차단 + adaptive poll
+
+작업 ID: A1 (1/2단계)
+
+변경 파일
+- `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`
+
+구현 내용 (코덱스 합의안의 독립 커밋 1)
+- renderStatus가 활성 씬의 renderer만 호출: renderTargetsScene은 TARGETS에서만,
+  renderViewerScene/updateViewerLogHeader는 VIEWER·SWITCHING에서만. LOGIN/HOSTS/CONNECT
+  tick에서 viewer 전용 JNI(data usage, presentation timestamp) 호출이 사라진다.
+- applySceneVisibility의 매 tick nativeMacroState() 제거: macro 정리는 씬 전환 시 1회
+  (lastVisibilityScene 추적). viewer 재진입 전환에서 stall tracker
+  (lastVideoOutputPtsUs/SeenUs)를 리셋해 이전 세션 잔존값의 1-tick 가짜 stall overlay
+  차단(계획 문서 9번 단계).
+- 씬별 adaptive poll: LOGIN/HOSTS 1000ms, TARGETS 750ms, CONNECT/SWITCHING 250ms,
+  VIEWER 500ms. 선택 진행 중(selectionStage != IDLE)은 어느 씬이든 250ms 유지 -
+  selection timeout(6s)과 전환 피드백 무회귀.
+- 효과(계산): 안정 tick JNI 비뷰어 9→6회 + 주기 250→1000ms = 로그인/목록 초당 JNI
+  36→6회(-83%). VIEWER 36→18회/s.
+
+실행한 build/test
+- assembleDebug 성공(컴파일 검증). 기기 스모크는 보류: 연결된 LDPlayer 인스턴스의
+  pm install이 4분+ 무응답(사용자 용도 인스턴스로 추정, 강제 개입하지 않음).
+  /data/local/tmp/gnlink_a1.apk 푸시 잔여물 있음 - 다음 기기 세션에서 설치·정리.
+
+미완료 (A1 2단계): native 단일 snapshot JSON(nativeGetUiSnapshotJson) + version 게이트로
+직접 getter 6회→1회 통합, 씬별 JNI 카운터 실측(9/9/8→목표) - 기기 검증 가능 시점에.
+
+다음 작업: A2.

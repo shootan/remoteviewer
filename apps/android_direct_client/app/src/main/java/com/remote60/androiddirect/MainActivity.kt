@@ -280,6 +280,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private var lastVideoOutputSeenUs = 0L
+    private var lastVisibilityScene: UiScene? = null
 
     private val scrollGestureStepPx: Float
         get() = SCROLL_GESTURE_STEP_DP * resources.displayMetrics.density
@@ -587,7 +588,22 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private val statusPollRunnable = object : Runnable {
         override fun run() {
             renderStatus()
-            statusHandler.postDelayed(this, 250L)
+            statusHandler.postDelayed(this, statusPollDelayMs())
+        }
+    }
+
+    /**
+     * Poll cadence follows the scene (A1). Anything time-critical -- selection timeout,
+     * switching feedback, stall recovery -- stays at 250ms; idle screens have nothing that
+     * changes faster than once a second.
+     */
+    private fun statusPollDelayMs(): Long {
+        if (selectionStage != SelectionStage.IDLE) return 250L
+        return when (currentScene) {
+            UiScene.LOGIN, UiScene.HOSTS -> 1000L
+            UiScene.TARGETS -> 750L
+            UiScene.CONNECT, UiScene.SWITCHING -> 250L
+            UiScene.VIEWER -> 500L
         }
     }
 
@@ -2496,9 +2512,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         connectErrorText.text = errorValue
         connectErrorText.visibility = if (errorValue.isNotBlank()) View.VISIBLE else View.GONE
 
-        renderTargetsScene(isConnected, panelSnapshot)
-        renderViewerScene(statusValue, panelSnapshot, videoDebugValue)
-        updateViewerLogHeader(statusValue, panelSnapshot, videoDebugValue, errorValue)
+        // Only the active scene renders (A1): the viewer-only JNI calls used to run on every
+        // login/hosts/connect tick as well.
+        if (currentScene == UiScene.TARGETS) {
+            renderTargetsScene(isConnected, panelSnapshot)
+        }
+        if (currentScene == UiScene.VIEWER || currentScene == UiScene.SWITCHING) {
+            renderViewerScene(statusValue, panelSnapshot, videoDebugValue)
+            updateViewerLogHeader(statusValue, panelSnapshot, videoDebugValue, errorValue)
+        }
         applySceneVisibility()
         syncVideoSurface(forceRebind = false)
         observeDiagnostics(nowMs, statusValue, panelSnapshot, videoDebugValue, lastOutputPresentationUs)
@@ -2864,11 +2886,24 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             statusHandler.removeCallbacks(viewerControlsFadeRunnable)
             virtualMouse?.hide()
             renderViewerModeBanner()
-            if (NativeSessionBridge.nativeMacroState() != MACRO_STATE_IDLE) {
+        }
+        if (currentScene != lastVisibilityScene) {
+            if (currentScene != UiScene.VIEWER &&
+                NativeSessionBridge.nativeMacroState() != MACRO_STATE_IDLE
+            ) {
+                // Once per scene transition, not per tick: polling macro state every 250ms
+                // from non-viewer scenes was pure JNI overhead.
                 NativeSessionBridge.nativeMacroStopPlayback()
                 NativeSessionBridge.nativeMacroStopRecording()
                 renderMacroUi()
             }
+            if (currentScene == UiScene.VIEWER) {
+                // The stall tracker stops updating outside the viewer now; stale values from
+                // a previous session would flash a false stall overlay on re-entry.
+                lastVideoOutputPtsUs = 0L
+                lastVideoOutputSeenUs = 0L
+            }
+            lastVisibilityScene = currentScene
         }
     }
 
