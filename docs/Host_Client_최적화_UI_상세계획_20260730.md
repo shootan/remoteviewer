@@ -1,7 +1,7 @@
 # Host / Client 최적화·UI 상세 구현 계획
 
 - 작성일: 2026-07-30
-- 현행화: 2026-07-31 (F1 결함 해소·U2 Android 뷰어 현황 반영)
+- 현행화: 2026-07-31 (F1 결함 해소·U2 Android 뷰어 현황·코드 재검증 반영)
 - 기준 감사: `docs/Host_Client_최적화_UI_감사_20260730.md`
 - 상태: 구현 전 계획
 - 적용 대상: Host 관리 앱, 영상 Host, Windows Client, Android GNLink Client, Directory/UDP 보안
@@ -20,9 +20,11 @@
   46개다(감사 시점 23개).
 
 2026-07-31에 성능 항목(B1, H1~H4, C1~C2, A1~A2) 전부를 코드와 대조 검증했다. 감사 진단은
-A2(절반 오류)와 A1의 어댑터 부분(이미 변경 게이트 존재)을 빼면 코드 레벨에서 정확했다.
-검증에서 확인된 사실, 감사가 놓친 함정(H1의 frame gating 의존성, C2의 디코더/렌더러
-디바이스 분리), 진단 정정은 각 작업 절의 "검증 결과" 소절에 반영돼 있다.
+A2와 A1의 어댑터 부분(이미 변경 게이트 존재)을 빼면 큰 방향이 정확했다. 이어진 2차 검증에서
+Windows의 1080→1088 가시 영역 오류, 런타임 bitrate 재설정 시 rate-control/pacing 불일치,
+제품 Host의 암묵적 encoder tune 차이도 확인했다. 또한 H2의 구현 수단, H3 surface lifetime,
+A1의 scene별 JNI 횟수, A2의 version 의미를 코드에 맞게 정정했다. 각 근거와 조치는 Q1 및
+관련 작업 절의 "검증 결과/추가 확인" 소절에 반영돼 있다.
 
 ## 1. 목표
 
@@ -35,6 +37,8 @@ A2(절반 오류)와 A1의 어댑터 부분(이미 변경 게이트 존재)을 �
 - Host 캡처 callback에서 동기 readback과 전체 프레임 memcpy 제거
 - crop/resize/BGRA→NV12를 가능한 범위에서 GPU에 유지
 - Media Foundation 인코더에 NV12 D3D surface를 직접 전달
+- coded frame과 visible aperture를 분리해 1080p 화면을 1088행으로 렌더하지 않음
+- 초기화·런타임 변경·ABR에서 화질 preset/rate-control/UDP pacing을 일관되게 유지
 - 1080p30·720p30 성능 Gate를 단독 실행 5회 기준으로 통과
 - Host/Windows/Android UI의 브랜드, 상태 표현, 일반/고급 기능 계층 통일
 - Android의 고정 250ms 전체 UI 갱신과 세션 동안 낡는 썸네일 제거
@@ -75,18 +79,19 @@ A2(절반 오류)와 A1의 어댑터 부분(이미 변경 게이트 존재)을 �
 | 1 | F1 | (결함은 해소됨) Windows stream-state 절전 동기화 | 없음 |
 | 2 | U1 | Host signed-in UI 수정 | 없음 |
 | 3 | B1 | Release 성능 기준선·격리 실행기 고정 | 없음 |
-| 4 | H1 | callback copy-only + worker readback ring | B1 |
-| 5 | H2 | GPU-front crop/resize | H1 |
-| 6 | H3 | GPU NV12 surface → MF encoder | H2 |
-| 7 | H4 | 전송 pacing/feedback 지연 분리 | H3 |
-| 8 | C1 | Windows RTV·thumbnail/GDI 비용 제거 | F1, B1 |
-| 9 | C2 | Windows decoder surface 렌더 spike | H3 결과 |
-| 10 | A1 | Android dirty snapshot·adaptive poll | F1 |
-| 11 | A2 | Android thumbnail TTL·버퍼 재사용 | A1 |
-| 12 | U2 | Windows/Android 정보 구조·브랜드 정리 | F1, U1 |
-| 13 | S1 | HTTPS 적용 | 기능 개발과 병행 가능 |
-| 14 | S2 | 미디어·제어 인증 암호화 | S1 |
-| 15 | G1 | 전체 회귀·WAN·soak 최종 Gate | 모든 채택 작업 |
+| 4 | Q1 | visible aperture·rate-control·pacing·제품 tune 정합성 | B1 |
+| 5 | H1 | callback copy-only + worker readback ring | Q1 |
+| 6 | H2 | GPU-front crop/resize | H1 |
+| 7 | H3 | GPU NV12 surface → MF encoder | H2 |
+| 8 | H4 | 전송 pacing/feedback 지연 분리 | H3 |
+| 9 | C1 | Windows RTV·thumbnail/GDI 비용 제거 | F1, B1 |
+| 10 | C2 | Windows decoder surface 렌더 spike | Q1, H3 결과 |
+| 11 | A1 | Android dirty snapshot·adaptive poll | F1 |
+| 12 | A2 | Android thumbnail TTL·버퍼 재사용 | A1 |
+| 13 | U2 | Windows/Android 정보 구조·브랜드 정리 | F1, U1 |
+| 14 | S1 | HTTPS 적용 | 기능 개발과 병행 가능 |
+| 15 | S2 | 미디어·제어 인증 암호화 | S1 |
+| 16 | G1 | 전체 회귀·WAN·soak 최종 Gate | 모든 채택 작업 |
 
 `S1`, `S2`는 구현 순서상 뒤에 있어도 외부 공개 기준으로는 P0이다. 완료 전 인터넷 제품 배포를
 허용하지 않는다.
@@ -281,6 +286,89 @@ Host가 세션 시작 시 스트림을 켜 주므로 영상은 나오지만, 목
 - 동일 commit 5회 결과 편차와 중앙값 출력
 - 실패 시 Host/Client raw log와 PID/포트 정보 보존
 
+## 6A. Q1 — 화질·동적 설정 정합성 quick fixes
+
+H1~H3 구조 변경 전에, 현재 화질을 불필요하게 흐리거나 실행 경로별 결과를 다르게 만드는
+정합성 문제를 먼저 고친다. 이 항목은 bitrate를 올리는 튜닝이 아니라 geometry와 기존 설정을
+의도대로 적용하는 correctness 작업이다.
+
+### 수정 파일
+
+- `apps/native_poc/src/mf_h264_codec.hpp/.cpp`
+- `apps/native_poc/src/native_video_client_main.cpp`
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `apps/native_poc/src/host_app_main.cpp`
+- 관련 codec/client shared-core 단위 테스트
+
+### Q1-1 Windows visible aperture와 coded size 분리
+
+#### 검증 결과 (2026-07-31, 코드·로그 확인)
+
+- 동일 실행에서 Host는 `size=1920x1080`을 보내지만 Windows Client의 decode 통계는 계속
+  `size=1920x1088`이다. H.264/MFT의 16행 정렬 coded height가 그대로 노출된 증거다.
+- `H264Decoder::query_output_size()`는 `MF_MT_FRAME_SIZE`만 읽고
+  `MF_MT_MINIMUM_DISPLAY_APERTURE`/`MF_MT_GEOMETRIC_APERTURE`를 읽지 않는다.
+- `DecodedFrameNv12`에는 width/height/bytes만 있고, `resolve_active_video_content_size()`는
+  선택 대상 크기보다 decode frame 크기를 우선한다. 따라서 aspect-fit, 입력 좌표 변환,
+  D3D/GDI 렌더가 1920×1088을 콘텐츠 크기로 취급해 약 0.74%의 종횡비 왜곡과 재샘플링을 만든다.
+- Android decoder는 이미 MediaCodec의 `crop-left/right/top/bottom`을 읽어 visible size를
+  분리하므로 이 문제는 Windows 경로에 국한된다.
+
+#### 구현 방법
+
+1. `DecodedFrameNv12`에 coded width/height와 visible rect를 구분해 보관한다.
+2. MFT output type에서 minimum display aperture를 우선 읽고 geometric aperture, 유효한
+   packet/header 화면 크기 순으로 fallback한다. 모든 rect는 coded plane 경계 안인지 검증한다.
+3. NV12 plane offset/stride와 CPU 복사는 coded size를 유지하고, aspect-fit·입력 좌표·GDI fallback은
+   visible rect만 사용한다.
+4. C2 direct-surface 경로도 전체 coded texture가 아니라 같은 visible source rect를 샘플링한다.
+
+완료 기준:
+
+- Host 1920×1080 입력에서 Windows Client의 coded height는 1088일 수 있어도 visible size와
+  aspect/input domain은 1920×1080
+- 화면 하단 8행을 잘못 포함하거나 실제 UV plane을 잘라내는 회귀 없음
+- 16:9 격자·원·1px 텍스트 screenshot에서 종횡비/선명도 회귀 없음
+
+### Q1-2 runtime bitrate의 rate-control과 UDP pacing 동기화
+
+#### 검증 결과 (2026-07-31, 코드 확인)
+
+- encoder 초기화는 `PeakConstrainedVBR`과 기본 peak 300%(CBR은 110%), tune별 VBV를 적용한다.
+  반면 `H264Encoder::reconfigure_bitrate()`는 환경 설정을 다시 쓰지 않고 max bitrate를
+  `low_latency=110%`, `stable_text=130%`로 고정한다. 런타임 설정/ABR로 bitrate만 바뀌면
+  같은 세션의 scene-change bit 여유가 갑자기 줄어 작은 글자가 다시 뭉개질 수 있다.
+- `gUdpPacePeakBitrateBps`는 시작 시 `args.bitrate`로 한 번만 저장된다.
+  `apply_encoder_target()`이 runtime config/ABR/M9 bitrate를 바꿔도 pacing budget은 갱신되지
+  않아, 하향 시 과도한 burst, 상향 시 불필요한 전송 지연을 만들 수 있다.
+
+#### 구현 방법
+
+1. rate-control mode, mean/max bitrate, peak percent, VBV, MaxQP를 계산·적용·로그하는 공용
+   helper를 만들고 초기화와 `reconfigure_bitrate()`가 같은 정책을 사용하게 한다.
+2. `apply_encoder_target()`이 성공한 직후 active bitrate와 기존 `udpPacePeakPercent`로
+   `gUdpPacePeakBitrateBps`도 다시 계산한다. no-pacing 모드는 기존처럼 실제 대기를 건너뛴다.
+3. 요청값뿐 아니라 MFT가 받아들인 mode/mean/max/VBV와 현재 pacing bps를 변경 전후 로그에 남긴다.
+
+완료 기준:
+
+- 시작 8Mbps → runtime 4Mbps → 10Mbps와 ABR down/up 후에도 peak percent·VBV 정책이 동일
+- 각 변경 후 `udpPacePeakBps`가 active bitrate와 일치
+- 텍스트 scene change에서 변경 직후만 QP/화질이 급락하거나 queue-to-send가 튀지 않음
+
+### Q1-3 제품 Host encoder tune 명시
+
+`remote60_host_app`은 child 실행 시 encoded experiment만 환경에 넣고 encoder tune은 지정하지
+않는다. 그래서 native Host 기본값 `low_latency`(`QualityVsSpeed=100`)를 쓰는 반면, Android LAN과
+external 검증 profile은 `stable_text`(`QualityVsSpeed=68`)다. 제품과 검증 경로의 화질 결론이
+현재 같지 않다.
+
+- Host 앱이 이름 있는 제품 preset을 명시적으로 전달하고 시작 로그/상태에 노출한다.
+- `low_latency`와 `stable_text`를 동일 1080p30 scroll/text 장면에서 A/B해 decoded fps,
+  latency p95, QP/bitrate, 작은 글자 screenshot으로 선택한다.
+- H3 전에는 성능 저하 가능성이 있으므로 측정 없이 `stable_text`를 제품 기본값으로 강제하지 않는다.
+- 선택한 제품 preset과 B1/G1 검증 preset을 동일하게 고정한다.
+
 ## 7. H1 — callback copy-only + worker readback ring
 
 ### 목표
@@ -306,8 +394,10 @@ Host가 세션 시작 시 스트림을 켜 주므로 영상은 나오지만, 목
 계속 쥔다. H1은 이 비교 입력을 없애므로 gating을 함께 옮기지 않으면 정지 화면 절전이 조용히
 죽는다.
 
-- gating 비교를 readback 이후 단계(worker가 만든 encode 크기 CPU 버퍼)로 이동하거나,
-  GPU 단계의 저비용 차이 검출로 대체한다. 어느 쪽이든 A/B로 확인한다.
+- H1 단독 단계에서는 readback 이후 encode 크기 CPU 버퍼 비교를 임시 경로로 쓸 수 있다.
+  다만 H3의 최종 surface 경로가 CPU 입력을 다시 없애므로, 최종 설계는 GPU downsample/hash
+  또는 별도 소형 readback처럼 surface 경로에서도 유지되는 비교 입력을 사용한다. H1에서
+  임시 CPU 전용 인터페이스를 공용 계약으로 굳히지 않는다.
 - 버퍼 풀 재사용은 gating이 쥔 이전 프레임 참조와 충돌하지 않게 lease 수명을 설계한다.
 - `gatingMotionPm`(`frameGatingMotionThresholdPermille`)은 시작 로그 외에는 읽히지 않는
   죽은 설정이다(실판정은 `changePermille > 0`). 삭제하거나 실제 판정에 연결한다.
@@ -413,7 +503,9 @@ readback한다.
 - 창 crop은 callback 스레드에서 전체 크기 버퍼를 새로 할당해 행 단위로 재복사한다(확인).
 - `GpuBgraScaler::scale()`은 입력이 `const uint8_t*`뿐이고(`ID3D11Texture2D*` 오버로드 없음),
   `UpdateSubresource`로 업로드한 뒤 결과를 staging `Map`으로 다시 CPU에 읽는다. 즉 GPU
-  스케일을 써도 프레임당 GPU↔CPU 왕복이 캡처 readback까지 합쳐 3회다(확인).
+  스케일을 써도 프레임당 full-frame transfer leg가 GPU→CPU capture, CPU→GPU upload,
+  GPU→CPU scaler output의 3개다. "GPU↔CPU 왕복 3회"라는 기존 표현은 과장이라 정정한다.
+- 이름과 달리 구현은 pixel shader가 아니라 `ID3D11VideoProcessor`/`VideoProcessorBlt` 기반이다.
 - H1의 gating 재설계와 입력/출력 버퍼 소유권을 공유하므로 H1과 인터페이스를 같이 설계한다.
 
 ### 수정 파일
@@ -425,8 +517,8 @@ readback한다.
 
 ### 구현 방법
 
-1. 기존 `GpuBgraScaler`의 shader와 BT.709 관련 전제를 재사용하되 입력을 CPU byte가 아니라
-   `ID3D11Texture2D*`로 받게 한다.
+1. 기존 `GpuBgraScaler`의 video processor 설정·resource 생성·색공간 정책을 재사용하되 입력을
+   CPU byte가 아니라 `ID3D11Texture2D*`로 받게 한다.
 2. `ProcessTexture(source, sourceRect, outputWidth, outputHeight)` 인터페이스를 제공한다.
 3. window client crop rect는 짝수 좌표·짝수 크기로 정렬한다.
 4. crop과 aspect-fit resize를 한 draw pass에서 수행한다.
@@ -496,7 +588,9 @@ CPU `bgra_to_nv12`와 `MFCreateMemoryBuffer` memcpy를 제거한다.
 ### 인터페이스 안전
 
 - 기존 `encode_frame(vector<uint8_t>)`는 software encoder와 fallback을 위해 유지
-- surface lifetime은 `ProcessInput`이 sample ref를 확보할 때까지 보장
+- surface pool slot은 `ProcessInput` 반환 시 바로 재사용하지 않는다. async MFT가 sample/texture
+  참조를 해제할 때까지 수명을 유지하고, tracked sample allocator 또는 명시적 COM 보유/완료
+  신호로 반환 시점을 결정한다.
 - encoder 재초기화와 device reset 시 NV12 texture generation도 함께 갱신
 - output H.264 timestamp/keyframe/SPS 처리 코드는 공유
 
@@ -538,6 +632,8 @@ H1~H3 이후에도 latency p95 또는 decoded fps가 목표에 미달할 때만 
 ### 구현 방법
 
 - encode 완료→packetize→pacing wait→send syscall→feedback 처리 시간을 각각 기록
+- Q1에서 runtime bitrate와 pacing budget의 즉시 동기화는 먼저 끝낸다. H4는 그 뒤에도 남는
+  inline wait/send 구조를 sender queue로 분리하는 작업이다.
 - encode thread에서 send가 장시간 block되면 bounded encoded-frame queue로 분리
 - queue는 최신 frame 우선, keyframe은 보존
 - queue depth 2를 기본으로 시작하고 수치 없이 늘리지 않음
@@ -613,6 +709,8 @@ H1~H3과 C1 후에도 Windows Client CPU가 단일 코어 환산 15% 이상이�
 - **감사가 놓친 선행 조건**: 디코더의 D3D 디바이스와 렌더러의 디바이스가 서로 다른
   `ID3D11Device`다. surface 직접 렌더는 두 디바이스를 통합하거나 shared handle로 텍스처를
   넘기는 작업이 먼저다. spike 견적에 이 비용을 포함한다.
+- Q1에서 확인한 coded 1088행/visible 1080행 분리를 surface 경로에서도 유지해야 한다.
+  그렇지 않으면 CPU 복사를 없애도 종횡비 왜곡과 불필요한 보간은 남는다.
 
 ### spike 내용
 
@@ -634,9 +732,11 @@ H1~H3과 C1 후에도 Windows Client CPU가 단일 코어 환산 15% 이상이�
 
 ### 검증 결과 (2026-07-31, 코드 확인)
 
-- 250ms 폴은 씬과 무관하게 돌며, 틱당 JNI 호출이 8~9회다(상태/오류 각각 스냅샷 전체 딥카피,
+- 250ms 폴은 씬과 무관하게 돈다. 직접 호출은 기본 6회이고 stable VIEWER에서는
+  data usage·중복 presentation timestamp·video size 조회가 더해져 9회다. pending config,
+  thumbnail 변화 등 상태에 따라 더 늘 수 있다(상태/오류 각각 스냅샷 전체 딥카피,
   디코더 뮤텍스 아래 ~28필드 디버그 문자열 생성, panel JSON 생성→`NewStringUTF`→Kotlin
-  `org.json` 재파싱·객체 재할당, `lastOutputPresentationUs` 중복 호출 포함). 확인.
+  `org.json` 재파싱·객체 재할당 포함). 기존의 모든 scene "8~9회" 표현을 정정한다.
 - 씬 visibility 6개와 targets 위젯 ~18개 속성은 변경 여부와 무관하게 매 틱 재설정된다. 확인.
 - **감사 정정**: 대상 목록 어댑터는 이미 변경 게이트가 있다(라벨/id/selectedId 비교 후에만
   `notifyDataSetChanged`). 다만 비교용 리스트는 매 틱 새로 할당된다.
@@ -686,9 +786,17 @@ H1~H3과 C1 후에도 Windows Client CPU가 단일 코어 환산 15% 이상이�
 ### 현재 원인 (2026-07-31 검증으로 정정)
 
 감사의 "다음 list roundtrip에서도 세션 cache가 유지된다"는 진단은 **틀렸다**.
-`RequestWindowList()`가 요청 시마다 `thumbs_`와 fetch queue를 비우므로 목록 재진입/새로 고침
-리프레시는 이미 동작하고, Kotlin 쪽도 `thumbVersion` 게이팅이 있어 안 변한 썸네일에는 JNI
-호출조차 없다.
+`RequestWindowList()`가 요청 시마다 `thumbs_`와 fetch queue를 비우므로 수동 새로 고침
+리프레시는 이미 동작하고, Kotlin 쪽도 같은 native cache version 사이에서는 JNI 호출을 생략한다.
+
+다만 2차 검증에서 `thumbVersion`의 주석/의미도 정정했다.
+
+- Host는 성공한 fetch마다 `rsp.version = qpc_now_us()`를 넣는다. 콘텐츠가 바뀔 때만 증가하는
+  version이 아니라 **캡처 시각**이다.
+- `ControlWindowThumbnailRequestMessage`에는 이전 version/hash가 없고 list entry에도 version이
+  없다. response의 "unchanged" flag 주석은 현재 protocol로 구현할 수 없으며 Host도 쓰지 않는다.
+- 따라서 TTL fetch를 단순 추가하면 화면이 같아도 payload 전체 전송, BGRA→RGBA, version 변경,
+  JNI/Bitmap 재생성이 매번 발생한다.
 
 실제 남는 문제만 다룬다:
 
@@ -707,12 +815,18 @@ H1~H3과 C1 후에도 Windows Client CPU가 단일 코어 환산 15% 이상이�
 
 ### 구현 방법
 
-- native thumbnail cache에 `fetchedUs`, `thumbVersion` 저장
+- native thumbnail cache에 `fetchedUs`, wire BGRA의 64-bit `contentHash`, client-local monotonic
+  `contentVersion`을 저장한다. 기존 Host timestamp는 진단용 `captureVersion`으로만 분리한다.
 - 기본 TTL 10초
 - TARGETS 진입/refresh 때 다음 조건이면 queue:
   - cache 없음
-  - host thumbVersion 변경
   - TTL 만료
+- TTL fetch payload는 BGRA→RGBA 전에 hash를 계산한다. 크기와 `contentHash`가 같으면
+  `fetchedUs`만 갱신하고 swizzle을 건너뛰며 `contentVersion`/RGBA buffer를 유지한다.
+  실제 변경 때만 buffer 교체와 version 증가를 한다.
+- Host capture/network까지 줄이려면 이전 content hash/version을 요청에 싣고 unchanged 응답을
+  주는 별도 negotiated capability를 추가한다. 구형 peer와 메시지 크기를 깨는 무협상 확장은
+  A2 기본 범위에 넣지 않는다.
 - queue 중복 방지 유지
 - 현재 보이는 card를 먼저 요청하고 한 번에 1개씩 가져옴
 - viewer에서는 주기 refresh 중단
@@ -722,7 +836,7 @@ H1~H3과 C1 후에도 Windows Client CPU가 단일 코어 환산 15% 이상이�
 ### 완료 기준
 
 - 같은 세션에서 대상 화면 변경 후 10초 안에 preview 갱신
-- 동일 버전·TTL 안에는 JNI byte array/Bitmap 재생성 없음
+- 동일 콘텐츠의 TTL fetch에서는 JNI byte array/Bitmap 재생성 없음
 - 30분 목록 반복에서 native/Java heap 지속 증가 없음
 
 ## 15. U2 — Windows/Android UI 정보 구조 정리
@@ -887,6 +1001,13 @@ cmake --build build-local --config Debug --clean-first --target `
 | latency p95 | 70ms 이하 | 55ms 이하 |
 | frame gap | 1초 초과 0회 | 1초 초과 0회 |
 | fallback | 의도하지 않은 fallback 0회 | 의도하지 않은 fallback 0회 |
+
+### Quality/config correctness
+
+- Host visible 1920×1080 → Windows coded 1920×1088 허용, visible/aspect/input 1920×1080 고정
+- runtime bitrate·ABR 전환 전후 rate-control peak/VBV 정책과 UDP pacing target 일치
+- 제품 Host와 B1/G1 실행의 encoder tune preset 일치 및 로그 확인
+- 100%/150% DPI 작은 글자, 원형/격자 screenshot에서 종횡비·색공간·선명도 회귀 없음
 
 ### Soak/WAN
 

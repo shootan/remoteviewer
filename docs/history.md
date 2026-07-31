@@ -4542,3 +4542,43 @@ Validation
 다음 작업
 - U1 Host signed-in UI 재배치부터 진행한다(F1 결함은 해소, 절전 동기화는 P2).
 - 이후 B1 Release 격리 기준선을 수집하고 M1.6(H1~H3)을 단계별로 적용한다.
+
+### 202) 2026-07-31 Host/Client 최적화 상세계획 2차 코드 검증
+
+현재 작업 목표
+- 상세계획에 기록된 1차 검증 결과를 실제 Host/Windows/Android 코드와 로그에 다시 대조하고,
+  누락된 화질·프레임 정합성 문제를 추가하며 부정확한 구현 전제를 바로잡는다.
+
+변경 사항
+- `docs/Host_Client_최적화_UI_상세계획_20260730.md`
+  - Q1을 추가해 Windows MFT의 `1920x1080 → coded 1920x1088` visible aperture 누락,
+    runtime bitrate 변경 시 rate-control peak/VBV와 UDP pacing target 불일치,
+    제품 Host와 검증 profile의 encoder tune 차이를 선행 작업으로 고정했다.
+  - H1 frame gating을 최종 GPU surface 경로까지 유지되는 설계로 보강했다.
+  - H2의 `GpuBgraScaler`가 shader가 아니라 D3D11 video processor라는 점과 실제 transfer
+    leg 3개를 정확히 기록했다.
+  - H3 surface pool 수명을 `ProcessInput` 반환이 아니라 async MFT 참조 해제까지 보장하도록
+    수정하고, C2 direct surface에도 visible rect를 적용하도록 연결했다.
+  - A1 JNI 횟수를 모든 scene 8~9회가 아니라 기본 6회/stable viewer 9회로 정정했다.
+  - A2의 Host version이 콘텐츠 버전이 아닌 매 fetch 시각임을 확인해, TTL 갱신 시 wire BGRA
+    content hash 기반 로컬 동일성 비교와 negotiated conditional-fetch 확장을 구분했다.
+- `docs/구현계획.md`
+  - 검증 전용 체크리스트에 상세계획 2차 코드 검증·정정 완료 상태만 추가했다.
+
+검증
+- `mf_h264_codec.cpp`: Windows decoder가 `MF_MT_FRAME_SIZE`만 읽고 aperture를 읽지 않으며,
+  encoder 초기화의 peak 정책과 `reconfigure_bitrate()`의 110/130% 정책이 다른 것을 확인했다.
+- `logs/audit_20260730/perf`: Host `1920x1080`, Windows Client `1920x1088` 반복 로그를 확인했다.
+- `native_video_host_main.cpp`: UDP pacing bitrate가 시작 시 한 번만 저장되고, 제품 기본 tune은
+  `low_latency`이며 thumbnail response version은 매 fetch `qpc_now_us()`인 것을 확인했다.
+- `host_app_main.cpp`: child에 encoded experiment만 설정하고 encoder tune은 지정하지 않음을 확인했다.
+- `native_video_client_session.*`/`poc_protocol.hpp`: request/list에 이전 thumbnail version이 없고,
+  기존 cache version은 Host timestamp를 그대로 저장함을 확인했다.
+- `MainActivity.kt`: 상태 poll 직접 호출 기본 6회, stable viewer 추가 3회와 기존 thumbnail
+  version gate를 확인했다.
+- 문서 전용 변경이므로 C++/Android build와 런타임 성능 테스트는 실행하지 않았다.
+
+다음 작업
+- B1 격리 Release 기준선을 먼저 고정한다.
+- 이어서 Q1-1 visible aperture, Q1-2 rate-control/pacing, Q1-3 제품 preset A/B를 순서대로
+  구현·측정한 뒤 H1~H3 GPU 경로 최적화에 착수한다.
