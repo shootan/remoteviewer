@@ -4859,3 +4859,60 @@ A/B 결과 (1080p30 scroll, Release, DXGI, 각 3회 중앙값)
   직접 비교하지 않는다.
 
 다음 작업: H1.
+
+### 210) 2026-07-31 H1 캡처 콜백 copy-only + 비동기 readback ring
+
+작업 ID: H1
+
+변경 파일
+- 신규 `apps/native_poc/src/d3d_capture_readback.hpp/.cpp` (D3dCaptureReadbackPipeline,
+  CaptureBufferPool, pick_latest_ready_slot)
+- 신규 `apps/native_poc/src/capture_readback_test.cpp` (링 정책·버퍼 풀 13체크)
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `apps/native_poc/CMakeLists.txt`
+
+변경 전 문제
+- 캡처 콜백이 CopyResource + 블로킹 Map + 전행 memcpy + crop을 인라인 수행했고, DXGI
+  경로는 duplication 프레임을 쥔 채 동기 readback을 기다렸다(콜백 ~1.9ms).
+
+구현 내용
+- 콜백: staging slot에 CopyResource + D3D11_QUERY_EVENT End + Flush만 수행(무 Map/무
+  memcpy/무 할당). Flush가 없으면 유휴 컨텍스트에서 복사가 커맨드 버퍼에 머물러 쿼리가
+  영원히 미완료가 된다 - 실측으로 확인한 함정.
+- 워커: GetData로 완료 확인된 slot만 Map(무정지, 실측 12us) 후 재사용 CPU 버퍼로 복사,
+  창 client crop도 워커에서 수행. latest-wins로 오래된 완료 프레임은 폐기.
+- CaptureBufferPool: shared_ptr 딜리터가 마지막 참조 해제 시 풀로 반환 - gating이
+  프레임 간 참조를 쥐어도 재사용이 절대 겹치지 않는다(단위 테스트로 고정).
+- 게이팅: 소비자 측 encode-크기 CPU 비교는 유지(H1 임시 경로, H3에서 GPU 비교로 이관
+  예정). 죽은 설정 gatingMotionPm(REMOTE60_NATIVE_FRAME_GATING_MOTION_THRESHOLD_PM)
+  제거.
+- FrameState 타이밍 필드는 로그 키 호환을 위해 이름 유지, 의미 재정의(copyMap=콜백
+  submit, unmapWait=GPU pending, unmap=워커 Map). 통계에 captureSupersededDrops,
+  captureCpuBufferReuse 추가.
+
+실행한 build/test
+- 단위 4스위트 + capture_readback_test(13체크) ALL PASS, e2e 13체크 ALL PASS.
+- Debug 실측: submitCopy 145us / workerMap 12us / workerMemcpy 550us / gpuPending
+  2.6ms(비동기 겹침) / busy·superseded drop 0 / bufferReuse 동작.
+
+Before/After (1080p30 scroll Release 5회 중앙값, post-Q1 기준선 대비)
+- Host CPU 67.6% → 58.9% (-12.9%)
+- 콜백 비용(captureCopyMap) 990.7us → 128.8us (-87%)
+- LAT_P95 26.9ms → 18.0ms (-32.9%)
+- Host peak WS 134.4 → 126.7MB (-5.7%)
+- DEC_AVG 23.44 → 22.56 (-3.8%): 런 간 편차 범위(21.67~23.44 vs 22.22~23.67) 겹침,
+  롤백 기준(-5%) 미달. H2/H3 후 재확인.
+- queueToSend +9%: pacing 지배 구간의 노이즈. H4 대상.
+
+측정 인프라 (세션 중 확정한 사실)
+- 디스플레이가 꺼지면 WGC와 DXGI duplication 모두 프레임 공급이 죽는다. 이날 WGC
+  15:59 / DXGI 16:41 "저하"의 근본 원인. keep-alive에 1px 왕복 SendInput 지글(0-델타
+  이동은 입력으로 집계되지 않음 - x64 INPUT 40바이트 레이아웃 필수)을 추가해 해결.
+  DXGI는 지글 후 완전 회복(19~23cb/s)을 확인했다.
+
+fallback/부작용: 10분 resize/창 전환 소크는 미수행(e2e의 선택 전환은 통과) - G1에서
+수행 예정.
+
+미완료: gating 비교 입력의 GPU 이관(H3에서).
+
+다음 작업: H2 GPU-front crop/resize.

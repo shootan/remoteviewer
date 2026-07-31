@@ -1,0 +1,341 @@
+#include "d3d_capture_readback.hpp"
+
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+// Off unless REMOTE60_NATIVE_READBACK_DEBUG=1; traces submits and worker polls when the
+// pipeline publishes nothing and the cause is not obvious from the per-second stats.
+#define RB_DEBUG(...)                                                        \
+  do {                                                                       \
+    static const bool rbDebugOn = [] {                                       \
+      const char* v = std::getenv("REMOTE60_NATIVE_READBACK_DEBUG");         \
+      return v && *v && *v != '0';                                           \
+    }();                                                                     \
+    if (rbDebugOn) {                                                         \
+      std::fprintf(stderr, "[readback] " __VA_ARGS__);                       \
+      std::fputc('\n', stderr);                                              \
+    }                                                                        \
+  } while (0)
+
+namespace remote60::native_poc {
+
+namespace {
+
+uint64_t qpc_us() {
+  LARGE_INTEGER f{};
+  LARGE_INTEGER c{};
+  QueryPerformanceFrequency(&f);
+  QueryPerformanceCounter(&c);
+  return static_cast<uint64_t>(c.QuadPart) * 1000000ULL / static_cast<uint64_t>(f.QuadPart);
+}
+
+}  // namespace
+
+size_t pick_latest_ready_slot(const std::vector<uint64_t>& submitSeq,
+                              const std::vector<bool>& ready, size_t* outSuperseded) {
+  size_t best = SIZE_MAX;
+  size_t readyCount = 0;
+  for (size_t i = 0; i < submitSeq.size() && i < ready.size(); ++i) {
+    if (!ready[i]) continue;
+    ++readyCount;
+    if (best == SIZE_MAX || submitSeq[i] > submitSeq[best]) best = i;
+  }
+  if (outSuperseded) *outSuperseded = (readyCount > 0) ? (readyCount - 1) : 0;
+  return best;
+}
+
+std::shared_ptr<std::vector<uint8_t>> CaptureBufferPool::Acquire(size_t bytes) {
+  std::unique_ptr<std::vector<uint8_t>> storage;
+  {
+    std::lock_guard<std::mutex> lk(state_->mu);
+    if (!state_->free.empty()) {
+      storage = std::move(state_->free.back());
+      state_->free.pop_back();
+    }
+  }
+  if (storage) {
+    state_->reuse.fetch_add(1, std::memory_order_relaxed);
+    storage->resize(bytes);
+  } else {
+    storage = std::make_unique<std::vector<uint8_t>>(bytes);
+  }
+  // The deleter keeps the pool state alive and returns the storage when the LAST holder --
+  // encode path, frame slot, or the gating reference held across frames -- lets go. Nothing
+  // is ever recycled while something still reads it.
+  auto* raw = storage.release();
+  std::shared_ptr<State> state = state_;
+  return std::shared_ptr<std::vector<uint8_t>>(raw, [state](std::vector<uint8_t>* p) {
+    std::lock_guard<std::mutex> lk(state->mu);
+    constexpr size_t kMaxPooled = 6;
+    if (state->free.size() < kMaxPooled) {
+      state->free.emplace_back(p);
+    } else {
+      delete p;
+    }
+  });
+}
+
+bool D3dCaptureReadbackPipeline::Initialize(ID3D11Device* device, ID3D11DeviceContext* context,
+                                            std::mutex* contextMu, uint32_t width,
+                                            uint32_t height, uint32_t slotCount,
+                                            PublishFn publish) {
+  if (!device || !context || !contextMu || !publish || slotCount == 0) return false;
+  Shutdown();
+  device_ = device;
+  context_ = context;
+  contextMu_ = contextMu;
+  publish_ = std::move(publish);
+  {
+    std::lock_guard<std::mutex> lk(slotMu_);
+    slots_.resize(slotCount);
+    if (!CreateSlotsLocked(width, height)) return false;
+  }
+  running_.store(true, std::memory_order_release);
+  worker_ = std::thread([this] { WorkerLoop(); });
+  return true;
+}
+
+bool D3dCaptureReadbackPipeline::CreateSlotsLocked(uint32_t width, uint32_t height) {
+  width_ = width;
+  height_ = height;
+  ++generation_;
+  for (auto& slot : slots_) {
+    slot.staging.Reset();
+    slot.query.Reset();
+    slot.state = SlotState::Free;
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (FAILED(device_->CreateTexture2D(&desc, nullptr, &slot.staging))) return false;
+    D3D11_QUERY_DESC queryDesc{};
+    queryDesc.Query = D3D11_QUERY_EVENT;
+    if (FAILED(device_->CreateQuery(&queryDesc, &slot.query))) return false;
+  }
+  return true;
+}
+
+bool D3dCaptureReadbackPipeline::Reconfigure(uint32_t width, uint32_t height) {
+  if (!device_) return false;
+  std::lock_guard<std::mutex> lk(slotMu_);
+  // Bumping the generation invalidates anything the worker has not consumed yet; it checks
+  // the generation again before publishing.
+  return CreateSlotsLocked(width, height);
+}
+
+void D3dCaptureReadbackPipeline::Shutdown() {
+  if (running_.exchange(false)) {
+    workerCv_.notify_all();
+    if (worker_.joinable()) worker_.join();
+  }
+  std::lock_guard<std::mutex> lk(slotMu_);
+  slots_.clear();
+  device_.Reset();
+  context_.Reset();
+  contextMu_ = nullptr;
+}
+
+bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrameMeta& meta) {
+  RB_DEBUG("submit enter src=%p running=%d", static_cast<void*>(src),
+           running_.load(std::memory_order_acquire) ? 1 : 0);
+  if (!src || !running_.load(std::memory_order_acquire)) return false;
+  Slot* slot = nullptr;
+  // Local refs keep the resources alive if a reconfigure resets the slot mid-copy.
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
+  Microsoft::WRL::ComPtr<ID3D11Query> query;
+  uint64_t generationAtSubmit = 0;
+  {
+    std::lock_guard<std::mutex> lk(slotMu_);
+    if (meta.width != width_ || meta.height != height_) return false;
+    for (auto& candidate : slots_) {
+      if (candidate.state == SlotState::Free) {
+        slot = &candidate;
+        break;
+      }
+    }
+    if (!slot) {
+      busyDrops_.fetch_add(1, std::memory_order_relaxed);
+      return true;  // dropped, but not a caller-visible failure
+    }
+    slot->state = SlotState::GpuPending;
+    slot->submitSeq = ++submitSeq_;
+    slot->meta = meta;
+    staging = slot->staging;
+    query = slot->query;
+    generationAtSubmit = generation_;
+  }
+
+  const uint64_t submitStartUs = qpc_us();
+  uint64_t lockWaitUs = 0;
+  {
+    const uint64_t lockWaitStartUs = submitStartUs;
+    std::lock_guard<std::mutex> d3dLock(*contextMu_);
+    const uint64_t lockAcquiredUs = qpc_us();
+    lockWaitUs = lockAcquiredUs - lockWaitStartUs;
+    context_->CopyResource(staging.Get(), src);
+    context_->End(query.Get());
+    // Without a flush the copy can sit in the command buffer indefinitely on an otherwise
+    // idle context: the query never signals and no frame is ever published. Flushing here
+    // also submits the copy to the GPU before the DXGI duplication frame is released, which
+    // preserves ordering against the next desktop update.
+    context_->Flush();
+  }
+  const uint64_t submitDoneUs = qpc_us();
+  {
+    std::lock_guard<std::mutex> lk(slotMu_);
+    // A reconfigure raced the copy; the slot no longer belongs to this generation.
+    if (generation_ == generationAtSubmit) {
+      slot->meta.d3dWaitUs = lockWaitUs;
+      slot->meta.submitCopyUs = submitDoneUs - submitStartUs - lockWaitUs;
+      slot->meta.submitUs = submitDoneUs;
+    }
+  }
+  RB_DEBUG("submit seq=%llu gen=%llu", static_cast<unsigned long long>(submitSeq_),
+           static_cast<unsigned long long>(generationAtSubmit));
+  workerCv_.notify_one();
+  return true;
+}
+
+void D3dCaptureReadbackPipeline::WorkerLoop() {
+  while (running_.load(std::memory_order_acquire)) {
+    Slot slotCopy;
+    Slot* slotRef = nullptr;
+    uint64_t generationAtPick = 0;
+    {
+      std::unique_lock<std::mutex> lk(slotMu_);
+      workerCv_.wait_for(lk, std::chrono::milliseconds(1), [&] {
+        if (!running_.load(std::memory_order_acquire)) return true;
+        for (const auto& s : slots_) {
+          if (s.state == SlotState::GpuPending) return true;
+        }
+        return false;
+      });
+      if (!running_.load(std::memory_order_acquire)) return;
+
+      // Which pending copies has the GPU finished? Checked outside the slot loop so the
+      // latest-wins pick sees a consistent snapshot.
+      std::vector<uint64_t> seq(slots_.size(), 0);
+      std::vector<bool> ready(slots_.size(), false);
+      {
+        std::lock_guard<std::mutex> d3dLock(*contextMu_);
+        for (size_t i = 0; i < slots_.size(); ++i) {
+          if (slots_[i].state != SlotState::GpuPending || !slots_[i].query) continue;
+          seq[i] = slots_[i].submitSeq;
+          BOOL done = FALSE;
+          const HRESULT hr =
+              context_->GetData(slots_[i].query.Get(), &done, sizeof(done), 0);
+          ready[i] = (hr == S_OK && done);
+        }
+      }
+      size_t pendingCount = 0;
+      for (const auto& s : slots_) {
+        if (s.state == SlotState::GpuPending) ++pendingCount;
+      }
+      static unsigned long long rbPollCount = 0;
+      if (pendingCount > 0 && (++rbPollCount % 512) == 1) {
+        RB_DEBUG("worker poll pending=%zu ready0=%d ready1=%d ready2=%d", pendingCount,
+                 ready.size() > 0 ? (int)ready[0] : -1, ready.size() > 1 ? (int)ready[1] : -1,
+                 ready.size() > 2 ? (int)ready[2] : -1);
+      }
+      size_t superseded = 0;
+      const size_t pick = pick_latest_ready_slot(seq, ready, &superseded);
+      if (pick == SIZE_MAX) {
+        // Copies are in flight but the GPU has not finished any; the CV predicate would
+        // return immediately, so yield briefly instead of spinning on GetData.
+        lk.unlock();
+        std::this_thread::sleep_for(std::chrono::microseconds(500));
+        continue;
+      }
+      for (size_t i = 0; i < slots_.size(); ++i) {
+        if (i != pick && ready[i]) {
+          slots_[i].state = SlotState::Free;
+        }
+      }
+      if (superseded > 0) supersededDrops_.fetch_add(superseded, std::memory_order_relaxed);
+      slotRef = &slots_[pick];
+      slotCopy.staging = slotRef->staging;
+      slotCopy.meta = slotRef->meta;
+      generationAtPick = generation_;
+    }
+
+    // Map/copy outside slotMu_ so the callback can keep submitting into other slots. The
+    // query already confirmed completion, so this Map does not stall on the GPU.
+    const CaptureFrameMeta& meta = slotCopy.meta;
+    const uint64_t gpuPendingUs =
+        (meta.submitUs > 0) ? (qpc_us() > meta.submitUs ? qpc_us() - meta.submitUs : 0) : 0;
+    const uint32_t stride = meta.width * 4;
+    auto payload = bufferPool_.Acquire(static_cast<size_t>(stride) * meta.height);
+    uint64_t mapUs = 0;
+    uint64_t memcpyUs = 0;
+    bool mapped = false;
+    {
+      std::lock_guard<std::mutex> d3dLock(*contextMu_);
+      D3D11_MAPPED_SUBRESOURCE map{};
+      const uint64_t mapStartUs = qpc_us();
+      if (SUCCEEDED(context_->Map(slotCopy.staging.Get(), 0, D3D11_MAP_READ, 0, &map))) {
+        mapUs = qpc_us() - mapStartUs;
+        const uint64_t memcpyStartUs = qpc_us();
+        const auto* srcRow = reinterpret_cast<const uint8_t*>(map.pData);
+        auto* dst = payload->data();
+        if (map.RowPitch == stride) {
+          std::memcpy(dst, srcRow, static_cast<size_t>(stride) * meta.height);
+        } else {
+          for (uint32_t y = 0; y < meta.height; ++y) {
+            std::memcpy(dst + static_cast<size_t>(y) * stride,
+                        srcRow + static_cast<size_t>(y) * map.RowPitch, stride);
+          }
+        }
+        memcpyUs = qpc_us() - memcpyStartUs;
+        context_->Unmap(slotCopy.staging.Get(), 0);
+        mapped = true;
+      }
+    }
+
+    uint32_t outW = meta.width;
+    uint32_t outH = meta.height;
+    uint32_t outStride = stride;
+    if (mapped && meta.cropActive && meta.cropW >= 2 && meta.cropH >= 2 &&
+        meta.cropX + meta.cropW <= meta.width && meta.cropY + meta.cropH <= meta.height &&
+        (meta.cropW < meta.width || meta.cropH < meta.height || meta.cropX > 0 ||
+         meta.cropY > 0)) {
+      const uint32_t croppedStride = meta.cropW * 4;
+      const uint64_t cropStartUs = qpc_us();
+      auto cropped = bufferPool_.Acquire(static_cast<size_t>(croppedStride) * meta.cropH);
+      const auto* srcBase = payload->data();
+      auto* dstBase = cropped->data();
+      for (uint32_t y = 0; y < meta.cropH; ++y) {
+        std::memcpy(dstBase + static_cast<size_t>(y) * croppedStride,
+                    srcBase + static_cast<size_t>(meta.cropY + y) * stride +
+                        static_cast<size_t>(meta.cropX) * 4u,
+                    croppedStride);
+      }
+      memcpyUs += qpc_us() - cropStartUs;
+      payload = std::move(cropped);
+      outW = meta.cropW;
+      outH = meta.cropH;
+      outStride = croppedStride;
+    }
+
+    bool stillCurrent = false;
+    {
+      std::lock_guard<std::mutex> lk(slotMu_);
+      // Only free the slot if a reconfigure has not replaced it under us.
+      if (generation_ == generationAtPick && slotRef && slotRef->staging == slotCopy.staging) {
+        slotRef->state = SlotState::Free;
+        stillCurrent = true;
+      }
+    }
+    if (mapped && stillCurrent && publish_) {
+      publish_(std::move(payload), outW, outH, outStride, meta, gpuPendingUs, mapUs, memcpyUs);
+    }
+  }
+}
+
+}  // namespace remote60::native_poc

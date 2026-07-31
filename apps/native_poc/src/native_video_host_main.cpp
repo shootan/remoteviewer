@@ -41,6 +41,7 @@
 #include <vector>
 
 #include "mf_h264_codec.hpp"
+#include "d3d_capture_readback.hpp"
 #include "directory_client.hpp"
 #include "json_profile.hpp"
 #include "native_video_transport.hpp"
@@ -117,7 +118,6 @@ constexpr uint32_t kCaptureInputStallConsecutiveSecDefault = 3;
 constexpr uint32_t kCaptureInputStallWarmupSecDefault = 4;
 constexpr uint32_t kFrameGatingStaticFpsDefault = 8;
 constexpr uint32_t kFrameGatingStaticThresholdPermilleDefault = 6;
-constexpr uint32_t kFrameGatingMotionThresholdPermilleDefault = 14;
 constexpr uint32_t kFrameGatingEnterFramesDefault = 10;
 constexpr uint32_t kFrameGatingExitFramesDefault = 2;
 constexpr uint32_t kFrameGatingSampleTargetDefault = 2048;
@@ -137,11 +137,6 @@ struct D3DReadbackTiming {
   uint64_t memcpyUs = 0;
   uint64_t unmapWaitUs = 0;
   uint64_t unmapUs = 0;
-};
-
-struct CaptureStagingSlot {
-  Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
-  std::atomic<bool> busy{false};
 };
 
 void update_host_bottleneck_stage(uint32_t code, uint64_t us, const char* name,
@@ -2507,10 +2502,6 @@ int main(int argc, char** argv) {
   const uint32_t frameGatingStaticThresholdPermille = env_u32_clamped(
       "REMOTE60_NATIVE_FRAME_GATING_STATIC_THRESHOLD_PM",
       kFrameGatingStaticThresholdPermilleDefault, 1, 400);
-  const uint32_t frameGatingMotionThresholdPermille = std::max<uint32_t>(
-      frameGatingStaticThresholdPermille + 1,
-      env_u32_clamped("REMOTE60_NATIVE_FRAME_GATING_MOTION_THRESHOLD_PM",
-                      kFrameGatingMotionThresholdPermilleDefault, 2, 500));
   const uint32_t frameGatingEnterFrames = env_u32_clamped(
       "REMOTE60_NATIVE_FRAME_GATING_ENTER_FRAMES", kFrameGatingEnterFramesDefault, 1, 120);
   const uint32_t frameGatingExitFrames = env_u32_clamped(
@@ -2602,7 +2593,6 @@ int main(int argc, char** argv) {
               << " frameGating=" << (frameGatingEnabled ? "on" : "off")
               << " staticSceneFps=" << frameGatingStaticFps
               << " gatingStaticPm=" << frameGatingStaticThresholdPermille
-              << " gatingMotionPm=" << frameGatingMotionThresholdPermille
               << " m9=" << (m9Enabled ? "on" : "off")
               << " m9Mode=" << (m9Apply ? "apply" : "dry-run")
               << " keyReqMinUs=" << keyReqMinIntervalUs
@@ -3855,59 +3845,24 @@ int main(int argc, char** argv) {
   bool dxgiCaptureStarted = false;
   std::string dxgiFallbackReason;
 
+  // Declared before the readback pipeline: the worker's publish callback writes into this,
+  // so it must outlive the pipeline on every exit path.
+  FrameState frame;
   std::mutex captureResourceMu;
   std::atomic<uint32_t> captureSizeChangePending{0};
   const uint32_t captureStagingSlotCount =
       std::max<uint32_t>(3u, static_cast<uint32_t>(captureFramePoolBuffers + 1));
-  std::vector<std::shared_ptr<CaptureStagingSlot>> captureStagingSlots;
-  std::atomic<uint32_t> captureStagingSlotCursor{0};
-  std::atomic<uint64_t> captureStagingBusyDropCount{0};
+  // Asynchronous readback ring: the capture callback only submits a GPU copy; a worker maps
+  // finished copies and publishes them. The publish function is assigned below, before the
+  // first create_staging call.
+  remote60::native_poc::D3dCaptureReadbackPipeline captureReadback;
+  remote60::native_poc::D3dCaptureReadbackPipeline::PublishFn capturePublishFn;
   auto create_staging = [&](uint32_t srcW, uint32_t srcH) -> bool {
-    auto try_create_staging_slots = [&](std::vector<std::shared_ptr<CaptureStagingSlot>>* outSlots,
-                                        HRESULT* outHr) -> bool {
-      if (!outSlots) return false;
-      D3D11_TEXTURE2D_DESC stDesc{};
-      stDesc.Width = srcW;
-      stDesc.Height = srcH;
-      stDesc.MipLevels = 1;
-      stDesc.ArraySize = 1;
-      stDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-      stDesc.SampleDesc.Count = 1;
-      stDesc.Usage = D3D11_USAGE_STAGING;
-      stDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-      outSlots->clear();
-      outSlots->reserve(captureStagingSlotCount);
-      for (uint32_t slotIndex = 0; slotIndex < captureStagingSlotCount; ++slotIndex) {
-        auto slot = std::make_shared<CaptureStagingSlot>();
-        if (!slot) {
-          if (outHr) *outHr = E_OUTOFMEMORY;
-          return false;
-        }
-        const HRESULT createHr = d3d->CreateTexture2D(&stDesc, nullptr, &slot->texture);
-        if (FAILED(createHr) || !slot->texture) {
-          if (outHr) *outHr = createHr;
-          const HRESULT removedHr = d3d ? d3d->GetDeviceRemovedReason() : E_FAIL;
-          std::cerr << "[native-video-host] staging texture CreateTexture2D failed slot="
-                    << slotIndex
-                    << " size=" << srcW << "x" << srcH
-                    << " hr=" << hr_hex(createHr)
-                    << " removedReason=" << hr_hex(removedHr)
-                    << "\n";
-          return false;
-        }
-        outSlots->push_back(std::move(slot));
-      }
-      if (outHr) *outHr = S_OK;
-      return true;
-    };
-
-    std::vector<std::shared_ptr<CaptureStagingSlot>> nextSlots;
-    HRESULT createHr = S_OK;
-    if (!try_create_staging_slots(&nextSlots, &createHr)) {
-      std::cerr << "[native-video-host] recreating D3D device after staging failure hr="
-                << hr_hex(createHr)
-                << " size=" << srcW << "x" << srcH
-                << "\n";
+    captureReadback.Shutdown();
+    if (!captureReadback.Initialize(d3d.Get(), ctx.Get(), &d3dContextMu, srcW, srcH,
+                                    captureStagingSlotCount, capturePublishFn)) {
+      std::cerr << "[native-video-host] recreating D3D device after readback init failure size="
+                << srcW << "x" << srcH << "\n";
       d3d.Reset();
       ctx.Reset();
       const HRESULT recreateHr = create_d3d11_device_for_primary_monitor(&d3d, &ctx, &fl);
@@ -3926,28 +3881,16 @@ int main(int argc, char** argv) {
         std::cout << "[native-video-host] gpu scaler reinit after device recreate ready="
                   << (gpuScalerHealthy ? 1 : 0) << "\n";
       }
-      if (!try_create_staging_slots(&nextSlots, &createHr)) {
-        std::cerr << "[native-video-host] staging recreate retry failed hr="
-                  << hr_hex(createHr)
-                  << " size=" << srcW << "x" << srcH
-                  << "\n";
+      if (!captureReadback.Initialize(d3d.Get(), ctx.Get(), &d3dContextMu, srcW, srcH,
+                                      captureStagingSlotCount, capturePublishFn)) {
+        std::cerr << "[native-video-host] readback init retry failed size="
+                  << srcW << "x" << srcH << "\n";
         return false;
       }
     }
-    std::lock_guard<std::mutex> lk(captureResourceMu);
-    captureStagingSlots = std::move(nextSlots);
-    captureStagingSlotCursor.store(0, std::memory_order_release);
     return true;
   };
-  if (!create_staging(captureWidth, captureHeight)) {
-    std::cerr << "[native-video-host] staging texture create failed\n";
-    closesocket(clientSock);
-    if (listenSock != INVALID_SOCKET) closesocket(listenSock);
-    if (mfStarted) MFShutdown();
-    return 10;
-  }
 
-  FrameState frame;
   const auto update_u64_max = [](std::atomic<uint64_t>& target, const uint64_t value) {
     auto old = target.load(std::memory_order_relaxed);
     while (value > old && !target.compare_exchange_weak(old, value, std::memory_order_release, std::memory_order_relaxed)) {
@@ -3988,125 +3931,27 @@ int main(int argc, char** argv) {
     return oss.str();
   };
 
-  auto publish_captured_texture = [&](ID3D11Texture2D* src,
-                                      uint64_t callbackUs,
-                                      uint64_t sourceCaptureUs,
-                                      uint64_t captureAgeAtCallbackUs,
-                                      uint64_t captureClockSkewUs) {
-    if (!src) return;
-    uint32_t frameW = 0;
-    uint32_t frameH = 0;
-    std::vector<std::shared_ptr<CaptureStagingSlot>> stagingSlotsLocal;
-    {
-      std::lock_guard<std::mutex> lk(captureResourceMu);
-      frameW = captureWidth;
-      frameH = captureHeight;
-      stagingSlotsLocal = captureStagingSlots;
-    }
-    if (stagingSlotsLocal.empty() || frameW < 2 || frameH < 2) return;
-    D3D11_TEXTURE2D_DESC srcDesc{};
-    src->GetDesc(&srcDesc);
-    if (srcDesc.Width != frameW || srcDesc.Height != frameH) {
-      captureSizeChangePending.store(1, std::memory_order_release);
-      return;
-    }
-    uint32_t stride = frameW * 4;
-    auto payload = std::make_shared<std::vector<uint8_t>>(static_cast<size_t>(stride) * frameH);
-    std::shared_ptr<CaptureStagingSlot> stagingSlot;
-    const uint32_t startIndex = captureStagingSlotCursor.fetch_add(1, std::memory_order_acq_rel);
-    for (uint32_t attempt = 0; attempt < stagingSlotsLocal.size(); ++attempt) {
-      const auto& candidate = stagingSlotsLocal[(startIndex + attempt) % stagingSlotsLocal.size()];
-      if (!candidate || !candidate->texture) continue;
-      bool expected = false;
-      if (candidate->busy.compare_exchange_strong(
-              expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
-        stagingSlot = candidate;
-        break;
-      }
-    }
-    if (!stagingSlot) {
-      captureStagingBusyDropCount.fetch_add(1, std::memory_order_relaxed);
-      return;
-    }
-    D3DReadbackTiming captureReadbackTiming{};
-    D3D11_MAPPED_SUBRESOURCE map{};
-    {
-      const uint64_t lockWaitStartUs = qpc_now_us();
-      std::lock_guard<std::mutex> d3dLock(d3dContextMu);
-      const uint64_t lockAcquiredUs = qpc_now_us();
-      captureReadbackTiming.d3dWaitUs =
-          (lockAcquiredUs >= lockWaitStartUs) ? (lockAcquiredUs - lockWaitStartUs) : 0;
-      ctx->CopyResource(stagingSlot->texture.Get(), src);
-      if (FAILED(ctx->Map(stagingSlot->texture.Get(), 0, D3D11_MAP_READ, 0, &map))) {
-        stagingSlot->busy.store(false, std::memory_order_release);
-        return;
-      }
-      const uint64_t copyMapDoneUs = qpc_now_us();
-      captureReadbackTiming.copyMapUs =
-          (copyMapDoneUs >= lockAcquiredUs) ? (copyMapDoneUs - lockAcquiredUs) : 0;
-    }
-    auto* dst = payload->data();
-    auto* srcRow = reinterpret_cast<const uint8_t*>(map.pData);
-    const uint64_t memcpyStartUs = qpc_now_us();
-    for (uint32_t y = 0; y < frameH; ++y) {
-      std::memcpy(dst + static_cast<size_t>(y) * stride,
-                  srcRow + static_cast<size_t>(y) * map.RowPitch, stride);
-    }
-    const uint64_t memcpyDoneUs = qpc_now_us();
-    captureReadbackTiming.memcpyUs =
-        (memcpyDoneUs >= memcpyStartUs) ? (memcpyDoneUs - memcpyStartUs) : 0;
-    {
-      const uint64_t unmapWaitStartUs = qpc_now_us();
-      std::lock_guard<std::mutex> d3dLock(d3dContextMu);
-      const uint64_t unmapLockAcquiredUs = qpc_now_us();
-      captureReadbackTiming.unmapWaitUs =
-          (unmapLockAcquiredUs >= unmapWaitStartUs) ? (unmapLockAcquiredUs - unmapWaitStartUs) : 0;
-      ctx->Unmap(stagingSlot->texture.Get(), 0);
-      const uint64_t unmapDoneUs = qpc_now_us();
-      captureReadbackTiming.unmapUs =
-          (unmapDoneUs >= unmapLockAcquiredUs) ? (unmapDoneUs - unmapLockAcquiredUs) : 0;
-    }
-    stagingSlot->busy.store(false, std::memory_order_release);
-    if (captureWindowModeActive && captureWindowClientOnlyActive) {
-      const HWND cropHwnd = reinterpret_cast<HWND>(
-          static_cast<uintptr_t>(hostCaptureTargetHwnd.load(std::memory_order_acquire)));
-      uint32_t cropX = 0;
-      uint32_t cropY = 0;
-      uint32_t cropW = 0;
-      uint32_t cropH = 0;
-      if (cropHwnd && compute_window_client_crop(cropHwnd, frameW, frameH, &cropX, &cropY, &cropW, &cropH)) {
-        if (cropW < frameW || cropH < frameH || cropX > 0 || cropY > 0) {
-          const uint32_t croppedStride = cropW * 4;
-          auto cropped = std::make_shared<std::vector<uint8_t>>(static_cast<size_t>(croppedStride) * cropH);
-          const auto* srcBase = payload->data();
-          auto* dstBase = cropped->data();
-          for (uint32_t y = 0; y < cropH; ++y) {
-            const size_t srcOff =
-                static_cast<size_t>(cropY + y) * stride + static_cast<size_t>(cropX) * 4u;
-            const size_t dstOff = static_cast<size_t>(y) * croppedStride;
-            std::memcpy(dstBase + dstOff, srcBase + srcOff, croppedStride);
-          }
-          payload = std::move(cropped);
-          frameW = cropW;
-          frameH = cropH;
-          stride = croppedStride;
-        }
-      }
-    }
+  // Worker-thread side: a finished readback becomes the latest frame. Timing fields keep
+  // their FrameState names so downstream logs stay parseable; their meaning under the async
+  // pipeline is documented at each assignment.
+  capturePublishFn = [&](std::shared_ptr<std::vector<uint8_t>> payload, uint32_t frameW,
+                         uint32_t frameH, uint32_t stride,
+                         const remote60::native_poc::CaptureFrameMeta& meta,
+                         uint64_t gpuPendingUs, uint64_t workerMapUs, uint64_t workerMemcpyUs) {
+    if (!payload || payload->empty() || frameW < 2 || frameH < 2) return;
     const uint64_t queuePushUs = qpc_now_us();
     const uint64_t prevCallbackUs = lastCallbackUs.load(std::memory_order_acquire);
     const uint64_t prevCaptureUs = lastCaptureUsForInterval.load(std::memory_order_acquire);
     uint64_t callbackIntervalUs = 0;
     uint64_t captureIntervalUs = 0;
-    if (prevCallbackUs > 0 && callbackUs >= prevCallbackUs) {
-      callbackIntervalUs = callbackUs - prevCallbackUs;
+    if (prevCallbackUs > 0 && meta.callbackUs >= prevCallbackUs) {
+      callbackIntervalUs = meta.callbackUs - prevCallbackUs;
     }
-    if (prevCaptureUs > 0 && sourceCaptureUs >= prevCaptureUs) {
-      captureIntervalUs = sourceCaptureUs - prevCaptureUs;
+    if (prevCaptureUs > 0 && meta.captureUs >= prevCaptureUs) {
+      captureIntervalUs = meta.captureUs - prevCaptureUs;
     }
-    lastCallbackUs.store(callbackUs, std::memory_order_release);
-    lastCaptureUsForInterval.store(sourceCaptureUs, std::memory_order_release);
-    const uint64_t streamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
+    lastCallbackUs.store(meta.callbackUs, std::memory_order_release);
+    lastCaptureUsForInterval.store(meta.captureUs, std::memory_order_release);
     uint64_t currentVersion = 0;
     {
       std::lock_guard<std::mutex> lk(frame.mu);
@@ -4114,19 +3959,19 @@ int main(int argc, char** argv) {
       frame.width = frameW;
       frame.height = frameH;
       frame.stride = stride;
-      frame.streamGeneration = streamGeneration;
-      frame.captureUs = sourceCaptureUs;
-      frame.callbackUs = callbackUs;
-      frame.captureAgeAtCallbackUs = captureAgeAtCallbackUs;
-      frame.captureClockSkewUs = captureClockSkewUs;
+      frame.streamGeneration = meta.streamGeneration;
+      frame.captureUs = meta.captureUs;
+      frame.callbackUs = meta.callbackUs;
+      frame.captureAgeAtCallbackUs = meta.captureAgeAtCallbackUs;
+      frame.captureClockSkewUs = meta.captureClockSkewUs;
       frame.queuePushUs = queuePushUs;
       frame.callbackIntervalUs = callbackIntervalUs;
       frame.captureIntervalUs = captureIntervalUs;
-      frame.captureD3DWaitUs = captureReadbackTiming.d3dWaitUs;
-      frame.captureCopyMapUs = captureReadbackTiming.copyMapUs;
-      frame.captureMemcpyUs = captureReadbackTiming.memcpyUs;
-      frame.captureUnmapWaitUs = captureReadbackTiming.unmapWaitUs;
-      frame.captureUnmapUs = captureReadbackTiming.unmapUs;
+      frame.captureD3DWaitUs = meta.d3dWaitUs;       // callback wait on d3dContextMu
+      frame.captureCopyMapUs = meta.submitCopyUs;    // callback CopyResource + query End
+      frame.captureMemcpyUs = workerMemcpyUs;        // worker memcpy incl. crop
+      frame.captureUnmapWaitUs = gpuPendingUs;       // submit -> GPU copy finished
+      frame.captureUnmapUs = workerMapUs;            // worker Map of the finished copy
       frame.seq += 1;
       frame.version += 1;
       currentVersion = frame.version;
@@ -4137,18 +3982,75 @@ int main(int argc, char** argv) {
     ++queuePushCount;
     callbackFrames += 1;
     uint64_t loggedGeneration = firstCallbackLoggedGeneration.load(std::memory_order_acquire);
-    if (streamGeneration != 0 && loggedGeneration != streamGeneration &&
+    if (meta.streamGeneration != 0 && loggedGeneration != meta.streamGeneration &&
         firstCallbackLoggedGeneration.compare_exchange_strong(
-            loggedGeneration, streamGeneration,
+            loggedGeneration, meta.streamGeneration,
             std::memory_order_acq_rel, std::memory_order_acquire)) {
       std::cout << "[native-video-host] capture-switch first-callback"
                 << describe_active_capture_target()
-                << " callbackUs=" << callbackUs
-                << " captureUs=" << sourceCaptureUs
+                << " callbackUs=" << meta.callbackUs
+                << " captureUs=" << meta.captureUs
                 << "\n";
     }
     frame.cv.notify_one();
   };
+
+  // Capture-callback side: size check, a cheap crop-rect query, then a single GPU copy
+  // submit. No Map, no memcpy, no allocation -- the DXGI duplication frame is released the
+  // moment this returns instead of being held across a synchronous readback.
+  auto publish_captured_texture = [&](ID3D11Texture2D* src,
+                                      uint64_t callbackUs,
+                                      uint64_t sourceCaptureUs,
+                                      uint64_t captureAgeAtCallbackUs,
+                                      uint64_t captureClockSkewUs) {
+    if (!src) return;
+    uint32_t frameW = 0;
+    uint32_t frameH = 0;
+    {
+      std::lock_guard<std::mutex> lk(captureResourceMu);
+      frameW = captureWidth;
+      frameH = captureHeight;
+    }
+    if (frameW < 2 || frameH < 2) return;
+    D3D11_TEXTURE2D_DESC srcDesc{};
+    src->GetDesc(&srcDesc);
+    if (srcDesc.Width != frameW || srcDesc.Height != frameH) {
+      captureSizeChangePending.store(1, std::memory_order_release);
+      return;
+    }
+    remote60::native_poc::CaptureFrameMeta meta{};
+    meta.width = frameW;
+    meta.height = frameH;
+    meta.callbackUs = callbackUs;
+    meta.captureUs = sourceCaptureUs;
+    meta.captureAgeAtCallbackUs = captureAgeAtCallbackUs;
+    meta.captureClockSkewUs = captureClockSkewUs;
+    meta.streamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
+    if (captureWindowModeActive && captureWindowClientOnlyActive) {
+      const HWND cropHwnd = reinterpret_cast<HWND>(
+          static_cast<uintptr_t>(hostCaptureTargetHwnd.load(std::memory_order_acquire)));
+      uint32_t cropX = 0;
+      uint32_t cropY = 0;
+      uint32_t cropW = 0;
+      uint32_t cropH = 0;
+      if (cropHwnd && compute_window_client_crop(cropHwnd, frameW, frameH, &cropX, &cropY, &cropW, &cropH)) {
+        meta.cropActive = true;
+        meta.cropX = cropX;
+        meta.cropY = cropY;
+        meta.cropW = cropW;
+        meta.cropH = cropH;
+      }
+    }
+    (void)captureReadback.Submit(src, meta);
+  };
+
+  if (!create_staging(captureWidth, captureHeight)) {
+    std::cerr << "[native-video-host] capture readback pipeline create failed\n";
+    closesocket(clientSock);
+    if (listenSock != INVALID_SOCKET) closesocket(listenSock);
+    if (mfStarted) MFShutdown();
+    return 10;
+  }
 
   auto attach_frame_arrived = [&]() {
     token = pool.FrameArrived([&](Direct3D11CaptureFramePool const& sender,
@@ -4387,6 +4289,7 @@ int main(int argc, char** argv) {
 
   if (!restart_capture_session()) {
     std::cerr << "[native-video-host] capture session start failed\n";
+    captureReadback.Shutdown();
     closesocket(clientSock);
     if (listenSock != INVALID_SOCKET) closesocket(listenSock);
     if (mfStarted) MFShutdown();
@@ -6227,7 +6130,9 @@ int main(int argc, char** argv) {
                   << " cb2eAvgUs=" << cb2eAvgUs
                   << " cb2eMaxUs=" << callbackToEncodeStartMaxUs
                   << " captureReadbackSamples=" << captureReadbackSamples
-                  << " captureStagingBusyDrops=" << captureStagingBusyDropCount.load(std::memory_order_relaxed)
+                  << " captureStagingBusyDrops=" << captureReadback.BusyDrops()
+                  << " captureSupersededDrops=" << captureReadback.SupersededDrops()
+                  << " captureCpuBufferReuse=" << captureReadback.BufferReuseCount()
                   << " captureD3DWaitAvgUs=" << captureD3DWaitAvgUs
                   << " captureD3DWaitMaxUs=" << captureD3DWaitMaxUs
                   << " captureCopyMapAvgUs=" << captureCopyMapAvgUs
@@ -6636,6 +6541,9 @@ int main(int argc, char** argv) {
   if (udpControlThread.joinable()) udpControlThread.join();
   if (udpReaderThread.joinable()) udpReaderThread.join();
   detach_capture_session();
+  // Stop the readback worker while everything its publish callback touches is still alive;
+  // relying on destructor order would tear down FrameState first.
+  captureReadback.Shutdown();
   if (clientSock != INVALID_SOCKET) {
     closesocket(clientSock);
     clientSock = INVALID_SOCKET;

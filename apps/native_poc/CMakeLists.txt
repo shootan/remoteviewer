@@ -44,6 +44,7 @@ target_link_libraries(remote60_native_client_poc PRIVATE
 
 add_executable(remote60_native_video_host_poc
   src/native_video_host_main.cpp
+  src/d3d_capture_readback.cpp
   src/directory_client.cpp
   src/udp_control_channel.cpp
   src/mf_h264_codec.cpp
@@ -154,6 +155,14 @@ target_link_libraries(remote60_udp_control_e2e_test PRIVATE
   common
   ws2_32
 )
+
+# Ring policy and buffer pool of the capture readback pipeline; no GPU involved.
+add_executable(remote60_capture_readback_test
+  src/d3d_capture_readback.cpp
+  src/capture_readback_test.cpp
+)
+target_include_directories(remote60_capture_readback_test PRIVATE src)
+target_link_libraries(remote60_capture_readback_test PRIVATE d3d11)
 
 add_executable(remote60_input_macro_test
   src/input_macro.cpp
