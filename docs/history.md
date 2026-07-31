@@ -4844,3 +4844,18 @@ A/B 결과 (1080p30 scroll, Release, DXGI, 각 3회 중앙값)
 미완료: WGC 저하 근본 원인(재부팅 후 재확인 필요).
 
 다음 작업: Q1 완료 기준선 재수집(DXGI).
+
+### 209) 2026-07-31 Q1 이후 기준선 재수집 (DXGI, H1+ 비교 앵커)
+
+작업 ID: B1 재수집
+
+- baseline-b1-post-q1 (build-perf Release, commit 5c8ecf0, DXGI, 4구성×5회 전부 OK).
+- 1080p-scroll(주 비교): DEC 23.44(22.22~23.67), Host CPU 67.6%, Client CPU 54.3%,
+  captureCopyMap 0.99ms, captureMemcpy 0.76ms, NV12 6.74ms, enc 4.45ms,
+  queueToSend 45.3ms, LAT_P95 26.9ms
+- 1080p-static: DEC 21.2, Host CPU 61.3% / 1080p-video: DEC 26.1, Host CPU 59.3% /
+  720p-scroll: DEC 24.1, scale 4.47ms, NV12 3.20ms
+- H1부터의 A/B는 이 수치만 기준으로 한다. pre-Q1 기준선(WGC)과는 캡처 백엔드가 달라
+  직접 비교하지 않는다.
+
+다음 작업: H1.
