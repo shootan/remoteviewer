@@ -605,6 +605,21 @@
                     android:layout_width="match_parent"
                     android:layout_height="match_parent" />
 
+                <!-- Appears while tablet mode is held: one tap pins the mode so the holding
+                     finger can be lifted, another tap releases it. Sits beside the strip's
+                     middle third, where the spare hand already is. -->
+                <TextView
+                    android:id="@+id/viewerTabletLockButton"
+                    android:layout_width="34dp"
+                    android:layout_height="34dp"
+                    android:layout_gravity="start|center_vertical"
+                    android:layout_marginStart="6dp"
+                    android:background="@drawable/viewer_control_button_background"
+                    android:gravity="center"
+                    android:text="@string/tablet_lock_open"
+                    android:textSize="15sp"
+                    android:visibility="gone" />
+
                 <!-- Tells the user which margin modifier is held; without it the mode is a
                      guess, and holding the wrong third does something unexpected. -->
                 <TextView

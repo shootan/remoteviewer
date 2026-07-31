@@ -116,4 +116,7 @@
     <string name="zone_right_click">우클릭</string>
     <string name="zone_tablet">태블릿</string>
     <string name="zone_mouse">마우스</string>
+    <string name="tablet_lock_open">🔓</string>
+    <string name="tablet_lock_closed">🔒</string>
+    <string name="viewer_mode_tablet_locked">태블릿 모드 고정됨 - 🔒를 누르면 해제</string>
 </resources>

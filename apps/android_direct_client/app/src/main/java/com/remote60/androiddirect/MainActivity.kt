@@ -532,8 +532,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     // why these are booleans and not pointer ids.
     private lateinit var viewerZoneRightClick: TextView
     private lateinit var viewerZoneTablet: TextView
+    private lateinit var viewerTabletLockButton: TextView
     private var zoneRightClickHeld = false
     private var zoneTabletHeld = false
+
+    /** Pinned tablet mode: survives the holding finger lifting, until the lock is tapped off. */
+    private var zoneTabletLocked = false
     private val viewerControlsDimAlpha = 1.0f  // rail sits beside the video, nothing to uncover
     private val viewerControlsFadeRunnable = Runnable {
         if (currentScene == UiScene.VIEWER) {
@@ -1565,7 +1569,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         zoneRightClickHeld || rightClickModifierPointerId != MotionEvent.INVALID_POINTER_ID
 
     private fun isTabletModeActive(): Boolean =
-        zoneTabletHeld || tabletModePointerId != MotionEvent.INVALID_POINTER_ID
+        zoneTabletHeld || zoneTabletLocked || tabletModePointerId != MotionEvent.INVALID_POINTER_ID
 
     /**
      * The left strip. Because it is its own view, the finger holding it never enters the
@@ -1574,6 +1578,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun initZoneBar() {
         viewerZoneRightClick = findViewById(R.id.viewerZoneRightClick)
         viewerZoneTablet = findViewById(R.id.viewerZoneTablet)
+        viewerTabletLockButton = findViewById(R.id.viewerTabletLockButton)
+        viewerTabletLockButton.setOnClickListener {
+            zoneTabletLocked = !zoneTabletLocked
+            diagnosticsLog.log("tablet_mode_lock", "locked=$zoneTabletLocked")
+            if (zoneTabletLocked) showViewerControls(emphasized = true)
+            renderViewerModeBanner()
+        }
         val bar = findViewById<LinearLayout>(R.id.viewerZoneBar)
         bar.setOnTouchListener { view, event ->
             when (event.actionMasked) {
@@ -1623,12 +1634,20 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     /** Shows which modifier is currently held, so the mode is never a guess. */
     private fun renderViewerModeBanner() {
         val text = when {
+            zoneTabletLocked -> getString(R.string.viewer_mode_tablet_locked)
             isTabletModeActive() -> getString(R.string.viewer_mode_tablet)
             isRightClickModeActive() -> getString(R.string.viewer_mode_right_click)
             else -> ""
         }
         viewerModeBanner.text = text
         viewerModeBanner.visibility = if (text.isEmpty()) View.GONE else View.VISIBLE
+        if (::viewerTabletLockButton.isInitialized) {
+            viewerTabletLockButton.visibility =
+                if (isTabletModeActive()) View.VISIBLE else View.GONE
+            viewerTabletLockButton.text = getString(
+                if (zoneTabletLocked) R.string.tablet_lock_closed else R.string.tablet_lock_open,
+            )
+        }
         if (::viewerZoneRightClick.isInitialized) {
             viewerZoneRightClick.alpha = if (isRightClickModeActive()) 1.0f else 0.55f
             viewerZoneRightClick.setBackgroundColor(
@@ -2093,9 +2112,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         statusHandler.postDelayed(viewerControlsFadeRunnable, delayMs)
     }
 
-    /** Drops every held modifier and any scroll gesture that depended on one. */
+    /** Drops every held modifier, the tablet lock, and any scroll gesture that depended on one. */
     private fun releaseViewerModifiers() {
+        zoneTabletLocked = false
         releaseZoneBarModifiers()
+        if (::viewerModeBanner.isInitialized) renderViewerModeBanner()
         if (activeViewerTouchMode == ViewerTouchMode.SCROLL) {
             resetViewerTouchState()
         }
