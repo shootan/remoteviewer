@@ -5002,3 +5002,42 @@ A/B로 켠다. 계획의 "성능 수치 없는 최적화는 완료로 치지 않
 
 다음 작업: C1. H4는 착수 조건(H1~H3 후 측정) 자체가 현 환경에서 판정 불가라 동일하게
 보류하고 G1 전에 재평가한다.
+
+### 213) 2026-07-31 C1 Windows Client 저위험 최적화 + F1 절전 배선
+
+작업 ID: C1 (+F1)
+
+변경 파일
+- `apps/native_poc/src/native_video_client_main.cpp`
+- `apps/native_poc/src/native_video_host_main.cpp` (썸네일 hung-window 가드)
+
+구현 내용
+- C1-1 RTV 캐시: `ensure_rtv()`가 크기 불변이면 즉시 반환(기존: 매 프레임
+  GetDesc+GetBuffer+CreateRenderTargetView). rtvCreateCount/rtvResizeCount 진단 추가.
+- C1-2 썸네일 락 축소: gThumbs를 `shared_ptr<const WindowThumb>` 맵으로 바꿔 paint는
+  락 안에서 포인터 스냅샷만 뜨고 StretchDIBits는 락 밖에서 수행. 수신 스레드의
+  InvalidateRect도 락 밖으로.
+- C1-3 GDI 캐시: 색상별 브러시 캐시(cached_brush)로 카드/버튼/오버레이의 매 페인트
+  CreateSolidBrush/DeleteObject 제거, 오버레이 제목 폰트를 DPI 변경 시에만 재생성
+  (gUiTitleFont), WM_DESTROY에서 일괄 정리.
+- F1 절전 배선: picker 전환 지점 5곳이 `set_picker_visible_and_sync_stream()`을 통해
+  `gStreamStateControl.Request(!visible)`를 보낸다(열림=false, 선택/닫힘=true). 시작
+  시에는 요청하지 않아 화면을 열지 않는 하네스/구클라이언트 동작 불변.
+- 호스트 썸네일: `IsHungAppWindow` 가드 - PrintWindow는 타임아웃 없는 SendMessage라
+  행 상태 창(오늘 실제로 뜬 AMD 드라이버 크래시 신고 창 등) 하나가 제어 세션 전체를
+  막는다.
+
+Before/After (1080p-scroll Release 3회, post-Q1 기준선 대비)
+- Client CPU 54.34% → 44.22% (-18.6%)
+- DEC 23.44 → 23.67 (동등), Host CPU 67.6 → 67.2 (동등)
+
+검증/미완
+- 클릭 시나리오(뷰어→Targets→복귀)로 picker 전환 자체는 스크린샷으로 확인. 그러나 이
+  머신에서는 썸네일 캡처(GDI BitBlt/PrintWindow)가 손상된 그래픽 스택에 막혀 제어
+  루프가 썸네일 recv에 고착, stream-state 송신까지 확인하지 못했다(hung 가드로도 미
+  해소 - 데스크톱 BitBlt CAPTUREBLT 단계 의심). 프로토콜 자체는 e2e의
+  RequestStreamActive로 검증돼 있고 Android가 동일 경로를 상용 사용 중.
+- 미완: 인코드 정지/재개 실측(재부팅 후), 썸네일 전송의 비동기화(제어 채널과 분리) -
+  C1-2 후속으로 U2/G1 전에 재평가.
+
+다음 작업: C2는 착수 조건(H3 채택 후) 미충족으로 보류. A1 Android로 진행.

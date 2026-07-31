@@ -281,6 +281,7 @@ std::wstring utf8_to_wide(const std::string& utf8) {
 // GDI defaults to the legacy System bitmap font, which is unscalable and cannot render
 // non-Latin window titles. Everything drawn through draw_text_utf8 selects this instead.
 HFONT gUiFont = nullptr;
+HFONT gUiTitleFont = nullptr;
 int gUiDpi = 96;
 
 int dpi_scale(int value) { return MulDiv(value, gUiDpi, 96); }
@@ -305,6 +306,40 @@ void ensure_ui_font(HWND hwnd) {
   lf.lfPitchAndFamily = DEFAULT_PITCH | FF_DONTCARE;
   std::wcscpy(lf.lfFaceName, L"Segoe UI");
   gUiFont = CreateFontIndirectW(&lf);
+  if (gUiTitleFont) {
+    DeleteObject(gUiTitleFont);
+    gUiTitleFont = nullptr;
+  }
+  lf.lfHeight = -MulDiv(15, dpi, 72);
+  lf.lfWeight = FW_SEMIBOLD;
+  gUiTitleFont = CreateFontIndirectW(&lf);
+}
+
+// Paint-time solid brushes, cached by color. Cards used to create and destroy several
+// brushes per paint, and the picker repaints on every thumbnail arrival. UI thread only.
+std::unordered_map<COLORREF, HBRUSH>& brush_cache() {
+  static std::unordered_map<COLORREF, HBRUSH> cache;
+  return cache;
+}
+
+HBRUSH cached_brush(COLORREF color) {
+  auto& cache = brush_cache();
+  const auto it = cache.find(color);
+  if (it != cache.end()) return it->second;
+  HBRUSH brush = CreateSolidBrush(color);
+  cache.emplace(color, brush);
+  return brush;
+}
+
+void destroy_cached_gdi_objects() {
+  for (auto& entry : brush_cache()) {
+    DeleteObject(entry.second);
+  }
+  brush_cache().clear();
+  if (gUiTitleFont) {
+    DeleteObject(gUiTitleFont);
+    gUiTitleFont = nullptr;
+  }
 }
 
 void draw_text_utf8(HDC hdc, const std::string& text, RECT* rect, UINT format) {
@@ -627,6 +662,12 @@ RuntimeTuneState gRuntimeTuneState{
     240};
 std::atomic<bool> gCaptureOverviewMode{false};
 remote60::native_poc::StreamStateControl gStreamStateControl;
+
+// Browsing targets must not keep the host encoding (F1). The request rides the control
+// scheduler, which orders stream state ahead of window selection. Sent only on explicit
+// picker transitions: startup leaves the host's default-active stream alone, so headless
+// harness clients that never open the picker keep receiving video unchanged.
+void set_picker_visible_and_sync_stream(bool visible);
 CaptureModeRequestState gCaptureModeRequests;
 ClientControlScheduler gControlScheduler;
 
@@ -691,7 +732,7 @@ struct WindowThumb {
   uint64_t fetchedUs = 0;
 };
 std::mutex gThumbMu;
-std::unordered_map<uint64_t, WindowThumb> gThumbs;
+std::unordered_map<uint64_t, std::shared_ptr<const WindowThumb>> gThumbs;
 std::deque<uint64_t> gThumbFetchQueue;
 std::atomic<bool> gHostSupportsThumbnails{false};
 constexpr uint64_t kThumbRefreshUs = 5000000;  // refresh a preview after 5 s
@@ -703,7 +744,7 @@ void queue_thumbnail_fetches_from_panel() {
   std::lock_guard<std::mutex> lk(gThumbMu);
   auto want = [&](uint64_t id) {
     const auto it = gThumbs.find(id);
-    if (it != gThumbs.end() && nowUs - it->second.fetchedUs < kThumbRefreshUs) return;
+    if (it != gThumbs.end() && it->second && nowUs - it->second->fetchedUs < kThumbRefreshUs) return;
     if (std::find(gThumbFetchQueue.begin(), gThumbFetchQueue.end(), id) != gThumbFetchQueue.end()) {
       return;
     }
@@ -1092,10 +1133,15 @@ void apply_window_list_snapshot(const ControlWindowListMessage& msg) {
   log_client_line(result.logLine);
 }
 
+void set_picker_visible_and_sync_stream(bool visible) {
+  gWindowPickerVisible.store(visible, std::memory_order_relaxed);
+  gStreamStateControl.Request(!visible);
+}
+
 void apply_window_selected_result(const ControlWindowSelectedMessage& msg) {
   const auto result = gWindowPanelState.ApplyWindowSelected(msg);
   if (result.ok) {
-    gWindowPickerVisible.store(false, std::memory_order_relaxed);
+    set_picker_visible_and_sync_stream(false);
   }
   log_client_line(result.logLine);
 }
@@ -1165,10 +1211,8 @@ void draw_alpha_rect(HDC hdc, const RECT& rect, COLORREF color, BYTE alpha) {
     return;
   }
   HGDIOBJ oldBmp = SelectObject(memDc, bmp);
-  HBRUSH brush = CreateSolidBrush(color);
   RECT fillRc{0, 0, w, h};
-  FillRect(memDc, &fillRc, brush);
-  DeleteObject(brush);
+  FillRect(memDc, &fillRc, cached_brush(color));
   BLENDFUNCTION blend{};
   blend.BlendOp = AC_SRC_OVER;
   blend.SourceConstantAlpha = alpha;
@@ -1187,9 +1231,7 @@ void draw_panel_button(HDC hdc, const RECT& rect, const char* label, bool active
   } else if (active) {
     fill = RGB(48, 96, 62);
   }
-  HBRUSH b = CreateSolidBrush(fill);
-  FillRect(hdc, &rect, b);
-  DeleteObject(b);
+  FillRect(hdc, &rect, cached_brush(fill));
   SetBkMode(hdc, TRANSPARENT);
   SetTextColor(hdc, disabled ? RGB(160, 165, 170) : RGB(240, 240, 240));
   RECT textRect = rect;
@@ -1262,23 +1304,20 @@ void draw_target_card(HDC hdc, const RECT& card, const CardGridMetrics& grid,
   const RECT captionRect = make_rect(card.left, card.top + grid.thumbH, card.right - card.left,
                                      card.bottom - card.top - grid.thumbH);
 
-  HBRUSH bg = CreateSolidBrush(RGB(24, 28, 36));
-  FillRect(hdc, &thumbRect, bg);
-  DeleteObject(bg);
-  HBRUSH cap = CreateSolidBrush(active ? RGB(38, 70, 52) : RGB(32, 37, 46));
-  FillRect(hdc, &captionRect, cap);
-  DeleteObject(cap);
+  FillRect(hdc, &thumbRect, cached_brush(RGB(24, 28, 36)));
+  FillRect(hdc, &captionRect, cached_brush(active ? RGB(38, 70, 52) : RGB(32, 37, 46)));
 
-  bool haveThumb = false;
+  // Snapshot under the lock, draw outside it: StretchDIBits under gThumbMu made the fetch
+  // thread and the paint stall each other.
+  std::shared_ptr<const WindowThumb> thumb;
   {
     std::lock_guard<std::mutex> lk(gThumbMu);
     const auto it = gThumbs.find(windowId);
-    if (it != gThumbs.end()) {
-      draw_thumbnail_into(hdc, thumbRect, it->second);
-      haveThumb = true;
-    }
+    if (it != gThumbs.end()) thumb = it->second;
   }
-  if (!haveThumb) {
+  if (thumb) {
+    draw_thumbnail_into(hdc, thumbRect, *thumb);
+  } else {
     RECT ph = thumbRect;
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, RGB(110, 118, 130));
@@ -1293,15 +1332,11 @@ void draw_target_card(HDC hdc, const RECT& card, const CardGridMetrics& grid,
   text.right -= dpi_scale(10);
   draw_text_utf8(hdc, title, &text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-  HBRUSH border = CreateSolidBrush(active ? RGB(88, 178, 122) : RGB(52, 58, 70));
   RECT frame = card;
-  FrameRect(hdc, &frame, border);
-  DeleteObject(border);
+  FrameRect(hdc, &frame, cached_brush(active ? RGB(88, 178, 122) : RGB(52, 58, 70)));
   if (active) {
-    HBRUSH accent = CreateSolidBrush(RGB(88, 178, 122));
     RECT inner{card.left + 1, card.top + 1, card.right - 1, card.bottom - 1};
-    FrameRect(hdc, &inner, accent);
-    DeleteObject(accent);
+    FrameRect(hdc, &inner, cached_brush(RGB(88, 178, 122)));
   }
 }
 
@@ -1328,14 +1363,10 @@ void draw_overlay(HDC hdc) {
   SetTextColor(hdc, RGB(240, 243, 247));
   RECT titleRect = layout.selectedInfoRect;
   {
-    HFONT big = CreateFontW(-MulDiv(15, gUiDpi, 72), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    HGDIOBJ old = big ? SelectObject(hdc, big) : nullptr;
+    HGDIOBJ old = gUiTitleFont ? SelectObject(hdc, gUiTitleFont) : nullptr;
     RECT t = titleRect;
     DrawTextW(hdc, L"Remote60", -1, &t, DT_LEFT | DT_SINGLELINE);
     if (old) SelectObject(hdc, old);
-    if (big) DeleteObject(big);
   }
   RECT subRect = titleRect;
   subRect.top += dpi_scale(28);
@@ -1438,6 +1469,10 @@ struct Nv12D3dRenderer {
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srvUV;
   uint32_t texW = 0;
   uint32_t texH = 0;
+  UINT rtvW = 0;
+  UINT rtvH = 0;
+  uint64_t rtvCreateCount = 0;
+  uint64_t rtvResizeCount = 0;
   bool ready = false;
 
   bool init(HWND hwnd) {
@@ -1535,16 +1570,24 @@ struct Nv12D3dRenderer {
     const UINT w = std::max<LONG>(1, rc.right - rc.left);
     const UINT h = std::max<LONG>(1, rc.bottom - rc.top);
 
+    // The steady state is a cache hit: recreating the view every frame also re-queried the
+    // swapchain descriptor every frame, all of it for a window that had not moved.
+    if (rtv && rtvW == w && rtvH == h) return true;
+
     DXGI_SWAP_CHAIN_DESC sd{};
     if (FAILED(swapChain->GetDesc(&sd))) return false;
     if (sd.BufferDesc.Width != w || sd.BufferDesc.Height != h) {
       rtv.Reset();
+      ++rtvResizeCount;
       if (FAILED(swapChain->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0))) return false;
     }
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> backBuffer;
     if (FAILED(swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer)))) return false;
     if (FAILED(device->CreateRenderTargetView(backBuffer.Get(), nullptr, &rtv))) return false;
+    ++rtvCreateCount;
+    rtvW = w;
+    rtvH = h;
     return true;
   }
 
@@ -1778,6 +1821,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       DestroyWindow(hwnd);
       return 0;
     case WM_DESTROY:
+      destroy_cached_gdi_objects();
       PostQuitMessage(0);
       return 0;
     case WM_DPICHANGED: {
@@ -1836,7 +1880,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       const ClientLayout layout = compute_client_layout(hwnd);
       if (gWindowPickerToggleDown.exchange(false, std::memory_order_relaxed)) {
         if (point_in_rect(layout.toggleButtonRect, x, y)) {
-          gWindowPickerVisible.store(!gWindowPickerVisible.load(std::memory_order_relaxed), std::memory_order_relaxed);
+          set_picker_visible_and_sync_stream(
+              !gWindowPickerVisible.load(std::memory_order_relaxed));
           InvalidateRect(hwnd, nullptr, FALSE);
         }
         return 0;
@@ -1856,7 +1901,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (point_in_rect(layout.desktopButtonRect, x, y)) {
           const bool alreadyDesktop = gWindowPanelState.IsDesktopSelected();
           if (alreadyDesktop) {
-            gWindowPickerVisible.store(false, std::memory_order_relaxed);
+            set_picker_visible_and_sync_stream(false);
           } else {
             queue_window_select_request(0, "desktop_select_requested");
           }
@@ -2008,7 +2053,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (msg == WM_POINTERDOWN) {
           gWindowPickerToggleDown.store(true, std::memory_order_relaxed);
         } else if (msg == WM_POINTERUP && gWindowPickerToggleDown.exchange(false, std::memory_order_relaxed)) {
-          gWindowPickerVisible.store(!gWindowPickerVisible.load(std::memory_order_relaxed), std::memory_order_relaxed);
+          set_picker_visible_and_sync_stream(
+              !gWindowPickerVisible.load(std::memory_order_relaxed));
           InvalidateRect(hwnd, nullptr, FALSE);
         }
         return 0;
@@ -2030,7 +2076,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           } else if (point_in_rect(layout.desktopButtonRect, p.x, p.y)) {
             const bool alreadyDesktop = gWindowPanelState.IsDesktopSelected();
             if (alreadyDesktop) {
-              gWindowPickerVisible.store(false, std::memory_order_relaxed);
+              set_picker_visible_and_sync_stream(false);
             } else {
               queue_window_select_request(0, "desktop_select_requested");
             }
@@ -2747,12 +2793,17 @@ int main(int argc, char** argv) {
           }
           if ((rsp.flags & 0x1u) != 0 && rsp.width > 0 && rsp.height > 0 &&
               payload.size() == static_cast<size_t>(rsp.width) * rsp.height * 4u) {
-            std::lock_guard<std::mutex> lk(gThumbMu);
-            auto& t = gThumbs[id];
-            t.width = rsp.width;
-            t.height = rsp.height;
-            t.bgra = std::move(payload);
-            t.fetchedUs = qpc_now_us();
+            auto thumb = std::make_shared<WindowThumb>();
+            thumb->width = rsp.width;
+            thumb->height = rsp.height;
+            thumb->bgra = std::move(payload);
+            thumb->fetchedUs = qpc_now_us();
+            {
+              std::lock_guard<std::mutex> lk(gThumbMu);
+              gThumbs[id] = std::move(thumb);
+            }
+            // Outside the lock: the paint handler takes gThumbMu, and invalidating while
+            // holding it invited a stall on every received preview.
             InvalidateRect(gHwnd, nullptr, FALSE);
           }
           return 1;
@@ -2782,6 +2833,10 @@ int main(int argc, char** argv) {
               } else if (action.kind == ControlOutboundActionKind::KeyframeRequest) {
                 std::cout << "[native-video-client][control] keyframe-request seq=" << action.keyframe.seq
                           << " reason=" << action.keyframe.reason << "\n";
+              } else if (action.kind == ControlOutboundActionKind::StreamState) {
+                std::cout << "[native-video-client][control] stream-state seq="
+                          << action.streamState.seq
+                          << " active=" << ((action.streamState.flags & 0x1u) ? 1 : 0) << "\n";
               } else if (action.kind == ControlOutboundActionKind::RuntimeTune) {
                 std::cout << "[native-video-client][control] runtime-config seq=" << action.runtimeTune.seq
                           << " bitrate=" << action.runtimeTune.bitrate

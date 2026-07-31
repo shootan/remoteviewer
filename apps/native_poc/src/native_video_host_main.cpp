@@ -1968,6 +1968,10 @@ bool capture_window_thumbnail(HWND hwnd, uint32_t maxW, uint32_t maxH,
     srcH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
   } else {
     if (!IsWindow(hwnd) || IsIconic(hwnd)) return false;
+    // PrintWindow delivers WM_PRINT with SendMessage and no timeout; one hung window (a
+    // crashed-driver dialog, a stuck installer) wedges the whole control session behind it,
+    // and with it every window-select and stream-state message.
+    if (IsHungAppWindow(hwnd)) return false;
     RECT rc{};
     if (!GetClientRect(hwnd, &rc)) return false;
     srcW = rc.right - rc.left;
