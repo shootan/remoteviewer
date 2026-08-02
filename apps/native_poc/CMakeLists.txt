@@ -46,10 +46,27 @@ add_executable(remote60_native_video_host_poc
   src/native_video_host_main.cpp
   src/d3d_capture_readback.cpp
   src/directory_client.cpp
+  src/gdi_capture_process.cpp
   src/udp_control_channel.cpp
   src/mf_h264_codec.cpp
   ../host/src/capture_backend_dxgi.cpp
 )
+
+add_executable(remote60_gdi_capture_worker
+  src/gdi_capture_worker_main.cpp
+)
+target_include_directories(remote60_gdi_capture_worker PRIVATE src)
+target_link_libraries(remote60_gdi_capture_worker PRIVATE
+  gdi32
+  user32
+)
+
+add_executable(remote60_gdi_capture_process_test
+  src/gdi_capture_process.cpp
+  src/gdi_capture_process_test.cpp
+)
+target_include_directories(remote60_gdi_capture_process_test PRIVATE src)
+target_link_libraries(remote60_gdi_capture_process_test PRIVATE user32)
 
 target_include_directories(remote60_native_video_host_poc PRIVATE
   src
@@ -171,6 +188,20 @@ add_executable(remote60_input_macro_test
 
 target_include_directories(remote60_input_macro_test PRIVATE
   src
+)
+
+add_executable(remote60_mf_h264_codec_test
+  src/mf_h264_codec.cpp
+  src/mf_h264_codec_test.cpp
+)
+target_include_directories(remote60_mf_h264_codec_test PRIVATE src)
+target_link_libraries(remote60_mf_h264_codec_test PRIVATE
+  d3d11
+  mfplat
+  mf
+  mfuuid
+  wmcodecdspuuid
+  ole32
 )
 
 add_executable(remote60_udp_control_channel_test

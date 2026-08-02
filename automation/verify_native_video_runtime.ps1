@@ -261,6 +261,7 @@ $fallbackNv12ConvertFailTotal = 0
 $paintCoalescedTotal = 0
 $overwriteBeforePresentTotal = 0
 $renderPathD3dNv12Count = 0
+$renderPathD3dNv12SurfaceCount = 0
 $renderPathGdiNv12FallbackCount = 0
 $renderPathGdiBgraCount = 0
 $renderPathOtherCount = 0
@@ -528,12 +529,9 @@ foreach ($line in $clientLines) {
   if ($line -match '\[native-video-client\]\[trace_present\]') {
     if ($line -match 'presentUs=([0-9]+)') {
       $presentUs = [int64]$Matches[1]
-      if ($prevPresentUs -ge 0 -and $presentUs -ge $prevPresentUs) {
-        $gapUs = [double]($presentUs - $prevPresentUs)
-        [void]$presentGapVals.Add($gapUs)
-        if ($gapUs -ge 1000000) { $presentGapOver1s += 1 }
-        if ($gapUs -ge 3000000) { $presentGapOver3s += 1 }
-      }
+      # trace_present is sampled at TraceEvery frames, so adjacent trace timestamps are
+      # expected to be about one second apart at 60 fps. They are not consecutive presents
+      # and therefore cannot be used as a freeze detector.
       $prevPresentUs = $presentUs
     }
     foreach ($stageName in $stageValues.Keys) {
@@ -544,6 +542,10 @@ foreach ($line in $clientLines) {
     if ($line -match 'renderPath=([A-Za-z0-9_]+)') {
       switch ($Matches[1]) {
         "d3d_nv12" { $renderPathD3dNv12Count += 1 }
+        "d3d_nv12_surface" {
+          $renderPathD3dNv12Count += 1
+          $renderPathD3dNv12SurfaceCount += 1
+        }
         "gdi_nv12_fallback" { $renderPathGdiNv12FallbackCount += 1 }
         "gdi_bgra" { $renderPathGdiBgraCount += 1 }
         default { $renderPathOtherCount += 1 }
@@ -567,6 +569,14 @@ foreach ($line in $clientLines) {
       if ($line -match ($stageName + '=([0-9]+)')) {
         [void]$clientUserFeedbackValues[$stageName].Add([double]$Matches[1])
       }
+    }
+    # capGapUs is measured between actual consecutive successful presents. A >=1s gap
+    # always causes a user-feedback record, so this remains a reliable sparse freeze signal.
+    if ($line -match 'capGapUs=([0-9]+)') {
+      $gapUs = [double]$Matches[1]
+      [void]$presentGapVals.Add($gapUs)
+      if ($gapUs -ge 1000000) { $presentGapOver1s += 1 }
+      if ($gapUs -ge 3000000) { $presentGapOver3s += 1 }
     }
     if ($line -match 'totalUs=([0-9]+)') {
       [void]$clientUserFeedbackTopEntries.Add([PSCustomObject]@{
@@ -1062,8 +1072,11 @@ $hostUserFeedbackStats = [ordered]@{}
 foreach ($stageName in $hostUserFeedbackValues.Keys) {
   $hostUserFeedbackStats[$stageName] = Stats-Summary -vals $hostUserFeedbackValues[$stageName]
 }
-$hostCaptureIntervalStats = Stats-Summary -vals $hostCaptureIntervalVals
-$hostCaptureIntervalErrStats = Stats-Summary -vals $hostCaptureIntervalErrUsVals
+# Trace records are intentionally sparse; subtracting adjacent trace capture timestamps
+# measures the logging cadence (roughly one second), not the frame cadence. The host embeds
+# the real consecutive callback interval in every trace, so use that for capture cadence.
+$hostCaptureIntervalStats = Stats-Summary -vals $hostCallbackIntervalVals
+$hostCaptureIntervalErrStats = Stats-Summary -vals $hostCallbackIntervalErrUsVals
 $hostCallbackIntervalStats = Stats-Summary -vals $hostCallbackIntervalVals
 $hostCallbackIntervalErrStats = Stats-Summary -vals $hostCallbackIntervalErrUsVals
 
@@ -1144,7 +1157,7 @@ foreach ($stageName in @(
 
 $decodedOk = ($Codec -ine "h264" -or $dec.max -gt 0)
 $overallOk = ($clientRc -eq 0 -and $lat.count -gt 0 -and $decodedOk)
-$gateADecodedFpsTarget = 20
+$gateADecodedFpsTarget = [Math]::Max(20, [int][Math]::Floor([Math]::Max(1, $Fps) * 0.90))
 $gateARecoveryMaxTargetUs = 1000000
 $gateAPresentGapOver1sTarget = 0
 $gateADecodedFpsOk = ($dec.count -gt 0 -and [double]$dec.avg -ge [double]$gateADecodedFpsTarget)
@@ -1158,12 +1171,12 @@ $m7DecodedFpsTarget = 0
 $m7LatencyP95TargetUs = 0
 if ($Codec -ieq "h264") {
   if ($EncodeWidth -ge 1920 -or $EncodeHeight -ge 1080) {
-    $m7Profile = "1080p30"
-    $m7DecodedFpsTarget = 27
+    $m7Profile = "1080p$($Fps)"
+    $m7DecodedFpsTarget = [Math]::Max(20, [int][Math]::Floor([Math]::Max(1, $Fps) * 0.90))
     $m7LatencyP95TargetUs = 70000
   } elseif ($EncodeWidth -ge 1280 -or $EncodeHeight -ge 720) {
-    $m7Profile = "720p30"
-    $m7DecodedFpsTarget = 28
+    $m7Profile = "720p$($Fps)"
+    $m7DecodedFpsTarget = [Math]::Max(20, [int][Math]::Floor([Math]::Max(1, $Fps) * 0.90))
     $m7LatencyP95TargetUs = 55000
   }
 }
@@ -1477,6 +1490,7 @@ Write-Output "FALLBACK_NV12_TO_BGRA_FAIL_TOTAL=$fallbackNv12ConvertFailTotal"
 Write-Output "PAINT_COALESCED_TOTAL=$paintCoalescedTotal"
 Write-Output "OVERWRITE_BEFORE_PRESENT_TOTAL=$overwriteBeforePresentTotal"
 Write-Output "RENDER_PATH_D3D_NV12_COUNT=$renderPathD3dNv12Count"
+Write-Output "RENDER_PATH_D3D_NV12_SURFACE_COUNT=$renderPathD3dNv12SurfaceCount"
 Write-Output "RENDER_PATH_GDI_NV12_FALLBACK_COUNT=$renderPathGdiNv12FallbackCount"
 Write-Output "RENDER_PATH_GDI_BGRA_COUNT=$renderPathGdiBgraCount"
 Write-Output "RENDER_PATH_OTHER_COUNT=$renderPathOtherCount"

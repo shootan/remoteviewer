@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <vector>
@@ -32,10 +33,16 @@ struct DecodedFrameNv12 {
   int64_t sampleTimeHns = 0;
   bool sampleTimeFromOutput = false;
   std::vector<uint8_t> bytes;
+  // Hardware decoders expose their NV12 output as a D3D11 surface. Keeping both the sample
+  // and texture alive prevents the decoder pool from reusing the surface before paint.
+  Microsoft::WRL::ComPtr<IMFSample> surfaceSample;
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> surfaceTexture;
+  uint32_t surfaceSubresource = 0;
 };
 
 struct H264EncodeFrameStats {
   uint64_t encodeCallUs = 0;
+  uint64_t colorConvertUs = 0;
   uint64_t sampleCreateUs = 0;
   uint64_t processInputUs = 0;
   uint64_t processOutputDrainUs = 0;
@@ -55,6 +62,8 @@ struct H264EncodeFrameStats {
 
 bool bgra_to_nv12(const uint8_t* bgra, uint32_t width, uint32_t height, uint32_t bgraStride,
                   std::vector<uint8_t>* outNv12);
+bool bgra_to_nv12_buffer(const uint8_t* bgra, uint32_t width, uint32_t height,
+                         uint32_t bgraStride, uint8_t* outNv12, size_t outNv12Size);
 bool nv12_to_bgra(const uint8_t* nv12, uint32_t width, uint32_t height, std::vector<uint8_t>* outBgra);
 
 class H264Encoder {
@@ -67,6 +76,12 @@ class H264Encoder {
   bool reconfigure_bitrate(uint32_t bitrate);
   bool encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFrame, int64_t inputSampleTimeHns,
                     std::vector<H264AccessUnit>* outUnits, H264EncodeFrameStats* encodeStats = nullptr);
+  /** Converts BGRA directly into the Media Foundation input buffer, avoiding the temporary
+   *  NV12 vector and the full-frame copy performed by encode_frame. */
+  bool encode_frame_bgra(const uint8_t* bgra, uint32_t width, uint32_t height,
+                         uint32_t bgraStride, bool forceKeyFrame, int64_t inputSampleTimeHns,
+                         std::vector<H264AccessUnit>* outUnits,
+                         H264EncodeFrameStats* encodeStats = nullptr);
   /** Zero-copy variant: wraps an NV12 texture in a DXGI surface buffer. The texture must not
    *  be written again until the MFT releases it (tracked by the caller). */
   bool encode_frame_surface(ID3D11Texture2D* texture, bool forceKeyFrame,
@@ -132,6 +147,7 @@ class H264Decoder {
  private:
   bool configure_input_type();
   bool configure_output_type();
+  bool configure_surface_allocator(IMFMediaType* outputType);
   bool query_output_size(uint32_t* outWidth, uint32_t* outHeight) const;
   bool query_output_geometry(uint32_t* codedWidth, uint32_t* codedHeight, uint32_t* visibleLeft,
                              uint32_t* visibleTop, uint32_t* visibleWidth,
@@ -151,6 +167,7 @@ class H264Decoder {
   std::deque<int64_t> pendingInputSampleTimesHns_;
   uint32_t d3dManagerResetToken_ = 0;
   Microsoft::WRL::ComPtr<IMFDXGIDeviceManager> d3dManager_;
+  Microsoft::WRL::ComPtr<IMFVideoSampleAllocatorEx> videoAllocator_;
 };
 
 }  // namespace remote60::native_poc

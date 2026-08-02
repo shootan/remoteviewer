@@ -442,6 +442,16 @@
                     android:background="@drawable/panel_button_background"
                     android:text="@string/settings_desktop_backend_wgc"
                     android:textColor="@color/panel_button_text" />
+
+                <Button
+                    android:id="@+id/settingsDesktopBackendGdiButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/panel_button_background"
+                    android:text="@string/settings_desktop_backend_gdi"
+                    android:textColor="@color/panel_button_text" />
             </LinearLayout>
 
             <LinearLayout
@@ -604,6 +614,30 @@
                     android:id="@+id/videoTextureView"
                     android:layout_width="match_parent"
                     android:layout_height="match_parent" />
+
+                <!-- Phone-side IME preview: the remote edit box can be too small to read once
+                     the keyboard consumes half the display, so retain the latest composed text
+                     over the upper-left of the video just like the OSLink reference. -->
+                <TextView
+                    android:id="@+id/viewerInputPreviewText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="top|start"
+                    android:layout_marginStart="12dp"
+                    android:layout_marginTop="10dp"
+                    android:background="@drawable/viewer_input_preview_background"
+                    android:elevation="8dp"
+                    android:ellipsize="start"
+                    android:gravity="center_vertical"
+                    android:maxLines="1"
+                    android:paddingStart="14dp"
+                    android:paddingTop="8dp"
+                    android:paddingEnd="14dp"
+                    android:paddingBottom="8dp"
+                    android:textColor="#17191C"
+                    android:textSize="15sp"
+                    android:textStyle="bold"
+                    android:visibility="gone" />
 
                 <!-- Appears while tablet mode is held: one tap pins the mode so the holding
                      finger can be lifted, another tap releases it. Sits beside the strip's

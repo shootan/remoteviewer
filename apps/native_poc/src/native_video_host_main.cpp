@@ -44,6 +44,7 @@
 #include "mf_h264_codec.hpp"
 #include "d3d_capture_readback.hpp"
 #include "directory_client.hpp"
+#include "gdi_capture_process.hpp"
 #include "json_profile.hpp"
 #include "native_video_transport.hpp"
 #include "poc_protocol.hpp"
@@ -81,6 +82,8 @@ using remote60::native_poc::H264EncodeFrameStats;
 using remote60::native_poc::EncodedFrameHeader;
 using remote60::native_poc::H264AccessUnit;
 using remote60::native_poc::H264Encoder;
+using remote60::native_poc::GdiCaptureProcess;
+using remote60::native_poc::GdiCaptureProcessConfig;
 using remote60::native_poc::MessageHeader;
 using remote60::native_poc::MessageType;
 using remote60::native_poc::RawFrameHeader;
@@ -1468,6 +1471,7 @@ DesktopCaptureBackend desktop_capture_backend_from_env() {
   std::transform(s.begin(), s.end(), s.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
   if (s == "wgc") return DesktopCaptureBackend::Wgc;
+  if (s == "gdi") return DesktopCaptureBackend::Gdi;
   return DesktopCaptureBackend::Dxgi;
 }
 
@@ -1480,6 +1484,9 @@ bool desktop_capture_backend_from_code(uint16_t code, DesktopCaptureBackend* out
     case 2:
       *out = DesktopCaptureBackend::Wgc;
       return true;
+    case 3:
+      *out = DesktopCaptureBackend::Gdi;
+      return true;
     default:
       return false;
   }
@@ -1491,6 +1498,8 @@ uint16_t desktop_capture_backend_code(DesktopCaptureBackend backend) {
       return 1;
     case DesktopCaptureBackend::Wgc:
       return 2;
+    case DesktopCaptureBackend::Gdi:
+      return 3;
   }
   return 1;
 }
@@ -1499,6 +1508,7 @@ const char* desktop_capture_backend_name(DesktopCaptureBackend backend) {
   switch (backend) {
     case DesktopCaptureBackend::Dxgi: return "dxgi";
     case DesktopCaptureBackend::Wgc: return "wgc";
+    case DesktopCaptureBackend::Gdi: return "gdi";
   }
   return "unknown";
 }
@@ -2325,16 +2335,34 @@ bool recv_discard(SOCKET s, size_t len) {
 constexpr size_t kUdpReceiveBufferBytes = 4096;
 
 std::atomic<uint32_t> gUdpPacePeakBitrateBps{0};  // 0 disables intra-frame pacing
+std::atomic<uint32_t> gUdpKeyframePacePeakBitrateBps{100000000};
 
 void udp_pace_wait_until(uint64_t targetUs) {
+  // A yield loop burns most of one logical core because a 1200-byte datagram at the normal
+  // pacing rate is only a few hundred microseconds apart. A reusable high-resolution
+  // waitable timer keeps the sender asleep without falling back to the ~15.6ms legacy timer
+  // quantum. Retain a short yield tail because setting a kernel timer for a few dozen
+  // microseconds costs more than it saves.
+  struct ThreadWaitTimer {
+    HANDLE handle = CreateWaitableTimerExW(nullptr, nullptr, 0x2 /* high resolution */,
+                                            TIMER_MODIFY_STATE | SYNCHRONIZE);
+    ~ThreadWaitTimer() {
+      if (handle) CloseHandle(handle);
+    }
+  };
+  thread_local ThreadWaitTimer timer;
   for (;;) {
     const uint64_t nowUs = qpc_now_us();
     if (nowUs >= targetUs) return;
     const uint64_t remainUs = targetUs - nowUs;
-    // Windows timer granularity is far coarser than the sub-millisecond gaps we need, so
-    // sleep only the bulk of a long wait and spin out the remainder.
-    if (remainUs > 2000) {
-      std::this_thread::sleep_for(std::chrono::microseconds(remainUs - 1500));
+    if (timer.handle && remainUs > 100) {
+      LARGE_INTEGER due{};
+      due.QuadPart = -static_cast<LONGLONG>(std::max<uint64_t>(1, remainUs - 50) * 10ULL);
+      if (SetWaitableTimer(timer.handle, &due, 0, nullptr, nullptr, FALSE)) {
+        (void)WaitForSingleObject(timer.handle, INFINITE);
+      } else {
+        std::this_thread::yield();
+      }
     } else {
       std::this_thread::yield();
     }
@@ -2343,8 +2371,16 @@ void udp_pace_wait_until(uint64_t targetUs) {
 
 // Returns the per-frame send budget in microseconds, or 0 when the frame should go out as
 // fast as possible (small frames are not worth the pacing overhead).
-uint64_t udp_pace_budget_us(size_t payloadSize, uint32_t chunkCount) {
-  const uint32_t peakBps = gUdpPacePeakBitrateBps.load(std::memory_order_relaxed);
+uint64_t udp_pace_budget_us(size_t payloadSize, uint32_t chunkCount, bool keyFrame) {
+  uint32_t peakBps = gUdpPacePeakBitrateBps.load(std::memory_order_relaxed);
+  if (keyFrame && peakBps != 0) {
+    // IDRs are much larger than delta frames. Pacing one at only a small multiple of the
+    // average bitrate blocks the sender for several frame periods, fills the latest-wins
+    // queue, and triggers another IDR -- a self-sustaining low-FPS loop. Keep pacing, but
+    // give recovery frames enough wire rate to finish inside roughly one 60 Hz interval.
+    peakBps = std::max(peakBps,
+                       gUdpKeyframePacePeakBitrateBps.load(std::memory_order_relaxed));
+  }
   if (peakBps == 0 || chunkCount <= 8) return 0;
   return (static_cast<uint64_t>(payloadSize) * 8ULL * 1000000ULL) / static_cast<uint64_t>(peakBps);
 }
@@ -2359,7 +2395,8 @@ bool send_udp_chunks(SOCKET s, const sockaddr_in& peer, const uint8_t* payload, 
   size_t offset = 0;
   const uint32_t chunkCount =
       static_cast<uint32_t>((payloadSize + maxChunk - 1) / maxChunk);
-  const uint64_t budgetUs = udp_pace_budget_us(payloadSize, chunkCount);
+  const uint64_t budgetUs =
+      udp_pace_budget_us(payloadSize, chunkCount, (baseHeader.flags & 0x1u) != 0);
   const uint64_t paceStartUs = budgetUs > 0 ? qpc_now_us() : 0;
   uint32_t chunkIndex = 0;
 
@@ -2401,7 +2438,8 @@ bool send_udp_chunks_timed(SOCKET s, const sockaddr_in& peer, const uint8_t* pay
   }
   const uint32_t chunkCount =
       static_cast<uint32_t>((payloadSize + maxChunk - 1) / maxChunk);
-  const uint64_t budgetUs = udp_pace_budget_us(payloadSize, chunkCount);
+  const uint64_t budgetUs =
+      udp_pace_budget_us(payloadSize, chunkCount, (baseHeader.flags & 0x1u) != 0);
   uint32_t chunkIndex = 0;
 
   while (offset < payloadSize) {
@@ -2488,6 +2526,8 @@ int main(int argc, char** argv) {
   // average rate. 0 restores the old unthrottled burst.
   const uint32_t udpPacePeakPercent =
       env_u32_clamped("REMOTE60_NATIVE_UDP_PACE_PEAK_PERCENT", 250, 0, 2000);
+  const uint32_t udpKeyframePacePeakBps = env_u32_clamped(
+      "REMOTE60_NATIVE_UDP_KEYFRAME_PACE_PEAK_BPS", 100000000, 0, 1000000000);
   const bool guardStalePreEncode = env_truthy("REMOTE60_NATIVE_GUARD_STALE_PREENCODE");
   const bool abrEnabled = useH264 && !env_truthy("REMOTE60_NATIVE_ABR_DISABLE");
   const bool abrQualityFirst = env_truthy("REMOTE60_NATIVE_ADAPTIVE_QUALITY_FIRST");
@@ -2593,9 +2633,13 @@ int main(int argc, char** argv) {
     gUdpPacePeakBitrateBps.store(
         static_cast<uint32_t>(std::min<uint64_t>(pacePeakBps, 4000000000ULL)),
         std::memory_order_relaxed);
+    gUdpKeyframePacePeakBitrateBps.store(udpKeyframePacePeakBps,
+                                        std::memory_order_relaxed);
     std::cout << "[native-video-host] h264 pacing=" << (noPacingH264 ? "off" : "on")
               << " udpPacePeakPercent=" << udpPacePeakPercent
               << " udpPacePeakBps=" << gUdpPacePeakBitrateBps.load(std::memory_order_relaxed)
+              << " udpKeyframePacePeakBps="
+              << gUdpKeyframePacePeakBitrateBps.load(std::memory_order_relaxed)
               << " stalePreEncodeGuard=" << (guardStalePreEncode ? 1 : 0)
               << " capturePoolBuffers=" << captureFramePoolBuffers
               << " encoderTuneMode=" << encoderTuneMode
@@ -3345,13 +3389,13 @@ int main(int argc, char** argv) {
         ControlDesktopBackendRequestMessage req{};
         req.header = header;
         if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
-        if (req.backend == 1 || req.backend == 2) {
+        if (req.backend == 1 || req.backend == 2 || req.backend == 3) {
           desktopBackendReqSeq.store(req.seq, std::memory_order_release);
           desktopBackendReqValue.store(req.backend, std::memory_order_release);
           desktopBackendReqPending.store(true, std::memory_order_release);
           std::cout << "[native-video-host][control] desktop-backend-request seq=" << req.seq
                     << " backend="
-                    << (req.backend == 2 ? "wgc" : "dxgi")
+                    << (req.backend == 2 ? "wgc" : (req.backend == 3 ? "gdi" : "dxgi"))
                     << "\n";
         }
         continue;
@@ -3918,13 +3962,17 @@ int main(int argc, char** argv) {
   GraphicsCaptureSession session{nullptr};
   winrt::event_token token{};
   DxgiDesktopCaptureSession dxgiCaptureSession;
+  GdiCaptureProcess gdiCaptureProcess;
   std::atomic<bool> captureSessionReady{false};
   std::atomic<bool> dxgiFallbackRequested{false};
+  std::atomic<bool> gdiFallbackRequested{false};
   uint64_t captureSessionStartedUs = 0;
   uint64_t captureRestartCount = 0;
   uint64_t lastCaptureRestartUs = 0;
   bool dxgiCaptureStarted = false;
+  bool gdiCaptureStarted = false;
   std::string dxgiFallbackReason;
+  std::string gdiFallbackReason;
 
   std::mutex captureResourceMu;
   std::atomic<uint32_t> captureSizeChangePending{0};
@@ -4206,6 +4254,10 @@ int main(int argc, char** argv) {
       dxgiCaptureSession.Stop();
       dxgiCaptureStarted = false;
     }
+    if (gdiCaptureStarted) {
+      gdiCaptureProcess.Stop();
+      gdiCaptureStarted = false;
+    }
     try {
       if (pool) {
         pool.FrameArrived(token);
@@ -4341,6 +4393,70 @@ int main(int argc, char** argv) {
           captureSessionReady.store(true, std::memory_order_release);
           captureSizeChangePending.store(0, std::memory_order_release);
           std::cout << "[native-video-host] desktop_backend=dxgi capture-started=1\n";
+          return true;
+        }
+      }
+      if (!captureWindowModeActive && activeDesktopBackend == DesktopCaptureBackend::Gdi) {
+        GdiCaptureProcessConfig config;
+        config.width = newW;
+        config.height = newH;
+        const uint32_t gdiDefaultFps =
+            activeFps >= 50 ? std::min<uint32_t>(120u, activeFps + 4u) : activeFps;
+        config.fps = env_u32_clamped("REMOTE60_GDI_CAPTURE_FPS",
+                                     gdiDefaultFps, 1, 120);
+        config.captureLayeredWindows = env_truthy("REMOTE60_GDI_CAPTURE_LAYERED");
+        std::string gdiDetail;
+        const bool started = gdiCaptureProcess.Start(
+            config,
+            [&](std::shared_ptr<std::vector<uint8_t>> pixels, uint32_t width,
+                uint32_t height, uint32_t stride, uint64_t captureQpcUs,
+                uint64_t captureCopyUs, uint64_t parentCopyUs) {
+              if (stop.load() || !streamControlActive.load(std::memory_order_acquire)) return;
+              const uint64_t callbackUs = qpc_now_us();
+              remote60::native_poc::CaptureFrameMeta meta{};
+              meta.width = width;
+              meta.height = height;
+              meta.callbackUs = callbackUs;
+              meta.captureUs = captureQpcUs;
+              meta.captureAgeAtCallbackUs =
+                  callbackUs >= captureQpcUs ? callbackUs - captureQpcUs : 0;
+              meta.submitCopyUs = captureCopyUs;
+              meta.streamGeneration =
+                  captureStreamGenerationState.load(std::memory_order_acquire);
+              capturePublishFn(std::move(pixels), width, height, stride, meta,
+                               0, 0, parentCopyUs);
+            },
+            [&](const std::string&, const std::string& message) {
+              std::cout << "[native-video-host] " << message << "\n";
+            },
+            [&](const std::string& reason) {
+              gdiFallbackReason = reason;
+              gdiFallbackRequested.store(true, std::memory_order_release);
+            },
+            &gdiDetail);
+        if (!started) {
+          std::cout << "[native-video-host] fallback_reason=" << gdiDetail << "\n";
+          activeDesktopBackend = DesktopCaptureBackend::Wgc;
+          auto refreshedItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(gdi-fallback)");
+          if (!refreshedItem) return false;
+          item = refreshedItem;
+          newSize = item.Size();
+          newW = static_cast<uint32_t>(newSize.Width);
+          newH = static_cast<uint32_t>(newSize.Height);
+          if (newW < 2 || newH < 2) return false;
+          if (!create_staging(newW, newH)) return false;
+          {
+            std::lock_guard<std::mutex> lk(captureResourceMu);
+            captureSize = newSize;
+            captureWidth = newW;
+            captureHeight = newH;
+          }
+        } else {
+          gdiCaptureStarted = true;
+          captureSessionStartedUs = qpc_now_us();
+          captureSessionReady.store(true, std::memory_order_release);
+          captureSizeChangePending.store(0, std::memory_order_release);
+          std::cout << "[native-video-host] desktop_backend=gdi capture-started=1 processIsolated=1\n";
           return true;
         }
       }
@@ -4899,6 +5015,21 @@ int main(int argc, char** argv) {
         break;
       }
     }
+    if (gdiFallbackRequested.exchange(false, std::memory_order_acq_rel) &&
+        !captureWindowModeActive.load(std::memory_order_acquire)) {
+      if (gdiCaptureStarted) {
+        gdiCaptureProcess.Stop();
+        gdiCaptureStarted = false;
+      }
+      activeDesktopBackend = DesktopCaptureBackend::Wgc;
+      std::cout << "[native-video-host] fallback_reason="
+                << (gdiFallbackReason.empty() ? "gdi_runtime_fallback" : gdiFallbackReason)
+                << "\n";
+      if (!restart_capture_session()) {
+        std::cerr << "[native-video-host] GDI capture fallback restart failed\n";
+        break;
+      }
+    }
     if (useH264 && runtimeTunePending.exchange(false, std::memory_order_acq_rel)) {
       const uint32_t reqSeq = runtimeTuneSeq.load(std::memory_order_acquire);
       uint32_t targetBitrate = runtimeTuneBitrate.load(std::memory_order_acquire);
@@ -4925,6 +5056,16 @@ int main(int argc, char** argv) {
         abrModeratePressureSeconds = 0;
         abrSeverePressureSeconds = 0;
         forceKeyNext = true;
+        if (fpsChanged && !captureWindowModeActive.load(std::memory_order_acquire) &&
+            activeDesktopBackend == DesktopCaptureBackend::Gdi) {
+          if (!restart_capture_session()) {
+            std::cerr << "[native-video-host][control] GDI fps restart failed seq="
+                      << reqSeq << "\n";
+            break;
+          }
+          ++captureRestartCount;
+          flush_capture_pipeline_state("gdi-fps-change");
+        }
         std::cout << "[native-video-host][control] runtime-config-applied seq=" << reqSeq
                   << " bitrate=" << activeBitrate
                   << " keyint=" << activeKeyint
@@ -5167,7 +5308,12 @@ int main(int argc, char** argv) {
       }
     }
     if (captureSessionReady.load(std::memory_order_acquire) &&
-        streamControlActive.load(std::memory_order_acquire)) {
+        streamControlActive.load(std::memory_order_acquire) &&
+        !captureWindowModeActive.load(std::memory_order_acquire) &&
+        activeDesktopBackend == DesktopCaptureBackend::Gdi) {
+      // GDI is clocked and must publish continuously. WGC/DXGI are change-driven and can
+      // legitimately stay silent on a static desktop, so callback silence is not a stall for
+      // those backends and must never trigger a restart loop.
       const uint64_t lastCbUs = lastCallbackUs.load(std::memory_order_acquire);
       const uint64_t sessionStartUs = captureSessionStartedUs;
       const uint64_t stallBaseUs = (lastCbUs > 0) ? lastCbUs : sessionStartUs;
@@ -5651,19 +5797,8 @@ int main(int argc, char** argv) {
         scaleUs = (scaleDoneUs >= scaleStartUs) ? (scaleDoneUs - scaleStartUs) : 0;
       }
 
-      std::vector<uint8_t> nv12;
-      if (!wantSurfaceEncode) {
-        const uint64_t nv12StartUs = qpc_now_us();
-        if (!bgra_to_nv12(encodeSrc, encodeSrcW, encodeSrcH, encodeSrcStride, &nv12) || nv12.empty()) {
-          continue;
-        }
-        const uint64_t nv12DoneUs = qpc_now_us();
-        nv12Us = (nv12DoneUs >= nv12StartUs) ? (nv12DoneUs - nv12StartUs) : 0;
-        preEncodePrepUs = (nv12DoneUs >= preEncodeStartUs) ? (nv12DoneUs - preEncodeStartUs) : 0;
-      } else {
-        const uint64_t prepDoneUs = qpc_now_us();
-        preEncodePrepUs = (prepDoneUs >= preEncodeStartUs) ? (prepDoneUs - preEncodeStartUs) : 0;
-      }
+      const uint64_t prepDoneUs = qpc_now_us();
+      preEncodePrepUs = (prepDoneUs >= preEncodeStartUs) ? (prepDoneUs - preEncodeStartUs) : 0;
 
       const uint64_t beforeEncodeUs = qpc_now_us();
       const uint64_t frameAgeBeforeEncodeUs =
@@ -5725,6 +5860,7 @@ int main(int argc, char** argv) {
               const uint64_t avgUs = surfaceEncodeProbeSumUs / surfaceEncodeProbeCount;
               if (avgUs > 16000) {
                 surfaceEncodeHealthy = false;
+                captureReadback.SetNv12Enabled(false);
                 std::cout << "[native-video-host] nv12 surface encode too slow avgUs=" << avgUs
                           << " backend=" << encoder.backend_name()
                           << "; reverting to cpu nv12\n";
@@ -5739,19 +5875,25 @@ int main(int argc, char** argv) {
             // One rejection turns the path off for the session; this frame is dropped and
             // the next one takes the CPU route. Its slot is released at the next loop top.
             surfaceEncodeHealthy = false;
+            captureReadback.SetNv12Enabled(false);
             std::cout << "[native-video-host] nv12 surface encode rejected backend="
                       << encoder.backend_name() << "; falling back to cpu nv12\n";
             continue;
           }
         }
        if (!surfaceEncoded &&
-           !encoder.encode_frame(nv12, forceKeyFrame, static_cast<int64_t>(encodeInputUs) * 10, &units,
-                                 &encodeStats)) {
+           !encoder.encode_frame_bgra(encodeSrc, encodeSrcW, encodeSrcH, encodeSrcStride,
+                                      forceKeyFrame, static_cast<int64_t>(encodeInputUs) * 10,
+                                      &units, &encodeStats)) {
         ++encodeFailCount;
         if ((encodeFailCount % 60) == 1) {
           std::cout << "[native-video-host] encode failed count=" << encodeFailCount << "\n";
         }
         continue;
+      }
+      if (!surfaceEncoded) {
+        nv12Us = encodeStats.colorConvertUs;
+        preEncodePrepUs += nv12Us;
       }
       encoderOutputSamplesTotal += encodeStats.processOutputSamples;
       while (!nv12PendingReleases.empty() &&
@@ -5991,7 +6133,8 @@ int main(int argc, char** argv) {
         ++encodedFrames;
         sentBytes += hdr.payloadSize;
         if (!countedRawForInput) {
-          rawEquivalentBytes += static_cast<uint64_t>(nv12.size());
+          rawEquivalentBytes +=
+              static_cast<uint64_t>(activeEncodeW) * static_cast<uint64_t>(activeEncodeH) * 3 / 2;
           countedRawForInput = true;
         }
         if ((hdr.flags & 1u) != 0) {
@@ -6010,7 +6153,7 @@ int main(int argc, char** argv) {
           const uint64_t auTsFromOutput = au.sampleTimeFromOutput ? 1ull : 0ull;
           const uint64_t auTsSkewUs = (captureToAuSignedDeltaUs >= 0) ? static_cast<uint64_t>(captureToAuSignedDeltaUs)
                                                                      : static_cast<uint64_t>(-captureToAuSignedDeltaUs);
-          const uint64_t encUs = (hdr.encodeEndQpcUs >= hdr.encodeStartQpcUs) ? (hdr.encodeEndQpcUs - hdr.encodeStartQpcUs) : 0;
+          const uint64_t encUs = (encodeSpanUs >= nv12Us) ? (encodeSpanUs - nv12Us) : 0;
           const uint64_t e2sUs = (hdr.sendQpcUs >= hdr.encodeEndQpcUs) ? (hdr.sendQpcUs - hdr.encodeEndQpcUs) : 0;
           const char* encBackendName = encoder.backend_name();
           const uint64_t encApiPathCode = encoder_api_path_code(encBackendName);
@@ -6113,7 +6256,7 @@ int main(int argc, char** argv) {
         const uint64_t auTsFromOutput = au.sampleTimeFromOutput ? 1ull : 0ull;
         const uint64_t auTsSkewUs = (captureToAuSignedDeltaUs >= 0) ? static_cast<uint64_t>(captureToAuSignedDeltaUs)
                                                                    : static_cast<uint64_t>(-captureToAuSignedDeltaUs);
-        const uint64_t encUs = (hdr.encodeEndQpcUs >= hdr.encodeStartQpcUs) ? (hdr.encodeEndQpcUs - hdr.encodeStartQpcUs) : 0;
+        const uint64_t encUs = (encodeSpanUs >= nv12Us) ? (encodeSpanUs - nv12Us) : 0;
         const uint64_t e2sUs = (hdr.sendQpcUs >= hdr.encodeEndQpcUs) ? (hdr.sendQpcUs - hdr.encodeEndQpcUs) : 0;
         const uint64_t pipeUs = (hdr.sendQpcUs >= hdr.captureQpcUs) ? (hdr.sendQpcUs - hdr.captureQpcUs) : 0;
         const char* encBackendName = encoder.backend_name();
@@ -6243,12 +6386,12 @@ int main(int argc, char** argv) {
            streamControlActive.load(std::memory_order_acquire) &&
            callbackFramesPerSec == 0) ? 1ULL : 0ULL;
       idleHoldTotal += idleHoldPerSec;
-      const bool desktopDxgiLowPushRestartEnabled =
-          !captureWindowModeActive && activeDesktopBackend != DesktopCaptureBackend::Dxgi;
+      const bool gdiLowPushFallbackEnabled =
+          !captureWindowModeActive && activeDesktopBackend == DesktopCaptureBackend::Gdi;
       if (useH264 &&
           captureSessionReady.load(std::memory_order_acquire) &&
           streamControlActive.load(std::memory_order_acquire) &&
-          desktopDxgiLowPushRestartEnabled) {
+          gdiLowPushFallbackEnabled) {
         const bool warmupDone =
             (captureInputStallWarmupSec == 0 ||
              t >= (startUs + static_cast<uint64_t>(captureInputStallWarmupSec) * 1000000ULL));
@@ -6263,6 +6406,15 @@ int main(int argc, char** argv) {
                t >= (lastCaptureRestartUs + kCaptureCallbackRestartCooldownUs));
           if (captureInputLowPushStreakSec >= captureInputStallConsecutiveSec && restartCooldownDone) {
             lastCaptureRestartUs = t;
+            const bool fallbackFromGdi =
+                !captureWindowModeActive && activeDesktopBackend == DesktopCaptureBackend::Gdi;
+            if (fallbackFromGdi) {
+              activeDesktopBackend = DesktopCaptureBackend::Wgc;
+              gdiFallbackReason = "gdi_low_capture_rate";
+              std::cout << "[native-video-host] fallback_reason=" << gdiFallbackReason
+                        << " callbackFramesPerSec=" << callbackFramesPerSec
+                        << " minPushPerSec=" << captureInputMinPushPerSec << "\n";
+            }
             const bool restarted = restart_capture_session();
             if (restarted) {
               ++captureRestartCount;
@@ -6273,7 +6425,8 @@ int main(int argc, char** argv) {
               resetHostTimelineAnchors();
               forceKeyNext = true;
               captureInputLowPushStreakSec = 0;
-              std::cout << "[native-video-host] capture session restarted reason=capture-input-stall"
+              std::cout << "[native-video-host] capture session restarted reason="
+                        << (fallbackFromGdi ? "gdi-low-push-fallback" : "capture-input-stall")
                         << " restartCount=" << captureRestartCount
                         << " captureDeadRestartCount=" << captureDeadRestartCount
                         << " callbackFramesPerSec=" << callbackFramesPerSec

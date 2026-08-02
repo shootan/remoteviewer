@@ -313,7 +313,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private enum class DesktopCaptureBackendOption(val code: Int, val label: String) {
         DXGI(1, "DXGI"),
-        WGC(2, "WGC");
+        WGC(2, "WGC"),
+        GDI(3, "GDI");
 
         companion object {
             fun fromCode(code: Int): DesktopCaptureBackendOption =
@@ -408,6 +409,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var settingsFpsInput: EditText
     private lateinit var settingsDesktopBackendDxgiButton: Button
     private lateinit var settingsDesktopBackendWgcButton: Button
+    private lateinit var settingsDesktopBackendGdiButton: Button
     private lateinit var settingsApplyButton: Button
     private lateinit var settingsAppliedText: TextView
     private lateinit var viewerControlsBar: LinearLayout
@@ -423,6 +425,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var viewerLoadingPanel: View
     private lateinit var viewerLoadingText: TextView
     private lateinit var viewerImeCaptureView: ImeCaptureView
+    private lateinit var viewerInputPreviewText: TextView
     private lateinit var viewerModeBanner: TextView
     private lateinit var videoTextureView: TextureView
     private lateinit var targetListAdapter: TargetCardAdapter
@@ -685,6 +688,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         settingsFpsInput = findViewById(R.id.settingsFpsInput)
         settingsDesktopBackendDxgiButton = findViewById(R.id.settingsDesktopBackendDxgiButton)
         settingsDesktopBackendWgcButton = findViewById(R.id.settingsDesktopBackendWgcButton)
+        settingsDesktopBackendGdiButton = findViewById(R.id.settingsDesktopBackendGdiButton)
         settingsApplyButton = findViewById(R.id.settingsApplyButton)
         settingsAppliedText = findViewById(R.id.settingsAppliedText)
         viewerControlsBar = findViewById(R.id.viewerControlsBar)
@@ -719,7 +723,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerLoadingPanel = findViewById(R.id.viewerLoadingPanel)
         viewerLoadingText = findViewById(R.id.viewerLoadingText)
         viewerImeCaptureView = findViewById(R.id.viewerImeCaptureView)
+        viewerInputPreviewText = findViewById(R.id.viewerInputPreviewText)
         videoTextureView = findViewById(R.id.videoTextureView)
+
+        findViewById<View>(R.id.viewerVideoFrame).addOnLayoutChangeListener {
+                view, left, _, right, _, _, _, _, _ ->
+            val available = (right - left - dp(24f)).coerceAtLeast(1)
+            viewerInputPreviewText.maxWidth =
+                (view.width * 0.62f).roundToInt().coerceAtMost(available).coerceAtLeast(1)
+        }
 
         videoTextureView.surfaceTextureListener = this
         videoTextureView.isOpaque = true
@@ -746,6 +758,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 override fun onSpecialKey(keyCode: Int, action: Int) {
                     val windowsVk = mapAndroidKeyCodeToWindowsVk(keyCode) ?: return
                     queueViewerSpecialKey(windowsVk, action)
+                }
+
+                override fun onPreviewTextChanged(text: CharSequence) {
+                    viewerInputPreviewText.post {
+                        val visibleText = text.toString().replace('\n', ' ').replace('\r', ' ')
+                        viewerInputPreviewText.text = visibleText
+                        viewerInputPreviewText.visibility =
+                            if (visibleText.isBlank()) View.GONE else View.VISIBLE
+                    }
                 }
             }
 
@@ -864,6 +885,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         settingsDesktopBackendWgcButton.setOnClickListener {
             requestedDesktopBackend = DesktopCaptureBackendOption.WGC
+            updateDesktopBackendButtons()
+        }
+        settingsDesktopBackendGdiButton.setOnClickListener {
+            requestedDesktopBackend = DesktopCaptureBackendOption.GDI
             updateDesktopBackendButtons()
         }
 
@@ -1168,11 +1193,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun updateDesktopBackendButtons() {
-        val dxgiSelected = requestedDesktopBackend == DesktopCaptureBackendOption.DXGI
         settingsDesktopBackendDxgiButton.text =
-            if (dxgiSelected) "[DXGI]" else "DXGI"
+            if (requestedDesktopBackend == DesktopCaptureBackendOption.DXGI) "[DXGI]" else "DXGI"
         settingsDesktopBackendWgcButton.text =
-            if (dxgiSelected) "WGC" else "[WGC]"
+            if (requestedDesktopBackend == DesktopCaptureBackendOption.WGC) "[WGC]" else "WGC"
+        settingsDesktopBackendGdiButton.text =
+            if (requestedDesktopBackend == DesktopCaptureBackendOption.GDI) "[GDI]" else "GDI"
     }
 
     private fun syncConnectedClientPreferences(isConnected: Boolean) {
@@ -2141,6 +2167,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             return
         }
         diagnosticsLog.log("viewer_keyboard_tap", "scene=$currentScene")
+        viewerImeCaptureView.resetPreviewState()
         viewerImeCaptureView.requestFocus()
         viewerImeCaptureView.post {
             val imm = getSystemService(InputMethodManager::class.java)
@@ -2154,6 +2181,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val imm = getSystemService(InputMethodManager::class.java)
         imm?.hideSoftInputFromWindow(viewerImeCaptureView.windowToken, 0)
         viewerImeCaptureView.clearFocus()
+        viewerImeCaptureView.resetPreviewState()
         if (hadFocus) {
             diagnosticsLog.log("viewer_keyboard_hide", "reason=$reason")
         }
@@ -2355,6 +2383,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             // target app's own TranslateMessage synthesises WM_CHAR from it — sending the
             // character here as well doubled every keystroke ("hello" -> "hheelllloo").
             if (vk != null && queueViewerSpecialKey(vk, event.action)) {
+                if (::viewerImeCaptureView.isInitialized && viewerImeCaptureView.hasFocus()) {
+                    viewerImeCaptureView.recordHardwareKeyEvent(event)
+                }
                 return true
             }
         }

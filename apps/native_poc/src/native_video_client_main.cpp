@@ -530,6 +530,9 @@ struct SharedFrame {
   uint64_t streamGeneration = 0;
   uint64_t version = 0;
   std::shared_ptr<std::vector<uint8_t>> bytes;
+  Microsoft::WRL::ComPtr<IMFSample> surfaceSample;
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> surfaceTexture;
+  uint32_t surfaceSubresource = 0;
 };
 
 SharedFrame gFrame;
@@ -1463,6 +1466,7 @@ struct Nv12D3dRenderer {
   Microsoft::WRL::ComPtr<ID3D11VertexShader> vs;
   Microsoft::WRL::ComPtr<ID3D11PixelShader> ps;
   Microsoft::WRL::ComPtr<ID3D11SamplerState> sampler;
+  Microsoft::WRL::ComPtr<ID3D11Buffer> uvConstants;
   Microsoft::WRL::ComPtr<ID3D11Texture2D> texY;
   Microsoft::WRL::ComPtr<ID3D11Texture2D> texUV;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srvY;
@@ -1523,12 +1527,14 @@ struct Nv12D3dRenderer {
         "  return o;"
         "}";
     static const char* kPsSrc =
+        "cbuffer FrameConstants : register(b0) { float4 uvRect; };"
         "Texture2D texY : register(t0);"
         "Texture2D texUV : register(t1);"
         "SamplerState smp : register(s0);"
         "float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {"
-        "  float y = texY.Sample(smp, uv).r;"
-        "  float2 c = texUV.Sample(smp, uv).rg;"
+        "  float2 sampleUv = uvRect.xy + uv * uvRect.zw;"
+        "  float y = texY.Sample(smp, sampleUv).r;"
+        "  float2 c = texUV.Sample(smp, sampleUv).rg;"
         "  float Y = max(0.0, y - 16.0 / 255.0);"
         "  float U = c.x - 128.0 / 255.0;"
         "  float V = c.y - 128.0 / 255.0;"
@@ -1564,6 +1570,12 @@ struct Nv12D3dRenderer {
     sdSamp.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
     sdSamp.MaxLOD = D3D11_FLOAT32_MAX;
     if (FAILED(device->CreateSamplerState(&sdSamp, &sampler))) return false;
+
+    D3D11_BUFFER_DESC constantsDesc{};
+    constantsDesc.ByteWidth = 16;
+    constantsDesc.Usage = D3D11_USAGE_DEFAULT;
+    constantsDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    if (FAILED(device->CreateBuffer(&constantsDesc, nullptr, &uvConstants))) return false;
 
     ready = ensure_rtv(hwnd);
     return ready;
@@ -1649,6 +1661,111 @@ struct Nv12D3dRenderer {
     return true;
   }
 
+  bool draw(HWND hwnd, const RECT& destRect, ID3D11ShaderResourceView* ySrv,
+            ID3D11ShaderResourceView* uvSrv, const float uvRect[4],
+            Nv12RenderTelemetry* telemetry) {
+    if (!ensure_rtv(hwnd) || !ySrv || !uvSrv || !uvConstants) {
+      if (telemetry) telemetry->failStage = "draw_args";
+      return false;
+    }
+    context->UpdateSubresource(uvConstants.Get(), 0, nullptr, uvRect, 0, 0);
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    RECT drawRect = destRect;
+    if (drawRect.right <= drawRect.left || drawRect.bottom <= drawRect.top) drawRect = rc;
+    D3D11_VIEWPORT vp{};
+    vp.TopLeftX = static_cast<float>(drawRect.left);
+    vp.TopLeftY = static_cast<float>(drawRect.top);
+    vp.Width = static_cast<float>(std::max<LONG>(1, drawRect.right - drawRect.left));
+    vp.Height = static_cast<float>(std::max<LONG>(1, drawRect.bottom - drawRect.top));
+    vp.MinDepth = 0.0f;
+    vp.MaxDepth = 1.0f;
+
+    ID3D11RenderTargetView* rtvs[] = {rtv.Get()};
+    context->OMSetRenderTargets(1, rtvs, nullptr);
+    context->RSSetViewports(1, &vp);
+    const float clearColor[4] = {0, 0, 0, 1};
+    context->ClearRenderTargetView(rtv.Get(), clearColor);
+    context->IASetInputLayout(nullptr);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context->VSSetShader(vs.Get(), nullptr, 0);
+    context->PSSetShader(ps.Get(), nullptr, 0);
+    ID3D11ShaderResourceView* srvs[] = {ySrv, uvSrv};
+    context->PSSetShaderResources(0, 2, srvs);
+    ID3D11Buffer* constants[] = {uvConstants.Get()};
+    context->PSSetConstantBuffers(0, 1, constants);
+    ID3D11SamplerState* samplers[] = {sampler.Get()};
+    context->PSSetSamplers(0, 1, samplers);
+    const uint64_t drawStartUs = qpc_now_us();
+    context->Draw(3, 0);
+    ID3D11ShaderResourceView* nullSrvs[] = {nullptr, nullptr};
+    context->PSSetShaderResources(0, 2, nullSrvs);
+    const uint64_t drawEndUs = qpc_now_us();
+    if (telemetry) telemetry->drawUs = drawEndUs - drawStartUs;
+
+    const uint64_t presentStartUs = qpc_now_us();
+    const HRESULT hr = swapChain->Present(0, 0);
+    const uint64_t presentDoneUs = qpc_now_us();
+    if (telemetry) telemetry->presentBlockUs = presentDoneUs - presentStartUs;
+    if (!(SUCCEEDED(hr) || hr == DXGI_STATUS_OCCLUDED) && telemetry) telemetry->failStage = "present";
+    return SUCCEEDED(hr) || hr == DXGI_STATUS_OCCLUDED;
+  }
+
+  bool render_surface(HWND hwnd, const RECT& destRect, ID3D11Texture2D* texture,
+                      uint32_t subresource, uint32_t codedW, uint32_t codedH,
+                      uint32_t visLeft, uint32_t visTop, uint32_t w, uint32_t h,
+                      Nv12RenderTelemetry* telemetry) {
+    if (telemetry) *telemetry = Nv12RenderTelemetry{};
+    if (!ready || !texture || !codedW || !codedH || !w || !h) {
+      if (telemetry) telemetry->failStage = "surface_args";
+      return false;
+    }
+    D3D11_TEXTURE2D_DESC td{};
+    texture->GetDesc(&td);
+    if (td.Format != DXGI_FORMAT_NV12 || subresource >= td.MipLevels * td.ArraySize ||
+        visLeft + w > codedW || visTop + h > codedH) {
+      if (telemetry) telemetry->failStage = "surface_desc";
+      return false;
+    }
+    Microsoft::WRL::ComPtr<ID3D11Device> textureDevice;
+    texture->GetDevice(&textureDevice);
+    if (textureDevice.Get() != device.Get()) {
+      if (telemetry) telemetry->failStage = "surface_device";
+      return false;
+    }
+    const UINT mipSlice = subresource % td.MipLevels;
+    const UINT arraySlice = subresource / td.MipLevels;
+    auto make_view = [&](DXGI_FORMAT format,
+                         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>* out) -> bool {
+      D3D11_SHADER_RESOURCE_VIEW_DESC desc{};
+      desc.Format = format;
+      if (td.ArraySize > 1) {
+        desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+        desc.Texture2DArray.MostDetailedMip = mipSlice;
+        desc.Texture2DArray.MipLevels = 1;
+        desc.Texture2DArray.FirstArraySlice = arraySlice;
+        desc.Texture2DArray.ArraySize = 1;
+      } else {
+        desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        desc.Texture2D.MostDetailedMip = mipSlice;
+        desc.Texture2D.MipLevels = 1;
+      }
+      return SUCCEEDED(device->CreateShaderResourceView(texture, &desc, out->ReleaseAndGetAddressOf()));
+    };
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ySrv;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> uvSrv;
+    if (!make_view(DXGI_FORMAT_R8_UNORM, &ySrv) ||
+        !make_view(DXGI_FORMAT_R8G8_UNORM, &uvSrv)) {
+      if (telemetry) telemetry->failStage = "surface_srv";
+      return false;
+    }
+    const float uvRect[4] = {static_cast<float>(visLeft) / codedW,
+                             static_cast<float>(visTop) / codedH,
+                             static_cast<float>(w) / codedW,
+                             static_cast<float>(h) / codedH};
+    return draw(hwnd, destRect, ySrv.Get(), uvSrv.Get(), uvRect, telemetry);
+  }
+
   /**
    * Draws the visible rect (w x h at visLeft/visTop) out of a coded NV12 plane. The textures
    * are sized to the visible picture, so the shader never samples the coded padding rows --
@@ -1716,48 +1833,8 @@ struct Nv12D3dRenderer {
     context->Unmap(texUV.Get(), 0);
     if (telemetry) telemetry->uploadUVUs = qpc_now_us() - uploadUVStartUs;
 
-    RECT rc{};
-    GetClientRect(hwnd, &rc);
-    RECT drawRect = destRect;
-    if (drawRect.right <= drawRect.left || drawRect.bottom <= drawRect.top) {
-      drawRect = rc;
-    }
-    D3D11_VIEWPORT vp{};
-    vp.TopLeftX = static_cast<float>(drawRect.left);
-    vp.TopLeftY = static_cast<float>(drawRect.top);
-    vp.Width = static_cast<float>(std::max<LONG>(1, drawRect.right - drawRect.left));
-    vp.Height = static_cast<float>(std::max<LONG>(1, drawRect.bottom - drawRect.top));
-    vp.MinDepth = 0.0f;
-    vp.MaxDepth = 1.0f;
-
-    ID3D11RenderTargetView* rtvs[] = {rtv.Get()};
-    context->OMSetRenderTargets(1, rtvs, nullptr);
-    context->RSSetViewports(1, &vp);
-    const float clearColor[4] = {0, 0, 0, 1};
-    context->ClearRenderTargetView(rtv.Get(), clearColor);
-    context->IASetInputLayout(nullptr);
-    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    context->VSSetShader(vs.Get(), nullptr, 0);
-    context->PSSetShader(ps.Get(), nullptr, 0);
-    ID3D11ShaderResourceView* srvs[] = {srvY.Get(), srvUV.Get()};
-    context->PSSetShaderResources(0, 2, srvs);
-    ID3D11SamplerState* samplers[] = {sampler.Get()};
-    context->PSSetSamplers(0, 1, samplers);
-    const uint64_t drawStartUs = qpc_now_us();
-    context->Draw(3, 0);
-    ID3D11ShaderResourceView* nullSrvs[] = {nullptr, nullptr};
-    context->PSSetShaderResources(0, 2, nullSrvs);
-    const uint64_t drawEndUs = qpc_now_us();
-    if (telemetry) telemetry->drawUs = (drawEndUs >= drawStartUs) ? (drawEndUs - drawStartUs) : 0;
-
-    const uint64_t presentStartUs = qpc_now_us();
-    HRESULT hr = swapChain->Present(0, 0);
-    const uint64_t presentDoneUs = qpc_now_us();
-    if (telemetry) telemetry->presentBlockUs = (presentDoneUs >= presentStartUs) ? (presentDoneUs - presentStartUs) : 0;
-    if (!(SUCCEEDED(hr) || hr == DXGI_STATUS_OCCLUDED) && telemetry) {
-      telemetry->failStage = "present";
-    }
-    return SUCCEEDED(hr) || hr == DXGI_STATUS_OCCLUDED;
+    const float uvRect[4] = {0, 0, 1, 1};
+    return draw(hwnd, destRect, srvY.Get(), srvUV.Get(), uvRect, telemetry);
   }
 };
 
@@ -2228,6 +2305,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       static bool hasPresentedAtLeastOneFrame = false;
 
       std::shared_ptr<std::vector<uint8_t>> local;
+      Microsoft::WRL::ComPtr<IMFSample> localSurfaceSample;
+      Microsoft::WRL::ComPtr<ID3D11Texture2D> localSurfaceTexture;
+      uint32_t localSurfaceSubresource = 0;
       SharedFrame::PixelFormat localFormat = SharedFrame::PixelFormat::Unknown;
       uint32_t w = 0, h = 0;
       uint32_t codedW = 0, codedH = 0;
@@ -2245,8 +2325,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       uint64_t frameVersion = 0;
       {
         std::lock_guard<std::mutex> lk(gFrame.mu);
-        if (gFrame.bytes && !gFrame.bytes->empty()) {
+        if ((gFrame.bytes && !gFrame.bytes->empty()) || gFrame.surfaceTexture) {
           local = gFrame.bytes;
+          localSurfaceSample = gFrame.surfaceSample;
+          localSurfaceTexture = gFrame.surfaceTexture;
+          localSurfaceSubresource = gFrame.surfaceSubresource;
           localFormat = gFrame.format;
           w = gFrame.width;
           h = gFrame.height;
@@ -2271,7 +2354,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       Nv12RenderTelemetry renderTelemetry{};
       const char* renderPath = "none";
       const char* fallbackReason = "none";
-      if (!pickerVisible && local && w > 0 && h > 0) {
+      if (!pickerVisible && (local || localSurfaceTexture) && w > 0 && h > 0) {
         if (localFormat == SharedFrame::PixelFormat::Nv12) {
           if (!gNv12Renderer.ready) {
             if (!gNv12Renderer.init(hwnd)) {
@@ -2281,18 +2364,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
           }
           if (gNv12Renderer.ready) {
-            presented = gNv12Renderer.render(hwnd, contentRect, local->data(), codedW, codedH,
-                                             visL, visT, w, h, &renderTelemetry);
+            if (localSurfaceTexture) {
+              presented = gNv12Renderer.render_surface(
+                  hwnd, contentRect, localSurfaceTexture.Get(), localSurfaceSubresource,
+                  codedW, codedH, visL, visT, w, h, &renderTelemetry);
+            } else {
+              presented = gNv12Renderer.render(hwnd, contentRect, local->data(), codedW, codedH,
+                                               visL, visT, w, h, &renderTelemetry);
+            }
             if (presented) {
               ++gD3dPresentSuccessCount;
-              renderPath = "d3d_nv12";
+              renderPath = localSurfaceTexture ? "d3d_nv12_surface" : "d3d_nv12";
             } else {
               ++gD3dPresentFailCount;
               ++gFallbackRenderFailCount;
               fallbackReason = renderTelemetry.failStage;
             }
           }
-          if (!presented) {
+          if (!presented && local) {
             std::vector<uint8_t> bgra;
             if (nv12_to_bgra(local->data(), codedW, codedH, &bgra) && !bgra.empty()) {
               // The DIB carries the coded plane; the source rect and a row-offset base
@@ -2590,7 +2679,9 @@ int main(int argc, char** argv) {
   gOverlayConfig.udpSimDropPm = udpSimDropPm;
   gRuntimeTuneState.Reset(args.runtimeBitrate, args.runtimeKeyint);
   gControlConnected.store(false, std::memory_order_relaxed);
-  gCaptureOverviewMode.store(true, std::memory_order_relaxed);
+  const bool startInStreamView = env_truthy("REMOTE60_NATIVE_START_STREAM_VIEW");
+  gCaptureOverviewMode.store(!startInStreamView, std::memory_order_relaxed);
+  gWindowPickerVisible.store(!startInStreamView, std::memory_order_relaxed);
   gCaptureModeRequests.Reset();
   gWindowPanelState.Reset();
   gSuppressMouseUntilUs.store(0, std::memory_order_relaxed);
@@ -2625,12 +2716,31 @@ int main(int argc, char** argv) {
       return 11;
     }
     mfStarted = true;
-    D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
-    const HRESULT d3dHr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-                                            D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
-                                            D3D11_SDK_VERSION, &decD3dDevice, &fl, &decD3dContext);
-    if (SUCCEEDED(d3dHr) && decD3dDevice) {
-      (void)decoder.set_d3d11_device(decD3dDevice.Get());
+    // Supplying AMD's decoder with an external DXGI device manager can enter atidxx64's
+    // direct-surface path even when the caller later reads a CPU buffer. Keep the proven
+    // system-memory decoder path as the safe default; the zero-copy experiment is an
+    // explicit opt-in because affected drivers can TDR or access-violate in that path.
+    const bool enableDxgiDecodeSurface =
+        env_truthy("REMOTE60_NATIVE_DXGI_DECODE_SURFACE") &&
+        !env_truthy("REMOTE60_NATIVE_DISABLE_DXGI_DECODE_SURFACE");
+    if (enableDxgiDecodeSurface) {
+      // Decode and paint share one D3D11 device so an opt-in hardware-decoder NV12 surface
+      // can be sampled directly without a GPU->CPU copy and CPU->GPU upload.
+      if (!gNv12Renderer.ready) (void)gNv12Renderer.init(gHwnd);
+      if (gNv12Renderer.ready) {
+        decD3dDevice = gNv12Renderer.device;
+        decD3dContext = gNv12Renderer.context;
+        (void)decoder.set_d3d11_device(decD3dDevice.Get());
+      } else {
+        D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
+        const HRESULT d3dHr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                                                D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+                                                D3D11_SDK_VERSION, &decD3dDevice, &fl,
+                                                &decD3dContext);
+        if (SUCCEEDED(d3dHr) && decD3dDevice) {
+          (void)decoder.set_d3d11_device(decD3dDevice.Get());
+        }
+      }
     }
   }
 
@@ -3206,7 +3316,6 @@ int main(int argc, char** argv) {
       }
 
       if (!decoderReady || decoderW != h.width || decoderH != h.height) {
-        decoder.shutdown();
         if (!decoder.initialize(h.width, h.height, args.fpsHint)) {
           std::cerr << "[native-video-client] H264 decoder initialize failed size=" << h.width << "x" << h.height
                     << "\n";
@@ -3591,18 +3700,23 @@ int main(int argc, char** argv) {
       const uint64_t decodedCaptureUs =
           tsFromHeaderFallback ? h.captureQpcUs : static_cast<uint64_t>(decoded.sampleTimeHns / 10);
       const char* tsSource = tsFromMft ? "mft" : (tsFromInputFallback ? "input_fallback" : "header_fallback");
-      if (decoded.bytes.empty()) {
+      if (decoded.bytes.empty() && !decoded.surfaceTexture) {
         ++skippedQueued;
         waitForKeyFrame = true;
         return true;
       }
-      const uint64_t decodedPayloadBytes = static_cast<uint64_t>(decoded.bytes.size());
+      const uint64_t decodedPayloadBytes = decoded.bytes.empty()
+          ? (static_cast<uint64_t>(decoded.width) * decoded.height * 3 / 2)
+          : static_cast<uint64_t>(decoded.bytes.size());
       const uint64_t decodeEndUs = qpc_now_us();
-      auto frameNv12 = std::make_shared<std::vector<uint8_t>>(std::move(decoded.bytes));
-      if (!frameNv12 || frameNv12->empty()) {
-        ++skippedQueued;
-        waitForKeyFrame = true;
-        return true;
+      std::shared_ptr<std::vector<uint8_t>> frameNv12;
+      if (!decoded.bytes.empty()) {
+        frameNv12 = std::make_shared<std::vector<uint8_t>>(std::move(decoded.bytes));
+        if (!frameNv12 || frameNv12->empty()) {
+          ++skippedQueued;
+          waitForKeyFrame = true;
+          return true;
+        }
       }
 
       const uint64_t nowUs = qpc_now_us();
@@ -3636,6 +3750,9 @@ int main(int argc, char** argv) {
         gFrame.streamGeneration = h.streamGeneration;
         gFrame.version = prevVersion + 1;
         gFrame.bytes = std::move(frameNv12);
+        gFrame.surfaceSample = std::move(decoded.surfaceSample);
+        gFrame.surfaceTexture = std::move(decoded.surfaceTexture);
+        gFrame.surfaceSubresource = decoded.surfaceSubresource;
       }
       if (gHwnd) {
         if (!gPaintQueued.exchange(true)) {
@@ -3924,6 +4041,9 @@ int main(int argc, char** argv) {
           gFrame.streamGeneration = h.streamGeneration;
           gFrame.version = prevVersion + 1;
           gFrame.bytes = std::move(frameBgra);
+          gFrame.surfaceSample.Reset();
+          gFrame.surfaceTexture.Reset();
+          gFrame.surfaceSubresource = 0;
         }
         if (gHwnd) {
           if (!gPaintQueued.exchange(true)) {
@@ -4072,6 +4192,12 @@ int main(int argc, char** argv) {
   if (recvThread.joinable()) recvThread.join();
 
   if (useH264) {
+    {
+      std::lock_guard<std::mutex> lk(gFrame.mu);
+      gFrame.surfaceSample.Reset();
+      gFrame.surfaceTexture.Reset();
+      gFrame.bytes.reset();
+    }
     decoder.shutdown();
     if (mfStarted) MFShutdown();
   }

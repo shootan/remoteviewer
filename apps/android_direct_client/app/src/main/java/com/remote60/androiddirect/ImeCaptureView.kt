@@ -30,12 +30,15 @@ class ImeCaptureView @JvmOverloads constructor(
         fun onCommitText(text: CharSequence)
         fun onDeleteBackward(count: Int)
         fun onSpecialKey(keyCode: Int, action: Int)
+        fun onPreviewTextChanged(text: CharSequence)
     }
 
     var listener: Listener? = null
 
     /** Text the host is currently showing for the in-progress composition. */
     private var composing: String = ""
+    /** Confirmed text retained locally so small remote text remains readable above the IME. */
+    private val previewCommitted = StringBuilder()
 
     init {
         isFocusable = true
@@ -43,6 +46,28 @@ class ImeCaptureView @JvmOverloads constructor(
     }
 
     override fun onCheckIsTextEditor(): Boolean = true
+
+    // Virtual keyboards normally use InputConnection, but accessibility tools and Android's
+    // synthetic keyboard inject directly into the focused View. Handle that route too so the
+    // remote keystroke and local preview stay consistent.
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_DEL) {
+            listener?.onDeleteBackward(1)
+            deletePreviewCodePoints(1)
+        } else {
+            finishPreviewComposition()
+            recordHardwareKeyEvent(event)
+            listener?.onSpecialKey(keyCode, KeyEvent.ACTION_DOWN)
+        }
+        return true
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode != KeyEvent.KEYCODE_DEL) {
+            listener?.onSpecialKey(keyCode, KeyEvent.ACTION_UP)
+        }
+        return true
+    }
 
     /** Host-visible length, in code points, because one backspace deletes one code point. */
     private fun codePointLength(s: String): Int =
@@ -70,11 +95,66 @@ class ImeCaptureView @JvmOverloads constructor(
         if (backspaces > 0) listener?.onDeleteBackward(backspaces)
         if (added.isNotEmpty()) listener?.onCommitText(added)
         composing = next
+        notifyPreviewChanged()
+    }
+
+    private fun notifyPreviewChanged() {
+        listener?.onPreviewTextChanged(previewCommitted.toString() + composing)
+    }
+
+    private fun trimPreviewToLimit() {
+        val maximumCodePoints = 160
+        val currentCodePoints = previewCommitted.codePointCount(0, previewCommitted.length)
+        if (currentCodePoints <= maximumCodePoints) return
+        val removeUntil = previewCommitted.offsetByCodePoints(0, currentCodePoints - maximumCodePoints)
+        previewCommitted.delete(0, removeUntil)
+    }
+
+    private fun finishPreviewComposition() {
+        if (composing.isNotEmpty()) {
+            previewCommitted.append(composing)
+            trimPreviewToLimit()
+            composing = ""
+            notifyPreviewChanged()
+        }
+    }
+
+    private fun deletePreviewCodePoints(count: Int) {
+        var remaining = count.coerceAtLeast(0)
+        while (remaining > 0 && previewCommitted.isNotEmpty()) {
+            val end = previewCommitted.length
+            val start = previewCommitted.offsetByCodePoints(end, -1)
+            previewCommitted.delete(start, end)
+            remaining--
+        }
+        notifyPreviewChanged()
+    }
+
+    /** Mirror printable keys from a USB/Bluetooth keyboard without sending them twice. */
+    fun recordHardwareKeyEvent(event: KeyEvent) {
+        if (event.action != KeyEvent.ACTION_DOWN) return
+        if (event.keyCode == KeyEvent.KEYCODE_DEL) {
+            deletePreviewCodePoints(1)
+            return
+        }
+        if (event.isCtrlPressed || event.isAltPressed || event.isMetaPressed) return
+        val codePoint = event.unicodeChar
+        if (codePoint <= 0 || Character.isISOControl(codePoint)) return
+        previewCommitted.appendCodePoint(codePoint)
+        trimPreviewToLimit()
+        notifyPreviewChanged()
     }
 
     /** Drop composition tracking; whatever is on the host stays there. */
     fun resetComposingState() {
+        finishPreviewComposition()
+    }
+
+    /** Clear only the phone-side preview; it never sends edits to the remote host. */
+    fun resetPreviewState() {
         composing = ""
+        previewCommitted.clear()
+        notifyPreviewChanged()
     }
 
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
@@ -89,14 +169,17 @@ class ImeCaptureView @JvmOverloads constructor(
                 EditorInfo.IME_ACTION_NONE
         outAttrs.initialSelStart = 0
         outAttrs.initialSelEnd = 0
-        composing = ""
+        finishPreviewComposition()
 
         return object : BaseInputConnection(this@ImeCaptureView, false) {
             override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
                 val value = text?.toString().orEmpty()
                 // A commit replaces whatever composition is on screen.
                 replaceComposing(value)
+                previewCommitted.append(value)
+                trimPreviewToLimit()
                 composing = ""
+                notifyPreviewChanged()
                 return true
             }
 
@@ -107,7 +190,7 @@ class ImeCaptureView @JvmOverloads constructor(
 
             override fun finishComposingText(): Boolean {
                 // The composed text stays on the host; stop tracking it as replaceable.
-                composing = ""
+                finishPreviewComposition()
                 return true
             }
 
@@ -119,13 +202,19 @@ class ImeCaptureView @JvmOverloads constructor(
                     // would remove characters twice.
                     return true
                 }
-                if (beforeLength > 0) listener?.onDeleteBackward(beforeLength)
+                if (beforeLength > 0) {
+                    listener?.onDeleteBackward(beforeLength)
+                    deletePreviewCodePoints(beforeLength)
+                }
                 return true
             }
 
             override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean {
                 if (composing.isNotEmpty()) return true
-                if (beforeLength > 0) listener?.onDeleteBackward(beforeLength)
+                if (beforeLength > 0) {
+                    listener?.onDeleteBackward(beforeLength)
+                    deletePreviewCodePoints(beforeLength)
+                }
                 return true
             }
 
@@ -134,17 +223,23 @@ class ImeCaptureView @JvmOverloads constructor(
                     // While composing, the IME decomposes the syllable itself and reports the
                     // result via setComposingText; a raw backspace here would double-delete.
                     if (composing.isNotEmpty()) return true
-                    if (event.action == KeyEvent.ACTION_DOWN) listener?.onDeleteBackward(1)
+                    if (event.action == KeyEvent.ACTION_DOWN) {
+                        listener?.onDeleteBackward(1)
+                        deletePreviewCodePoints(1)
+                    }
                     return true
                 }
                 // Any other key ends the composition on the host side.
-                if (event.action == KeyEvent.ACTION_DOWN) composing = ""
+                if (event.action == KeyEvent.ACTION_DOWN) {
+                    finishPreviewComposition()
+                    recordHardwareKeyEvent(event)
+                }
                 listener?.onSpecialKey(event.keyCode, event.action)
                 return true
             }
 
             override fun performEditorAction(actionCode: Int): Boolean {
-                composing = ""
+                finishPreviewComposition()
                 listener?.onSpecialKey(KeyEvent.KEYCODE_ENTER, KeyEvent.ACTION_DOWN)
                 listener?.onSpecialKey(KeyEvent.KEYCODE_ENTER, KeyEvent.ACTION_UP)
                 return true

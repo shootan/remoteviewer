@@ -13,6 +13,7 @@ namespace remote60::host {
 enum class DesktopCaptureBackend {
   Dxgi,
   Wgc,
+  Gdi,
 };
 
 struct DxgiDesktopCaptureConfig {

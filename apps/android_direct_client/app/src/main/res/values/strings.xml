@@ -16,11 +16,12 @@
     <string name="settings_title">Runtime Quality</string>
     <string name="settings_hint">Apply bitrate and FPS without restarting the host process.</string>
     <string name="settings_desktop_backend_label">Desktop Capture Backend</string>
-    <string name="settings_desktop_backend_hint">Choose DXGI or WGC for desktop mode only. Window-target capture remains WGC.</string>
+    <string name="settings_desktop_backend_hint">Choose DXGI, WGC, or isolated GDI for desktop mode. Window-target capture remains WGC.</string>
     <string name="settings_bitrate_hint">Bitrate Kbps</string>
     <string name="settings_fps_hint">FPS</string>
     <string name="settings_desktop_backend_dxgi">DXGI</string>
     <string name="settings_desktop_backend_wgc">WGC</string>
+    <string name="settings_desktop_backend_gdi">GDI</string>
     <string name="settings_apply_button">Apply</string>
     <string name="settings_apply_idle">Current request: none</string>
     <string name="viewer_back_button">LIST</string>

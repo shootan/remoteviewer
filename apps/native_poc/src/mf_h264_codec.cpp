@@ -16,6 +16,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <emmintrin.h>
 
 #include <windows.h>
 #ifdef min
@@ -274,6 +275,29 @@ bool sample_to_bytes(IMFSample* sample, std::vector<uint8_t>* out) {
   out->assign(src, src + curLen);
   buffer->Unlock();
   return !out->empty();
+}
+
+bool sample_to_dxgi_texture(IMFSample* sample, ID3D11Texture2D** outTexture,
+                            uint32_t* outSubresource) {
+  if (!sample || !outTexture || !outSubresource) return false;
+  *outTexture = nullptr;
+  *outSubresource = 0;
+  DWORD count = 0;
+  if (FAILED(sample->GetBufferCount(&count))) return false;
+  for (DWORD i = 0; i < count; ++i) {
+    Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
+    if (FAILED(sample->GetBufferByIndex(i, &buffer)) || !buffer) continue;
+    Microsoft::WRL::ComPtr<IMFDXGIBuffer> dxgiBuffer;
+    if (FAILED(buffer.As(&dxgiBuffer)) || !dxgiBuffer) continue;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+    if (FAILED(dxgiBuffer->GetResource(IID_PPV_ARGS(&texture))) || !texture) continue;
+    UINT subresource = 0;
+    if (FAILED(dxgiBuffer->GetSubresourceIndex(&subresource))) subresource = 0;
+    *outSubresource = subresource;
+    *outTexture = texture.Detach();
+    return true;
+  }
+  return false;
 }
 
 bool sample_to_nv12_bytes_from_2d_buffer(IMFSample* sample, uint32_t width, uint32_t height,
@@ -909,15 +933,18 @@ bool create_h264_decoder_transform(IMFTransform** outTransform, bool* outUsingHa
 
 }  // namespace
 
-bool bgra_to_nv12(const uint8_t* bgra, uint32_t width, uint32_t height, uint32_t bgraStride,
-                  std::vector<uint8_t>* outNv12) {
-  if (!bgra || width == 0 || height == 0 || !outNv12) return false;
+bool bgra_to_nv12_buffer(const uint8_t* bgra, uint32_t width, uint32_t height,
+                         uint32_t bgraStride, uint8_t* outNv12, size_t outNv12Size) {
+  if (!bgra || width == 0 || height == 0 || !outNv12 ||
+      bgraStride < static_cast<size_t>(width) * 4) {
+    return false;
+  }
   const size_t yPlaneSize = static_cast<size_t>(width) * static_cast<size_t>(height);
   const size_t uvPlaneSize = static_cast<size_t>(width) * static_cast<size_t>((height + 1) / 2);
-  outNv12->assign(yPlaneSize + uvPlaneSize, 0);
+  if (outNv12Size < yPlaneSize + uvPlaneSize) return false;
 
-  auto* yPlane = outNv12->data();
-  auto* uvPlane = outNv12->data() + yPlaneSize;
+  auto* yPlane = outNv12;
+  auto* uvPlane = outNv12 + yPlaneSize;
 
   struct BgraToNv12Tables {
     int yR[256]{};
@@ -936,12 +963,43 @@ bool bgra_to_nv12(const uint8_t* bgra, uint32_t width, uint32_t height, uint32_t
     return t;
   }();
 
+  // Luma accounts for two thirds of the output pixels. Process four BGRA pixels per
+  // iteration with SSE2 (available on every supported x64 Windows host), preserving the
+  // exact integer BT.709 coefficients used by the scalar path.
+  const __m128i zero = _mm_setzero_si128();
+  const __m128i mask = _mm_set1_epi32(0xff);
+  const __m128i coeffB = _mm_set1_epi16(16);
+  const __m128i coeffG = _mm_set1_epi16(157);
+  const __m128i coeffR = _mm_set1_epi16(47);
+  const __m128i rounding = _mm_set1_epi16(128);
+  const __m128i offset = _mm_set1_epi16(16);
+  for (uint32_t y = 0; y < height; ++y) {
+    const uint8_t* src = bgra + static_cast<size_t>(y) * bgraStride;
+    uint8_t* dst = yPlane + static_cast<size_t>(y) * width;
+    uint32_t x = 0;
+    for (; x + 4 <= width; x += 4) {
+      const __m128i pixels = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + x * 4));
+      const __m128i b16 = _mm_packs_epi32(_mm_and_si128(pixels, mask), zero);
+      const __m128i g16 = _mm_packs_epi32(_mm_and_si128(_mm_srli_epi32(pixels, 8), mask), zero);
+      const __m128i r16 = _mm_packs_epi32(_mm_and_si128(_mm_srli_epi32(pixels, 16), mask), zero);
+      __m128i y16 = _mm_add_epi16(_mm_mullo_epi16(b16, coeffB),
+                                  _mm_mullo_epi16(g16, coeffG));
+      y16 = _mm_add_epi16(y16, _mm_mullo_epi16(r16, coeffR));
+      y16 = _mm_add_epi16(_mm_srli_epi16(_mm_add_epi16(y16, rounding), 8), offset);
+      const uint32_t packed = static_cast<uint32_t>(_mm_cvtsi128_si32(_mm_packus_epi16(y16, zero)));
+      std::memcpy(dst + x, &packed, sizeof(packed));
+    }
+    for (; x < width; ++x) {
+      const uint8_t* p = src + static_cast<size_t>(x) * 4;
+      const int yy = ((kTbl.yR[p[2]] + kTbl.yG[p[1]] + kTbl.yB[p[0]] + 128) >> 8) + 16;
+      dst[x] = static_cast<uint8_t>(clamp_u8_int(yy));
+    }
+  }
+
   for (uint32_t y = 0; y < height; y += 2) {
     const uint32_t y1 = std::min<uint32_t>(y + 1, height - 1);
     const uint8_t* row0 = bgra + static_cast<size_t>(y) * bgraStride;
     const uint8_t* row1 = bgra + static_cast<size_t>(y1) * bgraStride;
-    uint8_t* yRow0 = yPlane + static_cast<size_t>(y) * width;
-    uint8_t* yRow1 = yPlane + static_cast<size_t>(y1) * width;
     uint8_t* uvRow = uvPlane + static_cast<size_t>(y / 2) * width;
 
     for (uint32_t x = 0; x < width; x += 2) {
@@ -956,21 +1014,6 @@ bool bgra_to_nv12(const uint8_t* bgra, uint32_t width, uint32_t height, uint32_t
       const int b01 = p01[0], g01 = p01[1], r01 = p01[2];
       const int b11 = p11[0], g11 = p11[1], r11 = p11[2];
 
-      const int y00 = ((kTbl.yR[r00] + kTbl.yG[g00] + kTbl.yB[b00] + 128) >> 8) + 16;
-      yRow0[x] = static_cast<uint8_t>(clamp_u8_int(y00));
-      if (x1 != x) {
-        const int y10 = ((kTbl.yR[r10] + kTbl.yG[g10] + kTbl.yB[b10] + 128) >> 8) + 16;
-        yRow0[x1] = static_cast<uint8_t>(clamp_u8_int(y10));
-      }
-      if (y1 != y) {
-        const int y01 = ((kTbl.yR[r01] + kTbl.yG[g01] + kTbl.yB[b01] + 128) >> 8) + 16;
-        yRow1[x] = static_cast<uint8_t>(clamp_u8_int(y01));
-        if (x1 != x) {
-          const int y11 = ((kTbl.yR[r11] + kTbl.yG[g11] + kTbl.yB[b11] + 128) >> 8) + 16;
-          yRow1[x1] = static_cast<uint8_t>(clamp_u8_int(y11));
-        }
-      }
-
       const int rAvg = (r00 + r10 + r01 + r11 + 2) >> 2;
       const int gAvg = (g00 + g10 + g01 + g11 + 2) >> 2;
       const int bAvg = (b00 + b10 + b01 + b11 + 2) >> 2;
@@ -982,6 +1025,15 @@ bool bgra_to_nv12(const uint8_t* bgra, uint32_t width, uint32_t height, uint32_t
   }
 
   return true;
+}
+
+bool bgra_to_nv12(const uint8_t* bgra, uint32_t width, uint32_t height, uint32_t bgraStride,
+                  std::vector<uint8_t>* outNv12) {
+  if (!bgra || width == 0 || height == 0 || !outNv12) return false;
+  const size_t yPlaneSize = static_cast<size_t>(width) * static_cast<size_t>(height);
+  const size_t uvPlaneSize = static_cast<size_t>(width) * static_cast<size_t>((height + 1) / 2);
+  outNv12->resize(yPlaneSize + uvPlaneSize);
+  return bgra_to_nv12_buffer(bgra, width, height, bgraStride, outNv12->data(), outNv12->size());
 }
 
 bool nv12_to_bgra(const uint8_t* nv12, uint32_t width, uint32_t height, std::vector<uint8_t>* outBgra) {
@@ -1557,6 +1609,63 @@ bool H264Encoder::encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFr
                               encodeCallStartUs);
 }
 
+bool H264Encoder::encode_frame_bgra(const uint8_t* bgra, uint32_t width, uint32_t height,
+                                    uint32_t bgraStride, bool forceKeyFrame,
+                                    int64_t inputSampleTimeHns,
+                                    std::vector<H264AccessUnit>* outUnits,
+                                    H264EncodeFrameStats* encodeStats) {
+  if (!enc_ || !started_ || !outUnits || !bgra || width != width_ || height != height_) {
+    return false;
+  }
+  H264EncodeFrameStats localStats{};
+  if (!encodeStats) encodeStats = &localStats;
+  *encodeStats = H264EncodeFrameStats();
+  encodeStats->asyncEnabled = asyncTransform_ ? 1 : 0;
+  outUnits->clear();
+  const uint64_t encodeCallStartUs = qpc_now_us();
+  const auto finish_call = [&](bool ok) -> bool {
+    const uint64_t endUs = qpc_now_us();
+    encodeStats->encodeCallUs = (endUs >= encodeCallStartUs) ? (endUs - encodeCallStartUs) : 0;
+    return ok;
+  };
+  const int64_t sampleTime = (inputSampleTimeHns > 0)
+                                 ? inputSampleTimeHns
+                                 : (static_cast<int64_t>(frameIndex_) * sampleDurationHns_);
+  const size_t nv12Size = static_cast<size_t>(width) * height * 3 / 2;
+  if (nv12Size > std::numeric_limits<DWORD>::max()) return finish_call(false);
+
+  const uint64_t sampleCreateStartUs = qpc_now_us();
+  Microsoft::WRL::ComPtr<IMFSample> sample;
+  Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
+  if (FAILED(MFCreateSample(&sample)) || !sample ||
+      FAILED(MFCreateMemoryBuffer(static_cast<DWORD>(nv12Size), &buffer)) || !buffer) {
+    return finish_call(false);
+  }
+  BYTE* dst = nullptr;
+  DWORD maxLen = 0;
+  DWORD curLen = 0;
+  if (FAILED(buffer->Lock(&dst, &maxLen, &curLen)) || !dst || maxLen < nv12Size) {
+    return finish_call(false);
+  }
+  const uint64_t convertStartUs = qpc_now_us();
+  const bool converted = bgra_to_nv12_buffer(bgra, width, height, bgraStride, dst, maxLen);
+  const uint64_t convertEndUs = qpc_now_us();
+  encodeStats->colorConvertUs =
+      (convertEndUs >= convertStartUs) ? (convertEndUs - convertStartUs) : 0;
+  buffer->Unlock();
+  if (!converted || FAILED(buffer->SetCurrentLength(static_cast<DWORD>(nv12Size))) ||
+      FAILED(sample->AddBuffer(buffer.Get()))) {
+    return finish_call(false);
+  }
+  (void)sample->SetSampleTime(sampleTime);
+  (void)sample->SetSampleDuration(sampleDurationHns_);
+  const uint64_t sampleCreateEndUs = qpc_now_us();
+  encodeStats->sampleCreateUs =
+      (sampleCreateEndUs >= sampleCreateStartUs) ? (sampleCreateEndUs - sampleCreateStartUs) : 0;
+  return encode_sample_common(sample.Get(), sampleTime, forceKeyFrame, outUnits, encodeStats,
+                              encodeCallStartUs);
+}
+
 bool H264Encoder::encode_frame_surface(ID3D11Texture2D* texture, bool forceKeyFrame,
                                        int64_t inputSampleTimeHns,
                                        std::vector<H264AccessUnit>* outUnits,
@@ -1927,9 +2036,47 @@ bool H264Decoder::configure_output_type() {
     if (FAILED(outType->GetGUID(MF_MT_SUBTYPE, &st)) || st != MFVideoFormat_NV12) continue;
     if (SUCCEEDED(dec_->SetOutputType(0, outType.Get(), 0))) {
       outputConfigured_ = true;
+      (void)configure_surface_allocator(outType.Get());
       return true;
     }
   }
+}
+
+bool H264Decoder::configure_surface_allocator(IMFMediaType* outputType) {
+  if (videoAllocator_) {
+    (void)videoAllocator_->UninitializeSampleAllocator();
+    videoAllocator_.Reset();
+  }
+  if (!d3dManager_ || !outputType ||
+      !env_truthy_local("REMOTE60_NATIVE_DXGI_DECODE_SURFACE") ||
+      env_truthy_local("REMOTE60_NATIVE_DISABLE_DXGI_DECODE_SURFACE")) {
+    return false;
+  }
+  Microsoft::WRL::ComPtr<IMFVideoSampleAllocatorEx> allocator;
+  HRESULT hr = MFCreateVideoSampleAllocatorEx(IID_PPV_ARGS(&allocator));
+  if (FAILED(hr) || !allocator) {
+    codec_debug_log(("decoder surface allocator create failed hr=" + hr_to_hex(hr)).c_str());
+    return false;
+  }
+  hr = allocator->SetDirectXManager(d3dManager_.Get());
+  if (FAILED(hr)) {
+    codec_debug_log(("decoder surface allocator set manager failed hr=" + hr_to_hex(hr)).c_str());
+    return false;
+  }
+  Microsoft::WRL::ComPtr<IMFAttributes> attrs;
+  if (FAILED(MFCreateAttributes(&attrs, 2)) || !attrs) return false;
+  (void)attrs->SetUINT32(MF_SA_D3D11_USAGE, D3D11_USAGE_DEFAULT);
+  (void)attrs->SetUINT32(MF_SA_D3D11_BINDFLAGS, D3D11_BIND_SHADER_RESOURCE);
+  // A small pool lets decode, queued paint, and the currently presented frame overlap
+  // without allocating in steady state. The decoder can grow it during a brief UI stall.
+  hr = allocator->InitializeSampleAllocatorEx(3, 8, attrs.Get(), outputType);
+  if (FAILED(hr)) {
+    codec_debug_log(("decoder surface allocator initialize failed hr=" + hr_to_hex(hr)).c_str());
+    return false;
+  }
+  codec_debug_log("decoder surface allocator ready");
+  videoAllocator_ = std::move(allocator);
+  return true;
 }
 
 bool H264Decoder::query_output_size(uint32_t* outWidth, uint32_t* outHeight) const {
@@ -2016,7 +2163,11 @@ bool H264Decoder::query_output_geometry(uint32_t* codedWidth, uint32_t* codedHei
 }
 
 bool H264Decoder::initialize(uint32_t width, uint32_t height, uint32_t fps) {
+  auto retainedD3dManager = d3dManager_;
+  const uint32_t retainedD3dToken = d3dManagerResetToken_;
   shutdown();
+  d3dManager_ = std::move(retainedD3dManager);
+  d3dManagerResetToken_ = retainedD3dToken;
   codec_debug_log("decoder initialize: start");
   width_ = width;
   height_ = height;
@@ -2033,6 +2184,12 @@ bool H264Decoder::initialize(uint32_t width, uint32_t height, uint32_t fps) {
     codec_debug_log("decoder initialize: set d3d manager");
     (void)dec_->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER,
                                reinterpret_cast<ULONG_PTR>(d3dManager_.Get()));
+    Microsoft::WRL::ComPtr<IMFAttributes> outputAttrs;
+    if (SUCCEEDED(dec_->GetOutputStreamAttributes(0, &outputAttrs)) && outputAttrs) {
+      // Ask the decoder's surface allocator for textures that the renderer can sample.
+      // Decoders may ignore the hint and fall back to a CPU buffer, which remains supported.
+      (void)outputAttrs->SetUINT32(MF_SA_D3D11_BINDFLAGS, D3D11_BIND_SHADER_RESOURCE);
+    }
   }
   (void)set_mf_attr_u32(dec_.Get(), MF_LOW_LATENCY, 1);
   (void)set_codecapi_bool(dec_.Get(), CODECAPI_AVLowLatencyMode, true);
@@ -2110,10 +2267,14 @@ bool H264Decoder::decode_access_unit(const std::vector<uint8_t>& annexb, bool ke
       odb.dwStreamID = 0;
 
       if ((osi.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) == 0) {
-        const uint32_t cb = (osi.cbSize > 0) ? static_cast<uint32_t>(osi.cbSize) : (4u << 20);
-        if (FAILED(MFCreateSample(&outSample)) || !outSample) return false;
-        if (FAILED(MFCreateMemoryBuffer(cb, &outBuffer)) || !outBuffer) return false;
-        if (FAILED(outSample->AddBuffer(outBuffer.Get()))) return false;
+        if (videoAllocator_) {
+          if (FAILED(videoAllocator_->AllocateSample(&outSample)) || !outSample) return false;
+        } else {
+          const uint32_t cb = (osi.cbSize > 0) ? static_cast<uint32_t>(osi.cbSize) : (4u << 20);
+          if (FAILED(MFCreateSample(&outSample)) || !outSample) return false;
+          if (FAILED(MFCreateMemoryBuffer(cb, &outBuffer)) || !outBuffer) return false;
+          if (FAILED(outSample->AddBuffer(outBuffer.Get()))) return false;
+        }
         odb.pSample = outSample.Get();
       }
 
@@ -2158,11 +2319,19 @@ bool H264Decoder::decode_access_unit(const std::vector<uint8_t>& annexb, bool ke
           pendingInputSampleTimesHns_.pop_front();
         }
 
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> surfaceTexture;
+        uint32_t surfaceSubresource = 0;
+        const bool hasSurface = d3dManager_ &&
+            env_truthy_local("REMOTE60_NATIVE_DXGI_DECODE_SURFACE") &&
+            !env_truthy_local("REMOTE60_NATIVE_DISABLE_DXGI_DECODE_SURFACE") &&
+            sample_to_dxgi_texture(produced, &surfaceTexture, &surfaceSubresource);
         std::vector<uint8_t> bytes;
-        if (!sample_to_bytes(produced, &bytes) || bytes.empty()) {
-          (void)sample_to_nv12_bytes_from_2d_buffer(produced, outW, outH, &bytes);
+        if (!hasSurface) {
+          if (!sample_to_bytes(produced, &bytes) || bytes.empty()) {
+            (void)sample_to_nv12_bytes_from_2d_buffer(produced, outW, outH, &bytes);
+          }
         }
-        if (!bytes.empty()) {
+        if (hasSurface || !bytes.empty()) {
           DecodedFrameNv12 frame{};
           frame.width = outW;
           frame.height = outH;
@@ -2189,6 +2358,11 @@ bool H264Decoder::decode_access_unit(const std::vector<uint8_t>& annexb, bool ke
             }
           }
           frame.bytes = std::move(bytes);
+          if (hasSurface) {
+            frame.surfaceSample = produced;
+            frame.surfaceTexture = std::move(surfaceTexture);
+            frame.surfaceSubresource = surfaceSubresource;
+          }
           outFrames->push_back(std::move(frame));
         }
       }
@@ -2227,6 +2401,10 @@ void H264Decoder::reset() {
 }
 
 void H264Decoder::shutdown() {
+  if (videoAllocator_) {
+    (void)videoAllocator_->UninitializeSampleAllocator();
+    videoAllocator_.Reset();
+  }
   if (dec_) {
     (void)dec_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
     (void)dec_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);

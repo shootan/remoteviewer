@@ -5230,3 +5230,60 @@ Before/After (1080p-scroll Release 5회, 오늘 H4-off 대비)
   발생 상황에서도 클라이언트 19~24fps 연속 디코드 - 참조 깨진 델타는 구조적으로 전송
   불가가 됐다.
 - 제품 호스트 재빌드·재시작(00:00), directory online 확인.
+
+
+### 222) 2026-08-03 OSLink 비교 후속 - GDI 캡처 프로세스 격리, 입력 미리보기, AMD 안전 경로
+
+목표
+- OSLink처럼 캡처를 별도 프로세스로 분리하고 GDI를 선택 가능한 폴백으로 제공한다.
+- Android 뷰어 왼쪽 위에 조합 중인 한글을 포함한 입력 미리보기를 표시한다.
+- AMD 드라이버 오류를 재현·차단하면서 1080p60 전체 경로의 실제 상한을 측정한다.
+
+변경 파일
+- Android 입력/UI: `ImeCaptureView.kt`, `MainActivity.kt`, `activity_main.xml`,
+  `strings.xml`, `viewer_input_preview_background.xml`
+- 캡처 프로세스: `gdi_capture_protocol.hpp`, `gdi_capture_process.hpp/.cpp`,
+  `gdi_capture_worker_main.cpp`, `gdi_capture_process_test.cpp`,
+  `capture_backend_dxgi.hpp`, `CMakeLists.txt`, `native_video_host_main.cpp`
+- 코덱/클라이언트/검증: `mf_h264_codec.hpp/.cpp`, `mf_h264_codec_test.cpp`,
+  `native_video_client_main.cpp`, `verify_native_video_runtime.ps1`
+
+구현
+- GDI BitBlt를 kill-on-parent-close Job Object의 별도 worker 프로세스로 분리했다. 3슬롯
+  공유 메모리 latest-wins 링에 worker가 직접 캡처하고, host는 최신 프레임만 복사한다.
+  worker 실패/저속은 감시해 WGC로 자동 복귀하며 Android 설정에 `GDI (격리)` 선택을 추가했다.
+- Android IME composing/commit/backspace와 물리·가상 키 입력을 최대 160 code point로
+  추적해 뷰어 왼쪽 위 흰색 말풍선에 한 줄로 표시하고 키보드 종료 시 초기화한다.
+- BGRA→NV12 SSE2 및 직접 encoder sample 입력, 고해상도 UDP pacing timer, 키프레임 전용
+  100Mbps pacing floor를 적용했다. 큰 IDR이 sender 큐를 막아 연쇄 IDR/드랍을 만드는 루프를
+  줄이되 일반 프레임의 Wi-Fi pacing은 유지한다.
+- AMD `atidxx64.dll` access violation과 기존 LiveKernelEvent 141 원인이 된 외부 DXGI device
+  manager/direct decode surface는 `REMOTE60_NATIVE_DXGI_DECODE_SURFACE=1` 명시 시에만 켠다.
+  기본은 하드웨어 MFT의 system-memory 출력 + 기존 D3D 업로드 경로다.
+- verifier의 sparse `trace_present` 간격을 프리즈로 잘못 세던 판정을 실제 연속 present의
+  `capGapUs`로 수정했고, host capture cadence도 sparse trace 차분 대신 callback interval을 쓴다.
+
+검증/build/test
+- Gate A (Release, WGC, 1920x1080@60, UDP H.264 6Mbps, OSLink 동시 실행):
+  `HOST_RC=0`, `CLIENT_RC=0`, `OVERALL_OK=True`, `DEC_AVG=50.11`, `DEC_P95=53`,
+  `LAT_P95_US=11164`, `PRESENT_GAP_OVER_1S=0`. 안정성/지연은 통과했으나 처리량 목표
+  54fps에는 미달해 `GATE_A_PASS=False`; 현재 동시 부하의 다음 병목은 약 15ms decoder다.
+- GDI 격리 단독 Release: `57.9986fps`, worker BitBlt p95 `22.099ms`, parent copy p95
+  `1.659ms`, `RESULT: ALL PASS`. 전체 encode/decode와 OSLink가 동시에 GDI를 쓰면 BitBlt가
+  24~26ms로 늘어 38~42fps이므로 GDI는 30fps 호환/격리 폴백, WGC는 최고 성능 기본으로 판정했다.
+- Gate B 격리 UDP control e2e: 연결/창 목록/desktop 선택/stream/4→10Mbps runtime tune/
+  입력 큐/세션 종료까지 13개 체크 `RESULT: ALL PASS`.
+- Gate C: H.264 SPS `High level 4.2, BT.709 limited`; LDPlayer 실제 뷰어에서 입력 말풍선과
+  host `inputEvents=22` 확인. 시각 증거 `automation/logs/gdi-android-20260802/preview-verified.png`.
+- Release 단위 테스트 6종(codec/readback/input macro/shared core/UDP control/GDI process) 및
+  Android `:app:assembleDebug` 통과. 관련 native Release target도 전부 빌드 통과.
+- 전체 workspace build는 작업 외 기존 선택 의존성(`rtc` namespace, `opus/opus.h`) 부재로
+  `apps/client`, `apps/host`에서 실패했으며 이번 변경 target과는 무관하다.
+- AMD 안전 수정 이후 00:03부터 반복 부하 테스트 종료까지 Application/System 이벤트에서
+  `atidxx64`, Display, LiveKernelEvent 신규 0건. AMD GPU/가상 디스플레이 상태 `OK`.
+
+다음 액션
+- 사용 중인 제품 host PID 17444는 중단하지 않았다. 새 바이너리 배포는 현재 원격 세션을
+  끝낸 뒤 build-local Release 재빌드·제품 host 재시작으로 반영한다.
+- 1080p60을 54fps 이상으로 고정하는 잔여 작업은 OSLink 미동시 기준선을 먼저 재측정한 뒤,
+  AMD direct surface를 다시 켜지 않고 decoder 프로세스 격리 또는 안전한 복사 경로 축소로 진행한다.
