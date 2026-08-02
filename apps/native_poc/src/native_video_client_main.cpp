@@ -2599,6 +2599,18 @@ int main(int argc, char** argv) {
   std::cout.setf(std::ios::unitbuf);
   std::cerr.setf(std::ios::unitbuf);
 
+  // Decoder/present deadlines should not lose their timeslice to ordinary background work.
+  // Keep this reversible for diagnostics and battery-sensitive deployments.
+  if (!env_truthy("REMOTE60_NATIVE_NORMAL_PRIORITY")) {
+    const BOOL processPriorityOk =
+        SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+    const BOOL threadPriorityOk =
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+    std::cout << "[native-video-client] latency-priority processAboveNormal="
+              << (processPriorityOk ? 1 : 0)
+              << " mainThreadAboveNormal=" << (threadPriorityOk ? 1 : 0) << "\n";
+  }
+
   // Without this the OS bitmap-stretches the whole window on a scaled display, which blurs
   // both the panel text and the decoded video. Must run before any window is created.
   if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {

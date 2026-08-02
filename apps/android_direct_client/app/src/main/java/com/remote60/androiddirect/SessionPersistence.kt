@@ -8,7 +8,7 @@ data class SavedEndpoint(
     val controlPort: Int = 43001,
     val bitrateKbps: Int = 8000,
     val fps: Int = 30,
-    val desktopBackendCode: Int = 2,
+    val desktopBackendCode: Int = 1,
 )
 
 object SessionPersistence {
@@ -28,7 +28,7 @@ object SessionPersistence {
             controlPort = prefs.getInt(KEY_CONTROL_PORT, 43001),
             bitrateKbps = prefs.getInt(KEY_BITRATE_KBPS, 8000),
             fps = prefs.getInt(KEY_FPS, 30),
-            desktopBackendCode = prefs.getInt(KEY_DESKTOP_BACKEND, 2),
+            desktopBackendCode = prefs.getInt(KEY_DESKTOP_BACKEND, 1),
         )
     }
 

@@ -1466,7 +1466,7 @@ uint32_t env_u32_clamped(const char* key, uint32_t fallback, uint32_t minValue, 
 
 DesktopCaptureBackend desktop_capture_backend_from_env() {
   const char* raw = std::getenv("REMOTE60_DESKTOP_CAPTURE_BACKEND");
-  if (!raw || !*raw) return DesktopCaptureBackend::Wgc;
+  if (!raw || !*raw) return DesktopCaptureBackend::Dxgi;
   std::string s(raw);
   std::transform(s.begin(), s.end(), s.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -2511,6 +2511,19 @@ int main(int argc, char** argv) {
   std::cout.setf(std::ios::unitbuf);
   std::cerr.setf(std::ios::unitbuf);
 
+  // The host normally runs behind a tray app with no foreground boost. Keep capture,
+  // conversion, and encode deadlines above ordinary UI/background work; opt out for A/B or
+  // constrained systems with REMOTE60_NATIVE_NORMAL_PRIORITY=1.
+  if (!env_truthy("REMOTE60_NATIVE_NORMAL_PRIORITY")) {
+    const BOOL processPriorityOk =
+        SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+    const BOOL threadPriorityOk =
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+    std::cout << "[native-video-host] latency-priority processAboveNormal="
+              << (processPriorityOk ? 1 : 0)
+              << " mainThreadAboveNormal=" << (threadPriorityOk ? 1 : 0) << "\n";
+  }
+
   const Args args = parse_args(argc, argv);
   const InputInjectionMode configuredInputInjectionMode = parse_input_injection_mode(args.inputInjectionMode);
   const bool inputInjectionEnabled =
@@ -2522,12 +2535,14 @@ int main(int argc, char** argv) {
   const bool guardStaleEncoded = env_truthy("REMOTE60_NATIVE_GUARD_STALE_ENCODED");
   const bool noPacingH264 = env_truthy("REMOTE60_NATIVE_H264_NO_PACING");
   // Spread each frame's datagrams over the wire instead of bursting them. Expressed as a
-  // percentage of the average bitrate: 250 means a frame may leave at up to 2.5x the
+  // percentage of the average bitrate: 500 means a frame may leave at up to 5x the
   // average rate. 0 restores the old unthrottled burst.
   const uint32_t udpPacePeakPercent =
-      env_u32_clamped("REMOTE60_NATIVE_UDP_PACE_PEAK_PERCENT", 250, 0, 2000);
+      env_u32_clamped("REMOTE60_NATIVE_UDP_PACE_PEAK_PERCENT", 500, 0, 2000);
   const uint32_t udpKeyframePacePeakBps = env_u32_clamped(
       "REMOTE60_NATIVE_UDP_KEYFRAME_PACE_PEAK_BPS", 100000000, 0, 1000000000);
+  const uint32_t pacingHeadroomFps = env_u32_clamped(
+      "REMOTE60_NATIVE_PACING_HEADROOM_FPS", 4, 0, 30);
   const bool guardStalePreEncode = env_truthy("REMOTE60_NATIVE_GUARD_STALE_PREENCODE");
   const bool abrEnabled = useH264 && !env_truthy("REMOTE60_NATIVE_ABR_DISABLE");
   const bool abrQualityFirst = env_truthy("REMOTE60_NATIVE_ADAPTIVE_QUALITY_FIRST");
@@ -2640,6 +2655,7 @@ int main(int argc, char** argv) {
               << " udpPacePeakBps=" << gUdpPacePeakBitrateBps.load(std::memory_order_relaxed)
               << " udpKeyframePacePeakBps="
               << gUdpKeyframePacePeakBitrateBps.load(std::memory_order_relaxed)
+              << " pacingHeadroomFps=" << pacingHeadroomFps
               << " stalePreEncodeGuard=" << (guardStalePreEncode ? 1 : 0)
               << " capturePoolBuffers=" << captureFramePoolBuffers
               << " encoderTuneMode=" << encoderTuneMode
@@ -3790,6 +3806,7 @@ int main(int argc, char** argv) {
   uint32_t activeKeyint = args.keyint;
   uint64_t activeFrameIntervalUs =
       std::max<uint64_t>(1, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, activeFps)));
+  uint64_t activePacingFrameIntervalUs = activeFrameIntervalUs;
   uint64_t frameGatingStaticIntervalUs =
       std::max<uint64_t>(activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGatingStaticFps));
   inputDomainW.store(activeEncodeW, std::memory_order_release);
@@ -3813,9 +3830,16 @@ int main(int argc, char** argv) {
   auto refresh_frame_intervals = [&]() {
     activeFrameIntervalUs =
         std::max<uint64_t>(1, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, activeFps)));
+    const uint32_t pacingFps =
+        activeFps >= 50
+            ? std::min<uint32_t>(120u, activeFps + pacingHeadroomFps)
+            : activeFps;
+    activePacingFrameIntervalUs =
+        std::max<uint64_t>(1, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, pacingFps)));
     frameGatingStaticIntervalUs =
         std::max<uint64_t>(activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGatingStaticFps));
   };
+  refresh_frame_intervals();
   // Declared before every lambda that references them. FrameState precedes the pipeline so
   // the worker's publish callback never outlives what it writes into.
   FrameState frame;
@@ -5347,16 +5371,20 @@ int main(int argc, char** argv) {
     if (paceByTick) {
       if (nowUs < nextTickUs) {
         const uint64_t paceWaitStartUs = qpc_now_us();
-        const uint64_t paceWaitTargetUs = nextTickUs - nowUs;
-        std::this_thread::sleep_for(std::chrono::microseconds(paceWaitTargetUs));
+        // Reuse the high-resolution sender timer. sleep_for commonly overshoots a 60 Hz
+        // deadline by 1-3ms on Windows; resetting the clock to that late wakeup on every
+        // frame turned a requested 60fps into a stable 48-54fps.
+        udp_pace_wait_until(nextTickUs);
         const uint64_t paceWaitDoneUs = qpc_now_us();
         tickWaitUs = (paceWaitDoneUs >= paceWaitStartUs) ? (paceWaitDoneUs - paceWaitStartUs) : 0;
         continue;
       }
-      if (nowUs > nextTickUs) {
+      // Preserve the target phase after a normal sub-frame timer overshoot. Re-anchor only
+      // when processing actually missed a whole frame, avoiding both drift and catch-up bursts.
+      if (nowUs > nextTickUs + activePacingFrameIntervalUs) {
         nextTickUs = nowUs;
       }
-      nextTickUs += activeFrameIntervalUs;
+      nextTickUs += activePacingFrameIntervalUs;
     }
 
     std::shared_ptr<std::vector<uint8_t>> payload;
@@ -5511,7 +5539,12 @@ int main(int argc, char** argv) {
       const uint64_t targetIntervalUs = frameGatingStaticMode ? frameGatingStaticIntervalUs : activeFrameIntervalUs;
       // The static interval throttles idle scenes; it must never hold back a frame that
       // actually changed, or the first interaction after idle arrives late.
-      if (!keyReqPending && !motionNow &&
+      // In paced motion mode the main tick already enforces activeFrameIntervalUs. Applying
+      // the same interval here a second time makes a slightly-early capture timestamp skip
+      // the entire tick (measured 1-6 lost frames/s at 60fps). Keep this limiter only for
+      // static throttling or the explicitly unpaced throughput path.
+      const bool needsGatingRateLimit = frameGatingStaticMode || !paceByTick;
+      if (needsGatingRateLimit && !keyReqPending && !motionNow &&
           frameGatingLastSentUs > 0 &&
           queuePopUs < (frameGatingLastSentUs + targetIntervalUs)) {
         ++frameGatingSkipCount;

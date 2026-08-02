@@ -12,6 +12,8 @@ param(
   [ValidateSet("scroll", "video")]
   [string]$Scene = "scroll",
   [int]$Seconds = 30,
+  [ValidateRange(1, 240)]
+  [int]$Fps = 30,
   [int]$Width = 1600,
   [int]$Height = 900
 )
@@ -63,7 +65,7 @@ if ($Scene -eq "scroll") {
 
 # ---- window --------------------------------------------------------------
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "GNLink perf scene: $Scene"
+$form.Text = "GNLink perf scene: $Scene ${Fps}fps"
 $form.StartPosition = "Manual"
 $form.Location = New-Object System.Drawing.Point(60, 60)
 $form.Size = New-Object System.Drawing.Size($Width, $Height)
@@ -74,13 +76,15 @@ $prop = [System.Windows.Forms.Control].GetProperty("DoubleBuffered", [System.Ref
 $prop.SetValue($form, $true, $null)
 
 $script:tick = 0
+$scrollStep = [Math]::Max(1, [int][Math]::Round(120.0 / [double]$Fps))
 
 $form.Add_Paint({
   param($s, $e)
   $gfx = $e.Graphics
   if ($Scene -eq "scroll") {
-    # Constant-rate scroll: 4px per 33ms tick = ~120px/s. Two blits make the loop seamless.
-    $offset = ($script:tick * 4) % $docH
+    # Keep scroll velocity near 120px/s at any requested refresh rate. Two blits make the
+    # document loop seamless.
+    $offset = ($script:tick * $scrollStep) % $docH
     $gfx.DrawImage($doc, 0, (-$offset))
     $gfx.DrawImage($doc, 0, ($docH - $offset))
   } else {
@@ -89,11 +93,14 @@ $form.Add_Paint({
 })
 
 $timer = New-Object System.Windows.Forms.Timer
-$timer.Interval = 33
+# WinForms rounds a 17ms 60fps request down to roughly 55-58 delivered paints once message
+# dispatch overhead is included. Use the floor (16ms at 60fps); DWM still caps presentation
+# to the display refresh, while the source no longer starves a 60fps capture measurement.
+$timer.Interval = [Math]::Max(1, [int][Math]::Floor(1000.0 / [double]$Fps))
 $timer.Add_Tick({
   $script:tick += 1
   $form.Invalidate()
-  if ($Seconds -gt 0 -and $script:tick -gt ($Seconds * 30)) { $form.Close() }
+  if ($Seconds -gt 0 -and $script:tick -gt ($Seconds * $Fps)) { $form.Close() }
 })
 
 $form.Add_Shown({ $timer.Start() })

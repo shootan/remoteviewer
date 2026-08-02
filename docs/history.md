@@ -5287,3 +5287,59 @@ Before/After (1080p-scroll Release 5회, 오늘 H4-off 대비)
   끝낸 뒤 build-local Release 재빌드·제품 host 재시작으로 반영한다.
 - 1080p60을 54fps 이상으로 고정하는 잔여 작업은 OSLink 미동시 기준선을 먼저 재측정한 뒤,
   AMD direct surface를 다시 켜지 않고 decoder 프로세스 격리 또는 안전한 복사 경로 축소로 진행한다.
+
+
+### 223) 2026-08-03 OSLink 스트림 종료 후 1080p60 제품 pacing 최적화·신규 host 직접 검증
+
+목표
+- OSLink 원격 스트림이 없는 기준선에서 WGC/GDI/DXGI 캡처 상한을 다시 분리하고,
+  AMD 위험 경로를 켜지 않은 채 1080p60 제품형 처리량을 54fps 이상으로 고정한다.
+- 새 Release host를 직접 실행해 UDP 제어/영상/입력 경로를 확인하고 정확한 PID를 종료한다.
+
+변경 파일
+- 제품 pacing/스케줄링: `apps/native_poc/src/native_video_host_main.cpp`,
+  `apps/native_poc/src/native_video_client_main.cpp`
+- Android 기본 캡처 선택: `apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt`,
+  `SessionPersistence.kt`
+- 재현 장면/기록: `automation/perf_scene_generator.ps1`, `docs/history.md`, `docs/구현계획.md`
+
+구현
+- 60Hz main tick의 `sleep_for` 누적 초과를 고해상도 deadline wait로 교체하고 정상적인 짧은
+  초과에서는 기준 phase를 보존했다. 50fps 이상 요청은 광고/인코더 목표는 그대로 두고 내부
+  pacing에 기본 +4fps 여유를 주며, motion frame gating이 main tick과 같은 제한을 두 번
+  적용하던 조건을 제거했다.
+- UDP 일반 프레임 pacing peak 기본을 평균 bitrate의 250%에서 500%로 높여 sender가 다음
+  프레임을 막지 않게 했고 host/client 프로세스와 주 스레드는 Above Normal로 실행한다.
+  `REMOTE60_NATIVE_NORMAL_PRIORITY=1`, `REMOTE60_NATIVE_PACING_HEADROOM_FPS`로 A/B/해제가 가능하다.
+- 이 PC에서 WGC 콜백은 약 43~56fps로 흔들린 반면 DXGI Desktop Duplication은 throughput
+  런에서 평균 디코드 85.11fps의 여유를 확인했다. 전체 화면 기본을 DXGI로 바꾸고 WGC/GDI는
+  호환성/수동 선택과 자동 폴백으로 유지했다. 기존 Android 저장값은 덮어쓰지 않고 신규/무효
+  값의 기본만 DXGI다. AMD direct decode surface는 계속 기본 OFF다.
+- 재현 장면에 1~240fps 입력을 추가하고 60fps 타이머 간격을 16ms로 설정했다.
+
+검증/build/test
+- `build-local` Release host_app/host/client/UDP e2e/GDI/codec target 전부 빌드 통과,
+  Android `:app:assembleDebug` 4 ABI 빌드 통과.
+- 동일 1600x900 60fps full-motion 장면을 1920x1080@60 H.264 6Mbps로 전송한 DXGI 제품형
+  3회: `DEC_AVG=58.33/58.67/57.89`, `DEC_P95=63/63/62`, `LAT_P95_US=6345/6031/2715`,
+  Gate A/M7 3/3 PASS, present 1초 초과 gap 0, 종료 후 잔존 0.
+  이전 제품형 DXGI 약 49.89fps 대비 반복 평균 58.30fps로 약 16.9% 향상했다.
+- 환경변수로 backend를 강제하지 않은 최종 런 `verify-native-video-20260803-004528`은
+  `desktop_backend=dxgi`, host encode 평균 62.75fps, client decode 워밍업 포함 평균
+  59.78fps, `HOST_RC=0`, `CLIENT_RC=0`, `OVERALL_OK=True`, 종료 후 잔존 0.
+- 1920x1080 크기의 PowerShell 장면 생성기는 DWM 입력을 35~40fps로 낮춰 비교에서 제외했다.
+  이는 host의 callback/encode가 같은 속도로 입력을 소진한 생성기 병목이며 freeze/error는 없었다.
+- Release host PID 26272를 43000/43001에 직접 실행한 UDP control E2E에서 연결, 창 목록,
+  desktop 선택, stream, 4→10Mbps runtime tune, 입력, 최종 세션 건강성 전 항목 `ALL PASS`.
+  해당 PID를 직접 종료한 뒤 remote60 프로세스 0, UDP 43000/TCP 43001 소유자 0을 확인했다.
+- 최종 재빌드 host PID 24984도 직접 기동해 Above Normal 적용과 60fps pacing 설정을 확인하고
+  직접 종료했다. 종료 후 PID와 UDP 44700/TCP 44701 소유자 모두 0이다.
+- codec `PASS`; GDI 격리 `58.6539fps`, worker copy p95 19.413ms, parent copy p95 1.610ms,
+  `RESULT: ALL PASS`. 테스트 시작 00:20 이후 AMD/Radeon/atidxx/DXGI/LiveKernel 관련
+  Application/System/WER 오류 0건. `REMOTE60_NATIVE_DXGI_DECODE_SURFACE`는 전 런에서 미설정.
+
+다음 액션
+- 실제 Android 단말에서 저장된 backend가 WGC라면 Settings에서 DXGI를 한 번 선택해 적용하고,
+  1080p60 실기기/동일 LAN 장시간 soak로 무선 pacing과 발열을 확인한다.
+- OSLink UI 스트림은 종료됐지만 비관리자 셸에서 중지할 수 없는 `LDRemoteSvc`만 idle Running으로
+  남아 있다. OSLink 동시부하 Gate 항목은 별도 미완료로 유지한다.
