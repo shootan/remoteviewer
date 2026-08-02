@@ -5371,3 +5371,65 @@ Before/After (1080p-scroll Release 5회, 오늘 H4-off 대비)
 다음 액션
 - 사용자가 release APK를 설치해 실제 Android 뷰어의 60fps/발열을 확인한다.
 - 외부 스토어 배포 전에는 전용 release keystore와 versionCode 증가 정책을 추가한다.
+
+
+### 225) 2026-08-03 전체화면 재연결·화면 깨짐·30fps cadence·잠금 입력 보강
+
+목표
+- YouTube 전체화면 전환 뒤 데스크톱 선택이 간헐적으로 실패하는 문제와 저비트레이트에서도
+  화면이 깨지거나 30fps가 주기적으로 멈춰 보이는 문제를 원인별로 수정한다.
+- 호스트 실행 중 절전 진입을 막고, 관리자 창·작업표시줄·잠금 화면까지 입력 가능한 제품형
+  권한 경로를 추가하며 Release 산출물을 `dist`에 갱신한다.
+
+변경 파일
+- 캡처/인코더/전송/전원: `apps/native_poc/src/native_video_host_main.cpp`,
+  `mf_h264_codec.hpp/.cpp`, `poc_protocol.hpp`
+- 수신/FEC/재동기화: `native_video_client_shared_core.hpp/.cpp/.test.cpp`,
+  `native_video_client_session.hpp/.cpp`, `native_video_client_main.cpp`
+- 디렉터리 capability: `directory_client.hpp/.cpp`, Android `DirectoryClient.kt`,
+  `NativeSessionBridge.kt`, `MainActivity.kt`, `native_bridge.cpp`
+- Android 표시 cadence: `android_video_decoder.hpp/.cpp`
+- 보안 입력: `secure_input_protocol.hpp`, `secure_input_broker.hpp/.cpp`,
+  `secure_input_service_main.cpp`, `apps/native_poc/CMakeLists.txt`
+- 기록: `docs/history.md`, `docs/구현계획.md`
+
+구현
+- 제품 로그의 `DXGI_ERROR_ACCESS_LOST(0x887A0026)` 후
+  `E_ACCESSDENIED(0x80070005)`를 재현 원인으로 확정했다. DXGI/GDI 런타임 폴백을
+  stream-inactive 조기 반환보다 먼저 처리하고 WGC 재시작 실패도 종료하지 않고 재시도한다.
+- 캡처 callback 전에 목표 FPS로 GPU copy를 제한하고 encoded main loop의 독립 tick을 제거했다.
+  AMD 비동기 MFT가 이전 입력 출력을 한 호출에서 반환할 때 현재 timestamp로 덮어쓰던 문제는
+  accepted-input FIFO로 복원했다. sender frame cadence와 Android 고정 FPS presentation clock/30ms
+  playout lead를 추가해 burst/pause 패턴을 평탄화했다.
+- UDP v2에 8 data + 1 XOR parity FEC를 추가하고 최대 3개 프레임을 out-of-order 조립한다.
+  복구 불가 gap/malformed에서는 P-frame을 즉시 중단하고 decoder reset과 IDR 요청을 수행한다.
+  수동 bitrate는 ABR 비활성 override가 아니라 high ceiling으로 적용해 12/20Mbps 요청도 압력 시
+  mid/low로 내려갈 수 있게 했다. 4Mbps 일반 프레임 peak floor는 40Mbps로 두었다.
+- 호스트 수명 동안 `ES_SYSTEM_REQUIRED`, 스트림 동안 `ES_DISPLAY_REQUIRED`와 display wake를
+  적용했다. launcher는 `requireAdministrator` manifest로 고정했고, 디렉터리 128-bit capability로
+  인증한 세션만 LocalSystem 서비스/active-console agent를 통해 secure desktop 입력을 전달한다.
+  최초 capability는 관측 IP/port로 검증하고 같은 token/IP의 소켓 재연결은 허용한다.
+- Windows/Android Hello에 protocol/FEC capability 검증을 추가했다. 이전 클라이언트와는 wire
+  format이 다르므로 host/client/APK를 같은 Release 세트로 교체해야 한다.
+
+검증/build/test
+- `build-verify` Release의 host app/host/client/secure-input/GDI worker와 관련 테스트 target 빌드 통과.
+- 1920x1080, DXGI, H.264, 4Mbps/30fps, Release 15초 런:
+  `DEC_AVG=28.64`(초기 handshake 포함), 안정구간 평균 `29.25fps`(28~30),
+  `queue overwrite=0`, UDP assembly drop/malformed/reorder 0, Gate A/M7 PASS,
+  `LAT_P95=45.250ms`. frame 완성 arrival p95는 수정 전 약 72ms에서 51.498ms로 감소했다.
+- 격리 UDP control E2E는 연결/목록/desktop 선택/stream/4→10Mbps tune/입력/종료까지
+  `RESULT: ALL PASS`. shared-core FEC, MF H.264 codec, capture readback, UDP 0/5/10% loss,
+  GDI process 격리 테스트 모두 PASS(`58.3146fps`). Directory `npm test` 전 항목 PASS.
+- Android `:app:assembleRelease`와 lint/RelWithDebInfo 4 ABI 통과. V3 서명 PASS,
+  APK SHA-256 `86EE6524802544227FF495FC5AC232B2C50D6D52031EBEF06DB329D6A8AD7CCE`,
+  `dist/gnlink-android-20260803-release.apk` 갱신.
+- Windows bundle은 `dist/gnlink-windows-20260803-release/`에 갱신했다. 최종 host SHA-256은
+  `9CE3DEC39962E74E1ABBA9BB69A001D5E0FC930BF9B4CC0B4C8F1DE8C4C8B1AD`다.
+
+다음 액션
+- 사용 중인 구버전 관리자 host PID 23376/child 2652가 `build-local` 제품 파일을 잠그고 있다.
+  tray host 종료 후 staging된 `remote60_host_app.new.exe`와
+  `remote60_native_video_host_poc.new.exe`를 원래 이름으로 교체하고 최신 제품 host를 기동한다.
+- 그 다음 Release APK를 LDPlayer에 `install -r`하고 실제 디렉터리 재연결, YouTube 전체화면 전환,
+  4Mbps/30fps 영상, 작업표시줄 및 Windows 잠금 화면 입력을 최종 수동 검증한다.

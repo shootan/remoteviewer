@@ -164,7 +164,8 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeDirectoryObserve(
 // up on NATs that would have worked.
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeDirectoryConnect(
-    JNIEnv* env, jobject /* this */, jstring host_ip, jint host_port, jint punch_budget_ms) {
+    JNIEnv* env, jobject /* this */, jstring host_ip, jint host_port, jint punch_budget_ms,
+    jstring punch_token) {
   const std::string host = jstring_to_string(env, host_ip);
   g_rendezvous_error.clear();
   (void)g_rendezvous.Punch(host, host_port,
@@ -184,6 +185,7 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeDirectoryConnect(
   args.controlPort = host_port;
   args.requireTcpControl = false;
   args.controlOverUdp = true;
+  args.peerAuthToken = jstring_to_string(env, punch_token);
   args.preparedUdpSocket = prepared;
   args.encodedFrameSink = &g_video_decoder_sink;
   return g_session_controller.Connect(args) ? JNI_TRUE : JNI_FALSE;
@@ -270,6 +272,10 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeSelectDesktopMode(
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeRequestRuntimeConfig(
     JNIEnv* /* env */, jobject /* this */, jint bitrate_bps, jint fps) {
+  if (fps > 0) {
+    g_video_decoder_sink.SetTargetFps(
+        static_cast<uint32_t>(std::clamp<jint>(fps, 1, 240)));
+  }
   return g_session_controller.RequestRuntimeConfig(
              static_cast<uint32_t>(std::max<jint>(0, bitrate_bps)),
              static_cast<uint32_t>(std::max<jint>(0, fps)))

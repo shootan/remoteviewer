@@ -493,6 +493,8 @@ void ClientSessionController::VideoReceiveMain() {
   std::array<uint8_t, 1600> datagram{};
   uint64_t assemblyDropped = 0;
   uint64_t oversizePayloadDropCount = 0;
+  uint64_t fecRecoveredCount = 0;
+  bool waitForKeyframe = true;
 
   while (!stopRequested_.load(std::memory_order_acquire)) {
     SocketHandle udpSocket = kInvalidSocket;
@@ -526,11 +528,25 @@ void ClientSessionController::VideoReceiveMain() {
 
     sessionBytesReceived_.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
     auto assembleResult = assembler.PushDatagram(datagram.data(), static_cast<size_t>(n));
+    if (assembleResult.fecRecovered) {
+      fecRecoveredCount += assembleResult.fecRecoveredChunks;
+      if ((fecRecoveredCount % 120ULL) == 1ULL) {
+        std::fprintf(stderr,
+                     "[native-video-client-session] udp fec recovered chunks=%llu\n",
+                     static_cast<unsigned long long>(fecRecoveredCount));
+      }
+    }
     if (assembleResult.droppedPreviousIncomplete) {
       ++assemblyDropped;
+      if (!waitForKeyframe) sink->OnVideoDiscontinuity();
+      waitForKeyframe = true;
+      (void)keyframeRequests_.Request(2, now_us());
     }
     if (assembleResult.disposition == UdpH264AssemblyDisposition::Malformed) {
       ++assemblyDropped;
+      if (!waitForKeyframe) sink->OnVideoDiscontinuity();
+      waitForKeyframe = true;
+      (void)keyframeRequests_.Request(2, now_us());
       if (assembleResult.oversizePayload && ((++oversizePayloadDropCount % 30ULL) == 1ULL)) {
         std::fprintf(stderr,
                      "[native-video-client-session] dropped oversized udp payload bytes=%u count=%llu\n",
@@ -541,12 +557,20 @@ void ClientSessionController::VideoReceiveMain() {
     }
     if (assembleResult.disposition == UdpH264AssemblyDisposition::Dropped) {
       ++assemblyDropped;
-      if ((assemblyDropped % 20) == 1) {
-        (void)keyframeRequests_.Request(2, now_us());
-      }
+      if (!waitForKeyframe) sink->OnVideoDiscontinuity();
+      waitForKeyframe = true;
+      // Request immediately. KeyframeRequestState owns the time/token limiter, so repeated
+      // late datagrams cannot create an IDR storm.
+      (void)keyframeRequests_.Request(2, now_us());
       continue;
     }
     if (assembleResult.disposition == UdpH264AssemblyDisposition::Completed) {
+      const bool keyFrame = (assembleResult.frame.header.flags & 1u) != 0;
+      if (waitForKeyframe && !keyFrame) {
+        (void)keyframeRequests_.Request(2, now_us());
+        continue;
+      }
+      if (keyFrame) waitForKeyframe = false;
       sink->OnEncodedH264Frame(std::move(assembleResult.frame));
     }
   }
@@ -695,6 +719,7 @@ bool ClientSessionController::ConnectUdpVideo(const ClientSessionConnectArgs& ar
 
   (void)set_recv_timeout(connected, args.udpHandshakeTimeoutMs);
   UdpHelloPacket hello{};
+  std::snprintf(hello.authToken, sizeof(hello.authToken), "%s", args.peerAuthToken.c_str());
   const int sent = send(connected, reinterpret_cast<const char*>(&hello), sizeof(hello), 0);
   if (sent != static_cast<int>(sizeof(hello))) {
     if (error) *error = "udp hello send failed";
@@ -706,7 +731,8 @@ bool ClientSessionController::ConnectUdpVideo(const ClientSessionConnectArgs& ar
   const int received = recv(connected, reinterpret_cast<char*>(&ack), sizeof(ack), 0);
   if (received < static_cast<int>(sizeof(UdpHelloPacket)) ||
       ack.magic != kMagic ||
-      ack.kind != static_cast<uint16_t>(UdpPacketKind::HelloAck)) {
+      ack.kind != static_cast<uint16_t>(UdpPacketKind::HelloAck) ||
+      ack.version != kUdpProtocolVersion || (ack.features & kUdpFeatureVideoFec) == 0) {
     if (error) *error = "udp hello ack failed";
     close_socket(&connected);
     return false;

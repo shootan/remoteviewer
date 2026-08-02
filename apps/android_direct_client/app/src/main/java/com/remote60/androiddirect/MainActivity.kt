@@ -2837,7 +2837,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 val target = DirectoryClient.connect(url, token, host.hostId, observeToken)
                 diagnosticsLog.log("directory_target", "${target.ip}:${target.port}")
 
-                val started = NativeSessionBridge.nativeDirectoryConnect(target.ip, target.port, 4000)
+                val started = NativeSessionBridge.nativeDirectoryConnect(
+                    target.ip, target.port, 4000, target.punchToken
+                )
                 if (!started) {
                     throw DirectoryClient.DirectoryException(
                         NativeSessionBridge.nativeDirectoryLastError().ifEmpty { "연결을 시작하지 못했습니다" }

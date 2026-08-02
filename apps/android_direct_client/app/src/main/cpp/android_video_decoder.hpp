@@ -20,8 +20,10 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   ~AndroidVideoDecoderSink() override;
 
   void SetSurface(JNIEnv* env, jobject surface);
+  void SetTargetFps(uint32_t fps);
   void OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& frame) override;
   void OnVideoStreamReset() override;
+  void OnVideoDiscontinuity() override;
   void OnWindowSelectionControlResult(
       const remote60::native_poc::ControlWindowSelectedMessage& msg) override;
   void PrepareForWindowSelection(uint64_t selectionGeneration);
@@ -63,6 +65,7 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint64_t ptsLocalBaseUs_ = 0;
   uint64_t lastQueuedPtsUs_ = 0;
   uint64_t lastRemoteCaptureUs_ = 0;
+  uint64_t targetFrameIntervalUs_ = 33333;
   uint64_t ptsReanchorCount_ = 0;
   uint64_t ptsMonotonicClampCount_ = 0;
   uint64_t ptsFallbackCount_ = 0;

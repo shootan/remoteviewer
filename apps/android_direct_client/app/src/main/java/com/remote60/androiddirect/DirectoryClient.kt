@@ -26,6 +26,7 @@ object DirectoryClient {
     data class ConnectTarget(
         val ip: String,
         val port: Int,
+        val punchToken: String,
     )
 
     class DirectoryException(message: String) : Exception(message)
@@ -155,7 +156,9 @@ object DirectoryClient {
         val ip = response.optString("hostPublicIp")
         val port = response.optInt("hostPublicUdpPort")
         if (ip.isEmpty() || port <= 0) throw DirectoryException("host address unavailable")
-        return ConnectTarget(ip, port)
+        val punchToken = response.optString("punchToken")
+        if (punchToken.length != 32) throw DirectoryException("connection authorization unavailable")
+        return ConnectTarget(ip, port, punchToken)
     }
 
     // ------------------------------------------------------------------ transport

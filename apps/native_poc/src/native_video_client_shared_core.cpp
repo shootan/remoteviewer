@@ -11,6 +11,12 @@ namespace {
 
 constexpr size_t kMaxInputQueueSize = 256;
 constexpr uint32_t kMaxUdpAssembledPayloadBytes = 16u * 1024u * 1024u;
+constexpr uint16_t kMaxUdpVideoChunks = 16384;
+constexpr size_t kMaxConcurrentVideoAssemblies = 3;
+
+bool sequence_is_newer(uint32_t value, uint32_t reference) {
+  return static_cast<int32_t>(value - reference) > 0;
+}
 
 void set_selected_target_dimensions(WindowPanelSnapshot* snapshot) {
   if (!snapshot) return;
@@ -509,12 +515,9 @@ uint64_t ClientControlScheduler::RecordInputAck(uint32_t inputLogEvery) {
 }
 
 void UdpH264FrameAssembler::Reset() {
-  assembling_ = false;
-  assemblingSeq_ = 0;
-  assemblingExpected_ = 0;
-  assemblingNextOffset_ = 0;
-  assemblingHeader_ = EncodedFrameHeader{};
-  assemblingPayload_.clear();
+  assemblies_.clear();
+  deliveredAny_ = false;
+  lastDeliveredSeq_ = 0;
 }
 
 UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* data, size_t len) {
@@ -524,9 +527,8 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* dat
   UdpVideoChunkHeader packet{};
   std::memcpy(&packet, data, sizeof(packet));
   result.packetSeq = packet.seq;
-  result.expectedSeq = assemblingSeq_;
+  result.expectedSeq = deliveredAny_ ? lastDeliveredSeq_ + 1u : packet.seq;
   result.packetChunkOffset = packet.chunkOffset;
-  result.expectedNextOffset = assemblingNextOffset_;
 
   if (packet.magic != kMagic ||
       packet.kind != static_cast<uint16_t>(UdpPacketKind::VideoChunk) ||
@@ -536,79 +538,173 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* dat
   if (packet.codec != static_cast<uint16_t>(UdpCodec::H264)) {
     return result;
   }
-  if (packet.payloadSize == 0 || packet.chunkSize == 0 ||
-      packet.chunkOffset > packet.payloadSize ||
-      (packet.chunkOffset + packet.chunkSize) > packet.payloadSize ||
+  const bool parityPacket = (packet.flags & 0x10u) != 0;
+  if (packet.payloadSize == 0 || packet.chunkSize == 0 || packet.chunkStride == 0 ||
+      packet.chunkStride > 4096 || packet.chunkCount == 0 ||
+      packet.chunkCount > kMaxUdpVideoChunks ||
       (sizeof(UdpVideoChunkHeader) + packet.chunkSize) > len) {
-    assembling_ = false;
     result.disposition = UdpH264AssemblyDisposition::Malformed;
     return result;
   }
   if (packet.payloadSize > kMaxUdpAssembledPayloadBytes) {
-    assembling_ = false;
     result.disposition = UdpH264AssemblyDisposition::Malformed;
     result.oversizePayload = true;
     result.rejectedPayloadSize = packet.payloadSize;
     return result;
   }
+  const uint32_t expectedChunkCount =
+      (packet.payloadSize + packet.chunkStride - 1u) / packet.chunkStride;
+  if (expectedChunkCount != packet.chunkCount || packet.chunkIndex >= packet.chunkCount) {
+    result.disposition = UdpH264AssemblyDisposition::Malformed;
+    return result;
+  }
+  const uint32_t expectedOffset = static_cast<uint32_t>(packet.chunkIndex) * packet.chunkStride;
+  if (packet.chunkOffset != expectedOffset) {
+    result.disposition = UdpH264AssemblyDisposition::Malformed;
+    return result;
+  }
+  if (parityPacket) {
+    if ((packet.chunkIndex % kUdpVideoFecGroupSize) != 0 ||
+        packet.chunkSize != packet.chunkStride) {
+      result.disposition = UdpH264AssemblyDisposition::Malformed;
+      return result;
+    }
+  } else {
+    const uint32_t expectedDataSize =
+        std::min<uint32_t>(packet.chunkStride, packet.payloadSize - expectedOffset);
+    if (packet.chunkSize != expectedDataSize) {
+      result.disposition = UdpH264AssemblyDisposition::Malformed;
+      return result;
+    }
+  }
 
-  const bool firstChunk = ((packet.flags & 0x2u) != 0);
-  const bool lastChunk = ((packet.flags & 0x4u) != 0);
-  if (firstChunk) {
-    if (assembling_ && assemblingNextOffset_ < assemblingExpected_) {
+  if (deliveredAny_ && !sequence_is_newer(packet.seq, lastDeliveredSeq_)) {
+    // Parity packets intentionally follow all data packets. A no-loss frame can therefore
+    // complete before its parity arrives; that harmless late repair packet must not reset the
+    // decoder. Older completed-frame traffic is stale for the same reason and is ignored.
+    result.disposition = UdpH264AssemblyDisposition::Ignored;
+    result.reorderDetected = true;
+    return result;
+  }
+
+  auto assemblyIt = std::find_if(assemblies_.begin(), assemblies_.end(),
+                                 [&](const Assembly& item) { return item.seq == packet.seq; });
+  if (assemblyIt == assemblies_.end()) {
+    if (assemblies_.size() >= kMaxConcurrentVideoAssemblies) {
+      assemblies_.pop_front();
       result.droppedPreviousIncomplete = true;
     }
-    assembling_ = true;
-    assemblingSeq_ = packet.seq;
-    assemblingExpected_ = packet.payloadSize;
-    assemblingNextOffset_ = 0;
-    assemblingPayload_.assign(assemblingExpected_, 0);
-    assemblingHeader_ = {};
-    assemblingHeader_.header.magic = kMagic;
-    assemblingHeader_.header.type = static_cast<uint16_t>(MessageType::EncodedFrameH264);
-    assemblingHeader_.header.size = static_cast<uint16_t>(sizeof(assemblingHeader_));
-    assemblingHeader_.seq = packet.seq;
-    assemblingHeader_.width = packet.width;
-    assemblingHeader_.height = packet.height;
-    assemblingHeader_.flags = (packet.flags & 0x1u) ? 1u : 0u;
-    assemblingHeader_.streamGeneration = packet.streamGeneration;
-    assemblingHeader_.captureQpcUs = packet.captureQpcUs;
-    assemblingHeader_.encodeStartQpcUs = packet.encodeStartQpcUs;
-    assemblingHeader_.encodeEndQpcUs = packet.encodeEndQpcUs;
-    assemblingHeader_.sendQpcUs = packet.sendQpcUs;
+    Assembly created{};
+    created.seq = packet.seq;
+    created.payloadSize = packet.payloadSize;
+    created.chunkCount = packet.chunkCount;
+    created.chunkStride = packet.chunkStride;
+    created.payload.assign(packet.payloadSize, 0);
+    created.received.assign(packet.chunkCount, 0);
+    const size_t fecGroupCount =
+        (static_cast<size_t>(packet.chunkCount) + kUdpVideoFecGroupSize - 1u) /
+        kUdpVideoFecGroupSize;
+    created.parity.resize(fecGroupCount);
+    created.parityReceived.assign(fecGroupCount, 0);
+    created.header.header.magic = kMagic;
+    created.header.header.type = static_cast<uint16_t>(MessageType::EncodedFrameH264);
+    created.header.header.size = static_cast<uint16_t>(sizeof(EncodedFrameHeader));
+    created.header.seq = packet.seq;
+    created.header.width = packet.width;
+    created.header.height = packet.height;
+    created.header.flags = (packet.flags & 0x1u) ? 1u : 0u;
+    created.header.streamGeneration = packet.streamGeneration;
+    created.header.captureQpcUs = packet.captureQpcUs;
+    created.header.encodeStartQpcUs = packet.encodeStartQpcUs;
+    created.header.encodeEndQpcUs = packet.encodeEndQpcUs;
+    created.header.sendQpcUs = packet.sendQpcUs;
+    assemblies_.push_back(std::move(created));
+    assemblyIt = std::prev(assemblies_.end());
     result.startedNewAssembly = true;
-    result.expectedSeq = assemblingSeq_;
-    result.expectedNextOffset = 0;
   }
 
-  if (!assembling_ || packet.seq != assemblingSeq_ || packet.chunkOffset != assemblingNextOffset_) {
-    result.disposition = UdpH264AssemblyDisposition::Dropped;
-    result.reorderDetected = true;
-    result.expectedNextOffset = assemblingNextOffset_;
-    return result;
-  }
-
-  std::memcpy(assemblingPayload_.data() + packet.chunkOffset,
-              data + sizeof(UdpVideoChunkHeader), packet.chunkSize);
-  assemblingNextOffset_ += packet.chunkSize;
-  result.expectedNextOffset = assemblingNextOffset_;
-
-  if (!lastChunk) {
-    result.disposition = UdpH264AssemblyDisposition::Partial;
-    return result;
-  }
-
-  if (assemblingNextOffset_ != assemblingExpected_) {
-    assembling_ = false;
+  Assembly& assembly = *assemblyIt;
+  if (assembly.payloadSize != packet.payloadSize ||
+      assembly.chunkCount != packet.chunkCount ||
+      assembly.chunkStride != packet.chunkStride ||
+      assembly.header.width != packet.width || assembly.header.height != packet.height ||
+      assembly.header.streamGeneration != packet.streamGeneration) {
+    assemblies_.erase(assemblyIt);
     result.disposition = UdpH264AssemblyDisposition::Malformed;
     return result;
   }
 
-  assemblingHeader_.payloadSize = assemblingExpected_;
+  if (parityPacket) {
+    const size_t groupIndex = packet.chunkIndex / kUdpVideoFecGroupSize;
+    if (!assembly.parityReceived[groupIndex]) {
+      assembly.parity[groupIndex].assign(data + sizeof(UdpVideoChunkHeader),
+                                         data + sizeof(UdpVideoChunkHeader) + packet.chunkSize);
+      assembly.parityReceived[groupIndex] = 1;
+    }
+  } else if (!assembly.received[packet.chunkIndex]) {
+    std::memcpy(assembly.payload.data() + packet.chunkOffset,
+                data + sizeof(UdpVideoChunkHeader), packet.chunkSize);
+    assembly.received[packet.chunkIndex] = 1;
+    ++assembly.receivedCount;
+  }
+
+  for (size_t groupIndex = 0; groupIndex < assembly.parity.size(); ++groupIndex) {
+    if (!assembly.parityReceived[groupIndex]) continue;
+    const uint16_t groupStart = static_cast<uint16_t>(groupIndex * kUdpVideoFecGroupSize);
+    const uint16_t groupEnd = std::min<uint16_t>(
+        assembly.chunkCount, static_cast<uint16_t>(groupStart + kUdpVideoFecGroupSize));
+    uint16_t missingIndex = 0;
+    uint16_t missingCount = 0;
+    for (uint16_t index = groupStart; index < groupEnd; ++index) {
+      if (!assembly.received[index]) {
+        missingIndex = index;
+        ++missingCount;
+      }
+    }
+    if (missingCount != 1) continue;
+    std::vector<uint8_t> recovered = assembly.parity[groupIndex];
+    for (uint16_t index = groupStart; index < groupEnd; ++index) {
+      if (index == missingIndex || !assembly.received[index]) continue;
+      const uint32_t offset = static_cast<uint32_t>(index) * assembly.chunkStride;
+      const uint32_t bytes = std::min<uint32_t>(assembly.chunkStride,
+                                                assembly.payloadSize - offset);
+      for (uint32_t i = 0; i < bytes; ++i) recovered[i] ^= assembly.payload[offset + i];
+    }
+    const uint32_t recoveredOffset = static_cast<uint32_t>(missingIndex) * assembly.chunkStride;
+    const uint32_t recoveredSize = std::min<uint32_t>(assembly.chunkStride,
+                                                      assembly.payloadSize - recoveredOffset);
+    std::memcpy(assembly.payload.data() + recoveredOffset, recovered.data(), recoveredSize);
+    assembly.received[missingIndex] = 1;
+    ++assembly.receivedCount;
+    result.fecRecovered = true;
+    ++result.fecRecoveredChunks;
+  }
+
+  for (uint16_t index = 0; index < assembly.chunkCount; ++index) {
+    if (!assembly.received[index]) {
+      result.expectedNextOffset = static_cast<uint32_t>(index) * assembly.chunkStride;
+      break;
+    }
+  }
+  if (assembly.receivedCount != assembly.chunkCount) {
+    result.disposition = UdpH264AssemblyDisposition::Partial;
+    return result;
+  }
+
+  assembly.header.payloadSize = assembly.payloadSize;
   result.disposition = UdpH264AssemblyDisposition::Completed;
-  result.frame.header = assemblingHeader_;
-  result.frame.payload = std::move(assemblingPayload_);
-  assembling_ = false;
+  result.frame.header = assembly.header;
+  result.frame.payload = std::move(assembly.payload);
+  if (deliveredAny_ && packet.seq != lastDeliveredSeq_ + 1u) {
+    result.droppedPreviousIncomplete = true;
+  }
+  deliveredAny_ = true;
+  lastDeliveredSeq_ = packet.seq;
+  assemblies_.erase(std::remove_if(assemblies_.begin(), assemblies_.end(),
+                                   [&](const Assembly& item) {
+                                     return !sequence_is_newer(item.seq, lastDeliveredSeq_);
+                                   }),
+                    assemblies_.end());
   return result;
 }
 

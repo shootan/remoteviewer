@@ -377,6 +377,9 @@ bool test_udp_assembler() {
   header->payloadSize = 4;
   header->chunkOffset = 0;
   header->chunkSize = 4;
+  header->chunkIndex = 0;
+  header->chunkCount = 1;
+  header->chunkStride = 4;
   datagram[sizeof(UdpVideoChunkHeader) + 0] = 1;
   datagram[sizeof(UdpVideoChunkHeader) + 1] = 2;
   datagram[sizeof(UdpVideoChunkHeader) + 2] = 3;
@@ -395,19 +398,75 @@ bool test_udp_assembler() {
   header->payloadSize = 8;
   header->chunkOffset = 0;
   header->chunkSize = 4;
+  header->chunkIndex = 0;
+  header->chunkCount = 2;
+  header->chunkStride = 4;
   result = assembler.PushDatagram(datagram.data(), datagram.size());
   if (!expect(result.disposition == UdpH264AssemblyDisposition::Partial,
               "udp assembler should enter partial state")) return false;
 
   header->flags = 0x4u;
-  header->seq = 43;
+  header->seq = 42;
   header->chunkOffset = 4;
+  header->chunkIndex = 1;
   result = assembler.PushDatagram(datagram.data(), datagram.size());
-  if (!expect(result.disposition == UdpH264AssemblyDisposition::Dropped && result.reorderDetected,
-              "udp assembler should detect reorder/drop")) return false;
+  if (!expect(result.disposition == UdpH264AssemblyDisposition::Completed,
+              "udp assembler should complete a multi-chunk frame")) return false;
 
+  // Data datagrams may be reordered by the network; offsets/indexes make this lossless.
+  assembler.Reset();
+  header->seq = 43;
+  header->flags = 0x4u;
+  header->payloadSize = 8;
+  header->chunkOffset = 4;
+  header->chunkIndex = 1;
+  result = assembler.PushDatagram(datagram.data(), datagram.size());
+  if (!expect(result.disposition == UdpH264AssemblyDisposition::Partial,
+              "udp assembler should accept a reordered last chunk")) return false;
+  header->flags = 0x2u;
+  header->chunkOffset = 0;
+  header->chunkIndex = 0;
+  result = assembler.PushDatagram(datagram.data(), datagram.size());
+  if (!expect(result.disposition == UdpH264AssemblyDisposition::Completed,
+              "udp assembler should complete reordered chunks")) return false;
+
+  // Drop one data chunk and recover it from the group's XOR parity packet.
   assembler.Reset();
   header->seq = 44;
+  header->payloadSize = 12;
+  header->chunkCount = 3;
+  header->chunkStride = 4;
+  header->flags = 0x2u;
+  header->chunkIndex = 0;
+  header->chunkOffset = 0;
+  for (int i = 0; i < 4; ++i) datagram[sizeof(UdpVideoChunkHeader) + i] = static_cast<uint8_t>(i + 1);
+  result = assembler.PushDatagram(datagram.data(), datagram.size());
+  if (!expect(result.disposition == UdpH264AssemblyDisposition::Partial,
+              "udp assembler fec first chunk should be partial")) return false;
+  header->flags = 0x4u;
+  header->chunkIndex = 2;
+  header->chunkOffset = 8;
+  for (int i = 0; i < 4; ++i) datagram[sizeof(UdpVideoChunkHeader) + i] = static_cast<uint8_t>(i + 9);
+  result = assembler.PushDatagram(datagram.data(), datagram.size());
+  if (!expect(result.disposition == UdpH264AssemblyDisposition::Partial,
+              "udp assembler fec missing chunk should remain partial")) return false;
+  header->flags = 0x10u;
+  header->chunkIndex = 0;
+  header->chunkOffset = 0;
+  // [1..4] XOR [5..8] XOR [9..12].
+  for (int i = 0; i < 4; ++i) {
+    datagram[sizeof(UdpVideoChunkHeader) + i] =
+        static_cast<uint8_t>((i + 1) ^ (i + 5) ^ (i + 9));
+  }
+  result = assembler.PushDatagram(datagram.data(), datagram.size());
+  if (!expect(result.disposition == UdpH264AssemblyDisposition::Completed && result.fecRecovered,
+              "udp assembler should recover one missing chunk with fec")) return false;
+  if (!expect(result.frame.payload.size() == 12 && result.frame.payload[4] == 5 &&
+                  result.frame.payload[7] == 8,
+              "udp assembler recovered payload mismatch")) return false;
+
+  assembler.Reset();
+  header->seq = 45;
   header->flags = 0x2u;
   header->payloadSize = (16u * 1024u * 1024u) + 1u;
   header->chunkOffset = 0;

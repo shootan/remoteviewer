@@ -21,6 +21,9 @@ class ClientEncodedFrameSink {
   virtual ~ClientEncodedFrameSink() = default;
   virtual void OnEncodedH264Frame(UdpH264AssembledFrame&& frame) = 0;
   virtual void OnVideoStreamReset() = 0;
+  // Called when a compressed reference frame was lost. Implementations that retain decoder
+  // state should flush it before the next IDR; the default keeps lightweight test sinks valid.
+  virtual void OnVideoDiscontinuity() {}
   virtual void OnWindowSelectionControlResult(const ControlWindowSelectedMessage& /* msg */) {}
 };
 
@@ -45,6 +48,7 @@ struct ClientSessionConnectArgs {
   // Tunnels control through the video socket instead of opening a TCP connection. Required
   // when the host was reached by hole punching, since only that one socket has a path.
   bool controlOverUdp = false;
+  std::string peerAuthToken;
   // An already-punched socket to adopt instead of opening a new one. It must be the socket the
   // punch was performed with: a fresh one would sit behind a different NAT mapping and the
   // host's packets would be dropped. The session takes ownership.

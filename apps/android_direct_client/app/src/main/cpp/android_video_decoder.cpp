@@ -20,6 +20,9 @@ namespace {
 constexpr const char* kLogTag = "remote60_android_direct";
 constexpr const char* kMimeTypeAvc = "video/avc";
 constexpr uint64_t kPtsDiscontinuityUs = 500000ULL;
+// One sub-frame of controlled playout headroom hides ordinary Wi-Fi arrival jitter. Frames
+// are still dropped rather than queued when the link falls materially behind.
+constexpr uint64_t kVideoPlayoutLeadUs = 30000ULL;
 constexpr uint64_t kBootstrapReplayIntervalUs = 250000ULL;
 constexpr uint64_t kBootstrapReplayMaxCount = 2ULL;
 
@@ -105,6 +108,15 @@ AndroidVideoDecoderSink::~AndroidVideoDecoderSink() {
   std::lock_guard<std::mutex> lock(mu_);
   ResetCodecLocked();
   ReleaseSurfaceLocked();
+}
+
+void AndroidVideoDecoderSink::SetTargetFps(uint32_t fps) {
+  std::lock_guard<std::mutex> lock(mu_);
+  const uint32_t clampedFps = std::clamp<uint32_t>(fps, 1u, 240u);
+  targetFrameIntervalUs_ =
+      std::max<uint64_t>(1ULL, 1000000ULL / static_cast<uint64_t>(clampedFps));
+  // A runtime FPS change starts a new presentation clock on the next frame.
+  ResetPtsStateLocked();
 }
 
 void AndroidVideoDecoderSink::SetSurface(JNIEnv* env, jobject surface) {
@@ -206,6 +218,14 @@ void AndroidVideoDecoderSink::OnVideoStreamReset() {
   awaitingSelectionAck_ = false;
   csd0_.clear();
   csd1_.clear();
+}
+
+void AndroidVideoDecoderSink::OnVideoDiscontinuity() {
+  std::lock_guard<std::mutex> lock(mu_);
+  // Keep SPS/PPS, dimensions, and the active selection generation. Only decoder reference
+  // pictures and pending compressed frames are invalid after a UDP loss.
+  ResetCodecLocked();
+  log_info("video decoder reset after transport discontinuity");
 }
 
 void AndroidVideoDecoderSink::OnWindowSelectionControlResult(
@@ -527,7 +547,6 @@ uint64_t AndroidVideoDecoderSink::ComputeQueuedPtsUsLocked(
       reanchorReason = "capture_before_base";
       ++ptsFallbackCount_;
     } else {
-      const uint64_t remoteDeltaUs = remoteCaptureUs - ptsRemoteBaseUs_;
       if (lastRemoteCaptureUs_ != 0) {
         const uint64_t remoteStepUs = remoteCaptureUs - lastRemoteCaptureUs_;
         if (remoteStepUs > kPtsDiscontinuityUs) {
@@ -537,7 +556,16 @@ uint64_t AndroidVideoDecoderSink::ComputeQueuedPtsUsLocked(
         }
       }
       if (!reanchor) {
-        rebasedPtsUs = ptsLocalBaseUs_ + remoteDeltaUs;
+        // The host capture clock can alternate 16/50 ms steps even while producing the
+        // requested 30 frames each second (monitor callback phase and async encoder drain).
+        // Advancing presentation by the negotiated fixed cadence makes those frames appear
+        // evenly instead of reproducing the capture jitter on screen.
+        rebasedPtsUs = lastQueuedPtsUs_ + targetFrameIntervalUs_;
+        if (localNowUs > rebasedPtsUs + targetFrameIntervalUs_) {
+          reanchor = true;
+          reanchorReason = "playout_underrun";
+          ++ptsFallbackCount_;
+        }
       }
     }
   }
@@ -545,8 +573,8 @@ uint64_t AndroidVideoDecoderSink::ComputeQueuedPtsUsLocked(
   if (reanchor) {
     ptsStreamGeneration_ = frame.header.streamGeneration;
     ptsRemoteBaseUs_ = remoteCaptureUs;
-    ptsLocalBaseUs_ = localNowUs;
-    rebasedPtsUs = localNowUs;
+    ptsLocalBaseUs_ = localNowUs + kVideoPlayoutLeadUs;
+    rebasedPtsUs = ptsLocalBaseUs_;
     ++ptsReanchorCount_;
     if (hadPtsBase || ptsReanchorCount_ == 1 || (ptsReanchorCount_ % 30u) == 1u) {
       char line[224];
@@ -679,7 +707,21 @@ void AndroidVideoDecoderSink::DrainOutputLocked() {
       lastOutputPresentationUs_ =
           (info.presentationTimeUs > 0) ? static_cast<uint64_t>(info.presentationTimeUs) : 0;
       latestOutputStreamGeneration_ = expectedStreamGeneration_;
-      AMediaCodec_releaseOutputBuffer(codec_, outputIndex, true);
+      const uint64_t nowUs = steady_now_us();
+      media_status_t releaseStatus = AMEDIA_OK;
+      if (lastOutputPresentationUs_ > nowUs + 1000ULL &&
+          lastOutputPresentationUs_ < nowUs + 250000ULL) {
+        // NDK timestamps use CLOCK_MONOTONIC, the same domain as steady_clock on Android.
+        releaseStatus = AMediaCodec_releaseOutputBufferAtTime(
+            codec_, outputIndex, static_cast<int64_t>(lastOutputPresentationUs_ * 1000ULL));
+      } else {
+        releaseStatus = AMediaCodec_releaseOutputBuffer(codec_, outputIndex, true);
+      }
+      if (releaseStatus != AMEDIA_OK) {
+        log_error("AMediaCodec output release failed");
+        ResetCodecLocked();
+        return;
+      }
       ++outputFrameCount_;
       if (pendingSelectionGeneration_ != 0 &&
           readySelectionGeneration_ != pendingSelectionGeneration_) {

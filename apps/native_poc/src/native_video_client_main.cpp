@@ -2822,7 +2822,9 @@ int main(int argc, char** argv) {
       const int n = recv(gSock, reinterpret_cast<char*>(&ack), sizeof(ack), 0);
       if (n >= static_cast<int>(sizeof(UdpHelloPacket)) &&
           ack.magic == remote60::native_poc::kMagic &&
-          ack.kind == static_cast<uint16_t>(UdpPacketKind::HelloAck)) {
+          ack.kind == static_cast<uint16_t>(UdpPacketKind::HelloAck) &&
+          ack.version == remote60::native_poc::kUdpProtocolVersion &&
+          (ack.features & remote60::native_poc::kUdpFeatureVideoFec) != 0) {
         handshakeOk = true;
         break;
       }
@@ -3087,6 +3089,7 @@ int main(int argc, char** argv) {
     uint64_t udpAssemblyMalformedCount = 0;
     uint64_t udpAssemblyReorderCount = 0;
     uint64_t udpAssemblyKeyReqCount = 0;
+    uint64_t udpAssemblyFecRecoveredCount = 0;
     uint32_t udpAssemblyDropPmLast = 0;
     uint64_t lastPacketRecvUs = 0;
     uint32_t lagTriggerStreak = 0;
@@ -3874,6 +3877,7 @@ int main(int argc, char** argv) {
       uint64_t lastUdpAssemblyMalformedCount = 0;
       uint64_t lastUdpAssemblyReorderCount = 0;
       uint64_t lastUdpAssemblyKeyReqCount = 0;
+      uint64_t lastUdpAssemblyFecRecoveredCount = 0;
       uint64_t lastUdpSimDroppedCount = 0;
       uint64_t lastUdpSimAcceptedCount = 0;
 
@@ -3905,14 +3909,28 @@ int main(int argc, char** argv) {
         ++udpChunkRecvCount;
 
         const auto assembleResult = assembler.PushDatagram(datagram.data(), static_cast<size_t>(n));
+        if (assembleResult.fecRecovered) {
+          udpAssemblyFecRecoveredCount += assembleResult.fecRecoveredChunks;
+        }
+        bool discontinuityHandled = false;
+        auto handle_udp_discontinuity = [&]() {
+          if (discontinuityHandled) return;
+          discontinuityHandled = true;
+          waitForKeyFrame = true;
+          decoder.reset();
+          request_keyframe(2);
+          ++udpAssemblyKeyReqCount;
+        };
         if (assembleResult.droppedPreviousIncomplete) {
           ++assemblyDropped;
           ++udpAssemblyDroppedCount;
+          handle_udp_discontinuity();
         }
 
         if (assembleResult.disposition == UdpH264AssemblyDisposition::Malformed) {
           ++skippedQueued;
           ++udpAssemblyMalformedCount;
+          handle_udp_discontinuity();
           if (assembleResult.oversizePayload && ((++oversizePayloadDropCount % 30ULL) == 1ULL)) {
             std::cout << "[native-video-client] dropped oversized udp payload bytes="
                       << assembleResult.rejectedPayloadSize
@@ -3926,11 +3944,7 @@ int main(int argc, char** argv) {
           ++assemblyDropped;
           ++udpAssemblyDroppedCount;
           if (assembleResult.reorderDetected) ++udpAssemblyReorderCount;
-          // Keep requesting keyframes on sustained assembly drops; rate-limit is handled in request_keyframe().
-          if ((assemblyDropped % 20) == 1) {
-            request_keyframe(2);
-            ++udpAssemblyKeyReqCount;
-          }
+          handle_udp_discontinuity();
           if ((assemblyDropped % 120) == 1) {
             std::cout << "[native-video-client] udp assembly drop count=" << assemblyDropped
                       << " seq=" << u.seq
@@ -3957,6 +3971,8 @@ int main(int argc, char** argv) {
           const uint64_t malformedDelta = udpAssemblyMalformedCount - lastUdpAssemblyMalformedCount;
           const uint64_t reorderDelta = udpAssemblyReorderCount - lastUdpAssemblyReorderCount;
           const uint64_t keyReqDelta = udpAssemblyKeyReqCount - lastUdpAssemblyKeyReqCount;
+          const uint64_t fecRecoveredDelta =
+              udpAssemblyFecRecoveredCount - lastUdpAssemblyFecRecoveredCount;
           const uint64_t simDroppedDelta = udpSimDroppedCount - lastUdpSimDroppedCount;
           const uint64_t simAcceptedDelta = udpSimAcceptedCount - lastUdpSimAcceptedCount;
           const uint64_t simTotalDelta = simDroppedDelta + simAcceptedDelta;
@@ -3975,6 +3991,7 @@ int main(int argc, char** argv) {
                     << " malformed=" << malformedDelta
                     << " reorder=" << reorderDelta
                     << " keyReq=" << keyReqDelta
+                    << " fecRecovered=" << fecRecoveredDelta
                     << " simDropPm=" << simDropPermille
                     << " simDropTotal=" << simDroppedDelta
                     << " waitForKey=" << (waitForKeyFrame ? 1 : 0)
@@ -3986,6 +4003,7 @@ int main(int argc, char** argv) {
           lastUdpAssemblyMalformedCount = udpAssemblyMalformedCount;
           lastUdpAssemblyReorderCount = udpAssemblyReorderCount;
           lastUdpAssemblyKeyReqCount = udpAssemblyKeyReqCount;
+          lastUdpAssemblyFecRecoveredCount = udpAssemblyFecRecoveredCount;
           lastUdpSimDroppedCount = udpSimDroppedCount;
           lastUdpSimAcceptedCount = udpSimAcceptedCount;
           udpAssemblyStatAtUs += 1000000ULL;

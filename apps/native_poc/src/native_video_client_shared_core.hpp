@@ -240,6 +240,8 @@ struct UdpH264AssemblyStepResult {
   bool droppedPreviousIncomplete = false;
   bool reorderDetected = false;
   bool oversizePayload = false;
+  bool fecRecovered = false;
+  uint32_t fecRecoveredChunks = 0;
   uint32_t packetSeq = 0;
   uint32_t expectedSeq = 0;
   uint32_t packetChunkOffset = 0;
@@ -254,12 +256,22 @@ class UdpH264FrameAssembler {
   UdpH264AssemblyStepResult PushDatagram(const uint8_t* data, size_t len);
 
  private:
-  bool assembling_ = false;
-  uint32_t assemblingSeq_ = 0;
-  uint32_t assemblingExpected_ = 0;
-  uint32_t assemblingNextOffset_ = 0;
-  EncodedFrameHeader assemblingHeader_{};
-  std::vector<uint8_t> assemblingPayload_;
+  struct Assembly {
+    uint32_t seq = 0;
+    uint32_t payloadSize = 0;
+    uint16_t chunkCount = 0;
+    uint32_t chunkStride = 0;
+    uint32_t receivedCount = 0;
+    EncodedFrameHeader header{};
+    std::vector<uint8_t> payload;
+    std::vector<uint8_t> received;
+    std::vector<std::vector<uint8_t>> parity;
+    std::vector<uint8_t> parityReceived;
+  };
+
+  std::deque<Assembly> assemblies_;
+  bool deliveredAny_ = false;
+  uint32_t lastDeliveredSeq_ = 0;
 };
 
 struct WindowTargetUiEntry {

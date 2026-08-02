@@ -1509,13 +1509,9 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
   (void)enc_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
   codec_debug_log("encoder initialize: stream started");
   started_ = true;
-  sampleTimeOffsetInitialized_ = false;
-  sampleTimeOffsetHns_ = 0;
-  sampleTimeOutputTimestampTrusted_ = true;
   sampleTimeOutputTimestampTotalSamples_ = 0;
   sampleTimeOutputTimestampFallbackCount_ = 0;
-  sampleTimeOutputTimestampRecoveryStreak_ = 0;
-  sampleTimeOutputTimestampRecoveryOffsetHns_ = 0;
+  pendingInputSampleTimesHns_.clear();
   frameIndex_ = 0;
   sequenceHeaderAnnexb_.clear();
 
@@ -1587,10 +1583,6 @@ bool H264Encoder::encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFr
     encodeStats->encodeCallUs = (encodeCallEndUs >= encodeCallStartUs) ? (encodeCallEndUs - encodeCallStartUs) : 0;
     return ok;
   };
-  constexpr int64_t kEncoderOutputTsSkewUs = 50000;
-  constexpr int64_t kEncoderOutputTsSkewHns = kEncoderOutputTsSkewUs * 10;
-  constexpr uint32_t kEncoderOutputTsRecoverySamples = 8;
-
   Microsoft::WRL::ComPtr<IMFSample> sample;
   IMFSample* inputSample = nullptr;
   const int64_t sampleTime = (inputSampleTimeHns > 0)
@@ -1722,9 +1714,7 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
     encodeStats->encodeCallUs = (encodeCallEndUs >= encodeCallStartUs) ? (encodeCallEndUs - encodeCallStartUs) : 0;
     return ok;
   };
-  constexpr int64_t kEncoderOutputTsSkewUs = 50000;
-  constexpr int64_t kEncoderOutputTsSkewHns = kEncoderOutputTsSkewUs * 10;
-  constexpr uint32_t kEncoderOutputTsRecoverySamples = 8;
+  constexpr int64_t kEncoderOutputTsSkewHns = 50000LL * 10LL;
 
   if (forceKeyFrame) {
     (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncVideoForceKeyFrame, 1);
@@ -1797,54 +1787,26 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
         const bool maybeKey = sampleKey || annexb_contains_idr(bytes.data(), bytes.size());
         au.keyFrame = maybeKey;
         int64_t outSampleTimeHns = 0;
-        bool sampleTimeFromOutput = false;
+        const bool hasOutputSampleTime =
+            SUCCEEDED(produced->GetSampleTime(&outSampleTimeHns)) && outSampleTimeHns > 0;
+        if (hasOutputSampleTime) ++sampleTimeOutputTimestampTotalSamples_;
+
+        // Do not align an older async output to `sampleTime`, which belongs to this call's
+        // newest input. That collapsed multiple frames onto one timestamp and produced the
+        // visible burst/pause cadence at 30 fps. MFT output order follows accepted input
+        // order, so the accepted-input FIFO is the stable source of truth even for vendor
+        // encoders that rewrite output timestamps to a private zero-based timeline.
         int64_t normalizedAuSampleTimeHns = sampleTime;
-        if (SUCCEEDED(produced->GetSampleTime(&outSampleTimeHns)) && outSampleTimeHns > 0) {
-          ++sampleTimeOutputTimestampTotalSamples_;
-          const int64_t candidateOffsetHns = sampleTime - outSampleTimeHns;
-          if (sampleTimeOutputTimestampTrusted_) {
-            if (!sampleTimeOffsetInitialized_) {
-              sampleTimeOffsetHns_ = candidateOffsetHns;
-              sampleTimeOffsetInitialized_ = true;
-            }
-            normalizedAuSampleTimeHns = outSampleTimeHns + sampleTimeOffsetHns_;
-            if (std::llabs(sampleTime - normalizedAuSampleTimeHns) > kEncoderOutputTsSkewHns) {
-              sampleTimeOutputTimestampTrusted_ = false;
-              sampleTimeOutputTimestampRecoveryStreak_ = 0;
-              sampleTimeOutputTimestampRecoveryOffsetHns_ = 0;
-              sampleTimeOutputTimestampFallbackCount_++;
-              sampleTimeFromOutput = false;
-              normalizedAuSampleTimeHns = sampleTime;
-              if (env_truthy_local("REMOTE60_NATIVE_DEBUG_CODEC")) {
-                codec_debug_log(("encoder output timestamp drifted >" +
-                                 std::to_string(kEncoderOutputTsSkewUs) +
-                                 "us; fallback to input timestamp").c_str());
-              }
-            } else {
-              sampleTimeFromOutput = true;
-              sampleTimeOutputTimestampRecoveryStreak_ = 0;
-            }
-          } else {
-            normalizedAuSampleTimeHns = sampleTime;
-            if (sampleTimeOutputTimestampRecoveryStreak_ == 0 ||
-                std::llabs(candidateOffsetHns - sampleTimeOutputTimestampRecoveryOffsetHns_) >
-                    kEncoderOutputTsSkewHns) {
-              sampleTimeOutputTimestampRecoveryOffsetHns_ = candidateOffsetHns;
-              sampleTimeOutputTimestampRecoveryStreak_ = 1;
-            } else {
-              ++sampleTimeOutputTimestampRecoveryStreak_;
-              if (sampleTimeOutputTimestampRecoveryStreak_ >= kEncoderOutputTsRecoverySamples) {
-                sampleTimeOffsetHns_ = sampleTimeOutputTimestampRecoveryOffsetHns_;
-                sampleTimeOffsetInitialized_ = true;
-                sampleTimeOutputTimestampTrusted_ = true;
-                sampleTimeOutputTimestampRecoveryStreak_ = 0;
-                if (env_truthy_local("REMOTE60_NATIVE_DEBUG_CODEC")) {
-                  codec_debug_log("encoder output timestamp trust recovered after consecutive matches");
-                }
-              }
-            }
-          }
+        if (!pendingInputSampleTimesHns_.empty()) {
+          normalizedAuSampleTimeHns = pendingInputSampleTimesHns_.front();
+          pendingInputSampleTimesHns_.pop_front();
+        } else {
+          ++sampleTimeOutputTimestampFallbackCount_;
         }
+        const bool sampleTimeFromOutput =
+            hasOutputSampleTime &&
+            std::llabs(outSampleTimeHns - normalizedAuSampleTimeHns) <=
+                kEncoderOutputTsSkewHns;
         au.sampleTimeHns = normalizedAuSampleTimeHns;
         au.sampleTimeFromOutput = sampleTimeFromOutput;
         if (maybeKey && !sequenceHeaderAnnexb_.empty() &&
@@ -1891,6 +1853,15 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
       codec_debug_log(line.c_str());
     }
     return finish_call(false);
+  }
+  pendingInputSampleTimesHns_.push_back(sampleTime);
+  constexpr size_t kPendingEncoderTimestampMax = 64;
+  if (pendingInputSampleTimesHns_.size() > kPendingEncoderTimestampMax) {
+    pendingInputSampleTimesHns_.pop_front();
+    ++sampleTimeOutputTimestampFallbackCount_;
+    if (env_truthy_local("REMOTE60_NATIVE_DEBUG_CODEC")) {
+      codec_debug_log("encoder pending input timestamp queue overflowed");
+    }
   }
   ++frameIndex_;
 
@@ -1944,13 +1915,9 @@ void H264Encoder::shutdown() {
     enc_.Reset();
   }
   started_ = false;
-  sampleTimeOffsetInitialized_ = false;
-  sampleTimeOffsetHns_ = 0;
-  sampleTimeOutputTimestampTrusted_ = true;
   sampleTimeOutputTimestampTotalSamples_ = 0;
   sampleTimeOutputTimestampFallbackCount_ = 0;
-  sampleTimeOutputTimestampRecoveryStreak_ = 0;
-  sampleTimeOutputTimestampRecoveryOffsetHns_ = 0;
+  pendingInputSampleTimesHns_.clear();
   frameIndex_ = 0;
   sequenceHeaderAnnexb_.clear();
   asyncTransform_ = false;

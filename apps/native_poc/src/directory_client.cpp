@@ -563,11 +563,13 @@ bool HostAgent::Heartbeat(std::vector<PunchTarget>* outPunch) {
         const std::string entry = resp.substr(objStart, objEnd - objStart + 1);
         std::string ip;
         uint32_t port = 0;
-        if (json_get_string(entry, "ip", &ip) && json_get_u32(entry, "port", &port) && port &&
+        std::string punchToken;
+        if (json_get_string(entry, "ip", &ip) && json_get_u32(entry, "port", &port) &&
+            json_get_string(entry, "punchToken", &punchToken) && punchToken.size() == 32 && port &&
             port <= 65535) {
           in_addr parsed{};
           if (inet_pton(AF_INET, ip.c_str(), &parsed) == 1) {
-            outPunch->push_back({parsed.s_addr, static_cast<uint16_t>(port)});
+            outPunch->push_back({parsed.s_addr, static_cast<uint16_t>(port), punchToken});
           }
         }
         cursor = objEnd + 1;
@@ -588,6 +590,19 @@ void HostAgent::Punch(const std::vector<PunchTarget>& targets) {
   }
   SetStatus("punching");
 
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    const auto now = std::chrono::steady_clock::now();
+    authorizedPeers_.erase(
+        std::remove_if(authorizedPeers_.begin(), authorizedPeers_.end(),
+                       [&](const AuthorizedPeer& peer) { return peer.expiresAt <= now; }),
+        authorizedPeers_.end());
+    for (const auto& target : targets) {
+      authorizedPeers_.push_back(
+          AuthorizedPeer{target, now + std::chrono::seconds(30)});
+    }
+  }
+
   UdpHelloPacket packet{};
   packet.kind = static_cast<uint16_t>(UdpPacketKind::Punch);
   for (int i = 0; i < kPunchPackets && running_.load(); ++i) {
@@ -600,6 +615,25 @@ void HostAgent::Punch(const std::vector<PunchTarget>& targets) {
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(kPunchIntervalMs));
   }
+}
+
+bool HostAgent::AuthorizePeer(const std::string& punchToken, const sockaddr_in& from) {
+  if (punchToken.empty()) return false;
+  std::lock_guard<std::mutex> lock(mu_);
+  const auto now = std::chrono::steady_clock::now();
+  authorizedPeers_.erase(
+      std::remove_if(authorizedPeers_.begin(), authorizedPeers_.end(),
+                     [&](const AuthorizedPeer& peer) { return peer.expiresAt <= now; }),
+      authorizedPeers_.end());
+  const auto match = std::find_if(authorizedPeers_.begin(), authorizedPeers_.end(),
+                                  [&](const AuthorizedPeer& peer) {
+                                    return peer.target.punchToken == punchToken &&
+                                           peer.target.ipv4NetworkOrder == from.sin_addr.s_addr &&
+                                           htons(peer.target.port) == from.sin_port;
+                                  });
+  if (match == authorizedPeers_.end()) return false;
+  authorizedPeers_.erase(match);  // one connection, one capability
+  return true;
 }
 
 void HostAgent::Run() {

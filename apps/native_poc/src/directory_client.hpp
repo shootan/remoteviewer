@@ -14,6 +14,7 @@
 #include <ws2tcpip.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -109,6 +110,9 @@ class HostAgent {
    */
   bool ConsumeUdpPacket(const void* data, size_t len, const sockaddr_in& from);
 
+  /** Consumes a one-time /api/connect capability for this exact observed UDP peer. */
+  bool AuthorizePeer(const std::string& punchToken, const sockaddr_in& from);
+
   /** Human-readable one-liner for status output; safe to call from any thread. */
   std::string StatusLine() const;
 
@@ -116,6 +120,12 @@ class HostAgent {
   struct PunchTarget {
     uint32_t ipv4NetworkOrder = 0;
     uint16_t port = 0;
+    std::string punchToken;
+  };
+
+  struct AuthorizedPeer {
+    PunchTarget target;
+    std::chrono::steady_clock::time_point expiresAt;
   };
 
   void Run();
@@ -151,6 +161,7 @@ class HostAgent {
   bool observedReady_ = false;
   std::string observedIp_;
   uint16_t observedPort_ = 0;
+  std::vector<AuthorizedPeer> authorizedPeers_;
 };
 
 }  // namespace remote60::native_poc::directory

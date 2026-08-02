@@ -22,7 +22,12 @@ object NativeSessionBridge {
     ): String
 
     /** Punches towards the host on the observed socket and starts the session on it. */
-    external fun nativeDirectoryConnect(hostIp: String, hostPort: Int, punchBudgetMs: Int): Boolean
+    external fun nativeDirectoryConnect(
+        hostIp: String,
+        hostPort: Int,
+        punchBudgetMs: Int,
+        punchToken: String,
+    ): Boolean
 
     external fun nativeDirectoryLastError(): String
     external fun nativeSetSurface(surface: Surface?)

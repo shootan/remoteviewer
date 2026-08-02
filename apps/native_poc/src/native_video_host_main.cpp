@@ -48,6 +48,7 @@
 #include "json_profile.hpp"
 #include "native_video_transport.hpp"
 #include "poc_protocol.hpp"
+#include "secure_input_broker.hpp"
 #include "time_utils.hpp"
 #include "udp_control_channel.hpp"
 #include "capture_backend_dxgi.hpp"
@@ -91,6 +92,7 @@ using remote60::native_poc::UdpCodec;
 using remote60::native_poc::UdpHelloPacket;
 using remote60::native_poc::UdpPacketKind;
 using remote60::native_poc::UdpVideoChunkHeader;
+using remote60::native_poc::SecureInputBrokerClient;
 using remote60::native_poc::VideoTransport;
 using remote60::native_poc::bgra_to_nv12;
 using remote60::native_poc::clamp_udp_mtu;
@@ -128,6 +130,49 @@ constexpr uint32_t kFrameGatingSampleTargetDefault = 2048;
 constexpr uint32_t kKeyReqMinIntervalUsDefault = 120000;  // 120ms
 constexpr uint32_t kKeyReqTokenRefillUsDefault = 300000;  // 300ms / token
 constexpr uint32_t kKeyReqTokenCapacityDefault = 3;
+
+void wake_display_for_remote_session() {
+  // ES_DISPLAY_REQUIRED resets the idle timer, but a monitor that has already powered down
+  // is not guaranteed to light immediately on every display driver. Mirror a real local
+  // wake without leaving the pointer displaced: the paired relative moves cancel out.
+  INPUT wake[2]{};
+  wake[0].type = INPUT_MOUSE;
+  wake[0].mi.dx = 1;
+  wake[0].mi.dwFlags = MOUSEEVENTF_MOVE;
+  wake[1].type = INPUT_MOUSE;
+  wake[1].mi.dx = -1;
+  wake[1].mi.dwFlags = MOUSEEVENTF_MOVE;
+  (void)SendInput(2, wake, sizeof(INPUT));
+  (void)PostMessageW(HWND_BROADCAST, WM_SYSCOMMAND,
+                     static_cast<WPARAM>(SC_MONITORPOWER), static_cast<LPARAM>(-1));
+}
+
+class HostPowerKeepalive {
+ public:
+  HostPowerKeepalive() {
+    Apply(false);
+  }
+
+  ~HostPowerKeepalive() {
+    (void)SetThreadExecutionState(ES_CONTINUOUS);
+  }
+
+  void SetStreaming(bool streaming, bool wakeDisplay = false) {
+    if (streaming_ == streaming && !wakeDisplay) return;
+    streaming_ = streaming;
+    Apply(streaming);
+    if (streaming && wakeDisplay) wake_display_for_remote_session();
+  }
+
+ private:
+  static void Apply(bool streaming) {
+    EXECUTION_STATE flags = ES_CONTINUOUS | ES_SYSTEM_REQUIRED;
+    if (streaming) flags = static_cast<EXECUTION_STATE>(flags | ES_DISPLAY_REQUIRED);
+    (void)SetThreadExecutionState(flags);
+  }
+
+  bool streaming_ = false;
+};
 
 struct HostBottleneckStage {
   uint32_t code = 0;
@@ -2385,94 +2430,113 @@ uint64_t udp_pace_budget_us(size_t payloadSize, uint32_t chunkCount, bool keyFra
   return (static_cast<uint64_t>(payloadSize) * 8ULL * 1000000ULL) / static_cast<uint64_t>(peakBps);
 }
 
-bool send_udp_chunks(SOCKET s, const sockaddr_in& peer, const uint8_t* payload, size_t payloadSize,
-                     const UdpVideoChunkHeader& baseHeader, uint32_t mtuBytes) {
+bool send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uint8_t* payload,
+                          size_t payloadSize, const UdpVideoChunkHeader& baseHeader,
+                          uint32_t mtuBytes, SendPathStats* stats) {
   if (!payload || payloadSize == 0 || s == INVALID_SOCKET) return false;
-  const uint32_t safeMtu = clamp_udp_mtu(mtuBytes);
-  if (safeMtu <= sizeof(UdpVideoChunkHeader)) return false;
-  const uint32_t maxChunk = safeMtu - static_cast<uint32_t>(sizeof(UdpVideoChunkHeader));
-  std::vector<uint8_t> datagram(safeMtu);
-  size_t offset = 0;
-  const uint32_t chunkCount =
-      static_cast<uint32_t>((payloadSize + maxChunk - 1) / maxChunk);
-  const uint64_t budgetUs =
-      udp_pace_budget_us(payloadSize, chunkCount, (baseHeader.flags & 0x1u) != 0);
-  const uint64_t paceStartUs = budgetUs > 0 ? qpc_now_us() : 0;
-  uint32_t chunkIndex = 0;
-
-  while (offset < payloadSize) {
-    const uint32_t chunkSize = static_cast<uint32_t>(std::min<size_t>(maxChunk, payloadSize - offset));
-    UdpVideoChunkHeader h = baseHeader;
-    h.chunkOffset = static_cast<uint32_t>(offset);
-    h.chunkSize = chunkSize;
-    h.flags &= static_cast<uint16_t>(~(0x2u | 0x4u));
-    if (offset == 0) h.flags |= 0x2u;
-    if (offset + chunkSize >= payloadSize) h.flags |= 0x4u;
-    std::memcpy(datagram.data(), &h, sizeof(h));
-    std::memcpy(datagram.data() + sizeof(h), payload + offset, chunkSize);
-    if (budgetUs > 0 && chunkIndex > 0) {
-      udp_pace_wait_until(paceStartUs + (budgetUs * chunkIndex) / chunkCount);
-    }
-    const int n = sendto(s, reinterpret_cast<const char*>(datagram.data()),
-                         static_cast<int>(sizeof(h) + chunkSize), 0,
-                         reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
-    if (n <= 0) return false;
-    offset += chunkSize;
-    ++chunkIndex;
-  }
-  return true;
-}
-
-bool send_udp_chunks_timed(SOCKET s, const sockaddr_in& peer, const uint8_t* payload, size_t payloadSize,
-                          const UdpVideoChunkHeader& baseHeader, uint32_t mtuBytes,
-                          SendPathStats* stats) {
-  if (!payload || payloadSize == 0 || s == INVALID_SOCKET) return false;
+  if (payloadSize > std::numeric_limits<uint32_t>::max()) return false;
   const uint64_t startUs = qpc_now_us();
   const uint32_t safeMtu = clamp_udp_mtu(mtuBytes);
   if (safeMtu <= sizeof(UdpVideoChunkHeader)) return false;
   const uint32_t maxChunk = safeMtu - static_cast<uint32_t>(sizeof(UdpVideoChunkHeader));
   std::vector<uint8_t> datagram(safeMtu);
-  size_t offset = 0;
-  if (!stats) {
-    return send_udp_chunks(s, peer, payload, payloadSize, baseHeader, mtuBytes);
-  }
   const uint32_t chunkCount =
       static_cast<uint32_t>((payloadSize + maxChunk - 1) / maxChunk);
+  if (chunkCount == 0 || chunkCount > std::numeric_limits<uint16_t>::max()) return false;
+  const uint32_t fecGroupCount =
+      (chunkCount + remote60::native_poc::kUdpVideoFecGroupSize - 1u) /
+      remote60::native_poc::kUdpVideoFecGroupSize;
+  const uint32_t packetCount = chunkCount + fecGroupCount;
+  const uint64_t pacedPayloadBytes =
+      static_cast<uint64_t>(payloadSize) + static_cast<uint64_t>(fecGroupCount) * maxChunk;
   const uint64_t budgetUs =
-      udp_pace_budget_us(payloadSize, chunkCount, (baseHeader.flags & 0x1u) != 0);
-  uint32_t chunkIndex = 0;
+      udp_pace_budget_us(static_cast<size_t>(pacedPayloadBytes), packetCount,
+                         (baseHeader.flags & 0x1u) != 0);
+  uint32_t packetOrdinal = 0;
 
-  while (offset < payloadSize) {
-    const uint32_t chunkSize = static_cast<uint32_t>(std::min<size_t>(maxChunk, payloadSize - offset));
+  auto send_packet = [&](const UdpVideoChunkHeader& header, const uint8_t* bytes,
+                         uint32_t byteCount) -> bool {
+    if (budgetUs > 0 && packetOrdinal > 0) {
+      udp_pace_wait_until(startUs + (budgetUs * packetOrdinal) / packetCount);
+    }
+    ++packetOrdinal;
+    std::memcpy(datagram.data(), &header, sizeof(header));
+    std::memcpy(datagram.data() + sizeof(header), bytes, byteCount);
+    const uint64_t callStartUs = stats ? qpc_now_us() : 0;
+    const int n = sendto(s, reinterpret_cast<const char*>(datagram.data()),
+                         static_cast<int>(sizeof(header) + byteCount), 0,
+                         reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
+    if (n <= 0) return false;
+    if (stats) {
+      const uint64_t callDoneUs = qpc_now_us();
+      const uint64_t callUs = callDoneUs >= callStartUs ? callDoneUs - callStartUs : 0;
+      ++stats->payloadChunkCount;
+      ++stats->payloadCallCount;
+      stats->payloadUs += callUs;
+      stats->payloadChunkMaxUs = std::max(stats->payloadChunkMaxUs, callUs);
+    }
+    return true;
+  };
+
+  for (uint32_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
+    const size_t offset = static_cast<size_t>(chunkIndex) * maxChunk;
+    const uint32_t chunkSize =
+        static_cast<uint32_t>(std::min<size_t>(maxChunk, payloadSize - offset));
     UdpVideoChunkHeader h = baseHeader;
     h.chunkOffset = static_cast<uint32_t>(offset);
     h.chunkSize = chunkSize;
-    h.flags &= static_cast<uint16_t>(~(0x2u | 0x4u));
+    h.chunkIndex = static_cast<uint16_t>(chunkIndex);
+    h.chunkCount = static_cast<uint16_t>(chunkCount);
+    h.chunkStride = maxChunk;
+    h.flags &= static_cast<uint16_t>(~(0x2u | 0x4u | 0x10u));
     if (offset == 0) h.flags |= 0x2u;
     if (offset + chunkSize >= payloadSize) h.flags |= 0x4u;
-    std::memcpy(datagram.data(), &h, sizeof(h));
-    std::memcpy(datagram.data() + sizeof(h), payload + offset, chunkSize);
-    if (budgetUs > 0 && chunkIndex > 0) {
-      udp_pace_wait_until(startUs + (budgetUs * chunkIndex) / chunkCount);
-    }
-    ++chunkIndex;
-
-    const uint64_t callStartUs = qpc_now_us();
-    const int n = sendto(s, reinterpret_cast<const char*>(datagram.data()),
-                         static_cast<int>(sizeof(h) + chunkSize), 0,
-                         reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
-    const uint64_t callDoneUs = qpc_now_us();
-    if (n <= 0) return false;
-    ++stats->payloadChunkCount;
-    ++stats->payloadCallCount;
-    const uint64_t callUs = (callDoneUs >= callStartUs) ? (callDoneUs - callStartUs) : 0;
-    if (callUs > stats->payloadChunkMaxUs) stats->payloadChunkMaxUs = callUs;
-    stats->payloadUs += callUs;
-    offset += chunkSize;
+    if (!send_packet(h, payload + offset, chunkSize)) return false;
   }
-  const uint64_t doneUs = qpc_now_us();
-  stats->payloadUs = (doneUs >= startUs) ? (doneUs - startUs) : stats->payloadUs;
+
+  // One XOR parity datagram per eight data datagrams repairs one loss in every group. The
+  // parity is sent after the frame data so a short Wi-Fi burst is less likely to erase a data
+  // packet and its repair packet together.
+  std::vector<uint8_t> parity(maxChunk, 0);
+  for (uint32_t groupStart = 0; groupStart < chunkCount;
+       groupStart += remote60::native_poc::kUdpVideoFecGroupSize) {
+    std::fill(parity.begin(), parity.end(), 0);
+    const uint32_t groupEnd = std::min<uint32_t>(
+        chunkCount, groupStart + remote60::native_poc::kUdpVideoFecGroupSize);
+    for (uint32_t chunkIndex = groupStart; chunkIndex < groupEnd; ++chunkIndex) {
+      const size_t offset = static_cast<size_t>(chunkIndex) * maxChunk;
+      const uint32_t chunkSize =
+          static_cast<uint32_t>(std::min<size_t>(maxChunk, payloadSize - offset));
+      for (uint32_t i = 0; i < chunkSize; ++i) parity[i] ^= payload[offset + i];
+    }
+    UdpVideoChunkHeader h = baseHeader;
+    h.flags &= static_cast<uint16_t>(~(0x2u | 0x4u));
+    h.flags |= 0x10u;
+    h.chunkOffset = groupStart * maxChunk;
+    h.chunkSize = maxChunk;
+    h.chunkIndex = static_cast<uint16_t>(groupStart);
+    h.chunkCount = static_cast<uint16_t>(chunkCount);
+    h.chunkStride = maxChunk;
+    if (!send_packet(h, parity.data(), maxChunk)) return false;
+  }
+
+  if (stats) {
+    const uint64_t doneUs = qpc_now_us();
+    stats->payloadUs = doneUs >= startUs ? doneUs - startUs : stats->payloadUs;
+  }
   return true;
+}
+
+bool send_udp_chunks(SOCKET s, const sockaddr_in& peer, const uint8_t* payload,
+                     size_t payloadSize, const UdpVideoChunkHeader& baseHeader,
+                     uint32_t mtuBytes) {
+  return send_udp_chunks_impl(s, peer, payload, payloadSize, baseHeader, mtuBytes, nullptr);
+}
+
+bool send_udp_chunks_timed(SOCKET s, const sockaddr_in& peer, const uint8_t* payload,
+                           size_t payloadSize, const UdpVideoChunkHeader& baseHeader,
+                           uint32_t mtuBytes, SendPathStats* stats) {
+  return send_udp_chunks_impl(s, peer, payload, payloadSize, baseHeader, mtuBytes, stats);
 }
 
 struct FrameState {
@@ -2508,6 +2572,9 @@ struct FrameState {
 }  // namespace
 
 int main(int argc, char** argv) {
+  // A remote host cannot wake itself after Windows enters S3. Keep the machine reachable
+  // while the host is running; the display requirement is enabled only for an active stream.
+  HostPowerKeepalive powerKeepalive;
   std::cout.setf(std::ios::unitbuf);
   std::cerr.setf(std::ios::unitbuf);
 
@@ -2539,10 +2606,13 @@ int main(int argc, char** argv) {
   // average rate. 0 restores the old unthrottled burst.
   const uint32_t udpPacePeakPercent =
       env_u32_clamped("REMOTE60_NATIVE_UDP_PACE_PEAK_PERCENT", 500, 0, 2000);
+  // A percentage alone is too slow at low user bitrates: 4 Mbps * 5 can take longer than
+  // one 30 fps period to deliver a normal motion frame plus FEC. Keep packets paced, but
+  // finish ordinary frames within the frame budget.
+  const uint32_t udpPacePeakFloorBps = env_u32_clamped(
+      "REMOTE60_NATIVE_UDP_PACE_PEAK_FLOOR_BPS", 40000000, 0, 1000000000);
   const uint32_t udpKeyframePacePeakBps = env_u32_clamped(
       "REMOTE60_NATIVE_UDP_KEYFRAME_PACE_PEAK_BPS", 100000000, 0, 1000000000);
-  const uint32_t pacingHeadroomFps = env_u32_clamped(
-      "REMOTE60_NATIVE_PACING_HEADROOM_FPS", 4, 0, 30);
   const bool guardStalePreEncode = env_truthy("REMOTE60_NATIVE_GUARD_STALE_PREENCODE");
   const bool abrEnabled = useH264 && !env_truthy("REMOTE60_NATIVE_ABR_DISABLE");
   const bool abrQualityFirst = env_truthy("REMOTE60_NATIVE_ADAPTIVE_QUALITY_FIRST");
@@ -2643,8 +2713,13 @@ int main(int argc, char** argv) {
   if (useH264) std::cout << " bitrate=" << args.bitrate;
   std::cout << " seconds=" << args.seconds << "\n";
   if (useH264) {
-    const uint64_t pacePeakBps =
-        (static_cast<uint64_t>(args.bitrate) * udpPacePeakPercent) / 100ULL;
+    const uint64_t pacePeakBps = noPacingH264
+                                     ? 0ULL
+                                     : std::max<uint64_t>(
+                                           udpPacePeakFloorBps,
+                                           (static_cast<uint64_t>(args.bitrate) *
+                                            udpPacePeakPercent) /
+                                               100ULL);
     gUdpPacePeakBitrateBps.store(
         static_cast<uint32_t>(std::min<uint64_t>(pacePeakBps, 4000000000ULL)),
         std::memory_order_relaxed);
@@ -2653,9 +2728,9 @@ int main(int argc, char** argv) {
     std::cout << "[native-video-host] h264 pacing=" << (noPacingH264 ? "off" : "on")
               << " udpPacePeakPercent=" << udpPacePeakPercent
               << " udpPacePeakBps=" << gUdpPacePeakBitrateBps.load(std::memory_order_relaxed)
+              << " udpPacePeakFloorBps=" << udpPacePeakFloorBps
               << " udpKeyframePacePeakBps="
               << gUdpKeyframePacePeakBitrateBps.load(std::memory_order_relaxed)
-              << " pacingHeadroomFps=" << pacingHeadroomFps
               << " stalePreEncodeGuard=" << (guardStalePreEncode ? 1 : 0)
               << " capturePoolBuffers=" << captureFramePoolBuffers
               << " encoderTuneMode=" << encoderTuneMode
@@ -2717,6 +2792,31 @@ int main(int argc, char** argv) {
   SOCKET clientSock = INVALID_SOCKET;
   sockaddr_in udpPeer{};
   bool udpPeerReady = false;
+  std::atomic<bool> sessionDirectoryAuthenticated{false};
+  std::mutex directorySessionAuthMu;
+  std::string directorySessionToken;
+  uint32_t directorySessionIpNet = 0;
+  auto authorize_directory_session = [&](const std::string& token,
+                                         const sockaddr_in& peer) -> bool {
+    if (token.empty()) return false;
+    {
+      std::lock_guard<std::mutex> lock(directorySessionAuthMu);
+      if (!directorySessionToken.empty() && token == directorySessionToken &&
+          peer.sin_addr.s_addr == directorySessionIpNet) {
+        // A controller reconnect creates a new UDP socket/port. The already-proven opaque
+        // capability remains the session credential, while the source IP stays bound.
+        return true;
+      }
+    }
+    if (!directoryAgent.AuthorizePeer(token, peer)) return false;
+    {
+      std::lock_guard<std::mutex> lock(directorySessionAuthMu);
+      directorySessionToken = token;
+      directorySessionIpNet = peer.sin_addr.s_addr;
+    }
+    return true;
+  };
+  SecureInputBrokerClient secureInputBroker;
 
   // H4: the encode thread hands encoded frames to this sender instead of pacing the wire
   // inline. Pacing a 60ms keyframe used to stall the next frame's encode start directly.
@@ -2727,6 +2827,7 @@ int main(int argc, char** argv) {
     std::vector<uint8_t> bytes;
     UdpVideoChunkHeader udpHdr{};
     bool keyFrame = false;
+    uint64_t frameIntervalUs = 0;
   };
   std::mutex senderMu;
   std::condition_variable senderCv;
@@ -2853,7 +2954,9 @@ int main(int argc, char** argv) {
       if (isHello) {
         std::memcpy(&hello, rx, sizeof(hello));
         isHello = hello.magic == remote60::native_poc::kMagic &&
-                  hello.kind == static_cast<uint16_t>(UdpPacketKind::Hello);
+                  hello.kind == static_cast<uint16_t>(UdpPacketKind::Hello) &&
+                  hello.version == remote60::native_poc::kUdpProtocolVersion &&
+                  (hello.features & remote60::native_poc::kUdpFeatureVideoFec) != 0;
       }
       if (!isHello) {
         (void)directoryAgent.ConsumeUdpPacket(rx, static_cast<size_t>(n), peer);
@@ -2862,6 +2965,17 @@ int main(int argc, char** argv) {
 
       UdpHelloPacket ack{};
       ack.kind = static_cast<uint16_t>(UdpPacketKind::HelloAck);
+      size_t tokenLen = 0;
+      while (tokenLen < sizeof(hello.authToken) && hello.authToken[tokenLen] != '\0') ++tokenLen;
+      if (tokenLen > 0) {
+        const std::string authToken(hello.authToken, hello.authToken + tokenLen);
+        if (!authorize_directory_session(authToken, peer)) {
+          std::cerr << "[native-video-host] rejected udp hello with invalid directory capability\n";
+          continue;
+        }
+        sessionDirectoryAuthenticated.store(true, std::memory_order_release);
+        ack.features |= remote60::native_poc::kUdpFeatureDirectoryAuth;
+      }
       (void)sendto(clientSock, reinterpret_cast<const char*>(&ack), sizeof(ack), 0,
                    reinterpret_cast<const sockaddr*>(&peer), peerLen);
       udpPeer = peer;
@@ -2879,6 +2993,16 @@ int main(int argc, char** argv) {
     // not wait for the next render-loop iteration. The timeout only exists so that thread can
     // notice shutdown.
     (void)remote60::native_poc::set_recv_timeout(clientSock, 200);
+  }
+
+  if (sessionDirectoryAuthenticated.load(std::memory_order_acquire)) {
+    std::string secureInputStatus;
+    const std::wstring servicePath = remote60::native_poc::sibling_executable_path(
+        L"remote60_secure_input_service.exe");
+    const bool secureInputReady =
+        secureInputBroker.EnsureInstalledAndConnected(servicePath, &secureInputStatus);
+    std::cout << "[native-video-host] secure-input ready=" << (secureInputReady ? 1 : 0)
+              << " status=" << secureInputStatus << "\n";
   }
 
   if (transport == VideoTransport::Udp && args.tcpSendBufKb == 0) {
@@ -3131,11 +3255,21 @@ int main(int argc, char** argv) {
           const bool desktopMode =
               !inputTargetCriteria.enabled() &&
               (selectedWindowIdState.load(std::memory_order_acquire) == 0);
-          const InputInjectResult injectResult =
-              inject_background_input_event(input, inputTargetCriteria, hostCaptureTargetHwnd, desktopMode,
-                                            inputDomainW.load(std::memory_order_acquire),
-                                            inputDomainH.load(std::memory_order_acquire),
-                                            &desktopInputState, &resolvedTarget);
+          const uint32_t domainW = inputDomainW.load(std::memory_order_acquire);
+          const uint32_t domainH = inputDomainH.load(std::memory_order_acquire);
+          InputInjectResult injectResult = InputInjectResult::Failed;
+          if (desktopMode && sessionDirectoryAuthenticated.load(std::memory_order_acquire) &&
+              secureInputBroker.connected()) {
+            injectResult = secureInputBroker.SendInputEvent(input, domainW, domainH)
+                               ? InputInjectResult::Injected
+                               : InputInjectResult::Failed;
+            resolvedTarget = " secure-system-agent";
+          } else {
+            injectResult =
+                inject_background_input_event(input, inputTargetCriteria, hostCaptureTargetHwnd,
+                                              desktopMode, domainW, domainH,
+                                              &desktopInputState, &resolvedTarget);
+          }
           if (injectResult == InputInjectResult::Injected) {
             const uint64_t n = inputEvents.fetch_add(1) + 1;
             if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
@@ -3199,9 +3333,19 @@ int main(int argc, char** argv) {
           const bool desktopMode =
               !inputTargetCriteria.enabled() &&
               (selectedWindowIdState.load(std::memory_order_acquire) == 0);
-          const InputInjectResult injectResult =
-              apply_input_text_message(text, hostCaptureTargetHwnd, desktopMode,
-                                       &desktopInputState, &resolvedTarget);
+          InputInjectResult injectResult = InputInjectResult::Failed;
+          if (desktopMode && sessionDirectoryAuthenticated.load(std::memory_order_acquire) &&
+              secureInputBroker.connected()) {
+            injectResult = secureInputBroker.SendInputText(
+                               text, inputDomainW.load(std::memory_order_acquire),
+                               inputDomainH.load(std::memory_order_acquire))
+                               ? InputInjectResult::Injected
+                               : InputInjectResult::Failed;
+            resolvedTarget = " secure-system-agent";
+          } else {
+            injectResult = apply_input_text_message(text, hostCaptureTargetHwnd, desktopMode,
+                                                    &desktopInputState, &resolvedTarget);
+          }
           if (injectResult == InputInjectResult::Injected) {
             const uint64_t n = inputEvents.fetch_add(1) + 1;
             if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
@@ -3569,9 +3713,37 @@ int main(int argc, char** argv) {
         if (len >= sizeof(UdpHelloPacket)) {
           std::memcpy(&hello, rx, sizeof(hello));
           if (hello.magic == remote60::native_poc::kMagic &&
-              hello.kind == static_cast<uint16_t>(UdpPacketKind::Hello)) {
+              hello.kind == static_cast<uint16_t>(UdpPacketKind::Hello) &&
+              hello.version == remote60::native_poc::kUdpProtocolVersion &&
+              (hello.features & remote60::native_poc::kUdpFeatureVideoFec) != 0) {
             UdpHelloPacket ack{};
             ack.kind = static_cast<uint16_t>(UdpPacketKind::HelloAck);
+            size_t tokenLen = 0;
+            while (tokenLen < sizeof(hello.authToken) && hello.authToken[tokenLen] != '\0') {
+              ++tokenLen;
+            }
+            bool directoryAuthenticated = false;
+            if (tokenLen > 0) {
+              const std::string authToken(hello.authToken, hello.authToken + tokenLen);
+              if (!authorize_directory_session(authToken, peer)) {
+                std::cerr << "[native-video-host] rejected reconnect hello with invalid directory capability\n";
+                continue;
+              }
+              directoryAuthenticated = true;
+              ack.features |= remote60::native_poc::kUdpFeatureDirectoryAuth;
+              std::string secureInputStatus;
+              (void)secureInputBroker.EnsureInstalledAndConnected(
+                  remote60::native_poc::sibling_executable_path(
+                      L"remote60_secure_input_service.exe"),
+                  &secureInputStatus);
+            } else if (sessionDirectoryAuthenticated.load(std::memory_order_acquire)) {
+              // Do not let an unauthenticated LAN Hello take over or de-authorize an active
+              // directory session. Direct-LAN mode remains available before authentication.
+              std::cerr << "[native-video-host] rejected unauthenticated reconnect during directory session\n";
+              continue;
+            }
+            sessionDirectoryAuthenticated.store(directoryAuthenticated,
+                                                std::memory_order_release);
             (void)sendto(clientSock, reinterpret_cast<const char*>(&ack), sizeof(ack), 0,
                          reinterpret_cast<const sockaddr*>(&peer), peerLen);
             const bool changed =
@@ -3761,13 +3933,13 @@ int main(int argc, char** argv) {
     choose_abr_720_size(abrHighW, abrHighH, &abrLowW, &abrLowH);
   }
   const bool abrHasLowerResolution = (abrLowW < abrHighW || abrLowH < abrHighH);
-  const uint32_t abrHighBitrate = args.bitrate;
-  const uint32_t abrMidBitrate = std::min<uint32_t>(
+  uint32_t abrHighBitrate = args.bitrate;
+  uint32_t abrMidBitrate = std::min<uint32_t>(
       abrHighBitrate, std::max<uint32_t>(2000000u, (abrHighBitrate * 75u) / 100u));
-  const uint32_t abrLowBitrate = std::min<uint32_t>(
+  uint32_t abrLowBitrate = std::min<uint32_t>(
       abrHighBitrate, std::max<uint32_t>(1500000u, (abrHighBitrate * 55u) / 100u));
-  const bool abrHasMidProfile = (abrMidBitrate < abrHighBitrate);
-  const bool abrHasLowProfile = abrHasLowerResolution || (abrLowBitrate < abrMidBitrate);
+  bool abrHasMidProfile = (abrMidBitrate < abrHighBitrate);
+  bool abrHasLowProfile = abrHasLowerResolution || (abrLowBitrate < abrMidBitrate);
   const uint32_t m9BitrateLevel0 = abrHighBitrate;
   const uint32_t m9BitrateLevel1 = std::min<uint32_t>(
       m9BitrateLevel0, std::max<uint32_t>(1500000u, (m9BitrateLevel0 * 80u) / 100u));
@@ -3807,6 +3979,8 @@ int main(int argc, char** argv) {
   uint64_t activeFrameIntervalUs =
       std::max<uint64_t>(1, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, activeFps)));
   uint64_t activePacingFrameIntervalUs = activeFrameIntervalUs;
+  std::atomic<uint64_t> captureSubmitMinIntervalUs{activeFrameIntervalUs};
+  std::atomic<uint64_t> nextCaptureSubmitUs{0};
   uint64_t frameGatingStaticIntervalUs =
       std::max<uint64_t>(activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGatingStaticFps));
   inputDomainW.store(activeEncodeW, std::memory_order_release);
@@ -3830,12 +4004,10 @@ int main(int argc, char** argv) {
   auto refresh_frame_intervals = [&]() {
     activeFrameIntervalUs =
         std::max<uint64_t>(1, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, activeFps)));
-    const uint32_t pacingFps =
-        activeFps >= 50
-            ? std::min<uint32_t>(120u, activeFps + pacingHeadroomFps)
-            : activeFps;
-    activePacingFrameIntervalUs =
-        std::max<uint64_t>(1, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, pacingFps)));
+    // Encoded capture is callback-clocked below. Raw mode uses the main tick at the exact
+    // requested cadence.
+    activePacingFrameIntervalUs = activeFrameIntervalUs;
+    captureSubmitMinIntervalUs.store(activeFrameIntervalUs, std::memory_order_release);
     frameGatingStaticIntervalUs =
         std::max<uint64_t>(activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGatingStaticFps));
   };
@@ -3910,8 +4082,13 @@ int main(int argc, char** argv) {
     // The pacing budget follows the active bitrate. It used to be computed once at startup,
     // so after an ABR downshift frames kept leaving at the launch rate (bursts the network
     // just asked us to stop), and after an upshift sends were throttled below the new rate.
-    const uint64_t pacePeakBps =
-        (static_cast<uint64_t>(activeBitrate) * udpPacePeakPercent) / 100ULL;
+    const uint64_t pacePeakBps = noPacingH264
+                                     ? 0ULL
+                                     : std::max<uint64_t>(
+                                           udpPacePeakFloorBps,
+                                           (static_cast<uint64_t>(activeBitrate) *
+                                            udpPacePeakPercent) /
+                                               100ULL);
     const uint32_t pacePeakBpsClamped =
         static_cast<uint32_t>(std::min<uint64_t>(pacePeakBps, 4000000000ULL));
     if (gUdpPacePeakBitrateBps.load(std::memory_order_relaxed) != pacePeakBpsClamped) {
@@ -3995,8 +4172,25 @@ int main(int argc, char** argv) {
   uint64_t lastCaptureRestartUs = 0;
   bool dxgiCaptureStarted = false;
   bool gdiCaptureStarted = false;
+  std::mutex captureFallbackReasonMu;
   std::string dxgiFallbackReason;
   std::string gdiFallbackReason;
+  auto set_dxgi_fallback_reason = [&](const std::string& reason) {
+    std::lock_guard<std::mutex> lock(captureFallbackReasonMu);
+    dxgiFallbackReason = reason;
+  };
+  auto set_gdi_fallback_reason = [&](const std::string& reason) {
+    std::lock_guard<std::mutex> lock(captureFallbackReasonMu);
+    gdiFallbackReason = reason;
+  };
+  auto copy_dxgi_fallback_reason = [&]() {
+    std::lock_guard<std::mutex> lock(captureFallbackReasonMu);
+    return dxgiFallbackReason;
+  };
+  auto copy_gdi_fallback_reason = [&]() {
+    std::lock_guard<std::mutex> lock(captureFallbackReasonMu);
+    return gdiFallbackReason;
+  };
 
   std::mutex captureResourceMu;
   std::atomic<uint32_t> captureSizeChangePending{0};
@@ -4166,6 +4360,27 @@ int main(int argc, char** argv) {
                                       uint64_t captureAgeAtCallbackUs,
                                       uint64_t captureClockSkewUs) {
     if (!src) return;
+    // WGC/DXGI commonly callback at the monitor refresh rate even when the encoder target is
+    // 30fps. Submitting all 60 copies made the staging ring and GPU fight over obsolete
+    // frames; query completion then oscillated between 16 and 50ms. Limit before the copy,
+    // using a phase-preserving deadline so the accepted frames stay evenly spaced.
+    const uint64_t submitIntervalUs =
+        std::max<uint64_t>(1, captureSubmitMinIntervalUs.load(std::memory_order_acquire));
+    uint64_t submitDueUs = nextCaptureSubmitUs.load(std::memory_order_acquire);
+    for (;;) {
+      constexpr uint64_t kCaptureSubmitEarlyToleranceUs = 1500;
+      if (submitDueUs != 0 && callbackUs + kCaptureSubmitEarlyToleranceUs < submitDueUs) return;
+      const bool phaseStillUseful =
+          submitDueUs != 0 && callbackUs <= submitDueUs + submitIntervalUs * 2;
+      const uint64_t nextDueUs = phaseStillUseful
+                                     ? submitDueUs + submitIntervalUs
+                                     : callbackUs + submitIntervalUs;
+      if (nextCaptureSubmitUs.compare_exchange_weak(
+              submitDueUs, nextDueUs, std::memory_order_acq_rel,
+              std::memory_order_acquire)) {
+        break;
+      }
+    }
     uint32_t frameW = 0;
     uint32_t frameH = 0;
     {
@@ -4312,8 +4527,8 @@ int main(int argc, char** argv) {
         }
         if (monitorInfo->width < monitorInfo->height) {
           activeDesktopBackend = DesktopCaptureBackend::Wgc;
-          dxgiFallbackReason = "rotation_unsupported";
-          std::cout << "[native-video-host] rotation_unsupported fallback_reason=" << dxgiFallbackReason << "\n";
+          set_dxgi_fallback_reason("rotation_unsupported");
+          std::cout << "[native-video-host] rotation_unsupported fallback_reason=rotation_unsupported\n";
         }
       }
       if (captureWindowModeActive) {
@@ -4390,7 +4605,7 @@ int main(int argc, char** argv) {
               std::cout << "[native-video-host] " << message << "\n";
             },
             [&](const std::string& reason) {
-              dxgiFallbackReason = reason;
+              set_dxgi_fallback_reason(reason);
               dxgiFallbackRequested.store(true, std::memory_order_release);
             },
             &dxgiDetail);
@@ -4454,7 +4669,7 @@ int main(int argc, char** argv) {
               std::cout << "[native-video-host] " << message << "\n";
             },
             [&](const std::string& reason) {
-              gdiFallbackReason = reason;
+              set_gdi_fallback_reason(reason);
               gdiFallbackRequested.store(true, std::memory_order_release);
             },
             &gdiDetail);
@@ -4525,12 +4740,18 @@ int main(int argc, char** argv) {
     if (mfStarted) MFShutdown();
     return 10;
   }
+  powerKeepalive.SetStreaming(streamControlActive.load(std::memory_order_acquire), true);
 
   const uint64_t startUs = qpc_now_us();
   uint64_t nextTickUs = startUs;
   // For encoded path, latency is prioritized over strict send pacing.
   // Raw path keeps legacy pacing to avoid excessive CPU/bandwidth burst.
-  const bool paceByTick = useRaw || !noPacingH264;
+  // Encoded capture callbacks are already phase-limited to activeFps before GPU readback.
+  // A second independent main-loop clock periodically woke just before the callback, waited
+  // only a quarter-frame, then slept to its next tick; the meanwhile-arriving frame was
+  // overwritten by the following callback. Consume encoded frames directly from the CV so
+  // every accepted 30 Hz capture reaches the encoder. Raw mode still needs its own clock.
+  const bool paceByTick = useRaw;
   const uint64_t captureWindowRebindIntervalUs =
       static_cast<uint64_t>(std::max<uint32_t>(200, args.captureWindowRebindIntervalMs)) * 1000ULL;
   uint64_t nextCaptureWindowCheckUs = startUs + captureWindowRebindIntervalUs;
@@ -4637,6 +4858,9 @@ int main(int argc, char** argv) {
   auto start_encoded_sender = [&]() {
     if (transport != VideoTransport::Udp || !useH264) return;
     senderThread = std::thread([&]() {
+      (void)SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+      uint64_t nextFrameSendUs = 0;
+      uint64_t cadenceGeneration = 0;
       while (true) {
         EncodedSendItem item;
         sockaddr_in peer{};
@@ -4657,6 +4881,19 @@ int main(int argc, char** argv) {
         if (!peerReady) {
           senderTxNoPeer.fetch_add(1, std::memory_order_relaxed);
           continue;
+        }
+        const uint64_t frameIntervalUs =
+            std::clamp<uint64_t>(item.frameIntervalUs, 8333ULL, 200000ULL);
+        const uint64_t nowUs = qpc_now_us();
+        if (nextFrameSendUs == 0 || cadenceGeneration != item.udpHdr.streamGeneration ||
+            nowUs > nextFrameSendUs + frameIntervalUs * 2ULL) {
+          // New selections and material sender stalls start a fresh local clock. Never send
+          // several overdue frames in a catch-up burst; that is perceived as pause/jump.
+          nextFrameSendUs = nowUs;
+          cadenceGeneration = item.udpHdr.streamGeneration;
+        } else {
+          nextFrameSendUs += frameIntervalUs;
+          if (nowUs < nextFrameSendUs) udp_pace_wait_until(nextFrameSendUs);
         }
         const uint64_t sendStartUs = qpc_now_us();
         item.udpHdr.sendQpcUs = sendStartUs;
@@ -4762,6 +4999,7 @@ int main(int argc, char** argv) {
     frameGatingLastSentUs = 0;
     firstSentLoggedGeneration = 0;
     firstCallbackLoggedGeneration.store(0, std::memory_order_release);
+    nextCaptureSubmitUs.store(0, std::memory_order_release);
 
     uint64_t flushedVersion = 0;
     {
@@ -5009,11 +5247,68 @@ int main(int argc, char** argv) {
         }
       }
     }
+    // A DXGI worker can lose duplication during a fullscreen/desktop transition after the
+    // viewer has already marked the stream inactive. Process recovery before the inactive
+    // early-return; otherwise the request remains stuck and the next selection intermittently
+    // times out with DXGI_ERROR_ACCESS_LOST/E_ACCESSDENIED.
+    if (dxgiFallbackRequested.exchange(false, std::memory_order_acq_rel) &&
+        !captureWindowModeActive.load(std::memory_order_acquire)) {
+      powerKeepalive.SetStreaming(true, true);
+      if (dxgiCaptureStarted) {
+        dxgiCaptureSession.Stop();
+        dxgiCaptureStarted = false;
+      }
+      activeDesktopBackend = DesktopCaptureBackend::Wgc;
+      const std::string fallbackReason = copy_dxgi_fallback_reason();
+      std::cout << "[native-video-host] fallback_reason="
+                << (fallbackReason.empty() ? "dxgi_runtime_fallback" : fallbackReason)
+                << "\n";
+      if (!restart_capture_session()) {
+        std::cerr << "[native-video-host] capture fallback restart failed; retrying\n";
+        dxgiFallbackRequested.store(true, std::memory_order_release);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        continue;
+      }
+      ++captureRestartCount;
+      captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+      lastCaptureUsForInterval.store(0, std::memory_order_release);
+      lastCallbackUs.store(0, std::memory_order_release);
+      resetHostTimelineAnchors();
+      forceKeyNext = true;
+      flush_capture_pipeline_state("dxgi-runtime-fallback");
+    }
+    if (gdiFallbackRequested.exchange(false, std::memory_order_acq_rel) &&
+        !captureWindowModeActive.load(std::memory_order_acquire)) {
+      powerKeepalive.SetStreaming(true, true);
+      if (gdiCaptureStarted) {
+        gdiCaptureProcess.Stop();
+        gdiCaptureStarted = false;
+      }
+      activeDesktopBackend = DesktopCaptureBackend::Wgc;
+      const std::string fallbackReason = copy_gdi_fallback_reason();
+      std::cout << "[native-video-host] fallback_reason="
+                << (fallbackReason.empty() ? "gdi_runtime_fallback" : fallbackReason)
+                << "\n";
+      if (!restart_capture_session()) {
+        std::cerr << "[native-video-host] GDI capture fallback restart failed; retrying\n";
+        gdiFallbackRequested.store(true, std::memory_order_release);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        continue;
+      }
+      ++captureRestartCount;
+      captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+      lastCaptureUsForInterval.store(0, std::memory_order_release);
+      lastCallbackUs.store(0, std::memory_order_release);
+      resetHostTimelineAnchors();
+      forceKeyNext = true;
+      flush_capture_pipeline_state("gdi-runtime-fallback");
+    }
     const bool streamActive = streamControlActive.load(std::memory_order_acquire);
     if (!streamActive) {
       if (streamActiveApplied) {
         flush_capture_pipeline_state("stream-inactive");
         streamActiveApplied = false;
+        powerKeepalive.SetStreaming(false);
         std::cout << "[native-video-host] stream inactive\n";
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -5022,41 +5317,14 @@ int main(int argc, char** argv) {
     if (!streamActiveApplied) {
       streamActiveApplied = true;
       forceKeyNext = true;
+      powerKeepalive.SetStreaming(true, true);
       std::cout << "[native-video-host] stream active; forcing keyframe\n";
-    }
-    if (dxgiFallbackRequested.exchange(false, std::memory_order_acq_rel) &&
-        !captureWindowModeActive.load(std::memory_order_acquire)) {
-      if (dxgiCaptureStarted) {
-        dxgiCaptureSession.Stop();
-        dxgiCaptureStarted = false;
-      }
-      activeDesktopBackend = DesktopCaptureBackend::Wgc;
-      std::cout << "[native-video-host] fallback_reason="
-                << (dxgiFallbackReason.empty() ? "dxgi_runtime_fallback" : dxgiFallbackReason)
-                << "\n";
-      if (!restart_capture_session()) {
-        std::cerr << "[native-video-host] capture fallback restart failed\n";
-        break;
-      }
-    }
-    if (gdiFallbackRequested.exchange(false, std::memory_order_acq_rel) &&
-        !captureWindowModeActive.load(std::memory_order_acquire)) {
-      if (gdiCaptureStarted) {
-        gdiCaptureProcess.Stop();
-        gdiCaptureStarted = false;
-      }
-      activeDesktopBackend = DesktopCaptureBackend::Wgc;
-      std::cout << "[native-video-host] fallback_reason="
-                << (gdiFallbackReason.empty() ? "gdi_runtime_fallback" : gdiFallbackReason)
-                << "\n";
-      if (!restart_capture_session()) {
-        std::cerr << "[native-video-host] GDI capture fallback restart failed\n";
-        break;
-      }
     }
     if (useH264 && runtimeTunePending.exchange(false, std::memory_order_acq_rel)) {
       const uint32_t reqSeq = runtimeTuneSeq.load(std::memory_order_acquire);
-      uint32_t targetBitrate = runtimeTuneBitrate.load(std::memory_order_acquire);
+      const uint32_t requestedBitrate = runtimeTuneBitrate.load(std::memory_order_acquire);
+      const bool bitrateExplicit = requestedBitrate >= 100000;
+      uint32_t targetBitrate = requestedBitrate;
       uint32_t targetKeyint = runtimeTuneKeyint.load(std::memory_order_acquire);
       uint32_t targetFps = runtimeTuneFps.load(std::memory_order_acquire);
       if (targetBitrate < 100000) targetBitrate = activeBitrate;
@@ -5066,6 +5334,21 @@ int main(int argc, char** argv) {
       const bool keyintChanged = (targetKeyint != activeKeyint);
       const bool fpsChanged = (targetFps != activeFps);
       if (bitrateChanged || keyintChanged || fpsChanged) {
+        if (bitrateExplicit) {
+          // The UI bitrate is the top quality ceiling, not an instruction to disable
+          // adaptation. A 20 Mbps request may start there, but the host must still step down
+          // when the client's decoded FPS/latency says the Wi-Fi path cannot sustain it.
+          abrHighBitrate = targetBitrate;
+          abrMidBitrate = std::min<uint32_t>(
+              abrHighBitrate,
+              std::max<uint32_t>(2000000u, (abrHighBitrate * 75u) / 100u));
+          abrLowBitrate = std::min<uint32_t>(
+              abrHighBitrate,
+              std::max<uint32_t>(1500000u, (abrHighBitrate * 55u) / 100u));
+          abrHasMidProfile = abrMidBitrate < abrHighBitrate;
+          abrHasLowProfile = abrHasLowerResolution || abrLowBitrate < abrMidBitrate;
+          abrProfile = 0;
+        }
         // Pass the nominal box, not the fitted activeEncode size: apply_encoder_target
         // records its width/height arguments as the new nominal budget, and feeding the
         // already-fitted size back in would permanently shrink the box for every later
@@ -5074,7 +5357,7 @@ int main(int argc, char** argv) {
           std::cerr << "[native-video-host][control] runtime-config apply failed seq=" << reqSeq << "\n";
           break;
         }
-        runtimeTuneManualOverride = true;
+        runtimeTuneManualOverride = false;
         abrCooldownUntilUs = nowUs + 3000000ULL;
         abrGoodSeconds = 0;
         abrModeratePressureSeconds = 0;
@@ -6010,7 +6293,9 @@ int main(int argc, char** argv) {
         }
         consecutiveStaleEncodedFrames = 0;
 
-        const bool encodedKeyFrame = (au.keyFrame || forceKeyFrame || forceKeyNext);
+        // The requested IDR can be delayed behind older async MFT output. Only the AU's
+        // actual CleanPoint/IDR state is safe to advertise as a keyframe.
+        const bool encodedKeyFrame = au.keyFrame;
         if (selectionFirstKeyframePendingGeneration != 0 &&
             streamGeneration == selectionFirstKeyframePendingGeneration &&
             !encodedKeyFrame) {
@@ -6035,7 +6320,8 @@ int main(int argc, char** argv) {
         hdr.payloadSize = static_cast<uint32_t>(au.bytes.size());
         hdr.flags = encodedKeyFrame ? 1u : 0u;
         hdr.streamGeneration = streamGeneration;
-        hdr.captureQpcUs = encodeInputUs;
+        hdr.captureQpcUs =
+            static_cast<uint64_t>(std::max<int64_t>(0, auCaptureUs));
         hdr.encodeStartQpcUs = encodeStartUs;
         hdr.encodeEndQpcUs = encodeEndUs;
         SendPathStats sendPathStats{};
@@ -6072,6 +6358,7 @@ int main(int argc, char** argv) {
           } else {
             EncodedSendItem item;
             item.keyFrame = (hdr.flags & 1u) != 0;
+            item.frameIntervalUs = activeFrameIntervalUs;
             item.udpHdr.magic = remote60::native_poc::kMagic;
             item.udpHdr.kind = static_cast<uint16_t>(UdpPacketKind::VideoChunk);
             item.udpHdr.size = static_cast<uint16_t>(sizeof(item.udpHdr));
@@ -6443,8 +6730,8 @@ int main(int argc, char** argv) {
                 !captureWindowModeActive && activeDesktopBackend == DesktopCaptureBackend::Gdi;
             if (fallbackFromGdi) {
               activeDesktopBackend = DesktopCaptureBackend::Wgc;
-              gdiFallbackReason = "gdi_low_capture_rate";
-              std::cout << "[native-video-host] fallback_reason=" << gdiFallbackReason
+              set_gdi_fallback_reason("gdi_low_capture_rate");
+              std::cout << "[native-video-host] fallback_reason=gdi_low_capture_rate"
                         << " callbackFramesPerSec=" << callbackFramesPerSec
                         << " minPushPerSec=" << captureInputMinPushPerSec << "\n";
             }

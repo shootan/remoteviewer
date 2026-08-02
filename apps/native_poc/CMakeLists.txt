@@ -49,6 +49,7 @@ add_executable(remote60_native_video_host_poc
   src/gdi_capture_process.cpp
   src/udp_control_channel.cpp
   src/mf_h264_codec.cpp
+  src/secure_input_broker.cpp
   ../host/src/capture_backend_dxgi.cpp
 )
 
@@ -84,9 +85,19 @@ target_link_libraries(remote60_native_video_host_poc PRIVATE
   ole32
   runtimeobject
   windowsapp
+  advapi32
 )
 target_compile_definitions(remote60_native_video_host_poc PRIVATE
   REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
+)
+
+add_executable(remote60_secure_input_service
+  src/secure_input_service_main.cpp
+)
+target_include_directories(remote60_secure_input_service PRIVATE src)
+target_link_libraries(remote60_secure_input_service PRIVATE
+  advapi32
+  user32
 )
 
 add_executable(remote60_native_video_client_poc
@@ -154,6 +165,18 @@ target_link_libraries(remote60_host_app PRIVATE
   ws2_32
   comctl32
   shlwapi
+)
+if(MSVC)
+  # Input into elevated windows and installation of the secure-desktop broker both require an
+  # elevated token. Embed that contract in the product launcher so it prompts once at startup.
+  target_link_options(remote60_host_app PRIVATE
+    "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'"
+  )
+endif()
+add_dependencies(remote60_host_app
+  remote60_native_video_host_poc
+  remote60_secure_input_service
+  remote60_gdi_capture_worker
 )
 
 add_executable(remote60_udp_control_e2e_test

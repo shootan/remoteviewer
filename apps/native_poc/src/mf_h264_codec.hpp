@@ -109,6 +109,10 @@ class H264Encoder {
   uint32_t outBufferBytes_ = 0;
   uint64_t frameIndex_ = 0;
   int64_t sampleDurationHns_ = 0;
+  // Hardware/async MFTs can return one or more older outputs while accepting the current
+  // input. Keep the accepted input timeline so each output is stamped with the frame that
+  // actually produced it, rather than the input from the current encode call.
+  std::deque<int64_t> pendingInputSampleTimesHns_;
   std::vector<uint8_t> sequenceHeaderAnnexb_;
   bool spsProfileReported_ = false;
   bool started_ = false;
@@ -116,13 +120,8 @@ class H264Encoder {
   bool usingHardware_ = false;
   bool stableTextTune_ = false;
   const char* backendName_ = "unknown";
-  bool sampleTimeOffsetInitialized_ = false;
-  int64_t sampleTimeOffsetHns_ = 0;
-  bool sampleTimeOutputTimestampTrusted_ = true;
   uint64_t sampleTimeOutputTimestampTotalSamples_ = 0;
   uint64_t sampleTimeOutputTimestampFallbackCount_ = 0;
-  uint32_t sampleTimeOutputTimestampRecoveryStreak_ = 0;
-  int64_t sampleTimeOutputTimestampRecoveryOffsetHns_ = 0;
   uint32_t d3dManagerResetToken_ = 0;
   Microsoft::WRL::ComPtr<IMFDXGIDeviceManager> d3dManager_;
   Microsoft::WRL::ComPtr<IMFMediaEventGenerator> eventGenerator_;

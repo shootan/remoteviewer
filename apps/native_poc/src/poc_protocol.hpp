@@ -307,13 +307,19 @@ struct ControlWindowSelectedMessage {
 // gain a feature without breaking older peers. Media encryption is not implemented yet; the bit
 // is claimed now so that adding it later is a field to fill in rather than a format change.
 constexpr uint32_t kUdpFeatureEncryptedMedia = 0x1u;
+constexpr uint32_t kUdpFeatureVideoFec = 0x2u;
+constexpr uint32_t kUdpFeatureDirectoryAuth = 0x4u;
+constexpr uint32_t kUdpProtocolVersion = 2u;
 
 struct UdpHelloPacket {
   uint32_t magic = kMagic;
   uint16_t kind = static_cast<uint16_t>(UdpPacketKind::Hello);
   uint16_t size = static_cast<uint16_t>(sizeof(UdpHelloPacket));
-  uint32_t version = 1;
-  uint32_t features = 0;
+  uint32_t version = kUdpProtocolVersion;
+  uint32_t features = kUdpFeatureVideoFec;
+  // One-time capability returned by /api/connect and delivered independently to the host.
+  // Empty preserves direct-LAN operation, but cannot authorize SYSTEM secure-desktop input.
+  char authToken[33] = {};
 };
 
 // One fragment of a control message. Fragments of a message are sent back to back; the
@@ -351,6 +357,7 @@ struct UdpVideoChunkHeader {
   uint32_t seq = 0;
   uint16_t codec = static_cast<uint16_t>(UdpCodec::H264);
   // bit0:keyFrame bit1:firstChunk bit2:lastChunk bit3:reserved for encrypted payload
+  // bit4:XOR parity packet for the FEC group beginning at chunkIndex
   uint16_t flags = 0;
   uint32_t width = 0;
   uint32_t height = 0;
@@ -358,12 +365,16 @@ struct UdpVideoChunkHeader {
   uint32_t payloadSize = 0;
   uint32_t chunkOffset = 0;
   uint32_t chunkSize = 0;
+  uint16_t chunkIndex = 0;
+  uint16_t chunkCount = 0;
+  uint32_t chunkStride = 0;
   uint64_t streamGeneration = 0;
   uint64_t captureQpcUs = 0;
   uint64_t encodeStartQpcUs = 0;
   uint64_t encodeEndQpcUs = 0;
   uint64_t sendQpcUs = 0;
 };
+constexpr uint16_t kUdpVideoFecGroupSize = 8;
 #pragma pack(pop)
 
 }  // namespace remote60::native_poc
