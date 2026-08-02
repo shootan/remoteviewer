@@ -5343,3 +5343,31 @@ Before/After (1080p-scroll Release 5회, 오늘 H4-off 대비)
   1080p60 실기기/동일 LAN 장시간 soak로 무선 pacing과 발열을 확인한다.
 - OSLink UI 스트림은 종료됐지만 비관리자 셸에서 중지할 수 없는 `LDRemoteSvc`만 idle Running으로
   남아 있다. OSLink 동시부하 Gate 항목은 별도 미완료로 유지한다.
+
+
+### 224) 2026-08-03 Android Release APK 빌드·dist 출력
+
+목표
+- debug APK 대신 실제 사용 성능에 맞는 비디버그 Android release APK를 만들고 기존 배포
+  규칙대로 저장소 루트의 `dist`에 설치 가능한 산출물을 출력한다.
+
+변경 파일
+- 기록: `docs/history.md`, `docs/구현계획.md`
+- 빌드 산출물(커밋 제외): `dist/gnlink-android-20260803-release.apk`
+
+검증/build/test
+- Gradle `:app:assembleRelease` 성공. Kotlin/리소스 release pipeline과 네이티브
+  `RelWithDebInfo` 빌드가 arm64-v8a/armeabi-v7a/x86/x86_64 4개 ABI에서 모두 통과했다.
+- 생성된 unsigned APK를 기존 debug 설치본과 같은 로컬 Android debug 인증서로 서명해
+  기존 앱에 `install -r` 가능한 내부 배포본으로 만들었다. APK Signature Scheme V3 검증 PASS,
+  certificate SHA-256도 기존 debug APK와 동일하다.
+- manifest `debuggable=false`, application ID `com.remote60.androiddirect`, version `0.1.0`,
+  4 ABI의 `libremote60_android_direct.so` 포함을 확인했다.
+- 최종 크기 7,716,380 bytes(debug 10,387,310 bytes 대비 25.7% 감소), SHA-256
+  `9806A97F1394FD26B9D118DDB38835986D5BE3D4A1493B4CDD2D9EB68D2505B1`.
+- 사용자가 실행 중인 host_app/child 프로세스는 중단하지 않았으며 APK를 LDPlayer에 자동
+  설치하거나 현재 앱 데이터를 변경하지 않았다.
+
+다음 액션
+- 사용자가 release APK를 설치해 실제 Android 뷰어의 60fps/발열을 확인한다.
+- 외부 스토어 배포 전에는 전용 release keystore와 versionCode 증가 정책을 추가한다.
