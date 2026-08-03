@@ -2485,6 +2485,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             log_client_line(oss.str());
           }
         }
+        // Emitted for every present, not only the ones that crossed a warning threshold.
+        // Smoothness is a property of the whole interval distribution: a stream can average a
+        // clean 30fps while alternating 16ms and 50ms gaps, which is exactly what a viewer
+        // reports as stutter. Gating this behind the warning thresholds left the aggregate
+        // reading zero through visibly uneven playback, so there was nothing to optimise
+        // against.
+        if (lastPresentUs > 0) {
+          std::ostringstream gapLine;
+          gapLine << "[native-video-client][present] seq=" << seq
+                  << " frameGapUs=" << presentGapUs;
+          log_client_line(gapLine.str());
+        }
         const uint64_t totalUs = (presentUs >= captureUs) ? (presentUs - captureUs) : 0;
         if ((totalUs >= kUserFeedbackLagWarnUs || (presentGapUs >= kUserFeedbackGapWarnUs && lastPresentUs > 0)) &&
             (presentUs >= lastUserFeedbackUs + kUserFeedbackMinIntervalUs || lastUserFeedbackUs == 0)) {

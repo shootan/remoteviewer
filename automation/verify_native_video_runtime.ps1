@@ -137,6 +137,10 @@ if ($Codec -ieq "h264") {
 $hostProc = Start-Process -FilePath $hostExe -ArgumentList $hostArgs -WorkingDirectory $Root `
   -RedirectStandardOutput $hostOut -RedirectStandardError $hostErr -PassThru
 Start-Sleep -Seconds 2
+# Start straight in the stream view. The client otherwise opens on the target picker, and
+# presentation is gated behind it, so every run measured decode while never painting a single
+# frame -- which is why the present-gap metrics read zero no matter how the stream behaved.
+$env:REMOTE60_NATIVE_START_STREAM_VIEW = "1"
 $clientProc = Start-Process -FilePath $clientExe -ArgumentList $clientArgs -WorkingDirectory $Root `
   -RedirectStandardOutput $clientOut -RedirectStandardError $clientErr -PassThru
 
@@ -204,6 +208,13 @@ $decodeZeroStreakMaxSec = 0
 $presentGapVals = New-Object System.Collections.Generic.List[double]
 $presentGapOver1s = 0
 $presentGapOver3s = 0
+# Every present reports its interval, so these describe the shape of the motion rather than
+# only the pathological gaps PRESENT_GAP_* was built to catch.
+$frameGapVals = New-Object System.Collections.Generic.List[double]
+$frameGapOver15x = 0
+$frameGapOver2x = 0
+$frameGapOver3x = 0
+$frameGapTargetUs = [int](1000000 / [Math]::Max(1, $Fps))
 $tsSourceMft = 0
 $tsSourceInputFallback = 0
 $tsSourceHeaderFallback = 0
@@ -559,6 +570,13 @@ foreach ($line in $clientLines) {
         default { $fallbackReasonOtherCount += 1 }
       }
     }
+  }
+  if ($line -match 'frameGapUs=([0-9]+)') {
+    $fg = [double]$Matches[1]
+    [void]$frameGapVals.Add($fg)
+    if ($fg -ge ($frameGapTargetUs * 1.5)) { $frameGapOver15x += 1 }
+    if ($fg -ge ($frameGapTargetUs * 2))   { $frameGapOver2x += 1 }
+    if ($fg -ge ($frameGapTargetUs * 3))   { $frameGapOver3x += 1 }
   }
   if ($line -match '\[native-video-client\]\[user-feedback\]') {
     $seqVal = 0
@@ -1059,6 +1077,7 @@ $decodeRecoverySec = Stats-Summary -vals $decodeRecoverySecVals
 $udpAssemblyDropPm = Stats-Summary -vals $udpAssemblyDropPmVals
 $udpSimDropPm = Stats-Summary -vals $udpSimDropPmVals
 $presentGap = Stats-Summary -vals $presentGapVals
+$frameGap = Stats-Summary -vals $frameGapVals
 $gdiFallbackRate = Stats-Summary -vals $gdiFallbackRateX1000Vals
 $stageStats = [ordered]@{}
 foreach ($stageName in $stageValues.Keys) {
@@ -1356,6 +1375,14 @@ Write-Output "PRESENT_GAP_P95_US=$($presentGap.p95)"
 Write-Output "PRESENT_GAP_MAX_US=$($presentGap.max)"
 Write-Output "PRESENT_GAP_OVER_1S=$presentGapOver1s"
 Write-Output "PRESENT_GAP_OVER_3S=$presentGapOver3s"
+Write-Output "FRAME_GAP_COUNT=$($frameGap.count)"
+Write-Output "FRAME_GAP_TARGET_US=$frameGapTargetUs"
+Write-Output "FRAME_GAP_AVG_US=$($frameGap.avg)"
+Write-Output "FRAME_GAP_P95_US=$($frameGap.p95)"
+Write-Output "FRAME_GAP_MAX_US=$($frameGap.max)"
+Write-Output "FRAME_GAP_OVER_1_5X=$frameGapOver15x"
+Write-Output "FRAME_GAP_OVER_2X=$frameGapOver2x"
+Write-Output "FRAME_GAP_OVER_3X=$frameGapOver3x"
 Write-Output "CONGESTION_STATE_LAST=$congestionStateLast"
 Write-Output "CONGESTION_TRANSITION_EVENTS=$congestionTransitionEvents"
 Write-Output "CONGESTION_TRANSITIONS_LAST=$congestionTransitionsLast"

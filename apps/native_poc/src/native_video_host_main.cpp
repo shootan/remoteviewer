@@ -1012,6 +1012,39 @@ DWORD mouse_vk_to_sendinput_flag(uint16_t kind, uint32_t vk) {
   return 0;
 }
 
+// True while the interactive desktop is the ordinary one the user works on.
+//
+// The elevated host can inject into that desktop itself, including elevated windows such as the
+// taskbar. What it cannot reach is the secure desktop -- the lock screen, the UAC prompt,
+// Ctrl+Alt+Del -- which is a separate desktop only a SYSTEM process can drive. Routing
+// everything through the SYSTEM agent instead is worse than it sounds: the agent reports nothing
+// back, so when its injection does not take effect the host still counts every event as
+// delivered and the session looks alive while no click ever lands.
+//
+// Checked on a short cache because it runs per input event.
+bool interactive_desktop_is_default() {
+  static std::atomic<uint64_t> lastCheckUs{0};
+  static std::atomic<bool> cached{true};
+  const uint64_t nowUs = qpc_now_us();
+  const uint64_t last = lastCheckUs.load(std::memory_order_relaxed);
+  if (last != 0 && nowUs - last < 250000ULL) return cached.load(std::memory_order_relaxed);
+
+  bool isDefault = false;
+  HDESK desktop = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
+  if (desktop) {
+    wchar_t name[64]{};
+    DWORD needed = 0;
+    if (GetUserObjectInformationW(desktop, UOI_NAME, name, sizeof(name), &needed)) {
+      isDefault = _wcsicmp(name, L"Default") == 0;
+    }
+    CloseDesktop(desktop);
+  }
+  // A desktop this process cannot even open is the secure one.
+  cached.store(isDefault, std::memory_order_relaxed);
+  lastCheckUs.store(nowUs, std::memory_order_relaxed);
+  return isDefault;
+}
+
 bool send_desktop_mouse_input(DWORD flags, DWORD mouseData = 0) {
   INPUT in{};
   in.type = INPUT_MOUSE;
@@ -1020,28 +1053,6 @@ bool send_desktop_mouse_input(DWORD flags, DWORD mouseData = 0) {
   return SendInput(1, &in, sizeof(INPUT)) == 1;
 }
 
-// Places the cursor and delivers the button/wheel action as ONE input event.
-//
-// Positioning with SetCursorPos and then sending a button in a separate call leaves a window in
-// which anything else -- the operator's physical mouse, another injected event -- moves the
-// cursor, so the click lands somewhere the user did not aim at. Carrying absolute coordinates on
-// the button event itself removes the window entirely.
-bool send_desktop_mouse_at(POINT screenPt, DWORD actionFlags, DWORD mouseData = 0) {
-  const int virtualLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
-  const int virtualTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
-  const int virtualWidth = std::max<int>(1, GetSystemMetrics(SM_CXVIRTUALSCREEN));
-  const int virtualHeight = std::max<int>(1, GetSystemMetrics(SM_CYVIRTUALSCREEN));
-  // SendInput's absolute space is 0..65535 spanning the whole virtual desktop.
-  const int64_t relX = static_cast<int64_t>(screenPt.x) - virtualLeft;
-  const int64_t relY = static_cast<int64_t>(screenPt.y) - virtualTop;
-  INPUT in{};
-  in.type = INPUT_MOUSE;
-  in.mi.dx = static_cast<LONG>((relX * 65535 + (virtualWidth - 1) / 2) / std::max<int>(1, virtualWidth - 1));
-  in.mi.dy = static_cast<LONG>((relY * 65535 + (virtualHeight - 1) / 2) / std::max<int>(1, virtualHeight - 1));
-  in.mi.mouseData = mouseData;
-  in.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | actionFlags;
-  return SendInput(1, &in, sizeof(INPUT)) == 1;
-}
 
 // Real keyboard events for the focused window.
 //
@@ -1207,12 +1218,14 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
   if (input.kind == 2 || input.kind == 3) {
     const DWORD mouseFlag = mouse_vk_to_sendinput_flag(input.kind, input.keyCode);
     if (mouseFlag == 0) return InputInjectResult::Unsupported;
-    return send_desktop_mouse_at(screenPt, mouseFlag) ? InputInjectResult::Injected
-                                                      : InputInjectResult::Failed;
+    if (!SetCursorPos(screenPt.x, screenPt.y)) return InputInjectResult::Failed;
+    return send_desktop_mouse_input(mouseFlag) ? InputInjectResult::Injected
+                                               : InputInjectResult::Failed;
   }
   if (input.kind == 4) {
-    return send_desktop_mouse_at(screenPt, MOUSEEVENTF_WHEEL,
-                                 static_cast<DWORD>(static_cast<SHORT>(input.wheelDelta)))
+    if (!SetCursorPos(screenPt.x, screenPt.y)) return InputInjectResult::Failed;
+    return send_desktop_mouse_input(MOUSEEVENTF_WHEEL,
+                                    static_cast<DWORD>(static_cast<SHORT>(input.wheelDelta)))
                ? InputInjectResult::Injected
                : InputInjectResult::Failed;
   }
@@ -2649,6 +2662,14 @@ int main(int argc, char** argv) {
   const uint32_t senderMaxCadenceHoldUs =
       env_u32_clamped("REMOTE60_NATIVE_SENDER_MAX_CADENCE_HOLD_US", 0, 0, 33000);
   const bool senderCadenceSmoothing = senderMaxCadenceHoldUs > 0;
+  // The capture-submit limiter keeps 60Hz callbacks from flooding a 30fps encode, but it
+  // rejects rather than defers, and a rejected desktop-duplication frame is lost for good.
+  // Widening the early tolerance lets a slightly-early callback through instead of leaving a
+  // double-length gap on screen; the disable switch exists to measure the limiter's cost.
+  const bool captureSubmitLimitEnabled =
+      !env_truthy("REMOTE60_NATIVE_CAPTURE_SUBMIT_LIMIT_DISABLE");
+  const uint32_t captureSubmitEarlyTolerancePercent = env_u32_clamped(
+      "REMOTE60_NATIVE_CAPTURE_SUBMIT_EARLY_TOLERANCE_PCT", 25, 0, 90);
   const bool guardStalePreEncode = env_truthy("REMOTE60_NATIVE_GUARD_STALE_PREENCODE");
   const bool abrEnabled = useH264 && !env_truthy("REMOTE60_NATIVE_ABR_DISABLE");
   const bool abrQualityFirst = env_truthy("REMOTE60_NATIVE_ADAPTIVE_QUALITY_FIRST");
@@ -3301,6 +3322,7 @@ int main(int argc, char** argv) {
           // broker at all, and treating that as a hard failure left the session with no input
           // whatsoever instead of the ordinary desktop injection that still works fine.
           if (desktopMode && sessionDirectoryAuthenticated.load(std::memory_order_acquire) &&
+              !interactive_desktop_is_default() &&
               secureInputBroker.SendInputEvent(input, domainW, domainH)) {
             injectResult = InputInjectResult::Injected;
             resolvedTarget = " secure-system-agent";
@@ -3375,6 +3397,7 @@ int main(int argc, char** argv) {
               (selectedWindowIdState.load(std::memory_order_acquire) == 0);
           InputInjectResult injectResult = InputInjectResult::Failed;
           if (desktopMode && sessionDirectoryAuthenticated.load(std::memory_order_acquire) &&
+              !interactive_desktop_is_default() &&
               secureInputBroker.SendInputText(text,
                                               inputDomainW.load(std::memory_order_acquire),
                                               inputDomainH.load(std::memory_order_acquire))) {
@@ -4404,10 +4427,16 @@ int main(int argc, char** argv) {
     // using a phase-preserving deadline so the accepted frames stay evenly spaced.
     const uint64_t submitIntervalUs =
         std::max<uint64_t>(1, captureSubmitMinIntervalUs.load(std::memory_order_acquire));
-    uint64_t submitDueUs = nextCaptureSubmitUs.load(std::memory_order_acquire);
+    uint64_t submitDueUs = captureSubmitLimitEnabled
+                               ? nextCaptureSubmitUs.load(std::memory_order_acquire)
+                               : 0;
     for (;;) {
-      constexpr uint64_t kCaptureSubmitEarlyToleranceUs = 1500;
-      if (submitDueUs != 0 && callbackUs + kCaptureSubmitEarlyToleranceUs < submitDueUs) return;
+      if (!captureSubmitLimitEnabled) break;
+      // A frame that misses this window is gone: desktop duplication only reports changes, so
+      // nothing re-sends the content that was rejected here.
+      const uint64_t earlyToleranceUs =
+          std::max<uint64_t>(1500, submitIntervalUs * captureSubmitEarlyTolerancePercent / 100);
+      if (submitDueUs != 0 && callbackUs + earlyToleranceUs < submitDueUs) return;
       const bool phaseStillUseful =
           submitDueUs != 0 && callbackUs <= submitDueUs + submitIntervalUs * 2;
       const uint64_t nextDueUs = phaseStillUseful

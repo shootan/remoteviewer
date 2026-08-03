@@ -281,30 +281,23 @@ bool inject_message(const SecureInputMessage& message) {
   }
   if (message.kind != static_cast<uint16_t>(SecureInputKind::InputEvent)) return false;
   const POINT point = map_point(message);
-  if (message.eventKind == 1) return SetCursorPos(point.x, point.y) != FALSE;
+  // Position with SetCursorPos and send the button separately. Carrying absolute coordinates on
+  // the button event is theoretically tidier -- it removes the window in which something else
+  // could move the cursor between the two calls -- but the 0..65535 virtual-desktop mapping
+  // relies on metrics this SYSTEM agent does not reliably see, and getting them wrong throws
+  // every click off-screen, which reads as input being completely dead. Keep the proven path.
+  if (message.eventKind >= 1 && message.eventKind <= 4 && !SetCursorPos(point.x, point.y)) {
+    return false;
+  }
+  if (message.eventKind == 1) return true;
   INPUT input{};
-  if (message.eventKind == 2 || message.eventKind == 3 || message.eventKind == 4) {
-    // Carry the position on the button/wheel event itself. Repositioning first and clicking
-    // afterwards lets anything that moves the cursor in between land the click elsewhere.
-    const int virtualLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    const int virtualTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    const int virtualWidth = std::max<int>(1, GetSystemMetrics(SM_CXVIRTUALSCREEN));
-    const int virtualHeight = std::max<int>(1, GetSystemMetrics(SM_CYVIRTUALSCREEN));
-    const int64_t relX = static_cast<int64_t>(point.x) - virtualLeft;
-    const int64_t relY = static_cast<int64_t>(point.y) - virtualTop;
+  if (message.eventKind == 2 || message.eventKind == 3) {
     input.type = INPUT_MOUSE;
-    input.mi.dx =
-        static_cast<LONG>((relX * 65535 + (virtualWidth - 1) / 2) / std::max<int>(1, virtualWidth - 1));
-    input.mi.dy =
-        static_cast<LONG>((relY * 65535 + (virtualHeight - 1) / 2) / std::max<int>(1, virtualHeight - 1));
-    const DWORD positionFlags =
-        MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
-    if (message.eventKind == 4) {
-      input.mi.dwFlags = positionFlags | MOUSEEVENTF_WHEEL;
-      input.mi.mouseData = static_cast<DWORD>(static_cast<SHORT>(message.wheelDelta));
-    } else {
-      input.mi.dwFlags = positionFlags | mouse_flag(message.eventKind, message.keyCode);
-    }
+    input.mi.dwFlags = mouse_flag(message.eventKind, message.keyCode);
+  } else if (message.eventKind == 4) {
+    input.type = INPUT_MOUSE;
+    input.mi.dwFlags = MOUSEEVENTF_WHEEL;
+    input.mi.mouseData = static_cast<DWORD>(static_cast<SHORT>(message.wheelDelta));
   } else if (message.eventKind == 5 || message.eventKind == 6) {
     input.type = INPUT_KEYBOARD;
     input.ki.wVk = static_cast<WORD>(message.keyCode);
