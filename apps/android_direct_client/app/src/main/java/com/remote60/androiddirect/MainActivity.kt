@@ -843,27 +843,26 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 "savedControlPort=${savedEndpoint.controlPort} logFile=${diagnosticsLog.filePath()}"
         )
 
-        findViewById<Button>(R.id.connectButton).setOnClickListener {
-            val host = hostEdit.text?.toString()?.trim().orEmpty()
-            val videoPort = videoPortEdit.text?.toString()?.toIntOrNull() ?: 0
-            val controlPort = controlPortEdit.text?.toString()?.toIntOrNull() ?: 0
-            saveCurrentEndpoint()
-            diagnosticsLog.log("connect_tap", "host=$host videoPort=$videoPort controlPort=$controlPort")
+        findViewById<Button>(R.id.connectButton).setOnClickListener { beginConnect("connect_tap") }
 
-            val ok = NativeSessionBridge.nativeConnect(host, videoPort, controlPort)
-            if (ok) {
-                connectFlowActive = true
-                pendingRuntimeConfigSync = true
-                pendingDesktopBackendSync = true
-                desiredStreamActive = false
-                lastAppliedStreamActive = null
-                clearPendingSelection()
-                currentScene = UiScene.TARGETS
-                NativeSessionBridge.nativeRequestWindowList()
-            } else {
-                diagnosticsLog.log("connect_failed", NativeSessionBridge.nativeGetLastError())
+        // Playback smoothness can only be judged from a running session, and driving the UI
+        // with synthetic taps to get one is both fragile and a poor thing to do to whatever
+        // is on screen. A launch extra starts the session directly:
+        //   am start -n <pkg>/.MainActivity --es host <ip> --ez autoConnect true
+        if (intent.getBooleanExtra("autoConnect", false)) {
+            val autoDesktop = intent.getBooleanExtra("autoDesktop", false)
+            hostEdit.post {
+                beginConnect("connect_auto")
+                if (autoDesktop) {
+                    // The host needs a moment to answer the window-list request before a
+                    // selection will take.
+                    hostEdit.postDelayed({
+                        activeTargetTab = TargetTab.DESKTOP
+                        startSelectionTransition(0L, "desktop", TargetTab.DESKTOP, "auto")
+                        renderStatus()
+                    }, 1500L)
+                }
             }
-            renderStatus()
         }
 
         listDisconnectButton.setOnClickListener {
@@ -1156,6 +1155,30 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         lastViewerRecoveryAtMs = 0L
         lastViewerRecoveryAttempts = 0
         resetViewerTouchState()
+    }
+
+    /** Opens the session using whatever is currently in the endpoint fields. */
+    private fun beginConnect(reason: String) {
+        val host = hostEdit.text?.toString()?.trim().orEmpty()
+        val videoPort = videoPortEdit.text?.toString()?.toIntOrNull() ?: 0
+        val controlPort = controlPortEdit.text?.toString()?.toIntOrNull() ?: 0
+        saveCurrentEndpoint()
+        diagnosticsLog.log(reason, "host=$host videoPort=$videoPort controlPort=$controlPort")
+
+        val ok = NativeSessionBridge.nativeConnect(host, videoPort, controlPort)
+        if (ok) {
+            connectFlowActive = true
+            pendingRuntimeConfigSync = true
+            pendingDesktopBackendSync = true
+            desiredStreamActive = false
+            lastAppliedStreamActive = null
+            clearPendingSelection()
+            currentScene = UiScene.TARGETS
+            NativeSessionBridge.nativeRequestWindowList()
+        } else {
+            diagnosticsLog.log("connect_failed", NativeSessionBridge.nativeGetLastError())
+        }
+        renderStatus()
     }
 
     private fun clearPendingSelection() {
