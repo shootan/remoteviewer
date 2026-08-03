@@ -234,6 +234,41 @@ void AndroidVideoDecoderSink::OnVideoDiscontinuity() {
   log_info("video decoder reset after transport discontinuity");
 }
 
+bool AndroidVideoDecoderSink::DrainPresentationStats(
+    remote60::native_poc::ClientPresentationStats* out) {
+  if (!out) return false;
+  std::lock_guard<std::mutex> lock(mu_);
+  if (presentGapsUs_.size() < 2) return false;
+
+  std::vector<uint32_t> gaps = presentGapsUs_;
+  const uint64_t windowStartUs = presentWindowStartUs_;
+  const uint64_t windowEndUs = lastPresentSteadyUs_;
+  presentGapsUs_.clear();
+  presentWindowStartUs_ = lastPresentSteadyUs_;
+
+  std::sort(gaps.begin(), gaps.end());
+  const size_t n = gaps.size();
+  const uint32_t targetUs = targetFrameIntervalUs_ > 0
+                                ? static_cast<uint32_t>(targetFrameIntervalUs_)
+                                : 33333u;
+  out->targetIntervalUs = targetUs;
+  out->sampleCount = static_cast<uint32_t>(n);
+  out->gapP50Us = gaps[n / 2];
+  out->gapP95Us = gaps[std::min(n - 1, static_cast<size_t>(n * 95 / 100))];
+  out->gapMaxUs = gaps.back();
+  for (uint32_t gap : gaps) {
+    if (gap >= targetUs + targetUs / 2) ++out->over1_5xCount;
+    if (gap >= targetUs * 2) ++out->over2xCount;
+  }
+  // Frames per second over the window the samples actually span, so a stalled second cannot
+  // be hidden by averaging against wall-clock.
+  const uint64_t spanUs = (windowEndUs > windowStartUs) ? (windowEndUs - windowStartUs) : 0;
+  out->fpsX100 = spanUs > 0
+                     ? static_cast<uint32_t>((static_cast<uint64_t>(n) * 100000000ULL) / spanUs)
+                     : 0;
+  return true;
+}
+
 bool AndroidVideoDecoderSink::ConsumeDecoderKeyframeRequest() {
   std::lock_guard<std::mutex> lock(mu_);
   const bool requested = decoderKeyframeRequest_;
@@ -736,6 +771,19 @@ void AndroidVideoDecoderSink::DrainOutputLocked() {
         return;
       }
       ++outputFrameCount_;
+      // The release call is where a frame becomes visible, so the spacing between releases is
+      // the smoothness the viewer perceives -- not the decode rate reported everywhere else.
+      {
+        const uint64_t releasedAtUs = steady_now_us();
+        if (lastPresentSteadyUs_ != 0 && releasedAtUs > lastPresentSteadyUs_) {
+          const uint64_t gapUs = releasedAtUs - lastPresentSteadyUs_;
+          if (presentGapsUs_.size() < 4096) {
+            presentGapsUs_.push_back(static_cast<uint32_t>(std::min<uint64_t>(gapUs, 4000000ULL)));
+          }
+        }
+        if (presentWindowStartUs_ == 0) presentWindowStartUs_ = releasedAtUs;
+        lastPresentSteadyUs_ = releasedAtUs;
+      }
       if (pendingSelectionGeneration_ != 0 &&
           readySelectionGeneration_ != pendingSelectionGeneration_) {
         readySelectionGeneration_ = pendingSelectionGeneration_;

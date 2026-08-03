@@ -16,9 +16,24 @@
 
 namespace remote60::native_poc {
 
+// One window's worth of display timing, measured where frames actually reach the screen.
+struct ClientPresentationStats {
+  uint32_t targetIntervalUs = 0;
+  uint32_t fpsX100 = 0;
+  uint32_t gapP50Us = 0;
+  uint32_t gapP95Us = 0;
+  uint32_t gapMaxUs = 0;
+  uint32_t over1_5xCount = 0;
+  uint32_t over2xCount = 0;
+  uint32_t sampleCount = 0;
+};
+
 class ClientEncodedFrameSink {
  public:
   virtual ~ClientEncodedFrameSink() = default;
+  /** Drains the presentation stats accumulated since the last call; false when the sink does
+   *  not present frames itself (a decode-only sink has nothing to report). */
+  virtual bool DrainPresentationStats(ClientPresentationStats* /* out */) { return false; }
   virtual void OnEncodedH264Frame(UdpH264AssembledFrame&& frame) = 0;
   virtual void OnVideoStreamReset() = 0;
   // Called when a compressed reference frame was lost. Implementations that retain decoder

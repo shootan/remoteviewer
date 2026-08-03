@@ -196,6 +196,17 @@ struct ControlClientMetricsMessage {
   uint32_t queueDepthH4p = 0;             // histogram bucket: 4+ frames
   uint32_t udpAssemblyDropPm = 0;         // latest assembly drop permille
   uint64_t clientSendQpcUs = 0;
+  // What the viewer actually sees. Everything above describes frames arriving and decoding,
+  // which stays healthy while playback visibly stutters -- the interval between frames
+  // reaching the display is the only number that tracks perceived smoothness.
+  uint32_t presentTargetIntervalUs = 0;   // 0 when the client does not report presentation
+  uint32_t presentFpsX100 = 0;
+  uint32_t presentGapP50Us = 0;
+  uint32_t presentGapP95Us = 0;
+  uint32_t presentGapMaxUs = 0;
+  uint32_t presentOver1_5xCount = 0;      // frames late by half a period or more, this window
+  uint32_t presentOver2xCount = 0;        // a whole missing frame, this window
+  uint32_t presentSampleCount = 0;
 };
 
 struct ControlRequestKeyFrameMessage {

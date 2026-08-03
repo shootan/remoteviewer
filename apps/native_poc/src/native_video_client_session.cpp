@@ -335,6 +335,26 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
     const uint64_t loopNowUs = now_us();
     ControlOutboundAction action{};
     ClientControlMetricsSnapshot metrics{};
+    // Report what the display is doing back to the host once a second. Without this the host
+    // only ever saw receive/decode counters, which stay healthy through visible stutter.
+    if (encodedFrameSink_) {
+      static uint64_t lastPresentReportUs = 0;
+      if (loopNowUs >= lastPresentReportUs + 1000000ULL) {
+        ClientPresentationStats present{};
+        if (encodedFrameSink_->DrainPresentationStats(&present) && present.sampleCount > 0) {
+          metrics.message.presentTargetIntervalUs = present.targetIntervalUs;
+          metrics.message.presentFpsX100 = present.fpsX100;
+          metrics.message.presentGapP50Us = present.gapP50Us;
+          metrics.message.presentGapP95Us = present.gapP95Us;
+          metrics.message.presentGapMaxUs = present.gapMaxUs;
+          metrics.message.presentOver1_5xCount = present.over1_5xCount;
+          metrics.message.presentOver2xCount = present.over2xCount;
+          metrics.message.presentSampleCount = present.sampleCount;
+          metrics.updatedQpcUs = loopNowUs;
+          lastPresentReportUs = loopNowUs;
+        }
+      }
+    }
     if (controlScheduler_.NextAction(loopNowUs, metrics, &windowPanel_, &streamState_, &captureMode_,
                                      &keyframeRequests_, &runtimeTune_, &inputQueue_, &action,
                                      &desktopBackend_)) {

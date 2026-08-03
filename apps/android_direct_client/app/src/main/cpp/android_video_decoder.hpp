@@ -25,6 +25,8 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   void OnVideoStreamReset() override;
   void OnVideoDiscontinuity() override;
   bool ConsumeDecoderKeyframeRequest() override;
+  bool DrainPresentationStats(
+      remote60::native_poc::ClientPresentationStats* out) override;
   void OnWindowSelectionControlResult(
       const remote60::native_poc::ControlWindowSelectedMessage& msg) override;
   void PrepareForWindowSelection(uint64_t selectionGeneration);
@@ -75,6 +77,11 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   // Set when a delta had to be discarded before reaching the codec; consumed by the session,
   // which turns it into a rate-limited IDR request.
   bool decoderKeyframeRequest_ = false;
+  // Intervals between frames actually handed to the display, drained once a second by the
+  // session and reported to the host.
+  std::vector<uint32_t> presentGapsUs_;
+  uint64_t lastPresentSteadyUs_ = 0;
+  uint64_t presentWindowStartUs_ = 0;
   uint64_t lastInputQueueSteadyUs_ = 0;
   uint64_t bootstrapReplayCount_ = 0;
   uint64_t staleFrameDropCount_ = 0;

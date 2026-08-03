@@ -3539,6 +3539,21 @@ int main(int argc, char** argv) {
         clientMetricsQueueDepthH4p = metrics.queueDepthH4p;
         clientMetricsUdpAssemblyDropPm = metrics.udpAssemblyDropPm;
         clientMetricsUpdatedUs = qpc_now_us();
+        // Logged as it arrives rather than folded into the per-second stat line: this is the
+        // only view the host gets of what the remote display is actually doing, and a viewer
+        // reporting stutter needs it visible without attaching to the device.
+        if (metrics.presentSampleCount > 0) {
+          std::cout << "[native-video-host][client-present]"
+                    << " fps=" << (metrics.presentFpsX100 / 100.0)
+                    << " targetUs=" << metrics.presentTargetIntervalUs
+                    << " gapP50Us=" << metrics.presentGapP50Us
+                    << " gapP95Us=" << metrics.presentGapP95Us
+                    << " gapMaxUs=" << metrics.presentGapMaxUs
+                    << " over1_5x=" << metrics.presentOver1_5xCount
+                    << " over2x=" << metrics.presentOver2xCount
+                    << " samples=" << metrics.presentSampleCount
+                    << "\n";
+        }
         continue;
       }
 
