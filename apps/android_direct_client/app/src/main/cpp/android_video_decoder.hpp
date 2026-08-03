@@ -2,9 +2,11 @@
 
 #include <jni.h>
 
+#include <atomic>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "native_video_client_session.hpp"
@@ -48,6 +50,9 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   bool UpdateCodecConfigLocked(const std::vector<uint8_t>& annexb);
   void UpdateOutputFormatLocked();
   void DrainOutputLocked();
+  void StartOutputPumpLocked();
+  void StopOutputPump();
+  void OutputPumpMain();
 
   std::mutex mu_;
   ANativeWindow* window_ = nullptr;
@@ -68,6 +73,12 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   // tested against recorded arrival patterns, because it is control logic whose failure mode
   // is "looks slightly wrong on a device you are not holding".
   remote60::native_poc::VideoPlayoutClock playoutClock_;
+  // Hands decoded frames to the display on their own schedule. Draining only when the next
+  // frame arrives meant a frame scheduled 80 ms out sat in the codec until something else
+  // showed up -- so the moment arrivals bunched, which is exactly when pacing matters, the
+  // schedule was missed and the frame went straight to the screen.
+  std::thread outputPumpThread_;
+  std::atomic<bool> outputPumpStop_{false};
   uint64_t pendingFrameCount_ = 0;
   uint64_t pendingFrameQueueRetryCount_ = 0;
   // Set when a delta had to be discarded before reaching the codec; consumed by the session,

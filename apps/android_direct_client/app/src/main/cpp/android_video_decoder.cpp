@@ -101,9 +101,36 @@ std::vector<uint8_t> with_start_code(const uint8_t* data, size_t size) {
 }  // namespace
 
 AndroidVideoDecoderSink::~AndroidVideoDecoderSink() {
+  // Before the lock: the pump takes it every tick, so joining while holding it would deadlock.
+  StopOutputPump();
   std::lock_guard<std::mutex> lock(mu_);
   ResetCodecLocked();
   ReleaseSurfaceLocked();
+}
+
+void AndroidVideoDecoderSink::StartOutputPumpLocked() {
+  if (outputPumpThread_.joinable()) return;
+  outputPumpStop_.store(false, std::memory_order_relaxed);
+  outputPumpThread_ = std::thread([this] { OutputPumpMain(); });
+}
+
+void AndroidVideoDecoderSink::StopOutputPump() {
+  outputPumpStop_.store(true, std::memory_order_relaxed);
+  if (outputPumpThread_.joinable()) outputPumpThread_.join();
+}
+
+void AndroidVideoDecoderSink::OutputPumpMain() {
+  // A frame is due at a wall-clock instant, so something has to be watching the clock. The
+  // tick is well under a frame period: an empty dequeue costs almost nothing, and being a few
+  // milliseconds late to hand over a frame is the entire defect this exists to avoid.
+  constexpr auto kPumpInterval = std::chrono::milliseconds(3);
+  while (!outputPumpStop_.load(std::memory_order_relaxed)) {
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (codec_) DrainOutputLocked();
+    }
+    std::this_thread::sleep_for(kPumpInterval);
+  }
 }
 
 void AndroidVideoDecoderSink::SetTargetFps(uint32_t fps) {
@@ -464,6 +491,7 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height)
   configuredHeight_ = height;
   outputWidth_ = width;
   outputHeight_ = height;
+  StartOutputPumpLocked();
   char line[128];
   std::snprintf(line, sizeof(line), "MediaCodec started width=%u height=%u csd0=%zu csd1=%zu",
                 width, height, csd0_.size(), csd1_.size());
