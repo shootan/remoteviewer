@@ -590,7 +590,12 @@ uint64_t AndroidVideoDecoderSink::ComputeQueuedPtsUsLocked(
 void AndroidVideoDecoderSink::ResetPtsStateLocked() { playoutClock_.Reset(); }
 
 void AndroidVideoDecoderSink::ResetCodecLocked() {
-  ResetPtsStateLocked();
+  // Deliberately not ResetPtsStateLocked(). Losing the codec invalidates reference pictures,
+  // not the relationship between the host's capture clock and this one -- and that
+  // relationship is the only thing holding playback steady. Dropping it on every recovered
+  // packet loss made each loss cost a visible timeline jump on top of the missing frames.
+  // When the timeline really has moved, the clock notices by itself: a new stream generation,
+  // a capture timestamp going backwards, or a gap too large to pace across all reanchor it.
   pendingFrame_.reset();
   pendingFrameCount_ = 0;
   pendingFrameQueueRetryCount_ = 0;
