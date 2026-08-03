@@ -281,18 +281,30 @@ bool inject_message(const SecureInputMessage& message) {
   }
   if (message.kind != static_cast<uint16_t>(SecureInputKind::InputEvent)) return false;
   const POINT point = map_point(message);
-  if (message.eventKind >= 1 && message.eventKind <= 4 && !SetCursorPos(point.x, point.y)) {
-    return false;
-  }
-  if (message.eventKind == 1) return true;
+  if (message.eventKind == 1) return SetCursorPos(point.x, point.y) != FALSE;
   INPUT input{};
-  if (message.eventKind == 2 || message.eventKind == 3) {
+  if (message.eventKind == 2 || message.eventKind == 3 || message.eventKind == 4) {
+    // Carry the position on the button/wheel event itself. Repositioning first and clicking
+    // afterwards lets anything that moves the cursor in between land the click elsewhere.
+    const int virtualLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    const int virtualTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    const int virtualWidth = std::max<int>(1, GetSystemMetrics(SM_CXVIRTUALSCREEN));
+    const int virtualHeight = std::max<int>(1, GetSystemMetrics(SM_CYVIRTUALSCREEN));
+    const int64_t relX = static_cast<int64_t>(point.x) - virtualLeft;
+    const int64_t relY = static_cast<int64_t>(point.y) - virtualTop;
     input.type = INPUT_MOUSE;
-    input.mi.dwFlags = mouse_flag(message.eventKind, message.keyCode);
-  } else if (message.eventKind == 4) {
-    input.type = INPUT_MOUSE;
-    input.mi.dwFlags = MOUSEEVENTF_WHEEL;
-    input.mi.mouseData = static_cast<DWORD>(static_cast<SHORT>(message.wheelDelta));
+    input.mi.dx =
+        static_cast<LONG>((relX * 65535 + (virtualWidth - 1) / 2) / std::max<int>(1, virtualWidth - 1));
+    input.mi.dy =
+        static_cast<LONG>((relY * 65535 + (virtualHeight - 1) / 2) / std::max<int>(1, virtualHeight - 1));
+    const DWORD positionFlags =
+        MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    if (message.eventKind == 4) {
+      input.mi.dwFlags = positionFlags | MOUSEEVENTF_WHEEL;
+      input.mi.mouseData = static_cast<DWORD>(static_cast<SHORT>(message.wheelDelta));
+    } else {
+      input.mi.dwFlags = positionFlags | mouse_flag(message.eventKind, message.keyCode);
+    }
   } else if (message.eventKind == 5 || message.eventKind == 6) {
     input.type = INPUT_KEYBOARD;
     input.ki.wVk = static_cast<WORD>(message.keyCode);

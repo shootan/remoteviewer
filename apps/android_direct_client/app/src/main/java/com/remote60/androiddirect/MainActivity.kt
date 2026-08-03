@@ -19,6 +19,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
 import android.view.TextureView
+import android.view.ViewConfiguration
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
@@ -41,11 +42,17 @@ import java.nio.ByteOrder
 import java.util.Locale
 import java.util.concurrent.Executors
 import kotlin.math.abs
+import kotlin.math.hypot
 import kotlin.math.roundToInt
 
 class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     companion object {
         private const val LOG_TAG = "remote60_android_direct"
+        // Windows promotes a second press to a double-click only inside SM_CXDOUBLECLK (4px)
+        // and GetDoubleClickTime (500ms). Anchor a little more generously than the OS box,
+        // since a thumb lands several pixels off and the remote image may be downscaled.
+        private const val DOUBLE_TAP_ANCHOR_WINDOW_MS = 400L
+        private const val DOUBLE_TAP_ANCHOR_RADIUS_PX = 24
         private const val INPUT_KIND_MOUSE_MOVE = 1
         private const val INPUT_KIND_MOUSE_DOWN = 2
         private const val INPUT_KIND_MOUSE_UP = 3
@@ -568,6 +575,23 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var lastTouchVideoY = 0
     private var scrollLastTouchY = 0f
     private var scrollWheelCarryPx = 0f
+
+    // A finger never holds perfectly still. Every pixel of that wobble used to be forwarded as
+    // a cursor move with the button down, which Windows reads as a drag once it passes 4px --
+    // so items got dragged instead of clicked and the second tap of a double-click landed
+    // outside the 4px double-click rectangle. Hold moves back until the gesture clearly is a
+    // drag, and keep a tap anchored to the pixel it started on.
+    private var touchDownViewX = 0f
+    private var touchDownViewY = 0f
+    private var touchDownVideoX = 0
+    private var touchDownVideoY = 0
+    private var touchDragLatched = false
+    private var lastTapVideoX = 0
+    private var lastTapVideoY = 0
+    private var lastTapUpAtMs = 0L
+    private val viewerTouchSlopPx: Float by lazy {
+        ViewConfiguration.get(this).scaledTouchSlop.toFloat()
+    }
 
     // The dedicated left strip. Its finger lives in a different view's event stream than the
     // picture's, so holding a zone cannot disturb the touch bookkeeping above -- which is also
@@ -1365,12 +1389,27 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 activeTouchIsSecondary = isRightClickModeActive()
                 activeTouchButtons =
                     if (activeTouchIsSecondary) INPUT_BUTTON_SECONDARY else INPUT_BUTTON_PRIMARY
-                lastTouchVideoX = mapped.first
-                lastTouchVideoY = mapped.second
+                // Reuse the previous tap's pixel when this one follows quickly and lands close
+                // by: two taps by the same thumb are several remote pixels apart, and Windows
+                // only promotes the second press to a double-click within a 4px box.
+                val nowMs = SystemClock.uptimeMillis()
+                val reuseAnchor =
+                    nowMs - lastTapUpAtMs <= DOUBLE_TAP_ANCHOR_WINDOW_MS &&
+                        abs(mapped.first - lastTapVideoX) <= DOUBLE_TAP_ANCHOR_RADIUS_PX &&
+                        abs(mapped.second - lastTapVideoY) <= DOUBLE_TAP_ANCHOR_RADIUS_PX
+                val downX = if (reuseAnchor) lastTapVideoX else mapped.first
+                val downY = if (reuseAnchor) lastTapVideoY else mapped.second
+                touchDownViewX = event.getX(pointerIndex)
+                touchDownViewY = event.getY(pointerIndex)
+                touchDownVideoX = downX
+                touchDownVideoY = downY
+                touchDragLatched = false
+                lastTouchVideoX = downX
+                lastTouchVideoY = downY
                 val queued = NativeSessionBridge.nativeQueueInputEvent(
                     INPUT_KIND_MOUSE_DOWN,
-                    mapped.first,
-                    mapped.second,
+                    downX,
+                    downY,
                     0,
                     if (activeTouchIsSecondary) INPUT_VK_RBUTTON else INPUT_VK_LBUTTON,
                     activeTouchButtons
@@ -1435,6 +1474,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 if (mapped.first == lastTouchVideoX && mapped.second == lastTouchVideoY) {
                     return true
                 }
+                if (!touchDragLatched) {
+                    // Measure the slop in view pixels: the remote-pixel delta is scaled by the
+                    // letterboxing factor, so the same finger wobble reads as a bigger jump on
+                    // a downscaled desktop and the threshold would drift with resolution.
+                    val dx = event.getX(pointerIndex) - touchDownViewX
+                    val dy = event.getY(pointerIndex) - touchDownViewY
+                    if (hypot(dx, dy) < viewerTouchSlopPx) return true
+                    touchDragLatched = true
+                }
                 lastTouchVideoX = mapped.first
                 lastTouchVideoY = mapped.second
                 NativeSessionBridge.nativeQueueInputEvent(
@@ -1475,12 +1523,23 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     view.performClick()
                     return true
                 }
-                lastTouchVideoX = mapped.first
-                lastTouchVideoY = mapped.second
+                // A tap that never became a drag releases exactly where it pressed, so the
+                // press/release pair is one clean click at one pixel.
+                val upX = if (touchDragLatched) mapped.first else touchDownVideoX
+                val upY = if (touchDragLatched) mapped.second else touchDownVideoY
+                lastTouchVideoX = upX
+                lastTouchVideoY = upY
+                if (!touchDragLatched) {
+                    lastTapVideoX = upX
+                    lastTapVideoY = upY
+                    lastTapUpAtMs = SystemClock.uptimeMillis()
+                } else {
+                    lastTapUpAtMs = 0L
+                }
                 val queued = NativeSessionBridge.nativeQueueInputEvent(
                     INPUT_KIND_MOUSE_UP,
-                    mapped.first,
-                    mapped.second,
+                    upX,
+                    upY,
                     0,
                     if (activeTouchIsSecondary) INPUT_VK_RBUTTON else INPUT_VK_LBUTTON,
                     0
@@ -2158,6 +2217,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         lastTouchVideoY = 0
         scrollLastTouchY = 0f
         scrollWheelCarryPx = 0f
+        touchDragLatched = false
+        touchDownViewX = 0f
+        touchDownViewY = 0f
+        touchDownVideoX = 0
+        touchDownVideoY = 0
     }
 
     private fun toggleViewerKeyboard() {

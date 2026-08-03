@@ -1867,9 +1867,27 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
 
   if (asyncTransform_ && eventGenerator_) {
     bool sawEvent = false;
-    const uint32_t asyncPollMax = env_u32_local("REMOTE60_NATIVE_H264_ASYNC_POLL_MAX", 1);
+    // Budget several events per call. Hardware MFTs post roughly one METransformNeedInput and
+    // one METransformHaveOutput per frame; draining only one event per encode let the queue
+    // ratchet up and then release two or three access units at once, which downstream is a
+    // burst the depth-2 sender queue treats as congestion.
+    //
+    // Draining is real work, though, and it happens inline: spending the whole budget at 60fps
+    // stretched the encode call past half the 16.7ms frame period and cost throughput, while a
+    // smaller fixed budget left frames sitting in the MFT and pushed 30fps latency back up.
+    // Bound the loop by a fraction of the frame period instead, so each rate gets the drain it
+    // can afford.
+    const uint32_t asyncPollMax = env_u32_local("REMOTE60_NATIVE_H264_ASYNC_POLL_MAX", 4);
+    const uint64_t framePeriodUs = 1000000ULL / std::max<uint32_t>(1, fps_);
+    const uint32_t asyncPollBudgetPercent =
+        env_u32_local("REMOTE60_NATIVE_H264_ASYNC_POLL_BUDGET_PCT", 40);
+    const uint64_t asyncPollDeadlineUs =
+        encodeCallStartUs + (framePeriodUs * std::min<uint32_t>(100, asyncPollBudgetPercent)) / 100ULL;
     const uint32_t asyncPollSleepUs = env_u32_local("REMOTE60_NATIVE_H264_ASYNC_POLL_SLEEP_US", 0);
     for (uint32_t poll = 0; poll < std::max<uint32_t>(1, asyncPollMax); ++poll) {
+      // Always take the first poll; after that, stop once this call has used its share of the
+      // frame period so a slow drain cannot eat the capture cadence.
+      if (poll > 0 && qpc_now_us() >= asyncPollDeadlineUs) break;
       Microsoft::WRL::ComPtr<IMFMediaEvent> ev;
       ++encodeStats->asyncPollCount;
       const HRESULT ehr = eventGenerator_->GetEvent(MF_EVENT_FLAG_NO_WAIT, &ev);
@@ -1890,10 +1908,12 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
       (void)ev->GetType(&et);
       if (et == METransformHaveOutput) {
         ++encodeStats->asyncPollHaveOutputCount;
-        if (!drain_outputs()) return false;
+        if (!drain_outputs()) return finish_call(false);
       } else if (et == METransformNeedInput) {
         ++encodeStats->asyncPollNeedInputCount;
-        break;
+        // Keep polling: a NeedInput only says the MFT will accept another frame, and
+        // abandoning the loop here would leave an already-posted HaveOutput queued.
+        continue;
       }
     }
     if (!sawEvent) {

@@ -158,10 +158,15 @@ class HostPowerKeepalive {
   }
 
   void SetStreaming(bool streaming, bool wakeDisplay = false) {
-    if (streaming_ == streaming && !wakeDisplay) return;
+    // Only a real not-streaming -> streaming edge may wake the display. The wake injects
+    // actual mouse motion, and the previous condition re-ran it for any call that passed
+    // wakeDisplay while already streaming -- including the capture-fallback retry loops,
+    // which re-arm themselves every 100ms and so jittered the cursor continuously.
+    const bool startedStreaming = streaming && !streaming_;
+    if (streaming_ == streaming) return;
     streaming_ = streaming;
     Apply(streaming);
-    if (streaming && wakeDisplay) wake_display_for_remote_session();
+    if (startedStreaming && wakeDisplay) wake_display_for_remote_session();
   }
 
  private:
@@ -1015,6 +1020,29 @@ bool send_desktop_mouse_input(DWORD flags, DWORD mouseData = 0) {
   return SendInput(1, &in, sizeof(INPUT)) == 1;
 }
 
+// Places the cursor and delivers the button/wheel action as ONE input event.
+//
+// Positioning with SetCursorPos and then sending a button in a separate call leaves a window in
+// which anything else -- the operator's physical mouse, another injected event -- moves the
+// cursor, so the click lands somewhere the user did not aim at. Carrying absolute coordinates on
+// the button event itself removes the window entirely.
+bool send_desktop_mouse_at(POINT screenPt, DWORD actionFlags, DWORD mouseData = 0) {
+  const int virtualLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+  const int virtualTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+  const int virtualWidth = std::max<int>(1, GetSystemMetrics(SM_CXVIRTUALSCREEN));
+  const int virtualHeight = std::max<int>(1, GetSystemMetrics(SM_CYVIRTUALSCREEN));
+  // SendInput's absolute space is 0..65535 spanning the whole virtual desktop.
+  const int64_t relX = static_cast<int64_t>(screenPt.x) - virtualLeft;
+  const int64_t relY = static_cast<int64_t>(screenPt.y) - virtualTop;
+  INPUT in{};
+  in.type = INPUT_MOUSE;
+  in.mi.dx = static_cast<LONG>((relX * 65535 + (virtualWidth - 1) / 2) / std::max<int>(1, virtualWidth - 1));
+  in.mi.dy = static_cast<LONG>((relY * 65535 + (virtualHeight - 1) / 2) / std::max<int>(1, virtualHeight - 1));
+  in.mi.mouseData = mouseData;
+  in.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | actionFlags;
+  return SendInput(1, &in, sizeof(INPUT)) == 1;
+}
+
 // Real keyboard events for the focused window.
 //
 // Chrome, Electron apps and anything UWP-backed ignore a synthetic WM_CHAR/WM_KEYDOWN that
@@ -1179,13 +1207,12 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
   if (input.kind == 2 || input.kind == 3) {
     const DWORD mouseFlag = mouse_vk_to_sendinput_flag(input.kind, input.keyCode);
     if (mouseFlag == 0) return InputInjectResult::Unsupported;
-    if (!SetCursorPos(screenPt.x, screenPt.y)) return InputInjectResult::Failed;
-    return send_desktop_mouse_input(mouseFlag) ? InputInjectResult::Injected : InputInjectResult::Failed;
+    return send_desktop_mouse_at(screenPt, mouseFlag) ? InputInjectResult::Injected
+                                                      : InputInjectResult::Failed;
   }
   if (input.kind == 4) {
-    if (!SetCursorPos(screenPt.x, screenPt.y)) return InputInjectResult::Failed;
-    return send_desktop_mouse_input(MOUSEEVENTF_WHEEL,
-                                    static_cast<DWORD>(static_cast<SHORT>(input.wheelDelta)))
+    return send_desktop_mouse_at(screenPt, MOUSEEVENTF_WHEEL,
+                                 static_cast<DWORD>(static_cast<SHORT>(input.wheelDelta)))
                ? InputInjectResult::Injected
                : InputInjectResult::Failed;
   }
@@ -2613,6 +2640,15 @@ int main(int argc, char** argv) {
       "REMOTE60_NATIVE_UDP_PACE_PEAK_FLOOR_BPS", 40000000, 0, 1000000000);
   const uint32_t udpKeyframePacePeakBps = env_u32_clamped(
       "REMOTE60_NATIVE_UDP_KEYFRAME_PACE_PEAK_BPS", 100000000, 0, 1000000000);
+  // Holding an encoded frame back to enforce even send spacing costs exactly what it holds:
+  // measured end-to-end latency p95 went 4ms -> 31ms at 30fps when this was enabled
+  // unconditionally, and rose further when the hold also pushed the next frame's deadline.
+  // The H4 sender queue is already capped at two frames with keyframe supersede, so a
+  // catch-up burst can only ever be a couple of frames; smoothing it is not worth a frame
+  // period of latency. Off by default; the cap below re-enables bounded smoothing.
+  const uint32_t senderMaxCadenceHoldUs =
+      env_u32_clamped("REMOTE60_NATIVE_SENDER_MAX_CADENCE_HOLD_US", 0, 0, 33000);
+  const bool senderCadenceSmoothing = senderMaxCadenceHoldUs > 0;
   const bool guardStalePreEncode = env_truthy("REMOTE60_NATIVE_GUARD_STALE_PREENCODE");
   const bool abrEnabled = useH264 && !env_truthy("REMOTE60_NATIVE_ABR_DISABLE");
   const bool abrQualityFirst = env_truthy("REMOTE60_NATIVE_ADAPTIVE_QUALITY_FIRST");
@@ -4757,6 +4793,9 @@ int main(int argc, char** argv) {
   uint64_t statAtUs = startUs + 1000000ULL;
   uint64_t sentFrames = 0;
   uint64_t encodedFrames = 0;
+  // Encoded frames the sender queue policy discarded (backlog resync or waiting for the
+  // forced IDR). These are the frames a viewer experiences as a freeze.
+  uint64_t senderHeldFrames = 0;
   uint64_t sentBytes = 0;
   uint64_t rawEquivalentBytes = 0;
   uint64_t udpTxFrames = 0;
@@ -4858,7 +4897,7 @@ int main(int argc, char** argv) {
     if (transport != VideoTransport::Udp || !useH264) return;
     senderThread = std::thread([&]() {
       (void)SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
-      uint64_t nextFrameSendUs = 0;
+      uint64_t cadenceScheduledUs = 0;
       uint64_t cadenceGeneration = 0;
       while (true) {
         EncodedSendItem item;
@@ -4884,15 +4923,24 @@ int main(int argc, char** argv) {
         const uint64_t frameIntervalUs =
             std::clamp<uint64_t>(item.frameIntervalUs, 8333ULL, 200000ULL);
         const uint64_t nowUs = qpc_now_us();
-        if (nextFrameSendUs == 0 || cadenceGeneration != item.udpHdr.streamGeneration ||
-            nowUs > nextFrameSendUs + frameIntervalUs * 2ULL) {
-          // New selections and material sender stalls start a fresh local clock. Never send
-          // several overdue frames in a catch-up burst; that is perceived as pause/jump.
-          nextFrameSendUs = nowUs;
-          cadenceGeneration = item.udpHdr.streamGeneration;
+        // Optional catch-up smoothing. The schedule is carried in its own variable and
+        // advanced as max(now, scheduled + interval): deriving the next deadline from the
+        // *actual* send time instead would fold each hold into the following frame's deadline
+        // and ratchet the stream progressively further behind live.
+        const bool freshCadence = cadenceScheduledUs == 0 ||
+                                  cadenceGeneration != item.udpHdr.streamGeneration ||
+                                  nowUs > cadenceScheduledUs + frameIntervalUs * 2ULL;
+        cadenceGeneration = item.udpHdr.streamGeneration;
+        if (freshCadence) {
+          cadenceScheduledUs = nowUs;
+        } else if (senderCadenceSmoothing) {
+          const uint64_t earliestSendUs = cadenceScheduledUs + frameIntervalUs;
+          if (nowUs < earliestSendUs) {
+            udp_pace_wait_until(std::min<uint64_t>(earliestSendUs, nowUs + senderMaxCadenceHoldUs));
+          }
+          cadenceScheduledUs = std::max<uint64_t>(nowUs, earliestSendUs);
         } else {
-          nextFrameSendUs += frameIntervalUs;
-          if (nowUs < nextFrameSendUs) udp_pace_wait_until(nextFrameSendUs);
+          cadenceScheduledUs = nowUs;
         }
         const uint64_t sendStartUs = qpc_now_us();
         item.udpHdr.sendQpcUs = sendStartUs;
@@ -6236,6 +6284,11 @@ int main(int argc, char** argv) {
           continue;
         }
       }
+        // An async MFT can release several access units from one encode call. They are pushed
+        // microseconds apart, so the sender thread has usually not been scheduled between them
+        // and the queue depth reflects the burst rather than a backlogged wire. Counting that
+        // as congestion discarded the whole GOP and forced an IDR on a perfectly healthy link.
+        const size_t senderQueueLimit = std::max<size_t>(2, units.size());
         for (const auto& au : units) {
           if (au.bytes.empty()) continue;
           const int64_t auCaptureUs = (au.sampleTimeHns > 0) ? (au.sampleTimeHns / 10) : static_cast<int64_t>(encodeInputUs);
@@ -6388,7 +6441,7 @@ int main(int argc, char** argv) {
                 // block garbage. Hold everything until the forced keyframe arrives.
                 senderDropCount.fetch_add(1, std::memory_order_relaxed);
                 senderRequestKey.store(true, std::memory_order_release);
-              } else if (senderQueue.size() >= 2) {
+              } else if (senderQueue.size() >= senderQueueLimit) {
                 // Backlogged: drop the stale frames AND this delta -- it references what
                 // was just dropped -- then resync with a fresh IDR.
                 senderDropCount.fetch_add(senderQueue.size() + 1, std::memory_order_relaxed);
@@ -6401,6 +6454,9 @@ int main(int argc, char** argv) {
               }
             }
             if (enqueuedForSend) senderCv.notify_one();
+            // Handing the frame off succeeded even when the queue policy discarded it; this
+            // flag means "no transport failure", and clearing it here would tear the session
+            // down. Whether the frame really went out is tracked by enqueuedForSend below.
             sentOk = true;
           }
         }
@@ -6448,6 +6504,13 @@ int main(int argc, char** argv) {
           break;
         }
 
+        // A frame the sender queue discarded never reaches the wire. Counting it kept fps and
+        // bitrate reporting a healthy stream straight through a cutout, which is precisely the
+        // window that is visible to the user as a freeze -- so count only what was handed on.
+        if (transport == VideoTransport::Udp && !enqueuedForSend) {
+          ++senderHeldFrames;
+          continue;
+        }
         ++sentFrames;
         ++encodedFrames;
         sentBytes += hdr.payloadSize;
@@ -6901,6 +6964,9 @@ int main(int argc, char** argv) {
                   << " udpTxFail=" << udpTxFail
                   << " udpTxNoPeer=" << udpTxNoPeer
                   << " senderQueueDrops=" << senderDropCount.load(std::memory_order_relaxed)
+                  // Frames the queue policy withheld: the direct measure of how long a viewer
+                  // was looking at a frozen picture.
+                  << " senderHeldFrames=" << senderHeldFrames
                   << " senderSendDurAvgUs=" << senderSendDurAvgUs
                   << " senderSendDurMaxUs=" << senderSendDurMaxUs.load(std::memory_order_relaxed)
                   << " bitrateTarget=" << activeBitrate
