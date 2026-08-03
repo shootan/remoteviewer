@@ -5529,3 +5529,47 @@ Before/After (1080p-scroll Release 5회, 오늘 H4-off 대비)
   제품 배포 시 관리자 전용 경로 설치를 강제해야 한다.
 - 합성 씬은 버스트가 약해 senderQueueDrops가 대부분 0이므로, 실사용 부하에서
   senderHeldFrames(신규 지표)로 정지 구간을 재확인한다.
+
+### 228) 2026-08-03 코덱스 리뷰 반영: 남은 정지 경로 차단
+
+목표
+- 227) 수정분(bb6dcc9)을 코덱스에 검증 의뢰해 나온 approve-with-changes 지적사항을
+  전부 반영하고, 성능 회귀 없음을 재측정으로 확인한다.
+
+반영한 지적사항
+- (High) sender 큐 한도를 묶음 크기로 잡으면 큐에 이미 1프레임이 있을 때 3-AU 묶음이
+  마지막 AU에서 다시 오버플로하여 원래 정지 증상이 재현된다. 또한 대량 드레인이 그만큼
+  큰 큐를 허용해 지연이 초 단위로 늘 수 있다. → 혼잡 판정을 묶음 처리 전 백로그로 한 번만
+  내리고 kSenderQueueMaxFrames=6 하드 상한을 추가했다.
+- (High) Android 디코더가 MediaCodec 입력 버퍼 부족 시 델타를 조용히 폐기하면서 IDR을
+  요청하지 않아 이후 프레임이 없는 참조를 보게 된다. → ClientEncodedFrameSink에
+  ConsumeDecoderKeyframeRequest()를 추가하고 세션이 기존 레이트 리미터로 IDR을 요청한다.
+- (Medium) enqueue 시점에 sent로 카운트한 프레임이 이후 senderQueue.clear()로 지워져도
+  통계에 남았다. → clear 시 senderHeldFrames로 이전하고 sentFrames에서 차감한다.
+- (Medium) 더블탭 앵커가 기동 직후 (0,0)을 유효 앵커로 취급하고 취소 후에도 남으며 좌/우
+  버튼을 구분하지 않았다. → 유효 플래그 + 버튼 일치 + UP 큐 성공 시에만 기록 + 취소 시 무효화.
+
+변경 파일
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `apps/native_poc/src/native_video_client_session.{hpp,cpp}`
+- `apps/android_direct_client/app/src/main/cpp/android_video_decoder.{hpp,cpp}`
+- `apps/android_direct_client/.../MainActivity.kt`
+
+검증/build/test
+- 5회 중앙값, 1080p DXGI, 격리 포트, RDP 차단. 코덱스 HEAD(수정 전) 대비
+  30fps 지연 p95 36.9ms→4.9ms(scroll), 42.6ms→6.4ms(video), fps 28.3/28.1 유지.
+  60fps 지연 p95 17.5ms→10.1ms(scroll), 17.0ms→6.6ms(video), fps 50.5/53.1.
+  60fps fps는 pre-Codex(50.4/50.9)와 동등하며 지연은 절반 이하다.
+- remote60_mf_h264_codec_test / shared_core_test / capture_readback_test /
+  input_macro_test / udp_control_channel_test 전부 PASS.
+- Android `:app:assembleRelease` 성공. zipalign 후 기존과 동일한 로컬 debug 인증서로 서명해
+  V3 검증 PASS(certificate SHA-256 dcc806ae...2990), `dist/gnlink-android-20260803-b-release.apk`
+  7,818,780 bytes, SHA-256 9EEAA8BC65F59D5583D8E6B070266B82D0A3E4551CD9EB2EB1A97624312295CF.
+- 사용자 기기에 자동 설치하지 않았다.
+
+다음 액션
+- GNLinkSecureInput 서비스가 LocalSystem으로 사용자 쓰기 가능한 build-local 경로를 가리키는
+  권한 상승 위험이 남아 있다. 관리자 권한으로 서비스 제거가 필요하다(중지/삭제 권한 부족으로
+  이번 세션에서 처리하지 못했다).
+- 합성 씬은 버스트가 약해 정지가 잘 재현되지 않으므로, 실사용에서 senderHeldFrames로
+  정지 구간을 재확인한다.
