@@ -1,0 +1,17 @@
+#include <windows.h>
+#include "installer_ids.h"
+
+// Button captions are set at runtime: the same dialog serves install, update, repair and
+// uninstall, so what is written on the buttons depends on what is already installed.
+IDD_MAIN DIALOGEX 0, 0, 268, 104
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "GNLink Host Setup"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    ICON            IDI_GNLINK, IDC_APP_ICON, 12, 14, 20, 20
+    LTEXT           "GNLink Host", IDC_TITLE, 44, 12, 212, 12
+    LTEXT           "", IDC_STATUS, 44, 28, 212, 34
+    DEFPUSHBUTTON   "Install", IDC_PRIMARY, 78, 76, 58, 16
+    PUSHBUTTON      "Uninstall", IDC_UNINSTALL, 142, 76, 58, 16
+    PUSHBUTTON      "Close", IDCANCEL, 206, 76, 50, 16
+END

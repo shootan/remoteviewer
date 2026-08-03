@@ -45,8 +45,8 @@ if ([string]::IsNullOrWhiteSpace($effectiveTransport)) {
   }
 }
 
-$hostExe = Join-Path $Root "build-native2/apps/native_poc/Debug/remote60_native_video_host_poc.exe"
-$clientExe = Join-Path $Root "build-native2/apps/native_poc/Debug/remote60_native_video_client_poc.exe"
+$hostExe = Join-Path $Root "build-native2/apps/native_poc/Debug/GNLinkStream.exe"
+$clientExe = Join-Path $Root "build-native2/apps/native_poc/Debug/GNLinkViewer.exe"
 if (-not (Test-Path $hostExe)) { throw "host exe not found: $hostExe" }
 if ($StartClient -and -not (Test-Path $clientExe)) { throw "client exe not found: $clientExe" }
 

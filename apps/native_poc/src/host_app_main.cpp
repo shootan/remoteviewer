@@ -5,7 +5,7 @@
 // in the tray, keeps the streaming process alive, and shows whether the PC is reachable.
 //
 // It deliberately does not stream anything itself. Capture, encode and input injection stay in
-// remote60_native_video_host_poc.exe, launched as a child process, so a crash there cannot take
+// GNLinkStream.exe, launched as a child process, so a crash there cannot take
 // the sign-in state with it and the two can be developed independently.
 //
 // The window has exactly two states with their own layouts: signed out is a sign-in form,
@@ -259,7 +259,7 @@ class StreamingHostProcess {
   }
 
   void Supervise() {
-    const std::wstring exe = executable_dir() + L"\\remote60_native_video_host_poc.exe";
+    const std::wstring exe = executable_dir() + L"\\GNLinkStream.exe";
     while (running_.load(std::memory_order_relaxed)) {
       // The control port serves clients on the same network that dial this PC directly. One
       // arriving through the directory tunnels control over the media socket instead, but with

@@ -342,11 +342,82 @@ int run_agent(HANDLE readPipe) {
 
 }  // namespace
 
+// Registration lives here, invoked by the elevated installer, so the streaming host never
+// needs the rights to create or repoint a LocalSystem service. The image path is whatever this
+// binary already is: an installer that put it under Program Files therefore registers an
+// admin-only path, and there is no code left that can walk it back out to a writable folder.
+int install_service() {
+  const std::wstring exe = current_executable_path();
+  if (exe.empty()) return 1;
+  const std::wstring quoted = L"\"" + exe + L"\"";
+  SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE);
+  if (!manager) return static_cast<int>(GetLastError());
+  SC_HANDLE service = OpenServiceW(manager, kSecureInputServiceName, SERVICE_CHANGE_CONFIG);
+  if (service) {
+    (void)ChangeServiceConfigW(service, SERVICE_WIN32_OWN_PROCESS, SERVICE_DEMAND_START,
+                               SERVICE_ERROR_NORMAL, quoted.c_str(), nullptr, nullptr, nullptr,
+                               nullptr, nullptr, nullptr);
+  } else {
+    service = CreateServiceW(manager, kSecureInputServiceName, L"GNLink secure desktop input",
+                             SERVICE_CHANGE_CONFIG, SERVICE_WIN32_OWN_PROCESS,
+                             SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL, quoted.c_str(),
+                             nullptr, nullptr, nullptr, nullptr, nullptr);
+  }
+  if (!service) {
+    const DWORD err = GetLastError();
+    CloseServiceHandle(manager);
+    return static_cast<int>(err);
+  }
+  SERVICE_DESCRIPTIONW description{};
+  description.lpDescription =
+      const_cast<wchar_t*>(L"Delivers GNLink remote input to elevated and secure desktops.");
+  (void)ChangeServiceConfig2W(service, SERVICE_CONFIG_DESCRIPTION, &description);
+  CloseServiceHandle(service);
+  CloseServiceHandle(manager);
+  return 0;
+}
+
+int uninstall_service() {
+  SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+  if (!manager) return static_cast<int>(GetLastError());
+  SC_HANDLE service = OpenServiceW(manager, kSecureInputServiceName,
+                                   SERVICE_STOP | SERVICE_QUERY_STATUS | DELETE);
+  if (!service) {
+    const DWORD err = GetLastError();
+    CloseServiceHandle(manager);
+    // Already absent is the desired end state, not a failure.
+    return err == ERROR_SERVICE_DOES_NOT_EXIST ? 0 : static_cast<int>(err);
+  }
+  SERVICE_STATUS status{};
+  if (ControlService(service, SERVICE_CONTROL_STOP, &status)) {
+    // The SCM refuses DeleteService while the service is still running.
+    for (int i = 0; i < 50; ++i) {
+      SERVICE_STATUS_PROCESS live{};
+      DWORD bytes = 0;
+      if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO,
+                                reinterpret_cast<BYTE*>(&live), sizeof(live), &bytes)) {
+        break;
+      }
+      if (live.dwCurrentState == SERVICE_STOPPED) break;
+      Sleep(100);
+    }
+  }
+  const BOOL deleted = DeleteService(service);
+  const DWORD err = deleted ? ERROR_SUCCESS : GetLastError();
+  CloseServiceHandle(service);
+  CloseServiceHandle(manager);
+  // Marked-for-delete means it disappears once the last handle closes, which just happened.
+  if (!deleted && err != ERROR_SERVICE_MARKED_FOR_DELETE) return static_cast<int>(err);
+  return 0;
+}
+
 int wmain(int argc, wchar_t** argv) {
   if (argc == 3 && std::wstring(argv[1]) == L"--agent") {
     const uintptr_t value = static_cast<uintptr_t>(_wcstoui64(argv[2], nullptr, 10));
     return run_agent(reinterpret_cast<HANDLE>(value));
   }
+  if (argc == 2 && std::wstring(argv[1]) == L"--install-service") return install_service();
+  if (argc == 2 && std::wstring(argv[1]) == L"--uninstall-service") return uninstall_service();
   SERVICE_TABLE_ENTRYW table[] = {
       {const_cast<wchar_t*>(kSecureInputServiceName), service_main},
       {nullptr, nullptr},

@@ -1,0 +1,11 @@
+// Generated at build time from payload.rc.in. The payload paths are configured by CMake so the
+// installer relinks whenever any product executable is rebuilt.
+#include <windows.h>
+#include "installer_ids.h"
+
+IDI_GNLINK ICON "@GNLINK_INSTALLER_ICON@"
+
+IDR_PAYLOAD_HOST_APP     RCDATA "@GNLINK_PAYLOAD_HOST_APP@"
+IDR_PAYLOAD_VIDEO_HOST   RCDATA "@GNLINK_PAYLOAD_VIDEO_HOST@"
+IDR_PAYLOAD_SECURE_INPUT RCDATA "@GNLINK_PAYLOAD_SECURE_INPUT@"
+IDR_PAYLOAD_GDI_WORKER   RCDATA "@GNLINK_PAYLOAD_GDI_WORKER@"

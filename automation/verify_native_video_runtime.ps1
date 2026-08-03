@@ -45,8 +45,8 @@ $resolvedBuildDir = $BuildDir
 if (-not [System.IO.Path]::IsPathRooted($BuildDir)) {
   $resolvedBuildDir = Join-Path $Root $BuildDir
 }
-$hostExe = Join-Path $resolvedBuildDir "apps/native_poc/$Configuration/remote60_native_video_host_poc.exe"
-$clientExe = Join-Path $resolvedBuildDir "apps/native_poc/$Configuration/remote60_native_video_client_poc.exe"
+$hostExe = Join-Path $resolvedBuildDir "apps/native_poc/$Configuration/GNLinkStream.exe"
+$clientExe = Join-Path $resolvedBuildDir "apps/native_poc/$Configuration/GNLinkViewer.exe"
 if (-not (Test-Path $hostExe)) { throw "host exe not found: $hostExe" }
 if (-not (Test-Path $clientExe)) { throw "client exe not found: $clientExe" }
 

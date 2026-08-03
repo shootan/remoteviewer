@@ -19,7 +19,7 @@ std::wstring sibling_worker_path() {
   const size_t slash = path.find_last_of(L"\\/");
   if (slash == std::wstring::npos) return {};
   path.resize(slash + 1);
-  path += L"remote60_gdi_capture_worker.exe";
+  path += L"GNLinkCapture.exe";
   return path;
 }
 

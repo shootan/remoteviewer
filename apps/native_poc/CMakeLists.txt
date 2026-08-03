@@ -52,10 +52,12 @@ add_executable(remote60_native_video_host_poc
   src/secure_input_broker.cpp
   ../host/src/capture_backend_dxgi.cpp
 )
+set_target_properties(remote60_native_video_host_poc PROPERTIES OUTPUT_NAME "GNLinkStream")
 
 add_executable(remote60_gdi_capture_worker
   src/gdi_capture_worker_main.cpp
 )
+set_target_properties(remote60_gdi_capture_worker PROPERTIES OUTPUT_NAME "GNLinkCapture")
 target_include_directories(remote60_gdi_capture_worker PRIVATE src)
 target_link_libraries(remote60_gdi_capture_worker PRIVATE
   gdi32
@@ -94,6 +96,7 @@ target_compile_definitions(remote60_native_video_host_poc PRIVATE
 add_executable(remote60_secure_input_service
   src/secure_input_service_main.cpp
 )
+set_target_properties(remote60_secure_input_service PROPERTIES OUTPUT_NAME "GNLinkInputService")
 target_include_directories(remote60_secure_input_service PRIVATE src)
 target_link_libraries(remote60_secure_input_service PRIVATE
   advapi32
@@ -109,6 +112,7 @@ add_executable(remote60_native_video_client_poc
   src/udp_control_channel.cpp
   src/mf_h264_codec.cpp
 )
+set_target_properties(remote60_native_video_client_poc PROPERTIES OUTPUT_NAME "GNLinkViewer")
 
 target_include_directories(remote60_native_video_client_poc PRIVATE
   src
@@ -156,6 +160,7 @@ add_executable(remote60_host_app WIN32
   src/directory_client.cpp
   host_app.rc
 )
+set_target_properties(remote60_host_app PROPERTIES OUTPUT_NAME "GNLinkHost")
 
 target_include_directories(remote60_host_app PRIVATE
   src
@@ -178,6 +183,79 @@ add_dependencies(remote60_host_app
   remote60_secure_input_service
   remote60_gdi_capture_worker
 )
+
+# One file the user can carry to another machine. It embeds the four product executables and
+# installs them under %ProgramFiles%\GNLink, which is the only place the LocalSystem input
+# service can live without handing SYSTEM to anyone who can write the install folder.
+set(_gnlink_payload_dir "${CMAKE_CURRENT_BINARY_DIR}/installer_payload")
+set(GNLINK_INSTALLER_ICON "${CMAKE_CURRENT_SOURCE_DIR}/res/gnlink.ico")
+set(GNLINK_PAYLOAD_HOST_APP "${_gnlink_payload_dir}/GNLinkHost.exe")
+set(GNLINK_PAYLOAD_VIDEO_HOST "${_gnlink_payload_dir}/GNLinkStream.exe")
+set(GNLINK_PAYLOAD_SECURE_INPUT "${_gnlink_payload_dir}/GNLinkInputService.exe")
+set(GNLINK_PAYLOAD_GDI_WORKER "${_gnlink_payload_dir}/GNLinkCapture.exe")
+
+# The .rc reader takes these paths literally, so escape the separators for the generated script.
+foreach(_var GNLINK_INSTALLER_ICON GNLINK_PAYLOAD_HOST_APP GNLINK_PAYLOAD_VIDEO_HOST
+             GNLINK_PAYLOAD_SECURE_INPUT GNLINK_PAYLOAD_GDI_WORKER)
+  string(REPLACE "/" "\\\\" ${_var} "${${_var}}")
+endforeach()
+configure_file(installer/payload.rc.in "${CMAKE_CURRENT_BINARY_DIR}/installer_payload.rc" @ONLY)
+
+# Stage the freshly built executables where the .rc expects them. Depending on the staged copies
+# (not the targets) is what makes the installer relink after any product change.
+add_custom_command(
+  OUTPUT
+    "${_gnlink_payload_dir}/GNLinkHost.exe"
+    "${_gnlink_payload_dir}/GNLinkStream.exe"
+    "${_gnlink_payload_dir}/GNLinkInputService.exe"
+    "${_gnlink_payload_dir}/GNLinkCapture.exe"
+  COMMAND ${CMAKE_COMMAND} -E make_directory "${_gnlink_payload_dir}"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "$<TARGET_FILE:remote60_host_app>" "${_gnlink_payload_dir}/GNLinkHost.exe"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "$<TARGET_FILE:remote60_native_video_host_poc>"
+          "${_gnlink_payload_dir}/GNLinkStream.exe"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "$<TARGET_FILE:remote60_secure_input_service>"
+          "${_gnlink_payload_dir}/GNLinkInputService.exe"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "$<TARGET_FILE:remote60_gdi_capture_worker>"
+          "${_gnlink_payload_dir}/GNLinkCapture.exe"
+  DEPENDS remote60_host_app remote60_native_video_host_poc
+          remote60_secure_input_service remote60_gdi_capture_worker
+  COMMENT "Staging GNLink installer payload"
+  VERBATIM
+)
+add_custom_target(remote60_installer_payload
+  DEPENDS
+    "${_gnlink_payload_dir}/GNLinkHost.exe"
+    "${_gnlink_payload_dir}/GNLinkStream.exe"
+    "${_gnlink_payload_dir}/GNLinkInputService.exe"
+    "${_gnlink_payload_dir}/GNLinkCapture.exe"
+)
+
+add_executable(remote60_installer WIN32
+  installer/installer_main.cpp
+  installer/installer_ui.rc
+  "${CMAKE_CURRENT_BINARY_DIR}/installer_payload.rc"
+)
+set_target_properties(remote60_installer PROPERTIES OUTPUT_NAME "GNLinkSetup")
+target_include_directories(remote60_installer PRIVATE installer)
+# Deliberately links no project library: the installer must stay dependency-free so it runs on a
+# machine that has nothing installed yet.
+target_link_libraries(remote60_installer PRIVATE
+  advapi32
+  shell32
+  ole32
+  uuid
+  user32
+)
+add_dependencies(remote60_installer remote60_installer_payload)
+if(MSVC)
+  target_link_options(remote60_installer PRIVATE
+    "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'"
+  )
+endif()
 
 add_executable(remote60_udp_control_e2e_test
   src/native_video_client_shared_core.cpp

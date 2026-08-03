@@ -97,7 +97,7 @@ if ($effectiveRole -ne "host" -and $effectiveRole -ne "client") {
 $exeDirResolved = Resolve-ExeDirectory -ScriptDir $scriptDir -ConfigDir $configDir -RequestedExeDir $ExeDir -ConfigObject $cfg
 
 if ($effectiveRole -eq "host") {
-  $exe = Join-Path $exeDirResolved "remote60_native_video_host_poc.exe"
+  $exe = Join-Path $exeDirResolved "GNLinkStream.exe"
   if (-not (Test-Path -LiteralPath $exe)) { throw "host exe not found: $exe" }
 
   $args = @("--config", $resolvedConfig)
@@ -108,7 +108,7 @@ if ($effectiveRole -eq "host") {
   exit $LASTEXITCODE
 }
 
-$exe = Join-Path $exeDirResolved "remote60_native_video_client_poc.exe"
+$exe = Join-Path $exeDirResolved "GNLinkViewer.exe"
 if (-not (Test-Path -LiteralPath $exe)) { throw "client exe not found: $exe" }
 
 $args = @("--config", $resolvedConfig)

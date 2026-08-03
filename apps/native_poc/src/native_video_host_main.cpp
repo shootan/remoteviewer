@@ -3035,7 +3035,7 @@ int main(int argc, char** argv) {
   if (sessionDirectoryAuthenticated.load(std::memory_order_acquire)) {
     std::string secureInputStatus;
     const std::wstring servicePath = remote60::native_poc::sibling_executable_path(
-        L"remote60_secure_input_service.exe");
+        L"GNLinkInputService.exe");
     const bool secureInputReady =
         secureInputBroker.EnsureInstalledAndConnected(servicePath, &secureInputStatus);
     std::cout << "[native-video-host] secure-input ready=" << (secureInputReady ? 1 : 0)
@@ -3295,10 +3295,14 @@ int main(int argc, char** argv) {
           const uint32_t domainW = inputDomainW.load(std::memory_order_acquire);
           const uint32_t domainH = inputDomainH.load(std::memory_order_acquire);
           InputInjectResult injectResult = InputInjectResult::Failed;
-          if (desktopMode && sessionDirectoryAuthenticated.load(std::memory_order_acquire)) {
-            injectResult = secureInputBroker.SendInputEvent(input, domainW, domainH)
-                               ? InputInjectResult::Injected
-                               : InputInjectResult::Failed;
+          // Prefer the SYSTEM agent, which is the only way into elevated windows and the lock
+          // screen -- but fall back when it is unavailable. The service is registered by the
+          // installer, so a host running from a build tree (or before installation) has no
+          // broker at all, and treating that as a hard failure left the session with no input
+          // whatsoever instead of the ordinary desktop injection that still works fine.
+          if (desktopMode && sessionDirectoryAuthenticated.load(std::memory_order_acquire) &&
+              secureInputBroker.SendInputEvent(input, domainW, domainH)) {
+            injectResult = InputInjectResult::Injected;
             resolvedTarget = " secure-system-agent";
           } else {
             injectResult =
@@ -3370,12 +3374,11 @@ int main(int argc, char** argv) {
               !inputTargetCriteria.enabled() &&
               (selectedWindowIdState.load(std::memory_order_acquire) == 0);
           InputInjectResult injectResult = InputInjectResult::Failed;
-          if (desktopMode && sessionDirectoryAuthenticated.load(std::memory_order_acquire)) {
-            injectResult = secureInputBroker.SendInputText(
-                               text, inputDomainW.load(std::memory_order_acquire),
-                               inputDomainH.load(std::memory_order_acquire))
-                               ? InputInjectResult::Injected
-                               : InputInjectResult::Failed;
+          if (desktopMode && sessionDirectoryAuthenticated.load(std::memory_order_acquire) &&
+              secureInputBroker.SendInputText(text,
+                                              inputDomainW.load(std::memory_order_acquire),
+                                              inputDomainH.load(std::memory_order_acquire))) {
+            injectResult = InputInjectResult::Injected;
             resolvedTarget = " secure-system-agent";
           } else {
             injectResult = apply_input_text_message(text, hostCaptureTargetHwnd, desktopMode,
@@ -3769,7 +3772,7 @@ int main(int argc, char** argv) {
               std::string secureInputStatus;
               (void)secureInputBroker.EnsureInstalledAndConnected(
                   remote60::native_poc::sibling_executable_path(
-                      L"remote60_secure_input_service.exe"),
+                      L"GNLinkInputService.exe"),
                   &secureInputStatus);
             } else if (sessionDirectoryAuthenticated.load(std::memory_order_acquire)) {
               // Do not let an unauthenticated LAN Hello take over or de-authorize an active

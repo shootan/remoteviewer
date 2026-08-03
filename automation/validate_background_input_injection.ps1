@@ -87,8 +87,8 @@ if ([string]::IsNullOrWhiteSpace($ExeDir)) {
 }
 
 $resolvedExeDir = Resolve-FromRoot -Base $Root -Value $ExeDir
-$hostExe = Join-Path $resolvedExeDir "remote60_native_video_host_poc.exe"
-$clientExe = Join-Path $resolvedExeDir "remote60_native_video_client_poc.exe"
+$hostExe = Join-Path $resolvedExeDir "GNLinkStream.exe"
+$clientExe = Join-Path $resolvedExeDir "GNLinkViewer.exe"
 if (-not (Test-Path -LiteralPath $hostExe)) { throw "host exe not found: $hostExe" }
 if (-not (Test-Path -LiteralPath $clientExe)) { throw "client exe not found: $clientExe" }
 
@@ -117,10 +117,10 @@ Set-JsonProperty -Object $cfg -Name "noInputChannel" -Value $false
 Set-JsonProperty -Object $cfg -Name "enableInputInjection" -Value $true
 Set-JsonProperty -Object $cfg -Name "inputInjectionMode" -Value "background_message"
 Set-JsonProperty -Object $cfg -Name "inputTargetPid" -Value 0
-Set-JsonProperty -Object $cfg -Name "inputTargetProcess" -Value "remote60_native_video_client_poc.exe"
+Set-JsonProperty -Object $cfg -Name "inputTargetProcess" -Value "GNLinkViewer.exe"
 Set-JsonProperty -Object $cfg -Name "inputTargetTitle" -Value ""
 Set-JsonProperty -Object $cfg -Name "captureWindowPid" -Value 0
-Set-JsonProperty -Object $cfg -Name "captureWindowProcess" -Value "remote60_native_video_client_poc.exe"
+Set-JsonProperty -Object $cfg -Name "captureWindowProcess" -Value "GNLinkViewer.exe"
 Set-JsonProperty -Object $cfg -Name "captureWindowTitle" -Value ""
 Set-JsonProperty -Object $cfg -Name "captureWindowClientOnly" -Value $true
 Set-JsonProperty -Object $cfg -Name "captureWindowRebindIntervalMs" -Value 500

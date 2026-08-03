@@ -77,42 +77,28 @@ bool SecureInputBrokerClient::EnsureInstalledAndConnected(const std::wstring& se
     return false;
   }
 
-  SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE);
+  // Connect-only: never create the service and never rewrite its binary path.
+  //
+  // Registration happens once, from the elevated installer, against the admin-only install
+  // directory. When the host could also create or repoint it, running any copy of the product
+  // from a user-writable folder silently aimed the LocalSystem service at that copy -- which
+  // hands SYSTEM to anyone who can write there, defeating the point of installing under
+  // Program Files. Requesting no CREATE/CHANGE rights makes that impossible by construction.
+  SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
   if (!manager) {
     if (status) *status = win32_error_text("OpenSCManager");
     return false;
   }
-  const std::wstring quotedServicePath = L"\"" + serviceExePath + L"\"";
-  SC_HANDLE service = OpenServiceW(manager, kSecureInputServiceName,
-                                   SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP |
-                                       SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG);
-  bool binaryPathChanged = false;
+  SC_HANDLE service =
+      OpenServiceW(manager, kSecureInputServiceName, SERVICE_QUERY_STATUS | SERVICE_START);
   if (!service) {
-    service = CreateServiceW(manager, kSecureInputServiceName, L"GNLink secure desktop input",
-                             SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP |
-                                 SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG,
-                             SERVICE_WIN32_OWN_PROCESS, SERVICE_DEMAND_START,
-                             SERVICE_ERROR_NORMAL, quotedServicePath.c_str(), nullptr, nullptr,
-                             nullptr, nullptr, nullptr);
-  } else {
-    DWORD configBytes = 0;
-    (void)QueryServiceConfigW(service, nullptr, 0, &configBytes);
-    if (configBytes > 0) {
-      std::vector<uint8_t> configStorage(configBytes);
-      auto* config = reinterpret_cast<QUERY_SERVICE_CONFIGW*>(configStorage.data());
-      if (QueryServiceConfigW(service, config, configBytes, &configBytes)) {
-        const std::wstring configured = config->lpBinaryPathName ? config->lpBinaryPathName : L"";
-        binaryPathChanged = _wcsicmp(configured.c_str(), quotedServicePath.c_str()) != 0 &&
-                            _wcsicmp(configured.c_str(), serviceExePath.c_str()) != 0;
-      }
-    }
-    (void)ChangeServiceConfigW(service, SERVICE_NO_CHANGE, SERVICE_DEMAND_START,
-                               SERVICE_NO_CHANGE, quotedServicePath.c_str(), nullptr, nullptr,
-                               nullptr, nullptr, nullptr, nullptr);
-  }
-  if (!service) {
-    if (status) *status = win32_error_text("Create/OpenService");
+    const DWORD err = GetLastError();
     CloseServiceHandle(manager);
+    if (status) {
+      *status = err == ERROR_SERVICE_DOES_NOT_EXIST
+                    ? "secure input service is not installed; run the GNLink installer"
+                    : win32_error_text("OpenService");
+    }
     return false;
   }
 
@@ -122,12 +108,6 @@ bool SecureInputBrokerClient::EnsureInstalledAndConnected(const std::wstring& se
                                       reinterpret_cast<BYTE*>(&serviceStatus),
                                       sizeof(serviceStatus), &bytes) &&
                  serviceStatus.dwCurrentState == SERVICE_RUNNING;
-  if (running && binaryPathChanged) {
-    SERVICE_STATUS stopped{};
-    if (ControlService(service, SERVICE_CONTROL_STOP, &stopped)) {
-      running = !wait_for_service_state(service, SERVICE_STOPPED, 5000);
-    }
-  }
   if (!running) {
     if (!StartServiceW(service, 0, nullptr) && GetLastError() != ERROR_SERVICE_ALREADY_RUNNING) {
       if (status) *status = win32_error_text("StartService");
