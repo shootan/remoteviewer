@@ -539,6 +539,7 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* dat
     return result;
   }
   const bool parityPacket = (packet.flags & 0x10u) != 0;
+  const bool interleavedParity = parityPacket && (packet.flags & 0x20u) != 0;
   if (packet.payloadSize == 0 || packet.chunkSize == 0 || packet.chunkStride == 0 ||
       packet.chunkStride > 4096 || packet.chunkCount == 0 ||
       packet.chunkCount > kMaxUdpVideoChunks ||
@@ -564,8 +565,16 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* dat
     return result;
   }
   if (parityPacket) {
-    if ((packet.chunkIndex % kUdpVideoFecGroupSize) != 0 ||
-        packet.chunkSize != packet.chunkStride) {
+    // Interleaved parity names its group directly; consecutive parity names the first chunk
+    // of the run it covers. The layout travels with the packet, so a host that still sends
+    // the old grouping keeps working without the two ends having to agree in advance.
+    const uint32_t groupCount =
+        (static_cast<uint32_t>(packet.chunkCount) + kUdpVideoFecGroupSize - 1u) /
+        kUdpVideoFecGroupSize;
+    const bool wellFormedGroup = interleavedParity
+                                     ? (packet.chunkIndex < groupCount)
+                                     : ((packet.chunkIndex % kUdpVideoFecGroupSize) == 0);
+    if (!wellFormedGroup || packet.chunkSize != packet.chunkStride) {
       result.disposition = UdpH264AssemblyDisposition::Malformed;
       return result;
     }
@@ -635,7 +644,14 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* dat
   }
 
   if (parityPacket) {
-    const size_t groupIndex = packet.chunkIndex / kUdpVideoFecGroupSize;
+    const size_t groupIndex =
+        interleavedParity ? packet.chunkIndex
+                          : (packet.chunkIndex / kUdpVideoFecGroupSize);
+    assembly.parityInterleaved = interleavedParity ? 1u : 0u;
+    if (groupIndex >= assembly.parityReceived.size()) {
+      result.disposition = UdpH264AssemblyDisposition::Malformed;
+      return result;
+    }
     if (!assembly.parityReceived[groupIndex]) {
       assembly.parity[groupIndex].assign(data + sizeof(UdpVideoChunkHeader),
                                          data + sizeof(UdpVideoChunkHeader) + packet.chunkSize);
@@ -648,14 +664,23 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* dat
     ++assembly.receivedCount;
   }
 
+  const uint16_t groupCount = static_cast<uint16_t>(assembly.parity.size());
   for (size_t groupIndex = 0; groupIndex < assembly.parity.size(); ++groupIndex) {
     if (!assembly.parityReceived[groupIndex]) continue;
-    const uint16_t groupStart = static_cast<uint16_t>(groupIndex * kUdpVideoFecGroupSize);
-    const uint16_t groupEnd = std::min<uint16_t>(
-        assembly.chunkCount, static_cast<uint16_t>(groupStart + kUdpVideoFecGroupSize));
+    // Interleaved: chunks groupIndex, groupIndex+G, groupIndex+2G ...
+    // Consecutive:  chunks groupIndex*8 .. groupIndex*8+7
+    const bool interleaved = assembly.parityInterleaved != 0;
+    const uint16_t groupStart = static_cast<uint16_t>(
+        interleaved ? groupIndex : (groupIndex * kUdpVideoFecGroupSize));
+    const uint16_t groupStep = interleaved ? groupCount : uint16_t{1};
+    const uint16_t groupEnd =
+        interleaved ? assembly.chunkCount
+                    : std::min<uint16_t>(
+                          assembly.chunkCount,
+                          static_cast<uint16_t>(groupStart + kUdpVideoFecGroupSize));
     uint16_t missingIndex = 0;
     uint16_t missingCount = 0;
-    for (uint16_t index = groupStart; index < groupEnd; ++index) {
+    for (uint16_t index = groupStart; index < groupEnd; index = static_cast<uint16_t>(index + groupStep)) {
       if (!assembly.received[index]) {
         missingIndex = index;
         ++missingCount;
@@ -663,7 +688,7 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* dat
     }
     if (missingCount != 1) continue;
     std::vector<uint8_t> recovered = assembly.parity[groupIndex];
-    for (uint16_t index = groupStart; index < groupEnd; ++index) {
+    for (uint16_t index = groupStart; index < groupEnd; index = static_cast<uint16_t>(index + groupStep)) {
       if (index == missingIndex || !assembly.received[index]) continue;
       const uint32_t offset = static_cast<uint32_t>(index) * assembly.chunkStride;
       const uint32_t bytes = std::min<uint32_t>(assembly.chunkStride,

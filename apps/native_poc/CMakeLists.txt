@@ -310,6 +310,16 @@ add_executable(remote60_video_playout_clock_test
 )
 target_include_directories(remote60_video_playout_clock_test PRIVATE src)
 
+add_executable(remote60_udp_fec_interleave_test
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+  src/udp_fec_interleave_test.cpp
+)
+target_include_directories(remote60_udp_fec_interleave_test PRIVATE src)
+target_link_libraries(remote60_udp_fec_interleave_test PRIVATE common ws2_32)
+
 add_executable(remote60_udp_control_channel_test
   src/udp_control_channel.cpp
   src/udp_control_channel_test.cpp

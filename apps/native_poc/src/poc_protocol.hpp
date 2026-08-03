@@ -326,6 +326,12 @@ struct ControlWindowSelectedMessage {
 constexpr uint32_t kUdpFeatureEncryptedMedia = 0x1u;
 constexpr uint32_t kUdpFeatureVideoFec = 0x2u;
 constexpr uint32_t kUdpFeatureDirectoryAuth = 0x4u;
+// Parity groups built from every Nth chunk instead of N consecutive ones. Same packet count,
+// same bandwidth -- but Wi-Fi loses packets in bursts, and consecutive grouping puts a whole
+// burst inside one group, where a single XOR parity repairs none of it. Interleaved, a burst
+// hits each group once and every packet in it is recoverable. Negotiated rather than assumed
+// so a host and viewer built at different times still agree on the layout.
+constexpr uint32_t kUdpFeatureVideoFecInterleaved = 0x8u;
 constexpr uint32_t kUdpProtocolVersion = 2u;
 
 struct UdpHelloPacket {
@@ -333,7 +339,7 @@ struct UdpHelloPacket {
   uint16_t kind = static_cast<uint16_t>(UdpPacketKind::Hello);
   uint16_t size = static_cast<uint16_t>(sizeof(UdpHelloPacket));
   uint32_t version = kUdpProtocolVersion;
-  uint32_t features = kUdpFeatureVideoFec;
+  uint32_t features = kUdpFeatureVideoFec | kUdpFeatureVideoFecInterleaved;
   // One-time capability returned by /api/connect and delivered independently to the host.
   // Empty preserves direct-LAN operation, but cannot authorize SYSTEM secure-desktop input.
   char authToken[33] = {};
@@ -374,7 +380,9 @@ struct UdpVideoChunkHeader {
   uint32_t seq = 0;
   uint16_t codec = static_cast<uint16_t>(UdpCodec::H264);
   // bit0:keyFrame bit1:firstChunk bit2:lastChunk bit3:reserved for encrypted payload
-  // bit4:XOR parity packet for the FEC group beginning at chunkIndex
+  // bit4:XOR parity packet -- covers the group beginning at chunkIndex
+  // bit5:that parity group is interleaved, so chunkIndex names the group itself and the
+  //      group holds chunks chunkIndex, chunkIndex+groupCount, chunkIndex+2*groupCount ...
   uint16_t flags = 0;
   uint32_t width = 0;
   uint32_t height = 0;

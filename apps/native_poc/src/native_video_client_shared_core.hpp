@@ -267,6 +267,8 @@ class UdpH264FrameAssembler {
     std::vector<uint8_t> received;
     std::vector<std::vector<uint8_t>> parity;
     std::vector<uint8_t> parityReceived;
+    // Which layout this frame's parity uses, learned from the first parity packet to arrive.
+    uint8_t parityInterleaved = 0;
   };
 
   std::deque<Assembly> assemblies_;

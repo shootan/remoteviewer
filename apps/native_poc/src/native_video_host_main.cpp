@@ -2420,6 +2420,9 @@ bool recv_discard(SOCKET s, size_t len) {
 constexpr size_t kUdpReceiveBufferBytes = 4096;
 
 std::atomic<uint32_t> gUdpPacePeakBitrateBps{0};  // 0 disables intra-frame pacing
+// Set from the viewer's hello. Older viewers do not advertise it and must keep receiving the
+// consecutive layout they know how to repair.
+std::atomic<bool> gUdpVideoFecInterleaved{false};
 std::atomic<uint32_t> gUdpKeyframePacePeakBitrateBps{100000000};
 
 void udp_pace_wait_until(uint64_t targetUs) {
@@ -2537,13 +2540,24 @@ bool send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uint8_t* payl
   // One XOR parity datagram per eight data datagrams repairs one loss in every group. The
   // parity is sent after the frame data so a short Wi-Fi burst is less likely to erase a data
   // packet and its repair packet together.
+  //
+  // Which eight matters more than how many. Wi-Fi drops packets in bursts, so grouping eight
+  // consecutive chunks puts the whole burst in one group, where a single parity repairs
+  // nothing. Interleaving -- group g holds chunks g, g+G, g+2G ... -- spreads a burst of up
+  // to G across G groups, one loss each, all recoverable, at exactly the same cost.
+  const bool interleaved = gUdpVideoFecInterleaved.load(std::memory_order_relaxed);
   std::vector<uint8_t> parity(maxChunk, 0);
-  for (uint32_t groupStart = 0; groupStart < chunkCount;
-       groupStart += remote60::native_poc::kUdpVideoFecGroupSize) {
+  for (uint32_t group = 0; group < fecGroupCount; ++group) {
     std::fill(parity.begin(), parity.end(), 0);
-    const uint32_t groupEnd = std::min<uint32_t>(
-        chunkCount, groupStart + remote60::native_poc::kUdpVideoFecGroupSize);
-    for (uint32_t chunkIndex = groupStart; chunkIndex < groupEnd; ++chunkIndex) {
+    const uint32_t firstChunk =
+        interleaved ? group : (group * remote60::native_poc::kUdpVideoFecGroupSize);
+    const uint32_t step = interleaved ? fecGroupCount : 1u;
+    const uint32_t limit =
+        interleaved ? chunkCount
+                    : std::min<uint32_t>(chunkCount,
+                                         firstChunk +
+                                             remote60::native_poc::kUdpVideoFecGroupSize);
+    for (uint32_t chunkIndex = firstChunk; chunkIndex < limit; chunkIndex += step) {
       const size_t offset = static_cast<size_t>(chunkIndex) * maxChunk;
       const uint32_t chunkSize =
           static_cast<uint32_t>(std::min<size_t>(maxChunk, payloadSize - offset));
@@ -2552,9 +2566,10 @@ bool send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uint8_t* payl
     UdpVideoChunkHeader h = baseHeader;
     h.flags &= static_cast<uint16_t>(~(0x2u | 0x4u));
     h.flags |= 0x10u;
-    h.chunkOffset = groupStart * maxChunk;
+    if (interleaved) h.flags |= 0x20u;
+    h.chunkOffset = firstChunk * maxChunk;
     h.chunkSize = maxChunk;
-    h.chunkIndex = static_cast<uint16_t>(groupStart);
+    h.chunkIndex = static_cast<uint16_t>(firstChunk);
     h.chunkCount = static_cast<uint16_t>(chunkCount);
     h.chunkStride = maxChunk;
     if (!send_packet(h, parity.data(), maxChunk)) return false;
@@ -3021,8 +3036,14 @@ int main(int argc, char** argv) {
         continue;
       }
 
+      gUdpVideoFecInterleaved.store(
+          (hello.features & remote60::native_poc::kUdpFeatureVideoFecInterleaved) != 0,
+          std::memory_order_relaxed);
+
       UdpHelloPacket ack{};
       ack.kind = static_cast<uint16_t>(UdpPacketKind::HelloAck);
+      ack.features = remote60::native_poc::kUdpFeatureVideoFec |
+                     (hello.features & remote60::native_poc::kUdpFeatureVideoFecInterleaved);
       size_t tokenLen = 0;
       while (tokenLen < sizeof(hello.authToken) && hello.authToken[tokenLen] != '\0') ++tokenLen;
       if (tokenLen > 0) {
@@ -3795,8 +3816,15 @@ int main(int argc, char** argv) {
               hello.kind == static_cast<uint16_t>(UdpPacketKind::Hello) &&
               hello.version == remote60::native_poc::kUdpProtocolVersion &&
               (hello.features & remote60::native_poc::kUdpFeatureVideoFec) != 0) {
+            gUdpVideoFecInterleaved.store(
+                (hello.features & remote60::native_poc::kUdpFeatureVideoFecInterleaved) != 0,
+                std::memory_order_relaxed);
+
             UdpHelloPacket ack{};
             ack.kind = static_cast<uint16_t>(UdpPacketKind::HelloAck);
+            ack.features =
+                remote60::native_poc::kUdpFeatureVideoFec |
+                (hello.features & remote60::native_poc::kUdpFeatureVideoFecInterleaved);
             size_t tokenLen = 0;
             while (tokenLen < sizeof(hello.authToken) && hello.authToken[tokenLen] != '\0') {
               ++tokenLen;
