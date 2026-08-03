@@ -589,6 +589,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var lastTapVideoX = 0
     private var lastTapVideoY = 0
     private var lastTapUpAtMs = 0L
+    // Without this, (0,0) with a zero timestamp reads as a real anchor during the first
+    // moments after launch, and a stale anchor survives a cancel or a session change.
+    private var lastTapAnchorValid = false
+    private var lastTapSecondary = false
     private val viewerTouchSlopPx: Float by lazy {
         ViewConfiguration.get(this).scaledTouchSlop.toFloat()
     }
@@ -1394,7 +1398,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 // only promotes the second press to a double-click within a 4px box.
                 val nowMs = SystemClock.uptimeMillis()
                 val reuseAnchor =
-                    nowMs - lastTapUpAtMs <= DOUBLE_TAP_ANCHOR_WINDOW_MS &&
+                    lastTapAnchorValid &&
+                        lastTapSecondary == activeTouchIsSecondary &&
+                        nowMs - lastTapUpAtMs <= DOUBLE_TAP_ANCHOR_WINDOW_MS &&
                         abs(mapped.first - lastTapVideoX) <= DOUBLE_TAP_ANCHOR_RADIUS_PX &&
                         abs(mapped.second - lastTapVideoY) <= DOUBLE_TAP_ANCHOR_RADIUS_PX
                 val downX = if (reuseAnchor) lastTapVideoX else mapped.first
@@ -1529,21 +1535,26 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 val upY = if (touchDragLatched) mapped.second else touchDownVideoY
                 lastTouchVideoX = upX
                 lastTouchVideoY = upY
-                if (!touchDragLatched) {
-                    lastTapVideoX = upX
-                    lastTapVideoY = upY
-                    lastTapUpAtMs = SystemClock.uptimeMillis()
-                } else {
-                    lastTapUpAtMs = 0L
-                }
+                val wasSecondary = activeTouchIsSecondary
+                val wasTap = !touchDragLatched
                 val queued = NativeSessionBridge.nativeQueueInputEvent(
                     INPUT_KIND_MOUSE_UP,
                     upX,
                     upY,
                     0,
-                    if (activeTouchIsSecondary) INPUT_VK_RBUTTON else INPUT_VK_LBUTTON,
+                    if (wasSecondary) INPUT_VK_RBUTTON else INPUT_VK_LBUTTON,
                     0
                 )
+                // Only a tap whose release actually reached the host can anchor the next one.
+                if (wasTap && queued) {
+                    lastTapVideoX = upX
+                    lastTapVideoY = upY
+                    lastTapSecondary = wasSecondary
+                    lastTapUpAtMs = SystemClock.uptimeMillis()
+                    lastTapAnchorValid = true
+                } else {
+                    lastTapAnchorValid = false
+                }
                 resetViewerTouchState()
                 view.performClick()
                 return queued
@@ -2175,6 +2186,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun cancelActiveViewerTouch(reason: String) {
+        // A cancelled gesture is not a tap, so it must not anchor whatever comes next.
+        lastTapAnchorValid = false
         if (activeViewerTouchMode == ViewerTouchMode.SCROLL) {
             resetViewerTouchState()
             return

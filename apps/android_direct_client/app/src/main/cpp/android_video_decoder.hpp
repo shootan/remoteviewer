@@ -24,6 +24,7 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   void OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& frame) override;
   void OnVideoStreamReset() override;
   void OnVideoDiscontinuity() override;
+  bool ConsumeDecoderKeyframeRequest() override;
   void OnWindowSelectionControlResult(
       const remote60::native_poc::ControlWindowSelectedMessage& msg) override;
   void PrepareForWindowSelection(uint64_t selectionGeneration);
@@ -71,6 +72,9 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint64_t ptsFallbackCount_ = 0;
   uint64_t pendingFrameCount_ = 0;
   uint64_t pendingFrameQueueRetryCount_ = 0;
+  // Set when a delta had to be discarded before reaching the codec; consumed by the session,
+  // which turns it into a rate-limited IDR request.
+  bool decoderKeyframeRequest_ = false;
   uint64_t lastInputQueueSteadyUs_ = 0;
   uint64_t bootstrapReplayCount_ = 0;
   uint64_t staleFrameDropCount_ = 0;

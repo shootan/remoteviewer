@@ -24,6 +24,11 @@ class ClientEncodedFrameSink {
   // Called when a compressed reference frame was lost. Implementations that retain decoder
   // state should flush it before the next IDR; the default keeps lightweight test sinks valid.
   virtual void OnVideoDiscontinuity() {}
+  // A decoder can be forced to discard a delta of its own accord -- typically when the
+  // hardware codec has no free input buffer -- which silently breaks the reference chain for
+  // everything that follows. Returning true asks the session for an IDR; the flag is consumed
+  // so one drop produces one request and the session's own rate limiter still applies.
+  virtual bool ConsumeDecoderKeyframeRequest() { return false; }
   virtual void OnWindowSelectionControlResult(const ControlWindowSelectedMessage& /* msg */) {}
 };
 

@@ -6288,7 +6288,19 @@ int main(int argc, char** argv) {
         // microseconds apart, so the sender thread has usually not been scheduled between them
         // and the queue depth reflects the burst rather than a backlogged wire. Counting that
         // as congestion discarded the whole GOP and forced an IDR on a perfectly healthy link.
-        const size_t senderQueueLimit = std::max<size_t>(2, units.size());
+        //
+        // Judge congestion once, on the backlog that existed *before* this batch: that is the
+        // only part of the queue the sender has genuinely failed to drain. Sizing the limit
+        // from the batch instead would still overflow on the last unit whenever a frame was
+        // already queued, and a large drain would authorise an equally large queue -- seconds
+        // of latency -- so the absolute cap below bounds it regardless.
+        constexpr size_t kSenderQueueMaxFrames = 6;
+        size_t senderBacklogBeforeBatch = 0;
+        {
+          std::lock_guard<std::mutex> lk(senderMu);
+          senderBacklogBeforeBatch = senderQueue.size();
+        }
+        const bool senderBacklogged = senderBacklogBeforeBatch >= 2;
         for (const auto& au : units) {
           if (au.bytes.empty()) continue;
           const int64_t auCaptureUs = (au.sampleTimeHns > 0) ? (au.sampleTimeHns / 10) : static_cast<int64_t>(encodeInputUs);
@@ -6432,6 +6444,8 @@ int main(int argc, char** argv) {
               if (item.keyFrame) {
                 // A new IDR makes every queued frame irrelevant and re-anchors the stream.
                 senderDropCount.fetch_add(senderQueue.size(), std::memory_order_relaxed);
+                senderHeldFrames += senderQueue.size();
+                sentFrames -= std::min<uint64_t>(sentFrames, senderQueue.size());
                 senderQueue.clear();
                 senderWaitingForKey = false;
                 senderQueue.push_back(std::move(item));
@@ -6441,10 +6455,14 @@ int main(int argc, char** argv) {
                 // block garbage. Hold everything until the forced keyframe arrives.
                 senderDropCount.fetch_add(1, std::memory_order_relaxed);
                 senderRequestKey.store(true, std::memory_order_release);
-              } else if (senderQueue.size() >= senderQueueLimit) {
+              } else if (senderBacklogged || senderQueue.size() >= kSenderQueueMaxFrames) {
                 // Backlogged: drop the stale frames AND this delta -- it references what
                 // was just dropped -- then resync with a fresh IDR.
                 senderDropCount.fetch_add(senderQueue.size() + 1, std::memory_order_relaxed);
+                // Frames already counted as sent are being erased here; move them to the held
+                // tally so the reported wire rate does not include what never left.
+                senderHeldFrames += senderQueue.size();
+                sentFrames -= std::min<uint64_t>(sentFrames, senderQueue.size());
                 senderQueue.clear();
                 senderWaitingForKey = true;
                 senderRequestKey.store(true, std::memory_order_release);

@@ -191,7 +191,13 @@ void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264As
       const bool replacePending =
           ((frame.header.flags & 1u) != 0) || pendingFrame_->payload.empty();
       if (replacePending) {
+        // The pending delta is being discarded in favour of this frame.
+        if ((pendingFrame_->header.flags & 1u) == 0) decoderKeyframeRequest_ = true;
         pendingFrame_ = std::move(frame);
+      } else if ((frame.header.flags & 1u) == 0) {
+        // This delta is dropped outright. Everything after it references a picture the
+        // decoder will never see, so the stream cannot recover without a fresh IDR.
+        decoderKeyframeRequest_ = true;
       }
       pendingFrameCount_ = 1;
     }
@@ -226,6 +232,13 @@ void AndroidVideoDecoderSink::OnVideoDiscontinuity() {
   // pictures and pending compressed frames are invalid after a UDP loss.
   ResetCodecLocked();
   log_info("video decoder reset after transport discontinuity");
+}
+
+bool AndroidVideoDecoderSink::ConsumeDecoderKeyframeRequest() {
+  std::lock_guard<std::mutex> lock(mu_);
+  const bool requested = decoderKeyframeRequest_;
+  decoderKeyframeRequest_ = false;
+  return requested;
 }
 
 void AndroidVideoDecoderSink::OnWindowSelectionControlResult(

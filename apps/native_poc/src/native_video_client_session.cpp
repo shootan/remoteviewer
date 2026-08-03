@@ -572,6 +572,11 @@ void ClientSessionController::VideoReceiveMain() {
       }
       if (keyFrame) waitForKeyframe = false;
       sink->OnEncodedH264Frame(std::move(assembleResult.frame));
+      // The decoder may have had to discard what it was just handed. Ask for an IDR now
+      // rather than letting every later delta decode against a reference that never arrived.
+      if (sink->ConsumeDecoderKeyframeRequest()) {
+        (void)keyframeRequests_.Request(2, now_us());
+      }
     }
   }
 }
