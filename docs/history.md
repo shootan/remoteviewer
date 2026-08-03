@@ -5482,3 +5482,50 @@ Before/After (1080p-scroll Release 5회, 오늘 H4-off 대비)
 - 현재 실행 중인 native host(PID 4140)는 directory/NAT 수정은 포함하지만 마지막 secure-input
   pipe 재연결 수정 전 바이너리다. 사용자가 GNLink Host를 종료하면 준비된 `.new.exe`를 기존
   제품 파일명으로 교체하고, 재연결 후 Session 1 SYSTEM 입력 agent와 잠금 화면 입력을 확인한다.
+
+### 227) 2026-08-03 인코더 버스트로 인한 화면 정지와 더블클릭 커서 튐 수정
+
+목표
+- 평균 fps는 25~30으로 정상인데 간헐적으로 화면이 완전히 멈추는 증상과, Android에서
+  더블클릭 시 커서가 튀고 아이콘이 끌려가는 증상의 실제 원인을 코드로 확정하고 수정한다.
+- 코덱스 작업(5dbfc1a~3e5019f) 이후 발생한 지연 회귀를 pre-Codex 수준으로 되돌리되
+  fps/CPU 이득은 유지한다.
+
+원인
+- 비동기 H.264 MFT를 encode 호출당 이벤트 1개만 폴링하고 METransformNeedInput에서
+  루프를 중단해 HaveOutput이 누적 → 이후 호출이 access unit 2~3개를 한 번에 배출.
+  이 묶음이 마이크로초 간격으로 깊이 2 sender 큐에 들어가 혼잡으로 오판되어 큐를 비우고
+  IDR이 올 때까지 모든 델타를 폐기(130~300ms 정지). 폐기된 프레임도 sentFrames로
+  카운트되어 지표에는 정상 fps로 보였다.
+- Android 터치에 드래그 데드존이 없어 손가락 1픽셀 흔들림이 절대 좌표 이동으로 전송되고
+  레터박싱 배율(1.3~1.8배)만큼 증폭 → Windows의 4px 드래그/더블클릭 임계를 초과.
+- 호스트가 SetCursorPos와 버튼 SendInput을 분리 호출해 그 사이 커서 이동 시 오클릭.
+- HostPowerKeepalive::SetStreaming이 이미 streaming 중에도 wake를 재실행해
+  캡처 폴백 재시도 루프(100ms 주기)가 실제 상대 마우스 이동을 계속 주입.
+
+변경 파일
+- `apps/native_poc/src/mf_h264_codec.cpp`
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `apps/native_poc/src/secure_input_service_main.cpp`
+- `apps/android_direct_client/.../MainActivity.kt`
+- `automation/run_perf_baseline_fps.ps1` (신규: fps 파라미터화 베이스라인 러너)
+
+검증/build/test
+- 5회 중앙값, 1080p DXGI, 격리 포트, RDP 차단 상태에서 수정 전(HEAD) 대비:
+  지연 p95 36.9ms→5.3ms(30fps scroll), 42.6ms→2.5ms(30fps video),
+  17.0ms→3.3ms(60fps video). fps는 28.3 및 52.8~53.4로 유지.
+  pre-Codex(b1e776d) 대비 지연 동등 이상, fps는 5~7% 높음.
+- 고정 폴링 예산은 30fps 지연과 60fps 처리량이 상충(4: 지연 4.2ms/fps 44.7,
+  2: 지연 26.3ms/fps 49.9)하여 프레임 주기의 40% 시간 제한 방식으로 해결.
+- remote60_mf_h264_codec_test / shared_core_test / capture_readback_test /
+  input_macro_test / udp_control_channel_test 전부 PASS.
+- Android `:app:compileReleaseKotlin` 성공.
+- 초기 측정은 RDP 세션과 동시 실행 에이전트 부하로 오염되어 CPU가 과다 계상되었고,
+  RDP 차단 + 단독 실행으로 재측정해 확정했다.
+
+다음 액션
+- GNLinkSecureInput 서비스가 LocalSystem으로 `D:\remote\remote\build-local\...`(사용자
+  쓰기 가능 경로)를 가리키고 있어 권한 상승 위험이 있다. 관리자 권한으로 서비스를 제거하고
+  제품 배포 시 관리자 전용 경로 설치를 강제해야 한다.
+- 합성 씬은 버스트가 약해 senderQueueDrops가 대부분 0이므로, 실사용 부하에서
+  senderHeldFrames(신규 지표)로 정지 구간을 재확인한다.
