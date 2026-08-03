@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "native_video_client_session.hpp"
+#include "video_playout_clock.hpp"
 
 struct ANativeWindow;
 struct AMediaCodec;
@@ -63,17 +64,10 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint64_t latestInputStreamGeneration_ = 0;
   uint64_t latestOutputStreamGeneration_ = 0;
   uint64_t lastOutputPresentationUs_ = 0;
-  uint64_t ptsStreamGeneration_ = 0;
-  uint64_t ptsRemoteBaseUs_ = 0;
-  uint64_t ptsLocalBaseUs_ = 0;
-  uint64_t lastQueuedPtsUs_ = 0;
-  uint64_t lastRemoteCaptureUs_ = 0;
-  uint64_t targetFrameIntervalUs_ = 33333;
-  // Smoothed interval between delivered captures: the cadence the playout clock advances at.
-  uint64_t playoutStepUs_ = 0;
-  uint64_t ptsReanchorCount_ = 0;
-  uint64_t ptsMonotonicClampCount_ = 0;
-  uint64_t ptsFallbackCount_ = 0;
+  // Decides when each frame reaches the screen. Shared with the desktop viewer and unit
+  // tested against recorded arrival patterns, because it is control logic whose failure mode
+  // is "looks slightly wrong on a device you are not holding".
+  remote60::native_poc::VideoPlayoutClock playoutClock_;
   uint64_t pendingFrameCount_ = 0;
   uint64_t pendingFrameQueueRetryCount_ = 0;
   // Set when a delta had to be discarded before reaching the codec; consumed by the session,

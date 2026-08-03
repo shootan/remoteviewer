@@ -305,6 +305,11 @@ target_link_libraries(remote60_mf_h264_codec_test PRIVATE
   ole32
 )
 
+add_executable(remote60_video_playout_clock_test
+  src/video_playout_clock_test.cpp
+)
+target_include_directories(remote60_video_playout_clock_test PRIVATE src)
+
 add_executable(remote60_udp_control_channel_test
   src/udp_control_channel.cpp
   src/udp_control_channel_test.cpp
