@@ -1,4 +1,4 @@
-{
+﻿{
   "codec": "h264",
   "transport": "udp",
   "port": 43000,
@@ -23,7 +23,7 @@
   "encoderTuneMode": "low_latency",
   "encoderBackend": "mft_auto",
   "decoderBackend": "mft_auto",
-  "h264NoPacing": true,
+  "h264NoPacing": false,
   "guardStalePreEncode": false,
   "capturePoolBuffers": 0,
   "guardStaleEncoded": false,
