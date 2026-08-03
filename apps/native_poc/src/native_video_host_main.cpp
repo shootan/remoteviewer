@@ -2804,7 +2804,8 @@ int main(int argc, char** argv) {
       if (!directorySessionToken.empty() && token == directorySessionToken &&
           peer.sin_addr.s_addr == directorySessionIpNet) {
         // A controller reconnect creates a new UDP socket/port. The already-proven opaque
-        // capability remains the session credential, while the source IP stays bound.
+        // capability remains the session credential, while the first authenticated source IP
+        // (which can differ from the directory-observed endpoint under hairpin NAT) stays bound.
         return true;
       }
     }
@@ -3258,8 +3259,7 @@ int main(int argc, char** argv) {
           const uint32_t domainW = inputDomainW.load(std::memory_order_acquire);
           const uint32_t domainH = inputDomainH.load(std::memory_order_acquire);
           InputInjectResult injectResult = InputInjectResult::Failed;
-          if (desktopMode && sessionDirectoryAuthenticated.load(std::memory_order_acquire) &&
-              secureInputBroker.connected()) {
+          if (desktopMode && sessionDirectoryAuthenticated.load(std::memory_order_acquire)) {
             injectResult = secureInputBroker.SendInputEvent(input, domainW, domainH)
                                ? InputInjectResult::Injected
                                : InputInjectResult::Failed;
@@ -3334,8 +3334,7 @@ int main(int argc, char** argv) {
               !inputTargetCriteria.enabled() &&
               (selectedWindowIdState.load(std::memory_order_acquire) == 0);
           InputInjectResult injectResult = InputInjectResult::Failed;
-          if (desktopMode && sessionDirectoryAuthenticated.load(std::memory_order_acquire) &&
-              secureInputBroker.connected()) {
+          if (desktopMode && sessionDirectoryAuthenticated.load(std::memory_order_acquire)) {
             injectResult = secureInputBroker.SendInputText(
                                text, inputDomainW.load(std::memory_order_acquire),
                                inputDomainH.load(std::memory_order_acquire))

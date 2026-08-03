@@ -717,22 +717,45 @@ bool ClientSessionController::ConnectUdpVideo(const ClientSessionConnectArgs& ar
     }
   }
 
-  (void)set_recv_timeout(connected, args.udpHandshakeTimeoutMs);
   UdpHelloPacket hello{};
   std::snprintf(hello.authToken, sizeof(hello.authToken), "%s", args.peerAuthToken.c_str());
-  const int sent = send(connected, reinterpret_cast<const char*>(&hello), sizeof(hello), 0);
-  if (sent != static_cast<int>(sizeof(hello))) {
-    if (error) *error = "udp hello send failed";
-    close_socket(&connected);
-    return false;
-  }
+  // A directory connect and the host heartbeat are independent HTTP requests. The first
+  // authenticated Hello can therefore reach the host a few milliseconds before its matching
+  // capability. Retry on the already-punched socket instead of turning that harmless race into
+  // the intermittent "connecting -> error" seen by the mobile client.
+  const uint32_t handshakeBudgetMs =
+      args.peerAuthToken.empty() ? std::max<uint32_t>(1, args.udpHandshakeTimeoutMs)
+                                 : std::max<uint32_t>(3000, args.udpHandshakeTimeoutMs);
+  const uint64_t handshakeDeadlineUs =
+      now_us() + static_cast<uint64_t>(handshakeBudgetMs) * 1000ULL;
+  bool helloAcknowledged = false;
+  while (!stopRequested_.load(std::memory_order_acquire) && now_us() < handshakeDeadlineUs) {
+    const int sent = send(connected, reinterpret_cast<const char*>(&hello), sizeof(hello), 0);
+    if (sent != static_cast<int>(sizeof(hello))) {
+      if (error) *error = "udp hello send failed";
+      close_socket(&connected);
+      return false;
+    }
 
-  UdpHelloPacket ack{};
-  const int received = recv(connected, reinterpret_cast<char*>(&ack), sizeof(ack), 0);
-  if (received < static_cast<int>(sizeof(UdpHelloPacket)) ||
-      ack.magic != kMagic ||
-      ack.kind != static_cast<uint16_t>(UdpPacketKind::HelloAck) ||
-      ack.version != kUdpProtocolVersion || (ack.features & kUdpFeatureVideoFec) == 0) {
+    const uint64_t remainingUs = handshakeDeadlineUs > now_us() ? handshakeDeadlineUs - now_us() : 0;
+    const uint32_t receiveSliceMs = static_cast<uint32_t>(
+        std::clamp<uint64_t>((remainingUs + 999ULL) / 1000ULL, 1ULL, 250ULL));
+    (void)set_recv_timeout(connected, receiveSliceMs);
+
+    UdpHelloPacket ack{};
+    const int received = recv(connected, reinterpret_cast<char*>(&ack), sizeof(ack), 0);
+    const bool validAck =
+        received >= static_cast<int>(sizeof(UdpHelloPacket)) && ack.magic == kMagic &&
+        ack.kind == static_cast<uint16_t>(UdpPacketKind::HelloAck) &&
+        ack.version == kUdpProtocolVersion && (ack.features & kUdpFeatureVideoFec) != 0;
+    const bool directoryAuthorized =
+        args.peerAuthToken.empty() || (ack.features & kUdpFeatureDirectoryAuth) != 0;
+    if (validAck && directoryAuthorized) {
+      helloAcknowledged = true;
+      break;
+    }
+  }
+  if (!helloAcknowledged) {
     if (error) *error = "udp hello ack failed";
     close_socket(&connected);
     return false;

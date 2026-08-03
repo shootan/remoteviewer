@@ -5433,3 +5433,52 @@ Before/After (1080p-scroll Release 5회, 오늘 H4-off 대비)
   `remote60_native_video_host_poc.new.exe`를 원래 이름으로 교체하고 최신 제품 host를 기동한다.
 - 그 다음 Release APK를 LDPlayer에 `install -r`하고 실제 디렉터리 재연결, YouTube 전체화면 전환,
   4Mbps/30fps 영상, 작업표시줄 및 Windows 잠금 화면 입력을 최종 수동 검증한다.
+
+
+### 226) 2026-08-03 Directory capability 간헐 연결 실패 수정
+
+목표
+- 온라인 호스트를 Android에서 선택했을 때 디렉터리 주소 조회까지 성공한 뒤
+  `connecting -> error`로 돌아가는 간헐 연결 실패를 실제 제품 로그로 확정하고 수정한다.
+
+변경 파일
+- `apps/native_poc/src/directory_client.hpp`
+- `apps/native_poc/src/directory_client.cpp`
+- `apps/native_poc/src/native_video_client_session.cpp`
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `apps/native_poc/src/secure_input_broker.cpp`
+- `docs/history.md`
+- `docs/구현계획.md`
+
+검증/build/test
+- LDPlayer Release 앱과 운영 디렉터리/제품 호스트 조합에서 호스트의
+  `rejected udp hello with invalid directory capability`와 Android의
+  `directory_target -> connecting -> error`를 같은 요청에서 확인했다.
+- 원인은 호스트의 기본 25초 heartbeat 직후 `/api/connect`가 들어오면 4초 punch 대기와
+  800ms 단발 Hello가 호스트의 다음 capability 수신보다 먼저 끝나는 경쟁 조건이었다.
+- 호스트가 peer Punch를 받으면 heartbeat sleep을 즉시 중단해 capability를 다시 조회하고,
+  인증 클라이언트는 같은 punched socket에서 최대 3초 동안 Hello를 재전송한다. 인증 토큰이
+  있을 때는 HelloAck의 directory-auth feature까지 확인한다.
+- 첫 경쟁을 제거한 뒤에도 디렉터리가 관측한 공인 endpoint(`175.209.236.194`)와 실제 호스트에
+  도착한 hairpin NAT endpoint(`192.168.0.1`)가 달라 capability가 거부되는 것을 추가로 확인했다.
+  30초 만료·128-bit·1회용 capability 토큰을 인증 기준으로 소비하고 관측 endpoint는 NAT punch
+  힌트로만 사용하며, 인증 이후 세션은 실제 발신 IP에 고정하도록 수정했다.
+- 보안 입력 서비스가 `SERVICE_RUNNING`을 보고한 직후 named pipe 생성 전이면 최초 연결이
+  `ERROR_FILE_NOT_FOUND`로 끝나고 일반 입력 경로로 영구 우회됐다. pipe open을 3초 동안 재시도하고,
+  인증된 desktop 입력은 사전 `connected()` 상태와 무관하게 broker의 재연결 경로를 거치게 했다.
+- `build-verify` Release host app/host/client/shared-core/E2E target 빌드 성공,
+  `remote60_native_video_client_shared_core_test` PASS, 별도 UDP 44122 제어 E2E 13/13 PASS.
+- Android `:app:assembleRelease` 성공, V3 서명 PASS, LDPlayer `install -r` 성공.
+  APK SHA-256은 `081B63203CC7CC2E33511EBB546F947C0DE116FFCDB372554082CE0083F4C467`이다.
+- 운영 디렉터리 실연결에서 `directory capability endpoint translated` 후
+  `connected window_list_received count=9`까지 성공했다. 4Mbps/30fps 20.09초 안정구간은 호스트
+  push/pop `600/600`, sender queue drop 증가 0, Android decoder reset 0, Android 출력 로그 간격
+  보정 약 29.6fps였다.
+- Windows dist launcher SHA-256은
+  `D5D8B70A8805316195A24B3E86527ED94B138135DC6F0F11EA4F5765AEC59590`, native host는
+  `0D38B9B1AE7E391C48BBDDA04228668B57EBFDC9A9EF03151DB797E4F4F2ADA1`이다.
+
+다음 액션
+- 현재 실행 중인 native host(PID 4140)는 directory/NAT 수정은 포함하지만 마지막 secure-input
+  pipe 재연결 수정 전 바이너리다. 사용자가 GNLink Host를 종료하면 준비된 `.new.exe`를 기존
+  제품 파일명으로 교체하고, 재연결 후 Session 1 SYSTEM 입력 agent와 잠금 화면 입력을 확인한다.

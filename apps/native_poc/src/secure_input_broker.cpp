@@ -1,7 +1,9 @@
 #include "secure_input_broker.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
+#include <thread>
 #include <vector>
 
 namespace remote60::native_poc {
@@ -151,10 +153,19 @@ bool SecureInputBrokerClient::EnsureInstalledAndConnected(const std::wstring& se
 
 bool SecureInputBrokerClient::ConnectLocked() {
   if (pipe_ != INVALID_HANDLE_VALUE) return true;
-  (void)WaitNamedPipeW(kSecureInputPipeName, 3000);
-  pipe_ = CreateFileW(kSecureInputPipeName, GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
-                      FILE_ATTRIBUTE_NORMAL, nullptr);
-  return pipe_ != INVALID_HANDLE_VALUE;
+  // A service may report SERVICE_RUNNING just before its worker creates the named pipe.
+  // WaitNamedPipe returns immediately with ERROR_FILE_NOT_FOUND during that small window, so
+  // a single call permanently pushed the host onto the non-secure fallback path. Retry both
+  // discovery and open until the startup budget expires.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  do {
+    (void)WaitNamedPipeW(kSecureInputPipeName, 100);
+    pipe_ = CreateFileW(kSecureInputPipeName, GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (pipe_ != INVALID_HANDLE_VALUE) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  } while (std::chrono::steady_clock::now() < deadline);
+  return false;
 }
 
 bool SecureInputBrokerClient::WriteLocked(const SecureInputMessage& message) {

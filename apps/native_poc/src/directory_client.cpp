@@ -244,6 +244,7 @@ bool HostAgent::Start(const HostAgentConfig& cfg, SendFn send, std::string* outE
     return false;
   }
 
+  refreshRequested_.store(false, std::memory_order_release);
   running_.store(true);
   thread_ = std::thread([this] { Run(); });
   return true;
@@ -271,10 +272,16 @@ bool HostAgent::ConsumeUdpPacket(const void* data, size_t len, const sockaddr_in
   if (!data || len == 0) return false;
   const auto* bytes = static_cast<const uint8_t*>(data);
 
-  // A punch packet from a peer only exists to open our NAT mapping; it carries no state.
+  // /api/connect queues the peer's one-time capability for the next heartbeat before the
+  // controller starts sending these packets. Treat the first punch as an interrupt for the
+  // ordinary heartbeat sleep; otherwise a request just after a poll can wait 25 seconds and
+  // its authenticated Hello arrives before the host has learned the capability.
   if (len >= sizeof(UdpHelloPacket)) {
     const auto* hello = reinterpret_cast<const UdpHelloPacket*>(bytes);
     if (hello->magic == kMagic && hello->kind == static_cast<uint16_t>(UdpPacketKind::Punch)) {
+      if (!refreshRequested_.exchange(true, std::memory_order_acq_rel)) {
+        std::cout << "[native-video-host] directory peer punch; refreshing capability\n";
+      }
       return true;
     }
   }
@@ -625,13 +632,30 @@ bool HostAgent::AuthorizePeer(const std::string& punchToken, const sockaddr_in& 
       std::remove_if(authorizedPeers_.begin(), authorizedPeers_.end(),
                      [&](const AuthorizedPeer& peer) { return peer.expiresAt <= now; }),
       authorizedPeers_.end());
+  // The directory's observed tuple is useful for opening the NAT path, but it is not an
+  // authentication invariant. Hairpin and symmetric NATs may translate the same prepared
+  // client socket differently when it changes destination from the directory to the host.
+  // The 128-bit random capability is single-use and expires after 30 seconds; consume it by
+  // value, then bind the live session to the endpoint that actually presented it.
   const auto match = std::find_if(authorizedPeers_.begin(), authorizedPeers_.end(),
                                   [&](const AuthorizedPeer& peer) {
-                                    return peer.target.punchToken == punchToken &&
-                                           peer.target.ipv4NetworkOrder == from.sin_addr.s_addr &&
-                                           htons(peer.target.port) == from.sin_port;
+                                    return peer.target.punchToken == punchToken;
                                   });
   if (match == authorizedPeers_.end()) return false;
+  if (match->target.ipv4NetworkOrder != from.sin_addr.s_addr ||
+      htons(match->target.port) != from.sin_port) {
+    in_addr expectedAddress{};
+    expectedAddress.s_addr = match->target.ipv4NetworkOrder;
+    in_addr actualAddress{};
+    actualAddress.s_addr = from.sin_addr.s_addr;
+    char expectedIp[INET_ADDRSTRLEN] = {};
+    char actualIp[INET_ADDRSTRLEN] = {};
+    inet_ntop(AF_INET, &expectedAddress, expectedIp, sizeof(expectedIp));
+    inet_ntop(AF_INET, &actualAddress, actualIp, sizeof(actualIp));
+    std::cout << "[native-video-host] directory capability endpoint translated expected="
+              << expectedIp << ":" << match->target.port << " actual=" << actualIp << ":"
+              << ntohs(from.sin_port) << "\n";
+  }
   authorizedPeers_.erase(match);  // one connection, one capability
   return true;
 }
@@ -666,6 +690,7 @@ void HostAgent::Run() {
         std::chrono::steady_clock::now() - cycleStart);
     auto remaining = std::chrono::milliseconds(cfg_.heartbeatSeconds * 1000u) - elapsed;
     while (running_.load() && remaining.count() > 0) {
+      if (refreshRequested_.exchange(false, std::memory_order_acq_rel)) break;
       const auto slice = std::min<std::chrono::milliseconds>(remaining,
                                                              std::chrono::milliseconds(200));
       std::this_thread::sleep_for(slice);

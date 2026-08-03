@@ -110,7 +110,7 @@ class HostAgent {
    */
   bool ConsumeUdpPacket(const void* data, size_t len, const sockaddr_in& from);
 
-  /** Consumes a one-time /api/connect capability for this exact observed UDP peer. */
+  /** Consumes a one-time /api/connect capability; the observed endpoint is advisory across NAT. */
   bool AuthorizePeer(const std::string& punchToken, const sockaddr_in& from);
 
   /** Human-readable one-liner for status output; safe to call from any thread. */
@@ -155,6 +155,9 @@ class HostAgent {
 
   std::thread thread_;
   std::atomic<bool> running_{false};
+  // A peer punch means /api/connect has just queued a capability for this host. Wake the
+  // heartbeat loop instead of making the controller wait for the ordinary 25-second poll.
+  std::atomic<bool> refreshRequested_{false};
 
   mutable std::mutex mu_;
   std::string status_ = "idle";
