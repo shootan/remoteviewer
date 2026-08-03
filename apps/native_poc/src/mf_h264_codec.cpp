@@ -1773,7 +1773,15 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
       }
       IMFSample* produced = odb.pSample ? odb.pSample : outSample.Get();
       std::vector<uint8_t> bytes;
-      if (produced && sample_to_bytes(produced, &bytes) && !bytes.empty()) {
+      const bool haveBytes = produced && sample_to_bytes(produced, &bytes) && !bytes.empty();
+      if (!haveBytes && produced && !pendingInputSampleTimesHns_.empty()) {
+        // The MFT consumed an input to produce this output even though nothing usable came
+        // back. Leaving its timestamp in the queue would offset every later access unit by a
+        // frame, permanently, and the client paces playout off those timestamps.
+        pendingInputSampleTimesHns_.pop_front();
+        ++sampleTimeOutputTimestampFallbackCount_;
+      }
+      if (haveBytes) {
         if (!h264_has_start_code(bytes.data(), bytes.size())) {
           std::vector<uint8_t> annexb;
           if (h264_avcc_to_annexb(bytes, &annexb) && !annexb.empty()) {

@@ -69,6 +69,8 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint64_t lastQueuedPtsUs_ = 0;
   uint64_t lastRemoteCaptureUs_ = 0;
   uint64_t targetFrameIntervalUs_ = 33333;
+  // Smoothed interval between delivered captures: the cadence the playout clock advances at.
+  uint64_t playoutStepUs_ = 0;
   uint64_t ptsReanchorCount_ = 0;
   uint64_t ptsMonotonicClampCount_ = 0;
   uint64_t ptsFallbackCount_ = 0;
@@ -77,11 +79,16 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   // Set when a delta had to be discarded before reaching the codec; consumed by the session,
   // which turns it into a rate-limited IDR request.
   bool decoderKeyframeRequest_ = false;
-  // Intervals between frames actually handed to the display, drained once a second by the
-  // session and reported to the host.
+  // Intervals between the times frames actually reach the display, drained once a second by
+  // the session and reported to the host. A scheduled release lands at its presentation
+  // timestamp, not at the moment we called release -- draining several ready buffers in one
+  // pass would otherwise read as a burst of near-zero gaps while the screen was fine.
   std::vector<uint32_t> presentGapsUs_;
   uint64_t lastPresentSteadyUs_ = 0;
   uint64_t presentWindowStartUs_ = 0;
+  uint32_t presentScheduledCount_ = 0;
+  uint32_t presentImmediateCount_ = 0;
+  uint64_t presentWindowReanchorBase_ = 0;
   uint64_t lastInputQueueSteadyUs_ = 0;
   uint64_t bootstrapReplayCount_ = 0;
   uint64_t staleFrameDropCount_ = 0;

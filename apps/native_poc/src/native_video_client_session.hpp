@@ -26,6 +26,9 @@ struct ClientPresentationStats {
   uint32_t over1_5xCount = 0;
   uint32_t over2xCount = 0;
   uint32_t sampleCount = 0;
+  uint32_t scheduledCount = 0;
+  uint32_t immediateCount = 0;
+  uint32_t reanchorCount = 0;
 };
 
 class ClientEncodedFrameSink {

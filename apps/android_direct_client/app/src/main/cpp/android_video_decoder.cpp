@@ -20,9 +20,25 @@ namespace {
 constexpr const char* kLogTag = "remote60_android_direct";
 constexpr const char* kMimeTypeAvc = "video/avc";
 constexpr uint64_t kPtsDiscontinuityUs = 500000ULL;
-// One sub-frame of controlled playout headroom hides ordinary Wi-Fi arrival jitter. Frames
-// are still dropped rather than queued when the link falls materially behind.
-constexpr uint64_t kVideoPlayoutLeadUs = 30000ULL;
+// Receiver-side playout headroom. Frames do not arrive evenly: the host's async encoder
+// releases two or three access units at once and the network adds its own jitter, so handing
+// them to the display on arrival reproduces every burst as visible stutter. Holding a couple
+// of frames' worth of headroom and releasing on a steady clock is what makes a fixed frame
+// rate actually look fixed. Frames are still dropped rather than queued when the link falls
+// materially behind.
+constexpr uint64_t kVideoPlayoutLeadMinUs = 60000ULL;
+constexpr uint64_t kVideoPlayoutLeadMaxUs = 120000ULL;
+// Bounds on the measured inter-frame step, so one absurd capture timestamp cannot poison the
+// playout cadence.
+constexpr uint64_t kVideoPlayoutStepMinUs = 4000ULL;
+constexpr uint64_t kVideoPlayoutStepMaxUs = 200000ULL;
+
+uint64_t playout_lead_for_step_us(uint64_t stepUs) {
+  const uint64_t lead = stepUs * 5ULL / 2ULL;
+  if (lead < kVideoPlayoutLeadMinUs) return kVideoPlayoutLeadMinUs;
+  if (lead > kVideoPlayoutLeadMaxUs) return kVideoPlayoutLeadMaxUs;
+  return lead;
+}
 constexpr uint64_t kBootstrapReplayIntervalUs = 250000ULL;
 constexpr uint64_t kBootstrapReplayMaxCount = 2ULL;
 
@@ -115,8 +131,11 @@ void AndroidVideoDecoderSink::SetTargetFps(uint32_t fps) {
   const uint32_t clampedFps = std::clamp<uint32_t>(fps, 1u, 240u);
   targetFrameIntervalUs_ =
       std::max<uint64_t>(1ULL, 1000000ULL / static_cast<uint64_t>(clampedFps));
-  // A runtime FPS change starts a new presentation clock on the next frame.
+  // A runtime FPS change starts a new presentation clock on the next frame. The measured
+  // cadence describes the old rate, so seed it from the new request rather than spending the
+  // next second converging away from a stale value.
   ResetPtsStateLocked();
+  playoutStepUs_ = targetFrameIntervalUs_;
 }
 
 void AndroidVideoDecoderSink::SetSurface(JNIEnv* env, jobject surface) {
@@ -245,6 +264,12 @@ bool AndroidVideoDecoderSink::DrainPresentationStats(
   const uint64_t windowEndUs = lastPresentSteadyUs_;
   presentGapsUs_.clear();
   presentWindowStartUs_ = lastPresentSteadyUs_;
+  out->scheduledCount = presentScheduledCount_;
+  out->immediateCount = presentImmediateCount_;
+  presentScheduledCount_ = 0;
+  presentImmediateCount_ = 0;
+  out->reanchorCount = static_cast<uint32_t>(ptsReanchorCount_ - presentWindowReanchorBase_);
+  presentWindowReanchorBase_ = ptsReanchorCount_;
 
   std::sort(gaps.begin(), gaps.end());
   const size_t n = gaps.size();
@@ -595,24 +620,65 @@ uint64_t AndroidVideoDecoderSink::ComputeQueuedPtsUsLocked(
       reanchorReason = "capture_before_base";
       ++ptsFallbackCount_;
     } else {
-      if (lastRemoteCaptureUs_ != 0) {
-        const uint64_t remoteStepUs = remoteCaptureUs - lastRemoteCaptureUs_;
-        if (remoteStepUs > kPtsDiscontinuityUs) {
-          reanchor = true;
-          reanchorReason = "capture_gap";
-          ++ptsFallbackCount_;
-        }
+      const uint64_t remoteStepUs =
+          (lastRemoteCaptureUs_ != 0) ? (remoteCaptureUs - lastRemoteCaptureUs_) : 0;
+      if (lastRemoteCaptureUs_ != 0 && remoteStepUs > kPtsDiscontinuityUs) {
+        reanchor = true;
+        reanchorReason = "capture_gap";
+        ++ptsFallbackCount_;
       }
       if (!reanchor) {
-        // The host capture clock can alternate 16/50 ms steps even while producing the
-        // requested 30 frames each second (monitor callback phase and async encoder drain).
-        // Advancing presentation by the negotiated fixed cadence makes those frames appear
-        // evenly instead of reproducing the capture jitter on screen.
-        rebasedPtsUs = lastQueuedPtsUs_ + targetFrameIntervalUs_;
-        if (localNowUs > rebasedPtsUs + targetFrameIntervalUs_) {
+        // Pace to the rate frames actually arrive at, not the rate that was requested. The
+        // host routinely delivers fewer frames than asked for -- 33 fps against a 60 fps
+        // request is normal -- and advancing the clock one requested period per arrival made
+        // it fall behind wall clock by the shortfall every second, until an underrun forced a
+        // reanchor. That periodic clock jump was the stutter, and it was worse at 60 than at
+        // 30 precisely because the shortfall was larger.
+        if (playoutStepUs_ == 0) playoutStepUs_ = targetFrameIntervalUs_;
+        if (remoteStepUs >= kVideoPlayoutStepMinUs && remoteStepUs <= kVideoPlayoutStepMaxUs) {
+          playoutStepUs_ = (playoutStepUs_ * 7ULL + remoteStepUs) / 8ULL;
+        }
+        // Anchored to the capture clock so the two ends cannot drift apart...
+        const int64_t anchoredUs = static_cast<int64_t>(ptsLocalBaseUs_) +
+                                   static_cast<int64_t>(remoteCaptureUs - ptsRemoteBaseUs_);
+        // ...but advanced at a steady cadence, because the host capture clock alternates
+        // 16/50 ms steps even while producing its 30 frames and following it exactly puts
+        // that jitter on screen. The bounded correction is what reconciles the two: smooth
+        // frame to frame, yet unable to accumulate error against the sender.
+        const int64_t cadenceUs =
+            static_cast<int64_t>(lastQueuedPtsUs_) + static_cast<int64_t>(playoutStepUs_);
+        const int64_t maxSlewUs = static_cast<int64_t>(playoutStepUs_ / 4ULL);
+        int64_t correctionUs = anchoredUs - cadenceUs;
+        if (correctionUs > maxSlewUs) correctionUs = maxSlewUs;
+        if (correctionUs < -maxSlewUs) correctionUs = -maxSlewUs;
+        const int64_t pacedUs = cadenceUs + correctionUs;
+        rebasedPtsUs = (pacedUs > 0) ? static_cast<uint64_t>(pacedUs) : localNowUs;
+
+        const uint64_t leadUs = playout_lead_for_step_us(playoutStepUs_);
+        if (localNowUs >= rebasedPtsUs) {
+          // Due before it arrived: the buffer is dry and no pacing can save this frame.
           reanchor = true;
           reanchorReason = "playout_underrun";
           ++ptsFallbackCount_;
+        } else {
+          // Keep the buffer near its target depth by walking the anchor, an eighth of a frame
+          // at a time. Adjusting a single frame instead would achieve nothing: the next
+          // correction is computed against the anchor and would simply pull it back, leaving
+          // the buffer to drain until it ran dry and the clock jumped. An eighth of a frame
+          // per step is well under what anyone can see, and it moves 4 ms per frame -- enough
+          // to absorb a route change long before it becomes a stall.
+          const uint64_t adjustUs = std::max<uint64_t>(1ULL, playoutStepUs_ / 8ULL);
+          const uint64_t headroomUs = rebasedPtsUs - localNowUs;
+          if (headroomUs < leadUs / 2) {
+            // Arrivals have drifted later than the anchor predicted; buy back headroom.
+            ptsLocalBaseUs_ += adjustUs;
+            rebasedPtsUs += adjustUs;
+          } else if (headroomUs > leadUs * 2 && ptsLocalBaseUs_ > adjustUs &&
+                     rebasedPtsUs > adjustUs) {
+            // Overshot: the buffer is deeper than it needs to be and that is pure latency.
+            ptsLocalBaseUs_ -= adjustUs;
+            rebasedPtsUs -= adjustUs;
+          }
         }
       }
     }
@@ -621,7 +687,8 @@ uint64_t AndroidVideoDecoderSink::ComputeQueuedPtsUsLocked(
   if (reanchor) {
     ptsStreamGeneration_ = frame.header.streamGeneration;
     ptsRemoteBaseUs_ = remoteCaptureUs;
-    ptsLocalBaseUs_ = localNowUs + kVideoPlayoutLeadUs;
+    if (playoutStepUs_ == 0) playoutStepUs_ = targetFrameIntervalUs_;
+    ptsLocalBaseUs_ = localNowUs + playout_lead_for_step_us(playoutStepUs_);
     rebasedPtsUs = ptsLocalBaseUs_;
     ++ptsReanchorCount_;
     if (hadPtsBase || ptsReanchorCount_ == 1 || (ptsReanchorCount_ % 30u) == 1u) {
@@ -654,6 +721,8 @@ void AndroidVideoDecoderSink::ResetPtsStateLocked() {
   ptsLocalBaseUs_ = 0;
   lastQueuedPtsUs_ = 0;
   lastRemoteCaptureUs_ = 0;
+  // Keep the measured cadence: it describes the sender, which a local codec reset does not
+  // change, and relearning it from the requested fps costs a second of bad pacing.
 }
 
 void AndroidVideoDecoderSink::ResetCodecLocked() {
@@ -757,8 +826,9 @@ void AndroidVideoDecoderSink::DrainOutputLocked() {
       latestOutputStreamGeneration_ = expectedStreamGeneration_;
       const uint64_t nowUs = steady_now_us();
       media_status_t releaseStatus = AMEDIA_OK;
-      if (lastOutputPresentationUs_ > nowUs + 1000ULL &&
-          lastOutputPresentationUs_ < nowUs + 250000ULL) {
+      const bool scheduledRelease = lastOutputPresentationUs_ > nowUs + 1000ULL &&
+                                    lastOutputPresentationUs_ < nowUs + 250000ULL;
+      if (scheduledRelease) {
         // NDK timestamps use CLOCK_MONOTONIC, the same domain as steady_clock on Android.
         releaseStatus = AMediaCodec_releaseOutputBufferAtTime(
             codec_, outputIndex, static_cast<int64_t>(lastOutputPresentationUs_ * 1000ULL));
@@ -771,18 +841,29 @@ void AndroidVideoDecoderSink::DrainOutputLocked() {
         return;
       }
       ++outputFrameCount_;
-      // The release call is where a frame becomes visible, so the spacing between releases is
-      // the smoothness the viewer perceives -- not the decode rate reported everywhere else.
+      // Smoothness is the spacing between frames on screen. For a scheduled release that is
+      // the presentation timestamp we asked for, not the moment we called release: this loop
+      // drains every ready buffer back to back, so timing the calls measured the drain and
+      // not the display. An immediate release has no schedule, and lands when it lands --
+      // counting those separately is what distinguishes a paced stream from a stuttering one.
       {
-        const uint64_t releasedAtUs = steady_now_us();
-        if (lastPresentSteadyUs_ != 0 && releasedAtUs > lastPresentSteadyUs_) {
-          const uint64_t gapUs = releasedAtUs - lastPresentSteadyUs_;
+        const uint64_t displayedAtUs = scheduledRelease ? lastOutputPresentationUs_
+                                                        : steady_now_us();
+        if (scheduledRelease) {
+          ++presentScheduledCount_;
+        } else {
+          ++presentImmediateCount_;
+        }
+        if (lastPresentSteadyUs_ != 0 && displayedAtUs > lastPresentSteadyUs_) {
+          const uint64_t gapUs = displayedAtUs - lastPresentSteadyUs_;
           if (presentGapsUs_.size() < 4096) {
             presentGapsUs_.push_back(static_cast<uint32_t>(std::min<uint64_t>(gapUs, 4000000ULL)));
           }
         }
-        if (presentWindowStartUs_ == 0) presentWindowStartUs_ = releasedAtUs;
-        lastPresentSteadyUs_ = releasedAtUs;
+        if (presentWindowStartUs_ == 0) presentWindowStartUs_ = displayedAtUs;
+        // An immediate release after a scheduled one can be stamped earlier than its
+        // predecessor; keep the window monotonic so the fps span stays meaningful.
+        if (displayedAtUs > lastPresentSteadyUs_) lastPresentSteadyUs_ = displayedAtUs;
       }
       if (pendingSelectionGeneration_ != 0 &&
           readySelectionGeneration_ != pendingSelectionGeneration_) {

@@ -350,6 +350,9 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
           metrics.message.presentOver1_5xCount = present.over1_5xCount;
           metrics.message.presentOver2xCount = present.over2xCount;
           metrics.message.presentSampleCount = present.sampleCount;
+          metrics.message.presentScheduledCount = present.scheduledCount;
+          metrics.message.presentImmediateCount = present.immediateCount;
+          metrics.message.presentReanchorCount = present.reanchorCount;
           metrics.updatedQpcUs = loopNowUs;
           lastPresentReportUs = loopNowUs;
         }

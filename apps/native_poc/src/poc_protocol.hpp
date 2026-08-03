@@ -207,6 +207,12 @@ struct ControlClientMetricsMessage {
   uint32_t presentOver1_5xCount = 0;      // frames late by half a period or more, this window
   uint32_t presentOver2xCount = 0;        // a whole missing frame, this window
   uint32_t presentSampleCount = 0;
+  // Why the gaps look the way they do. A frame handed to the display with a schedule lands
+  // where the playout clock put it; one released immediately landed wherever it happened to
+  // arrive, which is what stutter is made of. Reanchors are the playout clock itself jumping.
+  uint32_t presentScheduledCount = 0;
+  uint32_t presentImmediateCount = 0;
+  uint32_t presentReanchorCount = 0;
 };
 
 struct ControlRequestKeyFrameMessage {

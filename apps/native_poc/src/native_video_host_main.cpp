@@ -3552,6 +3552,9 @@ int main(int argc, char** argv) {
                     << " over1_5x=" << metrics.presentOver1_5xCount
                     << " over2x=" << metrics.presentOver2xCount
                     << " samples=" << metrics.presentSampleCount
+                    << " sched=" << metrics.presentScheduledCount
+                    << " immediate=" << metrics.presentImmediateCount
+                    << " reanchor=" << metrics.presentReanchorCount
                     << "\n";
         }
         continue;
