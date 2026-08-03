@@ -31,7 +31,7 @@ constexpr wchar_t kUninstallKey[] =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\GNLink";
 constexpr wchar_t kFirewallRuleName[] = L"GNLink Host";
 constexpr wchar_t kSetupFileName[] = L"GNLinkSetup.exe";
-constexpr wchar_t kProductVersion[] = L"0.1.0";
+constexpr wchar_t kProductVersion[] = L"0.1.1";
 
 struct PayloadFile {
   int resourceId;
