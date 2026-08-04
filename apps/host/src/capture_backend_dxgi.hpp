@@ -23,7 +23,12 @@ struct DxgiDesktopCaptureConfig {
   bool landscapeOnly = true;
 };
 
-using DxgiDesktopFrameHandler = std::function<void(ID3D11Texture2D* texture, uint32_t width, uint32_t height)>;
+// accumulatedFrames is what desktop duplication reported for this acquire: the number of
+// desktop updates it merged into this one frame. Zero means the desktop image did not
+// change at all and only the pointer moved, which is not a new frame of content.
+using DxgiDesktopFrameHandler =
+    std::function<void(ID3D11Texture2D* texture, uint32_t width, uint32_t height,
+                       uint32_t accumulatedFrames)>;
 using DxgiDesktopLogHandler = std::function<void(const std::string& phase, const std::string& message)>;
 using DxgiDesktopFallbackHandler = std::function<void(const std::string& reason)>;
 

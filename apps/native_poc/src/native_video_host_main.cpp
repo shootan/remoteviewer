@@ -42,6 +42,7 @@
 #include <vector>
 
 #include "mf_h264_codec.hpp"
+#include "capture_cadence_gate.hpp"
 #include "d3d_capture_readback.hpp"
 #include "directory_client.hpp"
 #include "gdi_capture_process.hpp"
@@ -4089,6 +4090,10 @@ int main(int argc, char** argv) {
   uint64_t activePacingFrameIntervalUs = activeFrameIntervalUs;
   std::atomic<uint64_t> captureSubmitMinIntervalUs{activeFrameIntervalUs};
   std::atomic<uint64_t> nextCaptureSubmitUs{0};
+  // Picks which offered frames reach the encoder, and how evenly. Guarded by its own mutex
+  // because capture callbacks can arrive on more than one thread across backends.
+  remote60::native_poc::CaptureCadenceGate captureCadenceGate;
+  std::mutex captureCadenceMu;
   uint64_t frameGatingStaticIntervalUs =
       std::max<uint64_t>(activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGatingStaticFps));
   inputDomainW.store(activeEncodeW, std::memory_order_release);
@@ -4466,34 +4471,20 @@ int main(int argc, char** argv) {
                                       uint64_t callbackUs,
                                       uint64_t sourceCaptureUs,
                                       uint64_t captureAgeAtCallbackUs,
-                                      uint64_t captureClockSkewUs) {
+                                      uint64_t captureClockSkewUs,
+                                      bool hasNewContent) {
     if (!src) return;
     // WGC/DXGI commonly callback at the monitor refresh rate even when the encoder target is
     // 30fps. Submitting all 60 copies made the staging ring and GPU fight over obsolete
     // frames; query completion then oscillated between 16 and 50ms. Limit before the copy,
     // using a phase-preserving deadline so the accepted frames stay evenly spaced.
-    const uint64_t submitIntervalUs =
-        std::max<uint64_t>(1, captureSubmitMinIntervalUs.load(std::memory_order_acquire));
-    uint64_t submitDueUs = captureSubmitLimitEnabled
-                               ? nextCaptureSubmitUs.load(std::memory_order_acquire)
-                               : 0;
-    for (;;) {
-      if (!captureSubmitLimitEnabled) break;
-      // A frame that misses this window is gone: desktop duplication only reports changes, so
-      // nothing re-sends the content that was rejected here.
-      const uint64_t earlyToleranceUs =
-          std::max<uint64_t>(1500, submitIntervalUs * captureSubmitEarlyTolerancePercent / 100);
-      if (submitDueUs != 0 && callbackUs + earlyToleranceUs < submitDueUs) return;
-      const bool phaseStillUseful =
-          submitDueUs != 0 && callbackUs <= submitDueUs + submitIntervalUs * 2;
-      const uint64_t nextDueUs = phaseStillUseful
-                                     ? submitDueUs + submitIntervalUs
-                                     : callbackUs + submitIntervalUs;
-      if (nextCaptureSubmitUs.compare_exchange_weak(
-              submitDueUs, nextDueUs, std::memory_order_acq_rel,
-              std::memory_order_acquire)) {
-        break;
-      }
+    {
+      std::lock_guard<std::mutex> lk(captureCadenceMu);
+      captureCadenceGate.SetEnabled(captureSubmitLimitEnabled);
+      captureCadenceGate.SetEarlyTolerancePercent(captureSubmitEarlyTolerancePercent);
+      captureCadenceGate.SetRequestedIntervalUs(
+          std::max<uint64_t>(1, captureSubmitMinIntervalUs.load(std::memory_order_acquire)));
+      if (!captureCadenceGate.ShouldAccept(callbackUs, hasNewContent)) return;
     }
     uint32_t frameW = 0;
     uint32_t frameH = 0;
@@ -4595,7 +4586,8 @@ int main(int argc, char** argv) {
             }
           }
         }
-        publish_captured_texture(src.Get(), callbackUs, sourceCaptureUs, captureAgeAtCallbackUs, captureClockSkewUs);
+        publish_captured_texture(src.Get(), callbackUs, sourceCaptureUs, captureAgeAtCallbackUs,
+                                 captureClockSkewUs, true);
       } catch (...) {
       }
     });
@@ -4709,11 +4701,13 @@ int main(int argc, char** argv) {
         std::string dxgiDetail;
         const bool started = dxgiCaptureSession.Start(
             config,
-            [&](ID3D11Texture2D* texture, uint32_t width, uint32_t height) {
+            [&](ID3D11Texture2D* texture, uint32_t width, uint32_t height,
+                uint32_t accumulatedFrames) {
               if (stop.load()) return;
               if (!streamControlActive.load(std::memory_order_acquire)) return;
               const uint64_t callbackUs = qpc_now_us();
-              publish_captured_texture(texture, callbackUs, callbackUs, 0, 0);
+              publish_captured_texture(texture, callbackUs, callbackUs, 0, 0,
+                                       accumulatedFrames > 0);
             },
             [&](const std::string&, const std::string& message) {
               std::cout << "[native-video-host] " << message << "\n";
@@ -5126,6 +5120,12 @@ int main(int argc, char** argv) {
     firstSentLoggedGeneration = 0;
     firstCallbackLoggedGeneration.store(0, std::memory_order_release);
     nextCaptureSubmitUs.store(0, std::memory_order_release);
+    {
+      // The measured offer rate describes the old target and the old content; carrying it
+      // into a restart would pace the first second against something no longer true.
+      std::lock_guard<std::mutex> lk(captureCadenceMu);
+      captureCadenceGate.Reset();
+    }
 
     uint64_t flushedVersion = 0;
     {

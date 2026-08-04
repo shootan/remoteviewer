@@ -262,7 +262,7 @@ struct DxgiDesktopCaptureSession::Impl {
       }
 
       try {
-        if (onFrame) onFrame(texture.Get(), width, height);
+        if (onFrame) onFrame(texture.Get(), width, height, frameInfo.AccumulatedFrames);
       } catch (...) {
         releaseFrame();
         request_fallback("dxgi_frame_handler_exception");

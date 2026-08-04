@@ -310,6 +310,11 @@ add_executable(remote60_video_playout_clock_test
 )
 target_include_directories(remote60_video_playout_clock_test PRIVATE src)
 
+add_executable(remote60_capture_cadence_gate_test
+  src/capture_cadence_gate_test.cpp
+)
+target_include_directories(remote60_capture_cadence_gate_test PRIVATE src)
+
 add_executable(remote60_udp_fec_interleave_test
   src/native_video_client_shared_core.cpp
   src/native_video_client_tcp_control.cpp
