@@ -24,6 +24,44 @@ using remote60::native_poc::kSecureInputServiceName;
 using remote60::native_poc::resolve_target_session;
 using remote60::native_poc::session_source_name;
 
+// A service has no console, so everything printed here went nowhere -- which is how the input
+// path came to be undiagnosable: the host counts every event as delivered because the injection
+// result is discarded, and the only component that knows better could not say so.
+//
+// %ProgramData% rather than the install directory: the service runs as LocalSystem and the
+// install directory is deliberately admin-only, so writing beside the binary would either fail
+// or hand a SYSTEM-writable file to a place that is supposed to be read-only at runtime.
+std::wstring diag_log_path() {
+  wchar_t base[MAX_PATH]{};
+  if (GetEnvironmentVariableW(L"ProgramData", base, MAX_PATH) == 0) return {};
+  std::wstring dir = std::wstring(base) + L"\\GNLink";
+  CreateDirectoryW(dir.c_str(), nullptr);
+  return dir + L"\\secure_input.log";
+}
+
+void diag(const char* format, ...) {
+  static const std::wstring path = diag_log_path();
+  if (path.empty()) return;
+  char line[1024]{};
+  va_list args;
+  va_start(args, format);
+  _vsnprintf_s(line, _TRUNCATE, format, args);
+  va_end(args);
+
+  SYSTEMTIME now{};
+  GetLocalTime(&now);
+  FILE* file = nullptr;
+  if (_wfopen_s(&file, path.c_str(), L"a") != 0 || !file) return;
+  // Truncate rather than grow without bound; this is a diagnostic, not an audit trail.
+  if (_ftelli64(file) > 2 * 1024 * 1024) {
+    fclose(file);
+    if (_wfopen_s(&file, path.c_str(), L"w") != 0 || !file) return;
+  }
+  fprintf(file, "%02d:%02d:%02d.%03d %s\n", now.wHour, now.wMinute, now.wSecond,
+          now.wMilliseconds, line);
+  fclose(file);
+}
+
 SERVICE_STATUS_HANDLE gStatusHandle = nullptr;
 SERVICE_STATUS gStatus{};
 std::atomic<bool> gRunning{true};
@@ -154,10 +192,8 @@ DWORD target_session() {
   static uint32_t reported = kInvalidSessionId;
   if (choice.sessionId != reported) {
     reported = choice.sessionId;
-    std::printf("[secure-input] target session=%u source=%s (requester=%u console=%u)\n",
-                choice.sessionId, session_source_name(choice.source), requester,
-                WTSGetActiveConsoleSessionId());
-    std::fflush(stdout);
+    diag("target session=%u source=%s (requester=%u console=%u)", choice.sessionId,
+         session_source_name(choice.source), requester, WTSGetActiveConsoleSessionId());
   }
   return choice.sessionId;
 }
@@ -200,9 +236,7 @@ DWORD WINAPI service_control(DWORD control, DWORD eventType, LPVOID eventData, L
     const auto* notification = static_cast<const WTSSESSION_NOTIFICATION*>(eventData);
     if (notification && (eventType == WTS_SESSION_LOGOFF || eventType == WTS_SESSION_LOGON ||
                          eventType == WTS_CONSOLE_DISCONNECT || eventType == WTS_REMOTE_DISCONNECT)) {
-      std::printf("[secure-input] session change event=%lu session=%lu\n", eventType,
-                  notification->dwSessionId);
-      std::fflush(stdout);
+      diag("session change event=%lu session=%lu", eventType, notification->dwSessionId);
       if (gAgent.process && gAgent.sessionId == notification->dwSessionId) {
         stop_agent();  // the next message re-resolves and re-creates it where it belongs
       }
@@ -268,8 +302,7 @@ void WINAPI service_main(DWORD, wchar_t**) {
       // the host's session can be learned, and everything downstream depends on it.
       const uint32_t requester = requester_session_of(pipe);
       gRequesterSession.store(requester, std::memory_order_release);
-      std::printf("[secure-input] control pipe connected, requester session=%u\n", requester);
-      std::fflush(stdout);
+      diag("control pipe connected, requester session=%u", requester);
       // A new requester may live in a different session than the agent already running.
       if (gAgent.process && gAgent.sessionId != target_session()) stop_agent();
       while (gRunning.load(std::memory_order_acquire)) {
@@ -392,16 +425,59 @@ bool inject_message(const SecureInputMessage& message) {
   return SendInput(1, &input, sizeof(INPUT)) == 1;
 }
 
+// Reports what the agent is actually doing, once per change rather than per event.
+//
+// This is the only place that knows whether an injection landed, and it used to discard the
+// answer -- so the host counted every event as delivered and a click that went nowhere was
+// indistinguishable from one that worked. Recording the desktop name matters most: "Winlogon"
+// proves the agent followed the switch, "Default" while a consent prompt is up proves it did not.
+void report_agent_state(const wchar_t* desktopName, bool attached, bool injected) {
+  static std::wstring lastDesktop;
+  static bool lastAttached = true;
+  static bool lastInjected = true;
+  const std::wstring current = desktopName ? desktopName : L"?";
+  if (current == lastDesktop && attached == lastAttached && injected == lastInjected) return;
+  lastDesktop = current;
+  lastAttached = attached;
+  lastInjected = injected;
+  char narrow[128]{};
+  size_t converted = 0;
+  wcstombs_s(&converted, narrow, current.c_str(), _TRUNCATE);
+  diag("agent desktop=%s attach=%s inject=%s", narrow, attached ? "ok" : "FAILED",
+       injected ? "ok" : "FAILED");
+}
+
+std::wstring current_desktop_name() {
+  HDESK desktop = GetThreadDesktop(GetCurrentThreadId());
+  if (!desktop) return L"?";
+  wchar_t name[128]{};
+  DWORD needed = 0;
+  if (!GetUserObjectInformationW(desktop, UOI_NAME, name, sizeof(name), &needed)) return L"?";
+  return name;
+}
+
 int run_agent(HANDLE readPipe) {
   HDESK ownedDesktop = nullptr;
+  diag("agent started in session %lu", []() {
+    DWORD s = 0;
+    ProcessIdToSessionId(GetCurrentProcessId(), &s);
+    return s;
+  }());
   for (;;) {
     SecureInputMessage message{};
     if (!read_exact(readPipe, &message, sizeof(message))) break;
     if (message.magic != kSecureInputMagic || message.size != sizeof(message)) break;
     if (message.kind == static_cast<uint16_t>(SecureInputKind::Shutdown)) break;
-    if (!attach_to_input_desktop(&ownedDesktop)) continue;
-    (void)inject_message(message);
+    // Re-attach every message on purpose: the desktop can change between any two events, and a
+    // handle kept from the previous one points at the desktop that is no longer receiving input.
+    if (!attach_to_input_desktop(&ownedDesktop)) {
+      report_agent_state(L"(attach failed)", false, false);
+      continue;
+    }
+    const bool injected = inject_message(message);
+    report_agent_state(current_desktop_name().c_str(), true, injected);
   }
+  diag("agent exiting");
   if (ownedDesktop) CloseDesktop(ownedDesktop);
   CloseHandle(readPipe);
   return 0;
