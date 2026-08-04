@@ -320,6 +320,15 @@ add_executable(remote60_bind_port_candidates_test
 )
 target_include_directories(remote60_bind_port_candidates_test PRIVATE src)
 
+# Throwaway diagnostic, not part of the product and not staged into the installer. Answers
+# whether a SYSTEM process on the Winlogon desktop can read pixels, and with which API, before
+# the secure-desktop capture work commits to one. Delete once 구현계획 U1 is answered.
+add_executable(remote60_winlogon_capture_probe
+  tools/winlogon_capture_probe.cpp
+)
+target_link_libraries(remote60_winlogon_capture_probe PRIVATE d3d11 dxgi gdi32 advapi32 user32)
+set_target_properties(remote60_winlogon_capture_probe PROPERTIES OUTPUT_NAME "WinlogonCaptureProbe")
+
 add_executable(remote60_udp_fec_interleave_test
   src/native_video_client_shared_core.cpp
   src/native_video_client_tcp_control.cpp
