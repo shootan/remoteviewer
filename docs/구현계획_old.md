@@ -1,0 +1,486 @@
+﻿# Native Video Perf Master Checklist
+Updated: 2026-04-16 16:40
+Archived: 2026-08-04 — 후속 문서 `docs/구현계획.md`
+
+> **[보관됨] 이 문서는 더 이상 Source of Truth가 아니다.**
+> 성능/화질/Android 마일스톤(M0~M8)을 마무리한 시점의 기록으로 남긴다. 완료 근거를
+> 되짚을 때만 참조하고, 여기서 체크박스를 갱신하지 않는다.
+> 남아 있던 미완료 `[ ]` 항목은 새 `docs/구현계획.md`의 "이월 항목"으로 옮겼다.
+
+이 문서를 앞으로 성능 작업의 단일 기준(Source of Truth)으로 사용한다.
+
+## 긴급 우선순위 공지 (2026-02-26)
+- 현재 확인된 병목 구간(`PIPE_US`/`C2E_US`/`queueToSendUs` 연관 지연) 해결을 최우선 과제로 고정한다.
+- 병목이 목표치로 안정화되기 전까지 신규 기능 확장(M4 이후 항목)은 원칙적으로 보류한다.
+- 모든 작업/로그 기록은 "병목 완화에 직접 기여하는지"를 기준으로 유지/롤백을 즉시 판단한다.
+
+## 긴급 우선순위 공지 (2026-03-05)
+- 신규 최우선 과제를 `백그라운드 입력 주입`으로 고정한다.
+- 입력 주입은 `실제 OS 마우스 포인터 비이동`을 필수 조건으로 한다.
+- 입력 범위는 `클릭/드래그/키보드`로 한정하고, 마우스 이동 단독 이벤트는 기본 비활성으로 유지한다.
+- 대상 윈도우가 다른 창에 가려져 있어도(occluded) 지정 HWND에 입력이 주입되어야 한다.
+
+## 1) 목표 (LAN 우선)
+- 1080p30:
+  - `decodedFrames >= 27` (1초 통계 기준)
+  - `LAT_P95_US <= 70000`
+  - `PRESENT_GAP_OVER_1S = 0`
+  - 텍스트 가독성 유지
+- 720p30:
+  - `decodedFrames >= 28`
+  - `LAT_P95_US <= 55000`
+  - `PRESENT_GAP_OVER_1S = 0`
+- 공통:
+  - 3초급 정지/프리즈 금지
+  - 입력 채널은 계속 차단(view-only) 유지
+
+## 2) 현재 병목 진단 (코드 근거)
+- Host 전처리 CPU 병목 가능성 높음
+  - `resize_bgra_nearest(...)`: `apps/native_poc/src/native_video_host_main.cpp:259`
+  - `bgra_to_nv12(...)` CPU 변환: `apps/native_poc/src/mf_h264_codec.cpp:590`
+  - 증상: `cb2eAvgUs`가 커지고 `encodedFrames`가 target fps 미달
+- Host 캡처 -> CPU 복사 경로 비용 큼
+  - staging map/copy: `apps/native_poc/src/native_video_host_main.cpp:812`
+- Client 디코드 후 업로드 복사 비용 큼
+  - NV12 텍스처 `Map/Unmap` 복사: `apps/native_poc/src/native_video_client_main.cpp:455`, `apps/native_poc/src/native_video_client_main.cpp:463`
+- 백엔드 고정 불완전
+  - 현재는 AMF direct 일부 + generic MFT 경로 중심
+  - NVENC/QSV 전용 경로 미구현
+- ABR 비활성 프로필 사용 중
+  - `abrDisable: true` in profiles
+  - 네트워크/클라 상태 적응이 꺼져 있음
+- 추가 진단 (2026-02-26 재측정):
+  - `verify-native-video-runtime` 기준 실측에서 `PIPE_US`/`C2E_US` 구간이 약 0.6초대(60만 us)로 고정되어 사용자 체감 지연의 주원인으로 추정.
+  - `CAPTURE_TO_CALLBACK`/`QUEUE_GAP_FRAMES`은 유의미치 않음으로 확인되어, capture/upload/present 경로보다 host 전송 인입 직전 큐잉·인코더 제출 경로 우선 점검 필요.
+  - 추가로 `queuePopUs` 타임스탬프가 `cv.wait_for` 이전에 잡히던 이슈를 발견해 정합성 복구 필요.
+
+## 3) 작업 원칙
+- 한 번에 하나의 변수만 바꾼다.
+- 매 단계 A/B 로그 2개를 남긴다.
+- 체감 개선 없는 튜닝은 즉시 롤백한다.
+- 바이트/압축비 지표를 같이 본다.
+  - host: `rawEquivMbps`, `encRatioX100`
+  - client: `decodedRawMbps`, `decodeRatioX100`
+
+## 4) 마일스톤 체크리스트
+- 현재 최우선 마일스톤: `M1.6 Window capture zero/low-readback pipeline (우선)`
+- 운영 우선순위 고정: `병목 해결 > 기능 확장` (병목 해소 전 M4+는 착수 보류)
+
+### 미완료 항목 빠른 필터 (2026-03-08 자동 검증 대조 기준)
+- 코드 작업 필요:
+  - [x] 감사 P0 Windows Client 검은 화면 (2026-07-31 Host측 해소 `bf19eee`: 새 제어 세션 시 스트림 기본 활성 복원 + UDP 리더 길이 0 데이터그램 내성; 클라이언트 stream-state 호출은 아래 절전 항목으로 강등)
+  - [ ] (P2, 절전) Windows Client stream-state 동기화 — 목록 화면 동안 Host 인코딩 정지 목적 (`list -> target -> viewer` active 요청 및 shared-core 회귀 테스트)
+  - [ ] 감사 P0 Host signed-in UI 재배치 (`잔여 로그인 라벨 제거`, `reachable 상태 잘림 제거`, `GNLink/DPI 레이아웃 통일`)
+  - [ ] M1.6 window capture zero/low-readback pipeline (`callback copy-only`, `worker readback ring`, `GPU-front crop/resize`, `GPU NV12 path`)
+  - [ ] 감사 P1 Windows RTV 캐시 + Android dirty-state/thumbnail refresh (`프레임당 RTV 생성 제거`, `상태 변경분만 UI 갱신`, `썸네일 TTL`)
+  - [x] M8 화질 정확도 보강 (`BT.709 limited 전 경로 통일`, `MF 색상 메타데이터 명시`, `H.264 High profile/level 지정`, `WGC capture border 제거`, `encode size aspect box-fit + 소스 변경 재적합`, `window crop 짝수 정렬`, `GPU 스케일러 colorspace/auto-processing 고정`, `CPU 리사이즈 box prefilter`, `기본 bitrate/keyint/VBV 재설정`, `window list client-rect 보고`)
+  - [x] M8 Windows 클라이언트 UI 품질 (`per-monitor DPI awareness + WM_DPICHANGED`, `Segoe UI 폰트`, `패널 메트릭 DPI 스케일`, `목록 항목 중복 렌더 제거`, `GDI fallback HALFTONE`)
+  - [x] M8.5 전체 재감사 결함 수정 (`encode-refit 디바운스+실패 시 스트림 종료`, `runtime-config nominal 래칫 수정`, `Win32 ANSI/유니코드 혼용 수정(창 제목/WM_CHAR)`, `Android 물리키보드 이중 입력 제거`, `DPI 줄간격`, `h264 level MaxFS 검사`, `VBV 바이트 단위 정정`, `viewer stall 오버레이 복귀`, `configChanges keyboard`, `WebRTC VUI/크로마 시팅/셰이더 영점`)
+  - [x] M8.5 OSLink형 카드 그리드 UI (`thumbnail 프로토콜 35/36 + capability bit`, `host PrintWindow 창별 미리보기`, `Windows 전체창 카드 그리드 홈`, `Android GridView 카드+JNI 썸네일`)
+  - [x] M8 Android 클라이언트 UX 품질 (`전환 로딩 패널`, `connect/targets ScrollView`, `버튼 상태 drawable/ColorStateList`, `ellipsize 보정`, `48dp 터치 타깃`, `adjustResize`, `dp 기반 스크롤 감도`, `MediaCodec low-latency`, `Annex-B tail NAL 수정`, `수정자키/물리 키보드 입력`, `진단 로그 비동기화`, `리스트 변경 시에만 갱신`, `values-ko 분리`)
+  - [x] 런타임 안정성/정확도 결함 보강 (MFT sample release, extended-key 입력, control/capture/queue race, encoder shutdown D3D manager reset, TCP listen socket leak, client overflow/drop/present 타이밍 보정)
+  - [x] D3D capture/scaler 경합 완화 1차 (`capture staging ring`, capture/scaler `Map` memcpy lock shrink, readback timing metrics)
+  - [x] H264 안정성 보강 2026-04-09 (Windows/native: C2 출력 timestamp trust recovery, C3 UDP payload 16MiB cap + oversize log, H1 decoder timestamp queue overflow fast recovery)
+  - [x] H264 안정성 보강 2026-04-09 (Android: C1 oversized codec input drop + codec reset, H2 CSD pointer invariant assert + debug status counter)
+  - [x] M4 AMD 기본화/안정화 마무리 (`mft_auto`에서 AMF 인코더 우선 선택 + opt-out env 지원)
+  - [x] M6 FEC/NACK/RTX 중 채택안 설계 + 구현(채택 시, 최소 NACK 경로 채택)
+  - [x] native window GUI parity v1 (`Desktop Mode`/window list/선택 상태/native window-target 입력/touch 단일포인터 + 제목 렌더/키입력 1차 보강 + home picker/Targets 토글 + static home scene`)
+  - [x] Windows/Android viewer aspect-fit parity (`selectedWidth/selectedHeight` shared snapshot, Windows letterbox + input rect sync, Android selection-time TextureView content hint)
+  - [x] Android Phase D surface buffer rebind + shell viewport 확장 (`nativeGetVideoSizePacked`, `TextureView.setDefaultBufferSize`, LDPlayer2 `view=928x86 -> 936x254`)
+  - [x] Android Phase D full-frame 렌더 보정 (`selected-window path`, `bind video surface buffer=1234x720`, viewer screenshot 확인)
+  - [x] Android Phase E session/JNI 제어 브리지 추가 (`window list snapshot`, `refresh/select`, `Desktop Mode` 요청)
+  - [x] Android Phase E 레퍼런스 탭 UI 1차 구현 (`LD플레이어/디바이스` 탭, `Desktop Mode`, Spinner 기반 window list/select 상태)
+  - [x] Android Phase E connected compact mode (`Show Panel` toolbar, connected viewport `936x172 -> 936x310`)
+  - [x] Android Phase E scene split (`connect -> targets -> viewer`, hidden back button)
+  - [x] Android/host recursive target filter (`textinputhost.exe` 제외 + current Android client LDPlayer PID만 window list에서 제외)
+  - [x] Android/host window-capture stall false-positive 완화 (`capture-input-stall` low-push restart를 window capture mode에서 비활성화)
+  - [x] Android endpoint persistence (`host/videoPort/controlPort` SharedPreferences 저장/복원)
+  - [x] Android diagnostics log file (`android_direct_client_session.log`, scene/status/video stall 기록)
+  - [x] Android second-selection re-entry guard (`window_select_requested` ack 후 viewer 전환 + decoder reset)
+  - [x] Android/host selection switch hardening (`request -> ack -> first-frame -> viewer`, stream generation gating, viewer stall auto-recover)
+  - [x] Android settings tab + runtime quality control (`Windows/Desktop/Settings`, host bitrate/fps + desktop backend runtime apply, performance default=`DXGI`, WGC/GDI 수동 선택 유지)
+  - [x] GDI capture worker 프로세스 격리 (`3-slot shared memory latest-wins`, `Job Object parent-close`, crash/저속 WGC fallback, Android backend selector)
+  - [x] Android viewer 입력 미리보기 (`IME composing/commit/backspace`, 물리·가상 키 동기화, 왼쪽 위 단일행 말풍선)
+  - [x] AMD-safe decoder 기본 경로 (`DXGI device manager/direct surface opt-in`, 기본 system-memory MFT 출력)
+  - [x] UDP IDR 저지연 pacing (`일반 프레임 pacing 유지`, 키프레임 100Mbps floor로 sender 재동기 루프 완화)
+  - [x] 1080p60 제품 pacing 보정 (`고해상도 deadline wait`, phase drift 제거, 50fps 이상 +4fps 내부 headroom, motion 이중 rate-limit 제거, Above Normal scheduler`)
+  - [x] Android settings persistence + viewer-only host streaming (saved bitrate/fps/desktop backend auto-apply on connect, list scene에서는 host stream stop)
+  - [x] Android fullscreen/back/rotation polish (`immersive fullscreen`, system back `viewer -> list`, connect/targets exit confirm, orientation recreate 방지)
+  - [x] Android LDPlayer 수동 검증 2차 (`connect scene fullscreen`, `targets exit dialog`, `system back -> list`, `connect exit dialog`)
+  - [x] Host stream-inactive stall guard (list scene stream stop 시 capture-input-stall restart loop 차단)
+  - [x] Host desktop DXGI stall false-positive 완화 (`desktop + dxgi` path에서는 low-push `capture-input-stall` restart 비활성화)
+  - [x] DXGI fullscreen/desktop 전환 복구 (`ACCESS_LOST` 폴백을 stream-inactive보다 먼저 처리, 재시작 실패 retry)
+  - [x] 30fps 균일 cadence 보강 (`MFT 입력 timestamp FIFO`, callback-clocked encode, sender cadence, Android fixed-cadence playout)
+  - [x] UDP 손실 화질 복구 (`8+1 XOR FEC`, 3-frame reorder assembly, discontinuity decoder reset + 즉시 IDR 요청)
+  - [x] 원격 접근/보안 데스크톱 입력 (`SYSTEM_REQUIRED`, stream display wake, 관리자 host manifest, SYSTEM input agent`)
+  - [x] Stream/list roundtrip ordering fix (`stream-state`를 `window-select`보다 먼저 전송, list 복귀 시 window list 재요청)
+  - [x] LDPlayer direct deploy re-verify (`Connect -> Windows list -> select -> viewer -> LIST -> list` 실제 재확인)
+- 검증/판정 필요 (코드 구현 완료 또는 부분 완료):
+  - [ ] M1.6 window capture zero/low-readback interactive/localhost 검증 (`captureD3DWaitUs`, `captureCopyMapUs`, `captureMemcpyUs`, `cb2eAvgUs`, drag 체감/텍스트 화질 A/B`)
+  - [x] Android direct timestamp/QPC overflow 1차 코드 반영 (`qpc_now_us` overflow-safe 변환, Android decoder local-monotonic PTS rebase, selection generation first-keyframe gate`)
+  - [x] Android direct timestamp/QPC overflow LDPlayer desktop closeout (`desktop select`, `select_ready`, `video_debug in=2 out=2`, local PTS rebase/bootstrap replay 확인)
+  - [x] Android direct window-select host restart closeout (`CreateTexture2D` failure hr logging + D3D device recreate retry, LDPlayer window select viewer 진입 확인)
+  - [ ] D3D capture/scaler 경합 완화 1차 interactive 검증 (`non-ShellWindow` capture source에서 `captureD3DWaitUs`/`scaleD3DWaitUs` 로그와 buffering 체감 확인)
+  - [x] H264 안정성 보강 2026-04-09 Windows 검증 (`remote60_native_video_*` Debug build, `shared_core_test` PASS, localhost Gate A smoke PASS)
+  - [ ] H264 안정성 보강 2026-04-09 Android 검증 (`Android Studio :app:assembleDebug`, oversized input log/drop, `connect -> select -> viewer` 1회)
+  - [x] M3.5 background 입력 주입 자동 지표 검증
+  - [ ] M3.5 background 입력 주입 1차 수동 검증 (`LDPlayer` desktop click pass, `DEL/SPACE/ENTER` fallback patch 반영 후 런타임 재확인 pending)
+  - [x] M4 backend auto/fallback 로그 검증 (AMD 로컬 단일장비)
+  - [x] M4 backend auto/fallback 로그 + 성능 완료조건 검증 (AMD 단일장비에서 요청별 fallback + `amf_hw vs mft_hw` 2개 지표 개선 확인)
+  - [x] M5 정적 장면 MBPS 절감 검증
+  - [x] M5 frame gating 완료조건 검증(`MBPS_AVG`, 화질/응답성)
+  - [x] GDI 격리 Release 검증 (`57.9986fps`, parent-copy p95 `1.659ms`, process test PASS)
+  - [x] Android 입력 미리보기 LDPlayer 시각 검증 (`preview-verified.png`, host 입력 이벤트 확인)
+  - [x] AMD-safe 경로 반복 부하 검증 (수정 후 `atidxx64`/Display/LiveKernelEvent 신규 0건)
+  - [ ] 1080p60 동시부하 Gate A 처리량 완료 (`OSLink 동시 실행 WGC DEC_AVG=50.11`, 목표 54fps)
+  - [x] OSLink 스트림 종료 후 1080p60 DXGI 제품형 Gate (`DEC_AVG=57.89~58.67` 3/3 PASS, 기본 DXGI 최종 런 워밍업 포함 `59.78fps`, AMD 신규 오류 0건)
+  - [x] Android 설치용 Release APK dist 출력 (`RelWithDebInfo` 4 ABI, `debuggable=false`, V3 서명 검증, `gnlink-android-20260803-release.apk`)
+  - [x] 1080p30 4Mbps Release cadence Gate (`DEC_AVG=28.64`, 안정구간 평균 `29.25fps`, overwrite/loss 0, Gate A/M7 PASS)
+  - [x] Directory capability 연결 안정화 (`peer Punch 즉시 heartbeat wake`, 인증 Hello 재전송, hairpin NAT endpoint 변환 허용)
+  - [ ] 최신 제품 host/LDPlayer 보안 데스크톱 실기 검증 (`capability race 수정 Release 교체·재연결 필요)
+- 검증 전용(추가 코드 작업 없음):
+  - [x] 2026-07-30 Host/Client 최적화·UI 상세 구현계획 작성 (`docs/Host_Client_최적화_UI_상세계획_20260730.md`, F1/U1/B1/H1~H4/C1~C2/A1~A2/U2/S1~S2/G1)
+  - [x] 2026-07-31 상세계획 2·3차 코드 검증·정정 (`Q1` 추가, A1 씬별 JNI 9/9/8 재정정 및 inactive-scene renderer 차단 계획 반영)
+  - [x] 2026-07-31 U1 Host signed-in UI 수정 (상태별 레이아웃 분리, DPI 대응, GNLink Host 브랜딩·아이콘, 자식 로그 파일+Open log, history 204)
+  - [x] 2026-07-31 B1 격리 Release 기준선 인프라 + 1차/Q1후 기준선 수집 (history 205, 209)
+  - [x] 2026-07-31 Q1-1 visible aperture, Q1-2 rate-control/pacing 동기화, Q1-3 tune=low_latency 확정 (history 206~208)
+  - [x] 2026-07-31 H1 비동기 readback ring (Host CPU -12.9%, 콜백 -87%), H2 GPU-front crop/resize (720p Host CPU -21.6%) (history 210, 211)
+  - [x] 2026-07-31 H3 zero-copy NV12 surface encode 구현 (opt-in REMOTE60_NATIVE_NV12_SURFACE, 활성화 A/B는 재부팅 후) (history 212)
+  - [x] 2026-07-31 C1 Client RTV/썸네일락/GDI 캐시 (Client CPU -18.6%) + F1 절전 배선 (history 213)
+  - [x] 2026-07-31 A1 1단계 scene-scoped renderer + adaptive poll (history 214)
+  - [x] 2026-07-31 (재부팅 후) H3 최종 판정: AMF iGPU에서 DXGI 표면 경로가 느림+TDR 유발 확정, 자동 속도 프로브 폴백 추가, opt-in 유지 (history 216~217)
+  - [x] 2026-07-31 H4 전송 스레드 분리: 1080p scroll 22.3~23.4 → 26.1~26.6fps(+14%), LAT p95 0.8~5.2ms (history 218)
+  - [ ] 보류: F1 실측, A1 2단계, A2, U2 잔여, S1, S2, G1 - 사유와 순서는 history 215
+  - [x] 2026-07-30 Host/Client 성능·UI 전수 감사 및 우선순위 문서화 (`docs/Host_Client_최적화_UI_감사_20260730.md`)
+  - [x] 버퍼링/GPU 경합 분석 검토 문서화 (`docs/버퍼링_GPU경합_검토_20260409.md`, capture/scaler 경합은 인정, encoder mutex direct contention은 비인정)
+  - [x] Android 최신 debug APK rebuild + visible host manual-test prep (`app-debug.apk` 2026-04-10 재빌드, host visible PowerShell launch)
+  - [x] visible DXGI host wrapper 고정 (`automation/host_dxgi.ps1`, config-first 경로로 input/control on 유지)
+  - [x] 장시간 루프백 재검증 (`720p30`/`1080p30`, 각 60초, `mft_auto`, `h264NoPacing=1`, `frameGatingDisable=1`, `ABR_DISABLE=1`)
+  - [x] 외부 2PC 테스트 준비물 정리 (native/web 각 external bundle + quickstart 포함, native는 minimal single-folder bundle + one-command host/client wrapper 포함, 기본 smoke profile은 fixed 30fps, 최신 native 2PC GUI profile은 input/control on)
+  - [x] M7 1080p30/720p30 Pass 로그 5회 확보 (현재 1080: 5/5, 720: 5/5)
+  - [x] M7 실패 케이스/회귀 로그 정리 (스모크/튜닝 8건 수집 + 자동 판정 아이콘 출력 추가)
+  - [x] M7 기본 실행 프로필 확정 (`1080p: 8Mbps/keyint30`, `720p: 5Mbps/keyint60`, 공통 `h264NoPacing=1`, `frameGatingDisable=1`)
+  - [x] Android direct client 구현계획 분리 문서화 (`docs/android_구현계획.md`, 공용 client core 재사용/단계별 gate 정의)
+  - [x] Android 공용 client core 1차 추출 착수 (`native_video_client_shared_core.*`, input queue/window panel/keyframe limiter 분리)
+  - [x] Android 공용 client control state 2차 추출 (`capture mode request`, `runtime tune state`를 shared core로 이동)
+  - [x] Android 공용 control scheduler + 테스트 추가 (`ClientControlScheduler`, `shared core test exe`)
+  - [x] Android 공용 UDP assembly helper 추가 (`UdpH264FrameAssembler`, localhost smoke 재실행)
+  - [x] Android 공용 TCP control adapter helper 분리 (`native_video_client_tcp_control.*`, send/recv/typed-response 분리)
+  - [x] Android/Gate A localhost 검증 프로필 고정 (`-GateAProfile`, `frameGatingDisable=1`, `ABR_DISABLE=1`, `h264NoPacing=1`)
+  - [x] Gate A capture source 진단 추가 (`HOST_CAPTURE_SOURCE_LAST`, `GATE_A_SHELLWINDOW_FALLBACK_DETECTED`)
+  - [x] Gate A shell fallback 재시도 추가 (`-GateAProfile`에서 `ShellWindow + decoded=0`이면 자동 재시도)
+  - [x] Android Phase C 앱 셸 최소 골격 추가 (`apps/android_direct_client`, Kotlin UI + JNI stub)
+  - [x] Android Phase C shared session controller 연결 (`native_video_client_session.*`, JNI가 공용 controller 사용)
+  - [x] Android Phase C session controller probe 연결 (`TCP control + UDP hello` 최소 네트워크 probe)
+  - [x] Android LDPlayer2 build/install/launch smoke (`assembleDebug`, `adb install`, launch, connect/disconnect UI 확인)
+  - [x] Android Phase C real session lifecycle wiring (`ClientSessionController` async worker, control loop, window list summary, `ClientEncodedFrameSink` placeholder)
+  - [x] Android LDPlayer2 real session state 검증 (`INTERNET` 권한, polling UI, `connecting -> connected/error -> disconnected`)
+  - [x] Android Phase D UDP receive + decoder wiring (`UDP hello -> TCP retry`, video receive thread, `SurfaceView + MediaCodec`)
+  - [x] Android LDPlayer2 real host decode path 검증 (host control attach, `MediaCodec started`, output release, disconnect/error 재확인)
+  - [x] Android TextureView 렌더 가시화 디버깅 (`SurfaceView` -> `TextureView`, screenshot에서도 video content 일부 확인)
+  - [x] Android decoder debug 상태 UI 노출 (`surface/codec/csd/in/out`)
+  - [x] Android 목표 UI 레퍼런스/탭 의미 문서화 (`image/...webp`, `LD플레이어`=각 윈도우별 화면, `디바이스`=각 모니터 화면, 예시용 화면)
+  - [x] Android Phase D final visual verify (`scene_window_viewer.png`, `bind video surface buffer=1234x720`, actual content screenshot)
+  - [x] Android Phase E live control verify (`scene_connect -> scene_targets -> scene_window_viewer -> scene_back_to_list`, host/UI 상태 반영)
+  - [x] Desktop full-screen DXGI backend split + env toggle/fallback wiring (`REMOTE60_DESKTOP_CAPTURE_BACKEND`, `apps/host` + `apps/native_poc`, window mode WGC 유지)
+  - [ ] Android desktop-mode valid capture source verify (`desktop` path에서 `GetShellWindow()` fallback 없는 환경 재검증)
+  - [x] LDPlayer2 desktop DXGI live verify (콘솔 세션에서 `desktop_backend=dxgi capture=1920x1080 capture-started=1` fallback 없이 성공 확인. 기존 `dxgi_no_output_found`는 코드 결함이 아니라 RDP 세션 제약으로 확정)
+  - [ ] Android long-run repeat verify (`targets -> viewer -> back` 반복 10회 이상 soak`)
+  - [ ] Android client-instance exclude automation (`REMOTE60_NATIVE_WINDOWLIST_EXCLUDE_PIDS`를 current emulator instance와 자동 동기화)
+  - [ ] Android Phase F 착수 Gate 검증 (`full-frame video`, `window select`, `background/foreground resume` 실기기 재확인)
+  - [x] Android Phase F touch input bridge 1차 (`TextureView` tap/drag -> existing control input queue, scene 전환/취소 시 release guard)
+  - [x] Android Phase F keyboard/text bridge 1차 (`viewer` auto-dim control bar + keyboard button + hidden IME capture -> existing UTF-16 text queue)
+  - [x] Android Phase F viewer utility controls (`SCROLL` hold -> fixed-point wheel drag, `LOG` 반투명 전체 로그 오버레이, Android local build/temp ignore 보강)
+  - [ ] Android Phase F tap/drag runtime verify (`Desktop Mode`, selected-window mode 실기기 확인)
+  - [ ] Android Phase F soft keyboard runtime verify (`keyboard button` + `IME served view` pass on `LDPlayer`, `DEL/SPACE/ENTER` patch 반영 후 runtime pending)
+  - [x] M8 인코더 프로파일 A/B 검증 (`HEAD 베이스라인 worktree` 대비 `sps profile_idc=77(main) -> 100(high)`, 동일 조건 `OVERALL_OK=True`, 처리량 동등 이상)
+  - [ ] M8 색상 정확도 육안 검증 (컬러바 기준 host 원본 vs Android 뷰어 나란히 캡처 비교)
+  - [ ] M8 Android UI 실기기 검증 (`전환 로딩 패널`, `가로 모드 스크롤`, `버튼 비활성 시각 구분`, `물리 키보드 입력`)
+  - [ ] M8 물리 디스플레이 세션에서 `GATE_A_DECODED_FPS_OK` 재측정 (현재 원격/헤드리스 세션은 WGC 콜백이 초당 수 프레임으로 제한되어 baseline도 동일 실패)
+
+## M0. 측정 기준 고정 (Gate)
+- [x] `verify_native_video_runtime.ps1`에 압축비 지표 집계 추가
+- [x] host/client 로그에 raw/encoded/decoded 크기 지표 추가
+- [x] `static / scroll / video` 3장면 측정 스크립트 추가 (`automation/verify_native_video_scene_suite.ps1`)
+- [x] `verify_native_video_runtime.ps1` StrictMode 타입 안전화(`hostUserFeedbackTopEntries` 단일 객체/배열 정합)
+  - 완료조건:
+    - 3장면 모두에서 동일 파라미터로 반복 측정 가능
+    - 로그 디렉터리 1회 실행당 3세트 생성
+
+## M1. Host 전처리 가속 (가장 우선)
+- [x] `resize_bgra_nearest`를 bilinear로 교체 (가독성 + alias 감소)
+- [x] 가능하면 스케일링을 GPU 경로로 이전 (D3D11)
+- [x] `bgra_to_nv12` CPU 루프 최적화 또는 GPU 변환 경로 추가
+- 상태:
+  - 현재 `c2e/encQueue` 지연으로 가시 범위가 이동했으나, M1 항목은 1080p Gate 충족 검증용으로 유지.
+- 완료조건:
+  - 1080p30에서 `cb2eAvgUs` 20% 이상 감소
+  - `encodedFrames`가 27 이상 유지
+  - 화질(텍스트) 주관평가 악화 없음
+
+## M1.5. D3D capture/scaler 경합 완화 (2026-04-10)
+- 코드 작업:
+  - [x] capture callback readback staging을 single texture에서 safe slot ring으로 전환
+  - [x] capture callback `CopyResource -> Map`와 `Unmap`만 `d3dContextMu` 안에 두고 row memcpy는 lock 밖으로 이동
+  - [x] `GpuBgraScaler`도 동일하게 `Map` memcpy 구간을 lock 밖으로 이동
+  - [x] host trace/user-feedback와 verify parser에 `captureD3DWaitUs`, `captureCopyMapUs`, `captureMemcpyUs`, `scaleD3DWaitUs`, `scaleCopyMapUs`, `scaleMemcpyUs` 계측 추가
+- 검증:
+  - [x] `cmake --build D:\remote\remote\build-vcpkg-local --config Debug --target remote60_native_video_host_poc remote60_native_video_client_poc remote60_native_video_client_shared_core_test`
+  - [x] `D:\remote\remote\build-vcpkg-local\apps\native_poc\Debug\remote60_native_video_client_shared_core_test.exe` PASS
+  - [ ] interactive localhost smoke (`capture-window` target 또는 monitor capture가 실제 callback을 생성하는 세션에서 재검증)
+
+## M1.6. Window capture zero/low-readback pipeline (2026-04-16)
+- 코드 작업:
+  - [ ] M1.6-1 capture callback에서 `CopyResource`만 수행하고 `Map/readback`은 별도 worker/staging ring consumer로 분리
+  - [ ] M1.6-2 window client crop을 readback 이후 CPU crop이 아니라 GPU source rect/capture front단으로 이동
+  - [ ] M1.6-3 resize를 CPU 뒤가 아니라 GPU front단에서 처리해 readback 바이트 수를 축소
+  - [ ] M1.6-4 `BGRA -> NV12`를 CPU 변환 대신 GPU/NV12 입력 경로로 바꿔 resize 시 두 번째 readback 제거
+- 검증:
+  - [ ] 단계별 localhost smoke 3회 (`window capture` 기준 `captureD3DWaitUs`, `captureCopyMapUs`, `captureMemcpyUs`, `cb2eAvgUs` 비교)
+  - [ ] interactive drag/move 체감 비교 (`window 이동/리사이즈 중 host 대상 앱 hitch 감소` 확인)
+  - [ ] text/scroll 품질 회귀 없음 확인 (`PRESENT_GAP_OVER_1S=0`, 목표 fps 유지, 텍스트 가독성 유지)
+- 완료조건:
+  - [ ] window capture 기준 `captureMemcpyAvgUs` 또는 `cb2eAvgUs` 20% 이상 개선
+  - [ ] resize 경로에서 CPU readback 2회 구조 제거
+  - [ ] 체감 hitch 개선이 없으면 단계별 롤백 가능 상태 유지
+
+## M2. Client 표시 경로 가속
+- [x] 디코드 결과 -> 렌더 텍스처 업로드 복사량 최적화
+- [x] D3D 경로 실패 시 GDI fallback 비율/원인 로그화
+- [x] present 스레드와 decode 스레드 간 병목 추적 필드 추가
+- M2 2차 적용(2026-02-25, `M2 2차`):
+  - `apps/native_poc/src/native_video_client_main.cpp`에서 NV12 업로드 경로를 `RowPitch == width`이면 단일 `memcpy`로, 아니면 기존 per-row 복사로 분기.
+  - 업로드 단계 계측(Upload Y/UV, Draw, PresentBlock) 및 render-path/fallback 사유가 `verify_native_video_runtime.ps1` 집계로 연결됨.
+  - `M2 1차`(계측 강화) 항목은 유지.
+  - 판정:
+    - 현재 체감 지연(0.5s+)의 주원인이 host 쪽 큐잉/인코더 제출로 판단되어 M2는 구현 마무리 상태로 간주.
+  - 완료조건:
+    - 1080p30에서 `decodedFrames` 27 이상
+    - `avgDecodeTailUs` 20% 이상 감소
+
+## M2.5. Host 인코더 큐/제출 병목 정밀 추적 (우선)
+- [x] `capture -> encode` 경로 타임스탬프 6분할(`capture`, `queuePush`, `queuePop`, `encBegin`, `encEnd`, `send`) 계측
+- [x] `capture->queue`/`queuePop` 구간 + send 시작/완료/지연 항목 host 사용자 피드백 로그 반영
+- [x] `verify_native_video_runtime.ps1` host 사용자 피드백 파서에 `queueDepth`, `queueWaitUs`, `sendDurUs` 지표 추가
+- [x] `queuePopUs` 산출 시점을 큐 웨이크 직후로 교정(선택 대기 정합성 복구)
+- [x] `queueWaitTimeoutCount`/`queueWaitNoWorkCount`로 큐 대기 원인 분해 집계 추가
+- [x] `encQueue` 및 `c2e` 하위 지연 분해(`queueToEncodeUs`, `queueToSendUs`) 추가
+- [x] `HOST_BOTTLENECK_STAGE` 후보에 `queueSelectWaitUs`, `queueToEncodeUs`, `queueToSendUs` 반영
+- [x] `verify_native_video_runtime.ps1`에 `queuePushCount/queuePopCount/SkippedByOverwrite` 상위 요약 반영
+- [x] `verify_native_video_runtime.ps1` host 사용자 피드백 파서가 `[trace]`/`[user-feedback]`를 모두 집계하도록 정합성 보강
+- [x] host trace/user-feedback에 `frameCaptureUs`(큐 캡처 시각)와 `auCaptureUs`(인코더 AU 시간) 분리 로그 및 `captureToAuSkewUs` 추가
+- [x] `captureToAuSkewUs` 20회 재측정 반영:
+  - `captureToAuSkewUs` 평균 `578,147.5`us
+  - `captureToAuSkewCount` 총합 `199`
+  - `HOST_QUEUE_WAIT_TIMEOUT_COUNT`/`HOST_QUEUE_WAIT_NOWORK_COUNT` 전부 `0`
+- [x] `CAPTURE_TO_AU_SKEW` 원인 분해 액션 적용 (AU timebase 정합성/샘플 타임 처리 경로 고정)
+  - 적용 내역:
+    - `EncodedFrameHeader.captureQpcUs`를 `encodeInputUs(=captureStampUs)`로 고정.
+    - `encodeInputUs`를 로그에 노출해 AU timestamp 정합성 분석 경로 분리.
+    - `captureToAuSkewUs`/`captureToAuUs` 계산 기준을 `encodeInputUs`로 통일.
+- [x] `captureToAuTimelineSkewUs` 추가로 `capture`/`AU` 상대시간 정렬 오차를 분리
+  - 적용 내역:
+    - `captureTimelineOriginUs`/`auTimelineOriginUs` 기반으로 상대 오차를 계산해 로그 출력.
+    - `captureToAuSkewUs` 병목 오염을 줄이기 위해 `encQueueAlignedUs`를 함께 출력.
+    - `verify_native_video_runtime.ps1` 병목 후보 목록에서 raw `captureToAuSkewUs`는 제외하고 `captureToAuTimelineSkewUs`를 우선 반영.
+- [x] 엔코더 재초기화/타임라인 기준점 분리 로그 반영
+  - `captureTimelineOriginUs`/`auTimelineOriginUs`를 reset 가능한 host state로 추적.
+  - `host` trace/user-feedback에 `captureTimelineRelativeUs`, `auTimelineRelativeUs`, `captureToAuTimelineDeltaUs`를 함께 출력.
+  - `verify_native_video_runtime.ps1` top3 host summary에 timeline origin/relative 항목을 추가해 재초기화 구간 인과분해 강화.
+- [x] TraceEvery=1에서 큐/인코드 세부 지연 재측정(6회):
+  - `QUEUE_TO_ENCODE`/`QUEUE_TO_SEND`는 평균 수십 ms
+  - `QUEUE_WAIT` 계열은 평균 10~20ms
+  - 사용자 `PIPE_US` 경보 임계 미달 구간이 다수라 기존 통계가 0으로 집계되는 현상 확인.
+- [x] `ENCODER` API 경로별(AMF/MFT/NVENC/QSV) 지연/대기 분기 추가
+  - 반영 내역(2026-03-02):
+    - host `trace/user-feedback`에 `encApiPathCode`, `encApiHw`, `encApiInputUs`, `encApiDrainUs`,
+      `encApiNotAcceptingCount`, `encApiNeedMoreInputCount`, `encApiStreamChangeCount`,
+      `encApiOutputErrorCount`, `encApiAsync*` 지표 추가.
+    - `verify_native_video_runtime.ps1`에서 API path code 집계(`HOST_ENC_API_PATH_CODE_*`) 및
+      `USER_FEEDBACK_UF_H_ENCAPI*` 요약 출력 추가.
+    - 실측 검증에서 `mft_hw` 조건 `HOST_ENC_API_PATH_CODE_4_MFT_COUNT` 집계 확인.
+- [x] AU timestamp 출처(`sampleTimeFromOutput`) + `captureToAuTimelineSkewUs` 기반 병목 분해 강화
+  - host/user-feedback/top3에 `AU_TS_FROM_OUTPUT`, `AU_TS_SKEW_US` 추가
+- [x] 호스트 send 패스 분해
+  - `sendHeaderUs`, `sendPayloadUs`, `sendCallCount`, `sendPayloadCallCount`, `sendChunkCount`, `sendChunkMaxUs` 로그/집계 추가
+  - `verify_native_video_runtime.ps1`에서 send 분해 지표를 호스트 병목 후보 및 TOP3에 반영
+- [x] send 패스 병목과 큐/스레드 스케줄링 경합 분해
+  - `sendIntervalUs`, `sendIntervalErrUs` 추가(`sendStart` 기준 전 프레임 간격/편차)로 스케줄러 스텝 지연 분리
+  - `queueToSendUs`가 커질 때와 `sendInterval` 편차 상관관계 동시 집계
+- [x] host 대기 구간 분류코드(`queueWaitReason`)를 trace/user-feedback/top 모두 반영
+  - `queueWaitReason`: 0=정상 pop, 1=타임아웃, 2=no-work로 분류
+  - 파서 출력에 분류별 개수(`HOST_QUEUE_WAIT_REASON_*_COUNT`)와 top entry (`USER_FEEDBACK_HOST_TOP*_QUEUE_WAIT_REASON`) 추가
+- [x] MF H264 인코더 async 이벤트 폴링 축소/비동기화 제어 액션:
+  - 기본 토글: `REMOTE60_NATIVE_H264_ASYNC_POLL_MAX` (기본 1), `REMOTE60_NATIVE_H264_ASYNC_POLL_SLEEP_US` (기본 0)
+  - 목표: `sendDoneUs`에서 `queueToSend`/`queueToEncode` 측면 대기요소 추정값 추가 감소
+  - 재측정 결과(2026-03-02):
+    - `async poll max=4` 조합은 현재 실측 조건(FHD/HW)에서 `LAT_P95_US` 악화 경향 확인.
+    - 기본값은 `MAX=1`, `SLEEP_US=0` 유지로 확정.
+- 완료조건:
+  - `PIPE_US`/`C2E_US`의 병목 하위 원인을 재현성 있게 고정
+  - 20회 재측정에서 `PIPE_US`/`C2E_US` 95퍼센타일 30% 이상 개선
+
+## M3. Adaptive 정책 재정의 (품질 유지형)
+- [x] ABR를 "품질 유지형"으로 설정 가능한 토글 추가 (`REMOTE60_NATIVE_ADAPTIVE_QUALITY_FIRST`)
+- [x] 프로필 전환 조건에 `decoded fps + latency + tail` 동시 사용
+- [x] host fallback/감쇠 조건 및 hysteresis/쿨다운을 `quality-first` 기준으로 분리
+  - [x] M3 종료 판정 완료
+  - 완료조건:
+    - 일반 작업(문서 스크롤)에서 1080 유지시간 증가
+    - 프리즈 없이 `LAT_P95_US` 목표 내 유지
+  - 현재 상태:
+    - 구현/기능 반영 + 종료 판정 완료.
+  - 종료 판정 근거(2026-03-02, OFF/ON 각 20회):
+    - `quality_first_off`: `LAT_P95_US_AVG=55022.8`
+    - `quality_first_on`: `LAT_P95_US_AVG=35499.05`
+    - 두 변형 모두 `OVERALL_OK=20/20`, `ABR_SWITCH_COUNT_AVG=0`
+  - 결론:
+    - 현재 기본 운영은 `quality-first=on` 유지.
+
+## M3.5. Background 입력 주입 (최우선)
+- 코드 작업:
+  - [x] 입력 주입 모드 `background_message` 추가 (`SendInput`/`SetCursorPos` 금지)
+  - [x] 마우스 포인터 비이동 보장(실제 OS 커서 위치/이동 미변경)
+  - [x] 클릭/드래그/키보드 입력 이벤트만 주입(마우스 이동 단독 이벤트 기본 미주입)
+  - [x] 가려진 윈도우 포함 지정 타겟 HWND 직접 입력 주입 경로 구현
+  - [x] 입력 polish 1차: drag capture/release 보강 + syskey 전달 + modifier-aware `WM_CHAR`
+  - [x] 입력 polish 2차: desktop mode top-level routing + committed text/IME 분리
+  - [x] desktop mode mouse path를 real OS cursor/click/wheel/drag로 분리 (`SetCursorPos`/`SendInput`, window mode `background_message` 유지)
+  - [x] JSON 설정 추가:
+    - `enableInputInjection`
+    - `inputInjectionMode=background_message`
+    - `inputTargetProcess` / `inputTargetTitle`
+  - [x] native host 기본값을 `enableInputInjection=true`로 전환해 direct exe/manual launch에서도 입력 채널이 기본 활성화되도록 고정
+  - [x] 검증 보조 스크립트 추가: `automation/validate_background_input_injection.ps1`
+  - [x] 수동확인 대기항목 통합 문서화: `docs/수동확인_체크리스트.md`
+- 검증:
+  - [x] 자동 검증 시나리오:
+    - `validate_background_input_injection.ps1` AUTO_PASS=1 확인
+    - host 지표 `inputEvents>0`, `inputNoTarget==0`, `inputInjectFail==0` 확인
+  - [ ] 1차 검증 시나리오:
+    - 백그라운드 Notepad 대상 클릭/드래그/키입력 동작 확인
+    - 실제 OS 마우스 포인터 비이동 확인
+    - 대상 창 occluded 상태에서도 입력 반영 확인
+
+## M4. HW 백엔드 고정 완성
+- 코드 작업:
+  - [x] AMD AMF 전용 backend 진입 경로(`amf_hw`/`amf_mft`) 구현
+  - [x] AMD: AMF 경로 안정화/기본화
+  - [x] NVIDIA: NVENC 전용 경로 추가
+  - [x] Intel: QSV 전용 경로 추가
+  - [x] 백엔드 자동 선택 + 실패 시 폴백 로그 골격(`mft_auto/hw/sw`, `*_unavailable`, host backend 로그) 반영
+- 검증:
+  - [x] AMD 로컬 단일장비 자동 검증:
+    - `mft_auto`, `nvenc_hw`, `qsv_hw`, `amf_hw` 요청별 requested/resolved/fallback 로그 확인
+    - `nvenc_hw/qsv_hw -> mft_enum_hw (requested_backend_unavailable)` 확인
+    - `amf_hw -> amf_mft_h264enc (fallbackReason=none)` 확인
+  - [x] AMD/NVIDIA/Intel별 backend 고정 표기 + fallback 동작 실측 검증 (AMD 단일장비에서 `amf_hw` 고정, `nvenc_hw/qsv_hw`의 `requested_backend_unavailable -> mft_enum_hw` fallback 경로 검증 완료)
+  - [x] 동일 장면에서 generic MFT 대비 fps/latency/mbps 중 2개 이상 개선 검증 (`1080p 6Mbps keyint60`: `amf_hw`가 `DEC_AVG`/`LAT_P95_US` 2개 지표 개선)
+  - 완료조건:
+    - 백엔드가 로그에 명확히 고정 표기됨
+    - 동일 장면에서 generic MFT 대비 fps/latency/mbps 중 2개 이상 개선
+
+## M5. Frame gating (화질 유지 + 트래픽 절감 핵심)
+- 코드 작업:
+  - [x] 변경량이 작은 프레임은 인코딩/전송 스킵
+  - [x] 정적 장면에서 fps downshift, 움직임 시 즉시 복귀
+  - [x] keyframe 요청 폭주 방지(토큰버킷/간격 제한) 재도입
+  - [x] static callback idle 시 synthetic keepalive re-encode 제거 + last decoded frame hold observability 추가
+- 검증:
+  - [x] 정적 장면 `MBPS_AVG` 30% 이상 감소
+  - [x] 텍스트 화질/응답성 악화 없음 (자동 proxy: 720p/1080p gating on/off 5회, `PRESENT_GAP_OVER_1S=0` 유지 + `M7_SUCCESS` 5/5 유지)
+  - 완료조건:
+    - 정적 장면 `MBPS_AVG` 30% 이상 감소
+    - 텍스트 화질/응답성 악화 없음
+
+## M6. 전송 레이어 안정화
+- 코드 작업:
+  - [x] UDP chunk 손실 추적 고도화(장면별 drop rate)
+  - [x] keyframe 복구 정책과 catchup 정책 충돌 제거
+  - [x] (조건부) 최소 FEC 또는 NACK/RTX 채택안 구현(채택안: assembly-drop 지속 keyframe NACK 요청)
+- 검증/설계:
+  - [x] FEC/NACK/RTX 필요성 판정(손실 패턴/복구시간 기준)
+  - [x] 채택안 적용 시 `PRESENT_GAP_OVER_1S=0` 유지 + 손실 구간 복구시간 단축 검증 (drop 5% 장기런에서 기본 정책 `DECODE_RECOVERY_AVG_SEC=0` vs 제한정책 `0.333`)
+  - 완료조건:
+    - `PRESENT_GAP_OVER_1S=0` 유지
+    - 손실 구간 복구시간 단축
+
+## M6.5. H264 안정성 보강 (2026-04-09)
+- 코드 작업:
+  - [x] Windows/native C2: MFT encoder output timestamp trust recovery (`50ms` skew guard 유지, `8회` 연속 정상 offset 시 trust 복구)
+  - [x] Windows/native C3: `UdpH264FrameAssembler` payload `16MiB` 상한 + oversize drop 진단 필드/로그 추가
+  - [x] Windows/native H1: decoder pending timestamp queue overflow를 caller signal + keyframe/reset recovery로 전환
+  - [x] Android C1: oversized `MediaCodec` input frame을 empty queue 대신 log + drop + codec reset으로 처리
+  - [x] Android H2: CSD buffer pointer capture 불변식 comment/assert 고정 + debug status oversize counter 노출
+- 검증:
+  - [x] `cmake --build D:\remote\remote\build-vcpkg-local --config Debug --target remote60_native_video_host_poc remote60_native_video_client_poc remote60_native_video_client_shared_core_test`
+  - [x] `D:\remote\remote\build-vcpkg-local\apps\native_poc\Debug\remote60_native_video_client_shared_core_test.exe` PASS
+  - [x] `automation/verify_native_video_runtime.ps1` localhost Gate A smoke PASS (`OVERALL_OK=True`, `GATE_A_PASS=True`, `UDP_ASSEMBLY_MALFORMED_TOTAL=0`)
+  - [ ] Android Studio `:app:assembleDebug` + oversized input runtime verify
+
+## M7. 제품화 Gate
+- 코드 작업:
+  - [x] 앱 직접 JSON 프로필 실행(`--config`) 지원(host/client, CLI override 우선)
+  - [x] config-first launcher 정리 (`run_native_video_with_config.ps1` 기본 config/auto bin/role-from-config 지원)
+  - [x] external native bundle 재패키징(config-first launcher/guide 반영)
+  - [x] external 기본 profile `stable_text` encoder tune 반영 + 최신 bundle refresh
+  - [x] 추가 코드 작업 없음(운영/검증 Gate 중심 마일스톤)
+- 검증:
+  - [x] 1080p30/720p30 각각 Pass 로그 5회 확보 (현재 1080: 5/5, 720: 5/5)
+  - [x] 체크리스트 항목별 실패 케이스/회귀 로그 정리 (스모크/튜닝 8건 수집 + `M7_STATUS_ICON`/`M7_STATUS_REASON` 자동 출력)
+  - [x] 기본 실행 프로필 확정 (`1080p: 8Mbps/keyint30`, `720p: 5Mbps/keyint60`, 공통 `h264NoPacing=1`, `frameGatingDisable=1`)
+  - 완료조건:
+    - Pass 기준 만족한 실행명령/설정값 고정
+
+## 5) 앞으로 실행 순서
+다음 작업 계획 (2026-04-16)
+- [ ] `M1.6-1` callback copy-only + worker readback ring 분리
+- [ ] `M1.6-2` window client crop/resize GPU front단 이동
+- [ ] `M1.6-3` GPU NV12 path 적용으로 second readback 제거
+- [ ] `M1.6` 단계별 A/B 검증 후 유지/롤백 판정
+
+0. [ ] `M1.6 Window capture zero/low-readback pipeline` 착수
+1. [ ] `M3.5 Background 입력 주입` 검증 완료 (코드 완료, 검증만 잔여)
+2. [x] 동일 설정 20회 반복 재측정(`host user-feedback` + `trace` 집계 포함) 완료
+3. [x] `CAPTURE_TO_AU_SKEW` 기준 재측정 실행 및 원인 우선순위 선결정
+   - 결과가 수렴되면 `M2.5/M3` 순서 재조정 및 토글 기본값 반영.
+4. [x] 원인 구간 우선순위 확정: `CAPTURE_TO_AU_SKEW` > `QUEUE_TO_ENCODE` > `QUEUE_TO_SEND` > `QUEUE_WAIT_TIMEOUT` > `QUEUE_WAIT_NOWORK`
+5. [x] `captureToAuTimelineSkewUs`와 `AU_TS_FROM_OUTPUT`으로 재초기화 이벤트/타임스탬프 출처 별 병목 정량 분해 완료.
+6. [x] 인코더 출력 타임스탬프 드리프트 가드(>50ms) 적용 후 재측정으로 병목 후보 재정렬 완료.
+   - 결과: host 병목이 `captureToAuTimelineSkewUs`에서 `sendDoneUs` 계열로 전환.
+7. [x] `sendHeaderUs`/`sendPayloadUs`/`sendChunk*` 분해 재측정을 완료해 send API 자체 지연을 정량화.
+8. [x] 병목 원인 기반 `M1/M2/M2.5/M3` 순서 재배치 및 토글 기본값 재정의
+   - 초기 결과: `sendPayloadUs` 평균 0.2ms 수준으로 `send` 호출 자체는 병목이 아님.
+   - `sendDoneUs`는 capture->send 구간 포함값으로 해석되어 `queueToSend` + 큐/스레드 대기 영향 우선 점검 필요.
+   - 2026-03-02 실측 반영:
+     - 기본 조합: `1920x1080 30fps / 8Mbps / keyint 30 / mft_hw` (`LAT_P95_US` 최저 구간).
+     - 해상도 상향 후보: `2304x1296 30fps / 10Mbps`(지연 증가 허용 범위).
+     - `2560x1440 30fps / 12Mbps`는 지연 증가폭이 커 기본값에서 제외.
+     - 프로필 추가: `automation/native_video_profile_1080p_lowlat.json`, `automation/native_video_profile_1296p_balanced.json`.
+9. [x] send 스케줄링 분해 지표 재측정 실행:
+   - `sendIntervalUs`, `sendIntervalErrUs`를 함께 보면서 `sendDoneUs`/`sendStart` 지연 구간 분리 완료.
+10. [x] `REMOTE60_NATIVE_H264_ASYNC_POLL_*` 토글 기반 재측정 실행:
+   - `sendDoneUs`가 `queueToSend` 중심으로 이동하는지 확인.
+   - 결과: 현재 기준 `async poll max=4`는 개선보다 악화 경향, 기본값 `max=1/sleep=0` 유지.
+11. [x] 1080p3개 장면 스모크에서 `LAT_P95_US` 70ms 이하 달성 여부 확인
+   - 실행: `verify_native_video_scene_suite.ps1` (build=`build-vcpkg-local`, 1080p30/8Mbps/mft_hw)
+   - 결과: static `62480`, scroll `37784`, video `48708` (모두 70ms 이하)
+   - 비고: video 장면 `PRESENT_GAP_OVER_1S=1` 1회 관측(지연 목표와 별도로 M6 안정화 항목에서 후속 추적)
+
+## 6) 매 작업 후 기록 템플릿
+- 변경 파일:
+- 실행 명령:
+- 로그 경로:
+- 주요 수치:
+  - MBPS_AVG / ENC_RATIO_X100_AVG / DECODE_RATIO_X100_AVG
+  - DEC_AVG / LAT_P95_US / PRESENT_GAP_OVER_1S
+- 유의미성 분석:
+  - 개선 / 미미 / 무효 중 하나로 판정 + 근거 수치(A/B 또는 기준선 비교)
+- 판정:
+  - 유지 / 롤백
+- 다음 액션:
+
+## 문서 운영 규칙
+- 이 문서는 처음 정의한 체크리스트/우선순위만 유지한다.
+- 완료 표시는 체크박스/상태 갱신으로만 반영한다.
+- 작업 이력/실행 로그/회고는 docs/history.md에만 기록한다.

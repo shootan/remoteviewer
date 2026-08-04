@@ -5573,3 +5573,57 @@ Before/After (1080p-scroll Release 5회, 오늘 H4-off 대비)
   이번 세션에서 처리하지 못했다).
 - 합성 씬은 버스트가 약해 정지가 잘 재현되지 않으므로, 실사용에서 senderHeldFrames로
   정지 구간을 재확인한다.
+
+### 229) 2026-08-04 접속 실패 원인 규명, 호스트 포트 후보 목록, 구현계획 재편
+
+목표
+- 다른 네트워크(회사 Wi-Fi)에서 접속이 안 되는 원인을 로그로 확정하고 고친다.
+- UAC 동의 창이 보이지도 눌리지도 않는 원인을 코드로 확정한다.
+- M0~M8이 끝난 `docs/구현계획.md`를 보관하고 이 단계용 계획을 새로 만든다.
+
+원인
+- 접속: 회사 Wi-Fi가 아웃바운드 UDP를 목적지 포트 화이트리스트로 제한한다. 디렉토리
+  관측 포트 8081은 12회 전부 통과해 pendingPunch가 생성됐으나, 호스트 43000으로는
+  단 한 개도 도착하지 않았다(`directory peer punch` 로그 0건, 거부 로그도 0건).
+  같은 폰이 LTE에서는 첫 펀치에 접속해 호스트측 경로는 정상임이 확인된다.
+- UAC: 경계는 무결성 수준이 아니라 데스크톱 객체다. UAC 동의 창은 `WinSta0\Winlogon`에
+  그려지는데 저장소 전체에서 `SetThreadDesktop`/`OpenInputDesktop` 호출은 두 곳뿐이고
+  둘 다 캡처가 아니다(호스트의 이름 probe, SYSTEM 에이전트의 입력 attach). Winlogon
+  프레임버퍼를 읽는 코드가 제품에 없어 창이 보이지 않고, Default에 붙은 스레드는 거기에
+  입력을 넣을 수 없다. 작업 관리자가 되는 것은 그것이 Default 데스크톱의 창이고 호스트가
+  관리자 권한이라 무결성이 동등하기 때문이다.
+- 부수 확인 2건: ACCESS_LOST 후 WGC 강등이 영구적이라 UAC 창이 닫힌 뒤에도 DXGI로
+  복귀하지 않는다. SYSTEM 입력 에이전트는 `WTSGetActiveConsoleSessionId()`로 세션을
+  고르는데 이는 물리 콘솔 세션이라 스트리밍 중인 세션과 다를 수 있고, 파이프 쓰기 성공을
+  전달 성공으로 간주해 잘못 전달된 클릭이 성공으로 보고된다.
+
+변경 파일
+- `apps/native_poc/src/bind_port_candidates.hpp` (신규)
+- `apps/native_poc/src/bind_port_candidates_test.cpp` (신규)
+- `apps/native_poc/src/native_video_host_main.cpp`
+- `apps/native_poc/src/host_app_main.cpp`
+- `apps/native_poc/src/directory_client.{hpp,cpp}`
+- `apps/native_poc/CMakeLists.txt`
+- `docs/구현계획.md` (신규 작성), `docs/구현계획_old.md` (보관)
+
+검증/build/test
+- `--bind-port`가 순서 있는 후보 목록을 받는다. 실측: `443,3478,43000` → `udp bound
+  port=443`. `43000,3478,443` → 43000이 실행 중인 제품 호스트에 점유되어 있어
+  `bind failed port=43000; trying next` 후 `udp bound port=3478`. 단일 `43000`은 기존
+  동작 유지.
+- 관측 공인 포트가 bind 포트와 다르면 `nat-port-rewritten` 경고를 1회 출력한다. 포트를
+  보존하지 않는 NAT에서는 이 방식이 무효이므로 침묵 대신 원인을 남긴다.
+- `remote60_bind_port_candidates_test` PASS(19 케이스). 회귀: video_playout_clock /
+  capture_cadence_gate / udp_fec_interleave / udp_control_channel /
+  native_video_client_shared_core 전부 PASS.
+- 이 PC의 UAC 정책 실측: `PromptOnSecureDesktop=1`, `EnableLUA=1`,
+  `ConsentPromptBehaviorAdmin=5`. secure desktop 전제가 성립한다.
+- 설치 파일은 수정하지 않았다. 방화벽 규칙이 포트가 아니라 프로그램 기준이다.
+
+다음 액션
+- N1의 마지막 완료조건인 회사 Wi-Fi 실기 접속 검증이 남아 있다. 0.2.3 패키징 필요.
+- 근거 대장 A1(데스크톱이 초당 33회만 갱신) 재검증. 측정 당시 RDP 연결 상태였고 Microsoft
+  Remote Display Adapter가 32Hz라 수치가 일치한다. RDP를 끊고 재측정해야 NACK(P2)의
+  우선순위를 정할 수 있다.
+- 근거 대장 A2(Winlogon에서 BitBlt 가능 여부) 실험. 저장소 설계 문서는 DXGI만 가능하다고
+  주장하나 검증된 적이 없고, 결과가 U2b의 규모를 좌우한다.
