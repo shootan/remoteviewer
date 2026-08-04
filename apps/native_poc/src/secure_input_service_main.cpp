@@ -8,19 +8,26 @@
 #include <string>
 
 #include "secure_input_protocol.hpp"
+#include "secure_input_session.hpp"
 
 namespace {
 
 using remote60::native_poc::SecureInputKind;
 using remote60::native_poc::SecureInputMessage;
+using remote60::native_poc::kInvalidSessionId;
 using remote60::native_poc::kSecureInputMagic;
 using remote60::native_poc::kSecureInputPipeName;
 using remote60::native_poc::kSecureInputServiceName;
+using remote60::native_poc::resolve_target_session;
+using remote60::native_poc::session_source_name;
 
 SERVICE_STATUS_HANDLE gStatusHandle = nullptr;
 SERVICE_STATUS gStatus{};
 std::atomic<bool> gRunning{true};
 std::atomic<HANDLE> gClientPipe{INVALID_HANDLE_VALUE};
+// The session of the process holding the control pipe -- the streaming host. Captured once when
+// the pipe connects, because that is the only moment the requester is identifiable.
+std::atomic<uint32_t> gRequesterSession{kInvalidSessionId};
 
 struct AgentProcess {
   HANDLE process = nullptr;
@@ -136,9 +143,25 @@ bool start_agent(DWORD sessionId) {
   return true;
 }
 
+// Resolves the session the agent belongs in and says why, once per change. Silence here is what
+// let the wrong-session bug live: the write succeeded, so everything downstream looked healthy.
+DWORD target_session() {
+  const uint32_t requester = gRequesterSession.load(std::memory_order_acquire);
+  const auto choice = resolve_target_session(requester, WTSGetActiveConsoleSessionId());
+  static uint32_t reported = kInvalidSessionId;
+  if (choice.sessionId != reported) {
+    reported = choice.sessionId;
+    std::printf("[secure-input] target session=%u source=%s (requester=%u console=%u)\n",
+                choice.sessionId, session_source_name(choice.source), requester,
+                WTSGetActiveConsoleSessionId());
+    std::fflush(stdout);
+  }
+  return choice.sessionId;
+}
+
 bool ensure_agent() {
-  const DWORD sessionId = WTSGetActiveConsoleSessionId();
-  if (sessionId == 0xffffffffu) return false;
+  const DWORD sessionId = target_session();
+  if (sessionId == kInvalidSessionId) return false;
   if (gAgent.process && gAgent.writePipe && gAgent.sessionId == sessionId &&
       WaitForSingleObject(gAgent.process, 0) == WAIT_TIMEOUT) {
     return true;
@@ -149,7 +172,10 @@ bool ensure_agent() {
 bool forward_to_agent(const SecureInputMessage& message) {
   if (!ensure_agent()) return false;
   if (write_exact(gAgent.writePipe, &message, sizeof(message))) return true;
-  if (!start_agent(WTSGetActiveConsoleSessionId())) return false;
+  // A failed write means the agent died; re-resolve rather than reusing the old session, since
+  // the reason it died may be that its session went away.
+  const DWORD retrySession = target_session();
+  if (retrySession == kInvalidSessionId || !start_agent(retrySession)) return false;
   return write_exact(gAgent.writePipe, &message, sizeof(message));
 }
 
@@ -163,8 +189,24 @@ void report_service_status(DWORD state, DWORD error = NO_ERROR) {
   if (gStatusHandle) SetServiceStatus(gStatusHandle, &gStatus);
 }
 
-void WINAPI service_control(DWORD control) {
-  if (control != SERVICE_CONTROL_STOP) return;
+DWORD WINAPI service_control(DWORD control, DWORD eventType, LPVOID eventData, LPVOID) {
+  // Session changes matter because the agent lives inside one. A session that logs off or
+  // disconnects takes the agent's desktop with it, and continuing to write to that agent is how
+  // input silently goes nowhere.
+  if (control == SERVICE_CONTROL_SESSIONCHANGE) {
+    const auto* notification = static_cast<const WTSSESSION_NOTIFICATION*>(eventData);
+    if (notification && (eventType == WTS_SESSION_LOGOFF || eventType == WTS_SESSION_LOGON ||
+                         eventType == WTS_CONSOLE_DISCONNECT || eventType == WTS_REMOTE_DISCONNECT)) {
+      std::printf("[secure-input] session change event=%lu session=%lu\n", eventType,
+                  notification->dwSessionId);
+      std::fflush(stdout);
+      if (gAgent.process && gAgent.sessionId == notification->dwSessionId) {
+        stop_agent();  // the next message re-resolves and re-creates it where it belongs
+      }
+    }
+    return NO_ERROR;
+  }
+  if (control != SERVICE_CONTROL_STOP) return NO_ERROR;
   report_service_status(SERVICE_STOP_PENDING);
   gRunning.store(false, std::memory_order_release);
   HANDLE pipe = gClientPipe.exchange(INVALID_HANDLE_VALUE, std::memory_order_acq_rel);
@@ -173,6 +215,17 @@ void WINAPI service_control(DWORD control) {
     (void)DisconnectNamedPipe(pipe);
     CloseHandle(pipe);
   }
+  return NO_ERROR;
+}
+
+// The process on the other end of the pipe is the streaming host, so its session is the one whose
+// desktop the operator is actually looking at.
+uint32_t requester_session_of(HANDLE pipe) {
+  ULONG pid = 0;
+  if (!GetNamedPipeClientProcessId(pipe, &pid) || pid == 0) return kInvalidSessionId;
+  DWORD session = 0;
+  if (!ProcessIdToSessionId(pid, &session)) return kInvalidSessionId;
+  return session;
 }
 
 HANDLE create_secure_pipe() {
@@ -193,7 +246,10 @@ HANDLE create_secure_pipe() {
 }
 
 void WINAPI service_main(DWORD, wchar_t**) {
-  gStatusHandle = RegisterServiceCtrlHandlerW(kSecureInputServiceName, service_control);
+  // Ex rather than the plain handler so SERVICE_CONTROL_SESSIONCHANGE can be delivered; the
+  // plain form cannot receive it, and without it the agent outlives the session it was made for.
+  gStatusHandle =
+      RegisterServiceCtrlHandlerExW(kSecureInputServiceName, service_control, nullptr);
   if (!gStatusHandle) return;
   report_service_status(SERVICE_START_PENDING);
   gRunning.store(true, std::memory_order_release);
@@ -205,6 +261,14 @@ void WINAPI service_main(DWORD, wchar_t**) {
     gClientPipe.store(pipe, std::memory_order_release);
     const BOOL connected = ConnectNamedPipe(pipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED;
     if (connected) {
+      // Identify the requester before reading anything from it. This is the only point at which
+      // the host's session can be learned, and everything downstream depends on it.
+      const uint32_t requester = requester_session_of(pipe);
+      gRequesterSession.store(requester, std::memory_order_release);
+      std::printf("[secure-input] control pipe connected, requester session=%u\n", requester);
+      std::fflush(stdout);
+      // A new requester may live in a different session than the agent already running.
+      if (gAgent.process && gAgent.sessionId != target_session()) stop_agent();
       while (gRunning.load(std::memory_order_acquire)) {
         SecureInputMessage message{};
         if (!read_exact(pipe, &message, sizeof(message))) break;
@@ -212,6 +276,8 @@ void WINAPI service_main(DWORD, wchar_t**) {
         (void)forward_to_agent(message);
       }
       (void)DisconnectNamedPipe(pipe);
+      // The requester is gone; do not keep its session as the answer for whoever connects next.
+      gRequesterSession.store(kInvalidSessionId, std::memory_order_release);
     }
     HANDLE expected = pipe;
     if (gClientPipe.compare_exchange_strong(expected, INVALID_HANDLE_VALUE,

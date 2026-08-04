@@ -320,6 +320,11 @@ add_executable(remote60_bind_port_candidates_test
 )
 target_include_directories(remote60_bind_port_candidates_test PRIVATE src)
 
+add_executable(remote60_secure_input_session_test
+  src/secure_input_session_test.cpp
+)
+target_include_directories(remote60_secure_input_session_test PRIVATE src)
+
 # Throwaway diagnostic, not part of the product and not staged into the installer. Answers
 # whether a SYSTEM process on the Winlogon desktop can read pixels, and with which API, before
 # the secure-desktop capture work commits to one. Delete once 구현계획 U1 is answered.
