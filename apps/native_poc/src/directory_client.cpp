@@ -299,6 +299,15 @@ bool HostAgent::ConsumeUdpPacket(const void* data, size_t len, const sockaddr_in
   std::lock_guard<std::mutex> lock(mu_);
   observedIp_ = ip;
   observedPort_ = static_cast<uint16_t>(port);
+  // Say so once when NAT rewrote the port. Choosing a bind port that restrictive firewalls
+  // allow only helps if the mapping keeps it, and when it does not the symptom on the client
+  // side is silence, which reads like a broken host rather than a blocked port.
+  if (cfg_.localUdpPort != 0 && observedPort_ != cfg_.localUdpPort && !portRewriteReported_) {
+    portRewriteReported_ = true;
+    std::cout << "[native-video-host] directory nat-port-rewritten local=" << cfg_.localUdpPort
+              << " public=" << observedPort_
+              << "; restrictive networks may still be unable to reach this host\n";
+  }
   observedReady_ = true;
   return true;
 }

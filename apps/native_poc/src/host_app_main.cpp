@@ -264,8 +264,13 @@ class StreamingHostProcess {
       // The control port serves clients on the same network that dial this PC directly. One
       // arriving through the directory tunnels control over the media socket instead, but with
       // no port open a LAN connection showed a picture that could not be controlled.
+      // An ordered candidate list, not one port: restrictive networks (company Wi-Fi, guest
+      // networks) commonly allow outbound UDP only to a whitelist of destination ports, and a
+      // host on 43000 is unreachable from those however healthy the rest of the path is. 443
+      // carries QUIC and 3478 carries STUN, so both pass almost everywhere; 43000 stays last so
+      // an existing install keeps its port when the friendlier ones are already taken.
       std::wstring command = L"\"" + exe + L"\"" +
-                             L" --transport udp --codec h264 --bind-port 43000" +
+                             L" --transport udp --codec h264 --bind-port 443,3478,43000" +
                              L" --control-port 43001" +
                              L" --directory-url \"" + directoryUrl_ + L"\"" +
                              L" --directory-id \"" + accountId_ + L"\"" +

@@ -42,6 +42,7 @@
 #include <vector>
 
 #include "mf_h264_codec.hpp"
+#include "bind_port_candidates.hpp"
 #include "capture_cadence_gate.hpp"
 #include "d3d_capture_readback.hpp"
 #include "directory_client.hpp"
@@ -1485,6 +1486,12 @@ ULONG resolve_bind_address(const std::string& bindAddress) {
 
 struct Args {
   uint16_t bindPort = 43000;
+  // Ordered fallback list for the media socket; the first port that binds wins. Corporate
+  // firewalls commonly permit outbound UDP only to a whitelist of destination ports, so a host
+  // sitting on 43000 is unreachable from those networks however healthy the rest of the path is.
+  // 443 carries QUIC and 3478 carries STUN, so both are open almost everywhere. Empty means
+  // "just bindPort", which is what a config file or an explicit single --bind-port produces.
+  std::vector<uint16_t> bindPortCandidates;
   // Empty binds every interface. Test harnesses pass 127.0.0.1: a loopback bind never
   // triggers the Windows Firewall consent dialog, which dims the whole screen and starves
   // WGC capture for as long as it is up -- every measurement taken behind it is garbage.
@@ -1748,8 +1755,9 @@ Args parse_args(int argc, char** argv) {
       continue;
     }
     if (k == "--bind-port" && i + 1 < argc) {
-      uint32_t v = 0;
-      if (parse_u32(argv[++i], &v)) a.bindPort = static_cast<uint16_t>(std::min<uint32_t>(v, 65535));
+      // Accepts one port or an ordered comma-separated fallback list.
+      a.bindPortCandidates = remote60::native_poc::parse_bind_port_candidates(argv[++i]);
+      if (!a.bindPortCandidates.empty()) a.bindPort = a.bindPortCandidates.front();
     } else if (k == "--bind-address" && i + 1 < argc) {
       a.bindAddress = argv[++i];
     } else if (k == "--control-port" && i + 1 < argc) {
@@ -2780,8 +2788,18 @@ int main(int argc, char** argv) {
     return 16;
   }
 
-  std::cout << "[native-video-host] waiting client bindPort=" << args.bindPort
-            << " transport=" << video_transport_name(transport)
+  // Print every candidate, not just the first: with a fallback list the port this line names is
+  // a request, and "udp bound port=" below is what actually happened.
+  std::cout << "[native-video-host] waiting client bindPort=";
+  if (args.bindPortCandidates.size() > 1) {
+    for (size_t i = 0; i < args.bindPortCandidates.size(); ++i) {
+      if (i) std::cout << ",";
+      std::cout << args.bindPortCandidates[i];
+    }
+  } else {
+    std::cout << args.bindPort;
+  }
+  std::cout << " transport=" << video_transport_name(transport)
             << " fps=" << args.fps;
   if (useH264) std::cout << " bitrate=" << args.bitrate;
   std::cout << " seconds=" << args.seconds << "\n";
@@ -2863,6 +2881,9 @@ int main(int argc, char** argv) {
 
   SOCKET listenSock = INVALID_SOCKET;
   SOCKET clientSock = INVALID_SOCKET;
+  // The port the media socket actually landed on. It only differs from args.bindPort when a
+  // fallback candidate was used, and the directory must publish this one rather than the request.
+  uint16_t mediaBindPort = args.bindPort;
   sockaddr_in udpPeer{};
   bool udpPeerReady = false;
   std::atomic<bool> sessionDirectoryAuthenticated{false};
@@ -2971,13 +2992,27 @@ int main(int argc, char** argv) {
     }
     sockaddr_in local{};
     local.sin_family = AF_INET;
-    local.sin_port = htons(args.bindPort);
     local.sin_addr.s_addr = resolve_bind_address(args.bindAddress);
-    if (bind(clientSock, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0) {
-      std::cerr << "[native-video-host] udp bind failed port=" << args.bindPort << "\n";
+    // Walk the candidates in order and keep the first that binds. A failed bind leaves the
+    // socket unbound, so the next attempt can reuse it.
+    std::vector<uint16_t> portCandidates = args.bindPortCandidates;
+    if (portCandidates.empty()) portCandidates.push_back(args.bindPort);
+    bool udpBound = false;
+    for (const uint16_t candidate : portCandidates) {
+      local.sin_port = htons(candidate);
+      if (bind(clientSock, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) == 0) {
+        mediaBindPort = candidate;
+        udpBound = true;
+        break;
+      }
+      std::cerr << "[native-video-host] udp bind failed port=" << candidate << "; trying next\n";
+    }
+    if (!udpBound) {
+      std::cerr << "[native-video-host] udp bind failed on every candidate port\n";
       closesocket(clientSock);
       return 3;
     }
+    std::cout << "[native-video-host] udp bound port=" << mediaBindPort << "\n";
 
     // The directory agent shares this socket on purpose: the public address it publishes has
     // to be the one NAT maps for the media stream, and that is a property of this socket.
@@ -2988,6 +3023,7 @@ int main(int argc, char** argv) {
       dirCfg.password = directoryPw;
       dirCfg.hostName = args.directoryHostName;
       dirCfg.observeUdpPort = args.directoryObservePort;
+      dirCfg.localUdpPort = mediaBindPort;
       dirCfg.heartbeatSeconds = env_u32_clamped("REMOTE60_DIRECTORY_HEARTBEAT_SEC", 25, 5, 300);
       std::string dirError;
       const bool started = directoryAgent.Start(

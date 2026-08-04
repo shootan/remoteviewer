@@ -37,6 +37,10 @@ struct HostAgentConfig {
   // Port of the UDP address-observation endpoint. 0 means the HTTP port + 1, which is the
   // server's own default relationship between the two.
   uint16_t observeUdpPort = 0;
+  // Local port the shared media socket is bound to. Only used to notice that NAT did not
+  // preserve it, which matters because a firewall-friendly bind port buys nothing once the
+  // mapping lands somewhere else. 0 disables the check.
+  uint16_t localUdpPort = 0;
   uint32_t heartbeatSeconds = 25;
 };
 
@@ -158,6 +162,7 @@ class HostAgent {
   // A peer punch means /api/connect has just queued a capability for this host. Wake the
   // heartbeat loop instead of making the controller wait for the ordinary 25-second poll.
   std::atomic<bool> refreshRequested_{false};
+  bool portRewriteReported_ = false;  // guarded by mu_
 
   mutable std::mutex mu_;
   std::string status_ = "idle";
