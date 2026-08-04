@@ -8,6 +8,9 @@
 #include <sstream>
 #include <thread>
 #include <utility>
+#include <vector>
+
+#include "dxgi_output_selection.hpp"
 
 namespace remote60::host {
 namespace {
@@ -16,6 +19,17 @@ std::string hresult_hex(HRESULT hr) {
   std::ostringstream oss;
   oss << "0x" << std::hex << std::uppercase << static_cast<unsigned long>(hr);
   return oss.str();
+}
+
+// Adapter and device names are the only wide strings here and they are ASCII in practice, so a
+// byte-wise narrowing is enough to put them in a log line.
+std::string narrow(const wchar_t* text) {
+  std::string out;
+  if (!text) return out;
+  for (const wchar_t* cursor = text; *cursor; ++cursor) {
+    out.push_back(*cursor < 128 ? static_cast<char>(*cursor) : '?');
+  }
+  return out;
 }
 
 }  // namespace
@@ -37,6 +51,111 @@ struct DxgiDesktopCaptureSession::Impl {
     if (onLog) onLog(phase, message);
   }
 
+  static DxgiOutputInfo make_info(uint32_t adapterIndex, uint32_t outputIndex,
+                                  const wchar_t* adapterDescription,
+                                  const DXGI_OUTPUT_DESC& desc, uint64_t adapterLuid) {
+    DxgiOutputInfo info;
+    info.adapterIndex = adapterIndex;
+    info.outputIndex = outputIndex;
+    info.adapterDescription = narrow(adapterDescription);
+    info.deviceName = narrow(desc.DeviceName);
+    info.left = desc.DesktopCoordinates.left;
+    info.top = desc.DesktopCoordinates.top;
+    info.right = desc.DesktopCoordinates.right;
+    info.bottom = desc.DesktopCoordinates.bottom;
+    info.attachedToDesktop = desc.AttachedToDesktop != 0;
+    info.monitorId = reinterpret_cast<uint64_t>(desc.Monitor);
+    info.rotatedPortrait = desc.Rotation == DXGI_MODE_ROTATION_ROTATE90 ||
+                           desc.Rotation == DXGI_MODE_ROTATION_ROTATE270;
+    info.adapterLuid = adapterLuid;
+    return info;
+  }
+
+  // Enumerates every adapter, not only the one the D3D device sits on.
+  //
+  // Looking at just the device's adapter is what made RDP unrecoverable: connecting moves the
+  // desktop onto the Microsoft Remote Display Adapter, the device stays on the physical GPU, and
+  // an output belonging to another adapter cannot be duplicated. From inside the device's own
+  // adapter that is indistinguishable from "no output found", so recreate retried forever
+  // against a monitor that was never going to be there.
+  bool enumerate_outputs(std::vector<DxgiOutputInfo>* infos,
+                         std::vector<Microsoft::WRL::ComPtr<IDXGIOutput>>* handles,
+                         std::string* detailOut) {
+    Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+    HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+    if (FAILED(hr) || !factory) {
+      if (detailOut) *detailOut = "dxgi_factory_failed_" + hresult_hex(hr);
+      return false;
+    }
+    for (UINT adapterIndex = 0;; ++adapterIndex) {
+      Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+      if (factory->EnumAdapters1(adapterIndex, &adapter) == DXGI_ERROR_NOT_FOUND) break;
+      if (!adapter) continue;
+      DXGI_ADAPTER_DESC1 adapterDesc{};
+      (void)adapter->GetDesc1(&adapterDesc);
+      for (UINT outputIndex = 0;; ++outputIndex) {
+        Microsoft::WRL::ComPtr<IDXGIOutput> output;
+        if (adapter->EnumOutputs(outputIndex, &output) == DXGI_ERROR_NOT_FOUND) break;
+        if (!output) continue;
+        DXGI_OUTPUT_DESC desc{};
+        if (FAILED(output->GetDesc(&desc))) continue;
+
+        infos->push_back(make_info(adapterIndex, outputIndex, adapterDesc.Description, desc,
+                                   (static_cast<uint64_t>(adapterDesc.AdapterLuid.HighPart)
+                                    << 32) |
+                                       adapterDesc.AdapterLuid.LowPart));
+        handles->push_back(output);
+      }
+    }
+    return true;
+  }
+
+  /** LUID of the adapter the D3D device was created on, or 0 when it cannot be determined. */
+  uint64_t device_adapter_luid() const {
+    Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
+    if (FAILED(d3dDevice.As(&dxgiDevice)) || !dxgiDevice) return 0;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    if (FAILED(dxgiDevice->GetAdapter(&adapter)) || !adapter) return 0;
+    DXGI_ADAPTER_DESC desc{};
+    if (FAILED(adapter->GetDesc(&desc))) return 0;
+    return (static_cast<uint64_t>(desc.AdapterLuid.HighPart) << 32) | desc.AdapterLuid.LowPart;
+  }
+
+  // Outputs belonging to the adapter the D3D device was created on. This is the only set that can
+  // actually be duplicated with this device, and it is the path every healthy session takes.
+  bool enumerate_device_adapter_outputs(std::vector<DxgiOutputInfo>* infos,
+                                        std::vector<Microsoft::WRL::ComPtr<IDXGIOutput>>* handles,
+                                        std::string* detailOut) {
+    Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
+    HRESULT hr = d3dDevice.As(&dxgiDevice);
+    if (FAILED(hr) || !dxgiDevice) {
+      if (detailOut) *detailOut = "dxgi_device_qi_failed_" + hresult_hex(hr);
+      return false;
+    }
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    hr = dxgiDevice->GetAdapter(&adapter);
+    if (FAILED(hr) || !adapter) {
+      if (detailOut) *detailOut = "dxgi_adapter_failed_" + hresult_hex(hr);
+      return false;
+    }
+    DXGI_ADAPTER_DESC adapterDesc{};
+    (void)adapter->GetDesc(&adapterDesc);
+
+    for (UINT idx = 0;; ++idx) {
+      Microsoft::WRL::ComPtr<IDXGIOutput> output;
+      hr = adapter->EnumOutputs(idx, &output);
+      if (hr == DXGI_ERROR_NOT_FOUND) break;
+      if (FAILED(hr) || !output) break;
+      DXGI_OUTPUT_DESC desc{};
+      if (FAILED(output->GetDesc(&desc))) continue;
+      infos->push_back(make_info(0, idx, adapterDesc.Description, desc,
+                                 (static_cast<uint64_t>(adapterDesc.AdapterLuid.HighPart) << 32) |
+                                     adapterDesc.AdapterLuid.LowPart));
+      handles->push_back(output);
+    }
+    return true;
+  }
+
   bool resolve_output(Microsoft::WRL::ComPtr<IDXGIOutput1>* outOutput1,
                       DXGI_OUTPUT_DESC* outDesc,
                       std::string* detailOut) {
@@ -45,94 +164,67 @@ struct DxgiDesktopCaptureSession::Impl {
       return false;
     }
 
-    Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
-    HRESULT hr = d3dDevice.As(&dxgiDevice);
-    if (FAILED(hr) || !dxgiDevice) {
-      if (detailOut) *detailOut = "dxgi_device_qi_failed_" + hresult_hex(hr);
-      return false;
-    }
-
-    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
-    hr = dxgiDevice->GetAdapter(&adapter);
-    if (FAILED(hr) || !adapter) {
-      if (detailOut) *detailOut = "dxgi_adapter_failed_" + hresult_hex(hr);
-      return false;
-    }
-
     const HMONITOR targetMonitor =
         config.monitor ? config.monitor : MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
-    if (!targetMonitor) {
-      if (detailOut) *detailOut = "primary_monitor_missing";
-      return false;
-    }
+    const auto targetId = reinterpret_cast<uint64_t>(targetMonitor);
 
-    Microsoft::WRL::ComPtr<IDXGIOutput> output;
-    Microsoft::WRL::ComPtr<IDXGIOutput> firstOutput;
-    DXGI_OUTPUT_DESC desc{};
-    DXGI_OUTPUT_DESC firstDesc{};
-    bool found = false;
-    for (UINT idx = 0;; ++idx) {
-      Microsoft::WRL::ComPtr<IDXGIOutput> candidate;
-      hr = adapter->EnumOutputs(idx, &candidate);
-      if (hr == DXGI_ERROR_NOT_FOUND) break;
-      if (FAILED(hr) || !candidate) {
-        if (detailOut) *detailOut = "dxgi_enum_outputs_failed_" + hresult_hex(hr);
+    // The device's own adapter first, exactly as before. Enumerating every adapter on a healthy
+    // start cost two failed runs out of six when it was tried the other way round -- creating a
+    // DXGI factory and walking the whole display topology is not free and is not needed while
+    // the desktop is where the device can see it.
+    std::vector<DxgiOutputInfo> own;
+    std::vector<Microsoft::WRL::ComPtr<IDXGIOutput>> ownHandles;
+    if (!enumerate_device_adapter_outputs(&own, &ownHandles, detailOut)) return false;
+
+    const auto selection = select_dxgi_output(own, targetId, config.landscapeOnly);
+    if (selection.found) {
+      Microsoft::WRL::ComPtr<IDXGIOutput1> output1;
+      const size_t chosen = selection.output.outputIndex;
+      if (chosen >= ownHandles.size()) {
+        if (detailOut) *detailOut = "dxgi_output_handle_missing";
         return false;
       }
-      DXGI_OUTPUT_DESC candidateDesc{};
-      hr = candidate->GetDesc(&candidateDesc);
-      if (FAILED(hr)) {
-        if (detailOut) *detailOut = "dxgi_output_desc_failed_" + hresult_hex(hr);
+      const HRESULT hr = ownHandles[chosen].As(&output1);
+      if (FAILED(hr) || !output1) {
+        if (detailOut) *detailOut = "dxgi_output1_qi_failed_" + hresult_hex(hr);
         return false;
       }
-      if (!firstOutput) {
-        firstOutput = candidate;
-        firstDesc = candidateDesc;
+      if (selection.reason != DxgiSelectionReason::MonitorMatch) {
+        log("capture", std::string("dxgi_output_match=") +
+                           dxgi_selection_reason_name(selection.reason) + " output=" +
+                           selection.output.deviceName);
       }
-      if (candidateDesc.Monitor == targetMonitor) {
-        output = candidate;
-        desc = candidateDesc;
-        found = true;
-        break;
+      DXGI_OUTPUT_DESC desc{};
+      (void)ownHandles[chosen]->GetDesc(&desc);
+      *outOutput1 = std::move(output1);
+      *outDesc = desc;
+      return true;
+    }
+
+    // Only now, having already failed, is it worth asking where the desktop went. Answering that
+    // is what separates "recreate and carry on" from the permanent demotion to a backend that
+    // cannot see the desktop either.
+    const std::string ownReason =
+        std::string("dxgi_select_") + dxgi_selection_reason_name(selection.reason);
+    std::vector<DxgiOutputInfo> all;
+    std::vector<Microsoft::WRL::ComPtr<IDXGIOutput>> allHandles;
+    std::string enumerateDetail;
+    if (enumerate_outputs(&all, &allHandles, &enumerateDetail)) {
+      const auto wide = select_dxgi_output(all, targetId, config.landscapeOnly);
+      const uint64_t deviceLuid = device_adapter_luid();
+      if (wide.found && deviceLuid != 0 && wide.output.adapterLuid != deviceLuid) {
+        // Under RDP the desktop composes onto the Microsoft Remote Display Adapter while the
+        // device stays on the physical GPU. Retrying the same device against it can never work;
+        // the answer is a new device on that adapter.
+        log("capture", "dxgi_desktop_moved adapter=" + wide.output.adapterDescription +
+                           " output=" + wide.output.deviceName);
+        if (detailOut) *detailOut = "dxgi_adapter_changed";
+        return false;
       }
     }
 
-    if (!output && firstOutput) {
-      output = firstOutput;
-      desc = firstDesc;
-      found = true;
-      log("capture", "dxgi_output_match=fallback_first_output");
-    }
-
-    if (!found || !output) {
-      if (detailOut) *detailOut = "dxgi_no_output_found";
-      return false;
-    }
-
-    const LONG outputWidth = desc.DesktopCoordinates.right - desc.DesktopCoordinates.left;
-    const LONG outputHeight = desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top;
-    if (outputWidth <= 0 || outputHeight <= 0) {
-      if (detailOut) *detailOut = "dxgi_output_size_invalid";
-      return false;
-    }
-
-    const bool rotatedPortrait = desc.Rotation == DXGI_MODE_ROTATION_ROTATE90 ||
-                                 desc.Rotation == DXGI_MODE_ROTATION_ROTATE270;
-    if (config.landscapeOnly && (rotatedPortrait || outputWidth < outputHeight)) {
-      if (detailOut) *detailOut = "rotation_unsupported";
-      return false;
-    }
-
-    Microsoft::WRL::ComPtr<IDXGIOutput1> output1;
-    hr = output.As(&output1);
-    if (FAILED(hr) || !output1) {
-      if (detailOut) *detailOut = "dxgi_output1_qi_failed_" + hresult_hex(hr);
-      return false;
-    }
-
-    *outOutput1 = std::move(output1);
-    *outDesc = desc;
-    return true;
+    if (detailOut) *detailOut = ownReason;
+    return false;
   }
 
   bool recreate_duplication(std::string* detailOut) {
