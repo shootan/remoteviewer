@@ -159,12 +159,53 @@ struct DxgiDesktopCaptureSession::Impl {
     if (onFallback) onFallback(reason);
   }
 
+  // Desktop duplication reports changes, not a cadence, and it reports them only while no
+  // frame is held. So the questions that decide the capture rate are: how often did an
+  // acquire return nothing, how many desktop updates did the OS have to accumulate because
+  // we were busy, and how long were we holding a frame. AccumulatedFrames answers the middle
+  // one exactly -- anything above 1 is an update we were not there to collect.
+  struct AcquireStats {
+    uint64_t windowStartUs = 0;
+    uint32_t acquires = 0;
+    uint32_t timeouts = 0;
+    uint32_t accumulatedTotal = 0;
+    uint32_t accumulatedMax = 0;
+    uint32_t coalescedAcquires = 0;  // acquires that carried more than one update
+    uint64_t holdTotalUs = 0;
+    uint64_t holdMaxUs = 0;
+  } stats;
+
+  static uint64_t now_us() {
+    using namespace std::chrono;
+    return static_cast<uint64_t>(
+        duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count());
+  }
+
+  void report_stats_if_due(uint64_t nowUs) {
+    if (stats.windowStartUs == 0) {
+      stats.windowStartUs = nowUs;
+      return;
+    }
+    if (nowUs - stats.windowStartUs < 1000000ULL) return;
+    std::ostringstream oss;
+    oss << "dxgi-acquire acquires=" << stats.acquires << " timeouts=" << stats.timeouts
+        << " coalesced=" << stats.coalescedAcquires
+        << " accumTotal=" << stats.accumulatedTotal << " accumMax=" << stats.accumulatedMax
+        << " holdAvgUs=" << (stats.acquires ? stats.holdTotalUs / stats.acquires : 0)
+        << " holdMaxUs=" << stats.holdMaxUs;
+    log("capture", oss.str());
+    stats = AcquireStats{};
+    stats.windowStartUs = nowUs;
+  }
+
   void run() {
     while (!stopRequested.load()) {
+      report_stats_if_due(now_us());
       DXGI_OUTDUPL_FRAME_INFO frameInfo{};
       Microsoft::WRL::ComPtr<IDXGIResource> resource;
       const HRESULT hr = duplication->AcquireNextFrame(config.acquireTimeoutMs, &frameInfo, &resource);
       if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
+        ++stats.timeouts;
         continue;
       }
       if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_ACCESS_DENIED) {
@@ -184,11 +225,24 @@ struct DxgiDesktopCaptureSession::Impl {
         return;
       }
 
+      ++stats.acquires;
+      if (frameInfo.AccumulatedFrames > 0) {
+        stats.accumulatedTotal += frameInfo.AccumulatedFrames;
+        if (frameInfo.AccumulatedFrames > stats.accumulatedMax) {
+          stats.accumulatedMax = frameInfo.AccumulatedFrames;
+        }
+        if (frameInfo.AccumulatedFrames > 1) ++stats.coalescedAcquires;
+      }
+      const uint64_t acquiredAtUs = now_us();
+
       bool frameHeld = true;
       auto releaseFrame = [&]() {
         if (!frameHeld || !duplication) return;
         duplication->ReleaseFrame();
         frameHeld = false;
+        const uint64_t heldUs = now_us() - acquiredAtUs;
+        stats.holdTotalUs += heldUs;
+        if (heldUs > stats.holdMaxUs) stats.holdMaxUs = heldUs;
       };
 
       Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
