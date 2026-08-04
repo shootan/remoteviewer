@@ -2940,11 +2940,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 diagnosticsLog.log("directory_observed", observed)
 
                 val target = DirectoryClient.connect(url, token, host.hostId, observeToken)
-                diagnosticsLog.log("directory_target", "${target.ip}:${target.port}")
+                diagnosticsLog.log("directory_target", target.candidates.joinToString(" "))
 
-                val started = NativeSessionBridge.nativeDirectoryConnect(
-                    target.ip, target.port, 4000, target.punchToken
+                val started = NativeSessionBridge.nativeDirectoryConnectAny(
+                    target.candidates.toTypedArray(), 4000, target.punchToken
                 )
+                // Which address won matters when something goes wrong later: "private" means the
+                // traffic never left the LAN, and a fallback with no answer explains a slow start.
+                diagnosticsLog.log("directory_chosen", NativeSessionBridge.nativeDirectoryChosenCandidate())
                 if (!started) {
                     throw DirectoryClient.DirectoryException(
                         NativeSessionBridge.nativeDirectoryLastError().ifEmpty { "연결을 시작하지 못했습니다" }

@@ -29,6 +29,23 @@ object NativeSessionBridge {
         punchToken: String,
     ): Boolean
 
+    /**
+     * Punches every offered address at once and starts the session on whichever answers.
+     *
+     * Each candidate is "ip:port|kind". They are tried together rather than in turn because the
+     * client cannot tell which its own network permits -- a blocked address and an offline host
+     * look the same from here -- and going one at a time would multiply the wait by however many
+     * blocked ones happen to be listed first.
+     */
+    external fun nativeDirectoryConnectAny(
+        candidates: Array<String>,
+        punchBudgetMs: Int,
+        punchToken: String,
+    ): Boolean
+
+    /** Which candidate answered, as "ip:port|kind", for the diagnostics log. */
+    external fun nativeDirectoryChosenCandidate(): String
+
     external fun nativeDirectoryLastError(): String
     external fun nativeSetSurface(surface: Surface?)
 

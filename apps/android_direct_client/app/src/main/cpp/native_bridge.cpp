@@ -19,6 +19,9 @@ remote60::android_direct::AndroidVideoDecoderSink g_video_decoder_sink;
 // that the HTTP calls can stay in the app where sessions and errors are already handled.
 remote60::native_poc::DirectoryRendezvous g_rendezvous;
 std::string g_rendezvous_error;
+// Which of the offered addresses answered. Worth surfacing: "private" means the traffic never
+// left the LAN, and a fallback after none answered is the case worth noticing in a bug report.
+std::string g_chosen_candidate;
 
 // One macro per session. Recording taps the same events the client is about to send, so what is
 // captured is exactly what the host saw.
@@ -189,6 +192,84 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeDirectoryConnect(
   args.preparedUdpSocket = prepared;
   args.encodedFrameSink = &g_video_decoder_sink;
   return g_session_controller.Connect(args) ? JNI_TRUE : JNI_FALSE;
+}
+
+// Same as nativeDirectoryConnect, but given every address the directory offered instead of one.
+//
+// The client cannot tell from the inside which of them its own network permits: a company Wi-Fi
+// blocks the high port outbound, a residential ISP blocks the well-known one inbound, and both
+// look identical from here -- nothing arrives. So all of them are punched at once and whichever
+// answers is used. Trying them in turn would multiply the wait by however many blocked addresses
+// happen to come first in the list.
+//
+// `candidates` is "ip:port|kind" per entry, which keeps the JNI surface to a string array rather
+// than a class the Kotlin side would have to mirror.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeDirectoryConnectAny(
+    JNIEnv* env, jobject /* this */, jobjectArray candidates, jint punch_budget_ms,
+    jstring punch_token) {
+  g_rendezvous_error.clear();
+  std::vector<remote60::native_poc::RendezvousCandidate> parsed;
+  const jsize count = candidates ? env->GetArrayLength(candidates) : 0;
+  for (jsize i = 0; i < count; ++i) {
+    auto item = static_cast<jstring>(env->GetObjectArrayElement(candidates, i));
+    if (!item) continue;
+    const std::string text = jstring_to_string(env, item);
+    env->DeleteLocalRef(item);
+    const size_t colon = text.rfind(':');
+    if (colon == std::string::npos) continue;
+    const size_t bar = text.find('|', colon);
+    const std::string portText = text.substr(colon + 1, bar == std::string::npos
+                                                            ? std::string::npos
+                                                            : bar - colon - 1);
+    const int port = std::atoi(portText.c_str());
+    if (port <= 0 || port > 65535) continue;
+    remote60::native_poc::RendezvousCandidate candidate;
+    candidate.ip = text.substr(0, colon);
+    candidate.port = static_cast<uint16_t>(port);
+    candidate.kind = bar == std::string::npos ? std::string() : text.substr(bar + 1);
+    if (!candidate.ip.empty()) parsed.push_back(std::move(candidate));
+  }
+  if (parsed.empty()) {
+    g_rendezvous_error = "no usable candidate";
+    return JNI_FALSE;
+  }
+
+  remote60::native_poc::RendezvousCandidate chosen;
+  const bool answered = g_rendezvous.PunchAny(
+      parsed, punch_budget_ms > 0 ? static_cast<uint32_t>(punch_budget_ms) : 4000u, &chosen,
+      &g_rendezvous_error);
+  // A punch that answered tells us which address to use. When none did, fall back to the first
+  // candidate and let the hello handshake try anyway -- some NATs pass it even after the punch
+  // was dropped, and giving up here would refuse connections that would have worked.
+  const remote60::native_poc::RendezvousCandidate& target = answered ? chosen : parsed.front();
+  g_chosen_candidate = target.ip + ":" + std::to_string(target.port) + "|" +
+                       (target.kind.empty() ? "unknown" : target.kind) +
+                       (answered ? "" : " (no answer, trying anyway)");
+
+  const remote60::native_poc::SocketHandle prepared = g_rendezvous.Release();
+  if (prepared == remote60::native_poc::kInvalidSocket) {
+    if (g_rendezvous_error.empty()) g_rendezvous_error = "no prepared socket";
+    return JNI_FALSE;
+  }
+
+  remote60::native_poc::ClientSessionConnectArgs args{};
+  args.host = target.ip;
+  args.videoPort = target.port;
+  args.controlPort = target.port;
+  args.requireTcpControl = false;
+  args.controlOverUdp = true;
+  args.peerAuthToken = jstring_to_string(env, punch_token);
+  args.preparedUdpSocket = prepared;
+  args.encodedFrameSink = &g_video_decoder_sink;
+  return g_session_controller.Connect(args) ? JNI_TRUE : JNI_FALSE;
+}
+
+// Which candidate answered, for the diagnostics log. Empty until a connect has been attempted.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeDirectoryChosenCandidate(
+    JNIEnv* env, jobject /* this */) {
+  return to_jstring(env, g_chosen_candidate);
 }
 
 extern "C" JNIEXPORT jstring JNICALL

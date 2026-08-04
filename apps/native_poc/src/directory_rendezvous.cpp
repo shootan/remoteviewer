@@ -166,4 +166,68 @@ bool DirectoryRendezvous::Punch(const std::string& hostIp, int hostPort, uint32_
   return false;
 }
 
+bool DirectoryRendezvous::PunchAny(const std::vector<RendezvousCandidate>& candidates,
+                                   uint32_t budgetMs, RendezvousCandidate* outChosen,
+                                   std::string* outError) {
+  if (socket_ == kInvalidSocket) {
+    if (outError) *outError = "no prepared socket; observe first";
+    return false;
+  }
+  if (candidates.empty()) {
+    if (outError) *outError = "no candidates";
+    return false;
+  }
+
+  // Resolve once. A candidate we cannot resolve is dropped rather than failing the whole
+  // attempt: one bad entry must not cost the others their chance.
+  std::vector<sockaddr_in> targets;
+  std::vector<const RendezvousCandidate*> resolved;
+  for (const RendezvousCandidate& candidate : candidates) {
+    sockaddr_in addr{};
+    if (!resolve_udp(candidate.ip, candidate.port, &addr)) continue;
+    targets.push_back(addr);
+    resolved.push_back(&candidate);
+  }
+  if (targets.empty()) {
+    if (outError) *outError = "no candidate address could be resolved";
+    return false;
+  }
+
+  (void)set_recv_timeout(socket_, kPunchIntervalMs);
+  UdpHelloPacket packet{};
+  packet.kind = static_cast<uint16_t>(UdpPacketKind::Punch);
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
+  char scratch[512];
+  while (std::chrono::steady_clock::now() < deadline) {
+    // One round hits every candidate before waiting, so a reply from any of them is caught by
+    // the same recvfrom rather than after the others have had their turn.
+    for (const sockaddr_in& target : targets) {
+      (void)sendto(socket_, reinterpret_cast<const char*>(&packet), sizeof(packet), 0,
+                   reinterpret_cast<const sockaddr*>(&target), sizeof(target));
+    }
+
+    sockaddr_in from{};
+#if defined(_WIN32)
+    int fromLen = sizeof(from);
+#else
+    socklen_t fromLen = sizeof(from);
+#endif
+    const int n = recvfrom(socket_, scratch, sizeof(scratch), 0,
+                           reinterpret_cast<sockaddr*>(&from), &fromLen);
+    if (n <= 0) continue;
+    for (size_t i = 0; i < targets.size(); ++i) {
+      if (from.sin_addr.s_addr != targets[i].sin_addr.s_addr ||
+          from.sin_port != targets[i].sin_port) {
+        continue;
+      }
+      if (outChosen) *outChosen = *resolved[i];
+      return true;
+    }
+  }
+
+  if (outError) *outError = "no candidate answered";
+  return false;
+}
+
 }  // namespace remote60::native_poc

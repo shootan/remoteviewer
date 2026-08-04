@@ -340,6 +340,13 @@ add_executable(remote60_connect_candidates_test
 )
 target_include_directories(remote60_connect_candidates_test PRIVATE src)
 
+add_executable(remote60_punch_any_test
+  src/punch_any_test.cpp
+  src/directory_rendezvous.cpp
+)
+target_include_directories(remote60_punch_any_test PRIVATE src)
+target_link_libraries(remote60_punch_any_test PRIVATE common ws2_32)
+
 # Throwaway diagnostic, not part of the product and not staged into the installer. Answers
 # whether a SYSTEM process on the Winlogon desktop can read pixels, and with which API, before
 # the secure-desktop capture work commits to one. Delete once 구현계획 U1 is answered.

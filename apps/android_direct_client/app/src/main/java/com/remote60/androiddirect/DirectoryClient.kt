@@ -27,6 +27,17 @@ object DirectoryClient {
         val ip: String,
         val port: Int,
         val punchToken: String,
+        /**
+         * Every address the host may be reachable at, most-preferred first, as "ip:port|kind".
+         *
+         * One address cannot serve two networks that filter in opposite directions: a residential
+         * ISP blocks the well-known port inbound, a company Wi-Fi blocks the high one outbound.
+         * The client cannot tell which side it is on from here -- both look like silence -- so it
+         * tries them all and keeps whichever answers.
+         *
+         * Falls back to the single [ip]:[port] when talking to a directory that predates this.
+         */
+        val candidates: List<String>,
     )
 
     class DirectoryException(message: String) : Exception(message)
@@ -158,7 +169,22 @@ object DirectoryClient {
         if (ip.isEmpty() || port <= 0) throw DirectoryException("host address unavailable")
         val punchToken = response.optString("punchToken")
         if (punchToken.length != 32) throw DirectoryException("connection authorization unavailable")
-        return ConnectTarget(ip, port, punchToken)
+
+        val candidates = mutableListOf<String>()
+        val array = response.optJSONArray("candidates")
+        if (array != null) {
+            for (i in 0 until array.length()) {
+                val entry = array.optJSONObject(i) ?: continue
+                val candidateIp = entry.optString("ip")
+                val candidatePort = entry.optInt("port")
+                if (candidateIp.isEmpty() || candidatePort <= 0 || candidatePort > 65535) continue
+                val kind = entry.optString("kind", "unknown")
+                candidates.add("$candidateIp:$candidatePort|$kind")
+            }
+        }
+        // An older directory sends no list; the single address it does send is still valid.
+        if (candidates.isEmpty()) candidates.add("$ip:$port|public")
+        return ConnectTarget(ip, port, punchToken, candidates)
     }
 
     // ------------------------------------------------------------------ transport
