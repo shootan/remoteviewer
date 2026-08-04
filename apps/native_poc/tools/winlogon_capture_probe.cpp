@@ -39,6 +39,9 @@ namespace {
 
 constexpr wchar_t kServiceName[] = L"GNLinkWinlogonProbe";
 constexpr DWORD kAgentPollMs = 250;
+// Generous enough for the longest sane run, short enough that a wedge clears itself well before
+// anyone notices. The service outlives the agent it waits on, so it gets the larger budget.
+constexpr DWORD kServiceHardLimitSeconds = 300;
 
 // ---------------------------------------------------------------------------- shared helpers
 
@@ -55,6 +58,22 @@ std::wstring exe_dir() {
 }
 
 std::wstring gLogPath;
+
+// Nothing here may outlive its own run. The first attempt left a SYSTEM service process alive
+// in session 0 for twenty minutes -- it survived the desktop it was working on going away when
+// RDP disconnected, kept the executable locked so the fix could not even be rebuilt, and needed
+// administrator rights to clear. A diagnostic that can strand a SYSTEM process is worse than
+// the uncertainty it was written to remove, so both SYSTEM-side modes arm a hard deadline that
+// ends the process no matter what any Win32 call is doing.
+void arm_self_destruct(DWORD seconds, const wchar_t* who) {
+  std::thread([seconds, who]() {
+    Sleep(seconds * 1000);
+    // Deliberately not a graceful shutdown: the whole point is to survive a wedged GDI or DXGI
+    // call, and those are exactly the ones that will not return to let us unwind politely.
+    wprintf(L"%s: self-destruct deadline reached, exiting\n", who);
+    ExitProcess(3);
+  }).detach();
+}
 
 void logf(const wchar_t* format, ...) {
   wchar_t line[2048]{};
@@ -269,9 +288,20 @@ Outcome capture_via_dxgi(const std::wstring& outPath, ULONGLONG deadlineTicks) {
   ComPtr<IDXGIResource> resource;
   DXGI_OUTDUPL_FRAME_INFO frameInfo{};
   bool acquired = false;
+  int pointerOnly = 0;
   while (!acquired && GetTickCount64() < deadlineTicks) {
     hr = duplication->AcquireNextFrame(250, &frameInfo, &resource);
     if (SUCCEEDED(hr)) {
+      // A frame with no present time is a cursor update: the desktop texture was not refreshed
+      // and reading it yields whatever was in the buffer, which on the first acquire is black.
+      // Measured on the ordinary desktop, that produced a perfectly uniform image that would
+      // have been recorded as a successful capture.
+      if (frameInfo.LastPresentTime.QuadPart == 0) {
+        ++pointerOnly;
+        duplication->ReleaseFrame();
+        resource.Reset();
+        continue;
+      }
       acquired = true;
       break;
     }
@@ -286,11 +316,14 @@ Outcome capture_via_dxgi(const std::wstring& outPath, ULONGLONG deadlineTicks) {
     return Outcome::Failed;
   }
   if (!acquired) {
-    logf(L"      DXGI: DuplicateOutput SUCCEEDED but no frame arrived before the deadline.");
-    logf(L"      DXGI: that means the desktop was readable and simply static -- move the mouse "
-         L"over the prompt and run again to force a frame.");
+    logf(L"      DXGI: DuplicateOutput SUCCEEDED but no desktop update arrived before the "
+         L"deadline (%d cursor-only frames were skipped).",
+         pointerOnly);
+    logf(L"      DXGI: the desktop was reachable and simply not repainting. Moving the mouse "
+         L"only makes cursor frames; click or drag something on the prompt to force a repaint.");
     return Outcome::Inconclusive;
   }
+  if (pointerOnly > 0) logf(L"      DXGI: skipped %d cursor-only frames first", pointerOnly);
 
   ComPtr<ID3D11Texture2D> frame;
   Outcome outcome = Outcome::Failed;
@@ -387,7 +420,10 @@ bool attach_and_capture_on_thread(const std::wstring& outDir, const std::wstring
 }
 
 int run_agent(const std::wstring& outDir, DWORD seconds) {
-  gLogPath = outDir + L"\\probe.log";
+  arm_self_destruct(seconds + 45, L"agent");
+  // A separate file from the controller's: _wfopen_s opens without sharing, so two processes
+  // appending to one log lose lines exactly when something is going wrong and the log matters.
+  gLogPath = outDir + L"\\probe_agent.log";
   DWORD sessionId = 0;
   ProcessIdToSessionId(GetCurrentProcessId(), &sessionId);
   logf(L"agent: running in session %lu as SYSTEM, watching for %lu seconds", sessionId, seconds);
@@ -397,8 +433,9 @@ int run_agent(const std::wstring& outDir, DWORD seconds) {
   logf(L"agent: control capture on the current desktop");
   attach_and_capture_on_thread(outDir, L"control", 8);
 
-  logf(L"agent: now open a UAC prompt (run anything as administrator), leave it up, and MOVE "
-       L"THE MOUSE over it -- a completely still screen produces no DXGI frame at all");
+  logf(L"agent: now open a UAC prompt (run anything as administrator) and make it REPAINT --");
+  logf(L"agent:   hover the Yes/No buttons, or drag the dialog. Moving the cursor alone only");
+  logf(L"agent:   produces cursor frames, which carry no desktop pixels.");
   const ULONGLONG deadline = GetTickCount64() + static_cast<ULONGLONG>(seconds) * 1000ull;
   std::wstring lastSeen;
   bool captured = false;
@@ -486,42 +523,96 @@ bool spawn_agent_in_session() {
   startup.cb = sizeof(startup);
   startup.lpDesktop = const_cast<wchar_t*>(L"winsta0\\default");
   PROCESS_INFORMATION process{};
+  logf(L"service: spawning %s", command);
   ok = CreateProcessAsUserW(agentToken, nullptr, command, nullptr, nullptr, FALSE,
                             CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr,
                             &startup, &process) != FALSE;
   CloseHandle(agentToken);
   if (ok) {
-    WaitForSingleObject(process.hProcess, (gSeconds + 30) * 1000);
+    logf(L"service: agent started pid=%lu", process.dwProcessId);
+    const DWORD waited =
+        WaitForSingleObject(process.hProcess, (gSeconds + 30) * 1000);
+    DWORD exitCode = 0;
+    GetExitCodeProcess(process.hProcess, &exitCode);
+    // An agent that dies instantly is the failure that leaves no other trace: it writes no log
+    // of its own, so its exit code is the only thing that says what happened.
+    logf(L"service: agent finished wait=%lu exitCode=0x%08lX%s", waited, exitCode,
+         exitCode == 0xC0000142u ? L" (DLL init failed -- the target session's window station "
+                                   L"was not reachable)"
+                                 : L"");
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
   }
   return ok;
 }
 
-void WINAPI service_main(DWORD argc, LPWSTR* argv) {
+// The service reads its parameters from a file next to the exe rather than from the arguments
+// StartService passes. The first run produced a log with controller lines only -- no service
+// line at all -- and service start arguments were the one link that could not be observed from
+// outside. A file can be checked before and after, so this removes the unobservable step
+// instead of guessing about it.
+std::wstring config_path() { return exe_dir() + L"\\probe_config.txt"; }
+
+bool write_config(const std::wstring& outDir, DWORD session, DWORD seconds) {
+  FILE* file = nullptr;
+  if (_wfopen_s(&file, config_path().c_str(), L"w, ccs=UTF-8") != 0 || !file) return false;
+  fwprintf(file, L"%s\n%lu\n%lu\n", outDir.c_str(), session, seconds);
+  fclose(file);
+  return true;
+}
+
+bool read_config() {
+  FILE* file = nullptr;
+  if (_wfopen_s(&file, config_path().c_str(), L"r, ccs=UTF-8") != 0 || !file) return false;
+  wchar_t dir[MAX_PATH]{};
+  wchar_t session[32]{};
+  wchar_t seconds[32]{};
+  const bool ok = fgetws(dir, MAX_PATH, file) && fgetws(session, 32, file) &&
+                  fgetws(seconds, 32, file);
+  fclose(file);
+  if (!ok) return false;
+  std::wstring dirText = dir;
+  while (!dirText.empty() && (dirText.back() == L'\n' || dirText.back() == L'\r')) {
+    dirText.pop_back();
+  }
+  gOutDir = dirText;
+  gTargetSession = static_cast<DWORD>(_wtoi(session));
+  gSeconds = static_cast<DWORD>(_wtoi(seconds));
+  return !gOutDir.empty();
+}
+
+void WINAPI service_main(DWORD, LPWSTR*) {
+  // Log to a path that does not depend on anything read at runtime, and do it before any other
+  // call, so a service that dies early still says it was alive.
+  gLogPath = exe_dir() + L"\\probe_service.log";
+  DeleteFileW(gLogPath.c_str());
+  logf(L"service: entered service_main");
+  // Armed before anything that can block, including StartServiceCtrlDispatcherW's wait for the
+  // SCM to acknowledge a stop that a wedged service_main will never send.
+  arm_self_destruct(kServiceHardLimitSeconds, L"service");
+
   gStatusHandle = RegisterServiceCtrlHandlerExW(kServiceName, service_control, nullptr);
   if (!gStatusHandle) {
-    // Without a handle every status report is silently dropped and the controller would just
-    // wait out its deadline, so leave a trace in the log the user is going to read.
-    if (argc >= 2) {
-      gLogPath = std::wstring(argv[1]) + L"\\probe.log";
-      logf(L"service: RegisterServiceCtrlHandlerExW failed err=%s",
-           last_error_text(GetLastError()).c_str());
-    }
+    logf(L"service: RegisterServiceCtrlHandlerExW failed err=%s",
+         last_error_text(GetLastError()).c_str());
     return;
   }
   set_service_state(SERVICE_START_PENDING);
-  if (argc >= 3) {
-    gOutDir = argv[1];
-    gTargetSession = static_cast<DWORD>(_wtoi(argv[2]));
-    if (argc >= 4) gSeconds = static_cast<DWORD>(_wtoi(argv[3]));
+
+  if (!read_config()) {
+    logf(L"service: could not read %s", config_path().c_str());
+    set_service_state(SERVICE_STOPPED);
+    return;
   }
-  gLogPath = gOutDir + L"\\probe.log";
+  logf(L"service: outDir=%s targetSession=%lu seconds=%lu", gOutDir.c_str(), gTargetSession,
+       gSeconds);
+
   set_service_state(SERVICE_RUNNING);
   if (!spawn_agent_in_session()) {
     logf(L"service: CreateProcessAsUserW into session %lu failed err=%s", gTargetSession,
          last_error_text(GetLastError()).c_str());
   }
+  logf(L"service: finished, stopping");
   set_service_state(SERVICE_STOPPED);
 }
 
@@ -572,10 +663,14 @@ int run_controller(DWORD targetSession, DWORD seconds) {
     return 3;
   }
 
-  const std::wstring sessionText = std::to_wstring(targetSession);
-  const std::wstring secondsText = std::to_wstring(seconds);
-  LPCWSTR args[] = {kServiceName, outDir.c_str(), sessionText.c_str(), secondsText.c_str()};
-  if (!StartServiceW(service, ARRAYSIZE(args), args)) {
+  if (!write_config(outDir, targetSession, seconds)) {
+    logf(L"controller: could not write %s", config_path().c_str());
+    DeleteService(service);
+    CloseServiceHandle(service);
+    CloseServiceHandle(manager);
+    return 5;
+  }
+  if (!StartServiceW(service, 0, nullptr)) {
     logf(L"controller: StartService failed err=%s", last_error_text(GetLastError()).c_str());
     DeleteService(service);
     CloseServiceHandle(service);
@@ -597,6 +692,31 @@ int run_controller(DWORD targetSession, DWORD seconds) {
   DeleteService(service);
   CloseServiceHandle(service);
   CloseServiceHandle(manager);
+  DeleteFileW(config_path().c_str());
+
+  // Fold the SYSTEM-side logs into the one the user was told to read. Three logs in three
+  // places is how a diagnostic gets misread as "nothing happened".
+  auto absorb = [&](const std::wstring& path, const wchar_t* heading, const wchar_t* ifMissing) {
+    FILE* source = nullptr;
+    if (_wfopen_s(&source, path.c_str(), L"r, ccs=UTF-8") != 0 || !source) {
+      logf(L"%s", ifMissing);
+      return;
+    }
+    logf(L"%s", heading);
+    wchar_t line[2048]{};
+    while (fgetws(line, ARRAYSIZE(line), source)) {
+      std::wstring text = line;
+      while (!text.empty() && (text.back() == L'\n' || text.back() == L'\r')) text.pop_back();
+      if (!text.empty()) logf(L"%s", text.c_str());
+    }
+    fclose(source);
+    DeleteFileW(path.c_str());
+  };
+  absorb(exe_dir() + L"\\probe_service.log", L"---- service (SYSTEM, session 0) ----",
+         L"---- the service never reached service_main and left no log ----");
+  absorb(outDir + L"\\probe_agent.log", L"---- agent (SYSTEM, target session) ----",
+         L"---- the agent never started or never wrote a line ----");
+
   logf(L"controller: temporary service removed. Read %s and the .bmp files beside it.",
        gLogPath.c_str());
   return 0;

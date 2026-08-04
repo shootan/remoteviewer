@@ -327,7 +327,7 @@ add_executable(remote60_winlogon_capture_probe
   tools/winlogon_capture_probe.cpp
 )
 target_link_libraries(remote60_winlogon_capture_probe PRIVATE d3d11 dxgi gdi32 advapi32 user32)
-set_target_properties(remote60_winlogon_capture_probe PROPERTIES OUTPUT_NAME "WinlogonCaptureProbe")
+set_target_properties(remote60_winlogon_capture_probe PROPERTIES OUTPUT_NAME "WinlogonProbe")
 
 add_executable(remote60_udp_fec_interleave_test
   src/native_video_client_shared_core.cpp
