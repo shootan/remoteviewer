@@ -309,10 +309,63 @@ async function handleHostRegister(req, res) {
     lastSeen: previous ? previous.lastSeen : 0,
     publicIp: previous ? previous.publicIp : '',
     publicUdpPort: previous ? previous.publicUdpPort : 0,
+    localIps: previous ? previous.localIps || [] : [],
+    localUdpPort: previous ? previous.localUdpPort || 0 : 0,
+    alternateUdpPort: previous ? previous.alternateUdpPort || 0 : 0,
   };
   hostTokens.set(tokenHash, hostId);
   saveStoreNow();
   sendJson(res, 200, { hostId, hostToken, hostName });
+}
+
+// Whatever a host reports about itself is untrusted input that ends up in another client's
+// connect list, so it is bounded and shape-checked rather than passed through.
+const MAX_LOCAL_IPS = 6;
+
+function sanitizePort(value) {
+  const port = Number(value);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : 0;
+}
+
+function sanitizeIpv4List(value) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  for (const entry of value) {
+    const text = String(entry || '');
+    // Dotted quad only. Anything else would become an address some other client dials.
+    const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+    if (!m) continue;
+    if (m.slice(1).some((part) => Number(part) > 255)) continue;
+    // Loopback and link-local can never reach a peer; link-local in particular means DHCP failed.
+    if (text.startsWith('127.') || text.startsWith('169.254.') || text === '0.0.0.0') continue;
+    if (!out.includes(text)) out.push(text);
+    if (out.length >= MAX_LOCAL_IPS) break;
+  }
+  return out;
+}
+
+/**
+ * The addresses a client should try, most-preferred first.
+ *
+ * Private candidates lead because when one works the traffic never leaves the LAN -- faster, and
+ * the only route at all when the router will not hairpin. The public candidate is the observed
+ * mapping. The alternate port exists because a network that filters the first may pass the
+ * second, which is the whole reason a single address was not enough.
+ */
+function connectCandidatesFor(host) {
+  const out = [];
+  const add = (ip, port, kind) => {
+    if (!ip || !port) return;
+    if (out.some((c) => c.ip === ip && c.port === port)) return;
+    out.push({ ip, port, kind });
+  };
+  const lanPort = host.localUdpPort || host.publicUdpPort;
+  for (const ip of host.localIps || []) add(ip, lanPort, 'private');
+  add(host.publicIp, host.publicUdpPort, 'public');
+  if (host.alternateUdpPort && host.alternateUdpPort !== host.publicUdpPort) {
+    add(host.publicIp, host.alternateUdpPort, 'public-alt');
+  }
+  return out;
 }
 
 async function handleHostHeartbeat(req, res) {
@@ -328,6 +381,13 @@ async function handleHostHeartbeat(req, res) {
   host.publicIp = obs ? obs.ip : remoteIp(req);
   host.publicUdpPort = obs ? obs.port : Number(body.udpPort || 0);
   host.hostName = String(body.hostName || host.hostName).slice(0, 64);
+  // Where else this host can be reached. The public address is ours to determine -- we see the
+  // mapping NAT actually made -- but a LAN address and a second listening port are only knowable
+  // at the host, and one published address cannot serve two networks whose filtering points in
+  // opposite directions.
+  host.localIps = sanitizeIpv4List(body.localIps);
+  host.alternateUdpPort = sanitizePort(body.alternateUdpPort);
+  host.localUdpPort = sanitizePort(body.localUdpPort);
   host.lastSeen = Date.now();
   saveStoreSoon();
 
@@ -380,8 +440,10 @@ async function handleConnect(req, res) {
   pendingPunch.set(host.hostId, list);
 
   sendJson(res, 200, {
+    // Kept for clients that predate candidates; they dial this one and behave as before.
     hostPublicIp: host.publicIp,
     hostPublicUdpPort: host.publicUdpPort,
+    candidates: connectCandidatesFor(host),
     punchToken,
   });
 }

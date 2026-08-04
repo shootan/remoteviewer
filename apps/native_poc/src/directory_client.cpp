@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <iphlpapi.h>
 #include <shlobj.h>
 
 #include <algorithm>
@@ -11,11 +12,14 @@
 #include <iostream>
 #include <random>
 #include <sstream>
+#include <vector>
 
+#include "connect_candidates.hpp"
 #include "json_profile.hpp"
 #include "poc_protocol.hpp"
 
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "iphlpapi.lib")
 
 namespace remote60::native_poc::directory {
 namespace {
@@ -540,11 +544,69 @@ bool HostAgent::RefreshObservedAddress() {
   return false;
 }
 
+// Every IPv4 address this machine holds that could plausibly reach a peer. A client on the same
+// network reaches one of these without leaving the LAN, which is both faster and free -- and it
+// is the only route that works at all when the router will not hairpin.
+std::vector<std::string> local_ipv4_addresses() {
+  std::vector<std::string> out;
+  ULONG size = 16 * 1024;
+  std::vector<uint8_t> buffer(size);
+  auto* table = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+  ULONG result = GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                                                   GAA_FLAG_SKIP_DNS_SERVER,
+                                      nullptr, table, &size);
+  if (result == ERROR_BUFFER_OVERFLOW) {
+    buffer.assign(size, 0);
+    table = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+    result = GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                                               GAA_FLAG_SKIP_DNS_SERVER,
+                                  nullptr, table, &size);
+  }
+  if (result != NO_ERROR) return out;
+
+  for (auto* adapter = table; adapter; adapter = adapter->Next) {
+    // A down adapter's address is stale; punching it burns part of the connect budget.
+    if (adapter->OperStatus != IfOperStatusUp) continue;
+    if (adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+    for (auto* unicast = adapter->FirstUnicastAddress; unicast; unicast = unicast->Next) {
+      if (!unicast->Address.lpSockaddr) continue;
+      if (unicast->Address.lpSockaddr->sa_family != AF_INET) continue;
+      const auto* addr = reinterpret_cast<const sockaddr_in*>(unicast->Address.lpSockaddr);
+      char text[INET_ADDRSTRLEN] = {};
+      if (!inet_ntop(AF_INET, &addr->sin_addr, text, sizeof(text))) continue;
+      const std::string ip = text;
+      if (!is_usable_local_ipv4(ip)) continue;
+      if (std::find(out.begin(), out.end(), ip) == out.end()) out.push_back(ip);
+    }
+  }
+  return out;
+}
+
 bool HostAgent::Heartbeat(std::vector<PunchTarget>* outPunch) {
   std::ostringstream body;
   body << "{\"hostToken\":\"" << json_escape(hostToken_) << "\","
        << "\"hostName\":\"" << json_escape(cfg_.hostName) << "\","
-       << "\"observeToken\":\"" << json_escape(observeToken_) << "\"}";
+       << "\"observeToken\":\"" << json_escape(observeToken_) << "\"";
+
+  // Tell the directory where else this host can be reached. The observed public address is the
+  // server's to determine -- it sees the mapping NAT actually made -- but the private addresses
+  // and the second port are only knowable here.
+  if (cfg_.localUdpPort != 0) {
+    body << ",\"localUdpPort\":" << cfg_.localUdpPort;
+  }
+  if (cfg_.alternateUdpPort != 0 && cfg_.alternateUdpPort != cfg_.localUdpPort) {
+    body << ",\"alternateUdpPort\":" << cfg_.alternateUdpPort;
+  }
+  const std::vector<std::string> localIps = local_ipv4_addresses();
+  if (!localIps.empty()) {
+    body << ",\"localIps\":[";
+    for (size_t i = 0; i < localIps.size(); ++i) {
+      if (i) body << ",";
+      body << "\"" << json_escape(localIps[i]) << "\"";
+    }
+    body << "]";
+  }
+  body << "}";
 
   uint32_t status = 0;
   std::string resp;

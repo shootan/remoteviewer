@@ -132,6 +132,43 @@ function observe(token) {
     r.body.pendingPunch.length === 1 && r.body.pendingPunch[0].port === cliObs.localPort,
     JSON.stringify(r.body.pendingPunch));
 
+  // One published address cannot serve two networks that filter in opposite directions: a
+  // residential ISP blocks the well-known port inbound, a company Wi-Fi blocks the high one
+  // outbound. Offering several and letting the client find out is the only thing that works.
+  // Runs after the punch checks above, because a heartbeat consumes whatever punch is pending.
+  await api('POST', '/api/host/heartbeat', {
+    hostToken, observeToken: 'host-observe-1',
+    localIps: ['192.168.0.76', '127.0.0.1', '169.254.9.9', 'not-an-ip', '192.168.0.76'],
+    localUdpPort: 43000, alternateUdpPort: 3478,
+  });
+  await observe('client-observe-2');
+  r = await api('POST', '/api/connect', { hostId, observeToken: 'client-observe-2' }, session);
+  const cands = r.body.candidates || [];
+  const privateCands = cands.filter((c) => c.kind === 'private');
+  check('connect returns a candidate list', Array.isArray(cands) && cands.length === 3,
+    JSON.stringify(cands));
+  check('the LAN candidate comes first, so traffic can stay off the router',
+    cands[0] && cands[0].kind === 'private' && cands[0].ip === '192.168.0.76' &&
+    cands[0].port === 43000, JSON.stringify(cands[0]));
+  check('the observed public address is offered',
+    cands.some((c) => c.kind === 'public' && c.port === hostObs.localPort),
+    JSON.stringify(cands));
+  check('the alternate port is offered for networks that filter the first',
+    cands.some((c) => c.kind === 'public-alt' && c.port === 3478), JSON.stringify(cands));
+  // Anything a host reports ends up as an address some other client dials, so it is bounded and
+  // shape-checked rather than passed through. Only the reported list is filtered -- the observed
+  // public address is the server's own finding, and on this loopback test rig it is 127.0.0.1.
+  check('loopback, link-local, malformed and duplicate addresses are dropped from what the host reported',
+    privateCands.length === 1 && privateCands[0].ip === '192.168.0.76',
+    JSON.stringify(privateCands));
+  check('older clients still get the single address they understand',
+    r.body.hostPublicUdpPort === hostObs.localPort && !!r.body.hostPublicIp,
+    `port=${r.body.hostPublicUdpPort}`);
+  // The candidate query must not have consumed anything the punch flow needs.
+  r = await api('POST', '/api/host/heartbeat', { hostToken, observeToken: 'host-observe-1' });
+  check('the candidate connect queued its own punch',
+    r.body.pendingPunch.length === 1, JSON.stringify(r.body.pendingPunch));
+
   r = await api('POST', '/api/host/heartbeat', { hostToken, observeToken: 'host-observe-1' });
   check('punch is delivered once only', r.body.pendingPunch.length === 0);
 

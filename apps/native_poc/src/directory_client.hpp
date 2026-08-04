@@ -41,6 +41,9 @@ struct HostAgentConfig {
   // preserve it, which matters because a firewall-friendly bind port buys nothing once the
   // mapping lands somewhere else. 0 disables the check.
   uint16_t localUdpPort = 0;
+  // A second port this host is also listening on, published so a client whose network filters
+  // the first has something else to try. Zero when there is no second listener.
+  uint16_t alternateUdpPort = 0;
   uint32_t heartbeatSeconds = 25;
 };
 

@@ -3081,6 +3081,9 @@ int main(int argc, char** argv) {
       dirCfg.hostName = args.directoryHostName;
       dirCfg.observeUdpPort = args.directoryObservePort;
       dirCfg.localUdpPort = mediaBindPort;
+      // The legacy/alternate listener from N6. Publishing it is what lets a client whose network
+      // filters the primary port have something else to dial.
+      dirCfg.alternateUdpPort = lanPort;
       dirCfg.heartbeatSeconds = env_u32_clamped("REMOTE60_DIRECTORY_HEARTBEAT_SEC", 25, 5, 300);
       std::string dirError;
       const bool started = directoryAgent.Start(
