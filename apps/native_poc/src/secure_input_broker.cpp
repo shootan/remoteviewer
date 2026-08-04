@@ -177,7 +177,26 @@ bool SecureInputBrokerClient::SendInputEvent(const ControlInputEventMessage& inp
   message.wheelDelta = input.wheelDelta;
   message.keyCode = input.keyCode;
   std::lock_guard<std::mutex> lock(mu_);
+  apply_target_rect_locked(&message);
   return WriteLocked(message);
+}
+
+void SecureInputBrokerClient::SetTargetRect(int32_t originX, int32_t originY, uint32_t width,
+                                            uint32_t height) {
+  std::lock_guard<std::mutex> lock(mu_);
+  targetOriginX_ = originX;
+  targetOriginY_ = originY;
+  targetWidth_ = width;
+  targetHeight_ = height;
+}
+
+void SecureInputBrokerClient::apply_target_rect_locked(SecureInputMessage* message) const {
+  // Left zero when the host has not told us where the capture sits, which makes the agent fall
+  // back to the virtual screen rather than guess.
+  message->targetOriginX = targetOriginX_;
+  message->targetOriginY = targetOriginY_;
+  message->targetWidth = targetWidth_;
+  message->targetHeight = targetHeight_;
 }
 
 bool SecureInputBrokerClient::SendInputText(const ControlInputTextMessage& text,
@@ -190,6 +209,7 @@ bool SecureInputBrokerClient::SendInputText(const ControlInputTextMessage& text,
   message.textCount = std::min<uint16_t>(text.utf16Count, kSecureInputTextMax);
   std::copy_n(text.utf16, message.textCount, message.text);
   std::lock_guard<std::mutex> lock(mu_);
+  apply_target_rect_locked(&message);
   return WriteLocked(message);
 }
 

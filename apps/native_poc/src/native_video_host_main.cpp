@@ -1610,6 +1610,10 @@ struct PrimaryMonitorInfo {
   HMONITOR monitor = nullptr;
   uint32_t width = 0;
   uint32_t height = 0;
+  // Desktop position of this monitor. Nonzero whenever it is not the top-left one, and negative
+  // for a monitor placed left of or above the primary, which is why these are signed.
+  int32_t originX = 0;
+  int32_t originY = 0;
 };
 
 std::optional<PrimaryMonitorInfo> primary_monitor_info() {
@@ -1625,6 +1629,8 @@ std::optional<PrimaryMonitorInfo> primary_monitor_info() {
   out.monitor = monitor;
   out.width = static_cast<uint32_t>(width);
   out.height = static_cast<uint32_t>(height);
+  out.originX = info.rcMonitor.left;
+  out.originY = info.rcMonitor.top;
   return out;
 }
 
@@ -4135,6 +4141,11 @@ int main(int argc, char** argv) {
     activeDesktopBackend = DesktopCaptureBackend::Wgc;
     std::cout << "[native-video-host] rotation_unsupported fallback_reason=rotation_unsupported\n";
   }
+  // Tell the SYSTEM agent where the captured pixels live. Without it the agent can only assume,
+  // and its old assumption -- the primary monitor -- put every click on the wrong screen when the
+  // prompt opened somewhere else.
+  secureInputBroker.SetTargetRect(monitorInfo->originX, monitorInfo->originY, monitorInfo->width,
+                                  monitorInfo->height);
 
   winrt::Windows::Graphics::Capture::GraphicsCaptureItem item{nullptr};
   uint32_t captureWidth = 0;

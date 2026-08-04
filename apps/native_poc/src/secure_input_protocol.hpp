@@ -30,6 +30,13 @@ struct SecureInputMessage {
   uint32_t keyCode = 0;
   uint16_t textCount = 0;
   uint16_t reserved = 0;
+  // Where the client's coordinate space sits on the desktop, in desktop coordinates. Zero
+  // width/height means "unknown", which makes the agent fall back to the virtual screen. A
+  // monitor left of the primary gives a negative origin, so these are signed.
+  int32_t targetOriginX = 0;
+  int32_t targetOriginY = 0;
+  uint32_t targetWidth = 0;
+  uint32_t targetHeight = 0;
   uint16_t text[kSecureInputTextMax] = {};
 };
 #pragma pack(pop)

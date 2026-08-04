@@ -7,11 +7,14 @@
 #include <cstdio>
 #include <string>
 
+#include "secure_input_mapping.hpp"
 #include "secure_input_protocol.hpp"
 #include "secure_input_session.hpp"
 
 namespace {
 
+using remote60::native_poc::DesktopRect;
+using remote60::native_poc::map_client_point;
 using remote60::native_poc::SecureInputKind;
 using remote60::native_poc::SecureInputMessage;
 using remote60::native_poc::kInvalidSessionId;
@@ -303,19 +306,24 @@ bool attach_to_input_desktop(HDESK* ownedDesktop) {
 }
 
 POINT map_point(const SecureInputMessage& message) {
-  const int width = std::max<int>(1, GetSystemMetrics(SM_CXSCREEN));
-  const int height = std::max<int>(1, GetSystemMetrics(SM_CYSCREEN));
-  const uint32_t inputW = std::max<uint32_t>(1, message.inputWidth);
-  const uint32_t inputH = std::max<uint32_t>(1, message.inputHeight);
+  // Where the client's pixels live on the desktop. The host sends it when it knows; otherwise
+  // fall back to the virtual screen, which is what full-desktop capture covers and what
+  // SetCursorPos addresses. The old fallback was the primary monitor alone, which made a prompt
+  // on any other display unreachable.
+  DesktopRect target{message.targetOriginX, message.targetOriginY,
+                     static_cast<int32_t>(message.targetWidth),
+                     static_cast<int32_t>(message.targetHeight)};
+  if (!target.valid()) {
+    target.originX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    target.originY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    target.width = std::max<int32_t>(1, GetSystemMetrics(SM_CXVIRTUALSCREEN));
+    target.height = std::max<int32_t>(1, GetSystemMetrics(SM_CYVIRTUALSCREEN));
+  }
+  const auto mapped =
+      map_client_point(message.x, message.y, message.inputWidth, message.inputHeight, target);
   POINT point{};
-  point.x = static_cast<LONG>((static_cast<int64_t>(std::clamp<int32_t>(message.x, 0,
-                                                                        inputW - 1)) *
-                               (width - 1)) /
-                              std::max<uint32_t>(1, inputW - 1));
-  point.y = static_cast<LONG>((static_cast<int64_t>(std::clamp<int32_t>(message.y, 0,
-                                                                        inputH - 1)) *
-                               (height - 1)) /
-                              std::max<uint32_t>(1, inputH - 1));
+  point.x = mapped.x;
+  point.y = mapped.y;
   return point;
 }
 
