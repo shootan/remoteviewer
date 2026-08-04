@@ -636,6 +636,9 @@ void AndroidVideoDecoderSink::ResetCodecLocked() {
   bootstrapFrame_.reset();
   lastInputQueueSteadyUs_ = 0;
   bootstrapReplayCount_ = 0;
+  // A held buffer index belongs to the codec that produced it. Releasing it against a codec
+  // that has been torn down and rebuilt would target an unrelated buffer.
+  heldOutputValid_ = false;
   if (codec_) {
     AMediaCodec_stop(codec_);
     AMediaCodec_delete(codec_);
@@ -750,6 +753,25 @@ void AndroidVideoDecoderSink::ReleaseHeldOutputLocked(uint64_t nowUs) {
   }
   if (presentWindowStartUs_ == 0) presentWindowStartUs_ = handedOverUs;
   if (handedOverUs > lastPresentSteadyUs_) lastPresentSteadyUs_ = handedOverUs;
+
+  // A selection is confirmed by a frame of it reaching the display, so this has to live where
+  // frames are handed over. It sat in the drain loop, which now returns early for every
+  // normally-paced frame -- leaving the viewer waiting for an acknowledgement that had
+  // already happened, and dropping back to the target list on a timeout while video played.
+  if (pendingSelectionGeneration_ != 0 &&
+      readySelectionGeneration_ != pendingSelectionGeneration_) {
+    readySelectionGeneration_ = pendingSelectionGeneration_;
+    bootstrapFrame_.reset();
+    bootstrapReplayCount_ = 0;
+    char line[192];
+    std::snprintf(line, sizeof(line),
+                  "selection first output localGen=%llu streamGen=%llu ptsUs=%llu out=%llu",
+                  static_cast<unsigned long long>(readySelectionGeneration_),
+                  static_cast<unsigned long long>(latestOutputStreamGeneration_),
+                  static_cast<unsigned long long>(lastOutputPresentationUs_),
+                  static_cast<unsigned long long>(outputFrameCount_));
+    log_info(line);
+  }
 }
 
 void AndroidVideoDecoderSink::DrainOutputLocked() {
@@ -794,20 +816,6 @@ void AndroidVideoDecoderSink::DrainOutputLocked() {
       heldOutputScheduled_ = false;
       ReleaseHeldOutputLocked(nowUs);
       if (codec_ == nullptr) return;  // release failed and reset the codec
-      if (pendingSelectionGeneration_ != 0 &&
-          readySelectionGeneration_ != pendingSelectionGeneration_) {
-        readySelectionGeneration_ = pendingSelectionGeneration_;
-        bootstrapFrame_.reset();
-        bootstrapReplayCount_ = 0;
-        char line[192];
-        std::snprintf(line, sizeof(line),
-                      "selection first output localGen=%llu streamGen=%llu ptsUs=%llu out=%llu",
-                      static_cast<unsigned long long>(readySelectionGeneration_),
-                      static_cast<unsigned long long>(latestOutputStreamGeneration_),
-                      static_cast<unsigned long long>(lastOutputPresentationUs_),
-                      static_cast<unsigned long long>(outputFrameCount_));
-        log_info(line);
-      }
       if ((outputFrameCount_ % 30) == 1) {
         char line[128];
         std::snprintf(line, sizeof(line), "released output frame count=%llu flags=%u",
