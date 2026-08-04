@@ -2881,6 +2881,24 @@ int main(int argc, char** argv) {
 
   SOCKET listenSock = INVALID_SOCKET;
   SOCKET clientSock = INVALID_SOCKET;
+  // A second listener on the legacy port for clients that dial this PC by address; see the bind
+  // site. `retiredSock` holds whichever socket the handshake did not choose but that still has an
+  // owner -- the directory agent captured the primary socket and keeps heartbeating on it even
+  // when a LAN client wins the handshake.
+  SOCKET lanSock = INVALID_SOCKET;
+  SOCKET retiredSock = INVALID_SOCKET;
+  // main() returns from many places; a destructor is the only way to close these on every path.
+  struct SocketCloser {
+    SOCKET* handle;
+    ~SocketCloser() {
+      if (handle && *handle != INVALID_SOCKET) {
+        closesocket(*handle);
+        *handle = INVALID_SOCKET;
+      }
+    }
+  };
+  SocketCloser lanCloser{&lanSock};
+  SocketCloser retiredCloser{&retiredSock};
   // The port the media socket actually landed on. It only differs from args.bindPort when a
   // fallback candidate was used, and the directory must publish this one rather than the request.
   uint16_t mediaBindPort = args.bindPort;
@@ -3014,6 +3032,39 @@ int main(int argc, char** argv) {
     }
     std::cout << "[native-video-host] udp bound port=" << mediaBindPort << "\n";
 
+    // Keep the last candidate listening as well, so dialling this PC by address still works.
+    //
+    // The candidate list exists to move the host onto a port restrictive networks allow, and
+    // moving it is exactly what breaks the other way in: both clients default to the legacy port
+    // when someone types an address by hand. The directory path is unaffected -- it dials
+    // hostPublicUdpPort, which follows whatever the primary socket was given -- but a LAN user
+    // has nothing telling them the port changed.
+    //
+    // Only the handshake watches both. Whichever socket the Hello arrives on becomes the media
+    // socket and everything downstream is unchanged, so a session that never uses this listener
+    // behaves exactly as it did before.
+    const uint16_t lanPort =
+        portCandidates.size() > 1 ? portCandidates.back() : 0;
+    if (lanPort != 0 && lanPort != mediaBindPort) {
+      lanSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+      if (lanSock != INVALID_SOCKET) {
+        sockaddr_in lanAddr{};
+        lanAddr.sin_family = AF_INET;
+        lanAddr.sin_port = htons(lanPort);
+        lanAddr.sin_addr.s_addr = resolve_bind_address(args.bindAddress);
+        if (bind(lanSock, reinterpret_cast<const sockaddr*>(&lanAddr), sizeof(lanAddr)) == 0) {
+          std::cout << "[native-video-host] lan direct-dial listener port=" << lanPort << "\n";
+        } else {
+          // Not fatal: the primary socket is the one that matters, and the usual reason this
+          // fails is another GNLink host already holding the legacy port.
+          std::cout << "[native-video-host] lan direct-dial listener unavailable port=" << lanPort
+                    << "\n";
+          closesocket(lanSock);
+          lanSock = INVALID_SOCKET;
+        }
+      }
+    }
+
     // The directory agent shares this socket on purpose: the public address it publishes has
     // to be the one NAT maps for the media stream, and that is a property of this socket.
     if (!directoryUrl.empty()) {
@@ -3042,12 +3093,34 @@ int main(int argc, char** argv) {
     }
 
     for (;;) {
+      // Wait on the primary and, when present, the legacy direct-dial listener. Reading only the
+      // primary would leave a LAN client's Hello sitting unanswered forever.
+      SOCKET readySock = clientSock;
+      if (lanSock != INVALID_SOCKET) {
+        fd_set readSet;
+        FD_ZERO(&readSet);
+        FD_SET(clientSock, &readSet);
+        FD_SET(lanSock, &readSet);
+        timeval wait{};
+        wait.tv_sec = 1;
+        const int ready = select(0, &readSet, nullptr, nullptr, &wait);
+        if (ready == 0) continue;
+        if (ready == SOCKET_ERROR) {
+          std::cerr << "[native-video-host] udp handshake select failed err=" << WSAGetLastError()
+                    << "\n";
+          closesocket(clientSock);
+          return 5;
+        }
+        // The primary wins a tie: it is the one the directory published.
+        readySock = FD_ISSET(clientSock, &readSet) ? clientSock : lanSock;
+      }
+
       // Big enough for the directory's observation reply; a datagram larger than the buffer
       // would be dropped with WSAEMSGSIZE and taken for a handshake failure.
       uint8_t rx[kUdpReceiveBufferBytes];
       sockaddr_in peer{};
       int peerLen = sizeof(peer);
-      const int n = recvfrom(clientSock, reinterpret_cast<char*>(rx), sizeof(rx), 0,
+      const int n = recvfrom(readySock, reinterpret_cast<char*>(rx), sizeof(rx), 0,
                              reinterpret_cast<sockaddr*>(&peer), &peerLen);
       // Zero-length datagrams are legal (NAT keepalives, scanners) and must not end the
       // process while it waits for a real client.
@@ -3069,7 +3142,12 @@ int main(int argc, char** argv) {
                   (hello.features & remote60::native_poc::kUdpFeatureVideoFec) != 0;
       }
       if (!isHello) {
-        (void)directoryAgent.ConsumeUdpPacket(rx, static_cast<size_t>(n), peer);
+        // Only the primary socket carries directory traffic; the legacy listener never had a
+        // punch or an observation sent to it, and feeding it in would let unrelated LAN noise
+        // interrupt the heartbeat.
+        if (readySock == clientSock) {
+          (void)directoryAgent.ConsumeUdpPacket(rx, static_cast<size_t>(n), peer);
+        }
         continue;
       }
 
@@ -3092,8 +3170,26 @@ int main(int argc, char** argv) {
         sessionDirectoryAuthenticated.store(true, std::memory_order_release);
         ack.features |= remote60::native_poc::kUdpFeatureDirectoryAuth;
       }
-      (void)sendto(clientSock, reinterpret_cast<const char*>(&ack), sizeof(ack), 0,
+      (void)sendto(readySock, reinterpret_cast<const char*>(&ack), sizeof(ack), 0,
                    reinterpret_cast<const sockaddr*>(&peer), peerLen);
+
+      // The socket that answered becomes the media socket for the rest of the session, so
+      // everything downstream keeps using clientSock exactly as before.
+      if (readySock != clientSock) {
+        std::cout << "[native-video-host] client arrived on the lan direct-dial listener; "
+                     "media moves to port "
+                  << lanPort << "\n";
+        // The directory agent captured the primary socket and must keep heartbeating on it, so
+        // it is retired rather than closed -- otherwise the host drops off the directory the
+        // moment someone connects over the LAN.
+        retiredSock = clientSock;
+        clientSock = lanSock;
+        lanSock = INVALID_SOCKET;
+      } else if (lanSock != INVALID_SOCKET) {
+        closesocket(lanSock);
+        lanSock = INVALID_SOCKET;
+      }
+
       udpPeer = peer;
       udpPeerReady = true;
       {
