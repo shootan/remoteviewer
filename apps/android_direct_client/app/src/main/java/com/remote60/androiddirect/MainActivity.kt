@@ -1047,6 +1047,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
+        // Fires once per frame this view actually latched. Frames handed to the surface that
+        // the view never latched -- because a newer one arrived before it drew -- are invisible
+        // to every other counter, and are exactly what "it says 30 but looks like 15" is.
+        NativeSessionBridge.nativeNotifyFrameDisplayed()
     }
 
     private fun applyImmersiveMode() {

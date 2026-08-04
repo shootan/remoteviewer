@@ -31,6 +31,10 @@ object NativeSessionBridge {
 
     external fun nativeDirectoryLastError(): String
     external fun nativeSetSurface(surface: Surface?)
+
+    /** Called once per frame the view actually latched, which is the only count that
+     *  corresponds to what a person sees. Everything else counts frames we handed over. */
+    external fun nativeNotifyFrameDisplayed()
     external fun nativeGetStatus(): String
     external fun nativeGetLastError(): String
     external fun nativeGetVideoDebugStatus(): String

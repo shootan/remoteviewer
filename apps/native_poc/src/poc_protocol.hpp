@@ -213,6 +213,9 @@ struct ControlClientMetricsMessage {
   uint32_t presentScheduledCount = 0;
   uint32_t presentImmediateCount = 0;
   uint32_t presentReanchorCount = 0;
+  // Counted by the view itself, once per frame it latched. Every other number here counts
+  // frames handed to the display; this one counts frames that reached it.
+  uint32_t presentDisplayedCount = 0;
 };
 
 struct ControlRequestKeyFrameMessage {

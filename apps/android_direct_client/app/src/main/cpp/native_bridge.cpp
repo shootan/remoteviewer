@@ -203,6 +203,12 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeSetSurface(
   g_video_decoder_sink.SetSurface(env, surface);
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeNotifyFrameDisplayed(
+    JNIEnv* /* env */, jobject /* this */) {
+  g_video_decoder_sink.NotifyFrameDisplayed();
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetStatus(
     JNIEnv* env, jobject /* this */) {

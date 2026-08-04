@@ -19,6 +19,9 @@ namespace {
 
 constexpr const char* kLogTag = "remote60_android_direct";
 constexpr const char* kMimeTypeAvc = "video/avc";
+// How close to its slot a frame is handed over. One 60 Hz vsync of slack: early enough that
+// the compositor has it in time, late enough that no second frame is ever waiting behind it.
+constexpr uint64_t kOutputReleaseLeadUs = 16000ULL;
 constexpr uint64_t kBootstrapReplayIntervalUs = 250000ULL;
 constexpr uint64_t kBootstrapReplayMaxCount = 2ULL;
 
@@ -274,6 +277,9 @@ bool AndroidVideoDecoderSink::DrainPresentationStats(
   const uint64_t reanchors = playoutClock_.ReanchorCount();
   out->reanchorCount = static_cast<uint32_t>(reanchors - presentWindowReanchorBase_);
   presentWindowReanchorBase_ = reanchors;
+  const uint64_t displayed = displayedFrameCount_.load(std::memory_order_relaxed);
+  out->displayedCount = static_cast<uint32_t>(displayed - displayedWindowBase_);
+  displayedWindowBase_ = displayed;
 
   std::sort(gaps.begin(), gaps.end());
   const size_t n = gaps.size();
@@ -711,8 +717,55 @@ void AndroidVideoDecoderSink::UpdateOutputFormatLocked() {
   AMediaFormat_delete(format);
 }
 
+void AndroidVideoDecoderSink::ReleaseHeldOutputLocked(uint64_t nowUs) {
+  if (!heldOutputValid_ || !codec_) return;
+  heldOutputValid_ = false;
+
+  media_status_t status;
+  if (heldOutputScheduled_) {
+    // NDK timestamps use CLOCK_MONOTONIC, the same domain as steady_clock on Android.
+    status = AMediaCodec_releaseOutputBufferAtTime(
+        codec_, heldOutputIndex_, static_cast<int64_t>(heldOutputPresentUs_ * 1000ULL));
+    ++presentScheduledCount_;
+  } else {
+    status = AMediaCodec_releaseOutputBuffer(codec_, heldOutputIndex_, true);
+    ++presentImmediateCount_;
+  }
+  if (status != AMEDIA_OK) {
+    log_error("AMediaCodec output release failed");
+    ResetCodecLocked();
+    return;
+  }
+  ++outputFrameCount_;
+
+  // Spacing between the moments frames were handed over on their due date. This is what the
+  // pacing achieved; whether the view then latched each one is counted separately, by the
+  // view itself, because only it knows.
+  const uint64_t handedOverUs = heldOutputScheduled_ ? heldOutputPresentUs_ : nowUs;
+  if (lastPresentSteadyUs_ != 0 && handedOverUs > lastPresentSteadyUs_) {
+    const uint64_t gapUs = handedOverUs - lastPresentSteadyUs_;
+    if (presentGapsUs_.size() < 4096) {
+      presentGapsUs_.push_back(static_cast<uint32_t>(std::min<uint64_t>(gapUs, 4000000ULL)));
+    }
+  }
+  if (presentWindowStartUs_ == 0) presentWindowStartUs_ = handedOverUs;
+  if (handedOverUs > lastPresentSteadyUs_) lastPresentSteadyUs_ = handedOverUs;
+}
+
 void AndroidVideoDecoderSink::DrainOutputLocked() {
   if (!codec_) return;
+
+  // A frame handed over early is not a frame shown early -- it is a frame at risk of never
+  // being shown at all. The view latches one buffer per vsync and takes the newest, so a
+  // burst of three decoded frames pushed to the surface within a millisecond of each other
+  // displays as one and discards two, no matter how carefully their timestamps were spaced.
+  // Hold each frame in the codec until its slot arrives, so the surface never holds more
+  // than one and every frame gets its own vsync to be picked up in.
+  if (heldOutputValid_) {
+    const uint64_t nowUs = steady_now_us();
+    if (nowUs + kOutputReleaseLeadUs < heldOutputPresentUs_) return;  // not due yet
+    ReleaseHeldOutputLocked(nowUs);
+  }
 
   AMediaCodecBufferInfo info{};
   for (;;) {
@@ -722,50 +775,25 @@ void AndroidVideoDecoderSink::DrainOutputLocked() {
           (info.presentationTimeUs > 0) ? static_cast<uint64_t>(info.presentationTimeUs) : 0;
       latestOutputStreamGeneration_ = expectedStreamGeneration_;
       const uint64_t nowUs = steady_now_us();
-      media_status_t releaseStatus = AMEDIA_OK;
-      // The upper bound only rejects nonsense timestamps. It has to stay clear of the depth
-      // the playout clock legitimately reaches -- a burst arriving early sits well past the
-      // target lead -- or ordinary buffering would be dumped straight to the screen, which is
-      // the stutter the clock exists to prevent.
-      const bool scheduledRelease = lastOutputPresentationUs_ > nowUs + 1000ULL &&
-                                    lastOutputPresentationUs_ < nowUs + 400000ULL;
-      if (scheduledRelease) {
-        // NDK timestamps use CLOCK_MONOTONIC, the same domain as steady_clock on Android.
-        releaseStatus = AMediaCodec_releaseOutputBufferAtTime(
-            codec_, outputIndex, static_cast<int64_t>(lastOutputPresentationUs_ * 1000ULL));
-      } else {
-        releaseStatus = AMediaCodec_releaseOutputBuffer(codec_, outputIndex, true);
+      // Hold it until its slot rather than pushing it to the surface now. The upper bound
+      // only rejects nonsense timestamps; anything sane waits here, where waiting is free,
+      // instead of in a queue that discards all but the newest entry.
+      const bool schedulable = lastOutputPresentationUs_ > nowUs + kOutputReleaseLeadUs &&
+                               lastOutputPresentationUs_ < nowUs + 400000ULL;
+      if (schedulable) {
+        heldOutputValid_ = true;
+        heldOutputIndex_ = static_cast<size_t>(outputIndex);
+        heldOutputPresentUs_ = lastOutputPresentationUs_;
+        heldOutputScheduled_ = true;
+        return;  // one frame in flight; the pump releases it when due
       }
-      if (releaseStatus != AMEDIA_OK) {
-        log_error("AMediaCodec output release failed");
-        ResetCodecLocked();
-        return;
-      }
-      ++outputFrameCount_;
-      // Smoothness is the spacing between frames on screen. For a scheduled release that is
-      // the presentation timestamp we asked for, not the moment we called release: this loop
-      // drains every ready buffer back to back, so timing the calls measured the drain and
-      // not the display. An immediate release has no schedule, and lands when it lands --
-      // counting those separately is what distinguishes a paced stream from a stuttering one.
-      {
-        const uint64_t displayedAtUs = scheduledRelease ? lastOutputPresentationUs_
-                                                        : steady_now_us();
-        if (scheduledRelease) {
-          ++presentScheduledCount_;
-        } else {
-          ++presentImmediateCount_;
-        }
-        if (lastPresentSteadyUs_ != 0 && displayedAtUs > lastPresentSteadyUs_) {
-          const uint64_t gapUs = displayedAtUs - lastPresentSteadyUs_;
-          if (presentGapsUs_.size() < 4096) {
-            presentGapsUs_.push_back(static_cast<uint32_t>(std::min<uint64_t>(gapUs, 4000000ULL)));
-          }
-        }
-        if (presentWindowStartUs_ == 0) presentWindowStartUs_ = displayedAtUs;
-        // An immediate release after a scheduled one can be stamped earlier than its
-        // predecessor; keep the window monotonic so the fps span stays meaningful.
-        if (displayedAtUs > lastPresentSteadyUs_) lastPresentSteadyUs_ = displayedAtUs;
-      }
+      // Past due, or no usable timestamp: it cannot be paced, so show it now.
+      heldOutputValid_ = true;
+      heldOutputIndex_ = static_cast<size_t>(outputIndex);
+      heldOutputPresentUs_ = lastOutputPresentationUs_;
+      heldOutputScheduled_ = false;
+      ReleaseHeldOutputLocked(nowUs);
+      if (codec_ == nullptr) return;  // release failed and reset the codec
       if (pendingSelectionGeneration_ != 0 &&
           readySelectionGeneration_ != pendingSelectionGeneration_) {
         readySelectionGeneration_ = pendingSelectionGeneration_;

@@ -23,6 +23,11 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   ~AndroidVideoDecoderSink() override;
 
   void SetSurface(JNIEnv* env, jobject surface);
+  /** One call per frame the view latched. Lock-free: this runs on the UI thread every vsync
+   *  and must never contend with the decoder. */
+  void NotifyFrameDisplayed() {
+    displayedFrameCount_.fetch_add(1, std::memory_order_relaxed);
+  }
   void SetTargetFps(uint32_t fps);
   void OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& frame) override;
   void OnVideoStreamReset() override;
@@ -50,6 +55,7 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   bool UpdateCodecConfigLocked(const std::vector<uint8_t>& annexb);
   void UpdateOutputFormatLocked();
   void DrainOutputLocked();
+  void ReleaseHeldOutputLocked(uint64_t nowUs);
   void StartOutputPumpLocked();
   void StopOutputPump();
   void OutputPumpMain();
@@ -79,6 +85,15 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   // schedule was missed and the frame went straight to the screen.
   std::thread outputPumpThread_;
   std::atomic<bool> outputPumpStop_{false};
+  // At most one decoded frame waits here for its slot. Handing it over sooner would put it in
+  // a queue the view drains newest-first, where an earlier frame is simply thrown away.
+  bool heldOutputValid_ = false;
+  bool heldOutputScheduled_ = false;
+  size_t heldOutputIndex_ = 0;
+  uint64_t heldOutputPresentUs_ = 0;
+  // Counted by the view, once per frame it actually latched.
+  std::atomic<uint64_t> displayedFrameCount_{0};
+  uint64_t displayedWindowBase_ = 0;
   uint64_t pendingFrameCount_ = 0;
   uint64_t pendingFrameQueueRetryCount_ = 0;
   // Set when a delta had to be discarded before reaching the codec; consumed by the session,

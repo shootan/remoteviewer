@@ -3576,6 +3576,7 @@ int main(int argc, char** argv) {
                     << " sched=" << metrics.presentScheduledCount
                     << " immediate=" << metrics.presentImmediateCount
                     << " reanchor=" << metrics.presentReanchorCount
+                    << " displayed=" << metrics.presentDisplayedCount
                     << "\n";
         }
         continue;
