@@ -125,6 +125,11 @@ struct ControlPingMessage {
   uint64_t clientSendQpcUs = 0;
 };
 
+// Bits of ControlPongMessage::captureTargetFlags.
+constexpr uint32_t kCaptureFlagWindowTargetEnabled = 0x1u;
+constexpr uint32_t kCaptureFlagClientAreaOnly = 0x2u;
+constexpr uint32_t kCaptureFlagSecureDesktopActive = 0x4u;
+
 struct ControlPongMessage {
   MessageHeader header{};
   uint32_t seq = 0;
@@ -132,7 +137,14 @@ struct ControlPongMessage {
   uint64_t hostRecvQpcUs = 0;
   uint64_t hostSendQpcUs = 0;
   uint32_t captureTargetPid = 0;
-  uint32_t captureTargetFlags = 0;   // bit0: windowTargetEnabled, bit1: clientAreaOnly
+  // bit0: windowTargetEnabled, bit1: clientAreaOnly, bit2: secureDesktopActive
+  //
+  // bit2 says the input desktop is not the ordinary one -- a UAC consent prompt or the lock
+  // screen is in front. Nothing in the product can capture that desktop yet, so the picture is
+  // frozen or blank while it is set, and a viewer that says so is worth a great deal more than a
+  // stalled rectangle the operator cannot explain. Carried in the existing flags word on purpose:
+  // growing the struct would change its size, which older peers validate.
+  uint32_t captureTargetFlags = 0;
   uint32_t captureRebindCount = 0;
   uint64_t captureTargetHwnd = 0;
   char captureTargetProcess[32] = {};

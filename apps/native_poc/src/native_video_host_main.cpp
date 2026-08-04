@@ -3439,6 +3439,12 @@ int main(int argc, char** argv) {
         pong.hostSendQpcUs = qpc_now_us();
         pong.captureTargetPid = hostCaptureTargetPid.load(std::memory_order_relaxed);
         pong.captureTargetFlags = hostCaptureTargetFlags.load(std::memory_order_relaxed);
+        // The probe is cached for 250ms, so asking it per ping is cheap. Telling the viewer that
+        // a security prompt is up is the difference between an explained pause and an apparent
+        // freeze, and it costs one bit in a word that is already on the wire.
+        if (!interactive_desktop_is_default()) {
+          pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagSecureDesktopActive;
+        }
         pong.captureRebindCount = hostCaptureRebindCount.load(std::memory_order_relaxed);
         pong.captureTargetHwnd = hostCaptureTargetHwnd.load(std::memory_order_relaxed);
         {
@@ -4071,6 +4077,14 @@ int main(int argc, char** argv) {
   const bool windowTargetConfigured = captureWindowCriteria.enabled();
   DesktopCaptureBackend requestedDesktopBackend = desktop_capture_backend_from_env();
   DesktopCaptureBackend activeDesktopBackend = requestedDesktopBackend;
+  // A demotion away from the requested backend is temporary until proven otherwise; these pace
+  // the attempts to get back to it. First retry is quick because the usual causes -- a UAC prompt
+  // being answered, RDP disconnecting -- clear in seconds; the ceiling keeps a machine that
+  // genuinely cannot use the requested backend from restarting capture forever.
+  constexpr uint64_t kDesktopBackendRetryMinUs = 3'000'000;
+  constexpr uint64_t kDesktopBackendRetryMaxUs = 30'000'000;
+  uint64_t desktopBackendRetryAtUs = 0;
+  uint64_t desktopBackendRetryDelayUs = kDesktopBackendRetryMinUs;
   std::atomic<bool> captureWindowModeActive{false};
   std::atomic<bool> captureWindowClientOnlyActive{args.captureWindowClientOnly};
   CaptureWindowInfo captureWindowInfo{};
@@ -5561,6 +5575,55 @@ int main(int argc, char** argv) {
       forceKeyNext = true;
       flush_capture_pipeline_state("gdi-runtime-fallback");
     }
+
+    // Climb back to the requested backend once whatever forced the demotion has passed.
+    //
+    // A demotion used to be permanent: activeDesktopBackend was set to Wgc and the only way back
+    // was an explicit request from the client, which then failed again for the same reason. So a
+    // single UAC prompt or RDP connect left the session on WGC for good, and the picture stayed
+    // degraded long after the cause was gone. That is the "everything is slower after a UAC
+    // prompt" report.
+    //
+    // Both causes are temporary by nature. The secure desktop goes away when the prompt is
+    // answered, and the desktop returns to the physical adapter when RDP disconnects, so simply
+    // trying again is what was missing.
+    if (activeDesktopBackend != requestedDesktopBackend &&
+        !captureWindowModeActive.load(std::memory_order_acquire) &&
+        streamControlActive.load(std::memory_order_acquire)) {
+      const uint64_t nowUs = qpc_now_us();
+      if (desktopBackendRetryAtUs == 0) {
+        desktopBackendRetryAtUs = nowUs + kDesktopBackendRetryMinUs;
+      } else if (nowUs >= desktopBackendRetryAtUs) {
+        const DesktopCaptureBackend demoted = activeDesktopBackend;
+        activeDesktopBackend = requestedDesktopBackend;
+        if (restart_capture_session()) {
+          std::cout << "[native-video-host] desktop-backend-restored from="
+                    << desktop_capture_backend_name(demoted)
+                    << " to=" << desktop_capture_backend_name(activeDesktopBackend) << "\n";
+          ++captureRestartCount;
+          captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(),
+                                     std::memory_order_release);
+          lastCaptureUsForInterval.store(0, std::memory_order_release);
+          lastCallbackUs.store(0, std::memory_order_release);
+          resetHostTimelineAnchors();
+          forceKeyNext = true;
+          flush_capture_pipeline_state("desktop-backend-restored");
+          desktopBackendRetryAtUs = 0;
+          desktopBackendRetryDelayUs = kDesktopBackendRetryMinUs;
+        } else {
+          // Still not available. Back off so a machine that genuinely cannot use the requested
+          // backend does not restart capture every few seconds forever.
+          activeDesktopBackend = demoted;
+          desktopBackendRetryDelayUs =
+              std::min<uint64_t>(desktopBackendRetryDelayUs * 2, kDesktopBackendRetryMaxUs);
+          desktopBackendRetryAtUs = nowUs + desktopBackendRetryDelayUs;
+        }
+      }
+    } else {
+      desktopBackendRetryAtUs = 0;
+      desktopBackendRetryDelayUs = kDesktopBackendRetryMinUs;
+    }
+
     const bool streamActive = streamControlActive.load(std::memory_order_acquire);
     if (!streamActive) {
       if (streamActiveApplied) {

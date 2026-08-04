@@ -2997,7 +2997,28 @@ int main(int argc, char** argv) {
                   gHostCaptureRebindCount.store(pong.captureRebindCount, std::memory_order_relaxed);
                   gHostCaptureTargetHwnd.store(pong.captureTargetHwnd, std::memory_order_relaxed);
                   gHostCaptureMetaUpdatedUs.store(doneUs, std::memory_order_relaxed);
-                  gCaptureOverviewMode.store((pong.captureTargetFlags & 0x1u) == 0, std::memory_order_relaxed);
+                  gCaptureOverviewMode.store(
+                      (pong.captureTargetFlags &
+                       remote60::native_poc::kCaptureFlagWindowTargetEnabled) == 0,
+                      std::memory_order_relaxed);
+                  {
+                    // Say it once per transition rather than every ping. A frozen picture with no
+                    // explanation is the worst version of this; a line saying a Windows security
+                    // prompt is on screen turns it into something the operator can act on.
+                    const bool secure =
+                        (pong.captureTargetFlags &
+                         remote60::native_poc::kCaptureFlagSecureDesktopActive) != 0;
+                    static bool reportedSecure = false;
+                    if (secure != reportedSecure) {
+                      reportedSecure = secure;
+                      std::cout << "[native-video-client] secure-desktop-active="
+                                << (secure ? 1 : 0)
+                                << (secure ? "  (a Windows security prompt is on screen; it "
+                                             "cannot be captured, so the picture is paused)"
+                                           : "  (picture resumes)")
+                                << std::endl;
+                    }
+                  }
                   {
                     std::lock_guard<std::mutex> lk(gHostCaptureMetaMu);
                     gHostCaptureTargetProcess =
