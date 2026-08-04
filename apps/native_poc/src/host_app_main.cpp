@@ -264,13 +264,27 @@ class StreamingHostProcess {
       // The control port serves clients on the same network that dial this PC directly. One
       // arriving through the directory tunnels control over the media socket instead, but with
       // no port open a LAN connection showed a picture that could not be controlled.
-      // An ordered candidate list, not one port: restrictive networks (company Wi-Fi, guest
-      // networks) commonly allow outbound UDP only to a whitelist of destination ports, and a
-      // host on 43000 is unreachable from those however healthy the rest of the path is. 443
-      // carries QUIC and 3478 carries STUN, so both pass almost everywhere; 43000 stays last so
-      // an existing install keeps its port when the friendlier ones are already taken.
+      // An ordered candidate list, not one port. Two different networks constrain this, at
+      // opposite ends of the connection, and only one port satisfies both.
+      //
+      // Restrictive networks -- company Wi-Fi, guest networks -- allow outbound UDP only to a
+      // whitelist of destination ports, so a host on 43000 is unreachable from them however
+      // healthy the rest of the path is. That argues for a well-known port.
+      //
+      // But a residential ISP restricts the other direction, and 443 is exactly the port it
+      // blocks inbound to stop people running servers at home. Measured here: with the host bound
+      // to 443 and NAT preserving it, a phone on mobile data that had connected on 43000 could no
+      // longer get through at all -- four punches, nothing arrived, and the Windows Firewall rule
+      // was a program-based allow that could not have been the cause.
+      //
+      // So 43000 is primary again: it is the only port measured to work end to end here, and a
+      // reachable host beats a theoretically friendlier one. 3478 (STUN) is bound as the second
+      // listener -- restrictive networks permit it outbound and ISPs do not filter it inbound the
+      // way they filter 443 -- but nothing dials it yet, because the directory publishes exactly
+      // one address. Making both reachable is N5's job, and until it lands the friendlier port
+      // can only be reached by someone who already knows to ask for it.
       std::wstring command = L"\"" + exe + L"\"" +
-                             L" --transport udp --codec h264 --bind-port 443,3478,43000" +
+                             L" --transport udp --codec h264 --bind-port 43000,3478" +
                              L" --control-port 43001" +
                              L" --directory-url \"" + directoryUrl_ + L"\"" +
                              L" --directory-id \"" + accountId_ + L"\"" +
