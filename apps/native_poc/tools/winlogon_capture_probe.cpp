@@ -131,10 +131,15 @@ bool write_bmp(const std::wstring& path, const uint8_t* bgra, int width, int hei
 }
 
 // A capture that returns an all-black or all-identical image is a failure wearing a success
-// costume, so say how much variety the pixels actually have.
-void describe_pixels(const wchar_t* label, const uint8_t* bgra, int width, int height,
+// costume, so say how much variety the pixels actually have -- and let the caller act on it.
+// Returns true when the image carries real content.
+//
+// This matters most right after a desktop switch: the secure desktop exists and is readable
+// before Windows has painted the dimmed snapshot and the dialog onto it, so an immediate
+// capture legitimately succeeds and legitimately contains nothing.
+bool describe_pixels(const wchar_t* label, const uint8_t* bgra, int width, int height,
                      int strideBytes) {
-  if (!bgra) return;
+  if (!bgra) return false;
   uint64_t sum = 0;
   uint8_t minValue = 255;
   uint8_t maxValue = 0;
@@ -150,8 +155,10 @@ void describe_pixels(const wchar_t* label, const uint8_t* bgra, int width, int h
     }
   }
   const unsigned average = sampled ? static_cast<unsigned>(sum / sampled) : 0u;
+  const bool hasContent = minValue != maxValue;
   logf(L"      %s pixels: avg=%u min=%u max=%u %s", label, average, minValue, maxValue,
-       (minValue == maxValue) ? L"<-- UNIFORM, almost certainly not real content" : L"");
+       hasContent ? L"" : L"<-- UNIFORM, nothing was painted yet");
+  return hasContent;
 }
 
 // ---------------------------------------------------------------------------- capture attempts
@@ -196,9 +203,12 @@ bool capture_via_bitblt(const std::wstring& outPath) {
     } else {
       GdiFlush();
       const auto* pixels = static_cast<const uint8_t*>(bits);
-      ok = write_bmp(outPath, pixels, width, height, width * 4);
-      logf(L"      BitBlt: captured %dx%d -> %s", width, height, ok ? L"OK" : L"write failed");
-      describe_pixels(L"BitBlt", pixels, width, height, width * 4);
+      const bool written = write_bmp(outPath, pixels, width, height, width * 4);
+      logf(L"      BitBlt: captured %dx%d -> %s", width, height,
+           written ? L"OK" : L"write failed");
+      // Only a picture with something in it counts. A readable but unpainted desktop must not
+      // end the search, or the run stops on the one frame that proves nothing.
+      ok = written && describe_pixels(L"BitBlt", pixels, width, height, width * 4);
     }
     SelectObject(memory, previous);
     DeleteObject(bitmap);
@@ -215,9 +225,9 @@ enum class Outcome { Ok, Failed, Inconclusive };
 
 const wchar_t* outcome_text(Outcome outcome) {
   switch (outcome) {
-    case Outcome::Ok: return L"OK";
-    case Outcome::Inconclusive: return L"INCONCLUSIVE (no frame arrived; nothing was moving)";
-    default: return L"FAIL";
+    case Outcome::Ok: return L"OK (real content)";
+    case Outcome::Inconclusive: return L"INCONCLUSIVE (readable, but nothing painted yet)";
+    default: return L"FAIL (refused)";
   }
 }
 
@@ -344,11 +354,13 @@ Outcome capture_via_dxgi(const std::wstring& outPath, ULONGLONG deadlineTicks) {
         const bool written = write_bmp(outPath, pixels, static_cast<int>(desc.Width),
                                        static_cast<int>(desc.Height),
                                        static_cast<int>(mapped.RowPitch));
-        outcome = written ? Outcome::Ok : Outcome::Failed;
         logf(L"      DXGI: captured %ux%u -> %s", desc.Width, desc.Height,
              written ? L"OK" : L"write failed");
-        describe_pixels(L"DXGI", pixels, static_cast<int>(desc.Width),
-                        static_cast<int>(desc.Height), static_cast<int>(mapped.RowPitch));
+        const bool hasContent =
+            describe_pixels(L"DXGI", pixels, static_cast<int>(desc.Width),
+                            static_cast<int>(desc.Height), static_cast<int>(mapped.RowPitch));
+        // Readable but blank is not an answer either way, so keep it distinct from a refusal.
+        outcome = !written ? Outcome::Failed : (hasContent ? Outcome::Ok : Outcome::Inconclusive);
         context->Unmap(staging.Get(), 0);
       } else {
         logf(L"      DXGI: Map failed");
@@ -410,8 +422,8 @@ bool attach_and_capture_on_thread(const std::wstring& outDir, const std::wstring
     const Outcome dxgi = capture_via_dxgi(outDir + L"\\" + tag + L"_dxgi.bmp", deadline);
 
     logf(L"  [%s] RESULT desktop=\"%s\" bitblt=%s dxgi=%s", tag.c_str(), name.c_str(),
-         bitbltOk ? L"OK" : L"FAIL", outcome_text(dxgi));
-    // Inconclusive is not success: retrying may still catch a frame.
+         bitbltOk ? L"OK (real content)" : L"no content", outcome_text(dxgi));
+    // Inconclusive is not success: retrying may still catch a painted frame.
     succeeded = bitbltOk || dxgi == Outcome::Ok;
     CloseDesktop(input);
   });
@@ -450,13 +462,22 @@ int run_agent(const std::wstring& outDir, DWORD seconds) {
         lastSeen = name;
       }
       if (_wcsicmp(name.c_str(), L"Default") != 0 && !name.empty() && name != L"?") {
+        if (attempts == 0) {
+          // The desktop exists before Windows paints the dimmed snapshot and the dialog onto
+          // it. Capturing on the same tick as the switch reliably produces a black frame that
+          // says nothing about whether the desktop is readable.
+          logf(L"agent: %s appeared; waiting for it to paint before the first capture",
+               name.c_str());
+          Sleep(600);
+        }
         wchar_t tag[64]{};
         _snwprintf_s(tag, _TRUNCATE, L"secure%d", ++attempts);
-        logf(L"agent: non-Default desktop detected, capturing (attempt %d)", attempts);
-        // Keep trying while the prompt is still up. A first attempt can miss for reasons that
-        // say nothing about access -- a transient denial, or simply no frame yet.
+        logf(L"agent: capturing %s (attempt %d)", name.c_str(), attempts);
         captured = attach_and_capture_on_thread(outDir, tag, 10);
-        if (!captured) logf(L"agent: attempt %d did not succeed, will retry", attempts);
+        if (!captured) {
+          logf(L"agent: attempt %d produced nothing to look at, retrying while it is still up",
+               attempts);
+        }
       }
     }
     Sleep(kAgentPollMs);
@@ -465,7 +486,13 @@ int run_agent(const std::wstring& outDir, DWORD seconds) {
     logf(L"agent: no non-Default input desktop ever appeared -- was a UAC prompt actually "
          L"shown, and is this the session it appeared in?");
   } else if (!captured) {
-    logf(L"agent: saw the secure desktop %d time(s) but never captured it", attempts);
+    // Distinguishable from a refusal: every attach worked, every capture call succeeded, and
+    // the pixels were blank each time. That is its own finding and must not be filed as "DXGI
+    // and GDI cannot read Winlogon".
+    logf(L"agent: attached to the secure desktop %d time(s) and every capture returned blank.",
+         attempts);
+    logf(L"agent: access was never refused -- check the newest secure*.bmp by eye before "
+         L"concluding anything.");
   }
   logf(L"agent: done");
   return 0;
