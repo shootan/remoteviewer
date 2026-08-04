@@ -536,6 +536,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var lastLoggedPanelStatus = ""
     private var lastLoggedVideoDebug = ""
     private var lastViewerOutCount = -1
+    private var lastViewerInCount = -1
     private var lastViewerOutChangeAtMs = 0L
     private var lastViewerStallLogAtMs = 0L
     private var lastViewerRecoveryTargetId = Long.MIN_VALUE
@@ -3276,8 +3277,17 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         if (currentScene == UiScene.VIEWER && statusValue.startsWith("connected")) {
             val outCount = parseVideoCounter(videoDebugValue, "out")
+            // A stall is frames going in and nothing coming out. Frames not going in either is
+            // a host with nothing to send -- a desktop nobody is touching produces no updates
+            // to capture, and that is the correct outcome, not a fault. Watching only the
+            // output count made a still screen look identical to a broken decoder, and after
+            // fifteen seconds of stillness the viewer closed itself and returned to the target
+            // list, which is what "it disconnected on its own" was.
+            val inCount = parseVideoCounter(videoDebugValue, "in")
+            val nothingArriving = inCount >= 0 && inCount == lastViewerInCount
+            lastViewerInCount = inCount
             if (outCount >= 0) {
-                if (outCount != lastViewerOutCount) {
+                if (outCount != lastViewerOutCount || nothingArriving) {
                     lastViewerOutCount = outCount
                     lastViewerOutChangeAtMs = nowMs
                     lastViewerStallLogAtMs = 0L
@@ -3302,6 +3312,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
         } else {
             lastViewerOutCount = -1
+            lastViewerInCount = -1
             lastViewerOutChangeAtMs = 0L
             lastViewerStallLogAtMs = 0L
             lastViewerRecoveryAttempts = 0
