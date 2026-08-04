@@ -329,6 +329,14 @@ add_executable(remote60_winlogon_capture_probe
 target_link_libraries(remote60_winlogon_capture_probe PRIVATE d3d11 dxgi gdi32 advapi32 user32)
 set_target_properties(remote60_winlogon_capture_probe PROPERTIES OUTPUT_NAME "WinlogonProbe")
 
+# Also diagnostic-only. Measures how often the desktop actually changes, with no encoder or
+# client in the way, so 구현계획 A1 can be settled by measurement instead of inference.
+add_executable(remote60_desktop_update_rate
+  tools/desktop_update_rate.cpp
+)
+target_link_libraries(remote60_desktop_update_rate PRIVATE d3d11 dxgi)
+set_target_properties(remote60_desktop_update_rate PROPERTIES OUTPUT_NAME "DesktopUpdateRate")
+
 add_executable(remote60_udp_fec_interleave_test
   src/native_video_client_shared_core.cpp
   src/native_video_client_tcp_control.cpp
