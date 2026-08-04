@@ -5627,3 +5627,54 @@ Before/After (1080p-scroll Release 5회, 오늘 H4-off 대비)
   우선순위를 정할 수 있다.
 - 근거 대장 A2(Winlogon에서 BitBlt 가능 여부) 실험. 저장소 설계 문서는 DXGI만 가능하다고
   주장하나 검증된 적이 없고, 결과가 U2b의 규모를 좌우한다.
+
+### 230) 2026-08-04 U1 결론: 보안 데스크톱은 BitBlt로도 읽힌다
+
+목표
+- UAC 동의 창 캡처를 며칠 걸려 구현하기 전에, SYSTEM 프로세스가 Winlogon 데스크톱의
+  픽셀을 실제로 읽을 수 있는지, 어느 API로 읽히는지를 먼저 확정한다.
+
+결과
+- **둘 다 읽힌다.** `OpenInputDesktop` + `SetThreadDesktop`으로 Winlogon에 붙는 데 성공했고
+  접근이 거부된 적은 한 번도 없다.
+  - `GetDC(NULL)` + `BitBlt`: 2720x1080. 가상 화면 전체(두 모니터)를 한 번에.
+  - DXGI `DuplicateOutput`: 1920x1080. 출력 1개.
+  - 두 이미지 모두 UAC 다이얼로그의 제목·본문·버튼이 판독 가능하다.
+- `docs/잠금화면_사전로그인_설계.md`의 "보안 데스크톱 캡처는 DXGI Desktop Duplication만
+  가능하다"는 **반증되었다.** 해당 문단에 정정을 남겼다. 검증 없이 적힌 주장이었고,
+  그 위에 세운 "Winlogon이면 DXGI로 강제 전환" 설계도 함께 무효다.
+- U2b 규모가 대 → 중으로 내려간다. `gdi_capture_worker_main.cpp`의 publish 루프를 재활용할
+  수 있어 `GNLinkInputService`에 d3d11/dxgi를 도입할 필요가 없다. BitBlt가 가상 화면을
+  한 번에 잡으므로 U4(멀티모니터)의 캡처 쪽도 함께 해결된다.
+- 부수 확인: 이 PC의 세션 구성이 RDP 접속 시 `호스트=세션 1`, `WTSGetActiveConsoleSessionId()=8`로
+  갈렸다. U2a(세션 타겟 오류)는 재현 완료이므로 별도 검증이 필요 없다.
+
+probe가 답을 세 번 틀릴 뻔한 지점
+- DXGI가 커서 전용 프레임(`LastPresentTime==0`)을 성공으로 반환하고 그 안의 텍스처는
+  갱신되지 않는다. 그대로 저장해 완전한 검은 이미지를 "성공"으로 기록했다. 일반 데스크톱
+  대조군에서 `avg=0 min=0 max=0`이 나와 잡았다.
+- 데스크톱 전환과 같은 tick에 촬영해 Winlogon이 아직 아무것도 그리지 않은 상태를 찍었다.
+  "파일을 썼으면 성공"이라는 판정 기준 때문에 재시도도 하지 않고 종료했다.
+- 첫 두 실행이 SYSTEM 서비스 프로세스를 세션 0에 20분간 남겼다. RDP 해제로 작업 중이던
+  데스크톱이 사라지며 멈춘 것으로 보이며, 실행 파일을 잠가 수정본 빌드조차 막았고 해제에
+  관리자 권한이 필요했다.
+- 각각 균일 픽셀 검사, 내용 기반 성공 판정 + 전환 후 대기, 하드 데드라인 자폭으로 수정했다.
+
+변경 파일
+- `apps/native_poc/tools/winlogon_capture_probe.cpp`
+- `apps/native_poc/CMakeLists.txt`
+- `docs/구현계획.md`, `docs/잠금화면_사전로그인_설계.md`
+
+검증/build/test
+- 관리자 권한 실행, RDP 아닌 콘솔 세션(`console shotan 1 Active`,
+  `WTSGetActiveConsoleSessionId()=1`). 대조군 캡처가 같은 실행에서 정상 내용을 담아
+  probe 자체의 건전성이 확인된다.
+- 결과 이미지 육안 확인: `secure1_bitblt.bmp`, `secure1_dxgi.bmp` 모두에
+  `GNLinkSetup-0.2.3.exe` UAC 프롬프트가 판독 가능하게 찍혔다.
+
+다음 액션
+- U2b를 BitBlt 경로로 착수하되 U2a(세션 타겟)를 먼저 고친다. 순서를 뒤집으면 엉뚱한 세션의
+  화면을 완벽하게 스트리밍하게 된다.
+- probe는 U2b가 안정될 때까지 남긴다. attach+capture 순서가 실제로 동작함이 증명된 유일한
+  레퍼런스다.
+- A1(데스크톱이 초당 33회만 갱신)은 여전히 미검증이며 P2(NACK) 착수 여부를 가른다.
