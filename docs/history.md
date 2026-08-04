@@ -5720,3 +5720,53 @@ probe가 답을 세 번 틀릴 뻔한 지점
 - P3: 물리 화면에서 데스크톱 60fps 요청 시 파이프라인 단계별 실측으로 어디서 60이 30대로
   떨어지는지 특정한다. P2(NACK)보다 우선한다.
 - 원격 세션에서 수집한 기존 성능 지표는 전부 재검토 대상이다.
+
+### 232) 2026-08-04 원격 접근 신뢰성 1차: 세션 타겟·LAN 포트·DXGI 복구·좌표 매핑
+
+목표
+- 사용자 수동 확인 없이 진행 가능한 항목을 우선순위 순으로 처리하되, 현재 성능을 해치지 않는다.
+
+처리한 항목 (커밋 순)
+- `1bfaa7a` **U2a** SYSTEM 입력 에이전트의 세션 타겟을 요청자 기준으로. `WTSGetActiveConsoleSessionId()`는
+  물리 콘솔 세션이라 RDP 중에는 호스트(세션 1)와 다른 곳(세션 8)을 가리켰다. 파이프 클라이언트의
+  PID → 세션으로 교체하고, `RegisterServiceCtrlHandlerExW`로 올려 세션 변경을 수신한다.
+  세션 0은 대화형 데스크톱이 없으므로 양쪽 입력에서 거부한다.
+- `031599e` **N6** 후보 목록의 마지막 포트에 두 번째 소켓을 유지. N1이 호스트를 43000에서 443으로
+  옮기면서 IP 직접 입력 경로가 깨졌고, 그건 0.2.3에 이미 나간 회귀였다. 핸드셰이크만 두 소켓을
+  보고, Hello가 온 쪽이 미디어 소켓이 된다. LAN이 이기면 기본 소켓은 닫지 않고 은퇴시킨다 —
+  디렉토리 에이전트가 그 소켓으로 하트비트를 계속 보내야 한다.
+- `c922258` **R1+R2** 데스크톱이 다른 어댑터로 옮겨간 경우를 `dxgi_adapter_changed`로 명명해 보고.
+  세션 내부에서 D3D 장치를 재생성하지 않는다 — `d3dDevice`는 호출자 소유이고 프레임 핸들러가
+  그 텍스처를 넘기므로, 다른 어댑터 장치로 바꾸면 호출자가 못 쓴다. 사용 가능 여부를 사후 검사가
+  아니라 선택의 일부로 만들어 0크기 가상 출력을 후보에서 제외한다.
+- `00dbefe` **R3=U0** 강등 후 요청 백엔드로 주기적 재승격(3초 → 2배씩, 30초 상한).
+  `ControlPongMessage.captureTargetFlags` bit2로 `secureDesktopActive` 전달.
+- `70e3156` **U4** 클릭을 캡처된 모니터에 매핑. `SetCursorPos`는 가상 데스크톱 절대 좌표를 받는데
+  매핑은 주 모니터로만 했다. 대상 사각형을 메시지가 명시적으로 운반하고, 미지정 시 폴백을
+  가상 화면으로 바꿨다. 음수 원점 지원, 범위 밖은 clamp.
+
+측정에서 배운 것
+- R1의 첫 구현은 매 resolve마다 모든 어댑터를 열거했고 6회 중 2회가 실패했다
+  (`dxgi_select_no_outputs`, `DXGI_ERROR_INVALID_CALL`). 기준선은 6/6 clean이었으므로 명백한 회귀였다.
+  **정상 경로에서는 장치 자신의 어댑터만 보고**, 실패한 뒤에만 전체를 뒤지도록 재구조화했다.
+  DXGI 팩토리 생성과 디스플레이 토폴로지 순회는 공짜가 아니다.
+
+변경 파일
+- 신규: `secure_input_session.hpp`, `secure_input_mapping.hpp`, `apps/host/src/dxgi_output_selection.hpp`
+  (각각 순수 함수 + 테스트)
+- `secure_input_service_main.cpp`, `secure_input_broker.{hpp,cpp}`, `secure_input_protocol.hpp`,
+  `native_video_host_main.cpp`, `native_video_client_main.cpp`, `poc_protocol.hpp`,
+  `apps/host/src/capture_backend_dxgi.cpp`
+
+검증/build/test
+- 단위 9종 전부 PASS (신규 3종: 세션 결정 7케이스, 좌표 매핑 13케이스, DXGI 출력 선택 7케이스).
+  세 가지 모두 실패가 조용한 종류라 순수 함수로 분리해 고정했다 — 잘못된 답도 모든 상위 계층에서
+  성공으로 보인다.
+- N6 실측: 기본 포트 접속 시 스왑 없이 decoded 30~31fps, LAN 포트 접속 시 스왑 후 29~31fps, 손실 0.
+- **성능 회귀 없음**: 변경 전후 동일 명령·씬으로 각 6회. 중앙값 53.2 → 53.2, 평균 52.5 → 52.6
+  (+0.1%), 실패 0/6 → 0/6. 회귀 기준은 -10%였다.
+
+다음 액션
+- 남은 항목은 U2b(SYSTEM 캡처 에이전트), U2c(프레임 채널), U2d/U5(상태·결과 반환), U3(전환 중재).
+  U1에서 BitBlt 경로가 확정됐고 `winlogon_capture_probe.cpp`가 검증된 레퍼런스다.
+- 수동 확인 대기: 회사 Wi-Fi 접속(N1), RDP 전환 시 DXGI 복구 실동작(R1/R3), UAC 창 실측(U2b 이후).
