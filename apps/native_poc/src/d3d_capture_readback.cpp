@@ -645,27 +645,41 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
     uint64_t mapUs = 0;
     uint64_t memcpyUs = 0;
     bool mapped = false;
+    D3D11_MAPPED_SUBRESOURCE map{};
+    bool mapHeld = false;
     {
       std::lock_guard<std::mutex> d3dLock(*contextMu_);
-      D3D11_MAPPED_SUBRESOURCE map{};
       const uint64_t mapStartUs = qpc_us();
       if (SUCCEEDED(context_->Map(slotCopy.staging.Get(), 0, D3D11_MAP_READ, 0, &map))) {
         mapUs = qpc_us() - mapStartUs;
-        const uint64_t memcpyStartUs = qpc_us();
-        const auto* srcRow = reinterpret_cast<const uint8_t*>(map.pData);
-        auto* dst = payload->data();
-        if (map.RowPitch == stride) {
-          std::memcpy(dst, srcRow, static_cast<size_t>(stride) * payloadH);
-        } else {
-          for (uint32_t y = 0; y < payloadH; ++y) {
-            std::memcpy(dst + static_cast<size_t>(y) * stride,
-                        srcRow + static_cast<size_t>(y) * map.RowPitch, stride);
-          }
-        }
-        memcpyUs = qpc_us() - memcpyStartUs;
-        context_->Unmap(slotCopy.staging.Get(), 0);
-        mapped = true;
+        mapHeld = true;
       }
+    }
+    if (mapHeld) {
+      // Copy outside the context lock. A mapping is a property of the resource, not of the
+      // context, so reading it needs no lock -- and this is a whole 1080p frame, ~1 ms of
+      // pure memcpy. Holding the immediate context across it blocked the capture thread
+      // inside Submit, and the capture thread blocks there while it is still holding a
+      // desktop duplication frame. Desktop duplication reports nothing new while a frame is
+      // held, so every readback quietly cost the capture its next update: 27 frames a second
+      // arriving for a 30 fps request, with no counter anywhere showing why.
+      const uint64_t memcpyStartUs = qpc_us();
+      const auto* srcRow = reinterpret_cast<const uint8_t*>(map.pData);
+      auto* dst = payload->data();
+      if (map.RowPitch == stride) {
+        std::memcpy(dst, srcRow, static_cast<size_t>(stride) * payloadH);
+      } else {
+        for (uint32_t y = 0; y < payloadH; ++y) {
+          std::memcpy(dst + static_cast<size_t>(y) * stride,
+                      srcRow + static_cast<size_t>(y) * map.RowPitch, stride);
+        }
+      }
+      memcpyUs = qpc_us() - memcpyStartUs;
+      {
+        std::lock_guard<std::mutex> d3dLock(*contextMu_);
+        context_->Unmap(slotCopy.staging.Get(), 0);
+      }
+      mapped = true;
     }
 
     uint32_t outW = payloadW;
