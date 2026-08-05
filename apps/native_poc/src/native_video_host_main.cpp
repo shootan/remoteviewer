@@ -3243,6 +3243,14 @@ int main(int argc, char** argv) {
 
   std::atomic<bool> stop{false};
   std::atomic<uint64_t> inputEvents{0};
+  // Split of what happened while a security prompt or the lock screen was in front. inputEvents
+  // alone cannot answer it: the fallback path reports success whether or not the click reached
+  // anything, so a dead session and a working one produce identical numbers.
+  std::atomic<uint64_t> secureInputAttempts{0};       // events seen while the secure desktop was up
+  std::atomic<uint64_t> secureInputDelivered{0};      // handed to the SYSTEM agent
+  std::atomic<uint64_t> secureInputBrokerFailed{0};   // agent unreachable; fell back, cannot land
+  std::atomic<uint64_t> secureInputSkipWindowMode{0}; // window mode never routes to the agent
+  std::atomic<uint64_t> secureInputSkipUnauthenticated{0};  // no directory capability to act on
   std::atomic<uint64_t> clientMetricsUpdatedUs{0};
   std::atomic<uint32_t> clientMetricsWidth{0};
   std::atomic<uint32_t> clientMetricsHeight{0};
@@ -3490,9 +3498,30 @@ int main(int argc, char** argv) {
           // installer, so a host running from a build tree (or before installation) has no
           // broker at all, and treating that as a hard failure left the session with no input
           // whatsoever instead of the ordinary desktop injection that still works fine.
-          if (desktopMode && sessionDirectoryAuthenticated.load(std::memory_order_acquire) &&
-              !interactive_desktop_is_default() &&
-              secureInputBroker.SendInputEvent(input, domainW, domainH)) {
+          //
+          // The conjuncts are evaluated separately so a failure can name itself. Clicks that go
+          // nowhere on a consent prompt look identical to clicks that work: the fallback path
+          // below reports Injected either way, because SendInput on the Default desktop succeeds
+          // whether or not anything is there to receive it. Counting which branch ran, and why,
+          // is the difference between "input is broken" and a specific cause.
+          const bool secureDesktopActive = !interactive_desktop_is_default();
+          bool routedToAgent = false;
+          if (secureDesktopActive) {
+            secureInputAttempts.fetch_add(1, std::memory_order_relaxed);
+            if (!desktopMode) {
+              secureInputSkipWindowMode.fetch_add(1, std::memory_order_relaxed);
+            } else if (!sessionDirectoryAuthenticated.load(std::memory_order_acquire)) {
+              // A plain-LAN session has no capability token, and the agent will not act without
+              // one. Nothing about the click is wrong; it simply cannot be authorised.
+              secureInputSkipUnauthenticated.fetch_add(1, std::memory_order_relaxed);
+            } else if (!secureInputBroker.SendInputEvent(input, domainW, domainH)) {
+              secureInputBrokerFailed.fetch_add(1, std::memory_order_relaxed);
+            } else {
+              secureInputDelivered.fetch_add(1, std::memory_order_relaxed);
+              routedToAgent = true;
+            }
+          }
+          if (routedToAgent) {
             injectResult = InputInjectResult::Injected;
             resolvedTarget = " secure-system-agent";
           } else {
@@ -7150,6 +7179,11 @@ int main(int argc, char** argv) {
                   << " captureTargetHwnd=0x" << std::hex
                   << hostCaptureTargetHwnd.load(std::memory_order_relaxed) << std::dec
                   << " inputEvents=" << inputEvents.load()
+                  << " secureInputAttempts=" << secureInputAttempts.load()
+                  << " secureInputDelivered=" << secureInputDelivered.load()
+                  << " secureInputBrokerFailed=" << secureInputBrokerFailed.load()
+                  << " secureInputSkipWindowMode=" << secureInputSkipWindowMode.load()
+                  << " secureInputSkipUnauth=" << secureInputSkipUnauthenticated.load()
                   << " inputIgnoredMove=" << inputIgnoredMove.load(std::memory_order_relaxed)
                   << " inputNoTarget=" << inputNoTarget.load(std::memory_order_relaxed)
                   << " inputUnsupported=" << inputUnsupported.load(std::memory_order_relaxed)
@@ -7233,6 +7267,11 @@ int main(int argc, char** argv) {
                   << " keyReqTotal=" << clientKeyFrameRequestCount.load()
                   << " keyReqDropTotal=" << clientKeyFrameRequestDropped.load()
                   << " inputEvents=" << inputEvents.load()
+                  << " secureInputAttempts=" << secureInputAttempts.load()
+                  << " secureInputDelivered=" << secureInputDelivered.load()
+                  << " secureInputBrokerFailed=" << secureInputBrokerFailed.load()
+                  << " secureInputSkipWindowMode=" << secureInputSkipWindowMode.load()
+                  << " secureInputSkipUnauth=" << secureInputSkipUnauthenticated.load()
                   << " inputIgnoredMove=" << inputIgnoredMove.load(std::memory_order_relaxed)
                   << " inputNoTarget=" << inputNoTarget.load(std::memory_order_relaxed)
                   << " inputUnsupported=" << inputUnsupported.load(std::memory_order_relaxed)
