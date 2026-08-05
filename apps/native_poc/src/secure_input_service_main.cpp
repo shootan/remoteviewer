@@ -530,11 +530,24 @@ std::wstring current_desktop_name() {
 
 int run_agent(HANDLE readPipe) {
   HDESK ownedDesktop = nullptr;
-  diag("agent started in session %lu", []() {
-    DWORD s = 0;
-    ProcessIdToSessionId(GetCurrentProcessId(), &s);
-    return s;
-  }());
+  // The desktop this process was CREATED on, before any attach. Distinct from the one it later
+  // attaches to, and the only way to confirm from outside which of the two the input path is
+  // actually judging.
+  {
+    DWORD session = 0;
+    ProcessIdToSessionId(GetCurrentProcessId(), &session);
+    char created[128] = "?";
+    HDESK own = GetThreadDesktop(GetCurrentThreadId());
+    if (own) {
+      wchar_t wide[64]{};
+      DWORD needed = 0;
+      if (GetUserObjectInformationW(own, UOI_NAME, wide, sizeof(wide), &needed)) {
+        size_t converted = 0;
+        wcstombs_s(&converted, created, wide, _TRUNCATE);
+      }
+    }
+    diag("agent started in session %lu, created on desktop=%s", session, created);
+  }
   for (;;) {
     SecureInputMessage message{};
     if (!read_exact(readPipe, &message, sizeof(message))) break;
