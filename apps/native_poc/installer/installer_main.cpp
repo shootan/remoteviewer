@@ -21,8 +21,11 @@
 #include <vector>
 
 #include "installer_ids.h"
+#include "product_version.hpp"
 
 namespace {
+
+using remote60::native_poc::kProductVersion;
 
 constexpr wchar_t kProductName[] = L"GNLink Host";
 constexpr wchar_t kInstallFolderName[] = L"GNLink";
@@ -31,7 +34,6 @@ constexpr wchar_t kUninstallKey[] =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\GNLink";
 constexpr wchar_t kFirewallRuleName[] = L"GNLink Host";
 constexpr wchar_t kSetupFileName[] = L"GNLinkSetup.exe";
-constexpr wchar_t kProductVersion[] = L"0.2.9";
 
 struct PayloadFile {
   int resourceId;

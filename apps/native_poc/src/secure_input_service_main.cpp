@@ -74,6 +74,10 @@ struct AgentProcess {
   HANDLE process = nullptr;
   HANDLE writePipe = nullptr;
   DWORD sessionId = 0xffffffffu;
+  // The desktop the agent was created on. A thread can move between desktops but the process's
+  // association cannot, and SendInput refuses when they disagree -- so a change here means the
+  // agent has to be replaced, not redirected.
+  std::wstring desktop;
 };
 
 AgentProcess gAgent;
@@ -123,6 +127,7 @@ void stop_agent() {
   }
   gAgent.process = nullptr;
   gAgent.sessionId = 0xffffffffu;
+  gAgent.desktop.clear();
 }
 
 std::wstring current_executable_path() {
@@ -133,7 +138,7 @@ std::wstring current_executable_path() {
   return path;
 }
 
-bool start_agent(DWORD sessionId) {
+bool start_agent(DWORD sessionId, const std::wstring& desktopName) {
   stop_agent();
   HANDLE readPipe = nullptr;
   HANDLE writePipe = nullptr;
@@ -166,7 +171,20 @@ bool start_agent(DWORD sessionId) {
                static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(readPipe)));
   STARTUPINFOW startup{};
   startup.cb = sizeof(startup);
-  startup.lpDesktop = const_cast<wchar_t*>(L"winsta0\\default");
+  // Create the agent on the desktop it will inject into, rather than starting it on Default and
+  // moving a thread there afterwards.
+  //
+  // Measured: with the agent created on Default and SetThreadDesktop'd onto Winlogon, attach
+  // succeeded and SetCursorPos worked -- the cursor moved -- but every button event came back
+  // from SendInput with ERROR_ACCESS_DENIED. Mouse moves appeared to work only because they
+  // return after SetCursorPos without calling SendInput at all, which is what made the failures
+  // look like they alternated.
+  //
+  // A thread can change desktops; the process's association is fixed when it is created, and
+  // that is what the input path checks. So the desktop is chosen up front and the agent is
+  // recreated when the input desktop changes.
+  std::wstring desktopSpec = L"winsta0\\" + desktopName;
+  startup.lpDesktop = desktopSpec.data();
   PROCESS_INFORMATION process{};
   ok = CreateProcessAsUserW(agentToken, nullptr, command, nullptr, nullptr, TRUE,
                             CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr,
@@ -181,6 +199,7 @@ bool start_agent(DWORD sessionId) {
   gAgent.process = process.hProcess;
   gAgent.writePipe = writePipe;
   gAgent.sessionId = sessionId;
+  gAgent.desktop = desktopName;
   return true;
 }
 
@@ -198,14 +217,39 @@ DWORD target_session() {
   return choice.sessionId;
 }
 
+// The desktop currently receiving input -- "Default" ordinarily, "Winlogon" while a consent
+// prompt or the lock screen is up. The agent has to be created on this one, so it is read here
+// rather than left for the agent to discover after the fact.
+//
+// A failure to open it is itself the answer: only the secure desktop refuses, so that is what it
+// must be. Guessing "Default" there would put the agent exactly where it cannot inject.
+std::wstring current_input_desktop_name() {
+  HDESK desktop = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
+  if (!desktop) return L"Winlogon";
+  wchar_t name[64]{};
+  DWORD needed = 0;
+  const bool ok = GetUserObjectInformationW(desktop, UOI_NAME, name, sizeof(name), &needed) != 0;
+  CloseDesktop(desktop);
+  return ok ? name : L"Default";
+}
+
 bool ensure_agent() {
   const DWORD sessionId = target_session();
   if (sessionId == kInvalidSessionId) return false;
+  const std::wstring desktop = current_input_desktop_name();
   if (gAgent.process && gAgent.writePipe && gAgent.sessionId == sessionId &&
-      WaitForSingleObject(gAgent.process, 0) == WAIT_TIMEOUT) {
+      gAgent.desktop == desktop && WaitForSingleObject(gAgent.process, 0) == WAIT_TIMEOUT) {
     return true;
   }
-  return start_agent(sessionId);
+  if (gAgent.process && gAgent.desktop != desktop) {
+    char narrowFrom[64]{};
+    char narrowTo[64]{};
+    size_t converted = 0;
+    wcstombs_s(&converted, narrowFrom, gAgent.desktop.c_str(), _TRUNCATE);
+    wcstombs_s(&converted, narrowTo, desktop.c_str(), _TRUNCATE);
+    diag("input desktop changed %s -> %s, recreating the agent there", narrowFrom, narrowTo);
+  }
+  return start_agent(sessionId, desktop);
 }
 
 bool forward_to_agent(const SecureInputMessage& message) {
@@ -214,7 +258,10 @@ bool forward_to_agent(const SecureInputMessage& message) {
   // A failed write means the agent died; re-resolve rather than reusing the old session, since
   // the reason it died may be that its session went away.
   const DWORD retrySession = target_session();
-  if (retrySession == kInvalidSessionId || !start_agent(retrySession)) return false;
+  if (retrySession == kInvalidSessionId ||
+      !start_agent(retrySession, current_input_desktop_name())) {
+    return false;
+  }
   return write_exact(gAgent.writePipe, &message, sizeof(message));
 }
 

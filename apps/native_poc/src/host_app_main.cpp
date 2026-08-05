@@ -40,6 +40,7 @@
 #include <vector>
 
 #include "directory_client.hpp"
+#include "product_version.hpp"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -57,6 +58,8 @@ constexpr int kIconResource = 101;
 // What the user sees. Internal identifiers (window class, Run value, cache folder) keep the
 // remote60 name so existing installs migrate without special handling.
 constexpr wchar_t kProductName[] = L"GNLink Host";
+
+using remote60::native_poc::kProductVersion;
 
 enum ControlId : int {
   IdServer = 1001,
@@ -82,6 +85,7 @@ enum ControlId : int {
   IdSignedHost,
   IdBadge,
   IdOpenLog,
+  IdVersion,
 };
 
 enum MenuId : int {
@@ -423,6 +427,10 @@ struct AppState {
 
   // Both states.
   HWND statusLabel = nullptr;
+  // Bottom corner, both states. An update that installs cleanly and a failed one look identical
+  // from outside, and several releases in a row were diagnostic-only -- so "is the new build
+  // actually running?" needed an answer that did not involve reading a log.
+  HWND versionLabel = nullptr;
 
   HFONT font = nullptr;
   HFONT titleFont = nullptr;
@@ -715,7 +723,7 @@ void apply_fonts() {
       g.serverLabel,     g.serverEdit,         g.createAccountCheck, g.signupKeyLabel,
       g.signupKeyEdit,   g.signInButton,       g.signedAccountLabel, g.signedHostLabel,
       g.statusBadge,     g.startWithWindowsCheck, g.switchAccountButton, g.signOutButton,
-      g.openLogButton,   g.statusLabel,
+      g.openLogButton,   g.statusLabel,     g.versionLabel,
   };
   for (HWND control : bodyControls) {
     if (control) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
@@ -809,6 +817,12 @@ void build_controls(HWND window) {
   g.openLogButton = make_button(window, IdOpenLog, L"Open log", 0);
 
   g.statusLabel = make_label(window, IdStatus, L"");
+  // Right-aligned so it sits in the corner rather than reading as content.
+  g.versionLabel = CreateWindowExW(0, L"STATIC", (std::wstring(L"v") + kProductVersion).c_str(),
+                                   WS_CHILD | WS_VISIBLE | SS_RIGHT, 0, 0, 10, 10, window,
+                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdVersion)),
+                                   nullptr, nullptr);
+  SendMessageW(g.versionLabel, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
 }
 
 // ---------------------------------------------------------------- layout
@@ -869,6 +883,9 @@ int layout_signed_out() {
   place(g.statusLabel, margin, y, contentW, sc(62));
   y += sc(70);
 
+  place(g.versionLabel, margin, y, contentW, sc(16));
+  y += sc(22);
+
   return y;
 }
 
@@ -898,7 +915,10 @@ int layout_signed_in() {
   place(g.switchAccountButton, margin, y, sc(140), sc(30));
   place(g.signOutButton, margin + sc(150), y, sc(110), sc(30));
   place(g.openLogButton, margin + sc(270), y, sc(110), sc(30));
-  y += sc(44);
+  y += sc(38);
+
+  place(g.versionLabel, margin, y, contentW, sc(16));
+  y += sc(22);
 
   return y;
 }
@@ -1019,6 +1039,11 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         SetBkColor(dc, badge_color(g.badgeState));
         SetTextColor(dc, RGB(255, 255, 255));
         return reinterpret_cast<LRESULT>(badge_brush(g.badgeState));
+      }
+      // Muted, because the version is there to be checked when something looks wrong, not to
+      // compete with the status it sits under.
+      if (reinterpret_cast<HWND>(lParam) == g.versionLabel) {
+        SetTextColor(dc, RGB(140, 140, 140));
       }
       // Labels and checkboxes otherwise paint on the grey dialog color, which reads as
       // stripes against this window's white background.

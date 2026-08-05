@@ -240,7 +240,7 @@ add_executable(remote60_installer WIN32
   "${CMAKE_CURRENT_BINARY_DIR}/installer_payload.rc"
 )
 set_target_properties(remote60_installer PROPERTIES OUTPUT_NAME "GNLinkSetup")
-target_include_directories(remote60_installer PRIVATE installer)
+target_include_directories(remote60_installer PRIVATE installer src)
 # Deliberately links no project library: the installer must stay dependency-free so it runs on a
 # machine that has nothing installed yet.
 target_link_libraries(remote60_installer PRIVATE
