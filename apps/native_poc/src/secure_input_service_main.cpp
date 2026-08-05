@@ -371,6 +371,21 @@ DWORD mouse_flag(uint16_t kind, uint32_t key) {
   return MOUSEEVENTF_LEFTUP;
 }
 
+// Records the first few failures in full. "inject failed" is not actionable: SetCursorPos and
+// SendInput fail for entirely different reasons, and the event kind decides which of them even
+// runs. Bounded because a broken session would otherwise write a line per click forever.
+void diag_inject_failure(const char* where, const SecureInputMessage& message, DWORD error,
+                         long mapped_x, long mapped_y) {
+  static std::atomic<int> remaining{40};
+  if (remaining.fetch_sub(1, std::memory_order_relaxed) <= 0) return;
+  diag("inject FAILED at %s: kind=%u eventKind=%u buttons=%u key=%u in=(%d,%d)/%ux%u "
+       "target=(%d,%d)/%ux%u mapped=(%ld,%ld) err=%lu",
+       where, message.kind, message.eventKind, message.buttons, message.keyCode, message.x,
+       message.y, message.inputWidth, message.inputHeight, message.targetOriginX,
+       message.targetOriginY, message.targetWidth, message.targetHeight, mapped_x, mapped_y,
+       error);
+}
+
 bool inject_message(const SecureInputMessage& message) {
   if (message.kind == static_cast<uint16_t>(SecureInputKind::InputText)) {
     const uint16_t count = std::min<uint16_t>(message.textCount,
@@ -382,11 +397,17 @@ bool inject_message(const SecureInputMessage& message) {
       input[0].ki.dwFlags = KEYEVENTF_UNICODE;
       input[1] = input[0];
       input[1].ki.dwFlags |= KEYEVENTF_KEYUP;
-      if (SendInput(2, input, sizeof(INPUT)) != 2) return false;
+      if (SendInput(2, input, sizeof(INPUT)) != 2) {
+        diag_inject_failure("SendInput-text", message, GetLastError(), 0, 0);
+        return false;
+      }
     }
     return true;
   }
-  if (message.kind != static_cast<uint16_t>(SecureInputKind::InputEvent)) return false;
+  if (message.kind != static_cast<uint16_t>(SecureInputKind::InputEvent)) {
+    diag_inject_failure("kind-not-input-event", message, 0, 0, 0);
+    return false;
+  }
   const POINT point = map_point(message);
   // Position with SetCursorPos and send the button separately. Carrying absolute coordinates on
   // the button event is theoretically tidier -- it removes the window in which something else
@@ -394,6 +415,7 @@ bool inject_message(const SecureInputMessage& message) {
   // relies on metrics this SYSTEM agent does not reliably see, and getting them wrong throws
   // every click off-screen, which reads as input being completely dead. Keep the proven path.
   if (message.eventKind >= 1 && message.eventKind <= 4 && !SetCursorPos(point.x, point.y)) {
+    diag_inject_failure("SetCursorPos", message, GetLastError(), point.x, point.y);
     return false;
   }
   if (message.eventKind == 1) return true;
@@ -420,9 +442,12 @@ bool inject_message(const SecureInputMessage& message) {
         break;
     }
   } else {
+    diag_inject_failure("unhandled-event-kind", message, 0, point.x, point.y);
     return false;
   }
-  return SendInput(1, &input, sizeof(INPUT)) == 1;
+  if (SendInput(1, &input, sizeof(INPUT)) == 1) return true;
+  diag_inject_failure("SendInput", message, GetLastError(), point.x, point.y);
+  return false;
 }
 
 // Reports what the agent is actually doing, once per change rather than per event.
