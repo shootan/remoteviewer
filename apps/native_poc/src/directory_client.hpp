@@ -166,6 +166,9 @@ class HostAgent {
   // heartbeat loop instead of making the controller wait for the ordinary 25-second poll.
   std::atomic<bool> refreshRequested_{false};
   bool portRewriteReported_ = false;  // guarded by mu_
+  // The advertised-address line is printed once per run; the heartbeat that carries it repeats
+  // every 25 seconds and would otherwise bury the log it was added to make readable.
+  bool announcedCandidates_ = false;
 
   mutable std::mutex mu_;
   std::string status_ = "idle";

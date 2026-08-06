@@ -608,6 +608,30 @@ bool HostAgent::Heartbeat(std::vector<PunchTarget>* outPunch) {
   }
   body << "}";
 
+  // Say once what this host is offering as reachable addresses.
+  //
+  // Without it, "the client never tried the LAN route" and "the host never advertised one" look
+  // identical from here, and the only place the difference showed was a log on the phone that
+  // Android will not let anyone copy off the device. This line moves that answer onto the PC,
+  // where it can actually be read: a private address here means the offer was made, so anything
+  // still failing is the network between the two, not a missing candidate.
+  //
+  // Once, not per heartbeat -- it repeats every 25 seconds and the answer does not change.
+  if (!announcedCandidates_) {
+    announcedCandidates_ = true;
+    std::cout << "[directory] advertising localPort=" << cfg_.localUdpPort
+              << " altPort=" << cfg_.alternateUdpPort << " localIps=";
+    if (localIps.empty()) {
+      std::cout << "(none)";
+    } else {
+      for (size_t i = 0; i < localIps.size(); ++i) {
+        if (i) std::cout << ",";
+        std::cout << localIps[i];
+      }
+    }
+    std::cout << "\n";
+  }
+
   uint32_t status = 0;
   std::string resp;
   if (!HttpPostJson("/api/host/heartbeat", body.str(), &status, &resp)) {
