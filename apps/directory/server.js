@@ -16,6 +16,12 @@
  *   REMOTE60_DIR_TLS_CERT    PEM cert
  *   REMOTE60_DIR_SIGNUP_KEY  shared secret that allows account creation; unset = no signup
  *   REMOTE60_DIR_MIN_PASSWORD  shortest password signup will accept (default 8)
+ *
+ * Temporary NAT diagnostics (default off; remove once the company-network question is settled):
+ *   REMOTE60_NAT_DIAG_ENABLED  1 = run the silent probe listener and offer its candidate
+ *   REMOTE60_NAT_DIAG_IP       this server's public IPv4, as the phone must dial it
+ *   REMOTE60_NAT_DIAG_PORT     port the probe listens on               (default 43000)
+ *   REMOTE60_NAT_DIAG_WAKE     1 = poke the host over UDP the moment a connect is requested
  */
 
 const http = require('http');
@@ -36,6 +42,31 @@ const SIGNUP_KEY = process.env.REMOTE60_DIR_SIGNUP_KEY || '';
 // The operator's call, not ours. Short passwords are genuinely weak on a server that
 // grants remote control of a PC, so the default stays at 8 and lowering it is explicit.
 const MIN_PASSWORD = Math.max(1, Number(process.env.REMOTE60_DIR_MIN_PASSWORD || 8));
+
+// ---------------------------------------------------------------- nat diagnostics (temporary)
+//
+// Two questions have to be separated before any more traversal work is worth doing: whether the
+// phone's network refuses UDP to the port the host actually listens on, and whether our own
+// signalling is simply too late. Both answers have to land in a log we can read -- Android 11
+// keeps the client's log inside Android/data, where no file manager can reach it -- so the
+// evidence is produced here and in the host log, never on the phone.
+//
+// Off unless explicitly enabled, and the probe never transmits, so with the flags unset this
+// block cannot influence a connection at all.
+const NAT_DIAG_ENABLED = process.env.REMOTE60_NAT_DIAG_ENABLED === '1';
+const NAT_DIAG_IP = String(process.env.REMOTE60_NAT_DIAG_IP || '').trim();
+const NAT_DIAG_PORT = Number(process.env.REMOTE60_NAT_DIAG_PORT || 43000);
+const NAT_DIAG_WAKE = process.env.REMOTE60_NAT_DIAG_WAKE === '1';
+const NAT_DIAG_TTL_MS = 2 * 60 * 1000;
+
+// Correlates a probe packet back to the connect that provoked it. Keyed by source IP rather than
+// ip:port on purpose: a mapping whose port differs from the one seen on the observe socket is
+// itself a finding (endpoint-dependent NAT), and keying on the port would hide exactly that.
+const natDiagByIp = new Map();
+
+// The observe socket, kept so the wake can be sent from the exact address the host already has a
+// NAT mapping toward. Sending from any other socket would need a mapping that does not exist.
+let observeSock = null;
 
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;   // 12 h
 const HOST_OFFLINE_MS = 90 * 1000;            // no heartbeat for 90 s = offline
@@ -365,7 +396,88 @@ function connectCandidatesFor(host) {
   if (host.alternateUdpPort && host.alternateUdpPort !== host.publicUdpPort) {
     add(host.publicIp, host.alternateUdpPort, 'public-alt');
   }
+  // A candidate that exists only to be punched at, never to be used.
+  //
+  // The client punches every candidate before waiting on any of them, so offering this one makes
+  // the phone send a packet to a port we control, on a network we otherwise cannot instrument.
+  // Whether it arrives answers the destination-port question outright.
+  //
+  // It is appended last and the listener never replies, so it cannot be nominated: selection
+  // requires an answer, and the no-answer fallback takes the first candidate, not this one.
+  if (NAT_DIAG_ENABLED && NAT_DIAG_IP) add(NAT_DIAG_IP, NAT_DIAG_PORT, 'diag-silent');
   return out;
+}
+
+/**
+ * Silent probe listener. Records what arrives and answers nothing.
+ *
+ * The silence is the safety property, not an oversight: a reply would make this endpoint eligible
+ * to win the client's candidate race, and it would win often, because a server with no NAT in
+ * front of it answers faster than the peer we actually want.
+ */
+function startNatDiagListener() {
+  if (!NAT_DIAG_ENABLED) return null;
+  const sock = dgram.createSocket('udp4');
+  sock.on('message', (msg, rinfo) => {
+    const rec = natDiagByIp.get(rinfo.address);
+    const age = rec ? Date.now() - rec.at : -1;
+    const connectId = rec ? rec.connectId : 'unknown';
+    // Same source port as the observe socket saw means one mapping serves both destinations;
+    // a different one means the NAT allocates per destination, which changes what a published
+    // "observed" address is even worth.
+    const samePort = rec ? String(rinfo.port === rec.observedPort) : 'unknown';
+    console.log(`[natdiag] connect=${connectId} rx dport=${NAT_DIAG_PORT} ` +
+                `src=${rinfo.address}:${rinfo.port} observedPort=${rec ? rec.observedPort : '?'} ` +
+                `samePort=${samePort} ageMs=${age} bytes=${msg.length}`);
+  });
+  sock.on('error', (err) => console.error('[natdiag] listener error:', err.message));
+  sock.bind(NAT_DIAG_PORT, () => {
+    console.log(`[natdiag] silent probe listening on udp ${NAT_DIAG_PORT}; never replies`);
+  });
+  return sock;
+}
+
+/**
+ * Builds the packet the host already treats as "a peer is trying to reach you".
+ *
+ * Layout is dictated by UdpHelloPacket in poc_protocol.hpp, which sits inside a
+ * `#pragma pack(1)` region, so the 49 bytes below are exact rather than approximate. The host
+ * checks only the magic and the kind, and does not check who sent it, which is what lets the
+ * directory stand in for the peer here.
+ */
+function buildPunchPacket() {
+  const buf = Buffer.alloc(49);
+  buf.writeUInt32LE(0x31435052, 0);  // kMagic, "RPC1"
+  buf.writeUInt16LE(303, 4);         // UdpPacketKind::Punch
+  buf.writeUInt16LE(49, 6);          // size
+  buf.writeUInt32LE(2, 8);           // kUdpProtocolVersion
+  buf.writeUInt32LE(0, 12);          // features -- unread on this path
+  return buf;                         // authToken stays zeroed
+}
+
+/**
+ * Pokes the host the instant a connect is requested, instead of waiting for its next heartbeat.
+ *
+ * The host learns about a waiting peer either from that heartbeat -- up to 25 seconds away -- or
+ * from the peer's own punch reaching it. The second only happens if the punch already crossed the
+ * host's NAT, which is precisely what fails on a restrictive one, so the two paths are circular
+ * exactly where it matters. Sending from the observe socket sidesteps that: the host has already
+ * opened a mapping toward this address and port.
+ *
+ * Three sends because a single datagram is a single chance, and this is a diagnostic that has to
+ * distinguish "the host was told and still could not connect" from "the host was never told".
+ */
+function sendWakePunch(sock, host, connectId) {
+  if (!sock || !host.publicIp || !host.publicUdpPort) return;
+  const packet = buildPunchPacket();
+  console.log(`[natdiag] connect=${connectId} wakeTx host=${host.publicIp}:${host.publicUdpPort}`);
+  for (const delay of [0, 100, 300]) {
+    setTimeout(() => {
+      sock.send(packet, host.publicUdpPort, host.publicIp, (err) => {
+        if (err) console.error(`[natdiag] connect=${connectId} wakeTx failed: ${err.message}`);
+      });
+    }, delay).unref();
+  }
 }
 
 async function handleHostHeartbeat(req, res) {
@@ -438,6 +550,21 @@ async function handleConnect(req, res) {
   const list = pendingPunch.get(host.hostId) || [];
   list.push({ ip: clientIp, port: clientPort, punchToken, expiresAt: Date.now() + PUNCH_TTL_MS });
   pendingPunch.set(host.hostId, list);
+
+  if (NAT_DIAG_ENABLED) {
+    // One short id ties together the three places this attempt shows up: here, the probe
+    // listener, and the host log. Without it, concurrent attempts are indistinguishable.
+    const connectId = crypto.randomBytes(4).toString('hex');
+    natDiagByIp.set(clientIp, { connectId, observedPort: clientPort, at: Date.now() });
+    for (const [ip, rec] of natDiagByIp) {
+      if (Date.now() - rec.at > NAT_DIAG_TTL_MS) natDiagByIp.delete(ip);
+    }
+    console.log(`[natdiag] connect=${connectId} host=${host.hostName} ` +
+                `hostPublic=${host.publicIp}:${host.publicUdpPort} ` +
+                `clientObserved=${clientIp}:${clientPort} ` +
+                `diag=${NAT_DIAG_IP || '(unset)'}:${NAT_DIAG_PORT}`);
+    if (NAT_DIAG_WAKE) sendWakePunch(observeSock, host, connectId);
+  }
 
   sendJson(res, 200, {
     // Kept for clients that predate candidates; they dial this one and behave as before.
@@ -526,5 +653,10 @@ if (!addAccountFromCli()) {
       console.warn('[directory] TLS is off — tokens travel in clear. Set REMOTE60_DIR_TLS_KEY/CERT for anything but local testing.');
     }
   });
-  startUdp();
+  observeSock = startUdp();
+  startNatDiagListener();
+  if (NAT_DIAG_ENABLED) {
+    console.log(`[natdiag] ENABLED ip=${NAT_DIAG_IP || '(unset -- candidate NOT offered)'} ` +
+                `port=${NAT_DIAG_PORT} wake=${NAT_DIAG_WAKE ? 'on' : 'off'}`);
+  }
 }

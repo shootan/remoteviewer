@@ -72,9 +72,30 @@ function cleanup() {
   await sleep(1500);
 
   const verified = await runTest(['restart_test.js', 'verify', registered.out]);
+  await stopServer(server);
+  if (verified.code !== 0) {
+    cleanup();
+    console.log('\nRESULT: FAILED');
+    process.exit(verified.code);
+  }
+
+  // The diagnostics get their own server because they are opt-in: running them in the main pass
+  // would prove the flags work but not that leaving them unset changes nothing, and "unset
+  // changes nothing" is the property everything above depends on.
+  console.log('\n--- nat diagnostics (opt-in) ---');
+  const diagEnv = { ...env, REMOTE60_NAT_DIAG_ENABLED: '1',
+                    REMOTE60_NAT_DIAG_IP: '127.0.0.1', REMOTE60_NAT_DIAG_PORT: '18443',
+                    T_DIAG: '18443' };
+  server = spawn(process.execPath, [serverPath], { env: diagEnv, stdio: 'ignore' });
+  await sleep(1500);
+  const diag = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(__dirname, 'nat_diag_test.js')],
+                        { env: diagEnv, stdio: 'inherit' });
+    child.on('exit', (code) => resolve(code ?? 1));
+  });
 
   await stopServer(server);
   cleanup();
-  console.log(verified.code === 0 ? '\nRESULT: ALL PASS' : '\nRESULT: FAILED');
-  process.exit(verified.code);
+  console.log(diag === 0 ? '\nRESULT: ALL PASS' : '\nRESULT: FAILED');
+  process.exit(diag);
 })();
