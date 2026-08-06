@@ -440,6 +440,34 @@ DWORD mouse_flag(uint16_t kind, uint32_t key) {
   return MOUSEEVENTF_LEFTUP;
 }
 
+const char* gDpiAwarenessApplied = "none";
+
+// Every other component that touches screen coordinates declares DPI awareness -- the capture
+// worker, the host window, the viewer. The input agent was the one that did not, and it is the
+// one that converts a client coordinate into a desktop point.
+//
+// It matters because the host captures and reports PHYSICAL pixels. A DPI-unaware process is
+// handed a virtualised coordinate space instead, so SetCursorPos(x, y) is scaled up by the
+// display's factor before it reaches the cursor -- putting every click down and to the right of
+// the intended spot, by more the further from the origin it is. At 100% scaling the two spaces
+// coincide and this call changes nothing, which is why it can be added without risking the
+// machines that already work.
+//
+// Called before any coordinate is touched; awareness cannot be changed once the process has
+// begun interacting with the desktop.
+void apply_dpi_awareness() {
+  if (SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
+    gDpiAwarenessApplied = "per-monitor-v2";
+    return;
+  }
+  if (SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE)) {
+    gDpiAwarenessApplied = "system";
+    return;
+  }
+  // Pre-1703 fallback. Equivalent to system awareness and enough to stop the virtualisation.
+  gDpiAwarenessApplied = SetProcessDPIAware() ? "legacy-system" : "none";
+}
+
 // Records the first few failures in full. "inject failed" is not actionable: SetCursorPos and
 // SendInput fail for entirely different reasons, and the event kind decides which of them even
 // runs. Bounded because a broken session would otherwise write a line per click forever.
@@ -453,6 +481,32 @@ void diag_inject_failure(const char* where, const SecureInputMessage& message, D
        message.y, message.inputWidth, message.inputHeight, message.targetOriginX,
        message.targetOriginY, message.targetWidth, message.targetHeight, mapped_x, mapped_y,
        error);
+}
+
+// Records where a click actually landed, for the first few button events only.
+//
+// Until injection started working there was nothing to record: the only coordinate log ran on
+// failure. Now that clicks land, "they land in the wrong place" has three candidate causes that
+// the mapped point alone cannot separate -- a wrong target rect from the host, a wrong input
+// domain from the client, or DPI virtualisation rewriting the coordinate after we hand it over.
+//
+// Reading the cursor straight back is what separates them. If GetCursorPos returns the point we
+// asked for, the coordinate arithmetic is sound and the inputs to it are what is wrong; if it
+// returns something else, the offset is being applied below us. `virt` is logged alongside
+// because the agent's own view of the virtual screen is what the fallback path would have used.
+void diag_inject_landing(const SecureInputMessage& message, long mapped_x, long mapped_y) {
+  static std::atomic<int> remaining{12};
+  if (remaining.fetch_sub(1, std::memory_order_relaxed) <= 0) return;
+  POINT actual{};
+  const bool got = GetCursorPos(&actual) != FALSE;
+  diag("inject landed: eventKind=%u in=(%d,%d)/%ux%u target=(%d,%d)/%ux%u mapped=(%ld,%ld) "
+       "cursor=%s(%ld,%ld) virt=(%d,%d)/%dx%d dpiAwareness=%s",
+       message.eventKind, message.x, message.y, message.inputWidth, message.inputHeight,
+       message.targetOriginX, message.targetOriginY, message.targetWidth, message.targetHeight,
+       mapped_x, mapped_y, got ? "" : "FAILED", got ? actual.x : 0, got ? actual.y : 0,
+       GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+       GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN),
+       gDpiAwarenessApplied);
 }
 
 bool inject_message(const SecureInputMessage& message) {
@@ -514,7 +568,12 @@ bool inject_message(const SecureInputMessage& message) {
     diag_inject_failure("unhandled-event-kind", message, 0, point.x, point.y);
     return false;
   }
-  if (SendInput(1, &input, sizeof(INPUT)) == 1) return true;
+  if (SendInput(1, &input, sizeof(INPUT)) == 1) {
+    // Button events only. Moves return above, and there are enough of them to exhaust the budget
+    // before a single click is recorded -- and it is the click whose position is in question.
+    diag_inject_landing(message, point.x, point.y);
+    return true;
+  }
   diag_inject_failure("SendInput", message, GetLastError(), point.x, point.y);
   return false;
 }
@@ -559,6 +618,7 @@ std::wstring current_desktop_name() {
 }
 
 int run_agent(HANDLE readPipe) {
+  apply_dpi_awareness();
   HDESK ownedDesktop = nullptr;
   // The desktop this process was CREATED on, before any attach. Distinct from the one it later
   // attaches to, and the only way to confirm from outside which of the two the input path is
@@ -576,7 +636,8 @@ int run_agent(HANDLE readPipe) {
         wcstombs_s(&converted, created, wide, _TRUNCATE);
       }
     }
-    diag("agent started in session %lu, created on desktop=%s", session, created);
+    diag("agent started in session %lu, created on desktop=%s dpiAwareness=%s", session, created,
+         gDpiAwarenessApplied);
   }
   for (;;) {
     SecureInputMessage message{};
