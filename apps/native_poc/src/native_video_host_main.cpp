@@ -5639,10 +5639,22 @@ int main(int argc, char** argv) {
       } else if (nowUs >= desktopBackendRetryAtUs) {
         const DesktopCaptureBackend demoted = activeDesktopBackend;
         activeDesktopBackend = requestedDesktopBackend;
-        if (restart_capture_session()) {
-          std::cout << "[native-video-host] desktop-backend-restored from="
-                    << desktop_capture_backend_name(demoted)
-                    << " to=" << desktop_capture_backend_name(activeDesktopBackend) << "\n";
+        const bool restarted = restart_capture_session();
+        // restart_capture_session() reports that *a* session started, not that it started on the
+        // backend we asked for. When the requested one is still unavailable it falls back
+        // internally, puts activeDesktopBackend back where it was, and returns success anyway.
+        //
+        // Taking that as a restoration logged "desktop-backend-restored from=wgc to=wgc" and --
+        // because the success branch cleared the backoff -- retried every 3 seconds for as long
+        // as the cause lasted, flushing the pipeline and forcing a keyframe each time. Measured
+        // in one session log: 45 of those against 2 real restorations.
+        //
+        // The backend the restart actually left behind is the only honest test.
+        const bool promoted = restarted && activeDesktopBackend == requestedDesktopBackend;
+        if (restarted) {
+          // A restart replaces the capture session whether or not the backend moved, so the
+          // timeline still has to be re-anchored and the next frame still has to be a keyframe.
+          // Only the reason differs, and it is worth naming: a retry is a cost paid for nothing.
           ++captureRestartCount;
           captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(),
                                      std::memory_order_release);
@@ -5650,7 +5662,13 @@ int main(int argc, char** argv) {
           lastCallbackUs.store(0, std::memory_order_release);
           resetHostTimelineAnchors();
           forceKeyNext = true;
-          flush_capture_pipeline_state("desktop-backend-restored");
+          flush_capture_pipeline_state(promoted ? "desktop-backend-restored"
+                                                : "desktop-backend-retry-failed");
+        }
+        if (promoted) {
+          std::cout << "[native-video-host] desktop-backend-restored from="
+                    << desktop_capture_backend_name(demoted)
+                    << " to=" << desktop_capture_backend_name(activeDesktopBackend) << "\n";
           desktopBackendRetryAtUs = 0;
           desktopBackendRetryDelayUs = kDesktopBackendRetryMinUs;
         } else {
