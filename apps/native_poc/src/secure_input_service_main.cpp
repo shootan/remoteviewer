@@ -372,9 +372,30 @@ void WINAPI service_main(DWORD, wchar_t**) {
   report_service_status(SERVICE_STOPPED);
 }
 
-bool attach_to_input_desktop(HDESK* ownedDesktop) {
-  HDESK next = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS |
-                                             DESKTOP_SWITCHDESKTOP);
+// Access the agent needs on the input desktop just to see it and follow switches.
+constexpr DWORD kDesktopBaseAccess =
+    DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS | DESKTOP_SWITCHDESKTOP;
+
+// SendInput refuses unless BOTH hold: the calling thread is on the current input desktop, and the
+// thread's desktop was opened with DESKTOP_JOURNALPLAYBACK. Either failure returns the same
+// ERROR_ACCESS_DENIED, which is why the two were indistinguishable for so long.
+//
+// Measured on 0.2.11: the agent ran as SYSTEM, was created on Winlogon, attached successfully, and
+// SetCursorPos moved the cursor on the live consent prompt -- so the desktop was already correct --
+// yet every button event came back err=5. The mask above simply never asked for journal playback.
+// SetCursorPos does not need it; SendInput does. That single missing bit is the whole reason UAC
+// was unclickable, and it is why the driver/registry routes looked like the only options left.
+//
+// The retry without journal playback is deliberate. A desktop whose DACL withholds that right
+// should still get cursor movement rather than lose input entirely, and the caller records which
+// of the two it got so a future err=5 cannot be misread as this bug returning.
+bool attach_to_input_desktop(HDESK* ownedDesktop, bool* journalPlayback) {
+  bool playback = true;
+  HDESK next = OpenInputDesktop(0, FALSE, kDesktopBaseAccess | DESKTOP_JOURNALPLAYBACK);
+  if (!next) {
+    playback = false;
+    next = OpenInputDesktop(0, FALSE, kDesktopBaseAccess);
+  }
   if (!next) return false;
   if (!SetThreadDesktop(next)) {
     CloseDesktop(next);
@@ -382,6 +403,7 @@ bool attach_to_input_desktop(HDESK* ownedDesktop) {
   }
   if (*ownedDesktop) CloseDesktop(*ownedDesktop);
   *ownedDesktop = next;
+  if (journalPlayback) *journalPlayback = playback;
   return true;
 }
 
@@ -503,20 +525,28 @@ bool inject_message(const SecureInputMessage& message) {
 // answer -- so the host counted every event as delivered and a click that went nowhere was
 // indistinguishable from one that worked. Recording the desktop name matters most: "Winlogon"
 // proves the agent followed the switch, "Default" while a consent prompt is up proves it did not.
-void report_agent_state(const wchar_t* desktopName, bool attached, bool injected) {
+// `journal` is reported because it is the difference between "SendInput can work here" and
+// "SendInput will return err=5 no matter what else is right". Without it in the log, a future
+// failure on a desktop that withholds the right would look identical to the 0.2.11 bug.
+void report_agent_state(const wchar_t* desktopName, bool attached, bool journal, bool injected) {
   static std::wstring lastDesktop;
   static bool lastAttached = true;
+  static bool lastJournal = true;
   static bool lastInjected = true;
   const std::wstring current = desktopName ? desktopName : L"?";
-  if (current == lastDesktop && attached == lastAttached && injected == lastInjected) return;
+  if (current == lastDesktop && attached == lastAttached && journal == lastJournal &&
+      injected == lastInjected) {
+    return;
+  }
   lastDesktop = current;
   lastAttached = attached;
+  lastJournal = journal;
   lastInjected = injected;
   char narrow[128]{};
   size_t converted = 0;
   wcstombs_s(&converted, narrow, current.c_str(), _TRUNCATE);
-  diag("agent desktop=%s attach=%s inject=%s", narrow, attached ? "ok" : "FAILED",
-       injected ? "ok" : "FAILED");
+  diag("agent desktop=%s attach=%s journal=%s inject=%s", narrow, attached ? "ok" : "FAILED",
+       journal ? "ok" : "DENIED", injected ? "ok" : "FAILED");
 }
 
 std::wstring current_desktop_name() {
@@ -555,12 +585,13 @@ int run_agent(HANDLE readPipe) {
     if (message.kind == static_cast<uint16_t>(SecureInputKind::Shutdown)) break;
     // Re-attach every message on purpose: the desktop can change between any two events, and a
     // handle kept from the previous one points at the desktop that is no longer receiving input.
-    if (!attach_to_input_desktop(&ownedDesktop)) {
-      report_agent_state(L"(attach failed)", false, false);
+    bool journalPlayback = false;
+    if (!attach_to_input_desktop(&ownedDesktop, &journalPlayback)) {
+      report_agent_state(L"(attach failed)", false, false, false);
       continue;
     }
     const bool injected = inject_message(message);
-    report_agent_state(current_desktop_name().c_str(), true, injected);
+    report_agent_state(current_desktop_name().c_str(), true, journalPlayback, injected);
   }
   diag("agent exiting");
   if (ownedDesktop) CloseDesktop(ownedDesktop);
