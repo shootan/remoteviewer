@@ -95,7 +95,32 @@ function cleanup() {
   });
 
   await stopServer(server);
+  if (diag !== 0) {
+    cleanup();
+    console.log('\nRESULT: FAILED');
+    process.exit(diag);
+  }
+
+  // The relay likewise gets its own server, and for the same reason twice over: the pass above
+  // proves it stays out of the way when unset, and this one proves it works when set. The grace
+  // is shortened because the test is about ordering, not about the production number.
+  console.log('\n--- relay (opt-in) ---');
+  const relayEnv = { ...env, REMOTE60_RELAY_ENABLED: '1',
+                     REMOTE60_RELAY_IP: '127.0.0.1', REMOTE60_RELAY_PORT: '18443',
+                     REMOTE60_RELAY_GRACE_MS: '400',
+                     REMOTE60_RELAY_ALLOW_IPS: '127.0.0.1',
+                     REMOTE60_RELAY_ALLOW_ACCOUNTS: 'tester',
+                     T_RELAY: '18443' };
+  server = spawn(process.execPath, [serverPath], { env: relayEnv, stdio: 'ignore' });
+  await sleep(1500);
+  const relay = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(__dirname, 'relay_test.js')],
+                        { env: relayEnv, stdio: 'inherit' });
+    child.on('exit', (code) => resolve(code ?? 1));
+  });
+
+  await stopServer(server);
   cleanup();
-  console.log(diag === 0 ? '\nRESULT: ALL PASS' : '\nRESULT: FAILED');
-  process.exit(diag);
+  console.log(relay === 0 ? '\nRESULT: ALL PASS' : '\nRESULT: FAILED');
+  process.exit(relay);
 })();

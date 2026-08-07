@@ -22,6 +22,14 @@
  *   REMOTE60_NAT_DIAG_IP       this server's public IPv4, as the phone must dial it
  *   REMOTE60_NAT_DIAG_PORT     port the probe listens on               (default 43000)
  *   REMOTE60_NAT_DIAG_WAKE     1 = poke the host over UDP the moment a connect is requested
+ *
+ * Relay (default off; for networks where no direct path exists at all):
+ *   REMOTE60_RELAY_ENABLED     1 = offer a relay candidate and forward for it
+ *   REMOTE60_RELAY_IP          this server's public IPv4, as the phone must dial it
+ *   REMOTE60_RELAY_PORT        client-facing relay port                (default 43000)
+ *   REMOTE60_RELAY_GRACE_MS    how long a direct path gets alone       (default 2500)
+ *   REMOTE60_RELAY_ALLOW_IPS   client public IPv4s allowed to relay; "*" for any, empty = none
+ *   REMOTE60_RELAY_ALLOW_ACCOUNTS  account ids allowed to relay; "*" for any, empty = none
  */
 
 const http = require('http');
@@ -67,6 +75,71 @@ const natDiagByIp = new Map();
 // The observe socket, kept so the wake can be sent from the exact address the host already has a
 // NAT mapping toward. Sending from any other socket would need a mapping that does not exist.
 let observeSock = null;
+
+// ---------------------------------------------------------------- relay
+//
+// For networks that carry UDP outbound but have no path between the two peers at all. Measured
+// on one company network: the phone's punches reach this server within milliseconds while not a
+// single packet crosses between the guest Wi-Fi and the wired segment, in either direction. No
+// amount of timing or port selection fixes that, so the traffic has to go through here.
+//
+// The whole thing lives in the server. Nothing in the APK or the host knows a relay exists:
+//   - the client punches every candidate and keeps whichever answers first, so a candidate that
+//     answers is a candidate it will use
+//   - the host binds its session to whatever endpoint sent the Hello it authorised, so a Hello
+//     forwarded from the observe socket makes this server the peer
+// Both are existing behaviours, relied on rather than added.
+//
+// Two properties keep it from touching the paths that already work. The relay answers only after
+// a grace period, so a direct candidate that answers at all answers first; and the candidate is
+// offered only to explicitly listed clients, so no one else is ever handed the option.
+const RELAY_ENABLED = process.env.REMOTE60_RELAY_ENABLED === '1';
+const RELAY_IP = String(process.env.REMOTE60_RELAY_IP || '').trim();
+const RELAY_PORT = Number(process.env.REMOTE60_RELAY_PORT || 43000);
+const RELAY_GRACE_MS = Number(process.env.REMOTE60_RELAY_GRACE_MS || 2500);
+
+// Fail closed: an unset allowlist offers the relay to nobody. Getting this backwards would put
+// every session in the country through this one server, so "unset" must not mean "everyone".
+function parseAllowList(raw) {
+  const items = String(raw || '').split(',').map((s) => s.trim()).filter(Boolean);
+  return { any: items.includes('*'), set: new Set(items) };
+}
+const RELAY_ALLOW_IPS = parseAllowList(process.env.REMOTE60_RELAY_ALLOW_IPS);
+const RELAY_ALLOW_ACCOUNTS = parseAllowList(process.env.REMOTE60_RELAY_ALLOW_ACCOUNTS);
+
+const RELAY_AUTH_TTL_MS = 60 * 1000;      // how long a connect stays relay-eligible
+const RELAY_IDLE_TTL_MS = 60 * 1000;      // a session with no traffic either way is finished
+const RELAY_HANDSHAKE_TTL_MS = 30 * 1000; // provisional binding waits this long for a HelloAck
+const RELAY_PUNCH_REPLIES = 3;            // one datagram is one chance; the client may miss it
+
+// The capability minted by /api/connect, kept separately from `pendingPunch`. That map is the
+// host's copy and heartbeat deletes it on read -- consuming it here would leave the host unable
+// to authorise the very session this is for.
+const relayAuthByToken = new Map();
+// The newest capability minted for each host. A phone that is restarted comes back with a new
+// token, and it has to be able to take the host from the session it just abandoned -- the old
+// session cannot be asked to release anything, because from the server's side a killed app and a
+// quiet one look identical.
+const relayLatestTokenByHost = new Map();
+// Punch carries no token (the client sends a bare packet), so the punch stage can only be gated
+// on "this address asked for a relay-eligible connect recently". Identity comes later, from the
+// token inside Hello.
+const relayEligibleByIp = new Map();
+const relaySessions = new Set();         // authoritative; the maps below are only indexes into it
+const relaySessionByClient = new Map();  // "ip:port" of the phone  -> session
+const relaySessionByHost = new Map();    // "ip:port" of the host   -> session
+const relayLeaseByHost = new Map();      // hostId -> session; one at a time, like the host itself
+let relaySock = null;
+
+const UDP_MAGIC = 0x31435052;             // kMagic, "RPC1"
+const UDP_HELLO_BYTES = 49;               // sizeof(UdpHelloPacket) under #pragma pack(1)
+const UDP_KIND_HELLO = 300;
+const UDP_KIND_HELLO_ACK = 301;
+const UDP_KIND_PUNCH = 303;
+const UDP_PROTOCOL_VERSION = 2;
+const UDP_FEATURE_VIDEO_FEC = 0x2;        // the host will not read a Hello without it
+const UDP_FEATURE_DIRECTORY_AUTH = 0x4;   // set in HelloAck only when the host authorised us
+const UDP_TOKEN_OFFSET = 16;              // char authToken[33] follows the five header words
 
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;   // 12 h
 const HOST_OFFLINE_MS = 90 * 1000;            // no heartbeat for 90 s = offline
@@ -383,7 +456,7 @@ function sanitizeIpv4List(value) {
  * mapping. The alternate port exists because a network that filters the first may pass the
  * second, which is the whole reason a single address was not enough.
  */
-function connectCandidatesFor(host) {
+function connectCandidatesFor(host, relayEligible) {
   const out = [];
   const add = (ip, port, kind) => {
     if (!ip || !port) return;
@@ -396,45 +469,35 @@ function connectCandidatesFor(host) {
   if (host.alternateUdpPort && host.alternateUdpPort !== host.publicUdpPort) {
     add(host.publicIp, host.alternateUdpPort, 'public-alt');
   }
-  // A candidate that exists only to be punched at, never to be used.
-  //
-  // The client punches every candidate before waiting on any of them, so offering this one makes
-  // the phone send a packet to a port we control, on a network we otherwise cannot instrument.
-  // Whether it arrives answers the destination-port question outright.
-  //
-  // It is appended last and the listener never replies, so it cannot be nominated: selection
-  // requires an answer, and the no-answer fallback takes the first candidate, not this one.
-  if (NAT_DIAG_ENABLED && NAT_DIAG_IP) add(NAT_DIAG_IP, NAT_DIAG_PORT, 'diag-silent');
+  // Last, and only for a client that has been listed. A relay that is merely available would win
+  // races it should lose -- a server with no NAT in front of it answers faster than the peer we
+  // actually want -- so it is held back both in the list and in time (see relayScheduleReply).
+  if (relayEligible && RELAY_IP) {
+    add(RELAY_IP, RELAY_PORT, 'relay');
+  } else if (NAT_DIAG_ENABLED && NAT_DIAG_IP && !RELAY_ENABLED) {
+    // The diagnostic that established the relay was needed. It shares the port, so the two can
+    // never run at once; the relay supersedes it.
+    //
+    // A candidate that exists only to be punched at, never to be used: it is appended last and
+    // the listener never replies, so it cannot be nominated -- selection requires an answer, and
+    // the no-answer fallback takes the first candidate, not this one.
+    add(NAT_DIAG_IP, NAT_DIAG_PORT, 'diag-silent');
+  }
   return out;
 }
 
 /**
- * Silent probe listener. Records what arrives and answers nothing.
+ * Whether this connect may be told about the relay.
  *
- * The silence is the safety property, not an oversight: a reply would make this endpoint eligible
- * to win the client's candidate race, and it would win often, because a server with no NAT in
- * front of it answers faster than the peer we actually want.
+ * Both lists must pass. During the POC that means one account on one network, which is what makes
+ * "the relay cannot affect the direct paths" a structural claim rather than a hopeful one: nobody
+ * else is ever handed the candidate, so nobody else's race can be won by it.
  */
-function startNatDiagListener() {
-  if (!NAT_DIAG_ENABLED) return null;
-  const sock = dgram.createSocket('udp4');
-  sock.on('message', (msg, rinfo) => {
-    const rec = natDiagByIp.get(rinfo.address);
-    const age = rec ? Date.now() - rec.at : -1;
-    const connectId = rec ? rec.connectId : 'unknown';
-    // Same source port as the observe socket saw means one mapping serves both destinations;
-    // a different one means the NAT allocates per destination, which changes what a published
-    // "observed" address is even worth.
-    const samePort = rec ? String(rinfo.port === rec.observedPort) : 'unknown';
-    console.log(`[natdiag] connect=${connectId} rx dport=${NAT_DIAG_PORT} ` +
-                `src=${rinfo.address}:${rinfo.port} observedPort=${rec ? rec.observedPort : '?'} ` +
-                `samePort=${samePort} ageMs=${age} bytes=${msg.length}`);
-  });
-  sock.on('error', (err) => console.error('[natdiag] listener error:', err.message));
-  sock.bind(NAT_DIAG_PORT, () => {
-    console.log(`[natdiag] silent probe listening on udp ${NAT_DIAG_PORT}; never replies`);
-  });
-  return sock;
+function relayEligibleFor(accountId, clientIp) {
+  if (!RELAY_ENABLED || !RELAY_IP) return false;
+  const ipOk = RELAY_ALLOW_IPS.any || RELAY_ALLOW_IPS.set.has(clientIp);
+  const accountOk = RELAY_ALLOW_ACCOUNTS.any || RELAY_ALLOW_ACCOUNTS.set.has(accountId);
+  return ipOk && accountOk;
 }
 
 /**
@@ -478,6 +541,271 @@ function sendWakePunch(sock, host, connectId) {
       });
     }, delay).unref();
   }
+}
+
+// ---------------------------------------------------------------- relay engine
+
+const endpointKey = (ip, port) => `${ip}:${port}`;
+
+/**
+ * Reads the header of a packet that claims to be one of ours.
+ *
+ * Only the fixed 49-byte Hello/Punch shape is parsed, and only before a session exists. Once one
+ * does, packets are forwarded as opaque bytes -- the relay has no business understanding video.
+ */
+function parseHandshakePacket(msg) {
+  if (msg.length !== UDP_HELLO_BYTES) return null;
+  if (msg.readUInt32LE(0) !== UDP_MAGIC) return null;
+  // The same fields the host checks before it will treat this as a handshake. Accepting a shape
+  // the host would reject only lets a malformed packet take a lease and then strand it.
+  if (msg.readUInt16LE(6) !== UDP_HELLO_BYTES) return null;
+  if (msg.readUInt32LE(8) !== UDP_PROTOCOL_VERSION) return null;
+  const kind = msg.readUInt16LE(4);
+  const features = msg.readUInt32LE(12);
+  // Both ends require FEC on both halves of the handshake, so requiring it here keeps the relay's
+  // idea of the session identical to theirs rather than merely compatible with it.
+  if (kind === UDP_KIND_HELLO_ACK && (features & UDP_FEATURE_VIDEO_FEC) === 0) return null;
+  let token = '';
+  if (kind === UDP_KIND_HELLO) {
+    if ((features & UDP_FEATURE_VIDEO_FEC) === 0) return null;
+    const end = msg.indexOf(0, UDP_TOKEN_OFFSET);
+    const stop = end < 0 ? msg.length : Math.min(end, UDP_TOKEN_OFFSET + 32);
+    token = msg.toString('latin1', UDP_TOKEN_OFFSET, stop);
+    if (!/^[0-9a-f]{32}$/.test(token)) token = '';
+  }
+  return { kind, features, token };
+}
+
+// Indexes are removed only when they still point at this session. Two sessions can briefly share
+// an endpoint -- a phone that reconnects to a different host reuses its address -- and an
+// unconditional delete would then evict whichever one arrived second.
+function relayUnindex(map, key, session) {
+  if (map.get(key) === session) map.delete(key);
+}
+
+function relayDropSession(session, reason) {
+  if (!session || session.dropped) return;
+  session.dropped = true;
+  relaySessions.delete(session);
+  relayUnindex(relaySessionByClient, endpointKey(session.clientIp, session.clientPort), session);
+  relayUnindex(relaySessionByHost, endpointKey(session.hostIp, session.hostPort), session);
+  relayUnindex(relayLeaseByHost, session.hostId, session);
+  console.log(`[relay] connect=${session.connectId} closed reason=${reason} ` +
+              `state=${session.state} c2h=${session.pktC2H}/${session.bytesC2H}B ` +
+              `h2c=${session.pktH2C}/${session.bytesH2C}B ` +
+              `ackMs=${session.ackMs === null ? 'never' : session.ackMs}`);
+}
+
+// One sweep for every expiring thing here. Called on a timer rather than per packet so the hot
+// path stays a Map lookup and a send.
+function relaySweep() {
+  const now = Date.now();
+  for (const [token, rec] of relayAuthByToken) {
+    if (now > rec.expiresAt) relayAuthByToken.delete(token);
+  }
+  for (const [ip, rec] of relayEligibleByIp) {
+    if (now > rec.expiresAt) relayEligibleByIp.delete(ip);
+  }
+  for (const session of [...relaySessions]) {
+    if (session.state === 'provisional' && now - session.createdAt > RELAY_HANDSHAKE_TTL_MS) {
+      relayDropSession(session, 'no HelloAck');
+    } else if (now - session.lastClientAt > RELAY_IDLE_TTL_MS) {
+      // Deliberately the client's silence, not the session's. A host goes on sending video to the
+      // endpoint it last knew about, so counting that as activity would keep a session alive long
+      // after the phone that owned it stopped existing -- and while it lived, the phone's next
+      // attempt would find the host already leased. The client pings every 1s (10s at the
+      // outside), so a minute of nothing means it is gone.
+      relayDropSession(session, 'client silent');
+    }
+  }
+}
+
+/**
+ * Answers a punch, but only once the direct candidates have had the field to themselves.
+ *
+ * The client keeps whichever candidate answers first, not whichever is best, so the only way to
+ * express "prefer direct" is to be slower than direct. The grace has to sit inside the client's
+ * punch budget (4s) with enough room for the Hello that follows, and comfortably above the round
+ * trip a working direct path takes.
+ */
+function relayScheduleReply(clientIp, clientPort, eligible) {
+  const key = endpointKey(clientIp, clientPort);
+  if (eligible.replied.has(key)) return;
+  eligible.replied.add(key);
+  const packet = buildPunchPacket();
+  for (let i = 0; i < RELAY_PUNCH_REPLIES; ++i) {
+    setTimeout(() => {
+      if (!relaySock) return;
+      relaySock.send(packet, clientPort, clientIp, (err) => {
+        if (err) console.error(`[relay] punch reply failed: ${err.message}`);
+      });
+    }, RELAY_GRACE_MS + i * 120).unref();
+  }
+  console.log(`[relay] connect=${eligible.connectId} punch from ${key}; ` +
+              `answering in ${RELAY_GRACE_MS}ms x${RELAY_PUNCH_REPLIES}`);
+}
+
+/**
+ * A Hello with a valid capability is what actually creates a session.
+ *
+ * Punch cannot do this: it carries no token, and a company NAT puts every phone on one address,
+ * so the source address alone identifies nothing. The token does -- it is 128 bits, minted for
+ * this one connect, and the host holds its own copy.
+ */
+function relayBindSession(rinfo, parsed) {
+  const auth = relayAuthByToken.get(parsed.token);
+  if (!auth || Date.now() > auth.expiresAt) return null;
+  if (auth.clientIp !== rinfo.address) return null;
+  // Only the newest capability for a host may take it. Without this, a token that lost the host
+  // could win it back the moment its owner retransmitted an old Hello.
+  if (relayLatestTokenByHost.get(auth.hostId) !== parsed.token) return null;
+  const host = store.hosts[auth.hostId];
+  if (!host || !host.publicIp || !host.publicUdpPort) return null;
+
+  // The newest connect wins. The alternative -- first session keeps the host -- reads as fair but
+  // means a phone whose app was killed cannot come back: nobody is left to release the lease, and
+  // the server cannot tell a dead session from a quiet one until its client falls silent.
+  const existingLease = relayLeaseByHost.get(auth.hostId);
+  if (existingLease && !existingLease.dropped) relayDropSession(existingLease, 'newer connect');
+  // The phone's address is just as exclusive: reusing it for a second host would leave the first
+  // session indexed under a key that no longer finds it.
+  const clientKey = endpointKey(rinfo.address, rinfo.port);
+  const existingClient = relaySessionByClient.get(clientKey);
+  if (existingClient && !existingClient.dropped) relayDropSession(existingClient, 'client moved');
+
+  const now = Date.now();
+  const session = {
+    connectId: auth.connectId,
+    token: parsed.token,
+    hostId: auth.hostId,
+    clientIp: rinfo.address,
+    clientPort: rinfo.port,
+    hostIp: host.publicIp,
+    hostPort: host.publicUdpPort,
+    state: 'provisional',
+    createdAt: now,
+    lastClientAt: now,
+    lastHostAt: now,
+    ackMs: null,
+    pktC2H: 0, pktH2C: 0, bytesC2H: 0, bytesH2C: 0,
+    dropped: false,
+  };
+  relaySessions.add(session);
+  relaySessionByClient.set(clientKey, session);
+  relaySessionByHost.set(endpointKey(session.hostIp, session.hostPort), session);
+  relayLeaseByHost.set(session.hostId, session);
+  console.log(`[relay] connect=${session.connectId} bound client=${session.clientIp}:` +
+              `${session.clientPort} host=${session.hostIp}:${session.hostPort}`);
+  return session;
+}
+
+// Forwards one client packet to the host and counts it.
+function relayForwardToHost(session, msg) {
+  session.lastClientAt = Date.now();
+  session.pktC2H++;
+  session.bytesC2H += msg.length;
+  if (observeSock) observeSock.send(msg, session.hostPort, session.hostIp);
+}
+
+/**
+ * Client-facing listener. Also the diagnostic probe when the relay is off, because they share a
+ * port and the diagnostic is what proved this port reaches the phone's network.
+ */
+function startRelayListener() {
+  if (!RELAY_ENABLED && !NAT_DIAG_ENABLED) return null;
+  const port = RELAY_ENABLED ? RELAY_PORT : NAT_DIAG_PORT;
+  const sock = dgram.createSocket('udp4');
+
+  sock.on('message', (msg, rinfo) => {
+    if (RELAY_ENABLED) {
+      const session = relaySessionByClient.get(endpointKey(rinfo.address, rinfo.port));
+      // Hello is read before the established-session path, not after. A phone that restarts often
+      // comes back on the same address with a new capability, and treating that Hello as ordinary
+      // media would forward it under the old session's identity -- the connection might even
+      // survive, while every counter and log line here described the session it replaced.
+      const parsed = parseHandshakePacket(msg);
+      if (parsed && parsed.kind === UDP_KIND_HELLO) {
+        // Dropped here rather than left to fall through: a Hello whose capability we cannot read
+        // is not media, and forwarding it under an existing session would attribute one client's
+        // handshake to another's.
+        if (!parsed.token) return;
+        if (session && !session.dropped && session.token === parsed.token) {
+          relayForwardToHost(session, msg);   // a retransmission, not a new session
+          return;
+        }
+        const bound = relayBindSession(rinfo, parsed);
+        if (bound) relayForwardToHost(bound, msg);
+        return;
+      }
+      if (session && !session.dropped) {
+        // Established: opaque bytes, host leg, no inspection. The observe socket is not a choice
+        // here -- it is the only address the host has a NAT mapping toward.
+        relayForwardToHost(session, msg);
+        return;
+      }
+      if (parsed && parsed.kind === UDP_KIND_PUNCH) {
+        const eligible = relayEligibleByIp.get(rinfo.address);
+        if (eligible && Date.now() <= eligible.expiresAt) {
+          relayScheduleReply(rinfo.address, rinfo.port, eligible);
+        }
+        return;
+      }
+      return;  // anything else opens nothing
+    }
+
+    // Diagnostic mode: record and answer nothing. Silence is the safety property -- a reply would
+    // make this endpoint eligible to win the client's candidate race.
+    const rec = natDiagByIp.get(rinfo.address);
+    const age = rec ? Date.now() - rec.at : -1;
+    const connectId = rec ? rec.connectId : 'unknown';
+    const samePort = rec ? String(rinfo.port === rec.observedPort) : 'unknown';
+    console.log(`[natdiag] connect=${connectId} rx dport=${port} ` +
+                `src=${rinfo.address}:${rinfo.port} observedPort=${rec ? rec.observedPort : '?'} ` +
+                `samePort=${samePort} ageMs=${age} bytes=${msg.length}`);
+  });
+
+  sock.on('error', (err) => console.error('[relay] listener error:', err.message));
+  sock.bind(port, () => {
+    if (RELAY_ENABLED) {
+      // A keyframe is a burst of a hundred-odd datagrams; the default receive buffer loses the
+      // tail of one and the client spends the next second asking for another.
+      try { sock.setRecvBufferSize(4 * 1024 * 1024); } catch { /* best effort */ }
+      try { sock.setSendBufferSize(4 * 1024 * 1024); } catch { /* best effort */ }
+      console.log(`[relay] listening on udp ${port}; grace=${RELAY_GRACE_MS}ms`);
+    } else {
+      console.log(`[natdiag] silent probe listening on udp ${port}; never replies`);
+    }
+  });
+  return sock;
+}
+
+/**
+ * The host side of an established relay session, arriving on the observe socket.
+ *
+ * Returns true when the packet was relay traffic. The caller checks OBSERVE first: a host in an
+ * active session keeps sending those from the very same tuple, and reading them as media would
+ * drop it out of the directory.
+ */
+function relayHandleHostPacket(msg, rinfo) {
+  if (!RELAY_ENABLED) return false;
+  const session = relaySessionByHost.get(endpointKey(rinfo.address, rinfo.port));
+  if (!session || session.dropped) return false;
+  session.lastHostAt = Date.now();
+  session.pktH2C++;
+  session.bytesH2C += msg.length;
+  if (session.state === 'provisional') {
+    const ack = parseHandshakePacket(msg);
+    // The host sets this bit only after authorising the capability, and the client refuses an Ack
+    // without it. So this one bit is the proof that both ends accepted the relayed handshake.
+    if (ack && ack.kind === UDP_KIND_HELLO_ACK &&
+        (ack.features & UDP_FEATURE_DIRECTORY_AUTH) !== 0) {
+      session.state = 'active';
+      session.ackMs = Date.now() - session.createdAt;
+      console.log(`[relay] connect=${session.connectId} active; helloAck in ${session.ackMs}ms`);
+    }
+  }
+  if (relaySock) relaySock.send(msg, session.clientPort, session.clientIp);
+  return true;
 }
 
 async function handleHostHeartbeat(req, res) {
@@ -551,10 +879,12 @@ async function handleConnect(req, res) {
   list.push({ ip: clientIp, port: clientPort, punchToken, expiresAt: Date.now() + PUNCH_TTL_MS });
   pendingPunch.set(host.hostId, list);
 
+  // One short id ties together the places this attempt shows up: here, the listener, the relay,
+  // and the host log. Without it, concurrent attempts are indistinguishable.
+  const connectId = crypto.randomBytes(4).toString('hex');
+  const relayEligible = relayEligibleFor(session.accountId, clientIp);
+
   if (NAT_DIAG_ENABLED) {
-    // One short id ties together the three places this attempt shows up: here, the probe
-    // listener, and the host log. Without it, concurrent attempts are indistinguishable.
-    const connectId = crypto.randomBytes(4).toString('hex');
     natDiagByIp.set(clientIp, { connectId, observedPort: clientPort, at: Date.now() });
     for (const [ip, rec] of natDiagByIp) {
       if (Date.now() - rec.at > NAT_DIAG_TTL_MS) natDiagByIp.delete(ip);
@@ -563,14 +893,39 @@ async function handleConnect(req, res) {
                 `hostPublic=${host.publicIp}:${host.publicUdpPort} ` +
                 `clientObserved=${clientIp}:${clientPort} ` +
                 `diag=${NAT_DIAG_IP || '(unset)'}:${NAT_DIAG_PORT}`);
-    if (NAT_DIAG_WAKE) sendWakePunch(observeSock, host, connectId);
+  }
+
+  if (relayEligible) {
+    const expiresAt = Date.now() + RELAY_AUTH_TTL_MS;
+    // The host's copy of this capability lives in `pendingPunch` and heartbeat deletes it on
+    // read. This is a separate copy for the same token, so verifying a relayed Hello never costs
+    // the host the authorisation it needs to accept that same Hello.
+    relayAuthByToken.set(punchToken, { hostId: host.hostId, clientIp, connectId, expiresAt });
+    // Newest wins, so the previous capability for this host stops being able to claim it. A phone
+    // that was killed mid-session is the ordinary case, and its old token must not outrank the
+    // one the user is holding now.
+    const previous = relayLatestTokenByHost.get(host.hostId);
+    if (previous && previous !== punchToken) relayAuthByToken.delete(previous);
+    relayLatestTokenByHost.set(host.hostId, punchToken);
+    relayEligibleByIp.set(clientIp, { connectId, expiresAt, replied: new Set() });
+    console.log(`[relay] connect=${connectId} eligible client=${clientIp}:${clientPort} ` +
+                `host=${host.hostName}@${host.publicIp}:${host.publicUdpPort}`);
+  }
+
+  // On the direct path the host learns of a waiting peer from the peer's own punch, but a relayed
+  // punch never reaches it -- the relay answers rather than forwards, precisely because forwarding
+  // is what fails on these networks. That leaves the heartbeat, up to 25 seconds out, against a
+  // client that gives its Hello about three. So the wake is not a diagnostic here; it is the only
+  // thing that gets the capability into the host before the client stops asking.
+  if (relayEligible || (NAT_DIAG_ENABLED && NAT_DIAG_WAKE)) {
+    sendWakePunch(observeSock, host, connectId);
   }
 
   sendJson(res, 200, {
     // Kept for clients that predate candidates; they dial this one and behave as before.
     hostPublicIp: host.publicIp,
     hostPublicUdpPort: host.publicUdpPort,
-    candidates: connectCandidatesFor(host),
+    candidates: connectCandidatesFor(host, relayEligible),
     punchToken,
   });
 }
@@ -606,16 +961,31 @@ async function onRequest(req, res) {
 function startUdp() {
   const sock = dgram.createSocket('udp4');
   sock.on('message', (msg, rinfo) => {
-    const text = msg.toString('utf8', 0, Math.min(msg.length, 128)).trim();
-    if (!text.startsWith('OBSERVE ')) return;
-    const token = text.slice(8).trim().slice(0, 64);
-    if (!token) return;
-    observed.set(token, { ip: rinfo.address, port: rinfo.port, at: Date.now() });
-    const reply = Buffer.from(JSON.stringify({ ip: rinfo.address, port: rinfo.port }));
-    sock.send(reply, rinfo.port, rinfo.address);
+    // OBSERVE is tested first and by shape. A host in a relay session sends both kinds from the
+    // same tuple, and reading its observations as media would drop it out of the directory --
+    // while a 49-byte binary packet can never be mistaken for this prefix.
+    if (msg.length <= 128 && msg[0] === 0x4f /* 'O' */) {
+      const text = msg.toString('utf8').trim();
+      if (text.startsWith('OBSERVE ')) {
+        const token = text.slice(8).trim().slice(0, 64);
+        if (!token) return;
+        observed.set(token, { ip: rinfo.address, port: rinfo.port, at: Date.now() });
+        const reply = Buffer.from(JSON.stringify({ ip: rinfo.address, port: rinfo.port }));
+        sock.send(reply, rinfo.port, rinfo.address);
+        return;
+      }
+    }
+    // Only a tuple already bound to a session is forwarded; an unknown sender opens nothing.
+    relayHandleHostPacket(msg, rinfo);
   });
   sock.on('error', (err) => console.error('[directory] udp error:', err.message));
-  sock.bind(UDP_PORT, () => console.log(`[directory] udp observe on ${UDP_PORT}`));
+  sock.bind(UDP_PORT, () => {
+    if (RELAY_ENABLED) {
+      try { sock.setRecvBufferSize(4 * 1024 * 1024); } catch { /* best effort */ }
+      try { sock.setSendBufferSize(4 * 1024 * 1024); } catch { /* best effort */ }
+    }
+    console.log(`[directory] udp observe on ${UDP_PORT}`);
+  });
   return sock;
 }
 
@@ -654,9 +1024,22 @@ if (!addAccountFromCli()) {
     }
   });
   observeSock = startUdp();
-  startNatDiagListener();
+  relaySock = startRelayListener();
+  if (RELAY_ENABLED) {
+    const ips = RELAY_ALLOW_IPS.any ? '*' : ([...RELAY_ALLOW_IPS.set].join(',') || '(none)');
+    const accounts = RELAY_ALLOW_ACCOUNTS.any
+      ? '*' : ([...RELAY_ALLOW_ACCOUNTS.set].join(',') || '(none)');
+    console.log(`[relay] ENABLED ip=${RELAY_IP || '(unset -- candidate NOT offered)'} ` +
+                `port=${RELAY_PORT} grace=${RELAY_GRACE_MS}ms allowIps=${ips} ` +
+                `allowAccounts=${accounts}`);
+    if (!RELAY_IP || ips === '(none)' || accounts === '(none)') {
+      console.warn('[relay] no client can be offered the relay until IP and account are listed');
+    }
+    setInterval(relaySweep, 5000).unref();
+  }
   if (NAT_DIAG_ENABLED) {
     console.log(`[natdiag] ENABLED ip=${NAT_DIAG_IP || '(unset -- candidate NOT offered)'} ` +
-                `port=${NAT_DIAG_PORT} wake=${NAT_DIAG_WAKE ? 'on' : 'off'}`);
+                `port=${NAT_DIAG_PORT} wake=${NAT_DIAG_WAKE ? 'on' : 'off'}` +
+                `${RELAY_ENABLED ? ' (probe superseded by relay)' : ''}`);
   }
 }

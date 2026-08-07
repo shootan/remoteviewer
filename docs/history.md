@@ -6034,3 +6034,58 @@ Codex 설계 검토에서 얻은 정정 2건 (둘 다 일을 줄이는 방향)
 - N8 릴레이 POC 구현 (서버 단독, APK·호스트 불변) — 착수 승인 대기.
 - 잔여 수동 확인: 집 Wi-Fi 회귀 1회 (wake=on 상태).
 - 세션 정리 anomaly는 미재현으로 우선순위 하향, 관찰 지속.
+
+### 239) 2026-08-07 N8 릴레이 POC 구현 — 서버 단독, APK·호스트 무수정
+
+목표
+- 회사망처럼 두 피어 사이에 경로가 아예 없는 환경에서 접속을 성립시킨다. 직접 경로가 되는
+  집·LTE 는 손대지 않는다(하드 제약).
+
+성립 근거 (기존 동작에 얹은 것이지 새로 만든 것이 아니다)
+- 클라는 후보를 전부 펀치하고 **먼저 답한 쪽**을 채택한다 → 답하면 쓰인다.
+- 호스트는 Hello 를 검증한 뒤 **그 Hello 를 보낸 endpoint** 를 udpPeer/senderPeer 로 채택한다
+  (`native_video_host_main.cpp:3175-3210`) → observe 소켓(8081)에서 Hello 를 넘기면 서버가 peer.
+- 디렉토리 경로의 control 은 TCP 가 아니라 미디어 UDP 소켓 위를 흐른다
+  (`native_bridge.cpp:184` requireTcpControl=false / controlOverUdp=true) → TCP leg 불필요.
+
+구현 (`apps/directory/server.js` 단독)
+- 후보 목록 맨 끝에 `relay` 후보. 허용 IP·계정 **둘 다 fail-closed** — 미설정이면 아무에게도
+  주지 않는다. 후보를 못 받은 클라는 릴레이와 경쟁할 수 없으므로 직접 경로 무영향이 구조적이다.
+- Punch 는 token 이 없다. "이 IP 가 최근 relay-eligible connect 를 했다"만 gate 하고 grace
+  (기본 2.5초) 후 응답만 한다. 세션 식별은 Hello 의 32-hex token 으로만.
+- relay 연결에서는 diag 플래그와 무관하게 wake 발사 — 릴레이는 Punch 를 전달하지 않으므로
+  호스트를 깨울 다른 경로가 없고, 하트비트는 최대 25초인데 클라 Hello 예산은 약 3초다.
+- diag 리스너를 relay-aware 리스너로 승격(포트 공유라 동시 bind 불가). diag-silent 후보는
+  `!RELAY_ENABLED` 일 때만.
+
+Codex 리뷰 2회에서 잡힌 blocker (agent-bus, 세션 remote#xcl572oo)
+- **앱 재시작이 영구 차단될 수 있었다.** 재시작은 새 token 인데 lease 를 "같은 token 만 재시도"
+  로 막았고, 게다가 호스트가 죽은 폰 주소로 계속 쏘면 그 트래픽이 lastSeenAt 을 갱신해 좀비
+  세션이 만료되지 않았다. → `relayLatestTokenByHost` 로 **최신 connect 가 이긴다**, 옛 token 은
+  auth 자체를 폐기. TTL 은 `lastClientAt`(클라 침묵)만 본다 — 근거: 클라 Ping 간격은
+  `clamp(x, 20, 10000)`ms(`native_video_client_shared_core.cpp:360`)라 60초면 안전.
+- **인덱스 삭제가 identity-safe 하지 않았다.** 같은 폰 주소가 다른 호스트로 옮기면 옛 세션 정리가
+  현재 세션의 인덱스를 지웠다. → `map.get(key)===session` 일 때만 delete, 수명 관리 주체를
+  `relaySessions` Set 으로 분리(클라 맵에서 밀려난 세션도 sweep 대상).
+- Hello 를 established fast path **보다 먼저** 판정하도록 순서 반전. 같은 token 재전송은 세션
+  재생성 없이 전달, 다른 token 은 최신 auth 검증 후 supersede, token 불명은 명시 drop.
+- handshake shape 검증을 호스트와 동일하게(size/version/FEC). HelloAck 도 같은 파서.
+- **staged 인덱스에 옛 버전이 남아 있던 것도 Codex 가 잡았다** — 그대로 커밋했으면 위 수정과
+  테스트, README 가 전부 빠질 뻔했다. 재-stage 후 cached diff 로 확인.
+
+변경 파일
+- `apps/directory/server.js`, `apps/directory/test/relay_test.js`(신규),
+  `apps/directory/test/run.js`, `apps/directory/README.md`
+
+검증/build/test
+- `node test/run.js` 전체 PASS. relay 29건은 실 UDP 소켓으로 가짜 호스트/폰을 띄워
+  `connect→wake→Punch→grace→Hello→HelloAck→양방향 1200B` 를 왕복시킨다. 특히 고정한 것:
+  wake 가 8081 에서 실제 발사됨, Hello 가 8081 발신으로 호스트에 도달(설계 전제),
+  pendingPunch 무손상(호스트 인증 안 뺏김), 호스트가 릴레이 중에도 OBSERVE 가능,
+  앱 재시작이 좀비 세션을 인계, 옛 token 재탈취 불가, 허용목록 밖 계정 무후보.
+- README 의 "Video never passes through here" 를 정정(직접 경로 한정 + relay 예외·과금·N4 선행).
+
+다음 액션
+- 배포 후 회사 Wi-Fi 실기: 영상 첫 프레임 + 30초 유지 + control 왕복 1건.
+- LTE·집 무회귀 확인(`chosen != relay`, relay 미디어 바이트 0).
+- 비차단 후속: idle TTL 판정을 순수 함수로 분리해 단위 테스트로 고정.
