@@ -175,6 +175,35 @@ function observe(token) {
   r = await api('POST', '/api/connect', { hostId: 'does-not-exist', observeToken: 'client-observe-1' }, session);
   check('unknown host rejected', r.status === 404, `status=${r.status}`);
 
+  // The wake, with nothing configured. It began as a diagnostic behind a flag, and the day that
+  // flag was left out of a deploy, mobile connections quietly stopped working: the host was left
+  // to discover a waiting peer from its own heartbeat, up to 25 seconds after a client that gives
+  // up in three. Nothing failed loudly. So what is pinned here is the default -- no environment,
+  // still woken.
+  const wakeHost = dgram.createSocket('udp4');
+  const wakeSeen = [];
+  wakeHost.on('message', (msg, rinfo) => wakeSeen.push({ msg, rinfo }));
+  await new Promise((resolve) => wakeHost.bind(0, resolve));
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('observe timeout')), 3000);
+    const onMessage = () => { clearTimeout(timer); wakeHost.off('message', onMessage); resolve(); };
+    wakeHost.on('message', onMessage);
+    wakeHost.send(Buffer.from('OBSERVE wake-host-observe'), UDP, '127.0.0.1');
+  });
+  await api('POST', '/api/host/heartbeat',
+            { hostToken, hostName: 'Office PC', observeToken: 'wake-host-observe' });
+  wakeSeen.length = 0;
+  await api('POST', '/api/connect', { hostId, observeToken: 'client-observe-1' }, session);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  // 49 bytes, magic "RPC1", kind 303 -- the packet the host already answers by refreshing.
+  const woke = wakeSeen.find((p) => p.msg.length === 49 && p.msg.readUInt32LE(0) === 0x31435052 &&
+                                    p.msg.readUInt16LE(4) === 303);
+  check('a connect wakes the host with no flags set at all', !!woke,
+        `received=${wakeSeen.length}`);
+  check('the wake comes from the observe socket, the only address the host can answer',
+        !!woke && woke.rinfo.port === UDP,
+        woke ? `src=${woke.rinfo.port} expected=${UDP}` : 'missing');
+  wakeHost.close();
 
   console.log(failures === 0 ? '\nRESULT: ALL PASS' : `\nRESULT: ${failures} FAILED`);
   process.exit(failures === 0 ? 0 : 1);

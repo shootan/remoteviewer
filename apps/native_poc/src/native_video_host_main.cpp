@@ -46,6 +46,7 @@
 #include "capture_cadence_gate.hpp"
 #include "d3d_capture_readback.hpp"
 #include "directory_client.hpp"
+#include "encode_resolution_ladder.hpp"
 #include "gdi_capture_process.hpp"
 #include "json_profile.hpp"
 #include "native_video_transport.hpp"
@@ -1898,18 +1899,15 @@ void choose_h264_encode_size(const Args& args, uint32_t captureW, uint32_t captu
     targetW = clamp_even_dim(targetW, 2, captureW);
     targetH = clamp_even_dim(targetH, 2, captureH);
   } else {
-    // At low bitrate, avoid encoder queue buildup by auto-falling back toward 720p.
-    if (args.bitrate <= 1500000 && (captureW > 1280 || captureH > 720)) {
-      const double sx = 1280.0 / static_cast<double>(captureW);
-      const double sy = 720.0 / static_cast<double>(captureH);
-      const double scale = std::min(sx, sy);
-      if (scale > 0.0 && scale < 1.0) {
-        targetW = static_cast<uint32_t>(captureW * scale);
-        targetH = static_cast<uint32_t>(captureH * scale);
-        targetW = clamp_even_dim(targetW, 2, captureW);
-        targetH = clamp_even_dim(targetH, 2, captureH);
-        *outAutoFallback720 = true;
-      }
+    // What the bitrate can carry. The threshold used to sit at 1.5 Mbps, which only caught the
+    // extremes; 3 Mbps at 1080p was left to spend a quarter of the bits per pixel and showed it
+    // whenever the whole screen changed at once. See encode_resolution_ladder.hpp.
+    const auto choice =
+        remote60::native_poc::choose_encode_resolution(args.bitrate, captureW, captureH, false);
+    if (choice.reduced) {
+      targetW = choice.width;
+      targetH = choice.height;
+      *outAutoFallback720 = true;
     }
   }
   *outW = targetW;
@@ -4320,6 +4318,9 @@ int main(int argc, char** argv) {
     choose_h264_encode_size(args, captureWidth, captureHeight, &encodeW, &encodeH, &autoFallback720);
   }
 
+  // Whether the ladder, rather than the source size, is currently deciding the resolution. Held
+  // across runtime changes so the band between the two thresholds can return the previous answer.
+  bool encodeLadderReduced = autoFallback720;
   const uint32_t abrHighW = encodeW;
   const uint32_t abrHighH = encodeH;
   const uint32_t abrMidW = abrHighW;
@@ -5830,11 +5831,29 @@ int main(int argc, char** argv) {
           abrHasLowProfile = abrHasLowerResolution || abrLowBitrate < abrMidBitrate;
           abrProfile = 0;
         }
+        // The resolution follows the bitrate, because the bitrate is a budget for the whole
+        // frame: the same 3 Mbps buys four times as much per pixel at 720p. Switching to mobile
+        // has to take the picture size down with it, or the encoder spends the difference
+        // predicting badly every time the screen changes at once.
+        uint32_t ladderW = nominalEncodeW;
+        uint32_t ladderH = nominalEncodeH;
+        if (bitrateExplicit) {
+          const auto choice = remote60::native_poc::choose_encode_resolution(
+              targetBitrate, captureWidth, captureHeight, encodeLadderReduced);
+          encodeLadderReduced = choice.reduced;
+          ladderW = choice.width;
+          ladderH = choice.height;
+          if (ladderW != nominalEncodeW || ladderH != nominalEncodeH) {
+            std::cout << "[native-video-host][control] encode ladder " << nominalEncodeW << "x"
+                      << nominalEncodeH << " -> " << ladderW << "x" << ladderH
+                      << " for " << (targetBitrate / 1000) << "kbps\n";
+          }
+        }
         // Pass the nominal box, not the fitted activeEncode size: apply_encoder_target
         // records its width/height arguments as the new nominal budget, and feeding the
         // already-fitted size back in would permanently shrink the box for every later
         // target switch.
-        if (!apply_encoder_target(nominalEncodeW, nominalEncodeH, targetFps, targetBitrate, targetKeyint)) {
+        if (!apply_encoder_target(ladderW, ladderH, targetFps, targetBitrate, targetKeyint)) {
           std::cerr << "[native-video-host][control] runtime-config apply failed seq=" << reqSeq << "\n";
           break;
         }

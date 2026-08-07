@@ -17,11 +17,13 @@
  *   REMOTE60_DIR_SIGNUP_KEY  shared secret that allows account creation; unset = no signup
  *   REMOTE60_DIR_MIN_PASSWORD  shortest password signup will accept (default 8)
  *
+ * Wake (on by default; a connection often depends on it):
+ *   REMOTE60_WAKE_DISABLED     1 = do not poke the host when a connect is requested
+ *
  * Temporary NAT diagnostics (default off; remove once the company-network question is settled):
  *   REMOTE60_NAT_DIAG_ENABLED  1 = run the silent probe listener and offer its candidate
  *   REMOTE60_NAT_DIAG_IP       this server's public IPv4, as the phone must dial it
  *   REMOTE60_NAT_DIAG_PORT     port the probe listens on               (default 43000)
- *   REMOTE60_NAT_DIAG_WAKE     1 = poke the host over UDP the moment a connect is requested
  *
  * Relay (default off; for networks where no direct path exists at all):
  *   REMOTE60_RELAY_ENABLED     1 = offer a relay candidate and forward for it
@@ -64,8 +66,31 @@ const MIN_PASSWORD = Math.max(1, Number(process.env.REMOTE60_DIR_MIN_PASSWORD ||
 const NAT_DIAG_ENABLED = process.env.REMOTE60_NAT_DIAG_ENABLED === '1';
 const NAT_DIAG_IP = String(process.env.REMOTE60_NAT_DIAG_IP || '').trim();
 const NAT_DIAG_PORT = Number(process.env.REMOTE60_NAT_DIAG_PORT || 43000);
-const NAT_DIAG_WAKE = process.env.REMOTE60_NAT_DIAG_WAKE === '1';
 const NAT_DIAG_TTL_MS = 2 * 60 * 1000;
+
+// ---------------------------------------------------------------- wake
+//
+// Poking the host the instant a connect is requested, instead of leaving it to find out from its
+// next heartbeat.
+//
+// This began as a diagnostic and turned out to be load-bearing. The host learns that a peer is
+// waiting either from that heartbeat -- up to 25 seconds away -- or from the peer's own punch
+// arriving, which a restrictive NAT drops precisely when it matters. Against a client that gives
+// up on Hello in about three seconds, that leaves success to coincidence: measured at roughly one
+// attempt in six on mobile data with the wake off, and first-try every time with it on.
+//
+// So it defaults to on, and turning it off is the explicit act. It was the other way round for
+// one afternoon -- the flag was left out of a deploy and mobile connections quietly stopped
+// working, with nothing in any log to say why.
+const WAKE_ENABLED = process.env.REMOTE60_WAKE_DISABLED !== '1';
+const WAKE_PACKETS = [0, 100, 300];        // one datagram is one chance
+const WAKE_MIN_INTERVAL_MS = 1000;         // per host; a retrying client must not become a flood
+// Only ever aimed at an address a heartbeat confirmed recently. An older one is a mapping that
+// has probably closed, and firing at it is at best noise to a stranger who now holds that port.
+const WAKE_HOST_FRESH_MS = 90 * 1000;
+// hostId -> last send, so repeated connects for one host collapse into a single burst.
+const wakeLastSentByHost = new Map();
+const wakeStats = { sent: 0, suppressed: 0, skippedStale: 0, failed: 0 };
 
 // Correlates a probe packet back to the connect that provoked it. Keyed by source IP rather than
 // ip:port on purpose: a mapping whose port differs from the one seen on the observe socket is
@@ -521,26 +546,51 @@ function buildPunchPacket() {
 /**
  * Pokes the host the instant a connect is requested, instead of waiting for its next heartbeat.
  *
- * The host learns about a waiting peer either from that heartbeat -- up to 25 seconds away -- or
- * from the peer's own punch reaching it. The second only happens if the punch already crossed the
- * host's NAT, which is precisely what fails on a restrictive one, so the two paths are circular
- * exactly where it matters. Sending from the observe socket sidesteps that: the host has already
- * opened a mapping toward this address and port.
+ * Sent from the observe socket because that is the one address the host has an open NAT mapping
+ * toward -- it has been sending its own observations there every heartbeat. Any other socket of
+ * ours would need a mapping that was never created.
  *
- * Three sends because a single datagram is a single chance, and this is a diagnostic that has to
- * distinguish "the host was told and still could not connect" from "the host was never told".
+ * Three datagrams because one is a single chance, and the whole point is to beat a client that
+ * stops asking after about three seconds.
  */
 function sendWakePunch(sock, host, connectId) {
-  if (!sock || !host.publicIp || !host.publicUdpPort) return;
+  if (!WAKE_ENABLED || !sock) return false;
+  if (!host.publicIp || !host.publicUdpPort) return false;
+  // Aim only at an address a heartbeat confirmed recently.
+  if (Date.now() - host.lastSeen > WAKE_HOST_FRESH_MS) {
+    wakeStats.skippedStale++;
+    return false;
+  }
+  // A client that retries three times in a second means one host to wake, not three bursts at it.
+  const last = wakeLastSentByHost.get(host.hostId) || 0;
+  if (Date.now() - last < WAKE_MIN_INTERVAL_MS) {
+    wakeStats.suppressed++;
+    return false;
+  }
+  wakeLastSentByHost.set(host.hostId, Date.now());
+  wakeStats.sent++;
+
   const packet = buildPunchPacket();
-  console.log(`[natdiag] connect=${connectId} wakeTx host=${host.publicIp}:${host.publicUdpPort}`);
-  for (const delay of [0, 100, 300]) {
+  console.log(`[wake] connect=${connectId} tx host=${host.publicIp}:${host.publicUdpPort}`);
+  for (const delay of WAKE_PACKETS) {
     setTimeout(() => {
       sock.send(packet, host.publicUdpPort, host.publicIp, (err) => {
-        if (err) console.error(`[natdiag] connect=${connectId} wakeTx failed: ${err.message}`);
+        if (err) {
+          wakeStats.failed++;
+          console.error(`[wake] connect=${connectId} tx failed: ${err.message}`);
+        }
       });
     }, delay).unref();
   }
+  return true;
+}
+
+// Cheap enough to keep forever, and the only way to notice the wake quietly stopping. Silence
+// here is how one afternoon's mobile connections were lost without a single error line.
+function logWakeStats() {
+  if (!WAKE_ENABLED || wakeStats.sent === 0) return;
+  console.log(`[wake] sent=${wakeStats.sent} suppressed=${wakeStats.suppressed} ` +
+              `skippedStale=${wakeStats.skippedStale} failed=${wakeStats.failed}`);
 }
 
 // ---------------------------------------------------------------- relay engine
@@ -912,14 +962,10 @@ async function handleConnect(req, res) {
                 `host=${host.hostName}@${host.publicIp}:${host.publicUdpPort}`);
   }
 
-  // On the direct path the host learns of a waiting peer from the peer's own punch, but a relayed
-  // punch never reaches it -- the relay answers rather than forwards, precisely because forwarding
-  // is what fails on these networks. That leaves the heartbeat, up to 25 seconds out, against a
-  // client that gives its Hello about three. So the wake is not a diagnostic here; it is the only
-  // thing that gets the capability into the host before the client stops asking.
-  if (relayEligible || (NAT_DIAG_ENABLED && NAT_DIAG_WAKE)) {
-    sendWakePunch(observeSock, host, connectId);
-  }
+  // Every connect, not just the relayed ones. On the relay the host would otherwise never hear
+  // that anyone was waiting -- the relay answers punches rather than forwarding them -- and on the
+  // direct path the peer's own punch is dropped by exactly the restrictive NATs where it matters.
+  sendWakePunch(observeSock, host, connectId);
 
   sendJson(res, 200, {
     // Kept for clients that predate candidates; they dial this one and behave as before.
@@ -1037,9 +1083,13 @@ if (!addAccountFromCli()) {
     }
     setInterval(relaySweep, 5000).unref();
   }
+  // Said at boot whichever way it is set, because the failure mode of the wake being off is
+  // silent: connections simply stop working on the networks that need it.
+  console.log(`[wake] ${WAKE_ENABLED ? 'on' : 'OFF (REMOTE60_WAKE_DISABLED=1)'}`);
+  if (WAKE_ENABLED) setInterval(logWakeStats, 5 * 60 * 1000).unref();
   if (NAT_DIAG_ENABLED) {
     console.log(`[natdiag] ENABLED ip=${NAT_DIAG_IP || '(unset -- candidate NOT offered)'} ` +
-                `port=${NAT_DIAG_PORT} wake=${NAT_DIAG_WAKE ? 'on' : 'off'}` +
+                `port=${NAT_DIAG_PORT}` +
                 `${RELAY_ENABLED ? ' (probe superseded by relay)' : ''}`);
   }
 }

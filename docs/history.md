@@ -6179,3 +6179,52 @@ Codex 리뷰에서 교정된 것 (agent-bus 2라운드)
 검증/build/test
 - `:app:assembleDebug` PASS, APK 생성 확인. **실기 확인 필요** — 회사 Wi-Fi에서 "중계",
   집·LTE에서 "직접"이 뜨는지.
+
+### 242) 2026-08-07 wake 정식 승격(N9) + 인코딩 해상도를 비트레이트에 연동(N11)
+
+#### N9 — wake를 진단 플래그에서 떼어냈다
+- 오늘 오후 이 한 줄(`REMOTE60_NAT_DIAG_WAKE=1`)이 배포에서 빠지자 LTE 접속이 7회 연속 실패했다.
+  에러는 한 줄도 안 났다. 진단용 플래그에 필수 기능이 매달려 있던 것이 원인.
+- 이제 **기본 켜짐**, `REMOTE60_WAKE_DISABLED=1`로만 끈다. 부팅 시 어느 쪽이든 로그로 말한다 —
+  꺼졌을 때의 증상이 "조용히 안 됨"이라서.
+- 가드: 하트비트가 90초 내 확인한 주소로만 발사(`WAKE_HOST_FRESH_MS`), 호스트당 1초 1버스트로
+  합침(재시도하는 클라가 폭주가 되지 않게), 5분마다 sent/suppressed/skippedStale/failed 집계.
+- 릴레이 여부와 무관하게 모든 connect에 발사한다. 릴레이는 펀치를 전달하지 않고 응답하므로
+  호스트가 알 길이 없고, 직접 경로에서도 제한적 NAT가 폰의 펀치를 떨군다.
+- 테스트: `directory_test.js`에 **환경변수 없는 기본 상태**에서 wake가 발사되는지 고정.
+  이게 정확히 오늘 깨진 것이라 기본값 자체를 테스트로 박았다.
+
+#### N11 — 장면 전환 화질 아티팩트 (신규)
+- 증상: 3Mbps/1080p30에서 화면이 급변하면(게임 메뉴) "잘못된 화면이 잠깐" 보인다. 5~20초에 1회.
+- **A/B로 원인 확정**: 8Mbps로 올리면 사라진다 → 패킷 손실이 아니라 인코더 레이트 컨트롤.
+  **P2(NACK)는 이 증상의 해법이 아니며 착수하지 않는다.**
+- Codex 교정으로 내 최초 진단이 뒤집혔다: (1) 내가 근거로 쓴 keyReqTotal/senderQueueDrops/
+  senderSendDurMax는 1초 값이 아니라 **세션 누적**이고 rawEquivMbps는 장면 복잡도가 아니라
+  그냥 NV12 한 장 크기다 (2) Android는 조립 실패 시 즉시 디코더를 리셋하고 키프레임을 요청하며
+  그전 P프레임을 버리므로(`native_video_client_session.cpp:563-598`) 고전적 참조 드리프트가
+  **구조적으로 불가능**하다.
+- 처방: 비트레이트를 못 올리므로(모바일 데이터 제약) **해상도를 내려 픽셀당 비트를 확보**한다.
+  `encode_resolution_ladder.hpp`(신규, 순수 함수+테스트): >=5Mbps 원본 유지, <=4Mbps 720p 상당,
+  그 사이는 직전 답 유지(히스테리시스 — 경계에서 인코더 재초기화가 반복되면 그 자체가 끊김).
+- 기존에 `args.bitrate <= 1500000`인 경우에만 720p로 내리는 규칙이 있었다. 임계값이 너무 낮아
+  3Mbps에서 안 걸렸다. 그 규칙을 사다리로 대체하고 **런타임 튜닝 경로에도 적용** — 이전에는
+  기동 시에만 결정돼서 앱에서 비트레이트를 바꿔도 해상도가 안 따라왔다.
+- 예산을 폭×높이 상자가 아니라 **픽셀 면적**으로 잡았다. 테스트가 1024x768(720p보다 픽셀이 적다)을
+  960x720으로 줄이는 버그를 잡아줘서 고친 것이다. 16:10 화면도 레터박스 없이 비율을 유지한다.
+
+변경 파일
+- `apps/directory/server.js`, `apps/directory/test/directory_test.js`, `apps/directory/README.md`
+- `apps/native_poc/src/encode_resolution_ladder.hpp`(신규), `encode_resolution_ladder_test.cpp`(신규),
+  `native_video_host_main.cpp`, `CMakeLists.txt`, `product_version.hpp`(0.2.17)
+- 산출물 `dist/GNLinkSetup-0.2.17.exe`
+
+검증/build/test
+- 디렉토리 스위트 전체 PASS(wake 기본값 2건 신규 포함). 호스트·인스톨러 빌드 PASS.
+- 단위 7종 PASS: encode_resolution_ladder(11건 신규), udp_control_channel, connect_candidates,
+  bind_port_candidates, secure_input_mapping, secure_input_session, dxgi_output_selection.
+
+다음 액션
+- **서버 배포는 사용자 승인 대기** (wake 승격 반영). 배포 후 systemd drop-in에서
+  `REMOTE60_NAT_DIAG_WAKE` 줄은 제거해도 된다 — 이제 무시된다.
+- 0.2.17 설치 후 실기: 3Mbps에서 게임 메뉴 전환 시 아티팩트가 사라지는지, 720p 체감 화질이
+  수용 가능한지. 앱에서 6Mbps로 올리면 1080p로 돌아오는지도 함께.

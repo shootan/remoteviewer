@@ -340,6 +340,11 @@ add_executable(remote60_connect_candidates_test
 )
 target_include_directories(remote60_connect_candidates_test PRIVATE src)
 
+add_executable(remote60_encode_resolution_ladder_test
+  src/encode_resolution_ladder_test.cpp
+)
+target_include_directories(remote60_encode_resolution_ladder_test PRIVATE src)
+
 add_executable(remote60_punch_any_test
   src/punch_any_test.cpp
   src/directory_rendezvous.cpp

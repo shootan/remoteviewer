@@ -27,6 +27,21 @@ node server.js                                 # start
 Passwords are stored as scrypt hashes with a per-account salt. **Run with TLS in production** —
 without it, session tokens travel in clear.
 
+## Wake
+
+When a client asks to connect, the server immediately sends a small UDP packet to the host from
+the observe socket. Without it the host only finds out at its next heartbeat — up to 25 seconds
+later, against a client that stops asking after about three. On restrictive networks the peer's
+own punch never arrives to tell it either, so this is often the only thing that makes the
+connection happen at all.
+
+It is on by default and `REMOTE60_WAKE_DISABLED=1` turns it off. That default is deliberate: it
+spent a while behind a diagnostics flag, and the day the flag was omitted from a deploy, mobile
+connections stopped working with nothing in any log to explain it.
+
+Only an address confirmed by a heartbeat in the last 90 seconds is used, repeated connects for
+one host collapse into one burst per second, and totals are logged every five minutes.
+
 ## Relay (opt-in)
 
 For a network that carries UDP outbound but has no path between the peers — measured on one
