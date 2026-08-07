@@ -41,7 +41,11 @@ void UdpControlChannel::Configure(SendFn send, uint32_t txStreamId, uint32_t rxS
   closed_.store(false, std::memory_order_relaxed);
 }
 
-void UdpControlChannel::Close() {
+void UdpControlChannel::Close(ControlCloseReason reason) {
+  // First reason wins. A rollover that races with the departing peer's retransmits running out
+  // would otherwise be reported as the peer's death, which reads like a network fault.
+  auto expected = ControlCloseReason::None;
+  closeReason_.compare_exchange_strong(expected, reason, std::memory_order_relaxed);
   closed_.store(true, std::memory_order_relaxed);
   cv_.notify_all();
 }
@@ -52,8 +56,20 @@ void UdpControlChannel::Reset() {
   txQueue_.clear();
   rxPending_.clear();
   rxReady_.clear();
+  // Without this the next client's first message looks like one already delivered, and
+  // HandleData answers it with an ack while dropping the data -- alive on the wire, deaf above.
   rxDeliveredSeq_ = 0;
+  closeReason_.store(ControlCloseReason::None, std::memory_order_relaxed);
   closed_.store(false, std::memory_order_relaxed);
+}
+
+const char* to_string(ControlCloseReason reason) {
+  switch (reason) {
+    case ControlCloseReason::PeerLost: return "peer-lost";
+    case ControlCloseReason::SessionRollover: return "session-rollover";
+    case ControlCloseReason::Shutdown: return "shutdown";
+    default: return "none";
+  }
 }
 
 UdpControlChannel::Stats UdpControlChannel::GetStats() const {
@@ -242,6 +258,9 @@ void UdpControlChannel::Tick() {
     Outbound& head = txQueue_.front();
     if (now - head.lastSendUs >= kRetransmitIntervalUs) {
       if (++head.attempts > kMaxAttempts) {
+        auto expected = ControlCloseReason::None;
+        closeReason_.compare_exchange_strong(expected, ControlCloseReason::PeerLost,
+                                             std::memory_order_relaxed);
         closed_.store(true, std::memory_order_relaxed);
         cv_.notify_all();
         return;

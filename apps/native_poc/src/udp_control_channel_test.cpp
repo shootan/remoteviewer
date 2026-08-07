@@ -97,6 +97,77 @@ std::vector<uint8_t> pattern(size_t len, uint8_t salt) {
   return out;
 }
 
+/**
+ * What a host has to do between one client and the next.
+ *
+ * Sequence numbers are per-channel and every client starts its own at one, so a host that
+ * carries a channel across a handover sees the newcomer's first message as one it has already
+ * delivered. The channel answers that with an ack and drops the payload -- which looks exactly
+ * like a healthy link whose peer has gone deaf, and is why it took a packet capture to find.
+ * Reset is what makes the handover real; this pins that, and the close reasons the host now
+ * uses to tell a departed client apart from its own shutdown.
+ */
+void run_handover_case() {
+  UdpControlChannel host;
+  UdpControlChannel first;
+  UdpControlChannel second;
+  // Queued rather than delivered inline: a channel sends while holding its own lock, so handing
+  // the bytes straight to the peer would re-enter that lock when the peer acknowledges.
+  std::vector<std::pair<UdpControlChannel*, std::vector<uint8_t>>> wire;
+  auto deliver_to = [&wire](UdpControlChannel* to) {
+    return [&wire, to](const void* data, size_t len) {
+      const auto* bytes = static_cast<const uint8_t*>(data);
+      wire.emplace_back(to, std::vector<uint8_t>(bytes, bytes + len));
+      return true;
+    };
+  };
+  auto pump = [&wire]() {
+    for (int guard = 0; guard < 64 && !wire.empty(); ++guard) {
+      auto batch = std::move(wire);
+      wire.clear();
+      for (auto& [target, bytes] : batch) target->OnPacket(bytes.data(), bytes.size());
+    }
+  };
+  host.Configure(deliver_to(&first), remote60::native_poc::kUdpControlStreamHostToClient,
+                 remote60::native_poc::kUdpControlStreamClientToHost, 1200);
+  first.Configure(deliver_to(&host), remote60::native_poc::kUdpControlStreamClientToHost,
+                  remote60::native_poc::kUdpControlStreamHostToClient, 1200);
+  second.Configure(deliver_to(&host), remote60::native_poc::kUdpControlStreamClientToHost,
+                   remote60::native_poc::kUdpControlStreamHostToClient, 1200);
+
+  const std::vector<uint8_t> fromFirst(48, 0xA5);
+  std::vector<uint8_t> got;
+  const bool firstSent = first.Send(fromFirst.data(), fromFirst.size());
+  pump();
+  check("the first client's message is delivered",
+        firstSent && host.Receive(&got, 100) && got == fromFirst);
+
+  // The first client leaves; its retransmits run out and close the channel. That is the ordinary
+  // end of a session, not a reason for the host to stop serving.
+  host.Close(remote60::native_poc::ControlCloseReason::PeerLost);
+  check("a departed peer is reported as such, not as shutdown",
+        host.CloseReason() == remote60::native_poc::ControlCloseReason::PeerLost,
+        remote60::native_poc::to_string(host.CloseReason()));
+
+  host.Reset();
+  host.Configure(deliver_to(&second), remote60::native_poc::kUdpControlStreamHostToClient,
+                 remote60::native_poc::kUdpControlStreamClientToHost, 1200);
+  check("the channel reopens for the next session", !host.IsClosed());
+  check("and the close reason goes with it",
+        host.CloseReason() == remote60::native_poc::ControlCloseReason::None,
+        remote60::native_poc::to_string(host.CloseReason()));
+
+  got.clear();
+  wire.clear();  // whatever the departed client still had in flight dies with it
+  const std::vector<uint8_t> fromSecond(48, 0x5C);
+  const bool sent = second.Send(fromSecond.data(), fromSecond.size());
+  pump();
+  const bool received = host.Receive(&got, 100);
+  check("the next client's first message is delivered, not merely acknowledged",
+        sent && received && got == fromSecond,
+        received ? "" : "acked into silence");
+}
+
 void run_case(const char* label, double lossRate, size_t messageBytes, int messageCount) {
   UdpControlChannel client;
   UdpControlChannel host;
@@ -164,6 +235,7 @@ void run_case(const char* label, double lossRate, size_t messageBytes, int messa
 }  // namespace
 
 int main() {
+  run_handover_case();
   run_case("small messages, clean link", 0.0, 64, 20);
   run_case("small messages, 10% loss", 0.10, 64, 20);
   run_case("multi-fragment message, clean link", 0.0, 40000, 5);

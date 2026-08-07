@@ -25,6 +25,18 @@
 
 namespace remote60::native_poc {
 
+// Why a channel stopped. The distinction matters because only one of these means the process is
+// finished: a peer that went away and a session being replaced both close the channel, and a host
+// that treats either as shutdown stops serving control for the rest of its life.
+enum class ControlCloseReason : uint8_t {
+  None = 0,
+  PeerLost,          // retransmits exhausted -- the client stopped answering
+  SessionRollover,   // a new client authenticated; this channel belongs to the previous one
+  Shutdown,          // the process is going away
+};
+
+const char* to_string(ControlCloseReason reason);
+
 class UdpControlChannel {
  public:
   // Transmits one datagram to the peer. Called from whichever thread is sending; must be safe
@@ -48,9 +60,12 @@ class UdpControlChannel {
   /** Drives retransmission and gap recovery. Safe to call often; cheap when idle. */
   void Tick();
 
-  void Close();
+  void Close(ControlCloseReason reason = ControlCloseReason::Shutdown);
   void Reset();
   bool IsClosed() const { return closed_.load(std::memory_order_relaxed); }
+  ControlCloseReason CloseReason() const {
+    return closeReason_.load(std::memory_order_relaxed);
+  }
 
   struct Stats {
     uint64_t messagesSent = 0;
@@ -93,6 +108,7 @@ class UdpControlChannel {
   mutable std::mutex mu_;
   std::condition_variable cv_;
   std::atomic<bool> closed_{false};
+  std::atomic<ControlCloseReason> closeReason_{ControlCloseReason::None};
 
   uint32_t nextTxSeq_ = 1;
   std::deque<Outbound> txQueue_;  // front is the message awaiting acknowledgement

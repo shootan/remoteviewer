@@ -6089,3 +6089,69 @@ Codex 리뷰 2회에서 잡힌 blocker (agent-bus, 세션 remote#xcl572oo)
 - 배포 후 회사 Wi-Fi 실기: 영상 첫 프레임 + 30초 유지 + control 왕복 1건.
 - LTE·집 무회귀 확인(`chosen != relay`, relay 미디어 바이트 0).
 - 비차단 후속: idle TTL 판정을 순수 함수로 분리해 단위 테스트로 고정.
+
+### 240) 2026-08-07 두 번째 접속부터 죽던 이유 — 세션 인계가 없었다 (0.2.16)
+
+증상
+- 릴레이 배포 후: 호스트 재시작 → 1회차 정상 → **2회차부터 `window_list_request pending` + 무영상.**
+  사용자 실측으로 재현 확정. LTE 로 바꿔도 동일.
+- 릴레이 서버 로그가 매 세션 `c2h=2/101B h2c=2/197B` 로 **바이트까지 동일**. 첫 성공 세션은
+  `h2c=211944/243MB` 였다. Hello/HelloAck + 클라 control 1개 + 호스트 ControlAck 1개 후 정지.
+- 호스트 로그의 `[control]` 라인은 세 줄뿐: `stream-state active=0`, `window-list seq=2`,
+  `udp control session ended`. 그 뒤 5회 접속에 `[control]` 이 **한 줄도 없다.**
+
+원인 (둘 다 기존 결함 — 릴레이가 만든 게 아니라 드러냈다)
+- **A. 새 세션 판정이 peer 주소 변경 기준** (`native_video_host_main.cpp:4034`). 릴레이를 쓰면
+  모든 클라가 호스트 눈에 `223.130.132.180:8081` 하나다 → 2회차부터 `changed=false` →
+  `udpControlChannel.Reset()` 누락. 클라는 세션마다 채널을 새로 만들어 seq 1 부터 시작하는데
+  (`native_video_client_session.cpp:84-88, 838-856`) 호스트 채널의 `rxDeliveredSeq_` 는 이전
+  세션 값 그대로 → `HandleData` 가 **ACK 만 보내고 페이로드를 버린다**
+  (`udp_control_channel.cpp:167`). 관측된 h2c=2 와 정확히 일치.
+- **B. UDP 조작 세션이 일회용** (`:4055`). TCP 는 accept 루프 안에서 세션을 반복하는데
+  (`:3916`) UDP 만 한 번 호출하고 스레드가 끝난다. 게다가 이탈 시 `streamControlActive=false`
+  (`:3877`) 라 렌더 루프가 `if (!streamActive) continue`(`:5689`) 에 걸려 영상도 영구 정지.
+  복구 코드(`:3347`)는 재진입해야만 도달한다.
+
+수정 — 세션 epoch (A/B 를 한 경계에서 함께)
+- 새 세션의 유일한 신호는 **인증된 Hello 의 capability 토큰**이다. endpoint 는 신호가 될 수
+  없다. `classify_directory_hello` 가 Rejected/Retransmit/NewSession 을 반환하도록 기존
+  auth 캐시(`:2917-2937`)를 확장 — 캐시가 이미 토큰 재전송을 허용하므로 일회성 소비
+  (`directory_client.cpp:754`)와 충돌하지 않는다.
+- 인계 순서: 리더가 epoch 를 올리고 `Close(SessionRollover)` 로 디스패처를 깨운 뒤 **대기** →
+  디스패처가 **자기 스레드에서** `Reset()` → `serve_control_session` 재진입(여기서 스트림 복구)
+  → ready 발행 → 그제서야 리더가 HelloAck 송신. 클라는 Ack 를 받을 때까지 Hello 만 재전송하므로
+  (`native_video_client_session.cpp:749-785`) 리셋 전에 도착하는 창이 없다.
+- 디스패처는 이제 프로세스 수명 내내 세션을 하나씩 이어서 서비스한다. 종료 조건은 전역 `stop`
+  뿐 — `IsClosed()` 는 정상적인 peer 이탈에서도 참이라 종료 신호로 쓰면 안 된다.
+- endpoint 변경도 여전히 새 세션으로 친다(토큰 없는 LAN 접속용). 단 같은 LAN 포트로 재접속하는
+  경우는 여전히 구분 불가 — 프로토콜 nonce 없이는 닫히지 않는 잔여 구멍으로 남긴다.
+
+곁들여 고친 것
+- `ControlCloseReason`(peer-lost / session-rollover / shutdown). 종료 사유가 로그에 없어서
+  이번 진단이 오래 걸렸다. 이제 세션 종료마다 epoch 와 사유가 남는다.
+- window 선택 대기(`:3712`)가 링크 사망 시 풀리도록. 떠난 클라의 선택 응답을 기다리느라 다음
+  세션 인계가 지연되던 경로.
+
+Codex 리뷰에서 교정된 것 (agent-bus 2라운드)
+- 내 "헤더/본문 Read 사이 Reset 경합" 가설은 **틀렸다**. `EnsureInbound` 가 완성 메시지를
+  통째로 꺼내 보관하므로 이미 꺼낸 메시지는 찢어지지 않는다. 다만 리더가 직접 Reset 하는 것은
+  의미론적 race 가 맞아 epoch barrier 로 바꿨다.
+- 내 계획의 "`IsClosed()` 면 진짜 종료" 는 **반대**였다. 정상 peer 이탈에서도 true 다.
+- `streamControlActive` 복구는 리더가 아니라 **디스패처 재진입 지점**이 맞다. 리더가 켜면
+  디스패처가 준비되기 전에 스트림이 돌고, 같은-토큰 재전송이 클라의 의도적 `active=0` 을 뒤집는다.
+
+변경 파일
+- `native_video_host_main.cpp`, `udp_control_channel.{hpp,cpp}`, `udp_control_channel_test.cpp`,
+  `product_version.hpp`(0.2.16), `dist/GNLinkSetup-0.2.16.exe`
+
+검증/build/test
+- 호스트·인스톨러 빌드 PASS. `remote60_udp_control_channel_test` 신규 핸드오버 5건 + 기존 5건
+  PASS, `connect_candidates`·`secure_input_mapping` PASS.
+- 핸드오버 테스트가 고정하는 것: 떠난 peer 가 shutdown 이 아니라 peer-lost 로 보고되고,
+  Reset 후 채널이 다시 열리며, **다음 클라의 첫 메시지가 ACK 만 되지 않고 실제로 전달된다.**
+
+다음 액션
+- 실기: 0.2.16 설치 후 **회사 Wi-Fi 로 연속 3회 접속** — 2회차부터 되는지가 판정.
+  이어서 LTE·집 무회귀, control 왕복(창목록), 30초 유지.
+- 남은 잔여: 같은 LAN endpoint 재접속 구분(프로토콜 nonce 필요), N9(wake 영구 승격),
+  render 측 세션 경계 정리(encodedSeq/cadence/metrics/pending 요청 — Codex 목록).

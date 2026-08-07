@@ -2914,9 +2914,13 @@ int main(int argc, char** argv) {
   std::mutex directorySessionAuthMu;
   std::string directorySessionToken;
   uint32_t directorySessionIpNet = 0;
-  auto authorize_directory_session = [&](const std::string& token,
-                                         const sockaddr_in& peer) -> bool {
-    if (token.empty()) return false;
+  // Which of the three things a Hello can be. The caller needs the distinction because a first
+  // Hello and its retransmissions are indistinguishable at the endpoint level -- and, behind a
+  // relay, so are two entirely different clients.
+  enum class DirectoryHello { Rejected, Retransmit, NewSession };
+  auto classify_directory_hello = [&](const std::string& token,
+                                      const sockaddr_in& peer) -> DirectoryHello {
+    if (token.empty()) return DirectoryHello::Rejected;
     {
       std::lock_guard<std::mutex> lock(directorySessionAuthMu);
       if (!directorySessionToken.empty() && token == directorySessionToken &&
@@ -2924,17 +2928,24 @@ int main(int argc, char** argv) {
         // A controller reconnect creates a new UDP socket/port. The already-proven opaque
         // capability remains the session credential, while the first authenticated source IP
         // (which can differ from the directory-observed endpoint under hairpin NAT) stays bound.
-        return true;
+        // This is also what makes retransmission safe: the capability itself is single-use, so
+        // without the cache the client's second Hello would be refused.
+        return DirectoryHello::Retransmit;
       }
     }
-    if (!directoryAgent.AuthorizePeer(token, peer)) return false;
+    if (!directoryAgent.AuthorizePeer(token, peer)) return DirectoryHello::Rejected;
     {
       std::lock_guard<std::mutex> lock(directorySessionAuthMu);
       directorySessionToken = token;
       directorySessionIpNet = peer.sin_addr.s_addr;
     }
-    return true;
+    return DirectoryHello::NewSession;
   };
+  auto authorize_directory_session = [&](const std::string& token,
+                                         const sockaddr_in& peer) -> bool {
+    return classify_directory_hello(token, peer) != DirectoryHello::Rejected;
+  };
+
   SecureInputBrokerClient secureInputBroker;
 
   // H4: the encode thread hands encoded frames to this sender instead of pacing the wire
@@ -3698,9 +3709,14 @@ int main(int argc, char** argv) {
           windowSelectionTxn.cv.notify_all();
 
           std::unique_lock<std::mutex> lk(windowSelectionTxn.mu);
-          windowSelectionTxn.cv.wait(lk, [&]() {
-            return stop.load() || windowSelectionTxn.completed;
-          });
+          // Also give up when the link dies. The client that asked for this selection may be the
+          // one that just went away, and the next client cannot be served until this returns --
+          // so waiting only for completion would hold the whole session handover behind a reply
+          // nobody is left to read. Polled, because a rollover closes the channel rather than
+          // touching this transaction.
+          while (!stop.load() && !windowSelectionTxn.completed && link.Alive()) {
+            windowSelectionTxn.cv.wait_for(lk, std::chrono::milliseconds(100));
+          }
           rsp.flags = windowSelectionTxn.responseFlags;
           rsp.windowId = windowSelectionTxn.responseWindowId;
           rsp.streamGeneration = windowSelectionTxn.responseStreamGeneration;
@@ -3936,6 +3952,44 @@ int main(int argc, char** argv) {
   UdpControlChannel udpControlChannel;
   std::thread udpControlThread;
   std::thread udpReaderThread;
+
+  // ---------------------------------------------------------------- session epoch
+  //
+  // A session begins when a Hello presents a capability we have not seen before, and that is the
+  // only reliable signal there is. The endpoint is not one: through a relay every client reaches
+  // us from the same address and port, so "the peer changed" stays false forever and the second
+  // client inherits the first one's control channel -- where its messages are acknowledged and
+  // then dropped, because their sequence numbers look like ones already delivered.
+  //
+  // The epoch serialises the handover. The reader raises it and waits; the dispatcher resets the
+  // channel, re-enters its session loop (which is also what turns the stream back on) and
+  // publishes that it is ready; only then does the reader answer the Hello. Since the client
+  // repeats its Hello until it sees an Ack, nothing it sends can arrive before the reset.
+  // Starts at one, not zero: control is only wired up after the handshake loop above has already
+  // accepted a Hello, so by the time the dispatcher starts there is a session waiting for it.
+  std::atomic<uint64_t> sessionEpoch{1};
+  std::atomic<uint64_t> controlReadyEpoch{0};
+  std::mutex sessionEpochMu;
+  std::condition_variable sessionEpochCv;
+  auto begin_session_epoch = [&]() -> uint64_t {
+    const uint64_t epoch = sessionEpoch.fetch_add(1, std::memory_order_acq_rel) + 1;
+    // Wakes the dispatcher out of its blocking read so it can pick the new epoch up. Reset is
+    // deliberately left to that thread: doing it here would clear the queues underneath a
+    // session still being served.
+    udpControlChannel.Close(remote60::native_poc::ControlCloseReason::SessionRollover);
+    sessionEpochCv.notify_all();
+    return epoch;
+  };
+  auto await_control_ready = [&](uint64_t epoch) {
+    std::unique_lock<std::mutex> lock(sessionEpochMu);
+    // Bounded: if the dispatcher cannot come back we answer the client anyway, because a session
+    // with video and no window list still beats one that never starts.
+    sessionEpochCv.wait_for(lock, std::chrono::milliseconds(1500), [&] {
+      return controlReadyEpoch.load(std::memory_order_acquire) >= epoch ||
+             sessionEpoch.load(std::memory_order_acquire) > epoch;
+    });
+  };
+
   if (transport == VideoTransport::Udp) {
     udpControlChannel.Configure(
         [&](const void* data, size_t len) -> bool {
@@ -4008,12 +4062,15 @@ int main(int argc, char** argv) {
               ++tokenLen;
             }
             bool directoryAuthenticated = false;
+            bool newSession = false;
             if (tokenLen > 0) {
               const std::string authToken(hello.authToken, hello.authToken + tokenLen);
-              if (!authorize_directory_session(authToken, peer)) {
+              const auto kind = classify_directory_hello(authToken, peer);
+              if (kind == DirectoryHello::Rejected) {
                 std::cerr << "[native-video-host] rejected reconnect hello with invalid directory capability\n";
                 continue;
               }
+              newSession = (kind == DirectoryHello::NewSession);
               directoryAuthenticated = true;
               ack.features |= remote60::native_poc::kUdpFeatureDirectoryAuth;
               std::string secureInputStatus;
@@ -4029,19 +4086,31 @@ int main(int argc, char** argv) {
             }
             sessionDirectoryAuthenticated.store(directoryAuthenticated,
                                                 std::memory_order_release);
-            (void)sendto(clientSock, reinterpret_cast<const char*>(&ack), sizeof(ack), 0,
-                         reinterpret_cast<const sockaddr*>(&peer), peerLen);
             const bool changed =
                 udpPeerIpNet.load(std::memory_order_acquire) != peer.sin_addr.s_addr ||
                 udpPeerPortNet.load(std::memory_order_acquire) != peer.sin_port;
+            // An unauthenticated LAN client has no capability to compare, so the endpoint is all
+            // there is to go on. It is a weaker signal -- an app restart that lands on the same
+            // port is invisible -- but the relay, which is what makes endpoints ambiguous, only
+            // ever carries authenticated sessions.
+            const bool startsSession = directoryAuthenticated ? newSession : changed;
             if (changed) {
               udpPeerIpNet.store(peer.sin_addr.s_addr, std::memory_order_release);
               udpPeerPortNet.store(peer.sin_port, std::memory_order_release);
-              // A different peer means a different decoder; the control channel's sequence
-              // numbers would otherwise continue from the previous session.
-              udpControlChannel.Reset();
-              udpPeerChanged.store(true, std::memory_order_release);
             }
+            if (startsSession) {
+              // Even when the endpoint is unchanged: a new client has a new decoder, and sending
+              // it deltas against frames it never saw leaves it grey until the next keyframe.
+              udpPeerChanged.store(true, std::memory_order_release);
+              const uint64_t epoch = begin_session_epoch();
+              std::cout << "[native-video-host][control] session epoch=" << epoch
+                        << (changed ? " peer=new" : " peer=same") << "\n";
+              await_control_ready(epoch);
+            }
+            // Answered last, so that by the time the client believes it is connected the control
+            // channel behind this endpoint is already the new session's.
+            (void)sendto(clientSock, reinterpret_cast<const char*>(&ack), sizeof(ack), 0,
+                         reinterpret_cast<const sockaddr*>(&peer), peerLen);
             continue;
           }
         }
@@ -4049,13 +4118,43 @@ int main(int argc, char** argv) {
         if (udpControlChannel.OnPacket(rx, len)) continue;
         (void)directoryAgent.ConsumeUdpPacket(rx, len, peer);
       }
-      udpControlChannel.Close();
+      udpControlChannel.Close(remote60::native_poc::ControlCloseReason::Shutdown);
+      sessionEpochCv.notify_all();
     });
 
+    // One dispatcher for the life of the process, serving one session after another. It used to
+    // serve exactly one: any failed read returned from serve_control_session and the thread
+    // exited for good, taking the stream with it (the session teardown clears
+    // streamControlActive, and only re-entry restores it). A client that merely walked out of
+    // Wi-Fi range was enough to leave the host answering handshakes and nothing else.
     udpControlThread = std::thread([&]() {
-      UdpControlLink link(&udpControlChannel, 0);
-      serve_control_session(link);
-      std::cout << "[native-video-host][control] udp control session ended\n";
+      uint64_t servedEpoch = 0;
+      for (;;) {
+        {
+          std::unique_lock<std::mutex> lock(sessionEpochMu);
+          sessionEpochCv.wait(lock, [&] {
+            return stop.load() || sessionEpoch.load(std::memory_order_acquire) > servedEpoch;
+          });
+        }
+        if (stop.load()) break;
+        servedEpoch = sessionEpoch.load(std::memory_order_acquire);
+        // Reset belongs here rather than in the reader: this is the thread that owns the
+        // channel's read side, so nothing is being consumed while the queues are cleared.
+        udpControlChannel.Reset();
+        {
+          std::lock_guard<std::mutex> lock(sessionEpochMu);
+          controlReadyEpoch.store(servedEpoch, std::memory_order_release);
+        }
+        sessionEpochCv.notify_all();
+
+        UdpControlLink link(&udpControlChannel, 0);
+        serve_control_session(link);
+        // Closed is not finished. Retransmits running out means this client is gone, which is
+        // the ordinary end of a session and the reason to wait for the next one.
+        std::cout << "[native-video-host][control] udp control session ended epoch=" << servedEpoch
+                  << " reason=" << remote60::native_poc::to_string(udpControlChannel.CloseReason())
+                  << "\n";
+      }
     });
   }
 
@@ -7716,8 +7815,10 @@ int main(int argc, char** argv) {
   }
   if (controlThread.joinable()) controlThread.join();
   // Close before joining: the control session is parked in a blocking read, and the reader
-  // thread is parked in recvfrom until its receive timeout expires.
-  udpControlChannel.Close();
+  // thread is parked in recvfrom until its receive timeout expires. The dispatcher now outlives
+  // any one session, so it also has to be woken from the wait it parks in between them.
+  udpControlChannel.Close(remote60::native_poc::ControlCloseReason::Shutdown);
+  sessionEpochCv.notify_all();
   if (udpControlThread.joinable()) udpControlThread.join();
   if (udpReaderThread.joinable()) udpReaderThread.join();
   detach_capture_session();
