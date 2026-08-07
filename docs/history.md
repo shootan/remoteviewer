@@ -5992,3 +5992,45 @@ Codex 논의 (agent-bus, 스레드 019fd9d0-2900-7232-b4c1-9359a5152d0e, 2라운
 - 결과가 `호스트 아웃바운드 확인 + 폰 펀치 NIC 미관측`이면 중단규칙 발동, P6 릴레이 POC 설계
   (Codex와 이어서). N4(미디어 암호화)가 릴레이와 함께 필수로 복귀함을 잊지 말 것.
 - 부수: 세션 정리 anomaly(LTE 성공 직후 재시도 실패) 별도 항목 승격 대기.
+
+### 238) 2026-08-07 중단규칙 5/5 발동 — 직접 연결 탐색 종료, 릴레이(N8)로
+
+최종 동기화 창 (11:17~11:20, pktmon + 서버/호스트 로그 3소스 대조)
+- LTE 2회: 폰 펀치 인바운드 도달 → 풀 세션 (1200B 영상 수천 패킷). 연속 성공 —
+  어제의 세션 anomaly 미재현.
+- 회사 Wi-Fi 3회: 호스트가 폰의 정확한 endpoint(57380/43501/53805)로 49B 펀치 25발×5초
+  발사, NIC 아웃바운드 실측. **`.4`발 인바운드 0패킷.** "앱이 받고 버렸다" 최종 배제 —
+  애플리케이션 상태는 NIC에 도착한 패킷을 소급해 없앨 수 없다.
+- pcap 세부: pktmon 이중 계수(스택 2계층) 확인, 실 패킷수는 표시의 절반. wake 15발
+  (3×5 connect) 전부 서버 8081→호스트 43000 관측.
+
+판정 (Codex 동의, agent-bus 3라운드)
+- 중단규칙 5요건 전부 충족: 서버 수신✓ 즉시 펀치✓ 무도달✓ 같은 창 LTE 성공✓ IPv6 0/10✓
+- **"사내 egress/NAT realm 간 public-to-public UDP 경로 사용 불가(폐기 지점 미확정).
+  해당 회사망의 IPv4 직접 연결 탐색을 중단하고 N8 릴레이 POC로 이동한다.
+  집·LTE 직접 연결은 유지한다."**
+
+Codex 설계 검토에서 얻은 정정 2건 (둘 다 일을 줄이는 방향)
+- ① 내 demux 가설 정정: Hello와 활성 세션 control은 ConsumeUdpPacket **이전에** 처리된다.
+  relay는 폰의 Punch를 호스트로 전달할 필요가 없고, 자체 응답 후 Hello의 punchToken으로
+  세션을 바인딩하면 된다.
+- ② **TCP relay 불필요**: 디렉토리 경로의 APK 0.2.6은 requireTcpControl=false,
+  controlOverUdp=true — control이 미디어 UDP 소켓의 UdpControlLink로 흐른다
+  (native_bridge.cpp:184, native_video_client_session.cpp:291). TCP listener는 수동 IP용
+  레거시. relay는 순수 UDP byte-forwarding으로 충분하다.
+- 추가 합의: relay 포트는 기존 diag 43000 재사용(회사망 통과 실측 완료), 호스트 leg는
+  8081 observe 소켓(매핑 실측 완료), direct grace 2.5초(1.5초는 4초 예산 대비 근거 부족),
+  POC 격리는 테스트 계정+회사 IP 한정으로 직접 경로 회귀를 구조적으로 차단,
+  호스트당 단일 lease, token 없는 패킷은 경로를 열지 않음, 평문은 POC 한정(N4가 게이트).
+
+변경 파일
+- `docs/구현계획.md` (N7 완결, N2/N3→N8 부활 표기, N8 릴레이 POC 신설, N9 wake 승격 신설)
+- `docs/history.md`
+
+검증/build/test
+- 코드 변경 없음. 증거 파일 보존: `logs/GNLink-sync.{etl,pcapng}`, `logs/host_app.log`.
+
+다음 액션
+- N8 릴레이 POC 구현 (서버 단독, APK·호스트 불변) — 착수 승인 대기.
+- 잔여 수동 확인: 집 Wi-Fi 회귀 1회 (wake=on 상태).
+- 세션 정리 anomaly는 미재현으로 우선순위 하향, 관찰 지속.
