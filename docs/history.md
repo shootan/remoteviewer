@@ -6155,3 +6155,27 @@ Codex 리뷰에서 교정된 것 (agent-bus 2라운드)
   이어서 LTE·집 무회귀, control 왕복(창목록), 30초 유지.
 - 남은 잔여: 같은 LAN endpoint 재접속 구분(프로토콜 nonce 필요), N9(wake 영구 승격),
   render 측 세션 경계 정리(encodedSeq/cadence/metrics/pending 요청 — Codex 목록).
+
+### 241) 2026-08-07 접속 경로 표시 (APK 0.2.7)
+
+배경
+- 릴레이가 붙으면서 같은 "연결됨"이 두 가지 뜻을 갖게 됐다. 직접은 공짜이고 빠르며, 중계는
+  서버 트래픽이 과금된다. 사용자가 그걸 모르고 쓰면 안 된다는 요청.
+
+구현
+- 배선은 이미 있었다. 후보의 `kind`가 문자열로 브리지까지 올라오고(`native_bridge.cpp:230,246`)
+  `nativeDirectoryChosenCandidate()`로 노출돼 있었는데 진단 로그로만 흘렸다. 이제 파싱해
+  UI로 보낸다.
+- 뷰어: 데이터 사용량 카운터 바로 아래 배지(`viewerPathText`). 중계일 때만 앰버색 —
+  오류가 아니라 "위 숫자가 과금된다"는 표시다.
+- 목록 화면: 무언가를 열기 전에 한 번, 문장으로. 배지 두 글자로 알 일이 아니다.
+- 세션 종료 시 초기화(`resetViewerObservability`) — 남아 있으면 다음 접속에 대한 거짓말이 된다.
+- Windows 클라이언트는 수동 IP 방식이라 후보 경주 자체가 없어 해당 없음.
+
+변경 파일
+- `MainActivity.kt`, `activity_main.xml`, `strings.xml`, `build.gradle.kts`(0.2.6→0.2.7, code 6)
+- 산출물 `dist/GNLink-0.2.7.apk`
+
+검증/build/test
+- `:app:assembleDebug` PASS, APK 생성 확인. **실기 확인 필요** — 회사 Wi-Fi에서 "중계",
+  집·LTE에서 "직접"이 뜨는지.

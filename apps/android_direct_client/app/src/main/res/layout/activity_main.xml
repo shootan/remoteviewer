@@ -879,6 +879,19 @@
                     android:maxLines="2"
                     android:textColor="#9AA3B2"
                     android:textSize="9sp" />
+
+                <!-- Sits with the data counter because that is the number it explains: on the
+                     relay every one of those megabytes is paid for, and the difference is
+                     invisible otherwise. -->
+                <TextView
+                    android:id="@+id/viewerPathText"
+                    android:layout_width="56dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:gravity="center"
+                    android:maxLines="1"
+                    android:textColor="#9AA3B2"
+                    android:textSize="9sp" />
             </LinearLayout>
         </LinearLayout>
 

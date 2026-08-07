@@ -51,6 +51,15 @@
     <string name="quick_orientation_portrait">Orientation: force portrait</string>
     <string name="quick_close">Close</string>
     <string name="viewer_data_usage">%1$s MB</string>
+    <!-- How the session is reaching the PC. Relay traffic is metered and slower, so it is worth
+         saying so plainly rather than leaving the user to guess from the speed. -->
+    <string name="path_direct">직접</string>
+    <string name="path_direct_lan">직접·LAN</string>
+    <string name="path_relay">중계</string>
+    <string name="path_unknown">경로 확인중</string>
+    <string name="connect_path_direct">직접 연결 — 트래픽 과금 없음</string>
+    <string name="connect_path_direct_lan">직접 연결(LAN) — 공유기를 거치지 않음</string>
+    <string name="connect_path_relay">중계 서버 경유 — 데이터 사용량이 과금됩니다</string>
     <string name="key_panel_button">KEYS</string>
     <string name="key_panel_description">PC keys and shortcuts</string>
     <string name="key_panel_tab_shortcut">Shortcuts</string>

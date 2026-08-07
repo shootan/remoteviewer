@@ -233,6 +233,26 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun renderDataUsage() {
         sessionBytesReceived = NativeSessionBridge.nativeGetSessionBytesReceived()
         viewerDataUsageText.text = getString(R.string.viewer_data_usage, formatMegabytes(sessionBytesReceived))
+        viewerPathText.text = when (connectionPathKind) {
+            "" -> ""
+            "private" -> getString(R.string.path_direct_lan)
+            "relay" -> getString(R.string.path_relay)
+            "public", "public-alt" -> getString(R.string.path_direct)
+            else -> getString(R.string.path_unknown)
+        }
+        // Amber for the relay. Not an error -- it is working, and on some networks it is the only
+        // thing that does -- but it is the one path where the counter above costs money.
+        viewerPathText.setTextColor(if (connectionPathKind == "relay") 0xFFD9A441.toInt() else 0xFF9AA3B2.toInt())
+    }
+
+    /**
+     * The candidate kind out of "ip:port|kind|note", which is how the bridge reports the winner.
+     * Anything unrecognised is left as-is so a kind added on the server still reaches the log.
+     */
+    private fun parseChosenCandidateKind(chosen: String): String {
+        val parts = chosen.split('|')
+        if (parts.size < 2) return ""
+        return parts[1].substringBefore(' ').trim()
     }
 
     /** Quick settings popup: bitrate/fps presets and the orientation override in one place. */
@@ -429,6 +449,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var viewerKeyPanel: ViewerKeyPanel? = null
     private lateinit var viewerMenuButton: Button
     private lateinit var viewerDataUsageText: TextView
+    private lateinit var viewerPathText: TextView
+    // The kind of candidate that answered ("private", "public", "relay", ...). Empty until a
+    // directory connect has run; a manual IP session never had candidates to choose between.
+    private var connectionPathKind: String = ""
     private lateinit var viewerLoadingPanel: View
     private lateinit var viewerLoadingText: TextView
     private lateinit var viewerImeCaptureView: ImeCaptureView
@@ -729,6 +753,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerRotateButton = findViewById(R.id.viewerRotateButton)
         viewerMenuButton = findViewById(R.id.viewerMenuButton)
         viewerDataUsageText = findViewById(R.id.viewerDataUsageText)
+        viewerPathText = findViewById(R.id.viewerPathText)
         viewerRotateButton.setOnClickListener {
             forcePortrait = !forcePortrait
             lastAppliedLandscape = null
@@ -1149,6 +1174,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun resetViewerObservability() {
+        // Cleared with the rest of the session: a path badge left over from the last connection
+        // would be a claim about this one, and the next may take a different route entirely.
+        connectionPathKind = ""
         videoWidth = 0
         videoHeight = 0
         expectedContentWidth = 0
@@ -2688,11 +2716,22 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         updateDesktopBackendButtons()
 
         listSelectedText.text = "Selected: ${panelSnapshot.selectedTitle}"
+        // The path is said in full here, once, before anything is opened. In the viewer there is
+        // only room for a two-character badge, and "my data is being billed" is not something to
+        // learn from a badge alone.
+        val pathNote = when (connectionPathKind) {
+            "private" -> getString(R.string.connect_path_direct_lan)
+            "relay" -> getString(R.string.connect_path_relay)
+            "public", "public-alt" -> getString(R.string.connect_path_direct)
+            else -> ""
+        }
         listStatusText.text =
             when (selectionStage) {
                 SelectionStage.REQUESTING -> "selecting $pendingSelectionLabel..."
                 SelectionStage.WAITING_FIRST_FRAME -> "waiting first frame for $pendingSelectionLabel..."
-                SelectionStage.IDLE -> panelSnapshot.status
+                SelectionStage.IDLE ->
+                    if (isConnected && pathNote.isNotEmpty()) "$pathNote\n${panelSnapshot.status}"
+                    else panelSnapshot.status
             }
 
         val labels = mutableListOf<String>()
@@ -2947,7 +2986,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 )
                 // Which address won matters when something goes wrong later: "private" means the
                 // traffic never left the LAN, and a fallback with no answer explains a slow start.
-                diagnosticsLog.log("directory_chosen", NativeSessionBridge.nativeDirectoryChosenCandidate())
+                val chosenCandidate = NativeSessionBridge.nativeDirectoryChosenCandidate()
+                diagnosticsLog.log("directory_chosen", chosenCandidate)
+                connectionPathKind = parseChosenCandidateKind(chosenCandidate)
                 if (!started) {
                     throw DirectoryClient.DirectoryException(
                         NativeSessionBridge.nativeDirectoryLastError().ifEmpty { "연결을 시작하지 못했습니다" }
