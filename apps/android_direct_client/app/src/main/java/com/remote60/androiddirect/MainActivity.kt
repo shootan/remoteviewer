@@ -59,6 +59,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         private const val INPUT_KIND_MOUSE_WHEEL = 4
         private const val INPUT_KIND_KEY_DOWN = 5
         private const val INPUT_KIND_KEY_UP = 6
+        private const val VK_RETURN = 0x0D
         private const val INPUT_BUTTON_PRIMARY = 0x1
         private const val INPUT_BUTTON_SECONDARY = 0x2
         private const val INPUT_BUTTON_MIDDLE = 0x4
@@ -105,6 +106,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var lastAppliedLandscape: Boolean? = null
     private var sessionBytesReceived = 0L
     private var quickSettingsDialog: AlertDialog? = null
+    private var unlockDialog: AlertDialog? = null
 
     /**
      * Lay the control rail along the device's short edge. Always safe to call: it only
@@ -264,6 +266,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             getString(R.string.quick_preset_sharp),
             if (forcePortrait) getString(R.string.quick_orientation_portrait)
             else getString(R.string.quick_orientation_auto),
+            getString(R.string.quick_unlock),
             // The rail ran out of room, so the rarely-needed diagnostics live here now.
             getString(R.string.quick_diagnostics_log),
         )
@@ -284,7 +287,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                         )
                         applyViewerRailLayout()
                     }
-                    4 -> toggleViewerLogDialog()
+                    4 -> showUnlockDialog()
+                    5 -> toggleViewerLogDialog()
                 }
                 renderStatus()
             }
@@ -292,6 +296,70 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             .create()
         quickSettingsDialog?.setOnDismissListener { quickSettingsDialog = null }
         quickSettingsDialog?.show()
+    }
+
+    /**
+     * Types the Windows sign-in password without needing to see the lock screen.
+     *
+     * The lock screen is a curtain over the password box: a keystroke lifts it, the box already
+     * has focus, and Enter submits. So the whole interaction is Enter, the password, Enter -- and
+     * doing it blind is the point, because on a phone the lock screen is fiddly to aim at and the
+     * password box is small.
+     *
+     * The password is never stored and never logged. It is held only for as long as it takes to
+     * send, and note that it crosses the wire in the clear like any other typed text -- the media
+     * channel is not encrypted yet (N4).
+     */
+    private fun showUnlockDialog() {
+        if (unlockDialog?.isShowing == true) return
+        val input = EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            hint = getString(R.string.unlock_hint)
+            setSingleLine()
+        }
+        val padding = (24 * resources.displayMetrics.density).toInt()
+        val frame = android.widget.FrameLayout(this).apply {
+            setPadding(padding, padding / 2, padding, 0)
+            addView(input)
+        }
+        unlockDialog = AlertDialog.Builder(this)
+            .setTitle(R.string.unlock_title)
+            .setMessage(R.string.unlock_message)
+            .setView(frame)
+            .setPositiveButton(R.string.unlock_send) { _, _ ->
+                sendUnlockSequence(input.text.toString())
+                input.text.clear()
+            }
+            .setNegativeButton(R.string.quick_close) { _, _ -> input.text.clear() }
+            .create()
+        unlockDialog?.setOnDismissListener { unlockDialog = null }
+        unlockDialog?.show()
+    }
+
+    /**
+     * Enter, wait, password, wait, Enter.
+     *
+     * The waits are not decoration. The first Enter dismisses a curtain that animates away, and
+     * anything typed during that animation lands nowhere; the second gap lets the host finish
+     * delivering the text before the submit arrives, since they travel as separate messages.
+     */
+    private fun sendUnlockSequence(password: String) {
+        if (password.isEmpty()) return
+        val handler = Handler(Looper.getMainLooper())
+        pressEnter()
+        handler.postDelayed({
+            NativeSessionBridge.nativeQueueInputText(password)
+            handler.postDelayed({ pressEnter() }, 250)
+        }, 600)
+        // Deliberately says nothing about the password itself, only that the attempt happened.
+        diagnosticsLog.log("unlock_sent", "chars=${password.length}")
+        Toast.makeText(this, R.string.unlock_sent, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun pressEnter() {
+        NativeSessionBridge.nativeQueueInputEvent(INPUT_KIND_KEY_DOWN, 0, 0, 0, VK_RETURN, 0)
+        NativeSessionBridge.nativeQueueInputEvent(INPUT_KIND_KEY_UP, 0, 0, 0, VK_RETURN, 0)
     }
 
     private fun applyQuickPreset(bitrateKbps: Int, fps: Int) {

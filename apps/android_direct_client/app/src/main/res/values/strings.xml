@@ -51,6 +51,13 @@
     <string name="quick_orientation_portrait">Orientation: force portrait</string>
     <string name="quick_close">Close</string>
     <string name="viewer_data_usage">%1$s MB</string>
+    <!-- Typing the sign-in password blind, so the lock screen never has to be aimed at. -->
+    <string name="quick_unlock">잠금 해제</string>
+    <string name="unlock_title">Windows 잠금 해제</string>
+    <string name="unlock_message">Enter → 비밀번호 → Enter 순서로 보냅니다. 비밀번호는 저장하지 않습니다.</string>
+    <string name="unlock_hint">Windows 로그인 비밀번호</string>
+    <string name="unlock_send">보내기</string>
+    <string name="unlock_sent">잠금 해제를 시도했습니다</string>
     <!-- How the session is reaching the PC. Relay traffic is metered and slower, so it is worth
          saying so plainly rather than leaving the user to guess from the speed. -->
     <string name="path_direct">직접</string>
