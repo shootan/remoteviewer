@@ -1,10 +1,10 @@
+# What is genuinely shared: the version string and the input wire format.
+#
+# The signalling client and the RTP packetisers lived here too, until the WebRTC host and client
+# they served were retired. Nothing in the shipping product -- streaming host, Windows client,
+# Android client, directory -- ever referenced them.
 add_library(common STATIC
   src/version.cpp
-  src/signaling_protocol.cpp
-  src/rtc_signaling_client.cpp
-  src/ws_rtc_signaling_client.cpp
-  src/h264_rtp_packetizer.cpp
-  src/opus_rtp_packetizer.cpp
   src/input_protocol.cpp
 )
 

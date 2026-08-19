@@ -25,15 +25,14 @@ endif()
 
 add_executable(remote60_native_host_poc
   src/native_host_main.cpp
-  ../host/src/capture_runtime.cpp
 )
 
 target_include_directories(remote60_native_host_poc PRIVATE
   src
-  ../host/src
 )
 
 target_link_libraries(remote60_native_host_poc PRIVATE
+  capture
   common
   ws2_32
   d3d11
@@ -62,7 +61,6 @@ add_executable(remote60_native_video_host_poc
   src/udp_control_channel.cpp
   src/mf_h264_codec.cpp
   src/secure_input_broker.cpp
-  ../host/src/capture_backend_dxgi.cpp
 )
 set_target_properties(remote60_native_video_host_poc PROPERTIES OUTPUT_NAME "GNLinkStream")
 
@@ -85,10 +83,10 @@ target_link_libraries(remote60_gdi_capture_process_test PRIVATE user32)
 
 target_include_directories(remote60_native_video_host_poc PRIVATE
   src
-  ../host/src
 )
 
 target_link_libraries(remote60_native_video_host_poc PRIVATE
+  capture
   common
   ws2_32
   d3d11
@@ -397,9 +395,9 @@ add_executable(remote60_secure_input_session_test
 target_include_directories(remote60_secure_input_session_test PRIVATE src)
 
 add_executable(remote60_dxgi_output_selection_test
-  ../host/src/dxgi_output_selection_test.cpp
+  ${CMAKE_SOURCE_DIR}/libs/capture/src/dxgi_output_selection_test.cpp
 )
-target_include_directories(remote60_dxgi_output_selection_test PRIVATE ../host/src)
+target_link_libraries(remote60_dxgi_output_selection_test PRIVATE capture)
 
 add_executable(remote60_secure_input_mapping_test
   src/secure_input_mapping_test.cpp

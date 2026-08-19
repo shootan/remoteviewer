@@ -181,25 +181,11 @@ Notes:
 - For validation, `automation/validate_background_input_injection.ps1` remains the shortest local check.
 
 ## Browser GUI Path
-If you need the browser UI with `desktop / window list / touch input`, use the web runtime instead of the native bundle.
-
-Host machine:
-```powershell
-powershell -ExecutionPolicy Bypass -File automation/run_web_runtime.ps1 -Port 3000
-```
-
-Client device:
-- Open `http://<HOST_PUBLIC_IP_OR_DNS>:3000`
-- This is the path that contains the web client's window list UI and touch handlers.
-
-Portable web bundle:
-```powershell
-powershell -ExecutionPolicy Bypass -File automation/package_web_runtime_external_bundle.ps1 -BuildDir build-vcpkg-local
-```
-
-Notes:
-- This bundle packages `remote60_host.exe`, `apps/signaling`, and web runtime scripts.
-- Node.js is still required on the host machine.
+Removed on 2026-08-19. The browser UI ran on `remote60_host` / `remote60_client` and the
+`apps/signaling` server, none of which the shipping product used; they were deleted along with
+the automation that started them. The GUI paths that remain are the Windows client
+(`GNLinkClient`) and the Android app. Recovering the browser path means recovering it from git
+history before `59e3dc0`.
 
 ## Portable bundle
 Create a portable bundle with current binaries, profiles, and helper scripts:

@@ -16,6 +16,5 @@ if(MSVC)
 endif()
 
 add_subdirectory(libs/common)
-add_subdirectory(apps/host)
-add_subdirectory(apps/client)
+add_subdirectory(libs/capture)
 add_subdirectory(apps/native_poc)

@@ -27,7 +27,7 @@ This directory is intentionally isolated from the existing web signaling/web cli
   - Injection scope in current phase: click/drag/keyboard (no global cursor move).
 
 ## Existing host code reuse
-- `remote60_native_host_poc` links existing capture runtime source from `apps/host/src/capture_runtime.cpp`.
+- `remote60_native_host_poc` links the shared capture runtime from `libs/capture`.
 - You can run a capture-only probe:
   - `remote60_native_host_poc --capture-probe 5`
 
