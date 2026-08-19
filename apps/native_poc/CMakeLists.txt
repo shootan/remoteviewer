@@ -345,6 +345,13 @@ add_executable(remote60_encode_resolution_ladder_test
 )
 target_include_directories(remote60_encode_resolution_ladder_test PRIVATE src)
 
+add_executable(remote60_directory_session_client_test
+  src/directory_session_client_test.cpp
+  src/directory_client.cpp
+)
+target_include_directories(remote60_directory_session_client_test PRIVATE src)
+target_link_libraries(remote60_directory_session_client_test PRIVATE common ws2_32)
+
 add_executable(remote60_punch_any_test
   src/punch_any_test.cpp
   src/directory_rendezvous.cpp
@@ -379,6 +386,17 @@ if(GNLINK_HAVE_WEBVIEW2)
   )
   set_target_properties(remote60_webview2_spike PROPERTIES OUTPUT_NAME "WebView2Spike")
 endif()
+
+# Diagnostic only. The parsing has unit tests; this answers the other half -- whether the requests
+# are shaped the way a real directory expects.
+add_executable(remote60_directory_login_probe
+  tools/directory_login_probe.cpp
+  src/directory_session_client.cpp
+  src/directory_client.cpp
+)
+target_include_directories(remote60_directory_login_probe PRIVATE src)
+target_link_libraries(remote60_directory_login_probe PRIVATE common ws2_32 iphlpapi shell32)
+set_target_properties(remote60_directory_login_probe PROPERTIES OUTPUT_NAME "DirectoryLoginProbe")
 
 add_executable(remote60_winlogon_capture_probe
   tools/winlogon_capture_probe.cpp
