@@ -111,6 +111,12 @@ add_executable(remote60_native_video_client_poc
   src/native_video_client_tcp_control.cpp
   src/udp_control_channel.cpp
   src/mf_h264_codec.cpp
+  # Reaching a host through the directory rather than by address: sign in, race the candidates,
+  # keep the socket the winner answered on.
+  src/directory_session_client.cpp
+  src/directory_session_bootstrap.cpp
+  src/directory_rendezvous.cpp
+  src/directory_client.cpp
 )
 set_target_properties(remote60_native_video_client_poc PROPERTIES OUTPUT_NAME "GNLinkViewer")
 

@@ -37,6 +37,8 @@
 #include <wrl/client.h>
 
 #include "client_macro_window.hpp"
+#include "directory_session_bootstrap.hpp"
+#include "directory_session_client.hpp"
 #include "input_macro.hpp"
 #include "mf_h264_codec.hpp"
 #include "json_profile.hpp"
@@ -118,6 +120,16 @@ struct Args {
   std::string host = "127.0.0.1";
   uint16_t port = 43000;
   uint16_t controlPort = 0;
+  // Reaching a host through the directory instead of by address. When these are set the client
+  // signs in, races the candidates the server offers and uses whichever answers -- which is the
+  // only way to reach a PC behind NAT, and the only way to use the relay at all.
+  std::string directoryUrl;
+  std::string directoryAccount;
+  std::string directoryPassword;
+  std::string directoryHostId;
+  // Empty means "the only host on the account", which is the common case and saves the caller
+  // from having to look an id up first.
+  std::string directoryHostName;
   uint32_t controlIntervalMs = 1000;
   uint32_t tcpRecvBufKb = 0;
   uint32_t tcpSendBufKb = 0;
@@ -412,6 +424,16 @@ Args parse_args(int argc, char** argv) {
     }
     if (k == "--host" && i + 1 < argc) {
       a.host = argv[++i];
+    } else if (k == "--directory-url" && i + 1 < argc) {
+      a.directoryUrl = argv[++i];
+    } else if (k == "--directory-id" && i + 1 < argc) {
+      a.directoryAccount = argv[++i];
+    } else if (k == "--directory-pw" && i + 1 < argc) {
+      a.directoryPassword = argv[++i];
+    } else if (k == "--directory-host-id" && i + 1 < argc) {
+      a.directoryHostId = argv[++i];
+    } else if (k == "--directory-host-name" && i + 1 < argc) {
+      a.directoryHostName = argv[++i];
     } else if (k == "--port" && i + 1 < argc) {
       uint32_t v = 0;
       if (parse_u32(argv[++i], &v)) a.port = static_cast<uint16_t>(std::min<uint32_t>(v, 65535));
@@ -2768,9 +2790,78 @@ int main(int argc, char** argv) {
     }
   }
 
-  gSock = socket(AF_INET,
-                 (transport == VideoTransport::Udp) ? SOCK_DGRAM : SOCK_STREAM,
-                 (transport == VideoTransport::Udp) ? IPPROTO_UDP : IPPROTO_TCP);
+  // Reaching the host through the directory replaces the address entirely: the socket comes back
+  // already prepared (it is the one the directory observed, so the host is punching towards it)
+  // and the capability that follows is what the host authorises the session against.
+  std::string directoryPunchToken;
+  Args resolvedArgs = args;
+  if (!args.directoryUrl.empty()) {
+    if (transport != VideoTransport::Udp) {
+      std::cerr << "[native-video-client] the directory path is udp only\n";
+      if (mfStarted) MFShutdown();
+      return 3;
+    }
+    std::string directoryError;
+    std::string sessionToken;
+    if (!remote60::native_poc::directory_login(args.directoryUrl, args.directoryAccount,
+                                               args.directoryPassword, &sessionToken,
+                                               &directoryError)) {
+      std::cerr << "[native-video-client] directory login failed: " << directoryError << "\n";
+      if (mfStarted) MFShutdown();
+      return 3;
+    }
+
+    std::string hostId = args.directoryHostId;
+    if (hostId.empty()) {
+      std::vector<remote60::native_poc::DirectoryHostEntry> hosts;
+      if (!remote60::native_poc::directory_list_hosts(args.directoryUrl, sessionToken, &hosts,
+                                                      &directoryError)) {
+        std::cerr << "[native-video-client] directory hosts failed: " << directoryError << "\n";
+        if (mfStarted) MFShutdown();
+        return 3;
+      }
+      for (const auto& entry : hosts) {
+        if (!args.directoryHostName.empty() && entry.hostName != args.directoryHostName) continue;
+        // An offline host has no mapping to punch towards, so preferring an online one avoids a
+        // four-second wait that was never going to succeed.
+        if (hostId.empty() || entry.online) hostId = entry.hostId;
+        if (entry.online) break;
+      }
+      if (hostId.empty()) {
+        std::cerr << "[native-video-client] no host on this account"
+                  << (args.directoryHostName.empty() ? "" : " named " + args.directoryHostName)
+                  << "\n";
+        if (mfStarted) MFShutdown();
+        return 3;
+      }
+    }
+
+    remote60::native_poc::DirectorySessionRequest request{};
+    request.url = args.directoryUrl;
+    request.sessionToken = sessionToken;
+    request.hostId = hostId;
+    remote60::native_poc::DirectorySessionResult session{};
+    if (!remote60::native_poc::directory_session_open(request, &session, &directoryError)) {
+      std::cerr << "[native-video-client] directory connect failed: " << directoryError << "\n";
+      if (mfStarted) MFShutdown();
+      return 3;
+    }
+    gSock = session.socket;
+    resolvedArgs.host = session.chosen.ip;
+    resolvedArgs.port = session.chosen.port;
+    // Control travels over the media socket on this path; a separate TCP port cannot survive
+    // hole punching.
+    resolvedArgs.controlPort = 0;
+    directoryPunchToken = session.punchToken;
+    std::cout << "[native-video-client] directory chose " << session.chosen.ip << ":"
+              << session.chosen.port << " ("
+              << remote60::native_poc::candidate_kind_name(session.chosen.kind) << ")"
+              << (session.answered ? "" : " [no answer, trying anyway]") << "\n";
+  } else {
+    gSock = socket(AF_INET,
+                   (transport == VideoTransport::Udp) ? SOCK_DGRAM : SOCK_STREAM,
+                   (transport == VideoTransport::Udp) ? IPPROTO_UDP : IPPROTO_TCP);
+  }
   if (gSock == INVALID_SOCKET) {
     std::cerr << "[native-video-client] socket create failed\n";
     if (mfStarted) MFShutdown();
@@ -2802,16 +2893,16 @@ int main(int argc, char** argv) {
 
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
-  addr.sin_port = htons(args.port);
-  if (inet_pton(AF_INET, args.host.c_str(), &addr.sin_addr) != 1) {
-    std::cerr << "[native-video-client] invalid host " << args.host << "\n";
+  addr.sin_port = htons(resolvedArgs.port);
+  if (inet_pton(AF_INET, resolvedArgs.host.c_str(), &addr.sin_addr) != 1) {
+    std::cerr << "[native-video-client] invalid host " << resolvedArgs.host << "\n";
     closesocket(gSock);
     gSock = INVALID_SOCKET;
     if (mfStarted) MFShutdown();
     return 4;
   }
   if (connect(gSock, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0) {
-    std::cerr << "[native-video-client] connect failed " << args.host << ":" << args.port << "\n";
+    std::cerr << "[native-video-client] connect failed " << resolvedArgs.host << ":" << resolvedArgs.port << "\n";
     closesocket(gSock);
     gSock = INVALID_SOCKET;
     if (mfStarted) MFShutdown();
@@ -2825,6 +2916,11 @@ int main(int argc, char** argv) {
     for (int attempt = 0; attempt < 40 && !handshakeOk; ++attempt) {
       UdpHelloPacket hello{};
       hello.kind = static_cast<uint16_t>(UdpPacketKind::Hello);
+      // The capability from /api/connect. Without it the host treats this as a plain LAN client
+      // and refuses anything that needs authorisation -- secure-desktop input in particular.
+      if (!directoryPunchToken.empty()) {
+        std::snprintf(hello.authToken, sizeof(hello.authToken), "%s", directoryPunchToken.c_str());
+      }
       const int sent = send(gSock, reinterpret_cast<const char*>(&hello), sizeof(hello), 0);
       if (sent <= 0) {
         Sleep(50);
