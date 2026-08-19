@@ -11,8 +11,10 @@
 // usually also one you sit at.
 #define IDR_PAYLOAD_CLIENT_SHELL 204
 #define IDR_PAYLOAD_CLIENT_VIEWER 205
-// Not an executable: the client's interface, written to ui\shell.html beside it.
+// Not executables: the two pages the client and viewer draw their interfaces from, written into
+// a ui subdirectory beside them.
 #define IDR_PAYLOAD_CLIENT_UI 206
+#define IDR_PAYLOAD_MACRO_UI 207
 
 #define IDD_MAIN 300
 #define IDC_APP_ICON 301

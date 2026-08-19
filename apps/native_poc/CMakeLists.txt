@@ -1,3 +1,15 @@
+# The WebView2 SDK is a NuGet package of headers and a static loader, fetched into third_party
+# rather than vendored: it is 45 MB of which the build uses two files. Detected up here because
+# both the client shell and the viewer's macro window depend on it.
+set(GNLINK_WEBVIEW2_DIR "${CMAKE_SOURCE_DIR}/third_party/webview2/build/native")
+if(EXISTS "${GNLINK_WEBVIEW2_DIR}/include/WebView2.h")
+  set(GNLINK_HAVE_WEBVIEW2 TRUE)
+else()
+  set(GNLINK_HAVE_WEBVIEW2 FALSE)
+  message(STATUS "WebView2 SDK not found at ${GNLINK_WEBVIEW2_DIR}; "
+                 "run automation/fetch_webview2.ps1 to build the client")
+endif()
+
 option(REMOTE60_NATIVE_ENCODED_EXPERIMENT "Enable native encoded-path experiment switches" OFF)
 get_property(_native_encoded_experiment_flag CACHE REMOTE60_NATIVE_ENCODED_EXPERIMENT PROPERTY VALUE)
 if("${_native_encoded_experiment_flag}" STREQUAL "")
@@ -117,12 +129,32 @@ add_executable(remote60_native_video_client_poc
   src/directory_session_bootstrap.cpp
   src/directory_rendezvous.cpp
   src/directory_client.cpp
+  # The macro window is a page too, so the viewer needs the same shell the client uses.
+  src/macro_shell_bridge.cpp
 )
 set_target_properties(remote60_native_video_client_poc PROPERTIES OUTPUT_NAME "GNLinkViewer")
 
 target_include_directories(remote60_native_video_client_poc PRIVATE
   src
 )
+
+# The viewer draws its macro window as a page, the same way the client draws its connect screen.
+# Guarded because the SDK is fetched rather than vendored; without it the window falls back to
+# nothing and the rest of the viewer still builds.
+if(GNLINK_HAVE_WEBVIEW2)
+  target_include_directories(remote60_native_video_client_poc PRIVATE
+    "${GNLINK_WEBVIEW2_DIR}/include")
+  target_link_libraries(remote60_native_video_client_poc PRIVATE
+    "${GNLINK_WEBVIEW2_DIR}/x64/WebView2LoaderStatic.lib" ole32 shlwapi version)
+  add_custom_command(TARGET remote60_native_video_client_poc POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:remote60_native_video_client_poc>/ui"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/ui/macro.html"
+            "$<TARGET_FILE_DIR:remote60_native_video_client_poc>/ui/macro.html"
+    COMMENT "Staging GNLink macro UI"
+  )
+endif()
 
 target_link_libraries(remote60_native_video_client_poc PRIVATE
   common
@@ -202,11 +234,13 @@ set(GNLINK_PAYLOAD_GDI_WORKER "${_gnlink_payload_dir}/GNLinkCapture.exe")
 set(GNLINK_PAYLOAD_CLIENT_SHELL "${_gnlink_payload_dir}/GNLinkClient.exe")
 set(GNLINK_PAYLOAD_CLIENT_VIEWER "${_gnlink_payload_dir}/GNLinkViewer.exe")
 set(GNLINK_PAYLOAD_CLIENT_UI "${_gnlink_payload_dir}/shell.html")
+set(GNLINK_PAYLOAD_MACRO_UI "${_gnlink_payload_dir}/macro.html")
 
 # The .rc reader takes these paths literally, so escape the separators for the generated script.
 foreach(_var GNLINK_INSTALLER_ICON GNLINK_PAYLOAD_HOST_APP GNLINK_PAYLOAD_VIDEO_HOST
              GNLINK_PAYLOAD_SECURE_INPUT GNLINK_PAYLOAD_GDI_WORKER
-             GNLINK_PAYLOAD_CLIENT_SHELL GNLINK_PAYLOAD_CLIENT_VIEWER GNLINK_PAYLOAD_CLIENT_UI)
+             GNLINK_PAYLOAD_CLIENT_SHELL GNLINK_PAYLOAD_CLIENT_VIEWER GNLINK_PAYLOAD_CLIENT_UI
+             GNLINK_PAYLOAD_MACRO_UI)
   string(REPLACE "/" "\\\\" ${_var} "${${_var}}")
 endforeach()
 configure_file(installer/payload.rc.in "${CMAKE_CURRENT_BINARY_DIR}/installer_payload.rc" @ONLY)
@@ -222,6 +256,7 @@ add_custom_command(
     "${_gnlink_payload_dir}/GNLinkClient.exe"
     "${_gnlink_payload_dir}/GNLinkViewer.exe"
     "${_gnlink_payload_dir}/shell.html"
+    "${_gnlink_payload_dir}/macro.html"
   COMMAND ${CMAKE_COMMAND} -E make_directory "${_gnlink_payload_dir}"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "$<TARGET_FILE:remote60_host_app>" "${_gnlink_payload_dir}/GNLinkHost.exe"
@@ -241,10 +276,13 @@ add_custom_command(
           "${_gnlink_payload_dir}/GNLinkViewer.exe"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "${CMAKE_CURRENT_SOURCE_DIR}/ui/shell.html" "${_gnlink_payload_dir}/shell.html"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CMAKE_CURRENT_SOURCE_DIR}/ui/macro.html" "${_gnlink_payload_dir}/macro.html"
   DEPENDS remote60_host_app remote60_native_video_host_poc
           remote60_secure_input_service remote60_gdi_capture_worker
           remote60_client_shell remote60_native_video_client_poc
           "${CMAKE_CURRENT_SOURCE_DIR}/ui/shell.html"
+          "${CMAKE_CURRENT_SOURCE_DIR}/ui/macro.html"
   COMMENT "Staging GNLink installer payload"
   VERBATIM
 )
@@ -257,6 +295,7 @@ add_custom_target(remote60_installer_payload
     "${_gnlink_payload_dir}/GNLinkClient.exe"
     "${_gnlink_payload_dir}/GNLinkViewer.exe"
     "${_gnlink_payload_dir}/shell.html"
+    "${_gnlink_payload_dir}/macro.html"
 )
 
 add_executable(remote60_installer WIN32
@@ -383,6 +422,13 @@ add_executable(remote60_client_shell_bridge_test
 )
 target_include_directories(remote60_client_shell_bridge_test PRIVATE src)
 
+add_executable(remote60_macro_shell_bridge_test
+  src/macro_shell_bridge_test.cpp
+  src/macro_shell_bridge.cpp
+  src/input_macro.cpp
+)
+target_include_directories(remote60_macro_shell_bridge_test PRIVATE src)
+
 add_executable(remote60_punch_any_test
   src/punch_any_test.cpp
   src/directory_rendezvous.cpp
@@ -393,16 +439,6 @@ target_link_libraries(remote60_punch_any_test PRIVATE common ws2_32)
 # Throwaway diagnostic, not part of the product and not staged into the installer. Answers
 # whether a SYSTEM process on the Winlogon desktop can read pixels, and with which API, before
 # the secure-desktop capture work commits to one. Delete once 구현계획 U1 is answered.
-# The WebView2 SDK is a NuGet package of headers and a static loader, fetched into third_party
-# rather than vendored: it is 100+ MB unpacked and only the include/lib pair is used.
-set(GNLINK_WEBVIEW2_DIR "${CMAKE_SOURCE_DIR}/third_party/webview2/build/native")
-if(EXISTS "${GNLINK_WEBVIEW2_DIR}/include/WebView2.h")
-  set(GNLINK_HAVE_WEBVIEW2 TRUE)
-else()
-  set(GNLINK_HAVE_WEBVIEW2 FALSE)
-  message(STATUS "WebView2 SDK not found at ${GNLINK_WEBVIEW2_DIR}; skipping WebView2 targets")
-endif()
-
 if(GNLINK_HAVE_WEBVIEW2)
   # The window a person opens: sign in, pick a PC, start a session. The session itself runs in
   # GNLinkViewer.exe as a child, mirroring how GNLinkHost supervises GNLinkStream.

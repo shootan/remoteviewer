@@ -52,8 +52,9 @@ const PayloadFile kPayload[] = {
     {IDR_PAYLOAD_GDI_WORKER, L"GNLinkCapture.exe"},
     {IDR_PAYLOAD_CLIENT_SHELL, L"GNLinkClient.exe"},
     {IDR_PAYLOAD_CLIENT_VIEWER, L"GNLinkViewer.exe"},
-    // The client loads its interface from beside itself, in a subdirectory it expects to exist.
+    // Both load their interfaces from beside themselves, in a subdirectory that has to exist.
     {IDR_PAYLOAD_CLIENT_UI, L"ui\\shell.html"},
+    {IDR_PAYLOAD_MACRO_UI, L"ui\\macro.html"},
 };
 
 bool gSilent = false;
