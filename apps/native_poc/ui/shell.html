@@ -1,0 +1,241 @@
+<!doctype html>
+<!--
+  The connect screen.
+
+  Drawn as a page rather than in Win32 because the alternative is owning every pixel, font and
+  DPI case by hand, and the result still looks like 1998. Nothing here touches the video: the
+  page decides which PC to open and with what settings, then hands over to a window the C++ side
+  draws with D3D11.
+
+  Everything crossing the boundary is JSON with a "type", matching client_shell_bridge.hpp.
+-->
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>GNLink</title>
+<style>
+  :root {
+    --bg: #0f1319;
+    --panel: #171c25;
+    --panel-hover: #1e2531;
+    --line: #262e3b;
+    --text: #e8eaed;
+    --muted: #98a1b0;
+    --accent: #3b82f6;
+    --accent-hover: #2f6fd0;
+    --online: #3ecf8e;
+    --danger: #f2555a;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Segoe UI', 'Malgun Gothic', sans-serif;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .card {
+    width: 380px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 28px;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, .45);
+  }
+  .brand { font-size: 22px; font-weight: 600; letter-spacing: -.2px; }
+  .brand span { color: var(--accent); }
+  .sub { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
+
+  label { display: block; font-size: 12px; color: var(--muted); margin: 16px 0 6px; }
+  input {
+    width: 100%; padding: 10px 12px; font-size: 14px; color: var(--text);
+    background: #0d1117; border: 1px solid var(--line); border-radius: 7px; outline: none;
+    font-family: inherit;
+  }
+  input:focus { border-color: var(--accent); }
+
+  button {
+    width: 100%; margin-top: 20px; padding: 11px; font-size: 14px; font-weight: 600;
+    color: #fff; background: var(--accent); border: 0; border-radius: 7px; cursor: pointer;
+    font-family: inherit;
+  }
+  button:hover:not(:disabled) { background: var(--accent-hover); }
+  button:disabled { opacity: .5; cursor: default; }
+
+  .msg { margin-top: 14px; font-size: 12.5px; min-height: 17px; color: var(--muted); }
+  .msg.error { color: var(--danger); }
+
+  /* Host list */
+  .head { display: flex; align-items: baseline; justify-content: space-between; }
+  .link {
+    color: var(--muted); font-size: 12px; cursor: pointer; background: none; border: 0;
+    width: auto; margin: 0; padding: 0; font-weight: normal;
+  }
+  .link:hover { color: var(--text); background: none; }
+  .hosts { margin-top: 16px; max-height: 320px; overflow-y: auto; }
+  .host {
+    display: flex; align-items: center; gap: 11px; width: 100%;
+    padding: 13px 14px; margin: 0 0 8px; text-align: left;
+    background: #0d1117; border: 1px solid var(--line); border-radius: 9px; cursor: pointer;
+  }
+  .host:hover:not(:disabled) { background: var(--panel-hover); border-color: #33404f; }
+  .host:disabled { cursor: default; opacity: .45; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #4b5563; flex: none; }
+  .dot.on { background: var(--online); box-shadow: 0 0 8px rgba(62, 207, 142, .55); }
+  .host .name { font-size: 14px; font-weight: 500; }
+  .host .state { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+  .empty { color: var(--muted); font-size: 12.5px; text-align: center; padding: 26px 0; }
+
+  .hidden { display: none; }
+  .spinner {
+    width: 15px; height: 15px; border: 2px solid rgba(255,255,255,.25);
+    border-top-color: #fff; border-radius: 50%; display: inline-block;
+    animation: spin .7s linear infinite; vertical-align: -3px; margin-right: 7px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div class="card" id="signInCard">
+  <div class="brand">GN<span>Link</span></div>
+  <div class="sub">계정으로 로그인하면 등록된 PC가 보입니다.</div>
+
+  <label for="server">서버 주소</label>
+  <input id="server" spellcheck="false" placeholder="http://주소:8080">
+
+  <label for="account">아이디</label>
+  <input id="account" spellcheck="false" autocomplete="off">
+
+  <label for="password">비밀번호</label>
+  <input id="password" type="password" autocomplete="off">
+
+  <button id="signIn">로그인</button>
+  <div class="msg" id="signInMsg"></div>
+</div>
+
+<div class="card hidden" id="hostsCard">
+  <div class="head">
+    <div>
+      <div class="brand">내 PC</div>
+      <div class="sub" id="accountLabel"></div>
+    </div>
+    <button class="link" id="signOut">로그아웃</button>
+  </div>
+  <div class="hosts" id="hostList"></div>
+  <div class="msg" id="hostsMsg"></div>
+  <button class="link" id="refresh" style="margin-top:4px">새로고침</button>
+</div>
+
+<script>
+  const send = (payload) => window.chrome.webview.postMessage(JSON.stringify(payload));
+  const $ = (id) => document.getElementById(id);
+  const show = (el, visible) => el.classList.toggle('hidden', !visible);
+
+  let busy = false;
+  function setBusy(on, text) {
+    busy = on;
+    $('signIn').disabled = on;
+    $('signIn').innerHTML = on ? '<span class="spinner"></span>' + (text || '연결 중') : '로그인';
+    document.querySelectorAll('.host').forEach((b) => { b.disabled = on || b.dataset.online !== '1'; });
+  }
+  function message(el, text, isError) {
+    el.textContent = text || '';
+    el.classList.toggle('error', !!isError);
+  }
+
+  $('signIn').onclick = () => {
+    if (busy) return;
+    const server = $('server').value.trim();
+    const id = $('account').value.trim();
+    const pw = $('password').value;
+    if (!server || !id || !pw) {
+      message($('signInMsg'), '서버 주소, 아이디, 비밀번호를 모두 입력해 주세요.', true);
+      return;
+    }
+    message($('signInMsg'), '');
+    setBusy(true, '로그인 중');
+    send({ type: 'login', server, accountId: id, password: pw });
+  };
+
+  // Enter anywhere in the form submits, because a login screen that ignores Enter feels broken.
+  ['server', 'account', 'password'].forEach((id) => {
+    $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') $('signIn').click(); });
+  });
+
+  $('signOut').onclick = () => send({ type: 'logout' });
+  $('refresh').onclick = () => { message($('hostsMsg'), '새로고침 중'); send({ type: 'hosts' }); };
+
+  function renderHosts(hosts) {
+    const list = $('hostList');
+    list.innerHTML = '';
+    if (!hosts.length) {
+      list.innerHTML = '<div class="empty">등록된 PC가 없습니다.<br>PC에서 GNLink 호스트를 실행해 주세요.</div>';
+      return;
+    }
+    for (const host of hosts) {
+      const button = document.createElement('button');
+      button.className = 'host';
+      button.dataset.online = host.online ? '1' : '0';
+      button.disabled = !host.online;
+      button.innerHTML =
+        '<span class="dot' + (host.online ? ' on' : '') + '"></span>' +
+        '<span><span class="name"></span><div class="state">' +
+        (host.online ? '연결 가능' : '오프라인') + '</div></span>';
+      // textContent, not innerHTML: the name came off another machine.
+      button.querySelector('.name').textContent = host.hostName || host.hostId;
+      button.onclick = () => {
+        if (busy) return;
+        setBusy(true);
+        message($('hostsMsg'), (host.hostName || 'PC') + '에 연결하는 중');
+        send({ type: 'connect', hostId: host.hostId, hostName: host.hostName });
+      };
+      list.appendChild(button);
+    }
+  }
+
+  // Everything the C++ side pushes arrives here.
+  window.chrome.webview.addEventListener('message', (event) => {
+    let msg;
+    try { msg = JSON.parse(event.data); } catch { return; }
+
+    if (msg.type === 'restore') {
+      $('server').value = msg.server || '';
+      $('account').value = msg.accountId || '';
+      if (msg.server && msg.accountId) $('password').focus();
+      return;
+    }
+    if (msg.type === 'hosts') {
+      setBusy(false);
+      show($('signInCard'), false);
+      show($('hostsCard'), true);
+      $('accountLabel').textContent = msg.accountId || '';
+      message($('hostsMsg'), '');
+      renderHosts(msg.hosts || []);
+      return;
+    }
+    if (msg.type === 'signedOut') {
+      setBusy(false);
+      show($('hostsCard'), false);
+      show($('signInCard'), true);
+      $('password').value = '';
+      message($('signInMsg'), '');
+      return;
+    }
+    if (msg.type === 'status') {
+      const target = $('hostsCard').classList.contains('hidden') ? $('signInMsg') : $('hostsMsg');
+      const failed = msg.state === 'error';
+      if (failed || msg.state === 'idle') setBusy(false);
+      message(target, msg.detail, failed);
+    }
+  });
+
+  send({ type: 'ready' });
+</script>
+</body>
+</html>

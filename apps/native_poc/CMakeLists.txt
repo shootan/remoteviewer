@@ -358,6 +358,12 @@ add_executable(remote60_directory_session_client_test
 target_include_directories(remote60_directory_session_client_test PRIVATE src)
 target_link_libraries(remote60_directory_session_client_test PRIVATE common ws2_32)
 
+add_executable(remote60_client_shell_bridge_test
+  src/client_shell_bridge_test.cpp
+  src/client_shell_bridge.cpp
+)
+target_include_directories(remote60_client_shell_bridge_test PRIVATE src)
+
 add_executable(remote60_punch_any_test
   src/punch_any_test.cpp
   src/directory_rendezvous.cpp
@@ -379,6 +385,32 @@ else()
 endif()
 
 if(GNLINK_HAVE_WEBVIEW2)
+  # The window a person opens: sign in, pick a PC, start a session. The session itself runs in
+  # GNLinkViewer.exe as a child, mirroring how GNLinkHost supervises GNLinkStream.
+  add_executable(remote60_client_shell WIN32
+    src/client_shell_main.cpp
+    src/client_shell_bridge.cpp
+    src/directory_session_client.cpp
+    src/directory_client.cpp
+  )
+  target_include_directories(remote60_client_shell PRIVATE src "${GNLINK_WEBVIEW2_DIR}/include")
+  target_link_libraries(remote60_client_shell PRIVATE
+    common
+    "${GNLINK_WEBVIEW2_DIR}/x64/WebView2LoaderStatic.lib"
+    ws2_32 iphlpapi user32 ole32 shell32 shlwapi version gdi32
+  )
+  set_target_properties(remote60_client_shell PROPERTIES OUTPUT_NAME "GNLinkClient")
+
+  # The page is loaded from disk rather than compiled in, so it can be adjusted without a
+  # rebuild; copied beside the executable so a build tree behaves like an install.
+  add_custom_command(TARGET remote60_client_shell POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:remote60_client_shell>/ui"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/ui/shell.html"
+            "$<TARGET_FILE_DIR:remote60_client_shell>/ui/shell.html"
+    COMMENT "Staging GNLink client UI"
+  )
+
   # Proves the shell before the client is built on it: SDK links, runtime present, HTML renders,
   # and JavaScript can reach C++. Diagnostic only -- nothing ships this.
   add_executable(remote60_webview2_spike

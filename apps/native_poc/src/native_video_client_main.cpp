@@ -126,6 +126,9 @@ struct Args {
   std::string directoryUrl;
   std::string directoryAccount;
   std::string directoryPassword;
+  // Preferred over the password when the caller already signed in. A command line is readable by
+  // any process that can enumerate them, and a session token expires where a password does not.
+  std::string directorySession;
   std::string directoryHostId;
   // Empty means "the only host on the account", which is the common case and saves the caller
   // from having to look an id up first.
@@ -430,6 +433,8 @@ Args parse_args(int argc, char** argv) {
       a.directoryAccount = argv[++i];
     } else if (k == "--directory-pw" && i + 1 < argc) {
       a.directoryPassword = argv[++i];
+    } else if (k == "--directory-session" && i + 1 < argc) {
+      a.directorySession = argv[++i];
     } else if (k == "--directory-host-id" && i + 1 < argc) {
       a.directoryHostId = argv[++i];
     } else if (k == "--directory-host-name" && i + 1 < argc) {
@@ -2802,8 +2807,9 @@ int main(int argc, char** argv) {
       return 3;
     }
     std::string directoryError;
-    std::string sessionToken;
-    if (!remote60::native_poc::directory_login(args.directoryUrl, args.directoryAccount,
+    std::string sessionToken = args.directorySession;
+    if (sessionToken.empty() &&
+        !remote60::native_poc::directory_login(args.directoryUrl, args.directoryAccount,
                                                args.directoryPassword, &sessionToken,
                                                &directoryError)) {
       std::cerr << "[native-video-client] directory login failed: " << directoryError << "\n";
