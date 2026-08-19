@@ -10,6 +10,10 @@ bool send_control_action(ControlLink& link, const ControlOutboundAction& action)
       return link.Write(&action.windowListRequest, sizeof(action.windowListRequest));
     case ControlOutboundActionKind::WindowSelect:
       return link.Write(&action.windowSelect, sizeof(action.windowSelect));
+    case ControlOutboundActionKind::MonitorListRequest:
+      return link.Write(&action.monitorListRequest, sizeof(action.monitorListRequest));
+    case ControlOutboundActionKind::MonitorSelect:
+      return link.Write(&action.monitorSelect, sizeof(action.monitorSelect));
     case ControlOutboundActionKind::StreamState:
       return link.Write(&action.streamState, sizeof(action.streamState));
     case ControlOutboundActionKind::CaptureMode:
@@ -64,6 +68,10 @@ bool recv_control_response(ControlLink& link, const ControlOutboundAction& actio
       out->kind = TcpControlResponseKind::InputAck;
       out->inputAck.header = header;
       return link.Read(&out->inputAck.seq, sizeof(out->inputAck) - sizeof(MessageHeader));
+    case MessageType::ControlMonitorList:
+      out->kind = TcpControlResponseKind::MonitorList;
+      out->monitorList.header = header;
+      return link.Read(&out->monitorList.seq, sizeof(out->monitorList) - sizeof(MessageHeader));
     default:
       out->kind = TcpControlResponseKind::None;
       return link.Discard(header.size - sizeof(MessageHeader));

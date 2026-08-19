@@ -60,6 +60,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         private const val INPUT_KIND_KEY_DOWN = 5
         private const val INPUT_KIND_KEY_UP = 6
         private const val VK_RETURN = 0x0D
+        // Screens share the target list with windows. Window ids come from HWNDs, which are
+        // pointer-derived and never reach this range, so the two cannot be confused.
+        private const val MONITOR_ID_BASE = 0x7000_0000_0000_0000L
         private const val INPUT_BUTTON_PRIMARY = 0x1
         private const val INPUT_BUTTON_SECONDARY = 0x2
         private const val INPUT_BUTTON_MIDDLE = 0x4
@@ -107,6 +110,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var sessionBytesReceived = 0L
     private var quickSettingsDialog: AlertDialog? = null
     private var unlockDialog: AlertDialog? = null
+    private lateinit var viewerUnlockBar: View
+    private lateinit var viewerUnlockButton: Button
+    private lateinit var viewerUnlockSettingsButton: Button
 
     /**
      * Lay the control rail along the device's short edge. Always safe to call: it only
@@ -232,6 +238,17 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         else String.format(Locale.US, "%.1f", mb)
     }
 
+    /**
+     * The unlock offer, shown only while the host says its lock screen is up.
+     *
+     * Gating on that matters for more than tidiness: sent to an unlocked PC, the password would be
+     * typed into whatever window happens to have focus.
+     */
+    private fun renderUnlockBar() {
+        val locked = currentScene == UiScene.VIEWER && NativeSessionBridge.nativeIsHostScreenLocked()
+        viewerUnlockBar.visibility = if (locked) View.VISIBLE else View.GONE
+    }
+
     private fun renderDataUsage() {
         sessionBytesReceived = NativeSessionBridge.nativeGetSessionBytesReceived()
         viewerDataUsageText.text = getString(R.string.viewer_data_usage, formatMegabytes(sessionBytesReceived))
@@ -310,29 +327,66 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
      * send, and note that it crosses the wire in the clear like any other typed text -- the media
      * channel is not encrypted yet (N4).
      */
+    private fun savedUnlockPassword(): String? =
+        SessionPersistence.loadUnlockPassword(this, currentUnlockHostKey())
+
+    /**
+     * Which PC the saved password belongs to. One phone reaches several, and typing the wrong
+     * password at a lock screen costs a failed sign-in attempt on that machine.
+     */
+    private fun currentUnlockHostKey(): String {
+        if (directoryHostKey.isNotEmpty()) return directoryHostKey
+        return hostEdit.text.toString().trim()
+    }
+
     private fun showUnlockDialog() {
         if (unlockDialog?.isShowing == true) return
+        val existing = savedUnlockPassword()
         val input = EditText(this).apply {
             inputType = android.text.InputType.TYPE_CLASS_TEXT or
                 android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
             hint = getString(R.string.unlock_hint)
             setSingleLine()
+            if (!existing.isNullOrEmpty()) setText(existing)
+        }
+        val saveBox = android.widget.CheckBox(this).apply {
+            text = getString(R.string.unlock_save_checkbox)
+            isChecked = !existing.isNullOrEmpty()
+        }
+        val note = TextView(this).apply {
+            text = getString(R.string.unlock_saved_note)
+            textSize = 12f
+            alpha = 0.7f
         }
         val padding = (24 * resources.displayMetrics.density).toInt()
-        val frame = android.widget.FrameLayout(this).apply {
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             setPadding(padding, padding / 2, padding, 0)
             addView(input)
+            addView(saveBox)
+            addView(note)
         }
-        unlockDialog = AlertDialog.Builder(this)
+        val builder = AlertDialog.Builder(this)
             .setTitle(R.string.unlock_title)
             .setMessage(R.string.unlock_message)
-            .setView(frame)
+            .setView(column)
             .setPositiveButton(R.string.unlock_send) { _, _ ->
-                sendUnlockSequence(input.text.toString())
+                val password = input.text.toString()
+                SessionPersistence.saveUnlockPassword(
+                    this, currentUnlockHostKey(), if (saveBox.isChecked) password else null
+                )
+                sendUnlockSequence(password)
                 input.text.clear()
             }
             .setNegativeButton(R.string.quick_close) { _, _ -> input.text.clear() }
-            .create()
+        if (!existing.isNullOrEmpty()) {
+            builder.setNeutralButton(R.string.unlock_clear) { _, _ ->
+                SessionPersistence.saveUnlockPassword(this, currentUnlockHostKey(), null)
+                input.text.clear()
+                Toast.makeText(this, R.string.unlock_cleared, Toast.LENGTH_SHORT).show()
+            }
+        }
+        unlockDialog = builder.create()
         unlockDialog?.setOnDismissListener { unlockDialog = null }
         unlockDialog?.show()
     }
@@ -345,7 +399,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
      * delivering the text before the submit arrives, since they travel as separate messages.
      */
     private fun sendUnlockSequence(password: String) {
-        if (password.isEmpty()) return
+        if (password.isEmpty()) {
+            Toast.makeText(this, R.string.unlock_no_password, Toast.LENGTH_SHORT).show()
+            return
+        }
         val handler = Handler(Looper.getMainLooper())
         pressEnter()
         handler.postDelayed({
@@ -426,6 +483,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val thumbVersion: Long = 0L,
     )
 
+    /** One attached screen on the host, ordered primary-first so the index is what the UI shows. */
+    private data class MonitorPanelItem(
+        val id: Int,
+        val width: Int,
+        val height: Int,
+        val primary: Boolean,
+    )
+
     private data class WindowPanelUiSnapshot(
         val selectedId: Long,
         val selectedTitle: String,
@@ -439,6 +504,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val lastSelectStreamGeneration: Long,
         val lastSelectHostSendQpcUs: Long,
         val items: List<WindowPanelItem>,
+        // Empty on a host that predates the monitor messages, which is also what
+        // hostSupportsMonitors reports -- asking such a host would stall the control loop.
+        val hostSupportsMonitors: Boolean = false,
+        val selectedMonitorId: Int = 0,
+        val monitors: List<MonitorPanelItem> = emptyList(),
     ) {
         companion object {
             val EMPTY = WindowPanelUiSnapshot(
@@ -608,6 +678,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var directoryBusy = false
     /** Set while a directory-brokered connection is being established, to keep the UI honest. */
     private var directoryConnectingName = ""
+    // The host this session reached through the directory, so a saved unlock password belongs to
+    // one PC rather than to the phone. Empty for a manual IP connection.
+    private var directoryHostKey = ""
     /**
      * The user asked to type an address instead of signing in. Remembered so that hanging up
      * returns them to the manual form rather than to a PC list they chose not to use.
@@ -822,6 +895,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerMenuButton = findViewById(R.id.viewerMenuButton)
         viewerDataUsageText = findViewById(R.id.viewerDataUsageText)
         viewerPathText = findViewById(R.id.viewerPathText)
+        viewerUnlockBar = findViewById(R.id.viewerUnlockBar)
+        viewerUnlockButton = findViewById(R.id.viewerUnlockButton)
+        viewerUnlockSettingsButton = findViewById(R.id.viewerUnlockSettingsButton)
+        // One tap when the password is already known, and the dialog only when it is not. The gear
+        // always opens the dialog, which is the only way to change a saved one.
+        viewerUnlockButton.setOnClickListener {
+            val saved = savedUnlockPassword()
+            if (saved.isNullOrEmpty()) showUnlockDialog() else sendUnlockSequence(saved)
+        }
+        viewerUnlockSettingsButton.setOnClickListener { showUnlockDialog() }
         viewerRotateButton.setOnClickListener {
             forcePortrait = !forcePortrait
             lastAppliedLandscape = null
@@ -1433,7 +1516,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         NativeSessionBridge.nativePrepareVideoSwitch(selectionGeneration)
         val ok = when (tab) {
             TargetTab.WINDOWS -> NativeSessionBridge.nativeSelectWindow(targetId)
-            TargetTab.DESKTOP -> NativeSessionBridge.nativeSelectDesktopMode()
+            // A screen id rather than a window id, when the host reported more than one.
+            TargetTab.DESKTOP ->
+                if (targetId >= MONITOR_ID_BASE) {
+                    NativeSessionBridge.nativeSelectMonitor((targetId - MONITOR_ID_BASE).toInt())
+                } else {
+                    NativeSessionBridge.nativeSelectDesktopMode()
+                }
             TargetTab.SETTINGS -> false
         }
         if (!ok) {
@@ -2816,8 +2905,25 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
 
             TargetTab.DESKTOP -> {
-                labels.add(getString(R.string.desktop_mode_button))
-                ids.add(0L)
+                // One screen means there is nothing to choose, so the single "Desktop" entry is
+                // still the honest label. With more, they are numbered as the host ordered them:
+                // primary first, then left to right, so "Monitor 2" is the same screen every time.
+                val monitors = panelSnapshot.monitors
+                if (monitors.size > 1) {
+                    monitors.forEach { mon ->
+                        val primaryMark = if (mon.primary) " • " + getString(R.string.monitor_primary) else ""
+                        labels.add(
+                            getString(R.string.monitor_label, mon.id + 1) +
+                                "  ${mon.width}x${mon.height}$primaryMark"
+                        )
+                        // Encoded so one list can carry both kinds; window ids are real HWND-derived
+                        // values and never collide with these.
+                        ids.add(MONITOR_ID_BASE + mon.id)
+                    }
+                } else {
+                    labels.add(getString(R.string.desktop_mode_button))
+                    ids.add(0L)
+                }
                 targetListEmptyText.text = ""
             }
             TargetTab.SETTINGS -> {
@@ -2857,6 +2963,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         videoTextureView.alpha = 1.0f
         applyViewerOrientation()
         renderDataUsage()
+        renderUnlockBar()
         val hasFrame = videoWidth > 0 && videoHeight > 0
         // A frozen last frame with no overlay looks like a live desktop. Treat a stalled
         // decoder or a dropped connection as reasons to bring the status text back.
@@ -3027,6 +3134,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         setDirectoryBusy(true)
         directoryConnectingName = host.hostName
+        directoryHostKey = host.hostId
         hostsStatusText.text = getString(R.string.hosts_connecting, host.hostName)
         diagnosticsLog.log("directory_connect", "host=${host.hostName} id=${host.hostId}")
 
@@ -3352,6 +3460,24 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 lastSelectStreamGeneration = root.optLong("lastSelectStreamGeneration"),
                 lastSelectHostSendQpcUs = root.optLong("lastSelectHostSendQpcUs"),
                 items = items,
+                hostSupportsMonitors = root.optBoolean("hostSupportsMonitors"),
+                selectedMonitorId = root.optInt("selectedMonitorId"),
+                monitors = buildList {
+                    val monitorsJson = root.optJSONArray("monitors")
+                    if (monitorsJson != null) {
+                        for (index in 0 until monitorsJson.length()) {
+                            val mon = monitorsJson.optJSONObject(index) ?: continue
+                            add(
+                                MonitorPanelItem(
+                                    id = mon.optInt("id"),
+                                    width = mon.optInt("width"),
+                                    height = mon.optInt("height"),
+                                    primary = mon.optBoolean("primary"),
+                                )
+                            )
+                        }
+                    }
+                },
             )
         } catch (_: JSONException) {
             WindowPanelUiSnapshot.EMPTY

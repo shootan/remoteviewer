@@ -74,6 +74,9 @@ using remote60::native_poc::ControlRuntimeEncoderConfigMessage;
 using remote60::native_poc::ControlDesktopBackendRequestMessage;
 using remote60::native_poc::ControlCaptureModeRequestMessage;
 using remote60::native_poc::ControlWindowEntry;
+using remote60::native_poc::ControlMonitorListMessage;
+using remote60::native_poc::ControlMonitorListRequestMessage;
+using remote60::native_poc::ControlMonitorSelectMessage;
 using remote60::native_poc::ControlWindowListMessage;
 using remote60::native_poc::ControlWindowListRequestMessage;
 using remote60::native_poc::ControlWindowSelectMessage;
@@ -429,6 +432,49 @@ BOOL CALLBACK enum_window_collect_proc(HWND hwnd, LPARAM lparam) {
   e.title = title;
   out->push_back(std::move(e));
   return TRUE;
+}
+
+// One attached display. Ordered with the primary first and the rest left to right, so "monitor 2"
+// on the phone means the same screen every time rather than whatever the OS enumerated first.
+struct MonitorListEntry {
+  HMONITOR handle = nullptr;
+  int32_t x = 0;
+  int32_t y = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  bool primary = false;
+  std::string name;
+};
+
+std::vector<MonitorListEntry> enumerate_monitors() {
+  std::vector<MonitorListEntry> out;
+  auto cb = [](HMONITOR mon, HDC, LPRECT, LPARAM lParam) -> BOOL {
+    auto* list = reinterpret_cast<std::vector<MonitorListEntry>*>(lParam);
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(mon, &info)) return TRUE;
+    MonitorListEntry e{};
+    e.handle = mon;
+    e.x = info.rcMonitor.left;
+    e.y = info.rcMonitor.top;
+    e.width = static_cast<uint32_t>(std::max<LONG>(0, info.rcMonitor.right - info.rcMonitor.left));
+    e.height = static_cast<uint32_t>(std::max<LONG>(0, info.rcMonitor.bottom - info.rcMonitor.top));
+    e.primary = (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
+    // The device name is "\\.\DISPLAY1", which means nothing to a user; the client numbers them.
+    char narrow[64]{};
+    WideCharToMultiByte(CP_UTF8, 0, info.szDevice, -1, narrow, sizeof(narrow) - 1, nullptr, nullptr);
+    e.name = narrow;
+    if (e.width > 0 && e.height > 0) list->push_back(std::move(e));
+    return TRUE;
+  };
+  EnumDisplayMonitors(nullptr, nullptr, cb, reinterpret_cast<LPARAM>(&out));
+  std::stable_sort(out.begin(), out.end(),
+                   [](const MonitorListEntry& a, const MonitorListEntry& b) {
+                     if (a.primary != b.primary) return a.primary;
+                     if (a.x != b.x) return a.x < b.x;
+                     return a.y < b.y;
+                   });
+  return out;
 }
 
 std::vector<WindowListEntry> enumerate_shareable_windows() {
@@ -1333,7 +1379,8 @@ bool compute_window_client_crop(HWND hwnd, uint32_t frameW, uint32_t frameH, uin
 }
 
 winrt::Windows::Graphics::Capture::GraphicsCaptureItem CreateItemForPrimaryMonitor(
-    HWND preferredWindow = nullptr, const char* preferredSource = nullptr) {
+    HWND preferredWindow = nullptr, const char* preferredSource = nullptr,
+    HMONITOR preferredMonitor = nullptr) {
   auto interop = winrt::get_activation_factory<winrt::Windows::Graphics::Capture::GraphicsCaptureItem,
                                                IGraphicsCaptureItemInterop>();
   winrt::Windows::Graphics::Capture::GraphicsCaptureItem item{nullptr};
@@ -1384,6 +1431,14 @@ winrt::Windows::Graphics::Capture::GraphicsCaptureItem CreateItemForPrimaryMonit
   if (preferredWindow) {
     createForWindow(preferredWindow, preferredSource ? preferredSource : "CreateForWindow(preferred)");
     if (item) return item;
+  }
+
+  // A specific screen when one was chosen. Everything below is the primary-monitor path, which
+  // stays the default: a client that never asks for a monitor sees exactly what it always did.
+  if (preferredMonitor) {
+    createForMonitor(preferredMonitor, "CreateForMonitor(selected)");
+    if (item) return item;
+    std::cerr << "[native-video-host] selected monitor unavailable; falling back to primary\n";
   }
 
   HMONITOR monitor = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
@@ -3287,6 +3342,11 @@ int main(int argc, char** argv) {
   std::string hostCaptureTargetProcess = "monitor";
   std::string hostCaptureTargetTitle;
   std::atomic<uint64_t> selectedWindowIdState{0};
+  // Which screen desktop mode shows. Zero is the primary, which is what it always was, so a
+  // client that never selects one behaves exactly as before.
+  std::atomic<uint32_t> selectedMonitorIdState{0};
+  std::atomic<uint32_t> monitorSelectRequested{0};
+  std::atomic<bool> monitorSelectPending{false};
   std::atomic<uint64_t> captureStreamGenerationState{1};
   std::atomic<bool> windowSelectionLocked{false};
   std::atomic<uint32_t> inputDomainW{0};
@@ -3368,6 +3428,9 @@ int main(int argc, char** argv) {
       // Tells the client it may ask for previews; older hosts leave this clear and
       // older clients ignore the bit, so both directions stay compatible.
       rsp.flags |= remote60::native_poc::kControlWindowListFlagThumbnails;
+      // Says the monitor messages exist here. A client that asked an older host would wait for a
+      // reply that never comes, since unknown opcodes are drained silently.
+      rsp.flags |= remote60::native_poc::kControlWindowListFlagMonitors;
       rsp.selectedWindowId = selectedWindowIdState.load(std::memory_order_relaxed);
       const auto windows = enumerate_shareable_windows();
       rsp.itemCount = std::min<uint32_t>(
@@ -3386,6 +3449,31 @@ int main(int argc, char** argv) {
                 << " count=" << rsp.itemCount
                 << " selectedId=" << rsp.selectedWindowId
                 << "\n";
+      return link.Write(&rsp, sizeof(rsp));
+    };
+    auto send_monitor_list = [&](uint32_t seq) -> bool {
+      ControlMonitorListMessage rsp{};
+      rsp.header.magic = remote60::native_poc::kMagic;
+      rsp.header.type = static_cast<uint16_t>(MessageType::ControlMonitorList);
+      rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
+      rsp.seq = seq;
+      rsp.selectedMonitorId = selectedMonitorIdState.load(std::memory_order_acquire);
+      const auto monitors = enumerate_monitors();
+      rsp.itemCount = std::min<uint32_t>(static_cast<uint32_t>(monitors.size()),
+                                         remote60::native_poc::kControlMonitorListMaxEntries);
+      for (uint32_t i = 0; i < rsp.itemCount; ++i) {
+        const auto& src = monitors[i];
+        auto& dst = rsp.items[i];
+        dst.id = i;
+        dst.x = src.x;
+        dst.y = src.y;
+        dst.width = src.width;
+        dst.height = src.height;
+        if (src.primary) dst.flags |= remote60::native_poc::kControlMonitorFlagPrimary;
+        std::snprintf(dst.name, sizeof(dst.name), "%s", src.name.c_str());
+      }
+      std::cout << "[native-video-host][control] monitor-list seq=" << seq
+                << " count=" << rsp.itemCount << " selectedId=" << rsp.selectedMonitorId << "\n";
       return link.Write(&rsp, sizeof(rsp));
     };
     auto send_window_thumbnail =
@@ -3658,6 +3746,28 @@ int main(int argc, char** argv) {
         req.header = header;
         if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
         if (!send_window_list(req.seq)) break;
+        continue;
+      }
+
+      if (type == MessageType::ControlMonitorListRequest &&
+          header.size == sizeof(ControlMonitorListRequestMessage)) {
+        ControlMonitorListRequestMessage req{};
+        req.header = header;
+        if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+        if (!send_monitor_list(req.seq)) break;
+        continue;
+      }
+
+      if (type == MessageType::ControlMonitorSelect &&
+          header.size == sizeof(ControlMonitorSelectMessage)) {
+        ControlMonitorSelectMessage req{};
+        req.header = header;
+        if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+        // Applied by the render loop, which owns the capture item; answered with the list so the
+        // client sees the selection that actually took effect rather than the one it asked for.
+        monitorSelectRequested.store(req.monitorId, std::memory_order_release);
+        monitorSelectPending.store(true, std::memory_order_release);
+        if (!send_monitor_list(req.seq)) break;
         continue;
       }
 
@@ -5923,6 +6033,56 @@ int main(int argc, char** argv) {
                   << "\n";
       }
     }
+    // Switching screens is the same operation as switching to desktop mode, aimed at a particular
+    // monitor. Done here rather than on the control thread because the capture item belongs to
+    // this loop, exactly like the window and capture-mode selections above.
+    if (monitorSelectPending.exchange(false, std::memory_order_acq_rel)) {
+      const uint32_t requestedId = monitorSelectRequested.load(std::memory_order_acquire);
+      const auto monitors = enumerate_monitors();
+      if (requestedId >= monitors.size()) {
+        std::cerr << "[native-video-host][control] monitor-select out of range id=" << requestedId
+                  << " count=" << monitors.size() << "\n";
+      } else {
+        const auto& target = monitors[requestedId];
+        auto nextItem = CreateItemForPrimaryMonitor(nullptr, nullptr, target.handle);
+        if (!nextItem) {
+          std::cerr << "[native-video-host][control] monitor-select capture failed id="
+                    << requestedId << "\n";
+        } else {
+          item = nextItem;
+          selectedMonitorIdState.store(requestedId, std::memory_order_release);
+          // A monitor is a desktop target, so any window selection it replaces has to go.
+          captureWindowModeActive = false;
+          captureWindowCriteria.processNamesLower.clear();
+          captureWindowCriteria.titleNeedleLower.clear();
+          selectedWindowIdState.store(0u, std::memory_order_release);
+          hostCaptureTargetFlags.store(0u, std::memory_order_release);
+          hostCaptureTargetPid.store(0u, std::memory_order_release);
+          hostCaptureTargetHwnd.store(0u, std::memory_order_release);
+          {
+            std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
+            hostCaptureTargetProcess = "monitor";
+            hostCaptureTargetTitle = target.name;
+          }
+          lastCaptureRestartUs = nowUs;
+          if (restart_capture_session()) {
+            ++captureRestartCount;
+            captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+            lastCaptureUsForInterval.store(0, std::memory_order_release);
+            lastCallbackUs.store(0, std::memory_order_release);
+            resetHostTimelineAnchors();
+            forceKeyNext = true;
+            std::cout << "[native-video-host][control] monitor-select applied id=" << requestedId
+                      << " " << target.width << "x" << target.height
+                      << " at " << target.x << "," << target.y << "\n";
+          } else {
+            std::cerr << "[native-video-host][control] monitor-select restart failed id="
+                      << requestedId << "\n";
+          }
+        }
+      }
+    }
+
     if (captureModeReqPending.exchange(false, std::memory_order_acq_rel)) {
       const uint16_t reqMode = captureModeReqMode.load(std::memory_order_acquire);
       const uint32_t reqSeq = captureModeReqSeq.load(std::memory_order_acquire);

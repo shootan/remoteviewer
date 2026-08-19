@@ -6265,3 +6265,53 @@ Codex 리뷰에서 교정된 것 (agent-bus 2라운드)
 - 실기: 회사 PC 잠근 상태에서 해제되는지. 안 되면 Ctrl+Alt+Del 정책 PC 인지부터 확인
   (`reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v DisableCAD`).
 - U5 와 N4 는 이 기능의 실용성·안전성에 직접 걸린다. 우선순위 재평가 대상.
+
+### 244) 2026-08-19 다중 모니터 선택 + OSLink 방식 잠금 해제 (호스트 0.2.18 / APK 0.2.9)
+
+#### 다중 모니터 (N12)
+- 그동안 데스크톱 모드는 `MONITOR_DEFAULTTOPRIMARY` 로 **주 모니터 고정**이었다
+  (`native_video_host_main.cpp:1432`). Android 의 "디바이스" 탭은 계획상 모니터 목록이었지만
+  실제로는 데스크톱 모드 버튼 하나였다.
+- 프로토콜에 `ControlMonitorListRequest/List/Select` 를 추가했다. 창 목록과 같은 모양이라
+  요청/응답 루프가 그대로 재사용된다. Select 의 응답도 List 라 클라가 **실제로 적용된 선택**을
+  같은 구조로 받는다.
+- 호스트: `enumerate_monitors()` 가 가상 화면 좌표로 열거하고 **주 화면 우선, 그다음 왼쪽에서
+  오른쪽** 으로 정렬한다. 그래야 "모니터 2" 가 매번 같은 화면이다. 선택은 렌더 루프가
+  적용한다(캡처 아이템의 소유자라서, 창 선택·캡처 모드와 같은 자리).
+- 구버전 호스트 보호: 알 수 없는 opcode 는 응답 없이 버려지므로 클라가 영원히 기다린다.
+  그래서 호스트가 `kControlWindowListFlagMonitors` 로 지원을 광고하고, 클라는 그 비트를 본
+  뒤에만 요청한다(썸네일과 같은 방식).
+- 모니터가 1개면 목록을 만들지 않고 기존 "Desktop" 한 줄을 그대로 둔다 — 고를 게 없다.
+
+#### 잠금 해제 UI (U6 개선)
+- 사용자가 OSLink 화면을 참고로 제시했다: 잠금 화면 위에 "컴퓨터 잠금해제" 버튼 + 톱니바퀴.
+- **저장된 암호가 있으면 버튼 한 번에 바로 해제**, 없으면 입력창. **톱니바퀴는 암호가 있어도
+  항상 입력창**(= 암호를 바꾸는 유일한 경로). 저장 체크박스와 삭제 버튼 포함.
+- 오버레이는 **호스트가 잠금 상태를 보고할 때만** 나타난다. 이것이 안전장치다 — 잠기지 않은
+  PC 에 보내면 암호가 포커스된 창에 그대로 타이핑된다.
+- 그 신호는 이미 프로토콜에 있었다(`ControlPongMessage.captureTargetFlags` bit2). 클라가 읽지
+  않고 버리고 있던 것을 세션에 저장해 JNI 로 노출했다.
+- 암호는 **호스트별로** 저장한다(`unlock_pw_<hostId>`). 폰 하나가 여러 PC 에 붙고, 잠금
+  화면에서 틀린 암호는 그 PC 의 로그인 실패로 남는다.
+
+변경 파일
+- `poc_protocol.hpp`, `native_video_host_main.cpp`, `native_video_client_shared_core.{hpp,cpp}`,
+  `native_video_client_session.{hpp,cpp}`, `native_video_client_tcp_control.{hpp,cpp}`
+- `native_bridge.cpp`, `NativeSessionBridge.kt`, `MainActivity.kt`, `SessionPersistence.kt`,
+  `activity_main.xml`, `strings.xml`, `build.gradle.kts`(0.2.8→0.2.9), `product_version.hpp`(0.2.18)
+- 산출물 `dist/GNLinkSetup-0.2.18.exe`, `dist/GNLink-0.2.9.apk`
+
+검증/build/test
+- 호스트·Windows 클라·인스톨러·APK 빌드 PASS. 단위 5종 PASS(shared_core 포함 — 프로토콜에
+  메시지를 추가해도 기존 크기 검증이 깨지지 않음을 확인).
+
+알려진 한계 (변함없음)
+- Ctrl+Alt+Del 필수 PC 에서는 잠금 해제가 동작하지 않는다. 그 키는 합성이 불가능하다.
+- 주입 실패가 실패로 보이지 않는다(U5). 화면을 안 보고 쓰는 기능이라 특히 아프다.
+- 암호가 평문으로 전송된다(N4). 릴레이 경유 시 서버를 평문으로 통과한다.
+- 암호는 앱 전용 저장소에 평문으로 보관된다. 루팅되지 않은 기기에서 다른 앱은 못 읽지만
+  암호화 저장소(EncryptedSharedPreferences)가 더 낫다.
+
+다음 액션
+- 실기: 모니터 2대 PC 에서 "모니터 1/2" 가 뜨고 전환되는지. 잠금 화면에서 오버레이가 뜨고
+  저장된 암호로 한 번에 해제되는지.

@@ -145,6 +145,25 @@ bool ClientSessionController::RequestWindowList() {
   return true;
 }
 
+bool ClientSessionController::RequestMonitorList() {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+  windowPanel_.RequestMonitorList();
+  return true;
+}
+
+bool ClientSessionController::RequestMonitorSelect(uint32_t monitorId) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+  // Refused when the host never advertised support, so the caller can say so rather than leave
+  // the user waiting on a request that will not be sent.
+  return windowPanel_.RequestMonitorSelect(monitorId);
+}
+
 bool ClientSessionController::RequestWindowSelect(uint64_t windowId) {
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -381,12 +400,31 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
       switch (response.kind) {
         case TcpControlResponseKind::Pong:
           controlScheduler_.OnPingCompleted(now_us());
+          // The host says here whether a UAC prompt or the lock screen is in front. It is the
+          // only signal the viewer has for "the picture is frozen because Windows is showing
+          // something we cannot capture", and the client can offer to unlock when it is set.
+          hostSecureDesktopActive_.store(
+              (response.pong.captureTargetFlags & kCaptureFlagSecureDesktopActive) != 0,
+              std::memory_order_relaxed);
           break;
+        case TcpControlResponseKind::MonitorList: {
+          windowPanel_.ApplyMonitorList(response.monitorList);
+          const auto panelSnapshot = windowPanel_.Snapshot();
+          std::lock_guard<std::mutex> lock(mu_);
+          SyncWindowPanelSnapshotLocked(panelSnapshot);
+          break;
+        }
         case TcpControlResponseKind::WindowList: {
           windowPanel_.ApplyWindowList(response.windowList, 4);
           hostSupportsThumbnails_.store(
               (response.windowList.flags & kControlWindowListFlagThumbnails) != 0,
               std::memory_order_relaxed);
+          // The window list is fetched on every connect, so it is where the host says whether it
+          // knows the monitor messages at all. Asking one that does not would hang the loop.
+          if (windowPanel_.SetHostSupportsMonitors(
+                  (response.windowList.flags & kControlWindowListFlagMonitors) != 0)) {
+            windowPanel_.RequestMonitorList();
+          }
           QueueThumbnailFetchesFromPanel();
           const auto panelSnapshot = windowPanel_.Snapshot();
           std::lock_guard<std::mutex> lock(mu_);

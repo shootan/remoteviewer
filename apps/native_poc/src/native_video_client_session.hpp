@@ -109,6 +109,11 @@ class ClientSessionController {
   bool RequestWindowList();
   bool RequestWindowSelect(uint64_t windowId);
   bool RequestDesktopMode();
+  bool RequestMonitorList();
+  bool RequestMonitorSelect(uint32_t monitorId);
+  bool HostSecureDesktopActive() const {
+    return hostSecureDesktopActive_.load(std::memory_order_relaxed);
+  }
   bool RequestStreamActive(bool active);
   bool RequestRuntimeConfig(uint32_t bitrate, uint32_t fps);
   bool RequestDesktopCaptureBackend(uint16_t backend);
@@ -174,6 +179,9 @@ class ClientSessionController {
   std::unordered_map<uint64_t, WindowThumbnail> thumbs_;
   std::deque<uint64_t> thumbFetchQueue_;
   std::atomic<bool> hostSupportsThumbnails_{false};
+  // Set while a UAC prompt or the lock screen is in front of the desktop. Nothing can capture
+  // that, so the picture stops; saying so beats a frozen rectangle nobody can explain.
+  std::atomic<bool> hostSecureDesktopActive_{false};
   std::atomic<uint64_t> sessionBytesReceived_{0};
 };
 

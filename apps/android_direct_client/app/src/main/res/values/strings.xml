@@ -58,6 +58,18 @@
     <string name="unlock_hint">Windows 로그인 비밀번호</string>
     <string name="unlock_send">보내기</string>
     <string name="unlock_sent">잠금 해제를 시도했습니다</string>
+    <string name="monitor_label">모니터 %1$d</string>
+    <string name="monitor_primary">주 화면</string>
+    <!-- Shown over the picture while Windows is on the lock screen, which is the one moment the
+         offer is useful and the one moment the remote screen cannot be operated normally. -->
+    <string name="unlock_overlay_button">컴퓨터 잠금해제</string>
+    <string name="unlock_overlay_settings">잠금 해제 설정</string>
+    <string name="unlock_gear">⚙</string>
+    <string name="unlock_save_checkbox">이 기기에 암호 저장</string>
+    <string name="unlock_saved_note">암호는 이 기기에만 저장되며 서버로 보내 보관하지 않습니다.</string>
+    <string name="unlock_no_password">저장된 암호가 없습니다. 암호를 입력해 주세요.</string>
+    <string name="unlock_cleared">저장된 암호를 지웠습니다</string>
+    <string name="unlock_clear">저장 암호 삭제</string>
     <!-- How the session is reaching the PC. Relay traffic is metered and slower, so it is worth
          saying so plainly rather than leaving the user to guess from the speed. -->
     <string name="path_direct">직접</string>

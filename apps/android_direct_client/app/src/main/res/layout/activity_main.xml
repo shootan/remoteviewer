@@ -768,6 +768,45 @@
                         android:textSize="14sp" />
                 </LinearLayout>
 
+                <!-- Sits at the top, where the lock screen leaves room: the clock and the photo
+                     are in the middle and covering them would hide what the user is looking at. -->
+                <LinearLayout
+                    android:id="@+id/viewerUnlockBar"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="top|center_horizontal"
+                    android:layout_marginTop="12dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:visibility="gone">
+
+                    <Button
+                        android:id="@+id/viewerUnlockButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="44dp"
+                        android:background="@drawable/viewer_control_button_background"
+                        android:minWidth="0dp"
+                        android:paddingStart="20dp"
+                        android:paddingEnd="20dp"
+                        android:text="@string/unlock_overlay_button"
+                        android:textAllCaps="false"
+                        android:textColor="#F4F0E8"
+                        android:textSize="14sp" />
+
+                    <Button
+                        android:id="@+id/viewerUnlockSettingsButton"
+                        android:layout_width="44dp"
+                        android:layout_height="44dp"
+                        android:layout_marginStart="8dp"
+                        android:background="@drawable/viewer_control_button_background"
+                        android:contentDescription="@string/unlock_overlay_settings"
+                        android:minWidth="0dp"
+                        android:text="@string/unlock_gear"
+                        android:textAllCaps="false"
+                        android:textColor="#F4F0E8"
+                        android:textSize="14sp" />
+                </LinearLayout>
+
                 <TextView
                     android:id="@+id/viewerOverlayStatusText"
                     android:layout_width="match_parent"

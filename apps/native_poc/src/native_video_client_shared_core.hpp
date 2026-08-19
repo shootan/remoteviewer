@@ -175,6 +175,8 @@ enum class ControlOutboundActionKind : uint8_t {
   DesktopBackend,
   InputEvent,
   InputText,
+  MonitorListRequest,
+  MonitorSelect,
 };
 
 struct ControlOutboundAction {
@@ -184,6 +186,8 @@ struct ControlOutboundAction {
   ControlPingMessage ping{};
   ControlWindowListRequestMessage windowListRequest{};
   ControlWindowSelectMessage windowSelect{};
+  ControlMonitorListRequestMessage monitorListRequest{};
+  ControlMonitorSelectMessage monitorSelect{};
   ControlStreamStateMessage streamState{};
   ControlCaptureModeRequestMessage captureMode{};
   ControlClientMetricsMessage metrics{};
@@ -215,6 +219,7 @@ class ClientControlScheduler {
   uint32_t nextMetricsSeq_ = 0;
   uint32_t nextWindowListSeq_ = 0;
   uint32_t nextWindowSelectSeq_ = 0;
+  uint32_t nextMonitorSeq_ = 0;
   uint64_t nextPingUs_ = 0;
   uint64_t lastMetricsSentUs_ = 0;
   uint64_t inputAckCount_ = 0;
@@ -285,6 +290,17 @@ struct WindowTargetUiEntry {
   std::string title;
 };
 
+// One attached screen. The host orders them primary-first then left to right, so the index is
+// what the UI numbers: "monitor 1" is the same screen every time.
+struct MonitorEntry {
+  uint32_t id = 0;
+  int32_t x = 0;
+  int32_t y = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  bool primary = false;
+};
+
 struct WindowPanelSnapshot {
   std::vector<WindowTargetUiEntry> items;
   uint64_t selectedId = 0;
@@ -299,6 +315,11 @@ struct WindowPanelSnapshot {
   uint64_t lastSelectStreamGeneration = 0;
   uint64_t lastSelectHostSendQpcUs = 0;
   int scrollIndex = 0;
+  // The attached screens, and which one desktop mode is showing. Empty until the host answers,
+  // and it only will if it advertised support -- an older one drains the request in silence.
+  bool hostSupportsMonitors = false;
+  uint32_t selectedMonitorId = 0;
+  std::vector<MonitorEntry> monitors;
 };
 
 struct WindowListApplyResult {
@@ -317,6 +338,13 @@ class WindowPanelStateModel {
   bool TakeListRequest();
   bool RequestSelect(uint64_t windowId, const char* statusText = nullptr);
   bool TakeSelectRequest(uint64_t* outWindowId);
+  void RequestMonitorList();
+  bool TakeMonitorListRequest();
+  /** Returns true when support was newly discovered, so the caller can fetch the list once. */
+  bool SetHostSupportsMonitors(bool supported);
+  bool RequestMonitorSelect(uint32_t monitorId);
+  bool TakeMonitorSelectRequest(uint32_t* outMonitorId);
+  void ApplyMonitorList(const ControlMonitorListMessage& msg);
   void SetStatus(const std::string& status);
   WindowListApplyResult ApplyWindowList(const ControlWindowListMessage& msg, int visibleCount);
   WindowSelectApplyResult ApplyWindowSelected(const ControlWindowSelectedMessage& msg);
@@ -331,6 +359,9 @@ class WindowPanelStateModel {
   bool listRequestPending_ = false;
   bool selectRequestPending_ = false;
   uint64_t pendingSelectId_ = 0;
+  bool monitorListRequestPending_ = false;
+  bool monitorSelectRequestPending_ = false;
+  uint32_t pendingMonitorId_ = 0;
 };
 
 }  // namespace remote60::native_poc

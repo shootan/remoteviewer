@@ -116,6 +116,20 @@ std::string window_panel_snapshot_json(const remote60::native_poc::WindowPanelSn
     append_json_escaped(oss, item.title);
     oss << "\"}";
   }
+  oss << "],";
+  oss << "\"hostSupportsMonitors\":" << (snapshot.hostSupportsMonitors ? "true" : "false") << ",";
+  oss << "\"selectedMonitorId\":" << snapshot.selectedMonitorId << ",";
+  oss << "\"monitors\":[";
+  for (size_t i = 0; i < snapshot.monitors.size(); ++i) {
+    const auto& mon = snapshot.monitors[i];
+    if (i > 0) oss << ",";
+    oss << "{\"id\":" << mon.id
+        << ",\"x\":" << mon.x
+        << ",\"y\":" << mon.y
+        << ",\"width\":" << mon.width
+        << ",\"height\":" << mon.height
+        << ",\"primary\":" << (mon.primary ? "true" : "false") << "}";
+  }
   oss << "]";
   oss << "}";
   return oss.str();
@@ -354,6 +368,22 @@ extern "C" JNIEXPORT jboolean JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeSelectDesktopMode(
     JNIEnv* /* env */, jobject /* this */) {
   return g_session_controller.RequestDesktopMode() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeSelectMonitor(
+    JNIEnv* /* env */, jobject /* this */, jint monitor_id) {
+  if (monitor_id < 0) return JNI_FALSE;
+  return g_session_controller.RequestMonitorSelect(static_cast<uint32_t>(monitor_id))
+             ? JNI_TRUE : JNI_FALSE;
+}
+
+// True while a UAC prompt or the lock screen is in front of the desktop, which is when nothing
+// can be captured and the offer to unlock is worth making.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeIsHostScreenLocked(
+    JNIEnv* /* env */, jobject /* this */) {
+  return g_session_controller.HostSecureDesktopActive() ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

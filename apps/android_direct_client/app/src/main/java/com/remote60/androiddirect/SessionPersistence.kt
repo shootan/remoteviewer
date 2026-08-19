@@ -19,6 +19,7 @@ object SessionPersistence {
     private const val KEY_BITRATE_KBPS = "bitrate_kbps"
     private const val KEY_FPS = "fps"
     private const val KEY_DESKTOP_BACKEND = "desktop_backend"
+    private const val KEY_UNLOCK_PASSWORD_PREFIX = "unlock_pw_"
 
     fun load(context: Context): SavedEndpoint {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -30,6 +31,29 @@ object SessionPersistence {
             fps = prefs.getInt(KEY_FPS, 30),
             desktopBackendCode = prefs.getInt(KEY_DESKTOP_BACKEND, 1),
         )
+    }
+
+    /**
+     * The Windows sign-in password, for one-tap unlocking.
+     *
+     * Kept per host, because one phone reaches several PCs and typing the wrong one at a lock
+     * screen costs a failed sign-in attempt. Stored in the app's private preferences, which no
+     * other app can read on a device that has not been rooted -- but this is a real credential,
+     * so it is only written when the user asks for it and can be removed from the same dialog.
+     */
+    fun loadUnlockPassword(context: Context, host: String): String? {
+        if (host.isEmpty()) return null
+        val value = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_UNLOCK_PASSWORD_PREFIX + host, null)
+        return if (value.isNullOrEmpty()) null else value
+    }
+
+    fun saveUnlockPassword(context: Context, host: String, password: String?) {
+        if (host.isEmpty()) return
+        val editor = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+        if (password.isNullOrEmpty()) editor.remove(KEY_UNLOCK_PASSWORD_PREFIX + host)
+        else editor.putString(KEY_UNLOCK_PASSWORD_PREFIX + host, password)
+        editor.apply()
     }
 
     fun save(

@@ -28,6 +28,11 @@ enum class MessageType : uint16_t {
   ControlDesktopBackendRequest = 34,
   ControlWindowThumbnailRequest = 35,
   ControlWindowThumbnail = 36,
+  // Desktop mode used to mean "the primary monitor", which is only the whole desktop when there
+  // is one. These name the others so a client can ask for the second screen.
+  ControlMonitorListRequest = 37,
+  ControlMonitorList = 38,
+  ControlMonitorSelect = 39,
 };
 
 enum class UdpPacketKind : uint16_t {
@@ -66,6 +71,13 @@ constexpr uint32_t kControlInputTextMaxUtf16 = 64;
 // advertises support via kControlWindowListFlagThumbnails and clients only ask when it is set.
 constexpr uint32_t kControlWindowListFlagSelectionLocked = 0x1u;
 constexpr uint32_t kControlWindowListFlagThumbnails = 0x2u;
+// Same reasoning as thumbnails: the monitor messages are newer than some hosts, and an unknown
+// opcode is drained without a reply, which would hang a client waiting for one. The window list
+// is fetched on every connect, so it is where support gets advertised.
+constexpr uint32_t kControlWindowListFlagMonitors = 0x4u;
+// Two or three screens is the normal case and a dozen is somebody's video wall; the cap only
+// bounds the message.
+constexpr uint32_t kControlMonitorListMaxEntries = 8;
 constexpr uint32_t kWindowThumbnailMaxWidth = 320;
 constexpr uint32_t kWindowThumbnailMaxHeight = 320;
 // BGRA, so the cap covers the largest thumbnail plus slack. Nothing else bounds payloadSize.
@@ -290,6 +302,44 @@ struct ControlWindowListMessage {
   uint32_t itemCount = 0;
   uint32_t reserved = 0;
   ControlWindowEntry items[kControlWindowListMaxEntries] = {};
+};
+
+// One screen. Coordinates are the virtual-screen rectangle, so a monitor left of or above the
+// primary one has a negative origin -- the same convention the secure-input mapping already uses.
+struct ControlMonitorEntry {
+  uint32_t id = 0;      // index within this host session; stable until the layout changes
+  int32_t x = 0;
+  int32_t y = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint32_t flags = 0;   // bit0: primary
+  char name[64] = {};
+};
+
+constexpr uint32_t kControlMonitorFlagPrimary = 0x1u;
+
+struct ControlMonitorListRequestMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint64_t clientSendQpcUs = 0;
+};
+
+// Also the reply to a select, so the client learns the new selection from the same shape it
+// already knows how to read.
+struct ControlMonitorListMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t flags = 0;
+  uint32_t selectedMonitorId = 0;
+  uint32_t itemCount = 0;
+  ControlMonitorEntry items[kControlMonitorListMaxEntries] = {};
+};
+
+struct ControlMonitorSelectMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t monitorId = 0;
+  uint64_t clientSendQpcUs = 0;
 };
 
 struct ControlWindowThumbnailRequestMessage {

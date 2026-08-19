@@ -45,6 +45,8 @@ uint16_t expected_message_size(MessageType type) {
       return static_cast<uint16_t>(sizeof(ControlPongMessage));
     case MessageType::ControlWindowList:
       return static_cast<uint16_t>(sizeof(ControlWindowListMessage));
+    case MessageType::ControlMonitorList:
+      return static_cast<uint16_t>(sizeof(ControlMonitorListMessage));
     case MessageType::ControlWindowSelected:
       return static_cast<uint16_t>(sizeof(ControlWindowSelectedMessage));
     case MessageType::ControlInputAck:
@@ -415,6 +417,34 @@ bool ClientControlScheduler::NextAction(uint64_t nowUs,
     return true;
   }
 
+  if (windowPanel->TakeMonitorListRequest()) {
+    out->kind = ControlOutboundActionKind::MonitorListRequest;
+    out->expectedResponseType = MessageType::ControlMonitorList;
+    out->expectedResponseSize = expected_message_size(MessageType::ControlMonitorList);
+    out->monitorListRequest.header.magic = kMagic;
+    out->monitorListRequest.header.type =
+        static_cast<uint16_t>(MessageType::ControlMonitorListRequest);
+    out->monitorListRequest.header.size = static_cast<uint16_t>(sizeof(out->monitorListRequest));
+    out->monitorListRequest.seq = ++nextMonitorSeq_;
+    out->monitorListRequest.clientSendQpcUs = nowUs;
+    return true;
+  }
+
+  uint32_t pendingMonitorId = 0;
+  if (windowPanel->TakeMonitorSelectRequest(&pendingMonitorId)) {
+    out->kind = ControlOutboundActionKind::MonitorSelect;
+    // Answered with the list, so the reply carries the selection that actually took effect.
+    out->expectedResponseType = MessageType::ControlMonitorList;
+    out->expectedResponseSize = expected_message_size(MessageType::ControlMonitorList);
+    out->monitorSelect.header.magic = kMagic;
+    out->monitorSelect.header.type = static_cast<uint16_t>(MessageType::ControlMonitorSelect);
+    out->monitorSelect.header.size = static_cast<uint16_t>(sizeof(out->monitorSelect));
+    out->monitorSelect.seq = ++nextMonitorSeq_;
+    out->monitorSelect.monitorId = pendingMonitorId;
+    out->monitorSelect.clientSendQpcUs = nowUs;
+    return true;
+  }
+
   uint64_t pendingWindowId = 0;
   if (windowPanel->TakeSelectRequest(&pendingWindowId)) {
     out->kind = ControlOutboundActionKind::WindowSelect;
@@ -739,6 +769,9 @@ void WindowPanelStateModel::Reset() {
   listRequestPending_ = false;
   selectRequestPending_ = false;
   pendingSelectId_ = 0;
+  monitorListRequestPending_ = false;
+  monitorSelectRequestPending_ = false;
+  pendingMonitorId_ = 0;
 }
 
 void WindowPanelStateModel::RequestList(const char* statusText) {
@@ -769,6 +802,68 @@ bool WindowPanelStateModel::TakeSelectRequest(uint64_t* outWindowId) {
   selectRequestPending_ = false;
   if (outWindowId) *outWindowId = pendingSelectId_;
   return true;
+}
+
+void WindowPanelStateModel::RequestMonitorList() {
+  std::lock_guard<std::mutex> lk(mu_);
+  monitorListRequestPending_ = true;
+}
+
+bool WindowPanelStateModel::TakeMonitorListRequest() {
+  std::lock_guard<std::mutex> lk(mu_);
+  // Only if the host said it understands these. An older one drains the request without
+  // answering, and the control loop is strictly request/response, so it would wait forever.
+  if (!monitorListRequestPending_ || !state_.hostSupportsMonitors) {
+    monitorListRequestPending_ = false;
+    return false;
+  }
+  monitorListRequestPending_ = false;
+  return true;
+}
+
+bool WindowPanelStateModel::SetHostSupportsMonitors(bool supported) {
+  std::lock_guard<std::mutex> lk(mu_);
+  const bool newlySupported = supported && !state_.hostSupportsMonitors;
+  state_.hostSupportsMonitors = supported;
+  if (!supported) {
+    state_.monitors.clear();
+    state_.selectedMonitorId = 0;
+  }
+  return newlySupported;
+}
+
+bool WindowPanelStateModel::RequestMonitorSelect(uint32_t monitorId) {
+  std::lock_guard<std::mutex> lk(mu_);
+  if (!state_.hostSupportsMonitors) return false;
+  monitorSelectRequestPending_ = true;
+  pendingMonitorId_ = monitorId;
+  return true;
+}
+
+bool WindowPanelStateModel::TakeMonitorSelectRequest(uint32_t* outMonitorId) {
+  std::lock_guard<std::mutex> lk(mu_);
+  if (!monitorSelectRequestPending_) return false;
+  monitorSelectRequestPending_ = false;
+  if (outMonitorId) *outMonitorId = pendingMonitorId_;
+  return true;
+}
+
+void WindowPanelStateModel::ApplyMonitorList(const ControlMonitorListMessage& msg) {
+  std::lock_guard<std::mutex> lk(mu_);
+  state_.monitors.clear();
+  const uint32_t count = std::min<uint32_t>(msg.itemCount, kControlMonitorListMaxEntries);
+  for (uint32_t i = 0; i < count; ++i) {
+    const auto& src = msg.items[i];
+    MonitorEntry e{};
+    e.id = src.id;
+    e.x = src.x;
+    e.y = src.y;
+    e.width = src.width;
+    e.height = src.height;
+    e.primary = (src.flags & kControlMonitorFlagPrimary) != 0;
+    state_.monitors.push_back(e);
+  }
+  state_.selectedMonitorId = msg.selectedMonitorId;
 }
 
 void WindowPanelStateModel::SetStatus(const std::string& status) {

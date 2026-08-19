@@ -14,6 +14,7 @@ enum class TcpControlResponseKind : uint8_t {
   WindowList,
   WindowSelected,
   InputAck,
+  MonitorList,
 };
 
 struct TcpControlResponse {
@@ -22,6 +23,7 @@ struct TcpControlResponse {
   ControlWindowListMessage windowList{};
   ControlWindowSelectedMessage windowSelected{};
   ControlInputAckMessage inputAck{};
+  ControlMonitorListMessage monitorList{};
 };
 
 // These take a ControlLink rather than a socket because the same exchange runs over TCP on a
