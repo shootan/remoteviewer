@@ -283,6 +283,9 @@ void begin_session(const ShellConnectRequest& request) {
   std::wstringstream command;
   command << L"\"" << exe << L"\""
           << L" --transport udp --codec h264"
+          // Controlling someone else's desktop is the entire point here, and the viewer keeps
+          // the input channel off unless asked -- it was written as a measurement tool first.
+          << L" --enable-input-channel"
           << L" --directory-url \"" << widen(server) << L"\""
           << L" --directory-session \"" << widen(token) << L"\""
           << L" --directory-host-id \"" << widen(request.hostId) << L"\""
@@ -302,6 +305,10 @@ void begin_session(const ShellConnectRequest& request) {
   // turned on for the child rather than left to how it was built -- the same thing the host app
   // does for the streaming host.
   SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
+  // On Windows a session means the whole desktop. The per-window picker the viewer opens with
+  // belongs to the capture experiments; here it is a screen the user has to dismiss before
+  // seeing anything, so the session starts already watching.
+  SetEnvironmentVariableW(L"REMOTE60_NATIVE_START_STREAM_VIEW", L"1");
   if (!CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, FALSE, 0, nullptr,
                       executable_dir().c_str(), &si, &pi)) {
     log_line("session launch failed err=" + std::to_string(GetLastError()));

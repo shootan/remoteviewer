@@ -41,6 +41,10 @@ struct DirectorySessionResult {
   // surfacing: some NATs pass the hello even after dropping the punch, so this is a warning
   // rather than a failure, and it explains a slow start when it happens.
   bool answered = false;
+  // True when the winner was the server-side relay. `chosen.kind` cannot say so on its own:
+  // relay is newer than the candidate enum, so it lands there as an ordinary public address.
+  // The session shows this because relay bytes are billed and direct ones are not.
+  bool relay = false;
   std::string punchToken;
 };
 

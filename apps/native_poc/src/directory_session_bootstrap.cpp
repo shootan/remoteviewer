@@ -93,8 +93,12 @@ bool directory_session_open(const DirectorySessionRequest& request, DirectorySes
   if (answered) {
     result->chosen.ip = chosen.ip;
     result->chosen.port = chosen.port;
+    // The string survives the race even when the enum has no name for it, which is the only
+    // place relay is still distinguishable.
+    result->relay = chosen.kind == "relay";
     (void)candidate_kind_from_name(chosen.kind, &result->chosen.kind);
   } else {
+    // The fallback is the first candidate, and the relay is deliberately offered last.
     result->chosen = fallback;
   }
   result->punchToken = target.punchToken;

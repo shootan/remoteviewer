@@ -37,6 +37,7 @@
 #include <wrl/client.h>
 
 #include "client_macro_window.hpp"
+#include "client_session_toolbar.hpp"
 #include "directory_session_bootstrap.hpp"
 #include "directory_session_client.hpp"
 #include "input_macro.hpp"
@@ -622,6 +623,9 @@ const char* congestion_state_name(ClientCongestionState state) {
 
 ClientInputQueue gInputQueueState;
 std::atomic<bool> gInputEnabled{false};
+// Which candidate won the race. The relay is billed per byte, so the session says which one it
+// is rather than leaving the user to guess from the bill.
+std::atomic<bool> gRelayPath{false};
 std::atomic<uint16_t> gMouseButtons{0};
 std::atomic<int32_t> gLastInputVideoX{0};
 std::atomic<int32_t> gLastInputVideoY{0};
@@ -1176,9 +1180,28 @@ void apply_window_list_snapshot(const ControlWindowListMessage& msg) {
   log_client_line(result.logLine);
 }
 
+/** Mirrors the session state into the toolbar window. Cheap enough to call on every change. */
+void push_session_toolbar_state() {
+  const WindowPanelSnapshot panel = gWindowPanelState.Snapshot();
+  remote60::native_poc::SessionToolbarState state;
+  state.connected = gControlConnected.load(std::memory_order_relaxed);
+  state.inputOn = gInputEnabled.load(std::memory_order_relaxed);
+  state.macroOpen = remote60::native_poc::macro_window_visible();
+  state.relay = gRelayPath.load(std::memory_order_relaxed);
+  state.fps = gClientMetrics.decodedFpsX100.load(std::memory_order_relaxed) / 100;
+  state.selectedMonitorId = panel.selectedMonitorId;
+  for (const auto& monitor : panel.monitors) {
+    state.monitors.push_back({monitor.id, monitor.width, monitor.height, monitor.primary});
+  }
+  remote60::native_poc::session_toolbar_update(state);
+}
+
 void set_picker_visible_and_sync_stream(bool visible) {
   gWindowPickerVisible.store(visible, std::memory_order_relaxed);
   gStreamStateControl.Request(!visible);
+  // The picker draws its own header, so the toolbar belongs to the session view alone.
+  remote60::native_poc::session_toolbar_set_visible(!visible);
+  push_session_toolbar_state();
 }
 
 void apply_window_selected_result(const ControlWindowSelectedMessage& msg) {
@@ -1944,9 +1967,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       DestroyWindow(hwnd);
       return 0;
     case WM_DESTROY:
+      remote60::native_poc::session_toolbar_destroy();
       destroy_cached_gdi_objects();
       PostQuitMessage(0);
       return 0;
+    // The toolbar is a window of its own, so it does not move with this one for free.
+    case WM_WINDOWPOSCHANGED:
+      remote60::native_poc::session_toolbar_follow_owner();
+      return DefWindowProcW(hwnd, msg, wp, lp);
     case WM_DPICHANGED: {
       ensure_ui_font(hwnd);
       const RECT* suggested = reinterpret_cast<const RECT*>(lp);
@@ -2033,7 +2061,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         uint64_t hitWindowId = 0;
         if (try_hit_window_list_item(hwnd, x, y, &hitWindowId)) {
-          queue_window_select_request(hitWindowId, "window_select_requested");
+          // Picking what is already picked has to mean "go watch it". Without this the desktop
+          // card -- which is selected by default -- re-selects the same target and leaves the
+          // picker up, so clicking it looks like nothing happened at all.
+          if (hitWindowId == gWindowPanelState.Snapshot().selectedId) {
+            set_picker_visible_and_sync_stream(false);
+          } else {
+            queue_window_select_request(hitWindowId, "window_select_requested");
+          }
           InvalidateRect(hwnd, nullptr, FALSE);
           return 0;
         }
@@ -2207,7 +2242,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           } else {
             uint64_t hitWindowId = 0;
             if (try_hit_window_list_item(hwnd, p.x, p.y, &hitWindowId)) {
-              queue_window_select_request(hitWindowId, "window_select_requested");
+              // Same rule as the mouse path: tapping the already-selected card means "watch it".
+              if (hitWindowId == gWindowPanelState.Snapshot().selectedId) {
+                set_picker_visible_and_sync_stream(false);
+              } else {
+                queue_window_select_request(hitWindowId, "window_select_requested");
+              }
               InvalidateRect(hwnd, nullptr, FALSE);
             }
           }
@@ -2765,6 +2805,25 @@ int main(int argc, char** argv) {
     return 2;
   }
 
+  {
+    remote60::native_poc::SessionToolbarCallbacks toolbarCallbacks;
+    toolbarCallbacks.onTargets = [] {
+      queue_window_list_request("window_list_request pending");
+      set_picker_visible_and_sync_stream(true);
+      InvalidateRect(gHwnd, nullptr, FALSE);
+    };
+    toolbarCallbacks.onMacro = [] {
+      toggle_macro_window(gHwnd);
+      push_session_toolbar_state();
+    };
+    toolbarCallbacks.onMonitor = [](uint32_t monitorId) {
+      gWindowPanelState.RequestMonitorSelect(monitorId);
+    };
+    remote60::native_poc::session_toolbar_create(gHwnd, std::move(toolbarCallbacks));
+    remote60::native_poc::session_toolbar_set_visible(startInStreamView);
+    push_session_toolbar_state();
+  }
+
   bool mfStarted = false;
   H264Decoder decoder;
   bool decoderReady = false;
@@ -2873,6 +2932,8 @@ int main(int argc, char** argv) {
     // hole punching.
     resolvedArgs.controlPort = 0;
     directoryPunchToken = session.punchToken;
+    gRelayPath.store(session.relay, std::memory_order_relaxed);
+    push_session_toolbar_state();
     std::cout << "[native-video-client] directory chose " << session.chosen.ip << ":"
               << session.chosen.port << " ("
               << remote60::native_poc::candidate_kind_name(session.chosen.kind) << ")"
@@ -4354,6 +4415,18 @@ int main(int argc, char** argv) {
       DispatchMessageW(&msg);
     }
     if (!gRunning.load()) break;
+
+    // The toolbar shows connection, input, path, frame rate and the monitor list, all of which
+    // change on other threads. Refreshing it on a slow tick here beats a push at each of the
+    // dozen places that move them, and it is a posted message either way.
+    {
+      static uint64_t nextToolbarPushUs = 0;
+      const uint64_t nowUs = qpc_now_us();
+      if (nowUs >= nextToolbarPushUs) {
+        nextToolbarPushUs = nowUs + 500000ULL;
+        push_session_toolbar_state();
+      }
+    }
 
     if (args.seconds > 0) {
       const uint64_t nowUs = qpc_now_us();
