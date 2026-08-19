@@ -89,6 +89,21 @@ int main() {
   check("an unknown message has no type we act on",
         shell_message_type(R"({"nothing":1})").empty());
 
+  // The settings file is plain text, so an editor may have left a byte order mark on the first
+  // line. It is invisible in the file and invisible in the field, but the url it prefixes
+  // resolves to nothing -- and the connect screen comes up blank with nothing to explain it.
+  ShellRuntimeSettings restoreSettings{9000, 30, 2};
+  const std::string restored =
+      shell_restore_json("\xEF\xBB\xBF" "http://server:8080", "demo", restoreSettings);
+  std::string restoredServer;
+  json_profile::json_get_string(restored, "server", &restoredServer);
+  check("a byte order mark is stripped from a restored address",
+        restoredServer == "http://server:8080", "server=[" + restoredServer + "]");
+  check("the remembered numbers travel with it",
+        contains(restored, "\"bitrateKbps\":9000") && contains(restored, "\"fps\":30") &&
+            contains(restored, "\"monitorId\":2"),
+        restored);
+
   std::printf(gFailures == 0 ? "\nclient_shell_bridge_test: PASS\n"
                              : "\nclient_shell_bridge_test: %d FAILED\n", gFailures);
   return gFailures == 0 ? 0 : 1;

@@ -31,6 +31,11 @@ std::string escape(const std::string& value) {
         break;
     }
   }
+  // A byte order mark left by a text editor is invisible in the file and invisible in the
+  // rendered field, but it makes the value it prefixes wrong -- a url with one in front resolves
+  // to nothing. Removed here so every string crossing the boundary is clean.
+  const std::string bom = "\xEF\xBB\xBF";
+  while (out.rfind(bom, 0) == 0) out.erase(0, bom.size());
   return out;
 }
 
@@ -65,6 +70,15 @@ std::string shell_status_json(const std::string& state, const std::string& detai
   std::ostringstream oss;
   oss << "{\"type\":\"status\",\"state\":\"" << escape(state) << "\",\"detail\":\""
       << escape(detail) << "\"}";
+  return oss.str();
+}
+
+std::string shell_restore_json(const std::string& server, const std::string& accountId,
+                               const ShellRuntimeSettings& settings) {
+  std::ostringstream oss;
+  oss << "{\"type\":\"restore\",\"server\":\"" << escape(server) << "\",\"accountId\":\""
+      << escape(accountId) << "\",\"bitrateKbps\":" << settings.bitrateKbps
+      << ",\"fps\":" << settings.fps << ",\"monitorId\":" << settings.monitorId << "}";
   return oss.str();
 }
 

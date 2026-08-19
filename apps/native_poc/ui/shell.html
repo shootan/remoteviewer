@@ -91,6 +91,25 @@
   .host .state { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
   .empty { color: var(--muted); font-size: 12.5px; text-align: center; padding: 26px 0; }
 
+  .row { display: flex; justify-content: space-between; margin-top: 4px; }
+  .hint { color: var(--text); font-weight: 600; float: right; }
+  .note { color: var(--muted); font-size: 11.5px; margin-top: 7px; line-height: 1.5; }
+  .note strong { color: #d8b26a; font-weight: 600; }
+
+  select {
+    width: 100%; padding: 10px 12px; font-size: 14px; color: var(--text);
+    background: #0d1117; border: 1px solid var(--line); border-radius: 7px; outline: none;
+    font-family: inherit;
+  }
+  input[type=range] {
+    -webkit-appearance: none; appearance: none; padding: 0; height: 4px; margin-top: 10px;
+    background: var(--line); border: 0; border-radius: 2px; cursor: pointer;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 17px; height: 17px; border-radius: 50%;
+    background: var(--accent); border: 0; cursor: pointer;
+  }
+
   .hidden { display: none; }
   .spinner {
     width: 15px; height: 15px; border: 2px solid rgba(255,255,255,.25);
@@ -129,7 +148,43 @@
   </div>
   <div class="hosts" id="hostList"></div>
   <div class="msg" id="hostsMsg"></div>
-  <button class="link" id="refresh" style="margin-top:4px">새로고침</button>
+  <div class="row">
+    <button class="link" id="refresh">새로고침</button>
+    <button class="link" id="openSettings">화질 설정</button>
+  </div>
+</div>
+
+<div class="card hidden" id="settingsCard">
+  <div class="head">
+    <div>
+      <div class="brand">화질 설정</div>
+      <div class="sub">다음 연결부터 적용됩니다.</div>
+    </div>
+    <button class="link" id="closeSettings">뒤로</button>
+  </div>
+
+  <label for="bitrate">최대 화질 <span class="hint" id="bitrateLabel"></span></label>
+  <input id="bitrate" type="range" min="2000" max="30000" step="1000">
+  <div class="note">
+    유선이나 집 Wi‑Fi에서는 높게 두어도 됩니다.
+    <strong>중계 연결일 때만</strong> 이 값이 곧 데이터 사용량입니다.
+  </div>
+
+  <label for="fps">초당 프레임 <span class="hint" id="fpsLabel"></span></label>
+  <input id="fps" type="range" min="15" max="60" step="15">
+  <div class="note">움직임이 많은 화면일수록 높은 값이 도움이 됩니다.</div>
+
+  <label for="monitor">기본 모니터</label>
+  <select id="monitor">
+    <option value="0">주 모니터</option>
+    <option value="1">모니터 2</option>
+    <option value="2">모니터 3</option>
+    <option value="3">모니터 4</option>
+  </select>
+  <div class="note">모니터가 한 대뿐이면 이 설정은 무시됩니다.</div>
+
+  <button id="saveSettings">저장</button>
+  <div class="msg" id="settingsMsg"></div>
 </div>
 
 <script>
@@ -171,6 +226,24 @@
   $('signOut').onclick = () => send({ type: 'logout' });
   $('refresh').onclick = () => { message($('hostsMsg'), '새로고침 중'); send({ type: 'hosts' }); };
 
+  // Settings
+  const labelBitrate = () => { $('bitrateLabel').textContent = ($('bitrate').value / 1000) + ' Mbps'; };
+  const labelFps = () => { $('fpsLabel').textContent = $('fps').value + ' fps'; };
+  $('bitrate').oninput = labelBitrate;
+  $('fps').oninput = labelFps;
+
+  $('openSettings').onclick = () => { show($('hostsCard'), false); show($('settingsCard'), true); };
+  $('closeSettings').onclick = () => { show($('settingsCard'), false); show($('hostsCard'), true); };
+  $('saveSettings').onclick = () => {
+    send({
+      type: 'settings',
+      bitrateKbps: parseInt($('bitrate').value, 10),
+      fps: parseInt($('fps').value, 10),
+      monitorId: parseInt($('monitor').value, 10),
+    });
+    message($('settingsMsg'), '저장했습니다.');
+  };
+
   function renderHosts(hosts) {
     const list = $('hostList');
     list.innerHTML = '';
@@ -207,6 +280,11 @@
     if (msg.type === 'restore') {
       $('server').value = msg.server || '';
       $('account').value = msg.accountId || '';
+      $('bitrate').value = msg.bitrateKbps || 12000;
+      $('fps').value = msg.fps || 60;
+      $('monitor').value = String(msg.monitorId || 0);
+      labelBitrate();
+      labelFps();
       if (msg.server && msg.accountId) $('password').focus();
       return;
     }
@@ -228,6 +306,10 @@
       return;
     }
     if (msg.type === 'status') {
+      if (!$('settingsCard').classList.contains('hidden')) {
+        message($('settingsMsg'), msg.detail, msg.state === 'error');
+        return;
+      }
       const target = $('hostsCard').classList.contains('hidden') ? $('signInMsg') : $('hostsMsg');
       const failed = msg.state === 'error';
       if (failed || msg.state === 'idle') setBusy(false);

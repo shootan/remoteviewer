@@ -46,6 +46,16 @@ std::string shell_hosts_json(const std::vector<DirectoryHostEntry>& hosts);
 /** Serialises a single status line, which is how every long operation reports progress. */
 std::string shell_status_json(const std::string& state, const std::string& detail);
 
+/**
+ * Serialises what the connect screen should start with.
+ *
+ * Escaped like everything else crossing the boundary: the server address and account come off
+ * disk, where a text editor may have left a byte order mark or a stray quote, and a message the
+ * page cannot parse produces a blank screen with nothing to explain it.
+ */
+std::string shell_restore_json(const std::string& server, const std::string& accountId,
+                               const ShellRuntimeSettings& settings);
+
 /** Reads a connect request out of what the page posted. Returns false when it is not one. */
 bool shell_parse_connect(const std::string& json, ShellConnectRequest* out);
 

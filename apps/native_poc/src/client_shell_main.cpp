@@ -55,6 +55,10 @@ std::mutex gStateMu;
 std::string gServerUrl;
 std::string gAccountId;
 std::string gSessionToken;
+// Defaults chosen for a desktop rather than a phone: this is usually wired or on home Wi-Fi,
+// where the picture is worth more than the bytes. The relay is the exception, and the interface
+// says so where the number is set.
+ShellRuntimeSettings gSettings{12000, 60, 0};
 
 std::wstring widen(const std::string& text) {
   if (text.empty()) return {};
@@ -101,17 +105,45 @@ std::wstring settings_path() {
   return dir + L"\\client.txt";
 }
 
-void save_settings(const std::string& server, const std::string& accountId) {
+void save_settings(const std::string& server, const std::string& accountId,
+                   const ShellRuntimeSettings& settings) {
   std::ofstream file(settings_path(), std::ios::trunc);
   if (!file) return;
-  file << server << "\n" << accountId << "\n";
+  // One value per line, in a fixed order. A settings file this small does not need a format.
+  file << server << "\n"
+       << accountId << "\n"
+       << settings.bitrateKbps << "\n"
+       << settings.fps << "\n"
+       << settings.monitorId << "\n";
 }
 
-void load_settings(std::string* server, std::string* accountId) {
+void load_settings(std::string* server, std::string* accountId, ShellRuntimeSettings* settings) {
   std::ifstream file(settings_path());
   if (!file) return;
   std::getline(file, *server);
   std::getline(file, *accountId);
+  // A file touched by a text editor comes back with a byte order mark, and it would ride along
+  // inside the url -- producing a message the page cannot parse and a screen that stays blank
+  // for no visible reason.
+  if (server->rfind("\xEF\xBB\xBF", 0) == 0) server->erase(0, 3);
+  // Written on Windows, so a stray carriage return is likelier than not.
+  for (std::string* line : {server, accountId}) {
+    while (!line->empty() && (line->back() == '\r' || line->back() == '\n')) line->pop_back();
+  }
+  std::string line;
+  auto read_u32 = [&](uint32_t* target) {
+    if (!std::getline(file, line) || line.empty()) return;
+    // A file edited by hand, or written by an older build, must not take the app down.
+    try {
+      *target = static_cast<uint32_t>(std::stoul(line));
+    } catch (...) {
+    }
+  };
+  if (settings) {
+    read_u32(&settings->bitrateKbps);
+    read_u32(&settings->fps);
+    read_u32(&settings->monitorId);
+  }
 }
 
 /** Pushes one JSON message into the page. Safe to call from any thread. */
@@ -147,7 +179,10 @@ void begin_login(std::string server, std::string accountId, std::string password
       gAccountId = accountId;
       gSessionToken = token;
     }
-    save_settings(server, accountId);
+    {
+      std::lock_guard<std::mutex> lock(gStateMu);
+      save_settings(server, accountId, gSettings);
+    }
 
     std::string message = shell_hosts_json(hosts);
     // The page shows which account it is listing, so it travels with the list.
@@ -209,12 +244,23 @@ void begin_session(const ShellConnectRequest& request) {
     return;
   }
 
+  ShellRuntimeSettings settings;
+  {
+    std::lock_guard<std::mutex> lock(gStateMu);
+    settings = gSettings;
+  }
+
   std::wstringstream command;
   command << L"\"" << exe << L"\""
           << L" --transport udp --codec h264"
           << L" --directory-url \"" << widen(server) << L"\""
           << L" --directory-session \"" << widen(token) << L"\""
-          << L" --directory-host-id \"" << widen(request.hostId) << L"\"";
+          << L" --directory-host-id \"" << widen(request.hostId) << L"\""
+          // Bits per second on the wire; the interface talks in kbps because that is what the
+          // numbers on a plan are quoted in.
+          << L" --runtime-bitrate " << (settings.bitrateKbps * 1000u)
+          << L" --runtime-fps " << settings.fps
+          << L" --monitor " << settings.monitorId;
 
   STARTUPINFOW si{};
   si.cb = sizeof(si);
@@ -250,11 +296,29 @@ void handle_page_message(const std::string& json) {
   if (type == "ready") {
     std::string server;
     std::string accountId;
-    load_settings(&server, &accountId);
-    std::ostringstream restore;
-    restore << "{\"type\":\"restore\",\"server\":\"" << server << "\",\"accountId\":\""
-            << accountId << "\"}";
-    post_to_page(restore.str());
+    ShellRuntimeSettings settings;
+    {
+      std::lock_guard<std::mutex> lock(gStateMu);
+      settings = gSettings;
+      load_settings(&server, &accountId, &settings);
+      gSettings = settings;
+    }
+    post_to_page(shell_restore_json(server, accountId, settings));
+    return;
+  }
+  if (type == "settings") {
+    std::string server;
+    std::string accountId;
+    {
+      std::lock_guard<std::mutex> lock(gStateMu);
+      shell_parse_settings(json, &gSettings);
+      server = gServerUrl;
+      accountId = gAccountId;
+      save_settings(server, accountId, gSettings);
+    }
+    // Applied to the next session rather than the running one: the child owns its own encoder
+    // negotiation once started, and reaching into it from here would duplicate that logic.
+    post_status("idle", "설정을 저장했습니다. 다음 연결부터 적용됩니다.");
     return;
   }
   if (type == "login") {

@@ -147,6 +147,10 @@ struct Args {
   uint32_t inputLogEvery = 120;
   uint32_t runtimeBitrate = 0;
   uint32_t runtimeKeyint = 0;
+  uint32_t runtimeFps = 0;
+  // Which screen to open on a host with more than one. Zero is the primary, which is what the
+  // client always asked for implicitly.
+  uint32_t monitorId = 0;
 };
 
 bool parse_u32(const char* s, uint32_t* out) {
@@ -488,6 +492,12 @@ Args parse_args(int argc, char** argv) {
     } else if (k == "--runtime-keyint" && i + 1 < argc) {
       uint32_t v = 0;
       if (parse_u32(argv[++i], &v)) a.runtimeKeyint = std::max<uint32_t>(1, v);
+    } else if (k == "--runtime-fps" && i + 1 < argc) {
+      uint32_t v = 0;
+      if (parse_u32(argv[++i], &v)) a.runtimeFps = std::clamp<uint32_t>(v, 1, 240);
+    } else if (k == "--monitor" && i + 1 < argc) {
+      uint32_t v = 0;
+      if (parse_u32(argv[++i], &v)) a.monitorId = v;
     }
   }
   return a;
@@ -749,6 +759,9 @@ std::deque<OverlayMetricSample> gOverlayMetrics;
 void log_client_line(const std::string& line);
 
 WindowPanelStateModel gWindowPanelState;
+// Which screen the shell asked for. Applied once the host has said it understands the monitor
+// messages, which it does in the window list.
+uint32_t gRequestedMonitorId = 0;
 std::atomic<bool> gWindowPickerVisible{true};
 std::atomic<bool> gWindowPickerToggleDown{false};
 std::atomic<int> gGridScrollRow{0};  // card grid scroll, in whole rows
@@ -2728,7 +2741,8 @@ int main(int argc, char** argv) {
   gOverlayConfig.keyReqTokenRefillUs = gKeyframeRequests.token_refill_us();
   gOverlayConfig.keyReqTokenCapacity = gKeyframeRequests.token_capacity();
   gOverlayConfig.udpSimDropPm = udpSimDropPm;
-  gRuntimeTuneState.Reset(args.runtimeBitrate, args.runtimeKeyint);
+  gRuntimeTuneState.Reset(args.runtimeBitrate, args.runtimeKeyint, args.runtimeFps);
+  gRequestedMonitorId = args.monitorId;
   gControlConnected.store(false, std::memory_order_relaxed);
   const bool startInStreamView = env_truthy("REMOTE60_NATIVE_START_STREAM_VIEW");
   gCaptureOverviewMode.store(!startInStreamView, std::memory_order_relaxed);
@@ -3142,9 +3156,25 @@ int main(int argc, char** argv) {
                             << "\n";
                   break;
                 }
-                case TcpControlResponseKind::WindowList:
+                case TcpControlResponseKind::WindowList: {
                   apply_window_list_snapshot(response.windowList);
+                  // The window list is where the host says whether it knows the monitor
+                  // messages; asking one that does not would stall this loop waiting for a
+                  // reply that never comes.
+                  const bool supportsMonitors =
+                      (response.windowList.flags &
+                       remote60::native_poc::kControlWindowListFlagMonitors) != 0;
+                  if (gWindowPanelState.SetHostSupportsMonitors(supportsMonitors) &&
+                      gRequestedMonitorId > 0) {
+                    // Only when a screen other than the primary was asked for: selecting monitor
+                    // zero would restart the capture for no change.
+                    gWindowPanelState.RequestMonitorSelect(gRequestedMonitorId);
+                  }
                   InvalidateRect(gHwnd, nullptr, FALSE);
+                  break;
+                }
+                case TcpControlResponseKind::MonitorList:
+                  gWindowPanelState.ApplyMonitorList(response.monitorList);
                   break;
                 case TcpControlResponseKind::WindowSelected:
                   apply_window_selected_result(response.windowSelected);
