@@ -146,6 +146,10 @@ if(GNLINK_HAVE_WEBVIEW2)
     "${GNLINK_WEBVIEW2_DIR}/include")
   target_link_libraries(remote60_native_video_client_poc PRIVATE
     "${GNLINK_WEBVIEW2_DIR}/x64/WebView2LoaderStatic.lib" ole32 shlwapi version)
+  if(MSVC)
+    # The macro window's messages are Korean in std::string, on their way to a UTF-8 page.
+    target_compile_options(remote60_native_video_client_poc PRIVATE /utf-8)
+  endif()
   add_custom_command(TARGET remote60_native_video_client_poc POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory
             "$<TARGET_FILE_DIR:remote60_native_video_client_poc>/ui"
@@ -449,6 +453,12 @@ if(GNLINK_HAVE_WEBVIEW2)
     src/directory_client.cpp
   )
   target_include_directories(remote60_client_shell PRIVATE src "${GNLINK_WEBVIEW2_DIR}/include")
+  if(MSVC)
+    # The interface text is Korean in ordinary std::string, and MSVC otherwise encodes narrow
+    # literals in the system code page while everything downstream -- the JSON, the page, the
+    # log -- is UTF-8. Without this the messages arrive as mojibake.
+    target_compile_options(remote60_client_shell PRIVATE /utf-8)
+  endif()
   target_link_libraries(remote60_client_shell PRIVATE
     common
     "${GNLINK_WEBVIEW2_DIR}/x64/WebView2LoaderStatic.lib"

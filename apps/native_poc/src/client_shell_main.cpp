@@ -296,6 +296,12 @@ void begin_session(const ShellConnectRequest& request) {
   si.cb = sizeof(si);
   PROCESS_INFORMATION pi{};
   std::wstring mutableCommand = command.str();
+
+  // H.264 is still behind a build-time experiment switch in the viewer, and a build without it
+  // refuses --codec h264 and exits at once. The product has no other path, so the switch is
+  // turned on for the child rather than left to how it was built -- the same thing the host app
+  // does for the streaming host.
+  SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
   if (!CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, FALSE, 0, nullptr,
                       executable_dir().c_str(), &si, &pi)) {
     log_line("session launch failed err=" + std::to_string(GetLastError()));

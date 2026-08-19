@@ -6497,3 +6497,32 @@ UI 방식 결정
 변경 파일
 - `ui/shell.html`, `ui/macro.html`, `client_shell_main.cpp`, `product_version.hpp`(0.2.21)
 - 산출물 `dist/GNLinkSetup-0.2.21.exe`
+
+### 249) 2026-08-19 세션이 안 열리고 메시지가 깨지던 두 원인 (0.2.22)
+
+증상 (사용자 실기)
+- 로그인·PC 목록은 정상 (248 수정 확인됨). PC 를 선택하면 **창이 뜨다 말고** 닫히고,
+  오류 문구가 `shotan Desktop ???ū ??????...` 처럼 **깨져서** 읽을 수 없었다.
+
+원인 1 — h264 실험 게이트 (세션이 안 열린 진짜 이유)
+- 뷰어는 `--codec h264` 를 **빌드 시 실험 스위치가 꺼져 있으면 거부하고 즉시 종료**한다
+  (`native_video_client_main.cpp:2711`, exit code 10).
+- 호스트 앱은 **이미 같은 문제를 같은 방식으로 해결해 두었다**: 자식을 띄우기 전에
+  `REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE=1` 을 설정한다(`host_app_main.cpp:323`,
+  "제품에는 다른 경로가 없다"는 주석과 함께). 클라이언트 셸도 같게 맞췄다.
+
+원인 2 — 한글이 깨진 이유
+- MSVC 는 narrow 문자열 리터럴을 **시스템 코드 페이지(CP949)** 로 인코딩한다. 그런데 그 뒤의
+  모든 단계 — JSON, 페이지, 로그 — 는 UTF-8 이다. `widen()` 이 CP_UTF8 로 변환하니 깨진다.
+- 기존 코드에는 이 문제가 없었다. 한글을 전부 wide(`L"..."`)로만 썼기 때문이다. narrow
+  `std::string` 에 한글을 넣은 것은 이번 새 코드가 처음이다.
+- 두 타겟에 `/utf-8` 추가. 소스와 실행 문자 집합을 모두 UTF-8 로 맞춘다.
+
+검증
+- 클라이언트·뷰어·인스톨러 빌드 PASS.
+- **실기 재확인 필요**: 이번엔 실제로 세션 창이 열리는지, 오류 문구가 읽히는지.
+
+변경 파일
+- `client_shell_main.cpp`(자식 환경변수), `CMakeLists.txt`(`/utf-8` 두 타겟),
+  `product_version.hpp`(0.2.22)
+- 산출물 `dist/GNLinkSetup-0.2.22.exe`
