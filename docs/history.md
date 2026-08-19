@@ -6360,3 +6360,61 @@ UI 방식 결정
 다음 액션
 - 1단계: 디렉토리 로그인·PC 목록 (C++ HTTP 는 `post_json` 재사용, 세션 토큰 저장)
 - 이후: 레이스·릴레이 배선 → WebView2 셸 → 설정창 → 매크로 UI → 설치본 → 실기
+
+### 246) 2026-08-19 Windows 클라이언트 — 디렉토리 로그인·GUI·설정·설치본 (0.2.19)
+
+배경
+- `GNLinkViewer.exe` 는 `--host` 로 IP 를 넣는 명령줄 프로그램이었고 디렉토리 코드가 없었다.
+  NAT 뒤 PC 에 못 닿고 릴레이도 못 쓰고 dist 에도 없었다.
+
+1) 디렉토리 HTTP 절반 (`directory_session_client.{hpp,cpp}`)
+- `DirectoryRendezvous` 는 UDP 소켓만 소유하고 HTTP 는 앱에 맡기는 설계였다. Android 는 Kotlin 이
+  그 역할을 했고 Windows 는 아예 없었다. 로그인·목록·연결을 C++ 로 채웠다.
+- 요청마다 연결을 닫는다. 사람 속도로 일어나는 호출이라 풀이 이득이 없고, `Connection: close`
+  면 본문이 EOF 로 끝나 chunked 파서가 필요 없다.
+- 배열 파싱은 중괄호 깊이 스캔. 응답이 작고 양끝을 우리가 만든다. **모르는 kind 를 버리지 않는
+  것**이 핵심 — `relay` 는 이 enum 보다 나중에 생겼고, 버리면 직접 경로가 없는 망에서 유일한
+  길이 사라진다. 실제 서버 응답으로 테스트했다.
+
+2) 접속 부트스트랩 (`directory_session_bootstrap.{hpp,cpp}`)
+- 관측 → connect → 레이스, 이 순서로 한 소켓에서. 순서나 소켓이 틀리면 "연결은 되는데 아무것도
+  안 오는" 세션이 된다. 무응답 시 첫 후보로 폴백 — 펀치는 떨구고 hello 는 통과시키는 NAT 가 있다.
+- 릴레이는 마지막 후보일 뿐이고 늦게 답하므로 직접 경로가 되면 항상 이긴다(과금 때문에 중요).
+
+3) GUI 셸 (`client_shell_main.cpp`, `ui/shell.html`)
+- WebView2. 세션은 `GNLinkViewer.exe` 자식 프로세스로 — **GNLinkHost 가 GNLinkStream 을
+  감독하는 것과 같은 구조**. 영상 경로(4270줄, 수개월치 튜닝)를 건드리지 않고, 거기서 죽어도
+  UI 가 안 죽는다.
+- 자식에게 **비밀번호 대신 세션 토큰**을 넘긴다. 명령줄은 다른 프로세스가 읽을 수 있다.
+- 경계를 넘는 것은 전부 type 필드가 있는 JSON, 테스트로 고정. 두 언어가 따로 컴파일되므로
+  필드명이 어긋나면 빌드가 아니라 **빈 화면**으로 실패한다.
+
+4) 설정
+- 최대 화질·FPS·기본 모니터. 기본값 12Mbps/60fps — 데스크톱은 보통 유선이고 화질이 바이트보다
+  가치 있다. **릴레이일 때만 그 숫자가 곧 요금**이라 슬라이더 옆에 그렇게 적었다.
+- 다음 세션부터 적용. 자식이 자기 인코더 협상을 소유하므로 실행 중인 세션에 손대면 그 로직이
+  두 벌이 된다.
+- **BOM 버그를 실제로 밟았다.** 설정 파일을 편집기가 저장하면 첫 줄에 BOM 이 붙고, 그게 URL
+  앞에 끼면 페이지가 JSON 파싱에 실패해 **아무 설명 없이 빈 화면**이 된다. 경계를 넘는 문자열에서
+  제거하고 테스트로 고정.
+
+5) 설치본
+- payload 에 `GNLinkClient.exe`, `GNLinkViewer.exe`, `ui/shell.html` 추가. 8.5MB → 14.4MB.
+- 시작 메뉴 항목 둘: "GNLink Host" 와 "GNLink". 한 대가 양쪽 역할을 다 할 수 있어 이름으로
+  구분되어야 한다. 제거 시 둘 다 지운다.
+
+변경 파일
+- 신규: `directory_session_client.{hpp,cpp}`, `directory_session_bootstrap.{hpp,cpp}`,
+  `client_shell_bridge.{hpp,cpp}`, `client_shell_main.cpp`, `ui/shell.html`,
+  각 테스트, `tools/directory_login_probe.cpp`
+- 수정: `native_video_client_main.cpp`(디렉토리 인자·모니터·fps), `installer_*`, `CMakeLists.txt`,
+  `product_version.hpp`(0.2.19)
+- 산출물 `dist/GNLinkSetup-0.2.19.exe`
+
+검증/build/test
+- 단위 7종 PASS. 로컬 디렉토리 서버(프로덕션 미사용)로 종단 확인: 로그인 → 목록 0건 →
+  호스트 등록 → 목록 1건에 온라인 상태까지 일치. 로그인 화면 스크린샷 `logs/ui-shots/`.
+
+남은 것
+- 매크로 UI 재작성, 실기 검증(실제 호스트 접속·모니터 전환·매크로).
+- WebView2 런타임이 없는 PC 에서의 설치 경험 — 현재는 안내 메시지만 띄운다.

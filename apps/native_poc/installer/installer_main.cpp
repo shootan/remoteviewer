@@ -28,6 +28,9 @@ namespace {
 using remote60::native_poc::kProductVersion;
 
 constexpr wchar_t kProductName[] = L"GNLink Host";
+// The other half. Named apart from the host so the Start menu says which one is being opened:
+// this machine can be the one you leave running, the one you sit at, or both.
+constexpr wchar_t kClientShortcutName[] = L"GNLink";
 constexpr wchar_t kInstallFolderName[] = L"GNLink";
 constexpr wchar_t kServiceName[] = L"GNLinkSecureInput";
 constexpr wchar_t kUninstallKey[] =
@@ -47,6 +50,10 @@ const PayloadFile kPayload[] = {
     {IDR_PAYLOAD_VIDEO_HOST, L"GNLinkStream.exe"},
     {IDR_PAYLOAD_SECURE_INPUT, L"GNLinkInputService.exe"},
     {IDR_PAYLOAD_GDI_WORKER, L"GNLinkCapture.exe"},
+    {IDR_PAYLOAD_CLIENT_SHELL, L"GNLinkClient.exe"},
+    {IDR_PAYLOAD_CLIENT_VIEWER, L"GNLinkViewer.exe"},
+    // The client loads its interface from beside itself, in a subdirectory it expects to exist.
+    {IDR_PAYLOAD_CLIENT_UI, L"ui\\shell.html"},
 };
 
 bool gSilent = false;
@@ -210,7 +217,8 @@ void remove_firewall_rules() {
   run_netsh(L"advfirewall firewall delete rule name=\"" + std::wstring(kFirewallRuleName) + L"\"");
 }
 
-bool create_start_menu_shortcut(const std::wstring& target, std::wstring* outPath) {
+bool create_start_menu_shortcut(const std::wstring& target, const wchar_t* linkName,
+                                const wchar_t* description, std::wstring* outPath) {
   PWSTR wide = nullptr;
   if (FAILED(SHGetKnownFolderPath(FOLDERID_CommonPrograms, KF_FLAG_CREATE, nullptr, &wide))) {
     return false;
@@ -218,7 +226,7 @@ bool create_start_menu_shortcut(const std::wstring& target, std::wstring* outPat
   std::wstring linkPath(wide);
   CoTaskMemFree(wide);
   linkPath += L"\\";
-  linkPath += kProductName;
+  linkPath += linkName;
   linkPath += L".lnk";
 
   IShellLinkW* link = nullptr;
@@ -232,7 +240,7 @@ bool create_start_menu_shortcut(const std::wstring& target, std::wstring* outPat
     if (slash != std::wstring::npos) {
       (void)link->SetWorkingDirectory(target.substr(0, slash).c_str());
     }
-    (void)link->SetDescription(L"GNLink remote desktop host");
+    (void)link->SetDescription(description);
     IPersistFile* persist = nullptr;
     if (SUCCEEDED(link->QueryInterface(IID_IPersistFile, reinterpret_cast<void**>(&persist)))) {
       ok = SUCCEEDED(persist->Save(linkPath.c_str(), TRUE));
@@ -284,6 +292,14 @@ int do_install() {
   }
   for (const PayloadFile& file : kPayload) {
     const std::wstring destination = directory + L"\\" + file.fileName;
+    // One entry lives in a subdirectory, which has to exist before the write.
+    const size_t slash = destination.find_last_of(L'\\');
+    if (slash != std::wstring::npos) {
+      const std::wstring parent = destination.substr(0, slash);
+      if (_wcsicmp(parent.c_str(), directory.c_str()) != 0) {
+        CreateDirectoryW(parent.c_str(), nullptr);
+      }
+    }
     if (!extract_resource(file.resourceId, destination)) {
       report(std::wstring(L"Could not write ") + file.fileName + L" to " + directory, true);
       return 4;
@@ -306,7 +322,12 @@ int do_install() {
   }
 
   add_firewall_rules(directory);
-  (void)create_start_menu_shortcut(directory + L"\\GNLinkHost.exe", nullptr);
+  // Two entries, because the machine can play either part and the names have to say which is
+  // which -- "GNLink" alone would leave the user guessing which one they are opening.
+  (void)create_start_menu_shortcut(directory + L"\\GNLinkHost.exe", kProductName,
+                                   L"GNLink remote desktop host", nullptr);
+  (void)create_start_menu_shortcut(directory + L"\\GNLinkClient.exe", kClientShortcutName,
+                                   L"GNLink — connect to another PC", nullptr);
   write_uninstall_entry(directory, setupPath);
 
   report(L"GNLink Host was installed to\n" + directory +
@@ -350,12 +371,11 @@ bool relaunch_from_temp_for_uninstall() {
 void remove_start_menu_shortcut() {
   PWSTR wide = nullptr;
   if (FAILED(SHGetKnownFolderPath(FOLDERID_CommonPrograms, 0, nullptr, &wide))) return;
-  std::wstring linkPath(wide);
+  const std::wstring folder(wide);
   CoTaskMemFree(wide);
-  linkPath += L"\\";
-  linkPath += kProductName;
-  linkPath += L".lnk";
-  (void)DeleteFileW(linkPath.c_str());
+  for (const wchar_t* name : {kProductName, kClientShortcutName}) {
+    (void)DeleteFileW((folder + L"\\" + name + L".lnk").c_str());
+  }
 }
 
 int do_uninstall(bool fromTemp) {

@@ -7,6 +7,12 @@
 #define IDR_PAYLOAD_VIDEO_HOST 201
 #define IDR_PAYLOAD_SECURE_INPUT 202
 #define IDR_PAYLOAD_GDI_WORKER 203
+// The viewing half. One install puts both on the machine, because the PC you leave running is
+// usually also one you sit at.
+#define IDR_PAYLOAD_CLIENT_SHELL 204
+#define IDR_PAYLOAD_CLIENT_VIEWER 205
+// Not an executable: the client's interface, written to ui\shell.html beside it.
+#define IDR_PAYLOAD_CLIENT_UI 206
 
 #define IDD_MAIN 300
 #define IDC_APP_ICON 301
