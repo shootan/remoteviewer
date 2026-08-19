@@ -355,6 +355,31 @@ target_link_libraries(remote60_punch_any_test PRIVATE common ws2_32)
 # Throwaway diagnostic, not part of the product and not staged into the installer. Answers
 # whether a SYSTEM process on the Winlogon desktop can read pixels, and with which API, before
 # the secure-desktop capture work commits to one. Delete once 구현계획 U1 is answered.
+# The WebView2 SDK is a NuGet package of headers and a static loader, fetched into third_party
+# rather than vendored: it is 100+ MB unpacked and only the include/lib pair is used.
+set(GNLINK_WEBVIEW2_DIR "${CMAKE_SOURCE_DIR}/third_party/webview2/build/native")
+if(EXISTS "${GNLINK_WEBVIEW2_DIR}/include/WebView2.h")
+  set(GNLINK_HAVE_WEBVIEW2 TRUE)
+else()
+  set(GNLINK_HAVE_WEBVIEW2 FALSE)
+  message(STATUS "WebView2 SDK not found at ${GNLINK_WEBVIEW2_DIR}; skipping WebView2 targets")
+endif()
+
+if(GNLINK_HAVE_WEBVIEW2)
+  # Proves the shell before the client is built on it: SDK links, runtime present, HTML renders,
+  # and JavaScript can reach C++. Diagnostic only -- nothing ships this.
+  add_executable(remote60_webview2_spike
+    tools/webview2_spike.cpp
+  )
+  target_include_directories(remote60_webview2_spike PRIVATE "${GNLINK_WEBVIEW2_DIR}/include")
+  # Static loader, so no extra DLL travels with the installer.
+  target_link_libraries(remote60_webview2_spike PRIVATE
+    "${GNLINK_WEBVIEW2_DIR}/x64/WebView2LoaderStatic.lib"
+    user32 ole32 shell32 version
+  )
+  set_target_properties(remote60_webview2_spike PROPERTIES OUTPUT_NAME "WebView2Spike")
+endif()
+
 add_executable(remote60_winlogon_capture_probe
   tools/winlogon_capture_probe.cpp
 )

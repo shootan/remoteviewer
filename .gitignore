@@ -38,3 +38,6 @@ screen-now.png
 /Logs/
 /$null
 /*.pdb
+
+# Fetched by automation/fetch_webview2.ps1; 45 MB of SDK for two files the build needs.
+/third_party/webview2/
