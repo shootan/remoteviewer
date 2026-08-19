@@ -146,6 +146,31 @@ void load_settings(std::string* server, std::string* accountId, ShellRuntimeSett
   }
 }
 
+/**
+ * A line in the client's log.
+ *
+ * The window can only show one short sentence, and when signing in fails that sentence is
+ * whatever the server said -- which does not distinguish "the address is wrong" from "the
+ * account is". This file does. It records what was attempted and what came back; never the
+ * password, and never the session token, which is as good as one until it expires.
+ */
+void log_line(const std::string& text) {
+  static std::mutex logMu;
+  std::lock_guard<std::mutex> lock(logMu);
+  std::wstring path = settings_path();
+  const size_t slash = path.find_last_of(L'\\');
+  path = (slash == std::wstring::npos ? L"." : path.substr(0, slash)) + L"\\client.log";
+
+  std::ofstream file(path, std::ios::app);
+  if (!file) return;
+  SYSTEMTIME now{};
+  GetLocalTime(&now);
+  char stamp[32]{};
+  std::snprintf(stamp, sizeof(stamp), "%02d-%02d %02d:%02d:%02d ", now.wMonth, now.wDay,
+                now.wHour, now.wMinute, now.wSecond);
+  file << stamp << text << "\n";
+}
+
 /** Pushes one JSON message into the page. Safe to call from any thread. */
 void post_to_page(const std::string& json) {
   if (!gWindow) return;
@@ -161,18 +186,23 @@ void post_status(const std::string& state, const std::string& detail) {
 
 /** Signing in and listing hosts both talk to the network, so they never run on the UI thread. */
 void begin_login(std::string server, std::string accountId, std::string password) {
+  log_line("login attempt server=" + server + " account=" + accountId);
   std::thread([server, accountId, password]() {
     std::string error;
     std::string token;
     if (!directory_login(server, accountId, password, &token, &error)) {
+      log_line("login failed: " + error);
       post_status("error", error);
       return;
     }
+    log_line("login ok");
     std::vector<DirectoryHostEntry> hosts;
     if (!directory_list_hosts(server, token, &hosts, &error)) {
+      log_line("hosts failed: " + error);
       post_status("error", error);
       return;
     }
+    log_line("hosts ok count=" + std::to_string(hosts.size()));
     {
       std::lock_guard<std::mutex> lock(gStateMu);
       gServerUrl = server;
@@ -268,9 +298,13 @@ void begin_session(const ShellConnectRequest& request) {
   std::wstring mutableCommand = command.str();
   if (!CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, FALSE, 0, nullptr,
                       executable_dir().c_str(), &si, &pi)) {
+    log_line("session launch failed err=" + std::to_string(GetLastError()));
     post_status("error", "세션을 시작하지 못했습니다");
     return;
   }
+  log_line("session started host=" + request.hostId + " kbps=" +
+           std::to_string(settings.bitrateKbps) + " fps=" + std::to_string(settings.fps) +
+           " monitor=" + std::to_string(settings.monitorId));
   CloseHandle(pi.hThread);
 
   // Watched rather than forgotten: when the session window closes the list has to become usable

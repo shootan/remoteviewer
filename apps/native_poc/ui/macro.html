@@ -249,9 +249,18 @@
     renderSteps();
   }
 
+  // PostWebMessageAsJson delivers an object already parsed; PostWebMessageAsString delivers
+  // text. Accepting either is what keeps this window from ignoring everything sent to it.
+  function readMessage(data) {
+    if (typeof data === 'string') {
+      try { return JSON.parse(data); } catch { return null; }
+    }
+    return data && typeof data === 'object' ? data : null;
+  }
+
   window.chrome.webview.addEventListener('message', (event) => {
-    let msg;
-    try { msg = JSON.parse(event.data); } catch { return; }
+    const msg = readMessage(event.data);
+    if (!msg) return;
     if (msg.type === 'state') { renderState(msg); return; }
     if (msg.type === 'notice') {
       $('notice').textContent = msg.detail || '';
