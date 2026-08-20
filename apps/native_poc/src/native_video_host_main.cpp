@@ -126,6 +126,17 @@ constexpr uint64_t kHostUserFeedbackMinIntervalUs = 10000000;
 constexpr uint64_t kCaptureStallKeepaliveIntervalUs = 1000000;  // 1s
 constexpr uint64_t kCaptureCallbackStallRestartUs = 1200000;  // 1.2s
 constexpr uint64_t kCaptureCallbackRestartCooldownUs = 3000000;  // 3s
+// DXGI/WGC frozen-ring self-heal. These backends are change-driven, so the callback-stall
+// watchdog above deliberately skips them -- silence on a static desktop is normal. But a ring
+// that has frozen under GPU contention (submits stuck in GpuPending, their completion query never
+// signalling) is distinguishable from an idle one by the age of its oldest pending submit: an idle
+// ring enqueues nothing, so its oldest-pending age is 0. 250ms is telemetry only; past 2s over two
+// consecutive polls the ring is dead and a same-device capture restart is due. If it refreezes
+// within 60s the device itself is wedged, so we exit and let the supervisor rebuild the process.
+constexpr uint64_t kCaptureFrozenWarnUs = 250000;                // 250ms
+constexpr uint64_t kCaptureFrozenRestartUs = 2000000;            // 2s
+constexpr uint32_t kCaptureFrozenPollStreakMin = 2;
+constexpr uint64_t kCaptureFrozenEscalationWindowUs = 60000000;  // 60s
 constexpr uint64_t kQueueWaitTimeoutUsDefault = 100000;  // 100ms
 constexpr uint64_t kQueueWaitTimeoutUsMin = 5000;  // 5ms
 constexpr uint32_t kCaptureInputMinPushPerSecDefault = 10;
@@ -4713,6 +4724,11 @@ int main(int argc, char** argv) {
   uint64_t captureSessionStartedUs = 0;
   uint64_t captureRestartCount = 0;
   uint64_t lastCaptureRestartUs = 0;
+  // Frozen-ring self-heal state (DXGI/WGC). Streak guards against a single slow poll; the last
+  // restart timestamp lets a refreeze inside the window escalate to a full process restart.
+  uint32_t captureFrozenPollStreak = 0;
+  uint64_t captureFrozenWarnedAtUs = 0;
+  uint64_t lastFrozenRestartUs = 0;
   bool dxgiCaptureStarted = false;
   bool gdiCaptureStarted = false;
   std::mutex captureFallbackReasonMu;
@@ -6437,6 +6453,75 @@ int main(int argc, char** argv) {
         } else {
           std::cerr << "[native-video-host] capture session restart failed stallUs=" << stallUs
                     << "\n";
+        }
+      }
+    }
+    // DXGI/WGC frozen-ring self-heal. The callback-stall watchdog above is GDI-only on purpose:
+    // change-driven backends are silent on a static desktop, so silence there is not a stall. A
+    // ring that has frozen under GPU contention is a different thing and it has a distinct signal
+    // -- its oldest submit sits in GpuPending because the completion query never fires, while an
+    // idle ring holds nothing pending at all. Restart on that age, over two consecutive polls so a
+    // single slow readback does not trip it. This is the "it went dark and reconnecting shows
+    // nothing" report from a host pinned by a GPU-heavy game; before this, DXGI/WGC had no path
+    // back short of the user restarting the host.
+    if (captureSessionReady.load(std::memory_order_acquire) &&
+        streamControlActive.load(std::memory_order_acquire) &&
+        !captureWindowModeActive.load(std::memory_order_acquire) &&
+        activeDesktopBackend != DesktopCaptureBackend::Gdi) {
+      const uint64_t oldestPendingUs = captureReadback.OldestGpuPendingAgeUs();
+      if (oldestPendingUs >= kCaptureFrozenWarnUs && captureFrozenWarnedAtUs == 0) {
+        captureFrozenWarnedAtUs = nowUs;
+        std::cout << "[native-video-host] capture readback slow oldestPendingUs=" << oldestPendingUs
+                  << "\n";
+      }
+      if (oldestPendingUs >= kCaptureFrozenRestartUs) {
+        ++captureFrozenPollStreak;
+      } else {
+        captureFrozenPollStreak = 0;
+        captureFrozenWarnedAtUs = 0;
+      }
+      const bool restartCooldownDone =
+          (lastCaptureRestartUs == 0 ||
+           nowUs >= (lastCaptureRestartUs + kCaptureCallbackRestartCooldownUs));
+      if (captureFrozenPollStreak >= kCaptureFrozenPollStreakMin && restartCooldownDone) {
+        captureFrozenPollStreak = 0;
+        captureFrozenWarnedAtUs = 0;
+        // First freeze: a same-device capture restart clears a wedged duplication/WGC session.
+        // A refreeze inside the window means the device itself is stuck -- restarting capture on
+        // the same device will not clear it -- so exit and let the supervisor rebuild the process
+        // with a fresh D3D device. main() runs under that supervisor; a non-zero return long after
+        // startup reads to it as a restartable exit (ranMs >= 15s, so not counted as a crash-loop),
+        // and it relaunches without the startup backoff.
+        const bool refroze =
+            lastFrozenRestartUs != 0 &&
+            nowUs < (lastFrozenRestartUs + kCaptureFrozenEscalationWindowUs);
+        lastFrozenRestartUs = nowUs;
+        if (refroze) {
+          std::cerr << "[native-video-host] capture ring refroze within "
+                    << (kCaptureFrozenEscalationWindowUs / 1000000)
+                    << "s oldestPendingUs=" << oldestPendingUs
+                    << "; exiting for a full process restart\n";
+          std::cout.flush();
+          std::cerr.flush();
+          return 3;
+        }
+        lastCaptureRestartUs = nowUs;
+        const bool restarted = restart_capture_session();
+        if (restarted) {
+          ++captureRestartCount;
+          captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(),
+                                     std::memory_order_release);
+          lastCaptureUsForInterval.store(0, std::memory_order_release);
+          lastCallbackUs.store(0, std::memory_order_release);
+          resetHostTimelineAnchors();
+          forceKeyNext = true;
+          ++captureDeadRestartCount;
+          std::cout << "[native-video-host] capture session restarted reason=frozen-ring count="
+                    << captureRestartCount << " captureDeadRestartCount=" << captureDeadRestartCount
+                    << " oldestPendingUs=" << oldestPendingUs << "\n";
+        } else {
+          std::cerr << "[native-video-host] frozen-ring restart failed oldestPendingUs="
+                    << oldestPendingUs << "\n";
         }
       }
     }

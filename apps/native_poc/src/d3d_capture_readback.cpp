@@ -231,6 +231,20 @@ void D3dCaptureReadbackPipeline::SetNv12Enabled(bool enabled) {
   nv12Enabled_ = enabled;
 }
 
+uint64_t D3dCaptureReadbackPipeline::OldestGpuPendingAgeUs() {
+  std::lock_guard<std::mutex> lk(slotMu_);
+  uint64_t oldestSubmitUs = 0;
+  for (const auto& s : slots_) {
+    if (s.state != SlotState::GpuPending || s.meta.submitUs == 0) continue;
+    if (oldestSubmitUs == 0 || s.meta.submitUs < oldestSubmitUs) oldestSubmitUs = s.meta.submitUs;
+  }
+  if (oldestSubmitUs == 0) return 0;
+  // Same clock as meta.submitUs (set from qpc_us() at submit), so the subtraction is meaningful
+  // without the caller having to pass a timestamp on a possibly different clock.
+  const uint64_t nowUs = qpc_us();
+  return nowUs > oldestSubmitUs ? nowUs - oldestSubmitUs : 0;
+}
+
 bool D3dCaptureReadbackPipeline::EnsureNv12Locked(uint32_t outW, uint32_t outH) {
   if (nv12Broken_ || !vpEnumerator_) return false;
   constexpr size_t kNv12Slots = 4;

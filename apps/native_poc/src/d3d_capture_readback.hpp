@@ -131,6 +131,14 @@ class D3dCaptureReadbackPipeline {
     return preprocessFallbacks_.load(std::memory_order_relaxed);
   }
 
+  // Age, in microseconds, of the oldest submit still stuck in GpuPending -- or 0 if the ring is
+  // idle. A DXGI/WGC capture that has gone dark under GPU contention leaves submits whose
+  // completion query never signals; the host's callback-stall watchdog stays silent because those
+  // backends are change-driven, so this age is the only evidence that the ring has frozen rather
+  // than merely fallen quiet on a static desktop (a static desktop enqueues nothing, so its
+  // oldest-pending age is 0).
+  uint64_t OldestGpuPendingAgeUs();
+
  private:
   enum class SlotState : uint8_t { Free, GpuPending };
 
