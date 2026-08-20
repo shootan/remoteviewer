@@ -1207,6 +1207,22 @@ void enqueue_release_for_pressed_mouse_buttons() {
   if ((buttons & 0x1u) != 0) enqueue_input_event(3, vx, vy, 0, VK_LBUTTON);
 }
 
+// Release every key this client has an outstanding down for.
+//
+// A key-up only arrives if this window still has focus when the key is released. Alt, the Win
+// key, and Alt+Tab are all intercepted by the local Windows and steal focus as they do it, so
+// their down reaches the host and their up never does -- the host is left holding a modifier
+// nobody is pressing, and because it is a real SendInput state it survives the client being
+// closed and reopened. Sending the up for everything held, the moment focus is lost, is what
+// keeps a modifier from latching on the host.
+void enqueue_release_for_pressed_keys() {
+  for (int vk = 0; vk < 256; ++vk) {
+    if (gForwardedKeyDown[vk].exchange(false, std::memory_order_relaxed)) {
+      enqueue_input_event(6, 0, 0, 0, static_cast<uint32_t>(vk));
+    }
+  }
+}
+
 uint32_t coord_to_permille(int coord, int extent) {
   if (extent <= 1) return 5000;
   const int clamped = std::clamp(coord, 0, extent - 1);
@@ -2421,6 +2437,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       if (kInputPolicyForceBlock) return 0;
       if (forward_key_up(wp)) enqueue_input_event(6, 0, 0, 0, static_cast<uint32_t>(wp));
       return 0;
+    case WM_KILLFOCUS:
+      // Focus is about to leave, so no more key-ups will reach this window. Release whatever
+      // is held now, before Alt/Win/Alt+Tab strands it on the host.
+      if (!kInputPolicyForceBlock) enqueue_release_for_pressed_keys();
+      return 0;
     case WM_CHAR:
       if (kInputPolicyForceBlock) return 0;
       {
@@ -3164,6 +3185,20 @@ int main(int argc, char** argv) {
     const bool inputChannelEnabled =
         controlReady && args.enableInputChannel && !kInputPolicyForceBlock;
     gInputEnabled = inputChannelEnabled;
+    if (inputChannelEnabled) {
+      // Clear any modifier the host is still holding from a previous session. A client that
+      // lost focus while a modifier was down could not send its up, and that up-less state is
+      // the host's real key state -- it survives the client closing and reopening, so
+      // reconnecting is the only way to shake it loose, and only if the fresh client says so.
+      for (const uint32_t vk : {static_cast<uint32_t>(VK_CONTROL), static_cast<uint32_t>(VK_LCONTROL),
+                                static_cast<uint32_t>(VK_RCONTROL), static_cast<uint32_t>(VK_MENU),
+                                static_cast<uint32_t>(VK_LMENU), static_cast<uint32_t>(VK_RMENU),
+                                static_cast<uint32_t>(VK_SHIFT), static_cast<uint32_t>(VK_LSHIFT),
+                                static_cast<uint32_t>(VK_RSHIFT), static_cast<uint32_t>(VK_LWIN),
+                                static_cast<uint32_t>(VK_RWIN)}) {
+        enqueue_input_event(6, 0, 0, 0, vk);
+      }
+    }
     gControlScheduler.Reset(args.controlIntervalMs, qpc_now_us());
     if (controlReady) {
       controlThread = std::thread([&]() {
