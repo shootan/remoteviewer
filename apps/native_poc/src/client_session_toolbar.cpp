@@ -113,7 +113,9 @@ SIZE rebuild_layout() {
     g.buttons.push_back(std::move(button));
   };
 
-  add(kButtonTargets, L"화면 선택", false);
+  // No target picker on Windows: the product decision is desktop-only, and the picker screen
+  // itself cannot render once the flip swap chain owns the window -- pressing the old button
+  // left the session looking frozen. Monitors are picked from the dropdown instead.
   add(kButtonMacro, L"매크로", g.state.macroOpen);
   const std::wstring monitors = monitor_label();
   if (!monitors.empty()) add(kButtonMonitor, monitors + L" ▾", false);

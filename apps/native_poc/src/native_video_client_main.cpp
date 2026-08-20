@@ -1119,9 +1119,53 @@ bool local_hotkey_modifiers_active() {
   return (GetKeyState(VK_CONTROL) < 0) && (GetKeyState(VK_MENU) < 0);
 }
 
+// Every key must reach the host exactly once, through exactly one of two paths: printable
+// characters as committed text (which is how composed Hangul arrives at all), everything
+// else as a virtual-key event. The split lives in these two predicates, and they are
+// complements by construction -- the same key must never satisfy both.
+//
+// Enter, Tab and Backspace go as key events, not text: SendInput of VK_RETURN behaves as a
+// real Enter in every application, while a '\r' delivered as a unicode text unit does not.
 bool is_committed_text_code_unit(uint16_t ch) {
-  return (ch >= 0x20u) || ch == static_cast<uint16_t>('\r') ||
-         ch == static_cast<uint16_t>('\t') || ch == static_cast<uint16_t>('\b');
+  return ch >= 0x20u;
+}
+
+// Which keys this client forwarded a down for, so the matching up is forwarded by memory
+// rather than by re-deciding. The decision depends on modifier state, and re-evaluating it
+// at release time strands keys on the host: Ctrl+A with Ctrl released first re-classifies
+// the A as text on the way up, and the host holds A down forever.
+std::atomic<bool> gForwardedKeyDown[256]{};
+
+/**
+ * Whether this virtual key should be forwarded as a key event.
+ *
+ * Keys that produce a character are excluded, because their character arrives through the
+ * text path -- forwarding both injected every printable twice: Korean once as composed text
+ * and once as the raw letter the host's English layout makes of the same key. That was the
+ * "type 11, get 22" session, with an English echo trailing every Hangul syllable.
+ */
+bool key_event_should_forward(WPARAM vk) {
+  // The IME owns the key while composing; its result arrives as text when it commits.
+  if (vk == VK_PROCESSKEY) return false;
+  // With Ctrl or Alt held there is no text -- these are shortcuts, and the host needs the
+  // real key to reproduce them.
+  if ((GetKeyState(VK_CONTROL) < 0) || (GetKeyState(VK_MENU) < 0)) return true;
+  const UINT ch = MapVirtualKeyW(static_cast<UINT>(vk), MAPVK_VK_TO_CHAR) & 0x7FFFFFFFu;
+  // Control characters (Enter 0x0D, Tab 0x09, Backspace 0x08, Escape 0x1B) are key events;
+  // the text filter above refuses them, so the two paths cannot overlap.
+  return ch == 0 || ch < 0x20u;
+}
+
+/** Decides for a down event and records the answer for the matching up. */
+bool forward_key_down(WPARAM vk) {
+  const bool forward = key_event_should_forward(vk);
+  if (vk < 256) gForwardedKeyDown[vk].store(forward, std::memory_order_relaxed);
+  return forward;
+}
+
+bool forward_key_up(WPARAM vk) {
+  if (vk < 256) return gForwardedKeyDown[vk].exchange(false, std::memory_order_relaxed);
+  return key_event_should_forward(vk);
 }
 
 void enqueue_committed_text_unit(uint16_t ch) {
@@ -2355,19 +2399,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
       }
       if (kInputPolicyForceBlock) return 0;
-      enqueue_input_event(5, 0, 0, 0, static_cast<uint32_t>(wp));
+      if (forward_key_down(wp)) enqueue_input_event(5, 0, 0, 0, static_cast<uint32_t>(wp));
       return 0;
     case WM_KEYUP:
       if (kInputPolicyForceBlock) return 0;
-      enqueue_input_event(6, 0, 0, 0, static_cast<uint32_t>(wp));
+      if (forward_key_up(wp)) enqueue_input_event(6, 0, 0, 0, static_cast<uint32_t>(wp));
       return 0;
     case WM_SYSKEYDOWN:
       if (kInputPolicyForceBlock) return 0;
-      enqueue_input_event(5, 0, 0, 0, static_cast<uint32_t>(wp));
+      if (forward_key_down(wp)) enqueue_input_event(5, 0, 0, 0, static_cast<uint32_t>(wp));
       return 0;
     case WM_SYSKEYUP:
       if (kInputPolicyForceBlock) return 0;
-      enqueue_input_event(6, 0, 0, 0, static_cast<uint32_t>(wp));
+      if (forward_key_up(wp)) enqueue_input_event(6, 0, 0, 0, static_cast<uint32_t>(wp));
       return 0;
     case WM_CHAR:
       if (kInputPolicyForceBlock) return 0;
@@ -2821,11 +2865,9 @@ int main(int argc, char** argv) {
 
   {
     remote60::native_poc::SessionToolbarCallbacks toolbarCallbacks;
-    toolbarCallbacks.onTargets = [] {
-      queue_window_list_request("window_list_request pending");
-      set_picker_visible_and_sync_stream(true);
-      InvalidateRect(gHwnd, nullptr, FALSE);
-    };
+    // onTargets stays unset: the toolbar no longer offers the picker. The GDI picker cannot
+    // paint over the flip swap chain once video has presented, so entering it mid-session
+    // showed a freeze, and the Windows product is desktop-only anyway.
     toolbarCallbacks.onMacro = [] {
       toggle_macro_window(gHwnd);
       push_session_toolbar_state();

@@ -115,7 +115,8 @@ $bmp.Dispose()
 
 # The button the user could not find. Clicking it has to actually produce the macro window,
 # so the check goes all the way through rather than stopping at "the bar is drawn".
-[ToolbarProbe]::Click($handle, 115, 20)
+# 매크로 is the first (leftmost) button since the target picker left the toolbar.
+[ToolbarProbe]::Click($handle, 30, 20)
 Start-Sleep -Milliseconds 2500
 [ToolbarProbe]::Macro = [IntPtr]::Zero
 [void][ToolbarProbe]::EnumWindows($cb, [IntPtr]::Zero)

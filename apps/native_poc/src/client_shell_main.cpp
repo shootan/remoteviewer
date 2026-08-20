@@ -317,8 +317,12 @@ void begin_session(const ShellConnectRequest& request) {
   // belongs to the capture experiments; here it is a screen the user has to dismiss before
   // seeing anything, so the session starts already watching.
   SetEnvironmentVariableW(L"REMOTE60_NATIVE_START_STREAM_VIEW", L"1");
-  if (!CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, FALSE, 0, nullptr,
-                      executable_dir().c_str(), &si, &pi)) {
+  // The viewer is a console-subsystem executable, and without this flag Windows gives it a
+  // console window -- a black cmd box full of scrolling telemetry next to every session.
+  // Launched from a terminal by hand it still inherits that terminal, so probes and manual
+  // debugging keep their output.
+  if (!CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                      nullptr, executable_dir().c_str(), &si, &pi)) {
     log_line("session launch failed err=" + std::to_string(GetLastError()));
     post_status("error", "세션을 시작하지 못했습니다");
     return;
