@@ -7797,10 +7797,17 @@ int main(int argc, char** argv) {
         const uint32_t clUdpDropPm = metricsFresh ? clientMetricsUdpAssemblyDropPm.load() : 0;
 
         if (abrEnabled && !runtimeTuneManualOverride && !m9Apply) {
-          const uint32_t minGoodFpsX100 = args.fps * (abrQualityFirst ? 95u : 93u);
-          const uint32_t minOkayFpsX100 = args.fps * (abrQualityFirst ? 90u : 85u);
-          const uint32_t minDegradeFpsX100 = args.fps * (abrQualityFirst ? 55u : 45u);
-          const uint32_t minSevereFpsX100 = args.fps * (abrQualityFirst ? 45u : 35u);
+          // The current target, not the one the process started with. A runtime FPS tune moves
+          // activeFps, and judging against the startup args.fps would compare the client's rate
+          // to a target that no longer exists -- after a tune to 20, a healthy 20 fps reads as
+          // 66% of 30 and trips a demote; after a tune to 60, a struggling 20 fps reads as fine.
+          // ABR only runs when no manual override or M9 is lowering activeFps, so here it is the
+          // authoritative target. All four thresholds and the sparse floor share it.
+          const uint32_t abrExpectedFps = std::max<uint32_t>(1, activeFps);
+          const uint32_t minGoodFpsX100 = abrExpectedFps * (abrQualityFirst ? 95u : 93u);
+          const uint32_t minOkayFpsX100 = abrExpectedFps * (abrQualityFirst ? 90u : 85u);
+          const uint32_t minDegradeFpsX100 = abrExpectedFps * (abrQualityFirst ? 55u : 45u);
+          const uint32_t minSevereFpsX100 = abrExpectedFps * (abrQualityFirst ? 45u : 35u);
           const bool abrWarmupDone = (t >= (startUs + 4000000ULL));
 
           // A second in which the host offered almost no frames carries no usable evidence
@@ -7815,7 +7822,7 @@ int main(int argc, char** argv) {
           // queuePushPerSec never was. When evidence is this thin, hold the profile and let a
           // second with real motion decide against the unchanged thresholds.
           const bool hostOfferSparse =
-              (sentFrames < std::max<uint64_t>(2, static_cast<uint64_t>(args.fps) / 2)) ||
+              (sentFrames < std::max<uint64_t>(2, static_cast<uint64_t>(abrExpectedFps) / 2)) ||
               frameGatingStaticMode;
 
           const uint64_t severeLatencyUs = abrQualityFirst ? 170000ULL : 150000ULL;
