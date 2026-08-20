@@ -47,6 +47,16 @@ bool session_toolbar_create(HWND owner, SessionToolbarCallbacks callbacks);
 /** Shown only while the session view is up: the picker draws its own header. */
 void session_toolbar_set_visible(bool visible);
 
+/**
+ * The video window's mouse position, forwarded on every move.
+ *
+ * The bar is a window of its own, so every pixel it covers is a pixel of the remote desktop
+ * that cannot be clicked. It therefore hides itself entirely and comes back when the mouse
+ * dwells in the top-center band -- and detecting that dwell is the video window's job,
+ * because a hidden window receives no mouse events of its own.
+ */
+void session_toolbar_notify_mouse(int x, int y, int clientWidth);
+
 void session_toolbar_update(const SessionToolbarState& state);
 
 /** Re-anchors to the owner after it moved, resized, or changed show state. */

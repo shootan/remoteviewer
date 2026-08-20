@@ -14,6 +14,17 @@ constexpr wchar_t kClassName[] = L"Remote60SessionToolbar";
 // owns the window, so the push turns into a posted message instead of a direct repaint.
 constexpr UINT kMsgStatePushed = WM_APP + 1;
 
+// Auto-hide. The bar blocks every remote-desktop pixel it covers, so it stays hidden until
+// summoned and leaves when the mouse does. Dwell before expanding, so a click aimed at the
+// top of the remote screen does not pop the bar into its own path; a delay before collapsing,
+// so travelling from the trigger zone onto a button does not hide the target mid-way.
+constexpr UINT_PTR kTimerExpand = 1;
+constexpr UINT_PTR kTimerCollapse = 2;
+constexpr UINT kExpandDwellMs = 250;
+constexpr UINT kCollapseDelayMs = 800;
+// Long enough to be seen and remembered on connect, short enough to get out of the way.
+constexpr UINT kIntroMs = 2500;
+
 enum ButtonId : int {
   kButtonNone = 0,
   kButtonTargets = 1,
@@ -37,7 +48,9 @@ struct Toolbar {
   int pressed = kButtonNone;
   int hovered = kButtonNone;
   bool tracking = false;
-  bool wanted = false;  // what the session asked for, before owner visibility is considered
+  bool wanted = false;    // what the session asked for, before owner visibility is considered
+  bool expanded = false;  // whether the bar is currently summoned; hidden pixels block nothing
+  bool menuOpen = false;  // the monitor menu is modal; collapsing under it would tear it down
   int dpi = 96;
   HFONT font = nullptr;
 };
@@ -129,7 +142,8 @@ SIZE rebuild_layout() {
 
 void reposition() {
   if (!g.hwnd || !g.owner || !IsWindow(g.owner)) return;
-  const bool showable = g.wanted && IsWindowVisible(g.owner) && !IsIconic(g.owner);
+  const bool showable =
+      g.wanted && g.expanded && IsWindowVisible(g.owner) && !IsIconic(g.owner);
   if (!showable) {
     ShowWindow(g.hwnd, SW_HIDE);
     return;
@@ -205,6 +219,24 @@ int hit_test(int x, int y) {
   return kButtonNone;
 }
 
+void expand_toolbar() {
+  KillTimer(g.hwnd, kTimerExpand);
+  if (!g.expanded) {
+    g.expanded = true;
+    reposition();
+  }
+  KillTimer(g.hwnd, kTimerCollapse);
+}
+
+void collapse_toolbar() {
+  KillTimer(g.hwnd, kTimerCollapse);
+  if (g.menuOpen || g.pressed != kButtonNone || g.hovered != kButtonNone) return;
+  if (g.expanded) {
+    g.expanded = false;
+    ShowWindow(g.hwnd, SW_HIDE);
+  }
+}
+
 void show_monitor_menu(const Button& button) {
   HMENU menu = CreatePopupMenu();
   if (!menu) return;
@@ -222,8 +254,10 @@ void show_monitor_menu(const Button& button) {
   }
   POINT origin{button.rect.left, button.rect.bottom};
   ClientToScreen(g.hwnd, &origin);
+  g.menuOpen = true;
   const int picked = TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD,
                                     origin.x, origin.y, 0, g.hwnd, nullptr);
+  g.menuOpen = false;
   DestroyMenu(menu);
   if (picked <= 0 || static_cast<size_t>(picked) > g.state.monitors.size()) return;
   const uint32_t monitorId = g.state.monitors[static_cast<size_t>(picked - 1)].id;
@@ -246,6 +280,8 @@ LRESULT CALLBACK toolbar_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_ERASEBKGND:
       return 1;
     case WM_MOUSEMOVE: {
+      // The mouse is on the bar; it must not vanish out from under the cursor.
+      KillTimer(hwnd, kTimerCollapse);
       const int hovered = hit_test(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
       if (hovered != g.hovered) {
         g.hovered = hovered;
@@ -263,7 +299,18 @@ LRESULT CALLBACK toolbar_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g.hovered = kButtonNone;
         InvalidateRect(hwnd, nullptr, FALSE);
       }
+      SetTimer(hwnd, kTimerCollapse, kCollapseDelayMs, nullptr);
       return 0;
+    case WM_TIMER:
+      if (wp == kTimerExpand) {
+        expand_toolbar();
+        return 0;
+      }
+      if (wp == kTimerCollapse) {
+        collapse_toolbar();
+        return 0;
+      }
+      break;
     case WM_LBUTTONDOWN:
       g.pressed = hit_test(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
       if (g.pressed != kButtonNone) SetCapture(hwnd);
@@ -347,7 +394,37 @@ bool session_toolbar_create(HWND owner, SessionToolbarCallbacks callbacks) {
 void session_toolbar_set_visible(bool visible) {
   if (!g.hwnd) return;
   g.wanted = visible;
+  if (visible) {
+    // Shown once on entry so the bar is discoverable, then it gets out of the way. After
+    // that, only the top-center dwell brings it back.
+    g.expanded = true;
+    SetTimer(g.hwnd, kTimerCollapse, kIntroMs, nullptr);
+  } else {
+    g.expanded = false;
+    KillTimer(g.hwnd, kTimerExpand);
+    KillTimer(g.hwnd, kTimerCollapse);
+  }
   reposition();
+}
+
+void session_toolbar_notify_mouse(int x, int y, int clientWidth) {
+  if (!g.hwnd || !g.wanted) return;
+  const int band = MulDiv(240, g.dpi, 96);
+  const bool inZone =
+      y >= 0 && y <= MulDiv(16, g.dpi, 96) && x >= clientWidth / 2 - band && x <= clientWidth / 2 + band;
+  if (inZone) {
+    if (g.expanded) {
+      KillTimer(g.hwnd, kTimerCollapse);
+    } else {
+      // Restarted on every move: the dwell requires the mouse to SETTLE near the top, so a
+      // click travelling through the zone on its way to a browser tab never summons the bar
+      // into its own path.
+      SetTimer(g.hwnd, kTimerExpand, kExpandDwellMs, nullptr);
+    }
+  } else {
+    KillTimer(g.hwnd, kTimerExpand);
+    if (g.expanded) SetTimer(g.hwnd, kTimerCollapse, kCollapseDelayMs, nullptr);
+  }
 }
 
 void session_toolbar_update(const SessionToolbarState& state) {

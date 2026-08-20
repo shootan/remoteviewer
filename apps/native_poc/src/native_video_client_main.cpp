@@ -2045,6 +2045,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     }
     case WM_MOUSEMOVE:
+      // The toolbar hides itself so it stops blocking clicks, which leaves it deaf: a hidden
+      // window gets no mouse events, so this window watches for the summoning dwell for it.
+      if (!gWindowPickerVisible.load(std::memory_order_relaxed)) {
+        RECT toolbarZone{};
+        GetClientRect(hwnd, &toolbarZone);
+        remote60::native_poc::session_toolbar_notify_mouse(GET_X_LPARAM(lp), GET_Y_LPARAM(lp),
+                                                           toolbarZone.right);
+      }
       if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (point_in_macro_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;

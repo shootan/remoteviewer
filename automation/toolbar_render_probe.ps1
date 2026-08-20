@@ -27,6 +27,7 @@ public class ToolbarProbe {
   public struct RECT { public int L, T, R, B; }
 
   public static IntPtr Found = IntPtr.Zero;
+  public static IntPtr Video = IntPtr.Zero;
   public static IntPtr Macro = IntPtr.Zero;
   public static RECT FoundRect;
   public static uint TargetPid = 0;
@@ -42,8 +43,15 @@ public class ToolbarProbe {
       RECT r; GetWindowRect(h, out r);
       Found = h; FoundRect = r;
     }
+    if (name == "Remote60NativeVideoClient") Video = h;
     if (name == "GNLinkMacroWindow" && IsWindowVisible(h)) Macro = h;
     return true;
+  }
+
+  // The bar auto-hides; a mouse move into the video window's top-center band followed by the
+  // dwell is what summons it. One move, no follow-ups: every further move restarts the dwell.
+  public static void MoveOnVideo(IntPtr h, int x, int y) {
+    SendMessageW(h, 0x0200, IntPtr.Zero, (IntPtr)((y << 16) | (x & 0xFFFF)));
   }
 
   /** Posts a click straight at the toolbar, so nothing depends on which window has focus. */
@@ -92,12 +100,29 @@ $cb = [ToolbarProbe+Cb]{ param($h, $l) return [ToolbarProbe]::Locate($h, $l) }
 [void][ToolbarProbe]::EnumWindows($cb, [IntPtr]::Zero)
 
 $handle = [ToolbarProbe]::Found
-if ($handle -eq [IntPtr]::Zero) {
+if ($handle -eq [IntPtr]::Zero -or [ToolbarProbe]::Video -eq [IntPtr]::Zero) {
   if (-not $proc.HasExited) { $proc.Kill() }
-if (-not $host_.HasExited) { $host_.Kill() }
-  throw "the toolbar window was never created"
+  if (-not $host_.HasExited) { $host_.Kill() }
+  throw "the toolbar or video window was never created"
 }
 
+# Auto-hide cycle. By now the intro display has timed out, so the bar must be gone -- that is
+# the whole point, no blocked pixels at rest. A dwell in the top-center band summons it; a
+# move away dismisses it; a second dwell brings it back for the render and click checks.
+Start-Sleep -Milliseconds 1500
+$hiddenAtRest = -not [ToolbarProbe]::IsWindowVisible($handle)
+[ToolbarProbe]::MoveOnVideo([ToolbarProbe]::Video, 800, 8)
+Start-Sleep -Milliseconds 700
+$summoned = [ToolbarProbe]::IsWindowVisible($handle)
+[ToolbarProbe]::MoveOnVideo([ToolbarProbe]::Video, 800, 500)
+Start-Sleep -Milliseconds 1600
+$dismissed = -not [ToolbarProbe]::IsWindowVisible($handle)
+[ToolbarProbe]::MoveOnVideo([ToolbarProbe]::Video, 800, 8)
+Start-Sleep -Milliseconds 700
+
+# Re-read the rect: the bar re-anchors when it reappears.
+[ToolbarProbe]::Found = [IntPtr]::Zero
+[void][ToolbarProbe]::EnumWindows($cb, [IntPtr]::Zero)
 $r = [ToolbarProbe]::FoundRect
 $w = $r.R - $r.L
 $h = $r.B - $r.T
@@ -125,9 +150,13 @@ $macroOpened = [ToolbarProbe]::Macro -ne [IntPtr]::Zero
 if (-not $proc.HasExited) { $proc.Kill() }
 if (-not $host_.HasExited) { $host_.Kill() }
 
-"rect      : $($r.L),$($r.T)  ${w}x${h}"
-"colours   : $($distinct.Count) distinct"
-"saved     : $Out"
-if ($distinct.Count -le 1) { "VERDICT   : blank -- the toolbar is not painting" }
-else { "VERDICT   : painted" }
-if ($macroOpened) { "macro     : opened on click" } else { "macro     : NOT opened on click" }
+"rect        : $($r.L),$($r.T)  ${w}x${h}"
+"colours     : $($distinct.Count) distinct"
+"saved       : $Out"
+"hidden@rest : $hiddenAtRest   (no blocked pixels until summoned)"
+"summoned    : $summoned   (top-center dwell brings it back)"
+"dismissed   : $dismissed   (leaves when the mouse does)"
+if ($distinct.Count -le 1) { "VERDICT     : blank -- the toolbar is not painting" }
+elseif ($hiddenAtRest -and $summoned -and $dismissed) { "VERDICT     : painted, auto-hide works" }
+else { "VERDICT     : INCOMPLETE" }
+if ($macroOpened) { "macro       : opened on click" } else { "macro       : NOT opened on click" }
