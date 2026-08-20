@@ -626,6 +626,20 @@ std::atomic<bool> gInputEnabled{false};
 // Which candidate won the race. The relay is billed per byte, so the session says which one it
 // is rather than leaving the user to guess from the bill.
 std::atomic<bool> gRelayPath{false};
+
+// Control over the media socket, for hosts reached through the directory.
+//
+// A second TCP connection cannot be opened to a host behind NAT: only the UDP socket was
+// punched, so control has to ride it. Everything the session needs -- input, the window list,
+// the monitor list, runtime tuning -- goes through here, which is why a session without it
+// shows a picture and responds to nothing.
+remote60::native_poc::UdpControlChannel gUdpControl;
+std::atomic<bool> gControlOverUdp{false};
+// Counted at the point the exchange succeeded, so it can be compared against the acks: the two
+// diverging is what tells "the host never answered" apart from "nothing was ever sent".
+std::atomic<uint64_t> gInputEventsSent{0};
+// Long enough that a slow host answering a window list is not mistaken for a dead link.
+constexpr uint32_t kUdpControlReadTimeoutMs = 12000;
 std::atomic<uint16_t> gMouseButtons{0};
 std::atomic<int32_t> gLastInputVideoX{0};
 std::atomic<int32_t> gLastInputVideoY{0};
@@ -3031,6 +3045,25 @@ int main(int argc, char** argv) {
     }
   }
 
+  // No second port to dial means the directory path: control tunnels through the socket the
+  // punch just opened. The send is bare because the socket is connected -- the same socket the
+  // receive loop below reads, which is what makes the two directions one NAT mapping.
+  if (args.controlPort == 0 && transport == VideoTransport::Udp && gSock != INVALID_SOCKET) {
+    gUdpControl.Configure(
+        [](const void* data, size_t len) -> bool {
+          return send(gSock, static_cast<const char*>(data), static_cast<int>(len), 0) > 0;
+        },
+        remote60::native_poc::kUdpControlStreamClientToHost,
+        remote60::native_poc::kUdpControlStreamHostToClient, args.udpMtu);
+    gControlOverUdp.store(true, std::memory_order_release);
+    // Without this the receive blocks forever on a link that has gone quiet, and the tick above
+    // never runs -- which is the one moment recovery is needed.
+    DWORD recvTimeoutMs = 200;
+    setsockopt(gSock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&recvTimeoutMs),
+               sizeof(recvTimeoutMs));
+    std::cout << "[native-video-client] control tunnelled over the media socket\n";
+  }
+
   std::cout << "[native-video-client] connected host=" << args.host
             << " port=" << args.port
             << " transport=" << video_transport_name(transport)
@@ -3059,6 +3092,10 @@ int main(int argc, char** argv) {
 
   SOCKET controlSock = INVALID_SOCKET;
   std::thread controlThread;
+  // Two ways to reach the host's control protocol, and the session only ever has one of them.
+  // A direct host answers on its own TCP port; a host behind NAT is reachable solely through
+  // the punched media socket, and dialling a second port there connects to nothing.
+  bool controlReady = gControlOverUdp.load(std::memory_order_acquire);
   if (args.controlPort > 0) {
     controlSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (controlSock != INVALID_SOCKET) {
@@ -3069,16 +3106,28 @@ int main(int argc, char** argv) {
       ctlAddr.sin_port = htons(args.controlPort);
       if (inet_pton(AF_INET, args.host.c_str(), &ctlAddr.sin_addr) == 1 &&
           connect(controlSock, reinterpret_cast<const sockaddr*>(&ctlAddr), sizeof(ctlAddr)) == 0) {
-        const bool inputChannelEnabled = args.enableInputChannel && !kInputPolicyForceBlock;
-        gInputEnabled = inputChannelEnabled;
-        gControlScheduler.Reset(args.controlIntervalMs, qpc_now_us());
-        controlThread = std::thread([&]() {
+        controlReady = true;
+      }
+    }
+  }
+  {
+    const bool inputChannelEnabled =
+        controlReady && args.enableInputChannel && !kInputPolicyForceBlock;
+    gInputEnabled = inputChannelEnabled;
+    gControlScheduler.Reset(args.controlIntervalMs, qpc_now_us());
+    if (controlReady) {
+      controlThread = std::thread([&]() {
         // Fetch one queued preview over the control socket. Runs between scheduler
         // actions on the same strict request/response pipeline, one card per call so a
         // large backlog cannot starve input events. Only invoked when the host advertised
         // the capability, because an older host would drain the request and never reply.
         // Returns: 1 fetched, 0 nothing to do, -1 socket failure (stream desynced).
         auto fetch_one_thumbnail = [&]() -> int {
+          // Reads and writes the TCP socket directly rather than going through the link, so it
+          // has nothing to talk to when control is tunnelled. Returning "nothing to do" keeps
+          // the loop alive; reporting failure here would tear down a control channel that is
+          // working, over a preview image.
+          if (gControlOverUdp.load(std::memory_order_acquire)) return 0;
           if (!gHostSupportsThumbnails.load(std::memory_order_relaxed)) return 0;
           uint64_t id = 0;
           {
@@ -3127,7 +3176,19 @@ int main(int argc, char** argv) {
           }
           return 1;
         };
+          // Built once, not per action: the tunnelled link carries the partially-read inbound
+          // message between calls, and a fresh one each time would drop whatever it held.
+          std::unique_ptr<remote60::native_poc::ControlLink> controlLink;
+          if (gControlOverUdp.load(std::memory_order_acquire)) {
+            controlLink = std::make_unique<remote60::native_poc::UdpControlLink>(
+                &gUdpControl, kUdpControlReadTimeoutMs);
+          } else {
+            controlLink = std::make_unique<remote60::native_poc::TcpControlLink>(controlSock);
+          }
+
           while (gRunning.load()) {
+            // Drives retransmission and gap recovery; cheap when there is nothing outstanding.
+            if (gControlOverUdp.load(std::memory_order_acquire)) gUdpControl.Tick();
             bool didWork = false;
             const uint64_t nowUs = qpc_now_us();
             ControlOutboundAction action{};
@@ -3136,10 +3197,46 @@ int main(int argc, char** argv) {
                     &gStreamStateControl, &gCaptureModeRequests, &gKeyframeRequests, &gRuntimeTuneState,
                     &gInputQueueState, &action)) {
               TcpControlResponse response{};
-              // The desktop client only ever talks to a host it can reach directly, so it
-              // stays on TCP; the link wrapper is stateless for that transport.
-              remote60::native_poc::TcpControlLink controlLink(controlSock);
-              if (!execute_control_action(controlLink, action, &response)) break;
+              const uint64_t actionStartUs = qpc_now_us();
+              const bool actionOk = execute_control_action(*controlLink, action, &response);
+              // One exchange that never gets its reply stalls every later one behind it,
+              // including input. Naming the slow action is the only way to see which.
+              const uint64_t actionUs = qpc_now_us() - actionStartUs;
+              if (actionUs > 1000000ULL) {
+                std::cout << "[native-video-client][control] slow action kind="
+                          << static_cast<int>(action.kind) << " tookUs=" << actionUs
+                          << " ok=" << (actionOk ? 1 : 0) << "\n";
+              }
+              if (!actionOk) {
+                // A failed exchange ends the session's control, so it has to say which one and
+                // on what transport. This used to break out silently, which made a control
+                // channel that died on one bad message look identical to one that never
+                // connected.
+                std::cout << "[native-video-client][control] action failed kind="
+                          << static_cast<int>(action.kind) << " transport="
+                          << (gControlOverUdp.load(std::memory_order_acquire) ? "udp-tunnel" : "tcp");
+                if (gControlOverUdp.load(std::memory_order_acquire)) {
+                  // Closed means the channel gave up on the peer; open means the exchange came
+                  // back as something other than the reply this action was waiting for.
+                  const auto stats = gUdpControl.GetStats();
+                  std::cout << " closed=" << (gUdpControl.IsClosed() ? 1 : 0)
+                            << " reason=" << to_string(gUdpControl.CloseReason())
+                            << " sent=" << stats.messagesSent
+                            << " received=" << stats.messagesReceived
+                            << " retx=" << stats.fragmentRetransmits
+                            << " nacks=" << stats.nacksSent;
+                }
+                std::cout << "\n";
+                break;
+              }
+              if (action.kind == ControlOutboundActionKind::InputEvent) {
+                const uint64_t sent = ++gInputEventsSent;
+                if (args.inputLogEvery > 0 && (sent % args.inputLogEvery) == 0) {
+                  std::cout << "[native-video-client][input] sent=" << sent
+                            << " kind=" << action.inputEvent.kind
+                            << " seq=" << action.inputEvent.seq << "\n";
+                }
+              }
               didWork = true;
 
               if (action.kind == ControlOutboundActionKind::CaptureMode) {
@@ -3269,23 +3366,28 @@ int main(int argc, char** argv) {
           gRuntimeTuneState.SetEnabled(false);
           set_window_panel_status("control_disconnected");
           InvalidateRect(gHwnd, nullptr, FALSE);
-        });
-        gControlConnected.store(true, std::memory_order_relaxed);
-        gRuntimeTuneState.SetEnabled(useH264);
-        queue_window_list_request("window_list_request pending");
-        if (useH264 && (args.runtimeBitrate > 0 || args.runtimeKeyint > 0)) {
-          gRuntimeTuneState.MarkDirty();
-        }
-        std::cout << "[native-video-client] control connected port=" << args.controlPort
-                  << " inputChannel=" << (inputChannelEnabled ? 1 : 0) << "\n";
-      } else {
+      });
+    }
+    if (controlReady) {
+      gControlConnected.store(true, std::memory_order_relaxed);
+      gRuntimeTuneState.SetEnabled(useH264);
+      queue_window_list_request("window_list_request pending");
+      if (useH264 && (args.runtimeBitrate > 0 || args.runtimeKeyint > 0)) {
+        gRuntimeTuneState.MarkDirty();
+      }
+      std::cout << "[native-video-client] control connected transport="
+                << (gControlOverUdp.load(std::memory_order_acquire) ? "udp-tunnel" : "tcp")
+                << " port=" << args.controlPort
+                << " inputChannel=" << (inputChannelEnabled ? 1 : 0) << "\n";
+    } else {
+      if (controlSock != INVALID_SOCKET) {
         closesocket(controlSock);
         controlSock = INVALID_SOCKET;
-        gControlConnected.store(false, std::memory_order_relaxed);
-        gRuntimeTuneState.SetEnabled(false);
-        set_window_panel_status("control_connect_failed");
-        std::cout << "[native-video-client] control connect failed port=" << args.controlPort << "\n";
       }
+      gControlConnected.store(false, std::memory_order_relaxed);
+      gRuntimeTuneState.SetEnabled(false);
+      set_window_panel_status("control_connect_failed");
+      std::cout << "[native-video-client] control unavailable port=" << args.controlPort << "\n";
     }
   }
 
@@ -4109,7 +4211,28 @@ int main(int argc, char** argv) {
 
       while (gRunning.load()) {
         const int n = recv(gSock, reinterpret_cast<char*>(datagram.data()), static_cast<int>(datagram.size()), 0);
-        if (n <= 0) break;
+        if (n <= 0) {
+          // A read timeout is not a dead socket. It is also the tunnel's heartbeat: the control
+          // thread spends most of its time blocked waiting for a reply, so if retransmission
+          // were driven from there it would stop exactly when a reply goes missing -- and the
+          // host, hearing nothing, declares the client lost. This thread always runs.
+          if (remote60::native_poc::last_socket_error_is_retryable()) {
+            if (gControlOverUdp.load(std::memory_order_acquire)) gUdpControl.Tick();
+            continue;
+          }
+          break;
+        }
+        if (gControlOverUdp.load(std::memory_order_acquire)) gUdpControl.Tick();
+        // Control is offered the datagram BEFORE the video length guard, and the order is the
+        // whole point. A control message is not bounded below by the video header: a
+        // single-fragment input ack is 32 + 28 = 60 bytes against an 88-byte video header, so
+        // checking the video size first silently ate every small reply -- input acks and window
+        // selections -- while the larger ones (pong, window lists) came through and made the
+        // channel look healthy. OnPacket claims only its own kinds, so video cannot be stolen.
+        if (gControlOverUdp.load(std::memory_order_acquire) &&
+            gUdpControl.OnPacket(datagram.data(), static_cast<size_t>(n))) {
+          continue;
+        }
         if (n < static_cast<int>(sizeof(UdpVideoChunkHeader))) continue;
 
         UdpVideoChunkHeader u{};
@@ -4443,6 +4566,9 @@ int main(int argc, char** argv) {
 
   gRunning = false;
   gInputEnabled = false;
+  // Before anything is joined: the control thread can be parked in a blocking receive for the
+  // read timeout, and closing the channel is what wakes it. Otherwise shutdown waits it out.
+  gUdpControl.Close(remote60::native_poc::ControlCloseReason::Shutdown);
   gInputMacro.StopPlayback();
   gInputMacro.StopRecording();
   remote60::native_poc::macro_window_destroy();
