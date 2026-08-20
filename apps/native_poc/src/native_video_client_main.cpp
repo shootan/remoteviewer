@@ -3466,6 +3466,13 @@ int main(int argc, char** argv) {
     uint64_t sumDecodeTailUs = 0;
     uint64_t maxDecodeTailUs = 0;
     uint64_t decodeFailCount = 0;
+    // Consecutive hard decode failures. A flush (decoder.reset) recovers a corrupt frame, but
+    // not a wedged hardware MFT or a lost D3D device -- and the viewer's only recovery for a
+    // same-resolution decode error was that flush, so once the decoder wedged (a YouTube scene
+    // change on a busy GPU could do it) every following frame failed identically and the
+    // picture froze until the app was restarted. Past a threshold, rebuild the decoder instead.
+    uint32_t decodeConsecutiveFailCount = 0;
+    constexpr uint32_t kDecodeRebuildThreshold = 8;
     uint64_t decodeTimestampOverflowCount = 0;
     uint64_t decodeEmptyCount = 0;
     uint64_t decodeEmptyStreak = 0;
@@ -3949,7 +3956,19 @@ int main(int argc, char** argv) {
         catchupMode = true;
         lastCatchupEnterUs = packetNowUs;
         waitForKeyFrame = true;
-        decoder.reset();
+        if (++decodeConsecutiveFailCount >= kDecodeRebuildThreshold) {
+          // Flush did not clear it: the transform or device is wedged. A full rebuild is the
+          // only recovery, and it is what the resolution-change path already does -- reached
+          // here without a resolution change so the wedge is not caught otherwise.
+          std::cout << "[native-video-client] decoder wedged (consecutive fails="
+                    << decodeConsecutiveFailCount << "); rebuilding\n";
+          if (decoder.initialize(decoderW, decoderH, args.fpsHint)) {
+            decodeConsecutiveFailCount = 0;
+          }
+          // On rebuild failure, keep the streak so the next frame retries the rebuild.
+        } else {
+          decoder.reset();
+        }
         transition_congestion_state(ClientCongestionState::Congested, packetNowUs, "decode_fail",
                                     streamLagUs, decodeQueueLagEstimateUs, h.seq);
         if (packetNowUs >= statAtUs) {
@@ -3989,6 +4008,8 @@ int main(int argc, char** argv) {
         }
         return true;
       }
+      // decode_access_unit succeeded: the transform is healthy, so the wedge streak is clear.
+      decodeConsecutiveFailCount = 0;
       if (pendingTimestampOverflow) {
         decodeEmptyStreak = 0;
         decodeEmptyStreakStartUs = 0;
