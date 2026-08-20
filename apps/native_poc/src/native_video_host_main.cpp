@@ -6040,7 +6040,17 @@ int main(int argc, char** argv) {
       const bool bitrateChanged = (targetBitrate != activeBitrate);
       const bool keyintChanged = (targetKeyint != activeKeyint);
       const bool fpsChanged = (targetFps != activeFps);
-      if (bitrateChanged || keyintChanged || fpsChanged) {
+      // A request can match the ACTIVE value while changing the CEILING: with ABR sitting on
+      // its low profile at 6.6 Mbps, a user lowering the ceiling from 12M to exactly 6.6M
+      // changes nothing active -- and used to be dropped whole, leaving the profiles, the
+      // ladder, and the manual-override reset all unrun. The ceiling comparisons catch what
+      // the active comparisons cannot; apply_encoder_target is a no-op for identical targets,
+      // so entering the block for a ceiling-only change costs no encoder restart.
+      const bool bitrateCeilingChanged = bitrateExplicit && (targetBitrate != abrHighBitrate);
+      const bool fpsCeilingChanged = fpsExplicit && (targetFps != userFpsCeiling);
+      const bool keyintCeilingChanged = keyintExplicit && (targetKeyint != userKeyintCeiling);
+      if (bitrateChanged || keyintChanged || fpsChanged || bitrateCeilingChanged ||
+          fpsCeilingChanged || keyintCeilingChanged) {
         if (bitrateExplicit) {
           // The UI bitrate is the top quality ceiling, not an instruction to disable
           // adaptation. A 20 Mbps request may start there, but the host must still step down
