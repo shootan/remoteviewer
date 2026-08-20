@@ -230,7 +230,19 @@ class StreamingHostProcess {
     return _wfsopen(path.c_str(), L"ab", _SH_DENYNO);
   }
 
-  void ReadChildOutput(HANDLE readEnd, FILE* log) {
+  /** One-off lines open their own handle; only the child-output reader keeps one. */
+  void AppendLogLineOnce(const std::string& line) {
+    FILE* log = OpenLog();
+    if (!log) return;
+    AppendLogLine(log, line);
+    std::fclose(log);
+  }
+
+  // Owns the log handle for the child's lifetime. Ownership lives here and nowhere else
+  // because rotation replaces the handle mid-run: a copy held by another thread would keep
+  // writing through a closed FILE after the swap.
+  void ReadChildOutput(HANDLE readEnd) {
+    FILE* log = OpenLog();
     std::string pending;
     char buffer[512];
     DWORD read = 0;
@@ -241,6 +253,16 @@ class StreamingHostProcess {
         std::string line = pending.substr(0, newline);
         pending.erase(0, newline + 1);
         if (!line.empty() && line.back() == '\r') line.pop_back();
+        // Rotation used to run only at Start(), which bounded nothing: a host that stays up
+        // for weeks passes the cap once and then grows for the rest of its uptime. The size
+        // check is a position query on our own append handle, cheap enough per line. When a
+        // log viewer holds the file open the rename fails and the file runs past the cap
+        // until the viewer closes; the next line's check picks it up again.
+        if (log && _ftelli64(log) > 2LL * 1024 * 1024) {
+          std::fclose(log);
+          RotateLog();
+          log = OpenLog();
+        }
         AppendLogLine(log, line);
         const size_t marker = line.find("directory ");
         if (marker != std::string::npos) {
@@ -250,6 +272,7 @@ class StreamingHostProcess {
       }
       if (pending.size() > 4096) pending.clear();
     }
+    if (log) std::fclose(log);
   }
 
   void TerminateChild() {
@@ -327,16 +350,14 @@ class StreamingHostProcess {
       // latency p95; text legibility is already protected by the peak-constrained VBR policy.
       SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODER_TUNE_MODE", L"low_latency");
 
-      FILE* log = OpenLog();
-      AppendLogLine(log, "[host-app] starting the streaming host (tune=low_latency)");
+      AppendLogLineOnce("[host-app] starting the streaming host (tune=low_latency)");
 
       if (!CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, TRUE,
                           CREATE_NO_WINDOW, nullptr, executable_dir().c_str(), &si, &pi)) {
         if (readEnd) CloseHandle(readEnd);
         if (writeEnd) CloseHandle(writeEnd);
         childAlive_.store(false, std::memory_order_relaxed);
-        AppendLogLine(log, "[host-app] cannot start the streaming host");
-        if (log) std::fclose(log);
+        AppendLogLineOnce("[host-app] cannot start the streaming host");
         {
           std::lock_guard<std::mutex> lock(statusMu_);
           directoryStatus_ = "cannot start the streaming host";
@@ -350,7 +371,7 @@ class StreamingHostProcess {
       // Ours must close or the reader never sees end-of-file when the child exits.
       if (writeEnd) CloseHandle(writeEnd);
       std::thread reader;
-      if (readEnd) reader = std::thread([this, readEnd, log] { ReadChildOutput(readEnd, log); });
+      if (readEnd) reader = std::thread([this, readEnd] { ReadChildOutput(readEnd); });
 
       {
         std::lock_guard<std::mutex> lock(mu_);
@@ -361,8 +382,7 @@ class StreamingHostProcess {
       childAlive_.store(false, std::memory_order_relaxed);
       if (reader.joinable()) reader.join();
       if (readEnd) CloseHandle(readEnd);
-      AppendLogLine(log, "[host-app] the streaming host exited");
-      if (log) std::fclose(log);
+      AppendLogLineOnce("[host-app] the streaming host exited");
       {
         std::lock_guard<std::mutex> lock(mu_);
         if (child_.hProcess) {

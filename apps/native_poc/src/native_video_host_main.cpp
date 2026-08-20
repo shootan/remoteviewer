@@ -119,7 +119,10 @@ constexpr uint32_t kMaxConsecutiveStaleEncodedFrames = 8;
 constexpr int kCaptureFramePoolBuffersDefault = 2;
 constexpr uint64_t kMaxPreEncodeFrameAgeUs = 25000;  // 25ms
 constexpr uint64_t kHostUserFeedbackWarnUs = 90000;  // 90ms
-constexpr uint64_t kHostUserFeedbackMinIntervalUs = 1000000;  // 1s
+// 10s, up from 1s: a static scene with frame gating on trips the send-interval detector on
+// nearly every frame, and at one 2.5KB line per second that alone wrote ~9MB per streaming
+// hour. One line per ten seconds still names the bottleneck while a user is feeling it.
+constexpr uint64_t kHostUserFeedbackMinIntervalUs = 10000000;
 constexpr uint64_t kCaptureStallKeepaliveIntervalUs = 1000000;  // 1s
 constexpr uint64_t kCaptureCallbackStallRestartUs = 1200000;  // 1.2s
 constexpr uint64_t kCaptureCallbackRestartCooldownUs = 3000000;  // 3s
@@ -5269,6 +5272,13 @@ int main(int argc, char** argv) {
       static_cast<uint64_t>(std::max<uint32_t>(200, args.captureWindowRebindIntervalMs)) * 1000ULL;
   uint64_t nextCaptureWindowCheckUs = startUs + captureWindowRebindIntervalUs;
   uint64_t statAtUs = startUs + 1000000ULL;
+  // Every rate in the stats line is computed over a one-second window, so the window is not
+  // widened -- only the printing is decimated. Each printed line still describes a true
+  // second; there are just fewer of them. At the old every-second cadence a streaming day
+  // wrote hundreds of megabytes through the host log; set 1 to watch a session closely.
+  const uint32_t statsPrintEverySec =
+      env_u32_clamped("REMOTE60_NATIVE_STATS_PRINT_EVERY_SEC", 30, 1, 3600);
+  uint64_t statTicks = 0;
   uint64_t sentFrames = 0;
   uint64_t encodedFrames = 0;
   // Encoded frames the sender queue policy discarded (backlog resync or waiting for the
@@ -7458,6 +7468,8 @@ int main(int argc, char** argv) {
 
     const uint64_t t = qpc_now_us();
     if (t >= statAtUs) {
+      ++statTicks;
+      const bool statsPrintDue = (statTicks % statsPrintEverySec) == 0;
       const double mbps = (sentBytes * 8.0) / (1000.0 * 1000.0);
       std::string targetProcessName;
       {
@@ -7533,6 +7545,7 @@ int main(int argc, char** argv) {
         }
       }
       if (useRaw) {
+        if (statsPrintDue) {
         std::cout << "[native-video-host] sentFrames=" << sentFrames
                   << " queuePushCount=" << queuePushCount
                   << " queuePopCount=" << queuePopCount
@@ -7569,6 +7582,7 @@ int main(int argc, char** argv) {
                   << " mbps=" << mbps
                   << " size=" << w << "x" << h
                   << "\n";
+        }
       } else {
         const uint64_t capAgeAvgUs = (encodedFrames > 0) ? (captureAgeSumUs / encodedFrames) : 0;
         const uint64_t cb2eAvgUs = (encodedFrames > 0) ? (callbackToEncodeStartSumUs / encodedFrames) : 0;
@@ -7613,6 +7627,7 @@ int main(int argc, char** argv) {
             (senderSendCountNow > 0)
                 ? (senderSendDurSumUs.load(std::memory_order_relaxed) / senderSendCountNow)
                 : 0;
+        if (statsPrintDue) {
         std::cout << "[native-video-host] encodedFrames=" << encodedFrames
                   << " sentFrames=" << sentFrames
                   << " queuePushCount=" << queuePushCount
@@ -7718,6 +7733,7 @@ int main(int argc, char** argv) {
                   << " frameGatingChangePm=" << frameGatingChangePermilleLast
                   << " frameGatingChangeAvgPm=" << frameGatingChangeAvgPm
                   << "\n";
+        }
 
         const uint64_t metricsUpdatedUs = clientMetricsUpdatedUs.load();
         const bool metricsFresh =

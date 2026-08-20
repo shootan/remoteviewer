@@ -161,6 +161,14 @@ void log_line(const std::string& text) {
   const size_t slash = path.find_last_of(L'\\');
   path = (slash == std::wstring::npos ? L"." : path.substr(0, slash)) + L"\\client.log";
 
+  // A few lines per session, but appended forever: without a cap this is the one file in the
+  // install that only ever grows. One .old generation keeps recent history for support.
+  WIN32_FILE_ATTRIBUTE_DATA info{};
+  if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info) &&
+      info.nFileSizeLow > 512u * 1024) {
+    MoveFileExW(path.c_str(), (path + L".old").c_str(), MOVEFILE_REPLACE_EXISTING);
+  }
+
   std::ofstream file(path, std::ios::app);
   if (!file) return;
   SYSTEMTIME now{};
