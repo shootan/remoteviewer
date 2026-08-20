@@ -2811,10 +2811,22 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     currentScene = UiScene.VIEWER
                     showViewerControls(emphasized = true)
                     showRightClickHintOnce()
-                } else if (pendingSelectionStartedAtMs > 0L && nowMs - pendingSelectionStartedAtMs >= 6000L) {
+                } else if (selectionStage == SelectionStage.REQUESTING &&
+                    pendingSelectionStartedAtMs > 0L && nowMs - pendingSelectionStartedAtMs >= 6000L
+                ) {
+                    // Only REQUESTING dies at 6 s: the host never even acked the select within 6 s,
+                    // so the request is genuinely lost and Targets is the honest fallback.
+                    //
+                    // WAITING_FIRST_FRAME (ack received, first frame not yet) is deliberately NOT
+                    // timed out here. Under GPU load the host can take well over 6 s to produce the
+                    // first encoded frame, and the old combined 6 s deadline threw the viewer back to
+                    // Targets mid-open -- the "the view just exits" the user reported. It now holds and
+                    // shows a preparing/soft-warning state (renderViewerScene), leaving only three
+                    // exits: the first frame arrives, the host reports select_failed, or the user
+                    // backs out.
                     diagnosticsLog.log(
                         "select_timeout",
-                        "targetId=$pendingSelectionId gen=$pendingSelectionGeneration " +
+                        "stage=REQUESTING targetId=$pendingSelectionId gen=$pendingSelectionGeneration " +
                             "scene=$currentScene status=${panelSnapshot.status} debug=$videoDebugValue"
                     )
                     moveToTargets("select_timeout", abortPendingSwitch = true)
@@ -2953,7 +2965,20 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             // Before this panel existed the switch showed a plain black screen with no
             // feedback for up to the 6 s selection timeout.
             val target = pendingSelectionLabel.ifBlank { panelSnapshot.selectedTitle }
-            viewerLoadingText.text = getString(R.string.viewer_switching_to, target)
+            val waitedMs =
+                if (pendingSelectionStartedAtMs > 0L) SystemClock.elapsedRealtime() - pendingSelectionStartedAtMs
+                else 0L
+            // Waiting on the first frame is not a failure: a GPU-loaded host can take far longer than
+            // the 6 s that used to abort the switch. Keep the switch alive, but let the words admit the
+            // wait so a long "preparing" doesn't read as a hang, and after 30 s say plainly that Back
+            // cancels -- there is no automatic give-up.
+            viewerLoadingText.text = when {
+                selectionStage == SelectionStage.WAITING_FIRST_FRAME && waitedMs >= 30000L ->
+                    getString(R.string.viewer_preparing_long, target)
+                selectionStage == SelectionStage.WAITING_FIRST_FRAME && waitedMs >= 6000L ->
+                    getString(R.string.viewer_preparing, target)
+                else -> getString(R.string.viewer_switching_to, target)
+            }
             viewerLoadingPanel.visibility = View.VISIBLE
             viewerOverlayStatusText.visibility = View.GONE
             videoTextureView.alpha = 0.0f

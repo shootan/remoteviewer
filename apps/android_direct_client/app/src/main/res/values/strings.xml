@@ -34,6 +34,8 @@
     <string name="viewer_log_close_button">Close</string>
     <string name="viewer_log_empty">No diagnostics yet.</string>
     <string name="viewer_switching_to">Switching to %1$s…</string>
+    <string name="viewer_preparing">Preparing %1$s… the host may be under heavy GPU load</string>
+    <string name="viewer_preparing_long">Still preparing %1$s… press Back to cancel</string>
     <string name="viewer_connecting">Waiting for the first frame…</string>
     <string name="targets_empty">No shareable windows yet. Tap Refresh.</string>
     <string name="exit_confirm_message">Exit the app?</string>
