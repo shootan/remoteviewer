@@ -4255,7 +4255,13 @@ int main(int argc, char** argv) {
         }
         sessionEpochCv.notify_all();
 
-        UdpControlLink link(&udpControlChannel, 0);
+        // The read timeout is what lets the host notice a client that simply vanished. The
+        // channel only declares peer-lost while it has something to retransmit; a client that
+        // dies between requests leaves nothing outstanding, and a blocking read sat here for
+        // the rest of the process with the stream still marked active -- capturing, encoding,
+        // and sending to nobody. The client pings about once a second, so ten silent seconds
+        // is a client that is gone, not one that is slow.
+        UdpControlLink link(&udpControlChannel, 10000);
         serve_control_session(link);
         // Closed is not finished. Retransmits running out means this client is gone, which is
         // the ordinary end of a session and the reason to wait for the next one.
@@ -5333,6 +5339,20 @@ int main(int argc, char** argv) {
   uint64_t selectionFirstKeyframePendingGeneration = 0;
   uint64_t selectionFirstKeyframeDropCount = 0;
   bool streamActiveApplied = true;
+  // The capture lifecycle used to be "start once, stop at exit". Everything between -- a client
+  // disconnecting, another connecting an hour later -- left DXGI duplication (or WGC after a
+  // fallback) acquiring frames at full desktop rate for nobody, which is what starved RDP
+  // sessions into single-digit frame rates until the process was killed. Capture now detaches
+  // after the stream has been inactive for a grace period, and reattaches on the active edge.
+  // The grace period exists because the picker also parks the stream: tearing down DXGI for a
+  // two-second visit to the target list would make every return visibly slow.
+  bool captureIdleDetached = false;
+  uint64_t captureIdleDetachAtUs = 0;
+  constexpr uint64_t kCaptureIdleDetachDelayUs = 5'000'000;
+  constexpr uint64_t kCaptureReattachRetryMinUs = 250'000;
+  constexpr uint64_t kCaptureReattachRetryMaxUs = 5'000'000;
+  uint64_t captureReattachRetryAtUs = 0;
+  uint64_t captureReattachRetryDelayUs = kCaptureReattachRetryMinUs;
   auto effective_queue_wait_timeout_us = [&]() -> uint64_t {
     if (queueWaitTimeoutUsOverride > 0) {
       return std::max<uint64_t>(kQueueWaitTimeoutUsMin, queueWaitTimeoutUsOverride);
@@ -5776,7 +5796,15 @@ int main(int argc, char** argv) {
     // viewer has already marked the stream inactive. Process recovery before the inactive
     // early-return; otherwise the request remains stuck and the next selection intermittently
     // times out with DXGI_ERROR_ACCESS_LOST/E_ACCESSDENIED.
-    if (dxgiFallbackRequested.exchange(false, std::memory_order_acq_rel) &&
+    // The active check comes before the exchange so an inactive stream does not consume the
+    // request: with no client watching, restarting capture here would be exactly the leak this
+    // lifecycle exists to close -- an RDP connect moves the desktop, the fallback fires, and a
+    // clientless host starts capturing the RDP session at full rate. While the stream is
+    // inactive the request either survives until the client returns (processed then, one
+    // iteration after the active edge) or is cleared by the idle detach, whose reattach
+    // re-resolves the backend from scratch anyway.
+    if (streamControlActive.load(std::memory_order_acquire) &&
+        dxgiFallbackRequested.exchange(false, std::memory_order_acq_rel) &&
         !captureWindowModeActive.load(std::memory_order_acquire)) {
       powerKeepalive.SetStreaming(true, true);
       if (dxgiCaptureStarted) {
@@ -5802,7 +5830,8 @@ int main(int argc, char** argv) {
       forceKeyNext = true;
       flush_capture_pipeline_state("dxgi-runtime-fallback");
     }
-    if (gdiFallbackRequested.exchange(false, std::memory_order_acq_rel) &&
+    if (streamControlActive.load(std::memory_order_acquire) &&
+        gdiFallbackRequested.exchange(false, std::memory_order_acq_rel) &&
         !captureWindowModeActive.load(std::memory_order_acquire)) {
       powerKeepalive.SetStreaming(true, true);
       if (gdiCaptureStarted) {
@@ -5901,12 +5930,59 @@ int main(int argc, char** argv) {
         flush_capture_pipeline_state("stream-inactive");
         streamActiveApplied = false;
         powerKeepalive.SetStreaming(false);
+        captureIdleDetachAtUs = qpc_now_us() + kCaptureIdleDetachDelayUs;
         std::cout << "[native-video-host] stream inactive\n";
+      }
+      if (!captureIdleDetached && qpc_now_us() >= captureIdleDetachAtUs) {
+        detach_capture_session();
+        // Stale by construction: whatever forced a fallback while nobody was watching is
+        // re-evaluated from scratch when the reattach picks its backend.
+        dxgiFallbackRequested.store(false, std::memory_order_release);
+        gdiFallbackRequested.store(false, std::memory_order_release);
+        captureIdleDetached = true;
+        std::cout << "[native-video-host] capture detached (idle)\n";
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
       continue;
     }
     if (!streamActiveApplied) {
+      if (captureIdleDetached) {
+        // Reattach before declaring the stream applied, and only declare it on success:
+        // marking it applied with no capture running would serve black frames with no path
+        // back. Failure retries with backoff -- the desktop may still be mid-transition
+        // (RDP disconnecting, a secure desktop closing) when the client returns.
+        const uint64_t nowUs = qpc_now_us();
+        if (nowUs < captureReattachRetryAtUs) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+          continue;
+        }
+        if (!captureWindowModeActive.load(std::memory_order_acquire)) {
+          // Fresh resolution, not the backend the last session was demoted to. This is also
+          // what frees a host parked on WGC by an RDP visit: the desktop is back on the real
+          // adapter by now, and starting from the requested backend finds it.
+          activeDesktopBackend = requestedDesktopBackend;
+        }
+        if (!restart_capture_session()) {
+          captureReattachRetryDelayUs =
+              std::min<uint64_t>(captureReattachRetryDelayUs * 2, kCaptureReattachRetryMaxUs);
+          captureReattachRetryAtUs = nowUs + captureReattachRetryDelayUs;
+          std::cerr << "[native-video-host] capture reattach failed; retrying in "
+                    << (captureReattachRetryDelayUs / 1000) << "ms\n";
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+          continue;
+        }
+        captureIdleDetached = false;
+        captureReattachRetryAtUs = 0;
+        captureReattachRetryDelayUs = kCaptureReattachRetryMinUs;
+        ++captureRestartCount;
+        captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+        lastCaptureUsForInterval.store(0, std::memory_order_release);
+        lastCallbackUs.store(0, std::memory_order_release);
+        resetHostTimelineAnchors();
+        flush_capture_pipeline_state("capture-reattached");
+        std::cout << "[native-video-host] capture reattached backend="
+                  << desktop_capture_backend_name(activeDesktopBackend) << "\n";
+      }
       streamActiveApplied = true;
       forceKeyNext = true;
       powerKeepalive.SetStreaming(true, true);
