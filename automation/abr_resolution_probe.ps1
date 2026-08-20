@@ -28,23 +28,25 @@ $h = Start-Process $Stream -PassThru -NoNewWindow `
   -RedirectStandardOutput "$env:TEMP\abr_host.txt" -RedirectStandardError "$env:TEMP\abr_host_err.txt"
 Start-Sleep -Seconds 3
 
-function Run-Viewer([int]$seconds, [int]$dropPm, [string]$tag) {
+function Run-Viewer([int]$seconds, [int]$dropPm, [bool]$tune, [string]$tag) {
   if ($dropPm -gt 0) { $env:REMOTE60_NATIVE_UDP_SIM_DROP_PM = "$dropPm" }
   else { $env:REMOTE60_NATIVE_UDP_SIM_DROP_PM = "0" }
-  $v = Start-Process $script:Viewer -PassThru -NoNewWindow `
-    -ArgumentList "--transport","udp","--codec","h264","--enable-input-channel", `
-                  "--host","127.0.0.1","--port","$Port", `
-                  "--runtime-bitrate","12000000","--runtime-fps","30","--seconds","$seconds" `
+  $viewerArgs = @("--transport","udp","--codec","h264","--enable-input-channel",
+                  "--host","127.0.0.1","--port","$Port","--seconds","$seconds")
+  if ($tune) { $viewerArgs += @("--runtime-bitrate","12000000","--runtime-fps","30") }
+  $v = Start-Process $script:Viewer -PassThru -NoNewWindow -ArgumentList $viewerArgs `
     -RedirectStandardOutput "$env:TEMP\abr_view_$tag.txt" -RedirectStandardError "$env:TEMP\abr_view_${tag}_err.txt"
   [void]$v.WaitForExit(($seconds + 15) * 1000)
   if (-not $v.HasExited) { $v.Kill() }
 }
 
-Run-Viewer 20 0 "clean1"      # phase 1: tune to 12M must lift the 3M-init 720p to full
+Run-Viewer 20 0 $true "clean1"     # phase 1: tune to 12M must lift the 3M-init 720p to full
 Start-Sleep -Seconds 2
-Run-Viewer 35 400 "lossy"     # phase 2: try to demote
+Run-Viewer 35 400 $true "lossy"    # phase 2: try to demote
 Start-Sleep -Seconds 2
-Run-Viewer 45 0 "clean2"      # phase 3: recover; the restored profile must be full size
+# Phase 3 sends NO tune on purpose: a tune applies the full profile directly and would let
+# the probe pass without the ABR recovery path -- the very code under test -- ever running.
+Run-Viewer 45 0 $false "clean2"
 Start-Sleep -Seconds 1
 if (-not $h.HasExited) { $h.Kill() }
 
@@ -54,26 +56,28 @@ $hostLog = Get-Content "$env:TEMP\abr_host.txt" -ErrorAction SilentlyContinue
 $events = @($hostLog | Where-Object { $_ -match 'encode ladder|\[abr\]|runtime-config-applied|rate-control reason' })
 $events | ForEach-Object { $_ }
 
-# The capture is whatever desktop this runs on; full resolution means "what the ladder grants
-# 12 Mbps", which is strictly wider than the 3 Mbps floor. The stuck bug pinned width at the
-# 3M ladder width for the whole run, so the discriminating fact is a WIDER size appearing
-# after the tune, and -- if a demote happened -- appearing AGAIN after recovery.
-$sizes = @($hostLog | Select-String -Pattern 'size=(\d+)x(\d+)' -AllMatches |
-           ForEach-Object { [int]$_.Matches[0].Groups[1].Value })
-$minW = ($sizes | Measure-Object -Minimum).Minimum
-$maxW = ($sizes | Measure-Object -Maximum).Maximum
-$demoted  = @($events | Where-Object { $_ -match '\[abr\] profile=(low|mid)' }).Count
-$restored = @($events | Where-Object { $_ -match '\[abr\] profile=high' })
-$restoredWide = @($restored | Where-Object { $_ -match 'encode=(\d+)x' -and [int]$matches[1] -gt $minW }).Count
+# The lift is proven by the ladder's own event line, not by sampling the stats: the tune
+# lands within the first second of the session, so the reduced size never survives long
+# enough to appear in a once-per-second stats line.
+$lift = @($events | Where-Object {
+  $_ -match 'encode ladder (\d+)x\d+ -> (\d+)x\d+ for 12000kbps' -and
+  [int]$matches[2] -gt [int]$matches[1] }).Count
+$floorW = 1300  # nothing the 3-4M ladder produces is wider than this
+$demoted  = @($events | Where-Object { $_ -match '\[abr\] profile=low' }).Count
+$restored = @($events | Where-Object { $_ -match '\[abr\] profile=(mid|high)' })
+$restoredWide = @($restored | Where-Object { $_ -match 'encode=(\d+)x' -and [int]$matches[1] -gt $floorW }).Count
 
-"min encode width : $minW  (3M ladder floor)"
-"max encode width : $maxW  (must exceed the floor after the 12M tune)"
+"tune lift events : $lift  (3M-born size raised for 12M)"
 "abr demotes seen : $demoted"
-"abr high restores: $($restored.Count)  (of which wider than floor: $restoredWide)"
+"abr mid/high     : $($restored.Count)  (of which full-size: $restoredWide)"
 
-if ($maxW -le $minW) { "VERDICT: INCOMPLETE -- the 12M tune never lifted the resolution" }
-elseif ($demoted -eq 0) { "VERDICT: PARTIAL -- tune lift verified; ABR never demoted, cycle untested" }
+if ($lift -eq 0) { "VERDICT: FAIL -- the 12M tune never lifted the resolution" }
+elseif ($demoted -eq 0) {
+  "VERDICT: PARTIAL -- tune lift verified; ABR never demoted (expected on loopback: it"
+  "demotes on latency, and simulated loss adds none here). Run on a real network, or rely"
+  "on the unit tests that pin the transition arithmetic."
+}
 elseif ($restored.Count -gt 0 -and $restoredWide -eq $restored.Count) {
   "VERDICT: full cycle -- demoted and recovered to full resolution, not the frozen one"
 } elseif ($restored.Count -eq 0) { "VERDICT: PARTIAL -- demoted but never recovered within the window" }
-else { "VERDICT: FAIL -- a high restore came back at the frozen low resolution" }
+else { "VERDICT: FAIL -- a recovery came back at the frozen low resolution" }

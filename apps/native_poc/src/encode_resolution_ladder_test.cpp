@@ -100,6 +100,14 @@ int main() {
         low.width <= 1280 && low.height <= 720, buf);
   check("but its ladder hysteresis reflects the bitrate, not the box", !low.reduced);
 
+  // The recovery staircase under a 12 Mbps ceiling: low is boxed, and the size is already
+  // back at full from the first step up -- the mid profile carries 9 Mbps, well over the
+  // full-resolution threshold. Only the low box ever costs pixels.
+  auto stairMid = choose_abr_profile_size(1, 9000000, 2236, 1232, low.reduced);
+  std::snprintf(buf, sizeof(buf), "%ux%u", stairMid.width, stairMid.height);
+  check("the first step up from low already restores the full size",
+        stairMid.width == 2236 && stairMid.height == 1232, buf);
+
   // The mobile arrangement is preserved: a 3 Mbps session reduces in every profile, so the
   // user's deliberate data-saving choice behaves exactly as it did before this function.
   auto mobileHigh = choose_abr_profile_size(0, 3000000, 1920, 1080, true);

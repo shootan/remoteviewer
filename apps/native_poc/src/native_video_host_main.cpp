@@ -4491,6 +4491,10 @@ int main(int argc, char** argv) {
   uint64_t pendingRefitSinceUs = 0;
   constexpr uint64_t kEncodeRefitSettleUs = 400000;  // 0.4 s of stable size before re-init
   uint32_t activeFps = args.fps;
+  // The frame rate the user asked for, as distinct from whatever the encoder is running at
+  // this moment: overview mode lowers activeFps on purpose, and restoring focus from
+  // "whatever is active" would restore the lowered value. Runtime tuning moves this ceiling.
+  uint32_t userFpsCeiling = args.fps;
   uint32_t activeBitrate = abrHighBitrate;
   uint32_t activeKeyint = args.keyint;
   uint64_t activeFrameIntervalUs =
@@ -4624,14 +4628,28 @@ int main(int argc, char** argv) {
 
   auto apply_capture_ui_quality_mode = [&](bool overviewMode, uint64_t nowUs) -> bool {
     if (!useH264) return true;
-    const uint32_t targetW = overviewMode ? m9WidthLevel3 : m9WidthLevel0;
-    const uint32_t targetH = overviewMode ? m9HeightLevel3 : m9HeightLevel0;
-    const uint32_t targetFps = overviewMode ? m9FpsLevel3 : m9FpsLevel0;
-    const uint32_t targetBitrate = overviewMode ? m9BitrateLevel3 : m9BitrateLevel0;
+    // Derived from the live ceiling, not from the m9 level constants: those are frozen at
+    // encoder initialization, so a host born at 3 Mbps regressed to its birth bitrate and
+    // size every time the client left overview mode -- and set the manual override, which
+    // kept ABR from ever repairing it. Same freeze as the ABR profiles, one more door in.
+    // (The m9 adaptive levels themselves are still the frozen constants; that ladder is off
+    // by default and needs its own pass before it can be trusted with live values.)
+    const uint32_t focusBitrate = abrHighBitrate;
+    const uint32_t targetBitrate =
+        overviewMode
+            ? std::min<uint32_t>(focusBitrate,
+                                 std::max<uint32_t>(900000u, (focusBitrate * 50u) / 100u))
+            : focusBitrate;
+    const uint32_t targetFps =
+        overviewMode ? std::max<uint32_t>(15u, (userFpsCeiling * 67u) / 100u) : userFpsCeiling;
+    const auto sizeChoice = remote60::native_poc::choose_abr_profile_size(
+        overviewMode ? 2 : 0, targetBitrate, captureWidth, captureHeight, encodeLadderReduced);
     const uint32_t targetKeyint = overviewMode ? std::max<uint32_t>(activeKeyint, 60u) : args.keyint;
-    if (!apply_encoder_target(targetW, targetH, targetFps, targetBitrate, targetKeyint)) {
+    if (!apply_encoder_target(sizeChoice.width, sizeChoice.height, targetFps, targetBitrate,
+                              targetKeyint)) {
       return false;
     }
+    encodeLadderReduced = sizeChoice.reduced;
     runtimeTuneManualOverride = true;
     abrCooldownUntilUs = nowUs + 3000000ULL;
     abrGoodSeconds = 0;
@@ -6033,10 +6051,11 @@ int main(int argc, char** argv) {
         // predicting badly every time the screen changes at once.
         uint32_t ladderW = nominalEncodeW;
         uint32_t ladderH = nominalEncodeH;
+        bool ladderReducedNext = encodeLadderReduced;
         if (bitrateExplicit) {
           const auto choice = remote60::native_poc::choose_encode_resolution(
               targetBitrate, captureWidth, captureHeight, encodeLadderReduced);
-          encodeLadderReduced = choice.reduced;
+          ladderReducedNext = choice.reduced;
           ladderW = choice.width;
           ladderH = choice.height;
           if (ladderW != nominalEncodeW || ladderH != nominalEncodeH) {
@@ -6053,6 +6072,8 @@ int main(int argc, char** argv) {
           std::cerr << "[native-video-host][control] runtime-config apply failed seq=" << reqSeq << "\n";
           break;
         }
+        encodeLadderReduced = ladderReducedNext;
+        userFpsCeiling = targetFps;
         runtimeTuneManualOverride = false;
         abrCooldownUntilUs = nowUs + 3000000ULL;
         abrGoodSeconds = 0;
@@ -7883,7 +7904,6 @@ int main(int argc, char** argv) {
             // already, and the hysteresis state is shared so the two cannot fight.
             const auto ladderChoice = remote60::native_poc::choose_abr_profile_size(
                 targetProfile, targetBitrate, captureWidth, captureHeight, encodeLadderReduced);
-            encodeLadderReduced = ladderChoice.reduced;
             uint32_t targetW = ladderChoice.width;
             uint32_t targetH = ladderChoice.height;
 
@@ -7891,6 +7911,9 @@ int main(int argc, char** argv) {
               std::cerr << "[native-video-host][abr] encoder profile apply failed\n";
               break;
             }
+            // Committed only once the encoder accepted the target, so a failed reinit cannot
+            // leave the hysteresis state describing an encoder that does not exist.
+            encodeLadderReduced = ladderChoice.reduced;
 
             abrProfile = targetProfile;
             abrGoodSeconds = 0;
