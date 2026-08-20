@@ -7870,18 +7870,22 @@ int main(int argc, char** argv) {
           }
 
           if (targetProfile != abrProfile) {
-            uint32_t targetW = abrHighW;
-            uint32_t targetH = abrHighH;
             uint32_t targetBitrate = abrHighBitrate;
             if (targetProfile == 1) {
-              targetW = abrMidW;
-              targetH = abrMidH;
               targetBitrate = abrMidBitrate;
             } else if (targetProfile == 2) {
-              targetW = abrLowW;
-              targetH = abrLowH;
               targetBitrate = abrLowBitrate;
             }
+            // Derived at transition time, never read from the profile: frozen profile sizes
+            // are the bug that put "profile=high encode=1256x706 bitrate=12000000" in a live
+            // log. Deriving from the ladder also tracks capture-size changes (monitor
+            // switches, RDP) that a frozen value never could. Runtime tuning does the same
+            // already, and the hysteresis state is shared so the two cannot fight.
+            const auto ladderChoice = remote60::native_poc::choose_abr_profile_size(
+                targetProfile, targetBitrate, captureWidth, captureHeight, encodeLadderReduced);
+            encodeLadderReduced = ladderChoice.reduced;
+            uint32_t targetW = ladderChoice.width;
+            uint32_t targetH = ladderChoice.height;
 
             if (!apply_encoder_target(targetW, targetH, activeFps, targetBitrate, activeKeyint)) {
               std::cerr << "[native-video-host][abr] encoder profile apply failed\n";

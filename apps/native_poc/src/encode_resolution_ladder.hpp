@@ -72,4 +72,35 @@ inline EncodeResolutionChoice choose_encode_resolution(uint32_t bitrate, uint32_
   return out;
 }
 
+/**
+ * The encode size an ABR profile should apply, derived when the profile is entered.
+ *
+ * Derived, never stored: the profiles used to carry sizes frozen at encoder initialization,
+ * and a host initialized at 3 Mbps froze ~720p into every profile including high. Each later
+ * recovery then restored the bitrate and re-applied the frozen size -- "profile=high
+ * encode=1256x706 bitrate=12000000" in a live log, which the user experiences as raising the
+ * bitrate and still reading smudged text.
+ *
+ * `profile`: 0 high, 1 mid, 2 low. The low profile keeps a hard 1280x720 box on top of the
+ * ladder: its purpose is decode load on a client that is already struggling, which the
+ * bitrate alone does not cap.
+ */
+inline EncodeResolutionChoice choose_abr_profile_size(int profile, uint32_t bitrate,
+                                                      uint32_t captureW, uint32_t captureH,
+                                                      bool currentlyReduced) {
+  EncodeResolutionChoice out =
+      choose_encode_resolution(bitrate, captureW, captureH, currentlyReduced);
+  if (profile != 2) return out;
+  if (out.width > 1280 || out.height > 720) {
+    const double sx = 1280.0 / static_cast<double>(out.width);
+    const double sy = 720.0 / static_cast<double>(out.height);
+    const double scale = std::min(sx, sy);
+    if (scale > 0.0 && scale < 1.0) {
+      out.width = static_cast<uint32_t>(out.width * scale);
+      out.height = static_cast<uint32_t>(out.height * scale);
+    }
+  }
+  return out;
+}
+
 }  // namespace remote60::native_poc
