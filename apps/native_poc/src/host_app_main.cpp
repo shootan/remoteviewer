@@ -177,6 +177,15 @@ class StreamingHostProcess {
 
   void Start() {
     if (running_.exchange(true)) return;
+    // Opt-in GPU surface encode via the shell's own environment, so a user can try it on a
+    // contended GPU without a rebuild while it stays off for everyone else. A tray toggle is
+    // the eventual home; the environment is the seam until then.
+    {
+      wchar_t buf[8]{};
+      const DWORD n = GetEnvironmentVariableW(L"GNLINK_HOST_NV12_SURFACE", buf, 8);
+      const bool on = n > 0 && n < 8 && (buf[0] == L'1' || buf[0] == L't' || buf[0] == L'T');
+      nv12SurfaceRequested_.store(on, std::memory_order_relaxed);
+    }
     RotateLog();
     supervisor_ = std::thread([this] { Supervise(); });
   }
@@ -287,7 +296,15 @@ class StreamingHostProcess {
 
   void Supervise() {
     const std::wstring exe = executable_dir() + L"\\GNLinkStream.exe";
+    // A streaming host that dies within seconds and keeps dying is a crash loop, not an
+    // ordinary reconnect. Two things follow from noticing it: back off the relaunch so a
+    // wedged driver does not spin the CPU and flood the log, and -- once the GPU surface
+    // encode path is opt-in-enabled -- fall back off it, since a driver that crashes on the
+    // DXGI surface path is exactly the failure that path was left opt-in to avoid, and the
+    // automatic in-process fallback only catches rejection and slowness, not a hard crash.
+    uint32_t crashStreak = 0;
     while (running_.load(std::memory_order_relaxed)) {
+      const bool nv12SurfaceForcedOff = crashStreak >= 2;
       // The control port serves clients on the same network that dial this PC directly. One
       // arriving through the directory tunnels control over the media socket instead, but with
       // no port open a LAN connection showed a picture that could not be controlled.
@@ -349,8 +366,19 @@ class StreamingHostProcess {
       // A/B on 1080p30 scroll (2026-07-31): stable_text bought no decoded fps and doubled
       // latency p95; text legibility is already protected by the peak-constrained VBR policy.
       SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODER_TUNE_MODE", L"low_latency");
+      // GPU surface encode bypasses the CPU readback that stalls (captureUnmapWait) when
+      // another app -- a game -- holds the GPU. It is opt-in (nv12SurfaceRequested_, default
+      // off) because it depends on the driver, and it is forced off after repeated crashes so
+      // a bad driver cannot lock the host into a crash loop. Passed explicitly each launch so
+      // the value the child sees is always this decision, not whatever the environment held.
+      const bool nv12Surface = nv12SurfaceRequested_.load(std::memory_order_relaxed) &&
+                               !nv12SurfaceForcedOff;
+      SetEnvironmentVariableW(L"REMOTE60_NATIVE_NV12_SURFACE", nv12Surface ? L"1" : L"0");
 
-      AppendLogLineOnce("[host-app] starting the streaming host (tune=low_latency)");
+      AppendLogLineOnce(nv12Surface
+                            ? "[host-app] starting the streaming host (tune=low_latency, nv12-surface=on)"
+                            : "[host-app] starting the streaming host (tune=low_latency)");
+      const uint64_t spawnTickMs = GetTickCount64();
 
       if (!CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, TRUE,
                           CREATE_NO_WINDOW, nullptr, executable_dir().c_str(), &si, &pi)) {
@@ -380,9 +408,28 @@ class StreamingHostProcess {
       childAlive_.store(true, std::memory_order_relaxed);
       WaitForSingleObject(pi.hProcess, INFINITE);
       childAlive_.store(false, std::memory_order_relaxed);
+      DWORD childExitCode = 0;
+      GetExitCodeProcess(pi.hProcess, &childExitCode);
+      const uint64_t ranMs = GetTickCount64() - spawnTickMs;
       if (reader.joinable()) reader.join();
       if (readEnd) CloseHandle(readEnd);
-      AppendLogLineOnce("[host-app] the streaming host exited");
+      // A nonzero exit within a few seconds is a crash, not a session that ran and ended.
+      // Only those count toward the streak; a host that streamed for a while and then a
+      // client left is a clean exit and resets it.
+      const bool crashed = (childExitCode != 0) && (ranMs < 15000);
+      if (crashed) {
+        ++crashStreak;
+        char line[160];
+        std::snprintf(line, sizeof(line),
+                      "[host-app] streaming host exited abnormally code=%lu ranMs=%llu streak=%u%s",
+                      static_cast<unsigned long>(childExitCode),
+                      static_cast<unsigned long long>(ranMs), crashStreak,
+                      (crashStreak >= 2 && nv12Surface) ? " -- disabling nv12 surface" : "");
+        AppendLogLineOnce(line);
+      } else {
+        crashStreak = 0;
+        AppendLogLineOnce("[host-app] the streaming host exited");
+      }
       {
         std::lock_guard<std::mutex> lock(mu_);
         if (child_.hProcess) {
@@ -393,7 +440,13 @@ class StreamingHostProcess {
       }
       if (!running_.load(std::memory_order_relaxed)) break;
       restarts_.fetch_add(1, std::memory_order_relaxed);
-      for (int i = 0; i < 20 && running_.load(std::memory_order_relaxed); ++i) Sleep(100);
+      // Ordinary relaunch is 2s. A crash streak backs off so a wedged driver or a boot-time
+      // failure does not spin: 2s, 4s, 6s ... capped at 30s.
+      const int relaunchTicks =
+          crashStreak >= 2 ? std::min<int>(300, 20 * crashStreak) : 20;
+      for (int i = 0; i < relaunchTicks && running_.load(std::memory_order_relaxed); ++i) {
+        Sleep(100);
+      }
     }
   }
 
@@ -408,6 +461,19 @@ class StreamingHostProcess {
   std::atomic<bool> running_{false};
   std::atomic<bool> childAlive_{false};
   std::atomic<uint32_t> restarts_{0};
+  // GPU surface encode, opt-in. Off by default because it depends on the driver; a user whose
+  // GPU is contended by a game can turn it on to skip the CPU readback that stalls there, and
+  // the supervisor forces it back off if the host starts crash-looping. Takes effect on the
+  // next relaunch of the streaming host.
+  std::atomic<bool> nv12SurfaceRequested_{false};
+
+ public:
+  void SetNv12SurfaceRequested(bool on) {
+    nv12SurfaceRequested_.store(on, std::memory_order_relaxed);
+  }
+  bool Nv12SurfaceRequested() const {
+    return nv12SurfaceRequested_.load(std::memory_order_relaxed);
+  }
 };
 
 // ---------------------------------------------------------------- app state
