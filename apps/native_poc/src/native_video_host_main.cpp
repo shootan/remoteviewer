@@ -4491,10 +4491,13 @@ int main(int argc, char** argv) {
   uint64_t pendingRefitSinceUs = 0;
   constexpr uint64_t kEncodeRefitSettleUs = 400000;  // 0.4 s of stable size before re-init
   uint32_t activeFps = args.fps;
-  // The frame rate the user asked for, as distinct from whatever the encoder is running at
-  // this moment: overview mode lowers activeFps on purpose, and restoring focus from
-  // "whatever is active" would restore the lowered value. Runtime tuning moves this ceiling.
+  // What the user asked for, as distinct from whatever the encoder is running at this
+  // moment: overview mode lowers the active values on purpose, and restoring focus from
+  // "whatever is active" would restore the lowered ones. Only an explicit runtime tune of
+  // the same field moves a ceiling -- a bitrate-only tune falls back to active values for
+  // its fps/keyint arguments, and those must not leak in here.
   uint32_t userFpsCeiling = args.fps;
+  uint32_t userKeyintCeiling = args.keyint;
   uint32_t activeBitrate = abrHighBitrate;
   uint32_t activeKeyint = args.keyint;
   uint64_t activeFrameIntervalUs =
@@ -4644,7 +4647,8 @@ int main(int argc, char** argv) {
         overviewMode ? std::max<uint32_t>(15u, (userFpsCeiling * 67u) / 100u) : userFpsCeiling;
     const auto sizeChoice = remote60::native_poc::choose_abr_profile_size(
         overviewMode ? 2 : 0, targetBitrate, captureWidth, captureHeight, encodeLadderReduced);
-    const uint32_t targetKeyint = overviewMode ? std::max<uint32_t>(activeKeyint, 60u) : args.keyint;
+    const uint32_t targetKeyint =
+        overviewMode ? std::max<uint32_t>(userKeyintCeiling, 60u) : userKeyintCeiling;
     if (!apply_encoder_target(sizeChoice.width, sizeChoice.height, targetFps, targetBitrate,
                               targetKeyint)) {
       return false;
@@ -6023,6 +6027,13 @@ int main(int argc, char** argv) {
       uint32_t targetBitrate = requestedBitrate;
       uint32_t targetKeyint = runtimeTuneKeyint.load(std::memory_order_acquire);
       uint32_t targetFps = runtimeTuneFps.load(std::memory_order_acquire);
+      // Explicitness is recorded before the fallbacks fill the gaps: the fallbacks are the
+      // CURRENT values, and only what the user actually asked for may move a ceiling. A
+      // bitrate-only tune sent while overview mode has activeFps lowered would otherwise
+      // write that lowered value into userFpsCeiling -- the exact contamination the ceiling
+      // exists to prevent, back in through a side door.
+      const bool fpsExplicit = targetFps >= 1;
+      const bool keyintExplicit = targetKeyint >= 1;
       if (targetBitrate < 100000) targetBitrate = activeBitrate;
       if (targetKeyint < 1) targetKeyint = activeKeyint;
       if (targetFps < 1) targetFps = activeFps;
@@ -6073,7 +6084,8 @@ int main(int argc, char** argv) {
           break;
         }
         encodeLadderReduced = ladderReducedNext;
-        userFpsCeiling = targetFps;
+        if (fpsExplicit) userFpsCeiling = targetFps;
+        if (keyintExplicit) userKeyintCeiling = targetKeyint;
         runtimeTuneManualOverride = false;
         abrCooldownUntilUs = nowUs + 3000000ULL;
         abrGoodSeconds = 0;
