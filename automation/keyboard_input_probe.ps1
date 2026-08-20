@@ -75,19 +75,20 @@ foreach ($i in 1..4) { [KeyProbe]::Bare([KeyProbe]::V, 0x25); Start-Sleep -Milli
 [void]$v.WaitForExit(20000); if (-not $v.HasExited) { $v.Kill() }
 if (-not $h.HasExited) { $h.Kill() }
 
-# The no-target line carries kind= but not key=, so keys are counted by kind. The arithmetic
-# still convicts the double-send: with it, the five a's add five keydowns and kind=5 reads 12;
-# fixed, only Enter and the arrows are keys and it reads exactly 7.
+# Every physical key -- letters included -- now takes the key-event path; only IME composition
+# results are text. So the a's, the Enters, and the arrows are all keydowns (12 total), there
+# is no [input-text] at all, and a double-send would push keydowns past 12.
+# The session-start reset emits 11 modifier ups first, so keyups run ahead of keydowns.
 $hostLog = Get-Content "$env:TEMP\key_host.txt" -ErrorAction SilentlyContinue
 $textArrived = @($hostLog | Where-Object { $_ -match '\[input-text\]' }).Count
 $keyDowns    = @($hostLog | Where-Object { $_ -match '\[input\] .*kind=5' }).Count
 $keyUps      = @($hostLog | Where-Object { $_ -match '\[input\] .*kind=6' }).Count
 
-"text units arrived : $textArrived   (expect 5: the a's once each; Enter is NOT text)"
-"keydowns arrived   : $keyDowns   (expect 7: 3 Enter + 4 Left; 12 means printables doubled)"
-"keyups arrived     : $keyUps   (expect 7)"
-if ($textArrived -eq 5 -and $keyDowns -eq 7 -and $keyUps -eq 7) {
-  "VERDICT: each keystroke reaches the host exactly once, on the right path"
+"text units arrived : $textArrived   (expect 0: nothing composes; letters go as keys now)"
+"keydowns arrived   : $keyDowns   (expect 12: 5 a + 3 Enter + 4 Left; >12 means a double-send)"
+"keyups arrived     : $keyUps   (expect >=12: 12 releases + 11 session-start modifier ups)"
+if ($textArrived -eq 0 -and $keyDowns -eq 12 -and $keyUps -ge 12) {
+  "VERDICT: each keystroke reaches the host exactly once, as a key event"
 } else {
   "VERDICT: INCOMPLETE"
 }
