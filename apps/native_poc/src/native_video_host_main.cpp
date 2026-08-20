@@ -7803,6 +7803,21 @@ int main(int argc, char** argv) {
           const uint32_t minSevereFpsX100 = args.fps * (abrQualityFirst ? 45u : 35u);
           const bool abrWarmupDone = (t >= (startUs + 4000000ULL));
 
+          // A second in which the host offered almost no frames carries no usable evidence
+          // either way. The client's relative-lag metric is a delay-variation estimate over
+          // that second's samples, and 2-4 samples let a single outlier -- or the decoder
+          // holding output across a sparse cadence -- read as latency the network never had.
+          // A static desktop (frame gating) is the common case: the picture was still, the
+          // client decoded a handful of frames, and the old code took that for congestion and
+          // demoted, then recovered on motion, then demoted again -- the quality seen flapping
+          // between sharp and soft while simply reading the screen. sentFrames is this tick's
+          // real send cadence (reset each stats second), which is what the discarded
+          // queuePushPerSec never was. When evidence is this thin, hold the profile and let a
+          // second with real motion decide against the unchanged thresholds.
+          const bool hostOfferSparse =
+              (sentFrames < std::max<uint64_t>(2, static_cast<uint64_t>(args.fps) / 2)) ||
+              frameGatingStaticMode;
+
           const uint64_t severeLatencyUs = abrQualityFirst ? 170000ULL : 150000ULL;
           const uint64_t severeTailUs = abrQualityFirst ? 140000ULL : 110000ULL;
           const uint64_t moderateLatencyUs = abrQualityFirst ? 145000ULL : 125000ULL;
@@ -7829,9 +7844,14 @@ int main(int argc, char** argv) {
                clAvgDecodeTailUs > emergencyTailUs);
           const bool severeDownByHost = (!metricsFresh && cb2eAvgUs > (abrQualityFirst ? 110000ULL : 90000ULL));
           const bool moderateDownByHost = (!metricsFresh && cb2eAvgUs > (abrQualityFirst ? 90000ULL : 70000ULL));
-          const bool severeDown = abrWarmupDone && (severeDownByClient || severeDownByHost);
-          const bool moderateDown = abrWarmupDone && (moderateDownByClient || moderateDownByHost);
-          const bool emergencyDown = abrWarmupDone && emergencyDownByClient;
+          // !hostOfferSparse on every up/down verdict: a sparse second neither degrades nor
+          // recovers the profile. The pressure and good counters below fall to their else
+          // branch and reset, so the profile holds until a second with real cadence arrives.
+          const bool severeDown =
+              abrWarmupDone && !hostOfferSparse && (severeDownByClient || severeDownByHost);
+          const bool moderateDown =
+              abrWarmupDone && !hostOfferSparse && (moderateDownByClient || moderateDownByHost);
+          const bool emergencyDown = abrWarmupDone && !hostOfferSparse && emergencyDownByClient;
 
           if (severeDown) {
             ++abrSeverePressureSeconds;
@@ -7845,12 +7865,12 @@ int main(int argc, char** argv) {
           }
 
           const bool goodForLowToMid =
-              metricsFresh &&
+              metricsFresh && !hostOfferSparse &&
               (clAvgLatencyUs < 90000ULL) &&
               (clAvgDecodeTailUs < 65000ULL) &&
               (clDecodedFpsX100 >= minOkayFpsX100);
           const bool goodForMidToHigh =
-              metricsFresh &&
+              metricsFresh && !hostOfferSparse &&
               (clAvgLatencyUs < 75000ULL) &&
               (clAvgDecodeTailUs < 50000ULL) &&
               (clDecodedFpsX100 >= minGoodFpsX100);
