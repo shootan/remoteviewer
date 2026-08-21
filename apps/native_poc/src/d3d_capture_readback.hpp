@@ -31,6 +31,11 @@ struct CaptureFrameMeta {
   uint64_t captureAgeAtCallbackUs = 0;
   uint64_t captureClockSkewUs = 0;
   uint64_t streamGeneration = 0;
+  // Capture attachment (session) cookie the frame was submitted under. The host bumps this on
+  // every pool recreate; a readback completion whose cookie no longer matches the live one
+  // belonged to a previous attachment and is dropped instead of published under the new target.
+  // 0 means "no cookie carried" (e.g. the GDI path) and is never checked.
+  uint64_t attachmentCookie = 0;
   // Callback-side timings, filled by Submit().
   uint64_t d3dWaitUs = 0;
   uint64_t submitCopyUs = 0;

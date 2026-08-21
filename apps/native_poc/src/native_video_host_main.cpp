@@ -4681,8 +4681,14 @@ int main(int argc, char** argv) {
     return true;
   };
 
-  auto apply_confirmed_capture_geometry = [&](uint32_t newW, uint32_t newH, const char* reason) {
-    if (captureWindowModeActive) return;                 // window drag keeps the 0.4s settle
+  auto apply_confirmed_capture_geometry = [&](uint32_t newW, uint32_t newH, const char* reason,
+                                              bool allowWindowOverride = false) {
+    // An interactive window DRAG keeps the 0.4s settle path (per-frame MFT re-init would thrash),
+    // so it bails here. A CONFIRMED window selection passes allowWindowOverride=true so the encode
+    // target is re-fit to the final window geometry immediately -- otherwise the first IDR goes out
+    // at the pre-selection encode size and a second, new-size IDR follows a frame later, forcing the
+    // client to reconfigure twice and fire a keyframe-request storm.
+    if (captureWindowModeActive && !allowWindowOverride) return;
     if (newW < 2 || newH < 2) return;
     if (newW == encodeSourceW && newH == encodeSourceH) return;  // already fit to this source
     encodeSourceW = newW;
@@ -4850,6 +4856,26 @@ int main(int argc, char** argv) {
 
   std::mutex captureResourceMu;
   std::atomic<uint32_t> captureSizeChangePending{0};
+  // Capture attachment (session) cookie. Bumped by detach_capture_session() on the main thread
+  // before any pool recreate; a capture callback or readback completion that began under the
+  // previous attachment sees the change and drops its frame instead of stamping it with the
+  // post-recreate target/generation. Hardens the recreate transition race.
+  std::atomic<uint64_t> captureAttachmentCookie{1};
+  // WGC ContentSize gate. A WGC frame-pool surface is a FIXED buffer size (captureWidth x
+  // captureHeight, chosen at pool creation); frame.ContentSize() is the actual content region and
+  // shrinks/grows with the window. The callback records a mismatching content size here and drops
+  // the frame; the main thread settles then recreates the pool at the new size (the callback thread
+  // must never recreate capture resources itself).
+  std::atomic<uint32_t> wgcContentSizeMismatchPending{0};
+  std::atomic<uint32_t> wgcPendingContentW{0};
+  std::atomic<uint32_t> wgcPendingContentH{0};
+  std::atomic<uint64_t> wgcContentSizeMismatchDrops{0};
+  // Main-thread-only settle tracking + recreate telemetry for the WGC ContentSize gate.
+  uint32_t wgcSettleTrackW = 0;
+  uint32_t wgcSettleTrackH = 0;
+  uint64_t wgcSettleSinceUs = 0;
+  uint64_t wgcPoolRecreates = 0;
+  constexpr uint64_t kWgcContentSettleUs = 100000;  // 0.1s of a stable content size before recreate
   const uint32_t captureStagingSlotCount =
       std::max<uint32_t>(3u, static_cast<uint32_t>(captureFramePoolBuffers + 1));
   auto create_staging = [&](uint32_t srcW, uint32_t srcH) -> bool {
@@ -4972,6 +4998,18 @@ int main(int argc, char** argv) {
                          const remote60::native_poc::CaptureFrameMeta& meta,
                          uint64_t gpuPendingUs, uint64_t workerMapUs, uint64_t workerMemcpyUs) {
     if (!payload || payload->empty() || frameW < 2 || frameH < 2) return;
+    // Drop a readback completion whose Submit happened under a previous capture attachment: a pool
+    // recreate bumped the cookie in between, so these pixels belong to the old target/geometry. The
+    // stream-generation check downstream does not catch a same-generation size-change recreate (the
+    // WGC ContentSize path and captureSizeChangePending keep the generation), so the cookie is what
+    // makes that case safe. Release the NV12 slot first or the zero-copy ring leaks.
+    if (meta.attachmentCookie != 0 &&
+        meta.attachmentCookie != captureAttachmentCookie.load(std::memory_order_acquire)) {
+      if (meta.nv12Slot >= 0) {
+        captureReadback.ReleaseNv12Slot(meta.nv12Slot, meta.nv12Generation);
+      }
+      return;
+    }
     const uint64_t queuePushUs = qpc_now_us();
     lastPublishUs.store(queuePushUs, std::memory_order_release);
     const uint64_t prevCallbackUs = lastCallbackUs.load(std::memory_order_acquire);
@@ -5103,6 +5141,7 @@ int main(int argc, char** argv) {
     meta.captureAgeAtCallbackUs = captureAgeAtCallbackUs;
     meta.captureClockSkewUs = captureClockSkewUs;
     meta.streamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
+    meta.attachmentCookie = captureAttachmentCookie.load(std::memory_order_acquire);
     if (captureWindowModeActive && captureWindowClientOnlyActive) {
       const HWND cropHwnd = reinterpret_cast<HWND>(
           static_cast<uintptr_t>(hostCaptureTargetHwnd.load(std::memory_order_acquire)));
@@ -5133,6 +5172,10 @@ int main(int argc, char** argv) {
     token = pool.FrameArrived([&](Direct3D11CaptureFramePool const& sender,
                                   winrt::Windows::Foundation::IInspectable const&) {
       if (stop.load()) return;
+      // Snapshot the capture attachment cookie on entry, before reading any capture geometry or
+      // generation. If a main-thread recreate bumps it while this callback runs, the pre-publish
+      // recheck below drops the frame instead of stamping it with the new target/generation.
+      const uint64_t myAttachmentCookie = captureAttachmentCookie.load(std::memory_order_acquire);
       try {
         auto latest = sender.TryGetNextFrame();
         if (!latest) return;
@@ -5141,6 +5184,31 @@ int main(int argc, char** argv) {
           latest = newer;
         }
         if (!streamControlActive.load(std::memory_order_acquire)) return;
+
+        // A WGC frame-pool surface is a FIXED buffer size (captureWidth x captureHeight, chosen when
+        // the pool was created); frame.ContentSize() is the actual content region and shrinks/grows
+        // with the window. Copying the whole surface would fold the stale size-delta band (undefined
+        // pixels beyond ContentSize) into the encoded frame -- that reads as "an old frame mixed into
+        // the current one". Microsoft's own sample gates on ContentSize and recreates the pool when
+        // it changes. Here the callback NEVER recreates capture resources: it records the pending
+        // content size + a flag and drops the frame, and the main thread settles then recreates.
+        const auto contentSize = latest.ContentSize();
+        const uint32_t contentW = contentSize.Width > 0 ? static_cast<uint32_t>(contentSize.Width) : 0;
+        const uint32_t contentH = contentSize.Height > 0 ? static_cast<uint32_t>(contentSize.Height) : 0;
+        uint32_t poolW = 0;
+        uint32_t poolH = 0;
+        {
+          std::lock_guard<std::mutex> lk(captureResourceMu);
+          poolW = captureWidth;
+          poolH = captureHeight;
+        }
+        if (contentW >= 2 && contentH >= 2 && (contentW != poolW || contentH != poolH)) {
+          wgcContentSizeMismatchDrops.fetch_add(1, std::memory_order_relaxed);
+          wgcPendingContentW.store(contentW, std::memory_order_release);
+          wgcPendingContentH.store(contentH, std::memory_order_release);
+          wgcContentSizeMismatchPending.store(1, std::memory_order_release);
+          return;  // drop; the main thread will settle then recreate the pool at the new size
+        }
 
         auto src = SurfaceToTexture(latest.Surface());
         if (!src) return;
@@ -5181,6 +5249,10 @@ int main(int argc, char** argv) {
             }
           }
         }
+        // A recreate may have started while this callback was running. If the attachment cookie
+        // moved, this frame belongs to the previous attachment -- drop it rather than publish it
+        // under the new target/generation.
+        if (captureAttachmentCookie.load(std::memory_order_acquire) != myAttachmentCookie) return;
         publish_captured_texture(src.Get(), callbackUs, sourceCaptureUs, captureAgeAtCallbackUs,
                                  captureClockSkewUs, true);
       } catch (...) {
@@ -5189,6 +5261,10 @@ int main(int argc, char** argv) {
   };
 
   auto detach_capture_session = [&]() {
+    // Invalidate any capture callback or readback completion that began under the current
+    // attachment before we tear the pool down: bumping the cookie makes that in-flight work drop
+    // instead of being published under the post-recreate target/geometry/generation.
+    captureAttachmentCookie.fetch_add(1, std::memory_order_acq_rel);
     captureSessionReady.store(false, std::memory_order_release);
     if (dxgiCaptureStarted) {
       dxgiCaptureSession.Stop();
@@ -5985,6 +6061,22 @@ int main(int argc, char** argv) {
     lastCaptureUsForInterval.store(0, std::memory_order_release);
     lastCallbackUs.store(0, std::memory_order_release);
     resetHostTimelineAnchors();
+    // Confirmed window selection: re-fit the encoder to the FINAL window geometry now (before the
+    // selection first-frame gate opens), so the first IDR is already at the final size. Without this,
+    // apply_confirmed_capture_geometry (called inside restart_capture_session) bails for window mode
+    // and the encoder stays at the pre-selection size -- the client would get an old-size IDR, then a
+    // new-size IDR a frame later, and reconfigure twice. A window DRAG still returns early there and
+    // keeps the 0.4s settle. The desktop selection already re-fit through the non-window path.
+    if (nextCaptureWindowModeActive && useH264) {
+      uint32_t finalW = 0;
+      uint32_t finalH = 0;
+      {
+        std::lock_guard<std::mutex> lk(captureResourceMu);
+        finalW = captureWidth;
+        finalH = captureHeight;
+      }
+      apply_confirmed_capture_geometry(finalW, finalH, "window-select", /*allowWindowOverride=*/true);
+    }
     forceKeyNext = true;
     selectionFirstKeyframePendingGeneration = nextCaptureStreamGeneration;
     selectionFirstKeyframeDropCount = 0;
@@ -6695,6 +6787,68 @@ int main(int argc, char** argv) {
               std::cerr << "[native-video-host] capture-window rebind restart failed\n";
             }
           }
+        }
+      }
+    }
+    // WGC ContentSize settle + main-thread pool recreate. The capture callback dropped frames whose
+    // ContentSize != the pool geometry and recorded the pending content size here; during an
+    // interactive window drag that size churns every frame. Wait for it to hold steady for a short
+    // settle window, then recreate the pool + readback at the new size on THIS (main) thread --
+    // the callback thread must never recreate capture resources. restart_capture_session() rebuilds
+    // the WGC pool at item.Size() (the settled window size) and create_staging at the new geometry.
+    if (wgcContentSizeMismatchPending.load(std::memory_order_acquire) != 0) {
+      const uint32_t pendW = wgcPendingContentW.load(std::memory_order_acquire);
+      const uint32_t pendH = wgcPendingContentH.load(std::memory_order_acquire);
+      uint32_t curCapW = 0;
+      uint32_t curCapH = 0;
+      {
+        std::lock_guard<std::mutex> lk(captureResourceMu);
+        curCapW = captureWidth;
+        curCapH = captureHeight;
+      }
+      if (pendW < 2 || pendH < 2 || (pendW == curCapW && pendH == curCapH)) {
+        // Content settled back to the current pool geometry -- nothing to recreate.
+        wgcContentSizeMismatchPending.store(0, std::memory_order_release);
+        wgcSettleTrackW = 0;
+        wgcSettleTrackH = 0;
+        wgcSettleSinceUs = 0;
+      } else if (pendW != wgcSettleTrackW || pendH != wgcSettleTrackH) {
+        // Size still moving: (re)arm the settle timer on the newest candidate.
+        wgcSettleTrackW = pendW;
+        wgcSettleTrackH = pendH;
+        wgcSettleSinceUs = nowUs;
+      } else if (nowUs - wgcSettleSinceUs >= kWgcContentSettleUs) {
+        // Stable for the settle window: recreate the pool/readback at the new size on the main thread.
+        wgcContentSizeMismatchPending.store(0, std::memory_order_release);
+        wgcSettleTrackW = 0;
+        wgcSettleTrackH = 0;
+        wgcSettleSinceUs = 0;
+        lastCaptureRestartUs = nowUs;
+        flush_capture_pipeline_state("wgc-content-size");
+        if (restart_capture_session()) {
+          ++captureRestartCount;
+          ++wgcPoolRecreates;
+          captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+          lastCaptureUsForInterval.store(0, std::memory_order_release);
+          lastCallbackUs.store(0, std::memory_order_release);
+          resetHostTimelineAnchors();
+          // Force an IDR at the (now correct) geometry. An interactive drag still lets the encode
+          // size catch up on the 0.4s refit path; only the capture pool was resized here.
+          forceKeyNext = true;
+          uint32_t newCapW = 0;
+          uint32_t newCapH = 0;
+          {
+            std::lock_guard<std::mutex> lk(captureResourceMu);
+            newCapW = captureWidth;
+            newCapH = captureHeight;
+          }
+          std::cout << "[native-video-host] wgc-content-size pool recreated content="
+                    << pendW << "x" << pendH << " capture=" << newCapW << "x" << newCapH
+                    << " poolRecreates=" << wgcPoolRecreates
+                    << " restartCount=" << captureRestartCount << "\n";
+        } else {
+          std::cerr << "[native-video-host] wgc-content-size pool recreate failed content="
+                    << pendW << "x" << pendH << "\n";
         }
       }
     }
@@ -8250,6 +8404,8 @@ int main(int argc, char** argv) {
                   << " queueWaitTimeoutCount=" << queueWaitTimeoutCount
                   << " queueWaitNoWorkCount=" << queueWaitNoWorkCount
                   << " captureRestarts=" << captureRestartCount
+                  << " wgcContentSizeMismatchDrops=" << wgcContentSizeMismatchDrops.load(std::memory_order_relaxed)
+                  << " wgcPoolRecreates=" << wgcPoolRecreates
                   << " captureWindowRebindCount=" << hostCaptureRebindCount.load(std::memory_order_relaxed)
                   << " captureTargetPid=" << hostCaptureTargetPid.load(std::memory_order_relaxed)
                   << " captureTargetProc=" << targetProcessName
@@ -8340,6 +8496,8 @@ int main(int argc, char** argv) {
                   << " queueWaitTimeoutCount=" << queueWaitTimeoutCount
                   << " queueWaitNoWorkCount=" << queueWaitNoWorkCount
                   << " captureRestarts=" << captureRestartCount
+                  << " wgcContentSizeMismatchDrops=" << wgcContentSizeMismatchDrops.load(std::memory_order_relaxed)
+                  << " wgcPoolRecreates=" << wgcPoolRecreates
                   << " captureWindowRebindCount=" << hostCaptureRebindCount.load(std::memory_order_relaxed)
                   << " captureTargetPid=" << hostCaptureTargetPid.load(std::memory_order_relaxed)
                   << " captureTargetProc=" << targetProcessName
