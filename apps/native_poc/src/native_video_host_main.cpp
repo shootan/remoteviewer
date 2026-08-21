@@ -8109,7 +8109,15 @@ int main(int argc, char** argv) {
         // cumulative (superseded especially -- it is never reset), so diff, never read absolute.
         // The snapshots are advanced every tick regardless of whether the watchdog is eligible, so
         // an eligible second always sees exactly that second's increment.
-        const uint64_t acceptedNow = captureCadenceGate.AcceptContentCount();
+        // AcceptContentCount is a plain uint64 the capture-callback thread mutates under
+        // captureCadenceMu; snapshot it under the same lock. The watchdog now restarts capture on
+        // this value, so an unlocked read is a real data race, not just a stale display. (BusyDrops
+        // and SupersededDrops are std::atomic, so they need no lock.)
+        uint64_t acceptedNow;
+        {
+          std::lock_guard<std::mutex> lk(captureCadenceMu);
+          acceptedNow = captureCadenceGate.AcceptContentCount();
+        }
         const uint64_t busyNow = captureReadback.BusyDrops();
         const uint64_t supersededNow = captureReadback.SupersededDrops();
         const uint64_t acceptedDelta =
