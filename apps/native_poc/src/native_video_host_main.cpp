@@ -4729,6 +4729,21 @@ int main(int argc, char** argv) {
   uint32_t captureFrozenPollStreak = 0;
   uint64_t captureFrozenWarnedAtUs = 0;
   uint64_t lastFrozenRestartUs = 0;
+  // Telemetry for the frozen-ring self-heal, so a real-GPU run can tell whether B-1 is actually the
+  // fix (oldest-pending age climbs to the 2s restart threshold) or whether the age keeps clearing at
+  // 50-100ms and the starvation lives in the readback path itself (the surface-only bypass, B-2).
+  // The age is a per-interval peak because a once-per-second sample of the instantaneous age would
+  // miss a spike that the restart logic (which polls every loop) does see.
+  uint64_t oldestGpuPendingPeakUs = 0;
+  // Peak GpuPending count over the interval, next to the age peak: a frozen ring pins this at the
+  // ring size while the age climbs, whereas a merely busy ring churns it low. The instantaneous
+  // age/count are also emitted, so a print catches both the interval's worst and the current state.
+  uint32_t gpuPendingCountPeak = 0;
+  // Restarts driven specifically by the frozen ring, kept apart from captureDeadRestartCount, which
+  // also counts the GDI callback-stall watchdog -- mixing them would blur which path actually fired.
+  // (A refreeze inside the escalation window is a distinct outcome, but it exits the process, so it
+  // shows up in the refroze log line rather than a counter that no later stats print would carry.)
+  uint64_t frozenRingRestartCount = 0;
   bool dxgiCaptureStarted = false;
   bool gdiCaptureStarted = false;
   std::mutex captureFallbackReasonMu;
@@ -4815,6 +4830,12 @@ int main(int argc, char** argv) {
   std::atomic<uint64_t> lastPopFrameVersion{0};
   std::atomic<uint64_t> queueDepthMax{0};
   std::atomic<uint64_t> lastCallbackUs{0};
+  // Timestamp (qpc) of the last frame actually published to the encoder ring, set in
+  // capturePublishFn on a valid payload -- distinct from lastCallbackUs, which is the capture time.
+  // The stats line reports this as lastPublishAgeUs (diagnostic only). Deliberately not reset on a
+  // restart: the age then honestly shows the publish gap and snaps back on the first new publish,
+  // which is exactly the recovery signal we want to see after a frozen-ring restart.
+  std::atomic<uint64_t> lastPublishUs{0};
   std::atomic<uint64_t> lastCaptureUsForInterval{0};
   std::atomic<uint64_t> firstCallbackLoggedGeneration{0};
   auto describe_active_capture_target = [&]() -> std::string {
@@ -4846,6 +4867,7 @@ int main(int argc, char** argv) {
                          uint64_t gpuPendingUs, uint64_t workerMapUs, uint64_t workerMemcpyUs) {
     if (!payload || payload->empty() || frameW < 2 || frameH < 2) return;
     const uint64_t queuePushUs = qpc_now_us();
+    lastPublishUs.store(queuePushUs, std::memory_order_release);
     const uint64_t prevCallbackUs = lastCallbackUs.load(std::memory_order_acquire);
     const uint64_t prevCaptureUs = lastCaptureUsForInterval.load(std::memory_order_acquire);
     uint64_t callbackIntervalUs = 0;
@@ -6469,6 +6491,8 @@ int main(int argc, char** argv) {
         !captureWindowModeActive.load(std::memory_order_acquire) &&
         activeDesktopBackend != DesktopCaptureBackend::Gdi) {
       const uint64_t oldestPendingUs = captureReadback.OldestGpuPendingAgeUs();
+      oldestGpuPendingPeakUs = std::max(oldestGpuPendingPeakUs, oldestPendingUs);
+      gpuPendingCountPeak = std::max(gpuPendingCountPeak, captureReadback.GpuPendingCount());
       if (oldestPendingUs >= kCaptureFrozenWarnUs && captureFrozenWarnedAtUs == 0) {
         captureFrozenWarnedAtUs = nowUs;
         std::cout << "[native-video-host] capture readback slow oldestPendingUs=" << oldestPendingUs
@@ -6501,6 +6525,23 @@ int main(int argc, char** argv) {
                     << (kCaptureFrozenEscalationWindowUs / 1000000)
                     << "s oldestPendingUs=" << oldestPendingUs
                     << "; exiting for a full process restart\n";
+          // A machine-readable twin of the line above: an in-process escalation counter would be
+          // pointless (the process exits before another stats print), so this single record carries
+          // the last state the frozen ring reached and pairs with host_app.log's exit-code-3 line
+          // to reconstruct a cross-process recovery across the restart. (Codex.)
+          const uint64_t refreezeLastPubUs = lastPublishUs.load(std::memory_order_acquire);
+          const uint64_t refreezeLastPubAgeUs =
+              (refreezeLastPubUs > 0 && nowUs > refreezeLastPubUs) ? nowUs - refreezeLastPubUs : 0;
+          std::cout << "[native-video-host] capture-recovery reason=frozen-ring-refreeze"
+                    << " action=process-restart exitCode=3"
+                    << " oldestPendingUs=" << oldestPendingUs
+                    << " gpuPendingCount=" << captureReadback.GpuPendingCount()
+                    << " frozenRingRestarts=" << frozenRingRestartCount
+                    << " captureRestarts=" << captureRestartCount
+                    << " lastPublishAgeUs=" << refreezeLastPubAgeUs
+                    << " backend=" << desktop_capture_backend_name(activeDesktopBackend)
+                    << " windowSec=" << (kCaptureFrozenEscalationWindowUs / 1000000)
+                    << "\n";
           std::cout.flush();
           std::cerr.flush();
           return 3;
@@ -6516,8 +6557,10 @@ int main(int argc, char** argv) {
           resetHostTimelineAnchors();
           forceKeyNext = true;
           ++captureDeadRestartCount;
+          ++frozenRingRestartCount;
           std::cout << "[native-video-host] capture session restarted reason=frozen-ring count="
                     << captureRestartCount << " captureDeadRestartCount=" << captureDeadRestartCount
+                    << " frozenRingRestarts=" << frozenRingRestartCount
                     << " oldestPendingUs=" << oldestPendingUs << "\n";
         } else {
           std::cerr << "[native-video-host] frozen-ring restart failed oldestPendingUs="
@@ -7756,6 +7799,13 @@ int main(int argc, char** argv) {
                 ? (senderSendDurSumUs.load(std::memory_order_relaxed) / senderSendCountNow)
                 : 0;
         if (statsPrintDue) {
+        // Age of the last frame published to the encoder -- diagnostic only. A frozen ring shows
+        // this climbing in lockstep with oldestGpuPendingPeakUs. Per Codex: report it, but never
+        // drive the watchdog off it, since a static change-driven desktop is legitimately silent.
+        const uint64_t statsNowUs = qpc_now_us();
+        const uint64_t lastPublishAtUs = lastPublishUs.load(std::memory_order_acquire);
+        const uint64_t lastPublishAgeUs =
+            (lastPublishAtUs > 0 && statsNowUs > lastPublishAtUs) ? statsNowUs - lastPublishAtUs : 0;
         std::cout << "[native-video-host] encodedFrames=" << encodedFrames
                   << " sentFrames=" << sentFrames
                   << " queuePushCount=" << queuePushCount
@@ -7812,6 +7862,12 @@ int main(int argc, char** argv) {
                   << " captureMemcpyMaxUs=" << captureMemcpyMaxUs
                   << " captureUnmapWaitAvgUs=" << captureUnmapWaitAvgUs
                   << " captureUnmapWaitMaxUs=" << captureUnmapWaitMaxUs
+                  << " oldestGpuPendingPeakUs=" << oldestGpuPendingPeakUs
+                  << " oldestGpuPendingNowUs=" << captureReadback.OldestGpuPendingAgeUs()
+                  << " gpuPendingCount=" << captureReadback.GpuPendingCount()
+                  << " gpuPendingCountPeak=" << gpuPendingCountPeak
+                  << " frozenRingRestarts=" << frozenRingRestartCount
+                  << " lastPublishAgeUs=" << lastPublishAgeUs
                   << " captureUnmapAvgUs=" << captureUnmapAvgUs
                   << " captureUnmapMaxUs=" << captureUnmapMaxUs
                   << " mbps=" << mbps
@@ -8210,6 +8266,15 @@ int main(int argc, char** argv) {
       captureMemcpyMaxUs = 0;
       captureUnmapWaitSumUs = 0;
       captureUnmapWaitMaxUs = 0;
+      // The frozen-ring peaks must span the whole print interval, not a single tick. Everything
+      // else here resets every second and is sampled once per print, but a freeze can spike in any
+      // of the ~30 ticks between prints (statsPrintEverySec defaults to 30), so a per-second reset
+      // would throw those windows away and the peak would only ever show the last second before a
+      // print. Reset them only once the value has actually been printed. (Codex.)
+      if (statsPrintDue) {
+        oldestGpuPendingPeakUs = 0;
+        gpuPendingCountPeak = 0;
+      }
       captureUnmapSumUs = 0;
       captureUnmapMaxUs = 0;
       gpuScaleTimedCount = 0;

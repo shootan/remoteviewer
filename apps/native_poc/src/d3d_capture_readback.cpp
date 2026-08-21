@@ -245,6 +245,15 @@ uint64_t D3dCaptureReadbackPipeline::OldestGpuPendingAgeUs() {
   return nowUs > oldestSubmitUs ? nowUs - oldestSubmitUs : 0;
 }
 
+uint32_t D3dCaptureReadbackPipeline::GpuPendingCount() {
+  std::lock_guard<std::mutex> lk(slotMu_);
+  uint32_t pending = 0;
+  for (const auto& s : slots_) {
+    if (s.state == SlotState::GpuPending) ++pending;
+  }
+  return pending;
+}
+
 bool D3dCaptureReadbackPipeline::EnsureNv12Locked(uint32_t outW, uint32_t outH) {
   if (nv12Broken_ || !vpEnumerator_) return false;
   constexpr size_t kNv12Slots = 4;

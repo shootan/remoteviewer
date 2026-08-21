@@ -139,6 +139,12 @@ class D3dCaptureReadbackPipeline {
   // oldest-pending age is 0).
   uint64_t OldestGpuPendingAgeUs();
 
+  // Count of submits currently stuck in GpuPending. The age above says how old the freeze is; this
+  // says how much of the ring it has swallowed. Reported next to it in the per-second stats so a
+  // real-GPU run can tell a frozen ring (age climbing toward the restart threshold, count pinned at
+  // the ring size) from a merely busy one (age small, count churning).
+  uint32_t GpuPendingCount();
+
  private:
   enum class SlotState : uint8_t { Free, GpuPending };
 
