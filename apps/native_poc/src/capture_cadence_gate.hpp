@@ -42,17 +42,16 @@ class CaptureCadenceGate {
     offerIntervalUs_ = 0;
     lastOfferUs_ = 0;
     nextContentDueUs_ = 0;
-    nextPointerDueUs_ = 0;
   }
 
   /** True when this frame should be encoded. `hasNewContent` is false for an offer that
    *  carried no desktop update -- a pointer-only report -- which says nothing about the rate
    *  at which content is arriving and must not be measured as if it did.
    *
-   *  Content and pointer-only offers pace on independent clocks. A pointer-only offer that
-   *  landed on the shared clock could claim the next content slot and, because duplication is
-   *  change-driven and never re-sends those pixels, silently drop the real frame that followed
-   *  (a right-click menu that then never appeared). Only content advances the content clock. */
+   *  Only content advances the content clock. A pointer-only offer on the old shared clock could
+   *  claim the next content slot and, because duplication is change-driven and never re-sends
+   *  those pixels, silently drop the real frame that followed (a right-click menu that then never
+   *  appeared); pointer-only offers are now dropped outright and never touch the clock. */
   bool ShouldAccept(uint64_t nowUs, bool hasNewContent) {
     if (hasNewContent) {
       if (lastOfferUs_ != 0 && nowUs > lastOfferUs_) {
@@ -87,20 +86,17 @@ class CaptureCadenceGate {
       return true;
     }
 
-    // Pointer-only offers throttle on their own clock so cursor motion flows at the cadence
-    // rate without ever consuming a content slot. Dropping one here is harmless: the next
-    // cursor move re-offers the position.
+    // Pointer-only offers carry no desktop update. The DXGI backend does not composite the
+    // hardware cursor into the desktop texture (capture_backend_dxgi.cpp forwards only
+    // AccumulatedFrames), so a pointer-only frame is byte-identical to the last content frame:
+    // the frame-gating stage downstream would drop it anyway, after paying for a full readback.
+    // Drop it here so it never advances the content clock -- the menu-loss bug this fix is about
+    // -- and never costs a readback. WGC composites the cursor and delivers motion as content
+    // (hasNewContent=true), taking the branch above; if DXGI cursor composition is ever added, a
+    // separate pointer cadence (min(activeFps, 30)) can re-enable these.
     ++offerPointerCount_;
-    if (nextPointerDueUs_ != 0 && nowUs + earlyToleranceUs < nextPointerDueUs_) {
-      ++gateDropPointerCount_;
-      return false;
-    }
-    const bool pointerPhaseStillUseful =
-        nextPointerDueUs_ != 0 && nowUs <= nextPointerDueUs_ + intervalUs * 2;
-    nextPointerDueUs_ =
-        pointerPhaseStillUseful ? nextPointerDueUs_ + intervalUs : nowUs + intervalUs;
-    ++acceptPointerCount_;
-    return true;
+    ++gateDropPointerCount_;
+    return false;
   }
 
   uint64_t EffectiveIntervalUs() const { return requestedIntervalUs_; }
@@ -113,14 +109,12 @@ class CaptureCadenceGate {
   uint64_t GateDropContentCount() const { return gateDropContentCount_; }
   uint64_t GateDropPointerCount() const { return gateDropPointerCount_; }
   uint64_t AcceptContentCount() const { return acceptContentCount_; }
-  uint64_t AcceptPointerCount() const { return acceptPointerCount_; }
 
  private:
   uint64_t requestedIntervalUs_ = 33333;
   uint64_t offerIntervalUs_ = 0;
   uint64_t lastOfferUs_ = 0;
   uint64_t nextContentDueUs_ = 0;
-  uint64_t nextPointerDueUs_ = 0;
   // Non-atomic: the gate runs on the capture-callback thread; the accessors are read for
   // telemetry only, where a torn read of a monotonic counter is harmless.
   uint64_t offerContentCount_ = 0;
@@ -128,7 +122,6 @@ class CaptureCadenceGate {
   uint64_t gateDropContentCount_ = 0;
   uint64_t gateDropPointerCount_ = 0;
   uint64_t acceptContentCount_ = 0;
-  uint64_t acceptPointerCount_ = 0;
   uint32_t earlyTolerancePercent_ = 25;
   bool enabled_ = true;
 };

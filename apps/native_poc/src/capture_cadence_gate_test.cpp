@@ -158,9 +158,12 @@ void TestPointerOnlyOfferDoesNotStealContentSlot() {
   expect(gate.ShouldAccept(t, true), "first content frame accepted");
 
   // A pointer-only offer arrives just past the content's next-due instant. On the old shared
-  // clock this consumed the content slot and advanced it a whole interval.
+  // clock this consumed the content slot and advanced it a whole interval. It is now dropped
+  // outright (DXGI does not composite the cursor, so the frame is byte-identical to the last
+  // content) -- what matters is that it never touches the content clock.
   const uint64_t pointerUs = t + intervalUs + 700;
-  expect(gate.ShouldAccept(pointerUs, false), "pointer-only offer accepted on its own clock");
+  expect(!gate.ShouldAccept(pointerUs, false),
+         "pointer-only offer dropped (DXGI cursor not composited)");
 
   // A real content frame a few ms later -- the right-click menu -- must still get through. Under
   // the old single-clock gate this was early-dropped against the pointer-advanced deadline.
@@ -173,16 +176,14 @@ void TestPointerOnlyOfferDoesNotStealContentSlot() {
   expect(gate.AcceptContentCount() == 2,
          "both content frames accepted, got " + std::to_string(gate.AcceptContentCount()));
 
-  // The pointer clock throttles on its own: a rapid burst of cursor moves inside one interval
-  // is thinned without ever touching the content counters.
+  // A rapid burst of cursor moves is all dropped and never touches the content counters.
   uint64_t p = contentUs + 500;
   for (int i = 0; i < 5; ++i) {
     gate.ShouldAccept(p, false);
-    p += 1000;  // 1ms apart -- far inside the 33ms interval
+    p += 1000;  // 1ms apart
   }
   expect(gate.GateDropPointerCount() >= 1,
-         "the pointer clock thins a rapid cursor burst, dropped " +
-             std::to_string(gate.GateDropPointerCount()));
+         "the pointer burst is dropped, count " + std::to_string(gate.GateDropPointerCount()));
   expect(gate.GateDropContentCount() == 0,
          "the pointer burst never gate-dropped content, got " +
              std::to_string(gate.GateDropContentCount()));
