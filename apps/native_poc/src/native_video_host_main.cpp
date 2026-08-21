@@ -1085,13 +1085,12 @@ DWORD mouse_vk_to_sendinput_flag(uint16_t kind, uint32_t vk) {
 // delivered and the session looks alive while no click ever lands.
 //
 // Checked on a short cache because it runs per input event.
-bool interactive_desktop_is_default() {
-  static std::atomic<uint64_t> lastCheckUs{0};
-  static std::atomic<bool> cached{true};
-  const uint64_t nowUs = qpc_now_us();
-  const uint64_t last = lastCheckUs.load(std::memory_order_relaxed);
-  if (last != 0 && nowUs - last < 250000ULL) return cached.load(std::memory_order_relaxed);
-
+// Fresh (uncached) query of whether the input desktop is the ordinary "Default" one. A locked
+// workstation, a UAC prompt, or any other secure desktop switches the input desktop to Winlogon,
+// which this user-session process cannot open. Split out from the cached wrapper below so callers
+// that must not trust a stale flag -- the static-screen bootstrap, which is about to paint pixels
+// -- can force a live check.
+bool interactive_desktop_is_default_uncached() {
   bool isDefault = false;
   HDESK desktop = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
   if (desktop) {
@@ -1103,6 +1102,17 @@ bool interactive_desktop_is_default() {
     CloseDesktop(desktop);
   }
   // A desktop this process cannot even open is the secure one.
+  return isDefault;
+}
+
+bool interactive_desktop_is_default() {
+  static std::atomic<uint64_t> lastCheckUs{0};
+  static std::atomic<bool> cached{true};
+  const uint64_t nowUs = qpc_now_us();
+  const uint64_t last = lastCheckUs.load(std::memory_order_relaxed);
+  if (last != 0 && nowUs - last < 250000ULL) return cached.load(std::memory_order_relaxed);
+
+  const bool isDefault = interactive_desktop_is_default_uncached();
   cached.store(isDefault, std::memory_order_relaxed);
   lastCheckUs.store(nowUs, std::memory_order_relaxed);
   return isDefault;
@@ -4862,6 +4872,30 @@ int main(int argc, char** argv) {
   std::atomic<uint64_t> lastPublishUs{0};
   std::atomic<uint64_t> lastCaptureUsForInterval{0};
   std::atomic<uint64_t> firstCallbackLoggedGeneration{0};
+  // Static-screen bootstrap cache: a memory-only copy of the last raw frame actually published,
+  // plus the identity of the capture that produced it. On a static desktop DXGI AcquireNextFrame
+  // just times out after a (re)start, so the forced keyframe has nothing to encode and a fresh
+  // viewer sits black for seconds. Keeping the last-good frame lets the main loop re-encode it once
+  // as an IDR so the picture paints immediately. Written ONLY from a real capture publish
+  // (capturePublishFn) and deliberately NOT touched by flush_capture_pipeline_state, so it survives
+  // a flush and a reattach can still use it.
+  struct BootstrapFrameCache {
+    std::shared_ptr<std::vector<uint8_t>> payload;  // BGRA pixels, post-crop
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t stride = 0;
+    uint64_t captureQpcUs = 0;      // real capture time, for replay-age telemetry only
+    uint64_t streamGeneration = 0;  // capture generation that produced these pixels
+    bool windowMode = false;
+    uint64_t selectedWindowId = 0;
+    uint64_t targetHwnd = 0;
+    uint32_t targetPid = 0;
+    uint32_t srcCaptureWidth = 0;   // pre-crop capture source dims (meta.width/height)
+    uint32_t srcCaptureHeight = 0;
+    uint32_t consoleSessionId = 0;  // WTS active console session at capture time
+  };
+  std::mutex bootstrapCacheMu;
+  BootstrapFrameCache bootstrapCache;
   auto describe_active_capture_target = [&]() -> std::string {
     const uint64_t targetHwnd = hostCaptureTargetHwnd.load(std::memory_order_acquire);
     const uint32_t targetPid = hostCaptureTargetPid.load(std::memory_order_acquire);
@@ -4904,6 +4938,27 @@ int main(int argc, char** argv) {
     }
     lastCallbackUs.store(meta.callbackUs, std::memory_order_release);
     lastCaptureUsForInterval.store(meta.captureUs, std::memory_order_release);
+    // Update the static-screen bootstrap cache from this real publish -- the ONLY writer. Copy the
+    // payload shared_ptr (do NOT move: `frame` still takes ownership below). The buffer pool
+    // recycles a payload only once its LAST holder releases, so holding this copy keeps the pixels
+    // alive and immutable until the next publish replaces it. meta.width/height are the pre-crop
+    // capture source dims; frameW/frameH are the post-crop payload dims we must encode.
+    {
+      std::lock_guard<std::mutex> lk(bootstrapCacheMu);
+      bootstrapCache.payload = payload;
+      bootstrapCache.width = frameW;
+      bootstrapCache.height = frameH;
+      bootstrapCache.stride = stride;
+      bootstrapCache.captureQpcUs = meta.captureUs;
+      bootstrapCache.streamGeneration = meta.streamGeneration;
+      bootstrapCache.windowMode = captureWindowModeActive.load(std::memory_order_acquire);
+      bootstrapCache.selectedWindowId = selectedWindowIdState.load(std::memory_order_acquire);
+      bootstrapCache.targetHwnd = hostCaptureTargetHwnd.load(std::memory_order_acquire);
+      bootstrapCache.targetPid = hostCaptureTargetPid.load(std::memory_order_acquire);
+      bootstrapCache.srcCaptureWidth = meta.width;
+      bootstrapCache.srcCaptureHeight = meta.height;
+      bootstrapCache.consoleSessionId = WTSGetActiveConsoleSessionId();
+    }
     uint64_t currentVersion = 0;
     {
       std::lock_guard<std::mutex> lk(frame.mu);
@@ -5852,6 +5907,68 @@ int main(int argc, char** argv) {
     return true;
   };
 
+  // --- Static-screen bootstrap (host main/encode thread only) -------------------------------
+  // When a new session / stream epoch appears while the desktop is idle, DXGI has no frame to hand
+  // the forced keyframe, so the viewer stays black until the screen next changes. Arm a one-shot
+  // timer on each such epoch; if no real frame is published before it fires, re-encode the cached
+  // raw frame once as a fresh IDR. Coalesced: re-arming just resets the timer (latest-epoch-wins),
+  // never queues multiples. Bootstrap replays are kept out of ABR/rate evidence -- a single sparse
+  // frame is not congestion signal.
+  constexpr uint64_t kBootstrapReplayDelayUs = 150000;  // 150ms, within the 100-250ms window
+  bool bootstrapPending = false;
+  uint64_t bootstrapDueAtUs = 0;
+  uint64_t lastSeenBootstrapEpoch = 0;
+  uint64_t bootstrapReplayCount = 0;   // telemetry: total replays served
+  uint64_t bootstrapSourceAgeUs = 0;   // telemetry: cached-frame age at the last replay
+  uint64_t bootstrapReplayEpoch = 0;   // telemetry: session epoch the last replay served
+  auto arm_bootstrap = [&](uint64_t atUs) {
+    if (!useH264) return;
+    bootstrapPending = true;
+    bootstrapDueAtUs = atUs + kBootstrapReplayDelayUs;
+  };
+  auto disarm_bootstrap = [&]() {
+    bootstrapPending = false;
+    bootstrapDueAtUs = 0;
+  };
+  // Validate the cache against the live capture identity and the CURRENT secure-desktop state, then
+  // fill the loop's frame locals from it. Returns false (leaving the screen black) if anything is
+  // stale, mismatched, or the desktop is locked/secure -- better black than a wrong picture.
+  auto bootstrap_try_fill = [&](std::shared_ptr<std::vector<uint8_t>>& outPayload, uint32_t& outW,
+                                uint32_t& outH, uint32_t& outStride, uint64_t nowUs) -> bool {
+    BootstrapFrameCache snap;
+    {
+      std::lock_guard<std::mutex> lk(bootstrapCacheMu);
+      snap = bootstrapCache;  // copies the shared_ptr (keeps pixels alive) + identity fields
+    }
+    if (!snap.payload || snap.payload->empty() || snap.width < 2 || snap.height < 2) return false;
+    // Identity: the cached pixels must belong to the target the session is watching now.
+    if (snap.windowMode != captureWindowModeActive.load(std::memory_order_acquire)) return false;
+    if (snap.selectedWindowId != selectedWindowIdState.load(std::memory_order_acquire)) return false;
+    if (snap.targetHwnd != hostCaptureTargetHwnd.load(std::memory_order_acquire)) return false;
+    if (snap.targetPid != hostCaptureTargetPid.load(std::memory_order_acquire)) return false;
+    if (snap.streamGeneration != captureStreamGenerationState.load(std::memory_order_acquire))
+      return false;
+    if (snap.consoleSessionId != WTSGetActiveConsoleSessionId()) return false;
+    {
+      std::lock_guard<std::mutex> lk(captureResourceMu);
+      if (snap.srcCaptureWidth != captureWidth || snap.srcCaptureHeight != captureHeight)
+        return false;
+    }
+    // Re-check secure/lock state live (the shared query caches ~250ms; do not trust it here).
+    if (!interactive_desktop_is_default_uncached()) return false;
+    outPayload = snap.payload;
+    outW = snap.width;
+    outH = snap.height;
+    outStride = snap.stride;
+    ++bootstrapReplayCount;
+    bootstrapSourceAgeUs = (nowUs > snap.captureQpcUs) ? (nowUs - snap.captureQpcUs) : 0;
+    bootstrapReplayEpoch = sessionEpoch.load(std::memory_order_acquire);
+    std::cout << "[native-video-host] static-screen bootstrap replay epoch=" << bootstrapReplayEpoch
+              << " ageUs=" << bootstrapSourceAgeUs << " size=" << outW << "x" << outH
+              << " gen=" << snap.streamGeneration << "\n";
+    return true;
+  };
+
   while (!stop.load()) {
     const uint64_t nowUs = qpc_now_us();
     uint64_t tickWaitUs = 0;
@@ -5859,6 +5976,16 @@ int main(int argc, char** argv) {
       break;
     }
     pump_udp_hello();
+    // A bumped session epoch means a fresh viewer/decoder; arm a one-shot bootstrap for it (latest
+    // wins). The cache is empty on the very first connect, so this is a no-op there (cold-cache is
+    // a separate follow-up); it pays off on reconnect, where the previous session left a frame.
+    {
+      const uint64_t curEpoch = sessionEpoch.load(std::memory_order_acquire);
+      if (curEpoch != lastSeenBootstrapEpoch) {
+        lastSeenBootstrapEpoch = curEpoch;
+        arm_bootstrap(nowUs);
+      }
+    }
     if (desktopBackendReqPending.exchange(false, std::memory_order_acq_rel)) {
       const uint32_t reqSeq = desktopBackendReqSeq.load(std::memory_order_acquire);
       DesktopCaptureBackend nextRequested = requestedDesktopBackend;
@@ -6091,6 +6218,9 @@ int main(int argc, char** argv) {
       }
       streamActiveApplied = true;
       forceKeyNext = true;
+      // A returning viewer on a still desktop needs a picture too; arm the one-shot bootstrap for
+      // the current epoch (coalesces with any arm from the epoch bump above).
+      arm_bootstrap(qpc_now_us());
       powerKeepalive.SetStreaming(true, true);
       std::cout << "[native-video-host] stream active; forcing keyframe\n";
     }
@@ -6649,8 +6779,33 @@ int main(int argc, char** argv) {
     uint32_t nv12H = 0;
     uint32_t queueWaitReason = 0;  // 0: normal, 1: timeout, 2: no-work
     const uint64_t queueSelectStartUs = qpc_now_us();
+    bool servedBootstrap = false;
+    if (bootstrapPending && nowUs >= bootstrapDueAtUs) {
+      // A real frame already waiting in the ring is always better than a replay; fall through to
+      // the normal pop (which disarms below). Otherwise re-encode the cached raw frame once.
+      bool realWaiting = false;
+      {
+        std::lock_guard<std::mutex> lk(frame.mu);
+        realWaiting = (frame.version != lastVersionSent) && frame.payload && !frame.payload->empty();
+      }
+      if (!realWaiting) {
+        if (bootstrap_try_fill(payload, w, h, stride, nowUs)) {
+          servedBootstrap = true;
+          forceKeyNext = true;   // a fresh decoder needs an IDR; the encode below consumes this
+          seq = 0;
+          version = lastVersionSent;  // no real version consumed (keeps queue bookkeeping stable)
+          streamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
+          captureUs = nowUs;     // fresh monotonic stamps: never reuse the stale capture time
+          callbackUs = nowUs;
+          queuePushUs = nowUs;
+        }
+        // One-shot regardless of outcome: a failed fill (locked/secure/identity mismatch) leaves
+        // the screen black rather than painting a wrong or stale picture.
+        disarm_bootstrap();
+      }
+    }
     bool queueReady = false;
-    {
+    if (!servedBootstrap) {
       std::unique_lock<std::mutex> lk(frame.mu);
       queueReady = frame.cv.wait_for(lk, std::chrono::microseconds(effective_queue_wait_timeout_us()), [&] {
         return stop.load() || frame.version != lastVersionSent;
@@ -6690,6 +6845,10 @@ int main(int argc, char** argv) {
       nv12W = frame.nv12W;
       nv12H = frame.nv12H;
       frame.nv12Slot = -1;  // claimed; this loop now owns the release
+    }
+    if (!servedBootstrap) {
+      // A real frame superseded any pending replay.
+      disarm_bootstrap();
     }
     if (poppedNv12Slot >= 0) {
       // The previous iteration bailed out before encoding (gating skip, stale drop);
@@ -6731,7 +6890,7 @@ int main(int argc, char** argv) {
     const uint64_t queueDepthAtPop = (version > lastPopVersionAtRead) ? (version - lastPopVersionAtRead) : 0;
     update_u64_max(queueDepthMax, queueDepthAtPop);
     lastPopFrameVersion.store(version, std::memory_order_release);
-    if (frameGatingEnabled && useH264 && payload && !payload->empty()) {
+    if (!servedBootstrap && frameGatingEnabled && useH264 && payload && !payload->empty()) {
       if (frameGatingRefPayload && !frameGatingRefPayload->empty() &&
           frameGatingRefW == w && frameGatingRefH == h && frameGatingRefStride == stride) {
         frameGatingChangePermilleLast = estimate_bgra_change_permille(
@@ -6794,10 +6953,12 @@ int main(int argc, char** argv) {
       ++stalePreEncodeDropCount;
       continue;
     }
-    if (lastVersionSent > 0 && version > lastVersionSent + 1) {
-      skippedByOverwrite += (version - lastVersionSent - 1);
+    if (!servedBootstrap) {
+      if (lastVersionSent > 0 && version > lastVersionSent + 1) {
+        skippedByOverwrite += (version - lastVersionSent - 1);
+      }
+      lastVersionSent = version;
     }
-    lastVersionSent = version;
     const uint64_t captureStampUs = (callbackUs > 0) ? callbackUs : captureUs;
 
     bool sendFailed = false;
@@ -6983,7 +7144,7 @@ int main(int argc, char** argv) {
       // EVERY frame of an interactive window drag, and apply_encoder_target tears the MFT
       // down, so two guards keep this from thrashing: the geometry must hold steady for a
       // settle period, and near-identical aspect (letterboxing under 2%) is left alone.
-      if (w > 0 && h > 0 && (w != encodeSourceW || h != encodeSourceH)) {
+      if (!servedBootstrap && w > 0 && h > 0 && (w != encodeSourceW || h != encodeSourceH)) {
         const uint64_t nowRefitUs = qpc_now_us();
         if (w != pendingRefitW || h != pendingRefitH) {
           pendingRefitW = w;
@@ -7267,6 +7428,13 @@ int main(int argc, char** argv) {
         // The requested IDR can be delayed behind older async MFT output. Only the AU's
         // actual CleanPoint/IDR state is safe to advertise as a keyframe.
         const bool encodedKeyFrame = au.keyFrame;
+        // A bootstrap replay exists to give a fresh decoder a picture; a non-IDR AU (an older
+        // async output that surfaced on this encode call) would decode into garbage on it. Drop
+        // anything but a real IDR -- one-shot, so if the IDR is delayed the replay simply had no
+        // effect and the next real frame carries the keyframe, exactly as before this change.
+        if (servedBootstrap && !encodedKeyFrame) {
+          continue;
+        }
         if (selectionFirstKeyframePendingGeneration != 0 &&
             streamGeneration == selectionFirstKeyframePendingGeneration &&
             !encodedKeyFrame) {
@@ -7406,7 +7574,8 @@ int main(int argc, char** argv) {
             selectionFirstKeyframeDropCount = 0;
           }
           // UDP tx counters are owned by the sender thread now; nothing to count here.
-          if (frameGatingEnabled && enqueuedForSend && payload && !payload->empty()) {
+          if (!servedBootstrap && frameGatingEnabled && enqueuedForSend && payload &&
+              !payload->empty()) {
             frameGatingLastSentUs = sendStartUs;
             frameGatingRefPayload = payload;
             frameGatingRefW = w;
@@ -7436,13 +7605,18 @@ int main(int argc, char** argv) {
           ++senderHeldFrames;
           continue;
         }
-        ++sentFrames;
-        ++encodedFrames;
-        sentBytes += hdr.payloadSize;
-        if (!countedRawForInput) {
-          rawEquivalentBytes +=
-              static_cast<uint64_t>(activeEncodeW) * static_cast<uint64_t>(activeEncodeH) * 3 / 2;
-          countedRawForInput = true;
+        // A bootstrap replay is a single sparse frame; keep it out of the fps/bitrate and ABR
+        // evidence (it is counted separately as bootstrapReplayCount). It still consumes the forced
+        // keyframe below so the normal path does not re-force one on the next real frame.
+        if (!servedBootstrap) {
+          ++sentFrames;
+          ++encodedFrames;
+          sentBytes += hdr.payloadSize;
+          if (!countedRawForInput) {
+            rawEquivalentBytes +=
+                static_cast<uint64_t>(activeEncodeW) * static_cast<uint64_t>(activeEncodeH) * 3 / 2;
+            countedRawForInput = true;
+          }
         }
         if ((hdr.flags & 1u) != 0) {
           forceKeyNext = false;
@@ -7957,6 +8131,9 @@ int main(int argc, char** argv) {
                   << " captureOfferPointer=" << captureCadenceGate.OfferPointerCount()
                   << " captureGateDropContent=" << captureCadenceGate.GateDropContentCount()
                   << " captureGateDropPointer=" << captureCadenceGate.GateDropPointerCount()
+                  << " bootstrapReplayCount=" << bootstrapReplayCount
+                  << " bootstrapSourceAgeUs=" << bootstrapSourceAgeUs
+                  << " bootstrapEpoch=" << bootstrapReplayEpoch
                   << "\n";
         }
 
