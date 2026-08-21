@@ -4640,6 +4640,30 @@ int main(int argc, char** argv) {
     return true;
   };
 
+  auto apply_confirmed_capture_geometry = [&](uint32_t newW, uint32_t newH, const char* reason) {
+    if (captureWindowModeActive) return;                 // window drag keeps the 0.4s settle
+    if (newW < 2 || newH < 2) return;
+    if (newW == encodeSourceW && newH == encodeSourceH) return;  // already fit to this source
+    encodeSourceW = newW;
+    encodeSourceH = newH;
+    pendingRefitW = 0;
+    pendingRefitH = 0;
+    pendingRefitSinceUs = 0;
+    const uint32_t prevEncW = activeEncodeW;
+    const uint32_t prevEncH = activeEncodeH;
+    // Confirmed change: no aspectClose skip. A smaller same-aspect source must still shrink
+    // activeEncode to avoid upscaling. Passing the current nominal box re-fits activeEncode from
+    // the new encodeSource aspect and rebuilds the MFT immediately, instead of after the 0.4s settle.
+    if (apply_encoder_target(nominalEncodeW, nominalEncodeH, activeFps, activeBitrate, activeKeyint)) {
+      forceKeyNext = true;
+      resetHostTimelineAnchors();
+      std::cout << "[native-video-host] capture-geometry-confirmed reason=" << reason
+                << " source=" << newW << "x" << newH
+                << " encode=" << prevEncW << "x" << prevEncH
+                << "->" << activeEncodeW << "x" << activeEncodeH << "\n";
+    }
+  };
+
   auto apply_capture_ui_quality_mode = [&](bool overviewMode, uint64_t nowUs) -> bool {
     if (!useH264) return true;
     // Derived from the live ceiling, not from the m9 level constants: those are frozen at
@@ -5090,7 +5114,7 @@ int main(int argc, char** argv) {
     pool = nullptr;
   };
 
-  auto restart_capture_session = [&]() -> bool {
+  auto restart_capture_session_impl = [&]() -> bool {
     detach_capture_session();
     try {
       if (!captureWindowModeActive && activeDesktopBackend == DesktopCaptureBackend::Dxgi) {
@@ -5306,6 +5330,18 @@ int main(int argc, char** argv) {
       detach_capture_session();
       return false;
     }
+  };
+
+  auto restart_capture_session = [&]() -> bool {
+    if (!restart_capture_session_impl()) return false;
+    uint32_t finalW = 0, finalH = 0;
+    {
+      std::lock_guard<std::mutex> lk(captureResourceMu);
+      finalW = captureWidth;
+      finalH = captureHeight;
+    }
+    apply_confirmed_capture_geometry(finalW, finalH, "capture-restart");
+    return true;
   };
 
   if (!restart_capture_session()) {
@@ -6428,6 +6464,7 @@ int main(int argc, char** argv) {
     }
     if (captureSizeChangePending.exchange(0, std::memory_order_acq_rel) != 0) {
       lastCaptureRestartUs = nowUs;
+      flush_capture_pipeline_state("size-change");
       if (restart_capture_session()) {
         ++captureRestartCount;
         captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
