@@ -800,12 +800,25 @@ std::atomic<int> gGridScrollRow{0};  // card grid scroll, in whole rows
 // failed selection.
 //   gSelectionPending      : a selection is in flight (from click until first frame or failure).
 //   gSelectionAwaitingAck  : request sent, host's WindowSelected ack not yet seen.
-//   gSelectionExpectedGeneration : the ack's streamGeneration; frames of other generations drop.
+//   gSelectionExpectedGeneration : the ack's streamGeneration for the *in-flight* transaction;
+//                                  frames of other generations drop while pending.
 //   gSelectionEpoch        : bumped per selection so the receive loop resets the decoder once.
+//   gActiveStreamGeneration : generation of the last successfully revealed selection; after
+//                             reveal this is the persistent filter (0 = accept anything, which
+//                             covers the legacy stream-view start and the window before any pick).
 std::atomic<bool> gSelectionPending{false};
 std::atomic<bool> gSelectionAwaitingAck{false};
 std::atomic<uint64_t> gSelectionExpectedGeneration{0};
 std::atomic<uint64_t> gSelectionEpoch{0};
+std::atomic<uint64_t> gActiveStreamGeneration{0};
+// The reveal is decided on the video thread but *committed* on the UI thread, so a cancel / new
+// selection / disconnect that races the post cannot wrongly close the picker. The video thread
+// records the candidate (generation + epoch) and posts once; the UI handler revalidates against
+// the live selection state before committing, and always releases the latch so a later legitimate
+// first frame can re-post.
+std::atomic<uint64_t> gSelectionReadyGeneration{0};
+std::atomic<uint64_t> gSelectionReadyEpoch{0};
+std::atomic<bool> gSelectionRevealPosted{false};
 // Posted to the video window when the first selected frame is ready, so the toolbar (a window of
 // its own, whose show/hide must run on the UI thread) is revealed on the thread that owns it.
 constexpr UINT kMsgRevealStreamView = WM_APP + 10;
@@ -1317,14 +1330,17 @@ void begin_pc_target_selection(uint64_t windowId, const char* statusText) {
   if (gHwnd) InvalidateRect(gHwnd, nullptr, FALSE);
 }
 
-// Video-thread reveal, run when the first frame of the acknowledged selection has decoded. The
-// picker guard (gWindowPickerVisible) is read on the paint thread, so flipping it here lets the
-// frame just committed present on the next paint; the toolbar lives in its own window whose
-// show/hide must happen on the UI thread, so that half is posted.
-void reveal_pc_stream_view() {
-  gWindowPickerVisible.store(false, std::memory_order_relaxed);
-  clear_pc_target_selection();
-  if (gHwnd) PostMessageW(gHwnd, kMsgRevealStreamView, 0, 0);
+// Video-thread half of the reveal. It only *records* the candidate (the generation and epoch of
+// the first decoded frame) and posts the reveal once; it deliberately touches none of the live
+// selection state. The UI-thread handler revalidates against that state before committing, so a
+// cancel / new selection / disconnect that races the post cannot wrongly close the picker.
+void post_pc_selection_reveal(uint64_t readyGeneration, uint64_t readyEpoch) {
+  gSelectionReadyGeneration.store(readyGeneration, std::memory_order_release);
+  gSelectionReadyEpoch.store(readyEpoch, std::memory_order_release);
+  bool expected = false;
+  if (gSelectionRevealPosted.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    if (gHwnd) PostMessageW(gHwnd, kMsgRevealStreamView, 0, 0);
+  }
 }
 
 void apply_window_selected_result(const ControlWindowSelectedMessage& msg) {
@@ -2121,13 +2137,34 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       destroy_cached_gdi_objects();
       PostQuitMessage(0);
       return 0;
-    case kMsgRevealStreamView:
-      // The first selected frame has decoded and the picker guard is already down (set on the
-      // video thread); bring up the toolbar here, on the thread that owns it, and repaint.
-      remote60::native_poc::session_toolbar_set_visible(true);
-      push_session_toolbar_state();
-      InvalidateRect(hwnd, nullptr, FALSE);
+    case kMsgRevealStreamView: {
+      // The video thread saw the first frame of a selection and posted this once. Revalidate
+      // against the live selection state before committing: a cancel / new selection / disconnect
+      // may have raced the post, and closing the picker then would be wrong. Require that the same
+      // transaction is still pending, its ack is in, and the recorded epoch and generation still
+      // match. Always release the latch at the end so a later legitimate first frame can re-post.
+      const bool commit =
+          gSelectionPending.load(std::memory_order_acquire) &&
+          !gSelectionAwaitingAck.load(std::memory_order_acquire) &&
+          gSelectionEpoch.load(std::memory_order_acquire) ==
+              gSelectionReadyEpoch.load(std::memory_order_acquire) &&
+          gSelectionExpectedGeneration.load(std::memory_order_acquire) ==
+              gSelectionReadyGeneration.load(std::memory_order_acquire);
+      if (commit) {
+        // Persistent filter for late stragglers from the previous target (see the recv gate).
+        gActiveStreamGeneration.store(gSelectionReadyGeneration.load(std::memory_order_acquire),
+                                      std::memory_order_release);
+        // Dropping the picker guard opens both the paint path and the input guard (input handlers
+        // early-return while the picker is up); clearing pending re-enables the picker's buttons.
+        gWindowPickerVisible.store(false, std::memory_order_relaxed);
+        clear_pc_target_selection();
+        remote60::native_poc::session_toolbar_set_visible(true);
+        push_session_toolbar_state();
+        InvalidateRect(hwnd, nullptr, FALSE);
+      }
+      gSelectionRevealPosted.store(false, std::memory_order_release);
       return 0;
+    }
     // The toolbar is a window of its own, so it does not move with this one for free.
     case WM_WINDOWPOSCHANGED:
       remote60::native_poc::session_toolbar_follow_owner();
@@ -2948,6 +2985,10 @@ int main(int argc, char** argv) {
   gCaptureOverviewMode.store(startInPicker, std::memory_order_relaxed);
   gWindowPickerVisible.store(startInPicker, std::memory_order_relaxed);
   clear_pc_target_selection();
+  // No target has taken effect yet. 0 disables the persistent generation filter, so the legacy
+  // stream-view start and the pre-first-pick window accept whatever the host sends, as before.
+  gActiveStreamGeneration.store(0, std::memory_order_release);
+  gSelectionRevealPosted.store(false, std::memory_order_release);
   // Picker-first sessions must not keep the host's default stream running under the picker: the
   // request rides the scheduler (StreamState before WindowList/Select) and is queued before the
   // control link exists, so it goes out first thing once connected. An initial default-desktop
@@ -3540,6 +3581,9 @@ int main(int argc, char** argv) {
           // re-enables instead of staying locked on "waiting for first frame". The viewer exits
           // shortly after (the video socket dies too), which returns the shell to the host list.
           clear_pc_target_selection();
+          // Drop the persistent generation filter too: a reconnect renegotiates generations from
+          // scratch, so an old value must not silently filter the new stream to nothing.
+          gActiveStreamGeneration.store(0, std::memory_order_release);
           set_window_panel_status("control_disconnected");
           InvalidateRect(gHwnd, nullptr, FALSE);
       });
@@ -3862,6 +3906,18 @@ int main(int argc, char** argv) {
         const uint64_t expectedGen = gSelectionExpectedGeneration.load(std::memory_order_acquire);
         if (expectedGen != 0 && h.streamGeneration != expectedGen) {
           // The previous target's stream still draining after the ack; not what we selected.
+          ++skippedQueued;
+          return true;
+        }
+      } else {
+        // No selection in flight. After a reveal, only the active target's generation is welcome:
+        // a late straggler from the previously selected target, still in flight on the wire, would
+        // otherwise flash on screen. gActiveStreamGeneration==0 means no PC-side selection has
+        // taken effect (legacy stream-view start, or before the first pick), so accept anything as
+        // before. Host auto-resolution changes keep the same generation, so this does not fight
+        // them -- only a host-side target selection bumps the generation.
+        const uint64_t activeGen = gActiveStreamGeneration.load(std::memory_order_acquire);
+        if (activeGen != 0 && h.streamGeneration != activeGen) {
           ++skippedQueued;
           return true;
         }
@@ -4320,12 +4376,14 @@ int main(int argc, char** argv) {
         gFrame.surfaceTexture = std::move(decoded.surfaceTexture);
         gFrame.surfaceSubresource = decoded.surfaceSubresource;
       }
-      // First real frame of the acknowledged selection just landed: drop the picker guard so the
-      // paint below presents it, and reveal the toolbar (posted to the UI thread). The gate above
-      // guarantees this frame belongs to the selected generation.
+      // First real frame of the acknowledged selection just landed. The gate above guarantees it
+      // belongs to the selected generation; record the candidate and post the reveal once. The
+      // picker flip, input guard and toolbar are committed on the UI thread (after revalidation),
+      // not here, so a racing cancel/new-selection/disconnect cannot wrongly close the picker.
       if (gSelectionPending.load(std::memory_order_acquire) &&
           !gSelectionAwaitingAck.load(std::memory_order_acquire)) {
-        reveal_pc_stream_view();
+        post_pc_selection_reveal(h.streamGeneration,
+                                 gSelectionEpoch.load(std::memory_order_acquire));
       }
       if (gHwnd) {
         if (!gPaintQueued.exchange(true)) {
