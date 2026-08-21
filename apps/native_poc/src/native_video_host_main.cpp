@@ -137,6 +137,21 @@ constexpr uint64_t kCaptureFrozenWarnUs = 250000;                // 250ms
 constexpr uint64_t kCaptureFrozenRestartUs = 2000000;            // 2s
 constexpr uint32_t kCaptureFrozenPollStreakMin = 2;
 constexpr uint64_t kCaptureFrozenEscalationWindowUs = 60000000;  // 60s
+// Readback-throughput soft watchdog (DXGI/WGC). A GPU->CPU readback that drains slowly under GPU
+// contention sits in the blind zone between the two hard self-heals above: the capture thread
+// keeps ACQUIRING and the cadence gate keeps accepting frames (so the callback-stall/capture-dead
+// watchdog stays silent), while the ring publishes almost nothing and its oldest-pending age peaks
+// *below* the 2s frozen-ring threshold (so that watchdog never fires either). It is caught instead
+// by watching per-1s windows where the gate accepted a real rate but the pipeline published
+// almost none, corroborated by either an elevated (but sub-2s) pending age or a burst of
+// staging-busy/superseded drops. First trip restarts capture+readback on the same device like the
+// frozen-ring path; a recurrence inside the same 60s window escalates to a process restart for a
+// fresh D3D device. These are intentionally softer than the frozen-ring thresholds -- the point is
+// to cover the case the 2s hard threshold misses -- and the frozen-ring path is left untouched.
+constexpr uint64_t kReadbackDrainWarmupUs = 4000000;            // 4s after start/restart/reattach
+constexpr uint32_t kReadbackDrainConsecutiveSecMin = 3;         // consecutive 1s windows
+constexpr uint64_t kReadbackDrainPendingAgeUs = 250000;         // 250ms window peak
+constexpr uint32_t kReadbackDrainDropBurstMin = 3;             // busy+superseded delta / window
 constexpr uint64_t kQueueWaitTimeoutUsDefault = 100000;  // 100ms
 constexpr uint64_t kQueueWaitTimeoutUsMin = 5000;  // 5ms
 constexpr uint32_t kCaptureInputMinPushPerSecDefault = 10;
@@ -4794,6 +4809,23 @@ int main(int argc, char** argv) {
   // (A refreeze inside the escalation window is a distinct outcome, but it exits the process, so it
   // shows up in the refroze log line rather than a counter that no later stats print would carry.)
   uint64_t frozenRingRestartCount = 0;
+  // Readback-throughput soft-watchdog state (see kReadbackDrainWarmupUs). The trigger is over
+  // per-1s-window deltas, so the cumulative sources (cadence accepts, staging-busy drops,
+  // superseded drops) are diffed against the previous tick's snapshot every tick -- not every
+  // print. The oldest-pending peak is accumulated at loop frequency next to the frozen-ring peak
+  // (a once-per-second sample would miss a spike the loop-rate poll sees) and reset each tick.
+  // The consecutive-second counter debounces a single slow window; the last drain-restart
+  // timestamp lets a recurrence inside the frozen-ring escalation window escalate to a process
+  // restart. streamActiveSinceUs anchors a warmup after a client (re)attaches.
+  uint64_t readbackDrainPrevAccepted = 0;
+  uint64_t readbackDrainPrevBusyDrops = 0;
+  uint64_t readbackDrainPrevSuperseded = 0;
+  uint32_t readbackDrainConsecutiveSec = 0;
+  uint64_t readbackDrainOldestPendingPeakUs = 0;  // per-1s window, reset every stats tick
+  uint64_t lastReadbackDrainRestartUs = 0;
+  uint64_t readbackDrainRestartCount = 0;
+  uint64_t streamActiveSinceUs = 0;
+  bool readbackDrainPrevStreamActive = false;
   bool dxgiCaptureStarted = false;
   bool gdiCaptureStarted = false;
   std::mutex captureFallbackReasonMu;
@@ -6733,6 +6765,9 @@ int main(int argc, char** argv) {
         activeDesktopBackend != DesktopCaptureBackend::Gdi) {
       const uint64_t oldestPendingUs = captureReadback.OldestGpuPendingAgeUs();
       oldestGpuPendingPeakUs = std::max(oldestGpuPendingPeakUs, oldestPendingUs);
+      // Same loop-rate sample feeds the readback-drain watchdog's per-1s-window peak; unlike the
+      // frozen-ring peak above (reset per print interval) this one is reset every stats tick.
+      readbackDrainOldestPendingPeakUs = std::max(readbackDrainOldestPendingPeakUs, oldestPendingUs);
       gpuPendingCountPeak = std::max(gpuPendingCountPeak, captureReadback.GpuPendingCount());
       if (oldestPendingUs >= kCaptureFrozenWarnUs && captureFrozenWarnedAtUs == 0) {
         captureFrozenWarnedAtUs = nowUs;
@@ -8057,6 +8092,142 @@ int main(int argc, char** argv) {
           }
         }
       }
+      // Readback-throughput soft watchdog (DXGI/WGC). Runs every stats tick on per-1s-window
+      // deltas: the frozen-ring block above already accumulated this window's oldest-pending peak
+      // at loop frequency. Gated to the same live desktop-capture surface the frozen-ring watchdog
+      // uses, plus a warmup and a secure-desktop check, so a legitimately static desktop, a
+      // just-restarted session, or a lock screen cannot trip it. This is the ONLY new rebuild
+      // trigger; the frozen-ring 2s hard path and session rollover behavior are unchanged.
+      {
+        const bool drainStreamActive = streamControlActive.load(std::memory_order_acquire);
+        if (drainStreamActive && !readbackDrainPrevStreamActive) {
+          streamActiveSinceUs = t;  // client (re)attach edge; anchors the warmup below
+        }
+        readbackDrainPrevStreamActive = drainStreamActive;
+
+        // Per-1s-window deltas. AcceptContentCount / BusyDrops / SupersededDrops are all lifetime
+        // cumulative (superseded especially -- it is never reset), so diff, never read absolute.
+        // The snapshots are advanced every tick regardless of whether the watchdog is eligible, so
+        // an eligible second always sees exactly that second's increment.
+        const uint64_t acceptedNow = captureCadenceGate.AcceptContentCount();
+        const uint64_t busyNow = captureReadback.BusyDrops();
+        const uint64_t supersededNow = captureReadback.SupersededDrops();
+        const uint64_t acceptedDelta =
+            (acceptedNow >= readbackDrainPrevAccepted) ? (acceptedNow - readbackDrainPrevAccepted) : 0;
+        const uint64_t busyDelta =
+            (busyNow >= readbackDrainPrevBusyDrops) ? (busyNow - readbackDrainPrevBusyDrops) : 0;
+        const uint64_t supersededDelta =
+            (supersededNow >= readbackDrainPrevSuperseded) ? (supersededNow - readbackDrainPrevSuperseded) : 0;
+        readbackDrainPrevAccepted = acceptedNow;
+        readbackDrainPrevBusyDrops = busyNow;
+        readbackDrainPrevSuperseded = supersededNow;
+        // published = callbackFramesPerSec: the readback worker's publish count for this second,
+        // already reset each tick, so it is a true per-window delta as-is.
+        const uint64_t drainPendingPeakUs = readbackDrainOldestPendingPeakUs;
+        readbackDrainOldestPendingPeakUs = 0;  // window closes here
+
+        const bool drainSurfaceEligible =
+            useH264 &&
+            captureSessionReady.load(std::memory_order_acquire) &&
+            drainStreamActive &&
+            !captureWindowModeActive.load(std::memory_order_acquire) &&
+            activeDesktopBackend != DesktopCaptureBackend::Gdi;
+        // Warmup after the latest of: capture session start, any capture restart, or client
+        // reattach -- so the first seconds of a fresh pipeline (encoder spin-up, first IDR) never
+        // read as a drain.
+        uint64_t drainWarmupAnchorUs = captureSessionStartedUs;
+        if (lastCaptureRestartUs > drainWarmupAnchorUs) drainWarmupAnchorUs = lastCaptureRestartUs;
+        if (streamActiveSinceUs > drainWarmupAnchorUs) drainWarmupAnchorUs = streamActiveSinceUs;
+        const bool drainWarmupDone = (t >= drainWarmupAnchorUs + kReadbackDrainWarmupUs);
+        // accepted >= max(5, fps/4): a static/quiet desktop accepts almost nothing (pointer-only
+        // offers never advance this count), so it stays well below the floor and cannot trip.
+        const uint32_t drainAcceptFloor =
+            std::max<uint32_t>(5u, std::max<uint32_t>(1u, activeFps) / 4u);
+        const uint64_t drainPublishCeil = std::max<uint64_t>(1u, acceptedDelta / 10u);
+        // Cheap arithmetic first; the uncached secure-desktop syscall runs only when a stall is
+        // already indicated, so the healthy path pays no per-second OpenInputDesktop cost.
+        const bool drainMetricsStalled =
+            drainSurfaceEligible && drainWarmupDone &&
+            acceptedDelta >= drainAcceptFloor &&
+            callbackFramesPerSec <= drainPublishCeil &&
+            (drainPendingPeakUs >= kReadbackDrainPendingAgeUs ||
+             (busyDelta + supersededDelta) >= kReadbackDrainDropBurstMin);
+        const bool drainStarved =
+            drainMetricsStalled && interactive_desktop_is_default_uncached();
+
+        if (drainStarved) {
+          ++readbackDrainConsecutiveSec;
+        } else {
+          readbackDrainConsecutiveSec = 0;
+        }
+
+        const bool drainRestartCooldownDone =
+            (lastCaptureRestartUs == 0 ||
+             t >= (lastCaptureRestartUs + kCaptureCallbackRestartCooldownUs));
+        if (readbackDrainConsecutiveSec >= kReadbackDrainConsecutiveSecMin && drainRestartCooldownDone) {
+          readbackDrainConsecutiveSec = 0;
+          // First trip: restart_capture_session() runs create_staging -> captureReadback
+          // Shutdown/Initialize, rebuilding the capture backend and the readback ring on the same
+          // device. A recurrence inside the same 60s window the frozen-ring refreeze uses means the
+          // device itself is wedged; match that path and exit code 3 so the supervisor rebuilds the
+          // process with a fresh D3D device.
+          const bool drainRecurred =
+              lastReadbackDrainRestartUs != 0 &&
+              t < (lastReadbackDrainRestartUs + kCaptureFrozenEscalationWindowUs);
+          lastReadbackDrainRestartUs = t;
+          if (drainRecurred) {
+            const uint64_t drainLastPubUs = lastPublishUs.load(std::memory_order_acquire);
+            const uint64_t drainLastPubAgeUs =
+                (drainLastPubUs > 0 && t > drainLastPubUs) ? t - drainLastPubUs : 0;
+            std::cerr << "[native-video-host] capture readback drain recurred within "
+                      << (kCaptureFrozenEscalationWindowUs / 1000000)
+                      << "s acceptedDelta=" << acceptedDelta
+                      << " published=" << callbackFramesPerSec
+                      << "; exiting for a full process restart\n";
+            std::cout << "[native-video-host] capture-recovery reason=readback-drain-recurrence"
+                      << " action=process-restart exitCode=3"
+                      << " acceptedDelta=" << acceptedDelta
+                      << " published=" << callbackFramesPerSec
+                      << " oldestPendingPeakUs=" << drainPendingPeakUs
+                      << " busyDelta=" << busyDelta
+                      << " supersededDelta=" << supersededDelta
+                      << " readbackDrainRestarts=" << readbackDrainRestartCount
+                      << " captureRestarts=" << captureRestartCount
+                      << " lastPublishAgeUs=" << drainLastPubAgeUs
+                      << " backend=" << desktop_capture_backend_name(activeDesktopBackend)
+                      << " windowSec=" << (kCaptureFrozenEscalationWindowUs / 1000000)
+                      << "\n";
+            std::cout.flush();
+            std::cerr.flush();
+            return 3;
+          }
+          lastCaptureRestartUs = t;
+          const bool restarted = restart_capture_session();
+          if (restarted) {
+            ++captureRestartCount;
+            captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+            lastCaptureUsForInterval.store(0, std::memory_order_release);
+            lastCallbackUs.store(0, std::memory_order_release);
+            resetHostTimelineAnchors();
+            forceKeyNext = true;
+            ++captureDeadRestartCount;
+            ++readbackDrainRestartCount;
+            std::cout << "[native-video-host] capture session restarted reason=readback-drain count="
+                      << captureRestartCount
+                      << " captureDeadRestartCount=" << captureDeadRestartCount
+                      << " readbackDrainRestarts=" << readbackDrainRestartCount
+                      << " acceptedDelta=" << acceptedDelta
+                      << " published=" << callbackFramesPerSec
+                      << " oldestPendingPeakUs=" << drainPendingPeakUs
+                      << " busyDelta=" << busyDelta
+                      << " supersededDelta=" << supersededDelta
+                      << "\n";
+          } else {
+            std::cerr << "[native-video-host] readback-drain restart failed acceptedDelta="
+                      << acceptedDelta << " published=" << callbackFramesPerSec << "\n";
+          }
+        }
+      }
       if (useRaw) {
         if (statsPrintDue) {
         std::cout << "[native-video-host] sentFrames=" << sentFrames
@@ -8209,6 +8380,8 @@ int main(int argc, char** argv) {
                   << " gpuPendingCount=" << captureReadback.GpuPendingCount()
                   << " gpuPendingCountPeak=" << gpuPendingCountPeak
                   << " frozenRingRestarts=" << frozenRingRestartCount
+                  << " readbackDrainRestarts=" << readbackDrainRestartCount
+                  << " readbackDrainSec=" << readbackDrainConsecutiveSec
                   << " lastPublishAgeUs=" << lastPublishAgeUs
                   << " captureUnmapAvgUs=" << captureUnmapAvgUs
                   << " captureUnmapMaxUs=" << captureUnmapMaxUs
