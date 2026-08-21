@@ -152,6 +152,11 @@ struct Args {
   // Which screen to open on a host with more than one. Zero is the primary, which is what the
   // client always asked for implicitly.
   uint32_t monitorId = 0;
+  // How the session opens. "targets" starts on the capture-target picker and streams only after
+  // the user selects one (the product flow, mirroring the Android client); "stream" goes straight
+  // to the host's default desktop. Empty falls back to the REMOTE60_NATIVE_START_STREAM_VIEW env
+  // var so existing manual/headless probes keep working unchanged.
+  std::string initialView;
 };
 
 bool parse_u32(const char* s, uint32_t* out) {
@@ -499,6 +504,10 @@ Args parse_args(int argc, char** argv) {
     } else if (k == "--monitor" && i + 1 < argc) {
       uint32_t v = 0;
       if (parse_u32(argv[++i], &v)) a.monitorId = v;
+    } else if (k == "--initial-view" && i + 1 < argc) {
+      a.initialView = ascii_lower(trim_ascii(argv[++i]));
+    } else if (k == "--start-in-picker") {
+      a.initialView = "targets";
     }
   }
   return a;
@@ -782,6 +791,24 @@ uint32_t gRequestedMonitorId = 0;
 std::atomic<bool> gWindowPickerVisible{true};
 std::atomic<bool> gWindowPickerToggleDown{false};
 std::atomic<int> gGridScrollRow{0};  // card grid scroll, in whole rows
+
+// Target-selection gate, mirroring the Android policy (commit 4892dea). After connecting the
+// session opens on the picker; picking a target starts the stream but the picker stays up, and
+// video is not presented, until the first frame of the *acknowledged* generation has decoded.
+// That keeps an initial default-desktop frame -- or a frame from the previously selected target
+// -- from flashing under the picker, and keeps a slow first frame from being mistaken for a
+// failed selection.
+//   gSelectionPending      : a selection is in flight (from click until first frame or failure).
+//   gSelectionAwaitingAck  : request sent, host's WindowSelected ack not yet seen.
+//   gSelectionExpectedGeneration : the ack's streamGeneration; frames of other generations drop.
+//   gSelectionEpoch        : bumped per selection so the receive loop resets the decoder once.
+std::atomic<bool> gSelectionPending{false};
+std::atomic<bool> gSelectionAwaitingAck{false};
+std::atomic<uint64_t> gSelectionExpectedGeneration{0};
+std::atomic<uint64_t> gSelectionEpoch{0};
+// Posted to the video window when the first selected frame is ready, so the toolbar (a window of
+// its own, whose show/hide must run on the UI thread) is revealed on the thread that owns it.
+constexpr UINT kMsgRevealStreamView = WM_APP + 10;
 
 // Preview thumbnails for the target picker, fetched over the control channel when the host
 // advertises kControlWindowListFlagThumbnails. Keyed by window id; id 0 is the desktop.
@@ -1262,12 +1289,66 @@ void set_picker_visible_and_sync_stream(bool visible) {
   push_session_toolbar_state();
 }
 
+// Clears the in-flight selection state. Safe to call from any thread; touches only atomics and
+// the stream request (itself atomic-backed).
+void clear_pc_target_selection() {
+  gSelectionPending.store(false, std::memory_order_release);
+  gSelectionAwaitingAck.store(false, std::memory_order_release);
+  gSelectionExpectedGeneration.store(0, std::memory_order_release);
+}
+
+// UI-thread entry for picking a target from the picker. Orders the control traffic so the host's
+// "!streamActive" continue-gate is already passed when the select arrives: the scheduler always
+// sends StreamState ahead of WindowSelect, so requesting stream-on here (before or after the
+// select is queued) still reaches the host first. Desktop is sent as an explicit WindowSelect(0)
+// -- one clean restart -- rather than the "already selected, just hide" shortcut, for mobile
+// parity. Ignores clicks while a selection is already in flight, which is the double-click guard.
+void begin_pc_target_selection(uint64_t windowId, const char* statusText) {
+  if (gSelectionPending.load(std::memory_order_acquire)) return;
+  if (!gControlConnected.load(std::memory_order_relaxed)) return;
+  // RequestSelect refuses when the target is locked by host config; do not touch the stream then.
+  if (!gWindowPanelState.RequestSelect(windowId, statusText)) return;
+  gSelectionExpectedGeneration.store(0, std::memory_order_release);
+  gSelectionAwaitingAck.store(true, std::memory_order_release);
+  gSelectionPending.store(true, std::memory_order_release);
+  // Bumped so the receive loop resets the decoder and holds for the new generation's keyframe.
+  gSelectionEpoch.fetch_add(1, std::memory_order_acq_rel);
+  gStreamStateControl.Request(true);
+  if (gHwnd) InvalidateRect(gHwnd, nullptr, FALSE);
+}
+
+// Video-thread reveal, run when the first frame of the acknowledged selection has decoded. The
+// picker guard (gWindowPickerVisible) is read on the paint thread, so flipping it here lets the
+// frame just committed present on the next paint; the toolbar lives in its own window whose
+// show/hide must happen on the UI thread, so that half is posted.
+void reveal_pc_stream_view() {
+  gWindowPickerVisible.store(false, std::memory_order_relaxed);
+  clear_pc_target_selection();
+  if (gHwnd) PostMessageW(gHwnd, kMsgRevealStreamView, 0, 0);
+}
+
 void apply_window_selected_result(const ControlWindowSelectedMessage& msg) {
   const auto result = gWindowPanelState.ApplyWindowSelected(msg);
+  log_client_line(result.logLine);
+  if (gSelectionPending.load(std::memory_order_acquire)) {
+    if (result.ok) {
+      // Ack received: hold the picker up until the first frame of this generation is presented.
+      // Do NOT hide the picker here -- that is what the first-frame gate is for.
+      gSelectionExpectedGeneration.store(msg.streamGeneration, std::memory_order_release);
+      gSelectionAwaitingAck.store(false, std::memory_order_release);
+      gWindowPanelState.SetStatus("waiting_first_frame");
+    } else {
+      // Select failed: stop the stream we speculatively started, keep the picker, allow a retry.
+      gStreamStateControl.Request(false);
+      clear_pc_target_selection();
+    }
+    if (gHwnd) InvalidateRect(gHwnd, nullptr, FALSE);
+    return;
+  }
+  // No PC-side selection tracked (e.g. a legacy stream-view session): behave as before.
   if (result.ok) {
     set_picker_visible_and_sync_stream(false);
   }
-  log_client_line(result.logLine);
 }
 
 void scroll_window_list(HWND hwnd, int deltaSteps) {
@@ -1492,18 +1573,29 @@ void draw_overlay(HDC hdc) {
     DrawTextW(hdc, L"Remote60", -1, &t, DT_LEFT | DT_SINGLELINE);
     if (old) SelectObject(hdc, old);
   }
+  // Once a target is picked the picker locks: the buttons and cards read as disabled while the
+  // stream spins up, and the sub-header says whether we are still waiting on the host's ack or
+  // on its first frame.
+  const bool selectionPending = gSelectionPending.load(std::memory_order_acquire);
+  const bool awaitingAck = gSelectionAwaitingAck.load(std::memory_order_acquire);
+
   RECT subRect = titleRect;
   subRect.top += dpi_scale(28);
   SetTextColor(hdc, RGB(150, 158, 170));
   std::string statusLine =
       selectionLocked ? std::string("Target locked by host config") : panelStatus;
+  if (selectionPending) {
+    statusLine = awaitingAck ? std::string("Selecting target...")
+                             : std::string("Waiting for first frame...");
+  }
   if (!gControlConnected.load(std::memory_order_relaxed)) statusLine = "Connecting to host...";
   draw_text_utf8(hdc, statusLine, &subRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
+  const bool actionsDisabled =
+      !gControlConnected.load(std::memory_order_relaxed) || selectionLocked || selectionPending;
   draw_panel_button(hdc, layout.refreshButtonRect, "Refresh", false,
-                    !gControlConnected.load(std::memory_order_relaxed));
-  draw_panel_button(hdc, layout.desktopButtonRect, "Desktop", selectedId == 0,
-                    !gControlConnected.load(std::memory_order_relaxed) || selectionLocked);
+                    !gControlConnected.load(std::memory_order_relaxed) || selectionPending);
+  draw_panel_button(hdc, layout.desktopButtonRect, "Desktop", selectedId == 0, actionsDisabled);
 
   // Card grid: desktop preview first, then one card per shareable window.
   const CardGridMetrics grid = compute_card_grid(layout.listRect);
@@ -1520,11 +1612,11 @@ void draw_overlay(HDC hdc) {
     const RECT card = card_rect_for_slot(layout.listRect, grid, slot);
     if (cardIndex == 0) {
       draw_target_card(hdc, card, grid, 0, "Desktop (full screen)", selectedId == 0,
-                       selectionLocked);
+                       selectionLocked || selectionPending);
     } else {
       const auto& entry = windowItems[static_cast<size_t>(cardIndex - 1)];
       draw_target_card(hdc, card, grid, entry.id, entry.title, entry.id == selectedId,
-                       selectionLocked);
+                       selectionLocked || selectionPending);
     }
   }
 
@@ -2029,6 +2121,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       destroy_cached_gdi_objects();
       PostQuitMessage(0);
       return 0;
+    case kMsgRevealStreamView:
+      // The first selected frame has decoded and the picker guard is already down (set on the
+      // video thread); bring up the toolbar here, on the thread that owns it, and repaint.
+      remote60::native_poc::session_toolbar_set_visible(true);
+      push_session_toolbar_state();
+      InvalidateRect(hwnd, nullptr, FALSE);
+      return 0;
     // The toolbar is a window of its own, so it does not move with this one for free.
     case WM_WINDOWPOSCHANGED:
       remote60::native_poc::session_toolbar_follow_owner();
@@ -2110,31 +2209,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
       }
       if (gWindowPickerVisible.load(std::memory_order_relaxed)) {
+        // A selection already in flight owns the picker until its first frame arrives; ignore
+        // further target clicks so a double-click cannot queue a second, racing select.
+        if (gSelectionPending.load(std::memory_order_acquire)) return 0;
         if (point_in_rect(layout.refreshButtonRect, x, y)) {
           queue_window_list_request("window_list_request pending");
           InvalidateRect(hwnd, nullptr, FALSE);
           return 0;
         }
         if (point_in_rect(layout.desktopButtonRect, x, y)) {
-          const bool alreadyDesktop = gWindowPanelState.IsDesktopSelected();
-          if (alreadyDesktop) {
-            set_picker_visible_and_sync_stream(false);
-          } else {
-            queue_window_select_request(0, "desktop_select_requested");
-          }
+          // Explicit WindowSelect(0) even when desktop is already the selected target: one clean
+          // restart with a fresh generation, so the first-frame gate has something to wait on.
+          begin_pc_target_selection(0, "desktop_select_requested");
           InvalidateRect(hwnd, nullptr, FALSE);
           return 0;
         }
         uint64_t hitWindowId = 0;
         if (try_hit_window_list_item(hwnd, x, y, &hitWindowId)) {
-          // Picking what is already picked has to mean "go watch it". Without this the desktop
-          // card -- which is selected by default -- re-selects the same target and leaves the
-          // picker up, so clicking it looks like nothing happened at all.
-          if (hitWindowId == gWindowPanelState.Snapshot().selectedId) {
-            set_picker_visible_and_sync_stream(false);
-          } else {
-            queue_window_select_request(hitWindowId, "window_select_requested");
-          }
+          begin_pc_target_selection(hitWindowId, "window_select_requested");
           InvalidateRect(hwnd, nullptr, FALSE);
           return 0;
         }
@@ -2293,27 +2385,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
       }
       if (gWindowPickerVisible.load(std::memory_order_relaxed)) {
+        // Ignore taps while a selection is already resolving (see the mouse path).
+        if (gSelectionPending.load(std::memory_order_acquire)) return 0;
         if (msg == WM_POINTERUP) {
           if (point_in_rect(layout.refreshButtonRect, p.x, p.y)) {
             queue_window_list_request("window_list_request pending");
             InvalidateRect(hwnd, nullptr, FALSE);
           } else if (point_in_rect(layout.desktopButtonRect, p.x, p.y)) {
-            const bool alreadyDesktop = gWindowPanelState.IsDesktopSelected();
-            if (alreadyDesktop) {
-              set_picker_visible_and_sync_stream(false);
-            } else {
-              queue_window_select_request(0, "desktop_select_requested");
-            }
+            begin_pc_target_selection(0, "desktop_select_requested");
             InvalidateRect(hwnd, nullptr, FALSE);
           } else {
             uint64_t hitWindowId = 0;
             if (try_hit_window_list_item(hwnd, p.x, p.y, &hitWindowId)) {
-              // Same rule as the mouse path: tapping the already-selected card means "watch it".
-              if (hitWindowId == gWindowPanelState.Snapshot().selectedId) {
-                set_picker_visible_and_sync_stream(false);
-              } else {
-                queue_window_select_request(hitWindowId, "window_select_requested");
-              }
+              begin_pc_target_selection(hitWindowId, "window_select_requested");
               InvalidateRect(hwnd, nullptr, FALSE);
             }
           }
@@ -2849,9 +2933,29 @@ int main(int argc, char** argv) {
   gRuntimeTuneState.Reset(args.runtimeBitrate, args.runtimeKeyint, args.runtimeFps);
   gRequestedMonitorId = args.monitorId;
   gControlConnected.store(false, std::memory_order_relaxed);
-  const bool startInStreamView = env_truthy("REMOTE60_NATIVE_START_STREAM_VIEW");
-  gCaptureOverviewMode.store(!startInStreamView, std::memory_order_relaxed);
-  gWindowPickerVisible.store(!startInStreamView, std::memory_order_relaxed);
+  // How the session opens. The explicit flag wins; with no flag we fall back to the legacy env
+  // var so the automation probes (which all set REMOTE60_NATIVE_START_STREAM_VIEW=1) are
+  // unaffected. "targets" is the product flow: open on the picker and stream only after a pick.
+  bool startInStreamView;
+  if (args.initialView == "targets" || args.initialView == "picker") {
+    startInStreamView = false;
+  } else if (args.initialView == "stream") {
+    startInStreamView = true;
+  } else {
+    startInStreamView = env_truthy("REMOTE60_NATIVE_START_STREAM_VIEW");
+  }
+  const bool startInPicker = !startInStreamView;
+  gCaptureOverviewMode.store(startInPicker, std::memory_order_relaxed);
+  gWindowPickerVisible.store(startInPicker, std::memory_order_relaxed);
+  clear_pc_target_selection();
+  // Picker-first sessions must not keep the host's default stream running under the picker: the
+  // request rides the scheduler (StreamState before WindowList/Select) and is queued before the
+  // control link exists, so it goes out first thing once connected. An initial default-desktop
+  // frame that slips through before the stream stops is dropped by the receive-path gate rather
+  // than painted, and no flip swap chain is created until the user's pick produces a real frame.
+  if (startInPicker) {
+    gStreamStateControl.Request(false);
+  }
   gCaptureModeRequests.Reset();
   gWindowPanelState.Reset();
   gSuppressMouseUntilUs.store(0, std::memory_order_relaxed);
@@ -3184,12 +3288,13 @@ int main(int argc, char** argv) {
         // large backlog cannot starve input events. Only invoked when the host advertised
         // the capability, because an older host would drain the request and never reply.
         // Returns: 1 fetched, 0 nothing to do, -1 socket failure (stream desynced).
-        auto fetch_one_thumbnail = [&]() -> int {
-          // Reads and writes the TCP socket directly rather than going through the link, so it
-          // has nothing to talk to when control is tunnelled. Returning "nothing to do" keeps
-          // the loop alive; reporting failure here would tear down a control channel that is
-          // working, over a preview image.
-          if (gControlOverUdp.load(std::memory_order_acquire)) return 0;
+        auto fetch_one_thumbnail = [&](remote60::native_poc::ControlLink& link) -> int {
+          // Routed through the ControlLink, not the raw socket, so a directory session (control
+          // tunnelled over the punched UDP socket) fetches previews too -- modelled on the
+          // Android ClientSessionController::FetchOneThumbnailLocked. One card per idle action
+          // keeps the strict request/response loop from being starved. Only invoked when the
+          // host advertised the capability, because an older host would drain the request and
+          // never reply. Returns: 1 fetched, 0 nothing to do, -1 link failure (stream desynced).
           if (!gHostSupportsThumbnails.load(std::memory_order_relaxed)) return 0;
           uint64_t id = 0;
           {
@@ -3208,17 +3313,17 @@ int main(int argc, char** argv) {
           req.maxWidth = 256;
           req.maxHeight = 160;
           req.clientSendQpcUs = qpc_now_us();
-          if (!remote60::native_poc::send_all(controlSock, &req, sizeof(req))) return -1;
+          // One request is one message; EndMessage() draws the boundary UDP needs and TCP ignores.
+          if (!link.Write(&req, sizeof(req)) || !link.EndMessage()) return -1;
           remote60::native_poc::ControlWindowThumbnailHeader rsp{};
-          if (!remote60::native_poc::recv_all(controlSock, &rsp, sizeof(rsp))) return -1;
+          if (!link.Read(&rsp, sizeof(rsp))) return -1;
           if (rsp.header.magic != remote60::native_poc::kMagic ||
               rsp.header.type != static_cast<uint16_t>(MessageType::ControlWindowThumbnail) ||
               rsp.payloadSize > remote60::native_poc::kWindowThumbnailMaxPayloadBytes) {
             return -1;
           }
           std::vector<uint8_t> payload(rsp.payloadSize);
-          if (rsp.payloadSize > 0 &&
-              !remote60::native_poc::recv_all(controlSock, payload.data(), payload.size())) {
+          if (rsp.payloadSize > 0 && !link.Read(payload.data(), payload.size())) {
             return -1;
           }
           if ((rsp.flags & 0x1u) != 0 && rsp.width > 0 && rsp.height > 0 &&
@@ -3384,8 +3489,13 @@ int main(int argc, char** argv) {
                   const bool supportsMonitors =
                       (response.windowList.flags &
                        remote60::native_poc::kControlWindowListFlagMonitors) != 0;
-                  if (gWindowPanelState.SetHostSupportsMonitors(supportsMonitors) &&
-                      gRequestedMonitorId > 0) {
+                  const bool monitorsNewlySupported =
+                      gWindowPanelState.SetHostSupportsMonitors(supportsMonitors);
+                  // The stored --monitor is auto-applied only when the session opens straight
+                  // into the stream. In picker mode the user has not chosen a target yet, so
+                  // selecting a monitor here would restart the host capture before any pick and
+                  // fight the first-frame gate; a monitor pick is a follow-up (toolbar) action.
+                  if (!startInPicker && monitorsNewlySupported && gRequestedMonitorId > 0) {
                     // Only when a screen other than the primary was asked for: selecting monitor
                     // zero would restart the capture for no change.
                     gWindowPanelState.RequestMonitorSelect(gRequestedMonitorId);
@@ -3418,7 +3528,7 @@ int main(int argc, char** argv) {
             }
 
             if (!didWork && gWindowPickerVisible.load(std::memory_order_relaxed)) {
-              const int fetched = fetch_one_thumbnail();
+              const int fetched = fetch_one_thumbnail(*controlLink);
               if (fetched < 0) break;
               didWork = (fetched > 0);
             }
@@ -3426,6 +3536,10 @@ int main(int argc, char** argv) {
           }
           gControlConnected.store(false, std::memory_order_relaxed);
           gRuntimeTuneState.SetEnabled(false);
+          // A selection cannot complete once control is gone: drop the pending state so the picker
+          // re-enables instead of staying locked on "waiting for first frame". The viewer exits
+          // shortly after (the video socket dies too), which returns the shell to the host list.
+          clear_pc_target_selection();
           set_window_panel_status("control_disconnected");
           InvalidateRect(gHwnd, nullptr, FALSE);
       });
@@ -3455,6 +3569,9 @@ int main(int argc, char** argv) {
 
   const uint64_t startUs = qpc_now_us();
   std::thread recvThread([&]() {
+    // Which selection generation this loop has already reset the decoder for. A bump by
+    // begin_pc_target_selection() on the UI thread makes the next frame flush stale references.
+    uint64_t recvSelectionEpoch = gSelectionEpoch.load(std::memory_order_acquire);
     uint64_t statAtUs = qpc_now_us() + 1000000ULL;
     uint64_t recvFrames = 0;
     uint64_t decodedFrames = 0;
@@ -3725,6 +3842,29 @@ int main(int argc, char** argv) {
       if (!useH264) {
         ++skippedQueued;
         return true;
+      }
+
+      // Target-selection gate (mobile parity, Android commit 4892dea). While the user's pick is
+      // resolving, keep the picker up and present nothing until the acknowledged generation's
+      // first frame decodes.
+      if (gSelectionEpoch.load(std::memory_order_acquire) != recvSelectionEpoch) {
+        // A fresh pick: drop stale reference frames and hold for the new generation's keyframe.
+        recvSelectionEpoch = gSelectionEpoch.load(std::memory_order_acquire);
+        decoder.reset();
+        waitForKeyFrame = true;
+      }
+      if (gSelectionPending.load(std::memory_order_acquire)) {
+        if (gSelectionAwaitingAck.load(std::memory_order_acquire)) {
+          // No ack yet: every frame here is either the old target or an unconfirmed guess.
+          ++skippedQueued;
+          return true;
+        }
+        const uint64_t expectedGen = gSelectionExpectedGeneration.load(std::memory_order_acquire);
+        if (expectedGen != 0 && h.streamGeneration != expectedGen) {
+          // The previous target's stream still draining after the ack; not what we selected.
+          ++skippedQueued;
+          return true;
+        }
       }
 
       if (!decoderReady || decoderW != h.width || decoderH != h.height) {
@@ -4179,6 +4319,13 @@ int main(int argc, char** argv) {
         gFrame.surfaceSample = std::move(decoded.surfaceSample);
         gFrame.surfaceTexture = std::move(decoded.surfaceTexture);
         gFrame.surfaceSubresource = decoded.surfaceSubresource;
+      }
+      // First real frame of the acknowledged selection just landed: drop the picker guard so the
+      // paint below presents it, and reveal the toolbar (posted to the UI thread). The gate above
+      // guarantees this frame belongs to the selected generation.
+      if (gSelectionPending.load(std::memory_order_acquire) &&
+          !gSelectionAwaitingAck.load(std::memory_order_acquire)) {
+        reveal_pc_stream_view();
       }
       if (gHwnd) {
         if (!gPaintQueued.exchange(true)) {

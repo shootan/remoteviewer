@@ -297,6 +297,11 @@ void begin_session(const ShellConnectRequest& request) {
           << L" --directory-url \"" << widen(server) << L"\""
           << L" --directory-session \"" << widen(token) << L"\""
           << L" --directory-host-id \"" << widen(request.hostId) << L"\""
+          // Open on the target picker, not straight into the host's default desktop: the session
+          // shows the Windows list and a Desktop card first, and starts the stream only once the
+          // user picks a target -- the same order the Android client uses. Passed as an explicit
+          // flag rather than an inherited env var so a stray env in the parent cannot flip it.
+          << L" --initial-view targets"
           // Bits per second on the wire; the interface talks in kbps because that is what the
           // numbers on a plan are quoted in.
           << L" --runtime-bitrate " << (settings.bitrateKbps * 1000u)
@@ -313,10 +318,6 @@ void begin_session(const ShellConnectRequest& request) {
   // turned on for the child rather than left to how it was built -- the same thing the host app
   // does for the streaming host.
   SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
-  // On Windows a session means the whole desktop. The per-window picker the viewer opens with
-  // belongs to the capture experiments; here it is a screen the user has to dismiss before
-  // seeing anything, so the session starts already watching.
-  SetEnvironmentVariableW(L"REMOTE60_NATIVE_START_STREAM_VIEW", L"1");
   // The viewer is a console-subsystem executable, and without this flag Windows gives it a
   // console window -- a black cmd box full of scrolling telemetry next to every session.
   // Launched from a terminal by hand it still inherits that terminal, so probes and manual
