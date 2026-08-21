@@ -3035,6 +3035,11 @@ int main(int argc, char** argv) {
     UdpVideoChunkHeader udpHdr{};
     bool keyFrame = false;
     uint64_t frameIntervalUs = 0;
+    // Media epoch live when this item was handed to the sender. streamGeneration is a
+    // target-selection id that does NOT change on a session rollover, so it cannot fence a delta
+    // encoded for the previous client. The sender drops any dequeued item whose mediaEpoch no
+    // longer matches the current one (see mediaSessionEpoch).
+    uint64_t mediaEpoch = 0;
   };
   std::mutex senderMu;
   std::condition_variable senderCv;
@@ -3045,6 +3050,10 @@ int main(int argc, char** argv) {
   // paints macroblock corruption on the client until the next IDR. They are held back here
   // until the requested keyframe actually passes through.
   bool senderWaitingForKey = false;
+  // Session media barrier. Bumped (under senderMu) by the rollover transaction in pump_udp_hello;
+  // read by the sender at dequeue to fence any item stamped for a previous session. Every item is
+  // stamped with this value when enqueued. Starts at 1 to match sessionEpoch.
+  std::atomic<uint64_t> mediaSessionEpoch{1};
   std::atomic<bool> senderStop{false};
   std::atomic<bool> senderSendFailed{false};
   std::atomic<bool> senderRequestKey{false};
@@ -3057,6 +3066,13 @@ int main(int argc, char** argv) {
   std::atomic<uint64_t> senderSendDurSumUs{0};
   std::atomic<uint64_t> senderSendDurMaxUs{0};
   std::atomic<uint64_t> senderSendCount{0};
+  // IDR telemetry written by the sender thread (per current media epoch): when the first key AU of
+  // this session hit the wire, and the size/chunk count of the last key AU sent. Reset by the
+  // rollover transaction so they describe the current session, not the previous one. Diagnostic
+  // only -- never wired into ABR evidence.
+  std::atomic<uint64_t> senderFirstKeyWireUs{0};
+  std::atomic<uint64_t> senderLastKeyAuBytes{0};
+  std::atomic<uint64_t> senderLastKeyAuChunks{0};
   std::thread senderThread;
   // The reader thread owns the peer address; the render loop picks up changes through these.
   std::atomic<uint32_t> udpPeerIpNet{0};
@@ -5435,6 +5451,13 @@ int main(int argc, char** argv) {
   // Encoded frames the sender queue policy discarded (backlog resync or waiting for the
   // forced IDR). These are the frames a viewer experiences as a freeze.
   uint64_t senderHeldFrames = 0;
+  // Session media barrier / IDR telemetry (encode-thread side). forceKeyInputCount and
+  // nonKeyAuWhileWaiting reset per print interval; firstKeyEnqueuedUs is per media epoch (reset by
+  // the rollover transaction). Goal: tell "encoder never produced a key" apart from "key produced
+  // but lost in UDP assembly". Diagnostic only -- never fed to ABR.
+  uint64_t forceKeyInputCount = 0;    // key inputs handed to the encoder
+  uint64_t nonKeyAuWhileWaiting = 0;  // delta AUs seen while the barrier was closed
+  uint64_t firstKeyEnqueuedUs = 0;    // wire-time stamp of the first key enqueued this media epoch
   uint64_t sentBytes = 0;
   uint64_t rawEquivalentBytes = 0;
   uint64_t udpTxFrames = 0;
@@ -5538,12 +5561,28 @@ int main(int argc, char** argv) {
     udpPeer = peer;
     udpPeerReady = true;
     {
+      // Session media barrier: the whole rollover is one transaction under the same lock the
+      // sender thread dequeues on. Dropping the queue discards every delta still bound for the old
+      // session; senderWaitingForKey holds new deltas until a real IDR; bumping the media epoch
+      // fences even an item the sender has already popped for the old peer. Without this, a delta
+      // queued before the swap goes out to the *new* peer as a P-frame its decoder can never use.
       std::lock_guard<std::mutex> lk(senderMu);
+      senderDropCount.fetch_add(senderQueue.size(), std::memory_order_relaxed);
+      senderHeldFrames += senderQueue.size();
+      sentFrames -= std::min<uint64_t>(sentFrames, senderQueue.size());
+      senderQueue.clear();
+      senderWaitingForKey = true;
       senderPeer = peer;
       senderPeerReady = true;
+      mediaSessionEpoch.fetch_add(1, std::memory_order_acq_rel);
+      senderFirstKeyWireUs.store(0, std::memory_order_relaxed);
+      senderLastKeyAuBytes.store(0, std::memory_order_relaxed);
+      senderLastKeyAuChunks.store(0, std::memory_order_relaxed);
     }
     forceKeyNext = true;
-    std::cout << "[native-video-host] udp peer updated; forcing keyframe\n";
+    firstKeyEnqueuedUs = 0;  // re-anchor the per-epoch IDR telemetry on the new session
+    std::cout << "[native-video-host] udp peer updated; media barrier armed epoch="
+              << mediaSessionEpoch.load(std::memory_order_acquire) << " forcing keyframe\n";
   };
 
   auto start_encoded_sender = [&]() {
@@ -5552,6 +5591,7 @@ int main(int argc, char** argv) {
       (void)SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
       uint64_t cadenceScheduledUs = 0;
       uint64_t cadenceGeneration = 0;
+      uint64_t cadenceMediaEpoch = 0;
       while (true) {
         EncodedSendItem item;
         sockaddr_in peer{};
@@ -5569,6 +5609,13 @@ int main(int argc, char** argv) {
           peer = senderPeer;
           peerReady = senderPeerReady;
         }
+        // Session media barrier: an item stamped for a previous session -- queued before the
+        // rollover, or popped in the instant before the swap -- must never reach the new peer.
+        // Drop it here so a stale P-frame cannot land on the new decoder.
+        if (item.mediaEpoch != mediaSessionEpoch.load(std::memory_order_acquire)) {
+          senderDropCount.fetch_add(1, std::memory_order_relaxed);
+          continue;
+        }
         if (!peerReady) {
           senderTxNoPeer.fetch_add(1, std::memory_order_relaxed);
           continue;
@@ -5582,8 +5629,12 @@ int main(int argc, char** argv) {
         // and ratchet the stream progressively further behind live.
         const bool freshCadence = cadenceScheduledUs == 0 ||
                                   cadenceGeneration != item.udpHdr.streamGeneration ||
+                                  cadenceMediaEpoch != item.mediaEpoch ||
                                   nowUs > cadenceScheduledUs + frameIntervalUs * 2ULL;
         cadenceGeneration = item.udpHdr.streamGeneration;
+        // Re-anchor the pacing clock on a media rollover so a new session's first frame is not
+        // held against a deadline inherited from the previous client.
+        cadenceMediaEpoch = item.mediaEpoch;
         if (freshCadence) {
           cadenceScheduledUs = nowUs;
         } else if (senderCadenceSmoothing) {
@@ -5614,6 +5665,15 @@ int main(int argc, char** argv) {
           while (durUs > prevMax &&
                  !senderSendDurMaxUs.compare_exchange_weak(prevMax, durUs,
                                                            std::memory_order_relaxed)) {
+          }
+          if (item.keyFrame) {
+            // Record when the first key AU of this media epoch reached the wire and the size of
+            // the last key sent -- distinguishes "key never produced" from "key lost in assembly".
+            uint64_t expectedFirst = 0;
+            senderFirstKeyWireUs.compare_exchange_strong(expectedFirst, sendStartUs,
+                                                         std::memory_order_relaxed);
+            senderLastKeyAuBytes.store(item.bytes.size(), std::memory_order_relaxed);
+            senderLastKeyAuChunks.store(pathStats.payloadChunkCount, std::memory_order_relaxed);
           }
         } else {
           senderSendFailed.store(true, std::memory_order_release);
@@ -7257,6 +7317,7 @@ int main(int argc, char** argv) {
        const bool forceKeyFrame =
             forceKeyNext || (encodedSeq == 0) ||
             ((activeKeyint > 0) && ((seq % activeKeyint) == 0));
+       if (forceKeyFrame) ++forceKeyInputCount;
         const uint64_t encodeStartUs = qpc_now_us();
         const uint64_t encodeInputUs = captureStampUs;
         if (captureTimelineOriginUs < 0) {
@@ -7516,18 +7577,28 @@ int main(int argc, char** argv) {
             item.bytes = std::move(au.bytes);
             {
               std::lock_guard<std::mutex> lk(senderMu);
+              // Stamp under the same lock the rollover bumps the epoch under, so the stamp is
+              // consistent with the queue-clear: a delta stamped just after a rollover carries the
+              // new epoch (and rides the fresh barrier); one stamped just before is dropped at
+              // dequeue. This is also how the static bootstrap IDR gets tagged for the new epoch --
+              // it flows through this same enqueue path and needs no special case.
+              item.mediaEpoch = mediaSessionEpoch.load(std::memory_order_acquire);
               if (item.keyFrame) {
-                // A new IDR makes every queued frame irrelevant and re-anchors the stream.
+                // A new IDR makes every queued frame irrelevant and re-anchors the stream. This is
+                // also the barrier-open point: a real (or bootstrap) key AU for the current epoch
+                // clears senderWaitingForKey so deltas may flow again.
                 senderDropCount.fetch_add(senderQueue.size(), std::memory_order_relaxed);
                 senderHeldFrames += senderQueue.size();
                 sentFrames -= std::min<uint64_t>(sentFrames, senderQueue.size());
                 senderQueue.clear();
                 senderWaitingForKey = false;
+                if (firstKeyEnqueuedUs == 0) firstKeyEnqueuedUs = sendStartUs;
                 senderQueue.push_back(std::move(item));
                 enqueuedForSend = true;
               } else if (senderWaitingForKey) {
                 // This delta references dropped frames; sending it would decode into
                 // block garbage. Hold everything until the forced keyframe arrives.
+                ++nonKeyAuWhileWaiting;
                 senderDropCount.fetch_add(1, std::memory_order_relaxed);
                 senderRequestKey.store(true, std::memory_order_release);
               } else if (senderBacklogged || senderQueue.size() >= kSenderQueueMaxFrames) {
@@ -8134,6 +8205,13 @@ int main(int argc, char** argv) {
                   << " bootstrapReplayCount=" << bootstrapReplayCount
                   << " bootstrapSourceAgeUs=" << bootstrapSourceAgeUs
                   << " bootstrapEpoch=" << bootstrapReplayEpoch
+                  << " mediaEpoch=" << mediaSessionEpoch.load(std::memory_order_acquire)
+                  << " forceKeyInputCount=" << forceKeyInputCount
+                  << " nonKeyAuWhileWaiting=" << nonKeyAuWhileWaiting
+                  << " firstKeyEnqueuedUs=" << firstKeyEnqueuedUs
+                  << " firstKeyWireUs=" << senderFirstKeyWireUs.load(std::memory_order_relaxed)
+                  << " lastKeyAuBytes=" << senderLastKeyAuBytes.load(std::memory_order_relaxed)
+                  << " lastKeyAuChunks=" << senderLastKeyAuChunks.load(std::memory_order_relaxed)
                   << "\n";
         }
 
@@ -8492,6 +8570,11 @@ int main(int argc, char** argv) {
       if (statsPrintDue) {
         oldestGpuPendingPeakUs = 0;
         gpuPendingCountPeak = 0;
+        // Per print-interval rates: reset only once printed so they span the whole interval
+        // (matching the peak resets above). firstKey*/lastKeyAu* are per media epoch and are
+        // reset by the rollover transaction instead, so they persist across prints.
+        forceKeyInputCount = 0;
+        nonKeyAuWhileWaiting = 0;
       }
       captureUnmapSumUs = 0;
       captureUnmapMaxUs = 0;
