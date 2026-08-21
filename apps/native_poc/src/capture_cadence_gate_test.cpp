@@ -140,6 +140,57 @@ void TestStillScreenDoesNotStallTheCadence() {
                                  "/s");
 }
 
+// The contract bug: a pointer-only offer (a cursor move, DXGI accumulatedFrames==0) that lands
+// just past the content's next-due instant used to advance the single shared clock and drop the
+// real content frame that followed a few ms later -- a right-click menu that, because desktop
+// duplication is change-driven, was then never re-offered and never appeared. Content and
+// pointer offers now pace on independent clocks, so pointer motion can never claim a content
+// slot.
+void TestPointerOnlyOfferDoesNotStealContentSlot() {
+  std::printf("a pointer-only offer never drops the content frame that follows it\n");
+  CaptureCadenceGate gate;
+  const uint64_t intervalUs = 1000000u / 30;  // 30 fps
+  gate.SetRequestedIntervalUs(intervalUs);
+  gate.SetEnabled(true);
+
+  uint64_t t = 1000000;
+  // A real content frame is accepted and sets the content phase.
+  expect(gate.ShouldAccept(t, true), "first content frame accepted");
+
+  // A pointer-only offer arrives just past the content's next-due instant. On the old shared
+  // clock this consumed the content slot and advanced it a whole interval.
+  const uint64_t pointerUs = t + intervalUs + 700;
+  expect(gate.ShouldAccept(pointerUs, false), "pointer-only offer accepted on its own clock");
+
+  // A real content frame a few ms later -- the right-click menu -- must still get through. Under
+  // the old single-clock gate this was early-dropped against the pointer-advanced deadline.
+  const uint64_t contentUs = pointerUs + 6000;
+  expect(gate.ShouldAccept(contentUs, true),
+         "content frame after a pointer-only offer is accepted, not dropped");
+
+  expect(gate.GateDropContentCount() == 0,
+         "no content frame was gate-dropped, got " + std::to_string(gate.GateDropContentCount()));
+  expect(gate.AcceptContentCount() == 2,
+         "both content frames accepted, got " + std::to_string(gate.AcceptContentCount()));
+
+  // The pointer clock throttles on its own: a rapid burst of cursor moves inside one interval
+  // is thinned without ever touching the content counters.
+  uint64_t p = contentUs + 500;
+  for (int i = 0; i < 5; ++i) {
+    gate.ShouldAccept(p, false);
+    p += 1000;  // 1ms apart -- far inside the 33ms interval
+  }
+  expect(gate.GateDropPointerCount() >= 1,
+         "the pointer clock thins a rapid cursor burst, dropped " +
+             std::to_string(gate.GateDropPointerCount()));
+  expect(gate.GateDropContentCount() == 0,
+         "the pointer burst never gate-dropped content, got " +
+             std::to_string(gate.GateDropContentCount()));
+  expect(gate.AcceptContentCount() == 2,
+         "content acceptance untouched by the pointer burst, got " +
+             std::to_string(gate.AcceptContentCount()));
+}
+
 }  // namespace
 
 int main() {
@@ -148,6 +199,7 @@ int main() {
   TestQuietScreenNeverPacedFasterThanAsked();
   TestIrregularQuietScreenAt60();
   TestStillScreenDoesNotStallTheCadence();
+  TestPointerOnlyOfferDoesNotStealContentSlot();
 
   if (gFailures != 0) {
     std::printf("capture_cadence_gate_test: FAIL (%d)\n", gFailures);

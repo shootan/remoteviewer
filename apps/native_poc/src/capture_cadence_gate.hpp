@@ -36,16 +36,23 @@ class CaptureCadenceGate {
   void SetEarlyTolerancePercent(uint32_t percent) { earlyTolerancePercent_ = percent; }
 
   // Forgets the measured rate. Used when the stream restarts, where the old rate describes
-  // content and a target that no longer apply.
+  // content and a target that no longer apply. The lifetime counters are deliberately left
+  // alone -- they are cumulative telemetry, like the host's captureRestarts.
   void Reset() {
     offerIntervalUs_ = 0;
     lastOfferUs_ = 0;
-    nextDueUs_ = 0;
+    nextContentDueUs_ = 0;
+    nextPointerDueUs_ = 0;
   }
 
   /** True when this frame should be encoded. `hasNewContent` is false for an offer that
    *  carried no desktop update -- a pointer-only report -- which says nothing about the rate
-   *  at which content is arriving and must not be measured as if it did. */
+   *  at which content is arriving and must not be measured as if it did.
+   *
+   *  Content and pointer-only offers pace on independent clocks. A pointer-only offer that
+   *  landed on the shared clock could claim the next content slot and, because duplication is
+   *  change-driven and never re-sends those pixels, silently drop the real frame that followed
+   *  (a right-click menu that then never appeared). Only content advances the content clock. */
   bool ShouldAccept(uint64_t nowUs, bool hasNewContent) {
     if (hasNewContent) {
       if (lastOfferUs_ != 0 && nowUs > lastOfferUs_) {
@@ -62,12 +69,37 @@ class CaptureCadenceGate {
     const uint64_t intervalUs = EffectiveIntervalUs();
     const uint64_t earlyToleranceUs =
         std::max<uint64_t>(1500, intervalUs * earlyTolerancePercent_ / 100);
-    // A frame turned away here is gone: duplication never re-sends it.
-    if (nextDueUs_ != 0 && nowUs + earlyToleranceUs < nextDueUs_) return false;
-    // Keep the phase while it still describes the present, so accepted frames stay evenly
-    // spaced instead of re-basing on every arrival.
-    const bool phaseStillUseful = nextDueUs_ != 0 && nowUs <= nextDueUs_ + intervalUs * 2;
-    nextDueUs_ = phaseStillUseful ? nextDueUs_ + intervalUs : nowUs + intervalUs;
+
+    if (hasNewContent) {
+      ++offerContentCount_;
+      // A content frame turned away here is gone: duplication never re-sends it.
+      if (nextContentDueUs_ != 0 && nowUs + earlyToleranceUs < nextContentDueUs_) {
+        ++gateDropContentCount_;
+        return false;
+      }
+      // Keep the phase while it still describes the present, so accepted frames stay evenly
+      // spaced instead of re-basing on every arrival.
+      const bool phaseStillUseful =
+          nextContentDueUs_ != 0 && nowUs <= nextContentDueUs_ + intervalUs * 2;
+      nextContentDueUs_ =
+          phaseStillUseful ? nextContentDueUs_ + intervalUs : nowUs + intervalUs;
+      ++acceptContentCount_;
+      return true;
+    }
+
+    // Pointer-only offers throttle on their own clock so cursor motion flows at the cadence
+    // rate without ever consuming a content slot. Dropping one here is harmless: the next
+    // cursor move re-offers the position.
+    ++offerPointerCount_;
+    if (nextPointerDueUs_ != 0 && nowUs + earlyToleranceUs < nextPointerDueUs_) {
+      ++gateDropPointerCount_;
+      return false;
+    }
+    const bool pointerPhaseStillUseful =
+        nextPointerDueUs_ != 0 && nowUs <= nextPointerDueUs_ + intervalUs * 2;
+    nextPointerDueUs_ =
+        pointerPhaseStillUseful ? nextPointerDueUs_ + intervalUs : nowUs + intervalUs;
+    ++acceptPointerCount_;
     return true;
   }
 
@@ -75,11 +107,28 @@ class CaptureCadenceGate {
 
   uint64_t OfferIntervalUs() const { return offerIntervalUs_; }
 
+  // Lifetime counters, split by content vs pointer-only offers. Cumulative across resets.
+  uint64_t OfferContentCount() const { return offerContentCount_; }
+  uint64_t OfferPointerCount() const { return offerPointerCount_; }
+  uint64_t GateDropContentCount() const { return gateDropContentCount_; }
+  uint64_t GateDropPointerCount() const { return gateDropPointerCount_; }
+  uint64_t AcceptContentCount() const { return acceptContentCount_; }
+  uint64_t AcceptPointerCount() const { return acceptPointerCount_; }
+
  private:
   uint64_t requestedIntervalUs_ = 33333;
   uint64_t offerIntervalUs_ = 0;
   uint64_t lastOfferUs_ = 0;
-  uint64_t nextDueUs_ = 0;
+  uint64_t nextContentDueUs_ = 0;
+  uint64_t nextPointerDueUs_ = 0;
+  // Non-atomic: the gate runs on the capture-callback thread; the accessors are read for
+  // telemetry only, where a torn read of a monotonic counter is harmless.
+  uint64_t offerContentCount_ = 0;
+  uint64_t offerPointerCount_ = 0;
+  uint64_t gateDropContentCount_ = 0;
+  uint64_t gateDropPointerCount_ = 0;
+  uint64_t acceptContentCount_ = 0;
+  uint64_t acceptPointerCount_ = 0;
   uint32_t earlyTolerancePercent_ = 25;
   bool enabled_ = true;
 };

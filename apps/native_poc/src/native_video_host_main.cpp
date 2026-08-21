@@ -7953,6 +7953,10 @@ int main(int argc, char** argv) {
                   << " frameGatingStaticSkips=" << frameGatingStaticSkipCount
                   << " frameGatingChangePm=" << frameGatingChangePermilleLast
                   << " frameGatingChangeAvgPm=" << frameGatingChangeAvgPm
+                  << " captureOfferContent=" << captureCadenceGate.OfferContentCount()
+                  << " captureOfferPointer=" << captureCadenceGate.OfferPointerCount()
+                  << " captureGateDropContent=" << captureCadenceGate.GateDropContentCount()
+                  << " captureGateDropPointer=" << captureCadenceGate.GateDropPointerCount()
                   << "\n";
         }
 
