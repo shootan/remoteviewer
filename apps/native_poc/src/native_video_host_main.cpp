@@ -5967,34 +5967,41 @@ int main(int argc, char** argv) {
     return true;
   };
 
-  // --- Static-screen bootstrap (host main/encode thread only) -------------------------------
-  // When a new session / stream epoch appears while the desktop is idle, DXGI has no frame to hand
-  // the forced keyframe, so the viewer stays black until the screen next changes. Arm a one-shot
-  // timer on each such epoch; if no real frame is published before it fires, re-encode the cached
-  // raw frame once as a fresh IDR. Coalesced: re-arming just resets the timer (latest-epoch-wins),
-  // never queues multiples. Bootstrap replays are kept out of ABR/rate evidence -- a single sparse
-  // frame is not congestion signal.
-  constexpr uint64_t kBootstrapReplayDelayUs = 150000;  // 150ms, within the 100-250ms window
-  bool bootstrapPending = false;
-  uint64_t bootstrapDueAtUs = 0;
-  uint64_t lastSeenBootstrapEpoch = 0;
-  uint64_t bootstrapReplayCount = 0;   // telemetry: total replays served
-  uint64_t bootstrapSourceAgeUs = 0;   // telemetry: cached-frame age at the last replay
-  uint64_t bootstrapReplayEpoch = 0;   // telemetry: session epoch the last replay served
-  auto arm_bootstrap = [&](uint64_t atUs) {
+  // --- Trailing-edge encoder kick (host main/encode thread only) ----------------------------
+  // The async H.264 MFT holds the most recent input frame until the NEXT input arrives, so on a
+  // still screen the last real capture (the state after a drag-release, a right-click menu, the
+  // first frame after connect) stays stuck inside the encoder and never reaches the wire. This kick
+  // supplies exactly one "next input" on a trailing edge: every real frame (re)arms a 150ms timer,
+  // so continuous motion just pushes the deadline out (zero synthetic frames); only when changes
+  // stop does the timer fire and resubmit the cached last raw frame once, flushing the held frame
+  // out. A kick is cancelled the moment the latest real input is observed coming out of the encoder
+  // (its capture timestamp on an emitted AU) or -- on a fresh media barrier -- the epoch's first key
+  // AU reaches the wire. Kicks are kept out of ABR/rate evidence: a single sparse frame is not a
+  // congestion signal. This is NOT a periodic keepalive -- nothing is sent while the screen is quiet.
+  constexpr uint64_t kTrailingKickDelayUs = 150000;  // 150ms trailing edge
+  bool trailingKickPending = false;
+  uint64_t trailingKickDueAtUs = 0;
+  uint64_t lastSeenBootstrapEpoch = 0;       // session epoch we last armed for
+  uint64_t lastSeenStreamGeneration = 0;     // capture generation last armed for (window-select/reattach)
+  uint64_t lastRealInputCaptureUs = 0;       // capture ts of the most recent real frame fed to the MFT
+  uint64_t lastEmittedAuCaptureUs = 0;       // capture ts seen on the most recent emitted AU (encoder output)
+  uint64_t lastKickedForInputCaptureUs = 0;  // one-kick-per-held-input guard
+  uint64_t trailingKickCount = 0;            // telemetry: total trailing-edge kicks served
+  uint64_t lastKickSourceAgeUs = 0;          // telemetry: cached-frame age at the last kick
+  auto arm_trailing_kick = [&](uint64_t atUs) {
     if (!useH264) return;
-    bootstrapPending = true;
-    bootstrapDueAtUs = atUs + kBootstrapReplayDelayUs;
+    trailingKickPending = true;
+    trailingKickDueAtUs = atUs + kTrailingKickDelayUs;
   };
-  auto disarm_bootstrap = [&]() {
-    bootstrapPending = false;
-    bootstrapDueAtUs = 0;
+  auto cancel_trailing_kick = [&]() {
+    trailingKickPending = false;
+    trailingKickDueAtUs = 0;
   };
   // Validate the cache against the live capture identity and the CURRENT secure-desktop state, then
   // fill the loop's frame locals from it. Returns false (leaving the screen black) if anything is
   // stale, mismatched, or the desktop is locked/secure -- better black than a wrong picture.
-  auto bootstrap_try_fill = [&](std::shared_ptr<std::vector<uint8_t>>& outPayload, uint32_t& outW,
-                                uint32_t& outH, uint32_t& outStride, uint64_t nowUs) -> bool {
+  auto kick_try_fill = [&](std::shared_ptr<std::vector<uint8_t>>& outPayload, uint32_t& outW,
+                           uint32_t& outH, uint32_t& outStride, uint64_t nowUs) -> bool {
     BootstrapFrameCache snap;
     {
       std::lock_guard<std::mutex> lk(bootstrapCacheMu);
@@ -6020,11 +6027,11 @@ int main(int argc, char** argv) {
     outW = snap.width;
     outH = snap.height;
     outStride = snap.stride;
-    ++bootstrapReplayCount;
-    bootstrapSourceAgeUs = (nowUs > snap.captureQpcUs) ? (nowUs - snap.captureQpcUs) : 0;
-    bootstrapReplayEpoch = sessionEpoch.load(std::memory_order_acquire);
-    std::cout << "[native-video-host] static-screen bootstrap replay epoch=" << bootstrapReplayEpoch
-              << " ageUs=" << bootstrapSourceAgeUs << " size=" << outW << "x" << outH
+    ++trailingKickCount;
+    lastKickSourceAgeUs = (nowUs > snap.captureQpcUs) ? (nowUs - snap.captureQpcUs) : 0;
+    std::cout << "[native-video-host] trailing-edge kick epoch="
+              << sessionEpoch.load(std::memory_order_acquire)
+              << " ageUs=" << lastKickSourceAgeUs << " size=" << outW << "x" << outH
               << " gen=" << snap.streamGeneration << "\n";
     return true;
   };
@@ -6036,14 +6043,20 @@ int main(int argc, char** argv) {
       break;
     }
     pump_udp_hello();
-    // A bumped session epoch means a fresh viewer/decoder; arm a one-shot bootstrap for it (latest
-    // wins). The cache is empty on the very first connect, so this is a no-op there (cold-cache is
-    // a separate follow-up); it pays off on reconnect, where the previous session left a frame.
+    // Arm the trailing-edge kick on a fresh viewer/decoder (bumped session epoch) and on a capture
+    // identity change (a new stream generation -- window select, reattach, backend change). The kick
+    // fires 150ms later only if no real frame has arrived and been flushed out; a real callback
+    // fills the cold cache first, so even the first kick has pixels to resubmit.
     {
       const uint64_t curEpoch = sessionEpoch.load(std::memory_order_acquire);
       if (curEpoch != lastSeenBootstrapEpoch) {
         lastSeenBootstrapEpoch = curEpoch;
-        arm_bootstrap(nowUs);
+        arm_trailing_kick(nowUs);
+      }
+      const uint64_t curGen = captureStreamGenerationState.load(std::memory_order_acquire);
+      if (curGen != lastSeenStreamGeneration) {
+        lastSeenStreamGeneration = curGen;
+        arm_trailing_kick(nowUs);
       }
     }
     if (desktopBackendReqPending.exchange(false, std::memory_order_acq_rel)) {
@@ -6278,9 +6291,10 @@ int main(int argc, char** argv) {
       }
       streamActiveApplied = true;
       forceKeyNext = true;
-      // A returning viewer on a still desktop needs a picture too; arm the one-shot bootstrap for
-      // the current epoch (coalesces with any arm from the epoch bump above).
-      arm_bootstrap(qpc_now_us());
+      // A returning viewer on a still desktop needs a picture too; arm the trailing-edge kick for
+      // the current epoch (coalesces with any arm from the epoch/generation edges above). This also
+      // covers the stream-inactive->active edge and a capture reattach, which both land here.
+      arm_trailing_kick(qpc_now_us());
       powerKeepalive.SetStreaming(true, true);
       std::cout << "[native-video-host] stream active; forcing keyframe\n";
     }
@@ -6840,28 +6854,59 @@ int main(int argc, char** argv) {
     uint32_t queueWaitReason = 0;  // 0: normal, 1: timeout, 2: no-work
     const uint64_t queueSelectStartUs = qpc_now_us();
     bool servedBootstrap = false;
-    if (bootstrapPending && nowUs >= bootstrapDueAtUs) {
-      // A real frame already waiting in the ring is always better than a replay; fall through to
-      // the normal pop (which disarms below). Otherwise re-encode the cached raw frame once.
+    bool kickForcedKey = false;  // true only when this kick must open a closed media barrier (IDR)
+    if (trailingKickPending && nowUs >= trailingKickDueAtUs) {
+      // A real frame already waiting in the ring is always better than a kick; fall through to the
+      // normal pop (the encode below re-arms and records it). Otherwise decide whether the last real
+      // input still needs flushing out of the MFT.
       bool realWaiting = false;
       {
         std::lock_guard<std::mutex> lk(frame.mu);
         realWaiting = (frame.version != lastVersionSent) && frame.payload && !frame.payload->empty();
       }
       if (!realWaiting) {
-        if (bootstrap_try_fill(payload, w, h, stride, nowUs)) {
+        // Media barrier (UDP): a closed barrier means the epoch's first key AU has not reached the
+        // wire, so a fresh/returning viewer still has no picture. TCP has no barrier (always open).
+        bool barrierClosed = false;
+        if (transport == VideoTransport::Udp) {
+          std::lock_guard<std::mutex> lk(senderMu);
+          barrierClosed = senderWaitingForKey;
+        }
+        // The latest real input is "stuck" until its capture timestamp is observed on an emitted AU;
+        // on the async MFT it sits there until the next input, which on a still screen never comes.
+        const bool latestInputStuck = (lastRealInputCaptureUs > lastEmittedAuCaptureUs);
+        // One kick per distinct held input: never resubmit the same held frame twice on a P-frame
+        // trailing edge. A closed barrier overrides this -- it must keep kicking until an IDR lands.
+        const bool alreadyKickedThisInput =
+            (lastRealInputCaptureUs != 0 && lastKickedForInputCaptureUs == lastRealInputCaptureUs);
+        const bool needKick = barrierClosed || (latestInputStuck && !alreadyKickedThisInput);
+        bool rearm = false;
+        if (needKick && kick_try_fill(payload, w, h, stride, nowUs)) {
           servedBootstrap = true;
-          forceKeyNext = true;   // a fresh decoder needs an IDR; the encode below consumes this
+          // A closed barrier needs a real IDR; an ordinary trailing edge on an open stream can ride
+          // the held frame as-is (a P-frame is fine). Leave any pre-existing forceKeyNext untouched.
+          if (barrierClosed) {
+            forceKeyNext = true;
+            kickForcedKey = true;
+          }
           seq = 0;
           version = lastVersionSent;  // no real version consumed (keeps queue bookkeeping stable)
           streamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
           captureUs = nowUs;     // fresh monotonic stamps: never reuse the stale capture time
           callbackUs = nowUs;
           queuePushUs = nowUs;
+          lastKickedForInputCaptureUs = lastRealInputCaptureUs;  // one-shot per held input
+          // Keep kicking on a still-closed barrier: each kick feeds a forced IDR, so the held frame
+          // becomes an IDR within a couple of flushes and the cancel comes when it reaches the wire.
+          rearm = barrierClosed;
         }
-        // One-shot regardless of outcome: a failed fill (locked/secure/identity mismatch) leaves
-        // the screen black rather than painting a wrong or stale picture.
-        disarm_bootstrap();
+        // Otherwise one-shot: a failed fill (locked/secure/identity mismatch) leaves the screen black
+        // rather than painting a wrong or stale picture, and a satisfied trailing edge stays quiet.
+        if (rearm) {
+          arm_trailing_kick(nowUs);
+        } else {
+          cancel_trailing_kick();
+        }
       }
     }
     bool queueReady = false;
@@ -6906,10 +6951,10 @@ int main(int argc, char** argv) {
       nv12H = frame.nv12H;
       frame.nv12Slot = -1;  // claimed; this loop now owns the release
     }
-    if (!servedBootstrap) {
-      // A real frame superseded any pending replay.
-      disarm_bootstrap();
-    }
+    // NB: a real frame pop deliberately does NOT cancel the kick. The pending timer is (re)armed and
+    // lastRealInputCaptureUs recorded once the frame is actually fed to the MFT (see below), so the
+    // deadline trails the LAST real input; the kick then cancels only when that input is observed
+    // coming out of the encoder, not merely because a frame was popped.
     if (poppedNv12Slot >= 0) {
       // The previous iteration bailed out before encoding (gating skip, stale drop);
       // release its claimed conversion now.
@@ -7388,6 +7433,14 @@ int main(int argc, char** argv) {
         preEncodePrepUs += nv12Us;
       }
       encoderOutputSamplesTotal += encodeStats.processOutputSamples;
+      if (!servedBootstrap) {
+        // A real frame was just handed to the async MFT; it becomes the encoder's held input until
+        // the next frame arrives. Record its capture timestamp and (re)arm the trailing kick so the
+        // deadline always trails the LAST real input -- continuous motion keeps pushing it out and
+        // adds zero synthetic frames; only a genuine pause lets the kick fire to flush this frame.
+        lastRealInputCaptureUs = encodeInputUs;
+        arm_trailing_kick(qpc_now_us());
+      }
       while (!nv12PendingReleases.empty() &&
              nv12PendingReleases.front().requiredOutputs <= encoderOutputSamplesTotal) {
         captureReadback.ReleaseNv12Slot(nv12PendingReleases.front().slot,
@@ -7433,6 +7486,13 @@ int main(int argc, char** argv) {
         for (const auto& au : units) {
           if (au.bytes.empty()) continue;
           const int64_t auCaptureUs = (au.sampleTimeHns > 0) ? (au.sampleTimeHns / 10) : static_cast<int64_t>(encodeInputUs);
+          // This AU carries the capture timestamp of the input frame it was produced from (the async
+          // MFT preserves input sample times FIFO). Observing it is the proof a given real input has
+          // finally come OUT of the encoder -- the cancel signal for the trailing kick. Track the
+          // newest we have seen so a pending kick disarms once the latest real input has emerged.
+          if (auCaptureUs > 0 && static_cast<uint64_t>(auCaptureUs) > lastEmittedAuCaptureUs) {
+            lastEmittedAuCaptureUs = static_cast<uint64_t>(auCaptureUs);
+          }
           if (auTimelineOriginUs < 0 && captureTimelineOriginUs >= 0) {
             auTimelineOriginUs = static_cast<int64_t>(auCaptureUs) -
                                  (static_cast<int64_t>(encodeInputUs) - captureTimelineOriginUs);
@@ -7489,11 +7549,11 @@ int main(int argc, char** argv) {
         // The requested IDR can be delayed behind older async MFT output. Only the AU's
         // actual CleanPoint/IDR state is safe to advertise as a keyframe.
         const bool encodedKeyFrame = au.keyFrame;
-        // A bootstrap replay exists to give a fresh decoder a picture; a non-IDR AU (an older
-        // async output that surfaced on this encode call) would decode into garbage on it. Drop
-        // anything but a real IDR -- one-shot, so if the IDR is delayed the replay simply had no
-        // effect and the next real frame carries the keyframe, exactly as before this change.
-        if (servedBootstrap && !encodedKeyFrame) {
+        // A barrier-opening kick (fresh viewer, no reference frames) must deliver a real IDR: a
+        // non-IDR AU would decode into garbage. Drop anything but an IDR in that case. An ordinary
+        // trailing-edge kick on an OPEN stream, however, is flushing out the last real held frame,
+        // whose P-frame references the decoder already has -- so let it through.
+        if (servedBootstrap && kickForcedKey && !encodedKeyFrame) {
           continue;
         }
         if (selectionFirstKeyframePendingGeneration != 0 &&
@@ -7676,8 +7736,8 @@ int main(int argc, char** argv) {
           ++senderHeldFrames;
           continue;
         }
-        // A bootstrap replay is a single sparse frame; keep it out of the fps/bitrate and ABR
-        // evidence (it is counted separately as bootstrapReplayCount). It still consumes the forced
+        // A trailing-edge kick is a single sparse frame; keep it out of the fps/bitrate and ABR
+        // evidence (it is counted separately as trailingKickCount). It still consumes the forced
         // keyframe below so the normal path does not re-force one on the next real frame.
         if (!servedBootstrap) {
           ++sentFrames;
@@ -8202,9 +8262,8 @@ int main(int argc, char** argv) {
                   << " captureOfferPointer=" << captureCadenceGate.OfferPointerCount()
                   << " captureGateDropContent=" << captureCadenceGate.GateDropContentCount()
                   << " captureGateDropPointer=" << captureCadenceGate.GateDropPointerCount()
-                  << " bootstrapReplayCount=" << bootstrapReplayCount
-                  << " bootstrapSourceAgeUs=" << bootstrapSourceAgeUs
-                  << " bootstrapEpoch=" << bootstrapReplayEpoch
+                  << " trailingKickCount=" << trailingKickCount
+                  << " lastKickSourceAgeUs=" << lastKickSourceAgeUs
                   << " mediaEpoch=" << mediaSessionEpoch.load(std::memory_order_acquire)
                   << " forceKeyInputCount=" << forceKeyInputCount
                   << " nonKeyAuWhileWaiting=" << nonKeyAuWhileWaiting
