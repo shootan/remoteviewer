@@ -313,7 +313,10 @@ HostBottleneckStage detect_host_bottleneck_stage(uint64_t queueWaitUs, uint64_t 
   update_host_bottleneck_stage(6, encUs, "encoder", &stage);
   update_host_bottleneck_stage(7, queueToSendUs, "queue_to_send", &stage);
   update_host_bottleneck_stage(8, sendDurUs, "send_io", &stage);
-  update_host_bottleneck_stage(9, sendIntervalErrUs, "send_interval_jitter", &stage);
+  // Not the wire: this is the interval between AUs being *enqueued* to the sender by the encode/main
+  // thread. A large value means the host failed to supply AUs steadily (async MFT bursting, main
+  // scheduling), which the client sees as a gap -- the actual wire timing is the "wire seq=" lines.
+  update_host_bottleneck_stage(9, sendIntervalErrUs, "encode_au_enqueue_jitter", &stage);
   return stage;
 }
 
@@ -3136,6 +3139,10 @@ int main(int argc, char** argv) {
     UdpVideoChunkHeader udpHdr{};
     bool keyFrame = false;
     uint64_t frameIntervalUs = 0;
+    // qpc time the encode/main thread handed this AU to the sender queue. The sender subtracts it
+    // from its actual wire-start to expose queueWaitUs -- the gap between "AU ready" and "bytes on
+    // the wire" -- so a stutter can be pinned to AU supply vs the sender/wire, not guessed.
+    uint64_t enqueueUs = 0;
     // Media epoch live when this item was handed to the sender. streamGeneration is a
     // target-selection id that does NOT change on a session rollover, so it cannot fence a delta
     // encoded for the previous client. The sender drops any dequeued item whose mediaEpoch no
@@ -5869,10 +5876,15 @@ int main(int argc, char** argv) {
       // policy (drop peer / wait re-Hello) is deferred until real-use shows whether it recurs.
       uint64_t recoveryWindowStartUs = 0;
       uint32_t recoveryAttemptsInWindow = 0;
+      // Actual-wire telemetry: interval between consecutive wire-starts on THIS (sender) thread, so
+      // an uneven picture can be pinned to the wire vs the encode/main AU supply (whose enqueue
+      // interval is the separate encode_au_enqueue jitter metric). 0 = no previous send yet.
+      uint64_t prevWireStartUs = 0;
       while (true) {
         EncodedSendItem item;
         sockaddr_in peer{};
         bool peerReady = false;
+        size_t queueDepthAtDequeue = 0;
         {
           std::unique_lock<std::mutex> lk(senderMu);
           senderCv.wait(lk, [&] { return senderStop.load(std::memory_order_acquire) ||
@@ -5883,6 +5895,7 @@ int main(int argc, char** argv) {
           }
           item = std::move(senderQueue.front());
           senderQueue.pop_front();
+          queueDepthAtDequeue = senderQueue.size();
           peer = senderPeer;
           peerReady = senderPeerReady;
         }
@@ -5952,6 +5965,24 @@ int main(int argc, char** argv) {
                                                          std::memory_order_relaxed);
             senderLastKeyAuBytes.store(item.bytes.size(), std::memory_order_relaxed);
             senderLastKeyAuChunks.store(pathStats.payloadChunkCount, std::memory_order_relaxed);
+          }
+          // Actual-wire per-frame telemetry. A key frame always logs (end-to-end anchor); a normal
+          // frame logs only when its wire-start interval ran >1.5x the target (an actual hitch), so
+          // steady 60fps play stays quiet. queueWaitUs = "AU ready" -> "bytes on wire"; wireIntUs =
+          // gap since the previous send's wire-start; join to the client by udpHdr.seq, not clocks.
+          const uint64_t wireIntUs = prevWireStartUs > 0 && sendStartUs >= prevWireStartUs
+                                         ? sendStartUs - prevWireStartUs
+                                         : 0;
+          const uint64_t queueWaitUs =
+              item.enqueueUs > 0 && sendStartUs >= item.enqueueUs ? sendStartUs - item.enqueueUs : 0;
+          prevWireStartUs = sendStartUs;
+          if (item.keyFrame || (wireIntUs > (frameIntervalUs * 3ULL) / 2ULL)) {
+            std::cout << "[native-video-host] wire seq=" << item.udpHdr.seq
+                      << " key=" << (item.keyFrame ? 1 : 0) << " bytes=" << item.bytes.size()
+                      << " chunks=" << pathStats.payloadChunkCount << " wireIntUs=" << wireIntUs
+                      << " targetIntUs=" << frameIntervalUs << " queueWaitUs=" << queueWaitUs
+                      << " sendDurUs=" << durUs << " queueDepth=" << queueDepthAtDequeue
+                      << " epoch=" << item.mediaEpoch << "\n";
           }
         } else if (outcome == UdpSendOutcome::EpochChanged) {
           // A rollover bumped the media epoch mid-frame; the remaining chunks were aborted so old-
@@ -8121,6 +8152,7 @@ int main(int argc, char** argv) {
               // dequeue. This is also how the static bootstrap IDR gets tagged for the new epoch --
               // it flows through this same enqueue path and needs no special case.
               item.mediaEpoch = mediaSessionEpoch.load(std::memory_order_acquire);
+              item.enqueueUs = qpc_now_us();  // AU handed to sender; sender derives queueWaitUs
               if (item.keyFrame) {
                 // A new IDR makes every queued frame irrelevant and re-anchors the stream. This is
                 // also the barrier-open point: a real (or bootstrap) key AU for the current epoch
