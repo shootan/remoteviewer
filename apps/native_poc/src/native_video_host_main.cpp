@@ -3486,6 +3486,17 @@ int main(int argc, char** argv) {
   std::atomic<uint64_t> inputNoTarget{0};
   std::atomic<uint64_t> inputUnsupported{0};
   std::atomic<uint64_t> inputInjectFail{0};
+  // Input desktop is routed on a cached (~250ms) default/secure check; when a UAC prompt or lock
+  // rises between refreshes an event lands on ordinary SendInput and fails. These split that
+  // failure by its real cause instead of piling every miss into inputInjectFail:
+  //   inputFreshProbeSecure  -- cached-default event failed, an uncached re-probe found the desktop
+  //                             actually secure (the stale-cache case)
+  //   inputFreshProbeReroute -- of those, the ones the SYSTEM broker then landed on the retry
+  //   inputInjectFailDefault -- cached-default event failed AND an uncached re-probe still says
+  //                             default: a genuine failure on the interactive desktop
+  std::atomic<uint64_t> inputFreshProbeSecure{0};
+  std::atomic<uint64_t> inputFreshProbeReroute{0};
+  std::atomic<uint64_t> inputInjectFailDefault{0};
   // One control conversation, independent of how the bytes travel. TCP works on a LAN;
   // a host behind NAT is only reachable over the punched UDP socket, so the same dispatch
   // has to serve both.
@@ -3707,16 +3718,53 @@ int main(int argc, char** argv) {
               routedToAgent = true;
             }
           }
+          // Set once the outcome has already been tallied (the secure-desktop path), so the result
+          // switch below does not also count it -- e.g. as an inject failure.
+          bool injectAccounted = false;
           if (routedToAgent) {
             injectResult = InputInjectResult::Injected;
             resolvedTarget = " secure-system-agent";
+          } else if (secureDesktopActive) {
+            // The cached check says the desktop is secure and the broker path did not route (window
+            // mode, unauthenticated, or broker failure -- all already tallied). Ordinary SendInput on
+            // a secure desktop would just fail, so do not fall through to it, and do not double-count
+            // the miss as an inject failure.
+            injectAccounted = true;
           } else {
             injectResult =
                 inject_background_input_event(input, inputTargetCriteria, hostCaptureTargetHwnd,
                                               desktopMode, domainW, domainH,
                                               &desktopInputState, &resolvedTarget);
+            if (injectResult == InputInjectResult::Failed) {
+              // The cached check said default but injection failed: the 250ms cache may be stale
+              // because a UAC prompt or lock screen rose since the last refresh. Pay for ONE uncached
+              // probe on this specific failing event (never per event -- that would be far too costly
+              // on a 100+/s pointer stream) to find out which it is.
+              if (!interactive_desktop_is_default_uncached()) {
+                inputFreshProbeSecure.fetch_add(1, std::memory_order_relaxed);
+                // Actually secure now. Retry THIS event through the SYSTEM broker exactly once.
+                if (desktopMode &&
+                    sessionDirectoryAuthenticated.load(std::memory_order_acquire) &&
+                    secureInputBroker.SendInputEvent(input, domainW, domainH)) {
+                  injectResult = InputInjectResult::Injected;
+                  resolvedTarget = " secure-system-agent(reprobe)";
+                  inputFreshProbeReroute.fetch_add(1, std::memory_order_relaxed);
+                  secureInputDelivered.fetch_add(1, std::memory_order_relaxed);
+                }
+                // else: genuinely secure but not broker-eligible (window mode / unauthenticated) or
+                // the broker failed -- stays Failed, but inputFreshProbeSecure distinguishes it from
+                // a real default-desktop failure below.
+              } else {
+                // Uncached re-probe still says default: a genuine failure on the interactive desktop
+                // (UIPI, no target, a transient block). Counted separately so it is not confused
+                // with the stale-cache case.
+                inputInjectFailDefault.fetch_add(1, std::memory_order_relaxed);
+              }
+            }
           }
-          if (injectResult == InputInjectResult::Injected) {
+          if (injectAccounted) {
+            // Already tallied on the secure path; nothing more to record.
+          } else if (injectResult == InputInjectResult::Injected) {
             const uint64_t n = inputEvents.fetch_add(1) + 1;
             if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
               std::cout << "[native-video-host][input] injected seq=" << input.seq
@@ -8600,6 +8648,9 @@ int main(int argc, char** argv) {
                   << " inputNoTarget=" << inputNoTarget.load(std::memory_order_relaxed)
                   << " inputUnsupported=" << inputUnsupported.load(std::memory_order_relaxed)
                   << " inputInjectFail=" << inputInjectFail.load(std::memory_order_relaxed)
+                  << " inputFreshProbeSecure=" << inputFreshProbeSecure.load(std::memory_order_relaxed)
+                  << " inputFreshProbeReroute=" << inputFreshProbeReroute.load(std::memory_order_relaxed)
+                  << " inputInjectFailDefault=" << inputInjectFailDefault.load(std::memory_order_relaxed)
                   << " keyReqDropTotal=" << clientKeyFrameRequestDropped.load()
                   << " callbackFrames=" << callbackFramesPerSec
                   << " skippedByOverwrite=" << skippedByOverwrite
@@ -8704,6 +8755,9 @@ int main(int argc, char** argv) {
                   << " inputNoTarget=" << inputNoTarget.load(std::memory_order_relaxed)
                   << " inputUnsupported=" << inputUnsupported.load(std::memory_order_relaxed)
                   << " inputInjectFail=" << inputInjectFail.load(std::memory_order_relaxed)
+                  << " inputFreshProbeSecure=" << inputFreshProbeSecure.load(std::memory_order_relaxed)
+                  << " inputFreshProbeReroute=" << inputFreshProbeReroute.load(std::memory_order_relaxed)
+                  << " inputInjectFailDefault=" << inputInjectFailDefault.load(std::memory_order_relaxed)
                   << " capAgeAvgUs=" << capAgeAvgUs
                   << " capAgeMaxUs=" << captureAgeMaxUs
                   << " cb2eAvgUs=" << cb2eAvgUs
