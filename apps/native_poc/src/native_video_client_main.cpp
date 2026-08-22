@@ -575,6 +575,8 @@ struct SharedFrame {
   uint64_t queueSetUs = 0;
   uint64_t decodeToQueueUs = 0;
   uint64_t streamGeneration = 0;
+  // Diagnostics-only: keyframe flag carried to the present stage for stream telemetry.
+  bool key = false;
   uint64_t version = 0;
   std::shared_ptr<std::vector<uint8_t>> bytes;
   Microsoft::WRL::ComPtr<IMFSample> surfaceSample;
@@ -591,6 +593,10 @@ uint32_t gWindowH = 900;
 std::atomic<bool> gPaintQueued{false};
 std::atomic<uint32_t> gTraceEvery{0};
 std::atomic<uint32_t> gTraceMax{0};
+// Diagnostics-only: expected present interval (from fpsHint), published once at startup so the
+// present-stage stream telemetry on the UI thread can flag gaps past 1.5x cadence without reaching
+// into the recv thread's Args. 0 => fall back to a 60fps assumption.
+std::atomic<uint32_t> gPresentFrameIntervalUs{0};
 std::atomic<uint64_t> gTracePresentPrinted{0};
 std::atomic<uint64_t> gTraceRecvPrinted{0};
 constexpr bool kInputPolicyForceBlock = false;
@@ -2579,6 +2585,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       uint32_t codedW = 0, codedH = 0;
       uint32_t visL = 0, visT = 0;
       uint32_t seq = 0;
+      bool frameKey = false;
+      uint64_t frameStreamGeneration = 0;
       uint64_t captureUs = 0;
       uint64_t encodeStartUs = 0;
       uint64_t encodeEndUs = 0;
@@ -2604,6 +2612,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           visL = gFrame.visibleLeft;
           visT = gFrame.visibleTop;
           seq = gFrame.seq;
+          frameKey = gFrame.key;
+          frameStreamGeneration = gFrame.streamGeneration;
           captureUs = gFrame.captureUs;
           encodeStartUs = gFrame.encodeStartUs;
           encodeEndUs = gFrame.encodeEndUs;
@@ -2764,6 +2774,34 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           log_client_line(gapLine.str());
         }
         const uint64_t totalUs = (presentUs >= captureUs) ? (presentUs - captureUs) : 0;
+        // GNLink stream telemetry (diagnostics only): one line per presented keyframe, plus any
+        // non-key frame whose present interval jumped past 1.5x the expected cadence -- the client
+        // side of a periodic stutter. Joins the host 'wire seq=' log by seq+gen; steady play stays
+        // quiet. This only observes the timestamps the present path already produced.
+        {
+          const uint32_t expIntervalUs = gPresentFrameIntervalUs.load(std::memory_order_relaxed);
+          const uint64_t anomalyGapUs =
+              (expIntervalUs > 0) ? (static_cast<uint64_t>(expIntervalUs) * 3ULL) / 2ULL : 25000ULL;
+          const bool presentAnomaly = (lastPresentUs > 0 && presentGapUs > anomalyGapUs);
+          if (frameKey || presentAnomaly) {
+            uint64_t presentBacklog = 0;
+            {
+              std::lock_guard<std::mutex> lk(gFrame.mu);
+              presentBacklog = (gFrame.version >= frameVersion) ? (gFrame.version - frameVersion) : 0;
+            }
+            std::ostringstream telem;
+            telem << "[native-video-client][telemetry] stage=present"
+                  << " seq=" << seq
+                  << " gen=" << frameStreamGeneration
+                  << " key=" << (frameKey ? 1 : 0)
+                  << " presentUs=" << presentUs
+                  << " presentedIntervalUs=" << presentGapUs
+                  << " presentBacklog=" << presentBacklog
+                  << " paintUs=" << queueToPresentUs
+                  << " totalUs=" << totalUs;
+            log_client_line(telem.str());
+          }
+        }
         if ((totalUs >= kUserFeedbackLagWarnUs || (presentGapUs >= kUserFeedbackGapWarnUs && lastPresentUs > 0)) &&
             (presentUs >= lastUserFeedbackUs + kUserFeedbackMinIntervalUs || lastUserFeedbackUs == 0)) {
           const uint64_t overwriteCountNow = gOverwriteBeforePresentCount.load(std::memory_order_relaxed);
@@ -2898,6 +2936,8 @@ int main(int argc, char** argv) {
   const Args args = parse_args(argc, argv);
   gTraceEvery = args.traceEvery;
   gTraceMax = args.traceMax;
+  gPresentFrameIntervalUs = static_cast<uint32_t>(std::max<uint64_t>(
+      1ULL, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, args.fpsHint))));
   const uint64_t keyframeReqMinIntervalUs = env_u32_clamped(
       "REMOTE60_NATIVE_KEYFRAME_REQ_MIN_INTERVAL_US",
       static_cast<uint32_t>(kKeyframeRequestMinIntervalUsDefault), 10000, 1000000);
@@ -3520,6 +3560,27 @@ int main(int argc, char** argv) {
                                    pong.captureTargetProcess, sizeof(pong.captureTargetProcess))
                             << " hostCapRebind=" << pong.captureRebindCount
                             << "\n";
+                  // GNLink stream telemetry (diagnostics only): a periodic NTP-style clock offset
+                  // (host QPC minus client QPC) plus RTT, so the seq-joined host/client logs can
+                  // also be roughly aligned on an absolute timeline. Runs once per pong (~control
+                  // interval); no new control traffic is introduced.
+                  {
+                    const int64_t t1 = static_cast<int64_t>(action.ping.clientSendQpcUs);
+                    const int64_t t2 = static_cast<int64_t>(pong.hostRecvQpcUs);
+                    const int64_t t3 = static_cast<int64_t>(pong.hostSendQpcUs);
+                    const int64_t t4 = static_cast<int64_t>(doneUs);
+                    const int64_t clockOffsetUs = ((t2 - t1) + (t3 - t4)) / 2;
+                    std::ostringstream telem;
+                    telem << "[native-video-client][telemetry] stage=clock"
+                          << " pingSeq=" << pong.seq
+                          << " rttUs=" << rttUs
+                          << " clockOffsetUs=" << clockOffsetUs
+                          << " clientSendUs=" << action.ping.clientSendQpcUs
+                          << " hostRecvUs=" << pong.hostRecvQpcUs
+                          << " hostSendUs=" << pong.hostSendQpcUs
+                          << " clientRecvUs=" << doneUs;
+                    log_client_line(telem.str());
+                  }
                   break;
                 }
                 case TcpControlResponseKind::WindowList: {
@@ -4370,6 +4431,7 @@ int main(int argc, char** argv) {
         gFrame.queueSetUs = queueSetUs;
         gFrame.decodeToQueueUs = decodeToQueueUs;
         gFrame.streamGeneration = h.streamGeneration;
+        gFrame.key = keyFrame;
         gFrame.version = prevVersion + 1;
         gFrame.bytes = std::move(frameNv12);
         gFrame.surfaceSample = std::move(decoded.surfaceSample);
@@ -4418,6 +4480,31 @@ int main(int argc, char** argv) {
               << " bytes=" << h.payloadSize
               << " key=" << (keyFrame ? 1 : 0);
           log_client_line(oss.str());
+        }
+      }
+
+      // GNLink stream telemetry (diagnostics only): one line per decoded keyframe, plus any
+      // non-key frame whose decode cost ran past 1.5x the expected frame interval. Joins the host
+      // 'wire seq=' log by seq+gen. decodeQueueLagUs is the capture-lag estimate already computed
+      // for scheduling (not a literal decoder input-queue count -- the MFT does not expose one).
+      {
+        const uint64_t decodeUs = (decodeEndUs >= decodeStartUs) ? (decodeEndUs - decodeStartUs) : 0;
+        const uint64_t decodeAnomalyUs = (frameIntervalUs * 3ULL) / 2ULL;
+        if (keyFrame || decodeUs > decodeAnomalyUs) {
+          const uint64_t r2dUs = (decodeStartUs >= packetNowUs) ? (decodeStartUs - packetNowUs) : 0;
+          std::ostringstream telem;
+          telem << "[native-video-client][telemetry] stage=decode"
+                << " seq=" << h.seq
+                << " gen=" << h.streamGeneration
+                << " key=" << (keyFrame ? 1 : 0)
+                << " recvUs=" << packetNowUs
+                << " decodeStartUs=" << decodeStartUs
+                << " decodeEndUs=" << decodeEndUs
+                << " decodeUs=" << decodeUs
+                << " r2dUs=" << r2dUs
+                << " decodeQueueLagUs=" << decodeQueueLagEstimateUs
+                << " pts=" << decodedCaptureUs;
+          log_client_line(telem.str());
         }
       }
 
@@ -4596,6 +4683,28 @@ int main(int argc, char** argv) {
         if (assembleResult.disposition == UdpH264AssemblyDisposition::Completed) {
           ++udpAssemblyCompletedCount;
           const uint64_t packetNowUs = qpc_now_us();
+          // GNLink stream telemetry (diagnostics only): one line per assembled keyframe, plus any
+          // non-key frame that needed FEC repair or showed loss/reorder, so a periodic-stutter
+          // session joins the host 'wire seq=' log by seq+gen while steady play stays quiet.
+          {
+            const auto& fh = assembleResult.frame.header;
+            const bool key = ((fh.flags & 1u) != 0);
+            if (key || assembleResult.fecRecovered || assembleResult.reorderDetected ||
+                assembleResult.droppedPreviousIncomplete) {
+              std::ostringstream telem;
+              telem << "[native-video-client][telemetry] stage=assembly"
+                    << " seq=" << fh.seq
+                    << " gen=" << fh.streamGeneration
+                    << " key=" << (key ? 1 : 0)
+                    << " lastChunkRecvUs=" << packetNowUs
+                    << " bytes=" << fh.payloadSize
+                    << " fecRecovered=" << (assembleResult.fecRecovered ? 1 : 0)
+                    << " fecRecoveredChunks=" << assembleResult.fecRecoveredChunks
+                    << " reorder=" << (assembleResult.reorderDetected ? 1 : 0)
+                    << " droppedPrev=" << (assembleResult.droppedPreviousIncomplete ? 1 : 0);
+              log_client_line(telem.str());
+            }
+          }
           auto payload = std::move(assembleResult.frame.payload);
           if (!process_h264_frame(assembleResult.frame.header, &payload, packetNowUs)) break;
         }
@@ -4706,6 +4815,7 @@ int main(int argc, char** argv) {
           gFrame.queueSetUs = queueSetUs;
           gFrame.decodeToQueueUs = 0;
           gFrame.streamGeneration = h.streamGeneration;
+          gFrame.key = false;  // raw BGRA has no keyframe concept; keeps present telemetry quiet.
           gFrame.version = prevVersion + 1;
           gFrame.bytes = std::move(frameBgra);
           gFrame.surfaceSample.Reset();
