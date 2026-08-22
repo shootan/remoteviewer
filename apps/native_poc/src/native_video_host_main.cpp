@@ -30,6 +30,7 @@
 #include <deque>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <cwctype>
 #include <iostream>
 #include <limits>
@@ -57,6 +58,66 @@
 #include "capture_backend_dxgi.hpp"
 
 namespace {
+
+// Every host log line is prefixed with a wall-clock timestamp so a capture can be lined up against
+// the client's own timestamped log (which uses the same MM-DD HH:MM:SS form). Rather than touch the
+// hundreds of std::cout/std::cerr sites, this filtering streambuf is slipped under both streams: it
+// buffers each line per-thread and, on the terminating newline, emits "timestamp + line" as one
+// locked write so concurrent log threads can never split a line or interleave a stamp mid-line.
+class TimestampPrefixBuf : public std::streambuf {
+ public:
+  explicit TimestampPrefixBuf(std::streambuf* dest) : dest_(dest) {}
+
+ protected:
+  int_type overflow(int_type ch) override {
+    if (traits_type::eq_int_type(ch, traits_type::eof())) return traits_type::not_eof(ch);
+    const char c = traits_type::to_char_type(ch);
+    std::string& line = tls_line();
+    line.push_back(c);
+    if (c == '\n') flush_line(line);
+    return ch;
+  }
+  std::streamsize xsputn(const char* s, std::streamsize n) override {
+    std::string& line = tls_line();
+    for (std::streamsize i = 0; i < n; ++i) {
+      line.push_back(s[i]);
+      if (s[i] == '\n') flush_line(line);
+    }
+    return n;
+  }
+  int sync() override {
+    std::lock_guard<std::mutex> lk(mu_);
+    return dest_->pubsync();
+  }
+
+ private:
+  static std::string& tls_line() {
+    static thread_local std::string line;
+    return line;
+  }
+  static std::string timestamp_now() {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t t = std::chrono::system_clock::to_time_t(now);
+    const auto ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+    std::tm tm{};
+    localtime_s(&tm, &t);
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%02d-%02d %02d:%02d:%02d.%03d ", tm.tm_mon + 1, tm.tm_mday,
+                  tm.tm_hour, tm.tm_min, tm.tm_sec, static_cast<int>(ms.count()));
+    return std::string(buf);
+  }
+  void flush_line(std::string& line) {
+    const std::string ts = timestamp_now();
+    std::lock_guard<std::mutex> lk(mu_);
+    dest_->sputn(ts.data(), static_cast<std::streamsize>(ts.size()));
+    dest_->sputn(line.data(), static_cast<std::streamsize>(line.size()));
+    line.clear();
+  }
+
+  std::streambuf* dest_;
+  std::mutex mu_;
+};
 
 using namespace winrt::Windows::Graphics::Capture;
 using namespace winrt::Windows::Graphics::DirectX::Direct3D11;
@@ -2758,6 +2819,12 @@ int main(int argc, char** argv) {
   HostPowerKeepalive powerKeepalive;
   std::cout.setf(std::ios::unitbuf);
   std::cerr.setf(std::ios::unitbuf);
+  // Prefix every host log line with a wall-clock timestamp so it aligns with the client log.
+  // Static so the filtering buffers outlive every logging thread for the life of the process.
+  static TimestampPrefixBuf coutTsBuf(std::cout.rdbuf());
+  std::cout.rdbuf(&coutTsBuf);
+  static TimestampPrefixBuf cerrTsBuf(std::cerr.rdbuf());
+  std::cerr.rdbuf(&cerrTsBuf);
 
   // The host normally runs behind a tray app with no foreground boost. Keep capture,
   // conversion, and encode deadlines above ordinary UI/background work; opt out for A/B or
