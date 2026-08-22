@@ -119,6 +119,20 @@ class TimestampPrefixBuf : public std::streambuf {
   std::mutex mu_;
 };
 
+// Phase of the host's main capture/encode loop, published for the liveness watchdog. A permanent
+// hang inside a GPU/MFT/driver call stops the loop WITHOUT crashing, so neither the in-loop
+// self-heal (which never runs) nor the supervisor (which only relaunches on a crash) recovers it.
+// The watchdog reads the last phase + how long the loop has been stuck to decide when to terminate.
+enum class MainLoopPhase : uint32_t {
+  Startup = 0,
+  Loop,            // between iterations / ordinary work -- 10s hang threshold
+  CaptureRestart,  // restart_capture_session: legitimately slow (device/pool rebuild) -- 20s
+  EncodeCall,      // MFT encode of a frame -- the prime suspect for a driver/MFT wedge -- 10s
+};
+// Terminate exit code the watchdog uses; the supervisor treats it as "wedged, relaunch fast" and
+// keeps it out of the crash streak / nv12 auto-disable (it is a recovery, not a crash).
+constexpr unsigned int kExitMainLoopWatchdog = 43;
+
 using namespace winrt::Windows::Graphics::Capture;
 using namespace winrt::Windows::Graphics::DirectX::Direct3D11;
 using remote60::native_poc::ControlLink;
@@ -5682,7 +5696,22 @@ int main(int argc, char** argv) {
     }
   };
 
+  // Liveness state for the main-loop watchdog (declared before restart_capture_session so it can
+  // flag its own slow phase). mainLoopProgressUs is bumped each loop iteration; the watchdog reads
+  // it plus the current phase and never touches a lock or the GPU.
+  std::atomic<uint32_t> mainLoopPhase{static_cast<uint32_t>(MainLoopPhase::Startup)};
+  std::atomic<uint64_t> mainLoopProgressUs{qpc_now_us()};
+  std::atomic<uint64_t> mainLoopLastSeq{0};
+  auto enter_main_phase = [&](MainLoopPhase p) {
+    mainLoopPhase.store(static_cast<uint32_t>(p), std::memory_order_release);
+  };
+  auto mark_main_progress = [&](MainLoopPhase p) {
+    mainLoopProgressUs.store(qpc_now_us(), std::memory_order_release);
+    mainLoopPhase.store(static_cast<uint32_t>(p), std::memory_order_release);
+  };
+
   auto restart_capture_session = [&]() -> bool {
+    enter_main_phase(MainLoopPhase::CaptureRestart);
     if (!restart_capture_session_impl()) return false;
     uint32_t finalW = 0, finalH = 0;
     {
@@ -6415,9 +6444,58 @@ int main(int argc, char** argv) {
     return true;
   };
 
+  // Dedicated liveness watchdog. It shares no lock or GPU with the capture/encode/send threads, so
+  // it stays responsive when they wedge inside a driver/MFT call (the failure seen in the field:
+  // the whole main loop stopped, control threads kept running, and nothing recovered because the
+  // in-loop self-heal never ran and the supervisor only relaunches on a crash). It never calls into
+  // D3D (a device-wide hang could block that too) -- it only reads the atomics the main loop last
+  // stored, writes one raw record via WriteFile (not iostream, whose lock a hung main may hold), and
+  // TerminateProcess()es so the supervisor relaunches a fresh child. ExitProcess/normal return are
+  // avoided: they run DLL detach / join the hung threads and would re-hang.
+  std::thread mainLoopWatchdog([&]() {
+    constexpr uint64_t kHangNormalUs = 10'000'000;   // Loop / EncodeCall
+    constexpr uint64_t kHangSlowUs = 20'000'000;     // CaptureRestart / Startup (legit slow)
+    constexpr uint64_t kStartupGraceUs = 30'000'000;  // device/encoder bring-up before arming
+    const uint64_t watchdogStartUs = qpc_now_us();
+    while (!stop.load(std::memory_order_acquire)) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+      if (stop.load(std::memory_order_acquire)) break;
+      const uint64_t now = qpc_now_us();
+      if (now - watchdogStartUs < kStartupGraceUs) continue;
+      const uint32_t phase = mainLoopPhase.load(std::memory_order_acquire);
+      const uint64_t progressUs = mainLoopProgressUs.load(std::memory_order_acquire);
+      const uint64_t ageUs = now > progressUs ? now - progressUs : 0;
+      const uint64_t threshold =
+          (phase == static_cast<uint32_t>(MainLoopPhase::CaptureRestart) ||
+           phase == static_cast<uint32_t>(MainLoopPhase::Startup))
+              ? kHangSlowUs
+              : kHangNormalUs;
+      if (ageUs >= threshold) {
+        char rec[192];
+        const int n = std::snprintf(
+            rec, sizeof(rec),
+            "[native-video-host][watchdog] main-loop hang phase=%u ageUs=%llu lastSeq=%llu; "
+            "terminating (exit 43) for supervisor relaunch\n",
+            phase, static_cast<unsigned long long>(ageUs),
+            static_cast<unsigned long long>(mainLoopLastSeq.load(std::memory_order_acquire)));
+        HANDLE herr = GetStdHandle(STD_ERROR_HANDLE);
+        if (herr && herr != INVALID_HANDLE_VALUE && n > 0) {
+          DWORD wrote = 0;
+          WriteFile(herr, rec, static_cast<DWORD>(n), &wrote, nullptr);
+        }
+        TerminateProcess(GetCurrentProcess(), kExitMainLoopWatchdog);
+      }
+    }
+  });
+  mainLoopWatchdog.detach();
+
   while (!stop.load()) {
+    mark_main_progress(MainLoopPhase::Loop);
     const uint64_t nowUs = qpc_now_us();
     uint64_t tickWaitUs = 0;
+    if (args.seconds > 0 && nowUs >= startUs + static_cast<uint64_t>(args.seconds) * 1000000ULL) {
+      break;
+    }
     if (args.seconds > 0 && nowUs >= startUs + static_cast<uint64_t>(args.seconds) * 1000000ULL) {
       break;
     }
@@ -7883,6 +7961,9 @@ int main(int argc, char** argv) {
         std::vector<H264AccessUnit> units;
         H264EncodeFrameStats encodeStats{};
         bool surfaceEncoded = false;
+        // The MFT encode is the prime suspect for a driver/GPU wedge that stops the whole loop
+        // without returning; mark the phase so the watchdog attributes a hang here correctly.
+        enter_main_phase(MainLoopPhase::EncodeCall);
         if (wantSurfaceEncode) {
           auto nv12Tex = captureReadback.Nv12SlotTexture(nv12Slot, nv12Generation);
           if (nv12Tex &&
@@ -7937,6 +8018,8 @@ int main(int argc, char** argv) {
         }
         continue;
       }
+      // Encode returned; back to ordinary work for the watchdog's threshold.
+      enter_main_phase(MainLoopPhase::Loop);
       if (!surfaceEncoded) {
         nv12Us = encodeStats.colorConvertUs;
         preEncodePrepUs += nv12Us;

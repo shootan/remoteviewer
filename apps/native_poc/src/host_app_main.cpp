@@ -303,6 +303,13 @@ class StreamingHostProcess {
     // DXGI surface path is exactly the failure that path was left opt-in to avoid, and the
     // automatic in-process fallback only catches rejection and slowness, not a hard crash.
     uint32_t crashStreak = 0;
+    // The child's main-loop liveness watchdog terminates a wedged (hung, not crashed) capture/encode
+    // loop with this exit code. It is a recovery, not a crash, so it must NOT feed the crash streak
+    // or nv12 auto-disable -- but a machine that keeps wedging still needs a backoff, so repeats
+    // inside a window are counted separately.
+    constexpr DWORD kChildWatchdogExitCode = 43;
+    uint32_t watchdogRecoveries = 0;
+    uint64_t watchdogWindowStartMs = 0;
     while (running_.load(std::memory_order_relaxed)) {
       const bool nv12SurfaceForcedOff = crashStreak >= 2;
       // The control port serves clients on the same network that dial this PC directly. One
@@ -416,8 +423,24 @@ class StreamingHostProcess {
       // A nonzero exit within a few seconds is a crash, not a session that ran and ended.
       // Only those count toward the streak; a host that streamed for a while and then a
       // client left is a clean exit and resets it.
-      const bool crashed = (childExitCode != 0) && (ranMs < 15000);
-      if (crashed) {
+      const bool watchdogRecovery = (childExitCode == kChildWatchdogExitCode);
+      const bool crashed = !watchdogRecovery && (childExitCode != 0) && (ranMs < 15000);
+      if (watchdogRecovery) {
+        // Count repeats in a rolling 5-minute window; a persistently wedging host still backs off.
+        if (watchdogWindowStartMs == 0 || (GetTickCount64() - watchdogWindowStartMs) > 300000ULL) {
+          watchdogWindowStartMs = GetTickCount64();
+          watchdogRecoveries = 0;
+        }
+        ++watchdogRecoveries;
+        char line[192];
+        std::snprintf(line, sizeof(line),
+                      "[host-app] streaming host self-terminated (main-loop watchdog) code=%lu "
+                      "ranMs=%llu recoveries5m=%u -- relaunching",
+                      static_cast<unsigned long>(childExitCode),
+                      static_cast<unsigned long long>(ranMs), watchdogRecoveries);
+        AppendLogLineOnce(line);
+        // A watchdog kill is not evidence the surface path is bad, so leave crashStreak alone.
+      } else if (crashed) {
         ++crashStreak;
         char line[160];
         std::snprintf(line, sizeof(line),
@@ -441,9 +464,16 @@ class StreamingHostProcess {
       if (!running_.load(std::memory_order_relaxed)) break;
       restarts_.fetch_add(1, std::memory_order_relaxed);
       // Ordinary relaunch is 2s. A crash streak backs off so a wedged driver or a boot-time
-      // failure does not spin: 2s, 4s, 6s ... capped at 30s.
-      const int relaunchTicks =
-          crashStreak >= 2 ? std::min<int>(300, 20 * crashStreak) : 20;
+      // failure does not spin: 2s, 4s, 6s ... capped at 30s. A watchdog recovery relaunches fast
+      // (~300ms) so a wedge is barely visible, but repeats inside the 5-minute window back off too.
+      int relaunchTicks;
+      if (watchdogRecovery) {
+        relaunchTicks = watchdogRecoveries > 3 ? std::min<int>(300, 30 * watchdogRecoveries) : 3;
+      } else if (crashStreak >= 2) {
+        relaunchTicks = std::min<int>(300, 20 * crashStreak);
+      } else {
+        relaunchTicks = 20;
+      }
       for (int i = 0; i < relaunchTicks && running_.load(std::memory_order_relaxed); ++i) {
         Sleep(100);
       }
