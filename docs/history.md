@@ -6645,3 +6645,16 @@ UI 방식 결정
   C++ 가 같은 폴더(client.log*/viewer.log* 위치)를 ShellExecuteW 로 연다. shellapi.h include.
 - 빌드: remote60_host_app / remote60_client_shell Release PASS(경고 0).
   산출물 dist/GNLinkSetup-0.2.53.exe (0.2.52 는 설치 전이라 대체).
+
+### 254) 2026-08-24 리포 내 산출물 대청소 (커밋 대상 없음)
+
+- 사용자 요청: dist 과거 설치본·로그·안 쓰는 폴더 정리. 전부 gitignore 된 로컬 산출물이라
+  추적 파일 변경은 없다(이 기록만 커밋).
+- 삭제: dist 구버전 58개(256MB — GNLinkSetup 0.2.0~0.2.49, APK 0.2.0~0.2.9 등; 유지:
+  0.2.53 현재본·0.2.50 직전 설치본·GNLink-0.2.10.apk), logs/ 81MB(2~8월 진단 잔재,
+  72MB runtime diag 포함), android app/.cxx 57MB + app/build 137MB(재생성 가능),
+  automation/logs 24MB, build-vcpkg-local(깨진 캐시), log/ 의 분석 완료된 0.2.50 테스트 로그.
+- 유지: build-local(활성 빌드트리 86MB), third_party/webview2(빌드 필수 46MB),
+  log/nas-survey.sh(NAS 작업 스크립트 — 리포 무관이라 보존 후 사용자 확인 대기),
+  .cgcignore/.codegraphcontext.yaml(codegraph 도구 설정 — 사용자 소유).
+- 결과: 리포 작업트리 약 650MB → 153MB (.git 43MB 별도).
