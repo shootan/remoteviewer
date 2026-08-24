@@ -233,13 +233,14 @@ class StreamingHostProcess {
         MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING);
       }
       MoveFileExW(path.c_str(), (path + L".1").c_str(), MOVEFILE_REPLACE_EXISTING);
-      // Adopt the legacy single-generation .old AFTER the shift, into the oldest free slot
-      // (highest number first, no replace). Adopting before the shift could land it in the only
-      // free slot -- .10 -- where the very next statement deleted it. If every slot is taken,
-      // .old stays on disk rather than being silently lost.
+      // Adopt the legacy single-generation .old AFTER the shift, into the FIRST free slot
+      // ascending (.2 upward, no replace). The rotation assumes generations are contiguous from
+      // .1 and always deletes .10 first, so parking the legacy at a sparse high slot (.10) would
+      // erase it on the very next rotation; placed contiguously it ages one slot per rotation
+      // like every generation. If every slot is taken, .old stays on disk rather than being lost.
       const std::wstring legacy = path + L".old";
       if (GetFileAttributesW(legacy.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        for (int i = kMaxLogBackups; i >= 2; --i) {
+        for (int i = 2; i <= kMaxLogBackups; ++i) {
           if (MoveFileExW(legacy.c_str(), (path + L"." + std::to_wstring(i)).c_str(), 0)) break;
         }
       }

@@ -6623,3 +6623,14 @@ UI 방식 결정
   부담으로 하지 않기로 합의(사용자 요구는 1Hz P + 커서로 충족).
 - P4 해상도 프리셋 UI(720p/1080p/자동) + resolution override 를 manualOverride 에서 분리.
 - 실기: 0.2.51 설치 후 재현 → viewer.log 의 catchup enter reason 으로 P1 방아쇠 확정.
+
+### 252) 2026-08-24 로테이션 legacy 슬롯 방향 수정 (0.2.52)
+
+- Codex 최종 재리뷰가 251의 잔여 결함 1건을 잡았다: legacy .old 를 **높은 번호(.10)부터** 빈
+  슬롯에 넣으면, 로테이션이 "세대는 .1부터 연속"이라는 전제로 매번 .10 을 먼저 지우므로
+  legacy 가 바로 다음 로테이션에서 삭제된다(sparse high placement 불가).
+- 수정: shift + current→.1 후 legacy 를 **.2부터 오름차순 첫 빈 슬롯**에 no-replace 이동.
+  연속 배치라 이후 로테이션마다 한 칸씩 밀리며 정상적으로 늙는다. 슬롯이 다 차면 .old 보존.
+  host/client 동일 적용. attribute-list 등 나머지 P0 항목은 Codex 최종 승인.
+- 빌드: remote60_host_app / remote60_client_shell Release PASS. 산출물
+  dist/GNLinkSetup-0.2.52.exe (0.2.51 은 설치 전이라 폐기).
