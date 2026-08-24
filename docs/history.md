@@ -6658,3 +6658,43 @@ UI 방식 결정
   log/nas-survey.sh(NAS 작업 스크립트 — 리포 무관이라 보존 후 사용자 확인 대기),
   .cgcignore/.codegraphcontext.yaml(codegraph 도구 설정 — 사용자 소유).
 - 결과: 리포 작업트리 약 650MB → 153MB (.git 43MB 별도).
+
+### 255) 2026-08-24 P0 필드 수정 3종 + UDP 컨트롤 기동 레이스 근절 (0.2.54)
+
+배경 (0.2.53 실기: 지도 멈춤 재현 분석의 후속)
+- 확정된 사용자 고통 4가지에 대한 P0: ①피커를 열면 스트림이 꺼져 7~10초 블랙아웃 ②연타 중
+  오클릭으로 다른 창 선택 ③정적 화면에서 아무것도 안 보내 얼어 보임 ④원격 커서 미표시.
+
+한 일 (검증용 Codex와 리뷰 3라운드 — Blocker/High 전부 반영 후 필드 승인)
+- 피커: 세션 중 열어도 스트림 유지(초기 피커만 정지). 카드 선택은 DOWN/UP 동일 타깃 +
+  오픈 후 300ms 디바운스(마우스/터치, 시작 스탬프 포함), pending/포커스·캡처 상실 시 latch
+  클리어. 피커 가시 중 catchup 진입·recover-timeout 억제(+종료 후 500ms 유예, present 앵커
+  리셋), 비디오 주도 리페인트·overwrite 카운터 게이트. 선택 성공 시에만 [picker] select 로그.
+- 1Hz 정적 리프레시(REMOTE60_NATIVE_STATIC_REFRESH_MS, 기본 1000, 0=off): 배리어 열림 +
+  sender 큐 빈 상태 + 킥 비활성일 때 캐시 프레임을 P로 재송출. cadence는 emitted-AU와
+  attempt 양쪽 클록(async MFT의 units.empty 시 tight-loop 차단). 합성(seq=0) 프레임이 keyint
+  나머지 0으로 매번 IDR 되던 버그 수정(!servedBootstrap 게이트).
+- 원격 커서 포워딩: DXGI 포인터를 UdpCursorPosPacket(kind=307, 44B, streamGeneration 펜스)으로
+  ≤30Hz latest-wins 송신(WGC 제외 — 자체 합성). 클라는 레이어드 오버레이 **파란 링+점**
+  마커(고스트 화살표·검정 알파 문제 회피), 500ms 무신호/피커/최소화/세대 불일치 시 숨김,
+  선택 시 샘플 리셋, 수신 바운즈 검증. 재시작 시 호스트 포인터 샘플 무효화.
+- **UDP 컨트롤 기동 레이스 근절(fix)**: 리더 스레드가 디스패처의 첫 Reset보다 먼저 클라의
+  첫 ControlData를 ACK+큐잉하면 Reset이 그것을 지우고, 클라는 ACK를 가져 재전송하지 않아
+  serve가 10초 굶고 종료 — **베이스라인 포함 40~70% 확률로 접속 실패하던 기존 버그**
+  (Codex가 메커니즘 특정, 반복 실측 MINE 7/10·BASE 4/6 실패로 귀속 확정). 리더 진입 전
+  controlReadyEpoch 대기 배리어로 수정.
+
+검증/build/test
+- 전 타겟 빌드 클린. capture_cadence_gate PASS. live-host UDP e2e 13체크:
+  수정 전 통과율 ~30%(MINE 7/10·BASE 4/6 실패) → **배리어 후 6/6 ALL PASS**.
+- 라이브 로그 실증: open-barrier 합성 프레임 key=0(P) ~1Hz, barrier-closed는 킥 IDR 유지.
+- 산출물 dist/GNLinkSetup-0.2.54.exe (0.2.53은 직전 설치본으로 보존).
+
+부수 발견
+- **RDP 접속 중엔 DXGI 복제가 0x80070005로 거부돼 WGC 폴백**(RDP 종료로 실측 확인) —
+  앞선 "다른 PC 3~5fps" 사건의 유력 원인.
+
+테스트 부채 (Codex 합의, 필드 빌드 조건)
+- (a) 3연속 units.empty에서 리프레시 ≤1Hz 단위테스트 (b) 세대 불일치 커서 숨김 UI 확인
+  (c) 레터박스 매핑 모서리/리사이즈 확인 — (b)(c)는 이번 실기에서 확인.
+- 같은-세대 크기변경 시 커서 capW/H 동시 스탬프(비차단, Codex 후속 권고).

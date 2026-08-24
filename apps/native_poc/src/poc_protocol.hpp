@@ -49,6 +49,10 @@ enum class UdpPacketKind : uint16_t {
   ControlData = 304,
   ControlAck = 305,
   ControlNack = 306,
+  // Hardware-cursor position report (UdpCursorPosPacket). Latest-wins and unreliable by design;
+  // an old viewer drops the unknown kind before its video-size guard, so both directions stay
+  // compatible without a handshake.
+  CursorPos = 307,
 };
 
 // Control messages are numbered per direction so a peer can tell a retransmission from a new
@@ -409,6 +413,30 @@ struct UdpHelloPacket {
   // Empty preserves direct-LAN operation, but cannot authorize SYSTEM secure-desktop input.
   char authToken[33] = {};
 };
+
+// Hardware-cursor position for the DXGI desktop backend, which does not composite the pointer
+// into captured frames: on a still screen the remote cursor otherwise never moves and the whole
+// session looks frozen (the field case: a static game map "revived" only by dragging it). Sent
+// over the media socket at <=30Hz, latest-wins -- a lost sample is superseded a frame later, so
+// no reliability machinery. x/y are pixels in the capture (monitor) space whose dimensions are
+// captureW/H, letting the viewer map into its letterboxed video rect even across resizes.
+struct UdpCursorPosPacket {
+  uint32_t magic = kMagic;
+  uint16_t kind = static_cast<uint16_t>(UdpPacketKind::CursorPos);
+  uint16_t size = static_cast<uint16_t>(sizeof(UdpCursorPosPacket));
+  uint16_t flags = 0;  // bit0: cursor visible
+  uint16_t reserved = 0;
+  int32_t x = 0;
+  int32_t y = 0;
+  uint32_t captureW = 0;
+  uint32_t captureH = 0;
+  // Generation fence: the sample is only meaningful for the stream generation it was captured
+  // under. Without it, a cursor sampled on the old target could paint over a freshly selected
+  // window for up to the stale-hide timeout.
+  uint64_t streamGeneration = 0;
+  uint64_t hostQpcUs = 0;
+};
+static_assert(sizeof(UdpCursorPosPacket) == 44, "cursor packet wire layout must not drift");
 
 // One fragment of a control message. Fragments of a message are sent back to back; the
 // receiver asks for what is missing rather than the sender waiting for each piece.

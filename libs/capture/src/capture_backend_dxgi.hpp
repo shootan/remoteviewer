@@ -16,11 +16,17 @@ enum class DesktopCaptureBackend {
   Gdi,
 };
 
+// Hardware-pointer report: position in this output's pixel space plus visibility. Fires on every
+// acquire that carried a mouse update -- including pointer-only frames, which the content pipeline
+// deliberately drops -- so a still screen can still show a moving remote cursor.
+using DxgiDesktopPointerHandler = std::function<void(int32_t x, int32_t y, bool visible)>;
+
 struct DxgiDesktopCaptureConfig {
   ID3D11Device* d3dDevice = nullptr;
   HMONITOR monitor = nullptr;
   uint32_t acquireTimeoutMs = 100;
   bool landscapeOnly = true;
+  DxgiDesktopPointerHandler onPointer;  // optional; see DxgiDesktopPointerHandler
 };
 
 // accumulatedFrames is what desktop duplication reported for this acquire: the number of

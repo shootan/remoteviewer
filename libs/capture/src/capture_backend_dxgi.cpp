@@ -325,6 +325,14 @@ struct DxgiDesktopCaptureSession::Impl {
         }
         if (frameInfo.AccumulatedFrames > 1) ++stats.coalescedAcquires;
       }
+      // Forward hardware-pointer reports even when the frame carries no desktop update:
+      // pointer-only frames are dropped downstream (the pointer is never composited), so this
+      // side channel is the only way a still screen can show the remote cursor moving.
+      if (config.onPointer && frameInfo.LastMouseUpdateTime.QuadPart != 0) {
+        config.onPointer(frameInfo.PointerPosition.Position.x,
+                         frameInfo.PointerPosition.Position.y,
+                         frameInfo.PointerPosition.Visible != FALSE);
+      }
       const uint64_t acquiredAtUs = now_us();
 
       bool frameHeld = true;

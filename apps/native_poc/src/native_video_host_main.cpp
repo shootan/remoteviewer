@@ -4340,6 +4340,22 @@ int main(int argc, char** argv) {
         remote60::native_poc::kUdpControlStreamClientToHost, args.udpMtu);
 
     udpReaderThread = std::thread([&]() {
+      // Startup barrier. The dispatcher's first Reset races this thread: if the client's first
+      // ControlData lands here first, OnPacket ACKs it into rxReady_, then the dispatcher's
+      // Reset wipes rxReady_ -- and the client, holding an ACK, never retransmits. The serve
+      // loop then starves for its full 10s read timeout ("ended reason=none") with a 40-70%
+      // field hit rate. Hold this thread off the socket until the dispatcher has published
+      // controlReadyEpoch for the current epoch; datagrams meanwhile wait, unharmed, in the
+      // kernel socket buffer. wait_for (not wait) so shutdown cannot strand us if no one
+      // signals the cv after stop.
+      {
+        std::unique_lock<std::mutex> lock(sessionEpochMu);
+        while (!stop.load() &&
+               controlReadyEpoch.load(std::memory_order_acquire) <
+                   sessionEpoch.load(std::memory_order_acquire)) {
+          sessionEpochCv.wait_for(lock, std::chrono::milliseconds(50));
+        }
+      }
       int lastLoggedRecvError = 0;
       while (!stop.load()) {
         uint8_t rx[kUdpReceiveBufferBytes];
@@ -5147,6 +5163,14 @@ int main(int argc, char** argv) {
     }
   };
   std::atomic<uint64_t> callbackFrames{0};
+  // Hardware-cursor state from the DXGI backend (pointer-only frames are dropped by the content
+  // pipeline, so without this side channel the remote cursor freezes on a still screen). Written
+  // by the capture thread, drained by the main loop's ~30Hz latest-wins UDP cursor sender.
+  std::atomic<int32_t> dxgiPointerX{0};
+  std::atomic<int32_t> dxgiPointerY{0};
+  std::atomic<bool> dxgiPointerVisible{false};
+  std::atomic<uint64_t> dxgiPointerGeneration{0};  // stream generation the sample belongs to
+  std::atomic<uint64_t> dxgiPointerUpdateUs{0};
   std::atomic<int64_t> captureClockOffsetUs{std::numeric_limits<int64_t>::max()};
   std::atomic<uint64_t> queuePushCount{0};
   uint64_t queuePushCountLastSample = 0;  // only read from main thread
@@ -5590,6 +5614,17 @@ int main(int argc, char** argv) {
         config.d3dDevice = d3d.Get();
         config.monitor = monitorInfo->monitor;
         config.landscapeOnly = true;
+        // Capture-thread side of the cursor forwarder: just stores the latest sample; the main
+        // loop's pump_cursor_forward() throttles and sends. No lock, no send from this thread.
+        config.onPointer = [&](int32_t px, int32_t py, bool visible) {
+          dxgiPointerX.store(px, std::memory_order_relaxed);
+          dxgiPointerY.store(py, std::memory_order_relaxed);
+          dxgiPointerVisible.store(visible, std::memory_order_relaxed);
+          dxgiPointerGeneration.store(
+              captureStreamGenerationState.load(std::memory_order_acquire),
+              std::memory_order_relaxed);
+          dxgiPointerUpdateUs.store(qpc_now_us(), std::memory_order_release);
+        };
         std::string dxgiDetail;
         const bool started = dxgiCaptureSession.Start(
             config,
@@ -5748,6 +5783,10 @@ int main(int argc, char** argv) {
 
   auto restart_capture_session = [&]() -> bool {
     enter_main_phase(MainLoopPhase::CaptureRestart);
+    // A restarted session invalidates the held pointer sample even when the stream generation
+    // survives (some size-changes keep it): a stale position against the new capture geometry
+    // would misplace the remote cursor until the next real mouse update.
+    dxgiPointerUpdateUs.store(0, std::memory_order_release);
     if (!restart_capture_session_impl()) return false;
     uint32_t finalW = 0, finalH = 0;
     {
@@ -5895,6 +5934,49 @@ int main(int argc, char** argv) {
   };
   // Receives now happen on their own thread so a control message never waits for the next
   // frame; this just adopts a peer change the reader has already handled.
+  // ~30Hz latest-wins cursor forwarder (UdpCursorPosPacket). Desktop-DXGI only: WGC composites
+  // the cursor into the frames themselves, and a window target has its own coordinate space.
+  // Sends on movement/visibility change, plus a 250ms heartbeat while visible so the viewer's
+  // stale-hide timeout does not blank a stationary cursor. Unreliable by design; no resend.
+  uint64_t cursorSendLastUs = 0;
+  int32_t cursorSentX = INT32_MIN;
+  int32_t cursorSentY = INT32_MIN;
+  bool cursorSentVisible = false;
+  auto pump_cursor_forward = [&](uint64_t nowUs) {
+    if (transport != VideoTransport::Udp || !udpPeerReady) return;
+    if (!streamControlActive.load(std::memory_order_acquire)) return;
+    if (captureWindowModeActive.load(std::memory_order_acquire)) return;
+    if (activeDesktopBackend != DesktopCaptureBackend::Dxgi) return;
+    if (dxgiPointerUpdateUs.load(std::memory_order_acquire) == 0) return;
+    if (nowUs < cursorSendLastUs + 33'000) return;  // <=30Hz
+    // Generation fence: a sample captured under the previous target/attachment must never be
+    // sent as if it belonged to the current one (stale desktop cursor over a fresh window).
+    const uint64_t sampleGen = dxgiPointerGeneration.load(std::memory_order_relaxed);
+    if (sampleGen != captureStreamGenerationState.load(std::memory_order_acquire)) return;
+    const int32_t px = dxgiPointerX.load(std::memory_order_acquire);
+    const int32_t py = dxgiPointerY.load(std::memory_order_acquire);
+    const bool visible = dxgiPointerVisible.load(std::memory_order_acquire);
+    const bool changed = px != cursorSentX || py != cursorSentY || visible != cursorSentVisible;
+    if (!changed && (!visible || nowUs < cursorSendLastUs + 250'000)) return;
+    remote60::native_poc::UdpCursorPosPacket pkt{};
+    if (visible) pkt.flags |= 0x1u;
+    pkt.x = px;
+    pkt.y = py;
+    pkt.streamGeneration = sampleGen;
+    {
+      std::lock_guard<std::mutex> lk(captureResourceMu);
+      pkt.captureW = captureWidth;
+      pkt.captureH = captureHeight;
+    }
+    pkt.hostQpcUs = nowUs;
+    (void)sendto(clientSock, reinterpret_cast<const char*>(&pkt), sizeof(pkt), 0,
+                 reinterpret_cast<const sockaddr*>(&udpPeer), sizeof(udpPeer));
+    cursorSendLastUs = nowUs;
+    cursorSentX = px;
+    cursorSentY = py;
+    cursorSentVisible = visible;
+  };
+
   auto pump_udp_hello = [&]() {
     if (transport != VideoTransport::Udp) return;
     if (!udpPeerChanged.exchange(false, std::memory_order_acq_rel)) return;
@@ -6432,6 +6514,14 @@ int main(int argc, char** argv) {
   uint64_t lastKickedForInputCaptureUs = 0;  // one-kick-per-held-input guard
   uint64_t trailingKickCount = 0;            // telemetry: total trailing-edge kicks served
   uint64_t lastKickSourceAgeUs = 0;          // telemetry: cached-frame age at the last kick
+  // Periodic static refresh cadence (0 = off). On a genuinely still screen the pipeline sends
+  // nothing at all, so the viewer's picture silently ages and looks dead; this re-serves the
+  // cached frame as a cheap P-frame at a low rate. Milliseconds via env for field tuning.
+  const uint64_t staticRefreshIntervalUs =
+      static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_STATIC_REFRESH_MS", 1000, 0, 10000)) *
+      1000ULL;
+  uint64_t staticRefreshCount = 0;           // telemetry: refresh SUBMITS (not wire AUs)
+  uint64_t lastStaticRefreshAttemptUs = 0;   // attempt-side cadence anchor; see the refresh block
   auto arm_trailing_kick = [&](uint64_t atUs) {
     if (!useH264) return;
     trailingKickPending = true;
@@ -6536,6 +6626,7 @@ int main(int argc, char** argv) {
       break;
     }
     pump_udp_hello();
+    pump_cursor_forward(nowUs);
     // Arm the trailing-edge kick on a fresh viewer/decoder (bumped session epoch) and on a capture
     // identity change (a new stream generation -- window select, reattach, backend change). The kick
     // fires 150ms later only if no real frame has arrived and been flushed out; a real callback
@@ -7537,6 +7628,43 @@ int main(int argc, char** argv) {
         }
       }
     }
+    // Periodic static refresh (user requirement): on a still screen duplication offers no content
+    // and the trailing kick is one-shot, so NOTHING is sent and the session looks frozen (the
+    // field case: a static game map, revived only by dragging it). Re-serve the cached frame at a
+    // low cadence (default 1Hz, REMOTE60_NATIVE_STATIC_REFRESH_MS, 0=off) as an ordinary P-frame.
+    // The cadence anchors on BOTH the last emitted AU and the last refresh ATTEMPT: the async MFT
+    // may legally return no output for a submitted input, and an emitted-only clock would then
+    // retry on every loop iteration -- a tight input flood, the opposite of an idle 1Hz refresh.
+    // The barrier must be open (a closed barrier is the kick's job and needs an IDR) and the
+    // sender queue empty (stacking a synthetic frame onto a backlog helps nobody; the queue drains
+    // within a few loop ticks). kick_try_fill re-validates identity/secure/size, so a lock screen
+    // or a mid-switch target stays black rather than repainting a stale picture; a failed fill
+    // also stamps the attempt clock so the (uncached) secure probe is not repeated every tick.
+    if (!servedBootstrap && staticRefreshIntervalUs > 0 && useH264 &&
+        streamControlActive.load(std::memory_order_acquire) && !trailingKickPending &&
+        lastEmittedAuCaptureUs != 0 &&
+        nowUs >= lastEmittedAuCaptureUs + staticRefreshIntervalUs &&
+        nowUs >= lastStaticRefreshAttemptUs + staticRefreshIntervalUs) {
+      bool refreshBlocked = false;
+      if (transport == VideoTransport::Udp) {
+        std::lock_guard<std::mutex> lk(senderMu);
+        refreshBlocked = senderWaitingForKey || !senderQueue.empty();
+      }
+      if (!refreshBlocked) {
+        // Stamped on the ATTEMPT, before the encode result is known -- see the cadence note.
+        lastStaticRefreshAttemptUs = nowUs;
+        if (kick_try_fill(payload, w, h, stride, nowUs)) {
+          servedBootstrap = true;
+          seq = 0;
+          version = lastVersionSent;  // no real version consumed (keeps queue bookkeeping stable)
+          streamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
+          captureUs = nowUs;
+          callbackUs = nowUs;
+          queuePushUs = nowUs;
+          ++staticRefreshCount;
+        }
+      }
+    }
     bool queueReady = false;
     if (!servedBootstrap) {
       std::unique_lock<std::mutex> lk(frame.mu);
@@ -7987,9 +8115,13 @@ int main(int argc, char** argv) {
         // The sender dropped a backlog; the stream needs an IDR to resynchronize.
         forceKeyNext = true;
       }
+       // The keyint schedule applies to REAL frames only. A kick/refresh-served synthetic frame
+       // carries seq=0, and 0 % keyint == 0 made every one of them an IDR -- defeating the open-
+       // barrier design of riding the held frame as a cheap P-frame (a 40-160KB IDR instead of a
+       // few-KB P, once per kick/refresh). A closed barrier still gets its IDR via forceKeyNext.
        const bool forceKeyFrame =
             forceKeyNext || (encodedSeq == 0) ||
-            ((activeKeyint > 0) && ((seq % activeKeyint) == 0));
+            (!servedBootstrap && (activeKeyint > 0) && ((seq % activeKeyint) == 0));
        if (forceKeyFrame) ++forceKeyInputCount;
         const uint64_t encodeStartUs = qpc_now_us();
         const uint64_t encodeInputUs = captureStampUs;
@@ -9135,6 +9267,7 @@ int main(int argc, char** argv) {
                   << " captureGateDropContent=" << captureCadenceGate.GateDropContentCount()
                   << " captureGateDropPointer=" << captureCadenceGate.GateDropPointerCount()
                   << " trailingKickCount=" << trailingKickCount
+                  << " staticRefreshCount=" << staticRefreshCount
                   << " lastKickSourceAgeUs=" << lastKickSourceAgeUs
                   << " mediaEpoch=" << mediaSessionEpoch.load(std::memory_order_acquire)
                   << " forceKeyInputCount=" << forceKeyInputCount

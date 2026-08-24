@@ -689,6 +689,11 @@ KeyframeRequestState gKeyframeRequests{
     kKeyframeRequestTokenCapacityDefault};
 std::atomic<uint64_t> gLastPresentedVersion{0};
 std::atomic<uint64_t> gLastPresentedCaptureUs{0};  // updated after actual present, not at queue time
+// While the picker overlays a live stream (mid-session picker no longer stops it), presents pause
+// but frames keep arriving, so lag-vs-last-presented would misread the overlay as decode backlog
+// and start catchup churn. Suppress catchup while the picker is up and briefly after it closes
+// (until the first present re-anchors gLastPresentedCaptureUs).
+std::atomic<uint64_t> gCatchupSuppressUntilUs{0};
 std::atomic<uint64_t> gPaintCoalescedCount{0};
 std::atomic<uint64_t> gOverwriteBeforePresentCount{0};
 std::atomic<uint64_t> gD3dPresentSuccessCount{0};
@@ -740,6 +745,8 @@ remote60::native_poc::StreamStateControl gStreamStateControl;
 // picker transitions: startup leaves the host's default-active stream alone, so headless
 // harness clients that never open the picker keep receiving video unchanged.
 void set_picker_visible_and_sync_stream(bool visible);
+void ensure_cursor_overlay(HWND owner);
+void update_cursor_overlay(HWND hwnd);
 CaptureModeRequestState gCaptureModeRequests;
 ClientControlScheduler gControlScheduler;
 
@@ -797,6 +804,15 @@ uint32_t gRequestedMonitorId = 0;
 std::atomic<bool> gWindowPickerVisible{true};
 std::atomic<bool> gWindowPickerToggleDown{false};
 std::atomic<int> gGridScrollRow{0};  // card grid scroll, in whole rows
+// Picker mis-click guard. In the field a frozen-looking stream had the user frantically clicking;
+// one UP landed on the first window card and silently switched the capture to another window.
+// A selection now requires DOWN and UP on the SAME target and a picker that has been visible for
+// at least 300ms (kPickerSelectMinShownUs), so a click that started before the picker appeared --
+// or that merely ends on a card -- cannot select. ~0 = nothing pressed; 0 = desktop is a valid id.
+constexpr uint64_t kPickerPressNone = ~0ULL;
+constexpr uint64_t kPickerSelectMinShownUs = 300000;
+std::atomic<uint64_t> gPickerShownAtUs{0};
+std::atomic<uint64_t> gPickerPressTargetId{kPickerPressNone};
 
 // Target-selection gate, mirroring the Android policy (commit 4892dea). After connecting the
 // session opens on the picker; picking a target starts the stream but the picker stays up, and
@@ -860,6 +876,20 @@ void queue_thumbnail_fetches_from_panel() {
   for (const auto& item : snap.items) want(item.id);
 }
 std::atomic<uint64_t> gSuppressMouseUntilUs{0};
+// Remote hardware-cursor state (UdpCursorPosPacket, DXGI desktop capture only). The host's
+// pipeline drops pointer-only frames, so this side channel is what keeps the remote cursor
+// visibly moving on a still screen. Drawn as a layered overlay; hidden when stale (>500ms).
+std::atomic<int32_t> gRemoteCursorX{0};
+std::atomic<int32_t> gRemoteCursorY{0};
+std::atomic<uint32_t> gRemoteCursorCapW{0};
+std::atomic<uint32_t> gRemoteCursorCapH{0};
+std::atomic<uint64_t> gRemoteCursorGeneration{0};  // stream generation the sample belongs to
+std::atomic<bool> gRemoteCursorVisible{false};
+std::atomic<uint64_t> gRemoteCursorUpdateUs{0};
+HWND gCursorOverlayHwnd = nullptr;
+constexpr UINT_PTR kCursorOverlayTimerId = 0x711;
+constexpr uint64_t kRemoteCursorStaleUs = 500000;  // hide after 500ms without a sample
+constexpr int kCursorOverlaySize = 24;             // ring bitmap edge; window is centered on the point
 std::atomic<uint32_t> gActiveTouchPointerId{0};
 std::atomic<bool> gActiveTouchDown{false};
 
@@ -1302,7 +1332,24 @@ void push_session_toolbar_state() {
 
 void set_picker_visible_and_sync_stream(bool visible) {
   gWindowPickerVisible.store(visible, std::memory_order_relaxed);
-  gStreamStateControl.Request(!visible);
+  if (visible) {
+    gPickerShownAtUs.store(qpc_now_us(), std::memory_order_relaxed);
+    gPickerPressTargetId.store(kPickerPressNone, std::memory_order_relaxed);
+    // Mid-session the stream KEEPS RUNNING behind the picker overlay. Stopping it here made every
+    // "is it frozen?" peek tear the capture down (host detaches after 5 idle seconds), a real
+    // multi-second blackout, and a reselect/keyframe churn on close -- the recovery gesture was
+    // manufacturing the very freeze it was checking for. Only the initial picker, before any
+    // selection has been revealed (gActiveStreamGeneration==0), still holds the stream off.
+    if (gActiveStreamGeneration.load(std::memory_order_acquire) == 0) {
+      gStreamStateControl.Request(false);
+    }
+  } else {
+    gStreamStateControl.Request(true);
+    // The present anchor froze while the picker covered the stream; drop it and hold catchup off
+    // until the first post-close present re-anchors it, so the pause cannot read as backlog.
+    gLastPresentedCaptureUs.store(0, std::memory_order_relaxed);
+    gCatchupSuppressUntilUs.store(qpc_now_us() + 500000, std::memory_order_relaxed);
+  }
   // The picker draws its own header, so the toolbar belongs to the session view alone.
   remote60::native_poc::session_toolbar_set_visible(!visible);
   push_session_toolbar_state();
@@ -1322,18 +1369,24 @@ void clear_pc_target_selection() {
 // select is queued) still reaches the host first. Desktop is sent as an explicit WindowSelect(0)
 // -- one clean restart -- rather than the "already selected, just hide" shortcut, for mobile
 // parity. Ignores clicks while a selection is already in flight, which is the double-click guard.
-void begin_pc_target_selection(uint64_t windowId, const char* statusText) {
-  if (gSelectionPending.load(std::memory_order_acquire)) return;
-  if (!gControlConnected.load(std::memory_order_relaxed)) return;
+// Returns true only when the select request was actually accepted for sending, so callers can
+// log/refresh on real selections instead of refused attempts (disconnected, locked target).
+bool begin_pc_target_selection(uint64_t windowId, const char* statusText) {
+  if (gSelectionPending.load(std::memory_order_acquire)) return false;
+  if (!gControlConnected.load(std::memory_order_relaxed)) return false;
   // RequestSelect refuses when the target is locked by host config; do not touch the stream then.
-  if (!gWindowPanelState.RequestSelect(windowId, statusText)) return;
+  if (!gWindowPanelState.RequestSelect(windowId, statusText)) return false;
   gSelectionExpectedGeneration.store(0, std::memory_order_release);
   gSelectionAwaitingAck.store(true, std::memory_order_release);
   gSelectionPending.store(true, std::memory_order_release);
   // Bumped so the receive loop resets the decoder and holds for the new generation's keyframe.
   gSelectionEpoch.fetch_add(1, std::memory_order_acq_rel);
   gStreamStateControl.Request(true);
+  // A selection is a generation change; drop the remote-cursor sample so the previous target's
+  // pointer cannot linger over the new one while the first fenced sample is in flight.
+  gRemoteCursorUpdateUs.store(0, std::memory_order_release);
   if (gHwnd) InvalidateRect(gHwnd, nullptr, FALSE);
+  return true;
 }
 
 // Video-thread half of the reveal. It only *records* the candidate (the generation and epoch of
@@ -2219,7 +2272,32 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         gMacroButtonDown.store(true, std::memory_order_relaxed);
         return 0;
       }
-      if (gWindowPickerVisible.load(std::memory_order_relaxed)) return 0;
+      if (gWindowPickerVisible.load(std::memory_order_relaxed)) {
+        if (gSelectionPending.load(std::memory_order_acquire)) {
+          gPickerPressTargetId.store(kPickerPressNone, std::memory_order_relaxed);
+          return 0;
+        }
+        // Remember which target (if any) this press started on; the UP handler only selects when
+        // it ends on the same one. A press on empty picker space latches "none", and so does a
+        // press within the first 300ms after the picker appeared -- the gesture must START after
+        // the picker is stable, or a long-press begun against the old screen could still select.
+        const int dx = GET_X_LPARAM(lp);
+        const int dy = GET_Y_LPARAM(lp);
+        const ClientLayout downLayout = compute_client_layout(hwnd);
+        uint64_t pressedId = kPickerPressNone;
+        uint64_t hitId = 0;
+        if (point_in_rect(downLayout.desktopButtonRect, dx, dy)) {
+          pressedId = 0;
+        } else if (try_hit_window_list_item(hwnd, dx, dy, &hitId)) {
+          pressedId = hitId;
+        }
+        if (qpc_now_us() <
+            gPickerShownAtUs.load(std::memory_order_relaxed) + kPickerSelectMinShownUs) {
+          pressedId = kPickerPressNone;
+        }
+        gPickerPressTargetId.store(pressedId, std::memory_order_relaxed);
+        return 0;
+      }
       if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
       SetFocus(hwnd);
@@ -2252,6 +2330,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
       }
       if (gWindowPickerVisible.load(std::memory_order_relaxed)) {
+        // Consume the press latch FIRST, unconditionally: any UP ends the gesture, and an early
+        // return below must not leave a stale latch to approve a later unrelated UP.
+        const uint64_t pressedId =
+            gPickerPressTargetId.exchange(kPickerPressNone, std::memory_order_relaxed);
         // A selection already in flight owns the picker until its first frame arrives; ignore
         // further target clicks so a double-click cannot queue a second, racing select.
         if (gSelectionPending.load(std::memory_order_acquire)) return 0;
@@ -2260,17 +2342,31 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           InvalidateRect(hwnd, nullptr, FALSE);
           return 0;
         }
+        // Mis-click guard: selecting needs a picker that has been up for a moment (a click begun
+        // before it appeared must not land on a card) AND a DOWN that started on the same target.
+        const uint64_t shownAtUs = gPickerShownAtUs.load(std::memory_order_relaxed);
+        const uint64_t nowUs = qpc_now_us();
+        if (nowUs < shownAtUs + kPickerSelectMinShownUs) return 0;
+        const uint64_t shownAgeMs = (nowUs - shownAtUs) / 1000;
         if (point_in_rect(layout.desktopButtonRect, x, y)) {
+          if (pressedId != 0) return 0;
           // Explicit WindowSelect(0) even when desktop is already the selected target: one clean
           // restart with a fresh generation, so the first-frame gate has something to wait on.
-          begin_pc_target_selection(0, "desktop_select_requested");
-          InvalidateRect(hwnd, nullptr, FALSE);
+          if (begin_pc_target_selection(0, "desktop_select_requested")) {
+            std::cout << "[native-video-client][picker] select source=mouse x=" << x << " y=" << y
+                      << " id=0 shownAgeMs=" << shownAgeMs << "\n";
+            InvalidateRect(hwnd, nullptr, FALSE);
+          }
           return 0;
         }
         uint64_t hitWindowId = 0;
         if (try_hit_window_list_item(hwnd, x, y, &hitWindowId)) {
-          begin_pc_target_selection(hitWindowId, "window_select_requested");
-          InvalidateRect(hwnd, nullptr, FALSE);
+          if (pressedId != hitWindowId) return 0;
+          if (begin_pc_target_selection(hitWindowId, "window_select_requested")) {
+            std::cout << "[native-video-client][picker] select source=mouse x=" << x << " y=" << y
+                      << " id=" << hitWindowId << " shownAgeMs=" << shownAgeMs << "\n";
+            InvalidateRect(hwnd, nullptr, FALSE);
+          }
           return 0;
         }
         return 0;
@@ -2428,20 +2524,56 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
       }
       if (gWindowPickerVisible.load(std::memory_order_relaxed)) {
-        // Ignore taps while a selection is already resolving (see the mouse path).
-        if (gSelectionPending.load(std::memory_order_acquire)) return 0;
+        // A selection in flight owns the picker; also clear the latch so a gesture spanning the
+        // pending window cannot leave a stale press behind.
+        if (gSelectionPending.load(std::memory_order_acquire)) {
+          gPickerPressTargetId.store(kPickerPressNone, std::memory_order_relaxed);
+          return 0;
+        }
+        if (msg == WM_POINTERDOWN) {
+          // Same DOWN/UP-on-the-same-target latch as the mouse path, including the "gesture must
+          // start after the picker is 300ms stable" rule.
+          uint64_t pressedId = kPickerPressNone;
+          uint64_t hitId = 0;
+          if (point_in_rect(layout.desktopButtonRect, p.x, p.y)) {
+            pressedId = 0;
+          } else if (try_hit_window_list_item(hwnd, p.x, p.y, &hitId)) {
+            pressedId = hitId;
+          }
+          if (qpc_now_us() <
+              gPickerShownAtUs.load(std::memory_order_relaxed) + kPickerSelectMinShownUs) {
+            pressedId = kPickerPressNone;
+          }
+          gPickerPressTargetId.store(pressedId, std::memory_order_relaxed);
+          return 0;
+        }
         if (msg == WM_POINTERUP) {
+          const uint64_t pressedId =
+              gPickerPressTargetId.exchange(kPickerPressNone, std::memory_order_relaxed);
+          const uint64_t shownAtUs = gPickerShownAtUs.load(std::memory_order_relaxed);
+          const uint64_t nowUs = qpc_now_us();
+          const bool shownLongEnough = nowUs >= shownAtUs + kPickerSelectMinShownUs;
+          const uint64_t shownAgeMs = (nowUs - shownAtUs) / 1000;
           if (point_in_rect(layout.refreshButtonRect, p.x, p.y)) {
             queue_window_list_request("window_list_request pending");
             InvalidateRect(hwnd, nullptr, FALSE);
           } else if (point_in_rect(layout.desktopButtonRect, p.x, p.y)) {
-            begin_pc_target_selection(0, "desktop_select_requested");
-            InvalidateRect(hwnd, nullptr, FALSE);
+            if (shownLongEnough && pressedId == 0 &&
+                begin_pc_target_selection(0, "desktop_select_requested")) {
+              std::cout << "[native-video-client][picker] select source=touch x=" << p.x
+                        << " y=" << p.y << " id=0 shownAgeMs=" << shownAgeMs << "\n";
+              InvalidateRect(hwnd, nullptr, FALSE);
+            }
           } else {
             uint64_t hitWindowId = 0;
             if (try_hit_window_list_item(hwnd, p.x, p.y, &hitWindowId)) {
-              begin_pc_target_selection(hitWindowId, "window_select_requested");
-              InvalidateRect(hwnd, nullptr, FALSE);
+              if (shownLongEnough && pressedId == hitWindowId &&
+                  begin_pc_target_selection(hitWindowId, "window_select_requested")) {
+                std::cout << "[native-video-client][picker] select source=touch x=" << p.x
+                          << " y=" << p.y << " id=" << hitWindowId
+                          << " shownAgeMs=" << shownAgeMs << "\n";
+                InvalidateRect(hwnd, nullptr, FALSE);
+              }
             }
           }
         }
@@ -2480,9 +2612,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_CAPTURECHANGED:
     case WM_CANCELMODE:
+    case WM_POINTERCAPTURECHANGED:
       enqueue_release_for_pressed_mouse_buttons();
       gActiveTouchDown.store(false, std::memory_order_relaxed);
       gActiveTouchPointerId.store(0, std::memory_order_relaxed);
+      // A gesture that lost capture mid-flight must not leave a stale picker press behind: the
+      // whole point of the latch is that an UP without its own valid DOWN selects nothing.
+      gPickerPressTargetId.store(kPickerPressNone, std::memory_order_relaxed);
       return 0;
     case WM_IME_SETCONTEXT: {
       const LPARAM masked =
@@ -2552,6 +2688,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       // Focus is about to leave, so no more key-ups will reach this window. Release whatever
       // is held now, before Alt/Win/Alt+Tab strands it on the host.
       if (!kInputPolicyForceBlock) enqueue_release_for_pressed_keys();
+      gPickerPressTargetId.store(kPickerPressNone, std::memory_order_relaxed);
       return 0;
     case WM_CHAR:
       // Ignored on purpose. Every physical key now travels the key-event path, and IME
@@ -2565,6 +2702,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_ERASEBKGND:
       // Avoid background erase flicker between frames.
       return 1;
+    case WM_TIMER:
+      if (wp == kCursorOverlayTimerId) {
+        update_cursor_overlay(hwnd);
+        return 0;
+      }
+      break;
     case WM_PAINT: {
       gPaintQueued = false;
       PAINTSTRUCT ps{};
@@ -2875,6 +3018,122 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   }
 }
 
+// Remote-cursor overlay: a small layered, click-through popup owned by the video window. GDI
+// drawn over a flip-model swapchain does not compose reliably, so the cursor lives in its own
+// window that just moves. Content is a blue ring with a center dot (a deliberately distinct
+// marker -- a second arrow would ghost behind the local one by an RTT), rasterized once.
+void ensure_cursor_overlay(HWND owner) {
+  if (gCursorOverlayHwnd) return;
+  HINSTANCE inst = GetModuleHandle(nullptr);
+  static bool registered = false;
+  const wchar_t* cls = L"Remote60CursorOverlay";
+  if (!registered) {
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = inst;
+    wc.lpszClassName = cls;
+    if (!RegisterClassExW(&wc)) return;
+    registered = true;
+  }
+  constexpr int kSize = kCursorOverlaySize;
+  gCursorOverlayHwnd = CreateWindowExW(
+      WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, cls, L"",
+      WS_POPUP, 0, 0, kSize, kSize, owner, nullptr, inst, nullptr);
+  if (!gCursorOverlayHwnd) return;
+  // Rasterize the arrow into a premultiplied 32bpp DIB: GDI writes alpha 0, so pixels that got
+  // color are promoted to opaque afterwards; untouched pixels stay fully transparent.
+  BITMAPINFO bi{};
+  bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+  bi.bmiHeader.biWidth = kSize;
+  bi.bmiHeader.biHeight = -kSize;  // top-down
+  bi.bmiHeader.biPlanes = 1;
+  bi.bmiHeader.biBitCount = 32;
+  bi.bmiHeader.biCompression = BI_RGB;
+  void* bits = nullptr;
+  HDC screenDc = GetDC(nullptr);
+  HDC memDc = CreateCompatibleDC(screenDc);
+  HBITMAP dib = CreateDIBSection(memDc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+  if (dib && bits) {
+    HGDIOBJ oldBmp = SelectObject(memDc, dib);
+    std::memset(bits, 0, static_cast<size_t>(kSize) * kSize * 4);
+    // A distinct remote marker, not a second arrow: the local cursor is already an arrow, and a
+    // ghost twin trailing it by one RTT reads as a rendering bug. A colored ring with a center
+    // dot is unmistakably "the remote pointer" -- and every drawn pixel is non-black, which keeps
+    // the alpha promotion below honest (a pure-black outline would be indistinguishable from the
+    // untouched transparent background and vanish).
+    HPEN ring = CreatePen(PS_SOLID, 3, RGB(64, 160, 255));
+    HGDIOBJ oldPen = SelectObject(memDc, ring);
+    HGDIOBJ oldBrush = SelectObject(memDc, GetStockObject(HOLLOW_BRUSH));
+    Ellipse(memDc, 3, 3, kSize - 3, kSize - 3);
+    SelectObject(memDc, oldBrush);
+    HBRUSH dot = CreateSolidBrush(RGB(64, 160, 255));
+    HGDIOBJ oldBrush2 = SelectObject(memDc, dot);
+    HGDIOBJ oldPen2 = SelectObject(memDc, GetStockObject(NULL_PEN));
+    const int c = kSize / 2;
+    Ellipse(memDc, c - 3, c - 3, c + 3, c + 3);
+    SelectObject(memDc, oldBrush2);
+    SelectObject(memDc, oldPen2);
+    SelectObject(memDc, oldPen);
+    DeleteObject(ring);
+    DeleteObject(dot);
+    auto* px = static_cast<uint32_t*>(bits);
+    for (int i = 0; i < kSize * kSize; ++i) {
+      if (px[i] != 0) px[i] |= 0xFF000000u;  // colored pixel -> opaque (already premultiplied)
+    }
+    POINT zero{0, 0};
+    SIZE size{kSize, kSize};
+    BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    POINT origin{0, 0};
+    UpdateLayeredWindow(gCursorOverlayHwnd, screenDc, nullptr, &size, memDc, &zero, 0, &blend,
+                        ULW_ALPHA);
+    SelectObject(memDc, oldBmp);
+  }
+  if (dib) DeleteObject(dib);
+  DeleteDC(memDc);
+  ReleaseDC(nullptr, screenDc);
+}
+
+// Timer body: maps the latest remote-cursor sample (capture pixels) into the letterboxed video
+// rect and moves the overlay; hides it when stale (>500ms), invisible, occluded by the picker,
+// or when the window is minimized.
+void update_cursor_overlay(HWND hwnd) {
+  ensure_cursor_overlay(hwnd);
+  if (!gCursorOverlayHwnd) return;
+  const uint64_t updUs = gRemoteCursorUpdateUs.load(std::memory_order_acquire);
+  const uint32_t capW = gRemoteCursorCapW.load(std::memory_order_relaxed);
+  const uint32_t capH = gRemoteCursorCapH.load(std::memory_order_relaxed);
+  // Generation fence: a sample from the previous target must not paint over a freshly selected
+  // one. activeGen==0 = legacy stream view before any PC-side selection; accept anything there.
+  const uint64_t cursorGen = gRemoteCursorGeneration.load(std::memory_order_relaxed);
+  const uint64_t activeGen = gActiveStreamGeneration.load(std::memory_order_acquire);
+  const bool fresh = updUs != 0 && (qpc_now_us() - updUs) < kRemoteCursorStaleUs;
+  const bool show = fresh && gRemoteCursorVisible.load(std::memory_order_relaxed) &&
+                    capW > 0 && capH > 0 &&
+                    (activeGen == 0 || cursorGen == activeGen) &&
+                    !gWindowPickerVisible.load(std::memory_order_relaxed) && !IsIconic(hwnd);
+  if (!show) {
+    ShowWindow(gCursorOverlayHwnd, SW_HIDE);
+    return;
+  }
+  const ClientLayout layout = compute_client_layout(hwnd);
+  const RECT content = resolve_video_content_rect(hwnd, layout.videoRect);
+  const int videoW = std::max<int>(1, static_cast<int>(content.right - content.left));
+  const int videoH = std::max<int>(1, static_cast<int>(content.bottom - content.top));
+  const int32_t cx = gRemoteCursorX.load(std::memory_order_relaxed);
+  const int32_t cy = gRemoteCursorY.load(std::memory_order_relaxed);
+  POINT pt{};
+  pt.x = content.left + static_cast<int>(static_cast<int64_t>(std::clamp<int32_t>(cx, 0, capW - 1)) *
+                                         videoW / static_cast<int>(capW));
+  pt.y = content.top + static_cast<int>(static_cast<int64_t>(std::clamp<int32_t>(cy, 0, capH - 1)) *
+                                        videoH / static_cast<int>(capH));
+  ClientToScreen(hwnd, &pt);
+  // The marker is a ring; center it on the reported point rather than hanging it off a corner.
+  SetWindowPos(gCursorOverlayHwnd, nullptr, pt.x - kCursorOverlaySize / 2,
+               pt.y - kCursorOverlaySize / 2, 0, 0,
+               SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
 // UNICODE is not defined for this target, so the generic Win32 names resolve to the ANSI
 // entry points. This window is registered and created wide, so every message API it touches
 // must be the explicit *W form -- DefWindowProcA on a Unicode window read the wide title as
@@ -2906,6 +3165,11 @@ bool create_window() {
   }
   ShowWindow(gHwnd, SW_SHOW);
   UpdateWindow(gHwnd);
+  // Remote-cursor overlay cadence: 50ms is enough for a 30Hz feed and costs nothing when hidden.
+  SetTimer(gHwnd, kCursorOverlayTimerId, 50, nullptr);
+  // The session starts on the picker; stamp its shown-time so the select debounce has one uniform
+  // contract from the very first gesture instead of a special startup exemption.
+  gPickerShownAtUs.store(qpc_now_us(), std::memory_order_relaxed);
   return true;
 }
 
@@ -4047,7 +4311,12 @@ int main(int argc, char** argv) {
           (decodeQueueLagEstimateUs > kDecodeQueueLagDropUs) ||
           (presentedCapUs > 0 && streamLagUs > kCatchupLagDropUs);
       const bool denseArrival = (recvGapUs == 0 || recvGapUs <= 150000);
-      if (lagTrigger && denseArrival) {
+      // The picker overlay pauses presents on purpose; lag measured against a frozen present
+      // anchor is not congestion. Same for the short post-close grace until the anchor is fresh.
+      const bool catchupSuppressed =
+          gWindowPickerVisible.load(std::memory_order_relaxed) ||
+          packetNowUs < gCatchupSuppressUntilUs.load(std::memory_order_relaxed);
+      if (lagTrigger && denseArrival && !catchupSuppressed) {
         if (lagTriggerStreak < std::numeric_limits<uint32_t>::max()) {
           ++lagTriggerStreak;
         }
@@ -4126,7 +4395,7 @@ int main(int argc, char** argv) {
         if (lagHealthy && recoverMinElapsed && recoveringHealthyStreak >= 3) {
           transition_congestion_state(ClientCongestionState::Normal, packetNowUs, "recover_stable",
                                       streamLagUs, decodeQueueLagEstimateUs, h.seq);
-        } else if (!lagHealthy &&
+        } else if (!lagHealthy && !catchupSuppressed &&
                    recoveringSinceUs > 0 &&
                    packetNowUs >= (recoveringSinceUs + congestionRecoveryTimeoutUs)) {
           const bool requestAllowed =
@@ -4409,7 +4678,10 @@ int main(int argc, char** argv) {
         std::lock_guard<std::mutex> lk(gFrame.mu);
         const uint64_t prevVersion = gFrame.version;
         const uint64_t lastPresentedVersion = gLastPresentedVersion.load(std::memory_order_relaxed);
-        if (prevVersion > lastPresentedVersion) {
+        // Overwrites while the picker covers the stream are the intended latest-wins behavior of a
+        // deliberately paused present, not a symptom -- keep them out of the telemetry.
+        if (prevVersion > lastPresentedVersion &&
+            !gWindowPickerVisible.load(std::memory_order_relaxed)) {
           ++gOverwriteBeforePresentCount;
         }
         gFrame.format = SharedFrame::PixelFormat::Nv12;
@@ -4447,7 +4719,11 @@ int main(int argc, char** argv) {
         post_pc_selection_reveal(h.streamGeneration,
                                  gSelectionEpoch.load(std::memory_order_acquire));
       }
-      if (gHwnd) {
+      // While the picker overlays a live stream, WM_PAINT redraws the picker (not the video), so
+      // a per-frame invalidate would repaint the whole card grid at video cadence for nothing.
+      // The reveal above and the picker-close handler invalidate on their own, so the newest
+      // decoded frame still shows the moment the picker leaves.
+      if (gHwnd && !gWindowPickerVisible.load(std::memory_order_relaxed)) {
         if (!gPaintQueued.exchange(true)) {
           InvalidateRect(gHwnd, nullptr, FALSE);
         } else {
@@ -4607,6 +4883,30 @@ int main(int argc, char** argv) {
         if (gControlOverUdp.load(std::memory_order_acquire) &&
             gUdpControl.OnPacket(datagram.data(), static_cast<size_t>(n))) {
           continue;
+        }
+        // Remote hardware-cursor sample: smaller than the video header, so it must be claimed
+        // before the size guard below silently eats it. Latest-wins into atomics; the UI timer
+        // does the mapping and drawing.
+        if (n == static_cast<int>(sizeof(remote60::native_poc::UdpCursorPosPacket))) {
+          remote60::native_poc::UdpCursorPosPacket cp{};
+          std::memcpy(&cp, datagram.data(), sizeof(cp));
+          if (cp.magic == remote60::native_poc::kMagic &&
+              cp.kind == static_cast<uint16_t>(remote60::native_poc::UdpPacketKind::CursorPos) &&
+              cp.size == sizeof(cp)) {
+            // Bounds sanity before the values reach mapping math: a malformed peer packet must
+            // not be able to feed the clamp arithmetic absurd dimensions. Claimed either way.
+            if (cp.captureW >= 2 && cp.captureW <= 16384 && cp.captureH >= 2 &&
+                cp.captureH <= 16384) {
+              gRemoteCursorX.store(cp.x, std::memory_order_relaxed);
+              gRemoteCursorY.store(cp.y, std::memory_order_relaxed);
+              gRemoteCursorCapW.store(cp.captureW, std::memory_order_relaxed);
+              gRemoteCursorCapH.store(cp.captureH, std::memory_order_relaxed);
+              gRemoteCursorGeneration.store(cp.streamGeneration, std::memory_order_relaxed);
+              gRemoteCursorVisible.store((cp.flags & 0x1u) != 0, std::memory_order_relaxed);
+              gRemoteCursorUpdateUs.store(qpc_now_us(), std::memory_order_release);
+            }
+            continue;
+          }
         }
         if (n < static_cast<int>(sizeof(UdpVideoChunkHeader))) continue;
 
