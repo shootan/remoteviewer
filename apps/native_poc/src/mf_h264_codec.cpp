@@ -1712,6 +1712,12 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
   const auto finish_call = [&](bool ok) -> bool {
     const uint64_t encodeCallEndUs = qpc_now_us();
     encodeStats->encodeCallUs = (encodeCallEndUs >= encodeCallStartUs) ? (encodeCallEndUs - encodeCallStartUs) : 0;
+    // Stamp the held-input FIFO depth at the TRUE end of the call. drain_outputs() pops produced
+    // frames from pendingInputSampleTimesHns_, so stamping before the poll/drain would overstate the
+    // depth on healthy calls and mislead the starvation diagnosis (depth is a decisive field).
+    // pendingInputOverflowTotal_ is object-lifetime cumulative.
+    encodeStats->pendingInputDepth = static_cast<uint32_t>(pendingInputSampleTimesHns_.size());
+    encodeStats->pendingInputOverflowTotal = pendingInputOverflowTotal_;
     return ok;
   };
   constexpr int64_t kEncoderOutputTsSkewHns = 50000LL * 10LL;
@@ -1867,6 +1873,7 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
   if (pendingInputSampleTimesHns_.size() > kPendingEncoderTimestampMax) {
     pendingInputSampleTimesHns_.pop_front();
     ++sampleTimeOutputTimestampFallbackCount_;
+    ++pendingInputOverflowTotal_;
     if (env_truthy_local("REMOTE60_NATIVE_DEBUG_CODEC")) {
       codec_debug_log("encoder pending input timestamp queue overflowed");
     }
@@ -1875,6 +1882,7 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
 
   if (asyncTransform_ && eventGenerator_) {
     bool sawEvent = false;
+    bool sawHaveOutput = false;
     // Budget several events per call. Hardware MFTs post roughly one METransformNeedInput and
     // one METransformHaveOutput per frame; draining only one event per encode let the queue
     // ratchet up and then release two or three access units at once, which downstream is a
@@ -1916,6 +1924,7 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
       (void)ev->GetType(&et);
       if (et == METransformHaveOutput) {
         ++encodeStats->asyncPollHaveOutputCount;
+        sawHaveOutput = true;
         if (!drain_outputs()) return finish_call(false);
       } else if (et == METransformNeedInput) {
         ++encodeStats->asyncPollNeedInputCount;
@@ -1927,6 +1936,14 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
     if (!sawEvent) {
       if (!drain_outputs()) return finish_call(false);
     }
+    // Diagnostic only: this call saw MFT events but none were METransformHaveOutput. Repeated across
+    // calls while input keeps being accepted is the fingerprint of the async output-starvation wedge
+    // (video frozen, encode loop still spinning). We deliberately do NOT call ProcessOutput here:
+    // the async MFT contract only permits it in response to METransformHaveOutput (otherwise
+    // E_UNEXPECTED), so a forced drain would be a per-call spec violation on the healthy path. A
+    // spec-compliant, starvation-gated wakeup (MFT_MESSAGE_COMMAND_MARKER) / recovery is a separate
+    // follow-up commit.
+    if (encodeStats) encodeStats->asyncNeedInputOnlyCall = (sawEvent && !sawHaveOutput) ? 1u : 0u;
     // Async MFTs may legitimately delay output; empty outUnits is not an error.
     return finish_call(true);
   }

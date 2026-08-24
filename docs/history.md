@@ -6526,3 +6526,52 @@ UI 방식 결정
 - `client_shell_main.cpp`(자식 환경변수), `CMakeLists.txt`(`/utf-8` 두 타겟),
   `product_version.hpp`(0.2.22)
 - 산출물 `dist/GNLinkSetup-0.2.22.exe`
+
+### 250) 2026-08-24 호스트 "먹통"의 진짜 원인 좁히기 — 인코더 출력-굶주림 계측 (0.2.50)
+
+배경 (증상 재정의)
+- 사용자 정정: **게임이 멈춘 게 아니라 GNLink 호스트가 먹통**이 된다. 같은 PC에서 게임도
+  OSLink(타 원격툴)도 정상인데, 우리 PC 클라로 접속했을 때만 갑자기 영상이 멈추고 호스트를
+  손으로 죽여야 한다. → OS/GPU/디스플레이/DXGI-가-게임을-못-봄은 전부 배제(그럼 OSLink도 죽음).
+  GNLink 호스트의 캡처/인코드/송신 파이프라인 고유 wedge.
+
+원인 (코드로 확정 + 검증용 Codex와 3라운드 교차검증)
+- 겹친 구멍 3개: ① 비동기 HW MFT가 `NeedInput`만 이벤트로 주고 `HaveOutput`이 안 보이는 호출에서
+  기존 코드는 `sawEvent=true`라 fallback 드레인을 건너뛰어 출력이 MFT에 갇힐 수 있음
+  (`mf_h264_codec.cpp` async poll tail). ② 출력이 비면 `units.empty() continue`가 1초 stats/자가복구
+  블록을 통째로 skip. ③ 0.2.49 워치독은 `mainLoopProgressUs`(루프 진행)만 봐서, 프레임 0인데 루프가
+  도는 상태를 "건강"으로 오판 → 발화 안 함(`mainLoopLastSeq`는 선언만 되고 store가 없는 죽은 변수).
+  → 입력만 받고 출력 0이면 영구 정지 + 자동복구 없음 + stats 소실 = 필드 증상과 정합.
+
+이번 커밋 범위 (telemetry-only, 런타임 동작 변경 0 — Codex 리뷰로 계약위반 제거)
+- `mf_h264_codec.{hpp,cpp}`: 위험한 "무조건 드레인" 수정안은 **철회**(async MFT 계약상 HaveOutput
+  없이 ProcessOutput 호출은 E_UNEXPECTED — Codex R2 blocker). 대신 계측만: `asyncNeedInputOnlyCall`,
+  `pendingInputDepth`(finish_call에서 call 종료 시점 stamp), `pendingInputOverflowTotal` 노출.
+- `native_video_host_main.cpp`: 인코더 출력-라이브니스 하트비트를 `units.empty()` early-out **앞에**
+  배치(굶주려도 관측됨). `encoder-output-starvation` 진단 로그 1줄(1/s) — streak 누적 async 카운터
+  (NeedInput/HaveOutput/NoEvent/NotAccepting/NeedMore) + real/synthetic 입력 분리 + pending depth/
+  overflow로 A(호스트 이벤트버그) vs B(벤더 고갈) 판별. `encoderNoOutputSinceUs`로 부팅부터
+  한 번도 출력 못 낸 경우도 감지. 죽은 `mainLoopLastSeq`를 실제 출력 진행으로 store(부활).
+  starvation episode를 인코더 재초기화 3곳 + 스트림 재활성 edge에서 reset(긴 inactive/이전 인코더
+  잔여 streak가 false 로그 내는 것 방지). `outAu += processOutputSamples`.
+- `product_version.hpp` 0.2.50.
+
+교차검증 (검증용 Codex, a2a 버스)
+- 초기 오진("DXGI 40초 wedge + 보안데스크톱")은 로그 재검증에서 4개 근거 모두 철회
+  (acquires 재개는 accumTotal=0 포인터전용 / pipeUs 32s는 MFT held-output 타임스탬프 아티팩트 /
+  secure-desktop는 다른 PC 로그 / 16:49:28 window-select 재시작 실재).
+- 커밋 전 Codex 리뷰 2라운드로 BLOCKER(계약위반 드레인) 제거 + HIGH(startup 감지, outAu 합산,
+  pendingDepth 시점) + MED(episode reset, streak 누적, real/synth) 반영 후 production 승인.
+
+검증/build/test
+- `cmake --build build-local --config Release --target remote60_native_video_host_poc
+  remote60_mf_h264_codec_test` PASS(경고 0). `remote60_mf_h264_codec_test: PASS`.
+- `--target remote60_installer` PASS → `GNLinkHost.exe`에 `0.2.50` 임베드 확인.
+- 산출물 `dist/GNLinkSetup-0.2.50.exe`.
+
+남은 것 (커밋2)
+- 워치독을 출력-라이브니스(accepted-input-coupled)로 발화, 1초 stats/health tick을 공통 loop-tail로
+  이동(현재 units.empty가 여전히 skip), encode-fail streak, spec-compliant `MFT_MESSAGE_COMMAND_MARKER`
+  기반 gated probe → 인코더 reset → 60s 재발 시 프로세스 재시작.
+- **실기**: 0.2.50 설치 후 다음 먹통 재현 시 `encoder-output-starvation` 로그로 A/B 확정.
+- naming nuance: `asyncNeedInputOnlyCall`은 marker 도입 시 `sawNeedInput`으로 정확화(Codex 비차단).

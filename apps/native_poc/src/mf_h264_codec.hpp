@@ -57,6 +57,13 @@ struct H264EncodeFrameStats {
   uint32_t asyncPollNoEventCount = 0;
   uint32_t asyncPollNeedInputCount = 0;
   uint32_t asyncPollHaveOutputCount = 0;
+  // Diagnostic for the async output-starvation wedge: this call saw MFT events but none were
+  // METransformHaveOutput. Repeated while input keeps being accepted is the wedge fingerprint.
+  uint32_t asyncNeedInputOnlyCall = 0;
+  // Held input-timestamp FIFO depth after this call, and the cumulative count of FIFO overflow
+  // drops. A depth pinned near the 64 cap with output stalled is decisive starvation evidence.
+  uint32_t pendingInputDepth = 0;
+  uint64_t pendingInputOverflowTotal = 0;
   uint8_t asyncEnabled = 0;
 };
 
@@ -122,6 +129,7 @@ class H264Encoder {
   const char* backendName_ = "unknown";
   uint64_t sampleTimeOutputTimestampTotalSamples_ = 0;
   uint64_t sampleTimeOutputTimestampFallbackCount_ = 0;
+  uint64_t pendingInputOverflowTotal_ = 0;
   uint32_t d3dManagerResetToken_ = 0;
   Microsoft::WRL::ComPtr<IMFDXGIDeviceManager> d3dManager_;
   Microsoft::WRL::ComPtr<IMFMediaEventGenerator> eventGenerator_;

@@ -4796,6 +4796,40 @@ int main(int argc, char** argv) {
   std::deque<Nv12PendingRelease> nv12PendingReleases;
   bool surfaceEncodeHealthy = true;
   uint64_t encoderOutputSamplesTotal = 0;
+  // Encoder OUTPUT-liveness heartbeat. The main-loop liveness watchdog only tracks loop iteration
+  // progress (mainLoopProgressUs), which keeps advancing even when the async hardware MFT accepts
+  // input every call but emits no output access unit -- an output-starvation wedge that freezes the
+  // video while the loop still spins and the watchdog stays green. These track real encoder output
+  // progress so that stall is observable (and, later, recoverable). Diagnostic-only in this commit.
+  uint64_t encoderInputAcceptedTotal = 0;      // encode calls that handed a frame to the MFT
+  uint64_t encoderRealInputAccepted = 0;       // ... of which carried a real captured frame
+  uint64_t encoderSyntheticInputAccepted = 0;  // ... trailing-edge/bootstrap synthetic kicks
+  uint64_t encoderOutputAuTotal = 0;           // cumulative output access units produced
+  uint64_t lastEncoderOutputUs = 0;            // qpc of the last produced output (0 = never yet)
+  uint64_t encoderNoOutputSinceUs = 0;         // qpc the current no-output streak began (catches
+                                               // a from-startup encoder that never emits one AU)
+  uint32_t encoderAcceptedNoOutputStreak = 0;  // consecutive accepted-input calls with no output
+  uint64_t lastEncoderStarvationLogUs = 0;     // rate-limits the anomaly line to <=1/s
+  // Async-event counters accumulated ACROSS the current no-output streak (reset when output
+  // resumes) so one anomaly line can tell a host event-driving bug (NeedInput accrues, HaveOutput
+  // stays 0) from a genuine vendor/hardware stall, rather than showing only the last call's counts.
+  uint64_t starveNeedInputAccum = 0;
+  uint64_t starveHaveOutputAccum = 0;
+  uint64_t starveNoEventAccum = 0;
+  uint64_t starveNotAcceptingAccum = 0;
+  uint64_t starveNeedMoreAccum = 0;
+  uint64_t starveNeedInputOnlyCalls = 0;
+  // Clears the CURRENT starvation episode (not the lifetime totals). Must run whenever the encoder
+  // is shut down + reinitialized or the stream (re)activates, otherwise a no-output streak left over
+  // from the previous encoder -- or a long stream-inactive gap -- would inflate noOutputAgeUs and
+  // fire a false starvation log on the fresh encoder's first inputs.
+  auto reset_encoder_starvation_episode = [&]() {
+    encoderNoOutputSinceUs = 0;
+    encoderAcceptedNoOutputStreak = 0;
+    lastEncoderStarvationLogUs = 0;
+    starveNeedInputAccum = starveHaveOutputAccum = starveNoEventAccum = 0;
+    starveNotAcceptingAccum = starveNeedMoreAccum = starveNeedInputOnlyCalls = 0;
+  };
   uint64_t nv12SurfaceEncodeCount = 0;
   uint32_t surfaceEncodeProbeCount = 0;
   uint64_t surfaceEncodeProbeSumUs = 0;
@@ -4827,6 +4861,7 @@ int main(int argc, char** argv) {
         return false;
       }
       resetHostTimelineAnchors();
+      reset_encoder_starvation_episode();
     } else if (bitrateChanged) {
       if (!encoder.reconfigure_bitrate(targetBitrate)) {
         encoder.shutdown();
@@ -4834,6 +4869,7 @@ int main(int argc, char** argv) {
           return false;
         }
         resetHostTimelineAnchors();
+        reset_encoder_starvation_episode();
       }
     }
 
@@ -6818,6 +6854,9 @@ int main(int argc, char** argv) {
       // covers the stream-inactive->active edge and a capture reattach, which both land here.
       arm_trailing_kick(qpc_now_us());
       powerKeepalive.SetStreaming(true, true);
+      // A stream-inactive->active edge starts a fresh streaming episode; drop any no-output streak
+      // left from before so the inactive gap is not mistaken for encoder starvation.
+      reset_encoder_starvation_episode();
       std::cout << "[native-video-host] stream active; forcing keyframe\n";
     }
     if (useH264 && runtimeTunePending.exchange(false, std::memory_order_acq_rel)) {
@@ -8040,6 +8079,77 @@ int main(int argc, char** argv) {
         nv12PendingReleases.pop_front();
       }
       const uint64_t encodeEndUs = qpc_now_us();
+
+      // Encoder output-liveness heartbeat. Placed BEFORE the units.empty() early-out below so a
+      // starved encoder -- which returns empty on every call -- is still observed here; the old
+      // `continue` skipped the whole 1s stats / self-heal tail, so a wedge produced no telemetry at
+      // all. A frame was just handed to the MFT this call, so input is advancing; only the OUTPUT is
+      // in question. This block changes no control flow (diagnostic only).
+      ++encoderInputAcceptedTotal;
+      if (servedBootstrap) {
+        ++encoderSyntheticInputAccepted;
+      } else {
+        ++encoderRealInputAccepted;
+      }
+      if (encodeStats.processOutputSamples > 0) {
+        encoderOutputAuTotal += encodeStats.processOutputSamples;
+        lastEncoderOutputUs = encodeEndUs;
+        encoderNoOutputSinceUs = 0;
+        encoderAcceptedNoOutputStreak = 0;
+        // Reset the episode so the next starvation logs its first line immediately, and clear the
+        // per-streak async accumulators.
+        lastEncoderStarvationLogUs = 0;
+        starveNeedInputAccum = starveHaveOutputAccum = starveNoEventAccum = 0;
+        starveNotAcceptingAccum = starveNeedMoreAccum = starveNeedInputOnlyCalls = 0;
+        // Revive mainLoopLastSeq (previously declared but never stored, so the watchdog record read
+        // a constant 0): publish real encoder-output progress, not loop iterations. A follow-up can
+        // make the watchdog fire on this age while input is still being accepted.
+        mainLoopLastSeq.store(encoderOutputSamplesTotal, std::memory_order_release);
+      } else {
+        ++encoderAcceptedNoOutputStreak;
+        if (encoderNoOutputSinceUs == 0) encoderNoOutputSinceUs = encodeEndUs;
+        starveNeedInputAccum += encodeStats.asyncPollNeedInputCount;
+        starveHaveOutputAccum += encodeStats.asyncPollHaveOutputCount;
+        starveNoEventAccum += encodeStats.asyncPollNoEventCount;
+        starveNotAcceptingAccum += encodeStats.processInputNotAcceptingCount;
+        starveNeedMoreAccum += encodeStats.processOutputNeedMoreInputCount;
+        starveNeedInputOnlyCalls += encodeStats.asyncNeedInputOnlyCall;
+        // Age is measured from when the streak began, NOT from lastEncoderOutputUs, so an encoder
+        // that never emitted a single AU since startup (lastEncoderOutputUs==0) is still detected.
+        const uint64_t noOutputAgeUs =
+            (encoderNoOutputSinceUs > 0 && encodeEndUs > encoderNoOutputSinceUs)
+                ? (encodeEndUs - encoderNoOutputSinceUs)
+                : 0;
+        // Stream active + encoder keeps accepting input but produces no output for a while = the
+        // async-MFT output-starvation wedge (video frozen, main loop spinning, liveness watchdog
+        // green). Emit one rate-limited anomaly line with the streak-accumulated async counters so a
+        // field recurrence tells a host event-driving bug (NeedInput accrues, HaveOutput stays 0)
+        // from a genuine vendor/hardware stall. Recovery is a separate follow-up; diagnostic only.
+        if (streamControlActive.load(std::memory_order_acquire) &&
+            encoderAcceptedNoOutputStreak >= 8 && noOutputAgeUs >= 1000000ULL &&
+            (lastEncoderStarvationLogUs == 0 ||
+             encodeEndUs >= lastEncoderStarvationLogUs + 1000000ULL)) {
+          lastEncoderStarvationLogUs = encodeEndUs;
+          std::cout << "[native-video-host] encoder-output-starvation"
+                    << " acceptedNoOutputStreak=" << encoderAcceptedNoOutputStreak
+                    << " noOutputAgeUs=" << noOutputAgeUs
+                    << " everOutput=" << (lastEncoderOutputUs > 0 ? 1 : 0)
+                    << " realIn=" << encoderRealInputAccepted
+                    << " synthIn=" << encoderSyntheticInputAccepted
+                    << " outAu=" << encoderOutputAuTotal
+                    << " asyncEnabled=" << static_cast<unsigned>(encodeStats.asyncEnabled)
+                    << " streakNeedInput=" << starveNeedInputAccum
+                    << " streakHaveOutput=" << starveHaveOutputAccum
+                    << " streakNeedInputOnlyCalls=" << starveNeedInputOnlyCalls
+                    << " streakNoEvent=" << starveNoEventAccum
+                    << " streakNotAccepting=" << starveNotAcceptingAccum
+                    << " streakNeedMore=" << starveNeedMoreAccum
+                    << " pendingDepth=" << encodeStats.pendingInputDepth
+                    << " pendingOverflow=" << encodeStats.pendingInputOverflowTotal
+                    << "\n";
+        }
+      }
+
       if (units.empty()) continue;
 
       captureAgeSumUs += captureAgeAtCallbackUs;
@@ -8128,6 +8238,7 @@ int main(int argc, char** argv) {
               break;
             }
             resetHostTimelineAnchors();
+            reset_encoder_starvation_episode();
             ++encoderResetCount;
             consecutiveStaleEncodedFrames = 0;
             forceKeyNext = true;
