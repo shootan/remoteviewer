@@ -6955,7 +6955,9 @@ int main(int argc, char** argv) {
                   << " bitrate=" << activeBitrate
                   << " keyint=" << activeKeyint
                   << " fps=" << activeFps
-                  << " abrOverride=1\n";
+                  // Was hardcoded "abrOverride=1", which misreported the ABR ladder as pinned --
+                  // the actual flag is cleared just above, so print the real state.
+                  << " abrOverride=" << (runtimeTuneManualOverride ? 1 : 0) << "\n";
       }
     }
     {

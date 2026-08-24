@@ -217,10 +217,32 @@ class StreamingHostProcess {
     const std::wstring path = log_file_path();
     if (path.empty()) return;
     WIN32_FILE_ATTRIBUTE_DATA info{};
-    if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info) &&
-        info.nFileSizeLow > 2u * 1024 * 1024) {
-      const std::wstring old = path + L".old";
-      MoveFileExW(path.c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING);
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info)) return;
+    ULARGE_INTEGER size{};
+    size.LowPart = info.nFileSizeLow;
+    size.HighPart = info.nFileSizeHigh;
+    if (size.QuadPart > 2ULL * 1024 * 1024) {
+      // Numbered generations instead of one .old: a single backup meant the second rotation
+      // destroyed the very window a long repro needed (the freeze evidence was in the overwritten
+      // generation). host_app.log.1 is the newest backup ... .10 the oldest; the oldest is deleted.
+      constexpr int kMaxLogBackups = 10;
+      DeleteFileW((path + L"." + std::to_wstring(kMaxLogBackups)).c_str());
+      for (int i = kMaxLogBackups - 1; i >= 1; --i) {
+        const std::wstring from = path + L"." + std::to_wstring(i);
+        const std::wstring to = path + L"." + std::to_wstring(i + 1);
+        MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING);
+      }
+      MoveFileExW(path.c_str(), (path + L".1").c_str(), MOVEFILE_REPLACE_EXISTING);
+      // Adopt the legacy single-generation .old AFTER the shift, into the oldest free slot
+      // (highest number first, no replace). Adopting before the shift could land it in the only
+      // free slot -- .10 -- where the very next statement deleted it. If every slot is taken,
+      // .old stays on disk rather than being silently lost.
+      const std::wstring legacy = path + L".old";
+      if (GetFileAttributesW(legacy.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        for (int i = kMaxLogBackups; i >= 2; --i) {
+          if (MoveFileExW(legacy.c_str(), (path + L"." + std::to_wstring(i)).c_str(), 0)) break;
+        }
+      }
     }
   }
 

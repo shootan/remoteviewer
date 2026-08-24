@@ -6575,3 +6575,51 @@ UI 방식 결정
   기반 gated probe → 인코더 reset → 60s 재발 시 프로세스 재시작.
 - **실기**: 0.2.50 설치 후 다음 먹통 재현 시 `encoder-output-starvation` 로그로 A/B 확정.
 - naming nuance: `asyncNeedInputOnlyCall`은 marker 도입 시 `sawNeedInput`으로 정확화(Codex 비차단).
+
+### 251) 2026-08-24 로그가 증거를 스스로 지우던 문제 — 번호 로테이션 + 뷰어 로그 신설 (0.2.51)
+
+배경 (사용자 실기 0.2.50 + 새 log/)
+- 사용자: "host 로그가 많아지면 초기화된다. .1 식으로 백업하고 10개 넘으면 오래된 것부터
+  지워라. 클라도 똑같이." 실제로 이번 host_app.log 도 2MB 캡의 단일 .old 로테이션 때문에
+  세션 앞부분이 잘려 있었다 — 긴 재현일수록 증거가 먼저 사라지는 구조.
+- 추가 발견: **뷰어(GNLinkViewer)의 stdout 텔레메트리가 통째로 버려지고 있었다.** 셸이
+  CREATE_NO_WINDOW 로 띄우며 리다이렉트를 안 해서, 0.2.48에서 넣은 클라 per-frame 로그가
+  어디에도 안 남음 — 클라 측 원인(catchup 등)을 확정할 수 없던 이유.
+
+로그 분석 (검증용 Codex 와 a2a 교차검증 2라운드)
+- host 는 이번엔 안 멈춤(워치독/starvation 로그 0건).
+- 정적 화면 "멈춤" 체감: 진짜 정적이면 DXGI 가 프레임을 안 주고, 포인터 전용 업데이트는
+  게이트에서 버려져 원격 커서도 안 움직이며, trailing kick 은 1회성이라 주기 리프레시가 없다.
+  15:44 의 stream 0/1 반복은 사용자가 피커를 여닫은 흔적(호스트 정지 아님).
+- 장기 실행 끊김: **클라 catchup 양성 피드백 확정** — lag 판정 실패 → 620ms 주기 IDR 요청
+  62회/분(코드의 600ms 게이트와 일치), IDR 개당 120~160KB(그 1분에만 19.9MB, 평시 8.3MB),
+  forceKeyInputCount=117/30s. 최초 방아쇠(클럭 드리프트 vs 디코드 백로그)는 viewer.log 로 확정
+  예정. 평시에도 인코드 파이프가 ~55/60fps(superseded 5/s, cb2eAvg 33.7ms)로 미세 끊김의 바탕.
+- "해상도 변경 안 됨": PC 클라에 해상도 UI 자체가 없고, 로그의 abrOverride=1 은 **하드코딩된
+  거짓 로그**(실제 0, 실송출 1080p 정상)였다 — Codex 가 정정.
+
+한 일 (P0, 동작 변경 없음 — Codex Blocker/High 반영 후 조건부 승인)
+- host/client 로그 **번호 로테이션 .1(최신)~.10(삭제)**. legacy .old 는 shift 후 높은 번호의
+  빈 슬롯으로 no-replace 이관(슬롯이 차면 보존) — 유일한 빈 .10 에 넣자마자 지우는 edge 차단.
+  크기 비교는 64-bit(ULARGE_INTEGER).
+- **viewer.log 신설**: 셸이 파이프로 뷰어 stdout/stderr 를 받아 ms 타임스탬프로 기록(2MB,
+  동일 로테이션). CreateProcess 는 STARTUPINFOEX + PROC_THREAD_ATTRIBUTE_HANDLE_LIST 로
+  {pipeWrite, NUL stdin}만 화이트리스트 상속(bInheritHandles=TRUE 단독은 모든 상속가능 핸들
+  누출 — Blocker). attribute list 는 probe(ERROR_INSUFFICIENT_BUFFER) 검증 + HeapAlloc +
+  실패 시 Delete→해제 순서 보장, 실패하면 무파이프 폴백. 다중 세션은 process-wide mutex +
+  단일 sink 핸들(FILE_SHARE_DELETE)로 write/rotate 직렬화. EOF 시 개행 없는 tail 도 flush.
+- runtime-config-applied 의 하드코딩 "abrOverride=1" → 실제 상태 출력.
+
+검증/build/test
+- remote60_host_app / remote60_client_shell / remote60_native_video_host_poc Release 빌드
+  PASS(경고 0). 산출물 dist/GNLinkSetup-0.2.51.exe.
+
+남은 것 (Codex 와 합의한 순서)
+- P1 클라 catchup 재앵커(aligned_lag_us 고정 base 의 드리프트) + reason1 요청 coalesce(키가
+  실제 present 될 때까지 재요청 금지).
+- P2 호스트 reason1 IDR 퓨즈(1~2s 1회, key pending 시 drop; barrier/reason2·3 은 예외).
+- P3 커서 포워딩(DXGI 전용 오버레이) + 1Hz cached-P 리프레시 — 선행: servedBootstrap(seq=0)
+  합성 프레임이 keyint 규칙으로 매번 IDR 이 되는 버그 수정. 6fps 전체 리로드는 대역·인코더
+  부담으로 하지 않기로 합의(사용자 요구는 1Hz P + 커서로 충족).
+- P4 해상도 프리셋 UI(720p/1080p/자동) + resolution override 를 manualOverride 에서 분리.
+- 실기: 0.2.51 설치 후 재현 → viewer.log 의 catchup enter reason 으로 P1 방아쇠 확정.

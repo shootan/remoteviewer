@@ -154,20 +154,51 @@ void load_settings(std::string* server, std::string* accountId, ShellRuntimeSett
  * account is". This file does. It records what was attempted and what came back; never the
  * password, and never the session token, which is as good as one until it expires.
  */
+/**
+ * Numbered log rotation: <path>.1 is the newest backup ... .10 the oldest, which is deleted.
+ * A single .old generation destroyed the very window a long repro needed on the second rotation,
+ * so both this shell's logs and the host app rotate the same way.
+ */
+void rotate_numbered_log(const std::wstring& path, ULONGLONG capBytes) {
+  WIN32_FILE_ATTRIBUTE_DATA info{};
+  if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info)) return;
+  ULARGE_INTEGER size{};
+  size.LowPart = info.nFileSizeLow;
+  size.HighPart = info.nFileSizeHigh;
+  if (size.QuadPart <= capBytes) return;
+  constexpr int kMaxLogBackups = 10;
+  DeleteFileW((path + L"." + std::to_wstring(kMaxLogBackups)).c_str());
+  for (int i = kMaxLogBackups - 1; i >= 1; --i) {
+    MoveFileExW((path + L"." + std::to_wstring(i)).c_str(),
+                (path + L"." + std::to_wstring(i + 1)).c_str(), MOVEFILE_REPLACE_EXISTING);
+  }
+  MoveFileExW(path.c_str(), (path + L".1").c_str(), MOVEFILE_REPLACE_EXISTING);
+  // Adopt the legacy single-generation .old AFTER the shift, into the oldest free slot (highest
+  // number first, no replace). Adopting before the shift could land it in the only free slot --
+  // .10 -- where the very next statement deleted it. If every slot is taken, .old stays on disk
+  // rather than being silently lost.
+  const std::wstring legacy = path + L".old";
+  if (GetFileAttributesW(legacy.c_str()) != INVALID_FILE_ATTRIBUTES) {
+    for (int i = kMaxLogBackups; i >= 2; --i) {
+      if (MoveFileExW(legacy.c_str(), (path + L"." + std::to_wstring(i)).c_str(), 0)) break;
+    }
+  }
+}
+
+std::wstring log_dir_path() {
+  std::wstring path = settings_path();
+  const size_t slash = path.find_last_of(L'\\');
+  return slash == std::wstring::npos ? L"." : path.substr(0, slash);
+}
+
 void log_line(const std::string& text) {
   static std::mutex logMu;
   std::lock_guard<std::mutex> lock(logMu);
-  std::wstring path = settings_path();
-  const size_t slash = path.find_last_of(L'\\');
-  path = (slash == std::wstring::npos ? L"." : path.substr(0, slash)) + L"\\client.log";
+  const std::wstring path = log_dir_path() + L"\\client.log";
 
   // A few lines per session, but appended forever: without a cap this is the one file in the
-  // install that only ever grows. One .old generation keeps recent history for support.
-  WIN32_FILE_ATTRIBUTE_DATA info{};
-  if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info) &&
-      info.nFileSizeLow > 512u * 1024) {
-    MoveFileExW(path.c_str(), (path + L".old").c_str(), MOVEFILE_REPLACE_EXISTING);
-  }
+  // install that only ever grows.
+  rotate_numbered_log(path, 512u * 1024);
 
   std::ofstream file(path, std::ios::app);
   if (!file) return;
@@ -177,6 +208,77 @@ void log_line(const std::string& text) {
   std::snprintf(stamp, sizeof(stamp), "%02d-%02d %02d:%02d:%02d ", now.wMonth, now.wDay,
                 now.wHour, now.wMinute, now.wSecond);
   file << stamp << text << "\n";
+}
+
+/**
+ * Appends one stamped line to viewer.log through a single process-wide serialized sink.
+ *
+ * One shared handle + one mutex, not a handle per session: with two sessions pumping, a second
+ * append handle made the rotation rename fail with a sharing violation, which silently disabled
+ * the size cap. Every write, size check, close, rotate and reopen serializes here, and the handle
+ * is opened with FILE_SHARE_DELETE so our own sink never pins the rotation rename (an external reader opened without share-delete still can; the next line simply retries the rotate).
+ */
+void viewer_log_write_line(const std::string& line) {
+  static std::mutex mu;
+  static HANDLE sink = INVALID_HANDLE_VALUE;
+  std::lock_guard<std::mutex> lock(mu);
+  const std::wstring path = log_dir_path() + L"\\viewer.log";
+  auto open_sink = [&]() -> HANDLE {
+    return CreateFileW(path.c_str(), FILE_APPEND_DATA,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                       OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  };
+  if (sink == INVALID_HANDLE_VALUE) sink = open_sink();
+  if (sink != INVALID_HANDLE_VALUE) {
+    LARGE_INTEGER size{};
+    if (GetFileSizeEx(sink, &size) && size.QuadPart > 2LL * 1024 * 1024) {
+      CloseHandle(sink);
+      sink = INVALID_HANDLE_VALUE;
+      rotate_numbered_log(path, 0);
+      sink = open_sink();
+    }
+  }
+  if (sink == INVALID_HANDLE_VALUE) return;
+  SYSTEMTIME now{};
+  GetLocalTime(&now);
+  char stamp[40]{};
+  std::snprintf(stamp, sizeof(stamp), "%02d-%02d %02d:%02d:%02d.%03d ", now.wMonth, now.wDay,
+                now.wHour, now.wMinute, now.wSecond, now.wMilliseconds);
+  std::string out = std::string(stamp) + line + "\n";
+  DWORD wrote = 0;
+  WriteFile(sink, out.data(), static_cast<DWORD>(out.size()), &wrote, nullptr);
+}
+
+/**
+ * Drains the viewer's stdout/stderr pipe into viewer.log.
+ *
+ * The viewer logs per-frame stream telemetry (assembly/decode/present, keyframe requests) to
+ * stdout, but it is launched with CREATE_NO_WINDOW and no redirect, so all of it was silently
+ * discarded -- exactly the client-side evidence a stutter investigation needed. Runs on its own
+ * thread per session; ends when the child exits and the pipe hits EOF.
+ */
+void pump_viewer_output_to_log(HANDLE readEnd) {
+  std::string pending;
+  char buffer[1024];
+  DWORD read = 0;
+  while (ReadFile(readEnd, buffer, sizeof(buffer), &read, nullptr) && read > 0) {
+    pending.append(buffer, read);
+    size_t newline;
+    while ((newline = pending.find('\n')) != std::string::npos) {
+      std::string line = pending.substr(0, newline);
+      pending.erase(0, newline + 1);
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      viewer_log_write_line(line);
+    }
+    if (pending.size() > 8192) {
+      // An oversized fragment without a newline: flush rather than drop, so a wedged child's
+      // final partial line still reaches the log.
+      viewer_log_write_line(pending);
+      pending.clear();
+    }
+  }
+  if (!pending.empty()) viewer_log_write_line(pending);  // tail without a trailing newline
+  CloseHandle(readEnd);
 }
 
 /** Pushes one JSON message into the page. Safe to call from any thread. */
@@ -308,9 +410,76 @@ void begin_session(const ShellConnectRequest& request) {
           << L" --runtime-fps " << settings.fps
           << L" --monitor " << settings.monitorId;
 
-  STARTUPINFOW si{};
-  si.cb = sizeof(si);
+  // Hand the child a pipe for stdout/stderr: the viewer's per-frame telemetry went to stdout,
+  // and CREATE_NO_WINDOW without a redirect silently discarded all of it. Inheritance is limited
+  // to an explicit PROC_THREAD_ATTRIBUTE_HANDLE_LIST whitelist -- bInheritHandles=TRUE alone
+  // would leak every inheritable handle in this process into the child. stdin gets a real NUL
+  // handle because STARTF_USESTDHANDLES copies all three values verbatim, valid or not.
+  SECURITY_ATTRIBUTES sa{};
+  sa.nLength = sizeof(sa);
+  sa.bInheritHandle = TRUE;
+  HANDLE pipeRead = nullptr;
+  HANDLE pipeWrite = nullptr;
+  HANDLE nulIn = INVALID_HANDLE_VALUE;
+  bool pipeOk = CreatePipe(&pipeRead, &pipeWrite, &sa, 0) != 0;
+  if (pipeOk) {
+    SetHandleInformation(pipeRead, HANDLE_FLAG_INHERIT, 0);
+    nulIn = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                        OPEN_EXISTING, 0, nullptr);
+    if (nulIn == INVALID_HANDLE_VALUE) {
+      CloseHandle(pipeRead);
+      CloseHandle(pipeWrite);
+      pipeOk = false;
+    }
+  }
+
+  STARTUPINFOEXW six{};
   PROCESS_INFORMATION pi{};
+  HANDLE inheritList[2] = {nullptr, nullptr};
+  if (pipeOk) {
+    // Microsoft's documented dance: the sizing probe FAILS with ERROR_INSUFFICIENT_BUFFER and
+    // returns the byte count -- anything else means the API is unusable here, so fall back to a
+    // pipe-less launch. HeapAlloc because the attribute list is opaque memory with no alignment
+    // contract a char buffer can promise.
+    SIZE_T attrSize = 0;
+    const BOOL probe = InitializeProcThreadAttributeList(nullptr, 1, 0, &attrSize);
+    bool listInitialized = false;
+    if (!probe && GetLastError() == ERROR_INSUFFICIENT_BUFFER && attrSize > 0) {
+      six.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(
+          HeapAlloc(GetProcessHeap(), 0, attrSize));
+      if (six.lpAttributeList &&
+          InitializeProcThreadAttributeList(six.lpAttributeList, 1, 0, &attrSize)) {
+        listInitialized = true;
+        inheritList[0] = pipeWrite;
+        inheritList[1] = nulIn;
+        if (!UpdateProcThreadAttribute(six.lpAttributeList, 0,
+                                       PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inheritList,
+                                       sizeof(inheritList), nullptr, nullptr)) {
+          // Delete BEFORE dropping the pointer, or the initialized list's resources leak.
+          DeleteProcThreadAttributeList(six.lpAttributeList);
+          listInitialized = false;
+        }
+      }
+    }
+    if (!listInitialized) {
+      if (six.lpAttributeList) {
+        HeapFree(GetProcessHeap(), 0, six.lpAttributeList);
+        six.lpAttributeList = nullptr;
+      }
+      CloseHandle(pipeRead);
+      CloseHandle(pipeWrite);
+      CloseHandle(nulIn);
+      nulIn = INVALID_HANDLE_VALUE;
+      pipeOk = false;
+    }
+  }
+  six.StartupInfo.cb = pipeOk ? sizeof(six) : sizeof(six.StartupInfo);
+  if (pipeOk) {
+    six.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
+    six.StartupInfo.hStdOutput = pipeWrite;
+    six.StartupInfo.hStdError = pipeWrite;
+    six.StartupInfo.hStdInput = nulIn;
+  }
   std::wstring mutableCommand = command.str();
 
   // H.264 is still behind a build-time experiment switch in the viewer, and a build without it
@@ -322,11 +491,30 @@ void begin_session(const ShellConnectRequest& request) {
   // console window -- a black cmd box full of scrolling telemetry next to every session.
   // Launched from a terminal by hand it still inherits that terminal, so probes and manual
   // debugging keep their output.
-  if (!CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
-                      nullptr, executable_dir().c_str(), &si, &pi)) {
-    log_line("session launch failed err=" + std::to_string(GetLastError()));
+  const BOOL launched = CreateProcessW(
+      nullptr, mutableCommand.data(), nullptr, nullptr, pipeOk ? TRUE : FALSE,
+      CREATE_NO_WINDOW | (pipeOk ? EXTENDED_STARTUPINFO_PRESENT : 0), nullptr,
+      executable_dir().c_str(), &six.StartupInfo, &pi);
+  const DWORD launchErr = launched ? 0 : GetLastError();
+  if (six.lpAttributeList) {
+    DeleteProcThreadAttributeList(six.lpAttributeList);
+    HeapFree(GetProcessHeap(), 0, six.lpAttributeList);
+  }
+  // The child holds its own copies now (or the launch failed); the parent's NUL is done either way.
+  if (nulIn != INVALID_HANDLE_VALUE) CloseHandle(nulIn);
+  if (!launched) {
+    if (pipeOk) {
+      CloseHandle(pipeRead);
+      CloseHandle(pipeWrite);
+    }
+    log_line("session launch failed err=" + std::to_string(launchErr));
     post_status("error", "세션을 시작하지 못했습니다");
     return;
+  }
+  if (pipeOk) {
+    // The parent's copy of the write end must close, or the reader never sees EOF after exit.
+    CloseHandle(pipeWrite);
+    std::thread(pump_viewer_output_to_log, pipeRead).detach();
   }
   log_line("session started host=" + request.hostId + " kbps=" +
            std::to_string(settings.bitrateKbps) + " fps=" + std::to_string(settings.fps) +
