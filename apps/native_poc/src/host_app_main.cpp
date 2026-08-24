@@ -1140,11 +1140,12 @@ void refresh_status_text() {
 void open_log_file() {
   const std::wstring path = log_file_path();
   if (path.empty()) return;
-  // Ensure it exists so the shell opens an editor instead of erroring.
-  HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                            nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
-  ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+  // Open the log FOLDER, not the file: with numbered rotation there are up to eleven
+  // host_app.log* generations plus the client's files, and opening just the live file made
+  // reaching the others a chore. log_file_path() already ensured the directory exists.
+  const size_t slash = path.find_last_of(L'\\');
+  const std::wstring dir = (slash == std::wstring::npos) ? path : path.substr(0, slash);
+  ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
 LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {

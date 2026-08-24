@@ -6634,3 +6634,14 @@ UI 방식 결정
   host/client 동일 적용. attribute-list 등 나머지 P0 항목은 Codex 최종 승인.
 - 빌드: remote60_host_app / remote60_client_shell Release PASS. 산출물
   dist/GNLinkSetup-0.2.52.exe (0.2.51 은 설치 전이라 폐기).
+
+### 253) 2026-08-24 로그 폴더 바로 열기 (0.2.53)
+
+- 사용자: "host의 Open log가 파일 하나만 열어서 불편하다. 폴더가 뜨게 하고, 클라에도 넣어라."
+  번호 로테이션(252) 이후 세대 파일이 여럿이라 파일 단위 열기가 실제로 더 불편해졌다.
+- host: Open log 버튼(open_log_file)이 host_app.log 파일 대신 **%LOCALAPPDATA%\GNLink 폴더**를
+  연다(파일 생성 보증 코드는 불필요해져 제거 — log_file_path 가 디렉토리를 이미 만든다).
+- client 셸: 호스트 목록 하단에 **"로그 폴더"** 버튼 추가(ui/shell.html) → openlog 메시지 →
+  C++ 가 같은 폴더(client.log*/viewer.log* 위치)를 ShellExecuteW 로 연다. shellapi.h include.
+- 빌드: remote60_host_app / remote60_client_shell Release PASS(경고 0).
+  산출물 dist/GNLinkSetup-0.2.53.exe (0.2.52 는 설치 전이라 대체).

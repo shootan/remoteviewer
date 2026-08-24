@@ -20,6 +20,7 @@
 #include "native_socket.hpp"
 
 #include <windows.h>
+#include <shellapi.h>
 #include <shlobj.h>
 #include <wrl.h>
 
@@ -590,6 +591,13 @@ void handle_page_message(const std::string& json) {
       gSessionToken.clear();
     }
     post_to_page("{\"type\":\"signedOut\"}");
+    return;
+  }
+  if (type == "openlog") {
+    // Open the log FOLDER (client.log*, viewer.log* and their rotated generations live together);
+    // opening a single file made reaching the others a chore. The directory always exists by the
+    // time the page is up -- settings and logs were written on startup.
+    ShellExecuteW(nullptr, L"open", log_dir_path().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     return;
   }
   ShellConnectRequest connect{};
