@@ -1,5 +1,8 @@
 # AGENTS.md
 
+## 가장 상위 정책
+* repository root path를 벗어나는 범위는 절대 삭제커맨드를 실행하지않는다. 필요시 권한을 물어본다. 
+
 ## Mandatory Workflow (Always)
 After each meaningful task is completed, do all of the following in order:
 1. Update `docs/history.md` with:
