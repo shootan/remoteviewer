@@ -6788,3 +6788,23 @@ UI 방식 결정
   2026040x 리뷰·홀펀칭/잠금화면 설계·android_구현계획). 현행 7종만 docs/ 루트 유지.
 - .gitignore에 /log/, /.cgcignore, /.codegraphcontext.yaml 추가(로컬 도구/로그 — .vscode 방식).
 - AGENTS.md의 "repo root 밖 삭제커맨드 금지" 정책은 별도 커밋으로 보존.
+
+### 260) 2026-08-25 호스트 분할 리팩터 계획 수립 (분석 + 문서만, 코드 변경 없음)
+
+- 사용자 요청: HANDOFF "코드 지도"의 분할 분석 재검증 + 파일을 AI가 읽기 편하게 공격적으로 기능 분할/클래스화.
+- 실측(`native_video_host_main.cpp` 9,896줄): main() 2892~9896 = 7,005줄, 지역변수 502(atomic 132,
+  mutex/cv 70), 람다 62(이름 45 + 스레드 5 + 인라인 12; 최대 serve_control_session 681줄,
+  restart_capture_session_impl 228, senderThread 177, apply_selected_window_capture 169). 구간별 main
+  변수 참조 수: 통계/ABR 블록 213(최고), encode+send 115, control 91, restart_capture 35, kick/attach 14.
+- 기존 분석 판정: 줄수·main 크기는 정확. "stats 추출"은 결합도 1위라 첫 대상이 아니라 마지막이어야 하고,
+  main 밖 2,900줄(자유함수 ~100개, 순수 이동 가능)이 누락. 근본 원인은 람다 수가 아니라 `[&]`로
+  공유되는 502개 지역변수.
+- 문서: `docs/호스트_분할_리팩터_계획.md` 신설 — Phase 0 순수 이동 10파일 / Phase 1 상태 struct 12 /
+  Phase 2 클래스 12(+단위테스트) / Phase 3 HostMainLoop::Tick 12단계 / Phase 4 스레드 소유권 재설계.
+  `구현계획.md`에 체크리스트 섹션, `HANDOFF.md` 코드 지도, `README.md` layout 갱신.
+- 사용자 결정 반영: (1) 이 리팩터는 Codex(a2a) 교차검증 없이 진행. (2) 스레드 소유권 규칙은 대부분
+  모놀리스 산물로 판정(atomic *Pending 플래그 12개 = 수제 메일박스, forceKeyNext 규칙 등) → Phase 0~3은
+  보존하되 클래스 머리 `// thread:` 블록으로 모으고, Phase 4에서 MainLoopMailbox/스냅샷으로 재설계.
+  근본 제약 3개(WGC 콜백 스레드 리소스 재생성 금지, MFT 단일 스레드, 소켓 단일 writer)만 유지.
+- 검증: 없음(분석/문서). 빌드/코드 변경 없음.
+- 다음 액션: Phase 0-1 `host_input_inject.hpp/.cpp` 분리(862~1520) → 빌드 게이트 → 커밋.

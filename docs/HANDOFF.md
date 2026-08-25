@@ -75,7 +75,8 @@
   다음 세션도 큰 변경은 a2a-collab 스킬로 그 세션과 교차검증 권장.
 
 ## 코드 지도 (거대 파일 주의)
-- `apps/native_poc/src/native_video_host_main.cpp` ~9.9k줄(main() 하나가 ~7k줄, 람다 55개),
-  `native_video_client_main.cpp` ~5.3k줄. **분할 리팩터가 대기 중**(사용자와 논의됨): P2 전/후로
-  커서포워더·인코더관리·UDP세션·readback글루·stats를 상태 struct+함수로 추출, 조각마다 빌드+e2e
-  게이트. 지금은 특정 코드 찾을 때 grep/sed로 좁혀야 함.
+- `apps/native_poc/src/native_video_host_main.cpp` 9,896줄(main() 7,005줄, 지역변수 502개, 람다 62개),
+  `native_video_client_main.cpp` 5,318줄. **분할 리팩터 설계 완료 → `docs/호스트_분할_리팩터_계획.md`**
+  (구간 지도 §1.2, 결합도 §1.3). Phase 0(순수 이동)은 실기 판정과 무관하게 진행 가능, Phase 1~3은
+  P2 착수 전 완료. 이 리팩터는 사용자 결정으로 **Codex 교차검증 없이** 진행한다(위 "교차검증" 권고의
+  예외). 지금은 특정 코드 찾을 때 grep/sed로 좁혀야 함.
