@@ -1072,10 +1072,15 @@ ClientLayout compute_client_layout(HWND hwnd) {
   layout.videoRect = make_rect(0, 0, clientW, clientH);
 
   if (!gWindowPickerVisible.load(std::memory_order_relaxed)) {
-    layout.toggleButtonRect = make_rect(kPanelMargin(), kPanelMargin(), dpi_scale(120), kPanelButtonHeight());
-    layout.macroButtonRect =
-        make_rect(kPanelMargin() + dpi_scale(120) + kPanelButtonGap(), kPanelMargin(),
-                  dpi_scale(90), kPanelButtonHeight());
+    // No legacy top-left Targets/Macro buttons in the stream view. The flip-model swapchain
+    // erases anything GDI paints before the user can see it, so these existed only as INVISIBLE
+    // hit zones -- sitting exactly where games put their top-left UI. In the field, clicking a
+    // map's region breadcrumb silently toggled the picker ("the screen froze") and the spot next
+    // to it opened the macro window. The session toolbar (its own composited window, summoned by
+    // the top-center dwell) carries Targets/Macro/Monitor now; empty rects keep every handler
+    // branch dead without touching the input-forwarding paths.
+    layout.toggleButtonRect = make_rect(0, 0, 0, 0);
+    layout.macroButtonRect = make_rect(0, 0, 0, 0);
     layout.panelRect = make_rect(0, 0, 0, 0);
     layout.refreshButtonRect = make_rect(0, 0, 0, 0);
     layout.desktopButtonRect = make_rect(0, 0, 0, 0);
@@ -1624,9 +1629,8 @@ void draw_overlay(HDC hdc) {
   const ClientLayout layout = compute_client_layout(gHwnd);
   const bool pickerVisible = gWindowPickerVisible.load(std::memory_order_relaxed);
   if (!pickerVisible) {
-    draw_panel_button(hdc, layout.toggleButtonRect, "Targets");
-    draw_panel_button(hdc, layout.macroButtonRect, "Macro",
-                      remote60::native_poc::macro_window_visible());
+    // Nothing to draw over the stream: the legacy Targets/Macro buttons were invisible ghost
+    // hit-zones under the flip-model video (see compute_client_layout); the toolbar owns that UI.
     return;
   }
 
@@ -3329,9 +3333,15 @@ int main(int argc, char** argv) {
 
   {
     remote60::native_poc::SessionToolbarCallbacks toolbarCallbacks;
-    // onTargets stays unset: the toolbar no longer offers the picker. The GDI picker cannot
-    // paint over the flip swap chain once video has presented, so entering it mid-session
-    // showed a freeze, and the Windows product is desktop-only anyway.
+    // Re-enabled: the reason this was unset -- entering the picker mid-session looked like a
+    // freeze -- is fixed (the picker no longer stops the stream, and its repaint is composited).
+    // With the invisible legacy top-left buttons removed, this is the ONLY road back to target
+    // selection during a session, so it must exist.
+    toolbarCallbacks.onTargets = [] {
+      set_picker_visible_and_sync_stream(true);
+      push_session_toolbar_state();
+      if (gHwnd) InvalidateRect(gHwnd, nullptr, FALSE);
+    };
     toolbarCallbacks.onMacro = [] {
       toggle_macro_window(gHwnd);
       push_session_toolbar_state();

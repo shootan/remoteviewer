@@ -126,9 +126,12 @@ SIZE rebuild_layout() {
     g.buttons.push_back(std::move(button));
   };
 
-  // No target picker on Windows: the product decision is desktop-only, and the picker screen
-  // itself cannot render once the flip swap chain owns the window -- pressing the old button
-  // left the session looking frozen. Monitors are picked from the dropdown instead.
+  // The target picker is back. The freeze that justified removing it is fixed: opening the picker
+  // no longer stops the stream mid-session, and video presents are suppressed while the picker is
+  // visible so its GDI drawing no longer fights the flip swap chain. With the invisible legacy
+  // top-left buttons gone, this is the only road back to target selection during a session. Gated
+  // on the callback so an embedding that did not wire one keeps the old two-button bar.
+  if (g.callbacks.onTargets) add(kButtonTargets, L"대상 선택", false);
   add(kButtonMacro, L"매크로", g.state.macroOpen);
   const std::wstring monitors = monitor_label();
   if (!monitors.empty()) add(kButtonMonitor, monitors + L" ▾", false);

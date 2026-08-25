@@ -1264,6 +1264,31 @@ enum class InputInjectResult : uint8_t {
   Failed = 4,
 };
 
+// Which API a failed injection died in. "Failed" alone hid the 14:51 field freeze for two
+// sessions: the log said inject-fail on a CoreWindow target and everyone (including review)
+// assumed UWP message rejection -- but the kind=1 desktop path never posts a message at all;
+// its only failing API is SetCursorPos. Stage + captured error make the next one one-glance.
+enum class InputFailStage : uint8_t {
+  None = 0,
+  MapPoint,
+  ResolveTarget,
+  SetCursorPos,
+  SendInputMouse,
+  SendInputKey,
+  PostMessage,
+};
+const char* input_fail_stage_name(InputFailStage s) {
+  switch (s) {
+    case InputFailStage::MapPoint: return "map_point";
+    case InputFailStage::ResolveTarget: return "resolve_target";
+    case InputFailStage::SetCursorPos: return "set_cursor_pos";
+    case InputFailStage::SendInputMouse: return "sendinput_mouse";
+    case InputFailStage::SendInputKey: return "sendinput_key";
+    case InputFailStage::PostMessage: return "post_message";
+    default: return "none";
+  }
+}
+
 InputInjectResult inject_background_input_event(const ControlInputEventMessage& input,
                                                 const CaptureWindowCriteria& explicitCriteria,
                                                 const std::atomic<uint64_t>& captureTargetHwnd,
@@ -1271,8 +1296,25 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
                                                 uint32_t inputDomainW,
                                                 uint32_t inputDomainH,
                                                 DesktopInputState* desktopInputState,
-                                                std::string* resolvedTargetOut = nullptr) {
-  if (inputDomainW == 0 || inputDomainH == 0) return InputInjectResult::Failed;
+                                                std::string* resolvedTargetOut = nullptr,
+                                                InputFailStage* failStageOut = nullptr,
+                                                DWORD* failErrorOut = nullptr) {
+  // SetLastError(ERROR_SUCCESS) before each stamped API, capture immediately on failure: per the
+  // SendInput contract a UIPI block can return with no error at all, so a preserved 0 next to a
+  // stage is itself the signal (stage set, error 0 = swallowed, not skipped).
+  auto fail = [&](InputFailStage stage) {
+    if (failStageOut) *failStageOut = stage;
+    if (failErrorOut) *failErrorOut = GetLastError();
+    return InputInjectResult::Failed;
+  };
+  // For non-Win32 validation/mapping failures, whose GetLastError would be a stale value from some
+  // earlier API. Pass the meaning explicitly instead of reporting a lie.
+  auto failVal = [&](InputFailStage stage, DWORD err) {
+    if (failStageOut) *failStageOut = stage;
+    if (failErrorOut) *failErrorOut = err;
+    return InputInjectResult::Failed;
+  };
+  if (inputDomainW == 0 || inputDomainH == 0) return failVal(InputFailStage::MapPoint, ERROR_INVALID_PARAMETER);
 
   CaptureWindowInfo explicitTarget{};
   const bool explicitTargetEnabled = explicitCriteria.enabled();
@@ -1292,10 +1334,11 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
     POINT rootClientPt{};
     LPARAM rootLp = 0;
     if (!make_scaled_client_lparam(targetHwnd, input.x, input.y, inputDomainW, inputDomainH, &rootLp, &rootClientPt)) {
-      return InputInjectResult::Failed;
+      return failVal(InputFailStage::MapPoint, ERROR_INVALID_PARAMETER);
     }
     POINT screenPt = rootClientPt;
-    if (!ClientToScreen(targetHwnd, &screenPt)) return InputInjectResult::Failed;
+    SetLastError(ERROR_SUCCESS);
+    if (!ClientToScreen(targetHwnd, &screenPt)) return fail(InputFailStage::MapPoint);
     HWND resolvedTargetHwnd = targetHwnd;
     POINT resolvedClientPt = rootClientPt;
     if (!resolve_message_target_at_screen_point(targetHwnd, screenPt, &resolvedTargetHwnd, &resolvedClientPt)) {
@@ -1310,8 +1353,9 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
       // all. WM_MOUSEMOVE with no buttons is what a real mouse sends while hovering.
       const WPARAM wp = mouse_button_wparam(static_cast<uint16_t>(input.buttons & 0x7u));
       const LPARAM lp = MAKELPARAM(static_cast<short>(resolvedClientPt.x), static_cast<short>(resolvedClientPt.y));
+      SetLastError(ERROR_SUCCESS);
       return PostMessageW(resolvedTargetHwnd, WM_MOUSEMOVE, wp, lp) ? InputInjectResult::Injected
-                                                                    : InputInjectResult::Failed;
+                                                                    : fail(InputFailStage::PostMessage);
     }
     if (input.kind == 2 || input.kind == 3) {
       const UINT msg = mouse_vk_to_message(input.kind, input.keyCode);
@@ -1325,9 +1369,13 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
       }
       const WPARAM wp = mouse_button_wparam(buttons);
       const LPARAM lp = MAKELPARAM(static_cast<short>(resolvedClientPt.x), static_cast<short>(resolvedClientPt.y));
-      const bool moved = PostMessageW(resolvedTargetHwnd, WM_MOUSEMOVE, wp, lp) != 0;
-      const bool clicked = PostMessageW(resolvedTargetHwnd, msg, wp, lp) != 0;
-      return (moved && clicked) ? InputInjectResult::Injected : InputInjectResult::Failed;
+      // Sequential, not one combined bool: a failing PostMessage must have its own error captured
+      // before the next call overwrites it.
+      SetLastError(ERROR_SUCCESS);
+      if (!PostMessageW(resolvedTargetHwnd, WM_MOUSEMOVE, wp, lp)) return fail(InputFailStage::PostMessage);
+      SetLastError(ERROR_SUCCESS);
+      if (!PostMessageW(resolvedTargetHwnd, msg, wp, lp)) return fail(InputFailStage::PostMessage);
+      return InputInjectResult::Injected;
     }
     if (input.kind == 4) {
       const WPARAM wp =
@@ -1335,8 +1383,9 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
                      static_cast<WORD>(static_cast<SHORT>(input.wheelDelta)));
       const LPARAM screenLp =
           MAKELPARAM(static_cast<short>(screenPt.x), static_cast<short>(screenPt.y));
+      SetLastError(ERROR_SUCCESS);
       return PostMessageW(resolvedTargetHwnd, WM_MOUSEWHEEL, wp, screenLp) ? InputInjectResult::Injected
-                                                                           : InputInjectResult::Failed;
+                                                                           : fail(InputFailStage::PostMessage);
     }
     if (input.kind == 5 || input.kind == 6) {
       HWND keyTargetHwnd = choose_text_target_window(targetHwnd, desktopInputState);
@@ -1350,15 +1399,18 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
       const bool targetHasFocus =
           foreground && (foreground == keyTargetHwnd ||
                          GetAncestor(keyTargetHwnd, GA_ROOT) == foreground);
+      InputFailStage keyStage = InputFailStage::PostMessage;
       bool ok = false;
+      SetLastError(ERROR_SUCCESS);
       if (targetHasFocus) {
+        keyStage = InputFailStage::SendInputKey;
         ok = send_desktop_virtual_key(input.keyCode, keyUp);
       } else {
         const UINT msg = keyUp ? WM_KEYUP : WM_KEYDOWN;
         const LPARAM lp = key_event_lparam(input.keyCode, keyUp);
         ok = PostMessageW(keyTargetHwnd, msg, static_cast<WPARAM>(input.keyCode), lp) != 0;
       }
-      if (!ok) return InputInjectResult::Failed;
+      if (!ok) return fail(keyStage);
       if (desktopInputState) {
         std::lock_guard<std::mutex> lk(desktopInputState->mu);
         update_synthetic_keyboard_state(desktopInputState->keyState, input.keyCode, keyUp);
@@ -1370,7 +1422,7 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
 
   POINT screenPt{};
   if (!map_input_to_primary_monitor_point(input.x, input.y, inputDomainW, inputDomainH, &screenPt)) {
-    return InputInjectResult::Failed;
+    return failVal(InputFailStage::MapPoint, ERROR_INVALID_PARAMETER);
   }
   resolve_desktop_input_target(screenPt, desktopInputState, nullptr, nullptr, resolvedTargetOut);
 
@@ -1379,21 +1431,27 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
     // real cursor, and the client only sends these when it means to place the pointer: the
     // on-screen mouse positions before clicking, and scroll mode positions before scrolling.
     // Dropping them made both silently do nothing.
-    return SetCursorPos(screenPt.x, screenPt.y) ? InputInjectResult::Injected : InputInjectResult::Failed;
+    SetLastError(ERROR_SUCCESS);
+    return SetCursorPos(screenPt.x, screenPt.y) ? InputInjectResult::Injected
+                                                : fail(InputFailStage::SetCursorPos);
   }
   if (input.kind == 2 || input.kind == 3) {
     const DWORD mouseFlag = mouse_vk_to_sendinput_flag(input.kind, input.keyCode);
     if (mouseFlag == 0) return InputInjectResult::Unsupported;
-    if (!SetCursorPos(screenPt.x, screenPt.y)) return InputInjectResult::Failed;
+    SetLastError(ERROR_SUCCESS);
+    if (!SetCursorPos(screenPt.x, screenPt.y)) return fail(InputFailStage::SetCursorPos);
+    SetLastError(ERROR_SUCCESS);
     return send_desktop_mouse_input(mouseFlag) ? InputInjectResult::Injected
-                                               : InputInjectResult::Failed;
+                                               : fail(InputFailStage::SendInputMouse);
   }
   if (input.kind == 4) {
-    if (!SetCursorPos(screenPt.x, screenPt.y)) return InputInjectResult::Failed;
+    SetLastError(ERROR_SUCCESS);
+    if (!SetCursorPos(screenPt.x, screenPt.y)) return fail(InputFailStage::SetCursorPos);
+    SetLastError(ERROR_SUCCESS);
     return send_desktop_mouse_input(MOUSEEVENTF_WHEEL,
                                     static_cast<DWORD>(static_cast<SHORT>(input.wheelDelta)))
                ? InputInjectResult::Injected
-               : InputInjectResult::Failed;
+               : fail(InputFailStage::SendInputMouse);
   }
   if (input.kind == 5 || input.kind == 6) {
     // Desktop mode drives the real cursor, so keyboard goes to the real focus too.
@@ -1402,7 +1460,8 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
       HWND focusHwnd = GetForegroundWindow();
       *resolvedTargetOut = focusHwnd ? describe_input_target(focusHwnd) : std::string("sendinput");
     }
-    if (!send_desktop_virtual_key(input.keyCode, keyUp)) return InputInjectResult::Failed;
+    SetLastError(ERROR_SUCCESS);
+    if (!send_desktop_virtual_key(input.keyCode, keyUp)) return fail(InputFailStage::SendInputKey);
     if (desktopInputState) {
       std::lock_guard<std::mutex> lk(desktopInputState->mu);
       update_synthetic_keyboard_state(desktopInputState->keyState, input.keyCode, keyUp);
@@ -3585,6 +3644,24 @@ int main(int argc, char** argv) {
   std::atomic<uint64_t> inputFreshProbeSecure{0};
   std::atomic<uint64_t> inputFreshProbeReroute{0};
   std::atomic<uint64_t> inputInjectFailDefault{0};
+  // Per-stage failure counters (which API the direct injection died in; see InputFailStage).
+  std::atomic<uint64_t> inputFailSetCursorPos{0};
+  std::atomic<uint64_t> inputFailSendInputMouse{0};
+  std::atomic<uint64_t> inputFailSendInputKey{0};
+  std::atomic<uint64_t> inputFailPostMessage{0};
+  //   inputDefaultBrokerFallback -- of the genuine default-desktop failures (e.g. SetCursorPos
+  //                                 denied because the control thread's desktop association is
+  //                                 not the input desktop), how many were retried via the SYSTEM
+  //                                 agent, which does SetThreadDesktop before SetCursorPos+SendInput
+  //   inputDefaultBrokerQueued   -- of those, how many the broker WROTE to the agent's pipe. This
+  //                                 is a queue success, NOT proof the input landed: the agent does
+  //                                 not ACK, so real delivery is confirmed only by the service log
+  //                                 (%ProgramData%\GNLink\secure_input.log) and the user. Named
+  //                                 "Queued" on purpose so it is never read as "Delivered".
+  //   inputDefaultBrokerPipeFail -- the pipe write itself failed (agent absent / broken pipe)
+  std::atomic<uint64_t> inputDefaultBrokerFallback{0};
+  std::atomic<uint64_t> inputDefaultBrokerQueued{0};
+  std::atomic<uint64_t> inputDefaultBrokerPipeFail{0};
   // One control conversation, independent of how the bytes travel. TCP works on a LAN;
   // a host behind NAT is only reachable over the punched UDP socket, so the same dispatch
   // has to serve both.
@@ -3819,10 +3896,35 @@ int main(int argc, char** argv) {
             // the miss as an inject failure.
             injectAccounted = true;
           } else {
+            InputFailStage directFailStage = InputFailStage::None;
+            DWORD directFailError = 0;
             injectResult =
                 inject_background_input_event(input, inputTargetCriteria, hostCaptureTargetHwnd,
                                               desktopMode, domainW, domainH,
-                                              &desktopInputState, &resolvedTarget);
+                                              &desktopInputState, &resolvedTarget,
+                                              &directFailStage, &directFailError);
+            if (injectResult == InputInjectResult::Failed) {
+              switch (directFailStage) {
+                case InputFailStage::SetCursorPos:
+                  inputFailSetCursorPos.fetch_add(1, std::memory_order_relaxed);
+                  break;
+                case InputFailStage::SendInputMouse:
+                  inputFailSendInputMouse.fetch_add(1, std::memory_order_relaxed);
+                  break;
+                case InputFailStage::SendInputKey:
+                  inputFailSendInputKey.fetch_add(1, std::memory_order_relaxed);
+                  break;
+                case InputFailStage::PostMessage:
+                  inputFailPostMessage.fetch_add(1, std::memory_order_relaxed);
+                  break;
+                default:
+                  break;
+              }
+              // Stage travels with the target description so the existing inject-fail line needs
+              // no format change downstream tooling would have to relearn.
+              resolvedTarget += std::string(" stage=") + input_fail_stage_name(directFailStage) +
+                                " err=" + std::to_string(directFailError);
+            }
             if (injectResult == InputInjectResult::Failed) {
               // The cached check said default but injection failed: the 250ms cache may be stale
               // because a UAC prompt or lock screen rose since the last refresh. Pay for ONE uncached
@@ -3847,6 +3949,33 @@ int main(int argc, char** argv) {
                 // (UIPI, no target, a transient block). Counted separately so it is not confused
                 // with the stale-cache case.
                 inputInjectFailDefault.fetch_add(1, std::memory_order_relaxed);
+                // Field case (14:51 freeze): direct default-desktop injection FAILED at
+                // SetCursorPos while the target resolved to a CoreWindow. SetCursorPos failing only
+                // tells us one of its required conditions was unmet -- the host thread MAY lack the
+                // current-input-desktop association or the window-station access it needs; the new
+                // stage/error plus the agent log pin which on the next repro. The SYSTEM agent
+                // reattaches to the current input desktop (SetThreadDesktop) before
+                // SetCursorPos+SendInput, so retry this one event through it. Only stages that are
+                // an actual OS injection API failure are worth retrying -- a coordinate/mapping
+                // error (MapPoint) would just repeat in the agent.
+                const bool brokerRetryableStage =
+                    directFailStage == InputFailStage::SetCursorPos ||
+                    directFailStage == InputFailStage::SendInputMouse ||
+                    directFailStage == InputFailStage::SendInputKey;
+                if (brokerRetryableStage && desktopMode &&
+                    sessionDirectoryAuthenticated.load(std::memory_order_acquire)) {
+                  inputDefaultBrokerFallback.fetch_add(1, std::memory_order_relaxed);
+                  if (secureInputBroker.SendInputEvent(input, domainW, domainH)) {
+                    // Queued to the agent, not confirmed landed (the broker does not ACK). Mark
+                    // Injected so the host stops re-reporting inject-fail, but the honest signal
+                    // is inputDefaultBrokerQueued + the service log, not this result.
+                    injectResult = InputInjectResult::Injected;
+                    resolvedTarget += " default-broker-fallback(queued)";
+                    inputDefaultBrokerQueued.fetch_add(1, std::memory_order_relaxed);
+                  } else {
+                    inputDefaultBrokerPipeFail.fetch_add(1, std::memory_order_relaxed);
+                  }
+                }
               }
             }
           }
@@ -9122,6 +9251,13 @@ int main(int argc, char** argv) {
                   << " inputFreshProbeSecure=" << inputFreshProbeSecure.load(std::memory_order_relaxed)
                   << " inputFreshProbeReroute=" << inputFreshProbeReroute.load(std::memory_order_relaxed)
                   << " inputInjectFailDefault=" << inputInjectFailDefault.load(std::memory_order_relaxed)
+                  << " inputFailSetCursorPos=" << inputFailSetCursorPos.load(std::memory_order_relaxed)
+                  << " inputFailSendInputMouse=" << inputFailSendInputMouse.load(std::memory_order_relaxed)
+                  << " inputFailSendInputKey=" << inputFailSendInputKey.load(std::memory_order_relaxed)
+                  << " inputFailPostMessage=" << inputFailPostMessage.load(std::memory_order_relaxed)
+                  << " inputDefaultBrokerFallback=" << inputDefaultBrokerFallback.load(std::memory_order_relaxed)
+                  << " inputDefaultBrokerQueued=" << inputDefaultBrokerQueued.load(std::memory_order_relaxed)
+                  << " inputDefaultBrokerPipeFail=" << inputDefaultBrokerPipeFail.load(std::memory_order_relaxed)
                   << " keyReqDropTotal=" << clientKeyFrameRequestDropped.load()
                   << " callbackFrames=" << callbackFramesPerSec
                   << " skippedByOverwrite=" << skippedByOverwrite
@@ -9229,6 +9365,13 @@ int main(int argc, char** argv) {
                   << " inputFreshProbeSecure=" << inputFreshProbeSecure.load(std::memory_order_relaxed)
                   << " inputFreshProbeReroute=" << inputFreshProbeReroute.load(std::memory_order_relaxed)
                   << " inputInjectFailDefault=" << inputInjectFailDefault.load(std::memory_order_relaxed)
+                  << " inputFailSetCursorPos=" << inputFailSetCursorPos.load(std::memory_order_relaxed)
+                  << " inputFailSendInputMouse=" << inputFailSendInputMouse.load(std::memory_order_relaxed)
+                  << " inputFailSendInputKey=" << inputFailSendInputKey.load(std::memory_order_relaxed)
+                  << " inputFailPostMessage=" << inputFailPostMessage.load(std::memory_order_relaxed)
+                  << " inputDefaultBrokerFallback=" << inputDefaultBrokerFallback.load(std::memory_order_relaxed)
+                  << " inputDefaultBrokerQueued=" << inputDefaultBrokerQueued.load(std::memory_order_relaxed)
+                  << " inputDefaultBrokerPipeFail=" << inputDefaultBrokerPipeFail.load(std::memory_order_relaxed)
                   << " capAgeAvgUs=" << capAgeAvgUs
                   << " capAgeMaxUs=" << captureAgeMaxUs
                   << " cb2eAvgUs=" << cb2eAvgUs

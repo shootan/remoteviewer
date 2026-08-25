@@ -6733,3 +6733,47 @@ UI 방식 결정
 - 레그A: 기본 설치 그대로. 레그B: 호스트 PC 시스템 환경변수
   REMOTE60_NATIVE_KEYINT_OVERRIDE=120 설정 후 GNLinkHost 재시작. 비교 관점: "주기적 이전
   프레임" 빈도(절반 기대), 평균 대역.
+
+### 258) 2026-08-25 유령 top-left 버튼 제거 + 입력 실패 stage 계측 + 브로커 폴백 (0.2.56)
+
+배경 (사용자 실기 2건)
+- "게임 지도 좌상단 '올라 대륙' 클릭=매번 멈춤, 그 오른쪽=매크로 창" → flip-model 영상이 GDI
+  버튼을 덮어 **보이지 않는 히트존만** 남은 레거시 Targets(120px)/Macro(90px) 버튼이 게임
+  좌상단 UI를 삼킴. 08-24 17:23 "다른 창(GNLink Host) 선택" 사가도 이 경로로 재분류.
+- 14:51 프리즈: 영상은 1Hz 리프레시로 매초 정상 표시(P0 실증) — 입력이 안 먹던 것. 로그의
+  inject-fail 대상이 CoreWindow라 "UWP가 메시지 거부"로 오인했으나, kind=1 desktop 경로는
+  PostMessage를 안 쓰고 **SetCursorPos만** 호출 → 실패 stage는 SetCursorPos(호스트 스레드의
+  input-desktop 연결 문제). OSLink로 포그라운드 바꾸니 복구.
+
+한 일 (검증용 Codex 리뷰 — 승인 조건 4건 반영 후 필드 승인)
+- 유령 버튼: compute_client_layout 스트림뷰 분기의 toggle/macro rect를 empty로, draw 제거.
+  대체로 세션 툴바(top-center dwell)에 "대상 선택" 버튼 복원(onTargets→set_picker_visible
+  단일 관문, P0 가드 자동 적용). 콜백 조건부라 미배선 임베딩은 기존 2버튼 유지.
+- 입력 실패 stage 계측: InputFailStage{MapPoint/ResolveTarget/SetCursorPos/SendInputMouse/
+  SendInputKey/PostMessage} + win32 error. 각 stamped API 앞 SetLastError(ERROR_SUCCESS),
+  실패 즉시 캡처(SendInput은 error=0이어도 stage로 식별). window-mode PostMessage 3경로+key도
+  실계측. 검증/매핑 실패는 failVal(stage, ERROR_INVALID_PARAMETER)로 stale error 제거.
+  카운터 inputFailSetCursorPos/SendInputMouse/SendInputKey/PostMessage, inject-fail 로그에
+  stage=/err= 부착.
+- SYSTEM 브로커 폴백: direct Failed && actionable stage(SetCursorPos/SendInputMouse/
+  SendInputKey) && desktopMode && fresh-default && directory-authenticated → 브로커 1회 재시도
+  (에이전트가 SetThreadDesktop 후 SetCursorPos+SendInput). 카운터 정직화 —
+  Fallback(시도)/Queued(파이프 쓰기 성공=주입 성공 아님)/PipeFail. 실제 성공은 secure_input.log.
+- product_version 0.2.56.
+
+검증/build/test
+- host+viewer+installer 빌드 클린. 산출물 dist/GNLinkSetup-0.2.56.exe(0.2.56 임베드 확인).
+- 커밋 직전 임베드 검증에서 버전 미범프(0.2.55)를 잡아 재빌드 — 실제 0.2.55를 0.2.56으로
+  내보내는 사고 방지.
+
+실기 게이트 (자동화 불가라 필드 확인)
+- 좌상단 유령버튼 무발화(피커/매크로 안 열림), 그 좌표 입력은 원격으로 전달.
+- 툴바 "대상 선택" → 피커 정상(멈춤/오클릭 없음).
+- CoreWindow 재현 시 host 로그 stage=set_cursor_pos → inputDefaultBrokerQueued 증가 →
+  secure_input.log inject=ok → 클릭 실동작. Chrome/Notepad 정상 경로는 폴백 0.
+
+부채 (Codex 합의)
+- sticky input routing(broker down→up 짝 고정, foreground별 1~2s, hover coalesce): 미포함.
+  필드 POC에서 stuck drag/button 한 번이라도 보이면 즉시 blocker 승격.
+- SyntheticRefresh flag(정적 리프레시 프레임을 클라 latency/catchup/anomaly 집계에서 제외):
+  UDP 재조립(안드로이드 공유 core) 관통이라 별도 커밋 — **P2 readback 착수 전 완료 게이트**.
