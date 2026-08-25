@@ -4752,7 +4752,12 @@ int main(int argc, char** argv) {
   uint32_t userFpsCeiling = args.fps;
   uint32_t userKeyintCeiling = args.keyint;
   uint32_t activeBitrate = abrHighBitrate;
-  uint32_t activeKeyint = args.keyint;
+  // Field A/B override for the keyframe interval (0 = off). Every ~1s a 120-160KB IDR was
+  // measured holding the previous frame an extra tick on 75% of key presents (the user's
+  // "periodically shows the previous frame"); this pins keyint (e.g. 120) without touching the
+  // client, winning over both the CLI default and runtime tunes.
+  const uint32_t keyintOverride = env_u32_clamped("REMOTE60_NATIVE_KEYINT_OVERRIDE", 0, 0, 600);
+  uint32_t activeKeyint = keyintOverride != 0 ? keyintOverride : args.keyint;
   uint64_t activeFrameIntervalUs =
       std::max<uint64_t>(1, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, activeFps)));
   uint64_t activePacingFrameIntervalUs = activeFrameIntervalUs;
@@ -4776,6 +4781,13 @@ int main(int argc, char** argv) {
   uint32_t m9DownPressureSeconds = 0;
   uint32_t m9UpPressureSeconds = 0;
   bool forceKeyNext = true;
+  // Submit latch for forceKeyNext. The async MFT can hold the key output for a few inputs, and
+  // forcing EVERY input in the meantime produced trains of 4-5 consecutive 40-160KB IDRs per
+  // request (measured at 17:24:26/32/52 in the field log). One forced input per request: stamped
+  // on submit, cleared when a key is accepted into the send path (on UDP that is the send-queue
+  // enqueue, not the wire; a failed send re-forces via barrier recovery), and timing out (300ms)
+  // so a lost key retries.
+  uint64_t forceKeySubmittedAtUs = 0;
   int64_t captureTimelineOriginUs = -1;
   int64_t auTimelineOriginUs = -1;
   auto resetHostTimelineAnchors = [&]() {
@@ -4854,6 +4866,11 @@ int main(int argc, char** argv) {
 
   auto apply_encoder_target = [&](uint32_t targetW, uint32_t targetH, uint32_t targetFps,
                                   uint32_t targetBitrate, uint32_t targetKeyint) -> bool {
+    // The keyint A/B env override is enforced HERE, the single choke point every caller passes
+    // (runtime tune, capture-UI overview/focus, ABR/M9 refit) -- pinning it in just one caller
+    // let another quietly revert the override with its own cached keyint. Ceiling bookkeeping
+    // upstream stays based on what the CLIENT actually requested.
+    if (keyintOverride != 0) targetKeyint = keyintOverride;
     // Callers pass the nominal box for the current ABR/M9 level. Remember it so a later
     // source-size change can be re-fitted against the same budget instead of ratcheting down.
     nominalEncodeW = targetW;
@@ -4878,6 +4895,9 @@ int main(int argc, char** argv) {
       }
       resetHostTimelineAnchors();
       reset_encoder_starvation_episode();
+      // shutdown+initialize discarded any pending key input; a stale latch here would delay the
+      // fresh encoder's needed IDR by up to the 300ms retry window.
+      forceKeySubmittedAtUs = 0;
     } else if (bitrateChanged) {
       if (!encoder.reconfigure_bitrate(targetBitrate)) {
         encoder.shutdown();
@@ -4886,6 +4906,8 @@ int main(int argc, char** argv) {
         }
         resetHostTimelineAnchors();
         reset_encoder_starvation_episode();
+        // Same contract as the other reinit sites: shutdown discarded any pending key input.
+        forceKeySubmittedAtUs = 0;
       }
     }
 
@@ -5943,6 +5965,11 @@ int main(int argc, char** argv) {
   int32_t cursorSentY = INT32_MIN;
   bool cursorSentVisible = false;
   auto pump_cursor_forward = [&](uint64_t nowUs) {
+    // Field verdict: the remote-cursor marker reads as clutter, not signal -- the user asked for
+    // it gone. Default OFF on both ends; the reviewed machinery (generation fence, overlay) stays
+    // dormant behind this env for future reconsideration.
+    static const bool remoteCursorEnabled = env_truthy("REMOTE60_NATIVE_REMOTE_CURSOR");
+    if (!remoteCursorEnabled) return;
     if (transport != VideoTransport::Udp || !udpPeerReady) return;
     if (!streamControlActive.load(std::memory_order_acquire)) return;
     if (captureWindowModeActive.load(std::memory_order_acquire)) return;
@@ -8119,11 +8146,19 @@ int main(int argc, char** argv) {
        // carries seq=0, and 0 % keyint == 0 made every one of them an IDR -- defeating the open-
        // barrier design of riding the held frame as a cheap P-frame (a 40-160KB IDR instead of a
        // few-KB P, once per kick/refresh). A closed barrier still gets its IDR via forceKeyNext.
-       const bool forceKeyFrame =
-            forceKeyNext || (encodedSeq == 0) ||
-            (!servedBootstrap && (activeKeyint > 0) && ((seq % activeKeyint) == 0));
-       if (forceKeyFrame) ++forceKeyInputCount;
+       // A single submit latch (forceKeySubmittedAtUs) covers ALL key reasons -- request,
+       // first-frame (encodedSeq==0), and the keyint schedule: one key input pending inside the
+       // async MFT satisfies every one of them, so none may re-force while it is in flight. The
+       // measured 4-5 consecutive-IDR trains came from forcing every input until the key finally
+       // surfaced. The latch is stamped only after the encoder ACCEPTS the input (below), and
+       // times out after 300ms so a lost key is retried.
         const uint64_t encodeStartUs = qpc_now_us();
+       const bool forceKeyInFlight =
+           forceKeySubmittedAtUs != 0 && encodeStartUs < forceKeySubmittedAtUs + 300'000;
+       const bool scheduledKey =
+           !servedBootstrap && (activeKeyint > 0) && ((seq % activeKeyint) == 0);
+       const bool keyWanted = forceKeyNext || (encodedSeq == 0) || scheduledKey;
+       const bool forceKeyFrame = keyWanted && !forceKeyInFlight;
         const uint64_t encodeInputUs = captureStampUs;
         if (captureTimelineOriginUs < 0) {
           captureTimelineOriginUs = static_cast<int64_t>(encodeInputUs);
@@ -8193,6 +8228,12 @@ int main(int argc, char** argv) {
       }
       // Encode returned; back to ordinary work for the watchdog's threshold.
       enter_main_phase(MainLoopPhase::Loop);
+      if (forceKeyFrame) {
+        // Latch/count only for inputs the encoder actually ACCEPTED: a failed encode never
+        // reached the MFT, and arming the latch for it would suppress the retry for 300ms.
+        ++forceKeyInputCount;
+        forceKeySubmittedAtUs = encodeStartUs;
+      }
       if (!surfaceEncoded) {
         nv12Us = encodeStats.colorConvertUs;
         preEncodePrepUs += nv12Us;
@@ -8373,6 +8414,8 @@ int main(int argc, char** argv) {
             }
             resetHostTimelineAnchors();
             reset_encoder_starvation_episode();
+            // Same contract as the reinit sites above: the reset discarded any pending key input.
+            forceKeySubmittedAtUs = 0;
             ++encoderResetCount;
             consecutiveStaleEncodedFrames = 0;
             forceKeyNext = true;
@@ -8589,6 +8632,7 @@ int main(int argc, char** argv) {
         }
         if ((hdr.flags & 1u) != 0) {
           forceKeyNext = false;
+          forceKeySubmittedAtUs = 0;
         }
 
         if (args.traceEvery > 0 && (hdr.seq % args.traceEvery) == 0 &&

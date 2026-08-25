@@ -6703,3 +6703,33 @@ UI 방식 결정
 
 - 사용자 지시: 모든 응답 마지막에 그 턴의 수행 작업(파일·커밋·빌드·산출물)을 반드시 명시.
 - CLAUDE.md 신설로 세션마다 로드되게 함. 워크플로우는 AGENTS.md 참조로 연결.
+
+### 257) 2026-08-25 P1 — IDR 연발 래치 + keyint A/B 오버라이드, 커서 링 기본 OFF (0.2.55)
+
+배경
+- "주기적으로 이전 프레임이 한 번 나온다"(255에서 원인 확정: 매초 120~160KB IDR이 키프레임
+  표시의 75%를 2~3프레임 간격으로 지연) + 키 요청 시 IDR 4~5연발(force-key 미소등).
+
+한 일 (Codex 리뷰 2라운드 — High 3건 반영 후 승인)
+- force-key 제출 래치: 키 사유 3종(요청·첫프레임·keyint 스케줄) 전부를 단일 latch 뒤로 —
+  비동기 MFT가 키 출력을 물고 있는 동안 매 입력을 강제하던 것이 연발의 원인. 스탬프는
+  **인코더가 입력을 수락한 뒤**(실패 시 다음 입력 즉시 재강제), 소등은 키가 송신 경로에
+  수락될 때, 300ms 타임아웃으로 유실 재시도. 인코더 shutdown+initialize 3경로(resize/fps/
+  keyint·bitrate-fallback·stale-output)에서 즉시 클리어(펜딩 입력 폐기 계약), 세션 rollover
+  는 의도적으로 제외(펜딩 IDR이 새 barrier를 열 수 있음).
+- keyint A/B: REMOTE60_NATIVE_KEYINT_OVERRIDE(0=off, 1..600, 시스템 env)를
+  apply_encoder_target 단일 관문에서 강제 — 모든 caller(runtime tune/캡처 UI/ABR·M9)가
+  통과하므로 되돌릴 수 없음. ceiling 부기는 클라 요청값 기준 유지(effective는 내부만).
+  50fps 레그는 클라 fps 슬라이더로 수행.
+- 원격 커서 링: 사용자 실기 판정 "불필요" → 양단 기본 OFF(REMOTE60_NATIVE_REMOTE_CURSOR로만
+  재활성, 파서 env_truthy로 통일). 리뷰된 기계장치(세대 펜스 등)는 dormant 보존.
+
+검증/build/test
+- 빌드 클린. live-host e2e: 기본=ALL PASS(keyint=60 유지), override=120=ALL PASS(클라 60 요청
+  ·비트레이트 튠 2회 관통에도 120 pin). 산출물 dist/GNLinkSetup-0.2.55.exe.
+- IDR 연발 소멸의 실증은 필드 로그 게이트(키요청 시나리오에서 "key=1 연속" 부재 확인).
+
+실기 A/B 안내
+- 레그A: 기본 설치 그대로. 레그B: 호스트 PC 시스템 환경변수
+  REMOTE60_NATIVE_KEYINT_OVERRIDE=120 설정 후 GNLinkHost 재시작. 비교 관점: "주기적 이전
+  프레임" 빈도(절반 기대), 평균 대역.

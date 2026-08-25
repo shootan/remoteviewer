@@ -3098,6 +3098,15 @@ void ensure_cursor_overlay(HWND owner) {
 // rect and moves the overlay; hides it when stale (>500ms), invisible, occluded by the picker,
 // or when the window is minimized.
 void update_cursor_overlay(HWND hwnd) {
+  // Field verdict: the ring reads as clutter -- disabled by default per the user, kept behind an
+  // env for future reconsideration. Static refresh (the thing that keeps still screens alive) is
+  // an independent host feature and is unaffected by this.
+  // Same parser as the host side (1/true/on), so a future re-enable cannot end up half-on.
+  static const bool remoteCursorEnabled = env_truthy("REMOTE60_NATIVE_REMOTE_CURSOR");
+  if (!remoteCursorEnabled) {
+    if (gCursorOverlayHwnd) ShowWindow(gCursorOverlayHwnd, SW_HIDE);
+    return;
+  }
   ensure_cursor_overlay(hwnd);
   if (!gCursorOverlayHwnd) return;
   const uint64_t updUs = gRemoteCursorUpdateUs.load(std::memory_order_acquire);
