@@ -41,3 +41,9 @@ screen-now.png
 
 # Fetched by automation/fetch_webview2.ps1; 45 MB of SDK for two files the build needs.
 /third_party/webview2/
+
+# Field logs copied in for analysis (the tracked dir is log/, distinct from the runtime /logs/)
+/log/
+# codegraph tool config (per-developer, like .vscode)
+/.cgcignore
+/.codegraphcontext.yaml

@@ -6777,3 +6777,14 @@ UI 방식 결정
   필드 POC에서 stuck drag/button 한 번이라도 보이면 즉시 blocker 승격.
 - SyntheticRefresh flag(정적 리프레시 프레임을 클라 latency/catchup/anomaly 집계에서 제외):
   UDP 재조립(안드로이드 공유 core) 관통이라 별도 커밋 — **P2 readback 착수 전 완료 게이트**.
+
+### 259) 2026-08-25 docs 정리(legacy 이동) + 핸드오프 문서 + gitignore 보정
+
+- 사용자 지시: 세션 전환 예정 → 현재 계획 문서화 + docs 과거 문서 legacy 폴더로 정리.
+- docs/HANDOFF.md 신설: 배포 이력(0.2.50~56), 멈춤/끊김 4갈래 원인·상태, 다음 액션(0.2.56 실기
+  판정선 4개 → sticky/P2), 부채(sticky routing, SyntheticRefresh=P2 게이트), env 스위치, 검증
+  파이프라인, RDP 주의, 코드 지도. README.md read-order에 HANDOFF 추가.
+- docs/legacy/ 신설, 날짜 박힌 과거 문서 12종 이동(history_old·구현계획_old·감사/상세계획_0730·
+  2026040x 리뷰·홀펀칭/잠금화면 설계·android_구현계획). 현행 7종만 docs/ 루트 유지.
+- .gitignore에 /log/, /.cgcignore, /.codegraphcontext.yaml 추가(로컬 도구/로그 — .vscode 방식).
+- AGENTS.md의 "repo root 밖 삭제커맨드 금지" 정책은 별도 커밋으로 보존.
