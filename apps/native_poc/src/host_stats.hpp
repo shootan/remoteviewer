@@ -18,6 +18,13 @@ namespace remote60::native_poc {
 // ClientMetricsSnapshot and RateControlState instead.
 // thread: main loop owns everything; callbackFrames / queuePushCount / queueDepthMax are atomics
 // because the capture publish callback increments them.
+
+// Monotonic max for an atomic counter (formerly the update_u64_max lambda in main()).
+inline void update_u64_max(std::atomic<uint64_t>& target, const uint64_t value) {
+  auto old = target.load(std::memory_order_relaxed);
+  while (value > old && !target.compare_exchange_weak(old, value, std::memory_order_release, std::memory_order_relaxed)) {
+  }
+}
 struct HostStats {
   uint32_t printEverySec = 0;   // REMOTE60_NATIVE_STATS_PRINT_EVERY_SEC
   uint64_t ticks = 0;
