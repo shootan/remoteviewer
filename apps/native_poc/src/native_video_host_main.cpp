@@ -56,6 +56,7 @@
 #include "time_utils.hpp"
 #include "udp_control_channel.hpp"
 #include "capture_backend_dxgi.hpp"
+#include "host_string_util.hpp"
 
 namespace {
 
@@ -156,6 +157,16 @@ using remote60::native_poc::ControlWindowEntry;
 using remote60::native_poc::ControlMonitorListMessage;
 using remote60::native_poc::ControlMonitorListRequestMessage;
 using remote60::native_poc::ControlMonitorSelectMessage;
+// String utilities extracted to host_string_util.hpp (Phase 0). These using-declarations keep every
+// existing unqualified call site (in this anonymous namespace and in main) resolving unchanged.
+using remote60::native_poc::trim_ascii;
+using remote60::native_poc::ascii_lower;
+using remote60::native_poc::utf8_to_wide;
+using remote60::native_poc::wide_to_utf8;
+using remote60::native_poc::wide_lower;
+using remote60::native_poc::hr_hex;
+using remote60::native_poc::parse_csv_lower;
+using remote60::native_poc::base_name_lower;
 using remote60::native_poc::ControlWindowListMessage;
 using remote60::native_poc::ControlWindowListRequestMessage;
 using remote60::native_poc::ControlWindowSelectMessage;
@@ -349,80 +360,9 @@ uint32_t encoder_api_path_code(const char* backendName) {
   return 6;
 }
 
-std::string trim_ascii(std::string v) {
-  size_t start = 0;
-  while (start < v.size() && std::isspace(static_cast<unsigned char>(v[start])) != 0) {
-    ++start;
-  }
-  size_t end = v.size();
-  while (end > start && std::isspace(static_cast<unsigned char>(v[end - 1])) != 0) {
-    --end;
-  }
-  return v.substr(start, end - start);
-}
-
-std::string ascii_lower(std::string v) {
-  std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
-    return static_cast<char>(std::tolower(c));
-  });
-  return v;
-}
-
-std::wstring utf8_to_wide(const std::string& utf8) {
-  if (utf8.empty()) return std::wstring{};
-  const int n = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
-  if (n <= 1) return std::wstring{};
-  std::wstring out(static_cast<size_t>(n - 1), L'\0');
-  MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, out.data(), n);
-  return out;
-}
-
-std::string wide_to_utf8(const std::wstring& wide) {
-  if (wide.empty()) return std::string{};
-  const int n = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, nullptr, 0, nullptr, nullptr);
-  if (n <= 1) return std::string{};
-  std::string out(static_cast<size_t>(n - 1), '\0');
-  WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, out.data(), n, nullptr, nullptr);
-  return out;
-}
-
-std::wstring wide_lower(std::wstring v) {
-  std::transform(v.begin(), v.end(), v.begin(), [](wchar_t c) {
-    return static_cast<wchar_t>(std::towlower(c));
-  });
-  return v;
-}
-
-std::string hr_hex(HRESULT hr) {
-  char buf[32];
-  std::snprintf(buf, sizeof(buf), "0x%08lX", static_cast<unsigned long>(hr));
-  return std::string(buf);
-}
-
-std::vector<std::string> parse_csv_lower(const std::string& raw) {
-  std::vector<std::string> out;
-  size_t start = 0;
-  while (start <= raw.size()) {
-    const size_t comma = raw.find(',', start);
-    const size_t end = (comma == std::string::npos) ? raw.size() : comma;
-    const std::string token = trim_ascii(raw.substr(start, end - start));
-    if (!token.empty()) {
-      out.push_back(ascii_lower(token));
-    }
-    if (comma == std::string::npos) break;
-    start = comma + 1;
-  }
-  return out;
-}
-
-std::string base_name_lower(std::string path) {
-  if (path.empty()) return path;
-  const size_t slashPos = path.find_last_of("\\/");
-  if (slashPos != std::string::npos && slashPos + 1 < path.size()) {
-    path = path.substr(slashPos + 1);
-  }
-  return ascii_lower(path);
-}
+// String utilities (trim_ascii/ascii_lower/utf8<->wide/wide_lower/hr_hex/parse_csv_lower/
+// base_name_lower) moved to host_string_util.hpp (host split refactor Phase 0). Brought back into
+// unqualified scope by the using-declarations near the top of the anonymous namespace.
 
 uint64_t hwnd_to_id(HWND hwnd) {
   return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(hwnd));
