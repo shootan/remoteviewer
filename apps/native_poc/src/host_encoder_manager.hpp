@@ -18,6 +18,10 @@
 
 namespace remote60::native_poc {
 
+struct InputRouterState;
+struct RateControlState;
+struct SenderState;
+
 // Zero-copy encode bookkeeping. A surface handed to the MFT stays reserved until the
 // encoder's total output count passes the frame's submission -- only then is its texture
 // provably no longer being read.
@@ -129,6 +133,30 @@ struct EncoderState {
     frameGating.staticIntervalUs =
         std::max<uint64_t>(activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGating.staticFps));
   }
+  // AU timeline anchor (paired with CaptureState::timelineOriginUs; -1 = not yet anchored).
+  int64_t auTimelineOriginUs = -1;
+
+  // --- behaviour (Phase 2-5: former main() lambdas; bodies in host_encoder_manager.cpp except the
+  //     one-liner) ---
+  // Forget both timeline anchors so the next frame re-anchors capture vs AU timing.
+  void ResetTimelineAnchors(CaptureState& capture) {
+    capture.timelineOriginUs = -1;
+    auTimelineOriginUs = -1;
+  }
+  // The single choke point every encoder parameter change goes through (runtime tune, capture-UI
+  // overview/focus, ABR/M9 refit): fits the box to the source aspect, rebuilds or re-tunes the MFT,
+  // publishes the input domain and the UDP pacing budget.
+  bool ApplyTarget(CaptureState& capture, CaptureResources& res, FrameGatingState& frameGating,
+                   InputRouterState& inputRouter, SenderState& sender, uint32_t targetW, uint32_t targetH,
+                   uint32_t targetFps, uint32_t targetBitrate, uint32_t targetKeyint);
+  // A confirmed source-size change: re-fit the encode target to the new geometry immediately.
+  void ApplyConfirmedCaptureGeometry(CaptureState& capture, CaptureResources& res, FrameGatingState& frameGating,
+                                     InputRouterState& inputRouter, SenderState& sender, uint32_t newW,
+                                     uint32_t newH, const char* reason, bool allowWindowOverride = false);
+  // Capture-UI overview (lower bitrate/fps/size) vs focus mode, derived from the live ceilings.
+  bool ApplyCaptureUiQualityMode(CaptureState& capture, CaptureResources& res, FrameGatingState& frameGating,
+                                 InputRouterState& inputRouter, SenderState& sender, RateControlState& rate,
+                                 bool useH264, bool overviewMode, uint64_t nowUs);
 };
 
 }  // namespace remote60::native_poc

@@ -57,6 +57,12 @@ struct EncodedSendItem {
 // udpPeer*); the plain sent*/udpTx*/heldFrames/nonKeyAu*/firstKeyEnqueuedUs counters are
 // main-thread stats-interval accumulators.
 struct SenderState {
+  // UDP pacing env config (REMOTE60_NATIVE_H264_NO_PACING / UDP_PACE_PEAK_* / UDP_KEYFRAME_PACE_PEAK_BPS),
+  // fixed after startup; EncoderState::ApplyTarget derives the live pacing budget from these.
+  bool noPacingH264 = false;
+  uint32_t udpPacePeakPercent = 0;
+  uint32_t udpPacePeakFloorBps = 0;
+  uint32_t udpKeyframePacePeakBps = 0;
   // Config (REMOTE60_NATIVE_SENDER_MAX_CADENCE_HOLD_US), fixed after startup.
   uint32_t maxCadenceHoldUs = 0;
   bool cadenceSmoothing = false;

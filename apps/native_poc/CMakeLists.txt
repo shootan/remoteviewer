@@ -64,6 +64,7 @@ add_executable(remote60_native_video_host_poc
   src/host_control_session.cpp
   src/host_encoded_sender.cpp
   src/host_capture_session.cpp
+  src/host_encoder_manager.cpp
   src/d3d_capture_readback.cpp
   src/directory_client.cpp
   src/gdi_capture_process.cpp
