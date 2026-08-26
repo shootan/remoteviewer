@@ -79,12 +79,12 @@
   다음 세션도 큰 변경은 a2a-collab 스킬로 그 세션과 교차검증 권장.
 
 ## 코드 지도 (거대 파일 주의)
-- `apps/native_poc/src/native_video_host_main.cpp` **2,048줄**(Phase 0~3 완료 2026-08-26 — 브랜치 `refactor/host-split`; main loop는 host_main_loop.cpp의 stage_* 12개, 컨트롤 세션·캡처·인코더·송신은 각 클래스/멤버로;
+- `apps/native_poc/src/native_video_host_main.cpp` **1,952줄**(Phase 0~3.6 완료 2026-08-26 — 브랜치 `refactor/host-split`; main loop는 host_stage_*.cpp 14개 + host_loop_helpers.cpp, 컨트롤 세션·캡처·인코더·송신은 각 클래스/멤버로;
   남은 것은 Phase 4 스레드 소유권 재설계) + `host_*.hpp/.cpp` 모듈 38개(stage별 13 + 클래스/상태 25: log/string_util/args/bgra_scale/
   gpu_scaler/window_enum/capture_device/net_io/input_inject/bottleneck+frame_state). `native_video_client_main.cpp` 5,318줄. **분할 리팩터 설계 완료 → `docs/호스트_분할_리팩터_계획.md`**
   (구간 지도 §1.2, 결합도 §1.3). Phase 0(순수 이동)은 실기 판정과 무관하게 진행 가능, Phase 1~3은
   P2 착수 전 완료. 이 리팩터는 사용자 결정으로 **Codex 교차검증 없이** 진행한다(위 "교차검증" 권고의
   예외). 지금은 특정 코드 찾을 때 grep/sed로 좁혀야 함.
-- **브랜치**: 리팩터 코드는 `refactor/host-split`(main에서 분기, **Phase 0~3 완료 = 6a604c1**, 다음: 실기 확인 → 버전 범프 → Phase 4). 계획·이력·체크리스트
+- **브랜치**: 리팩터 코드는 `refactor/host-split`(main에서 분기, **Phase 0~3.6 완료 = 9644e84**, 다음: 실기 확인 → 버전 범프(0.2.58) → main merge → Phase 4). 계획·이력·체크리스트
   문서는 **main에서만** 갱신하고 브랜치는 `git merge main`으로 동기화한다. Phase 0 실행 순서·의존성 정정은
   계획 문서 상단 2026-08-26 갱신 블록 참조.

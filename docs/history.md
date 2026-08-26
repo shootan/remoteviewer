@@ -7227,3 +7227,16 @@ Next action
 - 게이트: host 빌드 exit 0 / UDP e2e 13/13(1s stats).
 - 호스트 측 800줄 초과 잔여: native_video_host_main.cpp 2,048(선형 배선; capturePublishFn 람다 ~105줄, UDP 세션 스레드 블록
   ~190줄, 디렉터리 hello 람다 등), host_stage_encode_send_h264.cpp 989(AU 루프 분리 후보). 클라이언트/코덱 파일은 이 리팩터 범위 밖.
+
+### 295) 2026-08-26 리팩터 Phase 3.6 — PublishFrame 멤버화 + 리팩터 사이클 마무리 (브랜치 9644e84)
+
+- main()의 res.capturePublishFn 람다(103줄) → CaptureState::PublishFrame(verbatim), main은 3-캡처 포워더로 바인딩.
+  게이트: host 빌드 exit 0 / UDP e2e 13/13(프레임이 새 멤버를 통해 publish됨). host_main 2,048→1,952줄.
+- **사이클 결산(Phase 0~3.6, 2026-08-26 하루)**: native_video_host_main.cpp 9,988→1,952줄(선형 배선), 호스트 모듈 43파일
+  (state/클래스 25 + stage 15 + 헬퍼/도구), main() 공유 지역변수 502→~75, 30줄 초과 람다 62→4(UDP 스레드 본체 2·DXGI 워치독·
+  콜백 바인더). 호스트 파일 중 800줄 초과는 main(1,952)·encode_send_h264(989)뿐. 코드 커밋 ~40개 전부 host 빌드 + UDP e2e
+  13/13, 문자열 리터럴 집합 불변(로그 호환), 이동 본문 diff 대조. gate-A 5타깃 빌드·단위테스트 2종은 Phase 3 트리에서 PASS
+  (최종 트리 재확인은 아래).
+- 남은 것(문서 §0 지표 갱신): main() ≤300은 HostRuntime 조립(2-12) 없이는 불가 — 선형 배선 1,550줄로 남김; 단위테스트(2-5
+  AbrController 등)는 순수 클래스 분리가 전제라 미착수; Phase 4 스레드 소유권 재설계는 별도 사이클.
+- 다음 액션: 사용자 실기 1회(브랜치 빌드 GNLinkStream/GNLinkHost) → 이상 없으면 버전 0.2.58 범프 + main merge → Phase 4.
