@@ -2245,17 +2245,7 @@ int main(int argc, char** argv) {
     capture.timelineOriginUs = -1;
     auTimelineOriginUs = -1;
   };
-  auto refresh_frame_intervals = [&]() {
-    encoder.activeFrameIntervalUs =
-        std::max<uint64_t>(1, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, encoder.activeFps)));
-    // Encoded capture is callback-clocked below. Raw mode uses the main tick at the exact
-    // requested cadence.
-    encoder.activePacingFrameIntervalUs = encoder.activeFrameIntervalUs;
-    capture.submitMinIntervalUs.store(encoder.activeFrameIntervalUs, std::memory_order_release);
-    frameGating.staticIntervalUs =
-        std::max<uint64_t>(encoder.activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGating.staticFps));
-  };
-  refresh_frame_intervals();
+  encoder.RefreshFrameIntervals(capture, frameGating);
   // Declared before every lambda that references them. FrameState precedes the pipeline so
   // the worker's publish callback never outlives what it writes into.
   FrameState frame;
@@ -2277,13 +2267,6 @@ int main(int argc, char** argv) {
   // is shut down + reinitialized or the stream (re)activates, otherwise a no-output streak left over
   // from the previous encoder.codec -- or a long stream-inactive gap -- would inflate noOutputAgeUs and
   // fire a false starvation log on the fresh encoder.codec's first inputs.
-  auto reset_encoder_starvation_episode = [&]() {
-    encoder.noOutputSinceUs = 0;
-    encoder.acceptedNoOutputStreak = 0;
-    encoder.lastStarvationLogUs = 0;
-    encoder.starveNeedInputAccum = encoder.starveHaveOutputAccum = encoder.starveNoEventAccum = 0;
-    encoder.starveNotAcceptingAccum = encoder.starveNeedMoreAccum = encoder.starveNeedInputOnlyCalls = 0;
-  };
   int32_t poppedNv12Slot = -1;
   uint64_t poppedNv12Generation = 0;
 
@@ -2317,7 +2300,7 @@ int main(int argc, char** argv) {
         return false;
       }
       resetHostTimelineAnchors();
-      reset_encoder_starvation_episode();
+      encoder.ResetStarvationEpisode();
       // shutdown+initialize discarded any pending key input; a stale latch here would delay the
       // fresh encoder.codec's needed IDR by up to the 300ms retry window.
       encoder.forceKeySubmittedAtUs = 0;
@@ -2328,7 +2311,7 @@ int main(int argc, char** argv) {
           return false;
         }
         resetHostTimelineAnchors();
-        reset_encoder_starvation_episode();
+        encoder.ResetStarvationEpisode();
         // Same contract as the other reinit sites: shutdown discarded any pending key input.
         encoder.forceKeySubmittedAtUs = 0;
       }
@@ -2359,7 +2342,7 @@ int main(int argc, char** argv) {
                 << " bitrate=" << encoder.activeBitrate << "\n";
     }
     captureReadback.SetOutputSize(encoder.activeEncodeW, encoder.activeEncodeH);
-    refresh_frame_intervals();
+    encoder.RefreshFrameIntervals(capture, frameGating);
     return true;
   };
 
@@ -2574,22 +2557,6 @@ int main(int argc, char** argv) {
   // timestamp lets a recurrence inside the frozen-ring escalation window escalate to a process
   // restart. streamActiveSinceUs anchors a warmup after a client (re)attaches.
   uint64_t streamActiveSinceUs = 0;
-  auto set_dxgi_fallback_reason = [&](const std::string& reason) {
-    std::lock_guard<std::mutex> lock(capture.fallbackReasonMu);
-    capture.dxgiFallbackReason = reason;
-  };
-  auto set_gdi_fallback_reason = [&](const std::string& reason) {
-    std::lock_guard<std::mutex> lock(capture.fallbackReasonMu);
-    capture.gdiFallbackReason = reason;
-  };
-  auto copy_dxgi_fallback_reason = [&]() {
-    std::lock_guard<std::mutex> lock(capture.fallbackReasonMu);
-    return capture.dxgiFallbackReason;
-  };
-  auto copy_gdi_fallback_reason = [&]() {
-    std::lock_guard<std::mutex> lock(capture.fallbackReasonMu);
-    return capture.gdiFallbackReason;
-  };
 
   // Capture attachment (session) cookie. Bumped by detach_capture_session() on the main thread
   // before any pool recreate; a capture callback or readback completion that began under the
@@ -2661,25 +2628,6 @@ int main(int argc, char** argv) {
   // The stats line reports this as lastPublishAgeUs (diagnostic only). Deliberately not reset on a
   // restart: the age then honestly shows the publish gap and snaps back on the first new publish,
   // which is exactly the recovery signal we want to see after a frozen-ring restart.
-  auto describe_active_capture_target = [&]() -> std::string {
-    const uint64_t targetHwnd = capture.targetHwnd.load(std::memory_order_acquire);
-    const uint32_t targetPid = capture.targetPid.load(std::memory_order_acquire);
-    std::string targetProcess = "monitor";
-    std::string targetTitle;
-    {
-      std::lock_guard<std::mutex> lk(capture.metaMu);
-      targetProcess = capture.targetProcess;
-      targetTitle = capture.targetTitle;
-    }
-    std::ostringstream oss;
-    oss << " streamGen=" << capture.streamGenerationState.load(std::memory_order_acquire)
-        << " selectedId=" << capture.selectedWindowId.load(std::memory_order_acquire)
-        << " targetHwnd=0x" << std::hex << targetHwnd << std::dec
-        << " pid=" << targetPid
-        << " process=" << targetProcess
-        << " title=" << (targetTitle.empty() ? "<empty>" : targetTitle);
-    return oss.str();
-  };
 
   // Worker-thread side: a finished readback becomes the latest frame. Timing fields keep
   // their FrameState names so downstream logs stay parseable; their meaning under the async
@@ -2780,7 +2728,7 @@ int main(int argc, char** argv) {
             loggedGeneration, meta.streamGeneration,
             std::memory_order_acq_rel, std::memory_order_acquire)) {
       std::cout << "[native-video-host] capture-switch first-callback"
-                << describe_active_capture_target()
+                << capture.DescribeActiveTarget()
                 << " callbackUs=" << meta.callbackUs
                 << " captureUs=" << meta.captureUs
                 << "\n";
@@ -2995,7 +2943,7 @@ int main(int argc, char** argv) {
         }
         if (capture.monitorInfo->width < capture.monitorInfo->height) {
           backend.active = DesktopCaptureBackend::Wgc;
-          set_dxgi_fallback_reason("rotation_unsupported");
+          capture.SetDxgiFallbackReason("rotation_unsupported");
           std::cout << "[native-video-host] rotation_unsupported fallback_reason=rotation_unsupported\n";
         }
       }
@@ -3086,7 +3034,7 @@ int main(int argc, char** argv) {
               std::cout << "[native-video-host] " << message << "\n";
             },
             [&](const std::string& reason) {
-              set_dxgi_fallback_reason(reason);
+              capture.SetDxgiFallbackReason(reason);
               capture.dxgiFallbackRequested.store(true, std::memory_order_release);
             },
             &dxgiDetail);
@@ -3150,7 +3098,7 @@ int main(int argc, char** argv) {
               std::cout << "[native-video-host] " << message << "\n";
             },
             [&](const std::string& reason) {
-              set_gdi_fallback_reason(reason);
+              capture.SetGdiFallbackReason(reason);
               capture.gdiFallbackRequested.store(true, std::memory_order_release);
             },
             &gdiDetail);
@@ -3218,16 +3166,9 @@ int main(int argc, char** argv) {
   // it plus the current phase and never touches a lock or the GPU.
   watchdog.mainLoopPhase = static_cast<uint32_t>(MainLoopPhase::Startup);
   watchdog.mainLoopProgressUs = qpc_now_us();
-  auto enter_main_phase = [&](MainLoopPhase p) {
-    watchdog.mainLoopPhase.store(static_cast<uint32_t>(p), std::memory_order_release);
-  };
-  auto mark_main_progress = [&](MainLoopPhase p) {
-    watchdog.mainLoopProgressUs.store(qpc_now_us(), std::memory_order_release);
-    watchdog.mainLoopPhase.store(static_cast<uint32_t>(p), std::memory_order_release);
-  };
 
   auto restart_capture_session = [&]() -> bool {
-    enter_main_phase(MainLoopPhase::CaptureRestart);
+    watchdog.EnterMainPhase(MainLoopPhase::CaptureRestart);
     // A restarted session invalidates the held pointer sample even when the stream generation
     // survives (some size-changes keep it): a stale position against the new capture geometry
     // would misplace the remote cursor until the next real mouse update.
@@ -3680,7 +3621,7 @@ int main(int argc, char** argv) {
     frame.cv.notify_all();
     std::cout << "[native-video-host] capture-pipeline-flushed reason="
               << (reason ? reason : "unknown")
-              << describe_active_capture_target()
+              << capture.DescribeActiveTarget()
               << " version=" << flushedVersion
               << "\n";
   };
@@ -3690,7 +3631,7 @@ int main(int argc, char** argv) {
     stats.firstSentLoggedGeneration = streamGeneration;
     std::cout << "[native-video-host] capture-switch first-frame"
               << " path=" << (path ? path : "unknown")
-              << describe_active_capture_target()
+              << capture.DescribeActiveTarget()
               << " sendQpcUs=" << sendStartUs
               << " captureQpcUs=" << captureStampUs
               << " size=" << width << "x" << height
@@ -3878,22 +3819,12 @@ int main(int argc, char** argv) {
   // (its capture timestamp on an emitted AU) or -- on a fresh media barrier -- the epoch's first key
   // AU reaches the wire. Kicks are kept out of ABR/rate evidence: a single sparse frame is not a
   // congestion signal. This is NOT a periodic keepalive -- nothing is sent while the screen is quiet.
-  constexpr uint64_t kTrailingKickDelayUs = 150000;  // 150ms trailing edge
   // Periodic static refresh cadence (0 = off). On a genuinely still screen the pipeline sends
   // nothing at all, so the viewer's picture silently ages and looks dead; this re-serves the
   // cached frame as a cheap P-frame at a low rate. Milliseconds via env for field tuning.
   kick.staticRefreshIntervalUs =
       static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_STATIC_REFRESH_MS", 1000, 0, 10000)) *
       1000ULL;
-  auto arm_trailing_kick = [&](uint64_t atUs) {
-    if (!useH264) return;
-    kick.pending = true;
-    kick.dueAtUs = atUs + kTrailingKickDelayUs;
-  };
-  auto cancel_trailing_kick = [&]() {
-    kick.pending = false;
-    kick.dueAtUs = 0;
-  };
   // Validate the cache against the live capture identity and the CURRENT secure-desktop state, then
   // fill the loop's frame locals from it. Returns false (leaving the screen black) if anything is
   // stale, mismatched, or the desktop is locked/secure -- better black than a wrong picture.
@@ -3979,7 +3910,7 @@ int main(int argc, char** argv) {
   mainLoopWatchdog.detach();
 
   while (!stop.load()) {
-    mark_main_progress(MainLoopPhase::Loop);
+    watchdog.MarkMainProgress(MainLoopPhase::Loop);
     const uint64_t nowUs = qpc_now_us();
     uint64_t tickWaitUs = 0;
     if (args.seconds > 0 && nowUs >= startUs + static_cast<uint64_t>(args.seconds) * 1000000ULL) {
@@ -3998,12 +3929,12 @@ int main(int argc, char** argv) {
       const uint64_t curEpoch = clientSession.epoch.load(std::memory_order_acquire);
       if (curEpoch != kick.lastSeenBootstrapEpoch) {
         kick.lastSeenBootstrapEpoch = curEpoch;
-        arm_trailing_kick(nowUs);
+        kick.Arm(nowUs, useH264);
       }
       const uint64_t curGen = capture.streamGenerationState.load(std::memory_order_acquire);
       if (curGen != kick.lastSeenStreamGeneration) {
         kick.lastSeenStreamGeneration = curGen;
-        arm_trailing_kick(nowUs);
+        kick.Arm(nowUs, useH264);
       }
     }
     // Barrier recovery: the sender thread re-armed sender.waitingForKey after a same-epoch send
@@ -4014,7 +3945,7 @@ int main(int argc, char** argv) {
     // on a still desktop would never open.
     if (sender.recoveryPending.exchange(false, std::memory_order_acq_rel)) {
       encoder.forceKeyNext = true;
-      arm_trailing_kick(nowUs);
+      kick.Arm(nowUs, useH264);
     }
     if (backend.reqPending.exchange(false, std::memory_order_acq_rel)) {
       const uint32_t reqSeq = backend.reqSeq.load(std::memory_order_acquire);
@@ -4075,7 +4006,7 @@ int main(int argc, char** argv) {
         capture.dxgiStarted = false;
       }
       backend.active = DesktopCaptureBackend::Wgc;
-      const std::string fallbackReason = copy_dxgi_fallback_reason();
+      const std::string fallbackReason = capture.CopyDxgiFallbackReason();
       std::cout << "[native-video-host] fallback_reason="
                 << (fallbackReason.empty() ? "dxgi_runtime_fallback" : fallbackReason)
                 << "\n";
@@ -4102,7 +4033,7 @@ int main(int argc, char** argv) {
         capture.gdiStarted = false;
       }
       backend.active = DesktopCaptureBackend::Wgc;
-      const std::string fallbackReason = copy_gdi_fallback_reason();
+      const std::string fallbackReason = capture.CopyGdiFallbackReason();
       std::cout << "[native-video-host] fallback_reason="
                 << (fallbackReason.empty() ? "gdi_runtime_fallback" : fallbackReason)
                 << "\n";
@@ -4306,11 +4237,11 @@ int main(int argc, char** argv) {
       // A returning viewer on a still desktop needs a picture too; arm the trailing-edge kick for
       // the current epoch (coalesces with any arm from the epoch/generation edges above). This also
       // covers the stream-inactive->active edge and a capture reattach, which both land here.
-      arm_trailing_kick(qpc_now_us());
+      kick.Arm(qpc_now_us(), useH264);
       powerKeepalive.SetStreaming(true, true);
       // A stream-inactive->active edge starts a fresh streaming episode; drop any no-output streak
       // left from before so the inactive gap is not mistaken for encoder.codec starvation.
-      reset_encoder_starvation_episode();
+      encoder.ResetStarvationEpisode();
       std::cout << "[native-video-host] stream active; forcing keyframe\n";
     }
     if (useH264 && encoder.tunePending.exchange(false, std::memory_order_acq_rel)) {
@@ -4992,9 +4923,9 @@ int main(int argc, char** argv) {
         // Otherwise one-shot: a failed fill (locked/secure/identity mismatch) leaves the screen black
         // rather than painting a wrong or stale picture, and a satisfied trailing edge stays quiet.
         if (rearm) {
-          arm_trailing_kick(nowUs);
+          kick.Arm(nowUs, useH264);
         } else {
-          cancel_trailing_kick();
+          kick.Cancel();
         }
       }
     }
@@ -5514,7 +5445,7 @@ int main(int argc, char** argv) {
         bool surfaceEncoded = false;
         // The MFT encode is the prime suspect for a driver/GPU wedge that stops the whole loop
         // without returning; mark the phase so the watchdog attributes a hang here correctly.
-        enter_main_phase(MainLoopPhase::EncodeCall);
+        watchdog.EnterMainPhase(MainLoopPhase::EncodeCall);
         if (wantSurfaceEncode) {
           auto nv12Tex = captureReadback.Nv12SlotTexture(nv12Slot, nv12Generation);
           if (nv12Tex &&
@@ -5570,7 +5501,7 @@ int main(int argc, char** argv) {
         continue;
       }
       // Encode returned; back to ordinary work for the watchdog's threshold.
-      enter_main_phase(MainLoopPhase::Loop);
+      watchdog.EnterMainPhase(MainLoopPhase::Loop);
       if (forceKeyFrame) {
         // Latch/count only for inputs the encoder.codec actually ACCEPTED: a failed encode never
         // reached the MFT, and arming the latch for it would suppress the retry for 300ms.
@@ -5588,7 +5519,7 @@ int main(int argc, char** argv) {
         // deadline always trails the LAST real input -- continuous motion keeps pushing it out and
         // adds zero synthetic frames; only a genuine pause lets the kick fire to flush this frame.
         kick.lastRealInputCaptureUs = encodeInputUs;
-        arm_trailing_kick(qpc_now_us());
+        kick.Arm(qpc_now_us(), useH264);
       }
       while (!encoder.nv12PendingReleases.empty() &&
              encoder.nv12PendingReleases.front().requiredOutputs <= encoder.outputSamplesTotal) {
@@ -5756,7 +5687,7 @@ int main(int argc, char** argv) {
               break;
             }
             resetHostTimelineAnchors();
-            reset_encoder_starvation_episode();
+            encoder.ResetStarvationEpisode();
             // Same contract as the reinit sites above: the reset discarded any pending key input.
             encoder.forceKeySubmittedAtUs = 0;
             ++encoder.resetCount;
@@ -6249,7 +6180,7 @@ int main(int argc, char** argv) {
                 !capture.windowModeActive && backend.active == DesktopCaptureBackend::Gdi;
             if (fallbackFromGdi) {
               backend.active = DesktopCaptureBackend::Wgc;
-              set_gdi_fallback_reason("gdi_low_capture_rate");
+              capture.SetGdiFallbackReason("gdi_low_capture_rate");
               std::cout << "[native-video-host] fallback_reason=gdi_low_capture_rate"
                         << " callbackFramesPerSec=" << callbackFramesPerSec
                         << " minPushPerSec=" << watchdog.inputMinPushPerSec << "\n";
@@ -6932,37 +6863,13 @@ int main(int argc, char** argv) {
             }
           }
 
-          auto m9_level_bitrate = [&](int level) -> uint32_t {
-            if (level <= 0) return rate.m9BitrateLevel0;
-            if (level == 1) return rate.m9BitrateLevel1;
-            if (level == 2) return rate.m9BitrateLevel2;
-            return rate.m9BitrateLevel3;
-          };
-          auto m9_level_fps = [&](int level) -> uint32_t {
-            if (level <= 0) return rate.m9FpsLevel0;
-            if (level == 1) return rate.m9FpsLevel1;
-            if (level == 2) return rate.m9FpsLevel2;
-            return rate.m9FpsLevel3;
-          };
-          auto m9_level_w = [&](int level) -> uint32_t {
-            if (level <= 0) return rate.m9WidthLevel0;
-            if (level == 1) return rate.m9WidthLevel1;
-            if (level == 2) return rate.m9WidthLevel2;
-            return rate.m9WidthLevel3;
-          };
-          auto m9_level_h = [&](int level) -> uint32_t {
-            if (level <= 0) return rate.m9HeightLevel0;
-            if (level == 1) return rate.m9HeightLevel1;
-            if (level == 2) return rate.m9HeightLevel2;
-            return rate.m9HeightLevel3;
-          };
 
           if (targetLevel != rate.m9Level) {
             const char* action = (targetLevel > rate.m9Level) ? "down" : "up";
-            const uint32_t targetBitrate = m9_level_bitrate(targetLevel);
-            const uint32_t targetFps = m9_level_fps(targetLevel);
-            const uint32_t targetW = m9_level_w(targetLevel);
-            const uint32_t targetH = m9_level_h(targetLevel);
+            const uint32_t targetBitrate = rate.M9LevelBitrate(targetLevel);
+            const uint32_t targetFps = rate.M9LevelFps(targetLevel);
+            const uint32_t targetW = rate.M9LevelW(targetLevel);
+            const uint32_t targetH = rate.M9LevelH(targetLevel);
             std::cout << "[native-video-host][m9] action=" << action
                       << " mode=" << (rate.m9Apply ? "apply" : "dryrun")
                       << " fromLevel=" << rate.m9Level

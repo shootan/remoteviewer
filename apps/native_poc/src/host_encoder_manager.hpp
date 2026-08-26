@@ -6,11 +6,14 @@
 // it can be read on its own; the struct comment below documents role and thread ownership.
 // Phase 2 turns it into the class that owns the matching main() lambdas.
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <deque>
 #include <string>
 
+#include "host_capture_session.hpp"
+#include "host_frame_gate.hpp"
 #include "mf_h264_codec.hpp"
 
 namespace remote60::native_poc {
@@ -104,6 +107,28 @@ struct EncoderState {
   uint64_t encodeFailCount = 0;
   uint64_t resetCount = 0;
   uint32_t consecutiveStaleFrames = 0;
+
+  // --- behaviour (Phase 2-1: former main() lambdas reset_encoder_starvation_episode /
+  //     refresh_frame_intervals) ---
+  void ResetStarvationEpisode() {
+    noOutputSinceUs = 0;
+    acceptedNoOutputStreak = 0;
+    lastStarvationLogUs = 0;
+    starveNeedInputAccum = starveHaveOutputAccum = starveNoEventAccum = 0;
+    starveNotAcceptingAccum = starveNeedMoreAccum = starveNeedInputOnlyCalls = 0;
+  }
+  // Recompute the frame intervals from activeFps and push them to the capture submit limiter and
+  // the static-frame gate.
+  void RefreshFrameIntervals(CaptureState& capture, FrameGatingState& frameGating) {
+    activeFrameIntervalUs =
+        std::max<uint64_t>(1, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, activeFps)));
+    // Encoded capture is callback-clocked below. Raw mode uses the main tick at the exact
+    // requested cadence.
+    activePacingFrameIntervalUs = activeFrameIntervalUs;
+    capture.submitMinIntervalUs.store(activeFrameIntervalUs, std::memory_order_release);
+    frameGating.staticIntervalUs =
+        std::max<uint64_t>(activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGating.staticFps));
+  }
 };
 
 }  // namespace remote60::native_poc

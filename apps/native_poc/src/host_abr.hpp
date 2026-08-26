@@ -77,6 +77,32 @@ struct RateControlState {
   uint64_t m9CooldownUntilUs = 0;
   uint32_t m9DownPressureSeconds = 0;
   uint32_t m9UpPressureSeconds = 0;
+
+  // --- behaviour (Phase 2-1: former main() lambdas m9_level_bitrate/fps/w/h) ---
+  uint32_t M9LevelBitrate(int level) const {
+    if (level <= 0) return m9BitrateLevel0;
+    if (level == 1) return m9BitrateLevel1;
+    if (level == 2) return m9BitrateLevel2;
+    return m9BitrateLevel3;
+  }
+  uint32_t M9LevelFps(int level) const {
+    if (level <= 0) return m9FpsLevel0;
+    if (level == 1) return m9FpsLevel1;
+    if (level == 2) return m9FpsLevel2;
+    return m9FpsLevel3;
+  }
+  uint32_t M9LevelW(int level) const {
+    if (level <= 0) return m9WidthLevel0;
+    if (level == 1) return m9WidthLevel1;
+    if (level == 2) return m9WidthLevel2;
+    return m9WidthLevel3;
+  }
+  uint32_t M9LevelH(int level) const {
+    if (level <= 0) return m9HeightLevel0;
+    if (level == 1) return m9HeightLevel1;
+    if (level == 2) return m9HeightLevel2;
+    return m9HeightLevel3;
+  }
 };
 
 }  // namespace remote60::native_poc

@@ -9,6 +9,8 @@
 #include <atomic>
 #include <cstdint>
 
+#include "time_utils.hpp"
+
 namespace remote60::native_poc {
 
 // Phase of the host's main capture/encode loop, published for the liveness watchdog. A permanent
@@ -65,6 +67,18 @@ struct WatchdogState {
   std::atomic<uint32_t> mainLoopPhase{static_cast<uint32_t>(MainLoopPhase::Startup)};
   std::atomic<uint64_t> mainLoopProgressUs{0};
   std::atomic<uint64_t> mainLoopLastSeq{0};
+
+  // --- behaviour (Phase 2-1: former main() lambdas enter_main_phase / mark_main_progress) ---
+  // Publish the phase the main loop is about to enter; the watchdog thread picks the hang
+  // threshold from it.
+  void EnterMainPhase(MainLoopPhase p) {
+    mainLoopPhase.store(static_cast<uint32_t>(p), std::memory_order_release);
+  }
+  // Stamp "the loop is alive" plus the phase; called once per iteration.
+  void MarkMainProgress(MainLoopPhase p) {
+    mainLoopProgressUs.store(qpc_now_us(), std::memory_order_release);
+    mainLoopPhase.store(static_cast<uint32_t>(p), std::memory_order_release);
+  }
 };
 
 }  // namespace remote60::native_poc

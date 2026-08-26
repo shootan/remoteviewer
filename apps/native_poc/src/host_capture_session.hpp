@@ -16,6 +16,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -155,6 +156,45 @@ struct CaptureState {
   uint64_t idleDetachAtUs = 0;
   uint64_t reattachRetryAtUs = 0;
   uint64_t reattachRetryDelayUs = 0;
+
+  // --- behaviour (Phase 2-1: former main() lambdas set/copy_*_fallback_reason,
+  //     describe_active_capture_target) ---
+  void SetDxgiFallbackReason(const std::string& reason) {
+    std::lock_guard<std::mutex> lock(fallbackReasonMu);
+    dxgiFallbackReason = reason;
+  }
+  void SetGdiFallbackReason(const std::string& reason) {
+    std::lock_guard<std::mutex> lock(fallbackReasonMu);
+    gdiFallbackReason = reason;
+  }
+  std::string CopyDxgiFallbackReason() {
+    std::lock_guard<std::mutex> lock(fallbackReasonMu);
+    return dxgiFallbackReason;
+  }
+  std::string CopyGdiFallbackReason() {
+    std::lock_guard<std::mutex> lock(fallbackReasonMu);
+    return gdiFallbackReason;
+  }
+  // One-line description of the current capture target for log lines.
+  std::string DescribeActiveTarget() {
+    const uint64_t hwnd = targetHwnd.load(std::memory_order_acquire);
+    const uint32_t pid = targetPid.load(std::memory_order_acquire);
+    std::string process = "monitor";
+    std::string title;
+    {
+      std::lock_guard<std::mutex> lk(metaMu);
+      process = targetProcess;
+      title = targetTitle;
+    }
+    std::ostringstream oss;
+    oss << " streamGen=" << streamGenerationState.load(std::memory_order_acquire)
+        << " selectedId=" << selectedWindowId.load(std::memory_order_acquire)
+        << " targetHwnd=0x" << std::hex << hwnd << std::dec
+        << " pid=" << pid
+        << " process=" << process
+        << " title=" << (title.empty() ? "<empty>" : title);
+    return oss.str();
+  }
 };
 
 }  // namespace remote60::native_poc

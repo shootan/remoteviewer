@@ -32,6 +32,20 @@ struct KickState {
   // A window/monitor selection must open with an IDR: non-key AUs of that generation are dropped.
   uint64_t selectionFirstKeyframePendingGeneration = 0;
   uint64_t selectionFirstKeyframeDropCount = 0;
+
+  // --- behaviour (Phase 2-1: former main() lambdas arm_trailing_kick / cancel_trailing_kick) ---
+  static constexpr uint64_t kTrailingKickDelayUs = 150000;  // 150ms trailing edge
+  // (Re)arm the trailing-edge kick to fire kTrailingKickDelayUs after atUs. Raw mode has no
+  // encoder to flush, so it is a no-op there.
+  void Arm(uint64_t atUs, bool useH264) {
+    if (!useH264) return;
+    pending = true;
+    dueAtUs = atUs + kTrailingKickDelayUs;
+  }
+  void Cancel() {
+    pending = false;
+    dueAtUs = 0;
+  }
 };
 
 }  // namespace remote60::native_poc
