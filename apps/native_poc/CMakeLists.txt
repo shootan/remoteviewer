@@ -65,7 +65,19 @@ add_executable(remote60_native_video_host_poc
   src/host_encoded_sender.cpp
   src/host_capture_session.cpp
   src/host_encoder_manager.cpp
-  src/host_main_loop.cpp
+  src/host_loop_helpers.cpp
+  src/host_stage_time_limit.cpp
+  src/host_stage_backend.cpp
+  src/host_stage_stream_active.cpp
+  src/host_stage_runtime_tune.cpp
+  src/host_stage_selection.cpp
+  src/host_stage_geometry.cpp
+  src/host_stage_watchdogs.cpp
+  src/host_stage_pace.cpp
+  src/host_stage_pop_frame.cpp
+  src/host_stage_gate_static.cpp
+  src/host_stage_encode_send.cpp
+  src/host_stage_stats.cpp
   src/d3d_capture_readback.cpp
   src/directory_client.cpp
   src/gdi_capture_process.cpp
