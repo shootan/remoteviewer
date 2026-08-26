@@ -473,7 +473,7 @@ struct RateControlState {
 
 // Trailing-edge kick + periodic static refresh + selection-first-keyframe fence (Phase 1-8 state
 // struct). The kick resubmits the cached last raw frame once, 150ms after the last real capture,
-// so a held frame leaves the encoder on a still screen; the static refresh re-serves it at a low
+// so a held frame leaves the encoder.codec on a still screen; the static refresh re-serves it at a low
 // cadence so a quiet viewer does not look dead. See the comment block above arm_trailing_kick in
 // main() for the full rationale. thread: main encode loop only.
 struct KickState {
@@ -482,7 +482,7 @@ struct KickState {
   uint64_t lastSeenBootstrapEpoch = 0;         // session epoch we last armed for
   uint64_t lastSeenStreamGeneration = 0;       // capture generation last armed for (window-select/reattach)
   uint64_t lastRealInputCaptureUs = 0;         // capture ts of the most recent real frame fed to the MFT
-  uint64_t lastEmittedAuCaptureUs = 0;         // capture ts seen on the most recent emitted AU (encoder output)
+  uint64_t lastEmittedAuCaptureUs = 0;         // capture ts seen on the most recent emitted AU (encoder.codec output)
   uint64_t lastKickedForInputCaptureUs = 0;    // one-kick-per-held-input guard
   uint64_t count = 0;                          // telemetry: total trailing-edge kicks served
   uint64_t lastSourceAgeUs = 0;                // telemetry: cached-frame age at the last kick
@@ -784,6 +784,97 @@ struct SessionState {
   std::condition_variable epochCv;
 };
 
+// Zero-copy encode bookkeeping. A surface handed to the MFT stays reserved until the
+// encoder's total output count passes the frame's submission -- only then is its texture
+// provably no longer being read.
+struct Nv12PendingRelease {
+  int32_t slot = -1;
+  uint64_t generation = 0;
+  uint64_t requiredOutputs = 0;
+};
+
+// Encoder management (Phase 1-5 state struct): the MFT wrapper, the active/nominal encode
+// geometry and rate parameters (what the encoder runs at right now, as opposed to what the user
+// asked for -- see RateControlState ceilings), the runtime-tune request from the control thread,
+// the keyframe-request token bucket, the force-key submit latch, the zero-copy NV12 surface
+// bookkeeping, the output-liveness (starvation) heartbeat, and the stats-interval encode counters.
+// See the comment blocks in main() (refit debounce, force-key latch, starvation heartbeat) for
+// the rationale of each group.
+// thread: main encode loop owns everything except the tune* atomics, which the control thread
+// sets from ControlRuntimeEncoderConfig and the main loop consumes (cross-thread).
+struct EncoderState {
+  H264Encoder codec;
+  bool mfStarted = false;
+  bool experimentEnabled = false;   // REMOTE60_NATIVE_ENCODED_EXPERIMENT(_FORCE)
+  std::string tuneMode;             // REMOTE60_NATIVE_ENCODER_TUNE_MODE (default low_latency)
+  // Viewer keyframe-request token bucket (REMOTE60_NATIVE_KEYREQ_*).
+  uint32_t keyReqMinIntervalUs = 0;
+  uint32_t keyReqTokenRefillUs = 0;
+  uint32_t keyReqTokenCapacity = 0;
+  double keyReqTokens = 0.0;
+  uint64_t keyReqLastRefillUs = 0;
+  uint64_t keyReqNextAllowedUs = 0;
+  // cross-thread: runtime tune request (control thread -> main loop).
+  std::atomic<bool> tunePending{false};
+  std::atomic<uint32_t> tuneBitrate{0};
+  std::atomic<uint32_t> tuneKeyint{0};
+  std::atomic<uint32_t> tuneFps{0};
+  std::atomic<uint32_t> tuneSeq{0};
+  bool tuneManualOverride = false;
+  // Encode geometry: initial fit, active (running), nominal (pre-aspect-fit box of the quality
+  // level), the source size the active size was fitted against, and the refit debounce.
+  uint32_t encodeW = 0;
+  uint32_t encodeH = 0;
+  uint32_t activeEncodeW = 0;
+  uint32_t activeEncodeH = 0;
+  uint32_t nominalEncodeW = 0;
+  uint32_t nominalEncodeH = 0;
+  uint32_t encodeSourceW = 0;
+  uint32_t encodeSourceH = 0;
+  uint32_t pendingRefitW = 0;
+  uint32_t pendingRefitH = 0;
+  uint64_t pendingRefitSinceUs = 0;
+  // Active rate parameters.
+  uint32_t activeFps = 0;
+  uint32_t activeBitrate = 0;
+  uint32_t keyintOverride = 0;      // REMOTE60_NATIVE_KEYINT_OVERRIDE (0 = off)
+  uint32_t activeKeyint = 0;
+  uint64_t activeFrameIntervalUs = 0;
+  uint64_t activePacingFrameIntervalUs = 0;
+  // Force-key: next input must be an IDR; submit latch so one request forces one input.
+  bool forceKeyNext = true;
+  uint64_t forceKeySubmittedAtUs = 0;
+  // Zero-copy NV12 surfaces reserved until the encoder has provably consumed them.
+  std::deque<Nv12PendingRelease> nv12PendingReleases;
+  bool surfaceEncodeHealthy = true;
+  uint64_t nv12SurfaceEncodeCount = 0;
+  uint32_t surfaceEncodeProbeCount = 0;
+  uint64_t surfaceEncodeProbeSumUs = 0;
+  // Output-liveness heartbeat (a starved async MFT returns empty on every call).
+  uint64_t outputSamplesTotal = 0;
+  uint64_t inputAcceptedTotal = 0;       // encode calls that handed a frame to the MFT
+  uint64_t realInputAccepted = 0;        // ... of which carried a real captured frame
+  uint64_t syntheticInputAccepted = 0;   // ... trailing-edge/bootstrap synthetic kicks
+  uint64_t outputAuTotal = 0;            // cumulative output access units produced
+  uint64_t lastOutputUs = 0;             // qpc of the last produced output (0 = never yet)
+  uint64_t noOutputSinceUs = 0;          // qpc the current no-output streak began
+  uint32_t acceptedNoOutputStreak = 0;   // consecutive accepted-input calls with no output
+  uint64_t lastStarvationLogUs = 0;      // rate-limits the anomaly line to <=1/s
+  uint64_t starveNeedInputAccum = 0;
+  uint64_t starveHaveOutputAccum = 0;
+  uint64_t starveNoEventAccum = 0;
+  uint64_t starveNotAcceptingAccum = 0;
+  uint64_t starveNeedMoreAccum = 0;
+  uint64_t starveNeedInputOnlyCalls = 0;
+  // Stats-interval encode counters.
+  uint64_t encodedFrames = 0;
+  uint64_t forceKeyInputCount = 0;       // key inputs handed to the encoder
+  uint32_t encodedSeq = 0;
+  uint64_t encodeFailCount = 0;
+  uint64_t resetCount = 0;
+  uint32_t consecutiveStaleFrames = 0;
+};
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -890,11 +981,14 @@ int main(int argc, char** argv) {
       "REMOTE60_NATIVE_FRAME_GATING_EXIT_FRAMES", kFrameGatingExitFramesDefault, 1, 30);
   frameGating.sampleTarget = env_u32_clamped(
       "REMOTE60_NATIVE_FRAME_GATING_SAMPLE_TARGET", kFrameGatingSampleTargetDefault, 128, 16384);
-  const uint32_t keyReqMinIntervalUs = env_u32_clamped(
+  // MFT wrapper, active encode geometry/rate, tune requests, key-request bucket, force-key latch,
+  // NV12 surface bookkeeping, starvation heartbeat, encode counters (EncoderState, Phase 1-5).
+  EncoderState encoder;
+  encoder.keyReqMinIntervalUs = env_u32_clamped(
       "REMOTE60_NATIVE_KEYREQ_MIN_INTERVAL_US", kKeyReqMinIntervalUsDefault, 10000, 1000000);
-  const uint32_t keyReqTokenRefillUs = env_u32_clamped(
+  encoder.keyReqTokenRefillUs = env_u32_clamped(
       "REMOTE60_NATIVE_KEYREQ_TOKEN_REFILL_US", kKeyReqTokenRefillUsDefault, 10000, 2000000);
-  const uint32_t keyReqTokenCapacity = env_u32_clamped(
+  encoder.keyReqTokenCapacity = env_u32_clamped(
       "REMOTE60_NATIVE_KEYREQ_TOKEN_CAPACITY", kKeyReqTokenCapacityDefault, 1, 16);
   // Capture liveness watchdogs + main-loop liveness stamps (WatchdogState, Phase 1-11).
   WatchdogState watchdog;
@@ -918,9 +1012,9 @@ int main(int argc, char** argv) {
       captureFramePoolBuffers = requested;
     }
   }
-  const bool encodedExperimentEnabled =
+  encoder.experimentEnabled =
       (REMOTE60_NATIVE_ENCODED_EXPERIMENT != 0) || env_truthy("REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE");
-  const std::string encoderTuneMode = [&]() {
+  encoder.tuneMode = [&]() {
     const char* raw = std::getenv("REMOTE60_NATIVE_ENCODER_TUNE_MODE");
     if (!raw || !*raw) return std::string("low_latency");
     return ascii_lower(trim_ascii(std::string(raw)));
@@ -930,7 +1024,7 @@ int main(int argc, char** argv) {
     std::cerr << "[native-video-host] unsupported codec: " << args.codec << " (supported: raw,h264)\n";
     return 11;
   }
-  if (useH264 && !encodedExperimentEnabled) {
+  if (useH264 && !encoder.experimentEnabled) {
     std::cerr << "[native-video-host] unsupported codec: " << args.codec
               << " (enable REMOTE60_NATIVE_ENCODED_EXPERIMENT or set env REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE=1)\n";
     return 11;
@@ -991,7 +1085,7 @@ int main(int argc, char** argv) {
               << gUdpKeyframePacePeakBitrateBps.load(std::memory_order_relaxed)
               << " stalePreEncodeGuard=" << (guardStalePreEncode ? 1 : 0)
               << " capturePoolBuffers=" << captureFramePoolBuffers
-              << " encoderTuneMode=" << encoderTuneMode
+              << " encoderTuneMode=" << encoder.tuneMode
               << " abr=" << (rate.abrEnabled ? "on" : "off")
               << " abrMode=" << (rate.abrQualityFirst ? "quality-first" : "default")
               << " frameGating=" << (frameGating.enabled ? "on" : "off")
@@ -999,8 +1093,8 @@ int main(int argc, char** argv) {
               << " gatingStaticPm=" << frameGating.staticThresholdPermille
               << " m9=" << (rate.m9Enabled ? "on" : "off")
               << " m9Mode=" << (rate.m9Apply ? "apply" : "dry-run")
-              << " keyReqMinUs=" << keyReqMinIntervalUs
-              << " keyReqBucketCap=" << keyReqTokenCapacity
+              << " keyReqMinUs=" << encoder.keyReqMinIntervalUs
+              << " keyReqBucketCap=" << encoder.keyReqTokenCapacity
               << " captureInputMinPushPerSec=" << watchdog.inputMinPushPerSec
               << " captureInputStallSec=" << watchdog.inputStallConsecutiveSec
               << " captureInputWarmupSec=" << watchdog.inputStallWarmupSec
@@ -1094,10 +1188,10 @@ int main(int argc, char** argv) {
   // read by the sender at dequeue to fence any item stamped for a previous session. Every item is
   // stamped with this value when enqueued. Starts at 1 to match clientSession.epoch.
   // Set by the sender thread when a same-epoch transport error re-armed the barrier. The main loop
-  // consumes it at its top -> forceKeyNext + arm_trailing_kick, because sender.requestKey is only
+  // consumes it at its top -> encoder.forceKeyNext + arm_trailing_kick, because sender.requestKey is only
   // consumed after a real frame is popped: on a static desktop no new frame arrives to carry it, so
   // the recovery IDR would never be produced. This is the only barrier-recovery signal that works
-  // when the screen is not changing. forceKeyNext must never be written from the sender thread.
+  // when the screen is not changing. encoder.forceKeyNext must never be written from the sender thread.
   // IDR telemetry written by the sender thread (per current media epoch): when the first key AU of
   // this session hit the wire, and the size/chunk count of the last key AU sent. Reset by the
   // rollover transaction so they describe the current session, not the previous one. Diagnostic
@@ -1395,11 +1489,6 @@ int main(int argc, char** argv) {
   std::atomic<bool> monitorSelectPending{false};
   std::atomic<uint64_t> captureStreamGenerationState{1};
   std::atomic<bool> windowSelectionLocked{false};
-  std::atomic<bool> runtimeTunePending{false};
-  std::atomic<uint32_t> runtimeTuneBitrate{0};
-  std::atomic<uint32_t> runtimeTuneKeyint{0};
-  std::atomic<uint32_t> runtimeTuneFps{0};
-  std::atomic<uint32_t> runtimeTuneSeq{0};
   backend.reqValue = desktop_capture_backend_code(desktop_capture_backend_from_env());
   std::atomic<bool> captureModeReqPending{false};
   std::atomic<uint32_t> captureModeReqSeq{0};
@@ -1419,9 +1508,7 @@ int main(int argc, char** argv) {
     std::string responseReason;
     std::string responseTitle;
   } windowSelectionTxn;
-  double keyReqTokens = static_cast<double>(keyReqTokenCapacity);
-  uint64_t keyReqLastRefillUs = 0;
-  uint64_t keyReqNextAllowedUs = 0;
+  encoder.keyReqTokens = static_cast<double>(encoder.keyReqTokenCapacity);
   inputRouter.targetCriteria.pid = args.inputTargetPid;
   for (const auto& name : parse_csv_lower(args.inputTargetProcess)) {
     inputRouter.targetCriteria.processNamesLower.insert(name);
@@ -2027,19 +2114,19 @@ int main(int argc, char** argv) {
         req.header = header;
         if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
         const uint64_t nowUs = qpc_now_us();
-        if (keyReqLastRefillUs == 0) keyReqLastRefillUs = nowUs;
-        if (nowUs > keyReqLastRefillUs) {
+        if (encoder.keyReqLastRefillUs == 0) encoder.keyReqLastRefillUs = nowUs;
+        if (nowUs > encoder.keyReqLastRefillUs) {
           const double refill =
-              static_cast<double>(nowUs - keyReqLastRefillUs) / static_cast<double>(keyReqTokenRefillUs);
+              static_cast<double>(nowUs - encoder.keyReqLastRefillUs) / static_cast<double>(encoder.keyReqTokenRefillUs);
           if (refill > 0.0) {
-            keyReqTokens = std::min<double>(static_cast<double>(keyReqTokenCapacity), keyReqTokens + refill);
-            keyReqLastRefillUs = nowUs;
+            encoder.keyReqTokens = std::min<double>(static_cast<double>(encoder.keyReqTokenCapacity), encoder.keyReqTokens + refill);
+            encoder.keyReqLastRefillUs = nowUs;
           }
         }
-        const bool minIntervalOk = (keyReqNextAllowedUs == 0 || nowUs >= keyReqNextAllowedUs);
-        if (keyReqTokens >= 1.0 && minIntervalOk) {
-          keyReqTokens -= 1.0;
-          keyReqNextAllowedUs = nowUs + keyReqMinIntervalUs;
+        const bool minIntervalOk = (encoder.keyReqNextAllowedUs == 0 || nowUs >= encoder.keyReqNextAllowedUs);
+        if (encoder.keyReqTokens >= 1.0 && minIntervalOk) {
+          encoder.keyReqTokens -= 1.0;
+          encoder.keyReqNextAllowedUs = nowUs + encoder.keyReqMinIntervalUs;
           clientMetrics.requestedKeyFrame = true;
           clientMetrics.keyFrameReason = req.reason;
           const uint64_t reqCount = clientMetrics.keyFrameRequestCount.fetch_add(1) + 1;
@@ -2053,7 +2140,7 @@ int main(int argc, char** argv) {
             std::cout << "[native-video-host][control] keyframe-request-throttled seq=" << req.seq
                       << " reason=" << req.reason
                       << " dropped=" << dropCount
-                      << " tokens=" << keyReqTokens
+                      << " tokens=" << encoder.keyReqTokens
                       << "\n";
           }
         }
@@ -2069,11 +2156,11 @@ int main(int argc, char** argv) {
         const bool hasKeyint = ((tune.flags & 0x2u) != 0) && tune.keyint >= 1;
         const bool hasFps = ((tune.flags & 0x4u) != 0) && tune.fps >= 1;
         if (hasBitrate || hasKeyint || hasFps) {
-          if (hasBitrate) runtimeTuneBitrate.store(tune.bitrate, std::memory_order_release);
-          if (hasKeyint) runtimeTuneKeyint.store(tune.keyint, std::memory_order_release);
-          if (hasFps) runtimeTuneFps.store(tune.fps, std::memory_order_release);
-          runtimeTuneSeq.store(tune.seq, std::memory_order_release);
-          runtimeTunePending.store(true, std::memory_order_release);
+          if (hasBitrate) encoder.tuneBitrate.store(tune.bitrate, std::memory_order_release);
+          if (hasKeyint) encoder.tuneKeyint.store(tune.keyint, std::memory_order_release);
+          if (hasFps) encoder.tuneFps.store(tune.fps, std::memory_order_release);
+          encoder.tuneSeq.store(tune.seq, std::memory_order_release);
+          encoder.tunePending.store(true, std::memory_order_release);
           std::cout << "[native-video-host][control] runtime-config seq=" << tune.seq
                     << " bitrate=" << (hasBitrate ? tune.bitrate : 0)
                     << " keyint=" << (hasKeyint ? tune.keyint : 0)
@@ -2424,8 +2511,6 @@ int main(int argc, char** argv) {
     return 6;
   }
 
-  bool mfStarted = false;
-  H264Encoder encoder;
   if (useH264) {
     const HRESULT hr = MFStartup(MF_VERSION);
     if (FAILED(hr)) {
@@ -2435,7 +2520,7 @@ int main(int argc, char** argv) {
       if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
       return 12;
     }
-    mfStarted = true;
+    encoder.mfStarted = true;
   }
 
   Microsoft::WRL::ComPtr<ID3D11Device> d3d;
@@ -2447,11 +2532,11 @@ int main(int argc, char** argv) {
     std::cerr << "[native-video-host] D3D11CreateDevice failed\n";
     closesocket(clientSession.clientSock);
     if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
-    if (mfStarted) MFShutdown();
+    if (encoder.mfStarted) MFShutdown();
     return 7;
   }
   if (useH264) {
-    (void)encoder.set_d3d11_device(d3d.Get());
+    (void)encoder.codec.set_d3d11_device(d3d.Get());
   }
   GpuBgraScaler gpuScaler;
   bool gpuScalerHealthy = false;
@@ -2532,7 +2617,7 @@ int main(int argc, char** argv) {
     std::cerr << "[native-video-host] primary monitor query failed\n";
     closesocket(clientSession.clientSock);
     if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
-    if (mfStarted) MFShutdown();
+    if (encoder.mfStarted) MFShutdown();
     return 8;
   }
   if (!captureWindowModeActive && backend.requested == DesktopCaptureBackend::Dxgi &&
@@ -2558,7 +2643,7 @@ int main(int argc, char** argv) {
       std::cerr << "[native-video-host] capture item create failed\n";
       closesocket(clientSession.clientSock);
       if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
-      if (mfStarted) MFShutdown();
+      if (encoder.mfStarted) MFShutdown();
       return 8;
     }
     captureSize = item.Size();
@@ -2574,24 +2659,24 @@ int main(int argc, char** argv) {
     std::cerr << "[native-video-host] invalid capture size\n";
     closesocket(clientSession.clientSock);
     if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
-    if (mfStarted) MFShutdown();
+    if (encoder.mfStarted) MFShutdown();
     return 9;
   }
   std::cout << "[native-video-host] desktop_backend="
             << (captureWindowModeActive ? "wgc_window" : desktop_capture_backend_name(backend.active))
             << " capture=" << captureWidth << "x" << captureHeight << "\n";
 
-  uint32_t encodeW = captureWidth;
-  uint32_t encodeH = captureHeight;
+  encoder.encodeW = captureWidth;
+  encoder.encodeH = captureHeight;
   if (useH264) {
-    choose_h264_encode_size(args, captureWidth, captureHeight, &encodeW, &encodeH, &rate.autoFallback720);
+    choose_h264_encode_size(args, captureWidth, captureHeight, &encoder.encodeW, &encoder.encodeH, &rate.autoFallback720);
   }
 
   // Whether the ladder, rather than the source size, is currently deciding the resolution. Held
   // across runtime changes so the band between the two thresholds can return the previous answer.
   rate.encodeLadderReduced = rate.autoFallback720;
-  rate.abrHighW = encodeW;
-  rate.abrHighH = encodeH;
+  rate.abrHighW = encoder.encodeW;
+  rate.abrHighH = encoder.encodeH;
   rate.abrMidW = rate.abrHighW;
   rate.abrMidH = rate.abrHighH;
   rate.abrLowW = rate.abrHighW;
@@ -2626,56 +2711,50 @@ int main(int argc, char** argv) {
   rate.m9HeightLevel2 = rate.abrHighH;
   rate.m9WidthLevel3 = rate.abrLowW;
   rate.m9HeightLevel3 = rate.abrLowH;
-  uint32_t activeEncodeW = rate.abrHighW;
-  uint32_t activeEncodeH = rate.abrHighH;
+  encoder.activeEncodeW = rate.abrHighW;
+  encoder.activeEncodeH = rate.abrHighH;
   // Nominal (pre-aspect-fit) encode box of the current quality level, and the source size
   // the active encode dimensions were fitted against.
-  uint32_t nominalEncodeW = rate.abrHighW;
-  uint32_t nominalEncodeH = rate.abrHighH;
-  uint32_t encodeSourceW = captureWidth;
-  uint32_t encodeSourceH = captureHeight;
+  encoder.nominalEncodeW = rate.abrHighW;
+  encoder.nominalEncodeH = rate.abrHighH;
+  encoder.encodeSourceW = captureWidth;
+  encoder.encodeSourceH = captureHeight;
   // Refit debounce: candidate geometry and how long it has been stable.
-  uint32_t pendingRefitW = 0;
-  uint32_t pendingRefitH = 0;
-  uint64_t pendingRefitSinceUs = 0;
   constexpr uint64_t kEncodeRefitSettleUs = 400000;  // 0.4 s of stable size before re-init
-  uint32_t activeFps = args.fps;
-  // What the user asked for, as distinct from whatever the encoder is running at this
+  encoder.activeFps = args.fps;
+  // What the user asked for, as distinct from whatever the encoder.codec is running at this
   // moment: overview mode lowers the active values on purpose, and restoring focus from
   // "whatever is active" would restore the lowered ones. Only an explicit runtime tune of
   // the same field moves a ceiling -- a bitrate-only tune falls back to active values for
   // its fps/keyint arguments, and those must not leak in here.
   rate.userFpsCeiling = args.fps;
   rate.userKeyintCeiling = args.keyint;
-  uint32_t activeBitrate = rate.abrHighBitrate;
+  encoder.activeBitrate = rate.abrHighBitrate;
   // Field A/B override for the keyframe interval (0 = off). Every ~1s a 120-160KB IDR was
   // measured holding the previous frame an extra tick on 75% of key presents (the user's
   // "periodically shows the previous frame"); this pins keyint (e.g. 120) without touching the
   // client, winning over both the CLI default and runtime tunes.
-  const uint32_t keyintOverride = env_u32_clamped("REMOTE60_NATIVE_KEYINT_OVERRIDE", 0, 0, 600);
-  uint32_t activeKeyint = keyintOverride != 0 ? keyintOverride : args.keyint;
-  uint64_t activeFrameIntervalUs =
-      std::max<uint64_t>(1, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, activeFps)));
-  uint64_t activePacingFrameIntervalUs = activeFrameIntervalUs;
-  std::atomic<uint64_t> captureSubmitMinIntervalUs{activeFrameIntervalUs};
+  encoder.keyintOverride = env_u32_clamped("REMOTE60_NATIVE_KEYINT_OVERRIDE", 0, 0, 600);
+  encoder.activeKeyint = encoder.keyintOverride != 0 ? encoder.keyintOverride : args.keyint;
+  encoder.activeFrameIntervalUs =
+      std::max<uint64_t>(1, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, encoder.activeFps)));
+  encoder.activePacingFrameIntervalUs = encoder.activeFrameIntervalUs;
+  std::atomic<uint64_t> captureSubmitMinIntervalUs{encoder.activeFrameIntervalUs};
   std::atomic<uint64_t> nextCaptureSubmitUs{0};
-  // Picks which offered frames reach the encoder, and how evenly. Guarded by its own mutex
+  // Picks which offered frames reach the encoder.codec, and how evenly. Guarded by its own mutex
   // because capture callbacks can arrive on more than one thread across backends.
   remote60::native_poc::CaptureCadenceGate captureCadenceGate;
   std::mutex captureCadenceMu;
   frameGating.staticIntervalUs =
-      std::max<uint64_t>(activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGating.staticFps));
-  inputRouter.domainW.store(activeEncodeW, std::memory_order_release);
-  inputRouter.domainH.store(activeEncodeH, std::memory_order_release);
-  bool runtimeTuneManualOverride = false;
-  bool forceKeyNext = true;
-  // Submit latch for forceKeyNext. The async MFT can hold the key output for a few inputs, and
+      std::max<uint64_t>(encoder.activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGating.staticFps));
+  inputRouter.domainW.store(encoder.activeEncodeW, std::memory_order_release);
+  inputRouter.domainH.store(encoder.activeEncodeH, std::memory_order_release);
+  // Submit latch for encoder.forceKeyNext. The async MFT can hold the key output for a few inputs, and
   // forcing EVERY input in the meantime produced trains of 4-5 consecutive 40-160KB IDRs per
   // request (measured at 17:24:26/32/52 in the field log). One forced input per request: stamped
   // on submit, cleared when a key is accepted into the send path (on UDP that is the send-queue
   // enqueue, not the wire; a failed send re-forces via barrier recovery), and timing out (300ms)
   // so a lost key retries.
-  uint64_t forceKeySubmittedAtUs = 0;
   int64_t captureTimelineOriginUs = -1;
   int64_t auTimelineOriginUs = -1;
   auto resetHostTimelineAnchors = [&]() {
@@ -2683,14 +2762,14 @@ int main(int argc, char** argv) {
     auTimelineOriginUs = -1;
   };
   auto refresh_frame_intervals = [&]() {
-    activeFrameIntervalUs =
-        std::max<uint64_t>(1, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, activeFps)));
+    encoder.activeFrameIntervalUs =
+        std::max<uint64_t>(1, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, encoder.activeFps)));
     // Encoded capture is callback-clocked below. Raw mode uses the main tick at the exact
     // requested cadence.
-    activePacingFrameIntervalUs = activeFrameIntervalUs;
-    captureSubmitMinIntervalUs.store(activeFrameIntervalUs, std::memory_order_release);
+    encoder.activePacingFrameIntervalUs = encoder.activeFrameIntervalUs;
+    captureSubmitMinIntervalUs.store(encoder.activeFrameIntervalUs, std::memory_order_release);
     frameGating.staticIntervalUs =
-        std::max<uint64_t>(activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGating.staticFps));
+        std::max<uint64_t>(encoder.activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGating.staticFps));
   };
   refresh_frame_intervals();
   // Declared before every lambda that references them. FrameState precedes the pipeline so
@@ -2701,54 +2780,26 @@ int main(int argc, char** argv) {
   // first create_staging call.
   remote60::native_poc::D3dCaptureReadbackPipeline captureReadback;
   remote60::native_poc::D3dCaptureReadbackPipeline::PublishFn capturePublishFn;
-  // Zero-copy encode bookkeeping. A surface handed to the MFT stays reserved until the
-  // encoder's total output count passes the frame's submission -- only then is its texture
-  // provably no longer being read.
-  struct Nv12PendingRelease {
-    int32_t slot = -1;
-    uint64_t generation = 0;
-    uint64_t requiredOutputs = 0;
-  };
-  std::deque<Nv12PendingRelease> nv12PendingReleases;
-  bool surfaceEncodeHealthy = true;
-  uint64_t encoderOutputSamplesTotal = 0;
   // Encoder OUTPUT-liveness heartbeat. The main-loop liveness watchdog only tracks loop iteration
   // progress (watchdog.mainLoopProgressUs), which keeps advancing even when the async hardware MFT accepts
   // input every call but emits no output access unit -- an output-starvation wedge that freezes the
-  // video while the loop still spins and the watchdog stays green. These track real encoder output
+  // video while the loop still spins and the watchdog stays green. These track real encoder.codec output
   // progress so that stall is observable (and, later, recoverable). Diagnostic-only in this commit.
-  uint64_t encoderInputAcceptedTotal = 0;      // encode calls that handed a frame to the MFT
-  uint64_t encoderRealInputAccepted = 0;       // ... of which carried a real captured frame
-  uint64_t encoderSyntheticInputAccepted = 0;  // ... trailing-edge/bootstrap synthetic kicks
-  uint64_t encoderOutputAuTotal = 0;           // cumulative output access units produced
-  uint64_t lastEncoderOutputUs = 0;            // qpc of the last produced output (0 = never yet)
-  uint64_t encoderNoOutputSinceUs = 0;         // qpc the current no-output streak began (catches
-                                               // a from-startup encoder that never emits one AU)
-  uint32_t encoderAcceptedNoOutputStreak = 0;  // consecutive accepted-input calls with no output
-  uint64_t lastEncoderStarvationLogUs = 0;     // rate-limits the anomaly line to <=1/s
+                                               // a from-startup encoder.codec that never emits one AU)
   // Async-event counters accumulated ACROSS the current no-output streak (reset when output
   // resumes) so one anomaly line can tell a host event-driving bug (NeedInput accrues, HaveOutput
   // stays 0) from a genuine vendor/hardware stall, rather than showing only the last call's counts.
-  uint64_t starveNeedInputAccum = 0;
-  uint64_t starveHaveOutputAccum = 0;
-  uint64_t starveNoEventAccum = 0;
-  uint64_t starveNotAcceptingAccum = 0;
-  uint64_t starveNeedMoreAccum = 0;
-  uint64_t starveNeedInputOnlyCalls = 0;
-  // Clears the CURRENT starvation episode (not the lifetime totals). Must run whenever the encoder
+  // Clears the CURRENT starvation episode (not the lifetime totals). Must run whenever the encoder.codec
   // is shut down + reinitialized or the stream (re)activates, otherwise a no-output streak left over
-  // from the previous encoder -- or a long stream-inactive gap -- would inflate noOutputAgeUs and
-  // fire a false starvation log on the fresh encoder's first inputs.
+  // from the previous encoder.codec -- or a long stream-inactive gap -- would inflate noOutputAgeUs and
+  // fire a false starvation log on the fresh encoder.codec's first inputs.
   auto reset_encoder_starvation_episode = [&]() {
-    encoderNoOutputSinceUs = 0;
-    encoderAcceptedNoOutputStreak = 0;
-    lastEncoderStarvationLogUs = 0;
-    starveNeedInputAccum = starveHaveOutputAccum = starveNoEventAccum = 0;
-    starveNotAcceptingAccum = starveNeedMoreAccum = starveNeedInputOnlyCalls = 0;
+    encoder.noOutputSinceUs = 0;
+    encoder.acceptedNoOutputStreak = 0;
+    encoder.lastStarvationLogUs = 0;
+    encoder.starveNeedInputAccum = encoder.starveHaveOutputAccum = encoder.starveNoEventAccum = 0;
+    encoder.starveNotAcceptingAccum = encoder.starveNeedMoreAccum = encoder.starveNeedInputOnlyCalls = 0;
   };
-  uint64_t nv12SurfaceEncodeCount = 0;
-  uint32_t surfaceEncodeProbeCount = 0;
-  uint64_t surfaceEncodeProbeSumUs = 0;
   int32_t poppedNv12Slot = -1;
   uint64_t poppedNv12Generation = 0;
 
@@ -2758,54 +2809,54 @@ int main(int argc, char** argv) {
     // (runtime tune, capture-UI overview/focus, ABR/M9 refit) -- pinning it in just one caller
     // let another quietly revert the override with its own cached keyint. Ceiling bookkeeping
     // upstream stays based on what the CLIENT actually requested.
-    if (keyintOverride != 0) targetKeyint = keyintOverride;
+    if (encoder.keyintOverride != 0) targetKeyint = encoder.keyintOverride;
     // Callers pass the nominal box for the current ABR/M9 level. Remember it so a later
     // source-size change can be re-fitted against the same budget instead of ratcheting down.
-    nominalEncodeW = targetW;
-    nominalEncodeH = targetH;
-    fit_size_preserving_aspect(encodeSourceW, encodeSourceH, targetW, targetH, &targetW, &targetH);
+    encoder.nominalEncodeW = targetW;
+    encoder.nominalEncodeH = targetH;
+    fit_size_preserving_aspect(encoder.encodeSourceW, encoder.encodeSourceH, targetW, targetH, &targetW, &targetH);
 
-    const bool keyintChanged = (targetKeyint != activeKeyint);
-    const bool fpsChanged = (targetFps != activeFps);
-    const bool resizeChanged = (targetW != activeEncodeW || targetH != activeEncodeH);
-    const bool bitrateChanged = (targetBitrate != activeBitrate);
+    const bool keyintChanged = (targetKeyint != encoder.activeKeyint);
+    const bool fpsChanged = (targetFps != encoder.activeFps);
+    const bool resizeChanged = (targetW != encoder.activeEncodeW || targetH != encoder.activeEncodeH);
+    const bool bitrateChanged = (targetBitrate != encoder.activeBitrate);
 
     if (keyintChanged || fpsChanged || resizeChanged) {
-      encoder.shutdown();
+      encoder.codec.shutdown();
       // The shutdown flushed the MFT, so every in-flight surface is released.
-      for (const auto& pending : nv12PendingReleases) {
+      for (const auto& pending : encoder.nv12PendingReleases) {
         captureReadback.ReleaseNv12Slot(pending.slot, pending.generation);
       }
-      nv12PendingReleases.clear();
-      surfaceEncodeHealthy = true;
-      if (!encoder.initialize(targetW, targetH, targetFps, targetBitrate, targetKeyint)) {
+      encoder.nv12PendingReleases.clear();
+      encoder.surfaceEncodeHealthy = true;
+      if (!encoder.codec.initialize(targetW, targetH, targetFps, targetBitrate, targetKeyint)) {
         return false;
       }
       resetHostTimelineAnchors();
       reset_encoder_starvation_episode();
       // shutdown+initialize discarded any pending key input; a stale latch here would delay the
-      // fresh encoder's needed IDR by up to the 300ms retry window.
-      forceKeySubmittedAtUs = 0;
+      // fresh encoder.codec's needed IDR by up to the 300ms retry window.
+      encoder.forceKeySubmittedAtUs = 0;
     } else if (bitrateChanged) {
-      if (!encoder.reconfigure_bitrate(targetBitrate)) {
-        encoder.shutdown();
-        if (!encoder.initialize(targetW, targetH, targetFps, targetBitrate, targetKeyint)) {
+      if (!encoder.codec.reconfigure_bitrate(targetBitrate)) {
+        encoder.codec.shutdown();
+        if (!encoder.codec.initialize(targetW, targetH, targetFps, targetBitrate, targetKeyint)) {
           return false;
         }
         resetHostTimelineAnchors();
         reset_encoder_starvation_episode();
         // Same contract as the other reinit sites: shutdown discarded any pending key input.
-        forceKeySubmittedAtUs = 0;
+        encoder.forceKeySubmittedAtUs = 0;
       }
     }
 
-    activeEncodeW = targetW;
-    activeEncodeH = targetH;
-    activeFps = targetFps;
-    activeBitrate = targetBitrate;
-    activeKeyint = targetKeyint;
-    inputRouter.domainW.store(activeEncodeW, std::memory_order_release);
-    inputRouter.domainH.store(activeEncodeH, std::memory_order_release);
+    encoder.activeEncodeW = targetW;
+    encoder.activeEncodeH = targetH;
+    encoder.activeFps = targetFps;
+    encoder.activeBitrate = targetBitrate;
+    encoder.activeKeyint = targetKeyint;
+    inputRouter.domainW.store(encoder.activeEncodeW, std::memory_order_release);
+    inputRouter.domainH.store(encoder.activeEncodeH, std::memory_order_release);
     // The pacing budget follows the active bitrate. It used to be computed once at startup,
     // so after an ABR downshift frames kept leaving at the launch rate (bursts the network
     // just asked us to stop), and after an upshift sends were throttled below the new rate.
@@ -2813,7 +2864,7 @@ int main(int argc, char** argv) {
                                      ? 0ULL
                                      : std::max<uint64_t>(
                                            udpPacePeakFloorBps,
-                                           (static_cast<uint64_t>(activeBitrate) *
+                                           (static_cast<uint64_t>(encoder.activeBitrate) *
                                             udpPacePeakPercent) /
                                                100ULL);
     const uint32_t pacePeakBpsClamped =
@@ -2821,9 +2872,9 @@ int main(int argc, char** argv) {
     if (gUdpPacePeakBitrateBps.load(std::memory_order_relaxed) != pacePeakBpsClamped) {
       gUdpPacePeakBitrateBps.store(pacePeakBpsClamped, std::memory_order_relaxed);
       std::cout << "[native-video-host] pacing update udpPacePeakBps=" << pacePeakBpsClamped
-                << " bitrate=" << activeBitrate << "\n";
+                << " bitrate=" << encoder.activeBitrate << "\n";
     }
-    captureReadback.SetOutputSize(activeEncodeW, activeEncodeH);
+    captureReadback.SetOutputSize(encoder.activeEncodeW, encoder.activeEncodeH);
     refresh_frame_intervals();
     return true;
   };
@@ -2837,31 +2888,31 @@ int main(int argc, char** argv) {
     // client to reconfigure twice and fire a keyframe-request storm.
     if (captureWindowModeActive && !allowWindowOverride) return;
     if (newW < 2 || newH < 2) return;
-    if (newW == encodeSourceW && newH == encodeSourceH) return;  // already fit to this source
-    encodeSourceW = newW;
-    encodeSourceH = newH;
-    pendingRefitW = 0;
-    pendingRefitH = 0;
-    pendingRefitSinceUs = 0;
-    const uint32_t prevEncW = activeEncodeW;
-    const uint32_t prevEncH = activeEncodeH;
+    if (newW == encoder.encodeSourceW && newH == encoder.encodeSourceH) return;  // already fit to this source
+    encoder.encodeSourceW = newW;
+    encoder.encodeSourceH = newH;
+    encoder.pendingRefitW = 0;
+    encoder.pendingRefitH = 0;
+    encoder.pendingRefitSinceUs = 0;
+    const uint32_t prevEncW = encoder.activeEncodeW;
+    const uint32_t prevEncH = encoder.activeEncodeH;
     // Confirmed change: no aspectClose skip. A smaller same-aspect source must still shrink
     // activeEncode to avoid upscaling. Passing the current nominal box re-fits activeEncode from
     // the new encodeSource aspect and rebuilds the MFT immediately, instead of after the 0.4s settle.
-    if (apply_encoder_target(nominalEncodeW, nominalEncodeH, activeFps, activeBitrate, activeKeyint)) {
-      forceKeyNext = true;
+    if (apply_encoder_target(encoder.nominalEncodeW, encoder.nominalEncodeH, encoder.activeFps, encoder.activeBitrate, encoder.activeKeyint)) {
+      encoder.forceKeyNext = true;
       resetHostTimelineAnchors();
       std::cout << "[native-video-host] capture-geometry-confirmed reason=" << reason
                 << " source=" << newW << "x" << newH
                 << " encode=" << prevEncW << "x" << prevEncH
-                << "->" << activeEncodeW << "x" << activeEncodeH << "\n";
+                << "->" << encoder.activeEncodeW << "x" << encoder.activeEncodeH << "\n";
     }
   };
 
   auto apply_capture_ui_quality_mode = [&](bool overviewMode, uint64_t nowUs) -> bool {
     if (!useH264) return true;
     // Derived from the live ceiling, not from the m9 level constants: those are frozen at
-    // encoder initialization, so a host born at 3 Mbps regressed to its birth bitrate and
+    // encoder.codec initialization, so a host born at 3 Mbps regressed to its birth bitrate and
     // size every time the client left overview mode -- and set the manual override, which
     // kept ABR from ever repairing it. Same freeze as the ABR profiles, one more door in.
     // (The m9 adaptive levels themselves are still the frozen constants; that ladder is off
@@ -2883,7 +2934,7 @@ int main(int argc, char** argv) {
       return false;
     }
     rate.encodeLadderReduced = sizeChoice.reduced;
-    runtimeTuneManualOverride = true;
+    encoder.tuneManualOverride = true;
     rate.abrCooldownUntilUs = nowUs + 3000000ULL;
     rate.abrGoodSeconds = 0;
     rate.abrModeratePressureSeconds = 0;
@@ -2892,16 +2943,16 @@ int main(int argc, char** argv) {
     rate.m9CooldownUntilUs = nowUs + static_cast<uint64_t>(rate.m9CooldownSec) * 1000000ULL;
     rate.m9DownPressureSeconds = 0;
     rate.m9UpPressureSeconds = 0;
-    forceKeyNext = true;
+    encoder.forceKeyNext = true;
     return true;
   };
 
   if (useH264) {
-    if (!encoder.initialize(activeEncodeW, activeEncodeH, activeFps, activeBitrate, activeKeyint)) {
+    if (!encoder.codec.initialize(encoder.activeEncodeW, encoder.activeEncodeH, encoder.activeFps, encoder.activeBitrate, encoder.activeKeyint)) {
       std::cerr << "[native-video-host] H264 encoder initialize failed\n";
       closesocket(clientSession.clientSock);
       if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
-      if (mfStarted) MFShutdown();
+      if (encoder.mfStarted) MFShutdown();
       return 13;
     }
     resetHostTimelineAnchors();
@@ -2909,14 +2960,14 @@ int main(int argc, char** argv) {
     const std::string requestedEncoderBackendPrint =
         requestedEncoderBackend.empty() ? "default(mft_auto)" : requestedEncoderBackend;
     const std::string backendFallbackReason =
-        backend_fallback_reason(requestedEncoderBackend, encoder.backend_name());
-    std::cout << "[native-video-host] H264 encoder backend=" << encoder.backend_name()
+        backend_fallback_reason(requestedEncoderBackend, encoder.codec.backend_name());
+    std::cout << "[native-video-host] H264 encoder backend=" << encoder.codec.backend_name()
               << " backendRequested=" << requestedEncoderBackendPrint
-              << " backendResolved=" << encoder.backend_name()
+              << " backendResolved=" << encoder.codec.backend_name()
               << " backendFallbackReason=" << backendFallbackReason
-              << " hw=" << (encoder.using_hardware() ? 1 : 0)
+              << " hw=" << (encoder.codec.using_hardware() ? 1 : 0)
               << " captureSize=" << captureWidth << "x" << captureHeight
-              << " encodeSize=" << activeEncodeW << "x" << activeEncodeH
+              << " encodeSize=" << encoder.activeEncodeW << "x" << encoder.activeEncodeH
               << " auto720=" << (rate.autoFallback720 ? 1 : 0)
               << " abrMidProfile=" << rate.abrMidW << "x" << rate.abrMidH
               << " abrMidBitrate=" << rate.abrMidBitrate
@@ -3105,7 +3156,7 @@ int main(int argc, char** argv) {
         return false;
       }
       if (useH264) {
-        (void)encoder.set_d3d11_device(d3d.Get());
+        (void)encoder.codec.set_d3d11_device(d3d.Get());
       }
       gpuScaler = GpuBgraScaler();
       gpuScalerHealthy = false;
@@ -3122,12 +3173,12 @@ int main(int argc, char** argv) {
       }
     }
     if (useH264) {
-      captureReadback.SetOutputSize(activeEncodeW, activeEncodeH);
+      captureReadback.SetOutputSize(encoder.activeEncodeW, encoder.activeEncodeH);
       // Opt-in until a healthy-driver A/B lands: the path is functionally verified (color,
       // e2e), but on the bring-up machine the driver threw internal errors mid-run and an
       // H3-triggered cause could not be ruled out. The product path stays the H1/H2 one.
       captureReadback.SetNv12Enabled(
-          encoder.using_hardware() && env_truthy("REMOTE60_NATIVE_NV12_SURFACE"));
+          encoder.codec.using_hardware() && env_truthy("REMOTE60_NATIVE_NV12_SURFACE"));
     }
     return true;
   };
@@ -3156,7 +3207,7 @@ int main(int argc, char** argv) {
   std::atomic<uint64_t> lastPopFrameVersion{0};
   std::atomic<uint64_t> queueDepthMax{0};
   std::atomic<uint64_t> lastCallbackUs{0};
-  // Timestamp (qpc) of the last frame actually published to the encoder ring, set in
+  // Timestamp (qpc) of the last frame actually published to the encoder.codec ring, set in
   // capturePublishFn on a valid payload -- distinct from lastCallbackUs, which is the capture time.
   // The stats line reports this as lastPublishAgeUs (diagnostic only). Deliberately not reset on a
   // restart: the age then honestly shows the publish gap and snaps back on the first new publish,
@@ -3325,7 +3376,7 @@ int main(int argc, char** argv) {
                                       uint64_t captureClockSkewUs,
                                       bool hasNewContent) {
     if (!src) return;
-    // WGC/DXGI commonly callback at the monitor refresh rate even when the encoder target is
+    // WGC/DXGI commonly callback at the monitor refresh rate even when the encoder.codec target is
     // 30fps. Submitting all 60 copies made the staging ring and GPU fight over obsolete
     // frames; query completion then oscillated between 16 and 50ms. Limit before the copy,
     // using a phase-preserving deadline so the accepted frames stay evenly spaced.
@@ -3382,7 +3433,7 @@ int main(int argc, char** argv) {
     std::cerr << "[native-video-host] capture readback pipeline create failed\n";
     closesocket(clientSession.clientSock);
     if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
-    if (mfStarted) MFShutdown();
+    if (encoder.mfStarted) MFShutdown();
     return 10;
   }
 
@@ -3648,7 +3699,7 @@ int main(int argc, char** argv) {
         config.width = newW;
         config.height = newH;
         const uint32_t gdiDefaultFps =
-            activeFps >= 50 ? std::min<uint32_t>(120u, activeFps + 4u) : activeFps;
+            encoder.activeFps >= 50 ? std::min<uint32_t>(120u, encoder.activeFps + 4u) : encoder.activeFps;
         config.fps = env_u32_clamped("REMOTE60_GDI_CAPTURE_FPS",
                                      gdiDefaultFps, 1, 120);
         config.captureLayeredWindows = env_truthy("REMOTE60_GDI_CAPTURE_LAYERED");
@@ -3775,7 +3826,7 @@ int main(int argc, char** argv) {
     captureReadback.Shutdown();
     closesocket(clientSession.clientSock);
     if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
-    if (mfStarted) MFShutdown();
+    if (encoder.mfStarted) MFShutdown();
     return 10;
   }
   powerKeepalive.SetStreaming(clientSession.streamControlActive.load(std::memory_order_acquire), true);
@@ -3784,11 +3835,11 @@ int main(int argc, char** argv) {
   uint64_t nextTickUs = startUs;
   // For encoded path, latency is prioritized over strict send pacing.
   // Raw path keeps legacy pacing to avoid excessive CPU/bandwidth burst.
-  // Encoded capture callbacks are already phase-limited to activeFps before GPU readback.
+  // Encoded capture callbacks are already phase-limited to encoder.activeFps before GPU readback.
   // A second independent main-loop clock periodically woke just before the callback, waited
   // only a quarter-frame, then slept to its next tick; the meanwhile-arriving frame was
   // overwritten by the following callback. Consume encoded frames directly from the CV so
-  // every accepted 30 Hz capture reaches the encoder. Raw mode still needs its own clock.
+  // every accepted 30 Hz capture reaches the encoder.codec. Raw mode still needs its own clock.
   const bool paceByTick = useRaw;
   const uint64_t captureWindowRebindIntervalUs =
       static_cast<uint64_t>(std::max<uint32_t>(200, args.captureWindowRebindIntervalMs)) * 1000ULL;
@@ -3801,23 +3852,18 @@ int main(int argc, char** argv) {
   const uint32_t statsPrintEverySec =
       env_u32_clamped("REMOTE60_NATIVE_STATS_PRINT_EVERY_SEC", 30, 1, 3600);
   uint64_t statTicks = 0;
-  uint64_t encodedFrames = 0;
   // Encoded frames the sender queue policy discarded (backlog resync or waiting for the
   // forced IDR). These are the frames a viewer experiences as a freeze.
-  // Session media barrier / IDR telemetry (encode-thread side). forceKeyInputCount and
+  // Session media barrier / IDR telemetry (encode-thread side). encoder.forceKeyInputCount and
   // sender.nonKeyAuWhileWaiting reset per print interval; sender.firstKeyEnqueuedUs is per media epoch (reset by
   // the rollover transaction). Goal: tell "encoder never produced a key" apart from "key produced
   // but lost in UDP assembly". Diagnostic only -- never fed to ABR.
-  uint64_t forceKeyInputCount = 0;    // key inputs handed to the encoder
   uint64_t rawEquivalentBytes = 0;
   uint64_t skippedByOverwrite = 0;
   uint64_t lastVersionSent = 0;
   uint64_t tracePrinted = 0;
-  uint32_t encodedSeq = 0;
-  uint64_t encodeFailCount = 0;
   uint64_t staleEncodedDropCount = 0;
   uint64_t stalePreEncodeDropCount = 0;
-  uint64_t encoderResetCount = 0;
   uint64_t gpuScaleAttempts = 0;
   uint64_t gpuScaleSuccess = 0;
   uint64_t gpuScaleFail = 0;
@@ -3848,7 +3894,6 @@ int main(int argc, char** argv) {
   uint64_t captureAgeMaxUs = 0;
   uint64_t callbackToEncodeStartSumUs = 0;
   uint64_t callbackToEncodeStartMaxUs = 0;
-  uint32_t consecutiveStaleEncodedFrames = 0;
   uint64_t idleHoldTotal = 0;
   uint64_t lastSendStartUs = 0;
   uint64_t firstSentLoggedGeneration = 0;
@@ -3876,7 +3921,7 @@ int main(int argc, char** argv) {
     const uint64_t keepaliveIntervalUs =
         (captureStallKeepaliveIntervalUsOverride > 0)
             ? std::max<uint64_t>(kQueueWaitTimeoutUsMin, captureStallKeepaliveIntervalUsOverride)
-            : std::max<uint64_t>(kQueueWaitTimeoutUsMin, activeFrameIntervalUs);
+            : std::max<uint64_t>(kQueueWaitTimeoutUsMin, encoder.activeFrameIntervalUs);
     const uint64_t dynamicTimeoutUs =
         std::max<uint64_t>(kQueueWaitTimeoutUsMin, keepaliveIntervalUs / 4ULL);
     return std::min<uint64_t>(kQueueWaitTimeoutUsDefault, dynamicTimeoutUs);
@@ -3955,7 +4000,7 @@ int main(int argc, char** argv) {
       sender.lastKeyAuBytes.store(0, std::memory_order_relaxed);
       sender.lastKeyAuChunks.store(0, std::memory_order_relaxed);
     }
-    forceKeyNext = true;
+    encoder.forceKeyNext = true;
     sender.firstKeyEnqueuedUs = 0;  // re-anchor the per-epoch IDR telemetry on the new session
     std::cout << "[native-video-host] udp peer updated; media barrier armed epoch="
               << sender.mediaSessionEpoch.load(std::memory_order_acquire) << " forcing keyframe\n";
@@ -4187,17 +4232,17 @@ int main(int argc, char** argv) {
       clientMetrics.udpAssemblyDropPm = 0;
       clientMetrics.requestedKeyFrame = false;
       clientMetrics.keyFrameReason = 0;
-      runtimeTunePending = false;
-      runtimeTuneBitrate = 0;
-      runtimeTuneKeyint = 0;
-      runtimeTuneFps = 0;
-      runtimeTuneSeq = 0;
-      keyReqTokens = static_cast<double>(keyReqTokenCapacity);
-      keyReqLastRefillUs = 0;
-      keyReqNextAllowedUs = 0;
-      forceKeyNext = true;
+      encoder.tunePending = false;
+      encoder.tuneBitrate = 0;
+      encoder.tuneKeyint = 0;
+      encoder.tuneFps = 0;
+      encoder.tuneSeq = 0;
+      encoder.keyReqTokens = static_cast<double>(encoder.keyReqTokenCapacity);
+      encoder.keyReqLastRefillUs = 0;
+      encoder.keyReqNextAllowedUs = 0;
+      encoder.forceKeyNext = true;
       kick.selectionFirstKeyframeDropCount = 0;
-      encodedSeq = 0;
+      encoder.encodedSeq = 0;
       lastSendStartUs = 0;
       frameGating.lastSentUs = 0;
       {
@@ -4413,10 +4458,10 @@ int main(int argc, char** argv) {
     lastCaptureUsForInterval.store(0, std::memory_order_release);
     lastCallbackUs.store(0, std::memory_order_release);
     resetHostTimelineAnchors();
-    // Confirmed window selection: re-fit the encoder to the FINAL window geometry now (before the
+    // Confirmed window selection: re-fit the encoder.codec to the FINAL window geometry now (before the
     // selection first-frame gate opens), so the first IDR is already at the final size. Without this,
     // apply_confirmed_capture_geometry (called inside restart_capture_session) bails for window mode
-    // and the encoder stays at the pre-selection size -- the client would get an old-size IDR, then a
+    // and the encoder.codec stays at the pre-selection size -- the client would get an old-size IDR, then a
     // new-size IDR a frame later, and reconfigure twice. A window DRAG still returns early there and
     // keeps the 0.4s settle. The desktop selection already re-fit through the non-window path.
     if (nextCaptureWindowModeActive && useH264) {
@@ -4429,7 +4474,7 @@ int main(int argc, char** argv) {
       }
       apply_confirmed_capture_geometry(finalW, finalH, "window-select", /*allowWindowOverride=*/true);
     }
-    forceKeyNext = true;
+    encoder.forceKeyNext = true;
     kick.selectionFirstKeyframePendingGeneration = nextCaptureStreamGeneration;
     kick.selectionFirstKeyframeDropCount = 0;
     ++captureRestartCount;
@@ -4443,14 +4488,14 @@ int main(int argc, char** argv) {
     return true;
   };
 
-  // --- Trailing-edge encoder kick (host main/encode thread only) ----------------------------
+  // --- Trailing-edge encoder.codec kick (host main/encode thread only) ----------------------------
   // The async H.264 MFT holds the most recent input frame until the NEXT input arrives, so on a
   // still screen the last real capture (the state after a drag-release, a right-click menu, the
-  // first frame after connect) stays stuck inside the encoder and never reaches the wire. This kick
+  // first frame after connect) stays stuck inside the encoder.codec and never reaches the wire. This kick
   // supplies exactly one "next input" on a trailing edge: every real frame (re)arms a 150ms timer,
   // so continuous motion just pushes the deadline out (zero synthetic frames); only when changes
   // stop does the timer fire and resubmit the cached last raw frame once, flushing the held frame
-  // out. A kick is cancelled the moment the latest real input is observed coming out of the encoder
+  // out. A kick is cancelled the moment the latest real input is observed coming out of the encoder.codec
   // (its capture timestamp on an emitted AU) or -- on a fresh media barrier -- the epoch's first key
   // AU reaches the wire. Kicks are kept out of ABR/rate evidence: a single sparse frame is not a
   // congestion signal. This is NOT a periodic keepalive -- nothing is sent while the screen is quiet.
@@ -4520,7 +4565,7 @@ int main(int argc, char** argv) {
   std::thread mainLoopWatchdog([&]() {
     constexpr uint64_t kHangNormalUs = 10'000'000;   // Loop / EncodeCall
     constexpr uint64_t kHangSlowUs = 20'000'000;     // CaptureRestart / Startup (legit slow)
-    constexpr uint64_t kStartupGraceUs = 30'000'000;  // device/encoder bring-up before arming
+    constexpr uint64_t kStartupGraceUs = 30'000'000;  // device/encoder.codec bring-up before arming
     const uint64_t watchdogStartUs = qpc_now_us();
     while (!stop.load(std::memory_order_acquire)) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1000));
@@ -4583,13 +4628,13 @@ int main(int argc, char** argv) {
       }
     }
     // Barrier recovery: the sender thread re-armed sender.waitingForKey after a same-epoch send
-    // failure and cannot itself produce an IDR (forceKeyNext is main-thread-owned, and on a static
+    // failure and cannot itself produce an IDR (encoder.forceKeyNext is main-thread-owned, and on a static
     // desktop no new frame arrives to carry sender.requestKey). Consume the flag here, before the
     // frame wait, and both force the next encode to be a key AND arm the trailing kick so the kick
     // resubmits the cached raw frame when the screen is not changing -- otherwise a re-armed barrier
     // on a still desktop would never open.
     if (sender.recoveryPending.exchange(false, std::memory_order_acq_rel)) {
-      forceKeyNext = true;
+      encoder.forceKeyNext = true;
       arm_trailing_kick(nowUs);
     }
     if (backend.reqPending.exchange(false, std::memory_order_acq_rel)) {
@@ -4615,7 +4660,7 @@ int main(int argc, char** argv) {
             lastCaptureUsForInterval.store(0, std::memory_order_release);
             lastCallbackUs.store(0, std::memory_order_release);
             resetHostTimelineAnchors();
-            forceKeyNext = true;
+            encoder.forceKeyNext = true;
             flush_capture_pipeline_state("desktop-backend-switch");
             std::cout << "[native-video-host][control] desktop-backend-applied seq=" << reqSeq
                       << " requested=" << desktop_capture_backend_name(backend.requested)
@@ -4666,7 +4711,7 @@ int main(int argc, char** argv) {
       lastCaptureUsForInterval.store(0, std::memory_order_release);
       lastCallbackUs.store(0, std::memory_order_release);
       resetHostTimelineAnchors();
-      forceKeyNext = true;
+      encoder.forceKeyNext = true;
       flush_capture_pipeline_state("dxgi-runtime-fallback");
     }
     if (clientSession.streamControlActive.load(std::memory_order_acquire) &&
@@ -4693,7 +4738,7 @@ int main(int argc, char** argv) {
       lastCaptureUsForInterval.store(0, std::memory_order_release);
       lastCallbackUs.store(0, std::memory_order_release);
       resetHostTimelineAnchors();
-      forceKeyNext = true;
+      encoder.forceKeyNext = true;
       flush_capture_pipeline_state("gdi-runtime-fallback");
     }
 
@@ -4769,7 +4814,7 @@ int main(int argc, char** argv) {
             lastCaptureUsForInterval.store(0, std::memory_order_release);
             lastCallbackUs.store(0, std::memory_order_release);
             resetHostTimelineAnchors();
-            forceKeyNext = true;
+            encoder.forceKeyNext = true;
             flush_capture_pipeline_state(promoted ? "desktop-backend-restored"
                                                   : "desktop-backend-retry-failed");
           }
@@ -4878,43 +4923,43 @@ int main(int argc, char** argv) {
                   << desktop_capture_backend_name(backend.active) << "\n";
       }
       streamActiveApplied = true;
-      forceKeyNext = true;
+      encoder.forceKeyNext = true;
       // A returning viewer on a still desktop needs a picture too; arm the trailing-edge kick for
       // the current epoch (coalesces with any arm from the epoch/generation edges above). This also
       // covers the stream-inactive->active edge and a capture reattach, which both land here.
       arm_trailing_kick(qpc_now_us());
       powerKeepalive.SetStreaming(true, true);
       // A stream-inactive->active edge starts a fresh streaming episode; drop any no-output streak
-      // left from before so the inactive gap is not mistaken for encoder starvation.
+      // left from before so the inactive gap is not mistaken for encoder.codec starvation.
       reset_encoder_starvation_episode();
       std::cout << "[native-video-host] stream active; forcing keyframe\n";
     }
-    if (useH264 && runtimeTunePending.exchange(false, std::memory_order_acq_rel)) {
-      const uint32_t reqSeq = runtimeTuneSeq.load(std::memory_order_acquire);
-      const uint32_t requestedBitrate = runtimeTuneBitrate.load(std::memory_order_acquire);
+    if (useH264 && encoder.tunePending.exchange(false, std::memory_order_acq_rel)) {
+      const uint32_t reqSeq = encoder.tuneSeq.load(std::memory_order_acquire);
+      const uint32_t requestedBitrate = encoder.tuneBitrate.load(std::memory_order_acquire);
       const bool bitrateExplicit = requestedBitrate >= 100000;
       uint32_t targetBitrate = requestedBitrate;
-      uint32_t targetKeyint = runtimeTuneKeyint.load(std::memory_order_acquire);
-      uint32_t targetFps = runtimeTuneFps.load(std::memory_order_acquire);
+      uint32_t targetKeyint = encoder.tuneKeyint.load(std::memory_order_acquire);
+      uint32_t targetFps = encoder.tuneFps.load(std::memory_order_acquire);
       // Explicitness is recorded before the fallbacks fill the gaps: the fallbacks are the
       // CURRENT values, and only what the user actually asked for may move a ceiling. A
-      // bitrate-only tune sent while overview mode has activeFps lowered would otherwise
+      // bitrate-only tune sent while overview mode has encoder.activeFps lowered would otherwise
       // write that lowered value into rate.userFpsCeiling -- the exact contamination the ceiling
       // exists to prevent, back in through a side door.
       const bool fpsExplicit = targetFps >= 1;
       const bool keyintExplicit = targetKeyint >= 1;
-      if (targetBitrate < 100000) targetBitrate = activeBitrate;
-      if (targetKeyint < 1) targetKeyint = activeKeyint;
-      if (targetFps < 1) targetFps = activeFps;
-      const bool bitrateChanged = (targetBitrate != activeBitrate);
-      const bool keyintChanged = (targetKeyint != activeKeyint);
-      const bool fpsChanged = (targetFps != activeFps);
+      if (targetBitrate < 100000) targetBitrate = encoder.activeBitrate;
+      if (targetKeyint < 1) targetKeyint = encoder.activeKeyint;
+      if (targetFps < 1) targetFps = encoder.activeFps;
+      const bool bitrateChanged = (targetBitrate != encoder.activeBitrate);
+      const bool keyintChanged = (targetKeyint != encoder.activeKeyint);
+      const bool fpsChanged = (targetFps != encoder.activeFps);
       // A request can match the ACTIVE value while changing the CEILING: with ABR sitting on
       // its low profile at 6.6 Mbps, a user lowering the ceiling from 12M to exactly 6.6M
       // changes nothing active -- and used to be dropped whole, leaving the profiles, the
       // ladder, and the manual-override reset all unrun. The ceiling comparisons catch what
       // the active comparisons cannot; apply_encoder_target is a no-op for identical targets,
-      // so entering the block for a ceiling-only change costs no encoder restart.
+      // so entering the block for a ceiling-only change costs no encoder.codec restart.
       const bool bitrateCeilingChanged = bitrateExplicit && (targetBitrate != rate.abrHighBitrate);
       const bool fpsCeilingChanged = fpsExplicit && (targetFps != rate.userFpsCeiling);
       const bool keyintCeilingChanged = keyintExplicit && (targetKeyint != rate.userKeyintCeiling);
@@ -4937,10 +4982,10 @@ int main(int argc, char** argv) {
         }
         // The resolution follows the bitrate, because the bitrate is a budget for the whole
         // frame: the same 3 Mbps buys four times as much per pixel at 720p. Switching to mobile
-        // has to take the picture size down with it, or the encoder spends the difference
+        // has to take the picture size down with it, or the encoder.codec spends the difference
         // predicting badly every time the screen changes at once.
-        uint32_t ladderW = nominalEncodeW;
-        uint32_t ladderH = nominalEncodeH;
+        uint32_t ladderW = encoder.nominalEncodeW;
+        uint32_t ladderH = encoder.nominalEncodeH;
         bool ladderReducedNext = rate.encodeLadderReduced;
         if (bitrateExplicit) {
           const auto choice = remote60::native_poc::choose_encode_resolution(
@@ -4948,9 +4993,9 @@ int main(int argc, char** argv) {
           ladderReducedNext = choice.reduced;
           ladderW = choice.width;
           ladderH = choice.height;
-          if (ladderW != nominalEncodeW || ladderH != nominalEncodeH) {
-            std::cout << "[native-video-host][control] encode ladder " << nominalEncodeW << "x"
-                      << nominalEncodeH << " -> " << ladderW << "x" << ladderH
+          if (ladderW != encoder.nominalEncodeW || ladderH != encoder.nominalEncodeH) {
+            std::cout << "[native-video-host][control] encode ladder " << encoder.nominalEncodeW << "x"
+                      << encoder.nominalEncodeH << " -> " << ladderW << "x" << ladderH
                       << " for " << (targetBitrate / 1000) << "kbps\n";
           }
         }
@@ -4965,12 +5010,12 @@ int main(int argc, char** argv) {
         rate.encodeLadderReduced = ladderReducedNext;
         if (fpsExplicit) rate.userFpsCeiling = targetFps;
         if (keyintExplicit) rate.userKeyintCeiling = targetKeyint;
-        runtimeTuneManualOverride = false;
+        encoder.tuneManualOverride = false;
         rate.abrCooldownUntilUs = nowUs + 3000000ULL;
         rate.abrGoodSeconds = 0;
         rate.abrModeratePressureSeconds = 0;
         rate.abrSeverePressureSeconds = 0;
-        forceKeyNext = true;
+        encoder.forceKeyNext = true;
         if (fpsChanged && !captureWindowModeActive.load(std::memory_order_acquire) &&
             backend.active == DesktopCaptureBackend::Gdi) {
           if (!restart_capture_session()) {
@@ -4982,12 +5027,12 @@ int main(int argc, char** argv) {
           flush_capture_pipeline_state("gdi-fps-change");
         }
         std::cout << "[native-video-host][control] runtime-config-applied seq=" << reqSeq
-                  << " bitrate=" << activeBitrate
-                  << " keyint=" << activeKeyint
-                  << " fps=" << activeFps
+                  << " bitrate=" << encoder.activeBitrate
+                  << " keyint=" << encoder.activeKeyint
+                  << " fps=" << encoder.activeFps
                   // Was hardcoded "abrOverride=1", which misreported the ABR ladder as pinned --
                   // the actual flag is cleared just above, so print the real state.
-                  << " abrOverride=" << (runtimeTuneManualOverride ? 1 : 0) << "\n";
+                  << " abrOverride=" << (encoder.tuneManualOverride ? 1 : 0) << "\n";
       }
     }
     {
@@ -5071,7 +5116,7 @@ int main(int argc, char** argv) {
             lastCaptureUsForInterval.store(0, std::memory_order_release);
             lastCallbackUs.store(0, std::memory_order_release);
             resetHostTimelineAnchors();
-            forceKeyNext = true;
+            encoder.forceKeyNext = true;
             std::cout << "[native-video-host][control] monitor-select applied id=" << requestedId
                       << " " << target.width << "x" << target.height
                       << " at " << target.x << "," << target.y << "\n";
@@ -5120,9 +5165,9 @@ int main(int argc, char** argv) {
             }
             std::cout << "[native-video-host][control] capture-mode applied seq=" << reqSeq
                       << " mode=overview"
-                      << " bitrate=" << activeBitrate
-                      << " fps=" << activeFps
-                      << " encode=" << activeEncodeW << "x" << activeEncodeH
+                      << " bitrate=" << encoder.activeBitrate
+                      << " fps=" << encoder.activeFps
+                      << " encode=" << encoder.activeEncodeW << "x" << encoder.activeEncodeH
                       << "\n";
           } else {
             std::cerr << "[native-video-host][control] capture-mode overview restart failed seq=" << reqSeq << "\n";
@@ -5194,9 +5239,9 @@ int main(int argc, char** argv) {
                         << " pid=" << selected.pid
                         << " process=" << (selected.processName.empty() ? "unknown" : selected.processName)
                         << " title=" << (selected.title.empty() ? "<empty>" : wide_to_utf8(selected.title))
-                        << " bitrate=" << activeBitrate
-                        << " fps=" << activeFps
-                        << " encode=" << activeEncodeW << "x" << activeEncodeH
+                        << " bitrate=" << encoder.activeBitrate
+                        << " fps=" << encoder.activeFps
+                        << " encode=" << encoder.activeEncodeW << "x" << encoder.activeEncodeH
                         << "\n";
             } else {
               std::cerr << "[native-video-host][control] capture-mode focus restart failed seq=" << reqSeq << "\n";
@@ -5244,7 +5289,7 @@ int main(int argc, char** argv) {
               lastCaptureUsForInterval.store(0, std::memory_order_release);
               lastCallbackUs.store(0, std::memory_order_release);
               resetHostTimelineAnchors();
-              forceKeyNext = true;
+              encoder.forceKeyNext = true;
               std::cout << "[native-video-host] capture-window rebound hwnd=0x" << std::hex << nextRaw << std::dec
                         << " pid=" << hostCaptureTargetPid.load(std::memory_order_relaxed)
                         << " process=" << targetProc
@@ -5303,7 +5348,7 @@ int main(int argc, char** argv) {
           resetHostTimelineAnchors();
           // Force an IDR at the (now correct) geometry. An interactive drag still lets the encode
           // size catch up on the 0.4s refit path; only the capture pool was resized here.
-          forceKeyNext = true;
+          encoder.forceKeyNext = true;
           uint32_t newCapW = 0;
           uint32_t newCapH = 0;
           {
@@ -5330,7 +5375,7 @@ int main(int argc, char** argv) {
         lastCaptureUsForInterval.store(0, std::memory_order_release);
         lastCallbackUs.store(0, std::memory_order_release);
         resetHostTimelineAnchors();
-        forceKeyNext = true;
+        encoder.forceKeyNext = true;
         std::cout << "[native-video-host] capture session restarted reason=size-change count="
                   << captureRestartCount << "\n";
       } else {
@@ -5361,7 +5406,7 @@ int main(int argc, char** argv) {
           lastCaptureUsForInterval.store(0, std::memory_order_release);
           lastCallbackUs.store(0, std::memory_order_release);
           resetHostTimelineAnchors();
-          forceKeyNext = true;
+          encoder.forceKeyNext = true;
           ++watchdog.deadRestartCount;
           std::cout << "[native-video-host] capture session restarted count=" << captureRestartCount
                     << " captureDeadRestartCount=" << watchdog.deadRestartCount
@@ -5461,7 +5506,7 @@ int main(int argc, char** argv) {
           lastCaptureUsForInterval.store(0, std::memory_order_release);
           lastCallbackUs.store(0, std::memory_order_release);
           resetHostTimelineAnchors();
-          forceKeyNext = true;
+          encoder.forceKeyNext = true;
           ++watchdog.deadRestartCount;
           ++watchdog.frozenRingRestartCount;
           std::cout << "[native-video-host] capture session restarted reason=frozen-ring count="
@@ -5487,10 +5532,10 @@ int main(int argc, char** argv) {
       }
       // Preserve the target phase after a normal sub-frame timer overshoot. Re-anchor only
       // when processing actually missed a whole frame, avoiding both drift and catch-up bursts.
-      if (nowUs > nextTickUs + activePacingFrameIntervalUs) {
+      if (nowUs > nextTickUs + encoder.activePacingFrameIntervalUs) {
         nextTickUs = nowUs;
       }
-      nextTickUs += activePacingFrameIntervalUs;
+      nextTickUs += encoder.activePacingFrameIntervalUs;
     }
 
     std::shared_ptr<std::vector<uint8_t>> payload;
@@ -5549,9 +5594,9 @@ int main(int argc, char** argv) {
         if (needKick && kick_try_fill(payload, w, h, stride, nowUs)) {
           servedBootstrap = true;
           // A closed barrier needs a real IDR; an ordinary trailing edge on an open stream can ride
-          // the held frame as-is (a P-frame is fine). Leave any pre-existing forceKeyNext untouched.
+          // the held frame as-is (a P-frame is fine). Leave any pre-existing encoder.forceKeyNext untouched.
           if (barrierClosed) {
-            forceKeyNext = true;
+            encoder.forceKeyNext = true;
             kickForcedKey = true;
           }
           seq = 0;
@@ -5656,7 +5701,7 @@ int main(int argc, char** argv) {
     // NB: a real frame pop deliberately does NOT cancel the kick. The pending timer is (re)armed and
     // kick.lastRealInputCaptureUs recorded once the frame is actually fed to the MFT (see below), so the
     // deadline trails the LAST real input; the kick then cancels only when that input is observed
-    // coming out of the encoder, not merely because a frame was popped.
+    // coming out of the encoder.codec, not merely because a frame was popped.
     if (poppedNv12Slot >= 0) {
       // The previous iteration bailed out before encoding (gating skip, stale drop);
       // release its claimed conversion now.
@@ -5739,10 +5784,10 @@ int main(int argc, char** argv) {
       }
 
       const bool keyReqPending = clientMetrics.requestedKeyFrame.load(std::memory_order_acquire);
-      const uint64_t targetIntervalUs = frameGating.staticMode ? frameGating.staticIntervalUs : activeFrameIntervalUs;
+      const uint64_t targetIntervalUs = frameGating.staticMode ? frameGating.staticIntervalUs : encoder.activeFrameIntervalUs;
       // The static interval throttles idle scenes; it must never hold back a frame that
       // actually changed, or the first interaction after idle arrives late.
-      // In paced motion mode the main tick already enforces activeFrameIntervalUs. Applying
+      // In paced motion mode the main tick already enforces encoder.activeFrameIntervalUs. Applying
       // the same interval here a second time makes a slightly-early capture timestamp skip
       // the entire tick (measured 1-6 lost frames/s at 60fps). Keep this limiter only for
       // static throttling or the explicitly unpaced throughput path.
@@ -5789,9 +5834,9 @@ int main(int argc, char** argv) {
       const uint64_t sendIntervalUs =
           (lastSendStartUs > 0 && sendStartUs >= lastSendStartUs) ? (sendStartUs - lastSendStartUs) : 0;
       const uint64_t sendIntervalErrUs =
-          (activeFrameIntervalUs > 0 && sendIntervalUs > 0)
-              ? ((sendIntervalUs >= activeFrameIntervalUs) ? (sendIntervalUs - activeFrameIntervalUs)
-                                                           : (activeFrameIntervalUs - sendIntervalUs))
+          (encoder.activeFrameIntervalUs > 0 && sendIntervalUs > 0)
+              ? ((sendIntervalUs >= encoder.activeFrameIntervalUs) ? (sendIntervalUs - encoder.activeFrameIntervalUs)
+                                                           : (encoder.activeFrameIntervalUs - sendIntervalUs))
               : 0;
       const uint64_t queueToSendUs = (sendStartUs >= queuePopUs) ? (sendStartUs - queuePopUs) : 0;
       const uint64_t sendWaitUs = queueToSendUs;
@@ -5951,37 +5996,37 @@ int main(int argc, char** argv) {
       // EVERY frame of an interactive window drag, and apply_encoder_target tears the MFT
       // down, so two guards keep this from thrashing: the geometry must hold steady for a
       // settle period, and near-identical aspect (letterboxing under 2%) is left alone.
-      if (!servedBootstrap && w > 0 && h > 0 && (w != encodeSourceW || h != encodeSourceH)) {
+      if (!servedBootstrap && w > 0 && h > 0 && (w != encoder.encodeSourceW || h != encoder.encodeSourceH)) {
         const uint64_t nowRefitUs = qpc_now_us();
-        if (w != pendingRefitW || h != pendingRefitH) {
-          pendingRefitW = w;
-          pendingRefitH = h;
-          pendingRefitSinceUs = nowRefitUs;
-        } else if (nowRefitUs - pendingRefitSinceUs >= kEncodeRefitSettleUs) {
-          uint32_t refitW = activeEncodeW;
-          uint32_t refitH = activeEncodeH;
-          fit_size_preserving_aspect(w, h, nominalEncodeW, nominalEncodeH, &refitW, &refitH);
+        if (w != encoder.pendingRefitW || h != encoder.pendingRefitH) {
+          encoder.pendingRefitW = w;
+          encoder.pendingRefitH = h;
+          encoder.pendingRefitSinceUs = nowRefitUs;
+        } else if (nowRefitUs - encoder.pendingRefitSinceUs >= kEncodeRefitSettleUs) {
+          uint32_t refitW = encoder.activeEncodeW;
+          uint32_t refitH = encoder.activeEncodeH;
+          fit_size_preserving_aspect(w, h, encoder.nominalEncodeW, encoder.nominalEncodeH, &refitW, &refitH);
           const double activeAspect =
-              static_cast<double>(activeEncodeW) / static_cast<double>(std::max(1u, activeEncodeH));
+              static_cast<double>(encoder.activeEncodeW) / static_cast<double>(std::max(1u, encoder.activeEncodeH));
           const double refitAspect =
               static_cast<double>(refitW) / static_cast<double>(std::max(1u, refitH));
           const bool aspectClose =
               std::abs(refitAspect - activeAspect) <= activeAspect * 0.02;
-          encodeSourceW = w;
-          encodeSourceH = h;
-          if ((refitW != activeEncodeW || refitH != activeEncodeH) && !aspectClose) {
-            const uint32_t prevW = activeEncodeW;
-            const uint32_t prevH = activeEncodeH;
-            const uint32_t keepNominalW = nominalEncodeW;
-            const uint32_t keepNominalH = nominalEncodeH;
-            if (apply_encoder_target(keepNominalW, keepNominalH, activeFps, activeBitrate,
-                                     activeKeyint)) {
-              forceKeyNext = true;
+          encoder.encodeSourceW = w;
+          encoder.encodeSourceH = h;
+          if ((refitW != encoder.activeEncodeW || refitH != encoder.activeEncodeH) && !aspectClose) {
+            const uint32_t prevW = encoder.activeEncodeW;
+            const uint32_t prevH = encoder.activeEncodeH;
+            const uint32_t keepNominalW = encoder.nominalEncodeW;
+            const uint32_t keepNominalH = encoder.nominalEncodeH;
+            if (apply_encoder_target(keepNominalW, keepNominalH, encoder.activeFps, encoder.activeBitrate,
+                                     encoder.activeKeyint)) {
+              encoder.forceKeyNext = true;
               std::cout << "[native-video-host] encode-refit source=" << w << "x" << h
-                        << " encode=" << prevW << "x" << prevH << " -> " << activeEncodeW << "x"
-                        << activeEncodeH << "\n";
+                        << " encode=" << prevW << "x" << prevH << " -> " << encoder.activeEncodeW << "x"
+                        << encoder.activeEncodeH << "\n";
             } else {
-              // apply_encoder_target already shut the encoder down; without a working encoder
+              // apply_encoder_target already shut the encoder.codec down; without a working encoder.codec
               // every later frame fails silently, so treat this like the other callers do.
               std::cerr << "[native-video-host] encode-refit failed source=" << w << "x" << h
                         << "; stopping stream\n";
@@ -5990,17 +6035,17 @@ int main(int argc, char** argv) {
           }
         }
       } else {
-        pendingRefitW = 0;
-        pendingRefitH = 0;
+        encoder.pendingRefitW = 0;
+        encoder.pendingRefitH = 0;
       }
-      const bool wantSurfaceEncode = useH264 && nv12Slot >= 0 && surfaceEncodeHealthy &&
-                                     nv12W == activeEncodeW && nv12H == activeEncodeH;
-      if (!wantSurfaceEncode && (activeEncodeW != w || activeEncodeH != h)) {
+      const bool wantSurfaceEncode = useH264 && nv12Slot >= 0 && encoder.surfaceEncodeHealthy &&
+                                     nv12W == encoder.activeEncodeW && nv12H == encoder.activeEncodeH;
+      if (!wantSurfaceEncode && (encoder.activeEncodeW != w || encoder.activeEncodeH != h)) {
         const uint64_t scaleStartUs = qpc_now_us();
         bool scaleOk = false;
         if (gpuScalerHealthy) {
           ++gpuScaleAttempts;
-          scaleOk = gpuScaler.scale(payload->data(), w, h, stride, activeEncodeW, activeEncodeH,
+          scaleOk = gpuScaler.scale(payload->data(), w, h, stride, encoder.activeEncodeW, encoder.activeEncodeH,
                                     &scaledBgra, &scaleReadbackTiming);
           if (scaleOk) {
             ++gpuScaleSuccess;
@@ -6023,14 +6068,14 @@ int main(int argc, char** argv) {
         }
         if (!scaleOk) {
           ++gpuScaleCpuFallback;
-          if (!resize_bgra_bilinear(payload->data(), w, h, stride, activeEncodeW, activeEncodeH, &scaledBgra)) {
+          if (!resize_bgra_bilinear(payload->data(), w, h, stride, encoder.activeEncodeW, encoder.activeEncodeH, &scaledBgra)) {
             continue;
           }
         }
         encodeSrc = scaledBgra.data();
-        encodeSrcW = activeEncodeW;
-        encodeSrcH = activeEncodeH;
-        encodeSrcStride = activeEncodeW * 4;
+        encodeSrcW = encoder.activeEncodeW;
+        encodeSrcH = encoder.activeEncodeH;
+        encodeSrcStride = encoder.activeEncodeW * 4;
         const uint64_t scaleDoneUs = qpc_now_us();
         scaleUs = (scaleDoneUs >= scaleStartUs) ? (scaleDoneUs - scaleStartUs) : 0;
       }
@@ -6055,28 +6100,28 @@ int main(int argc, char** argv) {
        if (clientMetrics.requestedKeyFrame.exchange(false)) {
         const uint16_t reason = clientMetrics.keyFrameReason.load();
         std::cout << "[native-video-host][control] keyframe-request-consumed reason=" << reason << "\n";
-        forceKeyNext = true;
+        encoder.forceKeyNext = true;
       }
       if (sender.requestKey.exchange(false, std::memory_order_acq_rel)) {
         // The sender dropped a backlog; the stream needs an IDR to resynchronize.
-        forceKeyNext = true;
+        encoder.forceKeyNext = true;
       }
        // The keyint schedule applies to REAL frames only. A kick/refresh-served synthetic frame
        // carries seq=0, and 0 % keyint == 0 made every one of them an IDR -- defeating the open-
        // barrier design of riding the held frame as a cheap P-frame (a 40-160KB IDR instead of a
-       // few-KB P, once per kick/refresh). A closed barrier still gets its IDR via forceKeyNext.
-       // A single submit latch (forceKeySubmittedAtUs) covers ALL key reasons -- request,
-       // first-frame (encodedSeq==0), and the keyint schedule: one key input pending inside the
+       // few-KB P, once per kick/refresh). A closed barrier still gets its IDR via encoder.forceKeyNext.
+       // A single submit latch (encoder.forceKeySubmittedAtUs) covers ALL key reasons -- request,
+       // first-frame (encoder.encodedSeq==0), and the keyint schedule: one key input pending inside the
        // async MFT satisfies every one of them, so none may re-force while it is in flight. The
        // measured 4-5 consecutive-IDR trains came from forcing every input until the key finally
-       // surfaced. The latch is stamped only after the encoder ACCEPTS the input (below), and
+       // surfaced. The latch is stamped only after the encoder.codec ACCEPTS the input (below), and
        // times out after 300ms so a lost key is retried.
         const uint64_t encodeStartUs = qpc_now_us();
        const bool forceKeyInFlight =
-           forceKeySubmittedAtUs != 0 && encodeStartUs < forceKeySubmittedAtUs + 300'000;
+           encoder.forceKeySubmittedAtUs != 0 && encodeStartUs < encoder.forceKeySubmittedAtUs + 300'000;
        const bool scheduledKey =
-           !servedBootstrap && (activeKeyint > 0) && ((seq % activeKeyint) == 0);
-       const bool keyWanted = forceKeyNext || (encodedSeq == 0) || scheduledKey;
+           !servedBootstrap && (encoder.activeKeyint > 0) && ((seq % encoder.activeKeyint) == 0);
+       const bool keyWanted = encoder.forceKeyNext || (encoder.encodedSeq == 0) || scheduledKey;
        const bool forceKeyFrame = keyWanted && !forceKeyInFlight;
         const uint64_t encodeInputUs = captureStampUs;
         if (captureTimelineOriginUs < 0) {
@@ -6094,150 +6139,150 @@ int main(int argc, char** argv) {
         if (wantSurfaceEncode) {
           auto nv12Tex = captureReadback.Nv12SlotTexture(nv12Slot, nv12Generation);
           if (nv12Tex &&
-              encoder.encode_frame_surface(nv12Tex.Get(), forceKeyFrame,
+              encoder.codec.encode_frame_surface(nv12Tex.Get(), forceKeyFrame,
                                            static_cast<int64_t>(encodeInputUs) * 10, &units,
                                            &encodeStats)) {
             surfaceEncoded = true;
-            ++nv12SurfaceEncodeCount;
+            ++encoder.nv12SurfaceEncodeCount;
             Nv12PendingRelease pending;
             pending.slot = nv12Slot;
             pending.generation = nv12Generation;
-            pending.requiredOutputs = encoderOutputSamplesTotal + 1;
-            nv12PendingReleases.push_back(pending);
+            pending.requiredOutputs = encoder.outputSamplesTotal + 1;
+            encoder.nv12PendingReleases.push_back(pending);
             poppedNv12Slot = -1;  // ownership moved to the deferred-release queue
             // Accepting a DXGI sample is no proof the vendor path is fast: AMF accepts them
             // and then takes ~68ms a frame on internal synchronization (measured; the CPU
             // path runs 4.5ms). Probe the first frames and drop back for the session when
             // the surface path costs more than half the 33ms frame budget on average.
-            surfaceEncodeProbeSumUs += encodeStats.encodeCallUs;
-            if (++surfaceEncodeProbeCount == 30) {
-              const uint64_t avgUs = surfaceEncodeProbeSumUs / surfaceEncodeProbeCount;
+            encoder.surfaceEncodeProbeSumUs += encodeStats.encodeCallUs;
+            if (++encoder.surfaceEncodeProbeCount == 30) {
+              const uint64_t avgUs = encoder.surfaceEncodeProbeSumUs / encoder.surfaceEncodeProbeCount;
               if (avgUs > 16000) {
-                surfaceEncodeHealthy = false;
+                encoder.surfaceEncodeHealthy = false;
                 captureReadback.SetNv12Enabled(false);
                 std::cout << "[native-video-host] nv12 surface encode too slow avgUs=" << avgUs
-                          << " backend=" << encoder.backend_name()
+                          << " backend=" << encoder.codec.backend_name()
                           << "; reverting to cpu nv12\n";
               } else {
                 std::cout << "[native-video-host] nv12 surface encode probe ok avgUs=" << avgUs
-                          << " backend=" << encoder.backend_name() << "\n";
+                          << " backend=" << encoder.codec.backend_name() << "\n";
               }
-              surfaceEncodeProbeCount = 0;
-              surfaceEncodeProbeSumUs = 0;
+              encoder.surfaceEncodeProbeCount = 0;
+              encoder.surfaceEncodeProbeSumUs = 0;
             }
           } else {
             // One rejection turns the path off for the session; this frame is dropped and
             // the next one takes the CPU route. Its slot is released at the next loop top.
-            surfaceEncodeHealthy = false;
+            encoder.surfaceEncodeHealthy = false;
             captureReadback.SetNv12Enabled(false);
             std::cout << "[native-video-host] nv12 surface encode rejected backend="
-                      << encoder.backend_name() << "; falling back to cpu nv12\n";
+                      << encoder.codec.backend_name() << "; falling back to cpu nv12\n";
             continue;
           }
         }
        if (!surfaceEncoded &&
-           !encoder.encode_frame_bgra(encodeSrc, encodeSrcW, encodeSrcH, encodeSrcStride,
+           !encoder.codec.encode_frame_bgra(encodeSrc, encodeSrcW, encodeSrcH, encodeSrcStride,
                                       forceKeyFrame, static_cast<int64_t>(encodeInputUs) * 10,
                                       &units, &encodeStats)) {
-        ++encodeFailCount;
-        if ((encodeFailCount % 60) == 1) {
-          std::cout << "[native-video-host] encode failed count=" << encodeFailCount << "\n";
+        ++encoder.encodeFailCount;
+        if ((encoder.encodeFailCount % 60) == 1) {
+          std::cout << "[native-video-host] encode failed count=" << encoder.encodeFailCount << "\n";
         }
         continue;
       }
       // Encode returned; back to ordinary work for the watchdog's threshold.
       enter_main_phase(MainLoopPhase::Loop);
       if (forceKeyFrame) {
-        // Latch/count only for inputs the encoder actually ACCEPTED: a failed encode never
+        // Latch/count only for inputs the encoder.codec actually ACCEPTED: a failed encode never
         // reached the MFT, and arming the latch for it would suppress the retry for 300ms.
-        ++forceKeyInputCount;
-        forceKeySubmittedAtUs = encodeStartUs;
+        ++encoder.forceKeyInputCount;
+        encoder.forceKeySubmittedAtUs = encodeStartUs;
       }
       if (!surfaceEncoded) {
         nv12Us = encodeStats.colorConvertUs;
         preEncodePrepUs += nv12Us;
       }
-      encoderOutputSamplesTotal += encodeStats.processOutputSamples;
+      encoder.outputSamplesTotal += encodeStats.processOutputSamples;
       if (!servedBootstrap) {
-        // A real frame was just handed to the async MFT; it becomes the encoder's held input until
+        // A real frame was just handed to the async MFT; it becomes the encoder.codec's held input until
         // the next frame arrives. Record its capture timestamp and (re)arm the trailing kick so the
         // deadline always trails the LAST real input -- continuous motion keeps pushing it out and
         // adds zero synthetic frames; only a genuine pause lets the kick fire to flush this frame.
         kick.lastRealInputCaptureUs = encodeInputUs;
         arm_trailing_kick(qpc_now_us());
       }
-      while (!nv12PendingReleases.empty() &&
-             nv12PendingReleases.front().requiredOutputs <= encoderOutputSamplesTotal) {
-        captureReadback.ReleaseNv12Slot(nv12PendingReleases.front().slot,
-                                        nv12PendingReleases.front().generation);
-        nv12PendingReleases.pop_front();
+      while (!encoder.nv12PendingReleases.empty() &&
+             encoder.nv12PendingReleases.front().requiredOutputs <= encoder.outputSamplesTotal) {
+        captureReadback.ReleaseNv12Slot(encoder.nv12PendingReleases.front().slot,
+                                        encoder.nv12PendingReleases.front().generation);
+        encoder.nv12PendingReleases.pop_front();
       }
       const uint64_t encodeEndUs = qpc_now_us();
 
       // Encoder output-liveness heartbeat. Placed BEFORE the units.empty() early-out below so a
-      // starved encoder -- which returns empty on every call -- is still observed here; the old
+      // starved encoder.codec -- which returns empty on every call -- is still observed here; the old
       // `continue` skipped the whole 1s stats / self-heal tail, so a wedge produced no telemetry at
       // all. A frame was just handed to the MFT this call, so input is advancing; only the OUTPUT is
       // in question. This block changes no control flow (diagnostic only).
-      ++encoderInputAcceptedTotal;
+      ++encoder.inputAcceptedTotal;
       if (servedBootstrap) {
-        ++encoderSyntheticInputAccepted;
+        ++encoder.syntheticInputAccepted;
       } else {
-        ++encoderRealInputAccepted;
+        ++encoder.realInputAccepted;
       }
       if (encodeStats.processOutputSamples > 0) {
-        encoderOutputAuTotal += encodeStats.processOutputSamples;
-        lastEncoderOutputUs = encodeEndUs;
-        encoderNoOutputSinceUs = 0;
-        encoderAcceptedNoOutputStreak = 0;
+        encoder.outputAuTotal += encodeStats.processOutputSamples;
+        encoder.lastOutputUs = encodeEndUs;
+        encoder.noOutputSinceUs = 0;
+        encoder.acceptedNoOutputStreak = 0;
         // Reset the episode so the next starvation logs its first line immediately, and clear the
         // per-streak async accumulators.
-        lastEncoderStarvationLogUs = 0;
-        starveNeedInputAccum = starveHaveOutputAccum = starveNoEventAccum = 0;
-        starveNotAcceptingAccum = starveNeedMoreAccum = starveNeedInputOnlyCalls = 0;
+        encoder.lastStarvationLogUs = 0;
+        encoder.starveNeedInputAccum = encoder.starveHaveOutputAccum = encoder.starveNoEventAccum = 0;
+        encoder.starveNotAcceptingAccum = encoder.starveNeedMoreAccum = encoder.starveNeedInputOnlyCalls = 0;
         // Revive watchdog.mainLoopLastSeq (previously declared but never stored, so the watchdog record read
-        // a constant 0): publish real encoder-output progress, not loop iterations. A follow-up can
+        // a constant 0): publish real encoder.codec-output progress, not loop iterations. A follow-up can
         // make the watchdog fire on this age while input is still being accepted.
-        watchdog.mainLoopLastSeq.store(encoderOutputSamplesTotal, std::memory_order_release);
+        watchdog.mainLoopLastSeq.store(encoder.outputSamplesTotal, std::memory_order_release);
       } else {
-        ++encoderAcceptedNoOutputStreak;
-        if (encoderNoOutputSinceUs == 0) encoderNoOutputSinceUs = encodeEndUs;
-        starveNeedInputAccum += encodeStats.asyncPollNeedInputCount;
-        starveHaveOutputAccum += encodeStats.asyncPollHaveOutputCount;
-        starveNoEventAccum += encodeStats.asyncPollNoEventCount;
-        starveNotAcceptingAccum += encodeStats.processInputNotAcceptingCount;
-        starveNeedMoreAccum += encodeStats.processOutputNeedMoreInputCount;
-        starveNeedInputOnlyCalls += encodeStats.asyncNeedInputOnlyCall;
-        // Age is measured from when the streak began, NOT from lastEncoderOutputUs, so an encoder
-        // that never emitted a single AU since startup (lastEncoderOutputUs==0) is still detected.
+        ++encoder.acceptedNoOutputStreak;
+        if (encoder.noOutputSinceUs == 0) encoder.noOutputSinceUs = encodeEndUs;
+        encoder.starveNeedInputAccum += encodeStats.asyncPollNeedInputCount;
+        encoder.starveHaveOutputAccum += encodeStats.asyncPollHaveOutputCount;
+        encoder.starveNoEventAccum += encodeStats.asyncPollNoEventCount;
+        encoder.starveNotAcceptingAccum += encodeStats.processInputNotAcceptingCount;
+        encoder.starveNeedMoreAccum += encodeStats.processOutputNeedMoreInputCount;
+        encoder.starveNeedInputOnlyCalls += encodeStats.asyncNeedInputOnlyCall;
+        // Age is measured from when the streak began, NOT from encoder.lastOutputUs, so an encoder.codec
+        // that never emitted a single AU since startup (encoder.lastOutputUs==0) is still detected.
         const uint64_t noOutputAgeUs =
-            (encoderNoOutputSinceUs > 0 && encodeEndUs > encoderNoOutputSinceUs)
-                ? (encodeEndUs - encoderNoOutputSinceUs)
+            (encoder.noOutputSinceUs > 0 && encodeEndUs > encoder.noOutputSinceUs)
+                ? (encodeEndUs - encoder.noOutputSinceUs)
                 : 0;
-        // Stream active + encoder keeps accepting input but produces no output for a while = the
+        // Stream active + encoder.codec keeps accepting input but produces no output for a while = the
         // async-MFT output-starvation wedge (video frozen, main loop spinning, liveness watchdog
         // green). Emit one rate-limited anomaly line with the streak-accumulated async counters so a
         // field recurrence tells a host event-driving bug (NeedInput accrues, HaveOutput stays 0)
         // from a genuine vendor/hardware stall. Recovery is a separate follow-up; diagnostic only.
         if (clientSession.streamControlActive.load(std::memory_order_acquire) &&
-            encoderAcceptedNoOutputStreak >= 8 && noOutputAgeUs >= 1000000ULL &&
-            (lastEncoderStarvationLogUs == 0 ||
-             encodeEndUs >= lastEncoderStarvationLogUs + 1000000ULL)) {
-          lastEncoderStarvationLogUs = encodeEndUs;
+            encoder.acceptedNoOutputStreak >= 8 && noOutputAgeUs >= 1000000ULL &&
+            (encoder.lastStarvationLogUs == 0 ||
+             encodeEndUs >= encoder.lastStarvationLogUs + 1000000ULL)) {
+          encoder.lastStarvationLogUs = encodeEndUs;
           std::cout << "[native-video-host] encoder-output-starvation"
-                    << " acceptedNoOutputStreak=" << encoderAcceptedNoOutputStreak
+                    << " acceptedNoOutputStreak=" << encoder.acceptedNoOutputStreak
                     << " noOutputAgeUs=" << noOutputAgeUs
-                    << " everOutput=" << (lastEncoderOutputUs > 0 ? 1 : 0)
-                    << " realIn=" << encoderRealInputAccepted
-                    << " synthIn=" << encoderSyntheticInputAccepted
-                    << " outAu=" << encoderOutputAuTotal
+                    << " everOutput=" << (encoder.lastOutputUs > 0 ? 1 : 0)
+                    << " realIn=" << encoder.realInputAccepted
+                    << " synthIn=" << encoder.syntheticInputAccepted
+                    << " outAu=" << encoder.outputAuTotal
                     << " asyncEnabled=" << static_cast<unsigned>(encodeStats.asyncEnabled)
-                    << " streakNeedInput=" << starveNeedInputAccum
-                    << " streakHaveOutput=" << starveHaveOutputAccum
-                    << " streakNeedInputOnlyCalls=" << starveNeedInputOnlyCalls
-                    << " streakNoEvent=" << starveNoEventAccum
-                    << " streakNotAccepting=" << starveNotAcceptingAccum
-                    << " streakNeedMore=" << starveNeedMoreAccum
+                    << " streakNeedInput=" << encoder.starveNeedInputAccum
+                    << " streakHaveOutput=" << encoder.starveHaveOutputAccum
+                    << " streakNeedInputOnlyCalls=" << encoder.starveNeedInputOnlyCalls
+                    << " streakNoEvent=" << encoder.starveNoEventAccum
+                    << " streakNotAccepting=" << encoder.starveNotAcceptingAccum
+                    << " streakNeedMore=" << encoder.starveNeedMoreAccum
                     << " pendingDepth=" << encodeStats.pendingInputDepth
                     << " pendingOverflow=" << encodeStats.pendingInputOverflowTotal
                     << "\n";
@@ -6284,7 +6329,7 @@ int main(int argc, char** argv) {
           const int64_t auCaptureUs = (au.sampleTimeHns > 0) ? (au.sampleTimeHns / 10) : static_cast<int64_t>(encodeInputUs);
           // This AU carries the capture timestamp of the input frame it was produced from (the async
           // MFT preserves input sample times FIFO). Observing it is the proof a given real input has
-          // finally come OUT of the encoder -- the cancel signal for the trailing kick. Track the
+          // finally come OUT of the encoder.codec -- the cancel signal for the trailing kick. Track the
           // newest we have seen so a pending kick disarms once the latest real input has emerged.
           if (auCaptureUs > 0 && static_cast<uint64_t>(auCaptureUs) > kick.lastEmittedAuCaptureUs) {
             kick.lastEmittedAuCaptureUs = static_cast<uint64_t>(auCaptureUs);
@@ -6314,19 +6359,19 @@ int main(int argc, char** argv) {
                   : 0;
         if (guardStaleEncoded && encodedAgeUs > kMaxEncodedFrameAgeUs) {
           ++staleEncodedDropCount;
-          ++consecutiveStaleEncodedFrames;
+          ++encoder.consecutiveStaleFrames;
           if ((staleEncodedDropCount % 60) == 1) {
             std::cout << "[native-video-host] stale encoded drop count=" << staleEncodedDropCount
                       << " encodedAgeUs=" << encodedAgeUs
                       << " thresholdUs=" << kMaxEncodedFrameAgeUs
-                      << " consecutive=" << consecutiveStaleEncodedFrames
+                      << " consecutive=" << encoder.consecutiveStaleFrames
                       << "\n";
           }
-          if (consecutiveStaleEncodedFrames >= kMaxConsecutiveStaleEncodedFrames) {
+          if (encoder.consecutiveStaleFrames >= kMaxConsecutiveStaleEncodedFrames) {
             std::cout << "[native-video-host] encoder reset due to stale output age="
-                      << encodedAgeUs << "us consecutive=" << consecutiveStaleEncodedFrames << "\n";
-            encoder.shutdown();
-            if (!encoder.initialize(activeEncodeW, activeEncodeH, activeFps, activeBitrate, activeKeyint)) {
+                      << encodedAgeUs << "us consecutive=" << encoder.consecutiveStaleFrames << "\n";
+            encoder.codec.shutdown();
+            if (!encoder.codec.initialize(encoder.activeEncodeW, encoder.activeEncodeH, encoder.activeFps, encoder.activeBitrate, encoder.activeKeyint)) {
             std::cerr << "[native-video-host] encoder reinitialize failed\n";
               sendFailed = true;
               break;
@@ -6334,16 +6379,16 @@ int main(int argc, char** argv) {
             resetHostTimelineAnchors();
             reset_encoder_starvation_episode();
             // Same contract as the reinit sites above: the reset discarded any pending key input.
-            forceKeySubmittedAtUs = 0;
-            ++encoderResetCount;
-            consecutiveStaleEncodedFrames = 0;
-            forceKeyNext = true;
+            encoder.forceKeySubmittedAtUs = 0;
+            ++encoder.resetCount;
+            encoder.consecutiveStaleFrames = 0;
+            encoder.forceKeyNext = true;
             encoderResetTriggered = true;
             break;
           }
           continue;
         }
-        consecutiveStaleEncodedFrames = 0;
+        encoder.consecutiveStaleFrames = 0;
 
         // The requested IDR can be delayed behind older async MFT output. Only the AU's
         // actual CleanPoint/IDR state is safe to advertise as a keyframe.
@@ -6363,7 +6408,7 @@ int main(int argc, char** argv) {
             std::cout << "[native-video-host] selection generation waiting keyframe streamGen="
                       << streamGeneration
                       << " droppedAu=" << kick.selectionFirstKeyframeDropCount
-                      << " forceKeyNext=" << (forceKeyNext ? 1 : 0)
+                      << " forceKeyNext=" << (encoder.forceKeyNext ? 1 : 0)
                       << "\n";
           }
           continue;
@@ -6373,9 +6418,9 @@ int main(int argc, char** argv) {
         hdr.header.magic = remote60::native_poc::kMagic;
         hdr.header.type = static_cast<uint16_t>(MessageType::EncodedFrameH264);
         hdr.header.size = static_cast<uint16_t>(sizeof(hdr));
-        hdr.seq = ++encodedSeq;
-        hdr.width = activeEncodeW;
-        hdr.height = activeEncodeH;
+        hdr.seq = ++encoder.encodedSeq;
+        hdr.width = encoder.activeEncodeW;
+        hdr.height = encoder.activeEncodeH;
         hdr.payloadSize = static_cast<uint32_t>(au.bytes.size());
         hdr.flags = encodedKeyFrame ? 1u : 0u;
         hdr.streamGeneration = streamGeneration;
@@ -6388,9 +6433,9 @@ int main(int argc, char** argv) {
         const uint64_t sendIntervalUs =
             (lastSendStartUs > 0 && sendStartUs >= lastSendStartUs) ? (sendStartUs - lastSendStartUs) : 0;
         const uint64_t sendIntervalErrUs =
-            (activeFrameIntervalUs > 0 && sendIntervalUs > 0)
-                ? ((sendIntervalUs >= activeFrameIntervalUs) ? (sendIntervalUs - activeFrameIntervalUs)
-                                                             : (activeFrameIntervalUs - sendIntervalUs))
+            (encoder.activeFrameIntervalUs > 0 && sendIntervalUs > 0)
+                ? ((sendIntervalUs >= encoder.activeFrameIntervalUs) ? (sendIntervalUs - encoder.activeFrameIntervalUs)
+                                                             : (encoder.activeFrameIntervalUs - sendIntervalUs))
                 : 0;
         const uint64_t queueToSendUs = (sendStartUs >= queuePopUs) ? (sendStartUs - queuePopUs) : 0;
         const uint64_t sendToEncodeUs = (sendStartUs >= encodeEndUs) ? (sendStartUs - encodeEndUs) : 0;
@@ -6417,7 +6462,7 @@ int main(int argc, char** argv) {
           } else {
             EncodedSendItem item;
             item.keyFrame = (hdr.flags & 1u) != 0;
-            item.frameIntervalUs = activeFrameIntervalUs;
+            item.frameIntervalUs = encoder.activeFrameIntervalUs;
             item.udpHdr.magic = remote60::native_poc::kMagic;
             item.udpHdr.kind = static_cast<uint16_t>(UdpPacketKind::VideoChunk);
             item.udpHdr.size = static_cast<uint16_t>(sizeof(item.udpHdr));
@@ -6541,17 +6586,17 @@ int main(int argc, char** argv) {
         // keyframe below so the normal path does not re-force one on the next real frame.
         if (!servedBootstrap) {
           ++sender.sentFrames;
-          ++encodedFrames;
+          ++encoder.encodedFrames;
           sender.sentBytes += hdr.payloadSize;
           if (!countedRawForInput) {
             rawEquivalentBytes +=
-                static_cast<uint64_t>(activeEncodeW) * static_cast<uint64_t>(activeEncodeH) * 3 / 2;
+                static_cast<uint64_t>(encoder.activeEncodeW) * static_cast<uint64_t>(encoder.activeEncodeH) * 3 / 2;
             countedRawForInput = true;
           }
         }
         if ((hdr.flags & 1u) != 0) {
-          forceKeyNext = false;
-          forceKeySubmittedAtUs = 0;
+          encoder.forceKeyNext = false;
+          encoder.forceKeySubmittedAtUs = 0;
         }
 
         if (args.traceEvery > 0 && (hdr.seq % args.traceEvery) == 0 &&
@@ -6568,9 +6613,9 @@ int main(int argc, char** argv) {
                                                                      : static_cast<uint64_t>(-captureToAuSignedDeltaUs);
           const uint64_t encUs = (encodeSpanUs >= nv12Us) ? (encodeSpanUs - nv12Us) : 0;
           const uint64_t e2sUs = (hdr.sendQpcUs >= hdr.encodeEndQpcUs) ? (hdr.sendQpcUs - hdr.encodeEndQpcUs) : 0;
-          const char* encBackendName = encoder.backend_name();
+          const char* encBackendName = encoder.codec.backend_name();
           const uint64_t encApiPathCode = encoder_api_path_code(encBackendName);
-          const uint64_t encApiHw = encoder.using_hardware() ? 1ull : 0ull;
+          const uint64_t encApiHw = encoder.codec.using_hardware() ? 1ull : 0ull;
           const HostBottleneckStage bottleneck = detect_host_bottleneck_stage(
               queueWaitUs, queueToEncodeUs, preEncodePrepUs, scaleUs, nv12Us, encUs, queueToSendUs,
               sendDurUs, sendIntervalErrUs);
@@ -6672,9 +6717,9 @@ int main(int argc, char** argv) {
         const uint64_t encUs = (encodeSpanUs >= nv12Us) ? (encodeSpanUs - nv12Us) : 0;
         const uint64_t e2sUs = (hdr.sendQpcUs >= hdr.encodeEndQpcUs) ? (hdr.sendQpcUs - hdr.encodeEndQpcUs) : 0;
         const uint64_t pipeUs = (hdr.sendQpcUs >= hdr.captureQpcUs) ? (hdr.sendQpcUs - hdr.captureQpcUs) : 0;
-        const char* encBackendName = encoder.backend_name();
+        const char* encBackendName = encoder.codec.backend_name();
         const uint64_t encApiPathCode = encoder_api_path_code(encBackendName);
-        const uint64_t encApiHw = encoder.using_hardware() ? 1ull : 0ull;
+        const uint64_t encApiHw = encoder.codec.using_hardware() ? 1ull : 0ull;
         const HostBottleneckStage bottleneck = detect_host_bottleneck_stage(
             queueWaitUs, queueToEncodeUs, preEncodePrepUs, scaleUs, nv12Us, encUs, queueToSendUs,
             sendDurUs, sendIntervalErrUs);
@@ -6838,7 +6883,7 @@ int main(int argc, char** argv) {
               lastCaptureUsForInterval.store(0, std::memory_order_release);
               lastCallbackUs.store(0, std::memory_order_release);
               resetHostTimelineAnchors();
-              forceKeyNext = true;
+              encoder.forceKeyNext = true;
               watchdog.inputLowPushStreakSec = 0;
               std::cout << "[native-video-host] capture session restarted reason="
                         << (fallbackFromGdi ? "gdi-low-push-fallback" : "capture-input-stall")
@@ -6907,7 +6952,7 @@ int main(int argc, char** argv) {
             !captureWindowModeActive.load(std::memory_order_acquire) &&
             backend.active != DesktopCaptureBackend::Gdi;
         // Warmup after the latest of: capture session start, any capture restart, or client
-        // reattach -- so the first seconds of a fresh pipeline (encoder spin-up, first IDR) never
+        // reattach -- so the first seconds of a fresh pipeline (encoder.codec spin-up, first IDR) never
         // read as a drain.
         uint64_t drainWarmupAnchorUs = captureSessionStartedUs;
         if (watchdog.lastCaptureRestartUs > drainWarmupAnchorUs) drainWarmupAnchorUs = watchdog.lastCaptureRestartUs;
@@ -6916,7 +6961,7 @@ int main(int argc, char** argv) {
         // accepted >= max(5, fps/4): a static/quiet desktop accepts almost nothing (pointer-only
         // offers never advance this count), so it stays well below the floor and cannot trip.
         const uint32_t drainAcceptFloor =
-            std::max<uint32_t>(5u, std::max<uint32_t>(1u, activeFps) / 4u);
+            std::max<uint32_t>(5u, std::max<uint32_t>(1u, encoder.activeFps) / 4u);
         const uint64_t drainPublishCeil = std::max<uint64_t>(1u, acceptedDelta / 10u);
         // Cheap arithmetic first; the uncached secure-desktop syscall runs only when a stall is
         // already indicated, so the healthy path pays no per-second OpenInputDesktop cost.
@@ -6983,7 +7028,7 @@ int main(int argc, char** argv) {
             lastCaptureUsForInterval.store(0, std::memory_order_release);
             lastCallbackUs.store(0, std::memory_order_release);
             resetHostTimelineAnchors();
-            forceKeyNext = true;
+            encoder.forceKeyNext = true;
             ++watchdog.deadRestartCount;
             ++watchdog.drainRestartCount;
             std::cout << "[native-video-host] capture session restarted reason=readback-drain count="
@@ -7059,8 +7104,8 @@ int main(int argc, char** argv) {
                   << "\n";
         }
       } else {
-        const uint64_t capAgeAvgUs = (encodedFrames > 0) ? (captureAgeSumUs / encodedFrames) : 0;
-        const uint64_t cb2eAvgUs = (encodedFrames > 0) ? (callbackToEncodeStartSumUs / encodedFrames) : 0;
+        const uint64_t capAgeAvgUs = (encoder.encodedFrames > 0) ? (captureAgeSumUs / encoder.encodedFrames) : 0;
+        const uint64_t cb2eAvgUs = (encoder.encodedFrames > 0) ? (callbackToEncodeStartSumUs / encoder.encodedFrames) : 0;
         const uint64_t captureD3DWaitAvgUs =
             (captureReadbackSamples > 0) ? (captureD3DWaitSumUs / captureReadbackSamples) : 0;
         const uint64_t captureCopyMapAvgUs =
@@ -7103,14 +7148,14 @@ int main(int argc, char** argv) {
                 ? (sender.sendDurSumUs.load(std::memory_order_relaxed) / senderSendCountNow)
                 : 0;
         if (statsPrintDue) {
-        // Age of the last frame published to the encoder -- diagnostic only. A frozen ring shows
+        // Age of the last frame published to the encoder.codec -- diagnostic only. A frozen ring shows
         // this climbing in lockstep with watchdog.oldestGpuPendingPeakUs. Per Codex: report it, but never
         // drive the watchdog off it, since a static change-driven desktop is legitimately silent.
         const uint64_t statsNowUs = qpc_now_us();
         const uint64_t lastPublishAtUs = lastPublishUs.load(std::memory_order_acquire);
         const uint64_t lastPublishAgeUs =
             (lastPublishAtUs > 0 && statsNowUs > lastPublishAtUs) ? statsNowUs - lastPublishAtUs : 0;
-        std::cout << "[native-video-host] encodedFrames=" << encodedFrames
+        std::cout << "[native-video-host] encodedFrames=" << encoder.encodedFrames
                   << " sentFrames=" << sender.sentFrames
                   << " queuePushCount=" << queuePushCount
                   << " queuePopCount=" << queuePopCount
@@ -7134,7 +7179,7 @@ int main(int argc, char** argv) {
                   << " skippedByOverwrite=" << skippedByOverwrite
                   << " stalePreEncodeDrops=" << stalePreEncodeDropCount
                   << " staleEncodedDrops=" << staleEncodedDropCount
-                  << " encoderResets=" << encoderResetCount
+                  << " encoderResets=" << encoder.resetCount
                   << " keyReqTotal=" << clientMetrics.keyFrameRequestCount.load()
                   << " keyReqDropTotal=" << clientMetrics.keyFrameRequestDropped.load()
                   << " inputEvents=" << inputRouter.events.load()
@@ -7174,7 +7219,7 @@ int main(int argc, char** argv) {
                   << " capturePreprocessFallbacks=" << captureReadback.PreprocessFallbacks()
                   << " nv12Converted=" << captureReadback.Nv12Converted()
                   << " nv12RingBusy=" << captureReadback.Nv12RingBusy()
-                  << " nv12SurfaceFrames=" << nv12SurfaceEncodeCount
+                  << " nv12SurfaceFrames=" << encoder.nv12SurfaceEncodeCount
                   << " captureD3DWaitAvgUs=" << captureD3DWaitAvgUs
                   << " captureD3DWaitMaxUs=" << captureD3DWaitMaxUs
                   << " captureCopyMapAvgUs=" << captureCopyMapAvgUs
@@ -7208,10 +7253,10 @@ int main(int argc, char** argv) {
                   << " senderHeldFrames=" << sender.heldFrames
                   << " senderSendDurAvgUs=" << senderSendDurAvgUs
                   << " senderSendDurMaxUs=" << sender.sendDurMaxUs.load(std::memory_order_relaxed)
-                  << " bitrateTarget=" << activeBitrate
-                  << " fpsTarget=" << activeFps
-                  << " keyintTarget=" << activeKeyint
-                  << " size=" << activeEncodeW << "x" << activeEncodeH
+                  << " bitrateTarget=" << encoder.activeBitrate
+                  << " fpsTarget=" << encoder.activeFps
+                  << " keyintTarget=" << encoder.activeKeyint
+                  << " size=" << encoder.activeEncodeW << "x" << encoder.activeEncodeH
                   << " gpuScaleReq=" << (gpuScalerRequested ? 1 : 0)
                   << " gpuScaleReady=" << (gpuScalerHealthy ? 1 : 0)
                   << " gpuScaleAttempts=" << gpuScaleAttempts
@@ -7233,7 +7278,7 @@ int main(int argc, char** argv) {
                   << " abrModSec=" << rate.abrModeratePressureSeconds
                   << " abrSevSec=" << rate.abrSeverePressureSeconds
                   << " abrGoodSec=" << rate.abrGoodSeconds
-                  << " abrOverride=" << (runtimeTuneManualOverride ? 1 : 0)
+                  << " abrOverride=" << (encoder.tuneManualOverride ? 1 : 0)
                   << " frameGatingMode=" << (frameGating.staticMode ? "static" : "motion")
                   << " frameGatingSkips=" << frameGating.skipCount
                   << " frameGatingStaticSkips=" << frameGating.staticSkipCount
@@ -7247,7 +7292,7 @@ int main(int argc, char** argv) {
                   << " staticRefreshCount=" << kick.staticRefreshCount
                   << " lastKickSourceAgeUs=" << kick.lastSourceAgeUs
                   << " mediaEpoch=" << sender.mediaSessionEpoch.load(std::memory_order_acquire)
-                  << " forceKeyInputCount=" << forceKeyInputCount
+                  << " forceKeyInputCount=" << encoder.forceKeyInputCount
                   << " nonKeyAuWhileWaiting=" << sender.nonKeyAuWhileWaiting
                   << " barrierRearm=" << sender.barrierRearmCount.load(std::memory_order_relaxed)
                   << " firstKeyEnqueuedUs=" << sender.firstKeyEnqueuedUs
@@ -7275,14 +7320,14 @@ int main(int argc, char** argv) {
         const uint32_t clQueueDepthH4p = metricsFresh ? clientMetrics.queueDepthH4p.load() : 0;
         const uint32_t clUdpDropPm = metricsFresh ? clientMetrics.udpAssemblyDropPm.load() : 0;
 
-        if (rate.abrEnabled && !runtimeTuneManualOverride && !rate.m9Apply) {
+        if (rate.abrEnabled && !encoder.tuneManualOverride && !rate.m9Apply) {
           // The current target, not the one the process started with. A runtime FPS tune moves
-          // activeFps, and judging against the startup args.fps would compare the client's rate
+          // encoder.activeFps, and judging against the startup args.fps would compare the client's rate
           // to a target that no longer exists -- after a tune to 20, a healthy 20 fps reads as
           // 66% of 30 and trips a demote; after a tune to 60, a struggling 20 fps reads as fine.
-          // ABR only runs when no manual override or M9 is lowering activeFps, so here it is the
+          // ABR only runs when no manual override or M9 is lowering encoder.activeFps, so here it is the
           // authoritative target. All four thresholds and the sparse floor share it.
-          const uint32_t abrExpectedFps = std::max<uint32_t>(1, activeFps);
+          const uint32_t abrExpectedFps = std::max<uint32_t>(1, encoder.activeFps);
           const uint32_t minGoodFpsX100 = abrExpectedFps * (rate.abrQualityFirst ? 95u : 93u);
           const uint32_t minOkayFpsX100 = abrExpectedFps * (rate.abrQualityFirst ? 90u : 85u);
           const uint32_t minDegradeFpsX100 = abrExpectedFps * (rate.abrQualityFirst ? 55u : 45u);
@@ -7435,12 +7480,12 @@ int main(int argc, char** argv) {
             uint32_t targetW = ladderChoice.width;
             uint32_t targetH = ladderChoice.height;
 
-            if (!apply_encoder_target(targetW, targetH, activeFps, targetBitrate, activeKeyint)) {
+            if (!apply_encoder_target(targetW, targetH, encoder.activeFps, targetBitrate, encoder.activeKeyint)) {
               std::cerr << "[native-video-host][abr] encoder profile apply failed\n";
               break;
             }
-            // Committed only once the encoder accepted the target, so a failed reinit cannot
-            // leave the hysteresis state describing an encoder that does not exist.
+            // Committed only once the encoder.codec accepted the target, so a failed reinit cannot
+            // leave the hysteresis state describing an encoder.codec that does not exist.
             rate.encodeLadderReduced = ladderChoice.reduced;
 
             rate.abrProfile = targetProfile;
@@ -7448,12 +7493,12 @@ int main(int argc, char** argv) {
             rate.abrModeratePressureSeconds = 0;
             rate.abrSeverePressureSeconds = 0;
             rate.abrCooldownUntilUs = t + 4000000ULL;
-            forceKeyNext = true;
+            encoder.forceKeyNext = true;
 
             std::cout << "[native-video-host][abr] profile="
                       << ((rate.abrProfile == 0) ? "high" : ((rate.abrProfile == 1) ? "mid" : "low"))
-                      << " encode=" << activeEncodeW << "x" << activeEncodeH
-                      << " bitrate=" << activeBitrate
+                      << " encode=" << encoder.activeEncodeW << "x" << encoder.activeEncodeH
+                      << " bitrate=" << encoder.activeBitrate
                       << " reason=" << abrReason
                       << " clientSize=" << clWidth << "x" << clHeight
                       << " clientDecodedFps=" << (clDecodedFpsX100 / 100.0)
@@ -7464,7 +7509,7 @@ int main(int argc, char** argv) {
           }
         }
 
-        if (rate.m9Enabled && !runtimeTuneManualOverride) {
+        if (rate.m9Enabled && !encoder.tuneManualOverride) {
           const bool downByClient =
               metricsFresh &&
               (clCongestionState == 2 ||
@@ -7560,11 +7605,11 @@ int main(int argc, char** argv) {
                       << " congRecMaxUs=" << clCongestionRecoveryMaxUs
                       << "\n";
             if (rate.m9Apply) {
-              if (!apply_encoder_target(targetW, targetH, targetFps, targetBitrate, activeKeyint)) {
+              if (!apply_encoder_target(targetW, targetH, targetFps, targetBitrate, encoder.activeKeyint)) {
                 std::cerr << "[native-video-host][m9] encoder target apply failed level=" << targetLevel << "\n";
                 break;
               }
-              forceKeyNext = true;
+              encoder.forceKeyNext = true;
             }
             rate.m9Level = targetLevel;
             rate.m9CooldownUntilUs = t + static_cast<uint64_t>(rate.m9CooldownSec) * 1000000ULL;
@@ -7574,7 +7619,7 @@ int main(int argc, char** argv) {
         }
       }
       sender.sentFrames = 0;
-      encodedFrames = 0;
+      encoder.encodedFrames = 0;
       sender.sentBytes = 0;
       rawEquivalentBytes = 0;
       sender.udpTxFrames = 0;
@@ -7585,7 +7630,7 @@ int main(int argc, char** argv) {
       skippedByOverwrite = 0;
       stalePreEncodeDropCount = 0;
       staleEncodedDropCount = 0;
-      encoderResetCount = 0;
+      encoder.resetCount = 0;
       callbackFrames = 0;
       captureAgeSumUs = 0;
       captureAgeMaxUs = 0;
@@ -7615,7 +7660,7 @@ int main(int argc, char** argv) {
         // Per print-interval rates: reset only once printed so they span the whole interval
         // (matching the peak resets above). firstKey*/lastKeyAu* are per media epoch and are
         // reset by the rollover transaction instead, so they persist across prints.
-        forceKeyInputCount = 0;
+        encoder.forceKeyInputCount = 0;
         sender.nonKeyAuWhileWaiting = 0;
       }
       captureUnmapSumUs = 0;
@@ -7678,8 +7723,8 @@ int main(int argc, char** argv) {
     clientSession.listenSock = INVALID_SOCKET;
   }
   if (useH264) {
-    encoder.shutdown();
-    if (mfStarted) MFShutdown();
+    encoder.codec.shutdown();
+    if (encoder.mfStarted) MFShutdown();
   }
   std::cout << "[native-video-host] done\n";
   return 0;
