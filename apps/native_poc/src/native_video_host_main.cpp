@@ -597,6 +597,52 @@ struct WatchdogState {
   std::atomic<uint64_t> mainLoopLastSeq{0};
 };
 
+// Viewer input routing (Phase 1-9 state struct): the configured injection mode, the SYSTEM
+// input-broker client used when the secure desktop (UAC / lock screen) blocks direct injection,
+// the client's input coordinate domain, the explicit --input-target criteria, the last-target /
+// keyboard state, the per-cause failure counters the field logs are read by (see the comment
+// blocks in main() that explain each counter), and the remote-cursor forwarder's last sent state.
+// thread: control thread owns injection + counters (atomics: the stats tick on the main loop
+// reads them); domainW/H are written by the main loop on geometry change and read by control;
+// the cursor* fields are main-loop only (pump_cursor_forward).
+struct InputRouterState {
+  InputInjectionMode injectionMode = InputInjectionMode::Disabled;
+  bool injectionEnabled = false;
+  SecureInputBrokerClient broker;
+  std::atomic<uint64_t> events{0};
+  // Split of what happened while a security prompt or the lock screen was in front.
+  std::atomic<uint64_t> secureAttempts{0};             // events seen while the secure desktop was up
+  std::atomic<uint64_t> secureDelivered{0};            // handed to the SYSTEM agent
+  std::atomic<uint64_t> secureBrokerFailed{0};         // agent unreachable; fell back, cannot land
+  std::atomic<uint64_t> secureSkipWindowMode{0};       // window mode never routes to the agent
+  std::atomic<uint64_t> secureSkipUnauthenticated{0};  // no directory capability to act on
+  // cross-thread: the size the client's coordinates are expressed in (main writes, control reads).
+  std::atomic<uint32_t> domainW{0};
+  std::atomic<uint32_t> domainH{0};
+  DesktopInputState desktopState;
+  CaptureWindowCriteria targetCriteria{};
+  // Outcome counters for the direct injection paths.
+  std::atomic<uint64_t> ignoredMove{0};
+  std::atomic<uint64_t> noTarget{0};
+  std::atomic<uint64_t> unsupported{0};
+  std::atomic<uint64_t> injectFail{0};
+  std::atomic<uint64_t> freshProbeSecure{0};    // cached-default event failed, uncached re-probe saw secure
+  std::atomic<uint64_t> freshProbeReroute{0};   // ...of those, the SYSTEM broker then landed the retry
+  std::atomic<uint64_t> injectFailDefault{0};   // genuine failure on the interactive desktop
+  std::atomic<uint64_t> failSetCursorPos{0};    // per-stage: which API the direct injection died in
+  std::atomic<uint64_t> failSendInputMouse{0};
+  std::atomic<uint64_t> failSendInputKey{0};
+  std::atomic<uint64_t> failPostMessage{0};
+  std::atomic<uint64_t> defaultBrokerFallback{0};  // default-desktop failures retried via the SYSTEM agent
+  std::atomic<uint64_t> defaultBrokerQueued{0};    // ...of those, written to the agent's pipe (queued, NOT landed)
+  std::atomic<uint64_t> defaultBrokerPipeFail{0};  // the pipe write itself failed
+  // Remote cursor forwarder: last sent position/visibility (movement + 250ms heartbeat while visible).
+  uint64_t cursorSendLastUs = 0;
+  int32_t cursorSentX = INT32_MIN;
+  int32_t cursorSentY = INT32_MIN;
+  bool cursorSentVisible = false;
+};
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -626,10 +672,12 @@ int main(int argc, char** argv) {
   }
 
   const Args args = parse_args(argc, argv);
-  const InputInjectionMode configuredInputInjectionMode = parse_input_injection_mode(args.inputInjectionMode);
-  const bool inputInjectionEnabled =
+  // Viewer input routing: injection mode, SYSTEM broker, counters, cursor forwarder (InputRouterState, Phase 1-9).
+  InputRouterState inputRouter;
+  inputRouter.injectionMode = parse_input_injection_mode(args.inputInjectionMode);
+  inputRouter.injectionEnabled =
       args.enableInputInjection &&
-      (configuredInputInjectionMode == InputInjectionMode::BackgroundMessage) &&
+      (inputRouter.injectionMode == InputInjectionMode::BackgroundMessage) &&
       !kInputPolicyForceBlock;
   const bool useRaw = (args.codec == "raw");
   const bool useH264 = (args.codec == "h264");
@@ -828,12 +876,12 @@ int main(int argc, char** argv) {
     std::cout << "[native-video-host] input injection blocked by compile-time policy\n";
   } else if (!args.enableInputInjection) {
     std::cout << "[native-video-host] input injection disabled (enableInputInjection=false)\n";
-  } else if (!inputInjectionEnabled) {
+  } else if (!inputRouter.injectionEnabled) {
     std::cout << "[native-video-host] input injection disabled (unsupported mode) mode="
               << args.inputInjectionMode << "\n";
   } else {
     std::cout << "[native-video-host] input injection enabled mode="
-              << input_injection_mode_name(configuredInputInjectionMode)
+              << input_injection_mode_name(inputRouter.injectionMode)
               << " targetPid=" << args.inputTargetPid
               << " targetProcess=" << trim_ascii(args.inputTargetProcess)
               << " targetTitle=" << trim_ascii(args.inputTargetTitle)
@@ -916,7 +964,6 @@ int main(int argc, char** argv) {
     return classify_directory_hello(token, peer) != DirectoryHello::Rejected;
   };
 
-  SecureInputBrokerClient secureInputBroker;
 
   // H4: the encode thread hands encoded frames to this sender instead of pacing the wire
   // inline. Pacing a 60ms keyframe used to stall the next frame's encode start directly.
@@ -1229,7 +1276,7 @@ int main(int argc, char** argv) {
     const std::wstring servicePath = remote60::native_poc::sibling_executable_path(
         L"GNLinkInputService.exe");
     const bool secureInputReady =
-        secureInputBroker.EnsureInstalledAndConnected(servicePath, &secureInputStatus);
+        inputRouter.broker.EnsureInstalledAndConnected(servicePath, &secureInputStatus);
     std::cout << "[native-video-host] secure-input ready=" << (secureInputReady ? 1 : 0)
               << " status=" << secureInputStatus << "\n";
   }
@@ -1250,15 +1297,9 @@ int main(int argc, char** argv) {
   std::cout << "[native-video-host] socket sndbuf=" << effectiveSendBuf << " bytes\n";
 
   std::atomic<bool> stop{false};
-  std::atomic<uint64_t> inputEvents{0};
-  // Split of what happened while a security prompt or the lock screen was in front. inputEvents
+  // Split of what happened while a security prompt or the lock screen was in front. inputRouter.events
   // alone cannot answer it: the fallback path reports success whether or not the click reached
   // anything, so a dead session and a working one produce identical numbers.
-  std::atomic<uint64_t> secureInputAttempts{0};       // events seen while the secure desktop was up
-  std::atomic<uint64_t> secureInputDelivered{0};      // handed to the SYSTEM agent
-  std::atomic<uint64_t> secureInputBrokerFailed{0};   // agent unreachable; fell back, cannot land
-  std::atomic<uint64_t> secureInputSkipWindowMode{0}; // window mode never routes to the agent
-  std::atomic<uint64_t> secureInputSkipUnauthenticated{0};  // no directory capability to act on
   // P2 desktop-backend promotion (WGC -> requested DXGI climb-back). Lifetime totals, never
   // per-second reset: a session-shape summary is more useful than a rate for a rare transition.
   // Desktop capture backend request/active/backoff/secure-gate/promotion telemetry (DesktopBackendState, Phase 1-4).
@@ -1280,9 +1321,6 @@ int main(int argc, char** argv) {
   std::atomic<bool> monitorSelectPending{false};
   std::atomic<uint64_t> captureStreamGenerationState{1};
   std::atomic<bool> windowSelectionLocked{false};
-  std::atomic<uint32_t> inputDomainW{0};
-  std::atomic<uint32_t> inputDomainH{0};
-  DesktopInputState desktopInputState;
   std::atomic<bool> streamControlActive{true};
   std::atomic<bool> runtimeTunePending{false};
   std::atomic<uint32_t> runtimeTuneBitrate{0};
@@ -1311,45 +1349,30 @@ int main(int argc, char** argv) {
   double keyReqTokens = static_cast<double>(keyReqTokenCapacity);
   uint64_t keyReqLastRefillUs = 0;
   uint64_t keyReqNextAllowedUs = 0;
-  CaptureWindowCriteria inputTargetCriteria{};
-  inputTargetCriteria.pid = args.inputTargetPid;
+  inputRouter.targetCriteria.pid = args.inputTargetPid;
   for (const auto& name : parse_csv_lower(args.inputTargetProcess)) {
-    inputTargetCriteria.processNamesLower.insert(name);
+    inputRouter.targetCriteria.processNamesLower.insert(name);
   }
-  inputTargetCriteria.titleNeedleLower = wide_lower(utf8_to_wide(trim_ascii(args.inputTargetTitle)));
-  std::atomic<uint64_t> inputIgnoredMove{0};
-  std::atomic<uint64_t> inputNoTarget{0};
-  std::atomic<uint64_t> inputUnsupported{0};
-  std::atomic<uint64_t> inputInjectFail{0};
+  inputRouter.targetCriteria.titleNeedleLower = wide_lower(utf8_to_wide(trim_ascii(args.inputTargetTitle)));
   // Input desktop is routed on a cached (~250ms) default/secure check; when a UAC prompt or lock
   // rises between refreshes an event lands on ordinary SendInput and fails. These split that
-  // failure by its real cause instead of piling every miss into inputInjectFail:
-  //   inputFreshProbeSecure  -- cached-default event failed, an uncached re-probe found the desktop
+  // failure by its real cause instead of piling every miss into inputRouter.injectFail:
+  //   inputRouter.freshProbeSecure  -- cached-default event failed, an uncached re-probe found the desktop
   //                             actually secure (the stale-cache case)
-  //   inputFreshProbeReroute -- of those, the ones the SYSTEM broker then landed on the retry
-  //   inputInjectFailDefault -- cached-default event failed AND an uncached re-probe still says
+  //   inputRouter.freshProbeReroute -- of those, the ones the SYSTEM broker then landed on the retry
+  //   inputRouter.injectFailDefault -- cached-default event failed AND an uncached re-probe still says
   //                             default: a genuine failure on the interactive desktop
-  std::atomic<uint64_t> inputFreshProbeSecure{0};
-  std::atomic<uint64_t> inputFreshProbeReroute{0};
-  std::atomic<uint64_t> inputInjectFailDefault{0};
   // Per-stage failure counters (which API the direct injection died in; see InputFailStage).
-  std::atomic<uint64_t> inputFailSetCursorPos{0};
-  std::atomic<uint64_t> inputFailSendInputMouse{0};
-  std::atomic<uint64_t> inputFailSendInputKey{0};
-  std::atomic<uint64_t> inputFailPostMessage{0};
-  //   inputDefaultBrokerFallback -- of the genuine default-desktop failures (e.g. SetCursorPos
+  //   inputRouter.defaultBrokerFallback -- of the genuine default-desktop failures (e.g. SetCursorPos
   //                                 denied because the control thread's desktop association is
   //                                 not the input desktop), how many were retried via the SYSTEM
   //                                 agent, which does SetThreadDesktop before SetCursorPos+SendInput
-  //   inputDefaultBrokerQueued   -- of those, how many the broker WROTE to the agent's pipe. This
+  //   inputRouter.defaultBrokerQueued   -- of those, how many the broker WROTE to the agent's pipe. This
   //                                 is a queue success, NOT proof the input landed: the agent does
   //                                 not ACK, so real delivery is confirmed only by the service log
   //                                 (%ProgramData%\GNLink\secure_input.log) and the user. Named
   //                                 "Queued" on purpose so it is never read as "Delivered".
-  //   inputDefaultBrokerPipeFail -- the pipe write itself failed (agent absent / broken pipe)
-  std::atomic<uint64_t> inputDefaultBrokerFallback{0};
-  std::atomic<uint64_t> inputDefaultBrokerQueued{0};
-  std::atomic<uint64_t> inputDefaultBrokerPipeFail{0};
+  //   inputRouter.defaultBrokerPipeFail -- the pipe write itself failed (agent absent / broken pipe)
   // One control conversation, independent of how the bytes travel. TCP works on a LAN;
   // a host behind NAT is only reachable over the punched UDP socket, so the same dispatch
   // has to serve both.
@@ -1536,12 +1559,12 @@ int main(int argc, char** argv) {
         input.header = header;
         if (!link.Read(&input.seq, sizeof(input) - sizeof(MessageHeader))) break;
         std::string resolvedTarget;
-        if (inputInjectionEnabled) {
+        if (inputRouter.injectionEnabled) {
           const bool desktopMode =
-              !inputTargetCriteria.enabled() &&
+              !inputRouter.targetCriteria.enabled() &&
               (selectedWindowIdState.load(std::memory_order_acquire) == 0);
-          const uint32_t domainW = inputDomainW.load(std::memory_order_acquire);
-          const uint32_t domainH = inputDomainH.load(std::memory_order_acquire);
+          const uint32_t domainW = inputRouter.domainW.load(std::memory_order_acquire);
+          const uint32_t domainH = inputRouter.domainH.load(std::memory_order_acquire);
           InputInjectResult injectResult = InputInjectResult::Failed;
           // Prefer the SYSTEM agent, which is the only way into elevated windows and the lock
           // screen -- but fall back when it is unavailable. The service is registered by the
@@ -1557,17 +1580,17 @@ int main(int argc, char** argv) {
           const bool secureDesktopActive = !interactive_desktop_is_default();
           bool routedToAgent = false;
           if (secureDesktopActive) {
-            secureInputAttempts.fetch_add(1, std::memory_order_relaxed);
+            inputRouter.secureAttempts.fetch_add(1, std::memory_order_relaxed);
             if (!desktopMode) {
-              secureInputSkipWindowMode.fetch_add(1, std::memory_order_relaxed);
+              inputRouter.secureSkipWindowMode.fetch_add(1, std::memory_order_relaxed);
             } else if (!sessionDirectoryAuthenticated.load(std::memory_order_acquire)) {
               // A plain-LAN session has no capability token, and the agent will not act without
               // one. Nothing about the click is wrong; it simply cannot be authorised.
-              secureInputSkipUnauthenticated.fetch_add(1, std::memory_order_relaxed);
-            } else if (!secureInputBroker.SendInputEvent(input, domainW, domainH)) {
-              secureInputBrokerFailed.fetch_add(1, std::memory_order_relaxed);
+              inputRouter.secureSkipUnauthenticated.fetch_add(1, std::memory_order_relaxed);
+            } else if (!inputRouter.broker.SendInputEvent(input, domainW, domainH)) {
+              inputRouter.secureBrokerFailed.fetch_add(1, std::memory_order_relaxed);
             } else {
-              secureInputDelivered.fetch_add(1, std::memory_order_relaxed);
+              inputRouter.secureDelivered.fetch_add(1, std::memory_order_relaxed);
               routedToAgent = true;
             }
           }
@@ -1587,23 +1610,23 @@ int main(int argc, char** argv) {
             InputFailStage directFailStage = InputFailStage::None;
             DWORD directFailError = 0;
             injectResult =
-                inject_background_input_event(input, inputTargetCriteria, hostCaptureTargetHwnd,
+                inject_background_input_event(input, inputRouter.targetCriteria, hostCaptureTargetHwnd,
                                               desktopMode, domainW, domainH,
-                                              &desktopInputState, &resolvedTarget,
+                                              &inputRouter.desktopState, &resolvedTarget,
                                               &directFailStage, &directFailError);
             if (injectResult == InputInjectResult::Failed) {
               switch (directFailStage) {
                 case InputFailStage::SetCursorPos:
-                  inputFailSetCursorPos.fetch_add(1, std::memory_order_relaxed);
+                  inputRouter.failSetCursorPos.fetch_add(1, std::memory_order_relaxed);
                   break;
                 case InputFailStage::SendInputMouse:
-                  inputFailSendInputMouse.fetch_add(1, std::memory_order_relaxed);
+                  inputRouter.failSendInputMouse.fetch_add(1, std::memory_order_relaxed);
                   break;
                 case InputFailStage::SendInputKey:
-                  inputFailSendInputKey.fetch_add(1, std::memory_order_relaxed);
+                  inputRouter.failSendInputKey.fetch_add(1, std::memory_order_relaxed);
                   break;
                 case InputFailStage::PostMessage:
-                  inputFailPostMessage.fetch_add(1, std::memory_order_relaxed);
+                  inputRouter.failPostMessage.fetch_add(1, std::memory_order_relaxed);
                   break;
                 default:
                   break;
@@ -1619,24 +1642,24 @@ int main(int argc, char** argv) {
               // probe on this specific failing event (never per event -- that would be far too costly
               // on a 100+/s pointer stream) to find out which it is.
               if (!interactive_desktop_is_default_uncached()) {
-                inputFreshProbeSecure.fetch_add(1, std::memory_order_relaxed);
+                inputRouter.freshProbeSecure.fetch_add(1, std::memory_order_relaxed);
                 // Actually secure now. Retry THIS event through the SYSTEM broker exactly once.
                 if (desktopMode &&
                     sessionDirectoryAuthenticated.load(std::memory_order_acquire) &&
-                    secureInputBroker.SendInputEvent(input, domainW, domainH)) {
+                    inputRouter.broker.SendInputEvent(input, domainW, domainH)) {
                   injectResult = InputInjectResult::Injected;
                   resolvedTarget = " secure-system-agent(reprobe)";
-                  inputFreshProbeReroute.fetch_add(1, std::memory_order_relaxed);
-                  secureInputDelivered.fetch_add(1, std::memory_order_relaxed);
+                  inputRouter.freshProbeReroute.fetch_add(1, std::memory_order_relaxed);
+                  inputRouter.secureDelivered.fetch_add(1, std::memory_order_relaxed);
                 }
                 // else: genuinely secure but not broker-eligible (window mode / unauthenticated) or
-                // the broker failed -- stays Failed, but inputFreshProbeSecure distinguishes it from
+                // the broker failed -- stays Failed, but inputRouter.freshProbeSecure distinguishes it from
                 // a real default-desktop failure below.
               } else {
                 // Uncached re-probe still says default: a genuine failure on the interactive desktop
                 // (UIPI, no target, a transient block). Counted separately so it is not confused
                 // with the stale-cache case.
-                inputInjectFailDefault.fetch_add(1, std::memory_order_relaxed);
+                inputRouter.injectFailDefault.fetch_add(1, std::memory_order_relaxed);
                 // Field case (14:51 freeze): direct default-desktop injection FAILED at
                 // SetCursorPos while the target resolved to a CoreWindow. SetCursorPos failing only
                 // tells us one of its required conditions was unmet -- the host thread MAY lack the
@@ -1652,16 +1675,16 @@ int main(int argc, char** argv) {
                     directFailStage == InputFailStage::SendInputKey;
                 if (brokerRetryableStage && desktopMode &&
                     sessionDirectoryAuthenticated.load(std::memory_order_acquire)) {
-                  inputDefaultBrokerFallback.fetch_add(1, std::memory_order_relaxed);
-                  if (secureInputBroker.SendInputEvent(input, domainW, domainH)) {
+                  inputRouter.defaultBrokerFallback.fetch_add(1, std::memory_order_relaxed);
+                  if (inputRouter.broker.SendInputEvent(input, domainW, domainH)) {
                     // Queued to the agent, not confirmed landed (the broker does not ACK). Mark
                     // Injected so the host stops re-reporting inject-fail, but the honest signal
-                    // is inputDefaultBrokerQueued + the service log, not this result.
+                    // is inputRouter.defaultBrokerQueued + the service log, not this result.
                     injectResult = InputInjectResult::Injected;
                     resolvedTarget += " default-broker-fallback(queued)";
-                    inputDefaultBrokerQueued.fetch_add(1, std::memory_order_relaxed);
+                    inputRouter.defaultBrokerQueued.fetch_add(1, std::memory_order_relaxed);
                   } else {
-                    inputDefaultBrokerPipeFail.fetch_add(1, std::memory_order_relaxed);
+                    inputRouter.defaultBrokerPipeFail.fetch_add(1, std::memory_order_relaxed);
                   }
                 }
               }
@@ -1670,7 +1693,7 @@ int main(int argc, char** argv) {
           if (injectAccounted) {
             // Already tallied on the secure path; nothing more to record.
           } else if (injectResult == InputInjectResult::Injected) {
-            const uint64_t n = inputEvents.fetch_add(1) + 1;
+            const uint64_t n = inputRouter.events.fetch_add(1) + 1;
             if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
               std::cout << "[native-video-host][input] injected seq=" << input.seq
                         << " kind=" << input.kind
@@ -1683,9 +1706,9 @@ int main(int argc, char** argv) {
                         << "\n";
             }
           } else if (injectResult == InputInjectResult::IgnoredMove) {
-            inputIgnoredMove.fetch_add(1, std::memory_order_relaxed);
+            inputRouter.ignoredMove.fetch_add(1, std::memory_order_relaxed);
           } else if (injectResult == InputInjectResult::NoTarget) {
-            const uint64_t n = inputNoTarget.fetch_add(1, std::memory_order_relaxed) + 1;
+            const uint64_t n = inputRouter.noTarget.fetch_add(1, std::memory_order_relaxed) + 1;
             if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
               std::cout << "[native-video-host][input] no-target seq=" << input.seq
                         << " kind=" << input.kind
@@ -1696,7 +1719,7 @@ int main(int argc, char** argv) {
                         << "\n";
             }
           } else if (injectResult == InputInjectResult::Unsupported) {
-            const uint64_t n = inputUnsupported.fetch_add(1, std::memory_order_relaxed) + 1;
+            const uint64_t n = inputRouter.unsupported.fetch_add(1, std::memory_order_relaxed) + 1;
             if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
               std::cout << "[native-video-host][input] unsupported seq=" << input.seq
                         << " kind=" << input.kind
@@ -1704,7 +1727,7 @@ int main(int argc, char** argv) {
                         << "\n";
             }
           } else {
-            const uint64_t n = inputInjectFail.fetch_add(1, std::memory_order_relaxed) + 1;
+            const uint64_t n = inputRouter.injectFail.fetch_add(1, std::memory_order_relaxed) + 1;
             if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
               std::cout << "[native-video-host][input] inject-fail seq=" << input.seq
                         << " kind=" << input.kind
@@ -1728,24 +1751,24 @@ int main(int argc, char** argv) {
         text.header = header;
         if (!link.Read(&text.seq, sizeof(text) - sizeof(MessageHeader))) break;
         std::string resolvedTarget;
-        if (inputInjectionEnabled) {
+        if (inputRouter.injectionEnabled) {
           const bool desktopMode =
-              !inputTargetCriteria.enabled() &&
+              !inputRouter.targetCriteria.enabled() &&
               (selectedWindowIdState.load(std::memory_order_acquire) == 0);
           InputInjectResult injectResult = InputInjectResult::Failed;
           if (desktopMode && sessionDirectoryAuthenticated.load(std::memory_order_acquire) &&
               !interactive_desktop_is_default() &&
-              secureInputBroker.SendInputText(text,
-                                              inputDomainW.load(std::memory_order_acquire),
-                                              inputDomainH.load(std::memory_order_acquire))) {
+              inputRouter.broker.SendInputText(text,
+                                              inputRouter.domainW.load(std::memory_order_acquire),
+                                              inputRouter.domainH.load(std::memory_order_acquire))) {
             injectResult = InputInjectResult::Injected;
             resolvedTarget = " secure-system-agent";
           } else {
             injectResult = apply_input_text_message(text, hostCaptureTargetHwnd, desktopMode,
-                                                    &desktopInputState, &resolvedTarget);
+                                                    &inputRouter.desktopState, &resolvedTarget);
           }
           if (injectResult == InputInjectResult::Injected) {
-            const uint64_t n = inputEvents.fetch_add(1) + 1;
+            const uint64_t n = inputRouter.events.fetch_add(1) + 1;
             if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
               std::cout << "[native-video-host][input-text] injected seq=" << text.seq
                         << " utf16Count=" << text.utf16Count
@@ -1754,7 +1777,7 @@ int main(int argc, char** argv) {
                         << "\n";
             }
           } else if (injectResult == InputInjectResult::NoTarget) {
-            const uint64_t n = inputNoTarget.fetch_add(1, std::memory_order_relaxed) + 1;
+            const uint64_t n = inputRouter.noTarget.fetch_add(1, std::memory_order_relaxed) + 1;
             if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
               std::cout << "[native-video-host][input-text] no-target seq=" << text.seq
                         << " utf16Count=" << text.utf16Count
@@ -1762,14 +1785,14 @@ int main(int argc, char** argv) {
                         << "\n";
             }
           } else if (injectResult == InputInjectResult::Unsupported) {
-            const uint64_t n = inputUnsupported.fetch_add(1, std::memory_order_relaxed) + 1;
+            const uint64_t n = inputRouter.unsupported.fetch_add(1, std::memory_order_relaxed) + 1;
             if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
               std::cout << "[native-video-host][input-text] unsupported seq=" << text.seq
                         << " utf16Count=" << text.utf16Count
                         << "\n";
             }
           } else {
-            const uint64_t n = inputInjectFail.fetch_add(1, std::memory_order_relaxed) + 1;
+            const uint64_t n = inputRouter.injectFail.fetch_add(1, std::memory_order_relaxed) + 1;
             if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
               std::cout << "[native-video-host][input-text] inject-fail seq=" << text.seq
                         << " utf16Count=" << text.utf16Count
@@ -2240,7 +2263,7 @@ int main(int argc, char** argv) {
               directoryAuthenticated = true;
               ack.features |= remote60::native_poc::kUdpFeatureDirectoryAuth;
               std::string secureInputStatus;
-              (void)secureInputBroker.EnsureInstalledAndConnected(
+              (void)inputRouter.broker.EnsureInstalledAndConnected(
                   remote60::native_poc::sibling_executable_path(
                       L"GNLinkInputService.exe"),
                   &secureInputStatus);
@@ -2381,7 +2404,7 @@ int main(int argc, char** argv) {
     captureWindowCriteria.processNamesLower.insert(name);
   }
   captureWindowCriteria.titleNeedleLower = wide_lower(utf8_to_wide(trim_ascii(args.captureWindowTitle)));
-  const bool selectionLockedByConfig = captureWindowCriteria.enabled() || inputTargetCriteria.enabled();
+  const bool selectionLockedByConfig = captureWindowCriteria.enabled() || inputRouter.targetCriteria.enabled();
   windowSelectionLocked.store(selectionLockedByConfig, std::memory_order_release);
   const bool windowTargetConfigured = captureWindowCriteria.enabled();
   backend.requested = desktop_capture_backend_from_env();
@@ -2457,7 +2480,7 @@ int main(int argc, char** argv) {
   // Tell the SYSTEM agent where the captured pixels live. Without it the agent can only assume,
   // and its old assumption -- the primary monitor -- put every click on the wrong screen when the
   // prompt opened somewhere else.
-  secureInputBroker.SetTargetRect(monitorInfo->originX, monitorInfo->originY, monitorInfo->width,
+  inputRouter.broker.SetTargetRect(monitorInfo->originX, monitorInfo->originY, monitorInfo->width,
                                   monitorInfo->height);
 
   winrt::Windows::Graphics::Capture::GraphicsCaptureItem item{nullptr};
@@ -2579,8 +2602,8 @@ int main(int argc, char** argv) {
   std::mutex captureCadenceMu;
   frameGating.staticIntervalUs =
       std::max<uint64_t>(activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGating.staticFps));
-  inputDomainW.store(activeEncodeW, std::memory_order_release);
-  inputDomainH.store(activeEncodeH, std::memory_order_release);
+  inputRouter.domainW.store(activeEncodeW, std::memory_order_release);
+  inputRouter.domainH.store(activeEncodeH, std::memory_order_release);
   bool runtimeTuneManualOverride = false;
   bool forceKeyNext = true;
   // Submit latch for forceKeyNext. The async MFT can hold the key output for a few inputs, and
@@ -2718,8 +2741,8 @@ int main(int argc, char** argv) {
     activeFps = targetFps;
     activeBitrate = targetBitrate;
     activeKeyint = targetKeyint;
-    inputDomainW.store(activeEncodeW, std::memory_order_release);
-    inputDomainH.store(activeEncodeH, std::memory_order_release);
+    inputRouter.domainW.store(activeEncodeW, std::memory_order_release);
+    inputRouter.domainH.store(activeEncodeH, std::memory_order_release);
     // The pacing budget follows the active bitrate. It used to be computed once at startup,
     // so after an ABR downshift frames kept leaving at the launch rate (bursts the network
     // just asked us to stop), and after an upshift sends were throttled below the new rate.
@@ -3811,10 +3834,6 @@ int main(int argc, char** argv) {
   // the cursor into the frames themselves, and a window target has its own coordinate space.
   // Sends on movement/visibility change, plus a 250ms heartbeat while visible so the viewer's
   // stale-hide timeout does not blank a stationary cursor. Unreliable by design; no resend.
-  uint64_t cursorSendLastUs = 0;
-  int32_t cursorSentX = INT32_MIN;
-  int32_t cursorSentY = INT32_MIN;
-  bool cursorSentVisible = false;
   auto pump_cursor_forward = [&](uint64_t nowUs) {
     // Field verdict: the remote-cursor marker reads as clutter, not signal -- the user asked for
     // it gone. Default OFF on both ends; the reviewed machinery (generation fence, overlay) stays
@@ -3826,7 +3845,7 @@ int main(int argc, char** argv) {
     if (captureWindowModeActive.load(std::memory_order_acquire)) return;
     if (backend.active != DesktopCaptureBackend::Dxgi) return;
     if (dxgiPointerUpdateUs.load(std::memory_order_acquire) == 0) return;
-    if (nowUs < cursorSendLastUs + 33'000) return;  // <=30Hz
+    if (nowUs < inputRouter.cursorSendLastUs + 33'000) return;  // <=30Hz
     // Generation fence: a sample captured under the previous target/attachment must never be
     // sent as if it belonged to the current one (stale desktop cursor over a fresh window).
     const uint64_t sampleGen = dxgiPointerGeneration.load(std::memory_order_relaxed);
@@ -3834,8 +3853,8 @@ int main(int argc, char** argv) {
     const int32_t px = dxgiPointerX.load(std::memory_order_acquire);
     const int32_t py = dxgiPointerY.load(std::memory_order_acquire);
     const bool visible = dxgiPointerVisible.load(std::memory_order_acquire);
-    const bool changed = px != cursorSentX || py != cursorSentY || visible != cursorSentVisible;
-    if (!changed && (!visible || nowUs < cursorSendLastUs + 250'000)) return;
+    const bool changed = px != inputRouter.cursorSentX || py != inputRouter.cursorSentY || visible != inputRouter.cursorSentVisible;
+    if (!changed && (!visible || nowUs < inputRouter.cursorSendLastUs + 250'000)) return;
     remote60::native_poc::UdpCursorPosPacket pkt{};
     if (visible) pkt.flags |= 0x1u;
     pkt.x = px;
@@ -3849,10 +3868,10 @@ int main(int argc, char** argv) {
     pkt.hostQpcUs = nowUs;
     (void)sendto(clientSock, reinterpret_cast<const char*>(&pkt), sizeof(pkt), 0,
                  reinterpret_cast<const sockaddr*>(&udpPeer), sizeof(udpPeer));
-    cursorSendLastUs = nowUs;
-    cursorSentX = px;
-    cursorSentY = py;
-    cursorSentVisible = visible;
+    inputRouter.cursorSendLastUs = nowUs;
+    inputRouter.cursorSentX = px;
+    inputRouter.cursorSentY = py;
+    inputRouter.cursorSentVisible = visible;
   };
 
   auto pump_udp_hello = [&]() {
@@ -6951,31 +6970,31 @@ int main(int argc, char** argv) {
                   << " captureTargetProc=" << targetProcessName
                   << " captureTargetHwnd=0x" << std::hex
                   << hostCaptureTargetHwnd.load(std::memory_order_relaxed) << std::dec
-                  << " inputEvents=" << inputEvents.load()
-                  << " secureInputAttempts=" << secureInputAttempts.load()
-                  << " secureInputDelivered=" << secureInputDelivered.load()
-                  << " secureInputBrokerFailed=" << secureInputBrokerFailed.load()
-                  << " secureInputSkipWindowMode=" << secureInputSkipWindowMode.load()
-                  << " secureInputSkipUnauth=" << secureInputSkipUnauthenticated.load()
+                  << " inputEvents=" << inputRouter.events.load()
+                  << " secureInputAttempts=" << inputRouter.secureAttempts.load()
+                  << " secureInputDelivered=" << inputRouter.secureDelivered.load()
+                  << " secureInputBrokerFailed=" << inputRouter.secureBrokerFailed.load()
+                  << " secureInputSkipWindowMode=" << inputRouter.secureSkipWindowMode.load()
+                  << " secureInputSkipUnauth=" << inputRouter.secureSkipUnauthenticated.load()
                   << " desktopPromo=" << backend.promotionAttempts.load() << "/"
                   << backend.promotionSuccess.load() << "/" << backend.promotionFail.load()
                   << " desktopPromoDeferSecure=" << backend.promotionDeferredSecureTotal.load()
                   << " desktopSecureProbeFalse=" << backend.secureProbeFalseTotal.load()
                   << " lastPromoWaitUs=" << backend.lastPromotionWaitUs.load()
-                  << " inputIgnoredMove=" << inputIgnoredMove.load(std::memory_order_relaxed)
-                  << " inputNoTarget=" << inputNoTarget.load(std::memory_order_relaxed)
-                  << " inputUnsupported=" << inputUnsupported.load(std::memory_order_relaxed)
-                  << " inputInjectFail=" << inputInjectFail.load(std::memory_order_relaxed)
-                  << " inputFreshProbeSecure=" << inputFreshProbeSecure.load(std::memory_order_relaxed)
-                  << " inputFreshProbeReroute=" << inputFreshProbeReroute.load(std::memory_order_relaxed)
-                  << " inputInjectFailDefault=" << inputInjectFailDefault.load(std::memory_order_relaxed)
-                  << " inputFailSetCursorPos=" << inputFailSetCursorPos.load(std::memory_order_relaxed)
-                  << " inputFailSendInputMouse=" << inputFailSendInputMouse.load(std::memory_order_relaxed)
-                  << " inputFailSendInputKey=" << inputFailSendInputKey.load(std::memory_order_relaxed)
-                  << " inputFailPostMessage=" << inputFailPostMessage.load(std::memory_order_relaxed)
-                  << " inputDefaultBrokerFallback=" << inputDefaultBrokerFallback.load(std::memory_order_relaxed)
-                  << " inputDefaultBrokerQueued=" << inputDefaultBrokerQueued.load(std::memory_order_relaxed)
-                  << " inputDefaultBrokerPipeFail=" << inputDefaultBrokerPipeFail.load(std::memory_order_relaxed)
+                  << " inputIgnoredMove=" << inputRouter.ignoredMove.load(std::memory_order_relaxed)
+                  << " inputNoTarget=" << inputRouter.noTarget.load(std::memory_order_relaxed)
+                  << " inputUnsupported=" << inputRouter.unsupported.load(std::memory_order_relaxed)
+                  << " inputInjectFail=" << inputRouter.injectFail.load(std::memory_order_relaxed)
+                  << " inputFreshProbeSecure=" << inputRouter.freshProbeSecure.load(std::memory_order_relaxed)
+                  << " inputFreshProbeReroute=" << inputRouter.freshProbeReroute.load(std::memory_order_relaxed)
+                  << " inputInjectFailDefault=" << inputRouter.injectFailDefault.load(std::memory_order_relaxed)
+                  << " inputFailSetCursorPos=" << inputRouter.failSetCursorPos.load(std::memory_order_relaxed)
+                  << " inputFailSendInputMouse=" << inputRouter.failSendInputMouse.load(std::memory_order_relaxed)
+                  << " inputFailSendInputKey=" << inputRouter.failSendInputKey.load(std::memory_order_relaxed)
+                  << " inputFailPostMessage=" << inputRouter.failPostMessage.load(std::memory_order_relaxed)
+                  << " inputDefaultBrokerFallback=" << inputRouter.defaultBrokerFallback.load(std::memory_order_relaxed)
+                  << " inputDefaultBrokerQueued=" << inputRouter.defaultBrokerQueued.load(std::memory_order_relaxed)
+                  << " inputDefaultBrokerPipeFail=" << inputRouter.defaultBrokerPipeFail.load(std::memory_order_relaxed)
                   << " keyReqDropTotal=" << clientMetrics.keyFrameRequestDropped.load()
                   << " callbackFrames=" << callbackFramesPerSec
                   << " skippedByOverwrite=" << skippedByOverwrite
@@ -7065,31 +7084,31 @@ int main(int argc, char** argv) {
                   << " encoderResets=" << encoderResetCount
                   << " keyReqTotal=" << clientMetrics.keyFrameRequestCount.load()
                   << " keyReqDropTotal=" << clientMetrics.keyFrameRequestDropped.load()
-                  << " inputEvents=" << inputEvents.load()
-                  << " secureInputAttempts=" << secureInputAttempts.load()
-                  << " secureInputDelivered=" << secureInputDelivered.load()
-                  << " secureInputBrokerFailed=" << secureInputBrokerFailed.load()
-                  << " secureInputSkipWindowMode=" << secureInputSkipWindowMode.load()
-                  << " secureInputSkipUnauth=" << secureInputSkipUnauthenticated.load()
+                  << " inputEvents=" << inputRouter.events.load()
+                  << " secureInputAttempts=" << inputRouter.secureAttempts.load()
+                  << " secureInputDelivered=" << inputRouter.secureDelivered.load()
+                  << " secureInputBrokerFailed=" << inputRouter.secureBrokerFailed.load()
+                  << " secureInputSkipWindowMode=" << inputRouter.secureSkipWindowMode.load()
+                  << " secureInputSkipUnauth=" << inputRouter.secureSkipUnauthenticated.load()
                   << " desktopPromo=" << backend.promotionAttempts.load() << "/"
                   << backend.promotionSuccess.load() << "/" << backend.promotionFail.load()
                   << " desktopPromoDeferSecure=" << backend.promotionDeferredSecureTotal.load()
                   << " desktopSecureProbeFalse=" << backend.secureProbeFalseTotal.load()
                   << " lastPromoWaitUs=" << backend.lastPromotionWaitUs.load()
-                  << " inputIgnoredMove=" << inputIgnoredMove.load(std::memory_order_relaxed)
-                  << " inputNoTarget=" << inputNoTarget.load(std::memory_order_relaxed)
-                  << " inputUnsupported=" << inputUnsupported.load(std::memory_order_relaxed)
-                  << " inputInjectFail=" << inputInjectFail.load(std::memory_order_relaxed)
-                  << " inputFreshProbeSecure=" << inputFreshProbeSecure.load(std::memory_order_relaxed)
-                  << " inputFreshProbeReroute=" << inputFreshProbeReroute.load(std::memory_order_relaxed)
-                  << " inputInjectFailDefault=" << inputInjectFailDefault.load(std::memory_order_relaxed)
-                  << " inputFailSetCursorPos=" << inputFailSetCursorPos.load(std::memory_order_relaxed)
-                  << " inputFailSendInputMouse=" << inputFailSendInputMouse.load(std::memory_order_relaxed)
-                  << " inputFailSendInputKey=" << inputFailSendInputKey.load(std::memory_order_relaxed)
-                  << " inputFailPostMessage=" << inputFailPostMessage.load(std::memory_order_relaxed)
-                  << " inputDefaultBrokerFallback=" << inputDefaultBrokerFallback.load(std::memory_order_relaxed)
-                  << " inputDefaultBrokerQueued=" << inputDefaultBrokerQueued.load(std::memory_order_relaxed)
-                  << " inputDefaultBrokerPipeFail=" << inputDefaultBrokerPipeFail.load(std::memory_order_relaxed)
+                  << " inputIgnoredMove=" << inputRouter.ignoredMove.load(std::memory_order_relaxed)
+                  << " inputNoTarget=" << inputRouter.noTarget.load(std::memory_order_relaxed)
+                  << " inputUnsupported=" << inputRouter.unsupported.load(std::memory_order_relaxed)
+                  << " inputInjectFail=" << inputRouter.injectFail.load(std::memory_order_relaxed)
+                  << " inputFreshProbeSecure=" << inputRouter.freshProbeSecure.load(std::memory_order_relaxed)
+                  << " inputFreshProbeReroute=" << inputRouter.freshProbeReroute.load(std::memory_order_relaxed)
+                  << " inputInjectFailDefault=" << inputRouter.injectFailDefault.load(std::memory_order_relaxed)
+                  << " inputFailSetCursorPos=" << inputRouter.failSetCursorPos.load(std::memory_order_relaxed)
+                  << " inputFailSendInputMouse=" << inputRouter.failSendInputMouse.load(std::memory_order_relaxed)
+                  << " inputFailSendInputKey=" << inputRouter.failSendInputKey.load(std::memory_order_relaxed)
+                  << " inputFailPostMessage=" << inputRouter.failPostMessage.load(std::memory_order_relaxed)
+                  << " inputDefaultBrokerFallback=" << inputRouter.defaultBrokerFallback.load(std::memory_order_relaxed)
+                  << " inputDefaultBrokerQueued=" << inputRouter.defaultBrokerQueued.load(std::memory_order_relaxed)
+                  << " inputDefaultBrokerPipeFail=" << inputRouter.defaultBrokerPipeFail.load(std::memory_order_relaxed)
                   << " capAgeAvgUs=" << capAgeAvgUs
                   << " capAgeMaxUs=" << captureAgeMaxUs
                   << " cb2eAvgUs=" << cb2eAvgUs
