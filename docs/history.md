@@ -7287,3 +7287,44 @@ Next action
   + M9 5(연속 초 요구·쿨다운·0~3 한계, 스트릭 리셋, 회복, 스테일 메트릭 폴백/무회복, 축별 단독 강등) = 14 PASS.
 - 게이트: 리터럴 집합 불변, host + 테스트 빌드, 단위테스트 PASS, UDP e2e 13/13. 스크립트: automation/host_split_phase2_t1.sh.
 - 다음: T2 frame gating(FrameGatingState 전이/스킵), T3 kick(KickState 데드라인/1회 킥 가드/정적 리프레시), T4 backend 백오프/승격 게이트.
+
+### 300) 2026-08-26 리팩터 Phase 2-T2 — frame gating 결정 멤버화 + host_frame_gate_test (브랜치 c7dcd14)
+
+- stage_gate_static의 결정 줄 → FrameGatingState::RecordChange(changePermille)/RecordReferenceMiss()/UpdateMode()→changed/
+  ShouldSkip(queuePopUs, keyReqPending, activeFrameIntervalUs, paceByTick) const(host_frame_gate.hpp, 헤더 전용), 본문 verbatim
+  (리네임은 encoder.activeFrameIntervalUs→파라미터 하나). 스테이지는 픽셀 변화 추정·모드 전환 로그·스킵 집계·Flow::Continue를 같은
+  순서로 유지. 179→152줄. 테스트 8 시나리오(enterFrames 진입, 첫 변화 프레임 이탈, 스트릭 상호 리셋, 참조 미스=전체 변화, 60000 캡,
+  정적 모드 스로틀(간격·키요청·모션·미전송), paced 모션 모드 무스로틀, unpaced 경로 프레임 간격) PASS. 게이트: 리터럴 불변, 빌드,
+  e2e 13/13. 스크립트: automation/host_split_phase2_t2.sh.
+- 교훈(도구): `set -euo pipefail` 아래 `diff a b | grep` 은 파일이 다르면 diff의 1이 파이프라인 실패가 되어 스크립트를 중단시킴 —
+  T1의 정체불명 종료가 이것이었고, `(diff … || true) |` 로 정정(T1~T4 스크립트). 또 체크아웃 왕복 뒤 작업 트리가 CRLF라 `$` 앵커 편집이
+  빗나감 → 편집은 `\r?$`, 검증은 `tr -d '\r'` 사본 기준.
+
+### 301) 2026-08-26 리팩터 Phase 2-T3 — trailing kick / static refresh 결정 멤버화 + host_kick_test (브랜치 cb01e22)
+
+- stage_pop_frame의 킥 조건 → KickState::Due(nowUs)/NeedKick(barrierClosed)/MarkKickedForCurrentInput()/StaticRefreshDue(nowUs)
+  (host_kick.hpp), 본문·주석 verbatim. 스테이지는 링/배리어/송신 큐 읽기·KickTryFill·집계를 같은 순서로, 리프레시 조건도 같은 항을
+  같은 순서로 평가. 339→329줄. 테스트 4 시나리오(arm/150ms 데드라인/re-arm/cancel/raw 무동작, 보류 입력당 1회 킥·새 입력 재킥·AU 배출 후
+  정지, 닫힌 배리어의 1회 가드 무시, 마지막 AU와 마지막 시도 양쪽에 앵커된 리프레시 주기·킥 대기 중 차단) PASS. 게이트: 리터럴 불변,
+  빌드, e2e 13/13(trailingKickCount/staticRefreshCount 진행). 스크립트: automation/host_split_phase2_t3.sh.
+
+### 302) 2026-08-26 리팩터 Phase 2-T4 — desktop backend 승격 게이트 멤버화 + host_backend_policy_test (브랜치 89211b6)
+
+- stage_backend의 강등/승격 블록 중 순수 상태 갱신 → DesktopBackendState 멤버 12개(NoteDemotionEpisode, DefaultProbeDue,
+  NoteDefaultProbe(nowUs, isDefault), DefaultStable, RetryDue, NoteSecureAtDeadline, NoteDeferredForSecure, NotePromotionAttempt,
+  NotePromotionSuccess, NotePromotionFailure, ConsumeStabilityEvidence, ResetPromotionGate; host_backend_policy.hpp), 본문 verbatim.
+  스테이지는 OpenInputDesktop 프로브 2회·restart_capture_session·캡처/인코더 리셋·로그를 같은 순서로 유지. kDesktopBackendRetry*/
+  kDesktopDefault* 상수 4개는 host_main_loop.hpp → host_backend_policy.hpp(전자가 후자를 include). 315→286줄.
+- 테스트 5 시나리오(프로브 주기·1s 안정 클록·secure 프로브/데드라인 최종 확인의 리셋, 첫 발견 시 데드라인 무장과 3→6→12→24→30s 백오프
+  상한, 성공 시 에피소드 리셋·승격 대기 기록, 데드라인당 1회 유예 래치·시도 시 해제, 시도의 근거 소비, 유휴 리셋) PASS. 테스트 타깃은
+  헤더 체인(host_capture_device.hpp→capture_backend_dxgi.hpp) 때문에 `capture` 라이브러리를 링크; 상태가 atomic을 가져 값 반환 불가 →
+  in-place 초기화. 게이트: 리터럴 불변, 빌드, e2e 13/13. 스크립트: automation/host_split_phase2_t4.sh.
+
+### 303) 2026-08-26 리팩터 사이클 2차 결산 — 계획서의 남은 항목 전부 완료, gate-A 통과
+
+- 이번 세션 추가분: 2-12 HostRuntime 조립(main() 1,552→123줄), 2-12b 프리앰블 프루닝(main.cpp 265줄), 2-13 encode_send_h264 AU 루프
+  분리(989→506+636+52), T1~T4 순수 결정 로직 멤버화 + 단위테스트 4종 31 시나리오. 계획서 §0 지표: 최대 파일 ≤800 달성(최대
+  host_stage_encode_send_h264_au 636), main() ≤300 달성(123), 모듈 60개 + main + 테스트 4. 남은 것은 Phase 4(스레드 소유권 재설계,
+  동작 변경 허용)뿐 — 사용자 실기 확인 → 0.2.58 범프 → main merge 뒤 별도 사이클.
+- 최종 gate-A(브랜치 89211b6): host/client/e2e + 단위테스트 6종 빌드 exit 0, 단위테스트 6/6 PASS(mf_h264_codec, capture_cadence_gate,
+  host_abr, host_frame_gate, host_kick, host_backend_policy), 마지막 UDP e2e 13/13. 설치본(0.2.57)·dist 변경 없음, push 없음.
