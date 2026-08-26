@@ -58,6 +58,7 @@
 #include "capture_backend_dxgi.hpp"
 #include "host_string_util.hpp"
 #include "host_log.hpp"
+#include "host_args.hpp"
 
 namespace {
 
@@ -115,6 +116,12 @@ using remote60::native_poc::base_name_lower;
 using remote60::native_poc::TimestampPrefixBuf;
 using remote60::native_poc::wake_display_for_remote_session;
 using remote60::native_poc::HostPowerKeepalive;
+// Args record + env/number parsing helpers extracted to host_args.hpp (Phase 0-7a).
+using remote60::native_poc::Args;
+using remote60::native_poc::parse_u32;
+using remote60::native_poc::env_string_or_empty;
+using remote60::native_poc::env_truthy;
+using remote60::native_poc::env_u32_clamped;
 using remote60::native_poc::ControlWindowListMessage;
 using remote60::native_poc::ControlWindowListRequestMessage;
 using remote60::native_poc::ControlWindowSelectMessage;
@@ -463,12 +470,6 @@ std::optional<WindowListEntry> find_window_by_id(uint64_t id) {
   e.minimized = (IsIconic(hwnd) != 0);
   e.title = wide_to_utf8(wtitle);
   return e;
-}
-
-std::string env_string_or_empty(const char* key) {
-  if (!key) return std::string{};
-  const char* v = std::getenv(key);
-  return v ? std::string(v) : std::string{};
 }
 
 bool backend_request_is_any(const std::string& requestLower, const char* const* values,
@@ -1564,78 +1565,9 @@ ULONG resolve_bind_address(const std::string& bindAddress) {
   return htonl(INADDR_ANY);
 }
 
-struct Args {
-  uint16_t bindPort = 43000;
-  // Ordered fallback list for the media socket; the first port that binds wins. Corporate
-  // firewalls commonly permit outbound UDP only to a whitelist of destination ports, so a host
-  // sitting on 43000 is unreachable from those networks however healthy the rest of the path is.
-  // 443 carries QUIC and 3478 carries STUN, so both are open almost everywhere. Empty means
-  // "just bindPort", which is what a config file or an explicit single --bind-port produces.
-  std::vector<uint16_t> bindPortCandidates;
-  // Empty binds every interface. Test harnesses pass 127.0.0.1: a loopback bind never
-  // triggers the Windows Firewall consent dialog, which dims the whole screen and starves
-  // WGC capture for as long as it is up -- every measurement taken behind it is garbage.
-  std::string bindAddress;
-  uint16_t controlPort = 0;
-  uint32_t tcpSendBufKb = 0;
-  uint32_t udpMtu = 1200;
-  uint32_t traceEvery = 0;
-  uint32_t traceMax = 0;
-  uint32_t inputLogEvery = 120;
-  bool enableInputInjection = true;
-  std::string inputInjectionMode = "background_message";
-  uint32_t inputTargetPid = 0;
-  std::string inputTargetProcess;
-  std::string inputTargetTitle;
-  std::string transport;
-  std::string codec = "raw";
-  uint32_t fps = 30;
-  uint32_t seconds = 0;  // 0: infinite
-  // M7-confirmed 1080p defaults. The old 1.1 Mbps default also silently tripped the
-  // <=1.5 Mbps auto-720p downscale in choose_h264_encode_size on any larger display.
-  uint32_t bitrate = 8000000;
-  uint32_t keyint = 30;
-  uint32_t encodeWidth = 0;
-  uint32_t encodeHeight = 0;
-  uint32_t captureWindowPid = 0;
-  std::string captureWindowProcess;
-  std::string captureWindowTitle;
-  bool captureWindowClientOnly = false;
-  uint32_t captureWindowRebindIntervalMs = 1000;
-  // Directory service. Empty url keeps the host on the current LAN-only behaviour: it simply
-  // waits for a client that already knows its address.
-  std::string directoryUrl;
-  std::string directoryId;
-  std::string directoryPw;
-  std::string directoryHostName;
-  uint16_t directoryObservePort = 0;
-};
-
-bool parse_u32(const char* s, uint32_t* out) {
-  if (!s || !out) return false;
-  char* end = nullptr;
-  const unsigned long v = std::strtoul(s, &end, 10);
-  if (!end || *end != '\0') return false;
-  *out = static_cast<uint32_t>(v);
-  return true;
-}
-
-bool env_truthy(const char* key) {
-  if (!key) return false;
-  const char* v = std::getenv(key);
-  if (!v) return false;
-  const std::string s = v;
-  return s == "1" || s == "true" || s == "TRUE" || s == "on" || s == "ON";
-}
-
-uint32_t env_u32_clamped(const char* key, uint32_t fallback, uint32_t minValue, uint32_t maxValue) {
-  if (!key) return fallback;
-  const char* raw = std::getenv(key);
-  if (!raw) return fallback;
-  uint32_t parsed = 0;
-  if (!parse_u32(raw, &parsed)) return fallback;
-  return std::clamp<uint32_t>(parsed, minValue, maxValue);
-}
+// struct Args + parse_u32/env_truthy/env_u32_clamped moved to host_args.hpp (host split refactor
+// Phase 0-7a). Brought back into unqualified scope by the using-declarations near the top of the
+// anonymous namespace. parse_args stays here until Phase 0-7b.
 
 DesktopCaptureBackend desktop_capture_backend_from_env() {
   const char* raw = std::getenv("REMOTE60_DESKTOP_CAPTURE_BACKEND");
