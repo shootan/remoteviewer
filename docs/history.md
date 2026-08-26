@@ -7240,3 +7240,26 @@ Next action
 - 남은 것(문서 §0 지표 갱신): main() ≤300은 HostRuntime 조립(2-12) 없이는 불가 — 선형 배선 1,550줄로 남김; 단위테스트(2-5
   AbrController 등)는 순수 클래스 분리가 전제라 미착수; Phase 4 스레드 소유권 재설계는 별도 사이클.
 - 다음 액션: 사용자 실기 1회(브랜치 빌드 GNLinkStream/GNLinkHost) → 이상 없으면 버전 0.2.58 범프 + main merge → Phase 4.
+
+### 296) 2026-08-26 리팩터 Phase 2-12 — main() 시작 블록·종료를 host_startup_*.cpp / host_shutdown.cpp로 (브랜치 405802b)
+
+- main()의 선형 시작 구간(env 설정·transport·소켓/Hello 핸드셰이크·컨트롤 스레드·WinRT/MF/D3D·캡처 타깃·인코드 지오메트리·
+  인코더 init·DXGI 워커/메인루프 워치독·리드백 파이프라인·캡처 시작)과 종료 시퀀스를 함수 17개로 verbatim 이동
+  (host_startup.hpp가 호출 순서, host_startup_config/connect/control/graphics/capture.cpp 372~427줄, host_shutdown.cpp 158줄).
+  실패할 수 있는 단계는 예전 exit code를 그대로 반환. main()은 선언(모놀리스 순서 = 파괴 순서 보존) + HostContext 조립
+  (시작 전으로 이동; HostContext::transport를 참조로 바꿔 resolve_transport()가 채움) + WinsockScope 검사 + ControlSessionServer
+  + DXGI 워치독 스레드/조이너(DxgiWatchdogJoiner는 헤더로) + 15줄 루프 + shutdown_host: 1,552→123줄.
+- classify_directory_hello/authorize_directory_session 람다 → SessionState::ClassifyDirectoryHello/AuthorizeDirectorySession
+  (enum DirectoryHello는 host_session.hpp), 호출부 3곳 리네임.
+- 검증: main() 원본 줄 멀티셋 = 새 main + 이동 본문 + 멤버 본문(차이는 스캐폴딩/리네임/람다 래퍼 줄뿐 — 이 검사가
+  init_graphics 범위에 `CaptureResources res;` 선언이 섞인 실수를 잡아 수정), 본문 17개 IDENTICAL, 문자열 리터럴 집합 불변,
+  host 빌드, UDP e2e 13/13, 시작 로그 마커(bind/pacing/backend/encoder/control) 동일. 빌드 1회 실패: 헤더의
+  DxgiWatchdogJoiner 닫는 `};` 누락(원본은 `} dxgiWatchdogJoiner{...};` 한 줄이 겸함) → 수정 후 통과.
+- 스크립트: automation/host_split_phase2_12.sh(일회성).
+
+### 297) 2026-08-26 리팩터 Phase 2-12b — main.cpp 프리앰블 프루닝 (브랜치 6f39ab9)
+
+- 익명 네임스페이스의 using 226개 중 main()이 실제로 쓰는 41개만 남기고, `using namespace winrt` 2줄·json_profile 별칭·
+  REMOTE60_NATIVE_ENCODED_EXPERIMENT 매크로(이제 host_startup_config.cpp만 읽음)·"moved to" 잔존 주석 ~65줄 제거.
+  main() 바이트 동일. main.cpp 540→265줄. 게이트: host 빌드 + UDP e2e 13/13. 스크립트: automation/host_split_phase2_12b.sh.
+- 계획 §0 지표 갱신: main() ≤300 달성(123), 파일 50개 + main, 800줄 초과는 encode_send_h264(989)만 → 다음 2-13.
