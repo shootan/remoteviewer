@@ -6919,3 +6919,12 @@ Next action
 - 검증: 브랜치 host 타깃 Release 빌드 exit 0, warning/error 0 (CMake 재생성 포함).
 - 순서 정정: GpuBgraScaler(0-3)가 D3DReadbackTiming(0-10)을 쓰므로 0-10을 0-3 앞으로.
 - 다음 액션: 0-10 `host_bottleneck.hpp` + `host_frame_state.hpp` → 0-3 `host_gpu_scaler.hpp`.
+
+### 266) 2026-08-26 리팩터 Phase 0-10 — host_bottleneck.hpp + host_frame_state.hpp 추출 (브랜치 71bfc83)
+
+- 이동: HostBottleneckStage, D3DReadbackTiming, update/detect_host_bottleneck_stage, encoder_api_path_code →
+  `host_bottleneck.hpp`; FrameState → `host_frame_state.hpp` (둘 다 header-only, 소유 스레드 요약 포함).
+  host_main 9,469→9,395줄.
+- 순수 이동 검증: 제거 80줄 vs 헤더 본문 80줄(diff -w) → `inline` 3곳만 차이.
+- 검증: 브랜치 host 타깃 Release 빌드 exit 0, warning/error 0.
+- 다음 액션: 0-3 `host_gpu_scaler.hpp`(작성 완료, host_main 제거 대기) → 0-4 `host_window_enum.hpp/.cpp`.
