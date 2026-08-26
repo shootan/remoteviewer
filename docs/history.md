@@ -7139,3 +7139,13 @@ Next action
 - 다음 액션: 2-2 ControlSessionServer — serve_control_session(681줄)을 host_control_session.hpp/.cpp의 클래스로 verbatim 이동
   (의존: args, stop, clientSession/capture/clientMetrics/encoder/inputRouter/backend, WindowSelectionTxn). 1단계 순수 이동,
   2단계에서 메시지별 Handle*로 분할.
+
+### 287) 2026-08-26 리팩터 Phase 2-2 — ControlSessionServer (브랜치 80fd395)
+
+- serve_control_session 람다 681줄 → `ControlSessionServer::Serve(ControlLink&)`(host_control_session.hpp/.cpp, 신규 TU).
+  본문 verbatim(diff 동일) — 클래스가 main 지역과 같은 이름의 참조 멤버(args/stop/clientSession/capture/clientMetrics/encoder/
+  inputRouter/backend/windowSelectionTxn)를 들어 텍스트 불변. WindowSelectionTxn은 헤더로, FlushControlMessageOnExit는 .cpp로.
+  main은 인스턴스 1개 + Serve() 호출 2곳. host_main 7,017→6,318줄.
+- 게이트: host 빌드 exit 0 / UDP e2e 13/13(컨트롤 응답·창 목록·runtime tune 모두 새 클래스가 처리).
+- 다음 액션: 2-3 EncodedSender — sender 스레드 본체(180줄)·pump_udp_hello를 SenderState 멤버로, begin/await epoch를
+  SessionState 멤버로(스크립트 `automation/host_split_phase2_3.sh` 준비됨).
