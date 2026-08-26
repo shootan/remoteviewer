@@ -7084,3 +7084,13 @@ Next action
   1-12 HostStats → 1-3 CaptureState는 **두 단계**로: 1-3a 순수 데이터/atomic/카운터(~70), 1-3b RAII·WinRT·D3D 객체
   (d3d/ctx/pool/item/session/dxgiCaptureSession/gdiCaptureProcess/captureReadback/frame)는 소멸 순서가 바뀌므로 Phase 2
   CaptureSession 클래스에서 명시적 수명으로 처리(Phase 1에서는 main 지역 유지).
+
+### 282) 2026-08-26 리팩터 Phase 1-5 — EncoderState (브랜치 355dd36)
+
+- H264Encoder 객체(`encoder.codec`), mfStarted, tuneMode/experimentEnabled, keyReq 토큰버킷 6, runtimeTune atomic 5 + manual
+  override, active/nominal/source 인코드 기하 + refit 디바운스 11, active fps/bitrate/keyint/interval 6, force-key 래치 2,
+  NV12 surface 부기 5, 출력 생존 heartbeat/starve 15, 통계 구간 카운터 6 = 61개 → `struct EncoderState`(`encoder.<field>`).
+  `struct Nv12PendingRelease` 파일 스코프 이동. 선언 41줄 삭제(기본값으로), env/파생 초기값은 원래 위치 대입.
+- 게이트: host 빌드 exit 0 / UDP e2e 13/13 / 로그 gop-config·runtime-config-applied 그대로.
+- 다음 액션: 1-12 HostStats(50개, 인스턴스 `stats`; 리네이머는 main() 이후 구간에만 적용 — ClientMetricsSnapshot의
+  `queueDepthMax` 멤버 선언 보호) → 1-3a CaptureState(순수 데이터).
