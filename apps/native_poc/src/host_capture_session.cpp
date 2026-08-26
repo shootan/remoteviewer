@@ -656,4 +656,112 @@ uint64_t CaptureState::EffectiveQueueWaitTimeoutUs(EncoderState& encoder) {
   return std::min<uint64_t>(kQueueWaitTimeoutUsDefault, dynamicTimeoutUs);
 }
 
+// Readback-worker publish callback (Phase 3.6): the former res.capturePublishFn lambda of main(),
+// verbatim. Runs on the readback worker thread; hands the finished frame to FrameState, updates the
+// bootstrap cache and the capture timing stats.
+void CaptureState::PublishFrame(CaptureResources& res, HostStats& stats,
+                                std::shared_ptr<std::vector<uint8_t>> payload, uint32_t frameW,
+                                uint32_t frameH, uint32_t stride, const CaptureFrameMeta& meta,
+                                uint64_t gpuPendingUs, uint64_t workerMapUs, uint64_t workerMemcpyUs) {
+  CaptureState& capture = *this;
+  if (!payload || payload->empty() || frameW < 2 || frameH < 2) return;
+  // Drop a readback completion whose Submit happened under a previous capture attachment: a pool
+  // recreate bumped the cookie in between, so these pixels belong to the old target/geometry. The
+  // stream-generation check downstream does not catch a same-generation size-change recreate (the
+  // WGC ContentSize path and capture.sizeChangePending keep the generation), so the cookie is what
+  // makes that case safe. Release the NV12 slot first or the zero-copy ring leaks.
+  if (meta.attachmentCookie != 0 &&
+      meta.attachmentCookie != capture.attachmentCookie.load(std::memory_order_acquire)) {
+    if (meta.nv12Slot >= 0) {
+      res.captureReadback.ReleaseNv12Slot(meta.nv12Slot, meta.nv12Generation);
+    }
+    return;
+  }
+  const uint64_t queuePushUs = qpc_now_us();
+  capture.lastPublishUs.store(queuePushUs, std::memory_order_release);
+  const uint64_t prevCallbackUs = capture.lastCallbackUs.load(std::memory_order_acquire);
+  const uint64_t prevCaptureUs = capture.lastCaptureUsForInterval.load(std::memory_order_acquire);
+  uint64_t callbackIntervalUs = 0;
+  uint64_t captureIntervalUs = 0;
+  if (prevCallbackUs > 0 && meta.callbackUs >= prevCallbackUs) {
+    callbackIntervalUs = meta.callbackUs - prevCallbackUs;
+  }
+  if (prevCaptureUs > 0 && meta.captureUs >= prevCaptureUs) {
+    captureIntervalUs = meta.captureUs - prevCaptureUs;
+  }
+  capture.lastCallbackUs.store(meta.callbackUs, std::memory_order_release);
+  capture.lastCaptureUsForInterval.store(meta.captureUs, std::memory_order_release);
+  // Update the static-screen bootstrap cache from this real publish -- the ONLY writer. Copy the
+  // payload shared_ptr (do NOT move: `frame` still takes ownership below). The buffer pool
+  // recycles a payload only once its LAST holder releases, so holding this copy keeps the pixels
+  // alive and immutable until the next publish replaces it. meta.width/height are the pre-crop
+  // capture source dims; frameW/frameH are the post-crop payload dims we must encode.
+  {
+    std::lock_guard<std::mutex> lk(capture.bootstrapCacheMu);
+    capture.bootstrapCache.payload = payload;
+    capture.bootstrapCache.width = frameW;
+    capture.bootstrapCache.height = frameH;
+    capture.bootstrapCache.stride = stride;
+    capture.bootstrapCache.captureQpcUs = meta.captureUs;
+    capture.bootstrapCache.streamGeneration = meta.streamGeneration;
+    capture.bootstrapCache.windowMode = capture.windowModeActive.load(std::memory_order_acquire);
+    capture.bootstrapCache.selectedWindowId = capture.selectedWindowId.load(std::memory_order_acquire);
+    capture.bootstrapCache.targetHwnd = capture.targetHwnd.load(std::memory_order_acquire);
+    capture.bootstrapCache.targetPid = capture.targetPid.load(std::memory_order_acquire);
+    capture.bootstrapCache.srcCaptureWidth = meta.width;
+    capture.bootstrapCache.srcCaptureHeight = meta.height;
+    capture.bootstrapCache.consoleSessionId = WTSGetActiveConsoleSessionId();
+  }
+  uint64_t currentVersion = 0;
+  {
+    std::lock_guard<std::mutex> lk(res.frame.mu);
+    if (res.frame.nv12Slot >= 0) {
+      // The consumer never claimed the previous frame's conversion (latest-wins overwrite);
+      // give the slot back or the ring drains to nothing.
+      res.captureReadback.ReleaseNv12Slot(res.frame.nv12Slot, res.frame.nv12Generation);
+    }
+    res.frame.nv12Slot = meta.nv12Slot;
+    res.frame.nv12Generation = meta.nv12Generation;
+    res.frame.nv12W = meta.nv12W;
+    res.frame.nv12H = meta.nv12H;
+    res.frame.payload = std::move(payload);
+    res.frame.width = frameW;
+    res.frame.height = frameH;
+    res.frame.stride = stride;
+    res.frame.streamGeneration = meta.streamGeneration;
+    res.frame.captureUs = meta.captureUs;
+    res.frame.callbackUs = meta.callbackUs;
+    res.frame.captureAgeAtCallbackUs = meta.captureAgeAtCallbackUs;
+    res.frame.captureClockSkewUs = meta.captureClockSkewUs;
+    res.frame.queuePushUs = queuePushUs;
+    res.frame.callbackIntervalUs = callbackIntervalUs;
+    res.frame.captureIntervalUs = captureIntervalUs;
+    res.frame.captureD3DWaitUs = meta.d3dWaitUs;       // callback wait on res.d3dContextMu
+    res.frame.captureCopyMapUs = meta.submitCopyUs;    // callback CopyResource + query End
+    res.frame.captureMemcpyUs = workerMemcpyUs;        // worker memcpy incl. crop
+    res.frame.captureUnmapWaitUs = gpuPendingUs;       // submit -> GPU copy finished
+    res.frame.captureUnmapUs = workerMapUs;            // worker Map of the finished copy
+    res.frame.seq += 1;
+    res.frame.version += 1;
+    currentVersion = res.frame.version;
+  }
+  const uint64_t currentPopVersion = capture.lastPopFrameVersion.load(std::memory_order_acquire);
+  const uint64_t depthNow = (currentVersion >= currentPopVersion) ? (currentVersion - currentPopVersion) : 0;
+  update_u64_max(stats.queueDepthMax, depthNow);
+  ++stats.queuePushCount;
+  stats.callbackFrames += 1;
+  uint64_t loggedGeneration = capture.firstCallbackLoggedGeneration.load(std::memory_order_acquire);
+  if (meta.streamGeneration != 0 && loggedGeneration != meta.streamGeneration &&
+      capture.firstCallbackLoggedGeneration.compare_exchange_strong(
+          loggedGeneration, meta.streamGeneration,
+          std::memory_order_acq_rel, std::memory_order_acquire)) {
+    std::cout << "[native-video-host] capture-switch first-callback"
+              << capture.DescribeActiveTarget()
+              << " callbackUs=" << meta.callbackUs
+              << " captureUs=" << meta.captureUs
+              << "\n";
+  }
+  res.frame.cv.notify_one();
+}
+
 }  // namespace remote60::native_poc

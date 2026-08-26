@@ -32,6 +32,7 @@
 #include "host_frame_state.hpp"
 #include "host_gpu_scaler.hpp"
 #include "host_capture_device.hpp"
+#include "host_stats.hpp"
 #include "host_window_enum.hpp"
 
 namespace remote60::native_poc {
@@ -268,6 +269,10 @@ struct CaptureState {
   bool KickTryFill(SessionState& clientSession, KickState& kick, std::shared_ptr<std::vector<uint8_t>>& outPayload,
                    uint32_t& outW, uint32_t& outH, uint32_t& outStride, uint64_t nowUs);
   uint64_t EffectiveQueueWaitTimeoutUs(EncoderState& encoder);
+  // Readback-worker publish callback body (main() binds res.capturePublishFn to it).
+  void PublishFrame(CaptureResources& res, HostStats& stats, std::shared_ptr<std::vector<uint8_t>> payload,
+                    uint32_t frameW, uint32_t frameH, uint32_t stride, const CaptureFrameMeta& meta,
+                    uint64_t gpuPendingUs, uint64_t workerMapUs, uint64_t workerMemcpyUs);
 };
 
 }  // namespace remote60::native_poc
