@@ -7060,3 +7060,13 @@ Next action
 - 게이트: host 빌드 exit 0 / UDP e2e 13/13 / 로그 `input injection enabled mode=background_message` 그대로.
 - 다음 액션: 1-2 SenderState(42개 + EncodedSendItem을 파일 스코프로; WGC FrameArrived 콜백 매개변수 `sender`→`framePool`
   로 이름만 바꿔 그림자 충돌 제거).
+
+### 280) 2026-08-26 리팩터 Phase 1-2 — SenderState (브랜치 b272ec1)
+
+- 송신 큐/뮤텍스/cv/스레드, peer+waitingForKey 배리어, mediaSessionEpoch, sender→main 복구 신호 atomic, per-epoch IDR
+  텔레메트리, reader 스레드의 UDP peer atomic, 통계 구간 sent*/udpTx* 누적 = 42개 → `struct SenderState`(`sender.<field>`).
+  `struct EncodedSendItem`은 main 로컬에서 파일 스코프로 verbatim 이동(struct가 타입을 참조해야 함). WGC FrameArrived 콜백
+  매개변수 `sender`→`framePool`(3줄, 그림자 제거). 리터럴 집합 동일.
+- 게이트: host 빌드 exit 0 / UDP e2e 13/13 / wire seq 로그 정상.
+- 다음 액션: 1-1 SessionState(26개; 인스턴스 `clientSession` — `GraphicsCaptureSession session`과 충돌 회피; SocketCloser
+  파일 스코프 이동; 디렉터리 send 콜백의 값 캡처 `[clientSock]`은 `[clientSock = clientSession.clientSock]`로).
