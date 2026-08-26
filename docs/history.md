@@ -7192,3 +7192,20 @@ Next action
 - 주석 안의 일반 단어(frame/session/pool/encoder)가 res.frame/res.session/res.pool/encoder.codec으로 바뀌어 있던 것을 주석
   텍스트에서만 되돌림(162줄, host_main·host_capture_session.cpp·host_encoder_manager.cpp). 코드·문자열 리터럴 불변(파일별
   리터럴 집합 동일 확인). 주석만이라 e2e 생략, host 빌드 exit 0.
+
+### 292) 2026-08-26 리팩터 Phase 3 — main loop 12단계 stage 함수화 (브랜치 6a604c1)
+
+- main()의 while 본문 3,060줄 → host_main_loop.cpp의 stage_time_limit/backend/stream_active/runtime_tune/selection/geometry/
+  watchdogs/pace/pop_frame/gate_static/encode_send/stats(호출 순서 = 원래 순서), 루프는 RUN_STAGE 15줄. 본문 verbatim,
+  단 (a) 루프 수준 continue/break/return 32곳 → Flow::Continue/Break/Return(스코프 인식 스캐너 loop_exits.pl로 식별, 내부
+  for/while/switch/람다 안의 것은 제외), (b) 반복당 지역변수 40개 → TickContext(매 틱 새로 생성, 기본값 = 원래 초기값; 시각/파생
+  초기화는 원래 자리의 대입으로), (c) 남은 람다 4개(restart_capture_session/pump_cursor_forward/reconnect_tcp_data_session/
+  apply_selected_window_capture) → HostContext&를 받는 free function, update_u64_max → host_stats.hpp inline, 튜닝 constexpr
+  전부 → host_main_loop.hpp. HostContext = main이 한 번 조립하는 참조 묶음(startUs 등은 선언만 앞당기고 스탬프는 제자리).
+  단계 경계 13곳 중괄호 깊이 1 검증. 시행착오: 호출부 치환이 람다 구간 처리에서 파일 전체에 5회 중복 적용(hx, hx, …),
+  헬퍼에 tc 별칭 오삽입, main의 restart 호출 패턴 불일치 → 수정 후 빌드 통과(스크립트도 교정본 커밋).
+- 게이트: host 빌드 exit 0 / UDP e2e 13/13(REMOTE60_NATIVE_STATS_PRINT_EVERY_SEC=1로 stats 단계까지 실행: 초당 stats 라인,
+  trailing kick 4, wire 7, runtime tune 2, 오류 0). host_main 5,373→2,048줄, host_main_loop.cpp 3,768줄, hpp 219줄.
+- 남은 큰 덩어리: host_main_loop.cpp의 stage_encode_send(~1,000줄)·stage_stats(~830줄), main()의 capturePublishFn 람다(~105줄)와
+  디렉터리 hello 람다 — 파일당 ≤800줄 목표엔 2차 분할 필요(Phase 3.5 후보). Phase 4(스레드 소유권)는 별도 사이클.
+- 다음 액션: gate-A 4타깃 빌드 + 단위테스트 + e2e 재확인 → 사용자 실기 1회 → 버전 범프(0.2.58) 판단.
