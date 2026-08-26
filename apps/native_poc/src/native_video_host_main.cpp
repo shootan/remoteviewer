@@ -495,6 +495,38 @@ struct KickState {
   uint64_t selectionFirstKeyframeDropCount = 0;
 };
 
+// Client-reported metrics + keyframe requests (Phase 1-10 state struct). Written by the control
+// thread as ControlClientMetrics / ControlRequestKeyFrame messages arrive, read by the main loop's
+// 1s stats tick and the ABR/M9 decisions. Every field is an atomic so the two threads share it
+// without a lock; Phase 4 may replace this with a lock-copied snapshot.
+// thread: control (write) / main (read).
+struct ClientMetricsSnapshot {
+  std::atomic<uint64_t> updatedUs{0};
+  std::atomic<uint32_t> width{0};
+  std::atomic<uint32_t> height{0};
+  std::atomic<uint32_t> recvFpsX100{0};
+  std::atomic<uint32_t> decodedFpsX100{0};
+  std::atomic<uint32_t> recvMbpsX1000{0};
+  std::atomic<uint32_t> skippedFrames{0};
+  std::atomic<uint64_t> avgLatencyUs{0};
+  std::atomic<uint64_t> maxLatencyUs{0};
+  std::atomic<uint64_t> avgDecodeTailUs{0};
+  std::atomic<uint64_t> maxDecodeTailUs{0};
+  std::atomic<uint32_t> congestionState{0};
+  std::atomic<uint32_t> congestionTransitions{0};
+  std::atomic<uint32_t> congestionRecoveryCount{0};
+  std::atomic<uint32_t> congestionRecoveryReq{0};
+  std::atomic<uint32_t> congestionRecoveryMaxUs{0};
+  std::atomic<uint32_t> queueDepthMax{0};
+  std::atomic<uint32_t> queueDepthH4p{0};
+  std::atomic<uint32_t> udpAssemblyDropPm{0};
+  // Keyframe request signal from the viewer (consumed by the main loop's force-key path).
+  std::atomic<bool> requestedKeyFrame{false};
+  std::atomic<uint16_t> keyFrameReason{0};
+  std::atomic<uint64_t> keyFrameRequestCount{0};
+  std::atomic<uint64_t> keyFrameRequestDropped{0};
+};
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1163,25 +1195,8 @@ int main(int argc, char** argv) {
   std::atomic<uint64_t> desktopPromotionDeferredSecureTotal{0};  // deadlines held off by the secure gate (per episode)
   std::atomic<uint64_t> desktopSecureProbeFalseTotal{0};         // uncached probes that saw a secure desktop
   std::atomic<uint64_t> lastPromotionWaitUs{0};                  // demotion -> successful promotion
-  std::atomic<uint64_t> clientMetricsUpdatedUs{0};
-  std::atomic<uint32_t> clientMetricsWidth{0};
-  std::atomic<uint32_t> clientMetricsHeight{0};
-  std::atomic<uint32_t> clientMetricsRecvFpsX100{0};
-  std::atomic<uint32_t> clientMetricsDecodedFpsX100{0};
-  std::atomic<uint32_t> clientMetricsRecvMbpsX1000{0};
-  std::atomic<uint32_t> clientMetricsSkippedFrames{0};
-  std::atomic<uint64_t> clientMetricsAvgLatencyUs{0};
-  std::atomic<uint64_t> clientMetricsMaxLatencyUs{0};
-  std::atomic<uint64_t> clientMetricsAvgDecodeTailUs{0};
-  std::atomic<uint64_t> clientMetricsMaxDecodeTailUs{0};
-  std::atomic<uint32_t> clientMetricsCongestionState{0};
-  std::atomic<uint32_t> clientMetricsCongestionTransitions{0};
-  std::atomic<uint32_t> clientMetricsCongestionRecoveryCount{0};
-  std::atomic<uint32_t> clientMetricsCongestionRecoveryReq{0};
-  std::atomic<uint32_t> clientMetricsCongestionRecoveryMaxUs{0};
-  std::atomic<uint32_t> clientMetricsQueueDepthMax{0};
-  std::atomic<uint32_t> clientMetricsQueueDepthH4p{0};
-  std::atomic<uint32_t> clientMetricsUdpAssemblyDropPm{0};
+  // Viewer-reported metrics + keyframe requests, control thread -> main loop (ClientMetricsSnapshot, Phase 1-10).
+  ClientMetricsSnapshot clientMetrics;
   std::atomic<uint32_t> hostCaptureTargetPid{0};
   std::atomic<uint32_t> hostCaptureTargetFlags{0};
   std::atomic<uint32_t> hostCaptureRebindCount{0};
@@ -1200,10 +1215,6 @@ int main(int argc, char** argv) {
   std::atomic<uint32_t> inputDomainW{0};
   std::atomic<uint32_t> inputDomainH{0};
   DesktopInputState desktopInputState;
-  std::atomic<bool> clientRequestedKeyFrame{false};
-  std::atomic<uint16_t> clientKeyFrameReason{0};
-  std::atomic<uint64_t> clientKeyFrameRequestCount{0};
-  std::atomic<uint64_t> clientKeyFrameRequestDropped{0};
   std::atomic<bool> streamControlActive{true};
   std::atomic<bool> runtimeTunePending{false};
   std::atomic<uint32_t> runtimeTuneBitrate{0};
@@ -1808,25 +1819,25 @@ int main(int argc, char** argv) {
         ControlClientMetricsMessage metrics{};
         metrics.header = header;
         if (!link.Read(&metrics.seq, sizeof(metrics) - sizeof(MessageHeader))) break;
-        clientMetricsWidth = metrics.width;
-        clientMetricsHeight = metrics.height;
-        clientMetricsRecvFpsX100 = metrics.recvFpsX100;
-        clientMetricsDecodedFpsX100 = metrics.decodedFpsX100;
-        clientMetricsRecvMbpsX1000 = metrics.recvMbpsX1000;
-        clientMetricsSkippedFrames = metrics.skippedFrames;
-        clientMetricsAvgLatencyUs = metrics.avgLatencyUs;
-        clientMetricsMaxLatencyUs = metrics.maxLatencyUs;
-        clientMetricsAvgDecodeTailUs = metrics.avgDecodeTailUs;
-        clientMetricsMaxDecodeTailUs = metrics.maxDecodeTailUs;
-        clientMetricsCongestionState = metrics.congestionState;
-        clientMetricsCongestionTransitions = metrics.congestionTransitions;
-        clientMetricsCongestionRecoveryCount = metrics.congestionRecoveryCount;
-        clientMetricsCongestionRecoveryReq = metrics.congestionRecoveryReq;
-        clientMetricsCongestionRecoveryMaxUs = metrics.congestionRecoveryMaxUs;
-        clientMetricsQueueDepthMax = metrics.queueDepthMax;
-        clientMetricsQueueDepthH4p = metrics.queueDepthH4p;
-        clientMetricsUdpAssemblyDropPm = metrics.udpAssemblyDropPm;
-        clientMetricsUpdatedUs = qpc_now_us();
+        clientMetrics.width = metrics.width;
+        clientMetrics.height = metrics.height;
+        clientMetrics.recvFpsX100 = metrics.recvFpsX100;
+        clientMetrics.decodedFpsX100 = metrics.decodedFpsX100;
+        clientMetrics.recvMbpsX1000 = metrics.recvMbpsX1000;
+        clientMetrics.skippedFrames = metrics.skippedFrames;
+        clientMetrics.avgLatencyUs = metrics.avgLatencyUs;
+        clientMetrics.maxLatencyUs = metrics.maxLatencyUs;
+        clientMetrics.avgDecodeTailUs = metrics.avgDecodeTailUs;
+        clientMetrics.maxDecodeTailUs = metrics.maxDecodeTailUs;
+        clientMetrics.congestionState = metrics.congestionState;
+        clientMetrics.congestionTransitions = metrics.congestionTransitions;
+        clientMetrics.congestionRecoveryCount = metrics.congestionRecoveryCount;
+        clientMetrics.congestionRecoveryReq = metrics.congestionRecoveryReq;
+        clientMetrics.congestionRecoveryMaxUs = metrics.congestionRecoveryMaxUs;
+        clientMetrics.queueDepthMax = metrics.queueDepthMax;
+        clientMetrics.queueDepthH4p = metrics.queueDepthH4p;
+        clientMetrics.udpAssemblyDropPm = metrics.udpAssemblyDropPm;
+        clientMetrics.updatedUs = qpc_now_us();
         // Logged as it arrives rather than folded into the per-second stat line: this is the
         // only view the host gets of what the remote display is actually doing, and a viewer
         // reporting stutter needs it visible without attaching to the device.
@@ -1868,15 +1879,15 @@ int main(int argc, char** argv) {
         if (keyReqTokens >= 1.0 && minIntervalOk) {
           keyReqTokens -= 1.0;
           keyReqNextAllowedUs = nowUs + keyReqMinIntervalUs;
-          clientRequestedKeyFrame = true;
-          clientKeyFrameReason = req.reason;
-          const uint64_t reqCount = clientKeyFrameRequestCount.fetch_add(1) + 1;
+          clientMetrics.requestedKeyFrame = true;
+          clientMetrics.keyFrameReason = req.reason;
+          const uint64_t reqCount = clientMetrics.keyFrameRequestCount.fetch_add(1) + 1;
           std::cout << "[native-video-host][control] keyframe-request seq=" << req.seq
                     << " reason=" << req.reason
                     << " total=" << reqCount
                     << "\n";
         } else {
-          const uint64_t dropCount = clientKeyFrameRequestDropped.fetch_add(1) + 1;
+          const uint64_t dropCount = clientMetrics.keyFrameRequestDropped.fetch_add(1) + 1;
           if ((dropCount % 60) == 1) {
             std::cout << "[native-video-host][control] keyframe-request-throttled seq=" << req.seq
                       << " reason=" << req.reason
@@ -4052,17 +4063,17 @@ int main(int argc, char** argv) {
                        reinterpret_cast<char*>(&effectiveSendBuf), &effectiveSendBufLen);
       std::cout << "[native-video-host] client reconnected transport=tcp sndbuf="
                 << effectiveSendBuf << " bytes\n";
-      clientMetricsUpdatedUs = 0;
-      clientMetricsCongestionState = 0;
-      clientMetricsCongestionTransitions = 0;
-      clientMetricsCongestionRecoveryCount = 0;
-      clientMetricsCongestionRecoveryReq = 0;
-      clientMetricsCongestionRecoveryMaxUs = 0;
-      clientMetricsQueueDepthMax = 0;
-      clientMetricsQueueDepthH4p = 0;
-      clientMetricsUdpAssemblyDropPm = 0;
-      clientRequestedKeyFrame = false;
-      clientKeyFrameReason = 0;
+      clientMetrics.updatedUs = 0;
+      clientMetrics.congestionState = 0;
+      clientMetrics.congestionTransitions = 0;
+      clientMetrics.congestionRecoveryCount = 0;
+      clientMetrics.congestionRecoveryReq = 0;
+      clientMetrics.congestionRecoveryMaxUs = 0;
+      clientMetrics.queueDepthMax = 0;
+      clientMetrics.queueDepthH4p = 0;
+      clientMetrics.udpAssemblyDropPm = 0;
+      clientMetrics.requestedKeyFrame = false;
+      clientMetrics.keyFrameReason = 0;
       runtimeTunePending = false;
       runtimeTuneBitrate = 0;
       runtimeTuneKeyint = 0;
@@ -5614,7 +5625,7 @@ int main(int argc, char** argv) {
                   << "\n";
       }
 
-      const bool keyReqPending = clientRequestedKeyFrame.load(std::memory_order_acquire);
+      const bool keyReqPending = clientMetrics.requestedKeyFrame.load(std::memory_order_acquire);
       const uint64_t targetIntervalUs = frameGating.staticMode ? frameGating.staticIntervalUs : activeFrameIntervalUs;
       // The static interval throttles idle scenes; it must never hold back a frame that
       // actually changed, or the first interaction after idle arrives late.
@@ -5928,8 +5939,8 @@ int main(int argc, char** argv) {
         continue;
       }
 
-       if (clientRequestedKeyFrame.exchange(false)) {
-        const uint16_t reason = clientKeyFrameReason.load();
+       if (clientMetrics.requestedKeyFrame.exchange(false)) {
+        const uint16_t reason = clientMetrics.keyFrameReason.load();
         std::cout << "[native-video-host][control] keyframe-request-consumed reason=" << reason << "\n";
         forceKeyNext = true;
       }
@@ -6924,7 +6935,7 @@ int main(int argc, char** argv) {
                   << " inputDefaultBrokerFallback=" << inputDefaultBrokerFallback.load(std::memory_order_relaxed)
                   << " inputDefaultBrokerQueued=" << inputDefaultBrokerQueued.load(std::memory_order_relaxed)
                   << " inputDefaultBrokerPipeFail=" << inputDefaultBrokerPipeFail.load(std::memory_order_relaxed)
-                  << " keyReqDropTotal=" << clientKeyFrameRequestDropped.load()
+                  << " keyReqDropTotal=" << clientMetrics.keyFrameRequestDropped.load()
                   << " callbackFrames=" << callbackFramesPerSec
                   << " skippedByOverwrite=" << skippedByOverwrite
                   << " frameGatingMode=" << (frameGating.staticMode ? "static" : "motion")
@@ -7011,8 +7022,8 @@ int main(int argc, char** argv) {
                   << " stalePreEncodeDrops=" << stalePreEncodeDropCount
                   << " staleEncodedDrops=" << staleEncodedDropCount
                   << " encoderResets=" << encoderResetCount
-                  << " keyReqTotal=" << clientKeyFrameRequestCount.load()
-                  << " keyReqDropTotal=" << clientKeyFrameRequestDropped.load()
+                  << " keyReqTotal=" << clientMetrics.keyFrameRequestCount.load()
+                  << " keyReqDropTotal=" << clientMetrics.keyFrameRequestDropped.load()
                   << " inputEvents=" << inputEvents.load()
                   << " secureInputAttempts=" << secureInputAttempts.load()
                   << " secureInputDelivered=" << secureInputDelivered.load()
@@ -7133,23 +7144,23 @@ int main(int argc, char** argv) {
                   << "\n";
         }
 
-        const uint64_t metricsUpdatedUs = clientMetricsUpdatedUs.load();
+        const uint64_t metricsUpdatedUs = clientMetrics.updatedUs.load();
         const bool metricsFresh =
             (metricsUpdatedUs > 0) && (t >= metricsUpdatedUs) && ((t - metricsUpdatedUs) <= 3000000ULL);
-        const uint64_t clAvgLatencyUs = metricsFresh ? clientMetricsAvgLatencyUs.load() : 0;
-        const uint64_t clAvgDecodeTailUs = metricsFresh ? clientMetricsAvgDecodeTailUs.load() : 0;
-        const uint32_t clDecodedFpsX100 = metricsFresh ? clientMetricsDecodedFpsX100.load() : 0;
-        const uint32_t clRecvMbpsX1000 = metricsFresh ? clientMetricsRecvMbpsX1000.load() : 0;
-        const uint32_t clWidth = metricsFresh ? clientMetricsWidth.load() : 0;
-        const uint32_t clHeight = metricsFresh ? clientMetricsHeight.load() : 0;
-        const uint32_t clCongestionState = metricsFresh ? clientMetricsCongestionState.load() : 0;
-        const uint32_t clCongestionTransitions = metricsFresh ? clientMetricsCongestionTransitions.load() : 0;
-        const uint32_t clCongestionRecoveryCount = metricsFresh ? clientMetricsCongestionRecoveryCount.load() : 0;
-        const uint32_t clCongestionRecoveryReq = metricsFresh ? clientMetricsCongestionRecoveryReq.load() : 0;
-        const uint32_t clCongestionRecoveryMaxUs = metricsFresh ? clientMetricsCongestionRecoveryMaxUs.load() : 0;
-        const uint32_t clQueueDepthMax = metricsFresh ? clientMetricsQueueDepthMax.load() : 0;
-        const uint32_t clQueueDepthH4p = metricsFresh ? clientMetricsQueueDepthH4p.load() : 0;
-        const uint32_t clUdpDropPm = metricsFresh ? clientMetricsUdpAssemblyDropPm.load() : 0;
+        const uint64_t clAvgLatencyUs = metricsFresh ? clientMetrics.avgLatencyUs.load() : 0;
+        const uint64_t clAvgDecodeTailUs = metricsFresh ? clientMetrics.avgDecodeTailUs.load() : 0;
+        const uint32_t clDecodedFpsX100 = metricsFresh ? clientMetrics.decodedFpsX100.load() : 0;
+        const uint32_t clRecvMbpsX1000 = metricsFresh ? clientMetrics.recvMbpsX1000.load() : 0;
+        const uint32_t clWidth = metricsFresh ? clientMetrics.width.load() : 0;
+        const uint32_t clHeight = metricsFresh ? clientMetrics.height.load() : 0;
+        const uint32_t clCongestionState = metricsFresh ? clientMetrics.congestionState.load() : 0;
+        const uint32_t clCongestionTransitions = metricsFresh ? clientMetrics.congestionTransitions.load() : 0;
+        const uint32_t clCongestionRecoveryCount = metricsFresh ? clientMetrics.congestionRecoveryCount.load() : 0;
+        const uint32_t clCongestionRecoveryReq = metricsFresh ? clientMetrics.congestionRecoveryReq.load() : 0;
+        const uint32_t clCongestionRecoveryMaxUs = metricsFresh ? clientMetrics.congestionRecoveryMaxUs.load() : 0;
+        const uint32_t clQueueDepthMax = metricsFresh ? clientMetrics.queueDepthMax.load() : 0;
+        const uint32_t clQueueDepthH4p = metricsFresh ? clientMetrics.queueDepthH4p.load() : 0;
+        const uint32_t clUdpDropPm = metricsFresh ? clientMetrics.udpAssemblyDropPm.load() : 0;
 
         if (rate.abrEnabled && !runtimeTuneManualOverride && !rate.m9Apply) {
           // The current target, not the one the process started with. A runtime FPS tune moves
