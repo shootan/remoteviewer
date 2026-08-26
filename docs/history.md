@@ -7042,3 +7042,12 @@ Next action
 - 게이트: host 빌드 exit 0 / UDP e2e 13/13 / 로그 `desktop_backend=dxgi` 그대로.
 - 다음 액션: 1-11 WatchdogState(콜백 stall·frozen ring·readback drain·main-loop 워치독 26개; mainLoopProgressUs 초기 스탬프는
   원래 위치 대입으로 유지해 워치독 오발동 방지).
+
+### 278) 2026-08-26 리팩터 Phase 1-11 — WatchdogState (브랜치 4a8b36f)
+
+- GDI 콜백 stall 워치독(env 3 + 스트릭/카운터 3), frozen-ring 자가복구(스트릭·타임스탬프·피크 5), readback-slow 로그
+  rate-limit 2, readback drain 소프트 워치독(윈도 델타 8), main-loop 생존 atomic 3 = 24개 → `struct WatchdogState`
+  (`watchdog.<field>`). mainLoopPhase/ProgressUs 초기 스탬프는 원래 위치 대입으로 유지(워치독 스레드 첫 age 계산 불변).
+  문자열 리터럴 집합은 struct 주석의 "readback slow" 인용 1건 외 동일.
+- 게이트: host 빌드 exit 0 / UDP e2e 13/13 / 로그 워치독 발동 0, `captureInputMinPushPerSec=10 …` 라벨 그대로.
+- 다음 액션: 1-9 InputRouterState(31개, 인스턴스명 inputRouter — 지역 `input` 메시지 변수와 충돌 회피).
