@@ -56,6 +56,7 @@ target_link_libraries(remote60_native_client_poc PRIVATE
 add_executable(remote60_native_video_host_poc
   src/native_video_host_main.cpp
   src/host_bgra_scale.cpp
+  src/host_window_enum.cpp
   src/d3d_capture_readback.cpp
   src/directory_client.cpp
   src/gdi_capture_process.cpp
