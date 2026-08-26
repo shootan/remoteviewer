@@ -7175,3 +7175,14 @@ Next action
 - 다음 액션: 2-5 EncoderState 멤버(apply_encoder_target/apply_confirmed_capture_geometry/apply_capture_ui_quality_mode) →
   잔여 람다(restart_capture_session, apply_selected_window_capture, reconnect_tcp, pump_cursor_forward, capturePublishFn)는
   Phase 3 Tick 단계 함수와 함께 정리.
+
+### 290) 2026-08-26 리팩터 Phase 2-5 — EncoderState::ApplyTarget 등 4개 멤버 (브랜치 2622cd3)
+
+- apply_encoder_target(75줄)/apply_confirmed_capture_geometry/apply_capture_ui_quality_mode → host_encoder_manager.cpp의
+  EncoderState 멤버(본문 verbatim), resetHostTimelineAnchors → 인라인 ResetTimelineAnchors(capture). auTimelineOriginUs는
+  EncoderState 필드로, pacing env 4개(noPacingH264/udpPacePeakPercent/udpPacePeakFloorBps/udpKeyframePacePeakBps)는 SenderState
+  필드로(인스턴스를 env 프리루드 앞으로 끌어올림 — 기본 생성, 의존 없음). 호출부 1:1 치환. host_main 5,518→5,373줄.
+- 게이트: host 빌드 exit 0 / UDP e2e 13/13 / 로그 `h264 pacing=on udpPacePeakPercent=500 …`·pacing update·runtime tune 그대로.
+- 남은 main 람다: restart_capture_session(16), apply_selected_window_capture(169), reconnect_tcp_data_session(66),
+  pump_cursor_forward(39), capturePublishFn(~105), arg_or_env, classify/authorize_directory_hello, update_u64_max, emit —
+  Phase 3에서 Tick 단계 함수와 함께 정리. 다음 액션: 리네이머가 주석 프로즈에 남긴 `res.frame` 등 정리 → Phase 3.
