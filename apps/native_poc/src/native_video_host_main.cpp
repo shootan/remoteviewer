@@ -643,6 +643,89 @@ struct InputRouterState {
   bool cursorSentVisible = false;
 };
 
+// H4: the encode thread hands encoded frames to this sender instead of pacing the wire
+// inline. Pacing a 60ms keyframe used to stall the next frame's encode start directly.
+// Depth is 2: an arriving keyframe supersedes the whole backlog, and a delta that would
+// overflow the queue drops the backlog and requests a fresh keyframe -- an encoded delta
+// must never be skipped silently or the reference chain corrupts until the next IDR.
+struct EncodedSendItem {
+  std::vector<uint8_t> bytes;
+  UdpVideoChunkHeader udpHdr{};
+  bool keyFrame = false;
+  uint64_t frameIntervalUs = 0;
+  // qpc time the encode/main thread handed this AU to the sender queue. The sender subtracts it
+  // from its actual wire-start to expose queueWaitUs -- the gap between "AU ready" and "bytes on
+  // the wire" -- so a stutter can be pinned to AU supply vs the sender/wire, not guessed.
+  uint64_t enqueueUs = 0;
+  // Media epoch live when this item was handed to the sender. streamGeneration is a
+  // target-selection id that does NOT change on a session rollover, so it cannot fence a delta
+  // encoded for the previous client. The sender drops any dequeued item whose mediaEpoch no
+  // longer matches the current one (see mediaSessionEpoch).
+  uint64_t mediaEpoch = 0;
+};
+
+// Encoded-frame sender (Phase 1-2 state struct). The encode/main thread enqueues AUs; the sender
+// thread paces them onto the wire. Depth is 2: a keyframe supersedes the backlog, an overflowing
+// delta drops the backlog and requests a fresh keyframe, and deltas are held back until that key
+// passes (waitingForKey). mediaSessionEpoch fences items of a previous session at dequeue. See the
+// comment blocks in main() (H4 sender, session media barrier, IDR telemetry) for the rationale.
+// thread: queue/peer/waitingForKey under mu (main + sender + reader rollover); the atomics are the
+// cross-thread signals (sender -> main: sendFailed/recoveryPending/requestKey; reader -> main:
+// udpPeer*); the plain sent*/udpTx*/heldFrames/nonKeyAu*/firstKeyEnqueuedUs counters are
+// main-thread stats-interval accumulators.
+struct SenderState {
+  // Config (REMOTE60_NATIVE_SENDER_MAX_CADENCE_HOLD_US), fixed after startup.
+  uint32_t maxCadenceHoldUs = 0;
+  bool cadenceSmoothing = false;
+  // UDP peer as the reader thread sees it (the render loop picks up changes through the atomics).
+  sockaddr_in udpPeer{};
+  bool udpPeerReady = false;
+  std::atomic<uint32_t> udpPeerIpNet{0};
+  std::atomic<uint16_t> udpPeerPortNet{0};
+  std::atomic<bool> udpPeerChanged{false};
+  // Queue + peer the sender thread writes to (all under mu).
+  std::mutex mu;
+  std::condition_variable cv;
+  std::deque<EncodedSendItem> queue;
+  sockaddr_in peer{};
+  bool peerReady = false;
+  bool waitingForKey = false;  // deltas held back until the requested keyframe passes
+  // Session media barrier: bumped (under mu) by the rollover transaction; starts at 1 like sessionEpoch.
+  std::atomic<uint64_t> mediaSessionEpoch{1};
+  std::atomic<bool> stop{false};
+  std::atomic<bool> sendFailed{false};
+  std::atomic<bool> requestKey{false};
+  // Sender -> main: a same-epoch transport error re-armed the barrier; main forces the next key
+  // and arms the trailing kick (the only recovery signal that works on a static screen).
+  std::atomic<bool> recoveryPending{false};
+  std::atomic<uint64_t> barrierRearmCount{0};  // same-epoch send-failure barrier re-arms (telemetry)
+  std::atomic<uint64_t> dropCount{0};
+  std::atomic<uint64_t> txFrames{0};
+  std::atomic<uint64_t> txChunks{0};
+  std::atomic<uint64_t> txBytes{0};
+  std::atomic<uint64_t> txNoPeer{0};
+  std::atomic<uint64_t> lastSendStartUs{0};
+  std::atomic<uint64_t> sendDurSumUs{0};
+  std::atomic<uint64_t> sendDurMaxUs{0};
+  std::atomic<uint64_t> sendCount{0};
+  // IDR telemetry per media epoch (sender thread writes; reset by the rollover). Diagnostic only.
+  std::atomic<uint64_t> firstKeyWireUs{0};
+  std::atomic<uint64_t> lastKeyAuBytes{0};
+  std::atomic<uint64_t> lastKeyAuChunks{0};
+  std::thread thread;
+  // Main-thread stats-interval accumulators (reset every stats print).
+  uint64_t sentFrames = 0;
+  uint64_t sentBytes = 0;
+  uint64_t heldFrames = 0;             // AUs the queue policy discarded (backlog resync / waiting for IDR)
+  uint64_t nonKeyAuWhileWaiting = 0;   // delta AUs seen while the barrier was closed
+  uint64_t firstKeyEnqueuedUs = 0;     // wire-time stamp of the first key enqueued this media epoch
+  uint64_t udpTxFrames = 0;
+  uint64_t udpTxChunks = 0;
+  uint64_t udpTxBytes = 0;
+  uint64_t udpTxFail = 0;
+  uint64_t udpTxNoPeer = 0;
+};
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -701,9 +784,11 @@ int main(int argc, char** argv) {
   // The H4 sender queue is already capped at two frames with keyframe supersede, so a
   // catch-up burst can only ever be a couple of frames; smoothing it is not worth a frame
   // period of latency. Off by default; the cap below re-enables bounded smoothing.
-  const uint32_t senderMaxCadenceHoldUs =
+  // Encoded-frame sender queue/thread, UDP peer, media barrier, wire counters (SenderState, Phase 1-2).
+  SenderState sender;
+  sender.maxCadenceHoldUs =
       env_u32_clamped("REMOTE60_NATIVE_SENDER_MAX_CADENCE_HOLD_US", 0, 0, 33000);
-  const bool senderCadenceSmoothing = senderMaxCadenceHoldUs > 0;
+  sender.cadenceSmoothing = sender.maxCadenceHoldUs > 0;
   // The capture-submit limiter keeps 60Hz callbacks from flooding a 30fps encode, but it
   // rejects rather than defers, and a rejected desktop-duplication frame is lost for good.
   // Widening the early tolerance lets a slightly-early callback through instead of leaving a
@@ -926,8 +1011,6 @@ int main(int argc, char** argv) {
   // The port the media socket actually landed on. It only differs from args.bindPort when a
   // fallback candidate was used, and the directory must publish this one rather than the request.
   uint16_t mediaBindPort = args.bindPort;
-  sockaddr_in udpPeer{};
-  bool udpPeerReady = false;
   std::atomic<bool> sessionDirectoryAuthenticated{false};
   std::mutex directorySessionAuthMu;
   std::string directorySessionToken;
@@ -965,70 +1048,22 @@ int main(int argc, char** argv) {
   };
 
 
-  // H4: the encode thread hands encoded frames to this sender instead of pacing the wire
-  // inline. Pacing a 60ms keyframe used to stall the next frame's encode start directly.
-  // Depth is 2: an arriving keyframe supersedes the whole backlog, and a delta that would
-  // overflow the queue drops the backlog and requests a fresh keyframe -- an encoded delta
-  // must never be skipped silently or the reference chain corrupts until the next IDR.
-  struct EncodedSendItem {
-    std::vector<uint8_t> bytes;
-    UdpVideoChunkHeader udpHdr{};
-    bool keyFrame = false;
-    uint64_t frameIntervalUs = 0;
-    // qpc time the encode/main thread handed this AU to the sender queue. The sender subtracts it
-    // from its actual wire-start to expose queueWaitUs -- the gap between "AU ready" and "bytes on
-    // the wire" -- so a stutter can be pinned to AU supply vs the sender/wire, not guessed.
-    uint64_t enqueueUs = 0;
-    // Media epoch live when this item was handed to the sender. streamGeneration is a
-    // target-selection id that does NOT change on a session rollover, so it cannot fence a delta
-    // encoded for the previous client. The sender drops any dequeued item whose mediaEpoch no
-    // longer matches the current one (see mediaSessionEpoch).
-    uint64_t mediaEpoch = 0;
-  };
-  std::mutex senderMu;
-  std::condition_variable senderCv;
-  std::deque<EncodedSendItem> senderQueue;
-  sockaddr_in senderPeer{};
-  bool senderPeerReady = false;
   // After a backlog drop every delta references frames that never went out; shipping them
   // paints macroblock corruption on the client until the next IDR. They are held back here
   // until the requested keyframe actually passes through.
-  bool senderWaitingForKey = false;
-  // Session media barrier. Bumped (under senderMu) by the rollover transaction in pump_udp_hello;
+  // Session media barrier. Bumped (under sender.mu) by the rollover transaction in pump_udp_hello;
   // read by the sender at dequeue to fence any item stamped for a previous session. Every item is
   // stamped with this value when enqueued. Starts at 1 to match sessionEpoch.
-  std::atomic<uint64_t> mediaSessionEpoch{1};
-  std::atomic<bool> senderStop{false};
-  std::atomic<bool> senderSendFailed{false};
-  std::atomic<bool> senderRequestKey{false};
   // Set by the sender thread when a same-epoch transport error re-armed the barrier. The main loop
-  // consumes it at its top -> forceKeyNext + arm_trailing_kick, because senderRequestKey is only
+  // consumes it at its top -> forceKeyNext + arm_trailing_kick, because sender.requestKey is only
   // consumed after a real frame is popped: on a static desktop no new frame arrives to carry it, so
   // the recovery IDR would never be produced. This is the only barrier-recovery signal that works
   // when the screen is not changing. forceKeyNext must never be written from the sender thread.
-  std::atomic<bool> senderRecoveryPending{false};
-  std::atomic<uint64_t> barrierRearmCount{0};  // same-epoch send-failure barrier re-arms (telemetry)
-  std::atomic<uint64_t> senderDropCount{0};
-  std::atomic<uint64_t> senderTxFrames{0};
-  std::atomic<uint64_t> senderTxChunks{0};
-  std::atomic<uint64_t> senderTxBytes{0};
-  std::atomic<uint64_t> senderTxNoPeer{0};
-  std::atomic<uint64_t> senderLastSendStartUs{0};
-  std::atomic<uint64_t> senderSendDurSumUs{0};
-  std::atomic<uint64_t> senderSendDurMaxUs{0};
-  std::atomic<uint64_t> senderSendCount{0};
   // IDR telemetry written by the sender thread (per current media epoch): when the first key AU of
   // this session hit the wire, and the size/chunk count of the last key AU sent. Reset by the
   // rollover transaction so they describe the current session, not the previous one. Diagnostic
   // only -- never wired into ABR evidence.
-  std::atomic<uint64_t> senderFirstKeyWireUs{0};
-  std::atomic<uint64_t> senderLastKeyAuBytes{0};
-  std::atomic<uint64_t> senderLastKeyAuChunks{0};
-  std::thread senderThread;
   // The reader thread owns the peer address; the render loop picks up changes through these.
-  std::atomic<uint32_t> udpPeerIpNet{0};
-  std::atomic<uint16_t> udpPeerPortNet{0};
-  std::atomic<bool> udpPeerChanged{false};
   if (transport == VideoTransport::Tcp) {
     listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (listenSock == INVALID_SOCKET) {
@@ -1254,15 +1289,15 @@ int main(int argc, char** argv) {
         lanSock = INVALID_SOCKET;
       }
 
-      udpPeer = peer;
-      udpPeerReady = true;
+      sender.udpPeer = peer;
+      sender.udpPeerReady = true;
       {
-        std::lock_guard<std::mutex> lk(senderMu);
-        senderPeer = peer;
-        senderPeerReady = true;
+        std::lock_guard<std::mutex> lk(sender.mu);
+        sender.peer = peer;
+        sender.peerReady = true;
       }
-      udpPeerIpNet.store(peer.sin_addr.s_addr, std::memory_order_release);
-      udpPeerPortNet.store(peer.sin_port, std::memory_order_release);
+      sender.udpPeerIpNet.store(peer.sin_addr.s_addr, std::memory_order_release);
+      sender.udpPeerPortNet.store(peer.sin_port, std::memory_order_release);
       break;
     }
     // Stays blocking: a dedicated reader thread now owns receives, and control messages must
@@ -2166,8 +2201,8 @@ int main(int argc, char** argv) {
   if (transport == VideoTransport::Udp) {
     udpControlChannel.Configure(
         [&](const void* data, size_t len) -> bool {
-          const uint32_t ip = udpPeerIpNet.load(std::memory_order_acquire);
-          const uint16_t port = udpPeerPortNet.load(std::memory_order_acquire);
+          const uint32_t ip = sender.udpPeerIpNet.load(std::memory_order_acquire);
+          const uint16_t port = sender.udpPeerPortNet.load(std::memory_order_acquire);
           if (ip == 0 || port == 0) return false;
           sockaddr_in to{};
           to.sin_family = AF_INET;
@@ -2276,21 +2311,21 @@ int main(int argc, char** argv) {
             sessionDirectoryAuthenticated.store(directoryAuthenticated,
                                                 std::memory_order_release);
             const bool changed =
-                udpPeerIpNet.load(std::memory_order_acquire) != peer.sin_addr.s_addr ||
-                udpPeerPortNet.load(std::memory_order_acquire) != peer.sin_port;
+                sender.udpPeerIpNet.load(std::memory_order_acquire) != peer.sin_addr.s_addr ||
+                sender.udpPeerPortNet.load(std::memory_order_acquire) != peer.sin_port;
             // An unauthenticated LAN client has no capability to compare, so the endpoint is all
             // there is to go on. It is a weaker signal -- an app restart that lands on the same
             // port is invisible -- but the relay, which is what makes endpoints ambiguous, only
             // ever carries authenticated sessions.
             const bool startsSession = directoryAuthenticated ? newSession : changed;
             if (changed) {
-              udpPeerIpNet.store(peer.sin_addr.s_addr, std::memory_order_release);
-              udpPeerPortNet.store(peer.sin_port, std::memory_order_release);
+              sender.udpPeerIpNet.store(peer.sin_addr.s_addr, std::memory_order_release);
+              sender.udpPeerPortNet.store(peer.sin_port, std::memory_order_release);
             }
             if (startsSession) {
               // Even when the endpoint is unchanged: a new client has a new decoder, and sending
               // it deltas against frames it never saw leaves it grey until the next keyframe.
-              udpPeerChanged.store(true, std::memory_order_release);
+              sender.udpPeerChanged.store(true, std::memory_order_release);
               const uint64_t epoch = begin_session_epoch();
               std::cout << "[native-video-host][control] session epoch=" << epoch
                         << (changed ? " peer=new" : " peer=same") << "\n";
@@ -3324,7 +3359,7 @@ int main(int argc, char** argv) {
   }
 
   auto attach_frame_arrived = [&]() {
-    token = pool.FrameArrived([&](Direct3D11CaptureFramePool const& sender,
+    token = pool.FrameArrived([&](Direct3D11CaptureFramePool const& framePool,
                                   winrt::Windows::Foundation::IInspectable const&) {
       if (stop.load()) return;
       // Snapshot the capture attachment cookie on entry, before reading any capture geometry or
@@ -3332,10 +3367,10 @@ int main(int argc, char** argv) {
       // recheck below drops the frame instead of stamping it with the new target/generation.
       const uint64_t myAttachmentCookie = captureAttachmentCookie.load(std::memory_order_acquire);
       try {
-        auto latest = sender.TryGetNextFrame();
+        auto latest = framePool.TryGetNextFrame();
         if (!latest) return;
         // Drain queued frames and keep only the newest one to avoid stale-frame backlog.
-        while (auto newer = sender.TryGetNextFrame()) {
+        while (auto newer = framePool.TryGetNextFrame()) {
           latest = newer;
         }
         if (!streamControlActive.load(std::memory_order_acquire)) return;
@@ -3738,25 +3773,15 @@ int main(int argc, char** argv) {
   const uint32_t statsPrintEverySec =
       env_u32_clamped("REMOTE60_NATIVE_STATS_PRINT_EVERY_SEC", 30, 1, 3600);
   uint64_t statTicks = 0;
-  uint64_t sentFrames = 0;
   uint64_t encodedFrames = 0;
   // Encoded frames the sender queue policy discarded (backlog resync or waiting for the
   // forced IDR). These are the frames a viewer experiences as a freeze.
-  uint64_t senderHeldFrames = 0;
   // Session media barrier / IDR telemetry (encode-thread side). forceKeyInputCount and
-  // nonKeyAuWhileWaiting reset per print interval; firstKeyEnqueuedUs is per media epoch (reset by
+  // sender.nonKeyAuWhileWaiting reset per print interval; sender.firstKeyEnqueuedUs is per media epoch (reset by
   // the rollover transaction). Goal: tell "encoder never produced a key" apart from "key produced
   // but lost in UDP assembly". Diagnostic only -- never fed to ABR.
   uint64_t forceKeyInputCount = 0;    // key inputs handed to the encoder
-  uint64_t nonKeyAuWhileWaiting = 0;  // delta AUs seen while the barrier was closed
-  uint64_t firstKeyEnqueuedUs = 0;    // wire-time stamp of the first key enqueued this media epoch
-  uint64_t sentBytes = 0;
   uint64_t rawEquivalentBytes = 0;
-  uint64_t udpTxFrames = 0;
-  uint64_t udpTxChunks = 0;
-  uint64_t udpTxBytes = 0;
-  uint64_t udpTxFail = 0;
-  uint64_t udpTxNoPeer = 0;
   uint64_t skippedByOverwrite = 0;
   uint64_t lastVersionSent = 0;
   uint64_t tracePrinted = 0;
@@ -3840,7 +3865,7 @@ int main(int argc, char** argv) {
     // dormant behind this env for future reconsideration.
     static const bool remoteCursorEnabled = env_truthy("REMOTE60_NATIVE_REMOTE_CURSOR");
     if (!remoteCursorEnabled) return;
-    if (transport != VideoTransport::Udp || !udpPeerReady) return;
+    if (transport != VideoTransport::Udp || !sender.udpPeerReady) return;
     if (!streamControlActive.load(std::memory_order_acquire)) return;
     if (captureWindowModeActive.load(std::memory_order_acquire)) return;
     if (backend.active != DesktopCaptureBackend::Dxgi) return;
@@ -3867,7 +3892,7 @@ int main(int argc, char** argv) {
     }
     pkt.hostQpcUs = nowUs;
     (void)sendto(clientSock, reinterpret_cast<const char*>(&pkt), sizeof(pkt), 0,
-                 reinterpret_cast<const sockaddr*>(&udpPeer), sizeof(udpPeer));
+                 reinterpret_cast<const sockaddr*>(&sender.udpPeer), sizeof(sender.udpPeer));
     inputRouter.cursorSendLastUs = nowUs;
     inputRouter.cursorSentX = px;
     inputRouter.cursorSentY = py;
@@ -3876,41 +3901,41 @@ int main(int argc, char** argv) {
 
   auto pump_udp_hello = [&]() {
     if (transport != VideoTransport::Udp) return;
-    if (!udpPeerChanged.exchange(false, std::memory_order_acq_rel)) return;
+    if (!sender.udpPeerChanged.exchange(false, std::memory_order_acq_rel)) return;
     sockaddr_in peer{};
     peer.sin_family = AF_INET;
-    peer.sin_addr.s_addr = udpPeerIpNet.load(std::memory_order_acquire);
-    peer.sin_port = udpPeerPortNet.load(std::memory_order_acquire);
-    udpPeer = peer;
-    udpPeerReady = true;
+    peer.sin_addr.s_addr = sender.udpPeerIpNet.load(std::memory_order_acquire);
+    peer.sin_port = sender.udpPeerPortNet.load(std::memory_order_acquire);
+    sender.udpPeer = peer;
+    sender.udpPeerReady = true;
     {
       // Session media barrier: the whole rollover is one transaction under the same lock the
       // sender thread dequeues on. Dropping the queue discards every delta still bound for the old
-      // session; senderWaitingForKey holds new deltas until a real IDR; bumping the media epoch
+      // session; sender.waitingForKey holds new deltas until a real IDR; bumping the media epoch
       // fences even an item the sender has already popped for the old peer. Without this, a delta
       // queued before the swap goes out to the *new* peer as a P-frame its decoder can never use.
-      std::lock_guard<std::mutex> lk(senderMu);
-      senderDropCount.fetch_add(senderQueue.size(), std::memory_order_relaxed);
-      senderHeldFrames += senderQueue.size();
-      sentFrames -= std::min<uint64_t>(sentFrames, senderQueue.size());
-      senderQueue.clear();
-      senderWaitingForKey = true;
-      senderPeer = peer;
-      senderPeerReady = true;
-      mediaSessionEpoch.fetch_add(1, std::memory_order_acq_rel);
-      senderFirstKeyWireUs.store(0, std::memory_order_relaxed);
-      senderLastKeyAuBytes.store(0, std::memory_order_relaxed);
-      senderLastKeyAuChunks.store(0, std::memory_order_relaxed);
+      std::lock_guard<std::mutex> lk(sender.mu);
+      sender.dropCount.fetch_add(sender.queue.size(), std::memory_order_relaxed);
+      sender.heldFrames += sender.queue.size();
+      sender.sentFrames -= std::min<uint64_t>(sender.sentFrames, sender.queue.size());
+      sender.queue.clear();
+      sender.waitingForKey = true;
+      sender.peer = peer;
+      sender.peerReady = true;
+      sender.mediaSessionEpoch.fetch_add(1, std::memory_order_acq_rel);
+      sender.firstKeyWireUs.store(0, std::memory_order_relaxed);
+      sender.lastKeyAuBytes.store(0, std::memory_order_relaxed);
+      sender.lastKeyAuChunks.store(0, std::memory_order_relaxed);
     }
     forceKeyNext = true;
-    firstKeyEnqueuedUs = 0;  // re-anchor the per-epoch IDR telemetry on the new session
+    sender.firstKeyEnqueuedUs = 0;  // re-anchor the per-epoch IDR telemetry on the new session
     std::cout << "[native-video-host] udp peer updated; media barrier armed epoch="
-              << mediaSessionEpoch.load(std::memory_order_acquire) << " forcing keyframe\n";
+              << sender.mediaSessionEpoch.load(std::memory_order_acquire) << " forcing keyframe\n";
   };
 
   auto start_encoded_sender = [&]() {
     if (transport != VideoTransport::Udp || !useH264) return;
-    senderThread = std::thread([&]() {
+    sender.thread = std::thread([&]() {
       (void)SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
       uint64_t cadenceScheduledUs = 0;
       uint64_t cadenceGeneration = 0;
@@ -3930,28 +3955,28 @@ int main(int argc, char** argv) {
         bool peerReady = false;
         size_t queueDepthAtDequeue = 0;
         {
-          std::unique_lock<std::mutex> lk(senderMu);
-          senderCv.wait(lk, [&] { return senderStop.load(std::memory_order_acquire) ||
-                                         !senderQueue.empty(); });
-          if (senderQueue.empty()) {
-            if (senderStop.load(std::memory_order_acquire)) return;
+          std::unique_lock<std::mutex> lk(sender.mu);
+          sender.cv.wait(lk, [&] { return sender.stop.load(std::memory_order_acquire) ||
+                                         !sender.queue.empty(); });
+          if (sender.queue.empty()) {
+            if (sender.stop.load(std::memory_order_acquire)) return;
             continue;
           }
-          item = std::move(senderQueue.front());
-          senderQueue.pop_front();
-          queueDepthAtDequeue = senderQueue.size();
-          peer = senderPeer;
-          peerReady = senderPeerReady;
+          item = std::move(sender.queue.front());
+          sender.queue.pop_front();
+          queueDepthAtDequeue = sender.queue.size();
+          peer = sender.peer;
+          peerReady = sender.peerReady;
         }
         // Session media barrier: an item stamped for a previous session -- queued before the
         // rollover, or popped in the instant before the swap -- must never reach the new peer.
         // Drop it here so a stale P-frame cannot land on the new decoder.
-        if (item.mediaEpoch != mediaSessionEpoch.load(std::memory_order_acquire)) {
-          senderDropCount.fetch_add(1, std::memory_order_relaxed);
+        if (item.mediaEpoch != sender.mediaSessionEpoch.load(std::memory_order_acquire)) {
+          sender.dropCount.fetch_add(1, std::memory_order_relaxed);
           continue;
         }
         if (!peerReady) {
-          senderTxNoPeer.fetch_add(1, std::memory_order_relaxed);
+          sender.txNoPeer.fetch_add(1, std::memory_order_relaxed);
           continue;
         }
         const uint64_t frameIntervalUs =
@@ -3971,10 +3996,10 @@ int main(int argc, char** argv) {
         cadenceMediaEpoch = item.mediaEpoch;
         if (freshCadence) {
           cadenceScheduledUs = nowUs;
-        } else if (senderCadenceSmoothing) {
+        } else if (sender.cadenceSmoothing) {
           const uint64_t earliestSendUs = cadenceScheduledUs + frameIntervalUs;
           if (nowUs < earliestSendUs) {
-            udp_pace_wait_until(std::min<uint64_t>(earliestSendUs, nowUs + senderMaxCadenceHoldUs));
+            udp_pace_wait_until(std::min<uint64_t>(earliestSendUs, nowUs + sender.maxCadenceHoldUs));
           }
           cadenceScheduledUs = std::max<uint64_t>(nowUs, earliestSendUs);
         } else {
@@ -3985,30 +4010,30 @@ int main(int argc, char** argv) {
         SendPathStats pathStats{};
         const UdpSendOutcome outcome =
             send_udp_chunks_timed(clientSock, peer, item.bytes.data(), item.bytes.size(),
-                                  item.udpHdr, args.udpMtu, &pathStats, &mediaSessionEpoch,
+                                  item.udpHdr, args.udpMtu, &pathStats, &sender.mediaSessionEpoch,
                                   item.mediaEpoch);
         const uint64_t sendDoneUs = qpc_now_us();
         if (outcome == UdpSendOutcome::Sent) {
           const uint64_t durUs = (sendDoneUs >= sendStartUs) ? (sendDoneUs - sendStartUs) : 0;
-          senderLastSendStartUs.store(sendStartUs, std::memory_order_relaxed);
-          senderTxFrames.fetch_add(1, std::memory_order_relaxed);
-          senderTxChunks.fetch_add(pathStats.payloadChunkCount, std::memory_order_relaxed);
-          senderTxBytes.fetch_add(item.bytes.size(), std::memory_order_relaxed);
-          senderSendDurSumUs.fetch_add(durUs, std::memory_order_relaxed);
-          senderSendCount.fetch_add(1, std::memory_order_relaxed);
-          uint64_t prevMax = senderSendDurMaxUs.load(std::memory_order_relaxed);
+          sender.lastSendStartUs.store(sendStartUs, std::memory_order_relaxed);
+          sender.txFrames.fetch_add(1, std::memory_order_relaxed);
+          sender.txChunks.fetch_add(pathStats.payloadChunkCount, std::memory_order_relaxed);
+          sender.txBytes.fetch_add(item.bytes.size(), std::memory_order_relaxed);
+          sender.sendDurSumUs.fetch_add(durUs, std::memory_order_relaxed);
+          sender.sendCount.fetch_add(1, std::memory_order_relaxed);
+          uint64_t prevMax = sender.sendDurMaxUs.load(std::memory_order_relaxed);
           while (durUs > prevMax &&
-                 !senderSendDurMaxUs.compare_exchange_weak(prevMax, durUs,
+                 !sender.sendDurMaxUs.compare_exchange_weak(prevMax, durUs,
                                                            std::memory_order_relaxed)) {
           }
           if (item.keyFrame) {
             // Record when the first key AU of this media epoch reached the wire and the size of
             // the last key sent -- distinguishes "key never produced" from "key lost in assembly".
             uint64_t expectedFirst = 0;
-            senderFirstKeyWireUs.compare_exchange_strong(expectedFirst, sendStartUs,
+            sender.firstKeyWireUs.compare_exchange_strong(expectedFirst, sendStartUs,
                                                          std::memory_order_relaxed);
-            senderLastKeyAuBytes.store(item.bytes.size(), std::memory_order_relaxed);
-            senderLastKeyAuChunks.store(pathStats.payloadChunkCount, std::memory_order_relaxed);
+            sender.lastKeyAuBytes.store(item.bytes.size(), std::memory_order_relaxed);
+            sender.lastKeyAuChunks.store(pathStats.payloadChunkCount, std::memory_order_relaxed);
           }
           // Actual-wire per-frame telemetry. A key frame always logs (end-to-end anchor); a normal
           // frame logs only when its wire-start interval ran >1.5x the target (an actual hitch), so
@@ -4031,9 +4056,9 @@ int main(int argc, char** argv) {
         } else if (outcome == UdpSendOutcome::EpochChanged) {
           // A rollover bumped the media epoch mid-frame; the remaining chunks were aborted so old-
           // epoch data cannot interleave into the new session. The rollover already cleared the
-          // queue and re-armed the barrier under senderMu, so this is NOT a transport failure --
+          // queue and re-armed the barrier under sender.mu, so this is NOT a transport failure --
           // just account the aborted item and re-anchor pacing for the new epoch's first frame.
-          senderDropCount.fetch_add(1, std::memory_order_relaxed);
+          sender.dropCount.fetch_add(1, std::memory_order_relaxed);
           cadenceScheduledUs = 0;
           cadenceGeneration = 0;
           cadenceMediaEpoch = 0;
@@ -4042,29 +4067,29 @@ int main(int argc, char** argv) {
           // to reach the wire breaks the client's reference chain (a delta references a picture the
           // client never fully received), and a barrier that was opened by this frame's key would
           // leave the decoder stuck. Clear the queue and re-arm the barrier, then ask the MAIN loop
-          // for a fresh IDR via senderRecoveryPending: senderRequestKey alone is only consumed after
+          // for a fresh IDR via sender.recoveryPending: sender.requestKey alone is only consumed after
           // a real frame is popped, so on a static desktop the recovery IDR would never be produced.
-          senderSendFailed.store(true, std::memory_order_release);
+          sender.sendFailed.store(true, std::memory_order_release);
           bool rearmed = false;
           {
-            std::lock_guard<std::mutex> lk(senderMu);
-            if (mediaSessionEpoch.load(std::memory_order_acquire) == item.mediaEpoch) {
-              // senderDropCount is the authoritative drop tally; senderHeldFrames/sentFrames are
+            std::lock_guard<std::mutex> lk(sender.mu);
+            if (sender.mediaSessionEpoch.load(std::memory_order_acquire) == item.mediaEpoch) {
+              // sender.dropCount is the authoritative drop tally; sender.heldFrames/sender.sentFrames are
               // owned by the encode thread and must not be touched here (that would be a data race).
-              senderDropCount.fetch_add(senderQueue.size() + 1, std::memory_order_relaxed);
-              senderQueue.clear();
-              senderWaitingForKey = true;
+              sender.dropCount.fetch_add(sender.queue.size() + 1, std::memory_order_relaxed);
+              sender.queue.clear();
+              sender.waitingForKey = true;
               rearmed = true;
             } else {
               // A rollover landed between the send and here; it already re-armed. Just drop.
-              senderDropCount.fetch_add(1, std::memory_order_relaxed);
+              sender.dropCount.fetch_add(1, std::memory_order_relaxed);
             }
           }
           if (rearmed) {
-            senderFirstKeyWireUs.store(0, std::memory_order_relaxed);  // retry epoch's first key reappears
-            barrierRearmCount.fetch_add(1, std::memory_order_relaxed);
-            senderRequestKey.store(true, std::memory_order_release);
-            senderRecoveryPending.store(true, std::memory_order_release);
+            sender.firstKeyWireUs.store(0, std::memory_order_relaxed);  // retry epoch's first key reappears
+            sender.barrierRearmCount.fetch_add(1, std::memory_order_relaxed);
+            sender.requestKey.store(true, std::memory_order_release);
+            sender.recoveryPending.store(true, std::memory_order_release);
             // Re-anchor pacing: a partial frame consumed part of the schedule and the epoch is
             // unchanged, so freshCadence would not otherwise trip for the recovery IDR.
             cadenceScheduledUs = 0;
@@ -4529,13 +4554,13 @@ int main(int argc, char** argv) {
         arm_trailing_kick(nowUs);
       }
     }
-    // Barrier recovery: the sender thread re-armed senderWaitingForKey after a same-epoch send
+    // Barrier recovery: the sender thread re-armed sender.waitingForKey after a same-epoch send
     // failure and cannot itself produce an IDR (forceKeyNext is main-thread-owned, and on a static
-    // desktop no new frame arrives to carry senderRequestKey). Consume the flag here, before the
+    // desktop no new frame arrives to carry sender.requestKey). Consume the flag here, before the
     // frame wait, and both force the next encode to be a key AND arm the trailing kick so the kick
     // resubmits the cached raw frame when the screen is not changing -- otherwise a re-armed barrier
     // on a still desktop would never open.
-    if (senderRecoveryPending.exchange(false, std::memory_order_acq_rel)) {
+    if (sender.recoveryPending.exchange(false, std::memory_order_acq_rel)) {
       forceKeyNext = true;
       arm_trailing_kick(nowUs);
     }
@@ -5481,8 +5506,8 @@ int main(int argc, char** argv) {
         // wire, so a fresh/returning viewer still has no picture. TCP has no barrier (always open).
         bool barrierClosed = false;
         if (transport == VideoTransport::Udp) {
-          std::lock_guard<std::mutex> lk(senderMu);
-          barrierClosed = senderWaitingForKey;
+          std::lock_guard<std::mutex> lk(sender.mu);
+          barrierClosed = sender.waitingForKey;
         }
         // The latest real input is "stuck" until its capture timestamp is observed on an emitted AU;
         // on the async MFT it sits there until the next input, which on a still screen never comes.
@@ -5540,8 +5565,8 @@ int main(int argc, char** argv) {
         nowUs >= kick.lastStaticRefreshAttemptUs + kick.staticRefreshIntervalUs) {
       bool refreshBlocked = false;
       if (transport == VideoTransport::Udp) {
-        std::lock_guard<std::mutex> lk(senderMu);
-        refreshBlocked = senderWaitingForKey || !senderQueue.empty();
+        std::lock_guard<std::mutex> lk(sender.mu);
+        refreshBlocked = sender.waitingForKey || !sender.queue.empty();
       }
       if (!refreshBlocked) {
         // Stamped on the ATTEMPT, before the encode result is known -- see the cadence note.
@@ -5772,8 +5797,8 @@ int main(int argc, char** argv) {
         std::cout << "[native-video-host] client disconnected\n";
         break;
       }
-      ++sentFrames;
-      sentBytes += payload->size();
+      ++sender.sentFrames;
+      sender.sentBytes += payload->size();
         if (args.traceEvery > 0 && (seq % args.traceEvery) == 0 &&
             (args.traceMax == 0 || tracePrinted < args.traceMax)) {
         ++tracePrinted;
@@ -6004,7 +6029,7 @@ int main(int argc, char** argv) {
         std::cout << "[native-video-host][control] keyframe-request-consumed reason=" << reason << "\n";
         forceKeyNext = true;
       }
-      if (senderRequestKey.exchange(false, std::memory_order_acq_rel)) {
+      if (sender.requestKey.exchange(false, std::memory_order_acq_rel)) {
         // The sender dropped a backlog; the stream needs an IDR to resynchronize.
         forceKeyNext = true;
       }
@@ -6201,10 +6226,10 @@ int main(int argc, char** argv) {
       bool encoderResetTriggered = false;
       bool sessionReconnectTriggered = false;
       bool countedRawForInput = false;
-      if (senderSendFailed.exchange(false, std::memory_order_acq_rel)) {
+      if (sender.sendFailed.exchange(false, std::memory_order_acq_rel)) {
         // Same policy the inline path had: a UDP send failure on an endless session waits
         // for the peer to re-Hello rather than exiting.
-        ++udpTxFail;
+        ++sender.udpTxFail;
         if (args.seconds == 0) {
           continue;
         }
@@ -6222,8 +6247,8 @@ int main(int argc, char** argv) {
         constexpr size_t kSenderQueueMaxFrames = 6;
         size_t senderBacklogBeforeBatch = 0;
         {
-          std::lock_guard<std::mutex> lk(senderMu);
-          senderBacklogBeforeBatch = senderQueue.size();
+          std::lock_guard<std::mutex> lk(sender.mu);
+          senderBacklogBeforeBatch = sender.queue.size();
         }
         const bool senderBacklogged = senderBacklogBeforeBatch >= 2;
         for (const auto& au : units) {
@@ -6358,8 +6383,8 @@ int main(int argc, char** argv) {
                    send_all_timed(clientSock, au.bytes.data(), au.bytes.size(), &sendPathStats.payloadUs,
                                  &sendPathStats.payloadCallCount);
         } else {
-          if (!udpPeerReady) {
-            ++udpTxNoPeer;
+          if (!sender.udpPeerReady) {
+            ++sender.udpTxNoPeer;
             sentOk = false;
           } else {
             EncodedSendItem item;
@@ -6382,49 +6407,49 @@ int main(int argc, char** argv) {
             item.udpHdr.sendQpcUs = hdr.sendQpcUs;  // sender restamps at wire time
             item.bytes = std::move(au.bytes);
             {
-              std::lock_guard<std::mutex> lk(senderMu);
+              std::lock_guard<std::mutex> lk(sender.mu);
               // Stamp under the same lock the rollover bumps the epoch under, so the stamp is
               // consistent with the queue-clear: a delta stamped just after a rollover carries the
               // new epoch (and rides the fresh barrier); one stamped just before is dropped at
               // dequeue. This is also how the static bootstrap IDR gets tagged for the new epoch --
               // it flows through this same enqueue path and needs no special case.
-              item.mediaEpoch = mediaSessionEpoch.load(std::memory_order_acquire);
+              item.mediaEpoch = sender.mediaSessionEpoch.load(std::memory_order_acquire);
               item.enqueueUs = qpc_now_us();  // AU handed to sender; sender derives queueWaitUs
               if (item.keyFrame) {
                 // A new IDR makes every queued frame irrelevant and re-anchors the stream. This is
                 // also the barrier-open point: a real (or bootstrap) key AU for the current epoch
-                // clears senderWaitingForKey so deltas may flow again.
-                senderDropCount.fetch_add(senderQueue.size(), std::memory_order_relaxed);
-                senderHeldFrames += senderQueue.size();
-                sentFrames -= std::min<uint64_t>(sentFrames, senderQueue.size());
-                senderQueue.clear();
-                senderWaitingForKey = false;
-                if (firstKeyEnqueuedUs == 0) firstKeyEnqueuedUs = sendStartUs;
-                senderQueue.push_back(std::move(item));
+                // clears sender.waitingForKey so deltas may flow again.
+                sender.dropCount.fetch_add(sender.queue.size(), std::memory_order_relaxed);
+                sender.heldFrames += sender.queue.size();
+                sender.sentFrames -= std::min<uint64_t>(sender.sentFrames, sender.queue.size());
+                sender.queue.clear();
+                sender.waitingForKey = false;
+                if (sender.firstKeyEnqueuedUs == 0) sender.firstKeyEnqueuedUs = sendStartUs;
+                sender.queue.push_back(std::move(item));
                 enqueuedForSend = true;
-              } else if (senderWaitingForKey) {
+              } else if (sender.waitingForKey) {
                 // This delta references dropped frames; sending it would decode into
                 // block garbage. Hold everything until the forced keyframe arrives.
-                ++nonKeyAuWhileWaiting;
-                senderDropCount.fetch_add(1, std::memory_order_relaxed);
-                senderRequestKey.store(true, std::memory_order_release);
-              } else if (senderBacklogged || senderQueue.size() >= kSenderQueueMaxFrames) {
+                ++sender.nonKeyAuWhileWaiting;
+                sender.dropCount.fetch_add(1, std::memory_order_relaxed);
+                sender.requestKey.store(true, std::memory_order_release);
+              } else if (senderBacklogged || sender.queue.size() >= kSenderQueueMaxFrames) {
                 // Backlogged: drop the stale frames AND this delta -- it references what
                 // was just dropped -- then resync with a fresh IDR.
-                senderDropCount.fetch_add(senderQueue.size() + 1, std::memory_order_relaxed);
+                sender.dropCount.fetch_add(sender.queue.size() + 1, std::memory_order_relaxed);
                 // Frames already counted as sent are being erased here; move them to the held
                 // tally so the reported wire rate does not include what never left.
-                senderHeldFrames += senderQueue.size();
-                sentFrames -= std::min<uint64_t>(sentFrames, senderQueue.size());
-                senderQueue.clear();
-                senderWaitingForKey = true;
-                senderRequestKey.store(true, std::memory_order_release);
+                sender.heldFrames += sender.queue.size();
+                sender.sentFrames -= std::min<uint64_t>(sender.sentFrames, sender.queue.size());
+                sender.queue.clear();
+                sender.waitingForKey = true;
+                sender.requestKey.store(true, std::memory_order_release);
               } else {
-                senderQueue.push_back(std::move(item));
+                sender.queue.push_back(std::move(item));
                 enqueuedForSend = true;
               }
             }
-            if (enqueuedForSend) senderCv.notify_one();
+            if (enqueuedForSend) sender.cv.notify_one();
             // Handing the frame off succeeded even when the queue policy discarded it; this
             // flag means "no transport failure", and clearing it here would tear the session
             // down. Whether the frame really went out is tracked by enqueuedForSend below.
@@ -6463,7 +6488,7 @@ int main(int argc, char** argv) {
         }
         if (!sentOk) {
           if (transport == VideoTransport::Udp) {
-            ++udpTxFail;
+            ++sender.udpTxFail;
             if (args.seconds == 0) {
               sessionReconnectTriggered = true;
               break;
@@ -6480,16 +6505,16 @@ int main(int argc, char** argv) {
         // bitrate reporting a healthy stream straight through a cutout, which is precisely the
         // window that is visible to the user as a freeze -- so count only what was handed on.
         if (transport == VideoTransport::Udp && !enqueuedForSend) {
-          ++senderHeldFrames;
+          ++sender.heldFrames;
           continue;
         }
         // A trailing-edge kick is a single sparse frame; keep it out of the fps/bitrate and ABR
         // evidence (it is counted separately as kick.count). It still consumes the forced
         // keyframe below so the normal path does not re-force one on the next real frame.
         if (!servedBootstrap) {
-          ++sentFrames;
+          ++sender.sentFrames;
           ++encodedFrames;
-          sentBytes += hdr.payloadSize;
+          sender.sentBytes += hdr.payloadSize;
           if (!countedRawForInput) {
             rawEquivalentBytes +=
                 static_cast<uint64_t>(activeEncodeW) * static_cast<uint64_t>(activeEncodeH) * 3 / 2;
@@ -6731,7 +6756,7 @@ int main(int argc, char** argv) {
     if (t >= statAtUs) {
       ++statTicks;
       const bool statsPrintDue = (statTicks % statsPrintEverySec) == 0;
-      const double mbps = (sentBytes * 8.0) / (1000.0 * 1000.0);
+      const double mbps = (sender.sentBytes * 8.0) / (1000.0 * 1000.0);
       std::string targetProcessName;
       {
         std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
@@ -6951,7 +6976,7 @@ int main(int argc, char** argv) {
       }
       if (useRaw) {
         if (statsPrintDue) {
-        std::cout << "[native-video-host] sentFrames=" << sentFrames
+        std::cout << "[native-video-host] sentFrames=" << sender.sentFrames
                   << " queuePushCount=" << queuePushCount
                   << " queuePopCount=" << queuePopCount
                   << " queuePushPerSec=" << queuePushPerSecLatest
@@ -7034,20 +7059,20 @@ int main(int argc, char** argv) {
                 : frameGating.changePermilleLast;
         const double rawEquivMbps = (rawEquivalentBytes * 8.0) / (1000.0 * 1000.0);
         const uint64_t encRatioX100 =
-            (sentBytes > 0) ? ((rawEquivalentBytes * 100ULL) / sentBytes) : 0;
+            (sender.sentBytes > 0) ? ((rawEquivalentBytes * 100ULL) / sender.sentBytes) : 0;
         // The sender thread owns the UDP wire counters now.
         if (transport == VideoTransport::Udp) {
-          udpTxFrames = senderTxFrames.load(std::memory_order_relaxed);
-          udpTxChunks = senderTxChunks.load(std::memory_order_relaxed);
-          udpTxBytes = senderTxBytes.load(std::memory_order_relaxed);
-          udpTxNoPeer += senderTxNoPeer.exchange(0, std::memory_order_relaxed);
+          sender.udpTxFrames = sender.txFrames.load(std::memory_order_relaxed);
+          sender.udpTxChunks = sender.txChunks.load(std::memory_order_relaxed);
+          sender.udpTxBytes = sender.txBytes.load(std::memory_order_relaxed);
+          sender.udpTxNoPeer += sender.txNoPeer.exchange(0, std::memory_order_relaxed);
         }
         const uint64_t udpTxChunkPerFrameX100 =
-            (udpTxFrames > 0) ? ((udpTxChunks * 100ULL) / udpTxFrames) : 0;
-        const uint64_t senderSendCountNow = senderSendCount.load(std::memory_order_relaxed);
+            (sender.udpTxFrames > 0) ? ((sender.udpTxChunks * 100ULL) / sender.udpTxFrames) : 0;
+        const uint64_t senderSendCountNow = sender.sendCount.load(std::memory_order_relaxed);
         const uint64_t senderSendDurAvgUs =
             (senderSendCountNow > 0)
-                ? (senderSendDurSumUs.load(std::memory_order_relaxed) / senderSendCountNow)
+                ? (sender.sendDurSumUs.load(std::memory_order_relaxed) / senderSendCountNow)
                 : 0;
         if (statsPrintDue) {
         // Age of the last frame published to the encoder -- diagnostic only. A frozen ring shows
@@ -7058,7 +7083,7 @@ int main(int argc, char** argv) {
         const uint64_t lastPublishAgeUs =
             (lastPublishAtUs > 0 && statsNowUs > lastPublishAtUs) ? statsNowUs - lastPublishAtUs : 0;
         std::cout << "[native-video-host] encodedFrames=" << encodedFrames
-                  << " sentFrames=" << sentFrames
+                  << " sentFrames=" << sender.sentFrames
                   << " queuePushCount=" << queuePushCount
                   << " queuePopCount=" << queuePopCount
                   << " queuePushPerSec=" << queuePushPerSecLatest
@@ -7143,18 +7168,18 @@ int main(int argc, char** argv) {
                   << " mbps=" << mbps
                   << " rawEquivMbps=" << rawEquivMbps
                   << " encRatioX100=" << encRatioX100
-                  << " udpTxFrames=" << udpTxFrames
-                  << " udpTxChunks=" << udpTxChunks
+                  << " udpTxFrames=" << sender.udpTxFrames
+                  << " udpTxChunks=" << sender.udpTxChunks
                   << " udpTxChunkPerFrameX100=" << udpTxChunkPerFrameX100
-                  << " udpTxBytes=" << udpTxBytes
-                  << " udpTxFail=" << udpTxFail
-                  << " udpTxNoPeer=" << udpTxNoPeer
-                  << " senderQueueDrops=" << senderDropCount.load(std::memory_order_relaxed)
+                  << " udpTxBytes=" << sender.udpTxBytes
+                  << " udpTxFail=" << sender.udpTxFail
+                  << " udpTxNoPeer=" << sender.udpTxNoPeer
+                  << " senderQueueDrops=" << sender.dropCount.load(std::memory_order_relaxed)
                   // Frames the queue policy withheld: the direct measure of how long a viewer
                   // was looking at a frozen picture.
-                  << " senderHeldFrames=" << senderHeldFrames
+                  << " senderHeldFrames=" << sender.heldFrames
                   << " senderSendDurAvgUs=" << senderSendDurAvgUs
-                  << " senderSendDurMaxUs=" << senderSendDurMaxUs.load(std::memory_order_relaxed)
+                  << " senderSendDurMaxUs=" << sender.sendDurMaxUs.load(std::memory_order_relaxed)
                   << " bitrateTarget=" << activeBitrate
                   << " fpsTarget=" << activeFps
                   << " keyintTarget=" << activeKeyint
@@ -7193,14 +7218,14 @@ int main(int argc, char** argv) {
                   << " trailingKickCount=" << kick.count
                   << " staticRefreshCount=" << kick.staticRefreshCount
                   << " lastKickSourceAgeUs=" << kick.lastSourceAgeUs
-                  << " mediaEpoch=" << mediaSessionEpoch.load(std::memory_order_acquire)
+                  << " mediaEpoch=" << sender.mediaSessionEpoch.load(std::memory_order_acquire)
                   << " forceKeyInputCount=" << forceKeyInputCount
-                  << " nonKeyAuWhileWaiting=" << nonKeyAuWhileWaiting
-                  << " barrierRearm=" << barrierRearmCount.load(std::memory_order_relaxed)
-                  << " firstKeyEnqueuedUs=" << firstKeyEnqueuedUs
-                  << " firstKeyWireUs=" << senderFirstKeyWireUs.load(std::memory_order_relaxed)
-                  << " lastKeyAuBytes=" << senderLastKeyAuBytes.load(std::memory_order_relaxed)
-                  << " lastKeyAuChunks=" << senderLastKeyAuChunks.load(std::memory_order_relaxed)
+                  << " nonKeyAuWhileWaiting=" << sender.nonKeyAuWhileWaiting
+                  << " barrierRearm=" << sender.barrierRearmCount.load(std::memory_order_relaxed)
+                  << " firstKeyEnqueuedUs=" << sender.firstKeyEnqueuedUs
+                  << " firstKeyWireUs=" << sender.firstKeyWireUs.load(std::memory_order_relaxed)
+                  << " lastKeyAuBytes=" << sender.lastKeyAuBytes.load(std::memory_order_relaxed)
+                  << " lastKeyAuChunks=" << sender.lastKeyAuChunks.load(std::memory_order_relaxed)
                   << "\n";
         }
 
@@ -7243,12 +7268,12 @@ int main(int argc, char** argv) {
           // A static desktop (frame gating) is the common case: the picture was still, the
           // client decoded a handful of frames, and the old code took that for congestion and
           // demoted, then recovered on motion, then demoted again -- the quality seen flapping
-          // between sharp and soft while simply reading the screen. sentFrames is this tick's
+          // between sharp and soft while simply reading the screen. sender.sentFrames is this tick's
           // real send cadence (reset each stats second), which is what the discarded
           // queuePushPerSec never was. When evidence is this thin, hold the profile and let a
           // second with real motion decide against the unchanged thresholds.
           const bool hostOfferSparse =
-              (sentFrames < std::max<uint64_t>(2, static_cast<uint64_t>(abrExpectedFps) / 2)) ||
+              (sender.sentFrames < std::max<uint64_t>(2, static_cast<uint64_t>(abrExpectedFps) / 2)) ||
               frameGating.staticMode;
 
           const uint64_t severeLatencyUs = rate.abrQualityFirst ? 170000ULL : 150000ULL;
@@ -7520,15 +7545,15 @@ int main(int argc, char** argv) {
           }
         }
       }
-      sentFrames = 0;
+      sender.sentFrames = 0;
       encodedFrames = 0;
-      sentBytes = 0;
+      sender.sentBytes = 0;
       rawEquivalentBytes = 0;
-      udpTxFrames = 0;
-      udpTxChunks = 0;
-      udpTxBytes = 0;
-      udpTxFail = 0;
-      udpTxNoPeer = 0;
+      sender.udpTxFrames = 0;
+      sender.udpTxChunks = 0;
+      sender.udpTxBytes = 0;
+      sender.udpTxFail = 0;
+      sender.udpTxNoPeer = 0;
       skippedByOverwrite = 0;
       stalePreEncodeDropCount = 0;
       staleEncodedDropCount = 0;
@@ -7563,7 +7588,7 @@ int main(int argc, char** argv) {
         // (matching the peak resets above). firstKey*/lastKeyAu* are per media epoch and are
         // reset by the rollover transaction instead, so they persist across prints.
         forceKeyInputCount = 0;
-        nonKeyAuWhileWaiting = 0;
+        sender.nonKeyAuWhileWaiting = 0;
       }
       captureUnmapSumUs = 0;
       captureUnmapMaxUs = 0;
@@ -7613,9 +7638,9 @@ int main(int argc, char** argv) {
   // relying on destructor order would tear down FrameState first.
   captureReadback.Shutdown();
   // The sender still holds clientSock; stop it before the socket closes.
-  senderStop.store(true, std::memory_order_release);
-  senderCv.notify_all();
-  if (senderThread.joinable()) senderThread.join();
+  sender.stop.store(true, std::memory_order_release);
+  sender.cv.notify_all();
+  if (sender.thread.joinable()) sender.thread.join();
   if (clientSock != INVALID_SOCKET) {
     closesocket(clientSock);
     clientSock = INVALID_SOCKET;
