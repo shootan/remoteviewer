@@ -156,7 +156,7 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
   queueSelectStartUs = qpc_now_us();
  
  
-  if (kick.pending && nowUs >= kick.dueAtUs) {
+  if (kick.Due(nowUs)) {
     // A real frame already waiting in the ring is always better than a kick; fall through to the
     // normal pop (the encode below re-arms and records it). Otherwise decide whether the last real
     // input still needs flushing out of the MFT.
@@ -173,14 +173,7 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
         std::lock_guard<std::mutex> lk(sender.mu);
         barrierClosed = sender.waitingForKey;
       }
-      // The latest real input is "stuck" until its capture timestamp is observed on an emitted AU;
-      // on the async MFT it sits there until the next input, which on a still screen never comes.
-      const bool latestInputStuck = (kick.lastRealInputCaptureUs > kick.lastEmittedAuCaptureUs);
-      // One kick per distinct held input: never resubmit the same held frame twice on a P-frame
-      // trailing edge. A closed barrier overrides this -- it must keep kicking until an IDR lands.
-      const bool alreadyKickedThisInput =
-          (kick.lastRealInputCaptureUs != 0 && kick.lastKickedForInputCaptureUs == kick.lastRealInputCaptureUs);
-      const bool needKick = barrierClosed || (latestInputStuck && !alreadyKickedThisInput);
+      const bool needKick = kick.NeedKick(barrierClosed);
       bool rearm = false;
       if (needKick && capture.KickTryFill(clientSession, kick, payload, w, h, stride, nowUs)) {
         servedBootstrap = true;
@@ -196,7 +189,7 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
         captureUs = nowUs;     // fresh monotonic stamps: never reuse the stale capture time
         callbackUs = nowUs;
         queuePushUs = nowUs;
-        kick.lastKickedForInputCaptureUs = kick.lastRealInputCaptureUs;  // one-shot per held input
+        kick.MarkKickedForCurrentInput();
         // Keep kicking on a still-closed barrier: each kick feeds a forced IDR, so the held frame
         // becomes an IDR within a couple of flushes and the cancel comes when it reaches the wire.
         rearm = barrierClosed;
@@ -223,10 +216,7 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
   // or a mid-switch target stays black rather than repainting a stale picture; a failed fill
   // also stamps the attempt clock so the (uncached) secure probe is not repeated every tick.
   if (!servedBootstrap && kick.staticRefreshIntervalUs > 0 && useH264 &&
-      clientSession.streamControlActive.load(std::memory_order_acquire) && !kick.pending &&
-      kick.lastEmittedAuCaptureUs != 0 &&
-      nowUs >= kick.lastEmittedAuCaptureUs + kick.staticRefreshIntervalUs &&
-      nowUs >= kick.lastStaticRefreshAttemptUs + kick.staticRefreshIntervalUs) {
+      clientSession.streamControlActive.load(std::memory_order_acquire) && kick.StaticRefreshDue(nowUs)) {
     bool refreshBlocked = false;
     if (transport == VideoTransport::Udp) {
       std::lock_guard<std::mutex> lk(sender.mu);

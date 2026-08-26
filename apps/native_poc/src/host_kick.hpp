@@ -46,6 +46,34 @@ struct KickState {
     pending = false;
     dueAtUs = 0;
   }
+
+  // --- decisions (Phase 2-T3: the former stage_pop_frame conditions, pure on this state) ---
+  // The armed trailing edge has arrived.
+  bool Due(uint64_t nowUs) const { return pending && nowUs >= dueAtUs; }
+  // Whether the trailing edge needs a kick: the barrier still wants a key, or the newest real input is
+  // still held in the encoder and has not been kicked yet.
+  bool NeedKick(bool barrierClosed) const {
+    const KickState& kick = *this;
+    // The latest real input is "stuck" until its capture timestamp is observed on an emitted AU;
+    // on the async MFT it sits there until the next input, which on a still screen never comes.
+    const bool latestInputStuck = (kick.lastRealInputCaptureUs > kick.lastEmittedAuCaptureUs);
+    // One kick per distinct held input: never resubmit the same held frame twice on a P-frame
+    // trailing edge. A closed barrier overrides this -- it must keep kicking until an IDR lands.
+    const bool alreadyKickedThisInput =
+        (kick.lastRealInputCaptureUs != 0 && kick.lastKickedForInputCaptureUs == kick.lastRealInputCaptureUs);
+    return barrierClosed || (latestInputStuck && !alreadyKickedThisInput);
+  }
+  // One-shot per held input: remember which input the kick just re-served.
+  void MarkKickedForCurrentInput() { lastKickedForInputCaptureUs = lastRealInputCaptureUs; }
+  // Periodic static refresh cadence (the kick-side half of the stage condition): no kick pending, an AU
+  // has been seen, and both the emitted-AU and the attempt anchors are at least one interval old.
+  bool StaticRefreshDue(uint64_t nowUs) const {
+    const KickState& kick = *this;
+    return !kick.pending &&
+           kick.lastEmittedAuCaptureUs != 0 &&
+           nowUs >= kick.lastEmittedAuCaptureUs + kick.staticRefreshIntervalUs &&
+           nowUs >= kick.lastStaticRefreshAttemptUs + kick.staticRefreshIntervalUs;
+  }
 };
 
 }  // namespace remote60::native_poc
