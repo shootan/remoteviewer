@@ -690,7 +690,7 @@ struct SenderState {
   sockaddr_in peer{};
   bool peerReady = false;
   bool waitingForKey = false;  // deltas held back until the requested keyframe passes
-  // Session media barrier: bumped (under mu) by the rollover transaction; starts at 1 like sessionEpoch.
+  // Session media barrier: bumped (under mu) by the rollover transaction; starts at 1 like clientSession.epoch.
   std::atomic<uint64_t> mediaSessionEpoch{1};
   std::atomic<bool> stop{false};
   std::atomic<bool> sendFailed{false};
@@ -724,6 +724,64 @@ struct SenderState {
   uint64_t udpTxBytes = 0;
   uint64_t udpTxFail = 0;
   uint64_t udpTxNoPeer = 0;
+};
+
+// main() returns from many places; a destructor is the only way to close these on every path.
+struct SocketCloser {
+  SOCKET* handle;
+  ~SocketCloser() {
+    if (handle && *handle != INVALID_SOCKET) {
+      closesocket(*handle);
+      *handle = INVALID_SOCKET;
+    }
+  }
+};
+
+// Client session plumbing (Phase 1-1 state struct): the media/control sockets and their
+// lifetime closers, the directory agent + per-session directory authentication, the session
+// epoch (bumped on every new client so stale work is fenced) with its wait, the control-ready
+// handshake epoch, the stream-active flag, and the control/reader thread handles.
+// thread: sockets are created on the main thread before the threads start; clientSock/lanSock/
+// retiredSock swap on the main thread only (the reader thread reads the handle it was given);
+// directoryAuth* under directoryAuthMu (reader + control); epoch/controlReadyEpoch/
+// streamControlActive are the cross-thread atomics (control/reader -> main).
+struct SessionState {
+  // Directory service credentials (args or REMOTE60_DIRECTORY_* env) and the agent.
+  std::string directoryUrl;
+  std::string directoryId;
+  std::string directoryPw;
+  remote60::native_poc::directory::HostAgent directoryAgent;
+  // Media sockets. lanSock is the legacy-port listener; retiredSock holds whichever socket the
+  // handshake did not choose but that still has an owner (the directory agent keeps
+  // heartbeating on it).
+  SOCKET listenSock = INVALID_SOCKET;
+  SOCKET clientSock = INVALID_SOCKET;
+  SOCKET lanSock = INVALID_SOCKET;
+  SOCKET retiredSock = INVALID_SOCKET;
+  SocketCloser lanCloser{&lanSock};
+  SocketCloser retiredCloser{&retiredSock};
+  // The port the media socket actually landed on (differs from args.bindPort on a fallback).
+  uint16_t mediaBindPort = 0;
+  // Per-session directory authentication (token + peer the directory handed us).
+  std::atomic<bool> directoryAuthenticated{false};
+  std::mutex directoryAuthMu;
+  std::string directoryToken;
+  uint32_t directoryIpNet = 0;
+  // cross-thread: viewer stream state (ControlStreamState) -> main loop.
+  std::atomic<bool> streamControlActive{true};
+  // Control channel: TCP listener + accepted socket + its thread, or the UDP control dispatcher
+  // and the reader thread that owns the UDP peer.
+  SOCKET controlListenSock = INVALID_SOCKET;
+  std::atomic<SOCKET> controlClientSock{INVALID_SOCKET};
+  std::thread controlThread;
+  UdpControlChannel udpControlChannel;
+  std::thread udpControlThread;
+  std::thread udpReaderThread;
+  // Session epoch: bumped per new client; waited on by the main loop until control is ready.
+  std::atomic<uint64_t> epoch{1};
+  std::atomic<uint64_t> controlReadyEpoch{0};
+  std::mutex epochMu;
+  std::condition_variable epochCv;
 };
 
 }  // namespace
@@ -980,41 +1038,22 @@ int main(int argc, char** argv) {
     const char* v = std::getenv(envKey);
     return v ? std::string(v) : std::string();
   };
-  const std::string directoryUrl = arg_or_env(args.directoryUrl, "REMOTE60_DIRECTORY_URL");
-  const std::string directoryId = arg_or_env(args.directoryId, "REMOTE60_DIRECTORY_ID");
-  const std::string directoryPw = arg_or_env(args.directoryPw, "REMOTE60_DIRECTORY_PW");
-  remote60::native_poc::directory::HostAgent directoryAgent;
-  if (!directoryUrl.empty() && transport != VideoTransport::Udp) {
+  // Client session sockets, directory agent/auth, session epoch, control threads (SessionState, Phase 1-1).
+  SessionState clientSession;
+  clientSession.directoryUrl = arg_or_env(args.directoryUrl, "REMOTE60_DIRECTORY_URL");
+  clientSession.directoryId = arg_or_env(args.directoryId, "REMOTE60_DIRECTORY_ID");
+  clientSession.directoryPw = arg_or_env(args.directoryPw, "REMOTE60_DIRECTORY_PW");
+  if (!clientSession.directoryUrl.empty() && transport != VideoTransport::Udp) {
     std::cerr << "[native-video-host] directory requires transport=udp; ignoring directory url\n";
   }
 
-  SOCKET listenSock = INVALID_SOCKET;
-  SOCKET clientSock = INVALID_SOCKET;
   // A second listener on the legacy port for clients that dial this PC by address; see the bind
-  // site. `retiredSock` holds whichever socket the handshake did not choose but that still has an
+  // site. `clientSession.retiredSock` holds whichever socket the handshake did not choose but that still has an
   // owner -- the directory agent captured the primary socket and keeps heartbeating on it even
   // when a LAN client wins the handshake.
-  SOCKET lanSock = INVALID_SOCKET;
-  SOCKET retiredSock = INVALID_SOCKET;
-  // main() returns from many places; a destructor is the only way to close these on every path.
-  struct SocketCloser {
-    SOCKET* handle;
-    ~SocketCloser() {
-      if (handle && *handle != INVALID_SOCKET) {
-        closesocket(*handle);
-        *handle = INVALID_SOCKET;
-      }
-    }
-  };
-  SocketCloser lanCloser{&lanSock};
-  SocketCloser retiredCloser{&retiredSock};
   // The port the media socket actually landed on. It only differs from args.bindPort when a
   // fallback candidate was used, and the directory must publish this one rather than the request.
-  uint16_t mediaBindPort = args.bindPort;
-  std::atomic<bool> sessionDirectoryAuthenticated{false};
-  std::mutex directorySessionAuthMu;
-  std::string directorySessionToken;
-  uint32_t directorySessionIpNet = 0;
+  clientSession.mediaBindPort = args.bindPort;
   // Which of the three things a Hello can be. The caller needs the distinction because a first
   // Hello and its retransmissions are indistinguishable at the endpoint level -- and, behind a
   // relay, so are two entirely different clients.
@@ -1023,9 +1062,9 @@ int main(int argc, char** argv) {
                                       const sockaddr_in& peer) -> DirectoryHello {
     if (token.empty()) return DirectoryHello::Rejected;
     {
-      std::lock_guard<std::mutex> lock(directorySessionAuthMu);
-      if (!directorySessionToken.empty() && token == directorySessionToken &&
-          peer.sin_addr.s_addr == directorySessionIpNet) {
+      std::lock_guard<std::mutex> lock(clientSession.directoryAuthMu);
+      if (!clientSession.directoryToken.empty() && token == clientSession.directoryToken &&
+          peer.sin_addr.s_addr == clientSession.directoryIpNet) {
         // A controller reconnect creates a new UDP socket/port. The already-proven opaque
         // capability remains the session credential, while the first authenticated source IP
         // (which can differ from the directory-observed endpoint under hairpin NAT) stays bound.
@@ -1034,11 +1073,11 @@ int main(int argc, char** argv) {
         return DirectoryHello::Retransmit;
       }
     }
-    if (!directoryAgent.AuthorizePeer(token, peer)) return DirectoryHello::Rejected;
+    if (!clientSession.directoryAgent.AuthorizePeer(token, peer)) return DirectoryHello::Rejected;
     {
-      std::lock_guard<std::mutex> lock(directorySessionAuthMu);
-      directorySessionToken = token;
-      directorySessionIpNet = peer.sin_addr.s_addr;
+      std::lock_guard<std::mutex> lock(clientSession.directoryAuthMu);
+      clientSession.directoryToken = token;
+      clientSession.directoryIpNet = peer.sin_addr.s_addr;
     }
     return DirectoryHello::NewSession;
   };
@@ -1053,7 +1092,7 @@ int main(int argc, char** argv) {
   // until the requested keyframe actually passes through.
   // Session media barrier. Bumped (under sender.mu) by the rollover transaction in pump_udp_hello;
   // read by the sender at dequeue to fence any item stamped for a previous session. Every item is
-  // stamped with this value when enqueued. Starts at 1 to match sessionEpoch.
+  // stamped with this value when enqueued. Starts at 1 to match clientSession.epoch.
   // Set by the sender thread when a same-epoch transport error re-armed the barrier. The main loop
   // consumes it at its top -> forceKeyNext + arm_trailing_kick, because sender.requestKey is only
   // consumed after a real frame is popped: on a static desktop no new frame arrives to carry it, so
@@ -1065,8 +1104,8 @@ int main(int argc, char** argv) {
   // only -- never wired into ABR evidence.
   // The reader thread owns the peer address; the render loop picks up changes through these.
   if (transport == VideoTransport::Tcp) {
-    listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (listenSock == INVALID_SOCKET) {
+    clientSession.listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (clientSession.listenSock == INVALID_SOCKET) {
       std::cerr << "[native-video-host] listen socket create failed\n";
       return 2;
     }
@@ -1075,32 +1114,32 @@ int main(int argc, char** argv) {
     local.sin_family = AF_INET;
     local.sin_port = htons(args.bindPort);
     local.sin_addr.s_addr = resolve_bind_address(args.bindAddress);
-    if (bind(listenSock, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0) {
+    if (bind(clientSession.listenSock, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0) {
       std::cerr << "[native-video-host] bind failed port=" << args.bindPort << "\n";
-      closesocket(listenSock);
+      closesocket(clientSession.listenSock);
       return 3;
     }
-    if (listen(listenSock, 1) != 0) {
+    if (listen(clientSession.listenSock, 1) != 0) {
       std::cerr << "[native-video-host] listen failed\n";
-      closesocket(listenSock);
+      closesocket(clientSession.listenSock);
       return 4;
     }
 
     sockaddr_in peer{};
     int peerLen = sizeof(peer);
-    clientSock = accept(listenSock, reinterpret_cast<sockaddr*>(&peer), &peerLen);
-    if (clientSock == INVALID_SOCKET) {
+    clientSession.clientSock = accept(clientSession.listenSock, reinterpret_cast<sockaddr*>(&peer), &peerLen);
+    if (clientSession.clientSock == INVALID_SOCKET) {
       std::cerr << "[native-video-host] accept failed\n";
-      closesocket(listenSock);
-      listenSock = INVALID_SOCKET;
+      closesocket(clientSession.listenSock);
+      clientSession.listenSock = INVALID_SOCKET;
       return 5;
     }
 
     int noDelay = 1;
-    setsockopt(clientSock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
+    setsockopt(clientSession.clientSock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
   } else {
-    clientSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (clientSock == INVALID_SOCKET) {
+    clientSession.clientSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (clientSession.clientSock == INVALID_SOCKET) {
       std::cerr << "[native-video-host] udp socket create failed\n";
       return 2;
     }
@@ -1114,8 +1153,8 @@ int main(int argc, char** argv) {
     bool udpBound = false;
     for (const uint16_t candidate : portCandidates) {
       local.sin_port = htons(candidate);
-      if (bind(clientSock, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) == 0) {
-        mediaBindPort = candidate;
+      if (bind(clientSession.clientSock, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) == 0) {
+        clientSession.mediaBindPort = candidate;
         udpBound = true;
         break;
       }
@@ -1123,10 +1162,10 @@ int main(int argc, char** argv) {
     }
     if (!udpBound) {
       std::cerr << "[native-video-host] udp bind failed on every candidate port\n";
-      closesocket(clientSock);
+      closesocket(clientSession.clientSock);
       return 3;
     }
-    std::cout << "[native-video-host] udp bound port=" << mediaBindPort << "\n";
+    std::cout << "[native-video-host] udp bound port=" << clientSession.mediaBindPort << "\n";
 
     // Keep the last candidate listening as well, so dialling this PC by address still works.
     //
@@ -1141,44 +1180,44 @@ int main(int argc, char** argv) {
     // behaves exactly as it did before.
     const uint16_t lanPort =
         portCandidates.size() > 1 ? portCandidates.back() : 0;
-    if (lanPort != 0 && lanPort != mediaBindPort) {
-      lanSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-      if (lanSock != INVALID_SOCKET) {
+    if (lanPort != 0 && lanPort != clientSession.mediaBindPort) {
+      clientSession.lanSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+      if (clientSession.lanSock != INVALID_SOCKET) {
         sockaddr_in lanAddr{};
         lanAddr.sin_family = AF_INET;
         lanAddr.sin_port = htons(lanPort);
         lanAddr.sin_addr.s_addr = resolve_bind_address(args.bindAddress);
-        if (bind(lanSock, reinterpret_cast<const sockaddr*>(&lanAddr), sizeof(lanAddr)) == 0) {
+        if (bind(clientSession.lanSock, reinterpret_cast<const sockaddr*>(&lanAddr), sizeof(lanAddr)) == 0) {
           std::cout << "[native-video-host] lan direct-dial listener port=" << lanPort << "\n";
         } else {
           // Not fatal: the primary socket is the one that matters, and the usual reason this
           // fails is another GNLink host already holding the legacy port.
           std::cout << "[native-video-host] lan direct-dial listener unavailable port=" << lanPort
                     << "\n";
-          closesocket(lanSock);
-          lanSock = INVALID_SOCKET;
+          closesocket(clientSession.lanSock);
+          clientSession.lanSock = INVALID_SOCKET;
         }
       }
     }
 
     // The directory agent shares this socket on purpose: the public address it publishes has
     // to be the one NAT maps for the media stream, and that is a property of this socket.
-    if (!directoryUrl.empty()) {
+    if (!clientSession.directoryUrl.empty()) {
       remote60::native_poc::directory::HostAgentConfig dirCfg;
-      dirCfg.url = directoryUrl;
-      dirCfg.accountId = directoryId;
-      dirCfg.password = directoryPw;
+      dirCfg.url = clientSession.directoryUrl;
+      dirCfg.accountId = clientSession.directoryId;
+      dirCfg.password = clientSession.directoryPw;
       dirCfg.hostName = args.directoryHostName;
       dirCfg.observeUdpPort = args.directoryObservePort;
-      dirCfg.localUdpPort = mediaBindPort;
+      dirCfg.localUdpPort = clientSession.mediaBindPort;
       // The legacy/alternate listener from N6. Publishing it is what lets a client whose network
       // filters the primary port have something else to dial.
       dirCfg.alternateUdpPort = lanPort;
       dirCfg.heartbeatSeconds = env_u32_clamped("REMOTE60_DIRECTORY_HEARTBEAT_SEC", 25, 5, 300);
       std::string dirError;
-      const bool started = directoryAgent.Start(
+      const bool started = clientSession.directoryAgent.Start(
           dirCfg,
-          [clientSock](const void* data, size_t len, const sockaddr_in& to) {
+          [clientSock = clientSession.clientSock](const void* data, size_t len, const sockaddr_in& to) {
             (void)sendto(clientSock, static_cast<const char*>(data), static_cast<int>(len), 0,
                          reinterpret_cast<const sockaddr*>(&to), sizeof(to));
           },
@@ -1187,19 +1226,19 @@ int main(int argc, char** argv) {
         // Not fatal: direct LAN connections still work, so say why and carry on.
         std::cerr << "[native-video-host] directory disabled: " << dirError << "\n";
       } else {
-        std::cout << "[native-video-host] directory agent started url=" << directoryUrl << "\n";
+        std::cout << "[native-video-host] directory agent started url=" << clientSession.directoryUrl << "\n";
       }
     }
 
     for (;;) {
       // Wait on the primary and, when present, the legacy direct-dial listener. Reading only the
       // primary would leave a LAN client's Hello sitting unanswered forever.
-      SOCKET readySock = clientSock;
-      if (lanSock != INVALID_SOCKET) {
+      SOCKET readySock = clientSession.clientSock;
+      if (clientSession.lanSock != INVALID_SOCKET) {
         fd_set readSet;
         FD_ZERO(&readSet);
-        FD_SET(clientSock, &readSet);
-        FD_SET(lanSock, &readSet);
+        FD_SET(clientSession.clientSock, &readSet);
+        FD_SET(clientSession.lanSock, &readSet);
         timeval wait{};
         wait.tv_sec = 1;
         const int ready = select(0, &readSet, nullptr, nullptr, &wait);
@@ -1207,11 +1246,11 @@ int main(int argc, char** argv) {
         if (ready == SOCKET_ERROR) {
           std::cerr << "[native-video-host] udp handshake select failed err=" << WSAGetLastError()
                     << "\n";
-          closesocket(clientSock);
+          closesocket(clientSession.clientSock);
           return 5;
         }
         // The primary wins a tie: it is the one the directory published.
-        readySock = FD_ISSET(clientSock, &readSet) ? clientSock : lanSock;
+        readySock = FD_ISSET(clientSession.clientSock, &readSet) ? clientSession.clientSock : clientSession.lanSock;
       }
 
       // Big enough for the directory's observation reply; a datagram larger than the buffer
@@ -1228,7 +1267,7 @@ int main(int argc, char** argv) {
         const int err = WSAGetLastError();
         if (err == WSAEMSGSIZE || err == WSAECONNRESET) continue;
         std::cerr << "[native-video-host] udp handshake recv failed err=" << err << "\n";
-        closesocket(clientSock);
+        closesocket(clientSession.clientSock);
         return 5;
       }
       UdpHelloPacket hello{};
@@ -1244,8 +1283,8 @@ int main(int argc, char** argv) {
         // Only the primary socket carries directory traffic; the legacy listener never had a
         // punch or an observation sent to it, and feeding it in would let unrelated LAN noise
         // interrupt the heartbeat.
-        if (readySock == clientSock) {
-          (void)directoryAgent.ConsumeUdpPacket(rx, static_cast<size_t>(n), peer);
+        if (readySock == clientSession.clientSock) {
+          (void)clientSession.directoryAgent.ConsumeUdpPacket(rx, static_cast<size_t>(n), peer);
         }
         continue;
       }
@@ -1266,27 +1305,27 @@ int main(int argc, char** argv) {
           std::cerr << "[native-video-host] rejected udp hello with invalid directory capability\n";
           continue;
         }
-        sessionDirectoryAuthenticated.store(true, std::memory_order_release);
+        clientSession.directoryAuthenticated.store(true, std::memory_order_release);
         ack.features |= remote60::native_poc::kUdpFeatureDirectoryAuth;
       }
       (void)sendto(readySock, reinterpret_cast<const char*>(&ack), sizeof(ack), 0,
                    reinterpret_cast<const sockaddr*>(&peer), peerLen);
 
       // The socket that answered becomes the media socket for the rest of the session, so
-      // everything downstream keeps using clientSock exactly as before.
-      if (readySock != clientSock) {
+      // everything downstream keeps using clientSession.clientSock exactly as before.
+      if (readySock != clientSession.clientSock) {
         std::cout << "[native-video-host] client arrived on the lan direct-dial listener; "
                      "media moves to port "
                   << lanPort << "\n";
         // The directory agent captured the primary socket and must keep heartbeating on it, so
         // it is retired rather than closed -- otherwise the host drops off the directory the
         // moment someone connects over the LAN.
-        retiredSock = clientSock;
-        clientSock = lanSock;
-        lanSock = INVALID_SOCKET;
-      } else if (lanSock != INVALID_SOCKET) {
-        closesocket(lanSock);
-        lanSock = INVALID_SOCKET;
+        clientSession.retiredSock = clientSession.clientSock;
+        clientSession.clientSock = clientSession.lanSock;
+        clientSession.lanSock = INVALID_SOCKET;
+      } else if (clientSession.lanSock != INVALID_SOCKET) {
+        closesocket(clientSession.lanSock);
+        clientSession.lanSock = INVALID_SOCKET;
       }
 
       sender.udpPeer = peer;
@@ -1303,10 +1342,10 @@ int main(int argc, char** argv) {
     // Stays blocking: a dedicated reader thread now owns receives, and control messages must
     // not wait for the next render-loop iteration. The timeout only exists so that thread can
     // notice shutdown.
-    (void)remote60::native_poc::set_recv_timeout(clientSock, 200);
+    (void)remote60::native_poc::set_recv_timeout(clientSession.clientSock, 200);
   }
 
-  if (sessionDirectoryAuthenticated.load(std::memory_order_acquire)) {
+  if (clientSession.directoryAuthenticated.load(std::memory_order_acquire)) {
     std::string secureInputStatus;
     const std::wstring servicePath = remote60::native_poc::sibling_executable_path(
         L"GNLinkInputService.exe");
@@ -1318,15 +1357,15 @@ int main(int argc, char** argv) {
 
   if (transport == VideoTransport::Udp && args.tcpSendBufKb == 0) {
     const int sendBuf = 1024 * 1024;
-    (void)setsockopt(clientSock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sendBuf), sizeof(sendBuf));
+    (void)setsockopt(clientSession.clientSock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sendBuf), sizeof(sendBuf));
   }
   if (args.tcpSendBufKb > 0) {
     const int sendBuf = static_cast<int>(args.tcpSendBufKb * 1024u);
-    setsockopt(clientSock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sendBuf), sizeof(sendBuf));
+    setsockopt(clientSession.clientSock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sendBuf), sizeof(sendBuf));
   }
   int effectiveSendBuf = 0;
   int effectiveSendBufLen = sizeof(effectiveSendBuf);
-  (void)getsockopt(clientSock, SOL_SOCKET, SO_SNDBUF,
+  (void)getsockopt(clientSession.clientSock, SOL_SOCKET, SO_SNDBUF,
                    reinterpret_cast<char*>(&effectiveSendBuf), &effectiveSendBufLen);
   std::cout << "[native-video-host] client connected transport=" << video_transport_name(transport) << "\n";
   std::cout << "[native-video-host] socket sndbuf=" << effectiveSendBuf << " bytes\n";
@@ -1356,7 +1395,6 @@ int main(int argc, char** argv) {
   std::atomic<bool> monitorSelectPending{false};
   std::atomic<uint64_t> captureStreamGenerationState{1};
   std::atomic<bool> windowSelectionLocked{false};
-  std::atomic<bool> streamControlActive{true};
   std::atomic<bool> runtimeTunePending{false};
   std::atomic<uint32_t> runtimeTuneBitrate{0};
   std::atomic<uint32_t> runtimeTuneKeyint{0};
@@ -1424,7 +1462,7 @@ int main(int argc, char** argv) {
     // process. The previous session's disconnect turned it off, and a client that never
     // sends stream-state (the Windows client) would otherwise stare at a black screen
     // forever after any reconnect. Clients that manage the state explicitly still can.
-    if (!streamControlActive.exchange(true, std::memory_order_acq_rel)) {
+    if (!clientSession.streamControlActive.exchange(true, std::memory_order_acq_rel)) {
       std::cout << "[native-video-host][control] stream restored for new session\n";
     }
     auto send_window_list = [&](uint32_t seq) -> bool {
@@ -1618,7 +1656,7 @@ int main(int argc, char** argv) {
             inputRouter.secureAttempts.fetch_add(1, std::memory_order_relaxed);
             if (!desktopMode) {
               inputRouter.secureSkipWindowMode.fetch_add(1, std::memory_order_relaxed);
-            } else if (!sessionDirectoryAuthenticated.load(std::memory_order_acquire)) {
+            } else if (!clientSession.directoryAuthenticated.load(std::memory_order_acquire)) {
               // A plain-LAN session has no capability token, and the agent will not act without
               // one. Nothing about the click is wrong; it simply cannot be authorised.
               inputRouter.secureSkipUnauthenticated.fetch_add(1, std::memory_order_relaxed);
@@ -1680,7 +1718,7 @@ int main(int argc, char** argv) {
                 inputRouter.freshProbeSecure.fetch_add(1, std::memory_order_relaxed);
                 // Actually secure now. Retry THIS event through the SYSTEM broker exactly once.
                 if (desktopMode &&
-                    sessionDirectoryAuthenticated.load(std::memory_order_acquire) &&
+                    clientSession.directoryAuthenticated.load(std::memory_order_acquire) &&
                     inputRouter.broker.SendInputEvent(input, domainW, domainH)) {
                   injectResult = InputInjectResult::Injected;
                   resolvedTarget = " secure-system-agent(reprobe)";
@@ -1709,7 +1747,7 @@ int main(int argc, char** argv) {
                     directFailStage == InputFailStage::SendInputMouse ||
                     directFailStage == InputFailStage::SendInputKey;
                 if (brokerRetryableStage && desktopMode &&
-                    sessionDirectoryAuthenticated.load(std::memory_order_acquire)) {
+                    clientSession.directoryAuthenticated.load(std::memory_order_acquire)) {
                   inputRouter.defaultBrokerFallback.fetch_add(1, std::memory_order_relaxed);
                   if (inputRouter.broker.SendInputEvent(input, domainW, domainH)) {
                     // Queued to the agent, not confirmed landed (the broker does not ACK). Mark
@@ -1791,7 +1829,7 @@ int main(int argc, char** argv) {
               !inputRouter.targetCriteria.enabled() &&
               (selectedWindowIdState.load(std::memory_order_acquire) == 0);
           InputInjectResult injectResult = InputInjectResult::Failed;
-          if (desktopMode && sessionDirectoryAuthenticated.load(std::memory_order_acquire) &&
+          if (desktopMode && clientSession.directoryAuthenticated.load(std::memory_order_acquire) &&
               !interactive_desktop_is_default() &&
               inputRouter.broker.SendInputText(text,
                                               inputRouter.domainW.load(std::memory_order_acquire),
@@ -2069,7 +2107,7 @@ int main(int argc, char** argv) {
         req.header = header;
         if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
         const bool active = ((req.flags & 0x1u) != 0);
-        streamControlActive.store(active, std::memory_order_release);
+        clientSession.streamControlActive.store(active, std::memory_order_release);
         std::cout << "[native-video-host][control] stream-state seq=" << req.seq
                   << " active=" << (active ? 1 : 0)
                   << "\n";
@@ -2098,39 +2136,36 @@ int main(int argc, char** argv) {
 
       if (bodySize > 0 && !link.Discard(bodySize)) break;
     }
-    streamControlActive.store(false, std::memory_order_release);
+    clientSession.streamControlActive.store(false, std::memory_order_release);
   };
 
-  SOCKET controlListenSock = INVALID_SOCKET;
-  std::atomic<SOCKET> controlClientSock{INVALID_SOCKET};
-  std::thread controlThread;
   if (args.controlPort > 0) {
-    controlListenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (controlListenSock == INVALID_SOCKET) {
+    clientSession.controlListenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (clientSession.controlListenSock == INVALID_SOCKET) {
       std::cerr << "[native-video-host] control listen socket create failed port=" << args.controlPort << "\n";
     } else {
       sockaddr_in ctlLocal{};
       ctlLocal.sin_family = AF_INET;
       ctlLocal.sin_port = htons(args.controlPort);
       ctlLocal.sin_addr.s_addr = resolve_bind_address(args.bindAddress);
-      if (bind(controlListenSock, reinterpret_cast<const sockaddr*>(&ctlLocal), sizeof(ctlLocal)) != 0 ||
-          listen(controlListenSock, 1) != 0) {
+      if (bind(clientSession.controlListenSock, reinterpret_cast<const sockaddr*>(&ctlLocal), sizeof(ctlLocal)) != 0 ||
+          listen(clientSession.controlListenSock, 1) != 0) {
         std::cerr << "[native-video-host] control bind/listen failed port=" << args.controlPort << "\n";
-        closesocket(controlListenSock);
-        controlListenSock = INVALID_SOCKET;
+        closesocket(clientSession.controlListenSock);
+        clientSession.controlListenSock = INVALID_SOCKET;
       } else {
         std::cout << "[native-video-host] control waiting port=" << args.controlPort << "\n";
-        controlThread = std::thread([&]() {
+        clientSession.controlThread = std::thread([&]() {
           while (!stop.load()) {
             sockaddr_in cpeer{};
             int cpeerLen = sizeof(cpeer);
-            SOCKET acceptedSock = accept(controlListenSock, reinterpret_cast<sockaddr*>(&cpeer), &cpeerLen);
+            SOCKET acceptedSock = accept(clientSession.controlListenSock, reinterpret_cast<sockaddr*>(&cpeer), &cpeerLen);
             if (acceptedSock == INVALID_SOCKET) {
               if (stop.load()) break;
               Sleep(50);
               continue;
             }
-            controlClientSock = acceptedSock;
+            clientSession.controlClientSock = acceptedSock;
             int ctlNoDelay = 1;
             setsockopt(acceptedSock, IPPROTO_TCP, TCP_NODELAY,
                        reinterpret_cast<const char*>(&ctlNoDelay), sizeof(ctlNoDelay));
@@ -2145,7 +2180,7 @@ int main(int argc, char** argv) {
             }
             {
               SOCKET expected = acceptedSock;
-              controlClientSock.compare_exchange_strong(expected, INVALID_SOCKET);
+              clientSession.controlClientSock.compare_exchange_strong(expected, INVALID_SOCKET);
             }
             std::cout << "[native-video-host][control] tcp client disconnected\n";
           }
@@ -2157,9 +2192,6 @@ int main(int argc, char** argv) {
   // Control over the media socket. A client that arrived through the directory service has no
   // way to open a TCP connection back to us, so the same dispatch is also served here; a LAN
   // client that prefers TCP simply never sends control datagrams and this stays idle.
-  UdpControlChannel udpControlChannel;
-  std::thread udpControlThread;
-  std::thread udpReaderThread;
 
   // ---------------------------------------------------------------- session epoch
   //
@@ -2175,31 +2207,27 @@ int main(int argc, char** argv) {
   // repeats its Hello until it sees an Ack, nothing it sends can arrive before the reset.
   // Starts at one, not zero: control is only wired up after the handshake loop above has already
   // accepted a Hello, so by the time the dispatcher starts there is a session waiting for it.
-  std::atomic<uint64_t> sessionEpoch{1};
-  std::atomic<uint64_t> controlReadyEpoch{0};
-  std::mutex sessionEpochMu;
-  std::condition_variable sessionEpochCv;
   auto begin_session_epoch = [&]() -> uint64_t {
-    const uint64_t epoch = sessionEpoch.fetch_add(1, std::memory_order_acq_rel) + 1;
+    const uint64_t epoch = clientSession.epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
     // Wakes the dispatcher out of its blocking read so it can pick the new epoch up. Reset is
     // deliberately left to that thread: doing it here would clear the queues underneath a
     // session still being served.
-    udpControlChannel.Close(remote60::native_poc::ControlCloseReason::SessionRollover);
-    sessionEpochCv.notify_all();
+    clientSession.udpControlChannel.Close(remote60::native_poc::ControlCloseReason::SessionRollover);
+    clientSession.epochCv.notify_all();
     return epoch;
   };
   auto await_control_ready = [&](uint64_t epoch) {
-    std::unique_lock<std::mutex> lock(sessionEpochMu);
+    std::unique_lock<std::mutex> lock(clientSession.epochMu);
     // Bounded: if the dispatcher cannot come back we answer the client anyway, because a session
     // with video and no window list still beats one that never starts.
-    sessionEpochCv.wait_for(lock, std::chrono::milliseconds(1500), [&] {
-      return controlReadyEpoch.load(std::memory_order_acquire) >= epoch ||
-             sessionEpoch.load(std::memory_order_acquire) > epoch;
+    clientSession.epochCv.wait_for(lock, std::chrono::milliseconds(1500), [&] {
+      return clientSession.controlReadyEpoch.load(std::memory_order_acquire) >= epoch ||
+             clientSession.epoch.load(std::memory_order_acquire) > epoch;
     });
   };
 
   if (transport == VideoTransport::Udp) {
-    udpControlChannel.Configure(
+    clientSession.udpControlChannel.Configure(
         [&](const void* data, size_t len) -> bool {
           const uint32_t ip = sender.udpPeerIpNet.load(std::memory_order_acquire);
           const uint16_t port = sender.udpPeerPortNet.load(std::memory_order_acquire);
@@ -2208,27 +2236,27 @@ int main(int argc, char** argv) {
           to.sin_family = AF_INET;
           to.sin_addr.s_addr = ip;
           to.sin_port = port;
-          return sendto(clientSock, static_cast<const char*>(data), static_cast<int>(len), 0,
+          return sendto(clientSession.clientSock, static_cast<const char*>(data), static_cast<int>(len), 0,
                         reinterpret_cast<const sockaddr*>(&to), sizeof(to)) > 0;
         },
         remote60::native_poc::kUdpControlStreamHostToClient,
         remote60::native_poc::kUdpControlStreamClientToHost, args.udpMtu);
 
-    udpReaderThread = std::thread([&]() {
+    clientSession.udpReaderThread = std::thread([&]() {
       // Startup barrier. The dispatcher's first Reset races this thread: if the client's first
       // ControlData lands here first, OnPacket ACKs it into rxReady_, then the dispatcher's
       // Reset wipes rxReady_ -- and the client, holding an ACK, never retransmits. The serve
       // loop then starves for its full 10s read timeout ("ended reason=none") with a 40-70%
       // field hit rate. Hold this thread off the socket until the dispatcher has published
-      // controlReadyEpoch for the current epoch; datagrams meanwhile wait, unharmed, in the
+      // clientSession.controlReadyEpoch for the current epoch; datagrams meanwhile wait, unharmed, in the
       // kernel socket buffer. wait_for (not wait) so shutdown cannot strand us if no one
       // signals the cv after stop.
       {
-        std::unique_lock<std::mutex> lock(sessionEpochMu);
+        std::unique_lock<std::mutex> lock(clientSession.epochMu);
         while (!stop.load() &&
-               controlReadyEpoch.load(std::memory_order_acquire) <
-                   sessionEpoch.load(std::memory_order_acquire)) {
-          sessionEpochCv.wait_for(lock, std::chrono::milliseconds(50));
+               clientSession.controlReadyEpoch.load(std::memory_order_acquire) <
+                   clientSession.epoch.load(std::memory_order_acquire)) {
+          clientSession.epochCv.wait_for(lock, std::chrono::milliseconds(50));
         }
       }
       int lastLoggedRecvError = 0;
@@ -2236,7 +2264,7 @@ int main(int argc, char** argv) {
         uint8_t rx[kUdpReceiveBufferBytes];
         sockaddr_in peer{};
         int peerLen = sizeof(peer);
-        const int n = recvfrom(clientSock, reinterpret_cast<char*>(rx), sizeof(rx), 0,
+        const int n = recvfrom(clientSession.clientSock, reinterpret_cast<char*>(rx), sizeof(rx), 0,
                                reinterpret_cast<sockaddr*>(&peer), &peerLen);
         // A zero-length datagram is legal and arrives from NAT keepalives and port scanners.
         // It used to fall into the error path below and end this thread, after which no Hello
@@ -2249,7 +2277,7 @@ int main(int argc, char** argv) {
               err == WSAECONNRESET) {
             // Nothing arrived, or one datagram was malformed. Keep the retransmit timers moving
             // so a stalled transfer still recovers while the link is quiet.
-            udpControlChannel.Tick();
+            clientSession.udpControlChannel.Tick();
             continue;
           }
           // This thread is the only reader of hellos; while the process lives it must too.
@@ -2259,7 +2287,7 @@ int main(int argc, char** argv) {
             std::cout << "[native-video-host] udp reader recv error err=" << err
                       << " (continuing)\n";
           }
-          udpControlChannel.Tick();
+          clientSession.udpControlChannel.Tick();
           Sleep(50);
           continue;
         }
@@ -2302,13 +2330,13 @@ int main(int argc, char** argv) {
                   remote60::native_poc::sibling_executable_path(
                       L"GNLinkInputService.exe"),
                   &secureInputStatus);
-            } else if (sessionDirectoryAuthenticated.load(std::memory_order_acquire)) {
+            } else if (clientSession.directoryAuthenticated.load(std::memory_order_acquire)) {
               // Do not let an unauthenticated LAN Hello take over or de-authorize an active
               // directory session. Direct-LAN mode remains available before authentication.
               std::cerr << "[native-video-host] rejected unauthenticated reconnect during directory session\n";
               continue;
             }
-            sessionDirectoryAuthenticated.store(directoryAuthenticated,
+            clientSession.directoryAuthenticated.store(directoryAuthenticated,
                                                 std::memory_order_release);
             const bool changed =
                 sender.udpPeerIpNet.load(std::memory_order_acquire) != peer.sin_addr.s_addr ||
@@ -2333,43 +2361,43 @@ int main(int argc, char** argv) {
             }
             // Answered last, so that by the time the client believes it is connected the control
             // channel behind this endpoint is already the new session's.
-            (void)sendto(clientSock, reinterpret_cast<const char*>(&ack), sizeof(ack), 0,
+            (void)sendto(clientSession.clientSock, reinterpret_cast<const char*>(&ack), sizeof(ack), 0,
                          reinterpret_cast<const sockaddr*>(&peer), peerLen);
             continue;
           }
         }
 
-        if (udpControlChannel.OnPacket(rx, len)) continue;
-        (void)directoryAgent.ConsumeUdpPacket(rx, len, peer);
+        if (clientSession.udpControlChannel.OnPacket(rx, len)) continue;
+        (void)clientSession.directoryAgent.ConsumeUdpPacket(rx, len, peer);
       }
-      udpControlChannel.Close(remote60::native_poc::ControlCloseReason::Shutdown);
-      sessionEpochCv.notify_all();
+      clientSession.udpControlChannel.Close(remote60::native_poc::ControlCloseReason::Shutdown);
+      clientSession.epochCv.notify_all();
     });
 
     // One dispatcher for the life of the process, serving one session after another. It used to
     // serve exactly one: any failed read returned from serve_control_session and the thread
     // exited for good, taking the stream with it (the session teardown clears
-    // streamControlActive, and only re-entry restores it). A client that merely walked out of
+    // clientSession.streamControlActive, and only re-entry restores it). A client that merely walked out of
     // Wi-Fi range was enough to leave the host answering handshakes and nothing else.
-    udpControlThread = std::thread([&]() {
+    clientSession.udpControlThread = std::thread([&]() {
       uint64_t servedEpoch = 0;
       for (;;) {
         {
-          std::unique_lock<std::mutex> lock(sessionEpochMu);
-          sessionEpochCv.wait(lock, [&] {
-            return stop.load() || sessionEpoch.load(std::memory_order_acquire) > servedEpoch;
+          std::unique_lock<std::mutex> lock(clientSession.epochMu);
+          clientSession.epochCv.wait(lock, [&] {
+            return stop.load() || clientSession.epoch.load(std::memory_order_acquire) > servedEpoch;
           });
         }
         if (stop.load()) break;
-        servedEpoch = sessionEpoch.load(std::memory_order_acquire);
+        servedEpoch = clientSession.epoch.load(std::memory_order_acquire);
         // Reset belongs here rather than in the reader: this is the thread that owns the
         // channel's read side, so nothing is being consumed while the queues are cleared.
-        udpControlChannel.Reset();
+        clientSession.udpControlChannel.Reset();
         {
-          std::lock_guard<std::mutex> lock(sessionEpochMu);
-          controlReadyEpoch.store(servedEpoch, std::memory_order_release);
+          std::lock_guard<std::mutex> lock(clientSession.epochMu);
+          clientSession.controlReadyEpoch.store(servedEpoch, std::memory_order_release);
         }
-        sessionEpochCv.notify_all();
+        clientSession.epochCv.notify_all();
 
         // The read timeout is what lets the host notice a client that simply vanished. The
         // channel only declares peer-lost while it has something to retransmit; a client that
@@ -2377,12 +2405,12 @@ int main(int argc, char** argv) {
         // the rest of the process with the stream still marked active -- capturing, encoding,
         // and sending to nobody. The client pings about once a second, so ten silent seconds
         // is a client that is gone, not one that is slow.
-        UdpControlLink link(&udpControlChannel, 10000);
+        UdpControlLink link(&clientSession.udpControlChannel, 10000);
         serve_control_session(link);
         // Closed is not finished. Retransmits running out means this client is gone, which is
         // the ordinary end of a session and the reason to wait for the next one.
         std::cout << "[native-video-host][control] udp control session ended epoch=" << servedEpoch
-                  << " reason=" << remote60::native_poc::to_string(udpControlChannel.CloseReason())
+                  << " reason=" << remote60::native_poc::to_string(clientSession.udpControlChannel.CloseReason())
                   << "\n";
       }
     });
@@ -2391,8 +2419,8 @@ int main(int argc, char** argv) {
   winrt::init_apartment(winrt::apartment_type::multi_threaded);
   if (!GraphicsCaptureSession::IsSupported()) {
     std::cerr << "[native-video-host] WGC not supported\n";
-    closesocket(clientSock);
-    if (listenSock != INVALID_SOCKET) closesocket(listenSock);
+    closesocket(clientSession.clientSock);
+    if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
     return 6;
   }
 
@@ -2403,8 +2431,8 @@ int main(int argc, char** argv) {
     if (FAILED(hr)) {
       std::cerr << "[native-video-host] MFStartup failed hr=0x" << std::hex << static_cast<unsigned long>(hr)
                 << std::dec << "\n";
-      closesocket(clientSock);
-      if (listenSock != INVALID_SOCKET) closesocket(listenSock);
+      closesocket(clientSession.clientSock);
+      if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
       return 12;
     }
     mfStarted = true;
@@ -2417,8 +2445,8 @@ int main(int argc, char** argv) {
   HRESULT hr = create_d3d11_device_for_primary_monitor(&d3d, &ctx, &fl);
   if (FAILED(hr)) {
     std::cerr << "[native-video-host] D3D11CreateDevice failed\n";
-    closesocket(clientSock);
-    if (listenSock != INVALID_SOCKET) closesocket(listenSock);
+    closesocket(clientSession.clientSock);
+    if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
     if (mfStarted) MFShutdown();
     return 7;
   }
@@ -2502,8 +2530,8 @@ int main(int argc, char** argv) {
   auto monitorInfo = primary_monitor_info();
   if (!monitorInfo.has_value()) {
     std::cerr << "[native-video-host] primary monitor query failed\n";
-    closesocket(clientSock);
-    if (listenSock != INVALID_SOCKET) closesocket(listenSock);
+    closesocket(clientSession.clientSock);
+    if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
     if (mfStarted) MFShutdown();
     return 8;
   }
@@ -2528,8 +2556,8 @@ int main(int argc, char** argv) {
                : CreateItemForPrimaryMonitor();
     if (!item) {
       std::cerr << "[native-video-host] capture item create failed\n";
-      closesocket(clientSock);
-      if (listenSock != INVALID_SOCKET) closesocket(listenSock);
+      closesocket(clientSession.clientSock);
+      if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
       if (mfStarted) MFShutdown();
       return 8;
     }
@@ -2544,8 +2572,8 @@ int main(int argc, char** argv) {
   }
   if (captureWidth < 2 || captureHeight < 2) {
     std::cerr << "[native-video-host] invalid capture size\n";
-    closesocket(clientSock);
-    if (listenSock != INVALID_SOCKET) closesocket(listenSock);
+    closesocket(clientSession.clientSock);
+    if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
     if (mfStarted) MFShutdown();
     return 9;
   }
@@ -2871,8 +2899,8 @@ int main(int argc, char** argv) {
   if (useH264) {
     if (!encoder.initialize(activeEncodeW, activeEncodeH, activeFps, activeBitrate, activeKeyint)) {
       std::cerr << "[native-video-host] H264 encoder initialize failed\n";
-      closesocket(clientSock);
-      if (listenSock != INVALID_SOCKET) closesocket(listenSock);
+      closesocket(clientSession.clientSock);
+      if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
       if (mfStarted) MFShutdown();
       return 13;
     }
@@ -3352,8 +3380,8 @@ int main(int argc, char** argv) {
 
   if (!create_staging(captureWidth, captureHeight)) {
     std::cerr << "[native-video-host] capture readback pipeline create failed\n";
-    closesocket(clientSock);
-    if (listenSock != INVALID_SOCKET) closesocket(listenSock);
+    closesocket(clientSession.clientSock);
+    if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
     if (mfStarted) MFShutdown();
     return 10;
   }
@@ -3373,7 +3401,7 @@ int main(int argc, char** argv) {
         while (auto newer = framePool.TryGetNextFrame()) {
           latest = newer;
         }
-        if (!streamControlActive.load(std::memory_order_acquire)) return;
+        if (!clientSession.streamControlActive.load(std::memory_order_acquire)) return;
 
         // A WGC frame-pool surface is a FIXED buffer size (captureWidth x captureHeight, chosen when
         // the pool was created); frame.ContentSize() is the actual content region and shrinks/grows
@@ -3576,7 +3604,7 @@ int main(int argc, char** argv) {
             [&](ID3D11Texture2D* texture, uint32_t width, uint32_t height,
                 uint32_t accumulatedFrames) {
               if (stop.load()) return;
-              if (!streamControlActive.load(std::memory_order_acquire)) return;
+              if (!clientSession.streamControlActive.load(std::memory_order_acquire)) return;
               const uint64_t callbackUs = qpc_now_us();
               publish_captured_texture(texture, callbackUs, callbackUs, 0, 0,
                                        accumulatedFrames > 0);
@@ -3630,7 +3658,7 @@ int main(int argc, char** argv) {
             [&](std::shared_ptr<std::vector<uint8_t>> pixels, uint32_t width,
                 uint32_t height, uint32_t stride, uint64_t captureQpcUs,
                 uint64_t captureCopyUs, uint64_t parentCopyUs) {
-              if (stop.load() || !streamControlActive.load(std::memory_order_acquire)) return;
+              if (stop.load() || !clientSession.streamControlActive.load(std::memory_order_acquire)) return;
               const uint64_t callbackUs = qpc_now_us();
               remote60::native_poc::CaptureFrameMeta meta{};
               meta.width = width;
@@ -3745,12 +3773,12 @@ int main(int argc, char** argv) {
   if (!restart_capture_session()) {
     std::cerr << "[native-video-host] capture session start failed\n";
     captureReadback.Shutdown();
-    closesocket(clientSock);
-    if (listenSock != INVALID_SOCKET) closesocket(listenSock);
+    closesocket(clientSession.clientSock);
+    if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
     if (mfStarted) MFShutdown();
     return 10;
   }
-  powerKeepalive.SetStreaming(streamControlActive.load(std::memory_order_acquire), true);
+  powerKeepalive.SetStreaming(clientSession.streamControlActive.load(std::memory_order_acquire), true);
 
   const uint64_t startUs = qpc_now_us();
   uint64_t nextTickUs = startUs;
@@ -3866,7 +3894,7 @@ int main(int argc, char** argv) {
     static const bool remoteCursorEnabled = env_truthy("REMOTE60_NATIVE_REMOTE_CURSOR");
     if (!remoteCursorEnabled) return;
     if (transport != VideoTransport::Udp || !sender.udpPeerReady) return;
-    if (!streamControlActive.load(std::memory_order_acquire)) return;
+    if (!clientSession.streamControlActive.load(std::memory_order_acquire)) return;
     if (captureWindowModeActive.load(std::memory_order_acquire)) return;
     if (backend.active != DesktopCaptureBackend::Dxgi) return;
     if (dxgiPointerUpdateUs.load(std::memory_order_acquire) == 0) return;
@@ -3891,7 +3919,7 @@ int main(int argc, char** argv) {
       pkt.captureH = captureHeight;
     }
     pkt.hostQpcUs = nowUs;
-    (void)sendto(clientSock, reinterpret_cast<const char*>(&pkt), sizeof(pkt), 0,
+    (void)sendto(clientSession.clientSock, reinterpret_cast<const char*>(&pkt), sizeof(pkt), 0,
                  reinterpret_cast<const sockaddr*>(&sender.udpPeer), sizeof(sender.udpPeer));
     inputRouter.cursorSendLastUs = nowUs;
     inputRouter.cursorSentX = px;
@@ -4009,7 +4037,7 @@ int main(int argc, char** argv) {
         item.udpHdr.sendQpcUs = sendStartUs;
         SendPathStats pathStats{};
         const UdpSendOutcome outcome =
-            send_udp_chunks_timed(clientSock, peer, item.bytes.data(), item.bytes.size(),
+            send_udp_chunks_timed(clientSession.clientSock, peer, item.bytes.data(), item.bytes.size(),
                                   item.udpHdr, args.udpMtu, &pathStats, &sender.mediaSessionEpoch,
                                   item.mediaEpoch);
         const uint64_t sendDoneUs = qpc_now_us();
@@ -4117,11 +4145,11 @@ int main(int argc, char** argv) {
   auto reconnect_tcp_data_session = [&](const char* reason) -> bool {
     if (transport != VideoTransport::Tcp) return false;
     if (args.seconds > 0) return false;
-    if (listenSock == INVALID_SOCKET) return false;
-    if (clientSock != INVALID_SOCKET) {
-      shutdown(clientSock, SD_BOTH);
-      closesocket(clientSock);
-      clientSock = INVALID_SOCKET;
+    if (clientSession.listenSock == INVALID_SOCKET) return false;
+    if (clientSession.clientSock != INVALID_SOCKET) {
+      shutdown(clientSession.clientSock, SD_BOTH);
+      closesocket(clientSession.clientSock);
+      clientSession.clientSock = INVALID_SOCKET;
     }
     std::cout << "[native-video-host] data disconnected reason="
               << (reason ? reason : "unknown")
@@ -4129,22 +4157,22 @@ int main(int argc, char** argv) {
     while (!stop.load()) {
       sockaddr_in peer{};
       int peerLen = sizeof(peer);
-      SOCKET accepted = accept(listenSock, reinterpret_cast<sockaddr*>(&peer), &peerLen);
+      SOCKET accepted = accept(clientSession.listenSock, reinterpret_cast<sockaddr*>(&peer), &peerLen);
       if (accepted == INVALID_SOCKET) {
         if (stop.load()) return false;
         Sleep(50);
         continue;
       }
-      clientSock = accepted;
+      clientSession.clientSock = accepted;
       int noDelay = 1;
-      setsockopt(clientSock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
+      setsockopt(clientSession.clientSock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
       if (args.tcpSendBufKb > 0) {
         const int sendBuf = static_cast<int>(args.tcpSendBufKb * 1024u);
-        setsockopt(clientSock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sendBuf), sizeof(sendBuf));
+        setsockopt(clientSession.clientSock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sendBuf), sizeof(sendBuf));
       }
       int effectiveSendBuf = 0;
       int effectiveSendBufLen = sizeof(effectiveSendBuf);
-      (void)getsockopt(clientSock, SOL_SOCKET, SO_SNDBUF,
+      (void)getsockopt(clientSession.clientSock, SOL_SOCKET, SO_SNDBUF,
                        reinterpret_cast<char*>(&effectiveSendBuf), &effectiveSendBufLen);
       std::cout << "[native-video-host] client reconnected transport=tcp sndbuf="
                 << effectiveSendBuf << " bytes\n";
@@ -4475,7 +4503,7 @@ int main(int argc, char** argv) {
     ++kick.count;
     kick.lastSourceAgeUs = (nowUs > snap.captureQpcUs) ? (nowUs - snap.captureQpcUs) : 0;
     std::cout << "[native-video-host] trailing-edge kick epoch="
-              << sessionEpoch.load(std::memory_order_acquire)
+              << clientSession.epoch.load(std::memory_order_acquire)
               << " ageUs=" << kick.lastSourceAgeUs << " size=" << outW << "x" << outH
               << " gen=" << snap.streamGeneration << "\n";
     return true;
@@ -4543,7 +4571,7 @@ int main(int argc, char** argv) {
     // fires 150ms later only if no real frame has arrived and been flushed out; a real callback
     // fills the cold cache first, so even the first kick has pixels to resubmit.
     {
-      const uint64_t curEpoch = sessionEpoch.load(std::memory_order_acquire);
+      const uint64_t curEpoch = clientSession.epoch.load(std::memory_order_acquire);
       if (curEpoch != kick.lastSeenBootstrapEpoch) {
         kick.lastSeenBootstrapEpoch = curEpoch;
         arm_trailing_kick(nowUs);
@@ -4614,7 +4642,7 @@ int main(int argc, char** argv) {
     // inactive the request either survives until the client returns (processed then, one
     // iteration after the active edge) or is cleared by the idle detach, whose reattach
     // re-resolves the backend from scratch anyway.
-    if (streamControlActive.load(std::memory_order_acquire) &&
+    if (clientSession.streamControlActive.load(std::memory_order_acquire) &&
         dxgiFallbackRequested.exchange(false, std::memory_order_acq_rel) &&
         !captureWindowModeActive.load(std::memory_order_acquire)) {
       powerKeepalive.SetStreaming(true, true);
@@ -4641,7 +4669,7 @@ int main(int argc, char** argv) {
       forceKeyNext = true;
       flush_capture_pipeline_state("dxgi-runtime-fallback");
     }
-    if (streamControlActive.load(std::memory_order_acquire) &&
+    if (clientSession.streamControlActive.load(std::memory_order_acquire) &&
         gdiFallbackRequested.exchange(false, std::memory_order_acq_rel) &&
         !captureWindowModeActive.load(std::memory_order_acquire)) {
       powerKeepalive.SetStreaming(true, true);
@@ -4682,7 +4710,7 @@ int main(int argc, char** argv) {
     // trying again is what was missing.
     if (backend.active != backend.requested &&
         !captureWindowModeActive.load(std::memory_order_acquire) &&
-        streamControlActive.load(std::memory_order_acquire)) {
+        clientSession.streamControlActive.load(std::memory_order_acquire)) {
       const uint64_t nowUs = qpc_now_us();
       if (backend.demotionSinceUs == 0) backend.demotionSinceUs = nowUs;
       // Probe the interactive-desktop state at a bounded cadence (OpenInputDesktop is a syscall).
@@ -4781,7 +4809,7 @@ int main(int argc, char** argv) {
       backend.promotionDeferredForCurrentDeadline = false;
     }
 
-    const bool streamActive = streamControlActive.load(std::memory_order_acquire);
+    const bool streamActive = clientSession.streamControlActive.load(std::memory_order_acquire);
     if (!streamActive) {
       if (streamActiveApplied) {
         flush_capture_pipeline_state("stream-inactive");
@@ -5310,7 +5338,7 @@ int main(int argc, char** argv) {
       }
     }
     if (captureSessionReady.load(std::memory_order_acquire) &&
-        streamControlActive.load(std::memory_order_acquire) &&
+        clientSession.streamControlActive.load(std::memory_order_acquire) &&
         !captureWindowModeActive.load(std::memory_order_acquire) &&
         backend.active == DesktopCaptureBackend::Gdi) {
       // GDI is clocked and must publish continuously. WGC/DXGI are change-driven and can
@@ -5355,7 +5383,7 @@ int main(int argc, char** argv) {
     // nothing" report from a host pinned by a GPU-heavy game; before this, DXGI/WGC had no path
     // back short of the user restarting the host.
     if (captureSessionReady.load(std::memory_order_acquire) &&
-        streamControlActive.load(std::memory_order_acquire) &&
+        clientSession.streamControlActive.load(std::memory_order_acquire) &&
         !captureWindowModeActive.load(std::memory_order_acquire) &&
         backend.active != DesktopCaptureBackend::Gdi) {
       const uint64_t oldestPendingUs = captureReadback.OldestGpuPendingAgeUs();
@@ -5559,7 +5587,7 @@ int main(int argc, char** argv) {
     // or a mid-switch target stays black rather than repainting a stale picture; a failed fill
     // also stamps the attempt clock so the (uncached) secure probe is not repeated every tick.
     if (!servedBootstrap && kick.staticRefreshIntervalUs > 0 && useH264 &&
-        streamControlActive.load(std::memory_order_acquire) && !kick.pending &&
+        clientSession.streamControlActive.load(std::memory_order_acquire) && !kick.pending &&
         kick.lastEmittedAuCaptureUs != 0 &&
         nowUs >= kick.lastEmittedAuCaptureUs + kick.staticRefreshIntervalUs &&
         nowUs >= kick.lastStaticRefreshAttemptUs + kick.staticRefreshIntervalUs) {
@@ -5771,9 +5799,9 @@ int main(int argc, char** argv) {
       hdr.sendQpcUs = sendStartUs;
       const bool sentOk =
           (transport == VideoTransport::Tcp) &&
-          send_all_timed(clientSock, &hdr, sizeof(hdr), &sendPathStats.headerUs,
+          send_all_timed(clientSession.clientSock, &hdr, sizeof(hdr), &sendPathStats.headerUs,
                          &sendPathStats.headerCallCount) &&
-          send_all_timed(clientSock, payload->data(), payload->size(), &sendPathStats.payloadUs,
+          send_all_timed(clientSession.clientSock, payload->data(), payload->size(), &sendPathStats.payloadUs,
                          &sendPathStats.payloadCallCount);
       const uint64_t sendDoneUs = qpc_now_us();
       const uint64_t sendDurUs = (sendDoneUs >= sendStartUs) ? (sendDoneUs - sendStartUs) : 0;
@@ -6191,7 +6219,7 @@ int main(int argc, char** argv) {
         // green). Emit one rate-limited anomaly line with the streak-accumulated async counters so a
         // field recurrence tells a host event-driving bug (NeedInput accrues, HaveOutput stays 0)
         // from a genuine vendor/hardware stall. Recovery is a separate follow-up; diagnostic only.
-        if (streamControlActive.load(std::memory_order_acquire) &&
+        if (clientSession.streamControlActive.load(std::memory_order_acquire) &&
             encoderAcceptedNoOutputStreak >= 8 && noOutputAgeUs >= 1000000ULL &&
             (lastEncoderStarvationLogUs == 0 ||
              encodeEndUs >= lastEncoderStarvationLogUs + 1000000ULL)) {
@@ -6378,9 +6406,9 @@ int main(int argc, char** argv) {
         bool enqueuedForSend = false;
         if (transport == VideoTransport::Tcp) {
           enqueuedForSend = true;
-          sentOk = send_all_timed(clientSock, &hdr, sizeof(hdr), &sendPathStats.headerUs,
+          sentOk = send_all_timed(clientSession.clientSock, &hdr, sizeof(hdr), &sendPathStats.headerUs,
                                   &sendPathStats.headerCallCount) &&
-                   send_all_timed(clientSock, au.bytes.data(), au.bytes.size(), &sendPathStats.payloadUs,
+                   send_all_timed(clientSession.clientSock, au.bytes.data(), au.bytes.size(), &sendPathStats.payloadUs,
                                  &sendPathStats.payloadCallCount);
         } else {
           if (!sender.udpPeerReady) {
@@ -6770,14 +6798,14 @@ int main(int argc, char** argv) {
       const uint64_t idleHoldPerSec =
           (useH264 &&
            captureSessionReady.load(std::memory_order_acquire) &&
-           streamControlActive.load(std::memory_order_acquire) &&
+           clientSession.streamControlActive.load(std::memory_order_acquire) &&
            callbackFramesPerSec == 0) ? 1ULL : 0ULL;
       idleHoldTotal += idleHoldPerSec;
       const bool gdiLowPushFallbackEnabled =
           !captureWindowModeActive && backend.active == DesktopCaptureBackend::Gdi;
       if (useH264 &&
           captureSessionReady.load(std::memory_order_acquire) &&
-          streamControlActive.load(std::memory_order_acquire) &&
+          clientSession.streamControlActive.load(std::memory_order_acquire) &&
           gdiLowPushFallbackEnabled) {
         const bool warmupDone =
             (watchdog.inputStallWarmupSec == 0 ||
@@ -6837,7 +6865,7 @@ int main(int argc, char** argv) {
       // just-restarted session, or a lock screen cannot trip it. This is the ONLY new rebuild
       // trigger; the frozen-ring 2s hard path and session rollover behavior are unchanged.
       {
-        const bool drainStreamActive = streamControlActive.load(std::memory_order_acquire);
+        const bool drainStreamActive = clientSession.streamControlActive.load(std::memory_order_acquire);
         if (drainStreamActive && !watchdog.drainPrevStreamActive) {
           streamActiveSinceUs = t;  // client (re)attach edge; anchors the warmup below
         }
@@ -7615,39 +7643,39 @@ int main(int argc, char** argv) {
   frame.cv.notify_all();
   windowSelectionTxn.cv.notify_all();
   {
-    SOCKET ctlSock = controlClientSock.exchange(INVALID_SOCKET);
+    SOCKET ctlSock = clientSession.controlClientSock.exchange(INVALID_SOCKET);
     if (ctlSock != INVALID_SOCKET) {
       shutdown(ctlSock, SD_BOTH);
       closesocket(ctlSock);
     }
   }
-  if (controlListenSock != INVALID_SOCKET) {
-    closesocket(controlListenSock);
-    controlListenSock = INVALID_SOCKET;
+  if (clientSession.controlListenSock != INVALID_SOCKET) {
+    closesocket(clientSession.controlListenSock);
+    clientSession.controlListenSock = INVALID_SOCKET;
   }
-  if (controlThread.joinable()) controlThread.join();
+  if (clientSession.controlThread.joinable()) clientSession.controlThread.join();
   // Close before joining: the control session is parked in a blocking read, and the reader
   // thread is parked in recvfrom until its receive timeout expires. The dispatcher now outlives
   // any one session, so it also has to be woken from the wait it parks in between them.
-  udpControlChannel.Close(remote60::native_poc::ControlCloseReason::Shutdown);
-  sessionEpochCv.notify_all();
-  if (udpControlThread.joinable()) udpControlThread.join();
-  if (udpReaderThread.joinable()) udpReaderThread.join();
+  clientSession.udpControlChannel.Close(remote60::native_poc::ControlCloseReason::Shutdown);
+  clientSession.epochCv.notify_all();
+  if (clientSession.udpControlThread.joinable()) clientSession.udpControlThread.join();
+  if (clientSession.udpReaderThread.joinable()) clientSession.udpReaderThread.join();
   detach_capture_session();
   // Stop the readback worker while everything its publish callback touches is still alive;
   // relying on destructor order would tear down FrameState first.
   captureReadback.Shutdown();
-  // The sender still holds clientSock; stop it before the socket closes.
+  // The sender still holds clientSession.clientSock; stop it before the socket closes.
   sender.stop.store(true, std::memory_order_release);
   sender.cv.notify_all();
   if (sender.thread.joinable()) sender.thread.join();
-  if (clientSock != INVALID_SOCKET) {
-    closesocket(clientSock);
-    clientSock = INVALID_SOCKET;
+  if (clientSession.clientSock != INVALID_SOCKET) {
+    closesocket(clientSession.clientSock);
+    clientSession.clientSock = INVALID_SOCKET;
   }
-  if (listenSock != INVALID_SOCKET) {
-    closesocket(listenSock);
-    listenSock = INVALID_SOCKET;
+  if (clientSession.listenSock != INVALID_SOCKET) {
+    closesocket(clientSession.listenSock);
+    clientSession.listenSock = INVALID_SOCKET;
   }
   if (useH264) {
     encoder.shutdown();

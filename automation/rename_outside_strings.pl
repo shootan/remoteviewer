@@ -1,11 +1,13 @@
 #!/usr/bin/perl
-# Rename whole-word identifiers everywhere EXCEPT inside double-quoted string literals.
+# Rename whole-word identifiers everywhere EXCEPT inside double-quoted string literals and
+# EXCEPT when the identifier is a member/scope access (preceded by '.', '->' or '::').
 #
 # usage: perl rename_outside_strings.pl MAPFILE < in.cpp > out.cpp
 #   MAPFILE: one "old<TAB>new" per line.
 #
 # Used by the host split refactor (Phase 1 state structs) so that log labels such as
-# " abrProfile=" keep their exact text while the variable abrProfile becomes rate.abrProfile.
+# " abrProfile=" keep their exact text while the variable abrProfile becomes rate.abrProfile,
+# and so that args.directoryUrl (a member with the same name as a renamed local) is untouched.
 # Comments are renamed too (that keeps them accurate). Char literals are not special-cased;
 # the host has none containing a double quote.
 use strict;
@@ -23,7 +25,8 @@ while (my $l = <$mf>) {
 close $mf;
 
 my $alt = join('|', map { quotemeta } sort { length($b) <=> length($a) } keys %map);
-my $re = qr/\b($alt)\b/;
+# Not after '.', '->' or '::' (member / scope access), and only whole words.
+my $re = qr/(?<![.>:\w])($alt)\b/;
 
 # A string literal: opening quote, then any run of non-quote/non-backslash chars or
 # backslash-escaped chars, then the closing quote.
