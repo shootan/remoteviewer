@@ -212,46 +212,32 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
       !capture.windowModeActive.load(std::memory_order_acquire) &&
       clientSession.streamControlActive.load(std::memory_order_acquire)) {
     const uint64_t nowUs = qpc_now_us();
-    if (backend.demotionSinceUs == 0) backend.demotionSinceUs = nowUs;
+    backend.NoteDemotionEpisode(nowUs);
     // Probe the interactive-desktop state at a bounded cadence (OpenInputDesktop is a syscall).
     // A secure desktop resets the stability clock; the default desktop starts or continues it.
     // The uncached query is deliberate: the shared cached one is refreshed by input/pong callers
     // and can hand a stale "default" reading to a promotion decision the moment a UAC prompt rose.
-    if (nowUs >= backend.defaultProbeAtUs) {
-      backend.defaultProbeAtUs = nowUs + kDesktopDefaultProbeIntervalUs;
-      if (interactive_desktop_is_default_uncached()) {
-        if (backend.defaultStableSinceUs == 0) backend.defaultStableSinceUs = nowUs;
-      } else {
-        backend.defaultStableSinceUs = 0;
-        backend.secureProbeFalseTotal.fetch_add(1, std::memory_order_relaxed);
-      }
+    if (backend.DefaultProbeDue(nowUs)) {
+      backend.NoteDefaultProbe(nowUs, interactive_desktop_is_default_uncached());
     }
-    const bool defaultStable =
-        backend.defaultStableSinceUs != 0 &&
-        (nowUs - backend.defaultStableSinceUs) >= kDesktopDefaultStableUs;
-    if (backend.retryAtUs == 0) {
-      backend.retryAtUs = nowUs + kDesktopBackendRetryMinUs;
-    } else if (nowUs >= backend.retryAtUs) {
+    const bool defaultStable = backend.DefaultStable(nowUs);
+    if (backend.RetryDue(nowUs)) {
       // The retry deadline is due. Promote only if the default desktop has been up for the whole
       // settle window AND one final uncached check confirms it is still up right now -- otherwise
       // a UAC prompt that reappeared since the last cadence probe would still eat a restart+IDR.
       bool finalDefault = defaultStable;
       if (finalDefault && !interactive_desktop_is_default_uncached()) {
         finalDefault = false;
-        backend.defaultStableSinceUs = 0;  // secure again: restart the settle clock
-        backend.secureProbeFalseTotal.fetch_add(1, std::memory_order_relaxed);
+        backend.NoteSecureAtDeadline();
       }
       if (!finalDefault) {
         // Deferred by the secure gate. Latch so this counts once per deadline episode, not once
         // per main-loop iteration -- the deadline stays due until we actually attempt.
-        if (!backend.promotionDeferredForCurrentDeadline) {
-          backend.promotionDeferredForCurrentDeadline = true;
-          backend.promotionDeferredSecureTotal.fetch_add(1, std::memory_order_relaxed);
+        if (backend.NoteDeferredForSecure()) {
           std::cout << "[native-video-host] desktop-promotion-deferred reason=secure-desktop\n";
         }
       } else {
-        backend.promotionDeferredForCurrentDeadline = false;
-        backend.promotionAttempts.fetch_add(1, std::memory_order_relaxed);
+        backend.NotePromotionAttempt();
         const DesktopCaptureBackend demoted = backend.active;
         backend.active = backend.requested;
         const bool restarted = restart_capture_session(hx);
@@ -274,39 +260,24 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
                                                 : "desktop-backend-retry-failed");
         }
         if (promoted) {
-          backend.promotionSuccess.fetch_add(1, std::memory_order_relaxed);
-          if (backend.demotionSinceUs != 0 && nowUs >= backend.demotionSinceUs) {
-            backend.lastPromotionWaitUs.store(nowUs - backend.demotionSinceUs, std::memory_order_relaxed);
-          }
+          backend.NotePromotionSuccess(nowUs);
           std::cout << "[native-video-host] desktop-backend-restored from="
                     << desktop_capture_backend_name(demoted)
                     << " to=" << desktop_capture_backend_name(backend.active) << "\n";
-          backend.retryAtUs = 0;
-          backend.retryDelayUs = kDesktopBackendRetryMinUs;
-          backend.demotionSinceUs = 0;
         } else {
           // A real promotion failure with the default desktop up (e.g. RDP: primary duplication
           // still unavailable). This is not the secure-desktop case, so back off -- a machine
           // that genuinely cannot use the requested backend must not restart every few seconds.
-          backend.promotionFail.fetch_add(1, std::memory_order_relaxed);
           backend.active = demoted;
-          backend.retryDelayUs =
-              std::min<uint64_t>(backend.retryDelayUs * 2, kDesktopBackendRetryMaxUs);
-          backend.retryAtUs = nowUs + backend.retryDelayUs;
+          backend.NotePromotionFailure(nowUs);
         }
         // Any attempt consumes the current stability evidence; the next one must gather fresh
         // proof that the default desktop is up before it may fire.
-        backend.defaultStableSinceUs = 0;
-        backend.defaultProbeAtUs = 0;
+        backend.ConsumeStabilityEvidence();
       }
     }
   } else {
-    backend.retryAtUs = 0;
-    backend.retryDelayUs = kDesktopBackendRetryMinUs;
-    backend.defaultStableSinceUs = 0;
-    backend.defaultProbeAtUs = 0;
-    backend.demotionSinceUs = 0;
-    backend.promotionDeferredForCurrentDeadline = false;
+    backend.ResetPromotionGate();
   }
 
   return Flow::Next;

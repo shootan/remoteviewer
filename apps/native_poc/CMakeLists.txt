@@ -431,6 +431,12 @@ add_executable(remote60_host_kick_test
 )
 target_include_directories(remote60_host_kick_test PRIVATE src)
 
+add_executable(remote60_host_backend_policy_test
+  src/host_backend_policy_test.cpp
+)
+target_include_directories(remote60_host_backend_policy_test PRIVATE src)
+target_link_libraries(remote60_host_backend_policy_test PRIVATE capture)
+
 add_executable(remote60_bind_port_candidates_test
   src/bind_port_candidates_test.cpp
 )
