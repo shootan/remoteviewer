@@ -7186,3 +7186,9 @@ Next action
 - 남은 main 람다: restart_capture_session(16), apply_selected_window_capture(169), reconnect_tcp_data_session(66),
   pump_cursor_forward(39), capturePublishFn(~105), arg_or_env, classify/authorize_directory_hello, update_u64_max, emit —
   Phase 3에서 Tick 단계 함수와 함께 정리. 다음 액션: 리네이머가 주석 프로즈에 남긴 `res.frame` 등 정리 → Phase 3.
+
+### 291) 2026-08-26 리팩터 — 리네이머가 바꾼 주석 프로즈 복원 (브랜치 c3caf48)
+
+- 주석 안의 일반 단어(frame/session/pool/encoder)가 res.frame/res.session/res.pool/encoder.codec으로 바뀌어 있던 것을 주석
+  텍스트에서만 되돌림(162줄, host_main·host_capture_session.cpp·host_encoder_manager.cpp). 코드·문자열 리터럴 불변(파일별
+  리터럴 집합 동일 확인). 주석만이라 e2e 생략, host 빌드 exit 0.
