@@ -6898,3 +6898,13 @@ Next action
 - 순수 이동 검증: git diff의 제거 98줄 vs 헤더 본문 98줄 diff → 차이는 free 함수의 `inline` 1단어뿐.
 - 검증: 브랜치에서 `remote60_native_video_host_poc` Release 빌드 exit 0, warning/error 0 (GNLinkStream.exe 14:54).
 - 다음 액션: 0-7a `host_args.hpp`(struct Args + parse_u32/env_string_or_empty/env_truthy/env_u32_clamped).
+
+### 264) 2026-08-26 리팩터 Phase 0-7a — host_args.hpp 추출 (브랜치 refactor/host-split e1b1b9e)
+
+- 이동: struct Args, parse_u32, env_string_or_empty, env_truthy, env_u32_clamped →
+  `apps/native_poc/src/host_args.hpp`(header-only). parse_args와 main의 env 프리루드는 0-7b까지 host_main 잔류.
+  0-2 host_bgra_scale의 `choose_h264_encode_size(const Args&)` 의존 때문에 순서를 앞당김(262 의존성 정정).
+  host_main 9,832→9,764줄.
+- 순수 이동 검증: 제거 74줄 vs 헤더 본문 74줄 diff → `inline` 4곳만 차이.
+- 검증: 브랜치 host 타깃 Release 빌드 exit 0, warning/error 0.
+- 다음 액션: 0-2 `host_bgra_scale.hpp/.cpp`(.cpp 신규 TU, CMake 소스 추가).
