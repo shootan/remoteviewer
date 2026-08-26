@@ -938,6 +938,138 @@ struct HostStats {
   std::atomic<uint64_t> queueDepthMax{0};
 };
 
+// Static-screen bootstrap cache: a memory-only copy of the last raw frame actually published,
+// plus the identity of the capture that produced it. On a static desktop DXGI AcquireNextFrame
+// just times out after a (re)start, so the forced keyframe has nothing to encode and a fresh
+// viewer sits black for seconds. Keeping the last-good frame lets the main loop re-encode it once
+// as an IDR so the picture paints immediately. Written ONLY from a real capture publish
+// (capturePublishFn) and deliberately NOT touched by flush_capture_pipeline_state, so it survives
+// a flush and a reattach can still use it.
+struct BootstrapFrameCache {
+  std::shared_ptr<std::vector<uint8_t>> payload;  // BGRA pixels, post-crop
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint32_t stride = 0;
+  uint64_t captureQpcUs = 0;      // real capture time, for replay-age telemetry only
+  uint64_t streamGeneration = 0;  // capture generation that produced these pixels
+  bool windowMode = false;
+  uint64_t selectedWindowId = 0;
+  uint64_t targetHwnd = 0;
+  uint32_t targetPid = 0;
+  uint32_t srcCaptureWidth = 0;   // pre-crop capture source dims (meta.width/height)
+  uint32_t srcCaptureHeight = 0;
+  uint32_t consoleSessionId = 0;  // WTS active console session at capture time
+};
+
+// Capture session state (Phase 1-3a state struct): everything the capture path shares that is
+// plain data or an atomic/mutex -- the current target (window/monitor/desktop) as the control
+// thread reports it, the client's selection/mode requests, capture geometry and cadence gate,
+// backend start/fallback flags with their reasons, the WGC ContentSize settle gate, the DXGI
+// hardware-cursor side channel, publish/pop timestamps, the static-screen bootstrap cache and
+// the idle-detach / reattach backoff. The RAII/WinRT/D3D objects (device, frame pool, item,
+// DXGI/GDI sessions, readback pipeline, FrameState) deliberately stay locals of main() until
+// Phase 2's CaptureSession class gives them an explicit lifetime. See the comment blocks in
+// main() for the rationale behind each group.
+// thread: main loop owns the plain fields; atomics are the callback/control <-> main signals;
+// metaMu guards target*/selected* for the control thread's list/status replies; cadenceMu guards
+// the cadence gate (callbacks arrive on more than one thread); fallbackReasonMu guards the two
+// reason strings; resourceMu serialises pool/readback recreation; bootstrapCacheMu guards the
+// bootstrap frame.
+struct CaptureState {
+  // Env config (REMOTE60_NATIVE_CAPTURE_*/QUEUE_WAIT_*/DISABLE_GPU_SCALER), fixed after startup.
+  bool submitLimitEnabled = true;
+  uint32_t submitEarlyTolerancePercent = 0;
+  uint32_t stallKeepaliveIntervalUsOverride = 0;
+  uint32_t queueWaitTimeoutUsOverride = 0;
+  bool gpuScalerRequested = false;
+  bool gpuScalerHealthy = false;
+  int framePoolBuffers = 0;
+  // Current capture target as published to the control thread (window list / status replies).
+  std::atomic<uint32_t> targetPid{0};
+  std::atomic<uint32_t> targetFlags{0};
+  std::atomic<uint32_t> rebindCount{0};
+  std::atomic<uint64_t> targetHwnd{0};
+  std::mutex metaMu;
+  std::string targetProcess = "monitor";
+  std::string targetTitle;
+  std::atomic<uint64_t> selectedWindowId{0};
+  std::atomic<uint32_t> selectedMonitorId{0};
+  // cross-thread: selection / capture-mode requests from the control thread, consumed by main.
+  std::atomic<uint32_t> monitorSelectRequested{0};
+  std::atomic<bool> monitorSelectPending{false};
+  std::atomic<uint64_t> streamGenerationState{1};
+  std::atomic<bool> windowSelectionLocked{false};
+  std::atomic<bool> modeReqPending{false};
+  std::atomic<uint32_t> modeReqSeq{0};
+  std::atomic<uint16_t> modeReqMode{0};
+  std::atomic<uint32_t> modeReqXPermille{5000};
+  std::atomic<uint32_t> modeReqYPermille{5000};
+  // Window target (from --capture-window-* / the picker).
+  CaptureWindowCriteria windowCriteria{};
+  bool selectionLockedByConfig = false;
+  bool windowTargetConfigured = false;
+  std::atomic<bool> windowModeActive{false};
+  std::atomic<bool> windowClientOnlyActive{false};
+  CaptureWindowInfo windowInfo{};
+  // Geometry and submit cadence.
+  std::optional<PrimaryMonitorInfo> monitorInfo;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  winrt::Windows::Graphics::SizeInt32 size{};
+  std::atomic<uint64_t> submitMinIntervalUs{0};
+  std::atomic<uint64_t> nextSubmitUs{0};
+  remote60::native_poc::CaptureCadenceGate cadenceGate;
+  std::mutex cadenceMu;
+  int64_t timelineOriginUs = -1;
+  // Backend session flags, restart accounting and fallback reasons.
+  std::atomic<bool> sessionReady{false};
+  std::atomic<bool> dxgiFallbackRequested{false};
+  std::atomic<bool> gdiFallbackRequested{false};
+  uint64_t sessionStartedUs = 0;
+  uint64_t restartCount = 0;
+  bool dxgiStarted = false;
+  bool gdiStarted = false;
+  std::mutex fallbackReasonMu;
+  std::string dxgiFallbackReason;
+  std::string gdiFallbackReason;
+  std::mutex resourceMu;
+  std::atomic<uint32_t> sizeChangePending{0};
+  // Attachment cookie: bumped by detach_capture_session() before any pool recreate so a callback or
+  // readback that began under the previous attachment drops its frame.
+  std::atomic<uint64_t> attachmentCookie{1};
+  // WGC ContentSize gate (callback records the mismatch; main settles then recreates the pool).
+  std::atomic<uint32_t> wgcContentSizeMismatchPending{0};
+  std::atomic<uint32_t> wgcPendingContentW{0};
+  std::atomic<uint32_t> wgcPendingContentH{0};
+  std::atomic<uint64_t> wgcContentSizeMismatchDrops{0};
+  uint32_t wgcSettleTrackW = 0;
+  uint32_t wgcSettleTrackH = 0;
+  uint64_t wgcSettleSinceUs = 0;
+  uint64_t wgcPoolRecreates = 0;
+  uint32_t stagingSlotCount = 0;
+  // Hardware-cursor side channel from the DXGI backend (capture thread writes, main drains).
+  std::atomic<int32_t> dxgiPointerX{0};
+  std::atomic<int32_t> dxgiPointerY{0};
+  std::atomic<bool> dxgiPointerVisible{false};
+  std::atomic<uint64_t> dxgiPointerGeneration{0};  // stream generation the sample belongs to
+  std::atomic<uint64_t> dxgiPointerUpdateUs{0};
+  std::atomic<int64_t> clockOffsetUs{std::numeric_limits<int64_t>::max()};
+  // Publish / pop timestamps.
+  std::atomic<uint64_t> lastPopFrameVersion{0};
+  std::atomic<uint64_t> lastCallbackUs{0};
+  std::atomic<uint64_t> lastPublishUs{0};   // last frame actually published to the encoder ring
+  std::atomic<uint64_t> lastCaptureUsForInterval{0};
+  std::atomic<uint64_t> firstCallbackLoggedGeneration{0};
+  // Static-screen bootstrap cache (last raw frame actually published; survives a flush).
+  std::mutex bootstrapCacheMu;
+  BootstrapFrameCache bootstrapCache;
+  // Idle detach (no client) and reattach backoff.
+  bool idleDetached = false;
+  uint64_t idleDetachAtUs = 0;
+  uint64_t reattachRetryAtUs = 0;
+  uint64_t reattachRetryDelayUs = 0;
+};
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1005,9 +1137,12 @@ int main(int argc, char** argv) {
   // rejects rather than defers, and a rejected desktop-duplication frame is lost for good.
   // Widening the early tolerance lets a slightly-early callback through instead of leaving a
   // double-length gap on screen; the disable switch exists to measure the limiter's cost.
-  const bool captureSubmitLimitEnabled =
+  // Capture target/selection requests, geometry, backend flags, WGC settle gate, DXGI cursor,
+  // publish timestamps, bootstrap cache, idle/reattach backoff (CaptureState, Phase 1-3a).
+  CaptureState capture;
+  capture.submitLimitEnabled =
       !env_truthy("REMOTE60_NATIVE_CAPTURE_SUBMIT_LIMIT_DISABLE");
-  const uint32_t captureSubmitEarlyTolerancePercent = env_u32_clamped(
+  capture.submitEarlyTolerancePercent = env_u32_clamped(
       "REMOTE60_NATIVE_CAPTURE_SUBMIT_EARLY_TOLERANCE_PCT", 25, 0, 90);
   const bool guardStalePreEncode = env_truthy("REMOTE60_NATIVE_GUARD_STALE_PREENCODE");
   // ABR profile ladder + M9 level ladder config and runtime state (RateControlState, Phase 1-6).
@@ -1061,18 +1196,18 @@ int main(int argc, char** argv) {
       "REMOTE60_NATIVE_CAPTURE_INPUT_STALL_SEC", kCaptureInputStallConsecutiveSecDefault, 1, 30);
   watchdog.inputStallWarmupSec = env_u32_clamped(
       "REMOTE60_NATIVE_CAPTURE_INPUT_STALL_WARMUP_SEC", kCaptureInputStallWarmupSecDefault, 0, 60);
-  const uint32_t captureStallKeepaliveIntervalUsOverride = env_u32_clamped(
+  capture.stallKeepaliveIntervalUsOverride = env_u32_clamped(
       "REMOTE60_NATIVE_CAPTURE_STALL_KEEPALIVE_INTERVAL_US", 0, 0,
       static_cast<uint32_t>(kCaptureStallKeepaliveIntervalUs));
-  const uint32_t queueWaitTimeoutUsOverride = env_u32_clamped(
+  capture.queueWaitTimeoutUsOverride = env_u32_clamped(
       "REMOTE60_NATIVE_QUEUE_WAIT_TIMEOUT_US", 0, 0,
       static_cast<uint32_t>(kQueueWaitTimeoutUsDefault));
-  const bool gpuScalerRequested = useH264 && !env_truthy("REMOTE60_NATIVE_DISABLE_GPU_SCALER");
-  int captureFramePoolBuffers = kCaptureFramePoolBuffersDefault;
+  capture.gpuScalerRequested = useH264 && !env_truthy("REMOTE60_NATIVE_DISABLE_GPU_SCALER");
+  capture.framePoolBuffers = kCaptureFramePoolBuffersDefault;
   if (const char* poolEnv = std::getenv("REMOTE60_NATIVE_CAPTURE_POOL_BUFFERS")) {
     const int requested = std::atoi(poolEnv);
     if (requested >= 1 && requested <= 4) {
-      captureFramePoolBuffers = requested;
+      capture.framePoolBuffers = requested;
     }
   }
   encoder.experimentEnabled =
@@ -1147,7 +1282,7 @@ int main(int argc, char** argv) {
               << " udpKeyframePacePeakBps="
               << gUdpKeyframePacePeakBitrateBps.load(std::memory_order_relaxed)
               << " stalePreEncodeGuard=" << (guardStalePreEncode ? 1 : 0)
-              << " capturePoolBuffers=" << captureFramePoolBuffers
+              << " capturePoolBuffers=" << capture.framePoolBuffers
               << " encoderTuneMode=" << encoder.tuneMode
               << " abr=" << (rate.abrEnabled ? "on" : "off")
               << " abrMode=" << (rate.abrQualityFirst ? "quality-first" : "default")
@@ -1162,11 +1297,11 @@ int main(int argc, char** argv) {
               << " captureInputStallSec=" << watchdog.inputStallConsecutiveSec
               << " captureInputWarmupSec=" << watchdog.inputStallWarmupSec
               << " captureIdlePollIntervalUs="
-              << (captureStallKeepaliveIntervalUsOverride > 0
-                      ? static_cast<uint64_t>(captureStallKeepaliveIntervalUsOverride)
+              << (capture.stallKeepaliveIntervalUsOverride > 0
+                      ? static_cast<uint64_t>(capture.stallKeepaliveIntervalUsOverride)
                       : std::max<uint64_t>(kQueueWaitTimeoutUsMin, (1000000ULL / std::max<uint64_t>(1, args.fps))))
               << " queueWaitTimeoutUs="
-              << (queueWaitTimeoutUsOverride > 0 ? static_cast<uint64_t>(queueWaitTimeoutUsOverride)
+              << (capture.queueWaitTimeoutUsOverride > 0 ? static_cast<uint64_t>(capture.queueWaitTimeoutUsOverride)
                                                 : std::max<uint64_t>(kQueueWaitTimeoutUsMin,
                                                                      (1000000ULL / std::max<uint64_t>(1, args.fps)) /
                                                                          4ULL))
@@ -1537,27 +1672,9 @@ int main(int argc, char** argv) {
   DesktopBackendState backend;
   // Viewer-reported metrics + keyframe requests, control thread -> main loop (ClientMetricsSnapshot, Phase 1-10).
   ClientMetricsSnapshot clientMetrics;
-  std::atomic<uint32_t> hostCaptureTargetPid{0};
-  std::atomic<uint32_t> hostCaptureTargetFlags{0};
-  std::atomic<uint32_t> hostCaptureRebindCount{0};
-  std::atomic<uint64_t> hostCaptureTargetHwnd{0};
-  std::mutex hostCaptureMetaMu;
-  std::string hostCaptureTargetProcess = "monitor";
-  std::string hostCaptureTargetTitle;
-  std::atomic<uint64_t> selectedWindowIdState{0};
   // Which screen desktop mode shows. Zero is the primary, which is what it always was, so a
   // client that never selects one behaves exactly as before.
-  std::atomic<uint32_t> selectedMonitorIdState{0};
-  std::atomic<uint32_t> monitorSelectRequested{0};
-  std::atomic<bool> monitorSelectPending{false};
-  std::atomic<uint64_t> captureStreamGenerationState{1};
-  std::atomic<bool> windowSelectionLocked{false};
   backend.reqValue = desktop_capture_backend_code(desktop_capture_backend_from_env());
-  std::atomic<bool> captureModeReqPending{false};
-  std::atomic<uint32_t> captureModeReqSeq{0};
-  std::atomic<uint16_t> captureModeReqMode{0};
-  std::atomic<uint32_t> captureModeReqXPermille{5000};
-  std::atomic<uint32_t> captureModeReqYPermille{5000};
   struct WindowSelectionTxn {
     std::mutex mu;
     std::condition_variable cv;
@@ -1621,7 +1738,7 @@ int main(int argc, char** argv) {
       rsp.header.type = static_cast<uint16_t>(MessageType::ControlWindowList);
       rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
       rsp.seq = seq;
-      if (windowSelectionLocked.load(std::memory_order_relaxed)) {
+      if (capture.windowSelectionLocked.load(std::memory_order_relaxed)) {
         rsp.flags |= remote60::native_poc::kControlWindowListFlagSelectionLocked;
       }
       // Tells the client it may ask for previews; older hosts leave this clear and
@@ -1630,7 +1747,7 @@ int main(int argc, char** argv) {
       // Says the monitor messages exist here. A client that asked an older host would wait for a
       // reply that never comes, since unknown opcodes are drained silently.
       rsp.flags |= remote60::native_poc::kControlWindowListFlagMonitors;
-      rsp.selectedWindowId = selectedWindowIdState.load(std::memory_order_relaxed);
+      rsp.selectedWindowId = capture.selectedWindowId.load(std::memory_order_relaxed);
       const auto windows = enumerate_shareable_windows();
       rsp.itemCount = std::min<uint32_t>(
           static_cast<uint32_t>(windows.size()), remote60::native_poc::kControlWindowListMaxEntries);
@@ -1656,7 +1773,7 @@ int main(int argc, char** argv) {
       rsp.header.type = static_cast<uint16_t>(MessageType::ControlMonitorList);
       rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
       rsp.seq = seq;
-      rsp.selectedMonitorId = selectedMonitorIdState.load(std::memory_order_acquire);
+      rsp.selectedMonitorId = capture.selectedMonitorId.load(std::memory_order_acquire);
       const auto monitors = enumerate_monitors();
       rsp.itemCount = std::min<uint32_t>(static_cast<uint32_t>(monitors.size()),
                                          remote60::native_poc::kControlMonitorListMaxEntries);
@@ -1750,23 +1867,23 @@ int main(int argc, char** argv) {
         pong.clientSendQpcUs = ping.clientSendQpcUs;
         pong.hostRecvQpcUs = qpc_now_us();
         pong.hostSendQpcUs = qpc_now_us();
-        pong.captureTargetPid = hostCaptureTargetPid.load(std::memory_order_relaxed);
-        pong.captureTargetFlags = hostCaptureTargetFlags.load(std::memory_order_relaxed);
+        pong.captureTargetPid = capture.targetPid.load(std::memory_order_relaxed);
+        pong.captureTargetFlags = capture.targetFlags.load(std::memory_order_relaxed);
         // The probe is cached for 250ms, so asking it per ping is cheap. Telling the viewer that
         // a security prompt is up is the difference between an explained pause and an apparent
         // freeze, and it costs one bit in a word that is already on the wire.
         if (!interactive_desktop_is_default()) {
           pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagSecureDesktopActive;
         }
-        pong.captureRebindCount = hostCaptureRebindCount.load(std::memory_order_relaxed);
-        pong.captureTargetHwnd = hostCaptureTargetHwnd.load(std::memory_order_relaxed);
+        pong.captureRebindCount = capture.rebindCount.load(std::memory_order_relaxed);
+        pong.captureTargetHwnd = capture.targetHwnd.load(std::memory_order_relaxed);
         {
           std::string processName;
           std::string titleText;
           {
-            std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
-            processName = hostCaptureTargetProcess;
-            titleText = hostCaptureTargetTitle;
+            std::lock_guard<std::mutex> lk(capture.metaMu);
+            processName = capture.targetProcess;
+            titleText = capture.targetTitle;
           }
           std::snprintf(pong.captureTargetProcess, sizeof(pong.captureTargetProcess), "%s",
                         processName.c_str());
@@ -1785,7 +1902,7 @@ int main(int argc, char** argv) {
         if (inputRouter.injectionEnabled) {
           const bool desktopMode =
               !inputRouter.targetCriteria.enabled() &&
-              (selectedWindowIdState.load(std::memory_order_acquire) == 0);
+              (capture.selectedWindowId.load(std::memory_order_acquire) == 0);
           const uint32_t domainW = inputRouter.domainW.load(std::memory_order_acquire);
           const uint32_t domainH = inputRouter.domainH.load(std::memory_order_acquire);
           InputInjectResult injectResult = InputInjectResult::Failed;
@@ -1833,7 +1950,7 @@ int main(int argc, char** argv) {
             InputFailStage directFailStage = InputFailStage::None;
             DWORD directFailError = 0;
             injectResult =
-                inject_background_input_event(input, inputRouter.targetCriteria, hostCaptureTargetHwnd,
+                inject_background_input_event(input, inputRouter.targetCriteria, capture.targetHwnd,
                                               desktopMode, domainW, domainH,
                                               &inputRouter.desktopState, &resolvedTarget,
                                               &directFailStage, &directFailError);
@@ -1977,7 +2094,7 @@ int main(int argc, char** argv) {
         if (inputRouter.injectionEnabled) {
           const bool desktopMode =
               !inputRouter.targetCriteria.enabled() &&
-              (selectedWindowIdState.load(std::memory_order_acquire) == 0);
+              (capture.selectedWindowId.load(std::memory_order_acquire) == 0);
           InputInjectResult injectResult = InputInjectResult::Failed;
           if (desktopMode && clientSession.directoryAuthenticated.load(std::memory_order_acquire) &&
               !interactive_desktop_is_default() &&
@@ -1987,7 +2104,7 @@ int main(int argc, char** argv) {
             injectResult = InputInjectResult::Injected;
             resolvedTarget = " secure-system-agent";
           } else {
-            injectResult = apply_input_text_message(text, hostCaptureTargetHwnd, desktopMode,
+            injectResult = apply_input_text_message(text, capture.targetHwnd, desktopMode,
                                                     &inputRouter.desktopState, &resolvedTarget);
           }
           if (injectResult == InputInjectResult::Injected) {
@@ -2053,8 +2170,8 @@ int main(int argc, char** argv) {
         if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
         // Applied by the render loop, which owns the capture item; answered with the list so the
         // client sees the selection that actually took effect rather than the one it asked for.
-        monitorSelectRequested.store(req.monitorId, std::memory_order_release);
-        monitorSelectPending.store(true, std::memory_order_release);
+        capture.monitorSelectRequested.store(req.monitorId, std::memory_order_release);
+        capture.monitorSelectPending.store(true, std::memory_order_release);
         if (!send_monitor_list(req.seq)) break;
         continue;
       }
@@ -2080,10 +2197,10 @@ int main(int argc, char** argv) {
         rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
         rsp.seq = req.seq;
         rsp.windowId = req.windowId;
-        rsp.streamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
+        rsp.streamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
         rsp.hostSendQpcUs = qpc_now_us();
 
-        if (windowSelectionLocked.load(std::memory_order_acquire)) {
+        if (capture.windowSelectionLocked.load(std::memory_order_acquire)) {
           rsp.flags |= 0x2u;
           std::snprintf(rsp.reason, sizeof(rsp.reason), "%s", "selection_locked_by_config");
           if (req.windowId == 0) {
@@ -2270,11 +2387,11 @@ int main(int argc, char** argv) {
         req.header = header;
         if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
         if (req.mode == 1 || req.mode == 2) {
-          captureModeReqSeq.store(req.seq, std::memory_order_release);
-          captureModeReqMode.store(req.mode, std::memory_order_release);
-          captureModeReqXPermille.store(std::min<uint32_t>(10000u, req.xPermille), std::memory_order_release);
-          captureModeReqYPermille.store(std::min<uint32_t>(10000u, req.yPermille), std::memory_order_release);
-          captureModeReqPending.store(true, std::memory_order_release);
+          capture.modeReqSeq.store(req.seq, std::memory_order_release);
+          capture.modeReqMode.store(req.mode, std::memory_order_release);
+          capture.modeReqXPermille.store(std::min<uint32_t>(10000u, req.xPermille), std::memory_order_release);
+          capture.modeReqYPermille.store(std::min<uint32_t>(10000u, req.yPermille), std::memory_order_release);
+          capture.modeReqPending.store(true, std::memory_order_release);
           std::cout << "[native-video-host][control] capture-mode-request seq=" << req.seq
                     << " mode=" << req.mode
                     << " xPermille=" << req.xPermille
@@ -2602,22 +2719,20 @@ int main(int argc, char** argv) {
     (void)encoder.codec.set_d3d11_device(d3d.Get());
   }
   GpuBgraScaler gpuScaler;
-  bool gpuScalerHealthy = false;
-  if (gpuScalerRequested) {
-    gpuScalerHealthy = gpuScaler.initialize(d3d.Get(), ctx.Get(), &d3dContextMu);
+  if (capture.gpuScalerRequested) {
+    capture.gpuScalerHealthy = gpuScaler.initialize(d3d.Get(), ctx.Get(), &d3dContextMu);
     std::cout << "[native-video-host] gpuScalerRequested=1 gpuScalerReady="
-              << (gpuScalerHealthy ? 1 : 0) << "\n";
+              << (capture.gpuScalerHealthy ? 1 : 0) << "\n";
   }
 
-  CaptureWindowCriteria captureWindowCriteria{};
-  captureWindowCriteria.pid = args.captureWindowPid;
+  capture.windowCriteria.pid = args.captureWindowPid;
   for (const auto& name : parse_csv_lower(args.captureWindowProcess)) {
-    captureWindowCriteria.processNamesLower.insert(name);
+    capture.windowCriteria.processNamesLower.insert(name);
   }
-  captureWindowCriteria.titleNeedleLower = wide_lower(utf8_to_wide(trim_ascii(args.captureWindowTitle)));
-  const bool selectionLockedByConfig = captureWindowCriteria.enabled() || inputRouter.targetCriteria.enabled();
-  windowSelectionLocked.store(selectionLockedByConfig, std::memory_order_release);
-  const bool windowTargetConfigured = captureWindowCriteria.enabled();
+  capture.windowCriteria.titleNeedleLower = wide_lower(utf8_to_wide(trim_ascii(args.captureWindowTitle)));
+  capture.selectionLockedByConfig = capture.windowCriteria.enabled() || inputRouter.targetCriteria.enabled();
+  capture.windowSelectionLocked.store(capture.selectionLockedByConfig, std::memory_order_release);
+  capture.windowTargetConfigured = capture.windowCriteria.enabled();
   backend.requested = desktop_capture_backend_from_env();
   backend.active = backend.requested;
   // A demotion away from the requested backend is temporary until proven otherwise; these pace
@@ -2638,69 +2753,64 @@ int main(int argc, char** argv) {
   // exponential backoff, which is the right owner for a backend that truly cannot start.
   constexpr uint64_t kDesktopDefaultStableUs = 1'000'000;       // continuous default settle before promote
   constexpr uint64_t kDesktopDefaultProbeIntervalUs = 200'000;  // OpenInputDesktop probe cadence
-  std::atomic<bool> captureWindowModeActive{false};
-  std::atomic<bool> captureWindowClientOnlyActive{args.captureWindowClientOnly};
-  CaptureWindowInfo captureWindowInfo{};
-  if (windowTargetConfigured && find_capture_window(captureWindowCriteria, &captureWindowInfo)) {
-    captureWindowModeActive = true;
+  capture.windowClientOnlyActive = args.captureWindowClientOnly;
+  if (capture.windowTargetConfigured && find_capture_window(capture.windowCriteria, &capture.windowInfo)) {
+    capture.windowModeActive = true;
     std::cout << "[native-video-host] capture-window target hwnd=0x" << std::hex
-              << reinterpret_cast<uintptr_t>(captureWindowInfo.hwnd) << std::dec
-              << " pid=" << captureWindowInfo.pid
-              << " process=" << (captureWindowInfo.processName.empty() ? "unknown" : captureWindowInfo.processName)
-              << " title=" << (captureWindowInfo.title.empty() ? "<empty>" : wide_to_utf8(captureWindowInfo.title))
+              << reinterpret_cast<uintptr_t>(capture.windowInfo.hwnd) << std::dec
+              << " pid=" << capture.windowInfo.pid
+              << " process=" << (capture.windowInfo.processName.empty() ? "unknown" : capture.windowInfo.processName)
+              << " title=" << (capture.windowInfo.title.empty() ? "<empty>" : wide_to_utf8(capture.windowInfo.title))
               << " clientOnly=" << (args.captureWindowClientOnly ? 1 : 0)
               << "\n";
-  } else if (windowTargetConfigured) {
+  } else if (capture.windowTargetConfigured) {
     std::cout << "[native-video-host] capture-window target not found; fallback=monitor"
               << " pidFilter=" << args.captureWindowPid
               << " processFilter=" << trim_ascii(args.captureWindowProcess)
               << " titleFilter=" << trim_ascii(args.captureWindowTitle)
               << "\n";
   }
-  selectedWindowIdState.store(captureWindowModeActive ? hwnd_to_id(captureWindowInfo.hwnd) : 0u,
+  capture.selectedWindowId.store(capture.windowModeActive ? hwnd_to_id(capture.windowInfo.hwnd) : 0u,
                               std::memory_order_release);
-  hostCaptureTargetFlags.store((captureWindowModeActive ? 0x1u : 0x0u) |
-                                   ((captureWindowModeActive && captureWindowClientOnlyActive) ? 0x2u : 0x0u),
+  capture.targetFlags.store((capture.windowModeActive ? 0x1u : 0x0u) |
+                                   ((capture.windowModeActive && capture.windowClientOnlyActive) ? 0x2u : 0x0u),
                                std::memory_order_relaxed);
-  hostCaptureTargetPid.store(captureWindowModeActive ? captureWindowInfo.pid : 0u, std::memory_order_relaxed);
-  hostCaptureTargetHwnd.store(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(
-                                  captureWindowModeActive ? captureWindowInfo.hwnd : nullptr)),
+  capture.targetPid.store(capture.windowModeActive ? capture.windowInfo.pid : 0u, std::memory_order_relaxed);
+  capture.targetHwnd.store(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(
+                                  capture.windowModeActive ? capture.windowInfo.hwnd : nullptr)),
                               std::memory_order_relaxed);
   {
-    std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
-    hostCaptureTargetProcess =
-        (captureWindowModeActive && !captureWindowInfo.processName.empty()) ? captureWindowInfo.processName : "monitor";
-    hostCaptureTargetTitle =
-        (captureWindowModeActive && !captureWindowInfo.title.empty()) ? wide_to_utf8(captureWindowInfo.title)
+    std::lock_guard<std::mutex> lk(capture.metaMu);
+    capture.targetProcess =
+        (capture.windowModeActive && !capture.windowInfo.processName.empty()) ? capture.windowInfo.processName : "monitor";
+    capture.targetTitle =
+        (capture.windowModeActive && !capture.windowInfo.title.empty()) ? wide_to_utf8(capture.windowInfo.title)
                                                                        : std::string{};
   }
 
-  auto monitorInfo = primary_monitor_info();
-  if (!monitorInfo.has_value()) {
+  capture.monitorInfo = primary_monitor_info();
+  if (!capture.monitorInfo.has_value()) {
     std::cerr << "[native-video-host] primary monitor query failed\n";
     closesocket(clientSession.clientSock);
     if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
     if (encoder.mfStarted) MFShutdown();
     return 8;
   }
-  if (!captureWindowModeActive && backend.requested == DesktopCaptureBackend::Dxgi &&
-      monitorInfo->width < monitorInfo->height) {
+  if (!capture.windowModeActive && backend.requested == DesktopCaptureBackend::Dxgi &&
+      capture.monitorInfo->width < capture.monitorInfo->height) {
     backend.active = DesktopCaptureBackend::Wgc;
     std::cout << "[native-video-host] rotation_unsupported fallback_reason=rotation_unsupported\n";
   }
   // Tell the SYSTEM agent where the captured pixels live. Without it the agent can only assume,
   // and its old assumption -- the primary monitor -- put every click on the wrong screen when the
   // prompt opened somewhere else.
-  inputRouter.broker.SetTargetRect(monitorInfo->originX, monitorInfo->originY, monitorInfo->width,
-                                  monitorInfo->height);
+  inputRouter.broker.SetTargetRect(capture.monitorInfo->originX, capture.monitorInfo->originY, capture.monitorInfo->width,
+                                  capture.monitorInfo->height);
 
   winrt::Windows::Graphics::Capture::GraphicsCaptureItem item{nullptr};
-  uint32_t captureWidth = 0;
-  uint32_t captureHeight = 0;
-  winrt::Windows::Graphics::SizeInt32 captureSize{};
-  if (captureWindowModeActive || backend.active == DesktopCaptureBackend::Wgc) {
-    item = captureWindowModeActive
-               ? CreateItemForPrimaryMonitor(captureWindowInfo.hwnd, "CreateForWindow(target-window)")
+  if (capture.windowModeActive || backend.active == DesktopCaptureBackend::Wgc) {
+    item = capture.windowModeActive
+               ? CreateItemForPrimaryMonitor(capture.windowInfo.hwnd, "CreateForWindow(target-window)")
                : CreateItemForPrimaryMonitor();
     if (!item) {
       std::cerr << "[native-video-host] capture item create failed\n";
@@ -2709,16 +2819,16 @@ int main(int argc, char** argv) {
       if (encoder.mfStarted) MFShutdown();
       return 8;
     }
-    captureSize = item.Size();
-    captureWidth = static_cast<uint32_t>(captureSize.Width);
-    captureHeight = static_cast<uint32_t>(captureSize.Height);
+    capture.size = item.Size();
+    capture.width = static_cast<uint32_t>(capture.size.Width);
+    capture.height = static_cast<uint32_t>(capture.size.Height);
   } else {
-    captureWidth = monitorInfo->width;
-    captureHeight = monitorInfo->height;
-    captureSize.Width = static_cast<int32_t>(captureWidth);
-    captureSize.Height = static_cast<int32_t>(captureHeight);
+    capture.width = capture.monitorInfo->width;
+    capture.height = capture.monitorInfo->height;
+    capture.size.Width = static_cast<int32_t>(capture.width);
+    capture.size.Height = static_cast<int32_t>(capture.height);
   }
-  if (captureWidth < 2 || captureHeight < 2) {
+  if (capture.width < 2 || capture.height < 2) {
     std::cerr << "[native-video-host] invalid capture size\n";
     closesocket(clientSession.clientSock);
     if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
@@ -2726,13 +2836,13 @@ int main(int argc, char** argv) {
     return 9;
   }
   std::cout << "[native-video-host] desktop_backend="
-            << (captureWindowModeActive ? "wgc_window" : desktop_capture_backend_name(backend.active))
-            << " capture=" << captureWidth << "x" << captureHeight << "\n";
+            << (capture.windowModeActive ? "wgc_window" : desktop_capture_backend_name(backend.active))
+            << " capture=" << capture.width << "x" << capture.height << "\n";
 
-  encoder.encodeW = captureWidth;
-  encoder.encodeH = captureHeight;
+  encoder.encodeW = capture.width;
+  encoder.encodeH = capture.height;
   if (useH264) {
-    choose_h264_encode_size(args, captureWidth, captureHeight, &encoder.encodeW, &encoder.encodeH, &rate.autoFallback720);
+    choose_h264_encode_size(args, capture.width, capture.height, &encoder.encodeW, &encoder.encodeH, &rate.autoFallback720);
   }
 
   // Whether the ladder, rather than the source size, is currently deciding the resolution. Held
@@ -2780,8 +2890,8 @@ int main(int argc, char** argv) {
   // the active encode dimensions were fitted against.
   encoder.nominalEncodeW = rate.abrHighW;
   encoder.nominalEncodeH = rate.abrHighH;
-  encoder.encodeSourceW = captureWidth;
-  encoder.encodeSourceH = captureHeight;
+  encoder.encodeSourceW = capture.width;
+  encoder.encodeSourceH = capture.height;
   // Refit debounce: candidate geometry and how long it has been stable.
   constexpr uint64_t kEncodeRefitSettleUs = 400000;  // 0.4 s of stable size before re-init
   encoder.activeFps = args.fps;
@@ -2802,12 +2912,9 @@ int main(int argc, char** argv) {
   encoder.activeFrameIntervalUs =
       std::max<uint64_t>(1, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, encoder.activeFps)));
   encoder.activePacingFrameIntervalUs = encoder.activeFrameIntervalUs;
-  std::atomic<uint64_t> captureSubmitMinIntervalUs{encoder.activeFrameIntervalUs};
-  std::atomic<uint64_t> nextCaptureSubmitUs{0};
+  capture.submitMinIntervalUs = encoder.activeFrameIntervalUs;
   // Picks which offered frames reach the encoder.codec, and how evenly. Guarded by its own mutex
   // because capture callbacks can arrive on more than one thread across backends.
-  remote60::native_poc::CaptureCadenceGate captureCadenceGate;
-  std::mutex captureCadenceMu;
   frameGating.staticIntervalUs =
       std::max<uint64_t>(encoder.activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGating.staticFps));
   inputRouter.domainW.store(encoder.activeEncodeW, std::memory_order_release);
@@ -2818,10 +2925,9 @@ int main(int argc, char** argv) {
   // on submit, cleared when a key is accepted into the send path (on UDP that is the send-queue
   // enqueue, not the wire; a failed send re-forces via barrier recovery), and timing out (300ms)
   // so a lost key retries.
-  int64_t captureTimelineOriginUs = -1;
   int64_t auTimelineOriginUs = -1;
   auto resetHostTimelineAnchors = [&]() {
-    captureTimelineOriginUs = -1;
+    capture.timelineOriginUs = -1;
     auTimelineOriginUs = -1;
   };
   auto refresh_frame_intervals = [&]() {
@@ -2830,7 +2936,7 @@ int main(int argc, char** argv) {
     // Encoded capture is callback-clocked below. Raw mode uses the main tick at the exact
     // requested cadence.
     encoder.activePacingFrameIntervalUs = encoder.activeFrameIntervalUs;
-    captureSubmitMinIntervalUs.store(encoder.activeFrameIntervalUs, std::memory_order_release);
+    capture.submitMinIntervalUs.store(encoder.activeFrameIntervalUs, std::memory_order_release);
     frameGating.staticIntervalUs =
         std::max<uint64_t>(encoder.activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGating.staticFps));
   };
@@ -2949,7 +3055,7 @@ int main(int argc, char** argv) {
     // target is re-fit to the final window geometry immediately -- otherwise the first IDR goes out
     // at the pre-selection encode size and a second, new-size IDR follows a frame later, forcing the
     // client to reconfigure twice and fire a keyframe-request storm.
-    if (captureWindowModeActive && !allowWindowOverride) return;
+    if (capture.windowModeActive && !allowWindowOverride) return;
     if (newW < 2 || newH < 2) return;
     if (newW == encoder.encodeSourceW && newH == encoder.encodeSourceH) return;  // already fit to this source
     encoder.encodeSourceW = newW;
@@ -2989,7 +3095,7 @@ int main(int argc, char** argv) {
     const uint32_t targetFps =
         overviewMode ? std::max<uint32_t>(15u, (rate.userFpsCeiling * 67u) / 100u) : rate.userFpsCeiling;
     const auto sizeChoice = remote60::native_poc::choose_abr_profile_size(
-        overviewMode ? 2 : 0, targetBitrate, captureWidth, captureHeight, rate.encodeLadderReduced);
+        overviewMode ? 2 : 0, targetBitrate, capture.width, capture.height, rate.encodeLadderReduced);
     const uint32_t targetKeyint =
         overviewMode ? std::max<uint32_t>(rate.userKeyintCeiling, 60u) : rate.userKeyintCeiling;
     if (!apply_encoder_target(sizeChoice.width, sizeChoice.height, targetFps, targetBitrate,
@@ -3029,7 +3135,7 @@ int main(int argc, char** argv) {
               << " backendResolved=" << encoder.codec.backend_name()
               << " backendFallbackReason=" << backendFallbackReason
               << " hw=" << (encoder.codec.using_hardware() ? 1 : 0)
-              << " captureSize=" << captureWidth << "x" << captureHeight
+              << " captureSize=" << capture.width << "x" << capture.height
               << " encodeSize=" << encoder.activeEncodeW << "x" << encoder.activeEncodeH
               << " auto720=" << (rate.autoFallback720 ? 1 : 0)
               << " abrMidProfile=" << rate.abrMidW << "x" << rate.abrMidH
@@ -3126,11 +3232,6 @@ int main(int argc, char** argv) {
     }
   } dxgiWatchdogJoiner{&dxgiWatchdogStop, &dxgiWorkerWatchdog};
   GdiCaptureProcess gdiCaptureProcess;
-  std::atomic<bool> captureSessionReady{false};
-  std::atomic<bool> dxgiFallbackRequested{false};
-  std::atomic<bool> gdiFallbackRequested{false};
-  uint64_t captureSessionStartedUs = 0;
-  uint64_t captureRestartCount = 0;
   // Frozen-ring self-heal state (DXGI/WGC). Streak guards against a single slow poll; the last
   // restart timestamp lets a refreeze inside the window escalate to a full process restart.
   // Rate-limit the "readback slow" warn to one line/sec with the window peak. Under a GPU-heavy
@@ -3158,56 +3259,40 @@ int main(int argc, char** argv) {
   // timestamp lets a recurrence inside the frozen-ring escalation window escalate to a process
   // restart. streamActiveSinceUs anchors a warmup after a client (re)attaches.
   uint64_t streamActiveSinceUs = 0;
-  bool dxgiCaptureStarted = false;
-  bool gdiCaptureStarted = false;
-  std::mutex captureFallbackReasonMu;
-  std::string dxgiFallbackReason;
-  std::string gdiFallbackReason;
   auto set_dxgi_fallback_reason = [&](const std::string& reason) {
-    std::lock_guard<std::mutex> lock(captureFallbackReasonMu);
-    dxgiFallbackReason = reason;
+    std::lock_guard<std::mutex> lock(capture.fallbackReasonMu);
+    capture.dxgiFallbackReason = reason;
   };
   auto set_gdi_fallback_reason = [&](const std::string& reason) {
-    std::lock_guard<std::mutex> lock(captureFallbackReasonMu);
-    gdiFallbackReason = reason;
+    std::lock_guard<std::mutex> lock(capture.fallbackReasonMu);
+    capture.gdiFallbackReason = reason;
   };
   auto copy_dxgi_fallback_reason = [&]() {
-    std::lock_guard<std::mutex> lock(captureFallbackReasonMu);
-    return dxgiFallbackReason;
+    std::lock_guard<std::mutex> lock(capture.fallbackReasonMu);
+    return capture.dxgiFallbackReason;
   };
   auto copy_gdi_fallback_reason = [&]() {
-    std::lock_guard<std::mutex> lock(captureFallbackReasonMu);
-    return gdiFallbackReason;
+    std::lock_guard<std::mutex> lock(capture.fallbackReasonMu);
+    return capture.gdiFallbackReason;
   };
 
-  std::mutex captureResourceMu;
-  std::atomic<uint32_t> captureSizeChangePending{0};
   // Capture attachment (session) cookie. Bumped by detach_capture_session() on the main thread
   // before any pool recreate; a capture callback or readback completion that began under the
   // previous attachment sees the change and drops its frame instead of stamping it with the
   // post-recreate target/generation. Hardens the recreate transition race.
-  std::atomic<uint64_t> captureAttachmentCookie{1};
-  // WGC ContentSize gate. A WGC frame-pool surface is a FIXED buffer size (captureWidth x
-  // captureHeight, chosen at pool creation); frame.ContentSize() is the actual content region and
+  // WGC ContentSize gate. A WGC frame-pool surface is a FIXED buffer size (capture.width x
+  // capture.height, chosen at pool creation); frame.ContentSize() is the actual content region and
   // shrinks/grows with the window. The callback records a mismatching content size here and drops
   // the frame; the main thread settles then recreates the pool at the new size (the callback thread
   // must never recreate capture resources itself).
-  std::atomic<uint32_t> wgcContentSizeMismatchPending{0};
-  std::atomic<uint32_t> wgcPendingContentW{0};
-  std::atomic<uint32_t> wgcPendingContentH{0};
-  std::atomic<uint64_t> wgcContentSizeMismatchDrops{0};
   // Main-thread-only settle tracking + recreate telemetry for the WGC ContentSize gate.
-  uint32_t wgcSettleTrackW = 0;
-  uint32_t wgcSettleTrackH = 0;
-  uint64_t wgcSettleSinceUs = 0;
-  uint64_t wgcPoolRecreates = 0;
   constexpr uint64_t kWgcContentSettleUs = 100000;  // 0.1s of a stable content size before recreate
-  const uint32_t captureStagingSlotCount =
-      std::max<uint32_t>(3u, static_cast<uint32_t>(captureFramePoolBuffers + 1));
+  capture.stagingSlotCount =
+      std::max<uint32_t>(3u, static_cast<uint32_t>(capture.framePoolBuffers + 1));
   auto create_staging = [&](uint32_t srcW, uint32_t srcH) -> bool {
     captureReadback.Shutdown();
     if (!captureReadback.Initialize(d3d.Get(), ctx.Get(), &d3dContextMu, srcW, srcH,
-                                    captureStagingSlotCount, capturePublishFn)) {
+                                    capture.stagingSlotCount, capturePublishFn)) {
       std::cerr << "[native-video-host] recreating D3D device after readback init failure size="
                 << srcW << "x" << srcH << "\n";
       d3d.Reset();
@@ -3222,14 +3307,14 @@ int main(int argc, char** argv) {
         (void)encoder.codec.set_d3d11_device(d3d.Get());
       }
       gpuScaler = GpuBgraScaler();
-      gpuScalerHealthy = false;
-      if (gpuScalerRequested) {
-        gpuScalerHealthy = gpuScaler.initialize(d3d.Get(), ctx.Get(), &d3dContextMu);
+      capture.gpuScalerHealthy = false;
+      if (capture.gpuScalerRequested) {
+        capture.gpuScalerHealthy = gpuScaler.initialize(d3d.Get(), ctx.Get(), &d3dContextMu);
         std::cout << "[native-video-host] gpu scaler reinit after device recreate ready="
-                  << (gpuScalerHealthy ? 1 : 0) << "\n";
+                  << (capture.gpuScalerHealthy ? 1 : 0) << "\n";
       }
       if (!captureReadback.Initialize(d3d.Get(), ctx.Get(), &d3dContextMu, srcW, srcH,
-                                      captureStagingSlotCount, capturePublishFn)) {
+                                      capture.stagingSlotCount, capturePublishFn)) {
         std::cerr << "[native-video-host] readback init retry failed size="
                   << srcW << "x" << srcH << "\n";
         return false;
@@ -3256,59 +3341,24 @@ int main(int argc, char** argv) {
   // Hardware-cursor state from the DXGI backend (pointer-only frames are dropped by the content
   // pipeline, so without this side channel the remote cursor freezes on a still screen). Written
   // by the capture thread, drained by the main loop's ~30Hz latest-wins UDP cursor sender.
-  std::atomic<int32_t> dxgiPointerX{0};
-  std::atomic<int32_t> dxgiPointerY{0};
-  std::atomic<bool> dxgiPointerVisible{false};
-  std::atomic<uint64_t> dxgiPointerGeneration{0};  // stream generation the sample belongs to
-  std::atomic<uint64_t> dxgiPointerUpdateUs{0};
-  std::atomic<int64_t> captureClockOffsetUs{std::numeric_limits<int64_t>::max()};
-  std::atomic<uint64_t> lastPopFrameVersion{0};
-  std::atomic<uint64_t> lastCallbackUs{0};
   // Timestamp (qpc) of the last frame actually published to the encoder.codec ring, set in
-  // capturePublishFn on a valid payload -- distinct from lastCallbackUs, which is the capture time.
+  // capturePublishFn on a valid payload -- distinct from capture.lastCallbackUs, which is the capture time.
   // The stats line reports this as lastPublishAgeUs (diagnostic only). Deliberately not reset on a
   // restart: the age then honestly shows the publish gap and snaps back on the first new publish,
   // which is exactly the recovery signal we want to see after a frozen-ring restart.
-  std::atomic<uint64_t> lastPublishUs{0};
-  std::atomic<uint64_t> lastCaptureUsForInterval{0};
-  std::atomic<uint64_t> firstCallbackLoggedGeneration{0};
-  // Static-screen bootstrap cache: a memory-only copy of the last raw frame actually published,
-  // plus the identity of the capture that produced it. On a static desktop DXGI AcquireNextFrame
-  // just times out after a (re)start, so the forced keyframe has nothing to encode and a fresh
-  // viewer sits black for seconds. Keeping the last-good frame lets the main loop re-encode it once
-  // as an IDR so the picture paints immediately. Written ONLY from a real capture publish
-  // (capturePublishFn) and deliberately NOT touched by flush_capture_pipeline_state, so it survives
-  // a flush and a reattach can still use it.
-  struct BootstrapFrameCache {
-    std::shared_ptr<std::vector<uint8_t>> payload;  // BGRA pixels, post-crop
-    uint32_t width = 0;
-    uint32_t height = 0;
-    uint32_t stride = 0;
-    uint64_t captureQpcUs = 0;      // real capture time, for replay-age telemetry only
-    uint64_t streamGeneration = 0;  // capture generation that produced these pixels
-    bool windowMode = false;
-    uint64_t selectedWindowId = 0;
-    uint64_t targetHwnd = 0;
-    uint32_t targetPid = 0;
-    uint32_t srcCaptureWidth = 0;   // pre-crop capture source dims (meta.width/height)
-    uint32_t srcCaptureHeight = 0;
-    uint32_t consoleSessionId = 0;  // WTS active console session at capture time
-  };
-  std::mutex bootstrapCacheMu;
-  BootstrapFrameCache bootstrapCache;
   auto describe_active_capture_target = [&]() -> std::string {
-    const uint64_t targetHwnd = hostCaptureTargetHwnd.load(std::memory_order_acquire);
-    const uint32_t targetPid = hostCaptureTargetPid.load(std::memory_order_acquire);
+    const uint64_t targetHwnd = capture.targetHwnd.load(std::memory_order_acquire);
+    const uint32_t targetPid = capture.targetPid.load(std::memory_order_acquire);
     std::string targetProcess = "monitor";
     std::string targetTitle;
     {
-      std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
-      targetProcess = hostCaptureTargetProcess;
-      targetTitle = hostCaptureTargetTitle;
+      std::lock_guard<std::mutex> lk(capture.metaMu);
+      targetProcess = capture.targetProcess;
+      targetTitle = capture.targetTitle;
     }
     std::ostringstream oss;
-    oss << " streamGen=" << captureStreamGenerationState.load(std::memory_order_acquire)
-        << " selectedId=" << selectedWindowIdState.load(std::memory_order_acquire)
+    oss << " streamGen=" << capture.streamGenerationState.load(std::memory_order_acquire)
+        << " selectedId=" << capture.selectedWindowId.load(std::memory_order_acquire)
         << " targetHwnd=0x" << std::hex << targetHwnd << std::dec
         << " pid=" << targetPid
         << " process=" << targetProcess
@@ -3327,19 +3377,19 @@ int main(int argc, char** argv) {
     // Drop a readback completion whose Submit happened under a previous capture attachment: a pool
     // recreate bumped the cookie in between, so these pixels belong to the old target/geometry. The
     // stream-generation check downstream does not catch a same-generation size-change recreate (the
-    // WGC ContentSize path and captureSizeChangePending keep the generation), so the cookie is what
+    // WGC ContentSize path and capture.sizeChangePending keep the generation), so the cookie is what
     // makes that case safe. Release the NV12 slot first or the zero-copy ring leaks.
     if (meta.attachmentCookie != 0 &&
-        meta.attachmentCookie != captureAttachmentCookie.load(std::memory_order_acquire)) {
+        meta.attachmentCookie != capture.attachmentCookie.load(std::memory_order_acquire)) {
       if (meta.nv12Slot >= 0) {
         captureReadback.ReleaseNv12Slot(meta.nv12Slot, meta.nv12Generation);
       }
       return;
     }
     const uint64_t queuePushUs = qpc_now_us();
-    lastPublishUs.store(queuePushUs, std::memory_order_release);
-    const uint64_t prevCallbackUs = lastCallbackUs.load(std::memory_order_acquire);
-    const uint64_t prevCaptureUs = lastCaptureUsForInterval.load(std::memory_order_acquire);
+    capture.lastPublishUs.store(queuePushUs, std::memory_order_release);
+    const uint64_t prevCallbackUs = capture.lastCallbackUs.load(std::memory_order_acquire);
+    const uint64_t prevCaptureUs = capture.lastCaptureUsForInterval.load(std::memory_order_acquire);
     uint64_t callbackIntervalUs = 0;
     uint64_t captureIntervalUs = 0;
     if (prevCallbackUs > 0 && meta.callbackUs >= prevCallbackUs) {
@@ -3348,28 +3398,28 @@ int main(int argc, char** argv) {
     if (prevCaptureUs > 0 && meta.captureUs >= prevCaptureUs) {
       captureIntervalUs = meta.captureUs - prevCaptureUs;
     }
-    lastCallbackUs.store(meta.callbackUs, std::memory_order_release);
-    lastCaptureUsForInterval.store(meta.captureUs, std::memory_order_release);
+    capture.lastCallbackUs.store(meta.callbackUs, std::memory_order_release);
+    capture.lastCaptureUsForInterval.store(meta.captureUs, std::memory_order_release);
     // Update the static-screen bootstrap cache from this real publish -- the ONLY writer. Copy the
     // payload shared_ptr (do NOT move: `frame` still takes ownership below). The buffer pool
     // recycles a payload only once its LAST holder releases, so holding this copy keeps the pixels
     // alive and immutable until the next publish replaces it. meta.width/height are the pre-crop
     // capture source dims; frameW/frameH are the post-crop payload dims we must encode.
     {
-      std::lock_guard<std::mutex> lk(bootstrapCacheMu);
-      bootstrapCache.payload = payload;
-      bootstrapCache.width = frameW;
-      bootstrapCache.height = frameH;
-      bootstrapCache.stride = stride;
-      bootstrapCache.captureQpcUs = meta.captureUs;
-      bootstrapCache.streamGeneration = meta.streamGeneration;
-      bootstrapCache.windowMode = captureWindowModeActive.load(std::memory_order_acquire);
-      bootstrapCache.selectedWindowId = selectedWindowIdState.load(std::memory_order_acquire);
-      bootstrapCache.targetHwnd = hostCaptureTargetHwnd.load(std::memory_order_acquire);
-      bootstrapCache.targetPid = hostCaptureTargetPid.load(std::memory_order_acquire);
-      bootstrapCache.srcCaptureWidth = meta.width;
-      bootstrapCache.srcCaptureHeight = meta.height;
-      bootstrapCache.consoleSessionId = WTSGetActiveConsoleSessionId();
+      std::lock_guard<std::mutex> lk(capture.bootstrapCacheMu);
+      capture.bootstrapCache.payload = payload;
+      capture.bootstrapCache.width = frameW;
+      capture.bootstrapCache.height = frameH;
+      capture.bootstrapCache.stride = stride;
+      capture.bootstrapCache.captureQpcUs = meta.captureUs;
+      capture.bootstrapCache.streamGeneration = meta.streamGeneration;
+      capture.bootstrapCache.windowMode = capture.windowModeActive.load(std::memory_order_acquire);
+      capture.bootstrapCache.selectedWindowId = capture.selectedWindowId.load(std::memory_order_acquire);
+      capture.bootstrapCache.targetHwnd = capture.targetHwnd.load(std::memory_order_acquire);
+      capture.bootstrapCache.targetPid = capture.targetPid.load(std::memory_order_acquire);
+      capture.bootstrapCache.srcCaptureWidth = meta.width;
+      capture.bootstrapCache.srcCaptureHeight = meta.height;
+      capture.bootstrapCache.consoleSessionId = WTSGetActiveConsoleSessionId();
     }
     uint64_t currentVersion = 0;
     {
@@ -3404,14 +3454,14 @@ int main(int argc, char** argv) {
       frame.version += 1;
       currentVersion = frame.version;
     }
-    const uint64_t currentPopVersion = lastPopFrameVersion.load(std::memory_order_acquire);
+    const uint64_t currentPopVersion = capture.lastPopFrameVersion.load(std::memory_order_acquire);
     const uint64_t depthNow = (currentVersion >= currentPopVersion) ? (currentVersion - currentPopVersion) : 0;
     update_u64_max(stats.queueDepthMax, depthNow);
     ++stats.queuePushCount;
     stats.callbackFrames += 1;
-    uint64_t loggedGeneration = firstCallbackLoggedGeneration.load(std::memory_order_acquire);
+    uint64_t loggedGeneration = capture.firstCallbackLoggedGeneration.load(std::memory_order_acquire);
     if (meta.streamGeneration != 0 && loggedGeneration != meta.streamGeneration &&
-        firstCallbackLoggedGeneration.compare_exchange_strong(
+        capture.firstCallbackLoggedGeneration.compare_exchange_strong(
             loggedGeneration, meta.streamGeneration,
             std::memory_order_acq_rel, std::memory_order_acquire)) {
       std::cout << "[native-video-host] capture-switch first-callback"
@@ -3438,25 +3488,25 @@ int main(int argc, char** argv) {
     // frames; query completion then oscillated between 16 and 50ms. Limit before the copy,
     // using a phase-preserving deadline so the accepted frames stay evenly spaced.
     {
-      std::lock_guard<std::mutex> lk(captureCadenceMu);
-      captureCadenceGate.SetEnabled(captureSubmitLimitEnabled);
-      captureCadenceGate.SetEarlyTolerancePercent(captureSubmitEarlyTolerancePercent);
-      captureCadenceGate.SetRequestedIntervalUs(
-          std::max<uint64_t>(1, captureSubmitMinIntervalUs.load(std::memory_order_acquire)));
-      if (!captureCadenceGate.ShouldAccept(callbackUs, hasNewContent)) return;
+      std::lock_guard<std::mutex> lk(capture.cadenceMu);
+      capture.cadenceGate.SetEnabled(capture.submitLimitEnabled);
+      capture.cadenceGate.SetEarlyTolerancePercent(capture.submitEarlyTolerancePercent);
+      capture.cadenceGate.SetRequestedIntervalUs(
+          std::max<uint64_t>(1, capture.submitMinIntervalUs.load(std::memory_order_acquire)));
+      if (!capture.cadenceGate.ShouldAccept(callbackUs, hasNewContent)) return;
     }
     uint32_t frameW = 0;
     uint32_t frameH = 0;
     {
-      std::lock_guard<std::mutex> lk(captureResourceMu);
-      frameW = captureWidth;
-      frameH = captureHeight;
+      std::lock_guard<std::mutex> lk(capture.resourceMu);
+      frameW = capture.width;
+      frameH = capture.height;
     }
     if (frameW < 2 || frameH < 2) return;
     D3D11_TEXTURE2D_DESC srcDesc{};
     src->GetDesc(&srcDesc);
     if (srcDesc.Width != frameW || srcDesc.Height != frameH) {
-      captureSizeChangePending.store(1, std::memory_order_release);
+      capture.sizeChangePending.store(1, std::memory_order_release);
       return;
     }
     remote60::native_poc::CaptureFrameMeta meta{};
@@ -3466,11 +3516,11 @@ int main(int argc, char** argv) {
     meta.captureUs = sourceCaptureUs;
     meta.captureAgeAtCallbackUs = captureAgeAtCallbackUs;
     meta.captureClockSkewUs = captureClockSkewUs;
-    meta.streamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
-    meta.attachmentCookie = captureAttachmentCookie.load(std::memory_order_acquire);
-    if (captureWindowModeActive && captureWindowClientOnlyActive) {
+    meta.streamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
+    meta.attachmentCookie = capture.attachmentCookie.load(std::memory_order_acquire);
+    if (capture.windowModeActive && capture.windowClientOnlyActive) {
       const HWND cropHwnd = reinterpret_cast<HWND>(
-          static_cast<uintptr_t>(hostCaptureTargetHwnd.load(std::memory_order_acquire)));
+          static_cast<uintptr_t>(capture.targetHwnd.load(std::memory_order_acquire)));
       uint32_t cropX = 0;
       uint32_t cropY = 0;
       uint32_t cropW = 0;
@@ -3486,7 +3536,7 @@ int main(int argc, char** argv) {
     (void)captureReadback.Submit(src, meta);
   };
 
-  if (!create_staging(captureWidth, captureHeight)) {
+  if (!create_staging(capture.width, capture.height)) {
     std::cerr << "[native-video-host] capture readback pipeline create failed\n";
     closesocket(clientSession.clientSock);
     if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
@@ -3501,7 +3551,7 @@ int main(int argc, char** argv) {
       // Snapshot the capture attachment cookie on entry, before reading any capture geometry or
       // generation. If a main-thread recreate bumps it while this callback runs, the pre-publish
       // recheck below drops the frame instead of stamping it with the new target/generation.
-      const uint64_t myAttachmentCookie = captureAttachmentCookie.load(std::memory_order_acquire);
+      const uint64_t myAttachmentCookie = capture.attachmentCookie.load(std::memory_order_acquire);
       try {
         auto latest = framePool.TryGetNextFrame();
         if (!latest) return;
@@ -3511,7 +3561,7 @@ int main(int argc, char** argv) {
         }
         if (!clientSession.streamControlActive.load(std::memory_order_acquire)) return;
 
-        // A WGC frame-pool surface is a FIXED buffer size (captureWidth x captureHeight, chosen when
+        // A WGC frame-pool surface is a FIXED buffer size (capture.width x capture.height, chosen when
         // the pool was created); frame.ContentSize() is the actual content region and shrinks/grows
         // with the window. Copying the whole surface would fold the stale size-delta band (undefined
         // pixels beyond ContentSize) into the encoded frame -- that reads as "an old frame mixed into
@@ -3524,15 +3574,15 @@ int main(int argc, char** argv) {
         uint32_t poolW = 0;
         uint32_t poolH = 0;
         {
-          std::lock_guard<std::mutex> lk(captureResourceMu);
-          poolW = captureWidth;
-          poolH = captureHeight;
+          std::lock_guard<std::mutex> lk(capture.resourceMu);
+          poolW = capture.width;
+          poolH = capture.height;
         }
         if (contentW >= 2 && contentH >= 2 && (contentW != poolW || contentH != poolH)) {
-          wgcContentSizeMismatchDrops.fetch_add(1, std::memory_order_relaxed);
-          wgcPendingContentW.store(contentW, std::memory_order_release);
-          wgcPendingContentH.store(contentH, std::memory_order_release);
-          wgcContentSizeMismatchPending.store(1, std::memory_order_release);
+          capture.wgcContentSizeMismatchDrops.fetch_add(1, std::memory_order_relaxed);
+          capture.wgcPendingContentW.store(contentW, std::memory_order_release);
+          capture.wgcPendingContentH.store(contentH, std::memory_order_release);
+          capture.wgcContentSizeMismatchPending.store(1, std::memory_order_release);
           return;  // drop; the main thread will settle then recreate the pool at the new size
         }
 
@@ -3552,17 +3602,17 @@ int main(int argc, char** argv) {
           }
           const int64_t offsetCandidate = static_cast<int64_t>(callbackUs) - wgcUs;
           if (offsetCandidate > 0) {
-            int64_t cur = captureClockOffsetUs.load(std::memory_order_acquire);
+            int64_t cur = capture.clockOffsetUs.load(std::memory_order_acquire);
             if (cur == std::numeric_limits<int64_t>::max()) {
-              captureClockOffsetUs.store(offsetCandidate, std::memory_order_release);
+              capture.clockOffsetUs.store(offsetCandidate, std::memory_order_release);
               cur = offsetCandidate;
             } else {
               while (offsetCandidate < cur &&
-                     !captureClockOffsetUs.compare_exchange_weak(cur, offsetCandidate, std::memory_order_acq_rel,
+                     !capture.clockOffsetUs.compare_exchange_weak(cur, offsetCandidate, std::memory_order_acq_rel,
                                                                 std::memory_order_acquire)) {
               }
             }
-            const int64_t bestOffset = captureClockOffsetUs.load();
+            const int64_t bestOffset = capture.clockOffsetUs.load();
             if (bestOffset != std::numeric_limits<int64_t>::max()) {
               const int64_t aligned = wgcUs + bestOffset;
               const int64_t alignedSkewUs = aligned - static_cast<int64_t>(callbackUs);
@@ -3578,7 +3628,7 @@ int main(int argc, char** argv) {
         // A recreate may have started while this callback was running. If the attachment cookie
         // moved, this frame belongs to the previous attachment -- drop it rather than publish it
         // under the new target/generation.
-        if (captureAttachmentCookie.load(std::memory_order_acquire) != myAttachmentCookie) return;
+        if (capture.attachmentCookie.load(std::memory_order_acquire) != myAttachmentCookie) return;
         publish_captured_texture(src.Get(), callbackUs, sourceCaptureUs, captureAgeAtCallbackUs,
                                  captureClockSkewUs, true);
       } catch (...) {
@@ -3590,15 +3640,15 @@ int main(int argc, char** argv) {
     // Invalidate any capture callback or readback completion that began under the current
     // attachment before we tear the pool down: bumping the cookie makes that in-flight work drop
     // instead of being published under the post-recreate target/geometry/generation.
-    captureAttachmentCookie.fetch_add(1, std::memory_order_acq_rel);
-    captureSessionReady.store(false, std::memory_order_release);
-    if (dxgiCaptureStarted) {
+    capture.attachmentCookie.fetch_add(1, std::memory_order_acq_rel);
+    capture.sessionReady.store(false, std::memory_order_release);
+    if (capture.dxgiStarted) {
       dxgiCaptureSession.Stop();
-      dxgiCaptureStarted = false;
+      capture.dxgiStarted = false;
     }
-    if (gdiCaptureStarted) {
+    if (capture.gdiStarted) {
       gdiCaptureProcess.Stop();
-      gdiCaptureStarted = false;
+      capture.gdiStarted = false;
     }
     try {
       if (pool) {
@@ -3622,20 +3672,20 @@ int main(int argc, char** argv) {
   auto restart_capture_session_impl = [&]() -> bool {
     detach_capture_session();
     try {
-      if (!captureWindowModeActive && backend.active == DesktopCaptureBackend::Dxgi) {
-        monitorInfo = primary_monitor_info();
-        if (!monitorInfo.has_value()) {
+      if (!capture.windowModeActive && backend.active == DesktopCaptureBackend::Dxgi) {
+        capture.monitorInfo = primary_monitor_info();
+        if (!capture.monitorInfo.has_value()) {
           std::cerr << "[native-video-host] primary monitor query failed on restart\n";
           return false;
         }
-        if (monitorInfo->width < monitorInfo->height) {
+        if (capture.monitorInfo->width < capture.monitorInfo->height) {
           backend.active = DesktopCaptureBackend::Wgc;
           set_dxgi_fallback_reason("rotation_unsupported");
           std::cout << "[native-video-host] rotation_unsupported fallback_reason=rotation_unsupported\n";
         }
       }
-      if (captureWindowModeActive) {
-        const uintptr_t hwndRaw = static_cast<uintptr_t>(hostCaptureTargetHwnd.load(std::memory_order_relaxed));
+      if (capture.windowModeActive) {
+        const uintptr_t hwndRaw = static_cast<uintptr_t>(capture.targetHwnd.load(std::memory_order_relaxed));
         HWND targetHwnd = reinterpret_cast<HWND>(hwndRaw);
         if (targetHwnd && IsWindow(targetHwnd)) {
           auto refreshedItem = CreateItemForPrimaryMonitor(targetHwnd, "CreateForWindow(restart-refresh)");
@@ -3658,9 +3708,9 @@ int main(int argc, char** argv) {
         newSize = item.Size();
         newW = static_cast<uint32_t>(newSize.Width);
         newH = static_cast<uint32_t>(newSize.Height);
-      } else if (monitorInfo.has_value()) {
-        newW = monitorInfo->width;
-        newH = monitorInfo->height;
+      } else if (capture.monitorInfo.has_value()) {
+        newW = capture.monitorInfo->width;
+        newH = capture.monitorInfo->height;
         newSize.Width = static_cast<int32_t>(newW);
         newSize.Height = static_cast<int32_t>(newH);
       }
@@ -3671,9 +3721,9 @@ int main(int argc, char** argv) {
       uint32_t prevW = 0;
       uint32_t prevH = 0;
       {
-        std::lock_guard<std::mutex> lk(captureResourceMu);
-        prevW = captureWidth;
-        prevH = captureHeight;
+        std::lock_guard<std::mutex> lk(capture.resourceMu);
+        prevW = capture.width;
+        prevH = capture.height;
       }
       if (!create_staging(newW, newH)) {
         std::cerr << "[native-video-host] staging texture recreate failed size="
@@ -3681,30 +3731,30 @@ int main(int argc, char** argv) {
         return false;
       }
       {
-        std::lock_guard<std::mutex> lk(captureResourceMu);
-        captureSize = newSize;
-        captureWidth = newW;
-        captureHeight = newH;
+        std::lock_guard<std::mutex> lk(capture.resourceMu);
+        capture.size = newSize;
+        capture.width = newW;
+        capture.height = newH;
       }
       if (prevW != newW || prevH != newH) {
         std::cout << "[native-video-host] capture-size-updated old=" << prevW << "x" << prevH
                   << " new=" << newW << "x" << newH << "\n";
       }
-      if (!captureWindowModeActive && backend.active == DesktopCaptureBackend::Dxgi) {
+      if (!capture.windowModeActive && backend.active == DesktopCaptureBackend::Dxgi) {
         DxgiDesktopCaptureConfig config;
         config.d3dDevice = d3d.Get();
-        config.monitor = monitorInfo->monitor;
+        config.monitor = capture.monitorInfo->monitor;
         config.landscapeOnly = true;
         // Capture-thread side of the cursor forwarder: just stores the latest sample; the main
         // loop's pump_cursor_forward() throttles and sends. No lock, no send from this thread.
         config.onPointer = [&](int32_t px, int32_t py, bool visible) {
-          dxgiPointerX.store(px, std::memory_order_relaxed);
-          dxgiPointerY.store(py, std::memory_order_relaxed);
-          dxgiPointerVisible.store(visible, std::memory_order_relaxed);
-          dxgiPointerGeneration.store(
-              captureStreamGenerationState.load(std::memory_order_acquire),
+          capture.dxgiPointerX.store(px, std::memory_order_relaxed);
+          capture.dxgiPointerY.store(py, std::memory_order_relaxed);
+          capture.dxgiPointerVisible.store(visible, std::memory_order_relaxed);
+          capture.dxgiPointerGeneration.store(
+              capture.streamGenerationState.load(std::memory_order_acquire),
               std::memory_order_relaxed);
-          dxgiPointerUpdateUs.store(qpc_now_us(), std::memory_order_release);
+          capture.dxgiPointerUpdateUs.store(qpc_now_us(), std::memory_order_release);
         };
         std::string dxgiDetail;
         const bool started = dxgiCaptureSession.Start(
@@ -3722,7 +3772,7 @@ int main(int argc, char** argv) {
             },
             [&](const std::string& reason) {
               set_dxgi_fallback_reason(reason);
-              dxgiFallbackRequested.store(true, std::memory_order_release);
+              capture.dxgiFallbackRequested.store(true, std::memory_order_release);
             },
             &dxgiDetail);
         if (!started) {
@@ -3737,21 +3787,21 @@ int main(int argc, char** argv) {
           if (newW < 2 || newH < 2) return false;
           if (!create_staging(newW, newH)) return false;
           {
-            std::lock_guard<std::mutex> lk(captureResourceMu);
-            captureSize = newSize;
-            captureWidth = newW;
-            captureHeight = newH;
+            std::lock_guard<std::mutex> lk(capture.resourceMu);
+            capture.size = newSize;
+            capture.width = newW;
+            capture.height = newH;
           }
         } else {
-          dxgiCaptureStarted = true;
-          captureSessionStartedUs = qpc_now_us();
-          captureSessionReady.store(true, std::memory_order_release);
-          captureSizeChangePending.store(0, std::memory_order_release);
+          capture.dxgiStarted = true;
+          capture.sessionStartedUs = qpc_now_us();
+          capture.sessionReady.store(true, std::memory_order_release);
+          capture.sizeChangePending.store(0, std::memory_order_release);
           std::cout << "[native-video-host] desktop_backend=dxgi capture-started=1\n";
           return true;
         }
       }
-      if (!captureWindowModeActive && backend.active == DesktopCaptureBackend::Gdi) {
+      if (!capture.windowModeActive && backend.active == DesktopCaptureBackend::Gdi) {
         GdiCaptureProcessConfig config;
         config.width = newW;
         config.height = newH;
@@ -3777,7 +3827,7 @@ int main(int argc, char** argv) {
                   callbackUs >= captureQpcUs ? callbackUs - captureQpcUs : 0;
               meta.submitCopyUs = captureCopyUs;
               meta.streamGeneration =
-                  captureStreamGenerationState.load(std::memory_order_acquire);
+                  capture.streamGenerationState.load(std::memory_order_acquire);
               capturePublishFn(std::move(pixels), width, height, stride, meta,
                                0, 0, parentCopyUs);
             },
@@ -3786,7 +3836,7 @@ int main(int argc, char** argv) {
             },
             [&](const std::string& reason) {
               set_gdi_fallback_reason(reason);
-              gdiFallbackRequested.store(true, std::memory_order_release);
+              capture.gdiFallbackRequested.store(true, std::memory_order_release);
             },
             &gdiDetail);
         if (!started) {
@@ -3801,23 +3851,23 @@ int main(int argc, char** argv) {
           if (newW < 2 || newH < 2) return false;
           if (!create_staging(newW, newH)) return false;
           {
-            std::lock_guard<std::mutex> lk(captureResourceMu);
-            captureSize = newSize;
-            captureWidth = newW;
-            captureHeight = newH;
+            std::lock_guard<std::mutex> lk(capture.resourceMu);
+            capture.size = newSize;
+            capture.width = newW;
+            capture.height = newH;
           }
         } else {
-          gdiCaptureStarted = true;
-          captureSessionStartedUs = qpc_now_us();
-          captureSessionReady.store(true, std::memory_order_release);
-          captureSizeChangePending.store(0, std::memory_order_release);
+          capture.gdiStarted = true;
+          capture.sessionStartedUs = qpc_now_us();
+          capture.sessionReady.store(true, std::memory_order_release);
+          capture.sizeChangePending.store(0, std::memory_order_release);
           std::cout << "[native-video-host] desktop_backend=gdi capture-started=1 processIsolated=1\n";
           return true;
         }
       }
       pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
           d3dDevice, winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized,
-          captureFramePoolBuffers, captureSize);
+          capture.framePoolBuffers, capture.size);
       session = pool.CreateCaptureSession(item);
       // Windows draws a yellow "being captured" border on the session by default; it lands
       // inside the encoded frame and reads as a rendering artifact on the viewer.
@@ -3835,11 +3885,11 @@ int main(int argc, char** argv) {
       }
       attach_frame_arrived();
       session.StartCapture();
-      captureSessionStartedUs = qpc_now_us();
-      captureSessionReady.store(true, std::memory_order_release);
-      captureSizeChangePending.store(0, std::memory_order_release);
+      capture.sessionStartedUs = qpc_now_us();
+      capture.sessionReady.store(true, std::memory_order_release);
+      capture.sizeChangePending.store(0, std::memory_order_release);
       std::cout << "[native-video-host] desktop_backend="
-                << (captureWindowModeActive ? "wgc_window" : desktop_capture_backend_name(backend.active))
+                << (capture.windowModeActive ? "wgc_window" : desktop_capture_backend_name(backend.active))
                 << " capture-started=1\n";
       return true;
     } catch (...) {
@@ -3866,13 +3916,13 @@ int main(int argc, char** argv) {
     // A restarted session invalidates the held pointer sample even when the stream generation
     // survives (some size-changes keep it): a stale position against the new capture geometry
     // would misplace the remote cursor until the next real mouse update.
-    dxgiPointerUpdateUs.store(0, std::memory_order_release);
+    capture.dxgiPointerUpdateUs.store(0, std::memory_order_release);
     if (!restart_capture_session_impl()) return false;
     uint32_t finalW = 0, finalH = 0;
     {
-      std::lock_guard<std::mutex> lk(captureResourceMu);
-      finalW = captureWidth;
-      finalH = captureHeight;
+      std::lock_guard<std::mutex> lk(capture.resourceMu);
+      finalW = capture.width;
+      finalH = capture.height;
     }
     apply_confirmed_capture_geometry(finalW, finalH, "capture-restart");
     return true;
@@ -3924,20 +3974,17 @@ int main(int argc, char** argv) {
   // after the stream has been inactive for a grace period, and reattaches on the active edge.
   // The grace period exists because the picker also parks the stream: tearing down DXGI for a
   // two-second visit to the target list would make every return visibly slow.
-  bool captureIdleDetached = false;
-  uint64_t captureIdleDetachAtUs = 0;
   constexpr uint64_t kCaptureIdleDetachDelayUs = 5'000'000;
   constexpr uint64_t kCaptureReattachRetryMinUs = 250'000;
   constexpr uint64_t kCaptureReattachRetryMaxUs = 5'000'000;
-  uint64_t captureReattachRetryAtUs = 0;
-  uint64_t captureReattachRetryDelayUs = kCaptureReattachRetryMinUs;
+  capture.reattachRetryDelayUs = kCaptureReattachRetryMinUs;
   auto effective_queue_wait_timeout_us = [&]() -> uint64_t {
-    if (queueWaitTimeoutUsOverride > 0) {
-      return std::max<uint64_t>(kQueueWaitTimeoutUsMin, queueWaitTimeoutUsOverride);
+    if (capture.queueWaitTimeoutUsOverride > 0) {
+      return std::max<uint64_t>(kQueueWaitTimeoutUsMin, capture.queueWaitTimeoutUsOverride);
     }
     const uint64_t keepaliveIntervalUs =
-        (captureStallKeepaliveIntervalUsOverride > 0)
-            ? std::max<uint64_t>(kQueueWaitTimeoutUsMin, captureStallKeepaliveIntervalUsOverride)
+        (capture.stallKeepaliveIntervalUsOverride > 0)
+            ? std::max<uint64_t>(kQueueWaitTimeoutUsMin, capture.stallKeepaliveIntervalUsOverride)
             : std::max<uint64_t>(kQueueWaitTimeoutUsMin, encoder.activeFrameIntervalUs);
     const uint64_t dynamicTimeoutUs =
         std::max<uint64_t>(kQueueWaitTimeoutUsMin, keepaliveIntervalUs / 4ULL);
@@ -3957,17 +4004,17 @@ int main(int argc, char** argv) {
     if (!remoteCursorEnabled) return;
     if (transport != VideoTransport::Udp || !sender.udpPeerReady) return;
     if (!clientSession.streamControlActive.load(std::memory_order_acquire)) return;
-    if (captureWindowModeActive.load(std::memory_order_acquire)) return;
+    if (capture.windowModeActive.load(std::memory_order_acquire)) return;
     if (backend.active != DesktopCaptureBackend::Dxgi) return;
-    if (dxgiPointerUpdateUs.load(std::memory_order_acquire) == 0) return;
+    if (capture.dxgiPointerUpdateUs.load(std::memory_order_acquire) == 0) return;
     if (nowUs < inputRouter.cursorSendLastUs + 33'000) return;  // <=30Hz
     // Generation fence: a sample captured under the previous target/attachment must never be
     // sent as if it belonged to the current one (stale desktop cursor over a fresh window).
-    const uint64_t sampleGen = dxgiPointerGeneration.load(std::memory_order_relaxed);
-    if (sampleGen != captureStreamGenerationState.load(std::memory_order_acquire)) return;
-    const int32_t px = dxgiPointerX.load(std::memory_order_acquire);
-    const int32_t py = dxgiPointerY.load(std::memory_order_acquire);
-    const bool visible = dxgiPointerVisible.load(std::memory_order_acquire);
+    const uint64_t sampleGen = capture.dxgiPointerGeneration.load(std::memory_order_relaxed);
+    if (sampleGen != capture.streamGenerationState.load(std::memory_order_acquire)) return;
+    const int32_t px = capture.dxgiPointerX.load(std::memory_order_acquire);
+    const int32_t py = capture.dxgiPointerY.load(std::memory_order_acquire);
+    const bool visible = capture.dxgiPointerVisible.load(std::memory_order_acquire);
     const bool changed = px != inputRouter.cursorSentX || py != inputRouter.cursorSentY || visible != inputRouter.cursorSentVisible;
     if (!changed && (!visible || nowUs < inputRouter.cursorSendLastUs + 250'000)) return;
     remote60::native_poc::UdpCursorPosPacket pkt{};
@@ -3976,9 +4023,9 @@ int main(int argc, char** argv) {
     pkt.y = py;
     pkt.streamGeneration = sampleGen;
     {
-      std::lock_guard<std::mutex> lk(captureResourceMu);
-      pkt.captureW = captureWidth;
-      pkt.captureH = captureHeight;
+      std::lock_guard<std::mutex> lk(capture.resourceMu);
+      pkt.captureW = capture.width;
+      pkt.captureH = capture.height;
     }
     pkt.hostQpcUs = nowUs;
     (void)sendto(clientSession.clientSock, reinterpret_cast<const char*>(&pkt), sizeof(pkt), 0,
@@ -4280,13 +4327,13 @@ int main(int argc, char** argv) {
     frameGating.staticMode = false;
     frameGating.lastSentUs = 0;
     stats.firstSentLoggedGeneration = 0;
-    firstCallbackLoggedGeneration.store(0, std::memory_order_release);
-    nextCaptureSubmitUs.store(0, std::memory_order_release);
+    capture.firstCallbackLoggedGeneration.store(0, std::memory_order_release);
+    capture.nextSubmitUs.store(0, std::memory_order_release);
     {
       // The measured offer rate describes the old target and the old content; carrying it
       // into a restart would pace the first second against something no longer true.
-      std::lock_guard<std::mutex> lk(captureCadenceMu);
-      captureCadenceGate.Reset();
+      std::lock_guard<std::mutex> lk(capture.cadenceMu);
+      capture.cadenceGate.Reset();
     }
 
     uint64_t flushedVersion = 0;
@@ -4296,7 +4343,7 @@ int main(int argc, char** argv) {
       frame.width = 0;
       frame.height = 0;
       frame.stride = 0;
-      frame.streamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
+      frame.streamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
       frame.captureUs = 0;
       frame.callbackUs = 0;
       frame.callbackIntervalUs = 0;
@@ -4314,7 +4361,7 @@ int main(int argc, char** argv) {
       flushedVersion = frame.version;
       stats.lastVersionSent = flushedVersion;
     }
-    lastPopFrameVersion.store(flushedVersion, std::memory_order_release);
+    capture.lastPopFrameVersion.store(flushedVersion, std::memory_order_release);
     frame.cv.notify_all();
     std::cout << "[native-video-host] capture-pipeline-flushed reason="
               << (reason ? reason : "unknown")
@@ -4342,11 +4389,11 @@ int main(int argc, char** argv) {
     if (outFlags) *outFlags = 0;
     if (outWindowId) *outWindowId = requestedWindowId;
     if (outStreamGeneration) {
-      *outStreamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
+      *outStreamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
     }
     if (outReason) outReason->clear();
     if (outTitle) outTitle->clear();
-    if (windowSelectionLocked.load(std::memory_order_acquire)) {
+    if (capture.windowSelectionLocked.load(std::memory_order_acquire)) {
       if (outFlags) *outFlags |= 0x2u;
       if (outReason) *outReason = "selection_locked_by_config";
       if (requestedWindowId == 0 && outTitle) *outTitle = "desktop";
@@ -4354,41 +4401,41 @@ int main(int argc, char** argv) {
     }
 
     const auto prevItem = item;
-    const bool prevCaptureWindowModeActive = captureWindowModeActive.load(std::memory_order_acquire);
+    const bool prevCaptureWindowModeActive = capture.windowModeActive.load(std::memory_order_acquire);
     const bool prevCaptureWindowClientOnlyActive =
-        captureWindowClientOnlyActive.load(std::memory_order_acquire);
-    const auto prevCaptureWindowCriteria = captureWindowCriteria;
-    const auto prevCaptureWindowInfo = captureWindowInfo;
-    const uint64_t prevSelectedWindowId = selectedWindowIdState.load(std::memory_order_acquire);
-    const uint64_t prevCaptureStreamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
-    const uint32_t prevHostCaptureFlags = hostCaptureTargetFlags.load(std::memory_order_acquire);
-    const uint32_t prevHostCapturePid = hostCaptureTargetPid.load(std::memory_order_acquire);
-    const uint64_t prevHostCaptureHwnd = hostCaptureTargetHwnd.load(std::memory_order_acquire);
-    const uint32_t prevHostCaptureRebindCount = hostCaptureRebindCount.load(std::memory_order_acquire);
+        capture.windowClientOnlyActive.load(std::memory_order_acquire);
+    const auto prevCaptureWindowCriteria = capture.windowCriteria;
+    const auto prevCaptureWindowInfo = capture.windowInfo;
+    const uint64_t prevSelectedWindowId = capture.selectedWindowId.load(std::memory_order_acquire);
+    const uint64_t prevCaptureStreamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
+    const uint32_t prevHostCaptureFlags = capture.targetFlags.load(std::memory_order_acquire);
+    const uint32_t prevHostCapturePid = capture.targetPid.load(std::memory_order_acquire);
+    const uint64_t prevHostCaptureHwnd = capture.targetHwnd.load(std::memory_order_acquire);
+    const uint32_t prevHostCaptureRebindCount = capture.rebindCount.load(std::memory_order_acquire);
     std::string prevHostCaptureProcess;
     std::string prevHostCaptureTitle;
     {
-      std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
-      prevHostCaptureProcess = hostCaptureTargetProcess;
-      prevHostCaptureTitle = hostCaptureTargetTitle;
+      std::lock_guard<std::mutex> lk(capture.metaMu);
+      prevHostCaptureProcess = capture.targetProcess;
+      prevHostCaptureTitle = capture.targetTitle;
     }
 
     auto restore_previous_target = [&]() {
       item = prevItem;
-      captureWindowModeActive.store(prevCaptureWindowModeActive, std::memory_order_release);
-      captureWindowClientOnlyActive.store(prevCaptureWindowClientOnlyActive, std::memory_order_release);
-      captureWindowCriteria = prevCaptureWindowCriteria;
-      captureWindowInfo = prevCaptureWindowInfo;
-      selectedWindowIdState.store(prevSelectedWindowId, std::memory_order_release);
-      captureStreamGenerationState.store(prevCaptureStreamGeneration, std::memory_order_release);
-      hostCaptureTargetFlags.store(prevHostCaptureFlags, std::memory_order_release);
-      hostCaptureTargetPid.store(prevHostCapturePid, std::memory_order_release);
-      hostCaptureTargetHwnd.store(prevHostCaptureHwnd, std::memory_order_release);
-      hostCaptureRebindCount.store(prevHostCaptureRebindCount, std::memory_order_release);
+      capture.windowModeActive.store(prevCaptureWindowModeActive, std::memory_order_release);
+      capture.windowClientOnlyActive.store(prevCaptureWindowClientOnlyActive, std::memory_order_release);
+      capture.windowCriteria = prevCaptureWindowCriteria;
+      capture.windowInfo = prevCaptureWindowInfo;
+      capture.selectedWindowId.store(prevSelectedWindowId, std::memory_order_release);
+      capture.streamGenerationState.store(prevCaptureStreamGeneration, std::memory_order_release);
+      capture.targetFlags.store(prevHostCaptureFlags, std::memory_order_release);
+      capture.targetPid.store(prevHostCapturePid, std::memory_order_release);
+      capture.targetHwnd.store(prevHostCaptureHwnd, std::memory_order_release);
+      capture.rebindCount.store(prevHostCaptureRebindCount, std::memory_order_release);
       {
-        std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
-        hostCaptureTargetProcess = prevHostCaptureProcess;
-        hostCaptureTargetTitle = prevHostCaptureTitle;
+        std::lock_guard<std::mutex> lk(capture.metaMu);
+        capture.targetProcess = prevHostCaptureProcess;
+        capture.targetTitle = prevHostCaptureTitle;
       }
     };
 
@@ -4448,19 +4495,19 @@ int main(int argc, char** argv) {
     }
 
     item = nextItem;
-    captureWindowModeActive.store(nextCaptureWindowModeActive, std::memory_order_release);
-    captureWindowClientOnlyActive.store(nextCaptureWindowClientOnlyActive, std::memory_order_release);
-    captureWindowCriteria = nextCaptureWindowCriteria;
-    captureWindowInfo = nextCaptureWindowInfo;
-    selectedWindowIdState.store(nextSelectedWindowId, std::memory_order_release);
-    captureStreamGenerationState.store(nextCaptureStreamGeneration, std::memory_order_release);
-    hostCaptureTargetFlags.store(nextFlags, std::memory_order_release);
-    hostCaptureTargetPid.store(nextPid, std::memory_order_release);
-    hostCaptureTargetHwnd.store(nextHwnd, std::memory_order_release);
+    capture.windowModeActive.store(nextCaptureWindowModeActive, std::memory_order_release);
+    capture.windowClientOnlyActive.store(nextCaptureWindowClientOnlyActive, std::memory_order_release);
+    capture.windowCriteria = nextCaptureWindowCriteria;
+    capture.windowInfo = nextCaptureWindowInfo;
+    capture.selectedWindowId.store(nextSelectedWindowId, std::memory_order_release);
+    capture.streamGenerationState.store(nextCaptureStreamGeneration, std::memory_order_release);
+    capture.targetFlags.store(nextFlags, std::memory_order_release);
+    capture.targetPid.store(nextPid, std::memory_order_release);
+    capture.targetHwnd.store(nextHwnd, std::memory_order_release);
     {
-      std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
-      hostCaptureTargetProcess = nextProcess;
-      hostCaptureTargetTitle = nextTitle == "desktop" ? std::string{} : nextTitle;
+      std::lock_guard<std::mutex> lk(capture.metaMu);
+      capture.targetProcess = nextProcess;
+      capture.targetTitle = nextTitle == "desktop" ? std::string{} : nextTitle;
     }
     nextCaptureWindowCheckUs = nowUs + captureWindowRebindIntervalUs;
     watchdog.lastCaptureRestartUs = nowUs;
@@ -4471,9 +4518,9 @@ int main(int argc, char** argv) {
       return false;
     }
 
-    captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
-    lastCaptureUsForInterval.store(0, std::memory_order_release);
-    lastCallbackUs.store(0, std::memory_order_release);
+    capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+    capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
+    capture.lastCallbackUs.store(0, std::memory_order_release);
     resetHostTimelineAnchors();
     // Confirmed window selection: re-fit the encoder.codec to the FINAL window geometry now (before the
     // selection first-frame gate opens), so the first IDR is already at the final size. Without this,
@@ -4485,16 +4532,16 @@ int main(int argc, char** argv) {
       uint32_t finalW = 0;
       uint32_t finalH = 0;
       {
-        std::lock_guard<std::mutex> lk(captureResourceMu);
-        finalW = captureWidth;
-        finalH = captureHeight;
+        std::lock_guard<std::mutex> lk(capture.resourceMu);
+        finalW = capture.width;
+        finalH = capture.height;
       }
       apply_confirmed_capture_geometry(finalW, finalH, "window-select", /*allowWindowOverride=*/true);
     }
     encoder.forceKeyNext = true;
     kick.selectionFirstKeyframePendingGeneration = nextCaptureStreamGeneration;
     kick.selectionFirstKeyframeDropCount = 0;
-    ++captureRestartCount;
+    ++capture.restartCount;
     flush_capture_pipeline_state("window-select");
 
     if (outFlags) *outFlags = 0x1u;
@@ -4539,21 +4586,21 @@ int main(int argc, char** argv) {
                            uint32_t& outH, uint32_t& outStride, uint64_t nowUs) -> bool {
     BootstrapFrameCache snap;
     {
-      std::lock_guard<std::mutex> lk(bootstrapCacheMu);
-      snap = bootstrapCache;  // copies the shared_ptr (keeps pixels alive) + identity fields
+      std::lock_guard<std::mutex> lk(capture.bootstrapCacheMu);
+      snap = capture.bootstrapCache;  // copies the shared_ptr (keeps pixels alive) + identity fields
     }
     if (!snap.payload || snap.payload->empty() || snap.width < 2 || snap.height < 2) return false;
     // Identity: the cached pixels must belong to the target the session is watching now.
-    if (snap.windowMode != captureWindowModeActive.load(std::memory_order_acquire)) return false;
-    if (snap.selectedWindowId != selectedWindowIdState.load(std::memory_order_acquire)) return false;
-    if (snap.targetHwnd != hostCaptureTargetHwnd.load(std::memory_order_acquire)) return false;
-    if (snap.targetPid != hostCaptureTargetPid.load(std::memory_order_acquire)) return false;
-    if (snap.streamGeneration != captureStreamGenerationState.load(std::memory_order_acquire))
+    if (snap.windowMode != capture.windowModeActive.load(std::memory_order_acquire)) return false;
+    if (snap.selectedWindowId != capture.selectedWindowId.load(std::memory_order_acquire)) return false;
+    if (snap.targetHwnd != capture.targetHwnd.load(std::memory_order_acquire)) return false;
+    if (snap.targetPid != capture.targetPid.load(std::memory_order_acquire)) return false;
+    if (snap.streamGeneration != capture.streamGenerationState.load(std::memory_order_acquire))
       return false;
     if (snap.consoleSessionId != WTSGetActiveConsoleSessionId()) return false;
     {
-      std::lock_guard<std::mutex> lk(captureResourceMu);
-      if (snap.srcCaptureWidth != captureWidth || snap.srcCaptureHeight != captureHeight)
+      std::lock_guard<std::mutex> lk(capture.resourceMu);
+      if (snap.srcCaptureWidth != capture.width || snap.srcCaptureHeight != capture.height)
         return false;
     }
     // Re-check secure/lock state live (the shared query caches ~250ms; do not trust it here).
@@ -4638,7 +4685,7 @@ int main(int argc, char** argv) {
         kick.lastSeenBootstrapEpoch = curEpoch;
         arm_trailing_kick(nowUs);
       }
-      const uint64_t curGen = captureStreamGenerationState.load(std::memory_order_acquire);
+      const uint64_t curGen = capture.streamGenerationState.load(std::memory_order_acquire);
       if (curGen != kick.lastSeenStreamGeneration) {
         kick.lastSeenStreamGeneration = curGen;
         arm_trailing_kick(nowUs);
@@ -4660,7 +4707,7 @@ int main(int argc, char** argv) {
       const uint16_t requestedCode = backend.reqValue.load(std::memory_order_acquire);
       if (desktop_capture_backend_from_code(requestedCode, &nextRequested)) {
         backend.requested = nextRequested;
-        const bool desktopActive = !captureWindowModeActive.load(std::memory_order_acquire);
+        const bool desktopActive = !capture.windowModeActive.load(std::memory_order_acquire);
         const bool restartNeeded = desktopActive && backend.active != backend.requested;
         if (restartNeeded) {
           const DesktopCaptureBackend prevActiveBackend = backend.active;
@@ -4672,10 +4719,10 @@ int main(int argc, char** argv) {
                       << " active=" << desktop_capture_backend_name(backend.active)
                       << "\n";
           } else {
-            ++captureRestartCount;
-            captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
-            lastCaptureUsForInterval.store(0, std::memory_order_release);
-            lastCallbackUs.store(0, std::memory_order_release);
+            ++capture.restartCount;
+            capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+            capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
+            capture.lastCallbackUs.store(0, std::memory_order_release);
             resetHostTimelineAnchors();
             encoder.forceKeyNext = true;
             flush_capture_pipeline_state("desktop-backend-switch");
@@ -4705,12 +4752,12 @@ int main(int argc, char** argv) {
     // iteration after the active edge) or is cleared by the idle detach, whose reattach
     // re-resolves the backend from scratch anyway.
     if (clientSession.streamControlActive.load(std::memory_order_acquire) &&
-        dxgiFallbackRequested.exchange(false, std::memory_order_acq_rel) &&
-        !captureWindowModeActive.load(std::memory_order_acquire)) {
+        capture.dxgiFallbackRequested.exchange(false, std::memory_order_acq_rel) &&
+        !capture.windowModeActive.load(std::memory_order_acquire)) {
       powerKeepalive.SetStreaming(true, true);
-      if (dxgiCaptureStarted) {
+      if (capture.dxgiStarted) {
         dxgiCaptureSession.Stop();
-        dxgiCaptureStarted = false;
+        capture.dxgiStarted = false;
       }
       backend.active = DesktopCaptureBackend::Wgc;
       const std::string fallbackReason = copy_dxgi_fallback_reason();
@@ -4719,25 +4766,25 @@ int main(int argc, char** argv) {
                 << "\n";
       if (!restart_capture_session()) {
         std::cerr << "[native-video-host] capture fallback restart failed; retrying\n";
-        dxgiFallbackRequested.store(true, std::memory_order_release);
+        capture.dxgiFallbackRequested.store(true, std::memory_order_release);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         continue;
       }
-      ++captureRestartCount;
-      captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
-      lastCaptureUsForInterval.store(0, std::memory_order_release);
-      lastCallbackUs.store(0, std::memory_order_release);
+      ++capture.restartCount;
+      capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+      capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
+      capture.lastCallbackUs.store(0, std::memory_order_release);
       resetHostTimelineAnchors();
       encoder.forceKeyNext = true;
       flush_capture_pipeline_state("dxgi-runtime-fallback");
     }
     if (clientSession.streamControlActive.load(std::memory_order_acquire) &&
-        gdiFallbackRequested.exchange(false, std::memory_order_acq_rel) &&
-        !captureWindowModeActive.load(std::memory_order_acquire)) {
+        capture.gdiFallbackRequested.exchange(false, std::memory_order_acq_rel) &&
+        !capture.windowModeActive.load(std::memory_order_acquire)) {
       powerKeepalive.SetStreaming(true, true);
-      if (gdiCaptureStarted) {
+      if (capture.gdiStarted) {
         gdiCaptureProcess.Stop();
-        gdiCaptureStarted = false;
+        capture.gdiStarted = false;
       }
       backend.active = DesktopCaptureBackend::Wgc;
       const std::string fallbackReason = copy_gdi_fallback_reason();
@@ -4746,14 +4793,14 @@ int main(int argc, char** argv) {
                 << "\n";
       if (!restart_capture_session()) {
         std::cerr << "[native-video-host] GDI capture fallback restart failed; retrying\n";
-        gdiFallbackRequested.store(true, std::memory_order_release);
+        capture.gdiFallbackRequested.store(true, std::memory_order_release);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         continue;
       }
-      ++captureRestartCount;
-      captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
-      lastCaptureUsForInterval.store(0, std::memory_order_release);
-      lastCallbackUs.store(0, std::memory_order_release);
+      ++capture.restartCount;
+      capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+      capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
+      capture.lastCallbackUs.store(0, std::memory_order_release);
       resetHostTimelineAnchors();
       encoder.forceKeyNext = true;
       flush_capture_pipeline_state("gdi-runtime-fallback");
@@ -4771,7 +4818,7 @@ int main(int argc, char** argv) {
     // answered, and the desktop returns to the physical adapter when RDP disconnects, so simply
     // trying again is what was missing.
     if (backend.active != backend.requested &&
-        !captureWindowModeActive.load(std::memory_order_acquire) &&
+        !capture.windowModeActive.load(std::memory_order_acquire) &&
         clientSession.streamControlActive.load(std::memory_order_acquire)) {
       const uint64_t nowUs = qpc_now_us();
       if (backend.demotionSinceUs == 0) backend.demotionSinceUs = nowUs;
@@ -4825,11 +4872,11 @@ int main(int argc, char** argv) {
           if (restarted) {
             // A restart replaces the capture session whether or not the backend moved, so the
             // timeline still has to be re-anchored and the next frame still has to be a keyframe.
-            ++captureRestartCount;
-            captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(),
+            ++capture.restartCount;
+            capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(),
                                        std::memory_order_release);
-            lastCaptureUsForInterval.store(0, std::memory_order_release);
-            lastCallbackUs.store(0, std::memory_order_release);
+            capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
+            capture.lastCallbackUs.store(0, std::memory_order_release);
             resetHostTimelineAnchors();
             encoder.forceKeyNext = true;
             flush_capture_pipeline_state(promoted ? "desktop-backend-restored"
@@ -4877,33 +4924,33 @@ int main(int argc, char** argv) {
         flush_capture_pipeline_state("stream-inactive");
         streamActiveApplied = false;
         powerKeepalive.SetStreaming(false);
-        captureIdleDetachAtUs = qpc_now_us() + kCaptureIdleDetachDelayUs;
+        capture.idleDetachAtUs = qpc_now_us() + kCaptureIdleDetachDelayUs;
         std::cout << "[native-video-host] stream inactive\n";
       }
-      if (!captureIdleDetached && qpc_now_us() >= captureIdleDetachAtUs) {
+      if (!capture.idleDetached && qpc_now_us() >= capture.idleDetachAtUs) {
         detach_capture_session();
         // Stale by construction: whatever forced a fallback while nobody was watching is
         // re-evaluated from scratch when the reattach picks its backend.
-        dxgiFallbackRequested.store(false, std::memory_order_release);
-        gdiFallbackRequested.store(false, std::memory_order_release);
-        captureIdleDetached = true;
+        capture.dxgiFallbackRequested.store(false, std::memory_order_release);
+        capture.gdiFallbackRequested.store(false, std::memory_order_release);
+        capture.idleDetached = true;
         std::cout << "[native-video-host] capture detached (idle)\n";
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
       continue;
     }
     if (!streamActiveApplied) {
-      if (captureIdleDetached) {
+      if (capture.idleDetached) {
         // Reattach before declaring the stream applied, and only declare it on success:
         // marking it applied with no capture running would serve black frames with no path
         // back. Failure retries with backoff -- the desktop may still be mid-transition
         // (RDP disconnecting, a secure desktop closing) when the client returns.
         const uint64_t nowUs = qpc_now_us();
-        if (nowUs < captureReattachRetryAtUs) {
+        if (nowUs < capture.reattachRetryAtUs) {
           std::this_thread::sleep_for(std::chrono::milliseconds(10));
           continue;
         }
-        if (!captureWindowModeActive.load(std::memory_order_acquire)) {
+        if (!capture.windowModeActive.load(std::memory_order_acquire)) {
           // Fresh resolution, not the backend the last session was demoted to. This is also
           // what frees a host parked on WGC by an RDP visit: the desktop is back on the real
           // adapter by now, and starting from the requested backend finds it.
@@ -4919,21 +4966,21 @@ int main(int argc, char** argv) {
           }
         }
         if (!restart_capture_session()) {
-          captureReattachRetryDelayUs =
-              std::min<uint64_t>(captureReattachRetryDelayUs * 2, kCaptureReattachRetryMaxUs);
-          captureReattachRetryAtUs = nowUs + captureReattachRetryDelayUs;
+          capture.reattachRetryDelayUs =
+              std::min<uint64_t>(capture.reattachRetryDelayUs * 2, kCaptureReattachRetryMaxUs);
+          capture.reattachRetryAtUs = nowUs + capture.reattachRetryDelayUs;
           std::cerr << "[native-video-host] capture reattach failed; retrying in "
-                    << (captureReattachRetryDelayUs / 1000) << "ms\n";
+                    << (capture.reattachRetryDelayUs / 1000) << "ms\n";
           std::this_thread::sleep_for(std::chrono::milliseconds(10));
           continue;
         }
-        captureIdleDetached = false;
-        captureReattachRetryAtUs = 0;
-        captureReattachRetryDelayUs = kCaptureReattachRetryMinUs;
-        ++captureRestartCount;
-        captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
-        lastCaptureUsForInterval.store(0, std::memory_order_release);
-        lastCallbackUs.store(0, std::memory_order_release);
+        capture.idleDetached = false;
+        capture.reattachRetryAtUs = 0;
+        capture.reattachRetryDelayUs = kCaptureReattachRetryMinUs;
+        ++capture.restartCount;
+        capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+        capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
+        capture.lastCallbackUs.store(0, std::memory_order_release);
         resetHostTimelineAnchors();
         flush_capture_pipeline_state("capture-reattached");
         std::cout << "[native-video-host] capture reattached backend="
@@ -5006,7 +5053,7 @@ int main(int argc, char** argv) {
         bool ladderReducedNext = rate.encodeLadderReduced;
         if (bitrateExplicit) {
           const auto choice = remote60::native_poc::choose_encode_resolution(
-              targetBitrate, captureWidth, captureHeight, rate.encodeLadderReduced);
+              targetBitrate, capture.width, capture.height, rate.encodeLadderReduced);
           ladderReducedNext = choice.reduced;
           ladderW = choice.width;
           ladderH = choice.height;
@@ -5033,14 +5080,14 @@ int main(int argc, char** argv) {
         rate.abrModeratePressureSeconds = 0;
         rate.abrSeverePressureSeconds = 0;
         encoder.forceKeyNext = true;
-        if (fpsChanged && !captureWindowModeActive.load(std::memory_order_acquire) &&
+        if (fpsChanged && !capture.windowModeActive.load(std::memory_order_acquire) &&
             backend.active == DesktopCaptureBackend::Gdi) {
           if (!restart_capture_session()) {
             std::cerr << "[native-video-host][control] GDI fps restart failed seq="
                       << reqSeq << "\n";
             break;
           }
-          ++captureRestartCount;
+          ++capture.restartCount;
           flush_capture_pipeline_state("gdi-fps-change");
         }
         std::cout << "[native-video-host][control] runtime-config-applied seq=" << reqSeq
@@ -5068,7 +5115,7 @@ int main(int argc, char** argv) {
       if (hasWindowSelectRequest) {
         uint32_t responseFlags = 0;
         uint64_t responseWindowId = requestedWindowId;
-        uint64_t responseStreamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
+        uint64_t responseStreamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
         std::string responseReason;
         std::string responseTitle;
         const bool applied = apply_selected_window_capture(
@@ -5098,8 +5145,8 @@ int main(int argc, char** argv) {
     // Switching screens is the same operation as switching to desktop mode, aimed at a particular
     // monitor. Done here rather than on the control thread because the capture item belongs to
     // this loop, exactly like the window and capture-mode selections above.
-    if (monitorSelectPending.exchange(false, std::memory_order_acq_rel)) {
-      const uint32_t requestedId = monitorSelectRequested.load(std::memory_order_acquire);
+    if (capture.monitorSelectPending.exchange(false, std::memory_order_acq_rel)) {
+      const uint32_t requestedId = capture.monitorSelectRequested.load(std::memory_order_acquire);
       const auto monitors = enumerate_monitors();
       if (requestedId >= monitors.size()) {
         std::cerr << "[native-video-host][control] monitor-select out of range id=" << requestedId
@@ -5112,26 +5159,26 @@ int main(int argc, char** argv) {
                     << requestedId << "\n";
         } else {
           item = nextItem;
-          selectedMonitorIdState.store(requestedId, std::memory_order_release);
+          capture.selectedMonitorId.store(requestedId, std::memory_order_release);
           // A monitor is a desktop target, so any window selection it replaces has to go.
-          captureWindowModeActive = false;
-          captureWindowCriteria.processNamesLower.clear();
-          captureWindowCriteria.titleNeedleLower.clear();
-          selectedWindowIdState.store(0u, std::memory_order_release);
-          hostCaptureTargetFlags.store(0u, std::memory_order_release);
-          hostCaptureTargetPid.store(0u, std::memory_order_release);
-          hostCaptureTargetHwnd.store(0u, std::memory_order_release);
+          capture.windowModeActive = false;
+          capture.windowCriteria.processNamesLower.clear();
+          capture.windowCriteria.titleNeedleLower.clear();
+          capture.selectedWindowId.store(0u, std::memory_order_release);
+          capture.targetFlags.store(0u, std::memory_order_release);
+          capture.targetPid.store(0u, std::memory_order_release);
+          capture.targetHwnd.store(0u, std::memory_order_release);
           {
-            std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
-            hostCaptureTargetProcess = "monitor";
-            hostCaptureTargetTitle = target.name;
+            std::lock_guard<std::mutex> lk(capture.metaMu);
+            capture.targetProcess = "monitor";
+            capture.targetTitle = target.name;
           }
           watchdog.lastCaptureRestartUs = nowUs;
           if (restart_capture_session()) {
-            ++captureRestartCount;
-            captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
-            lastCaptureUsForInterval.store(0, std::memory_order_release);
-            lastCallbackUs.store(0, std::memory_order_release);
+            ++capture.restartCount;
+            capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+            capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
+            capture.lastCallbackUs.store(0, std::memory_order_release);
             resetHostTimelineAnchors();
             encoder.forceKeyNext = true;
             std::cout << "[native-video-host][control] monitor-select applied id=" << requestedId
@@ -5145,35 +5192,35 @@ int main(int argc, char** argv) {
       }
     }
 
-    if (captureModeReqPending.exchange(false, std::memory_order_acq_rel)) {
-      const uint16_t reqMode = captureModeReqMode.load(std::memory_order_acquire);
-      const uint32_t reqSeq = captureModeReqSeq.load(std::memory_order_acquire);
-      const uint32_t reqXPermille = std::min<uint32_t>(10000u, captureModeReqXPermille.load(std::memory_order_acquire));
-      const uint32_t reqYPermille = std::min<uint32_t>(10000u, captureModeReqYPermille.load(std::memory_order_acquire));
+    if (capture.modeReqPending.exchange(false, std::memory_order_acq_rel)) {
+      const uint16_t reqMode = capture.modeReqMode.load(std::memory_order_acquire);
+      const uint32_t reqSeq = capture.modeReqSeq.load(std::memory_order_acquire);
+      const uint32_t reqXPermille = std::min<uint32_t>(10000u, capture.modeReqXPermille.load(std::memory_order_acquire));
+      const uint32_t reqYPermille = std::min<uint32_t>(10000u, capture.modeReqYPermille.load(std::memory_order_acquire));
       if (reqMode == 1) {
         auto nextItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(control-overview)");
         if (!nextItem) {
           std::cerr << "[native-video-host][control] capture-mode overview failed seq=" << reqSeq << "\n";
         } else {
           item = nextItem;
-          captureWindowModeActive = false;
-          captureWindowCriteria.processNamesLower.clear();
-          captureWindowCriteria.titleNeedleLower.clear();
-          selectedWindowIdState.store(0u, std::memory_order_release);
-          hostCaptureTargetFlags.store(0u, std::memory_order_release);
-          hostCaptureTargetPid.store(0u, std::memory_order_release);
-          hostCaptureTargetHwnd.store(0u, std::memory_order_release);
+          capture.windowModeActive = false;
+          capture.windowCriteria.processNamesLower.clear();
+          capture.windowCriteria.titleNeedleLower.clear();
+          capture.selectedWindowId.store(0u, std::memory_order_release);
+          capture.targetFlags.store(0u, std::memory_order_release);
+          capture.targetPid.store(0u, std::memory_order_release);
+          capture.targetHwnd.store(0u, std::memory_order_release);
           {
-            std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
-            hostCaptureTargetProcess = "monitor";
-            hostCaptureTargetTitle.clear();
+            std::lock_guard<std::mutex> lk(capture.metaMu);
+            capture.targetProcess = "monitor";
+            capture.targetTitle.clear();
           }
           watchdog.lastCaptureRestartUs = nowUs;
           if (restart_capture_session()) {
-            ++captureRestartCount;
-            captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
-            lastCaptureUsForInterval.store(0, std::memory_order_release);
-            lastCallbackUs.store(0, std::memory_order_release);
+            ++capture.restartCount;
+            capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+            capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
+            capture.lastCallbackUs.store(0, std::memory_order_release);
             resetHostTimelineAnchors();
             if (!apply_capture_ui_quality_mode(true, nowUs)) {
               std::cerr << "[native-video-host][control] capture-mode overview quality apply failed seq=" << reqSeq
@@ -5221,30 +5268,30 @@ int main(int argc, char** argv) {
             std::cerr << "[native-video-host][control] capture-mode focus create-item failed seq=" << reqSeq << "\n";
           } else {
             item = nextItem;
-            captureWindowModeActive = true;
-            captureWindowClientOnlyActive = true;
-            captureWindowCriteria.processNamesLower.clear();
+            capture.windowModeActive = true;
+            capture.windowClientOnlyActive = true;
+            capture.windowCriteria.processNamesLower.clear();
             if (!selected.processName.empty()) {
-              captureWindowCriteria.processNamesLower.insert(selected.processName);
+              capture.windowCriteria.processNamesLower.insert(selected.processName);
             }
-            captureWindowCriteria.titleNeedleLower.clear();
-            selectedWindowIdState.store(hwnd_to_id(selected.hwnd), std::memory_order_release);
-            hostCaptureTargetFlags.store(0x1u | 0x2u, std::memory_order_release);
-            hostCaptureTargetPid.store(selected.pid, std::memory_order_release);
-            hostCaptureTargetHwnd.store(
+            capture.windowCriteria.titleNeedleLower.clear();
+            capture.selectedWindowId.store(hwnd_to_id(selected.hwnd), std::memory_order_release);
+            capture.targetFlags.store(0x1u | 0x2u, std::memory_order_release);
+            capture.targetPid.store(selected.pid, std::memory_order_release);
+            capture.targetHwnd.store(
                 static_cast<uint64_t>(reinterpret_cast<uintptr_t>(selected.hwnd)), std::memory_order_release);
             {
-              std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
-              hostCaptureTargetProcess = selected.processName.empty() ? "unknown" : selected.processName;
-              hostCaptureTargetTitle = selected.title.empty() ? std::string{} : wide_to_utf8(selected.title);
+              std::lock_guard<std::mutex> lk(capture.metaMu);
+              capture.targetProcess = selected.processName.empty() ? "unknown" : selected.processName;
+              capture.targetTitle = selected.title.empty() ? std::string{} : wide_to_utf8(selected.title);
             }
             nextCaptureWindowCheckUs = nowUs + captureWindowRebindIntervalUs;
             watchdog.lastCaptureRestartUs = nowUs;
             if (restart_capture_session()) {
-              ++captureRestartCount;
-              captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
-              lastCaptureUsForInterval.store(0, std::memory_order_release);
-              lastCallbackUs.store(0, std::memory_order_release);
+              ++capture.restartCount;
+              capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+              capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
+              capture.lastCallbackUs.store(0, std::memory_order_release);
               resetHostTimelineAnchors();
               if (!apply_capture_ui_quality_mode(false, nowUs)) {
                 std::cerr << "[native-video-host][control] capture-mode focus quality apply failed seq=" << reqSeq
@@ -5267,52 +5314,52 @@ int main(int argc, char** argv) {
         }
       }
     }
-    if (captureWindowModeActive && captureWindowCriteria.enabled() && nowUs >= nextCaptureWindowCheckUs) {
+    if (capture.windowModeActive && capture.windowCriteria.enabled() && nowUs >= nextCaptureWindowCheckUs) {
       nextCaptureWindowCheckUs = nowUs + captureWindowRebindIntervalUs;
       CaptureWindowInfo latestWindowInfo{};
-      if (find_capture_window(captureWindowCriteria, &latestWindowInfo)) {
-        const uintptr_t currentRaw = static_cast<uintptr_t>(hostCaptureTargetHwnd.load(std::memory_order_acquire));
+      if (find_capture_window(capture.windowCriteria, &latestWindowInfo)) {
+        const uintptr_t currentRaw = static_cast<uintptr_t>(capture.targetHwnd.load(std::memory_order_acquire));
         const uintptr_t nextRaw = reinterpret_cast<uintptr_t>(latestWindowInfo.hwnd);
         if (nextRaw != currentRaw) {
           const auto nextItem =
               CreateItemForPrimaryMonitor(latestWindowInfo.hwnd, "CreateForWindow(target-window-rebind)");
           if (nextItem) {
             item = nextItem;
-            selectedWindowIdState.store(hwnd_to_id(latestWindowInfo.hwnd), std::memory_order_release);
-            hostCaptureTargetHwnd.store(static_cast<uint64_t>(nextRaw), std::memory_order_release);
-            hostCaptureTargetPid.store(latestWindowInfo.pid, std::memory_order_release);
+            capture.selectedWindowId.store(hwnd_to_id(latestWindowInfo.hwnd), std::memory_order_release);
+            capture.targetHwnd.store(static_cast<uint64_t>(nextRaw), std::memory_order_release);
+            capture.targetPid.store(latestWindowInfo.pid, std::memory_order_release);
             {
-              std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
-              hostCaptureTargetProcess =
+              std::lock_guard<std::mutex> lk(capture.metaMu);
+              capture.targetProcess =
                   latestWindowInfo.processName.empty() ? std::string("unknown") : latestWindowInfo.processName;
-              hostCaptureTargetTitle =
+              capture.targetTitle =
                   latestWindowInfo.title.empty() ? std::string{} : wide_to_utf8(latestWindowInfo.title);
             }
-            const uint32_t rebindCount = hostCaptureRebindCount.fetch_add(1, std::memory_order_acq_rel) + 1;
-            hostCaptureTargetFlags.store((captureWindowModeActive ? 0x1u : 0x0u) |
-                                             ((captureWindowModeActive && captureWindowClientOnlyActive) ? 0x2u : 0x0u),
+            const uint32_t rebindCount = capture.rebindCount.fetch_add(1, std::memory_order_acq_rel) + 1;
+            capture.targetFlags.store((capture.windowModeActive ? 0x1u : 0x0u) |
+                                             ((capture.windowModeActive && capture.windowClientOnlyActive) ? 0x2u : 0x0u),
                                          std::memory_order_release);
             std::string targetProc = "unknown";
             std::string targetTitle;
             {
-              std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
-              targetProc = hostCaptureTargetProcess;
-              targetTitle = hostCaptureTargetTitle;
+              std::lock_guard<std::mutex> lk(capture.metaMu);
+              targetProc = capture.targetProcess;
+              targetTitle = capture.targetTitle;
             }
             watchdog.lastCaptureRestartUs = nowUs;
             if (restart_capture_session()) {
-              ++captureRestartCount;
-              captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
-              lastCaptureUsForInterval.store(0, std::memory_order_release);
-              lastCallbackUs.store(0, std::memory_order_release);
+              ++capture.restartCount;
+              capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+              capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
+              capture.lastCallbackUs.store(0, std::memory_order_release);
               resetHostTimelineAnchors();
               encoder.forceKeyNext = true;
               std::cout << "[native-video-host] capture-window rebound hwnd=0x" << std::hex << nextRaw << std::dec
-                        << " pid=" << hostCaptureTargetPid.load(std::memory_order_relaxed)
+                        << " pid=" << capture.targetPid.load(std::memory_order_relaxed)
                         << " process=" << targetProc
                         << " title=" << (targetTitle.empty() ? "<empty>" : targetTitle)
                         << " rebindCount=" << rebindCount
-                        << " restartCount=" << captureRestartCount
+                        << " restartCount=" << capture.restartCount
                         << "\n";
             } else {
               std::cerr << "[native-video-host] capture-window rebind restart failed\n";
@@ -5327,41 +5374,41 @@ int main(int argc, char** argv) {
     // settle window, then recreate the pool + readback at the new size on THIS (main) thread --
     // the callback thread must never recreate capture resources. restart_capture_session() rebuilds
     // the WGC pool at item.Size() (the settled window size) and create_staging at the new geometry.
-    if (wgcContentSizeMismatchPending.load(std::memory_order_acquire) != 0) {
-      const uint32_t pendW = wgcPendingContentW.load(std::memory_order_acquire);
-      const uint32_t pendH = wgcPendingContentH.load(std::memory_order_acquire);
+    if (capture.wgcContentSizeMismatchPending.load(std::memory_order_acquire) != 0) {
+      const uint32_t pendW = capture.wgcPendingContentW.load(std::memory_order_acquire);
+      const uint32_t pendH = capture.wgcPendingContentH.load(std::memory_order_acquire);
       uint32_t curCapW = 0;
       uint32_t curCapH = 0;
       {
-        std::lock_guard<std::mutex> lk(captureResourceMu);
-        curCapW = captureWidth;
-        curCapH = captureHeight;
+        std::lock_guard<std::mutex> lk(capture.resourceMu);
+        curCapW = capture.width;
+        curCapH = capture.height;
       }
       if (pendW < 2 || pendH < 2 || (pendW == curCapW && pendH == curCapH)) {
         // Content settled back to the current pool geometry -- nothing to recreate.
-        wgcContentSizeMismatchPending.store(0, std::memory_order_release);
-        wgcSettleTrackW = 0;
-        wgcSettleTrackH = 0;
-        wgcSettleSinceUs = 0;
-      } else if (pendW != wgcSettleTrackW || pendH != wgcSettleTrackH) {
+        capture.wgcContentSizeMismatchPending.store(0, std::memory_order_release);
+        capture.wgcSettleTrackW = 0;
+        capture.wgcSettleTrackH = 0;
+        capture.wgcSettleSinceUs = 0;
+      } else if (pendW != capture.wgcSettleTrackW || pendH != capture.wgcSettleTrackH) {
         // Size still moving: (re)arm the settle timer on the newest candidate.
-        wgcSettleTrackW = pendW;
-        wgcSettleTrackH = pendH;
-        wgcSettleSinceUs = nowUs;
-      } else if (nowUs - wgcSettleSinceUs >= kWgcContentSettleUs) {
+        capture.wgcSettleTrackW = pendW;
+        capture.wgcSettleTrackH = pendH;
+        capture.wgcSettleSinceUs = nowUs;
+      } else if (nowUs - capture.wgcSettleSinceUs >= kWgcContentSettleUs) {
         // Stable for the settle window: recreate the pool/readback at the new size on the main thread.
-        wgcContentSizeMismatchPending.store(0, std::memory_order_release);
-        wgcSettleTrackW = 0;
-        wgcSettleTrackH = 0;
-        wgcSettleSinceUs = 0;
+        capture.wgcContentSizeMismatchPending.store(0, std::memory_order_release);
+        capture.wgcSettleTrackW = 0;
+        capture.wgcSettleTrackH = 0;
+        capture.wgcSettleSinceUs = 0;
         watchdog.lastCaptureRestartUs = nowUs;
         flush_capture_pipeline_state("wgc-content-size");
         if (restart_capture_session()) {
-          ++captureRestartCount;
-          ++wgcPoolRecreates;
-          captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
-          lastCaptureUsForInterval.store(0, std::memory_order_release);
-          lastCallbackUs.store(0, std::memory_order_release);
+          ++capture.restartCount;
+          ++capture.wgcPoolRecreates;
+          capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+          capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
+          capture.lastCallbackUs.store(0, std::memory_order_release);
           resetHostTimelineAnchors();
           // Force an IDR at the (now correct) geometry. An interactive drag still lets the encode
           // size catch up on the 0.4s refit path; only the capture pool was resized here.
@@ -5369,45 +5416,45 @@ int main(int argc, char** argv) {
           uint32_t newCapW = 0;
           uint32_t newCapH = 0;
           {
-            std::lock_guard<std::mutex> lk(captureResourceMu);
-            newCapW = captureWidth;
-            newCapH = captureHeight;
+            std::lock_guard<std::mutex> lk(capture.resourceMu);
+            newCapW = capture.width;
+            newCapH = capture.height;
           }
           std::cout << "[native-video-host] wgc-content-size pool recreated content="
                     << pendW << "x" << pendH << " capture=" << newCapW << "x" << newCapH
-                    << " poolRecreates=" << wgcPoolRecreates
-                    << " restartCount=" << captureRestartCount << "\n";
+                    << " poolRecreates=" << capture.wgcPoolRecreates
+                    << " restartCount=" << capture.restartCount << "\n";
         } else {
           std::cerr << "[native-video-host] wgc-content-size pool recreate failed content="
                     << pendW << "x" << pendH << "\n";
         }
       }
     }
-    if (captureSizeChangePending.exchange(0, std::memory_order_acq_rel) != 0) {
+    if (capture.sizeChangePending.exchange(0, std::memory_order_acq_rel) != 0) {
       watchdog.lastCaptureRestartUs = nowUs;
       flush_capture_pipeline_state("size-change");
       if (restart_capture_session()) {
-        ++captureRestartCount;
-        captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
-        lastCaptureUsForInterval.store(0, std::memory_order_release);
-        lastCallbackUs.store(0, std::memory_order_release);
+        ++capture.restartCount;
+        capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+        capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
+        capture.lastCallbackUs.store(0, std::memory_order_release);
         resetHostTimelineAnchors();
         encoder.forceKeyNext = true;
         std::cout << "[native-video-host] capture session restarted reason=size-change count="
-                  << captureRestartCount << "\n";
+                  << capture.restartCount << "\n";
       } else {
         std::cerr << "[native-video-host] capture session restart failed reason=size-change\n";
       }
     }
-    if (captureSessionReady.load(std::memory_order_acquire) &&
+    if (capture.sessionReady.load(std::memory_order_acquire) &&
         clientSession.streamControlActive.load(std::memory_order_acquire) &&
-        !captureWindowModeActive.load(std::memory_order_acquire) &&
+        !capture.windowModeActive.load(std::memory_order_acquire) &&
         backend.active == DesktopCaptureBackend::Gdi) {
       // GDI is clocked and must publish continuously. WGC/DXGI are change-driven and can
       // legitimately stay silent on a static desktop, so callback silence is not a stall for
       // those backends and must never trigger a restart loop.
-      const uint64_t lastCbUs = lastCallbackUs.load(std::memory_order_acquire);
-      const uint64_t sessionStartUs = captureSessionStartedUs;
+      const uint64_t lastCbUs = capture.lastCallbackUs.load(std::memory_order_acquire);
+      const uint64_t sessionStartUs = capture.sessionStartedUs;
       const uint64_t stallBaseUs = (lastCbUs > 0) ? lastCbUs : sessionStartUs;
       const bool restartCooldownDone =
           (watchdog.lastCaptureRestartUs == 0 ||
@@ -5418,14 +5465,14 @@ int main(int argc, char** argv) {
         watchdog.lastCaptureRestartUs = nowUs;
         const bool restarted = restart_capture_session();
         if (restarted) {
-          ++captureRestartCount;
-          captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
-          lastCaptureUsForInterval.store(0, std::memory_order_release);
-          lastCallbackUs.store(0, std::memory_order_release);
+          ++capture.restartCount;
+          capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+          capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
+          capture.lastCallbackUs.store(0, std::memory_order_release);
           resetHostTimelineAnchors();
           encoder.forceKeyNext = true;
           ++watchdog.deadRestartCount;
-          std::cout << "[native-video-host] capture session restarted count=" << captureRestartCount
+          std::cout << "[native-video-host] capture session restarted count=" << capture.restartCount
                     << " captureDeadRestartCount=" << watchdog.deadRestartCount
                     << " stallUs=" << stallUs
                     << " lastCallbackUs=" << lastCbUs
@@ -5444,9 +5491,9 @@ int main(int argc, char** argv) {
     // single slow readback does not trip it. This is the "it went dark and reconnecting shows
     // nothing" report from a host pinned by a GPU-heavy game; before this, DXGI/WGC had no path
     // back short of the user restarting the host.
-    if (captureSessionReady.load(std::memory_order_acquire) &&
+    if (capture.sessionReady.load(std::memory_order_acquire) &&
         clientSession.streamControlActive.load(std::memory_order_acquire) &&
-        !captureWindowModeActive.load(std::memory_order_acquire) &&
+        !capture.windowModeActive.load(std::memory_order_acquire) &&
         backend.active != DesktopCaptureBackend::Gdi) {
       const uint64_t oldestPendingUs = captureReadback.OldestGpuPendingAgeUs();
       watchdog.oldestGpuPendingPeakUs = std::max(watchdog.oldestGpuPendingPeakUs, oldestPendingUs);
@@ -5497,7 +5544,7 @@ int main(int argc, char** argv) {
           // pointless (the process exits before another stats print), so this single record carries
           // the last state the frozen ring reached and pairs with host_app.log's exit-code-3 line
           // to reconstruct a cross-process recovery across the restart. (Codex.)
-          const uint64_t refreezeLastPubUs = lastPublishUs.load(std::memory_order_acquire);
+          const uint64_t refreezeLastPubUs = capture.lastPublishUs.load(std::memory_order_acquire);
           const uint64_t refreezeLastPubAgeUs =
               (refreezeLastPubUs > 0 && nowUs > refreezeLastPubUs) ? nowUs - refreezeLastPubUs : 0;
           std::cout << "[native-video-host] capture-recovery reason=frozen-ring-refreeze"
@@ -5505,7 +5552,7 @@ int main(int argc, char** argv) {
                     << " oldestPendingUs=" << oldestPendingUs
                     << " gpuPendingCount=" << captureReadback.GpuPendingCount()
                     << " frozenRingRestarts=" << watchdog.frozenRingRestartCount
-                    << " captureRestarts=" << captureRestartCount
+                    << " captureRestarts=" << capture.restartCount
                     << " lastPublishAgeUs=" << refreezeLastPubAgeUs
                     << " backend=" << desktop_capture_backend_name(backend.active)
                     << " windowSec=" << (kCaptureFrozenEscalationWindowUs / 1000000)
@@ -5517,17 +5564,17 @@ int main(int argc, char** argv) {
         watchdog.lastCaptureRestartUs = nowUs;
         const bool restarted = restart_capture_session();
         if (restarted) {
-          ++captureRestartCount;
-          captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(),
+          ++capture.restartCount;
+          capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(),
                                      std::memory_order_release);
-          lastCaptureUsForInterval.store(0, std::memory_order_release);
-          lastCallbackUs.store(0, std::memory_order_release);
+          capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
+          capture.lastCallbackUs.store(0, std::memory_order_release);
           resetHostTimelineAnchors();
           encoder.forceKeyNext = true;
           ++watchdog.deadRestartCount;
           ++watchdog.frozenRingRestartCount;
           std::cout << "[native-video-host] capture session restarted reason=frozen-ring count="
-                    << captureRestartCount << " captureDeadRestartCount=" << watchdog.deadRestartCount
+                    << capture.restartCount << " captureDeadRestartCount=" << watchdog.deadRestartCount
                     << " frozenRingRestarts=" << watchdog.frozenRingRestartCount
                     << " oldestPendingUs=" << oldestPendingUs << "\n";
         } else {
@@ -5618,7 +5665,7 @@ int main(int argc, char** argv) {
           }
           seq = 0;
           version = stats.lastVersionSent;  // no real version consumed (keeps queue bookkeeping stable)
-          streamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
+          streamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
           captureUs = nowUs;     // fresh monotonic stamps: never reuse the stale capture time
           callbackUs = nowUs;
           queuePushUs = nowUs;
@@ -5665,7 +5712,7 @@ int main(int argc, char** argv) {
           servedBootstrap = true;
           seq = 0;
           version = stats.lastVersionSent;  // no real version consumed (keeps queue bookkeeping stable)
-          streamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
+          streamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
           captureUs = nowUs;
           callbackUs = nowUs;
           queuePushUs = nowUs;
@@ -5755,10 +5802,10 @@ int main(int argc, char** argv) {
     const uint64_t queueGapFrames =
         (stats.lastVersionSent > 0 && version > stats.lastVersionSent) ? (version - stats.lastVersionSent - 1) : 0;
     ++stats.queuePopCount;
-    const uint64_t lastPopVersionAtRead = lastPopFrameVersion.load(std::memory_order_acquire);
+    const uint64_t lastPopVersionAtRead = capture.lastPopFrameVersion.load(std::memory_order_acquire);
     const uint64_t queueDepthAtPop = (version > lastPopVersionAtRead) ? (version - lastPopVersionAtRead) : 0;
     update_u64_max(stats.queueDepthMax, queueDepthAtPop);
-    lastPopFrameVersion.store(version, std::memory_order_release);
+    capture.lastPopFrameVersion.store(version, std::memory_order_release);
     if (!servedBootstrap && frameGating.enabled && useH264 && payload && !payload->empty()) {
       if (frameGating.refPayload && !frameGating.refPayload->empty() &&
           frameGating.refW == w && frameGating.refH == h && frameGating.refStride == stride) {
@@ -6060,7 +6107,7 @@ int main(int argc, char** argv) {
       if (!wantSurfaceEncode && (encoder.activeEncodeW != w || encoder.activeEncodeH != h)) {
         const uint64_t scaleStartUs = qpc_now_us();
         bool scaleOk = false;
-        if (gpuScalerHealthy) {
+        if (capture.gpuScalerHealthy) {
           ++stats.gpuScaleAttempts;
           scaleOk = gpuScaler.scale(payload->data(), w, h, stride, encoder.activeEncodeW, encoder.activeEncodeH,
                                     &scaledBgra, &scaleReadbackTiming);
@@ -6079,7 +6126,7 @@ int main(int argc, char** argv) {
             stats.gpuScaleUnmapMaxUs = std::max(stats.gpuScaleUnmapMaxUs, scaleReadbackTiming.unmapUs);
           } else {
             ++stats.gpuScaleFail;
-            gpuScalerHealthy = false;
+            capture.gpuScalerHealthy = false;
             std::cout << "[native-video-host] gpu scaler disabled after failure; fallback=cpu\n";
           }
         }
@@ -6141,8 +6188,8 @@ int main(int argc, char** argv) {
        const bool keyWanted = encoder.forceKeyNext || (encoder.encodedSeq == 0) || scheduledKey;
        const bool forceKeyFrame = keyWanted && !forceKeyInFlight;
         const uint64_t encodeInputUs = captureStampUs;
-        if (captureTimelineOriginUs < 0) {
-          captureTimelineOriginUs = static_cast<int64_t>(encodeInputUs);
+        if (capture.timelineOriginUs < 0) {
+          capture.timelineOriginUs = static_cast<int64_t>(encodeInputUs);
         }
         const uint64_t queueToEncodeUs = (encodeStartUs >= queuePopUs) ? (encodeStartUs - queuePopUs) : 0;
        const uint64_t callbackToEncodeStartUs =
@@ -6351,11 +6398,11 @@ int main(int argc, char** argv) {
           if (auCaptureUs > 0 && static_cast<uint64_t>(auCaptureUs) > kick.lastEmittedAuCaptureUs) {
             kick.lastEmittedAuCaptureUs = static_cast<uint64_t>(auCaptureUs);
           }
-          if (auTimelineOriginUs < 0 && captureTimelineOriginUs >= 0) {
+          if (auTimelineOriginUs < 0 && capture.timelineOriginUs >= 0) {
             auTimelineOriginUs = static_cast<int64_t>(auCaptureUs) -
-                                 (static_cast<int64_t>(encodeInputUs) - captureTimelineOriginUs);
+                                 (static_cast<int64_t>(encodeInputUs) - capture.timelineOriginUs);
           }
-          const int64_t captureTimelineRelativeUs = static_cast<int64_t>(encodeInputUs) - captureTimelineOriginUs;
+          const int64_t captureTimelineRelativeUs = static_cast<int64_t>(encodeInputUs) - capture.timelineOriginUs;
           const int64_t auTimelineRelativeUs = static_cast<int64_t>(auCaptureUs) - auTimelineOriginUs;
           const int64_t captureToAuTimelineDeltaUs = captureTimelineRelativeUs - auTimelineRelativeUs;
           const uint64_t captureToAuTimelineSkewUs =
@@ -6665,7 +6712,7 @@ int main(int argc, char** argv) {
                       << " captureToAuTimelineSkewUs=" << captureToAuTimelineSkewUs
                       << " auTsFromOutput=" << auTsFromOutput
                       << " auTsSkewUs=" << auTsSkewUs
-                      << " captureTimelineOriginUs=" << captureTimelineOriginUs
+                      << " captureTimelineOriginUs=" << capture.timelineOriginUs
                      << " auTimelineOriginUs=" << auTimelineOriginUs
                      << " captureTimelineRelativeUs=" << captureTimelineRelativeUs
                      << " auTimelineRelativeUs=" << auTimelineRelativeUs
@@ -6790,7 +6837,7 @@ int main(int argc, char** argv) {
                       << " auTsSkewUs=" << auTsSkewUs
                       << " captureToAuTimelineDeltaUs="
                       << (captureToAuTimelineDeltaUs >= 0 ? captureToAuTimelineDeltaUs : 0 - captureToAuTimelineDeltaUs)
-                      << " captureTimelineOriginUs=" << captureTimelineOriginUs
+                      << " captureTimelineOriginUs=" << capture.timelineOriginUs
                       << " auTimelineOriginUs=" << auTimelineOriginUs
                       << " captureTimelineRelativeUs=" << captureTimelineRelativeUs
                       << " auTimelineRelativeUs=" << auTimelineRelativeUs
@@ -6849,8 +6896,8 @@ int main(int argc, char** argv) {
       const double mbps = (sender.sentBytes * 8.0) / (1000.0 * 1000.0);
       std::string targetProcessName;
       {
-        std::lock_guard<std::mutex> lk(hostCaptureMetaMu);
-        targetProcessName = hostCaptureTargetProcess;
+        std::lock_guard<std::mutex> lk(capture.metaMu);
+        targetProcessName = capture.targetProcess;
       }
       const uint64_t queuePushPerSec =
           (stats.queuePushCount >= stats.queuePushCountLastSample) ? (stats.queuePushCount - stats.queuePushCountLastSample) : 0;
@@ -6859,14 +6906,14 @@ int main(int argc, char** argv) {
       const uint64_t callbackFramesPerSec = stats.callbackFrames.load(std::memory_order_relaxed);
       const uint64_t idleHoldPerSec =
           (useH264 &&
-           captureSessionReady.load(std::memory_order_acquire) &&
+           capture.sessionReady.load(std::memory_order_acquire) &&
            clientSession.streamControlActive.load(std::memory_order_acquire) &&
            callbackFramesPerSec == 0) ? 1ULL : 0ULL;
       stats.idleHoldTotal += idleHoldPerSec;
       const bool gdiLowPushFallbackEnabled =
-          !captureWindowModeActive && backend.active == DesktopCaptureBackend::Gdi;
+          !capture.windowModeActive && backend.active == DesktopCaptureBackend::Gdi;
       if (useH264 &&
-          captureSessionReady.load(std::memory_order_acquire) &&
+          capture.sessionReady.load(std::memory_order_acquire) &&
           clientSession.streamControlActive.load(std::memory_order_acquire) &&
           gdiLowPushFallbackEnabled) {
         const bool warmupDone =
@@ -6884,7 +6931,7 @@ int main(int argc, char** argv) {
           if (watchdog.inputLowPushStreakSec >= watchdog.inputStallConsecutiveSec && restartCooldownDone) {
             watchdog.lastCaptureRestartUs = t;
             const bool fallbackFromGdi =
-                !captureWindowModeActive && backend.active == DesktopCaptureBackend::Gdi;
+                !capture.windowModeActive && backend.active == DesktopCaptureBackend::Gdi;
             if (fallbackFromGdi) {
               backend.active = DesktopCaptureBackend::Wgc;
               set_gdi_fallback_reason("gdi_low_capture_rate");
@@ -6894,17 +6941,17 @@ int main(int argc, char** argv) {
             }
             const bool restarted = restart_capture_session();
             if (restarted) {
-              ++captureRestartCount;
+              ++capture.restartCount;
               ++watchdog.deadRestartCount;
-              captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
-              lastCaptureUsForInterval.store(0, std::memory_order_release);
-              lastCallbackUs.store(0, std::memory_order_release);
+              capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+              capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
+              capture.lastCallbackUs.store(0, std::memory_order_release);
               resetHostTimelineAnchors();
               encoder.forceKeyNext = true;
               watchdog.inputLowPushStreakSec = 0;
               std::cout << "[native-video-host] capture session restarted reason="
                         << (fallbackFromGdi ? "gdi-low-push-fallback" : "capture-input-stall")
-                        << " restartCount=" << captureRestartCount
+                        << " restartCount=" << capture.restartCount
                         << " captureDeadRestartCount=" << watchdog.deadRestartCount
                         << " callbackFramesPerSec=" << callbackFramesPerSec
                         << " minPushPerSec=" << watchdog.inputMinPushPerSec
@@ -6938,13 +6985,13 @@ int main(int argc, char** argv) {
         // The snapshots are advanced every tick regardless of whether the watchdog is eligible, so
         // an eligible second always sees exactly that second's increment.
         // AcceptContentCount is a plain uint64 the capture-callback thread mutates under
-        // captureCadenceMu; snapshot it under the same lock. The watchdog now restarts capture on
+        // capture.cadenceMu; snapshot it under the same lock. The watchdog now restarts capture on
         // this value, so an unlocked read is a real data race, not just a stale display. (BusyDrops
         // and SupersededDrops are std::atomic, so they need no lock.)
         uint64_t acceptedNow;
         {
-          std::lock_guard<std::mutex> lk(captureCadenceMu);
-          acceptedNow = captureCadenceGate.AcceptContentCount();
+          std::lock_guard<std::mutex> lk(capture.cadenceMu);
+          acceptedNow = capture.cadenceGate.AcceptContentCount();
         }
         const uint64_t busyNow = captureReadback.BusyDrops();
         const uint64_t supersededNow = captureReadback.SupersededDrops();
@@ -6964,14 +7011,14 @@ int main(int argc, char** argv) {
 
         const bool drainSurfaceEligible =
             useH264 &&
-            captureSessionReady.load(std::memory_order_acquire) &&
+            capture.sessionReady.load(std::memory_order_acquire) &&
             drainStreamActive &&
-            !captureWindowModeActive.load(std::memory_order_acquire) &&
+            !capture.windowModeActive.load(std::memory_order_acquire) &&
             backend.active != DesktopCaptureBackend::Gdi;
         // Warmup after the latest of: capture session start, any capture restart, or client
         // reattach -- so the first seconds of a fresh pipeline (encoder.codec spin-up, first IDR) never
         // read as a drain.
-        uint64_t drainWarmupAnchorUs = captureSessionStartedUs;
+        uint64_t drainWarmupAnchorUs = capture.sessionStartedUs;
         if (watchdog.lastCaptureRestartUs > drainWarmupAnchorUs) drainWarmupAnchorUs = watchdog.lastCaptureRestartUs;
         if (streamActiveSinceUs > drainWarmupAnchorUs) drainWarmupAnchorUs = streamActiveSinceUs;
         const bool drainWarmupDone = (t >= drainWarmupAnchorUs + kReadbackDrainWarmupUs);
@@ -7012,7 +7059,7 @@ int main(int argc, char** argv) {
               t < (watchdog.lastDrainRestartUs + kCaptureFrozenEscalationWindowUs);
           watchdog.lastDrainRestartUs = t;
           if (drainRecurred) {
-            const uint64_t drainLastPubUs = lastPublishUs.load(std::memory_order_acquire);
+            const uint64_t drainLastPubUs = capture.lastPublishUs.load(std::memory_order_acquire);
             const uint64_t drainLastPubAgeUs =
                 (drainLastPubUs > 0 && t > drainLastPubUs) ? t - drainLastPubUs : 0;
             std::cerr << "[native-video-host] capture readback drain recurred within "
@@ -7028,7 +7075,7 @@ int main(int argc, char** argv) {
                       << " busyDelta=" << busyDelta
                       << " supersededDelta=" << supersededDelta
                       << " readbackDrainRestarts=" << watchdog.drainRestartCount
-                      << " captureRestarts=" << captureRestartCount
+                      << " captureRestarts=" << capture.restartCount
                       << " lastPublishAgeUs=" << drainLastPubAgeUs
                       << " backend=" << desktop_capture_backend_name(backend.active)
                       << " windowSec=" << (kCaptureFrozenEscalationWindowUs / 1000000)
@@ -7040,16 +7087,16 @@ int main(int argc, char** argv) {
           watchdog.lastCaptureRestartUs = t;
           const bool restarted = restart_capture_session();
           if (restarted) {
-            ++captureRestartCount;
-            captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
-            lastCaptureUsForInterval.store(0, std::memory_order_release);
-            lastCallbackUs.store(0, std::memory_order_release);
+            ++capture.restartCount;
+            capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+            capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
+            capture.lastCallbackUs.store(0, std::memory_order_release);
             resetHostTimelineAnchors();
             encoder.forceKeyNext = true;
             ++watchdog.deadRestartCount;
             ++watchdog.drainRestartCount;
             std::cout << "[native-video-host] capture session restarted reason=readback-drain count="
-                      << captureRestartCount
+                      << capture.restartCount
                       << " captureDeadRestartCount=" << watchdog.deadRestartCount
                       << " readbackDrainRestarts=" << watchdog.drainRestartCount
                       << " acceptedDelta=" << acceptedDelta
@@ -7077,14 +7124,14 @@ int main(int argc, char** argv) {
                   << " queueDepthMax=" << stats.queueDepthMax.load(std::memory_order_relaxed)
                   << " queueWaitTimeoutCount=" << stats.queueWaitTimeoutCount
                   << " queueWaitNoWorkCount=" << stats.queueWaitNoWorkCount
-                  << " captureRestarts=" << captureRestartCount
-                  << " wgcContentSizeMismatchDrops=" << wgcContentSizeMismatchDrops.load(std::memory_order_relaxed)
-                  << " wgcPoolRecreates=" << wgcPoolRecreates
-                  << " captureWindowRebindCount=" << hostCaptureRebindCount.load(std::memory_order_relaxed)
-                  << " captureTargetPid=" << hostCaptureTargetPid.load(std::memory_order_relaxed)
+                  << " captureRestarts=" << capture.restartCount
+                  << " wgcContentSizeMismatchDrops=" << capture.wgcContentSizeMismatchDrops.load(std::memory_order_relaxed)
+                  << " wgcPoolRecreates=" << capture.wgcPoolRecreates
+                  << " captureWindowRebindCount=" << capture.rebindCount.load(std::memory_order_relaxed)
+                  << " captureTargetPid=" << capture.targetPid.load(std::memory_order_relaxed)
                   << " captureTargetProc=" << targetProcessName
                   << " captureTargetHwnd=0x" << std::hex
-                  << hostCaptureTargetHwnd.load(std::memory_order_relaxed) << std::dec
+                  << capture.targetHwnd.load(std::memory_order_relaxed) << std::dec
                   << " inputEvents=" << inputRouter.events.load()
                   << " secureInputAttempts=" << inputRouter.secureAttempts.load()
                   << " secureInputDelivered=" << inputRouter.secureDelivered.load()
@@ -7169,7 +7216,7 @@ int main(int argc, char** argv) {
         // this climbing in lockstep with watchdog.oldestGpuPendingPeakUs. Per Codex: report it, but never
         // drive the watchdog off it, since a static change-driven desktop is legitimately silent.
         const uint64_t statsNowUs = qpc_now_us();
-        const uint64_t lastPublishAtUs = lastPublishUs.load(std::memory_order_acquire);
+        const uint64_t lastPublishAtUs = capture.lastPublishUs.load(std::memory_order_acquire);
         const uint64_t lastPublishAgeUs =
             (lastPublishAtUs > 0 && statsNowUs > lastPublishAtUs) ? statsNowUs - lastPublishAtUs : 0;
         std::cout << "[native-video-host] encodedFrames=" << encoder.encodedFrames
@@ -7184,14 +7231,14 @@ int main(int argc, char** argv) {
                   << " queueDepthMax=" << stats.queueDepthMax.load(std::memory_order_relaxed)
                   << " queueWaitTimeoutCount=" << stats.queueWaitTimeoutCount
                   << " queueWaitNoWorkCount=" << stats.queueWaitNoWorkCount
-                  << " captureRestarts=" << captureRestartCount
-                  << " wgcContentSizeMismatchDrops=" << wgcContentSizeMismatchDrops.load(std::memory_order_relaxed)
-                  << " wgcPoolRecreates=" << wgcPoolRecreates
-                  << " captureWindowRebindCount=" << hostCaptureRebindCount.load(std::memory_order_relaxed)
-                  << " captureTargetPid=" << hostCaptureTargetPid.load(std::memory_order_relaxed)
+                  << " captureRestarts=" << capture.restartCount
+                  << " wgcContentSizeMismatchDrops=" << capture.wgcContentSizeMismatchDrops.load(std::memory_order_relaxed)
+                  << " wgcPoolRecreates=" << capture.wgcPoolRecreates
+                  << " captureWindowRebindCount=" << capture.rebindCount.load(std::memory_order_relaxed)
+                  << " captureTargetPid=" << capture.targetPid.load(std::memory_order_relaxed)
                   << " captureTargetProc=" << targetProcessName
                   << " captureTargetHwnd=0x" << std::hex
-                  << hostCaptureTargetHwnd.load(std::memory_order_relaxed) << std::dec
+                  << capture.targetHwnd.load(std::memory_order_relaxed) << std::dec
                   << " callbackFrames=" << callbackFramesPerSec
                   << " skippedByOverwrite=" << stats.skippedByOverwrite
                   << " stalePreEncodeDrops=" << stats.stalePreEncodeDropCount
@@ -7274,8 +7321,8 @@ int main(int argc, char** argv) {
                   << " fpsTarget=" << encoder.activeFps
                   << " keyintTarget=" << encoder.activeKeyint
                   << " size=" << encoder.activeEncodeW << "x" << encoder.activeEncodeH
-                  << " gpuScaleReq=" << (gpuScalerRequested ? 1 : 0)
-                  << " gpuScaleReady=" << (gpuScalerHealthy ? 1 : 0)
+                  << " gpuScaleReq=" << (capture.gpuScalerRequested ? 1 : 0)
+                  << " gpuScaleReady=" << (capture.gpuScalerHealthy ? 1 : 0)
                   << " gpuScaleAttempts=" << stats.gpuScaleAttempts
                   << " gpuScaleSuccess=" << stats.gpuScaleSuccess
                   << " gpuScaleFail=" << stats.gpuScaleFail
@@ -7301,10 +7348,10 @@ int main(int argc, char** argv) {
                   << " frameGatingStaticSkips=" << frameGating.staticSkipCount
                   << " frameGatingChangePm=" << frameGating.changePermilleLast
                   << " frameGatingChangeAvgPm=" << frameGatingChangeAvgPm
-                  << " captureOfferContent=" << captureCadenceGate.OfferContentCount()
-                  << " captureOfferPointer=" << captureCadenceGate.OfferPointerCount()
-                  << " captureGateDropContent=" << captureCadenceGate.GateDropContentCount()
-                  << " captureGateDropPointer=" << captureCadenceGate.GateDropPointerCount()
+                  << " captureOfferContent=" << capture.cadenceGate.OfferContentCount()
+                  << " captureOfferPointer=" << capture.cadenceGate.OfferPointerCount()
+                  << " captureGateDropContent=" << capture.cadenceGate.GateDropContentCount()
+                  << " captureGateDropPointer=" << capture.cadenceGate.GateDropPointerCount()
                   << " trailingKickCount=" << kick.count
                   << " staticRefreshCount=" << kick.staticRefreshCount
                   << " lastKickSourceAgeUs=" << kick.lastSourceAgeUs
@@ -7493,7 +7540,7 @@ int main(int argc, char** argv) {
             // switches, RDP) that a frozen value never could. Runtime tuning does the same
             // already, and the hysteresis state is shared so the two cannot fight.
             const auto ladderChoice = remote60::native_poc::choose_abr_profile_size(
-                targetProfile, targetBitrate, captureWidth, captureHeight, rate.encodeLadderReduced);
+                targetProfile, targetBitrate, capture.width, capture.height, rate.encodeLadderReduced);
             uint32_t targetW = ladderChoice.width;
             uint32_t targetH = ladderChoice.height;
 
