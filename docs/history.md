@@ -6965,5 +6965,8 @@ Next action
   전역 `gUdpPacePeakBitrateBps/gUdpVideoFecInterleaved/gUdpKeyframePacePeakBitrateBps`는 헤더의 `inline std::atomic`
   (main loop 8곳이 unqualified로 계속 사용; UdpPacer 멤버화는 Phase 2). host_main 8,524→8,266줄.
 - 순수 이동 검증: 제거 265줄 정렬 대조 → 차이는 전역 3줄의 `inline`뿐.
-- **정정**: d522474 시점의 빌드는 실제로 실패했었다(C2011/C2084 — WinsockScope/send_all/recv_all/recv_discard가  native_socket.hpp의 공유 정의와 재정의 충돌). `cmake --build … | tail` 파이프가 종료코드를 가려 exit 0으로 오판.  후속 커밋 eeb703e에서 호스트 사본 4개를 제거(공유본과 byte-동일, 동작 불변)하고 PIPESTATUS로 종료코드 검사 → 빌드 exit 0,  warning/error 0. 이후 모든 빌드 게이트는 `set -o pipefail` + PIPESTATUS로 판정한다.
+- **정정**: d522474 시점의 빌드는 실제로 실패했었다(C2011/C2084 — WinsockScope/send_all/recv_all/recv_discard가
+  native_socket.hpp의 공유 정의와 재정의 충돌). `cmake --build … | tail` 파이프가 종료코드를 가려 exit 0으로 오판.
+  후속 커밋 eeb703e에서 호스트 사본 4개를 제거(공유본과 byte-동일, 동작 불변)하고 PIPESTATUS로 종료코드 검사 → 빌드
+  exit 0, warning/error 0. 이후 모든 빌드 게이트는 `set -o pipefail` + PIPESTATUS로 판정한다.
 - 다음 액션: 0-1 `host_input_inject.hpp/.cpp`(헤더 작성 완료) → 0-7b `host_args` 확장(parse_args + env 프리루드).
