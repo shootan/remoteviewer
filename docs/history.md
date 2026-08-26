@@ -6999,3 +6999,13 @@ Next action
   미지 플래그를 무시하는 기존 동작(변경 없음).
 - 다음 액션: Phase 1 — 502개 지역변수를 12개 state struct로(기능 기준, `// cross-thread:` 블록). 첫 struct는 결합도 낮은
   RateControlState(abr*/m9* 65개, main 전용) 또는 FrameGatingState(20개)부터.
+
+### 273) 2026-08-26 리팩터 Phase 1-7 — FrameGatingState (브랜치 61fa33f)
+
+- main()의 frameGating* 지역변수 20개(env 설정 6, 파생 간격 1, 참조프레임·스트릭 8, 텔레메트리 5)를 익명 네임스페이스의
+  `struct FrameGatingState` 필드로 묶고 `frameGating.<field>`로 기계적 치환(97줄). 설정 필드는 const를 잃지만 재대입 없음.
+  로그 라벨(" frameGatingMode=" 등)은 변수명과 겹치지 않음을 치환 전 확인 → 로그 텍스트 불변.
+- 게이트: host 빌드 PIPESTATUS exit 0 / UDP e2e 13/13 ALL PASS(격리 호스트 44100).
+- 도구: `automation/rename_outside_strings.pl` — 문자열 리터럴 밖에서만 식별자를 치환(다음 1-6 RateControlState는
+  " abrProfile=" 같은 라벨이 변수명과 겹쳐 필요). 자가 테스트 통과.
+- 다음 액션: 1-6 RateControlState(abr*/m9*/ceiling 65개, main 전용).
