@@ -7009,3 +7009,12 @@ Next action
 - 도구: `automation/rename_outside_strings.pl` — 문자열 리터럴 밖에서만 식별자를 치환(다음 1-6 RateControlState는
   " abrProfile=" 같은 라벨이 변수명과 겹쳐 필요). 자가 테스트 통과.
 - 다음 액션: 1-6 RateControlState(abr*/m9*/ceiling 65개, main 전용).
+
+### 274) 2026-08-26 리팩터 Phase 1-6 — RateControlState (브랜치 b20f5f4)
+
+- main()의 abr*/m9*/userFpsCeiling/userKeyintCeiling/autoFallback720/encodeLadderReduced 58개를 `struct RateControlState`
+  (env 설정 17 / 레더 기하·비트레이트 31 / 상한 2 / 런타임 카운터 8)로 묶고 `rate.<원래이름>`으로 치환(224줄).
+  " abrProfile=" 같은 로그 라벨이 변수명과 겹치므로 `automation/rename_outside_strings.pl`(문자열 리터럴 밖 치환)로
+  수행 → 파일 내 문자열 리터럴 집합 1,160개 before/after diff = 동일(1-7도 소급 확인). 람다 명시 캡처 없음 확인.
+- 게이트: host 빌드 PIPESTATUS exit 0 / UDP e2e 13/13 ALL PASS / 호스트 로그 `abr=on abrMode=default … m9=off m9Mode=dry-run` 그대로.
+- 다음 액션: 1-8 KickState(trailing kick + 정적 리프레시 + selectionFirstKeyframe 14개; servedBootstrap은 루프 지역변수라 제외).
