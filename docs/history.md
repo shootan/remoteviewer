@@ -7051,3 +7051,12 @@ Next action
   문자열 리터럴 집합은 struct 주석의 "readback slow" 인용 1건 외 동일.
 - 게이트: host 빌드 exit 0 / UDP e2e 13/13 / 로그 워치독 발동 0, `captureInputMinPushPerSec=10 …` 라벨 그대로.
 - 다음 액션: 1-9 InputRouterState(31개, 인스턴스명 inputRouter — 지역 `input` 메시지 변수와 충돌 회피).
+
+### 279) 2026-08-26 리팩터 Phase 1-9 — InputRouterState (브랜치 a57d2ac)
+
+- 주입 모드/활성 2, SYSTEM 브로커 클라이언트, secure-desktop 카운터 5, 입력 도메인 atomic 2, DesktopInputState, 명시 타깃
+  criteria, 원인별 실패 카운터 14, 원격 커서 포워더 상태 4 = 31개 → `struct InputRouterState`(인스턴스 `inputRouter` —
+  control 핸들러의 지역 `input` 메시지 변수와 충돌 회피). 브로커 생성자는 defaulted라 멤버화해도 부작용 없음. 리터럴 집합 동일.
+- 게이트: host 빌드 exit 0 / UDP e2e 13/13 / 로그 `input injection enabled mode=background_message` 그대로.
+- 다음 액션: 1-2 SenderState(42개 + EncodedSendItem을 파일 스코프로; WGC FrameArrived 콜백 매개변수 `sender`→`framePool`
+  로 이름만 바꿔 그림자 충돌 제거).
