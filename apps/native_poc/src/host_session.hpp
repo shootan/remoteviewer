@@ -78,6 +78,30 @@ struct SessionState {
   std::atomic<uint64_t> controlReadyEpoch{0};
   std::mutex epochMu;
   std::condition_variable epochCv;
+
+  // --- behaviour (Phase 2-3: former main() lambdas begin_session_epoch / await_control_ready) ---
+  // Open a new session epoch for a just-connected client; returns the epoch to wait on.
+  uint64_t BeginEpoch() {
+    SessionState& clientSession = *this;
+    const uint64_t epoch = clientSession.epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
+    // Wakes the dispatcher out of its blocking read so it can pick the new epoch up. Reset is
+    // deliberately left to that thread: doing it here would clear the queues underneath a
+    // session still being served.
+    clientSession.udpControlChannel.Close(remote60::native_poc::ControlCloseReason::SessionRollover);
+    clientSession.epochCv.notify_all();
+    return epoch;
+  }
+  // Block until the control channel has served that epoch (or the host stops).
+  void AwaitControlReady(uint64_t epoch) {
+    SessionState& clientSession = *this;
+    std::unique_lock<std::mutex> lock(clientSession.epochMu);
+    // Bounded: if the dispatcher cannot come back we answer the client anyway, because a session
+    // with video and no window list still beats one that never starts.
+    clientSession.epochCv.wait_for(lock, std::chrono::milliseconds(1500), [&] {
+      return clientSession.controlReadyEpoch.load(std::memory_order_acquire) >= epoch ||
+             clientSession.epoch.load(std::memory_order_acquire) > epoch;
+    });
+  }
 };
 
 }  // namespace remote60::native_poc

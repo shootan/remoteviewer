@@ -17,9 +17,14 @@
 #include <thread>
 #include <vector>
 
+#include "native_video_transport.hpp"
 #include "poc_protocol.hpp"
 
 namespace remote60::native_poc {
+
+struct Args;
+struct EncoderState;
+struct SessionState;
 
 // H4: the encode thread hands encoded frames to this sender instead of pacing the wire
 // inline. Pacing a 60ms keyframe used to stall the next frame's encode start directly.
@@ -102,6 +107,15 @@ struct SenderState {
   uint64_t udpTxBytes = 0;
   uint64_t udpTxFail = 0;
   uint64_t udpTxNoPeer = 0;
+
+  // --- behaviour (Phase 2-3: former main() lambdas start_encoded_sender / pump_udp_hello;
+  //     bodies in host_encoded_sender.cpp) ---
+  // Start the sender thread (UDP + H.264 only). It dequeues AUs, paces them onto the wire and
+  // drives the media barrier; see the thread body for the full policy.
+  void StartThread(VideoTransport transport, bool useH264, const Args& args, SessionState& clientSession);
+  // Consume a reader-thread peer change: swap the peer and roll the media session over in one
+  // transaction (drop backlog, hold deltas until an IDR, bump the epoch, force a keyframe).
+  void PumpUdpHello(VideoTransport transport, EncoderState& encoder);
 };
 
 }  // namespace remote60::native_poc
