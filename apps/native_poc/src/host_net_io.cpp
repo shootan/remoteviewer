@@ -37,17 +37,6 @@ ULONG resolve_bind_address(const std::string& bindAddress) {
   return htonl(INADDR_ANY);
 }
 
-bool send_all(SOCKET s, const void* data, size_t len) {
-  const char* p = reinterpret_cast<const char*>(data);
-  size_t sent = 0;
-  while (sent < len) {
-    const int n = send(s, p + sent, static_cast<int>(len - sent), 0);
-    if (n <= 0) return false;
-    sent += static_cast<size_t>(n);
-  }
-  return true;
-}
-
 bool send_all_timed(SOCKET s, const void* data, size_t len, uint64_t* outUs,
                     uint64_t* outCallCount) {
   const char* p = reinterpret_cast<const char*>(data);
@@ -65,28 +54,6 @@ bool send_all_timed(SOCKET s, const void* data, size_t len, uint64_t* outUs,
   const uint64_t doneUs = qpc_now_us();
   if (outUs) *outUs = (doneUs >= startUs) ? (doneUs - startUs) : 0;
   if (outCallCount) *outCallCount = calls;
-  return true;
-}
-
-bool recv_all(SOCKET s, void* out, size_t len) {
-  auto* p = reinterpret_cast<uint8_t*>(out);
-  size_t got = 0;
-  while (got < len) {
-    const int n = recv(s, reinterpret_cast<char*>(p + got), static_cast<int>(len - got), 0);
-    if (n <= 0) return false;
-    got += static_cast<size_t>(n);
-  }
-  return true;
-}
-
-bool recv_discard(SOCKET s, size_t len) {
-  std::vector<uint8_t> scratch(1024);
-  size_t left = len;
-  while (left > 0) {
-    const size_t chunk = std::min(left, scratch.size());
-    if (!recv_all(s, scratch.data(), chunk)) return false;
-    left -= chunk;
-  }
   return true;
 }
 

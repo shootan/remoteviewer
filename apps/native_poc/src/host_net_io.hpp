@@ -2,7 +2,8 @@
 
 // Socket I/O primitives and the UDP video chunk sender (pacing + XOR FEC) used by the host.
 //
-// Role:    Winsock lifetime (WinsockScope), bind-address parsing, blocking TCP send/recv helpers
+// Role:    bind-address parsing, timed TCP send (send_all/recv_all/recv_discard/WinsockScope come
+//          from native_socket.hpp -- the host used byte-identical private copies before the split)
 //          with optional timing (SendPathStats), and send_udp_chunks*: split one encoded AU into
 //          MTU-sized datagrams, pace them against the configured peak bitrate, append one XOR
 //          parity datagram per FEC group (consecutive or interleaved), and abort mid-frame when the
@@ -28,25 +29,14 @@
 #include <cstdint>
 #include <string>
 
+#include "native_socket.hpp"  // WinsockScope (the host used a byte-identical private copy; now the shared one)
 #include "poc_protocol.hpp"
 
 namespace remote60::native_poc {
 
-struct WinsockScope {
-  bool ok = false;
-  WinsockScope() {
-    WSADATA wsa{};
-    ok = (WSAStartup(MAKEWORD(2, 2), &wsa) == 0);
-  }
-  ~WinsockScope() {
-    if (ok) WSACleanup();
-  }
-};
-
 /** Network-order address for bind(); 0.0.0.0 when unset. A typo must not bind nowhere silently. */
 ULONG resolve_bind_address(const std::string& bindAddress);
 
-bool send_all(SOCKET s, const void* data, size_t len);
 
 struct SendPathStats {
   uint64_t headerUs = 0;
@@ -59,8 +49,6 @@ struct SendPathStats {
 
 bool send_all_timed(SOCKET s, const void* data, size_t len, uint64_t* outUs,
                     uint64_t* outCallCount);
-bool recv_all(SOCKET s, void* out, size_t len);
-bool recv_discard(SOCKET s, size_t len);
 
 // Peak send rate used to spread one frame's datagrams over time, as a multiple of the
 // configured average bitrate. Sending a whole keyframe as an unthrottled burst overruns the

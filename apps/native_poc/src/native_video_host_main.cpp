@@ -978,7 +978,8 @@ InputInjectResult apply_input_text_message(const ControlInputTextMessage& text,
 // compute_window_client_crop / CreateItemForPrimaryMonitor / SurfaceToTexture moved to
 // host_capture_device.hpp/.cpp (host split refactor Phase 0-6).
 
-// WinsockScope / resolve_bind_address moved to host_net_io.hpp/.cpp (host split refactor Phase 0-5).
+// resolve_bind_address moved to host_net_io.hpp/.cpp (host split refactor Phase 0-5). WinsockScope was a
+// byte-identical private copy of native_socket.hpp's; the using-declaration now names the shared one.
 
 // struct Args + parse_u32/env_truthy/env_u32_clamped moved to host_args.hpp (host split refactor
 // Phase 0-7a). Brought back into unqualified scope by the using-declarations near the top of the
@@ -1161,7 +1162,8 @@ Args parse_args(int argc, char** argv) {
 // struct GpuBgraScaler moved to host_gpu_scaler.hpp (host split refactor Phase 0-3); see the
 // using-declaration near the top of the anonymous namespace.
 
-// send_all(_timed) / SendPathStats / recv_all / recv_discard / kUdpReceiveBufferBytes / gUdpPace* /
+// send_all_timed / SendPathStats / kUdpReceiveBufferBytes / gUdpPace* / (send_all / recv_all / recv_discard
+// were byte-identical private copies of native_socket.hpp's and now resolve to the shared ones) /
 // udp_pace_* / UdpSendOutcome / send_udp_chunks(_impl/_timed) moved to host_net_io.hpp/.cpp (host
 // split refactor Phase 0-5). Brought back into unqualified scope by the using-declarations near the
 // top of the anonymous namespace.
