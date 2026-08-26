@@ -7018,3 +7018,11 @@ Next action
   수행 → 파일 내 문자열 리터럴 집합 1,160개 before/after diff = 동일(1-7도 소급 확인). 람다 명시 캡처 없음 확인.
 - 게이트: host 빌드 PIPESTATUS exit 0 / UDP e2e 13/13 ALL PASS / 호스트 로그 `abr=on abrMode=default … m9=off m9Mode=dry-run` 그대로.
 - 다음 액션: 1-8 KickState(trailing kick + 정적 리프레시 + selectionFirstKeyframe 14개; servedBootstrap은 루프 지역변수라 제외).
+
+### 275) 2026-08-26 리팩터 Phase 1-8 — KickState (브랜치 e653baf)
+
+- trailing kick(pending/dueAt/count/lastSourceAge + lastSeen*/lastReal*/lastEmitted*/lastKickedFor*), 정적 리프레시
+  (interval/count/lastAttempt), selectionFirstKeyframe* 14개 → `struct KickState`(`kick.<field>`). servedBootstrap은 루프
+  지역변수라 제외. 문자열 리터럴 집합 동일 확인. 인스턴스는 원래 선언 위치(3703)에 두어 스코프 불변.
+- 게이트: host 빌드 exit 0 / UDP e2e 13/13 / 호스트 로그 trailing-edge kick 2회 정상.
+- 다음 액션: 1-10 ClientMetricsSnapshot(atomic 23개, control 쓰기·main 읽기 — atomic 유지, 그룹핑만).
