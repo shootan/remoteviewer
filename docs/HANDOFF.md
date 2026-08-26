@@ -4,8 +4,8 @@
 읽으면 이어서 작업할 수 있도록 정리한 인수인계 문서.
 
 ## 지금 상태 한 줄
-"게임 중 멈춤/끊김" 문제를 원인별로 분해해 P0·P1·P1.5까지 배포(0.2.54~0.2.56). **현재 최신
-설치본은 `dist/GNLinkSetup-0.2.56.exe`.** 남은 것은 실기 검증 대기 + P2/P3.
+"게임 중 멈춤/끊김" 문제를 원인별로 분해해 P0·P1·P1.5·필드안정화까지 배포(0.2.54~0.2.57). **현재 최신
+설치본은 `dist/GNLinkSetup-0.2.57.exe`.** 남은 것은 실기 검증 대기 + P2/P3.
 
 ## 배포 이력 (상세는 history.md 해당 번호)
 - 0.2.50 (250) 인코더 output-starvation 계측
@@ -15,6 +15,8 @@
 - 0.2.55 (257) P1: force-key 래치(IDR 연발 제거) + keyint A/B 오버라이드
 - 0.2.56 (258) P1.5: 유령 top-left 버튼 제거(+툴바 "대상 선택" 복원) / 입력 실패 stage 계측 /
   default-desktop SetCursorPos 실패 시 SYSTEM 브로커 폴백
+- 0.2.57 (261) 필드 안정화: 클라 참조체인 key-anchor IDR 재동기(텍스트 스크롤 깨짐) / DXGI 워커 웨지
+  독립 워치독(5s kill, exit44, supervisor 동일 recovery 클래스) / readback-slow 로그 1s rate-limit / GOP 계측
 
 ## "멈춤/끊김"의 확정된 원인 4갈래와 상태
 1. 정적 화면이 안 갱신됨 → **해결**(0.2.54 1Hz 리프레시).
@@ -25,12 +27,14 @@
    근본(공급)은 P2 미착수**.
 
 ## 다음 액션 (순서 — Codex 합의)
-**A. 0.2.56 실기 판정 (다음 세션 최우선, 이게 나오기 전엔 아래를 쌓지 말 것)**
+**A. 0.2.56→0.2.57 실기 판정 (다음 세션 최우선, 이게 나오기 전엔 아래를 쌓지 말 것)**
    판정선 4개:
    1) 게임 지도 좌상단/브레드크럼 클릭이 picker/macro 무발화 + 게임에 정상 전달
    2) 입력 실패 시 host 로그 `stage=set_cursor_pos` → `inputDefaultBrokerQueued` 증가
    3) `%ProgramData%\GNLink\secure_input.log`에 `inject=ok`/landed (폴백이 실제로 클릭을 넣었나)
    4) stuck button/drag 0건
+   5) (0.2.57/261 추가) 텍스트 스크롤 garbage 소멸 + viewer `staleRefRecoveries` 관찰 / 게임 프리즈 시
+      host_app 로그 `dxgi-worker watchdog code=44` 후 수초 내 자동복구 / readback-slow 로그 ≤1줄/초
    로그 수집: 클라 "로그 폴더" 버튼 → `viewer.log*`,`client.log*`; host "Open log" → `host_app.log*`;
    그리고 host의 `%ProgramData%\GNLink\secure_input.log`.
 
@@ -38,7 +42,7 @@
    - 폴백이 먹으면: sticky input routing 착수(아래 부채) → 그 다음 P2.
    - 폴백이 안 먹으면: secure_input.log의 attach/journal/inject 단계로 다음 원인 특정.
 
-**C. P2 readback (호스트 60fps 공급)** — 착수 전 **SyntheticRefresh flag 선행 필수**(아래).
+**C. P2 readback (호스트 60fps 공급)** — 착수 전 **SyntheticRefresh flag 선행 필수**(아래) + 호스트 분할 리팩터 Phase 1~3 선행(구현계획 참조).
 **D. P3 클라 paced playout(도착 버스트 평탄화), P4 해상도 프리셋 UI.**
 
 ## 미해결 부채 (Codex 합의, 반드시 유지)
@@ -80,3 +84,6 @@
   (구간 지도 §1.2, 결합도 §1.3). Phase 0(순수 이동)은 실기 판정과 무관하게 진행 가능, Phase 1~3은
   P2 착수 전 완료. 이 리팩터는 사용자 결정으로 **Codex 교차검증 없이** 진행한다(위 "교차검증" 권고의
   예외). 지금은 특정 코드 찾을 때 grep/sed로 좁혀야 함.
+- **브랜치**: 리팩터 코드는 `refactor/host-split`(main에서 분기, Phase 0-9 완료 = 2f09ec5). 계획·이력·체크리스트
+  문서는 **main에서만** 갱신하고 브랜치는 `git merge main`으로 동기화한다. Phase 0 실행 순서·의존성 정정은
+  계획 문서 상단 2026-08-26 갱신 블록 참조.
