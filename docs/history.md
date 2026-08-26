@@ -6908,3 +6908,14 @@ Next action
 - 순수 이동 검증: 제거 74줄 vs 헤더 본문 74줄 diff → `inline` 4곳만 차이.
 - 검증: 브랜치 host 타깃 Release 빌드 exit 0, warning/error 0.
 - 다음 액션: 0-2 `host_bgra_scale.hpp/.cpp`(.cpp 신규 TU, CMake 소스 추가).
+
+### 265) 2026-08-26 리팩터 Phase 0-2 — host_bgra_scale.hpp/.cpp 추출 (브랜치 refactor/host-split 9a10e63)
+
+- 이동: clamp_even_dim, fit_size_preserving_aspect, choose_h264_encode_size, choose_abr_720_size,
+  estimate_bgra_change_permille, box_halve_bgra, resize_bgra_bilinear, capture_window_thumbnail →
+  `host_bgra_scale.hpp`(선언+요약) / `host_bgra_scale.cpp`(정의, 신규 TU, CMake 호스트 타깃 소스 추가).
+  PW_RENDERFULLCONTENT 정의도 동반 이동. host_main 9,764→9,469줄.
+- 순수 이동 검증: 제거 292줄 vs .cpp 본문 292줄 diff → IDENTICAL.
+- 검증: 브랜치 host 타깃 Release 빌드 exit 0, warning/error 0 (CMake 재생성 포함).
+- 순서 정정: GpuBgraScaler(0-3)가 D3DReadbackTiming(0-10)을 쓰므로 0-10을 0-3 앞으로.
+- 다음 액션: 0-10 `host_bottleneck.hpp` + `host_frame_state.hpp` → 0-3 `host_gpu_scaler.hpp`.
