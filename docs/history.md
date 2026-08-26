@@ -7263,3 +7263,27 @@ Next action
   REMOTE60_NATIVE_ENCODED_EXPERIMENT 매크로(이제 host_startup_config.cpp만 읽음)·"moved to" 잔존 주석 ~65줄 제거.
   main() 바이트 동일. main.cpp 540→265줄. 게이트: host 빌드 + UDP e2e 13/13. 스크립트: automation/host_split_phase2_12b.sh.
 - 계획 §0 지표 갱신: main() ≤300 달성(123), 파일 50개 + main, 800줄 초과는 encode_send_h264(989)만 → 다음 2-13.
+
+### 298) 2026-08-26 리팩터 Phase 2-13 — encode_send_h264 AU 루프 본문 분리 (브랜치 7870014)
+
+- 800줄 초과로 남아 있던 마지막 호스트 모듈 host_stage_encode_send_h264.cpp(989)의 `for (au : units)` 루프 본문(491줄)을
+  encode_send_h264_emit_au()(host_stage_encode_send_h264_au.cpp)로 verbatim 이동. 루프 자체의 continue/break 10곳(루프 수준만,
+  return 없음 — loop_exits.pl 확인)은 `return AuFlow::Continue/Break`, 본문은 4칸 디인덴트. 본문이 읽는 함수 지역변수 14개는
+  H264AuBatch(참조 묶음, HostContext와 같은 패턴)로 전달, constexpr kSenderQueueMaxFrames는 새 헤더 host_stage_encode_send_h264.hpp로.
+  989 → 506 + 636 + 52. 검증: 본문 diff = 탈출 10줄만, 부모는 루프 밖 불변(+include, −constexpr), 리터럴 집합 불변, host 빌드,
+  UDP e2e 13/13(udpTxFrames/키 AU/트레일링 킥 카운터 진행). 도구: automation/host_split_phase2_13.sh, decls_at_depth1.pl.
+- 참고: main ↔ 브랜치 체크아웃 왕복 뒤 작업 트리의 추적 파일이 CRLF로 다시 써짐(core.autocrlf=true). 스크립트는 tr -d '\r'로
+  정규화한 사본을 기준으로 검증, 커밋 시 git이 LF로 정규화하므로 저장소 내용엔 영향 없음.
+
+### 299) 2026-08-26 리팩터 Phase 2-T1 — ABR/M9 결정 로직 멤버화 + 첫 단위테스트 (브랜치 3fde905)
+
+- stats_tick_h264의 1초 결정 블록 2개 → RateControlState::DecideAbrProfile(const AbrInputs&, t)/CommitAbrProfile,
+  DecideM9Level(const M9Inputs&, t)/CommitM9Level(host_abr.hpp, 헤더 전용). 본문은 원문 그대로이되 상태 밖에서 읽던 값
+  (이번 초 클라 메트릭, 호스트 cb2e 폴백 근거, sender.sentFrames, frameGating.staticMode, encoder.activeFps, startUs)만 `in.` 필드로
+  — 바뀐 줄 29+15개 전부 리네임(diff로 확인). 스테이지는 같은 지역값으로 입력을 채우고 적용/로그(ApplyTarget, forceKeyNext)는
+  그대로. 계획 §5 2-5(AbrController)는 별도 클래스 대신 멤버화로 충족.
+- host_abr_test.cpp(remote60_host_abr_test): 시간을 인자로 세션을 초 단위로 구동 — ABR 9(워밍업 홀드, 희소/정지 홀드·스트릭 리셋,
+  high→mid 2/3초, 쿨다운 후 mid→low, 비상→low, 호스트 폴백 근거, mid→high 8/12초·스트릭 리셋, low→mid/저프로파일 없음, 강등 대상 없음)
+  + M9 5(연속 초 요구·쿨다운·0~3 한계, 스트릭 리셋, 회복, 스테일 메트릭 폴백/무회복, 축별 단독 강등) = 14 PASS.
+- 게이트: 리터럴 집합 불변, host + 테스트 빌드, 단위테스트 PASS, UDP e2e 13/13. 스크립트: automation/host_split_phase2_t1.sh.
+- 다음: T2 frame gating(FrameGatingState 전이/스킵), T3 kick(KickState 데드라인/1회 킥 가드/정적 리프레시), T4 backend 백오프/승격 게이트.
