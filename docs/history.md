@@ -6970,3 +6970,14 @@ Next action
   후속 커밋 eeb703e에서 호스트 사본 4개를 제거(공유본과 byte-동일, 동작 불변)하고 PIPESTATUS로 종료코드 검사 → 빌드
   exit 0, warning/error 0. 이후 모든 빌드 게이트는 `set -o pipefail` + PIPESTATUS로 판정한다.
 - 다음 액션: 0-1 `host_input_inject.hpp/.cpp`(헤더 작성 완료) → 0-7b `host_args` 확장(parse_args + env 프리루드).
+
+### 271) 2026-08-26 리팩터 Phase 0-1 — host_input_inject.hpp/.cpp 추출 (브랜치 f13d76d)
+
+- 이동: InputInjectionMode(+parse/name), DesktopInputState, interactive_desktop_is_default(_uncached), InputInjectResult,
+  InputFailStage(+name), inject_background_input_event, apply_input_text_message + 파일-private Win32 헬퍼(마우스/키 매핑,
+  키보드 상태, 좌표 스케일, 타깃 해석, SendInput 래퍼 — .cpp 익명 네임스페이스) → `host_input_inject.hpp/.cpp`(신규 TU).
+  host_main 8,266→7,628줄. 이동 전 공유 헤더와의 이름 충돌 사전 스캔(0-5 재발 방지) → 충돌 없음.
+- 순수 이동 검증: 제거 619줄 정렬 대조 → .cpp/.hpp에 없는 줄은 기본인자 시그니처 2줄(헤더로 이동)뿐.
+- 검증: 브랜치 host 타깃 Release 빌드 PIPESTATUS exit 0, warning/error 0.
+- 다음 액션: 0-7b — parse_args만 `host_args.cpp`(신규 TU)로 이동. main 첫 236줄 env 프리루드는 **Phase 1에서** 상태
+  struct(RateControl/FrameGating/…)로 흡수한다(지금 옮기면 main 본문 수백 곳의 이름을 바꿔야 해 Phase 0 "순수 이동" 규칙 위반).
