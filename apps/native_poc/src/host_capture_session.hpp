@@ -8,7 +8,12 @@
 
 #include <windows.h>
 
+#include <d3d11.h>
+#include <wrl/client.h>
+
 #include <winrt/Windows.Graphics.h>
+#include <winrt/Windows.Graphics.Capture.h>
+#include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 
 #include <atomic>
 #include <cstdint>
@@ -20,11 +25,23 @@
 #include <string>
 #include <vector>
 
+#include "capture_backend_dxgi.hpp"
 #include "capture_cadence_gate.hpp"
+#include "d3d_capture_readback.hpp"
+#include "gdi_capture_process.hpp"
+#include "host_frame_state.hpp"
+#include "host_gpu_scaler.hpp"
 #include "host_capture_device.hpp"
 #include "host_window_enum.hpp"
 
 namespace remote60::native_poc {
+
+struct DesktopBackendState;
+struct EncoderState;
+struct FrameGatingState;
+struct HostStats;
+struct KickState;
+struct SessionState;
 
 // Static-screen bootstrap cache: a memory-only copy of the last raw frame actually published,
 // plus the identity of the capture that produced it. On a static desktop DXGI AcquireNextFrame
@@ -63,6 +80,37 @@ struct BootstrapFrameCache {
 // the cadence gate (callbacks arrive on more than one thread); fallbackReasonMu guards the two
 // reason strings; resourceMu serialises pool/readback recreation; bootstrapCacheMu guards the
 // bootstrap frame.
+
+// Capture resources (Phase 2-4): the RAII / WinRT / D3D objects the capture path owns -- the D3D
+// device + immediate context (shared with the GPU scaler under d3dContextMu), the readback ring and
+// its publish callback, the WinRT interop device, the WGC frame pool + session, and the DXGI / GDI
+// backend sessions. Declared in the same order as the former main() locals so their destruction
+// order is unchanged; main() still creates the device / interop device into them at the original
+// points and owns the capture item, the FrameArrived event token and the DXGI worker watchdog.
+// thread: main loop creates/destroys; the readback worker and capture callbacks use frame,
+// captureReadback and the D3D context (under d3dContextMu) while a session is attached.
+// Frame-queue wait bounds shared by main() and CaptureState::EffectiveQueueWaitTimeoutUs.
+constexpr uint64_t kQueueWaitTimeoutUsDefault = 100000;  // 100ms
+constexpr uint64_t kQueueWaitTimeoutUsMin = 5000;  // 5ms
+
+struct CaptureResources {
+  Microsoft::WRL::ComPtr<ID3D11Device> d3d;
+  Microsoft::WRL::ComPtr<ID3D11DeviceContext> ctx;
+  std::mutex d3dContextMu;
+  D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
+  GpuBgraScaler gpuScaler;
+  // FrameState precedes the pipeline so the worker's publish callback never outlives what it
+  // writes into.
+  FrameState frame;
+  D3dCaptureReadbackPipeline captureReadback;
+  D3dCaptureReadbackPipeline::PublishFn capturePublishFn;
+  winrt::com_ptr<::IInspectable> inspectable;
+  winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice d3dDevice{nullptr};
+  winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool pool{nullptr};
+  winrt::Windows::Graphics::Capture::GraphicsCaptureSession session{nullptr};
+  remote60::host::DxgiDesktopCaptureSession dxgiCaptureSession;
+  GdiCaptureProcess gdiCaptureProcess;
+};
 struct CaptureState {
   // Env config (REMOTE60_NATIVE_CAPTURE_*/QUEUE_WAIT_*/DISABLE_GPU_SCALER), fixed after startup.
   bool submitLimitEnabled = true;
@@ -195,6 +243,31 @@ struct CaptureState {
         << " title=" << (title.empty() ? "<empty>" : title);
     return oss.str();
   }
+
+  // --- behaviour (Phase 2-4: former main() capture lambdas; bodies in host_capture_session.cpp) ---
+  // (Re)create the staging/readback ring for a srcW x srcH capture surface.
+  bool CreateStaging(CaptureResources& res, EncoderState& encoder, bool useH264, uint32_t srcW, uint32_t srcH);
+  // Hand a captured texture to the readback ring (capture callback thread).
+  void PublishCapturedTexture(CaptureResources& res, ID3D11Texture2D* src, uint64_t callbackUs,
+                              uint64_t sourceCaptureUs, uint64_t captureAgeAtCallbackUs,
+                              uint64_t captureClockSkewUs, bool hasNewContent);
+  // Subscribe the WGC FrameArrived callback on the current pool.
+  void AttachFrameArrived(CaptureResources& res, SessionState& clientSession, std::atomic<bool>& stop,
+                          winrt::event_token& token);
+  // Tear down the current capture attachment (WGC pool/session, DXGI or GDI backend).
+  void DetachCaptureSession(CaptureResources& res, winrt::event_token& token);
+  // Full restart: detach, resolve the backend, rebuild the pool/readback, reattach.
+  bool RestartCaptureSessionImpl(CaptureResources& res, DesktopBackendState& backend, SessionState& clientSession,
+                                 EncoderState& encoder, std::atomic<bool>& stop, bool useH264,
+                                 winrt::Windows::Graphics::Capture::GraphicsCaptureItem& item, winrt::event_token& token);
+  // Drop everything queued for the encoder after a target/backend/size change.
+  void FlushCapturePipelineState(CaptureResources& res, FrameGatingState& frameGating, HostStats& stats, const char* reason);
+  void LogFirstSentGeneration(CaptureResources& res, HostStats& stats, const char* path, uint64_t streamGeneration,
+                              uint64_t sendStartUs, uint64_t captureStampUs, uint32_t width, uint32_t height);
+  // Serve the cached bootstrap frame for a trailing kick / static refresh, if still valid.
+  bool KickTryFill(SessionState& clientSession, KickState& kick, std::shared_ptr<std::vector<uint8_t>>& outPayload,
+                   uint32_t& outW, uint32_t& outH, uint32_t& outStride, uint64_t nowUs);
+  uint64_t EffectiveQueueWaitTimeoutUs(EncoderState& encoder);
 };
 
 }  // namespace remote60::native_poc
