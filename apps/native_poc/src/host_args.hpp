@@ -12,8 +12,8 @@
 //          (choose_h264_encode_size reads encodeWidth/encodeHeight/bitrate).
 //
 // Extracted verbatim from native_video_host_main.cpp (host split refactor Phase 0-7a). Header-only
-// so no new translation unit is added and behavior is byte-identical. parse_args itself and the env
-// switch prelude move later (Phase 0-7b) once every module they feed has been split out.
+// (parse_args itself lives in host_args.cpp, Phase 0-7b). Behavior is byte-identical. The env
+// switch prelude at the top of main() stays there until Phase 1 folds it into the state structs.
 
 #include <algorithm>
 #include <cstdint>
@@ -92,6 +92,9 @@ inline bool env_truthy(const char* key) {
   const std::string s = v;
   return s == "1" || s == "true" || s == "TRUE" || s == "on" || s == "ON";
 }
+
+// Command line (+ optional --config JSON profile) -> Args. Defined in host_args.cpp.
+Args parse_args(int argc, char** argv);
 
 inline uint32_t env_u32_clamped(const char* key, uint32_t fallback, uint32_t minValue, uint32_t maxValue) {
   if (!key) return fallback;

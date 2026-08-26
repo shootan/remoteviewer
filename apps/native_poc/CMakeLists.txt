@@ -60,6 +60,7 @@ add_executable(remote60_native_video_host_poc
   src/host_capture_device.cpp
   src/host_net_io.cpp
   src/host_input_inject.cpp
+  src/host_args.cpp
   src/d3d_capture_readback.cpp
   src/directory_client.cpp
   src/gdi_capture_process.cpp
