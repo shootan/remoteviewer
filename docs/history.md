@@ -6852,3 +6852,39 @@ Next action
 - Codex 권장 fault-injection 테스트(전용 child + phase 지연 hook로 warn3/kill5/exit44/generation-reset)는
   stable close 전 test debt로 명시.
 - 그 후 호스트 분할 리팩터 Phase 0~3 → FIX-②-deep(P2).
+
+### 262) 2026-08-26 리팩터 착수 전 점검 — 문서·코드·브랜치 교차 확인 + 계획 의존성 정정 + 브랜치 동기화
+
+Goal
+- 사용자 지시: 리팩터 작업 전에 문서부터 브랜치까지 전부 확인.
+
+확인 결과
+- 브랜치: `refactor/host-split`(2f09ec5)은 `90f97f8`(0.2.57)에서 분기, main(c1483aa, 계획 문서 갱신)을
+  포함하지 않음 → 계획 문서가 main/브랜치에서 서로 다르게 편집됨(main: 브랜치 정책+진행 줄, 0-9 `[ ]`;
+  브랜치: 0-9 `[x]`, 정책 줄 없음). `fix/field-stabilization-dxgi-wedge-refchain`은 main에 완전 포함(삭제 가능).
+  main은 origin/main보다 5커밋 앞(미push). 작업 트리 clean(`.claude/`만 untracked, 미ignore).
+- 2f09ec5 코드 diff 검토: 8개 문자열 함수 본문 byte-동일 이동(header-only inline + using 선언), 순수 이동 확인.
+  Release/GNLinkStream.exe 타임스탬프 14:19 = 커밋 시각 → "clean 빌드" 주장과 일치.
+- fix(261)가 추가한 요소 실존 확인: `kExitDxgiWorkerWedge=44`(host_main:138), `DxgiWatchdogJoiner`(5251),
+  `readbackSlowLastLogUs/WindowPeakUs`(5273), `CaptureWorkerPhase`/`SnapshotWorker`(capture_backend_dxgi.hpp),
+  host_app_main `kChildDxgiWorkerWatchdogExitCode=44` 동일 recovery 클래스. host_main 9,988줄, main() 2896~.
+- 문서 불일치: HANDOFF가 0.2.56 최신·261 미반영·브랜치 정책 없음; history에 2f09ec5 항목 없음(AGENTS 워크플로
+  누락); 구현계획 리팩터 섹션 진행 미표시. dist/에 GNLinkSetup-0.2.57.exe(13:25) 존재, product_version 0.2.57 일치.
+- **계획 의존성 오류 발견**: `choose_h264_encode_size(const Args&, …)`가 Args를 받아 0-2 host_bgra_scale이
+  0-7 host_args(마지막 예정)에 의존. Phase 0 각 모듈 범위를 Args/상수/전역/교차호출로 스캔 — 그 외 의존은
+  전부 선행 모듈만 향함(window_enum→string_util, backend_req→env_string_or_empty, input_inject→window_enum,
+  net_io→poc_protocol 상수, gUdpPace* 3개는 main loop 8곳 사용).
+
+수정
+- 계획 문서: 0-7을 0-7a(struct Args+env 헬퍼, header-only, 0-8 직후)/0-7b(parse_args+env 프리루드, 마지막)로
+  분리한 확정 순서, gUdpPace*는 Phase 0에서 inline atomic으로, 워크플로(문서는 main에서만·브랜치는 merge)
+  명시. 0-9 `[x]`, §10 진행 1/10.
+- HANDOFF: 최신 0.2.57, 배포 이력 261, 실기 판정선 5) 추가(텍스트 스크롤/exit44/readback 로그), P2 선행조건에
+  리팩터 Phase 1~3, 코드 지도에 브랜치 정책. 구현계획: Phase 0 진행 1/10.
+- 브랜치 동기화: `refactor/host-split`에 main merge(계획 문서는 main 버전 채택) → host 타깃 빌드로 확인.
+
+Validation / build / test
+- (아래 커밋/빌드 결과는 본 항목 커밋 이후 history 263 또는 본 항목 갱신으로 기록)
+
+Next action
+- 브랜치에서 Phase 0-8 host_log → 0-7a host_args → 0-2 … 순으로 진행. 커밋마다 main에 history + 체크박스.
