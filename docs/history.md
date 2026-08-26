@@ -6981,3 +6981,21 @@ Next action
 - 검증: 브랜치 host 타깃 Release 빌드 PIPESTATUS exit 0, warning/error 0.
 - 다음 액션: 0-7b — parse_args만 `host_args.cpp`(신규 TU)로 이동. main 첫 236줄 env 프리루드는 **Phase 1에서** 상태
   struct(RateControl/FrameGating/…)로 흡수한다(지금 옮기면 main 본문 수백 곳의 이름을 바꿔야 해 Phase 0 "순수 이동" 규칙 위반).
+
+### 272) 2026-08-26 리팩터 Phase 0-7b parse_args 이동 + Phase 0 완료 게이트 통과 (브랜치 3647e41)
+
+- 이동: parse_args → `host_args.cpp`(신규 TU, 163줄 전부 대조 일치), `host_args.hpp`에 선언. env 프리루드(main 첫 236줄)는
+  Phase 1로 이월(대량 리네임 회피). host_main 7,628→7,469줄. **Phase 0 11/11 완료**(9,988→7,469줄, 모듈 10개:
+  host_log 138 / string_util 100 / args 108+180 / bgra_scale 55+330 / gpu_scaler 235 / window_enum 91+340 /
+  capture_device 78+410 / net_io 96+242 / input_inject 100+659 / bottleneck 79 + frame_state 56).
+- 게이트: (A) gate-A 4타깃 빌드 PIPESTATUS exit 0 — host / GNLinkViewer / mf_h264_codec_test / capture_cadence_gate_test /
+  udp_control_e2e_test (클라 native_video_client_main.cpp:3023 C4715 경고 1건은 리팩터 전부터 있던 것, 클라 미변경).
+  (B) mf_h264_codec_test PASS, capture_cadence_gate_test PASS. (C) UDP e2e: 격리 호스트 `GNLinkStream --transport udp
+  --codec h264 --bind-port 44100 --bind-address 127.0.0.1 --control-port 44101 --seconds 90`
+  (REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE=1, ENCODER_TUNE_MODE=low_latency) + `remote60_udp_control_e2e_test 127.0.0.1 44100`
+  → **13/13 ALL PASS**(connect / control over udp / window list / desktop select / stream start / video flows / bitrate
+  down·up / input queue drain / healthy at end). 호스트 로그 정상(mft_enum_hw GOP 60, wire key AU, pacing update).
+- 사고 1건: 존재하지 않는 `--help`로 스모크하려다 호스트가 43000에 그대로 기동됨 → taskkill로 종료(잔존 0). parse_args가
+  미지 플래그를 무시하는 기존 동작(변경 없음).
+- 다음 액션: Phase 1 — 502개 지역변수를 12개 state struct로(기능 기준, `// cross-thread:` 블록). 첫 struct는 결합도 낮은
+  RateControlState(abr*/m9* 65개, main 전용) 또는 FrameGatingState(20개)부터.
