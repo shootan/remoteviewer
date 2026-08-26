@@ -7159,3 +7159,19 @@ Next action
 - 다음 액션: 2-4 CaptureSession — RAII/WinRT/D3D 지역 16개를 `CaptureResources`로 묶고(원래 선언 순서 유지) 캡처 람다
   10개(create_staging/publish/attach/detach/restart_impl/restore/flush/log_first_sent/kick_try_fill/effective_queue_wait)를
   CaptureState 멤버(res + 의존 struct 매개변수)로. event_token `token`·HRESULT `hr`는 이름 충돌로 main 잔류.
+
+### 289) 2026-08-26 리팩터 Phase 2-4 — CaptureResources + CaptureState 멤버 9개 (브랜치 87c85c2)
+
+- main()의 RAII/WinRT/D3D 지역 14개(d3d/ctx/d3dContextMu/fl/gpuScaler/frame/captureReadback/capturePublishFn/inspectable/
+  d3dDevice/pool/session/dxgiCaptureSession/gdiCaptureProcess)를 `CaptureResources`로(원래 선언 순서 유지 → 소멸 순서 불변).
+  캡처 item·event_token·hr·DXGI 워커 워치독은 main 잔류(워치독 캡처는 `&dxgiCaptureSession = res.dxgiCaptureSession` init-capture).
+- create_staging/publish_captured_texture/attach_frame_arrived/detach_capture_session/restart_capture_session_impl(228줄)/
+  flush_capture_pipeline_state/log_first_sent_generation/kick_try_fill/effective_queue_wait_timeout_us → CaptureState 멤버
+  (host_capture_session.cpp 신규 TU). 본문 verbatim(교차 호출 치환 후 diff 동일 9/9), 의존 struct는 명시 매개변수.
+  restore_previous_target는 apply_selected_window_capture의 지역을 읽는 중첩 람다라 main에 복원. kQueueWaitTimeoutUs*는 헤더로.
+- 시행착오: 생성 스크립트의 sed BRE `\(` / perl 파서 줄 훼손으로 2회 실패(본문은 무손상), 시그니처 10줄 수작업 교정,
+  DxgiDesktopCaptureConfig using 누락·워치독 람다 내 res. 참조 교정. 스크립트는 수정본으로 커밋.
+- 게이트: host 빌드 exit 0 / UDP e2e 13/13 / 로그 capture-started·trailing kick·wire 정상. host_main 6,090→5,518줄.
+- 다음 액션: 2-5 EncoderState 멤버(apply_encoder_target/apply_confirmed_capture_geometry/apply_capture_ui_quality_mode) →
+  잔여 람다(restart_capture_session, apply_selected_window_capture, reconnect_tcp, pump_cursor_forward, capturePublishFn)는
+  Phase 3 Tick 단계 함수와 함께 정리.
