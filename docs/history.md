@@ -6884,7 +6884,8 @@ Goal
 - 브랜치 동기화: `refactor/host-split`에 main merge(계획 문서는 main 버전 채택) → host 타깃 빌드로 확인.
 
 Validation / build / test
-- (아래 커밋/빌드 결과는 본 항목 커밋 이후 history 263 또는 본 항목 갱신으로 기록)
+- main 문서 커밋 f9ab14d. 브랜치 `refactor/host-split`: merge 39980c3(auto-merge가 08-26 갱신 블록을 중복시켜 8a211f5에서 main 버전으로 교체) → main과의 차이는 코드 2파일(host_string_util.hpp, host_main)뿐.
+- 브랜치에서 `cmake --build build-local --config Release --target remote60_native_video_host_poc` exit 0, warning/error 0, GNLinkStream.exe 14:33 재생성(2f09ec5+merge 상태 clean 빌드 확인).
 
 Next action
 - 브랜치에서 Phase 0-8 host_log → 0-7a host_args → 0-2 … 순으로 진행. 커밋마다 main에 history + 체크박스.
