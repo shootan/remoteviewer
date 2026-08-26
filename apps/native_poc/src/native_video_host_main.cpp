@@ -60,6 +60,8 @@
 #include "host_log.hpp"
 #include "host_args.hpp"
 #include "host_bgra_scale.hpp"
+#include "host_bottleneck.hpp"
+#include "host_frame_state.hpp"
 
 namespace {
 
@@ -132,6 +134,14 @@ using remote60::native_poc::estimate_bgra_change_permille;
 using remote60::native_poc::box_halve_bgra;
 using remote60::native_poc::resize_bgra_bilinear;
 using remote60::native_poc::capture_window_thumbnail;
+// Bottleneck-stage telemetry records + FrameState extracted to host_bottleneck.hpp /
+// host_frame_state.hpp (Phase 0-10).
+using remote60::native_poc::HostBottleneckStage;
+using remote60::native_poc::D3DReadbackTiming;
+using remote60::native_poc::update_host_bottleneck_stage;
+using remote60::native_poc::detect_host_bottleneck_stage;
+using remote60::native_poc::encoder_api_path_code;
+using remote60::native_poc::FrameState;
 using remote60::native_poc::ControlWindowListMessage;
 using remote60::native_poc::ControlWindowListRequestMessage;
 using remote60::native_poc::ControlWindowSelectMessage;
@@ -225,62 +235,7 @@ constexpr uint32_t kKeyReqTokenCapacityDefault = 3;
 // Phase 0-8). Brought back into unqualified scope by the using-declarations near the top of the
 // anonymous namespace.
 
-struct HostBottleneckStage {
-  uint32_t code = 0;
-  uint64_t us = 0;
-  const char* name = "none";
-};
-
-struct D3DReadbackTiming {
-  uint64_t d3dWaitUs = 0;
-  uint64_t copyMapUs = 0;
-  uint64_t memcpyUs = 0;
-  uint64_t unmapWaitUs = 0;
-  uint64_t unmapUs = 0;
-};
-
-void update_host_bottleneck_stage(uint32_t code, uint64_t us, const char* name,
-                                  HostBottleneckStage* stage) {
-  if (!stage || !name) return;
-  if (us > stage->us) {
-    stage->code = code;
-    stage->us = us;
-    stage->name = name;
-  }
-}
-
-HostBottleneckStage detect_host_bottleneck_stage(uint64_t queueWaitUs, uint64_t queueToEncodeUs,
-                                                 uint64_t preEncodePrepUs, uint64_t scaleUs,
-                                                 uint64_t nv12Us, uint64_t encUs,
-                                                 uint64_t queueToSendUs, uint64_t sendDurUs,
-                                                 uint64_t sendIntervalErrUs) {
-  HostBottleneckStage stage{};
-  update_host_bottleneck_stage(1, queueWaitUs, "queue_wait", &stage);
-  update_host_bottleneck_stage(2, queueToEncodeUs, "queue_to_encode", &stage);
-  update_host_bottleneck_stage(3, preEncodePrepUs, "pre_encode_prep", &stage);
-  update_host_bottleneck_stage(4, scaleUs, "scale", &stage);
-  update_host_bottleneck_stage(5, nv12Us, "bgra_to_nv12", &stage);
-  update_host_bottleneck_stage(6, encUs, "encoder", &stage);
-  update_host_bottleneck_stage(7, queueToSendUs, "queue_to_send", &stage);
-  update_host_bottleneck_stage(8, sendDurUs, "send_io", &stage);
-  // Not the wire: this is the interval between AUs being *enqueued* to the sender by the encode/main
-  // thread. A large value means the host failed to supply AUs steadily (async MFT bursting, main
-  // scheduling), which the client sees as a gap -- the actual wire timing is the "wire seq=" lines.
-  update_host_bottleneck_stage(9, sendIntervalErrUs, "encode_au_enqueue_jitter", &stage);
-  return stage;
-}
-
-uint32_t encoder_api_path_code(const char* backendName) {
-  if (!backendName) return 0;
-  const std::string name = backendName;
-  if (name.find("amf") != std::string::npos) return 1;
-  if (name.find("nvenc") != std::string::npos || name.find("nvidia") != std::string::npos) return 2;
-  if (name.find("qsv") != std::string::npos || name.find("intel") != std::string::npos) return 3;
-  if (name.find("mft") != std::string::npos) return 4;
-  if (name.find("clsid") != std::string::npos) return 5;
-  return 6;
-}
-
+// HostBottleneckStage / D3DReadbackTiming / update_host_bottleneck_stage / detect_host_bottleneck_stage /// encoder_api_path_code moved to host_bottleneck.hpp (host split refactor Phase 0-10). Brought back// into unqualified scope by the using-declarations near the top of the anonymous namespace.
 // String utilities (trim_ascii/ascii_lower/utf8<->wide/wide_lower/hr_hex/parse_csv_lower/
 // base_name_lower) moved to host_string_util.hpp (host split refactor Phase 0). Brought back into
 // unqualified scope by the using-declarations near the top of the anonymous namespace.
@@ -2342,36 +2297,7 @@ UdpSendOutcome send_udp_chunks_timed(SOCKET s, const sockaddr_in& peer, const ui
                               itemEpoch);
 }
 
-struct FrameState {
-  std::mutex mu;
-  std::condition_variable cv;
-  uint64_t version = 0;
-  uint32_t seq = 0;
-  uint32_t width = 0;
-  uint32_t height = 0;
-  uint32_t stride = 0;
-  uint64_t streamGeneration = 0;
-  uint64_t captureUs = 0;
-  uint64_t callbackUs = 0;
-  uint64_t callbackIntervalUs = 0;
-  uint64_t captureAgeAtCallbackUs = 0;
-  uint64_t captureClockSkewUs = 0;
-  uint64_t queuePushUs = 0;
-  uint64_t captureIntervalUs = 0;
-  uint64_t captureD3DWaitUs = 0;
-  uint64_t captureCopyMapUs = 0;
-  uint64_t captureMemcpyUs = 0;
-  uint64_t captureUnmapWaitUs = 0;
-  uint64_t captureUnmapUs = 0;
-  // GPU NV12 conversion of this frame for the zero-copy encode path; -1 when absent.
-  // Whoever pops the frame claims the slot and must release it.
-  int32_t nv12Slot = -1;
-  uint64_t nv12Generation = 0;
-  uint32_t nv12W = 0;
-  uint32_t nv12H = 0;
-  std::shared_ptr<std::vector<uint8_t>> payload;
-};
-
+// FrameState moved to host_frame_state.hpp (host split refactor Phase 0-10); see the// using-declaration near the top of the anonymous namespace.
 }  // namespace
 
 int main(int argc, char** argv) {
