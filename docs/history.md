@@ -7128,3 +7128,14 @@ Next action
 - 게이트: host 빌드 exit 0 / UDP e2e 13/13.
 - 다음 액션: 2-1 자기 struct만 쓰는 소형 람다 16개를 멤버함수로(Kick arm/cancel, Watchdog enter/mark, Capture fallback
   reason·describe, Encoder starvation reset·refresh intervals, Rate m9_level_*). 이후 2-2 ControlSessionServer(681줄 람다).
+
+### 286) 2026-08-26 리팩터 Phase 2-1 — 소형 람다 15개 → state struct 멤버함수 (브랜치 40b69f5)
+
+- KickState::Arm/Cancel(kTrailingKickDelayUs는 static 멤버), WatchdogState::EnterMainPhase/MarkMainProgress,
+  CaptureState::Set/CopyDxgi|GdiFallbackReason·DescribeActiveTarget, EncoderState::ResetStarvationEpisode·
+  RefreshFrameIntervals(capture, frameGating), RateControlState::M9LevelBitrate/Fps/W/H. 본문은 람다 본문에서 인스턴스
+  접두사만 제거, 호출부 30곳 1:1 치환. host_main 7,110→7,017줄.
+- 게이트: host 빌드 exit 0 / UDP e2e 13/13.
+- 다음 액션: 2-2 ControlSessionServer — serve_control_session(681줄)을 host_control_session.hpp/.cpp의 클래스로 verbatim 이동
+  (의존: args, stop, clientSession/capture/clientMetrics/encoder/inputRouter/backend, WindowSelectionTxn). 1단계 순수 이동,
+  2단계에서 메시지별 Handle*로 분할.
