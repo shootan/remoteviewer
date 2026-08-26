@@ -7070,3 +7070,17 @@ Next action
 - 게이트: host 빌드 exit 0 / UDP e2e 13/13 / wire seq 로그 정상.
 - 다음 액션: 1-1 SessionState(26개; 인스턴스 `clientSession` — `GraphicsCaptureSession session`과 충돌 회피; SocketCloser
   파일 스코프 이동; 디렉터리 send 콜백의 값 캡처 `[clientSock]`은 `[clientSock = clientSession.clientSock]`로).
+
+### 281) 2026-08-26 리팩터 Phase 1-1 — SessionState (브랜치 c4f0d73)
+
+- 미디어/컨트롤 소켓 + SocketCloser, 디렉터리 에이전트/세션 인증, sessionEpoch/controlReadyEpoch + 대기, streamControlActive,
+  control/reader 스레드 핸들 = 26개 → `struct SessionState`(인스턴스 `clientSession` — WGC `GraphicsCaptureSession session`과
+  충돌 회피). `struct SocketCloser` 파일 스코프로 verbatim 이동. 디렉터리 send 콜백의 값 캡처 `[clientSock]`은
+  `[clientSock = clientSession.clientSock]`(본문 불변).
+- 리네이머 결함 발견·수정: `args.directoryUrl`처럼 같은 이름의 멤버 접근까지 바꿔 첫 빌드 실패(C2039) → `.`/`->`/`::` 뒤는
+  제외하도록 수정(자가 테스트 통과). 이전 8개 struct에는 같은 오염 없음을 grep으로 확인(`\.(rate|kick|…)\.` 0건).
+- 게이트: host 빌드 exit 0 / UDP e2e 13/13.
+- 다음 액션: 1-5 EncoderState(61개, Nv12PendingRelease 파일 스코프 이동, H264Encoder 객체는 `encoder.codec`) →
+  1-12 HostStats → 1-3 CaptureState는 **두 단계**로: 1-3a 순수 데이터/atomic/카운터(~70), 1-3b RAII·WinRT·D3D 객체
+  (d3d/ctx/pool/item/session/dxgiCaptureSession/gdiCaptureProcess/captureReadback/frame)는 소멸 순서가 바뀌므로 Phase 2
+  CaptureSession 클래스에서 명시적 수명으로 처리(Phase 1에서는 main 지역 유지).
