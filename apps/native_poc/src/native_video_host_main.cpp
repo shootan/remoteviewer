@@ -559,6 +559,44 @@ struct DesktopBackendState {
   std::atomic<uint64_t> lastPromotionWaitUs{0};           // demotion -> successful promotion
 };
 
+// Capture/encode liveness watchdogs (Phase 1-11 state struct): the GDI callback-stall watchdog
+// (input push rate), the DXGI/WGC frozen-ring self-heal, the readback-throughput soft watchdog
+// (per-1s-window deltas), the readback-slow log rate-limit, and the main-loop liveness stamps the
+// independent watchdog thread polls. See the comment blocks in main() for each one's rationale.
+// thread: main loop owns everything; the three mainLoop* atomics are read by the watchdog thread.
+struct WatchdogState {
+  // GDI callback-stall watchdog (REMOTE60_NATIVE_CAPTURE_INPUT_*).
+  uint32_t inputMinPushPerSec = 0;
+  uint32_t inputStallConsecutiveSec = 0;
+  uint32_t inputStallWarmupSec = 0;
+  uint32_t inputLowPushStreakSec = 0;
+  uint64_t deadRestartCount = 0;        // callback-stall + frozen-ring restarts (see frozenRingRestartCount)
+  uint64_t lastCaptureRestartUs = 0;
+  // Frozen-ring self-heal (DXGI/WGC): streak guards a single slow poll; the last restart timestamp
+  // lets a refreeze inside the window escalate to a full process restart.
+  uint32_t frozenPollStreak = 0;
+  uint64_t lastFrozenRestartUs = 0;
+  uint64_t frozenRingRestartCount = 0;  // restarts driven specifically by the frozen ring
+  uint64_t oldestGpuPendingPeakUs = 0;  // per-interval peak of the oldest GpuPending age
+  uint32_t gpuPendingCountPeak = 0;     // per-interval peak GpuPending count
+  // "readback slow" warn rate-limit: one line/sec with the window peak.
+  uint64_t readbackSlowLastLogUs = 0;
+  uint64_t readbackSlowWindowPeakUs = 0;
+  // Readback-throughput soft watchdog over per-1s-window deltas of cumulative sources.
+  uint64_t drainPrevAccepted = 0;
+  uint64_t drainPrevBusyDrops = 0;
+  uint64_t drainPrevSuperseded = 0;
+  uint32_t drainConsecutiveSec = 0;
+  uint64_t drainOldestPendingPeakUs = 0;  // per-1s window, reset every stats tick
+  uint64_t lastDrainRestartUs = 0;
+  uint64_t drainRestartCount = 0;
+  bool drainPrevStreamActive = false;
+  // cross-thread: main-loop liveness for the watchdog thread (phase + last progress stamp).
+  std::atomic<uint32_t> mainLoopPhase{static_cast<uint32_t>(MainLoopPhase::Startup)};
+  std::atomic<uint64_t> mainLoopProgressUs{0};
+  std::atomic<uint64_t> mainLoopLastSeq{0};
+};
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -667,11 +705,13 @@ int main(int argc, char** argv) {
       "REMOTE60_NATIVE_KEYREQ_TOKEN_REFILL_US", kKeyReqTokenRefillUsDefault, 10000, 2000000);
   const uint32_t keyReqTokenCapacity = env_u32_clamped(
       "REMOTE60_NATIVE_KEYREQ_TOKEN_CAPACITY", kKeyReqTokenCapacityDefault, 1, 16);
-  const uint32_t captureInputMinPushPerSec = env_u32_clamped(
+  // Capture liveness watchdogs + main-loop liveness stamps (WatchdogState, Phase 1-11).
+  WatchdogState watchdog;
+  watchdog.inputMinPushPerSec = env_u32_clamped(
       "REMOTE60_NATIVE_CAPTURE_INPUT_MIN_PUSH_PER_SEC", kCaptureInputMinPushPerSecDefault, 1, 120);
-  const uint32_t captureInputStallConsecutiveSec = env_u32_clamped(
+  watchdog.inputStallConsecutiveSec = env_u32_clamped(
       "REMOTE60_NATIVE_CAPTURE_INPUT_STALL_SEC", kCaptureInputStallConsecutiveSecDefault, 1, 30);
-  const uint32_t captureInputStallWarmupSec = env_u32_clamped(
+  watchdog.inputStallWarmupSec = env_u32_clamped(
       "REMOTE60_NATIVE_CAPTURE_INPUT_STALL_WARMUP_SEC", kCaptureInputStallWarmupSecDefault, 0, 60);
   const uint32_t captureStallKeepaliveIntervalUsOverride = env_u32_clamped(
       "REMOTE60_NATIVE_CAPTURE_STALL_KEEPALIVE_INTERVAL_US", 0, 0,
@@ -770,9 +810,9 @@ int main(int argc, char** argv) {
               << " m9Mode=" << (rate.m9Apply ? "apply" : "dry-run")
               << " keyReqMinUs=" << keyReqMinIntervalUs
               << " keyReqBucketCap=" << keyReqTokenCapacity
-              << " captureInputMinPushPerSec=" << captureInputMinPushPerSec
-              << " captureInputStallSec=" << captureInputStallConsecutiveSec
-              << " captureInputWarmupSec=" << captureInputStallWarmupSec
+              << " captureInputMinPushPerSec=" << watchdog.inputMinPushPerSec
+              << " captureInputStallSec=" << watchdog.inputStallConsecutiveSec
+              << " captureInputWarmupSec=" << watchdog.inputStallWarmupSec
               << " captureIdlePollIntervalUs="
               << (captureStallKeepaliveIntervalUsOverride > 0
                       ? static_cast<uint64_t>(captureStallKeepaliveIntervalUsOverride)
@@ -2587,7 +2627,7 @@ int main(int argc, char** argv) {
   bool surfaceEncodeHealthy = true;
   uint64_t encoderOutputSamplesTotal = 0;
   // Encoder OUTPUT-liveness heartbeat. The main-loop liveness watchdog only tracks loop iteration
-  // progress (mainLoopProgressUs), which keeps advancing even when the async hardware MFT accepts
+  // progress (watchdog.mainLoopProgressUs), which keeps advancing even when the async hardware MFT accepts
   // input every call but emits no output access unit -- an output-starvation wedge that freezes the
   // video while the loop still spins and the watchdog stays green. These track real encoder output
   // progress so that stall is observable (and, later, recoverable). Diagnostic-only in this commit.
@@ -2891,32 +2931,24 @@ int main(int argc, char** argv) {
   std::atomic<bool> gdiFallbackRequested{false};
   uint64_t captureSessionStartedUs = 0;
   uint64_t captureRestartCount = 0;
-  uint64_t lastCaptureRestartUs = 0;
   // Frozen-ring self-heal state (DXGI/WGC). Streak guards against a single slow poll; the last
   // restart timestamp lets a refreeze inside the window escalate to a full process restart.
-  uint32_t captureFrozenPollStreak = 0;
   // Rate-limit the "readback slow" warn to one line/sec with the window peak. Under a GPU-heavy
   // game the oldest-pending age oscillates in [250ms, 2s) every frame, and the old warn-once latch
   // was cleared by the 2s-restart else-branch below, so it re-fired ~60x/sec -- the log spam was
   // itself a perturbation (Codex 2026-08-25).
-  uint64_t readbackSlowLastLogUs = 0;
-  uint64_t readbackSlowWindowPeakUs = 0;
-  uint64_t lastFrozenRestartUs = 0;
   // Telemetry for the frozen-ring self-heal, so a real-GPU run can tell whether B-1 is actually the
   // fix (oldest-pending age climbs to the 2s restart threshold) or whether the age keeps clearing at
   // 50-100ms and the starvation lives in the readback path itself (the surface-only bypass, B-2).
   // The age is a per-interval peak because a once-per-second sample of the instantaneous age would
   // miss a spike that the restart logic (which polls every loop) does see.
-  uint64_t oldestGpuPendingPeakUs = 0;
   // Peak GpuPending count over the interval, next to the age peak: a frozen ring pins this at the
   // ring size while the age climbs, whereas a merely busy ring churns it low. The instantaneous
   // age/count are also emitted, so a print catches both the interval's worst and the current state.
-  uint32_t gpuPendingCountPeak = 0;
-  // Restarts driven specifically by the frozen ring, kept apart from captureDeadRestartCount, which
+  // Restarts driven specifically by the frozen ring, kept apart from watchdog.deadRestartCount, which
   // also counts the GDI callback-stall watchdog -- mixing them would blur which path actually fired.
   // (A refreeze inside the escalation window is a distinct outcome, but it exits the process, so it
   // shows up in the refroze log line rather than a counter that no later stats print would carry.)
-  uint64_t frozenRingRestartCount = 0;
   // Readback-throughput soft-watchdog state (see kReadbackDrainWarmupUs). The trigger is over
   // per-1s-window deltas, so the cumulative sources (cadence accepts, staging-busy drops,
   // superseded drops) are diffed against the previous tick's snapshot every tick -- not every
@@ -2925,15 +2957,7 @@ int main(int argc, char** argv) {
   // The consecutive-second counter debounces a single slow window; the last drain-restart
   // timestamp lets a recurrence inside the frozen-ring escalation window escalate to a process
   // restart. streamActiveSinceUs anchors a warmup after a client (re)attaches.
-  uint64_t readbackDrainPrevAccepted = 0;
-  uint64_t readbackDrainPrevBusyDrops = 0;
-  uint64_t readbackDrainPrevSuperseded = 0;
-  uint32_t readbackDrainConsecutiveSec = 0;
-  uint64_t readbackDrainOldestPendingPeakUs = 0;  // per-1s window, reset every stats tick
-  uint64_t lastReadbackDrainRestartUs = 0;
-  uint64_t readbackDrainRestartCount = 0;
   uint64_t streamActiveSinceUs = 0;
-  bool readbackDrainPrevStreamActive = false;
   bool dxgiCaptureStarted = false;
   bool gdiCaptureStarted = false;
   std::mutex captureFallbackReasonMu;
@@ -3040,8 +3064,6 @@ int main(int argc, char** argv) {
   std::atomic<uint64_t> queuePushCount{0};
   uint64_t queuePushCountLastSample = 0;  // only read from main thread
   uint64_t queuePushPerSecLatest = 0;
-  uint32_t captureInputLowPushStreakSec = 0;
-  uint64_t captureDeadRestartCount = 0;
   uint64_t queuePopCount = 0;
   uint64_t queueWaitTimeoutCount = 0;
   uint64_t queueWaitNoWorkCount = 0;
@@ -3633,17 +3655,16 @@ int main(int argc, char** argv) {
   };
 
   // Liveness state for the main-loop watchdog (declared before restart_capture_session so it can
-  // flag its own slow phase). mainLoopProgressUs is bumped each loop iteration; the watchdog reads
+  // flag its own slow phase). watchdog.mainLoopProgressUs is bumped each loop iteration; the watchdog reads
   // it plus the current phase and never touches a lock or the GPU.
-  std::atomic<uint32_t> mainLoopPhase{static_cast<uint32_t>(MainLoopPhase::Startup)};
-  std::atomic<uint64_t> mainLoopProgressUs{qpc_now_us()};
-  std::atomic<uint64_t> mainLoopLastSeq{0};
+  watchdog.mainLoopPhase = static_cast<uint32_t>(MainLoopPhase::Startup);
+  watchdog.mainLoopProgressUs = qpc_now_us();
   auto enter_main_phase = [&](MainLoopPhase p) {
-    mainLoopPhase.store(static_cast<uint32_t>(p), std::memory_order_release);
+    watchdog.mainLoopPhase.store(static_cast<uint32_t>(p), std::memory_order_release);
   };
   auto mark_main_progress = [&](MainLoopPhase p) {
-    mainLoopProgressUs.store(qpc_now_us(), std::memory_order_release);
-    mainLoopPhase.store(static_cast<uint32_t>(p), std::memory_order_release);
+    watchdog.mainLoopProgressUs.store(qpc_now_us(), std::memory_order_release);
+    watchdog.mainLoopPhase.store(static_cast<uint32_t>(p), std::memory_order_release);
   };
 
   auto restart_capture_session = [&]() -> bool {
@@ -4308,7 +4329,7 @@ int main(int argc, char** argv) {
       hostCaptureTargetTitle = nextTitle == "desktop" ? std::string{} : nextTitle;
     }
     nextCaptureWindowCheckUs = nowUs + captureWindowRebindIntervalUs;
-    lastCaptureRestartUs = nowUs;
+    watchdog.lastCaptureRestartUs = nowUs;
     if (!restart_capture_session()) {
       restore_previous_target();
       if (outReason) *outReason = "capture_restart_failed";
@@ -4434,8 +4455,8 @@ int main(int argc, char** argv) {
       if (stop.load(std::memory_order_acquire)) break;
       const uint64_t now = qpc_now_us();
       if (now - watchdogStartUs < kStartupGraceUs) continue;
-      const uint32_t phase = mainLoopPhase.load(std::memory_order_acquire);
-      const uint64_t progressUs = mainLoopProgressUs.load(std::memory_order_acquire);
+      const uint32_t phase = watchdog.mainLoopPhase.load(std::memory_order_acquire);
+      const uint64_t progressUs = watchdog.mainLoopProgressUs.load(std::memory_order_acquire);
       const uint64_t ageUs = now > progressUs ? now - progressUs : 0;
       const uint64_t threshold =
           (phase == static_cast<uint32_t>(MainLoopPhase::CaptureRestart) ||
@@ -4449,7 +4470,7 @@ int main(int argc, char** argv) {
             "[native-video-host][watchdog] main-loop hang phase=%u ageUs=%llu lastSeq=%llu; "
             "terminating (exit 43) for supervisor relaunch\n",
             phase, static_cast<unsigned long long>(ageUs),
-            static_cast<unsigned long long>(mainLoopLastSeq.load(std::memory_order_acquire)));
+            static_cast<unsigned long long>(watchdog.mainLoopLastSeq.load(std::memory_order_acquire)));
         HANDLE herr = GetStdHandle(STD_ERROR_HANDLE);
         if (herr && herr != INVALID_HANDLE_VALUE && n > 0) {
           DWORD wrote = 0;
@@ -4971,7 +4992,7 @@ int main(int argc, char** argv) {
             hostCaptureTargetProcess = "monitor";
             hostCaptureTargetTitle = target.name;
           }
-          lastCaptureRestartUs = nowUs;
+          watchdog.lastCaptureRestartUs = nowUs;
           if (restart_capture_session()) {
             ++captureRestartCount;
             captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
@@ -5013,7 +5034,7 @@ int main(int argc, char** argv) {
             hostCaptureTargetProcess = "monitor";
             hostCaptureTargetTitle.clear();
           }
-          lastCaptureRestartUs = nowUs;
+          watchdog.lastCaptureRestartUs = nowUs;
           if (restart_capture_session()) {
             ++captureRestartCount;
             captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
@@ -5084,7 +5105,7 @@ int main(int argc, char** argv) {
               hostCaptureTargetTitle = selected.title.empty() ? std::string{} : wide_to_utf8(selected.title);
             }
             nextCaptureWindowCheckUs = nowUs + captureWindowRebindIntervalUs;
-            lastCaptureRestartUs = nowUs;
+            watchdog.lastCaptureRestartUs = nowUs;
             if (restart_capture_session()) {
               ++captureRestartCount;
               captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
@@ -5144,7 +5165,7 @@ int main(int argc, char** argv) {
               targetProc = hostCaptureTargetProcess;
               targetTitle = hostCaptureTargetTitle;
             }
-            lastCaptureRestartUs = nowUs;
+            watchdog.lastCaptureRestartUs = nowUs;
             if (restart_capture_session()) {
               ++captureRestartCount;
               captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
@@ -5199,7 +5220,7 @@ int main(int argc, char** argv) {
         wgcSettleTrackW = 0;
         wgcSettleTrackH = 0;
         wgcSettleSinceUs = 0;
-        lastCaptureRestartUs = nowUs;
+        watchdog.lastCaptureRestartUs = nowUs;
         flush_capture_pipeline_state("wgc-content-size");
         if (restart_capture_session()) {
           ++captureRestartCount;
@@ -5229,7 +5250,7 @@ int main(int argc, char** argv) {
       }
     }
     if (captureSizeChangePending.exchange(0, std::memory_order_acq_rel) != 0) {
-      lastCaptureRestartUs = nowUs;
+      watchdog.lastCaptureRestartUs = nowUs;
       flush_capture_pipeline_state("size-change");
       if (restart_capture_session()) {
         ++captureRestartCount;
@@ -5255,12 +5276,12 @@ int main(int argc, char** argv) {
       const uint64_t sessionStartUs = captureSessionStartedUs;
       const uint64_t stallBaseUs = (lastCbUs > 0) ? lastCbUs : sessionStartUs;
       const bool restartCooldownDone =
-          (lastCaptureRestartUs == 0 ||
-           nowUs >= (lastCaptureRestartUs + kCaptureCallbackRestartCooldownUs));
+          (watchdog.lastCaptureRestartUs == 0 ||
+           nowUs >= (watchdog.lastCaptureRestartUs + kCaptureCallbackRestartCooldownUs));
       if (stallBaseUs > 0 && nowUs >= (stallBaseUs + kCaptureCallbackStallRestartUs) &&
           restartCooldownDone) {
         const uint64_t stallUs = nowUs - stallBaseUs;
-        lastCaptureRestartUs = nowUs;
+        watchdog.lastCaptureRestartUs = nowUs;
         const bool restarted = restart_capture_session();
         if (restarted) {
           ++captureRestartCount;
@@ -5269,9 +5290,9 @@ int main(int argc, char** argv) {
           lastCallbackUs.store(0, std::memory_order_release);
           resetHostTimelineAnchors();
           forceKeyNext = true;
-          ++captureDeadRestartCount;
+          ++watchdog.deadRestartCount;
           std::cout << "[native-video-host] capture session restarted count=" << captureRestartCount
-                    << " captureDeadRestartCount=" << captureDeadRestartCount
+                    << " captureDeadRestartCount=" << watchdog.deadRestartCount
                     << " stallUs=" << stallUs
                     << " lastCallbackUs=" << lastCbUs
                     << "\n";
@@ -5294,35 +5315,35 @@ int main(int argc, char** argv) {
         !captureWindowModeActive.load(std::memory_order_acquire) &&
         backend.active != DesktopCaptureBackend::Gdi) {
       const uint64_t oldestPendingUs = captureReadback.OldestGpuPendingAgeUs();
-      oldestGpuPendingPeakUs = std::max(oldestGpuPendingPeakUs, oldestPendingUs);
+      watchdog.oldestGpuPendingPeakUs = std::max(watchdog.oldestGpuPendingPeakUs, oldestPendingUs);
       // Same loop-rate sample feeds the readback-drain watchdog's per-1s-window peak; unlike the
       // frozen-ring peak above (reset per print interval) this one is reset every stats tick.
-      readbackDrainOldestPendingPeakUs = std::max(readbackDrainOldestPendingPeakUs, oldestPendingUs);
-      gpuPendingCountPeak = std::max(gpuPendingCountPeak, captureReadback.GpuPendingCount());
+      watchdog.drainOldestPendingPeakUs = std::max(watchdog.drainOldestPendingPeakUs, oldestPendingUs);
+      watchdog.gpuPendingCountPeak = std::max(watchdog.gpuPendingCountPeak, captureReadback.GpuPendingCount());
       if (oldestPendingUs >= kCaptureFrozenWarnUs) {
-        readbackSlowWindowPeakUs = std::max(readbackSlowWindowPeakUs, oldestPendingUs);
+        watchdog.readbackSlowWindowPeakUs = std::max(watchdog.readbackSlowWindowPeakUs, oldestPendingUs);
       }
       // Advance the 1s window on the boundary regardless of whether it logs, so a peak from an
       // earlier slow episode never bleeds into a later warn (Codex 2026-08-25).
-      if (readbackSlowLastLogUs == 0) readbackSlowLastLogUs = nowUs;
-      if (nowUs - readbackSlowLastLogUs >= 1'000'000) {
-        if (readbackSlowWindowPeakUs >= kCaptureFrozenWarnUs) {
+      if (watchdog.readbackSlowLastLogUs == 0) watchdog.readbackSlowLastLogUs = nowUs;
+      if (nowUs - watchdog.readbackSlowLastLogUs >= 1'000'000) {
+        if (watchdog.readbackSlowWindowPeakUs >= kCaptureFrozenWarnUs) {
           std::cout << "[native-video-host] capture readback slow oldestPendingUs=" << oldestPendingUs
-                    << " peakUs=" << readbackSlowWindowPeakUs << "\n";
+                    << " peakUs=" << watchdog.readbackSlowWindowPeakUs << "\n";
         }
-        readbackSlowLastLogUs = nowUs;
-        readbackSlowWindowPeakUs = 0;
+        watchdog.readbackSlowLastLogUs = nowUs;
+        watchdog.readbackSlowWindowPeakUs = 0;
       }
       if (oldestPendingUs >= kCaptureFrozenRestartUs) {
-        ++captureFrozenPollStreak;
+        ++watchdog.frozenPollStreak;
       } else {
-        captureFrozenPollStreak = 0;
+        watchdog.frozenPollStreak = 0;
       }
       const bool restartCooldownDone =
-          (lastCaptureRestartUs == 0 ||
-           nowUs >= (lastCaptureRestartUs + kCaptureCallbackRestartCooldownUs));
-      if (captureFrozenPollStreak >= kCaptureFrozenPollStreakMin && restartCooldownDone) {
-        captureFrozenPollStreak = 0;
+          (watchdog.lastCaptureRestartUs == 0 ||
+           nowUs >= (watchdog.lastCaptureRestartUs + kCaptureCallbackRestartCooldownUs));
+      if (watchdog.frozenPollStreak >= kCaptureFrozenPollStreakMin && restartCooldownDone) {
+        watchdog.frozenPollStreak = 0;
         // First freeze: a same-device capture restart clears a wedged duplication/WGC session.
         // A refreeze inside the window means the device itself is stuck -- restarting capture on
         // the same device will not clear it -- so exit and let the supervisor rebuild the process
@@ -5330,9 +5351,9 @@ int main(int argc, char** argv) {
         // startup reads to it as a restartable exit (ranMs >= 15s, so not counted as a crash-loop),
         // and it relaunches without the startup backoff.
         const bool refroze =
-            lastFrozenRestartUs != 0 &&
-            nowUs < (lastFrozenRestartUs + kCaptureFrozenEscalationWindowUs);
-        lastFrozenRestartUs = nowUs;
+            watchdog.lastFrozenRestartUs != 0 &&
+            nowUs < (watchdog.lastFrozenRestartUs + kCaptureFrozenEscalationWindowUs);
+        watchdog.lastFrozenRestartUs = nowUs;
         if (refroze) {
           std::cerr << "[native-video-host] capture ring refroze within "
                     << (kCaptureFrozenEscalationWindowUs / 1000000)
@@ -5349,7 +5370,7 @@ int main(int argc, char** argv) {
                     << " action=process-restart exitCode=3"
                     << " oldestPendingUs=" << oldestPendingUs
                     << " gpuPendingCount=" << captureReadback.GpuPendingCount()
-                    << " frozenRingRestarts=" << frozenRingRestartCount
+                    << " frozenRingRestarts=" << watchdog.frozenRingRestartCount
                     << " captureRestarts=" << captureRestartCount
                     << " lastPublishAgeUs=" << refreezeLastPubAgeUs
                     << " backend=" << desktop_capture_backend_name(backend.active)
@@ -5359,7 +5380,7 @@ int main(int argc, char** argv) {
           std::cerr.flush();
           return 3;
         }
-        lastCaptureRestartUs = nowUs;
+        watchdog.lastCaptureRestartUs = nowUs;
         const bool restarted = restart_capture_session();
         if (restarted) {
           ++captureRestartCount;
@@ -5369,11 +5390,11 @@ int main(int argc, char** argv) {
           lastCallbackUs.store(0, std::memory_order_release);
           resetHostTimelineAnchors();
           forceKeyNext = true;
-          ++captureDeadRestartCount;
-          ++frozenRingRestartCount;
+          ++watchdog.deadRestartCount;
+          ++watchdog.frozenRingRestartCount;
           std::cout << "[native-video-host] capture session restarted reason=frozen-ring count="
-                    << captureRestartCount << " captureDeadRestartCount=" << captureDeadRestartCount
-                    << " frozenRingRestarts=" << frozenRingRestartCount
+                    << captureRestartCount << " captureDeadRestartCount=" << watchdog.deadRestartCount
+                    << " frozenRingRestarts=" << watchdog.frozenRingRestartCount
                     << " oldestPendingUs=" << oldestPendingUs << "\n";
         } else {
           std::cerr << "[native-video-host] frozen-ring restart failed oldestPendingUs="
@@ -6102,10 +6123,10 @@ int main(int argc, char** argv) {
         lastEncoderStarvationLogUs = 0;
         starveNeedInputAccum = starveHaveOutputAccum = starveNoEventAccum = 0;
         starveNotAcceptingAccum = starveNeedMoreAccum = starveNeedInputOnlyCalls = 0;
-        // Revive mainLoopLastSeq (previously declared but never stored, so the watchdog record read
+        // Revive watchdog.mainLoopLastSeq (previously declared but never stored, so the watchdog record read
         // a constant 0): publish real encoder-output progress, not loop iterations. A follow-up can
         // make the watchdog fire on this age while input is still being accepted.
-        mainLoopLastSeq.store(encoderOutputSamplesTotal, std::memory_order_release);
+        watchdog.mainLoopLastSeq.store(encoderOutputSamplesTotal, std::memory_order_release);
       } else {
         ++encoderAcceptedNoOutputStreak;
         if (encoderNoOutputSinceUs == 0) encoderNoOutputSinceUs = encodeEndUs;
@@ -6715,19 +6736,19 @@ int main(int argc, char** argv) {
           streamControlActive.load(std::memory_order_acquire) &&
           gdiLowPushFallbackEnabled) {
         const bool warmupDone =
-            (captureInputStallWarmupSec == 0 ||
-             t >= (startUs + static_cast<uint64_t>(captureInputStallWarmupSec) * 1000000ULL));
+            (watchdog.inputStallWarmupSec == 0 ||
+             t >= (startUs + static_cast<uint64_t>(watchdog.inputStallWarmupSec) * 1000000ULL));
         if (warmupDone) {
-          if (callbackFramesPerSec < static_cast<uint64_t>(captureInputMinPushPerSec)) {
-            captureInputLowPushStreakSec += 1;
+          if (callbackFramesPerSec < static_cast<uint64_t>(watchdog.inputMinPushPerSec)) {
+            watchdog.inputLowPushStreakSec += 1;
           } else {
-            captureInputLowPushStreakSec = 0;
+            watchdog.inputLowPushStreakSec = 0;
           }
           const bool restartCooldownDone =
-              (lastCaptureRestartUs == 0 ||
-               t >= (lastCaptureRestartUs + kCaptureCallbackRestartCooldownUs));
-          if (captureInputLowPushStreakSec >= captureInputStallConsecutiveSec && restartCooldownDone) {
-            lastCaptureRestartUs = t;
+              (watchdog.lastCaptureRestartUs == 0 ||
+               t >= (watchdog.lastCaptureRestartUs + kCaptureCallbackRestartCooldownUs));
+          if (watchdog.inputLowPushStreakSec >= watchdog.inputStallConsecutiveSec && restartCooldownDone) {
+            watchdog.lastCaptureRestartUs = t;
             const bool fallbackFromGdi =
                 !captureWindowModeActive && backend.active == DesktopCaptureBackend::Gdi;
             if (fallbackFromGdi) {
@@ -6735,31 +6756,31 @@ int main(int argc, char** argv) {
               set_gdi_fallback_reason("gdi_low_capture_rate");
               std::cout << "[native-video-host] fallback_reason=gdi_low_capture_rate"
                         << " callbackFramesPerSec=" << callbackFramesPerSec
-                        << " minPushPerSec=" << captureInputMinPushPerSec << "\n";
+                        << " minPushPerSec=" << watchdog.inputMinPushPerSec << "\n";
             }
             const bool restarted = restart_capture_session();
             if (restarted) {
               ++captureRestartCount;
-              ++captureDeadRestartCount;
+              ++watchdog.deadRestartCount;
               captureClockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
               lastCaptureUsForInterval.store(0, std::memory_order_release);
               lastCallbackUs.store(0, std::memory_order_release);
               resetHostTimelineAnchors();
               forceKeyNext = true;
-              captureInputLowPushStreakSec = 0;
+              watchdog.inputLowPushStreakSec = 0;
               std::cout << "[native-video-host] capture session restarted reason="
                         << (fallbackFromGdi ? "gdi-low-push-fallback" : "capture-input-stall")
                         << " restartCount=" << captureRestartCount
-                        << " captureDeadRestartCount=" << captureDeadRestartCount
+                        << " captureDeadRestartCount=" << watchdog.deadRestartCount
                         << " callbackFramesPerSec=" << callbackFramesPerSec
-                        << " minPushPerSec=" << captureInputMinPushPerSec
-                        << " stallStreakSec=" << captureInputStallConsecutiveSec
+                        << " minPushPerSec=" << watchdog.inputMinPushPerSec
+                        << " stallStreakSec=" << watchdog.inputStallConsecutiveSec
                         << "\n";
             } else {
               std::cerr << "[native-video-host] capture session restart failed reason=capture-input-stall"
                         << " callbackFramesPerSec=" << callbackFramesPerSec
-                        << " minPushPerSec=" << captureInputMinPushPerSec
-                        << " streakSec=" << captureInputLowPushStreakSec
+                        << " minPushPerSec=" << watchdog.inputMinPushPerSec
+                        << " streakSec=" << watchdog.inputLowPushStreakSec
                         << "\n";
             }
           }
@@ -6773,10 +6794,10 @@ int main(int argc, char** argv) {
       // trigger; the frozen-ring 2s hard path and session rollover behavior are unchanged.
       {
         const bool drainStreamActive = streamControlActive.load(std::memory_order_acquire);
-        if (drainStreamActive && !readbackDrainPrevStreamActive) {
+        if (drainStreamActive && !watchdog.drainPrevStreamActive) {
           streamActiveSinceUs = t;  // client (re)attach edge; anchors the warmup below
         }
-        readbackDrainPrevStreamActive = drainStreamActive;
+        watchdog.drainPrevStreamActive = drainStreamActive;
 
         // Per-1s-window deltas. AcceptContentCount / BusyDrops / SupersededDrops are all lifetime
         // cumulative (superseded especially -- it is never reset), so diff, never read absolute.
@@ -6794,18 +6815,18 @@ int main(int argc, char** argv) {
         const uint64_t busyNow = captureReadback.BusyDrops();
         const uint64_t supersededNow = captureReadback.SupersededDrops();
         const uint64_t acceptedDelta =
-            (acceptedNow >= readbackDrainPrevAccepted) ? (acceptedNow - readbackDrainPrevAccepted) : 0;
+            (acceptedNow >= watchdog.drainPrevAccepted) ? (acceptedNow - watchdog.drainPrevAccepted) : 0;
         const uint64_t busyDelta =
-            (busyNow >= readbackDrainPrevBusyDrops) ? (busyNow - readbackDrainPrevBusyDrops) : 0;
+            (busyNow >= watchdog.drainPrevBusyDrops) ? (busyNow - watchdog.drainPrevBusyDrops) : 0;
         const uint64_t supersededDelta =
-            (supersededNow >= readbackDrainPrevSuperseded) ? (supersededNow - readbackDrainPrevSuperseded) : 0;
-        readbackDrainPrevAccepted = acceptedNow;
-        readbackDrainPrevBusyDrops = busyNow;
-        readbackDrainPrevSuperseded = supersededNow;
+            (supersededNow >= watchdog.drainPrevSuperseded) ? (supersededNow - watchdog.drainPrevSuperseded) : 0;
+        watchdog.drainPrevAccepted = acceptedNow;
+        watchdog.drainPrevBusyDrops = busyNow;
+        watchdog.drainPrevSuperseded = supersededNow;
         // published = callbackFramesPerSec: the readback worker's publish count for this second,
         // already reset each tick, so it is a true per-window delta as-is.
-        const uint64_t drainPendingPeakUs = readbackDrainOldestPendingPeakUs;
-        readbackDrainOldestPendingPeakUs = 0;  // window closes here
+        const uint64_t drainPendingPeakUs = watchdog.drainOldestPendingPeakUs;
+        watchdog.drainOldestPendingPeakUs = 0;  // window closes here
 
         const bool drainSurfaceEligible =
             useH264 &&
@@ -6817,7 +6838,7 @@ int main(int argc, char** argv) {
         // reattach -- so the first seconds of a fresh pipeline (encoder spin-up, first IDR) never
         // read as a drain.
         uint64_t drainWarmupAnchorUs = captureSessionStartedUs;
-        if (lastCaptureRestartUs > drainWarmupAnchorUs) drainWarmupAnchorUs = lastCaptureRestartUs;
+        if (watchdog.lastCaptureRestartUs > drainWarmupAnchorUs) drainWarmupAnchorUs = watchdog.lastCaptureRestartUs;
         if (streamActiveSinceUs > drainWarmupAnchorUs) drainWarmupAnchorUs = streamActiveSinceUs;
         const bool drainWarmupDone = (t >= drainWarmupAnchorUs + kReadbackDrainWarmupUs);
         // accepted >= max(5, fps/4): a static/quiet desktop accepts almost nothing (pointer-only
@@ -6837,25 +6858,25 @@ int main(int argc, char** argv) {
             drainMetricsStalled && interactive_desktop_is_default_uncached();
 
         if (drainStarved) {
-          ++readbackDrainConsecutiveSec;
+          ++watchdog.drainConsecutiveSec;
         } else {
-          readbackDrainConsecutiveSec = 0;
+          watchdog.drainConsecutiveSec = 0;
         }
 
         const bool drainRestartCooldownDone =
-            (lastCaptureRestartUs == 0 ||
-             t >= (lastCaptureRestartUs + kCaptureCallbackRestartCooldownUs));
-        if (readbackDrainConsecutiveSec >= kReadbackDrainConsecutiveSecMin && drainRestartCooldownDone) {
-          readbackDrainConsecutiveSec = 0;
+            (watchdog.lastCaptureRestartUs == 0 ||
+             t >= (watchdog.lastCaptureRestartUs + kCaptureCallbackRestartCooldownUs));
+        if (watchdog.drainConsecutiveSec >= kReadbackDrainConsecutiveSecMin && drainRestartCooldownDone) {
+          watchdog.drainConsecutiveSec = 0;
           // First trip: restart_capture_session() runs create_staging -> captureReadback
           // Shutdown/Initialize, rebuilding the capture backend and the readback ring on the same
           // device. A recurrence inside the same 60s window the frozen-ring refreeze uses means the
           // device itself is wedged; match that path and exit code 3 so the supervisor rebuilds the
           // process with a fresh D3D device.
           const bool drainRecurred =
-              lastReadbackDrainRestartUs != 0 &&
-              t < (lastReadbackDrainRestartUs + kCaptureFrozenEscalationWindowUs);
-          lastReadbackDrainRestartUs = t;
+              watchdog.lastDrainRestartUs != 0 &&
+              t < (watchdog.lastDrainRestartUs + kCaptureFrozenEscalationWindowUs);
+          watchdog.lastDrainRestartUs = t;
           if (drainRecurred) {
             const uint64_t drainLastPubUs = lastPublishUs.load(std::memory_order_acquire);
             const uint64_t drainLastPubAgeUs =
@@ -6872,7 +6893,7 @@ int main(int argc, char** argv) {
                       << " oldestPendingPeakUs=" << drainPendingPeakUs
                       << " busyDelta=" << busyDelta
                       << " supersededDelta=" << supersededDelta
-                      << " readbackDrainRestarts=" << readbackDrainRestartCount
+                      << " readbackDrainRestarts=" << watchdog.drainRestartCount
                       << " captureRestarts=" << captureRestartCount
                       << " lastPublishAgeUs=" << drainLastPubAgeUs
                       << " backend=" << desktop_capture_backend_name(backend.active)
@@ -6882,7 +6903,7 @@ int main(int argc, char** argv) {
             std::cerr.flush();
             return 3;
           }
-          lastCaptureRestartUs = t;
+          watchdog.lastCaptureRestartUs = t;
           const bool restarted = restart_capture_session();
           if (restarted) {
             ++captureRestartCount;
@@ -6891,12 +6912,12 @@ int main(int argc, char** argv) {
             lastCallbackUs.store(0, std::memory_order_release);
             resetHostTimelineAnchors();
             forceKeyNext = true;
-            ++captureDeadRestartCount;
-            ++readbackDrainRestartCount;
+            ++watchdog.deadRestartCount;
+            ++watchdog.drainRestartCount;
             std::cout << "[native-video-host] capture session restarted reason=readback-drain count="
                       << captureRestartCount
-                      << " captureDeadRestartCount=" << captureDeadRestartCount
-                      << " readbackDrainRestarts=" << readbackDrainRestartCount
+                      << " captureDeadRestartCount=" << watchdog.deadRestartCount
+                      << " readbackDrainRestarts=" << watchdog.drainRestartCount
                       << " acceptedDelta=" << acceptedDelta
                       << " published=" << callbackFramesPerSec
                       << " oldestPendingPeakUs=" << drainPendingPeakUs
@@ -6917,8 +6938,8 @@ int main(int argc, char** argv) {
                   << " queuePushPerSec=" << queuePushPerSecLatest
                   << " idleHoldPerSec=" << idleHoldPerSec
                   << " idleHoldTotal=" << idleHoldTotal
-                  << " captureInputLowPushStreakSec=" << captureInputLowPushStreakSec
-                  << " captureDeadRestartCount=" << captureDeadRestartCount
+                  << " captureInputLowPushStreakSec=" << watchdog.inputLowPushStreakSec
+                  << " captureDeadRestartCount=" << watchdog.deadRestartCount
                   << " queueDepthMax=" << queueDepthMax.load(std::memory_order_relaxed)
                   << " queueWaitTimeoutCount=" << queueWaitTimeoutCount
                   << " queueWaitNoWorkCount=" << queueWaitNoWorkCount
@@ -7011,7 +7032,7 @@ int main(int argc, char** argv) {
                 : 0;
         if (statsPrintDue) {
         // Age of the last frame published to the encoder -- diagnostic only. A frozen ring shows
-        // this climbing in lockstep with oldestGpuPendingPeakUs. Per Codex: report it, but never
+        // this climbing in lockstep with watchdog.oldestGpuPendingPeakUs. Per Codex: report it, but never
         // drive the watchdog off it, since a static change-driven desktop is legitimately silent.
         const uint64_t statsNowUs = qpc_now_us();
         const uint64_t lastPublishAtUs = lastPublishUs.load(std::memory_order_acquire);
@@ -7024,8 +7045,8 @@ int main(int argc, char** argv) {
                   << " queuePushPerSec=" << queuePushPerSecLatest
                   << " idleHoldPerSec=" << idleHoldPerSec
                   << " idleHoldTotal=" << idleHoldTotal
-                  << " captureInputLowPushStreakSec=" << captureInputLowPushStreakSec
-                  << " captureDeadRestartCount=" << captureDeadRestartCount
+                  << " captureInputLowPushStreakSec=" << watchdog.inputLowPushStreakSec
+                  << " captureDeadRestartCount=" << watchdog.deadRestartCount
                   << " queueDepthMax=" << queueDepthMax.load(std::memory_order_relaxed)
                   << " queueWaitTimeoutCount=" << queueWaitTimeoutCount
                   << " queueWaitNoWorkCount=" << queueWaitNoWorkCount
@@ -7090,13 +7111,13 @@ int main(int argc, char** argv) {
                   << " captureMemcpyMaxUs=" << captureMemcpyMaxUs
                   << " captureUnmapWaitAvgUs=" << captureUnmapWaitAvgUs
                   << " captureUnmapWaitMaxUs=" << captureUnmapWaitMaxUs
-                  << " oldestGpuPendingPeakUs=" << oldestGpuPendingPeakUs
+                  << " oldestGpuPendingPeakUs=" << watchdog.oldestGpuPendingPeakUs
                   << " oldestGpuPendingNowUs=" << captureReadback.OldestGpuPendingAgeUs()
                   << " gpuPendingCount=" << captureReadback.GpuPendingCount()
-                  << " gpuPendingCountPeak=" << gpuPendingCountPeak
-                  << " frozenRingRestarts=" << frozenRingRestartCount
-                  << " readbackDrainRestarts=" << readbackDrainRestartCount
-                  << " readbackDrainSec=" << readbackDrainConsecutiveSec
+                  << " gpuPendingCountPeak=" << watchdog.gpuPendingCountPeak
+                  << " frozenRingRestarts=" << watchdog.frozenRingRestartCount
+                  << " readbackDrainRestarts=" << watchdog.drainRestartCount
+                  << " readbackDrainSec=" << watchdog.drainConsecutiveSec
                   << " lastPublishAgeUs=" << lastPublishAgeUs
                   << " captureUnmapAvgUs=" << captureUnmapAvgUs
                   << " captureUnmapMaxUs=" << captureUnmapMaxUs
@@ -7517,8 +7538,8 @@ int main(int argc, char** argv) {
       // would throw those windows away and the peak would only ever show the last second before a
       // print. Reset them only once the value has actually been printed. (Codex.)
       if (statsPrintDue) {
-        oldestGpuPendingPeakUs = 0;
-        gpuPendingCountPeak = 0;
+        watchdog.oldestGpuPendingPeakUs = 0;
+        watchdog.gpuPendingCountPeak = 0;
         // Per print-interval rates: reset only once printed so they span the whole interval
         // (matching the peak resets above). firstKey*/lastKeyAu* are per media epoch and are
         // reset by the rollover transaction instead, so they persist across prints.
