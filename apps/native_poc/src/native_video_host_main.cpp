@@ -875,6 +875,69 @@ struct EncoderState {
   uint32_t consecutiveStaleFrames = 0;
 };
 
+// Host-side pipeline statistics (Phase 1-12 state struct): the per-print-interval accumulators
+// and lifetime counters the 1s stats tick folds into the "[native-video-host] stats" line --
+// capture readback / GPU-scale stage timings (sum + max), queue push/pop/wait counts, drop and
+// fallback counters, and the print cadence itself. Nothing here drives a decision; ABR reads
+// ClientMetricsSnapshot and RateControlState instead.
+// thread: main loop owns everything; callbackFrames / queuePushCount / queueDepthMax are atomics
+// because the capture publish callback increments them.
+struct HostStats {
+  uint32_t printEverySec = 0;   // REMOTE60_NATIVE_STATS_PRINT_EVERY_SEC
+  uint64_t ticks = 0;
+  uint64_t nextAtUs = 0;
+  uint64_t rawEquivalentBytes = 0;
+  uint64_t skippedByOverwrite = 0;
+  uint64_t lastVersionSent = 0;
+  uint64_t tracePrinted = 0;
+  uint64_t staleEncodedDropCount = 0;
+  uint64_t stalePreEncodeDropCount = 0;
+  // GPU scaler outcome counters + stage timings.
+  uint64_t gpuScaleAttempts = 0;
+  uint64_t gpuScaleSuccess = 0;
+  uint64_t gpuScaleFail = 0;
+  uint64_t gpuScaleCpuFallback = 0;
+  uint64_t gpuScaleTimedCount = 0;
+  uint64_t gpuScaleD3DWaitSumUs = 0;
+  uint64_t gpuScaleD3DWaitMaxUs = 0;
+  uint64_t gpuScaleCopyMapSumUs = 0;
+  uint64_t gpuScaleCopyMapMaxUs = 0;
+  uint64_t gpuScaleMemcpySumUs = 0;
+  uint64_t gpuScaleMemcpyMaxUs = 0;
+  uint64_t gpuScaleUnmapWaitSumUs = 0;
+  uint64_t gpuScaleUnmapWaitMaxUs = 0;
+  uint64_t gpuScaleUnmapSumUs = 0;
+  uint64_t gpuScaleUnmapMaxUs = 0;
+  // Capture readback stage timings (per published frame).
+  uint64_t captureReadbackSamples = 0;
+  uint64_t captureD3DWaitSumUs = 0;
+  uint64_t captureD3DWaitMaxUs = 0;
+  uint64_t captureCopyMapSumUs = 0;
+  uint64_t captureCopyMapMaxUs = 0;
+  uint64_t captureMemcpySumUs = 0;
+  uint64_t captureMemcpyMaxUs = 0;
+  uint64_t captureUnmapWaitSumUs = 0;
+  uint64_t captureUnmapWaitMaxUs = 0;
+  uint64_t captureUnmapSumUs = 0;
+  uint64_t captureUnmapMaxUs = 0;
+  uint64_t captureAgeSumUs = 0;
+  uint64_t captureAgeMaxUs = 0;
+  uint64_t callbackToEncodeStartSumUs = 0;
+  uint64_t callbackToEncodeStartMaxUs = 0;
+  uint64_t idleHoldTotal = 0;
+  uint64_t lastSendStartUs = 0;
+  uint64_t firstSentLoggedGeneration = 0;
+  // Frame queue accounting (callback -> main handoff).
+  std::atomic<uint64_t> callbackFrames{0};
+  std::atomic<uint64_t> queuePushCount{0};
+  uint64_t queuePushCountLastSample = 0;  // only read from main thread
+  uint64_t queuePushPerSecLatest = 0;
+  uint64_t queuePopCount = 0;
+  uint64_t queueWaitTimeoutCount = 0;
+  uint64_t queueWaitNoWorkCount = 0;
+  std::atomic<uint64_t> queueDepthMax{0};
+};
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -3188,7 +3251,8 @@ int main(int argc, char** argv) {
     while (value > old && !target.compare_exchange_weak(old, value, std::memory_order_release, std::memory_order_relaxed)) {
     }
   };
-  std::atomic<uint64_t> callbackFrames{0};
+  // Per-interval / lifetime pipeline statistics for the stats line (HostStats, Phase 1-12).
+  HostStats stats;
   // Hardware-cursor state from the DXGI backend (pointer-only frames are dropped by the content
   // pipeline, so without this side channel the remote cursor freezes on a still screen). Written
   // by the capture thread, drained by the main loop's ~30Hz latest-wins UDP cursor sender.
@@ -3198,14 +3262,7 @@ int main(int argc, char** argv) {
   std::atomic<uint64_t> dxgiPointerGeneration{0};  // stream generation the sample belongs to
   std::atomic<uint64_t> dxgiPointerUpdateUs{0};
   std::atomic<int64_t> captureClockOffsetUs{std::numeric_limits<int64_t>::max()};
-  std::atomic<uint64_t> queuePushCount{0};
-  uint64_t queuePushCountLastSample = 0;  // only read from main thread
-  uint64_t queuePushPerSecLatest = 0;
-  uint64_t queuePopCount = 0;
-  uint64_t queueWaitTimeoutCount = 0;
-  uint64_t queueWaitNoWorkCount = 0;
   std::atomic<uint64_t> lastPopFrameVersion{0};
-  std::atomic<uint64_t> queueDepthMax{0};
   std::atomic<uint64_t> lastCallbackUs{0};
   // Timestamp (qpc) of the last frame actually published to the encoder.codec ring, set in
   // capturePublishFn on a valid payload -- distinct from lastCallbackUs, which is the capture time.
@@ -3349,9 +3406,9 @@ int main(int argc, char** argv) {
     }
     const uint64_t currentPopVersion = lastPopFrameVersion.load(std::memory_order_acquire);
     const uint64_t depthNow = (currentVersion >= currentPopVersion) ? (currentVersion - currentPopVersion) : 0;
-    update_u64_max(queueDepthMax, depthNow);
-    ++queuePushCount;
-    callbackFrames += 1;
+    update_u64_max(stats.queueDepthMax, depthNow);
+    ++stats.queuePushCount;
+    stats.callbackFrames += 1;
     uint64_t loggedGeneration = firstCallbackLoggedGeneration.load(std::memory_order_acquire);
     if (meta.streamGeneration != 0 && loggedGeneration != meta.streamGeneration &&
         firstCallbackLoggedGeneration.compare_exchange_strong(
@@ -3844,59 +3901,19 @@ int main(int argc, char** argv) {
   const uint64_t captureWindowRebindIntervalUs =
       static_cast<uint64_t>(std::max<uint32_t>(200, args.captureWindowRebindIntervalMs)) * 1000ULL;
   uint64_t nextCaptureWindowCheckUs = startUs + captureWindowRebindIntervalUs;
-  uint64_t statAtUs = startUs + 1000000ULL;
+  stats.nextAtUs = startUs + 1000000ULL;
   // Every rate in the stats line is computed over a one-second window, so the window is not
   // widened -- only the printing is decimated. Each printed line still describes a true
   // second; there are just fewer of them. At the old every-second cadence a streaming day
   // wrote hundreds of megabytes through the host log; set 1 to watch a session closely.
-  const uint32_t statsPrintEverySec =
+  stats.printEverySec =
       env_u32_clamped("REMOTE60_NATIVE_STATS_PRINT_EVERY_SEC", 30, 1, 3600);
-  uint64_t statTicks = 0;
   // Encoded frames the sender queue policy discarded (backlog resync or waiting for the
   // forced IDR). These are the frames a viewer experiences as a freeze.
   // Session media barrier / IDR telemetry (encode-thread side). encoder.forceKeyInputCount and
   // sender.nonKeyAuWhileWaiting reset per print interval; sender.firstKeyEnqueuedUs is per media epoch (reset by
   // the rollover transaction). Goal: tell "encoder never produced a key" apart from "key produced
   // but lost in UDP assembly". Diagnostic only -- never fed to ABR.
-  uint64_t rawEquivalentBytes = 0;
-  uint64_t skippedByOverwrite = 0;
-  uint64_t lastVersionSent = 0;
-  uint64_t tracePrinted = 0;
-  uint64_t staleEncodedDropCount = 0;
-  uint64_t stalePreEncodeDropCount = 0;
-  uint64_t gpuScaleAttempts = 0;
-  uint64_t gpuScaleSuccess = 0;
-  uint64_t gpuScaleFail = 0;
-  uint64_t gpuScaleCpuFallback = 0;
-  uint64_t captureReadbackSamples = 0;
-  uint64_t captureD3DWaitSumUs = 0;
-  uint64_t captureD3DWaitMaxUs = 0;
-  uint64_t captureCopyMapSumUs = 0;
-  uint64_t captureCopyMapMaxUs = 0;
-  uint64_t captureMemcpySumUs = 0;
-  uint64_t captureMemcpyMaxUs = 0;
-  uint64_t captureUnmapWaitSumUs = 0;
-  uint64_t captureUnmapWaitMaxUs = 0;
-  uint64_t captureUnmapSumUs = 0;
-  uint64_t captureUnmapMaxUs = 0;
-  uint64_t gpuScaleTimedCount = 0;
-  uint64_t gpuScaleD3DWaitSumUs = 0;
-  uint64_t gpuScaleD3DWaitMaxUs = 0;
-  uint64_t gpuScaleCopyMapSumUs = 0;
-  uint64_t gpuScaleCopyMapMaxUs = 0;
-  uint64_t gpuScaleMemcpySumUs = 0;
-  uint64_t gpuScaleMemcpyMaxUs = 0;
-  uint64_t gpuScaleUnmapWaitSumUs = 0;
-  uint64_t gpuScaleUnmapWaitMaxUs = 0;
-  uint64_t gpuScaleUnmapSumUs = 0;
-  uint64_t gpuScaleUnmapMaxUs = 0;
-  uint64_t captureAgeSumUs = 0;
-  uint64_t captureAgeMaxUs = 0;
-  uint64_t callbackToEncodeStartSumUs = 0;
-  uint64_t callbackToEncodeStartMaxUs = 0;
-  uint64_t idleHoldTotal = 0;
-  uint64_t lastSendStartUs = 0;
-  uint64_t firstSentLoggedGeneration = 0;
   // Trailing-edge kick / static refresh / selection-first-keyframe state (KickState, Phase 1-8).
   KickState kick;
   bool streamActiveApplied = true;
@@ -4243,11 +4260,11 @@ int main(int argc, char** argv) {
       encoder.forceKeyNext = true;
       kick.selectionFirstKeyframeDropCount = 0;
       encoder.encodedSeq = 0;
-      lastSendStartUs = 0;
+      stats.lastSendStartUs = 0;
       frameGating.lastSentUs = 0;
       {
         std::lock_guard<std::mutex> lk(frame.mu);
-        lastVersionSent = frame.version;
+        stats.lastVersionSent = frame.version;
       }
       return true;
     }
@@ -4262,7 +4279,7 @@ int main(int argc, char** argv) {
     frameGating.motionStreak = 0;
     frameGating.staticMode = false;
     frameGating.lastSentUs = 0;
-    firstSentLoggedGeneration = 0;
+    stats.firstSentLoggedGeneration = 0;
     firstCallbackLoggedGeneration.store(0, std::memory_order_release);
     nextCaptureSubmitUs.store(0, std::memory_order_release);
     {
@@ -4295,7 +4312,7 @@ int main(int argc, char** argv) {
       frame.seq += 1;
       frame.version += 1;
       flushedVersion = frame.version;
-      lastVersionSent = flushedVersion;
+      stats.lastVersionSent = flushedVersion;
     }
     lastPopFrameVersion.store(flushedVersion, std::memory_order_release);
     frame.cv.notify_all();
@@ -4307,8 +4324,8 @@ int main(int argc, char** argv) {
   };
   auto log_first_sent_generation = [&](const char* path, uint64_t streamGeneration, uint64_t sendStartUs,
                                        uint64_t captureStampUs, uint32_t width, uint32_t height) {
-    if (streamGeneration == 0 || firstSentLoggedGeneration == streamGeneration) return;
-    firstSentLoggedGeneration = streamGeneration;
+    if (streamGeneration == 0 || stats.firstSentLoggedGeneration == streamGeneration) return;
+    stats.firstSentLoggedGeneration = streamGeneration;
     std::cout << "[native-video-host] capture-switch first-frame"
               << " path=" << (path ? path : "unknown")
               << describe_active_capture_target()
@@ -5572,7 +5589,7 @@ int main(int argc, char** argv) {
       bool realWaiting = false;
       {
         std::lock_guard<std::mutex> lk(frame.mu);
-        realWaiting = (frame.version != lastVersionSent) && frame.payload && !frame.payload->empty();
+        realWaiting = (frame.version != stats.lastVersionSent) && frame.payload && !frame.payload->empty();
       }
       if (!realWaiting) {
         // Media barrier (UDP): a closed barrier means the epoch's first key AU has not reached the
@@ -5600,7 +5617,7 @@ int main(int argc, char** argv) {
             kickForcedKey = true;
           }
           seq = 0;
-          version = lastVersionSent;  // no real version consumed (keeps queue bookkeeping stable)
+          version = stats.lastVersionSent;  // no real version consumed (keeps queue bookkeeping stable)
           streamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
           captureUs = nowUs;     // fresh monotonic stamps: never reuse the stale capture time
           callbackUs = nowUs;
@@ -5647,7 +5664,7 @@ int main(int argc, char** argv) {
         if (kick_try_fill(payload, w, h, stride, nowUs)) {
           servedBootstrap = true;
           seq = 0;
-          version = lastVersionSent;  // no real version consumed (keeps queue bookkeeping stable)
+          version = stats.lastVersionSent;  // no real version consumed (keeps queue bookkeeping stable)
           streamGeneration = captureStreamGenerationState.load(std::memory_order_acquire);
           captureUs = nowUs;
           callbackUs = nowUs;
@@ -5660,17 +5677,17 @@ int main(int argc, char** argv) {
     if (!servedBootstrap) {
       std::unique_lock<std::mutex> lk(frame.mu);
       queueReady = frame.cv.wait_for(lk, std::chrono::microseconds(effective_queue_wait_timeout_us()), [&] {
-        return stop.load() || frame.version != lastVersionSent;
+        return stop.load() || frame.version != stats.lastVersionSent;
       });
       if (!queueReady && !stop.load()) {
         queueWaitReason = 1;
-        ++queueWaitTimeoutCount;
+        ++stats.queueWaitTimeoutCount;
         continue;
       }
       if (stop.load()) break;
-      if (frame.version == lastVersionSent || !frame.payload || frame.payload->empty()) {
+      if (frame.version == stats.lastVersionSent || !frame.payload || frame.payload->empty()) {
         queueWaitReason = 2;
-        ++queueWaitNoWorkCount;
+        ++stats.queueWaitNoWorkCount;
         continue;
       }
       version = frame.version;
@@ -5722,25 +5739,25 @@ int main(int argc, char** argv) {
       (queuePushUs > 0 && captureUs > 0)
           ? (queuePushUs >= captureUs ? (queuePushUs - captureUs) : (captureUs - queuePushUs))
           : 0;
-    ++captureReadbackSamples;
-    captureD3DWaitSumUs += captureD3DWaitUs;
-    captureD3DWaitMaxUs = std::max(captureD3DWaitMaxUs, captureD3DWaitUs);
-    captureCopyMapSumUs += captureCopyMapUs;
-    captureCopyMapMaxUs = std::max(captureCopyMapMaxUs, captureCopyMapUs);
-    captureMemcpySumUs += captureMemcpyUs;
-    captureMemcpyMaxUs = std::max(captureMemcpyMaxUs, captureMemcpyUs);
-    captureUnmapWaitSumUs += captureUnmapWaitUs;
-    captureUnmapWaitMaxUs = std::max(captureUnmapWaitMaxUs, captureUnmapWaitUs);
-    captureUnmapSumUs += captureUnmapUs;
-    captureUnmapMaxUs = std::max(captureUnmapMaxUs, captureUnmapUs);
+    ++stats.captureReadbackSamples;
+    stats.captureD3DWaitSumUs += captureD3DWaitUs;
+    stats.captureD3DWaitMaxUs = std::max(stats.captureD3DWaitMaxUs, captureD3DWaitUs);
+    stats.captureCopyMapSumUs += captureCopyMapUs;
+    stats.captureCopyMapMaxUs = std::max(stats.captureCopyMapMaxUs, captureCopyMapUs);
+    stats.captureMemcpySumUs += captureMemcpyUs;
+    stats.captureMemcpyMaxUs = std::max(stats.captureMemcpyMaxUs, captureMemcpyUs);
+    stats.captureUnmapWaitSumUs += captureUnmapWaitUs;
+    stats.captureUnmapWaitMaxUs = std::max(stats.captureUnmapWaitMaxUs, captureUnmapWaitUs);
+    stats.captureUnmapSumUs += captureUnmapUs;
+    stats.captureUnmapMaxUs = std::max(stats.captureUnmapMaxUs, captureUnmapUs);
     const uint64_t queueWaitUs =
         (queuePopUs > 0 && queuePushUs > 0 && queuePopUs >= queuePushUs) ? (queuePopUs - queuePushUs) : 0;
     const uint64_t queueGapFrames =
-        (lastVersionSent > 0 && version > lastVersionSent) ? (version - lastVersionSent - 1) : 0;
-    ++queuePopCount;
+        (stats.lastVersionSent > 0 && version > stats.lastVersionSent) ? (version - stats.lastVersionSent - 1) : 0;
+    ++stats.queuePopCount;
     const uint64_t lastPopVersionAtRead = lastPopFrameVersion.load(std::memory_order_acquire);
     const uint64_t queueDepthAtPop = (version > lastPopVersionAtRead) ? (version - lastPopVersionAtRead) : 0;
-    update_u64_max(queueDepthMax, queueDepthAtPop);
+    update_u64_max(stats.queueDepthMax, queueDepthAtPop);
     lastPopFrameVersion.store(version, std::memory_order_release);
     if (!servedBootstrap && frameGating.enabled && useH264 && payload && !payload->empty()) {
       if (frameGating.refPayload && !frameGating.refPayload->empty() &&
@@ -5797,19 +5814,19 @@ int main(int argc, char** argv) {
           queuePopUs < (frameGating.lastSentUs + targetIntervalUs)) {
         ++frameGating.skipCount;
         if (frameGating.staticMode) ++frameGating.staticSkipCount;
-        lastVersionSent = version;
+        stats.lastVersionSent = version;
         continue;
       }
     }
     if (useH264 && guardStalePreEncode && frameAgeAtSelectUs > kMaxPreEncodeFrameAgeUs) {
-      ++stalePreEncodeDropCount;
+      ++stats.stalePreEncodeDropCount;
       continue;
     }
     if (!servedBootstrap) {
-      if (lastVersionSent > 0 && version > lastVersionSent + 1) {
-        skippedByOverwrite += (version - lastVersionSent - 1);
+      if (stats.lastVersionSent > 0 && version > stats.lastVersionSent + 1) {
+        stats.skippedByOverwrite += (version - stats.lastVersionSent - 1);
       }
-      lastVersionSent = version;
+      stats.lastVersionSent = version;
     }
     const uint64_t captureStampUs = (callbackUs > 0) ? callbackUs : captureUs;
 
@@ -5832,7 +5849,7 @@ int main(int argc, char** argv) {
       SendPathStats sendPathStats{};
       const uint64_t sendStartUs = qpc_now_us();
       const uint64_t sendIntervalUs =
-          (lastSendStartUs > 0 && sendStartUs >= lastSendStartUs) ? (sendStartUs - lastSendStartUs) : 0;
+          (stats.lastSendStartUs > 0 && sendStartUs >= stats.lastSendStartUs) ? (sendStartUs - stats.lastSendStartUs) : 0;
       const uint64_t sendIntervalErrUs =
           (encoder.activeFrameIntervalUs > 0 && sendIntervalUs > 0)
               ? ((sendIntervalUs >= encoder.activeFrameIntervalUs) ? (sendIntervalUs - encoder.activeFrameIntervalUs)
@@ -5852,7 +5869,7 @@ int main(int argc, char** argv) {
       const uint64_t sendDurUs = (sendDoneUs >= sendStartUs) ? (sendDoneUs - sendStartUs) : 0;
       const uint64_t sendCallCount = sendPathStats.headerCallCount + sendPathStats.payloadCallCount;
       if (sentOk) {
-        lastSendStartUs = sendStartUs;
+        stats.lastSendStartUs = sendStartUs;
         log_first_sent_generation("raw", streamGeneration, sendStartUs, hdr.captureQpcUs, hdr.width, hdr.height);
         if (frameGating.enabled && useH264 && payload && !payload->empty()) {
           frameGating.lastSentUs = sendStartUs;
@@ -5873,8 +5890,8 @@ int main(int argc, char** argv) {
       ++sender.sentFrames;
       sender.sentBytes += payload->size();
         if (args.traceEvery > 0 && (seq % args.traceEvery) == 0 &&
-            (args.traceMax == 0 || tracePrinted < args.traceMax)) {
-        ++tracePrinted;
+            (args.traceMax == 0 || stats.tracePrinted < args.traceMax)) {
+        ++stats.tracePrinted;
         const uint64_t c2eUs = (hdr.encodeStartQpcUs >= hdr.captureQpcUs) ? (hdr.encodeStartQpcUs - hdr.captureQpcUs) : 0;
         const uint64_t encUs = (hdr.encodeEndQpcUs >= hdr.encodeStartQpcUs) ? (hdr.encodeEndQpcUs - hdr.encodeStartQpcUs) : 0;
         const uint64_t e2sUs = (hdr.sendQpcUs >= hdr.encodeEndQpcUs) ? (hdr.sendQpcUs - hdr.encodeEndQpcUs) : 0;
@@ -5902,7 +5919,7 @@ int main(int argc, char** argv) {
                     << " queueSelectWaitUs=" << queueSelectWaitUs
                    << " queueGapFrames=" << queueGapFrames
                    << " queueDepth=" << queueDepthAtPop
-                   << " queueDepthMax=" << queueDepthMax.load(std::memory_order_relaxed)
+                   << " queueDepthMax=" << stats.queueDepthMax.load(std::memory_order_relaxed)
                    << " captureToQueueUs=" << captureToQueueUs
                    << " queueWaitUs=" << queueWaitUs
                    << " queueWaitReason=" << queueWaitReason
@@ -5956,7 +5973,7 @@ int main(int argc, char** argv) {
                    << " queueWaitReason=" << queueWaitReason
                     << " queueGapFrames=" << queueGapFrames
                     << " queueDepth=" << queueDepthAtPop
-                    << " queueDepthMax=" << queueDepthMax.load(std::memory_order_relaxed)
+                    << " queueDepthMax=" << stats.queueDepthMax.load(std::memory_order_relaxed)
                     << " queueToSendUs=" << queueToSendUs
                     << " sendIntervalUs=" << sendIntervalUs
                     << " sendIntervalErrUs=" << sendIntervalErrUs
@@ -6044,30 +6061,30 @@ int main(int argc, char** argv) {
         const uint64_t scaleStartUs = qpc_now_us();
         bool scaleOk = false;
         if (gpuScalerHealthy) {
-          ++gpuScaleAttempts;
+          ++stats.gpuScaleAttempts;
           scaleOk = gpuScaler.scale(payload->data(), w, h, stride, encoder.activeEncodeW, encoder.activeEncodeH,
                                     &scaledBgra, &scaleReadbackTiming);
           if (scaleOk) {
-            ++gpuScaleSuccess;
-            ++gpuScaleTimedCount;
-            gpuScaleD3DWaitSumUs += scaleReadbackTiming.d3dWaitUs;
-            gpuScaleD3DWaitMaxUs = std::max(gpuScaleD3DWaitMaxUs, scaleReadbackTiming.d3dWaitUs);
-            gpuScaleCopyMapSumUs += scaleReadbackTiming.copyMapUs;
-            gpuScaleCopyMapMaxUs = std::max(gpuScaleCopyMapMaxUs, scaleReadbackTiming.copyMapUs);
-            gpuScaleMemcpySumUs += scaleReadbackTiming.memcpyUs;
-            gpuScaleMemcpyMaxUs = std::max(gpuScaleMemcpyMaxUs, scaleReadbackTiming.memcpyUs);
-            gpuScaleUnmapWaitSumUs += scaleReadbackTiming.unmapWaitUs;
-            gpuScaleUnmapWaitMaxUs = std::max(gpuScaleUnmapWaitMaxUs, scaleReadbackTiming.unmapWaitUs);
-            gpuScaleUnmapSumUs += scaleReadbackTiming.unmapUs;
-            gpuScaleUnmapMaxUs = std::max(gpuScaleUnmapMaxUs, scaleReadbackTiming.unmapUs);
+            ++stats.gpuScaleSuccess;
+            ++stats.gpuScaleTimedCount;
+            stats.gpuScaleD3DWaitSumUs += scaleReadbackTiming.d3dWaitUs;
+            stats.gpuScaleD3DWaitMaxUs = std::max(stats.gpuScaleD3DWaitMaxUs, scaleReadbackTiming.d3dWaitUs);
+            stats.gpuScaleCopyMapSumUs += scaleReadbackTiming.copyMapUs;
+            stats.gpuScaleCopyMapMaxUs = std::max(stats.gpuScaleCopyMapMaxUs, scaleReadbackTiming.copyMapUs);
+            stats.gpuScaleMemcpySumUs += scaleReadbackTiming.memcpyUs;
+            stats.gpuScaleMemcpyMaxUs = std::max(stats.gpuScaleMemcpyMaxUs, scaleReadbackTiming.memcpyUs);
+            stats.gpuScaleUnmapWaitSumUs += scaleReadbackTiming.unmapWaitUs;
+            stats.gpuScaleUnmapWaitMaxUs = std::max(stats.gpuScaleUnmapWaitMaxUs, scaleReadbackTiming.unmapWaitUs);
+            stats.gpuScaleUnmapSumUs += scaleReadbackTiming.unmapUs;
+            stats.gpuScaleUnmapMaxUs = std::max(stats.gpuScaleUnmapMaxUs, scaleReadbackTiming.unmapUs);
           } else {
-            ++gpuScaleFail;
+            ++stats.gpuScaleFail;
             gpuScalerHealthy = false;
             std::cout << "[native-video-host] gpu scaler disabled after failure; fallback=cpu\n";
           }
         }
         if (!scaleOk) {
-          ++gpuScaleCpuFallback;
+          ++stats.gpuScaleCpuFallback;
           if (!resize_bgra_bilinear(payload->data(), w, h, stride, encoder.activeEncodeW, encoder.activeEncodeH, &scaledBgra)) {
             continue;
           }
@@ -6093,7 +6110,7 @@ int main(int argc, char** argv) {
       }
       if (guardStalePreEncode &&
           frameAgeBeforeEncodeUs > kMaxPreEncodeFrameAgeUs && latestVersion != version) {
-        ++stalePreEncodeDropCount;
+        ++stats.stalePreEncodeDropCount;
         continue;
       }
 
@@ -6291,10 +6308,10 @@ int main(int argc, char** argv) {
 
       if (units.empty()) continue;
 
-      captureAgeSumUs += captureAgeAtCallbackUs;
-      captureAgeMaxUs = std::max(captureAgeMaxUs, captureAgeAtCallbackUs);
-      callbackToEncodeStartSumUs += callbackToEncodeStartUs;
-      callbackToEncodeStartMaxUs = std::max(callbackToEncodeStartMaxUs, callbackToEncodeStartUs);
+      stats.captureAgeSumUs += captureAgeAtCallbackUs;
+      stats.captureAgeMaxUs = std::max(stats.captureAgeMaxUs, captureAgeAtCallbackUs);
+      stats.callbackToEncodeStartSumUs += callbackToEncodeStartUs;
+      stats.callbackToEncodeStartMaxUs = std::max(stats.callbackToEncodeStartMaxUs, callbackToEncodeStartUs);
 
       bool encoderResetTriggered = false;
       bool sessionReconnectTriggered = false;
@@ -6358,10 +6375,10 @@ int main(int argc, char** argv) {
                   ? (encodeEndUs - static_cast<uint64_t>(auCaptureUs))
                   : 0;
         if (guardStaleEncoded && encodedAgeUs > kMaxEncodedFrameAgeUs) {
-          ++staleEncodedDropCount;
+          ++stats.staleEncodedDropCount;
           ++encoder.consecutiveStaleFrames;
-          if ((staleEncodedDropCount % 60) == 1) {
-            std::cout << "[native-video-host] stale encoded drop count=" << staleEncodedDropCount
+          if ((stats.staleEncodedDropCount % 60) == 1) {
+            std::cout << "[native-video-host] stale encoded drop count=" << stats.staleEncodedDropCount
                       << " encodedAgeUs=" << encodedAgeUs
                       << " thresholdUs=" << kMaxEncodedFrameAgeUs
                       << " consecutive=" << encoder.consecutiveStaleFrames
@@ -6431,7 +6448,7 @@ int main(int argc, char** argv) {
         SendPathStats sendPathStats{};
         const uint64_t sendStartUs = qpc_now_us();
         const uint64_t sendIntervalUs =
-            (lastSendStartUs > 0 && sendStartUs >= lastSendStartUs) ? (sendStartUs - lastSendStartUs) : 0;
+            (stats.lastSendStartUs > 0 && sendStartUs >= stats.lastSendStartUs) ? (sendStartUs - stats.lastSendStartUs) : 0;
         const uint64_t sendIntervalErrUs =
             (encoder.activeFrameIntervalUs > 0 && sendIntervalUs > 0)
                 ? ((sendIntervalUs >= encoder.activeFrameIntervalUs) ? (sendIntervalUs - encoder.activeFrameIntervalUs)
@@ -6533,7 +6550,7 @@ int main(int argc, char** argv) {
         const uint64_t sendDurUs = (sendDoneUs >= sendStartUs) ? (sendDoneUs - sendStartUs) : 0;
         const uint64_t sendCallCount = sendPathStats.headerCallCount + sendPathStats.payloadCallCount;
         if (sentOk) {
-          lastSendStartUs = sendStartUs;
+          stats.lastSendStartUs = sendStartUs;
           log_first_sent_generation(
               transport == VideoTransport::Tcp ? "h264-tcp" : "h264-udp",
               streamGeneration, sendStartUs, hdr.captureQpcUs, hdr.width, hdr.height);
@@ -6589,7 +6606,7 @@ int main(int argc, char** argv) {
           ++encoder.encodedFrames;
           sender.sentBytes += hdr.payloadSize;
           if (!countedRawForInput) {
-            rawEquivalentBytes +=
+            stats.rawEquivalentBytes +=
                 static_cast<uint64_t>(encoder.activeEncodeW) * static_cast<uint64_t>(encoder.activeEncodeH) * 3 / 2;
             countedRawForInput = true;
           }
@@ -6600,8 +6617,8 @@ int main(int argc, char** argv) {
         }
 
         if (args.traceEvery > 0 && (hdr.seq % args.traceEvery) == 0 &&
-            (args.traceMax == 0 || tracePrinted < args.traceMax)) {
-          ++tracePrinted;
+            (args.traceMax == 0 || stats.tracePrinted < args.traceMax)) {
+          ++stats.tracePrinted;
           const uint64_t c2eUs = (hdr.encodeStartQpcUs >= hdr.captureQpcUs) ? (hdr.encodeStartQpcUs - hdr.captureQpcUs) : 0;
           const uint64_t encQueueUs =
               (encodeStartUs >= static_cast<uint64_t>(auCaptureUs))
@@ -6675,7 +6692,7 @@ int main(int argc, char** argv) {
                      << " sendToEncodeUs=" << sendToEncodeUs
                      << " tickWaitUs=" << tickWaitUs
                      << " queueDepth=" << queueDepthAtPop
-                    << " queueDepthMax=" << queueDepthMax.load(std::memory_order_relaxed)
+                    << " queueDepthMax=" << stats.queueDepthMax.load(std::memory_order_relaxed)
                     << " sendCallCount=" << sendCallCount
                     << " sendHeaderUs=" << sendPathStats.headerUs
                     << " sendPayloadUs=" << sendPathStats.payloadUs
@@ -6747,7 +6764,7 @@ int main(int argc, char** argv) {
                    << " queueWaitReason=" << queueWaitReason
                      << " queueGapFrames=" << queueGapFrames
                      << " queueDepth=" << queueDepthAtPop
-                    << " queueDepthMax=" << queueDepthMax.load(std::memory_order_relaxed)
+                    << " queueDepthMax=" << stats.queueDepthMax.load(std::memory_order_relaxed)
                     << " queueToEncodeUs=" << queueToEncodeUs
                     << " queueToSendUs=" << queueToSendUs
                     << " sendIntervalUs=" << sendIntervalUs
@@ -6826,9 +6843,9 @@ int main(int argc, char** argv) {
     }
 
     const uint64_t t = qpc_now_us();
-    if (t >= statAtUs) {
-      ++statTicks;
-      const bool statsPrintDue = (statTicks % statsPrintEverySec) == 0;
+    if (t >= stats.nextAtUs) {
+      ++stats.ticks;
+      const bool statsPrintDue = (stats.ticks % stats.printEverySec) == 0;
       const double mbps = (sender.sentBytes * 8.0) / (1000.0 * 1000.0);
       std::string targetProcessName;
       {
@@ -6836,16 +6853,16 @@ int main(int argc, char** argv) {
         targetProcessName = hostCaptureTargetProcess;
       }
       const uint64_t queuePushPerSec =
-          (queuePushCount >= queuePushCountLastSample) ? (queuePushCount - queuePushCountLastSample) : 0;
-      queuePushCountLastSample = queuePushCount;
-      queuePushPerSecLatest = queuePushPerSec;
-      const uint64_t callbackFramesPerSec = callbackFrames.load(std::memory_order_relaxed);
+          (stats.queuePushCount >= stats.queuePushCountLastSample) ? (stats.queuePushCount - stats.queuePushCountLastSample) : 0;
+      stats.queuePushCountLastSample = stats.queuePushCount;
+      stats.queuePushPerSecLatest = queuePushPerSec;
+      const uint64_t callbackFramesPerSec = stats.callbackFrames.load(std::memory_order_relaxed);
       const uint64_t idleHoldPerSec =
           (useH264 &&
            captureSessionReady.load(std::memory_order_acquire) &&
            clientSession.streamControlActive.load(std::memory_order_acquire) &&
            callbackFramesPerSec == 0) ? 1ULL : 0ULL;
-      idleHoldTotal += idleHoldPerSec;
+      stats.idleHoldTotal += idleHoldPerSec;
       const bool gdiLowPushFallbackEnabled =
           !captureWindowModeActive && backend.active == DesktopCaptureBackend::Gdi;
       if (useH264 &&
@@ -7050,16 +7067,16 @@ int main(int argc, char** argv) {
       if (useRaw) {
         if (statsPrintDue) {
         std::cout << "[native-video-host] sentFrames=" << sender.sentFrames
-                  << " queuePushCount=" << queuePushCount
-                  << " queuePopCount=" << queuePopCount
-                  << " queuePushPerSec=" << queuePushPerSecLatest
+                  << " queuePushCount=" << stats.queuePushCount
+                  << " queuePopCount=" << stats.queuePopCount
+                  << " queuePushPerSec=" << stats.queuePushPerSecLatest
                   << " idleHoldPerSec=" << idleHoldPerSec
-                  << " idleHoldTotal=" << idleHoldTotal
+                  << " idleHoldTotal=" << stats.idleHoldTotal
                   << " captureInputLowPushStreakSec=" << watchdog.inputLowPushStreakSec
                   << " captureDeadRestartCount=" << watchdog.deadRestartCount
-                  << " queueDepthMax=" << queueDepthMax.load(std::memory_order_relaxed)
-                  << " queueWaitTimeoutCount=" << queueWaitTimeoutCount
-                  << " queueWaitNoWorkCount=" << queueWaitNoWorkCount
+                  << " queueDepthMax=" << stats.queueDepthMax.load(std::memory_order_relaxed)
+                  << " queueWaitTimeoutCount=" << stats.queueWaitTimeoutCount
+                  << " queueWaitNoWorkCount=" << stats.queueWaitNoWorkCount
                   << " captureRestarts=" << captureRestartCount
                   << " wgcContentSizeMismatchDrops=" << wgcContentSizeMismatchDrops.load(std::memory_order_relaxed)
                   << " wgcPoolRecreates=" << wgcPoolRecreates
@@ -7095,7 +7112,7 @@ int main(int argc, char** argv) {
                   << " inputDefaultBrokerPipeFail=" << inputRouter.defaultBrokerPipeFail.load(std::memory_order_relaxed)
                   << " keyReqDropTotal=" << clientMetrics.keyFrameRequestDropped.load()
                   << " callbackFrames=" << callbackFramesPerSec
-                  << " skippedByOverwrite=" << skippedByOverwrite
+                  << " skippedByOverwrite=" << stats.skippedByOverwrite
                   << " frameGatingMode=" << (frameGating.staticMode ? "static" : "motion")
                   << " frameGatingSkips=" << frameGating.skipCount
                   << " frameGatingStaticSkips=" << frameGating.staticSkipCount
@@ -7104,35 +7121,35 @@ int main(int argc, char** argv) {
                   << "\n";
         }
       } else {
-        const uint64_t capAgeAvgUs = (encoder.encodedFrames > 0) ? (captureAgeSumUs / encoder.encodedFrames) : 0;
-        const uint64_t cb2eAvgUs = (encoder.encodedFrames > 0) ? (callbackToEncodeStartSumUs / encoder.encodedFrames) : 0;
+        const uint64_t capAgeAvgUs = (encoder.encodedFrames > 0) ? (stats.captureAgeSumUs / encoder.encodedFrames) : 0;
+        const uint64_t cb2eAvgUs = (encoder.encodedFrames > 0) ? (stats.callbackToEncodeStartSumUs / encoder.encodedFrames) : 0;
         const uint64_t captureD3DWaitAvgUs =
-            (captureReadbackSamples > 0) ? (captureD3DWaitSumUs / captureReadbackSamples) : 0;
+            (stats.captureReadbackSamples > 0) ? (stats.captureD3DWaitSumUs / stats.captureReadbackSamples) : 0;
         const uint64_t captureCopyMapAvgUs =
-            (captureReadbackSamples > 0) ? (captureCopyMapSumUs / captureReadbackSamples) : 0;
+            (stats.captureReadbackSamples > 0) ? (stats.captureCopyMapSumUs / stats.captureReadbackSamples) : 0;
         const uint64_t captureMemcpyAvgUs =
-            (captureReadbackSamples > 0) ? (captureMemcpySumUs / captureReadbackSamples) : 0;
+            (stats.captureReadbackSamples > 0) ? (stats.captureMemcpySumUs / stats.captureReadbackSamples) : 0;
         const uint64_t captureUnmapWaitAvgUs =
-            (captureReadbackSamples > 0) ? (captureUnmapWaitSumUs / captureReadbackSamples) : 0;
+            (stats.captureReadbackSamples > 0) ? (stats.captureUnmapWaitSumUs / stats.captureReadbackSamples) : 0;
         const uint64_t captureUnmapAvgUs =
-            (captureReadbackSamples > 0) ? (captureUnmapSumUs / captureReadbackSamples) : 0;
+            (stats.captureReadbackSamples > 0) ? (stats.captureUnmapSumUs / stats.captureReadbackSamples) : 0;
         const uint64_t gpuScaleD3DWaitAvgUs =
-            (gpuScaleTimedCount > 0) ? (gpuScaleD3DWaitSumUs / gpuScaleTimedCount) : 0;
+            (stats.gpuScaleTimedCount > 0) ? (stats.gpuScaleD3DWaitSumUs / stats.gpuScaleTimedCount) : 0;
         const uint64_t gpuScaleCopyMapAvgUs =
-            (gpuScaleTimedCount > 0) ? (gpuScaleCopyMapSumUs / gpuScaleTimedCount) : 0;
+            (stats.gpuScaleTimedCount > 0) ? (stats.gpuScaleCopyMapSumUs / stats.gpuScaleTimedCount) : 0;
         const uint64_t gpuScaleMemcpyAvgUs =
-            (gpuScaleTimedCount > 0) ? (gpuScaleMemcpySumUs / gpuScaleTimedCount) : 0;
+            (stats.gpuScaleTimedCount > 0) ? (stats.gpuScaleMemcpySumUs / stats.gpuScaleTimedCount) : 0;
         const uint64_t gpuScaleUnmapWaitAvgUs =
-            (gpuScaleTimedCount > 0) ? (gpuScaleUnmapWaitSumUs / gpuScaleTimedCount) : 0;
+            (stats.gpuScaleTimedCount > 0) ? (stats.gpuScaleUnmapWaitSumUs / stats.gpuScaleTimedCount) : 0;
         const uint64_t gpuScaleUnmapAvgUs =
-            (gpuScaleTimedCount > 0) ? (gpuScaleUnmapSumUs / gpuScaleTimedCount) : 0;
+            (stats.gpuScaleTimedCount > 0) ? (stats.gpuScaleUnmapSumUs / stats.gpuScaleTimedCount) : 0;
         const uint64_t frameGatingChangeAvgPm =
             (frameGating.changePermilleCount > 0)
                 ? (frameGating.changePermilleSum / frameGating.changePermilleCount)
                 : frameGating.changePermilleLast;
-        const double rawEquivMbps = (rawEquivalentBytes * 8.0) / (1000.0 * 1000.0);
+        const double rawEquivMbps = (stats.rawEquivalentBytes * 8.0) / (1000.0 * 1000.0);
         const uint64_t encRatioX100 =
-            (sender.sentBytes > 0) ? ((rawEquivalentBytes * 100ULL) / sender.sentBytes) : 0;
+            (sender.sentBytes > 0) ? ((stats.rawEquivalentBytes * 100ULL) / sender.sentBytes) : 0;
         // The sender thread owns the UDP wire counters now.
         if (transport == VideoTransport::Udp) {
           sender.udpTxFrames = sender.txFrames.load(std::memory_order_relaxed);
@@ -7157,16 +7174,16 @@ int main(int argc, char** argv) {
             (lastPublishAtUs > 0 && statsNowUs > lastPublishAtUs) ? statsNowUs - lastPublishAtUs : 0;
         std::cout << "[native-video-host] encodedFrames=" << encoder.encodedFrames
                   << " sentFrames=" << sender.sentFrames
-                  << " queuePushCount=" << queuePushCount
-                  << " queuePopCount=" << queuePopCount
-                  << " queuePushPerSec=" << queuePushPerSecLatest
+                  << " queuePushCount=" << stats.queuePushCount
+                  << " queuePopCount=" << stats.queuePopCount
+                  << " queuePushPerSec=" << stats.queuePushPerSecLatest
                   << " idleHoldPerSec=" << idleHoldPerSec
-                  << " idleHoldTotal=" << idleHoldTotal
+                  << " idleHoldTotal=" << stats.idleHoldTotal
                   << " captureInputLowPushStreakSec=" << watchdog.inputLowPushStreakSec
                   << " captureDeadRestartCount=" << watchdog.deadRestartCount
-                  << " queueDepthMax=" << queueDepthMax.load(std::memory_order_relaxed)
-                  << " queueWaitTimeoutCount=" << queueWaitTimeoutCount
-                  << " queueWaitNoWorkCount=" << queueWaitNoWorkCount
+                  << " queueDepthMax=" << stats.queueDepthMax.load(std::memory_order_relaxed)
+                  << " queueWaitTimeoutCount=" << stats.queueWaitTimeoutCount
+                  << " queueWaitNoWorkCount=" << stats.queueWaitNoWorkCount
                   << " captureRestarts=" << captureRestartCount
                   << " wgcContentSizeMismatchDrops=" << wgcContentSizeMismatchDrops.load(std::memory_order_relaxed)
                   << " wgcPoolRecreates=" << wgcPoolRecreates
@@ -7176,9 +7193,9 @@ int main(int argc, char** argv) {
                   << " captureTargetHwnd=0x" << std::hex
                   << hostCaptureTargetHwnd.load(std::memory_order_relaxed) << std::dec
                   << " callbackFrames=" << callbackFramesPerSec
-                  << " skippedByOverwrite=" << skippedByOverwrite
-                  << " stalePreEncodeDrops=" << stalePreEncodeDropCount
-                  << " staleEncodedDrops=" << staleEncodedDropCount
+                  << " skippedByOverwrite=" << stats.skippedByOverwrite
+                  << " stalePreEncodeDrops=" << stats.stalePreEncodeDropCount
+                  << " staleEncodedDrops=" << stats.staleEncodedDropCount
                   << " encoderResets=" << encoder.resetCount
                   << " keyReqTotal=" << clientMetrics.keyFrameRequestCount.load()
                   << " keyReqDropTotal=" << clientMetrics.keyFrameRequestDropped.load()
@@ -7208,10 +7225,10 @@ int main(int argc, char** argv) {
                   << " inputDefaultBrokerQueued=" << inputRouter.defaultBrokerQueued.load(std::memory_order_relaxed)
                   << " inputDefaultBrokerPipeFail=" << inputRouter.defaultBrokerPipeFail.load(std::memory_order_relaxed)
                   << " capAgeAvgUs=" << capAgeAvgUs
-                  << " capAgeMaxUs=" << captureAgeMaxUs
+                  << " capAgeMaxUs=" << stats.captureAgeMaxUs
                   << " cb2eAvgUs=" << cb2eAvgUs
-                  << " cb2eMaxUs=" << callbackToEncodeStartMaxUs
-                  << " captureReadbackSamples=" << captureReadbackSamples
+                  << " cb2eMaxUs=" << stats.callbackToEncodeStartMaxUs
+                  << " captureReadbackSamples=" << stats.captureReadbackSamples
                   << " captureStagingBusyDrops=" << captureReadback.BusyDrops()
                   << " captureSupersededDrops=" << captureReadback.SupersededDrops()
                   << " captureCpuBufferReuse=" << captureReadback.BufferReuseCount()
@@ -7221,13 +7238,13 @@ int main(int argc, char** argv) {
                   << " nv12RingBusy=" << captureReadback.Nv12RingBusy()
                   << " nv12SurfaceFrames=" << encoder.nv12SurfaceEncodeCount
                   << " captureD3DWaitAvgUs=" << captureD3DWaitAvgUs
-                  << " captureD3DWaitMaxUs=" << captureD3DWaitMaxUs
+                  << " captureD3DWaitMaxUs=" << stats.captureD3DWaitMaxUs
                   << " captureCopyMapAvgUs=" << captureCopyMapAvgUs
-                  << " captureCopyMapMaxUs=" << captureCopyMapMaxUs
+                  << " captureCopyMapMaxUs=" << stats.captureCopyMapMaxUs
                   << " captureMemcpyAvgUs=" << captureMemcpyAvgUs
-                  << " captureMemcpyMaxUs=" << captureMemcpyMaxUs
+                  << " captureMemcpyMaxUs=" << stats.captureMemcpyMaxUs
                   << " captureUnmapWaitAvgUs=" << captureUnmapWaitAvgUs
-                  << " captureUnmapWaitMaxUs=" << captureUnmapWaitMaxUs
+                  << " captureUnmapWaitMaxUs=" << stats.captureUnmapWaitMaxUs
                   << " oldestGpuPendingPeakUs=" << watchdog.oldestGpuPendingPeakUs
                   << " oldestGpuPendingNowUs=" << captureReadback.OldestGpuPendingAgeUs()
                   << " gpuPendingCount=" << captureReadback.GpuPendingCount()
@@ -7237,7 +7254,7 @@ int main(int argc, char** argv) {
                   << " readbackDrainSec=" << watchdog.drainConsecutiveSec
                   << " lastPublishAgeUs=" << lastPublishAgeUs
                   << " captureUnmapAvgUs=" << captureUnmapAvgUs
-                  << " captureUnmapMaxUs=" << captureUnmapMaxUs
+                  << " captureUnmapMaxUs=" << stats.captureUnmapMaxUs
                   << " mbps=" << mbps
                   << " rawEquivMbps=" << rawEquivMbps
                   << " encRatioX100=" << encRatioX100
@@ -7259,21 +7276,21 @@ int main(int argc, char** argv) {
                   << " size=" << encoder.activeEncodeW << "x" << encoder.activeEncodeH
                   << " gpuScaleReq=" << (gpuScalerRequested ? 1 : 0)
                   << " gpuScaleReady=" << (gpuScalerHealthy ? 1 : 0)
-                  << " gpuScaleAttempts=" << gpuScaleAttempts
-                  << " gpuScaleSuccess=" << gpuScaleSuccess
-                  << " gpuScaleFail=" << gpuScaleFail
-                  << " gpuScaleCpuFallback=" << gpuScaleCpuFallback
-                  << " gpuScaleTimedCount=" << gpuScaleTimedCount
+                  << " gpuScaleAttempts=" << stats.gpuScaleAttempts
+                  << " gpuScaleSuccess=" << stats.gpuScaleSuccess
+                  << " gpuScaleFail=" << stats.gpuScaleFail
+                  << " gpuScaleCpuFallback=" << stats.gpuScaleCpuFallback
+                  << " gpuScaleTimedCount=" << stats.gpuScaleTimedCount
                   << " gpuScaleD3DWaitAvgUs=" << gpuScaleD3DWaitAvgUs
-                  << " gpuScaleD3DWaitMaxUs=" << gpuScaleD3DWaitMaxUs
+                  << " gpuScaleD3DWaitMaxUs=" << stats.gpuScaleD3DWaitMaxUs
                   << " gpuScaleCopyMapAvgUs=" << gpuScaleCopyMapAvgUs
-                  << " gpuScaleCopyMapMaxUs=" << gpuScaleCopyMapMaxUs
+                  << " gpuScaleCopyMapMaxUs=" << stats.gpuScaleCopyMapMaxUs
                   << " gpuScaleMemcpyAvgUs=" << gpuScaleMemcpyAvgUs
-                  << " gpuScaleMemcpyMaxUs=" << gpuScaleMemcpyMaxUs
+                  << " gpuScaleMemcpyMaxUs=" << stats.gpuScaleMemcpyMaxUs
                   << " gpuScaleUnmapWaitAvgUs=" << gpuScaleUnmapWaitAvgUs
-                  << " gpuScaleUnmapWaitMaxUs=" << gpuScaleUnmapWaitMaxUs
+                  << " gpuScaleUnmapWaitMaxUs=" << stats.gpuScaleUnmapWaitMaxUs
                   << " gpuScaleUnmapAvgUs=" << gpuScaleUnmapAvgUs
-                  << " gpuScaleUnmapMaxUs=" << gpuScaleUnmapMaxUs
+                  << " gpuScaleUnmapMaxUs=" << stats.gpuScaleUnmapMaxUs
                   << " abrProfile=" << ((rate.abrProfile == 0) ? "high" : ((rate.abrProfile == 1) ? "mid" : "low"))
                   << " abrModSec=" << rate.abrModeratePressureSeconds
                   << " abrSevSec=" << rate.abrSeverePressureSeconds
@@ -7621,37 +7638,37 @@ int main(int argc, char** argv) {
       sender.sentFrames = 0;
       encoder.encodedFrames = 0;
       sender.sentBytes = 0;
-      rawEquivalentBytes = 0;
+      stats.rawEquivalentBytes = 0;
       sender.udpTxFrames = 0;
       sender.udpTxChunks = 0;
       sender.udpTxBytes = 0;
       sender.udpTxFail = 0;
       sender.udpTxNoPeer = 0;
-      skippedByOverwrite = 0;
-      stalePreEncodeDropCount = 0;
-      staleEncodedDropCount = 0;
+      stats.skippedByOverwrite = 0;
+      stats.stalePreEncodeDropCount = 0;
+      stats.staleEncodedDropCount = 0;
       encoder.resetCount = 0;
-      callbackFrames = 0;
-      captureAgeSumUs = 0;
-      captureAgeMaxUs = 0;
-      callbackToEncodeStartSumUs = 0;
-      callbackToEncodeStartMaxUs = 0;
-      gpuScaleAttempts = 0;
-      gpuScaleSuccess = 0;
-      gpuScaleFail = 0;
-      gpuScaleCpuFallback = 0;
-      captureReadbackSamples = 0;
-      captureD3DWaitSumUs = 0;
-      captureD3DWaitMaxUs = 0;
-      captureCopyMapSumUs = 0;
-      captureCopyMapMaxUs = 0;
-      captureMemcpySumUs = 0;
-      captureMemcpyMaxUs = 0;
-      captureUnmapWaitSumUs = 0;
-      captureUnmapWaitMaxUs = 0;
+      stats.callbackFrames = 0;
+      stats.captureAgeSumUs = 0;
+      stats.captureAgeMaxUs = 0;
+      stats.callbackToEncodeStartSumUs = 0;
+      stats.callbackToEncodeStartMaxUs = 0;
+      stats.gpuScaleAttempts = 0;
+      stats.gpuScaleSuccess = 0;
+      stats.gpuScaleFail = 0;
+      stats.gpuScaleCpuFallback = 0;
+      stats.captureReadbackSamples = 0;
+      stats.captureD3DWaitSumUs = 0;
+      stats.captureD3DWaitMaxUs = 0;
+      stats.captureCopyMapSumUs = 0;
+      stats.captureCopyMapMaxUs = 0;
+      stats.captureMemcpySumUs = 0;
+      stats.captureMemcpyMaxUs = 0;
+      stats.captureUnmapWaitSumUs = 0;
+      stats.captureUnmapWaitMaxUs = 0;
       // The frozen-ring peaks must span the whole print interval, not a single tick. Everything
       // else here resets every second and is sampled once per print, but a freeze can spike in any
-      // of the ~30 ticks between prints (statsPrintEverySec defaults to 30), so a per-second reset
+      // of the ~30 ticks between prints (stats.printEverySec defaults to 30), so a per-second reset
       // would throw those windows away and the peak would only ever show the last second before a
       // print. Reset them only once the value has actually been printed. (Codex.)
       if (statsPrintDue) {
@@ -7663,24 +7680,24 @@ int main(int argc, char** argv) {
         encoder.forceKeyInputCount = 0;
         sender.nonKeyAuWhileWaiting = 0;
       }
-      captureUnmapSumUs = 0;
-      captureUnmapMaxUs = 0;
-      gpuScaleTimedCount = 0;
-      gpuScaleD3DWaitSumUs = 0;
-      gpuScaleD3DWaitMaxUs = 0;
-      gpuScaleCopyMapSumUs = 0;
-      gpuScaleCopyMapMaxUs = 0;
-      gpuScaleMemcpySumUs = 0;
-      gpuScaleMemcpyMaxUs = 0;
-      gpuScaleUnmapWaitSumUs = 0;
-      gpuScaleUnmapWaitMaxUs = 0;
-      gpuScaleUnmapSumUs = 0;
-      gpuScaleUnmapMaxUs = 0;
+      stats.captureUnmapSumUs = 0;
+      stats.captureUnmapMaxUs = 0;
+      stats.gpuScaleTimedCount = 0;
+      stats.gpuScaleD3DWaitSumUs = 0;
+      stats.gpuScaleD3DWaitMaxUs = 0;
+      stats.gpuScaleCopyMapSumUs = 0;
+      stats.gpuScaleCopyMapMaxUs = 0;
+      stats.gpuScaleMemcpySumUs = 0;
+      stats.gpuScaleMemcpyMaxUs = 0;
+      stats.gpuScaleUnmapWaitSumUs = 0;
+      stats.gpuScaleUnmapWaitMaxUs = 0;
+      stats.gpuScaleUnmapSumUs = 0;
+      stats.gpuScaleUnmapMaxUs = 0;
       frameGating.skipCount = 0;
       frameGating.staticSkipCount = 0;
       frameGating.changePermilleSum = 0;
       frameGating.changePermilleCount = 0;
-      statAtUs += 1000000ULL;
+      stats.nextAtUs += 1000000ULL;
     }
   }
 
