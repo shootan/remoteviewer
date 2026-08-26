@@ -77,7 +77,9 @@ add_executable(remote60_native_video_host_poc
   src/host_stage_pop_frame.cpp
   src/host_stage_gate_static.cpp
   src/host_stage_encode_send.cpp
+  src/host_stage_encode_send_h264.cpp
   src/host_stage_stats.cpp
+  src/host_stage_stats_h264.cpp
   src/d3d_capture_readback.cpp
   src/directory_client.cpp
   src/gdi_capture_process.cpp

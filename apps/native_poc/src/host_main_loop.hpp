@@ -213,7 +213,12 @@ Flow stage_watchdogs(HostContext& hx, TickContext& tc);     // callback-stall + 
 Flow stage_pace(HostContext& hx, TickContext& tc);          // raw-mode tick pacing
 Flow stage_pop_frame(HostContext& hx, TickContext& tc);     // trailing kick, static refresh, frame pop
 Flow stage_gate_static(HostContext& hx, TickContext& tc);   // static-frame gating, stale guards
-Flow stage_encode_send(HostContext& hx, TickContext& tc);   // raw send / H.264 encode + enqueue
+Flow stage_encode_send(HostContext& hx, TickContext& tc);   // raw send / H.264 encode + enqueue (dispatcher)
+Flow encode_send_raw(HostContext& hx, TickContext& tc);
+Flow encode_send_h264(HostContext& hx, TickContext& tc);
 Flow stage_stats(HostContext& hx, TickContext& tc);         // 1s stats tick, drain watchdog, ABR/M9
+Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPrintDue, double mbps,
+                     const std::string& targetProcessName, uint64_t queuePushPerSec,
+                     uint64_t callbackFramesPerSec, uint64_t idleHoldPerSec);
 
 }  // namespace remote60::native_poc
