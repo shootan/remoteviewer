@@ -6936,3 +6936,14 @@ Next action
 - 순수 이동 검증: 제거 182줄 vs 헤더 본문 182줄 → IDENTICAL.
 - 검증: 브랜치 host 타깃 Release 빌드 exit 0, warning/error 0.
 - 다음 액션: 0-4 `host_window_enum.hpp/.cpp`(파일 작성 완료, host_main 제거+CMake 대기) → 0-6 `host_capture_device`.
+
+### 268) 2026-08-26 리팩터 Phase 0-4 — host_window_enum.hpp/.cpp 추출 (브랜치 49218e4)
+
+- 이동: hwnd_to_id/window_id_to_hwnd, WindowListEntry/MonitorListEntry, should_*_window, window_content_extent,
+  enumerate_monitors/enumerate_shareable_windows, find_window_by_id, get_window_process_name/class_name/title,
+  describe_input_target, CaptureWindowCriteria/Info, match/find_capture_window*, find_top_level_window_at_point →
+  `host_window_enum.hpp`(struct+선언) / `host_window_enum.cpp`(정의, 신규 TU, CMake 추가). host_main 9,204→8,879줄.
+- 순수 이동 검증: 제거 325줄을 정렬 multiset으로 .cpp 본문(291)+.hpp와 대조 → 함수 본문 전부 일치, .cpp에 없는 줄은
+  헤더로 간 struct 4개·주석·전방선언 2개뿐(전방선언은 헤더가 대체).
+- 검증: 브랜치 host 타깃 Release 빌드 exit 0, warning/error 0.
+- 다음 액션: 0-6 `host_capture_device.hpp/.cpp`(파일 작성 완료) → 0-5 `host_net_io.hpp/.cpp`(헤더 작성 완료).
