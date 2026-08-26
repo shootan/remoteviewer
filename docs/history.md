@@ -6947,3 +6947,13 @@ Next action
   헤더로 간 struct 4개·주석·전방선언 2개뿐(전방선언은 헤더가 대체).
 - 검증: 브랜치 host 타깃 Release 빌드 exit 0, warning/error 0.
 - 다음 액션: 0-6 `host_capture_device.hpp/.cpp`(파일 작성 완료) → 0-5 `host_net_io.hpp/.cpp`(헤더 작성 완료).
+
+### 269) 2026-08-26 리팩터 Phase 0-6 — host_capture_device.hpp/.cpp 추출 (브랜치 0d1f528)
+
+- 이동: backend_request_*/backend_fallback_reason, desktop_capture_backend_from_env/from_code/code/name(fix 261이 추가한
+  name 포함), compute_window_client_crop, CreateItemForPrimaryMonitor, SurfaceToTexture, PrimaryMonitorInfo/
+  primary_monitor_info, create_d3d11_device_for_primary_monitor → `host_capture_device.hpp/.cpp`(신규 TU, CMake 추가).
+  host_main 8,879→8,524줄.
+- 순수 이동 검증: 제거 351줄 정렬 대조 → .cpp/.hpp에 없는 줄은 기본인자 시그니처 1줄(헤더로 이동)뿐.
+- 검증: 브랜치 host 타깃 Release 빌드 exit 0, warning/error 0.
+- 다음 액션: 0-5 `host_net_io.hpp/.cpp`(파일 작성 완료) → 0-1 `host_input_inject.hpp/.cpp` → 0-7b.
