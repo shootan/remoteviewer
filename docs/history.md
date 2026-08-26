@@ -7094,3 +7094,12 @@ Next action
 - 게이트: host 빌드 exit 0 / UDP e2e 13/13 / 로그 gop-config·runtime-config-applied 그대로.
 - 다음 액션: 1-12 HostStats(50개, 인스턴스 `stats`; 리네이머는 main() 이후 구간에만 적용 — ClientMetricsSnapshot의
   `queueDepthMax` 멤버 선언 보호) → 1-3a CaptureState(순수 데이터).
+
+### 283) 2026-08-26 리팩터 Phase 1-12 — HostStats (브랜치 eadf83f)
+
+- 통계 출력 주기/틱, readback·GPU-scale 단계 타이밍(sum/max) 24, 큐 push/pop/wait 계정 8, 드롭/폴백 카운터 등 = 50개 →
+  `struct HostStats`(`stats.<field>`). 리네이머를 main() 이후 구간에만 적용해 ClientMetricsSnapshot의 `queueDepthMax` 멤버
+  선언을 보호. 선언 48줄 삭제(기본값). 리터럴 집합 동일.
+- 게이트: host 빌드 exit 0 / UDP e2e 13/13.
+- 다음 액션: 1-3a CaptureState(순수 데이터 79개, 인스턴스 `capture`; BootstrapFrameCache 파일 스코프 이동) → Phase 1 마무리
+  (1-3b RAII 객체는 Phase 2 CaptureSession으로 이월).
