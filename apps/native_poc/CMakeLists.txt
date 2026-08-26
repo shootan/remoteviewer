@@ -66,6 +66,12 @@ add_executable(remote60_native_video_host_poc
   src/host_capture_session.cpp
   src/host_encoder_manager.cpp
   src/host_loop_helpers.cpp
+  src/host_startup_config.cpp
+  src/host_startup_connect.cpp
+  src/host_startup_control.cpp
+  src/host_startup_graphics.cpp
+  src/host_startup_capture.cpp
+  src/host_shutdown.cpp
   src/host_stage_time_limit.cpp
   src/host_stage_backend.cpp
   src/host_stage_stream_active.cpp

@@ -113,7 +113,7 @@ struct HostContext {
   const Args& args;
   const bool useH264;
   const bool useRaw;
-  const VideoTransport transport;
+  const VideoTransport& transport;  // bound to main()'s, which resolve_transport() fills after assembly (2-12)
   std::atomic<bool>& stop;
   const bool guardStaleEncoded;
   const bool guardStalePreEncode;

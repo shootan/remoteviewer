@@ -41,6 +41,11 @@ struct SocketCloser {
 // retiredSock swap on the main thread only (the reader thread reads the handle it was given);
 // directoryAuth* under directoryAuthMu (reader + control); epoch/controlReadyEpoch/
 // streamControlActive are the cross-thread atomics (control/reader -> main).
+  // Which of the three things a Hello can be. The caller needs the distinction because a first
+  // Hello and its retransmissions are indistinguishable at the endpoint level -- and, behind a
+  // relay, so are two entirely different clients.
+  enum class DirectoryHello { Rejected, Retransmit, NewSession };
+
 struct SessionState {
   // Directory service credentials (args or REMOTE60_DIRECTORY_* env) and the agent.
   std::string directoryUrl;
@@ -101,6 +106,35 @@ struct SessionState {
       return clientSession.controlReadyEpoch.load(std::memory_order_acquire) >= epoch ||
              clientSession.epoch.load(std::memory_order_acquire) > epoch;
     });
+  }
+
+  // --- directory Hello classification (Phase 2-12: former main() lambdas classify_directory_hello /
+  // authorize_directory_session) ---
+  DirectoryHello ClassifyDirectoryHello(const std::string& token, const sockaddr_in& peer) {
+    SessionState& clientSession = *this;
+    if (token.empty()) return DirectoryHello::Rejected;
+    {
+      std::lock_guard<std::mutex> lock(clientSession.directoryAuthMu);
+      if (!clientSession.directoryToken.empty() && token == clientSession.directoryToken &&
+          peer.sin_addr.s_addr == clientSession.directoryIpNet) {
+        // A controller reconnect creates a new UDP socket/port. The already-proven opaque
+        // capability remains the session credential, while the first authenticated source IP
+        // (which can differ from the directory-observed endpoint under hairpin NAT) stays bound.
+        // This is also what makes retransmission safe: the capability itself is single-use, so
+        // without the cache the client's second Hello would be refused.
+        return DirectoryHello::Retransmit;
+      }
+    }
+    if (!clientSession.directoryAgent.AuthorizePeer(token, peer)) return DirectoryHello::Rejected;
+    {
+      std::lock_guard<std::mutex> lock(clientSession.directoryAuthMu);
+      clientSession.directoryToken = token;
+      clientSession.directoryIpNet = peer.sin_addr.s_addr;
+    }
+    return DirectoryHello::NewSession;
+  }
+  bool AuthorizeDirectorySession(const std::string& token, const sockaddr_in& peer) {
+    return ClassifyDirectoryHello(token, peer) != DirectoryHello::Rejected;
   }
 };
 
