@@ -7149,3 +7149,13 @@ Next action
 - 게이트: host 빌드 exit 0 / UDP e2e 13/13(컨트롤 응답·창 목록·runtime tune 모두 새 클래스가 처리).
 - 다음 액션: 2-3 EncodedSender — sender 스레드 본체(180줄)·pump_udp_hello를 SenderState 멤버로, begin/await epoch를
   SessionState 멤버로(스크립트 `automation/host_split_phase2_3.sh` 준비됨).
+
+### 288) 2026-08-26 리팩터 Phase 2-3 — SenderState::StartThread/PumpUdpHello, SessionState::BeginEpoch/AwaitControlReady (브랜치 5033c5f)
+
+- start_encoded_sender(180줄, sender 스레드 본체 포함)·pump_udp_hello → `host_encoded_sender.cpp`의 SenderState 멤버(본문
+  verbatim, `SenderState& sender = *this;` 별칭으로 텍스트 불변). begin/await epoch → host_session.hpp 인라인 멤버.
+  호출부 4곳 치환. 스크립트 `automation/host_split_phase2_3.sh`. host_main 6,318→6,090줄.
+- 게이트: host 빌드 exit 0 / UDP e2e 13/13.
+- 다음 액션: 2-4 CaptureSession — RAII/WinRT/D3D 지역 16개를 `CaptureResources`로 묶고(원래 선언 순서 유지) 캡처 람다
+  10개(create_staging/publish/attach/detach/restart_impl/restore/flush/log_first_sent/kick_try_fill/effective_queue_wait)를
+  CaptureState 멤버(res + 의존 struct 매개변수)로. event_token `token`·HRESULT `hr`는 이름 충돌로 main 잔류.
