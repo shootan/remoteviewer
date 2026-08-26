@@ -103,36 +103,13 @@ Flow stage_gate_static(HostContext& hx, TickContext& tc) {
   if (!servedBootstrap && frameGating.enabled && useH264 && payload && !payload->empty()) {
     if (frameGating.refPayload && !frameGating.refPayload->empty() &&
         frameGating.refW == w && frameGating.refH == h && frameGating.refStride == stride) {
-      frameGating.changePermilleLast = estimate_bgra_change_permille(
-          payload->data(), frameGating.refPayload->data(), payload->size(), frameGating.sampleTarget);
-      frameGating.changePermilleSum += frameGating.changePermilleLast;
-      ++frameGating.changePermilleCount;
-
-      if (frameGating.changePermilleLast == 0) {
-        frameGating.staticStreak = std::min<uint32_t>(frameGating.staticStreak + 1, 60000);
-        frameGating.motionStreak = 0;
-      } else {
-        frameGating.motionStreak = std::min<uint32_t>(frameGating.motionStreak + 1, 60000);
-        frameGating.staticStreak = 0;
-      }
+      frameGating.RecordChange(estimate_bgra_change_permille(
+          payload->data(), frameGating.refPayload->data(), payload->size(), frameGating.sampleTarget));
     } else {
-      frameGating.staticStreak = 0;
-      frameGating.motionStreak = 0;
-      frameGating.changePermilleLast = 1000;
+      frameGating.RecordReferenceMiss();
     }
 
-    const bool prevStaticMode = frameGating.staticMode;
-    // Any difference at all counts as motion. estimate_bgra_change_permille returns 0 only
-    // for a byte-identical frame, so this both leaves static mode on the first changed
-    // frame and never throttles an edit that is too small to move a percentage threshold.
-    const bool motionNow = frameGating.changePermilleLast > 0;
-    if (!frameGating.staticMode && frameGating.staticStreak >= frameGating.enterFrames) {
-      frameGating.staticMode = true;
-    } else if (frameGating.staticMode &&
-               (motionNow || frameGating.motionStreak >= frameGating.exitFrames)) {
-      frameGating.staticMode = false;
-    }
-    if (prevStaticMode != frameGating.staticMode) {
+    if (frameGating.UpdateMode()) {
       std::cout << "[native-video-host] frame-gating mode="
                 << (frameGating.staticMode ? "static" : "motion")
                 << " changePm=" << frameGating.changePermilleLast
@@ -142,17 +119,13 @@ Flow stage_gate_static(HostContext& hx, TickContext& tc) {
     }
 
     const bool keyReqPending = clientMetrics.requestedKeyFrame.load(std::memory_order_acquire);
-    const uint64_t targetIntervalUs = frameGating.staticMode ? frameGating.staticIntervalUs : encoder.activeFrameIntervalUs;
     // The static interval throttles idle scenes; it must never hold back a frame that
     // actually changed, or the first interaction after idle arrives late.
     // In paced motion mode the main tick already enforces encoder.activeFrameIntervalUs. Applying
     // the same interval here a second time makes a slightly-early capture timestamp skip
     // the entire tick (measured 1-6 lost frames/s at 60fps). Keep this limiter only for
     // static throttling or the explicitly unpaced throughput path.
-    const bool needsGatingRateLimit = frameGating.staticMode || !paceByTick;
-    if (needsGatingRateLimit && !keyReqPending && !motionNow &&
-        frameGating.lastSentUs > 0 &&
-        queuePopUs < (frameGating.lastSentUs + targetIntervalUs)) {
+    if (frameGating.ShouldSkip(queuePopUs, keyReqPending, encoder.activeFrameIntervalUs, paceByTick)) {
       ++frameGating.skipCount;
       if (frameGating.staticMode) ++frameGating.staticSkipCount;
       stats.lastVersionSent = version;

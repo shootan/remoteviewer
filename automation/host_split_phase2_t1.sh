@@ -160,7 +160,7 @@ echo "== M9 body vs original 510..551:"
 diff <(sed -n '510,551p' $O) $B/m9_body.txt | grep -E '^>' | grep -v -E '\bin\.' || echo "  (all > lines carry in.)"
 echo "  changed lines: $(diff <(sed -n '510,551p' $O) $B/m9_body.txt | grep -c '^>')"
 echo "== stage diff (expected: the two blocks -> the input/decision lines; commit lines -> Commit* calls):"
-diff $O "$T" | grep -c -E '^[<>]'
+(diff $O "$T" || true) | grep -c -E '^[<>]'
 grep -o '"\([^"\\]\|\\.\)*"' $O $B/abr_before.hpp | sed 's/^[^:]*://' | sort -u > $B/lit_before.txt
 grep -o '"\([^"\\]\|\\.\)*"' "$T" "$H" | sed 's/^[^:]*://' | sort -u > $B/lit_after.txt
 echo "== literals only in OLD (must be empty):"; comm -23 $B/lit_before.txt $B/lit_after.txt
