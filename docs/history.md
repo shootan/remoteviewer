@@ -7218,3 +7218,12 @@ Next action
   UDP e2e 13/13(1s stats).
 - 800줄 초과 잔여: host_stage_encode_send.cpp 1,155 / host_stage_stats.cpp 941 / native_video_host_main.cpp 2,048(main() ~1,650).
   다음 액션: 3.5b — encode_send를 raw/h264 경로로, stats를 출력/ABR·M9 결정으로 2차 분할 검토; main()은 시작·종료 블록 함수화 검토.
+
+### 294) 2026-08-26 리팩터 Phase 3.5b — 800줄 초과 stage 2개 2차 분할 (브랜치 4143a3c)
+
+- stage_encode_send의 `if (useRaw) {…} else {…}` → encode_send_raw(297줄 파일) / encode_send_h264(host_stage_encode_send_h264.cpp
+  989줄) + 2줄 디스패처; stage_stats의 1s 틱 H.264 arm → stats_tick_h264(host_stage_stats_h264.cpp 596줄, 틱 const 지역 7개를
+  인자로). 세 arm verbatim 검증. else 줄이 원본 들여쓰기 불일치(4칸)로 정규식에 안 잡혀 깊이 기반 검출로 교정 후 성공.
+- 게이트: host 빌드 exit 0 / UDP e2e 13/13(1s stats).
+- 호스트 측 800줄 초과 잔여: native_video_host_main.cpp 2,048(선형 배선; capturePublishFn 람다 ~105줄, UDP 세션 스레드 블록
+  ~190줄, 디렉터리 hello 람다 등), host_stage_encode_send_h264.cpp 989(AU 루프 분리 후보). 클라이언트/코덱 파일은 이 리팩터 범위 밖.
