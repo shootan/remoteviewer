@@ -6889,3 +6889,12 @@ Validation / build / test
 
 Next action
 - 브랜치에서 Phase 0-8 host_log → 0-7a host_args → 0-2 … 순으로 진행. 커밋마다 main에 history + 체크박스.
+
+### 263) 2026-08-26 리팩터 Phase 0-8 — host_log.hpp 추출 (브랜치 refactor/host-split f79ca38)
+
+- 이동: TimestampPrefixBuf, wake_display_for_remote_session, HostPowerKeepalive →
+  `apps/native_poc/src/host_log.hpp`(header-only, `remote60::native_poc`, 파일 머리 5줄 요약 포함).
+  host_main에는 include + using 선언 3개와 포인터 주석만 남김. host_main 9,928→9,832줄.
+- 순수 이동 검증: git diff의 제거 98줄 vs 헤더 본문 98줄 diff → 차이는 free 함수의 `inline` 1단어뿐.
+- 검증: 브랜치에서 `remote60_native_video_host_poc` Release 빌드 exit 0, warning/error 0 (GNLinkStream.exe 14:54).
+- 다음 액션: 0-7a `host_args.hpp`(struct Args + parse_u32/env_string_or_empty/env_truthy/env_u32_clamped).
