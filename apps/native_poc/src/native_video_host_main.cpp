@@ -402,6 +402,75 @@ struct FrameGatingState {
   uint64_t changePermilleCount = 0;
 };
 
+// Rate control (Phase 1-6 state struct): the ABR profile ladder (high/mid/low bitrate + optional
+// lower resolution) and the M9 four-level ladder, their env config, the user's fps/keyint
+// ceilings, and the pressure/cooldown counters the 1s stats tick drives them with.
+// thread: main encode loop only (reads ClientMetrics snapshots written by the control thread).
+struct RateControlState {
+  // Env config (REMOTE60_NATIVE_ABR_* / M9_*), fixed after startup.
+  bool abrEnabled = false;
+  bool abrQualityFirst = false;
+  bool m9Enabled = false;
+  bool m9Apply = false;
+  uint32_t m9CooldownSec = 0;
+  uint32_t m9DownRequireSec = 0;
+  uint32_t m9UpRequireSec = 0;
+  uint32_t m9DecodedFpsFloorX100 = 0;
+  uint32_t m9DecodedFpsRecoverX100 = 0;
+  uint32_t m9QueueDepthHighFrames = 0;
+  uint32_t m9QueueDepthLowFrames = 0;
+  uint32_t m9UdpDropPmHigh = 0;
+  uint32_t m9UdpDropPmLow = 0;
+  uint32_t m9LatencyHighUs = 0;
+  uint32_t m9LatencyLowUs = 0;
+  uint32_t m9TailHighUs = 0;
+  uint32_t m9TailLowUs = 0;
+  // Ladder geometry/bitrates, derived once from the initial encode size and args.
+  bool autoFallback720 = false;
+  bool encodeLadderReduced = false;
+  uint32_t abrHighW = 0;
+  uint32_t abrHighH = 0;
+  uint32_t abrMidW = 0;
+  uint32_t abrMidH = 0;
+  uint32_t abrLowW = 0;
+  uint32_t abrLowH = 0;
+  bool abrHasLowerResolution = false;
+  uint32_t abrHighBitrate = 0;
+  uint32_t abrMidBitrate = 0;
+  uint32_t abrLowBitrate = 0;
+  bool abrHasMidProfile = false;
+  bool abrHasLowProfile = false;
+  uint32_t m9BitrateLevel0 = 0;
+  uint32_t m9BitrateLevel1 = 0;
+  uint32_t m9BitrateLevel2 = 0;
+  uint32_t m9BitrateLevel3 = 0;
+  uint32_t m9FpsLevel0 = 0;
+  uint32_t m9FpsLevel1 = 0;
+  uint32_t m9FpsLevel2 = 0;
+  uint32_t m9FpsLevel3 = 0;
+  uint32_t m9WidthLevel0 = 0;
+  uint32_t m9WidthLevel1 = 0;
+  uint32_t m9WidthLevel2 = 0;
+  uint32_t m9WidthLevel3 = 0;
+  uint32_t m9HeightLevel0 = 0;
+  uint32_t m9HeightLevel1 = 0;
+  uint32_t m9HeightLevel2 = 0;
+  uint32_t m9HeightLevel3 = 0;
+  int abrProfile = 0;  // 0: high, 1: mid, 2: low
+  // What the user asked for (ceilings a runtime tune may lower but ABR must not exceed).
+  uint32_t userFpsCeiling = 0;
+  uint32_t userKeyintCeiling = 0;
+  // Runtime decision state, advanced by the 1s stats tick.
+  uint64_t abrCooldownUntilUs = 0;
+  uint32_t abrGoodSeconds = 0;
+  uint32_t abrModeratePressureSeconds = 0;
+  uint32_t abrSeverePressureSeconds = 0;
+  int m9Level = 0;
+  uint64_t m9CooldownUntilUs = 0;
+  uint32_t m9DownPressureSeconds = 0;
+  uint32_t m9UpPressureSeconds = 0;
+};
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -470,24 +539,26 @@ int main(int argc, char** argv) {
   const uint32_t captureSubmitEarlyTolerancePercent = env_u32_clamped(
       "REMOTE60_NATIVE_CAPTURE_SUBMIT_EARLY_TOLERANCE_PCT", 25, 0, 90);
   const bool guardStalePreEncode = env_truthy("REMOTE60_NATIVE_GUARD_STALE_PREENCODE");
-  const bool abrEnabled = useH264 && !env_truthy("REMOTE60_NATIVE_ABR_DISABLE");
-  const bool abrQualityFirst = env_truthy("REMOTE60_NATIVE_ADAPTIVE_QUALITY_FIRST");
-  const bool m9Enabled = useH264 && env_truthy("REMOTE60_NATIVE_M9_ENABLE");
-  const bool m9Apply = m9Enabled && env_truthy("REMOTE60_NATIVE_M9_APPLY");
-  const uint32_t m9CooldownSec = env_u32_clamped("REMOTE60_NATIVE_M9_COOLDOWN_SEC", 4, 1, 60);
-  const uint32_t m9DownRequireSec = env_u32_clamped("REMOTE60_NATIVE_M9_DOWN_REQUIRE_SEC", 2, 1, 20);
-  const uint32_t m9UpRequireSec = env_u32_clamped("REMOTE60_NATIVE_M9_UP_REQUIRE_SEC", 8, 1, 60);
-  const uint32_t m9DecodedFpsFloorX100 = env_u32_clamped("REMOTE60_NATIVE_M9_DECODED_FPS_FLOOR_X100", 2000, 500, 12000);
-  const uint32_t m9DecodedFpsRecoverX100 = env_u32_clamped(
+  // ABR profile ladder + M9 level ladder config and runtime state (RateControlState, Phase 1-6).
+  RateControlState rate;
+  rate.abrEnabled = useH264 && !env_truthy("REMOTE60_NATIVE_ABR_DISABLE");
+  rate.abrQualityFirst = env_truthy("REMOTE60_NATIVE_ADAPTIVE_QUALITY_FIRST");
+  rate.m9Enabled = useH264 && env_truthy("REMOTE60_NATIVE_M9_ENABLE");
+  rate.m9Apply = rate.m9Enabled && env_truthy("REMOTE60_NATIVE_M9_APPLY");
+  rate.m9CooldownSec = env_u32_clamped("REMOTE60_NATIVE_M9_COOLDOWN_SEC", 4, 1, 60);
+  rate.m9DownRequireSec = env_u32_clamped("REMOTE60_NATIVE_M9_DOWN_REQUIRE_SEC", 2, 1, 20);
+  rate.m9UpRequireSec = env_u32_clamped("REMOTE60_NATIVE_M9_UP_REQUIRE_SEC", 8, 1, 60);
+  rate.m9DecodedFpsFloorX100 = env_u32_clamped("REMOTE60_NATIVE_M9_DECODED_FPS_FLOOR_X100", 2000, 500, 12000);
+  rate.m9DecodedFpsRecoverX100 = env_u32_clamped(
       "REMOTE60_NATIVE_M9_DECODED_FPS_RECOVER_X100", 2500, 500, 12000);
-  const uint32_t m9QueueDepthHighFrames = env_u32_clamped("REMOTE60_NATIVE_M9_QUEUE_DEPTH_HIGH_FRAMES", 4, 1, 120);
-  const uint32_t m9QueueDepthLowFrames = env_u32_clamped("REMOTE60_NATIVE_M9_QUEUE_DEPTH_LOW_FRAMES", 1, 0, 120);
-  const uint32_t m9UdpDropPmHigh = env_u32_clamped("REMOTE60_NATIVE_M9_UDP_DROP_PM_HIGH", 120, 1, 1000);
-  const uint32_t m9UdpDropPmLow = env_u32_clamped("REMOTE60_NATIVE_M9_UDP_DROP_PM_LOW", 30, 0, 1000);
-  const uint32_t m9LatencyHighUs = env_u32_clamped("REMOTE60_NATIVE_M9_LATENCY_HIGH_US", 140000, 10000, 1000000);
-  const uint32_t m9LatencyLowUs = env_u32_clamped("REMOTE60_NATIVE_M9_LATENCY_LOW_US", 90000, 10000, 1000000);
-  const uint32_t m9TailHighUs = env_u32_clamped("REMOTE60_NATIVE_M9_TAIL_HIGH_US", 110000, 10000, 1000000);
-  const uint32_t m9TailLowUs = env_u32_clamped("REMOTE60_NATIVE_M9_TAIL_LOW_US", 70000, 10000, 1000000);
+  rate.m9QueueDepthHighFrames = env_u32_clamped("REMOTE60_NATIVE_M9_QUEUE_DEPTH_HIGH_FRAMES", 4, 1, 120);
+  rate.m9QueueDepthLowFrames = env_u32_clamped("REMOTE60_NATIVE_M9_QUEUE_DEPTH_LOW_FRAMES", 1, 0, 120);
+  rate.m9UdpDropPmHigh = env_u32_clamped("REMOTE60_NATIVE_M9_UDP_DROP_PM_HIGH", 120, 1, 1000);
+  rate.m9UdpDropPmLow = env_u32_clamped("REMOTE60_NATIVE_M9_UDP_DROP_PM_LOW", 30, 0, 1000);
+  rate.m9LatencyHighUs = env_u32_clamped("REMOTE60_NATIVE_M9_LATENCY_HIGH_US", 140000, 10000, 1000000);
+  rate.m9LatencyLowUs = env_u32_clamped("REMOTE60_NATIVE_M9_LATENCY_LOW_US", 90000, 10000, 1000000);
+  rate.m9TailHighUs = env_u32_clamped("REMOTE60_NATIVE_M9_TAIL_HIGH_US", 110000, 10000, 1000000);
+  rate.m9TailLowUs = env_u32_clamped("REMOTE60_NATIVE_M9_TAIL_LOW_US", 70000, 10000, 1000000);
   // Static-frame gating config + loop state (FrameGatingState, Phase 1-7).
   FrameGatingState frameGating;
   frameGating.enabled = useH264 && !env_truthy("REMOTE60_NATIVE_FRAME_GATING_DISABLE");
@@ -602,13 +673,13 @@ int main(int argc, char** argv) {
               << " stalePreEncodeGuard=" << (guardStalePreEncode ? 1 : 0)
               << " capturePoolBuffers=" << captureFramePoolBuffers
               << " encoderTuneMode=" << encoderTuneMode
-              << " abr=" << (abrEnabled ? "on" : "off")
-              << " abrMode=" << (abrQualityFirst ? "quality-first" : "default")
+              << " abr=" << (rate.abrEnabled ? "on" : "off")
+              << " abrMode=" << (rate.abrQualityFirst ? "quality-first" : "default")
               << " frameGating=" << (frameGating.enabled ? "on" : "off")
               << " staticSceneFps=" << frameGating.staticFps
               << " gatingStaticPm=" << frameGating.staticThresholdPermille
-              << " m9=" << (m9Enabled ? "on" : "off")
-              << " m9Mode=" << (m9Apply ? "apply" : "dry-run")
+              << " m9=" << (rate.m9Enabled ? "on" : "off")
+              << " m9Mode=" << (rate.m9Apply ? "apply" : "dry-run")
               << " keyReqMinUs=" << keyReqMinIntervalUs
               << " keyReqBucketCap=" << keyReqTokenCapacity
               << " captureInputMinPushPerSec=" << captureInputMinPushPerSec
@@ -2331,57 +2402,55 @@ int main(int argc, char** argv) {
 
   uint32_t encodeW = captureWidth;
   uint32_t encodeH = captureHeight;
-  bool autoFallback720 = false;
   if (useH264) {
-    choose_h264_encode_size(args, captureWidth, captureHeight, &encodeW, &encodeH, &autoFallback720);
+    choose_h264_encode_size(args, captureWidth, captureHeight, &encodeW, &encodeH, &rate.autoFallback720);
   }
 
   // Whether the ladder, rather than the source size, is currently deciding the resolution. Held
   // across runtime changes so the band between the two thresholds can return the previous answer.
-  bool encodeLadderReduced = autoFallback720;
-  const uint32_t abrHighW = encodeW;
-  const uint32_t abrHighH = encodeH;
-  const uint32_t abrMidW = abrHighW;
-  const uint32_t abrMidH = abrHighH;
-  uint32_t abrLowW = abrHighW;
-  uint32_t abrLowH = abrHighH;
+  rate.encodeLadderReduced = rate.autoFallback720;
+  rate.abrHighW = encodeW;
+  rate.abrHighH = encodeH;
+  rate.abrMidW = rate.abrHighW;
+  rate.abrMidH = rate.abrHighH;
+  rate.abrLowW = rate.abrHighW;
+  rate.abrLowH = rate.abrHighH;
   if (useH264) {
-    choose_abr_720_size(abrHighW, abrHighH, &abrLowW, &abrLowH);
+    choose_abr_720_size(rate.abrHighW, rate.abrHighH, &rate.abrLowW, &rate.abrLowH);
   }
-  const bool abrHasLowerResolution = (abrLowW < abrHighW || abrLowH < abrHighH);
-  uint32_t abrHighBitrate = args.bitrate;
-  uint32_t abrMidBitrate = std::min<uint32_t>(
-      abrHighBitrate, std::max<uint32_t>(2000000u, (abrHighBitrate * 75u) / 100u));
-  uint32_t abrLowBitrate = std::min<uint32_t>(
-      abrHighBitrate, std::max<uint32_t>(1500000u, (abrHighBitrate * 55u) / 100u));
-  bool abrHasMidProfile = (abrMidBitrate < abrHighBitrate);
-  bool abrHasLowProfile = abrHasLowerResolution || (abrLowBitrate < abrMidBitrate);
-  const uint32_t m9BitrateLevel0 = abrHighBitrate;
-  const uint32_t m9BitrateLevel1 = std::min<uint32_t>(
-      m9BitrateLevel0, std::max<uint32_t>(1500000u, (m9BitrateLevel0 * 80u) / 100u));
-  const uint32_t m9BitrateLevel2 = std::min<uint32_t>(
-      m9BitrateLevel1, std::max<uint32_t>(1200000u, (m9BitrateLevel0 * 65u) / 100u));
-  const uint32_t m9BitrateLevel3 = std::min<uint32_t>(
-      m9BitrateLevel2, std::max<uint32_t>(900000u, (m9BitrateLevel0 * 50u) / 100u));
-  const uint32_t m9FpsLevel0 = args.fps;
-  const uint32_t m9FpsLevel1 = args.fps;
-  const uint32_t m9FpsLevel2 = std::max<uint32_t>(20u, (args.fps * 80u) / 100u);
-  const uint32_t m9FpsLevel3 = std::max<uint32_t>(15u, (args.fps * 67u) / 100u);
-  const uint32_t m9WidthLevel0 = abrHighW;
-  const uint32_t m9HeightLevel0 = abrHighH;
-  const uint32_t m9WidthLevel1 = abrHighW;
-  const uint32_t m9HeightLevel1 = abrHighH;
-  const uint32_t m9WidthLevel2 = abrHighW;
-  const uint32_t m9HeightLevel2 = abrHighH;
-  const uint32_t m9WidthLevel3 = abrLowW;
-  const uint32_t m9HeightLevel3 = abrLowH;
-  int abrProfile = 0;  // 0: high, 1: mid, 2: low
-  uint32_t activeEncodeW = abrHighW;
-  uint32_t activeEncodeH = abrHighH;
+  rate.abrHasLowerResolution = (rate.abrLowW < rate.abrHighW || rate.abrLowH < rate.abrHighH);
+  rate.abrHighBitrate = args.bitrate;
+  rate.abrMidBitrate = std::min<uint32_t>(
+      rate.abrHighBitrate, std::max<uint32_t>(2000000u, (rate.abrHighBitrate * 75u) / 100u));
+  rate.abrLowBitrate = std::min<uint32_t>(
+      rate.abrHighBitrate, std::max<uint32_t>(1500000u, (rate.abrHighBitrate * 55u) / 100u));
+  rate.abrHasMidProfile = (rate.abrMidBitrate < rate.abrHighBitrate);
+  rate.abrHasLowProfile = rate.abrHasLowerResolution || (rate.abrLowBitrate < rate.abrMidBitrate);
+  rate.m9BitrateLevel0 = rate.abrHighBitrate;
+  rate.m9BitrateLevel1 = std::min<uint32_t>(
+      rate.m9BitrateLevel0, std::max<uint32_t>(1500000u, (rate.m9BitrateLevel0 * 80u) / 100u));
+  rate.m9BitrateLevel2 = std::min<uint32_t>(
+      rate.m9BitrateLevel1, std::max<uint32_t>(1200000u, (rate.m9BitrateLevel0 * 65u) / 100u));
+  rate.m9BitrateLevel3 = std::min<uint32_t>(
+      rate.m9BitrateLevel2, std::max<uint32_t>(900000u, (rate.m9BitrateLevel0 * 50u) / 100u));
+  rate.m9FpsLevel0 = args.fps;
+  rate.m9FpsLevel1 = args.fps;
+  rate.m9FpsLevel2 = std::max<uint32_t>(20u, (args.fps * 80u) / 100u);
+  rate.m9FpsLevel3 = std::max<uint32_t>(15u, (args.fps * 67u) / 100u);
+  rate.m9WidthLevel0 = rate.abrHighW;
+  rate.m9HeightLevel0 = rate.abrHighH;
+  rate.m9WidthLevel1 = rate.abrHighW;
+  rate.m9HeightLevel1 = rate.abrHighH;
+  rate.m9WidthLevel2 = rate.abrHighW;
+  rate.m9HeightLevel2 = rate.abrHighH;
+  rate.m9WidthLevel3 = rate.abrLowW;
+  rate.m9HeightLevel3 = rate.abrLowH;
+  uint32_t activeEncodeW = rate.abrHighW;
+  uint32_t activeEncodeH = rate.abrHighH;
   // Nominal (pre-aspect-fit) encode box of the current quality level, and the source size
   // the active encode dimensions were fitted against.
-  uint32_t nominalEncodeW = abrHighW;
-  uint32_t nominalEncodeH = abrHighH;
+  uint32_t nominalEncodeW = rate.abrHighW;
+  uint32_t nominalEncodeH = rate.abrHighH;
   uint32_t encodeSourceW = captureWidth;
   uint32_t encodeSourceH = captureHeight;
   // Refit debounce: candidate geometry and how long it has been stable.
@@ -2395,9 +2464,9 @@ int main(int argc, char** argv) {
   // "whatever is active" would restore the lowered ones. Only an explicit runtime tune of
   // the same field moves a ceiling -- a bitrate-only tune falls back to active values for
   // its fps/keyint arguments, and those must not leak in here.
-  uint32_t userFpsCeiling = args.fps;
-  uint32_t userKeyintCeiling = args.keyint;
-  uint32_t activeBitrate = abrHighBitrate;
+  rate.userFpsCeiling = args.fps;
+  rate.userKeyintCeiling = args.keyint;
+  uint32_t activeBitrate = rate.abrHighBitrate;
   // Field A/B override for the keyframe interval (0 = off). Every ~1s a 120-160KB IDR was
   // measured holding the previous frame an extra tick on 75% of key presents (the user's
   // "periodically shows the previous frame"); this pins keyint (e.g. 120) without touching the
@@ -2418,14 +2487,6 @@ int main(int argc, char** argv) {
   inputDomainW.store(activeEncodeW, std::memory_order_release);
   inputDomainH.store(activeEncodeH, std::memory_order_release);
   bool runtimeTuneManualOverride = false;
-  uint64_t abrCooldownUntilUs = 0;
-  uint32_t abrGoodSeconds = 0;
-  uint32_t abrModeratePressureSeconds = 0;
-  uint32_t abrSeverePressureSeconds = 0;
-  int m9Level = 0;
-  uint64_t m9CooldownUntilUs = 0;
-  uint32_t m9DownPressureSeconds = 0;
-  uint32_t m9UpPressureSeconds = 0;
   bool forceKeyNext = true;
   // Submit latch for forceKeyNext. The async MFT can hold the key output for a few inputs, and
   // forcing EVERY input in the meantime produced trains of 4-5 consecutive 40-160KB IDRs per
@@ -2624,32 +2685,32 @@ int main(int argc, char** argv) {
     // kept ABR from ever repairing it. Same freeze as the ABR profiles, one more door in.
     // (The m9 adaptive levels themselves are still the frozen constants; that ladder is off
     // by default and needs its own pass before it can be trusted with live values.)
-    const uint32_t focusBitrate = abrHighBitrate;
+    const uint32_t focusBitrate = rate.abrHighBitrate;
     const uint32_t targetBitrate =
         overviewMode
             ? std::min<uint32_t>(focusBitrate,
                                  std::max<uint32_t>(900000u, (focusBitrate * 50u) / 100u))
             : focusBitrate;
     const uint32_t targetFps =
-        overviewMode ? std::max<uint32_t>(15u, (userFpsCeiling * 67u) / 100u) : userFpsCeiling;
+        overviewMode ? std::max<uint32_t>(15u, (rate.userFpsCeiling * 67u) / 100u) : rate.userFpsCeiling;
     const auto sizeChoice = remote60::native_poc::choose_abr_profile_size(
-        overviewMode ? 2 : 0, targetBitrate, captureWidth, captureHeight, encodeLadderReduced);
+        overviewMode ? 2 : 0, targetBitrate, captureWidth, captureHeight, rate.encodeLadderReduced);
     const uint32_t targetKeyint =
-        overviewMode ? std::max<uint32_t>(userKeyintCeiling, 60u) : userKeyintCeiling;
+        overviewMode ? std::max<uint32_t>(rate.userKeyintCeiling, 60u) : rate.userKeyintCeiling;
     if (!apply_encoder_target(sizeChoice.width, sizeChoice.height, targetFps, targetBitrate,
                               targetKeyint)) {
       return false;
     }
-    encodeLadderReduced = sizeChoice.reduced;
+    rate.encodeLadderReduced = sizeChoice.reduced;
     runtimeTuneManualOverride = true;
-    abrCooldownUntilUs = nowUs + 3000000ULL;
-    abrGoodSeconds = 0;
-    abrModeratePressureSeconds = 0;
-    abrSeverePressureSeconds = 0;
-    m9Level = overviewMode ? 3 : 0;
-    m9CooldownUntilUs = nowUs + static_cast<uint64_t>(m9CooldownSec) * 1000000ULL;
-    m9DownPressureSeconds = 0;
-    m9UpPressureSeconds = 0;
+    rate.abrCooldownUntilUs = nowUs + 3000000ULL;
+    rate.abrGoodSeconds = 0;
+    rate.abrModeratePressureSeconds = 0;
+    rate.abrSeverePressureSeconds = 0;
+    rate.m9Level = overviewMode ? 3 : 0;
+    rate.m9CooldownUntilUs = nowUs + static_cast<uint64_t>(rate.m9CooldownSec) * 1000000ULL;
+    rate.m9DownPressureSeconds = 0;
+    rate.m9UpPressureSeconds = 0;
     forceKeyNext = true;
     return true;
   };
@@ -2675,11 +2736,11 @@ int main(int argc, char** argv) {
               << " hw=" << (encoder.using_hardware() ? 1 : 0)
               << " captureSize=" << captureWidth << "x" << captureHeight
               << " encodeSize=" << activeEncodeW << "x" << activeEncodeH
-              << " auto720=" << (autoFallback720 ? 1 : 0)
-              << " abrMidProfile=" << abrMidW << "x" << abrMidH
-              << " abrMidBitrate=" << abrMidBitrate
-              << " abrLowProfile=" << abrLowW << "x" << abrLowH
-              << " abrLowBitrate=" << abrLowBitrate
+              << " auto720=" << (rate.autoFallback720 ? 1 : 0)
+              << " abrMidProfile=" << rate.abrMidW << "x" << rate.abrMidH
+              << " abrMidBitrate=" << rate.abrMidBitrate
+              << " abrLowProfile=" << rate.abrLowW << "x" << rate.abrLowH
+              << " abrLowBitrate=" << rate.abrLowBitrate
               << "\n";
   }
 
@@ -4701,7 +4762,7 @@ int main(int argc, char** argv) {
       // Explicitness is recorded before the fallbacks fill the gaps: the fallbacks are the
       // CURRENT values, and only what the user actually asked for may move a ceiling. A
       // bitrate-only tune sent while overview mode has activeFps lowered would otherwise
-      // write that lowered value into userFpsCeiling -- the exact contamination the ceiling
+      // write that lowered value into rate.userFpsCeiling -- the exact contamination the ceiling
       // exists to prevent, back in through a side door.
       const bool fpsExplicit = targetFps >= 1;
       const bool keyintExplicit = targetKeyint >= 1;
@@ -4717,25 +4778,25 @@ int main(int argc, char** argv) {
       // ladder, and the manual-override reset all unrun. The ceiling comparisons catch what
       // the active comparisons cannot; apply_encoder_target is a no-op for identical targets,
       // so entering the block for a ceiling-only change costs no encoder restart.
-      const bool bitrateCeilingChanged = bitrateExplicit && (targetBitrate != abrHighBitrate);
-      const bool fpsCeilingChanged = fpsExplicit && (targetFps != userFpsCeiling);
-      const bool keyintCeilingChanged = keyintExplicit && (targetKeyint != userKeyintCeiling);
+      const bool bitrateCeilingChanged = bitrateExplicit && (targetBitrate != rate.abrHighBitrate);
+      const bool fpsCeilingChanged = fpsExplicit && (targetFps != rate.userFpsCeiling);
+      const bool keyintCeilingChanged = keyintExplicit && (targetKeyint != rate.userKeyintCeiling);
       if (bitrateChanged || keyintChanged || fpsChanged || bitrateCeilingChanged ||
           fpsCeilingChanged || keyintCeilingChanged) {
         if (bitrateExplicit) {
           // The UI bitrate is the top quality ceiling, not an instruction to disable
           // adaptation. A 20 Mbps request may start there, but the host must still step down
           // when the client's decoded FPS/latency says the Wi-Fi path cannot sustain it.
-          abrHighBitrate = targetBitrate;
-          abrMidBitrate = std::min<uint32_t>(
-              abrHighBitrate,
-              std::max<uint32_t>(2000000u, (abrHighBitrate * 75u) / 100u));
-          abrLowBitrate = std::min<uint32_t>(
-              abrHighBitrate,
-              std::max<uint32_t>(1500000u, (abrHighBitrate * 55u) / 100u));
-          abrHasMidProfile = abrMidBitrate < abrHighBitrate;
-          abrHasLowProfile = abrHasLowerResolution || abrLowBitrate < abrMidBitrate;
-          abrProfile = 0;
+          rate.abrHighBitrate = targetBitrate;
+          rate.abrMidBitrate = std::min<uint32_t>(
+              rate.abrHighBitrate,
+              std::max<uint32_t>(2000000u, (rate.abrHighBitrate * 75u) / 100u));
+          rate.abrLowBitrate = std::min<uint32_t>(
+              rate.abrHighBitrate,
+              std::max<uint32_t>(1500000u, (rate.abrHighBitrate * 55u) / 100u));
+          rate.abrHasMidProfile = rate.abrMidBitrate < rate.abrHighBitrate;
+          rate.abrHasLowProfile = rate.abrHasLowerResolution || rate.abrLowBitrate < rate.abrMidBitrate;
+          rate.abrProfile = 0;
         }
         // The resolution follows the bitrate, because the bitrate is a budget for the whole
         // frame: the same 3 Mbps buys four times as much per pixel at 720p. Switching to mobile
@@ -4743,10 +4804,10 @@ int main(int argc, char** argv) {
         // predicting badly every time the screen changes at once.
         uint32_t ladderW = nominalEncodeW;
         uint32_t ladderH = nominalEncodeH;
-        bool ladderReducedNext = encodeLadderReduced;
+        bool ladderReducedNext = rate.encodeLadderReduced;
         if (bitrateExplicit) {
           const auto choice = remote60::native_poc::choose_encode_resolution(
-              targetBitrate, captureWidth, captureHeight, encodeLadderReduced);
+              targetBitrate, captureWidth, captureHeight, rate.encodeLadderReduced);
           ladderReducedNext = choice.reduced;
           ladderW = choice.width;
           ladderH = choice.height;
@@ -4764,14 +4825,14 @@ int main(int argc, char** argv) {
           std::cerr << "[native-video-host][control] runtime-config apply failed seq=" << reqSeq << "\n";
           break;
         }
-        encodeLadderReduced = ladderReducedNext;
-        if (fpsExplicit) userFpsCeiling = targetFps;
-        if (keyintExplicit) userKeyintCeiling = targetKeyint;
+        rate.encodeLadderReduced = ladderReducedNext;
+        if (fpsExplicit) rate.userFpsCeiling = targetFps;
+        if (keyintExplicit) rate.userKeyintCeiling = targetKeyint;
         runtimeTuneManualOverride = false;
-        abrCooldownUntilUs = nowUs + 3000000ULL;
-        abrGoodSeconds = 0;
-        abrModeratePressureSeconds = 0;
-        abrSeverePressureSeconds = 0;
+        rate.abrCooldownUntilUs = nowUs + 3000000ULL;
+        rate.abrGoodSeconds = 0;
+        rate.abrModeratePressureSeconds = 0;
+        rate.abrSeverePressureSeconds = 0;
         forceKeyNext = true;
         if (fpsChanged && !captureWindowModeActive.load(std::memory_order_acquire) &&
             activeDesktopBackend == DesktopCaptureBackend::Gdi) {
@@ -7031,10 +7092,10 @@ int main(int argc, char** argv) {
                   << " gpuScaleUnmapWaitMaxUs=" << gpuScaleUnmapWaitMaxUs
                   << " gpuScaleUnmapAvgUs=" << gpuScaleUnmapAvgUs
                   << " gpuScaleUnmapMaxUs=" << gpuScaleUnmapMaxUs
-                  << " abrProfile=" << ((abrProfile == 0) ? "high" : ((abrProfile == 1) ? "mid" : "low"))
-                  << " abrModSec=" << abrModeratePressureSeconds
-                  << " abrSevSec=" << abrSeverePressureSeconds
-                  << " abrGoodSec=" << abrGoodSeconds
+                  << " abrProfile=" << ((rate.abrProfile == 0) ? "high" : ((rate.abrProfile == 1) ? "mid" : "low"))
+                  << " abrModSec=" << rate.abrModeratePressureSeconds
+                  << " abrSevSec=" << rate.abrSeverePressureSeconds
+                  << " abrGoodSec=" << rate.abrGoodSeconds
                   << " abrOverride=" << (runtimeTuneManualOverride ? 1 : 0)
                   << " frameGatingMode=" << (frameGating.staticMode ? "static" : "motion")
                   << " frameGatingSkips=" << frameGating.skipCount
@@ -7077,7 +7138,7 @@ int main(int argc, char** argv) {
         const uint32_t clQueueDepthH4p = metricsFresh ? clientMetricsQueueDepthH4p.load() : 0;
         const uint32_t clUdpDropPm = metricsFresh ? clientMetricsUdpAssemblyDropPm.load() : 0;
 
-        if (abrEnabled && !runtimeTuneManualOverride && !m9Apply) {
+        if (rate.abrEnabled && !runtimeTuneManualOverride && !rate.m9Apply) {
           // The current target, not the one the process started with. A runtime FPS tune moves
           // activeFps, and judging against the startup args.fps would compare the client's rate
           // to a target that no longer exists -- after a tune to 20, a healthy 20 fps reads as
@@ -7085,10 +7146,10 @@ int main(int argc, char** argv) {
           // ABR only runs when no manual override or M9 is lowering activeFps, so here it is the
           // authoritative target. All four thresholds and the sparse floor share it.
           const uint32_t abrExpectedFps = std::max<uint32_t>(1, activeFps);
-          const uint32_t minGoodFpsX100 = abrExpectedFps * (abrQualityFirst ? 95u : 93u);
-          const uint32_t minOkayFpsX100 = abrExpectedFps * (abrQualityFirst ? 90u : 85u);
-          const uint32_t minDegradeFpsX100 = abrExpectedFps * (abrQualityFirst ? 55u : 45u);
-          const uint32_t minSevereFpsX100 = abrExpectedFps * (abrQualityFirst ? 45u : 35u);
+          const uint32_t minGoodFpsX100 = abrExpectedFps * (rate.abrQualityFirst ? 95u : 93u);
+          const uint32_t minOkayFpsX100 = abrExpectedFps * (rate.abrQualityFirst ? 90u : 85u);
+          const uint32_t minDegradeFpsX100 = abrExpectedFps * (rate.abrQualityFirst ? 55u : 45u);
+          const uint32_t minSevereFpsX100 = abrExpectedFps * (rate.abrQualityFirst ? 45u : 35u);
           const bool abrWarmupDone = (t >= (startUs + 4000000ULL));
 
           // A second in which the host offered almost no frames carries no usable evidence
@@ -7106,12 +7167,12 @@ int main(int argc, char** argv) {
               (sentFrames < std::max<uint64_t>(2, static_cast<uint64_t>(abrExpectedFps) / 2)) ||
               frameGating.staticMode;
 
-          const uint64_t severeLatencyUs = abrQualityFirst ? 170000ULL : 150000ULL;
-          const uint64_t severeTailUs = abrQualityFirst ? 140000ULL : 110000ULL;
-          const uint64_t moderateLatencyUs = abrQualityFirst ? 145000ULL : 125000ULL;
-          const uint64_t moderateTailUs = abrQualityFirst ? 120000ULL : 90000ULL;
-          const uint64_t emergencyLatencyUs = abrQualityFirst ? 260000ULL : 220000ULL;
-          const uint64_t emergencyTailUs = abrQualityFirst ? 190000ULL : 160000ULL;
+          const uint64_t severeLatencyUs = rate.abrQualityFirst ? 170000ULL : 150000ULL;
+          const uint64_t severeTailUs = rate.abrQualityFirst ? 140000ULL : 110000ULL;
+          const uint64_t moderateLatencyUs = rate.abrQualityFirst ? 145000ULL : 125000ULL;
+          const uint64_t moderateTailUs = rate.abrQualityFirst ? 120000ULL : 90000ULL;
+          const uint64_t emergencyLatencyUs = rate.abrQualityFirst ? 260000ULL : 220000ULL;
+          const uint64_t emergencyTailUs = rate.abrQualityFirst ? 190000ULL : 160000ULL;
 
           const bool severeDownByClient =
               metricsFresh &&
@@ -7130,8 +7191,8 @@ int main(int argc, char** argv) {
               metricsFresh &&
               (clAvgLatencyUs > emergencyLatencyUs ||
                clAvgDecodeTailUs > emergencyTailUs);
-          const bool severeDownByHost = (!metricsFresh && cb2eAvgUs > (abrQualityFirst ? 110000ULL : 90000ULL));
-          const bool moderateDownByHost = (!metricsFresh && cb2eAvgUs > (abrQualityFirst ? 90000ULL : 70000ULL));
+          const bool severeDownByHost = (!metricsFresh && cb2eAvgUs > (rate.abrQualityFirst ? 110000ULL : 90000ULL));
+          const bool moderateDownByHost = (!metricsFresh && cb2eAvgUs > (rate.abrQualityFirst ? 90000ULL : 70000ULL));
           // !hostOfferSparse on every up/down verdict: a sparse second neither degrades nor
           // recovers the profile. The pressure and good counters below fall to their else
           // branch and reset, so the profile holds until a second with real cadence arrives.
@@ -7142,14 +7203,14 @@ int main(int argc, char** argv) {
           const bool emergencyDown = abrWarmupDone && !hostOfferSparse && emergencyDownByClient;
 
           if (severeDown) {
-            ++abrSeverePressureSeconds;
+            ++rate.abrSeverePressureSeconds;
           } else {
-            abrSeverePressureSeconds = 0;
+            rate.abrSeverePressureSeconds = 0;
           }
           if (moderateDown) {
-            ++abrModeratePressureSeconds;
+            ++rate.abrModeratePressureSeconds;
           } else {
-            abrModeratePressureSeconds = 0;
+            rate.abrModeratePressureSeconds = 0;
           }
 
           const bool goodForLowToMid =
@@ -7163,69 +7224,69 @@ int main(int argc, char** argv) {
               (clAvgDecodeTailUs < 50000ULL) &&
               (clDecodedFpsX100 >= minGoodFpsX100);
 
-          int targetProfile = abrProfile;
+          int targetProfile = rate.abrProfile;
           const char* abrReason = "none";
-          if (t >= abrCooldownUntilUs) {
-            const uint32_t highToMidSevereSec = abrQualityFirst ? 3u : 2u;
-            const uint32_t highToMidModerateSec = abrQualityFirst ? 6u : 4u;
-            const uint32_t midToLowSevereSec = abrQualityFirst ? 4u : 3u;
-            const uint32_t midToLowModerateSec = abrQualityFirst ? 8u : 5u;
-            const uint32_t lowToMidGoodSec = abrQualityFirst ? 8u : 5u;
-            const uint32_t midToHighGoodSec = abrQualityFirst ? 12u : 8u;
+          if (t >= rate.abrCooldownUntilUs) {
+            const uint32_t highToMidSevereSec = rate.abrQualityFirst ? 3u : 2u;
+            const uint32_t highToMidModerateSec = rate.abrQualityFirst ? 6u : 4u;
+            const uint32_t midToLowSevereSec = rate.abrQualityFirst ? 4u : 3u;
+            const uint32_t midToLowModerateSec = rate.abrQualityFirst ? 8u : 5u;
+            const uint32_t lowToMidGoodSec = rate.abrQualityFirst ? 8u : 5u;
+            const uint32_t midToHighGoodSec = rate.abrQualityFirst ? 12u : 8u;
 
-            if (abrProfile == 0) {
-              if (emergencyDown && abrHasLowProfile && abrSeverePressureSeconds >= 1) {
+            if (rate.abrProfile == 0) {
+              if (emergencyDown && rate.abrHasLowProfile && rate.abrSeverePressureSeconds >= 1) {
                 targetProfile = 2;
                 abrReason = "client_emergency";
-              } else if ((abrSeverePressureSeconds >= highToMidSevereSec) || (abrModeratePressureSeconds >= highToMidModerateSec)) {
-                if (abrHasMidProfile) {
+              } else if ((rate.abrSeverePressureSeconds >= highToMidSevereSec) || (rate.abrModeratePressureSeconds >= highToMidModerateSec)) {
+                if (rate.abrHasMidProfile) {
                   targetProfile = 1;
-                  abrReason = (abrSeverePressureSeconds >= highToMidSevereSec) ? "high_to_mid_severe" : "high_to_mid_moderate";
-                } else if (abrHasLowProfile) {
+                  abrReason = (rate.abrSeverePressureSeconds >= highToMidSevereSec) ? "high_to_mid_severe" : "high_to_mid_moderate";
+                } else if (rate.abrHasLowProfile) {
                   targetProfile = 2;
-                  abrReason = (abrSeverePressureSeconds >= highToMidSevereSec) ? "high_to_low_severe" : "high_to_low_moderate";
+                  abrReason = (rate.abrSeverePressureSeconds >= highToMidSevereSec) ? "high_to_low_severe" : "high_to_low_moderate";
                 }
               }
-              abrGoodSeconds = 0;
-            } else if (abrProfile == 1) {
-              if (emergencyDown && abrHasLowProfile) {
+              rate.abrGoodSeconds = 0;
+            } else if (rate.abrProfile == 1) {
+              if (emergencyDown && rate.abrHasLowProfile) {
                 targetProfile = 2;
                 abrReason = "client_emergency";
-                abrGoodSeconds = 0;
-              } else if ((abrSeverePressureSeconds >= midToLowSevereSec || abrModeratePressureSeconds >= midToLowModerateSec) && abrHasLowProfile) {
+                rate.abrGoodSeconds = 0;
+              } else if ((rate.abrSeverePressureSeconds >= midToLowSevereSec || rate.abrModeratePressureSeconds >= midToLowModerateSec) && rate.abrHasLowProfile) {
                 targetProfile = 2;
-                abrReason = (abrSeverePressureSeconds >= midToLowSevereSec) ? "mid_to_low_severe" : "mid_to_low_moderate";
-                abrGoodSeconds = 0;
+                abrReason = (rate.abrSeverePressureSeconds >= midToLowSevereSec) ? "mid_to_low_severe" : "mid_to_low_moderate";
+                rate.abrGoodSeconds = 0;
               } else {
                 if (goodForMidToHigh) {
-                  ++abrGoodSeconds;
+                  ++rate.abrGoodSeconds;
                 } else {
-                  abrGoodSeconds = 0;
+                  rate.abrGoodSeconds = 0;
                 }
-                if (abrGoodSeconds >= midToHighGoodSec) {
+                if (rate.abrGoodSeconds >= midToHighGoodSec) {
                   targetProfile = 0;
                   abrReason = "client_stable_high";
                 }
               }
-            } else {  // abrProfile == 2
+            } else {  // rate.abrProfile == 2
               if (goodForLowToMid) {
-                ++abrGoodSeconds;
+                ++rate.abrGoodSeconds;
               } else {
-                abrGoodSeconds = 0;
+                rate.abrGoodSeconds = 0;
               }
-              if (abrGoodSeconds >= lowToMidGoodSec) {
-                targetProfile = abrHasMidProfile ? 1 : 0;
+              if (rate.abrGoodSeconds >= lowToMidGoodSec) {
+                targetProfile = rate.abrHasMidProfile ? 1 : 0;
                 abrReason = "client_stable_mid";
               }
             }
           }
 
-          if (targetProfile != abrProfile) {
-            uint32_t targetBitrate = abrHighBitrate;
+          if (targetProfile != rate.abrProfile) {
+            uint32_t targetBitrate = rate.abrHighBitrate;
             if (targetProfile == 1) {
-              targetBitrate = abrMidBitrate;
+              targetBitrate = rate.abrMidBitrate;
             } else if (targetProfile == 2) {
-              targetBitrate = abrLowBitrate;
+              targetBitrate = rate.abrLowBitrate;
             }
             // Derived at transition time, never read from the profile: frozen profile sizes
             // are the bug that put "profile=high encode=1256x706 bitrate=12000000" in a live
@@ -7233,7 +7294,7 @@ int main(int argc, char** argv) {
             // switches, RDP) that a frozen value never could. Runtime tuning does the same
             // already, and the hysteresis state is shared so the two cannot fight.
             const auto ladderChoice = remote60::native_poc::choose_abr_profile_size(
-                targetProfile, targetBitrate, captureWidth, captureHeight, encodeLadderReduced);
+                targetProfile, targetBitrate, captureWidth, captureHeight, rate.encodeLadderReduced);
             uint32_t targetW = ladderChoice.width;
             uint32_t targetH = ladderChoice.height;
 
@@ -7243,17 +7304,17 @@ int main(int argc, char** argv) {
             }
             // Committed only once the encoder accepted the target, so a failed reinit cannot
             // leave the hysteresis state describing an encoder that does not exist.
-            encodeLadderReduced = ladderChoice.reduced;
+            rate.encodeLadderReduced = ladderChoice.reduced;
 
-            abrProfile = targetProfile;
-            abrGoodSeconds = 0;
-            abrModeratePressureSeconds = 0;
-            abrSeverePressureSeconds = 0;
-            abrCooldownUntilUs = t + 4000000ULL;
+            rate.abrProfile = targetProfile;
+            rate.abrGoodSeconds = 0;
+            rate.abrModeratePressureSeconds = 0;
+            rate.abrSeverePressureSeconds = 0;
+            rate.abrCooldownUntilUs = t + 4000000ULL;
             forceKeyNext = true;
 
             std::cout << "[native-video-host][abr] profile="
-                      << ((abrProfile == 0) ? "high" : ((abrProfile == 1) ? "mid" : "low"))
+                      << ((rate.abrProfile == 0) ? "high" : ((rate.abrProfile == 1) ? "mid" : "low"))
                       << " encode=" << activeEncodeW << "x" << activeEncodeH
                       << " bitrate=" << activeBitrate
                       << " reason=" << abrReason
@@ -7266,84 +7327,84 @@ int main(int argc, char** argv) {
           }
         }
 
-        if (m9Enabled && !runtimeTuneManualOverride) {
+        if (rate.m9Enabled && !runtimeTuneManualOverride) {
           const bool downByClient =
               metricsFresh &&
               (clCongestionState == 2 ||
-               clDecodedFpsX100 < m9DecodedFpsFloorX100 ||
-               clQueueDepthMax >= m9QueueDepthHighFrames ||
-               clUdpDropPm >= m9UdpDropPmHigh ||
-               clAvgLatencyUs >= m9LatencyHighUs ||
-               clAvgDecodeTailUs >= m9TailHighUs);
+               clDecodedFpsX100 < rate.m9DecodedFpsFloorX100 ||
+               clQueueDepthMax >= rate.m9QueueDepthHighFrames ||
+               clUdpDropPm >= rate.m9UdpDropPmHigh ||
+               clAvgLatencyUs >= rate.m9LatencyHighUs ||
+               clAvgDecodeTailUs >= rate.m9TailHighUs);
           const bool downByHostFallback =
-              (!metricsFresh && cb2eAvgUs >= m9TailHighUs);
+              (!metricsFresh && cb2eAvgUs >= rate.m9TailHighUs);
           const bool downPressure = downByClient || downByHostFallback;
           const bool upPressure =
               metricsFresh &&
               clCongestionState == 0 &&
-              clDecodedFpsX100 >= m9DecodedFpsRecoverX100 &&
-              clQueueDepthMax <= m9QueueDepthLowFrames &&
-              clUdpDropPm <= m9UdpDropPmLow &&
-              clAvgLatencyUs <= m9LatencyLowUs &&
-              clAvgDecodeTailUs <= m9TailLowUs;
+              clDecodedFpsX100 >= rate.m9DecodedFpsRecoverX100 &&
+              clQueueDepthMax <= rate.m9QueueDepthLowFrames &&
+              clUdpDropPm <= rate.m9UdpDropPmLow &&
+              clAvgLatencyUs <= rate.m9LatencyLowUs &&
+              clAvgDecodeTailUs <= rate.m9TailLowUs;
 
           if (downPressure) {
-            ++m9DownPressureSeconds;
+            ++rate.m9DownPressureSeconds;
           } else {
-            m9DownPressureSeconds = 0;
+            rate.m9DownPressureSeconds = 0;
           }
           if (upPressure) {
-            ++m9UpPressureSeconds;
+            ++rate.m9UpPressureSeconds;
           } else {
-            m9UpPressureSeconds = 0;
+            rate.m9UpPressureSeconds = 0;
           }
 
-          int targetLevel = m9Level;
+          int targetLevel = rate.m9Level;
           const char* m9Reason = "hold";
-          if (t >= m9CooldownUntilUs) {
-            if (downPressure && m9DownPressureSeconds >= m9DownRequireSec && targetLevel < 3) {
+          if (t >= rate.m9CooldownUntilUs) {
+            if (downPressure && rate.m9DownPressureSeconds >= rate.m9DownRequireSec && targetLevel < 3) {
               ++targetLevel;
               m9Reason = downByClient ? "client_pressure" : "host_fallback_pressure";
-            } else if (upPressure && m9UpPressureSeconds >= m9UpRequireSec && targetLevel > 0) {
+            } else if (upPressure && rate.m9UpPressureSeconds >= rate.m9UpRequireSec && targetLevel > 0) {
               --targetLevel;
               m9Reason = "client_recovered";
             }
           }
 
           auto m9_level_bitrate = [&](int level) -> uint32_t {
-            if (level <= 0) return m9BitrateLevel0;
-            if (level == 1) return m9BitrateLevel1;
-            if (level == 2) return m9BitrateLevel2;
-            return m9BitrateLevel3;
+            if (level <= 0) return rate.m9BitrateLevel0;
+            if (level == 1) return rate.m9BitrateLevel1;
+            if (level == 2) return rate.m9BitrateLevel2;
+            return rate.m9BitrateLevel3;
           };
           auto m9_level_fps = [&](int level) -> uint32_t {
-            if (level <= 0) return m9FpsLevel0;
-            if (level == 1) return m9FpsLevel1;
-            if (level == 2) return m9FpsLevel2;
-            return m9FpsLevel3;
+            if (level <= 0) return rate.m9FpsLevel0;
+            if (level == 1) return rate.m9FpsLevel1;
+            if (level == 2) return rate.m9FpsLevel2;
+            return rate.m9FpsLevel3;
           };
           auto m9_level_w = [&](int level) -> uint32_t {
-            if (level <= 0) return m9WidthLevel0;
-            if (level == 1) return m9WidthLevel1;
-            if (level == 2) return m9WidthLevel2;
-            return m9WidthLevel3;
+            if (level <= 0) return rate.m9WidthLevel0;
+            if (level == 1) return rate.m9WidthLevel1;
+            if (level == 2) return rate.m9WidthLevel2;
+            return rate.m9WidthLevel3;
           };
           auto m9_level_h = [&](int level) -> uint32_t {
-            if (level <= 0) return m9HeightLevel0;
-            if (level == 1) return m9HeightLevel1;
-            if (level == 2) return m9HeightLevel2;
-            return m9HeightLevel3;
+            if (level <= 0) return rate.m9HeightLevel0;
+            if (level == 1) return rate.m9HeightLevel1;
+            if (level == 2) return rate.m9HeightLevel2;
+            return rate.m9HeightLevel3;
           };
 
-          if (targetLevel != m9Level) {
-            const char* action = (targetLevel > m9Level) ? "down" : "up";
+          if (targetLevel != rate.m9Level) {
+            const char* action = (targetLevel > rate.m9Level) ? "down" : "up";
             const uint32_t targetBitrate = m9_level_bitrate(targetLevel);
             const uint32_t targetFps = m9_level_fps(targetLevel);
             const uint32_t targetW = m9_level_w(targetLevel);
             const uint32_t targetH = m9_level_h(targetLevel);
             std::cout << "[native-video-host][m9] action=" << action
-                      << " mode=" << (m9Apply ? "apply" : "dryrun")
-                      << " fromLevel=" << m9Level
+                      << " mode=" << (rate.m9Apply ? "apply" : "dryrun")
+                      << " fromLevel=" << rate.m9Level
                       << " toLevel=" << targetLevel
                       << " reason=" << m9Reason
                       << " targetBitrate=" << targetBitrate
@@ -7361,17 +7422,17 @@ int main(int argc, char** argv) {
                       << " congRecReq=" << clCongestionRecoveryReq
                       << " congRecMaxUs=" << clCongestionRecoveryMaxUs
                       << "\n";
-            if (m9Apply) {
+            if (rate.m9Apply) {
               if (!apply_encoder_target(targetW, targetH, targetFps, targetBitrate, activeKeyint)) {
                 std::cerr << "[native-video-host][m9] encoder target apply failed level=" << targetLevel << "\n";
                 break;
               }
               forceKeyNext = true;
             }
-            m9Level = targetLevel;
-            m9CooldownUntilUs = t + static_cast<uint64_t>(m9CooldownSec) * 1000000ULL;
-            m9DownPressureSeconds = 0;
-            m9UpPressureSeconds = 0;
+            rate.m9Level = targetLevel;
+            rate.m9CooldownUntilUs = t + static_cast<uint64_t>(rate.m9CooldownSec) * 1000000ULL;
+            rate.m9DownPressureSeconds = 0;
+            rate.m9UpPressureSeconds = 0;
           }
         }
       }
