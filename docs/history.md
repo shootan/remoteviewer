@@ -6957,3 +6957,13 @@ Next action
 - 순수 이동 검증: 제거 351줄 정렬 대조 → .cpp/.hpp에 없는 줄은 기본인자 시그니처 1줄(헤더로 이동)뿐.
 - 검증: 브랜치 host 타깃 Release 빌드 exit 0, warning/error 0.
 - 다음 액션: 0-5 `host_net_io.hpp/.cpp`(파일 작성 완료) → 0-1 `host_input_inject.hpp/.cpp` → 0-7b.
+
+### 270) 2026-08-26 리팩터 Phase 0-5 — host_net_io.hpp/.cpp 추출 (브랜치 d522474)
+
+- 이동: WinsockScope, resolve_bind_address, send_all(_timed), SendPathStats, recv_all/recv_discard, kUdpReceiveBufferBytes,
+  udp_pace_wait_until/udp_pace_budget_us, UdpSendOutcome, send_udp_chunks(_impl/_timed) → `host_net_io.hpp/.cpp`(신규 TU).
+  전역 `gUdpPacePeakBitrateBps/gUdpVideoFecInterleaved/gUdpKeyframePacePeakBitrateBps`는 헤더의 `inline std::atomic`
+  (main loop 8곳이 unqualified로 계속 사용; UdpPacer 멤버화는 Phase 2). host_main 8,524→8,266줄.
+- 순수 이동 검증: 제거 265줄 정렬 대조 → 차이는 전역 3줄의 `inline`뿐.
+- 검증: 브랜치 host 타깃 Release 빌드 exit 0, warning/error 0.
+- 다음 액션: 0-1 `host_input_inject.hpp/.cpp`(헤더 작성 완료) → 0-7b `host_args` 확장(parse_args + env 프리루드).
