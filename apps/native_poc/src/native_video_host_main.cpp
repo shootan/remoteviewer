@@ -372,6 +372,36 @@ constexpr uint32_t kKeyReqTokenCapacityDefault = 3;
 // FrameState moved to host_frame_state.hpp (host split refactor Phase 0-10); see the
 // using-declaration near the top of the anonymous namespace.
 
+// Static-frame gating (Phase 1-7 state struct). Skips near-identical frames on a still screen
+// and drops the encode cadence to staticFps, so a static desktop does not spend bitrate on
+// identical P-frames. Config fields are set once from env in main(); the rest is loop state.
+// thread: main encode loop only.
+struct FrameGatingState {
+  // Config (REMOTE60_NATIVE_FRAME_GATING_* / STATIC_SCENE_FPS), fixed after startup.
+  bool enabled = false;
+  uint32_t staticFps = 0;
+  uint32_t staticThresholdPermille = 0;
+  uint32_t enterFrames = 0;
+  uint32_t exitFrames = 0;
+  uint32_t sampleTarget = 0;
+  uint64_t staticIntervalUs = 0;  // derived from staticFps and the active frame interval
+  // Reference frame for the change estimate + static/motion streaks.
+  std::shared_ptr<std::vector<uint8_t>> refPayload;
+  uint32_t refW = 0;
+  uint32_t refH = 0;
+  uint32_t refStride = 0;
+  uint32_t staticStreak = 0;
+  uint32_t motionStreak = 0;
+  bool staticMode = false;
+  uint64_t lastSentUs = 0;
+  // Telemetry for the stats line.
+  uint64_t skipCount = 0;
+  uint64_t staticSkipCount = 0;
+  uint64_t changePermilleLast = 1000;
+  uint64_t changePermilleSum = 0;
+  uint64_t changePermilleCount = 0;
+};
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -458,17 +488,19 @@ int main(int argc, char** argv) {
   const uint32_t m9LatencyLowUs = env_u32_clamped("REMOTE60_NATIVE_M9_LATENCY_LOW_US", 90000, 10000, 1000000);
   const uint32_t m9TailHighUs = env_u32_clamped("REMOTE60_NATIVE_M9_TAIL_HIGH_US", 110000, 10000, 1000000);
   const uint32_t m9TailLowUs = env_u32_clamped("REMOTE60_NATIVE_M9_TAIL_LOW_US", 70000, 10000, 1000000);
-  const bool frameGatingEnabled = useH264 && !env_truthy("REMOTE60_NATIVE_FRAME_GATING_DISABLE");
-  const uint32_t frameGatingStaticFps = env_u32_clamped(
+  // Static-frame gating config + loop state (FrameGatingState, Phase 1-7).
+  FrameGatingState frameGating;
+  frameGating.enabled = useH264 && !env_truthy("REMOTE60_NATIVE_FRAME_GATING_DISABLE");
+  frameGating.staticFps = env_u32_clamped(
       "REMOTE60_NATIVE_STATIC_SCENE_FPS", kFrameGatingStaticFpsDefault, 1, 30);
-  const uint32_t frameGatingStaticThresholdPermille = env_u32_clamped(
+  frameGating.staticThresholdPermille = env_u32_clamped(
       "REMOTE60_NATIVE_FRAME_GATING_STATIC_THRESHOLD_PM",
       kFrameGatingStaticThresholdPermilleDefault, 1, 400);
-  const uint32_t frameGatingEnterFrames = env_u32_clamped(
+  frameGating.enterFrames = env_u32_clamped(
       "REMOTE60_NATIVE_FRAME_GATING_ENTER_FRAMES", kFrameGatingEnterFramesDefault, 1, 120);
-  const uint32_t frameGatingExitFrames = env_u32_clamped(
+  frameGating.exitFrames = env_u32_clamped(
       "REMOTE60_NATIVE_FRAME_GATING_EXIT_FRAMES", kFrameGatingExitFramesDefault, 1, 30);
-  const uint32_t frameGatingSampleTarget = env_u32_clamped(
+  frameGating.sampleTarget = env_u32_clamped(
       "REMOTE60_NATIVE_FRAME_GATING_SAMPLE_TARGET", kFrameGatingSampleTargetDefault, 128, 16384);
   const uint32_t keyReqMinIntervalUs = env_u32_clamped(
       "REMOTE60_NATIVE_KEYREQ_MIN_INTERVAL_US", kKeyReqMinIntervalUsDefault, 10000, 1000000);
@@ -572,9 +604,9 @@ int main(int argc, char** argv) {
               << " encoderTuneMode=" << encoderTuneMode
               << " abr=" << (abrEnabled ? "on" : "off")
               << " abrMode=" << (abrQualityFirst ? "quality-first" : "default")
-              << " frameGating=" << (frameGatingEnabled ? "on" : "off")
-              << " staticSceneFps=" << frameGatingStaticFps
-              << " gatingStaticPm=" << frameGatingStaticThresholdPermille
+              << " frameGating=" << (frameGating.enabled ? "on" : "off")
+              << " staticSceneFps=" << frameGating.staticFps
+              << " gatingStaticPm=" << frameGating.staticThresholdPermille
               << " m9=" << (m9Enabled ? "on" : "off")
               << " m9Mode=" << (m9Apply ? "apply" : "dry-run")
               << " keyReqMinUs=" << keyReqMinIntervalUs
@@ -2381,8 +2413,8 @@ int main(int argc, char** argv) {
   // because capture callbacks can arrive on more than one thread across backends.
   remote60::native_poc::CaptureCadenceGate captureCadenceGate;
   std::mutex captureCadenceMu;
-  uint64_t frameGatingStaticIntervalUs =
-      std::max<uint64_t>(activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGatingStaticFps));
+  frameGating.staticIntervalUs =
+      std::max<uint64_t>(activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGating.staticFps));
   inputDomainW.store(activeEncodeW, std::memory_order_release);
   inputDomainH.store(activeEncodeH, std::memory_order_release);
   bool runtimeTuneManualOverride = false;
@@ -2415,8 +2447,8 @@ int main(int argc, char** argv) {
     // requested cadence.
     activePacingFrameIntervalUs = activeFrameIntervalUs;
     captureSubmitMinIntervalUs.store(activeFrameIntervalUs, std::memory_order_release);
-    frameGatingStaticIntervalUs =
-        std::max<uint64_t>(activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGatingStaticFps));
+    frameGating.staticIntervalUs =
+        std::max<uint64_t>(activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGating.staticFps));
   };
   refresh_frame_intervals();
   // Declared before every lambda that references them. FrameState precedes the pipeline so
@@ -3606,19 +3638,6 @@ int main(int argc, char** argv) {
   uint32_t consecutiveStaleEncodedFrames = 0;
   uint64_t idleHoldTotal = 0;
   uint64_t lastSendStartUs = 0;
-  std::shared_ptr<std::vector<uint8_t>> frameGatingRefPayload;
-  uint32_t frameGatingRefW = 0;
-  uint32_t frameGatingRefH = 0;
-  uint32_t frameGatingRefStride = 0;
-  uint32_t frameGatingStaticStreak = 0;
-  uint32_t frameGatingMotionStreak = 0;
-  bool frameGatingStaticMode = false;
-  uint64_t frameGatingLastSentUs = 0;
-  uint64_t frameGatingSkipCount = 0;
-  uint64_t frameGatingStaticSkipCount = 0;
-  uint64_t frameGatingChangePermilleLast = 1000;
-  uint64_t frameGatingChangePermilleSum = 0;
-  uint64_t frameGatingChangePermilleCount = 0;
   uint64_t firstSentLoggedGeneration = 0;
   uint64_t selectionFirstKeyframePendingGeneration = 0;
   uint64_t selectionFirstKeyframeDropCount = 0;
@@ -3971,7 +3990,7 @@ int main(int argc, char** argv) {
       selectionFirstKeyframeDropCount = 0;
       encodedSeq = 0;
       lastSendStartUs = 0;
-      frameGatingLastSentUs = 0;
+      frameGating.lastSentUs = 0;
       {
         std::lock_guard<std::mutex> lk(frame.mu);
         lastVersionSent = frame.version;
@@ -3981,14 +4000,14 @@ int main(int argc, char** argv) {
     return false;
   };
   auto flush_capture_pipeline_state = [&](const char* reason) {
-    frameGatingRefPayload.reset();
-    frameGatingRefW = 0;
-    frameGatingRefH = 0;
-    frameGatingRefStride = 0;
-    frameGatingStaticStreak = 0;
-    frameGatingMotionStreak = 0;
-    frameGatingStaticMode = false;
-    frameGatingLastSentUs = 0;
+    frameGating.refPayload.reset();
+    frameGating.refW = 0;
+    frameGating.refH = 0;
+    frameGating.refStride = 0;
+    frameGating.staticStreak = 0;
+    frameGating.motionStreak = 0;
+    frameGating.staticMode = false;
+    frameGating.lastSentUs = 0;
     firstSentLoggedGeneration = 0;
     firstCallbackLoggedGeneration.store(0, std::memory_order_release);
     nextCaptureSubmitUs.store(0, std::memory_order_release);
@@ -5480,61 +5499,61 @@ int main(int argc, char** argv) {
     const uint64_t queueDepthAtPop = (version > lastPopVersionAtRead) ? (version - lastPopVersionAtRead) : 0;
     update_u64_max(queueDepthMax, queueDepthAtPop);
     lastPopFrameVersion.store(version, std::memory_order_release);
-    if (!servedBootstrap && frameGatingEnabled && useH264 && payload && !payload->empty()) {
-      if (frameGatingRefPayload && !frameGatingRefPayload->empty() &&
-          frameGatingRefW == w && frameGatingRefH == h && frameGatingRefStride == stride) {
-        frameGatingChangePermilleLast = estimate_bgra_change_permille(
-            payload->data(), frameGatingRefPayload->data(), payload->size(), frameGatingSampleTarget);
-        frameGatingChangePermilleSum += frameGatingChangePermilleLast;
-        ++frameGatingChangePermilleCount;
+    if (!servedBootstrap && frameGating.enabled && useH264 && payload && !payload->empty()) {
+      if (frameGating.refPayload && !frameGating.refPayload->empty() &&
+          frameGating.refW == w && frameGating.refH == h && frameGating.refStride == stride) {
+        frameGating.changePermilleLast = estimate_bgra_change_permille(
+            payload->data(), frameGating.refPayload->data(), payload->size(), frameGating.sampleTarget);
+        frameGating.changePermilleSum += frameGating.changePermilleLast;
+        ++frameGating.changePermilleCount;
 
-        if (frameGatingChangePermilleLast == 0) {
-          frameGatingStaticStreak = std::min<uint32_t>(frameGatingStaticStreak + 1, 60000);
-          frameGatingMotionStreak = 0;
+        if (frameGating.changePermilleLast == 0) {
+          frameGating.staticStreak = std::min<uint32_t>(frameGating.staticStreak + 1, 60000);
+          frameGating.motionStreak = 0;
         } else {
-          frameGatingMotionStreak = std::min<uint32_t>(frameGatingMotionStreak + 1, 60000);
-          frameGatingStaticStreak = 0;
+          frameGating.motionStreak = std::min<uint32_t>(frameGating.motionStreak + 1, 60000);
+          frameGating.staticStreak = 0;
         }
       } else {
-        frameGatingStaticStreak = 0;
-        frameGatingMotionStreak = 0;
-        frameGatingChangePermilleLast = 1000;
+        frameGating.staticStreak = 0;
+        frameGating.motionStreak = 0;
+        frameGating.changePermilleLast = 1000;
       }
 
-      const bool prevStaticMode = frameGatingStaticMode;
+      const bool prevStaticMode = frameGating.staticMode;
       // Any difference at all counts as motion. estimate_bgra_change_permille returns 0 only
       // for a byte-identical frame, so this both leaves static mode on the first changed
       // frame and never throttles an edit that is too small to move a percentage threshold.
-      const bool motionNow = frameGatingChangePermilleLast > 0;
-      if (!frameGatingStaticMode && frameGatingStaticStreak >= frameGatingEnterFrames) {
-        frameGatingStaticMode = true;
-      } else if (frameGatingStaticMode &&
-                 (motionNow || frameGatingMotionStreak >= frameGatingExitFrames)) {
-        frameGatingStaticMode = false;
+      const bool motionNow = frameGating.changePermilleLast > 0;
+      if (!frameGating.staticMode && frameGating.staticStreak >= frameGating.enterFrames) {
+        frameGating.staticMode = true;
+      } else if (frameGating.staticMode &&
+                 (motionNow || frameGating.motionStreak >= frameGating.exitFrames)) {
+        frameGating.staticMode = false;
       }
-      if (prevStaticMode != frameGatingStaticMode) {
+      if (prevStaticMode != frameGating.staticMode) {
         std::cout << "[native-video-host] frame-gating mode="
-                  << (frameGatingStaticMode ? "static" : "motion")
-                  << " changePm=" << frameGatingChangePermilleLast
-                  << " staticStreak=" << frameGatingStaticStreak
-                  << " motionStreak=" << frameGatingMotionStreak
+                  << (frameGating.staticMode ? "static" : "motion")
+                  << " changePm=" << frameGating.changePermilleLast
+                  << " staticStreak=" << frameGating.staticStreak
+                  << " motionStreak=" << frameGating.motionStreak
                   << "\n";
       }
 
       const bool keyReqPending = clientRequestedKeyFrame.load(std::memory_order_acquire);
-      const uint64_t targetIntervalUs = frameGatingStaticMode ? frameGatingStaticIntervalUs : activeFrameIntervalUs;
+      const uint64_t targetIntervalUs = frameGating.staticMode ? frameGating.staticIntervalUs : activeFrameIntervalUs;
       // The static interval throttles idle scenes; it must never hold back a frame that
       // actually changed, or the first interaction after idle arrives late.
       // In paced motion mode the main tick already enforces activeFrameIntervalUs. Applying
       // the same interval here a second time makes a slightly-early capture timestamp skip
       // the entire tick (measured 1-6 lost frames/s at 60fps). Keep this limiter only for
       // static throttling or the explicitly unpaced throughput path.
-      const bool needsGatingRateLimit = frameGatingStaticMode || !paceByTick;
+      const bool needsGatingRateLimit = frameGating.staticMode || !paceByTick;
       if (needsGatingRateLimit && !keyReqPending && !motionNow &&
-          frameGatingLastSentUs > 0 &&
-          queuePopUs < (frameGatingLastSentUs + targetIntervalUs)) {
-        ++frameGatingSkipCount;
-        if (frameGatingStaticMode) ++frameGatingStaticSkipCount;
+          frameGating.lastSentUs > 0 &&
+          queuePopUs < (frameGating.lastSentUs + targetIntervalUs)) {
+        ++frameGating.skipCount;
+        if (frameGating.staticMode) ++frameGating.staticSkipCount;
         lastVersionSent = version;
         continue;
       }
@@ -5592,12 +5611,12 @@ int main(int argc, char** argv) {
       if (sentOk) {
         lastSendStartUs = sendStartUs;
         log_first_sent_generation("raw", streamGeneration, sendStartUs, hdr.captureQpcUs, hdr.width, hdr.height);
-        if (frameGatingEnabled && useH264 && payload && !payload->empty()) {
-          frameGatingLastSentUs = sendStartUs;
-          frameGatingRefPayload = payload;
-          frameGatingRefW = w;
-          frameGatingRefH = h;
-          frameGatingRefStride = stride;
+        if (frameGating.enabled && useH264 && payload && !payload->empty()) {
+          frameGating.lastSentUs = sendStartUs;
+          frameGating.refPayload = payload;
+          frameGating.refW = w;
+          frameGating.refH = h;
+          frameGating.refStride = stride;
         }
       }
 
@@ -6288,13 +6307,13 @@ int main(int argc, char** argv) {
             selectionFirstKeyframeDropCount = 0;
           }
           // UDP tx counters are owned by the sender thread now; nothing to count here.
-          if (!servedBootstrap && frameGatingEnabled && enqueuedForSend && payload &&
+          if (!servedBootstrap && frameGating.enabled && enqueuedForSend && payload &&
               !payload->empty()) {
-            frameGatingLastSentUs = sendStartUs;
-            frameGatingRefPayload = payload;
-            frameGatingRefW = w;
-            frameGatingRefH = h;
-            frameGatingRefStride = stride;
+            frameGating.lastSentUs = sendStartUs;
+            frameGating.refPayload = payload;
+            frameGating.refW = w;
+            frameGating.refH = h;
+            frameGating.refStride = stride;
           }
         }
         if (!sentOk) {
@@ -6834,9 +6853,9 @@ int main(int argc, char** argv) {
                   << " keyReqDropTotal=" << clientKeyFrameRequestDropped.load()
                   << " callbackFrames=" << callbackFramesPerSec
                   << " skippedByOverwrite=" << skippedByOverwrite
-                  << " frameGatingMode=" << (frameGatingStaticMode ? "static" : "motion")
-                  << " frameGatingSkips=" << frameGatingSkipCount
-                  << " frameGatingStaticSkips=" << frameGatingStaticSkipCount
+                  << " frameGatingMode=" << (frameGating.staticMode ? "static" : "motion")
+                  << " frameGatingSkips=" << frameGating.skipCount
+                  << " frameGatingStaticSkips=" << frameGating.staticSkipCount
                   << " mbps=" << mbps
                   << " size=" << w << "x" << h
                   << "\n";
@@ -6865,9 +6884,9 @@ int main(int argc, char** argv) {
         const uint64_t gpuScaleUnmapAvgUs =
             (gpuScaleTimedCount > 0) ? (gpuScaleUnmapSumUs / gpuScaleTimedCount) : 0;
         const uint64_t frameGatingChangeAvgPm =
-            (frameGatingChangePermilleCount > 0)
-                ? (frameGatingChangePermilleSum / frameGatingChangePermilleCount)
-                : frameGatingChangePermilleLast;
+            (frameGating.changePermilleCount > 0)
+                ? (frameGating.changePermilleSum / frameGating.changePermilleCount)
+                : frameGating.changePermilleLast;
         const double rawEquivMbps = (rawEquivalentBytes * 8.0) / (1000.0 * 1000.0);
         const uint64_t encRatioX100 =
             (sentBytes > 0) ? ((rawEquivalentBytes * 100ULL) / sentBytes) : 0;
@@ -7017,10 +7036,10 @@ int main(int argc, char** argv) {
                   << " abrSevSec=" << abrSeverePressureSeconds
                   << " abrGoodSec=" << abrGoodSeconds
                   << " abrOverride=" << (runtimeTuneManualOverride ? 1 : 0)
-                  << " frameGatingMode=" << (frameGatingStaticMode ? "static" : "motion")
-                  << " frameGatingSkips=" << frameGatingSkipCount
-                  << " frameGatingStaticSkips=" << frameGatingStaticSkipCount
-                  << " frameGatingChangePm=" << frameGatingChangePermilleLast
+                  << " frameGatingMode=" << (frameGating.staticMode ? "static" : "motion")
+                  << " frameGatingSkips=" << frameGating.skipCount
+                  << " frameGatingStaticSkips=" << frameGating.staticSkipCount
+                  << " frameGatingChangePm=" << frameGating.changePermilleLast
                   << " frameGatingChangeAvgPm=" << frameGatingChangeAvgPm
                   << " captureOfferContent=" << captureCadenceGate.OfferContentCount()
                   << " captureOfferPointer=" << captureCadenceGate.OfferPointerCount()
@@ -7085,7 +7104,7 @@ int main(int argc, char** argv) {
           // second with real motion decide against the unchanged thresholds.
           const bool hostOfferSparse =
               (sentFrames < std::max<uint64_t>(2, static_cast<uint64_t>(abrExpectedFps) / 2)) ||
-              frameGatingStaticMode;
+              frameGating.staticMode;
 
           const uint64_t severeLatencyUs = abrQualityFirst ? 170000ULL : 150000ULL;
           const uint64_t severeTailUs = abrQualityFirst ? 140000ULL : 110000ULL;
@@ -7414,10 +7433,10 @@ int main(int argc, char** argv) {
       gpuScaleUnmapWaitMaxUs = 0;
       gpuScaleUnmapSumUs = 0;
       gpuScaleUnmapMaxUs = 0;
-      frameGatingSkipCount = 0;
-      frameGatingStaticSkipCount = 0;
-      frameGatingChangePermilleSum = 0;
-      frameGatingChangePermilleCount = 0;
+      frameGating.skipCount = 0;
+      frameGating.staticSkipCount = 0;
+      frameGating.changePermilleSum = 0;
+      frameGating.changePermilleCount = 0;
       statAtUs += 1000000ULL;
     }
   }
