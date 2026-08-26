@@ -6928,3 +6928,11 @@ Next action
 - 순수 이동 검증: 제거 80줄 vs 헤더 본문 80줄(diff -w) → `inline` 3곳만 차이.
 - 검증: 브랜치 host 타깃 Release 빌드 exit 0, warning/error 0.
 - 다음 액션: 0-3 `host_gpu_scaler.hpp`(작성 완료, host_main 제거 대기) → 0-4 `host_window_enum.hpp/.cpp`.
+
+### 267) 2026-08-26 리팩터 Phase 0-3 — host_gpu_scaler.hpp 추출 (브랜치 f235835)
+
+- 이동: struct GpuBgraScaler → `host_gpu_scaler.hpp`(header-only; 멤버가 원래 in-class 정의라 .cpp 분리 없이 순수 이동).
+  host_main 9,395→9,204줄. 0-10/0-3의 포인터 주석 3곳이 sed 이어붙임으로 한 줄로 합쳐진 것을 같은 커밋에서 교정(주석만).
+- 순수 이동 검증: 제거 182줄 vs 헤더 본문 182줄 → IDENTICAL.
+- 검증: 브랜치 host 타깃 Release 빌드 exit 0, warning/error 0.
+- 다음 액션: 0-4 `host_window_enum.hpp/.cpp`(파일 작성 완료, host_main 제거+CMake 대기) → 0-6 `host_capture_device`.
