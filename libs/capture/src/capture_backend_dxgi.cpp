@@ -32,7 +32,45 @@ std::string narrow(const wchar_t* text) {
   return out;
 }
 
+// The capture backend's single monotonic clock. The worker heartbeat and the SnapshotWorker age
+// calculation must both use it; mixing it with the host's QPC clock would produce nonsense ages.
+uint64_t steady_now_us() {
+  using namespace std::chrono;
+  return static_cast<uint64_t>(
+      duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count());
+}
+
 }  // namespace
+
+const char* capture_worker_phase_name(CaptureWorkerPhase phase) {
+  switch (phase) {
+    case CaptureWorkerPhase::Idle: return "idle";
+    case CaptureWorkerPhase::Loop: return "loop";
+    case CaptureWorkerPhase::Report: return "report";
+    case CaptureWorkerPhase::Acquire: return "acquire";
+    case CaptureWorkerPhase::ResourceQI: return "resource_qi";
+    case CaptureWorkerPhase::TextureDesc: return "texture_desc";
+    case CaptureWorkerPhase::FrameHandler: return "frame_handler";
+    case CaptureWorkerPhase::Release: return "release";
+    case CaptureWorkerPhase::Exited: return "exited";
+  }
+  return "unknown";
+}
+
+// Stable heartbeat block. Lives on the session (not the Impl that Start recreates) so the host
+// wedge watchdog can hold one reference across capture restarts; every timestamp here is the
+// backend steady clock (steady_now_us).
+struct DxgiDesktopCaptureSession::WorkerProgress {
+  std::atomic<bool> running{false};
+  std::atomic<uint64_t> generation{0};
+  std::atomic<uint64_t> lastProgressUs{0};
+  std::atomic<uint32_t> phase{static_cast<uint32_t>(CaptureWorkerPhase::Idle)};
+  std::atomic<uint64_t> phaseStartedUs{0};
+  std::atomic<uint64_t> loopCount{0};
+  std::atomic<int32_t> lastAcquireHr{0};
+  std::atomic<int32_t> lastReleaseHr{0};
+  std::atomic<uint32_t> lastAccumulatedFrames{0};
+};
 
 struct DxgiDesktopCaptureSession::Impl {
   DxgiDesktopCaptureConfig config;
@@ -41,6 +79,7 @@ struct DxgiDesktopCaptureSession::Impl {
   DxgiDesktopFallbackHandler onFallback;
   std::atomic<bool> stopRequested{false};
   std::thread worker;
+  WorkerProgress* progress = nullptr;  // session-owned; set by Start before the worker spawns
   Microsoft::WRL::ComPtr<ID3D11Device> d3dDevice;
   Microsoft::WRL::ComPtr<IDXGIOutputDuplication> duplication;
   HMONITOR monitor = nullptr;
@@ -291,12 +330,47 @@ struct DxgiDesktopCaptureSession::Impl {
   }
 
   void run() {
+    // RAII: every exit path (recreate failure, texture QI failure, size change, handler exception,
+    // stop) must publish "worker exited" so the host wedge watchdog never mistakes a cleanly-
+    // stopped worker for a hang. Named-return and each early `return` all unwind through this.
+    // (Codex-reviewed 2026-08-25.)
+    struct RunningGuard {
+      WorkerProgress* p;
+      ~RunningGuard() {
+        if (!p) return;
+        const uint64_t t = steady_now_us();
+        p->phaseStartedUs.store(t, std::memory_order_release);
+        p->lastProgressUs.store(t, std::memory_order_release);
+        p->phase.store(static_cast<uint32_t>(CaptureWorkerPhase::Exited), std::memory_order_release);
+        p->running.store(false, std::memory_order_release);
+      }
+    } runningGuard{progress};
+
+    auto enterPhase = [&](CaptureWorkerPhase ph) {
+      if (!progress) return;
+      // phaseStartedUs before phase so a reader that sees the new phase also sees a start no later
+      // than it -- phaseAge is then an upper bound, never a stale-large value.
+      progress->phaseStartedUs.store(steady_now_us(), std::memory_order_release);
+      progress->phase.store(static_cast<uint32_t>(ph), std::memory_order_release);
+    };
+    auto markProgress = [&]() {
+      if (progress) progress->lastProgressUs.store(steady_now_us(), std::memory_order_release);
+    };
+
     while (!stopRequested.load()) {
+      enterPhase(CaptureWorkerPhase::Report);
       report_stats_if_due(now_us());
+      markProgress();
+
+      enterPhase(CaptureWorkerPhase::Acquire);
       DXGI_OUTDUPL_FRAME_INFO frameInfo{};
       Microsoft::WRL::ComPtr<IDXGIResource> resource;
       const HRESULT hr = duplication->AcquireNextFrame(config.acquireTimeoutMs, &frameInfo, &resource);
+      if (progress) progress->lastAcquireHr.store(static_cast<int32_t>(hr), std::memory_order_release);
+      markProgress();
       if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
+        // The routine 100ms idle path -- markProgress above already refreshed the heartbeat, so a
+        // static desktop keeps the worker "young" and never trips the wedge watchdog.
         ++stats.timeouts;
         continue;
       }
@@ -318,6 +392,9 @@ struct DxgiDesktopCaptureSession::Impl {
       }
 
       ++stats.acquires;
+      if (progress) {
+        progress->lastAccumulatedFrames.store(frameInfo.AccumulatedFrames, std::memory_order_release);
+      }
       if (frameInfo.AccumulatedFrames > 0) {
         stats.accumulatedTotal += frameInfo.AccumulatedFrames;
         if (frameInfo.AccumulatedFrames > stats.accumulatedMax) {
@@ -338,29 +415,37 @@ struct DxgiDesktopCaptureSession::Impl {
       bool frameHeld = true;
       auto releaseFrame = [&]() {
         if (!frameHeld || !duplication) return;
-        duplication->ReleaseFrame();
+        enterPhase(CaptureWorkerPhase::Release);
+        const HRESULT relHr = duplication->ReleaseFrame();
+        if (progress) progress->lastReleaseHr.store(static_cast<int32_t>(relHr), std::memory_order_release);
+        markProgress();
         frameHeld = false;
         const uint64_t heldUs = now_us() - acquiredAtUs;
         stats.holdTotalUs += heldUs;
         if (heldUs > stats.holdMaxUs) stats.holdMaxUs = heldUs;
       };
 
+      enterPhase(CaptureWorkerPhase::ResourceQI);
       Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
       const HRESULT texHr = resource.As(&texture);
+      markProgress();
       if (FAILED(texHr) || !texture) {
         releaseFrame();
         request_fallback("dxgi_frame_texture_qi_failed_" + hresult_hex(texHr));
         return;
       }
 
+      enterPhase(CaptureWorkerPhase::TextureDesc);
       D3D11_TEXTURE2D_DESC desc{};
       texture->GetDesc(&desc);
+      markProgress();
       if (desc.Width != width || desc.Height != height) {
         releaseFrame();
         request_fallback("dxgi_frame_size_changed");
         return;
       }
 
+      enterPhase(CaptureWorkerPhase::FrameHandler);
       try {
         if (onFrame) onFrame(texture.Get(), width, height, frameInfo.AccumulatedFrames);
       } catch (...) {
@@ -368,13 +453,17 @@ struct DxgiDesktopCaptureSession::Impl {
         request_fallback("dxgi_frame_handler_exception");
         return;
       }
+      markProgress();
 
       releaseFrame();
+      if (progress) progress->loopCount.fetch_add(1, std::memory_order_acq_rel);
+      enterPhase(CaptureWorkerPhase::Loop);
     }
   }
 };
 
-DxgiDesktopCaptureSession::DxgiDesktopCaptureSession() : impl_(std::make_unique<Impl>()) {}
+DxgiDesktopCaptureSession::DxgiDesktopCaptureSession()
+    : progress_(std::make_unique<WorkerProgress>()), impl_(std::make_unique<Impl>()) {}
 
 DxgiDesktopCaptureSession::~DxgiDesktopCaptureSession() {
   Stop();
@@ -405,7 +494,30 @@ bool DxgiDesktopCaptureSession::Start(const DxgiDesktopCaptureConfig& config,
     return false;
   }
 
-  impl_->worker = std::thread([impl = impl_.get()]() { impl->run(); });
+  // Publish a fresh heartbeat BEFORE the worker spawns so a watchdog poll that races the spawn sees
+  // a young running worker, not a stale block from a prior episode. Bump generation so any warn
+  // latched against the previous worker is discarded.
+  impl_->progress = progress_.get();
+  const uint64_t startUs = steady_now_us();
+  progress_->phase.store(static_cast<uint32_t>(CaptureWorkerPhase::Loop), std::memory_order_release);
+  progress_->phaseStartedUs.store(startUs, std::memory_order_release);
+  progress_->lastProgressUs.store(startUs, std::memory_order_release);
+  progress_->loopCount.store(0, std::memory_order_release);
+  progress_->lastAcquireHr.store(0, std::memory_order_release);
+  progress_->lastReleaseHr.store(0, std::memory_order_release);
+  progress_->lastAccumulatedFrames.store(0, std::memory_order_release);
+  progress_->generation.fetch_add(1, std::memory_order_acq_rel);
+  progress_->running.store(true, std::memory_order_release);
+  try {
+    impl_->worker = std::thread([impl = impl_.get()]() { impl->run(); });
+  } catch (...) {
+    // Spawn failed: roll the running flag back so the watchdog does not treat a never-started
+    // worker as wedged.
+    progress_->running.store(false, std::memory_order_release);
+    if (detailOut) *detailOut = "dxgi_worker_thread_spawn_failed";
+    impl_.reset();
+    return false;
+  }
   if (detailOut) *detailOut = "ok";
   return true;
 }
@@ -415,6 +527,24 @@ void DxgiDesktopCaptureSession::Stop() {
   impl_->stopRequested = true;
   if (impl_->worker.joinable()) impl_->worker.join();
   impl_->duplication.Reset();
+}
+
+CaptureWorkerSnapshot DxgiDesktopCaptureSession::SnapshotWorker() const {
+  CaptureWorkerSnapshot s;
+  if (!progress_) return s;
+  s.running = progress_->running.load(std::memory_order_acquire);
+  s.generation = progress_->generation.load(std::memory_order_acquire);
+  s.phase = static_cast<CaptureWorkerPhase>(progress_->phase.load(std::memory_order_acquire));
+  const uint64_t lastProgressUs = progress_->lastProgressUs.load(std::memory_order_acquire);
+  const uint64_t phaseStartedUs = progress_->phaseStartedUs.load(std::memory_order_acquire);
+  const uint64_t now = steady_now_us();
+  s.ageUs = (now > lastProgressUs) ? (now - lastProgressUs) : 0;
+  s.phaseAgeUs = (now > phaseStartedUs) ? (now - phaseStartedUs) : 0;
+  s.loopCount = progress_->loopCount.load(std::memory_order_acquire);
+  s.lastAcquireHr = progress_->lastAcquireHr.load(std::memory_order_acquire);
+  s.lastReleaseHr = progress_->lastReleaseHr.load(std::memory_order_acquire);
+  s.lastAccumulatedFrames = progress_->lastAccumulatedFrames.load(std::memory_order_acquire);
+  return s;
 }
 
 uint32_t DxgiDesktopCaptureSession::width() const {

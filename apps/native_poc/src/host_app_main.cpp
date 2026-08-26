@@ -331,6 +331,10 @@ class StreamingHostProcess {
     // or nv12 auto-disable -- but a machine that keeps wedging still needs a backoff, so repeats
     // inside a window are counted separately.
     constexpr DWORD kChildWatchdogExitCode = 43;
+    // The child's independent DXGI capture-worker watchdog terminates a worker wedged inside a DXGI
+    // call with this distinct code. Same recovery class as 43 (fast relaunch, no crash streak, no
+    // nv12 auto-disable); the separate code only tells the two hang sites apart in the log.
+    constexpr DWORD kChildDxgiWorkerWatchdogExitCode = 44;
     uint32_t watchdogRecoveries = 0;
     uint64_t watchdogWindowStartMs = 0;
     while (running_.load(std::memory_order_relaxed)) {
@@ -446,7 +450,9 @@ class StreamingHostProcess {
       // A nonzero exit within a few seconds is a crash, not a session that ran and ended.
       // Only those count toward the streak; a host that streamed for a while and then a
       // client left is a clean exit and resets it.
-      const bool watchdogRecovery = (childExitCode == kChildWatchdogExitCode);
+      const bool dxgiWorkerWatchdog = (childExitCode == kChildDxgiWorkerWatchdogExitCode);
+      const bool watchdogRecovery =
+          (childExitCode == kChildWatchdogExitCode) || dxgiWorkerWatchdog;
       const bool crashed = !watchdogRecovery && (childExitCode != 0) && (ranMs < 15000);
       if (watchdogRecovery) {
         // Count repeats in a rolling 5-minute window; a persistently wedging host still backs off.
@@ -457,8 +463,9 @@ class StreamingHostProcess {
         ++watchdogRecoveries;
         char line[192];
         std::snprintf(line, sizeof(line),
-                      "[host-app] streaming host self-terminated (main-loop watchdog) code=%lu "
+                      "[host-app] streaming host self-terminated (%s) code=%lu "
                       "ranMs=%llu recoveries5m=%u -- relaunching",
+                      dxgiWorkerWatchdog ? "dxgi-worker watchdog" : "main-loop watchdog",
                       static_cast<unsigned long>(childExitCode),
                       static_cast<unsigned long long>(ranMs), watchdogRecoveries);
         AppendLogLineOnce(line);

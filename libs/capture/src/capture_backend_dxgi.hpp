@@ -38,6 +38,37 @@ using DxgiDesktopFrameHandler =
 using DxgiDesktopLogHandler = std::function<void(const std::string& phase, const std::string& message)>;
 using DxgiDesktopFallbackHandler = std::function<void(const std::string& reason)>;
 
+// Coarse location of the DXGI capture worker within one AcquireNextFrame..ReleaseFrame cycle.
+// The host's wedge watchdog reports this so a hang can be attributed to the actual blocking call
+// (Acquire vs a resource QI vs ReleaseFrame) instead of guessing.
+enum class CaptureWorkerPhase : uint32_t {
+  Idle = 0,
+  Loop,
+  Report,
+  Acquire,
+  ResourceQI,
+  TextureDesc,
+  FrameHandler,
+  Release,
+  Exited,
+};
+const char* capture_worker_phase_name(CaptureWorkerPhase phase);
+
+// Liveness snapshot of the DXGI capture worker, for the host's independent wedge watchdog. ageUs
+// and phaseAgeUs are computed against the capture backend's OWN steady clock -- callers must not
+// mix them with host QPC timestamps.
+struct CaptureWorkerSnapshot {
+  bool running = false;
+  uint64_t generation = 0;
+  uint64_t ageUs = 0;        // since the worker last made progress
+  uint64_t phaseAgeUs = 0;   // since the current phase began
+  CaptureWorkerPhase phase = CaptureWorkerPhase::Idle;
+  uint64_t loopCount = 0;
+  int32_t lastAcquireHr = 0;
+  int32_t lastReleaseHr = 0;
+  uint32_t lastAccumulatedFrames = 0;
+};
+
 class DxgiDesktopCaptureSession {
  public:
   DxgiDesktopCaptureSession();
@@ -56,8 +87,17 @@ class DxgiDesktopCaptureSession {
   uint32_t width() const;
   uint32_t height() const;
 
+  // Reads only atomics; safe to call from another thread while the worker runs. The progress block
+  // outlives the Impl that Start() recreates, so a watchdog can keep one session reference across
+  // capture restarts and rely on the generation field to tell episodes apart.
+  CaptureWorkerSnapshot SnapshotWorker() const;
+
  private:
   struct Impl;
+  struct WorkerProgress;
+  // Declared before impl_ so it is destroyed AFTER it: the worker thread (owned by Impl) writes
+  // to this block, so the block must outlive the thread.
+  std::unique_ptr<WorkerProgress> progress_;
   std::unique_ptr<Impl> impl_;
 };
 

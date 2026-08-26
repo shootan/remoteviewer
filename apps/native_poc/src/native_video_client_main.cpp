@@ -4017,6 +4017,11 @@ int main(int argc, char** argv) {
     uint64_t staleDropCount = 0;
     uint64_t holdLatestDropCount = 0;
     uint64_t burstDropCount = 0;
+    uint64_t staleReferenceRecoveryCount = 0;
+    // Capture timestamp of the newest keyframe the decoder has successfully consumed. A stale
+    // frame OLDER than this anchor was already resynced past (safe to quiet-drop); one AT OR
+    // AFTER it still sits in the live reference chain, so dropping it needs an IDR resync.
+    uint64_t lastDecodedKeyCaptureUs = 0;
     uint64_t latestCaptureSeenUs = 0;
     uint64_t queueDepthSampleCount = 0;
     uint64_t queueDepthHist[5] = {0, 0, 0, 0, 0};
@@ -4139,6 +4144,7 @@ int main(int argc, char** argv) {
          << " staleDrops=" << staleDropCount
          << " holdLatestDrops=" << holdLatestDropCount
          << " burstDrops=" << burstDropCount
+         << " staleRefRecoveries=" << staleReferenceRecoveryCount
          << " queueDepthSamples=" << queueDepthSampleCount
          << " queueDepthMax=" << queueDepthFramesMax
          << " queueDepthH0=" << queueDepthHist[0]
@@ -4317,10 +4323,30 @@ int main(int argc, char** argv) {
         if (staleBehindLatestUs > staleCaptureDropUs) {
           ++holdLatestDropCount;
         }
+        // Dropping a frame that is NOT older than the last decoded keyframe breaks the still-live
+        // reference chain. This is a B=0 low-latency IPPP stream and the wire header carries no
+        // ref flag, so every such P must be treated as a reference: decoding later P-frames that
+        // referenced the dropped one produces garbage (the corrupted text/scroll seen in the
+        // field). Resync on the next IDR instead -- freeze on the last good frame until it lands.
+        // A frame older than the anchor is a late/reordered straggler the decoder already resynced
+        // past, so quiet-drop stays safe there. Recover once per gap; the wait gate below then
+        // drops non-key frames until the IDR and request_keyframe's limiter throttles the ask.
+        const bool inLiveReferenceChain = (h.captureQpcUs >= lastDecodedKeyCaptureUs);
+        if (inLiveReferenceChain && !waitForKeyFrame) {
+          waitForKeyFrame = true;
+          decoder.reset();
+          request_keyframe(6);  // stale_reference_gap
+          ++congestionRecoveryRequestCount;
+          ++staleReferenceRecoveryCount;
+          std::cout << "[native-video-client] stale-reference recovery seq=" << h.seq
+                    << " count=" << staleReferenceRecoveryCount
+                    << " staleBehindLatestUs=" << staleBehindLatestUs << "\n";
+        }
         if ((lagDropCount % 120) == 1) {
           std::cout << "[native-video-client] stale frame drop count=" << lagDropCount
                     << " staleBehindPresentedUs=" << staleBehindPresentedUs
                     << " staleBehindLatestUs=" << staleBehindLatestUs
+                    << " inRefChain=" << (inLiveReferenceChain ? 1 : 0)
                     << " seq=" << h.seq << "\n";
         }
         return true;
@@ -4575,6 +4601,11 @@ int main(int argc, char** argv) {
         return true;
       }
       waitForKeyFrame = false;
+      if (keyFrame) {
+        // Advance the reference-chain anchor: a successfully decoded IDR resyncs the decoder, so
+        // any later stale frame older than this is safe to quiet-drop.
+        lastDecodedKeyCaptureUs = h.captureQpcUs;
+      }
       if (outFrames.empty()) {
         ++decodeEmptyCount;
         ++decodeEmptyStreak;

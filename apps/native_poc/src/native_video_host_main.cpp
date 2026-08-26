@@ -132,6 +132,10 @@ enum class MainLoopPhase : uint32_t {
 // Terminate exit code the watchdog uses; the supervisor treats it as "wedged, relaunch fast" and
 // keeps it out of the crash streak / nv12 auto-disable (it is a recovery, not a crash).
 constexpr unsigned int kExitMainLoopWatchdog = 43;
+// The DXGI capture worker wedge watchdog terminates with this distinct code so the supervisor can
+// tell a capture-thread hang apart from a main-loop hang, while giving both the same fast,
+// no-crash-streak relaunch. (Codex-reviewed 2026-08-25.)
+constexpr unsigned int kExitDxgiWorkerWedge = 44;
 
 using namespace winrt::Windows::Graphics::Capture;
 using namespace winrt::Windows::Graphics::DirectX::Direct3D11;
@@ -5176,6 +5180,82 @@ int main(int argc, char** argv) {
   GraphicsCaptureSession session{nullptr};
   winrt::event_token token{};
   DxgiDesktopCaptureSession dxgiCaptureSession;
+  // Independent DXGI capture-worker wedge watchdog. Kept OUT of the main-loop watchdog because the
+  // field failure (15:05, 2026-08-25) was the worker hung inside a DXGI call while a user "select"
+  // parked main in restart_capture_session -> Stop().join() waiting on that same worker -- the main
+  // tick was blocked too, so only an independent thread can break it. Shares no lock/GPU with
+  // capture; reads only the worker's atomic heartbeat (backend steady clock) and TerminateProcess
+  // (44)s a worker stuck > 5s so the supervisor rebuilds the process with a fresh D3D device.
+  // Joined (never detached) before dxgiCaptureSession is destroyed -- it references the session's
+  // progress block. (Codex-reviewed 2026-08-25.)
+  std::atomic<bool> dxgiWatchdogStop{false};
+  std::thread dxgiWorkerWatchdog([&dxgiCaptureSession, &dxgiWatchdogStop]() {
+    constexpr uint64_t kWorkerWarnUs = 3'000'000;   // structured warn; likely a transient
+    constexpr uint64_t kWorkerKillUs = 5'000'000;   // ~50x the 100ms Acquire timeout -> genuine wedge
+    uint64_t warnedGeneration = std::numeric_limits<uint64_t>::max();
+    HANDLE herr = GetStdHandle(STD_ERROR_HANDLE);
+    auto emit = [&](const char* rec, int n) {
+      if (herr && herr != INVALID_HANDLE_VALUE && n > 0) {
+        DWORD wrote = 0;
+        WriteFile(herr, rec, static_cast<DWORD>(n), &wrote, nullptr);
+      }
+    };
+    while (!dxgiWatchdogStop.load(std::memory_order_acquire)) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      if (dxgiWatchdogStop.load(std::memory_order_acquire)) break;
+      const auto snap = dxgiCaptureSession.SnapshotWorker();
+      if (!snap.running) {
+        warnedGeneration = std::numeric_limits<uint64_t>::max();
+        continue;
+      }
+      if (snap.ageUs >= kWorkerKillUs) {
+        char rec[320];
+        const int n = std::snprintf(
+            rec, sizeof(rec),
+            "[native-video-host][dxgi-watchdog] dxgi-worker-wedge phase=%s phaseAgeUs=%llu "
+            "ageUs=%llu generation=%llu loopCount=%llu acquireHr=0x%08lX releaseHr=0x%08lX "
+            "accumulated=%u; terminating (exit 44) for supervisor relaunch\n",
+            remote60::host::capture_worker_phase_name(snap.phase),
+            static_cast<unsigned long long>(snap.phaseAgeUs),
+            static_cast<unsigned long long>(snap.ageUs),
+            static_cast<unsigned long long>(snap.generation),
+            static_cast<unsigned long long>(snap.loopCount),
+            static_cast<unsigned long>(static_cast<uint32_t>(snap.lastAcquireHr)),
+            static_cast<unsigned long>(static_cast<uint32_t>(snap.lastReleaseHr)),
+            static_cast<unsigned>(snap.lastAccumulatedFrames));
+        emit(rec, n);
+        TerminateProcess(GetCurrentProcess(), kExitDxgiWorkerWedge);
+      } else if (snap.ageUs >= kWorkerWarnUs) {
+        if (warnedGeneration != snap.generation) {
+          warnedGeneration = snap.generation;  // warn once per worker episode
+          char rec[320];
+          const int n = std::snprintf(
+              rec, sizeof(rec),
+              "[native-video-host][dxgi-watchdog] dxgi-worker slow phase=%s phaseAgeUs=%llu "
+              "ageUs=%llu generation=%llu loopCount=%llu acquireHr=0x%08lX releaseHr=0x%08lX\n",
+              remote60::host::capture_worker_phase_name(snap.phase),
+              static_cast<unsigned long long>(snap.phaseAgeUs),
+              static_cast<unsigned long long>(snap.ageUs),
+              static_cast<unsigned long long>(snap.generation),
+              static_cast<unsigned long long>(snap.loopCount),
+              static_cast<unsigned long>(static_cast<uint32_t>(snap.lastAcquireHr)),
+              static_cast<unsigned long>(static_cast<uint32_t>(snap.lastReleaseHr)));
+          emit(rec, n);
+        }
+      } else {
+        // Progress resumed within this generation; re-arm so a later stall in the same episode warns.
+        warnedGeneration = std::numeric_limits<uint64_t>::max();
+      }
+    }
+  });
+  struct DxgiWatchdogJoiner {
+    std::atomic<bool>* stopFlag;
+    std::thread* th;
+    ~DxgiWatchdogJoiner() {
+      stopFlag->store(true, std::memory_order_release);
+      if (th->joinable()) th->join();
+    }
+  } dxgiWatchdogJoiner{&dxgiWatchdogStop, &dxgiWorkerWatchdog};
   GdiCaptureProcess gdiCaptureProcess;
   std::atomic<bool> captureSessionReady{false};
   std::atomic<bool> dxgiFallbackRequested{false};
@@ -5186,7 +5266,12 @@ int main(int argc, char** argv) {
   // Frozen-ring self-heal state (DXGI/WGC). Streak guards against a single slow poll; the last
   // restart timestamp lets a refreeze inside the window escalate to a full process restart.
   uint32_t captureFrozenPollStreak = 0;
-  uint64_t captureFrozenWarnedAtUs = 0;
+  // Rate-limit the "readback slow" warn to one line/sec with the window peak. Under a GPU-heavy
+  // game the oldest-pending age oscillates in [250ms, 2s) every frame, and the old warn-once latch
+  // was cleared by the 2s-restart else-branch below, so it re-fired ~60x/sec -- the log spam was
+  // itself a perturbation (Codex 2026-08-25).
+  uint64_t readbackSlowLastLogUs = 0;
+  uint64_t readbackSlowWindowPeakUs = 0;
   uint64_t lastFrozenRestartUs = 0;
   // Telemetry for the frozen-ring self-heal, so a real-GPU run can tell whether B-1 is actually the
   // fix (oldest-pending age climbs to the 2s restart threshold) or whether the age keeps clearing at
@@ -7609,23 +7694,30 @@ int main(int argc, char** argv) {
       // frozen-ring peak above (reset per print interval) this one is reset every stats tick.
       readbackDrainOldestPendingPeakUs = std::max(readbackDrainOldestPendingPeakUs, oldestPendingUs);
       gpuPendingCountPeak = std::max(gpuPendingCountPeak, captureReadback.GpuPendingCount());
-      if (oldestPendingUs >= kCaptureFrozenWarnUs && captureFrozenWarnedAtUs == 0) {
-        captureFrozenWarnedAtUs = nowUs;
-        std::cout << "[native-video-host] capture readback slow oldestPendingUs=" << oldestPendingUs
-                  << "\n";
+      if (oldestPendingUs >= kCaptureFrozenWarnUs) {
+        readbackSlowWindowPeakUs = std::max(readbackSlowWindowPeakUs, oldestPendingUs);
+      }
+      // Advance the 1s window on the boundary regardless of whether it logs, so a peak from an
+      // earlier slow episode never bleeds into a later warn (Codex 2026-08-25).
+      if (readbackSlowLastLogUs == 0) readbackSlowLastLogUs = nowUs;
+      if (nowUs - readbackSlowLastLogUs >= 1'000'000) {
+        if (readbackSlowWindowPeakUs >= kCaptureFrozenWarnUs) {
+          std::cout << "[native-video-host] capture readback slow oldestPendingUs=" << oldestPendingUs
+                    << " peakUs=" << readbackSlowWindowPeakUs << "\n";
+        }
+        readbackSlowLastLogUs = nowUs;
+        readbackSlowWindowPeakUs = 0;
       }
       if (oldestPendingUs >= kCaptureFrozenRestartUs) {
         ++captureFrozenPollStreak;
       } else {
         captureFrozenPollStreak = 0;
-        captureFrozenWarnedAtUs = 0;
       }
       const bool restartCooldownDone =
           (lastCaptureRestartUs == 0 ||
            nowUs >= (lastCaptureRestartUs + kCaptureCallbackRestartCooldownUs));
       if (captureFrozenPollStreak >= kCaptureFrozenPollStreakMin && restartCooldownDone) {
         captureFrozenPollStreak = 0;
-        captureFrozenWarnedAtUs = 0;
         // First freeze: a same-device capture restart clears a wedged duplication/WGC session.
         // A refreeze inside the window means the device itself is stuck -- restarting capture on
         // the same device will not clear it -- so exit and let the supervisor rebuild the process

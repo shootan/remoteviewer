@@ -6808,3 +6808,47 @@ UI 방식 결정
   근본 제약 3개(WGC 콜백 스레드 리소스 재생성 금지, MFT 단일 스레드, 소켓 단일 writer)만 유지.
 - 검증: 없음(분석/문서). 빌드/코드 변경 없음.
 - 다음 액션: Phase 0-1 `host_input_inject.hpp/.cpp` 분리(862~1520) → 빌드 게이트 → 커밋.
+
+### 261) 2026-08-26 필드 안정화 — 클라 참조체인 오염 + DXGI 워커 웨지 워치독 + readback 로그 rate-limit + GOP 계측
+
+Goal
+- 0.2.56 실기 로그(log/, log/2/)에서 확정된 4건을 수정. Codex(a2a) 교차검증 반영.
+
+원인/수정
+- FIX-③ 클라 참조체인 오염(텍스트 스크롤 "다 깨짐"): stale-frame drop이 참조프레임을 무음 폐기 →
+  후속 P프레임이 garbage 디코드. lastDecodedKeyCaptureUs 앵커 도입 — stale AU가 앵커 이후(라이브
+  참조체인)면 첫1회 decoder.reset+waitForKeyFrame+request_keyframe(6)로 다음 IDR 재동기, 앵커보다
+  오래되면 기존대로 quiet-drop. Codex 지적으로 presented/latest 분기 폐기, key-anchor 축 채택.
+  staleRefRecoveries 누적 stat 추가.
+- FIX-① DXGI 워커 웨지(15:05 5.6분 프리즈): 워커가 AcquireNextFrame류 내부에서 무기한 블록,
+  monitorSelect→Stop().join()이 죽은 워커 대기→main-loop 워치독 exit43. capture_backend_dxgi에
+  세션-소유 하트비트(running/generation/phase/lastProgressUs/HR/…)+run() 전경로 RAII 종료보장.
+  호스트 독립 워치독 스레드(500ms, warn3s/kill5s, exit44, join RAII). supervisor는 exit44를 43과
+  동일 recovery 클래스로(crashStreak/nv12 제외). WGC는 콜백 방식이라 이번 제외.
+- FIX-②-stopgap readback-slow 로그 ~60/s 스팸: warn 래치가 2s-restart else에서 리셋돼 250ms~2s
+  진동 시 매 프레임 재발화 → 1s peak 요약 rate-limit(경계마다 peak 리셋). restart 로직 불변.
+  P2-deep(readback 60fps)는 리팩터 후.
+- FIX-④ keyint120→IDR60 계측: mf_h264_codec에 GOP SetValue HRESULT/GetValue readback 로깅.
+  실측 backend=mft_enum_hw requestedGop=120 setHr=S_OK readbackGop=120 → 인코더가 max-GOP 120을
+  수용·유지하면서 자체 정책으로 더 잦은 IDR. AVEncMPVGOPSize는 최대 GOP라 규격 위반 아님(우리 버그
+  아님). 2s GOP 강제는 vendor-specific 후속.
+
+Files changed
+- apps/native_poc/src/native_video_client_main.cpp (FIX-③ + staleRefRecoveries stat)
+- libs/capture/src/capture_backend_dxgi.hpp/.cpp (하트비트/phase/generation/SnapshotWorker)
+- apps/native_poc/src/native_video_host_main.cpp (독립 워치독 스레드 + exit44 + readback 로그 rate-limit)
+- apps/native_poc/src/host_app_main.cpp (exit44 recovery 분류)
+- apps/native_poc/src/mf_h264_codec.cpp (GOP 계측)
+
+Validation / build / test
+- capture·GNLinkStream·GNLinkHost·GNLinkViewer clean 빌드.
+- mf_h264_codec_test PASS, capture_cadence_gate_test PASS.
+- live-host udp_control_e2e ALL PASS(13/13, alt포트). DXGI 워치독 라이브 오발동 0(dxgi-watchdog 로그
+  0, self-terminated 0), 클라 종료 후 clean idle-detach 확인. FIX-④ 계측값 실측(setHr=S_OK/readback=120).
+
+Next action
+- 실기: 텍스트 스크롤 garbage 소멸 + staleRefRecoveries 관찰 / 게임 중 프리즈 시 dxgi-worker-wedge
+  exit44 자동복구(수초) 확인 / readback-slow 로그 1줄/초.
+- Codex 권장 fault-injection 테스트(전용 child + phase 지연 hook로 warn3/kill5/exit44/generation-reset)는
+  stable close 전 test debt로 명시.
+- 그 후 호스트 분할 리팩터 Phase 0~3 → FIX-②-deep(P2).

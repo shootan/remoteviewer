@@ -51,6 +51,32 @@ bool set_codecapi_u32(IMFTransform* transform, const GUID& key, uint32_t value) 
   return SUCCEEDED(codecApi->SetValue(&key, &v));
 }
 
+// Like set_codecapi_u32 but surfaces the raw HRESULT, for the GOP-config telemetry that has to
+// tell "property rejected" apart from "accepted but the encoder chose a smaller GOP".
+HRESULT set_codecapi_u32_hr(IMFTransform* transform, const GUID& key, uint32_t value) {
+  if (!transform) return E_POINTER;
+  Microsoft::WRL::ComPtr<ICodecAPI> codecApi;
+  const HRESULT qhr = transform->QueryInterface(IID_PPV_ARGS(&codecApi));
+  if (FAILED(qhr) || !codecApi) return FAILED(qhr) ? qhr : E_NOINTERFACE;
+  VARIANT v{};
+  v.vt = VT_UI4;
+  v.ulVal = value;
+  return codecApi->SetValue(&key, &v);
+}
+
+// Reads back a u32 ICodecAPI property. Integer variants (VT_UI4/VT_I4) own no memory, so no
+// VariantClear is needed.
+bool get_codecapi_u32(IMFTransform* transform, const GUID& key, uint32_t* out) {
+  if (!transform || !out) return false;
+  Microsoft::WRL::ComPtr<ICodecAPI> codecApi;
+  if (FAILED(transform->QueryInterface(IID_PPV_ARGS(&codecApi))) || !codecApi) return false;
+  VARIANT v{};
+  if (FAILED(codecApi->GetValue(&key, &v))) return false;
+  if (v.vt == VT_UI4) { *out = v.ulVal; return true; }
+  if (v.vt == VT_I4) { *out = static_cast<uint32_t>(v.lVal); return true; }
+  return false;
+}
+
 bool set_codecapi_bool(IMFTransform* transform, const GUID& key, bool value) {
   if (!transform) return false;
   Microsoft::WRL::ComPtr<ICodecAPI> codecApi;
@@ -1399,7 +1425,23 @@ void H264Encoder::apply_low_latency_codec_api() {
 
   (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVDefaultBPictureCount, 0);
   (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVEncMPVGOPOpen, false);
-  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVGOPSize, std::max<uint32_t>(1, keyint_));
+  // GOP-config telemetry (FIX-4 investigation): the field showed keyint=120 requested but an IDR
+  // cadence of ~60 frames. AVEncMPVGOPSize is a MAXIMUM GOP, so a smaller observed cadence can be
+  // spec-legal encoder policy rather than the property being ignored. Log requested vs SetValue
+  // HRESULT vs GetValue readback vs backend so the three cases separate: setHr!=S_OK => rejected;
+  // setHr=S_OK & readback=requested & observed<requested => encoder policy; readback<requested =>
+  // clamped/not applied.
+  const uint32_t requestedGop = std::max<uint32_t>(1, keyint_);
+  const HRESULT gopSetHr = set_codecapi_u32_hr(enc_.Get(), CODECAPI_AVEncMPVGOPSize, requestedGop);
+  uint32_t gopReadback = 0;
+  const bool gopGetOk = get_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVGOPSize, &gopReadback);
+  char gopLine[192];
+  std::snprintf(gopLine, sizeof(gopLine),
+                "[native-video-host] h264 gop-config backend=%s requestedGop=%u setHr=0x%08lX "
+                "readbackOk=%d readbackGop=%u",
+                backendName_, requestedGop, static_cast<unsigned long>(gopSetHr),
+                gopGetOk ? 1 : 0, gopReadback);
+  std::cout << gopLine << "\n";
   (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonQualityVsSpeed, stableTextTune_ ? 68u : 100u);
 }
 
