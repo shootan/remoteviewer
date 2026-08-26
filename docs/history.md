@@ -7117,3 +7117,14 @@ Next action
   Session·Encoder·HostStats·Capture), main() 공유 지역변수 502→77(struct 인스턴스 12, constexpr 10, 1-3b 객체, 루프 보조).
   host_main 7,795줄(struct 정의 ~600줄 포함). 매 struct 커밋마다 빌드+e2e 13/13 통과, 문자열 리터럴 집합 불변.
 - 다음 액션: Phase 2 — struct→클래스, 람다→멤버(2-1 EncodedSender부터). 각 struct가 이미 파일 스코프라 헤더로 옮기는 것부터.
+
+### 285) 2026-08-26 리팩터 Phase 2-0 — state struct 12개를 클래스별 헤더로 (브랜치 cd77e70)
+
+- 파일 스코프 struct 12개(+보조 타입: MainLoopPhase/exit 코드, EncodedSendItem, SocketCloser, Nv12PendingRelease,
+  BootstrapFrameCache)를 Phase 2 클래스가 살 헤더로 verbatim 이동: host_frame_gate/abr/kick/client_metrics/backend_policy/
+  watchdog/input_router/encoded_sender/session/encoder_manager/stats/capture_session.hpp(총 929줄). 이동 699줄 정렬 대조 동일.
+  host_main 7,795→7,110줄. 스크립트 `automation/host_split_phase2_0.sh`(재실행 금지: 이미 이동된 파일에 돌리면 range가
+  비어 손상 — 실제로 한 번 발생해 git 커밋본에서 복원 후 1회만 재실행).
+- 게이트: host 빌드 exit 0 / UDP e2e 13/13.
+- 다음 액션: 2-1 자기 struct만 쓰는 소형 람다 16개를 멤버함수로(Kick arm/cancel, Watchdog enter/mark, Capture fallback
+  reason·describe, Encoder starvation reset·refresh intervals, Rate m9_level_*). 이후 2-2 ControlSessionServer(681줄 람다).
