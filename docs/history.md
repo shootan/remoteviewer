@@ -7033,3 +7033,12 @@ Next action
   (`clientMetrics.<field>`, atomic 유지 — control 쓰기/main 읽기). 문자열 리터럴 집합 동일. 인스턴스는 원래 첫 선언 위치.
 - 게이트: host 빌드 exit 0 / UDP e2e 13/13 ALL PASS.
 - 다음 액션: 1-4 DesktopBackendState(17개: req* atomic 3 + requested/active + 백오프 + secure gate + 승격 텔레메트리).
+
+### 277) 2026-08-26 리팩터 Phase 1-4 — DesktopBackendState (브랜치 cd5ddd5)
+
+- desktopBackendReq* atomic 3 + requested/activeDesktopBackend + 재시도 백오프 2 + secure-desktop 안정 게이트 4 + 승격
+  텔레메트리 atomic 6 = 17개 → `struct DesktopBackendState`(`backend.<field>`). env 초기값(from_env, reqValue)은 원래 위치의
+  대입으로 유지, 0 초기화는 struct 기본값. 문자열 리터럴 집합 동일.
+- 게이트: host 빌드 exit 0 / UDP e2e 13/13 / 로그 `desktop_backend=dxgi` 그대로.
+- 다음 액션: 1-11 WatchdogState(콜백 stall·frozen ring·readback drain·main-loop 워치독 26개; mainLoopProgressUs 초기 스탬프는
+  원래 위치 대입으로 유지해 워치독 오발동 방지).
