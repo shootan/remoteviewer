@@ -7103,3 +7103,17 @@ Next action
 - 게이트: host 빌드 exit 0 / UDP e2e 13/13.
 - 다음 액션: 1-3a CaptureState(순수 데이터 79개, 인스턴스 `capture`; BootstrapFrameCache 파일 스코프 이동) → Phase 1 마무리
   (1-3b RAII 객체는 Phase 2 CaptureSession으로 이월).
+
+### 284) 2026-08-26 리팩터 Phase 1-3a — CaptureState + Phase 1 완료 (브랜치 90759ae)
+
+- 캡처 env 설정 7, 공개 타깃/선택·모드 요청 atomic 18, 창 criteria/info 6, 기하·cadence 9, 백엔드 플래그/폴백 사유 12,
+  WGC settle 게이트 9, DXGI 커서 6, publish/pop 타임스탬프 5, bootstrap 캐시 2, idle/reattach 4 = 79개 →
+  `struct CaptureState`(`capture.<field>`). `struct BootstrapFrameCache` 파일 스코프 이동. 선언 66줄 삭제.
+  **1-3b**(d3d/ctx/pool/item/session/dxgiCaptureSession/gdiCaptureProcess/captureReadback/frame 등 RAII·WinRT·D3D 객체)는
+  소멸 순서 보존을 위해 main 지역 유지 → Phase 2-2 CaptureSession 클래스가 명시적 수명으로 흡수.
+- 게이트: host 빌드 exit 0 / UDP e2e 13/13 / 로그 desktop_backend=dxgi capture-started 그대로 / mf_h264_codec_test·
+  capture_cadence_gate_test PASS.
+- **Phase 1 완료**: 상태 struct 12개(FrameGating·RateControl·Kick·ClientMetrics·DesktopBackend·Watchdog·InputRouter·Sender·
+  Session·Encoder·HostStats·Capture), main() 공유 지역변수 502→77(struct 인스턴스 12, constexpr 10, 1-3b 객체, 루프 보조).
+  host_main 7,795줄(struct 정의 ~600줄 포함). 매 struct 커밋마다 빌드+e2e 13/13 통과, 문자열 리터럴 집합 불변.
+- 다음 액션: Phase 2 — struct→클래스, 람다→멤버(2-1 EncodedSender부터). 각 struct가 이미 파일 스코프라 헤더로 옮기는 것부터.
