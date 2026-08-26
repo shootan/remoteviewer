@@ -7209,3 +7209,12 @@ Next action
 - 남은 큰 덩어리: host_main_loop.cpp의 stage_encode_send(~1,000줄)·stage_stats(~830줄), main()의 capturePublishFn 람다(~105줄)와
   디렉터리 hello 람다 — 파일당 ≤800줄 목표엔 2차 분할 필요(Phase 3.5 후보). Phase 4(스레드 소유권)는 별도 사이클.
 - 다음 액션: gate-A 4타깃 빌드 + 단위테스트 + e2e 재확인 → 사용자 실기 1회 → 버전 범프(0.2.58) 판단.
+
+### 293) 2026-08-26 리팩터 Phase 3.5a — stage별 파일 분할 (브랜치 af8df03)
+
+- host_main_loop.cpp(3,766줄) → host_loop_helpers.cpp + host_stage_{time_limit,backend,stream_active,runtime_tune,selection,
+  geometry,watchdogs,pace,pop_frame,gate_static,encode_send,stats}.cpp(13개, verbatim; 함수 3,606줄 정렬 대조 동일).
+- 게이트: gate-A 5타깃 빌드 exit 0 + mf_h264_codec_test/capture_cadence_gate_test PASS(Phase 3 트리) → 3.5a host 빌드 exit 0,
+  UDP e2e 13/13(1s stats).
+- 800줄 초과 잔여: host_stage_encode_send.cpp 1,155 / host_stage_stats.cpp 941 / native_video_host_main.cpp 2,048(main() ~1,650).
+  다음 액션: 3.5b — encode_send를 raw/h264 경로로, stats를 출력/ABR·M9 결정으로 2차 분할 검토; main()은 시작·종료 블록 함수화 검토.
