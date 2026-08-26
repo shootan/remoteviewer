@@ -431,30 +431,30 @@ int main(int argc, char** argv) {
   // Encoded-frame sender queue/thread, UDP peer, media barrier, wire counters (SenderState, Phase 1-2).
   SenderState sender;
   sender.noPacingH264 = env_truthy("REMOTE60_NATIVE_H264_NO_PACING");
-  // Spread each res.frame's datagrams over the wire instead of bursting them. Expressed as a
-  // percentage of the average bitrate: 500 means a res.frame may leave at up to 5x the
+  // Spread each frame's datagrams over the wire instead of bursting them. Expressed as a
+  // percentage of the average bitrate: 500 means a frame may leave at up to 5x the
   // average rate. 0 restores the old unthrottled burst.
   sender.udpPacePeakPercent =
       env_u32_clamped("REMOTE60_NATIVE_UDP_PACE_PEAK_PERCENT", 500, 0, 2000);
   // A percentage alone is too slow at low user bitrates: 4 Mbps * 5 can take longer than
-  // one 30 fps period to deliver a normal motion res.frame plus FEC. Keep packets paced, but
-  // finish ordinary frames within the res.frame budget.
+  // one 30 fps period to deliver a normal motion frame plus FEC. Keep packets paced, but
+  // finish ordinary frames within the frame budget.
   sender.udpPacePeakFloorBps = env_u32_clamped(
       "REMOTE60_NATIVE_UDP_PACE_PEAK_FLOOR_BPS", 40000000, 0, 1000000000);
   sender.udpKeyframePacePeakBps = env_u32_clamped(
       "REMOTE60_NATIVE_UDP_KEYFRAME_PACE_PEAK_BPS", 100000000, 0, 1000000000);
-  // Holding an encoded res.frame back to enforce even send spacing costs exactly what it holds:
+  // Holding an encoded frame back to enforce even send spacing costs exactly what it holds:
   // measured end-to-end latency p95 went 4ms -> 31ms at 30fps when this was enabled
-  // unconditionally, and rose further when the hold also pushed the next res.frame's deadline.
+  // unconditionally, and rose further when the hold also pushed the next frame's deadline.
   // The H4 sender queue is already capped at two frames with keyframe supersede, so a
-  // catch-up burst can only ever be a couple of frames; smoothing it is not worth a res.frame
+  // catch-up burst can only ever be a couple of frames; smoothing it is not worth a frame
   // period of latency. Off by default; the cap below re-enables bounded smoothing.
-  // Encoded-res.frame sender queue/thread, UDP peer, media barrier, wire counters (SenderState, Phase 1-2).
+  // Encoded-frame sender queue/thread, UDP peer, media barrier, wire counters (SenderState, Phase 1-2).
   sender.maxCadenceHoldUs =
       env_u32_clamped("REMOTE60_NATIVE_SENDER_MAX_CADENCE_HOLD_US", 0, 0, 33000);
   sender.cadenceSmoothing = sender.maxCadenceHoldUs > 0;
   // The capture-submit limiter keeps 60Hz callbacks from flooding a 30fps encode, but it
-  // rejects rather than defers, and a rejected desktop-duplication res.frame is lost for good.
+  // rejects rather than defers, and a rejected desktop-duplication frame is lost for good.
   // Widening the early tolerance lets a slightly-early callback through instead of leaving a
   // double-length gap on screen; the disable switch exists to measure the limiter's cost.
   // Capture target/selection requests, geometry, backend flags, WGC settle gate, DXGI cursor,
@@ -485,7 +485,7 @@ int main(int argc, char** argv) {
   rate.m9LatencyLowUs = env_u32_clamped("REMOTE60_NATIVE_M9_LATENCY_LOW_US", 90000, 10000, 1000000);
   rate.m9TailHighUs = env_u32_clamped("REMOTE60_NATIVE_M9_TAIL_HIGH_US", 110000, 10000, 1000000);
   rate.m9TailLowUs = env_u32_clamped("REMOTE60_NATIVE_M9_TAIL_LOW_US", 70000, 10000, 1000000);
-  // Static-res.frame gating config + loop state (FrameGatingState, Phase 1-7).
+  // Static-frame gating config + loop state (FrameGatingState, Phase 1-7).
   FrameGatingState frameGating;
   frameGating.enabled = useH264 && !env_truthy("REMOTE60_NATIVE_FRAME_GATING_DISABLE");
   frameGating.staticFps = env_u32_clamped(
@@ -650,7 +650,7 @@ int main(int argc, char** argv) {
     const char* v = std::getenv(envKey);
     return v ? std::string(v) : std::string();
   };
-  // Client res.session sockets, directory agent/auth, res.session epoch, control threads (SessionState, Phase 1-1).
+  // Client session sockets, directory agent/auth, session epoch, control threads (SessionState, Phase 1-1).
   SessionState clientSession;
   clientSession.directoryUrl = arg_or_env(args.directoryUrl, "REMOTE60_DIRECTORY_URL");
   clientSession.directoryId = arg_or_env(args.directoryId, "REMOTE60_DIRECTORY_ID");
@@ -678,7 +678,7 @@ int main(int argc, char** argv) {
       if (!clientSession.directoryToken.empty() && token == clientSession.directoryToken &&
           peer.sin_addr.s_addr == clientSession.directoryIpNet) {
         // A controller reconnect creates a new UDP socket/port. The already-proven opaque
-        // capability remains the res.session credential, while the first authenticated source IP
+        // capability remains the session credential, while the first authenticated source IP
         // (which can differ from the directory-observed endpoint under hairpin NAT) stays bound.
         // This is also what makes retransmission safe: the capability itself is single-use, so
         // without the cache the client's second Hello would be refused.
@@ -703,16 +703,16 @@ int main(int argc, char** argv) {
   // paints macroblock corruption on the client until the next IDR. They are held back here
   // until the requested keyframe actually passes through.
   // Session media barrier. Bumped (under sender.mu) by the rollover transaction in pump_udp_hello;
-  // read by the sender at dequeue to fence any item stamped for a previous res.session. Every item is
+  // read by the sender at dequeue to fence any item stamped for a previous session. Every item is
   // stamped with this value when enqueued. Starts at 1 to match clientSession.epoch.
   // Set by the sender thread when a same-epoch transport error re-armed the barrier. The main loop
   // consumes it at its top -> encoder.forceKeyNext + arm_trailing_kick, because sender.requestKey is only
-  // consumed after a real res.frame is popped: on a static desktop no new res.frame arrives to carry it, so
+  // consumed after a real frame is popped: on a static desktop no new frame arrives to carry it, so
   // the recovery IDR would never be produced. This is the only barrier-recovery signal that works
   // when the screen is not changing. encoder.forceKeyNext must never be written from the sender thread.
   // IDR telemetry written by the sender thread (per current media epoch): when the first key AU of
-  // this res.session hit the wire, and the size/chunk count of the last key AU sent. Reset by the
-  // rollover transaction so they describe the current res.session, not the previous one. Diagnostic
+  // this session hit the wire, and the size/chunk count of the last key AU sent. Reset by the
+  // rollover transaction so they describe the current session, not the previous one. Diagnostic
   // only -- never wired into ABR evidence.
   // The reader thread owns the peer address; the render loop picks up changes through these.
   if (transport == VideoTransport::Tcp) {
@@ -788,7 +788,7 @@ int main(int argc, char** argv) {
     // has nothing telling them the port changed.
     //
     // Only the handshake watches both. Whichever socket the Hello arrives on becomes the media
-    // socket and everything downstream is unchanged, so a res.session that never uses this listener
+    // socket and everything downstream is unchanged, so a session that never uses this listener
     // behaves exactly as it did before.
     const uint16_t lanPort =
         portCandidates.size() > 1 ? portCandidates.back() : 0;
@@ -923,7 +923,7 @@ int main(int argc, char** argv) {
       (void)sendto(readySock, reinterpret_cast<const char*>(&ack), sizeof(ack), 0,
                    reinterpret_cast<const sockaddr*>(&peer), peerLen);
 
-      // The socket that answered becomes the media socket for the rest of the res.session, so
+      // The socket that answered becomes the media socket for the rest of the session, so
       // everything downstream keeps using clientSession.clientSock exactly as before.
       if (readySock != clientSession.clientSock) {
         std::cout << "[native-video-host] client arrived on the lan direct-dial listener; "
@@ -985,9 +985,9 @@ int main(int argc, char** argv) {
   std::atomic<bool> stop{false};
   // Split of what happened while a security prompt or the lock screen was in front. inputRouter.events
   // alone cannot answer it: the fallback path reports success whether or not the click reached
-  // anything, so a dead res.session and a working one produce identical numbers.
+  // anything, so a dead session and a working one produce identical numbers.
   // P2 desktop-backend promotion (WGC -> requested DXGI climb-back). Lifetime totals, never
-  // per-second reset: a res.session-shape summary is more useful than a rate for a rare transition.
+  // per-second reset: a session-shape summary is more useful than a rate for a rare transition.
   // Desktop capture backend request/active/backoff/secure-gate/promotion telemetry (DesktopBackendState, Phase 1-4).
   DesktopBackendState backend;
   // Viewer-reported metrics + keyframe requests, control thread -> main loop (ClientMetricsSnapshot, Phase 1-10).
@@ -1081,20 +1081,20 @@ int main(int argc, char** argv) {
   // way to open a TCP connection back to us, so the same dispatch is also served here; a LAN
   // client that prefers TCP simply never sends control datagrams and this stays idle.
 
-  // ---------------------------------------------------------------- res.session epoch
+  // ---------------------------------------------------------------- session epoch
   //
-  // A res.session begins when a Hello presents a capability we have not seen before, and that is the
+  // A session begins when a Hello presents a capability we have not seen before, and that is the
   // only reliable signal there is. The endpoint is not one: through a relay every client reaches
   // us from the same address and port, so "the peer changed" stays false forever and the second
   // client inherits the first one's control channel -- where its messages are acknowledged and
   // then dropped, because their sequence numbers look like ones already delivered.
   //
   // The epoch serialises the handover. The reader raises it and waits; the dispatcher resets the
-  // channel, re-enters its res.session loop (which is also what turns the stream back on) and
+  // channel, re-enters its session loop (which is also what turns the stream back on) and
   // publishes that it is ready; only then does the reader answer the Hello. Since the client
   // repeats its Hello until it sees an Ack, nothing it sends can arrive before the reset.
   // Starts at one, not zero: control is only wired up after the handshake loop above has already
-  // accepted a Hello, so by the time the dispatcher starts there is a res.session waiting for it.
+  // accepted a Hello, so by the time the dispatcher starts there is a session waiting for it.
 
   if (transport == VideoTransport::Udp) {
     clientSession.udpControlChannel.Configure(
@@ -1202,7 +1202,7 @@ int main(int argc, char** argv) {
                   &secureInputStatus);
             } else if (clientSession.directoryAuthenticated.load(std::memory_order_acquire)) {
               // Do not let an unauthenticated LAN Hello take over or de-authorize an active
-              // directory res.session. Direct-LAN mode remains available before authentication.
+              // directory session. Direct-LAN mode remains available before authentication.
               std::cerr << "[native-video-host] rejected unauthenticated reconnect during directory session\n";
               continue;
             }
@@ -1230,7 +1230,7 @@ int main(int argc, char** argv) {
               clientSession.AwaitControlReady(epoch);
             }
             // Answered last, so that by the time the client believes it is connected the control
-            // channel behind this endpoint is already the new res.session's.
+            // channel behind this endpoint is already the new session's.
             (void)sendto(clientSession.clientSock, reinterpret_cast<const char*>(&ack), sizeof(ack), 0,
                          reinterpret_cast<const sockaddr*>(&peer), peerLen);
             continue;
@@ -1244,9 +1244,9 @@ int main(int argc, char** argv) {
       clientSession.epochCv.notify_all();
     });
 
-    // One dispatcher for the life of the process, serving one res.session after another. It used to
+    // One dispatcher for the life of the process, serving one session after another. It used to
     // serve exactly one: any failed read returned from serve_control_session and the thread
-    // exited for good, taking the stream with it (the res.session teardown clears
+    // exited for good, taking the stream with it (the session teardown clears
     // clientSession.streamControlActive, and only re-entry restores it). A client that merely walked out of
     // Wi-Fi range was enough to leave the host answering handshakes and nothing else.
     clientSession.udpControlThread = std::thread([&]() {
@@ -1278,7 +1278,7 @@ int main(int argc, char** argv) {
         UdpControlLink link(&clientSession.udpControlChannel, 10000);
         controlServer.Serve(link);
         // Closed is not finished. Retransmits running out means this client is gone, which is
-        // the ordinary end of a res.session and the reason to wait for the next one.
+        // the ordinary end of a session and the reason to wait for the next one.
         std::cout << "[native-video-host][control] udp control session ended epoch=" << servedEpoch
                   << " reason=" << remote60::native_poc::to_string(clientSession.udpControlChannel.CloseReason())
                   << "\n";
@@ -1495,7 +1495,7 @@ int main(int argc, char** argv) {
   // Refit debounce: candidate geometry and how long it has been stable.
   constexpr uint64_t kEncodeRefitSettleUs = 400000;  // 0.4 s of stable size before re-init
   encoder.activeFps = args.fps;
-  // What the user asked for, as distinct from whatever the encoder.codec is running at this
+  // What the user asked for, as distinct from whatever the encoder is running at this
   // moment: overview mode lowers the active values on purpose, and restoring focus from
   // "whatever is active" would restore the lowered ones. Only an explicit runtime tune of
   // the same field moves a ceiling -- a bitrate-only tune falls back to active values for
@@ -1504,7 +1504,7 @@ int main(int argc, char** argv) {
   rate.userKeyintCeiling = args.keyint;
   encoder.activeBitrate = rate.abrHighBitrate;
   // Field A/B override for the keyframe interval (0 = off). Every ~1s a 120-160KB IDR was
-  // measured holding the previous res.frame an extra tick on 75% of key presents (the user's
+  // measured holding the previous frame an extra tick on 75% of key presents (the user's
   // "periodically shows the previous frame"); this pins keyint (e.g. 120) without touching the
   // client, winning over both the CLI default and runtime tunes.
   encoder.keyintOverride = env_u32_clamped("REMOTE60_NATIVE_KEYINT_OVERRIDE", 0, 0, 600);
@@ -1513,7 +1513,7 @@ int main(int argc, char** argv) {
       std::max<uint64_t>(1, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, encoder.activeFps)));
   encoder.activePacingFrameIntervalUs = encoder.activeFrameIntervalUs;
   capture.submitMinIntervalUs = encoder.activeFrameIntervalUs;
-  // Picks which offered frames reach the encoder.codec, and how evenly. Guarded by its own mutex
+  // Picks which offered frames reach the encoder, and how evenly. Guarded by its own mutex
   // because capture callbacks can arrive on more than one thread across backends.
   frameGating.staticIntervalUs =
       std::max<uint64_t>(encoder.activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGating.staticFps));
@@ -1534,16 +1534,16 @@ int main(int argc, char** argv) {
   // Encoder OUTPUT-liveness heartbeat. The main-loop liveness watchdog only tracks loop iteration
   // progress (watchdog.mainLoopProgressUs), which keeps advancing even when the async hardware MFT accepts
   // input every call but emits no output access unit -- an output-starvation wedge that freezes the
-  // video while the loop still spins and the watchdog stays green. These track real encoder.codec output
+  // video while the loop still spins and the watchdog stays green. These track real encoder output
   // progress so that stall is observable (and, later, recoverable). Diagnostic-only in this commit.
-                                               // a from-startup encoder.codec that never emits one AU)
+                                               // a from-startup encoder that never emits one AU)
   // Async-event counters accumulated ACROSS the current no-output streak (reset when output
   // resumes) so one anomaly line can tell a host event-driving bug (NeedInput accrues, HaveOutput
   // stays 0) from a genuine vendor/hardware stall, rather than showing only the last call's counts.
-  // Clears the CURRENT starvation episode (not the lifetime totals). Must run whenever the encoder.codec
+  // Clears the CURRENT starvation episode (not the lifetime totals). Must run whenever the encoder
   // is shut down + reinitialized or the stream (re)activates, otherwise a no-output streak left over
-  // from the previous encoder.codec -- or a long stream-inactive gap -- would inflate noOutputAgeUs and
-  // fire a false starvation log on the fresh encoder.codec's first inputs.
+  // from the previous encoder -- or a long stream-inactive gap -- would inflate noOutputAgeUs and
+  // fire a false starvation log on the fresh encoder's first inputs.
   int32_t poppedNv12Slot = -1;
   uint64_t poppedNv12Generation = 0;
 
@@ -1591,7 +1591,7 @@ int main(int argc, char** argv) {
   // tick was blocked too, so only an independent thread can break it. Shares no lock/GPU with
   // capture; reads only the worker's atomic heartbeat (backend steady clock) and TerminateProcess
   // (44)s a worker stuck > 5s so the supervisor rebuilds the process with a fresh D3D device.
-  // Joined (never detached) before res.dxgiCaptureSession is destroyed -- it references the res.session's
+  // Joined (never detached) before dxgiCaptureSession is destroyed -- it references the session's
   // progress block. (Codex-reviewed 2026-08-25.)
   std::atomic<bool> dxgiWatchdogStop{false};
   std::thread dxgiWorkerWatchdog([&dxgiCaptureSession = res.dxgiCaptureSession, &dxgiWatchdogStop]() {
@@ -1664,7 +1664,7 @@ int main(int argc, char** argv) {
   // Frozen-ring self-heal state (DXGI/WGC). Streak guards against a single slow poll; the last
   // restart timestamp lets a refreeze inside the window escalate to a full process restart.
   // Rate-limit the "readback slow" warn to one line/sec with the window peak. Under a GPU-heavy
-  // game the oldest-pending age oscillates in [250ms, 2s) every res.frame, and the old warn-once latch
+  // game the oldest-pending age oscillates in [250ms, 2s) every frame, and the old warn-once latch
   // was cleared by the 2s-restart else-branch below, so it re-fired ~60x/sec -- the log spam was
   // itself a perturbation (Codex 2026-08-25).
   // Telemetry for the frozen-ring self-heal, so a real-GPU run can tell whether B-1 is actually the
@@ -1689,14 +1689,14 @@ int main(int argc, char** argv) {
   // restart. streamActiveSinceUs anchors a warmup after a client (re)attaches.
   uint64_t streamActiveSinceUs = 0;
 
-  // Capture attachment (res.session) cookie. Bumped by capture.DetachCaptureSession(res, token) on the main thread
-  // before any res.pool recreate; a capture callback or readback completion that began under the
-  // previous attachment sees the change and drops its res.frame instead of stamping it with the
+  // Capture attachment (session) cookie. Bumped by capture.DetachCaptureSession(res, token) on the main thread
+  // before any pool recreate; a capture callback or readback completion that began under the
+  // previous attachment sees the change and drops its frame instead of stamping it with the
   // post-recreate target/generation. Hardens the recreate transition race.
-  // WGC ContentSize gate. A WGC res.frame-res.pool surface is a FIXED buffer size (capture.width x
-  // capture.height, chosen at res.pool creation); res.frame.ContentSize() is the actual content region and
+  // WGC ContentSize gate. A WGC frame-pool surface is a FIXED buffer size (capture.width x
+  // capture.height, chosen at pool creation); frame.ContentSize() is the actual content region and
   // shrinks/grows with the window. The callback records a mismatching content size here and drops
-  // the res.frame; the main thread settles then recreates the res.pool at the new size (the callback thread
+  // the frame; the main thread settles then recreates the pool at the new size (the callback thread
   // must never recreate capture resources itself).
   // Main-thread-only settle tracking + recreate telemetry for the WGC ContentSize gate.
   constexpr uint64_t kWgcContentSettleUs = 100000;  // 0.1s of a stable content size before recreate
@@ -1713,13 +1713,13 @@ int main(int argc, char** argv) {
   // Hardware-cursor state from the DXGI backend (pointer-only frames are dropped by the content
   // pipeline, so without this side channel the remote cursor freezes on a still screen). Written
   // by the capture thread, drained by the main loop's ~30Hz latest-wins UDP cursor sender.
-  // Timestamp (qpc) of the last res.frame actually published to the encoder.codec ring, set in
-  // res.capturePublishFn on a valid payload -- distinct from capture.lastCallbackUs, which is the capture time.
+  // Timestamp (qpc) of the last frame actually published to the encoder ring, set in
+  // capturePublishFn on a valid payload -- distinct from capture.lastCallbackUs, which is the capture time.
   // The stats line reports this as lastPublishAgeUs (diagnostic only). Deliberately not reset on a
   // restart: the age then honestly shows the publish gap and snaps back on the first new publish,
   // which is exactly the recovery signal we want to see after a frozen-ring restart.
 
-  // Worker-thread side: a finished readback becomes the latest res.frame. Timing fields keep
+  // Worker-thread side: a finished readback becomes the latest frame. Timing fields keep
   // their FrameState names so downstream logs stay parseable; their meaning under the async
   // pipeline is documented at each assignment.
   res.capturePublishFn = [&](std::shared_ptr<std::vector<uint8_t>> payload, uint32_t frameW,
@@ -1727,7 +1727,7 @@ int main(int argc, char** argv) {
                          const remote60::native_poc::CaptureFrameMeta& meta,
                          uint64_t gpuPendingUs, uint64_t workerMapUs, uint64_t workerMemcpyUs) {
     if (!payload || payload->empty() || frameW < 2 || frameH < 2) return;
-    // Drop a readback completion whose Submit happened under a previous capture attachment: a res.pool
+    // Drop a readback completion whose Submit happened under a previous capture attachment: a pool
     // recreate bumped the cookie in between, so these pixels belong to the old target/geometry. The
     // stream-generation check downstream does not catch a same-generation size-change recreate (the
     // WGC ContentSize path and capture.sizeChangePending keep the generation), so the cookie is what
@@ -1754,7 +1754,7 @@ int main(int argc, char** argv) {
     capture.lastCallbackUs.store(meta.callbackUs, std::memory_order_release);
     capture.lastCaptureUsForInterval.store(meta.captureUs, std::memory_order_release);
     // Update the static-screen bootstrap cache from this real publish -- the ONLY writer. Copy the
-    // payload shared_ptr (do NOT move: `res.frame` still takes ownership below). The buffer res.pool
+    // payload shared_ptr (do NOT move: `frame` still takes ownership below). The buffer pool
     // recycles a payload only once its LAST holder releases, so holding this copy keeps the pixels
     // alive and immutable until the next publish replaces it. meta.width/height are the pre-crop
     // capture source dims; frameW/frameH are the post-crop payload dims we must encode.
@@ -1778,7 +1778,7 @@ int main(int argc, char** argv) {
     {
       std::lock_guard<std::mutex> lk(res.frame.mu);
       if (res.frame.nv12Slot >= 0) {
-        // The consumer never claimed the previous res.frame's conversion (latest-wins overwrite);
+        // The consumer never claimed the previous frame's conversion (latest-wins overwrite);
         // give the slot back or the ring drains to nothing.
         res.captureReadback.ReleaseNv12Slot(res.frame.nv12Slot, res.frame.nv12Generation);
       }
@@ -1827,7 +1827,7 @@ int main(int argc, char** argv) {
   };
 
   // Capture-callback side: size check, a cheap crop-rect query, then a single GPU copy
-  // submit. No Map, no memcpy, no allocation -- the DXGI duplication res.frame is released the
+  // submit. No Map, no memcpy, no allocation -- the DXGI duplication frame is released the
   // moment this returns instead of being held across a synchronous readback.
 
   if (!capture.CreateStaging(res, encoder, useH264, capture.width, capture.height)) {
@@ -1849,7 +1849,7 @@ int main(int argc, char** argv) {
 
   auto restart_capture_session = [&]() -> bool {
     watchdog.EnterMainPhase(MainLoopPhase::CaptureRestart);
-    // A restarted res.session invalidates the held pointer sample even when the stream generation
+    // A restarted session invalidates the held pointer sample even when the stream generation
     // survives (some size-changes keep it): a stale position against the new capture geometry
     // would misplace the remote cursor until the next real mouse update.
     capture.dxgiPointerUpdateUs.store(0, std::memory_order_release);
@@ -1880,9 +1880,9 @@ int main(int argc, char** argv) {
   // Raw path keeps legacy pacing to avoid excessive CPU/bandwidth burst.
   // Encoded capture callbacks are already phase-limited to encoder.activeFps before GPU readback.
   // A second independent main-loop clock periodically woke just before the callback, waited
-  // only a quarter-res.frame, then slept to its next tick; the meanwhile-arriving res.frame was
+  // only a quarter-frame, then slept to its next tick; the meanwhile-arriving frame was
   // overwritten by the following callback. Consume encoded frames directly from the CV so
-  // every accepted 30 Hz capture reaches the encoder.codec. Raw mode still needs its own clock.
+  // every accepted 30 Hz capture reaches the encoder. Raw mode still needs its own clock.
   const bool paceByTick = useRaw;
   const uint64_t captureWindowRebindIntervalUs =
       static_cast<uint64_t>(std::max<uint32_t>(200, args.captureWindowRebindIntervalMs)) * 1000ULL;
@@ -1891,7 +1891,7 @@ int main(int argc, char** argv) {
   // Every rate in the stats line is computed over a one-second window, so the window is not
   // widened -- only the printing is decimated. Each printed line still describes a true
   // second; there are just fewer of them. At the old every-second cadence a streaming day
-  // wrote hundreds of megabytes through the host log; set 1 to watch a res.session closely.
+  // wrote hundreds of megabytes through the host log; set 1 to watch a session closely.
   stats.printEverySec =
       env_u32_clamped("REMOTE60_NATIVE_STATS_PRINT_EVERY_SEC", 30, 1, 3600);
   // Encoded frames the sender queue policy discarded (backlog resync or waiting for the
@@ -1906,7 +1906,7 @@ int main(int argc, char** argv) {
   // The capture lifecycle used to be "start once, stop at exit". Everything between -- a client
   // disconnecting, another connecting an hour later -- left DXGI duplication (or WGC after a
   // fallback) acquiring frames at full desktop rate for nobody, which is what starved RDP
-  // sessions into single-digit res.frame rates until the process was killed. Capture now detaches
+  // sessions into single-digit frame rates until the process was killed. Capture now detaches
   // after the stream has been inactive for a grace period, and reattaches on the active edge.
   // The grace period exists because the picker also parks the stream: tearing down DXGI for a
   // two-second visit to the target list would make every return visibly slow.
@@ -1915,7 +1915,7 @@ int main(int argc, char** argv) {
   constexpr uint64_t kCaptureReattachRetryMaxUs = 5'000'000;
   capture.reattachRetryDelayUs = kCaptureReattachRetryMinUs;
   // Receives now happen on their own thread so a control message never waits for the next
-  // res.frame; this just adopts a peer change the reader has already handled.
+  // frame; this just adopts a peer change the reader has already handled.
   // ~30Hz latest-wins cursor forwarder (UdpCursorPosPacket). Desktop-DXGI only: WGC composites
   // the cursor into the frames themselves, and a window target has its own coordinate space.
   // Sends on movement/visibility change, plus a 250ms heartbeat while visible so the viewer's
@@ -2169,11 +2169,11 @@ int main(int argc, char** argv) {
     capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
     capture.lastCallbackUs.store(0, std::memory_order_release);
     encoder.ResetTimelineAnchors(capture);
-    // Confirmed window selection: re-fit the encoder.codec to the FINAL window geometry now (before the
-    // selection first-res.frame gate opens), so the first IDR is already at the final size. Without this,
+    // Confirmed window selection: re-fit the encoder to the FINAL window geometry now (before the
+    // selection first-frame gate opens), so the first IDR is already at the final size. Without this,
     // apply_confirmed_capture_geometry (called inside restart_capture_session) bails for window mode
-    // and the encoder.codec stays at the pre-selection size -- the client would get an old-size IDR, then a
-    // new-size IDR a res.frame later, and reconfigure twice. A window DRAG still returns early there and
+    // and the encoder stays at the pre-selection size -- the client would get an old-size IDR, then a
+    // new-size IDR a frame later, and reconfigure twice. A window DRAG still returns early there and
     // keeps the 0.4s settle. The desktop selection already re-fit through the non-window path.
     if (nextCaptureWindowModeActive && useH264) {
       uint32_t finalW = 0;
@@ -2199,25 +2199,25 @@ int main(int argc, char** argv) {
     return true;
   };
 
-  // --- Trailing-edge encoder.codec kick (host main/encode thread only) ----------------------------
-  // The async H.264 MFT holds the most recent input res.frame until the NEXT input arrives, so on a
+  // --- Trailing-edge encoder kick (host main/encode thread only) ----------------------------
+  // The async H.264 MFT holds the most recent input frame until the NEXT input arrives, so on a
   // still screen the last real capture (the state after a drag-release, a right-click menu, the
-  // first res.frame after connect) stays stuck inside the encoder.codec and never reaches the wire. This kick
-  // supplies exactly one "next input" on a trailing edge: every real res.frame (re)arms a 150ms timer,
+  // first frame after connect) stays stuck inside the encoder and never reaches the wire. This kick
+  // supplies exactly one "next input" on a trailing edge: every real frame (re)arms a 150ms timer,
   // so continuous motion just pushes the deadline out (zero synthetic frames); only when changes
-  // stop does the timer fire and resubmit the cached last raw res.frame once, flushing the held res.frame
-  // out. A kick is cancelled the moment the latest real input is observed coming out of the encoder.codec
+  // stop does the timer fire and resubmit the cached last raw frame once, flushing the held frame
+  // out. A kick is cancelled the moment the latest real input is observed coming out of the encoder
   // (its capture timestamp on an emitted AU) or -- on a fresh media barrier -- the epoch's first key
-  // AU reaches the wire. Kicks are kept out of ABR/rate evidence: a single sparse res.frame is not a
+  // AU reaches the wire. Kicks are kept out of ABR/rate evidence: a single sparse frame is not a
   // congestion signal. This is NOT a periodic keepalive -- nothing is sent while the screen is quiet.
   // Periodic static refresh cadence (0 = off). On a genuinely still screen the pipeline sends
   // nothing at all, so the viewer's picture silently ages and looks dead; this re-serves the
-  // cached res.frame as a cheap P-res.frame at a low rate. Milliseconds via env for field tuning.
+  // cached frame as a cheap P-frame at a low rate. Milliseconds via env for field tuning.
   kick.staticRefreshIntervalUs =
       static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_STATIC_REFRESH_MS", 1000, 0, 10000)) *
       1000ULL;
   // Validate the cache against the live capture identity and the CURRENT secure-desktop state, then
-  // fill the loop's res.frame locals from it. Returns false (leaving the screen black) if anything is
+  // fill the loop's frame locals from it. Returns false (leaving the screen black) if anything is
   // stale, mismatched, or the desktop is locked/secure -- better black than a wrong picture.
 
   // Dedicated liveness watchdog. It shares no lock or GPU with the capture/encode/send threads, so
@@ -2231,7 +2231,7 @@ int main(int argc, char** argv) {
   std::thread mainLoopWatchdog([&]() {
     constexpr uint64_t kHangNormalUs = 10'000'000;   // Loop / EncodeCall
     constexpr uint64_t kHangSlowUs = 20'000'000;     // CaptureRestart / Startup (legit slow)
-    constexpr uint64_t kStartupGraceUs = 30'000'000;  // device/encoder.codec bring-up before arming
+    constexpr uint64_t kStartupGraceUs = 30'000'000;  // device/encoder bring-up before arming
     const uint64_t watchdogStartUs = qpc_now_us();
     while (!stop.load(std::memory_order_acquire)) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1000));
@@ -2277,9 +2277,9 @@ int main(int argc, char** argv) {
     }
     sender.PumpUdpHello(transport, encoder);
     pump_cursor_forward(nowUs);
-    // Arm the trailing-edge kick on a fresh viewer/decoder (bumped res.session epoch) and on a capture
+    // Arm the trailing-edge kick on a fresh viewer/decoder (bumped session epoch) and on a capture
     // identity change (a new stream generation -- window select, reattach, backend change). The kick
-    // fires 150ms later only if no real res.frame has arrived and been flushed out; a real callback
+    // fires 150ms later only if no real frame has arrived and been flushed out; a real callback
     // fills the cold cache first, so even the first kick has pixels to resubmit.
     {
       const uint64_t curEpoch = clientSession.epoch.load(std::memory_order_acquire);
@@ -2295,9 +2295,9 @@ int main(int argc, char** argv) {
     }
     // Barrier recovery: the sender thread re-armed sender.waitingForKey after a same-epoch send
     // failure and cannot itself produce an IDR (encoder.forceKeyNext is main-thread-owned, and on a static
-    // desktop no new res.frame arrives to carry sender.requestKey). Consume the flag here, before the
-    // res.frame wait, and both force the next encode to be a key AND arm the trailing kick so the kick
-    // resubmits the cached raw res.frame when the screen is not changing -- otherwise a re-armed barrier
+    // desktop no new frame arrives to carry sender.requestKey). Consume the flag here, before the
+    // frame wait, and both force the next encode to be a key AND arm the trailing kick so the kick
+    // resubmits the cached raw frame when the screen is not changing -- otherwise a re-armed barrier
     // on a still desktop would never open.
     if (sender.recoveryPending.exchange(false, std::memory_order_acq_rel)) {
       encoder.forceKeyNext = true;
@@ -2349,7 +2349,7 @@ int main(int argc, char** argv) {
     // The active check comes before the exchange so an inactive stream does not consume the
     // request: with no client watching, restarting capture here would be exactly the leak this
     // lifecycle exists to close -- an RDP connect moves the desktop, the fallback fires, and a
-    // clientless host starts capturing the RDP res.session at full rate. While the stream is
+    // clientless host starts capturing the RDP session at full rate. While the stream is
     // inactive the request either survives until the client returns (processed then, one
     // iteration after the active edge) or is cleared by the idle detach, whose reattach
     // re-resolves the backend from scratch anyway.
@@ -2412,7 +2412,7 @@ int main(int argc, char** argv) {
     //
     // A demotion used to be permanent: backend.active was set to Wgc and the only way back
     // was an explicit request from the client, which then failed again for the same reason. So a
-    // single UAC prompt or RDP connect left the res.session on WGC for good, and the picture stayed
+    // single UAC prompt or RDP connect left the session on WGC for good, and the picture stayed
     // degraded long after the cause was gone. That is the "everything is slower after a UAC
     // prompt" report.
     //
@@ -2466,14 +2466,14 @@ int main(int argc, char** argv) {
           const DesktopCaptureBackend demoted = backend.active;
           backend.active = backend.requested;
           const bool restarted = restart_capture_session();
-          // restart_capture_session() reports that *a* res.session started, not that it started on the
+          // restart_capture_session() reports that *a* session started, not that it started on the
           // backend we asked for. When the requested one is still unavailable it falls back
           // internally, puts backend.active back where it was, and returns success anyway.
           // The backend the restart actually left behind is the only honest test.
           const bool promoted = restarted && backend.active == backend.requested;
           if (restarted) {
-            // A restart replaces the capture res.session whether or not the backend moved, so the
-            // timeline still has to be re-anchored and the next res.frame still has to be a keyframe.
+            // A restart replaces the capture session whether or not the backend moved, so the
+            // timeline still has to be re-anchored and the next frame still has to be a keyframe.
             ++capture.restartCount;
             capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(),
                                        std::memory_order_release);
@@ -2553,7 +2553,7 @@ int main(int argc, char** argv) {
           continue;
         }
         if (!capture.windowModeActive.load(std::memory_order_acquire)) {
-          // Fresh resolution, not the backend the last res.session was demoted to. This is also
+          // Fresh resolution, not the backend the last session was demoted to. This is also
           // what frees a host parked on WGC by an RDP visit: the desktop is back on the real
           // adapter by now, and starting from the requested backend finds it.
           backend.active = backend.requested;
@@ -2596,7 +2596,7 @@ int main(int argc, char** argv) {
       kick.Arm(qpc_now_us(), useH264);
       powerKeepalive.SetStreaming(true, true);
       // A stream-inactive->active edge starts a fresh streaming episode; drop any no-output streak
-      // left from before so the inactive gap is not mistaken for encoder.codec starvation.
+      // left from before so the inactive gap is not mistaken for encoder starvation.
       encoder.ResetStarvationEpisode();
       std::cout << "[native-video-host] stream active; forcing keyframe\n";
     }
@@ -2625,7 +2625,7 @@ int main(int argc, char** argv) {
       // changes nothing active -- and used to be dropped whole, leaving the profiles, the
       // ladder, and the manual-override reset all unrun. The ceiling comparisons catch what
       // the active comparisons cannot; apply_encoder_target is a no-op for identical targets,
-      // so entering the block for a ceiling-only change costs no encoder.codec restart.
+      // so entering the block for a ceiling-only change costs no encoder restart.
       const bool bitrateCeilingChanged = bitrateExplicit && (targetBitrate != rate.abrHighBitrate);
       const bool fpsCeilingChanged = fpsExplicit && (targetFps != rate.userFpsCeiling);
       const bool keyintCeilingChanged = keyintExplicit && (targetKeyint != rate.userKeyintCeiling);
@@ -2647,8 +2647,8 @@ int main(int argc, char** argv) {
           rate.abrProfile = 0;
         }
         // The resolution follows the bitrate, because the bitrate is a budget for the whole
-        // res.frame: the same 3 Mbps buys four times as much per pixel at 720p. Switching to mobile
-        // has to take the picture size down with it, or the encoder.codec spends the difference
+        // frame: the same 3 Mbps buys four times as much per pixel at 720p. Switching to mobile
+        // has to take the picture size down with it, or the encoder spends the difference
         // predicting badly every time the screen changes at once.
         uint32_t ladderW = encoder.nominalEncodeW;
         uint32_t ladderH = encoder.nominalEncodeH;
@@ -2970,12 +2970,12 @@ int main(int argc, char** argv) {
         }
       }
     }
-    // WGC ContentSize settle + main-thread res.pool recreate. The capture callback dropped frames whose
-    // ContentSize != the res.pool geometry and recorded the pending content size here; during an
-    // interactive window drag that size churns every res.frame. Wait for it to hold steady for a short
-    // settle window, then recreate the res.pool + readback at the new size on THIS (main) thread --
+    // WGC ContentSize settle + main-thread pool recreate. The capture callback dropped frames whose
+    // ContentSize != the pool geometry and recorded the pending content size here; during an
+    // interactive window drag that size churns every frame. Wait for it to hold steady for a short
+    // settle window, then recreate the pool + readback at the new size on THIS (main) thread --
     // the callback thread must never recreate capture resources. restart_capture_session() rebuilds
-    // the WGC res.pool at item.Size() (the settled window size) and create_staging at the new geometry.
+    // the WGC pool at item.Size() (the settled window size) and create_staging at the new geometry.
     if (capture.wgcContentSizeMismatchPending.load(std::memory_order_acquire) != 0) {
       const uint32_t pendW = capture.wgcPendingContentW.load(std::memory_order_acquire);
       const uint32_t pendH = capture.wgcPendingContentH.load(std::memory_order_acquire);
@@ -2987,7 +2987,7 @@ int main(int argc, char** argv) {
         curCapH = capture.height;
       }
       if (pendW < 2 || pendH < 2 || (pendW == curCapW && pendH == curCapH)) {
-        // Content settled back to the current res.pool geometry -- nothing to recreate.
+        // Content settled back to the current pool geometry -- nothing to recreate.
         capture.wgcContentSizeMismatchPending.store(0, std::memory_order_release);
         capture.wgcSettleTrackW = 0;
         capture.wgcSettleTrackH = 0;
@@ -2998,7 +2998,7 @@ int main(int argc, char** argv) {
         capture.wgcSettleTrackH = pendH;
         capture.wgcSettleSinceUs = nowUs;
       } else if (nowUs - capture.wgcSettleSinceUs >= kWgcContentSettleUs) {
-        // Stable for the settle window: recreate the res.pool/readback at the new size on the main thread.
+        // Stable for the settle window: recreate the pool/readback at the new size on the main thread.
         capture.wgcContentSizeMismatchPending.store(0, std::memory_order_release);
         capture.wgcSettleTrackW = 0;
         capture.wgcSettleTrackH = 0;
@@ -3013,7 +3013,7 @@ int main(int argc, char** argv) {
           capture.lastCallbackUs.store(0, std::memory_order_release);
           encoder.ResetTimelineAnchors(capture);
           // Force an IDR at the (now correct) geometry. An interactive drag still lets the encode
-          // size catch up on the 0.4s refit path; only the capture res.pool was resized here.
+          // size catch up on the 0.4s refit path; only the capture pool was resized here.
           encoder.forceKeyNext = true;
           uint32_t newCapW = 0;
           uint32_t newCapH = 0;
@@ -3127,7 +3127,7 @@ int main(int argc, char** argv) {
            nowUs >= (watchdog.lastCaptureRestartUs + kCaptureCallbackRestartCooldownUs));
       if (watchdog.frozenPollStreak >= kCaptureFrozenPollStreakMin && restartCooldownDone) {
         watchdog.frozenPollStreak = 0;
-        // First freeze: a same-device capture restart clears a wedged duplication/WGC res.session.
+        // First freeze: a same-device capture restart clears a wedged duplication/WGC session.
         // A refreeze inside the window means the device itself is stuck -- restarting capture on
         // the same device will not clear it -- so exit and let the supervisor rebuild the process
         // with a fresh D3D device. main() runs under that supervisor; a non-zero return long after
@@ -3190,14 +3190,14 @@ int main(int argc, char** argv) {
         const uint64_t paceWaitStartUs = qpc_now_us();
         // Reuse the high-resolution sender timer. sleep_for commonly overshoots a 60 Hz
         // deadline by 1-3ms on Windows; resetting the clock to that late wakeup on every
-        // res.frame turned a requested 60fps into a stable 48-54fps.
+        // frame turned a requested 60fps into a stable 48-54fps.
         udp_pace_wait_until(nextTickUs);
         const uint64_t paceWaitDoneUs = qpc_now_us();
         tickWaitUs = (paceWaitDoneUs >= paceWaitStartUs) ? (paceWaitDoneUs - paceWaitStartUs) : 0;
         continue;
       }
-      // Preserve the target phase after a normal sub-res.frame timer overshoot. Re-anchor only
-      // when processing actually missed a whole res.frame, avoiding both drift and catch-up bursts.
+      // Preserve the target phase after a normal sub-frame timer overshoot. Re-anchor only
+      // when processing actually missed a whole frame, avoiding both drift and catch-up bursts.
       if (nowUs > nextTickUs + encoder.activePacingFrameIntervalUs) {
         nextTickUs = nowUs;
       }
@@ -3232,7 +3232,7 @@ int main(int argc, char** argv) {
     bool servedBootstrap = false;
     bool kickForcedKey = false;  // true only when this kick must open a closed media barrier (IDR)
     if (kick.pending && nowUs >= kick.dueAtUs) {
-      // A real res.frame already waiting in the ring is always better than a kick; fall through to the
+      // A real frame already waiting in the ring is always better than a kick; fall through to the
       // normal pop (the encode below re-arms and records it). Otherwise decide whether the last real
       // input still needs flushing out of the MFT.
       bool realWaiting = false;
@@ -3251,7 +3251,7 @@ int main(int argc, char** argv) {
         // The latest real input is "stuck" until its capture timestamp is observed on an emitted AU;
         // on the async MFT it sits there until the next input, which on a still screen never comes.
         const bool latestInputStuck = (kick.lastRealInputCaptureUs > kick.lastEmittedAuCaptureUs);
-        // One kick per distinct held input: never resubmit the same held res.frame twice on a P-res.frame
+        // One kick per distinct held input: never resubmit the same held frame twice on a P-frame
         // trailing edge. A closed barrier overrides this -- it must keep kicking until an IDR lands.
         const bool alreadyKickedThisInput =
             (kick.lastRealInputCaptureUs != 0 && kick.lastKickedForInputCaptureUs == kick.lastRealInputCaptureUs);
@@ -3260,7 +3260,7 @@ int main(int argc, char** argv) {
         if (needKick && capture.KickTryFill(clientSession, kick, payload, w, h, stride, nowUs)) {
           servedBootstrap = true;
           // A closed barrier needs a real IDR; an ordinary trailing edge on an open stream can ride
-          // the held res.frame as-is (a P-res.frame is fine). Leave any pre-existing encoder.forceKeyNext untouched.
+          // the held frame as-is (a P-frame is fine). Leave any pre-existing encoder.forceKeyNext untouched.
           if (barrierClosed) {
             encoder.forceKeyNext = true;
             kickForcedKey = true;
@@ -3272,7 +3272,7 @@ int main(int argc, char** argv) {
           callbackUs = nowUs;
           queuePushUs = nowUs;
           kick.lastKickedForInputCaptureUs = kick.lastRealInputCaptureUs;  // one-shot per held input
-          // Keep kicking on a still-closed barrier: each kick feeds a forced IDR, so the held res.frame
+          // Keep kicking on a still-closed barrier: each kick feeds a forced IDR, so the held frame
           // becomes an IDR within a couple of flushes and the cancel comes when it reaches the wire.
           rearm = barrierClosed;
         }
@@ -3286,14 +3286,14 @@ int main(int argc, char** argv) {
       }
     }
     // Periodic static refresh (user requirement): on a still screen duplication offers no content
-    // and the trailing kick is one-shot, so NOTHING is sent and the res.session looks frozen (the
-    // field case: a static game map, revived only by dragging it). Re-serve the cached res.frame at a
-    // low cadence (default 1Hz, REMOTE60_NATIVE_STATIC_REFRESH_MS, 0=off) as an ordinary P-res.frame.
+    // and the trailing kick is one-shot, so NOTHING is sent and the session looks frozen (the
+    // field case: a static game map, revived only by dragging it). Re-serve the cached frame at a
+    // low cadence (default 1Hz, REMOTE60_NATIVE_STATIC_REFRESH_MS, 0=off) as an ordinary P-frame.
     // The cadence anchors on BOTH the last emitted AU and the last refresh ATTEMPT: the async MFT
     // may legally return no output for a submitted input, and an emitted-only clock would then
     // retry on every loop iteration -- a tight input flood, the opposite of an idle 1Hz refresh.
     // The barrier must be open (a closed barrier is the kick's job and needs an IDR) and the
-    // sender queue empty (stacking a synthetic res.frame onto a backlog helps nobody; the queue drains
+    // sender queue empty (stacking a synthetic frame onto a backlog helps nobody; the queue drains
     // within a few loop ticks). kick_try_fill re-validates identity/secure/size, so a lock screen
     // or a mid-switch target stays black rather than repainting a stale picture; a failed fill
     // also stamps the attempt clock so the (uncached) secure probe is not repeated every tick.
@@ -3364,10 +3364,10 @@ int main(int argc, char** argv) {
       nv12H = res.frame.nv12H;
       res.frame.nv12Slot = -1;  // claimed; this loop now owns the release
     }
-    // NB: a real res.frame pop deliberately does NOT cancel the kick. The pending timer is (re)armed and
-    // kick.lastRealInputCaptureUs recorded once the res.frame is actually fed to the MFT (see below), so the
+    // NB: a real frame pop deliberately does NOT cancel the kick. The pending timer is (re)armed and
+    // kick.lastRealInputCaptureUs recorded once the frame is actually fed to the MFT (see below), so the
     // deadline trails the LAST real input; the kick then cancels only when that input is observed
-    // coming out of the encoder.codec, not merely because a res.frame was popped.
+    // coming out of the encoder, not merely because a frame was popped.
     if (poppedNv12Slot >= 0) {
       // The previous iteration bailed out before encoding (gating skip, stale drop);
       // release its claimed conversion now.
@@ -3431,8 +3431,8 @@ int main(int argc, char** argv) {
 
       const bool prevStaticMode = frameGating.staticMode;
       // Any difference at all counts as motion. estimate_bgra_change_permille returns 0 only
-      // for a byte-identical res.frame, so this both leaves static mode on the first changed
-      // res.frame and never throttles an edit that is too small to move a percentage threshold.
+      // for a byte-identical frame, so this both leaves static mode on the first changed
+      // frame and never throttles an edit that is too small to move a percentage threshold.
       const bool motionNow = frameGating.changePermilleLast > 0;
       if (!frameGating.staticMode && frameGating.staticStreak >= frameGating.enterFrames) {
         frameGating.staticMode = true;
@@ -3451,7 +3451,7 @@ int main(int argc, char** argv) {
 
       const bool keyReqPending = clientMetrics.requestedKeyFrame.load(std::memory_order_acquire);
       const uint64_t targetIntervalUs = frameGating.staticMode ? frameGating.staticIntervalUs : encoder.activeFrameIntervalUs;
-      // The static interval throttles idle scenes; it must never hold back a res.frame that
+      // The static interval throttles idle scenes; it must never hold back a frame that
       // actually changed, or the first interaction after idle arrives late.
       // In paced motion mode the main tick already enforces encoder.activeFrameIntervalUs. Applying
       // the same interval here a second time makes a slightly-early capture timestamp skip
@@ -3659,7 +3659,7 @@ int main(int argc, char** argv) {
       const uint64_t preEncodeStartUs = qpc_now_us();
       // A window selection or a resize changes the source geometry; re-fit the encode size
       // to the new aspect so the scaler never has to stretch. The source size changes on
-      // EVERY res.frame of an interactive window drag, and apply_encoder_target tears the MFT
+      // EVERY frame of an interactive window drag, and apply_encoder_target tears the MFT
       // down, so two guards keep this from thrashing: the geometry must hold steady for a
       // settle period, and near-identical aspect (letterboxing under 2%) is left alone.
       if (!servedBootstrap && w > 0 && h > 0 && (w != encoder.encodeSourceW || h != encoder.encodeSourceH)) {
@@ -3692,8 +3692,8 @@ int main(int argc, char** argv) {
                         << " encode=" << prevW << "x" << prevH << " -> " << encoder.activeEncodeW << "x"
                         << encoder.activeEncodeH << "\n";
             } else {
-              // apply_encoder_target already shut the encoder.codec down; without a working encoder.codec
-              // every later res.frame fails silently, so treat this like the other callers do.
+              // apply_encoder_target already shut the encoder down; without a working encoder
+              // every later frame fails silently, so treat this like the other callers do.
               std::cerr << "[native-video-host] encode-refit failed source=" << w << "x" << h
                         << "; stopping stream\n";
               break;
@@ -3772,15 +3772,15 @@ int main(int argc, char** argv) {
         // The sender dropped a backlog; the stream needs an IDR to resynchronize.
         encoder.forceKeyNext = true;
       }
-       // The keyint schedule applies to REAL frames only. A kick/refresh-served synthetic res.frame
+       // The keyint schedule applies to REAL frames only. A kick/refresh-served synthetic frame
        // carries seq=0, and 0 % keyint == 0 made every one of them an IDR -- defeating the open-
-       // barrier design of riding the held res.frame as a cheap P-res.frame (a 40-160KB IDR instead of a
+       // barrier design of riding the held frame as a cheap P-frame (a 40-160KB IDR instead of a
        // few-KB P, once per kick/refresh). A closed barrier still gets its IDR via encoder.forceKeyNext.
        // A single submit latch (encoder.forceKeySubmittedAtUs) covers ALL key reasons -- request,
-       // first-res.frame (encoder.encodedSeq==0), and the keyint schedule: one key input pending inside the
+       // first-frame (encoder.encodedSeq==0), and the keyint schedule: one key input pending inside the
        // async MFT satisfies every one of them, so none may re-force while it is in flight. The
        // measured 4-5 consecutive-IDR trains came from forcing every input until the key finally
-       // surfaced. The latch is stamped only after the encoder.codec ACCEPTS the input (below), and
+       // surfaced. The latch is stamped only after the encoder ACCEPTS the input (below), and
        // times out after 300ms so a lost key is retried.
         const uint64_t encodeStartUs = qpc_now_us();
        const bool forceKeyInFlight =
@@ -3817,9 +3817,9 @@ int main(int argc, char** argv) {
             encoder.nv12PendingReleases.push_back(pending);
             poppedNv12Slot = -1;  // ownership moved to the deferred-release queue
             // Accepting a DXGI sample is no proof the vendor path is fast: AMF accepts them
-            // and then takes ~68ms a res.frame on internal synchronization (measured; the CPU
-            // path runs 4.5ms). Probe the first frames and drop back for the res.session when
-            // the surface path costs more than half the 33ms res.frame budget on average.
+            // and then takes ~68ms a frame on internal synchronization (measured; the CPU
+            // path runs 4.5ms). Probe the first frames and drop back for the session when
+            // the surface path costs more than half the 33ms frame budget on average.
             encoder.surfaceEncodeProbeSumUs += encodeStats.encodeCallUs;
             if (++encoder.surfaceEncodeProbeCount == 30) {
               const uint64_t avgUs = encoder.surfaceEncodeProbeSumUs / encoder.surfaceEncodeProbeCount;
@@ -3837,7 +3837,7 @@ int main(int argc, char** argv) {
               encoder.surfaceEncodeProbeSumUs = 0;
             }
           } else {
-            // One rejection turns the path off for the res.session; this res.frame is dropped and
+            // One rejection turns the path off for the session; this frame is dropped and
             // the next one takes the CPU route. Its slot is released at the next loop top.
             encoder.surfaceEncodeHealthy = false;
             res.captureReadback.SetNv12Enabled(false);
@@ -3859,7 +3859,7 @@ int main(int argc, char** argv) {
       // Encode returned; back to ordinary work for the watchdog's threshold.
       watchdog.EnterMainPhase(MainLoopPhase::Loop);
       if (forceKeyFrame) {
-        // Latch/count only for inputs the encoder.codec actually ACCEPTED: a failed encode never
+        // Latch/count only for inputs the encoder actually ACCEPTED: a failed encode never
         // reached the MFT, and arming the latch for it would suppress the retry for 300ms.
         ++encoder.forceKeyInputCount;
         encoder.forceKeySubmittedAtUs = encodeStartUs;
@@ -3870,10 +3870,10 @@ int main(int argc, char** argv) {
       }
       encoder.outputSamplesTotal += encodeStats.processOutputSamples;
       if (!servedBootstrap) {
-        // A real res.frame was just handed to the async MFT; it becomes the encoder.codec's held input until
-        // the next res.frame arrives. Record its capture timestamp and (re)arm the trailing kick so the
+        // A real frame was just handed to the async MFT; it becomes the encoder's held input until
+        // the next frame arrives. Record its capture timestamp and (re)arm the trailing kick so the
         // deadline always trails the LAST real input -- continuous motion keeps pushing it out and
-        // adds zero synthetic frames; only a genuine pause lets the kick fire to flush this res.frame.
+        // adds zero synthetic frames; only a genuine pause lets the kick fire to flush this frame.
         kick.lastRealInputCaptureUs = encodeInputUs;
         kick.Arm(qpc_now_us(), useH264);
       }
@@ -3886,9 +3886,9 @@ int main(int argc, char** argv) {
       const uint64_t encodeEndUs = qpc_now_us();
 
       // Encoder output-liveness heartbeat. Placed BEFORE the units.empty() early-out below so a
-      // starved encoder.codec -- which returns empty on every call -- is still observed here; the old
+      // starved encoder -- which returns empty on every call -- is still observed here; the old
       // `continue` skipped the whole 1s stats / self-heal tail, so a wedge produced no telemetry at
-      // all. A res.frame was just handed to the MFT this call, so input is advancing; only the OUTPUT is
+      // all. A frame was just handed to the MFT this call, so input is advancing; only the OUTPUT is
       // in question. This block changes no control flow (diagnostic only).
       ++encoder.inputAcceptedTotal;
       if (servedBootstrap) {
@@ -3907,7 +3907,7 @@ int main(int argc, char** argv) {
         encoder.starveNeedInputAccum = encoder.starveHaveOutputAccum = encoder.starveNoEventAccum = 0;
         encoder.starveNotAcceptingAccum = encoder.starveNeedMoreAccum = encoder.starveNeedInputOnlyCalls = 0;
         // Revive watchdog.mainLoopLastSeq (previously declared but never stored, so the watchdog record read
-        // a constant 0): publish real encoder.codec-output progress, not loop iterations. A follow-up can
+        // a constant 0): publish real encoder-output progress, not loop iterations. A follow-up can
         // make the watchdog fire on this age while input is still being accepted.
         watchdog.mainLoopLastSeq.store(encoder.outputSamplesTotal, std::memory_order_release);
       } else {
@@ -3919,13 +3919,13 @@ int main(int argc, char** argv) {
         encoder.starveNotAcceptingAccum += encodeStats.processInputNotAcceptingCount;
         encoder.starveNeedMoreAccum += encodeStats.processOutputNeedMoreInputCount;
         encoder.starveNeedInputOnlyCalls += encodeStats.asyncNeedInputOnlyCall;
-        // Age is measured from when the streak began, NOT from encoder.lastOutputUs, so an encoder.codec
+        // Age is measured from when the streak began, NOT from encoder.lastOutputUs, so an encoder
         // that never emitted a single AU since startup (encoder.lastOutputUs==0) is still detected.
         const uint64_t noOutputAgeUs =
             (encoder.noOutputSinceUs > 0 && encodeEndUs > encoder.noOutputSinceUs)
                 ? (encodeEndUs - encoder.noOutputSinceUs)
                 : 0;
-        // Stream active + encoder.codec keeps accepting input but produces no output for a while = the
+        // Stream active + encoder keeps accepting input but produces no output for a while = the
         // async-MFT output-starvation wedge (video frozen, main loop spinning, liveness watchdog
         // green). Emit one rate-limited anomaly line with the streak-accumulated async counters so a
         // field recurrence tells a host event-driving bug (NeedInput accrues, HaveOutput stays 0)
@@ -3966,7 +3966,7 @@ int main(int argc, char** argv) {
       bool sessionReconnectTriggered = false;
       bool countedRawForInput = false;
       if (sender.sendFailed.exchange(false, std::memory_order_acq_rel)) {
-        // Same policy the inline path had: a UDP send failure on an endless res.session waits
+        // Same policy the inline path had: a UDP send failure on an endless session waits
         // for the peer to re-Hello rather than exiting.
         ++sender.udpTxFail;
         if (args.seconds == 0) {
@@ -3980,7 +3980,7 @@ int main(int argc, char** argv) {
         //
         // Judge congestion once, on the backlog that existed *before* this batch: that is the
         // only part of the queue the sender has genuinely failed to drain. Sizing the limit
-        // from the batch instead would still overflow on the last unit whenever a res.frame was
+        // from the batch instead would still overflow on the last unit whenever a frame was
         // already queued, and a large drain would authorise an equally large queue -- seconds
         // of latency -- so the absolute cap below bounds it regardless.
         constexpr size_t kSenderQueueMaxFrames = 6;
@@ -3993,9 +3993,9 @@ int main(int argc, char** argv) {
         for (const auto& au : units) {
           if (au.bytes.empty()) continue;
           const int64_t auCaptureUs = (au.sampleTimeHns > 0) ? (au.sampleTimeHns / 10) : static_cast<int64_t>(encodeInputUs);
-          // This AU carries the capture timestamp of the input res.frame it was produced from (the async
+          // This AU carries the capture timestamp of the input frame it was produced from (the async
           // MFT preserves input sample times FIFO). Observing it is the proof a given real input has
-          // finally come OUT of the encoder.codec -- the cancel signal for the trailing kick. Track the
+          // finally come OUT of the encoder -- the cancel signal for the trailing kick. Track the
           // newest we have seen so a pending kick disarms once the latest real input has emerged.
           if (auCaptureUs > 0 && static_cast<uint64_t>(auCaptureUs) > kick.lastEmittedAuCaptureUs) {
             kick.lastEmittedAuCaptureUs = static_cast<uint64_t>(auCaptureUs);
@@ -4061,8 +4061,8 @@ int main(int argc, char** argv) {
         const bool encodedKeyFrame = au.keyFrame;
         // A barrier-opening kick (fresh viewer, no reference frames) must deliver a real IDR: a
         // non-IDR AU would decode into garbage. Drop anything but an IDR in that case. An ordinary
-        // trailing-edge kick on an OPEN stream, however, is flushing out the last real held res.frame,
-        // whose P-res.frame references the decoder already has -- so let it through.
+        // trailing-edge kick on an OPEN stream, however, is flushing out the last real held frame,
+        // whose P-frame references the decoder already has -- so let it through.
         if (servedBootstrap && kickForcedKey && !encodedKeyFrame) {
           continue;
         }
@@ -4155,7 +4155,7 @@ int main(int argc, char** argv) {
               item.mediaEpoch = sender.mediaSessionEpoch.load(std::memory_order_acquire);
               item.enqueueUs = qpc_now_us();  // AU handed to sender; sender derives queueWaitUs
               if (item.keyFrame) {
-                // A new IDR makes every queued res.frame irrelevant and re-anchors the stream. This is
+                // A new IDR makes every queued frame irrelevant and re-anchors the stream. This is
                 // also the barrier-open point: a real (or bootstrap) key AU for the current epoch
                 // clears sender.waitingForKey so deltas may flow again.
                 sender.dropCount.fetch_add(sender.queue.size(), std::memory_order_relaxed);
@@ -4189,9 +4189,9 @@ int main(int argc, char** argv) {
               }
             }
             if (enqueuedForSend) sender.cv.notify_one();
-            // Handing the res.frame off succeeded even when the queue policy discarded it; this
-            // flag means "no transport failure", and clearing it here would tear the res.session
-            // down. Whether the res.frame really went out is tracked by enqueuedForSend below.
+            // Handing the frame off succeeded even when the queue policy discarded it; this
+            // flag means "no transport failure", and clearing it here would tear the session
+            // down. Whether the frame really went out is tracked by enqueuedForSend below.
             sentOk = true;
           }
         }
@@ -4240,16 +4240,16 @@ int main(int argc, char** argv) {
           break;
         }
 
-        // A res.frame the sender queue discarded never reaches the wire. Counting it kept fps and
+        // A frame the sender queue discarded never reaches the wire. Counting it kept fps and
         // bitrate reporting a healthy stream straight through a cutout, which is precisely the
         // window that is visible to the user as a freeze -- so count only what was handed on.
         if (transport == VideoTransport::Udp && !enqueuedForSend) {
           ++sender.heldFrames;
           continue;
         }
-        // A trailing-edge kick is a single sparse res.frame; keep it out of the fps/bitrate and ABR
+        // A trailing-edge kick is a single sparse frame; keep it out of the fps/bitrate and ABR
         // evidence (it is counted separately as kick.count). It still consumes the forced
-        // keyframe below so the normal path does not re-force one on the next real res.frame.
+        // keyframe below so the normal path does not re-force one on the next real frame.
         if (!servedBootstrap) {
           ++sender.sentFrames;
           ++encoder.encodedFrames;
@@ -4573,8 +4573,8 @@ int main(int argc, char** argv) {
       // deltas: the frozen-ring block above already accumulated this window's oldest-pending peak
       // at loop frequency. Gated to the same live desktop-capture surface the frozen-ring watchdog
       // uses, plus a warmup and a secure-desktop check, so a legitimately static desktop, a
-      // just-restarted res.session, or a lock screen cannot trip it. This is the ONLY new rebuild
-      // trigger; the frozen-ring 2s hard path and res.session rollover behavior are unchanged.
+      // just-restarted session, or a lock screen cannot trip it. This is the ONLY new rebuild
+      // trigger; the frozen-ring 2s hard path and session rollover behavior are unchanged.
       {
         const bool drainStreamActive = clientSession.streamControlActive.load(std::memory_order_acquire);
         if (drainStreamActive && !watchdog.drainPrevStreamActive) {
@@ -4617,8 +4617,8 @@ int main(int argc, char** argv) {
             drainStreamActive &&
             !capture.windowModeActive.load(std::memory_order_acquire) &&
             backend.active != DesktopCaptureBackend::Gdi;
-        // Warmup after the latest of: capture res.session start, any capture restart, or client
-        // reattach -- so the first seconds of a fresh pipeline (encoder.codec spin-up, first IDR) never
+        // Warmup after the latest of: capture session start, any capture restart, or client
+        // reattach -- so the first seconds of a fresh pipeline (encoder spin-up, first IDR) never
         // read as a drain.
         uint64_t drainWarmupAnchorUs = capture.sessionStartedUs;
         if (watchdog.lastCaptureRestartUs > drainWarmupAnchorUs) drainWarmupAnchorUs = watchdog.lastCaptureRestartUs;
@@ -4651,7 +4651,7 @@ int main(int argc, char** argv) {
              t >= (watchdog.lastCaptureRestartUs + kCaptureCallbackRestartCooldownUs));
         if (watchdog.drainConsecutiveSec >= kReadbackDrainConsecutiveSecMin && drainRestartCooldownDone) {
           watchdog.drainConsecutiveSec = 0;
-          // First trip: restart_capture_session() runs create_staging -> res.captureReadback
+          // First trip: restart_capture_session() runs create_staging -> captureReadback
           // Shutdown/Initialize, rebuilding the capture backend and the readback ring on the same
           // device. A recurrence inside the same 60s window the frozen-ring refreeze uses means the
           // device itself is wedged; match that path and exit code 3 so the supervisor rebuilds the
@@ -4814,7 +4814,7 @@ int main(int argc, char** argv) {
                 ? (sender.sendDurSumUs.load(std::memory_order_relaxed) / senderSendCountNow)
                 : 0;
         if (statsPrintDue) {
-        // Age of the last res.frame published to the encoder.codec -- diagnostic only. A frozen ring shows
+        // Age of the last frame published to the encoder -- diagnostic only. A frozen ring shows
         // this climbing in lockstep with watchdog.oldestGpuPendingPeakUs. Per Codex: report it, but never
         // drive the watchdog off it, since a static change-driven desktop is legitimately silent.
         const uint64_t statsNowUs = qpc_now_us();
@@ -5004,7 +5004,7 @@ int main(int argc, char** argv) {
           // either way. The client's relative-lag metric is a delay-variation estimate over
           // that second's samples, and 2-4 samples let a single outlier -- or the decoder
           // holding output across a sparse cadence -- read as latency the network never had.
-          // A static desktop (res.frame gating) is the common case: the picture was still, the
+          // A static desktop (frame gating) is the common case: the picture was still, the
           // client decoded a handful of frames, and the old code took that for congestion and
           // demoted, then recovered on motion, then demoted again -- the quality seen flapping
           // between sharp and soft while simply reading the screen. sender.sentFrames is this tick's
@@ -5150,8 +5150,8 @@ int main(int argc, char** argv) {
               std::cerr << "[native-video-host][abr] encoder profile apply failed\n";
               break;
             }
-            // Committed only once the encoder.codec accepted the target, so a failed reinit cannot
-            // leave the hysteresis state describing an encoder.codec that does not exist.
+            // Committed only once the encoder accepted the target, so a failed reinit cannot
+            // leave the hysteresis state describing an encoder that does not exist.
             rate.encodeLadderReduced = ladderChoice.reduced;
 
             rate.abrProfile = targetProfile;
@@ -5341,9 +5341,9 @@ int main(int argc, char** argv) {
     clientSession.controlListenSock = INVALID_SOCKET;
   }
   if (clientSession.controlThread.joinable()) clientSession.controlThread.join();
-  // Close before joining: the control res.session is parked in a blocking read, and the reader
+  // Close before joining: the control session is parked in a blocking read, and the reader
   // thread is parked in recvfrom until its receive timeout expires. The dispatcher now outlives
-  // any one res.session, so it also has to be woken from the wait it parks in between them.
+  // any one session, so it also has to be woken from the wait it parks in between them.
   clientSession.udpControlChannel.Close(remote60::native_poc::ControlCloseReason::Shutdown);
   clientSession.epochCv.notify_all();
   if (clientSession.udpControlThread.joinable()) clientSession.udpControlThread.join();

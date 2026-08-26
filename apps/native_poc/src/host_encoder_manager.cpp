@@ -64,7 +64,7 @@ bool EncoderState::ApplyTarget(CaptureState& capture, CaptureResources& res, Fra
     encoder.ResetTimelineAnchors(capture);
     encoder.ResetStarvationEpisode();
     // shutdown+initialize discarded any pending key input; a stale latch here would delay the
-    // fresh encoder.codec's needed IDR by up to the 300ms retry window.
+    // fresh encoder's needed IDR by up to the 300ms retry window.
     encoder.forceKeySubmittedAtUs = 0;
   } else if (bitrateChanged) {
     if (!encoder.codec.reconfigure_bitrate(targetBitrate)) {
@@ -113,10 +113,10 @@ void EncoderState::ApplyConfirmedCaptureGeometry(CaptureState& capture, CaptureR
                                                  SenderState& sender, uint32_t newW, uint32_t newH,
                                                  const char* reason, bool allowWindowOverride) {
   EncoderState& encoder = *this;
-  // An interactive window DRAG keeps the 0.4s settle path (per-res.frame MFT re-init would thrash),
+  // An interactive window DRAG keeps the 0.4s settle path (per-frame MFT re-init would thrash),
   // so it bails here. A CONFIRMED window selection passes allowWindowOverride=true so the encode
   // target is re-fit to the final window geometry immediately -- otherwise the first IDR goes out
-  // at the pre-selection encode size and a second, new-size IDR follows a res.frame later, forcing the
+  // at the pre-selection encode size and a second, new-size IDR follows a frame later, forcing the
   // client to reconfigure twice and fire a keyframe-request storm.
   if (capture.windowModeActive && !allowWindowOverride) return;
   if (newW < 2 || newH < 2) return;
@@ -148,7 +148,7 @@ bool EncoderState::ApplyCaptureUiQualityMode(CaptureState& capture, CaptureResou
   EncoderState& encoder = *this;
   if (!useH264) return true;
   // Derived from the live ceiling, not from the m9 level constants: those are frozen at
-  // encoder.codec initialization, so a host born at 3 Mbps regressed to its birth bitrate and
+  // encoder initialization, so a host born at 3 Mbps regressed to its birth bitrate and
   // size every time the client left overview mode -- and set the manual override, which
   // kept ABR from ever repairing it. Same freeze as the ABR profiles, one more door in.
   // (The m9 adaptive levels themselves are still the frozen constants; that ladder is off

@@ -113,7 +113,7 @@ void CaptureState::PublishCapturedTexture(CaptureResources& res, ID3D11Texture2D
   CaptureState& capture = *this;
   auto& captureReadback = res.captureReadback;
   if (!src) return;
-  // WGC/DXGI commonly callback at the monitor refresh rate even when the encoder.codec target is
+  // WGC/DXGI commonly callback at the monitor refresh rate even when the encoder target is
   // 30fps. Submitting all 60 copies made the staging ring and GPU fight over obsolete
   // frames; query completion then oscillated between 16 and 50ms. Limit before the copy,
   // using a phase-preserving deadline so the accepted frames stay evenly spaced.
