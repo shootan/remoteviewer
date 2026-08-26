@@ -324,141 +324,11 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
     // 66% of 30 and trips a demote; after a tune to 60, a struggling 20 fps reads as fine.
     // ABR only runs when no manual override or M9 is lowering encoder.activeFps, so here it is the
     // authoritative target. All four thresholds and the sparse floor share it.
-    const uint32_t abrExpectedFps = std::max<uint32_t>(1, encoder.activeFps);
-    const uint32_t minGoodFpsX100 = abrExpectedFps * (rate.abrQualityFirst ? 95u : 93u);
-    const uint32_t minOkayFpsX100 = abrExpectedFps * (rate.abrQualityFirst ? 90u : 85u);
-    const uint32_t minDegradeFpsX100 = abrExpectedFps * (rate.abrQualityFirst ? 55u : 45u);
-    const uint32_t minSevereFpsX100 = abrExpectedFps * (rate.abrQualityFirst ? 45u : 35u);
-    const bool abrWarmupDone = (t >= (startUs + 4000000ULL));
-
-    // A second in which the host offered almost no frames carries no usable evidence
-    // either way. The client's relative-lag metric is a delay-variation estimate over
-    // that second's samples, and 2-4 samples let a single outlier -- or the decoder
-    // holding output across a sparse cadence -- read as latency the network never had.
-    // A static desktop (frame gating) is the common case: the picture was still, the
-    // client decoded a handful of frames, and the old code took that for congestion and
-    // demoted, then recovered on motion, then demoted again -- the quality seen flapping
-    // between sharp and soft while simply reading the screen. sender.sentFrames is this tick's
-    // real send cadence (reset each stats second), which is what the discarded
-    // queuePushPerSec never was. When evidence is this thin, hold the profile and let a
-    // second with real motion decide against the unchanged thresholds.
-    const bool hostOfferSparse =
-        (sender.sentFrames < std::max<uint64_t>(2, static_cast<uint64_t>(abrExpectedFps) / 2)) ||
-        frameGating.staticMode;
-
-    const uint64_t severeLatencyUs = rate.abrQualityFirst ? 170000ULL : 150000ULL;
-    const uint64_t severeTailUs = rate.abrQualityFirst ? 140000ULL : 110000ULL;
-    const uint64_t moderateLatencyUs = rate.abrQualityFirst ? 145000ULL : 125000ULL;
-    const uint64_t moderateTailUs = rate.abrQualityFirst ? 120000ULL : 90000ULL;
-    const uint64_t emergencyLatencyUs = rate.abrQualityFirst ? 260000ULL : 220000ULL;
-    const uint64_t emergencyTailUs = rate.abrQualityFirst ? 190000ULL : 160000ULL;
-
-    const bool severeDownByClient =
-        metricsFresh &&
-        (clAvgLatencyUs > severeLatencyUs ||
-         clAvgDecodeTailUs > severeTailUs ||
-         (clDecodedFpsX100 < minSevereFpsX100 &&
-          (clAvgLatencyUs > (severeLatencyUs - 30000ULL) || clAvgDecodeTailUs > (severeTailUs - 40000ULL))));
-    const bool moderateDownByClient =
-        metricsFresh &&
-        (clAvgLatencyUs > moderateLatencyUs ||
-         clAvgDecodeTailUs > moderateTailUs ||
-         (clDecodedFpsX100 < minDegradeFpsX100 &&
-          (clAvgLatencyUs > (moderateLatencyUs - 50000ULL) ||
-           clAvgDecodeTailUs > (moderateTailUs - 30000ULL))));
-    const bool emergencyDownByClient =
-        metricsFresh &&
-        (clAvgLatencyUs > emergencyLatencyUs ||
-         clAvgDecodeTailUs > emergencyTailUs);
-    const bool severeDownByHost = (!metricsFresh && cb2eAvgUs > (rate.abrQualityFirst ? 110000ULL : 90000ULL));
-    const bool moderateDownByHost = (!metricsFresh && cb2eAvgUs > (rate.abrQualityFirst ? 90000ULL : 70000ULL));
-    // !hostOfferSparse on every up/down verdict: a sparse second neither degrades nor
-    // recovers the profile. The pressure and good counters below fall to their else
-    // branch and reset, so the profile holds until a second with real cadence arrives.
-    const bool severeDown =
-        abrWarmupDone && !hostOfferSparse && (severeDownByClient || severeDownByHost);
-    const bool moderateDown =
-        abrWarmupDone && !hostOfferSparse && (moderateDownByClient || moderateDownByHost);
-    const bool emergencyDown = abrWarmupDone && !hostOfferSparse && emergencyDownByClient;
-
-    if (severeDown) {
-      ++rate.abrSeverePressureSeconds;
-    } else {
-      rate.abrSeverePressureSeconds = 0;
-    }
-    if (moderateDown) {
-      ++rate.abrModeratePressureSeconds;
-    } else {
-      rate.abrModeratePressureSeconds = 0;
-    }
-
-    const bool goodForLowToMid =
-        metricsFresh && !hostOfferSparse &&
-        (clAvgLatencyUs < 90000ULL) &&
-        (clAvgDecodeTailUs < 65000ULL) &&
-        (clDecodedFpsX100 >= minOkayFpsX100);
-    const bool goodForMidToHigh =
-        metricsFresh && !hostOfferSparse &&
-        (clAvgLatencyUs < 75000ULL) &&
-        (clAvgDecodeTailUs < 50000ULL) &&
-        (clDecodedFpsX100 >= minGoodFpsX100);
-
-    int targetProfile = rate.abrProfile;
-    const char* abrReason = "none";
-    if (t >= rate.abrCooldownUntilUs) {
-      const uint32_t highToMidSevereSec = rate.abrQualityFirst ? 3u : 2u;
-      const uint32_t highToMidModerateSec = rate.abrQualityFirst ? 6u : 4u;
-      const uint32_t midToLowSevereSec = rate.abrQualityFirst ? 4u : 3u;
-      const uint32_t midToLowModerateSec = rate.abrQualityFirst ? 8u : 5u;
-      const uint32_t lowToMidGoodSec = rate.abrQualityFirst ? 8u : 5u;
-      const uint32_t midToHighGoodSec = rate.abrQualityFirst ? 12u : 8u;
-
-      if (rate.abrProfile == 0) {
-        if (emergencyDown && rate.abrHasLowProfile && rate.abrSeverePressureSeconds >= 1) {
-          targetProfile = 2;
-          abrReason = "client_emergency";
-        } else if ((rate.abrSeverePressureSeconds >= highToMidSevereSec) || (rate.abrModeratePressureSeconds >= highToMidModerateSec)) {
-          if (rate.abrHasMidProfile) {
-            targetProfile = 1;
-            abrReason = (rate.abrSeverePressureSeconds >= highToMidSevereSec) ? "high_to_mid_severe" : "high_to_mid_moderate";
-          } else if (rate.abrHasLowProfile) {
-            targetProfile = 2;
-            abrReason = (rate.abrSeverePressureSeconds >= highToMidSevereSec) ? "high_to_low_severe" : "high_to_low_moderate";
-          }
-        }
-        rate.abrGoodSeconds = 0;
-      } else if (rate.abrProfile == 1) {
-        if (emergencyDown && rate.abrHasLowProfile) {
-          targetProfile = 2;
-          abrReason = "client_emergency";
-          rate.abrGoodSeconds = 0;
-        } else if ((rate.abrSeverePressureSeconds >= midToLowSevereSec || rate.abrModeratePressureSeconds >= midToLowModerateSec) && rate.abrHasLowProfile) {
-          targetProfile = 2;
-          abrReason = (rate.abrSeverePressureSeconds >= midToLowSevereSec) ? "mid_to_low_severe" : "mid_to_low_moderate";
-          rate.abrGoodSeconds = 0;
-        } else {
-          if (goodForMidToHigh) {
-            ++rate.abrGoodSeconds;
-          } else {
-            rate.abrGoodSeconds = 0;
-          }
-          if (rate.abrGoodSeconds >= midToHighGoodSec) {
-            targetProfile = 0;
-            abrReason = "client_stable_high";
-          }
-        }
-      } else {  // rate.abrProfile == 2
-        if (goodForLowToMid) {
-          ++rate.abrGoodSeconds;
-        } else {
-          rate.abrGoodSeconds = 0;
-        }
-        if (rate.abrGoodSeconds >= lowToMidGoodSec) {
-          targetProfile = rate.abrHasMidProfile ? 1 : 0;
-          abrReason = "client_stable_mid";
-        }
-      }
-    }
+    const AbrInputs abrIn{metricsFresh, clDecodedFpsX100, clAvgLatencyUs, clAvgDecodeTailUs, cb2eAvgUs,
+                          sender.sentFrames, frameGating.staticMode, encoder.activeFps, startUs};
+    const AbrDecision abrDecision = rate.DecideAbrProfile(abrIn, t);
+    const int targetProfile = abrDecision.targetProfile;
+    const char* abrReason = abrDecision.reason;
 
     if (targetProfile != rate.abrProfile) {
       uint32_t targetBitrate = rate.abrHighBitrate;
@@ -483,13 +353,7 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
       }
       // Committed only once the encoder accepted the target, so a failed reinit cannot
       // leave the hysteresis state describing an encoder that does not exist.
-      rate.encodeLadderReduced = ladderChoice.reduced;
-
-      rate.abrProfile = targetProfile;
-      rate.abrGoodSeconds = 0;
-      rate.abrModeratePressureSeconds = 0;
-      rate.abrSeverePressureSeconds = 0;
-      rate.abrCooldownUntilUs = t + 4000000ULL;
+      rate.CommitAbrProfile(targetProfile, ladderChoice.reduced, t);
       encoder.forceKeyNext = true;
 
       std::cout << "[native-video-host][abr] profile="
@@ -507,48 +371,11 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
   }
 
   if (rate.m9Enabled && !encoder.tuneManualOverride) {
-    const bool downByClient =
-        metricsFresh &&
-        (clCongestionState == 2 ||
-         clDecodedFpsX100 < rate.m9DecodedFpsFloorX100 ||
-         clQueueDepthMax >= rate.m9QueueDepthHighFrames ||
-         clUdpDropPm >= rate.m9UdpDropPmHigh ||
-         clAvgLatencyUs >= rate.m9LatencyHighUs ||
-         clAvgDecodeTailUs >= rate.m9TailHighUs);
-    const bool downByHostFallback =
-        (!metricsFresh && cb2eAvgUs >= rate.m9TailHighUs);
-    const bool downPressure = downByClient || downByHostFallback;
-    const bool upPressure =
-        metricsFresh &&
-        clCongestionState == 0 &&
-        clDecodedFpsX100 >= rate.m9DecodedFpsRecoverX100 &&
-        clQueueDepthMax <= rate.m9QueueDepthLowFrames &&
-        clUdpDropPm <= rate.m9UdpDropPmLow &&
-        clAvgLatencyUs <= rate.m9LatencyLowUs &&
-        clAvgDecodeTailUs <= rate.m9TailLowUs;
-
-    if (downPressure) {
-      ++rate.m9DownPressureSeconds;
-    } else {
-      rate.m9DownPressureSeconds = 0;
-    }
-    if (upPressure) {
-      ++rate.m9UpPressureSeconds;
-    } else {
-      rate.m9UpPressureSeconds = 0;
-    }
-
-    int targetLevel = rate.m9Level;
-    const char* m9Reason = "hold";
-    if (t >= rate.m9CooldownUntilUs) {
-      if (downPressure && rate.m9DownPressureSeconds >= rate.m9DownRequireSec && targetLevel < 3) {
-        ++targetLevel;
-        m9Reason = downByClient ? "client_pressure" : "host_fallback_pressure";
-      } else if (upPressure && rate.m9UpPressureSeconds >= rate.m9UpRequireSec && targetLevel > 0) {
-        --targetLevel;
-        m9Reason = "client_recovered";
-      }
-    }
+    const M9Inputs m9In{metricsFresh, clCongestionState, clDecodedFpsX100, clQueueDepthMax, clUdpDropPm,
+                        clAvgLatencyUs, clAvgDecodeTailUs, cb2eAvgUs};
+    const M9Decision m9Decision = rate.DecideM9Level(m9In, t);
+    const int targetLevel = m9Decision.targetLevel;
+    const char* m9Reason = m9Decision.reason;
 
 
     if (targetLevel != rate.m9Level) {
@@ -584,10 +411,7 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
         }
         encoder.forceKeyNext = true;
       }
-      rate.m9Level = targetLevel;
-      rate.m9CooldownUntilUs = t + static_cast<uint64_t>(rate.m9CooldownSec) * 1000000ULL;
-      rate.m9DownPressureSeconds = 0;
-      rate.m9UpPressureSeconds = 0;
+      rate.CommitM9Level(targetLevel, t);
     }
   }
   return Flow::Next;

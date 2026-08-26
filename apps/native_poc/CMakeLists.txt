@@ -416,6 +416,11 @@ add_executable(remote60_capture_cadence_gate_test
 )
 target_include_directories(remote60_capture_cadence_gate_test PRIVATE src)
 
+add_executable(remote60_host_abr_test
+  src/host_abr_test.cpp
+)
+target_include_directories(remote60_host_abr_test PRIVATE src)
+
 add_executable(remote60_bind_port_candidates_test
   src/bind_port_candidates_test.cpp
 )
