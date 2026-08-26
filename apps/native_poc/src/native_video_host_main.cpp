@@ -527,6 +527,38 @@ struct ClientMetricsSnapshot {
   std::atomic<uint64_t> keyFrameRequestDropped{0};
 };
 
+// Desktop capture backend policy (Phase 1-4 state struct): which backend the client asked for,
+// which one is actually running after a demotion (DXGI -> WGC on UAC/lock/RDP), the exponential
+// retry that climbs back, the secure-desktop stable gate that holds the climb until the DEFAULT
+// desktop has been up for a while, and lifetime promotion telemetry. See the comment blocks at
+// the assignments in main() for the full rationale.
+// thread: main loop owns everything except the three req* atomics, which the control thread sets
+// from ControlDesktopBackendRequest and the main loop consumes (cross-thread).
+struct DesktopBackendState {
+  // cross-thread: request from the control thread, consumed at the top of the main loop.
+  std::atomic<bool> reqPending{false};
+  std::atomic<uint32_t> reqSeq{0};
+  std::atomic<uint16_t> reqValue{0};
+  DesktopCaptureBackend requested = DesktopCaptureBackend::Dxgi;
+  DesktopCaptureBackend active = DesktopCaptureBackend::Dxgi;
+  // Exponential backoff for climbing back to the requested backend.
+  uint64_t retryAtUs = 0;
+  uint64_t retryDelayUs = 0;
+  // Secure-desktop stable gate.
+  uint64_t defaultStableSinceUs = 0;  // when the default desktop last became continuously up (0=not)
+  uint64_t defaultProbeAtUs = 0;      // next uncached secure-desktop probe
+  uint64_t demotionSinceUs = 0;       // when this WGC demotion began (for the promotion-wait metric)
+  bool promotionDeferredForCurrentDeadline = false;  // episode latch so the deferred counter can't per-loop spin
+  // Lifetime promotion telemetry (read by the stats line; atomics because the control thread
+  // reads them for the window-list/status replies).
+  std::atomic<uint64_t> promotionAttempts{0};
+  std::atomic<uint64_t> promotionSuccess{0};
+  std::atomic<uint64_t> promotionFail{0};
+  std::atomic<uint64_t> promotionDeferredSecureTotal{0};  // deadlines held off by the secure gate (per episode)
+  std::atomic<uint64_t> secureProbeFalseTotal{0};         // uncached probes that saw a secure desktop
+  std::atomic<uint64_t> lastPromotionWaitUs{0};           // demotion -> successful promotion
+};
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1189,12 +1221,8 @@ int main(int argc, char** argv) {
   std::atomic<uint64_t> secureInputSkipUnauthenticated{0};  // no directory capability to act on
   // P2 desktop-backend promotion (WGC -> requested DXGI climb-back). Lifetime totals, never
   // per-second reset: a session-shape summary is more useful than a rate for a rare transition.
-  std::atomic<uint64_t> desktopPromotionAttempts{0};
-  std::atomic<uint64_t> desktopPromotionSuccess{0};
-  std::atomic<uint64_t> desktopPromotionFail{0};
-  std::atomic<uint64_t> desktopPromotionDeferredSecureTotal{0};  // deadlines held off by the secure gate (per episode)
-  std::atomic<uint64_t> desktopSecureProbeFalseTotal{0};         // uncached probes that saw a secure desktop
-  std::atomic<uint64_t> lastPromotionWaitUs{0};                  // demotion -> successful promotion
+  // Desktop capture backend request/active/backoff/secure-gate/promotion telemetry (DesktopBackendState, Phase 1-4).
+  DesktopBackendState backend;
   // Viewer-reported metrics + keyframe requests, control thread -> main loop (ClientMetricsSnapshot, Phase 1-10).
   ClientMetricsSnapshot clientMetrics;
   std::atomic<uint32_t> hostCaptureTargetPid{0};
@@ -1221,10 +1249,7 @@ int main(int argc, char** argv) {
   std::atomic<uint32_t> runtimeTuneKeyint{0};
   std::atomic<uint32_t> runtimeTuneFps{0};
   std::atomic<uint32_t> runtimeTuneSeq{0};
-  std::atomic<bool> desktopBackendReqPending{false};
-  std::atomic<uint32_t> desktopBackendReqSeq{0};
-  std::atomic<uint16_t> desktopBackendReqValue{
-      desktop_capture_backend_code(desktop_capture_backend_from_env())};
+  backend.reqValue = desktop_capture_backend_code(desktop_capture_backend_from_env());
   std::atomic<bool> captureModeReqPending{false};
   std::atomic<uint32_t> captureModeReqSeq{0};
   std::atomic<uint16_t> captureModeReqMode{0};
@@ -1929,9 +1954,9 @@ int main(int argc, char** argv) {
         req.header = header;
         if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
         if (req.backend == 1 || req.backend == 2 || req.backend == 3) {
-          desktopBackendReqSeq.store(req.seq, std::memory_order_release);
-          desktopBackendReqValue.store(req.backend, std::memory_order_release);
-          desktopBackendReqPending.store(true, std::memory_order_release);
+          backend.reqSeq.store(req.seq, std::memory_order_release);
+          backend.reqValue.store(req.backend, std::memory_order_release);
+          backend.reqPending.store(true, std::memory_order_release);
           std::cout << "[native-video-host][control] desktop-backend-request seq=" << req.seq
                     << " backend="
                     << (req.backend == 2 ? "wgc" : (req.backend == 3 ? "gdi" : "dxgi"))
@@ -2319,16 +2344,15 @@ int main(int argc, char** argv) {
   const bool selectionLockedByConfig = captureWindowCriteria.enabled() || inputTargetCriteria.enabled();
   windowSelectionLocked.store(selectionLockedByConfig, std::memory_order_release);
   const bool windowTargetConfigured = captureWindowCriteria.enabled();
-  DesktopCaptureBackend requestedDesktopBackend = desktop_capture_backend_from_env();
-  DesktopCaptureBackend activeDesktopBackend = requestedDesktopBackend;
+  backend.requested = desktop_capture_backend_from_env();
+  backend.active = backend.requested;
   // A demotion away from the requested backend is temporary until proven otherwise; these pace
   // the attempts to get back to it. First retry is quick because the usual causes -- a UAC prompt
   // being answered, RDP disconnecting -- clear in seconds; the ceiling keeps a machine that
   // genuinely cannot use the requested backend from restarting capture forever.
   constexpr uint64_t kDesktopBackendRetryMinUs = 3'000'000;
   constexpr uint64_t kDesktopBackendRetryMaxUs = 30'000'000;
-  uint64_t desktopBackendRetryAtUs = 0;
-  uint64_t desktopBackendRetryDelayUs = kDesktopBackendRetryMinUs;
+  backend.retryDelayUs = kDesktopBackendRetryMinUs;
   // P2 secure-desktop stable gate. A demotion to WGC (UAC prompt, lock screen, RDP) used to be
   // climbed back on a bare 3s timer, so every retry deadline that fired while the secure desktop
   // was still up spent a restart_capture_session (pipeline flush + forced IDR) that failed at once
@@ -2340,10 +2364,6 @@ int main(int argc, char** argv) {
   // exponential backoff, which is the right owner for a backend that truly cannot start.
   constexpr uint64_t kDesktopDefaultStableUs = 1'000'000;       // continuous default settle before promote
   constexpr uint64_t kDesktopDefaultProbeIntervalUs = 200'000;  // OpenInputDesktop probe cadence
-  uint64_t desktopDefaultStableSinceUs = 0;  // when the default desktop last became continuously up (0=not)
-  uint64_t desktopDefaultProbeAtUs = 0;      // next uncached secure-desktop probe
-  uint64_t desktopDemotionSinceUs = 0;       // when this WGC demotion began (for the promotion-wait metric)
-  bool promotionDeferredForCurrentDeadline = false;  // episode latch so the deferred counter can't per-loop spin
   std::atomic<bool> captureWindowModeActive{false};
   std::atomic<bool> captureWindowClientOnlyActive{args.captureWindowClientOnly};
   CaptureWindowInfo captureWindowInfo{};
@@ -2389,9 +2409,9 @@ int main(int argc, char** argv) {
     if (mfStarted) MFShutdown();
     return 8;
   }
-  if (!captureWindowModeActive && requestedDesktopBackend == DesktopCaptureBackend::Dxgi &&
+  if (!captureWindowModeActive && backend.requested == DesktopCaptureBackend::Dxgi &&
       monitorInfo->width < monitorInfo->height) {
-    activeDesktopBackend = DesktopCaptureBackend::Wgc;
+    backend.active = DesktopCaptureBackend::Wgc;
     std::cout << "[native-video-host] rotation_unsupported fallback_reason=rotation_unsupported\n";
   }
   // Tell the SYSTEM agent where the captured pixels live. Without it the agent can only assume,
@@ -2404,7 +2424,7 @@ int main(int argc, char** argv) {
   uint32_t captureWidth = 0;
   uint32_t captureHeight = 0;
   winrt::Windows::Graphics::SizeInt32 captureSize{};
-  if (captureWindowModeActive || activeDesktopBackend == DesktopCaptureBackend::Wgc) {
+  if (captureWindowModeActive || backend.active == DesktopCaptureBackend::Wgc) {
     item = captureWindowModeActive
                ? CreateItemForPrimaryMonitor(captureWindowInfo.hwnd, "CreateForWindow(target-window)")
                : CreateItemForPrimaryMonitor();
@@ -2432,7 +2452,7 @@ int main(int argc, char** argv) {
     return 9;
   }
   std::cout << "[native-video-host] desktop_backend="
-            << (captureWindowModeActive ? "wgc_window" : desktop_capture_backend_name(activeDesktopBackend))
+            << (captureWindowModeActive ? "wgc_window" : desktop_capture_backend_name(backend.active))
             << " capture=" << captureWidth << "x" << captureHeight << "\n";
 
   uint32_t encodeW = captureWidth;
@@ -3386,14 +3406,14 @@ int main(int argc, char** argv) {
   auto restart_capture_session_impl = [&]() -> bool {
     detach_capture_session();
     try {
-      if (!captureWindowModeActive && activeDesktopBackend == DesktopCaptureBackend::Dxgi) {
+      if (!captureWindowModeActive && backend.active == DesktopCaptureBackend::Dxgi) {
         monitorInfo = primary_monitor_info();
         if (!monitorInfo.has_value()) {
           std::cerr << "[native-video-host] primary monitor query failed on restart\n";
           return false;
         }
         if (monitorInfo->width < monitorInfo->height) {
-          activeDesktopBackend = DesktopCaptureBackend::Wgc;
+          backend.active = DesktopCaptureBackend::Wgc;
           set_dxgi_fallback_reason("rotation_unsupported");
           std::cout << "[native-video-host] rotation_unsupported fallback_reason=rotation_unsupported\n";
         }
@@ -3407,7 +3427,7 @@ int main(int argc, char** argv) {
             item = refreshedItem;
           }
         }
-      } else if (activeDesktopBackend == DesktopCaptureBackend::Wgc) {
+      } else if (backend.active == DesktopCaptureBackend::Wgc) {
         auto refreshedItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(restart-refresh)");
         if (refreshedItem) {
           item = refreshedItem;
@@ -3454,7 +3474,7 @@ int main(int argc, char** argv) {
         std::cout << "[native-video-host] capture-size-updated old=" << prevW << "x" << prevH
                   << " new=" << newW << "x" << newH << "\n";
       }
-      if (!captureWindowModeActive && activeDesktopBackend == DesktopCaptureBackend::Dxgi) {
+      if (!captureWindowModeActive && backend.active == DesktopCaptureBackend::Dxgi) {
         DxgiDesktopCaptureConfig config;
         config.d3dDevice = d3d.Get();
         config.monitor = monitorInfo->monitor;
@@ -3491,7 +3511,7 @@ int main(int argc, char** argv) {
             &dxgiDetail);
         if (!started) {
           std::cout << "[native-video-host] fallback_reason=" << dxgiDetail << "\n";
-          activeDesktopBackend = DesktopCaptureBackend::Wgc;
+          backend.active = DesktopCaptureBackend::Wgc;
           auto refreshedItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(dxgi-fallback)");
           if (!refreshedItem) return false;
           item = refreshedItem;
@@ -3515,7 +3535,7 @@ int main(int argc, char** argv) {
           return true;
         }
       }
-      if (!captureWindowModeActive && activeDesktopBackend == DesktopCaptureBackend::Gdi) {
+      if (!captureWindowModeActive && backend.active == DesktopCaptureBackend::Gdi) {
         GdiCaptureProcessConfig config;
         config.width = newW;
         config.height = newH;
@@ -3555,7 +3575,7 @@ int main(int argc, char** argv) {
             &gdiDetail);
         if (!started) {
           std::cout << "[native-video-host] fallback_reason=" << gdiDetail << "\n";
-          activeDesktopBackend = DesktopCaptureBackend::Wgc;
+          backend.active = DesktopCaptureBackend::Wgc;
           auto refreshedItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(gdi-fallback)");
           if (!refreshedItem) return false;
           item = refreshedItem;
@@ -3603,7 +3623,7 @@ int main(int argc, char** argv) {
       captureSessionReady.store(true, std::memory_order_release);
       captureSizeChangePending.store(0, std::memory_order_release);
       std::cout << "[native-video-host] desktop_backend="
-                << (captureWindowModeActive ? "wgc_window" : desktop_capture_backend_name(activeDesktopBackend))
+                << (captureWindowModeActive ? "wgc_window" : desktop_capture_backend_name(backend.active))
                 << " capture-started=1\n";
       return true;
     } catch (...) {
@@ -3783,7 +3803,7 @@ int main(int argc, char** argv) {
     if (transport != VideoTransport::Udp || !udpPeerReady) return;
     if (!streamControlActive.load(std::memory_order_acquire)) return;
     if (captureWindowModeActive.load(std::memory_order_acquire)) return;
-    if (activeDesktopBackend != DesktopCaptureBackend::Dxgi) return;
+    if (backend.active != DesktopCaptureBackend::Dxgi) return;
     if (dxgiPointerUpdateUs.load(std::memory_order_acquire) == 0) return;
     if (nowUs < cursorSendLastUs + 33'000) return;  // <=30Hz
     // Generation fence: a sample captured under the previous target/attachment must never be
@@ -4232,8 +4252,8 @@ int main(int argc, char** argv) {
     const uint64_t nextCaptureStreamGeneration = prevCaptureStreamGeneration + 1;
 
     if (requestedWindowId == 0) {
-      if (requestedDesktopBackend == DesktopCaptureBackend::Wgc ||
-          activeDesktopBackend == DesktopCaptureBackend::Wgc) {
+      if (backend.requested == DesktopCaptureBackend::Wgc ||
+          backend.active == DesktopCaptureBackend::Wgc) {
         nextItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(window-select-desktop)");
         if (!nextItem) {
           if (outReason) *outReason = "desktop_capture_item_failed";
@@ -4479,22 +4499,22 @@ int main(int argc, char** argv) {
       forceKeyNext = true;
       arm_trailing_kick(nowUs);
     }
-    if (desktopBackendReqPending.exchange(false, std::memory_order_acq_rel)) {
-      const uint32_t reqSeq = desktopBackendReqSeq.load(std::memory_order_acquire);
-      DesktopCaptureBackend nextRequested = requestedDesktopBackend;
-      const uint16_t requestedCode = desktopBackendReqValue.load(std::memory_order_acquire);
+    if (backend.reqPending.exchange(false, std::memory_order_acq_rel)) {
+      const uint32_t reqSeq = backend.reqSeq.load(std::memory_order_acquire);
+      DesktopCaptureBackend nextRequested = backend.requested;
+      const uint16_t requestedCode = backend.reqValue.load(std::memory_order_acquire);
       if (desktop_capture_backend_from_code(requestedCode, &nextRequested)) {
-        requestedDesktopBackend = nextRequested;
+        backend.requested = nextRequested;
         const bool desktopActive = !captureWindowModeActive.load(std::memory_order_acquire);
-        const bool restartNeeded = desktopActive && activeDesktopBackend != requestedDesktopBackend;
+        const bool restartNeeded = desktopActive && backend.active != backend.requested;
         if (restartNeeded) {
-          const DesktopCaptureBackend prevActiveBackend = activeDesktopBackend;
-          activeDesktopBackend = requestedDesktopBackend;
+          const DesktopCaptureBackend prevActiveBackend = backend.active;
+          backend.active = backend.requested;
           if (!restart_capture_session()) {
-            activeDesktopBackend = prevActiveBackend;
+            backend.active = prevActiveBackend;
             std::cerr << "[native-video-host][control] desktop-backend-apply failed seq=" << reqSeq
-                      << " requested=" << desktop_capture_backend_name(requestedDesktopBackend)
-                      << " active=" << desktop_capture_backend_name(activeDesktopBackend)
+                      << " requested=" << desktop_capture_backend_name(backend.requested)
+                      << " active=" << desktop_capture_backend_name(backend.active)
                       << "\n";
           } else {
             ++captureRestartCount;
@@ -4505,14 +4525,14 @@ int main(int argc, char** argv) {
             forceKeyNext = true;
             flush_capture_pipeline_state("desktop-backend-switch");
             std::cout << "[native-video-host][control] desktop-backend-applied seq=" << reqSeq
-                      << " requested=" << desktop_capture_backend_name(requestedDesktopBackend)
-                      << " active=" << desktop_capture_backend_name(activeDesktopBackend)
+                      << " requested=" << desktop_capture_backend_name(backend.requested)
+                      << " active=" << desktop_capture_backend_name(backend.active)
                       << " desktopActive=1\n";
           }
         } else {
           std::cout << "[native-video-host][control] desktop-backend-stored seq=" << reqSeq
-                    << " requested=" << desktop_capture_backend_name(requestedDesktopBackend)
-                    << " active=" << desktop_capture_backend_name(activeDesktopBackend)
+                    << " requested=" << desktop_capture_backend_name(backend.requested)
+                    << " active=" << desktop_capture_backend_name(backend.active)
                     << " desktopActive=" << (desktopActive ? 1 : 0)
                     << "\n";
         }
@@ -4537,7 +4557,7 @@ int main(int argc, char** argv) {
         dxgiCaptureSession.Stop();
         dxgiCaptureStarted = false;
       }
-      activeDesktopBackend = DesktopCaptureBackend::Wgc;
+      backend.active = DesktopCaptureBackend::Wgc;
       const std::string fallbackReason = copy_dxgi_fallback_reason();
       std::cout << "[native-video-host] fallback_reason="
                 << (fallbackReason.empty() ? "dxgi_runtime_fallback" : fallbackReason)
@@ -4564,7 +4584,7 @@ int main(int argc, char** argv) {
         gdiCaptureProcess.Stop();
         gdiCaptureStarted = false;
       }
-      activeDesktopBackend = DesktopCaptureBackend::Wgc;
+      backend.active = DesktopCaptureBackend::Wgc;
       const std::string fallbackReason = copy_gdi_fallback_reason();
       std::cout << "[native-video-host] fallback_reason="
                 << (fallbackReason.empty() ? "gdi_runtime_fallback" : fallbackReason)
@@ -4586,7 +4606,7 @@ int main(int argc, char** argv) {
 
     // Climb back to the requested backend once whatever forced the demotion has passed.
     //
-    // A demotion used to be permanent: activeDesktopBackend was set to Wgc and the only way back
+    // A demotion used to be permanent: backend.active was set to Wgc and the only way back
     // was an explicit request from the client, which then failed again for the same reason. So a
     // single UAC prompt or RDP connect left the session on WGC for good, and the picture stayed
     // degraded long after the cause was gone. That is the "everything is slower after a UAC
@@ -4595,58 +4615,58 @@ int main(int argc, char** argv) {
     // Both causes are temporary by nature. The secure desktop goes away when the prompt is
     // answered, and the desktop returns to the physical adapter when RDP disconnects, so simply
     // trying again is what was missing.
-    if (activeDesktopBackend != requestedDesktopBackend &&
+    if (backend.active != backend.requested &&
         !captureWindowModeActive.load(std::memory_order_acquire) &&
         streamControlActive.load(std::memory_order_acquire)) {
       const uint64_t nowUs = qpc_now_us();
-      if (desktopDemotionSinceUs == 0) desktopDemotionSinceUs = nowUs;
+      if (backend.demotionSinceUs == 0) backend.demotionSinceUs = nowUs;
       // Probe the interactive-desktop state at a bounded cadence (OpenInputDesktop is a syscall).
       // A secure desktop resets the stability clock; the default desktop starts or continues it.
       // The uncached query is deliberate: the shared cached one is refreshed by input/pong callers
       // and can hand a stale "default" reading to a promotion decision the moment a UAC prompt rose.
-      if (nowUs >= desktopDefaultProbeAtUs) {
-        desktopDefaultProbeAtUs = nowUs + kDesktopDefaultProbeIntervalUs;
+      if (nowUs >= backend.defaultProbeAtUs) {
+        backend.defaultProbeAtUs = nowUs + kDesktopDefaultProbeIntervalUs;
         if (interactive_desktop_is_default_uncached()) {
-          if (desktopDefaultStableSinceUs == 0) desktopDefaultStableSinceUs = nowUs;
+          if (backend.defaultStableSinceUs == 0) backend.defaultStableSinceUs = nowUs;
         } else {
-          desktopDefaultStableSinceUs = 0;
-          desktopSecureProbeFalseTotal.fetch_add(1, std::memory_order_relaxed);
+          backend.defaultStableSinceUs = 0;
+          backend.secureProbeFalseTotal.fetch_add(1, std::memory_order_relaxed);
         }
       }
       const bool defaultStable =
-          desktopDefaultStableSinceUs != 0 &&
-          (nowUs - desktopDefaultStableSinceUs) >= kDesktopDefaultStableUs;
-      if (desktopBackendRetryAtUs == 0) {
-        desktopBackendRetryAtUs = nowUs + kDesktopBackendRetryMinUs;
-      } else if (nowUs >= desktopBackendRetryAtUs) {
+          backend.defaultStableSinceUs != 0 &&
+          (nowUs - backend.defaultStableSinceUs) >= kDesktopDefaultStableUs;
+      if (backend.retryAtUs == 0) {
+        backend.retryAtUs = nowUs + kDesktopBackendRetryMinUs;
+      } else if (nowUs >= backend.retryAtUs) {
         // The retry deadline is due. Promote only if the default desktop has been up for the whole
         // settle window AND one final uncached check confirms it is still up right now -- otherwise
         // a UAC prompt that reappeared since the last cadence probe would still eat a restart+IDR.
         bool finalDefault = defaultStable;
         if (finalDefault && !interactive_desktop_is_default_uncached()) {
           finalDefault = false;
-          desktopDefaultStableSinceUs = 0;  // secure again: restart the settle clock
-          desktopSecureProbeFalseTotal.fetch_add(1, std::memory_order_relaxed);
+          backend.defaultStableSinceUs = 0;  // secure again: restart the settle clock
+          backend.secureProbeFalseTotal.fetch_add(1, std::memory_order_relaxed);
         }
         if (!finalDefault) {
           // Deferred by the secure gate. Latch so this counts once per deadline episode, not once
           // per main-loop iteration -- the deadline stays due until we actually attempt.
-          if (!promotionDeferredForCurrentDeadline) {
-            promotionDeferredForCurrentDeadline = true;
-            desktopPromotionDeferredSecureTotal.fetch_add(1, std::memory_order_relaxed);
+          if (!backend.promotionDeferredForCurrentDeadline) {
+            backend.promotionDeferredForCurrentDeadline = true;
+            backend.promotionDeferredSecureTotal.fetch_add(1, std::memory_order_relaxed);
             std::cout << "[native-video-host] desktop-promotion-deferred reason=secure-desktop\n";
           }
         } else {
-          promotionDeferredForCurrentDeadline = false;
-          desktopPromotionAttempts.fetch_add(1, std::memory_order_relaxed);
-          const DesktopCaptureBackend demoted = activeDesktopBackend;
-          activeDesktopBackend = requestedDesktopBackend;
+          backend.promotionDeferredForCurrentDeadline = false;
+          backend.promotionAttempts.fetch_add(1, std::memory_order_relaxed);
+          const DesktopCaptureBackend demoted = backend.active;
+          backend.active = backend.requested;
           const bool restarted = restart_capture_session();
           // restart_capture_session() reports that *a* session started, not that it started on the
           // backend we asked for. When the requested one is still unavailable it falls back
-          // internally, puts activeDesktopBackend back where it was, and returns success anyway.
+          // internally, puts backend.active back where it was, and returns success anyway.
           // The backend the restart actually left behind is the only honest test.
-          const bool promoted = restarted && activeDesktopBackend == requestedDesktopBackend;
+          const bool promoted = restarted && backend.active == backend.requested;
           if (restarted) {
             // A restart replaces the capture session whether or not the backend moved, so the
             // timeline still has to be re-anchored and the next frame still has to be a keyframe.
@@ -4661,39 +4681,39 @@ int main(int argc, char** argv) {
                                                   : "desktop-backend-retry-failed");
           }
           if (promoted) {
-            desktopPromotionSuccess.fetch_add(1, std::memory_order_relaxed);
-            if (desktopDemotionSinceUs != 0 && nowUs >= desktopDemotionSinceUs) {
-              lastPromotionWaitUs.store(nowUs - desktopDemotionSinceUs, std::memory_order_relaxed);
+            backend.promotionSuccess.fetch_add(1, std::memory_order_relaxed);
+            if (backend.demotionSinceUs != 0 && nowUs >= backend.demotionSinceUs) {
+              backend.lastPromotionWaitUs.store(nowUs - backend.demotionSinceUs, std::memory_order_relaxed);
             }
             std::cout << "[native-video-host] desktop-backend-restored from="
                       << desktop_capture_backend_name(demoted)
-                      << " to=" << desktop_capture_backend_name(activeDesktopBackend) << "\n";
-            desktopBackendRetryAtUs = 0;
-            desktopBackendRetryDelayUs = kDesktopBackendRetryMinUs;
-            desktopDemotionSinceUs = 0;
+                      << " to=" << desktop_capture_backend_name(backend.active) << "\n";
+            backend.retryAtUs = 0;
+            backend.retryDelayUs = kDesktopBackendRetryMinUs;
+            backend.demotionSinceUs = 0;
           } else {
             // A real promotion failure with the default desktop up (e.g. RDP: primary duplication
             // still unavailable). This is not the secure-desktop case, so back off -- a machine
             // that genuinely cannot use the requested backend must not restart every few seconds.
-            desktopPromotionFail.fetch_add(1, std::memory_order_relaxed);
-            activeDesktopBackend = demoted;
-            desktopBackendRetryDelayUs =
-                std::min<uint64_t>(desktopBackendRetryDelayUs * 2, kDesktopBackendRetryMaxUs);
-            desktopBackendRetryAtUs = nowUs + desktopBackendRetryDelayUs;
+            backend.promotionFail.fetch_add(1, std::memory_order_relaxed);
+            backend.active = demoted;
+            backend.retryDelayUs =
+                std::min<uint64_t>(backend.retryDelayUs * 2, kDesktopBackendRetryMaxUs);
+            backend.retryAtUs = nowUs + backend.retryDelayUs;
           }
           // Any attempt consumes the current stability evidence; the next one must gather fresh
           // proof that the default desktop is up before it may fire.
-          desktopDefaultStableSinceUs = 0;
-          desktopDefaultProbeAtUs = 0;
+          backend.defaultStableSinceUs = 0;
+          backend.defaultProbeAtUs = 0;
         }
       }
     } else {
-      desktopBackendRetryAtUs = 0;
-      desktopBackendRetryDelayUs = kDesktopBackendRetryMinUs;
-      desktopDefaultStableSinceUs = 0;
-      desktopDefaultProbeAtUs = 0;
-      desktopDemotionSinceUs = 0;
-      promotionDeferredForCurrentDeadline = false;
+      backend.retryAtUs = 0;
+      backend.retryDelayUs = kDesktopBackendRetryMinUs;
+      backend.defaultStableSinceUs = 0;
+      backend.defaultProbeAtUs = 0;
+      backend.demotionSinceUs = 0;
+      backend.promotionDeferredForCurrentDeadline = false;
     }
 
     const bool streamActive = streamControlActive.load(std::memory_order_acquire);
@@ -4732,15 +4752,15 @@ int main(int argc, char** argv) {
           // Fresh resolution, not the backend the last session was demoted to. This is also
           // what frees a host parked on WGC by an RDP visit: the desktop is back on the real
           // adapter by now, and starting from the requested backend finds it.
-          activeDesktopBackend = requestedDesktopBackend;
+          backend.active = backend.requested;
           // Reattach bypasses the climb-back secure gate, so honour the same rule here: if the
           // requested backend is DXGI but the desktop is currently secure (UAC/lock), attaching
           // DXGI would just take an immediate E_ACCESSDENIED and demote. Start on WGC instead so
           // the returning viewer gets a picture now, and let the climb-back promote to DXGI once
           // the default desktop settles. A requested WGC/GDI backend is respected as-is.
-          if (requestedDesktopBackend == DesktopCaptureBackend::Dxgi &&
+          if (backend.requested == DesktopCaptureBackend::Dxgi &&
               !interactive_desktop_is_default_uncached()) {
-            activeDesktopBackend = DesktopCaptureBackend::Wgc;
+            backend.active = DesktopCaptureBackend::Wgc;
           }
         }
         if (!restart_capture_session()) {
@@ -4762,7 +4782,7 @@ int main(int argc, char** argv) {
         resetHostTimelineAnchors();
         flush_capture_pipeline_state("capture-reattached");
         std::cout << "[native-video-host] capture reattached backend="
-                  << desktop_capture_backend_name(activeDesktopBackend) << "\n";
+                  << desktop_capture_backend_name(backend.active) << "\n";
       }
       streamActiveApplied = true;
       forceKeyNext = true;
@@ -4859,7 +4879,7 @@ int main(int argc, char** argv) {
         rate.abrSeverePressureSeconds = 0;
         forceKeyNext = true;
         if (fpsChanged && !captureWindowModeActive.load(std::memory_order_acquire) &&
-            activeDesktopBackend == DesktopCaptureBackend::Gdi) {
+            backend.active == DesktopCaptureBackend::Gdi) {
           if (!restart_capture_session()) {
             std::cerr << "[native-video-host][control] GDI fps restart failed seq="
                       << reqSeq << "\n";
@@ -5227,7 +5247,7 @@ int main(int argc, char** argv) {
     if (captureSessionReady.load(std::memory_order_acquire) &&
         streamControlActive.load(std::memory_order_acquire) &&
         !captureWindowModeActive.load(std::memory_order_acquire) &&
-        activeDesktopBackend == DesktopCaptureBackend::Gdi) {
+        backend.active == DesktopCaptureBackend::Gdi) {
       // GDI is clocked and must publish continuously. WGC/DXGI are change-driven and can
       // legitimately stay silent on a static desktop, so callback silence is not a stall for
       // those backends and must never trigger a restart loop.
@@ -5272,7 +5292,7 @@ int main(int argc, char** argv) {
     if (captureSessionReady.load(std::memory_order_acquire) &&
         streamControlActive.load(std::memory_order_acquire) &&
         !captureWindowModeActive.load(std::memory_order_acquire) &&
-        activeDesktopBackend != DesktopCaptureBackend::Gdi) {
+        backend.active != DesktopCaptureBackend::Gdi) {
       const uint64_t oldestPendingUs = captureReadback.OldestGpuPendingAgeUs();
       oldestGpuPendingPeakUs = std::max(oldestGpuPendingPeakUs, oldestPendingUs);
       // Same loop-rate sample feeds the readback-drain watchdog's per-1s-window peak; unlike the
@@ -5332,7 +5352,7 @@ int main(int argc, char** argv) {
                     << " frozenRingRestarts=" << frozenRingRestartCount
                     << " captureRestarts=" << captureRestartCount
                     << " lastPublishAgeUs=" << refreezeLastPubAgeUs
-                    << " backend=" << desktop_capture_backend_name(activeDesktopBackend)
+                    << " backend=" << desktop_capture_backend_name(backend.active)
                     << " windowSec=" << (kCaptureFrozenEscalationWindowUs / 1000000)
                     << "\n";
           std::cout.flush();
@@ -6689,7 +6709,7 @@ int main(int argc, char** argv) {
            callbackFramesPerSec == 0) ? 1ULL : 0ULL;
       idleHoldTotal += idleHoldPerSec;
       const bool gdiLowPushFallbackEnabled =
-          !captureWindowModeActive && activeDesktopBackend == DesktopCaptureBackend::Gdi;
+          !captureWindowModeActive && backend.active == DesktopCaptureBackend::Gdi;
       if (useH264 &&
           captureSessionReady.load(std::memory_order_acquire) &&
           streamControlActive.load(std::memory_order_acquire) &&
@@ -6709,9 +6729,9 @@ int main(int argc, char** argv) {
           if (captureInputLowPushStreakSec >= captureInputStallConsecutiveSec && restartCooldownDone) {
             lastCaptureRestartUs = t;
             const bool fallbackFromGdi =
-                !captureWindowModeActive && activeDesktopBackend == DesktopCaptureBackend::Gdi;
+                !captureWindowModeActive && backend.active == DesktopCaptureBackend::Gdi;
             if (fallbackFromGdi) {
-              activeDesktopBackend = DesktopCaptureBackend::Wgc;
+              backend.active = DesktopCaptureBackend::Wgc;
               set_gdi_fallback_reason("gdi_low_capture_rate");
               std::cout << "[native-video-host] fallback_reason=gdi_low_capture_rate"
                         << " callbackFramesPerSec=" << callbackFramesPerSec
@@ -6792,7 +6812,7 @@ int main(int argc, char** argv) {
             captureSessionReady.load(std::memory_order_acquire) &&
             drainStreamActive &&
             !captureWindowModeActive.load(std::memory_order_acquire) &&
-            activeDesktopBackend != DesktopCaptureBackend::Gdi;
+            backend.active != DesktopCaptureBackend::Gdi;
         // Warmup after the latest of: capture session start, any capture restart, or client
         // reattach -- so the first seconds of a fresh pipeline (encoder spin-up, first IDR) never
         // read as a drain.
@@ -6855,7 +6875,7 @@ int main(int argc, char** argv) {
                       << " readbackDrainRestarts=" << readbackDrainRestartCount
                       << " captureRestarts=" << captureRestartCount
                       << " lastPublishAgeUs=" << drainLastPubAgeUs
-                      << " backend=" << desktop_capture_backend_name(activeDesktopBackend)
+                      << " backend=" << desktop_capture_backend_name(backend.active)
                       << " windowSec=" << (kCaptureFrozenEscalationWindowUs / 1000000)
                       << "\n";
             std::cout.flush();
@@ -6916,11 +6936,11 @@ int main(int argc, char** argv) {
                   << " secureInputBrokerFailed=" << secureInputBrokerFailed.load()
                   << " secureInputSkipWindowMode=" << secureInputSkipWindowMode.load()
                   << " secureInputSkipUnauth=" << secureInputSkipUnauthenticated.load()
-                  << " desktopPromo=" << desktopPromotionAttempts.load() << "/"
-                  << desktopPromotionSuccess.load() << "/" << desktopPromotionFail.load()
-                  << " desktopPromoDeferSecure=" << desktopPromotionDeferredSecureTotal.load()
-                  << " desktopSecureProbeFalse=" << desktopSecureProbeFalseTotal.load()
-                  << " lastPromoWaitUs=" << lastPromotionWaitUs.load()
+                  << " desktopPromo=" << backend.promotionAttempts.load() << "/"
+                  << backend.promotionSuccess.load() << "/" << backend.promotionFail.load()
+                  << " desktopPromoDeferSecure=" << backend.promotionDeferredSecureTotal.load()
+                  << " desktopSecureProbeFalse=" << backend.secureProbeFalseTotal.load()
+                  << " lastPromoWaitUs=" << backend.lastPromotionWaitUs.load()
                   << " inputIgnoredMove=" << inputIgnoredMove.load(std::memory_order_relaxed)
                   << " inputNoTarget=" << inputNoTarget.load(std::memory_order_relaxed)
                   << " inputUnsupported=" << inputUnsupported.load(std::memory_order_relaxed)
@@ -7030,11 +7050,11 @@ int main(int argc, char** argv) {
                   << " secureInputBrokerFailed=" << secureInputBrokerFailed.load()
                   << " secureInputSkipWindowMode=" << secureInputSkipWindowMode.load()
                   << " secureInputSkipUnauth=" << secureInputSkipUnauthenticated.load()
-                  << " desktopPromo=" << desktopPromotionAttempts.load() << "/"
-                  << desktopPromotionSuccess.load() << "/" << desktopPromotionFail.load()
-                  << " desktopPromoDeferSecure=" << desktopPromotionDeferredSecureTotal.load()
-                  << " desktopSecureProbeFalse=" << desktopSecureProbeFalseTotal.load()
-                  << " lastPromoWaitUs=" << lastPromotionWaitUs.load()
+                  << " desktopPromo=" << backend.promotionAttempts.load() << "/"
+                  << backend.promotionSuccess.load() << "/" << backend.promotionFail.load()
+                  << " desktopPromoDeferSecure=" << backend.promotionDeferredSecureTotal.load()
+                  << " desktopSecureProbeFalse=" << backend.secureProbeFalseTotal.load()
+                  << " lastPromoWaitUs=" << backend.lastPromotionWaitUs.load()
                   << " inputIgnoredMove=" << inputIgnoredMove.load(std::memory_order_relaxed)
                   << " inputNoTarget=" << inputNoTarget.load(std::memory_order_relaxed)
                   << " inputUnsupported=" << inputUnsupported.load(std::memory_order_relaxed)
