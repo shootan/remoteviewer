@@ -7472,3 +7472,17 @@ Next action
   `v0.2.58-pre-viewer-split`. 문제 시 수정 후 0.2.60.
 - 뷰어 리팩터 총괄: 5,349줄 모놀리스 → main.cpp 45줄 + viewer_* 57파일(최대 555) + 공유 헤더 3 + 단위테스트 4종, 커밋 ~55개
   (Phase 0 16 / Phase 1 15 / Phase 2 14 / Phase 3 1 + 도구·문서). 원장 F-01~F-17 기록만, 코드 수정 없음(사용자 결정).
+
+### 312) 2026-08-27 발견사항 원장 재확인 — 분할 후 코드에 F-01~F-17 대조, 정정 4 + 신규 F-18 (main, 문서만)
+
+- 대상: `docs/뷰어_리팩터_발견사항.md`의 "위치" 열이 모놀리스(`e346ff7`) 기준이라, 분할 후 `viewer_*` 57파일에 F-01~F-17을 전부 대조.
+  원장에 "리팩터 후 재확인" 절 추가 — 항목별 분할 후 위치 매핑 + 정정표(R-1~R-5) + 처리 순서 권고.
+- 정정: R-1 F-01 범위 확대(`control connected/unavailable port=`도 `args.controlPort` — 디렉터리 경로에선 `resolvedArgs.controlPort=0`) ·
+  R-2 F-07에서 `gGridScrollRow` 근거 삭제(`apply_window_list_snapshot`은 visibleCards만 사용, scrollRow는 UI 전용) ·
+  R-3 F-14 `// reset: never` 마커가 2곳 5필드만 커버(`nextToolbarPushUs` 누락; brush cache·`registered`·`remoteCursorEnabled`는 리셋 대상 아님 → 실제 6) ·
+  R-4 F-15 present 카운터 8→11(카운터 6 + trace 5).
+- 상태 변경: R-5 F-08 `[x] ec31044` — Phase 2-1b에서 `flush_stats_if_due` 1개로 통합되어 구조적으로 해소(원장 규칙 4).
+- 발견 → F-18: 혼잡 진입 임계 감도. 조건은 (디코드 큐 랙 > 0.3s **또는** presented 기준 스트림 랙 > 0.45s) AND 도착 간격 ≤150ms AND
+  !catchupSuppressed 가 3연속(`viewer_frame_gate.cpp:178~189`) — 빌드 중 로컬 e2e에서 CPU 경합만으로 `state=congested` 1회 전이(재실행 통과).
+  임계·스트릭 튜너블화 + T1 CPU 경합 시나리오는 Phase 4.
+- 코드 변경 없음(원장 규칙 1). 다음 액션: 실기 확인 후 F-01 → F-05/F-03/F-04 → F-16 → Phase 4(F-17/F-15/F-07/F-06/F-18) → F-10/F-11.
