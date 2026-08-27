@@ -108,6 +108,13 @@ bool D3dCaptureReadbackPipeline::CreateSlotsLocked(uint32_t width, uint32_t heig
   height_ = height;
   ++generation_;
   for (auto& slot : slots_) {
+    // Reclaim whatever NV12 lease this slot still holds before its meta is thrown away.
+    // This is the SINGLE owner of leases belonging to a superseded generation: a worker that
+    // is mid-Map on the old generation sees stillCurrent == false and deliberately does not
+    // release, because by then the index may already have been re-leased to a newer frame and
+    // freeing it would hand the same texture to two consumers. (Ledger H-03c.)
+    ReleaseNv12SlotLocked(slot.meta.nv12Slot, slot.meta.nv12Generation);
+    slot.meta = CaptureFrameMeta{};
     slot.staging.Reset();
     slot.query.Reset();
     slot.state = SlotState::Free;
@@ -451,6 +458,12 @@ bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrame
       }
     }
     if (!slot) {
+      // The staging ring is full, so this frame is dropped -- but the NV12 lease reserved a
+      // few lines up would stay busy forever. A busy drop is ordinary load-time behaviour, not
+      // an exception path, so four of them exhausted the four-slot ring and the zero-copy
+      // encode path silently degraded to CPU NV12 for the rest of the session -- precisely
+      // when the GPU is contended and the surface path matters most. (Ledger H-03e.)
+      ReleaseNv12SlotLocked(slotMeta.nv12Slot, slotMeta.nv12Generation);
       busyDrops_.fetch_add(1, std::memory_order_relaxed);
       return true;  // dropped, but not a caller-visible failure
     }
@@ -464,13 +477,15 @@ bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrame
 
   const uint64_t submitStartUs = qpc_us();
   uint64_t lockWaitUs = 0;
+  // Declared outside the context lock: the failure handling that reads them has to run AFTER
+  // that lock is released. See the lock-order note below. (Ledger H-23.)
+  bool preprocessedOk = false;
+  bool nv12Ok = false;
   {
     const uint64_t lockWaitStartUs = submitStartUs;
     std::lock_guard<std::mutex> d3dLock(*contextMu_);
     const uint64_t lockAcquiredUs = qpc_us();
     lockWaitUs = lockAcquiredUs - lockWaitStartUs;
-    bool preprocessedOk = false;
-    bool nv12Ok = false;
     if (preprocess || nv12OutView) {
       // Crop and scale in one blt: source rect selects the window client area, the
       // destination is the whole encode-size texture. Own-texture copy first, because
@@ -540,35 +555,38 @@ bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrame
     // also submits the copy to the GPU before the DXGI duplication frame is released, which
     // preserves ordering against the next desktop update.
     context_->Flush();
-    if ((preprocess && !preprocessedOk) || (nv12OutView && !nv12Ok)) {
-      std::lock_guard<std::mutex> lk(slotMu_);
-      if (preprocess && !preprocessedOk && generation_ == generationAtSubmit &&
-          slot->staging == staging) {
-        // The blt failed after the meta was already stamped as preprocessed; fix it up so
-        // the worker reads capture-size bytes and applies the CPU crop.
-        slot->meta.payloadW = meta.width;
-        slot->meta.payloadH = meta.height;
-        slot->meta.preprocessed = false;
-        slot->meta.cropX = meta.cropX;
-        slot->meta.cropY = meta.cropY;
-        slot->meta.cropW = meta.cropW;
-        slot->meta.cropH = meta.cropH;
-      }
-      if (nv12OutView && !nv12Ok) {
-        // One failed conversion disables the path for the session; retrying per frame would
-        // burn a blt per frame for nothing.
-        ReleaseNv12SlotLocked(slotMeta.nv12Slot, slotMeta.nv12Generation);
-        nv12Broken_ = true;
-        RB_DEBUG("nv12 blt failed; surface path disabled");
-        if (generation_ == generationAtSubmit && slot->staging == staging) {
-          slot->meta.nv12Slot = -1;
-        }
-      }
-    }
   }
+  // Everything that needs slotMu_ happens here, AFTER the context lock is released.
+  //
+  // The two locks have exactly one legal order, slotMu_ -> contextMu_, because that is what
+  // WorkerLoop takes (it holds slotMu_ across its GetData sweep). Taking slotMu_ while still
+  // holding contextMu_ -- which the blt-failure handling below used to do -- is the opposite
+  // order and deadlocks against that sweep. It had never been hit only because it needs a
+  // failing preprocess or NV12 blt; the NV12 branch is the one a driver without NV12 support
+  // takes on its very first frame. (Ledger H-23.)
   const uint64_t submitDoneUs = qpc_us();
   {
     std::lock_guard<std::mutex> lk(slotMu_);
+    const bool slotStillOurs = (generation_ == generationAtSubmit) && slot->staging == staging;
+    if (preprocess && !preprocessedOk && slotStillOurs) {
+      // The blt failed after the meta was already stamped as preprocessed; fix it up so
+      // the worker reads capture-size bytes and applies the CPU crop.
+      slot->meta.payloadW = meta.width;
+      slot->meta.payloadH = meta.height;
+      slot->meta.preprocessed = false;
+      slot->meta.cropX = meta.cropX;
+      slot->meta.cropY = meta.cropY;
+      slot->meta.cropW = meta.cropW;
+      slot->meta.cropH = meta.cropH;
+    }
+    if (nv12OutView && !nv12Ok) {
+      // One failed conversion disables the path for the session; retrying per frame would
+      // burn a blt per frame for nothing.
+      ReleaseNv12SlotLocked(slotMeta.nv12Slot, slotMeta.nv12Generation);
+      nv12Broken_ = true;
+      RB_DEBUG("nv12 blt failed; surface path disabled");
+      if (slotStillOurs) slot->meta.nv12Slot = -1;
+    }
     // A reconfigure raced the copy; the slot no longer belongs to this generation.
     if (generation_ == generationAtSubmit) {
       slot->meta.d3dWaitUs = lockWaitUs;
@@ -730,16 +748,28 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
       outStride = croppedStride;
     }
 
-    bool stillCurrent = false;
+    bool handOff = false;
     {
       std::lock_guard<std::mutex> lk(slotMu_);
       // Only free the slot if a reconfigure has not replaced it under us.
       if (generation_ == generationAtPick && slotRef && slotRef->staging == slotCopy.staging) {
         slotRef->state = SlotState::Free;
-        stillCurrent = true;
+        handOff = mapped && static_cast<bool>(publish_);
+        // The NV12 lease travels with the frame. Hand it to the consumer when the frame is
+        // actually published (whoever pops the frame releases it), and give it back here when
+        // it is not -- a failed Map used to skip publish_ and strand the slot. Either way the
+        // slot's own copy is cleared, so `meta.nv12Slot >= 0` keeps meaning "the ring still
+        // owns this lease", which is the invariant CreateSlotsLocked reclaims in bulk from.
+        // (Ledger H-03a.)
+        if (!handOff) {
+          ReleaseNv12SlotLocked(slotCopy.meta.nv12Slot, slotCopy.meta.nv12Generation);
+        }
+        slotRef->meta.nv12Slot = -1;
       }
+      // else: a reconfigure replaced this slot. Deliberately NOT released from here -- see the
+      // note in CreateSlotsLocked, which already reclaimed it. (Ledger H-03b.)
     }
-    if (mapped && stillCurrent && publish_) {
+    if (handOff) {
       publish_(std::move(payload), outW, outH, outStride, meta, gpuPendingUs, mapUs, memcpyUs);
     }
   }

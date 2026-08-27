@@ -664,7 +664,15 @@ void CaptureState::PublishFrame(CaptureResources& res, HostStats& stats,
                                 uint32_t frameH, uint32_t stride, const CaptureFrameMeta& meta,
                                 uint64_t gpuPendingUs, uint64_t workerMapUs, uint64_t workerMemcpyUs) {
   CaptureState& capture = *this;
-  if (!payload || payload->empty() || frameW < 2 || frameH < 2) return;
+  if (!payload || payload->empty() || frameW < 2 || frameH < 2) {
+    // The NV12 lease was handed to us with the frame; dropping the frame without giving it
+    // back strands a ring slot for the rest of the session. The attachment-cookie guard just
+    // below already does this -- only this first guard was missing it. (Ledger H-03d.)
+    if (meta.nv12Slot >= 0) {
+      res.captureReadback.ReleaseNv12Slot(meta.nv12Slot, meta.nv12Generation);
+    }
+    return;
+  }
   // Drop a readback completion whose Submit happened under a previous capture attachment: a pool
   // recreate bumped the cookie in between, so these pixels belong to the old target/geometry. The
   // stream-generation check downstream does not catch a same-generation size-change recreate (the
