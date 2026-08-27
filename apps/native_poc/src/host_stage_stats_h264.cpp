@@ -163,6 +163,7 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
             << " captureInputLowPushStreakSec=" << watchdog.inputLowPushStreakSec
             << " captureDeadRestartCount=" << watchdog.deadRestartCount
             << " queueDepthMax=" << stats.queueDepthMax.load(std::memory_order_relaxed)
+            << " queueDepthWindowMax=" << stats.queueDepthWindowMax.load(std::memory_order_relaxed)
             << " queueWaitTimeoutCount=" << stats.queueWaitTimeoutCount
             << " queueWaitNoWorkCount=" << stats.queueWaitNoWorkCount
             << " captureRestarts=" << capture.restartCount

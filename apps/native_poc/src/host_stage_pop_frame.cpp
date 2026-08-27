@@ -306,17 +306,25 @@ captureToQueueUs =
   // Remember the size for the 1s tick, which no longer sees this tick's TickContext.
   stats.lastFrameW = w;
   stats.lastFrameH = h;
-  ++stats.captureReadbackSamples;
-  stats.captureD3DWaitSumUs += captureD3DWaitUs;
-  stats.captureD3DWaitMaxUs = std::max(stats.captureD3DWaitMaxUs, captureD3DWaitUs);
-  stats.captureCopyMapSumUs += captureCopyMapUs;
-  stats.captureCopyMapMaxUs = std::max(stats.captureCopyMapMaxUs, captureCopyMapUs);
-  stats.captureMemcpySumUs += captureMemcpyUs;
-  stats.captureMemcpyMaxUs = std::max(stats.captureMemcpyMaxUs, captureMemcpyUs);
-  stats.captureUnmapWaitSumUs += captureUnmapWaitUs;
-  stats.captureUnmapWaitMaxUs = std::max(stats.captureUnmapWaitMaxUs, captureUnmapWaitUs);
-  stats.captureUnmapSumUs += captureUnmapUs;
-  stats.captureUnmapMaxUs = std::max(stats.captureUnmapMaxUs, captureUnmapUs);
+  // Real readbacks only. A trailing kick or a static-refresh frame is served from the bootstrap
+  // cache and never went through D3D at all, so its stage timings are all zero -- feeding them
+  // here added zeros to the numerator and ones to the denominator, and on a static desktop (where
+  // the 1Hz refresh may be the ONLY thing flowing) that dragged every capture-stage average
+  // toward zero exactly when someone would be reading them to ask why nothing is moving.
+  // (Ledger H-13; the client-side twin is viewer ledger F-10.)
+  if (!servedBootstrap) {
+    ++stats.captureReadbackSamples;
+    stats.captureD3DWaitSumUs += captureD3DWaitUs;
+    stats.captureD3DWaitMaxUs = std::max(stats.captureD3DWaitMaxUs, captureD3DWaitUs);
+    stats.captureCopyMapSumUs += captureCopyMapUs;
+    stats.captureCopyMapMaxUs = std::max(stats.captureCopyMapMaxUs, captureCopyMapUs);
+    stats.captureMemcpySumUs += captureMemcpyUs;
+    stats.captureMemcpyMaxUs = std::max(stats.captureMemcpyMaxUs, captureMemcpyUs);
+    stats.captureUnmapWaitSumUs += captureUnmapWaitUs;
+    stats.captureUnmapWaitMaxUs = std::max(stats.captureUnmapWaitMaxUs, captureUnmapWaitUs);
+    stats.captureUnmapSumUs += captureUnmapUs;
+    stats.captureUnmapMaxUs = std::max(stats.captureUnmapMaxUs, captureUnmapUs);
+  }
   queueWaitUs =
       (queuePopUs > 0 && queuePushUs > 0 && queuePopUs >= queuePushUs) ? (queuePopUs - queuePushUs) : 0;
   queueGapFrames =
@@ -325,6 +333,7 @@ captureToQueueUs =
   const uint64_t lastPopVersionAtRead = capture.lastPopFrameVersion.load(std::memory_order_acquire);
   queueDepthAtPop = (version > lastPopVersionAtRead) ? (version - lastPopVersionAtRead) : 0;
   update_u64_max(stats.queueDepthMax, queueDepthAtPop);
+  update_u64_max(stats.queueDepthWindowMax, queueDepthAtPop);
   capture.lastPopFrameVersion.store(version, std::memory_order_release);
   return Flow::Next;
 }

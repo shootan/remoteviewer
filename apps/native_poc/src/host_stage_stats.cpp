@@ -342,6 +342,7 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
                 << " captureInputLowPushStreakSec=" << watchdog.inputLowPushStreakSec
                 << " captureDeadRestartCount=" << watchdog.deadRestartCount
                 << " queueDepthMax=" << stats.queueDepthMax.load(std::memory_order_relaxed)
+                << " queueDepthWindowMax=" << stats.queueDepthWindowMax.load(std::memory_order_relaxed)
                 << " queueWaitTimeoutCount=" << stats.queueWaitTimeoutCount
                 << " queueWaitNoWorkCount=" << stats.queueWaitNoWorkCount
                 << " captureRestarts=" << capture.restartCount
@@ -402,6 +403,7 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
     sender.udpTxBytes = 0;
     sender.udpTxFail = 0;
     sender.udpTxNoPeer = 0;
+    stats.queueDepthWindowMax.store(0, std::memory_order_relaxed);
     stats.skippedByOverwrite = 0;
     stats.stalePreEncodeDropCount = 0;
     stats.staleEncodedDropCount = 0;

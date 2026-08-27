@@ -756,6 +756,7 @@ void CaptureState::PublishFrame(CaptureResources& res, HostStats& stats,
   const uint64_t currentPopVersion = capture.lastPopFrameVersion.load(std::memory_order_acquire);
   const uint64_t depthNow = (currentVersion >= currentPopVersion) ? (currentVersion - currentPopVersion) : 0;
   update_u64_max(stats.queueDepthMax, depthNow);
+  update_u64_max(stats.queueDepthWindowMax, depthNow);
   ++stats.queuePushCount;
   stats.callbackFrames += 1;
   uint64_t loggedGeneration = capture.firstCallbackLoggedGeneration.load(std::memory_order_acquire);

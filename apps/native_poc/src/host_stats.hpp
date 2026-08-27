@@ -87,7 +87,13 @@ struct HostStats {
   uint32_t lastFrameW = 0;
   uint32_t lastFrameH = 0;
   uint64_t queueWaitNoWorkCount = 0;
+  // LIFETIME worst, never reset -- that is deliberate (it has behaved this way since it was
+  // introduced) but it is printed next to per-second counters with nothing saying so, which is
+  // how it kept reading as "the last second was that deep". The label stays for log
+  // compatibility; queueDepthWindowMax below is the per-interval peak that was missing.
+  // (Ledger H-14.)
   std::atomic<uint64_t> queueDepthMax{0};
+  std::atomic<uint64_t> queueDepthWindowMax{0};  // reset every stats tick
 };
 
 }  // namespace remote60::native_poc
