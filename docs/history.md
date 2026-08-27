@@ -7457,3 +7457,18 @@ Next action
   뷰어 e2e 3/3 ALL PASS; 단위테스트 viewer_frame_gate/selection_gate/picker_gesture/layout PASS; 아래 최종 게이트 참조.
 - 발견 → 원장: F-16(점→비디오 좌표 끝점 편차, T4에서 확인), F-17(전역 인스턴스 10 잔존 — 계획 편차).
 - 다음 액션: 최종 게이트(호스트 e2e·단위테스트 전부·verify -GateAProfile) → 0.2.59 설치본 → 실기 확인 → main 병합.
+
+### 311) 2026-08-27 뷰어 분할 리팩터 최종 게이트 통과 + 실기용 설치본 0.2.59 (브랜치 refactor/viewer-split, 2464c62)
+
+- 최종 게이트(b877016 기준): (A) 14타깃 빌드 exit 0 — 뷰어/호스트/단위테스트 10/UDP e2e. (C) 뷰어 e2e C-1 stream·C-2 picker·C-3 tcp-raw
+  ALL PASS. (D) 단위테스트 10/10 PASS — host_abr/frame_gate/kick/backend_policy, capture_cadence_gate, shared_core, viewer_frame_gate/
+  selection_gate/picker_gesture/layout. 호스트 UDP e2e ALL PASS. `verify_native_video_runtime.ps1 -GateAProfile`(udp/h264 30fps, 격리
+  포트): 정적 데스크톱에서는 `capture_input_stall`로 decoded fps 목표 27 미달(환경 요인, recovery/present gap OK, 폴백 0) →
+  `perf_scene_generator.ps1 -Scene scroll` 동시 구동 시 **GATE_A_PASS=True**(decoded fps OK, recovery ≤1s OK, present gap>1s 0건,
+  present gap avg 53ms/p95 65ms/max 83ms, CLIENT_RC=0).
+- 설치본: product_version 0.2.58→0.2.59(2464c62), `remote60_installer` 빌드, 임베드 검증 — GNLinkSetup.exe L"0.2.59" ×3 / L"0.2.58" ×0,
+  GNLinkHost.exe ×1/×0. `dist/GNLinkSetup-0.2.59.exe`(3171840 B) 복사; 0.2.58(호스트 분할, 리팩터 전 뷰어)은 되돌리기용으로 보존.
+- 상태: **실기 확인 대기**(계획 §10). 통과 시 `refactor/viewer-split` → main 병합(문서는 이미 main과 동기), 복귀 태그
+  `v0.2.58-pre-viewer-split`. 문제 시 수정 후 0.2.60.
+- 뷰어 리팩터 총괄: 5,349줄 모놀리스 → main.cpp 45줄 + viewer_* 57파일(최대 555) + 공유 헤더 3 + 단위테스트 4종, 커밋 ~55개
+  (Phase 0 16 / Phase 1 15 / Phase 2 14 / Phase 3 1 + 도구·문서). 원장 F-01~F-17 기록만, 코드 수정 없음(사용자 결정).

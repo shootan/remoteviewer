@@ -5,7 +5,7 @@
 
 ## 지금 상태 한 줄
 "게임 중 멈춤/끊김" 문제를 원인별로 분해해 P0·P1·P1.5·필드안정화까지 배포(0.2.54~0.2.57). **현재 최신
-설치본은 `dist/GNLinkSetup-0.2.58.exe`(리팩터 코드, **실기 통과 2026-08-27 → main 병합 완료**; 되돌리기 = `dist/GNLinkSetup-0.2.57.exe` + git 태그 `v0.2.57-pre-host-split`).** 남은 것은 실기 검증 대기 + P2/P3.
+설치본은 `dist/GNLinkSetup-0.2.59.exe`(뷰어 분할 리팩터 코드, 브랜치 `refactor/viewer-split`, **실기 확인 대기**; 되돌리기 = `dist/GNLinkSetup-0.2.58.exe` + 태그 `v0.2.58-pre-viewer-split`). 호스트 분할 0.2.58은 실기 통과 → main 병합 완료.** 남은 것은 실기 검증 대기 + P2/P3.
 
 ## 배포 이력 (상세는 history.md 해당 번호)
 - 0.2.50 (250) 인코더 output-starvation 계측
