@@ -7626,3 +7626,27 @@ Next action
   노출해야 한다(DXGI는 독립 worker 워치독이 이미 잡는다).
 - 변경 파일: `docs/호스트_리팩터_발견사항.md`, `docs/구현계획.md`, `docs/history.md`. 코드 변경 없음.
 - 다음 액션: 실기 확인(설치본 빌드 → 사용자 판정). 그 뒤 H-24 / H-25 / 검증 부채.
+
+### 319) 2026-08-28 코덱스 cf9d684/e545cd6 검증 반영 — H-26 (브랜치 refactor/viewer-split, 854b58f)
+
+- 코덱스가 우선 검증 대상으로 지목한 두 커밋을 diff 단위로 봤고, `e545cd6`(MainLoopMailbox)가
+  **스스로 커밋 메시지에 내건 계약을 못 지키고 있었다**는 지적이 나왔다. 셋 다 코드에서 확인해 닫았다.
+- H-26a: `stage_time_limit`(2번)이 메일박스를 비우는데 `stage_gate_static`(11번)이 같은 tick에 peek 하니
+  거의 항상 false. 옛 `requestedKeyFrame` atomic은 gate **뒤** encode 경로에서 소비돼 gate가 true를 볼 수
+  있었다 — 즉 강제 IDR을 실을 바로 그 프레임을 정적 게이트가 throttle 할 수 있었다. gate가
+  `encoder.forceKeyNext`를 읽도록 수정.
+- H-26b: `kick.Arm`이 SenderBarrier에만 걸려 있어 "새 프레임 없이도 모든 키 요청이 동작"이 미완이었다.
+  모든 reason에서 arm하고 `needKick`에 `forceKeyNext` 포함.
+- H-26c: UDP 롤오버에 `mailbox.Clear`가 없어 옛 클라의 요청이 새 클라에 적용될 수 있었다(옛 atomic도
+  같은 누락이라 회귀는 아니나 Clear 주석이 거짓이었다). dispatcher가 옛 Serve 반환 후 `Reset` 다음,
+  `controlReadyEpoch` publish 전에 Clear.
+- H-26d: `cf9d684`가 `stage_stats`를 `stage_runtime_tune` 앞으로 옮긴 탓에 1초 경계와 명시 tune이 겹치면
+  ABR/M9가 pre-tune 상태로 재init하고 tune이 또 재init한다. `TuneEncoderPending()` peek로 그 tick의
+  ABR/M9를 hold해 옛 동작 복원.
+- **테스트 구멍**: `sink.AskForKeyframe(); wait_until(state == Connected)`는 요청 전부터 Connected라 즉시
+  참이라 아무것도 검증하지 않았다. 그리고 `e545cd6` 커밋 메시지의 "harness가 host log를 grep한다"는
+  사실이 아니었다 — 수동으로 한 번 했을 뿐이다. 이제 sink가 key AU를 세어 요청 전후 증가를 기다리고
+  (실측 before=3 after=4), harness가 host.log에서 네 줄을 grep해 없으면 FAIL한다.
+- 검증: 전 타깃 빌드 에러 0 + host_udp_e2e ALL PASS(18 체크 + host 로그 4건) + 단위테스트 22종 PASS +
+  정상 종료 rc=0/"done".
+- 다음 액션: 실기 확인. 그 뒤 H-24 / H-25 / 검증 부채.
