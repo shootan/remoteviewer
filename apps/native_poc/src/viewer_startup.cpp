@@ -382,7 +382,8 @@ int connect_media_socket(ViewerContext& ctx) {
     (void)setsockopt(gSession.sock, SOL_SOCKET, SO_RCVTIMEO,
                      reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
     if (!handshakeOk) {
-      std::cerr << "[native-video-client] udp handshake failed " << ctx.args.host << ":" << ctx.args.port << "\n";
+      std::cerr << "[native-video-client] udp handshake failed " << ctx.resolvedArgs.host << ":"
+                << ctx.resolvedArgs.port << "\n";
       closesocket(gSession.sock);
       gSession.sock = INVALID_SOCKET;
       if (ctx.dec.mfStarted) MFShutdown();
@@ -412,8 +413,8 @@ void attach_control_tunnel_and_log(ViewerContext& ctx) {
     std::cout << "[native-video-client] control tunnelled over the media socket\n";
   }
 
-  std::cout << "[native-video-client] connected host=" << ctx.args.host
-            << " port=" << ctx.args.port
+  std::cout << "[native-video-client] connected host=" << ctx.resolvedArgs.host
+            << " port=" << ctx.resolvedArgs.port
             << " transport=" << video_transport_name(ctx.dec.transport)
             << " codec=" << ctx.args.codec
             << " seconds=" << ctx.args.seconds << "\n";
