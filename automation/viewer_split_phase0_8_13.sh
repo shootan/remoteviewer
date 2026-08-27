@@ -31,11 +31,11 @@ EOF
 }
 hpp_prelude() {  # $1 out, $2.. comment lines (already prefixed with //), then includes given via INCLUDES var
   local out=$1; shift
-  { echo '#pragma once'; echo; printf '%s\n' "$@"; echo; printf '%s\n' $INCLUDES; echo; echo 'namespace remote60::native_poc::viewer {'; echo; } > "$out"
+  { echo '#pragma once'; echo; printf '%s\n' "$@"; echo; for h in $INCLUDES; do echo "#include \"$h\""; done; echo; echo 'namespace remote60::native_poc::viewer {'; echo; } > "$out"
 }
 cpp_prelude() {  # $1 out, $2 own header, then INCLUDES var
   local out=$1 own=$2
-  { echo "// See $own. Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0)."; echo; echo "#include \"$own\""; echo; printf '%s\n' $INCLUDES; echo; echo 'namespace remote60::native_poc::viewer {'; echo; } > "$out"
+  { echo "// See $own. Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0)."; echo; echo "#include \"$own\""; echo; for h in $INCLUDES; do echo "#include \"$h\""; done; echo; echo 'namespace remote60::native_poc::viewer {'; echo; } > "$out"
 }
 
 # ================= 0-8 viewer_layout =================
