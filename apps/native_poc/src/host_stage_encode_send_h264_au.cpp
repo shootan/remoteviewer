@@ -422,6 +422,11 @@ if (!servedBootstrap) {
     countedRawForInput = true;
   }
 }
+// The forced key is satisfied when the key AU is ACCEPTED by the send path, not when it lands on
+// the wire: on UDP this point is past the enqueue, on TCP past the write. A key AU always takes
+// the EnqueueKey branch of the queue policy, so the `!enqueuedForSend` early-out above never
+// swallows one. A UDP send that fails afterwards re-arms the media barrier and posts
+// RequestKeyframe{SenderBarrier}, which is what makes the weaker condition safe.
 if ((hdr.flags & 1u) != 0) {
   encoder.forceKeyNext = false;
   encoder.forceKeySubmittedAtUs = 0;

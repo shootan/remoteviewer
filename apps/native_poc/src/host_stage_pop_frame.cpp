@@ -200,9 +200,12 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
         // (it is only cleared when a key AU is actually emitted), nothing re-armed the kick, and
         // with the static refresh off there was no further input ever -- the request stalled on a
         // single MFT hold. Re-arming on forceKeyNext drains it 150ms later instead.
-        // Termination: the AU path clears forceKeyNext when the key reaches the wire, so the next
-        // due sees needKick false and cancels. The 300ms force-key submit latch keeps this from
-        // becoming an IDR train. (Ledger H-26b, second pass.)
+        // Termination: the AU path clears forceKeyNext once the key AU is accepted by the send
+        // path -- enqueued to the sender on UDP, written on TCP -- not once it is on the wire.
+        // The next due then sees needKick false and cancels. A UDP send that later fails re-arms
+        // the barrier and posts RequestKeyframe{SenderBarrier}, so the weaker condition is safe.
+        // The 300ms force-key submit latch keeps this from becoming an IDR train.
+        // (Ledger H-26b, second pass.)
         rearm = barrierClosed || encoder.forceKeyNext;
       }
       // Otherwise one-shot: a failed fill (locked/secure/identity mismatch) leaves the screen black
