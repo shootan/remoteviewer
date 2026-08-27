@@ -1,0 +1,68 @@
+#pragma once
+
+// Input forwarding of the viewer: mouse/key/IME events become ControlInputEvent/Text messages.
+//
+// Role:    enqueue_input_event / enqueue_input_text_units / enqueue_macro_step (queue for the control
+//          thread), the key-forwarding memory (forward_key_down/up, key_event_should_forward,
+//          enqueue_release_for_pressed_keys), IME result text, mouse capture release, coord_to_permille,
+//          toggle_macro_window.
+// Thread:  UI (WndProc) produces; the control thread drains gInputQueueState. The macro window replays
+//          through enqueue_macro_step on the UI thread.
+// Input:   virtual keys, video coordinates, UTF-16 text, macro steps.
+// Output:  QueuedControlInputMessage entries; macro recording taps enqueue_input_event.
+// Callers: WndProc, viewer_picker (coord_to_permille), the toolbar/macro callbacks in main().
+//
+// Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-9).
+
+#include "viewer_common.hpp"
+#include "viewer_globals.hpp"
+
+namespace remote60::native_poc::viewer {
+
+void enqueue_control_input_message(const QueuedControlInputMessage& msg);
+
+void enqueue_input_text_units(const uint16_t* text, size_t count);
+
+bool local_hotkey_modifiers_active();
+
+/**
+ * Whether this virtual key should be forwarded as a key event.
+ *
+ * Keys that produce a character are excluded, because their character arrives through the
+ * text path -- forwarding both injected every printable twice: Korean once as composed text
+ * and once as the raw letter the host's English layout makes of the same key. That was the
+ * "type 11, get 22" session, with an English echo trailing every Hangul syllable.
+ */
+bool key_event_should_forward(WPARAM vk);
+
+/** Decides for a down event and records the answer for the matching up. */
+bool forward_key_down(WPARAM vk);
+
+bool forward_key_up(WPARAM vk);
+
+bool send_ime_result_text(HWND hwnd, LPARAM imeFlags);
+
+void release_mouse_capture_if_idle(HWND hwnd);
+
+void enqueue_release_for_pressed_mouse_buttons();
+
+// Release every key this client has an outstanding down for.
+//
+// A key-up only arrives if this window still has focus when the key is released. Alt, the Win
+// key, and Alt+Tab are all intercepted by the local Windows and steal focus as they do it, so
+// their down reaches the host and their up never does -- the host is left holding a modifier
+// nobody is pressing, and because it is a real SendInput state it survives the client being
+// closed and reopened. Sending the up for everything held, the moment focus is lost, is what
+// keeps a modifier from latching on the host.
+void enqueue_release_for_pressed_keys();
+
+uint32_t coord_to_permille(int coord, int extent);
+
+void enqueue_input_event(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode);
+
+/** A replayed step carries its own recorded button state instead of today's live one. */
+void enqueue_macro_step(const remote60::native_poc::MacroStep& step);
+
+void toggle_macro_window(HWND owner);
+
+}  // namespace remote60::native_poc::viewer

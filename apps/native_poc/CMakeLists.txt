@@ -148,6 +148,7 @@ target_link_libraries(remote60_secure_input_service PRIVATE
 add_executable(remote60_native_video_client_poc
   src/native_video_client_main.cpp
   src/viewer_globals.cpp
+  src/viewer_input_forward.cpp
   src/viewer_layout.cpp
   src/viewer_gdi_util.cpp
   src/viewer_decoder_backend.cpp
