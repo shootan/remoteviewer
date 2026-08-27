@@ -108,7 +108,7 @@ if [ "$FROM" -le 0 ]; then
   done
   perl -0pi -e 's@// Catch-up defaults tuned for software codec path: avoid runaway multi-second lag,\r\n// but still clamp perceived latency quickly for interactive remote use\.\r\n@@ or die "c1"; s@// Long enough that a slow host answering a window list is not mistaken for a dead link\.\r\n@@ or die "c2"; s@// Picker mis-click guard\. In the field a frozen-looking stream had the user frantically clicking;\r\n// one UP landed on the first window card and silently switched the capture to another window\.\r\n// A selection now requires DOWN and UP on the SAME target and a picker that has been visible for\r\n// at least 300ms \(kPickerSelectMinShownUs\), so a click that started before the picker appeared --\r\n// or that merely ends on a card -- cannot select\. ~0 = nothing pressed; 0 = desktop is a valid id\.\r\n@@ or die "c3"; s@// Posted to the video window when the first selected frame is ready, so the toolbar \(a window of\r\n// its own, whose show/hide must run on the UI thread\) is revealed on the thread that owns it\.\r\n@@ or die "c4"' "$GH"
   perl -0pi -e 's~(#include "viewer_common\.hpp"\r\n)~$1#include "viewer_constants.hpp"\r\n~ or die "include"' "$GH"
-  grep -c "^constexpr" "$GH" | grep -qx 0 || { echo "constants remain in globals.hpp"; exit 1; }
+  [ "$(grep -c '^constexpr' "$GH" || true)" = 0 ] || { echo "constants remain in globals.hpp"; exit 1; }
   bash automation/viewer_split_gate.sh --e2e
   commit_step 1-0 "tuning constants to viewer_constants.hpp (verbatim)" "The 28 kXxx constants (with their comments) leave viewer_globals.hpp so the Phase 1 state headers can use them as default member initialisers; each line checked identical to HEAD." "$GH" $S/viewer_constants.hpp
 fi
