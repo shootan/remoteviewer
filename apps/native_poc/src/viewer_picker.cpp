@@ -58,10 +58,6 @@ void queue_window_list_request(const char* statusText) {
   gPicker.windowPanel.RequestList(statusText);
 }
 
-void queue_window_select_request(uint64_t windowId, const char* statusText) {
-  gPicker.windowPanel.RequestSelect(windowId, statusText);
-}
-
 void set_window_panel_status(const std::string& status) {
   gPicker.windowPanel.SetStatus(status);
 }

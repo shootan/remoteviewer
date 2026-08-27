@@ -254,22 +254,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         picker_release(hwnd, layout, x, y, "mouse");
         return 0;
       }
-      if (point_in_rect(layout.refreshButtonRect, x, y)) {
-        queue_window_list_request("window_list_request pending");
-        InvalidateRect(hwnd, nullptr, FALSE);
-        return 0;
-      }
-      if (point_in_rect(layout.desktopButtonRect, x, y)) {
-        queue_window_select_request(0, "desktop_select_requested");
-        InvalidateRect(hwnd, nullptr, FALSE);
-        return 0;
-      }
-      uint64_t hitWindowId = 0;
-      if (try_hit_window_list_item(hwnd, x, y, &hitWindowId)) {
-        queue_window_select_request(hitWindowId, "window_select_requested");
-        InvalidateRect(hwnd, nullptr, FALSE);
-        return 0;
-      }
       if (point_in_panel_ui(hwnd, x, y)) return 0;
       if (kInputPolicyForceBlock) return 0;
       {
@@ -303,12 +287,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           scroll_window_list(hwnd, (wheel < 0) ? 1 : -1);
           InvalidateRect(hwnd, nullptr, FALSE);
         }
-        return 0;
-      }
-      if (point_in_rect(layout.listRect, p.x, p.y)) {
-        const int wheel = GET_WHEEL_DELTA_WPARAM(wp);
-        scroll_window_list(hwnd, (wheel < 0) ? 1 : -1);
-        InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
       }
       if (point_in_panel_ui(hwnd, p.x, p.y)) return 0;

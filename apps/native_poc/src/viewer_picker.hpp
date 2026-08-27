@@ -26,7 +26,6 @@ void queue_thumbnail_fetches_from_panel();
 
 void queue_window_list_request(const char* statusText = nullptr);
 
-void queue_window_select_request(uint64_t windowId, const char* statusText = nullptr);
 
 void set_window_panel_status(const std::string& status);
 
