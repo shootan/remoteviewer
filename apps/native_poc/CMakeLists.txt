@@ -450,6 +450,11 @@ add_executable(remote60_host_kick_test
 )
 target_include_directories(remote60_host_kick_test PRIVATE src)
 
+add_executable(remote60_host_main_loop_mailbox_test
+  src/host_main_loop_mailbox_test.cpp
+)
+target_include_directories(remote60_host_main_loop_mailbox_test PRIVATE src)
+
 add_executable(remote60_host_command_line_test
   src/host_command_line_test.cpp
 )

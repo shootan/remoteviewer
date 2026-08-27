@@ -32,12 +32,19 @@ class CountingSink : public ClientEncodedFrameSink {
     frames_.fetch_add(1, std::memory_order_relaxed);
   }
   void OnVideoStreamReset() override {}
+  // Lets the test ask the controller for one keyframe, which is the only way to drive
+  // ControlRequestKeyFrame from here. One-shot: the controller polls this every loop tick.
+  bool ConsumeDecoderKeyframeRequest() override {
+    return wantKeyframe_.exchange(false, std::memory_order_acq_rel);
+  }
+  void AskForKeyframe() { wantKeyframe_.store(true, std::memory_order_release); }
   uint64_t frames() const { return frames_.load(std::memory_order_relaxed); }
   uint64_t bytes() const { return bytes_.load(std::memory_order_relaxed); }
 
  private:
   std::atomic<uint64_t> frames_{0};
   std::atomic<uint64_t> bytes_{0};
+  std::atomic<bool> wantKeyframe_{false};
 };
 
 template <typename Fn>
@@ -120,6 +127,30 @@ int main(int argc, char** argv) {
   check("runtime bitrate up request accepted", controller.RequestRuntimeConfig(10000000, 30));
   std::this_thread::sleep_for(std::chrono::milliseconds(800));
   check("session survives bitrate upshift",
+        controller.Snapshot().state == ClientSessionState::Connected);
+
+  // The remaining control requests the host turns into main-loop work. Each one used to be a
+  // hand-rolled `*Pending` atomic plus a scattered payload; they are MainLoopMailbox posts now
+  // (Phase 4), and nothing else in this suite exercised them. The assertion here is that the
+  // request goes out and the session survives it -- the host log carries the matching
+  // "keyframe-request-consumed" / "monitor-select applied" / "desktop-backend-" lines a harness
+  // greps for.
+  sink.AskForKeyframe();
+  const bool keyframeRequested = wait_until([&] {
+    return controller.Snapshot().state == ClientSessionState::Connected;
+  }, 2000);
+  check("keyframe request survives the tunnel", keyframeRequested);
+
+  check("monitor select request accepted", controller.RequestMonitorSelect(0));
+  std::this_thread::sleep_for(std::chrono::milliseconds(800));
+  check("session survives monitor select",
+        controller.Snapshot().state == ClientSessionState::Connected);
+
+  // 2 = WGC. Requesting the backend the host may already be on is fine: the point is that the
+  // request reaches the loop, and the host logs either "-applied" or "-stored".
+  check("desktop backend request accepted", controller.RequestDesktopCaptureBackend(2));
+  std::this_thread::sleep_for(std::chrono::milliseconds(800));
+  check("session survives backend request",
         controller.Snapshot().state == ClientSessionState::Connected);
 
   // Input is the latency-sensitive traffic; it must survive the same path.

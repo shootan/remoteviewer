@@ -20,6 +20,7 @@
 
 #include "host_args.hpp"
 #include "host_encoded_sender.hpp"
+#include "host_main_loop_mailbox.hpp"
 #include "host_encoder_manager.hpp"
 #include "host_net_io.hpp"
 #include "host_session.hpp"
@@ -30,9 +31,10 @@
 namespace remote60::native_poc {
 
 void SenderState::StartThread(VideoTransport transport, bool useH264, const Args& args,
-                              SessionState& clientSession) {
+                              SessionState& clientSession, MainLoopMailbox& mailbox) {
   SenderState& sender = *this;
   if (transport != VideoTransport::Udp || !useH264) return;
+  sender.mailbox = &mailbox;
   sender.thread = std::thread([&]() {
     (void)SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
     uint64_t cadenceScheduledUs = 0;
@@ -168,8 +170,10 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
         // to reach the wire breaks the client's reference chain (a delta references a picture the
         // client never fully received), and a barrier that was opened by this frame's key would
         // leave the decoder stuck. Clear the queue and re-arm the barrier, then ask the MAIN loop
-        // for a fresh IDR via sender.recoveryPending: sender.requestKey alone is only consumed after
-        // a real frame is popped, so on a static desktop the recovery IDR would never be produced.
+        // for a fresh IDR by posting RequestKeyframe{SenderBarrier}. This used to need two flags
+        // consumed at two different points -- requestKey was only read after a real frame was
+        // popped, which never happens on a static desktop, so recoveryPending existed purely to
+        // get the recovery IDR out. One typed request replaces both. (Phase 4.)
         sender.sendFailed.store(true, std::memory_order_release);
         bool rearmed = false;
         {
@@ -189,8 +193,7 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
         if (rearmed) {
           sender.firstKeyWireUs.store(0, std::memory_order_relaxed);  // retry epoch's first key reappears
           sender.barrierRearmCount.fetch_add(1, std::memory_order_relaxed);
-          sender.requestKey.store(true, std::memory_order_release);
-          sender.recoveryPending.store(true, std::memory_order_release);
+          sender.mailbox->PostRequestKeyframe(kKeyframeReasonSenderBarrier);
           // Re-anchor pacing: a partial frame consumed part of the schedule and the epoch is
           // unchanged, so freshCadence would not otherwise trip for the recovery IDR.
           cadenceScheduledUs = 0;

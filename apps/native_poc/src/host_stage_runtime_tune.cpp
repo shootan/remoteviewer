@@ -94,13 +94,14 @@ Flow stage_runtime_tune(HostContext& hx, TickContext& tc) {
   auto& res = hx.res;
   auto& nowUs = tc.nowUs;
   auto& seq = tc.seq;
-  if (useH264 && encoder.tunePending.exchange(false, std::memory_order_acq_rel)) {
-    const uint32_t reqSeq = encoder.tuneSeq.load(std::memory_order_acquire);
-    const uint32_t requestedBitrate = encoder.tuneBitrate.load(std::memory_order_acquire);
+  const auto tuneReq = useH264 ? hx.mailbox.TakeTuneEncoder() : std::nullopt;
+  if (tuneReq) {
+    const uint32_t reqSeq = tuneReq->seq;
+    const uint32_t requestedBitrate = tuneReq->bitrate;
     const bool bitrateExplicit = requestedBitrate >= 100000;
     uint32_t targetBitrate = requestedBitrate;
-    uint32_t targetKeyint = encoder.tuneKeyint.load(std::memory_order_acquire);
-    uint32_t targetFps = encoder.tuneFps.load(std::memory_order_acquire);
+    uint32_t targetKeyint = tuneReq->keyint;
+    uint32_t targetFps = tuneReq->fps;
     // Explicitness is recorded before the fallbacks fill the gaps: the fallbacks are the
     // CURRENT values, and only what the user actually asked for may move a ceiling. A
     // bitrate-only tune sent while overview mode has encoder.activeFps lowered would otherwise

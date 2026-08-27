@@ -329,7 +329,7 @@ int startup_start_capture(HostContext& hx) {
   // stale-hide timeout does not blank a stationary cursor. Unreliable by design; no resend.
 
 
-  sender.StartThread(transport, useH264, args, clientSession);
+  sender.StartThread(transport, useH264, args, clientSession, hx.mailbox);
 
 
   // --- Trailing-edge encoder kick (host main/encode thread only) ----------------------------

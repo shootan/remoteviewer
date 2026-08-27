@@ -330,7 +330,7 @@ if (transport == VideoTransport::Tcp) {
           // block garbage. Hold everything until the forced keyframe arrives.
           ++sender.nonKeyAuWhileWaiting;
           sender.dropCount.fetch_add(1, std::memory_order_relaxed);
-          sender.requestKey.store(true, std::memory_order_release);
+          hx.mailbox.PostRequestKeyframe(kKeyframeReasonSenderBacklog);
           break;
         case SenderQueueAction::DropAndResync:
           // Backlogged: drop the stale frames AND this delta -- it references what
@@ -342,7 +342,7 @@ if (transport == VideoTransport::Tcp) {
           sender.sentFrames -= std::min<uint64_t>(sender.sentFrames, sender.queue.size());
           sender.queue.clear();
           sender.waitingForKey = true;
-          sender.requestKey.store(true, std::memory_order_release);
+          hx.mailbox.PostRequestKeyframe(kKeyframeReasonSenderBacklog);
           break;
         case SenderQueueAction::Enqueue:
           sender.queue.push_back(std::move(item));

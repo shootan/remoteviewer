@@ -51,7 +51,8 @@ ControlSessionServer::ControlSessionServer(const Args& args, std::atomic<bool>& 
                                            SessionState& clientSession, CaptureState& capture,
                                            ClientMetricsSnapshot& clientMetrics, EncoderState& encoder,
                                            InputRouterState& inputRouter, DesktopBackendState& backend,
-                                           WindowSelectionTxn& windowSelectionTxn)
+                                           WindowSelectionTxn& windowSelectionTxn,
+                                           MainLoopMailbox& mailbox)
     : args(args),
       stop(stop),
       clientSession(clientSession),
@@ -60,7 +61,8 @@ ControlSessionServer::ControlSessionServer(const Args& args, std::atomic<bool>& 
       encoder(encoder),
       inputRouter(inputRouter),
       backend(backend),
-      windowSelectionTxn(windowSelectionTxn) {}
+      windowSelectionTxn(windowSelectionTxn),
+      mailbox(mailbox) {}
 
 void ControlSessionServer::Serve(ControlLink& link) {
   // A new session starts with the stream on, exactly like the first client of a fresh
@@ -502,8 +504,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
       if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
       // Applied by the render loop, which owns the capture item; answered with the list so the
       // client sees the selection that actually took effect rather than the one it asked for.
-      capture.monitorSelectRequested.store(req.monitorId, std::memory_order_release);
-      capture.monitorSelectPending.store(true, std::memory_order_release);
+      mailbox.PostSelectMonitor({req.monitorId});
       if (!send_monitor_list(req.seq)) break;
       continue;
     }
@@ -637,8 +638,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
       // often the stream is forced to an IDR. (Ledger H-04.)
       double keyReqTokensNow = 0.0;
       if (encoder.TryTakeKeyRequestToken(nowUs, &keyReqTokensNow)) {
-        clientMetrics.requestedKeyFrame = true;
-        clientMetrics.keyFrameReason = req.reason;
+        mailbox.PostRequestKeyframe(kKeyframeReasonViewer, req.reason);
         const uint64_t reqCount = clientMetrics.keyFrameRequestCount.fetch_add(1) + 1;
         std::cout << "[native-video-host][control] keyframe-request seq=" << req.seq
                   << " reason=" << req.reason
@@ -666,11 +666,12 @@ void ControlSessionServer::Serve(ControlLink& link) {
       const bool hasKeyint = ((tune.flags & 0x2u) != 0) && tune.keyint >= 1;
       const bool hasFps = ((tune.flags & 0x4u) != 0) && tune.fps >= 1;
       if (hasBitrate || hasKeyint || hasFps) {
-        if (hasBitrate) encoder.tuneBitrate.store(tune.bitrate, std::memory_order_release);
-        if (hasKeyint) encoder.tuneKeyint.store(tune.keyint, std::memory_order_release);
-        if (hasFps) encoder.tuneFps.store(tune.fps, std::memory_order_release);
-        encoder.tuneSeq.store(tune.seq, std::memory_order_release);
-        encoder.tunePending.store(true, std::memory_order_release);
+        TuneEncoderRequest tuneReq;
+        tuneReq.seq = tune.seq;
+        if (hasBitrate) tuneReq.bitrate = tune.bitrate;
+        if (hasKeyint) tuneReq.keyint = tune.keyint;
+        if (hasFps) tuneReq.fps = tune.fps;
+        mailbox.PostTuneEncoder(tuneReq);
         std::cout << "[native-video-host][control] runtime-config seq=" << tune.seq
                   << " bitrate=" << (hasBitrate ? tune.bitrate : 0)
                   << " keyint=" << (hasKeyint ? tune.keyint : 0)
@@ -687,9 +688,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
       req.header = header;
       if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
       if (req.backend == 1 || req.backend == 2 || req.backend == 3) {
-        backend.reqSeq.store(req.seq, std::memory_order_release);
-        backend.reqValue.store(req.backend, std::memory_order_release);
-        backend.reqPending.store(true, std::memory_order_release);
+        mailbox.PostBackendRequest({req.seq, req.backend});
         std::cout << "[native-video-host][control] desktop-backend-request seq=" << req.seq
                   << " backend="
                   << (req.backend == 2 ? "wgc" : (req.backend == 3 ? "gdi" : "dxgi"))
@@ -717,11 +716,9 @@ void ControlSessionServer::Serve(ControlLink& link) {
       req.header = header;
       if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
       if (req.mode == 1 || req.mode == 2) {
-        capture.modeReqSeq.store(req.seq, std::memory_order_release);
-        capture.modeReqMode.store(req.mode, std::memory_order_release);
-        capture.modeReqXPermille.store(std::min<uint32_t>(10000u, req.xPermille), std::memory_order_release);
-        capture.modeReqYPermille.store(std::min<uint32_t>(10000u, req.yPermille), std::memory_order_release);
-        capture.modeReqPending.store(true, std::memory_order_release);
+        mailbox.PostCaptureMode({req.seq, req.mode,
+                                 std::min<uint32_t>(10000u, req.xPermille),
+                                 std::min<uint32_t>(10000u, req.yPermille)});
         std::cout << "[native-video-host][control] capture-mode-request seq=" << req.seq
                   << " mode=" << req.mode
                   << " xPermille=" << req.xPermille

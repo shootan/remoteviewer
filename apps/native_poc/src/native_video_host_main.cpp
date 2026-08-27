@@ -111,6 +111,7 @@ using remote60::native_poc::HostContext;
 using remote60::native_poc::TickContext;
 using remote60::native_poc::DxgiWatchdogJoiner;
 using remote60::native_poc::MainLoopWatchdogThread;
+using remote60::native_poc::MainLoopMailbox;
 using remote60::native_poc::startup_process_setup;
 using remote60::native_poc::startup_configure_from_env;
 using remote60::native_poc::resolve_transport;
@@ -187,8 +188,10 @@ int main(int argc, char** argv) {
   // Control-thread <-> main-loop window selection handshake (WindowSelectionTxn, host_control_session.hpp).
   WindowSelectionTxn windowSelectionTxn;
   // Control conversation handler (ControlSessionServer, Phase 2-2); one Serve() per connected viewer.
+  // Requests the control / sender / reader threads post for the loop to act on (Phase 4).
+  MainLoopMailbox mailbox;
   ControlSessionServer controlServer(args, stop, clientSession, capture, clientMetrics, encoder,
-                                     inputRouter, backend, windowSelectionTxn);
+                                     inputRouter, backend, windowSelectionTxn, mailbox);
   // RAII / WinRT / D3D capture objects (CaptureResources, Phase 2-4); created below at the same points as before.
   CaptureResources res;
   winrt::Windows::Graphics::Capture::GraphicsCaptureItem item{nullptr};
@@ -222,7 +225,7 @@ int main(int argc, char** argv) {
                    nextCaptureWindowCheckUs, streamActiveApplied, streamActiveSinceUs, poppedNv12Slot,
                    poppedNv12Generation, powerKeepalive, item, token, windowSelectionTxn, frameGating,
                    rate, kick, clientMetrics, backend, watchdog, inputRouter, sender, clientSession,
-                   encoder, stats, capture, res};
+                   encoder, stats, capture, res, mailbox};
 
   // Startup, in the monolith's order (host_startup.hpp). Each step is one former block of main();
   // the ones that can fail return the exit code main() used to return at that point.

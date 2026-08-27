@@ -153,15 +153,8 @@ struct CaptureState {
   std::atomic<uint64_t> selectedWindowId{0};
   std::atomic<uint32_t> selectedMonitorId{0};
   // cross-thread: selection / capture-mode requests from the control thread, consumed by main.
-  std::atomic<uint32_t> monitorSelectRequested{0};
-  std::atomic<bool> monitorSelectPending{false};
   std::atomic<uint64_t> streamGenerationState{1};
   std::atomic<bool> windowSelectionLocked{false};
-  std::atomic<bool> modeReqPending{false};
-  std::atomic<uint32_t> modeReqSeq{0};
-  std::atomic<uint16_t> modeReqMode{0};
-  std::atomic<uint32_t> modeReqXPermille{5000};
-  std::atomic<uint32_t> modeReqYPermille{5000};
   // Window target (from --capture-window-* / the picker).
   CaptureWindowCriteria windowCriteria{};
   bool selectionLockedByConfig = false;

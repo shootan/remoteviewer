@@ -201,13 +201,8 @@ bool reconnect_tcp_data_session(HostContext& hx, const char* reason) {
     std::cout << "[native-video-host] client reconnected transport=tcp sndbuf="
               << effectiveSendBuf << " bytes\n";
     clientMetrics.Reset();
-    clientMetrics.requestedKeyFrame = false;
-    clientMetrics.keyFrameReason = 0;
-    encoder.tunePending = false;
-    encoder.tuneBitrate = 0;
-    encoder.tuneKeyint = 0;
-    encoder.tuneFps = 0;
-    encoder.tuneSeq = 0;
+    // Outstanding requests belong to the client that made them. (Phase 4.)
+    hx.mailbox.Clear();
     encoder.ResetKeyRequestBucket();
     encoder.forceKeyNext = true;
     kick.selectionFirstKeyframeDropCount = 0;

@@ -383,9 +383,9 @@ void startup_configure_control_state(HostContext& hx) {
   auto& backend = hx.backend;
   auto& inputRouter = hx.inputRouter;
   auto& encoder = hx.encoder;
-  // Which screen desktop mode shows. Zero is the primary, which is what it always was, so a
-  // client that never selects one behaves exactly as before.
-  backend.reqValue = desktop_capture_backend_code(desktop_capture_backend_from_env());
+  // (There used to be a `backend.reqValue = ...from_env()` here. It was write-only: reqPending
+  // was never raised at startup, so the loop never read it, and the live env path is
+  // `backend.requested = desktop_capture_backend_from_env()` in startup_init_graphics.)
   encoder.ResetKeyRequestBucket();
   inputRouter.targetCriteria.pid = args.inputTargetPid;
   for (const auto& name : parse_csv_lower(args.inputTargetProcess)) {

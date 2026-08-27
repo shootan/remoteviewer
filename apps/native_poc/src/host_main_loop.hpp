@@ -36,6 +36,7 @@
 #include "host_input_router.hpp"
 #include "host_kick.hpp"
 #include "host_log.hpp"
+#include "host_main_loop_mailbox.hpp"
 #include "host_session.hpp"
 #include "host_stats.hpp"
 #include "host_watchdog.hpp"
@@ -139,6 +140,8 @@ struct HostContext {
   HostStats& stats;
   CaptureState& capture;
   CaptureResources& res;
+  // Requests posted by the control / sender / reader threads for the loop to act on.
+  MainLoopMailbox& mailbox;
   // Owned here (formerly a function-static inside the loop): user-feedback log rate limit.
   uint64_t lastUserFeedbackUs = 0;
   // Set by a stage that returns Flow::Return; main() returns it.

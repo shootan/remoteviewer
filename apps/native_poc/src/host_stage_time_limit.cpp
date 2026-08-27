@@ -119,15 +119,23 @@ Flow stage_time_limit(HostContext& hx, TickContext& tc) {
       kick.Arm(nowUs, useH264);
     }
   }
-  // Barrier recovery: the sender thread re-armed sender.waitingForKey after a same-epoch send
-  // failure and cannot itself produce an IDR (encoder.forceKeyNext is main-thread-owned, and on a static
-  // desktop no new frame arrives to carry sender.requestKey). Consume the flag here, before the
-  // frame wait, and both force the next encode to be a key AND arm the trailing kick so the kick
-  // resubmits the cached raw frame when the screen is not changing -- otherwise a re-armed barrier
-  // on a still desktop would never open.
-  if (sender.recoveryPending.exchange(false, std::memory_order_acq_rel)) {
+  // Every keyframe request -- the viewer's, and the sender's after a dropped backlog or a
+  // re-armed media barrier -- is consumed HERE, before the frame wait, so a request takes effect
+  // whether or not a new frame ever arrives. That is the whole point of the move: the viewer's
+  // request used to be consumed inside the encode path, which a static desktop never reaches.
+  // A barrier re-arm additionally arms the trailing kick, so the kick resubmits the cached raw
+  // frame and the barrier can actually open on a still screen. (Phase 4: RequestKeyframe.)
+  uint16_t viewerKeyReason = 0;
+  const uint32_t keyReasons = hx.mailbox.TakeKeyframeReasons(&viewerKeyReason);
+  if (keyReasons != kKeyframeReasonNone) {
     encoder.forceKeyNext = true;
-    kick.Arm(nowUs, useH264);
+    if ((keyReasons & kKeyframeReasonViewer) != 0) {
+      std::cout << "[native-video-host][control] keyframe-request-consumed reason="
+                << viewerKeyReason << "\n";
+    }
+    // A barrier re-arm additionally needs the trailing kick: on a still desktop no new frame
+    // arrives to carry the forced IDR, so without this the re-armed barrier never opens.
+    if ((keyReasons & kKeyframeReasonSenderBarrier) != 0) kick.Arm(nowUs, useH264);
   }
   return Flow::Next;
 }

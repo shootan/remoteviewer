@@ -98,8 +98,8 @@ Flow stage_selection(HostContext& hx, TickContext& tc) {
   // Switching screens is the same operation as switching to desktop mode, aimed at a particular
   // monitor. Done here rather than on the control thread because the capture item belongs to
   // this loop, exactly like the window and capture-mode selections above.
-  if (capture.monitorSelectPending.exchange(false, std::memory_order_acq_rel)) {
-    const uint32_t requestedId = capture.monitorSelectRequested.load(std::memory_order_acquire);
+  if (const auto monitorReq = hx.mailbox.TakeSelectMonitor()) {
+    const uint32_t requestedId = monitorReq->monitorId;
     const auto monitors = enumerate_monitors();
     if (requestedId >= monitors.size()) {
       std::cerr << "[native-video-host][control] monitor-select out of range id=" << requestedId
@@ -145,11 +145,11 @@ Flow stage_selection(HostContext& hx, TickContext& tc) {
     }
   }
 
-  if (capture.modeReqPending.exchange(false, std::memory_order_acq_rel)) {
-    const uint16_t reqMode = capture.modeReqMode.load(std::memory_order_acquire);
-    const uint32_t reqSeq = capture.modeReqSeq.load(std::memory_order_acquire);
-    const uint32_t reqXPermille = std::min<uint32_t>(10000u, capture.modeReqXPermille.load(std::memory_order_acquire));
-    const uint32_t reqYPermille = std::min<uint32_t>(10000u, capture.modeReqYPermille.load(std::memory_order_acquire));
+  if (const auto modeReq = hx.mailbox.TakeCaptureMode()) {
+    const uint16_t reqMode = modeReq->mode;
+    const uint32_t reqSeq = modeReq->seq;
+    const uint32_t reqXPermille = std::min<uint32_t>(10000u, modeReq->xPermille);
+    const uint32_t reqYPermille = std::min<uint32_t>(10000u, modeReq->yPermille);
     if (reqMode == 1) {
       auto nextItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(control-overview)");
       if (!nextItem) {

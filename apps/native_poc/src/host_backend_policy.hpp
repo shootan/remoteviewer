@@ -29,9 +29,6 @@ constexpr uint64_t kDesktopDefaultProbeIntervalUs = 200'000;  // OpenInputDeskto
 // from ControlDesktopBackendRequest and the main loop consumes (cross-thread).
 struct DesktopBackendState {
   // cross-thread: request from the control thread, consumed at the top of the main loop.
-  std::atomic<bool> reqPending{false};
-  std::atomic<uint32_t> reqSeq{0};
-  std::atomic<uint16_t> reqValue{0};
   DesktopCaptureBackend requested = DesktopCaptureBackend::Dxgi;
   DesktopCaptureBackend active = DesktopCaptureBackend::Dxgi;
   // Exponential backoff for climbing back to the requested backend.

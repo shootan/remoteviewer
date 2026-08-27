@@ -252,15 +252,9 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     return Flow::Continue;
   }
 
-   if (clientMetrics.requestedKeyFrame.exchange(false)) {
-    const uint16_t reason = clientMetrics.keyFrameReason.load();
-    std::cout << "[native-video-host][control] keyframe-request-consumed reason=" << reason << "\n";
-    encoder.forceKeyNext = true;
-  }
-  if (sender.requestKey.exchange(false, std::memory_order_acq_rel)) {
-    // The sender dropped a backlog; the stream needs an IDR to resynchronize.
-    encoder.forceKeyNext = true;
-  }
+  // Keyframe requests are consumed once per tick in stage_time_limit, before the frame wait --
+   // see MainLoopMailbox. Consuming them here meant a request only took effect after a real frame
+   // was popped, which on a static desktop never happens. (Phase 4.)
    // The keyint schedule applies to REAL frames only. A kick/refresh-served synthetic frame
    // carries seq=0, and 0 % keyint == 0 made every one of them an IDR -- defeating the open-
    // barrier design of riding the held frame as a cheap P-frame (a 40-160KB IDR instead of a

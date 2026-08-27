@@ -27,6 +27,7 @@
 #include "host_client_metrics.hpp"
 #include "host_encoder_manager.hpp"
 #include "host_input_router.hpp"
+#include "host_main_loop_mailbox.hpp"
 #include "host_session.hpp"
 #include "udp_control_channel.hpp"
 
@@ -54,7 +55,8 @@ class ControlSessionServer {
   ControlSessionServer(const Args& args, std::atomic<bool>& stop, SessionState& clientSession,
                        CaptureState& capture, ClientMetricsSnapshot& clientMetrics,
                        EncoderState& encoder, InputRouterState& inputRouter,
-                       DesktopBackendState& backend, WindowSelectionTxn& windowSelectionTxn);
+                       DesktopBackendState& backend, WindowSelectionTxn& windowSelectionTxn,
+                       MainLoopMailbox& mailbox);
 
   // Serve one control conversation until the link dies or the host stops.
   void Serve(ControlLink& link);
@@ -70,6 +72,7 @@ class ControlSessionServer {
   InputRouterState& inputRouter;
   DesktopBackendState& backend;
   WindowSelectionTxn& windowSelectionTxn;
+  MainLoopMailbox& mailbox;
 };
 
 }  // namespace remote60::native_poc

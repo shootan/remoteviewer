@@ -39,10 +39,10 @@ struct Nv12PendingRelease {
 // bookkeeping, the output-liveness (starvation) heartbeat, and the stats-interval encode counters.
 // See the comment blocks in main() (refit debounce, force-key latch, starvation heartbeat) for
 // the rationale of each group.
-// thread: main encode loop owns everything except (a) the tune* atomics, which the control thread
-// sets from ControlRuntimeEncoderConfig and the main loop consumes, and (b) the keyframe-request
-// token bucket, which the control thread refills/consumes and the main loop resets on reconnect --
-// both are cross-thread. The bucket is guarded by keyReqMu rather than made atomic field by field,
+// thread: main encode loop owns everything except the keyframe-request token bucket, which the
+// control thread refills/consumes and the main loop resets on reconnect. (Runtime tune requests
+// moved to MainLoopMailbox in Phase 4.) The bucket is guarded by keyReqMu rather than made atomic
+// field by field,
 // because refill/check/consume is one transaction: three separate atomics would still let a reset
 // land in the middle of it. (Ledger H-04.)
 struct EncoderState {
@@ -91,12 +91,8 @@ struct EncoderState {
     keyReqLastRefillUs = 0;
     keyReqNextAllowedUs = 0;
   }
-  // cross-thread: runtime tune request (control thread -> main loop).
-  std::atomic<bool> tunePending{false};
-  std::atomic<uint32_t> tuneBitrate{0};
-  std::atomic<uint32_t> tuneKeyint{0};
-  std::atomic<uint32_t> tuneFps{0};
-  std::atomic<uint32_t> tuneSeq{0};
+  // The runtime tune request used to live here as five atomics the control thread stored one by
+  // one before raising tunePending. It is a MainLoopMailbox request now. (Phase 4.)
   bool tuneManualOverride = false;
   // Encode geometry: initial fit, active (running), nominal (pre-aspect-fit box of the quality
   // level), the source size the active size was fitted against, and the refit debounce.

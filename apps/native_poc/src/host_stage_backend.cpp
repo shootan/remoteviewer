@@ -91,10 +91,10 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
   auto& res = hx.res;
   auto& nowUs = tc.nowUs;
   auto& seq = tc.seq;
-  if (backend.reqPending.exchange(false, std::memory_order_acq_rel)) {
-    const uint32_t reqSeq = backend.reqSeq.load(std::memory_order_acquire);
+  if (const auto backendReq = hx.mailbox.TakeBackendRequest()) {
+    const uint32_t reqSeq = backendReq->seq;
     DesktopCaptureBackend nextRequested = backend.requested;
-    const uint16_t requestedCode = backend.reqValue.load(std::memory_order_acquire);
+    const uint16_t requestedCode = static_cast<uint16_t>(backendReq->backend);
     if (desktop_capture_backend_from_code(requestedCode, &nextRequested)) {
       backend.requested = nextRequested;
       const bool desktopActive = !capture.windowModeActive.load(std::memory_order_acquire);

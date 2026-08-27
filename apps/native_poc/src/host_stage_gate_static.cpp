@@ -117,7 +117,7 @@ Flow stage_gate_static(HostContext& hx, TickContext& tc) {
                 << "\n";
     }
 
-    const bool keyReqPending = clientMetrics.requestedKeyFrame.load(std::memory_order_acquire);
+    const bool keyReqPending = hx.mailbox.KeyframePending();
     // The static interval throttles idle scenes; it must never hold back a frame that
     // actually changed, or the first interaction after idle arrives late.
     // In paced motion mode the main tick already enforces encoder.activeFrameIntervalUs. Applying

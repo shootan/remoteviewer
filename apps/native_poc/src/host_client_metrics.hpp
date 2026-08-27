@@ -45,9 +45,8 @@ struct ViewerMetrics {
 // Client-reported metrics + keyframe requests (Phase 1-10 state struct). The control thread
 // publishes a whole ViewerMetrics as each ControlClientMetrics message arrives; the main loop's
 // 1s tick and the ABR/M9 decision take a whole copy.
-// thread: control (write) / main (read), under mu. The keyframe-request fields stay atomic --
-// they are an independent edge signal the main loop consumes with an exchange, not part of the
-// reported state.
+// thread: control (write) / main (read), under mu. The keyframe-request counters stay atomic --
+// they are lifetime telemetry, not part of the reported state.
 struct ClientMetricsSnapshot {
   std::mutex mu;
   ViewerMetrics metrics;
@@ -66,9 +65,8 @@ struct ClientMetricsSnapshot {
     metrics = ViewerMetrics{};
   }
 
-  // Keyframe request signal from the viewer (consumed by the main loop's force-key path).
-  std::atomic<bool> requestedKeyFrame{false};
-  std::atomic<uint16_t> keyFrameReason{0};
+  // Keyframe-request accounting. The request itself is a MainLoopMailbox post (Phase 4); these
+  // two are lifetime counters for the stats line and the throttle log.
   std::atomic<uint64_t> keyFrameRequestCount{0};
   std::atomic<uint64_t> keyFrameRequestDropped{0};
 };

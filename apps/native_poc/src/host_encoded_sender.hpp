@@ -25,6 +25,7 @@ namespace remote60::native_poc {
 
 struct Args;
 struct EncoderState;
+struct MainLoopMailbox;
 struct SessionState;
 
 // H4: the encode thread hands encoded frames to this sender instead of pacing the wire
@@ -54,9 +55,9 @@ struct EncodedSendItem {
 // passes (waitingForKey). mediaSessionEpoch fences items of a previous session at dequeue. See the
 // comment blocks in main() (H4 sender, session media barrier, IDR telemetry) for the rationale.
 // thread: queue/peer/waitingForKey under mu (main + sender + reader rollover); the atomics are the
-// cross-thread signals (sender -> main: sendFailed/recoveryPending/requestKey; reader -> main:
-// udpPeer*); the plain sent*/udpTx*/heldFrames/nonKeyAu*/firstKeyEnqueuedUs counters are
-// main-thread stats-interval accumulators.
+// cross-thread signals (sender -> main: sendFailed; reader -> main: udpPeer*); keyframe requests
+// go through MainLoopMailbox; the plain sent*/udpTx*/heldFrames/nonKeyAu*/firstKeyEnqueuedUs
+// counters are main-thread stats-interval accumulators.
 struct SenderState {
   // UDP pacing env config (REMOTE60_NATIVE_H264_NO_PACING / UDP_PACE_PEAK_* / UDP_KEYFRAME_PACE_PEAK_BPS),
   // fixed after startup; EncoderState::ApplyTarget derives the live pacing budget from these.
@@ -100,10 +101,9 @@ struct SenderState {
   std::atomic<uint64_t> mediaSessionEpoch{1};
   std::atomic<bool> stop{false};
   std::atomic<bool> sendFailed{false};
-  std::atomic<bool> requestKey{false};
-  // Sender -> main: a same-epoch transport error re-armed the barrier; main forces the next key
-  // and arms the trailing kick (the only recovery signal that works on a static screen).
-  std::atomic<bool> recoveryPending{false};
+  // requestKey / recoveryPending used to live here: two flags for "the stream needs an IDR",
+  // consumed at two different points in the tick because one of them was only read after a real
+  // frame had been popped. Both are RequestKeyframe posts on the mailbox now. (Phase 4.)
   std::atomic<uint64_t> barrierRearmCount{0};  // same-epoch send-failure barrier re-arms (telemetry)
   std::atomic<uint64_t> dropCount{0};
   std::atomic<uint64_t> txFrames{0};
@@ -119,6 +119,9 @@ struct SenderState {
   std::atomic<uint64_t> lastKeyAuBytes{0};
   std::atomic<uint64_t> lastKeyAuChunks{0};
   std::thread thread;
+  // Where the sender posts RequestKeyframe. Bound by StartThread; null when no sender runs
+  // (TCP / raw), where nothing on this path executes anyway.
+  MainLoopMailbox* mailbox = nullptr;
   // Main-thread stats-interval accumulators (reset every stats print).
   uint64_t sentFrames = 0;
   uint64_t sentBytes = 0;
@@ -135,7 +138,8 @@ struct SenderState {
   //     bodies in host_encoded_sender.cpp) ---
   // Start the sender thread (UDP + H.264 only). It dequeues AUs, paces them onto the wire and
   // drives the media barrier; see the thread body for the full policy.
-  void StartThread(VideoTransport transport, bool useH264, const Args& args, SessionState& clientSession);
+  void StartThread(VideoTransport transport, bool useH264, const Args& args,
+                   SessionState& clientSession, MainLoopMailbox& mailbox);
   // Consume a reader-thread peer change: swap the peer and roll the media session over in one
   // transaction (drop backlog, hold deltas until an IDR, bump the epoch, force a keyframe).
   void PumpUdpHello(VideoTransport transport, EncoderState& encoder);
