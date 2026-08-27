@@ -14,10 +14,14 @@ namespace remote60::native_poc {
 // Host-side pipeline statistics (Phase 1-12 state struct): the per-print-interval accumulators
 // and lifetime counters the 1s stats tick folds into the "[native-video-host] stats" line --
 // capture readback / GPU-scale stage timings (sum + max), queue push/pop/wait counts, drop and
-// fallback counters, and the print cadence itself. Nothing here drives a decision; ABR reads
-// ClientMetricsSnapshot and RateControlState instead.
+// fallback counters, and the print cadence itself. ABR reads ClientMetricsSnapshot and
+// RateControlState instead -- but see the callbackFrames note below: this struct is not purely
+// descriptive any more.
 // thread: main loop owns everything; callbackFrames / queuePushCount / queueDepthMax are atomics
 // because the capture publish callback increments them.
+// NOTE: callbackFrames is NOT display-only -- the readback-drain and GDI low-push watchdogs
+// restart capture on its per-window value, which is why the 1s tick consumes it with an
+// exchange rather than reading it and zeroing it later. (Ledger H-12.)
 
 // Monotonic max for an atomic counter (formerly the update_u64_max lambda in main()).
 inline void update_u64_max(std::atomic<uint64_t>& target, const uint64_t value) {
@@ -77,6 +81,11 @@ struct HostStats {
   uint64_t queuePushPerSecLatest = 0;
   uint64_t queuePopCount = 0;
   uint64_t queueWaitTimeoutCount = 0;
+  // Last size actually popped from the capture ring. The 1s tick prints it instead of the
+  // current TickContext, because that tick now runs before the pop (see stage order in
+  // native_video_host_main.cpp). (Ledger H-10.)
+  uint32_t lastFrameW = 0;
+  uint32_t lastFrameH = 0;
   uint64_t queueWaitNoWorkCount = 0;
   std::atomic<uint64_t> queueDepthMax{0};
 };

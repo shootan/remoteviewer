@@ -243,8 +243,19 @@ int main(int argc, char** argv) {
 
   // One tick = the twelve stages of host_main_loop.cpp, in order. A stage that used to
   // `continue`/`break`/`return` from the loop body reports it through Flow.
+  //
+  // stage_stats runs FIRST, and that position is load-bearing (ledger H-10). It carries the 1s
+  // housekeeping -- the stats line, the ABR/M9 decision, the readback-drain soft watchdog and
+  // the GDI low-push capture restart -- and any Flow::Continue from an earlier stage skips
+  // everything after it. As the last stage it was therefore skipped by the two most common
+  // exits in the whole loop: the frame-queue wait timing out (stage_pop_frame) and the async
+  // MFT returning no access unit (encode_send_h264). Both of those are exactly what a stalled
+  // pipeline looks like, so the self-heal that exists to notice a stall could not run while one
+  // was happening. Nothing here reads this tick's frame, so running before the pop costs only a
+  // one-tick shift in which window the tick's own counters land in.
   while (!stop.load()) {
     TickContext tc;
+    RUN_STAGE(stage_stats);
     RUN_STAGE(stage_time_limit);
     RUN_STAGE(stage_backend);
     RUN_STAGE(stage_stream_active);
@@ -256,7 +267,6 @@ int main(int argc, char** argv) {
     RUN_STAGE(stage_pop_frame);
     RUN_STAGE(stage_gate_static);
     RUN_STAGE(stage_encode_send);
-    RUN_STAGE(stage_stats);
   }
 
   shutdown_host(host);

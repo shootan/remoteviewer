@@ -100,8 +100,12 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
   auto& stats = hx.stats;
   auto& capture = hx.capture;
   auto& res = hx.res;
-  auto& w = tc.w;
-  auto& h = tc.h;
+  // Persistent, not tc.w/tc.h: this stage now runs first in the tick, before a frame has been
+  // popped, so the per-tick values would print 0x0. lastFrameW/H is the last size actually
+  // popped, which is what the old placement printed anyway. (Ledger H-10.)
+  const uint32_t w = stats.lastFrameW;
+  const uint32_t h = stats.lastFrameH;
+  (void)tc;
   const uint64_t t = qpc_now_us();
   if (t >= stats.nextAtUs) {
     ++stats.ticks;
@@ -116,7 +120,11 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
         (stats.queuePushCount >= stats.queuePushCountLastSample) ? (stats.queuePushCount - stats.queuePushCountLastSample) : 0;
     stats.queuePushCountLastSample = stats.queuePushCount;
     stats.queuePushPerSecLatest = queuePushPerSec;
-    const uint64_t callbackFramesPerSec = stats.callbackFrames.load(std::memory_order_relaxed);
+    // exchange, not load-then-zero-at-the-end: the readback worker keeps publishing while this
+  // tick runs, and the old `= 0` at the bottom threw away every increment that landed in
+  // between. Those lost frames biased `published` downward -- and `published` is what the
+  // readback-drain and GDI low-push watchdogs restart capture on. (Ledger H-12.)
+    const uint64_t callbackFramesPerSec = stats.callbackFrames.exchange(0, std::memory_order_relaxed);
     const uint64_t idleHoldPerSec =
         (useH264 &&
          capture.sessionReady.load(std::memory_order_acquire) &&
@@ -398,7 +406,6 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
     stats.stalePreEncodeDropCount = 0;
     stats.staleEncodedDropCount = 0;
     encoder.resetCount = 0;
-    stats.callbackFrames = 0;
     stats.captureAgeSumUs = 0;
     stats.captureAgeMaxUs = 0;
     stats.callbackToEncodeStartSumUs = 0;
@@ -448,6 +455,14 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
     frameGating.changePermilleSum = 0;
     frameGating.changePermilleCount = 0;
     stats.nextAtUs += 1000000ULL;
+    // Clamped, so a tick that ran late cannot leave nextAtUs in the past and fire once per
+    // loop iteration until it catches up. Those catch-up windows measured ~0 seconds, read
+    // callbackFramesPerSec as 0, and drove inputLowPushStreakSec to its threshold within a
+    // few milliseconds -- a capture restart with nothing wrong. Phase is preserved in the
+    // ordinary case; a real gap re-anchors. Every window is now >= 1s by construction, which
+    // is also what makes the low-push streak count genuinely separated observations.
+    // (Ledger H-11.)
+    if (stats.nextAtUs <= t) stats.nextAtUs = t + 1000000ULL;
   }
   return Flow::Next;
 }

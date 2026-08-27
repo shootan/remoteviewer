@@ -303,6 +303,9 @@ captureToQueueUs =
     (queuePushUs > 0 && captureUs > 0)
         ? (queuePushUs >= captureUs ? (queuePushUs - captureUs) : (captureUs - queuePushUs))
         : 0;
+  // Remember the size for the 1s tick, which no longer sees this tick's TickContext.
+  stats.lastFrameW = w;
+  stats.lastFrameH = h;
   ++stats.captureReadbackSamples;
   stats.captureD3DWaitSumUs += captureD3DWaitUs;
   stats.captureD3DWaitMaxUs = std::max(stats.captureD3DWaitMaxUs, captureD3DWaitUs);
