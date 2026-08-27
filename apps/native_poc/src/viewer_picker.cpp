@@ -101,7 +101,7 @@ void set_picker_visible_and_sync_stream(bool visible) {
   gPicker.visible.store(visible, std::memory_order_relaxed);
   if (visible) {
     gPicker.shownAtUs.store(qpc_now_us(), std::memory_order_relaxed);
-    gPicker.pressTargetId.store(kPickerPressNone, std::memory_order_relaxed);
+    gPicker.CancelPress();
     // Mid-session the stream KEEPS RUNNING behind the picker overlay. Stopping it here made every
     // "is it frozen?" peek tear the capture down (host detaches after 5 idle seconds), a real
     // multi-second blackout, and a reselect/keyframe churn on close -- the recovery gesture was

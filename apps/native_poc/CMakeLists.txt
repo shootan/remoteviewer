@@ -148,6 +148,7 @@ target_link_libraries(remote60_secure_input_service PRIVATE
 add_executable(remote60_native_video_client_poc
   src/native_video_client_main.cpp
   src/viewer_globals.cpp
+  src/viewer_picker_state.cpp
   src/viewer_selection_gate.cpp
   src/viewer_frame_gate.cpp
   src/viewer_control_client.cpp
@@ -468,6 +469,15 @@ add_executable(remote60_viewer_selection_gate_test
 )
 target_include_directories(remote60_viewer_selection_gate_test PRIVATE src)
 target_link_libraries(remote60_viewer_selection_gate_test PRIVATE common)
+
+# Viewer split refactor T3: the picker gesture latch (DOWN/UP on the same target, 300 ms stability, cancel on capture loss).
+add_executable(remote60_viewer_picker_gesture_test
+  src/viewer_picker_state.cpp
+  src/native_video_client_shared_core.cpp
+  src/viewer_picker_gesture_test.cpp
+)
+target_include_directories(remote60_viewer_picker_gesture_test PRIVATE src)
+target_link_libraries(remote60_viewer_picker_gesture_test PRIVATE common ws2_32)
 
 add_executable(remote60_bind_port_candidates_test
   src/bind_port_candidates_test.cpp

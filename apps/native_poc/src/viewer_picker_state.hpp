@@ -47,6 +47,16 @@ struct PickerState {
   std::unordered_map<uint64_t, std::shared_ptr<const WindowThumb>> thumbs;
   std::deque<uint64_t> thumbFetchQueue;
   std::atomic<bool> hostSupportsThumbnails{false};
+
+  // The picker gesture latch (viewer_picker_state.cpp), shared by the mouse and touch paths: a
+  // selection needs DOWN and UP on the SAME target and a picker that has been visible for at least
+  // kPickerSelectMinShownUs. Time is an argument, so viewer_picker_gesture_test drives it.
+  void PressTarget(uint64_t hitId, uint64_t nowUs);   // DOWN: latch hitId (kPickerPressNone = empty space) unless the picker is too young
+  uint64_t ReleaseTarget();                           // UP: consume the latch, return what DOWN latched
+  void CancelPress();                                 // capture / focus lost, or a selection is pending
+  bool ShownLongEnough(uint64_t nowUs) const;
+  uint64_t ShownAgeMs(uint64_t nowUs) const;
+  bool SelectAllowed(uint64_t pressedId, uint64_t hitId, uint64_t nowUs) const;  // ShownLongEnough && pressedId == hitId
 };
 
 }  // namespace remote60::native_poc::viewer

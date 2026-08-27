@@ -92,7 +92,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       }
       if (gPicker.visible.load(std::memory_order_relaxed)) {
         if (gSel.pending.load(std::memory_order_acquire)) {
-          gPicker.pressTargetId.store(kPickerPressNone, std::memory_order_relaxed);
+          gPicker.CancelPress();
           return 0;
         }
         // Remember which target (if any) this press started on; the UP handler only selects when
@@ -109,11 +109,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         } else if (try_hit_window_list_item(hwnd, dx, dy, &hitId)) {
           pressedId = hitId;
         }
-        if (qpc_now_us() <
-            gPicker.shownAtUs.load(std::memory_order_relaxed) + kPickerSelectMinShownUs) {
-          pressedId = kPickerPressNone;
-        }
-        gPicker.pressTargetId.store(pressedId, std::memory_order_relaxed);
+        gPicker.PressTarget(pressedId, qpc_now_us());
         return 0;
       }
       if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
@@ -148,10 +144,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
       }
       if (gPicker.visible.load(std::memory_order_relaxed)) {
-        // Consume the press latch FIRST, unconditionally: any UP ends the gesture, and an early
-        // return below must not leave a stale latch to approve a later unrelated UP.
-        const uint64_t pressedId =
-            gPicker.pressTargetId.exchange(kPickerPressNone, std::memory_order_relaxed);
+        const uint64_t pressedId = gPicker.ReleaseTarget();
         // A selection already in flight owns the picker until its first frame arrives; ignore
         // further target clicks so a double-click cannot queue a second, racing select.
         if (gSel.pending.load(std::memory_order_acquire)) return 0;
@@ -162,10 +155,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         // Mis-click guard: selecting needs a picker that has been up for a moment (a click begun
         // before it appeared must not land on a card) AND a DOWN that started on the same target.
-        const uint64_t shownAtUs = gPicker.shownAtUs.load(std::memory_order_relaxed);
         const uint64_t nowUs = qpc_now_us();
-        if (nowUs < shownAtUs + kPickerSelectMinShownUs) return 0;
-        const uint64_t shownAgeMs = (nowUs - shownAtUs) / 1000;
+        if (!gPicker.ShownLongEnough(nowUs)) return 0;
+        const uint64_t shownAgeMs = gPicker.ShownAgeMs(nowUs);
         if (point_in_rect(layout.desktopButtonRect, x, y)) {
           if (pressedId != 0) return 0;
           // Explicit WindowSelect(0) even when desktop is already the selected target: one clean
@@ -345,7 +337,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // A selection in flight owns the picker; also clear the latch so a gesture spanning the
         // pending window cannot leave a stale press behind.
         if (gSel.pending.load(std::memory_order_acquire)) {
-          gPicker.pressTargetId.store(kPickerPressNone, std::memory_order_relaxed);
+          gPicker.CancelPress();
           return 0;
         }
         if (msg == WM_POINTERDOWN) {
@@ -358,20 +350,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           } else if (try_hit_window_list_item(hwnd, p.x, p.y, &hitId)) {
             pressedId = hitId;
           }
-          if (qpc_now_us() <
-              gPicker.shownAtUs.load(std::memory_order_relaxed) + kPickerSelectMinShownUs) {
-            pressedId = kPickerPressNone;
-          }
-          gPicker.pressTargetId.store(pressedId, std::memory_order_relaxed);
+          gPicker.PressTarget(pressedId, qpc_now_us());
           return 0;
         }
         if (msg == WM_POINTERUP) {
-          const uint64_t pressedId =
-              gPicker.pressTargetId.exchange(kPickerPressNone, std::memory_order_relaxed);
-          const uint64_t shownAtUs = gPicker.shownAtUs.load(std::memory_order_relaxed);
+          const uint64_t pressedId = gPicker.ReleaseTarget();
           const uint64_t nowUs = qpc_now_us();
-          const bool shownLongEnough = nowUs >= shownAtUs + kPickerSelectMinShownUs;
-          const uint64_t shownAgeMs = (nowUs - shownAtUs) / 1000;
+          const bool shownLongEnough = gPicker.ShownLongEnough(nowUs);
+          const uint64_t shownAgeMs = gPicker.ShownAgeMs(nowUs);
           if (point_in_rect(layout.refreshButtonRect, p.x, p.y)) {
             queue_window_list_request("window_list_request pending");
             InvalidateRect(hwnd, nullptr, FALSE);
@@ -436,7 +422,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       gInput.activeTouchPointerId.store(0, std::memory_order_relaxed);
       // A gesture that lost capture mid-flight must not leave a stale picker press behind: the
       // whole point of the latch is that an UP without its own valid DOWN selects nothing.
-      gPicker.pressTargetId.store(kPickerPressNone, std::memory_order_relaxed);
+      gPicker.CancelPress();
       return 0;
     case WM_IME_SETCONTEXT: {
       const LPARAM masked =
@@ -506,7 +492,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       // Focus is about to leave, so no more key-ups will reach this window. Release whatever
       // is held now, before Alt/Win/Alt+Tab strands it on the host.
       if (!kInputPolicyForceBlock) enqueue_release_for_pressed_keys();
-      gPicker.pressTargetId.store(kPickerPressNone, std::memory_order_relaxed);
+      gPicker.CancelPress();
       return 0;
     case WM_CHAR:
       // Ignored on purpose. Every physical key now travels the key-event path, and IME
