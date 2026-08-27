@@ -98,8 +98,6 @@ hpp_prelude $T/input_hpp.txt \
 '//' \
 '// Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-9).'
 cpp_prelude $T/input_cpp.txt viewer_input_forward.hpp
-# the two forward declarations main.cpp carried are the header's job now
-perl -0pi -e 's{void enqueue_input_event\(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode\);\r\nvoid enqueue_input_text_units\(const uint16_t\* text, size_t count\);\r\n\r\n}{} or die "fwd decls"' "$M"
 OUT=$(perl automation/viewer_split_move.pl --src "$M" --hpp $S/viewer_input_forward.hpp --hpp-prelude $T/input_hpp.txt \
   --cpp $S/viewer_input_forward.cpp --cpp-prelude $T/input_cpp.txt \
   --start '^void enqueue_control_input_message\(const QueuedControlInputMessage& msg\) \{$' \
@@ -116,6 +114,9 @@ OUT=$(perl automation/viewer_split_move.pl --src "$M" --hpp $S/viewer_input_forw
   --start '^void enqueue_macro_step\(const remote60::native_poc::MacroStep& step\) \{$' \
   --start '^void toggle_macro_window\(HWND owner\) \{$')
 echo "$OUT"; R=$(ranges "$OUT")
+# the two forward declarations main.cpp carried are the header's job now (deleted AFTER the move so
+# the ranges above still index the HEAD revision)
+perl -0pi -e 's{void enqueue_input_event\(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode\);\r\nvoid enqueue_input_text_units\(const uint16_t\* text, size_t count\);\r\n\r\n}{} or die "fwd decls"' "$M"
 add_include viewer_input_forward.hpp; add_cmake viewer_input_forward.cpp
 check "$R" $S/viewer_input_forward.hpp $S/viewer_input_forward.cpp
 bash automation/viewer_split_gate.sh --e2e
@@ -141,8 +142,6 @@ hpp_prelude $T/picker_hpp.txt \
 '// Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-10).'
 INCLUDES='viewer_common.hpp viewer_globals.hpp viewer_input_forward.hpp viewer_layout.hpp viewer_log.hpp'
 cpp_prelude $T/picker_cpp.txt viewer_picker.hpp
-# the forward declaration (and its explanatory comment) of set_picker_visible_and_sync_stream move to the definition
-perl -0pi -e 's{// Browsing targets must not keep the host encoding \(F1\)\. The request rides the control\r\n// scheduler, which orders stream state ahead of window selection\. Sent only on explicit\r\n// picker transitions: startup leaves the host.s default-active stream alone, so headless\r\n// harness clients that never open the picker keep receiving video unchanged\.\r\nvoid set_picker_visible_and_sync_stream\(bool visible\);\r\n}{} or die "picker fwd decl"' "$M"
 OUT=$(perl automation/viewer_split_move.pl --src "$M" --hpp $S/viewer_picker.hpp --hpp-prelude $T/picker_hpp.txt \
   --cpp $S/viewer_picker.cpp --cpp-prelude $T/picker_cpp.txt \
   --start '^ClientControlMetricsSnapshot capture_client_control_metrics_snapshot\(\) \{$' \
@@ -163,6 +162,9 @@ OUT=$(perl automation/viewer_split_move.pl --src "$M" --hpp $S/viewer_picker.hpp
   --start '^void request_capture_overview_mode\(\) \{$' \
   --start '^void request_capture_focus_from_client_point\(HWND hwnd, int x, int y\) \{$')
 echo "$OUT"; R=$(ranges "$OUT")
+# the forward declaration (and its explanatory comment) of set_picker_visible_and_sync_stream move to
+# the definition (deleted AFTER the move so the ranges above still index the HEAD revision)
+perl -0pi -e 's{// Browsing targets must not keep the host encoding \(F1\)\. The request rides the control\r\n// scheduler, which orders stream state ahead of window selection\. Sent only on explicit\r\n// picker transitions: startup leaves the host.s default-active stream alone, so headless\r\n// harness clients that never open the picker keep receiving video unchanged\.\r\nvoid set_picker_visible_and_sync_stream\(bool visible\);\r\n}{} or die "picker fwd decl"' "$M"
 perl -0pi -e 's~\r\nvoid set_picker_visible_and_sync_stream\(bool visible\) \{~\r\n// Browsing targets must not keep the host encoding (F1). The request rides the control\r\n// scheduler, which orders stream state ahead of window selection. Sent only on explicit\r\n// picker transitions: startup leaves the host\x27s default-active stream alone, so headless\r\n// harness clients that never open the picker keep receiving video unchanged.\r\nvoid set_picker_visible_and_sync_stream(bool visible) {~ or die "picker comment"' $S/viewer_picker.cpp
 add_include viewer_picker.hpp; add_cmake viewer_picker.cpp
 check "$R" $S/viewer_picker.hpp $S/viewer_picker.cpp
@@ -217,11 +219,11 @@ hpp_prelude $T/cursor_hpp.txt \
 '// Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-12).'
 INCLUDES='viewer_common.hpp viewer_env_util.hpp viewer_globals.hpp viewer_layout.hpp'
 cpp_prelude $T/cursor_cpp.txt viewer_cursor_overlay.hpp
-perl -0pi -e 's{void ensure_cursor_overlay\(HWND owner\);\r\nvoid update_cursor_overlay\(HWND hwnd\);\r\n}{} or die "cursor fwd decls"' "$M"
 OUT=$(perl automation/viewer_split_move.pl --src "$M" --hpp $S/viewer_cursor_overlay.hpp --hpp-prelude $T/cursor_hpp.txt \
   --cpp $S/viewer_cursor_overlay.cpp --cpp-prelude $T/cursor_cpp.txt \
   --start '^void ensure_cursor_overlay\(HWND owner\) \{$' --start '^void update_cursor_overlay\(HWND hwnd\) \{$')
 echo "$OUT"; R=$(ranges "$OUT")
+perl -0pi -e 's{void ensure_cursor_overlay\(HWND owner\);\r\nvoid update_cursor_overlay\(HWND hwnd\);\r\n}{} or die "cursor fwd decls"' "$M"
 add_include viewer_cursor_overlay.hpp; add_cmake viewer_cursor_overlay.cpp
 check "$R" $S/viewer_cursor_overlay.hpp $S/viewer_cursor_overlay.cpp
 bash automation/viewer_split_gate.sh --e2e
