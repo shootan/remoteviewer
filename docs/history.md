@@ -7415,3 +7415,25 @@ Next action
   직후 reset --soft로 되돌리고 재적용(최종 36fe396만 남음).
 - 다음 액션: Phase 1 — 전역 88 + 함수 static 7 + recv 지역 75 → state struct 13(viewer_constants.hpp 선행, 인스턴스는 globals 명명
   전역 gSession/gFrameBuf/gPresent/gMetrics/gControl/gPicker/gSel/gInput/gCursor/gUi + recv 지역 RecvStats/FrameGateState/DecoderState).
+
+### 309) 2026-08-27 뷰어 분할 리팩터 Phase 1 완료 — 전역 88개 + recv 지역 75개 → state struct 13 (브랜치 refactor/viewer-split, e4bd517 → d7b8f2f)
+
+- 방법: 호스트 Phase 1과 같은 기계적 치환. `rename_outside_strings.pl`(문자열 리터럴·멤버 접근 제외)로 `gXxx` → `gInst.member`;
+  recv 지역/`decoder`/`transport`처럼 산문에 흔한 이름은 새 `--code-only`(주석도 제외)로. state 헤더는 손으로 작성(초기값은
+  viewer_globals.cpp 정의에서 그대로, `// cross-thread:` 블록으로 스레드 규칙 명문화), 옮긴 타입(SharedFrame·ClientRuntimeMetrics·
+  OverlayConfigSnapshot·OverlayMetricSample/Averages·WindowThumb·ClientCongestionState·PresentCounterSnapshot)은 HEAD 대비 verbatim
+  검사. 스크립트: `automation/viewer_split_phase1.sh`(1-0~1-10), `viewer_split_phase1b.sh`(1-11~1-13).
+- 커밋: 1-0 e4bd517 상수 28개 → viewer_constants.hpp · 1-1 819081a SessionState gSession(+메시지 펌프 static nextToolbarPushUs) ·
+  1-2 33e32ea FrameBuffer gFrameBuf(SharedFrame) · 1-3 d728803 PresentStats gPresent(+WM_PAINT static 4) · 1-4 75aea0d
+  ClientMetricsState gMetrics · 1-5 a9ef628 ControlChannelState gControl(+control static reportedSecure, 다중행 초기화 2) ·
+  1-6 63e49b5 PickerState gPicker(WindowThumb) · 1-7 398b501 SelectionGateState gSel · 1-8 8ecf049 InputState gInput ·
+  1-9 ece4257 RemoteCursorState gCursor · 1-10 22d35e5 UiResources gUi(brush_cache static map) · 1-11 250fd72 RecvStats st(recv 지역 26)
+  · 1-12 c3d8e6b FrameGateState gate(recv 지역 33 + main env 설정 4, ClientCongestionState 이동) · 1-13 0dccc66 DecoderState dec
+  (main 지역 11 + recvSelectionEpoch) · 1-14 d7b8f2f viewer_globals.hpp/.cpp 정리(고아 주석 제거, extern 10).
+- 결과: 파일 스코프 전역 0(인스턴스 10), 함수 static은 설정 래치 2개(`registered`, `remoteCursorEnabled`)만 유지. main.cpp 2,287→2,205줄.
+  게이트: 매 커밋 빌드 exit 0 + 뷰어 e2e 3/3 ALL PASS(1-9는 빌드 중 부하로 C-1에 congested 전이 1회 → 같은 트리 재실행 통과).
+- 발견: 코드 발견 신규 없음(F-03 dead 상태는 struct 멤버에 `// dead: F-03` 주석으로 표시, F-14 리셋 없음 static은 `// reset: never (F-14)`).
+  절차 교훈: msys `head/sed/tail` 파이프라인이 CR을 떨어뜨려 CRLF 앵커가 빗나감 → 앵커 `\r?\n` + rename 후 CRLF 재정규화;
+  이 grep의 `-P`는 CP949 로케일을 거부 → 검사는 perl로; 로그 라벨 문자열은 검사에서 제외.
+- 다음 액션: Phase 2 — VideoReceiver/FrameGate(+T1)/DecoderStage/ControlClient/SelectionGate(+T2)/PickerGesture(+T3)/layout 순수화(+T4)/
+  present 분리/WndProc 핸들러 분할/startup/shutdown.
