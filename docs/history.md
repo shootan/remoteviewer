@@ -7389,3 +7389,29 @@ Next action
   §11 결정표, §12 기록 절차 신설. `구현계획.md` 체크리스트 1줄 추가·Phase 0 줄 수정, `HANDOFF.md` 코드 지도, `README.md` 목록.
 - 검증: 없음(문서). 빌드/코드 변경 없음.
 - 다음 액션: 변동 없음 — 사전 단계(태그/브랜치, viewer_split_e2e.sh 기준선) → Phase 0-0.
+
+### 308) 2026-08-27 뷰어 분할 리팩터 Phase 0 완료 — 파일 스코프 이동 15단계 (브랜치 refactor/viewer-split, 43553e6 → 36fe396)
+
+- 사전: 복귀 태그 `v0.2.58-pre-viewer-split`, 브랜치 `refactor/viewer-split`(문서는 main, 워크트리 build-local/_main_wt로 갱신 후
+  branch가 merge main). 게이트 C 신설 `automation/viewer_split_e2e.sh`(뷰어 exe 직접 구동: C-1 stream 10s / C-2 picker 6s /
+  C-3 tcp-raw 5s, 격리 포트 44100/44101) 기준선 ALL PASS. 도구: `viewer_split_move.pl`(정규식 앵커로 최상위 블록을 verbatim
+  이동, 선행 주석 포함, 선언/정의 분리·기본인자 처리, HEAD 기준 줄 범위 출력), `viewer_split_check.pl`(게이트 B: 이동 전 리비전의
+  줄 범위가 새 파일에 연속·byte-동일로 존재), `viewer_split_gate.sh`(빌드 exit code 전파 + e2e), `host_udp_e2e.sh`.
+- 커밋: 0-0 43553e6 globals 88 + 상태 타입 6 + 상수 → viewer_globals.hpp(extern, 군집별 `// thread:`)/.cpp + viewer_common.hpp,
+  anonymous namespace → `remote60::native_poc::viewer` · 0-1 a6a074c+ae5dee5 소켓 사본 삭제 → native_socket.hpp(첫 커밋이 `\b::`
+  치환 누락으로 빌드 깨진 채 커밋됨 → 후속 fix; 이후 게이트 스크립트로 exit code 전파) · 0-2 1509dc8 viewer_env_util.hpp ·
+  0-3 2caeccd viewer_log · 0-4 8815fef viewer_args · 0-5 42b9e0b viewer_decoder_backend · 0-6 3556584 viewer_gdi_util ·
+  0-7 f31c633 viewer_nv12_renderer.hpp(+gNv12Renderer → globals) · 0-8 a3f4919 viewer_layout · 0-9 77809ff viewer_input_forward ·
+  0-10 c8b90d2 viewer_picker · 0-11 1cc5967 viewer_overlay_draw · 0-12 b298bd1 viewer_cursor_overlay · 0-13 c054f00
+  viewer_window_proc(891줄, 2-8까지 한시 허용) · 0-15 36fe396 호스트 공유 통합: env_util.hpp / string_util.hpp(host_string_util.hpp는
+  forwarding) / backend_request_match.hpp(inline) — 호스트 host_args/host_capture_device의 사본 제거, 뷰어는 namespace viewer로
+  re-export. 0-14 dead code 삭제는 원장 F-04로 이관(실행 안 함).
+- 결과: main.cpp 5,349→2,287줄(main() 2,158줄 그대로 — Phase 1~3 대상), viewer_* 24파일(최대 window_proc 891, nv12_renderer 409,
+  globals.hpp 337) + 공유 헤더 3. 게이트: 매 커밋 이동 동일성 PASS / 빌드 exit 0 / 뷰어 e2e 3/3 ALL PASS; 0-15는 호스트+테스트
+  9타깃 빌드, 단위테스트 6종 PASS, 호스트 UDP e2e ALL PASS 추가.
+- 발견: 코드 발견 신규 없음(원장 F-01~F-15 유지). 절차 교훈: (1) Bash 툴 인라인 체인에서는 `set -e`가 안 먹어 실패가 전파되지
+  않음 → 스크립트 파일 + `&&` 체인 + 게이트 스크립트로 통일. (2) perl `s{}{}`는 치환문에 `}`/`{`가 있으면 깨짐 → `s~~~`.
+  (3) 전방선언 삭제는 이동 뒤에(줄 범위가 HEAD를 가리키도록). 0-15 첫 시도는 스크립트 앵커 실패로 재배선 없이 커밋될 뻔 → 커밋
+  직후 reset --soft로 되돌리고 재적용(최종 36fe396만 남음).
+- 다음 액션: Phase 1 — 전역 88 + 함수 static 7 + recv 지역 75 → state struct 13(viewer_constants.hpp 선행, 인스턴스는 globals 명명
+  전역 gSession/gFrameBuf/gPresent/gMetrics/gControl/gPicker/gSel/gInput/gCursor/gUi + recv 지역 RecvStats/FrameGateState/DecoderState).
