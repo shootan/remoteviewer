@@ -65,8 +65,9 @@ rename_all() {  # $1 mapfile
 verify_gone() {  # $1 mapfile: no old identifier may remain outside the state headers
   local old bad=0
   while IFS=$'\t' read -r old new; do
-    # a word not preceded by . -> :: or an identifier char (the renamed member names may equal the old bare names)
-    if grep -nP '(?<![.\w>:])'"$old"'\b' $(rename_files) ; then echo "still referenced: $old"; bad=1; fi
+    # a word not preceded by . -> :: or an identifier char (the renamed member names may equal the old bare names);
+    # perl, because this grep's -P refuses the CP949 locale
+    if OLD="$old" perl -ne 'print "$ARGV:$.: $_" if /(?<![.\w>:])\Q$ENV{OLD}\E\b/' $(rename_files) | grep . ; then echo "still referenced: $old"; bad=1; fi
   done < "$1"
   [ $bad -eq 0 ]
 }
