@@ -548,7 +548,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       const RECT& videoRect = layout.videoRect;
       const RECT contentRect = resolve_video_content_rect(hwnd, videoRect);
       const bool pickerVisible = gWindowPickerVisible.load(std::memory_order_relaxed);
-      static bool hasPresentedAtLeastOneFrame = false;
 
       std::shared_ptr<std::vector<uint8_t>> local;
       Microsoft::WRL::ComPtr<IMFSample> localSurfaceSample;
@@ -608,8 +607,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (localFormat == SharedFrame::PixelFormat::Nv12) {
           if (!gNv12Renderer.ready) {
             if (!gNv12Renderer.init(hwnd)) {
-              ++gD3dPresentFailCount;
-              ++gFallbackInitFailCount;
+              ++gPresent.d3dPresentFailCount;
+              ++gPresent.fallbackInitFailCount;
               fallbackReason = "d3d_init_fail";
             }
           }
@@ -623,11 +622,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                                visL, visT, w, h, &renderTelemetry);
             }
             if (presented) {
-              ++gD3dPresentSuccessCount;
+              ++gPresent.d3dPresentSuccessCount;
               renderPath = localSurfaceTexture ? "d3d_nv12_surface" : "d3d_nv12";
             } else {
-              ++gD3dPresentFailCount;
-              ++gFallbackRenderFailCount;
+              ++gPresent.d3dPresentFailCount;
+              ++gPresent.fallbackRenderFailCount;
               fallbackReason = renderTelemetry.failStage;
             }
           }
@@ -651,10 +650,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                             bgra.data() + static_cast<size_t>(visT) * codedW * 4, &bmi,
                             DIB_RGB_COLORS, SRCCOPY);
               presented = true;
-              ++gGdiFallbackPresentedCount;
+              ++gPresent.gdiFallbackPresentedCount;
               renderPath = "gdi_nv12_fallback";
             } else {
-              ++gFallbackNv12ConvertFailCount;
+              ++gPresent.fallbackNv12ConvertFailCount;
               fallbackReason = "nv12_to_bgra_fail";
             }
           }
@@ -677,21 +676,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
       }
       if (presented) {
-        hasPresentedAtLeastOneFrame = true;
-        static uint64_t lastPresentUs = 0;
-        static uint64_t lastUserFeedbackUs = 0;
-        static uint64_t lastUserFeedbackOverwrite = 0;
+        gPresent.hasPresentedAtLeastOneFrame = true;
         gFrameBuf.lastPresentedVersion.store(frameVersion, std::memory_order_relaxed);
         gFrameBuf.lastPresentedCaptureUs.store(captureUs, std::memory_order_relaxed);
         const uint64_t presentUs = qpc_now_us();
-        const uint64_t presentGapUs = (lastPresentUs > 0) ? (presentUs - lastPresentUs) : 0;
+        const uint64_t presentGapUs = (gPresent.lastPresentUs > 0) ? (presentUs - gPresent.lastPresentUs) : 0;
         const uint64_t queueToPaintUs = (paintStartUs >= queueSetUs) ? (paintStartUs - queueSetUs) : 0;
         const uint64_t queueToPresentUs = (presentUs >= paintStartUs) ? (presentUs - paintStartUs) : 0;
-        const uint32_t traceEvery = gTraceEvery.load();
-        const uint32_t traceMax = gTraceMax.load();
+        const uint32_t traceEvery = gPresent.traceEvery.load();
+        const uint32_t traceMax = gPresent.traceMax.load();
         if (traceEvery > 0 && (seq % traceEvery) == 0 &&
-            (traceMax == 0 || gTracePresentPrinted.load() < traceMax)) {
-          const auto nowPrinted = gTracePresentPrinted.fetch_add(1) + 1;
+            (traceMax == 0 || gPresent.tracePresentPrinted.load() < traceMax)) {
+          const auto nowPrinted = gPresent.tracePresentPrinted.fetch_add(1) + 1;
           if (traceMax == 0 || nowPrinted <= traceMax) {
             const uint64_t netUs = (recvUs >= sendUs) ? (recvUs - sendUs) : 0;
             const uint64_t c2eUs = (encodeStartUs >= captureUs) ? (encodeStartUs - captureUs) : 0;
@@ -741,7 +737,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // reports as stutter. Gating this behind the warning thresholds left the aggregate
         // reading zero through visibly uneven playback, so there was nothing to optimise
         // against.
-        if (lastPresentUs > 0) {
+        if (gPresent.lastPresentUs > 0) {
           std::ostringstream gapLine;
           gapLine << "[native-video-client][present] seq=" << seq
                   << " frameGapUs=" << presentGapUs;
@@ -753,10 +749,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // side of a periodic stutter. Joins the host 'wire seq=' log by seq+gen; steady play stays
         // quiet. This only observes the timestamps the present path already produced.
         {
-          const uint32_t expIntervalUs = gPresentFrameIntervalUs.load(std::memory_order_relaxed);
+          const uint32_t expIntervalUs = gPresent.presentFrameIntervalUs.load(std::memory_order_relaxed);
           const uint64_t anomalyGapUs =
               (expIntervalUs > 0) ? (static_cast<uint64_t>(expIntervalUs) * 3ULL) / 2ULL : 25000ULL;
-          const bool presentAnomaly = (lastPresentUs > 0 && presentGapUs > anomalyGapUs);
+          const bool presentAnomaly = (gPresent.lastPresentUs > 0 && presentGapUs > anomalyGapUs);
           if (frameKey || presentAnomaly) {
             uint64_t presentBacklog = 0;
             {
@@ -776,15 +772,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             log_client_line(telem.str());
           }
         }
-        if ((totalUs >= kUserFeedbackLagWarnUs || (presentGapUs >= kUserFeedbackGapWarnUs && lastPresentUs > 0)) &&
-            (presentUs >= lastUserFeedbackUs + kUserFeedbackMinIntervalUs || lastUserFeedbackUs == 0)) {
+        if ((totalUs >= kUserFeedbackLagWarnUs || (presentGapUs >= kUserFeedbackGapWarnUs && gPresent.lastPresentUs > 0)) &&
+            (presentUs >= gPresent.lastUserFeedbackUs + kUserFeedbackMinIntervalUs || gPresent.lastUserFeedbackUs == 0)) {
           const uint64_t overwriteCountNow = gFrameBuf.overwriteBeforePresentCount.load(std::memory_order_relaxed);
-          const uint64_t overwriteDelta = (overwriteCountNow >= lastUserFeedbackOverwrite)
-                                             ? (overwriteCountNow - lastUserFeedbackOverwrite)
+          const uint64_t overwriteDelta = (overwriteCountNow >= gPresent.lastUserFeedbackOverwrite)
+                                             ? (overwriteCountNow - gPresent.lastUserFeedbackOverwrite)
                                              : 0;
-          const uint64_t d3dSuccess = gD3dPresentSuccessCount.load(std::memory_order_relaxed);
-          const uint64_t d3dFail = gD3dPresentFailCount.load(std::memory_order_relaxed);
-          const uint64_t gdiFallback = gGdiFallbackPresentedCount.load(std::memory_order_relaxed);
+          const uint64_t d3dSuccess = gPresent.d3dPresentSuccessCount.load(std::memory_order_relaxed);
+          const uint64_t d3dFail = gPresent.d3dPresentFailCount.load(std::memory_order_relaxed);
+          const uint64_t gdiFallback = gPresent.gdiFallbackPresentedCount.load(std::memory_order_relaxed);
           const uint64_t paintCoalesced = gFrameBuf.paintCoalescedCount.load(std::memory_order_relaxed);
           const uint64_t queueWaitUs = (paintStartUs >= queueSetUs) ? (paintStartUs - queueSetUs) : 0;
           const uint64_t paintUs = (presentUs >= paintStartUs) ? (presentUs - paintStartUs) : 0;
@@ -820,11 +816,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
               << " renderPath=" << renderPath
               << " fallbackReason=" << fallbackReason;
           log_client_line(oss.str());
-          lastUserFeedbackUs = presentUs;
-          lastUserFeedbackOverwrite = overwriteCountNow;
+          gPresent.lastUserFeedbackUs = presentUs;
+          gPresent.lastUserFeedbackOverwrite = overwriteCountNow;
         }
-        lastPresentUs = presentUs;
-      } else if (pickerVisible || !hasPresentedAtLeastOneFrame) {
+        gPresent.lastPresentUs = presentUs;
+      } else if (pickerVisible || !gPresent.hasPresentedAtLeastOneFrame) {
         // Before first successful frame, keep a deterministic background.
         FillRect(hdc, &videoRect, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
       }

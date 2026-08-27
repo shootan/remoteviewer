@@ -8,11 +8,6 @@
 
 namespace remote60::native_poc::viewer {
 
-std::atomic<uint32_t> gTraceEvery{0};
-std::atomic<uint32_t> gTraceMax{0};
-std::atomic<uint32_t> gPresentFrameIntervalUs{0};
-std::atomic<uint64_t> gTracePresentPrinted{0};
-std::atomic<uint64_t> gTraceRecvPrinted{0};
 ClientInputQueue gInputQueueState;
 remote60::native_poc::UdpControlChannel gUdpControl;
 std::atomic<bool> gControlOverUdp{false};
@@ -24,12 +19,6 @@ KeyframeRequestState gKeyframeRequests{
     kKeyframeRequestMinIntervalUsDefault,
     kKeyframeRequestTokenRefillUsDefault,
     kKeyframeRequestTokenCapacityDefault};
-std::atomic<uint64_t> gD3dPresentSuccessCount{0};
-std::atomic<uint64_t> gD3dPresentFailCount{0};
-std::atomic<uint64_t> gGdiFallbackPresentedCount{0};
-std::atomic<uint64_t> gFallbackInitFailCount{0};
-std::atomic<uint64_t> gFallbackRenderFailCount{0};
-std::atomic<uint64_t> gFallbackNv12ConvertFailCount{0};
 std::atomic<bool> gControlConnected{false};
 std::atomic<uint32_t> gHostCaptureTargetPid{0};
 std::atomic<uint32_t> gHostCaptureTargetFlags{0};
@@ -87,5 +76,5 @@ std::atomic<bool> gForwardedKeyDown[256]{};
 remote60::native_poc::InputMacro gInputMacro;
 std::atomic<bool> gMacroButtonDown{false};
 Nv12D3dRenderer gNv12Renderer;
-SessionState gSession;FrameBuffer gFrameBuf;
+SessionState gSession;FrameBuffer gFrameBuf;PresentStats gPresent;
 }  // namespace remote60::native_poc::viewer

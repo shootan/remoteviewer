@@ -149,9 +149,9 @@ int main(int argc, char** argv) {
   }
 
   const Args args = parse_args(argc, argv);
-  gTraceEvery = args.traceEvery;
-  gTraceMax = args.traceMax;
-  gPresentFrameIntervalUs = static_cast<uint32_t>(std::max<uint64_t>(
+  gPresent.traceEvery = args.traceEvery;
+  gPresent.traceMax = args.traceMax;
+  gPresent.presentFrameIntervalUs = static_cast<uint32_t>(std::max<uint64_t>(
       1ULL, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, args.fpsHint))));
   const uint64_t keyframeReqMinIntervalUs = env_u32_clamped(
       "REMOTE60_NATIVE_KEYFRAME_REQ_MIN_INTERVAL_US",
@@ -1031,12 +1031,12 @@ int main(int argc, char** argv) {
     };
     auto load_present_counters = [&]() -> PresentCounterSnapshot {
       PresentCounterSnapshot s{};
-      s.d3dPresentSuccess = gD3dPresentSuccessCount.load(std::memory_order_relaxed);
-      s.d3dPresentFail = gD3dPresentFailCount.load(std::memory_order_relaxed);
-      s.gdiFallbackPresented = gGdiFallbackPresentedCount.load(std::memory_order_relaxed);
-      s.fallbackInitFail = gFallbackInitFailCount.load(std::memory_order_relaxed);
-      s.fallbackRenderFail = gFallbackRenderFailCount.load(std::memory_order_relaxed);
-      s.fallbackNv12ConvertFail = gFallbackNv12ConvertFailCount.load(std::memory_order_relaxed);
+      s.d3dPresentSuccess = gPresent.d3dPresentSuccessCount.load(std::memory_order_relaxed);
+      s.d3dPresentFail = gPresent.d3dPresentFailCount.load(std::memory_order_relaxed);
+      s.gdiFallbackPresented = gPresent.gdiFallbackPresentedCount.load(std::memory_order_relaxed);
+      s.fallbackInitFail = gPresent.fallbackInitFailCount.load(std::memory_order_relaxed);
+      s.fallbackRenderFail = gPresent.fallbackRenderFailCount.load(std::memory_order_relaxed);
+      s.fallbackNv12ConvertFail = gPresent.fallbackNv12ConvertFailCount.load(std::memory_order_relaxed);
       s.paintCoalesced = gFrameBuf.paintCoalescedCount.load(std::memory_order_relaxed);
       s.overwriteBeforePresent = gFrameBuf.overwriteBeforePresentCount.load(std::memory_order_relaxed);
       return s;
@@ -1720,8 +1720,8 @@ int main(int argc, char** argv) {
       }
 
       if (args.traceEvery > 0 && (h.seq % args.traceEvery) == 0 &&
-          (args.traceMax == 0 || gTraceRecvPrinted.load() < args.traceMax)) {
-        const auto nowPrinted = gTraceRecvPrinted.fetch_add(1) + 1;
+          (args.traceMax == 0 || gPresent.traceRecvPrinted.load() < args.traceMax)) {
+        const auto nowPrinted = gPresent.traceRecvPrinted.fetch_add(1) + 1;
         if (args.traceMax == 0 || nowPrinted <= args.traceMax) {
           std::ostringstream oss;
           oss << "[native-video-client][trace_recv] seq=" << h.seq
@@ -2119,8 +2119,8 @@ int main(int argc, char** argv) {
         }
 
         if (args.traceEvery > 0 && (h.seq % args.traceEvery) == 0 &&
-            (args.traceMax == 0 || gTraceRecvPrinted.load() < args.traceMax)) {
-          const auto nowPrinted = gTraceRecvPrinted.fetch_add(1) + 1;
+            (args.traceMax == 0 || gPresent.traceRecvPrinted.load() < args.traceMax)) {
+          const auto nowPrinted = gPresent.traceRecvPrinted.fetch_add(1) + 1;
           if (args.traceMax == 0 || nowPrinted <= args.traceMax) {
             std::ostringstream oss;
             oss << "[native-video-client][trace_recv] seq=" << h.seq

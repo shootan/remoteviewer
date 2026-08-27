@@ -14,6 +14,7 @@
 // Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-0).
 
 #include "viewer_common.hpp"
+#include "viewer_present_stats.hpp"
 #include "viewer_frame_buffer.hpp"
 #include "viewer_session_state.hpp"
 #include "viewer_constants.hpp"
@@ -24,14 +25,9 @@ namespace remote60::native_poc::viewer {
 // thread: recv writes gFrameBuf.frame/version, UI reads it under gFrameBuf.frame.mu and stamps gLastPresented*;
 // gFrameBuf.paintQueued coalesces InvalidateRect between recv and UI; trace counters recv/UI.
 
-extern std::atomic<uint32_t> gTraceEvery;
-extern std::atomic<uint32_t> gTraceMax;
 // Diagnostics-only: expected present interval (from fpsHint), published once at startup so the
 // present-stage stream telemetry on the UI thread can flag gaps past 1.5x cadence without reaching
 // into the recv thread's Args. 0 => fall back to a 60fps assumption.
-extern std::atomic<uint32_t> gPresentFrameIntervalUs;
-extern std::atomic<uint64_t> gTracePresentPrinted;
-extern std::atomic<uint64_t> gTraceRecvPrinted;
 
 enum class ClientCongestionState : uint8_t {
   Normal = 0,
@@ -91,12 +87,6 @@ extern KeyframeRequestState gKeyframeRequests;
 // but frames keep arriving, so lag-vs-last-presented would misread the overlay as decode backlog
 // and start catchup churn. Suppress catchup while the picker is up and briefly after it closes
 // (until the first present re-anchors gFrameBuf.lastPresentedCaptureUs).
-extern std::atomic<uint64_t> gD3dPresentSuccessCount;
-extern std::atomic<uint64_t> gD3dPresentFailCount;
-extern std::atomic<uint64_t> gGdiFallbackPresentedCount;
-extern std::atomic<uint64_t> gFallbackInitFailCount;
-extern std::atomic<uint64_t> gFallbackRenderFailCount;
-extern std::atomic<uint64_t> gFallbackNv12ConvertFailCount;
 
 
 // thread: main fills gSession.overlayConfig once; control writes the host capture meta on every pong;
@@ -230,4 +220,5 @@ extern Nv12D3dRenderer gNv12Renderer;
 
 extern SessionState gSession;
 extern FrameBuffer gFrameBuf;
+extern PresentStats gPresent;
 }  // namespace remote60::native_poc::viewer
