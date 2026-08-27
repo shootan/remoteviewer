@@ -193,9 +193,17 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
         callbackUs = nowUs;
         queuePushUs = nowUs;
         kick.MarkKickedForCurrentInput();
-        // Keep kicking on a still-closed barrier: each kick feeds a forced IDR, so the held frame
-        // becomes an IDR within a couple of flushes and the cancel comes when it reaches the wire.
-        rearm = barrierClosed;
+        // Keep kicking while an IDR is still owed -- a closed barrier, or any forced key that has
+        // not yet come out of the encoder. `barrierClosed` alone was not enough: a viewer key
+        // request arrives on an OPEN barrier, so one cached submit went in and the kick was then
+        // cancelled. If the async MFT held that input and returned no AU, forceKeyNext stayed set
+        // (it is only cleared when a key AU is actually emitted), nothing re-armed the kick, and
+        // with the static refresh off there was no further input ever -- the request stalled on a
+        // single MFT hold. Re-arming on forceKeyNext drains it 150ms later instead.
+        // Termination: the AU path clears forceKeyNext when the key reaches the wire, so the next
+        // due sees needKick false and cancels. The 300ms force-key submit latch keeps this from
+        // becoming an IDR train. (Ledger H-26b, second pass.)
+        rearm = barrierClosed || encoder.forceKeyNext;
       }
       // Otherwise one-shot: a failed fill (locked/secure/identity mismatch) leaves the screen black
       // rather than painting a wrong or stale picture, and a satisfied trailing edge stays quiet.
