@@ -479,6 +479,13 @@ add_executable(remote60_viewer_picker_gesture_test
 target_include_directories(remote60_viewer_picker_gesture_test PRIVATE src)
 target_link_libraries(remote60_viewer_picker_gesture_test PRIVATE common ws2_32)
 
+# Viewer split refactor T4: the viewer layout arithmetic (aspect fit, card grid, client layout, point mapping, hit test).
+add_executable(remote60_viewer_layout_test
+  src/viewer_layout_test.cpp
+)
+target_include_directories(remote60_viewer_layout_test PRIVATE src)
+target_link_libraries(remote60_viewer_layout_test PRIVATE user32 gdi32)
+
 add_executable(remote60_bind_port_candidates_test
   src/bind_port_candidates_test.cpp
 )

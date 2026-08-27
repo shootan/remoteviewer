@@ -17,6 +17,7 @@
 #include "viewer_common.hpp"
 #include "viewer_globals.hpp"
 #include "viewer_gdi_util.hpp"
+#include "viewer_layout_math.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -42,40 +43,7 @@ inline int kPanelItemHeight() { return dpi_scale(28); }
 
 inline int kPanelItemGap() { return dpi_scale(4); }
 
-struct ClientLayout {
-  RECT clientRect{};
-  RECT toggleButtonRect{};
-  RECT macroButtonRect{};
-  RECT panelRect{};
-  RECT videoRect{};
-  RECT refreshButtonRect{};
-  RECT desktopButtonRect{};
-  RECT selectedInfoRect{};
-  RECT listRect{};
-  RECT statsRect{};
-};
-
-RECT make_rect(int x, int y, int w, int h);
-
-bool point_in_rect(const RECT& r, int x, int y);
-
-// Geometry of the card grid inside ClientLayout::listRect. Cards hold a 16:10 preview and a
-// one-line caption, laid out left-to-right then top-to-bottom.
-struct CardGridMetrics {
-  int cols = 1;
-  int cardW = 0;
-  int cardH = 0;
-  int thumbH = 0;
-  int gap = 0;
-  int visibleRows = 1;
-  int visibleCards = 1;
-};
-
 CardGridMetrics compute_card_grid(const RECT& gridRect);
-
-RECT card_rect_for_slot(const RECT& gridRect, const CardGridMetrics& m, int slot);
-
-RECT aspect_fit_rect(const RECT& containerRect, uint32_t contentWidth, uint32_t contentHeight);
 
 bool resolve_active_video_content_size(uint32_t* outWidth, uint32_t* outHeight);
 

@@ -199,17 +199,11 @@ bool try_hit_window_list_item(HWND hwnd, int x, int y, uint64_t* outWindowId) {
   const ClientLayout layout = compute_client_layout(hwnd);
   if (!point_in_rect(layout.listRect, x, y)) return false;
   const CardGridMetrics grid = compute_card_grid(layout.listRect);
-  const int relX = x - layout.listRect.left;
-  const int relY = y - layout.listRect.top;
-  const int col = relX / (grid.cardW + grid.gap);
-  const int row = relY / (grid.cardH + grid.gap);
-  if (col < 0 || col >= grid.cols || row < 0 || row >= grid.visibleRows) return false;
-  // Reject clicks that land in the gaps between cards.
-  if (relX - col * (grid.cardW + grid.gap) >= grid.cardW) return false;
-  if (relY - row * (grid.cardH + grid.gap) >= grid.cardH) return false;
+  int cardIndex = 0;
+  if (!card_hit_test(layout.listRect, grid, gPicker.gridScrollRow.load(std::memory_order_relaxed), x, y, &cardIndex)) {
+    return false;
+  }
   const WindowPanelSnapshot snap = gPicker.windowPanel.Snapshot();
-  const int cardIndex =
-      gPicker.gridScrollRow.load(std::memory_order_relaxed) * grid.cols + row * grid.cols + col;
   if (cardIndex == 0) {
     *outWindowId = 0;
     return true;
