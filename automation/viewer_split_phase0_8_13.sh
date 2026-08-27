@@ -40,8 +40,7 @@ cpp_prelude() {  # $1 out, $2 own header, then INCLUDES var
 
 # ================= 0-8 viewer_layout =================
 if [ "$FROM" -le 8 ]; then
-INCLUDES='#include_"viewer_common.hpp" #include_"viewer_globals.hpp" #include_"viewer_gdi_util.hpp"'
-INCLUDES=${INCLUDES//_/ }
+INCLUDES='viewer_common.hpp viewer_globals.hpp viewer_gdi_util.hpp'
 hpp_prelude $T/layout_hpp.txt \
 '// Geometry of the viewer window: the picker/stream layout, the card grid, aspect-fit letterboxing' \
 '// and the mapping from client pixels to video coordinates.' \
@@ -83,8 +82,7 @@ fi
 
 # ================= 0-9 viewer_input_forward =================
 if [ "$FROM" -le 9 ]; then
-INCLUDES='#include_"viewer_common.hpp" #include_"viewer_globals.hpp"'
-INCLUDES=${INCLUDES//_/ }
+INCLUDES='viewer_common.hpp viewer_globals.hpp'
 hpp_prelude $T/input_hpp.txt \
 '// Input forwarding of the viewer: mouse/key/IME events become ControlInputEvent/Text messages.' \
 '//' \
@@ -126,8 +124,7 @@ fi
 
 # ================= 0-10 viewer_picker =================
 if [ "$FROM" -le 10 ]; then
-INCLUDES='#include_"viewer_common.hpp" #include_"viewer_globals.hpp" #include_"viewer_layout.hpp"'
-INCLUDES=${INCLUDES//_/ }
+INCLUDES='viewer_common.hpp viewer_globals.hpp viewer_layout.hpp'
 hpp_prelude $T/picker_hpp.txt \
 '// Target picker and selection gate glue of the viewer.' \
 '//' \
@@ -142,8 +139,7 @@ hpp_prelude $T/picker_hpp.txt \
 '// Callers: WndProc, control thread, recv thread, main() toolbar callbacks.' \
 '//' \
 '// Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-10).'
-INCLUDES='#include_"viewer_common.hpp" #include_"viewer_globals.hpp" #include_"viewer_input_forward.hpp" #include_"viewer_layout.hpp" #include_"viewer_log.hpp"'
-INCLUDES=${INCLUDES//_/ }
+INCLUDES='viewer_common.hpp viewer_globals.hpp viewer_input_forward.hpp viewer_layout.hpp viewer_log.hpp'
 cpp_prelude $T/picker_cpp.txt viewer_picker.hpp
 # the forward declaration (and its explanatory comment) of set_picker_visible_and_sync_stream move to the definition
 perl -0pi -e 's{// Browsing targets must not keep the host encoding \(F1\)\. The request rides the control\r\n// scheduler, which orders stream state ahead of window selection\. Sent only on explicit\r\n// picker transitions: startup leaves the host.s default-active stream alone, so headless\r\n// harness clients that never open the picker keep receiving video unchanged\.\r\nvoid set_picker_visible_and_sync_stream\(bool visible\);\r\n}{} or die "picker fwd decl"' "$M"
@@ -176,8 +172,7 @@ fi
 
 # ================= 0-11 viewer_overlay_draw =================
 if [ "$FROM" -le 11 ]; then
-INCLUDES='#include_"viewer_common.hpp" #include_"viewer_globals.hpp" #include_"viewer_layout.hpp"'
-INCLUDES=${INCLUDES//_/ }
+INCLUDES='viewer_common.hpp viewer_globals.hpp viewer_layout.hpp'
 hpp_prelude $T/overlay_hpp.txt \
 '// The picker overlay paint and the overlay metric ring of the viewer.' \
 '//' \
@@ -189,8 +184,7 @@ hpp_prelude $T/overlay_hpp.txt \
 '// Callers: WM_PAINT, recv thread (publish_metrics), WM_KEYDOWN hotkeys.' \
 '//' \
 '// Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-11).'
-INCLUDES='#include_"viewer_common.hpp" #include_"viewer_gdi_util.hpp" #include_"viewer_globals.hpp" #include_"viewer_layout.hpp"'
-INCLUDES=${INCLUDES//_/ }
+INCLUDES='viewer_common.hpp viewer_gdi_util.hpp viewer_globals.hpp viewer_layout.hpp'
 cpp_prelude $T/overlay_cpp.txt viewer_overlay_draw.hpp
 OUT=$(perl automation/viewer_split_move.pl --src "$M" --hpp $S/viewer_overlay_draw.hpp --hpp-prelude $T/overlay_hpp.txt \
   --cpp $S/viewer_overlay_draw.cpp --cpp-prelude $T/overlay_cpp.txt \
@@ -209,8 +203,7 @@ fi
 
 # ================= 0-12 viewer_cursor_overlay =================
 if [ "$FROM" -le 12 ]; then
-INCLUDES='#include_"viewer_common.hpp" #include_"viewer_globals.hpp"'
-INCLUDES=${INCLUDES//_/ }
+INCLUDES='viewer_common.hpp viewer_globals.hpp'
 hpp_prelude $T/cursor_hpp.txt \
 '// Remote-cursor overlay: a layered, click-through popup that follows the host cursor sample.' \
 '//' \
@@ -222,8 +215,7 @@ hpp_prelude $T/cursor_hpp.txt \
 '// Callers: WndProc WM_TIMER (kCursorOverlayTimerId).' \
 '//' \
 '// Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-12).'
-INCLUDES='#include_"viewer_common.hpp" #include_"viewer_env_util.hpp" #include_"viewer_globals.hpp" #include_"viewer_layout.hpp"'
-INCLUDES=${INCLUDES//_/ }
+INCLUDES='viewer_common.hpp viewer_env_util.hpp viewer_globals.hpp viewer_layout.hpp'
 cpp_prelude $T/cursor_cpp.txt viewer_cursor_overlay.hpp
 perl -0pi -e 's{void ensure_cursor_overlay\(HWND owner\);\r\nvoid update_cursor_overlay\(HWND hwnd\);\r\n}{} or die "cursor fwd decls"' "$M"
 OUT=$(perl automation/viewer_split_move.pl --src "$M" --hpp $S/viewer_cursor_overlay.hpp --hpp-prelude $T/cursor_hpp.txt \
@@ -238,8 +230,7 @@ fi
 
 # ================= 0-13 viewer_window_proc =================
 if [ "$FROM" -le 13 ]; then
-INCLUDES='#include_"viewer_common.hpp"'
-INCLUDES=${INCLUDES//_/ }
+INCLUDES='viewer_common.hpp'
 hpp_prelude $T/wnd_hpp.txt \
 '// The viewer window: class registration, creation, and its window procedure.' \
 '//' \
@@ -252,8 +243,7 @@ hpp_prelude $T/wnd_hpp.txt \
 '//' \
 '// Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-13). Still 870' \
 '// lines: Phase 2-8 moves the WM_PAINT body to viewer_present.cpp and 2-9 splits the handlers.'
-INCLUDES='#include_"viewer_common.hpp" #include_"viewer_cursor_overlay.hpp" #include_"viewer_gdi_util.hpp" #include_"viewer_globals.hpp" #include_"viewer_input_forward.hpp" #include_"viewer_layout.hpp" #include_"viewer_log.hpp" #include_"viewer_nv12_renderer.hpp" #include_"viewer_overlay_draw.hpp" #include_"viewer_picker.hpp"'
-INCLUDES=${INCLUDES//_/ }
+INCLUDES='viewer_common.hpp viewer_cursor_overlay.hpp viewer_gdi_util.hpp viewer_globals.hpp viewer_input_forward.hpp viewer_layout.hpp viewer_log.hpp viewer_nv12_renderer.hpp viewer_overlay_draw.hpp viewer_picker.hpp'
 cpp_prelude $T/wnd_cpp.txt viewer_window_proc.hpp
 OUT=$(perl automation/viewer_split_move.pl --src "$M" --hpp $S/viewer_window_proc.hpp --hpp-prelude $T/wnd_hpp.txt \
   --cpp $S/viewer_window_proc.cpp --cpp-prelude $T/wnd_cpp.txt \
