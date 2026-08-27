@@ -7336,3 +7336,12 @@ Next action
   GNLinkSetup.exe에 L"0.2.58" ×3 / L"0.2.57" ×0, GNLinkHost.exe ×1/×0(GNLinkStream은 버전 문자열 없음). 재빌드 호스트 UDP e2e 13/13.
   `dist/GNLinkSetup-0.2.58.exe`(3,168,768B) 복사, 0.2.55~0.2.57 보존(0.2.57 = 리팩터 전 코드, 되돌리기용).
 - 상태: **실기 확인 대기**. 통과 시 `refactor/host-split` → main 병합; 문제 시 수정 후 0.2.59로 재배포.
+
+### 305) 2026-08-27 리팩터 실기 통과 → main 병합, 리팩터 전 복귀점 고정 (d152627)
+
+- 사용자 실기(0.2.58 설치본) "동작 잘 되는 것 같다" → 병합 승인, 단 리팩터 전 버전을 언제든 돌릴 수 있게 남길 것.
+- 복귀점: 병합 직전 main(리팩터 전 호스트 코드 0.2.57 + 문서 전부)에 태그 `v0.2.57-pre-host-split` + 브랜치
+  `keep/pre-host-split-0.2.57`. 코드 확인: main의 apps/libs가 리팩터 분기점 c1483aa와 diff 0. 런타임 복귀는 `dist/GNLinkSetup-0.2.57.exe`.
+- 병합: `git merge --ff-only refactor/host-split`(main의 커밋이 전부 브랜치에 있어 fast-forward, 충돌 없음) → main = d152627,
+  main과 브랜치 diff 0, native_video_host_main.cpp 265줄, product_version 0.2.58. push 없음. `refactor/host-split` 브랜치는 남겨 둠.
+- 되돌리는 법: 코드 `git checkout v0.2.57-pre-host-split`(또는 keep/ 브랜치), 설치본 0.2.57 재설치. 다음: Phase 4.
