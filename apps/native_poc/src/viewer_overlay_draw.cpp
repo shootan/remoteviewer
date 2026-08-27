@@ -46,7 +46,7 @@ OverlayMetricAverages collect_overlay_averages(uint64_t nowUs, uint64_t windowUs
 }
 
 void apply_runtime_tune_delta(int bitrateStep, int keyintStep) {
-  gRuntimeTuneState.ApplyDelta(
+  gControl.runtimeTune.ApplyDelta(
       bitrateStep, keyintStep, gMetrics.client.recvMbpsX1000.load(std::memory_order_relaxed));
 }
 
@@ -152,13 +152,13 @@ void draw_overlay(HDC hdc) {
     statusLine = awaitingAck ? std::string("Selecting target...")
                              : std::string("Waiting for first frame...");
   }
-  if (!gControlConnected.load(std::memory_order_relaxed)) statusLine = "Connecting to host...";
+  if (!gControl.connected.load(std::memory_order_relaxed)) statusLine = "Connecting to host...";
   draw_text_utf8(hdc, statusLine, &subRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
   const bool actionsDisabled =
-      !gControlConnected.load(std::memory_order_relaxed) || selectionLocked || selectionPending;
+      !gControl.connected.load(std::memory_order_relaxed) || selectionLocked || selectionPending;
   draw_panel_button(hdc, layout.refreshButtonRect, "Refresh", false,
-                    !gControlConnected.load(std::memory_order_relaxed) || selectionPending);
+                    !gControl.connected.load(std::memory_order_relaxed) || selectionPending);
   draw_panel_button(hdc, layout.desktopButtonRect, "Desktop", selectedId == 0, actionsDisabled);
 
   // Card grid: desktop preview first, then one card per shareable window.
@@ -196,7 +196,7 @@ void draw_overlay(HDC hdc) {
 
   // Footer: connection and input state in one quiet line.
   std::ostringstream foot;
-  foot << (gControlConnected.load(std::memory_order_relaxed) ? "Connected" : "Disconnected")
+  foot << (gControl.connected.load(std::memory_order_relaxed) ? "Connected" : "Disconnected")
        << "   Input " << (gSession.inputEnabled.load(std::memory_order_relaxed) ? "on" : "off");
   const uint32_t decFpsX100 = gMetrics.client.decodedFpsX100.load(std::memory_order_relaxed);
   if (decFpsX100 > 0) foot << "   " << (decFpsX100 / 100) << " fps";

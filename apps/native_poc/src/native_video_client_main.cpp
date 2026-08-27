@@ -162,7 +162,7 @@ int main(int argc, char** argv) {
   const uint32_t keyframeReqTokenCapacity = env_u32_clamped(
       "REMOTE60_NATIVE_KEYFRAME_REQ_TOKEN_CAPACITY",
       kKeyframeRequestTokenCapacityDefault, 1, 16);
-  gKeyframeRequests.Configure(keyframeReqMinIntervalUs, keyframeReqTokenRefillUs, keyframeReqTokenCapacity);
+  gControl.keyframeRequests.Configure(keyframeReqMinIntervalUs, keyframeReqTokenRefillUs, keyframeReqTokenCapacity);
   const uint64_t catchupReenterMinIntervalUs = env_u32_clamped(
       "REMOTE60_NATIVE_CATCHUP_REENTER_MIN_INTERVAL_US",
       static_cast<uint32_t>(kCatchupReenterMinIntervalUsDefault), 100000, 3000000);
@@ -179,7 +179,7 @@ int main(int argc, char** argv) {
       "REMOTE60_NATIVE_UDP_SIM_DROP_PM", 0, 0, 1000);
   const uint32_t udpSimDropSeed = env_u32_clamped(
       "REMOTE60_NATIVE_UDP_SIM_DROP_SEED", 0, 0, 0x7fffffffu);
-  gKeyframeRequests.Reset();
+  gControl.keyframeRequests.Reset();
 
   const bool useRaw = (args.codec == "raw");
   const bool useH264 = (args.codec == "h264");
@@ -218,13 +218,13 @@ int main(int argc, char** argv) {
   gSession.overlayConfig.tcpRecvBufKb = args.tcpRecvBufKb;
   gSession.overlayConfig.tcpSendBufKb = args.tcpSendBufKb;
   gSession.overlayConfig.udpMtu = args.udpMtu;
-  gSession.overlayConfig.keyReqMinIntervalUs = gKeyframeRequests.min_interval_us();
-  gSession.overlayConfig.keyReqTokenRefillUs = gKeyframeRequests.token_refill_us();
-  gSession.overlayConfig.keyReqTokenCapacity = gKeyframeRequests.token_capacity();
+  gSession.overlayConfig.keyReqMinIntervalUs = gControl.keyframeRequests.min_interval_us();
+  gSession.overlayConfig.keyReqTokenRefillUs = gControl.keyframeRequests.token_refill_us();
+  gSession.overlayConfig.keyReqTokenCapacity = gControl.keyframeRequests.token_capacity();
   gSession.overlayConfig.udpSimDropPm = udpSimDropPm;
-  gRuntimeTuneState.Reset(args.runtimeBitrate, args.runtimeKeyint, args.runtimeFps);
+  gControl.runtimeTune.Reset(args.runtimeBitrate, args.runtimeKeyint, args.runtimeFps);
   gSession.requestedMonitorId = args.monitorId;
-  gControlConnected.store(false, std::memory_order_relaxed);
+  gControl.connected.store(false, std::memory_order_relaxed);
   // How the session opens. The explicit flag wins; with no flag we fall back to the legacy env
   // var so the automation probes (which all set REMOTE60_NATIVE_START_STREAM_VIEW=1) are
   // unaffected. "targets" is the product flow: open on the picker and stream only after a pick.
@@ -237,7 +237,7 @@ int main(int argc, char** argv) {
     startInStreamView = env_truthy("REMOTE60_NATIVE_START_STREAM_VIEW");
   }
   const bool startInPicker = !startInStreamView;
-  gCaptureOverviewMode.store(startInPicker, std::memory_order_relaxed);
+  gControl.captureOverviewMode.store(startInPicker, std::memory_order_relaxed);
   gWindowPickerVisible.store(startInPicker, std::memory_order_relaxed);
   clear_pc_target_selection();
   // No target has taken effect yet. 0 disables the persistent generation filter, so the legacy
@@ -250,9 +250,9 @@ int main(int argc, char** argv) {
   // frame that slips through before the stream stops is dropped by the receive-path gate rather
   // than painted, and no flip swap chain is created until the user's pick produces a real frame.
   if (startInPicker) {
-    gStreamStateControl.Request(false);
+    gControl.streamState.Request(false);
   }
-  gCaptureModeRequests.Reset();
+  gControl.captureModeRequests.Reset();
   gWindowPanelState.Reset();
   gSuppressMouseUntilUs.store(0, std::memory_order_relaxed);
   gActiveTouchPointerId.store(0, std::memory_order_relaxed);
@@ -503,13 +503,13 @@ int main(int argc, char** argv) {
   // punch just opened. The send is bare because the socket is connected -- the same socket the
   // receive loop below reads, which is what makes the two directions one NAT mapping.
   if (args.controlPort == 0 && transport == VideoTransport::Udp && gSession.sock != INVALID_SOCKET) {
-    gUdpControl.Configure(
+    gControl.udpControl.Configure(
         [](const void* data, size_t len) -> bool {
           return send(gSession.sock, static_cast<const char*>(data), static_cast<int>(len), 0) > 0;
         },
         remote60::native_poc::kUdpControlStreamClientToHost,
         remote60::native_poc::kUdpControlStreamHostToClient, args.udpMtu);
-    gControlOverUdp.store(true, std::memory_order_release);
+    gControl.overUdp.store(true, std::memory_order_release);
     // Without this the receive blocks forever on a link that has gone quiet, and the tick above
     // never runs -- which is the one moment recovery is needed.
     DWORD recvTimeoutMs = 200;
@@ -524,9 +524,9 @@ int main(int argc, char** argv) {
             << " codec=" << args.codec
             << " seconds=" << args.seconds << "\n";
   std::cout << "[native-video-client] keyframe-request-limiter minIntervalUs="
-            << gKeyframeRequests.min_interval_us()
-            << " tokenRefillUs=" << gKeyframeRequests.token_refill_us()
-            << " tokenCapacity=" << gKeyframeRequests.token_capacity()
+            << gControl.keyframeRequests.min_interval_us()
+            << " tokenRefillUs=" << gControl.keyframeRequests.token_refill_us()
+            << " tokenCapacity=" << gControl.keyframeRequests.token_capacity()
             << " catchupReenterMinUs=" << catchupReenterMinIntervalUs
             << " staleCaptureDropUs=" << staleCaptureDropUs
             << " congestionRecoverMinUs=" << congestionRecoverMinUs
@@ -549,7 +549,7 @@ int main(int argc, char** argv) {
   // Two ways to reach the host's control protocol, and the session only ever has one of them.
   // A direct host answers on its own TCP port; a host behind NAT is reachable solely through
   // the punched media socket, and dialling a second port there connects to nothing.
-  bool controlReady = gControlOverUdp.load(std::memory_order_acquire);
+  bool controlReady = gControl.overUdp.load(std::memory_order_acquire);
   if (args.controlPort > 0) {
     controlSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (controlSock != INVALID_SOCKET) {
@@ -582,7 +582,7 @@ int main(int argc, char** argv) {
         enqueue_input_event(6, 0, 0, 0, vk);
       }
     }
-    gControlScheduler.Reset(args.controlIntervalMs, qpc_now_us());
+    gControl.scheduler.Reset(args.controlIntervalMs, qpc_now_us());
     if (controlReady) {
       controlThread = std::thread([&]() {
         // Fetch one queued preview over the control socket. Runs between scheduler
@@ -648,23 +648,23 @@ int main(int argc, char** argv) {
           // Built once, not per action: the tunnelled link carries the partially-read inbound
           // message between calls, and a fresh one each time would drop whatever it held.
           std::unique_ptr<remote60::native_poc::ControlLink> controlLink;
-          if (gControlOverUdp.load(std::memory_order_acquire)) {
+          if (gControl.overUdp.load(std::memory_order_acquire)) {
             controlLink = std::make_unique<remote60::native_poc::UdpControlLink>(
-                &gUdpControl, kUdpControlReadTimeoutMs);
+                &gControl.udpControl, kUdpControlReadTimeoutMs);
           } else {
             controlLink = std::make_unique<remote60::native_poc::TcpControlLink>(controlSock);
           }
 
           while (gSession.running.load()) {
             // Drives retransmission and gap recovery; cheap when there is nothing outstanding.
-            if (gControlOverUdp.load(std::memory_order_acquire)) gUdpControl.Tick();
+            if (gControl.overUdp.load(std::memory_order_acquire)) gControl.udpControl.Tick();
             bool didWork = false;
             const uint64_t nowUs = qpc_now_us();
             ControlOutboundAction action{};
-            if (gControlScheduler.NextAction(
+            if (gControl.scheduler.NextAction(
                     nowUs, capture_client_control_metrics_snapshot(), &gWindowPanelState,
-                    &gStreamStateControl, &gCaptureModeRequests, &gKeyframeRequests, &gRuntimeTuneState,
-                    &gInputQueueState, &action)) {
+                    &gControl.streamState, &gControl.captureModeRequests, &gControl.keyframeRequests, &gControl.runtimeTune,
+                    &gControl.inputQueue, &action)) {
               TcpControlResponse response{};
               const uint64_t actionStartUs = qpc_now_us();
               const bool actionOk = execute_control_action(*controlLink, action, &response);
@@ -683,13 +683,13 @@ int main(int argc, char** argv) {
                 // connected.
                 std::cout << "[native-video-client][control] action failed kind="
                           << static_cast<int>(action.kind) << " transport="
-                          << (gControlOverUdp.load(std::memory_order_acquire) ? "udp-tunnel" : "tcp");
-                if (gControlOverUdp.load(std::memory_order_acquire)) {
+                          << (gControl.overUdp.load(std::memory_order_acquire) ? "udp-tunnel" : "tcp");
+                if (gControl.overUdp.load(std::memory_order_acquire)) {
                   // Closed means the channel gave up on the peer; open means the exchange came
                   // back as something other than the reply this action was waiting for.
-                  const auto stats = gUdpControl.GetStats();
-                  std::cout << " closed=" << (gUdpControl.IsClosed() ? 1 : 0)
-                            << " reason=" << to_string(gUdpControl.CloseReason())
+                  const auto stats = gControl.udpControl.GetStats();
+                  std::cout << " closed=" << (gControl.udpControl.IsClosed() ? 1 : 0)
+                            << " reason=" << to_string(gControl.udpControl.CloseReason())
                             << " sent=" << stats.messagesSent
                             << " received=" << stats.messagesReceived
                             << " retx=" << stats.fragmentRetransmits
@@ -709,7 +709,7 @@ int main(int argc, char** argv) {
               didWork = true;
 
               if (action.kind == ControlOutboundActionKind::CaptureMode) {
-                gCaptureOverviewMode.store(action.captureMode.mode == 1, std::memory_order_relaxed);
+                gControl.captureOverviewMode.store(action.captureMode.mode == 1, std::memory_order_relaxed);
                 std::cout << "[native-video-client][control] capture-mode-request seq=" << action.captureMode.seq
                           << " mode=" << action.captureMode.mode
                           << " xPermille=" << action.captureMode.xPermille
@@ -734,13 +734,13 @@ int main(int argc, char** argv) {
                 case TcpControlResponseKind::Pong: {
                   const auto& pong = response.pong;
                   const uint64_t doneUs = qpc_now_us();
-                  gControlScheduler.OnPingCompleted(doneUs);
-                  gHostCaptureTargetPid.store(pong.captureTargetPid, std::memory_order_relaxed);
-                  gHostCaptureTargetFlags.store(pong.captureTargetFlags, std::memory_order_relaxed);
-                  gHostCaptureRebindCount.store(pong.captureRebindCount, std::memory_order_relaxed);
-                  gHostCaptureTargetHwnd.store(pong.captureTargetHwnd, std::memory_order_relaxed);
-                  gHostCaptureMetaUpdatedUs.store(doneUs, std::memory_order_relaxed);
-                  gCaptureOverviewMode.store(
+                  gControl.scheduler.OnPingCompleted(doneUs);
+                  gControl.hostCaptureTargetPid.store(pong.captureTargetPid, std::memory_order_relaxed);
+                  gControl.hostCaptureTargetFlags.store(pong.captureTargetFlags, std::memory_order_relaxed);
+                  gControl.hostCaptureRebindCount.store(pong.captureRebindCount, std::memory_order_relaxed);
+                  gControl.hostCaptureTargetHwnd.store(pong.captureTargetHwnd, std::memory_order_relaxed);
+                  gControl.hostCaptureMetaUpdatedUs.store(doneUs, std::memory_order_relaxed);
+                  gControl.captureOverviewMode.store(
                       (pong.captureTargetFlags &
                        remote60::native_poc::kCaptureFlagWindowTargetEnabled) == 0,
                       std::memory_order_relaxed);
@@ -751,9 +751,8 @@ int main(int argc, char** argv) {
                     const bool secure =
                         (pong.captureTargetFlags &
                          remote60::native_poc::kCaptureFlagSecureDesktopActive) != 0;
-                    static bool reportedSecure = false;
-                    if (secure != reportedSecure) {
-                      reportedSecure = secure;
+                    if (secure != gControl.reportedSecure) {
+                      gControl.reportedSecure = secure;
                       std::cout << "[native-video-client] secure-desktop-active="
                                 << (secure ? 1 : 0)
                                 << (secure ? "  (a Windows security prompt is on screen; it "
@@ -763,10 +762,10 @@ int main(int argc, char** argv) {
                     }
                   }
                   {
-                    std::lock_guard<std::mutex> lk(gHostCaptureMetaMu);
-                    gHostCaptureTargetProcess =
+                    std::lock_guard<std::mutex> lk(gControl.hostCaptureMetaMu);
+                    gControl.hostCaptureTargetProcess =
                         fixed_cstr_to_string(pong.captureTargetProcess, sizeof(pong.captureTargetProcess));
-                    gHostCaptureTargetTitle =
+                    gControl.hostCaptureTargetTitle =
                         fixed_cstr_to_string(pong.captureTargetTitle, sizeof(pong.captureTargetTitle));
                   }
                   const uint64_t rttUs =
@@ -835,11 +834,11 @@ int main(int argc, char** argv) {
                   InvalidateRect(gSession.hwnd, nullptr, FALSE);
                   break;
                 case TcpControlResponseKind::InputAck: {
-                  const uint64_t ackCount = gControlScheduler.RecordInputAck(args.inputLogEvery);
+                  const uint64_t ackCount = gControl.scheduler.RecordInputAck(args.inputLogEvery);
                   if (ackCount > 0) {
                     std::cout << "[native-video-client][input] ackSeq=" << response.inputAck.seq
                               << " sent=" << ackCount
-                              << " dropped=" << gInputQueueState.dropped_count()
+                              << " dropped=" << gControl.inputQueue.dropped_count()
                               << "\n";
                   }
                   break;
@@ -857,8 +856,8 @@ int main(int argc, char** argv) {
             }
             if (!didWork) Sleep(2);
           }
-          gControlConnected.store(false, std::memory_order_relaxed);
-          gRuntimeTuneState.SetEnabled(false);
+          gControl.connected.store(false, std::memory_order_relaxed);
+          gControl.runtimeTune.SetEnabled(false);
           // A selection cannot complete once control is gone: drop the pending state so the picker
           // re-enables instead of staying locked on "waiting for first frame". The viewer exits
           // shortly after (the video socket dies too), which returns the shell to the host list.
@@ -871,14 +870,14 @@ int main(int argc, char** argv) {
       });
     }
     if (controlReady) {
-      gControlConnected.store(true, std::memory_order_relaxed);
-      gRuntimeTuneState.SetEnabled(useH264);
+      gControl.connected.store(true, std::memory_order_relaxed);
+      gControl.runtimeTune.SetEnabled(useH264);
       queue_window_list_request("window_list_request pending");
       if (useH264 && (args.runtimeBitrate > 0 || args.runtimeKeyint > 0)) {
-        gRuntimeTuneState.MarkDirty();
+        gControl.runtimeTune.MarkDirty();
       }
       std::cout << "[native-video-client] control connected transport="
-                << (gControlOverUdp.load(std::memory_order_acquire) ? "udp-tunnel" : "tcp")
+                << (gControl.overUdp.load(std::memory_order_acquire) ? "udp-tunnel" : "tcp")
                 << " port=" << args.controlPort
                 << " inputChannel=" << (inputChannelEnabled ? 1 : 0) << "\n";
     } else {
@@ -886,8 +885,8 @@ int main(int argc, char** argv) {
         closesocket(controlSock);
         controlSock = INVALID_SOCKET;
       }
-      gControlConnected.store(false, std::memory_order_relaxed);
-      gRuntimeTuneState.SetEnabled(false);
+      gControl.connected.store(false, std::memory_order_relaxed);
+      gControl.runtimeTune.SetEnabled(false);
       set_window_panel_status("control_connect_failed");
       std::cout << "[native-video-client] control unavailable port=" << args.controlPort << "\n";
     }
@@ -1856,20 +1855,20 @@ int main(int argc, char** argv) {
           // were driven from there it would stop exactly when a reply goes missing -- and the
           // host, hearing nothing, declares the client lost. This thread always runs.
           if (remote60::native_poc::last_socket_error_is_retryable()) {
-            if (gControlOverUdp.load(std::memory_order_acquire)) gUdpControl.Tick();
+            if (gControl.overUdp.load(std::memory_order_acquire)) gControl.udpControl.Tick();
             continue;
           }
           break;
         }
-        if (gControlOverUdp.load(std::memory_order_acquire)) gUdpControl.Tick();
+        if (gControl.overUdp.load(std::memory_order_acquire)) gControl.udpControl.Tick();
         // Control is offered the datagram BEFORE the video length guard, and the order is the
         // whole point. A control message is not bounded below by the video header: a
         // single-fragment input ack is 32 + 28 = 60 bytes against an 88-byte video header, so
         // checking the video size first silently ate every small reply -- input acks and window
         // selections -- while the larger ones (pong, window lists) came through and made the
         // channel look healthy. OnPacket claims only its own kinds, so video cannot be stolen.
-        if (gControlOverUdp.load(std::memory_order_acquire) &&
-            gUdpControl.OnPacket(datagram.data(), static_cast<size_t>(n))) {
+        if (gControl.overUdp.load(std::memory_order_acquire) &&
+            gControl.udpControl.OnPacket(datagram.data(), static_cast<size_t>(n))) {
           continue;
         }
         // Remote hardware-cursor sample: smaller than the video header, so it must be claimed
@@ -2253,7 +2252,7 @@ int main(int argc, char** argv) {
   gSession.inputEnabled = false;
   // Before anything is joined: the control thread can be parked in a blocking receive for the
   // read timeout, and closing the channel is what wakes it. Otherwise shutdown waits it out.
-  gUdpControl.Close(remote60::native_poc::ControlCloseReason::Shutdown);
+  gControl.udpControl.Close(remote60::native_poc::ControlCloseReason::Shutdown);
   gInputMacro.StopPlayback();
   gInputMacro.StopRecording();
   remote60::native_poc::macro_window_destroy();

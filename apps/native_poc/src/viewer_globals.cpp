@@ -8,35 +8,9 @@
 
 namespace remote60::native_poc::viewer {
 
-ClientInputQueue gInputQueueState;
-remote60::native_poc::UdpControlChannel gUdpControl;
-std::atomic<bool> gControlOverUdp{false};
 std::atomic<uint16_t> gMouseButtons{0};
 std::atomic<int32_t> gLastInputVideoX{0};
 std::atomic<int32_t> gLastInputVideoY{0};
-KeyframeRequestState gKeyframeRequests{
-    kKeyframeRequestMinIntervalUsDefault,
-    kKeyframeRequestTokenRefillUsDefault,
-    kKeyframeRequestTokenCapacityDefault};
-std::atomic<bool> gControlConnected{false};
-std::atomic<uint32_t> gHostCaptureTargetPid{0};
-std::atomic<uint32_t> gHostCaptureTargetFlags{0};
-std::atomic<uint32_t> gHostCaptureRebindCount{0};
-std::atomic<uint64_t> gHostCaptureTargetHwnd{0};
-std::atomic<uint64_t> gHostCaptureMetaUpdatedUs{0};
-std::mutex gHostCaptureMetaMu;
-std::string gHostCaptureTargetProcess = "monitor";
-std::string gHostCaptureTargetTitle;
-RuntimeTuneState gRuntimeTuneState{
-    300000,
-    30000000,
-    250000,
-    1,
-    240};
-std::atomic<bool> gCaptureOverviewMode{false};
-remote60::native_poc::StreamStateControl gStreamStateControl;
-CaptureModeRequestState gCaptureModeRequests;
-ClientControlScheduler gControlScheduler;
 WindowPanelStateModel gWindowPanelState;
 std::atomic<bool> gWindowPickerVisible{true};
 std::atomic<bool> gWindowPickerToggleDown{false};
@@ -73,5 +47,5 @@ std::atomic<bool> gForwardedKeyDown[256]{};
 remote60::native_poc::InputMacro gInputMacro;
 std::atomic<bool> gMacroButtonDown{false};
 Nv12D3dRenderer gNv12Renderer;
-SessionState gSession;FrameBuffer gFrameBuf;PresentStats gPresent;ClientMetricsState gMetrics;
+SessionState gSession;FrameBuffer gFrameBuf;PresentStats gPresent;ClientMetricsState gMetrics;ControlChannelState gControl;
 }  // namespace remote60::native_poc::viewer

@@ -14,6 +14,7 @@
 // Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-0).
 
 #include "viewer_common.hpp"
+#include "viewer_control_state.hpp"
 #include "viewer_client_metrics.hpp"
 #include "viewer_present_stats.hpp"
 #include "viewer_frame_buffer.hpp"
@@ -36,10 +37,9 @@ enum class ClientCongestionState : uint8_t {
   Congested = 2,
 };
 
-// thread: UI enqueues input (gInputQueueState) that the control thread drains; gSession.inputEnabled is
-// set by main at connect and cleared at shutdown; gUdpControl is written by the control thread
+// thread: UI enqueues input (gControl.inputQueue) that the control thread drains; gSession.inputEnabled is
+// set by main at connect and cleared at shutdown; gControl.udpControl is written by the control thread
 // and ticked/fed by the recv thread (one reader, one writer on the shared socket).
-extern ClientInputQueue gInputQueueState;
 // Which candidate won the race. The relay is billed per byte, so the session says which one it
 // is rather than leaving the user to guess from the bill.
 
@@ -49,8 +49,6 @@ extern ClientInputQueue gInputQueueState;
 // punched, so control has to ride it. Everything the session needs -- input, the window list,
 // the monitor list, runtime tuning -- goes through here, which is why a session without it
 // shows a picture and responds to nothing.
-extern remote60::native_poc::UdpControlChannel gUdpControl;
-extern std::atomic<bool> gControlOverUdp;
 // Counted at the point the exchange succeeded, so it can be compared against the acks: the two
 // diverging is what tells "the host never answered" apart from "nothing was ever sent".
 extern std::atomic<uint16_t> gMouseButtons;
@@ -60,7 +58,6 @@ extern std::atomic<int32_t> gLastInputVideoY;
 
 // thread: recv publishes gMetrics.client (atomics); control snapshots it for the host, UI reads
 // fps for the toolbar. Present counters are UI-written and read by the recv 1s stats line.
-extern KeyframeRequestState gKeyframeRequests;
 // While the picker overlays a live stream (mid-session picker no longer stops it), presents pause
 // but frames keep arriving, so lag-vs-last-presented would misread the overlay as decode backlog
 // and start catchup churn. Suppress catchup while the picker is up and briefly after it closes
@@ -69,21 +66,7 @@ extern KeyframeRequestState gKeyframeRequests;
 
 // thread: main fills gSession.overlayConfig once; control writes the host capture meta on every pong;
 // the request states (tune/stream/capture-mode/scheduler) are UI/main producers, control consumer.
-extern std::atomic<bool> gControlConnected;
-extern std::atomic<uint32_t> gHostCaptureTargetPid;
-extern std::atomic<uint32_t> gHostCaptureTargetFlags;
-extern std::atomic<uint32_t> gHostCaptureRebindCount;
-extern std::atomic<uint64_t> gHostCaptureTargetHwnd;
-extern std::atomic<uint64_t> gHostCaptureMetaUpdatedUs;
-extern std::mutex gHostCaptureMetaMu;
-extern std::string gHostCaptureTargetProcess;
-extern std::string gHostCaptureTargetTitle;
-extern RuntimeTuneState gRuntimeTuneState;
-extern std::atomic<bool> gCaptureOverviewMode;
-extern remote60::native_poc::StreamStateControl gStreamStateControl;
 
-extern CaptureModeRequestState gCaptureModeRequests;
-extern ClientControlScheduler gControlScheduler;
 
 
 
@@ -184,4 +167,5 @@ extern SessionState gSession;
 extern FrameBuffer gFrameBuf;
 extern PresentStats gPresent;
 extern ClientMetricsState gMetrics;
+extern ControlChannelState gControl;
 }  // namespace remote60::native_poc::viewer

@@ -8,7 +8,7 @@
 namespace remote60::native_poc::viewer {
 
 void enqueue_control_input_message(const QueuedControlInputMessage& msg) {
-  gInputQueueState.Enqueue(msg);
+  gControl.inputQueue.Enqueue(msg);
 }
 
 void enqueue_input_text_units(const uint16_t* text, size_t count) {
@@ -24,7 +24,7 @@ void enqueue_input_text_units(const uint16_t* text, size_t count) {
     msg.inputText.header.magic = remote60::native_poc::kMagic;
     msg.inputText.header.type = static_cast<uint16_t>(MessageType::ControlInputText);
     msg.inputText.header.size = static_cast<uint16_t>(sizeof(msg.inputText));
-    msg.inputText.seq = gInputQueueState.NextSequence();
+    msg.inputText.seq = gControl.inputQueue.NextSequence();
     msg.inputText.utf16Count = static_cast<uint16_t>(chunk);
     std::memcpy(msg.inputText.utf16, text + offset, chunk * sizeof(uint16_t));
     msg.inputText.clientSendQpcUs = qpc_now_us();
@@ -136,7 +136,7 @@ void enqueue_input_event(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta
   msg.inputEvent.header.magic = remote60::native_poc::kMagic;
   msg.inputEvent.header.type = static_cast<uint16_t>(MessageType::ControlInputEvent);
   msg.inputEvent.header.size = static_cast<uint16_t>(sizeof(msg.inputEvent));
-  msg.inputEvent.seq = gInputQueueState.NextSequence();
+  msg.inputEvent.seq = gControl.inputQueue.NextSequence();
   msg.inputEvent.kind = kind;
   msg.inputEvent.buttons = gMouseButtons.load();
   msg.inputEvent.x = x;
@@ -161,7 +161,7 @@ void enqueue_macro_step(const remote60::native_poc::MacroStep& step) {
   msg.inputEvent.header.magic = remote60::native_poc::kMagic;
   msg.inputEvent.header.type = static_cast<uint16_t>(MessageType::ControlInputEvent);
   msg.inputEvent.header.size = static_cast<uint16_t>(sizeof(msg.inputEvent));
-  msg.inputEvent.seq = gInputQueueState.NextSequence();
+  msg.inputEvent.seq = gControl.inputQueue.NextSequence();
   msg.inputEvent.kind = step.kind;
   msg.inputEvent.buttons = step.buttons;
   msg.inputEvent.x = step.x;

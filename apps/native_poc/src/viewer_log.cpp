@@ -28,7 +28,7 @@ void log_client_line(const std::string& line) {
 
 void request_keyframe(uint16_t reason) {
   const uint64_t nowUs = qpc_now_us();
-  const auto attempt = gKeyframeRequests.Request(reason, nowUs);
+  const auto attempt = gControl.keyframeRequests.Request(reason, nowUs);
   if (!attempt.queued && (attempt.throttledCount % 120) == 1) {
     std::cout << "[native-video-client][control] keyframe-request-throttled total=" << attempt.throttledCount
               << " reason=" << (reason == 0 ? 1 : reason)

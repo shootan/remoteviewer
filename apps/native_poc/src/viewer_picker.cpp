@@ -81,7 +81,7 @@ void apply_window_list_snapshot(const ControlWindowListMessage& msg) {
 void push_session_toolbar_state() {
   const WindowPanelSnapshot panel = gWindowPanelState.Snapshot();
   remote60::native_poc::SessionToolbarState state;
-  state.connected = gControlConnected.load(std::memory_order_relaxed);
+  state.connected = gControl.connected.load(std::memory_order_relaxed);
   state.inputOn = gSession.inputEnabled.load(std::memory_order_relaxed);
   state.macroOpen = remote60::native_poc::macro_window_visible();
   state.relay = gSession.relayPath.load(std::memory_order_relaxed);
@@ -108,10 +108,10 @@ void set_picker_visible_and_sync_stream(bool visible) {
     // manufacturing the very freeze it was checking for. Only the initial picker, before any
     // selection has been revealed (gActiveStreamGeneration==0), still holds the stream off.
     if (gActiveStreamGeneration.load(std::memory_order_acquire) == 0) {
-      gStreamStateControl.Request(false);
+      gControl.streamState.Request(false);
     }
   } else {
-    gStreamStateControl.Request(true);
+    gControl.streamState.Request(true);
     // The present anchor froze while the picker covered the stream; drop it and hold catchup off
     // until the first post-close present re-anchors it, so the pause cannot read as backlog.
     gFrameBuf.lastPresentedCaptureUs.store(0, std::memory_order_relaxed);
@@ -140,7 +140,7 @@ void clear_pc_target_selection() {
 // log/refresh on real selections instead of refused attempts (disconnected, locked target).
 bool begin_pc_target_selection(uint64_t windowId, const char* statusText) {
   if (gSelectionPending.load(std::memory_order_acquire)) return false;
-  if (!gControlConnected.load(std::memory_order_relaxed)) return false;
+  if (!gControl.connected.load(std::memory_order_relaxed)) return false;
   // RequestSelect refuses when the target is locked by host config; do not touch the stream then.
   if (!gWindowPanelState.RequestSelect(windowId, statusText)) return false;
   gSelectionExpectedGeneration.store(0, std::memory_order_release);
@@ -148,7 +148,7 @@ bool begin_pc_target_selection(uint64_t windowId, const char* statusText) {
   gSelectionPending.store(true, std::memory_order_release);
   // Bumped so the receive loop resets the decoder and holds for the new generation's keyframe.
   gSelectionEpoch.fetch_add(1, std::memory_order_acq_rel);
-  gStreamStateControl.Request(true);
+  gControl.streamState.Request(true);
   // A selection is a generation change; drop the remote-cursor sample so the previous target's
   // pointer cannot linger over the new one while the first fenced sample is in flight.
   gRemoteCursorUpdateUs.store(0, std::memory_order_release);
@@ -181,7 +181,7 @@ void apply_window_selected_result(const ControlWindowSelectedMessage& msg) {
       gWindowPanelState.SetStatus("waiting_first_frame");
     } else {
       // Select failed: stop the stream we speculatively started, keep the picker, allow a retry.
-      gStreamStateControl.Request(false);
+      gControl.streamState.Request(false);
       clear_pc_target_selection();
     }
     if (gSession.hwnd) InvalidateRect(gSession.hwnd, nullptr, FALSE);
@@ -231,7 +231,7 @@ bool try_hit_window_list_item(HWND hwnd, int x, int y, uint64_t* outWindowId) {
 }
 
 void enqueue_capture_mode_request(uint16_t mode, uint32_t xPermille, uint32_t yPermille) {
-  gCaptureModeRequests.Request(mode, xPermille, yPermille);
+  gControl.captureModeRequests.Request(mode, xPermille, yPermille);
 }
 
 void request_capture_overview_mode() {

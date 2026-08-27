@@ -6,7 +6,7 @@
 //          thread), the key-forwarding memory (forward_key_down/up, key_event_should_forward,
 //          enqueue_release_for_pressed_keys), IME result text, mouse capture release, coord_to_permille,
 //          toggle_macro_window.
-// Thread:  UI (WndProc) produces; the control thread drains gInputQueueState. The macro window replays
+// Thread:  UI (WndProc) produces; the control thread drains gControl.inputQueue. The macro window replays
 //          through enqueue_macro_step on the UI thread.
 // Input:   virtual keys, video coordinates, UTF-16 text, macro steps.
 // Output:  QueuedControlInputMessage entries; macro recording taps enqueue_input_event.
