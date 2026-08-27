@@ -450,6 +450,11 @@ add_executable(remote60_host_kick_test
 )
 target_include_directories(remote60_host_kick_test PRIVATE src)
 
+add_executable(remote60_host_sender_queue_policy_test
+  src/host_sender_queue_policy_test.cpp
+)
+target_include_directories(remote60_host_sender_queue_policy_test PRIVATE src)
+
 add_executable(remote60_host_backend_policy_test
   src/host_backend_policy_test.cpp
 )

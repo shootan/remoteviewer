@@ -16,6 +16,7 @@
 
 #include "host_bottleneck.hpp"
 #include "host_main_loop.hpp"
+#include "host_sender_queue_policy.hpp"
 #include "mf_h264_codec.hpp"
 
 namespace remote60::native_poc {
@@ -42,7 +43,9 @@ struct H264AuBatch {
   bool& encoderResetTriggered;
   bool& sessionReconnectTriggered;
   bool& countedRawForInput;
-  const bool& senderBacklogged;
+  // Not const: a key AU inside this batch clears the backlog it describes, and the deltas that
+  // follow in the SAME batch must see that. (Ledger H-19.)
+  bool senderBacklogged;
 };
 
 // One access unit: timestamps / kick cancel, key-frame bookkeeping, sender-queue policy (UDP) or the

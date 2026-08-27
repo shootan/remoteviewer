@@ -304,38 +304,52 @@ if (transport == VideoTransport::Tcp) {
       // it flows through this same enqueue path and needs no special case.
       item.mediaEpoch = sender.mediaSessionEpoch.load(std::memory_order_acquire);
       item.enqueueUs = qpc_now_us();  // AU handed to sender; sender derives queueWaitUs
-      if (item.keyFrame) {
-        // A new IDR makes every queued frame irrelevant and re-anchors the stream. This is
-        // also the barrier-open point: a real (or bootstrap) key AU for the current epoch
-        // clears sender.waitingForKey so deltas may flow again.
-        sender.dropCount.fetch_add(sender.queue.size(), std::memory_order_relaxed);
-        sender.heldFrames += sender.queue.size();
-        sender.sentFrames -= std::min<uint64_t>(sender.sentFrames, sender.queue.size());
-        sender.queue.clear();
-        sender.waitingForKey = false;
-        if (sender.firstKeyEnqueuedUs == 0) sender.firstKeyEnqueuedUs = sendStartUs;
-        sender.queue.push_back(std::move(item));
-        enqueuedForSend = true;
-      } else if (sender.waitingForKey) {
-        // This delta references dropped frames; sending it would decode into
-        // block garbage. Hold everything until the forced keyframe arrives.
-        ++sender.nonKeyAuWhileWaiting;
-        sender.dropCount.fetch_add(1, std::memory_order_relaxed);
-        sender.requestKey.store(true, std::memory_order_release);
-      } else if (senderBacklogged || sender.queue.size() >= kSenderQueueMaxFrames) {
-        // Backlogged: drop the stale frames AND this delta -- it references what
-        // was just dropped -- then resync with a fresh IDR.
-        sender.dropCount.fetch_add(sender.queue.size() + 1, std::memory_order_relaxed);
-        // Frames already counted as sent are being erased here; move them to the held
-        // tally so the reported wire rate does not include what never left.
-        sender.heldFrames += sender.queue.size();
-        sender.sentFrames -= std::min<uint64_t>(sender.sentFrames, sender.queue.size());
-        sender.queue.clear();
-        sender.waitingForKey = true;
-        sender.requestKey.store(true, std::memory_order_release);
-      } else {
-        sender.queue.push_back(std::move(item));
-        enqueuedForSend = true;
+      switch (decide_sender_queue_action(item.keyFrame, sender.waitingForKey, senderBacklogged,
+                                         sender.queue.size(), kSenderQueueMaxFrames)) {
+        case SenderQueueAction::EnqueueKey: {
+          // A new IDR makes every queued frame irrelevant and re-anchors the stream. This is
+          // also the barrier-open point: a real (or bootstrap) key AU for the current epoch
+          // clears sender.waitingForKey so deltas may flow again.
+          sender.dropCount.fetch_add(sender.queue.size(), std::memory_order_relaxed);
+          sender.heldFrames += sender.queue.size();
+          sender.sentFrames -= std::min<uint64_t>(sender.sentFrames, sender.queue.size());
+          sender.queue.clear();
+          sender.waitingForKey = false;
+          if (sender.firstKeyEnqueuedUs == 0) sender.firstKeyEnqueuedUs = sendStartUs;
+          sender.queue.push_back(std::move(item));
+          enqueuedForSend = true;
+          // The backlog this batch was judged on is gone -- this key just cleared it. Leaving
+          // the flag set made the next delta OF THE SAME BATCH drop the queue the IDR had just
+          // re-anchored and ask for another key, which came back with the same stale reading:
+          // an IDR loop on a link that was fine. One encode call can legitimately release
+          // [key, delta] together, because the async MFT drains its accepted-input backlog and
+          // that backlog can straddle a GOP boundary. (Ledger H-19.)
+          senderBacklogged = false;
+          break;
+        }
+        case SenderQueueAction::HoldForKey:
+          // This delta references dropped frames; sending it would decode into
+          // block garbage. Hold everything until the forced keyframe arrives.
+          ++sender.nonKeyAuWhileWaiting;
+          sender.dropCount.fetch_add(1, std::memory_order_relaxed);
+          sender.requestKey.store(true, std::memory_order_release);
+          break;
+        case SenderQueueAction::DropAndResync:
+          // Backlogged: drop the stale frames AND this delta -- it references what
+          // was just dropped -- then resync with a fresh IDR.
+          sender.dropCount.fetch_add(sender.queue.size() + 1, std::memory_order_relaxed);
+          // Frames already counted as sent are being erased here; move them to the held
+          // tally so the reported wire rate does not include what never left.
+          sender.heldFrames += sender.queue.size();
+          sender.sentFrames -= std::min<uint64_t>(sender.sentFrames, sender.queue.size());
+          sender.queue.clear();
+          sender.waitingForKey = true;
+          sender.requestKey.store(true, std::memory_order_release);
+          break;
+        case SenderQueueAction::Enqueue:
+          sender.queue.push_back(std::move(item));
+          enqueuedForSend = true;
+          break;
       }
     }
     if (enqueuedForSend) sender.cv.notify_one();
