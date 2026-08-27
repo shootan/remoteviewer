@@ -208,22 +208,22 @@ int main(int argc, char** argv) {
     return 13;
   }
 
-  gOverlayConfig.host = args.host;
-  gOverlayConfig.port = args.port;
-  gOverlayConfig.controlPort = args.controlPort;
-  gOverlayConfig.transport = video_transport_name(transport);
-  gOverlayConfig.codec = args.codec;
-  gOverlayConfig.fpsHint = args.fpsHint;
-  gOverlayConfig.controlIntervalMs = args.controlIntervalMs;
-  gOverlayConfig.tcpRecvBufKb = args.tcpRecvBufKb;
-  gOverlayConfig.tcpSendBufKb = args.tcpSendBufKb;
-  gOverlayConfig.udpMtu = args.udpMtu;
-  gOverlayConfig.keyReqMinIntervalUs = gKeyframeRequests.min_interval_us();
-  gOverlayConfig.keyReqTokenRefillUs = gKeyframeRequests.token_refill_us();
-  gOverlayConfig.keyReqTokenCapacity = gKeyframeRequests.token_capacity();
-  gOverlayConfig.udpSimDropPm = udpSimDropPm;
+  gSession.overlayConfig.host = args.host;
+  gSession.overlayConfig.port = args.port;
+  gSession.overlayConfig.controlPort = args.controlPort;
+  gSession.overlayConfig.transport = video_transport_name(transport);
+  gSession.overlayConfig.codec = args.codec;
+  gSession.overlayConfig.fpsHint = args.fpsHint;
+  gSession.overlayConfig.controlIntervalMs = args.controlIntervalMs;
+  gSession.overlayConfig.tcpRecvBufKb = args.tcpRecvBufKb;
+  gSession.overlayConfig.tcpSendBufKb = args.tcpSendBufKb;
+  gSession.overlayConfig.udpMtu = args.udpMtu;
+  gSession.overlayConfig.keyReqMinIntervalUs = gKeyframeRequests.min_interval_us();
+  gSession.overlayConfig.keyReqTokenRefillUs = gKeyframeRequests.token_refill_us();
+  gSession.overlayConfig.keyReqTokenCapacity = gKeyframeRequests.token_capacity();
+  gSession.overlayConfig.udpSimDropPm = udpSimDropPm;
   gRuntimeTuneState.Reset(args.runtimeBitrate, args.runtimeKeyint, args.runtimeFps);
-  gRequestedMonitorId = args.monitorId;
+  gSession.requestedMonitorId = args.monitorId;
   gControlConnected.store(false, std::memory_order_relaxed);
   // How the session opens. The explicit flag wins; with no flag we fall back to the legacy env
   // var so the automation probes (which all set REMOTE60_NATIVE_START_STREAM_VIEW=1) are
@@ -278,16 +278,16 @@ int main(int argc, char** argv) {
     toolbarCallbacks.onTargets = [] {
       set_picker_visible_and_sync_stream(true);
       push_session_toolbar_state();
-      if (gHwnd) InvalidateRect(gHwnd, nullptr, FALSE);
+      if (gSession.hwnd) InvalidateRect(gSession.hwnd, nullptr, FALSE);
     };
     toolbarCallbacks.onMacro = [] {
-      toggle_macro_window(gHwnd);
+      toggle_macro_window(gSession.hwnd);
       push_session_toolbar_state();
     };
     toolbarCallbacks.onMonitor = [](uint32_t monitorId) {
       gWindowPanelState.RequestMonitorSelect(monitorId);
     };
-    remote60::native_poc::session_toolbar_create(gHwnd, std::move(toolbarCallbacks));
+    remote60::native_poc::session_toolbar_create(gSession.hwnd, std::move(toolbarCallbacks));
     remote60::native_poc::session_toolbar_set_visible(startInStreamView);
     push_session_toolbar_state();
   }
@@ -318,7 +318,7 @@ int main(int argc, char** argv) {
     if (enableDxgiDecodeSurface) {
       // Decode and paint share one D3D11 device so an opt-in hardware-decoder NV12 surface
       // can be sampled directly without a GPU->CPU copy and CPU->GPU upload.
-      if (!gNv12Renderer.ready) (void)gNv12Renderer.init(gHwnd);
+      if (!gNv12Renderer.ready) (void)gNv12Renderer.init(gSession.hwnd);
       if (gNv12Renderer.ready) {
         decD3dDevice = gNv12Renderer.device;
         decD3dContext = gNv12Renderer.context;
@@ -393,25 +393,25 @@ int main(int argc, char** argv) {
       if (mfStarted) MFShutdown();
       return 3;
     }
-    gSock = session.socket;
+    gSession.sock = session.socket;
     resolvedArgs.host = session.chosen.ip;
     resolvedArgs.port = session.chosen.port;
     // Control travels over the media socket on this path; a separate TCP port cannot survive
     // hole punching.
     resolvedArgs.controlPort = 0;
     directoryPunchToken = session.punchToken;
-    gRelayPath.store(session.relay, std::memory_order_relaxed);
+    gSession.relayPath.store(session.relay, std::memory_order_relaxed);
     push_session_toolbar_state();
     std::cout << "[native-video-client] directory chose " << session.chosen.ip << ":"
               << session.chosen.port << " ("
               << remote60::native_poc::candidate_kind_name(session.chosen.kind) << ")"
               << (session.answered ? "" : " [no answer, trying anyway]") << "\n";
   } else {
-    gSock = socket(AF_INET,
+    gSession.sock = socket(AF_INET,
                    (transport == VideoTransport::Udp) ? SOCK_DGRAM : SOCK_STREAM,
                    (transport == VideoTransport::Udp) ? IPPROTO_UDP : IPPROTO_TCP);
   }
-  if (gSock == INVALID_SOCKET) {
+  if (gSession.sock == INVALID_SOCKET) {
     std::cerr << "[native-video-client] socket create failed\n";
     if (mfStarted) MFShutdown();
     return 3;
@@ -419,25 +419,25 @@ int main(int argc, char** argv) {
 
   if (transport == VideoTransport::Tcp) {
     int noDelay = 1;
-    setsockopt(gSock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
+    setsockopt(gSession.sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
   }
   if (transport == VideoTransport::Udp) {
     if (args.tcpRecvBufKb == 0) {
       const int recvBuf = 1024 * 1024;
-      (void)setsockopt(gSock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&recvBuf), sizeof(recvBuf));
+      (void)setsockopt(gSession.sock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&recvBuf), sizeof(recvBuf));
     }
     if (args.tcpSendBufKb == 0) {
       const int sendBuf = 256 * 1024;
-      (void)setsockopt(gSock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sendBuf), sizeof(sendBuf));
+      (void)setsockopt(gSession.sock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sendBuf), sizeof(sendBuf));
     }
   }
   if (args.tcpRecvBufKb > 0) {
     const int recvBuf = static_cast<int>(args.tcpRecvBufKb * 1024u);
-    setsockopt(gSock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&recvBuf), sizeof(recvBuf));
+    setsockopt(gSession.sock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&recvBuf), sizeof(recvBuf));
   }
   if (args.tcpSendBufKb > 0) {
     const int sendBuf = static_cast<int>(args.tcpSendBufKb * 1024u);
-    setsockopt(gSock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sendBuf), sizeof(sendBuf));
+    setsockopt(gSession.sock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sendBuf), sizeof(sendBuf));
   }
 
   sockaddr_in addr{};
@@ -445,21 +445,21 @@ int main(int argc, char** argv) {
   addr.sin_port = htons(resolvedArgs.port);
   if (inet_pton(AF_INET, resolvedArgs.host.c_str(), &addr.sin_addr) != 1) {
     std::cerr << "[native-video-client] invalid host " << resolvedArgs.host << "\n";
-    closesocket(gSock);
-    gSock = INVALID_SOCKET;
+    closesocket(gSession.sock);
+    gSession.sock = INVALID_SOCKET;
     if (mfStarted) MFShutdown();
     return 4;
   }
-  if (connect(gSock, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0) {
+  if (connect(gSession.sock, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0) {
     std::cerr << "[native-video-client] connect failed " << resolvedArgs.host << ":" << resolvedArgs.port << "\n";
-    closesocket(gSock);
-    gSock = INVALID_SOCKET;
+    closesocket(gSession.sock);
+    gSession.sock = INVALID_SOCKET;
     if (mfStarted) MFShutdown();
     return 5;
   }
   if (transport == VideoTransport::Udp) {
     int timeoutMs = 200;
-    (void)setsockopt(gSock, SOL_SOCKET, SO_RCVTIMEO,
+    (void)setsockopt(gSession.sock, SOL_SOCKET, SO_RCVTIMEO,
                      reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
     bool handshakeOk = false;
     for (int attempt = 0; attempt < 40 && !handshakeOk; ++attempt) {
@@ -470,13 +470,13 @@ int main(int argc, char** argv) {
       if (!directoryPunchToken.empty()) {
         std::snprintf(hello.authToken, sizeof(hello.authToken), "%s", directoryPunchToken.c_str());
       }
-      const int sent = send(gSock, reinterpret_cast<const char*>(&hello), sizeof(hello), 0);
+      const int sent = send(gSession.sock, reinterpret_cast<const char*>(&hello), sizeof(hello), 0);
       if (sent <= 0) {
         Sleep(50);
         continue;
       }
       UdpHelloPacket ack{};
-      const int n = recv(gSock, reinterpret_cast<char*>(&ack), sizeof(ack), 0);
+      const int n = recv(gSession.sock, reinterpret_cast<char*>(&ack), sizeof(ack), 0);
       if (n >= static_cast<int>(sizeof(UdpHelloPacket)) &&
           ack.magic == remote60::native_poc::kMagic &&
           ack.kind == static_cast<uint16_t>(UdpPacketKind::HelloAck) &&
@@ -488,12 +488,12 @@ int main(int argc, char** argv) {
       Sleep(50);
     }
     timeoutMs = 0;
-    (void)setsockopt(gSock, SOL_SOCKET, SO_RCVTIMEO,
+    (void)setsockopt(gSession.sock, SOL_SOCKET, SO_RCVTIMEO,
                      reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
     if (!handshakeOk) {
       std::cerr << "[native-video-client] udp handshake failed " << args.host << ":" << args.port << "\n";
-      closesocket(gSock);
-      gSock = INVALID_SOCKET;
+      closesocket(gSession.sock);
+      gSession.sock = INVALID_SOCKET;
       if (mfStarted) MFShutdown();
       return 6;
     }
@@ -502,10 +502,10 @@ int main(int argc, char** argv) {
   // No second port to dial means the directory path: control tunnels through the socket the
   // punch just opened. The send is bare because the socket is connected -- the same socket the
   // receive loop below reads, which is what makes the two directions one NAT mapping.
-  if (args.controlPort == 0 && transport == VideoTransport::Udp && gSock != INVALID_SOCKET) {
+  if (args.controlPort == 0 && transport == VideoTransport::Udp && gSession.sock != INVALID_SOCKET) {
     gUdpControl.Configure(
         [](const void* data, size_t len) -> bool {
-          return send(gSock, static_cast<const char*>(data), static_cast<int>(len), 0) > 0;
+          return send(gSession.sock, static_cast<const char*>(data), static_cast<int>(len), 0) > 0;
         },
         remote60::native_poc::kUdpControlStreamClientToHost,
         remote60::native_poc::kUdpControlStreamHostToClient, args.udpMtu);
@@ -513,7 +513,7 @@ int main(int argc, char** argv) {
     // Without this the receive blocks forever on a link that has gone quiet, and the tick above
     // never runs -- which is the one moment recovery is needed.
     DWORD recvTimeoutMs = 200;
-    setsockopt(gSock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&recvTimeoutMs),
+    setsockopt(gSession.sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&recvTimeoutMs),
                sizeof(recvTimeoutMs));
     std::cout << "[native-video-client] control tunnelled over the media socket\n";
   }
@@ -537,10 +537,10 @@ int main(int argc, char** argv) {
   }
   int effectiveRecvBuf = 0;
   int effectiveRecvBufLen = sizeof(effectiveRecvBuf);
-  (void)getsockopt(gSock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<char*>(&effectiveRecvBuf), &effectiveRecvBufLen);
+  (void)getsockopt(gSession.sock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<char*>(&effectiveRecvBuf), &effectiveRecvBufLen);
   int effectiveSendBuf = 0;
   int effectiveSendBufLen = sizeof(effectiveSendBuf);
-  (void)getsockopt(gSock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<char*>(&effectiveSendBuf), &effectiveSendBufLen);
+  (void)getsockopt(gSession.sock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<char*>(&effectiveSendBuf), &effectiveSendBufLen);
   std::cout << "[native-video-client] socket rcvbuf=" << effectiveRecvBuf
             << " sndbuf=" << effectiveSendBuf << " bytes\n";
 
@@ -567,7 +567,7 @@ int main(int argc, char** argv) {
   {
     const bool inputChannelEnabled =
         controlReady && args.enableInputChannel && !kInputPolicyForceBlock;
-    gInputEnabled = inputChannelEnabled;
+    gSession.inputEnabled = inputChannelEnabled;
     if (inputChannelEnabled) {
       // Clear any modifier the host is still holding from a previous session. A client that
       // lost focus while a modifier was down could not send its up, and that up-less state is
@@ -641,7 +641,7 @@ int main(int argc, char** argv) {
             }
             // Outside the lock: the paint handler takes gThumbMu, and invalidating while
             // holding it invited a stall on every received preview.
-            InvalidateRect(gHwnd, nullptr, FALSE);
+            InvalidateRect(gSession.hwnd, nullptr, FALSE);
           }
           return 1;
         };
@@ -655,7 +655,7 @@ int main(int argc, char** argv) {
             controlLink = std::make_unique<remote60::native_poc::TcpControlLink>(controlSock);
           }
 
-          while (gRunning.load()) {
+          while (gSession.running.load()) {
             // Drives retransmission and gap recovery; cheap when there is nothing outstanding.
             if (gControlOverUdp.load(std::memory_order_acquire)) gUdpControl.Tick();
             bool didWork = false;
@@ -699,7 +699,7 @@ int main(int argc, char** argv) {
                 break;
               }
               if (action.kind == ControlOutboundActionKind::InputEvent) {
-                const uint64_t sent = ++gInputEventsSent;
+                const uint64_t sent = ++gSession.inputEventsSent;
                 if (args.inputLogEvery > 0 && (sent % args.inputLogEvery) == 0) {
                   std::cout << "[native-video-client][input] sent=" << sent
                             << " kind=" << action.inputEvent.kind
@@ -818,12 +818,12 @@ int main(int argc, char** argv) {
                   // into the stream. In picker mode the user has not chosen a target yet, so
                   // selecting a monitor here would restart the host capture before any pick and
                   // fight the first-frame gate; a monitor pick is a follow-up (toolbar) action.
-                  if (!startInPicker && monitorsNewlySupported && gRequestedMonitorId > 0) {
+                  if (!startInPicker && monitorsNewlySupported && gSession.requestedMonitorId > 0) {
                     // Only when a screen other than the primary was asked for: selecting monitor
                     // zero would restart the capture for no change.
-                    gWindowPanelState.RequestMonitorSelect(gRequestedMonitorId);
+                    gWindowPanelState.RequestMonitorSelect(gSession.requestedMonitorId);
                   }
-                  InvalidateRect(gHwnd, nullptr, FALSE);
+                  InvalidateRect(gSession.hwnd, nullptr, FALSE);
                   break;
                 }
                 case TcpControlResponseKind::MonitorList:
@@ -832,7 +832,7 @@ int main(int argc, char** argv) {
                 case TcpControlResponseKind::WindowSelected:
                   apply_window_selected_result(response.windowSelected);
                   queue_window_list_request("window_list_request pending");
-                  InvalidateRect(gHwnd, nullptr, FALSE);
+                  InvalidateRect(gSession.hwnd, nullptr, FALSE);
                   break;
                 case TcpControlResponseKind::InputAck: {
                   const uint64_t ackCount = gControlScheduler.RecordInputAck(args.inputLogEvery);
@@ -867,7 +867,7 @@ int main(int argc, char** argv) {
           // scratch, so an old value must not silently filter the new stream to nothing.
           gActiveStreamGeneration.store(0, std::memory_order_release);
           set_window_panel_status("control_disconnected");
-          InvalidateRect(gHwnd, nullptr, FALSE);
+          InvalidateRect(gSession.hwnd, nullptr, FALSE);
       });
     }
     if (controlReady) {
@@ -1150,9 +1150,9 @@ int main(int argc, char** argv) {
                                  gClientMetrics.recvMbpsX1000.load(std::memory_order_relaxed),
                                  gClientMetrics.avgLatencyUs.load(std::memory_order_relaxed),
                                  nowUs);
-      if (gHwnd && !gWindowPickerVisible.load(std::memory_order_relaxed)) {
+      if (gSession.hwnd && !gWindowPickerVisible.load(std::memory_order_relaxed)) {
         if (!gPaintQueued.exchange(true)) {
-          InvalidateRect(gHwnd, nullptr, FALSE);
+          InvalidateRect(gSession.hwnd, nullptr, FALSE);
         } else {
           ++gPaintCoalescedCount;
         }
@@ -1711,9 +1711,9 @@ int main(int argc, char** argv) {
       // a per-frame invalidate would repaint the whole card grid at video cadence for nothing.
       // The reveal above and the picker-close handler invalidate on their own, so the newest
       // decoded frame still shows the moment the picker leaves.
-      if (gHwnd && !gWindowPickerVisible.load(std::memory_order_relaxed)) {
+      if (gSession.hwnd && !gWindowPickerVisible.load(std::memory_order_relaxed)) {
         if (!gPaintQueued.exchange(true)) {
-          InvalidateRect(gHwnd, nullptr, FALSE);
+          InvalidateRect(gSession.hwnd, nullptr, FALSE);
         } else {
           ++gPaintCoalescedCount;
         }
@@ -1848,8 +1848,8 @@ int main(int argc, char** argv) {
       uint64_t lastUdpSimDroppedCount = 0;
       uint64_t lastUdpSimAcceptedCount = 0;
 
-      while (gRunning.load()) {
-        const int n = recv(gSock, reinterpret_cast<char*>(datagram.data()), static_cast<int>(datagram.size()), 0);
+      while (gSession.running.load()) {
+        const int n = recv(gSession.sock, reinterpret_cast<char*>(datagram.data()), static_cast<int>(datagram.size()), 0);
         if (n <= 0) {
           // A read timeout is not a dead socket. It is also the tunnel's heartbeat: the control
           // thread spends most of its time blocked waiting for a reply, so if retransmission
@@ -2047,23 +2047,23 @@ int main(int argc, char** argv) {
         }
       }
 
-      gRunning = false;
-      if (gHwnd) PostMessageW(gHwnd, WM_CLOSE, 0, 0);
+      gSession.running = false;
+      if (gSession.hwnd) PostMessageW(gSession.hwnd, WM_CLOSE, 0, 0);
       return;
     }
 
-    while (gRunning.load()) {
+    while (gSession.running.load()) {
       MessageHeader header{};
-      if (!remote60::native_poc::recv_all(gSock, &header, sizeof(header))) break;
+      if (!remote60::native_poc::recv_all(gSession.sock, &header, sizeof(header))) break;
       if (header.magic != remote60::native_poc::kMagic || header.size < sizeof(header)) break;
       const auto msgType = static_cast<MessageType>(header.type);
 
       if (msgType == MessageType::RawFrameBgra && header.size == sizeof(RawFrameHeader)) {
         RawFrameHeader h{};
         h.header = header;
-        if (!remote60::native_poc::recv_all(gSock, &h.seq, sizeof(h) - sizeof(MessageHeader))) break;
+        if (!remote60::native_poc::recv_all(gSession.sock, &h.seq, sizeof(h) - sizeof(MessageHeader))) break;
         std::vector<uint8_t> payload(h.payloadSize);
-        if (!remote60::native_poc::recv_all(gSock, payload.data(), payload.size())) break;
+        if (!remote60::native_poc::recv_all(gSession.sock, payload.data(), payload.size())) break;
 
         if (!useRaw) {
           ++skippedQueued;
@@ -2110,9 +2110,9 @@ int main(int argc, char** argv) {
           gFrame.surfaceTexture.Reset();
           gFrame.surfaceSubresource = 0;
         }
-        if (gHwnd) {
+        if (gSession.hwnd) {
           if (!gPaintQueued.exchange(true)) {
-            InvalidateRect(gHwnd, nullptr, FALSE);
+            InvalidateRect(gSession.hwnd, nullptr, FALSE);
           } else {
             ++gPaintCoalescedCount;
           }
@@ -2191,14 +2191,14 @@ int main(int argc, char** argv) {
       } else if (msgType == MessageType::EncodedFrameH264 && header.size == sizeof(EncodedFrameHeader)) {
         EncodedFrameHeader h{};
         h.header = header;
-        if (!remote60::native_poc::recv_all(gSock, &h.seq, sizeof(h) - sizeof(MessageHeader))) break;
+        if (!remote60::native_poc::recv_all(gSession.sock, &h.seq, sizeof(h) - sizeof(MessageHeader))) break;
         std::vector<uint8_t> payload(h.payloadSize);
-        if (!remote60::native_poc::recv_all(gSock, payload.data(), payload.size())) break;
+        if (!remote60::native_poc::recv_all(gSession.sock, payload.data(), payload.size())) break;
         const uint64_t packetNowUs = qpc_now_us();
         if (!process_h264_frame(h, &payload, packetNowUs)) break;
       } else {
         const size_t bodySize = static_cast<size_t>(header.size - sizeof(header));
-        if (bodySize > 0 && !remote60::native_poc::recv_discard(gSock, bodySize)) break;
+        if (bodySize > 0 && !remote60::native_poc::recv_discard(gSession.sock, bodySize)) break;
         ++skippedQueued;
       }
 
@@ -2207,32 +2207,31 @@ int main(int argc, char** argv) {
         break;
       }
     }
-    gRunning = false;
-    if (gHwnd) PostMessageW(gHwnd, WM_CLOSE, 0, 0);
+    gSession.running = false;
+    if (gSession.hwnd) PostMessageW(gSession.hwnd, WM_CLOSE, 0, 0);
   });
 
   MSG msg{};
-  while (gRunning.load()) {
+  while (gSession.running.load()) {
     bool hadMessage = false;
     while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
       hadMessage = true;
       if (msg.message == WM_QUIT) {
-        gRunning = false;
+        gSession.running = false;
         break;
       }
       TranslateMessage(&msg);
       DispatchMessageW(&msg);
     }
-    if (!gRunning.load()) break;
+    if (!gSession.running.load()) break;
 
     // The toolbar shows connection, input, path, frame rate and the monitor list, all of which
     // change on other threads. Refreshing it on a slow tick here beats a push at each of the
     // dozen places that move them, and it is a posted message either way.
     {
-      static uint64_t nextToolbarPushUs = 0;
       const uint64_t nowUs = qpc_now_us();
-      if (nowUs >= nextToolbarPushUs) {
-        nextToolbarPushUs = nowUs + 500000ULL;
+      if (nowUs >= gSession.nextToolbarPushUs) {
+        gSession.nextToolbarPushUs = nowUs + 500000ULL;
         push_session_toolbar_state();
       }
     }
@@ -2240,7 +2239,7 @@ int main(int argc, char** argv) {
     if (args.seconds > 0) {
       const uint64_t nowUs = qpc_now_us();
       if (nowUs >= startUs + static_cast<uint64_t>(args.seconds) * 1000000ULL) {
-        gRunning = false;
+        gSession.running = false;
         break;
       }
     }
@@ -2250,18 +2249,18 @@ int main(int argc, char** argv) {
     }
   }
 
-  gRunning = false;
-  gInputEnabled = false;
+  gSession.running = false;
+  gSession.inputEnabled = false;
   // Before anything is joined: the control thread can be parked in a blocking receive for the
   // read timeout, and closing the channel is what wakes it. Otherwise shutdown waits it out.
   gUdpControl.Close(remote60::native_poc::ControlCloseReason::Shutdown);
   gInputMacro.StopPlayback();
   gInputMacro.StopRecording();
   remote60::native_poc::macro_window_destroy();
-  if (gSock != INVALID_SOCKET) {
-    shutdown(gSock, SD_BOTH);
-    closesocket(gSock);
-    gSock = INVALID_SOCKET;
+  if (gSession.sock != INVALID_SOCKET) {
+    shutdown(gSession.sock, SD_BOTH);
+    closesocket(gSession.sock);
+    gSession.sock = INVALID_SOCKET;
   }
   if (controlSock != INVALID_SOCKET) {
     shutdown(controlSock, SD_BOTH);

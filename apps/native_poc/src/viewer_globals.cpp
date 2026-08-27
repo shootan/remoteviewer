@@ -9,11 +9,6 @@
 namespace remote60::native_poc::viewer {
 
 SharedFrame gFrame;
-std::atomic<bool> gRunning{true};
-SOCKET gSock = INVALID_SOCKET;
-HWND gHwnd = nullptr;
-uint32_t gWindowW = 1600;
-uint32_t gWindowH = 900;
 std::atomic<bool> gPaintQueued{false};
 std::atomic<uint32_t> gTraceEvery{0};
 std::atomic<uint32_t> gTraceMax{0};
@@ -21,11 +16,8 @@ std::atomic<uint32_t> gPresentFrameIntervalUs{0};
 std::atomic<uint64_t> gTracePresentPrinted{0};
 std::atomic<uint64_t> gTraceRecvPrinted{0};
 ClientInputQueue gInputQueueState;
-std::atomic<bool> gInputEnabled{false};
-std::atomic<bool> gRelayPath{false};
 remote60::native_poc::UdpControlChannel gUdpControl;
 std::atomic<bool> gControlOverUdp{false};
-std::atomic<uint64_t> gInputEventsSent{0};
 std::atomic<uint16_t> gMouseButtons{0};
 std::atomic<int32_t> gLastInputVideoX{0};
 std::atomic<int32_t> gLastInputVideoY{0};
@@ -45,8 +37,6 @@ std::atomic<uint64_t> gGdiFallbackPresentedCount{0};
 std::atomic<uint64_t> gFallbackInitFailCount{0};
 std::atomic<uint64_t> gFallbackRenderFailCount{0};
 std::atomic<uint64_t> gFallbackNv12ConvertFailCount{0};
-std::mutex gLogMu;
-OverlayConfigSnapshot gOverlayConfig;
 std::atomic<bool> gControlConnected{false};
 std::atomic<uint32_t> gHostCaptureTargetPid{0};
 std::atomic<uint32_t> gHostCaptureTargetFlags{0};
@@ -69,7 +59,6 @@ ClientControlScheduler gControlScheduler;
 std::mutex gOverlayMetricsMu;
 std::deque<OverlayMetricSample> gOverlayMetrics;
 WindowPanelStateModel gWindowPanelState;
-uint32_t gRequestedMonitorId = 0;
 std::atomic<bool> gWindowPickerVisible{true};
 std::atomic<bool> gWindowPickerToggleDown{false};
 std::atomic<int> gGridScrollRow{0};  // card grid scroll, in whole rows
@@ -105,5 +94,5 @@ std::atomic<bool> gForwardedKeyDown[256]{};
 remote60::native_poc::InputMacro gInputMacro;
 std::atomic<bool> gMacroButtonDown{false};
 Nv12D3dRenderer gNv12Renderer;
-
+SessionState gSession;
 }  // namespace remote60::native_poc::viewer

@@ -18,8 +18,8 @@ namespace remote60::native_poc::viewer {
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   switch (msg) {
     case WM_CLOSE:
-      gRunning = false;
-      if (gSock != INVALID_SOCKET) shutdown(gSock, SD_BOTH);
+      gSession.running = false;
+      if (gSession.sock != INVALID_SOCKET) shutdown(gSession.sock, SD_BOTH);
       DestroyWindow(hwnd);
       return 0;
     case WM_DESTROY:
@@ -866,22 +866,22 @@ bool create_window() {
   wc.lpszClassName = cls;
   if (!RegisterClassExW(&wc)) return false;
 
-  gHwnd = CreateWindowExW(0, cls, L"remote60 native video client",
+  gSession.hwnd = CreateWindowExW(0, cls, L"remote60 native video client",
                           WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-                          static_cast<int>(gWindowW), static_cast<int>(gWindowH),
+                          static_cast<int>(gSession.windowW), static_cast<int>(gSession.windowH),
                           nullptr, nullptr, inst, nullptr);
-  if (!gHwnd) return false;
-  ensure_ui_font(gHwnd);
+  if (!gSession.hwnd) return false;
+  ensure_ui_font(gSession.hwnd);
   // The process is per-monitor DPI aware, so the requested size is physical pixels; rescale
   // to keep the intended logical size on scaled displays.
   if (gUiDpi != 96) {
-    SetWindowPos(gHwnd, nullptr, 0, 0, dpi_scale(static_cast<int>(gWindowW)),
-                 dpi_scale(static_cast<int>(gWindowH)), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(gSession.hwnd, nullptr, 0, 0, dpi_scale(static_cast<int>(gSession.windowW)),
+                 dpi_scale(static_cast<int>(gSession.windowH)), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
   }
-  ShowWindow(gHwnd, SW_SHOW);
-  UpdateWindow(gHwnd);
+  ShowWindow(gSession.hwnd, SW_SHOW);
+  UpdateWindow(gSession.hwnd);
   // Remote-cursor overlay cadence: 50ms is enough for a 30Hz feed and costs nothing when hidden.
-  SetTimer(gHwnd, kCursorOverlayTimerId, 50, nullptr);
+  SetTimer(gSession.hwnd, kCursorOverlayTimerId, 50, nullptr);
   // The session starts on the picker; stamp its shown-time so the select debounce has one uniform
   // contract from the very first gesture instead of a special startup exemption.
   gPickerShownAtUs.store(qpc_now_us(), std::memory_order_relaxed);

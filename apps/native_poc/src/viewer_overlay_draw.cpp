@@ -111,7 +111,7 @@ void draw_target_card(HDC hdc, const RECT& card, const CardGridMetrics& grid,
 }
 
 void draw_overlay(HDC hdc) {
-  const ClientLayout layout = compute_client_layout(gHwnd);
+  const ClientLayout layout = compute_client_layout(gSession.hwnd);
   const bool pickerVisible = gWindowPickerVisible.load(std::memory_order_relaxed);
   if (!pickerVisible) {
     // Nothing to draw over the stream: the legacy Targets/Macro buttons were invisible ghost
@@ -197,7 +197,7 @@ void draw_overlay(HDC hdc) {
   // Footer: connection and input state in one quiet line.
   std::ostringstream foot;
   foot << (gControlConnected.load(std::memory_order_relaxed) ? "Connected" : "Disconnected")
-       << "   Input " << (gInputEnabled.load(std::memory_order_relaxed) ? "on" : "off");
+       << "   Input " << (gSession.inputEnabled.load(std::memory_order_relaxed) ? "on" : "off");
   const uint32_t decFpsX100 = gClientMetrics.decodedFpsX100.load(std::memory_order_relaxed);
   if (decFpsX100 > 0) foot << "   " << (decFpsX100 / 100) << " fps";
   if (totalRows > grid.visibleRows) {

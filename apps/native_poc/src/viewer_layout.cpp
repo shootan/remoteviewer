@@ -134,7 +134,7 @@ ClientLayout compute_client_layout(HWND hwnd) {
   if (hwnd && IsWindow(hwnd)) {
     GetClientRect(hwnd, &layout.clientRect);
   } else {
-    layout.clientRect = make_rect(0, 0, static_cast<int>(gWindowW), static_cast<int>(gWindowH));
+    layout.clientRect = make_rect(0, 0, static_cast<int>(gSession.windowW), static_cast<int>(gSession.windowH));
   }
   const int clientW =
       std::max<int>(1, static_cast<int>(layout.clientRect.right - layout.clientRect.left));

@@ -21,7 +21,7 @@ const char* congestion_state_name(ClientCongestionState state) {
 }
 
 void log_client_line(const std::string& line) {
-  std::lock_guard<std::mutex> lk(gLogMu);
+  std::lock_guard<std::mutex> lk(gSession.logMu);
   const std::string withNewline = line + "\n";
   std::cout << withNewline;
 }

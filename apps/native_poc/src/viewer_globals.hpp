@@ -14,6 +14,7 @@
 // Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-0).
 
 #include "viewer_common.hpp"
+#include "viewer_session_state.hpp"
 #include "viewer_constants.hpp"
 #include "viewer_nv12_renderer.hpp"
 
@@ -60,11 +61,6 @@ struct SharedFrame {
 };
 
 extern SharedFrame gFrame;
-extern std::atomic<bool> gRunning;
-extern SOCKET gSock;
-extern HWND gHwnd;
-extern uint32_t gWindowW;
-extern uint32_t gWindowH;
 extern std::atomic<bool> gPaintQueued;
 extern std::atomic<uint32_t> gTraceEvery;
 extern std::atomic<uint32_t> gTraceMax;
@@ -81,14 +77,12 @@ enum class ClientCongestionState : uint8_t {
   Congested = 2,
 };
 
-// thread: UI enqueues input (gInputQueueState) that the control thread drains; gInputEnabled is
+// thread: UI enqueues input (gInputQueueState) that the control thread drains; gSession.inputEnabled is
 // set by main at connect and cleared at shutdown; gUdpControl is written by the control thread
 // and ticked/fed by the recv thread (one reader, one writer on the shared socket).
 extern ClientInputQueue gInputQueueState;
-extern std::atomic<bool> gInputEnabled;
 // Which candidate won the race. The relay is billed per byte, so the session says which one it
 // is rather than leaving the user to guess from the bill.
-extern std::atomic<bool> gRelayPath;
 
 // Control over the media socket, for hosts reached through the directory.
 //
@@ -100,7 +94,6 @@ extern remote60::native_poc::UdpControlChannel gUdpControl;
 extern std::atomic<bool> gControlOverUdp;
 // Counted at the point the exchange succeeded, so it can be compared against the acks: the two
 // diverging is what tells "the host never answered" apart from "nothing was ever sent".
-extern std::atomic<uint64_t> gInputEventsSent;
 extern std::atomic<uint16_t> gMouseButtons;
 extern std::atomic<int32_t> gLastInputVideoX;
 extern std::atomic<int32_t> gLastInputVideoY;
@@ -147,28 +140,10 @@ extern std::atomic<uint64_t> gGdiFallbackPresentedCount;
 extern std::atomic<uint64_t> gFallbackInitFailCount;
 extern std::atomic<uint64_t> gFallbackRenderFailCount;
 extern std::atomic<uint64_t> gFallbackNv12ConvertFailCount;
-extern std::mutex gLogMu;
 
-struct OverlayConfigSnapshot {
-  std::string host = "127.0.0.1";
-  uint16_t port = 43000;
-  uint16_t controlPort = 0;
-  std::string transport = "tcp";
-  std::string codec = "raw";
-  uint32_t fpsHint = 30;
-  uint32_t controlIntervalMs = 1000;
-  uint32_t tcpRecvBufKb = 0;
-  uint32_t tcpSendBufKb = 0;
-  uint32_t udpMtu = 1200;
-  uint32_t udpSimDropPm = 0;
-  uint64_t keyReqMinIntervalUs = kKeyframeRequestMinIntervalUsDefault;
-  uint64_t keyReqTokenRefillUs = kKeyframeRequestTokenRefillUsDefault;
-  uint32_t keyReqTokenCapacity = kKeyframeRequestTokenCapacityDefault;
-};
 
-// thread: main fills gOverlayConfig once; control writes the host capture meta on every pong;
+// thread: main fills gSession.overlayConfig once; control writes the host capture meta on every pong;
 // the request states (tune/stream/capture-mode/scheduler) are UI/main producers, control consumer.
-extern OverlayConfigSnapshot gOverlayConfig;
 extern std::atomic<bool> gControlConnected;
 extern std::atomic<uint32_t> gHostCaptureTargetPid;
 extern std::atomic<uint32_t> gHostCaptureTargetFlags;
@@ -210,7 +185,6 @@ extern std::deque<OverlayMetricSample> gOverlayMetrics;
 extern WindowPanelStateModel gWindowPanelState;
 // Which screen the shell asked for. Applied once the host has said it understands the monitor
 // messages, which it does in the window list.
-extern uint32_t gRequestedMonitorId;
 extern std::atomic<bool> gWindowPickerVisible;
 extern std::atomic<bool> gWindowPickerToggleDown;
 extern std::atomic<int> gGridScrollRow;  // card grid scroll, in whole rows
@@ -297,4 +271,5 @@ extern std::atomic<bool> gMacroButtonDown;
 // thread: UI only (swap chain); the decoder shares its device when the DXGI surface opt-in is on.
 extern Nv12D3dRenderer gNv12Renderer;
 
+extern SessionState gSession;
 }  // namespace remote60::native_poc::viewer

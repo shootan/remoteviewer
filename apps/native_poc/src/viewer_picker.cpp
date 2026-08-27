@@ -67,7 +67,7 @@ void set_window_panel_status(const std::string& status) {
 }
 
 void apply_window_list_snapshot(const ControlWindowListMessage& msg) {
-  const ClientLayout layout = compute_client_layout(gHwnd);
+  const ClientLayout layout = compute_client_layout(gSession.hwnd);
   const CardGridMetrics grid = compute_card_grid(layout.listRect);
   const auto result = gWindowPanelState.ApplyWindowList(msg, grid.visibleCards);
   gHostSupportsThumbnails.store(
@@ -82,9 +82,9 @@ void push_session_toolbar_state() {
   const WindowPanelSnapshot panel = gWindowPanelState.Snapshot();
   remote60::native_poc::SessionToolbarState state;
   state.connected = gControlConnected.load(std::memory_order_relaxed);
-  state.inputOn = gInputEnabled.load(std::memory_order_relaxed);
+  state.inputOn = gSession.inputEnabled.load(std::memory_order_relaxed);
   state.macroOpen = remote60::native_poc::macro_window_visible();
-  state.relay = gRelayPath.load(std::memory_order_relaxed);
+  state.relay = gSession.relayPath.load(std::memory_order_relaxed);
   state.fps = gClientMetrics.decodedFpsX100.load(std::memory_order_relaxed) / 100;
   state.selectedMonitorId = panel.selectedMonitorId;
   for (const auto& monitor : panel.monitors) {
@@ -152,7 +152,7 @@ bool begin_pc_target_selection(uint64_t windowId, const char* statusText) {
   // A selection is a generation change; drop the remote-cursor sample so the previous target's
   // pointer cannot linger over the new one while the first fenced sample is in flight.
   gRemoteCursorUpdateUs.store(0, std::memory_order_release);
-  if (gHwnd) InvalidateRect(gHwnd, nullptr, FALSE);
+  if (gSession.hwnd) InvalidateRect(gSession.hwnd, nullptr, FALSE);
   return true;
 }
 
@@ -165,7 +165,7 @@ void post_pc_selection_reveal(uint64_t readyGeneration, uint64_t readyEpoch) {
   gSelectionReadyEpoch.store(readyEpoch, std::memory_order_release);
   bool expected = false;
   if (gSelectionRevealPosted.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-    if (gHwnd) PostMessageW(gHwnd, kMsgRevealStreamView, 0, 0);
+    if (gSession.hwnd) PostMessageW(gSession.hwnd, kMsgRevealStreamView, 0, 0);
   }
 }
 
@@ -184,7 +184,7 @@ void apply_window_selected_result(const ControlWindowSelectedMessage& msg) {
       gStreamStateControl.Request(false);
       clear_pc_target_selection();
     }
-    if (gHwnd) InvalidateRect(gHwnd, nullptr, FALSE);
+    if (gSession.hwnd) InvalidateRect(gSession.hwnd, nullptr, FALSE);
     return;
   }
   // No PC-side selection tracked (e.g. a legacy stream-view session): behave as before.

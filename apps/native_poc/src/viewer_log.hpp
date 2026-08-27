@@ -4,7 +4,7 @@
 //
 // Role:    log_client_line (one serialised stdout line), request_keyframe (rate-limited keyframe
 //          request with the throttle log), congestion_state_name.
-// Thread:  any -- log_client_line serialises on gLogMu; request_keyframe only touches the
+// Thread:  any -- log_client_line serialises on gSession.logMu; request_keyframe only touches the
 //          atomic-backed gKeyframeRequests.
 // Input:   a finished log line / a keyframe reason code.
 // Output:  stdout / a pending keyframe request for the control thread.

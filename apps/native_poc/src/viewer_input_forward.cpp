@@ -13,7 +13,7 @@ void enqueue_control_input_message(const QueuedControlInputMessage& msg) {
 
 void enqueue_input_text_units(const uint16_t* text, size_t count) {
   if (kInputPolicyForceBlock) return;
-  if (!gInputEnabled.load()) return;
+  if (!gSession.inputEnabled.load()) return;
   if (!text || count == 0) return;
   size_t offset = 0;
   while (offset < count) {
@@ -130,7 +130,7 @@ uint32_t coord_to_permille(int coord, int extent) {
 
 void enqueue_input_event(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode) {
   if (kInputPolicyForceBlock) return;
-  if (!gInputEnabled.load()) return;
+  if (!gSession.inputEnabled.load()) return;
   QueuedControlInputMessage msg{};
   msg.type = MessageType::ControlInputEvent;
   msg.inputEvent.header.magic = remote60::native_poc::kMagic;
@@ -155,7 +155,7 @@ void enqueue_input_event(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta
 /** A replayed step carries its own recorded button state instead of today's live one. */
 void enqueue_macro_step(const remote60::native_poc::MacroStep& step) {
   if (kInputPolicyForceBlock) return;
-  if (!gInputEnabled.load()) return;
+  if (!gSession.inputEnabled.load()) return;
   QueuedControlInputMessage msg{};
   msg.type = MessageType::ControlInputEvent;
   msg.inputEvent.header.magic = remote60::native_poc::kMagic;
