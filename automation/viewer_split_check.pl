@@ -17,9 +17,11 @@
 use strict;
 use warnings;
 
+my $ignoreIndent = 0;
+if (@ARGV && $ARGV[0] eq '--ignore-indent') { $ignoreIndent = 1; shift @ARGV; }   # Phase 2: lambda bodies re-indented as members
 my ($rev, $ranges, $newfile, $src) = @ARGV;
 $src //= 'apps/native_poc/src/native_video_client_main.cpp';
-die "usage: $0 BASE_REV RANGES NEWFILE [SRC]\n" unless defined $newfile;
+die "usage: $0 [--ignore-indent] BASE_REV RANGES NEWFILE [SRC]\n" unless defined $newfile;
 
 my $base = `git show "$rev:$src"`;
 die "git show failed for $rev:$src\n" if $? != 0 || !length $base;
@@ -39,6 +41,7 @@ sub norm {
   $s =~ s/ = false,/,/g;
   $s =~ s/^inline //mg;
   $s =~ s/^static //mg;
+  $s =~ s/^[ \t]+//mg if $ignoreIndent;
   return $s;
 }
 my $newn = norm($new);
