@@ -51,7 +51,7 @@ void startup_start_dxgi_watchdog(HostContext& hx, std::atomic<bool>& dxgiWatchdo
                                  std::thread& dxgiWorkerWatchdog);
 int startup_create_readback(HostContext& hx);          // publish callback, readback pipeline (10)
 int startup_start_capture(HostContext& hx);            // capture session start (10), timing / stats anchors, sender thread
-void startup_start_main_loop_watchdog(HostContext& hx);
+void startup_start_main_loop_watchdog(HostContext& hx, MainLoopWatchdogThread& mainLoopWatchdog);
 void shutdown_host(HostContext& hx);                   // stop threads, detach capture, close sockets, MFShutdown
 
 }  // namespace remote60::native_poc

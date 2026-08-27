@@ -363,11 +363,9 @@ int startup_start_capture(HostContext& hx) {
   return 0;
 }
 
-void startup_start_main_loop_watchdog(HostContext& hx) {
+void startup_start_main_loop_watchdog(HostContext& hx, MainLoopWatchdogThread& mainLoopWatchdog) {
   auto& stop = hx.stop;
   auto& watchdog = hx.watchdog;
-  auto& encoder = hx.encoder;
-  auto& capture = hx.capture;
   // Dedicated liveness watchdog. It shares no lock or GPU with the capture/encode/send threads, so
   // it stays responsive when they wedge inside a driver/MFT call (the failure seen in the field:
   // the whole main loop stopped, control threads kept running, and nothing recovered because the
@@ -376,14 +374,16 @@ void startup_start_main_loop_watchdog(HostContext& hx) {
   // stored, writes one raw record via WriteFile (not iostream, whose lock a hung main may hold), and
   // TerminateProcess()es so the supervisor relaunches a fresh child. ExitProcess/normal return are
   // avoided: they run DLL detach / join the hung threads and would re-hang.
-  std::thread mainLoopWatchdog([&]() {
+  // Owned, not detached: the joiner in main() stops and joins it before the state below goes out
+  // of scope (ledger H-06). &stop / &watchdog are main() locals that outlive this object.
+  mainLoopWatchdog.thread = std::thread([&mainLoopWatchdog, &stop, &watchdog]() {
     constexpr uint64_t kHangNormalUs = 10'000'000;   // Loop / EncodeCall
     constexpr uint64_t kHangSlowUs = 20'000'000;     // CaptureRestart / Startup (legit slow)
     constexpr uint64_t kStartupGraceUs = 30'000'000;  // device/encoder bring-up before arming
     const uint64_t watchdogStartUs = qpc_now_us();
     while (!stop.load(std::memory_order_acquire)) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-      if (stop.load(std::memory_order_acquire)) break;
+      // Same 1s cadence as the old sleep, but interruptible so shutdown does not wait it out.
+      if (!mainLoopWatchdog.WaitOrStop(std::chrono::milliseconds(1000), stop)) break;
       const uint64_t now = qpc_now_us();
       if (now - watchdogStartUs < kStartupGraceUs) continue;
       const uint32_t phase = watchdog.mainLoopPhase.load(std::memory_order_acquire);
@@ -411,7 +411,6 @@ void startup_start_main_loop_watchdog(HostContext& hx) {
       }
     }
   });
-  mainLoopWatchdog.detach();
 }
 
 }  // namespace remote60::native_poc

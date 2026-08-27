@@ -7,7 +7,10 @@
 // Phase 2 turns it into the class that owns the matching main() lambdas.
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
+#include <thread>
 
 #include "time_utils.hpp"
 
@@ -78,6 +81,45 @@ struct WatchdogState {
   void MarkMainProgress(MainLoopPhase p) {
     mainLoopProgressUs.store(qpc_now_us(), std::memory_order_release);
     mainLoopPhase.store(static_cast<uint32_t>(p), std::memory_order_release);
+  }
+};
+
+// Owns the main-loop liveness watchdog thread.
+//
+// It used to be detached. The lambda reads WatchdogState and the stop flag, both of which are
+// main() stack locals, and it polls on a 1s cycle -- so after main() returned there was a window
+// of up to a second in which it could read destroyed storage. The process was about to exit
+// anyway, which is why it never bit, but "the CRT gets there first" is not a lifetime guarantee,
+// and it stops being true the moment this runs inside a test or an embedded host.
+//
+// Declare this in main() AFTER the state the thread reads, so reverse destruction order stops and
+// joins the thread first. The condition variable is what keeps that join from costing a second.
+// (Ledger H-06.)
+struct MainLoopWatchdogThread {
+  std::atomic<bool> stopFlag{false};
+  std::mutex mu;
+  std::condition_variable cv;
+  std::thread thread;
+
+  void RequestStop() {
+    {
+      std::lock_guard<std::mutex> lk(mu);
+      stopFlag.store(true, std::memory_order_release);
+    }
+    cv.notify_all();
+  }
+  // Returns false when the watchdog should exit. `hostStop` is the loop's own stop flag; either
+  // one ends the wait.
+  bool WaitOrStop(std::chrono::milliseconds period, const std::atomic<bool>& hostStop) {
+    std::unique_lock<std::mutex> lk(mu);
+    cv.wait_for(lk, period, [&] {
+      return stopFlag.load(std::memory_order_acquire) || hostStop.load(std::memory_order_acquire);
+    });
+    return !stopFlag.load(std::memory_order_acquire) && !hostStop.load(std::memory_order_acquire);
+  }
+  ~MainLoopWatchdogThread() {
+    RequestStop();
+    if (thread.joinable()) thread.join();
   }
 };
 

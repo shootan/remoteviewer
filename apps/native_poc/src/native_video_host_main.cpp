@@ -110,6 +110,7 @@ using remote60::native_poc::ControlSessionServer;
 using remote60::native_poc::HostContext;
 using remote60::native_poc::TickContext;
 using remote60::native_poc::DxgiWatchdogJoiner;
+using remote60::native_poc::MainLoopWatchdogThread;
 using remote60::native_poc::startup_process_setup;
 using remote60::native_poc::startup_configure_from_env;
 using remote60::native_poc::resolve_transport;
@@ -199,6 +200,10 @@ int main(int argc, char** argv) {
   std::atomic<bool> dxgiWatchdogStop{false};
   std::thread dxgiWorkerWatchdog;
   DxgiWatchdogJoiner dxgiWatchdogJoiner{&dxgiWatchdogStop, &dxgiWorkerWatchdog};
+  // Main-loop liveness watchdog. Declared here -- after `watchdog` and `stop`, which its thread
+  // reads -- so reverse destruction order joins the thread before that state dies. It used to be
+  // detached, which left a ~1s window after main() returned where it read freed stack. (H-06)
+  MainLoopWatchdogThread mainLoopWatchdog;
   uint64_t streamActiveSinceUs = 0;
   // Per-interval / lifetime pipeline statistics for the stats line (HostStats, Phase 1-12).
   HostStats stats;
@@ -239,7 +244,7 @@ int main(int argc, char** argv) {
   startup_start_dxgi_watchdog(host, dxgiWatchdogStop, dxgiWorkerWatchdog);
   if (const int rc = startup_create_readback(host)) return rc;
   if (const int rc = startup_start_capture(host)) return rc;
-  startup_start_main_loop_watchdog(host);
+  startup_start_main_loop_watchdog(host, mainLoopWatchdog);
 
   // One tick = the twelve stages of host_main_loop.cpp, in order. A stage that used to
   // `continue`/`break`/`return` from the loop body reports it through Flow.
