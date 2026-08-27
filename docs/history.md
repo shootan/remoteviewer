@@ -7437,3 +7437,23 @@ Next action
   이 grep의 `-P`는 CP949 로케일을 거부 → 검사는 perl로; 로그 라벨 문자열은 검사에서 제외.
 - 다음 액션: Phase 2 — VideoReceiver/FrameGate(+T1)/DecoderStage/ControlClient/SelectionGate(+T2)/PickerGesture(+T3)/layout 순수화(+T4)/
   present 분리/WndProc 핸들러 분할/startup/shutdown.
+
+### 310) 2026-08-27 뷰어 분할 리팩터 Phase 2·3 완료 — 클래스/순수결정 + 단위테스트 4종 + ViewerContext (브랜치 refactor/viewer-split, feeb781 → b877016)
+
+- Phase 2 (14 커밋): 2-1 feeb781 recv 람다 1,240줄 → `VideoReceiver`(헬퍼 람다 8 + process_h264_frame 멤버, verbatim, 게이트 B
+  --ignore-indent) · 2-1b ec31044 1s 통계 블록 5→1 `flush_stats_if_due`(변형 2개는 파라미터: raw 분모 F-02, codedSize) — 각 사본을
+  정본 템플릿과 대조 후 치환 · 2-4 8bd26a5 control 람다 → `ControlClient`, 2-4b f7c1cfd 응답 switch → handle_pong/window_list/
+  window_selected/input_ack · 2-2 f95d8ce process_h264_frame의 게이팅 블록 → `FrameGate`(FrameGateInputs/FrameGateLag/FrameGateSink;
+  admit·note_decode_failure·note_timestamp_overflow·note_reference_sync·note_decode_empty; waitForKeyFrame은 DecoderState→
+  FrameGateState; congestion_state_name은 enum 옆으로) — 유일한 순서 변화: present anchor/picker 억제 atomic 2개를 timeline 정렬
+  앞에서 읽음(무해) · T1 170a5d4 viewer_frame_gate_test 7군(기대값 오류 1건은 코드가 아니라 테스트 수정: Recovering 진입 IDR도
+  healthy 스트릭 1 가산) · 2-3 8cdc280 receiver.cpp 810→396+432(루프/프레임 단계 분리) · 2-5 b60964d SelectionGateState 멤버
+  9개 + T2 3군 · 2-6 c54f934 PickerState 제스처 래치 멤버 6개 + T3 4군 · 2-7 99e2c7f viewer_layout_math.hpp(순수, dpi 인자) +
+  T4 5군(기대값 3건 테스트 수정; 끝점 매핑 편차는 F-16) · 2-8 34e5e8a WM_PAINT 305줄 → viewer_present.cpp · 2-9 1662a5c WndProc
+  핸들러 분할(on_secondary_button/picker_press/picker_release/on_local_hotkey; 마우스·터치 피커 경로 통합 — 동일 결과 검증).
+- Phase 3 (b877016): viewer_context.hpp(ViewerContext) + viewer_startup.cpp 13 함수(verbatim 블록, exit code 보존) + viewer_shutdown.cpp;
+  main() 689→45줄. **편차**: state 인스턴스 10개는 viewer_globals에 잔존(F-17, Phase 4).
+- 결과: viewer_* 57파일(최대 viewer_startup.cpp 555), main.cpp 45줄, 30줄 초과 람다 0, 통계 복제 0. 게이트: 매 커밋 빌드 exit 0 +
+  뷰어 e2e 3/3 ALL PASS; 단위테스트 viewer_frame_gate/selection_gate/picker_gesture/layout PASS; 아래 최종 게이트 참조.
+- 발견 → 원장: F-16(점→비디오 좌표 끝점 편차, T4에서 확인), F-17(전역 인스턴스 10 잔존 — 계획 편차).
+- 다음 액션: 최종 게이트(호스트 e2e·단위테스트 전부·verify -GateAProfile) → 0.2.59 설치본 → 실기 확인 → main 병합.
