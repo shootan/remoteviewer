@@ -27,10 +27,11 @@ region_rename() {  # $1 mapfile: rename inside the recv lambda only
   head -n $((a - 1)) "$M" > $T/pre; sed -n "${a},${b}p" "$M" > $T/mid; tail -n +$((b + 1)) "$M" > $T/post
   perl automation/rename_outside_strings.pl --code-only "$1" < $T/mid > $T/mid2
   cat $T/pre $T/mid2 $T/post > "$M"
+  perl -pi -e 's/\r?\n$/\r\n/' "$M"   # the head/sed/tail/perl pipeline drops CRs on this msys; keep the tree CRLF
 }
-main_rename() { perl automation/rename_outside_strings.pl --code-only "$1" < "$M" > $T/m2 && cp $T/m2 "$M"; }
-del_line() { LINE="$1" perl -0pi -e 's~^\Q$ENV{LINE}\E\r\n~~m or die "line not found: $ENV{LINE}\n"' "$M"; }
-rep_line() { LINE="$1" NEW="$2" perl -0pi -e '(my $n = $ENV{NEW}) =~ s/\n/\r\n/g; s~^\Q$ENV{LINE}\E\r\n~$n\r\n~m or die "line not found: $ENV{LINE}\n"' "$M"; }
+main_rename() { perl automation/rename_outside_strings.pl --code-only "$1" < "$M" > $T/m2 && cp $T/m2 "$M"; perl -pi -e 's/\r?\n$/\r\n/' "$M"; }
+del_line() { LINE="$1" perl -0pi -e 's~^\Q$ENV{LINE}\E\r?\n~~m or die "line not found: $ENV{LINE}\n"' "$M"; }
+rep_line() { LINE="$1" NEW="$2" perl -0pi -e '(my $n = $ENV{NEW}) =~ s/\n/\r\n/g; s~^\Q$ENV{LINE}\E\r?\n~$n\r\n~m or die "line not found: $ENV{LINE}\n"' "$M"; }
 add_include() { perl -0pi -e 's/((?:#include "viewer_[a-z_0-9]+\.hpp"\r\n)+)/$1#include "'"$1"'"\r\n/ or die "include anchor"' "$M"; }
 mapfile_from() { sed -E 's/^([A-Za-z0-9_]+) +/\1\t/' > "$1"; }
 verify_gone() {  # $1 mapfile $2 file: no old bare identifier left (not after . -> :: or an identifier char)
@@ -123,6 +124,7 @@ if [ "$FROM" -le 12 ]; then
     del_line "$l"
   done
   # the three comment blocks that documented those locals now live in the header
+  perl -pi -e 's/\r?\n$/\r\n/' "$M"
   perl -0pi -e 's~    // Consecutive hard decode failures\. A flush \(decoder\.reset\) recovers a corrupt frame, but\r\n    // not a wedged hardware MFT or a lost D3D device -- and the viewer.s only recovery for a\r\n    // same-resolution decode error was that flush, so once the decoder wedged \(a YouTube scene\r\n    // change on a busy GPU could do it\) every following frame failed identically and the\r\n    // picture froze until the app was restarted\. Past a threshold, rebuild the decoder instead\.\r\n~~ or die "c-consecutive"; s~    // lastPresentedCaptureUs is now [^\r\n]*\r\n~~ or die "c-lastpresented"; s~    // Capture timestamp of the newest keyframe the decoder has successfully consumed\. A stale\r\n    // frame OLDER than this anchor was already resynced past \(safe to quiet-drop\); one AT OR\r\n    // AFTER it still sits in the live reference chain, so dropping it needs an IDR resync\.\r\n~~ or die "c-anchor"' "$M"
   rep_line "    const uint64_t frameIntervalUs = std::max<uint64_t>(" "    gate.frameIntervalUs = std::max<uint64_t>("
   mapfile_from $T/map12 <<'EOF'
@@ -201,6 +203,7 @@ if [ "$FROM" -le 13 ]; then
   del_line "  uint32_t decoderH = 0;"
   del_line "  Microsoft::WRL::ComPtr<ID3D11Device> decD3dDevice;"
   del_line "  Microsoft::WRL::ComPtr<ID3D11DeviceContext> decD3dContext;"
+  perl -pi -e 's/\r?\n$/\r\n/' "$M"
   perl -0pi -e 's~^    uint64_t recvSelectionEpoch = (gSel\.epoch|gSelectionEpoch)\.load\(std::memory_order_acquire\);\r\n~    dec.recvSelectionEpoch = $1.load(std::memory_order_acquire);\r\n~m or die "recvSelectionEpoch"' "$M"
   perl -0pi -e 's~    // Which selection generation this loop has already reset the decoder for\. A bump by\r\n    // begin_pc_target_selection\(\) on the UI thread makes the next frame flush stale references\.\r\n~~ or die "c-epoch"' "$M"
   mapfile_from $T/map13 <<'EOF'
