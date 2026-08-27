@@ -7,7 +7,7 @@
 //          aspect_fit_rect, resolve_active_video_content_size/rect, point_in_* hit tests,
 //          map_client_point_to_video_coords, the DPI-scaled kPanel* metrics.
 // Thread:  UI mostly; apply_window_list_snapshot (control thread) also computes the grid, and
-//          resolve_active_video_content_size reads gFrame under its mutex from any thread.
+//          resolve_active_video_content_size reads gFrameBuf.frame under its mutex from any thread.
 // Input:   HWND client rect, picker visibility, the selected target / frame / metrics sizes.
 // Output:  RECTs and video coordinates.
 // Callers: WndProc, viewer_overlay_draw, viewer_picker, viewer_cursor_overlay.

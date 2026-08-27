@@ -540,7 +540,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       }
       break;
     case WM_PAINT: {
-      gPaintQueued = false;
+      gFrameBuf.paintQueued = false;
       PAINTSTRUCT ps{};
       HDC hdc = BeginPaint(hwnd, &ps);
       const uint64_t paintStartUs = qpc_now_us();
@@ -572,32 +572,32 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       uint64_t decodeToQueueUs = 0;
       uint64_t frameVersion = 0;
       {
-        std::lock_guard<std::mutex> lk(gFrame.mu);
-        if ((gFrame.bytes && !gFrame.bytes->empty()) || gFrame.surfaceTexture) {
-          local = gFrame.bytes;
-          localSurfaceSample = gFrame.surfaceSample;
-          localSurfaceTexture = gFrame.surfaceTexture;
-          localSurfaceSubresource = gFrame.surfaceSubresource;
-          localFormat = gFrame.format;
-          w = gFrame.width;
-          h = gFrame.height;
-          codedW = (gFrame.codedWidth > 0) ? gFrame.codedWidth : gFrame.width;
-          codedH = (gFrame.codedHeight > 0) ? gFrame.codedHeight : gFrame.height;
-          visL = gFrame.visibleLeft;
-          visT = gFrame.visibleTop;
-          seq = gFrame.seq;
-          frameKey = gFrame.key;
-          frameStreamGeneration = gFrame.streamGeneration;
-          captureUs = gFrame.captureUs;
-          encodeStartUs = gFrame.encodeStartUs;
-          encodeEndUs = gFrame.encodeEndUs;
-          sendUs = gFrame.sendUs;
-          recvUs = gFrame.recvUs;
-          decodeStartUs = gFrame.decodeStartUs;
-          decodeEndUs = gFrame.decodeEndUs;
-          queueSetUs = gFrame.queueSetUs;
-          decodeToQueueUs = gFrame.decodeToQueueUs;
-          frameVersion = gFrame.version;
+        std::lock_guard<std::mutex> lk(gFrameBuf.frame.mu);
+        if ((gFrameBuf.frame.bytes && !gFrameBuf.frame.bytes->empty()) || gFrameBuf.frame.surfaceTexture) {
+          local = gFrameBuf.frame.bytes;
+          localSurfaceSample = gFrameBuf.frame.surfaceSample;
+          localSurfaceTexture = gFrameBuf.frame.surfaceTexture;
+          localSurfaceSubresource = gFrameBuf.frame.surfaceSubresource;
+          localFormat = gFrameBuf.frame.format;
+          w = gFrameBuf.frame.width;
+          h = gFrameBuf.frame.height;
+          codedW = (gFrameBuf.frame.codedWidth > 0) ? gFrameBuf.frame.codedWidth : gFrameBuf.frame.width;
+          codedH = (gFrameBuf.frame.codedHeight > 0) ? gFrameBuf.frame.codedHeight : gFrameBuf.frame.height;
+          visL = gFrameBuf.frame.visibleLeft;
+          visT = gFrameBuf.frame.visibleTop;
+          seq = gFrameBuf.frame.seq;
+          frameKey = gFrameBuf.frame.key;
+          frameStreamGeneration = gFrameBuf.frame.streamGeneration;
+          captureUs = gFrameBuf.frame.captureUs;
+          encodeStartUs = gFrameBuf.frame.encodeStartUs;
+          encodeEndUs = gFrameBuf.frame.encodeEndUs;
+          sendUs = gFrameBuf.frame.sendUs;
+          recvUs = gFrameBuf.frame.recvUs;
+          decodeStartUs = gFrameBuf.frame.decodeStartUs;
+          decodeEndUs = gFrameBuf.frame.decodeEndUs;
+          queueSetUs = gFrameBuf.frame.queueSetUs;
+          decodeToQueueUs = gFrameBuf.frame.decodeToQueueUs;
+          frameVersion = gFrameBuf.frame.version;
         }
       }
       bool presented = false;
@@ -681,8 +681,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         static uint64_t lastPresentUs = 0;
         static uint64_t lastUserFeedbackUs = 0;
         static uint64_t lastUserFeedbackOverwrite = 0;
-        gLastPresentedVersion.store(frameVersion, std::memory_order_relaxed);
-        gLastPresentedCaptureUs.store(captureUs, std::memory_order_relaxed);
+        gFrameBuf.lastPresentedVersion.store(frameVersion, std::memory_order_relaxed);
+        gFrameBuf.lastPresentedCaptureUs.store(captureUs, std::memory_order_relaxed);
         const uint64_t presentUs = qpc_now_us();
         const uint64_t presentGapUs = (lastPresentUs > 0) ? (presentUs - lastPresentUs) : 0;
         const uint64_t queueToPaintUs = (paintStartUs >= queueSetUs) ? (paintStartUs - queueSetUs) : 0;
@@ -760,8 +760,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           if (frameKey || presentAnomaly) {
             uint64_t presentBacklog = 0;
             {
-              std::lock_guard<std::mutex> lk(gFrame.mu);
-              presentBacklog = (gFrame.version >= frameVersion) ? (gFrame.version - frameVersion) : 0;
+              std::lock_guard<std::mutex> lk(gFrameBuf.frame.mu);
+              presentBacklog = (gFrameBuf.frame.version >= frameVersion) ? (gFrameBuf.frame.version - frameVersion) : 0;
             }
             std::ostringstream telem;
             telem << "[native-video-client][telemetry] stage=present"
@@ -778,14 +778,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         if ((totalUs >= kUserFeedbackLagWarnUs || (presentGapUs >= kUserFeedbackGapWarnUs && lastPresentUs > 0)) &&
             (presentUs >= lastUserFeedbackUs + kUserFeedbackMinIntervalUs || lastUserFeedbackUs == 0)) {
-          const uint64_t overwriteCountNow = gOverwriteBeforePresentCount.load(std::memory_order_relaxed);
+          const uint64_t overwriteCountNow = gFrameBuf.overwriteBeforePresentCount.load(std::memory_order_relaxed);
           const uint64_t overwriteDelta = (overwriteCountNow >= lastUserFeedbackOverwrite)
                                              ? (overwriteCountNow - lastUserFeedbackOverwrite)
                                              : 0;
           const uint64_t d3dSuccess = gD3dPresentSuccessCount.load(std::memory_order_relaxed);
           const uint64_t d3dFail = gD3dPresentFailCount.load(std::memory_order_relaxed);
           const uint64_t gdiFallback = gGdiFallbackPresentedCount.load(std::memory_order_relaxed);
-          const uint64_t paintCoalesced = gPaintCoalescedCount.load(std::memory_order_relaxed);
+          const uint64_t paintCoalesced = gFrameBuf.paintCoalescedCount.load(std::memory_order_relaxed);
           const uint64_t queueWaitUs = (paintStartUs >= queueSetUs) ? (paintStartUs - queueSetUs) : 0;
           const uint64_t paintUs = (presentUs >= paintStartUs) ? (presentUs - paintStartUs) : 0;
           const uint64_t netUs = (recvUs >= sendUs) ? (recvUs - sendUs) : 0;
@@ -832,14 +832,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       EndPaint(hwnd, &ps);
       uint64_t latestVersion = 0;
       {
-        std::lock_guard<std::mutex> lk(gFrame.mu);
-        latestVersion = gFrame.version;
+        std::lock_guard<std::mutex> lk(gFrameBuf.frame.mu);
+        latestVersion = gFrameBuf.frame.version;
       }
       if (!pickerVisible && latestVersion != frameVersion) {
-        if (!gPaintQueued.exchange(true)) {
+        if (!gFrameBuf.paintQueued.exchange(true)) {
           InvalidateRect(hwnd, nullptr, FALSE);
         } else {
-          ++gPaintCoalescedCount;
+          ++gFrameBuf.paintCoalescedCount;
         }
       }
       return 0;

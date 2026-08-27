@@ -936,7 +936,7 @@ int main(int argc, char** argv) {
     uint64_t lastCatchupEnterUs = 0;
     uint64_t catchupEnterThrottledCount = 0;
     bool catchupMode = false;
-    // lastPresentedCaptureUs is now gLastPresentedCaptureUs (atomic, updated after actual present)
+    // lastPresentedCaptureUs is now gFrameBuf.lastPresentedCaptureUs (atomic, updated after actual present)
     bool captureTimelineReady = false;
     uint64_t captureRemoteBaseUs = 0;
     uint64_t captureLocalBaseUs = 0;
@@ -1037,8 +1037,8 @@ int main(int argc, char** argv) {
       s.fallbackInitFail = gFallbackInitFailCount.load(std::memory_order_relaxed);
       s.fallbackRenderFail = gFallbackRenderFailCount.load(std::memory_order_relaxed);
       s.fallbackNv12ConvertFail = gFallbackNv12ConvertFailCount.load(std::memory_order_relaxed);
-      s.paintCoalesced = gPaintCoalescedCount.load(std::memory_order_relaxed);
-      s.overwriteBeforePresent = gOverwriteBeforePresentCount.load(std::memory_order_relaxed);
+      s.paintCoalesced = gFrameBuf.paintCoalescedCount.load(std::memory_order_relaxed);
+      s.overwriteBeforePresent = gFrameBuf.overwriteBeforePresentCount.load(std::memory_order_relaxed);
       return s;
     };
     PresentCounterSnapshot lastPresentCounters = load_present_counters();
@@ -1151,10 +1151,10 @@ int main(int argc, char** argv) {
                                  gClientMetrics.avgLatencyUs.load(std::memory_order_relaxed),
                                  nowUs);
       if (gSession.hwnd && !gWindowPickerVisible.load(std::memory_order_relaxed)) {
-        if (!gPaintQueued.exchange(true)) {
+        if (!gFrameBuf.paintQueued.exchange(true)) {
           InvalidateRect(gSession.hwnd, nullptr, FALSE);
         } else {
-          ++gPaintCoalescedCount;
+          ++gFrameBuf.paintCoalescedCount;
         }
       }
     };
@@ -1240,7 +1240,7 @@ int main(int argc, char** argv) {
       }
       const uint64_t streamLagUs = aligned_lag_us(
           h.captureQpcUs, packetNowUs, captureTimelineReady, captureRemoteBaseUs, captureLocalBaseUs);
-      const uint64_t presentedCapUs = gLastPresentedCaptureUs.load(std::memory_order_relaxed);
+      const uint64_t presentedCapUs = gFrameBuf.lastPresentedCaptureUs.load(std::memory_order_relaxed);
       const uint64_t decodeQueueLagEstimateUs =
           (presentedCapUs > 0 && h.captureQpcUs >= presentedCapUs)
               ? (h.captureQpcUs - presentedCapUs)
@@ -1298,7 +1298,7 @@ int main(int argc, char** argv) {
       // anchor is not congestion. Same for the short post-close grace until the anchor is fresh.
       const bool catchupSuppressed =
           gWindowPickerVisible.load(std::memory_order_relaxed) ||
-          packetNowUs < gCatchupSuppressUntilUs.load(std::memory_order_relaxed);
+          packetNowUs < gFrameBuf.catchupSuppressUntilUs.load(std::memory_order_relaxed);
       if (lagTrigger && denseArrival && !catchupSuppressed) {
         if (lagTriggerStreak < std::numeric_limits<uint32_t>::max()) {
           ++lagTriggerStreak;
@@ -1663,40 +1663,40 @@ int main(int argc, char** argv) {
       const uint64_t queueSetUs = nowUs;
       const uint64_t decodeToQueueUs = (queueSetUs >= decodeEndUs) ? (queueSetUs - decodeEndUs) : 0;
       {
-        std::lock_guard<std::mutex> lk(gFrame.mu);
-        const uint64_t prevVersion = gFrame.version;
-        const uint64_t lastPresentedVersion = gLastPresentedVersion.load(std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lk(gFrameBuf.frame.mu);
+        const uint64_t prevVersion = gFrameBuf.frame.version;
+        const uint64_t lastPresentedVersion = gFrameBuf.lastPresentedVersion.load(std::memory_order_relaxed);
         // Overwrites while the picker covers the stream are the intended latest-wins behavior of a
         // deliberately paused present, not a symptom -- keep them out of the telemetry.
         if (prevVersion > lastPresentedVersion &&
             !gWindowPickerVisible.load(std::memory_order_relaxed)) {
-          ++gOverwriteBeforePresentCount;
+          ++gFrameBuf.overwriteBeforePresentCount;
         }
-        gFrame.format = SharedFrame::PixelFormat::Nv12;
-        gFrame.width = (decoded.visibleWidth > 0) ? decoded.visibleWidth : decoded.width;
-        gFrame.height = (decoded.visibleHeight > 0) ? decoded.visibleHeight : decoded.height;
-        gFrame.codedWidth = decoded.width;
-        gFrame.codedHeight = decoded.height;
-        gFrame.visibleLeft = decoded.visibleLeft;
-        gFrame.visibleTop = decoded.visibleTop;
-        gFrame.stride = decoded.width;
-        gFrame.seq = h.seq;
-        gFrame.captureUs = decodedCaptureUs;
-        gFrame.encodeStartUs = h.encodeStartQpcUs;
-        gFrame.encodeEndUs = h.encodeEndQpcUs;
-        gFrame.sendUs = h.sendQpcUs;
-        gFrame.recvUs = packetNowUs;
-        gFrame.decodeStartUs = decodeStartUs;
-        gFrame.decodeEndUs = decodeEndUs;
-        gFrame.queueSetUs = queueSetUs;
-        gFrame.decodeToQueueUs = decodeToQueueUs;
-        gFrame.streamGeneration = h.streamGeneration;
-        gFrame.key = keyFrame;
-        gFrame.version = prevVersion + 1;
-        gFrame.bytes = std::move(frameNv12);
-        gFrame.surfaceSample = std::move(decoded.surfaceSample);
-        gFrame.surfaceTexture = std::move(decoded.surfaceTexture);
-        gFrame.surfaceSubresource = decoded.surfaceSubresource;
+        gFrameBuf.frame.format = SharedFrame::PixelFormat::Nv12;
+        gFrameBuf.frame.width = (decoded.visibleWidth > 0) ? decoded.visibleWidth : decoded.width;
+        gFrameBuf.frame.height = (decoded.visibleHeight > 0) ? decoded.visibleHeight : decoded.height;
+        gFrameBuf.frame.codedWidth = decoded.width;
+        gFrameBuf.frame.codedHeight = decoded.height;
+        gFrameBuf.frame.visibleLeft = decoded.visibleLeft;
+        gFrameBuf.frame.visibleTop = decoded.visibleTop;
+        gFrameBuf.frame.stride = decoded.width;
+        gFrameBuf.frame.seq = h.seq;
+        gFrameBuf.frame.captureUs = decodedCaptureUs;
+        gFrameBuf.frame.encodeStartUs = h.encodeStartQpcUs;
+        gFrameBuf.frame.encodeEndUs = h.encodeEndQpcUs;
+        gFrameBuf.frame.sendUs = h.sendQpcUs;
+        gFrameBuf.frame.recvUs = packetNowUs;
+        gFrameBuf.frame.decodeStartUs = decodeStartUs;
+        gFrameBuf.frame.decodeEndUs = decodeEndUs;
+        gFrameBuf.frame.queueSetUs = queueSetUs;
+        gFrameBuf.frame.decodeToQueueUs = decodeToQueueUs;
+        gFrameBuf.frame.streamGeneration = h.streamGeneration;
+        gFrameBuf.frame.key = keyFrame;
+        gFrameBuf.frame.version = prevVersion + 1;
+        gFrameBuf.frame.bytes = std::move(frameNv12);
+        gFrameBuf.frame.surfaceSample = std::move(decoded.surfaceSample);
+        gFrameBuf.frame.surfaceTexture = std::move(decoded.surfaceTexture);
+        gFrameBuf.frame.surfaceSubresource = decoded.surfaceSubresource;
       }
       // First real frame of the acknowledged selection just landed. The gate above guarantees it
       // belongs to the selected generation; record the candidate and post the reveal once. The
@@ -1712,10 +1712,10 @@ int main(int argc, char** argv) {
       // The reveal above and the picker-close handler invalidate on their own, so the newest
       // decoded frame still shows the moment the picker leaves.
       if (gSession.hwnd && !gWindowPickerVisible.load(std::memory_order_relaxed)) {
-        if (!gPaintQueued.exchange(true)) {
+        if (!gFrameBuf.paintQueued.exchange(true)) {
           InvalidateRect(gSession.hwnd, nullptr, FALSE);
         } else {
-          ++gPaintCoalescedCount;
+          ++gFrameBuf.paintCoalescedCount;
         }
       }
 
@@ -1774,7 +1774,7 @@ int main(int argc, char** argv) {
 
       ++decodedFrames;
       decodedBytes += decodedPayloadBytes;
-      // lastPresentedCaptureUs is now updated by render thread via gLastPresentedCaptureUs
+      // lastPresentedCaptureUs is now updated by render thread via gFrameBuf.lastPresentedCaptureUs
       const uint64_t latencyUs = aligned_lag_us(
           decodedCaptureUs, nowUs, captureTimelineReady, captureRemoteBaseUs, captureLocalBaseUs);
       const uint64_t decodeTailUs = aligned_lag_us(
@@ -2078,43 +2078,43 @@ int main(int argc, char** argv) {
           continue;
         }
         {
-          std::lock_guard<std::mutex> lk(gFrame.mu);
-          const uint64_t prevVersion = gFrame.version;
-          const uint64_t lastPresentedVersion = gLastPresentedVersion.load(std::memory_order_relaxed);
+          std::lock_guard<std::mutex> lk(gFrameBuf.frame.mu);
+          const uint64_t prevVersion = gFrameBuf.frame.version;
+          const uint64_t lastPresentedVersion = gFrameBuf.lastPresentedVersion.load(std::memory_order_relaxed);
           if (prevVersion > lastPresentedVersion) {
-            ++gOverwriteBeforePresentCount;
+            ++gFrameBuf.overwriteBeforePresentCount;
           }
-          gFrame.format = SharedFrame::PixelFormat::Bgra32;
-          gFrame.width = h.width;
-          gFrame.height = h.height;
-          gFrame.codedWidth = h.width;
-          gFrame.codedHeight = h.height;
-          gFrame.visibleLeft = 0;
-          gFrame.visibleTop = 0;
-          gFrame.stride = h.stride;
-          gFrame.seq = h.seq;
-          gFrame.captureUs = h.captureQpcUs;
-          gFrame.encodeStartUs = h.encodeStartQpcUs;
-          gFrame.encodeEndUs = h.encodeEndQpcUs;
-          gFrame.sendUs = h.sendQpcUs;
-          gFrame.recvUs = nowUs;
-          gFrame.decodeStartUs = nowUs;
-          gFrame.decodeEndUs = nowUs;
-          gFrame.queueSetUs = queueSetUs;
-          gFrame.decodeToQueueUs = 0;
-          gFrame.streamGeneration = h.streamGeneration;
-          gFrame.key = false;  // raw BGRA has no keyframe concept; keeps present telemetry quiet.
-          gFrame.version = prevVersion + 1;
-          gFrame.bytes = std::move(frameBgra);
-          gFrame.surfaceSample.Reset();
-          gFrame.surfaceTexture.Reset();
-          gFrame.surfaceSubresource = 0;
+          gFrameBuf.frame.format = SharedFrame::PixelFormat::Bgra32;
+          gFrameBuf.frame.width = h.width;
+          gFrameBuf.frame.height = h.height;
+          gFrameBuf.frame.codedWidth = h.width;
+          gFrameBuf.frame.codedHeight = h.height;
+          gFrameBuf.frame.visibleLeft = 0;
+          gFrameBuf.frame.visibleTop = 0;
+          gFrameBuf.frame.stride = h.stride;
+          gFrameBuf.frame.seq = h.seq;
+          gFrameBuf.frame.captureUs = h.captureQpcUs;
+          gFrameBuf.frame.encodeStartUs = h.encodeStartQpcUs;
+          gFrameBuf.frame.encodeEndUs = h.encodeEndQpcUs;
+          gFrameBuf.frame.sendUs = h.sendQpcUs;
+          gFrameBuf.frame.recvUs = nowUs;
+          gFrameBuf.frame.decodeStartUs = nowUs;
+          gFrameBuf.frame.decodeEndUs = nowUs;
+          gFrameBuf.frame.queueSetUs = queueSetUs;
+          gFrameBuf.frame.decodeToQueueUs = 0;
+          gFrameBuf.frame.streamGeneration = h.streamGeneration;
+          gFrameBuf.frame.key = false;  // raw BGRA has no keyframe concept; keeps present telemetry quiet.
+          gFrameBuf.frame.version = prevVersion + 1;
+          gFrameBuf.frame.bytes = std::move(frameBgra);
+          gFrameBuf.frame.surfaceSample.Reset();
+          gFrameBuf.frame.surfaceTexture.Reset();
+          gFrameBuf.frame.surfaceSubresource = 0;
         }
         if (gSession.hwnd) {
-          if (!gPaintQueued.exchange(true)) {
+          if (!gFrameBuf.paintQueued.exchange(true)) {
             InvalidateRect(gSession.hwnd, nullptr, FALSE);
           } else {
-            ++gPaintCoalescedCount;
+            ++gFrameBuf.paintCoalescedCount;
           }
         }
 
@@ -2272,10 +2272,10 @@ int main(int argc, char** argv) {
 
   if (useH264) {
     {
-      std::lock_guard<std::mutex> lk(gFrame.mu);
-      gFrame.surfaceSample.Reset();
-      gFrame.surfaceTexture.Reset();
-      gFrame.bytes.reset();
+      std::lock_guard<std::mutex> lk(gFrameBuf.frame.mu);
+      gFrameBuf.frame.surfaceSample.Reset();
+      gFrameBuf.frame.surfaceTexture.Reset();
+      gFrameBuf.frame.bytes.reset();
     }
     decoder.shutdown();
     if (mfStarted) MFShutdown();

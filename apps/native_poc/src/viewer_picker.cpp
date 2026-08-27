@@ -114,8 +114,8 @@ void set_picker_visible_and_sync_stream(bool visible) {
     gStreamStateControl.Request(true);
     // The present anchor froze while the picker covered the stream; drop it and hold catchup off
     // until the first post-close present re-anchors it, so the pause cannot read as backlog.
-    gLastPresentedCaptureUs.store(0, std::memory_order_relaxed);
-    gCatchupSuppressUntilUs.store(qpc_now_us() + 500000, std::memory_order_relaxed);
+    gFrameBuf.lastPresentedCaptureUs.store(0, std::memory_order_relaxed);
+    gFrameBuf.catchupSuppressUntilUs.store(qpc_now_us() + 500000, std::memory_order_relaxed);
   }
   // The picker draws its own header, so the toolbar belongs to the session view alone.
   remote60::native_poc::session_toolbar_set_visible(!visible);

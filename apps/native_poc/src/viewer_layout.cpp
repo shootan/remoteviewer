@@ -85,10 +85,10 @@ bool resolve_active_video_content_size(uint32_t* outWidth, uint32_t* outHeight) 
   uint32_t frameHeight = 0;
   uint64_t frameStreamGeneration = 0;
   {
-    std::lock_guard<std::mutex> lk(gFrame.mu);
-    frameWidth = gFrame.width;
-    frameHeight = gFrame.height;
-    frameStreamGeneration = gFrame.streamGeneration;
+    std::lock_guard<std::mutex> lk(gFrameBuf.frame.mu);
+    frameWidth = gFrameBuf.frame.width;
+    frameHeight = gFrameBuf.frame.height;
+    frameStreamGeneration = gFrameBuf.frame.streamGeneration;
   }
 
   if (selectedWidth > 0 && selectedHeight > 0) {

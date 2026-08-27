@@ -8,8 +8,6 @@
 
 namespace remote60::native_poc::viewer {
 
-SharedFrame gFrame;
-std::atomic<bool> gPaintQueued{false};
 std::atomic<uint32_t> gTraceEvery{0};
 std::atomic<uint32_t> gTraceMax{0};
 std::atomic<uint32_t> gPresentFrameIntervalUs{0};
@@ -26,11 +24,6 @@ KeyframeRequestState gKeyframeRequests{
     kKeyframeRequestMinIntervalUsDefault,
     kKeyframeRequestTokenRefillUsDefault,
     kKeyframeRequestTokenCapacityDefault};
-std::atomic<uint64_t> gLastPresentedVersion{0};
-std::atomic<uint64_t> gLastPresentedCaptureUs{0};  // updated after actual present, not at queue time
-std::atomic<uint64_t> gCatchupSuppressUntilUs{0};
-std::atomic<uint64_t> gPaintCoalescedCount{0};
-std::atomic<uint64_t> gOverwriteBeforePresentCount{0};
 std::atomic<uint64_t> gD3dPresentSuccessCount{0};
 std::atomic<uint64_t> gD3dPresentFailCount{0};
 std::atomic<uint64_t> gGdiFallbackPresentedCount{0};
@@ -94,5 +87,5 @@ std::atomic<bool> gForwardedKeyDown[256]{};
 remote60::native_poc::InputMacro gInputMacro;
 std::atomic<bool> gMacroButtonDown{false};
 Nv12D3dRenderer gNv12Renderer;
-SessionState gSession;
+SessionState gSession;FrameBuffer gFrameBuf;
 }  // namespace remote60::native_poc::viewer

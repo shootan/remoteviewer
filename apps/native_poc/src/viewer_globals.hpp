@@ -14,54 +14,16 @@
 // Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-0).
 
 #include "viewer_common.hpp"
+#include "viewer_frame_buffer.hpp"
 #include "viewer_session_state.hpp"
 #include "viewer_constants.hpp"
 #include "viewer_nv12_renderer.hpp"
 
 namespace remote60::native_poc::viewer {
 
-// thread: recv writes gFrame/version, UI reads it under gFrame.mu and stamps gLastPresented*;
-// gPaintQueued coalesces InvalidateRect between recv and UI; trace counters recv/UI.
-struct SharedFrame {
-  enum class PixelFormat : uint8_t {
-    Unknown = 0,
-    Bgra32 = 1,
-    Nv12 = 2,
-  };
-  std::mutex mu;
-  PixelFormat format = PixelFormat::Unknown;
-  // Visible content size -- what aspect fit, input mapping, and rendering treat as the
-  // picture. For H.264 this is the display aperture (1080), not the coded plane (1088).
-  uint32_t width = 0;
-  uint32_t height = 0;
-  // Coded plane the byte buffer is actually laid out in, plus where the visible rect starts.
-  uint32_t codedWidth = 0;
-  uint32_t codedHeight = 0;
-  uint32_t visibleLeft = 0;
-  uint32_t visibleTop = 0;
-  uint32_t stride = 0;
-  uint32_t seq = 0;
-  uint64_t captureUs = 0;
-  uint64_t encodeStartUs = 0;
-  uint64_t encodeEndUs = 0;
-  uint64_t sendUs = 0;
-  uint64_t recvUs = 0;
-  uint64_t decodeStartUs = 0;
-  uint64_t decodeEndUs = 0;
-  uint64_t queueSetUs = 0;
-  uint64_t decodeToQueueUs = 0;
-  uint64_t streamGeneration = 0;
-  // Diagnostics-only: keyframe flag carried to the present stage for stream telemetry.
-  bool key = false;
-  uint64_t version = 0;
-  std::shared_ptr<std::vector<uint8_t>> bytes;
-  Microsoft::WRL::ComPtr<IMFSample> surfaceSample;
-  Microsoft::WRL::ComPtr<ID3D11Texture2D> surfaceTexture;
-  uint32_t surfaceSubresource = 0;
-};
+// thread: recv writes gFrameBuf.frame/version, UI reads it under gFrameBuf.frame.mu and stamps gLastPresented*;
+// gFrameBuf.paintQueued coalesces InvalidateRect between recv and UI; trace counters recv/UI.
 
-extern SharedFrame gFrame;
-extern std::atomic<bool> gPaintQueued;
 extern std::atomic<uint32_t> gTraceEvery;
 extern std::atomic<uint32_t> gTraceMax;
 // Diagnostics-only: expected present interval (from fpsHint), published once at startup so the
@@ -125,15 +87,10 @@ struct ClientRuntimeMetrics {
 // fps for the toolbar. Present counters are UI-written and read by the recv 1s stats line.
 extern ClientRuntimeMetrics gClientMetrics;
 extern KeyframeRequestState gKeyframeRequests;
-extern std::atomic<uint64_t> gLastPresentedVersion;
-extern std::atomic<uint64_t> gLastPresentedCaptureUs;  // updated after actual present, not at queue time
 // While the picker overlays a live stream (mid-session picker no longer stops it), presents pause
 // but frames keep arriving, so lag-vs-last-presented would misread the overlay as decode backlog
 // and start catchup churn. Suppress catchup while the picker is up and briefly after it closes
-// (until the first present re-anchors gLastPresentedCaptureUs).
-extern std::atomic<uint64_t> gCatchupSuppressUntilUs;
-extern std::atomic<uint64_t> gPaintCoalescedCount;
-extern std::atomic<uint64_t> gOverwriteBeforePresentCount;
+// (until the first present re-anchors gFrameBuf.lastPresentedCaptureUs).
 extern std::atomic<uint64_t> gD3dPresentSuccessCount;
 extern std::atomic<uint64_t> gD3dPresentFailCount;
 extern std::atomic<uint64_t> gGdiFallbackPresentedCount;
@@ -272,4 +229,5 @@ extern std::atomic<bool> gMacroButtonDown;
 extern Nv12D3dRenderer gNv12Renderer;
 
 extern SessionState gSession;
+extern FrameBuffer gFrameBuf;
 }  // namespace remote60::native_poc::viewer
