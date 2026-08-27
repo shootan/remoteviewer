@@ -7486,3 +7486,19 @@ Next action
   !catchupSuppressed 가 3연속(`viewer_frame_gate.cpp:178~189`) — 빌드 중 로컬 e2e에서 CPU 경합만으로 `state=congested` 1회 전이(재실행 통과).
   임계·스트릭 튜너블화 + T1 CPU 경합 시나리오는 Phase 4.
 - 코드 변경 없음(원장 규칙 1). 다음 액션: 실기 확인 후 F-01 → F-05/F-03/F-04 → F-16 → Phase 4(F-17/F-15/F-07/F-06/F-18) → F-10/F-11.
+
+### 313) 2026-08-27 발견사항 원장 처리 1차 — F-01/F-05/F-03/F-04 (브랜치 refactor/viewer-split, 93e59ab → 5497b47)
+
+- 목표: 원장 권고 순서의 앞부분(로그 정확도 + 죽은 코드/상태 정리)을 항목당 1커밋으로. 동작 변경 없음(F-01은 디렉터리 경로 로그값만).
+- `93e59ab` F-01: UDP 핸드셰이크 실패 로그와 `connected host=/port=`가 `ctx.args` 대신 `ctx.resolvedArgs`를 찍음 — 소켓은 `resolvedArgs`로 connect 되므로
+  디렉터리 세션이 실제로 접속한 적 없는 주소를 보고하고 있었다. 처리 중 발견 → F-19(`resolvedArgs.controlPort`가 쓰기 전용이고 터널/control 분기는 `args.controlPort`를 씀;
+  셸이 디렉터리 세션에 `--control-port`를 안 넘겨 현재 무해) → 재확인 R-1 취소.
+- `3c399a6` F-05: `WM_LBUTTONUP`의 refresh/desktop/카드 hit-test 분기 삭제(피커 숨김 시 `compute_client_layout_at`이 rect를 0으로 만들어 도달 불가) +
+  `WM_MOUSEWHEEL`의 동일 분기 1곳 + 고아가 된 옛 선택 경로 `queue_window_select_request`.
+- `82f945a` F-03: 쓰기 전용 상태 삭제 — 호스트 캡처 메타 미러(atomic 5 + mutex + 문자열 2), `captureOverviewMode`, `overlayConfig`(구조체 포함),
+  오버레이 샘플 링(deque+mutex). recv 스레드가 매초 락 잡고 push 하던 경로가 사라졌다. pong 로그는 메시지 필드에서 직접 출력이라 문자열 불변.
+- `5497b47` F-04: `point_in_video_rect`·`request_capture_focus_from_client_point`(+연쇄 고아 `coord_to_permille`) 삭제, `kRuntime*` 5개를
+  `RuntimeTuneState` 초기화에 연결(같은 값 리터럴 중복 제거).
+- 게이트: 매 커밋 `automation/viewer_split_gate.sh --e2e` — 빌드 exit 0 + 뷰어 e2e C-1 stream/C-2 picker/C-3 tcp-raw ALL PASS.
+  F-04 커밋은 단위테스트 4종 빌드 + 실행 PASS 추가. 코드 -215/+31줄.
+- 다음 액션: F-16(끝점 매핑, T4 기대값 동반) → Phase 4(F-17/F-15/F-07/F-06/F-18/F-19) → F-10/F-11. 0.2.59 실기 확인은 별개로 계속 대기.
