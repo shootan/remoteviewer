@@ -60,6 +60,26 @@ struct CaptureFrameMeta {
   uint32_t nv12H = 0;
 };
 
+// Free -> Submitting -> GpuPending -> Free. See the note on the publication barrier in
+// D3dCaptureReadbackPipeline. At namespace scope so the identity predicate below is testable.
+enum class ReadbackSlotState : uint8_t { Free, Submitting, GpuPending };
+
+/**
+ * Is the slot a thread reserved still the same reservation?
+ *
+ * Generation alone is not enough. Within one generation the worker can free a slot and a newer
+ * Submit can take it over, and the slot keeps the same staging texture across that -- so neither
+ * the generation nor the texture pointer is an identity fence. submitSeq is. `expected` is the
+ * state the caller requires: Submit finalises a slot that is still Submitting, the worker frees
+ * one that is still GpuPending. (Ledger H-23.)
+ */
+inline bool readback_slot_is_current(uint64_t liveGeneration, uint64_t generationAtReserve,
+                                     ReadbackSlotState state, ReadbackSlotState expected,
+                                     uint64_t slotSubmitSeq, uint64_t submitSeqAtReserve) {
+  return liveGeneration == generationAtReserve && state == expected &&
+         slotSubmitSeq == submitSeqAtReserve;
+}
+
 /**
  * Pure latest-wins selection over the ring: returns the index of the ready slot with the
  * highest submit sequence, and counts every older ready slot as superseded. Returns SIZE_MAX
@@ -151,7 +171,13 @@ class D3dCaptureReadbackPipeline {
   uint32_t GpuPendingCount();
 
  private:
-  enum class SlotState : uint8_t { Free, GpuPending };
+  // Submitting is the publication barrier. The worker only ever polls GpuPending, so a slot
+  // stays invisible to it until Submit has finished the D3D work AND written the final meta --
+  // the preprocess-failure fixup, the NV12-failure lease return, the submit timestamps. Without
+  // it the worker could pick a slot whose meta still claimed `preprocessed` after the blt had
+  // failed, or still held an NV12 lease that Submit was about to return, and hand either to a
+  // consumer. (Ledger H-23, second pass.)
+  using SlotState = ReadbackSlotState;
 
   struct Slot {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;

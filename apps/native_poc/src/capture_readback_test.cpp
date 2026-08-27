@@ -9,6 +9,8 @@
 
 using remote60::native_poc::CaptureBufferPool;
 using remote60::native_poc::pick_latest_ready_slot;
+using remote60::native_poc::readback_slot_is_current;
+using remote60::native_poc::ReadbackSlotState;
 
 namespace {
 
@@ -79,6 +81,40 @@ int main() {
     auto b = pool.Acquire(16);
     auto c = pool.Acquire(16);
     check("pool serves distinct buffers concurrently", b.get() != c.get());
+  }
+
+  // Slot identity (ledger H-23). The bug this pins: Submit released the context lock, then
+  // finalised the slot's meta -- but the slot was already GpuPending, so the worker could pick it
+  // up with a meta that still claimed a failed preprocess had succeeded, or still held an NV12
+  // lease Submit was about to return. Submitting is the barrier; submitSeq is the identity.
+  {
+    constexpr uint64_t gen = 7;
+    constexpr uint64_t seq = 42;
+    check("submit finalises its own still-Submitting slot",
+          readback_slot_is_current(gen, gen, ReadbackSlotState::Submitting,
+                                   ReadbackSlotState::Submitting, seq, seq));
+    check("a reconfigure (new generation) stops submit finalising",
+          !readback_slot_is_current(gen + 1, gen, ReadbackSlotState::Submitting,
+                                    ReadbackSlotState::Submitting, seq, seq));
+    // Same generation, slot freed by the worker and re-reserved by a newer Submit: the staging
+    // texture is unchanged, so only submitSeq can tell the two apart.
+    check("same-generation slot reuse stops the older submit finalising",
+          !readback_slot_is_current(gen, gen, ReadbackSlotState::Submitting,
+                                    ReadbackSlotState::Submitting, seq + 1, seq));
+    check("a slot already promoted is not finalised again",
+          !readback_slot_is_current(gen, gen, ReadbackSlotState::GpuPending,
+                                    ReadbackSlotState::Submitting, seq, seq));
+    check("the worker frees its own still-GpuPending slot",
+          readback_slot_is_current(gen, gen, ReadbackSlotState::GpuPending,
+                                   ReadbackSlotState::GpuPending, seq, seq));
+    check("the worker does not free a slot a newer submit reserved",
+          !readback_slot_is_current(gen, gen, ReadbackSlotState::Submitting,
+                                    ReadbackSlotState::GpuPending, seq + 1, seq));
+    check("a freed slot is neither finalised nor freed again",
+          !readback_slot_is_current(gen, gen, ReadbackSlotState::Free,
+                                    ReadbackSlotState::GpuPending, seq, seq) &&
+              !readback_slot_is_current(gen, gen, ReadbackSlotState::Free,
+                                        ReadbackSlotState::Submitting, seq, seq));
   }
 
   std::printf(gFailures == 0 ? "\nRESULT: ALL PASS\n" : "\nRESULT: %d FAILED\n", gFailures);

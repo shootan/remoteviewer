@@ -109,10 +109,11 @@ bool D3dCaptureReadbackPipeline::CreateSlotsLocked(uint32_t width, uint32_t heig
   ++generation_;
   for (auto& slot : slots_) {
     // Reclaim whatever NV12 lease this slot still holds before its meta is thrown away.
-    // This is the SINGLE owner of leases belonging to a superseded generation: a worker that
-    // is mid-Map on the old generation sees stillCurrent == false and deliberately does not
-    // release, because by then the index may already have been re-leased to a newer frame and
-    // freeing it would hand the same texture to two consumers. (Ledger H-03c.)
+    // This is the SINGLE owner of leases belonging to a superseded generation: a worker that is
+    // mid-Map, and a Submit still in its Submitting window, both see their identity check fail
+    // and deliberately do not release -- by then the index may already have been re-leased to a
+    // newer frame, and freeing it would hand the same texture to two consumers.
+    // (Ledger H-03c / H-23.)
     ReleaseNv12SlotLocked(slot.meta.nv12Slot, slot.meta.nv12Generation);
     slot.meta = CaptureFrameMeta{};
     slot.staging.Reset();
@@ -371,6 +372,8 @@ bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrame
            running_.load(std::memory_order_acquire) ? 1 : 0);
   if (!src || !running_.load(std::memory_order_acquire)) return false;
   Slot* slot = nullptr;
+  size_t slotIndex = SIZE_MAX;
+  uint64_t submitSeqAtSubmit = 0;
   // Local refs keep the resources alive if a reconfigure resets the slot mid-copy.
   Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
   Microsoft::WRL::ComPtr<ID3D11Query> query;
@@ -467,9 +470,13 @@ bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrame
       busyDrops_.fetch_add(1, std::memory_order_relaxed);
       return true;  // dropped, but not a caller-visible failure
     }
-    slot->state = SlotState::GpuPending;
+    // Reserved, not yet visible: the worker polls GpuPending only. Promotion happens after the
+    // D3D work, once the meta is final. (Ledger H-23.)
+    slot->state = SlotState::Submitting;
     slot->submitSeq = ++submitSeq_;
     slot->meta = slotMeta;
+    slotIndex = static_cast<size_t>(slot - slots_.data());
+    submitSeqAtSubmit = slot->submitSeq;
     staging = slot->staging;
     query = slot->query;
     generationAtSubmit = generation_;
@@ -560,43 +567,62 @@ bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrame
   //
   // The two locks have exactly one legal order, slotMu_ -> contextMu_, because that is what
   // WorkerLoop takes (it holds slotMu_ across its GetData sweep). Taking slotMu_ while still
-  // holding contextMu_ -- which the blt-failure handling below used to do -- is the opposite
-  // order and deadlocks against that sweep. It had never been hit only because it needs a
-  // failing preprocess or NV12 blt; the NV12 branch is the one a driver without NV12 support
-  // takes on its very first frame. (Ledger H-23.)
+  // holding contextMu_ -- which the blt-failure handling used to do -- is the opposite order and
+  // deadlocks against that sweep. The NV12 branch is the one a driver without NV12 support takes
+  // on its very first frame, so it was reachable.
+  //
+  // Releasing the context lock first is only safe because the slot is still Submitting: the
+  // worker cannot see it until this block promotes it. Doing the promotion last is the whole
+  // point -- the first version of this fix left the slot GpuPending throughout, which traded the
+  // deadlock for the worker publishing a half-written meta. (Ledger H-23.)
   const uint64_t submitDoneUs = qpc_us();
+  bool promoted = false;
   {
     std::lock_guard<std::mutex> lk(slotMu_);
-    const bool slotStillOurs = (generation_ == generationAtSubmit) && slot->staging == staging;
-    if (preprocess && !preprocessedOk && slotStillOurs) {
-      // The blt failed after the meta was already stamped as preprocessed; fix it up so
-      // the worker reads capture-size bytes and applies the CPU crop.
-      slot->meta.payloadW = meta.width;
-      slot->meta.payloadH = meta.height;
-      slot->meta.preprocessed = false;
-      slot->meta.cropX = meta.cropX;
-      slot->meta.cropY = meta.cropY;
-      slot->meta.cropW = meta.cropW;
-      slot->meta.cropH = meta.cropH;
-    }
-    if (nv12OutView && !nv12Ok) {
-      // One failed conversion disables the path for the session; retrying per frame would
-      // burn a blt per frame for nothing.
-      ReleaseNv12SlotLocked(slotMeta.nv12Slot, slotMeta.nv12Generation);
+    // Identity, not just generation: within one generation a slot can be freed by the worker and
+    // re-reserved by a newer Submit, and it keeps the same staging texture across that -- so the
+    // texture pointer is not a fence. submitSeq is.
+    Slot* mine = (slotIndex < slots_.size()) ? &slots_[slotIndex] : nullptr;
+    const bool slotStillOurs =
+        mine && readback_slot_is_current(generation_, generationAtSubmit, mine->state,
+                                         SlotState::Submitting, mine->submitSeq, submitSeqAtSubmit);
+    if (slotStillOurs) {
+      if (preprocess && !preprocessedOk) {
+        // The blt failed after the meta was already stamped as preprocessed; fix it up so
+        // the worker reads capture-size bytes and applies the CPU crop.
+        mine->meta.payloadW = meta.width;
+        mine->meta.payloadH = meta.height;
+        mine->meta.preprocessed = false;
+        mine->meta.cropX = meta.cropX;
+        mine->meta.cropY = meta.cropY;
+        mine->meta.cropW = meta.cropW;
+        mine->meta.cropH = meta.cropH;
+      }
+      if (nv12OutView && !nv12Ok) {
+        // One failed conversion disables the path for the session; retrying per frame would
+        // burn a blt per frame for nothing. The release is inside the identity check: if a
+        // reconfigure reclaimed this lease and handed the same index to a newer frame, returning
+        // it from here would free that frame's surface (ABA).
+        ReleaseNv12SlotLocked(mine->meta.nv12Slot, mine->meta.nv12Generation);
+        mine->meta.nv12Slot = -1;
+        nv12Broken_ = true;
+        RB_DEBUG("nv12 blt failed; surface path disabled");
+      }
+      mine->meta.d3dWaitUs = lockWaitUs;
+      mine->meta.submitCopyUs = submitDoneUs - submitStartUs - lockWaitUs;
+      mine->meta.submitUs = submitDoneUs;
+      mine->state = SlotState::GpuPending;  // now, and only now, visible to the worker
+      promoted = true;
+    } else if (nv12OutView && !nv12Ok) {
+      // Our slot is gone (reconfigure), so CreateSlotsLocked already reclaimed the lease that
+      // went with it. Record the capability loss without touching the ring.
       nv12Broken_ = true;
-      RB_DEBUG("nv12 blt failed; surface path disabled");
-      if (slotStillOurs) slot->meta.nv12Slot = -1;
-    }
-    // A reconfigure raced the copy; the slot no longer belongs to this generation.
-    if (generation_ == generationAtSubmit) {
-      slot->meta.d3dWaitUs = lockWaitUs;
-      slot->meta.submitCopyUs = submitDoneUs - submitStartUs - lockWaitUs;
-      slot->meta.submitUs = submitDoneUs;
+      RB_DEBUG("nv12 blt failed on a superseded slot; surface path disabled");
     }
   }
-  RB_DEBUG("submit seq=%llu gen=%llu", static_cast<unsigned long long>(submitSeq_),
-           static_cast<unsigned long long>(generationAtSubmit));
-  workerCv_.notify_one();
+  RB_DEBUG("submit seq=%llu gen=%llu promoted=%d", static_cast<unsigned long long>(submitSeqAtSubmit),
+           static_cast<unsigned long long>(generationAtSubmit), promoted ? 1 : 0);
+  if (promoted) workerCv_.notify_one();
   return true;
 }
 
@@ -614,6 +640,7 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
     Slot slotCopy;
     Slot* slotRef = nullptr;
     uint64_t generationAtPick = 0;
+    uint64_t submitSeqAtPick = 0;
     {
       std::unique_lock<std::mutex> lk(slotMu_);
       workerCv_.wait_for(lk, std::chrono::milliseconds(1), [&] {
@@ -687,6 +714,7 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
       slotCopy.staging = slotRef->staging;
       slotCopy.meta = slotRef->meta;
       generationAtPick = generation_;
+      submitSeqAtPick = slotRef->submitSeq;
     }
 
     // Map/copy outside slotMu_ so the callback can keep submitting into other slots. The
@@ -766,8 +794,12 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
     bool handOff = false;
     {
       std::lock_guard<std::mutex> lk(slotMu_);
-      // Only free the slot if a reconfigure has not replaced it under us.
-      if (generation_ == generationAtPick && slotRef && slotRef->staging == slotCopy.staging) {
+      // Only free the slot if a reconfigure has not replaced it, and if a newer Submit has not
+      // already taken it over -- the staging texture survives slot reuse, so submitSeq is the
+      // identity here too. (Ledger H-23.)
+      if (slotRef && readback_slot_is_current(generation_, generationAtPick, slotRef->state,
+                                             SlotState::GpuPending, slotRef->submitSeq,
+                                             submitSeqAtPick)) {
         slotRef->state = SlotState::Free;
         handOff = mapped && static_cast<bool>(publish_);
         // The NV12 lease travels with the frame. Hand it to the consumer when the frame is

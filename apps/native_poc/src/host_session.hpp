@@ -73,7 +73,14 @@ struct SessionState {
   // Control channel: TCP listener + accepted socket + its thread, or the UDP control dispatcher
   // and the reader thread that owns the UDP peer.
   SOCKET controlListenSock = INVALID_SOCKET;
-  std::atomic<SOCKET> controlClientSock{INVALID_SOCKET};
+  // The accepted control socket, and the mutex that makes its LIFETIME -- not just its value --
+  // safe to share. An atomic only publishes the handle; it cannot stop the owning thread from
+  // closing it between another thread's load and that thread's next Winsock call, and a SOCKET
+  // value is reusable the instant it closes. Every use outside the owner (currently only
+  // shutdown_host's wake-up shutdown()) holds this mutex, and the owner holds it while closing.
+  // (Ledger H-02, second pass.)
+  std::mutex controlClientSockMu;
+  SOCKET controlClientSock = INVALID_SOCKET;
   std::thread controlThread;
   UdpControlChannel udpControlChannel;
   std::thread udpControlThread;

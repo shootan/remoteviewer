@@ -463,6 +463,13 @@ class StreamingHostProcess {
       {
         std::lock_guard<std::mutex> lock(mu_);
         child_ = pi;
+        // Stop() clears running_ and then calls TerminateChild(). If it did both while this
+        // thread was still inside CreateProcessW, TerminateChild found child_ empty and killed
+        // nothing -- and this thread would then publish the child and block in
+        // WaitForSingleObject(INFINITE) with no one left to end it, hanging Stop()'s join
+        // forever. Re-checking under the same lock that publishes closes that: either the
+        // publish wins and TerminateChild sees the child, or this does. (Ledger H-01.)
+        if (!running_.load(std::memory_order_relaxed)) TerminateProcess(pi.hProcess, 0);
       }
       childAlive_.store(true, std::memory_order_relaxed);
       WaitForSingleObject(pi.hProcess, INFINITE);

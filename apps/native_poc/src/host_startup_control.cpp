@@ -134,7 +134,10 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
               Sleep(50);
               continue;
             }
-            clientSession.controlClientSock = acceptedSock;
+            {
+              std::lock_guard<std::mutex> lk(clientSession.controlClientSockMu);
+              clientSession.controlClientSock = acceptedSock;
+            }
             int ctlNoDelay = 1;
             setsockopt(acceptedSock, IPPROTO_TCP, TCP_NODELAY,
                        reinterpret_cast<const char*>(&ctlNoDelay), sizeof(ctlNoDelay));
@@ -143,15 +146,21 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
               TcpControlLink link(acceptedSock);
               controlServer.Serve(link);
             }
-            // This thread is the ONLY closer of an accepted control socket. Taking the handle
-            // out of controlClientSock with an exchange is what makes that true: shutdown_host
-            // only shutdown()s whatever it finds there (to break the blocking read) and never
-            // closes, so the descriptor cannot be closed twice and a recycled value cannot be
-            // closed out from under a later socket. (Ledger H-02.)
-            const SOCKET mine = clientSession.controlClientSock.exchange(INVALID_SOCKET);
-            if (mine != INVALID_SOCKET) {
-              shutdown(mine, SD_BOTH);
-              closesocket(mine);
+            // This thread is the ONLY closer of an accepted control socket, and the close
+            // happens under controlClientSockMu. shutdown_host holds the same mutex for its
+            // wake-up shutdown(), so the two can never overlap: either it shuts a socket this
+            // thread has not closed yet, or it finds INVALID_SOCKET. Publishing the handle
+            // atomically was not enough -- it left a window where shutdown_host had read a value
+            // this thread then closed, and SOCKET values are reused immediately. (Ledger H-02.)
+            SOCKET mine = INVALID_SOCKET;
+            {
+              std::lock_guard<std::mutex> lk(clientSession.controlClientSockMu);
+              mine = clientSession.controlClientSock;
+              clientSession.controlClientSock = INVALID_SOCKET;
+              if (mine != INVALID_SOCKET) {
+                shutdown(mine, SD_BOTH);
+                closesocket(mine);
+              }
             }
             std::cout << "[native-video-host][control] tcp client disconnected\n";
           }
