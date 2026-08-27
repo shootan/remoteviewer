@@ -7548,3 +7548,38 @@ Next action
   피어 `211.218.222.4`는 저장소에 회사 공인 IP로 기록된 주소와 일치하나, 이번 세션의 물리적 위치는 직접 확인하지 않았다.
 - 정리: 프로브 스크립트·ETL·임시 해제한 ZEGO 로그 삭제, pktmon 필터/세션은 스크립트 `finally`에서 원복. 저장소 코드 변경 없음.
 - 다음 액션(사용자 판단 대기): 이 구조 차이를 N 항목으로 승격할지 — "미디어 소켓을 임시 포트로 + 시그널링 채널 상시 유지" 검토.
+
+### 316) 2026-08-28 호스트 원장 23건 + Phase 4 스레드 소유권 재설계 (브랜치 refactor/viewer-split, 779390e → e545cd6)
+
+- 목표: `docs/호스트_리팩터_발견사항.md`의 H-01~H-23을 코덱스 권고 순서대로 항목당 1커밋으로 처리하고,
+  이어서 계획서 §7.2의 Phase 4 본체(메일박스/스냅샷)를 끝낸다.
+- 게이트: 매 커밋 gate-A 빌드 + `automation/host_udp_e2e.sh` ALL PASS + 단위테스트. 마지막에 host/host_app/client 전 타깃 빌드 에러 0 + 단위테스트 11종 PASS.
+
+**원장 23건** (커밋 → 항목)
+- `779390e` H-01 대기 중인 프로세스 핸들 close(Win32 UB) / H-02 accepted 소켓 이중 close — 둘 다 "소유자가 둘"이라 생긴 문제라 소유자를 하나로 고정.
+- `4aaa451` H-23 readback lock-order inversion(worker `slotMu→contextMu` vs Submit `contextMu→slotMu`) / H-03 NV12 lease 누수. 대표 경로는 코덱스가 찾은 (e) staging busy-drop — 예외가 아니라 상시 경로라 링 4슬롯이 소진되면 surface encode가 조용히 CPU로 영구 강등된다.
+  처리 중 **6번째 경로 발견**: publish 성공 후에도 worker가 `slotRef->meta.nv12Slot`을 안 지워서, (c)의 일괄 반환을 넣으면 이미 인코드 루프로 넘어간 lease를 double-free 한다. 인계 시점에도 -1로 지워 `meta.nv12Slot >= 0` == "링이 아직 소유" 불변식을 세웠다.
+- `cf9d684` H-10/11/12 1초 틱. `stage_stats`가 12번째라 앞 스테이지의 Continue가 통계·ABR·drain 워치독·GDI 재시작을 통째로 건너뛰었다 — 하필 파이프라인이 멈췄을 때 도는 경로들(pop 타임아웃, units.empty, 스트림 idle)이다. tick의 **첫** 스테이지로 옮겼다.
+  실측: STATS_PRINT_EVERY_SEC=1로 클라이언트를 떼고 12초 방치 → 1.000s 간격 13연속(01:29:34.479~01:29:46.481). 수정 전 같은 구간은 0회.
+- `3f89610` H-19 배치 내 stale `senderBacklogged` — key AU가 연 배리어를 같은 배치의 delta가 되닫아 IDR 루프. 큐 정책을 `host_sender_queue_policy.hpp` 순수 함수로 뽑고 회귀 테스트 추가(리셋을 뺀 옛 동작도 명시적으로 박제).
+- `0efefc8` H-04 키프레임 토큰버킷 race(keyReqMu 트랜잭션으로) / H-05 cadence gate 무락 getter 4개(SnapshotCounters 하나로) — 계획서 §7.2의 CadenceGate::Snapshot 완료.
+- `75232d4` H-08 `std::move(au.bytes)`가 `const&`라 복사대입이었다. AU마다 40~160KB 깊은 복사.
+- `e71182e` H-06 detach된 main-loop 워치독 → RAII 소유 + cv로 즉시 join. 정상 종료 rc=0/"done" 확인.
+- `d352ffa` H-13 합성 프레임이 캡처 타이밍 평균 분모만 늘리던 것 / H-14 `queueDepthMax`는 lifetime이라 라벨 유지 + `queueDepthWindowMax` 신설.
+- `2b0ab1a` H-21 DIB 비트 읽기 전 GdiFlush 누락 + 데스크톱 썸네일 전체 크기 DIB/CPU bilinear → StretchBlt(HALFTONE). 신규 `host_bgra_scale_test`.
+- `fb944c4` H-07 로그인 worker가 `g.cache` std::string을 직접 갱신하던 race → SignInResult 값 전달 + UI 스레드가 유일 writer / H-20 자식 커맨드라인 따옴표 미이스케이프 → MS CRT 규칙 argv builder. 신규 `host_command_line_test`(CommandLineToArgvW 왕복 9건, 인자 주입 시도 포함).
+- `5cbcf99` H-15 아무도 안 읽는 cadence EWMA / H-16 미사용 alias **32개**(첫 보고 18은 스캐너 오류로 과대집계 → 코덱스가 15로 정정 → 파일 단위 재스캔으로 19개 추가 발견).
+- `6734b9b` H-17 GetData에 DONOTFLUSH + 적응형 백오프(Submit이 명시 Flush를 하므로 전제가 닫힘) / H-18 publish마다의 WTS 시스콜을 attach 시점 stamp로. 실측: 14초 세션에서 `queuePushPerSec == callbackFrames` 매초 일치.
+- `3bb54da` H-22 마지막 전역 3개 → `SenderState` egress config 스냅샷(dequeue마다 1회).
+
+**Phase 4 본체**
+- `d0bd795` BackendFallbackInfo / SnapshotTarget / ClientMetricsSnapshot. 공통 성격은 "함께 읽어야 하는 값을 따로 읽어 존재한 적 없는 상태를 만들 수 있었다" — 특히 뷰어 메트릭 19개를 각각 atomic으로 읽어 두 보고를 섞은 상태로 ABR/M9을 결정할 수 있었다.
+- `e545cd6` MainLoopMailbox + RequestKeyframe. `*Pending` 12개 은퇴. RequestKeyframe이 "forceKeyNext를 sender 스레드에서 쓰지 말 것" 규칙을 소멸시킨다 — sender가 그 규칙을 우회하려고 쓰던 두 번째 플래그(recoveryPending)는, 첫 번째(requestKey)가 실제 프레임 pop 뒤에만 읽혀 정적 데스크톱에선 복구 IDR이 안 나오기 때문에 존재했다. 이제 프레임 대기 **앞** 한 지점에서 소비한다.
+  덤: `startup_configure_control_state`의 `backend.reqValue = ...from_env()`가 아무도 읽지 않는 죽은 쓰기였음을 발견해 제거.
+- 검토 항목이던 **인코더 전용 스레드는 보류** — 캡처→인코드가 이미 latest-wins 단일 슬롯이라 스레드를 넣어도 같은 프레임이 큐에서 버려지고 지연만 한 홉 는다. H4가 푼 것은 와이어였지 인코더가 아니다. 재검토 조건을 계획서 §7.4에 명시.
+- **egress mux(H-09 후단)는 미착수** — 정확성 문제는 없고 필요성은 실측 후 판단.
+
+- 신규 단위테스트 4종(host_sender_queue_policy / host_bgra_scale / host_command_line / host_main_loop_mailbox). 호스트 UDP e2e를 13 → 18 체크로 확장 — 메일박스로 옮긴 5경로 중 tune 하나만 덮고 있었기에 keyframe/monitor/backend 요청을 실제로 구동하도록 추가했고, 호스트 로그로 왕복 확인(`runtime-config seq=1,2` 각각 applied / `monitor-select applied` / `desktop-backend-request→applied` / `keyframe-request reason=2 → -consumed reason=2`).
+- 변경 파일: `apps/native_poc/src/` 호스트 모듈 다수 + `CMakeLists.txt` + 신규 헤더/테스트 6개, `docs/호스트_리팩터_발견사항.md`, `docs/호스트_분할_리팩터_계획.md`(§7.2/§7.3/§7.4/§10), `docs/구현계획.md`, `docs/history.md`.
+- 코덱스 교차검증: diff 검증 요청(seq 776)을 보냈으나 응답 없음 — 사용자 지시("코덱스 토큰 얼마 안 남았으니 대답 없으면 그냥 진행")대로 계속 진행했다. 원장 작성 단계의 판정(seq 769/770/772)은 전부 반영돼 있다.
+- 다음 액션: **실기 확인** — Phase 4 코드로 설치본을 빌드해 사용자 판정. 그 전까지 `dist/`에 내지 않는다(계획서 게이트 E). 이후 P2(readback 60fps 공급)로.
