@@ -81,7 +81,7 @@
 ## 코드 지도 (거대 파일 주의)
 - `apps/native_poc/src/native_video_host_main.cpp` **265줄 / main() 123줄**(Phase 0~3.6 + 2-12/2-13/T1~T4 완료 2026-08-26 — 브랜치 `refactor/host-split`; 시작/종료는 host_startup_*.cpp 5개 + host_shutdown.cpp(호출 순서는 host_startup.hpp), main loop는 host_stage_*.cpp 14개 + host_loop_helpers.cpp, 컨트롤 세션·캡처·인코더·송신은 각 클래스/멤버로;
   남은 것은 Phase 4 스레드 소유권 재설계; 순수 결정 로직 4종은 host_*_test 단위테스트로 고정) + `host_*.hpp/.cpp` 모듈 60개(startup/shutdown 7 + stage별 16 + encode_send_h264.hpp + 클래스/상태 25 + 공용: log/string_util/args/bgra_scale/
-  gpu_scaler/window_enum/capture_device/net_io/input_inject/bottleneck+frame_state). `native_video_client_main.cpp` **5,349줄 / main() 2,158줄 / 전역 88개 — 뷰어 분할 설계 완료 → `docs/클라이언트_뷰어_분할_리팩터_계획.md`(구간 지도 §1.1~1.2, 결합도 §1.3, 뷰어 e2e 게이트 §8-C; 다음 사이클 대상)**. 리팩터 중 발견한 오구현·고도화는 `docs/뷰어_리팩터_발견사항.md`에 기록만(F-01~F-15 시드), 수정은 리팩터 후. 호스트 설계 → `docs/호스트_분할_리팩터_계획.md`
+  gpu_scaler/window_enum/capture_device/net_io/input_inject/bottleneck+frame_state). `native_video_client_main.cpp` **45줄 / main() 45줄**(뷰어 분할 Phase 0~3 완료 2026-08-27 — 브랜치 `refactor/viewer-split`, b877016; viewer_*.hpp/.cpp 57파일: startup/shutdown/context, VideoReceiver(+_frame)/FrameGate/ControlClient/present/window_proc/picker/layout(+_math)/overlay/cursor/input/gdi/args/log + state struct 13; 단위테스트 viewer_frame_gate/selection_gate/picker_gesture/layout; 뷰어 e2e `automation/viewer_split_e2e.sh`; 설계 `docs/클라이언트_뷰어_분할_리팩터_계획.md`)**. 리팩터 중 발견한 오구현·고도화는 `docs/뷰어_리팩터_발견사항.md`에 기록만(F-01~F-15 시드), 수정은 리팩터 후. 호스트 설계 → `docs/호스트_분할_리팩터_계획.md`
   (구간 지도 §1.2, 결합도 §1.3). Phase 0(순수 이동)은 실기 판정과 무관하게 진행 가능, Phase 1~3은
   P2 착수 전 완료. 이 리팩터는 사용자 결정으로 **Codex 교차검증 없이** 진행한다(위 "교차검증" 권고의
   예외). 지금은 특정 코드 찾을 때 grep/sed로 좁혀야 함.
