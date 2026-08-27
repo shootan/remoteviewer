@@ -140,8 +140,8 @@ void draw_overlay(HDC hdc) {
   // Once a target is picked the picker locks: the buttons and cards read as disabled while the
   // stream spins up, and the sub-header says whether we are still waiting on the host's ack or
   // on its first frame.
-  const bool selectionPending = gSelectionPending.load(std::memory_order_acquire);
-  const bool awaitingAck = gSelectionAwaitingAck.load(std::memory_order_acquire);
+  const bool selectionPending = gSel.pending.load(std::memory_order_acquire);
+  const bool awaitingAck = gSel.awaitingAck.load(std::memory_order_acquire);
 
   RECT subRect = titleRect;
   subRect.top += dpi_scale(28);

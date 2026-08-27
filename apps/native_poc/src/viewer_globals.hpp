@@ -14,6 +14,7 @@
 // Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-0).
 
 #include "viewer_common.hpp"
+#include "viewer_selection_gate.hpp"
 #include "viewer_picker_state.hpp"
 #include "viewer_control_state.hpp"
 #include "viewer_client_metrics.hpp"
@@ -84,27 +85,19 @@ extern std::atomic<int32_t> gLastInputVideoY;
 // That keeps an initial default-desktop frame -- or a frame from the previously selected target
 // -- from flashing under the picker, and keeps a slow first frame from being mistaken for a
 // failed selection.
-//   gSelectionPending      : a selection is in flight (from click until first frame or failure).
-//   gSelectionAwaitingAck  : request sent, host's WindowSelected ack not yet seen.
-//   gSelectionExpectedGeneration : the ack's streamGeneration for the *in-flight* transaction;
+//   gSel.pending      : a selection is in flight (from click until first frame or failure).
+//   gSel.awaitingAck  : request sent, host's WindowSelected ack not yet seen.
+//   gSel.expectedGeneration : the ack's streamGeneration for the *in-flight* transaction;
 //                                  frames of other generations drop while pending.
-//   gSelectionEpoch        : bumped per selection so the receive loop resets the decoder once.
-//   gActiveStreamGeneration : generation of the last successfully revealed selection; after
+//   gSel.epoch        : bumped per selection so the receive loop resets the decoder once.
+//   gSel.activeStreamGeneration : generation of the last successfully revealed selection; after
 //                             reveal this is the persistent filter (0 = accept anything, which
 //                             covers the legacy stream-view start and the window before any pick).
-extern std::atomic<bool> gSelectionPending;
-extern std::atomic<bool> gSelectionAwaitingAck;
-extern std::atomic<uint64_t> gSelectionExpectedGeneration;
-extern std::atomic<uint64_t> gSelectionEpoch;
-extern std::atomic<uint64_t> gActiveStreamGeneration;
 // The reveal is decided on the video thread but *committed* on the UI thread, so a cancel / new
 // selection / disconnect that races the post cannot wrongly close the picker. The video thread
 // records the candidate (generation + epoch) and posts once; the UI handler revalidates against
 // the live selection state before committing, and always releases the latch so a later legitimate
 // first frame can re-post.
-extern std::atomic<uint64_t> gSelectionReadyGeneration;
-extern std::atomic<uint64_t> gSelectionReadyEpoch;
-extern std::atomic<bool> gSelectionRevealPosted;
 
 // Preview thumbnails for the target picker, fetched over the control channel when the host
 // advertises kControlWindowListFlagThumbnails. Keyed by window id; id 0 is the desktop.
@@ -153,4 +146,5 @@ extern PresentStats gPresent;
 extern ClientMetricsState gMetrics;
 extern ControlChannelState gControl;
 extern PickerState gPicker;
+extern SelectionGateState gSel;
 }  // namespace remote60::native_poc::viewer

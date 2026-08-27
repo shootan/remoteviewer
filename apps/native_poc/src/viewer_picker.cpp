@@ -106,8 +106,8 @@ void set_picker_visible_and_sync_stream(bool visible) {
     // "is it frozen?" peek tear the capture down (host detaches after 5 idle seconds), a real
     // multi-second blackout, and a reselect/keyframe churn on close -- the recovery gesture was
     // manufacturing the very freeze it was checking for. Only the initial picker, before any
-    // selection has been revealed (gActiveStreamGeneration==0), still holds the stream off.
-    if (gActiveStreamGeneration.load(std::memory_order_acquire) == 0) {
+    // selection has been revealed (gSel.activeStreamGeneration==0), still holds the stream off.
+    if (gSel.activeStreamGeneration.load(std::memory_order_acquire) == 0) {
       gControl.streamState.Request(false);
     }
   } else {
@@ -125,9 +125,9 @@ void set_picker_visible_and_sync_stream(bool visible) {
 // Clears the in-flight selection state. Safe to call from any thread; touches only atomics and
 // the stream request (itself atomic-backed).
 void clear_pc_target_selection() {
-  gSelectionPending.store(false, std::memory_order_release);
-  gSelectionAwaitingAck.store(false, std::memory_order_release);
-  gSelectionExpectedGeneration.store(0, std::memory_order_release);
+  gSel.pending.store(false, std::memory_order_release);
+  gSel.awaitingAck.store(false, std::memory_order_release);
+  gSel.expectedGeneration.store(0, std::memory_order_release);
 }
 
 // UI-thread entry for picking a target from the picker. Orders the control traffic so the host's
@@ -139,15 +139,15 @@ void clear_pc_target_selection() {
 // Returns true only when the select request was actually accepted for sending, so callers can
 // log/refresh on real selections instead of refused attempts (disconnected, locked target).
 bool begin_pc_target_selection(uint64_t windowId, const char* statusText) {
-  if (gSelectionPending.load(std::memory_order_acquire)) return false;
+  if (gSel.pending.load(std::memory_order_acquire)) return false;
   if (!gControl.connected.load(std::memory_order_relaxed)) return false;
   // RequestSelect refuses when the target is locked by host config; do not touch the stream then.
   if (!gPicker.windowPanel.RequestSelect(windowId, statusText)) return false;
-  gSelectionExpectedGeneration.store(0, std::memory_order_release);
-  gSelectionAwaitingAck.store(true, std::memory_order_release);
-  gSelectionPending.store(true, std::memory_order_release);
+  gSel.expectedGeneration.store(0, std::memory_order_release);
+  gSel.awaitingAck.store(true, std::memory_order_release);
+  gSel.pending.store(true, std::memory_order_release);
   // Bumped so the receive loop resets the decoder and holds for the new generation's keyframe.
-  gSelectionEpoch.fetch_add(1, std::memory_order_acq_rel);
+  gSel.epoch.fetch_add(1, std::memory_order_acq_rel);
   gControl.streamState.Request(true);
   // A selection is a generation change; drop the remote-cursor sample so the previous target's
   // pointer cannot linger over the new one while the first fenced sample is in flight.
@@ -161,10 +161,10 @@ bool begin_pc_target_selection(uint64_t windowId, const char* statusText) {
 // selection state. The UI-thread handler revalidates against that state before committing, so a
 // cancel / new selection / disconnect that races the post cannot wrongly close the picker.
 void post_pc_selection_reveal(uint64_t readyGeneration, uint64_t readyEpoch) {
-  gSelectionReadyGeneration.store(readyGeneration, std::memory_order_release);
-  gSelectionReadyEpoch.store(readyEpoch, std::memory_order_release);
+  gSel.readyGeneration.store(readyGeneration, std::memory_order_release);
+  gSel.readyEpoch.store(readyEpoch, std::memory_order_release);
   bool expected = false;
-  if (gSelectionRevealPosted.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+  if (gSel.revealPosted.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
     if (gSession.hwnd) PostMessageW(gSession.hwnd, kMsgRevealStreamView, 0, 0);
   }
 }
@@ -172,12 +172,12 @@ void post_pc_selection_reveal(uint64_t readyGeneration, uint64_t readyEpoch) {
 void apply_window_selected_result(const ControlWindowSelectedMessage& msg) {
   const auto result = gPicker.windowPanel.ApplyWindowSelected(msg);
   log_client_line(result.logLine);
-  if (gSelectionPending.load(std::memory_order_acquire)) {
+  if (gSel.pending.load(std::memory_order_acquire)) {
     if (result.ok) {
       // Ack received: hold the picker up until the first frame of this generation is presented.
       // Do NOT hide the picker here -- that is what the first-frame gate is for.
-      gSelectionExpectedGeneration.store(msg.streamGeneration, std::memory_order_release);
-      gSelectionAwaitingAck.store(false, std::memory_order_release);
+      gSel.expectedGeneration.store(msg.streamGeneration, std::memory_order_release);
+      gSel.awaitingAck.store(false, std::memory_order_release);
       gPicker.windowPanel.SetStatus("waiting_first_frame");
     } else {
       // Select failed: stop the stream we speculatively started, keep the picker, allow a retry.

@@ -11,14 +11,6 @@ namespace remote60::native_poc::viewer {
 std::atomic<uint16_t> gMouseButtons{0};
 std::atomic<int32_t> gLastInputVideoX{0};
 std::atomic<int32_t> gLastInputVideoY{0};
-std::atomic<bool> gSelectionPending{false};
-std::atomic<bool> gSelectionAwaitingAck{false};
-std::atomic<uint64_t> gSelectionExpectedGeneration{0};
-std::atomic<uint64_t> gSelectionEpoch{0};
-std::atomic<uint64_t> gActiveStreamGeneration{0};
-std::atomic<uint64_t> gSelectionReadyGeneration{0};
-std::atomic<uint64_t> gSelectionReadyEpoch{0};
-std::atomic<bool> gSelectionRevealPosted{false};
 std::atomic<uint64_t> gSuppressMouseUntilUs{0};
 std::atomic<int32_t> gRemoteCursorX{0};
 std::atomic<int32_t> gRemoteCursorY{0};
@@ -36,5 +28,5 @@ int gUiDpi = 96;
 std::atomic<bool> gForwardedKeyDown[256]{};
 remote60::native_poc::InputMacro gInputMacro;
 Nv12D3dRenderer gNv12Renderer;
-SessionState gSession;FrameBuffer gFrameBuf;PresentStats gPresent;ClientMetricsState gMetrics;ControlChannelState gControl;PickerState gPicker;
+SessionState gSession;FrameBuffer gFrameBuf;PresentStats gPresent;ClientMetricsState gMetrics;ControlChannelState gControl;PickerState gPicker;SelectionGateState gSel;
 }  // namespace remote60::native_poc::viewer

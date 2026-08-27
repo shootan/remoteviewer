@@ -106,7 +106,7 @@ void update_cursor_overlay(HWND hwnd) {
   // Generation fence: a sample from the previous target must not paint over a freshly selected
   // one. activeGen==0 = legacy stream view before any PC-side selection; accept anything there.
   const uint64_t cursorGen = gRemoteCursorGeneration.load(std::memory_order_relaxed);
-  const uint64_t activeGen = gActiveStreamGeneration.load(std::memory_order_acquire);
+  const uint64_t activeGen = gSel.activeStreamGeneration.load(std::memory_order_acquire);
   const bool fresh = updUs != 0 && (qpc_now_us() - updUs) < kRemoteCursorStaleUs;
   const bool show = fresh && gRemoteCursorVisible.load(std::memory_order_relaxed) &&
                     capW > 0 && capH > 0 &&

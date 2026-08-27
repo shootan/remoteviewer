@@ -242,8 +242,8 @@ int main(int argc, char** argv) {
   clear_pc_target_selection();
   // No target has taken effect yet. 0 disables the persistent generation filter, so the legacy
   // stream-view start and the pre-first-pick window accept whatever the host sends, as before.
-  gActiveStreamGeneration.store(0, std::memory_order_release);
-  gSelectionRevealPosted.store(false, std::memory_order_release);
+  gSel.activeStreamGeneration.store(0, std::memory_order_release);
+  gSel.revealPosted.store(false, std::memory_order_release);
   // Picker-first sessions must not keep the host's default stream running under the picker: the
   // request rides the scheduler (StreamState before WindowList/Select) and is queued before the
   // control link exists, so it goes out first thing once connected. An initial default-desktop
@@ -864,7 +864,7 @@ int main(int argc, char** argv) {
           clear_pc_target_selection();
           // Drop the persistent generation filter too: a reconnect renegotiates generations from
           // scratch, so an old value must not silently filter the new stream to nothing.
-          gActiveStreamGeneration.store(0, std::memory_order_release);
+          gSel.activeStreamGeneration.store(0, std::memory_order_release);
           set_window_panel_status("control_disconnected");
           InvalidateRect(gSession.hwnd, nullptr, FALSE);
       });
@@ -896,7 +896,7 @@ int main(int argc, char** argv) {
   std::thread recvThread([&]() {
     // Which selection generation this loop has already reset the decoder for. A bump by
     // begin_pc_target_selection() on the UI thread makes the next frame flush stale references.
-    uint64_t recvSelectionEpoch = gSelectionEpoch.load(std::memory_order_acquire);
+    uint64_t recvSelectionEpoch = gSel.epoch.load(std::memory_order_acquire);
     uint64_t statAtUs = qpc_now_us() + 1000000ULL;
     uint64_t recvFrames = 0;
     uint64_t decodedFrames = 0;
@@ -1178,19 +1178,19 @@ int main(int argc, char** argv) {
       // Target-selection gate (mobile parity, Android commit 4892dea). While the user's pick is
       // resolving, keep the picker up and present nothing until the acknowledged generation's
       // first frame decodes.
-      if (gSelectionEpoch.load(std::memory_order_acquire) != recvSelectionEpoch) {
+      if (gSel.epoch.load(std::memory_order_acquire) != recvSelectionEpoch) {
         // A fresh pick: drop stale reference frames and hold for the new generation's keyframe.
-        recvSelectionEpoch = gSelectionEpoch.load(std::memory_order_acquire);
+        recvSelectionEpoch = gSel.epoch.load(std::memory_order_acquire);
         decoder.reset();
         waitForKeyFrame = true;
       }
-      if (gSelectionPending.load(std::memory_order_acquire)) {
-        if (gSelectionAwaitingAck.load(std::memory_order_acquire)) {
+      if (gSel.pending.load(std::memory_order_acquire)) {
+        if (gSel.awaitingAck.load(std::memory_order_acquire)) {
           // No ack yet: every frame here is either the old target or an unconfirmed guess.
           ++skippedQueued;
           return true;
         }
-        const uint64_t expectedGen = gSelectionExpectedGeneration.load(std::memory_order_acquire);
+        const uint64_t expectedGen = gSel.expectedGeneration.load(std::memory_order_acquire);
         if (expectedGen != 0 && h.streamGeneration != expectedGen) {
           // The previous target's stream still draining after the ack; not what we selected.
           ++skippedQueued;
@@ -1199,11 +1199,11 @@ int main(int argc, char** argv) {
       } else {
         // No selection in flight. After a reveal, only the active target's generation is welcome:
         // a late straggler from the previously selected target, still in flight on the wire, would
-        // otherwise flash on screen. gActiveStreamGeneration==0 means no PC-side selection has
+        // otherwise flash on screen. gSel.activeStreamGeneration==0 means no PC-side selection has
         // taken effect (legacy stream-view start, or before the first pick), so accept anything as
         // before. Host auto-resolution changes keep the same generation, so this does not fight
         // them -- only a host-side target selection bumps the generation.
-        const uint64_t activeGen = gActiveStreamGeneration.load(std::memory_order_acquire);
+        const uint64_t activeGen = gSel.activeStreamGeneration.load(std::memory_order_acquire);
         if (activeGen != 0 && h.streamGeneration != activeGen) {
           ++skippedQueued;
           return true;
@@ -1701,10 +1701,10 @@ int main(int argc, char** argv) {
       // belongs to the selected generation; record the candidate and post the reveal once. The
       // picker flip, input guard and toolbar are committed on the UI thread (after revalidation),
       // not here, so a racing cancel/new-selection/disconnect cannot wrongly close the picker.
-      if (gSelectionPending.load(std::memory_order_acquire) &&
-          !gSelectionAwaitingAck.load(std::memory_order_acquire)) {
+      if (gSel.pending.load(std::memory_order_acquire) &&
+          !gSel.awaitingAck.load(std::memory_order_acquire)) {
         post_pc_selection_reveal(h.streamGeneration,
-                                 gSelectionEpoch.load(std::memory_order_acquire));
+                                 gSel.epoch.load(std::memory_order_acquire));
       }
       // While the picker overlays a live stream, WM_PAINT redraws the picker (not the video), so
       // a per-frame invalidate would repaint the whole card grid at video cadence for nothing.

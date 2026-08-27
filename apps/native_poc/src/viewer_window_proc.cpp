@@ -34,15 +34,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       // transaction is still pending, its ack is in, and the recorded epoch and generation still
       // match. Always release the latch at the end so a later legitimate first frame can re-post.
       const bool commit =
-          gSelectionPending.load(std::memory_order_acquire) &&
-          !gSelectionAwaitingAck.load(std::memory_order_acquire) &&
-          gSelectionEpoch.load(std::memory_order_acquire) ==
-              gSelectionReadyEpoch.load(std::memory_order_acquire) &&
-          gSelectionExpectedGeneration.load(std::memory_order_acquire) ==
-              gSelectionReadyGeneration.load(std::memory_order_acquire);
+          gSel.pending.load(std::memory_order_acquire) &&
+          !gSel.awaitingAck.load(std::memory_order_acquire) &&
+          gSel.epoch.load(std::memory_order_acquire) ==
+              gSel.readyEpoch.load(std::memory_order_acquire) &&
+          gSel.expectedGeneration.load(std::memory_order_acquire) ==
+              gSel.readyGeneration.load(std::memory_order_acquire);
       if (commit) {
         // Persistent filter for late stragglers from the previous target (see the recv gate).
-        gActiveStreamGeneration.store(gSelectionReadyGeneration.load(std::memory_order_acquire),
+        gSel.activeStreamGeneration.store(gSel.readyGeneration.load(std::memory_order_acquire),
                                       std::memory_order_release);
         // Dropping the picker guard opens both the paint path and the input guard (input handlers
         // early-return while the picker is up); clearing pending re-enables the picker's buttons.
@@ -52,7 +52,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         push_session_toolbar_state();
         InvalidateRect(hwnd, nullptr, FALSE);
       }
-      gSelectionRevealPosted.store(false, std::memory_order_release);
+      gSel.revealPosted.store(false, std::memory_order_release);
       return 0;
     }
     // The toolbar is a window of its own, so it does not move with this one for free.
@@ -104,7 +104,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
       }
       if (gPicker.visible.load(std::memory_order_relaxed)) {
-        if (gSelectionPending.load(std::memory_order_acquire)) {
+        if (gSel.pending.load(std::memory_order_acquire)) {
           gPicker.pressTargetId.store(kPickerPressNone, std::memory_order_relaxed);
           return 0;
         }
@@ -167,7 +167,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             gPicker.pressTargetId.exchange(kPickerPressNone, std::memory_order_relaxed);
         // A selection already in flight owns the picker until its first frame arrives; ignore
         // further target clicks so a double-click cannot queue a second, racing select.
-        if (gSelectionPending.load(std::memory_order_acquire)) return 0;
+        if (gSel.pending.load(std::memory_order_acquire)) return 0;
         if (point_in_rect(layout.refreshButtonRect, x, y)) {
           queue_window_list_request("window_list_request pending");
           InvalidateRect(hwnd, nullptr, FALSE);
@@ -357,7 +357,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       if (gPicker.visible.load(std::memory_order_relaxed)) {
         // A selection in flight owns the picker; also clear the latch so a gesture spanning the
         // pending window cannot leave a stale press behind.
-        if (gSelectionPending.load(std::memory_order_acquire)) {
+        if (gSel.pending.load(std::memory_order_acquire)) {
           gPicker.pressTargetId.store(kPickerPressNone, std::memory_order_relaxed);
           return 0;
         }
