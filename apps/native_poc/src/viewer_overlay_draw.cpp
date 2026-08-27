@@ -11,23 +11,23 @@ namespace remote60::native_poc::viewer {
 
 void push_overlay_metric_sample(uint32_t recvFpsX100, uint32_t decodedFpsX100, uint32_t recvMbpsX1000,
                                 uint64_t avgLatencyUs, uint64_t nowUs) {
-  std::lock_guard<std::mutex> lk(gOverlayMetricsMu);
-  gOverlayMetrics.push_back({nowUs, recvFpsX100, decodedFpsX100, recvMbpsX1000, avgLatencyUs});
+  std::lock_guard<std::mutex> lk(gMetrics.overlayMu);
+  gMetrics.overlay.push_back({nowUs, recvFpsX100, decodedFpsX100, recvMbpsX1000, avgLatencyUs});
   const uint64_t keepWindowUs = 12000000ULL;
-  while (!gOverlayMetrics.empty() && nowUs > gOverlayMetrics.front().tsUs &&
-         (nowUs - gOverlayMetrics.front().tsUs) > keepWindowUs) {
-    gOverlayMetrics.pop_front();
+  while (!gMetrics.overlay.empty() && nowUs > gMetrics.overlay.front().tsUs &&
+         (nowUs - gMetrics.overlay.front().tsUs) > keepWindowUs) {
+    gMetrics.overlay.pop_front();
   }
 }
 
 OverlayMetricAverages collect_overlay_averages(uint64_t nowUs, uint64_t windowUs) {
   OverlayMetricAverages out{};
-  std::lock_guard<std::mutex> lk(gOverlayMetricsMu);
+  std::lock_guard<std::mutex> lk(gMetrics.overlayMu);
   uint64_t sumRecvFpsX100 = 0;
   uint64_t sumDecodedFpsX100 = 0;
   uint64_t sumRecvMbpsX1000 = 0;
   uint64_t sumLatencyUs = 0;
-  for (const auto& s : gOverlayMetrics) {
+  for (const auto& s : gMetrics.overlay) {
     if (nowUs >= s.tsUs && (nowUs - s.tsUs) <= windowUs) {
       ++out.sampleCount;
       sumRecvFpsX100 += s.recvFpsX100;
@@ -47,7 +47,7 @@ OverlayMetricAverages collect_overlay_averages(uint64_t nowUs, uint64_t windowUs
 
 void apply_runtime_tune_delta(int bitrateStep, int keyintStep) {
   gRuntimeTuneState.ApplyDelta(
-      bitrateStep, keyintStep, gClientMetrics.recvMbpsX1000.load(std::memory_order_relaxed));
+      bitrateStep, keyintStep, gMetrics.client.recvMbpsX1000.load(std::memory_order_relaxed));
 }
 
 void draw_thumbnail_into(HDC hdc, const RECT& dst, const WindowThumb& thumb) {
@@ -198,7 +198,7 @@ void draw_overlay(HDC hdc) {
   std::ostringstream foot;
   foot << (gControlConnected.load(std::memory_order_relaxed) ? "Connected" : "Disconnected")
        << "   Input " << (gSession.inputEnabled.load(std::memory_order_relaxed) ? "on" : "off");
-  const uint32_t decFpsX100 = gClientMetrics.decodedFpsX100.load(std::memory_order_relaxed);
+  const uint32_t decFpsX100 = gMetrics.client.decodedFpsX100.load(std::memory_order_relaxed);
   if (decFpsX100 > 0) foot << "   " << (decFpsX100 / 100) << " fps";
   if (totalRows > grid.visibleRows) {
     foot << "   Rows " << (scrollRow + 1) << "-"

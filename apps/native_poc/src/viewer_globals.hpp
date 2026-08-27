@@ -14,6 +14,7 @@
 // Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-0).
 
 #include "viewer_common.hpp"
+#include "viewer_client_metrics.hpp"
 #include "viewer_present_stats.hpp"
 #include "viewer_frame_buffer.hpp"
 #include "viewer_session_state.hpp"
@@ -56,32 +57,9 @@ extern std::atomic<uint16_t> gMouseButtons;
 extern std::atomic<int32_t> gLastInputVideoX;
 extern std::atomic<int32_t> gLastInputVideoY;
 
-struct ClientRuntimeMetrics {
-  std::atomic<uint32_t> seq{0};
-  std::atomic<uint32_t> width{0};
-  std::atomic<uint32_t> height{0};
-  std::atomic<uint32_t> recvFpsX100{0};
-  std::atomic<uint32_t> decodedFpsX100{0};
-  std::atomic<uint32_t> recvMbpsX1000{0};
-  std::atomic<uint32_t> skippedFrames{0};
-  std::atomic<uint64_t> avgLatencyUs{0};
-  std::atomic<uint64_t> maxLatencyUs{0};
-  std::atomic<uint64_t> avgDecodeTailUs{0};
-  std::atomic<uint64_t> maxDecodeTailUs{0};
-  std::atomic<uint32_t> congestionState{0};
-  std::atomic<uint32_t> congestionTransitions{0};
-  std::atomic<uint32_t> congestionRecoveryCount{0};
-  std::atomic<uint32_t> congestionRecoveryReq{0};
-  std::atomic<uint32_t> congestionRecoveryMaxUs{0};
-  std::atomic<uint32_t> queueDepthMax{0};
-  std::atomic<uint32_t> queueDepthH4p{0};
-  std::atomic<uint32_t> udpAssemblyDropPm{0};
-  std::atomic<uint64_t> updatedQpcUs{0};
-};
 
-// thread: recv publishes gClientMetrics (atomics); control snapshots it for the host, UI reads
+// thread: recv publishes gMetrics.client (atomics); control snapshots it for the host, UI reads
 // fps for the toolbar. Present counters are UI-written and read by the recv 1s stats line.
-extern ClientRuntimeMetrics gClientMetrics;
 extern KeyframeRequestState gKeyframeRequests;
 // While the picker overlays a live stream (mid-session picker no longer stops it), presents pause
 // but frames keep arriving, so lag-vs-last-presented would misread the overlay as decode backlog
@@ -107,25 +85,9 @@ extern remote60::native_poc::StreamStateControl gStreamStateControl;
 extern CaptureModeRequestState gCaptureModeRequests;
 extern ClientControlScheduler gControlScheduler;
 
-struct OverlayMetricSample {
-  uint64_t tsUs = 0;
-  uint32_t recvFpsX100 = 0;
-  uint32_t decodedFpsX100 = 0;
-  uint32_t recvMbpsX1000 = 0;
-  uint64_t avgLatencyUs = 0;
-};
 
-struct OverlayMetricAverages {
-  uint32_t recvFpsX100 = 0;
-  uint32_t decodedFpsX100 = 0;
-  uint32_t recvMbpsX1000 = 0;
-  uint64_t avgLatencyUs = 0;
-  uint32_t sampleCount = 0;
-};
 
-// thread: recv pushes overlay metric samples; UI (overlay) reads under gOverlayMetricsMu.
-extern std::mutex gOverlayMetricsMu;
-extern std::deque<OverlayMetricSample> gOverlayMetrics;
+// thread: recv pushes overlay metric samples; UI (overlay) reads under gMetrics.overlayMu.
 
 // thread: picker state is UI-owned; control applies window/monitor lists and thumbnails;
 // the selection gate is begun/committed on UI, acked on control, gated on recv (see comments).
@@ -221,4 +183,5 @@ extern Nv12D3dRenderer gNv12Renderer;
 extern SessionState gSession;
 extern FrameBuffer gFrameBuf;
 extern PresentStats gPresent;
+extern ClientMetricsState gMetrics;
 }  // namespace remote60::native_poc::viewer

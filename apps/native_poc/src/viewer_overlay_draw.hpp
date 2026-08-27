@@ -4,7 +4,7 @@
 //
 // Role:    draw_overlay (the target picker: header, actions, card grid, footer), draw_target_card,
 //          draw_thumbnail_into, push_overlay_metric_sample / collect_overlay_averages, apply_runtime_tune_delta.
-// Thread:  UI paints; recv pushes metric samples under gOverlayMetricsMu.
+// Thread:  UI paints; recv pushes metric samples under gMetrics.overlayMu.
 // Input:   the paint DC, picker/selection/thumbnail state, client metrics.
 // Output:  the picker pixels; runtime tune deltas queued for the control thread.
 // Callers: WM_PAINT, recv thread (publish_metrics), WM_KEYDOWN hotkeys.

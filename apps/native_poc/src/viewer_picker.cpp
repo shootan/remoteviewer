@@ -12,28 +12,28 @@ namespace remote60::native_poc::viewer {
 
 ClientControlMetricsSnapshot capture_client_control_metrics_snapshot() {
   ClientControlMetricsSnapshot snapshot{};
-  snapshot.updatedQpcUs = gClientMetrics.updatedQpcUs.load(std::memory_order_relaxed);
-  snapshot.message.width = gClientMetrics.width.load(std::memory_order_relaxed);
-  snapshot.message.height = gClientMetrics.height.load(std::memory_order_relaxed);
-  snapshot.message.recvFpsX100 = gClientMetrics.recvFpsX100.load(std::memory_order_relaxed);
-  snapshot.message.decodedFpsX100 = gClientMetrics.decodedFpsX100.load(std::memory_order_relaxed);
-  snapshot.message.recvMbpsX1000 = gClientMetrics.recvMbpsX1000.load(std::memory_order_relaxed);
-  snapshot.message.skippedFrames = gClientMetrics.skippedFrames.load(std::memory_order_relaxed);
-  snapshot.message.avgLatencyUs = gClientMetrics.avgLatencyUs.load(std::memory_order_relaxed);
-  snapshot.message.maxLatencyUs = gClientMetrics.maxLatencyUs.load(std::memory_order_relaxed);
-  snapshot.message.avgDecodeTailUs = gClientMetrics.avgDecodeTailUs.load(std::memory_order_relaxed);
-  snapshot.message.maxDecodeTailUs = gClientMetrics.maxDecodeTailUs.load(std::memory_order_relaxed);
-  snapshot.message.congestionState = gClientMetrics.congestionState.load(std::memory_order_relaxed);
-  snapshot.message.congestionTransitions = gClientMetrics.congestionTransitions.load(std::memory_order_relaxed);
+  snapshot.updatedQpcUs = gMetrics.client.updatedQpcUs.load(std::memory_order_relaxed);
+  snapshot.message.width = gMetrics.client.width.load(std::memory_order_relaxed);
+  snapshot.message.height = gMetrics.client.height.load(std::memory_order_relaxed);
+  snapshot.message.recvFpsX100 = gMetrics.client.recvFpsX100.load(std::memory_order_relaxed);
+  snapshot.message.decodedFpsX100 = gMetrics.client.decodedFpsX100.load(std::memory_order_relaxed);
+  snapshot.message.recvMbpsX1000 = gMetrics.client.recvMbpsX1000.load(std::memory_order_relaxed);
+  snapshot.message.skippedFrames = gMetrics.client.skippedFrames.load(std::memory_order_relaxed);
+  snapshot.message.avgLatencyUs = gMetrics.client.avgLatencyUs.load(std::memory_order_relaxed);
+  snapshot.message.maxLatencyUs = gMetrics.client.maxLatencyUs.load(std::memory_order_relaxed);
+  snapshot.message.avgDecodeTailUs = gMetrics.client.avgDecodeTailUs.load(std::memory_order_relaxed);
+  snapshot.message.maxDecodeTailUs = gMetrics.client.maxDecodeTailUs.load(std::memory_order_relaxed);
+  snapshot.message.congestionState = gMetrics.client.congestionState.load(std::memory_order_relaxed);
+  snapshot.message.congestionTransitions = gMetrics.client.congestionTransitions.load(std::memory_order_relaxed);
   snapshot.message.congestionRecoveryCount =
-      gClientMetrics.congestionRecoveryCount.load(std::memory_order_relaxed);
+      gMetrics.client.congestionRecoveryCount.load(std::memory_order_relaxed);
   snapshot.message.congestionRecoveryReq =
-      gClientMetrics.congestionRecoveryReq.load(std::memory_order_relaxed);
+      gMetrics.client.congestionRecoveryReq.load(std::memory_order_relaxed);
   snapshot.message.congestionRecoveryMaxUs =
-      gClientMetrics.congestionRecoveryMaxUs.load(std::memory_order_relaxed);
-  snapshot.message.queueDepthMax = gClientMetrics.queueDepthMax.load(std::memory_order_relaxed);
-  snapshot.message.queueDepthH4p = gClientMetrics.queueDepthH4p.load(std::memory_order_relaxed);
-  snapshot.message.udpAssemblyDropPm = gClientMetrics.udpAssemblyDropPm.load(std::memory_order_relaxed);
+      gMetrics.client.congestionRecoveryMaxUs.load(std::memory_order_relaxed);
+  snapshot.message.queueDepthMax = gMetrics.client.queueDepthMax.load(std::memory_order_relaxed);
+  snapshot.message.queueDepthH4p = gMetrics.client.queueDepthH4p.load(std::memory_order_relaxed);
+  snapshot.message.udpAssemblyDropPm = gMetrics.client.udpAssemblyDropPm.load(std::memory_order_relaxed);
   return snapshot;
 }
 
@@ -85,7 +85,7 @@ void push_session_toolbar_state() {
   state.inputOn = gSession.inputEnabled.load(std::memory_order_relaxed);
   state.macroOpen = remote60::native_poc::macro_window_visible();
   state.relay = gSession.relayPath.load(std::memory_order_relaxed);
-  state.fps = gClientMetrics.decodedFpsX100.load(std::memory_order_relaxed) / 100;
+  state.fps = gMetrics.client.decodedFpsX100.load(std::memory_order_relaxed) / 100;
   state.selectedMonitorId = panel.selectedMonitorId;
   for (const auto& monitor : panel.monitors) {
     state.monitors.push_back({monitor.id, monitor.width, monitor.height, monitor.primary});

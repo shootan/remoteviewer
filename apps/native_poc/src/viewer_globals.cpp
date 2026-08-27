@@ -14,7 +14,6 @@ std::atomic<bool> gControlOverUdp{false};
 std::atomic<uint16_t> gMouseButtons{0};
 std::atomic<int32_t> gLastInputVideoX{0};
 std::atomic<int32_t> gLastInputVideoY{0};
-ClientRuntimeMetrics gClientMetrics;
 KeyframeRequestState gKeyframeRequests{
     kKeyframeRequestMinIntervalUsDefault,
     kKeyframeRequestTokenRefillUsDefault,
@@ -38,8 +37,6 @@ std::atomic<bool> gCaptureOverviewMode{false};
 remote60::native_poc::StreamStateControl gStreamStateControl;
 CaptureModeRequestState gCaptureModeRequests;
 ClientControlScheduler gControlScheduler;
-std::mutex gOverlayMetricsMu;
-std::deque<OverlayMetricSample> gOverlayMetrics;
 WindowPanelStateModel gWindowPanelState;
 std::atomic<bool> gWindowPickerVisible{true};
 std::atomic<bool> gWindowPickerToggleDown{false};
@@ -76,5 +73,5 @@ std::atomic<bool> gForwardedKeyDown[256]{};
 remote60::native_poc::InputMacro gInputMacro;
 std::atomic<bool> gMacroButtonDown{false};
 Nv12D3dRenderer gNv12Renderer;
-SessionState gSession;FrameBuffer gFrameBuf;PresentStats gPresent;
+SessionState gSession;FrameBuffer gFrameBuf;PresentStats gPresent;ClientMetricsState gMetrics;
 }  // namespace remote60::native_poc::viewer

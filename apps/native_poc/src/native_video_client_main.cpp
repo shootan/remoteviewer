@@ -1120,35 +1120,35 @@ int main(int argc, char** argv) {
         recvMbpsX1000 = static_cast<uint32_t>(
             std::min<double>(mbpsX1000, static_cast<double>(0xFFFFFFFFu)));
       }
-      gClientMetrics.width = metricW;
-      gClientMetrics.height = metricH;
-      gClientMetrics.recvFpsX100 = static_cast<uint32_t>(cappedRecvFpsX100);
-      gClientMetrics.decodedFpsX100 = static_cast<uint32_t>(cappedDecodedFpsX100);
-      gClientMetrics.recvMbpsX1000 = recvMbpsX1000;
-      gClientMetrics.skippedFrames = static_cast<uint32_t>(std::min<uint64_t>(skippedQueued, 0xFFFFFFFFULL));
-      gClientMetrics.avgLatencyUs = avgLatencyUs;
-      gClientMetrics.maxLatencyUs = maxLatencyUsLocal;
-      gClientMetrics.avgDecodeTailUs = avgDecodeTailUs;
-      gClientMetrics.maxDecodeTailUs = maxDecodeTailUsLocal;
-      gClientMetrics.congestionState = static_cast<uint32_t>(congestionState);
-      gClientMetrics.congestionTransitions =
+      gMetrics.client.width = metricW;
+      gMetrics.client.height = metricH;
+      gMetrics.client.recvFpsX100 = static_cast<uint32_t>(cappedRecvFpsX100);
+      gMetrics.client.decodedFpsX100 = static_cast<uint32_t>(cappedDecodedFpsX100);
+      gMetrics.client.recvMbpsX1000 = recvMbpsX1000;
+      gMetrics.client.skippedFrames = static_cast<uint32_t>(std::min<uint64_t>(skippedQueued, 0xFFFFFFFFULL));
+      gMetrics.client.avgLatencyUs = avgLatencyUs;
+      gMetrics.client.maxLatencyUs = maxLatencyUsLocal;
+      gMetrics.client.avgDecodeTailUs = avgDecodeTailUs;
+      gMetrics.client.maxDecodeTailUs = maxDecodeTailUsLocal;
+      gMetrics.client.congestionState = static_cast<uint32_t>(congestionState);
+      gMetrics.client.congestionTransitions =
           static_cast<uint32_t>(std::min<uint64_t>(congestionTransitionCount, 0xFFFFFFFFULL));
-      gClientMetrics.congestionRecoveryCount =
+      gMetrics.client.congestionRecoveryCount =
           static_cast<uint32_t>(std::min<uint64_t>(congestionRecoveryCount, 0xFFFFFFFFULL));
-      gClientMetrics.congestionRecoveryReq =
+      gMetrics.client.congestionRecoveryReq =
           static_cast<uint32_t>(std::min<uint64_t>(congestionRecoveryRequestCount, 0xFFFFFFFFULL));
-      gClientMetrics.congestionRecoveryMaxUs =
+      gMetrics.client.congestionRecoveryMaxUs =
           static_cast<uint32_t>(std::min<uint64_t>(congestionRecoveryMaxUs, 0xFFFFFFFFULL));
-      gClientMetrics.queueDepthMax = queueDepthFramesMax;
-      gClientMetrics.queueDepthH4p =
+      gMetrics.client.queueDepthMax = queueDepthFramesMax;
+      gMetrics.client.queueDepthH4p =
           static_cast<uint32_t>(std::min<uint64_t>(queueDepthHist[4], 0xFFFFFFFFULL));
-      gClientMetrics.udpAssemblyDropPm = udpAssemblyDropPmLast;
-      gClientMetrics.seq.fetch_add(1);
-      gClientMetrics.updatedQpcUs = nowUs;
-      push_overlay_metric_sample(gClientMetrics.recvFpsX100.load(std::memory_order_relaxed),
-                                 gClientMetrics.decodedFpsX100.load(std::memory_order_relaxed),
-                                 gClientMetrics.recvMbpsX1000.load(std::memory_order_relaxed),
-                                 gClientMetrics.avgLatencyUs.load(std::memory_order_relaxed),
+      gMetrics.client.udpAssemblyDropPm = udpAssemblyDropPmLast;
+      gMetrics.client.seq.fetch_add(1);
+      gMetrics.client.updatedQpcUs = nowUs;
+      push_overlay_metric_sample(gMetrics.client.recvFpsX100.load(std::memory_order_relaxed),
+                                 gMetrics.client.decodedFpsX100.load(std::memory_order_relaxed),
+                                 gMetrics.client.recvMbpsX1000.load(std::memory_order_relaxed),
+                                 gMetrics.client.avgLatencyUs.load(std::memory_order_relaxed),
                                  nowUs);
       if (gSession.hwnd && !gWindowPickerVisible.load(std::memory_order_relaxed)) {
         if (!gFrameBuf.paintQueued.exchange(true)) {
