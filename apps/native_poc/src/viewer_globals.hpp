@@ -14,6 +14,7 @@
 // Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-0).
 
 #include "viewer_common.hpp"
+#include "viewer_frame_gate_state.hpp"
 #include "viewer_ui_resources.hpp"
 #include "viewer_remote_cursor.hpp"
 #include "viewer_input_state.hpp"
@@ -36,11 +37,6 @@ namespace remote60::native_poc::viewer {
 // present-stage stream telemetry on the UI thread can flag gaps past 1.5x cadence without reaching
 // into the recv thread's Args. 0 => fall back to a 60fps assumption.
 
-enum class ClientCongestionState : uint8_t {
-  Normal = 0,
-  Recovering = 1,
-  Congested = 2,
-};
 
 // thread: UI enqueues input (gControl.inputQueue) that the control thread drains; gSession.inputEnabled is
 // set by main at connect and cleared at shutdown; gControl.udpControl is written by the control thread

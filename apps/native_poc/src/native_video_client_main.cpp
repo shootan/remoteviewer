@@ -13,6 +13,7 @@
 #include "viewer_cursor_overlay.hpp"
 #include "viewer_window_proc.hpp"
 #include "viewer_recv_stats.hpp"
+#include "viewer_frame_gate_state.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -164,16 +165,17 @@ int main(int argc, char** argv) {
       "REMOTE60_NATIVE_KEYFRAME_REQ_TOKEN_CAPACITY",
       kKeyframeRequestTokenCapacityDefault, 1, 16);
   gControl.keyframeRequests.Configure(keyframeReqMinIntervalUs, keyframeReqTokenRefillUs, keyframeReqTokenCapacity);
-  const uint64_t catchupReenterMinIntervalUs = env_u32_clamped(
+  FrameGateState gate;
+  gate.catchupReenterMinIntervalUs = env_u32_clamped(
       "REMOTE60_NATIVE_CATCHUP_REENTER_MIN_INTERVAL_US",
       static_cast<uint32_t>(kCatchupReenterMinIntervalUsDefault), 100000, 3000000);
-  const uint64_t staleCaptureDropUs = env_u32_clamped(
+  gate.staleCaptureDropUs = env_u32_clamped(
       "REMOTE60_NATIVE_STALE_CAPTURE_DROP_US",
       static_cast<uint32_t>(kStaleCaptureDropUs), 1000, 2000000);
-  const uint64_t congestionRecoverMinUs = env_u32_clamped(
+  gate.congestionRecoverMinUs = env_u32_clamped(
       "REMOTE60_NATIVE_CONGEST_RECOVER_MIN_US",
       static_cast<uint32_t>(kCongestionRecoverMinUsDefault), 50000, 5000000);
-  const uint64_t congestionRecoveryTimeoutUs = env_u32_clamped(
+  gate.congestionRecoveryTimeoutUs = env_u32_clamped(
       "REMOTE60_NATIVE_CONGEST_RECOVERY_TIMEOUT_US",
       static_cast<uint32_t>(kCongestionRecoveryTimeoutUsDefault), 100000, 10000000);
   const uint32_t udpSimDropPm = env_u32_clamped(
@@ -528,10 +530,10 @@ int main(int argc, char** argv) {
             << gControl.keyframeRequests.min_interval_us()
             << " tokenRefillUs=" << gControl.keyframeRequests.token_refill_us()
             << " tokenCapacity=" << gControl.keyframeRequests.token_capacity()
-            << " catchupReenterMinUs=" << catchupReenterMinIntervalUs
-            << " staleCaptureDropUs=" << staleCaptureDropUs
-            << " congestionRecoverMinUs=" << congestionRecoverMinUs
-            << " congestionRecoveryTimeoutUs=" << congestionRecoveryTimeoutUs
+            << " catchupReenterMinUs=" << gate.catchupReenterMinIntervalUs
+            << " staleCaptureDropUs=" << gate.staleCaptureDropUs
+            << " congestionRecoverMinUs=" << gate.congestionRecoverMinUs
+            << " congestionRecoveryTimeoutUs=" << gate.congestionRecoveryTimeoutUs
             << "\n";
   if (kInputPolicyForceBlock) {
     std::cout << "[native-video-client] input channel blocked by compile-time policy\n";
@@ -900,53 +902,11 @@ int main(int argc, char** argv) {
     uint64_t recvSelectionEpoch = gSel.epoch.load(std::memory_order_acquire);
     RecvStats st;
     st.statAtUs = qpc_now_us() + 1000000ULL;
-    // Consecutive hard decode failures. A flush (decoder.reset) recovers a corrupt frame, but
-    // not a wedged hardware MFT or a lost D3D device -- and the viewer's only recovery for a
-    // same-resolution decode error was that flush, so once the decoder wedged (a YouTube scene
-    // change on a busy GPU could do it) every following frame failed identically and the
-    // picture froze until the app was restarted. Past a threshold, rebuild the decoder instead.
-    uint32_t decodeConsecutiveFailCount = 0;
-    constexpr uint32_t kDecodeRebuildThreshold = 8;
-    uint64_t decodeEmptyStreak = 0;
-    uint64_t decodeEmptyStreakStartUs = 0;
-    uint64_t waitingKeyDropCount = 0;
-    uint64_t lagDropCount = 0;
-    uint64_t lastPacketRecvUs = 0;
-    uint32_t lagTriggerStreak = 0;
-    uint64_t lastCatchupEnterUs = 0;
-    uint64_t catchupEnterThrottledCount = 0;
-    bool catchupMode = false;
-    // lastPresentedCaptureUs is now gFrameBuf.lastPresentedCaptureUs (atomic, updated after actual present)
-    bool captureTimelineReady = false;
-    uint64_t captureRemoteBaseUs = 0;
-    uint64_t captureLocalBaseUs = 0;
-    bool sendTimelineReady = false;
-    uint64_t sendRemoteBaseUs = 0;
-    uint64_t sendLocalBaseUs = 0;
-    const uint64_t frameIntervalUs = std::max<uint64_t>(
+    gate.frameIntervalUs = std::max<uint64_t>(
         1ULL, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, args.fpsHint)));
-    ClientCongestionState congestionState = ClientCongestionState::Normal;
-    uint64_t congestionStateEnterUs = 0;
-    uint64_t congestionTransitionCount = 0;
-    uint64_t congestionRecoveryCount = 0;
-    uint64_t congestionRecoveryTotalUs = 0;
-    uint64_t congestionRecoveryMaxUs = 0;
-    uint64_t congestionRecoveryRequestCount = 0;
-    uint64_t staleDropCount = 0;
-    uint64_t holdLatestDropCount = 0;
-    uint64_t burstDropCount = 0;
-    uint64_t staleReferenceRecoveryCount = 0;
-    // Capture timestamp of the newest keyframe the decoder has successfully consumed. A stale
-    // frame OLDER than this anchor was already resynced past (safe to quiet-drop); one AT OR
-    // AFTER it still sits in the live reference chain, so dropping it needs an IDR resync.
-    uint64_t lastDecodedKeyCaptureUs = 0;
-    uint64_t latestCaptureSeenUs = 0;
-    uint64_t recoveringSinceUs = 0;
-    uint32_t recoveringHealthyStreak = 0;
-    uint64_t lastRecoveryRequestUs = 0;
     auto queue_depth_frames = [&](uint64_t lagUs) -> uint32_t {
       if (lagUs == 0) return 0;
-      const uint64_t depth64 = (lagUs + frameIntervalUs - 1) / frameIntervalUs;
+      const uint64_t depth64 = (lagUs + gate.frameIntervalUs - 1) / gate.frameIntervalUs;
       return static_cast<uint32_t>(std::min<uint64_t>(depth64, 1000ULL));
     };
     auto sample_queue_depth = [&](uint64_t lagUs) {
@@ -967,27 +927,27 @@ int main(int argc, char** argv) {
     };
     auto transition_congestion_state = [&](ClientCongestionState nextState, uint64_t nowUs, const char* reason,
                                            uint64_t streamLagUs, uint64_t decodeQueueLagEstimateUs, uint32_t seq) {
-      if (nextState == congestionState) return;
-      const ClientCongestionState prev = congestionState;
+      if (nextState == gate.congestionState) return;
+      const ClientCongestionState prev = gate.congestionState;
       if (prev != ClientCongestionState::Normal &&
           nextState == ClientCongestionState::Normal &&
-          congestionStateEnterUs > 0 &&
-          nowUs >= congestionStateEnterUs) {
-        const uint64_t recoverUs = nowUs - congestionStateEnterUs;
-        ++congestionRecoveryCount;
-        congestionRecoveryTotalUs += recoverUs;
-        if (recoverUs > congestionRecoveryMaxUs) congestionRecoveryMaxUs = recoverUs;
+          gate.congestionStateEnterUs > 0 &&
+          nowUs >= gate.congestionStateEnterUs) {
+        const uint64_t recoverUs = nowUs - gate.congestionStateEnterUs;
+        ++gate.congestionRecoveryCount;
+        gate.congestionRecoveryTotalUs += recoverUs;
+        if (recoverUs > gate.congestionRecoveryMaxUs) gate.congestionRecoveryMaxUs = recoverUs;
       }
-      congestionState = nextState;
-      congestionStateEnterUs = (nextState == ClientCongestionState::Normal) ? 0 : nowUs;
+      gate.congestionState = nextState;
+      gate.congestionStateEnterUs = (nextState == ClientCongestionState::Normal) ? 0 : nowUs;
       if (nextState == ClientCongestionState::Recovering) {
-        recoveringSinceUs = nowUs;
-        recoveringHealthyStreak = 0;
+        gate.recoveringSinceUs = nowUs;
+        gate.recoveringHealthyStreak = 0;
       } else if (nextState != ClientCongestionState::Recovering) {
-        recoveringSinceUs = 0;
-        recoveringHealthyStreak = 0;
+        gate.recoveringSinceUs = 0;
+        gate.recoveringHealthyStreak = 0;
       }
-      ++congestionTransitionCount;
+      ++gate.congestionTransitionCount;
       std::cout << "[native-video-client][congestion] state=" << congestion_state_name(nextState)
                 << " prev=" << congestion_state_name(prev)
                 << " reason=" << reason
@@ -1039,17 +999,17 @@ int main(int argc, char** argv) {
     };
     auto append_congestion_fields = [&](std::ostream& os) {
       const uint64_t recoveryAvgUs =
-          (congestionRecoveryCount > 0) ? (congestionRecoveryTotalUs / congestionRecoveryCount) : 0;
-      os << " congestionState=" << congestion_state_name(congestionState)
-         << " congestionTransitions=" << congestionTransitionCount
-         << " congestionRecoveryCount=" << congestionRecoveryCount
+          (gate.congestionRecoveryCount > 0) ? (gate.congestionRecoveryTotalUs / gate.congestionRecoveryCount) : 0;
+      os << " congestionState=" << congestion_state_name(gate.congestionState)
+         << " congestionTransitions=" << gate.congestionTransitionCount
+         << " congestionRecoveryCount=" << gate.congestionRecoveryCount
          << " congestionRecoveryAvgUs=" << recoveryAvgUs
-         << " congestionRecoveryMaxUs=" << congestionRecoveryMaxUs
-         << " congestionRecoveryReq=" << congestionRecoveryRequestCount
-         << " staleDrops=" << staleDropCount
-         << " holdLatestDrops=" << holdLatestDropCount
-         << " burstDrops=" << burstDropCount
-         << " staleRefRecoveries=" << staleReferenceRecoveryCount
+         << " congestionRecoveryMaxUs=" << gate.congestionRecoveryMaxUs
+         << " congestionRecoveryReq=" << gate.congestionRecoveryRequestCount
+         << " staleDrops=" << gate.staleDropCount
+         << " holdLatestDrops=" << gate.holdLatestDropCount
+         << " burstDrops=" << gate.burstDropCount
+         << " staleRefRecoveries=" << gate.staleReferenceRecoveryCount
          << " queueDepthSamples=" << st.queueDepthSampleCount
          << " queueDepthMax=" << st.queueDepthFramesMax
          << " queueDepthH0=" << st.queueDepthHist[0]
@@ -1097,15 +1057,15 @@ int main(int argc, char** argv) {
       gMetrics.client.maxLatencyUs = maxLatencyUsLocal;
       gMetrics.client.avgDecodeTailUs = avgDecodeTailUs;
       gMetrics.client.maxDecodeTailUs = maxDecodeTailUsLocal;
-      gMetrics.client.congestionState = static_cast<uint32_t>(congestionState);
+      gMetrics.client.congestionState = static_cast<uint32_t>(gate.congestionState);
       gMetrics.client.congestionTransitions =
-          static_cast<uint32_t>(std::min<uint64_t>(congestionTransitionCount, 0xFFFFFFFFULL));
+          static_cast<uint32_t>(std::min<uint64_t>(gate.congestionTransitionCount, 0xFFFFFFFFULL));
       gMetrics.client.congestionRecoveryCount =
-          static_cast<uint32_t>(std::min<uint64_t>(congestionRecoveryCount, 0xFFFFFFFFULL));
+          static_cast<uint32_t>(std::min<uint64_t>(gate.congestionRecoveryCount, 0xFFFFFFFFULL));
       gMetrics.client.congestionRecoveryReq =
-          static_cast<uint32_t>(std::min<uint64_t>(congestionRecoveryRequestCount, 0xFFFFFFFFULL));
+          static_cast<uint32_t>(std::min<uint64_t>(gate.congestionRecoveryRequestCount, 0xFFFFFFFFULL));
       gMetrics.client.congestionRecoveryMaxUs =
-          static_cast<uint32_t>(std::min<uint64_t>(congestionRecoveryMaxUs, 0xFFFFFFFFULL));
+          static_cast<uint32_t>(std::min<uint64_t>(gate.congestionRecoveryMaxUs, 0xFFFFFFFFULL));
       gMetrics.client.queueDepthMax = st.queueDepthFramesMax;
       gMetrics.client.queueDepthH4p =
           static_cast<uint32_t>(std::min<uint64_t>(st.queueDepthHist[4], 0xFFFFFFFFULL));
@@ -1131,11 +1091,11 @@ int main(int argc, char** argv) {
       ++st.recvFrames;
       st.recvBytes += h.payloadSize;
       const uint64_t recvGapUs =
-          (lastPacketRecvUs > 0 && packetNowUs >= lastPacketRecvUs) ? (packetNowUs - lastPacketRecvUs) : 0;
-      lastPacketRecvUs = packetNowUs;
+          (gate.lastPacketRecvUs > 0 && packetNowUs >= gate.lastPacketRecvUs) ? (packetNowUs - gate.lastPacketRecvUs) : 0;
+      gate.lastPacketRecvUs = packetNowUs;
       if (recvGapUs > 250000) {
         // Sparse arrival usually means source/capture stall, not decoder backlog.
-        lagTriggerStreak = 0;
+        gate.lagTriggerStreak = 0;
       }
 
       if (!useH264) {
@@ -1202,11 +1162,11 @@ int main(int argc, char** argv) {
       }
 
       const bool keyFrame = ((h.flags & 1u) != 0);
-      if (h.captureQpcUs > latestCaptureSeenUs) {
-        latestCaptureSeenUs = h.captureQpcUs;
+      if (h.captureQpcUs > gate.latestCaptureSeenUs) {
+        gate.latestCaptureSeenUs = h.captureQpcUs;
       }
       const uint64_t streamLagUs = aligned_lag_us(
-          h.captureQpcUs, packetNowUs, captureTimelineReady, captureRemoteBaseUs, captureLocalBaseUs);
+          h.captureQpcUs, packetNowUs, gate.captureTimelineReady, gate.captureRemoteBaseUs, gate.captureLocalBaseUs);
       const uint64_t presentedCapUs = gFrameBuf.lastPresentedCaptureUs.load(std::memory_order_relaxed);
       const uint64_t decodeQueueLagEstimateUs =
           (presentedCapUs > 0 && h.captureQpcUs >= presentedCapUs)
@@ -1218,15 +1178,15 @@ int main(int argc, char** argv) {
               ? (presentedCapUs - h.captureQpcUs)
               : 0;
       const uint64_t staleBehindLatestUs =
-          (latestCaptureSeenUs > h.captureQpcUs)
-              ? (latestCaptureSeenUs - h.captureQpcUs)
+          (gate.latestCaptureSeenUs > h.captureQpcUs)
+              ? (gate.latestCaptureSeenUs - h.captureQpcUs)
               : 0;
-      if (staleBehindPresentedUs > staleCaptureDropUs || staleBehindLatestUs > staleCaptureDropUs) {
+      if (staleBehindPresentedUs > gate.staleCaptureDropUs || staleBehindLatestUs > gate.staleCaptureDropUs) {
         ++st.skippedQueued;
-        ++lagDropCount;
-        ++staleDropCount;
-        if (staleBehindLatestUs > staleCaptureDropUs) {
-          ++holdLatestDropCount;
+        ++gate.lagDropCount;
+        ++gate.staleDropCount;
+        if (staleBehindLatestUs > gate.staleCaptureDropUs) {
+          ++gate.holdLatestDropCount;
         }
         // Dropping a frame that is NOT older than the last decoded keyframe breaks the still-live
         // reference chain. This is a B=0 low-latency IPPP stream and the wire header carries no
@@ -1236,19 +1196,19 @@ int main(int argc, char** argv) {
         // A frame older than the anchor is a late/reordered straggler the decoder already resynced
         // past, so quiet-drop stays safe there. Recover once per gap; the wait gate below then
         // drops non-key frames until the IDR and request_keyframe's limiter throttles the ask.
-        const bool inLiveReferenceChain = (h.captureQpcUs >= lastDecodedKeyCaptureUs);
+        const bool inLiveReferenceChain = (h.captureQpcUs >= gate.lastDecodedKeyCaptureUs);
         if (inLiveReferenceChain && !waitForKeyFrame) {
           waitForKeyFrame = true;
           decoder.reset();
           request_keyframe(6);  // stale_reference_gap
-          ++congestionRecoveryRequestCount;
-          ++staleReferenceRecoveryCount;
+          ++gate.congestionRecoveryRequestCount;
+          ++gate.staleReferenceRecoveryCount;
           std::cout << "[native-video-client] stale-reference recovery seq=" << h.seq
-                    << " count=" << staleReferenceRecoveryCount
+                    << " count=" << gate.staleReferenceRecoveryCount
                     << " staleBehindLatestUs=" << staleBehindLatestUs << "\n";
         }
-        if ((lagDropCount % 120) == 1) {
-          std::cout << "[native-video-client] stale frame drop count=" << lagDropCount
+        if ((gate.lagDropCount % 120) == 1) {
+          std::cout << "[native-video-client] stale frame drop count=" << gate.lagDropCount
                     << " staleBehindPresentedUs=" << staleBehindPresentedUs
                     << " staleBehindLatestUs=" << staleBehindLatestUs
                     << " inRefChain=" << (inLiveReferenceChain ? 1 : 0)
@@ -1267,24 +1227,24 @@ int main(int argc, char** argv) {
           gPicker.visible.load(std::memory_order_relaxed) ||
           packetNowUs < gFrameBuf.catchupSuppressUntilUs.load(std::memory_order_relaxed);
       if (lagTrigger && denseArrival && !catchupSuppressed) {
-        if (lagTriggerStreak < std::numeric_limits<uint32_t>::max()) {
-          ++lagTriggerStreak;
+        if (gate.lagTriggerStreak < std::numeric_limits<uint32_t>::max()) {
+          ++gate.lagTriggerStreak;
         }
       } else {
-        lagTriggerStreak = 0;
+        gate.lagTriggerStreak = 0;
       }
-      if (congestionState != ClientCongestionState::Congested && lagTriggerStreak >= 3) {
-        lagTriggerStreak = 0;
+      if (gate.congestionState != ClientCongestionState::Congested && gate.lagTriggerStreak >= 3) {
+        gate.lagTriggerStreak = 0;
         const bool catchupEnterAllowed =
-            (lastCatchupEnterUs == 0) || (packetNowUs >= (lastCatchupEnterUs + catchupReenterMinIntervalUs));
+            (gate.lastCatchupEnterUs == 0) || (packetNowUs >= (gate.lastCatchupEnterUs + gate.catchupReenterMinIntervalUs));
         if (!catchupEnterAllowed) {
-          ++catchupEnterThrottledCount;
-          if ((catchupEnterThrottledCount % 120) == 1) {
+          ++gate.catchupEnterThrottledCount;
+          if ((gate.catchupEnterThrottledCount % 120) == 1) {
             std::cout << "[native-video-client] catchup-enter-throttled count="
-                      << catchupEnterThrottledCount
+                      << gate.catchupEnterThrottledCount
                       << " streamLagUs=" << streamLagUs
                       << " decodeQueueLagEstUs=" << decodeQueueLagEstimateUs
-                      << " minIntervalUs=" << catchupReenterMinIntervalUs
+                      << " minIntervalUs=" << gate.catchupReenterMinIntervalUs
                       << "\n";
           }
         } else {
@@ -1293,12 +1253,12 @@ int main(int argc, char** argv) {
                                           ? "decode_queue"
                                           : "stream_lag_emergency",
                                       streamLagUs, decodeQueueLagEstimateUs, h.seq);
-          catchupMode = true;
-          lastCatchupEnterUs = packetNowUs;
+          gate.catchupMode = true;
+          gate.lastCatchupEnterUs = packetNowUs;
           waitForKeyFrame = true;
           decoder.reset();
           request_keyframe(1);
-          ++congestionRecoveryRequestCount;
+          ++gate.congestionRecoveryRequestCount;
           std::cout << "[native-video-client] catchup enter streamLagUs=" << streamLagUs
                     << " decodeQueueLagEstUs=" << decodeQueueLagEstimateUs
                     << " recvGapUs=" << recvGapUs
@@ -1307,74 +1267,74 @@ int main(int argc, char** argv) {
                     << " seq=" << h.seq << "\n";
         }
       }
-      if (congestionState == ClientCongestionState::Congested && !keyFrame) {
-        decodeEmptyStreak = 0;
-        decodeEmptyStreakStartUs = 0;
+      if (gate.congestionState == ClientCongestionState::Congested && !keyFrame) {
+        gate.decodeEmptyStreak = 0;
+        gate.decodeEmptyStreakStartUs = 0;
         ++st.skippedQueued;
-        ++lagDropCount;
-        ++burstDropCount;
-        if ((lagDropCount % 120) == 1) {
-          std::cout << "[native-video-client] catchup drops=" << lagDropCount
+        ++gate.lagDropCount;
+        ++gate.burstDropCount;
+        if ((gate.lagDropCount % 120) == 1) {
+          std::cout << "[native-video-client] catchup drops=" << gate.lagDropCount
                     << " streamLagUs=" << streamLagUs
                     << " decodeQueueLagEstUs=" << decodeQueueLagEstimateUs
                     << "\n";
         }
         return true;
       }
-      if (congestionState == ClientCongestionState::Congested && keyFrame) {
-        catchupMode = false;
+      if (gate.congestionState == ClientCongestionState::Congested && keyFrame) {
+        gate.catchupMode = false;
         transition_congestion_state(ClientCongestionState::Recovering, packetNowUs, "keyframe",
                                     streamLagUs, decodeQueueLagEstimateUs, h.seq);
         std::cout << "[native-video-client] catchup exit streamLagUs=" << streamLagUs
                   << " decodeQueueLagEstUs=" << decodeQueueLagEstimateUs
                   << " seq=" << h.seq << "\n";
       }
-      if (congestionState == ClientCongestionState::Recovering) {
+      if (gate.congestionState == ClientCongestionState::Recovering) {
         const bool lagHealthy =
             decodeQueueLagEstimateUs <= kDecodeQueueLagResumeUs &&
             streamLagUs <= kCatchupResumeKeyLagUs;
         if (lagHealthy) {
-          if (recoveringHealthyStreak < std::numeric_limits<uint32_t>::max()) {
-            ++recoveringHealthyStreak;
+          if (gate.recoveringHealthyStreak < std::numeric_limits<uint32_t>::max()) {
+            ++gate.recoveringHealthyStreak;
           }
         } else {
-          recoveringHealthyStreak = 0;
+          gate.recoveringHealthyStreak = 0;
         }
         const bool recoverMinElapsed =
-            recoveringSinceUs > 0 && packetNowUs >= (recoveringSinceUs + congestionRecoverMinUs);
-        if (lagHealthy && recoverMinElapsed && recoveringHealthyStreak >= 3) {
+            gate.recoveringSinceUs > 0 && packetNowUs >= (gate.recoveringSinceUs + gate.congestionRecoverMinUs);
+        if (lagHealthy && recoverMinElapsed && gate.recoveringHealthyStreak >= 3) {
           transition_congestion_state(ClientCongestionState::Normal, packetNowUs, "recover_stable",
                                       streamLagUs, decodeQueueLagEstimateUs, h.seq);
         } else if (!lagHealthy && !catchupSuppressed &&
-                   recoveringSinceUs > 0 &&
-                   packetNowUs >= (recoveringSinceUs + congestionRecoveryTimeoutUs)) {
+                   gate.recoveringSinceUs > 0 &&
+                   packetNowUs >= (gate.recoveringSinceUs + gate.congestionRecoveryTimeoutUs)) {
           const bool requestAllowed =
-              (lastRecoveryRequestUs == 0) || (packetNowUs >= (lastRecoveryRequestUs + 300000));
+              (gate.lastRecoveryRequestUs == 0) || (packetNowUs >= (gate.lastRecoveryRequestUs + 300000));
           if (requestAllowed) {
             request_keyframe(1);
-            ++congestionRecoveryRequestCount;
-            lastRecoveryRequestUs = packetNowUs;
+            ++gate.congestionRecoveryRequestCount;
+            gate.lastRecoveryRequestUs = packetNowUs;
           }
-          catchupMode = true;
+          gate.catchupMode = true;
           waitForKeyFrame = true;
           decoder.reset();
-          lastCatchupEnterUs = packetNowUs;
+          gate.lastCatchupEnterUs = packetNowUs;
           transition_congestion_state(ClientCongestionState::Congested, packetNowUs, "recover_timeout",
                                       streamLagUs, decodeQueueLagEstimateUs, h.seq);
         }
       }
 
       if (waitForKeyFrame && !keyFrame) {
-        decodeEmptyStreak = 0;
-        decodeEmptyStreakStartUs = 0;
+        gate.decodeEmptyStreak = 0;
+        gate.decodeEmptyStreakStartUs = 0;
         ++st.skippedQueued;
-        ++waitingKeyDropCount;
-        ++burstDropCount;
-        if ((waitingKeyDropCount % 30) == 1) {
+        ++gate.waitingKeyDropCount;
+        ++gate.burstDropCount;
+        if ((gate.waitingKeyDropCount % 30) == 1) {
           request_keyframe(3);
         }
-        if ((waitingKeyDropCount % 120) == 1) {
-          std::cout << "[native-video-client] waiting keyframe drops=" << waitingKeyDropCount << "\n";
+        if ((gate.waitingKeyDropCount % 120) == 1) {
+          std::cout << "[native-video-client] waiting keyframe drops=" << gate.waitingKeyDropCount << "\n";
         }
         if (packetNowUs >= st.statAtUs) {
           const uint64_t avgLatencyUs = (st.decodedFrames > 0) ? (st.sumLatencyUs / st.decodedFrames) : 0;
@@ -1420,26 +1380,26 @@ int main(int argc, char** argv) {
       bool pendingTimestampOverflow = false;
       if (!decoder.decode_access_unit(*payloadPtr, keyFrame, inputSampleTimeHns, &outFrames,
                                       &pendingTimestampOverflow)) {
-        decodeEmptyStreak = 0;
-        decodeEmptyStreakStartUs = 0;
+        gate.decodeEmptyStreak = 0;
+        gate.decodeEmptyStreakStartUs = 0;
         ++st.skippedQueued;
         ++st.decodeFailCount;
         request_keyframe(4);
-        ++congestionRecoveryRequestCount;
+        ++gate.congestionRecoveryRequestCount;
         if ((st.decodeFailCount % 60) == 1) {
           std::cout << "[native-video-client] decode failed count=" << st.decodeFailCount << "\n";
         }
-        catchupMode = true;
-        lastCatchupEnterUs = packetNowUs;
+        gate.catchupMode = true;
+        gate.lastCatchupEnterUs = packetNowUs;
         waitForKeyFrame = true;
-        if (++decodeConsecutiveFailCount >= kDecodeRebuildThreshold) {
+        if (++gate.decodeConsecutiveFailCount >= gate.kDecodeRebuildThreshold) {
           // Flush did not clear it: the transform or device is wedged. A full rebuild is the
           // only recovery, and it is what the resolution-change path already does -- reached
           // here without a resolution change so the wedge is not caught otherwise.
           std::cout << "[native-video-client] decoder wedged (consecutive fails="
-                    << decodeConsecutiveFailCount << "); rebuilding\n";
+                    << gate.decodeConsecutiveFailCount << "); rebuilding\n";
           if (decoder.initialize(decoderW, decoderH, args.fpsHint)) {
-            decodeConsecutiveFailCount = 0;
+            gate.decodeConsecutiveFailCount = 0;
           }
           // On rebuild failure, keep the streak so the next frame retries the rebuild.
         } else {
@@ -1485,20 +1445,20 @@ int main(int argc, char** argv) {
         return true;
       }
       // decode_access_unit succeeded: the transform is healthy, so the wedge streak is clear.
-      decodeConsecutiveFailCount = 0;
+      gate.decodeConsecutiveFailCount = 0;
       if (pendingTimestampOverflow) {
-        decodeEmptyStreak = 0;
-        decodeEmptyStreakStartUs = 0;
+        gate.decodeEmptyStreak = 0;
+        gate.decodeEmptyStreakStartUs = 0;
         ++st.skippedQueued;
         ++st.decodeTimestampOverflowCount;
         request_keyframe(4);
-        ++congestionRecoveryRequestCount;
+        ++gate.congestionRecoveryRequestCount;
         if ((st.decodeTimestampOverflowCount % 10ULL) == 1ULL) {
           std::cout << "[native-video-client] decoder timestamp queue overflow count="
                     << st.decodeTimestampOverflowCount << "\n";
         }
-        catchupMode = true;
-        lastCatchupEnterUs = packetNowUs;
+        gate.catchupMode = true;
+        gate.lastCatchupEnterUs = packetNowUs;
         waitForKeyFrame = true;
         decoder.reset();
         transition_congestion_state(ClientCongestionState::Congested, packetNowUs, "decode_ts_overflow",
@@ -1509,54 +1469,54 @@ int main(int argc, char** argv) {
       if (keyFrame) {
         // Advance the reference-chain anchor: a successfully decoded IDR resyncs the decoder, so
         // any later stale frame older than this is safe to quiet-drop.
-        lastDecodedKeyCaptureUs = h.captureQpcUs;
+        gate.lastDecodedKeyCaptureUs = h.captureQpcUs;
       }
       if (outFrames.empty()) {
         ++st.decodeEmptyCount;
-        ++decodeEmptyStreak;
-        if (decodeEmptyStreak == 1) {
-          decodeEmptyStreakStartUs = packetNowUs;
+        ++gate.decodeEmptyStreak;
+        if (gate.decodeEmptyStreak == 1) {
+          gate.decodeEmptyStreakStartUs = packetNowUs;
         }
         const uint64_t emptyStreakUs =
-            (decodeEmptyStreakStartUs > 0 && packetNowUs >= decodeEmptyStreakStartUs)
-                ? (packetNowUs - decodeEmptyStreakStartUs)
+            (gate.decodeEmptyStreakStartUs > 0 && packetNowUs >= gate.decodeEmptyStreakStartUs)
+                ? (packetNowUs - gate.decodeEmptyStreakStartUs)
                 : 0;
-        if (decodeEmptyStreak >= 12 || emptyStreakUs >= 300000) {
+        if (gate.decodeEmptyStreak >= 12 || emptyStreakUs >= 300000) {
           const bool catchupEnterAllowed =
-              (lastCatchupEnterUs == 0) || (packetNowUs >= (lastCatchupEnterUs + catchupReenterMinIntervalUs));
+              (gate.lastCatchupEnterUs == 0) || (packetNowUs >= (gate.lastCatchupEnterUs + gate.catchupReenterMinIntervalUs));
           if (catchupEnterAllowed) {
             ++st.decodeEmptyRecoveryCount;
             waitForKeyFrame = true;
-            catchupMode = true;
-            lastCatchupEnterUs = packetNowUs;
+            gate.catchupMode = true;
+            gate.lastCatchupEnterUs = packetNowUs;
             request_keyframe(5);
-            ++congestionRecoveryRequestCount;
+            ++gate.congestionRecoveryRequestCount;
             decoder.reset();
             transition_congestion_state(ClientCongestionState::Congested, packetNowUs, "decode_empty",
                                         streamLagUs, decodeQueueLagEstimateUs, h.seq);
             if ((st.decodeEmptyRecoveryCount % 10) == 1) {
               std::cout << "[native-video-client] decode empty recovery count=" << st.decodeEmptyRecoveryCount
-                        << " streak=" << decodeEmptyStreak
+                        << " streak=" << gate.decodeEmptyStreak
                         << " emptyUs=" << emptyStreakUs
                         << "\n";
             }
           } else {
-            ++catchupEnterThrottledCount;
-            if ((catchupEnterThrottledCount % 120) == 1) {
+            ++gate.catchupEnterThrottledCount;
+            if ((gate.catchupEnterThrottledCount % 120) == 1) {
               std::cout << "[native-video-client] decode-empty-recovery-throttled count="
-                        << catchupEnterThrottledCount
-                        << " streak=" << decodeEmptyStreak
+                        << gate.catchupEnterThrottledCount
+                        << " streak=" << gate.decodeEmptyStreak
                         << " emptyUs=" << emptyStreakUs
-                        << " minIntervalUs=" << catchupReenterMinIntervalUs
+                        << " minIntervalUs=" << gate.catchupReenterMinIntervalUs
                         << "\n";
             }
           }
-          decodeEmptyStreak = 0;
-          decodeEmptyStreakStartUs = 0;
+          gate.decodeEmptyStreak = 0;
+          gate.decodeEmptyStreakStartUs = 0;
         }
         if ((st.decodeEmptyCount % 120) == 1) {
           std::cout << "[native-video-client] decode output empty count=" << st.decodeEmptyCount
-                    << " streak=" << decodeEmptyStreak
+                    << " streak=" << gate.decodeEmptyStreak
                     << " emptyUs=" << emptyStreakUs
                     << "\n";
         }
@@ -1597,8 +1557,8 @@ int main(int argc, char** argv) {
         }
         return true;
       }
-      decodeEmptyStreak = 0;
-      decodeEmptyStreakStartUs = 0;
+      gate.decodeEmptyStreak = 0;
+      gate.decodeEmptyStreakStartUs = 0;
 
       auto& decoded = outFrames.back();
       const bool tsFromMft = decoded.sampleTimeFromOutput && (decoded.sampleTimeHns > 0);
@@ -1720,7 +1680,7 @@ int main(int argc, char** argv) {
       // for scheduling (not a literal decoder input-queue count -- the MFT does not expose one).
       {
         const uint64_t decodeUs = (decodeEndUs >= decodeStartUs) ? (decodeEndUs - decodeStartUs) : 0;
-        const uint64_t decodeAnomalyUs = (frameIntervalUs * 3ULL) / 2ULL;
+        const uint64_t decodeAnomalyUs = (gate.frameIntervalUs * 3ULL) / 2ULL;
         if (keyFrame || decodeUs > decodeAnomalyUs) {
           const uint64_t r2dUs = (decodeStartUs >= packetNowUs) ? (decodeStartUs - packetNowUs) : 0;
           std::ostringstream telem;
@@ -1743,9 +1703,9 @@ int main(int argc, char** argv) {
       st.decodedBytes += decodedPayloadBytes;
       // lastPresentedCaptureUs is now updated by render thread via gFrameBuf.lastPresentedCaptureUs
       const uint64_t latencyUs = aligned_lag_us(
-          decodedCaptureUs, nowUs, captureTimelineReady, captureRemoteBaseUs, captureLocalBaseUs);
+          decodedCaptureUs, nowUs, gate.captureTimelineReady, gate.captureRemoteBaseUs, gate.captureLocalBaseUs);
       const uint64_t decodeTailUs = aligned_lag_us(
-          h.sendQpcUs, nowUs, sendTimelineReady, sendRemoteBaseUs, sendLocalBaseUs);
+          h.sendQpcUs, nowUs, gate.sendTimelineReady, gate.sendRemoteBaseUs, gate.sendLocalBaseUs);
       st.sumLatencyUs += latencyUs;
       st.sumDecodeTailUs += decodeTailUs;
       st.maxLatencyUs = std::max(st.maxLatencyUs, latencyUs);
@@ -1996,7 +1956,7 @@ int main(int argc, char** argv) {
                     << " simDropPm=" << simDropPermille
                     << " simDropTotal=" << simDroppedDelta
                     << " waitForKey=" << (waitForKeyFrame ? 1 : 0)
-                    << " catchup=" << (catchupMode ? 1 : 0)
+                    << " catchup=" << (gate.catchupMode ? 1 : 0)
                     << "\n";
           lastUdpChunkRecvCount = st.udpChunkRecvCount;
           lastUdpAssemblyCompletedCount = st.udpAssemblyCompletedCount;
