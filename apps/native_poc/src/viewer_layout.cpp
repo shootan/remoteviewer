@@ -76,7 +76,7 @@ bool resolve_active_video_content_size(uint32_t* outWidth, uint32_t* outHeight) 
   *outWidth = 0;
   *outHeight = 0;
 
-  const WindowPanelSnapshot panelSnapshot = gWindowPanelState.Snapshot();
+  const WindowPanelSnapshot panelSnapshot = gPicker.windowPanel.Snapshot();
   const uint32_t selectedWidth = panelSnapshot.selectedWidth;
   const uint32_t selectedHeight = panelSnapshot.selectedHeight;
   const uint64_t selectedStreamGeneration = panelSnapshot.lastSelectStreamGeneration;
@@ -142,7 +142,7 @@ ClientLayout compute_client_layout(HWND hwnd) {
       std::max<int>(1, static_cast<int>(layout.clientRect.bottom - layout.clientRect.top));
   layout.videoRect = make_rect(0, 0, clientW, clientH);
 
-  if (!gWindowPickerVisible.load(std::memory_order_relaxed)) {
+  if (!gPicker.visible.load(std::memory_order_relaxed)) {
     // No legacy top-left Targets/Macro buttons in the stream view. The flip-model swapchain
     // erases anything GDI paints before the user can see it, so these existed only as INVISIBLE
     // hit zones -- sitting exactly where games put their top-left UI. In the field, clicking a

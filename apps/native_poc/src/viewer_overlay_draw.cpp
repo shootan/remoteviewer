@@ -77,13 +77,13 @@ void draw_target_card(HDC hdc, const RECT& card, const CardGridMetrics& grid,
   FillRect(hdc, &thumbRect, cached_brush(RGB(24, 28, 36)));
   FillRect(hdc, &captionRect, cached_brush(active ? RGB(38, 70, 52) : RGB(32, 37, 46)));
 
-  // Snapshot under the lock, draw outside it: StretchDIBits under gThumbMu made the fetch
+  // Snapshot under the lock, draw outside it: StretchDIBits under gPicker.thumbMu made the fetch
   // thread and the paint stall each other.
   std::shared_ptr<const WindowThumb> thumb;
   {
-    std::lock_guard<std::mutex> lk(gThumbMu);
-    const auto it = gThumbs.find(windowId);
-    if (it != gThumbs.end()) thumb = it->second;
+    std::lock_guard<std::mutex> lk(gPicker.thumbMu);
+    const auto it = gPicker.thumbs.find(windowId);
+    if (it != gPicker.thumbs.end()) thumb = it->second;
   }
   if (thumb) {
     draw_thumbnail_into(hdc, thumbRect, *thumb);
@@ -112,7 +112,7 @@ void draw_target_card(HDC hdc, const RECT& card, const CardGridMetrics& grid,
 
 void draw_overlay(HDC hdc) {
   const ClientLayout layout = compute_client_layout(gSession.hwnd);
-  const bool pickerVisible = gWindowPickerVisible.load(std::memory_order_relaxed);
+  const bool pickerVisible = gPicker.visible.load(std::memory_order_relaxed);
   if (!pickerVisible) {
     // Nothing to draw over the stream: the legacy Targets/Macro buttons were invisible ghost
     // hit-zones under the flip-model video (see compute_client_layout); the toolbar owns that UI.
@@ -121,7 +121,7 @@ void draw_overlay(HDC hdc) {
 
   draw_alpha_rect(hdc, layout.clientRect, RGB(13, 15, 20), 255);
 
-  const WindowPanelSnapshot windowPanel = gWindowPanelState.Snapshot();
+  const WindowPanelSnapshot windowPanel = gPicker.windowPanel.Snapshot();
   const std::vector<WindowTargetUiEntry>& windowItems = windowPanel.items;
   const uint64_t selectedId = windowPanel.selectedId;
   const std::string& panelStatus = windowPanel.status;
@@ -166,8 +166,8 @@ void draw_overlay(HDC hdc) {
   const int totalCards = 1 + static_cast<int>(windowItems.size());
   const int totalRows = (totalCards + grid.cols - 1) / grid.cols;
   const int maxScrollRow = std::max(0, totalRows - grid.visibleRows);
-  int scrollRow = std::clamp(gGridScrollRow.load(std::memory_order_relaxed), 0, maxScrollRow);
-  gGridScrollRow.store(scrollRow, std::memory_order_relaxed);
+  int scrollRow = std::clamp(gPicker.gridScrollRow.load(std::memory_order_relaxed), 0, maxScrollRow);
+  gPicker.gridScrollRow.store(scrollRow, std::memory_order_relaxed);
   const int firstCard = scrollRow * grid.cols;
 
   for (int slot = 0; slot < grid.visibleCards; ++slot) {

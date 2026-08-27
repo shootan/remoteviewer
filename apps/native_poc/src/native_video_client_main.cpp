@@ -238,7 +238,7 @@ int main(int argc, char** argv) {
   }
   const bool startInPicker = !startInStreamView;
   gControl.captureOverviewMode.store(startInPicker, std::memory_order_relaxed);
-  gWindowPickerVisible.store(startInPicker, std::memory_order_relaxed);
+  gPicker.visible.store(startInPicker, std::memory_order_relaxed);
   clear_pc_target_selection();
   // No target has taken effect yet. 0 disables the persistent generation filter, so the legacy
   // stream-view start and the pre-first-pick window accept whatever the host sends, as before.
@@ -253,7 +253,7 @@ int main(int argc, char** argv) {
     gControl.streamState.Request(false);
   }
   gControl.captureModeRequests.Reset();
-  gWindowPanelState.Reset();
+  gPicker.windowPanel.Reset();
   gSuppressMouseUntilUs.store(0, std::memory_order_relaxed);
   gActiveTouchPointerId.store(0, std::memory_order_relaxed);
   gActiveTouchDown.store(false, std::memory_order_relaxed);
@@ -285,7 +285,7 @@ int main(int argc, char** argv) {
       push_session_toolbar_state();
     };
     toolbarCallbacks.onMonitor = [](uint32_t monitorId) {
-      gWindowPanelState.RequestMonitorSelect(monitorId);
+      gPicker.windowPanel.RequestMonitorSelect(monitorId);
     };
     remote60::native_poc::session_toolbar_create(gSession.hwnd, std::move(toolbarCallbacks));
     remote60::native_poc::session_toolbar_set_visible(startInStreamView);
@@ -597,13 +597,13 @@ int main(int argc, char** argv) {
           // keeps the strict request/response loop from being starved. Only invoked when the
           // host advertised the capability, because an older host would drain the request and
           // never reply. Returns: 1 fetched, 0 nothing to do, -1 link failure (stream desynced).
-          if (!gHostSupportsThumbnails.load(std::memory_order_relaxed)) return 0;
+          if (!gPicker.hostSupportsThumbnails.load(std::memory_order_relaxed)) return 0;
           uint64_t id = 0;
           {
-            std::lock_guard<std::mutex> lk(gThumbMu);
-            if (gThumbFetchQueue.empty()) return 0;
-            id = gThumbFetchQueue.front();
-            gThumbFetchQueue.pop_front();
+            std::lock_guard<std::mutex> lk(gPicker.thumbMu);
+            if (gPicker.thumbFetchQueue.empty()) return 0;
+            id = gPicker.thumbFetchQueue.front();
+            gPicker.thumbFetchQueue.pop_front();
           }
           remote60::native_poc::ControlWindowThumbnailRequestMessage req{};
           req.header.magic = remote60::native_poc::kMagic;
@@ -636,10 +636,10 @@ int main(int argc, char** argv) {
             thumb->bgra = std::move(payload);
             thumb->fetchedUs = qpc_now_us();
             {
-              std::lock_guard<std::mutex> lk(gThumbMu);
-              gThumbs[id] = std::move(thumb);
+              std::lock_guard<std::mutex> lk(gPicker.thumbMu);
+              gPicker.thumbs[id] = std::move(thumb);
             }
-            // Outside the lock: the paint handler takes gThumbMu, and invalidating while
+            // Outside the lock: the paint handler takes gPicker.thumbMu, and invalidating while
             // holding it invited a stall on every received preview.
             InvalidateRect(gSession.hwnd, nullptr, FALSE);
           }
@@ -662,7 +662,7 @@ int main(int argc, char** argv) {
             const uint64_t nowUs = qpc_now_us();
             ControlOutboundAction action{};
             if (gControl.scheduler.NextAction(
-                    nowUs, capture_client_control_metrics_snapshot(), &gWindowPanelState,
+                    nowUs, capture_client_control_metrics_snapshot(), &gPicker.windowPanel,
                     &gControl.streamState, &gControl.captureModeRequests, &gControl.keyframeRequests, &gControl.runtimeTune,
                     &gControl.inputQueue, &action)) {
               TcpControlResponse response{};
@@ -812,7 +812,7 @@ int main(int argc, char** argv) {
                       (response.windowList.flags &
                        remote60::native_poc::kControlWindowListFlagMonitors) != 0;
                   const bool monitorsNewlySupported =
-                      gWindowPanelState.SetHostSupportsMonitors(supportsMonitors);
+                      gPicker.windowPanel.SetHostSupportsMonitors(supportsMonitors);
                   // The stored --monitor is auto-applied only when the session opens straight
                   // into the stream. In picker mode the user has not chosen a target yet, so
                   // selecting a monitor here would restart the host capture before any pick and
@@ -820,13 +820,13 @@ int main(int argc, char** argv) {
                   if (!startInPicker && monitorsNewlySupported && gSession.requestedMonitorId > 0) {
                     // Only when a screen other than the primary was asked for: selecting monitor
                     // zero would restart the capture for no change.
-                    gWindowPanelState.RequestMonitorSelect(gSession.requestedMonitorId);
+                    gPicker.windowPanel.RequestMonitorSelect(gSession.requestedMonitorId);
                   }
                   InvalidateRect(gSession.hwnd, nullptr, FALSE);
                   break;
                 }
                 case TcpControlResponseKind::MonitorList:
-                  gWindowPanelState.ApplyMonitorList(response.monitorList);
+                  gPicker.windowPanel.ApplyMonitorList(response.monitorList);
                   break;
                 case TcpControlResponseKind::WindowSelected:
                   apply_window_selected_result(response.windowSelected);
@@ -849,7 +849,7 @@ int main(int argc, char** argv) {
               }
             }
 
-            if (!didWork && gWindowPickerVisible.load(std::memory_order_relaxed)) {
+            if (!didWork && gPicker.visible.load(std::memory_order_relaxed)) {
               const int fetched = fetch_one_thumbnail(*controlLink);
               if (fetched < 0) break;
               didWork = (fetched > 0);
@@ -1149,7 +1149,7 @@ int main(int argc, char** argv) {
                                  gMetrics.client.recvMbpsX1000.load(std::memory_order_relaxed),
                                  gMetrics.client.avgLatencyUs.load(std::memory_order_relaxed),
                                  nowUs);
-      if (gSession.hwnd && !gWindowPickerVisible.load(std::memory_order_relaxed)) {
+      if (gSession.hwnd && !gPicker.visible.load(std::memory_order_relaxed)) {
         if (!gFrameBuf.paintQueued.exchange(true)) {
           InvalidateRect(gSession.hwnd, nullptr, FALSE);
         } else {
@@ -1296,7 +1296,7 @@ int main(int argc, char** argv) {
       // The picker overlay pauses presents on purpose; lag measured against a frozen present
       // anchor is not congestion. Same for the short post-close grace until the anchor is fresh.
       const bool catchupSuppressed =
-          gWindowPickerVisible.load(std::memory_order_relaxed) ||
+          gPicker.visible.load(std::memory_order_relaxed) ||
           packetNowUs < gFrameBuf.catchupSuppressUntilUs.load(std::memory_order_relaxed);
       if (lagTrigger && denseArrival && !catchupSuppressed) {
         if (lagTriggerStreak < std::numeric_limits<uint32_t>::max()) {
@@ -1668,7 +1668,7 @@ int main(int argc, char** argv) {
         // Overwrites while the picker covers the stream are the intended latest-wins behavior of a
         // deliberately paused present, not a symptom -- keep them out of the telemetry.
         if (prevVersion > lastPresentedVersion &&
-            !gWindowPickerVisible.load(std::memory_order_relaxed)) {
+            !gPicker.visible.load(std::memory_order_relaxed)) {
           ++gFrameBuf.overwriteBeforePresentCount;
         }
         gFrameBuf.frame.format = SharedFrame::PixelFormat::Nv12;
@@ -1710,7 +1710,7 @@ int main(int argc, char** argv) {
       // a per-frame invalidate would repaint the whole card grid at video cadence for nothing.
       // The reveal above and the picker-close handler invalidate on their own, so the newest
       // decoded frame still shows the moment the picker leaves.
-      if (gSession.hwnd && !gWindowPickerVisible.load(std::memory_order_relaxed)) {
+      if (gSession.hwnd && !gPicker.visible.load(std::memory_order_relaxed)) {
         if (!gFrameBuf.paintQueued.exchange(true)) {
           InvalidateRect(gSession.hwnd, nullptr, FALSE);
         } else {

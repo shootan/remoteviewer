@@ -111,7 +111,7 @@ void update_cursor_overlay(HWND hwnd) {
   const bool show = fresh && gRemoteCursorVisible.load(std::memory_order_relaxed) &&
                     capW > 0 && capH > 0 &&
                     (activeGen == 0 || cursorGen == activeGen) &&
-                    !gWindowPickerVisible.load(std::memory_order_relaxed) && !IsIconic(hwnd);
+                    !gPicker.visible.load(std::memory_order_relaxed) && !IsIconic(hwnd);
   if (!show) {
     ShowWindow(gCursorOverlayHwnd, SW_HIDE);
     return;

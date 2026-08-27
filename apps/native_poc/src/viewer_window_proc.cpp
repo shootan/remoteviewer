@@ -46,7 +46,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                       std::memory_order_release);
         // Dropping the picker guard opens both the paint path and the input guard (input handlers
         // early-return while the picker is up); clearing pending re-enables the picker's buttons.
-        gWindowPickerVisible.store(false, std::memory_order_relaxed);
+        gPicker.visible.store(false, std::memory_order_relaxed);
         clear_pc_target_selection();
         remote60::native_poc::session_toolbar_set_visible(true);
         push_session_toolbar_state();
@@ -73,7 +73,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE:
       // The toolbar hides itself so it stops blocking clicks, which leaves it deaf: a hidden
       // window gets no mouse events, so this window watches for the summoning dwell for it.
-      if (!gWindowPickerVisible.load(std::memory_order_relaxed)) {
+      if (!gPicker.visible.load(std::memory_order_relaxed)) {
         RECT toolbarZone{};
         GetClientRect(hwnd, &toolbarZone);
         remote60::native_poc::session_toolbar_notify_mouse(GET_X_LPARAM(lp), GET_Y_LPARAM(lp),
@@ -82,7 +82,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (point_in_macro_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
-      if (gWindowPickerVisible.load(std::memory_order_relaxed)) return 0;
+      if (gPicker.visible.load(std::memory_order_relaxed)) return 0;
       if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
       if ((gMouseButtons.load(std::memory_order_relaxed) & 0x7u) == 0) return 0;
@@ -96,16 +96,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN:
       if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) {
-        gWindowPickerToggleDown.store(true, std::memory_order_relaxed);
+        gPicker.toggleDown.store(true, std::memory_order_relaxed);
         return 0;
       }
       if (point_in_macro_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) {
-        gMacroButtonDown.store(true, std::memory_order_relaxed);
+        gPicker.macroButtonDown.store(true, std::memory_order_relaxed);
         return 0;
       }
-      if (gWindowPickerVisible.load(std::memory_order_relaxed)) {
+      if (gPicker.visible.load(std::memory_order_relaxed)) {
         if (gSelectionPending.load(std::memory_order_acquire)) {
-          gPickerPressTargetId.store(kPickerPressNone, std::memory_order_relaxed);
+          gPicker.pressTargetId.store(kPickerPressNone, std::memory_order_relaxed);
           return 0;
         }
         // Remember which target (if any) this press started on; the UP handler only selects when
@@ -123,10 +123,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           pressedId = hitId;
         }
         if (qpc_now_us() <
-            gPickerShownAtUs.load(std::memory_order_relaxed) + kPickerSelectMinShownUs) {
+            gPicker.shownAtUs.load(std::memory_order_relaxed) + kPickerSelectMinShownUs) {
           pressedId = kPickerPressNone;
         }
-        gPickerPressTargetId.store(pressedId, std::memory_order_relaxed);
+        gPicker.pressTargetId.store(pressedId, std::memory_order_relaxed);
         return 0;
       }
       if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
@@ -146,25 +146,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       const int x = GET_X_LPARAM(lp);
       const int y = GET_Y_LPARAM(lp);
       const ClientLayout layout = compute_client_layout(hwnd);
-      if (gWindowPickerToggleDown.exchange(false, std::memory_order_relaxed)) {
+      if (gPicker.toggleDown.exchange(false, std::memory_order_relaxed)) {
         if (point_in_rect(layout.toggleButtonRect, x, y)) {
           set_picker_visible_and_sync_stream(
-              !gWindowPickerVisible.load(std::memory_order_relaxed));
+              !gPicker.visible.load(std::memory_order_relaxed));
           InvalidateRect(hwnd, nullptr, FALSE);
         }
         return 0;
       }
-      if (gMacroButtonDown.exchange(false, std::memory_order_relaxed)) {
+      if (gPicker.macroButtonDown.exchange(false, std::memory_order_relaxed)) {
         if (point_in_rect(layout.macroButtonRect, x, y)) {
           toggle_macro_window(hwnd);
         }
         return 0;
       }
-      if (gWindowPickerVisible.load(std::memory_order_relaxed)) {
+      if (gPicker.visible.load(std::memory_order_relaxed)) {
         // Consume the press latch FIRST, unconditionally: any UP ends the gesture, and an early
         // return below must not leave a stale latch to approve a later unrelated UP.
         const uint64_t pressedId =
-            gPickerPressTargetId.exchange(kPickerPressNone, std::memory_order_relaxed);
+            gPicker.pressTargetId.exchange(kPickerPressNone, std::memory_order_relaxed);
         // A selection already in flight owns the picker until its first frame arrives; ignore
         // further target clicks so a double-click cannot queue a second, racing select.
         if (gSelectionPending.load(std::memory_order_acquire)) return 0;
@@ -175,7 +175,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         // Mis-click guard: selecting needs a picker that has been up for a moment (a click begun
         // before it appeared must not land on a card) AND a DOWN that started on the same target.
-        const uint64_t shownAtUs = gPickerShownAtUs.load(std::memory_order_relaxed);
+        const uint64_t shownAtUs = gPicker.shownAtUs.load(std::memory_order_relaxed);
         const uint64_t nowUs = qpc_now_us();
         if (nowUs < shownAtUs + kPickerSelectMinShownUs) return 0;
         const uint64_t shownAgeMs = (nowUs - shownAtUs) / 1000;
@@ -234,7 +234,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (point_in_macro_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
-      if (gWindowPickerVisible.load(std::memory_order_relaxed)) return 0;
+      if (gPicker.visible.load(std::memory_order_relaxed)) return 0;
       if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
       {
@@ -250,7 +250,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (point_in_macro_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
-      if (gWindowPickerVisible.load(std::memory_order_relaxed)) return 0;
+      if (gPicker.visible.load(std::memory_order_relaxed)) return 0;
       if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
       {
@@ -266,7 +266,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (point_in_macro_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
-      if (gWindowPickerVisible.load(std::memory_order_relaxed)) return 0;
+      if (gPicker.visible.load(std::memory_order_relaxed)) return 0;
       if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
       {
@@ -282,7 +282,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (point_in_macro_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
-      if (gWindowPickerVisible.load(std::memory_order_relaxed)) return 0;
+      if (gPicker.visible.load(std::memory_order_relaxed)) return 0;
       if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
       {
@@ -301,7 +301,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       const ClientLayout layout = compute_client_layout(hwnd);
       if (point_in_rect(layout.toggleButtonRect, p.x, p.y)) return 0;
       if (point_in_rect(layout.macroButtonRect, p.x, p.y)) return 0;
-      if (gWindowPickerVisible.load(std::memory_order_relaxed)) {
+      if (gPicker.visible.load(std::memory_order_relaxed)) {
         if (point_in_rect(layout.listRect, p.x, p.y)) {
           const int wheel = GET_WHEEL_DELTA_WPARAM(wp);
           scroll_window_list(hwnd, (wheel < 0) ? 1 : -1);
@@ -337,28 +337,28 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       const ClientLayout layout = compute_client_layout(hwnd);
       if (point_in_rect(layout.toggleButtonRect, p.x, p.y)) {
         if (msg == WM_POINTERDOWN) {
-          gWindowPickerToggleDown.store(true, std::memory_order_relaxed);
-        } else if (msg == WM_POINTERUP && gWindowPickerToggleDown.exchange(false, std::memory_order_relaxed)) {
+          gPicker.toggleDown.store(true, std::memory_order_relaxed);
+        } else if (msg == WM_POINTERUP && gPicker.toggleDown.exchange(false, std::memory_order_relaxed)) {
           set_picker_visible_and_sync_stream(
-              !gWindowPickerVisible.load(std::memory_order_relaxed));
+              !gPicker.visible.load(std::memory_order_relaxed));
           InvalidateRect(hwnd, nullptr, FALSE);
         }
         return 0;
       }
       if (point_in_rect(layout.macroButtonRect, p.x, p.y)) {
         if (msg == WM_POINTERDOWN) {
-          gMacroButtonDown.store(true, std::memory_order_relaxed);
+          gPicker.macroButtonDown.store(true, std::memory_order_relaxed);
         } else if (msg == WM_POINTERUP &&
-                   gMacroButtonDown.exchange(false, std::memory_order_relaxed)) {
+                   gPicker.macroButtonDown.exchange(false, std::memory_order_relaxed)) {
           toggle_macro_window(hwnd);
         }
         return 0;
       }
-      if (gWindowPickerVisible.load(std::memory_order_relaxed)) {
+      if (gPicker.visible.load(std::memory_order_relaxed)) {
         // A selection in flight owns the picker; also clear the latch so a gesture spanning the
         // pending window cannot leave a stale press behind.
         if (gSelectionPending.load(std::memory_order_acquire)) {
-          gPickerPressTargetId.store(kPickerPressNone, std::memory_order_relaxed);
+          gPicker.pressTargetId.store(kPickerPressNone, std::memory_order_relaxed);
           return 0;
         }
         if (msg == WM_POINTERDOWN) {
@@ -372,16 +372,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             pressedId = hitId;
           }
           if (qpc_now_us() <
-              gPickerShownAtUs.load(std::memory_order_relaxed) + kPickerSelectMinShownUs) {
+              gPicker.shownAtUs.load(std::memory_order_relaxed) + kPickerSelectMinShownUs) {
             pressedId = kPickerPressNone;
           }
-          gPickerPressTargetId.store(pressedId, std::memory_order_relaxed);
+          gPicker.pressTargetId.store(pressedId, std::memory_order_relaxed);
           return 0;
         }
         if (msg == WM_POINTERUP) {
           const uint64_t pressedId =
-              gPickerPressTargetId.exchange(kPickerPressNone, std::memory_order_relaxed);
-          const uint64_t shownAtUs = gPickerShownAtUs.load(std::memory_order_relaxed);
+              gPicker.pressTargetId.exchange(kPickerPressNone, std::memory_order_relaxed);
+          const uint64_t shownAtUs = gPicker.shownAtUs.load(std::memory_order_relaxed);
           const uint64_t nowUs = qpc_now_us();
           const bool shownLongEnough = nowUs >= shownAtUs + kPickerSelectMinShownUs;
           const uint64_t shownAgeMs = (nowUs - shownAtUs) / 1000;
@@ -449,7 +449,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       gActiveTouchPointerId.store(0, std::memory_order_relaxed);
       // A gesture that lost capture mid-flight must not leave a stale picker press behind: the
       // whole point of the latch is that an UP without its own valid DOWN selects nothing.
-      gPickerPressTargetId.store(kPickerPressNone, std::memory_order_relaxed);
+      gPicker.pressTargetId.store(kPickerPressNone, std::memory_order_relaxed);
       return 0;
     case WM_IME_SETCONTEXT: {
       const LPARAM masked =
@@ -519,7 +519,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       // Focus is about to leave, so no more key-ups will reach this window. Release whatever
       // is held now, before Alt/Win/Alt+Tab strands it on the host.
       if (!kInputPolicyForceBlock) enqueue_release_for_pressed_keys();
-      gPickerPressTargetId.store(kPickerPressNone, std::memory_order_relaxed);
+      gPicker.pressTargetId.store(kPickerPressNone, std::memory_order_relaxed);
       return 0;
     case WM_CHAR:
       // Ignored on purpose. Every physical key now travels the key-event path, and IME
@@ -547,7 +547,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       const ClientLayout layout = compute_client_layout(hwnd);
       const RECT& videoRect = layout.videoRect;
       const RECT contentRect = resolve_video_content_rect(hwnd, videoRect);
-      const bool pickerVisible = gWindowPickerVisible.load(std::memory_order_relaxed);
+      const bool pickerVisible = gPicker.visible.load(std::memory_order_relaxed);
 
       std::shared_ptr<std::vector<uint8_t>> local;
       Microsoft::WRL::ComPtr<IMFSample> localSurfaceSample;
@@ -880,7 +880,7 @@ bool create_window() {
   SetTimer(gSession.hwnd, kCursorOverlayTimerId, 50, nullptr);
   // The session starts on the picker; stamp its shown-time so the select debounce has one uniform
   // contract from the very first gesture instead of a special startup exemption.
-  gPickerShownAtUs.store(qpc_now_us(), std::memory_order_relaxed);
+  gPicker.shownAtUs.store(qpc_now_us(), std::memory_order_relaxed);
   return true;
 }
 

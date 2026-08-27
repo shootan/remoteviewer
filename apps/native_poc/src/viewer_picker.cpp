@@ -38,39 +38,39 @@ ClientControlMetricsSnapshot capture_client_control_metrics_snapshot() {
 }
 
 void queue_thumbnail_fetches_from_panel() {
-  if (!gHostSupportsThumbnails.load(std::memory_order_relaxed)) return;
-  const WindowPanelSnapshot snap = gWindowPanelState.Snapshot();
+  if (!gPicker.hostSupportsThumbnails.load(std::memory_order_relaxed)) return;
+  const WindowPanelSnapshot snap = gPicker.windowPanel.Snapshot();
   const uint64_t nowUs = qpc_now_us();
-  std::lock_guard<std::mutex> lk(gThumbMu);
+  std::lock_guard<std::mutex> lk(gPicker.thumbMu);
   auto want = [&](uint64_t id) {
-    const auto it = gThumbs.find(id);
-    if (it != gThumbs.end() && it->second && nowUs - it->second->fetchedUs < kThumbRefreshUs) return;
-    if (std::find(gThumbFetchQueue.begin(), gThumbFetchQueue.end(), id) != gThumbFetchQueue.end()) {
+    const auto it = gPicker.thumbs.find(id);
+    if (it != gPicker.thumbs.end() && it->second && nowUs - it->second->fetchedUs < kThumbRefreshUs) return;
+    if (std::find(gPicker.thumbFetchQueue.begin(), gPicker.thumbFetchQueue.end(), id) != gPicker.thumbFetchQueue.end()) {
       return;
     }
-    gThumbFetchQueue.push_back(id);
+    gPicker.thumbFetchQueue.push_back(id);
   };
   want(0);
   for (const auto& item : snap.items) want(item.id);
 }
 
 void queue_window_list_request(const char* statusText) {
-  gWindowPanelState.RequestList(statusText);
+  gPicker.windowPanel.RequestList(statusText);
 }
 
 void queue_window_select_request(uint64_t windowId, const char* statusText) {
-  gWindowPanelState.RequestSelect(windowId, statusText);
+  gPicker.windowPanel.RequestSelect(windowId, statusText);
 }
 
 void set_window_panel_status(const std::string& status) {
-  gWindowPanelState.SetStatus(status);
+  gPicker.windowPanel.SetStatus(status);
 }
 
 void apply_window_list_snapshot(const ControlWindowListMessage& msg) {
   const ClientLayout layout = compute_client_layout(gSession.hwnd);
   const CardGridMetrics grid = compute_card_grid(layout.listRect);
-  const auto result = gWindowPanelState.ApplyWindowList(msg, grid.visibleCards);
-  gHostSupportsThumbnails.store(
+  const auto result = gPicker.windowPanel.ApplyWindowList(msg, grid.visibleCards);
+  gPicker.hostSupportsThumbnails.store(
       (msg.flags & remote60::native_poc::kControlWindowListFlagThumbnails) != 0,
       std::memory_order_relaxed);
   queue_thumbnail_fetches_from_panel();
@@ -79,7 +79,7 @@ void apply_window_list_snapshot(const ControlWindowListMessage& msg) {
 
 /** Mirrors the session state into the toolbar window. Cheap enough to call on every change. */
 void push_session_toolbar_state() {
-  const WindowPanelSnapshot panel = gWindowPanelState.Snapshot();
+  const WindowPanelSnapshot panel = gPicker.windowPanel.Snapshot();
   remote60::native_poc::SessionToolbarState state;
   state.connected = gControl.connected.load(std::memory_order_relaxed);
   state.inputOn = gSession.inputEnabled.load(std::memory_order_relaxed);
@@ -98,10 +98,10 @@ void push_session_toolbar_state() {
 // picker transitions: startup leaves the host's default-active stream alone, so headless
 // harness clients that never open the picker keep receiving video unchanged.
 void set_picker_visible_and_sync_stream(bool visible) {
-  gWindowPickerVisible.store(visible, std::memory_order_relaxed);
+  gPicker.visible.store(visible, std::memory_order_relaxed);
   if (visible) {
-    gPickerShownAtUs.store(qpc_now_us(), std::memory_order_relaxed);
-    gPickerPressTargetId.store(kPickerPressNone, std::memory_order_relaxed);
+    gPicker.shownAtUs.store(qpc_now_us(), std::memory_order_relaxed);
+    gPicker.pressTargetId.store(kPickerPressNone, std::memory_order_relaxed);
     // Mid-session the stream KEEPS RUNNING behind the picker overlay. Stopping it here made every
     // "is it frozen?" peek tear the capture down (host detaches after 5 idle seconds), a real
     // multi-second blackout, and a reselect/keyframe churn on close -- the recovery gesture was
@@ -142,7 +142,7 @@ bool begin_pc_target_selection(uint64_t windowId, const char* statusText) {
   if (gSelectionPending.load(std::memory_order_acquire)) return false;
   if (!gControl.connected.load(std::memory_order_relaxed)) return false;
   // RequestSelect refuses when the target is locked by host config; do not touch the stream then.
-  if (!gWindowPanelState.RequestSelect(windowId, statusText)) return false;
+  if (!gPicker.windowPanel.RequestSelect(windowId, statusText)) return false;
   gSelectionExpectedGeneration.store(0, std::memory_order_release);
   gSelectionAwaitingAck.store(true, std::memory_order_release);
   gSelectionPending.store(true, std::memory_order_release);
@@ -170,7 +170,7 @@ void post_pc_selection_reveal(uint64_t readyGeneration, uint64_t readyEpoch) {
 }
 
 void apply_window_selected_result(const ControlWindowSelectedMessage& msg) {
-  const auto result = gWindowPanelState.ApplyWindowSelected(msg);
+  const auto result = gPicker.windowPanel.ApplyWindowSelected(msg);
   log_client_line(result.logLine);
   if (gSelectionPending.load(std::memory_order_acquire)) {
     if (result.ok) {
@@ -178,7 +178,7 @@ void apply_window_selected_result(const ControlWindowSelectedMessage& msg) {
       // Do NOT hide the picker here -- that is what the first-frame gate is for.
       gSelectionExpectedGeneration.store(msg.streamGeneration, std::memory_order_release);
       gSelectionAwaitingAck.store(false, std::memory_order_release);
-      gWindowPanelState.SetStatus("waiting_first_frame");
+      gPicker.windowPanel.SetStatus("waiting_first_frame");
     } else {
       // Select failed: stop the stream we speculatively started, keep the picker, allow a retry.
       gControl.streamState.Request(false);
@@ -196,11 +196,11 @@ void apply_window_selected_result(const ControlWindowSelectedMessage& msg) {
 void scroll_window_list(HWND hwnd, int deltaSteps) {
   const ClientLayout layout = compute_client_layout(hwnd);
   const CardGridMetrics grid = compute_card_grid(layout.listRect);
-  const int totalCards = 1 + static_cast<int>(gWindowPanelState.Snapshot().items.size());
+  const int totalCards = 1 + static_cast<int>(gPicker.windowPanel.Snapshot().items.size());
   const int totalRows = (totalCards + grid.cols - 1) / grid.cols;
   const int maxScrollRow = std::max(0, totalRows - grid.visibleRows);
-  const int cur = gGridScrollRow.load(std::memory_order_relaxed);
-  gGridScrollRow.store(std::clamp(cur + deltaSteps, 0, maxScrollRow), std::memory_order_relaxed);
+  const int cur = gPicker.gridScrollRow.load(std::memory_order_relaxed);
+  gPicker.gridScrollRow.store(std::clamp(cur + deltaSteps, 0, maxScrollRow), std::memory_order_relaxed);
 }
 
 // Hit-test a grid card. Card index 0 is the pinned Desktop card; window items follow.
@@ -217,9 +217,9 @@ bool try_hit_window_list_item(HWND hwnd, int x, int y, uint64_t* outWindowId) {
   // Reject clicks that land in the gaps between cards.
   if (relX - col * (grid.cardW + grid.gap) >= grid.cardW) return false;
   if (relY - row * (grid.cardH + grid.gap) >= grid.cardH) return false;
-  const WindowPanelSnapshot snap = gWindowPanelState.Snapshot();
+  const WindowPanelSnapshot snap = gPicker.windowPanel.Snapshot();
   const int cardIndex =
-      gGridScrollRow.load(std::memory_order_relaxed) * grid.cols + row * grid.cols + col;
+      gPicker.gridScrollRow.load(std::memory_order_relaxed) * grid.cols + row * grid.cols + col;
   if (cardIndex == 0) {
     *outWindowId = 0;
     return true;

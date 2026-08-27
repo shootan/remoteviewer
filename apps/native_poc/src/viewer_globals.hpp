@@ -14,6 +14,7 @@
 // Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-0).
 
 #include "viewer_common.hpp"
+#include "viewer_picker_state.hpp"
 #include "viewer_control_state.hpp"
 #include "viewer_client_metrics.hpp"
 #include "viewer_present_stats.hpp"
@@ -74,14 +75,8 @@ extern std::atomic<int32_t> gLastInputVideoY;
 
 // thread: picker state is UI-owned; control applies window/monitor lists and thumbnails;
 // the selection gate is begun/committed on UI, acked on control, gated on recv (see comments).
-extern WindowPanelStateModel gWindowPanelState;
 // Which screen the shell asked for. Applied once the host has said it understands the monitor
 // messages, which it does in the window list.
-extern std::atomic<bool> gWindowPickerVisible;
-extern std::atomic<bool> gWindowPickerToggleDown;
-extern std::atomic<int> gGridScrollRow;  // card grid scroll, in whole rows
-extern std::atomic<uint64_t> gPickerShownAtUs;
-extern std::atomic<uint64_t> gPickerPressTargetId;
 
 // Target-selection gate, mirroring the Android policy (commit 4892dea). After connecting the
 // session opens on the picker; picking a target starts the stream but the picker stays up, and
@@ -113,16 +108,6 @@ extern std::atomic<bool> gSelectionRevealPosted;
 
 // Preview thumbnails for the target picker, fetched over the control channel when the host
 // advertises kControlWindowListFlagThumbnails. Keyed by window id; id 0 is the desktop.
-struct WindowThumb {
-  uint32_t width = 0;
-  uint32_t height = 0;
-  std::vector<uint8_t> bgra;
-  uint64_t fetchedUs = 0;
-};
-extern std::mutex gThumbMu;
-extern std::unordered_map<uint64_t, std::shared_ptr<const WindowThumb>> gThumbs;
-extern std::deque<uint64_t> gThumbFetchQueue;
-extern std::atomic<bool> gHostSupportsThumbnails;
 
 // thread: touch/mouse suppression is UI-only; the remote cursor sample is recv-written,
 // UI-timer-read (latest wins).
@@ -158,7 +143,6 @@ extern std::atomic<bool> gForwardedKeyDown[256];
 
 
 extern remote60::native_poc::InputMacro gInputMacro;
-extern std::atomic<bool> gMacroButtonDown;
 
 // thread: UI only (swap chain); the decoder shares its device when the DXGI surface opt-in is on.
 extern Nv12D3dRenderer gNv12Renderer;
@@ -168,4 +152,5 @@ extern FrameBuffer gFrameBuf;
 extern PresentStats gPresent;
 extern ClientMetricsState gMetrics;
 extern ControlChannelState gControl;
+extern PickerState gPicker;
 }  // namespace remote60::native_poc::viewer
