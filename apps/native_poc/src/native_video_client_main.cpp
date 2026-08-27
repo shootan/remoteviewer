@@ -1,5 +1,6 @@
 #include "viewer_common.hpp"
 #include "viewer_globals.hpp"
+#include "viewer_env_util.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -48,56 +49,11 @@ struct Args {
   std::string initialView;
 };
 
-bool parse_u32(const char* s, uint32_t* out) {
-  if (!s || !out) return false;
-  char* end = nullptr;
-  const unsigned long v = std::strtoul(s, &end, 10);
-  if (!end || *end != '\0') return false;
-  *out = static_cast<uint32_t>(v);
-  return true;
-}
 
-bool env_truthy(const char* key) {
-  if (!key) return false;
-  const char* v = std::getenv(key);
-  if (!v) return false;
-  const std::string s = v;
-  return s == "1" || s == "true" || s == "TRUE" || s == "on" || s == "ON";
-}
 
-uint32_t env_u32_clamped(const char* key, uint32_t fallback, uint32_t minValue, uint32_t maxValue) {
-  if (!key) return fallback;
-  const char* raw = std::getenv(key);
-  if (!raw) return fallback;
-  uint32_t parsed = 0;
-  if (!parse_u32(raw, &parsed)) return fallback;
-  return std::clamp<uint32_t>(parsed, minValue, maxValue);
-}
 
-std::string trim_ascii(std::string v) {
-  size_t start = 0;
-  while (start < v.size() && std::isspace(static_cast<unsigned char>(v[start])) != 0) {
-    ++start;
-  }
-  size_t end = v.size();
-  while (end > start && std::isspace(static_cast<unsigned char>(v[end - 1])) != 0) {
-    --end;
-  }
-  return v.substr(start, end - start);
-}
 
-std::string ascii_lower(std::string v) {
-  std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
-    return static_cast<char>(std::tolower(c));
-  });
-  return v;
-}
 
-std::string env_string_or_empty(const char* key) {
-  if (!key) return std::string{};
-  const char* v = std::getenv(key);
-  return v ? std::string(v) : std::string{};
-}
 
 bool backend_request_is_any(const std::string& requestLower, const char* const* values,
                             size_t valueCount) {
@@ -176,21 +132,7 @@ std::string backend_fallback_reason(const std::string& requestedRaw, const char*
   return "requested_backend_mismatch";
 }
 
-std::string fixed_cstr_to_string(const char* buf, size_t cap) {
-  if (!buf || cap == 0) return std::string{};
-  size_t n = 0;
-  while (n < cap && buf[n] != '\0') ++n;
-  return std::string(buf, buf + n);
-}
 
-std::wstring utf8_to_wide(const std::string& utf8) {
-  if (utf8.empty()) return std::wstring{};
-  const int n = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
-  if (n <= 1) return std::wstring{};
-  std::wstring out(static_cast<size_t>(n - 1), L'\0');
-  MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, out.data(), n);
-  return out;
-}
 
 
 int dpi_scale(int value) { return MulDiv(value, gUiDpi, 96); }
