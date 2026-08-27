@@ -7583,3 +7583,29 @@ Next action
 - 변경 파일: `apps/native_poc/src/` 호스트 모듈 다수 + `CMakeLists.txt` + 신규 헤더/테스트 6개, `docs/호스트_리팩터_발견사항.md`, `docs/호스트_분할_리팩터_계획.md`(§7.2/§7.3/§7.4/§10), `docs/구현계획.md`, `docs/history.md`.
 - 코덱스 교차검증: diff 검증 요청(seq 776)을 보냈으나 응답 없음 — 사용자 지시("코덱스 토큰 얼마 안 남았으니 대답 없으면 그냥 진행")대로 계속 진행했다. 원장 작성 단계의 판정(seq 769/770/772)은 전부 반영돼 있다.
 - 다음 액션: **실기 확인** — Phase 4 코드로 설치본을 빌드해 사용자 판정. 그 전까지 `dist/`에 내지 않는다(계획서 게이트 E). 이후 P2(readback 60fps 공급)로.
+
+### 317) 2026-08-28 코덱스 diff 교차검증 반영 — blocker 2 + High 1 (브랜치 refactor/viewer-split, a67522f)
+
+- 목표: #316의 `779390e`/`4aaa451`에 대한 코덱스 diff 검증 결과를 닫는다.
+- **H-23은 내가 만든 회귀였다.** AB-BA 데드락을 없애면서 meta 확정을 contextMu 해제 뒤로 옮겼는데,
+  `slot->state`는 컨텍스트 작업 **전에** 이미 GpuPending이라 그 사이 워커가 미확정 meta를 소비할 수 있었다:
+  실패한 preprocess를 `preprocessed=true`로 읽기(캡처 크기 바이트를 인코드 크기로), 반환 예정 NV12 lease를
+  유효 surface로 소비자에게 넘기고 뒤늦은 실패 처리가 같은 lease를 반환(double-owner), 그리고 실패와 무관하게
+  매 프레임 `submitUs=0` 프레임이 나가 frozen-ring 워치독이 그 슬롯을 못 세는 창.
+  `SlotState::Submitting`을 publication barrier로 추가했다 — 워커는 GpuPending만 poll하고, Submit이
+  D3D 작업 + meta 확정을 끝낸 뒤 **마지막에** 승격한다. 락 순서 `slotMu→contextMu`는 그대로.
+  identity도 `submitSeq`로 교체(같은 generation 안에서 슬롯이 재사용돼도 staging 텍스처는 동일해 포인터는
+  fence가 아니다), NV12 실패 lease 반환도 identity 안으로(밖이면 Reconfigure 후 재대여된 index를 푸는 ABA).
+- **H-02: 내 추론이 틀렸다.** "stop=true라 새 소켓을 못 넘긴다"는 새 accept만 막을 뿐, owner가 load와
+  shutdown 사이에 close하는 것과 무관하다. atomic은 핸들 값만 게시하지 수명을 고정하지 못하고 닫힌 SOCKET
+  값은 즉시 재사용된다. `controlClientSockMu`를 도입해 게시/해제+close/외부 shutdown을 전부 그 아래로.
+- **H-01 기동 레이스**: Stop이 CreateProcessW 도중이면 TerminateChild가 미게시 child_를 보고 아무것도
+  안 죽이고, 이후 게시 + Wait(INFINITE)로 join이 영구 대기. 게시 임계구역에서 `running_` 재확인으로 닫음.
+- 코덱스가 PASS 준 부분: H-01 핵심(wait 중 handle close 소유권), H-03 lease 규칙 5경로 + "publish 후 meta -1".
+- 신규 회귀: `capture_readback_test`에 슬롯 identity 7건(`readback_slot_is_current`를 순수 함수로 뽑아 GPU 없이).
+- 새 원장 항목 **H-24**(미착수): `controlListenSock`이 plain SOCKET이라 accept 중 close와 겹친다 —
+  H-02는 accepted 소켓만 고쳤다. 검증 부채도 기록(fault-injection 훅 기반 결정론적 교차 테스트).
+- 변경 파일: `d3d_capture_readback.{hpp,cpp}` · `capture_readback_test.cpp` · `host_session.hpp` ·
+  `host_startup_control.cpp` · `host_shutdown.cpp` · `host_app_main.cpp` · 문서 3.
+- 검증: 전 타깃 빌드 에러 0 + host_udp_e2e ALL PASS + 단위테스트 22종 PASS + 정상 종료 rc=0/"done".
+- 다음 액션: 실기 확인(설치본 빌드 → 사용자 판정). H-24와 검증 부채는 그 다음.
