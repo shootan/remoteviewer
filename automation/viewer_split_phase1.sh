@@ -129,7 +129,7 @@ gOverlayConfig gSession.overlayConfig
 gLogMu gSession.logMu
 nextToolbarPushUs gSession.nextToolbarPushUs
 EOF
-  [ "$(grep -lw nextToolbarPushUs $M $S/viewer_*.cpp $S/viewer_*.hpp | wc -l)" = 1 ] || { echo "nextToolbarPushUs not unique to main.cpp"; exit 1; }
+  [ "$(grep -lw nextToolbarPushUs $M $S/viewer_*.cpp $S/viewer_*.hpp | grep -v viewer_session_state.hpp)" = "$M" ] || { echo "nextToolbarPushUs not unique to main.cpp"; exit 1; }
   perl -0pi -e 's~      static uint64_t nextToolbarPushUs = 0;\r\n~~ or die "static nextToolbarPushUs"' "$M"
   apply_struct 1-1 viewer_session_state.hpp SessionState gSession $T/map1 "OverlayConfigSnapshot" \
     "SessionState gSession (running/sock/hwnd/windowW/H/inputEnabled/relayPath/requestedMonitorId/inputEventsSent/overlayConfig/logMu)" \
