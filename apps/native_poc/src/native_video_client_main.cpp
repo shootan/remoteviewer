@@ -12,6 +12,7 @@
 #include "viewer_overlay_draw.hpp"
 #include "viewer_cursor_overlay.hpp"
 #include "viewer_window_proc.hpp"
+#include "viewer_recv_stats.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -897,17 +898,8 @@ int main(int argc, char** argv) {
     // Which selection generation this loop has already reset the decoder for. A bump by
     // begin_pc_target_selection() on the UI thread makes the next frame flush stale references.
     uint64_t recvSelectionEpoch = gSel.epoch.load(std::memory_order_acquire);
-    uint64_t statAtUs = qpc_now_us() + 1000000ULL;
-    uint64_t recvFrames = 0;
-    uint64_t decodedFrames = 0;
-    uint64_t skippedQueued = 0;
-    uint64_t recvBytes = 0;
-    uint64_t decodedBytes = 0;
-    uint64_t sumLatencyUs = 0;
-    uint64_t maxLatencyUs = 0;
-    uint64_t sumDecodeTailUs = 0;
-    uint64_t maxDecodeTailUs = 0;
-    uint64_t decodeFailCount = 0;
+    RecvStats st;
+    st.statAtUs = qpc_now_us() + 1000000ULL;
     // Consecutive hard decode failures. A flush (decoder.reset) recovers a corrupt frame, but
     // not a wedged hardware MFT or a lost D3D device -- and the viewer's only recovery for a
     // same-resolution decode error was that flush, so once the decoder wedged (a YouTube scene
@@ -915,21 +907,10 @@ int main(int argc, char** argv) {
     // picture froze until the app was restarted. Past a threshold, rebuild the decoder instead.
     uint32_t decodeConsecutiveFailCount = 0;
     constexpr uint32_t kDecodeRebuildThreshold = 8;
-    uint64_t decodeTimestampOverflowCount = 0;
-    uint64_t decodeEmptyCount = 0;
     uint64_t decodeEmptyStreak = 0;
     uint64_t decodeEmptyStreakStartUs = 0;
-    uint64_t decodeEmptyRecoveryCount = 0;
     uint64_t waitingKeyDropCount = 0;
     uint64_t lagDropCount = 0;
-    uint64_t udpChunkRecvCount = 0;
-    uint64_t udpAssemblyCompletedCount = 0;
-    uint64_t udpAssemblyDroppedCount = 0;
-    uint64_t udpAssemblyMalformedCount = 0;
-    uint64_t udpAssemblyReorderCount = 0;
-    uint64_t udpAssemblyKeyReqCount = 0;
-    uint64_t udpAssemblyFecRecoveredCount = 0;
-    uint32_t udpAssemblyDropPmLast = 0;
     uint64_t lastPacketRecvUs = 0;
     uint32_t lagTriggerStreak = 0;
     uint64_t lastCatchupEnterUs = 0;
@@ -960,9 +941,6 @@ int main(int argc, char** argv) {
     // AFTER it still sits in the live reference chain, so dropping it needs an IDR resync.
     uint64_t lastDecodedKeyCaptureUs = 0;
     uint64_t latestCaptureSeenUs = 0;
-    uint64_t queueDepthSampleCount = 0;
-    uint64_t queueDepthHist[5] = {0, 0, 0, 0, 0};
-    uint32_t queueDepthFramesMax = 0;
     uint64_t recoveringSinceUs = 0;
     uint32_t recoveringHealthyStreak = 0;
     uint64_t lastRecoveryRequestUs = 0;
@@ -973,18 +951,18 @@ int main(int argc, char** argv) {
     };
     auto sample_queue_depth = [&](uint64_t lagUs) {
       const uint32_t depthFrames = queue_depth_frames(lagUs);
-      ++queueDepthSampleCount;
-      if (depthFrames > queueDepthFramesMax) queueDepthFramesMax = depthFrames;
+      ++st.queueDepthSampleCount;
+      if (depthFrames > st.queueDepthFramesMax) st.queueDepthFramesMax = depthFrames;
       if (depthFrames == 0) {
-        ++queueDepthHist[0];
+        ++st.queueDepthHist[0];
       } else if (depthFrames == 1) {
-        ++queueDepthHist[1];
+        ++st.queueDepthHist[1];
       } else if (depthFrames == 2) {
-        ++queueDepthHist[2];
+        ++st.queueDepthHist[2];
       } else if (depthFrames == 3) {
-        ++queueDepthHist[3];
+        ++st.queueDepthHist[3];
       } else {
-        ++queueDepthHist[4];
+        ++st.queueDepthHist[4];
       }
     };
     auto transition_congestion_state = [&](ClientCongestionState nextState, uint64_t nowUs, const char* reason,
@@ -1018,16 +996,6 @@ int main(int argc, char** argv) {
                 << " seq=" << seq
                 << "\n";
     };
-    struct PresentCounterSnapshot {
-      uint64_t d3dPresentSuccess = 0;
-      uint64_t d3dPresentFail = 0;
-      uint64_t gdiFallbackPresented = 0;
-      uint64_t fallbackInitFail = 0;
-      uint64_t fallbackRenderFail = 0;
-      uint64_t fallbackNv12ConvertFail = 0;
-      uint64_t paintCoalesced = 0;
-      uint64_t overwriteBeforePresent = 0;
-    };
     auto load_present_counters = [&]() -> PresentCounterSnapshot {
       PresentCounterSnapshot s{};
       s.d3dPresentSuccess = gPresent.d3dPresentSuccessCount.load(std::memory_order_relaxed);
@@ -1040,20 +1008,20 @@ int main(int argc, char** argv) {
       s.overwriteBeforePresent = gFrameBuf.overwriteBeforePresentCount.load(std::memory_order_relaxed);
       return s;
     };
-    PresentCounterSnapshot lastPresentCounters = load_present_counters();
+    st.lastPresentCounters = load_present_counters();
     auto append_present_counter_fields = [&](std::ostream& os) {
       const PresentCounterSnapshot nowCounters = load_present_counters();
-      const uint64_t d3dPresentSuccess = nowCounters.d3dPresentSuccess - lastPresentCounters.d3dPresentSuccess;
-      const uint64_t d3dPresentFail = nowCounters.d3dPresentFail - lastPresentCounters.d3dPresentFail;
+      const uint64_t d3dPresentSuccess = nowCounters.d3dPresentSuccess - st.lastPresentCounters.d3dPresentSuccess;
+      const uint64_t d3dPresentFail = nowCounters.d3dPresentFail - st.lastPresentCounters.d3dPresentFail;
       const uint64_t gdiFallbackPresented =
-          nowCounters.gdiFallbackPresented - lastPresentCounters.gdiFallbackPresented;
-      const uint64_t fallbackInitFail = nowCounters.fallbackInitFail - lastPresentCounters.fallbackInitFail;
-      const uint64_t fallbackRenderFail = nowCounters.fallbackRenderFail - lastPresentCounters.fallbackRenderFail;
+          nowCounters.gdiFallbackPresented - st.lastPresentCounters.gdiFallbackPresented;
+      const uint64_t fallbackInitFail = nowCounters.fallbackInitFail - st.lastPresentCounters.fallbackInitFail;
+      const uint64_t fallbackRenderFail = nowCounters.fallbackRenderFail - st.lastPresentCounters.fallbackRenderFail;
       const uint64_t fallbackNv12ConvertFail =
-          nowCounters.fallbackNv12ConvertFail - lastPresentCounters.fallbackNv12ConvertFail;
-      const uint64_t paintCoalesced = nowCounters.paintCoalesced - lastPresentCounters.paintCoalesced;
+          nowCounters.fallbackNv12ConvertFail - st.lastPresentCounters.fallbackNv12ConvertFail;
+      const uint64_t paintCoalesced = nowCounters.paintCoalesced - st.lastPresentCounters.paintCoalesced;
       const uint64_t overwriteBeforePresent =
-          nowCounters.overwriteBeforePresent - lastPresentCounters.overwriteBeforePresent;
+          nowCounters.overwriteBeforePresent - st.lastPresentCounters.overwriteBeforePresent;
       const uint64_t d3dAttempts = d3dPresentSuccess + d3dPresentFail;
       const uint64_t gdiFallbackRateX1000 = (d3dAttempts > 0)
           ? ((gdiFallbackPresented * 1000ULL) / d3dAttempts)
@@ -1067,7 +1035,7 @@ int main(int argc, char** argv) {
          << " fallbackNv12ConvertFail=" << fallbackNv12ConvertFail
          << " paintCoalesced=" << paintCoalesced
          << " overwriteBeforePresent=" << overwriteBeforePresent;
-      lastPresentCounters = nowCounters;
+      st.lastPresentCounters = nowCounters;
     };
     auto append_congestion_fields = [&](std::ostream& os) {
       const uint64_t recoveryAvgUs =
@@ -1082,13 +1050,13 @@ int main(int argc, char** argv) {
          << " holdLatestDrops=" << holdLatestDropCount
          << " burstDrops=" << burstDropCount
          << " staleRefRecoveries=" << staleReferenceRecoveryCount
-         << " queueDepthSamples=" << queueDepthSampleCount
-         << " queueDepthMax=" << queueDepthFramesMax
-         << " queueDepthH0=" << queueDepthHist[0]
-         << " queueDepthH1=" << queueDepthHist[1]
-         << " queueDepthH2=" << queueDepthHist[2]
-         << " queueDepthH3=" << queueDepthHist[3]
-         << " queueDepthH4p=" << queueDepthHist[4];
+         << " queueDepthSamples=" << st.queueDepthSampleCount
+         << " queueDepthMax=" << st.queueDepthFramesMax
+         << " queueDepthH0=" << st.queueDepthHist[0]
+         << " queueDepthH1=" << st.queueDepthHist[1]
+         << " queueDepthH2=" << st.queueDepthHist[2]
+         << " queueDepthH3=" << st.queueDepthHist[3]
+         << " queueDepthH4p=" << st.queueDepthHist[4];
     };
     auto aligned_lag_us = [&](uint64_t remoteTsUs, uint64_t localNowUs,
                               bool& timelineReady, uint64_t& remoteBaseUs, uint64_t& localBaseUs) -> uint64_t {
@@ -1111,8 +1079,8 @@ int main(int argc, char** argv) {
                                uint64_t avgLatencyUs, uint64_t maxLatencyUsLocal,
                                uint64_t avgDecodeTailUs, uint64_t maxDecodeTailUsLocal,
                                double mbpsLocal) {
-      const uint64_t cappedRecvFpsX100 = std::min<uint64_t>(recvFrames * 100ULL, 0xFFFFFFFFULL);
-      const uint64_t cappedDecodedFpsX100 = std::min<uint64_t>(decodedFrames * 100ULL, 0xFFFFFFFFULL);
+      const uint64_t cappedRecvFpsX100 = std::min<uint64_t>(st.recvFrames * 100ULL, 0xFFFFFFFFULL);
+      const uint64_t cappedDecodedFpsX100 = std::min<uint64_t>(st.decodedFrames * 100ULL, 0xFFFFFFFFULL);
       const double mbpsX1000 = mbpsLocal * 1000.0;
       uint32_t recvMbpsX1000 = 0;
       if (mbpsX1000 > 0.0) {
@@ -1124,7 +1092,7 @@ int main(int argc, char** argv) {
       gMetrics.client.recvFpsX100 = static_cast<uint32_t>(cappedRecvFpsX100);
       gMetrics.client.decodedFpsX100 = static_cast<uint32_t>(cappedDecodedFpsX100);
       gMetrics.client.recvMbpsX1000 = recvMbpsX1000;
-      gMetrics.client.skippedFrames = static_cast<uint32_t>(std::min<uint64_t>(skippedQueued, 0xFFFFFFFFULL));
+      gMetrics.client.skippedFrames = static_cast<uint32_t>(std::min<uint64_t>(st.skippedQueued, 0xFFFFFFFFULL));
       gMetrics.client.avgLatencyUs = avgLatencyUs;
       gMetrics.client.maxLatencyUs = maxLatencyUsLocal;
       gMetrics.client.avgDecodeTailUs = avgDecodeTailUs;
@@ -1138,10 +1106,10 @@ int main(int argc, char** argv) {
           static_cast<uint32_t>(std::min<uint64_t>(congestionRecoveryRequestCount, 0xFFFFFFFFULL));
       gMetrics.client.congestionRecoveryMaxUs =
           static_cast<uint32_t>(std::min<uint64_t>(congestionRecoveryMaxUs, 0xFFFFFFFFULL));
-      gMetrics.client.queueDepthMax = queueDepthFramesMax;
+      gMetrics.client.queueDepthMax = st.queueDepthFramesMax;
       gMetrics.client.queueDepthH4p =
-          static_cast<uint32_t>(std::min<uint64_t>(queueDepthHist[4], 0xFFFFFFFFULL));
-      gMetrics.client.udpAssemblyDropPm = udpAssemblyDropPmLast;
+          static_cast<uint32_t>(std::min<uint64_t>(st.queueDepthHist[4], 0xFFFFFFFFULL));
+      gMetrics.client.udpAssemblyDropPm = st.udpAssemblyDropPmLast;
       gMetrics.client.seq.fetch_add(1);
       gMetrics.client.updatedQpcUs = nowUs;
       push_overlay_metric_sample(gMetrics.client.recvFpsX100.load(std::memory_order_relaxed),
@@ -1160,8 +1128,8 @@ int main(int argc, char** argv) {
     auto process_h264_frame = [&](const EncodedFrameHeader& h, std::vector<uint8_t>* payloadPtr,
                                   uint64_t packetNowUs) -> bool {
       if (!payloadPtr) return true;
-      ++recvFrames;
-      recvBytes += h.payloadSize;
+      ++st.recvFrames;
+      st.recvBytes += h.payloadSize;
       const uint64_t recvGapUs =
           (lastPacketRecvUs > 0 && packetNowUs >= lastPacketRecvUs) ? (packetNowUs - lastPacketRecvUs) : 0;
       lastPacketRecvUs = packetNowUs;
@@ -1171,7 +1139,7 @@ int main(int argc, char** argv) {
       }
 
       if (!useH264) {
-        ++skippedQueued;
+        ++st.skippedQueued;
         return true;
       }
 
@@ -1187,13 +1155,13 @@ int main(int argc, char** argv) {
       if (gSel.pending.load(std::memory_order_acquire)) {
         if (gSel.awaitingAck.load(std::memory_order_acquire)) {
           // No ack yet: every frame here is either the old target or an unconfirmed guess.
-          ++skippedQueued;
+          ++st.skippedQueued;
           return true;
         }
         const uint64_t expectedGen = gSel.expectedGeneration.load(std::memory_order_acquire);
         if (expectedGen != 0 && h.streamGeneration != expectedGen) {
           // The previous target's stream still draining after the ack; not what we selected.
-          ++skippedQueued;
+          ++st.skippedQueued;
           return true;
         }
       } else {
@@ -1205,7 +1173,7 @@ int main(int argc, char** argv) {
         // them -- only a host-side target selection bumps the generation.
         const uint64_t activeGen = gSel.activeStreamGeneration.load(std::memory_order_acquire);
         if (activeGen != 0 && h.streamGeneration != activeGen) {
-          ++skippedQueued;
+          ++st.skippedQueued;
           return true;
         }
       }
@@ -1254,7 +1222,7 @@ int main(int argc, char** argv) {
               ? (latestCaptureSeenUs - h.captureQpcUs)
               : 0;
       if (staleBehindPresentedUs > staleCaptureDropUs || staleBehindLatestUs > staleCaptureDropUs) {
-        ++skippedQueued;
+        ++st.skippedQueued;
         ++lagDropCount;
         ++staleDropCount;
         if (staleBehindLatestUs > staleCaptureDropUs) {
@@ -1342,7 +1310,7 @@ int main(int argc, char** argv) {
       if (congestionState == ClientCongestionState::Congested && !keyFrame) {
         decodeEmptyStreak = 0;
         decodeEmptyStreakStartUs = 0;
-        ++skippedQueued;
+        ++st.skippedQueued;
         ++lagDropCount;
         ++burstDropCount;
         if ((lagDropCount % 120) == 1) {
@@ -1399,7 +1367,7 @@ int main(int argc, char** argv) {
       if (waitForKeyFrame && !keyFrame) {
         decodeEmptyStreak = 0;
         decodeEmptyStreakStartUs = 0;
-        ++skippedQueued;
+        ++st.skippedQueued;
         ++waitingKeyDropCount;
         ++burstDropCount;
         if ((waitingKeyDropCount % 30) == 1) {
@@ -1408,23 +1376,23 @@ int main(int argc, char** argv) {
         if ((waitingKeyDropCount % 120) == 1) {
           std::cout << "[native-video-client] waiting keyframe drops=" << waitingKeyDropCount << "\n";
         }
-        if (packetNowUs >= statAtUs) {
-          const uint64_t avgLatencyUs = (decodedFrames > 0) ? (sumLatencyUs / decodedFrames) : 0;
-          const uint64_t avgDecodeTailUs = (decodedFrames > 0) ? (sumDecodeTailUs / decodedFrames) : 0;
-          const double mbps = (recvBytes * 8.0) / (1000.0 * 1000.0);
-          const double decodedRawMbps = (decodedBytes * 8.0) / (1000.0 * 1000.0);
+        if (packetNowUs >= st.statAtUs) {
+          const uint64_t avgLatencyUs = (st.decodedFrames > 0) ? (st.sumLatencyUs / st.decodedFrames) : 0;
+          const uint64_t avgDecodeTailUs = (st.decodedFrames > 0) ? (st.sumDecodeTailUs / st.decodedFrames) : 0;
+          const double mbps = (st.recvBytes * 8.0) / (1000.0 * 1000.0);
+          const double decodedRawMbps = (st.decodedBytes * 8.0) / (1000.0 * 1000.0);
           const uint64_t decodeRatioX100 =
-              (recvBytes > 0) ? ((decodedBytes * 100ULL) / recvBytes) : 0;
+              (st.recvBytes > 0) ? ((st.decodedBytes * 100ULL) / st.recvBytes) : 0;
           publish_metrics(h.width, h.height, packetNowUs,
-                          avgLatencyUs, maxLatencyUs, avgDecodeTailUs, maxDecodeTailUs, mbps);
+                          avgLatencyUs, st.maxLatencyUs, avgDecodeTailUs, st.maxDecodeTailUs, mbps);
           std::ostringstream oss;
-          oss << "[native-video-client] recvFrames=" << recvFrames
-              << " decodedFrames=" << decodedFrames
-              << " skippedQueued=" << skippedQueued
+          oss << "[native-video-client] recvFrames=" << st.recvFrames
+              << " decodedFrames=" << st.decodedFrames
+              << " skippedQueued=" << st.skippedQueued
               << " avgLatencyUs=" << avgLatencyUs
-              << " maxLatencyUs=" << maxLatencyUs
+              << " maxLatencyUs=" << st.maxLatencyUs
               << " avgDecodeTailUs=" << avgDecodeTailUs
-              << " maxDecodeTailUs=" << maxDecodeTailUs
+              << " maxDecodeTailUs=" << st.maxDecodeTailUs
               << " mbps=" << mbps
               << " decodedRawMbps=" << decodedRawMbps
               << " decodeRatioX100=" << decodeRatioX100
@@ -1432,16 +1400,16 @@ int main(int argc, char** argv) {
           append_congestion_fields(oss);
           append_present_counter_fields(oss);
           log_client_line(oss.str());
-          recvFrames = 0;
-          decodedFrames = 0;
-          skippedQueued = 0;
-          recvBytes = 0;
-          decodedBytes = 0;
-          sumLatencyUs = 0;
-          maxLatencyUs = 0;
-          sumDecodeTailUs = 0;
-          maxDecodeTailUs = 0;
-          statAtUs += 1000000ULL;
+          st.recvFrames = 0;
+          st.decodedFrames = 0;
+          st.skippedQueued = 0;
+          st.recvBytes = 0;
+          st.decodedBytes = 0;
+          st.sumLatencyUs = 0;
+          st.maxLatencyUs = 0;
+          st.sumDecodeTailUs = 0;
+          st.maxDecodeTailUs = 0;
+          st.statAtUs += 1000000ULL;
         }
         return true;
       }
@@ -1454,12 +1422,12 @@ int main(int argc, char** argv) {
                                       &pendingTimestampOverflow)) {
         decodeEmptyStreak = 0;
         decodeEmptyStreakStartUs = 0;
-        ++skippedQueued;
-        ++decodeFailCount;
+        ++st.skippedQueued;
+        ++st.decodeFailCount;
         request_keyframe(4);
         ++congestionRecoveryRequestCount;
-        if ((decodeFailCount % 60) == 1) {
-          std::cout << "[native-video-client] decode failed count=" << decodeFailCount << "\n";
+        if ((st.decodeFailCount % 60) == 1) {
+          std::cout << "[native-video-client] decode failed count=" << st.decodeFailCount << "\n";
         }
         catchupMode = true;
         lastCatchupEnterUs = packetNowUs;
@@ -1479,23 +1447,23 @@ int main(int argc, char** argv) {
         }
         transition_congestion_state(ClientCongestionState::Congested, packetNowUs, "decode_fail",
                                     streamLagUs, decodeQueueLagEstimateUs, h.seq);
-        if (packetNowUs >= statAtUs) {
-          const uint64_t avgLatencyUs = (decodedFrames > 0) ? (sumLatencyUs / decodedFrames) : 0;
-          const uint64_t avgDecodeTailUs = (decodedFrames > 0) ? (sumDecodeTailUs / decodedFrames) : 0;
-          const double mbps = (recvBytes * 8.0) / (1000.0 * 1000.0);
-          const double decodedRawMbps = (decodedBytes * 8.0) / (1000.0 * 1000.0);
+        if (packetNowUs >= st.statAtUs) {
+          const uint64_t avgLatencyUs = (st.decodedFrames > 0) ? (st.sumLatencyUs / st.decodedFrames) : 0;
+          const uint64_t avgDecodeTailUs = (st.decodedFrames > 0) ? (st.sumDecodeTailUs / st.decodedFrames) : 0;
+          const double mbps = (st.recvBytes * 8.0) / (1000.0 * 1000.0);
+          const double decodedRawMbps = (st.decodedBytes * 8.0) / (1000.0 * 1000.0);
           const uint64_t decodeRatioX100 =
-              (recvBytes > 0) ? ((decodedBytes * 100ULL) / recvBytes) : 0;
+              (st.recvBytes > 0) ? ((st.decodedBytes * 100ULL) / st.recvBytes) : 0;
           publish_metrics(h.width, h.height, packetNowUs,
-                          avgLatencyUs, maxLatencyUs, avgDecodeTailUs, maxDecodeTailUs, mbps);
+                          avgLatencyUs, st.maxLatencyUs, avgDecodeTailUs, st.maxDecodeTailUs, mbps);
           std::ostringstream oss;
-          oss << "[native-video-client] recvFrames=" << recvFrames
-              << " decodedFrames=" << decodedFrames
-              << " skippedQueued=" << skippedQueued
+          oss << "[native-video-client] recvFrames=" << st.recvFrames
+              << " decodedFrames=" << st.decodedFrames
+              << " skippedQueued=" << st.skippedQueued
               << " avgLatencyUs=" << avgLatencyUs
-              << " maxLatencyUs=" << maxLatencyUs
+              << " maxLatencyUs=" << st.maxLatencyUs
               << " avgDecodeTailUs=" << avgDecodeTailUs
-              << " maxDecodeTailUs=" << maxDecodeTailUs
+              << " maxDecodeTailUs=" << st.maxDecodeTailUs
               << " mbps=" << mbps
               << " decodedRawMbps=" << decodedRawMbps
               << " decodeRatioX100=" << decodeRatioX100
@@ -1503,16 +1471,16 @@ int main(int argc, char** argv) {
           append_congestion_fields(oss);
           append_present_counter_fields(oss);
           log_client_line(oss.str());
-          recvFrames = 0;
-          decodedFrames = 0;
-          skippedQueued = 0;
-          recvBytes = 0;
-          decodedBytes = 0;
-          sumLatencyUs = 0;
-          maxLatencyUs = 0;
-          sumDecodeTailUs = 0;
-          maxDecodeTailUs = 0;
-          statAtUs += 1000000ULL;
+          st.recvFrames = 0;
+          st.decodedFrames = 0;
+          st.skippedQueued = 0;
+          st.recvBytes = 0;
+          st.decodedBytes = 0;
+          st.sumLatencyUs = 0;
+          st.maxLatencyUs = 0;
+          st.sumDecodeTailUs = 0;
+          st.maxDecodeTailUs = 0;
+          st.statAtUs += 1000000ULL;
         }
         return true;
       }
@@ -1521,13 +1489,13 @@ int main(int argc, char** argv) {
       if (pendingTimestampOverflow) {
         decodeEmptyStreak = 0;
         decodeEmptyStreakStartUs = 0;
-        ++skippedQueued;
-        ++decodeTimestampOverflowCount;
+        ++st.skippedQueued;
+        ++st.decodeTimestampOverflowCount;
         request_keyframe(4);
         ++congestionRecoveryRequestCount;
-        if ((decodeTimestampOverflowCount % 10ULL) == 1ULL) {
+        if ((st.decodeTimestampOverflowCount % 10ULL) == 1ULL) {
           std::cout << "[native-video-client] decoder timestamp queue overflow count="
-                    << decodeTimestampOverflowCount << "\n";
+                    << st.decodeTimestampOverflowCount << "\n";
         }
         catchupMode = true;
         lastCatchupEnterUs = packetNowUs;
@@ -1544,7 +1512,7 @@ int main(int argc, char** argv) {
         lastDecodedKeyCaptureUs = h.captureQpcUs;
       }
       if (outFrames.empty()) {
-        ++decodeEmptyCount;
+        ++st.decodeEmptyCount;
         ++decodeEmptyStreak;
         if (decodeEmptyStreak == 1) {
           decodeEmptyStreakStartUs = packetNowUs;
@@ -1557,7 +1525,7 @@ int main(int argc, char** argv) {
           const bool catchupEnterAllowed =
               (lastCatchupEnterUs == 0) || (packetNowUs >= (lastCatchupEnterUs + catchupReenterMinIntervalUs));
           if (catchupEnterAllowed) {
-            ++decodeEmptyRecoveryCount;
+            ++st.decodeEmptyRecoveryCount;
             waitForKeyFrame = true;
             catchupMode = true;
             lastCatchupEnterUs = packetNowUs;
@@ -1566,8 +1534,8 @@ int main(int argc, char** argv) {
             decoder.reset();
             transition_congestion_state(ClientCongestionState::Congested, packetNowUs, "decode_empty",
                                         streamLagUs, decodeQueueLagEstimateUs, h.seq);
-            if ((decodeEmptyRecoveryCount % 10) == 1) {
-              std::cout << "[native-video-client] decode empty recovery count=" << decodeEmptyRecoveryCount
+            if ((st.decodeEmptyRecoveryCount % 10) == 1) {
+              std::cout << "[native-video-client] decode empty recovery count=" << st.decodeEmptyRecoveryCount
                         << " streak=" << decodeEmptyStreak
                         << " emptyUs=" << emptyStreakUs
                         << "\n";
@@ -1586,29 +1554,29 @@ int main(int argc, char** argv) {
           decodeEmptyStreak = 0;
           decodeEmptyStreakStartUs = 0;
         }
-        if ((decodeEmptyCount % 120) == 1) {
-          std::cout << "[native-video-client] decode output empty count=" << decodeEmptyCount
+        if ((st.decodeEmptyCount % 120) == 1) {
+          std::cout << "[native-video-client] decode output empty count=" << st.decodeEmptyCount
                     << " streak=" << decodeEmptyStreak
                     << " emptyUs=" << emptyStreakUs
                     << "\n";
         }
-        if (packetNowUs >= statAtUs) {
-          const uint64_t avgLatencyUs = (decodedFrames > 0) ? (sumLatencyUs / decodedFrames) : 0;
-          const uint64_t avgDecodeTailUs = (decodedFrames > 0) ? (sumDecodeTailUs / decodedFrames) : 0;
-          const double mbps = (recvBytes * 8.0) / (1000.0 * 1000.0);
-          const double decodedRawMbps = (decodedBytes * 8.0) / (1000.0 * 1000.0);
+        if (packetNowUs >= st.statAtUs) {
+          const uint64_t avgLatencyUs = (st.decodedFrames > 0) ? (st.sumLatencyUs / st.decodedFrames) : 0;
+          const uint64_t avgDecodeTailUs = (st.decodedFrames > 0) ? (st.sumDecodeTailUs / st.decodedFrames) : 0;
+          const double mbps = (st.recvBytes * 8.0) / (1000.0 * 1000.0);
+          const double decodedRawMbps = (st.decodedBytes * 8.0) / (1000.0 * 1000.0);
           const uint64_t decodeRatioX100 =
-              (recvBytes > 0) ? ((decodedBytes * 100ULL) / recvBytes) : 0;
+              (st.recvBytes > 0) ? ((st.decodedBytes * 100ULL) / st.recvBytes) : 0;
           publish_metrics(h.width, h.height, packetNowUs,
-                          avgLatencyUs, maxLatencyUs, avgDecodeTailUs, maxDecodeTailUs, mbps);
+                          avgLatencyUs, st.maxLatencyUs, avgDecodeTailUs, st.maxDecodeTailUs, mbps);
           std::ostringstream oss;
-          oss << "[native-video-client] recvFrames=" << recvFrames
-              << " decodedFrames=" << decodedFrames
-              << " skippedQueued=" << skippedQueued
+          oss << "[native-video-client] recvFrames=" << st.recvFrames
+              << " decodedFrames=" << st.decodedFrames
+              << " skippedQueued=" << st.skippedQueued
               << " avgLatencyUs=" << avgLatencyUs
-              << " maxLatencyUs=" << maxLatencyUs
+              << " maxLatencyUs=" << st.maxLatencyUs
               << " avgDecodeTailUs=" << avgDecodeTailUs
-              << " maxDecodeTailUs=" << maxDecodeTailUs
+              << " maxDecodeTailUs=" << st.maxDecodeTailUs
               << " mbps=" << mbps
               << " decodedRawMbps=" << decodedRawMbps
               << " decodeRatioX100=" << decodeRatioX100
@@ -1616,16 +1584,16 @@ int main(int argc, char** argv) {
           append_congestion_fields(oss);
           append_present_counter_fields(oss);
           log_client_line(oss.str());
-          recvFrames = 0;
-          decodedFrames = 0;
-          skippedQueued = 0;
-          recvBytes = 0;
-          decodedBytes = 0;
-          sumLatencyUs = 0;
-          maxLatencyUs = 0;
-          sumDecodeTailUs = 0;
-          maxDecodeTailUs = 0;
-          statAtUs += 1000000ULL;
+          st.recvFrames = 0;
+          st.decodedFrames = 0;
+          st.skippedQueued = 0;
+          st.recvBytes = 0;
+          st.decodedBytes = 0;
+          st.sumLatencyUs = 0;
+          st.maxLatencyUs = 0;
+          st.sumDecodeTailUs = 0;
+          st.maxDecodeTailUs = 0;
+          st.statAtUs += 1000000ULL;
         }
         return true;
       }
@@ -1640,7 +1608,7 @@ int main(int argc, char** argv) {
           tsFromHeaderFallback ? h.captureQpcUs : static_cast<uint64_t>(decoded.sampleTimeHns / 10);
       const char* tsSource = tsFromMft ? "mft" : (tsFromInputFallback ? "input_fallback" : "header_fallback");
       if (decoded.bytes.empty() && !decoded.surfaceTexture) {
-        ++skippedQueued;
+        ++st.skippedQueued;
         waitForKeyFrame = true;
         return true;
       }
@@ -1652,7 +1620,7 @@ int main(int argc, char** argv) {
       if (!decoded.bytes.empty()) {
         frameNv12 = std::make_shared<std::vector<uint8_t>>(std::move(decoded.bytes));
         if (!frameNv12 || frameNv12->empty()) {
-          ++skippedQueued;
+          ++st.skippedQueued;
           waitForKeyFrame = true;
           return true;
         }
@@ -1771,37 +1739,37 @@ int main(int argc, char** argv) {
         }
       }
 
-      ++decodedFrames;
-      decodedBytes += decodedPayloadBytes;
+      ++st.decodedFrames;
+      st.decodedBytes += decodedPayloadBytes;
       // lastPresentedCaptureUs is now updated by render thread via gFrameBuf.lastPresentedCaptureUs
       const uint64_t latencyUs = aligned_lag_us(
           decodedCaptureUs, nowUs, captureTimelineReady, captureRemoteBaseUs, captureLocalBaseUs);
       const uint64_t decodeTailUs = aligned_lag_us(
           h.sendQpcUs, nowUs, sendTimelineReady, sendRemoteBaseUs, sendLocalBaseUs);
-      sumLatencyUs += latencyUs;
-      sumDecodeTailUs += decodeTailUs;
-      maxLatencyUs = std::max(maxLatencyUs, latencyUs);
-      maxDecodeTailUs = std::max(maxDecodeTailUs, decodeTailUs);
+      st.sumLatencyUs += latencyUs;
+      st.sumDecodeTailUs += decodeTailUs;
+      st.maxLatencyUs = std::max(st.maxLatencyUs, latencyUs);
+      st.maxDecodeTailUs = std::max(st.maxDecodeTailUs, decodeTailUs);
 
-      if (nowUs >= statAtUs) {
-        const uint64_t avgLatencyUs = (decodedFrames > 0) ? (sumLatencyUs / decodedFrames) : 0;
-        const uint64_t avgDecodeTailUs = (decodedFrames > 0) ? (sumDecodeTailUs / decodedFrames) : 0;
-        const double mbps = (recvBytes * 8.0) / (1000.0 * 1000.0);
-        const double decodedRawMbps = (decodedBytes * 8.0) / (1000.0 * 1000.0);
+      if (nowUs >= st.statAtUs) {
+        const uint64_t avgLatencyUs = (st.decodedFrames > 0) ? (st.sumLatencyUs / st.decodedFrames) : 0;
+        const uint64_t avgDecodeTailUs = (st.decodedFrames > 0) ? (st.sumDecodeTailUs / st.decodedFrames) : 0;
+        const double mbps = (st.recvBytes * 8.0) / (1000.0 * 1000.0);
+        const double decodedRawMbps = (st.decodedBytes * 8.0) / (1000.0 * 1000.0);
         const uint64_t decodeRatioX100 =
-            (recvBytes > 0) ? ((decodedBytes * 100ULL) / recvBytes) : 0;
+            (st.recvBytes > 0) ? ((st.decodedBytes * 100ULL) / st.recvBytes) : 0;
         const uint32_t visibleW = (decoded.visibleWidth > 0) ? decoded.visibleWidth : decoded.width;
         const uint32_t visibleH = (decoded.visibleHeight > 0) ? decoded.visibleHeight : decoded.height;
         publish_metrics(visibleW, visibleH, nowUs,
-                        avgLatencyUs, maxLatencyUs, avgDecodeTailUs, maxDecodeTailUs, mbps);
+                        avgLatencyUs, st.maxLatencyUs, avgDecodeTailUs, st.maxDecodeTailUs, mbps);
         std::ostringstream oss;
-        oss << "[native-video-client] recvFrames=" << recvFrames
-            << " decodedFrames=" << decodedFrames
-            << " skippedQueued=" << skippedQueued
+        oss << "[native-video-client] recvFrames=" << st.recvFrames
+            << " decodedFrames=" << st.decodedFrames
+            << " skippedQueued=" << st.skippedQueued
             << " avgLatencyUs=" << avgLatencyUs
-            << " maxLatencyUs=" << maxLatencyUs
+            << " maxLatencyUs=" << st.maxLatencyUs
             << " avgDecodeTailUs=" << avgDecodeTailUs
-            << " maxDecodeTailUs=" << maxDecodeTailUs
+            << " maxDecodeTailUs=" << st.maxDecodeTailUs
             << " mbps=" << mbps
             << " decodedRawMbps=" << decodedRawMbps
             << " decodeRatioX100=" << decodeRatioX100
@@ -1810,16 +1778,16 @@ int main(int argc, char** argv) {
         append_congestion_fields(oss);
         append_present_counter_fields(oss);
         log_client_line(oss.str());
-        recvFrames = 0;
-        decodedFrames = 0;
-        skippedQueued = 0;
-        recvBytes = 0;
-        decodedBytes = 0;
-        sumLatencyUs = 0;
-        maxLatencyUs = 0;
-        sumDecodeTailUs = 0;
-        maxDecodeTailUs = 0;
-        statAtUs += 1000000ULL;
+        st.recvFrames = 0;
+        st.decodedFrames = 0;
+        st.skippedQueued = 0;
+        st.recvBytes = 0;
+        st.decodedBytes = 0;
+        st.sumLatencyUs = 0;
+        st.maxLatencyUs = 0;
+        st.sumDecodeTailUs = 0;
+        st.maxDecodeTailUs = 0;
+        st.statAtUs += 1000000ULL;
       }
       return true;
     };
@@ -1905,23 +1873,23 @@ int main(int argc, char** argv) {
           continue;
         }
         if (u.codec != static_cast<uint16_t>(UdpCodec::H264)) {
-          ++skippedQueued;
+          ++st.skippedQueued;
           continue;
         }
         if (udpSimDropPm > 0) {
           const uint32_t samplePm = udpSimDropDist(udpSimRng);
           if (samplePm < udpSimDropPm) {
             ++udpSimDroppedCount;
-            ++skippedQueued;
+            ++st.skippedQueued;
             continue;
           }
         }
         ++udpSimAcceptedCount;
-        ++udpChunkRecvCount;
+        ++st.udpChunkRecvCount;
 
         const auto assembleResult = assembler.PushDatagram(datagram.data(), static_cast<size_t>(n));
         if (assembleResult.fecRecovered) {
-          udpAssemblyFecRecoveredCount += assembleResult.fecRecoveredChunks;
+          st.udpAssemblyFecRecoveredCount += assembleResult.fecRecoveredChunks;
         }
         bool discontinuityHandled = false;
         auto handle_udp_discontinuity = [&]() {
@@ -1930,17 +1898,17 @@ int main(int argc, char** argv) {
           waitForKeyFrame = true;
           decoder.reset();
           request_keyframe(2);
-          ++udpAssemblyKeyReqCount;
+          ++st.udpAssemblyKeyReqCount;
         };
         if (assembleResult.droppedPreviousIncomplete) {
           ++assemblyDropped;
-          ++udpAssemblyDroppedCount;
+          ++st.udpAssemblyDroppedCount;
           handle_udp_discontinuity();
         }
 
         if (assembleResult.disposition == UdpH264AssemblyDisposition::Malformed) {
-          ++skippedQueued;
-          ++udpAssemblyMalformedCount;
+          ++st.skippedQueued;
+          ++st.udpAssemblyMalformedCount;
           handle_udp_discontinuity();
           if (assembleResult.oversizePayload && ((++oversizePayloadDropCount % 30ULL) == 1ULL)) {
             std::cout << "[native-video-client] dropped oversized udp payload bytes="
@@ -1951,10 +1919,10 @@ int main(int argc, char** argv) {
         }
 
         if (assembleResult.disposition == UdpH264AssemblyDisposition::Dropped) {
-          ++skippedQueued;
+          ++st.skippedQueued;
           ++assemblyDropped;
-          ++udpAssemblyDroppedCount;
-          if (assembleResult.reorderDetected) ++udpAssemblyReorderCount;
+          ++st.udpAssemblyDroppedCount;
+          if (assembleResult.reorderDetected) ++st.udpAssemblyReorderCount;
           handle_udp_discontinuity();
           if ((assemblyDropped % 120) == 1) {
             std::cout << "[native-video-client] udp assembly drop count=" << assemblyDropped
@@ -1968,7 +1936,7 @@ int main(int argc, char** argv) {
         }
 
         if (assembleResult.disposition == UdpH264AssemblyDisposition::Completed) {
-          ++udpAssemblyCompletedCount;
+          ++st.udpAssemblyCompletedCount;
           const uint64_t packetNowUs = qpc_now_us();
           // GNLink stream telemetry (diagnostics only): one line per assembled keyframe, plus any
           // non-key frame that needed FEC repair or showed loss/reorder, so a periodic-stutter
@@ -1998,14 +1966,14 @@ int main(int argc, char** argv) {
 
         const uint64_t nowUs = qpc_now_us();
         if (nowUs >= udpAssemblyStatAtUs) {
-          const uint64_t chunksDelta = udpChunkRecvCount - lastUdpChunkRecvCount;
-          const uint64_t completedDelta = udpAssemblyCompletedCount - lastUdpAssemblyCompletedCount;
-          const uint64_t droppedDelta = udpAssemblyDroppedCount - lastUdpAssemblyDroppedCount;
-          const uint64_t malformedDelta = udpAssemblyMalformedCount - lastUdpAssemblyMalformedCount;
-          const uint64_t reorderDelta = udpAssemblyReorderCount - lastUdpAssemblyReorderCount;
-          const uint64_t keyReqDelta = udpAssemblyKeyReqCount - lastUdpAssemblyKeyReqCount;
+          const uint64_t chunksDelta = st.udpChunkRecvCount - lastUdpChunkRecvCount;
+          const uint64_t completedDelta = st.udpAssemblyCompletedCount - lastUdpAssemblyCompletedCount;
+          const uint64_t droppedDelta = st.udpAssemblyDroppedCount - lastUdpAssemblyDroppedCount;
+          const uint64_t malformedDelta = st.udpAssemblyMalformedCount - lastUdpAssemblyMalformedCount;
+          const uint64_t reorderDelta = st.udpAssemblyReorderCount - lastUdpAssemblyReorderCount;
+          const uint64_t keyReqDelta = st.udpAssemblyKeyReqCount - lastUdpAssemblyKeyReqCount;
           const uint64_t fecRecoveredDelta =
-              udpAssemblyFecRecoveredCount - lastUdpAssemblyFecRecoveredCount;
+              st.udpAssemblyFecRecoveredCount - lastUdpAssemblyFecRecoveredCount;
           const uint64_t simDroppedDelta = udpSimDroppedCount - lastUdpSimDroppedCount;
           const uint64_t simAcceptedDelta = udpSimAcceptedCount - lastUdpSimAcceptedCount;
           const uint64_t simTotalDelta = simDroppedDelta + simAcceptedDelta;
@@ -2016,7 +1984,7 @@ int main(int argc, char** argv) {
           const uint64_t dropPermille = (totalFramesDelta > 0)
               ? ((droppedDelta * 1000ULL) / totalFramesDelta)
               : 0;
-          udpAssemblyDropPmLast = static_cast<uint32_t>(std::min<uint64_t>(dropPermille, 1000ULL));
+          st.udpAssemblyDropPmLast = static_cast<uint32_t>(std::min<uint64_t>(dropPermille, 1000ULL));
           std::cout << "[native-video-client] udp-assembly chunks=" << chunksDelta
                     << " completed=" << completedDelta
                     << " dropped=" << droppedDelta
@@ -2030,13 +1998,13 @@ int main(int argc, char** argv) {
                     << " waitForKey=" << (waitForKeyFrame ? 1 : 0)
                     << " catchup=" << (catchupMode ? 1 : 0)
                     << "\n";
-          lastUdpChunkRecvCount = udpChunkRecvCount;
-          lastUdpAssemblyCompletedCount = udpAssemblyCompletedCount;
-          lastUdpAssemblyDroppedCount = udpAssemblyDroppedCount;
-          lastUdpAssemblyMalformedCount = udpAssemblyMalformedCount;
-          lastUdpAssemblyReorderCount = udpAssemblyReorderCount;
-          lastUdpAssemblyKeyReqCount = udpAssemblyKeyReqCount;
-          lastUdpAssemblyFecRecoveredCount = udpAssemblyFecRecoveredCount;
+          lastUdpChunkRecvCount = st.udpChunkRecvCount;
+          lastUdpAssemblyCompletedCount = st.udpAssemblyCompletedCount;
+          lastUdpAssemblyDroppedCount = st.udpAssemblyDroppedCount;
+          lastUdpAssemblyMalformedCount = st.udpAssemblyMalformedCount;
+          lastUdpAssemblyReorderCount = st.udpAssemblyReorderCount;
+          lastUdpAssemblyKeyReqCount = st.udpAssemblyKeyReqCount;
+          lastUdpAssemblyFecRecoveredCount = st.udpAssemblyFecRecoveredCount;
           lastUdpSimDroppedCount = udpSimDroppedCount;
           lastUdpSimAcceptedCount = udpSimAcceptedCount;
           udpAssemblyStatAtUs += 1000000ULL;
@@ -2065,7 +2033,7 @@ int main(int argc, char** argv) {
         if (!remote60::native_poc::recv_all(gSession.sock, payload.data(), payload.size())) break;
 
         if (!useRaw) {
-          ++skippedQueued;
+          ++st.skippedQueued;
           continue;
         }
 
@@ -2073,7 +2041,7 @@ int main(int argc, char** argv) {
         const uint64_t queueSetUs = nowUs;
         auto frameBgra = std::make_shared<std::vector<uint8_t>>(std::move(payload));
         if (!frameBgra || frameBgra->empty()) {
-          ++skippedQueued;
+          ++st.skippedQueued;
           continue;
         }
         {
@@ -2141,34 +2109,34 @@ int main(int argc, char** argv) {
           }
         }
 
-        ++recvFrames;
-        ++decodedFrames;
-        recvBytes += h.payloadSize;
-        decodedBytes += static_cast<uint64_t>(h.payloadSize);
+        ++st.recvFrames;
+        ++st.decodedFrames;
+        st.recvBytes += h.payloadSize;
+        st.decodedBytes += static_cast<uint64_t>(h.payloadSize);
         const uint64_t latencyUs = (nowUs >= h.captureQpcUs) ? (nowUs - h.captureQpcUs) : 0;
         const uint64_t decodeTailUs = (nowUs >= h.sendQpcUs) ? (nowUs - h.sendQpcUs) : 0;
-        sumLatencyUs += latencyUs;
-        sumDecodeTailUs += decodeTailUs;
-        maxLatencyUs = std::max(maxLatencyUs, latencyUs);
-        maxDecodeTailUs = std::max(maxDecodeTailUs, decodeTailUs);
+        st.sumLatencyUs += latencyUs;
+        st.sumDecodeTailUs += decodeTailUs;
+        st.maxLatencyUs = std::max(st.maxLatencyUs, latencyUs);
+        st.maxDecodeTailUs = std::max(st.maxDecodeTailUs, decodeTailUs);
 
-        if (nowUs >= statAtUs) {
-          const uint64_t avgLatencyUs = (recvFrames > 0) ? (sumLatencyUs / recvFrames) : 0;
-          const uint64_t avgDecodeTailUs = (recvFrames > 0) ? (sumDecodeTailUs / recvFrames) : 0;
-          const double mbps = (recvBytes * 8.0) / (1000.0 * 1000.0);
-          const double decodedRawMbps = (decodedBytes * 8.0) / (1000.0 * 1000.0);
+        if (nowUs >= st.statAtUs) {
+          const uint64_t avgLatencyUs = (st.recvFrames > 0) ? (st.sumLatencyUs / st.recvFrames) : 0;
+          const uint64_t avgDecodeTailUs = (st.recvFrames > 0) ? (st.sumDecodeTailUs / st.recvFrames) : 0;
+          const double mbps = (st.recvBytes * 8.0) / (1000.0 * 1000.0);
+          const double decodedRawMbps = (st.decodedBytes * 8.0) / (1000.0 * 1000.0);
           const uint64_t decodeRatioX100 =
-              (recvBytes > 0) ? ((decodedBytes * 100ULL) / recvBytes) : 0;
+              (st.recvBytes > 0) ? ((st.decodedBytes * 100ULL) / st.recvBytes) : 0;
           publish_metrics(h.width, h.height, nowUs,
-                          avgLatencyUs, maxLatencyUs, avgDecodeTailUs, maxDecodeTailUs, mbps);
+                          avgLatencyUs, st.maxLatencyUs, avgDecodeTailUs, st.maxDecodeTailUs, mbps);
           std::ostringstream oss;
-          oss << "[native-video-client] recvFrames=" << recvFrames
-              << " decodedFrames=" << decodedFrames
-              << " skippedQueued=" << skippedQueued
+          oss << "[native-video-client] recvFrames=" << st.recvFrames
+              << " decodedFrames=" << st.decodedFrames
+              << " skippedQueued=" << st.skippedQueued
               << " avgLatencyUs=" << avgLatencyUs
-              << " maxLatencyUs=" << maxLatencyUs
+              << " maxLatencyUs=" << st.maxLatencyUs
               << " avgDecodeTailUs=" << avgDecodeTailUs
-              << " maxDecodeTailUs=" << maxDecodeTailUs
+              << " maxDecodeTailUs=" << st.maxDecodeTailUs
               << " mbps=" << mbps
               << " decodedRawMbps=" << decodedRawMbps
               << " decodeRatioX100=" << decodeRatioX100
@@ -2176,16 +2144,16 @@ int main(int argc, char** argv) {
           append_congestion_fields(oss);
           append_present_counter_fields(oss);
           log_client_line(oss.str());
-          recvFrames = 0;
-          decodedFrames = 0;
-          skippedQueued = 0;
-          recvBytes = 0;
-          decodedBytes = 0;
-          sumLatencyUs = 0;
-          maxLatencyUs = 0;
-          sumDecodeTailUs = 0;
-          maxDecodeTailUs = 0;
-          statAtUs += 1000000ULL;
+          st.recvFrames = 0;
+          st.decodedFrames = 0;
+          st.skippedQueued = 0;
+          st.recvBytes = 0;
+          st.decodedBytes = 0;
+          st.sumLatencyUs = 0;
+          st.maxLatencyUs = 0;
+          st.sumDecodeTailUs = 0;
+          st.maxDecodeTailUs = 0;
+          st.statAtUs += 1000000ULL;
         }
       } else if (msgType == MessageType::EncodedFrameH264 && header.size == sizeof(EncodedFrameHeader)) {
         EncodedFrameHeader h{};
@@ -2198,7 +2166,7 @@ int main(int argc, char** argv) {
       } else {
         const size_t bodySize = static_cast<size_t>(header.size - sizeof(header));
         if (bodySize > 0 && !remote60::native_poc::recv_discard(gSession.sock, bodySize)) break;
-        ++skippedQueued;
+        ++st.skippedQueued;
       }
 
       const uint64_t nowUs = qpc_now_us();
