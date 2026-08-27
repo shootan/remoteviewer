@@ -11,6 +11,7 @@
   - `HANDOFF.md` — session handoff / current plan (start here).
   - `구현계획.md` — the plan + checklist.
   - `호스트_분할_리팩터_계획.md` — host main split/classify refactor design + per-phase checkboxes.
+  - `클라이언트_뷰어_분할_리팩터_계획.md` — viewer (GNLinkViewer) main split refactor design + per-phase checkboxes.
   - `history.md` — running work log.
   - `external_wan_test_guide.md`, `성능기준선_60fps_20260804.md`, `수동확인_체크리스트.md` — active test aids.
 - `docs/legacy/` — dated/superseded designs, reviews, and old history splits. Read only when

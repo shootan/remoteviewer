@@ -7345,3 +7345,30 @@ Next action
 - 병합: `git merge --ff-only refactor/host-split`(main의 커밋이 전부 브랜치에 있어 fast-forward, 충돌 없음) → main = d152627,
   main과 브랜치 diff 0, native_video_host_main.cpp 265줄, product_version 0.2.58. push 없음. `refactor/host-split` 브랜치는 남겨 둠.
 - 되돌리는 법: 코드 `git checkout v0.2.57-pre-host-split`(또는 keep/ 브랜치), 설치본 0.2.57 재설치. 다음: Phase 4.
+
+### 306) 2026-08-27 클라이언트 뷰어 분할 리팩터 계획 수립 (분석 + 문서만, 코드 변경 없음)
+
+- Goal: 호스트 분할(260~305)과 같은 방식으로 `native_video_client_main.cpp`(GNLinkViewer) 분할을 설계한다.
+- 실측(e346ff7): 5,349줄/255KB, main() 2,158줄(3191~5349), 파일 스코프 전역 88개(atomic 58, mutex 4, 동적 초기화 19) +
+  함수 내 static 은닉 상태 9, recvThread 지역 ~75개, `process_h264_frame` 람다 666줄, WndProc 833줄(WM_PAINT 305),
+  1s 통계 블록 5회 복제(3 동일 + 2 변형). 구간별 참조 전역 수: WndProc 36 / controlThread 29 / main 프리루드 26 /
+  피커·선택 글루 24 / draw 17 / process_h264_frame 15(+recv 지역 60) / Nv12D3dRenderer 0.
+- 기존 분석 판정: "후순위" 근거였던 shared_core/tcp_control/toolbar/macro_window 분리는 프로토콜 상태모델·별창뿐이고
+  디코드 파이프라인·혼잡 상태기계·선택 게이트·present·WndProc·startup은 전부 main.cpp에 남아 있음. 호스트와 다른 점:
+  (1) 전역 기반이라 함수를 다른 TU로 옮기기 전에 extern 헤더(0-0 `viewer_globals`)가 선행돼야 함, (2) 호스트 e2e
+  (`remote60_udp_control_e2e_test`)는 `ClientSessionController`를 써 뷰어 코드를 전혀 거치지 않으므로 뷰어 exe를 직접
+  띄우는 e2e 3종(stream/picker/tcp-raw)을 게이트로 신설. 중복: `native_socket.hpp`(WinsockScope/recv_all/recv_discard),
+  `host_args.hpp`/`host_string_util.hpp`(env/string 6), `host_capture_device`(backend_request_*)와 byte-동일 사본;
+  `ClientSessionController`(906줄)는 같은 프로토콜 루프의 이중 구현(뷰어 미링크) → Phase 4 후보.
+- 문서: `docs/클라이언트_뷰어_분할_리팩터_계획.md` 신설 — Phase 0 이동 16(0-0 globals extern → 소켓 중복 제거 → env/log/
+  args/decoder_backend/gdi/renderer/layout/input/picker/overlay/cursor/window_proc → dead code → 호스트 공유 통합) /
+  Phase 1 state struct 13 / Phase 2 클래스 12 + 단위테스트 4(FrameGate/SelectionGate/PickerGesture/Layout — 순수 결정은
+  시간을 인자로) / Phase 3 ViewerContext 조립(main ≤150줄, WndProc는 GWLP_USERDATA) / Phase 4 스레드 소유권 재설계
+  (+PresentScheduler=P3 paced playout 훅, SyntheticRefresh flag). `구현계획.md` 체크리스트 섹션, `HANDOFF.md` 코드 지도,
+  `README.md` 목록 갱신.
+- 정책(호스트 승계, 계획 §11에 기본값 명시): Codex 교차검증 없음, 브랜치 `refactor/viewer-split` + 문서는 main,
+  접두사 `viewer_` / namespace `remote60::native_poc::viewer`(셸 `client_shell_*`·호스트 `host_args.hpp` 심볼 충돌 회피),
+  복귀 태그 `v0.2.58-pre-viewer-split`. 게이트 8종(빌드/이동 동일성/뷰어 e2e/단위테스트/릴리스 금지/로그 호환/정적
+  초기화/CLI·셸 계약).
+- 검증: 없음(분석/문서). 빌드/코드 변경 없음.
+- 다음 액션: 사전 단계(태그/브랜치, `automation/viewer_split_e2e.sh` 기준선 C-1/2/3) → Phase 0-0 `viewer_globals.hpp/.cpp`.
