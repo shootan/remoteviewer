@@ -1,6 +1,7 @@
 #include "viewer_common.hpp"
 #include "viewer_globals.hpp"
 #include "viewer_env_util.hpp"
+#include "viewer_log.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -344,18 +345,6 @@ Args parse_args(int argc, char** argv) {
 
 
 
-const char* congestion_state_name(ClientCongestionState state) {
-  switch (state) {
-    case ClientCongestionState::Normal:
-      return "normal";
-    case ClientCongestionState::Recovering:
-      return "recovering";
-    case ClientCongestionState::Congested:
-      return "congested";
-    default:
-      return "unknown";
-  }
-}
 
 
 
@@ -398,7 +387,6 @@ ClientControlMetricsSnapshot capture_client_control_metrics_snapshot() {
 }
 
 
-void log_client_line(const std::string& line);
 
 
 void queue_thumbnail_fetches_from_panel() {
@@ -1241,21 +1229,7 @@ void draw_overlay(HDC hdc) {
                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
-void log_client_line(const std::string& line) {
-  std::lock_guard<std::mutex> lk(gLogMu);
-  const std::string withNewline = line + "\n";
-  std::cout << withNewline;
-}
 
-void request_keyframe(uint16_t reason) {
-  const uint64_t nowUs = qpc_now_us();
-  const auto attempt = gKeyframeRequests.Request(reason, nowUs);
-  if (!attempt.queued && (attempt.throttledCount % 120) == 1) {
-    std::cout << "[native-video-client][control] keyframe-request-throttled total=" << attempt.throttledCount
-              << " reason=" << (reason == 0 ? 1 : reason)
-              << " cause=" << attempt.throttleCause << "\n";
-  }
-}
 
 struct Nv12RenderTelemetry {
   uint64_t uploadYUs = 0;

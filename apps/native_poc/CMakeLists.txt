@@ -148,6 +148,7 @@ target_link_libraries(remote60_secure_input_service PRIVATE
 add_executable(remote60_native_video_client_poc
   src/native_video_client_main.cpp
   src/viewer_globals.cpp
+  src/viewer_log.cpp
   src/client_macro_window.cpp
   # The session controls live in their own window because the video is presented through a flip
   # swap chain, which erases anything drawn into the video window's own client area.
