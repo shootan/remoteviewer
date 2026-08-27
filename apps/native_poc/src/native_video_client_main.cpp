@@ -14,6 +14,7 @@
 #include "viewer_window_proc.hpp"
 #include "viewer_recv_stats.hpp"
 #include "viewer_frame_gate_state.hpp"
+#include "viewer_decoder_state.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -151,6 +152,7 @@ int main(int argc, char** argv) {
   }
 
   const Args args = parse_args(argc, argv);
+  DecoderState dec;
   gPresent.traceEvery = args.traceEvery;
   gPresent.traceMax = args.traceMax;
   gPresent.presentFrameIntervalUs = static_cast<uint32_t>(std::max<uint64_t>(
@@ -184,29 +186,28 @@ int main(int argc, char** argv) {
       "REMOTE60_NATIVE_UDP_SIM_DROP_SEED", 0, 0, 0x7fffffffu);
   gControl.keyframeRequests.Reset();
 
-  const bool useRaw = (args.codec == "raw");
-  const bool useH264 = (args.codec == "h264");
+  dec.useRaw = (args.codec == "raw");
+  dec.useH264 = (args.codec == "h264");
   const bool encodedExperimentEnabled =
       (REMOTE60_NATIVE_ENCODED_EXPERIMENT != 0) || env_truthy("REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE");
-  if (!useRaw && !useH264) {
+  if (!dec.useRaw && !dec.useH264) {
     std::cerr << "[native-video-client] unsupported codec: " << args.codec << " (supported: raw,h264)\n";
     return 10;
   }
-  if (useH264 && !encodedExperimentEnabled) {
+  if (dec.useH264 && !encodedExperimentEnabled) {
     std::cerr << "[native-video-client] unsupported codec: " << args.codec
               << " (enable REMOTE60_NATIVE_ENCODED_EXPERIMENT or set env REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE=1)\n";
     return 10;
   }
   std::string effectiveTransport = args.transport;
   if (effectiveTransport.empty()) {
-    effectiveTransport = useH264 ? "udp" : "tcp";
+    effectiveTransport = dec.useH264 ? "udp" : "tcp";
   }
-  VideoTransport transport = VideoTransport::Tcp;
-  if (!parse_video_transport(effectiveTransport, &transport)) {
+  if (!parse_video_transport(effectiveTransport, &dec.transport)) {
     std::cerr << "[native-video-client] unsupported transport: " << effectiveTransport << " (supported: tcp,udp)\n";
     return 12;
   }
-  if (transport == VideoTransport::Udp && useRaw) {
+  if (dec.transport == VideoTransport::Udp && dec.useRaw) {
     std::cerr << "[native-video-client] raw codec over udp is not supported in current phase (use codec=h264)\n";
     return 13;
   }
@@ -214,7 +215,7 @@ int main(int argc, char** argv) {
   gSession.overlayConfig.host = args.host;
   gSession.overlayConfig.port = args.port;
   gSession.overlayConfig.controlPort = args.controlPort;
-  gSession.overlayConfig.transport = video_transport_name(transport);
+  gSession.overlayConfig.transport = video_transport_name(dec.transport);
   gSession.overlayConfig.codec = args.codec;
   gSession.overlayConfig.fpsHint = args.fpsHint;
   gSession.overlayConfig.controlIntervalMs = args.controlIntervalMs;
@@ -295,22 +296,15 @@ int main(int argc, char** argv) {
     push_session_toolbar_state();
   }
 
-  bool mfStarted = false;
-  H264Decoder decoder;
-  bool decoderReady = false;
-  bool waitForKeyFrame = useH264;
-  uint32_t decoderW = 0;
-  uint32_t decoderH = 0;
-  Microsoft::WRL::ComPtr<ID3D11Device> decD3dDevice;
-  Microsoft::WRL::ComPtr<ID3D11DeviceContext> decD3dContext;
-  if (useH264) {
+  dec.waitForKeyFrame = dec.useH264;
+  if (dec.useH264) {
     const HRESULT hr = MFStartup(MF_VERSION);
     if (FAILED(hr)) {
       std::cerr << "[native-video-client] MFStartup failed hr=0x" << std::hex << static_cast<unsigned long>(hr)
                 << std::dec << "\n";
       return 11;
     }
-    mfStarted = true;
+    dec.mfStarted = true;
     // Supplying AMD's decoder with an external DXGI device manager can enter atidxx64's
     // direct-surface path even when the caller later reads a CPU buffer. Keep the proven
     // system-memory decoder path as the safe default; the zero-copy experiment is an
@@ -323,17 +317,17 @@ int main(int argc, char** argv) {
       // can be sampled directly without a GPU->CPU copy and CPU->GPU upload.
       if (!gUi.nv12Renderer.ready) (void)gUi.nv12Renderer.init(gSession.hwnd);
       if (gUi.nv12Renderer.ready) {
-        decD3dDevice = gUi.nv12Renderer.device;
-        decD3dContext = gUi.nv12Renderer.context;
-        (void)decoder.set_d3d11_device(decD3dDevice.Get());
+        dec.d3dDevice = gUi.nv12Renderer.device;
+        dec.d3dContext = gUi.nv12Renderer.context;
+        (void)dec.decoder.set_d3d11_device(dec.d3dDevice.Get());
       } else {
         D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
         const HRESULT d3dHr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
                                                 D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
-                                                D3D11_SDK_VERSION, &decD3dDevice, &fl,
-                                                &decD3dContext);
-        if (SUCCEEDED(d3dHr) && decD3dDevice) {
-          (void)decoder.set_d3d11_device(decD3dDevice.Get());
+                                                D3D11_SDK_VERSION, &dec.d3dDevice, &fl,
+                                                &dec.d3dContext);
+        if (SUCCEEDED(d3dHr) && dec.d3dDevice) {
+          (void)dec.decoder.set_d3d11_device(dec.d3dDevice.Get());
         }
       }
     }
@@ -345,9 +339,9 @@ int main(int argc, char** argv) {
   std::string directoryPunchToken;
   Args resolvedArgs = args;
   if (!args.directoryUrl.empty()) {
-    if (transport != VideoTransport::Udp) {
+    if (dec.transport != VideoTransport::Udp) {
       std::cerr << "[native-video-client] the directory path is udp only\n";
-      if (mfStarted) MFShutdown();
+      if (dec.mfStarted) MFShutdown();
       return 3;
     }
     std::string directoryError;
@@ -357,7 +351,7 @@ int main(int argc, char** argv) {
                                                args.directoryPassword, &sessionToken,
                                                &directoryError)) {
       std::cerr << "[native-video-client] directory login failed: " << directoryError << "\n";
-      if (mfStarted) MFShutdown();
+      if (dec.mfStarted) MFShutdown();
       return 3;
     }
 
@@ -367,7 +361,7 @@ int main(int argc, char** argv) {
       if (!remote60::native_poc::directory_list_hosts(args.directoryUrl, sessionToken, &hosts,
                                                       &directoryError)) {
         std::cerr << "[native-video-client] directory hosts failed: " << directoryError << "\n";
-        if (mfStarted) MFShutdown();
+        if (dec.mfStarted) MFShutdown();
         return 3;
       }
       for (const auto& entry : hosts) {
@@ -381,7 +375,7 @@ int main(int argc, char** argv) {
         std::cerr << "[native-video-client] no host on this account"
                   << (args.directoryHostName.empty() ? "" : " named " + args.directoryHostName)
                   << "\n";
-        if (mfStarted) MFShutdown();
+        if (dec.mfStarted) MFShutdown();
         return 3;
       }
     }
@@ -393,7 +387,7 @@ int main(int argc, char** argv) {
     remote60::native_poc::DirectorySessionResult session{};
     if (!remote60::native_poc::directory_session_open(request, &session, &directoryError)) {
       std::cerr << "[native-video-client] directory connect failed: " << directoryError << "\n";
-      if (mfStarted) MFShutdown();
+      if (dec.mfStarted) MFShutdown();
       return 3;
     }
     gSession.sock = session.socket;
@@ -411,20 +405,20 @@ int main(int argc, char** argv) {
               << (session.answered ? "" : " [no answer, trying anyway]") << "\n";
   } else {
     gSession.sock = socket(AF_INET,
-                   (transport == VideoTransport::Udp) ? SOCK_DGRAM : SOCK_STREAM,
-                   (transport == VideoTransport::Udp) ? IPPROTO_UDP : IPPROTO_TCP);
+                   (dec.transport == VideoTransport::Udp) ? SOCK_DGRAM : SOCK_STREAM,
+                   (dec.transport == VideoTransport::Udp) ? IPPROTO_UDP : IPPROTO_TCP);
   }
   if (gSession.sock == INVALID_SOCKET) {
     std::cerr << "[native-video-client] socket create failed\n";
-    if (mfStarted) MFShutdown();
+    if (dec.mfStarted) MFShutdown();
     return 3;
   }
 
-  if (transport == VideoTransport::Tcp) {
+  if (dec.transport == VideoTransport::Tcp) {
     int noDelay = 1;
     setsockopt(gSession.sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
   }
-  if (transport == VideoTransport::Udp) {
+  if (dec.transport == VideoTransport::Udp) {
     if (args.tcpRecvBufKb == 0) {
       const int recvBuf = 1024 * 1024;
       (void)setsockopt(gSession.sock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&recvBuf), sizeof(recvBuf));
@@ -450,17 +444,17 @@ int main(int argc, char** argv) {
     std::cerr << "[native-video-client] invalid host " << resolvedArgs.host << "\n";
     closesocket(gSession.sock);
     gSession.sock = INVALID_SOCKET;
-    if (mfStarted) MFShutdown();
+    if (dec.mfStarted) MFShutdown();
     return 4;
   }
   if (connect(gSession.sock, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0) {
     std::cerr << "[native-video-client] connect failed " << resolvedArgs.host << ":" << resolvedArgs.port << "\n";
     closesocket(gSession.sock);
     gSession.sock = INVALID_SOCKET;
-    if (mfStarted) MFShutdown();
+    if (dec.mfStarted) MFShutdown();
     return 5;
   }
-  if (transport == VideoTransport::Udp) {
+  if (dec.transport == VideoTransport::Udp) {
     int timeoutMs = 200;
     (void)setsockopt(gSession.sock, SOL_SOCKET, SO_RCVTIMEO,
                      reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
@@ -497,7 +491,7 @@ int main(int argc, char** argv) {
       std::cerr << "[native-video-client] udp handshake failed " << args.host << ":" << args.port << "\n";
       closesocket(gSession.sock);
       gSession.sock = INVALID_SOCKET;
-      if (mfStarted) MFShutdown();
+      if (dec.mfStarted) MFShutdown();
       return 6;
     }
   }
@@ -505,7 +499,7 @@ int main(int argc, char** argv) {
   // No second port to dial means the directory path: control tunnels through the socket the
   // punch just opened. The send is bare because the socket is connected -- the same socket the
   // receive loop below reads, which is what makes the two directions one NAT mapping.
-  if (args.controlPort == 0 && transport == VideoTransport::Udp && gSession.sock != INVALID_SOCKET) {
+  if (args.controlPort == 0 && dec.transport == VideoTransport::Udp && gSession.sock != INVALID_SOCKET) {
     gControl.udpControl.Configure(
         [](const void* data, size_t len) -> bool {
           return send(gSession.sock, static_cast<const char*>(data), static_cast<int>(len), 0) > 0;
@@ -523,7 +517,7 @@ int main(int argc, char** argv) {
 
   std::cout << "[native-video-client] connected host=" << args.host
             << " port=" << args.port
-            << " transport=" << video_transport_name(transport)
+            << " transport=" << video_transport_name(dec.transport)
             << " codec=" << args.codec
             << " seconds=" << args.seconds << "\n";
   std::cout << "[native-video-client] keyframe-request-limiter minIntervalUs="
@@ -874,9 +868,9 @@ int main(int argc, char** argv) {
     }
     if (controlReady) {
       gControl.connected.store(true, std::memory_order_relaxed);
-      gControl.runtimeTune.SetEnabled(useH264);
+      gControl.runtimeTune.SetEnabled(dec.useH264);
       queue_window_list_request("window_list_request pending");
-      if (useH264 && (args.runtimeBitrate > 0 || args.runtimeKeyint > 0)) {
+      if (dec.useH264 && (args.runtimeBitrate > 0 || args.runtimeKeyint > 0)) {
         gControl.runtimeTune.MarkDirty();
       }
       std::cout << "[native-video-client] control connected transport="
@@ -897,9 +891,7 @@ int main(int argc, char** argv) {
 
   const uint64_t startUs = qpc_now_us();
   std::thread recvThread([&]() {
-    // Which selection generation this loop has already reset the decoder for. A bump by
-    // begin_pc_target_selection() on the UI thread makes the next frame flush stale references.
-    uint64_t recvSelectionEpoch = gSel.epoch.load(std::memory_order_acquire);
+    dec.recvSelectionEpoch = gSel.epoch.load(std::memory_order_acquire);
     RecvStats st;
     st.statAtUs = qpc_now_us() + 1000000ULL;
     gate.frameIntervalUs = std::max<uint64_t>(
@@ -1098,7 +1090,7 @@ int main(int argc, char** argv) {
         gate.lagTriggerStreak = 0;
       }
 
-      if (!useH264) {
+      if (!dec.useH264) {
         ++st.skippedQueued;
         return true;
       }
@@ -1106,11 +1098,11 @@ int main(int argc, char** argv) {
       // Target-selection gate (mobile parity, Android commit 4892dea). While the user's pick is
       // resolving, keep the picker up and present nothing until the acknowledged generation's
       // first frame decodes.
-      if (gSel.epoch.load(std::memory_order_acquire) != recvSelectionEpoch) {
+      if (gSel.epoch.load(std::memory_order_acquire) != dec.recvSelectionEpoch) {
         // A fresh pick: drop stale reference frames and hold for the new generation's keyframe.
-        recvSelectionEpoch = gSel.epoch.load(std::memory_order_acquire);
-        decoder.reset();
-        waitForKeyFrame = true;
+        dec.recvSelectionEpoch = gSel.epoch.load(std::memory_order_acquire);
+        dec.decoder.reset();
+        dec.waitForKeyFrame = true;
       }
       if (gSel.pending.load(std::memory_order_acquire)) {
         if (gSel.awaitingAck.load(std::memory_order_acquire)) {
@@ -1138,8 +1130,8 @@ int main(int argc, char** argv) {
         }
       }
 
-      if (!decoderReady || decoderW != h.width || decoderH != h.height) {
-        if (!decoder.initialize(h.width, h.height, args.fpsHint)) {
+      if (!dec.decoderReady || dec.decoderW != h.width || dec.decoderH != h.height) {
+        if (!dec.decoder.initialize(h.width, h.height, args.fpsHint)) {
           std::cerr << "[native-video-client] H264 decoder initialize failed size=" << h.width << "x" << h.height
                     << "\n";
           return false;
@@ -1148,17 +1140,17 @@ int main(int argc, char** argv) {
     const std::string requestedDecoderBackendPrint =
         requestedDecoderBackend.empty() ? "default(mft_auto)" : requestedDecoderBackend;
         const std::string backendFallbackReason =
-            backend_fallback_reason(requestedDecoderBackend, decoder.backend_name());
-        std::cout << "[native-video-client] H264 decoder backend=" << decoder.backend_name()
+            backend_fallback_reason(requestedDecoderBackend, dec.decoder.backend_name());
+        std::cout << "[native-video-client] H264 decoder backend=" << dec.decoder.backend_name()
                   << " backendRequested=" << requestedDecoderBackendPrint
-                  << " backendResolved=" << decoder.backend_name()
+                  << " backendResolved=" << dec.decoder.backend_name()
                   << " backendFallbackReason=" << backendFallbackReason
-                  << " hw=" << (decoder.using_hardware() ? 1 : 0)
+                  << " hw=" << (dec.decoder.using_hardware() ? 1 : 0)
                   << " size=" << h.width << "x" << h.height << "\n";
-        decoderReady = true;
-        decoderW = h.width;
-        decoderH = h.height;
-        waitForKeyFrame = true;
+        dec.decoderReady = true;
+        dec.decoderW = h.width;
+        dec.decoderH = h.height;
+        dec.waitForKeyFrame = true;
       }
 
       const bool keyFrame = ((h.flags & 1u) != 0);
@@ -1197,9 +1189,9 @@ int main(int argc, char** argv) {
         // past, so quiet-drop stays safe there. Recover once per gap; the wait gate below then
         // drops non-key frames until the IDR and request_keyframe's limiter throttles the ask.
         const bool inLiveReferenceChain = (h.captureQpcUs >= gate.lastDecodedKeyCaptureUs);
-        if (inLiveReferenceChain && !waitForKeyFrame) {
-          waitForKeyFrame = true;
-          decoder.reset();
+        if (inLiveReferenceChain && !dec.waitForKeyFrame) {
+          dec.waitForKeyFrame = true;
+          dec.decoder.reset();
           request_keyframe(6);  // stale_reference_gap
           ++gate.congestionRecoveryRequestCount;
           ++gate.staleReferenceRecoveryCount;
@@ -1255,8 +1247,8 @@ int main(int argc, char** argv) {
                                       streamLagUs, decodeQueueLagEstimateUs, h.seq);
           gate.catchupMode = true;
           gate.lastCatchupEnterUs = packetNowUs;
-          waitForKeyFrame = true;
-          decoder.reset();
+          dec.waitForKeyFrame = true;
+          dec.decoder.reset();
           request_keyframe(1);
           ++gate.congestionRecoveryRequestCount;
           std::cout << "[native-video-client] catchup enter streamLagUs=" << streamLagUs
@@ -1316,15 +1308,15 @@ int main(int argc, char** argv) {
             gate.lastRecoveryRequestUs = packetNowUs;
           }
           gate.catchupMode = true;
-          waitForKeyFrame = true;
-          decoder.reset();
+          dec.waitForKeyFrame = true;
+          dec.decoder.reset();
           gate.lastCatchupEnterUs = packetNowUs;
           transition_congestion_state(ClientCongestionState::Congested, packetNowUs, "recover_timeout",
                                       streamLagUs, decodeQueueLagEstimateUs, h.seq);
         }
       }
 
-      if (waitForKeyFrame && !keyFrame) {
+      if (dec.waitForKeyFrame && !keyFrame) {
         gate.decodeEmptyStreak = 0;
         gate.decodeEmptyStreakStartUs = 0;
         ++st.skippedQueued;
@@ -1378,7 +1370,7 @@ int main(int argc, char** argv) {
       std::vector<DecodedFrameNv12> outFrames;
       const int64_t inputSampleTimeHns = static_cast<int64_t>(h.captureQpcUs) * 10;
       bool pendingTimestampOverflow = false;
-      if (!decoder.decode_access_unit(*payloadPtr, keyFrame, inputSampleTimeHns, &outFrames,
+      if (!dec.decoder.decode_access_unit(*payloadPtr, keyFrame, inputSampleTimeHns, &outFrames,
                                       &pendingTimestampOverflow)) {
         gate.decodeEmptyStreak = 0;
         gate.decodeEmptyStreakStartUs = 0;
@@ -1391,19 +1383,19 @@ int main(int argc, char** argv) {
         }
         gate.catchupMode = true;
         gate.lastCatchupEnterUs = packetNowUs;
-        waitForKeyFrame = true;
+        dec.waitForKeyFrame = true;
         if (++gate.decodeConsecutiveFailCount >= gate.kDecodeRebuildThreshold) {
           // Flush did not clear it: the transform or device is wedged. A full rebuild is the
           // only recovery, and it is what the resolution-change path already does -- reached
           // here without a resolution change so the wedge is not caught otherwise.
           std::cout << "[native-video-client] decoder wedged (consecutive fails="
                     << gate.decodeConsecutiveFailCount << "); rebuilding\n";
-          if (decoder.initialize(decoderW, decoderH, args.fpsHint)) {
+          if (dec.decoder.initialize(dec.decoderW, dec.decoderH, args.fpsHint)) {
             gate.decodeConsecutiveFailCount = 0;
           }
           // On rebuild failure, keep the streak so the next frame retries the rebuild.
         } else {
-          decoder.reset();
+          dec.decoder.reset();
         }
         transition_congestion_state(ClientCongestionState::Congested, packetNowUs, "decode_fail",
                                     streamLagUs, decodeQueueLagEstimateUs, h.seq);
@@ -1459,13 +1451,13 @@ int main(int argc, char** argv) {
         }
         gate.catchupMode = true;
         gate.lastCatchupEnterUs = packetNowUs;
-        waitForKeyFrame = true;
-        decoder.reset();
+        dec.waitForKeyFrame = true;
+        dec.decoder.reset();
         transition_congestion_state(ClientCongestionState::Congested, packetNowUs, "decode_ts_overflow",
                                     streamLagUs, decodeQueueLagEstimateUs, h.seq);
         return true;
       }
-      waitForKeyFrame = false;
+      dec.waitForKeyFrame = false;
       if (keyFrame) {
         // Advance the reference-chain anchor: a successfully decoded IDR resyncs the decoder, so
         // any later stale frame older than this is safe to quiet-drop.
@@ -1486,12 +1478,12 @@ int main(int argc, char** argv) {
               (gate.lastCatchupEnterUs == 0) || (packetNowUs >= (gate.lastCatchupEnterUs + gate.catchupReenterMinIntervalUs));
           if (catchupEnterAllowed) {
             ++st.decodeEmptyRecoveryCount;
-            waitForKeyFrame = true;
+            dec.waitForKeyFrame = true;
             gate.catchupMode = true;
             gate.lastCatchupEnterUs = packetNowUs;
             request_keyframe(5);
             ++gate.congestionRecoveryRequestCount;
-            decoder.reset();
+            dec.decoder.reset();
             transition_congestion_state(ClientCongestionState::Congested, packetNowUs, "decode_empty",
                                         streamLagUs, decodeQueueLagEstimateUs, h.seq);
             if ((st.decodeEmptyRecoveryCount % 10) == 1) {
@@ -1569,7 +1561,7 @@ int main(int argc, char** argv) {
       const char* tsSource = tsFromMft ? "mft" : (tsFromInputFallback ? "input_fallback" : "header_fallback");
       if (decoded.bytes.empty() && !decoded.surfaceTexture) {
         ++st.skippedQueued;
-        waitForKeyFrame = true;
+        dec.waitForKeyFrame = true;
         return true;
       }
       const uint64_t decodedPayloadBytes = decoded.bytes.empty()
@@ -1581,7 +1573,7 @@ int main(int argc, char** argv) {
         frameNv12 = std::make_shared<std::vector<uint8_t>>(std::move(decoded.bytes));
         if (!frameNv12 || frameNv12->empty()) {
           ++st.skippedQueued;
-          waitForKeyFrame = true;
+          dec.waitForKeyFrame = true;
           return true;
         }
       }
@@ -1752,7 +1744,7 @@ int main(int argc, char** argv) {
       return true;
     };
 
-    if (transport == VideoTransport::Udp) {
+    if (dec.transport == VideoTransport::Udp) {
       std::array<uint8_t, 1600> datagram{};
       const uint32_t effectiveUdpSimDropSeed = (udpSimDropSeed > 0)
                                                    ? udpSimDropSeed
@@ -1855,8 +1847,8 @@ int main(int argc, char** argv) {
         auto handle_udp_discontinuity = [&]() {
           if (discontinuityHandled) return;
           discontinuityHandled = true;
-          waitForKeyFrame = true;
-          decoder.reset();
+          dec.waitForKeyFrame = true;
+          dec.decoder.reset();
           request_keyframe(2);
           ++st.udpAssemblyKeyReqCount;
         };
@@ -1955,7 +1947,7 @@ int main(int argc, char** argv) {
                     << " fecRecovered=" << fecRecoveredDelta
                     << " simDropPm=" << simDropPermille
                     << " simDropTotal=" << simDroppedDelta
-                    << " waitForKey=" << (waitForKeyFrame ? 1 : 0)
+                    << " waitForKey=" << (dec.waitForKeyFrame ? 1 : 0)
                     << " catchup=" << (gate.catchupMode ? 1 : 0)
                     << "\n";
           lastUdpChunkRecvCount = st.udpChunkRecvCount;
@@ -1992,7 +1984,7 @@ int main(int argc, char** argv) {
         std::vector<uint8_t> payload(h.payloadSize);
         if (!remote60::native_poc::recv_all(gSession.sock, payload.data(), payload.size())) break;
 
-        if (!useRaw) {
+        if (!dec.useRaw) {
           ++st.skippedQueued;
           continue;
         }
@@ -2197,15 +2189,15 @@ int main(int argc, char** argv) {
   if (controlThread.joinable()) controlThread.join();
   if (recvThread.joinable()) recvThread.join();
 
-  if (useH264) {
+  if (dec.useH264) {
     {
       std::lock_guard<std::mutex> lk(gFrameBuf.frame.mu);
       gFrameBuf.frame.surfaceSample.Reset();
       gFrameBuf.frame.surfaceTexture.Reset();
       gFrameBuf.frame.bytes.reset();
     }
-    decoder.shutdown();
-    if (mfStarted) MFShutdown();
+    dec.decoder.shutdown();
+    if (dec.mfStarted) MFShutdown();
   }
 
   std::cout << "[native-video-client] done\n";
