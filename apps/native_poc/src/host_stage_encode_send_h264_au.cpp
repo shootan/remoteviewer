@@ -85,9 +85,7 @@ AuFlow encode_send_h264_emit_au(HostContext& hx, TickContext& tc, H264AuBatch& b
   auto& args = hx.args;
   auto& transport = hx.transport;
   auto& guardStaleEncoded = hx.guardStaleEncoded;
-  auto& item = hx.item;
   auto& frameGating = hx.frameGating;
-  auto& rate = hx.rate;
   auto& kick = hx.kick;
   auto& sender = hx.sender;
   auto& clientSession = hx.clientSession;

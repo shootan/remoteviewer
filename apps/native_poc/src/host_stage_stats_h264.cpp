@@ -87,7 +87,6 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
                      const std::string& targetProcessName, uint64_t queuePushPerSec,
                      uint64_t callbackFramesPerSec, uint64_t idleHoldPerSec,
                      const CaptureCadenceGate::Counters& cadence) {
-  auto& args = hx.args;
   auto& transport = hx.transport;
   auto& startUs = hx.startUs;
   auto& frameGating = hx.frameGating;

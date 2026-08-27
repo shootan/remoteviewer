@@ -81,12 +81,10 @@ using remote60::host::DxgiDesktopCaptureSession;
 namespace remote60::native_poc {
 
 Flow stage_watchdogs(HostContext& hx, TickContext& tc) {
-  auto& rate = hx.rate;
   auto& backend = hx.backend;
   auto& watchdog = hx.watchdog;
   auto& clientSession = hx.clientSession;
   auto& encoder = hx.encoder;
-  auto& stats = hx.stats;
   auto& capture = hx.capture;
   auto& res = hx.res;
   auto& nowUs = tc.nowUs;

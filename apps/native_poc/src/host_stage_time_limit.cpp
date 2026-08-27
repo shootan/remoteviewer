@@ -86,7 +86,6 @@ Flow stage_time_limit(HostContext& hx, TickContext& tc) {
   auto& transport = hx.transport;
   auto& startUs = hx.startUs;
   auto& kick = hx.kick;
-  auto& backend = hx.backend;
   auto& watchdog = hx.watchdog;
   auto& sender = hx.sender;
   auto& clientSession = hx.clientSession;

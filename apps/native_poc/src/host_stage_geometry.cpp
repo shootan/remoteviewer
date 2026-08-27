@@ -81,7 +81,6 @@ using remote60::host::DxgiDesktopCaptureSession;
 namespace remote60::native_poc {
 
 Flow stage_geometry(HostContext& hx, TickContext& tc) {
-  auto& item = hx.item;
   auto& frameGating = hx.frameGating;
   auto& watchdog = hx.watchdog;
   auto& encoder = hx.encoder;

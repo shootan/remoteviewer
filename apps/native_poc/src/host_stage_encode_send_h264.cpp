@@ -87,16 +87,11 @@ namespace remote60::native_poc {
 Flow encode_send_h264(HostContext& hx, TickContext& tc) {
   auto& args = hx.args;
   auto& useH264 = hx.useH264;
-  auto& transport = hx.transport;
-  auto& guardStaleEncoded = hx.guardStaleEncoded;
   auto& guardStalePreEncode = hx.guardStalePreEncode;
   auto& poppedNv12Slot = hx.poppedNv12Slot;
-  auto& item = hx.item;
   auto& frameGating = hx.frameGating;
-  auto& rate = hx.rate;
   auto& kick = hx.kick;
   auto& clientMetrics = hx.clientMetrics;
-  auto& backend = hx.backend;
   auto& watchdog = hx.watchdog;
   auto& inputRouter = hx.inputRouter;
   auto& sender = hx.sender;
@@ -105,7 +100,6 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
   auto& stats = hx.stats;
   auto& capture = hx.capture;
   auto& res = hx.res;
-  auto& lastUserFeedbackUs = hx.lastUserFeedbackUs;
   auto& tickWaitUs = tc.tickWaitUs;
   auto& payload = tc.payload;
   auto& seq = tc.seq;

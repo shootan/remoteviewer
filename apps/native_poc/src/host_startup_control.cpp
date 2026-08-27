@@ -105,7 +105,6 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
   auto& args = hx.args;
   auto& transport = hx.transport;
   auto& stop = hx.stop;
-  auto& rate = hx.rate;
   auto& inputRouter = hx.inputRouter;
   auto& sender = hx.sender;
   auto& clientSession = hx.clientSession;

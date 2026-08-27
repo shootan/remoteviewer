@@ -81,15 +81,11 @@ using remote60::host::DxgiDesktopCaptureSession;
 namespace remote60::native_poc {
 
 Flow stage_stats(HostContext& hx, TickContext& tc) {
-  auto& args = hx.args;
   auto& useH264 = hx.useH264;
   auto& useRaw = hx.useRaw;
-  auto& transport = hx.transport;
   auto& startUs = hx.startUs;
   auto& streamActiveSinceUs = hx.streamActiveSinceUs;
   auto& frameGating = hx.frameGating;
-  auto& rate = hx.rate;
-  auto& kick = hx.kick;
   auto& clientMetrics = hx.clientMetrics;
   auto& backend = hx.backend;
   auto& watchdog = hx.watchdog;

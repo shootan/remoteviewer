@@ -102,9 +102,6 @@ using remote60::host::DxgiDesktopCaptureSession;
 namespace remote60::native_poc {
 
 void startup_start_dxgi_watchdog(HostContext& hx, std::atomic<bool>& dxgiWatchdogStop, std::thread& dxgiWorkerWatchdog) {
-  auto& backend = hx.backend;
-  auto& watchdog = hx.watchdog;
-  auto& capture = hx.capture;
   auto& res = hx.res;
   // Independent DXGI capture-worker wedge watchdog. Kept OUT of the main-loop watchdog because the
   // field failure (15:05, 2026-08-25) was the worker hung inside a DXGI call while a user "select"
@@ -177,10 +174,6 @@ void startup_start_dxgi_watchdog(HostContext& hx, std::atomic<bool>& dxgiWatchdo
 
 int startup_create_readback(HostContext& hx) {
   auto& useH264 = hx.useH264;
-  auto& streamActiveSinceUs = hx.streamActiveSinceUs;
-  auto& token = hx.token;
-  auto& rate = hx.rate;
-  auto& backend = hx.backend;
   auto& watchdog = hx.watchdog;
   auto& sender = hx.sender;
   auto& clientSession = hx.clientSession;
@@ -270,7 +263,6 @@ int startup_start_capture(HostContext& hx) {
   auto& captureWindowRebindIntervalUs = hx.captureWindowRebindIntervalUs;
   auto& nextCaptureWindowCheckUs = hx.nextCaptureWindowCheckUs;
   auto& powerKeepalive = hx.powerKeepalive;
-  auto& rate = hx.rate;
   auto& kick = hx.kick;
   auto& watchdog = hx.watchdog;
   auto& sender = hx.sender;

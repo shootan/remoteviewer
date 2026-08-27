@@ -83,7 +83,6 @@ namespace remote60::native_poc {
 Flow stage_pace(HostContext& hx, TickContext& tc) {
   auto& paceByTick = hx.paceByTick;
   auto& nextTickUs = hx.nextTickUs;
-  auto& sender = hx.sender;
   auto& encoder = hx.encoder;
   auto& nowUs = tc.nowUs;
   auto& tickWaitUs = tc.tickWaitUs;

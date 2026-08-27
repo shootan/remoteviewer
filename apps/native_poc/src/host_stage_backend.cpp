@@ -83,7 +83,6 @@ namespace remote60::native_poc {
 Flow stage_backend(HostContext& hx, TickContext& tc) {
   auto& powerKeepalive = hx.powerKeepalive;
   auto& frameGating = hx.frameGating;
-  auto& rate = hx.rate;
   auto& backend = hx.backend;
   auto& clientSession = hx.clientSession;
   auto& encoder = hx.encoder;

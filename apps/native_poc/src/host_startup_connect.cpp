@@ -104,11 +104,9 @@ namespace remote60::native_poc {
 int startup_connect_client(HostContext& hx) {
   auto& args = hx.args;
   auto& transport = hx.transport;
-  auto& item = hx.item;
   auto& inputRouter = hx.inputRouter;
   auto& sender = hx.sender;
   auto& clientSession = hx.clientSession;
-  auto& encoder = hx.encoder;
   // After a backlog drop every delta references frames that never went out; shipping them
   // paints macroblock corruption on the client until the next IDR. They are held back here
   // until the requested keyframe actually passes through.

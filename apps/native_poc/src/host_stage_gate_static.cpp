@@ -88,7 +88,6 @@ Flow stage_gate_static(HostContext& hx, TickContext& tc) {
   auto& clientMetrics = hx.clientMetrics;
   auto& encoder = hx.encoder;
   auto& stats = hx.stats;
-  auto& capture = hx.capture;
   auto& payload = tc.payload;
   auto& w = tc.w;
   auto& h = tc.h;

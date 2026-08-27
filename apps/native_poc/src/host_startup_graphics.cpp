@@ -270,7 +270,6 @@ void startup_configure_encode_geometry(HostContext& hx) {
   auto& useH264 = hx.useH264;
   auto& frameGating = hx.frameGating;
   auto& rate = hx.rate;
-  auto& watchdog = hx.watchdog;
   auto& inputRouter = hx.inputRouter;
   auto& encoder = hx.encoder;
   auto& capture = hx.capture;

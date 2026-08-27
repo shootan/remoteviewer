@@ -1,7 +1,6 @@
 #pragma once
 
 #include <algorithm>
-#include <atomic>
 #include <cstdint>
 
 namespace remote60::native_poc {
@@ -24,13 +23,9 @@ namespace remote60::native_poc {
 // is happening is the correct answer rather than a defect.
 class CaptureCadenceGate {
  public:
-  // Offers further apart than this are a pause, not a rate.
-  static constexpr uint64_t kOfferGapIgnoreUs = 1000000;
-
   void SetRequestedIntervalUs(uint64_t intervalUs) {
     requestedIntervalUs_ = (intervalUs > 0) ? intervalUs : 1;
   }
-  uint64_t RequestedIntervalUs() const { return requestedIntervalUs_; }
 
   void SetEnabled(bool enabled) { enabled_ = enabled; }
   void SetEarlyTolerancePercent(uint32_t percent) { earlyTolerancePercent_ = percent; }
@@ -39,8 +34,6 @@ class CaptureCadenceGate {
   // content and a target that no longer apply. The lifetime counters are deliberately left
   // alone -- they are cumulative telemetry, like the host's captureRestarts.
   void Reset() {
-    offerIntervalUs_ = 0;
-    lastOfferUs_ = 0;
     nextContentDueUs_ = 0;
   }
 
@@ -53,16 +46,10 @@ class CaptureCadenceGate {
    *  those pixels, silently drop the real frame that followed (a right-click menu that then never
    *  appeared); pointer-only offers are now dropped outright and never touch the clock. */
   bool ShouldAccept(uint64_t nowUs, bool hasNewContent) {
-    if (hasNewContent) {
-      if (lastOfferUs_ != 0 && nowUs > lastOfferUs_) {
-        const uint64_t gapUs = nowUs - lastOfferUs_;
-        if (gapUs < kOfferGapIgnoreUs) {
-          offerIntervalUs_ = (offerIntervalUs_ == 0) ? gapUs
-                                                     : (offerIntervalUs_ * 15 + gapUs) / 16;
-        }
-      }
-      lastOfferUs_ = nowUs;
-    }
+    // There used to be an EWMA of the observed offer interval here, kept per content offer on the
+    // capture-callback thread. Nothing read it: EffectiveIntervalUs() returns the requested
+    // interval, and its two accessors had no callers anywhere in the tree, tests included. It was
+    // arithmetic and two fields of state maintained every frame for nobody. (Ledger H-15.)
     if (!enabled_) return true;
 
     const uint64_t intervalUs = EffectiveIntervalUs();
@@ -101,8 +88,6 @@ class CaptureCadenceGate {
 
   uint64_t EffectiveIntervalUs() const { return requestedIntervalUs_; }
 
-  uint64_t OfferIntervalUs() const { return offerIntervalUs_; }
-
   // Lifetime counters, split by content vs pointer-only offers. Cumulative across resets.
   //
   // Taken as one snapshot rather than five getters, because the caller must hold the same lock
@@ -128,8 +113,6 @@ class CaptureCadenceGate {
 
  private:
   uint64_t requestedIntervalUs_ = 33333;
-  uint64_t offerIntervalUs_ = 0;
-  uint64_t lastOfferUs_ = 0;
   uint64_t nextContentDueUs_ = 0;
   // Non-atomic: the gate runs on the capture-callback thread, and every reader takes
   // CaptureState::cadenceMu -- the mutex the callback holds while calling ShouldAccept. This is
