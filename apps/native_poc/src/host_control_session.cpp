@@ -205,29 +205,23 @@ void ControlSessionServer::Serve(ControlLink& link) {
       pong.clientSendQpcUs = ping.clientSendQpcUs;
       pong.hostRecvQpcUs = qpc_now_us();
       pong.hostSendQpcUs = qpc_now_us();
-      pong.captureTargetPid = capture.targetPid.load(std::memory_order_relaxed);
-      pong.captureTargetFlags = capture.targetFlags.load(std::memory_order_relaxed);
+      // One snapshot, so the pid / hwnd / process / title the viewer receives all describe the
+      // same instant. (Phase 4: SnapshotTarget.)
+      const CaptureTargetSnapshot target = capture.SnapshotTarget();
+      pong.captureTargetPid = target.pid;
+      pong.captureTargetFlags = target.flags;
       // The probe is cached for 250ms, so asking it per ping is cheap. Telling the viewer that
       // a security prompt is up is the difference between an explained pause and an apparent
       // freeze, and it costs one bit in a word that is already on the wire.
       if (!interactive_desktop_is_default()) {
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagSecureDesktopActive;
       }
-      pong.captureRebindCount = capture.rebindCount.load(std::memory_order_relaxed);
-      pong.captureTargetHwnd = capture.targetHwnd.load(std::memory_order_relaxed);
-      {
-        std::string processName;
-        std::string titleText;
-        {
-          std::lock_guard<std::mutex> lk(capture.metaMu);
-          processName = capture.targetProcess;
-          titleText = capture.targetTitle;
-        }
-        std::snprintf(pong.captureTargetProcess, sizeof(pong.captureTargetProcess), "%s",
-                      processName.c_str());
-        std::snprintf(pong.captureTargetTitle, sizeof(pong.captureTargetTitle), "%s",
-                      titleText.c_str());
-      }
+      pong.captureRebindCount = target.rebindCount;
+      pong.captureTargetHwnd = target.targetHwnd;
+      std::snprintf(pong.captureTargetProcess, sizeof(pong.captureTargetProcess), "%s",
+                    target.process.c_str());
+      std::snprintf(pong.captureTargetTitle, sizeof(pong.captureTargetTitle), "%s",
+                    target.title.c_str());
       if (!link.Write(&pong, sizeof(pong))) break;
       continue;
     }
@@ -585,25 +579,30 @@ void ControlSessionServer::Serve(ControlLink& link) {
       ControlClientMetricsMessage metrics{};
       metrics.header = header;
       if (!link.Read(&metrics.seq, sizeof(metrics) - sizeof(MessageHeader))) break;
-      clientMetrics.width = metrics.width;
-      clientMetrics.height = metrics.height;
-      clientMetrics.recvFpsX100 = metrics.recvFpsX100;
-      clientMetrics.decodedFpsX100 = metrics.decodedFpsX100;
-      clientMetrics.recvMbpsX1000 = metrics.recvMbpsX1000;
-      clientMetrics.skippedFrames = metrics.skippedFrames;
-      clientMetrics.avgLatencyUs = metrics.avgLatencyUs;
-      clientMetrics.maxLatencyUs = metrics.maxLatencyUs;
-      clientMetrics.avgDecodeTailUs = metrics.avgDecodeTailUs;
-      clientMetrics.maxDecodeTailUs = metrics.maxDecodeTailUs;
-      clientMetrics.congestionState = metrics.congestionState;
-      clientMetrics.congestionTransitions = metrics.congestionTransitions;
-      clientMetrics.congestionRecoveryCount = metrics.congestionRecoveryCount;
-      clientMetrics.congestionRecoveryReq = metrics.congestionRecoveryReq;
-      clientMetrics.congestionRecoveryMaxUs = metrics.congestionRecoveryMaxUs;
-      clientMetrics.queueDepthMax = metrics.queueDepthMax;
-      clientMetrics.queueDepthH4p = metrics.queueDepthH4p;
-      clientMetrics.udpAssemblyDropPm = metrics.udpAssemblyDropPm;
-      clientMetrics.updatedUs = qpc_now_us();
+      // Published as one record: these describe a single instant on the viewer and the ABR/M9
+      // decision reads them together. Storing them field by field let the main loop act on a mix
+      // of two reports. (Phase 4: ClientMetricsSnapshot.)
+      ViewerMetrics reported;
+      reported.width = metrics.width;
+      reported.height = metrics.height;
+      reported.recvFpsX100 = metrics.recvFpsX100;
+      reported.decodedFpsX100 = metrics.decodedFpsX100;
+      reported.recvMbpsX1000 = metrics.recvMbpsX1000;
+      reported.skippedFrames = metrics.skippedFrames;
+      reported.avgLatencyUs = metrics.avgLatencyUs;
+      reported.maxLatencyUs = metrics.maxLatencyUs;
+      reported.avgDecodeTailUs = metrics.avgDecodeTailUs;
+      reported.maxDecodeTailUs = metrics.maxDecodeTailUs;
+      reported.congestionState = metrics.congestionState;
+      reported.congestionTransitions = metrics.congestionTransitions;
+      reported.congestionRecoveryCount = metrics.congestionRecoveryCount;
+      reported.congestionRecoveryReq = metrics.congestionRecoveryReq;
+      reported.congestionRecoveryMaxUs = metrics.congestionRecoveryMaxUs;
+      reported.queueDepthMax = metrics.queueDepthMax;
+      reported.queueDepthH4p = metrics.queueDepthH4p;
+      reported.udpAssemblyDropPm = metrics.udpAssemblyDropPm;
+      reported.updatedUs = qpc_now_us();
+      clientMetrics.Publish(reported);
       // Logged as it arrives rather than folded into the per-second stat line: this is the
       // only view the host gets of what the remote display is actually doing, and a viewer
       // reporting stutter needs it visible without attaching to the device.

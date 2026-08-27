@@ -200,15 +200,7 @@ bool reconnect_tcp_data_session(HostContext& hx, const char* reason) {
                      reinterpret_cast<char*>(&effectiveSendBuf), &effectiveSendBufLen);
     std::cout << "[native-video-host] client reconnected transport=tcp sndbuf="
               << effectiveSendBuf << " bytes\n";
-    clientMetrics.updatedUs = 0;
-    clientMetrics.congestionState = 0;
-    clientMetrics.congestionTransitions = 0;
-    clientMetrics.congestionRecoveryCount = 0;
-    clientMetrics.congestionRecoveryReq = 0;
-    clientMetrics.congestionRecoveryMaxUs = 0;
-    clientMetrics.queueDepthMax = 0;
-    clientMetrics.queueDepthH4p = 0;
-    clientMetrics.udpAssemblyDropPm = 0;
+    clientMetrics.Reset();
     clientMetrics.requestedKeyFrame = false;
     clientMetrics.keyFrameReason = 0;
     encoder.tunePending = false;

@@ -107,11 +107,7 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
     ++stats.ticks;
     const bool statsPrintDue = (stats.ticks % stats.printEverySec) == 0;
     const double mbps = (sender.sentBytes * 8.0) / (1000.0 * 1000.0);
-    std::string targetProcessName;
-    {
-      std::lock_guard<std::mutex> lk(capture.metaMu);
-      targetProcessName = capture.targetProcess;
-    }
+    const std::string targetProcessName = capture.SnapshotTarget().process;
     // One lock-correct read of the cadence counters for the whole tick: the drain watchdog's
     // accepted delta below and the stats line both come from it. (Ledger H-05.)
     const CaptureCadenceGate::Counters cadence = capture.SnapshotCadenceCounters();

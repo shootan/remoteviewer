@@ -300,23 +300,26 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
             << "\n";
   }
 
-  const uint64_t metricsUpdatedUs = clientMetrics.updatedUs.load();
+  // One copy for the whole tick -- the freshness gate and every value below then describe the
+  // same report. (Phase 4: ClientMetricsSnapshot.)
+  const ViewerMetrics viewer = clientMetrics.Snapshot();
+  const uint64_t metricsUpdatedUs = viewer.updatedUs;
   const bool metricsFresh =
       (metricsUpdatedUs > 0) && (t >= metricsUpdatedUs) && ((t - metricsUpdatedUs) <= 3000000ULL);
-  const uint64_t clAvgLatencyUs = metricsFresh ? clientMetrics.avgLatencyUs.load() : 0;
-  const uint64_t clAvgDecodeTailUs = metricsFresh ? clientMetrics.avgDecodeTailUs.load() : 0;
-  const uint32_t clDecodedFpsX100 = metricsFresh ? clientMetrics.decodedFpsX100.load() : 0;
-  const uint32_t clRecvMbpsX1000 = metricsFresh ? clientMetrics.recvMbpsX1000.load() : 0;
-  const uint32_t clWidth = metricsFresh ? clientMetrics.width.load() : 0;
-  const uint32_t clHeight = metricsFresh ? clientMetrics.height.load() : 0;
-  const uint32_t clCongestionState = metricsFresh ? clientMetrics.congestionState.load() : 0;
-  const uint32_t clCongestionTransitions = metricsFresh ? clientMetrics.congestionTransitions.load() : 0;
-  const uint32_t clCongestionRecoveryCount = metricsFresh ? clientMetrics.congestionRecoveryCount.load() : 0;
-  const uint32_t clCongestionRecoveryReq = metricsFresh ? clientMetrics.congestionRecoveryReq.load() : 0;
-  const uint32_t clCongestionRecoveryMaxUs = metricsFresh ? clientMetrics.congestionRecoveryMaxUs.load() : 0;
-  const uint32_t clQueueDepthMax = metricsFresh ? clientMetrics.queueDepthMax.load() : 0;
-  const uint32_t clQueueDepthH4p = metricsFresh ? clientMetrics.queueDepthH4p.load() : 0;
-  const uint32_t clUdpDropPm = metricsFresh ? clientMetrics.udpAssemblyDropPm.load() : 0;
+  const uint64_t clAvgLatencyUs = metricsFresh ? viewer.avgLatencyUs : 0;
+  const uint64_t clAvgDecodeTailUs = metricsFresh ? viewer.avgDecodeTailUs : 0;
+  const uint32_t clDecodedFpsX100 = metricsFresh ? viewer.decodedFpsX100 : 0;
+  const uint32_t clRecvMbpsX1000 = metricsFresh ? viewer.recvMbpsX1000 : 0;
+  const uint32_t clWidth = metricsFresh ? viewer.width : 0;
+  const uint32_t clHeight = metricsFresh ? viewer.height : 0;
+  const uint32_t clCongestionState = metricsFresh ? viewer.congestionState : 0;
+  const uint32_t clCongestionTransitions = metricsFresh ? viewer.congestionTransitions : 0;
+  const uint32_t clCongestionRecoveryCount = metricsFresh ? viewer.congestionRecoveryCount : 0;
+  const uint32_t clCongestionRecoveryReq = metricsFresh ? viewer.congestionRecoveryReq : 0;
+  const uint32_t clCongestionRecoveryMaxUs = metricsFresh ? viewer.congestionRecoveryMaxUs : 0;
+  const uint32_t clQueueDepthMax = metricsFresh ? viewer.queueDepthMax : 0;
+  const uint32_t clQueueDepthH4p = metricsFresh ? viewer.queueDepthH4p : 0;
+  const uint32_t clUdpDropPm = metricsFresh ? viewer.udpAssemblyDropPm : 0;
 
   if (rate.abrEnabled && !encoder.tuneManualOverride && !rate.m9Apply) {
     // The current target, not the one the process started with. A runtime FPS tune moves

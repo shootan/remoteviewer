@@ -150,7 +150,7 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
       capture.dxgiStarted = false;
     }
     backend.active = DesktopCaptureBackend::Wgc;
-    const std::string fallbackReason = capture.CopyDxgiFallbackReason();
+    const std::string fallbackReason = capture.SnapshotFallbackReasons().dxgi;
     std::cout << "[native-video-host] fallback_reason="
               << (fallbackReason.empty() ? "dxgi_runtime_fallback" : fallbackReason)
               << "\n";
@@ -177,7 +177,7 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
       capture.gdiStarted = false;
     }
     backend.active = DesktopCaptureBackend::Wgc;
-    const std::string fallbackReason = capture.CopyGdiFallbackReason();
+    const std::string fallbackReason = capture.SnapshotFallbackReasons().gdi;
     std::cout << "[native-video-host] fallback_reason="
               << (fallbackReason.empty() ? "gdi_runtime_fallback" : fallbackReason)
               << "\n";

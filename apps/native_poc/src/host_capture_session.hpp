@@ -51,6 +51,27 @@ struct SessionState;
 // as an IDR so the picture paints immediately. Written ONLY from a real capture publish
 // (capturePublishFn) and deliberately NOT touched by flush_capture_pipeline_state, so it survives
 // a flush and a reattach can still use it.
+// Why each desktop backend was demoted, as one record behind fallbackReasonMu; read with
+// CaptureState::SnapshotFallbackReasons(). (Phase 4: BackendFallbackInfo.)
+struct BackendFallbackInfo {
+  std::string dxgi;
+  std::string gdi;
+};
+
+// The capture target as the control thread is allowed to see it: the atomics and the two
+// metaMu-guarded strings, taken together. (Phase 4: SnapshotTarget.)
+struct CaptureTargetSnapshot {
+  uint64_t streamGeneration = 0;
+  uint64_t selectedWindowId = 0;
+  uint32_t selectedMonitorId = 0;
+  uint64_t targetHwnd = 0;
+  uint32_t pid = 0;
+  uint32_t flags = 0;
+  uint32_t rebindCount = 0;
+  std::string process = "monitor";
+  std::string title;
+};
+
 struct BootstrapFrameCache {
   std::shared_ptr<std::vector<uint8_t>> payload;  // BGRA pixels, post-crop
   uint32_t width = 0;
@@ -167,8 +188,7 @@ struct CaptureState {
   bool dxgiStarted = false;
   bool gdiStarted = false;
   std::mutex fallbackReasonMu;
-  std::string dxgiFallbackReason;
-  std::string gdiFallbackReason;
+  BackendFallbackInfo fallbackReasons;
   std::mutex resourceMu;
   std::atomic<uint32_t> sizeChangePending{0};
   // Attachment cookie: bumped by detach_capture_session() before any pool recreate so a callback or
@@ -218,11 +238,11 @@ struct CaptureState {
   //     describe_active_capture_target) ---
   void SetDxgiFallbackReason(const std::string& reason) {
     std::lock_guard<std::mutex> lock(fallbackReasonMu);
-    dxgiFallbackReason = reason;
+    fallbackReasons.dxgi = reason;
   }
   void SetGdiFallbackReason(const std::string& reason) {
     std::lock_guard<std::mutex> lock(fallbackReasonMu);
-    gdiFallbackReason = reason;
+    fallbackReasons.gdi = reason;
   }
   // The one lock-correct way to read the cadence gate's counters from another thread.
   // (Ledger H-05.)
@@ -230,32 +250,43 @@ struct CaptureState {
     std::lock_guard<std::mutex> lk(cadenceMu);
     return cadenceGate.SnapshotCounters();
   }
-  std::string CopyDxgiFallbackReason() {
+  // Both reasons in one lock acquisition, replacing the two Copy* accessors: a reader that took
+  // the lock twice could describe a pair of states that never coexisted.
+  // (Phase 4: BackendFallbackInfo.)
+  BackendFallbackInfo SnapshotFallbackReasons() {
     std::lock_guard<std::mutex> lock(fallbackReasonMu);
-    return dxgiFallbackReason;
+    return fallbackReasons;
   }
-  std::string CopyGdiFallbackReason() {
-    std::lock_guard<std::mutex> lock(fallbackReasonMu);
-    return gdiFallbackReason;
+  // The capture target as one consistent record. The control thread answers pongs, window lists
+  // and status replies from this; it used to read four atomics and then take metaMu for the two
+  // strings, so a selection landing mid-read could report a new pid with the old title.
+  // (Phase 4: SnapshotTarget.)
+  CaptureTargetSnapshot SnapshotTarget() {
+    CaptureTargetSnapshot t;
+    t.streamGeneration = streamGenerationState.load(std::memory_order_acquire);
+    t.selectedWindowId = selectedWindowId.load(std::memory_order_acquire);
+    t.selectedMonitorId = selectedMonitorId.load(std::memory_order_acquire);
+    t.targetHwnd = targetHwnd.load(std::memory_order_acquire);
+    t.pid = targetPid.load(std::memory_order_acquire);
+    t.flags = targetFlags.load(std::memory_order_acquire);
+    t.rebindCount = rebindCount.load(std::memory_order_acquire);
+    {
+      std::lock_guard<std::mutex> lk(metaMu);
+      t.process = targetProcess;
+      t.title = targetTitle;
+    }
+    return t;
   }
   // One-line description of the current capture target for log lines.
   std::string DescribeActiveTarget() {
-    const uint64_t hwnd = targetHwnd.load(std::memory_order_acquire);
-    const uint32_t pid = targetPid.load(std::memory_order_acquire);
-    std::string process = "monitor";
-    std::string title;
-    {
-      std::lock_guard<std::mutex> lk(metaMu);
-      process = targetProcess;
-      title = targetTitle;
-    }
+    const CaptureTargetSnapshot t = SnapshotTarget();
     std::ostringstream oss;
-    oss << " streamGen=" << streamGenerationState.load(std::memory_order_acquire)
-        << " selectedId=" << selectedWindowId.load(std::memory_order_acquire)
-        << " targetHwnd=0x" << std::hex << hwnd << std::dec
-        << " pid=" << pid
-        << " process=" << process
-        << " title=" << (title.empty() ? "<empty>" : title);
+    oss << " streamGen=" << t.streamGeneration
+        << " selectedId=" << t.selectedWindowId
+        << " targetHwnd=0x" << std::hex << t.targetHwnd << std::dec
+        << " pid=" << t.pid
+        << " process=" << t.process
+        << " title=" << (t.title.empty() ? "<empty>" : t.title);
     return oss.str();
   }
 
