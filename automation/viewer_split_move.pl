@@ -66,7 +66,9 @@ for my $re (@starts) {
   unless ($noLead) {
     # leading // comments and /** ... */ doc blocks directly above the start line
     while ($first > 0 && $lines[$first - 1] =~ /^\/\//) { $first--; }
-    if ($first > 0 && $lines[$first - 1] =~ /^\s*\*\/\s*$/) {
+    if ($first > 0 && $lines[$first - 1] =~ /^\/\*\*.*\*\/\s*$/) {
+      $first--;   # one-line /** doc */
+    } elsif ($first > 0 && $lines[$first - 1] =~ /^\s*\*\/\s*$/) {
       my $k = $first - 1;
       $k-- while $k > 0 && $lines[$k] !~ /^\/\*\*/;
       $first = $k if $lines[$k] =~ /^\/\*\*/;
@@ -97,17 +99,23 @@ for my $b (@blocks) {
     }
     push @hppOut, join("\n", @blk), '';
   } else {
-    # declaration: signature lines up to the one ending with "{"
+    # declaration: signature lines up to the one ending with "{" (or the one-line body's "{")
     my @sig;
-    my $k = $s;
-    while ($k <= $e) {
-      push @sig, $lines[$k];
-      last if $lines[$k] =~ /\{\s*$/;
-      $k++;
+    my $decl;
+    if ($s == $e && $lines[$s] =~ /^(.*?)\s*\{.*\}\s*$/) {
+      @sig = ($lines[$s]);
+      $decl = "$1;";
+    } else {
+      my $k = $s;
+      while ($k <= $e) {
+        push @sig, $lines[$k];
+        last if $lines[$k] =~ /\{\s*$/;
+        $k++;
+      }
+      die "no '{' in signature at line " . ($s + 1) . "\n" if $k > $e;
+      $decl = join("\n", @sig);
+      $decl =~ s/\s*\{\s*$/;/;
     }
-    die "no '{' in signature at line " . ($s + 1) . "\n" if $k > $e;
-    my $decl = join("\n", @sig);
-    $decl =~ s/\s*\{\s*$/;/;
     my $lead = ($s > $f) ? join("\n", @lines[$f .. $s - 1]) . "\n" : '';
     push @hppOut, $lead . $decl, '';
     # definition: drop default arguments from the signature lines
