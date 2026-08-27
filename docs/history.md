@@ -7502,3 +7502,25 @@ Next action
 - 게이트: 매 커밋 `automation/viewer_split_gate.sh --e2e` — 빌드 exit 0 + 뷰어 e2e C-1 stream/C-2 picker/C-3 tcp-raw ALL PASS.
   F-04 커밋은 단위테스트 4종 빌드 + 실행 PASS 추가. 코드 -215/+31줄.
 - 다음 액션: F-16(끝점 매핑, T4 기대값 동반) → Phase 4(F-17/F-15/F-07/F-06/F-18/F-19) → F-10/F-11. 0.2.59 실기 확인은 별개로 계속 대기.
+
+### 314) 2026-08-27 호스트 전수 분석 + 코덱스 교차검증 → 호스트 발견사항 원장 신설 (브랜치 refactor/viewer-split, 문서만)
+
+- 목표: Phase 4(호스트 스레드 소유권 재설계) 착수 전에 호스트 전체 소스를 전수 분석해 오구현/데드코드/고도화 대상을 원장으로 만든다.
+  뷰어 원장(`docs/뷰어_리팩터_발견사항.md`)과 같은 규칙 — 기록만, 수정은 별도 커밋/사이클.
+- 분석 범위(18,706줄): `apps/native_poc/src/host_*.{cpp,hpp}` 60여 파일 · `native_video_host_main.cpp` · `d3d_capture_readback.*` ·
+  `capture_cadence_gate.hpp` · `host_bgra_scale.cpp` · `gdi_capture_process.*` · `mf_h264_codec.cpp`(AU 생성부) · `libs/capture/src/capture_backend_dxgi.*`.
+- 교차검증: GMux a2a 버스의 `검증용Codex`(remote#sa9wm39t)와 3통 왕복(seq 769 버그/레이스/누수 12건, 770 통계/설계/데드코드/고도화 9건, 772 판정 수령+추가 2건).
+  전 항목 판정 완료. 코덱스가 **추가 발견 2건**: H-03(e) NV12 lease 상시 누수 경로, H-23 readback lock-order inversion.
+- 결과 23건(H-01~H-23). 확정 18 · 조건부 3(H-07 상시 race, H-14 의미 미표기, H-17 병목 계측 필요) · 기각/정정 2(H-09 인터리브 버그 기각, H-18 1Hz 갱신안 기각).
+  - 최우선: `H-01` 대기 중 프로세스 핸들 close(Win32 UB, Blocker) → `H-02` accepted 소켓 이중 close → `H-03` NV12 lease 누수 5경로
+    (**busy-drop이 상시 경로** — 링 4슬롯이 소진되면 zero-copy surface encode가 조용히 CPU로 영구 강등. GPU가 바쁠 때 발생하므로
+    실기에서 nv12 surface가 효과 없어 보인 원인 1순위 후보) → `H-10/11/12` 1초 틱이 tick 성공에 인질(워치독·ABR 미도달 + 가짜 GDI 재시작)
+    → `H-23` lock inversion → `H-19` key AU가 연 배리어를 같은 배치 delta가 되닫음 → `H-04/05` data race → `H-08` AU마다 전체 페이로드 복사
+    (`std::move`가 `const&`라 복사대입 선택).
+  - 자체 기각(오탐) 5건도 원장에 표로 남김 — reattach 백오프 시드, UDP 인터리브, bootstrap 갱신 cadence, queueDepthMax 리셋, alias 18→15 과대집계.
+- 변경 파일: `docs/호스트_리팩터_발견사항.md`(신설) · `docs/호스트_분할_리팩터_계획.md`(§7.1 근본제약 문구 정정 + §7.2 후보에 H-04/H-05 명시 + §7.3 신설) ·
+  `docs/구현계획.md`(체크박스) · `docs/history.md`.
+- 검증: 문서만. 코드 변경 0 → 빌드/e2e 미실행. 원장의 파일:라인 근거는 전부 `3508c85`에서 직접 확인했고,
+  코덱스 지적 2건(H-16 alias 과대집계, H-23 lock inversion)은 재검증 후 반영.
+- 다음 액션: 원장 권고 순서대로 `H-01` → `H-02` → `H-03` 를 항목당 1커밋으로 처리(Phase 4를 기다리지 않는다 — 종료 경로 UB + 상시 누수).
+  그 뒤 `H-10/11/12` 묶음 → `H-23` → `H-19`. 0.2.59 실기 확인은 별개로 계속 대기.
