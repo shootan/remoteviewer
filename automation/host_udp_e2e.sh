@@ -25,5 +25,26 @@ kill -0 "$HOST_PID" 2>/dev/null && MSYS_NO_PATHCONV=1 taskkill /F /PID "$HOST_PI
 wait "$HOST_PID" 2>/dev/null || true
 tail -3 "$OUT/e2e.log"
 echo "logs: $OUT"
-if [ "$RC" -eq 0 ] && grep -q "ALL PASS" "$OUT/e2e.log"; then echo "HOST UDP E2E: ALL PASS"; exit 0; fi
-echo "HOST UDP E2E: FAIL (rc=$RC)"; exit 1
+
+# The client can only assert what it observes. These four lines are the host-side proof that each
+# control request actually reached the main loop and was acted on -- every one of them is a
+# MainLoopMailbox round trip, and without this grep the suite passed whether or not the loop ever
+# saw them. (Ledger H-26; the earlier claim that this harness grepped host.log was not true.)
+HOST_OK=1
+check_host_log() {
+  if grep -qE "$1" "$OUT/host.log"; then
+    echo "PASS  host: $2"
+  else
+    echo "FAIL  host: $2"
+    HOST_OK=0
+  fi
+}
+check_host_log "runtime-config-applied seq=" "runtime tune applied"
+check_host_log "monitor-select applied id=" "monitor select applied"
+check_host_log "desktop-backend-(applied|stored) seq=" "desktop backend request applied or stored"
+check_host_log "keyframe-request-consumed reason=" "keyframe request consumed"
+
+if [ "$RC" -eq 0 ] && grep -q "ALL PASS" "$OUT/e2e.log" && [ "$HOST_OK" -eq 1 ]; then
+  echo "HOST UDP E2E: ALL PASS"; exit 0
+fi
+echo "HOST UDP E2E: FAIL (rc=$RC hostLog=$HOST_OK)"; exit 1

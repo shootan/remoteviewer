@@ -117,7 +117,13 @@ Flow stage_gate_static(HostContext& hx, TickContext& tc) {
                 << "\n";
     }
 
-    const bool keyReqPending = hx.mailbox.KeyframePending();
+    // encoder.forceKeyNext, not a mailbox peek. The mailbox is drained in stage_time_limit --
+    // nine stages earlier in the same tick -- so peeking here read false essentially always, and
+    // the gate could throttle the very frame that was supposed to carry the forced IDR. The
+    // authoritative "the next accepted input must be a key" state is main-owned and already set
+    // by then. (Ledger H-26a; the old requestedKeyFrame atomic worked only because it was
+    // consumed AFTER this gate.)
+    const bool keyReqPending = encoder.forceKeyNext;
     // The static interval throttles idle scenes; it must never hold back a frame that
     // actually changed, or the first interaction after idle arrives late.
     // In paced motion mode the main tick already enforces encoder.activeFrameIntervalUs. Applying

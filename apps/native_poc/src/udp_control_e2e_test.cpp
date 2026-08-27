@@ -30,6 +30,9 @@ class CountingSink : public ClientEncodedFrameSink {
   void OnEncodedH264Frame(UdpH264AssembledFrame&& frame) override {
     bytes_.fetch_add(frame.payload.size(), std::memory_order_relaxed);
     frames_.fetch_add(1, std::memory_order_relaxed);
+    // bit0 of the encoded header flags is "this AU is a keyframe". Counting them is how a
+    // keyframe REQUEST is verified end to end: the request only matters if an IDR comes back.
+    if ((frame.header.flags & 0x1u) != 0) keyFrames_.fetch_add(1, std::memory_order_relaxed);
   }
   void OnVideoStreamReset() override {}
   // Lets the test ask the controller for one keyframe, which is the only way to drive
@@ -40,10 +43,12 @@ class CountingSink : public ClientEncodedFrameSink {
   void AskForKeyframe() { wantKeyframe_.store(true, std::memory_order_release); }
   uint64_t frames() const { return frames_.load(std::memory_order_relaxed); }
   uint64_t bytes() const { return bytes_.load(std::memory_order_relaxed); }
+  uint64_t keyFrames() const { return keyFrames_.load(std::memory_order_relaxed); }
 
  private:
   std::atomic<uint64_t> frames_{0};
   std::atomic<uint64_t> bytes_{0};
+  std::atomic<uint64_t> keyFrames_{0};
   std::atomic<bool> wantKeyframe_{false};
 };
 
@@ -135,12 +140,25 @@ int main(int argc, char** argv) {
   // request goes out and the session survives it -- the host log carries the matching
   // "keyframe-request-consumed" / "monitor-select applied" / "desktop-backend-" lines a harness
   // greps for.
+  // A keyframe REQUEST is only meaningful if an IDR comes back, so assert on the arriving key
+  // count rather than on "the session is still connected" -- which was already true before the
+  // request and therefore asserted nothing.
+  //
+  // This leg proves the IDR reaches the client. It does NOT by itself prove this particular IDR
+  // was caused by the request: the keyint schedule can emit one too (unlikely inside the window
+  // on an idle desktop, where publishes are ~1/s against a 60-frame keyint, but not impossible).
+  // Causation is pinned by the harness grepping the host log for "keyframe-request-consumed"
+  // (automation/host_udp_e2e.sh). The two together cover request -> loop -> wire.
+  const uint64_t keyFramesBefore = sink.keyFrames();
   sink.AskForKeyframe();
-  const bool keyframeRequested = wait_until([&] {
-    return controller.Snapshot().state == ClientSessionState::Connected;
-  }, 2000);
-  check("keyframe request survives the tunnel", keyframeRequested);
+  const bool keyframeArrived =
+      wait_until([&] { return sink.keyFrames() > keyFramesBefore; }, 10000);
+  check("keyframe request produces an IDR", keyframeArrived,
+        "before=" + std::to_string(keyFramesBefore) + " after=" + std::to_string(sink.keyFrames()));
 
+  // The host applies these on the main loop and logs the outcome; the shell harness greps
+  // host.log for "monitor-select applied" / "desktop-backend-(applied|stored)", so the assertion
+  // here is that the request goes out and the session survives it.
   check("monitor select request accepted", controller.RequestMonitorSelect(0));
   std::this_thread::sleep_for(std::chrono::milliseconds(800));
   check("session survives monitor select",

@@ -111,13 +111,26 @@ class MainLoopMailbox {
     const uint32_t r = keyframeReasons_;
     if (outViewerReason) *outViewerReason = viewerKeyframeReason_;
     keyframeReasons_ = kKeyframeReasonNone;
+    viewerKeyframeReason_ = 0;  // consumed; do not report it again next time
     return r;
   }
-  // Peek without consuming. The static-frame gate needs to know a keyframe is coming so it does
-  // not throttle the frame that will carry it.
+  // Peek without consuming.
+  //
+  // NOT for the static-frame gate: the loop drains this in stage_time_limit, nine stages before
+  // that gate runs, so a peek there is false essentially always. The gate reads
+  // encoder.forceKeyNext instead, which is the authoritative main-owned state. (Ledger H-26a.)
   bool KeyframePending() const {
     std::lock_guard<std::mutex> lk(mu_);
     return keyframeReasons_ != kKeyframeReasonNone;
+  }
+  // Does a runtime-tune request need applying this tick? The 1s tick peeks this before running
+  // ABR/M9: stage_stats now runs BEFORE stage_runtime_tune, so without the peek an explicit tune
+  // arriving on a second boundary would let ABR re-init the encoder from pre-tune state and the
+  // tune re-init it again in the same tick -- two teardowns and a visible gap where the old
+  // ordering had one. (Ledger H-26d.)
+  bool TuneEncoderPending() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return tuneEncoder_.has_value();
   }
 
   // A new session starts with nothing outstanding: requests belong to the client that made them.

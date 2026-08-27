@@ -98,9 +98,6 @@ Flow stage_time_limit(HostContext& hx, TickContext& tc) {
   if (args.seconds > 0 && nowUs >= startUs + static_cast<uint64_t>(args.seconds) * 1000000ULL) {
     return Flow::Break;
   }
-  if (args.seconds > 0 && nowUs >= startUs + static_cast<uint64_t>(args.seconds) * 1000000ULL) {
-    return Flow::Break;
-  }
   sender.PumpUdpHello(transport, encoder);
   pump_cursor_forward(hx, nowUs);
   // Arm the trailing-edge kick on a fresh viewer/decoder (bumped session epoch) and on a capture
@@ -133,9 +130,14 @@ Flow stage_time_limit(HostContext& hx, TickContext& tc) {
       std::cout << "[native-video-host][control] keyframe-request-consumed reason="
                 << viewerKeyReason << "\n";
     }
-    // A barrier re-arm additionally needs the trailing kick: on a still desktop no new frame
-    // arrives to carry the forced IDR, so without this the re-armed barrier never opens.
-    if ((keyReasons & kKeyframeReasonSenderBarrier) != 0) kick.Arm(nowUs, useH264);
+    // EVERY reason arms the trailing kick, not just the barrier one. On a still desktop no new
+    // frame arrives to carry the forced IDR at all -- and with the static refresh off
+    // (REMOTE60_NATIVE_STATIC_REFRESH_MS=0) none ever will, so a viewer asking for a keyframe
+    // would wait forever. Arming the kick is what makes "consumed before the frame wait" actually
+    // mean the request completes without one: the kick resubmits the cached raw frame ~150ms
+    // later and KickTryFill still re-validates identity/secure/size before it does.
+    // (Ledger H-26b.)
+    kick.Arm(nowUs, useH264);
   }
   return Flow::Next;
 }

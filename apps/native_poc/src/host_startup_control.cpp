@@ -355,6 +355,13 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
         // Reset belongs here rather than in the reader: this is the thread that owns the
         // channel's read side, so nothing is being consumed while the queues are cleared.
         clientSession.udpControlChannel.Reset();
+        // Outstanding main-loop requests belong to the client that made them. This is the only
+        // point where that is provably true for a UDP rollover: the previous Serve() has already
+        // returned, so the old client can no longer post, and the new one cannot post until
+        // controlReadyEpoch is published below. (Only the TCP reconnect path cleared before --
+        // a UDP handover carried the old viewer's monitor / capture-mode / tune / backend /
+        // keyframe requests into the new session. Ledger H-26c.)
+        hx.mailbox.Clear();
         {
           std::lock_guard<std::mutex> lock(clientSession.epochMu);
           clientSession.controlReadyEpoch.store(servedEpoch, std::memory_order_release);

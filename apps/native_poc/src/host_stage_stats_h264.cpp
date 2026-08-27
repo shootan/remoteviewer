@@ -321,7 +321,15 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
   const uint32_t clQueueDepthH4p = metricsFresh ? viewer.queueDepthH4p : 0;
   const uint32_t clUdpDropPm = metricsFresh ? viewer.udpAssemblyDropPm : 0;
 
-  if (rate.abrEnabled && !encoder.tuneManualOverride && !rate.m9Apply) {
+  // Hold ABR/M9 for a tick when an explicit tune is already queued. stage_stats runs BEFORE
+  // stage_runtime_tune now (the 1s tick had to move to the front so it stops being skipped -- see
+  // native_video_host_main.cpp), and the old ordering was the other way round: a tune arriving on
+  // a second boundary set tuneManualOverride first, which suppressed ABR for that tick. Without
+  // this peek ABR would re-init the encoder from pre-tune state and the tune would re-init it
+  // again a few stages later -- two teardowns and a visible gap where there used to be one.
+  // (Ledger H-26d.)
+  const bool tuneQueued = hx.mailbox.TuneEncoderPending();
+  if (rate.abrEnabled && !encoder.tuneManualOverride && !rate.m9Apply && !tuneQueued) {
     // The current target, not the one the process started with. A runtime FPS tune moves
     // encoder.activeFps, and judging against the startup args.fps would compare the client's rate
     // to a target that no longer exists -- after a tune to 20, a healthy 20 fps reads as
@@ -374,7 +382,7 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
     }
   }
 
-  if (rate.m9Enabled && !encoder.tuneManualOverride) {
+  if (rate.m9Enabled && !encoder.tuneManualOverride && !tuneQueued) {
     const M9Inputs m9In{metricsFresh, clCongestionState, clDecodedFpsX100, clQueueDepthMax, clUdpDropPm,
                         clAvgLatencyUs, clAvgDecodeTailUs, cb2eAvgUs};
     const M9Decision m9Decision = rate.DecideM9Level(m9In, t);

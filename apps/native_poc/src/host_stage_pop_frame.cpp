@@ -173,7 +173,10 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
         std::lock_guard<std::mutex> lk(sender.mu);
         barrierClosed = sender.waitingForKey;
       }
-      const bool needKick = kick.NeedKick(barrierClosed);
+      // A pending forced key counts as needing a kick even on an open barrier: something has
+      // asked for an IDR (a viewer request, a sender backlog resync) and on a still screen the
+      // cached frame is the only input that will ever carry it. (Ledger H-26b.)
+      const bool needKick = kick.NeedKick(barrierClosed) || encoder.forceKeyNext;
       bool rearm = false;
       if (needKick && capture.KickTryFill(clientSession, kick, payload, w, h, stride, nowUs)) {
         servedBootstrap = true;
