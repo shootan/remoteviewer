@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstdint>
 #include <deque>
+#include <mutex>
 #include <string>
 
 #include "host_capture_session.hpp"
@@ -38,20 +39,58 @@ struct Nv12PendingRelease {
 // bookkeeping, the output-liveness (starvation) heartbeat, and the stats-interval encode counters.
 // See the comment blocks in main() (refit debounce, force-key latch, starvation heartbeat) for
 // the rationale of each group.
-// thread: main encode loop owns everything except the tune* atomics, which the control thread
-// sets from ControlRuntimeEncoderConfig and the main loop consumes (cross-thread).
+// thread: main encode loop owns everything except (a) the tune* atomics, which the control thread
+// sets from ControlRuntimeEncoderConfig and the main loop consumes, and (b) the keyframe-request
+// token bucket, which the control thread refills/consumes and the main loop resets on reconnect --
+// both are cross-thread. The bucket is guarded by keyReqMu rather than made atomic field by field,
+// because refill/check/consume is one transaction: three separate atomics would still let a reset
+// land in the middle of it. (Ledger H-04.)
 struct EncoderState {
   H264Encoder codec;
   bool mfStarted = false;
   bool experimentEnabled = false;   // REMOTE60_NATIVE_ENCODED_EXPERIMENT(_FORCE)
   std::string tuneMode;             // REMOTE60_NATIVE_ENCODER_TUNE_MODE (default low_latency)
-  // Viewer keyframe-request token bucket (REMOTE60_NATIVE_KEYREQ_*).
+  // Viewer keyframe-request token bucket (REMOTE60_NATIVE_KEYREQ_*). The three config fields are
+  // fixed after startup; the three live fields below are cross-thread -- see keyReqMu.
   uint32_t keyReqMinIntervalUs = 0;
   uint32_t keyReqTokenRefillUs = 0;
   uint32_t keyReqTokenCapacity = 0;
+  std::mutex keyReqMu;
   double keyReqTokens = 0.0;
   uint64_t keyReqLastRefillUs = 0;
   uint64_t keyReqNextAllowedUs = 0;
+
+  // Control thread: refill by elapsed time, then take one token if the minimum interval has also
+  // passed. Returns whether the request is allowed; *outTokens is the post-decision level, for the
+  // throttle log. Formerly open-coded in the ControlRequestKeyFrame handler, where it raced the
+  // main loop's reconnect reset on plain double/uint64 fields.
+  bool TryTakeKeyRequestToken(uint64_t nowUs, double* outTokens) {
+    std::lock_guard<std::mutex> lk(keyReqMu);
+    if (keyReqLastRefillUs == 0) keyReqLastRefillUs = nowUs;
+    if (nowUs > keyReqLastRefillUs) {
+      const double refill = static_cast<double>(nowUs - keyReqLastRefillUs) /
+                            static_cast<double>(keyReqTokenRefillUs);
+      if (refill > 0.0) {
+        keyReqTokens = std::min<double>(static_cast<double>(keyReqTokenCapacity), keyReqTokens + refill);
+        keyReqLastRefillUs = nowUs;
+      }
+    }
+    const bool minIntervalOk = (keyReqNextAllowedUs == 0 || nowUs >= keyReqNextAllowedUs);
+    const bool allowed = (keyReqTokens >= 1.0) && minIntervalOk;
+    if (allowed) {
+      keyReqTokens -= 1.0;
+      keyReqNextAllowedUs = nowUs + keyReqMinIntervalUs;
+    }
+    if (outTokens) *outTokens = keyReqTokens;
+    return allowed;
+  }
+  // Main loop: a new session starts with a full bucket.
+  void ResetKeyRequestBucket() {
+    std::lock_guard<std::mutex> lk(keyReqMu);
+    keyReqTokens = static_cast<double>(keyReqTokenCapacity);
+    keyReqLastRefillUs = 0;
+    keyReqNextAllowedUs = 0;
+  }
   // cross-thread: runtime tune request (control thread -> main loop).
   std::atomic<bool> tunePending{false};
   std::atomic<uint32_t> tuneBitrate{0};

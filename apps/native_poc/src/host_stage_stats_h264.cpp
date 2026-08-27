@@ -85,7 +85,8 @@ namespace remote60::native_poc {
 
 Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPrintDue, double mbps,
                      const std::string& targetProcessName, uint64_t queuePushPerSec,
-                     uint64_t callbackFramesPerSec, uint64_t idleHoldPerSec) {
+                     uint64_t callbackFramesPerSec, uint64_t idleHoldPerSec,
+                     const CaptureCadenceGate::Counters& cadence) {
   auto& args = hx.args;
   auto& transport = hx.transport;
   auto& startUs = hx.startUs;
@@ -281,10 +282,10 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
             << " frameGatingStaticSkips=" << frameGating.staticSkipCount
             << " frameGatingChangePm=" << frameGating.changePermilleLast
             << " frameGatingChangeAvgPm=" << frameGatingChangeAvgPm
-            << " captureOfferContent=" << capture.cadenceGate.OfferContentCount()
-            << " captureOfferPointer=" << capture.cadenceGate.OfferPointerCount()
-            << " captureGateDropContent=" << capture.cadenceGate.GateDropContentCount()
-            << " captureGateDropPointer=" << capture.cadenceGate.GateDropPointerCount()
+            << " captureOfferContent=" << cadence.offerContent
+            << " captureOfferPointer=" << cadence.offerPointer
+            << " captureGateDropContent=" << cadence.gateDropContent
+            << " captureGateDropPointer=" << cadence.gateDropPointer
             << " trailingKickCount=" << kick.count
             << " staticRefreshCount=" << kick.staticRefreshCount
             << " lastKickSourceAgeUs=" << kick.lastSourceAgeUs

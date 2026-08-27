@@ -171,10 +171,10 @@ void TestPointerOnlyOfferDoesNotStealContentSlot() {
   expect(gate.ShouldAccept(contentUs, true),
          "content frame after a pointer-only offer is accepted, not dropped");
 
-  expect(gate.GateDropContentCount() == 0,
-         "no content frame was gate-dropped, got " + std::to_string(gate.GateDropContentCount()));
-  expect(gate.AcceptContentCount() == 2,
-         "both content frames accepted, got " + std::to_string(gate.AcceptContentCount()));
+  expect(gate.SnapshotCounters().gateDropContent == 0,
+         "no content frame was gate-dropped, got " + std::to_string(gate.SnapshotCounters().gateDropContent));
+  expect(gate.SnapshotCounters().acceptContent == 2,
+         "both content frames accepted, got " + std::to_string(gate.SnapshotCounters().acceptContent));
 
   // A rapid burst of cursor moves is all dropped and never touches the content counters.
   uint64_t p = contentUs + 500;
@@ -182,14 +182,14 @@ void TestPointerOnlyOfferDoesNotStealContentSlot() {
     gate.ShouldAccept(p, false);
     p += 1000;  // 1ms apart
   }
-  expect(gate.GateDropPointerCount() >= 1,
-         "the pointer burst is dropped, count " + std::to_string(gate.GateDropPointerCount()));
-  expect(gate.GateDropContentCount() == 0,
+  expect(gate.SnapshotCounters().gateDropPointer >= 1,
+         "the pointer burst is dropped, count " + std::to_string(gate.SnapshotCounters().gateDropPointer));
+  expect(gate.SnapshotCounters().gateDropContent == 0,
          "the pointer burst never gate-dropped content, got " +
-             std::to_string(gate.GateDropContentCount()));
-  expect(gate.AcceptContentCount() == 2,
+             std::to_string(gate.SnapshotCounters().gateDropContent));
+  expect(gate.SnapshotCounters().acceptContent == 2,
          "content acceptance untouched by the pointer burst, got " +
-             std::to_string(gate.AcceptContentCount()));
+             std::to_string(gate.SnapshotCounters().acceptContent));
 }
 
 }  // namespace

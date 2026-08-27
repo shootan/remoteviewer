@@ -387,7 +387,7 @@ void startup_configure_control_state(HostContext& hx) {
   // Which screen desktop mode shows. Zero is the primary, which is what it always was, so a
   // client that never selects one behaves exactly as before.
   backend.reqValue = desktop_capture_backend_code(desktop_capture_backend_from_env());
-  encoder.keyReqTokens = static_cast<double>(encoder.keyReqTokenCapacity);
+  encoder.ResetKeyRequestBucket();
   inputRouter.targetCriteria.pid = args.inputTargetPid;
   for (const auto& name : parse_csv_lower(args.inputTargetProcess)) {
     inputRouter.targetCriteria.processNamesLower.insert(name);

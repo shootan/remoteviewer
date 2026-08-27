@@ -632,19 +632,12 @@ void ControlSessionServer::Serve(ControlLink& link) {
       req.header = header;
       if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
       const uint64_t nowUs = qpc_now_us();
-      if (encoder.keyReqLastRefillUs == 0) encoder.keyReqLastRefillUs = nowUs;
-      if (nowUs > encoder.keyReqLastRefillUs) {
-        const double refill =
-            static_cast<double>(nowUs - encoder.keyReqLastRefillUs) / static_cast<double>(encoder.keyReqTokenRefillUs);
-        if (refill > 0.0) {
-          encoder.keyReqTokens = std::min<double>(static_cast<double>(encoder.keyReqTokenCapacity), encoder.keyReqTokens + refill);
-          encoder.keyReqLastRefillUs = nowUs;
-        }
-      }
-      const bool minIntervalOk = (encoder.keyReqNextAllowedUs == 0 || nowUs >= encoder.keyReqNextAllowedUs);
-      if (encoder.keyReqTokens >= 1.0 && minIntervalOk) {
-        encoder.keyReqTokens -= 1.0;
-        encoder.keyReqNextAllowedUs = nowUs + encoder.keyReqMinIntervalUs;
+      // Refill + minimum-interval check + consume, as one transaction under encoder.keyReqMu.
+      // These three fields are plain (a double and two uint64s) and the main loop resets them on
+      // reconnect, so doing this open-coded here was a data race on the throttle that decides how
+      // often the stream is forced to an IDR. (Ledger H-04.)
+      double keyReqTokensNow = 0.0;
+      if (encoder.TryTakeKeyRequestToken(nowUs, &keyReqTokensNow)) {
         clientMetrics.requestedKeyFrame = true;
         clientMetrics.keyFrameReason = req.reason;
         const uint64_t reqCount = clientMetrics.keyFrameRequestCount.fetch_add(1) + 1;
@@ -658,7 +651,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
           std::cout << "[native-video-host][control] keyframe-request-throttled seq=" << req.seq
                     << " reason=" << req.reason
                     << " dropped=" << dropCount
-                    << " tokens=" << encoder.keyReqTokens
+                    << " tokens=" << keyReqTokensNow
                     << "\n";
         }
       }

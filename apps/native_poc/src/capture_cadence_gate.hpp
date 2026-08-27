@@ -104,19 +104,37 @@ class CaptureCadenceGate {
   uint64_t OfferIntervalUs() const { return offerIntervalUs_; }
 
   // Lifetime counters, split by content vs pointer-only offers. Cumulative across resets.
-  uint64_t OfferContentCount() const { return offerContentCount_; }
-  uint64_t OfferPointerCount() const { return offerPointerCount_; }
-  uint64_t GateDropContentCount() const { return gateDropContentCount_; }
-  uint64_t GateDropPointerCount() const { return gateDropPointerCount_; }
-  uint64_t AcceptContentCount() const { return acceptContentCount_; }
+  //
+  // Taken as one snapshot rather than five getters, because the caller must hold the same lock
+  // the capture-callback thread mutates them under (CaptureState::cadenceMu) and per-getter
+  // reads invited exactly the bug this replaces: the stats line read four of them with no lock
+  // at all while the drain watchdog carefully locked for the fifth. (Ledger H-05.)
+  struct Counters {
+    uint64_t offerContent = 0;
+    uint64_t offerPointer = 0;
+    uint64_t gateDropContent = 0;
+    uint64_t gateDropPointer = 0;
+    uint64_t acceptContent = 0;
+  };
+  Counters SnapshotCounters() const {
+    Counters c;
+    c.offerContent = offerContentCount_;
+    c.offerPointer = offerPointerCount_;
+    c.gateDropContent = gateDropContentCount_;
+    c.gateDropPointer = gateDropPointerCount_;
+    c.acceptContent = acceptContentCount_;
+    return c;
+  }
 
  private:
   uint64_t requestedIntervalUs_ = 33333;
   uint64_t offerIntervalUs_ = 0;
   uint64_t lastOfferUs_ = 0;
   uint64_t nextContentDueUs_ = 0;
-  // Non-atomic: the gate runs on the capture-callback thread; the accessors are read for
-  // telemetry only, where a torn read of a monotonic counter is harmless.
+  // Non-atomic: the gate runs on the capture-callback thread, and every reader takes
+  // CaptureState::cadenceMu -- the mutex the callback holds while calling ShouldAccept. This is
+  // NOT telemetry-only state, whatever an earlier comment here claimed: acceptContent is the
+  // numerator the readback-drain watchdog restarts capture on. (Ledger H-05.)
   uint64_t offerContentCount_ = 0;
   uint64_t offerPointerCount_ = 0;
   uint64_t gateDropContentCount_ = 0;

@@ -216,9 +216,7 @@ bool reconnect_tcp_data_session(HostContext& hx, const char* reason) {
     encoder.tuneKeyint = 0;
     encoder.tuneFps = 0;
     encoder.tuneSeq = 0;
-    encoder.keyReqTokens = static_cast<double>(encoder.keyReqTokenCapacity);
-    encoder.keyReqLastRefillUs = 0;
-    encoder.keyReqNextAllowedUs = 0;
+    encoder.ResetKeyRequestBucket();
     encoder.forceKeyNext = true;
     kick.selectionFirstKeyframeDropCount = 0;
     encoder.encodedSeq = 0;

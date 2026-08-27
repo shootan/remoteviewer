@@ -215,6 +215,7 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc);
 Flow stage_stats(HostContext& hx, TickContext& tc);         // 1s tick: stats line, drain watchdog, ABR/M9 -- MUST run first (H-10)
 Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPrintDue, double mbps,
                      const std::string& targetProcessName, uint64_t queuePushPerSec,
-                     uint64_t callbackFramesPerSec, uint64_t idleHoldPerSec);
+                     uint64_t callbackFramesPerSec, uint64_t idleHoldPerSec,
+                     const CaptureCadenceGate::Counters& cadence);
 
 }  // namespace remote60::native_poc

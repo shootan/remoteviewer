@@ -216,6 +216,12 @@ struct CaptureState {
     std::lock_guard<std::mutex> lock(fallbackReasonMu);
     gdiFallbackReason = reason;
   }
+  // The one lock-correct way to read the cadence gate's counters from another thread.
+  // (Ledger H-05.)
+  CaptureCadenceGate::Counters SnapshotCadenceCounters() {
+    std::lock_guard<std::mutex> lk(cadenceMu);
+    return cadenceGate.SnapshotCounters();
+  }
   std::string CopyDxgiFallbackReason() {
     std::lock_guard<std::mutex> lock(fallbackReasonMu);
     return dxgiFallbackReason;

@@ -116,6 +116,9 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
       std::lock_guard<std::mutex> lk(capture.metaMu);
       targetProcessName = capture.targetProcess;
     }
+    // One lock-correct read of the cadence counters for the whole tick: the drain watchdog's
+    // accepted delta below and the stats line both come from it. (Ledger H-05.)
+    const CaptureCadenceGate::Counters cadence = capture.SnapshotCadenceCounters();
     const uint64_t queuePushPerSec =
         (stats.queuePushCount >= stats.queuePushCountLastSample) ? (stats.queuePushCount - stats.queuePushCountLastSample) : 0;
     stats.queuePushCountLastSample = stats.queuePushCount;
@@ -201,19 +204,15 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
       }
       watchdog.drainPrevStreamActive = drainStreamActive;
 
-      // Per-1s-window deltas. AcceptContentCount / BusyDrops / SupersededDrops are all lifetime
+      // Per-1s-window deltas. acceptContent / BusyDrops / SupersededDrops are all lifetime
       // cumulative (superseded especially -- it is never reset), so diff, never read absolute.
       // The snapshots are advanced every tick regardless of whether the watchdog is eligible, so
       // an eligible second always sees exactly that second's increment.
-      // AcceptContentCount is a plain uint64 the capture-callback thread mutates under
-      // capture.cadenceMu; snapshot it under the same lock. The watchdog now restarts capture on
-      // this value, so an unlocked read is a real data race, not just a stale display. (BusyDrops
-      // and SupersededDrops are std::atomic, so they need no lock.)
-      uint64_t acceptedNow;
-      {
-        std::lock_guard<std::mutex> lk(capture.cadenceMu);
-        acceptedNow = capture.cadenceGate.AcceptContentCount();
-      }
+      // acceptContent comes from `cadence` above, taken under capture.cadenceMu -- the mutex the
+      // capture-callback thread mutates the gate under. The watchdog restarts capture on this
+      // value, so an unlocked read is a real data race, not just a stale display. (BusyDrops and
+      // SupersededDrops are std::atomic, so they need no lock.)
+      const uint64_t acceptedNow = cadence.acceptContent;
       const uint64_t busyNow = res.captureReadback.BusyDrops();
       const uint64_t supersededNow = res.captureReadback.SupersededDrops();
       const uint64_t acceptedDelta =
@@ -390,7 +389,8 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
       }
     } else {
       const Flow h264Flow = stats_tick_h264(hx, tc, t, statsPrintDue, mbps, targetProcessName,
-                                            queuePushPerSec, callbackFramesPerSec, idleHoldPerSec);
+                                            queuePushPerSec, callbackFramesPerSec, idleHoldPerSec,
+                                            cadence);
       if (h264Flow != Flow::Next) return h264Flow;
     }
     sender.sentFrames = 0;
