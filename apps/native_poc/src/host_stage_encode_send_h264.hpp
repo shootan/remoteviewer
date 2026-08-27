@@ -50,6 +50,11 @@ struct H264AuBatch {
 
 // One access unit: timestamps / kick cancel, key-frame bookkeeping, sender-queue policy (UDP) or the
 // direct TCP send, per-AU telemetry.
-AuFlow encode_send_h264_emit_au(HostContext& hx, TickContext& tc, H264AuBatch& b, const H264AccessUnit& au);
+//
+// `au` is non-const because the UDP path MOVES its bytes into the sender queue item. It used to be
+// a const& with a std::move() on the member, which yields `const vector&&` -- that binds to the
+// copy assignment, not the move, so every access unit was silently deep-copied (a 1080p IDR is
+// 40-160KB). Nothing reads au.bytes after the move; the later reads are scalars. (Ledger H-08.)
+AuFlow encode_send_h264_emit_au(HostContext& hx, TickContext& tc, H264AuBatch& b, H264AccessUnit& au);
 
 }  // namespace remote60::native_poc

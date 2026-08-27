@@ -1,7 +1,7 @@
 // Stage 11 (H.264 path), per access unit: AU timestamp / trailing-kick cancel, key-frame bookkeeping,
 // sender-queue policy + enqueue (UDP) or the direct TCP send, per-AU telemetry.
 //
-// Host split refactor Phase 2-13: the body of the `for (const auto& au : units)` loop of
+// Host split refactor Phase 2-13: the body of the `for (auto& au : units)` loop of
 // encode_send_h264(), verbatim (its continue / break became AuFlow); see host_stage_encode_send_h264.hpp.
 
 #include <winsock2.h>
@@ -81,7 +81,7 @@ using remote60::host::DxgiDesktopCaptureSession;
 
 namespace remote60::native_poc {
 
-AuFlow encode_send_h264_emit_au(HostContext& hx, TickContext& tc, H264AuBatch& b, const H264AccessUnit& au) {
+AuFlow encode_send_h264_emit_au(HostContext& hx, TickContext& tc, H264AuBatch& b, H264AccessUnit& au) {
   auto& args = hx.args;
   auto& transport = hx.transport;
   auto& guardStaleEncoded = hx.guardStaleEncoded;

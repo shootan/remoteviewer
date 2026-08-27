@@ -487,7 +487,7 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     H264AuBatch b{scaleReadbackTiming, preEncodePrepUs, scaleUs, nv12Us, encodeStartUs, encodeInputUs,
                   queueToEncodeUs, callbackToEncodeStartUs, encodeStats, encodeEndUs, encoderResetTriggered,
                   sessionReconnectTriggered, countedRawForInput, senderBacklogged};
-    for (const auto& au : units) {
+    for (auto& au : units) {  // non-const: the UDP path moves au.bytes (ledger H-08)
       const AuFlow f = encode_send_h264_emit_au(hx, tc, b, au);
       if (f == AuFlow::Continue) continue;
       if (f == AuFlow::Break) break;
