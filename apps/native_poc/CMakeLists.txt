@@ -151,6 +151,7 @@ add_executable(remote60_native_video_client_poc
   src/viewer_frame_gate.cpp
   src/viewer_control_client.cpp
   src/viewer_video_receiver.cpp
+  src/viewer_video_receiver_frame.cpp
   src/viewer_window_proc.cpp
   src/viewer_cursor_overlay.cpp
   src/viewer_overlay_draw.cpp
