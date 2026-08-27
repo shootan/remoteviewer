@@ -28,18 +28,12 @@
 #include <optional>
 #include <string>
 
+#include "backend_request_match.hpp"
 #include "capture_backend_dxgi.hpp"
 
 namespace remote60::native_poc {
 
 using remote60::host::DesktopCaptureBackend;
-
-// --- encoder backend request matching -----------------------------------------------------------
-bool backend_request_is_any(const std::string& requestLower, const char* const* values,
-                            size_t valueCount);
-bool backend_request_satisfied(const std::string& requestLower, const std::string& resolvedLower);
-bool backend_request_is_vendor_specific(const std::string& requestLower);
-std::string backend_fallback_reason(const std::string& requestedRaw, const char* resolvedBackendRaw);
 
 // --- desktop capture backend selection ----------------------------------------------------------
 DesktopCaptureBackend desktop_capture_backend_from_env();

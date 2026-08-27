@@ -14,6 +14,7 @@
 // Extracted verbatim from native_video_host_main.cpp (host split refactor Phase 0-7a). Header-only
 // (parse_args itself lives in host_args.cpp, Phase 0-7b). Behavior is byte-identical. The env
 // switch prelude at the top of main() stays there until Phase 1 folds it into the state structs.
+// The env_* helpers moved to env_util.hpp, shared with the viewer (viewer split refactor Phase 0-15).
 
 #include <algorithm>
 #include <cstdint>
@@ -21,13 +22,9 @@
 #include <string>
 #include <vector>
 
-namespace remote60::native_poc {
+#include "env_util.hpp"
 
-inline std::string env_string_or_empty(const char* key) {
-  if (!key) return std::string{};
-  const char* v = std::getenv(key);
-  return v ? std::string(v) : std::string{};
-}
+namespace remote60::native_poc {
 
 struct Args {
   uint16_t bindPort = 43000;
@@ -76,33 +73,7 @@ struct Args {
   uint16_t directoryObservePort = 0;
 };
 
-inline bool parse_u32(const char* s, uint32_t* out) {
-  if (!s || !out) return false;
-  char* end = nullptr;
-  const unsigned long v = std::strtoul(s, &end, 10);
-  if (!end || *end != '\0') return false;
-  *out = static_cast<uint32_t>(v);
-  return true;
-}
-
-inline bool env_truthy(const char* key) {
-  if (!key) return false;
-  const char* v = std::getenv(key);
-  if (!v) return false;
-  const std::string s = v;
-  return s == "1" || s == "true" || s == "TRUE" || s == "on" || s == "ON";
-}
-
 // Command line (+ optional --config JSON profile) -> Args. Defined in host_args.cpp.
 Args parse_args(int argc, char** argv);
-
-inline uint32_t env_u32_clamped(const char* key, uint32_t fallback, uint32_t minValue, uint32_t maxValue) {
-  if (!key) return fallback;
-  const char* raw = std::getenv(key);
-  if (!raw) return fallback;
-  uint32_t parsed = 0;
-  if (!parse_u32(raw, &parsed)) return fallback;
-  return std::clamp<uint32_t>(parsed, minValue, maxValue);
-}
 
 }  // namespace remote60::native_poc

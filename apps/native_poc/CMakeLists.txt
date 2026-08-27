@@ -155,7 +155,6 @@ add_executable(remote60_native_video_client_poc
   src/viewer_input_forward.cpp
   src/viewer_layout.cpp
   src/viewer_gdi_util.cpp
-  src/viewer_decoder_backend.cpp
   src/viewer_args.cpp
   src/viewer_log.cpp
   src/client_macro_window.cpp
