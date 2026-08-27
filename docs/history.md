@@ -7328,3 +7328,11 @@ Next action
   동작 변경 허용)뿐 — 사용자 실기 확인 → 0.2.58 범프 → main merge 뒤 별도 사이클.
 - 최종 gate-A(브랜치 89211b6): host/client/e2e + 단위테스트 6종 빌드 exit 0, 단위테스트 6/6 PASS(mf_h264_codec, capture_cadence_gate,
   host_abr, host_frame_gate, host_kick, host_backend_policy), 마지막 UDP e2e 13/13. 설치본(0.2.57)·dist 변경 없음, push 없음.
+
+### 304) 2026-08-27 리팩터 실기 확인용 설치본 0.2.58 (브랜치 9d37c9e)
+
+- 사용자 요청: 리팩터 결과를 실기로 확인할 설치본이 없음 → 선택 A(0.2.58 설치본 생성). 브랜치에서 product_version 0.2.57→0.2.58,
+  `remote60_installer` 빌드(payload 6종 재스테이징: GNLinkHost/GNLinkStream 재빌드), HANDOFF 절차대로 임베드 검증 —
+  GNLinkSetup.exe에 L"0.2.58" ×3 / L"0.2.57" ×0, GNLinkHost.exe ×1/×0(GNLinkStream은 버전 문자열 없음). 재빌드 호스트 UDP e2e 13/13.
+  `dist/GNLinkSetup-0.2.58.exe`(3,168,768B) 복사, 0.2.55~0.2.57 보존(0.2.57 = 리팩터 전 코드, 되돌리기용).
+- 상태: **실기 확인 대기**. 통과 시 `refactor/host-split` → main 병합; 문제 시 수정 후 0.2.59로 재배포.
