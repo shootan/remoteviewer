@@ -7609,3 +7609,20 @@ Next action
   `host_startup_control.cpp` · `host_shutdown.cpp` · `host_app_main.cpp` · 문서 3.
 - 검증: 전 타깃 빌드 에러 0 + host_udp_e2e ALL PASS + 단위테스트 22종 PASS + 정상 종료 rc=0/"done".
 - 다음 액션: 실기 확인(설치본 빌드 → 사용자 판정). H-24와 검증 부채는 그 다음.
+
+### 318) 2026-08-28 a67522f 재검증 PASS + H-25 기록 (브랜치 refactor/viewer-split, 문서만)
+
+- 코덱스가 `a67522f`를 재검증해 세 지적(H-23 publication barrier / H-02 소켓 lifetime / H-01 기동 레이스)이
+  모두 닫힌 것으로 확인했다. 추가 blocker/High 없음. 검증이 끝난 커밋은 `779390e` / `4aaa451` / `a67522f`
+  셋이고, 21커밋 전체를 일괄 승인한 것은 아니다 — 원장에 그대로 명시했다.
+- 비차단 관찰 1건을 **H-25**로 기록. "슬롯이 Submitting인 동안 OldestGpuPendingAgeUs / GpuPendingCount
+  어디에도 안 잡힌다"는 지적인데, 코드로 따져보니 **복구 동작은 바뀌지 않았다**: frozen-ring 워치독의
+  트리거는 `oldestPendingUs`이고 `OldestGpuPendingAgeUs()`는 `meta.submitUs == 0`인 슬롯을 원래부터
+  건너뛴다. submitUs는 컨텍스트 작업이 끝난 뒤 찍히므로 Submitting 상태가 생기기 전에도 Submit 도중인
+  슬롯은 이 지표에 안 보였다. 실제로 좁아진 것은 `GpuPendingCount()` 하나이고 그 값은 통계 필드
+  (`gpuPendingCountPeak` / `gpuPendingCount=`)에만 쓰인다. 회귀가 아니라 원래 있던 사각지대가 상태
+  이름으로 드러난 것이라 그렇게 적었다.
+  WGC 콜백 안의 Submit 장기 정체까지 복구 대상으로 삼으려면 Submitting 진입 시각을 찍고 별도 age를
+  노출해야 한다(DXGI는 독립 worker 워치독이 이미 잡는다).
+- 변경 파일: `docs/호스트_리팩터_발견사항.md`, `docs/구현계획.md`, `docs/history.md`. 코드 변경 없음.
+- 다음 액션: 실기 확인(설치본 빌드 → 사용자 판정). 그 뒤 H-24 / H-25 / 검증 부채.
