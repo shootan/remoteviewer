@@ -450,6 +450,14 @@ add_executable(remote60_host_kick_test
 )
 target_include_directories(remote60_host_kick_test PRIVATE src)
 
+add_executable(remote60_host_bgra_scale_test
+  src/host_bgra_scale_test.cpp
+  src/host_bgra_scale.cpp
+  src/host_args.cpp
+)
+target_include_directories(remote60_host_bgra_scale_test PRIVATE src)
+target_link_libraries(remote60_host_bgra_scale_test PRIVATE common)
+
 add_executable(remote60_host_sender_queue_policy_test
   src/host_sender_queue_policy_test.cpp
 )

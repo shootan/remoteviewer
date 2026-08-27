@@ -237,10 +237,14 @@ bool capture_window_thumbnail(HWND hwnd, uint32_t maxW, uint32_t maxH,
 
   int srcW = 0;
   int srcH = 0;
+  int srcOriginX = 0;
+  int srcOriginY = 0;
   const bool desktop = (hwnd == nullptr);
   if (desktop) {
     srcW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
     srcH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    srcOriginX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    srcOriginY = GetSystemMetrics(SM_YVIRTUALSCREEN);
   } else {
     if (!IsWindow(hwnd) || IsIconic(hwnd)) return false;
     // PrintWindow delivers WM_PRINT with SendMessage and no timeout; one hung window (a
@@ -260,66 +264,92 @@ bool capture_window_thumbnail(HWND hwnd, uint32_t maxW, uint32_t maxH,
   }
   if (srcW <= 1 || srcH <= 1) return false;
 
-  HDC screenDc = GetDC(nullptr);
-  if (!screenDc) return false;
-  HDC memDc = CreateCompatibleDC(screenDc);
-  if (!memDc) {
-    ReleaseDC(nullptr, screenDc);
-    return false;
-  }
-
-  BITMAPINFO bmi{};
-  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-  bmi.bmiHeader.biWidth = srcW;
-  bmi.bmiHeader.biHeight = -srcH;  // top-down
-  bmi.bmiHeader.biPlanes = 1;
-  bmi.bmiHeader.biBitCount = 32;
-  bmi.bmiHeader.biCompression = BI_RGB;
-  void* bits = nullptr;
-  HBITMAP dib = CreateDIBSection(screenDc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-  if (!dib || !bits) {
-    if (dib) DeleteObject(dib);
-    DeleteDC(memDc);
-    ReleaseDC(nullptr, screenDc);
-    return false;
-  }
-  HGDIOBJ oldBmp = SelectObject(memDc, dib);
-
-  bool captured = false;
-  if (desktop) {
-    captured = (BitBlt(memDc, 0, 0, srcW, srcH, screenDc, GetSystemMetrics(SM_XVIRTUALSCREEN),
-                       GetSystemMetrics(SM_YVIRTUALSCREEN), SRCCOPY | CAPTUREBLT) != FALSE);
-  } else {
-    // PW_RENDERFULLCONTENT is needed for DirectComposition/UWP-backed windows; without it
-    // those render blank. It is ignored on older systems.
-    captured = (PrintWindow(hwnd, memDc, PW_CLIENTONLY | PW_RENDERFULLCONTENT) != FALSE);
-    if (!captured) captured = (PrintWindow(hwnd, memDc, PW_RENDERFULLCONTENT) != FALSE);
-  }
-
-  std::vector<uint8_t> full;
-  if (captured) {
-    full.resize(static_cast<size_t>(srcW) * static_cast<size_t>(srcH) * 4u);
-    std::memcpy(full.data(), bits, full.size());
-    // PrintWindow leaves alpha at 0 for many windows; force opaque so clients can blit it.
-    for (size_t i = 3; i < full.size(); i += 4) full[i] = 0xFF;
-  }
-
-  SelectObject(memDc, oldBmp);
-  DeleteObject(dib);
-  DeleteDC(memDc);
-  ReleaseDC(nullptr, screenDc);
-  if (!captured || full.empty()) return false;
-
+  // Decide the output size FIRST and let GDI do the downscale.
+  //
+  // This used to render at full source size into a DIB, memcpy the whole thing into a vector,
+  // and then bilinear-resize on the CPU -- for the desktop preview that is a virtual-screen-sized
+  // allocation and copy (tens of MB on a 4K or multi-monitor setup) per request, on the control
+  // thread, to produce at most a 256x160 thumbnail. StretchBlt with HALFTONE does the same job in
+  // the driver and only the thumbnail-sized bits are ever touched by the CPU. (Ledger H-21.)
   uint32_t dstW = 0;
   uint32_t dstH = 0;
   fit_size_preserving_aspect(static_cast<uint32_t>(srcW), static_cast<uint32_t>(srcH), maxW, maxH,
                              &dstW, &dstH);
   if (dstW == 0 || dstH == 0) return false;
-  if (dstW == static_cast<uint32_t>(srcW) && dstH == static_cast<uint32_t>(srcH)) {
-    *outBgra = std::move(full);
-  } else if (!resize_bgra_bilinear(full.data(), static_cast<uint32_t>(srcW),
-                                   static_cast<uint32_t>(srcH), static_cast<uint32_t>(srcW) * 4u,
-                                   dstW, dstH, outBgra)) {
+
+  HDC screenDc = GetDC(nullptr);
+  if (!screenDc) return false;
+
+  // Owns an HDC + DIB section pair; the thumbnail path builds one or two of them and every
+  // failure path has to unwind both, which is what a scope guard is for.
+  struct DibSurface {
+    HDC dc = nullptr;
+    HBITMAP bmp = nullptr;
+    HGDIOBJ oldBmp = nullptr;
+    void* bits = nullptr;
+    bool Create(HDC ref, int w, int h) {
+      dc = CreateCompatibleDC(ref);
+      if (!dc) return false;
+      BITMAPINFO bmi{};
+      bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+      bmi.bmiHeader.biWidth = w;
+      bmi.bmiHeader.biHeight = -h;  // top-down
+      bmi.bmiHeader.biPlanes = 1;
+      bmi.bmiHeader.biBitCount = 32;
+      bmi.bmiHeader.biCompression = BI_RGB;
+      bmp = CreateDIBSection(ref, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+      if (!bmp || !bits) return false;
+      oldBmp = SelectObject(dc, bmp);
+      return true;
+    }
+    ~DibSurface() {
+      if (dc && oldBmp) SelectObject(dc, oldBmp);
+      if (bmp) DeleteObject(bmp);
+      if (dc) DeleteDC(dc);
+    }
+  };
+
+  bool captured = false;
+  {
+    DibSurface dst;
+    if (dst.Create(screenDc, static_cast<int>(dstW), static_cast<int>(dstH))) {
+      SetStretchBltMode(dst.dc, HALFTONE);
+      SetBrushOrgEx(dst.dc, 0, 0, nullptr);
+      if (desktop) {
+        captured = (StretchBlt(dst.dc, 0, 0, static_cast<int>(dstW), static_cast<int>(dstH),
+                               screenDc, srcOriginX, srcOriginY, srcW, srcH,
+                               SRCCOPY | CAPTUREBLT) != FALSE);
+      } else {
+        // PrintWindow does not scale into a smaller DC, so a window still renders at full size
+        // first -- but the downscale and the CPU copy are the thumbnail's, not the window's.
+        DibSurface full;
+        if (full.Create(screenDc, srcW, srcH)) {
+          // PW_RENDERFULLCONTENT is needed for DirectComposition/UWP-backed windows; without it
+          // those render blank. It is ignored on older systems.
+          bool rendered = (PrintWindow(hwnd, full.dc, PW_CLIENTONLY | PW_RENDERFULLCONTENT) != FALSE);
+          if (!rendered) rendered = (PrintWindow(hwnd, full.dc, PW_RENDERFULLCONTENT) != FALSE);
+          if (rendered) {
+            captured = (StretchBlt(dst.dc, 0, 0, static_cast<int>(dstW), static_cast<int>(dstH),
+                                   full.dc, 0, 0, srcW, srcH, SRCCOPY) != FALSE);
+          }
+        }
+      }
+      if (captured) {
+        // Required before reading a DIB section's bits directly: GDI batches drawing calls per
+        // thread, and without the flush the memcpy below can read pixels the BitBlt/StretchBlt
+        // has not actually written yet. (Ledger H-21.)
+        GdiFlush();
+        const size_t stride = static_cast<size_t>(dstW) * 4u;
+        outBgra->resize(stride * dstH);
+        std::memcpy(outBgra->data(), dst.bits, outBgra->size());
+        // PrintWindow leaves alpha at 0 for many windows; force opaque so clients can blit it.
+        for (size_t i = 3; i < outBgra->size(); i += 4) (*outBgra)[i] = 0xFF;
+      }
+    }
+  }
+  ReleaseDC(nullptr, screenDc);
+  if (!captured || outBgra->empty()) {
+    outBgra->clear();
     return false;
   }
   *outW = dstW;
