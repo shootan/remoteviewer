@@ -144,13 +144,15 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
               TcpControlLink link(acceptedSock);
               controlServer.Serve(link);
             }
-            if (acceptedSock != INVALID_SOCKET) {
-              shutdown(acceptedSock, SD_BOTH);
-              closesocket(acceptedSock);
-            }
-            {
-              SOCKET expected = acceptedSock;
-              clientSession.controlClientSock.compare_exchange_strong(expected, INVALID_SOCKET);
+            // This thread is the ONLY closer of an accepted control socket. Taking the handle
+            // out of controlClientSock with an exchange is what makes that true: shutdown_host
+            // only shutdown()s whatever it finds there (to break the blocking read) and never
+            // closes, so the descriptor cannot be closed twice and a recycled value cannot be
+            // closed out from under a later socket. (Ledger H-02.)
+            const SOCKET mine = clientSession.controlClientSock.exchange(INVALID_SOCKET);
+            if (mine != INVALID_SOCKET) {
+              shutdown(mine, SD_BOTH);
+              closesocket(mine);
             }
             std::cout << "[native-video-host][control] tcp client disconnected\n";
           }

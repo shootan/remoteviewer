@@ -307,14 +307,15 @@ class StreamingHostProcess {
     if (log) std::fclose(log);
   }
 
+  // Kill the child, but do NOT close its handles: the supervisor is parked in
+  // WaitForSingleObject on the very same handle value, and closing a handle another thread is
+  // waiting on is undefined -- the wait can return on a recycled object, and the
+  // GetExitCodeProcess that follows would query it. mu_ does not help, because the waiter
+  // cannot hold it while it blocks. Handle ownership therefore sits with Supervise() alone,
+  // which closes only after its wait has returned. (Ledger H-01.)
   void TerminateChild() {
     std::lock_guard<std::mutex> lock(mu_);
-    if (child_.hProcess) {
-      TerminateProcess(child_.hProcess, 0);
-      CloseHandle(child_.hProcess);
-      CloseHandle(child_.hThread);
-      child_ = PROCESS_INFORMATION{};
-    }
+    if (child_.hProcess) TerminateProcess(child_.hProcess, 0);
   }
 
   void Supervise() {
@@ -484,12 +485,14 @@ class StreamingHostProcess {
         AppendLogLineOnce("[host-app] the streaming host exited");
       }
       {
+        // Sole owner of these handles (see TerminateChild). Clearing child_ first, under the
+        // same lock, means a TerminateChild racing this point finds nothing to terminate
+        // rather than a handle that is about to close.
         std::lock_guard<std::mutex> lock(mu_);
-        if (child_.hProcess) {
-          CloseHandle(child_.hProcess);
-          CloseHandle(child_.hThread);
-          child_ = PROCESS_INFORMATION{};
-        }
+        child_ = PROCESS_INFORMATION{};
+        if (pi.hProcess) CloseHandle(pi.hProcess);
+        if (pi.hThread) CloseHandle(pi.hThread);
+        pi = PROCESS_INFORMATION{};
       }
       if (!running_.load(std::memory_order_relaxed)) break;
       restarts_.fetch_add(1, std::memory_order_relaxed);

@@ -115,11 +115,14 @@ void shutdown_host(HostContext& hx) {
   res.frame.cv.notify_all();
   windowSelectionTxn.cv.notify_all();
   {
-    SOCKET ctlSock = clientSession.controlClientSock.exchange(INVALID_SOCKET);
-    if (ctlSock != INVALID_SOCKET) {
-      shutdown(ctlSock, SD_BOTH);
-      closesocket(ctlSock);
-    }
+    // Wake the control thread out of its blocking read, but do NOT close: that thread owns the
+    // accepted socket and closes it once Serve() returns (host_startup_control.cpp). Closing
+    // here as well meant the same descriptor was closed twice -- and since a SOCKET value is
+    // reusable the instant the first close lands, the second one could close an unrelated
+    // socket. `stop` is already true above, so the accept loop cannot hand out a new socket
+    // between the load and the shutdown. (Ledger H-02.)
+    const SOCKET ctlSock = clientSession.controlClientSock.load(std::memory_order_acquire);
+    if (ctlSock != INVALID_SOCKET) shutdown(ctlSock, SD_BOTH);
   }
   if (clientSession.controlListenSock != INVALID_SOCKET) {
     closesocket(clientSession.controlListenSock);
