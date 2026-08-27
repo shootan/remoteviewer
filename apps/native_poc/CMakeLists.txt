@@ -450,6 +450,15 @@ add_executable(remote60_host_backend_policy_test
 target_include_directories(remote60_host_backend_policy_test PRIVATE src)
 target_link_libraries(remote60_host_backend_policy_test PRIVATE capture)
 
+# Viewer split refactor T1: the recv thread's frame gate (stale drop, congestion state machine, keyframe wait)
+# driven with time as an argument and a recording sink; no decoder, no sockets.
+add_executable(remote60_viewer_frame_gate_test
+  src/viewer_frame_gate.cpp
+  src/viewer_frame_gate_test.cpp
+)
+target_include_directories(remote60_viewer_frame_gate_test PRIVATE src)
+target_link_libraries(remote60_viewer_frame_gate_test PRIVATE common)
+
 add_executable(remote60_bind_port_candidates_test
   src/bind_port_candidates_test.cpp
 )
