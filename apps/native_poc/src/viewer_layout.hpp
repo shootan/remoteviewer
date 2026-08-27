@@ -57,8 +57,6 @@ bool point_in_macro_button(HWND hwnd, int x, int y);
 
 bool point_in_panel_ui(HWND hwnd, int x, int y);
 
-bool point_in_video_rect(HWND hwnd, int x, int y);
-
 bool map_client_point_to_video_coords(HWND hwnd, int x, int y, int32_t* outVideoX, int32_t* outVideoY);
 
 }  // namespace remote60::native_poc::viewer

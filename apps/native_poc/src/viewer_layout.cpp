@@ -95,11 +95,6 @@ bool point_in_panel_ui(HWND hwnd, int x, int y) {
   return point_in_rect(layout.panelRect, x, y);
 }
 
-bool point_in_video_rect(HWND hwnd, int x, int y) {
-  const ClientLayout layout = compute_client_layout(hwnd);
-  return point_in_rect(layout.videoRect, x, y);
-}
-
 bool map_client_point_to_video_coords(HWND hwnd, int x, int y, int32_t* outVideoX, int32_t* outVideoY) {
   if (!outVideoX || !outVideoY) return false;
   const ClientLayout layout = compute_client_layout(hwnd);

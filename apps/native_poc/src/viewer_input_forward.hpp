@@ -4,13 +4,13 @@
 //
 // Role:    enqueue_input_event / enqueue_input_text_units / enqueue_macro_step (queue for the control
 //          thread), the key-forwarding memory (forward_key_down/up, key_event_should_forward,
-//          enqueue_release_for_pressed_keys), IME result text, mouse capture release, coord_to_permille,
+//          enqueue_release_for_pressed_keys), IME result text, mouse capture release,
 //          toggle_macro_window.
 // Thread:  UI (WndProc) produces; the control thread drains gControl.inputQueue. The macro window replays
 //          through enqueue_macro_step on the UI thread.
 // Input:   virtual keys, video coordinates, UTF-16 text, macro steps.
 // Output:  QueuedControlInputMessage entries; macro recording taps enqueue_input_event.
-// Callers: WndProc, viewer_picker (coord_to_permille), the toolbar/macro callbacks in main().
+// Callers: WndProc, the toolbar/macro callbacks in main().
 //
 // Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-9).
 
@@ -55,8 +55,6 @@ void enqueue_release_for_pressed_mouse_buttons();
 // closed and reopened. Sending the up for everything held, the moment focus is lost, is what
 // keeps a modifier from latching on the host.
 void enqueue_release_for_pressed_keys();
-
-uint32_t coord_to_permille(int coord, int extent);
 
 void enqueue_input_event(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode);
 

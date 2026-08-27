@@ -120,14 +120,6 @@ void enqueue_release_for_pressed_keys() {
   }
 }
 
-uint32_t coord_to_permille(int coord, int extent) {
-  if (extent <= 1) return 5000;
-  const int clamped = std::clamp(coord, 0, extent - 1);
-  const uint64_t numerator = static_cast<uint64_t>(clamped) * 10000ULL +
-                             static_cast<uint64_t>((extent - 1) / 2);
-  return static_cast<uint32_t>(numerator / static_cast<uint64_t>(extent - 1));
-}
-
 void enqueue_input_event(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode) {
   if (kInputPolicyForceBlock) return;
   if (!gSession.inputEnabled.load()) return;

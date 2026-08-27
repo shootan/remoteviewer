@@ -34,11 +34,11 @@ struct ControlChannelState {
       kKeyframeRequestTokenRefillUsDefault,
       kKeyframeRequestTokenCapacityDefault};
   RuntimeTuneState runtimeTune{
-      300000,
-      30000000,
-      250000,
-      1,
-      240};
+      kRuntimeBitrateMin,
+      kRuntimeBitrateMax,
+      kRuntimeBitrateStep,
+      kRuntimeKeyintMin,
+      kRuntimeKeyintMax};
   remote60::native_poc::StreamStateControl streamState;
   CaptureModeRequestState captureModeRequests;
   ClientInputQueue inputQueue;

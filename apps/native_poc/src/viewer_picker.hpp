@@ -67,6 +67,4 @@ void enqueue_capture_mode_request(uint16_t mode, uint32_t xPermille, uint32_t yP
 
 void request_capture_overview_mode();
 
-void request_capture_focus_from_client_point(HWND hwnd, int x, int y);
-
 }  // namespace remote60::native_poc::viewer

@@ -218,12 +218,4 @@ void request_capture_overview_mode() {
   enqueue_capture_mode_request(1, 5000, 5000);
 }
 
-void request_capture_focus_from_client_point(HWND hwnd, int x, int y) {
-  RECT rc{};
-  GetClientRect(hwnd, &rc);
-  const int clientW = std::max<int>(1, static_cast<int>(rc.right - rc.left));
-  const int clientH = std::max<int>(1, static_cast<int>(rc.bottom - rc.top));
-  enqueue_capture_mode_request(2, coord_to_permille(x, clientW), coord_to_permille(y, clientH));
-}
-
 }  // namespace remote60::native_poc::viewer
