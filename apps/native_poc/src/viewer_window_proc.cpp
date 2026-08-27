@@ -14,7 +14,120 @@
 #include "viewer_picker.hpp"
 #include "viewer_present.hpp"
 
+#include <iostream>
+
 namespace remote60::native_poc::viewer {
+
+// WM_RBUTTONDOWN / WM_RBUTTONUP / WM_MBUTTONDOWN / WM_MBUTTONUP: identical apart from the button bit
+// (2 = right, 4 = middle) and the virtual key the host receives.
+LRESULT on_secondary_button(HWND hwnd, bool down, uint16_t buttonBit, uint32_t vk, int x, int y) {
+  if (qpc_now_us() < gInput.suppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+  if (point_in_toggle_button(hwnd, x, y)) return 0;
+  if (point_in_macro_button(hwnd, x, y)) return 0;
+  if (gPicker.visible.load(std::memory_order_relaxed)) return 0;
+  if (point_in_panel_ui(hwnd, x, y)) return 0;
+  if (kInputPolicyForceBlock) return 0;
+  int32_t vx = 0;
+  int32_t vy = 0;
+  if (!map_client_point_to_video_coords(hwnd, x, y, &vx, &vy)) return 0;
+  if (down) {
+    SetCapture(hwnd);
+    gInput.mouseButtons.fetch_or(buttonBit);
+    enqueue_input_event(2, vx, vy, 0, vk);
+  } else {
+    gInput.mouseButtons.fetch_and(static_cast<uint16_t>(~buttonBit));
+    enqueue_input_event(3, vx, vy, 0, vk);
+    release_mouse_capture_if_idle(hwnd);
+  }
+  return 0;
+}
+
+// The picker's DOWN (mouse WM_LBUTTONDOWN and touch WM_POINTERDOWN): remember which target (if any)
+// this press started on; the UP handler only selects when it ends on the same one. A press on empty
+// picker space latches "none", and so does a press within the first 300ms after the picker appeared
+// -- the gesture must START after the picker is stable, or a long-press begun against the old
+// screen could still select (PickerState::PressTarget).
+void picker_press(HWND hwnd, const ClientLayout& layout, int x, int y) {
+  uint64_t pressedId = kPickerPressNone;
+  uint64_t hitId = 0;
+  if (point_in_rect(layout.desktopButtonRect, x, y)) {
+    pressedId = 0;
+  } else if (try_hit_window_list_item(hwnd, x, y, &hitId)) {
+    pressedId = hitId;
+  }
+  gPicker.PressTarget(pressedId, qpc_now_us());
+}
+
+// The picker's UP (mouse WM_LBUTTONUP and touch WM_POINTERUP). Consumes the press latch first --
+// any UP ends the gesture. Refresh needs no latch; selecting needs a picker that has been up for a
+// moment (a click begun before it appeared must not land on a card) AND a DOWN that started on the
+// same target (PickerState::SelectAllowed). Desktop is an explicit WindowSelect(0) even when desktop
+// is already the selected target: one clean restart with a fresh generation, so the first-frame
+// gate has something to wait on.
+void picker_release(HWND hwnd, const ClientLayout& layout, int x, int y, const char* source) {
+  const uint64_t pressedId = gPicker.ReleaseTarget();
+  if (point_in_rect(layout.refreshButtonRect, x, y)) {
+    queue_window_list_request("window_list_request pending");
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return;
+  }
+  const uint64_t nowUs = qpc_now_us();
+  const uint64_t shownAgeMs = gPicker.ShownAgeMs(nowUs);
+  if (point_in_rect(layout.desktopButtonRect, x, y)) {
+    if (gPicker.SelectAllowed(pressedId, 0, nowUs) &&
+        begin_pc_target_selection(0, "desktop_select_requested")) {
+      std::cout << "[native-video-client][picker] select source=" << source << " x=" << x << " y=" << y
+                << " id=0 shownAgeMs=" << shownAgeMs << "\n";
+      InvalidateRect(hwnd, nullptr, FALSE);
+    }
+    return;
+  }
+  uint64_t hitWindowId = 0;
+  if (try_hit_window_list_item(hwnd, x, y, &hitWindowId)) {
+    if (gPicker.SelectAllowed(pressedId, hitWindowId, nowUs) &&
+        begin_pc_target_selection(hitWindowId, "window_select_requested")) {
+      std::cout << "[native-video-client][picker] select source=" << source << " x=" << x << " y=" << y
+                << " id=" << hitWindowId << " shownAgeMs=" << shownAgeMs << "\n";
+      InvalidateRect(hwnd, nullptr, FALSE);
+    }
+  }
+}
+
+// The Ctrl+Alt local hotkeys of WM_KEYDOWN: F5 refresh the window list, F9 capture overview,
+// [ ] bitrate down/up, ; ' keyint down/up. True when consumed.
+bool on_local_hotkey(HWND hwnd, WPARAM wp) {
+  if (local_hotkey_modifiers_active() && wp == VK_F5) {
+    queue_window_list_request("window_list_request pending");
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+  }
+  if (local_hotkey_modifiers_active() && wp == VK_F9) {
+    request_capture_overview_mode();
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+  }
+  if (local_hotkey_modifiers_active() && wp == VK_OEM_4) {  // [
+    apply_runtime_tune_delta(-1, 0);
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+  }
+  if (local_hotkey_modifiers_active() && wp == VK_OEM_6) {  // ]
+    apply_runtime_tune_delta(1, 0);
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+  }
+  if (local_hotkey_modifiers_active() && wp == VK_OEM_1) {  // ;
+    apply_runtime_tune_delta(0, -1);
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+  }
+  if (local_hotkey_modifiers_active() && wp == VK_OEM_7) {  // '
+    apply_runtime_tune_delta(0, 1);
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+  }
+  return false;
+}
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   switch (msg) {
@@ -96,21 +209,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           gPicker.CancelPress();
           return 0;
         }
-        // Remember which target (if any) this press started on; the UP handler only selects when
-        // it ends on the same one. A press on empty picker space latches "none", and so does a
-        // press within the first 300ms after the picker appeared -- the gesture must START after
-        // the picker is stable, or a long-press begun against the old screen could still select.
-        const int dx = GET_X_LPARAM(lp);
-        const int dy = GET_Y_LPARAM(lp);
-        const ClientLayout downLayout = compute_client_layout(hwnd);
-        uint64_t pressedId = kPickerPressNone;
-        uint64_t hitId = 0;
-        if (point_in_rect(downLayout.desktopButtonRect, dx, dy)) {
-          pressedId = 0;
-        } else if (try_hit_window_list_item(hwnd, dx, dy, &hitId)) {
-          pressedId = hitId;
-        }
-        gPicker.PressTarget(pressedId, qpc_now_us());
+        picker_press(hwnd, compute_client_layout(hwnd), GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
         return 0;
       }
       if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
@@ -145,41 +244,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
       }
       if (gPicker.visible.load(std::memory_order_relaxed)) {
-        const uint64_t pressedId = gPicker.ReleaseTarget();
         // A selection already in flight owns the picker until its first frame arrives; ignore
-        // further target clicks so a double-click cannot queue a second, racing select.
-        if (gSel.pending.load(std::memory_order_acquire)) return 0;
-        if (point_in_rect(layout.refreshButtonRect, x, y)) {
-          queue_window_list_request("window_list_request pending");
-          InvalidateRect(hwnd, nullptr, FALSE);
+        // further target clicks so a double-click cannot queue a second, racing select. (The
+        // latch is dropped either way: any UP ends the gesture.)
+        if (gSel.pending.load(std::memory_order_acquire)) {
+          gPicker.CancelPress();
           return 0;
         }
-        // Mis-click guard: selecting needs a picker that has been up for a moment (a click begun
-        // before it appeared must not land on a card) AND a DOWN that started on the same target.
-        const uint64_t nowUs = qpc_now_us();
-        if (!gPicker.ShownLongEnough(nowUs)) return 0;
-        const uint64_t shownAgeMs = gPicker.ShownAgeMs(nowUs);
-        if (point_in_rect(layout.desktopButtonRect, x, y)) {
-          if (pressedId != 0) return 0;
-          // Explicit WindowSelect(0) even when desktop is already the selected target: one clean
-          // restart with a fresh generation, so the first-frame gate has something to wait on.
-          if (begin_pc_target_selection(0, "desktop_select_requested")) {
-            std::cout << "[native-video-client][picker] select source=mouse x=" << x << " y=" << y
-                      << " id=0 shownAgeMs=" << shownAgeMs << "\n";
-            InvalidateRect(hwnd, nullptr, FALSE);
-          }
-          return 0;
-        }
-        uint64_t hitWindowId = 0;
-        if (try_hit_window_list_item(hwnd, x, y, &hitWindowId)) {
-          if (pressedId != hitWindowId) return 0;
-          if (begin_pc_target_selection(hitWindowId, "window_select_requested")) {
-            std::cout << "[native-video-client][picker] select source=mouse x=" << x << " y=" << y
-                      << " id=" << hitWindowId << " shownAgeMs=" << shownAgeMs << "\n";
-            InvalidateRect(hwnd, nullptr, FALSE);
-          }
-          return 0;
-        }
+        picker_release(hwnd, layout, x, y, "mouse");
         return 0;
       }
       if (point_in_rect(layout.refreshButtonRect, x, y)) {
@@ -211,69 +283,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     }
     case WM_RBUTTONDOWN:
-      if (qpc_now_us() < gInput.suppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
-      if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
-      if (point_in_macro_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
-      if (gPicker.visible.load(std::memory_order_relaxed)) return 0;
-      if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
-      if (kInputPolicyForceBlock) return 0;
-      {
-        int32_t vx = 0;
-        int32_t vy = 0;
-        if (!map_client_point_to_video_coords(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &vx, &vy)) return 0;
-        SetCapture(hwnd);
-        gInput.mouseButtons.fetch_or(2);
-        enqueue_input_event(2, vx, vy, 0, VK_RBUTTON);
-      }
-      return 0;
+      return on_secondary_button(hwnd, true, 2, VK_RBUTTON, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
     case WM_RBUTTONUP:
-      if (qpc_now_us() < gInput.suppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
-      if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
-      if (point_in_macro_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
-      if (gPicker.visible.load(std::memory_order_relaxed)) return 0;
-      if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
-      if (kInputPolicyForceBlock) return 0;
-      {
-        int32_t vx = 0;
-        int32_t vy = 0;
-        if (!map_client_point_to_video_coords(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &vx, &vy)) return 0;
-        gInput.mouseButtons.fetch_and(static_cast<uint16_t>(~2u));
-        enqueue_input_event(3, vx, vy, 0, VK_RBUTTON);
-        release_mouse_capture_if_idle(hwnd);
-      }
-      return 0;
+      return on_secondary_button(hwnd, false, 2, VK_RBUTTON, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
     case WM_MBUTTONDOWN:
-      if (qpc_now_us() < gInput.suppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
-      if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
-      if (point_in_macro_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
-      if (gPicker.visible.load(std::memory_order_relaxed)) return 0;
-      if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
-      if (kInputPolicyForceBlock) return 0;
-      {
-        int32_t vx = 0;
-        int32_t vy = 0;
-        if (!map_client_point_to_video_coords(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &vx, &vy)) return 0;
-        SetCapture(hwnd);
-        gInput.mouseButtons.fetch_or(4);
-        enqueue_input_event(2, vx, vy, 0, VK_MBUTTON);
-      }
-      return 0;
+      return on_secondary_button(hwnd, true, 4, VK_MBUTTON, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
     case WM_MBUTTONUP:
-      if (qpc_now_us() < gInput.suppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
-      if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
-      if (point_in_macro_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
-      if (gPicker.visible.load(std::memory_order_relaxed)) return 0;
-      if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
-      if (kInputPolicyForceBlock) return 0;
-      {
-        int32_t vx = 0;
-        int32_t vy = 0;
-        if (!map_client_point_to_video_coords(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &vx, &vy)) return 0;
-        gInput.mouseButtons.fetch_and(static_cast<uint16_t>(~4u));
-        enqueue_input_event(3, vx, vy, 0, VK_MBUTTON);
-        release_mouse_capture_if_idle(hwnd);
-      }
-      return 0;
+      return on_secondary_button(hwnd, false, 4, VK_MBUTTON, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
     case WM_MOUSEWHEEL: {
       if (qpc_now_us() < gInput.suppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
@@ -342,45 +358,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           return 0;
         }
         if (msg == WM_POINTERDOWN) {
-          // Same DOWN/UP-on-the-same-target latch as the mouse path, including the "gesture must
-          // start after the picker is 300ms stable" rule.
-          uint64_t pressedId = kPickerPressNone;
-          uint64_t hitId = 0;
-          if (point_in_rect(layout.desktopButtonRect, p.x, p.y)) {
-            pressedId = 0;
-          } else if (try_hit_window_list_item(hwnd, p.x, p.y, &hitId)) {
-            pressedId = hitId;
-          }
-          gPicker.PressTarget(pressedId, qpc_now_us());
+          picker_press(hwnd, layout, p.x, p.y);
           return 0;
         }
         if (msg == WM_POINTERUP) {
-          const uint64_t pressedId = gPicker.ReleaseTarget();
-          const uint64_t nowUs = qpc_now_us();
-          const bool shownLongEnough = gPicker.ShownLongEnough(nowUs);
-          const uint64_t shownAgeMs = gPicker.ShownAgeMs(nowUs);
-          if (point_in_rect(layout.refreshButtonRect, p.x, p.y)) {
-            queue_window_list_request("window_list_request pending");
-            InvalidateRect(hwnd, nullptr, FALSE);
-          } else if (point_in_rect(layout.desktopButtonRect, p.x, p.y)) {
-            if (shownLongEnough && pressedId == 0 &&
-                begin_pc_target_selection(0, "desktop_select_requested")) {
-              std::cout << "[native-video-client][picker] select source=touch x=" << p.x
-                        << " y=" << p.y << " id=0 shownAgeMs=" << shownAgeMs << "\n";
-              InvalidateRect(hwnd, nullptr, FALSE);
-            }
-          } else {
-            uint64_t hitWindowId = 0;
-            if (try_hit_window_list_item(hwnd, p.x, p.y, &hitWindowId)) {
-              if (shownLongEnough && pressedId == hitWindowId &&
-                  begin_pc_target_selection(hitWindowId, "window_select_requested")) {
-                std::cout << "[native-video-client][picker] select source=touch x=" << p.x
-                          << " y=" << p.y << " id=" << hitWindowId
-                          << " shownAgeMs=" << shownAgeMs << "\n";
-                InvalidateRect(hwnd, nullptr, FALSE);
-              }
-            }
-          }
+          picker_release(hwnd, layout, p.x, p.y, "touch");
         }
         return 0;
       }
@@ -444,36 +426,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       (void)send_ime_result_text(hwnd, lp);
       return 0;
     case WM_KEYDOWN:
-      if (local_hotkey_modifiers_active() && wp == VK_F5) {
-        queue_window_list_request("window_list_request pending");
-        InvalidateRect(hwnd, nullptr, FALSE);
-        return 0;
-      }
-      if (local_hotkey_modifiers_active() && wp == VK_F9) {
-        request_capture_overview_mode();
-        InvalidateRect(hwnd, nullptr, FALSE);
-        return 0;
-      }
-      if (local_hotkey_modifiers_active() && wp == VK_OEM_4) {  // [
-        apply_runtime_tune_delta(-1, 0);
-        InvalidateRect(hwnd, nullptr, FALSE);
-        return 0;
-      }
-      if (local_hotkey_modifiers_active() && wp == VK_OEM_6) {  // ]
-        apply_runtime_tune_delta(1, 0);
-        InvalidateRect(hwnd, nullptr, FALSE);
-        return 0;
-      }
-      if (local_hotkey_modifiers_active() && wp == VK_OEM_1) {  // ;
-        apply_runtime_tune_delta(0, -1);
-        InvalidateRect(hwnd, nullptr, FALSE);
-        return 0;
-      }
-      if (local_hotkey_modifiers_active() && wp == VK_OEM_7) {  // '
-        apply_runtime_tune_delta(0, 1);
-        InvalidateRect(hwnd, nullptr, FALSE);
-        return 0;
-      }
+      if (on_local_hotkey(hwnd, wp)) return 0;
       if (kInputPolicyForceBlock) return 0;
       if (forward_key_down(wp)) enqueue_input_event(5, 0, 0, 0, static_cast<uint32_t>(wp));
       return 0;
