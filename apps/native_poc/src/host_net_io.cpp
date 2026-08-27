@@ -91,15 +91,15 @@ void udp_pace_wait_until(uint64_t targetUs) {
 
 // Returns the per-frame send budget in microseconds, or 0 when the frame should go out as
 // fast as possible (small frames are not worth the pacing overhead).
-uint64_t udp_pace_budget_us(size_t payloadSize, uint32_t chunkCount, bool keyFrame) {
-  uint32_t peakBps = gUdpPacePeakBitrateBps.load(std::memory_order_relaxed);
+uint64_t udp_pace_budget_us(const UdpEgressConfig& egress, size_t payloadSize,
+                            uint32_t chunkCount, bool keyFrame) {
+  uint32_t peakBps = egress.pacePeakBps;
   if (keyFrame && peakBps != 0) {
     // IDRs are much larger than delta frames. Pacing one at only a small multiple of the
     // average bitrate blocks the sender for several frame periods, fills the latest-wins
     // queue, and triggers another IDR -- a self-sustaining low-FPS loop. Keep pacing, but
     // give recovery frames enough wire rate to finish inside roughly one 60 Hz interval.
-    peakBps = std::max(peakBps,
-                       gUdpKeyframePacePeakBitrateBps.load(std::memory_order_relaxed));
+    peakBps = std::max(peakBps, egress.keyframePacePeakBps);
   }
   if (peakBps == 0 || chunkCount <= 8) return 0;
   return (static_cast<uint64_t>(payloadSize) * 8ULL * 1000000ULL) / static_cast<uint64_t>(peakBps);
@@ -111,7 +111,8 @@ uint64_t udp_pace_budget_us(size_t payloadSize, uint32_t chunkCount, bool keyFra
 UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uint8_t* payload,
                                     size_t payloadSize, const UdpVideoChunkHeader& baseHeader,
                                     uint32_t mtuBytes, SendPathStats* stats,
-                                    const std::atomic<uint64_t>* liveEpoch, uint64_t itemEpoch) {
+                                    const std::atomic<uint64_t>* liveEpoch, uint64_t itemEpoch,
+                                    const UdpEgressConfig& egress) {
   if (!payload || payloadSize == 0 || s == INVALID_SOCKET) return UdpSendOutcome::TransportError;
   if (payloadSize > std::numeric_limits<uint32_t>::max()) return UdpSendOutcome::TransportError;
   const uint64_t startUs = qpc_now_us();
@@ -133,7 +134,7 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
   const uint64_t pacedPayloadBytes =
       static_cast<uint64_t>(payloadSize) + static_cast<uint64_t>(fecGroupCount) * maxChunk;
   const uint64_t budgetUs =
-      udp_pace_budget_us(static_cast<size_t>(pacedPayloadBytes), packetCount,
+      udp_pace_budget_us(egress, static_cast<size_t>(pacedPayloadBytes), packetCount,
                          (baseHeader.flags & 0x1u) != 0);
   uint32_t packetOrdinal = 0;
 
@@ -186,7 +187,7 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
   // consecutive chunks puts the whole burst in one group, where a single parity repairs
   // nothing. Interleaving -- group g holds chunks g, g+G, g+2G ... -- spreads a burst of up
   // to G across G groups, one loss each, all recoverable, at exactly the same cost.
-  const bool interleaved = gUdpVideoFecInterleaved.load(std::memory_order_relaxed);
+  const bool interleaved = egress.fecInterleaved;
   std::vector<uint8_t> parity(maxChunk, 0);
   for (uint32_t group = 0; group < fecGroupCount; ++group) {
     if (epoch_changed()) return UdpSendOutcome::EpochChanged;
@@ -226,17 +227,18 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
 
 bool send_udp_chunks(SOCKET s, const sockaddr_in& peer, const uint8_t* payload,
                      size_t payloadSize, const UdpVideoChunkHeader& baseHeader,
-                     uint32_t mtuBytes) {
+                     uint32_t mtuBytes, const UdpEgressConfig& egress) {
   return send_udp_chunks_impl(s, peer, payload, payloadSize, baseHeader, mtuBytes, nullptr,
-                              nullptr, 0) == UdpSendOutcome::Sent;
+                              nullptr, 0, egress) == UdpSendOutcome::Sent;
 }
 
 UdpSendOutcome send_udp_chunks_timed(SOCKET s, const sockaddr_in& peer, const uint8_t* payload,
                                      size_t payloadSize, const UdpVideoChunkHeader& baseHeader,
                                      uint32_t mtuBytes, SendPathStats* stats,
-                                     const std::atomic<uint64_t>* liveEpoch, uint64_t itemEpoch) {
+                                     const std::atomic<uint64_t>* liveEpoch, uint64_t itemEpoch,
+                                     const UdpEgressConfig& egress) {
   return send_udp_chunks_impl(s, peer, payload, payloadSize, baseHeader, mtuBytes, stats, liveEpoch,
-                              itemEpoch);
+                              itemEpoch, egress);
 }
 
 }  // namespace remote60::native_poc

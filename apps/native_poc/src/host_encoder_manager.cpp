@@ -98,8 +98,8 @@ bool EncoderState::ApplyTarget(CaptureState& capture, CaptureResources& res, Fra
                                              100ULL);
   const uint32_t pacePeakBpsClamped =
       static_cast<uint32_t>(std::min<uint64_t>(pacePeakBps, 4000000000ULL));
-  if (gUdpPacePeakBitrateBps.load(std::memory_order_relaxed) != pacePeakBpsClamped) {
-    gUdpPacePeakBitrateBps.store(pacePeakBpsClamped, std::memory_order_relaxed);
+  if (sender.pacePeakBps.load(std::memory_order_relaxed) != pacePeakBpsClamped) {
+    sender.pacePeakBps.store(pacePeakBpsClamped, std::memory_order_relaxed);
     std::cout << "[native-video-host] pacing update udpPacePeakBps=" << pacePeakBpsClamped
               << " bitrate=" << encoder.activeBitrate << "\n";
   }

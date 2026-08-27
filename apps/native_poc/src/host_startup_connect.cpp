@@ -309,7 +309,7 @@ int startup_connect_client(HostContext& hx) {
         continue;
       }
 
-      gUdpVideoFecInterleaved.store(
+      sender.fecInterleaved.store(
           (hello.features & remote60::native_poc::kUdpFeatureVideoFecInterleaved) != 0,
           std::memory_order_relaxed);
 

@@ -299,17 +299,16 @@ void startup_log_config(HostContext& hx) {
                                            (static_cast<uint64_t>(args.bitrate) *
                                             sender.udpPacePeakPercent) /
                                                100ULL);
-    gUdpPacePeakBitrateBps.store(
+    sender.pacePeakBps.store(
         static_cast<uint32_t>(std::min<uint64_t>(pacePeakBps, 4000000000ULL)),
         std::memory_order_relaxed);
-    gUdpKeyframePacePeakBitrateBps.store(sender.udpKeyframePacePeakBps,
-                                        std::memory_order_relaxed);
+    sender.keyframePacePeakBps.store(sender.udpKeyframePacePeakBps, std::memory_order_relaxed);
     std::cout << "[native-video-host] h264 pacing=" << (sender.noPacingH264 ? "off" : "on")
               << " udpPacePeakPercent=" << sender.udpPacePeakPercent
-              << " udpPacePeakBps=" << gUdpPacePeakBitrateBps.load(std::memory_order_relaxed)
+              << " udpPacePeakBps=" << sender.pacePeakBps.load(std::memory_order_relaxed)
               << " udpPacePeakFloorBps=" << sender.udpPacePeakFloorBps
               << " udpKeyframePacePeakBps="
-              << gUdpKeyframePacePeakBitrateBps.load(std::memory_order_relaxed)
+              << sender.keyframePacePeakBps.load(std::memory_order_relaxed)
               << " stalePreEncodeGuard=" << (guardStalePreEncode ? 1 : 0)
               << " capturePoolBuffers=" << capture.framePoolBuffers
               << " encoderTuneMode=" << encoder.tuneMode

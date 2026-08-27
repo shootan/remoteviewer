@@ -17,6 +17,7 @@
 #include <thread>
 #include <vector>
 
+#include "host_net_io.hpp"
 #include "native_video_transport.hpp"
 #include "poc_protocol.hpp"
 
@@ -66,6 +67,22 @@ struct SenderState {
   // Config (REMOTE60_NATIVE_SENDER_MAX_CADENCE_HOLD_US), fixed after startup.
   uint32_t maxCadenceHoldUs = 0;
   bool cadenceSmoothing = false;
+  // cross-thread: live egress parameters. pacePeakBps is written by the main loop
+  // (EncoderState::ApplyTarget), fecInterleaved by the UDP handshake / control thread from the
+  // viewer's hello, keyframePacePeakBps once at startup; the sender thread reads all three. These
+  // were process globals in host_net_io.hpp until ledger H-22 -- the fields above are the policy
+  // INPUTS (percent/floor), these are the derived and negotiated values.
+  std::atomic<uint32_t> pacePeakBps{0};
+  std::atomic<uint32_t> keyframePacePeakBps{100000000};
+  std::atomic<bool> fecInterleaved{false};
+  // Taken once per dequeue so one frame is paced and chunked by a single consistent set.
+  UdpEgressConfig EgressSnapshot() const {
+    UdpEgressConfig c;
+    c.pacePeakBps = pacePeakBps.load(std::memory_order_relaxed);
+    c.keyframePacePeakBps = keyframePacePeakBps.load(std::memory_order_relaxed);
+    c.fecInterleaved = fecInterleaved.load(std::memory_order_relaxed);
+    return c;
+  }
   // UDP peer as the reader thread sees it (the render loop picks up changes through the atomics).
   sockaddr_in udpPeer{};
   bool udpPeerReady = false;

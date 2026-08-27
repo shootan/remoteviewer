@@ -253,7 +253,7 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
               hello.kind == static_cast<uint16_t>(UdpPacketKind::Hello) &&
               hello.version == remote60::native_poc::kUdpProtocolVersion &&
               (hello.features & remote60::native_poc::kUdpFeatureVideoFec) != 0) {
-            gUdpVideoFecInterleaved.store(
+            sender.fecInterleaved.store(
                 (hello.features & remote60::native_poc::kUdpFeatureVideoFecInterleaved) != 0,
                 std::memory_order_relaxed);
 

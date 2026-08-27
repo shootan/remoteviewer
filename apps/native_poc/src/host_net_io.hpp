@@ -58,17 +58,26 @@ bool send_all_timed(SOCKET s, const void* data, size_t len, uint64_t* outUs,
 // with WSAEMSGSIZE, which looked like a handshake failure the first time it happened.
 constexpr size_t kUdpReceiveBufferBytes = 4096;
 
-inline std::atomic<uint32_t> gUdpPacePeakBitrateBps{0};  // 0 disables intra-frame pacing
-// Set from the viewer's hello. Older viewers do not advertise it and must keep receiving the
-// consecutive layout they know how to repair.
-inline std::atomic<bool> gUdpVideoFecInterleaved{false};
-inline std::atomic<uint32_t> gUdpKeyframePacePeakBitrateBps{100000000};
+// What the wire needs to know about one send, passed explicitly instead of read from process
+// globals. These three used to be inline globals here -- live cross-thread state written by the
+// main loop (pace peak, from ApplyTarget), the UDP handshake (FEC layout, from the viewer's
+// hello) and startup (keyframe peak), and read by the sender thread. SenderState owns them now
+// and the sender snapshots them once per dequeue, so a send is a pure function of its arguments
+// and tests stop leaking configuration into each other. (Ledger H-22.)
+struct UdpEgressConfig {
+  uint32_t pacePeakBps = 0;                 // 0 disables intra-frame pacing
+  uint32_t keyframePacePeakBps = 100000000;
+  // Set from the viewer's hello. Older viewers do not advertise it and must keep receiving the
+  // consecutive layout they know how to repair.
+  bool fecInterleaved = false;
+};
 
 void udp_pace_wait_until(uint64_t targetUs);
 
 // Returns the per-frame send budget in microseconds, or 0 when the frame should go out as
 // fast as possible (small frames are not worth the pacing overhead).
-uint64_t udp_pace_budget_us(size_t payloadSize, uint32_t chunkCount, bool keyFrame);
+uint64_t udp_pace_budget_us(const UdpEgressConfig& egress, size_t payloadSize, uint32_t chunkCount,
+                            bool keyFrame);
 
 // Result of a chunked UDP video send. EpochChanged means a session rollover bumped the media epoch
 // mid-frame, so the remaining chunks were aborted rather than interleaved into the new session --
@@ -82,15 +91,17 @@ enum class UdpSendOutcome { Sent, TransportError, EpochChanged };
 UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uint8_t* payload,
                                     size_t payloadSize, const UdpVideoChunkHeader& baseHeader,
                                     uint32_t mtuBytes, SendPathStats* stats,
-                                    const std::atomic<uint64_t>* liveEpoch, uint64_t itemEpoch);
+                                    const std::atomic<uint64_t>* liveEpoch, uint64_t itemEpoch,
+                                    const UdpEgressConfig& egress);
 
 bool send_udp_chunks(SOCKET s, const sockaddr_in& peer, const uint8_t* payload,
                      size_t payloadSize, const UdpVideoChunkHeader& baseHeader,
-                     uint32_t mtuBytes);
+                     uint32_t mtuBytes, const UdpEgressConfig& egress = {});
 
 UdpSendOutcome send_udp_chunks_timed(SOCKET s, const sockaddr_in& peer, const uint8_t* payload,
                                      size_t payloadSize, const UdpVideoChunkHeader& baseHeader,
                                      uint32_t mtuBytes, SendPathStats* stats,
-                                     const std::atomic<uint64_t>* liveEpoch, uint64_t itemEpoch);
+                                     const std::atomic<uint64_t>* liveEpoch, uint64_t itemEpoch,
+                                     const UdpEgressConfig& egress);
 
 }  // namespace remote60::native_poc

@@ -66,6 +66,9 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
         peer = sender.peer;
         peerReady = sender.peerReady;
       }
+      // One consistent set of egress parameters for this frame's pacing and chunking, instead of
+      // three process globals re-read at different points inside the send. (Ledger H-22.)
+      const UdpEgressConfig egress = sender.EgressSnapshot();
       // Session media barrier: an item stamped for a previous session -- queued before the
       // rollover, or popped in the instant before the swap -- must never reach the new peer.
       // Drop it here so a stale P-frame cannot land on the new decoder.
@@ -109,7 +112,7 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
       const UdpSendOutcome outcome =
           send_udp_chunks_timed(clientSession.clientSock, peer, item.bytes.data(), item.bytes.size(),
                                 item.udpHdr, args.udpMtu, &pathStats, &sender.mediaSessionEpoch,
-                                item.mediaEpoch);
+                                item.mediaEpoch, egress);
       const uint64_t sendDoneUs = qpc_now_us();
       if (outcome == UdpSendOutcome::Sent) {
         const uint64_t durUs = (sendDoneUs >= sendStartUs) ? (sendDoneUs - sendStartUs) : 0;
