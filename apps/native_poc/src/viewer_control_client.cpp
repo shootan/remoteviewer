@@ -72,15 +72,6 @@ int ControlClient::fetch_one_thumbnail(remote60::native_poc::ControlLink& link) 
 void ControlClient::handle_pong(const ControlOutboundAction& action, const ControlPongMessage& pong) {
   const uint64_t doneUs = qpc_now_us();
   gControl.scheduler.OnPingCompleted(doneUs);
-  gControl.hostCaptureTargetPid.store(pong.captureTargetPid, std::memory_order_relaxed);
-  gControl.hostCaptureTargetFlags.store(pong.captureTargetFlags, std::memory_order_relaxed);
-  gControl.hostCaptureRebindCount.store(pong.captureRebindCount, std::memory_order_relaxed);
-  gControl.hostCaptureTargetHwnd.store(pong.captureTargetHwnd, std::memory_order_relaxed);
-  gControl.hostCaptureMetaUpdatedUs.store(doneUs, std::memory_order_relaxed);
-  gControl.captureOverviewMode.store(
-      (pong.captureTargetFlags &
-       remote60::native_poc::kCaptureFlagWindowTargetEnabled) == 0,
-      std::memory_order_relaxed);
   {
     // Say it once per transition rather than every ping. A frozen picture with no
     // explanation is the worst version of this; a line saying a Windows security
@@ -97,13 +88,6 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
                            : "  (picture resumes)")
                 << std::endl;
     }
-  }
-  {
-    std::lock_guard<std::mutex> lk(gControl.hostCaptureMetaMu);
-    gControl.hostCaptureTargetProcess =
-        fixed_cstr_to_string(pong.captureTargetProcess, sizeof(pong.captureTargetProcess));
-    gControl.hostCaptureTargetTitle =
-        fixed_cstr_to_string(pong.captureTargetTitle, sizeof(pong.captureTargetTitle));
   }
   const uint64_t rttUs =
       (doneUs >= action.ping.clientSendQpcUs) ? (doneUs - action.ping.clientSendQpcUs) : 0;
@@ -244,7 +228,6 @@ void ControlClient::Run() {
       didWork = true;
 
       if (action.kind == ControlOutboundActionKind::CaptureMode) {
-        gControl.captureOverviewMode.store(action.captureMode.mode == 1, std::memory_order_relaxed);
         std::cout << "[native-video-client][control] capture-mode-request seq=" << action.captureMode.seq
                   << " mode=" << action.captureMode.mode
                   << " xPermille=" << action.captureMode.xPermille

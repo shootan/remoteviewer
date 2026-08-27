@@ -103,20 +103,6 @@ int validate_codec_transport(ViewerContext& ctx) {
 }
 
 void apply_initial_state(ViewerContext& ctx) {
-  gSession.overlayConfig.host = ctx.args.host;
-  gSession.overlayConfig.port = ctx.args.port;
-  gSession.overlayConfig.controlPort = ctx.args.controlPort;
-  gSession.overlayConfig.transport = video_transport_name(ctx.dec.transport);
-  gSession.overlayConfig.codec = ctx.args.codec;
-  gSession.overlayConfig.fpsHint = ctx.args.fpsHint;
-  gSession.overlayConfig.controlIntervalMs = ctx.args.controlIntervalMs;
-  gSession.overlayConfig.tcpRecvBufKb = ctx.args.tcpRecvBufKb;
-  gSession.overlayConfig.tcpSendBufKb = ctx.args.tcpSendBufKb;
-  gSession.overlayConfig.udpMtu = ctx.args.udpMtu;
-  gSession.overlayConfig.keyReqMinIntervalUs = gControl.keyframeRequests.min_interval_us();
-  gSession.overlayConfig.keyReqTokenRefillUs = gControl.keyframeRequests.token_refill_us();
-  gSession.overlayConfig.keyReqTokenCapacity = gControl.keyframeRequests.token_capacity();
-  gSession.overlayConfig.udpSimDropPm = ctx.udpSimDropPm;
   gControl.runtimeTune.Reset(ctx.args.runtimeBitrate, ctx.args.runtimeKeyint, ctx.args.runtimeFps);
   gSession.requestedMonitorId = ctx.args.monitorId;
   gControl.connected.store(false, std::memory_order_relaxed);
@@ -131,7 +117,6 @@ void apply_initial_state(ViewerContext& ctx) {
     ctx.startInStreamView = env_truthy("REMOTE60_NATIVE_START_STREAM_VIEW");
   }
   ctx.startInPicker = !ctx.startInStreamView;
-  gControl.captureOverviewMode.store(ctx.startInPicker, std::memory_order_relaxed);
   gPicker.visible.store(ctx.startInPicker, std::memory_order_relaxed);
   clear_pc_target_selection();
   // No target has taken effect yet. 0 disables the persistent generation filter, so the legacy

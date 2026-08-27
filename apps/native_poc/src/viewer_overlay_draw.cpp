@@ -9,42 +9,6 @@
 
 namespace remote60::native_poc::viewer {
 
-void push_overlay_metric_sample(uint32_t recvFpsX100, uint32_t decodedFpsX100, uint32_t recvMbpsX1000,
-                                uint64_t avgLatencyUs, uint64_t nowUs) {
-  std::lock_guard<std::mutex> lk(gMetrics.overlayMu);
-  gMetrics.overlay.push_back({nowUs, recvFpsX100, decodedFpsX100, recvMbpsX1000, avgLatencyUs});
-  const uint64_t keepWindowUs = 12000000ULL;
-  while (!gMetrics.overlay.empty() && nowUs > gMetrics.overlay.front().tsUs &&
-         (nowUs - gMetrics.overlay.front().tsUs) > keepWindowUs) {
-    gMetrics.overlay.pop_front();
-  }
-}
-
-OverlayMetricAverages collect_overlay_averages(uint64_t nowUs, uint64_t windowUs) {
-  OverlayMetricAverages out{};
-  std::lock_guard<std::mutex> lk(gMetrics.overlayMu);
-  uint64_t sumRecvFpsX100 = 0;
-  uint64_t sumDecodedFpsX100 = 0;
-  uint64_t sumRecvMbpsX1000 = 0;
-  uint64_t sumLatencyUs = 0;
-  for (const auto& s : gMetrics.overlay) {
-    if (nowUs >= s.tsUs && (nowUs - s.tsUs) <= windowUs) {
-      ++out.sampleCount;
-      sumRecvFpsX100 += s.recvFpsX100;
-      sumDecodedFpsX100 += s.decodedFpsX100;
-      sumRecvMbpsX1000 += s.recvMbpsX1000;
-      sumLatencyUs += s.avgLatencyUs;
-    }
-  }
-  if (out.sampleCount > 0) {
-    out.recvFpsX100 = static_cast<uint32_t>(sumRecvFpsX100 / out.sampleCount);
-    out.decodedFpsX100 = static_cast<uint32_t>(sumDecodedFpsX100 / out.sampleCount);
-    out.recvMbpsX1000 = static_cast<uint32_t>(sumRecvMbpsX1000 / out.sampleCount);
-    out.avgLatencyUs = sumLatencyUs / out.sampleCount;
-  }
-  return out;
-}
-
 void apply_runtime_tune_delta(int bitrateStep, int keyintStep) {
   gControl.runtimeTune.ApplyDelta(
       bitrateStep, keyintStep, gMetrics.client.recvMbpsX1000.load(std::memory_order_relaxed));

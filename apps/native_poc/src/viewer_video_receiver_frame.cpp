@@ -95,11 +95,6 @@ void VideoReceiver::publish_metrics(uint32_t metricW, uint32_t metricH, uint64_t
     gMetrics.client.udpAssemblyDropPm = st.udpAssemblyDropPmLast;
     gMetrics.client.seq.fetch_add(1);
     gMetrics.client.updatedQpcUs = nowUs;
-    push_overlay_metric_sample(gMetrics.client.recvFpsX100.load(std::memory_order_relaxed),
-                               gMetrics.client.decodedFpsX100.load(std::memory_order_relaxed),
-                               gMetrics.client.recvMbpsX1000.load(std::memory_order_relaxed),
-                               gMetrics.client.avgLatencyUs.load(std::memory_order_relaxed),
-                               nowUs);
     if (gSession.hwnd && !gPicker.visible.load(std::memory_order_relaxed)) {
       if (!gFrameBuf.paintQueued.exchange(true)) {
         InvalidateRect(gSession.hwnd, nullptr, FALSE);
