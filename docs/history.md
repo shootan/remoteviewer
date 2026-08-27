@@ -7650,3 +7650,27 @@ Next action
 - 검증: 전 타깃 빌드 에러 0 + host_udp_e2e ALL PASS(18 체크 + host 로그 4건) + 단위테스트 22종 PASS +
   정상 종료 rc=0/"done".
 - 다음 액션: 실기 확인. 그 뒤 H-24 / H-25 / 검증 부채.
+
+### 320) 2026-08-28 H-26b 2패스 + H-27 기록 (브랜치 refactor/viewer-split, 631882d)
+
+- 코덱스가 `854b58f`를 재검증해 High A / High C / host-log gate는 닫혔다고 확인했고, **High B에 한 단계가
+  남았다**고 지적했다. 체인을 코드로 확인했고 맞다.
+- viewer 키 요청은 보통 **열린** 배리어에서 온다. `needKick`에 `forceKeyNext`를 넣어 첫 cached submit은
+  보장했지만 성공 뒤 `rearm = barrierClosed`라 곧바로 `kick.Cancel()`이고, `Cancel`은 pending=false로
+  `Due()`를 영원히 false로 만든다. 비동기 MFT가 그 forced input을 보류해 `units.empty`를 반환하면
+  `forceKeyNext`는 true인 채(키 AU가 실제로 emit될 때만 꺼진다 — `..._au.cpp:426`) 다음 input이 영영 없다.
+  `rearm = barrierClosed || encoder.forceKeyNext`로 수정. 종료는 AU 경로가, IDR train 억제는 300ms
+  submit 래치가 보장한다.
+- **테스트**: 기본 1Hz 리프레시가 이 구멍을 최대 1초 뒤에 가려버린다는 지적이 정확하다. `host_udp_e2e.sh`를
+  두 leg로 나눠 두 번째를 `REMOTE60_NATIVE_STATIC_REFRESH_MS=0`으로 돌린다. 그 leg에서 정적 리프레시 0회,
+  trailing kick 10회, 키 요청 → IDR 도착(before=3 after=4) 확인. `units.empty` 강제 주입 fault leg는
+  아니라 부분 커버이고 검증 부채로 남겼다.
+- 작업 중 harness 버그 하나: `HOST_LOG_CHECKS`의 구분자 `|`가 패턴 안 alternation과 충돌해 grep 오류로
+  FAIL 했다(`@@`로 교체). 이 오탐이 게이트가 실제로 동작한다는 증거이기도 하다.
+- 코덱스 정정 반영: **H-26d는 "완전 제거"가 아니라 "창 축소 + 일반 경로 복원"**이다. peek가 false를 읽은
+  직후 post되면 같은 tick 이중 적용이 여전히 가능하다(옛 순서에도 대칭 창이 있었으므로 새 결함은 아님).
+- 신규 **H-27**(미착수): `mailbox.Clear`는 큐에 남은 요청만 격리한다. main이 이미 Take해 적용 중이면
+  회수할 수 없다. H-26d 잔여 창과 근본 원인이 같아 tick 시작 drain 스냅샷 또는 요청에 servedEpoch stamp로
+  함께 닫는 것이 자연스럽다.
+- 검증: 전 타깃 빌드 0 에러 + host_udp_e2e **두 leg** ALL PASS(각 18 체크 + host 로그 4건) + 단위테스트 22종 PASS.
+- 다음 액션: 실기 확인. 그 뒤 H-24 / H-25 / H-27 / 검증 부채.
