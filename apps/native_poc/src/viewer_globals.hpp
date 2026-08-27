@@ -1,0 +1,333 @@
+#pragma once
+
+// Every piece of process-wide viewer state, declared in one place.
+//
+// Role:    the monolith's 88 file-scope globals (+ their state types and tuning constants) as
+//          `extern` declarations, grouped by feature exactly as they were declared. This header
+//          is transitional: Phase 1 folds each group into a state struct and Phase 3 hands them
+//          to a ViewerContext owned by main(), after which this file disappears.
+// Thread:  see the `// thread:` block above each group (the pre-refactor rules, unchanged).
+// Input:   -
+// Output:  declarations only; definitions live in viewer_globals.cpp with the original initialisers.
+// Callers: every viewer_* module and native_video_client_main.cpp.
+//
+// Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-0).
+
+#include "viewer_common.hpp"
+
+namespace remote60::native_poc::viewer {
+
+// thread: recv writes gFrame/version, UI reads it under gFrame.mu and stamps gLastPresented*;
+// gPaintQueued coalesces InvalidateRect between recv and UI; trace counters recv/UI.
+struct SharedFrame {
+  enum class PixelFormat : uint8_t {
+    Unknown = 0,
+    Bgra32 = 1,
+    Nv12 = 2,
+  };
+  std::mutex mu;
+  PixelFormat format = PixelFormat::Unknown;
+  // Visible content size -- what aspect fit, input mapping, and rendering treat as the
+  // picture. For H.264 this is the display aperture (1080), not the coded plane (1088).
+  uint32_t width = 0;
+  uint32_t height = 0;
+  // Coded plane the byte buffer is actually laid out in, plus where the visible rect starts.
+  uint32_t codedWidth = 0;
+  uint32_t codedHeight = 0;
+  uint32_t visibleLeft = 0;
+  uint32_t visibleTop = 0;
+  uint32_t stride = 0;
+  uint32_t seq = 0;
+  uint64_t captureUs = 0;
+  uint64_t encodeStartUs = 0;
+  uint64_t encodeEndUs = 0;
+  uint64_t sendUs = 0;
+  uint64_t recvUs = 0;
+  uint64_t decodeStartUs = 0;
+  uint64_t decodeEndUs = 0;
+  uint64_t queueSetUs = 0;
+  uint64_t decodeToQueueUs = 0;
+  uint64_t streamGeneration = 0;
+  // Diagnostics-only: keyframe flag carried to the present stage for stream telemetry.
+  bool key = false;
+  uint64_t version = 0;
+  std::shared_ptr<std::vector<uint8_t>> bytes;
+  Microsoft::WRL::ComPtr<IMFSample> surfaceSample;
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> surfaceTexture;
+  uint32_t surfaceSubresource = 0;
+};
+
+extern SharedFrame gFrame;
+extern std::atomic<bool> gRunning;
+extern SOCKET gSock;
+extern HWND gHwnd;
+extern uint32_t gWindowW;
+extern uint32_t gWindowH;
+extern std::atomic<bool> gPaintQueued;
+extern std::atomic<uint32_t> gTraceEvery;
+extern std::atomic<uint32_t> gTraceMax;
+// Diagnostics-only: expected present interval (from fpsHint), published once at startup so the
+// present-stage stream telemetry on the UI thread can flag gaps past 1.5x cadence without reaching
+// into the recv thread's Args. 0 => fall back to a 60fps assumption.
+extern std::atomic<uint32_t> gPresentFrameIntervalUs;
+extern std::atomic<uint64_t> gTracePresentPrinted;
+extern std::atomic<uint64_t> gTraceRecvPrinted;
+constexpr bool kInputPolicyForceBlock = false;
+// Catch-up defaults tuned for software codec path: avoid runaway multi-second lag,
+// but still clamp perceived latency quickly for interactive remote use.
+constexpr uint64_t kCatchupLagDropUs = 450000;       // 0.45s
+constexpr uint64_t kCatchupResumeKeyLagUs = 500000;  // 0.5s
+constexpr uint64_t kDecodeQueueLagDropUs = 300000;   // 0.3s
+constexpr uint64_t kDecodeQueueLagResumeUs = 400000; // 0.4s
+constexpr uint64_t kStaleCaptureDropUs = 50000;      // 50ms
+constexpr uint64_t kUserFeedbackLagWarnUs = 90000;   // 90ms
+constexpr uint64_t kUserFeedbackGapWarnUs = 50000;   // 50ms
+constexpr uint64_t kUserFeedbackMinIntervalUs = 1000000;  // 1s
+constexpr uint64_t kKeyframeRequestMinIntervalUsDefault = 120000;  // 120ms
+constexpr uint64_t kKeyframeRequestTokenRefillUsDefault = 300000;  // 300ms / token
+constexpr uint32_t kKeyframeRequestTokenCapacityDefault = 3;
+constexpr uint64_t kCatchupReenterMinIntervalUsDefault = 600000;  // 600ms
+constexpr uint64_t kCongestionRecoverMinUsDefault = 250000;  // 250ms
+constexpr uint64_t kCongestionRecoveryTimeoutUsDefault = 1500000;  // 1.5s
+
+enum class ClientCongestionState : uint8_t {
+  Normal = 0,
+  Recovering = 1,
+  Congested = 2,
+};
+
+// thread: UI enqueues input (gInputQueueState) that the control thread drains; gInputEnabled is
+// set by main at connect and cleared at shutdown; gUdpControl is written by the control thread
+// and ticked/fed by the recv thread (one reader, one writer on the shared socket).
+extern ClientInputQueue gInputQueueState;
+extern std::atomic<bool> gInputEnabled;
+// Which candidate won the race. The relay is billed per byte, so the session says which one it
+// is rather than leaving the user to guess from the bill.
+extern std::atomic<bool> gRelayPath;
+
+// Control over the media socket, for hosts reached through the directory.
+//
+// A second TCP connection cannot be opened to a host behind NAT: only the UDP socket was
+// punched, so control has to ride it. Everything the session needs -- input, the window list,
+// the monitor list, runtime tuning -- goes through here, which is why a session without it
+// shows a picture and responds to nothing.
+extern remote60::native_poc::UdpControlChannel gUdpControl;
+extern std::atomic<bool> gControlOverUdp;
+// Counted at the point the exchange succeeded, so it can be compared against the acks: the two
+// diverging is what tells "the host never answered" apart from "nothing was ever sent".
+extern std::atomic<uint64_t> gInputEventsSent;
+// Long enough that a slow host answering a window list is not mistaken for a dead link.
+constexpr uint32_t kUdpControlReadTimeoutMs = 12000;
+extern std::atomic<uint16_t> gMouseButtons;
+extern std::atomic<int32_t> gLastInputVideoX;
+extern std::atomic<int32_t> gLastInputVideoY;
+
+struct ClientRuntimeMetrics {
+  std::atomic<uint32_t> seq{0};
+  std::atomic<uint32_t> width{0};
+  std::atomic<uint32_t> height{0};
+  std::atomic<uint32_t> recvFpsX100{0};
+  std::atomic<uint32_t> decodedFpsX100{0};
+  std::atomic<uint32_t> recvMbpsX1000{0};
+  std::atomic<uint32_t> skippedFrames{0};
+  std::atomic<uint64_t> avgLatencyUs{0};
+  std::atomic<uint64_t> maxLatencyUs{0};
+  std::atomic<uint64_t> avgDecodeTailUs{0};
+  std::atomic<uint64_t> maxDecodeTailUs{0};
+  std::atomic<uint32_t> congestionState{0};
+  std::atomic<uint32_t> congestionTransitions{0};
+  std::atomic<uint32_t> congestionRecoveryCount{0};
+  std::atomic<uint32_t> congestionRecoveryReq{0};
+  std::atomic<uint32_t> congestionRecoveryMaxUs{0};
+  std::atomic<uint32_t> queueDepthMax{0};
+  std::atomic<uint32_t> queueDepthH4p{0};
+  std::atomic<uint32_t> udpAssemblyDropPm{0};
+  std::atomic<uint64_t> updatedQpcUs{0};
+};
+
+// thread: recv publishes gClientMetrics (atomics); control snapshots it for the host, UI reads
+// fps for the toolbar. Present counters are UI-written and read by the recv 1s stats line.
+extern ClientRuntimeMetrics gClientMetrics;
+extern KeyframeRequestState gKeyframeRequests;
+extern std::atomic<uint64_t> gLastPresentedVersion;
+extern std::atomic<uint64_t> gLastPresentedCaptureUs;  // updated after actual present, not at queue time
+// While the picker overlays a live stream (mid-session picker no longer stops it), presents pause
+// but frames keep arriving, so lag-vs-last-presented would misread the overlay as decode backlog
+// and start catchup churn. Suppress catchup while the picker is up and briefly after it closes
+// (until the first present re-anchors gLastPresentedCaptureUs).
+extern std::atomic<uint64_t> gCatchupSuppressUntilUs;
+extern std::atomic<uint64_t> gPaintCoalescedCount;
+extern std::atomic<uint64_t> gOverwriteBeforePresentCount;
+extern std::atomic<uint64_t> gD3dPresentSuccessCount;
+extern std::atomic<uint64_t> gD3dPresentFailCount;
+extern std::atomic<uint64_t> gGdiFallbackPresentedCount;
+extern std::atomic<uint64_t> gFallbackInitFailCount;
+extern std::atomic<uint64_t> gFallbackRenderFailCount;
+extern std::atomic<uint64_t> gFallbackNv12ConvertFailCount;
+extern std::mutex gLogMu;
+
+struct OverlayConfigSnapshot {
+  std::string host = "127.0.0.1";
+  uint16_t port = 43000;
+  uint16_t controlPort = 0;
+  std::string transport = "tcp";
+  std::string codec = "raw";
+  uint32_t fpsHint = 30;
+  uint32_t controlIntervalMs = 1000;
+  uint32_t tcpRecvBufKb = 0;
+  uint32_t tcpSendBufKb = 0;
+  uint32_t udpMtu = 1200;
+  uint32_t udpSimDropPm = 0;
+  uint64_t keyReqMinIntervalUs = kKeyframeRequestMinIntervalUsDefault;
+  uint64_t keyReqTokenRefillUs = kKeyframeRequestTokenRefillUsDefault;
+  uint32_t keyReqTokenCapacity = kKeyframeRequestTokenCapacityDefault;
+};
+
+// thread: main fills gOverlayConfig once; control writes the host capture meta on every pong;
+// the request states (tune/stream/capture-mode/scheduler) are UI/main producers, control consumer.
+extern OverlayConfigSnapshot gOverlayConfig;
+extern std::atomic<bool> gControlConnected;
+extern std::atomic<uint32_t> gHostCaptureTargetPid;
+extern std::atomic<uint32_t> gHostCaptureTargetFlags;
+extern std::atomic<uint32_t> gHostCaptureRebindCount;
+extern std::atomic<uint64_t> gHostCaptureTargetHwnd;
+extern std::atomic<uint64_t> gHostCaptureMetaUpdatedUs;
+extern std::mutex gHostCaptureMetaMu;
+extern std::string gHostCaptureTargetProcess;
+extern std::string gHostCaptureTargetTitle;
+extern RuntimeTuneState gRuntimeTuneState;
+extern std::atomic<bool> gCaptureOverviewMode;
+extern remote60::native_poc::StreamStateControl gStreamStateControl;
+
+extern CaptureModeRequestState gCaptureModeRequests;
+extern ClientControlScheduler gControlScheduler;
+
+struct OverlayMetricSample {
+  uint64_t tsUs = 0;
+  uint32_t recvFpsX100 = 0;
+  uint32_t decodedFpsX100 = 0;
+  uint32_t recvMbpsX1000 = 0;
+  uint64_t avgLatencyUs = 0;
+};
+
+struct OverlayMetricAverages {
+  uint32_t recvFpsX100 = 0;
+  uint32_t decodedFpsX100 = 0;
+  uint32_t recvMbpsX1000 = 0;
+  uint64_t avgLatencyUs = 0;
+  uint32_t sampleCount = 0;
+};
+
+// thread: recv pushes overlay metric samples; UI (overlay) reads under gOverlayMetricsMu.
+extern std::mutex gOverlayMetricsMu;
+extern std::deque<OverlayMetricSample> gOverlayMetrics;
+
+// thread: picker state is UI-owned; control applies window/monitor lists and thumbnails;
+// the selection gate is begun/committed on UI, acked on control, gated on recv (see comments).
+extern WindowPanelStateModel gWindowPanelState;
+// Which screen the shell asked for. Applied once the host has said it understands the monitor
+// messages, which it does in the window list.
+extern uint32_t gRequestedMonitorId;
+extern std::atomic<bool> gWindowPickerVisible;
+extern std::atomic<bool> gWindowPickerToggleDown;
+extern std::atomic<int> gGridScrollRow;  // card grid scroll, in whole rows
+// Picker mis-click guard. In the field a frozen-looking stream had the user frantically clicking;
+// one UP landed on the first window card and silently switched the capture to another window.
+// A selection now requires DOWN and UP on the SAME target and a picker that has been visible for
+// at least 300ms (kPickerSelectMinShownUs), so a click that started before the picker appeared --
+// or that merely ends on a card -- cannot select. ~0 = nothing pressed; 0 = desktop is a valid id.
+constexpr uint64_t kPickerPressNone = ~0ULL;
+constexpr uint64_t kPickerSelectMinShownUs = 300000;
+extern std::atomic<uint64_t> gPickerShownAtUs;
+extern std::atomic<uint64_t> gPickerPressTargetId;
+
+// Target-selection gate, mirroring the Android policy (commit 4892dea). After connecting the
+// session opens on the picker; picking a target starts the stream but the picker stays up, and
+// video is not presented, until the first frame of the *acknowledged* generation has decoded.
+// That keeps an initial default-desktop frame -- or a frame from the previously selected target
+// -- from flashing under the picker, and keeps a slow first frame from being mistaken for a
+// failed selection.
+//   gSelectionPending      : a selection is in flight (from click until first frame or failure).
+//   gSelectionAwaitingAck  : request sent, host's WindowSelected ack not yet seen.
+//   gSelectionExpectedGeneration : the ack's streamGeneration for the *in-flight* transaction;
+//                                  frames of other generations drop while pending.
+//   gSelectionEpoch        : bumped per selection so the receive loop resets the decoder once.
+//   gActiveStreamGeneration : generation of the last successfully revealed selection; after
+//                             reveal this is the persistent filter (0 = accept anything, which
+//                             covers the legacy stream-view start and the window before any pick).
+extern std::atomic<bool> gSelectionPending;
+extern std::atomic<bool> gSelectionAwaitingAck;
+extern std::atomic<uint64_t> gSelectionExpectedGeneration;
+extern std::atomic<uint64_t> gSelectionEpoch;
+extern std::atomic<uint64_t> gActiveStreamGeneration;
+// The reveal is decided on the video thread but *committed* on the UI thread, so a cancel / new
+// selection / disconnect that races the post cannot wrongly close the picker. The video thread
+// records the candidate (generation + epoch) and posts once; the UI handler revalidates against
+// the live selection state before committing, and always releases the latch so a later legitimate
+// first frame can re-post.
+extern std::atomic<uint64_t> gSelectionReadyGeneration;
+extern std::atomic<uint64_t> gSelectionReadyEpoch;
+extern std::atomic<bool> gSelectionRevealPosted;
+// Posted to the video window when the first selected frame is ready, so the toolbar (a window of
+// its own, whose show/hide must run on the UI thread) is revealed on the thread that owns it.
+constexpr UINT kMsgRevealStreamView = WM_APP + 10;
+
+// Preview thumbnails for the target picker, fetched over the control channel when the host
+// advertises kControlWindowListFlagThumbnails. Keyed by window id; id 0 is the desktop.
+struct WindowThumb {
+  uint32_t width = 0;
+  uint32_t height = 0;
+  std::vector<uint8_t> bgra;
+  uint64_t fetchedUs = 0;
+};
+extern std::mutex gThumbMu;
+extern std::unordered_map<uint64_t, std::shared_ptr<const WindowThumb>> gThumbs;
+extern std::deque<uint64_t> gThumbFetchQueue;
+extern std::atomic<bool> gHostSupportsThumbnails;
+constexpr uint64_t kThumbRefreshUs = 5000000;  // refresh a preview after 5 s
+
+// thread: touch/mouse suppression is UI-only; the remote cursor sample is recv-written,
+// UI-timer-read (latest wins).
+extern std::atomic<uint64_t> gSuppressMouseUntilUs;
+// Remote hardware-cursor state (UdpCursorPosPacket, DXGI desktop capture only). The host's
+// pipeline drops pointer-only frames, so this side channel is what keeps the remote cursor
+// visibly moving on a still screen. Drawn as a layered overlay; hidden when stale (>500ms).
+extern std::atomic<int32_t> gRemoteCursorX;
+extern std::atomic<int32_t> gRemoteCursorY;
+extern std::atomic<uint32_t> gRemoteCursorCapW;
+extern std::atomic<uint32_t> gRemoteCursorCapH;
+extern std::atomic<uint64_t> gRemoteCursorGeneration;  // stream generation the sample belongs to
+extern std::atomic<bool> gRemoteCursorVisible;
+extern std::atomic<uint64_t> gRemoteCursorUpdateUs;
+extern HWND gCursorOverlayHwnd;
+constexpr UINT_PTR kCursorOverlayTimerId = 0x711;
+constexpr uint64_t kRemoteCursorStaleUs = 500000;  // hide after 500ms without a sample
+constexpr int kCursorOverlaySize = 24;             // ring bitmap edge; window is centered on the point
+extern std::atomic<uint32_t> gActiveTouchPointerId;
+extern std::atomic<bool> gActiveTouchDown;
+
+constexpr uint32_t kRuntimeBitrateMin = 300000;
+constexpr uint32_t kRuntimeBitrateMax = 30000000;
+constexpr uint32_t kRuntimeBitrateStep = 250000;
+constexpr uint32_t kRuntimeKeyintMin = 1;
+constexpr uint32_t kRuntimeKeyintMax = 240;
+
+// thread: UI only (GDI objects).
+// GDI defaults to the legacy System bitmap font, which is unscalable and cannot render
+// non-Latin window titles. Everything drawn through draw_text_utf8 selects this instead.
+extern HFONT gUiFont;
+extern HFONT gUiTitleFont;
+extern int gUiDpi;
+
+// thread: UI only (key state), macro engine shared with the macro window on the UI thread.
+// Which keys this client forwarded a down for, so the matching up is forwarded by memory
+// rather than by re-deciding. The decision depends on modifier state, and re-evaluating it
+// at release time strands keys on the host: Ctrl+A with Ctrl released first re-classifies
+// the A as text on the way up, and the host holds A down forever.
+extern std::atomic<bool> gForwardedKeyDown[256];
+
+
+extern remote60::native_poc::InputMacro gInputMacro;
+extern std::atomic<bool> gMacroButtonDown;
+
+}  // namespace remote60::native_poc::viewer

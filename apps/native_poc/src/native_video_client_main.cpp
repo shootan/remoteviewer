@@ -1,110 +1,9 @@
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <windows.h>
-#include <windowsx.h>
-#include <imm.h>
-#include <d3d11.h>
-#include <d3dcompiler.h>
-#include <dxgi.h>
-#ifdef min
-#undef min
-#endif
-#ifdef max
-#undef max
-#endif
+#include "viewer_common.hpp"
+#include "viewer_globals.hpp"
 
-#include <atomic>
-#include <algorithm>
-#include <chrono>
-#include <cctype>
-#include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <array>
-#include <cmath>
-#include <iostream>
-#include <memory>
-#include <mutex>
-#include <random>
-#include <sstream>
-#include <string>
-#include <thread>
-#include <unordered_map>
-#include <vector>
+namespace remote60::native_poc::viewer {
 
-#include <mfapi.h>
-#include <wrl/client.h>
 
-#include "client_macro_window.hpp"
-#include "client_session_toolbar.hpp"
-#include "directory_session_bootstrap.hpp"
-#include "directory_session_client.hpp"
-#include "input_macro.hpp"
-#include "mf_h264_codec.hpp"
-#include "json_profile.hpp"
-#include "native_video_client_shared_core.hpp"
-#include "native_video_client_tcp_control.hpp"
-#include "native_video_transport.hpp"
-#include "poc_protocol.hpp"
-#include "time_utils.hpp"
-
-#pragma comment(lib, "Msimg32.lib")
-#pragma comment(lib, "Imm32.lib")
-
-namespace {
-
-using remote60::native_poc::ControlInputAckMessage;
-using remote60::native_poc::ControlInputEventMessage;
-using remote60::native_poc::ControlInputTextMessage;
-using remote60::native_poc::ControlClientMetricsMessage;
-using remote60::native_poc::ControlRequestKeyFrameMessage;
-using remote60::native_poc::ControlRuntimeEncoderConfigMessage;
-using remote60::native_poc::ControlCaptureModeRequestMessage;
-using remote60::native_poc::ControlWindowEntry;
-using remote60::native_poc::ControlWindowListMessage;
-using remote60::native_poc::ControlWindowListRequestMessage;
-using remote60::native_poc::ControlWindowSelectMessage;
-using remote60::native_poc::ControlWindowSelectedMessage;
-using remote60::native_poc::ControlPingMessage;
-using remote60::native_poc::ControlPongMessage;
-using remote60::native_poc::ClientInputQueue;
-using remote60::native_poc::CaptureModeRequestState;
-using remote60::native_poc::ClientControlMetricsSnapshot;
-using remote60::native_poc::ClientControlScheduler;
-using remote60::native_poc::DecodedFrameNv12;
-using remote60::native_poc::EncodedFrameHeader;
-using remote60::native_poc::H264Decoder;
-using remote60::native_poc::KeyframeRequestState;
-using remote60::native_poc::MessageHeader;
-using remote60::native_poc::MessageType;
-using remote60::native_poc::ControlOutboundAction;
-using remote60::native_poc::ControlOutboundActionKind;
-using remote60::native_poc::RawFrameHeader;
-using remote60::native_poc::QueuedControlInputMessage;
-using remote60::native_poc::RuntimeTuneState;
-using remote60::native_poc::TcpControlResponse;
-using remote60::native_poc::TcpControlResponseKind;
-using remote60::native_poc::UdpH264AssemblyDisposition;
-using remote60::native_poc::UdpH264FrameAssembler;
-using remote60::native_poc::UdpCodec;
-using remote60::native_poc::UdpHelloPacket;
-using remote60::native_poc::UdpPacketKind;
-using remote60::native_poc::UdpVideoChunkHeader;
-using remote60::native_poc::VideoTransport;
-using remote60::native_poc::WindowPanelSnapshot;
-using remote60::native_poc::WindowPanelStateModel;
-using remote60::native_poc::WindowTargetUiEntry;
-using remote60::native_poc::nv12_to_bgra;
-using remote60::native_poc::clamp_udp_mtu;
-using remote60::native_poc::parse_video_transport;
-using remote60::native_poc::qpc_now_us;
-using remote60::native_poc::video_transport_name;
-namespace json_profile = remote60::native_poc::json_profile;
-
-#ifndef REMOTE60_NATIVE_ENCODED_EXPERIMENT
-#define REMOTE60_NATIVE_ENCODED_EXPERIMENT 0
-#endif
 
 struct WinsockScope {
   bool ok = false;
@@ -303,11 +202,6 @@ std::wstring utf8_to_wide(const std::string& utf8) {
   return out;
 }
 
-// GDI defaults to the legacy System bitmap font, which is unscalable and cannot render
-// non-Latin window titles. Everything drawn through draw_text_utf8 selects this instead.
-HFONT gUiFont = nullptr;
-HFONT gUiTitleFont = nullptr;
-int gUiDpi = 96;
 
 int dpi_scale(int value) { return MulDiv(value, gUiDpi, 96); }
 
@@ -546,82 +440,7 @@ bool recv_discard(SOCKET s, size_t len) {
   return true;
 }
 
-struct SharedFrame {
-  enum class PixelFormat : uint8_t {
-    Unknown = 0,
-    Bgra32 = 1,
-    Nv12 = 2,
-  };
-  std::mutex mu;
-  PixelFormat format = PixelFormat::Unknown;
-  // Visible content size -- what aspect fit, input mapping, and rendering treat as the
-  // picture. For H.264 this is the display aperture (1080), not the coded plane (1088).
-  uint32_t width = 0;
-  uint32_t height = 0;
-  // Coded plane the byte buffer is actually laid out in, plus where the visible rect starts.
-  uint32_t codedWidth = 0;
-  uint32_t codedHeight = 0;
-  uint32_t visibleLeft = 0;
-  uint32_t visibleTop = 0;
-  uint32_t stride = 0;
-  uint32_t seq = 0;
-  uint64_t captureUs = 0;
-  uint64_t encodeStartUs = 0;
-  uint64_t encodeEndUs = 0;
-  uint64_t sendUs = 0;
-  uint64_t recvUs = 0;
-  uint64_t decodeStartUs = 0;
-  uint64_t decodeEndUs = 0;
-  uint64_t queueSetUs = 0;
-  uint64_t decodeToQueueUs = 0;
-  uint64_t streamGeneration = 0;
-  // Diagnostics-only: keyframe flag carried to the present stage for stream telemetry.
-  bool key = false;
-  uint64_t version = 0;
-  std::shared_ptr<std::vector<uint8_t>> bytes;
-  Microsoft::WRL::ComPtr<IMFSample> surfaceSample;
-  Microsoft::WRL::ComPtr<ID3D11Texture2D> surfaceTexture;
-  uint32_t surfaceSubresource = 0;
-};
 
-SharedFrame gFrame;
-std::atomic<bool> gRunning{true};
-SOCKET gSock = INVALID_SOCKET;
-HWND gHwnd = nullptr;
-uint32_t gWindowW = 1600;
-uint32_t gWindowH = 900;
-std::atomic<bool> gPaintQueued{false};
-std::atomic<uint32_t> gTraceEvery{0};
-std::atomic<uint32_t> gTraceMax{0};
-// Diagnostics-only: expected present interval (from fpsHint), published once at startup so the
-// present-stage stream telemetry on the UI thread can flag gaps past 1.5x cadence without reaching
-// into the recv thread's Args. 0 => fall back to a 60fps assumption.
-std::atomic<uint32_t> gPresentFrameIntervalUs{0};
-std::atomic<uint64_t> gTracePresentPrinted{0};
-std::atomic<uint64_t> gTraceRecvPrinted{0};
-constexpr bool kInputPolicyForceBlock = false;
-// Catch-up defaults tuned for software codec path: avoid runaway multi-second lag,
-// but still clamp perceived latency quickly for interactive remote use.
-constexpr uint64_t kCatchupLagDropUs = 450000;       // 0.45s
-constexpr uint64_t kCatchupResumeKeyLagUs = 500000;  // 0.5s
-constexpr uint64_t kDecodeQueueLagDropUs = 300000;   // 0.3s
-constexpr uint64_t kDecodeQueueLagResumeUs = 400000; // 0.4s
-constexpr uint64_t kStaleCaptureDropUs = 50000;      // 50ms
-constexpr uint64_t kUserFeedbackLagWarnUs = 90000;   // 90ms
-constexpr uint64_t kUserFeedbackGapWarnUs = 50000;   // 50ms
-constexpr uint64_t kUserFeedbackMinIntervalUs = 1000000;  // 1s
-constexpr uint64_t kKeyframeRequestMinIntervalUsDefault = 120000;  // 120ms
-constexpr uint64_t kKeyframeRequestTokenRefillUsDefault = 300000;  // 300ms / token
-constexpr uint32_t kKeyframeRequestTokenCapacityDefault = 3;
-constexpr uint64_t kCatchupReenterMinIntervalUsDefault = 600000;  // 600ms
-constexpr uint64_t kCongestionRecoverMinUsDefault = 250000;  // 250ms
-constexpr uint64_t kCongestionRecoveryTimeoutUsDefault = 1500000;  // 1.5s
-
-enum class ClientCongestionState : uint8_t {
-  Normal = 0,
-  Recovering = 1,
-  Congested = 2,
-};
 
 const char* congestion_state_name(ClientCongestionState state) {
   switch (state) {
@@ -636,109 +455,10 @@ const char* congestion_state_name(ClientCongestionState state) {
   }
 }
 
-ClientInputQueue gInputQueueState;
-std::atomic<bool> gInputEnabled{false};
-// Which candidate won the race. The relay is billed per byte, so the session says which one it
-// is rather than leaving the user to guess from the bill.
-std::atomic<bool> gRelayPath{false};
 
-// Control over the media socket, for hosts reached through the directory.
-//
-// A second TCP connection cannot be opened to a host behind NAT: only the UDP socket was
-// punched, so control has to ride it. Everything the session needs -- input, the window list,
-// the monitor list, runtime tuning -- goes through here, which is why a session without it
-// shows a picture and responds to nothing.
-remote60::native_poc::UdpControlChannel gUdpControl;
-std::atomic<bool> gControlOverUdp{false};
-// Counted at the point the exchange succeeded, so it can be compared against the acks: the two
-// diverging is what tells "the host never answered" apart from "nothing was ever sent".
-std::atomic<uint64_t> gInputEventsSent{0};
-// Long enough that a slow host answering a window list is not mistaken for a dead link.
-constexpr uint32_t kUdpControlReadTimeoutMs = 12000;
-std::atomic<uint16_t> gMouseButtons{0};
-std::atomic<int32_t> gLastInputVideoX{0};
-std::atomic<int32_t> gLastInputVideoY{0};
 
-struct ClientRuntimeMetrics {
-  std::atomic<uint32_t> seq{0};
-  std::atomic<uint32_t> width{0};
-  std::atomic<uint32_t> height{0};
-  std::atomic<uint32_t> recvFpsX100{0};
-  std::atomic<uint32_t> decodedFpsX100{0};
-  std::atomic<uint32_t> recvMbpsX1000{0};
-  std::atomic<uint32_t> skippedFrames{0};
-  std::atomic<uint64_t> avgLatencyUs{0};
-  std::atomic<uint64_t> maxLatencyUs{0};
-  std::atomic<uint64_t> avgDecodeTailUs{0};
-  std::atomic<uint64_t> maxDecodeTailUs{0};
-  std::atomic<uint32_t> congestionState{0};
-  std::atomic<uint32_t> congestionTransitions{0};
-  std::atomic<uint32_t> congestionRecoveryCount{0};
-  std::atomic<uint32_t> congestionRecoveryReq{0};
-  std::atomic<uint32_t> congestionRecoveryMaxUs{0};
-  std::atomic<uint32_t> queueDepthMax{0};
-  std::atomic<uint32_t> queueDepthH4p{0};
-  std::atomic<uint32_t> udpAssemblyDropPm{0};
-  std::atomic<uint64_t> updatedQpcUs{0};
-};
 
-ClientRuntimeMetrics gClientMetrics;
-KeyframeRequestState gKeyframeRequests{
-    kKeyframeRequestMinIntervalUsDefault,
-    kKeyframeRequestTokenRefillUsDefault,
-    kKeyframeRequestTokenCapacityDefault};
-std::atomic<uint64_t> gLastPresentedVersion{0};
-std::atomic<uint64_t> gLastPresentedCaptureUs{0};  // updated after actual present, not at queue time
-// While the picker overlays a live stream (mid-session picker no longer stops it), presents pause
-// but frames keep arriving, so lag-vs-last-presented would misread the overlay as decode backlog
-// and start catchup churn. Suppress catchup while the picker is up and briefly after it closes
-// (until the first present re-anchors gLastPresentedCaptureUs).
-std::atomic<uint64_t> gCatchupSuppressUntilUs{0};
-std::atomic<uint64_t> gPaintCoalescedCount{0};
-std::atomic<uint64_t> gOverwriteBeforePresentCount{0};
-std::atomic<uint64_t> gD3dPresentSuccessCount{0};
-std::atomic<uint64_t> gD3dPresentFailCount{0};
-std::atomic<uint64_t> gGdiFallbackPresentedCount{0};
-std::atomic<uint64_t> gFallbackInitFailCount{0};
-std::atomic<uint64_t> gFallbackRenderFailCount{0};
-std::atomic<uint64_t> gFallbackNv12ConvertFailCount{0};
-std::mutex gLogMu;
 
-struct OverlayConfigSnapshot {
-  std::string host = "127.0.0.1";
-  uint16_t port = 43000;
-  uint16_t controlPort = 0;
-  std::string transport = "tcp";
-  std::string codec = "raw";
-  uint32_t fpsHint = 30;
-  uint32_t controlIntervalMs = 1000;
-  uint32_t tcpRecvBufKb = 0;
-  uint32_t tcpSendBufKb = 0;
-  uint32_t udpMtu = 1200;
-  uint32_t udpSimDropPm = 0;
-  uint64_t keyReqMinIntervalUs = kKeyframeRequestMinIntervalUsDefault;
-  uint64_t keyReqTokenRefillUs = kKeyframeRequestTokenRefillUsDefault;
-  uint32_t keyReqTokenCapacity = kKeyframeRequestTokenCapacityDefault;
-};
-
-OverlayConfigSnapshot gOverlayConfig;
-std::atomic<bool> gControlConnected{false};
-std::atomic<uint32_t> gHostCaptureTargetPid{0};
-std::atomic<uint32_t> gHostCaptureTargetFlags{0};
-std::atomic<uint32_t> gHostCaptureRebindCount{0};
-std::atomic<uint64_t> gHostCaptureTargetHwnd{0};
-std::atomic<uint64_t> gHostCaptureMetaUpdatedUs{0};
-std::mutex gHostCaptureMetaMu;
-std::string gHostCaptureTargetProcess = "monitor";
-std::string gHostCaptureTargetTitle;
-RuntimeTuneState gRuntimeTuneState{
-    300000,
-    30000000,
-    250000,
-    1,
-    240};
-std::atomic<bool> gCaptureOverviewMode{false};
-remote60::native_poc::StreamStateControl gStreamStateControl;
 
 // Browsing targets must not keep the host encoding (F1). The request rides the control
 // scheduler, which orders stream state ahead of window selection. Sent only on explicit
@@ -747,8 +467,6 @@ remote60::native_poc::StreamStateControl gStreamStateControl;
 void set_picker_visible_and_sync_stream(bool visible);
 void ensure_cursor_overlay(HWND owner);
 void update_cursor_overlay(HWND hwnd);
-CaptureModeRequestState gCaptureModeRequests;
-ClientControlScheduler gControlScheduler;
 
 ClientControlMetricsSnapshot capture_client_control_metrics_snapshot() {
   ClientControlMetricsSnapshot snapshot{};
@@ -777,87 +495,9 @@ ClientControlMetricsSnapshot capture_client_control_metrics_snapshot() {
   return snapshot;
 }
 
-struct OverlayMetricSample {
-  uint64_t tsUs = 0;
-  uint32_t recvFpsX100 = 0;
-  uint32_t decodedFpsX100 = 0;
-  uint32_t recvMbpsX1000 = 0;
-  uint64_t avgLatencyUs = 0;
-};
 
-struct OverlayMetricAverages {
-  uint32_t recvFpsX100 = 0;
-  uint32_t decodedFpsX100 = 0;
-  uint32_t recvMbpsX1000 = 0;
-  uint64_t avgLatencyUs = 0;
-  uint32_t sampleCount = 0;
-};
-
-std::mutex gOverlayMetricsMu;
-std::deque<OverlayMetricSample> gOverlayMetrics;
 void log_client_line(const std::string& line);
 
-WindowPanelStateModel gWindowPanelState;
-// Which screen the shell asked for. Applied once the host has said it understands the monitor
-// messages, which it does in the window list.
-uint32_t gRequestedMonitorId = 0;
-std::atomic<bool> gWindowPickerVisible{true};
-std::atomic<bool> gWindowPickerToggleDown{false};
-std::atomic<int> gGridScrollRow{0};  // card grid scroll, in whole rows
-// Picker mis-click guard. In the field a frozen-looking stream had the user frantically clicking;
-// one UP landed on the first window card and silently switched the capture to another window.
-// A selection now requires DOWN and UP on the SAME target and a picker that has been visible for
-// at least 300ms (kPickerSelectMinShownUs), so a click that started before the picker appeared --
-// or that merely ends on a card -- cannot select. ~0 = nothing pressed; 0 = desktop is a valid id.
-constexpr uint64_t kPickerPressNone = ~0ULL;
-constexpr uint64_t kPickerSelectMinShownUs = 300000;
-std::atomic<uint64_t> gPickerShownAtUs{0};
-std::atomic<uint64_t> gPickerPressTargetId{kPickerPressNone};
-
-// Target-selection gate, mirroring the Android policy (commit 4892dea). After connecting the
-// session opens on the picker; picking a target starts the stream but the picker stays up, and
-// video is not presented, until the first frame of the *acknowledged* generation has decoded.
-// That keeps an initial default-desktop frame -- or a frame from the previously selected target
-// -- from flashing under the picker, and keeps a slow first frame from being mistaken for a
-// failed selection.
-//   gSelectionPending      : a selection is in flight (from click until first frame or failure).
-//   gSelectionAwaitingAck  : request sent, host's WindowSelected ack not yet seen.
-//   gSelectionExpectedGeneration : the ack's streamGeneration for the *in-flight* transaction;
-//                                  frames of other generations drop while pending.
-//   gSelectionEpoch        : bumped per selection so the receive loop resets the decoder once.
-//   gActiveStreamGeneration : generation of the last successfully revealed selection; after
-//                             reveal this is the persistent filter (0 = accept anything, which
-//                             covers the legacy stream-view start and the window before any pick).
-std::atomic<bool> gSelectionPending{false};
-std::atomic<bool> gSelectionAwaitingAck{false};
-std::atomic<uint64_t> gSelectionExpectedGeneration{0};
-std::atomic<uint64_t> gSelectionEpoch{0};
-std::atomic<uint64_t> gActiveStreamGeneration{0};
-// The reveal is decided on the video thread but *committed* on the UI thread, so a cancel / new
-// selection / disconnect that races the post cannot wrongly close the picker. The video thread
-// records the candidate (generation + epoch) and posts once; the UI handler revalidates against
-// the live selection state before committing, and always releases the latch so a later legitimate
-// first frame can re-post.
-std::atomic<uint64_t> gSelectionReadyGeneration{0};
-std::atomic<uint64_t> gSelectionReadyEpoch{0};
-std::atomic<bool> gSelectionRevealPosted{false};
-// Posted to the video window when the first selected frame is ready, so the toolbar (a window of
-// its own, whose show/hide must run on the UI thread) is revealed on the thread that owns it.
-constexpr UINT kMsgRevealStreamView = WM_APP + 10;
-
-// Preview thumbnails for the target picker, fetched over the control channel when the host
-// advertises kControlWindowListFlagThumbnails. Keyed by window id; id 0 is the desktop.
-struct WindowThumb {
-  uint32_t width = 0;
-  uint32_t height = 0;
-  std::vector<uint8_t> bgra;
-  uint64_t fetchedUs = 0;
-};
-std::mutex gThumbMu;
-std::unordered_map<uint64_t, std::shared_ptr<const WindowThumb>> gThumbs;
-std::deque<uint64_t> gThumbFetchQueue;
-std::atomic<bool> gHostSupportsThumbnails{false};
-constexpr uint64_t kThumbRefreshUs = 5000000;  // refresh a preview after 5 s
 
 void queue_thumbnail_fetches_from_panel() {
   if (!gHostSupportsThumbnails.load(std::memory_order_relaxed)) return;
@@ -875,23 +515,6 @@ void queue_thumbnail_fetches_from_panel() {
   want(0);
   for (const auto& item : snap.items) want(item.id);
 }
-std::atomic<uint64_t> gSuppressMouseUntilUs{0};
-// Remote hardware-cursor state (UdpCursorPosPacket, DXGI desktop capture only). The host's
-// pipeline drops pointer-only frames, so this side channel is what keeps the remote cursor
-// visibly moving on a still screen. Drawn as a layered overlay; hidden when stale (>500ms).
-std::atomic<int32_t> gRemoteCursorX{0};
-std::atomic<int32_t> gRemoteCursorY{0};
-std::atomic<uint32_t> gRemoteCursorCapW{0};
-std::atomic<uint32_t> gRemoteCursorCapH{0};
-std::atomic<uint64_t> gRemoteCursorGeneration{0};  // stream generation the sample belongs to
-std::atomic<bool> gRemoteCursorVisible{false};
-std::atomic<uint64_t> gRemoteCursorUpdateUs{0};
-HWND gCursorOverlayHwnd = nullptr;
-constexpr UINT_PTR kCursorOverlayTimerId = 0x711;
-constexpr uint64_t kRemoteCursorStaleUs = 500000;  // hide after 500ms without a sample
-constexpr int kCursorOverlaySize = 24;             // ring bitmap edge; window is centered on the point
-std::atomic<uint32_t> gActiveTouchPointerId{0};
-std::atomic<bool> gActiveTouchDown{false};
 
 // Panel metrics are authored at 96 DPI and scaled per monitor; the process is
 // per-monitor DPI aware, so raw pixel constants would render tiny on a scaled display.
@@ -905,11 +528,6 @@ inline int kPanelInfoHeight() { return dpi_scale(64); }
 inline int kPanelStatsHeight() { return dpi_scale(128); }
 inline int kPanelItemHeight() { return dpi_scale(28); }
 inline int kPanelItemGap() { return dpi_scale(4); }
-constexpr uint32_t kRuntimeBitrateMin = 300000;
-constexpr uint32_t kRuntimeBitrateMax = 30000000;
-constexpr uint32_t kRuntimeBitrateStep = 250000;
-constexpr uint32_t kRuntimeKeyintMin = 1;
-constexpr uint32_t kRuntimeKeyintMax = 240;
 
 struct ClientLayout {
   RECT clientRect{};
@@ -1199,11 +817,6 @@ bool local_hotkey_modifiers_active() {
   return (GetKeyState(VK_CONTROL) < 0) && (GetKeyState(VK_MENU) < 0);
 }
 
-// Which keys this client forwarded a down for, so the matching up is forwarded by memory
-// rather than by re-deciding. The decision depends on modifier state, and re-evaluating it
-// at release time strands keys on the host: Ctrl+A with Ctrl released first re-classifies
-// the A as text on the way up, and the host holds A down forever.
-std::atomic<bool> gForwardedKeyDown[256]{};
 
 /**
  * Whether this virtual key should be forwarded as a key event.
@@ -2132,7 +1745,6 @@ struct Nv12D3dRenderer {
 
 Nv12D3dRenderer gNv12Renderer;
 
-remote60::native_poc::InputMacro gInputMacro;
 
 void enqueue_input_event(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode) {
   if (kInputPolicyForceBlock) return;
@@ -2186,7 +1798,6 @@ void toggle_macro_window(HWND owner) {
   if (owner) InvalidateRect(owner, nullptr, FALSE);
 }
 
-std::atomic<bool> gMacroButtonDown{false};
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   switch (msg) {
@@ -3186,7 +2797,9 @@ bool create_window() {
   return true;
 }
 
-}  // namespace
+}  // namespace remote60::native_poc::viewer
+
+using namespace remote60::native_poc::viewer;
 
 int main(int argc, char** argv) {
   std::cout.setf(std::ios::unitbuf);
