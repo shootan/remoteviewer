@@ -62,12 +62,12 @@ bool key_event_should_forward(WPARAM vk) {
 /** Decides for a down event and records the answer for the matching up. */
 bool forward_key_down(WPARAM vk) {
   const bool forward = key_event_should_forward(vk);
-  if (vk < 256) gForwardedKeyDown[vk].store(forward, std::memory_order_relaxed);
+  if (vk < 256) gInput.forwardedKeyDown[vk].store(forward, std::memory_order_relaxed);
   return forward;
 }
 
 bool forward_key_up(WPARAM vk) {
-  if (vk < 256) return gForwardedKeyDown[vk].exchange(false, std::memory_order_relaxed);
+  if (vk < 256) return gInput.forwardedKeyDown[vk].exchange(false, std::memory_order_relaxed);
   return key_event_should_forward(vk);
 }
 
@@ -89,16 +89,16 @@ bool send_ime_result_text(HWND hwnd, LPARAM imeFlags) {
 }
 
 void release_mouse_capture_if_idle(HWND hwnd) {
-  if ((gMouseButtons.load(std::memory_order_relaxed) & 0x7u) == 0 && GetCapture() == hwnd) {
+  if ((gInput.mouseButtons.load(std::memory_order_relaxed) & 0x7u) == 0 && GetCapture() == hwnd) {
     ReleaseCapture();
   }
 }
 
 void enqueue_release_for_pressed_mouse_buttons() {
-  const uint16_t buttons = gMouseButtons.exchange(0, std::memory_order_acq_rel);
+  const uint16_t buttons = gInput.mouseButtons.exchange(0, std::memory_order_acq_rel);
   if ((buttons & 0x7u) == 0) return;
-  const int32_t vx = gLastInputVideoX.load(std::memory_order_relaxed);
-  const int32_t vy = gLastInputVideoY.load(std::memory_order_relaxed);
+  const int32_t vx = gInput.lastVideoX.load(std::memory_order_relaxed);
+  const int32_t vy = gInput.lastVideoY.load(std::memory_order_relaxed);
   if ((buttons & 0x4u) != 0) enqueue_input_event(3, vx, vy, 0, VK_MBUTTON);
   if ((buttons & 0x2u) != 0) enqueue_input_event(3, vx, vy, 0, VK_RBUTTON);
   if ((buttons & 0x1u) != 0) enqueue_input_event(3, vx, vy, 0, VK_LBUTTON);
@@ -114,7 +114,7 @@ void enqueue_release_for_pressed_mouse_buttons() {
 // keeps a modifier from latching on the host.
 void enqueue_release_for_pressed_keys() {
   for (int vk = 0; vk < 256; ++vk) {
-    if (gForwardedKeyDown[vk].exchange(false, std::memory_order_relaxed)) {
+    if (gInput.forwardedKeyDown[vk].exchange(false, std::memory_order_relaxed)) {
       enqueue_input_event(6, 0, 0, 0, static_cast<uint32_t>(vk));
     }
   }
@@ -138,7 +138,7 @@ void enqueue_input_event(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta
   msg.inputEvent.header.size = static_cast<uint16_t>(sizeof(msg.inputEvent));
   msg.inputEvent.seq = gControl.inputQueue.NextSequence();
   msg.inputEvent.kind = kind;
-  msg.inputEvent.buttons = gMouseButtons.load();
+  msg.inputEvent.buttons = gInput.mouseButtons.load();
   msg.inputEvent.x = x;
   msg.inputEvent.y = y;
   msg.inputEvent.wheelDelta = wheelDelta;
@@ -146,8 +146,8 @@ void enqueue_input_event(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta
   msg.inputEvent.clientSendQpcUs = qpc_now_us();
   // Recording taps the send path, so the macro sees exactly what the host will see -- the
   // engine keeps pointer actions and drops keys on its own.
-  if (gInputMacro.IsRecording()) {
-    gInputMacro.RecordEvent(msg.inputEvent, GetTickCount64());
+  if (gInput.macro.IsRecording()) {
+    gInput.macro.RecordEvent(msg.inputEvent, GetTickCount64());
   }
   enqueue_control_input_message(msg);
 }
@@ -174,7 +174,7 @@ void enqueue_macro_step(const remote60::native_poc::MacroStep& step) {
 
 void toggle_macro_window(HWND owner) {
   remote60::native_poc::MacroWindowHooks hooks;
-  hooks.macro = &gInputMacro;
+  hooks.macro = &gInput.macro;
   hooks.sendStep = [](const remote60::native_poc::MacroStep& step) { enqueue_macro_step(step); };
   remote60::native_poc::macro_window_toggle(GetModuleHandleW(nullptr), owner, hooks);
   if (owner) InvalidateRect(owner, nullptr, FALSE);

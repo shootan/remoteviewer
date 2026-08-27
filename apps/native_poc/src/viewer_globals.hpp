@@ -14,6 +14,7 @@
 // Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-0).
 
 #include "viewer_common.hpp"
+#include "viewer_input_state.hpp"
 #include "viewer_selection_gate.hpp"
 #include "viewer_picker_state.hpp"
 #include "viewer_control_state.hpp"
@@ -53,9 +54,6 @@ enum class ClientCongestionState : uint8_t {
 // shows a picture and responds to nothing.
 // Counted at the point the exchange succeeded, so it can be compared against the acks: the two
 // diverging is what tells "the host never answered" apart from "nothing was ever sent".
-extern std::atomic<uint16_t> gMouseButtons;
-extern std::atomic<int32_t> gLastInputVideoX;
-extern std::atomic<int32_t> gLastInputVideoY;
 
 
 // thread: recv publishes gMetrics.client (atomics); control snapshots it for the host, UI reads
@@ -104,7 +102,6 @@ extern std::atomic<int32_t> gLastInputVideoY;
 
 // thread: touch/mouse suppression is UI-only; the remote cursor sample is recv-written,
 // UI-timer-read (latest wins).
-extern std::atomic<uint64_t> gSuppressMouseUntilUs;
 // Remote hardware-cursor state (UdpCursorPosPacket, DXGI desktop capture only). The host's
 // pipeline drops pointer-only frames, so this side channel is what keeps the remote cursor
 // visibly moving on a still screen. Drawn as a layered overlay; hidden when stale (>500ms).
@@ -116,8 +113,6 @@ extern std::atomic<uint64_t> gRemoteCursorGeneration;  // stream generation the 
 extern std::atomic<bool> gRemoteCursorVisible;
 extern std::atomic<uint64_t> gRemoteCursorUpdateUs;
 extern HWND gCursorOverlayHwnd;
-extern std::atomic<uint32_t> gActiveTouchPointerId;
-extern std::atomic<bool> gActiveTouchDown;
 
 
 // thread: UI only (GDI objects).
@@ -132,10 +127,8 @@ extern int gUiDpi;
 // rather than by re-deciding. The decision depends on modifier state, and re-evaluating it
 // at release time strands keys on the host: Ctrl+A with Ctrl released first re-classifies
 // the A as text on the way up, and the host holds A down forever.
-extern std::atomic<bool> gForwardedKeyDown[256];
 
 
-extern remote60::native_poc::InputMacro gInputMacro;
 
 // thread: UI only (swap chain); the decoder shares its device when the DXGI surface opt-in is on.
 extern Nv12D3dRenderer gNv12Renderer;
@@ -147,4 +140,5 @@ extern ClientMetricsState gMetrics;
 extern ControlChannelState gControl;
 extern PickerState gPicker;
 extern SelectionGateState gSel;
+extern InputState gInput;
 }  // namespace remote60::native_poc::viewer

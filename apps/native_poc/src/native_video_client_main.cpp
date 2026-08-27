@@ -254,9 +254,9 @@ int main(int argc, char** argv) {
   }
   gControl.captureModeRequests.Reset();
   gPicker.windowPanel.Reset();
-  gSuppressMouseUntilUs.store(0, std::memory_order_relaxed);
-  gActiveTouchPointerId.store(0, std::memory_order_relaxed);
-  gActiveTouchDown.store(false, std::memory_order_relaxed);
+  gInput.suppressMouseUntilUs.store(0, std::memory_order_relaxed);
+  gInput.activeTouchPointerId.store(0, std::memory_order_relaxed);
+  gInput.activeTouchDown.store(false, std::memory_order_relaxed);
 
   remote60::native_poc::WinsockScope ws;
   if (!ws.ok) {
@@ -2253,8 +2253,8 @@ int main(int argc, char** argv) {
   // Before anything is joined: the control thread can be parked in a blocking receive for the
   // read timeout, and closing the channel is what wakes it. Otherwise shutdown waits it out.
   gControl.udpControl.Close(remote60::native_poc::ControlCloseReason::Shutdown);
-  gInputMacro.StopPlayback();
-  gInputMacro.StopRecording();
+  gInput.macro.StopPlayback();
+  gInput.macro.StopRecording();
   remote60::native_poc::macro_window_destroy();
   if (gSession.sock != INVALID_SOCKET) {
     shutdown(gSession.sock, SD_BOTH);

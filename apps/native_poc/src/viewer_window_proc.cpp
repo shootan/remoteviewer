@@ -79,13 +79,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         remote60::native_poc::session_toolbar_notify_mouse(GET_X_LPARAM(lp), GET_Y_LPARAM(lp),
                                                            toolbarZone.right);
       }
-      if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (qpc_now_us() < gInput.suppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (point_in_macro_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (gPicker.visible.load(std::memory_order_relaxed)) return 0;
       if (point_in_panel_ui(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
-      if ((gMouseButtons.load(std::memory_order_relaxed) & 0x7u) == 0) return 0;
+      if ((gInput.mouseButtons.load(std::memory_order_relaxed) & 0x7u) == 0) return 0;
       {
         int32_t vx = 0;
         int32_t vy = 0;
@@ -94,7 +94,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       }
       return 0;
     case WM_LBUTTONDOWN:
-      if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (qpc_now_us() < gInput.suppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) {
         gPicker.toggleDown.store(true, std::memory_order_relaxed);
         return 0;
@@ -137,12 +137,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int32_t vy = 0;
         if (!map_client_point_to_video_coords(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &vx, &vy)) return 0;
         SetCapture(hwnd);
-        gMouseButtons.fetch_or(1);
+        gInput.mouseButtons.fetch_or(1);
         enqueue_input_event(2, vx, vy, 0, VK_LBUTTON);
       }
       return 0;
     case WM_LBUTTONUP: {
-      if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (qpc_now_us() < gInput.suppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       const int x = GET_X_LPARAM(lp);
       const int y = GET_Y_LPARAM(lp);
       const ClientLayout layout = compute_client_layout(hwnd);
@@ -224,14 +224,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int32_t vx = 0;
         int32_t vy = 0;
         if (!map_client_point_to_video_coords(hwnd, x, y, &vx, &vy)) return 0;
-        gMouseButtons.fetch_and(static_cast<uint16_t>(~1u));
+        gInput.mouseButtons.fetch_and(static_cast<uint16_t>(~1u));
         enqueue_input_event(3, vx, vy, 0, VK_LBUTTON);
         release_mouse_capture_if_idle(hwnd);
       }
       return 0;
     }
     case WM_RBUTTONDOWN:
-      if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (qpc_now_us() < gInput.suppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (point_in_macro_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (gPicker.visible.load(std::memory_order_relaxed)) return 0;
@@ -242,12 +242,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int32_t vy = 0;
         if (!map_client_point_to_video_coords(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &vx, &vy)) return 0;
         SetCapture(hwnd);
-        gMouseButtons.fetch_or(2);
+        gInput.mouseButtons.fetch_or(2);
         enqueue_input_event(2, vx, vy, 0, VK_RBUTTON);
       }
       return 0;
     case WM_RBUTTONUP:
-      if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (qpc_now_us() < gInput.suppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (point_in_macro_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (gPicker.visible.load(std::memory_order_relaxed)) return 0;
@@ -257,13 +257,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int32_t vx = 0;
         int32_t vy = 0;
         if (!map_client_point_to_video_coords(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &vx, &vy)) return 0;
-        gMouseButtons.fetch_and(static_cast<uint16_t>(~2u));
+        gInput.mouseButtons.fetch_and(static_cast<uint16_t>(~2u));
         enqueue_input_event(3, vx, vy, 0, VK_RBUTTON);
         release_mouse_capture_if_idle(hwnd);
       }
       return 0;
     case WM_MBUTTONDOWN:
-      if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (qpc_now_us() < gInput.suppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (point_in_macro_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (gPicker.visible.load(std::memory_order_relaxed)) return 0;
@@ -274,12 +274,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int32_t vy = 0;
         if (!map_client_point_to_video_coords(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &vx, &vy)) return 0;
         SetCapture(hwnd);
-        gMouseButtons.fetch_or(4);
+        gInput.mouseButtons.fetch_or(4);
         enqueue_input_event(2, vx, vy, 0, VK_MBUTTON);
       }
       return 0;
     case WM_MBUTTONUP:
-      if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (qpc_now_us() < gInput.suppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       if (point_in_toggle_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (point_in_macro_button(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (gPicker.visible.load(std::memory_order_relaxed)) return 0;
@@ -289,13 +289,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int32_t vx = 0;
         int32_t vy = 0;
         if (!map_client_point_to_video_coords(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &vx, &vy)) return 0;
-        gMouseButtons.fetch_and(static_cast<uint16_t>(~4u));
+        gInput.mouseButtons.fetch_and(static_cast<uint16_t>(~4u));
         enqueue_input_event(3, vx, vy, 0, VK_MBUTTON);
         release_mouse_capture_if_idle(hwnd);
       }
       return 0;
     case WM_MOUSEWHEEL: {
-      if (qpc_now_us() < gSuppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (qpc_now_us() < gInput.suppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
       POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
       ScreenToClient(hwnd, &p);
       const ClientLayout layout = compute_client_layout(hwnd);
@@ -333,7 +333,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       }
       POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
       ScreenToClient(hwnd, &p);
-      gSuppressMouseUntilUs.store(qpc_now_us() + 300000ULL, std::memory_order_relaxed);
+      gInput.suppressMouseUntilUs.store(qpc_now_us() + 300000ULL, std::memory_order_relaxed);
       const ClientLayout layout = compute_client_layout(hwnd);
       if (point_in_rect(layout.toggleButtonRect, p.x, p.y)) {
         if (msg == WM_POINTERDOWN) {
@@ -415,27 +415,27 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       int32_t vy = 0;
       if (!map_client_point_to_video_coords(hwnd, p.x, p.y, &vx, &vy)) return 0;
       if (msg == WM_POINTERDOWN) {
-        if (gActiveTouchDown.load(std::memory_order_relaxed)) return 0;
+        if (gInput.activeTouchDown.load(std::memory_order_relaxed)) return 0;
         SetFocus(hwnd);
         SetCapture(hwnd);
-        gActiveTouchPointerId.store(pointerId, std::memory_order_relaxed);
-        gActiveTouchDown.store(true, std::memory_order_relaxed);
-        gMouseButtons.fetch_or(1);
+        gInput.activeTouchPointerId.store(pointerId, std::memory_order_relaxed);
+        gInput.activeTouchDown.store(true, std::memory_order_relaxed);
+        gInput.mouseButtons.fetch_or(1);
         enqueue_input_event(2, vx, vy, 0, VK_LBUTTON);
       } else if (msg == WM_POINTERUPDATE) {
-        if (!gActiveTouchDown.load(std::memory_order_relaxed) ||
-            gActiveTouchPointerId.load(std::memory_order_relaxed) != pointerId) {
+        if (!gInput.activeTouchDown.load(std::memory_order_relaxed) ||
+            gInput.activeTouchPointerId.load(std::memory_order_relaxed) != pointerId) {
           return 0;
         }
         enqueue_input_event(1, vx, vy, 0, 0);
       } else {
-        if (!gActiveTouchDown.load(std::memory_order_relaxed) ||
-            gActiveTouchPointerId.load(std::memory_order_relaxed) != pointerId) {
+        if (!gInput.activeTouchDown.load(std::memory_order_relaxed) ||
+            gInput.activeTouchPointerId.load(std::memory_order_relaxed) != pointerId) {
           return 0;
         }
-        gMouseButtons.fetch_and(static_cast<uint16_t>(~1u));
-        gActiveTouchDown.store(false, std::memory_order_relaxed);
-        gActiveTouchPointerId.store(0, std::memory_order_relaxed);
+        gInput.mouseButtons.fetch_and(static_cast<uint16_t>(~1u));
+        gInput.activeTouchDown.store(false, std::memory_order_relaxed);
+        gInput.activeTouchPointerId.store(0, std::memory_order_relaxed);
         enqueue_input_event(3, vx, vy, 0, VK_LBUTTON);
         release_mouse_capture_if_idle(hwnd);
       }
@@ -445,8 +445,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CANCELMODE:
     case WM_POINTERCAPTURECHANGED:
       enqueue_release_for_pressed_mouse_buttons();
-      gActiveTouchDown.store(false, std::memory_order_relaxed);
-      gActiveTouchPointerId.store(0, std::memory_order_relaxed);
+      gInput.activeTouchDown.store(false, std::memory_order_relaxed);
+      gInput.activeTouchPointerId.store(0, std::memory_order_relaxed);
       // A gesture that lost capture mid-flight must not leave a stale picker press behind: the
       // whole point of the latch is that an UP without its own valid DOWN selects nothing.
       gPicker.pressTargetId.store(kPickerPressNone, std::memory_order_relaxed);

@@ -232,8 +232,8 @@ bool map_client_point_to_video_coords(HWND hwnd, int x, int y, int32_t* outVideo
   *outVideoY = static_cast<int32_t>((static_cast<uint64_t>(relY) * static_cast<uint64_t>(frameH - 1) +
                                      static_cast<uint64_t>(videoH / 2)) /
                                     static_cast<uint64_t>(videoH));
-  gLastInputVideoX.store(*outVideoX, std::memory_order_relaxed);
-  gLastInputVideoY.store(*outVideoY, std::memory_order_relaxed);
+  gInput.lastVideoX.store(*outVideoX, std::memory_order_relaxed);
+  gInput.lastVideoY.store(*outVideoY, std::memory_order_relaxed);
   return true;
 }
 
