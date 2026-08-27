@@ -151,7 +151,7 @@ bool begin_pc_target_selection(uint64_t windowId, const char* statusText) {
   gControl.streamState.Request(true);
   // A selection is a generation change; drop the remote-cursor sample so the previous target's
   // pointer cannot linger over the new one while the first fenced sample is in flight.
-  gRemoteCursorUpdateUs.store(0, std::memory_order_release);
+  gCursor.updateUs.store(0, std::memory_order_release);
   if (gSession.hwnd) InvalidateRect(gSession.hwnd, nullptr, FALSE);
   return true;
 }

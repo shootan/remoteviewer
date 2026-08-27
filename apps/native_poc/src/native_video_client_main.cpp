@@ -1884,13 +1884,13 @@ int main(int argc, char** argv) {
             // not be able to feed the clamp arithmetic absurd dimensions. Claimed either way.
             if (cp.captureW >= 2 && cp.captureW <= 16384 && cp.captureH >= 2 &&
                 cp.captureH <= 16384) {
-              gRemoteCursorX.store(cp.x, std::memory_order_relaxed);
-              gRemoteCursorY.store(cp.y, std::memory_order_relaxed);
-              gRemoteCursorCapW.store(cp.captureW, std::memory_order_relaxed);
-              gRemoteCursorCapH.store(cp.captureH, std::memory_order_relaxed);
-              gRemoteCursorGeneration.store(cp.streamGeneration, std::memory_order_relaxed);
-              gRemoteCursorVisible.store((cp.flags & 0x1u) != 0, std::memory_order_relaxed);
-              gRemoteCursorUpdateUs.store(qpc_now_us(), std::memory_order_release);
+              gCursor.x.store(cp.x, std::memory_order_relaxed);
+              gCursor.y.store(cp.y, std::memory_order_relaxed);
+              gCursor.capW.store(cp.captureW, std::memory_order_relaxed);
+              gCursor.capH.store(cp.captureH, std::memory_order_relaxed);
+              gCursor.generation.store(cp.streamGeneration, std::memory_order_relaxed);
+              gCursor.visible.store((cp.flags & 0x1u) != 0, std::memory_order_relaxed);
+              gCursor.updateUs.store(qpc_now_us(), std::memory_order_release);
             }
             continue;
           }

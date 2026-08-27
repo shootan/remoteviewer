@@ -14,6 +14,7 @@
 // Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-0).
 
 #include "viewer_common.hpp"
+#include "viewer_remote_cursor.hpp"
 #include "viewer_input_state.hpp"
 #include "viewer_selection_gate.hpp"
 #include "viewer_picker_state.hpp"
@@ -105,14 +106,6 @@ enum class ClientCongestionState : uint8_t {
 // Remote hardware-cursor state (UdpCursorPosPacket, DXGI desktop capture only). The host's
 // pipeline drops pointer-only frames, so this side channel is what keeps the remote cursor
 // visibly moving on a still screen. Drawn as a layered overlay; hidden when stale (>500ms).
-extern std::atomic<int32_t> gRemoteCursorX;
-extern std::atomic<int32_t> gRemoteCursorY;
-extern std::atomic<uint32_t> gRemoteCursorCapW;
-extern std::atomic<uint32_t> gRemoteCursorCapH;
-extern std::atomic<uint64_t> gRemoteCursorGeneration;  // stream generation the sample belongs to
-extern std::atomic<bool> gRemoteCursorVisible;
-extern std::atomic<uint64_t> gRemoteCursorUpdateUs;
-extern HWND gCursorOverlayHwnd;
 
 
 // thread: UI only (GDI objects).
@@ -141,4 +134,5 @@ extern ControlChannelState gControl;
 extern PickerState gPicker;
 extern SelectionGateState gSel;
 extern InputState gInput;
+extern RemoteCursorState gCursor;
 }  // namespace remote60::native_poc::viewer

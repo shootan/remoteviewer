@@ -8,17 +8,9 @@
 
 namespace remote60::native_poc::viewer {
 
-std::atomic<int32_t> gRemoteCursorX{0};
-std::atomic<int32_t> gRemoteCursorY{0};
-std::atomic<uint32_t> gRemoteCursorCapW{0};
-std::atomic<uint32_t> gRemoteCursorCapH{0};
-std::atomic<uint64_t> gRemoteCursorGeneration{0};  // stream generation the sample belongs to
-std::atomic<bool> gRemoteCursorVisible{false};
-std::atomic<uint64_t> gRemoteCursorUpdateUs{0};
-HWND gCursorOverlayHwnd = nullptr;
 HFONT gUiFont = nullptr;
 HFONT gUiTitleFont = nullptr;
 int gUiDpi = 96;
 Nv12D3dRenderer gNv12Renderer;
-SessionState gSession;FrameBuffer gFrameBuf;PresentStats gPresent;ClientMetricsState gMetrics;ControlChannelState gControl;PickerState gPicker;SelectionGateState gSel;InputState gInput;
+SessionState gSession;FrameBuffer gFrameBuf;PresentStats gPresent;ClientMetricsState gMetrics;ControlChannelState gControl;PickerState gPicker;SelectionGateState gSel;InputState gInput;RemoteCursorState gCursor;
 }  // namespace remote60::native_poc::viewer
