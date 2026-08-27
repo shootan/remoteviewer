@@ -25,6 +25,19 @@ enum class ClientCongestionState : uint8_t {
   Congested = 2,
 };
 
+inline const char* congestion_state_name(ClientCongestionState state) {
+  switch (state) {
+    case ClientCongestionState::Normal:
+      return "normal";
+    case ClientCongestionState::Recovering:
+      return "recovering";
+    case ClientCongestionState::Congested:
+      return "congested";
+    default:
+      return "unknown";
+  }
+}
+
 struct FrameGateState {
   // config: main() sets from env before the recv thread starts.
   uint64_t catchupReenterMinIntervalUs = 0;
@@ -32,6 +45,8 @@ struct FrameGateState {
   uint64_t congestionRecoverMinUs = 0;
   uint64_t congestionRecoveryTimeoutUs = 0;
   uint64_t frameIntervalUs = 0;  // from args.fpsHint, set at thread start
+  // Hold non-key frames until the next IDR (set at startup to useH264, after every decoder reset).
+  bool waitForKeyFrame = false;
   // Consecutive hard decode failures. A flush (decoder.reset) recovers a corrupt frame, but
   // not a wedged hardware MFT or a lost D3D device -- and the viewer's only recovery for a
   // same-resolution decode error was that flush, so once the decoder wedged (a YouTube scene

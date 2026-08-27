@@ -19,6 +19,7 @@
 #include "viewer_args.hpp"
 #include "viewer_common.hpp"
 #include "viewer_decoder_state.hpp"
+#include "viewer_frame_gate.hpp"
 #include "viewer_frame_gate_state.hpp"
 #include "viewer_globals.hpp"
 #include "viewer_recv_stats.hpp"
@@ -43,15 +44,21 @@ class VideoReceiver {
   const uint32_t udpSimDropPm;
   const uint32_t udpSimDropSeed;
   RecvStats st;
+  // what the frame gate may do to the decoder and the control path
+  struct DecoderSink : FrameGateSink {
+    DecoderSink(DecoderState& dec, const Args& args) : dec(dec), args(args) {}
+    void reset_decoder() override;
+    bool rebuild_decoder() override;
+    void request_keyframe(uint16_t reason) override;
+    DecoderState& dec;
+    const Args& args;
+  };
+  DecoderSink sink{dec, args};
+  FrameGate fg{gate, st, sink};
 
   // the helper lambdas, now members (verbatim bodies)
-  uint32_t queue_depth_frames(uint64_t lagUs);
-  void sample_queue_depth(uint64_t lagUs);
-  void transition_congestion_state(ClientCongestionState nextState, uint64_t nowUs, const char* reason, uint64_t streamLagUs, uint64_t decodeQueueLagEstimateUs, uint32_t seq);
   PresentCounterSnapshot load_present_counters();
   void append_present_counter_fields(std::ostream& os);
-  void append_congestion_fields(std::ostream& os);
-  uint64_t aligned_lag_us(uint64_t remoteTsUs, uint64_t localNowUs, bool& timelineReady, uint64_t& remoteBaseUs, uint64_t& localBaseUs);
   void publish_metrics(uint32_t metricW, uint32_t metricH, uint64_t nowUs, uint64_t avgLatencyUs, uint64_t maxLatencyUsLocal, uint64_t avgDecodeTailUs, uint64_t maxDecodeTailUsLocal, double mbpsLocal);
   bool process_h264_frame(const EncodedFrameHeader& h, std::vector<uint8_t>* payloadPtr, uint64_t packetNowUs);
   void flush_stats_if_due(uint64_t nowUs, uint32_t w, uint32_t h, bool codedSize, uint32_t codedW, uint32_t codedH, bool divideByRecvFrames);

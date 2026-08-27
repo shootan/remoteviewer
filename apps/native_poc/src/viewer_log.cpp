@@ -7,19 +7,6 @@
 
 namespace remote60::native_poc::viewer {
 
-const char* congestion_state_name(ClientCongestionState state) {
-  switch (state) {
-    case ClientCongestionState::Normal:
-      return "normal";
-    case ClientCongestionState::Recovering:
-      return "recovering";
-    case ClientCongestionState::Congested:
-      return "congested";
-    default:
-      return "unknown";
-  }
-}
-
 void log_client_line(const std::string& line) {
   std::lock_guard<std::mutex> lk(gSession.logMu);
   const std::string withNewline = line + "\n";

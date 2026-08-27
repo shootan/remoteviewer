@@ -298,7 +298,7 @@ int main(int argc, char** argv) {
     push_session_toolbar_state();
   }
 
-  dec.waitForKeyFrame = dec.useH264;
+  gate.waitForKeyFrame = dec.useH264;
   if (dec.useH264) {
     const HRESULT hr = MFStartup(MF_VERSION);
     if (FAILED(hr)) {

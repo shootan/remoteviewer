@@ -17,7 +17,6 @@
 
 namespace remote60::native_poc::viewer {
 
-const char* congestion_state_name(ClientCongestionState state);
 
 void log_client_line(const std::string& line);
 

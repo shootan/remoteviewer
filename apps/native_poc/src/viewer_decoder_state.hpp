@@ -28,7 +28,6 @@ struct DecoderState {
   bool mfStarted = false;
   H264Decoder decoder;
   bool decoderReady = false;
-  bool waitForKeyFrame = false;  // set to useH264 at startup
   uint32_t decoderW = 0;
   uint32_t decoderH = 0;
   Microsoft::WRL::ComPtr<ID3D11Device> d3dDevice;
