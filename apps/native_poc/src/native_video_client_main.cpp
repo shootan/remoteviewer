@@ -318,10 +318,10 @@ int main(int argc, char** argv) {
     if (enableDxgiDecodeSurface) {
       // Decode and paint share one D3D11 device so an opt-in hardware-decoder NV12 surface
       // can be sampled directly without a GPU->CPU copy and CPU->GPU upload.
-      if (!gNv12Renderer.ready) (void)gNv12Renderer.init(gSession.hwnd);
-      if (gNv12Renderer.ready) {
-        decD3dDevice = gNv12Renderer.device;
-        decD3dContext = gNv12Renderer.context;
+      if (!gUi.nv12Renderer.ready) (void)gUi.nv12Renderer.init(gSession.hwnd);
+      if (gUi.nv12Renderer.ready) {
+        decD3dDevice = gUi.nv12Renderer.device;
+        decD3dContext = gUi.nv12Renderer.context;
         (void)decoder.set_d3d11_device(decD3dDevice.Get());
       } else {
         D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;

@@ -8,9 +8,5 @@
 
 namespace remote60::native_poc::viewer {
 
-HFONT gUiFont = nullptr;
-HFONT gUiTitleFont = nullptr;
-int gUiDpi = 96;
-Nv12D3dRenderer gNv12Renderer;
-SessionState gSession;FrameBuffer gFrameBuf;PresentStats gPresent;ClientMetricsState gMetrics;ControlChannelState gControl;PickerState gPicker;SelectionGateState gSel;InputState gInput;RemoteCursorState gCursor;
+SessionState gSession;FrameBuffer gFrameBuf;PresentStats gPresent;ClientMetricsState gMetrics;ControlChannelState gControl;PickerState gPicker;SelectionGateState gSel;InputState gInput;RemoteCursorState gCursor;UiResources gUi;
 }  // namespace remote60::native_poc::viewer

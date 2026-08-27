@@ -14,6 +14,7 @@
 // Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-0).
 
 #include "viewer_common.hpp"
+#include "viewer_ui_resources.hpp"
 #include "viewer_remote_cursor.hpp"
 #include "viewer_input_state.hpp"
 #include "viewer_selection_gate.hpp"
@@ -111,9 +112,6 @@ enum class ClientCongestionState : uint8_t {
 // thread: UI only (GDI objects).
 // GDI defaults to the legacy System bitmap font, which is unscalable and cannot render
 // non-Latin window titles. Everything drawn through draw_text_utf8 selects this instead.
-extern HFONT gUiFont;
-extern HFONT gUiTitleFont;
-extern int gUiDpi;
 
 // thread: UI only (key state), macro engine shared with the macro window on the UI thread.
 // Which keys this client forwarded a down for, so the matching up is forwarded by memory
@@ -124,7 +122,6 @@ extern int gUiDpi;
 
 
 // thread: UI only (swap chain); the decoder shares its device when the DXGI surface opt-in is on.
-extern Nv12D3dRenderer gNv12Renderer;
 
 extern SessionState gSession;
 extern FrameBuffer gFrameBuf;
@@ -135,4 +132,5 @@ extern PickerState gPicker;
 extern SelectionGateState gSel;
 extern InputState gInput;
 extern RemoteCursorState gCursor;
+extern UiResources gUi;
 }  // namespace remote60::native_poc::viewer

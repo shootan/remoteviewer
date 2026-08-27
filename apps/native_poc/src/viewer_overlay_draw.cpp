@@ -132,7 +132,7 @@ void draw_overlay(HDC hdc) {
   SetTextColor(hdc, RGB(240, 243, 247));
   RECT titleRect = layout.selectedInfoRect;
   {
-    HGDIOBJ old = gUiTitleFont ? SelectObject(hdc, gUiTitleFont) : nullptr;
+    HGDIOBJ old = gUi.titleFont ? SelectObject(hdc, gUi.titleFont) : nullptr;
     RECT t = titleRect;
     DrawTextW(hdc, L"Remote60", -1, &t, DT_LEFT | DT_SINGLELINE);
     if (old) SelectObject(hdc, old);

@@ -6,7 +6,7 @@
 
 namespace remote60::native_poc::viewer {
 
-int dpi_scale(int value) { return MulDiv(value, gUiDpi, 96); }
+int dpi_scale(int value) { return MulDiv(value, gUi.dpi, 96); }
 
 void ensure_ui_font(HWND hwnd) {
   int dpi = 96;
@@ -14,12 +14,12 @@ void ensure_ui_font(HWND hwnd) {
     const UINT windowDpi = GetDpiForWindow(hwnd);
     if (windowDpi > 0) dpi = static_cast<int>(windowDpi);
   }
-  if (gUiFont && dpi == gUiDpi) return;
-  if (gUiFont) {
-    DeleteObject(gUiFont);
-    gUiFont = nullptr;
+  if (gUi.font && dpi == gUi.dpi) return;
+  if (gUi.font) {
+    DeleteObject(gUi.font);
+    gUi.font = nullptr;
   }
-  gUiDpi = dpi;
+  gUi.dpi = dpi;
   LOGFONTW lf{};
   lf.lfHeight = -MulDiv(9, dpi, 72);
   lf.lfWeight = FW_NORMAL;
@@ -27,21 +27,20 @@ void ensure_ui_font(HWND hwnd) {
   lf.lfQuality = CLEARTYPE_QUALITY;
   lf.lfPitchAndFamily = DEFAULT_PITCH | FF_DONTCARE;
   std::wcscpy(lf.lfFaceName, L"Segoe UI");
-  gUiFont = CreateFontIndirectW(&lf);
-  if (gUiTitleFont) {
-    DeleteObject(gUiTitleFont);
-    gUiTitleFont = nullptr;
+  gUi.font = CreateFontIndirectW(&lf);
+  if (gUi.titleFont) {
+    DeleteObject(gUi.titleFont);
+    gUi.titleFont = nullptr;
   }
   lf.lfHeight = -MulDiv(15, dpi, 72);
   lf.lfWeight = FW_SEMIBOLD;
-  gUiTitleFont = CreateFontIndirectW(&lf);
+  gUi.titleFont = CreateFontIndirectW(&lf);
 }
 
 // Paint-time solid brushes, cached by color. Cards used to create and destroy several
 // brushes per paint, and the picker repaints on every thumbnail arrival. UI thread only.
 std::unordered_map<COLORREF, HBRUSH>& brush_cache() {
-  static std::unordered_map<COLORREF, HBRUSH> cache;
-  return cache;
+  return gUi.brushCache;
 }
 
 HBRUSH cached_brush(COLORREF color) {
@@ -58,16 +57,16 @@ void destroy_cached_gdi_objects() {
     DeleteObject(entry.second);
   }
   brush_cache().clear();
-  if (gUiTitleFont) {
-    DeleteObject(gUiTitleFont);
-    gUiTitleFont = nullptr;
+  if (gUi.titleFont) {
+    DeleteObject(gUi.titleFont);
+    gUi.titleFont = nullptr;
   }
 }
 
 void draw_text_utf8(HDC hdc, const std::string& text, RECT* rect, UINT format) {
   if (!rect) return;
   const std::wstring wide = utf8_to_wide(text);
-  HGDIOBJ oldFont = gUiFont ? SelectObject(hdc, gUiFont) : nullptr;
+  HGDIOBJ oldFont = gUi.font ? SelectObject(hdc, gUi.font) : nullptr;
   DrawTextW(hdc, wide.c_str(), static_cast<int>(wide.size()), rect, format);
   if (oldFont) SelectObject(hdc, oldFont);
 }

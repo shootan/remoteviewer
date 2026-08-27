@@ -605,20 +605,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       const char* fallbackReason = "none";
       if (!pickerVisible && (local || localSurfaceTexture) && w > 0 && h > 0) {
         if (localFormat == SharedFrame::PixelFormat::Nv12) {
-          if (!gNv12Renderer.ready) {
-            if (!gNv12Renderer.init(hwnd)) {
+          if (!gUi.nv12Renderer.ready) {
+            if (!gUi.nv12Renderer.init(hwnd)) {
               ++gPresent.d3dPresentFailCount;
               ++gPresent.fallbackInitFailCount;
               fallbackReason = "d3d_init_fail";
             }
           }
-          if (gNv12Renderer.ready) {
+          if (gUi.nv12Renderer.ready) {
             if (localSurfaceTexture) {
-              presented = gNv12Renderer.render_surface(
+              presented = gUi.nv12Renderer.render_surface(
                   hwnd, contentRect, localSurfaceTexture.Get(), localSurfaceSubresource,
                   codedW, codedH, visL, visT, w, h, &renderTelemetry);
             } else {
-              presented = gNv12Renderer.render(hwnd, contentRect, local->data(), codedW, codedH,
+              presented = gUi.nv12Renderer.render(hwnd, contentRect, local->data(), codedW, codedH,
                                                visL, visT, w, h, &renderTelemetry);
             }
             if (presented) {
@@ -870,7 +870,7 @@ bool create_window() {
   ensure_ui_font(gSession.hwnd);
   // The process is per-monitor DPI aware, so the requested size is physical pixels; rescale
   // to keep the intended logical size on scaled displays.
-  if (gUiDpi != 96) {
+  if (gUi.dpi != 96) {
     SetWindowPos(gSession.hwnd, nullptr, 0, 0, dpi_scale(static_cast<int>(gSession.windowW)),
                  dpi_scale(static_cast<int>(gSession.windowH)), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
   }
