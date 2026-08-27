@@ -14,6 +14,7 @@
 // Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-0).
 
 #include "viewer_common.hpp"
+#include "viewer_nv12_renderer.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -329,5 +330,8 @@ extern std::atomic<bool> gForwardedKeyDown[256];
 
 extern remote60::native_poc::InputMacro gInputMacro;
 extern std::atomic<bool> gMacroButtonDown;
+
+// thread: UI only (swap chain); the decoder shares its device when the DXGI surface opt-in is on.
+extern Nv12D3dRenderer gNv12Renderer;
 
 }  // namespace remote60::native_poc::viewer

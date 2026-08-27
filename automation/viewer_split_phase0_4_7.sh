@@ -203,8 +203,8 @@ OUT=$(perl automation/viewer_split_move.pl --src "$M" --hpp $S/viewer_nv12_rende
 echo "$OUT"; R=$(ranges "$OUT")
 # the global instance joins viewer_globals (extern in the header, definition in the .cpp)
 perl -0pi -e 's{\r\nNv12D3dRenderer gNv12Renderer;\r\n}{\r\n} or die "gNv12Renderer def"' "$M"
-perl -0pi -e 's{#include "viewer_common.hpp"\r\n}{#include "viewer_common.hpp"\r\n#include "viewer_nv12_renderer.hpp"\r\n} or die "globals include"; s{\r\n\}  // namespace remote60::native_poc::viewer\r\n$}{\r\n// thread: UI only (swap chain); the decoder shares its device when the DXGI surface opt-in is on.\r\nextern Nv12D3dRenderer gNv12Renderer;\r\n\r\n}  // namespace remote60::native_poc::viewer\r\n} or die "globals hpp tail"' $S/viewer_globals.hpp
-perl -0pi -e 's{\r\n\}  // namespace remote60::native_poc::viewer\r\n$}{Nv12D3dRenderer gNv12Renderer;\r\n\r\n}  // namespace remote60::native_poc::viewer\r\n} or die "globals cpp tail"' $S/viewer_globals.cpp
+perl -0pi -e 's~#include "viewer_common.hpp"\r\n~#include "viewer_common.hpp"\r\n#include "viewer_nv12_renderer.hpp"\r\n~ or die "globals include"; s~\r\n\}  // namespace remote60::native_poc::viewer\r\n$~\r\n// thread: UI only (swap chain); the decoder shares its device when the DXGI surface opt-in is on.\r\nextern Nv12D3dRenderer gNv12Renderer;\r\n\r\n}  // namespace remote60::native_poc::viewer\r\n~ or die "globals hpp tail"' $S/viewer_globals.hpp
+perl -0pi -e 's~\r\n\}  // namespace remote60::native_poc::viewer\r\n$~Nv12D3dRenderer gNv12Renderer;\r\n\r\n}  // namespace remote60::native_poc::viewer\r\n~ or die "globals cpp tail"' $S/viewer_globals.cpp
 grep -q '^Nv12D3dRenderer gNv12Renderer;' $S/viewer_globals.cpp && grep -q '^extern Nv12D3dRenderer gNv12Renderer;' $S/viewer_globals.hpp
 add_include viewer_nv12_renderer.hpp
 check "$R" $S/viewer_nv12_renderer.hpp

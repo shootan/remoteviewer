@@ -104,5 +104,6 @@ int gUiDpi = 96;
 std::atomic<bool> gForwardedKeyDown[256]{};
 remote60::native_poc::InputMacro gInputMacro;
 std::atomic<bool> gMacroButtonDown{false};
+Nv12D3dRenderer gNv12Renderer;
 
 }  // namespace remote60::native_poc::viewer

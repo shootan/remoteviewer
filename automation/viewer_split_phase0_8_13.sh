@@ -167,7 +167,7 @@ OUT=$(perl automation/viewer_split_move.pl --src "$M" --hpp $S/viewer_picker.hpp
   --start '^void request_capture_overview_mode\(\) \{$' \
   --start '^void request_capture_focus_from_client_point\(HWND hwnd, int x, int y\) \{$')
 echo "$OUT"; R=$(ranges "$OUT")
-perl -0pi -e 's{\r\nvoid set_picker_visible_and_sync_stream\(bool visible\) \{}{\r\n// Browsing targets must not keep the host encoding (F1). The request rides the control\r\n// scheduler, which orders stream state ahead of window selection. Sent only on explicit\r\n// picker transitions: startup leaves the host\x27s default-active stream alone, so headless\r\n// harness clients that never open the picker keep receiving video unchanged.\r\nvoid set_picker_visible_and_sync_stream(bool visible) {} or die "picker comment"' $S/viewer_picker.cpp
+perl -0pi -e 's~\r\nvoid set_picker_visible_and_sync_stream\(bool visible\) \{~\r\n// Browsing targets must not keep the host encoding (F1). The request rides the control\r\n// scheduler, which orders stream state ahead of window selection. Sent only on explicit\r\n// picker transitions: startup leaves the host\x27s default-active stream alone, so headless\r\n// harness clients that never open the picker keep receiving video unchanged.\r\nvoid set_picker_visible_and_sync_stream(bool visible) {~ or die "picker comment"' $S/viewer_picker.cpp
 add_include viewer_picker.hpp; add_cmake viewer_picker.cpp
 check "$R" $S/viewer_picker.hpp $S/viewer_picker.cpp
 bash automation/viewer_split_gate.sh --e2e
