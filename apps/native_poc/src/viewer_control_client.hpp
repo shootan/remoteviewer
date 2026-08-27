@@ -43,6 +43,11 @@ class ControlClient {
   // the capability, because an older host would drain the request and never reply.
   // Returns: 1 fetched, 0 nothing to do, -1 socket failure (stream desynced).
   int fetch_one_thumbnail(remote60::native_poc::ControlLink& link);
+  // the reply switch of Run(), one member per reply kind (verbatim case bodies)
+  void handle_pong(const ControlOutboundAction& action, const ControlPongMessage& pong);
+  void handle_window_list(const ControlWindowListMessage& windowList);
+  void handle_window_selected(const ControlWindowSelectedMessage& windowSelected);
+  void handle_input_ack(const ControlInputAckMessage& inputAck);
 };
 
 }  // namespace remote60::native_poc::viewer

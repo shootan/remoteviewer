@@ -69,6 +69,116 @@ int ControlClient::fetch_one_thumbnail(remote60::native_poc::ControlLink& link) 
   return 1;
 }
 
+void ControlClient::handle_pong(const ControlOutboundAction& action, const ControlPongMessage& pong) {
+  const uint64_t doneUs = qpc_now_us();
+  gControl.scheduler.OnPingCompleted(doneUs);
+  gControl.hostCaptureTargetPid.store(pong.captureTargetPid, std::memory_order_relaxed);
+  gControl.hostCaptureTargetFlags.store(pong.captureTargetFlags, std::memory_order_relaxed);
+  gControl.hostCaptureRebindCount.store(pong.captureRebindCount, std::memory_order_relaxed);
+  gControl.hostCaptureTargetHwnd.store(pong.captureTargetHwnd, std::memory_order_relaxed);
+  gControl.hostCaptureMetaUpdatedUs.store(doneUs, std::memory_order_relaxed);
+  gControl.captureOverviewMode.store(
+      (pong.captureTargetFlags &
+       remote60::native_poc::kCaptureFlagWindowTargetEnabled) == 0,
+      std::memory_order_relaxed);
+  {
+    // Say it once per transition rather than every ping. A frozen picture with no
+    // explanation is the worst version of this; a line saying a Windows security
+    // prompt is on screen turns it into something the operator can act on.
+    const bool secure =
+        (pong.captureTargetFlags &
+         remote60::native_poc::kCaptureFlagSecureDesktopActive) != 0;
+    if (secure != gControl.reportedSecure) {
+      gControl.reportedSecure = secure;
+      std::cout << "[native-video-client] secure-desktop-active="
+                << (secure ? 1 : 0)
+                << (secure ? "  (a Windows security prompt is on screen; it "
+                             "cannot be captured, so the picture is paused)"
+                           : "  (picture resumes)")
+                << std::endl;
+    }
+  }
+  {
+    std::lock_guard<std::mutex> lk(gControl.hostCaptureMetaMu);
+    gControl.hostCaptureTargetProcess =
+        fixed_cstr_to_string(pong.captureTargetProcess, sizeof(pong.captureTargetProcess));
+    gControl.hostCaptureTargetTitle =
+        fixed_cstr_to_string(pong.captureTargetTitle, sizeof(pong.captureTargetTitle));
+  }
+  const uint64_t rttUs =
+      (doneUs >= action.ping.clientSendQpcUs) ? (doneUs - action.ping.clientSendQpcUs) : 0;
+  std::cout << "[native-video-client][control] seq=" << pong.seq
+            << " rttUs=" << rttUs
+            << " hostQueueUs=" << ((pong.hostSendQpcUs >= pong.hostRecvQpcUs)
+                                        ? (pong.hostSendQpcUs - pong.hostRecvQpcUs)
+                                        : 0)
+            << " hostCapPid=" << pong.captureTargetPid
+            << " hostCapProc=" << fixed_cstr_to_string(
+                   pong.captureTargetProcess, sizeof(pong.captureTargetProcess))
+            << " hostCapRebind=" << pong.captureRebindCount
+            << "\n";
+  // GNLink stream telemetry (diagnostics only): a periodic NTP-style clock offset
+  // (host QPC minus client QPC) plus RTT, so the seq-joined host/client logs can
+  // also be roughly aligned on an absolute timeline. Runs once per pong (~control
+  // interval); no new control traffic is introduced.
+  {
+    const int64_t t1 = static_cast<int64_t>(action.ping.clientSendQpcUs);
+    const int64_t t2 = static_cast<int64_t>(pong.hostRecvQpcUs);
+    const int64_t t3 = static_cast<int64_t>(pong.hostSendQpcUs);
+    const int64_t t4 = static_cast<int64_t>(doneUs);
+    const int64_t clockOffsetUs = ((t2 - t1) + (t3 - t4)) / 2;
+    std::ostringstream telem;
+    telem << "[native-video-client][telemetry] stage=clock"
+          << " pingSeq=" << pong.seq
+          << " rttUs=" << rttUs
+          << " clockOffsetUs=" << clockOffsetUs
+          << " clientSendUs=" << action.ping.clientSendQpcUs
+          << " hostRecvUs=" << pong.hostRecvQpcUs
+          << " hostSendUs=" << pong.hostSendQpcUs
+          << " clientRecvUs=" << doneUs;
+    log_client_line(telem.str());
+  }
+}
+
+void ControlClient::handle_window_list(const ControlWindowListMessage& windowList) {
+  apply_window_list_snapshot(windowList);
+  // The window list is where the host says whether it knows the monitor
+  // messages; asking one that does not would stall this loop waiting for a
+  // reply that never comes.
+  const bool supportsMonitors =
+      (windowList.flags &
+       remote60::native_poc::kControlWindowListFlagMonitors) != 0;
+  const bool monitorsNewlySupported =
+      gPicker.windowPanel.SetHostSupportsMonitors(supportsMonitors);
+  // The stored --monitor is auto-applied only when the session opens straight
+  // into the stream. In picker mode the user has not chosen a target yet, so
+  // selecting a monitor here would restart the host capture before any pick and
+  // fight the first-frame gate; a monitor pick is a follow-up (toolbar) action.
+  if (!startInPicker && monitorsNewlySupported && gSession.requestedMonitorId > 0) {
+    // Only when a screen other than the primary was asked for: selecting monitor
+    // zero would restart the capture for no change.
+    gPicker.windowPanel.RequestMonitorSelect(gSession.requestedMonitorId);
+  }
+  InvalidateRect(gSession.hwnd, nullptr, FALSE);
+}
+
+void ControlClient::handle_window_selected(const ControlWindowSelectedMessage& windowSelected) {
+  apply_window_selected_result(windowSelected);
+  queue_window_list_request("window_list_request pending");
+  InvalidateRect(gSession.hwnd, nullptr, FALSE);
+}
+
+void ControlClient::handle_input_ack(const ControlInputAckMessage& inputAck) {
+  const uint64_t ackCount = gControl.scheduler.RecordInputAck(args.inputLogEvery);
+  if (ackCount > 0) {
+    std::cout << "[native-video-client][input] ackSeq=" << inputAck.seq
+              << " sent=" << ackCount
+              << " dropped=" << gControl.inputQueue.dropped_count()
+              << "\n";
+  }
+}
+
+
 void ControlClient::Run() {
   // Built once, not per action: the tunnelled link carries the partially-read inbound
   // message between calls, and a fresh one each time would drop whatever it held.
@@ -157,115 +267,21 @@ void ControlClient::Run() {
 
       switch (response.kind) {
         case TcpControlResponseKind::Pong: {
-          const auto& pong = response.pong;
-          const uint64_t doneUs = qpc_now_us();
-          gControl.scheduler.OnPingCompleted(doneUs);
-          gControl.hostCaptureTargetPid.store(pong.captureTargetPid, std::memory_order_relaxed);
-          gControl.hostCaptureTargetFlags.store(pong.captureTargetFlags, std::memory_order_relaxed);
-          gControl.hostCaptureRebindCount.store(pong.captureRebindCount, std::memory_order_relaxed);
-          gControl.hostCaptureTargetHwnd.store(pong.captureTargetHwnd, std::memory_order_relaxed);
-          gControl.hostCaptureMetaUpdatedUs.store(doneUs, std::memory_order_relaxed);
-          gControl.captureOverviewMode.store(
-              (pong.captureTargetFlags &
-               remote60::native_poc::kCaptureFlagWindowTargetEnabled) == 0,
-              std::memory_order_relaxed);
-          {
-            // Say it once per transition rather than every ping. A frozen picture with no
-            // explanation is the worst version of this; a line saying a Windows security
-            // prompt is on screen turns it into something the operator can act on.
-            const bool secure =
-                (pong.captureTargetFlags &
-                 remote60::native_poc::kCaptureFlagSecureDesktopActive) != 0;
-            if (secure != gControl.reportedSecure) {
-              gControl.reportedSecure = secure;
-              std::cout << "[native-video-client] secure-desktop-active="
-                        << (secure ? 1 : 0)
-                        << (secure ? "  (a Windows security prompt is on screen; it "
-                                     "cannot be captured, so the picture is paused)"
-                                   : "  (picture resumes)")
-                        << std::endl;
-            }
-          }
-          {
-            std::lock_guard<std::mutex> lk(gControl.hostCaptureMetaMu);
-            gControl.hostCaptureTargetProcess =
-                fixed_cstr_to_string(pong.captureTargetProcess, sizeof(pong.captureTargetProcess));
-            gControl.hostCaptureTargetTitle =
-                fixed_cstr_to_string(pong.captureTargetTitle, sizeof(pong.captureTargetTitle));
-          }
-          const uint64_t rttUs =
-              (doneUs >= action.ping.clientSendQpcUs) ? (doneUs - action.ping.clientSendQpcUs) : 0;
-          std::cout << "[native-video-client][control] seq=" << pong.seq
-                    << " rttUs=" << rttUs
-                    << " hostQueueUs=" << ((pong.hostSendQpcUs >= pong.hostRecvQpcUs)
-                                                ? (pong.hostSendQpcUs - pong.hostRecvQpcUs)
-                                                : 0)
-                    << " hostCapPid=" << pong.captureTargetPid
-                    << " hostCapProc=" << fixed_cstr_to_string(
-                           pong.captureTargetProcess, sizeof(pong.captureTargetProcess))
-                    << " hostCapRebind=" << pong.captureRebindCount
-                    << "\n";
-          // GNLink stream telemetry (diagnostics only): a periodic NTP-style clock offset
-          // (host QPC minus client QPC) plus RTT, so the seq-joined host/client logs can
-          // also be roughly aligned on an absolute timeline. Runs once per pong (~control
-          // interval); no new control traffic is introduced.
-          {
-            const int64_t t1 = static_cast<int64_t>(action.ping.clientSendQpcUs);
-            const int64_t t2 = static_cast<int64_t>(pong.hostRecvQpcUs);
-            const int64_t t3 = static_cast<int64_t>(pong.hostSendQpcUs);
-            const int64_t t4 = static_cast<int64_t>(doneUs);
-            const int64_t clockOffsetUs = ((t2 - t1) + (t3 - t4)) / 2;
-            std::ostringstream telem;
-            telem << "[native-video-client][telemetry] stage=clock"
-                  << " pingSeq=" << pong.seq
-                  << " rttUs=" << rttUs
-                  << " clockOffsetUs=" << clockOffsetUs
-                  << " clientSendUs=" << action.ping.clientSendQpcUs
-                  << " hostRecvUs=" << pong.hostRecvQpcUs
-                  << " hostSendUs=" << pong.hostSendQpcUs
-                  << " clientRecvUs=" << doneUs;
-            log_client_line(telem.str());
-          }
+          handle_pong(action, response.pong);
           break;
         }
         case TcpControlResponseKind::WindowList: {
-          apply_window_list_snapshot(response.windowList);
-          // The window list is where the host says whether it knows the monitor
-          // messages; asking one that does not would stall this loop waiting for a
-          // reply that never comes.
-          const bool supportsMonitors =
-              (response.windowList.flags &
-               remote60::native_poc::kControlWindowListFlagMonitors) != 0;
-          const bool monitorsNewlySupported =
-              gPicker.windowPanel.SetHostSupportsMonitors(supportsMonitors);
-          // The stored --monitor is auto-applied only when the session opens straight
-          // into the stream. In picker mode the user has not chosen a target yet, so
-          // selecting a monitor here would restart the host capture before any pick and
-          // fight the first-frame gate; a monitor pick is a follow-up (toolbar) action.
-          if (!startInPicker && monitorsNewlySupported && gSession.requestedMonitorId > 0) {
-            // Only when a screen other than the primary was asked for: selecting monitor
-            // zero would restart the capture for no change.
-            gPicker.windowPanel.RequestMonitorSelect(gSession.requestedMonitorId);
-          }
-          InvalidateRect(gSession.hwnd, nullptr, FALSE);
+          handle_window_list(response.windowList);
           break;
         }
         case TcpControlResponseKind::MonitorList:
           gPicker.windowPanel.ApplyMonitorList(response.monitorList);
           break;
         case TcpControlResponseKind::WindowSelected:
-          apply_window_selected_result(response.windowSelected);
-          queue_window_list_request("window_list_request pending");
-          InvalidateRect(gSession.hwnd, nullptr, FALSE);
+          handle_window_selected(response.windowSelected);
           break;
         case TcpControlResponseKind::InputAck: {
-          const uint64_t ackCount = gControl.scheduler.RecordInputAck(args.inputLogEvery);
-          if (ackCount > 0) {
-            std::cout << "[native-video-client][input] ackSeq=" << response.inputAck.seq
-                      << " sent=" << ackCount
-                      << " dropped=" << gControl.inputQueue.dropped_count()
-                      << "\n";
-          }
+          handle_input_ack(response.inputAck);
           break;
         }
         case TcpControlResponseKind::None:
