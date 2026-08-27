@@ -37,7 +37,8 @@ verify_gone() {  # $1 mapfile $2 file: no old bare identifier left (not after . 
   local old new bad=0
   while IFS=$'\t' read -r old new; do
     # perl, because this grep's -P refuses the CP949 locale; comment-only lines are ignored
-    if OLD="$old" perl -ne 'print "$.: $_" if /(?<![.\w>:])\Q$ENV{OLD}\E\b/ && !/^\s*\/\//' "$2" | grep . ; then echo "still referenced: $old"; bad=1; fi
+    # string literals (the log labels " recvFrames=" etc.) are stripped before the test
+    if OLD="$old" perl -ne '(my $c = $_) =~ s/"(?:[^"\\]|\\.)*"//g; print "$.: $_" if $c =~ /(?<![.\w>:])\Q$ENV{OLD}\E\b/ && $c !~ /^\s*\/\//' "$2" | grep . ; then echo "still referenced: $old"; bad=1; fi
   done < "$1"
   [ $bad -eq 0 ]
 }
