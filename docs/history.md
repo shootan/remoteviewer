@@ -7372,3 +7372,20 @@ Next action
   초기화/CLI·셸 계약).
 - 검증: 없음(분석/문서). 빌드/코드 변경 없음.
 - 다음 액션: 사전 단계(태그/브랜치, `automation/viewer_split_e2e.sh` 기준선 C-1/2/3) → Phase 0-0 `viewer_globals.hpp/.cpp`.
+
+### 307) 2026-08-27 뷰어 리팩터 발견사항 원장 신설 — 기록만, 수정은 리팩터 후 (문서만, 코드 변경 없음)
+
+- 사용자 결정: 뷰어 분할 리팩터는 계획대로 진행하되, 진행 중 코드를 읽다가 **잘못 구현된 곳·고도화가 필요한 곳을 발견하면
+  고치지 않고 별도 문서에 기록**, 리팩터 완료 후 그 문서에서 골라 작업한다.
+- 문서: `docs/뷰어_리팩터_발견사항.md` 신설 — 규칙 4개(발견 즉시 기록·history에 "발견 → F-NN"·완료 후 별도 커밋·구조적 해소
+  항목은 Phase 표시) + 분류 6종 + 발견 목록 표. 분석(e346ff7) 시점에 grep으로 확인한 시드 15건: F-01 디렉터리 경로에서
+  handshake/connected 로그가 `args.host/port`(resolvedArgs 아님) · F-02 raw 경로 1s 통계 분모 recvFrames vs h264 decodedFrames ·
+  F-03 write-only 전역(gHostCaptureTarget* 7 + mu, gCaptureOverviewMode, gOverlayConfig, gOverlayMetrics push만) · F-04 미사용
+  함수 4 + 상수 5(리터럴 중복; 계획 0-14 이관) · F-05 WM_LBUTTONUP 스트림 뷰 도달 불가 분기 · F-06 gControlConnected 기동 순서
+  (이론상) · F-07 control 스레드의 layout 계산/InvalidateRect · F-08 통계 블록 5회 복제(Phase 2-1 해소) · F-09 ClientSessionController
+  이중 구현 · F-10 SyntheticRefresh(HANDOFF 부채) · F-11 paced playout(P3) · F-12 decoder backend env 매 init getenv+들여쓰기 ·
+  F-13 recv 스레드 --seconds 검사 위치 · F-14 함수 static 9개 리셋 없음 · F-15 atomics 군집(§7.1 b).
+- 계획서 갱신: 머리 정책 줄, §2 원칙 13(발견은 기록, 수정은 나중에), 0-14 dead code 삭제를 원장 F-04로 이관(Phase 0 15커밋),
+  §11 결정표, §12 기록 절차 신설. `구현계획.md` 체크리스트 1줄 추가·Phase 0 줄 수정, `HANDOFF.md` 코드 지도, `README.md` 목록.
+- 검증: 없음(문서). 빌드/코드 변경 없음.
+- 다음 액션: 변동 없음 — 사전 단계(태그/브랜치, viewer_split_e2e.sh 기준선) → Phase 0-0.
