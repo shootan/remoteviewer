@@ -7674,3 +7674,19 @@ Next action
   함께 닫는 것이 자연스럽다.
 - 검증: 전 타깃 빌드 0 에러 + host_udp_e2e **두 leg** ALL PASS(각 18 체크 + host 로그 4건) + 단위테스트 22종 PASS.
 - 다음 액션: 실기 확인. 그 뒤 H-24 / H-25 / H-27 / 검증 부채.
+
+### 321) 2026-08-28 631882d 실기 승인 + forceKeyNext 해제 시점 문구 정정 (브랜치 refactor/viewer-split, c1dc455)
+
+- 코덱스가 `631882d`를 최종 재검증해 **실기 설치본 대상으로 승인**했다. 잔여 High B는 닫혔고,
+  두-leg harness가 별도 포트/프로세스/로그로 독립 실행·판정하는 것과 `@@` separator 파싱,
+  FAILED 누적·최종 exit도 정상으로 확인됐다. `units.empty` fault injection 부재는 주석과 원장에
+  정확히 남아 있어 실기 blocker가 아니라는 판정.
+- Low 지적 하나 반영: 내 주석이 "키가 wire에 도달하면 forceKeyNext clear"라고 썼는데 실제로는
+  key AU가 **send path에 accept될 때** clear다(UDP는 sender 큐 enqueue 이후, TCP는 write 이후).
+  clear 지점에도 그 약한 조건이 왜 안전한지 적었다 — key AU는 항상 EnqueueKey 분기를 타므로 위의
+  `!enqueuedForSend` early-out이 키를 삼키지 않고, 이후 UDP 송신 실패는 배리어 재무장 +
+  RequestKeyframe{SenderBarrier}로 덮인다.
+- 코덱스 교차검증이 확인한 커밋: `779390e` / `4aaa451` / `a67522f` / `cf9d684` / `e545cd6` /
+  `854b58f` / `631882d`. 나머지는 자체 게이트(빌드 + 두-leg e2e + 단위테스트 22종)만 통과한 상태.
+- 검증: 빌드 0 에러 + host_udp_e2e 두 leg ALL PASS + 단위테스트 22종 PASS. 주석만 변경.
+- 다음 액션: **실기 확인**(설치본 빌드 → 사용자 판정). 그 뒤 H-24 / H-25 / H-27 / 검증 부채.
