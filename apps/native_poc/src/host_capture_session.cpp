@@ -271,6 +271,9 @@ void CaptureState::DetachCaptureSession(CaptureResources& res, winrt::event_toke
   // attachment before we tear the pool down: bumping the cookie makes that in-flight work drop
   // instead of being published under the post-recreate target/geometry/generation.
   capture.attachmentCookie.fetch_add(1, std::memory_order_acq_rel);
+  // Re-read the console session with the new cookie: the next attachment's frames are stamped
+  // from here instead of paying a syscall per publish. (Ledger H-18.)
+  capture.attachedConsoleSessionId.store(WTSGetActiveConsoleSessionId(), std::memory_order_release);
   capture.sessionReady.store(false, std::memory_order_release);
   if (capture.dxgiStarted) {
     dxgiCaptureSession.Stop();
@@ -718,7 +721,8 @@ void CaptureState::PublishFrame(CaptureResources& res, HostStats& stats,
     capture.bootstrapCache.targetPid = capture.targetPid.load(std::memory_order_acquire);
     capture.bootstrapCache.srcCaptureWidth = meta.width;
     capture.bootstrapCache.srcCaptureHeight = meta.height;
-    capture.bootstrapCache.consoleSessionId = WTSGetActiveConsoleSessionId();
+    capture.bootstrapCache.consoleSessionId =
+        capture.attachedConsoleSessionId.load(std::memory_order_acquire);
   }
   uint64_t currentVersion = 0;
   {

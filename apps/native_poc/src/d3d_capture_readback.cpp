@@ -601,6 +601,15 @@ bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrame
 }
 
 void D3dCaptureReadbackPipeline::WorkerLoop() {
+  // Backoff for the "copies in flight, none finished yet" case. The CV predicate is true while
+  // anything is GpuPending, so waiting on it returns immediately and the loop would otherwise
+  // re-take the context lock every 500us -- ~2000 acquisitions a second contending with the
+  // capture callback's CopyResource and the GPU scaler. Start at the old 500us so a ready frame
+  // is still picked up promptly, then back off to 2ms while nothing completes, and reset the
+  // moment one does. (Ledger H-17.)
+  constexpr auto kPollMinUs = std::chrono::microseconds(500);
+  constexpr auto kPollMaxUs = std::chrono::microseconds(2000);
+  auto pollBackoff = kPollMinUs;
   while (running_.load(std::memory_order_acquire)) {
     Slot slotCopy;
     Slot* slotRef = nullptr;
@@ -626,8 +635,12 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
           if (slots_[i].state != SlotState::GpuPending || !slots_[i].query) continue;
           seq[i] = slots_[i].submitSeq;
           BOOL done = FALSE;
-          const HRESULT hr =
-              context_->GetData(slots_[i].query.Get(), &done, sizeof(done), 0);
+          // DONOTFLUSH: Submit already calls Flush() right after End(query), so the copy is on
+          // the GPU by the time we poll. Without the flag every poll is allowed to flush the
+          // context -- and this loop polls while holding the immediate-context lock the capture
+          // callback needs to submit the NEXT frame. (Ledger H-17.)
+          const HRESULT hr = context_->GetData(slots_[i].query.Get(), &done, sizeof(done),
+                                               D3D11_ASYNC_GETDATA_DONOTFLUSH);
           ready[i] = (hr == S_OK && done);
           if (FAILED(hr) && hr != S_FALSE) {
             // Device loss: this query will never signal. Free the slot instead of leaving it
@@ -656,9 +669,11 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
         // Copies are in flight but the GPU has not finished any; the CV predicate would
         // return immediately, so yield briefly instead of spinning on GetData.
         lk.unlock();
-        std::this_thread::sleep_for(std::chrono::microseconds(500));
+        std::this_thread::sleep_for(pollBackoff);
+        pollBackoff = (pollBackoff * 2 > kPollMaxUs) ? kPollMaxUs : pollBackoff * 2;
         continue;
       }
+      pollBackoff = kPollMinUs;  // something completed; poll eagerly again
       for (size_t i = 0; i < slots_.size(); ++i) {
         if (i != pick && ready[i]) {
           // A superseded frame's NV12 slot would otherwise leak busy forever.

@@ -174,6 +174,14 @@ struct CaptureState {
   // Attachment cookie: bumped by detach_capture_session() before any pool recreate so a callback or
   // readback that began under the previous attachment drops its frame.
   std::atomic<uint64_t> attachmentCookie{1};
+  // WTS console session this attachment belongs to, stamped alongside the cookie. The bootstrap
+  // cache records it per frame so a kick can refuse to repaint pixels captured in a different
+  // console session (fast user switch / lock). It is stamped at attach rather than queried per
+  // publish because WTSGetActiveConsoleSessionId is a syscall and the publish path runs at up to
+  // 60Hz -- and it used to run inside bootstrapCacheMu, holding the lock across it. A switch
+  // while attached tears the capture down and re-attaches, which re-stamps; until then the stale
+  // stamp fails the live comparison in KickTryFill, which is the safe direction. (Ledger H-18.)
+  std::atomic<uint32_t> attachedConsoleSessionId{0};
   // WGC ContentSize gate (callback records the mismatch; main settles then recreates the pool).
   std::atomic<uint32_t> wgcContentSizeMismatchPending{0};
   std::atomic<uint32_t> wgcPendingContentW{0};
