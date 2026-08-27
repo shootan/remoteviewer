@@ -39,6 +39,21 @@
 
 namespace remote60::native_poc::viewer {
 
+// What the host's WindowSelected ack did to the in-flight selection (ApplyAck).
+enum class SelectionAck : uint8_t {
+  NotPending = 0,  // no PC-side selection tracked (legacy stream-view session): caller's old path
+  Acked = 1,       // the transaction now waits for the first frame of its generation
+  Failed = 2,      // the caller stops the speculative stream and clears the transaction
+};
+
+// Whether a decoded frame of a given stream generation may be presented (AdmitGeneration).
+enum class SelectionAdmit : uint8_t {
+  Accept = 0,
+  DropAwaitingAck = 1,       // no ack yet: old target or an unconfirmed guess
+  DropWrongGeneration = 2,   // the previous target's stream still draining after the ack
+  DropStraggler = 3,         // after a reveal, not the active target's generation
+};
+
 struct SelectionGateState {
   // cross-thread: UI/control write, recv reads.
   std::atomic<bool> pending{false};
@@ -50,6 +65,18 @@ struct SelectionGateState {
   std::atomic<uint64_t> readyGeneration{0};
   std::atomic<uint64_t> readyEpoch{0};
   std::atomic<bool> revealPosted{false};
+
+  // The transitions (viewer_selection_gate.cpp), each the atomic sequence the former free function
+  // or inline block performed, in the same order. Time-free, so viewer_selection_gate_test drives them.
+  void Begin();                                            // UI: a pick was accepted for sending
+  void Clear();                                            // any thread: drop the in-flight transaction
+  SelectionAck ApplyAck(bool ok, uint64_t streamGeneration);   // control: the host's WindowSelected
+  bool EpochChanged(uint64_t& seenEpoch);                  // recv: a new pick since the last frame (reset the decoder)
+  SelectionAdmit AdmitGeneration(uint64_t streamGeneration) const;  // recv: may this frame be presented
+  bool AckedSelectionPending() const;                      // recv: a first frame would complete the transaction
+  bool RecordReveal(uint64_t readyGeneration, uint64_t readyEpoch);  // recv: record the candidate; true = post once
+  bool CommitReveal();                                     // UI: revalidate the posted candidate; true = commit
+  void ReleaseRevealLatch();                               // UI: after handling the post, allow a re-post
 };
 
 }  // namespace remote60::native_poc::viewer

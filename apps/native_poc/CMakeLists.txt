@@ -148,6 +148,7 @@ target_link_libraries(remote60_secure_input_service PRIVATE
 add_executable(remote60_native_video_client_poc
   src/native_video_client_main.cpp
   src/viewer_globals.cpp
+  src/viewer_selection_gate.cpp
   src/viewer_frame_gate.cpp
   src/viewer_control_client.cpp
   src/viewer_video_receiver.cpp
@@ -459,6 +460,14 @@ add_executable(remote60_viewer_frame_gate_test
 )
 target_include_directories(remote60_viewer_frame_gate_test PRIVATE src)
 target_link_libraries(remote60_viewer_frame_gate_test PRIVATE common)
+
+# Viewer split refactor T2: the PC-side target-selection gate (begin / ack / frame admission / reveal race).
+add_executable(remote60_viewer_selection_gate_test
+  src/viewer_selection_gate.cpp
+  src/viewer_selection_gate_test.cpp
+)
+target_include_directories(remote60_viewer_selection_gate_test PRIVATE src)
+target_link_libraries(remote60_viewer_selection_gate_test PRIVATE common)
 
 add_executable(remote60_bind_port_candidates_test
   src/bind_port_candidates_test.cpp

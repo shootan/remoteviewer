@@ -28,22 +28,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       PostQuitMessage(0);
       return 0;
     case kMsgRevealStreamView: {
-      // The video thread saw the first frame of a selection and posted this once. Revalidate
-      // against the live selection state before committing: a cancel / new selection / disconnect
-      // may have raced the post, and closing the picker then would be wrong. Require that the same
-      // transaction is still pending, its ack is in, and the recorded epoch and generation still
-      // match. Always release the latch at the end so a later legitimate first frame can re-post.
-      const bool commit =
-          gSel.pending.load(std::memory_order_acquire) &&
-          !gSel.awaitingAck.load(std::memory_order_acquire) &&
-          gSel.epoch.load(std::memory_order_acquire) ==
-              gSel.readyEpoch.load(std::memory_order_acquire) &&
-          gSel.expectedGeneration.load(std::memory_order_acquire) ==
-              gSel.readyGeneration.load(std::memory_order_acquire);
-      if (commit) {
-        // Persistent filter for late stragglers from the previous target (see the recv gate).
-        gSel.activeStreamGeneration.store(gSel.readyGeneration.load(std::memory_order_acquire),
-                                      std::memory_order_release);
+      // The video thread saw the first frame of a selection and posted this once; CommitReveal
+      // revalidates against the live selection state (see viewer_selection_gate.cpp).
+      if (gSel.CommitReveal()) {
         // Dropping the picker guard opens both the paint path and the input guard (input handlers
         // early-return while the picker is up); clearing pending re-enables the picker's buttons.
         gPicker.visible.store(false, std::memory_order_relaxed);
@@ -52,7 +39,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         push_session_toolbar_state();
         InvalidateRect(hwnd, nullptr, FALSE);
       }
-      gSel.revealPosted.store(false, std::memory_order_release);
+      gSel.ReleaseRevealLatch();
       return 0;
     }
     // The toolbar is a window of its own, so it does not move with this one for free.

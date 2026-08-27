@@ -1,0 +1,37 @@
+#!/usr/bin/perl
+# Viewer split refactor Phase 2-5: the selection-gate atomics sequences in viewer_picker.cpp,
+# viewer_window_proc.cpp and viewer_video_receiver_frame.cpp become SelectionGateState members
+# (viewer_selection_gate.cpp). Exact anchors; a miss dies before any file is written.
+use strict;
+use warnings;
+my $S = 'apps/native_poc/src';
+sub slurp { my ($f) = @_; open(my $h, '<:raw', $f) or die "open $f: $!"; local $/; my $s = <$h>; close $h; $s =~ s/\r\n/\n/g; return $s; }
+sub spew  { my ($f, $s) = @_; $s =~ s/\r?\n/\r\n/g; open(my $h, '>:raw', $f) or die "write $f: $!"; print $h $s; close $h; }
+sub must  { my ($ok, $what) = @_; die "anchor failed: $what\n" unless $ok; print "ok: $what\n"; }
+
+# ---- viewer_picker.cpp ----
+my $P = slurp("$S/viewer_picker.cpp");
+must($P =~ s/(void clear_pc_target_selection\(\) \{\n)  gSel\.pending\.store\(false, std::memory_order_release\);\n  gSel\.awaitingAck\.store\(false, std::memory_order_release\);\n  gSel\.expectedGeneration\.store\(0, std::memory_order_release\);\n/$1  gSel.Clear();\n/, 'picker clear');
+must($P =~ s/  gSel\.expectedGeneration\.store\(0, std::memory_order_release\);\n  gSel\.awaitingAck\.store\(true, std::memory_order_release\);\n  gSel\.pending\.store\(true, std::memory_order_release\);\n  \/\/ Bumped so the receive loop resets the decoder and holds for the new generation's keyframe\.\n  gSel\.epoch\.fetch_add\(1, std::memory_order_acq_rel\);\n/  gSel.Begin();\n/, 'picker begin');
+must($P =~ s/(void post_pc_selection_reveal\(uint64_t readyGeneration, uint64_t readyEpoch\) \{\n)  gSel\.readyGeneration\.store\(readyGeneration, std::memory_order_release\);\n  gSel\.readyEpoch\.store\(readyEpoch, std::memory_order_release\);\n  bool expected = false;\n  if \(gSel\.revealPosted\.compare_exchange_strong\(expected, true, std::memory_order_acq_rel\)\) \{\n/$1  if (gSel.RecordReveal(readyGeneration, readyEpoch)) {\n/, 'picker post reveal');
+must($P =~ s/  if \(gSel\.pending\.load\(std::memory_order_acquire\)\) \{\n    if \(result\.ok\) \{\n      \/\/ Ack received: hold the picker up until the first frame of this generation is presented\.\n      \/\/ Do NOT hide the picker here -- that is what the first-frame gate is for\.\n      gSel\.expectedGeneration\.store\(msg\.streamGeneration, std::memory_order_release\);\n      gSel\.awaitingAck\.store\(false, std::memory_order_release\);\n      gPicker\.windowPanel\.SetStatus\("waiting_first_frame"\);\n    \} else \{\n      \/\/ Select failed: stop the stream we speculatively started, keep the picker, allow a retry\.\n      gControl\.streamState\.Request\(false\);\n      clear_pc_target_selection\(\);\n    \}\n    if \(gSession\.hwnd\) InvalidateRect\(gSession\.hwnd, nullptr, FALSE\);\n    return;\n  \}\n/  switch (gSel.ApplyAck(result.ok, msg.streamGeneration)) {\n    case SelectionAck::Acked:\n      gPicker.windowPanel.SetStatus("waiting_first_frame");\n      if (gSession.hwnd) InvalidateRect(gSession.hwnd, nullptr, FALSE);\n      return;\n    case SelectionAck::Failed:\n      \/\/ Select failed: stop the stream we speculatively started, keep the picker, allow a retry.\n      gControl.streamState.Request(false);\n      clear_pc_target_selection();\n      if (gSession.hwnd) InvalidateRect(gSession.hwnd, nullptr, FALSE);\n      return;\n    case SelectionAck::NotPending:\n      break;\n  }\n/, 'picker apply ack');
+spew("$S/viewer_picker.cpp", $P);
+
+# ---- viewer_window_proc.cpp ----
+my $W = slurp("$S/viewer_window_proc.cpp");
+must($W =~ s/    case kMsgRevealStreamView: \{\n      \/\/ The video thread saw the first frame of a selection and posted this once\. Revalidate\n      \/\/ against the live selection state before committing: a cancel \/ new selection \/ disconnect\n      \/\/ may have raced the post, and closing the picker then would be wrong\. Require that the same\n      \/\/ transaction is still pending, its ack is in, and the recorded epoch and generation still\n      \/\/ match\. Always release the latch at the end so a later legitimate first frame can re-post\.\n      const bool commit =\n          gSel\.pending\.load\(std::memory_order_acquire\) &&\n          !gSel\.awaitingAck\.load\(std::memory_order_acquire\) &&\n          gSel\.epoch\.load\(std::memory_order_acquire\) ==\n              gSel\.readyEpoch\.load\(std::memory_order_acquire\) &&\n          gSel\.expectedGeneration\.load\(std::memory_order_acquire\) ==\n              gSel\.readyGeneration\.load\(std::memory_order_acquire\);\n      if \(commit\) \{\n        \/\/ Persistent filter for late stragglers from the previous target \(see the recv gate\)\.\n        gSel\.activeStreamGeneration\.store\(gSel\.readyGeneration\.load\(std::memory_order_acquire\),\n                                      std::memory_order_release\);\n/    case kMsgRevealStreamView: {\n      \/\/ The video thread saw the first frame of a selection and posted this once; CommitReveal\n      \/\/ revalidates against the live selection state (see viewer_selection_gate.cpp).\n      if (gSel.CommitReveal()) {\n/, 'wndproc commit');
+must($W =~ s/      gSel\.revealPosted\.store\(false, std::memory_order_release\);\n      return 0;\n    \}\n/      gSel.ReleaseRevealLatch();\n      return 0;\n    }\n/, 'wndproc release latch');
+spew("$S/viewer_window_proc.cpp", $W);
+
+# ---- viewer_video_receiver_frame.cpp ----
+my $R = slurp("$S/viewer_video_receiver_frame.cpp");
+must($R =~ s/    if \(gSel\.epoch\.load\(std::memory_order_acquire\) != dec\.recvSelectionEpoch\) \{\n      \/\/ A fresh pick: drop stale reference frames and hold for the new generation's keyframe\.\n      dec\.recvSelectionEpoch = gSel\.epoch\.load\(std::memory_order_acquire\);\n      dec\.decoder\.reset\(\);\n      gate\.waitForKeyFrame = true;\n    \}\n    if \(gSel\.pending\.load\(std::memory_order_acquire\)\) \{\n.*?      const uint64_t activeGen = gSel\.activeStreamGeneration\.load\(std::memory_order_acquire\);\n      if \(activeGen != 0 && h\.streamGeneration != activeGen\) \{\n        \+\+st\.skippedQueued;\n        return true;\n      \}\n    \}\n/    if (gSel.EpochChanged(dec.recvSelectionEpoch)) {\n      \/\/ A fresh pick: drop stale reference frames and hold for the new generation's keyframe.\n      dec.decoder.reset();\n      gate.waitForKeyFrame = true;\n    }\n    if (gSel.AdmitGeneration(h.streamGeneration) != SelectionAdmit::Accept) {\n      ++st.skippedQueued;\n      return true;\n    }\n/s, 'receiver admit');
+must($R =~ s/    if \(gSel\.pending\.load\(std::memory_order_acquire\) &&\n        !gSel\.awaitingAck\.load\(std::memory_order_acquire\)\) \{\n      post_pc_selection_reveal\(/    if (gSel.AckedSelectionPending()) {\n      post_pc_selection_reveal(/, 'receiver reveal');
+spew("$S/viewer_video_receiver_frame.cpp", $R);
+
+# ---- CMake: the new translation unit + the T2 test target ----
+my $C = slurp('apps/native_poc/CMakeLists.txt');
+must($C =~ s/(  src\/viewer_globals\.cpp\n)/$1  src\/viewer_selection_gate.cpp\n/, 'cmake viewer source');
+must($C =~ s/(target_link_libraries\(remote60_viewer_frame_gate_test PRIVATE common\)\n)/$1\n# Viewer split refactor T2: the PC-side target-selection gate (begin \/ ack \/ frame admission \/ reveal race).\nadd_executable(remote60_viewer_selection_gate_test\n  src\/viewer_selection_gate.cpp\n  src\/viewer_selection_gate_test.cpp\n)\ntarget_include_directories(remote60_viewer_selection_gate_test PRIVATE src)\ntarget_link_libraries(remote60_viewer_selection_gate_test PRIVATE common)\n/, 'cmake T2');
+spew('apps/native_poc/CMakeLists.txt', $C);
+print "done\n";

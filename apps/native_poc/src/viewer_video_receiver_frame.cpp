@@ -169,36 +169,14 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
     // Target-selection gate (mobile parity, Android commit 4892dea). While the user's pick is
     // resolving, keep the picker up and present nothing until the acknowledged generation's
     // first frame decodes.
-    if (gSel.epoch.load(std::memory_order_acquire) != dec.recvSelectionEpoch) {
+    if (gSel.EpochChanged(dec.recvSelectionEpoch)) {
       // A fresh pick: drop stale reference frames and hold for the new generation's keyframe.
-      dec.recvSelectionEpoch = gSel.epoch.load(std::memory_order_acquire);
       dec.decoder.reset();
       gate.waitForKeyFrame = true;
     }
-    if (gSel.pending.load(std::memory_order_acquire)) {
-      if (gSel.awaitingAck.load(std::memory_order_acquire)) {
-        // No ack yet: every frame here is either the old target or an unconfirmed guess.
-        ++st.skippedQueued;
-        return true;
-      }
-      const uint64_t expectedGen = gSel.expectedGeneration.load(std::memory_order_acquire);
-      if (expectedGen != 0 && h.streamGeneration != expectedGen) {
-        // The previous target's stream still draining after the ack; not what we selected.
-        ++st.skippedQueued;
-        return true;
-      }
-    } else {
-      // No selection in flight. After a reveal, only the active target's generation is welcome:
-      // a late straggler from the previously selected target, still in flight on the wire, would
-      // otherwise flash on screen. gSel.activeStreamGeneration==0 means no PC-side selection has
-      // taken effect (legacy stream-view start, or before the first pick), so accept anything as
-      // before. Host auto-resolution changes keep the same generation, so this does not fight
-      // them -- only a host-side target selection bumps the generation.
-      const uint64_t activeGen = gSel.activeStreamGeneration.load(std::memory_order_acquire);
-      if (activeGen != 0 && h.streamGeneration != activeGen) {
-        ++st.skippedQueued;
-        return true;
-      }
+    if (gSel.AdmitGeneration(h.streamGeneration) != SelectionAdmit::Accept) {
+      ++st.skippedQueued;
+      return true;
     }
 
     if (!dec.decoderReady || dec.decoderW != h.width || dec.decoderH != h.height) {
@@ -341,8 +319,7 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
     // belongs to the selected generation; record the candidate and post the reveal once. The
     // picker flip, input guard and toolbar are committed on the UI thread (after revalidation),
     // not here, so a racing cancel/new-selection/disconnect cannot wrongly close the picker.
-    if (gSel.pending.load(std::memory_order_acquire) &&
-        !gSel.awaitingAck.load(std::memory_order_acquire)) {
+    if (gSel.AckedSelectionPending()) {
       post_pc_selection_reveal(h.streamGeneration,
                                gSel.epoch.load(std::memory_order_acquire));
     }
