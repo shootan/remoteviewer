@@ -35,11 +35,13 @@
 
 #include <atomic>
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "directory_client.hpp"
+#include "host_command_line.hpp"
 #include "product_version.hpp"
 
 #pragma comment(lib, "comctl32.lib")
@@ -48,6 +50,7 @@
 namespace {
 
 namespace directory = remote60::native_poc::directory;
+using remote60::native_poc::build_windows_command_line;
 
 constexpr wchar_t kWindowClass[] = L"Remote60HostApp";
 constexpr UINT kTrayMessage = WM_APP + 1;
@@ -158,6 +161,20 @@ std::wstring log_file_path() {
   CreateDirectoryW(dir.c_str(), nullptr);
   return dir + L"\\host_app.log";
 }
+
+// Everything the sign-in worker produces, handed to the UI thread by value. Deliberately plain
+// data: the worker must not reach into shared state, and the UI thread is the only writer of
+// g.cache. (Ledger H-07.)
+struct SignInResult {
+  bool ok = false;
+  std::string url;
+  std::string account;
+  std::string hostName;
+  std::string machineId;
+  std::string hostId;
+  std::string hostToken;
+  std::wstring error;
+};
 
 // ---------------------------------------------------------------- streaming child
 
@@ -362,12 +379,17 @@ class StreamingHostProcess {
       // way they filter 443 -- but nothing dials it yet, because the directory publishes exactly
       // one address. Making both reachable is N5's job, and until it lands the friendlier port
       // can only be reached by someone who already knows to ask for it.
-      std::wstring command = L"\"" + exe + L"\"" +
-                             L" --transport udp --codec h264 --bind-port 43000,3478" +
-                             L" --control-port 43001" +
-                             L" --directory-url \"" + directoryUrl_ + L"\"" +
-                             L" --directory-id \"" + accountId_ + L"\"" +
-                             L" --host-name \"" + hostName_ + L"\"";
+      // Built from argument VALUES, not string concatenation. hostName_ comes from an edit box
+      // and the URL / account id are user input as well; a value containing a quote used to break
+      // the argument boundary and inject or corrupt the child's options. (Ledger H-20.)
+      const std::wstring command = build_windows_command_line(
+          exe, {L"--transport", L"udp",
+                L"--codec", L"h264",
+                L"--bind-port", L"43000,3478",
+                L"--control-port", L"43001",
+                L"--directory-url", directoryUrl_,
+                L"--directory-id", accountId_,
+                L"--host-name", hostName_});
 
       // The child's stdout is the only place the directory result is reported, so it is piped
       // back here rather than discarded.
@@ -415,7 +437,9 @@ class StreamingHostProcess {
                             : "[host-app] starting the streaming host (tune=low_latency)");
       const uint64_t spawnTickMs = GetTickCount64();
 
-      if (!CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, TRUE,
+      // lpApplicationName names the exe by path, so the child is chosen outright instead of by
+      // parsing the first token of the command line. (Ledger H-20.)
+      if (!CreateProcessW(exe.c_str(), mutableCommand.data(), nullptr, nullptr, TRUE,
                           CREATE_NO_WINDOW, nullptr, executable_dir().c_str(), &si, &pi)) {
         if (readEnd) CloseHandle(readEnd);
         if (writeEnd) CloseHandle(writeEnd);
@@ -816,28 +840,30 @@ void perform_sign_in() {
   EnableWindow(g.signInButton, FALSE);
 
   // Off the UI thread: this makes a network round trip and the window must stay responsive.
+  //
+  // The worker produces a value and nothing else. It used to write g.cache's std::strings
+  // directly -- directoryUrl / accountId / machineId / hostName / hostId / hostToken -- while the
+  // UI thread read the same strings from the status timer, the tray tip and start_streaming().
+  // That is a data race on std::string, not just a stale read, and it was not covered by the
+  // "don't touch windows from a worker" rule the old comment stated. Now the UI thread performs
+  // every g.cache write and the disk save, in the WM_APP+2 handler. (Ledger H-07.)
   std::thread([url, account, password, hostName, creating, signupKey]() {
-    std::string hostId, token, error;
+    auto* result = new SignInResult{};
+    result->url = url;
+    result->account = account;
+    result->hostName = hostName;
+    std::string error;
     if (creating && !directory::create_account(url, account, password, signupKey, &error)) {
-      PostMessageW(g.window, WM_APP + 2, 0,
-                   reinterpret_cast<LPARAM>(new std::wstring(widen(error))));
+      result->error = widen(error);
+      PostMessageW(g.window, WM_APP + 2, 0, reinterpret_cast<LPARAM>(result));
       return;
     }
-    const bool ok = directory::register_host(url, account, password, hostName,
-                                             directory::machine_id(), &hostId, &token, &error);
-    if (ok) {
-      g.cache.directoryUrl = url;
-      g.cache.accountId = account;
-      g.cache.machineId = directory::machine_id();
-      g.cache.hostName = hostName;
-      g.cache.hostId = hostId;
-      g.cache.hostToken = token;
-      // Only the token is written; the password never reaches disk.
-      (void)directory::save_host_cache(g.cachePath, g.cache);
-    }
-    // Hand the result back to the UI thread rather than touching windows from here.
-    PostMessageW(g.window, WM_APP + 2, ok ? 1 : 0,
-                 reinterpret_cast<LPARAM>(new std::wstring(widen(error))));
+    result->ok = directory::register_host(url, account, password, hostName,
+                                          directory::machine_id(), &result->hostId,
+                                          &result->hostToken, &error);
+    result->machineId = directory::machine_id();
+    result->error = widen(error);
+    PostMessageW(g.window, WM_APP + 2, result->ok ? 1 : 0, reinterpret_cast<LPARAM>(result));
   }).detach();
 }
 
@@ -1268,19 +1294,28 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
     }
 
     case WM_APP + 2: {
-      // Sign-in result, marshalled back from the worker thread.
-      std::wstring* error = reinterpret_cast<std::wstring*>(lParam);
+      // Sign-in result, marshalled back from the worker thread. The worker only produces this
+      // value; every g.cache mutation and the disk save happen here, on the UI thread, so the
+      // strings the status timer and the tray tip read have exactly one writer. (Ledger H-07.)
+      std::unique_ptr<SignInResult> result(reinterpret_cast<SignInResult*>(lParam));
       g.signInBusy.store(false);
       EnableWindow(g.signInButton, TRUE);
-      if (wParam == 1) {
+      if (result && result->ok) {
+        g.cache.directoryUrl = result->url;
+        g.cache.accountId = result->account;
+        g.cache.machineId = result->machineId;
+        g.cache.hostName = result->hostName;
+        g.cache.hostId = result->hostId;
+        g.cache.hostToken = result->hostToken;
+        // Only the token is written; the password never reaches disk.
+        (void)directory::save_host_cache(g.cachePath, g.cache);
         SetWindowTextW(g.passwordEdit, L"");
         apply_signed_in_ui(true);
         start_streaming();
         refresh_status_text();
       } else {
-        set_status(error && !error->empty() ? *error : L"Sign in failed.");
+        set_status(result && !result->error.empty() ? result->error : L"Sign in failed.");
       }
-      delete error;
       return 0;
     }
 
