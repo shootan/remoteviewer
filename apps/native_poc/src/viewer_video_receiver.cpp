@@ -205,6 +205,52 @@ void VideoReceiver::publish_metrics(uint32_t metricW, uint32_t metricH, uint64_t
     }
 }
 
+// The once-a-second stats line + metrics publish, formerly copied at five early-return sites of
+// process_h264_frame and the raw path (F-08). `divideByRecvFrames` keeps the raw path's average
+// divisor (recvFrames) apart from the H.264 path's (decodedFrames) -- F-02; `codedSize` adds the
+// post-decode copy's " codedSize=" field. Output is byte-identical to the five copies.
+void VideoReceiver::flush_stats_if_due(uint64_t nowUs, uint32_t w, uint32_t h, bool codedSize,
+                                       uint32_t codedW, uint32_t codedH, bool divideByRecvFrames) {
+  if (nowUs >= st.statAtUs) {
+    const uint64_t frames = divideByRecvFrames ? st.recvFrames : st.decodedFrames;
+    const uint64_t avgLatencyUs = (frames > 0) ? (st.sumLatencyUs / frames) : 0;
+    const uint64_t avgDecodeTailUs = (frames > 0) ? (st.sumDecodeTailUs / frames) : 0;
+    const double mbps = (st.recvBytes * 8.0) / (1000.0 * 1000.0);
+    const double decodedRawMbps = (st.decodedBytes * 8.0) / (1000.0 * 1000.0);
+    const uint64_t decodeRatioX100 =
+        (st.recvBytes > 0) ? ((st.decodedBytes * 100ULL) / st.recvBytes) : 0;
+    publish_metrics(w, h, nowUs,
+                    avgLatencyUs, st.maxLatencyUs, avgDecodeTailUs, st.maxDecodeTailUs, mbps);
+    std::ostringstream oss;
+    oss << "[native-video-client] recvFrames=" << st.recvFrames
+        << " decodedFrames=" << st.decodedFrames
+        << " skippedQueued=" << st.skippedQueued
+        << " avgLatencyUs=" << avgLatencyUs
+        << " maxLatencyUs=" << st.maxLatencyUs
+        << " avgDecodeTailUs=" << avgDecodeTailUs
+        << " maxDecodeTailUs=" << st.maxDecodeTailUs
+        << " mbps=" << mbps
+        << " decodedRawMbps=" << decodedRawMbps
+        << " decodeRatioX100=" << decodeRatioX100
+        << " size=" << w << "x" << h;
+    if (codedSize) oss << " codedSize=" << codedW << "x" << codedH;
+    append_congestion_fields(oss);
+    append_present_counter_fields(oss);
+    log_client_line(oss.str());
+    st.recvFrames = 0;
+    st.decodedFrames = 0;
+    st.skippedQueued = 0;
+    st.recvBytes = 0;
+    st.decodedBytes = 0;
+    st.sumLatencyUs = 0;
+    st.maxLatencyUs = 0;
+    st.sumDecodeTailUs = 0;
+    st.maxDecodeTailUs = 0;
+    st.statAtUs += 1000000ULL;
+  }
+}
+
+
 bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<uint8_t>* payloadPtr,
     uint64_t packetNowUs) {
     if (!payloadPtr) return true;
@@ -456,41 +502,7 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
       if ((gate.waitingKeyDropCount % 120) == 1) {
         std::cout << "[native-video-client] waiting keyframe drops=" << gate.waitingKeyDropCount << "\n";
       }
-      if (packetNowUs >= st.statAtUs) {
-        const uint64_t avgLatencyUs = (st.decodedFrames > 0) ? (st.sumLatencyUs / st.decodedFrames) : 0;
-        const uint64_t avgDecodeTailUs = (st.decodedFrames > 0) ? (st.sumDecodeTailUs / st.decodedFrames) : 0;
-        const double mbps = (st.recvBytes * 8.0) / (1000.0 * 1000.0);
-        const double decodedRawMbps = (st.decodedBytes * 8.0) / (1000.0 * 1000.0);
-        const uint64_t decodeRatioX100 =
-            (st.recvBytes > 0) ? ((st.decodedBytes * 100ULL) / st.recvBytes) : 0;
-        publish_metrics(h.width, h.height, packetNowUs,
-                        avgLatencyUs, st.maxLatencyUs, avgDecodeTailUs, st.maxDecodeTailUs, mbps);
-        std::ostringstream oss;
-        oss << "[native-video-client] recvFrames=" << st.recvFrames
-            << " decodedFrames=" << st.decodedFrames
-            << " skippedQueued=" << st.skippedQueued
-            << " avgLatencyUs=" << avgLatencyUs
-            << " maxLatencyUs=" << st.maxLatencyUs
-            << " avgDecodeTailUs=" << avgDecodeTailUs
-            << " maxDecodeTailUs=" << st.maxDecodeTailUs
-            << " mbps=" << mbps
-            << " decodedRawMbps=" << decodedRawMbps
-            << " decodeRatioX100=" << decodeRatioX100
-            << " size=" << h.width << "x" << h.height;
-        append_congestion_fields(oss);
-        append_present_counter_fields(oss);
-        log_client_line(oss.str());
-        st.recvFrames = 0;
-        st.decodedFrames = 0;
-        st.skippedQueued = 0;
-        st.recvBytes = 0;
-        st.decodedBytes = 0;
-        st.sumLatencyUs = 0;
-        st.maxLatencyUs = 0;
-        st.sumDecodeTailUs = 0;
-        st.maxDecodeTailUs = 0;
-        st.statAtUs += 1000000ULL;
-      }
+      flush_stats_if_due(packetNowUs, h.width, h.height, false, 0, 0, false);
       return true;
     }
 
@@ -527,41 +539,7 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
       }
       transition_congestion_state(ClientCongestionState::Congested, packetNowUs, "decode_fail",
                                   streamLagUs, decodeQueueLagEstimateUs, h.seq);
-      if (packetNowUs >= st.statAtUs) {
-        const uint64_t avgLatencyUs = (st.decodedFrames > 0) ? (st.sumLatencyUs / st.decodedFrames) : 0;
-        const uint64_t avgDecodeTailUs = (st.decodedFrames > 0) ? (st.sumDecodeTailUs / st.decodedFrames) : 0;
-        const double mbps = (st.recvBytes * 8.0) / (1000.0 * 1000.0);
-        const double decodedRawMbps = (st.decodedBytes * 8.0) / (1000.0 * 1000.0);
-        const uint64_t decodeRatioX100 =
-            (st.recvBytes > 0) ? ((st.decodedBytes * 100ULL) / st.recvBytes) : 0;
-        publish_metrics(h.width, h.height, packetNowUs,
-                        avgLatencyUs, st.maxLatencyUs, avgDecodeTailUs, st.maxDecodeTailUs, mbps);
-        std::ostringstream oss;
-        oss << "[native-video-client] recvFrames=" << st.recvFrames
-            << " decodedFrames=" << st.decodedFrames
-            << " skippedQueued=" << st.skippedQueued
-            << " avgLatencyUs=" << avgLatencyUs
-            << " maxLatencyUs=" << st.maxLatencyUs
-            << " avgDecodeTailUs=" << avgDecodeTailUs
-            << " maxDecodeTailUs=" << st.maxDecodeTailUs
-            << " mbps=" << mbps
-            << " decodedRawMbps=" << decodedRawMbps
-            << " decodeRatioX100=" << decodeRatioX100
-            << " size=" << h.width << "x" << h.height;
-        append_congestion_fields(oss);
-        append_present_counter_fields(oss);
-        log_client_line(oss.str());
-        st.recvFrames = 0;
-        st.decodedFrames = 0;
-        st.skippedQueued = 0;
-        st.recvBytes = 0;
-        st.decodedBytes = 0;
-        st.sumLatencyUs = 0;
-        st.maxLatencyUs = 0;
-        st.sumDecodeTailUs = 0;
-        st.maxDecodeTailUs = 0;
-        st.statAtUs += 1000000ULL;
-      }
+      flush_stats_if_due(packetNowUs, h.width, h.height, false, 0, 0, false);
       return true;
     }
     // decode_access_unit succeeded: the transform is healthy, so the wedge streak is clear.
@@ -640,41 +618,7 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
                   << " emptyUs=" << emptyStreakUs
                   << "\n";
       }
-      if (packetNowUs >= st.statAtUs) {
-        const uint64_t avgLatencyUs = (st.decodedFrames > 0) ? (st.sumLatencyUs / st.decodedFrames) : 0;
-        const uint64_t avgDecodeTailUs = (st.decodedFrames > 0) ? (st.sumDecodeTailUs / st.decodedFrames) : 0;
-        const double mbps = (st.recvBytes * 8.0) / (1000.0 * 1000.0);
-        const double decodedRawMbps = (st.decodedBytes * 8.0) / (1000.0 * 1000.0);
-        const uint64_t decodeRatioX100 =
-            (st.recvBytes > 0) ? ((st.decodedBytes * 100ULL) / st.recvBytes) : 0;
-        publish_metrics(h.width, h.height, packetNowUs,
-                        avgLatencyUs, st.maxLatencyUs, avgDecodeTailUs, st.maxDecodeTailUs, mbps);
-        std::ostringstream oss;
-        oss << "[native-video-client] recvFrames=" << st.recvFrames
-            << " decodedFrames=" << st.decodedFrames
-            << " skippedQueued=" << st.skippedQueued
-            << " avgLatencyUs=" << avgLatencyUs
-            << " maxLatencyUs=" << st.maxLatencyUs
-            << " avgDecodeTailUs=" << avgDecodeTailUs
-            << " maxDecodeTailUs=" << st.maxDecodeTailUs
-            << " mbps=" << mbps
-            << " decodedRawMbps=" << decodedRawMbps
-            << " decodeRatioX100=" << decodeRatioX100
-            << " size=" << h.width << "x" << h.height;
-        append_congestion_fields(oss);
-        append_present_counter_fields(oss);
-        log_client_line(oss.str());
-        st.recvFrames = 0;
-        st.decodedFrames = 0;
-        st.skippedQueued = 0;
-        st.recvBytes = 0;
-        st.decodedBytes = 0;
-        st.sumLatencyUs = 0;
-        st.maxLatencyUs = 0;
-        st.sumDecodeTailUs = 0;
-        st.maxDecodeTailUs = 0;
-        st.statAtUs += 1000000ULL;
-      }
+      flush_stats_if_due(packetNowUs, h.width, h.height, false, 0, 0, false);
       return true;
     }
     gate.decodeEmptyStreak = 0;
@@ -831,44 +775,9 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
     st.maxLatencyUs = std::max(st.maxLatencyUs, latencyUs);
     st.maxDecodeTailUs = std::max(st.maxDecodeTailUs, decodeTailUs);
 
-    if (nowUs >= st.statAtUs) {
-      const uint64_t avgLatencyUs = (st.decodedFrames > 0) ? (st.sumLatencyUs / st.decodedFrames) : 0;
-      const uint64_t avgDecodeTailUs = (st.decodedFrames > 0) ? (st.sumDecodeTailUs / st.decodedFrames) : 0;
-      const double mbps = (st.recvBytes * 8.0) / (1000.0 * 1000.0);
-      const double decodedRawMbps = (st.decodedBytes * 8.0) / (1000.0 * 1000.0);
-      const uint64_t decodeRatioX100 =
-          (st.recvBytes > 0) ? ((st.decodedBytes * 100ULL) / st.recvBytes) : 0;
-      const uint32_t visibleW = (decoded.visibleWidth > 0) ? decoded.visibleWidth : decoded.width;
-      const uint32_t visibleH = (decoded.visibleHeight > 0) ? decoded.visibleHeight : decoded.height;
-      publish_metrics(visibleW, visibleH, nowUs,
-                      avgLatencyUs, st.maxLatencyUs, avgDecodeTailUs, st.maxDecodeTailUs, mbps);
-      std::ostringstream oss;
-      oss << "[native-video-client] recvFrames=" << st.recvFrames
-          << " decodedFrames=" << st.decodedFrames
-          << " skippedQueued=" << st.skippedQueued
-          << " avgLatencyUs=" << avgLatencyUs
-          << " maxLatencyUs=" << st.maxLatencyUs
-          << " avgDecodeTailUs=" << avgDecodeTailUs
-          << " maxDecodeTailUs=" << st.maxDecodeTailUs
-          << " mbps=" << mbps
-          << " decodedRawMbps=" << decodedRawMbps
-          << " decodeRatioX100=" << decodeRatioX100
-          << " size=" << visibleW << "x" << visibleH
-          << " codedSize=" << decoded.width << "x" << decoded.height;
-      append_congestion_fields(oss);
-      append_present_counter_fields(oss);
-      log_client_line(oss.str());
-      st.recvFrames = 0;
-      st.decodedFrames = 0;
-      st.skippedQueued = 0;
-      st.recvBytes = 0;
-      st.decodedBytes = 0;
-      st.sumLatencyUs = 0;
-      st.maxLatencyUs = 0;
-      st.sumDecodeTailUs = 0;
-      st.maxDecodeTailUs = 0;
-      st.statAtUs += 1000000ULL;
-    }
+    const uint32_t visibleW = (decoded.visibleWidth > 0) ? decoded.visibleWidth : decoded.width;
+    const uint32_t visibleH = (decoded.visibleHeight > 0) ? decoded.visibleHeight : decoded.height;
+    flush_stats_if_due(nowUs, visibleW, visibleH, true, decoded.width, decoded.height, false);
     return true;
 }
 
@@ -1201,41 +1110,7 @@ void VideoReceiver::run_tcp() {
       st.maxLatencyUs = std::max(st.maxLatencyUs, latencyUs);
       st.maxDecodeTailUs = std::max(st.maxDecodeTailUs, decodeTailUs);
 
-      if (nowUs >= st.statAtUs) {
-        const uint64_t avgLatencyUs = (st.recvFrames > 0) ? (st.sumLatencyUs / st.recvFrames) : 0;
-        const uint64_t avgDecodeTailUs = (st.recvFrames > 0) ? (st.sumDecodeTailUs / st.recvFrames) : 0;
-        const double mbps = (st.recvBytes * 8.0) / (1000.0 * 1000.0);
-        const double decodedRawMbps = (st.decodedBytes * 8.0) / (1000.0 * 1000.0);
-        const uint64_t decodeRatioX100 =
-            (st.recvBytes > 0) ? ((st.decodedBytes * 100ULL) / st.recvBytes) : 0;
-        publish_metrics(h.width, h.height, nowUs,
-                        avgLatencyUs, st.maxLatencyUs, avgDecodeTailUs, st.maxDecodeTailUs, mbps);
-        std::ostringstream oss;
-        oss << "[native-video-client] recvFrames=" << st.recvFrames
-            << " decodedFrames=" << st.decodedFrames
-            << " skippedQueued=" << st.skippedQueued
-            << " avgLatencyUs=" << avgLatencyUs
-            << " maxLatencyUs=" << st.maxLatencyUs
-            << " avgDecodeTailUs=" << avgDecodeTailUs
-            << " maxDecodeTailUs=" << st.maxDecodeTailUs
-            << " mbps=" << mbps
-            << " decodedRawMbps=" << decodedRawMbps
-            << " decodeRatioX100=" << decodeRatioX100
-            << " size=" << h.width << "x" << h.height;
-        append_congestion_fields(oss);
-        append_present_counter_fields(oss);
-        log_client_line(oss.str());
-        st.recvFrames = 0;
-        st.decodedFrames = 0;
-        st.skippedQueued = 0;
-        st.recvBytes = 0;
-        st.decodedBytes = 0;
-        st.sumLatencyUs = 0;
-        st.maxLatencyUs = 0;
-        st.sumDecodeTailUs = 0;
-        st.maxDecodeTailUs = 0;
-        st.statAtUs += 1000000ULL;
-      }
+      flush_stats_if_due(nowUs, h.width, h.height, false, 0, 0, true);
     } else if (msgType == MessageType::EncodedFrameH264 && header.size == sizeof(EncodedFrameHeader)) {
       EncodedFrameHeader h{};
       h.header = header;

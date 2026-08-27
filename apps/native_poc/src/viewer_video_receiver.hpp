@@ -54,6 +54,7 @@ class VideoReceiver {
   uint64_t aligned_lag_us(uint64_t remoteTsUs, uint64_t localNowUs, bool& timelineReady, uint64_t& remoteBaseUs, uint64_t& localBaseUs);
   void publish_metrics(uint32_t metricW, uint32_t metricH, uint64_t nowUs, uint64_t avgLatencyUs, uint64_t maxLatencyUsLocal, uint64_t avgDecodeTailUs, uint64_t maxDecodeTailUsLocal, double mbpsLocal);
   bool process_h264_frame(const EncodedFrameHeader& h, std::vector<uint8_t>* payloadPtr, uint64_t packetNowUs);
+  void flush_stats_if_due(uint64_t nowUs, uint32_t w, uint32_t h, bool codedSize, uint32_t codedW, uint32_t codedH, bool divideByRecvFrames);
   void run_udp();
   void run_tcp();
 };
