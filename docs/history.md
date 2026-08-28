@@ -7706,3 +7706,20 @@ Next action
   채택을 가르는 핵심이라 문서에는 **검토 후보로만** 적고 결정하지 않았다. 코덱스 상의용 질문 4개(Q1~Q4)를 문서 §5에 명시.
 - 코드 변경 0 · 빌드/e2e 미실행(문서만).
 - 다음 액션: 검증용 코덱스와 Q1~Q4 상의 → 결론을 §5에 반영하고, 채택 시 `구현계획.md` N/H 항목으로 승격.
+
+### 323) 2026-08-28 프로세스 경계 재설계 검토 — 코덱스 교차검증, 캡처+인코딩 워커 분리 권고 (브랜치 refactor/viewer-split)
+
+- `docs/OSLink_구조분석.md` §5를 열린 질문(Q1~Q4)에서 **검토 결과**로 교체. 검증용 코덱스(a2a `remote#sa9wm39t`)와 2라운드 진행.
+- 코덱스가 지적한 내 오류 2건, 코드 확인 후 그대로 수용:
+  - "Q1(원시 shared texture 0-copy)이 안 되면 논의 무의미" → **②안(캡처+인코딩 분리)의 선결조건이 아니다.** ①안(캡처만 분리)의 별도 연구 게이트로 강등.
+  - "스레드·mutex 개수가 분리 근거" → **철회.** OSLink의 사용자 프로세스도 스레드 84개다. 근거는 fault domain · 권한/세션 · 소켓·NAT 매핑 수명.
+  - 덤: **프로세스 분리는 포트포워딩/NAT를 고치지 않는다**(그건 ZEGO ICE/relay 계층 결과) — §5 머리에 명시.
+- 코덱스 인용 근거 5건 전부 코드에서 직접 확인: `host_stage_encode_send_h264.cpp:302~317`(AMF surface ~68ms vs CPU 4.5ms, 30프레임 프로브 후 세션 단위 폴백) ·
+  `:296~300`/`:363~367`(`nv12PendingReleases` = MFT retention ack) · `gdi_capture_protocol.hpp:21~50`(고정 크기 원시 BGRA 3-slot) ·
+  `gdi_capture_process.cpp:107~117`(프레임마다 vector 할당+memcpy) · `object_name()`의 **`Local\` 네임스페이스 + 기본 ACL**(세션 경계 확장 불가).
+- 합의: ②안 = `GNLinkStream`을 **broker**(소켓·control·epoch/barrier·워커 감시)로 두고 **`GNLinkMediaWorker`**(WGC/DXGI/GDI+스케일+MFT)를 재시작 가능한 자식으로 분리,
+  **H.264 AU + 메타만 IPC**. 기존 `GNLinkCapture.exe`는 프로토콜 재사용 금지(원시 BGRA 전제) — 수명관리 코드만 `ChildProcessSupervisor`로 추출.
+  시점은 **0.2.59 실기 안정화 후**, 지금은 ADR + bounded spike 정의까지만. 5단계 절차를 §5.5에 기록.
+- 미해결(코덱스에 2라운드 질의 발송, seq 790): R1 워커 재시작이 클라 선택 게이트의 generation에 어떻게 보여야 하는가(투명 재시작 vs 새 generation) ·
+  R2 SyntheticRefresh(F-10)를 IPC 스키마 v1 필수 필드로 선행해야 하는가 · R3 spike 합격 기준 수치화(p95 회귀 ≤10%, 워커 kill 후 복귀 ≤1.5초 제안).
+- 코드 변경 0 · 빌드/e2e 미실행(문서만). 채택 시 `구현계획.md` N/H 항목으로 승격 — 아직 승격하지 않았다.

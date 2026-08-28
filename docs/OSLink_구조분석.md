@@ -97,30 +97,96 @@ ldremote.exe             PID 10480   사용자 계정   스레드 84  154MB    �
 
 ---
 
-## 5) 프로세스 분리로 실제로 얻는 것 / 잃는 것 (검토 후보, 결정 아님)
+## 5) 프로세스 경계 재설계 — 검토 결과 (코덱스 교차검증 2026-08-28)
 
-**얻는 쪽**
+**결론부터**: 방향은 타당하지만 **이유가 "스레드·mutex가 많아서"가 아니다.** OSLink의 사용자 프로세스도 스레드 84개다 — 개수는 구조 결함의 증거가 아니다.
+분리의 근거는 셋이다: **fault domain**(GPU/MFT가 죽을 때 소켓까지 죽는 것) · **권한/세션**(보안 데스크톱·세션 전환) · **소켓/NAT 매핑 수명**(재시작해도 매핑을 잃지 않는 것).
 
-1. **동기화 객체가 IPC 경계로 대체된다.** 캡처↔인코딩을 프로세스로 가르면 그 사이 공유 상태는 프레임 큐 하나로 줄고, 지금 그 경계에 있는 mutex/atomic이 통째로 사라진다.
-2. **크래시 격리.** 캡처 백엔드(WGC/DXGI/GDI)는 드라이버·세션 상태에 물려 있어 가장 잘 죽는 부분인데, 지금은 죽으면 네트워크 연결까지 같이 죽는다. OSLink은 `capture.exe`만 죽었다 살아난다.
-3. **세션/보안 데스크톱 대응이 구조로 풀린다.** 잠금화면·UAC·세션 전환은 "SYSTEM 자식을 새 세션에 다시 띄우는" 문제인데, 사용자 프로세스가 캡처를 들고 있으면 그 프로세스 자체를 옮겨야 한다.
-4. **권한 최소화.** 네트워크 프로세스는 SYSTEM일 필요가 없고, 캡처 프로세스는 소켓이 필요 없다.
+또한 **프로세스 분리는 포트포워딩/NAT 문제를 고치지 않는다.** OSLink이 포워딩 없이 붙는 것은 ZEGO의 ICE/relay 계층 결과이지 4-프로세스 구조의 결과가 아니다. 그 목표는 N8(릴레이)/N 트랙에서 따로 다룬다. 이 문서의 §3과 §5는 **별개의 주제**다.
 
-**잃는 쪽 / 비용**
+### 5.1 경계는 어디에 — 채택 권고: 캡처+인코딩 분리
 
-1. **프레임 IPC 비용.** 1080p60이면 초당 수백 MB — 명명 파이프로 픽셀을 복사하면 답이 없다. 공유 메모리(또는 D3D11 shared handle/NT handle 전달)로 **0-copy**를 유지해야 하고, 그렇지 않으면 지금의 지연 예산이 무너진다. **이게 채택 여부를 가르는 핵심 질문이다.**
-2. **수명 관리가 늘어난다.** 자식 크래시 감지·재기동·중복 기동 방지·좀비 정리. 호스트 원장 H-01(프로세스 핸들 소유권)·H-06(detach 워치독)이 이미 이 종류의 버그였다.
-3. **e2e·측정 복잡도.** 로그가 프로세스별로 갈리고, 지연 계측이 프로세스 경계를 넘는다.
-4. **리팩터 직후다.** Phase 4까지 막 끝낸 구조를 다시 가르는 것이라, 지금 하면 그 회귀 원인 분리가 어려워진다.
+| 안 | 경계를 넘는 것 | 판정 |
+|---|---|---|
+| ① 캡처만 분리 (OSLink 방식) | **NV12 텍스처** (D3D11 shared NT handle + keyed mutex/fence) | **보류** — 가장 어려운 seam. 아래 5.3 |
+| ② **캡처+인코딩 분리 (권고)** | **H.264 AU + 메타**뿐 (0.07~1.5MB/s) | **채택 권고** |
+| ③ 네트워크만 분리 | ②를 반대편에서 본 것 | ②로 흡수. 단 **소켓은 안정 프로세스가 소유**해야 하므로, 현 `GNLinkStream`을 미디어로 두고 네트워크 자식을 붙이는 방향은 소켓 소유자 수명을 오히려 불안정하게 만든다 |
 
-**따라서 답해야 할 질문 (코덱스 상의 대상)**
+**②의 구조 (권고안)**
 
-- Q1. 프레임 전달을 0-copy로 유지할 수 있나? D3D11 텍스처를 프로세스 간에 넘길 때(shared NT handle) 지금의 readback/인코더 경로가 그대로 성립하나?
-- Q2. 가른다면 경계를 어디에 두나 — ①캡처만 분리 ②캡처+인코딩 분리 ③네트워크만 분리?
-- Q3. 이미 있는 `GNLinkCapture.exe`(GDI 워커)를 일반화하는 길이 가장 싼가?
-- Q4. 지금 해야 하나, 아니면 실기 안정화 뒤인가? 선행 조건은?
+- `GNLinkStream` = **broker(안정)**: 디렉터리/릴레이, UDP/TCP 소켓, UdpControl, media epoch/barrier, 입력·컨트롤 라우팅, 클라이언트 메트릭, 워커 감시.
+- `GNLinkMediaWorker`(신규, **재시작 가능**): WGC/DXGI/GDI, readback/GPU 스케일, frame gate/kick, MFT 인코더, SPS/PPS/IDR 생성.
+- worker→broker IPC: `EncodedFrameHeader` 상당 메타(seq/generation/size/key/capture·encode 타임스탬프) + AU.
+- broker→worker IPC: start/stop, 타깃·백엔드 선택, 유효 bitrate/fps/keyint/size, force-IDR, 1Hz 네트워크 피드백 스냅샷.
+- `GNLinkInputService`는 보안 입력 전용 그대로.
 
----
+**②를 고르는 이유**
+
+- **원시 픽셀이 경계를 넘지 않으므로** shared texture/adapter LUID/keyed mutex/드라이버 매트릭스 문제를 통째로 회피한다.
+- AU는 0.55~12Mbps(≈0.07~1.5MB/s)라 IPC 복사 비용이 원시 1080p60과 비교 대상이 아니다. 단 **IDR은 수백 KB 버스트**라 인코더 스레드가 blocking write에 묶이지 않게 bounded 큐가 필요하다.
+- D3D/DXGI/WGC/MFT의 크래시·행이 worker 재시작으로 격리되고 **broker의 소켓/NAT 매핑은 유지**된다. 지금은 supervisor가 `GNLinkStream` 전체를 죽여 매핑까지 잃는다.
+- ABR 왕복은 blocker가 아니다. 현재 ABR도 1초 창의 클라이언트 메트릭/캡처 통계를 쓴다 — worker가 캡처 통계를, broker가 네트워크 통계를 1Hz 스냅샷으로 교환하면 된다. 긴급 keyframe/tune도 소형 IPC 1회.
+- 정책 소유: **broker가 대역 목표를 정하고 worker가 적용 후 유효값을 회신**하는 방향(권고).
+
+**②의 함정 (명문화 대상)**
+
+- AU 파이프가 막힐 때 캡처/인코딩을 블록시키면 분리 효과가 사라진다. **bounded latest-wins 큐 + delta drop 시 체인 무효화 + IDR 요청 + key AU 보존**을 현재 `SenderQueueAction`과 동일 정책으로 못박아야 한다.
+- 경계는 락을 **없애는 게 아니라 프로토콜/큐/백프레셔로 바꾼다.** correctness가 저절로 쉬워지지 않는다.
+
+### 5.2 기존 `GNLinkCapture.exe` 일반화 — 권고: 하지 않는다
+
+수명 관리 코드는 **추출해서 재사용**할 가치가 있다(`gdi_capture_process.cpp:147~175` Stop/terminate/join/handle 정리, `:183~296` CreateProcess suspended → job kill-on-close → resume → reader 스레드, 프로세스 종료 감시와 폴백 콜백, 3-slot latest-wins 개념) → 공용 `ChildProcessSupervisor` 유틸로 뽑는다.
+
+그러나 **프로토콜과 워커 본체는 재사용 금지**다. 코드에서 확인한 전제:
+
+- `gdi_capture_protocol.hpp:21~50` — 고정 크기 **원시 BGRA** 3-slot 공유 메모리(`SharedHeader{width,height,stride,frameBytes,slots[]}`).
+- `gdi_capture_process.cpp:107~117` — 부모가 **매 프레임 새 vector 할당 + `memcpy`**.
+- `gdi_capture_worker_main.cpp:97~105`(primary monitor 고정 geometry), `:118~130`(mapping-backed DIB), `:170~186`(`BitBlt`).
+- 공유 객체 이름이 `object_name()` 기준 **`Localemote60_gdi_*`** + `SECURITY_ATTRIBUTES` nullptr(기본 ACL) — **세션 로컬**이라 Session 0 서비스 ↔ 콘솔 세션 경계로 그대로 확장되지 않는다.
+- 컨트롤 채널이 stop/frame 이벤트뿐이라 select/tune/keyframe/ABR/reconfigure/AU framing/버전 협상이 없다.
+
+→ **신규 `GNLinkMediaWorker.exe` + 버전 있는 미디어 IPC**를 만들고, GDI 백엔드는 그 워커 내부 백엔드로 옮겨 **원시 BGRA IPC 자체를 없앤다.**
+
+### 5.3 ① 캡처만 분리(원시 GPU 공유)는 왜 보류인가
+
+가능은 하다 — consumer 절반은 이미 있다(`mf_h264_codec.cpp:1147~1162` `IMFDXGIDeviceManager`, `:1522~1525` `MFT_MESSAGE_SET_D3D_MANAGER`, `:1703~1745` `MFCreateDXGISurfaceBuffer`, `host_stage_encode_send_h264.cpp:289~300` surface 입력). producer가 `D3D11_RESOURCE_MISC_SHARED_NTHANDLE`(+`SHARED_KEYEDMUTEX`)로 만들고 `IDXGIResource1::CreateSharedHandle` → consumer가 `ID3D11Device1::OpenSharedResource1`로 열면 된다.
+
+그런데 이 경로에 걸린 조건이 많다:
+
+- WGC/DXGI가 돌려준 캡처 텍스처가 shareable로 생성됐다고 **가정할 수 없다.** 앱이 만든 shareable ring으로 `CopyResource`/`VideoProcessorBlt`해야 하므로 "CPU 복사 0"은 되어도 **"GPU 복사 0"은 아니다.**
+- shared resource는 **같은 어댑터에서만** 열린다. RDP/가상 디스플레이/하이브리드 GPU에서 두 프로세스가 동일 LUID로 device를 만든다는 계약이 필요하다.
+- surface 경로 자체가 드라이버 의존이다 — 코드 주석의 실측: **AMF가 샘플을 받아놓고 프레임당 ~68ms(내부 동기화), 같은 조건 CPU 경로 4.5ms.** 그래서 30프레임 프로브 후 평균 16ms 초과면 세션 단위로 꺼버린다(`host_stage_encode_send_h264.cpp:302~317`). **공유 핸들이 된다는 것과 빠르다는 것은 별개다.**
+- **MFT는 `ProcessInput` 반환 후에도 텍스처를 비동기로 보유한다.** 동일 프로세스인 지금도 그래서 `nv12PendingReleases`가 output 수로 소비를 증명할 때까지 슬롯을 반환하지 않는다(`host_stage_encode_send_h264.cpp:296~300`, `:363~367`). 프로세스를 가르면 이 release ack를 **IPC로 되돌려야** 하고 shared ring이 최소 3(실기 4~6 후보) 필요하다. keyed mutex 하나를 MFT output까지 쥔 단일 버퍼 설계는 캡처를 프레임 단위로 막는다.
+- 판정 지표: `present gap p95 65ms`는 이 경계를 판단할 수 없다. capture-copy→consumer-acquire, acquire wait, ProcessInput→slot-release, AU IPC enqueue를 각각 찍어 동일 프로세스 대비 delta를 A/B해야 한다.
+
+### 5.4 권한/세션은 별도 게이트
+
+- **"LocalSystem 서비스에서 WGC"가 아니다.** 서비스는 Session 0이고, Microsoft 권고도 서비스가 직접 대화형 데스크톱에 접근하지 말고 `CreateProcessAsUser`로 활성 콘솔 세션에 에이전트를 띄우라는 것이다. OSLink의 `ldremoteservice → ldremoteevent → capture.exe` 체인이 정확히 그 패턴이다(§2 실측).
+- 토큰이 SYSTEM이어도 Terminal Services 세션/윈도우 스테이션이 틀리면 실패한다. 반대로 **지금 사용자 세션 워커를 떼어내는 데 SYSTEM은 필요 없다.**
+- **보안 데스크톱/UAC 캡처는 별개 문제다.** SYSTEM + 콘솔 세션이라고 WGC가 Winlogon secure desktop을 캡처한다는 보장이 없다. 기존 `E_ACCESSDENIED` 경로와 secure agent 설계를 별도 게이트로 유지한다.
+
+### 5.5 시점 — 지금은 ADR + spike까지만
+
+**0.2.59 실기 안정화 전 production 분리 착수는 반대**(코덱스·클로드 합의). 호스트/뷰어 분할 + Phase 4 직후라 baseline 자체가 아직 실기 확인 전이고, 여기에 프로세스 분리를 얹으면 회귀 귀속이 불가능해진다. 열린 부채(H-24/H-25/H-27, fault-injection)도 0.2.59에서 어떤 실패가 남는지 봐야 seam 우선순위가 정해진다.
+
+권장 단계:
+
+0. **0.2.59 실기**: 게임 로드 / UAC / RDP / 정적 화면 / PC↔모바일 / 재접속, 최소 30~60분 soak. 호스트+뷰어 로그 보존.
+1. **ADR 1장**: 소켓 소유자, 워커 권한/세션, IPC 메시지 목록, epoch/generation 소유, 백프레셔·드롭 정책, 크래시 복구, 버전 협상.
+2. **encoded-AU IPC spike** (동일 사용자·동일 콘솔 세션, SYSTEM 금지): broker가 UDP 소켓 계속 소유 · 워커 강제 크래시/행 후 broker·세션 유지 → 워커 재시작 → IDR → 화면 회복 · 1080p60 12Mbps + 큰 IDR에서 파이프/백프레셔 측정 · 동일 프로세스 대비 capture→wire/present p50·p95와 CPU/메모리 무회귀.
+3. **권한/세션 분리**는 그 다음: 서비스가 활성 콘솔 세션 에이전트 관리, WTS 세션 변경/RDP/빠른 사용자 전환, 명시적 ACL·핸들 복제(공개 named object 금지).
+4. **capture-only GPU 공유**는 필요성이 남을 때 별도 spike(어댑터 LUID 일치, shareable 텍스처 생성/열기, WGC/DXGI→shared ring GPU 복사, keyed mutex/fence + MFT deferred release, 드라이버 폴백 매트릭스).
+5. feature flag 이중 경로로 실기 A/B 후 in-process 경로 제거 여부 결정.
+
+### 5.6 합의 / 미합의
+
+| 논점 | 판정 |
+|---|---|
+| "지금 구조가 영구적으로 맞다" | **반대**(양측) — GPU/MFT 실패가 소켓 매핑까지 죽이는 현재 fault domain은 장기적으로 분리 가치가 크다 |
+| "지금 바로 OSLink처럼 capture.exe를 확장" | **반대**(양측) |
+| "0.2.59 안정화 후 broker + capture/encode 미디어 워커, AU IPC" | **찬성**(양측) |
+| "Q1(원시 shared texture)이 안 되면 논의가 무의미" | **클로드의 최초 프레이밍이 틀렸다** — ②의 선결조건이 아니라 ①의 별도 연구 게이트다 |
+| "스레드·mutex 개수가 분리 근거" | **틀렸다** — 근거는 fault domain·권한·소켓 수명 |
 
 ## 6) 한계 / 미확인
 
