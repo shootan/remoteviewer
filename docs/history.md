@@ -7740,3 +7740,16 @@ Next action
 - 새로 드러난 실패 모드: **워커 재시작 직후 정적 화면 seed 프레임** — WGC/DXGI가 변화 없으면 프레임을 안 주므로 "첫 전달 AU는 key"만으로는 복구가 끝나지 않을 수 있다.
   fault-recovery suite를 정적 화면 시나리오로도 돌리도록 기록.
 - 코드 변경 0 · 빌드/e2e 미실행(문서만). 코덱스 3라운드 발송(seq 792) — ADR 문구 확정 확인용.
+
+### 325) 2026-08-28 ADR 마감 정정 — 정적 화면 seed 위험 문구 · worker Ready 정의 · wire seq 소유 범위 (브랜치 refactor/viewer-split)
+
+- 코덱스 3라운드(마감 판정) 반영. 기술 방향 변경 없음, **문구 정밀화 4건**.
+- **정정(내 오류)**: #324에서 "정적 화면이면 WGC/DXGI가 프레임을 안 주므로 워커가 프레임을 영영 못 얻는다"고 단정했는데 **틀렸다.**
+  실기상 duplication/frame-pool 재생성 직후 initial frame이 오는 경우가 많다(기존 로그도 그랬다). 정확한 위험은 **복구가 그 우연한 initial callback에 의존하게 되는 것** —
+  raw 캐시가 워커와 함께 사라진 상태에서 콜백이 늦거나 누락되면 barrier를 열 seed가 없다. §6.1을 그대로 고쳤다.
+- ADR 7번 신설: **`worker Ready`는 프로세스 기동이 아니라** broker generation의 타깃 bind 완료 + **정적 데스크톱에서도 IDR seed를 만들 수 있는 상태**.
+  broker는 Ready 이전 AU를 받지 않고, **first-present 전까지 복구를 완료로 보지 않는다.**
+- ADR 1번 정밀화: wire seq는 **broker가 network/media epoch 안에서 단조 소유** — 새 client epoch에서는 reset 가능하나 워커 재시작만으로는 되감지 않는다.
+- §6.3에 **B-static leg 신설**(필수): 물리 콘솔·타깃 불변·`STATIC_REFRESH=0`·화면/커서/입력 완전 정지에서 DXGI·WGC 각각 10회 kill.
+  seed 미도착 시 명시적 폴백 3택(백엔드 재생성 / one-shot 스냅샷 / 동일 타깃·generation·보안 identity 검증된 broker-side last-safe IDR replay — 락·타깃·세션 경계 넘기지 말 것).
+- 코덱스 스레드 종료(3왕복, seq 788/790/792). 코드 변경 0 · 빌드/e2e 미실행(문서만). `구현계획.md` N/H 승격은 여전히 사용자 결정 대기.

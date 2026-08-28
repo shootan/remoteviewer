@@ -192,12 +192,13 @@ ldremote.exe             PID 10480   사용자 계정   스레드 84  154MB    �
 
 **상태: 초안. 승인 전.** 채택은 `구현계획.md`의 N/H 항목 승격으로 결정한다. 아래 6줄이 ADR 본문이고, 6.1~6.3이 그 근거·절차다.
 
-1. **논리 세션 identity(network epoch / stream generation / wire seq / media barrier)는 broker 단독 소유.**
+1. **논리 세션 identity(network epoch / stream generation / wire seq / media barrier)는 broker 단독 소유.** wire seq는 **broker가 network/media epoch 안에서 단조 증가로 소유**한다 — 새 client epoch에서는 reset할 수 있으나 **워커 재시작만으로는 절대 되감지 않는다.**
 2. **worker identity는 private `workerIncarnation`이며 wire에 노출하지 않는다.**
 3. **워커 재시작은 같은 generation의 투명 IDR 복구**다 — 피커를 다시 띄우지 않는다.
 4. **frame provenance는 IPC v1 필수 필드**이고, 현재 wire의 SyntheticRefresh 비트가 그보다 선행한다.
 5. **성능 게이트는 물리 콘솔 baseline을 뽑은 뒤 사전 동결**한다. RDP는 성능이 아니라 별도 기능 회귀 suite다.
 6. **production 착수는 0.2.59 실기 통과 후.**
+7. **`worker Ready`는 프로세스가 떴다는 뜻이 아니다** — broker generation의 타깃 bind를 완료하고 **정적 데스크톱에서도 IDR seed를 만들 수 있는 상태**를 말한다. broker는 Ready 이전의 AU를 받지 않으며, **first-present 전까지 복구를 완료로 보지 않는다.**
 
 ### 6.1 R1 — 워커 재시작은 generation을 올리지 않는다
 
@@ -225,7 +226,9 @@ ldremote.exe             PID 10480   사용자 계정   스레드 84  154MB    �
 - 워커 down 중 뷰어의 keyframe 요청은 broker가 coalesce했다가 새 워커 Ready 뒤 전달한다.
 - **IPC 커맨드에는 network/client epoch(또는 broker request generation)을 stamp**해서, H-27의 옛 in-flight 커맨드가 새 워커/세션에 적용되지 않게 한다.
 - 선택 진행 중 워커가 죽으면 broker가 **같은 pending selection generation으로 재시도**하고 성공 IDR까지 기존 피커 대기를 유지한다. 임의의 새 generation 금지.
-- 워커 재시작 직후에는 옛 raw 캐시가 없다. **새 캡처 백엔드가 현재 데스크톱 seed 프레임을 내는 게이트가 별도로 필요**하다 — "첫 전달 AU는 key" 규칙만으로는 정적 화면에서 워커가 프레임을 영영 못 얻는 경우를 못 고친다.
+- 워커 재시작 직후에는 옛 raw 캐시가 없다. **새 캡처 백엔드가 현재 데스크톱 seed 프레임을 내는 게이트가 별도로 필요**하다.
+  정확히 하자면 — **"WGC/DXGI가 변화 없는 화면에서는 첫 프레임을 영원히 주지 않는다"는 단정은 틀렸다.** 실기상 duplication/frame-pool 재생성 직후 initial frame이 오는 경우가 많고 기존 로그도 그랬다.
+  위험은 **복구가 그 우연한 initial callback에 의존하게 되는 것**이다: raw 캐시가 워커와 함께 사라진 상태에서 콜백이 늦거나 누락되면 **barrier를 열 seed가 없다.** API/드라이버/세션 전환 전반에서 이 의존은 성립하지 않으므로, seed 확보를 명시적 게이트로 둔다(§6.3 B-static).
 
 ### 6.2 R2 — SyntheticRefresh는 IPC v1 freeze보다 먼저
 
@@ -271,6 +274,13 @@ ldremote.exe             PID 10480   사용자 계정   스레드 84  154MB    �
 | 첫 전달 AU | key여야 함. pre-key delta = 0, stale incarnation AU = 0 |
 | 디렉터리 재등록 / 릴레이 재협상 / 클라 재접속 | 0건 |
 | 자동 복구 | 10/10, 반복 kill 후 핸들·메모리 증가 없음 |
+
+**B-static. 정적 화면 워커 재시작 (필수 leg, DXGI·WGC 각각 최소 10회)**
+
+- 조건: 물리 콘솔 · 타깃/geometry 불변 · `STATIC_REFRESH=0` · **화면·커서·입력 완전 정지**
+- 절차: 워커 강제 kill → 복구 관측
+- 통과: network epoch·active generation 불변 · 피커 미노출 · 옛 `workerIncarnation` AU 0 · 첫 전달 AU는 key · 첫 client present p95 ≤ 1.0s / max ≤ 1.5s
+- **seed가 타임아웃 내에 오지 않으면 명시적 폴백이 있어야 한다**: ①캡처 백엔드 재생성 ②대체 one-shot 스냅샷 ③동일 타깃·generation·보안 identity가 검증된 **broker-side last-safe IDR replay**. replay는 **락·타깃·세션 경계를 넘기면 안 된다.**
 
 > 1.5s는 `viewer_constants.hpp:37`의 `kCongestionRecoveryTimeoutUsDefault`와 같은 값이다. "그때까지 괜찮다"가 아니라 **그 전에 끝나야** 클라이언트의 추가 key 요청/리셋 churn을 피한다는 뜻이다.
 > present gap p95는 1회의 1.5초 blackout을 숨길 수 있으므로 **recovery duration과 max/over2x를 반드시 따로 본다.**
