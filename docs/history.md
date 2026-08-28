@@ -7690,3 +7690,19 @@ Next action
   `854b58f` / `631882d`. 나머지는 자체 게이트(빌드 + 두-leg e2e + 단위테스트 22종)만 통과한 상태.
 - 검증: 빌드 0 에러 + host_udp_e2e 두 leg ALL PASS + 단위테스트 22종 PASS. 주석만 변경.
 - 다음 액션: **실기 확인**(설치본 빌드 → 사용자 판정). 그 뒤 H-24 / H-25 / H-27 / 검증 부채.
+
+### 322) 2026-08-28 OSLink 프로세스 구조 실측 + GNLink 호스트와 대조 문서 신설 (브랜치 refactor/viewer-split)
+
+- 계기: "한 프로세스에 스레드·mutex가 너무 많다. 프로세스를 나눠 담는 게 이득 아니냐" — 경쟁 제품(OSLink)이 실제로 어떻게 갈라 놨는지부터 실측.
+- 신설: `docs/OSLink_구조분석.md` (README 활성 문서 목록에 등재). 측정 절차 · 프로세스 트리 · 전송 구조 · GNLink 대조 · 분리의 득실 · 한계.
+- OSLink 실측: **권한 경계로 프로세스 4개** — `ldremoteservice.exe`(LocalSystem 서비스) → `ldremoteevent.exe`(SYSTEM, 콘솔 세션 재기동) →
+  `capture.exe`(캡처 전담, 소켓 0) / 별도로 `ldremote.exe`(사용자, 스레드 84, **소켓 전부 소유**). 프레임은 명명 파이프
+  `ld-winpipe-read/write-<n>` + `VideoFrameIPC`. 세션 전환 시 서비스가 SYSTEM 자식을 죽였다 새 세션에 다시 띄우고, 사용자 프로세스는 연결 유지.
+  엔진은 ZEGO RTC SDK, 캡처는 OBS 계열 + 자체 가상 디스플레이(VDD by MTT).
+- GNLink 대조: 산출물은 이미 5개(`GNLinkHost`/`GNLinkStream`/`GNLinkCapture`/`GNLinkInputService`/`GNLinkViewer`)지만 **상주는 2개**뿐이고,
+  캡처+인코딩+ABR+컨트롤+송신이 전부 `GNLinkStream` 한 프로세스(런타임 스레드 23, 핸들 861). `GNLinkCapture`는 GDI 폴백 전용,
+  `GNLinkInputService`는 Manual/Stopped. 동기화 객체 선언 mutex류 19 / atomic 멤버 107 (뷰어 3 / 72) — Phase 4 정리 후에도 남은 밀도.
+- 판단: 밀도의 원인은 스타일이 아니라 **경계**(캡처·인코딩·네트워크가 한 주소 공간). 다만 프레임 IPC를 0-copy로 유지할 수 있는지가
+  채택을 가르는 핵심이라 문서에는 **검토 후보로만** 적고 결정하지 않았다. 코덱스 상의용 질문 4개(Q1~Q4)를 문서 §5에 명시.
+- 코드 변경 0 · 빌드/e2e 미실행(문서만).
+- 다음 액션: 검증용 코덱스와 Q1~Q4 상의 → 결론을 §5에 반영하고, 채택 시 `구현계획.md` N/H 항목으로 승격.

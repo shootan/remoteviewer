@@ -14,6 +14,8 @@
   - `클라이언트_뷰어_분할_리팩터_계획.md` — viewer (GNLinkViewer) main split refactor design + per-phase checkboxes.
   - `뷰어_리팩터_발견사항.md` — findings ledger kept during the viewer refactor (record only; fix after the refactor).
   - `history.md` — running work log.
+  - `OSLink_구조분석.md` — measured architecture of a competing remote tool (process boundaries, transport)
+    and the side-by-side with our host; background for 구현계획 E7.
   - `external_wan_test_guide.md`, `성능기준선_60fps_20260804.md`, `수동확인_체크리스트.md` — active test aids.
 - `docs/legacy/` — dated/superseded designs, reviews, and old history splits. Read only when
   explicitly needed for deep historical context; do not read by default.
