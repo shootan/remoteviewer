@@ -188,7 +188,94 @@ ldremote.exe             PID 10480   사용자 계정   스레드 84  154MB    �
 | "Q1(원시 shared texture)이 안 되면 논의가 무의미" | **클로드의 최초 프레이밍이 틀렸다** — ②의 선결조건이 아니라 ①의 별도 연구 게이트다 |
 | "스레드·mutex 개수가 분리 근거" | **틀렸다** — 근거는 fault domain·권한·소켓 수명 |
 
-## 6) 한계 / 미확인
+## 6) ADR 초안 — 미디어 워커 분리 (코덱스 2라운드 합의, 2026-08-28)
+
+**상태: 초안. 승인 전.** 채택은 `구현계획.md`의 N/H 항목 승격으로 결정한다. 아래 6줄이 ADR 본문이고, 6.1~6.3이 그 근거·절차다.
+
+1. **논리 세션 identity(network epoch / stream generation / wire seq / media barrier)는 broker 단독 소유.**
+2. **worker identity는 private `workerIncarnation`이며 wire에 노출하지 않는다.**
+3. **워커 재시작은 같은 generation의 투명 IDR 복구**다 — 피커를 다시 띄우지 않는다.
+4. **frame provenance는 IPC v1 필수 필드**이고, 현재 wire의 SyntheticRefresh 비트가 그보다 선행한다.
+5. **성능 게이트는 물리 콘솔 baseline을 뽑은 뒤 사전 동결**한다. RDP는 성능이 아니라 별도 기능 회귀 suite다.
+6. **production 착수는 0.2.59 실기 통과 후.**
+
+### 6.1 R1 — 워커 재시작은 generation을 올리지 않는다
+
+근거(코드 확인):
+
+- `viewer_selection_gate.hpp:13~30` — generation은 **"사용자가 승인한 논리 타깃"의 identity**다. 워커 프로세스 수명과 다른 개념이다.
+- `:63` `activeStreamGeneration`은 reveal 이후 **영구 필터**다. 워커 재시작만으로 generation을 올리면 새 프레임이 `SelectionAdmit::DropStraggler`(`:54`)로 버려진다. "새 generation" 안은 새 `WindowSelected` ack/선택 트랜잭션 없이는 성립하지 않는다.
+- `host_stage_encode_send_h264_au.cpp:235` — `hdr.seq = ++encoder.encodedSeq`. **wire seq가 인코더에서 나오므로** 워커가 죽었다 살아나 seq=1로 돌아오면 같은 generation 안에서 UDP assembly/최신 프레임 판정/telemetry가 이전 seq 공간과 충돌한다. → **wire seq도 broker 소유**로 옮긴다. IPC 프레임은 `{workerIncarnation, localFrameId, brokerGeneration, ...}`으로 올리고 broker가 현재 incarnation인지 검사한 뒤 단조 wire seq를 새로 부여한다.
+
+**투명 재시작 트랜잭션 (broker 주도)**
+
+1. `workerIncarnation++`
+2. 송신 AU 큐 비우고, **같은 network epoch에서** media barrier close(`waitingForKey=true`)
+3. 옛 incarnation의 AU/청크/IPC completion 전부 drop
+4. 현재 타깃·설정·generation + `ForceIDR`를 새 워커에 replay
+5. **SPS/PPS 포함 key AU만 첫 프레임으로 accept** — 그 전 delta는 broker에서 drop
+6. key enqueue/wire 실패 시 현재 `SenderBarrier` 규칙대로 barrier 재arm
+7. key가 도착하면 클라이언트 디코더가 같은 generation에서 IDR로 DPB 재동기화 — **피커는 건드리지 않는다**
+
+**generation을 올려야 하는 경우는 둘뿐**: 사용자가 다른 타깃/모니터/창을 선택했을 때, broker가 논리 타깃 identity를 바꿀 때. 워커 재기동·같은 타깃 재attach·인코더/디바이스 재생성은 generation을 유지한다. 해상도만 바뀌면 지금처럼 같은 generation의 SPS/크기 변경 경로를 쓰되 클라이언트 reconfigure 게이트를 그대로 검증한다.
+
+**H-26/H-27과의 접점**
+
+- `forceKeyNext`/kick/cache는 워커 내부 상태여도 되지만 **"IDR가 아직 필요하다"는 barrier는 broker 권위**다. 워커가 죽으면 broker가 barrier를 닫고 `ForceIDR`를 다시 보내므로 워커 로컬 force 상태의 유실은 안전하다.
+- 워커 down 중 뷰어의 keyframe 요청은 broker가 coalesce했다가 새 워커 Ready 뒤 전달한다.
+- **IPC 커맨드에는 network/client epoch(또는 broker request generation)을 stamp**해서, H-27의 옛 in-flight 커맨드가 새 워커/세션에 적용되지 않게 한다.
+- 선택 진행 중 워커가 죽으면 broker가 **같은 pending selection generation으로 재시도**하고 성공 IDR까지 기존 피커 대기를 유지한다. 임의의 새 generation 금지.
+- 워커 재시작 직후에는 옛 raw 캐시가 없다. **새 캡처 백엔드가 현재 데스크톱 seed 프레임을 내는 게이트가 별도로 필요**하다 — "첫 전달 AU는 key" 규칙만으로는 정적 화면에서 워커가 프레임을 영영 못 얻는 경우를 못 고친다.
+
+### 6.2 R2 — SyntheticRefresh는 IPC v1 freeze보다 먼저
+
+근거: `poc_protocol.hpp:130` — `uint32_t flags = 0;  // bit0: keyFrame`. 현재 wire에 **키프레임 비트 하나뿐**이고 `host_stage_encode_send_h264_au.cpp:239`(`hdr.flags = encodedKeyFrame ? 1u : 0u`)도 그것만 싣는다. 분리 후 broker는 AU 바이트/크기만으로 합성 여부를 복원할 수 없으므로, **워커가 origin을 발행하지 않으면 지금의 집계 오염이 프로토콜 계약으로 굳는다.** `HANDOFF.md:45,51~54`가 이미 P2 선행 게이트로 못박아 둔 항목이다(F-10).
+
+순서: **0.2.59 실기 baseline 확인(설치본 불변)** → 독립 커밋으로 현재 wire에 end-to-end SyntheticRefresh 구현·검증 → 그 semantic을 IPC v1 필수 provenance 필드로 넣고 미디어 워커 spike 시작.
+
+스키마 권고:
+
+- IPC는 bool이 아니라 **`FrameOrigin { RealCapture, TrailingKick, StaticRefresh, RecoveryBootstrap }`**.
+- wire는 상수를 정의해 `bit0=KeyFrame`, `bit1=SyntheticRefresh`로 매핑.
+- `servedBootstrap`은 trailing kick과 static refresh를 함께 뜻하므로 **그대로 bit1의 원천으로 쓰지 않는다**. TickContext/워커 프레임에 origin을 명시한다.
+- 클라이언트는 synthetic refresh를 present/디코더 liveness에는 쓰되 **latency·catchup·anomaly·real-fps 근거에서 제외**하고, wire 바이트/디코더 비용 통계에는 포함한다.
+- **워커 재시작 첫 IDR은 SyntheticRefresh로 뭉개지 않는다** — `RecoveryBootstrap`으로 구분한다(필요하면 별도 wire 비트).
+
+### 6.3 R3 — 성능 게이트: 두 suite, 물리 콘솔 baseline 후 동결
+
+**선행(fail-closed preflight)**: RDP 접속 해제만으로 부족하다. 물리 콘솔 로그인 후 ① 활성 디스플레이 경로가 실제 GPU 출력인지 ② 호스트 로그가 `desktop_backend=dxgi`인지 ③ `dxgi_select_no_outputs`/WGC 폴백이 없는지 확인하고, OSLink 등 다른 원격 캡처 도구를 종료한 뒤 **동일한 결정적 모션 씬**으로 측정한다.
+
+**A. steady-state** (예: 60초 × 5회, 물리 콘솔)
+
+| 지표 | 임계(시작점 — baseline 분산 확인 후 spike 전 동결) |
+|---|---|
+| captureQpc→broker wire p50/p95 | baseline + max(10%, 2ms) |
+| client present gap p50/p95/max + over1.5x/over2x 건수 | 〃 (max·over2x는 별도로 본다) |
+| capture/encoded/sent/decoded fps | baseline의 95% 이상 |
+| broker+worker 합산 CPU time (순간값 아닌 delta/wall) | baseline + max(10% 상대, 2%p 절대) |
+| 합산 working set/commit | **절대 예산 명시**(새 프로세스 고정비가 있어 상대값만 쓰면 안 됨) |
+| AU IPC queue depth/max/drop, key·delta drop, enqueue→dequeue p95 | 정상 부하에서 **drop = 0** |
+| bitrate/wire bytes, keyframe 빈도 | 회귀 없음 |
+
+> 10%만 고정하면 baseline이 작은 지표가 노이즈에 지고, 절대값만 쓰면 큰 지표의 회귀를 숨긴다. 그래서 상대·절대를 함께 쓴다.
+
+**B. fault-recovery** (kill/hang 주입 최소 10회)
+
+구간별 시계: 워커 exit/hang 감지 → 새 프로세스 spawn → 워커 Ready(타깃/디바이스/인코더) → 첫 key AU broker accept → 첫 key wire → 클라이언트 첫 디코드/present.
+
+| 게이트 | 값 |
+|---|---|
+| 첫 present 복귀 | **p95 ≤ 1.0s 목표, max ≤ 1.5s hard** |
+| 네트워크 epoch/UDP peer/NAT 매핑 | 유지, control ping 지속 |
+| 피커 노출 / active generation | 노출 0 / 불변 |
+| 첫 전달 AU | key여야 함. pre-key delta = 0, stale incarnation AU = 0 |
+| 디렉터리 재등록 / 릴레이 재협상 / 클라 재접속 | 0건 |
+| 자동 복구 | 10/10, 반복 kill 후 핸들·메모리 증가 없음 |
+
+> 1.5s는 `viewer_constants.hpp:37`의 `kCongestionRecoveryTimeoutUsDefault`와 같은 값이다. "그때까지 괜찮다"가 아니라 **그 전에 끝나야** 클라이언트의 추가 key 요청/리셋 churn을 피한다는 뜻이다.
+> present gap p95는 1회의 1.5초 blackout을 숨길 수 있으므로 **recovery duration과 max/over2x를 반드시 따로 본다.**
+
+## 7) 한계 / 미확인
 
 - ZEGO 엔진 로그가 난독화되어 있어 **NAT 종류 판정·릴레이 폴백 조건·암호화 방식은 확인하지 못했다.**
 - 최초 홀펀칭이 성립한 순간은 캡처 창(연결 이후 8초) 밖이라 관측하지 못했다. 시그널링 채널이 상시 유지된다는 사실만 확인.

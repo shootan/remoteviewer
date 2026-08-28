@@ -7723,3 +7723,20 @@ Next action
 - 미해결(코덱스에 2라운드 질의 발송, seq 790): R1 워커 재시작이 클라 선택 게이트의 generation에 어떻게 보여야 하는가(투명 재시작 vs 새 generation) ·
   R2 SyntheticRefresh(F-10)를 IPC 스키마 v1 필수 필드로 선행해야 하는가 · R3 spike 합격 기준 수치화(p95 회귀 ≤10%, 워커 kill 후 복귀 ≤1.5초 제안).
 - 코드 변경 0 · 빌드/e2e 미실행(문서만). 채택 시 `구현계획.md` N/H 항목으로 승격 — 아직 승격하지 않았다.
+
+### 324) 2026-08-28 미디어 워커 분리 ADR 초안 확정 — 코덱스 2라운드(R1/R2/R3) (브랜치 refactor/viewer-split)
+
+- `docs/OSLink_구조분석.md` §6 신설(ADR 초안 6줄 + 6.1~6.3). **승인 전 초안** — 채택은 `구현계획.md` N/H 승격으로 결정하며 아직 승격하지 않았다.
+- ADR 6줄: ①논리 세션 identity(epoch/generation/**wire seq**/barrier)는 broker 단독 소유 ②worker identity는 private `workerIncarnation`, wire 미노출
+  ③워커 재시작 = 같은 generation의 투명 IDR 복구(피커 재노출 금지) ④frame provenance는 IPC v1 필수, 현재 wire의 SyntheticRefresh 비트가 선행
+  ⑤성능 게이트는 물리 콘솔 baseline 후 사전 동결, RDP는 기능 회귀 suite ⑥production 착수는 0.2.59 실기 통과 후.
+- R1 근거(코드 확인): `viewer_selection_gate.hpp:13~30`(generation = 사용자 승인 논리 타깃의 identity) · `:63`(`activeStreamGeneration` = reveal 후 영구 필터) ·
+  `:54`(`DropStraggler` — 워커 재시작으로 generation을 올리면 새 프레임이 여기로 떨어진다) · **`host_stage_engine... host_stage_encode_send_h264_au.cpp:235`
+  (`hdr.seq = ++encoder.encodedSeq` — wire seq가 인코더 소유라 재시작 시 1로 되감김 → broker로 이관 필요)**. 투명 재시작 트랜잭션 7단계와 H-26/H-27 접점 기록.
+- R2: `poc_protocol.hpp:130`(`flags` bit0 key뿐) 확인. 분리 후에는 broker가 AU만 보고 합성 여부를 복원할 수 없으므로 **SyntheticRefresh(F-10)를 현재 wire에서 먼저 검증한 뒤
+  IPC v1 필수 필드로** 넣는다. IPC는 bool 대신 `FrameOrigin{RealCapture,TrailingKick,StaticRefresh,RecoveryBootstrap}`; 워커 재시작 첫 IDR은 `RecoveryBootstrap`으로 구분.
+- R3: steady-state suite(상대·절대 임계 병행, IPC drop 0) + fault-recovery suite(kill 10회, 첫 present p95 ≤1.0s / max ≤1.5s = `viewer_constants.hpp:37`과 동일 값,
+  NAT 매핑·generation 불변, pre-key delta 0). 물리 콘솔 fail-closed preflight(실제 GPU 출력 / `desktop_backend=dxgi` / WGC 폴백 없음 / 타 원격 도구 종료) 선행.
+- 새로 드러난 실패 모드: **워커 재시작 직후 정적 화면 seed 프레임** — WGC/DXGI가 변화 없으면 프레임을 안 주므로 "첫 전달 AU는 key"만으로는 복구가 끝나지 않을 수 있다.
+  fault-recovery suite를 정적 화면 시나리오로도 돌리도록 기록.
+- 코드 변경 0 · 빌드/e2e 미실행(문서만). 코덱스 3라운드 발송(seq 792) — ADR 문구 확정 확인용.
