@@ -18,6 +18,11 @@
 
 namespace remote60::native_poc::viewer {
 
+// How long a newer-but-unpresented frame may sit before the UI timer forces an invalidate.
+// Long enough that an ordinary pending paint is never pre-empted (the timer runs every 50ms),
+// short enough that a lost request costs one dropped tick instead of the session. (F-20.)
+constexpr uint64_t kPaintLivenessGraceUs = 200000;  // 200ms
+
 constexpr bool kInputPolicyForceBlock = false;
 // Catch-up defaults tuned for software codec path: avoid runaway multi-second lag,
 // but still clamp perceived latency quickly for interactive remote use.

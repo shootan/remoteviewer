@@ -70,9 +70,24 @@ struct FrameBuffer {
   // (until the first present re-anchors lastPresentedCaptureUs).
   std::atomic<uint64_t> catchupSuppressUntilUs{0};
   // cross-thread: exchanged by recv (publish) and UI (WM_PAINT) to coalesce InvalidateRect.
+  //
+  // This latch mirrors state the OS already owns (the window's update region), and getting the two
+  // out of step wedges the viewer permanently: with the latch set but no invalid region, no
+  // WM_PAINT can ever arrive, and every later frame takes the "already queued" branch instead of
+  // asking for one. That is exactly what a field freeze turned out to be -- present stopped dead
+  // while decode kept running and the decode-queue lag estimate climbed past 100 seconds.
+  // Only request_video_paint() may set it, and only paint_video_frame() may clear it -- after
+  // BeginPaint has validated the old region, never before. (Viewer ledger F-20.)
   std::atomic<bool> paintQueued{false};
   std::atomic<uint64_t> paintCoalescedCount{0};
   std::atomic<uint64_t> overwriteBeforePresentCount{0};
+  // Liveness telemetry for the above. paintEnterCount rising while presents stay at zero is the
+  // signature of a paint that runs but skips the video branch; both frozen is the stuck latch.
+  std::atomic<uint64_t> paintEnterCount{0};
+  std::atomic<uint64_t> beginPaintFailCount{0};
+  std::atomic<uint64_t> paintSelfHealCount{0};
+  std::atomic<uint64_t> invalidateFailCount{0};
+  std::atomic<uint64_t> lastPaintEnterUs{0};
 };
 
 }  // namespace remote60::native_poc::viewer

@@ -441,6 +441,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
       if (wp == kCursorOverlayTimerId) {
         update_cursor_overlay(hwnd);
+        // Safety net, not the primary path: if a repaint request was ever lost, this notices that
+        // a newer frame is sitting unpresented and asks again. Correctness lives in
+        // request_video_paint; this only bounds the damage to one tick. (Viewer ledger F-20.)
+        poll_video_paint_liveness(hwnd);
         return 0;
       }
       break;

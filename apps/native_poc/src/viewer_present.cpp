@@ -15,11 +15,65 @@
 
 namespace remote60::native_poc::viewer {
 
+void request_video_paint(HWND hwnd) {
+  if (!hwnd) return;
+  // The picker draws itself and invalidates on its own transitions; repainting the whole card
+  // grid at video cadence would be pure cost.
+  if (gPicker.visible.load(std::memory_order_relaxed)) return;
+  if (gFrameBuf.paintQueued.exchange(true)) {
+    ++gFrameBuf.paintCoalescedCount;
+    return;
+  }
+  if (!InvalidateRect(hwnd, nullptr, FALSE)) {
+    // The request never reached the OS, so nothing will ever clear the latch. Put it back or the
+    // viewer stops painting for good.
+    ++gFrameBuf.invalidateFailCount;
+    gFrameBuf.paintQueued.store(false, std::memory_order_release);
+  }
+}
+
+void poll_video_paint_liveness(HWND hwnd) {
+  if (!hwnd) return;
+  if (gPicker.visible.load(std::memory_order_relaxed)) return;
+  uint64_t latestVersion = 0;
+  {
+    std::lock_guard<std::mutex> lk(gFrameBuf.frame.mu);
+    latestVersion = gFrameBuf.frame.version;
+  }
+  if (latestVersion == gFrameBuf.lastPresentedVersion.load(std::memory_order_relaxed)) return;
+  // A newer frame exists and has not been presented. If a paint is genuinely pending the update
+  // region is non-empty and this does nothing; if the latch and the OS have drifted apart, this
+  // is what turns a permanent freeze into one dropped tick. Correctness still lives in
+  // request_video_paint -- this only catches the case where that request was lost.
+  const uint64_t nowUs = qpc_now_us();
+  const uint64_t lastEnterUs = gFrameBuf.lastPaintEnterUs.load(std::memory_order_relaxed);
+  if (lastEnterUs != 0 && nowUs - lastEnterUs < kPaintLivenessGraceUs) return;
+  RECT updateRect{};
+  if (GetUpdateRect(hwnd, &updateRect, FALSE)) return;  // a paint really is pending
+  ++gFrameBuf.paintSelfHealCount;
+  gFrameBuf.paintQueued.store(false, std::memory_order_release);
+  request_video_paint(hwnd);
+}
+
 LRESULT paint_video_frame(HWND hwnd) {
-  gFrameBuf.paintQueued = false;
   PAINTSTRUCT ps{};
   HDC hdc = BeginPaint(hwnd, &ps);
+  // AFTER BeginPaint, never before. BeginPaint validates (clears) the window's update region, so
+  // clearing the latch first opened a window where a producer's InvalidateRect was swallowed by
+  // this very BeginPaint: the latch stayed set, no invalid region remained, and no WM_PAINT could
+  // ever be generated again. Clearing here means any request that lands after this point creates
+  // a fresh region that this paint cannot swallow. (Viewer ledger F-20.)
+  gFrameBuf.paintQueued.store(false, std::memory_order_release);
+  ++gFrameBuf.paintEnterCount;
   const uint64_t paintStartUs = qpc_now_us();
+  gFrameBuf.lastPaintEnterUs.store(paintStartUs, std::memory_order_relaxed);
+  if (!hdc) {
+    // Nothing to draw into. EndPaint still has to run so the region stays validated, and the next
+    // frame will ask again through the (now cleared) latch.
+    ++gFrameBuf.beginPaintFailCount;
+    EndPaint(hwnd, &ps);
+    return 0;
+  }
   const ClientLayout layout = compute_client_layout(hwnd);
   const RECT& videoRect = layout.videoRect;
   const RECT contentRect = resolve_video_content_rect(hwnd, videoRect);
@@ -307,13 +361,7 @@ LRESULT paint_video_frame(HWND hwnd) {
     std::lock_guard<std::mutex> lk(gFrameBuf.frame.mu);
     latestVersion = gFrameBuf.frame.version;
   }
-  if (!pickerVisible && latestVersion != frameVersion) {
-    if (!gFrameBuf.paintQueued.exchange(true)) {
-      InvalidateRect(hwnd, nullptr, FALSE);
-    } else {
-      ++gFrameBuf.paintCoalescedCount;
-    }
-  }
+  if (latestVersion != frameVersion) request_video_paint(hwnd);
   return 0;
 }
 

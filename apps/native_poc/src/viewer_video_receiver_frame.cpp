@@ -13,6 +13,7 @@
 #include "viewer_log.hpp"
 #include "viewer_overlay_draw.hpp"
 #include "viewer_picker.hpp"
+#include "viewer_present.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -54,7 +55,13 @@ void VideoReceiver::append_present_counter_fields(std::ostream& os) {
        << " fallbackRenderFail=" << fallbackRenderFail
        << " fallbackNv12ConvertFail=" << fallbackNv12ConvertFail
        << " paintCoalesced=" << paintCoalesced
-       << " overwriteBeforePresent=" << overwriteBeforePresent;
+       << " overwriteBeforePresent=" << overwriteBeforePresent
+       // Paint liveness (F-20). paintEnter frozen while decodedFrames climbs is the stuck-latch
+       // signature the field freeze showed; selfHeal>0 means the safety net caught a lost request.
+       << " paintEnter=" << gFrameBuf.paintEnterCount.load(std::memory_order_relaxed)
+       << " paintSelfHeal=" << gFrameBuf.paintSelfHealCount.load(std::memory_order_relaxed)
+       << " invalidateFail=" << gFrameBuf.invalidateFailCount.load(std::memory_order_relaxed)
+       << " beginPaintFail=" << gFrameBuf.beginPaintFailCount.load(std::memory_order_relaxed);
     st.lastPresentCounters = nowCounters;
 }
 
@@ -95,13 +102,7 @@ void VideoReceiver::publish_metrics(uint32_t metricW, uint32_t metricH, uint64_t
     gMetrics.client.udpAssemblyDropPm = st.udpAssemblyDropPmLast;
     gMetrics.client.seq.fetch_add(1);
     gMetrics.client.updatedQpcUs = nowUs;
-    if (gSession.hwnd && !gPicker.visible.load(std::memory_order_relaxed)) {
-      if (!gFrameBuf.paintQueued.exchange(true)) {
-        InvalidateRect(gSession.hwnd, nullptr, FALSE);
-      } else {
-        ++gFrameBuf.paintCoalescedCount;
-      }
-    }
+    request_video_paint(gSession.hwnd);
 }
 
 // The once-a-second stats line + metrics publish, formerly copied at five early-return sites of
@@ -322,13 +323,7 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
     // a per-frame invalidate would repaint the whole card grid at video cadence for nothing.
     // The reveal above and the picker-close handler invalidate on their own, so the newest
     // decoded frame still shows the moment the picker leaves.
-    if (gSession.hwnd && !gPicker.visible.load(std::memory_order_relaxed)) {
-      if (!gFrameBuf.paintQueued.exchange(true)) {
-        InvalidateRect(gSession.hwnd, nullptr, FALSE);
-      } else {
-        ++gFrameBuf.paintCoalescedCount;
-      }
-    }
+    request_video_paint(gSession.hwnd);
 
     if (args.traceEvery > 0 && (h.seq % args.traceEvery) == 0 &&
         (args.traceMax == 0 || gPresent.traceRecvPrinted.load() < args.traceMax)) {

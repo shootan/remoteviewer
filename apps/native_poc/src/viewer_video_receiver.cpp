@@ -16,6 +16,7 @@
 #include "viewer_log.hpp"
 #include "viewer_overlay_draw.hpp"
 #include "viewer_picker.hpp"
+#include "viewer_present.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -313,13 +314,7 @@ void VideoReceiver::run_tcp() {
         gFrameBuf.frame.surfaceTexture.Reset();
         gFrameBuf.frame.surfaceSubresource = 0;
       }
-      if (gSession.hwnd) {
-        if (!gFrameBuf.paintQueued.exchange(true)) {
-          InvalidateRect(gSession.hwnd, nullptr, FALSE);
-        } else {
-          ++gFrameBuf.paintCoalescedCount;
-        }
-      }
+      request_video_paint(gSession.hwnd);
 
       if (args.traceEvery > 0 && (h.seq % args.traceEvery) == 0 &&
           (args.traceMax == 0 || gPresent.traceRecvPrinted.load() < args.traceMax)) {
