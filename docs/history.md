@@ -7753,3 +7753,26 @@ Next action
 - §6.3에 **B-static leg 신설**(필수): 물리 콘솔·타깃 불변·`STATIC_REFRESH=0`·화면/커서/입력 완전 정지에서 DXGI·WGC 각각 10회 kill.
   seed 미도착 시 명시적 폴백 3택(백엔드 재생성 / one-shot 스냅샷 / 동일 타깃·generation·보안 identity 검증된 broker-side last-safe IDR replay — 락·타깃·세션 경계 넘기지 말 것).
 - 코덱스 스레드 종료(3왕복, seq 788/790/792). 코드 변경 0 · 빌드/e2e 미실행(문서만). `구현계획.md` N/H 승격은 여전히 사용자 결정 대기.
+
+### 322) 2026-08-29 0.2.60 설치본 + RDP 테스트 규칙 (브랜치 refactor/viewer-split)
+
+- Phase 4 코드의 실기 판정을 위해 설치본을 냈다. `product_version.hpp` 0.2.59 → **0.2.60**,
+  `remote60_installer` 빌드, payload 6실행파일 + HTML 2개 스테이징.
+- **임베드 검증**(HANDOFF가 유지하라고 한 절차): payload `GNLinkHost.exe`와 `dist/` 복사본 양쪽에서
+  UTF-16 버전 문자열이 `0.2.60` 임을 확인. → `dist/GNLinkSetup-0.2.60.exe` (3,174,400 bytes).
+  되돌리기는 `dist/GNLinkSetup-0.2.59.exe`.
+- 게이트: 전 타깃 빌드 0 에러 + host UDP e2e 두 leg ALL PASS + 단위테스트 **21/22**.
+- **실패 1건은 환경 문제로 규명**: `remote60_gdi_capture_process_test` 가 `delivered=96 / fps=31.99`로
+  `>=150 / >=50fps` 요구를 못 맞췄다. 원인은 코드가 아니라 **RDP 접속 상태**다 —
+  `qwinsta` 결과 `rdp-tcp#0` 이 Active 이고 `Microsoft Remote Display Adapter` 의 갱신률이 **32Hz**다.
+  GDI 캡처는 화면 갱신률에 묶이므로 50fps 요구를 물리적으로 만족할 수 없다.
+  근거 3가지: (a) `gdi_capture_*` 는 이번 사이클 diff에 없음, (b) 세션 초반 동일 바이너리로 PASS 했음,
+  (c) 3회 연속 정확히 32.0fps — 경합 노이즈가 아니라 하드 캡.
+- 그래서 규칙으로 승격했다: `CLAUDE.md` 에 "테스트 규칙(필수)" 신설 — 테스트 전 `qwinsta` 로 RDP 확인,
+  접속 중이면 사용자에게 종료를 요청하고 종료 확인 후 진행, RDP 상태의 결과는 PASS/FAIL 모두 판정 근거로
+  쓰지 않는다. `HANDOFF.md` 의 "테스트 환경 주의"에도 탐지 방법과 GDI 테스트 오진 방지를 연결.
+- 변경 파일: `apps/native_poc/src/product_version.hpp`, `CLAUDE.md`, `docs/HANDOFF.md`,
+  `docs/구현계획.md`, `docs/history.md`, `dist/GNLinkSetup-0.2.60.exe`(신규).
+- 다음 액션: **RDP 끊고 실기 판정.** 중점 확인 — (1) 뷰어 재접속 시 복구(1초 틱 위치, H-10)
+  (2) 정적 화면 키프레임 복구(kick 재무장, H-26b) (3) 게임 중 프리즈/IDR 연발(H-19, H-03)
+  (4) 런타임 비트레이트 변경 직후 끊김(ABR hold, H-26d). DXGI 경로 항목이 많아 RDP면 판정 불가.

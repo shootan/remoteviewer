@@ -57,6 +57,11 @@
 ## 테스트 환경 주의 (중요)
 - **호스트 PC에 RDP 접속 중이면 DXGI 캡처가 0x80070005로 막혀 WGC 저품질 폴백** — 실측 확인됨.
   테스트 시 RDP 끊을 것. ("다른 PC 3~5fps" 사건의 유력 원인이기도.)
+- 확인은 `qwinsta` — `rdp-tcp#N` 세션이 `Active` 면 접속 중이다. `$env:SESSIONNAME` 은 내 셸의
+  세션만 보므로 부족하다. 절차는 `CLAUDE.md`의 "테스트 규칙"에 있다(RDP면 사용자에게 종료 요청 후 진행).
+- **`remote60_gdi_capture_process_test` 가 FAIL 하면 코드부터 의심하지 말고 `qwinsta` 부터 볼 것.**
+  RDP 세션의 `Microsoft Remote Display Adapter` 갱신률이 낮아(2026-08-29 실측 32Hz) GDI 캡처가
+  그 값에 묶이고, 테스트의 `fps >= 50` 요구를 물리적으로 만족할 수 없어 항상 FAIL 한다.
 
 ## 유용한 env 스위치 (host PC 시스템 환경변수, GNLinkHost 재시작 필요)
 - `REMOTE60_NATIVE_KEYINT_OVERRIDE=120` — 키프레임 2초 간격 A/B (0=off, 기본 60)
