@@ -7805,3 +7805,25 @@ Next action
   되돌리기 = `dist/GNLinkSetup-0.2.60.exe`.
 - 신규 미착수 **F-21**: PC 피커가 flip-model 스왑체인에 가려 안 보임(+ 사용자 요청: PC 피커는 desktop만 표시).
 - 다음 액션: 0.2.61 실기 판정 → F-21 → H-28.
+
+### 324) 2026-08-31 원장 잔여 전부 마무리 + 0.2.62 (브랜치 refactor/viewer-split, c3678b9 / a638913)
+
+- **F-21**(`c3678b9`) 뷰어: 대상 선택을 눌러도 피커가 안 보이고 마지막 영상이 얼어붙은 것처럼 보이던 것.
+  원인은 flip-model 스왑체인(HWND 직접 바인딩)을 DWM이 창 위에 합성해 GDI 피커 오버레이가 그 아래 깔린 것.
+  피커 진입 시 **스왑체인만** 해제하고 디바이스·컨텍스트는 유지한다(하드웨어 디코더가 공유 —
+  통째로 해제하면 디코딩이 깨진다). 사용자 요청도 함께: PC 피커는 `kPickerListsWindows` 한 곳으로
+  그리기·히트테스트·썸네일을 막아 desktop만 표시(그리기만 막으면 안 보이는 카드가 클릭됨).
+- **H-24 / H-25 / H-27 / H-28**(`a638913`) 호스트 원장 잔여 + 신규 1건.
+  H-24 listen 소켓을 accept 스레드가 select 틱으로 소유·자체 close / H-28 Serve 종료가 servedEpoch가
+  같을 때만 스트림 차단(TCP·UDP 동시 생존 시 상대 영상을 끄던 것) / H-27 요청에 epoch 스탬프 +
+  TakeForEpoch 폐기(이미 적용 중인 창은 설계상 유지, 원장 명시) / H-25 `oldestSubmittingUs=` 계측 신설.
+- 회귀: `host_main_loop_mailbox_test`에 stale-epoch 4건. 기존 brace 초기화는 epoch 추가로 필드가
+  밀렸으므로 전부 이름 주석으로 고정 — 앞으로 필드가 추가돼도 조용히 밀리지 않는다.
+- **테스트 스윕 오류 정정**: 이전 "26/26"에는 `udp_control_e2e_test`가 포함돼 있었는데 이건 살아있는
+  호스트가 필요한 e2e다. 직전 `host_udp_e2e`의 호스트가 남아 우연히 통과한 것으로 보인다. 단독
+  스윕에서 제외하고 `host_udp_e2e.sh`로만 검증한다(현재 25/25).
+- 검증(RDP 종료 후 콘솔): 전 타깃 빌드 0 에러 · 단위테스트 25/25 · host_udp_e2e 두 leg ALL PASS ·
+  viewer_split_gate --e2e ALL PASS · gdi_capture_process_test 58.30fps PASS.
+- 릴리스: 0.2.61 → **0.2.62**, `dist/GNLinkSetup-0.2.62.exe`. 임베드 버전 확인 + payload 바이너리가
+  마지막 소스 변경 이후 빌드본인지 타임스탬프로 확인. 되돌리기 = `dist/GNLinkSetup-0.2.61.exe`.
+- 다음 액션: 0.2.62 실기 판정. 원장 미착수 0건, 검증 부채(readback fault-injection)만 남음.
