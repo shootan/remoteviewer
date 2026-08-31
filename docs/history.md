@@ -7827,3 +7827,23 @@ Next action
 - 릴리스: 0.2.61 → **0.2.62**, `dist/GNLinkSetup-0.2.62.exe`. 임베드 버전 확인 + payload 바이너리가
   마지막 소스 변경 이후 빌드본인지 타임스탬프로 확인. 되돌리기 = `dist/GNLinkSetup-0.2.61.exe`.
 - 다음 액션: 0.2.62 실기 판정. 원장 미착수 0건, 검증 부채(readback fault-injection)만 남음.
+
+### 325) 2026-08-31 뷰어 원장 잔여 12건 → 10건 처리 + 0.2.63 (브랜치 refactor/viewer-split, d24fc31…a06ff69)
+
+- 목표: 호스트 Phase 4 와 같은 사이클로 뷰어 원장의 잔여 항목을 처리한다. 사용자 질문("다 해야 하나")에
+  "동작 영향은 F-10·F-18 둘뿐, 구조만인 것은 건너뛰자"로 답했으나 조건이 "전부"라 실행 가능한 10건은 전부
+  했고, 2건(F-17 전역→ctx, F-09 이중 구현)만 사유를 적고 보류했다.
+- **F-10 SyntheticRefresh**(`ffabc5f`): 호스트 kick/정적 리프레시 프레임에 헤더 bit1(UDP 청크는 bit6 — bit1 이
+  firstChunk 라서)을 찍고 공용 어셈블러가 관통시킨다. 뷰어는 그 프레임을 디코드·표시하되 latency/decodeTail
+  합계·혼잡 트리거·큐깊이 히스토그램에서 뺀다. **핵심은 호스트 ABR 입력(clAvgLatencyUs) 오염 방지** —
+  정적 화면에서 화질을 가짜로 낮출 수 있었다. 안드로이드 JNI 는 bit0 만 마스킹해 무해 확인. 회귀 1건.
+- **F-11 paced playout(P3)**(`a06ff69`): 안드로이드가 쓰는 VideoPlayoutClock 을 뷰어에 붙였다. recv 가
+  presentAtUs 를 찍고 WM_PAINT 가 due 전이면 one-shot 타이머로 보류. `REMOTE60_NATIVE_PACED_PLAYOUT=1`
+  opt-in, 기본 OFF(헤드룸의 지연 값어치는 실기가 말해줘야). 합성 프레임은 pacing 우회.
+- F-18 혼잡 임계 4개 튜너블(기본값 불변, 회귀 2건) · F-15 커서 샘플/클라 메트릭 스냅샷화(selection gate·
+  present 카운터는 검토 후 유지) · F-07 창 목록 적용을 UI 스레드로 · F-13/F-14 · 소소 5건(F-06/12/19/02/16).
+- 검증(RDP 종료 후 콘솔): 전 타깃 빌드 0 에러 · 단위테스트 26/26 · host_udp_e2e 두 leg ALL PASS · viewer e2e
+  ALL PASS × 2(기본 / PACED). e2e 로그: syntheticFrames 5~7/s, 기본 pacedHold=0, paced pacedHold 67~79/s.
+- 릴리스: 0.2.62 → **0.2.63**, `dist/GNLinkSetup-0.2.63.exe`(임베드 버전 + payload 최신성 확인). 되돌리기 0.2.62.
+- 코덱스: 검증 요청 발신(대답 없으면 진행 — 사용자 지시).
+- 다음 액션: 0.2.63 실기 판정(F-20 정지 / F-21 피커 / F-10 정적화면 화질 / 선택적으로 PACED_PLAYOUT=1 체감).
