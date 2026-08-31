@@ -5,9 +5,9 @@
 //
 // Role:    ClientLayout/compute_client_layout, CardGridMetrics/compute_card_grid/card_rect_for_slot,
 //          aspect_fit_rect, resolve_active_video_content_size/rect, point_in_* hit tests,
-//          map_client_point_to_video_coords, the DPI-scaled kPanel* metrics.
+//          map_client_point_to_video_coords.
 // Thread:  UI mostly; apply_window_list_snapshot (control thread) also computes the grid, and
-//          resolve_active_video_content_size reads gFrameBuf.frame under its mutex from any thread.
+//          resolve_active_video_content_size reads ctx.frameBuf.frame under its mutex from any thread.
 // Input:   HWND client rect, picker visibility, the selected target / frame / metrics sizes.
 // Output:  RECTs and video coordinates.
 // Callers: WndProc, viewer_overlay_draw, viewer_picker, viewer_cursor_overlay.
@@ -15,48 +15,29 @@
 // Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-8).
 
 #include "viewer_common.hpp"
-#include "viewer_globals.hpp"
+#include "viewer_state.hpp"
 #include "viewer_gdi_util.hpp"
 #include "viewer_layout_math.hpp"
 
 namespace remote60::native_poc::viewer {
 
-// Panel metrics are authored at 96 DPI and scaled per monitor; the process is
-// per-monitor DPI aware, so raw pixel constants would render tiny on a scaled display.
-inline int kPickerPanelPreferredWidth() { return dpi_scale(560); }
+// The kPanel* DPI-scaled metrics that used to sit here had no callers: Phase 2-7 moved the panel
+// geometry into viewer_layout_math.hpp, which takes the DPI as an argument. (Removed under F-17.)
 
-inline int kPickerPanelMinWidth() { return dpi_scale(420); }
+CardGridMetrics compute_card_grid(ViewerState& ctx, const RECT& gridRect);
 
-inline int kPanelMargin() { return dpi_scale(12); }
+bool resolve_active_video_content_size(ViewerState& ctx, uint32_t* outWidth, uint32_t* outHeight);
 
-inline int kPanelButtonHeight() { return dpi_scale(30); }
+RECT resolve_video_content_rect(ViewerState& ctx, HWND hwnd, const RECT& containerRect);
 
-inline int kPanelButtonGap() { return dpi_scale(8); }
+ClientLayout compute_client_layout(ViewerState& ctx, HWND hwnd);
 
-inline int kPanelSectionGap() { return dpi_scale(12); }
+bool point_in_toggle_button(ViewerState& ctx, HWND hwnd, int x, int y);
 
-inline int kPanelInfoHeight() { return dpi_scale(64); }
+bool point_in_macro_button(ViewerState& ctx, HWND hwnd, int x, int y);
 
-inline int kPanelStatsHeight() { return dpi_scale(128); }
+bool point_in_panel_ui(ViewerState& ctx, HWND hwnd, int x, int y);
 
-inline int kPanelItemHeight() { return dpi_scale(28); }
-
-inline int kPanelItemGap() { return dpi_scale(4); }
-
-CardGridMetrics compute_card_grid(const RECT& gridRect);
-
-bool resolve_active_video_content_size(uint32_t* outWidth, uint32_t* outHeight);
-
-RECT resolve_video_content_rect(HWND hwnd, const RECT& containerRect);
-
-ClientLayout compute_client_layout(HWND hwnd);
-
-bool point_in_toggle_button(HWND hwnd, int x, int y);
-
-bool point_in_macro_button(HWND hwnd, int x, int y);
-
-bool point_in_panel_ui(HWND hwnd, int x, int y);
-
-bool map_client_point_to_video_coords(HWND hwnd, int x, int y, int32_t* outVideoX, int32_t* outVideoY);
+bool map_client_point_to_video_coords(ViewerState& ctx, HWND hwnd, int x, int y, int32_t* outVideoX, int32_t* outVideoY);
 
 }  // namespace remote60::native_poc::viewer

@@ -34,7 +34,7 @@ struct DecoderState {
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> d3dContext;
   // Which selection generation the recv loop has already reset the decoder for. A bump by
   // begin_pc_target_selection() on the UI thread makes the next frame flush stale references.
-  uint64_t recvSelectionEpoch = 0;  // set from gSel.epoch at thread start
+  uint64_t recvSelectionEpoch = 0;  // set from ctx.sel.epoch at thread start
 };
 
 }  // namespace remote60::native_poc::viewer

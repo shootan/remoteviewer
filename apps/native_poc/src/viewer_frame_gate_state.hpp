@@ -72,7 +72,7 @@ struct FrameGateState {
   uint64_t lastCatchupEnterUs = 0;
   uint64_t catchupEnterThrottledCount = 0;
   bool catchupMode = false;
-  // lastPresentedCaptureUs is gFrameBuf.lastPresentedCaptureUs (atomic, updated after actual present)
+  // lastPresentedCaptureUs is ctx.frameBuf.lastPresentedCaptureUs (atomic, updated after actual present)
   bool captureTimelineReady = false;
   uint64_t captureRemoteBaseUs = 0;
   uint64_t captureLocalBaseUs = 0;

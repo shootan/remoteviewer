@@ -6,7 +6,7 @@
 //          thread), the key-forwarding memory (forward_key_down/up, key_event_should_forward,
 //          enqueue_release_for_pressed_keys), IME result text, mouse capture release,
 //          toggle_macro_window.
-// Thread:  UI (WndProc) produces; the control thread drains gControl.inputQueue. The macro window replays
+// Thread:  UI (WndProc) produces; the control thread drains ctx.control.inputQueue. The macro window replays
 //          through enqueue_macro_step on the UI thread.
 // Input:   virtual keys, video coordinates, UTF-16 text, macro steps.
 // Output:  QueuedControlInputMessage entries; macro recording taps enqueue_input_event.
@@ -15,13 +15,13 @@
 // Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-9).
 
 #include "viewer_common.hpp"
-#include "viewer_globals.hpp"
+#include "viewer_state.hpp"
 
 namespace remote60::native_poc::viewer {
 
-void enqueue_control_input_message(const QueuedControlInputMessage& msg);
+void enqueue_control_input_message(ViewerState& ctx, const QueuedControlInputMessage& msg);
 
-void enqueue_input_text_units(const uint16_t* text, size_t count);
+void enqueue_input_text_units(ViewerState& ctx, const uint16_t* text, size_t count);
 
 bool local_hotkey_modifiers_active();
 
@@ -36,15 +36,15 @@ bool local_hotkey_modifiers_active();
 bool key_event_should_forward(WPARAM vk);
 
 /** Decides for a down event and records the answer for the matching up. */
-bool forward_key_down(WPARAM vk);
+bool forward_key_down(ViewerState& ctx, WPARAM vk);
 
-bool forward_key_up(WPARAM vk);
+bool forward_key_up(ViewerState& ctx, WPARAM vk);
 
-bool send_ime_result_text(HWND hwnd, LPARAM imeFlags);
+bool send_ime_result_text(ViewerState& ctx, HWND hwnd, LPARAM imeFlags);
 
-void release_mouse_capture_if_idle(HWND hwnd);
+void release_mouse_capture_if_idle(ViewerState& ctx, HWND hwnd);
 
-void enqueue_release_for_pressed_mouse_buttons();
+void enqueue_release_for_pressed_mouse_buttons(ViewerState& ctx);
 
 // Release every key this client has an outstanding down for.
 //
@@ -54,13 +54,13 @@ void enqueue_release_for_pressed_mouse_buttons();
 // nobody is pressing, and because it is a real SendInput state it survives the client being
 // closed and reopened. Sending the up for everything held, the moment focus is lost, is what
 // keeps a modifier from latching on the host.
-void enqueue_release_for_pressed_keys();
+void enqueue_release_for_pressed_keys(ViewerState& ctx);
 
-void enqueue_input_event(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode);
+void enqueue_input_event(ViewerState& ctx, uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode);
 
 /** A replayed step carries its own recorded button state instead of today's live one. */
-void enqueue_macro_step(const remote60::native_poc::MacroStep& step);
+void enqueue_macro_step(ViewerState& ctx, const remote60::native_poc::MacroStep& step);
 
-void toggle_macro_window(HWND owner);
+void toggle_macro_window(ViewerState& ctx, HWND owner);
 
 }  // namespace remote60::native_poc::viewer

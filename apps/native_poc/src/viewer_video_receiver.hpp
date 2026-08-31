@@ -9,7 +9,7 @@
 //          publish, trace) and the once-a-second stats line.
 // Thread:  recv only. Owns RecvStats; writes FrameBuffer under its mutex, the remote cursor sample,
 //          the client metrics; reads the selection gate, picker visibility and present counters.
-// Input:   the media socket (gSession.sock), DecoderState, FrameGateState, Args.
+// Input:   the media socket (ctx.session.sock), DecoderState, FrameGateState, Args.
 // Output:  FrameBuffer frames, metrics, stats/telemetry lines, keyframe requests.
 // Callers: main() (std::thread recvThread([&]{ receiver.Run(); })).
 //
@@ -21,22 +21,24 @@
 #include "viewer_decoder_state.hpp"
 #include "viewer_frame_gate.hpp"
 #include "viewer_frame_gate_state.hpp"
-#include "viewer_globals.hpp"
+#include "viewer_state.hpp"
 #include "viewer_recv_stats.hpp"
 
 namespace remote60::native_poc::viewer {
 
 class VideoReceiver {
  public:
-  VideoReceiver(const Args& args, DecoderState& dec, FrameGateState& gate, uint64_t startUs,
-                uint32_t udpSimDropPm, uint32_t udpSimDropSeed)
-      : args(args), dec(dec), gate(gate), startUs(startUs), udpSimDropPm(udpSimDropPm),
+  VideoReceiver(ViewerState& ctx, const Args& args, DecoderState& dec, FrameGateState& gate,
+                uint64_t startUs, uint32_t udpSimDropPm, uint32_t udpSimDropSeed)
+      : ctx(ctx), args(args), dec(dec), gate(gate), startUs(startUs), udpSimDropPm(udpSimDropPm),
         udpSimDropSeed(udpSimDropSeed) {}
   // The thread body (formerly the recvThread lambda).
   void Run();
 
  private:
-  // captured by reference in the monolith; same names so the bodies read unchanged
+  // the session state (F-17), then what the monolith captured by reference; same names so the
+  // bodies read unchanged
+  ViewerState& ctx;
   const Args& args;
   DecoderState& dec;
   FrameGateState& gate;
@@ -46,14 +48,15 @@ class VideoReceiver {
   RecvStats st;
   // what the frame gate may do to the decoder and the control path
   struct DecoderSink : FrameGateSink {
-    DecoderSink(DecoderState& dec, const Args& args) : dec(dec), args(args) {}
+    DecoderSink(ViewerState& ctx, DecoderState& dec, const Args& args) : ctx(ctx), dec(dec), args(args) {}
     void reset_decoder() override;
     bool rebuild_decoder() override;
     void request_keyframe(uint16_t reason) override;
+    ViewerState& ctx;
     DecoderState& dec;
     const Args& args;
   };
-  DecoderSink sink{dec, args};
+  DecoderSink sink{ctx, dec, args};
   FrameGate fg{gate, st, sink};
 
   // the helper lambdas, now members (verbatim bodies)

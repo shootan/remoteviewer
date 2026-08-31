@@ -3,17 +3,17 @@
 #include "viewer_input_forward.hpp"
 
 #include "viewer_common.hpp"
-#include "viewer_globals.hpp"
+#include "viewer_state.hpp"
 
 namespace remote60::native_poc::viewer {
 
-void enqueue_control_input_message(const QueuedControlInputMessage& msg) {
-  gControl.inputQueue.Enqueue(msg);
+void enqueue_control_input_message(ViewerState& ctx, const QueuedControlInputMessage& msg) {
+  ctx.control.inputQueue.Enqueue(msg);
 }
 
-void enqueue_input_text_units(const uint16_t* text, size_t count) {
+void enqueue_input_text_units(ViewerState& ctx, const uint16_t* text, size_t count) {
   if (kInputPolicyForceBlock) return;
-  if (!gSession.inputEnabled.load()) return;
+  if (!ctx.session.inputEnabled.load()) return;
   if (!text || count == 0) return;
   size_t offset = 0;
   while (offset < count) {
@@ -24,11 +24,11 @@ void enqueue_input_text_units(const uint16_t* text, size_t count) {
     msg.inputText.header.magic = remote60::native_poc::kMagic;
     msg.inputText.header.type = static_cast<uint16_t>(MessageType::ControlInputText);
     msg.inputText.header.size = static_cast<uint16_t>(sizeof(msg.inputText));
-    msg.inputText.seq = gControl.inputQueue.NextSequence();
+    msg.inputText.seq = ctx.control.inputQueue.NextSequence();
     msg.inputText.utf16Count = static_cast<uint16_t>(chunk);
     std::memcpy(msg.inputText.utf16, text + offset, chunk * sizeof(uint16_t));
     msg.inputText.clientSendQpcUs = qpc_now_us();
-    enqueue_control_input_message(msg);
+    enqueue_control_input_message(ctx, msg);
     offset += chunk;
   }
 }
@@ -60,18 +60,18 @@ bool key_event_should_forward(WPARAM vk) {
 }
 
 /** Decides for a down event and records the answer for the matching up. */
-bool forward_key_down(WPARAM vk) {
+bool forward_key_down(ViewerState& ctx, WPARAM vk) {
   const bool forward = key_event_should_forward(vk);
-  if (vk < 256) gInput.forwardedKeyDown[vk].store(forward, std::memory_order_relaxed);
+  if (vk < 256) ctx.input.forwardedKeyDown[vk].store(forward, std::memory_order_relaxed);
   return forward;
 }
 
-bool forward_key_up(WPARAM vk) {
-  if (vk < 256) return gInput.forwardedKeyDown[vk].exchange(false, std::memory_order_relaxed);
+bool forward_key_up(ViewerState& ctx, WPARAM vk) {
+  if (vk < 256) return ctx.input.forwardedKeyDown[vk].exchange(false, std::memory_order_relaxed);
   return key_event_should_forward(vk);
 }
 
-bool send_ime_result_text(HWND hwnd, LPARAM imeFlags) {
+bool send_ime_result_text(ViewerState& ctx, HWND hwnd, LPARAM imeFlags) {
   if ((imeFlags & GCS_RESULTSTR) == 0) return false;
   HIMC imc = ImmGetContext(hwnd);
   if (!imc) return false;
@@ -84,24 +84,24 @@ bool send_ime_result_text(HWND hwnd, LPARAM imeFlags) {
   const LONG copied = ImmGetCompositionStringW(imc, GCS_RESULTSTR, text.data(), bytes);
   ImmReleaseContext(hwnd, imc);
   if (copied <= 0 || text.empty()) return false;
-  enqueue_input_text_units(text.data(), text.size());
+  enqueue_input_text_units(ctx, text.data(), text.size());
   return true;
 }
 
-void release_mouse_capture_if_idle(HWND hwnd) {
-  if ((gInput.mouseButtons.load(std::memory_order_relaxed) & 0x7u) == 0 && GetCapture() == hwnd) {
+void release_mouse_capture_if_idle(ViewerState& ctx, HWND hwnd) {
+  if ((ctx.input.mouseButtons.load(std::memory_order_relaxed) & 0x7u) == 0 && GetCapture() == hwnd) {
     ReleaseCapture();
   }
 }
 
-void enqueue_release_for_pressed_mouse_buttons() {
-  const uint16_t buttons = gInput.mouseButtons.exchange(0, std::memory_order_acq_rel);
+void enqueue_release_for_pressed_mouse_buttons(ViewerState& ctx) {
+  const uint16_t buttons = ctx.input.mouseButtons.exchange(0, std::memory_order_acq_rel);
   if ((buttons & 0x7u) == 0) return;
-  const int32_t vx = gInput.lastVideoX.load(std::memory_order_relaxed);
-  const int32_t vy = gInput.lastVideoY.load(std::memory_order_relaxed);
-  if ((buttons & 0x4u) != 0) enqueue_input_event(3, vx, vy, 0, VK_MBUTTON);
-  if ((buttons & 0x2u) != 0) enqueue_input_event(3, vx, vy, 0, VK_RBUTTON);
-  if ((buttons & 0x1u) != 0) enqueue_input_event(3, vx, vy, 0, VK_LBUTTON);
+  const int32_t vx = ctx.input.lastVideoX.load(std::memory_order_relaxed);
+  const int32_t vy = ctx.input.lastVideoY.load(std::memory_order_relaxed);
+  if ((buttons & 0x4u) != 0) enqueue_input_event(ctx, 3, vx, vy, 0, VK_MBUTTON);
+  if ((buttons & 0x2u) != 0) enqueue_input_event(ctx, 3, vx, vy, 0, VK_RBUTTON);
+  if ((buttons & 0x1u) != 0) enqueue_input_event(ctx, 3, vx, vy, 0, VK_LBUTTON);
 }
 
 // Release every key this client has an outstanding down for.
@@ -112,25 +112,25 @@ void enqueue_release_for_pressed_mouse_buttons() {
 // nobody is pressing, and because it is a real SendInput state it survives the client being
 // closed and reopened. Sending the up for everything held, the moment focus is lost, is what
 // keeps a modifier from latching on the host.
-void enqueue_release_for_pressed_keys() {
+void enqueue_release_for_pressed_keys(ViewerState& ctx) {
   for (int vk = 0; vk < 256; ++vk) {
-    if (gInput.forwardedKeyDown[vk].exchange(false, std::memory_order_relaxed)) {
-      enqueue_input_event(6, 0, 0, 0, static_cast<uint32_t>(vk));
+    if (ctx.input.forwardedKeyDown[vk].exchange(false, std::memory_order_relaxed)) {
+      enqueue_input_event(ctx, 6, 0, 0, 0, static_cast<uint32_t>(vk));
     }
   }
 }
 
-void enqueue_input_event(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode) {
+void enqueue_input_event(ViewerState& ctx, uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode) {
   if (kInputPolicyForceBlock) return;
-  if (!gSession.inputEnabled.load()) return;
+  if (!ctx.session.inputEnabled.load()) return;
   QueuedControlInputMessage msg{};
   msg.type = MessageType::ControlInputEvent;
   msg.inputEvent.header.magic = remote60::native_poc::kMagic;
   msg.inputEvent.header.type = static_cast<uint16_t>(MessageType::ControlInputEvent);
   msg.inputEvent.header.size = static_cast<uint16_t>(sizeof(msg.inputEvent));
-  msg.inputEvent.seq = gControl.inputQueue.NextSequence();
+  msg.inputEvent.seq = ctx.control.inputQueue.NextSequence();
   msg.inputEvent.kind = kind;
-  msg.inputEvent.buttons = gInput.mouseButtons.load();
+  msg.inputEvent.buttons = ctx.input.mouseButtons.load();
   msg.inputEvent.x = x;
   msg.inputEvent.y = y;
   msg.inputEvent.wheelDelta = wheelDelta;
@@ -138,22 +138,22 @@ void enqueue_input_event(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta
   msg.inputEvent.clientSendQpcUs = qpc_now_us();
   // Recording taps the send path, so the macro sees exactly what the host will see -- the
   // engine keeps pointer actions and drops keys on its own.
-  if (gInput.macro.IsRecording()) {
-    gInput.macro.RecordEvent(msg.inputEvent, GetTickCount64());
+  if (ctx.input.macro.IsRecording()) {
+    ctx.input.macro.RecordEvent(msg.inputEvent, GetTickCount64());
   }
-  enqueue_control_input_message(msg);
+  enqueue_control_input_message(ctx, msg);
 }
 
 /** A replayed step carries its own recorded button state instead of today's live one. */
-void enqueue_macro_step(const remote60::native_poc::MacroStep& step) {
+void enqueue_macro_step(ViewerState& ctx, const remote60::native_poc::MacroStep& step) {
   if (kInputPolicyForceBlock) return;
-  if (!gSession.inputEnabled.load()) return;
+  if (!ctx.session.inputEnabled.load()) return;
   QueuedControlInputMessage msg{};
   msg.type = MessageType::ControlInputEvent;
   msg.inputEvent.header.magic = remote60::native_poc::kMagic;
   msg.inputEvent.header.type = static_cast<uint16_t>(MessageType::ControlInputEvent);
   msg.inputEvent.header.size = static_cast<uint16_t>(sizeof(msg.inputEvent));
-  msg.inputEvent.seq = gControl.inputQueue.NextSequence();
+  msg.inputEvent.seq = ctx.control.inputQueue.NextSequence();
   msg.inputEvent.kind = step.kind;
   msg.inputEvent.buttons = step.buttons;
   msg.inputEvent.x = step.x;
@@ -161,13 +161,14 @@ void enqueue_macro_step(const remote60::native_poc::MacroStep& step) {
   msg.inputEvent.wheelDelta = step.wheelDelta;
   msg.inputEvent.keyCode = step.keyCode;
   msg.inputEvent.clientSendQpcUs = qpc_now_us();
-  enqueue_control_input_message(msg);
+  enqueue_control_input_message(ctx, msg);
 }
 
-void toggle_macro_window(HWND owner) {
+void toggle_macro_window(ViewerState& ctx, HWND owner) {
   remote60::native_poc::MacroWindowHooks hooks;
-  hooks.macro = &gInput.macro;
-  hooks.sendStep = [](const remote60::native_poc::MacroStep& step) { enqueue_macro_step(step); };
+  hooks.macro = &ctx.input.macro;
+  // The macro window is destroyed at shutdown, before ctx goes away.
+  hooks.sendStep = [&ctx](const remote60::native_poc::MacroStep& step) { enqueue_macro_step(ctx, step); };
   remote60::native_poc::macro_window_toggle(GetModuleHandleW(nullptr), owner, hooks);
   if (owner) InvalidateRect(owner, nullptr, FALSE);
 }

@@ -4,23 +4,23 @@
 
 #include "viewer_shutdown.hpp"
 
-#include "viewer_globals.hpp"
+#include "viewer_state.hpp"
 
 namespace remote60::native_poc::viewer {
 
 void shutdown_viewer(ViewerContext& ctx) {
-  gSession.running = false;
-  gSession.inputEnabled = false;
+  ctx.session.running = false;
+  ctx.session.inputEnabled = false;
   // Before anything is joined: the control thread can be parked in a blocking receive for the
   // read timeout, and closing the channel is what wakes it. Otherwise shutdown waits it out.
-  gControl.udpControl.Close(remote60::native_poc::ControlCloseReason::Shutdown);
-  gInput.macro.StopPlayback();
-  gInput.macro.StopRecording();
+  ctx.control.udpControl.Close(remote60::native_poc::ControlCloseReason::Shutdown);
+  ctx.input.macro.StopPlayback();
+  ctx.input.macro.StopRecording();
   remote60::native_poc::macro_window_destroy();
-  if (gSession.sock != INVALID_SOCKET) {
-    shutdown(gSession.sock, SD_BOTH);
-    closesocket(gSession.sock);
-    gSession.sock = INVALID_SOCKET;
+  if (ctx.session.sock != INVALID_SOCKET) {
+    shutdown(ctx.session.sock, SD_BOTH);
+    closesocket(ctx.session.sock);
+    ctx.session.sock = INVALID_SOCKET;
   }
   if (ctx.controlSock != INVALID_SOCKET) {
     shutdown(ctx.controlSock, SD_BOTH);
@@ -32,10 +32,10 @@ void shutdown_viewer(ViewerContext& ctx) {
 
   if (ctx.dec.useH264) {
     {
-      std::lock_guard<std::mutex> lk(gFrameBuf.frame.mu);
-      gFrameBuf.frame.surfaceSample.Reset();
-      gFrameBuf.frame.surfaceTexture.Reset();
-      gFrameBuf.frame.bytes.reset();
+      std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+      ctx.frameBuf.frame.surfaceSample.Reset();
+      ctx.frameBuf.frame.surfaceTexture.Reset();
+      ctx.frameBuf.frame.bytes.reset();
     }
     ctx.dec.decoder.shutdown();
     if (ctx.dec.mfStarted) MFShutdown();

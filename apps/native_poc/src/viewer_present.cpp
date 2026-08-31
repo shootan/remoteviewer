@@ -7,7 +7,7 @@
 #include <sstream>
 
 #include "viewer_gdi_util.hpp"
-#include "viewer_globals.hpp"
+#include "viewer_state.hpp"
 #include "viewer_layout.hpp"
 #include "viewer_log.hpp"
 #include "viewer_nv12_renderer.hpp"
@@ -15,47 +15,47 @@
 
 namespace remote60::native_poc::viewer {
 
-void request_video_paint(HWND hwnd) {
+void request_video_paint(ViewerState& ctx, HWND hwnd) {
   if (!hwnd) return;
   // The picker draws itself and invalidates on its own transitions; repainting the whole card
   // grid at video cadence would be pure cost.
-  if (gPicker.visible.load(std::memory_order_relaxed)) return;
-  if (gFrameBuf.paintQueued.exchange(true)) {
-    ++gFrameBuf.paintCoalescedCount;
+  if (ctx.picker.visible.load(std::memory_order_relaxed)) return;
+  if (ctx.frameBuf.paintQueued.exchange(true)) {
+    ++ctx.frameBuf.paintCoalescedCount;
     return;
   }
   if (!InvalidateRect(hwnd, nullptr, FALSE)) {
     // The request never reached the OS, so nothing will ever clear the latch. Put it back or the
     // viewer stops painting for good.
-    ++gFrameBuf.invalidateFailCount;
-    gFrameBuf.paintQueued.store(false, std::memory_order_release);
+    ++ctx.frameBuf.invalidateFailCount;
+    ctx.frameBuf.paintQueued.store(false, std::memory_order_release);
   }
 }
 
-void poll_video_paint_liveness(HWND hwnd) {
+void poll_video_paint_liveness(ViewerState& ctx, HWND hwnd) {
   if (!hwnd) return;
-  if (gPicker.visible.load(std::memory_order_relaxed)) return;
+  if (ctx.picker.visible.load(std::memory_order_relaxed)) return;
   uint64_t latestVersion = 0;
   {
-    std::lock_guard<std::mutex> lk(gFrameBuf.frame.mu);
-    latestVersion = gFrameBuf.frame.version;
+    std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+    latestVersion = ctx.frameBuf.frame.version;
   }
-  if (latestVersion == gFrameBuf.lastPresentedVersion.load(std::memory_order_relaxed)) return;
+  if (latestVersion == ctx.frameBuf.lastPresentedVersion.load(std::memory_order_relaxed)) return;
   // A newer frame exists and has not been presented. If a paint is genuinely pending the update
   // region is non-empty and this does nothing; if the latch and the OS have drifted apart, this
   // is what turns a permanent freeze into one dropped tick. Correctness still lives in
   // request_video_paint -- this only catches the case where that request was lost.
   const uint64_t nowUs = qpc_now_us();
-  const uint64_t lastEnterUs = gFrameBuf.lastPaintEnterUs.load(std::memory_order_relaxed);
+  const uint64_t lastEnterUs = ctx.frameBuf.lastPaintEnterUs.load(std::memory_order_relaxed);
   if (lastEnterUs != 0 && nowUs - lastEnterUs < kPaintLivenessGraceUs) return;
   RECT updateRect{};
   if (GetUpdateRect(hwnd, &updateRect, FALSE)) return;  // a paint really is pending
-  ++gFrameBuf.paintSelfHealCount;
-  gFrameBuf.paintQueued.store(false, std::memory_order_release);
-  request_video_paint(hwnd);
+  ++ctx.frameBuf.paintSelfHealCount;
+  ctx.frameBuf.paintQueued.store(false, std::memory_order_release);
+  request_video_paint(ctx, hwnd);
 }
 
-LRESULT paint_video_frame(HWND hwnd) {
+LRESULT paint_video_frame(ViewerState& ctx, HWND hwnd) {
   PAINTSTRUCT ps{};
   HDC hdc = BeginPaint(hwnd, &ps);
   // AFTER BeginPaint, never before. BeginPaint validates (clears) the window's update region, so
@@ -63,21 +63,21 @@ LRESULT paint_video_frame(HWND hwnd) {
   // this very BeginPaint: the latch stayed set, no invalid region remained, and no WM_PAINT could
   // ever be generated again. Clearing here means any request that lands after this point creates
   // a fresh region that this paint cannot swallow. (Viewer ledger F-20.)
-  gFrameBuf.paintQueued.store(false, std::memory_order_release);
-  ++gFrameBuf.paintEnterCount;
+  ctx.frameBuf.paintQueued.store(false, std::memory_order_release);
+  ++ctx.frameBuf.paintEnterCount;
   const uint64_t paintStartUs = qpc_now_us();
-  gFrameBuf.lastPaintEnterUs.store(paintStartUs, std::memory_order_relaxed);
+  ctx.frameBuf.lastPaintEnterUs.store(paintStartUs, std::memory_order_relaxed);
   if (!hdc) {
     // Nothing to draw into. EndPaint still has to run so the region stays validated, and the next
     // frame will ask again through the (now cleared) latch.
-    ++gFrameBuf.beginPaintFailCount;
+    ++ctx.frameBuf.beginPaintFailCount;
     EndPaint(hwnd, &ps);
     return 0;
   }
-  const ClientLayout layout = compute_client_layout(hwnd);
+  const ClientLayout layout = compute_client_layout(ctx, hwnd);
   const RECT& videoRect = layout.videoRect;
-  const RECT contentRect = resolve_video_content_rect(hwnd, videoRect);
-  const bool pickerVisible = gPicker.visible.load(std::memory_order_relaxed);
+  const RECT contentRect = resolve_video_content_rect(ctx, hwnd, videoRect);
+  const bool pickerVisible = ctx.picker.visible.load(std::memory_order_relaxed);
 
   std::shared_ptr<std::vector<uint8_t>> local;
   Microsoft::WRL::ComPtr<IMFSample> localSurfaceSample;
@@ -102,33 +102,33 @@ LRESULT paint_video_frame(HWND hwnd) {
   uint64_t frameVersion = 0;
   uint64_t presentAtUs = 0;
   {
-    std::lock_guard<std::mutex> lk(gFrameBuf.frame.mu);
-    presentAtUs = gFrameBuf.frame.presentAtUs;
-    if ((gFrameBuf.frame.bytes && !gFrameBuf.frame.bytes->empty()) || gFrameBuf.frame.surfaceTexture) {
-      local = gFrameBuf.frame.bytes;
-      localSurfaceSample = gFrameBuf.frame.surfaceSample;
-      localSurfaceTexture = gFrameBuf.frame.surfaceTexture;
-      localSurfaceSubresource = gFrameBuf.frame.surfaceSubresource;
-      localFormat = gFrameBuf.frame.format;
-      w = gFrameBuf.frame.width;
-      h = gFrameBuf.frame.height;
-      codedW = (gFrameBuf.frame.codedWidth > 0) ? gFrameBuf.frame.codedWidth : gFrameBuf.frame.width;
-      codedH = (gFrameBuf.frame.codedHeight > 0) ? gFrameBuf.frame.codedHeight : gFrameBuf.frame.height;
-      visL = gFrameBuf.frame.visibleLeft;
-      visT = gFrameBuf.frame.visibleTop;
-      seq = gFrameBuf.frame.seq;
-      frameKey = gFrameBuf.frame.key;
-      frameStreamGeneration = gFrameBuf.frame.streamGeneration;
-      captureUs = gFrameBuf.frame.captureUs;
-      encodeStartUs = gFrameBuf.frame.encodeStartUs;
-      encodeEndUs = gFrameBuf.frame.encodeEndUs;
-      sendUs = gFrameBuf.frame.sendUs;
-      recvUs = gFrameBuf.frame.recvUs;
-      decodeStartUs = gFrameBuf.frame.decodeStartUs;
-      decodeEndUs = gFrameBuf.frame.decodeEndUs;
-      queueSetUs = gFrameBuf.frame.queueSetUs;
-      decodeToQueueUs = gFrameBuf.frame.decodeToQueueUs;
-      frameVersion = gFrameBuf.frame.version;
+    std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+    presentAtUs = ctx.frameBuf.frame.presentAtUs;
+    if ((ctx.frameBuf.frame.bytes && !ctx.frameBuf.frame.bytes->empty()) || ctx.frameBuf.frame.surfaceTexture) {
+      local = ctx.frameBuf.frame.bytes;
+      localSurfaceSample = ctx.frameBuf.frame.surfaceSample;
+      localSurfaceTexture = ctx.frameBuf.frame.surfaceTexture;
+      localSurfaceSubresource = ctx.frameBuf.frame.surfaceSubresource;
+      localFormat = ctx.frameBuf.frame.format;
+      w = ctx.frameBuf.frame.width;
+      h = ctx.frameBuf.frame.height;
+      codedW = (ctx.frameBuf.frame.codedWidth > 0) ? ctx.frameBuf.frame.codedWidth : ctx.frameBuf.frame.width;
+      codedH = (ctx.frameBuf.frame.codedHeight > 0) ? ctx.frameBuf.frame.codedHeight : ctx.frameBuf.frame.height;
+      visL = ctx.frameBuf.frame.visibleLeft;
+      visT = ctx.frameBuf.frame.visibleTop;
+      seq = ctx.frameBuf.frame.seq;
+      frameKey = ctx.frameBuf.frame.key;
+      frameStreamGeneration = ctx.frameBuf.frame.streamGeneration;
+      captureUs = ctx.frameBuf.frame.captureUs;
+      encodeStartUs = ctx.frameBuf.frame.encodeStartUs;
+      encodeEndUs = ctx.frameBuf.frame.encodeEndUs;
+      sendUs = ctx.frameBuf.frame.sendUs;
+      recvUs = ctx.frameBuf.frame.recvUs;
+      decodeStartUs = ctx.frameBuf.frame.decodeStartUs;
+      decodeEndUs = ctx.frameBuf.frame.decodeEndUs;
+      queueSetUs = ctx.frameBuf.frame.queueSetUs;
+      decodeToQueueUs = ctx.frameBuf.frame.decodeToQueueUs;
+      frameVersion = ctx.frameBuf.frame.version;
     }
   }
   bool presented = false;
@@ -139,40 +139,40 @@ LRESULT paint_video_frame(HWND hwnd) {
   // what is on screen, re-arm for the remainder, and let the timer bring us back through
   // request_video_paint. The version recheck at the bottom is skipped on purpose -- a newer frame
   // will re-stamp presentAtUs and request its own paint.
-  if (!pickerVisible && presentAtUs > 0 && frameVersion != gFrameBuf.lastPresentedVersion.load(std::memory_order_relaxed)) {
+  if (!pickerVisible && presentAtUs > 0 && frameVersion != ctx.frameBuf.lastPresentedVersion.load(std::memory_order_relaxed)) {
     const uint64_t nowUs = qpc_now_us();
     if (nowUs < presentAtUs) {
       const uint64_t waitMs = (presentAtUs - nowUs + 999) / 1000;
       SetTimer(hwnd, kPacedPresentTimerId, static_cast<UINT>(std::clamp<uint64_t>(waitMs, 1, 250)), nullptr);
-      ++gFrameBuf.pacedHoldCount;
+      ++ctx.frameBuf.pacedHoldCount;
       EndPaint(hwnd, &ps);
       return 0;
     }
   }
   if (!pickerVisible && (local || localSurfaceTexture) && w > 0 && h > 0) {
     if (localFormat == SharedFrame::PixelFormat::Nv12) {
-      if (!gUi.nv12Renderer.ready) {
-        if (!gUi.nv12Renderer.init(hwnd)) {
-          ++gPresent.d3dPresentFailCount;
-          ++gPresent.fallbackInitFailCount;
+      if (!ctx.ui.nv12Renderer.ready) {
+        if (!ctx.ui.nv12Renderer.init(hwnd)) {
+          ++ctx.present.d3dPresentFailCount;
+          ++ctx.present.fallbackInitFailCount;
           fallbackReason = "d3d_init_fail";
         }
       }
-      if (gUi.nv12Renderer.ready) {
+      if (ctx.ui.nv12Renderer.ready) {
         if (localSurfaceTexture) {
-          presented = gUi.nv12Renderer.render_surface(
+          presented = ctx.ui.nv12Renderer.render_surface(
               hwnd, contentRect, localSurfaceTexture.Get(), localSurfaceSubresource,
               codedW, codedH, visL, visT, w, h, &renderTelemetry);
         } else {
-          presented = gUi.nv12Renderer.render(hwnd, contentRect, local->data(), codedW, codedH,
+          presented = ctx.ui.nv12Renderer.render(hwnd, contentRect, local->data(), codedW, codedH,
                                            visL, visT, w, h, &renderTelemetry);
         }
         if (presented) {
-          ++gPresent.d3dPresentSuccessCount;
+          ++ctx.present.d3dPresentSuccessCount;
           renderPath = localSurfaceTexture ? "d3d_nv12_surface" : "d3d_nv12";
         } else {
-          ++gPresent.d3dPresentFailCount;
-          ++gPresent.fallbackRenderFailCount;
+          ++ctx.present.d3dPresentFailCount;
+          ++ctx.present.fallbackRenderFailCount;
           fallbackReason = renderTelemetry.failStage;
         }
       }
@@ -196,10 +196,10 @@ LRESULT paint_video_frame(HWND hwnd) {
                         bgra.data() + static_cast<size_t>(visT) * codedW * 4, &bmi,
                         DIB_RGB_COLORS, SRCCOPY);
           presented = true;
-          ++gPresent.gdiFallbackPresentedCount;
+          ++ctx.present.gdiFallbackPresentedCount;
           renderPath = "gdi_nv12_fallback";
         } else {
-          ++gPresent.fallbackNv12ConvertFailCount;
+          ++ctx.present.fallbackNv12ConvertFailCount;
           fallbackReason = "nv12_to_bgra_fail";
         }
       }
@@ -222,18 +222,18 @@ LRESULT paint_video_frame(HWND hwnd) {
     }
   }
   if (presented) {
-    gPresent.hasPresentedAtLeastOneFrame = true;
-    gFrameBuf.lastPresentedVersion.store(frameVersion, std::memory_order_relaxed);
-    gFrameBuf.lastPresentedCaptureUs.store(captureUs, std::memory_order_relaxed);
+    ctx.present.hasPresentedAtLeastOneFrame = true;
+    ctx.frameBuf.lastPresentedVersion.store(frameVersion, std::memory_order_relaxed);
+    ctx.frameBuf.lastPresentedCaptureUs.store(captureUs, std::memory_order_relaxed);
     const uint64_t presentUs = qpc_now_us();
-    const uint64_t presentGapUs = (gPresent.lastPresentUs > 0) ? (presentUs - gPresent.lastPresentUs) : 0;
+    const uint64_t presentGapUs = (ctx.present.lastPresentUs > 0) ? (presentUs - ctx.present.lastPresentUs) : 0;
     const uint64_t queueToPaintUs = (paintStartUs >= queueSetUs) ? (paintStartUs - queueSetUs) : 0;
     const uint64_t queueToPresentUs = (presentUs >= paintStartUs) ? (presentUs - paintStartUs) : 0;
-    const uint32_t traceEvery = gPresent.traceEvery.load();
-    const uint32_t traceMax = gPresent.traceMax.load();
+    const uint32_t traceEvery = ctx.present.traceEvery.load();
+    const uint32_t traceMax = ctx.present.traceMax.load();
     if (traceEvery > 0 && (seq % traceEvery) == 0 &&
-        (traceMax == 0 || gPresent.tracePresentPrinted.load() < traceMax)) {
-      const auto nowPrinted = gPresent.tracePresentPrinted.fetch_add(1) + 1;
+        (traceMax == 0 || ctx.present.tracePresentPrinted.load() < traceMax)) {
+      const auto nowPrinted = ctx.present.tracePresentPrinted.fetch_add(1) + 1;
       if (traceMax == 0 || nowPrinted <= traceMax) {
         const uint64_t netUs = (recvUs >= sendUs) ? (recvUs - sendUs) : 0;
         const uint64_t c2eUs = (encodeStartUs >= captureUs) ? (encodeStartUs - captureUs) : 0;
@@ -274,7 +274,7 @@ LRESULT paint_video_frame(HWND hwnd) {
             << " totalUs=" << totalUs
             << " renderPath=" << renderPath
             << " fallbackReason=" << fallbackReason;
-        log_client_line(oss.str());
+        log_client_line(ctx, oss.str());
       }
     }
     // Emitted for every present, not only the ones that crossed a warning threshold.
@@ -283,11 +283,11 @@ LRESULT paint_video_frame(HWND hwnd) {
     // reports as stutter. Gating this behind the warning thresholds left the aggregate
     // reading zero through visibly uneven playback, so there was nothing to optimise
     // against.
-    if (gPresent.lastPresentUs > 0) {
+    if (ctx.present.lastPresentUs > 0) {
       std::ostringstream gapLine;
       gapLine << "[native-video-client][present] seq=" << seq
               << " frameGapUs=" << presentGapUs;
-      log_client_line(gapLine.str());
+      log_client_line(ctx, gapLine.str());
     }
     const uint64_t totalUs = (presentUs >= captureUs) ? (presentUs - captureUs) : 0;
     // GNLink stream telemetry (diagnostics only): one line per presented keyframe, plus any
@@ -295,15 +295,15 @@ LRESULT paint_video_frame(HWND hwnd) {
     // side of a periodic stutter. Joins the host 'wire seq=' log by seq+gen; steady play stays
     // quiet. This only observes the timestamps the present path already produced.
     {
-      const uint32_t expIntervalUs = gPresent.presentFrameIntervalUs.load(std::memory_order_relaxed);
+      const uint32_t expIntervalUs = ctx.present.presentFrameIntervalUs.load(std::memory_order_relaxed);
       const uint64_t anomalyGapUs =
           (expIntervalUs > 0) ? (static_cast<uint64_t>(expIntervalUs) * 3ULL) / 2ULL : 25000ULL;
-      const bool presentAnomaly = (gPresent.lastPresentUs > 0 && presentGapUs > anomalyGapUs);
+      const bool presentAnomaly = (ctx.present.lastPresentUs > 0 && presentGapUs > anomalyGapUs);
       if (frameKey || presentAnomaly) {
         uint64_t presentBacklog = 0;
         {
-          std::lock_guard<std::mutex> lk(gFrameBuf.frame.mu);
-          presentBacklog = (gFrameBuf.frame.version >= frameVersion) ? (gFrameBuf.frame.version - frameVersion) : 0;
+          std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+          presentBacklog = (ctx.frameBuf.frame.version >= frameVersion) ? (ctx.frameBuf.frame.version - frameVersion) : 0;
         }
         std::ostringstream telem;
         telem << "[native-video-client][telemetry] stage=present"
@@ -315,19 +315,19 @@ LRESULT paint_video_frame(HWND hwnd) {
               << " presentBacklog=" << presentBacklog
               << " paintUs=" << queueToPresentUs
               << " totalUs=" << totalUs;
-        log_client_line(telem.str());
+        log_client_line(ctx, telem.str());
       }
     }
-    if ((totalUs >= kUserFeedbackLagWarnUs || (presentGapUs >= kUserFeedbackGapWarnUs && gPresent.lastPresentUs > 0)) &&
-        (presentUs >= gPresent.lastUserFeedbackUs + kUserFeedbackMinIntervalUs || gPresent.lastUserFeedbackUs == 0)) {
-      const uint64_t overwriteCountNow = gFrameBuf.overwriteBeforePresentCount.load(std::memory_order_relaxed);
-      const uint64_t overwriteDelta = (overwriteCountNow >= gPresent.lastUserFeedbackOverwrite)
-                                         ? (overwriteCountNow - gPresent.lastUserFeedbackOverwrite)
+    if ((totalUs >= kUserFeedbackLagWarnUs || (presentGapUs >= kUserFeedbackGapWarnUs && ctx.present.lastPresentUs > 0)) &&
+        (presentUs >= ctx.present.lastUserFeedbackUs + kUserFeedbackMinIntervalUs || ctx.present.lastUserFeedbackUs == 0)) {
+      const uint64_t overwriteCountNow = ctx.frameBuf.overwriteBeforePresentCount.load(std::memory_order_relaxed);
+      const uint64_t overwriteDelta = (overwriteCountNow >= ctx.present.lastUserFeedbackOverwrite)
+                                         ? (overwriteCountNow - ctx.present.lastUserFeedbackOverwrite)
                                          : 0;
-      const uint64_t d3dSuccess = gPresent.d3dPresentSuccessCount.load(std::memory_order_relaxed);
-      const uint64_t d3dFail = gPresent.d3dPresentFailCount.load(std::memory_order_relaxed);
-      const uint64_t gdiFallback = gPresent.gdiFallbackPresentedCount.load(std::memory_order_relaxed);
-      const uint64_t paintCoalesced = gFrameBuf.paintCoalescedCount.load(std::memory_order_relaxed);
+      const uint64_t d3dSuccess = ctx.present.d3dPresentSuccessCount.load(std::memory_order_relaxed);
+      const uint64_t d3dFail = ctx.present.d3dPresentFailCount.load(std::memory_order_relaxed);
+      const uint64_t gdiFallback = ctx.present.gdiFallbackPresentedCount.load(std::memory_order_relaxed);
+      const uint64_t paintCoalesced = ctx.frameBuf.paintCoalescedCount.load(std::memory_order_relaxed);
       const uint64_t queueWaitUs = (paintStartUs >= queueSetUs) ? (paintStartUs - queueSetUs) : 0;
       const uint64_t paintUs = (presentUs >= paintStartUs) ? (presentUs - paintStartUs) : 0;
       const uint64_t netUs = (recvUs >= sendUs) ? (recvUs - sendUs) : 0;
@@ -361,23 +361,23 @@ LRESULT paint_video_frame(HWND hwnd) {
           << " presentBlockUs=" << renderTelemetry.presentBlockUs
           << " renderPath=" << renderPath
           << " fallbackReason=" << fallbackReason;
-      log_client_line(oss.str());
-      gPresent.lastUserFeedbackUs = presentUs;
-      gPresent.lastUserFeedbackOverwrite = overwriteCountNow;
+      log_client_line(ctx, oss.str());
+      ctx.present.lastUserFeedbackUs = presentUs;
+      ctx.present.lastUserFeedbackOverwrite = overwriteCountNow;
     }
-    gPresent.lastPresentUs = presentUs;
-  } else if (pickerVisible || !gPresent.hasPresentedAtLeastOneFrame) {
+    ctx.present.lastPresentUs = presentUs;
+  } else if (pickerVisible || !ctx.present.hasPresentedAtLeastOneFrame) {
     // Before first successful frame, keep a deterministic background.
     FillRect(hdc, &videoRect, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
   }
-  draw_overlay(hdc);
+  draw_overlay(ctx, hdc);
   EndPaint(hwnd, &ps);
   uint64_t latestVersion = 0;
   {
-    std::lock_guard<std::mutex> lk(gFrameBuf.frame.mu);
-    latestVersion = gFrameBuf.frame.version;
+    std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+    latestVersion = ctx.frameBuf.frame.version;
   }
-  if (latestVersion != frameVersion) request_video_paint(hwnd);
+  if (latestVersion != frameVersion) request_video_paint(ctx, hwnd);
   return 0;
 }
 

@@ -5,14 +5,14 @@
 
 #include "viewer_common.hpp"
 #include "viewer_gdi_util.hpp"
-#include "viewer_globals.hpp"
+#include "viewer_state.hpp"
 #include "viewer_layout.hpp"
 
 namespace remote60::native_poc::viewer {
 
-void apply_runtime_tune_delta(int bitrateStep, int keyintStep) {
-  gControl.runtimeTune.ApplyDelta(
-      bitrateStep, keyintStep, gMetrics.Snapshot().recvMbpsX1000);
+void apply_runtime_tune_delta(ViewerState& ctx, int bitrateStep, int keyintStep) {
+  ctx.control.runtimeTune.ApplyDelta(
+      bitrateStep, keyintStep, ctx.metrics.Snapshot().recvMbpsX1000);
 }
 
 void draw_thumbnail_into(HDC hdc, const RECT& dst, const WindowThumb& thumb) {
@@ -33,22 +33,22 @@ void draw_thumbnail_into(HDC hdc, const RECT& dst, const WindowThumb& thumb) {
                 &bmi, DIB_RGB_COLORS, SRCCOPY);
 }
 
-void draw_target_card(HDC hdc, const RECT& card, const CardGridMetrics& grid,
+void draw_target_card(ViewerState& ctx, HDC hdc, const RECT& card, const CardGridMetrics& grid,
                       uint64_t windowId, const std::string& title, bool active, bool disabled) {
   const RECT thumbRect = make_rect(card.left, card.top, card.right - card.left, grid.thumbH);
   const RECT captionRect = make_rect(card.left, card.top + grid.thumbH, card.right - card.left,
                                      card.bottom - card.top - grid.thumbH);
 
-  FillRect(hdc, &thumbRect, cached_brush(RGB(24, 28, 36)));
-  FillRect(hdc, &captionRect, cached_brush(active ? RGB(38, 70, 52) : RGB(32, 37, 46)));
+  FillRect(hdc, &thumbRect, cached_brush(ctx, RGB(24, 28, 36)));
+  FillRect(hdc, &captionRect, cached_brush(ctx, active ? RGB(38, 70, 52) : RGB(32, 37, 46)));
 
-  // Snapshot under the lock, draw outside it: StretchDIBits under gPicker.thumbMu made the fetch
+  // Snapshot under the lock, draw outside it: StretchDIBits under ctx.picker.thumbMu made the fetch
   // thread and the paint stall each other.
   std::shared_ptr<const WindowThumb> thumb;
   {
-    std::lock_guard<std::mutex> lk(gPicker.thumbMu);
-    const auto it = gPicker.thumbs.find(windowId);
-    if (it != gPicker.thumbs.end()) thumb = it->second;
+    std::lock_guard<std::mutex> lk(ctx.picker.thumbMu);
+    const auto it = ctx.picker.thumbs.find(windowId);
+    if (it != ctx.picker.thumbs.end()) thumb = it->second;
   }
   if (thumb) {
     draw_thumbnail_into(hdc, thumbRect, *thumb);
@@ -56,37 +56,37 @@ void draw_target_card(HDC hdc, const RECT& card, const CardGridMetrics& grid,
     RECT ph = thumbRect;
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, RGB(110, 118, 130));
-    draw_text_utf8(hdc, windowId == 0 ? std::string("Desktop") : std::string("Loading preview..."),
+    draw_text_utf8(ctx, hdc, windowId == 0 ? std::string("Desktop") : std::string("Loading preview..."),
                    &ph, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
   }
 
   SetBkMode(hdc, TRANSPARENT);
   SetTextColor(hdc, disabled ? RGB(150, 155, 162) : RGB(236, 239, 243));
   RECT text = captionRect;
-  text.left += dpi_scale(10);
-  text.right -= dpi_scale(10);
-  draw_text_utf8(hdc, title, &text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  text.left += dpi_scale(ctx, 10);
+  text.right -= dpi_scale(ctx, 10);
+  draw_text_utf8(ctx, hdc, title, &text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
   RECT frame = card;
-  FrameRect(hdc, &frame, cached_brush(active ? RGB(88, 178, 122) : RGB(52, 58, 70)));
+  FrameRect(hdc, &frame, cached_brush(ctx, active ? RGB(88, 178, 122) : RGB(52, 58, 70)));
   if (active) {
     RECT inner{card.left + 1, card.top + 1, card.right - 1, card.bottom - 1};
-    FrameRect(hdc, &inner, cached_brush(RGB(88, 178, 122)));
+    FrameRect(hdc, &inner, cached_brush(ctx, RGB(88, 178, 122)));
   }
 }
 
-void draw_overlay(HDC hdc) {
-  const ClientLayout layout = compute_client_layout(gSession.hwnd);
-  const bool pickerVisible = gPicker.visible.load(std::memory_order_relaxed);
+void draw_overlay(ViewerState& ctx, HDC hdc) {
+  const ClientLayout layout = compute_client_layout(ctx, ctx.session.hwnd);
+  const bool pickerVisible = ctx.picker.visible.load(std::memory_order_relaxed);
   if (!pickerVisible) {
     // Nothing to draw over the stream: the legacy Targets/Macro buttons were invisible ghost
     // hit-zones under the flip-model video (see compute_client_layout); the toolbar owns that UI.
     return;
   }
 
-  draw_alpha_rect(hdc, layout.clientRect, RGB(13, 15, 20), 255);
+  draw_alpha_rect(ctx, hdc, layout.clientRect, RGB(13, 15, 20), 255);
 
-  const WindowPanelSnapshot windowPanel = gPicker.windowPanel.Snapshot();
+  const WindowPanelSnapshot windowPanel = ctx.picker.windowPanel.Snapshot();
   const std::vector<WindowTargetUiEntry>& windowItems = windowPanel.items;
   const uint64_t selectedId = windowPanel.selectedId;
   const std::string& panelStatus = windowPanel.status;
@@ -97,7 +97,7 @@ void draw_overlay(HDC hdc) {
   SetTextColor(hdc, RGB(240, 243, 247));
   RECT titleRect = layout.selectedInfoRect;
   {
-    HGDIOBJ old = gUi.titleFont ? SelectObject(hdc, gUi.titleFont) : nullptr;
+    HGDIOBJ old = ctx.ui.titleFont ? SelectObject(hdc, ctx.ui.titleFont) : nullptr;
     RECT t = titleRect;
     DrawTextW(hdc, L"Remote60", -1, &t, DT_LEFT | DT_SINGLELINE);
     if (old) SelectObject(hdc, old);
@@ -105,11 +105,11 @@ void draw_overlay(HDC hdc) {
   // Once a target is picked the picker locks: the buttons and cards read as disabled while the
   // stream spins up, and the sub-header says whether we are still waiting on the host's ack or
   // on its first frame.
-  const bool selectionPending = gSel.pending.load(std::memory_order_acquire);
-  const bool awaitingAck = gSel.awaitingAck.load(std::memory_order_acquire);
+  const bool selectionPending = ctx.sel.pending.load(std::memory_order_acquire);
+  const bool awaitingAck = ctx.sel.awaitingAck.load(std::memory_order_acquire);
 
   RECT subRect = titleRect;
-  subRect.top += dpi_scale(28);
+  subRect.top += dpi_scale(ctx, 28);
   SetTextColor(hdc, RGB(150, 158, 170));
   std::string statusLine =
       selectionLocked ? std::string("Target locked by host config") : panelStatus;
@@ -117,22 +117,22 @@ void draw_overlay(HDC hdc) {
     statusLine = awaitingAck ? std::string("Selecting target...")
                              : std::string("Waiting for first frame...");
   }
-  if (!gControl.connected.load(std::memory_order_relaxed)) statusLine = "Connecting to host...";
-  draw_text_utf8(hdc, statusLine, &subRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+  if (!ctx.control.connected.load(std::memory_order_relaxed)) statusLine = "Connecting to host...";
+  draw_text_utf8(ctx, hdc, statusLine, &subRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
   const bool actionsDisabled =
-      !gControl.connected.load(std::memory_order_relaxed) || selectionLocked || selectionPending;
-  draw_panel_button(hdc, layout.refreshButtonRect, "Refresh", false,
-                    !gControl.connected.load(std::memory_order_relaxed) || selectionPending);
-  draw_panel_button(hdc, layout.desktopButtonRect, "Desktop", selectedId == 0, actionsDisabled);
+      !ctx.control.connected.load(std::memory_order_relaxed) || selectionLocked || selectionPending;
+  draw_panel_button(ctx, hdc, layout.refreshButtonRect, "Refresh", false,
+                    !ctx.control.connected.load(std::memory_order_relaxed) || selectionPending);
+  draw_panel_button(ctx, hdc, layout.desktopButtonRect, "Desktop", selectedId == 0, actionsDisabled);
 
   // Card grid: desktop preview first, then one card per shareable window.
-  const CardGridMetrics grid = compute_card_grid(layout.listRect);
+  const CardGridMetrics grid = compute_card_grid(ctx, layout.listRect);
   const int totalCards = kPickerListsWindows ? 1 + static_cast<int>(windowItems.size()) : 1;
   const int totalRows = (totalCards + grid.cols - 1) / grid.cols;
   const int maxScrollRow = std::max(0, totalRows - grid.visibleRows);
-  int scrollRow = std::clamp(gPicker.gridScrollRow.load(std::memory_order_relaxed), 0, maxScrollRow);
-  gPicker.gridScrollRow.store(scrollRow, std::memory_order_relaxed);
+  int scrollRow = std::clamp(ctx.picker.gridScrollRow.load(std::memory_order_relaxed), 0, maxScrollRow);
+  ctx.picker.gridScrollRow.store(scrollRow, std::memory_order_relaxed);
   const int firstCard = scrollRow * grid.cols;
 
   for (int slot = 0; slot < grid.visibleCards; ++slot) {
@@ -140,20 +140,20 @@ void draw_overlay(HDC hdc) {
     if (cardIndex >= totalCards) break;
     const RECT card = card_rect_for_slot(layout.listRect, grid, slot);
     if (cardIndex == 0) {
-      draw_target_card(hdc, card, grid, 0, "Desktop (full screen)", selectedId == 0,
+      draw_target_card(ctx, hdc, card, grid, 0, "Desktop (full screen)", selectedId == 0,
                        selectionLocked || selectionPending);
     } else {
       const auto& entry = windowItems[static_cast<size_t>(cardIndex - 1)];
-      draw_target_card(hdc, card, grid, entry.id, entry.title, entry.id == selectedId,
+      draw_target_card(ctx, hdc, card, grid, entry.id, entry.title, entry.id == selectedId,
                        selectionLocked || selectionPending);
     }
   }
 
   if (kPickerListsWindows && windowItems.empty()) {
     RECT emptyRect = layout.listRect;
-    emptyRect.top += grid.cardH + dpi_scale(18);
+    emptyRect.top += grid.cardH + dpi_scale(ctx, 18);
     SetTextColor(hdc, RGB(150, 158, 170));
-    draw_text_utf8(hdc,
+    draw_text_utf8(ctx, hdc,
                    selectionLocked ? std::string("Window list hidden by host config")
                                    : std::string("No shareable windows yet. Click Refresh."),
                    &emptyRect, DT_CENTER | DT_SINGLELINE);
@@ -161,9 +161,9 @@ void draw_overlay(HDC hdc) {
 
   // Footer: connection and input state in one quiet line.
   std::ostringstream foot;
-  foot << (gControl.connected.load(std::memory_order_relaxed) ? "Connected" : "Disconnected")
-       << "   Input " << (gSession.inputEnabled.load(std::memory_order_relaxed) ? "on" : "off");
-  const uint32_t decFpsX100 = gMetrics.Snapshot().decodedFpsX100;
+  foot << (ctx.control.connected.load(std::memory_order_relaxed) ? "Connected" : "Disconnected")
+       << "   Input " << (ctx.session.inputEnabled.load(std::memory_order_relaxed) ? "on" : "off");
+  const uint32_t decFpsX100 = ctx.metrics.Snapshot().decodedFpsX100;
   if (decFpsX100 > 0) foot << "   " << (decFpsX100 / 100) << " fps";
   if (totalRows > grid.visibleRows) {
     foot << "   Rows " << (scrollRow + 1) << "-"
@@ -172,7 +172,7 @@ void draw_overlay(HDC hdc) {
   }
   RECT footRect = layout.statsRect;
   SetTextColor(hdc, RGB(140, 148, 160));
-  draw_text_utf8(hdc, foot.str(), &footRect,
+  draw_text_utf8(ctx, hdc, foot.str(), &footRect,
                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 

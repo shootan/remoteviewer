@@ -3,21 +3,21 @@
 #include "viewer_layout.hpp"
 
 #include "viewer_common.hpp"
-#include "viewer_globals.hpp"
+#include "viewer_state.hpp"
 #include "viewer_gdi_util.hpp"
 
 namespace remote60::native_poc::viewer {
 
-CardGridMetrics compute_card_grid(const RECT& gridRect) {
-  return compute_card_grid_at(gridRect, gUi.dpi);
+CardGridMetrics compute_card_grid(ViewerState& ctx, const RECT& gridRect) {
+  return compute_card_grid_at(gridRect, ctx.ui.dpi);
 }
 
-bool resolve_active_video_content_size(uint32_t* outWidth, uint32_t* outHeight) {
+bool resolve_active_video_content_size(ViewerState& ctx, uint32_t* outWidth, uint32_t* outHeight) {
   if (!outWidth || !outHeight) return false;
   *outWidth = 0;
   *outHeight = 0;
 
-  const WindowPanelSnapshot panelSnapshot = gPicker.windowPanel.Snapshot();
+  const WindowPanelSnapshot panelSnapshot = ctx.picker.windowPanel.Snapshot();
   const uint32_t selectedWidth = panelSnapshot.selectedWidth;
   const uint32_t selectedHeight = panelSnapshot.selectedHeight;
   const uint64_t selectedStreamGeneration = panelSnapshot.lastSelectStreamGeneration;
@@ -26,10 +26,10 @@ bool resolve_active_video_content_size(uint32_t* outWidth, uint32_t* outHeight) 
   uint32_t frameHeight = 0;
   uint64_t frameStreamGeneration = 0;
   {
-    std::lock_guard<std::mutex> lk(gFrameBuf.frame.mu);
-    frameWidth = gFrameBuf.frame.width;
-    frameHeight = gFrameBuf.frame.height;
-    frameStreamGeneration = gFrameBuf.frame.streamGeneration;
+    std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+    frameWidth = ctx.frameBuf.frame.width;
+    frameHeight = ctx.frameBuf.frame.height;
+    frameStreamGeneration = ctx.frameBuf.frame.streamGeneration;
   }
 
   if (selectedWidth > 0 && selectedHeight > 0) {
@@ -44,7 +44,7 @@ bool resolve_active_video_content_size(uint32_t* outWidth, uint32_t* outHeight) 
     return true;
   }
 
-  const ClientRuntimeMetrics m = gMetrics.Snapshot();  // (F-15)
+  const ClientRuntimeMetrics m = ctx.metrics.Snapshot();  // (F-15)
   const uint32_t metricWidth = m.width;
   const uint32_t metricHeight = m.height;
   if (metricWidth > 0 && metricHeight > 0) {
@@ -61,52 +61,52 @@ bool resolve_active_video_content_size(uint32_t* outWidth, uint32_t* outHeight) 
   return false;
 }
 
-RECT resolve_video_content_rect(HWND hwnd, const RECT& containerRect) {
+RECT resolve_video_content_rect(ViewerState& ctx, HWND hwnd, const RECT& containerRect) {
   (void)hwnd;
   uint32_t contentWidth = 0;
   uint32_t contentHeight = 0;
-  if (!resolve_active_video_content_size(&contentWidth, &contentHeight)) {
+  if (!resolve_active_video_content_size(ctx, &contentWidth, &contentHeight)) {
     return containerRect;
   }
   return aspect_fit_rect(containerRect, contentWidth, contentHeight);
 }
 
-ClientLayout compute_client_layout(HWND hwnd) {
+ClientLayout compute_client_layout(ViewerState& ctx, HWND hwnd) {
   RECT clientRect{};
   if (hwnd && IsWindow(hwnd)) {
     GetClientRect(hwnd, &clientRect);
   } else {
-    clientRect = make_rect(0, 0, static_cast<int>(gSession.windowW), static_cast<int>(gSession.windowH));
+    clientRect = make_rect(0, 0, static_cast<int>(ctx.session.windowW), static_cast<int>(ctx.session.windowH));
   }
-  return compute_client_layout_at(clientRect, gPicker.visible.load(std::memory_order_relaxed), gUi.dpi);
+  return compute_client_layout_at(clientRect, ctx.picker.visible.load(std::memory_order_relaxed), ctx.ui.dpi);
 }
 
-bool point_in_toggle_button(HWND hwnd, int x, int y) {
-  const ClientLayout layout = compute_client_layout(hwnd);
+bool point_in_toggle_button(ViewerState& ctx, HWND hwnd, int x, int y) {
+  const ClientLayout layout = compute_client_layout(ctx, hwnd);
   return point_in_rect(layout.toggleButtonRect, x, y);
 }
 
-bool point_in_macro_button(HWND hwnd, int x, int y) {
-  const ClientLayout layout = compute_client_layout(hwnd);
+bool point_in_macro_button(ViewerState& ctx, HWND hwnd, int x, int y) {
+  const ClientLayout layout = compute_client_layout(ctx, hwnd);
   return point_in_rect(layout.macroButtonRect, x, y);
 }
 
-bool point_in_panel_ui(HWND hwnd, int x, int y) {
-  const ClientLayout layout = compute_client_layout(hwnd);
+bool point_in_panel_ui(ViewerState& ctx, HWND hwnd, int x, int y) {
+  const ClientLayout layout = compute_client_layout(ctx, hwnd);
   return point_in_rect(layout.panelRect, x, y);
 }
 
-bool map_client_point_to_video_coords(HWND hwnd, int x, int y, int32_t* outVideoX, int32_t* outVideoY) {
+bool map_client_point_to_video_coords(ViewerState& ctx, HWND hwnd, int x, int y, int32_t* outVideoX, int32_t* outVideoY) {
   if (!outVideoX || !outVideoY) return false;
-  const ClientLayout layout = compute_client_layout(hwnd);
-  const RECT contentRect = resolve_video_content_rect(hwnd, layout.videoRect);
+  const ClientLayout layout = compute_client_layout(ctx, hwnd);
+  const RECT contentRect = resolve_video_content_rect(ctx, hwnd, layout.videoRect);
   if (!point_in_rect(contentRect, x, y)) return false;
   uint32_t frameW = 0;
   uint32_t frameH = 0;
-  if (!resolve_active_video_content_size(&frameW, &frameH)) return false;
+  if (!resolve_active_video_content_size(ctx, &frameW, &frameH)) return false;
   map_point_to_video(contentRect, frameW, frameH, x, y, outVideoX, outVideoY);
-  gInput.lastVideoX.store(*outVideoX, std::memory_order_relaxed);
-  gInput.lastVideoY.store(*outVideoY, std::memory_order_relaxed);
+  ctx.input.lastVideoX.store(*outVideoX, std::memory_order_relaxed);
+  ctx.input.lastVideoY.store(*outVideoY, std::memory_order_relaxed);
   return true;
 }
 

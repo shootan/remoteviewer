@@ -1,11 +1,12 @@
 #pragma once
 
 // What main() owns for the life of the session and hands to the startup steps and the two threads
-// (viewer split refactor Phase 3). Declaration order is destruction order: the thread objects and the
-// receiver / control client (which reference args / dec / gate) go before the state they use.
+// (viewer split refactor Phase 3; the ten state structs joined it under viewer ledger F-17).
 //
-// The ten process-wide state structs (viewer_globals.hpp: gSession, gFrameBuf, ...) stay where they
-// are for now; folding them in here means threading a context through every module -- Phase 4.
+// ViewerContext IS the ViewerState (the ten feature structs, viewer_state.hpp) plus the session
+// objects built on it. Destruction runs the members below in reverse -- the threads and the
+// receiver / control client (which reference args / dec / gate and the state) go first -- and the
+// ViewerState base last, which is the relation the former globals had to main()'s locals.
 
 #include <optional>
 #include <string>
@@ -16,11 +17,12 @@
 #include "viewer_control_client.hpp"
 #include "viewer_decoder_state.hpp"
 #include "viewer_frame_gate_state.hpp"
+#include "viewer_state.hpp"
 #include "viewer_video_receiver.hpp"
 
 namespace remote60::native_poc::viewer {
 
-struct ViewerContext {
+struct ViewerContext : ViewerState {
   Args args;                        // the command line
   Args resolvedArgs;                // the directory path replaces host/port/controlPort
   std::string directoryPunchToken;  // capability from /api/connect, carried in the UDP hello
@@ -33,7 +35,7 @@ struct ViewerContext {
   SOCKET controlSock = INVALID_SOCKET;  // the TCP control socket (direct hosts); main closes it
   bool controlReady = false;
   uint64_t startUs = 0;             // session start, for --seconds
-  std::optional<ControlClient> control;
+  std::optional<ControlClient> controlClient;  // not `control`: that is ViewerState::control (the channel state)
   std::optional<VideoReceiver> receiver;
   std::thread controlThread;
   std::thread recvThread;

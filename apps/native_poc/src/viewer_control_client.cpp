@@ -20,13 +20,13 @@ int ControlClient::fetch_one_thumbnail(remote60::native_poc::ControlLink& link) 
   // keeps the strict request/response loop from being starved. Only invoked when the
   // host advertised the capability, because an older host would drain the request and
   // never reply. Returns: 1 fetched, 0 nothing to do, -1 link failure (stream desynced).
-  if (!gPicker.hostSupportsThumbnails.load(std::memory_order_relaxed)) return 0;
+  if (!ctx.picker.hostSupportsThumbnails.load(std::memory_order_relaxed)) return 0;
   uint64_t id = 0;
   {
-    std::lock_guard<std::mutex> lk(gPicker.thumbMu);
-    if (gPicker.thumbFetchQueue.empty()) return 0;
-    id = gPicker.thumbFetchQueue.front();
-    gPicker.thumbFetchQueue.pop_front();
+    std::lock_guard<std::mutex> lk(ctx.picker.thumbMu);
+    if (ctx.picker.thumbFetchQueue.empty()) return 0;
+    id = ctx.picker.thumbFetchQueue.front();
+    ctx.picker.thumbFetchQueue.pop_front();
   }
   remote60::native_poc::ControlWindowThumbnailRequestMessage req{};
   req.header.magic = remote60::native_poc::kMagic;
@@ -59,19 +59,19 @@ int ControlClient::fetch_one_thumbnail(remote60::native_poc::ControlLink& link) 
     thumb->bgra = std::move(payload);
     thumb->fetchedUs = qpc_now_us();
     {
-      std::lock_guard<std::mutex> lk(gPicker.thumbMu);
-      gPicker.thumbs[id] = std::move(thumb);
+      std::lock_guard<std::mutex> lk(ctx.picker.thumbMu);
+      ctx.picker.thumbs[id] = std::move(thumb);
     }
-    // Outside the lock: the paint handler takes gPicker.thumbMu, and invalidating while
+    // Outside the lock: the paint handler takes ctx.picker.thumbMu, and invalidating while
     // holding it invited a stall on every received preview.
-    InvalidateRect(gSession.hwnd, nullptr, FALSE);
+    InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
   }
   return 1;
 }
 
 void ControlClient::handle_pong(const ControlOutboundAction& action, const ControlPongMessage& pong) {
   const uint64_t doneUs = qpc_now_us();
-  gControl.scheduler.OnPingCompleted(doneUs);
+  ctx.control.scheduler.OnPingCompleted(doneUs);
   {
     // Say it once per transition rather than every ping. A frozen picture with no
     // explanation is the worst version of this; a line saying a Windows security
@@ -79,8 +79,8 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
     const bool secure =
         (pong.captureTargetFlags &
          remote60::native_poc::kCaptureFlagSecureDesktopActive) != 0;
-    if (secure != gControl.reportedSecure) {
-      gControl.reportedSecure = secure;
+    if (secure != ctx.control.reportedSecure) {
+      ctx.control.reportedSecure = secure;
       std::cout << "[native-video-client] secure-desktop-active="
                 << (secure ? 1 : 0)
                 << (secure ? "  (a Windows security prompt is on screen; it "
@@ -120,7 +120,7 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
           << " hostRecvUs=" << pong.hostRecvQpcUs
           << " hostSendUs=" << pong.hostSendQpcUs
           << " clientRecvUs=" << doneUs;
-    log_client_line(telem.str());
+    log_client_line(ctx, telem.str());
   }
 }
 
@@ -130,12 +130,12 @@ void ControlClient::handle_window_list(const ControlWindowListMessage& windowLis
   // same layout. A control thread computing UI layout was the thread-affinity smell F-07 names.
   // Falls back to applying inline only when there is no window to post to (headless harness).
   bool posted = false;
-  if (gSession.hwnd) {
+  if (ctx.session.hwnd) {
     auto* copy = new ControlWindowListMessage(windowList);
-    posted = PostMessageW(gSession.hwnd, kMsgApplyWindowList, 0, reinterpret_cast<LPARAM>(copy)) != FALSE;
+    posted = PostMessageW(ctx.session.hwnd, kMsgApplyWindowList, 0, reinterpret_cast<LPARAM>(copy)) != FALSE;
     if (!posted) delete copy;
   }
-  if (!posted) apply_window_list_snapshot(windowList);
+  if (!posted) apply_window_list_snapshot(ctx, windowList);
   // The window list is where the host says whether it knows the monitor
   // messages; asking one that does not would stall this loop waiting for a
   // reply that never comes.
@@ -143,31 +143,31 @@ void ControlClient::handle_window_list(const ControlWindowListMessage& windowLis
       (windowList.flags &
        remote60::native_poc::kControlWindowListFlagMonitors) != 0;
   const bool monitorsNewlySupported =
-      gPicker.windowPanel.SetHostSupportsMonitors(supportsMonitors);
+      ctx.picker.windowPanel.SetHostSupportsMonitors(supportsMonitors);
   // The stored --monitor is auto-applied only when the session opens straight
   // into the stream. In picker mode the user has not chosen a target yet, so
   // selecting a monitor here would restart the host capture before any pick and
   // fight the first-frame gate; a monitor pick is a follow-up (toolbar) action.
-  if (!startInPicker && monitorsNewlySupported && gSession.requestedMonitorId > 0) {
+  if (!startInPicker && monitorsNewlySupported && ctx.session.requestedMonitorId > 0) {
     // Only when a screen other than the primary was asked for: selecting monitor
     // zero would restart the capture for no change.
-    gPicker.windowPanel.RequestMonitorSelect(gSession.requestedMonitorId);
+    ctx.picker.windowPanel.RequestMonitorSelect(ctx.session.requestedMonitorId);
   }
-  InvalidateRect(gSession.hwnd, nullptr, FALSE);
+  InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
 }
 
 void ControlClient::handle_window_selected(const ControlWindowSelectedMessage& windowSelected) {
-  apply_window_selected_result(windowSelected);
-  queue_window_list_request("window_list_request pending");
-  InvalidateRect(gSession.hwnd, nullptr, FALSE);
+  apply_window_selected_result(ctx, windowSelected);
+  queue_window_list_request(ctx, "window_list_request pending");
+  InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
 }
 
 void ControlClient::handle_input_ack(const ControlInputAckMessage& inputAck) {
-  const uint64_t ackCount = gControl.scheduler.RecordInputAck(args.inputLogEvery);
+  const uint64_t ackCount = ctx.control.scheduler.RecordInputAck(args.inputLogEvery);
   if (ackCount > 0) {
     std::cout << "[native-video-client][input] ackSeq=" << inputAck.seq
               << " sent=" << ackCount
-              << " dropped=" << gControl.inputQueue.dropped_count()
+              << " dropped=" << ctx.control.inputQueue.dropped_count()
               << "\n";
   }
 }
@@ -177,23 +177,23 @@ void ControlClient::Run() {
   // Built once, not per action: the tunnelled link carries the partially-read inbound
   // message between calls, and a fresh one each time would drop whatever it held.
   std::unique_ptr<remote60::native_poc::ControlLink> controlLink;
-  if (gControl.overUdp.load(std::memory_order_acquire)) {
+  if (ctx.control.overUdp.load(std::memory_order_acquire)) {
     controlLink = std::make_unique<remote60::native_poc::UdpControlLink>(
-        &gControl.udpControl, kUdpControlReadTimeoutMs);
+        &ctx.control.udpControl, kUdpControlReadTimeoutMs);
   } else {
     controlLink = std::make_unique<remote60::native_poc::TcpControlLink>(controlSock);
   }
 
-  while (gSession.running.load()) {
+  while (ctx.session.running.load()) {
     // Drives retransmission and gap recovery; cheap when there is nothing outstanding.
-    if (gControl.overUdp.load(std::memory_order_acquire)) gControl.udpControl.Tick();
+    if (ctx.control.overUdp.load(std::memory_order_acquire)) ctx.control.udpControl.Tick();
     bool didWork = false;
     const uint64_t nowUs = qpc_now_us();
     ControlOutboundAction action{};
-    if (gControl.scheduler.NextAction(
-            nowUs, capture_client_control_metrics_snapshot(), &gPicker.windowPanel,
-            &gControl.streamState, &gControl.captureModeRequests, &gControl.keyframeRequests, &gControl.runtimeTune,
-            &gControl.inputQueue, &action)) {
+    if (ctx.control.scheduler.NextAction(
+            nowUs, capture_client_control_metrics_snapshot(ctx), &ctx.picker.windowPanel,
+            &ctx.control.streamState, &ctx.control.captureModeRequests, &ctx.control.keyframeRequests, &ctx.control.runtimeTune,
+            &ctx.control.inputQueue, &action)) {
       TcpControlResponse response{};
       const uint64_t actionStartUs = qpc_now_us();
       const bool actionOk = execute_control_action(*controlLink, action, &response);
@@ -212,13 +212,13 @@ void ControlClient::Run() {
         // connected.
         std::cout << "[native-video-client][control] action failed kind="
                   << static_cast<int>(action.kind) << " transport="
-                  << (gControl.overUdp.load(std::memory_order_acquire) ? "udp-tunnel" : "tcp");
-        if (gControl.overUdp.load(std::memory_order_acquire)) {
+                  << (ctx.control.overUdp.load(std::memory_order_acquire) ? "udp-tunnel" : "tcp");
+        if (ctx.control.overUdp.load(std::memory_order_acquire)) {
           // Closed means the channel gave up on the peer; open means the exchange came
           // back as something other than the reply this action was waiting for.
-          const auto stats = gControl.udpControl.GetStats();
-          std::cout << " closed=" << (gControl.udpControl.IsClosed() ? 1 : 0)
-                    << " reason=" << to_string(gControl.udpControl.CloseReason())
+          const auto stats = ctx.control.udpControl.GetStats();
+          std::cout << " closed=" << (ctx.control.udpControl.IsClosed() ? 1 : 0)
+                    << " reason=" << to_string(ctx.control.udpControl.CloseReason())
                     << " sent=" << stats.messagesSent
                     << " received=" << stats.messagesReceived
                     << " retx=" << stats.fragmentRetransmits
@@ -228,7 +228,7 @@ void ControlClient::Run() {
         break;
       }
       if (action.kind == ControlOutboundActionKind::InputEvent) {
-        const uint64_t sent = ++gSession.inputEventsSent;
+        const uint64_t sent = ++ctx.session.inputEventsSent;
         if (args.inputLogEvery > 0 && (sent % args.inputLogEvery) == 0) {
           std::cout << "[native-video-client][input] sent=" << sent
                     << " kind=" << action.inputEvent.kind
@@ -268,7 +268,7 @@ void ControlClient::Run() {
           break;
         }
         case TcpControlResponseKind::MonitorList:
-          gPicker.windowPanel.ApplyMonitorList(response.monitorList);
+          ctx.picker.windowPanel.ApplyMonitorList(response.monitorList);
           break;
         case TcpControlResponseKind::WindowSelected:
           handle_window_selected(response.windowSelected);
@@ -283,24 +283,24 @@ void ControlClient::Run() {
       }
     }
 
-    if (!didWork && gPicker.visible.load(std::memory_order_relaxed)) {
+    if (!didWork && ctx.picker.visible.load(std::memory_order_relaxed)) {
       const int fetched = fetch_one_thumbnail(*controlLink);
       if (fetched < 0) break;
       didWork = (fetched > 0);
     }
     if (!didWork) Sleep(2);
   }
-  gControl.connected.store(false, std::memory_order_relaxed);
-  gControl.runtimeTune.SetEnabled(false);
+  ctx.control.connected.store(false, std::memory_order_relaxed);
+  ctx.control.runtimeTune.SetEnabled(false);
   // A selection cannot complete once control is gone: drop the pending state so the picker
   // re-enables instead of staying locked on "waiting for first frame". The viewer exits
   // shortly after (the video socket dies too), which returns the shell to the host list.
-  clear_pc_target_selection();
+  clear_pc_target_selection(ctx);
   // Drop the persistent generation filter too: a reconnect renegotiates generations from
   // scratch, so an old value must not silently filter the new stream to nothing.
-  gSel.activeStreamGeneration.store(0, std::memory_order_release);
-  set_window_panel_status("control_disconnected");
-  InvalidateRect(gSession.hwnd, nullptr, FALSE);
+  ctx.sel.activeStreamGeneration.store(0, std::memory_order_release);
+  set_window_panel_status(ctx, "control_disconnected");
+  InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
 }
 
 }  // namespace remote60::native_poc::viewer

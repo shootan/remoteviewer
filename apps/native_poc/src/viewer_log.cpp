@@ -7,15 +7,15 @@
 
 namespace remote60::native_poc::viewer {
 
-void log_client_line(const std::string& line) {
-  std::lock_guard<std::mutex> lk(gSession.logMu);
+void log_client_line(ViewerState& ctx, const std::string& line) {
+  std::lock_guard<std::mutex> lk(ctx.session.logMu);
   const std::string withNewline = line + "\n";
   std::cout << withNewline;
 }
 
-void request_keyframe(uint16_t reason) {
+void request_keyframe(ViewerState& ctx, uint16_t reason) {
   const uint64_t nowUs = qpc_now_us();
-  const auto attempt = gControl.keyframeRequests.Request(reason, nowUs);
+  const auto attempt = ctx.control.keyframeRequests.Request(reason, nowUs);
   if (!attempt.queued && (attempt.throttledCount % 120) == 1) {
     std::cout << "[native-video-client][control] keyframe-request-throttled total=" << attempt.throttledCount
               << " reason=" << (reason == 0 ? 1 : reason)

@@ -19,14 +19,14 @@ namespace remote60::native_poc::viewer {
 
 PresentCounterSnapshot VideoReceiver::load_present_counters() {
     PresentCounterSnapshot s{};
-    s.d3dPresentSuccess = gPresent.d3dPresentSuccessCount.load(std::memory_order_relaxed);
-    s.d3dPresentFail = gPresent.d3dPresentFailCount.load(std::memory_order_relaxed);
-    s.gdiFallbackPresented = gPresent.gdiFallbackPresentedCount.load(std::memory_order_relaxed);
-    s.fallbackInitFail = gPresent.fallbackInitFailCount.load(std::memory_order_relaxed);
-    s.fallbackRenderFail = gPresent.fallbackRenderFailCount.load(std::memory_order_relaxed);
-    s.fallbackNv12ConvertFail = gPresent.fallbackNv12ConvertFailCount.load(std::memory_order_relaxed);
-    s.paintCoalesced = gFrameBuf.paintCoalescedCount.load(std::memory_order_relaxed);
-    s.overwriteBeforePresent = gFrameBuf.overwriteBeforePresentCount.load(std::memory_order_relaxed);
+    s.d3dPresentSuccess = ctx.present.d3dPresentSuccessCount.load(std::memory_order_relaxed);
+    s.d3dPresentFail = ctx.present.d3dPresentFailCount.load(std::memory_order_relaxed);
+    s.gdiFallbackPresented = ctx.present.gdiFallbackPresentedCount.load(std::memory_order_relaxed);
+    s.fallbackInitFail = ctx.present.fallbackInitFailCount.load(std::memory_order_relaxed);
+    s.fallbackRenderFail = ctx.present.fallbackRenderFailCount.load(std::memory_order_relaxed);
+    s.fallbackNv12ConvertFail = ctx.present.fallbackNv12ConvertFailCount.load(std::memory_order_relaxed);
+    s.paintCoalesced = ctx.frameBuf.paintCoalescedCount.load(std::memory_order_relaxed);
+    s.overwriteBeforePresent = ctx.frameBuf.overwriteBeforePresentCount.load(std::memory_order_relaxed);
     return s;
 }
 
@@ -58,11 +58,11 @@ void VideoReceiver::append_present_counter_fields(std::ostream& os) {
        << " overwriteBeforePresent=" << overwriteBeforePresent
        // Paint liveness (F-20). paintEnter frozen while decodedFrames climbs is the stuck-latch
        // signature the field freeze showed; selfHeal>0 means the safety net caught a lost request.
-       << " paintEnter=" << gFrameBuf.paintEnterCount.load(std::memory_order_relaxed)
-       << " paintSelfHeal=" << gFrameBuf.paintSelfHealCount.load(std::memory_order_relaxed)
-       << " invalidateFail=" << gFrameBuf.invalidateFailCount.load(std::memory_order_relaxed)
-       << " beginPaintFail=" << gFrameBuf.beginPaintFailCount.load(std::memory_order_relaxed)
-       << " pacedHold=" << gFrameBuf.pacedHoldCount.load(std::memory_order_relaxed);
+       << " paintEnter=" << ctx.frameBuf.paintEnterCount.load(std::memory_order_relaxed)
+       << " paintSelfHeal=" << ctx.frameBuf.paintSelfHealCount.load(std::memory_order_relaxed)
+       << " invalidateFail=" << ctx.frameBuf.invalidateFailCount.load(std::memory_order_relaxed)
+       << " beginPaintFail=" << ctx.frameBuf.beginPaintFailCount.load(std::memory_order_relaxed)
+       << " pacedHold=" << ctx.frameBuf.pacedHoldCount.load(std::memory_order_relaxed);
     st.lastPresentCounters = nowCounters;
 }
 
@@ -103,8 +103,8 @@ void VideoReceiver::publish_metrics(uint32_t metricW, uint32_t metricH, uint64_t
         static_cast<uint32_t>(std::min<uint64_t>(st.queueDepthHist[4], 0xFFFFFFFFULL));
     m.udpAssemblyDropPm = st.udpAssemblyDropPmLast;
     m.updatedQpcUs = nowUs;
-    gMetrics.Publish(m);  // whole record at once (F-15)
-    request_video_paint(gSession.hwnd);
+    ctx.metrics.Publish(m);  // whole record at once (F-15)
+    request_video_paint(ctx, ctx.session.hwnd);
 }
 
 // The once-a-second stats line + metrics publish, formerly copied at five early-return sites of
@@ -141,7 +141,7 @@ void VideoReceiver::flush_stats_if_due(uint64_t nowUs, uint32_t w, uint32_t h, b
     if (codedSize) oss << " codedSize=" << codedW << "x" << codedH;
     fg.append_congestion_fields(oss);
     append_present_counter_fields(oss);
-    log_client_line(oss.str());
+    log_client_line(ctx, oss.str());
     st.recvFrames = 0;
     st.decodedFrames = 0;
     st.skippedQueued = 0;
@@ -171,12 +171,12 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
     // Target-selection gate (mobile parity, Android commit 4892dea). While the user's pick is
     // resolving, keep the picker up and present nothing until the acknowledged generation's
     // first frame decodes.
-    if (gSel.EpochChanged(dec.recvSelectionEpoch)) {
+    if (ctx.sel.EpochChanged(dec.recvSelectionEpoch)) {
       // A fresh pick: drop stale reference frames and hold for the new generation's keyframe.
       dec.decoder.reset();
       gate.waitForKeyFrame = true;
     }
-    if (gSel.AdmitGeneration(h.streamGeneration) != SelectionAdmit::Accept) {
+    if (ctx.sel.AdmitGeneration(h.streamGeneration) != SelectionAdmit::Accept) {
       ++st.skippedQueued;
       return true;
     }
@@ -216,12 +216,12 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
     in.keyFrame = keyFrame;
     in.packetNowUs = packetNowUs;
     in.recvGapUs = recvGapUs;
-    in.presentedCapUs = gFrameBuf.lastPresentedCaptureUs.load(std::memory_order_relaxed);
+    in.presentedCapUs = ctx.frameBuf.lastPresentedCaptureUs.load(std::memory_order_relaxed);
     // The picker overlay pauses presents on purpose; lag measured against a frozen present
     // anchor is not congestion. Same for the short post-close grace until the anchor is fresh.
     in.catchupSuppressed =
-        gPicker.visible.load(std::memory_order_relaxed) ||
-        packetNowUs < gFrameBuf.catchupSuppressUntilUs.load(std::memory_order_relaxed);
+        ctx.picker.visible.load(std::memory_order_relaxed) ||
+        packetNowUs < ctx.frameBuf.catchupSuppressUntilUs.load(std::memory_order_relaxed);
     FrameGateLag lag{};
     switch (fg.admit(in, &lag)) {
       case FrameGateVerdict::DropStale:
@@ -287,74 +287,74 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
     const uint64_t queueSetUs = nowUs;
     const uint64_t decodeToQueueUs = (queueSetUs >= decodeEndUs) ? (queueSetUs - decodeEndUs) : 0;
     {
-      std::lock_guard<std::mutex> lk(gFrameBuf.frame.mu);
-      const uint64_t prevVersion = gFrameBuf.frame.version;
-      const uint64_t lastPresentedVersion = gFrameBuf.lastPresentedVersion.load(std::memory_order_relaxed);
+      std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+      const uint64_t prevVersion = ctx.frameBuf.frame.version;
+      const uint64_t lastPresentedVersion = ctx.frameBuf.lastPresentedVersion.load(std::memory_order_relaxed);
       // Overwrites while the picker covers the stream are the intended latest-wins behavior of a
       // deliberately paused present, not a symptom -- keep them out of the telemetry.
       if (prevVersion > lastPresentedVersion &&
-          !gPicker.visible.load(std::memory_order_relaxed)) {
-        ++gFrameBuf.overwriteBeforePresentCount;
+          !ctx.picker.visible.load(std::memory_order_relaxed)) {
+        ++ctx.frameBuf.overwriteBeforePresentCount;
       }
-      gFrameBuf.frame.format = SharedFrame::PixelFormat::Nv12;
-      gFrameBuf.frame.width = (decoded.visibleWidth > 0) ? decoded.visibleWidth : decoded.width;
-      gFrameBuf.frame.height = (decoded.visibleHeight > 0) ? decoded.visibleHeight : decoded.height;
-      gFrameBuf.frame.codedWidth = decoded.width;
-      gFrameBuf.frame.codedHeight = decoded.height;
-      gFrameBuf.frame.visibleLeft = decoded.visibleLeft;
-      gFrameBuf.frame.visibleTop = decoded.visibleTop;
-      gFrameBuf.frame.stride = decoded.width;
-      gFrameBuf.frame.seq = h.seq;
-      gFrameBuf.frame.captureUs = decodedCaptureUs;
-      gFrameBuf.frame.encodeStartUs = h.encodeStartQpcUs;
-      gFrameBuf.frame.encodeEndUs = h.encodeEndQpcUs;
-      gFrameBuf.frame.sendUs = h.sendQpcUs;
-      gFrameBuf.frame.recvUs = packetNowUs;
-      gFrameBuf.frame.decodeStartUs = decodeStartUs;
-      gFrameBuf.frame.decodeEndUs = decodeEndUs;
-      gFrameBuf.frame.queueSetUs = queueSetUs;
-      gFrameBuf.frame.decodeToQueueUs = decodeToQueueUs;
-      gFrameBuf.frame.streamGeneration = h.streamGeneration;
-      gFrameBuf.frame.key = keyFrame;
+      ctx.frameBuf.frame.format = SharedFrame::PixelFormat::Nv12;
+      ctx.frameBuf.frame.width = (decoded.visibleWidth > 0) ? decoded.visibleWidth : decoded.width;
+      ctx.frameBuf.frame.height = (decoded.visibleHeight > 0) ? decoded.visibleHeight : decoded.height;
+      ctx.frameBuf.frame.codedWidth = decoded.width;
+      ctx.frameBuf.frame.codedHeight = decoded.height;
+      ctx.frameBuf.frame.visibleLeft = decoded.visibleLeft;
+      ctx.frameBuf.frame.visibleTop = decoded.visibleTop;
+      ctx.frameBuf.frame.stride = decoded.width;
+      ctx.frameBuf.frame.seq = h.seq;
+      ctx.frameBuf.frame.captureUs = decodedCaptureUs;
+      ctx.frameBuf.frame.encodeStartUs = h.encodeStartQpcUs;
+      ctx.frameBuf.frame.encodeEndUs = h.encodeEndQpcUs;
+      ctx.frameBuf.frame.sendUs = h.sendQpcUs;
+      ctx.frameBuf.frame.recvUs = packetNowUs;
+      ctx.frameBuf.frame.decodeStartUs = decodeStartUs;
+      ctx.frameBuf.frame.decodeEndUs = decodeEndUs;
+      ctx.frameBuf.frame.queueSetUs = queueSetUs;
+      ctx.frameBuf.frame.decodeToQueueUs = decodeToQueueUs;
+      ctx.frameBuf.frame.streamGeneration = h.streamGeneration;
+      ctx.frameBuf.frame.key = keyFrame;
       // Paced playout (F-11): where on the local clock this frame belongs. Synthetic refresh
       // frames carry the kick time, not a capture time, so they go straight through rather than
       // teaching the clock a false cadence.
-      gFrameBuf.frame.presentAtUs = 0;
-      if (gFrameBuf.pacedPlayout && !synthetic) {
-        const auto decision = gFrameBuf.playout.Schedule(nowUs, decodedCaptureUs, h.streamGeneration);
-        gFrameBuf.frame.presentAtUs = decision.presentAtUs;
+      ctx.frameBuf.frame.presentAtUs = 0;
+      if (ctx.frameBuf.pacedPlayout && !synthetic) {
+        const auto decision = ctx.frameBuf.playout.Schedule(nowUs, decodedCaptureUs, h.streamGeneration);
+        ctx.frameBuf.frame.presentAtUs = decision.presentAtUs;
         if (decision.reanchored) {
-          const uint64_t n = gFrameBuf.pacedReanchorCount.fetch_add(1, std::memory_order_relaxed) + 1;
+          const uint64_t n = ctx.frameBuf.pacedReanchorCount.fetch_add(1, std::memory_order_relaxed) + 1;
           if (n == 1 || (n % 30u) == 1u) {
             std::cout << "[native-video-client] paced-playout reanchor reason=" << decision.reanchorReason
-                      << " gen=" << h.streamGeneration << " stepUs=" << gFrameBuf.playout.StepUs()
+                      << " gen=" << h.streamGeneration << " stepUs=" << ctx.frameBuf.playout.StepUs()
                       << " count=" << n << "\n";
           }
         }
       }
-      gFrameBuf.frame.version = prevVersion + 1;
-      gFrameBuf.frame.bytes = std::move(frameNv12);
-      gFrameBuf.frame.surfaceSample = std::move(decoded.surfaceSample);
-      gFrameBuf.frame.surfaceTexture = std::move(decoded.surfaceTexture);
-      gFrameBuf.frame.surfaceSubresource = decoded.surfaceSubresource;
+      ctx.frameBuf.frame.version = prevVersion + 1;
+      ctx.frameBuf.frame.bytes = std::move(frameNv12);
+      ctx.frameBuf.frame.surfaceSample = std::move(decoded.surfaceSample);
+      ctx.frameBuf.frame.surfaceTexture = std::move(decoded.surfaceTexture);
+      ctx.frameBuf.frame.surfaceSubresource = decoded.surfaceSubresource;
     }
     // First real frame of the acknowledged selection just landed. The gate above guarantees it
     // belongs to the selected generation; record the candidate and post the reveal once. The
     // picker flip, input guard and toolbar are committed on the UI thread (after revalidation),
     // not here, so a racing cancel/new-selection/disconnect cannot wrongly close the picker.
-    if (gSel.AckedSelectionPending()) {
-      post_pc_selection_reveal(h.streamGeneration,
-                               gSel.epoch.load(std::memory_order_acquire));
+    if (ctx.sel.AckedSelectionPending()) {
+      post_pc_selection_reveal(ctx, h.streamGeneration,
+                               ctx.sel.epoch.load(std::memory_order_acquire));
     }
     // While the picker overlays a live stream, WM_PAINT redraws the picker (not the video), so
     // a per-frame invalidate would repaint the whole card grid at video cadence for nothing.
     // The reveal above and the picker-close handler invalidate on their own, so the newest
     // decoded frame still shows the moment the picker leaves.
-    request_video_paint(gSession.hwnd);
+    request_video_paint(ctx, ctx.session.hwnd);
 
     if (args.traceEvery > 0 && (h.seq % args.traceEvery) == 0 &&
-        (args.traceMax == 0 || gPresent.traceRecvPrinted.load() < args.traceMax)) {
-      const auto nowPrinted = gPresent.traceRecvPrinted.fetch_add(1) + 1;
+        (args.traceMax == 0 || ctx.present.traceRecvPrinted.load() < args.traceMax)) {
+      const auto nowPrinted = ctx.present.traceRecvPrinted.fetch_add(1) + 1;
       if (args.traceMax == 0 || nowPrinted <= args.traceMax) {
         std::ostringstream oss;
         oss << "[native-video-client][trace_recv] seq=" << h.seq
@@ -376,7 +376,7 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
             << " tsSource=" << tsSource
             << " bytes=" << h.payloadSize
             << " key=" << (keyFrame ? 1 : 0);
-        log_client_line(oss.str());
+        log_client_line(ctx, oss.str());
       }
     }
 
@@ -401,13 +401,13 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
               << " r2dUs=" << r2dUs
               << " decodeQueueLagUs=" << lag.decodeQueueLagEstimateUs
               << " pts=" << decodedCaptureUs;
-        log_client_line(telem.str());
+        log_client_line(ctx, telem.str());
       }
     }
 
     ++st.decodedFrames;
     st.decodedBytes += decodedPayloadBytes;
-    // lastPresentedCaptureUs is now updated by render thread via gFrameBuf.lastPresentedCaptureUs
+    // lastPresentedCaptureUs is now updated by render thread via ctx.frameBuf.lastPresentedCaptureUs
     const uint64_t latencyUs = FrameGate::aligned_lag_us(
         decodedCaptureUs, nowUs, gate.captureTimelineReady, gate.captureRemoteBaseUs, gate.captureLocalBaseUs);
     const uint64_t decodeTailUs = FrameGate::aligned_lag_us(

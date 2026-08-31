@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "viewer_env_util.hpp"
-#include "viewer_globals.hpp"
+#include "viewer_state.hpp"
 #include "viewer_input_forward.hpp"
 #include "viewer_picker.hpp"
 #include "viewer_window_proc.hpp"
@@ -40,17 +40,17 @@ void apply_dpi_awareness() {
 
 void load_config(ViewerContext& ctx, int argc, char** argv) {
   ctx.args = parse_args(argc, argv);
-  gPresent.traceEvery = ctx.args.traceEvery;
-  gPresent.traceMax = ctx.args.traceMax;
-  gPresent.presentFrameIntervalUs = static_cast<uint32_t>(std::max<uint64_t>(
+  ctx.present.traceEvery = ctx.args.traceEvery;
+  ctx.present.traceMax = ctx.args.traceMax;
+  ctx.present.presentFrameIntervalUs = static_cast<uint32_t>(std::max<uint64_t>(
       1ULL, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, ctx.args.fpsHint))));
   // Paced playout (F-11 / P3), opt-in. The clock is seeded from the fps hint and re-measures the
   // sender's real cadence from capture timestamps as frames arrive.
-  gFrameBuf.pacedPlayout = env_truthy("REMOTE60_NATIVE_PACED_PLAYOUT");
-  gFrameBuf.playout.SetTargetFrameIntervalUs(gPresent.presentFrameIntervalUs);
-  if (gFrameBuf.pacedPlayout) {
-    std::cout << "[native-video-client] paced playout enabled targetUs=" << gPresent.presentFrameIntervalUs
-              << " leadUs=" << VideoPlayoutClock::LeadForStepUs(gPresent.presentFrameIntervalUs) << "\n";
+  ctx.frameBuf.pacedPlayout = env_truthy("REMOTE60_NATIVE_PACED_PLAYOUT");
+  ctx.frameBuf.playout.SetTargetFrameIntervalUs(ctx.present.presentFrameIntervalUs);
+  if (ctx.frameBuf.pacedPlayout) {
+    std::cout << "[native-video-client] paced playout enabled targetUs=" << ctx.present.presentFrameIntervalUs
+              << " leadUs=" << VideoPlayoutClock::LeadForStepUs(ctx.present.presentFrameIntervalUs) << "\n";
   }
   const uint64_t keyframeReqMinIntervalUs = env_u32_clamped(
       "REMOTE60_NATIVE_KEYFRAME_REQ_MIN_INTERVAL_US",
@@ -61,7 +61,7 @@ void load_config(ViewerContext& ctx, int argc, char** argv) {
   const uint32_t keyframeReqTokenCapacity = env_u32_clamped(
       "REMOTE60_NATIVE_KEYFRAME_REQ_TOKEN_CAPACITY",
       kKeyframeRequestTokenCapacityDefault, 1, 16);
-  gControl.keyframeRequests.Configure(keyframeReqMinIntervalUs, keyframeReqTokenRefillUs, keyframeReqTokenCapacity);
+  ctx.control.keyframeRequests.Configure(keyframeReqMinIntervalUs, keyframeReqTokenRefillUs, keyframeReqTokenCapacity);
   ctx.gate.catchupReenterMinIntervalUs = env_u32_clamped(
       "REMOTE60_NATIVE_CATCHUP_REENTER_MIN_INTERVAL_US",
       static_cast<uint32_t>(kCatchupReenterMinIntervalUsDefault), 100000, 3000000);
@@ -91,7 +91,7 @@ void load_config(ViewerContext& ctx, int argc, char** argv) {
       "REMOTE60_NATIVE_UDP_SIM_DROP_PM", 0, 0, 1000);
   ctx.udpSimDropSeed = env_u32_clamped(
       "REMOTE60_NATIVE_UDP_SIM_DROP_SEED", 0, 0, 0x7fffffffu);
-  gControl.keyframeRequests.Reset();
+  ctx.control.keyframeRequests.Reset();
 }
 
 int validate_codec_transport(ViewerContext& ctx) {
@@ -124,9 +124,9 @@ int validate_codec_transport(ViewerContext& ctx) {
 }
 
 void apply_initial_state(ViewerContext& ctx) {
-  gControl.runtimeTune.Reset(ctx.args.runtimeBitrate, ctx.args.runtimeKeyint, ctx.args.runtimeFps);
-  gSession.requestedMonitorId = ctx.args.monitorId;
-  gControl.connected.store(false, std::memory_order_relaxed);
+  ctx.control.runtimeTune.Reset(ctx.args.runtimeBitrate, ctx.args.runtimeKeyint, ctx.args.runtimeFps);
+  ctx.session.requestedMonitorId = ctx.args.monitorId;
+  ctx.control.connected.store(false, std::memory_order_relaxed);
   // How the session opens. The explicit flag wins; with no flag we fall back to the legacy env
   // var so the automation probes (which all set REMOTE60_NATIVE_START_STREAM_VIEW=1) are
   // unaffected. "targets" is the product flow: open on the picker and stream only after a pick.
@@ -138,29 +138,29 @@ void apply_initial_state(ViewerContext& ctx) {
     ctx.startInStreamView = env_truthy("REMOTE60_NATIVE_START_STREAM_VIEW");
   }
   ctx.startInPicker = !ctx.startInStreamView;
-  gPicker.visible.store(ctx.startInPicker, std::memory_order_relaxed);
-  clear_pc_target_selection();
+  ctx.picker.visible.store(ctx.startInPicker, std::memory_order_relaxed);
+  clear_pc_target_selection(ctx);
   // No target has taken effect yet. 0 disables the persistent generation filter, so the legacy
   // stream-view start and the pre-first-pick window accept whatever the host sends, as before.
-  gSel.activeStreamGeneration.store(0, std::memory_order_release);
-  gSel.revealPosted.store(false, std::memory_order_release);
+  ctx.sel.activeStreamGeneration.store(0, std::memory_order_release);
+  ctx.sel.revealPosted.store(false, std::memory_order_release);
   // Picker-first sessions must not keep the host's default stream running under the picker: the
   // request rides the scheduler (StreamState before WindowList/Select) and is queued before the
   // control link exists, so it goes out first thing once connected. An initial default-desktop
   // frame that slips through before the stream stops is dropped by the receive-path gate rather
   // than painted, and no flip swap chain is created until the user's pick produces a real frame.
   if (ctx.startInPicker) {
-    gControl.streamState.Request(false);
+    ctx.control.streamState.Request(false);
   }
-  gControl.captureModeRequests.Reset();
-  gPicker.windowPanel.Reset();
-  gInput.suppressMouseUntilUs.store(0, std::memory_order_relaxed);
-  gInput.activeTouchPointerId.store(0, std::memory_order_relaxed);
-  gInput.activeTouchDown.store(false, std::memory_order_relaxed);
+  ctx.control.captureModeRequests.Reset();
+  ctx.picker.windowPanel.Reset();
+  ctx.input.suppressMouseUntilUs.store(0, std::memory_order_relaxed);
+  ctx.input.activeTouchPointerId.store(0, std::memory_order_relaxed);
+  ctx.input.activeTouchDown.store(false, std::memory_order_relaxed);
 }
 
 int create_window_and_toolbar(ViewerContext& ctx) {
-  if (!create_window()) {
+  if (!create_window(ctx)) {
     std::cerr << "[native-video-client] window create failed\n";
     return 2;
   }
@@ -171,21 +171,22 @@ int create_window_and_toolbar(ViewerContext& ctx) {
     // freeze -- is fixed (the picker no longer stops the stream, and its repaint is composited).
     // With the invisible legacy top-left buttons removed, this is the ONLY road back to target
     // selection during a session, so it must exist.
-    toolbarCallbacks.onTargets = [] {
-      set_picker_visible_and_sync_stream(true);
-      push_session_toolbar_state();
-      if (gSession.hwnd) InvalidateRect(gSession.hwnd, nullptr, FALSE);
+    // The callbacks outlive nothing: the toolbar is destroyed in WM_DESTROY, long before ctx.
+    toolbarCallbacks.onTargets = [&ctx] {
+      set_picker_visible_and_sync_stream(ctx, true);
+      push_session_toolbar_state(ctx);
+      if (ctx.session.hwnd) InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
     };
-    toolbarCallbacks.onMacro = [] {
-      toggle_macro_window(gSession.hwnd);
-      push_session_toolbar_state();
+    toolbarCallbacks.onMacro = [&ctx] {
+      toggle_macro_window(ctx, ctx.session.hwnd);
+      push_session_toolbar_state(ctx);
     };
-    toolbarCallbacks.onMonitor = [](uint32_t monitorId) {
-      gPicker.windowPanel.RequestMonitorSelect(monitorId);
+    toolbarCallbacks.onMonitor = [&ctx](uint32_t monitorId) {
+      ctx.picker.windowPanel.RequestMonitorSelect(monitorId);
     };
-    remote60::native_poc::session_toolbar_create(gSession.hwnd, std::move(toolbarCallbacks));
+    remote60::native_poc::session_toolbar_create(ctx.session.hwnd, std::move(toolbarCallbacks));
     remote60::native_poc::session_toolbar_set_visible(ctx.startInStreamView);
-    push_session_toolbar_state();
+    push_session_toolbar_state(ctx);
   }
   return 0;
 }
@@ -210,10 +211,10 @@ int init_decoder(ViewerContext& ctx) {
     if (enableDxgiDecodeSurface) {
       // Decode and paint share one D3D11 device so an opt-in hardware-decoder NV12 surface
       // can be sampled directly without a GPU->CPU copy and CPU->GPU upload.
-      if (!gUi.nv12Renderer.ready) (void)gUi.nv12Renderer.init(gSession.hwnd);
-      if (gUi.nv12Renderer.ready) {
-        ctx.dec.d3dDevice = gUi.nv12Renderer.device;
-        ctx.dec.d3dContext = gUi.nv12Renderer.context;
+      if (!ctx.ui.nv12Renderer.ready) (void)ctx.ui.nv12Renderer.init(ctx.session.hwnd);
+      if (ctx.ui.nv12Renderer.ready) {
+        ctx.dec.d3dDevice = ctx.ui.nv12Renderer.device;
+        ctx.dec.d3dContext = ctx.ui.nv12Renderer.context;
         (void)ctx.dec.decoder.set_d3d11_device(ctx.dec.d3dDevice.Get());
       } else {
         D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
@@ -287,7 +288,7 @@ int open_media_socket(ViewerContext& ctx) {
       if (ctx.dec.mfStarted) MFShutdown();
       return 3;
     }
-    gSession.sock = session.socket;
+    ctx.session.sock = session.socket;
     ctx.resolvedArgs.host = session.chosen.ip;
     ctx.resolvedArgs.port = session.chosen.port;
     // Control travels over the media socket on this path; a separate TCP port cannot survive
@@ -297,18 +298,18 @@ int open_media_socket(ViewerContext& ctx) {
     // --control-port on the directory path). (F-19.)
     ctx.resolvedArgs.controlPort = 0;
     ctx.directoryPunchToken = session.punchToken;
-    gSession.relayPath.store(session.relay, std::memory_order_relaxed);
-    push_session_toolbar_state();
+    ctx.session.relayPath.store(session.relay, std::memory_order_relaxed);
+    push_session_toolbar_state(ctx);
     std::cout << "[native-video-client] directory chose " << session.chosen.ip << ":"
               << session.chosen.port << " ("
               << remote60::native_poc::candidate_kind_name(session.chosen.kind) << ")"
               << (session.answered ? "" : " [no answer, trying anyway]") << "\n";
   } else {
-    gSession.sock = socket(AF_INET,
+    ctx.session.sock = socket(AF_INET,
                    (ctx.dec.transport == VideoTransport::Udp) ? SOCK_DGRAM : SOCK_STREAM,
                    (ctx.dec.transport == VideoTransport::Udp) ? IPPROTO_UDP : IPPROTO_TCP);
   }
-  if (gSession.sock == INVALID_SOCKET) {
+  if (ctx.session.sock == INVALID_SOCKET) {
     std::cerr << "[native-video-client] socket create failed\n";
     if (ctx.dec.mfStarted) MFShutdown();
     return 3;
@@ -319,25 +320,25 @@ int open_media_socket(ViewerContext& ctx) {
 int connect_media_socket(ViewerContext& ctx) {
   if (ctx.dec.transport == VideoTransport::Tcp) {
     int noDelay = 1;
-    setsockopt(gSession.sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
+    setsockopt(ctx.session.sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
   }
   if (ctx.dec.transport == VideoTransport::Udp) {
     if (ctx.args.tcpRecvBufKb == 0) {
       const int recvBuf = 1024 * 1024;
-      (void)setsockopt(gSession.sock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&recvBuf), sizeof(recvBuf));
+      (void)setsockopt(ctx.session.sock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&recvBuf), sizeof(recvBuf));
     }
     if (ctx.args.tcpSendBufKb == 0) {
       const int sendBuf = 256 * 1024;
-      (void)setsockopt(gSession.sock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sendBuf), sizeof(sendBuf));
+      (void)setsockopt(ctx.session.sock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sendBuf), sizeof(sendBuf));
     }
   }
   if (ctx.args.tcpRecvBufKb > 0) {
     const int recvBuf = static_cast<int>(ctx.args.tcpRecvBufKb * 1024u);
-    setsockopt(gSession.sock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&recvBuf), sizeof(recvBuf));
+    setsockopt(ctx.session.sock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&recvBuf), sizeof(recvBuf));
   }
   if (ctx.args.tcpSendBufKb > 0) {
     const int sendBuf = static_cast<int>(ctx.args.tcpSendBufKb * 1024u);
-    setsockopt(gSession.sock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sendBuf), sizeof(sendBuf));
+    setsockopt(ctx.session.sock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sendBuf), sizeof(sendBuf));
   }
 
   sockaddr_in addr{};
@@ -345,21 +346,21 @@ int connect_media_socket(ViewerContext& ctx) {
   addr.sin_port = htons(ctx.resolvedArgs.port);
   if (inet_pton(AF_INET, ctx.resolvedArgs.host.c_str(), &addr.sin_addr) != 1) {
     std::cerr << "[native-video-client] invalid host " << ctx.resolvedArgs.host << "\n";
-    closesocket(gSession.sock);
-    gSession.sock = INVALID_SOCKET;
+    closesocket(ctx.session.sock);
+    ctx.session.sock = INVALID_SOCKET;
     if (ctx.dec.mfStarted) MFShutdown();
     return 4;
   }
-  if (connect(gSession.sock, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0) {
+  if (connect(ctx.session.sock, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0) {
     std::cerr << "[native-video-client] connect failed " << ctx.resolvedArgs.host << ":" << ctx.resolvedArgs.port << "\n";
-    closesocket(gSession.sock);
-    gSession.sock = INVALID_SOCKET;
+    closesocket(ctx.session.sock);
+    ctx.session.sock = INVALID_SOCKET;
     if (ctx.dec.mfStarted) MFShutdown();
     return 5;
   }
   if (ctx.dec.transport == VideoTransport::Udp) {
     int timeoutMs = 200;
-    (void)setsockopt(gSession.sock, SOL_SOCKET, SO_RCVTIMEO,
+    (void)setsockopt(ctx.session.sock, SOL_SOCKET, SO_RCVTIMEO,
                      reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
     bool handshakeOk = false;
     for (int attempt = 0; attempt < 40 && !handshakeOk; ++attempt) {
@@ -370,13 +371,13 @@ int connect_media_socket(ViewerContext& ctx) {
       if (!ctx.directoryPunchToken.empty()) {
         std::snprintf(hello.authToken, sizeof(hello.authToken), "%s", ctx.directoryPunchToken.c_str());
       }
-      const int sent = send(gSession.sock, reinterpret_cast<const char*>(&hello), sizeof(hello), 0);
+      const int sent = send(ctx.session.sock, reinterpret_cast<const char*>(&hello), sizeof(hello), 0);
       if (sent <= 0) {
         Sleep(50);
         continue;
       }
       UdpHelloPacket ack{};
-      const int n = recv(gSession.sock, reinterpret_cast<char*>(&ack), sizeof(ack), 0);
+      const int n = recv(ctx.session.sock, reinterpret_cast<char*>(&ack), sizeof(ack), 0);
       if (n >= static_cast<int>(sizeof(UdpHelloPacket)) &&
           ack.magic == remote60::native_poc::kMagic &&
           ack.kind == static_cast<uint16_t>(UdpPacketKind::HelloAck) &&
@@ -388,13 +389,13 @@ int connect_media_socket(ViewerContext& ctx) {
       Sleep(50);
     }
     timeoutMs = 0;
-    (void)setsockopt(gSession.sock, SOL_SOCKET, SO_RCVTIMEO,
+    (void)setsockopt(ctx.session.sock, SOL_SOCKET, SO_RCVTIMEO,
                      reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
     if (!handshakeOk) {
       std::cerr << "[native-video-client] udp handshake failed " << ctx.resolvedArgs.host << ":"
                 << ctx.resolvedArgs.port << "\n";
-      closesocket(gSession.sock);
-      gSession.sock = INVALID_SOCKET;
+      closesocket(ctx.session.sock);
+      ctx.session.sock = INVALID_SOCKET;
       if (ctx.dec.mfStarted) MFShutdown();
       return 6;
     }
@@ -406,18 +407,18 @@ void attach_control_tunnel_and_log(ViewerContext& ctx) {
   // No second port to dial means the directory path: control tunnels through the socket the
   // punch just opened. The send is bare because the socket is connected -- the same socket the
   // receive loop below reads, which is what makes the two directions one NAT mapping.
-  if (ctx.resolvedArgs.controlPort == 0 && ctx.dec.transport == VideoTransport::Udp && gSession.sock != INVALID_SOCKET) {
-    gControl.udpControl.Configure(
-        [](const void* data, size_t len) -> bool {
-          return send(gSession.sock, static_cast<const char*>(data), static_cast<int>(len), 0) > 0;
+  if (ctx.resolvedArgs.controlPort == 0 && ctx.dec.transport == VideoTransport::Udp && ctx.session.sock != INVALID_SOCKET) {
+    ctx.control.udpControl.Configure(
+        [&ctx](const void* data, size_t len) -> bool {  // the channel lives in ctx itself
+          return send(ctx.session.sock, static_cast<const char*>(data), static_cast<int>(len), 0) > 0;
         },
         remote60::native_poc::kUdpControlStreamClientToHost,
         remote60::native_poc::kUdpControlStreamHostToClient, ctx.args.udpMtu);
-    gControl.overUdp.store(true, std::memory_order_release);
+    ctx.control.overUdp.store(true, std::memory_order_release);
     // Without this the receive blocks forever on a link that has gone quiet, and the tick above
     // never runs -- which is the one moment recovery is needed.
     DWORD recvTimeoutMs = 200;
-    setsockopt(gSession.sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&recvTimeoutMs),
+    setsockopt(ctx.session.sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&recvTimeoutMs),
                sizeof(recvTimeoutMs));
     std::cout << "[native-video-client] control tunnelled over the media socket\n";
   }
@@ -428,9 +429,9 @@ void attach_control_tunnel_and_log(ViewerContext& ctx) {
             << " codec=" << ctx.args.codec
             << " seconds=" << ctx.args.seconds << "\n";
   std::cout << "[native-video-client] keyframe-request-limiter minIntervalUs="
-            << gControl.keyframeRequests.min_interval_us()
-            << " tokenRefillUs=" << gControl.keyframeRequests.token_refill_us()
-            << " tokenCapacity=" << gControl.keyframeRequests.token_capacity()
+            << ctx.control.keyframeRequests.min_interval_us()
+            << " tokenRefillUs=" << ctx.control.keyframeRequests.token_refill_us()
+            << " tokenCapacity=" << ctx.control.keyframeRequests.token_capacity()
             << " catchupReenterMinUs=" << ctx.gate.catchupReenterMinIntervalUs
             << " staleCaptureDropUs=" << ctx.gate.staleCaptureDropUs
             << " congestionRecoverMinUs=" << ctx.gate.congestionRecoverMinUs
@@ -441,20 +442,20 @@ void attach_control_tunnel_and_log(ViewerContext& ctx) {
   }
   int effectiveRecvBuf = 0;
   int effectiveRecvBufLen = sizeof(effectiveRecvBuf);
-  (void)getsockopt(gSession.sock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<char*>(&effectiveRecvBuf), &effectiveRecvBufLen);
+  (void)getsockopt(ctx.session.sock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<char*>(&effectiveRecvBuf), &effectiveRecvBufLen);
   int effectiveSendBuf = 0;
   int effectiveSendBufLen = sizeof(effectiveSendBuf);
-  (void)getsockopt(gSession.sock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<char*>(&effectiveSendBuf), &effectiveSendBufLen);
+  (void)getsockopt(ctx.session.sock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<char*>(&effectiveSendBuf), &effectiveSendBufLen);
   std::cout << "[native-video-client] socket rcvbuf=" << effectiveRecvBuf
             << " sndbuf=" << effectiveSendBuf << " bytes\n";
 }
 
 void connect_control(ViewerContext& ctx) {
-  ctx.control.emplace(ctx.args, ctx.startInPicker);
+  ctx.controlClient.emplace(ctx, ctx.args, ctx.startInPicker);
   // Two ways to reach the host's control protocol, and the session only ever has one of them.
   // A direct host answers on its own TCP port; a host behind NAT is reachable solely through
   // the punched media socket, and dialling a second port there connects to nothing.
-  ctx.controlReady = gControl.overUdp.load(std::memory_order_acquire);
+  ctx.controlReady = ctx.control.overUdp.load(std::memory_order_acquire);
   if (ctx.resolvedArgs.controlPort > 0) {
     ctx.controlSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (ctx.controlSock != INVALID_SOCKET) {
@@ -472,7 +473,7 @@ void connect_control(ViewerContext& ctx) {
   {
     const bool inputChannelEnabled =
         ctx.controlReady && ctx.args.enableInputChannel && !kInputPolicyForceBlock;
-    gSession.inputEnabled = inputChannelEnabled;
+    ctx.session.inputEnabled = inputChannelEnabled;
     if (inputChannelEnabled) {
       // Clear any modifier the host is still holding from a previous session. A client that
       // lost focus while a modifier was down could not send its up, and that up-less state is
@@ -484,26 +485,26 @@ void connect_control(ViewerContext& ctx) {
                                 static_cast<uint32_t>(VK_SHIFT), static_cast<uint32_t>(VK_LSHIFT),
                                 static_cast<uint32_t>(VK_RSHIFT), static_cast<uint32_t>(VK_LWIN),
                                 static_cast<uint32_t>(VK_RWIN)}) {
-        enqueue_input_event(6, 0, 0, 0, vk);
+        enqueue_input_event(ctx, 6, 0, 0, 0, vk);
       }
     }
-    gControl.scheduler.Reset(ctx.args.controlIntervalMs, qpc_now_us());
+    ctx.control.scheduler.Reset(ctx.args.controlIntervalMs, qpc_now_us());
     if (ctx.controlReady) {
-      ctx.control->controlSock = ctx.controlSock;
+      ctx.controlClient->controlSock = ctx.controlSock;
       // Published BEFORE the thread starts. Run() stores false on its first failed exchange, so
       // storing true after the spawn could land on top of that and leave "connected" stale for
       // the rest of the session. The window was milliseconds wide; it is now zero. (F-06.)
-      gControl.connected.store(true, std::memory_order_relaxed);
-      ctx.controlThread = std::thread([&ctx]() { ctx.control->Run(); });
+      ctx.control.connected.store(true, std::memory_order_relaxed);
+      ctx.controlThread = std::thread([&ctx]() { ctx.controlClient->Run(); });
     }
     if (ctx.controlReady) {
-      gControl.runtimeTune.SetEnabled(ctx.dec.useH264);
-      queue_window_list_request("window_list_request pending");
+      ctx.control.runtimeTune.SetEnabled(ctx.dec.useH264);
+      queue_window_list_request(ctx, "window_list_request pending");
       if (ctx.dec.useH264 && (ctx.args.runtimeBitrate > 0 || ctx.args.runtimeKeyint > 0)) {
-        gControl.runtimeTune.MarkDirty();
+        ctx.control.runtimeTune.MarkDirty();
       }
       std::cout << "[native-video-client] control connected transport="
-                << (gControl.overUdp.load(std::memory_order_acquire) ? "udp-tunnel" : "tcp")
+                << (ctx.control.overUdp.load(std::memory_order_acquire) ? "udp-tunnel" : "tcp")
                 << " port=" << ctx.resolvedArgs.controlPort
                 << " inputChannel=" << (inputChannelEnabled ? 1 : 0) << "\n";
     } else {
@@ -511,9 +512,9 @@ void connect_control(ViewerContext& ctx) {
         closesocket(ctx.controlSock);
         ctx.controlSock = INVALID_SOCKET;
       }
-      gControl.connected.store(false, std::memory_order_relaxed);
-      gControl.runtimeTune.SetEnabled(false);
-      set_window_panel_status("control_connect_failed");
+      ctx.control.connected.store(false, std::memory_order_relaxed);
+      ctx.control.runtimeTune.SetEnabled(false);
+      set_window_panel_status(ctx, "control_connect_failed");
       std::cout << "[native-video-client] control unavailable port=" << ctx.resolvedArgs.controlPort << "\n";
     }
   }
@@ -521,40 +522,40 @@ void connect_control(ViewerContext& ctx) {
 
 void start_receiver(ViewerContext& ctx) {
   ctx.startUs = qpc_now_us();
-  ctx.receiver.emplace(ctx.args, ctx.dec, ctx.gate, ctx.startUs, ctx.udpSimDropPm, ctx.udpSimDropSeed);
+  ctx.receiver.emplace(ctx, ctx.args, ctx.dec, ctx.gate, ctx.startUs, ctx.udpSimDropPm, ctx.udpSimDropSeed);
   ctx.recvThread = std::thread([&ctx]() { ctx.receiver->Run(); });
 }
 
 void run_message_pump(ViewerContext& ctx) {
   MSG msg{};
-  while (gSession.running.load()) {
+  while (ctx.session.running.load()) {
     bool hadMessage = false;
     while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
       hadMessage = true;
       if (msg.message == WM_QUIT) {
-        gSession.running = false;
+        ctx.session.running = false;
         break;
       }
       TranslateMessage(&msg);
       DispatchMessageW(&msg);
     }
-    if (!gSession.running.load()) break;
+    if (!ctx.session.running.load()) break;
 
     // The toolbar shows connection, input, path, frame rate and the monitor list, all of which
     // change on other threads. Refreshing it on a slow tick here beats a push at each of the
     // dozen places that move them, and it is a posted message either way.
     {
       const uint64_t nowUs = qpc_now_us();
-      if (nowUs >= gSession.nextToolbarPushUs) {
-        gSession.nextToolbarPushUs = nowUs + 500000ULL;
-        push_session_toolbar_state();
+      if (nowUs >= ctx.session.nextToolbarPushUs) {
+        ctx.session.nextToolbarPushUs = nowUs + 500000ULL;
+        push_session_toolbar_state(ctx);
       }
     }
 
     if (ctx.args.seconds > 0) {
       const uint64_t nowUs = qpc_now_us();
       if (nowUs >= ctx.startUs + static_cast<uint64_t>(ctx.args.seconds) * 1000000ULL) {
-        gSession.running = false;
+        ctx.session.running = false;
         break;
       }
     }

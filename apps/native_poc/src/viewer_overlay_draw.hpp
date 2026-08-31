@@ -12,18 +12,18 @@
 // Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-11).
 
 #include "viewer_common.hpp"
-#include "viewer_globals.hpp"
+#include "viewer_state.hpp"
 #include "viewer_layout.hpp"
 
 namespace remote60::native_poc::viewer {
 
-void apply_runtime_tune_delta(int bitrateStep, int keyintStep);
+void apply_runtime_tune_delta(ViewerState& ctx, int bitrateStep, int keyintStep);
 
 void draw_thumbnail_into(HDC hdc, const RECT& dst, const WindowThumb& thumb);
 
-void draw_target_card(HDC hdc, const RECT& card, const CardGridMetrics& grid,
+void draw_target_card(ViewerState& ctx, HDC hdc, const RECT& card, const CardGridMetrics& grid,
                       uint64_t windowId, const std::string& title, bool active, bool disabled);
 
-void draw_overlay(HDC hdc);
+void draw_overlay(ViewerState& ctx, HDC hdc);
 
 }  // namespace remote60::native_poc::viewer

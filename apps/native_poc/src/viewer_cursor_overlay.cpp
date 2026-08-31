@@ -4,7 +4,7 @@
 
 #include "viewer_common.hpp"
 #include "viewer_env_util.hpp"
-#include "viewer_globals.hpp"
+#include "viewer_state.hpp"
 #include "viewer_layout.hpp"
 
 namespace remote60::native_poc::viewer {
@@ -13,8 +13,8 @@ namespace remote60::native_poc::viewer {
 // drawn over a flip-model swapchain does not compose reliably, so the cursor lives in its own
 // window that just moves. Content is a blue ring with a center dot (a deliberately distinct
 // marker -- a second arrow would ghost behind the local one by an RTT), rasterized once.
-void ensure_cursor_overlay(HWND owner) {
-  if (gCursor.overlayHwnd) return;
+void ensure_cursor_overlay(ViewerState& ctx, HWND owner) {
+  if (ctx.cursor.overlayHwnd) return;
   HINSTANCE inst = GetModuleHandle(nullptr);
   static bool registered = false;
   const wchar_t* cls = L"Remote60CursorOverlay";
@@ -28,10 +28,10 @@ void ensure_cursor_overlay(HWND owner) {
     registered = true;
   }
   constexpr int kSize = kCursorOverlaySize;
-  gCursor.overlayHwnd = CreateWindowExW(
+  ctx.cursor.overlayHwnd = CreateWindowExW(
       WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, cls, L"",
       WS_POPUP, 0, 0, kSize, kSize, owner, nullptr, inst, nullptr);
-  if (!gCursor.overlayHwnd) return;
+  if (!ctx.cursor.overlayHwnd) return;
   // Rasterize the arrow into a premultiplied 32bpp DIB: GDI writes alpha 0, so pixels that got
   // color are promoted to opaque afterwards; untouched pixels stay fully transparent.
   BITMAPINFO bi{};
@@ -76,7 +76,7 @@ void ensure_cursor_overlay(HWND owner) {
     SIZE size{kSize, kSize};
     BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
     POINT origin{0, 0};
-    UpdateLayeredWindow(gCursor.overlayHwnd, screenDc, nullptr, &size, memDc, &zero, 0, &blend,
+    UpdateLayeredWindow(ctx.cursor.overlayHwnd, screenDc, nullptr, &size, memDc, &zero, 0, &blend,
                         ULW_ALPHA);
     SelectObject(memDc, oldBmp);
   }
@@ -88,37 +88,37 @@ void ensure_cursor_overlay(HWND owner) {
 // Timer body: maps the latest remote-cursor sample (capture pixels) into the letterboxed video
 // rect and moves the overlay; hides it when stale (>500ms), invisible, occluded by the picker,
 // or when the window is minimized.
-void update_cursor_overlay(HWND hwnd) {
+void update_cursor_overlay(ViewerState& ctx, HWND hwnd) {
   // Field verdict: the ring reads as clutter -- disabled by default per the user, kept behind an
   // env for future reconsideration. Static refresh (the thing that keeps still screens alive) is
   // an independent host feature and is unaffected by this.
   // Same parser as the host side (1/true/on), so a future re-enable cannot end up half-on.
   static const bool remoteCursorEnabled = env_truthy("REMOTE60_NATIVE_REMOTE_CURSOR");
   if (!remoteCursorEnabled) {
-    if (gCursor.overlayHwnd) ShowWindow(gCursor.overlayHwnd, SW_HIDE);
+    if (ctx.cursor.overlayHwnd) ShowWindow(ctx.cursor.overlayHwnd, SW_HIDE);
     return;
   }
-  ensure_cursor_overlay(hwnd);
-  if (!gCursor.overlayHwnd) return;
-  const RemoteCursorSample cur = gCursor.Snapshot();  // one consistent sample (F-15)
+  ensure_cursor_overlay(ctx, hwnd);
+  if (!ctx.cursor.overlayHwnd) return;
+  const RemoteCursorSample cur = ctx.cursor.Snapshot();  // one consistent sample (F-15)
   const uint64_t updUs = cur.updateUs;
   const uint32_t capW = cur.capW;
   const uint32_t capH = cur.capH;
   // Generation fence: a sample from the previous target must not paint over a freshly selected
   // one. activeGen==0 = legacy stream view before any PC-side selection; accept anything there.
   const uint64_t cursorGen = cur.generation;
-  const uint64_t activeGen = gSel.activeStreamGeneration.load(std::memory_order_acquire);
+  const uint64_t activeGen = ctx.sel.activeStreamGeneration.load(std::memory_order_acquire);
   const bool fresh = updUs != 0 && (qpc_now_us() - updUs) < kRemoteCursorStaleUs;
   const bool show = fresh && cur.visible &&
                     capW > 0 && capH > 0 &&
                     (activeGen == 0 || cursorGen == activeGen) &&
-                    !gPicker.visible.load(std::memory_order_relaxed) && !IsIconic(hwnd);
+                    !ctx.picker.visible.load(std::memory_order_relaxed) && !IsIconic(hwnd);
   if (!show) {
-    ShowWindow(gCursor.overlayHwnd, SW_HIDE);
+    ShowWindow(ctx.cursor.overlayHwnd, SW_HIDE);
     return;
   }
-  const ClientLayout layout = compute_client_layout(hwnd);
-  const RECT content = resolve_video_content_rect(hwnd, layout.videoRect);
+  const ClientLayout layout = compute_client_layout(ctx, hwnd);
+  const RECT content = resolve_video_content_rect(ctx, hwnd, layout.videoRect);
   const int videoW = std::max<int>(1, static_cast<int>(content.right - content.left));
   const int videoH = std::max<int>(1, static_cast<int>(content.bottom - content.top));
   const int32_t cx = cur.x;
@@ -130,7 +130,7 @@ void update_cursor_overlay(HWND hwnd) {
                                         videoH / static_cast<int>(capH));
   ClientToScreen(hwnd, &pt);
   // The marker is a ring; center it on the reported point rather than hanging it off a corner.
-  SetWindowPos(gCursor.overlayHwnd, nullptr, pt.x - kCursorOverlaySize / 2,
+  SetWindowPos(ctx.cursor.overlayHwnd, nullptr, pt.x - kCursorOverlaySize / 2,
                pt.y - kCursorOverlaySize / 2, 0, 0,
                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
 }

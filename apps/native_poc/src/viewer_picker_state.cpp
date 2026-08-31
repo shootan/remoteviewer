@@ -1,6 +1,6 @@
 // The picker gesture latch (viewer split refactor Phase 2-6). Each member is the sequence the mouse
 // (WM_LBUTTONDOWN / WM_LBUTTONUP) and touch (WM_POINTERDOWN / WM_POINTERUP) handlers performed on
-// gPicker.pressTargetId / shownAtUs, with the time as an argument.
+// ctx.picker.pressTargetId / shownAtUs, with the time as an argument.
 
 #include "viewer_picker_state.hpp"
 

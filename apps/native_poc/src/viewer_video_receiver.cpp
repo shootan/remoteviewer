@@ -26,7 +26,7 @@ bool VideoReceiver::DecoderSink::rebuild_decoder() {
   return dec.decoder.initialize(dec.decoderW, dec.decoderH, args.fpsHint);
 }
 
-void VideoReceiver::DecoderSink::request_keyframe(uint16_t reason) { viewer::request_keyframe(reason); }
+void VideoReceiver::DecoderSink::request_keyframe(uint16_t reason) { viewer::request_keyframe(ctx, reason); }
 
 namespace {
 
@@ -69,33 +69,33 @@ void VideoReceiver::run_udp() {
   uint64_t lastUdpSimDroppedCount = 0;
   uint64_t lastUdpSimAcceptedCount = 0;
 
-  while (gSession.running.load()) {
+  while (ctx.session.running.load()) {
     // At the top of the loop, so it also runs on the 200 ms receive timeouts a quiet link
     // produces -- previously it sat after the packet processing and a socket that stayed silent
     // never reached it, so a harness --seconds limit could only end through the UI's own timer
     // and the socket close. (F-13.)
     if (args.seconds > 0 && qpc_now_us() >= startUs + static_cast<uint64_t>(args.seconds) * 1000000ULL) break;
-    const int n = recv(gSession.sock, reinterpret_cast<char*>(datagram.data()), static_cast<int>(datagram.size()), 0);
+    const int n = recv(ctx.session.sock, reinterpret_cast<char*>(datagram.data()), static_cast<int>(datagram.size()), 0);
     if (n <= 0) {
       // A read timeout is not a dead socket. It is also the tunnel's heartbeat: the control
       // thread spends most of its time blocked waiting for a reply, so if retransmission
       // were driven from there it would stop exactly when a reply goes missing -- and the
       // host, hearing nothing, declares the client lost. This thread always runs.
       if (remote60::native_poc::last_socket_error_is_retryable()) {
-        if (gControl.overUdp.load(std::memory_order_acquire)) gControl.udpControl.Tick();
+        if (ctx.control.overUdp.load(std::memory_order_acquire)) ctx.control.udpControl.Tick();
         continue;
       }
       break;
     }
-    if (gControl.overUdp.load(std::memory_order_acquire)) gControl.udpControl.Tick();
+    if (ctx.control.overUdp.load(std::memory_order_acquire)) ctx.control.udpControl.Tick();
     // Control is offered the datagram BEFORE the video length guard, and the order is the
     // whole point. A control message is not bounded below by the video header: a
     // single-fragment input ack is 32 + 28 = 60 bytes against an 88-byte video header, so
     // checking the video size first silently ate every small reply -- input acks and window
     // selections -- while the larger ones (pong, window lists) came through and made the
     // channel look healthy. OnPacket claims only its own kinds, so video cannot be stolen.
-    if (gControl.overUdp.load(std::memory_order_acquire) &&
-        gControl.udpControl.OnPacket(datagram.data(), static_cast<size_t>(n))) {
+    if (ctx.control.overUdp.load(std::memory_order_acquire) &&
+        ctx.control.udpControl.OnPacket(datagram.data(), static_cast<size_t>(n))) {
       continue;
     }
     // Remote hardware-cursor sample: smaller than the video header, so it must be claimed
@@ -119,7 +119,7 @@ void VideoReceiver::run_udp() {
           sample.generation = cp.streamGeneration;
           sample.visible = (cp.flags & 0x1u) != 0;
           sample.updateUs = qpc_now_us();
-          gCursor.Publish(sample);  // whole sample at once (F-15)
+          ctx.cursor.Publish(sample);  // whole sample at once (F-15)
         }
         continue;
       }
@@ -158,7 +158,7 @@ void VideoReceiver::run_udp() {
       discontinuityHandled = true;
       gate.waitForKeyFrame = true;
       dec.decoder.reset();
-      request_keyframe(2);
+      request_keyframe(ctx, 2);
       ++st.udpAssemblyKeyReqCount;
     };
     if (assembleResult.droppedPreviousIncomplete) {
@@ -218,7 +218,7 @@ void VideoReceiver::run_udp() {
                 << " fecRecoveredChunks=" << assembleResult.fecRecoveredChunks
                 << " reorder=" << (assembleResult.reorderDetected ? 1 : 0)
                 << " droppedPrev=" << (assembleResult.droppedPreviousIncomplete ? 1 : 0);
-          log_client_line(telem.str());
+          log_client_line(ctx, telem.str());
         }
       }
       auto payload = std::move(assembleResult.frame.payload);
@@ -272,28 +272,28 @@ void VideoReceiver::run_udp() {
     }
   }
 
-  gSession.running = false;
-  if (gSession.hwnd) PostMessageW(gSession.hwnd, WM_CLOSE, 0, 0);
+  ctx.session.running = false;
+  if (ctx.session.hwnd) PostMessageW(ctx.session.hwnd, WM_CLOSE, 0, 0);
   return;
 }
 
 void VideoReceiver::run_tcp() {
-  while (gSession.running.load()) {
+  while (ctx.session.running.load()) {
     if (args.seconds > 0 && qpc_now_us() >= startUs + static_cast<uint64_t>(args.seconds) * 1000000ULL) break;
     // The TCP socket has no receive timeout, so recv_all would block for as long as the host
     // stays quiet; a bounded select in front of it keeps the checks above alive. (F-13.)
-    if (!wait_readable(gSession.sock, 200)) continue;
+    if (!wait_readable(ctx.session.sock, 200)) continue;
     MessageHeader header{};
-    if (!remote60::native_poc::recv_all(gSession.sock, &header, sizeof(header))) break;
+    if (!remote60::native_poc::recv_all(ctx.session.sock, &header, sizeof(header))) break;
     if (header.magic != remote60::native_poc::kMagic || header.size < sizeof(header)) break;
     const auto msgType = static_cast<MessageType>(header.type);
 
     if (msgType == MessageType::RawFrameBgra && header.size == sizeof(RawFrameHeader)) {
       RawFrameHeader h{};
       h.header = header;
-      if (!remote60::native_poc::recv_all(gSession.sock, &h.seq, sizeof(h) - sizeof(MessageHeader))) break;
+      if (!remote60::native_poc::recv_all(ctx.session.sock, &h.seq, sizeof(h) - sizeof(MessageHeader))) break;
       std::vector<uint8_t> payload(h.payloadSize);
-      if (!remote60::native_poc::recv_all(gSession.sock, payload.data(), payload.size())) break;
+      if (!remote60::native_poc::recv_all(ctx.session.sock, payload.data(), payload.size())) break;
 
       if (!dec.useRaw) {
         ++st.skippedQueued;
@@ -308,43 +308,43 @@ void VideoReceiver::run_tcp() {
         continue;
       }
       {
-        std::lock_guard<std::mutex> lk(gFrameBuf.frame.mu);
-        const uint64_t prevVersion = gFrameBuf.frame.version;
-        const uint64_t lastPresentedVersion = gFrameBuf.lastPresentedVersion.load(std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+        const uint64_t prevVersion = ctx.frameBuf.frame.version;
+        const uint64_t lastPresentedVersion = ctx.frameBuf.lastPresentedVersion.load(std::memory_order_relaxed);
         if (prevVersion > lastPresentedVersion) {
-          ++gFrameBuf.overwriteBeforePresentCount;
+          ++ctx.frameBuf.overwriteBeforePresentCount;
         }
-        gFrameBuf.frame.format = SharedFrame::PixelFormat::Bgra32;
-        gFrameBuf.frame.width = h.width;
-        gFrameBuf.frame.height = h.height;
-        gFrameBuf.frame.codedWidth = h.width;
-        gFrameBuf.frame.codedHeight = h.height;
-        gFrameBuf.frame.visibleLeft = 0;
-        gFrameBuf.frame.visibleTop = 0;
-        gFrameBuf.frame.stride = h.stride;
-        gFrameBuf.frame.seq = h.seq;
-        gFrameBuf.frame.captureUs = h.captureQpcUs;
-        gFrameBuf.frame.encodeStartUs = h.encodeStartQpcUs;
-        gFrameBuf.frame.encodeEndUs = h.encodeEndQpcUs;
-        gFrameBuf.frame.sendUs = h.sendQpcUs;
-        gFrameBuf.frame.recvUs = nowUs;
-        gFrameBuf.frame.decodeStartUs = nowUs;
-        gFrameBuf.frame.decodeEndUs = nowUs;
-        gFrameBuf.frame.queueSetUs = queueSetUs;
-        gFrameBuf.frame.decodeToQueueUs = 0;
-        gFrameBuf.frame.streamGeneration = h.streamGeneration;
-        gFrameBuf.frame.key = false;  // raw BGRA has no keyframe concept; keeps present telemetry quiet.
-        gFrameBuf.frame.version = prevVersion + 1;
-        gFrameBuf.frame.bytes = std::move(frameBgra);
-        gFrameBuf.frame.surfaceSample.Reset();
-        gFrameBuf.frame.surfaceTexture.Reset();
-        gFrameBuf.frame.surfaceSubresource = 0;
+        ctx.frameBuf.frame.format = SharedFrame::PixelFormat::Bgra32;
+        ctx.frameBuf.frame.width = h.width;
+        ctx.frameBuf.frame.height = h.height;
+        ctx.frameBuf.frame.codedWidth = h.width;
+        ctx.frameBuf.frame.codedHeight = h.height;
+        ctx.frameBuf.frame.visibleLeft = 0;
+        ctx.frameBuf.frame.visibleTop = 0;
+        ctx.frameBuf.frame.stride = h.stride;
+        ctx.frameBuf.frame.seq = h.seq;
+        ctx.frameBuf.frame.captureUs = h.captureQpcUs;
+        ctx.frameBuf.frame.encodeStartUs = h.encodeStartQpcUs;
+        ctx.frameBuf.frame.encodeEndUs = h.encodeEndQpcUs;
+        ctx.frameBuf.frame.sendUs = h.sendQpcUs;
+        ctx.frameBuf.frame.recvUs = nowUs;
+        ctx.frameBuf.frame.decodeStartUs = nowUs;
+        ctx.frameBuf.frame.decodeEndUs = nowUs;
+        ctx.frameBuf.frame.queueSetUs = queueSetUs;
+        ctx.frameBuf.frame.decodeToQueueUs = 0;
+        ctx.frameBuf.frame.streamGeneration = h.streamGeneration;
+        ctx.frameBuf.frame.key = false;  // raw BGRA has no keyframe concept; keeps present telemetry quiet.
+        ctx.frameBuf.frame.version = prevVersion + 1;
+        ctx.frameBuf.frame.bytes = std::move(frameBgra);
+        ctx.frameBuf.frame.surfaceSample.Reset();
+        ctx.frameBuf.frame.surfaceTexture.Reset();
+        ctx.frameBuf.frame.surfaceSubresource = 0;
       }
-      request_video_paint(gSession.hwnd);
+      request_video_paint(ctx, ctx.session.hwnd);
 
       if (args.traceEvery > 0 && (h.seq % args.traceEvery) == 0 &&
-          (args.traceMax == 0 || gPresent.traceRecvPrinted.load() < args.traceMax)) {
-        const auto nowPrinted = gPresent.traceRecvPrinted.fetch_add(1) + 1;
+          (args.traceMax == 0 || ctx.present.traceRecvPrinted.load() < args.traceMax)) {
+        const auto nowPrinted = ctx.present.traceRecvPrinted.fetch_add(1) + 1;
         if (args.traceMax == 0 || nowPrinted <= args.traceMax) {
           std::ostringstream oss;
           oss << "[native-video-client][trace_recv] seq=" << h.seq
@@ -362,7 +362,7 @@ void VideoReceiver::run_tcp() {
               << " r2dUs=0"
               << " decUs=0"
               << " bytes=" << h.payloadSize;
-          log_client_line(oss.str());
+          log_client_line(ctx, oss.str());
         }
       }
 
@@ -381,24 +381,24 @@ void VideoReceiver::run_tcp() {
     } else if (msgType == MessageType::EncodedFrameH264 && header.size == sizeof(EncodedFrameHeader)) {
       EncodedFrameHeader h{};
       h.header = header;
-      if (!remote60::native_poc::recv_all(gSession.sock, &h.seq, sizeof(h) - sizeof(MessageHeader))) break;
+      if (!remote60::native_poc::recv_all(ctx.session.sock, &h.seq, sizeof(h) - sizeof(MessageHeader))) break;
       std::vector<uint8_t> payload(h.payloadSize);
-      if (!remote60::native_poc::recv_all(gSession.sock, payload.data(), payload.size())) break;
+      if (!remote60::native_poc::recv_all(ctx.session.sock, payload.data(), payload.size())) break;
       const uint64_t packetNowUs = qpc_now_us();
       if (!process_h264_frame(h, &payload, packetNowUs)) break;
     } else {
       const size_t bodySize = static_cast<size_t>(header.size - sizeof(header));
-      if (bodySize > 0 && !remote60::native_poc::recv_discard(gSession.sock, bodySize)) break;
+      if (bodySize > 0 && !remote60::native_poc::recv_discard(ctx.session.sock, bodySize)) break;
       ++st.skippedQueued;
     }
 
   }
-  gSession.running = false;
-  if (gSession.hwnd) PostMessageW(gSession.hwnd, WM_CLOSE, 0, 0);
+  ctx.session.running = false;
+  if (ctx.session.hwnd) PostMessageW(ctx.session.hwnd, WM_CLOSE, 0, 0);
 }
 
 void VideoReceiver::Run() {
-  dec.recvSelectionEpoch = gSel.epoch.load(std::memory_order_acquire);
+  dec.recvSelectionEpoch = ctx.sel.epoch.load(std::memory_order_acquire);
   st.statAtUs = qpc_now_us() + 1000000ULL;
   gate.frameIntervalUs = std::max<uint64_t>(
       1ULL, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, args.fpsHint)));

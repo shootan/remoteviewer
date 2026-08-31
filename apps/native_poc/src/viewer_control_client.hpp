@@ -8,10 +8,10 @@
 //          clock telemetry; window list; monitor list; window selected; input ack), fetching one
 //          picker thumbnail per idle turn; on link failure mark control disconnected and clear the
 //          selection.
-// Thread:  control only. Owns the ControlLink and the scheduler (gControl.scheduler); writes
-//          gControl.connected / host capture meta / reportedSecure, gPicker.windowPanel and thumbs;
+// Thread:  control only. Owns the ControlLink and the scheduler (ctx.control.scheduler); writes
+//          ctx.control.connected / host capture meta / reportedSecure, ctx.picker.windowPanel and thumbs;
 //          reads the request states the UI/recv threads fill.
-// Input:   gControl request states, the host's replies.
+// Input:   ctx.control request states, the host's replies.
 // Output:  control messages on the wire; picker/thumbnail state; log lines.
 // Callers: main() (controlThread = std::thread([&]{ control.Run(); })).
 //
@@ -20,13 +20,14 @@
 
 #include "viewer_args.hpp"
 #include "viewer_common.hpp"
-#include "viewer_globals.hpp"
+#include "viewer_state.hpp"
 
 namespace remote60::native_poc::viewer {
 
 class ControlClient {
  public:
-  ControlClient(const Args& args, bool startInPicker) : args(args), startInPicker(startInPicker) {}
+  ControlClient(ViewerState& ctx, const Args& args, bool startInPicker)
+      : ctx(ctx), args(args), startInPicker(startInPicker) {}
   // The TCP control socket when the host was dialled directly (INVALID_SOCKET on the UDP tunnel).
   // Set by main() before the thread starts; main() still owns and closes it at shutdown.
   SOCKET controlSock = INVALID_SOCKET;
@@ -34,6 +35,7 @@ class ControlClient {
   void Run();
 
  private:
+  ViewerState& ctx;  // the session state (F-17)
   const Args& args;
   const bool startInPicker;
 

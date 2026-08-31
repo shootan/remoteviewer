@@ -12,7 +12,7 @@
 // Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-12).
 
 #include "viewer_common.hpp"
-#include "viewer_globals.hpp"
+#include "viewer_state.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -20,11 +20,11 @@ namespace remote60::native_poc::viewer {
 // drawn over a flip-model swapchain does not compose reliably, so the cursor lives in its own
 // window that just moves. Content is a blue ring with a center dot (a deliberately distinct
 // marker -- a second arrow would ghost behind the local one by an RTT), rasterized once.
-void ensure_cursor_overlay(HWND owner);
+void ensure_cursor_overlay(ViewerState& ctx, HWND owner);
 
 // Timer body: maps the latest remote-cursor sample (capture pixels) into the letterboxed video
 // rect and moves the overlay; hides it when stale (>500ms), invisible, occluded by the picker,
 // or when the window is minimized.
-void update_cursor_overlay(HWND hwnd);
+void update_cursor_overlay(ViewerState& ctx, HWND hwnd);
 
 }  // namespace remote60::native_poc::viewer
