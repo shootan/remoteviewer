@@ -113,7 +113,8 @@ void VideoReceiver::publish_metrics(uint32_t metricW, uint32_t metricH, uint64_t
 void VideoReceiver::flush_stats_if_due(uint64_t nowUs, uint32_t w, uint32_t h, bool codedSize,
                                        uint32_t codedW, uint32_t codedH) {
   if (nowUs >= st.statAtUs) {
-    const uint64_t frames = st.decodedFrames;
+    // Real frames only: synthetic ones are excluded from the sums above. (F-10.)
+    const uint64_t frames = (st.decodedFrames > st.syntheticFrames) ? (st.decodedFrames - st.syntheticFrames) : 0;
     const uint64_t avgLatencyUs = (frames > 0) ? (st.sumLatencyUs / frames) : 0;
     const uint64_t avgDecodeTailUs = (frames > 0) ? (st.sumDecodeTailUs / frames) : 0;
     const double mbps = (st.recvBytes * 8.0) / (1000.0 * 1000.0);
@@ -125,6 +126,7 @@ void VideoReceiver::flush_stats_if_due(uint64_t nowUs, uint32_t w, uint32_t h, b
     std::ostringstream oss;
     oss << "[native-video-client] recvFrames=" << st.recvFrames
         << " decodedFrames=" << st.decodedFrames
+        << " syntheticFrames=" << st.syntheticFrames
         << " skippedQueued=" << st.skippedQueued
         << " avgLatencyUs=" << avgLatencyUs
         << " maxLatencyUs=" << st.maxLatencyUs
@@ -145,6 +147,7 @@ void VideoReceiver::flush_stats_if_due(uint64_t nowUs, uint32_t w, uint32_t h, b
     st.decodedBytes = 0;
     st.sumLatencyUs = 0;
     st.maxLatencyUs = 0;
+    st.syntheticFrames = 0;
     st.sumDecodeTailUs = 0;
     st.maxDecodeTailUs = 0;
     st.statAtUs += 1000000ULL;
@@ -202,8 +205,10 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
       gate.waitForKeyFrame = true;
     }
 
-    const bool keyFrame = ((h.flags & 1u) != 0);
+    const bool keyFrame = ((h.flags & kEncodedFrameFlagKeyFrame) != 0);
+    const bool synthetic = ((h.flags & kEncodedFrameFlagSynthetic) != 0);
     FrameGateInputs in{};
+    in.synthetic = synthetic;
     in.captureQpcUs = h.captureQpcUs;
     in.seq = h.seq;
     in.keyFrame = keyFrame;
@@ -389,10 +394,18 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
         decodedCaptureUs, nowUs, gate.captureTimelineReady, gate.captureRemoteBaseUs, gate.captureLocalBaseUs);
     const uint64_t decodeTailUs = FrameGate::aligned_lag_us(
         h.sendQpcUs, nowUs, gate.sendTimelineReady, gate.sendRemoteBaseUs, gate.sendLocalBaseUs);
-    st.sumLatencyUs += latencyUs;
-    st.sumDecodeTailUs += decodeTailUs;
-    st.maxLatencyUs = std::max(st.maxLatencyUs, latencyUs);
-    st.maxDecodeTailUs = std::max(st.maxDecodeTailUs, decodeTailUs);
+    if (synthetic) {
+      // Counted, shown, but not measured: a re-encoded cached frame carries the kick time as its
+      // capture stamp and would pull every pipeline average toward a number that means nothing --
+      // on a still desktop, where the 1Hz refresh may be ALL that flows, it was the whole average,
+      // and the host's ABR reads that average. (F-10.)
+      ++st.syntheticFrames;
+    } else {
+      st.sumLatencyUs += latencyUs;
+      st.sumDecodeTailUs += decodeTailUs;
+      st.maxLatencyUs = std::max(st.maxLatencyUs, latencyUs);
+      st.maxDecodeTailUs = std::max(st.maxDecodeTailUs, decodeTailUs);
+    }
 
     const uint32_t visibleW = (decoded.visibleWidth > 0) ? decoded.visibleWidth : decoded.width;
     const uint32_t visibleH = (decoded.visibleHeight > 0) ? decoded.visibleHeight : decoded.height;

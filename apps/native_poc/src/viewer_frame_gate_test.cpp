@@ -58,7 +58,8 @@ struct Rig {
   }
   // One frame: packet arrival at `t`, capture timestamp `captureUs`, present anchor `presented`.
   FrameGateVerdict feed(uint64_t t, uint64_t captureUs, bool key, uint64_t presented, bool suppressed,
-                        FrameGateLag* lag = nullptr, FrameGateInputs* inOut = nullptr) {
+                        FrameGateLag* lag = nullptr, FrameGateInputs* inOut = nullptr,
+                        bool synthetic = false) {
     FrameGateInputs in{};
     in.captureQpcUs = captureUs;
     in.seq = ++seq;
@@ -67,6 +68,7 @@ struct Rig {
     in.recvGapUs = fg.note_packet(t);
     in.presentedCapUs = presented;
     in.catchupSuppressed = suppressed;
+    in.synthetic = synthetic;
     FrameGateLag l{};
     const FrameGateVerdict v = fg.admit(in, &l);
     if (lag) *lag = l;
@@ -365,7 +367,39 @@ void test_aligned_lag_and_queue_depth() {
 
 }  // namespace
 
+
+// F-10: the host's re-encoded cached frames (kick / static refresh) decode and show, but they
+// carry the kick time as their capture stamp, so they must not drive the congestion trigger.
+void test_synthetic_frames_do_not_drive_congestion() {
+  std::printf("[T1] synthetic frames: lagging synthetic frames never build the trigger streak; real ones still do\n");
+  Rig r;
+  uint64_t t = 5000 * kMs;
+  FrameGateInputs in{};
+  CHECK(r.feed(t, t, true, 0, false, nullptr, &in) == FrameGateVerdict::Decode);
+  r.decoded(in);
+  // five synthetic frames each 400 ms behind the present anchor: decoded, streak untouched
+  for (int i = 0; i < 5; ++i) {
+    t += kFrame;
+    CHECK(r.feed(t, t, false, t - 400 * kMs, false, nullptr, &in, /*synthetic=*/true) == FrameGateVerdict::Decode);
+    r.decoded(in);
+  }
+  CHECK(r.gate.lagTriggerStreak == 0);
+  CHECK(r.gate.congestionState == ClientCongestionState::Normal);
+  CHECK(r.sink.requests(1) == 0);
+  CHECK(r.st.queueDepthSampleCount == 1);  // only the IDR sampled the histogram
+  // the same lag on real frames still trips it
+  for (int i = 0; i < 2; ++i) {
+    t += kFrame;
+    CHECK(r.feed(t, t, false, t - 400 * kMs, false, nullptr, &in) == FrameGateVerdict::Decode);
+    r.decoded(in);
+  }
+  t += kFrame;
+  CHECK(r.feed(t, t, false, t - 400 * kMs, false) == FrameGateVerdict::DropCongested);
+  CHECK(r.gate.congestionState == ClientCongestionState::Congested);
+}
+
 int main() {
+  test_synthetic_frames_do_not_drive_congestion();
   test_keyframe_wait_then_decode();
   test_stale_drop_quiet_vs_reference_chain();
   test_catchup_entry_recovery_and_timeout();

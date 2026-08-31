@@ -34,6 +34,7 @@ struct RecvStats {
   uint64_t statAtUs = 0;  // next stats line; set to qpc_now_us() + 1s at thread start
   uint64_t recvFrames = 0;
   uint64_t decodedFrames = 0;
+  uint64_t syntheticFrames = 0;  // of decodedFrames: host kick / static-refresh re-encodes (F-10)
   uint64_t skippedQueued = 0;
   uint64_t recvBytes = 0;
   uint64_t decodedBytes = 0;

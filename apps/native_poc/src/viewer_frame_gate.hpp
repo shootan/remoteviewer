@@ -47,6 +47,10 @@ struct FrameGateInputs {
   uint64_t recvGapUs = 0;           // from note_packet()
   uint64_t presentedCapUs = 0;      // FrameBuffer::lastPresentedCaptureUs
   bool catchupSuppressed = false;   // picker visible || packetNowUs < catchupSuppressUntilUs
+  // The host re-encoded its cached picture (kick / static refresh). Decoded and shown like any
+  // frame, but it must not feed the congestion trigger or the queue-depth histogram: its capture
+  // stamp is the kick time, not a measurement of the pipeline. (F-10.)
+  bool synthetic = false;
 };
 
 // The two lag estimates admit() computes for this frame (also fed to the post-decode notes).

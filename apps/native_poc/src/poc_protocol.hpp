@@ -121,13 +121,24 @@ struct RawFrameHeader {
   uint64_t sendQpcUs = 0;
 };
 
+// EncodedFrameHeader::flags. bit1 marks a frame the host produced by re-encoding its cached
+// picture -- a trailing-edge kick or the 1Hz static refresh -- rather than from new capture. The
+// pixels are right, but the frame says nothing about the pipeline: its capture stamp is the kick
+// time, so a viewer that folds it into latency / decode-tail averages, the catch-up trigger or the
+// "real" fps reads a static desktop as a stalled one (avgLatency 0.6~0.8s in the field), and the
+// host's ABR -- which takes those averages as input -- can demote quality for nothing. (Viewer
+// ledger F-10 / host H-13.) On the UDP wire the same fact rides UdpVideoChunkHeader bit6.
+constexpr uint32_t kEncodedFrameFlagKeyFrame = 0x1u;
+constexpr uint32_t kEncodedFrameFlagSynthetic = 0x2u;
+constexpr uint16_t kUdpVideoChunkFlagSynthetic = 0x40u;
+
 struct EncodedFrameHeader {
   MessageHeader header{};
   uint32_t seq = 0;
   uint32_t width = 0;
   uint32_t height = 0;
   uint32_t payloadSize = 0;
-  uint32_t flags = 0;  // bit0: keyFrame
+  uint32_t flags = 0;  // bit0: keyFrame  bit1: synthetic refresh (kEncodedFrameFlagSynthetic)
   uint64_t streamGeneration = 0;
   uint64_t captureQpcUs = 0;
   uint64_t encodeStartQpcUs = 0;
@@ -476,6 +487,8 @@ struct UdpVideoChunkHeader {
   // bit4:XOR parity packet -- covers the group beginning at chunkIndex
   // bit5:that parity group is interleaved, so chunkIndex names the group itself and the
   //      group holds chunks chunkIndex, chunkIndex+groupCount, chunkIndex+2*groupCount ...
+  // bit6:synthetic refresh frame (see kEncodedFrameFlagSynthetic); preserved by the chunker,
+  //      which only rewrites bits 1/2/4
   uint16_t flags = 0;
   uint32_t width = 0;
   uint32_t height = 0;

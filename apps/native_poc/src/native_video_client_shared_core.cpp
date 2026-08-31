@@ -651,7 +651,8 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* dat
     created.header.seq = packet.seq;
     created.header.width = packet.width;
     created.header.height = packet.height;
-    created.header.flags = (packet.flags & 0x1u) ? 1u : 0u;
+    created.header.flags = ((packet.flags & 0x1u) ? kEncodedFrameFlagKeyFrame : 0u) |
+                           ((packet.flags & kUdpVideoChunkFlagSynthetic) ? kEncodedFrameFlagSynthetic : 0u);
     created.header.streamGeneration = packet.streamGeneration;
     created.header.captureQpcUs = packet.captureQpcUs;
     created.header.encodeStartQpcUs = packet.encodeStartQpcUs;

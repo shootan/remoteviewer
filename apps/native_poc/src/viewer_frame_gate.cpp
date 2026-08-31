@@ -130,7 +130,7 @@ FrameGateVerdict FrameGate::admit(const FrameGateInputs& in, FrameGateLag* lag) 
           : 0;
   lag->streamLagUs = streamLagUs;
   lag->decodeQueueLagEstimateUs = decodeQueueLagEstimateUs;
-  sample_queue_depth(decodeQueueLagEstimateUs);
+  if (!in.synthetic) sample_queue_depth(decodeQueueLagEstimateUs);
   const uint64_t staleBehindPresentedUs =
       (in.presentedCapUs > 0 && in.presentedCapUs > in.captureQpcUs)
           ? (in.presentedCapUs - in.captureQpcUs)
@@ -179,7 +179,7 @@ FrameGateVerdict FrameGate::admit(const FrameGateInputs& in, FrameGateLag* lag) 
       (decodeQueueLagEstimateUs > kDecodeQueueLagDropUs) ||
       (in.presentedCapUs > 0 && streamLagUs > kCatchupLagDropUs);
   const bool denseArrival = (in.recvGapUs == 0 || in.recvGapUs <= 150000);
-  if (lagTrigger && denseArrival && !in.catchupSuppressed) {
+  if (lagTrigger && denseArrival && !in.catchupSuppressed && !in.synthetic) {
     if (gate.lagTriggerStreak < std::numeric_limits<uint32_t>::max()) {
       ++gate.lagTriggerStreak;
     }

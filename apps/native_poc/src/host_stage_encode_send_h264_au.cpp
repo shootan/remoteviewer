@@ -236,7 +236,10 @@ hdr.seq = ++encoder.encodedSeq;
 hdr.width = encoder.activeEncodeW;
 hdr.height = encoder.activeEncodeH;
 hdr.payloadSize = static_cast<uint32_t>(au.bytes.size());
-hdr.flags = encodedKeyFrame ? 1u : 0u;
+hdr.flags = encodedKeyFrame ? kEncodedFrameFlagKeyFrame : 0u;
+// A kick / static-refresh frame is the cached picture re-encoded, not new content; tell the
+// viewer so it keeps the frame out of its latency and congestion arithmetic. (F-10 / H-13.)
+if (servedBootstrap) hdr.flags |= kEncodedFrameFlagSynthetic;
 hdr.streamGeneration = streamGeneration;
 hdr.captureQpcUs =
     static_cast<uint64_t>(std::max<int64_t>(0, auCaptureUs));
@@ -282,7 +285,9 @@ if (transport == VideoTransport::Tcp) {
     item.udpHdr.size = static_cast<uint16_t>(sizeof(item.udpHdr));
     item.udpHdr.seq = hdr.seq;
     item.udpHdr.codec = static_cast<uint16_t>(UdpCodec::H264);
-    item.udpHdr.flags = (hdr.flags & 1u) ? 0x1u : 0u;
+    item.udpHdr.flags = static_cast<uint16_t>(
+        ((hdr.flags & kEncodedFrameFlagKeyFrame) ? 0x1u : 0u) |
+        ((hdr.flags & kEncodedFrameFlagSynthetic) ? kUdpVideoChunkFlagSynthetic : 0u));
     item.udpHdr.width = hdr.width;
     item.udpHdr.height = hdr.height;
     item.udpHdr.stride = 0;
