@@ -270,7 +270,10 @@ int open_media_socket(ViewerContext& ctx) {
     ctx.resolvedArgs.host = session.chosen.ip;
     ctx.resolvedArgs.port = session.chosen.port;
     // Control travels over the media socket on this path; a separate TCP port cannot survive
-    // hole punching.
+    // hole punching. Everything downstream reads resolvedArgs.controlPort, so this is what
+    // actually routes control -- it used to be a write nobody read while the tunnel / TCP
+    // branches consulted args.controlPort instead (harmless only because the shell never passed
+    // --control-port on the directory path). (F-19.)
     ctx.resolvedArgs.controlPort = 0;
     ctx.directoryPunchToken = session.punchToken;
     gSession.relayPath.store(session.relay, std::memory_order_relaxed);
@@ -382,7 +385,7 @@ void attach_control_tunnel_and_log(ViewerContext& ctx) {
   // No second port to dial means the directory path: control tunnels through the socket the
   // punch just opened. The send is bare because the socket is connected -- the same socket the
   // receive loop below reads, which is what makes the two directions one NAT mapping.
-  if (ctx.args.controlPort == 0 && ctx.dec.transport == VideoTransport::Udp && gSession.sock != INVALID_SOCKET) {
+  if (ctx.resolvedArgs.controlPort == 0 && ctx.dec.transport == VideoTransport::Udp && gSession.sock != INVALID_SOCKET) {
     gControl.udpControl.Configure(
         [](const void* data, size_t len) -> bool {
           return send(gSession.sock, static_cast<const char*>(data), static_cast<int>(len), 0) > 0;
@@ -431,14 +434,14 @@ void connect_control(ViewerContext& ctx) {
   // A direct host answers on its own TCP port; a host behind NAT is reachable solely through
   // the punched media socket, and dialling a second port there connects to nothing.
   ctx.controlReady = gControl.overUdp.load(std::memory_order_acquire);
-  if (ctx.args.controlPort > 0) {
+  if (ctx.resolvedArgs.controlPort > 0) {
     ctx.controlSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (ctx.controlSock != INVALID_SOCKET) {
       int ctlNoDelay = 1;
       setsockopt(ctx.controlSock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&ctlNoDelay), sizeof(ctlNoDelay));
       sockaddr_in ctlAddr{};
       ctlAddr.sin_family = AF_INET;
-      ctlAddr.sin_port = htons(ctx.args.controlPort);
+      ctlAddr.sin_port = htons(ctx.resolvedArgs.controlPort);
       if (inet_pton(AF_INET, ctx.args.host.c_str(), &ctlAddr.sin_addr) == 1 &&
           connect(ctx.controlSock, reinterpret_cast<const sockaddr*>(&ctlAddr), sizeof(ctlAddr)) == 0) {
         ctx.controlReady = true;
@@ -466,10 +469,13 @@ void connect_control(ViewerContext& ctx) {
     gControl.scheduler.Reset(ctx.args.controlIntervalMs, qpc_now_us());
     if (ctx.controlReady) {
       ctx.control->controlSock = ctx.controlSock;
+      // Published BEFORE the thread starts. Run() stores false on its first failed exchange, so
+      // storing true after the spawn could land on top of that and leave "connected" stale for
+      // the rest of the session. The window was milliseconds wide; it is now zero. (F-06.)
+      gControl.connected.store(true, std::memory_order_relaxed);
       ctx.controlThread = std::thread([&ctx]() { ctx.control->Run(); });
     }
     if (ctx.controlReady) {
-      gControl.connected.store(true, std::memory_order_relaxed);
       gControl.runtimeTune.SetEnabled(ctx.dec.useH264);
       queue_window_list_request("window_list_request pending");
       if (ctx.dec.useH264 && (ctx.args.runtimeBitrate > 0 || ctx.args.runtimeKeyint > 0)) {
@@ -477,7 +483,7 @@ void connect_control(ViewerContext& ctx) {
       }
       std::cout << "[native-video-client] control connected transport="
                 << (gControl.overUdp.load(std::memory_order_acquire) ? "udp-tunnel" : "tcp")
-                << " port=" << ctx.args.controlPort
+                << " port=" << ctx.resolvedArgs.controlPort
                 << " inputChannel=" << (inputChannelEnabled ? 1 : 0) << "\n";
     } else {
       if (ctx.controlSock != INVALID_SOCKET) {
@@ -487,7 +493,7 @@ void connect_control(ViewerContext& ctx) {
       gControl.connected.store(false, std::memory_order_relaxed);
       gControl.runtimeTune.SetEnabled(false);
       set_window_panel_status("control_connect_failed");
-      std::cout << "[native-video-client] control unavailable port=" << ctx.args.controlPort << "\n";
+      std::cout << "[native-video-client] control unavailable port=" << ctx.resolvedArgs.controlPort << "\n";
     }
   }
 }

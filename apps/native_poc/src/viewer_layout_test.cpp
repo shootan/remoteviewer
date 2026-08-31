@@ -111,16 +111,16 @@ void test_point_mapping() {
   int32_t vx = 0, vy = 0;
   map_point_to_video(content, 1600, 900, 100, 50, &vx, &vy);
   CHECK(vx == 0 && vy == 0);
-  // the far edge: rel = 799 of 800 -> (799 * 1599 + 400) / 800 = 1597 (the last client pixel maps two
-  // video pixels short of w-1; the mapping scales rel/videoW, not rel/(videoW-1) -- findings F-16)
+  // the far edge: rel = 799 of 800 -> the last client pixel is the last video pixel (F-16 fixed
+  // the rel/videoW scale that used to land on 1597)
   map_point_to_video(content, 1600, 900, 899, 499, &vx, &vy);
-  CHECK(vx == 1597 && vy == 897);
-  map_point_to_video(content, 1600, 900, 500, 275, &vx, &vy);   // centre
-  CHECK(vx == 800 && vy == 450);
+  CHECK(vx == 1599 && vy == 899);
+  map_point_to_video(content, 1600, 900, 500, 275, &vx, &vy);   // centre: 400/799 * 1599 rounds to 801
+  CHECK(vx == 801 && vy == 451);
   map_point_to_video(content, 1600, 900, 101, 51, &vx, &vy);    // one client pixel = two video pixels
   CHECK(vx == 2 && vy == 2);
   map_point_to_video(content, 1600, 900, 5000, -20, &vx, &vy);  // clamps to the content rect
-  CHECK(vx == 1597 && vy == 0);
+  CHECK(vx == 1599 && vy == 0);
   // a 1x1 content rect never divides by zero
   map_point_to_video(make_rect(0, 0, 1, 1), 1600, 900, 0, 0, &vx, &vy);
   CHECK(vx == 0 && vy == 0);

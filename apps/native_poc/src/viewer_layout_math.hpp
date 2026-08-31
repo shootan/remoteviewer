@@ -186,12 +186,18 @@ inline void map_point_to_video(const RECT& contentRect, uint32_t frameW, uint32_
                       std::max<int>(0, static_cast<int>(contentRect.bottom - contentRect.top - 1)));
   const int videoW = std::max<int>(1, static_cast<int>(contentRect.right - contentRect.left));
   const int videoH = std::max<int>(1, static_cast<int>(contentRect.bottom - contentRect.top));
-  *outVideoX = static_cast<int32_t>((static_cast<uint64_t>(relX) * static_cast<uint64_t>(frameW - 1) +
-                                     static_cast<uint64_t>(videoW / 2)) /
-                                    static_cast<uint64_t>(videoW));
-  *outVideoY = static_cast<int32_t>((static_cast<uint64_t>(relY) * static_cast<uint64_t>(frameH - 1) +
-                                     static_cast<uint64_t>(videoH / 2)) /
-                                    static_cast<uint64_t>(videoH));
+  // rel runs 0..videoW-1 and must land on 0..frameW-1, so the scale is (frameW-1)/(videoW-1):
+  // both endpoints map exactly. Scaling by 1/videoW instead left the last client pixel one or
+  // two video pixels short of the edge (800 -> 1600: 799 landed on 1597), which made the
+  // rightmost / bottom column of the remote screen unreachable by the mouse. (F-16.)
+  const auto scale = [](int rel, uint32_t frameDim, int videoDim) -> int32_t {
+    if (videoDim <= 1 || frameDim == 0) return 0;
+    const uint64_t num = static_cast<uint64_t>(rel) * static_cast<uint64_t>(frameDim - 1) +
+                         static_cast<uint64_t>((videoDim - 1) / 2);
+    return static_cast<int32_t>(num / static_cast<uint64_t>(videoDim - 1));
+  };
+  *outVideoX = scale(relX, frameW, videoW);
+  *outVideoY = scale(relY, frameH, videoH);
 }
 
 // Hit-test the card grid: which card (index 0 = the pinned Desktop card, then the window items,

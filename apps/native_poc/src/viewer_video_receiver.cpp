@@ -351,7 +351,7 @@ void VideoReceiver::run_tcp() {
       st.maxLatencyUs = std::max(st.maxLatencyUs, latencyUs);
       st.maxDecodeTailUs = std::max(st.maxDecodeTailUs, decodeTailUs);
 
-      flush_stats_if_due(nowUs, h.width, h.height, false, 0, 0, true);
+      flush_stats_if_due(nowUs, h.width, h.height, false, 0, 0);
     } else if (msgType == MessageType::EncodedFrameH264 && header.size == sizeof(EncodedFrameHeader)) {
       EncodedFrameHeader h{};
       h.header = header;

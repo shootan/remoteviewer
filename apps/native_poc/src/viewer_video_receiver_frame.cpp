@@ -106,13 +106,14 @@ void VideoReceiver::publish_metrics(uint32_t metricW, uint32_t metricH, uint64_t
 }
 
 // The once-a-second stats line + metrics publish, formerly copied at five early-return sites of
-// process_h264_frame and the raw path (F-08). `divideByRecvFrames` keeps the raw path's average
-// divisor (recvFrames) apart from the H.264 path's (decodedFrames) -- F-02; `codedSize` adds the
-// post-decode copy's " codedSize=" field. Output is byte-identical to the five copies.
+// process_h264_frame and the raw path (F-08). The averages divide by decodedFrames on every path:
+// the raw path used recvFrames, which is the same number there (it bumps both per frame), so
+// the parameter that kept them apart only preserved a distinction without a difference. (F-02.)
+// `codedSize` adds the post-decode copy's " codedSize=" field.
 void VideoReceiver::flush_stats_if_due(uint64_t nowUs, uint32_t w, uint32_t h, bool codedSize,
-                                       uint32_t codedW, uint32_t codedH, bool divideByRecvFrames) {
+                                       uint32_t codedW, uint32_t codedH) {
   if (nowUs >= st.statAtUs) {
-    const uint64_t frames = divideByRecvFrames ? st.recvFrames : st.decodedFrames;
+    const uint64_t frames = st.decodedFrames;
     const uint64_t avgLatencyUs = (frames > 0) ? (st.sumLatencyUs / frames) : 0;
     const uint64_t avgDecodeTailUs = (frames > 0) ? (st.sumDecodeTailUs / frames) : 0;
     const double mbps = (st.recvBytes * 8.0) / (1000.0 * 1000.0);
@@ -181,9 +182,12 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
                   << "\n";
         return false;
       }
-  const std::string requestedDecoderBackend = env_string_or_empty("REMOTE60_NATIVE_DECODER_BACKEND");
-  const std::string requestedDecoderBackendPrint =
-      requestedDecoderBackend.empty() ? "default(mft_auto)" : requestedDecoderBackend;
+      // Read once: the decoder re-initialises on every size change and the env is fixed for
+      // the process, so re-reading it per init only cost a getenv and a string. (F-12.)
+      static const std::string requestedDecoderBackend =
+          env_string_or_empty("REMOTE60_NATIVE_DECODER_BACKEND");
+      static const std::string requestedDecoderBackendPrint =
+          requestedDecoderBackend.empty() ? "default(mft_auto)" : requestedDecoderBackend;
       const std::string backendFallbackReason =
           backend_fallback_reason(requestedDecoderBackend, dec.decoder.backend_name());
       std::cout << "[native-video-client] H264 decoder backend=" << dec.decoder.backend_name()
@@ -217,7 +221,7 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
       case FrameGateVerdict::DropCongested:
         return true;
       case FrameGateVerdict::DropWaitingKeyframe:
-        flush_stats_if_due(packetNowUs, h.width, h.height, false, 0, 0, false);
+        flush_stats_if_due(packetNowUs, h.width, h.height, false, 0, 0);
         return true;
       case FrameGateVerdict::Decode:
         break;
@@ -230,7 +234,7 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
     if (!dec.decoder.decode_access_unit(*payloadPtr, keyFrame, inputSampleTimeHns, &outFrames,
                                     &pendingTimestampOverflow)) {
       fg.note_decode_failure(in, lag);
-      flush_stats_if_due(packetNowUs, h.width, h.height, false, 0, 0, false);
+      flush_stats_if_due(packetNowUs, h.width, h.height, false, 0, 0);
       return true;
     }
     fg.note_decode_ok();
@@ -241,7 +245,7 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
     fg.note_reference_sync(in);
     if (outFrames.empty()) {
       fg.note_decode_empty(in, lag);
-      flush_stats_if_due(packetNowUs, h.width, h.height, false, 0, 0, false);
+      flush_stats_if_due(packetNowUs, h.width, h.height, false, 0, 0);
       return true;
     }
     fg.clear_empty_streak();
@@ -392,7 +396,7 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
 
     const uint32_t visibleW = (decoded.visibleWidth > 0) ? decoded.visibleWidth : decoded.width;
     const uint32_t visibleH = (decoded.visibleHeight > 0) ? decoded.visibleHeight : decoded.height;
-    flush_stats_if_due(nowUs, visibleW, visibleH, true, decoded.width, decoded.height, false);
+    flush_stats_if_due(nowUs, visibleW, visibleH, true, decoded.width, decoded.height);
     return true;
 }
 
