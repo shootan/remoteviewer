@@ -40,6 +40,10 @@ constexpr uint32_t kKeyframeRequestTokenCapacityDefault = 3;
 constexpr uint64_t kCatchupReenterMinIntervalUsDefault = 600000;  // 600ms
 constexpr uint64_t kCongestionRecoverMinUsDefault = 250000;  // 250ms
 constexpr uint64_t kCongestionRecoveryTimeoutUsDefault = 1500000;  // 1.5s
+// F-18: the congestion-entry gate, previously fixed. 150 ms "dense arrival" and a streak of 3 are
+// the values the field has run on; they stay the defaults.
+constexpr uint64_t kDenseArrivalMaxGapUsDefault = 150000;  // 150ms
+constexpr uint32_t kLagTriggerStreakMinDefault = 3;
 
 // Long enough that a slow host answering a window list is not mistaken for a dead link.
 constexpr uint32_t kUdpControlReadTimeoutMs = 12000;

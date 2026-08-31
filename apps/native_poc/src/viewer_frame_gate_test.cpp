@@ -53,6 +53,10 @@ struct Rig {
     gate.staleCaptureDropUs = kStaleCaptureDropUs;                            // 50 ms
     gate.congestionRecoverMinUs = kCongestionRecoverMinUsDefault;             // 250 ms
     gate.congestionRecoveryTimeoutUs = kCongestionRecoveryTimeoutUsDefault;   // 1.5 s
+    gate.decodeQueueLagDropUs = kDecodeQueueLagDropUs;                        // 300 ms (F-18)
+    gate.catchupLagDropUs = kCatchupLagDropUs;                                // 450 ms
+    gate.denseArrivalMaxGapUs = kDenseArrivalMaxGapUsDefault;                 // 150 ms
+    gate.lagTriggerStreakMin = kLagTriggerStreakMinDefault;                   // 3
     gate.frameIntervalUs = 16667;
     gate.waitForKeyFrame = true;  // an H.264 session starts waiting for its first IDR
   }
@@ -398,7 +402,50 @@ void test_synthetic_frames_do_not_drive_congestion() {
   CHECK(r.gate.congestionState == ClientCongestionState::Congested);
 }
 
+
+// F-18: the congestion-entry gate is tunable. Two knobs that turn a local-contention false
+// positive into a no-op: a longer streak, and a tighter "dense arrival" gap.
+void test_congestion_entry_tunables() {
+  std::printf("[T1] tunables: streak=5 needs five lagging frames; sparse arrival (gap > denseArrivalMaxGapUs) never enters\n");
+  {
+    Rig r;
+    r.gate.lagTriggerStreakMin = 5;
+    uint64_t t = 7000 * kMs;
+    FrameGateInputs in{};
+    CHECK(r.feed(t, t, true, 0, false, nullptr, &in) == FrameGateVerdict::Decode);
+    r.decoded(in);
+    // three lagging dense frames used to be enough; with the streak at 5 they are not
+    for (int i = 0; i < 4; ++i) {
+      t += kFrame;
+      CHECK(r.feed(t, t, false, t - 400 * kMs, false, nullptr, &in) == FrameGateVerdict::Decode);
+      r.decoded(in);
+    }
+    CHECK(r.gate.lagTriggerStreak == 4);
+    CHECK(r.gate.congestionState == ClientCongestionState::Normal);
+    t += kFrame;
+    CHECK(r.feed(t, t, false, t - 400 * kMs, false) == FrameGateVerdict::DropCongested);
+    CHECK(r.gate.congestionState == ClientCongestionState::Congested);
+  }
+  {
+    Rig r;
+    r.gate.denseArrivalMaxGapUs = 20 * kMs;  // tighter than the 33 ms these frames arrive at
+    uint64_t t = 9000 * kMs;
+    FrameGateInputs in{};
+    CHECK(r.feed(t, t, true, 0, false, nullptr, &in) == FrameGateVerdict::Decode);
+    r.decoded(in);
+    for (int i = 0; i < 6; ++i) {
+      t += 33 * kMs;
+      CHECK(r.feed(t, t, false, t - 400 * kMs, false, nullptr, &in) == FrameGateVerdict::Decode);
+      r.decoded(in);
+    }
+    CHECK(r.gate.lagTriggerStreak == 0);
+    CHECK(r.gate.congestionState == ClientCongestionState::Normal);
+    CHECK(r.sink.requests(1) == 0);
+  }
+}
+
 int main() {
+  test_congestion_entry_tunables();
   test_synthetic_frames_do_not_drive_congestion();
   test_keyframe_wait_then_decode();
   test_stale_drop_quiet_vs_reference_chain();

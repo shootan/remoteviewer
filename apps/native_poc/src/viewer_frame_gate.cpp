@@ -176,9 +176,9 @@ FrameGateVerdict FrameGate::admit(const FrameGateInputs& in, FrameGateLag* lag) 
   }
 
   const bool lagTrigger =
-      (decodeQueueLagEstimateUs > kDecodeQueueLagDropUs) ||
-      (in.presentedCapUs > 0 && streamLagUs > kCatchupLagDropUs);
-  const bool denseArrival = (in.recvGapUs == 0 || in.recvGapUs <= 150000);
+      (decodeQueueLagEstimateUs > gate.decodeQueueLagDropUs) ||
+      (in.presentedCapUs > 0 && streamLagUs > gate.catchupLagDropUs);
+  const bool denseArrival = (in.recvGapUs == 0 || in.recvGapUs <= gate.denseArrivalMaxGapUs);
   if (lagTrigger && denseArrival && !in.catchupSuppressed && !in.synthetic) {
     if (gate.lagTriggerStreak < std::numeric_limits<uint32_t>::max()) {
       ++gate.lagTriggerStreak;
@@ -186,7 +186,8 @@ FrameGateVerdict FrameGate::admit(const FrameGateInputs& in, FrameGateLag* lag) 
   } else {
     gate.lagTriggerStreak = 0;
   }
-  if (gate.congestionState != ClientCongestionState::Congested && gate.lagTriggerStreak >= 3) {
+  if (gate.congestionState != ClientCongestionState::Congested &&
+      gate.lagTriggerStreak >= gate.lagTriggerStreakMin) {
     gate.lagTriggerStreak = 0;
     const bool catchupEnterAllowed =
         (gate.lastCatchupEnterUs == 0) || (in.packetNowUs >= (gate.lastCatchupEnterUs + gate.catchupReenterMinIntervalUs));
@@ -202,7 +203,7 @@ FrameGateVerdict FrameGate::admit(const FrameGateInputs& in, FrameGateLag* lag) 
       }
     } else {
       transition_congestion_state(ClientCongestionState::Congested, in.packetNowUs,
-                                  (decodeQueueLagEstimateUs > kDecodeQueueLagDropUs)
+                                  (decodeQueueLagEstimateUs > gate.decodeQueueLagDropUs)
                                       ? "decode_queue"
                                       : "stream_lag_emergency",
                                   streamLagUs, decodeQueueLagEstimateUs, in.seq);
@@ -216,7 +217,7 @@ FrameGateVerdict FrameGate::admit(const FrameGateInputs& in, FrameGateLag* lag) 
                 << " decodeQueueLagEstUs=" << decodeQueueLagEstimateUs
                 << " in.recvGapUs=" << in.recvGapUs
                 << " reason="
-                << ((decodeQueueLagEstimateUs > kDecodeQueueLagDropUs) ? "decode_queue" : "stream_lag_emergency")
+                << ((decodeQueueLagEstimateUs > gate.decodeQueueLagDropUs) ? "decode_queue" : "stream_lag_emergency")
                 << " seq=" << in.seq << "\n";
     }
   }

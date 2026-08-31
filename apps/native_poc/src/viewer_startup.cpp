@@ -66,6 +66,19 @@ void load_config(ViewerContext& ctx, int argc, char** argv) {
   ctx.gate.congestionRecoveryTimeoutUs = env_u32_clamped(
       "REMOTE60_NATIVE_CONGEST_RECOVERY_TIMEOUT_US",
       static_cast<uint32_t>(kCongestionRecoveryTimeoutUsDefault), 100000, 10000000);
+  // Congestion-entry thresholds (F-18). Tunable so a machine where local CPU contention alone
+  // trips the trigger can be measured and adjusted without a rebuild.
+  ctx.gate.decodeQueueLagDropUs = env_u32_clamped(
+      "REMOTE60_NATIVE_CONGEST_DECODE_QUEUE_LAG_US",
+      static_cast<uint32_t>(kDecodeQueueLagDropUs), 50000, 5000000);
+  ctx.gate.catchupLagDropUs = env_u32_clamped(
+      "REMOTE60_NATIVE_CONGEST_STREAM_LAG_US",
+      static_cast<uint32_t>(kCatchupLagDropUs), 50000, 5000000);
+  ctx.gate.denseArrivalMaxGapUs = env_u32_clamped(
+      "REMOTE60_NATIVE_CONGEST_DENSE_ARRIVAL_US",
+      static_cast<uint32_t>(kDenseArrivalMaxGapUsDefault), 10000, 2000000);
+  ctx.gate.lagTriggerStreakMin = env_u32_clamped(
+      "REMOTE60_NATIVE_CONGEST_TRIGGER_STREAK", kLagTriggerStreakMinDefault, 1, 60);
   ctx.udpSimDropPm = env_u32_clamped(
       "REMOTE60_NATIVE_UDP_SIM_DROP_PM", 0, 0, 1000);
   ctx.udpSimDropSeed = env_u32_clamped(

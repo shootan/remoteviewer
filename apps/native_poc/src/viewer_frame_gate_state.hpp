@@ -44,6 +44,15 @@ struct FrameGateState {
   uint64_t staleCaptureDropUs = 0;
   uint64_t congestionRecoverMinUs = 0;
   uint64_t congestionRecoveryTimeoutUs = 0;
+  // Congestion-entry thresholds (F-18). Formerly constants: the trigger is "decode-queue lag past
+  // decodeQueueLagDropUs, or stream lag past catchupLagDropUs, on lagTriggerStreakMin consecutive
+  // frames that arrived within denseArrivalMaxGapUs of each other". Local CPU contention alone can
+  // satisfy that -- an e2e run next to a build tripped it once -- so the values are tunable from
+  // the environment (REMOTE60_NATIVE_CONGEST_*) until field measurements settle them.
+  uint64_t decodeQueueLagDropUs = 0;
+  uint64_t catchupLagDropUs = 0;
+  uint64_t denseArrivalMaxGapUs = 0;
+  uint32_t lagTriggerStreakMin = 0;
   uint64_t frameIntervalUs = 0;  // from args.fpsHint, set at thread start
   // Hold non-key frames until the next IDR (set at startup to useH264, after every decoder reset).
   bool waitForKeyFrame = false;
