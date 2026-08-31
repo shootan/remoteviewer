@@ -7847,3 +7847,23 @@ Next action
 - 릴리스: 0.2.62 → **0.2.63**, `dist/GNLinkSetup-0.2.63.exe`(임베드 버전 + payload 최신성 확인). 되돌리기 0.2.62.
 - 코덱스: 검증 요청 발신(대답 없으면 진행 — 사용자 지시).
 - 다음 액션: 0.2.63 실기 판정(F-20 정지 / F-21 피커 / F-10 정적화면 화질 / 선택적으로 PACED_PLAYOUT=1 체감).
+
+### 326) 2026-08-31 뷰어 원장 마지막 2건(F-17 / F-09) 처리 + 0.2.64 (브랜치 refactor/viewer-split, 3768490 / 744b693)
+
+- 사용자 지시("원장 전부 구현")로 #325 에서 보류했던 2건을 구현. 원장의 보류 사유 표는 처리 기록으로 대체.
+- **F-17** (`3768490`): `viewer_globals.hpp/.cpp` 삭제. 신설 `viewer_state.hpp`(ViewerState = 상태 struct 10, 선언 순서 = 옛 정의 순서)를
+  `ViewerContext` 가 상속 → main() 이 소유. 자유함수 55개에 `ViewerState& ctx` 첫 인자, 참조 557곳 치환. WndProc 는 `CreateWindowExW`
+  lpParam → `WM_NCCREATE` 에서 `GWLP_USERDATA` 고정 + `session.hwnd` 선기록. 람다 6곳 `[&ctx]`(툴바 3·매크로 sendStep·UDP 터널 send·
+  스레드 2 — 모두 ctx 보다 먼저 파괴). `ViewerContext::control` → `controlClient`(기반 `ViewerState::control` 과 충돌). 호출자 없던
+  `viewer_layout.hpp` `kPanel*` inline 10개·`brush_cache()` 삭제. 동작 변화 0. 30파일 +883/−882.
+- **F-09** (`744b693`): "뷰어를 컨트롤러 위에 올리기"는 기각 — TCP 비디오 경로(e2e C-3) / 커서 패킷·sim-drop·assembly 텔레메트리 /
+  UI 스레드 visibleCards(F-07) / BGRA vs RGBA / 하네스가 grep 하는 로그 라인. 대신 **프로토콜 코드가 한 곳에만 있도록** 와이어 단계 3종을
+  공용으로 추출해 컨트롤러·뷰어 양쪽이 호출: `udp_hello_handshake`·`fetch_window_thumbnail`(tcp_control), `make_control_input_event`/
+  `enqueue_control_input_text`(shared_core). 새 파일 없음 → Android CMake 불변. 컨트롤러 동작 불변(send 실패 즉시 실패 유지).
+  뷰어 변화 1건: 디렉터리 토큰을 보냈으면 `kUdpFeatureDirectoryAuth` 승인이 돌아와야 함(모바일과 동일; 전에는 검사하지 않았다).
+  shared_core_test 에 builder 시나리오 추가.
+- 게이트(RDP 없음, 콘솔): 전 타깃 빌드 0 에러 · 단위테스트 26/26 · viewer e2e C-1/C-2/C-3 ALL PASS(F-17 후, F-09 후 각각).
+- 릴리스: 0.2.63 → **0.2.64**, `dist/GNLinkSetup-0.2.64.exe`(임베드 버전 + payload 최신성 확인). 되돌리기 0.2.63.
+- 코덱스: 설계(seq 837)·구현 diff(seq 838) 검증 요청 발신, delivered=1(onCall 꺼짐 → 우편함 대기). 답이 오면 후속 커밋으로 반영.
+- 이로써 뷰어 원장 F-01~F-21 **전부 처리**, 호스트 원장 H-01~H-28 전부 처리. 다음 액션: 0.2.64 실기 판정(0.2.63 항목 + 디렉터리
+  경로 접속 1회 — DirectoryAuth 검사 확인).
