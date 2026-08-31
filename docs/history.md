@@ -7776,3 +7776,32 @@ Next action
 - 다음 액션: **RDP 끊고 실기 판정.** 중점 확인 — (1) 뷰어 재접속 시 복구(1초 틱 위치, H-10)
   (2) 정적 화면 키프레임 복구(kick 재무장, H-26b) (3) 게임 중 프리즈/IDR 연발(H-19, H-03)
   (4) 런타임 비트레이트 변경 직후 끊김(ABR hold, H-26d). DXGI 경로 항목이 많아 RDP면 판정 불가.
+
+### 323) 2026-08-29 실기 정지 원인 규명 + 뷰어 F-20 수정 + 0.2.61 (브랜치 refactor/viewer-split, 42bfc73)
+
+- 0.2.60 실기에서 PC 뷰어가 장시간 스트리밍 중 완전히 멎었다(조작은 됨, 자가복구 안 됨, 재접속해야 복구).
+- 로그 3종(host_app / viewer / 안드로이드 진단)을 교차 분석했다. **먼저 낸 결론이 틀려 두 번 정정했다**:
+  (1) 호스트 통계의 `encodedFrames=0` 구간(17:16~17:20)을 사용자가 겪은 정지로 단정했으나, 그건 **모바일이
+  뒤로가기(`viewer_back`)로 대상 선택 화면에 머문** 구간이었다(안드로이드 로그가 확정). (2) "occlusion으로
+  Present가 멈췄다"도 틀렸다 — `DXGI_STATUS_OCCLUDED`는 이미 성공 처리 중이고 `d3dPresentFail=0`이다.
+  (3) "`paintCoalesced` 증가 = WM_PAINT 실행 중"도 틀렸다 — 그 카운터는 수신 스레드에서도 증가한다.
+- 실제 정지는 PC 세션(17:20:49~17:23:56)의 `17:22:10.949` 이후. 결정적 증거는
+  `d3dPresentSuccess=0` **이면서** `d3dPresentFail=0` + 모든 fallback 실패 0 → 렌더 실패가 아니라 **진입조차 안 함**.
+- 원인 = **`gFrameBuf.paintQueued` 래치 고착**(뷰어 원장 F-20). `paint_video_frame()`이 `BeginPaint`
+  **이전에** 래치를 해제해, 그 사이 producer의 `InvalidateRect`를 바로 뒤의 `BeginPaint`가 검증(삭제)하면
+  래치는 true인데 invalid region도 pending WM_PAINT도 없는 상태가 된다. 래치를 푸는 곳이 WM_PAINT
+  한 곳뿐이라 영구 고착. 코덱스 교차검증에서 **두 번째 고착 경로**(UI 스냅샷이 새 프레임을 포함하면
+  말미 재확인 조건 자체가 성립하지 않음)까지 확인.
+- 수정(`42bfc73`): 래치 해제를 `BeginPaint` 뒤로 · `request_video_paint()` 중앙화(동일 패턴 4곳 복제) ·
+  `InvalidateRect` 실패 시 롤백 · `BeginPaint` 실패 처리 · 50ms 타이머 안전망(미표시 200ms + update region
+  없음이면 강제 재요청) · `paintEnter`/`paintSelfHeal`/`invalidateFail`/`beginPaintFail` 계측.
+  코덱스가 반대한 "가려지면 스트림 중지"안은 기각(캡처 churn 재도입 + H.264 참조 체인 파손).
+- **RDP 규칙이 값을 했다**: `gdi_capture_process_test`가 RDP에서 32fps로 FAIL 하다가 콘솔에서
+  59.98fps PASS. 코드 회귀가 아니라 RDP 어댑터 32Hz였음이 실증됐다(CLAUDE.md 테스트 규칙).
+- 검증(콘솔 세션): 전 타깃 빌드 0 에러 · 단위테스트 **26/26** · host_udp_e2e 두 leg ALL PASS ·
+  viewer_split_gate --e2e ALL PASS · 신규 텔레메트리 실측(paintEnter 30→120, 실패 카운터 0).
+- 릴리스: product_version 0.2.60 → **0.2.61**, `dist/GNLinkSetup-0.2.61.exe`. 임베드 검증에 더해
+  **payload 안에 이번 수정 심볼(paintSelfHeal/paintEnter/invalidateFail)이 실제로 들어갔는지**까지 확인했다.
+  되돌리기 = `dist/GNLinkSetup-0.2.60.exe`.
+- 신규 미착수 **F-21**: PC 피커가 flip-model 스왑체인에 가려 안 보임(+ 사용자 요청: PC 피커는 desktop만 표시).
+- 다음 액션: 0.2.61 실기 판정 → F-21 → H-28.
