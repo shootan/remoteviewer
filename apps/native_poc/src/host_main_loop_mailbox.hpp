@@ -30,10 +30,14 @@ namespace remote60::native_poc {
 // --- request payloads ---
 
 struct SelectMonitorRequest {
+  // Session epoch this request was posted under; a request outlives its client otherwise.
+  uint64_t epoch = 0;  // 0 = unstamped (accept always)
   uint32_t monitorId = 0;
 };
 
 struct CaptureModeRequest {
+  // Session epoch this request was posted under; a request outlives its client otherwise.
+  uint64_t epoch = 0;  // 0 = unstamped (accept always)
   uint32_t seq = 0;
   uint16_t mode = 0;         // 1 = overview, 2 = focus
   uint32_t xPermille = 5000;
@@ -41,6 +45,8 @@ struct CaptureModeRequest {
 };
 
 struct TuneEncoderRequest {
+  // Session epoch this request was posted under; a request outlives its client otherwise.
+  uint64_t epoch = 0;  // 0 = unstamped (accept always)
   uint32_t seq = 0;
   uint32_t bitrate = 0;  // 0 = leave alone
   uint32_t keyint = 0;   // 0 = leave alone
@@ -48,6 +54,8 @@ struct TuneEncoderRequest {
 };
 
 struct BackendRequest {
+  // Session epoch this request was posted under; a request outlives its client otherwise.
+  uint64_t epoch = 0;  // 0 = unstamped (accept always)
   uint32_t seq = 0;
   uint32_t backend = 0;  // 1 = dxgi, 2 = wgc, 3 = gdi
 };
@@ -101,10 +109,23 @@ class MainLoopMailbox {
   }
 
   // --- consumer (main loop) ---
-  std::optional<SelectMonitorRequest> TakeSelectMonitor() { return Take(selectMonitor_); }
-  std::optional<CaptureModeRequest> TakeCaptureMode() { return Take(captureMode_); }
-  std::optional<TuneEncoderRequest> TakeTuneEncoder() { return Take(tuneEncoder_); }
-  std::optional<BackendRequest> TakeBackendRequest() { return Take(backend_); }
+  //
+  // `currentEpoch` is the session the loop is serving right now. A request stamped for an older
+  // session is dropped instead of applied: Clear() covers the requests still sitting here when a
+  // rollover happens, but a request posted just before one and taken just after would otherwise
+  // retarget the NEW client's capture. Pass 0 to accept anything. (Ledger H-27.)
+  std::optional<SelectMonitorRequest> TakeSelectMonitor(uint64_t currentEpoch = 0) {
+    return TakeForEpoch(selectMonitor_, currentEpoch);
+  }
+  std::optional<CaptureModeRequest> TakeCaptureMode(uint64_t currentEpoch = 0) {
+    return TakeForEpoch(captureMode_, currentEpoch);
+  }
+  std::optional<TuneEncoderRequest> TakeTuneEncoder(uint64_t currentEpoch = 0) {
+    return TakeForEpoch(tuneEncoder_, currentEpoch);
+  }
+  std::optional<BackendRequest> TakeBackendRequest(uint64_t currentEpoch = 0) {
+    return TakeForEpoch(backend_, currentEpoch);
+  }
   // Returns the accumulated reason mask and clears it; kKeyframeReasonNone when nothing pending.
   uint32_t TakeKeyframeReasons(uint16_t* outViewerReason = nullptr) {
     std::lock_guard<std::mutex> lk(mu_);
@@ -133,6 +154,11 @@ class MainLoopMailbox {
     return tuneEncoder_.has_value();
   }
 
+  uint64_t StaleDroppedCount() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return staleDropped_;
+  }
+
   // A new session starts with nothing outstanding: requests belong to the client that made them.
   void Clear() {
     std::lock_guard<std::mutex> lk(mu_);
@@ -152,6 +178,17 @@ class MainLoopMailbox {
     out.swap(slot);
     return out;
   }
+  // Take, then drop it on the floor if it belonged to a session that has since ended. Taking
+  // first is deliberate: a stale request must not stay queued for the next Take either.
+  template <typename T>
+  std::optional<T> TakeForEpoch(std::optional<T>& slot, uint64_t currentEpoch) {
+    std::optional<T> out = Take(slot);
+    if (out && currentEpoch != 0 && out->epoch != 0 && out->epoch != currentEpoch) {
+      ++staleDropped_;
+      return std::nullopt;
+    }
+    return out;
+  }
 
   mutable std::mutex mu_;
   std::optional<SelectMonitorRequest> selectMonitor_;
@@ -160,6 +197,7 @@ class MainLoopMailbox {
   std::optional<BackendRequest> backend_;
   uint32_t keyframeReasons_ = kKeyframeReasonNone;
   uint16_t viewerKeyframeReason_ = 0;
+  uint64_t staleDropped_ = 0;  // requests dropped because their session had ended (H-27)
 };
 
 }  // namespace remote60::native_poc

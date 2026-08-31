@@ -65,6 +65,10 @@ ControlSessionServer::ControlSessionServer(const Args& args, std::atomic<bool>& 
       mailbox(mailbox) {}
 
 void ControlSessionServer::Serve(ControlLink& link) {
+  // Which session this conversation belongs to. Checked again at the bottom before touching any
+  // shared stream state, so a session that ends after its successor has started cannot turn the
+  // successor's stream off. (Ledger H-28.)
+  const uint64_t servedEpoch = clientSession.epoch.load(std::memory_order_acquire);
   // A new session starts with the stream on, exactly like the first client of a fresh
   // process. The previous session's disconnect turned it off, and a client that never
   // sends stream-state (the Windows client) would otherwise stare at a black screen
@@ -504,7 +508,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
       if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
       // Applied by the render loop, which owns the capture item; answered with the list so the
       // client sees the selection that actually took effect rather than the one it asked for.
-      mailbox.PostSelectMonitor({req.monitorId});
+      mailbox.PostSelectMonitor({servedEpoch, req.monitorId});
       if (!send_monitor_list(req.seq)) break;
       continue;
     }
@@ -667,6 +671,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
       const bool hasFps = ((tune.flags & 0x4u) != 0) && tune.fps >= 1;
       if (hasBitrate || hasKeyint || hasFps) {
         TuneEncoderRequest tuneReq;
+        tuneReq.epoch = servedEpoch;
         tuneReq.seq = tune.seq;
         if (hasBitrate) tuneReq.bitrate = tune.bitrate;
         if (hasKeyint) tuneReq.keyint = tune.keyint;
@@ -688,7 +693,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
       req.header = header;
       if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
       if (req.backend == 1 || req.backend == 2 || req.backend == 3) {
-        mailbox.PostBackendRequest({req.seq, req.backend});
+        mailbox.PostBackendRequest({servedEpoch, req.seq, req.backend});
         std::cout << "[native-video-host][control] desktop-backend-request seq=" << req.seq
                   << " backend="
                   << (req.backend == 2 ? "wgc" : (req.backend == 3 ? "gdi" : "dxgi"))
@@ -716,7 +721,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
       req.header = header;
       if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
       if (req.mode == 1 || req.mode == 2) {
-        mailbox.PostCaptureMode({req.seq, req.mode,
+        mailbox.PostCaptureMode({servedEpoch, req.seq, req.mode,
                                  std::min<uint32_t>(10000u, req.xPermille),
                                  std::min<uint32_t>(10000u, req.yPermille)});
         std::cout << "[native-video-host][control] capture-mode-request seq=" << req.seq
@@ -730,7 +735,13 @@ void ControlSessionServer::Serve(ControlLink& link) {
 
     if (bodySize > 0 && !link.Discard(bodySize)) break;
   }
-  clientSession.streamControlActive.store(false, std::memory_order_release);
+  // Only if we are still the current session. A TCP control thread and the UDP dispatcher can be
+  // alive at the same time, and this unconditional store meant whichever finished last switched
+  // the OTHER one's video off -- the viewer would sit on a frozen picture with a healthy link.
+  // (Ledger H-28.)
+  if (clientSession.epoch.load(std::memory_order_acquire) == servedEpoch) {
+    clientSession.streamControlActive.store(false, std::memory_order_release);
+  }
 }
 
 }  // namespace remote60::native_poc

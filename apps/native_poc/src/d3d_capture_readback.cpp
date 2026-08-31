@@ -253,6 +253,18 @@ uint64_t D3dCaptureReadbackPipeline::OldestGpuPendingAgeUs() {
   return nowUs > oldestSubmitUs ? nowUs - oldestSubmitUs : 0;
 }
 
+uint64_t D3dCaptureReadbackPipeline::OldestSubmittingAgeUs() {
+  std::lock_guard<std::mutex> lk(slotMu_);
+  uint64_t oldestUs = 0;
+  for (const auto& s : slots_) {
+    if (s.state != SlotState::Submitting || s.reservedUs == 0) continue;
+    if (oldestUs == 0 || s.reservedUs < oldestUs) oldestUs = s.reservedUs;
+  }
+  if (oldestUs == 0) return 0;
+  const uint64_t nowUs = qpc_us();
+  return nowUs > oldestUs ? nowUs - oldestUs : 0;
+}
+
 uint32_t D3dCaptureReadbackPipeline::GpuPendingCount() {
   std::lock_guard<std::mutex> lk(slotMu_);
   uint32_t pending = 0;
@@ -473,6 +485,7 @@ bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrame
     // Reserved, not yet visible: the worker polls GpuPending only. Promotion happens after the
     // D3D work, once the meta is final. (Ledger H-23.)
     slot->state = SlotState::Submitting;
+    slot->reservedUs = qpc_us();
     slot->submitSeq = ++submitSeq_;
     slot->meta = slotMeta;
     slotIndex = static_cast<size_t>(slot - slots_.data());

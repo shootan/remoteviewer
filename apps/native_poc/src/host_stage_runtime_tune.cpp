@@ -94,7 +94,7 @@ Flow stage_runtime_tune(HostContext& hx, TickContext& tc) {
   auto& res = hx.res;
   auto& nowUs = tc.nowUs;
   auto& seq = tc.seq;
-  const auto tuneReq = useH264 ? hx.mailbox.TakeTuneEncoder() : std::nullopt;
+  const auto tuneReq = useH264 ? hx.mailbox.TakeTuneEncoder(hx.clientSession.epoch.load(std::memory_order_acquire)) : std::nullopt;
   if (tuneReq) {
     const uint32_t reqSeq = tuneReq->seq;
     const uint32_t requestedBitrate = tuneReq->bitrate;

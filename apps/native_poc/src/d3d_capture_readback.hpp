@@ -170,6 +170,13 @@ class D3dCaptureReadbackPipeline {
   // the ring size) from a merely busy one (age small, count churning).
   uint32_t GpuPendingCount();
 
+  // Age of the oldest slot still inside Submit (reserved, D3D work not finished). GpuPendingCount
+  // and OldestGpuPendingAgeUs both skip these by construction -- the age one always did, because
+  // meta.submitUs is only stamped once the work completes -- so a Submit that stalls inside a
+  // capture callback has no signal at all. The DXGI path has its own worker watchdog; this is what
+  // a WGC-callback stall would need. Telemetry only today. (Ledger H-25.)
+  uint64_t OldestSubmittingAgeUs();
+
  private:
   // Submitting is the publication barrier. The worker only ever polls GpuPending, so a slot
   // stays invisible to it until Submit has finished the D3D work AND written the final meta --
@@ -184,6 +191,7 @@ class D3dCaptureReadbackPipeline {
     Microsoft::WRL::ComPtr<ID3D11Query> query;
     SlotState state = SlotState::Free;
     uint64_t submitSeq = 0;
+    uint64_t reservedUs = 0;  // when this slot entered Submitting (H-25)
     CaptureFrameMeta meta;
   };
 

@@ -126,10 +126,10 @@ void shutdown_host(HostContext& hx) {
       shutdown(clientSession.controlClientSock, SD_BOTH);
     }
   }
-  if (clientSession.controlListenSock != INVALID_SOCKET) {
-    closesocket(clientSession.controlListenSock);
-    clientSession.controlListenSock = INVALID_SOCKET;
-  }
+  // The listen socket is NOT closed here. Its accept thread owns it and closes it on the way out
+  // (host_startup_control.cpp): closing it from this thread raced accept() on a plain SOCKET, and
+  // Winsock does not allow a concurrent close. That thread polls `stop` on a 200ms select tick, so
+  // joining is enough to end it. (Ledger H-24.)
   if (clientSession.controlThread.joinable()) clientSession.controlThread.join();
   // Close before joining: the control session is parked in a blocking read, and the reader
   // thread is parked in recvfrom until its receive timeout expires. The dispatcher now outlives

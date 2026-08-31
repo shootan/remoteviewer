@@ -227,6 +227,7 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
             << " captureUnmapWaitAvgUs=" << captureUnmapWaitAvgUs
             << " captureUnmapWaitMaxUs=" << stats.captureUnmapWaitMaxUs
             << " oldestGpuPendingPeakUs=" << watchdog.oldestGpuPendingPeakUs
+            << " oldestSubmittingUs=" << res.captureReadback.OldestSubmittingAgeUs()
             << " oldestGpuPendingNowUs=" << res.captureReadback.OldestGpuPendingAgeUs()
             << " gpuPendingCount=" << res.captureReadback.GpuPendingCount()
             << " gpuPendingCountPeak=" << watchdog.gpuPendingCountPeak

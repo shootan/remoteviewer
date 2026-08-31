@@ -98,7 +98,7 @@ Flow stage_selection(HostContext& hx, TickContext& tc) {
   // Switching screens is the same operation as switching to desktop mode, aimed at a particular
   // monitor. Done here rather than on the control thread because the capture item belongs to
   // this loop, exactly like the window and capture-mode selections above.
-  if (const auto monitorReq = hx.mailbox.TakeSelectMonitor()) {
+  if (const auto monitorReq = hx.mailbox.TakeSelectMonitor(hx.clientSession.epoch.load(std::memory_order_acquire))) {
     const uint32_t requestedId = monitorReq->monitorId;
     const auto monitors = enumerate_monitors();
     if (requestedId >= monitors.size()) {
@@ -145,7 +145,7 @@ Flow stage_selection(HostContext& hx, TickContext& tc) {
     }
   }
 
-  if (const auto modeReq = hx.mailbox.TakeCaptureMode()) {
+  if (const auto modeReq = hx.mailbox.TakeCaptureMode(hx.clientSession.epoch.load(std::memory_order_acquire))) {
     const uint16_t reqMode = modeReq->mode;
     const uint32_t reqSeq = modeReq->seq;
     const uint32_t reqXPermille = std::min<uint32_t>(10000u, modeReq->xPermille);

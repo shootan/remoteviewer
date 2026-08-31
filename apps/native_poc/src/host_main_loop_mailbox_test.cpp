@@ -39,7 +39,7 @@ void test_empty() {
 void test_take_is_consume() {
   std::printf("take consumes\n");
   MainLoopMailbox mb;
-  mb.PostSelectMonitor({2});
+  mb.PostSelectMonitor({/*epoch=*/0, /*monitorId=*/2});
   const auto first = mb.TakeSelectMonitor();
   expect(first.has_value() && first->monitorId == 2, "first take returns the request");
   expect(!mb.TakeSelectMonitor().has_value(), "second take is empty");
@@ -48,8 +48,8 @@ void test_take_is_consume() {
 void test_payload_travels_with_request() {
   std::printf("payload travels with the request\n");
   MainLoopMailbox mb;
-  mb.PostCaptureMode({7, 1, 1000, 2000});
-  mb.PostCaptureMode({8, 2, 3000, 4000});
+  mb.PostCaptureMode({/*epoch=*/0, /*seq=*/7, /*mode=*/1, 1000, 2000});
+  mb.PostCaptureMode({/*epoch=*/0, /*seq=*/8, /*mode=*/2, 3000, 4000});
   const auto got = mb.TakeCaptureMode();
   expect(got.has_value(), "a request is pending");
   if (!got) return;
@@ -62,9 +62,9 @@ void test_payload_travels_with_request() {
 void test_latest_wins_per_kind() {
   std::printf("latest-wins per kind, kinds independent\n");
   MainLoopMailbox mb;
-  mb.PostSelectMonitor({1});
-  mb.PostBackendRequest({10, 3});
-  mb.PostSelectMonitor({5});
+  mb.PostSelectMonitor({/*epoch=*/0, /*monitorId=*/1});
+  mb.PostBackendRequest({/*epoch=*/0, /*seq=*/10, /*backend=*/3});
+  mb.PostSelectMonitor({/*epoch=*/0, /*monitorId=*/5});
   const auto mon = mb.TakeSelectMonitor();
   const auto be = mb.TakeBackendRequest();
   expect(mon.has_value() && mon->monitorId == 5, "monitor coalesced to the latest");
@@ -74,8 +74,8 @@ void test_latest_wins_per_kind() {
 void test_tune_merges_fields() {
   std::printf("tune merges fields\n");
   MainLoopMailbox mb;
-  mb.PostTuneEncoder({1, 5000000, 0, 0});  // bitrate only
-  mb.PostTuneEncoder({2, 0, 120, 0});      // keyint only
+  mb.PostTuneEncoder({/*epoch=*/0, /*seq=*/1, /*bitrate=*/5000000, 0, 0});  // bitrate only
+  mb.PostTuneEncoder({/*epoch=*/0, /*seq=*/2, 0, /*keyint=*/120, 0});      // keyint only
   const auto got = mb.TakeTuneEncoder();
   expect(got.has_value(), "a tune request is pending");
   if (!got) return;
@@ -106,7 +106,7 @@ void test_keyframe_reasons_accumulate() {
 void test_clear() {
   std::printf("clear drops a departed client's requests\n");
   MainLoopMailbox mb;
-  mb.PostSelectMonitor({3});
+  mb.PostSelectMonitor({/*epoch=*/0, /*monitorId=*/3});
   mb.PostTuneEncoder({1, 1, 1, 1});
   mb.PostRequestKeyframe(kKeyframeReasonViewer);
   mb.Clear();
@@ -123,7 +123,8 @@ void test_concurrent_posts() {
   constexpr int kIters = 2000;
   std::vector<std::thread> producers;
   producers.emplace_back([&] {
-    for (int i = 0; i < kIters; ++i) mb.PostCaptureMode({static_cast<uint32_t>(i), 1, 1000, 2000});
+    for (int i = 0; i < kIters; ++i)
+      mb.PostCaptureMode({/*epoch=*/0, static_cast<uint32_t>(i), /*mode=*/1, 1000, 2000});
   });
   producers.emplace_back([&] {
     for (int i = 0; i < kIters; ++i) mb.PostRequestKeyframe(kKeyframeReasonSenderBarrier);
@@ -153,7 +154,32 @@ void test_concurrent_posts() {
 
 }  // namespace
 
+
+// H-27: a request posted by a client that has since gone away must not be applied to its
+// successor. Clear() covers what is still queued at rollover; this covers the request that was
+// posted just before one and taken just after.
+void TestStaleEpochRequestIsDropped() {
+  std::printf("stale-epoch requests are dropped\n");
+  MainLoopMailbox mb;
+  mb.PostSelectMonitor({/*epoch=*/7, /*monitorId=*/2});
+  expect(!mb.TakeSelectMonitor(/*currentEpoch=*/8).has_value(),
+         "older session's request is not applied");
+  expect(mb.StaleDroppedCount() == 1, "and it is counted");
+  expect(!mb.TakeSelectMonitor(/*currentEpoch=*/8).has_value(),
+         "nor does it linger for the next take");
+
+  mb.PostSelectMonitor({/*epoch=*/8, /*monitorId=*/3});
+  const auto same = mb.TakeSelectMonitor(/*currentEpoch=*/8);
+  expect(same.has_value() && same->monitorId == 3, "same-session request is applied");
+
+  // 0 means "unstamped": producers that predate the stamp, and the tests above, still work.
+  mb.PostCaptureMode({/*epoch=*/0, /*seq=*/1, /*mode=*/1, 5000, 5000});
+  expect(mb.TakeCaptureMode(/*currentEpoch=*/9).has_value(), "unstamped request is accepted");
+  expect(mb.StaleDroppedCount() == 1, "no extra stale drops");
+}
+
 int main() {
+  TestStaleEpochRequestIsDropped();
   test_empty();
   test_take_is_consume();
   test_payload_travels_with_request();

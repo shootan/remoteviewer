@@ -91,7 +91,7 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
   auto& res = hx.res;
   auto& nowUs = tc.nowUs;
   auto& seq = tc.seq;
-  if (const auto backendReq = hx.mailbox.TakeBackendRequest()) {
+  if (const auto backendReq = hx.mailbox.TakeBackendRequest(hx.clientSession.epoch.load(std::memory_order_acquire))) {
     const uint32_t reqSeq = backendReq->seq;
     DesktopCaptureBackend nextRequested = backend.requested;
     const uint16_t requestedCode = static_cast<uint16_t>(backendReq->backend);

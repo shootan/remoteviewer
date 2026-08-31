@@ -125,7 +125,23 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
       } else {
         std::cout << "[native-video-host] control waiting port=" << args.controlPort << "\n";
         clientSession.controlThread = std::thread([&]() {
+          // This thread owns the listen socket for its whole life, including the close.
+          //
+          // Shutdown used to closesocket() it from another thread to break accept(), which is a
+          // data race on a plain SOCKET and a concurrent close-with-accept that Winsock does not
+          // allow -- and the value is reusable the instant it closes. Instead accept() is entered
+          // only when select() says a connection is waiting, so a 200ms tick is enough to notice
+          // `stop` and close it here. (Ledger H-24.)
           while (!stop.load()) {
+            fd_set readSet;
+            FD_ZERO(&readSet);
+            FD_SET(clientSession.controlListenSock, &readSet);
+            timeval tv{};
+            tv.tv_sec = 0;
+            tv.tv_usec = 200000;
+            const int ready = select(0, &readSet, nullptr, nullptr, &tv);
+            if (stop.load()) break;
+            if (ready <= 0) continue;  // timeout, or the listener is going away
             sockaddr_in cpeer{};
             int cpeerLen = sizeof(cpeer);
             SOCKET acceptedSock = accept(clientSession.controlListenSock, reinterpret_cast<sockaddr*>(&cpeer), &cpeerLen);
@@ -163,6 +179,11 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
               }
             }
             std::cout << "[native-video-host][control] tcp client disconnected\n";
+          }
+          // Sole closer (H-24). shutdown_host only sets `stop` and joins.
+          if (clientSession.controlListenSock != INVALID_SOCKET) {
+            closesocket(clientSession.controlListenSock);
+            clientSession.controlListenSock = INVALID_SOCKET;
           }
         });
       }
