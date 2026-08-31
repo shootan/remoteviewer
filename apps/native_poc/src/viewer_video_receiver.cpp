@@ -28,6 +28,24 @@ bool VideoReceiver::DecoderSink::rebuild_decoder() {
 
 void VideoReceiver::DecoderSink::request_keyframe(uint16_t reason) { viewer::request_keyframe(reason); }
 
+namespace {
+
+// Wait until the socket is readable or the timeout passes. Lets a loop that would otherwise sit in
+// a blocking recv come up for air on a quiet link -- which is exactly when a --seconds limit or a
+// running=false has to be noticed. True on readable OR error (the recv reports the error).
+bool wait_readable(SOCKET s, int timeoutMs) {
+  fd_set readSet;
+  FD_ZERO(&readSet);
+  FD_SET(s, &readSet);
+  timeval tv{};
+  tv.tv_sec = timeoutMs / 1000;
+  tv.tv_usec = (timeoutMs % 1000) * 1000;
+  const int ready = select(0, &readSet, nullptr, nullptr, &tv);
+  return ready != 0;  // 0 = timeout; >0 readable; <0 error -> let recv see it
+}
+
+}  // namespace
+
 void VideoReceiver::run_udp() {
   std::array<uint8_t, 1600> datagram{};
   const uint32_t effectiveUdpSimDropSeed = (udpSimDropSeed > 0)
@@ -52,6 +70,11 @@ void VideoReceiver::run_udp() {
   uint64_t lastUdpSimAcceptedCount = 0;
 
   while (gSession.running.load()) {
+    // At the top of the loop, so it also runs on the 200 ms receive timeouts a quiet link
+    // produces -- previously it sat after the packet processing and a socket that stayed silent
+    // never reached it, so a harness --seconds limit could only end through the UI's own timer
+    // and the socket close. (F-13.)
+    if (args.seconds > 0 && qpc_now_us() >= startUs + static_cast<uint64_t>(args.seconds) * 1000000ULL) break;
     const int n = recv(gSession.sock, reinterpret_cast<char*>(datagram.data()), static_cast<int>(datagram.size()), 0);
     if (n <= 0) {
       // A read timeout is not a dead socket. It is also the tunnel's heartbeat: the control
@@ -245,9 +268,6 @@ void VideoReceiver::run_udp() {
       lastUdpSimAcceptedCount = udpSimAcceptedCount;
       udpAssemblyStatAtUs += 1000000ULL;
     }
-    if (args.seconds > 0 && nowUs >= startUs + static_cast<uint64_t>(args.seconds) * 1000000ULL) {
-      break;
-    }
   }
 
   gSession.running = false;
@@ -257,6 +277,10 @@ void VideoReceiver::run_udp() {
 
 void VideoReceiver::run_tcp() {
   while (gSession.running.load()) {
+    if (args.seconds > 0 && qpc_now_us() >= startUs + static_cast<uint64_t>(args.seconds) * 1000000ULL) break;
+    // The TCP socket has no receive timeout, so recv_all would block for as long as the host
+    // stays quiet; a bounded select in front of it keeps the checks above alive. (F-13.)
+    if (!wait_readable(gSession.sock, 200)) continue;
     MessageHeader header{};
     if (!remote60::native_poc::recv_all(gSession.sock, &header, sizeof(header))) break;
     if (header.magic != remote60::native_poc::kMagic || header.size < sizeof(header)) break;
@@ -366,10 +390,6 @@ void VideoReceiver::run_tcp() {
       ++st.skippedQueued;
     }
 
-    const uint64_t nowUs = qpc_now_us();
-    if (args.seconds > 0 && nowUs >= startUs + static_cast<uint64_t>(args.seconds) * 1000000ULL) {
-      break;
-    }
   }
   gSession.running = false;
   if (gSession.hwnd) PostMessageW(gSession.hwnd, WM_CLOSE, 0, 0);

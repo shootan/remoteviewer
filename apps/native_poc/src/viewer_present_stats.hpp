@@ -41,11 +41,19 @@ struct PresentStats {
   std::atomic<uint32_t> presentFrameIntervalUs{0};
   std::atomic<uint64_t> tracePresentPrinted{0};
   std::atomic<uint64_t> traceRecvPrinted{0};
-  // UI thread only (WM_PAINT); reset: never (F-14).
+  // UI thread only (WM_PAINT). Per stream episode: ResetForNewEpisode() clears them when a new
+  // selection is revealed, so a second target in the same process does not inherit the first
+  // one's "already painted" flag and feedback rate-limit. (F-14.)
   bool hasPresentedAtLeastOneFrame = false;
   uint64_t lastPresentUs = 0;
   uint64_t lastUserFeedbackUs = 0;
   uint64_t lastUserFeedbackOverwrite = 0;
+  void ResetForNewEpisode() {
+    hasPresentedAtLeastOneFrame = false;
+    lastPresentUs = 0;
+    lastUserFeedbackUs = 0;
+    lastUserFeedbackOverwrite = 0;
+  }
 };
 
 }  // namespace remote60::native_poc::viewer

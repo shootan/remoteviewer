@@ -145,6 +145,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       // The video thread saw the first frame of a selection and posted this once; CommitReveal
       // revalidates against the live selection state (see viewer_selection_gate.cpp).
       if (gSel.CommitReveal()) {
+        // A new stream episode begins here: the per-episode UI-thread state must not carry over
+        // from the previous target (F-14). reportedSecure is control-thread state and is left
+        // alone -- it is "say it once per process", which is still the right cadence.
+        gPresent.ResetForNewEpisode();
+        gSession.nextToolbarPushUs = 0;
         // Dropping the picker guard opens both the paint path and the input guard (input handlers
         // early-return while the picker is up); clearing pending re-enables the picker's buttons.
         gPicker.visible.store(false, std::memory_order_relaxed);

@@ -44,7 +44,7 @@ struct SessionState {
   std::atomic<uint64_t> inputEventsSent{0};
   std::mutex logMu;
   // UI thread only: the 500ms toolbar push clock of the message pump (was a function static).
-  uint64_t nextToolbarPushUs = 0;
+  uint64_t nextToolbarPushUs = 0;  // main-loop only; 0 = push on the next tick (F-14 resets it per episode)
 };
 
 }  // namespace remote60::native_poc::viewer
