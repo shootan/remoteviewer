@@ -111,13 +111,15 @@ void VideoReceiver::run_udp() {
         // not be able to feed the clamp arithmetic absurd dimensions. Claimed either way.
         if (cp.captureW >= 2 && cp.captureW <= 16384 && cp.captureH >= 2 &&
             cp.captureH <= 16384) {
-          gCursor.x.store(cp.x, std::memory_order_relaxed);
-          gCursor.y.store(cp.y, std::memory_order_relaxed);
-          gCursor.capW.store(cp.captureW, std::memory_order_relaxed);
-          gCursor.capH.store(cp.captureH, std::memory_order_relaxed);
-          gCursor.generation.store(cp.streamGeneration, std::memory_order_relaxed);
-          gCursor.visible.store((cp.flags & 0x1u) != 0, std::memory_order_relaxed);
-          gCursor.updateUs.store(qpc_now_us(), std::memory_order_release);
+          RemoteCursorSample sample;
+          sample.x = cp.x;
+          sample.y = cp.y;
+          sample.capW = cp.captureW;
+          sample.capH = cp.captureH;
+          sample.generation = cp.streamGeneration;
+          sample.visible = (cp.flags & 0x1u) != 0;
+          sample.updateUs = qpc_now_us();
+          gCursor.Publish(sample);  // whole sample at once (F-15)
         }
         continue;
       }

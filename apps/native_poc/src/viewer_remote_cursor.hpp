@@ -19,15 +19,33 @@
 
 namespace remote60::native_poc::viewer {
 
+// One remote-cursor report: position in the host's capture space, the capture size it is
+// expressed in, the stream generation it belongs to, and when it arrived.
+struct RemoteCursorSample {
+  int32_t x = 0;
+  int32_t y = 0;
+  uint32_t capW = 0;
+  uint32_t capH = 0;
+  uint64_t generation = 0;  // stream generation the sample belongs to
+  bool visible = false;
+  uint64_t updateUs = 0;
+};
+
 struct RemoteCursorState {
-  // cross-thread: recv writes, UI timer reads.
-  std::atomic<int32_t> x{0};
-  std::atomic<int32_t> y{0};
-  std::atomic<uint32_t> capW{0};
-  std::atomic<uint32_t> capH{0};
-  std::atomic<uint64_t> generation{0};  // stream generation the sample belongs to
-  std::atomic<bool> visible{false};
-  std::atomic<uint64_t> updateUs{0};
+  // cross-thread: recv publishes a whole sample, the UI timer copies a whole sample. Seven separate
+  // atomics let the reader see a position from one packet with the capture size / generation of
+  // another -- the same-generation size-change case the ledger flagged -- so the sample is now
+  // one value under one lock. (F-15.)
+  std::mutex mu;
+  RemoteCursorSample sample;
+  void Publish(const RemoteCursorSample& s) {
+    std::lock_guard<std::mutex> lk(mu);
+    sample = s;
+  }
+  RemoteCursorSample Snapshot() {
+    std::lock_guard<std::mutex> lk(mu);
+    return sample;
+  }
   // UI thread only.
   HWND overlayHwnd = nullptr;
 };

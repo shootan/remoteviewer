@@ -12,7 +12,7 @@ namespace remote60::native_poc::viewer {
 
 void apply_runtime_tune_delta(int bitrateStep, int keyintStep) {
   gControl.runtimeTune.ApplyDelta(
-      bitrateStep, keyintStep, gMetrics.client.recvMbpsX1000.load(std::memory_order_relaxed));
+      bitrateStep, keyintStep, gMetrics.Snapshot().recvMbpsX1000);
 }
 
 void draw_thumbnail_into(HDC hdc, const RECT& dst, const WindowThumb& thumb) {
@@ -163,7 +163,7 @@ void draw_overlay(HDC hdc) {
   std::ostringstream foot;
   foot << (gControl.connected.load(std::memory_order_relaxed) ? "Connected" : "Disconnected")
        << "   Input " << (gSession.inputEnabled.load(std::memory_order_relaxed) ? "on" : "off");
-  const uint32_t decFpsX100 = gMetrics.client.decodedFpsX100.load(std::memory_order_relaxed);
+  const uint32_t decFpsX100 = gMetrics.Snapshot().decodedFpsX100;
   if (decFpsX100 > 0) foot << "   " << (decFpsX100 / 100) << " fps";
   if (totalRows > grid.visibleRows) {
     foot << "   Rows " << (scrollRow + 1) << "-"

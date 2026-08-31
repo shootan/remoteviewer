@@ -100,15 +100,16 @@ void update_cursor_overlay(HWND hwnd) {
   }
   ensure_cursor_overlay(hwnd);
   if (!gCursor.overlayHwnd) return;
-  const uint64_t updUs = gCursor.updateUs.load(std::memory_order_acquire);
-  const uint32_t capW = gCursor.capW.load(std::memory_order_relaxed);
-  const uint32_t capH = gCursor.capH.load(std::memory_order_relaxed);
+  const RemoteCursorSample cur = gCursor.Snapshot();  // one consistent sample (F-15)
+  const uint64_t updUs = cur.updateUs;
+  const uint32_t capW = cur.capW;
+  const uint32_t capH = cur.capH;
   // Generation fence: a sample from the previous target must not paint over a freshly selected
   // one. activeGen==0 = legacy stream view before any PC-side selection; accept anything there.
-  const uint64_t cursorGen = gCursor.generation.load(std::memory_order_relaxed);
+  const uint64_t cursorGen = cur.generation;
   const uint64_t activeGen = gSel.activeStreamGeneration.load(std::memory_order_acquire);
   const bool fresh = updUs != 0 && (qpc_now_us() - updUs) < kRemoteCursorStaleUs;
-  const bool show = fresh && gCursor.visible.load(std::memory_order_relaxed) &&
+  const bool show = fresh && cur.visible &&
                     capW > 0 && capH > 0 &&
                     (activeGen == 0 || cursorGen == activeGen) &&
                     !gPicker.visible.load(std::memory_order_relaxed) && !IsIconic(hwnd);
@@ -120,8 +121,8 @@ void update_cursor_overlay(HWND hwnd) {
   const RECT content = resolve_video_content_rect(hwnd, layout.videoRect);
   const int videoW = std::max<int>(1, static_cast<int>(content.right - content.left));
   const int videoH = std::max<int>(1, static_cast<int>(content.bottom - content.top));
-  const int32_t cx = gCursor.x.load(std::memory_order_relaxed);
-  const int32_t cy = gCursor.y.load(std::memory_order_relaxed);
+  const int32_t cx = cur.x;
+  const int32_t cy = cur.y;
   POINT pt{};
   pt.x = content.left + static_cast<int>(static_cast<int64_t>(std::clamp<int32_t>(cx, 0, capW - 1)) *
                                          videoW / static_cast<int>(capW));

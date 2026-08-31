@@ -77,31 +77,32 @@ void VideoReceiver::publish_metrics(uint32_t metricW, uint32_t metricH, uint64_t
       recvMbpsX1000 = static_cast<uint32_t>(
           std::min<double>(mbpsX1000, static_cast<double>(0xFFFFFFFFu)));
     }
-    gMetrics.client.width = metricW;
-    gMetrics.client.height = metricH;
-    gMetrics.client.recvFpsX100 = static_cast<uint32_t>(cappedRecvFpsX100);
-    gMetrics.client.decodedFpsX100 = static_cast<uint32_t>(cappedDecodedFpsX100);
-    gMetrics.client.recvMbpsX1000 = recvMbpsX1000;
-    gMetrics.client.skippedFrames = static_cast<uint32_t>(std::min<uint64_t>(st.skippedQueued, 0xFFFFFFFFULL));
-    gMetrics.client.avgLatencyUs = avgLatencyUs;
-    gMetrics.client.maxLatencyUs = maxLatencyUsLocal;
-    gMetrics.client.avgDecodeTailUs = avgDecodeTailUs;
-    gMetrics.client.maxDecodeTailUs = maxDecodeTailUsLocal;
-    gMetrics.client.congestionState = static_cast<uint32_t>(gate.congestionState);
-    gMetrics.client.congestionTransitions =
+    ClientRuntimeMetrics m;
+    m.width = metricW;
+    m.height = metricH;
+    m.recvFpsX100 = static_cast<uint32_t>(cappedRecvFpsX100);
+    m.decodedFpsX100 = static_cast<uint32_t>(cappedDecodedFpsX100);
+    m.recvMbpsX1000 = recvMbpsX1000;
+    m.skippedFrames = static_cast<uint32_t>(std::min<uint64_t>(st.skippedQueued, 0xFFFFFFFFULL));
+    m.avgLatencyUs = avgLatencyUs;
+    m.maxLatencyUs = maxLatencyUsLocal;
+    m.avgDecodeTailUs = avgDecodeTailUs;
+    m.maxDecodeTailUs = maxDecodeTailUsLocal;
+    m.congestionState = static_cast<uint32_t>(gate.congestionState);
+    m.congestionTransitions =
         static_cast<uint32_t>(std::min<uint64_t>(gate.congestionTransitionCount, 0xFFFFFFFFULL));
-    gMetrics.client.congestionRecoveryCount =
+    m.congestionRecoveryCount =
         static_cast<uint32_t>(std::min<uint64_t>(gate.congestionRecoveryCount, 0xFFFFFFFFULL));
-    gMetrics.client.congestionRecoveryReq =
+    m.congestionRecoveryReq =
         static_cast<uint32_t>(std::min<uint64_t>(gate.congestionRecoveryRequestCount, 0xFFFFFFFFULL));
-    gMetrics.client.congestionRecoveryMaxUs =
+    m.congestionRecoveryMaxUs =
         static_cast<uint32_t>(std::min<uint64_t>(gate.congestionRecoveryMaxUs, 0xFFFFFFFFULL));
-    gMetrics.client.queueDepthMax = st.queueDepthFramesMax;
-    gMetrics.client.queueDepthH4p =
+    m.queueDepthMax = st.queueDepthFramesMax;
+    m.queueDepthH4p =
         static_cast<uint32_t>(std::min<uint64_t>(st.queueDepthHist[4], 0xFFFFFFFFULL));
-    gMetrics.client.udpAssemblyDropPm = st.udpAssemblyDropPmLast;
-    gMetrics.client.seq.fetch_add(1);
-    gMetrics.client.updatedQpcUs = nowUs;
+    m.udpAssemblyDropPm = st.udpAssemblyDropPmLast;
+    m.updatedQpcUs = nowUs;
+    gMetrics.Publish(m);  // whole record at once (F-15)
     request_video_paint(gSession.hwnd);
 }
 

@@ -11,29 +11,28 @@
 namespace remote60::native_poc::viewer {
 
 ClientControlMetricsSnapshot capture_client_control_metrics_snapshot() {
+  // One locked copy, then plain field reads: every field below comes from the same report. (F-15.)
+  const ClientRuntimeMetrics m = gMetrics.Snapshot();
   ClientControlMetricsSnapshot snapshot{};
-  snapshot.updatedQpcUs = gMetrics.client.updatedQpcUs.load(std::memory_order_relaxed);
-  snapshot.message.width = gMetrics.client.width.load(std::memory_order_relaxed);
-  snapshot.message.height = gMetrics.client.height.load(std::memory_order_relaxed);
-  snapshot.message.recvFpsX100 = gMetrics.client.recvFpsX100.load(std::memory_order_relaxed);
-  snapshot.message.decodedFpsX100 = gMetrics.client.decodedFpsX100.load(std::memory_order_relaxed);
-  snapshot.message.recvMbpsX1000 = gMetrics.client.recvMbpsX1000.load(std::memory_order_relaxed);
-  snapshot.message.skippedFrames = gMetrics.client.skippedFrames.load(std::memory_order_relaxed);
-  snapshot.message.avgLatencyUs = gMetrics.client.avgLatencyUs.load(std::memory_order_relaxed);
-  snapshot.message.maxLatencyUs = gMetrics.client.maxLatencyUs.load(std::memory_order_relaxed);
-  snapshot.message.avgDecodeTailUs = gMetrics.client.avgDecodeTailUs.load(std::memory_order_relaxed);
-  snapshot.message.maxDecodeTailUs = gMetrics.client.maxDecodeTailUs.load(std::memory_order_relaxed);
-  snapshot.message.congestionState = gMetrics.client.congestionState.load(std::memory_order_relaxed);
-  snapshot.message.congestionTransitions = gMetrics.client.congestionTransitions.load(std::memory_order_relaxed);
-  snapshot.message.congestionRecoveryCount =
-      gMetrics.client.congestionRecoveryCount.load(std::memory_order_relaxed);
-  snapshot.message.congestionRecoveryReq =
-      gMetrics.client.congestionRecoveryReq.load(std::memory_order_relaxed);
-  snapshot.message.congestionRecoveryMaxUs =
-      gMetrics.client.congestionRecoveryMaxUs.load(std::memory_order_relaxed);
-  snapshot.message.queueDepthMax = gMetrics.client.queueDepthMax.load(std::memory_order_relaxed);
-  snapshot.message.queueDepthH4p = gMetrics.client.queueDepthH4p.load(std::memory_order_relaxed);
-  snapshot.message.udpAssemblyDropPm = gMetrics.client.udpAssemblyDropPm.load(std::memory_order_relaxed);
+  snapshot.updatedQpcUs = m.updatedQpcUs;
+  snapshot.message.width = m.width;
+  snapshot.message.height = m.height;
+  snapshot.message.recvFpsX100 = m.recvFpsX100;
+  snapshot.message.decodedFpsX100 = m.decodedFpsX100;
+  snapshot.message.recvMbpsX1000 = m.recvMbpsX1000;
+  snapshot.message.skippedFrames = m.skippedFrames;
+  snapshot.message.avgLatencyUs = m.avgLatencyUs;
+  snapshot.message.maxLatencyUs = m.maxLatencyUs;
+  snapshot.message.avgDecodeTailUs = m.avgDecodeTailUs;
+  snapshot.message.maxDecodeTailUs = m.maxDecodeTailUs;
+  snapshot.message.congestionState = m.congestionState;
+  snapshot.message.congestionTransitions = m.congestionTransitions;
+  snapshot.message.congestionRecoveryCount = m.congestionRecoveryCount;
+  snapshot.message.congestionRecoveryReq = m.congestionRecoveryReq;
+  snapshot.message.congestionRecoveryMaxUs = m.congestionRecoveryMaxUs;
+  snapshot.message.queueDepthMax = m.queueDepthMax;
+  snapshot.message.queueDepthH4p = m.queueDepthH4p;
+  snapshot.message.udpAssemblyDropPm = m.udpAssemblyDropPm;
   return snapshot;
 }
 
@@ -87,7 +86,7 @@ void push_session_toolbar_state() {
   state.inputOn = gSession.inputEnabled.load(std::memory_order_relaxed);
   state.macroOpen = remote60::native_poc::macro_window_visible();
   state.relay = gSession.relayPath.load(std::memory_order_relaxed);
-  state.fps = gMetrics.client.decodedFpsX100.load(std::memory_order_relaxed) / 100;
+  state.fps = gMetrics.Snapshot().decodedFpsX100 / 100;
   state.selectedMonitorId = panel.selectedMonitorId;
   for (const auto& monitor : panel.monitors) {
     state.monitors.push_back({monitor.id, monitor.width, monitor.height, monitor.primary});
@@ -153,7 +152,7 @@ bool begin_pc_target_selection(uint64_t windowId, const char* statusText) {
   gControl.streamState.Request(true);
   // A selection is a generation change; drop the remote-cursor sample so the previous target's
   // pointer cannot linger over the new one while the first fenced sample is in flight.
-  gCursor.updateUs.store(0, std::memory_order_release);
+  gCursor.Publish(RemoteCursorSample{});  // updateUs=0: the overlay treats it as stale (F-15)
   if (gSession.hwnd) InvalidateRect(gSession.hwnd, nullptr, FALSE);
   return true;
 }

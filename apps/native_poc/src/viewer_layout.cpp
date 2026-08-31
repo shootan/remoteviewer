@@ -44,8 +44,9 @@ bool resolve_active_video_content_size(uint32_t* outWidth, uint32_t* outHeight) 
     return true;
   }
 
-  const uint32_t metricWidth = gMetrics.client.width.load(std::memory_order_relaxed);
-  const uint32_t metricHeight = gMetrics.client.height.load(std::memory_order_relaxed);
+  const ClientRuntimeMetrics m = gMetrics.Snapshot();  // (F-15)
+  const uint32_t metricWidth = m.width;
+  const uint32_t metricHeight = m.height;
   if (metricWidth > 0 && metricHeight > 0) {
     *outWidth = metricWidth;
     *outHeight = metricHeight;
