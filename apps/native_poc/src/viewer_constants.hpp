@@ -59,6 +59,10 @@ constexpr uint64_t kPickerSelectMinShownUs = 300000;
 // Posted to the video window when the first selected frame is ready, so the toolbar (a window of
 // its own, whose show/hide must run on the UI thread) is revealed on the thread that owns it.
 constexpr UINT kMsgRevealStreamView = WM_APP + 10;
+// Posted by the control thread with a heap-allocated ControlWindowListMessage in lParam; the UI
+// thread applies it and frees it. Applying it needs the visible card count, which comes from the
+// window's client rect and DPI -- UI state that the control thread was computing itself. (F-07.)
+constexpr UINT kMsgApplyWindowList = WM_APP + 11;
 
 constexpr uint64_t kThumbRefreshUs = 5000000;  // refresh a preview after 5 s
 

@@ -125,7 +125,17 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
 }
 
 void ControlClient::handle_window_list(const ControlWindowListMessage& windowList) {
-  apply_window_list_snapshot(windowList);
+  // Handed to the UI thread rather than applied here: ApplyWindowList sizes the visible grid from
+  // the window's client rect and DPI, and the thumbnail queue it fills is consumed against the
+  // same layout. A control thread computing UI layout was the thread-affinity smell F-07 names.
+  // Falls back to applying inline only when there is no window to post to (headless harness).
+  bool posted = false;
+  if (gSession.hwnd) {
+    auto* copy = new ControlWindowListMessage(windowList);
+    posted = PostMessageW(gSession.hwnd, kMsgApplyWindowList, 0, reinterpret_cast<LPARAM>(copy)) != FALSE;
+    if (!posted) delete copy;
+  }
+  if (!posted) apply_window_list_snapshot(windowList);
   // The window list is where the host says whether it knows the monitor
   // messages; asking one that does not would stall this loop waiting for a
   // reply that never comes.

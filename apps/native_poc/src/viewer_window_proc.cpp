@@ -141,6 +141,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       destroy_cached_gdi_objects();
       PostQuitMessage(0);
       return 0;
+    case kMsgApplyWindowList: {
+      // Ownership of the copy arrives with the message (F-07). A message still queued when the
+      // window dies is one small leak at exit, which is cheaper than a drain protocol.
+      std::unique_ptr<ControlWindowListMessage> msg(reinterpret_cast<ControlWindowListMessage*>(lp));
+      if (msg) apply_window_list_snapshot(*msg);
+      return 0;
+    }
     case kMsgRevealStreamView: {
       // The video thread saw the first frame of a selection and posted this once; CommitReveal
       // revalidates against the live selection state (see viewer_selection_gate.cpp).
