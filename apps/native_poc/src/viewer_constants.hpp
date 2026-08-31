@@ -67,6 +67,7 @@ constexpr UINT kMsgApplyWindowList = WM_APP + 11;
 constexpr uint64_t kThumbRefreshUs = 5000000;  // refresh a preview after 5 s
 
 constexpr UINT_PTR kCursorOverlayTimerId = 0x711;
+constexpr UINT_PTR kPacedPresentTimerId = 0x712;  // one-shot: a held frame's remaining wait (F-11)
 constexpr uint64_t kRemoteCursorStaleUs = 500000;  // hide after 500ms without a sample
 constexpr int kCursorOverlaySize = 24;             // ring bitmap edge; window is centered on the point
 

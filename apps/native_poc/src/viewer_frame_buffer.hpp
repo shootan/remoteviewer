@@ -17,6 +17,7 @@
 // initialisers unchanged (viewer split refactor Phase 1-2).
 
 #include "viewer_common.hpp"
+#include "video_playout_clock.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -51,6 +52,10 @@ struct SharedFrame {
   uint64_t streamGeneration = 0;
   // Diagnostics-only: keyframe flag carried to the present stage for stream telemetry.
   bool key = false;
+  // Paced playout (F-11 / P3): when the frame may be shown, on the local QPC clock; 0 = now.
+  // Set by the recv thread from VideoPlayoutClock when pacing is on; WM_PAINT holds a frame that
+  // is not yet due and re-arms itself for the remainder instead of presenting it early.
+  uint64_t presentAtUs = 0;
   uint64_t version = 0;
   std::shared_ptr<std::vector<uint8_t>> bytes;
   Microsoft::WRL::ComPtr<IMFSample> surfaceSample;
@@ -83,6 +88,16 @@ struct FrameBuffer {
   std::atomic<uint64_t> overwriteBeforePresentCount{0};
   // Liveness telemetry for the above. paintEnterCount rising while presents stay at zero is the
   // signature of a paint that runs but skips the video branch; both frozen is the stuck latch.
+  // Paced playout (F-11 / P3). Off unless REMOTE60_NATIVE_PACED_PLAYOUT=1: the host's async
+  // encoder releases access units in bursts (several per encode call), and presenting each the
+  // instant it decodes reproduces that burst on screen. The clock re-times frames onto a steady
+  // cadence anchored to the host's capture timeline, holding ~2.5 frames of headroom against
+  // arrival jitter. Same VideoPlayoutClock the Android client ships with. Default off until the
+  // field says whether the added headroom is worth its latency on a PC.
+  bool pacedPlayout = false;                 // main sets once at startup
+  VideoPlayoutClock playout;                 // recv thread only
+  std::atomic<uint64_t> pacedHoldCount{0};   // WM_PAINTs that deferred a not-yet-due frame
+  std::atomic<uint64_t> pacedReanchorCount{0};
   std::atomic<uint64_t> paintEnterCount{0};
   std::atomic<uint64_t> beginPaintFailCount{0};
   std::atomic<uint64_t> paintSelfHealCount{0};

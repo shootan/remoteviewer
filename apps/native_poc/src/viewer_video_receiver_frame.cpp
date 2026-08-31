@@ -61,7 +61,8 @@ void VideoReceiver::append_present_counter_fields(std::ostream& os) {
        << " paintEnter=" << gFrameBuf.paintEnterCount.load(std::memory_order_relaxed)
        << " paintSelfHeal=" << gFrameBuf.paintSelfHealCount.load(std::memory_order_relaxed)
        << " invalidateFail=" << gFrameBuf.invalidateFailCount.load(std::memory_order_relaxed)
-       << " beginPaintFail=" << gFrameBuf.beginPaintFailCount.load(std::memory_order_relaxed);
+       << " beginPaintFail=" << gFrameBuf.beginPaintFailCount.load(std::memory_order_relaxed)
+       << " pacedHold=" << gFrameBuf.pacedHoldCount.load(std::memory_order_relaxed);
     st.lastPresentCounters = nowCounters;
 }
 
@@ -315,6 +316,22 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
       gFrameBuf.frame.decodeToQueueUs = decodeToQueueUs;
       gFrameBuf.frame.streamGeneration = h.streamGeneration;
       gFrameBuf.frame.key = keyFrame;
+      // Paced playout (F-11): where on the local clock this frame belongs. Synthetic refresh
+      // frames carry the kick time, not a capture time, so they go straight through rather than
+      // teaching the clock a false cadence.
+      gFrameBuf.frame.presentAtUs = 0;
+      if (gFrameBuf.pacedPlayout && !synthetic) {
+        const auto decision = gFrameBuf.playout.Schedule(nowUs, decodedCaptureUs, h.streamGeneration);
+        gFrameBuf.frame.presentAtUs = decision.presentAtUs;
+        if (decision.reanchored) {
+          const uint64_t n = gFrameBuf.pacedReanchorCount.fetch_add(1, std::memory_order_relaxed) + 1;
+          if (n == 1 || (n % 30u) == 1u) {
+            std::cout << "[native-video-client] paced-playout reanchor reason=" << decision.reanchorReason
+                      << " gen=" << h.streamGeneration << " stepUs=" << gFrameBuf.playout.StepUs()
+                      << " count=" << n << "\n";
+          }
+        }
+      }
       gFrameBuf.frame.version = prevVersion + 1;
       gFrameBuf.frame.bytes = std::move(frameNv12);
       gFrameBuf.frame.surfaceSample = std::move(decoded.surfaceSample);

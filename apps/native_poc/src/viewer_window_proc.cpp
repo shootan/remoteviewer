@@ -451,6 +451,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       // Avoid background erase flicker between frames.
       return 1;
     case WM_TIMER:
+      if (wp == kPacedPresentTimerId) {
+        // One-shot: the held frame's wait is over (F-11).
+        KillTimer(hwnd, kPacedPresentTimerId);
+        request_video_paint(hwnd);
+        return 0;
+      }
       if (wp == kCursorOverlayTimerId) {
         update_cursor_overlay(hwnd);
         // Safety net, not the primary path: if a repaint request was ever lost, this notices that

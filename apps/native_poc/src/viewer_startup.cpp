@@ -44,6 +44,14 @@ void load_config(ViewerContext& ctx, int argc, char** argv) {
   gPresent.traceMax = ctx.args.traceMax;
   gPresent.presentFrameIntervalUs = static_cast<uint32_t>(std::max<uint64_t>(
       1ULL, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, ctx.args.fpsHint))));
+  // Paced playout (F-11 / P3), opt-in. The clock is seeded from the fps hint and re-measures the
+  // sender's real cadence from capture timestamps as frames arrive.
+  gFrameBuf.pacedPlayout = env_truthy("REMOTE60_NATIVE_PACED_PLAYOUT");
+  gFrameBuf.playout.SetTargetFrameIntervalUs(gPresent.presentFrameIntervalUs);
+  if (gFrameBuf.pacedPlayout) {
+    std::cout << "[native-video-client] paced playout enabled targetUs=" << gPresent.presentFrameIntervalUs
+              << " leadUs=" << VideoPlayoutClock::LeadForStepUs(gPresent.presentFrameIntervalUs) << "\n";
+  }
   const uint64_t keyframeReqMinIntervalUs = env_u32_clamped(
       "REMOTE60_NATIVE_KEYFRAME_REQ_MIN_INTERVAL_US",
       static_cast<uint32_t>(kKeyframeRequestMinIntervalUsDefault), 10000, 1000000);

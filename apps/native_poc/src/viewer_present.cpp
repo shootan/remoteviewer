@@ -100,8 +100,10 @@ LRESULT paint_video_frame(HWND hwnd) {
   uint64_t queueSetUs = 0;
   uint64_t decodeToQueueUs = 0;
   uint64_t frameVersion = 0;
+  uint64_t presentAtUs = 0;
   {
     std::lock_guard<std::mutex> lk(gFrameBuf.frame.mu);
+    presentAtUs = gFrameBuf.frame.presentAtUs;
     if ((gFrameBuf.frame.bytes && !gFrameBuf.frame.bytes->empty()) || gFrameBuf.frame.surfaceTexture) {
       local = gFrameBuf.frame.bytes;
       localSurfaceSample = gFrameBuf.frame.surfaceSample;
@@ -133,6 +135,20 @@ LRESULT paint_video_frame(HWND hwnd) {
   Nv12RenderTelemetry renderTelemetry{};
   const char* renderPath = "none";
   const char* fallbackReason = "none";
+  // Paced playout (F-11): the frame is decoded but its slot on the cadence has not come. Leave
+  // what is on screen, re-arm for the remainder, and let the timer bring us back through
+  // request_video_paint. The version recheck at the bottom is skipped on purpose -- a newer frame
+  // will re-stamp presentAtUs and request its own paint.
+  if (!pickerVisible && presentAtUs > 0 && frameVersion != gFrameBuf.lastPresentedVersion.load(std::memory_order_relaxed)) {
+    const uint64_t nowUs = qpc_now_us();
+    if (nowUs < presentAtUs) {
+      const uint64_t waitMs = (presentAtUs - nowUs + 999) / 1000;
+      SetTimer(hwnd, kPacedPresentTimerId, static_cast<UINT>(std::clamp<uint64_t>(waitMs, 1, 250)), nullptr);
+      ++gFrameBuf.pacedHoldCount;
+      EndPaint(hwnd, &ps);
+      return 0;
+    }
+  }
   if (!pickerVisible && (local || localSurfaceTexture) && w > 0 && h > 0) {
     if (localFormat == SharedFrame::PixelFormat::Nv12) {
       if (!gUi.nv12Renderer.ready) {
