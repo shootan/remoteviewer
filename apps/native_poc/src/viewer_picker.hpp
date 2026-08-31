@@ -20,6 +20,15 @@
 
 namespace remote60::native_poc::viewer {
 
+// The desktop viewer's picker lists the desktop and nothing else.
+//
+// Per-window capture still exists on the wire and the mobile client still offers it; on a PC
+// nobody picks a single window, so the card grid was cost without a use -- a thumbnail per window
+// (~33ms each on the host's control thread) plus grid scrolling. What the picker is actually for
+// here is the pause before the stream starts: it lets you size the window before the picture
+// appears. That is the part worth keeping. (Viewer ledger F-21.)
+inline constexpr bool kPickerListsWindows = false;
+
 ClientControlMetricsSnapshot capture_client_control_metrics_snapshot();
 
 void queue_thumbnail_fetches_from_panel();

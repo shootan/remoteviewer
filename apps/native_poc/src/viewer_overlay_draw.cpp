@@ -1,6 +1,7 @@
 // See viewer_overlay_draw.hpp. Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0).
 
 #include "viewer_overlay_draw.hpp"
+#include "viewer_picker.hpp"
 
 #include "viewer_common.hpp"
 #include "viewer_gdi_util.hpp"
@@ -127,7 +128,7 @@ void draw_overlay(HDC hdc) {
 
   // Card grid: desktop preview first, then one card per shareable window.
   const CardGridMetrics grid = compute_card_grid(layout.listRect);
-  const int totalCards = 1 + static_cast<int>(windowItems.size());
+  const int totalCards = kPickerListsWindows ? 1 + static_cast<int>(windowItems.size()) : 1;
   const int totalRows = (totalCards + grid.cols - 1) / grid.cols;
   const int maxScrollRow = std::max(0, totalRows - grid.visibleRows);
   int scrollRow = std::clamp(gPicker.gridScrollRow.load(std::memory_order_relaxed), 0, maxScrollRow);
@@ -148,7 +149,7 @@ void draw_overlay(HDC hdc) {
     }
   }
 
-  if (windowItems.empty()) {
+  if (kPickerListsWindows && windowItems.empty()) {
     RECT emptyRect = layout.listRect;
     emptyRect.top += grid.cardH + dpi_scale(18);
     SetTextColor(hdc, RGB(150, 158, 170));

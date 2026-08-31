@@ -51,7 +51,13 @@ void queue_thumbnail_fetches_from_panel() {
     gPicker.thumbFetchQueue.push_back(id);
   };
   want(0);
-  for (const auto& item : snap.items) want(item.id);
+  // Only the desktop preview is shown, so fetching a thumbnail per window would spend host
+  // control-thread time on pictures nobody sees. (F-21.)
+  if (kPickerListsWindows) {
+    for (const auto& item : snap.items) want(item.id);
+  } else {
+    (void)snap;
+  }
 }
 
 void queue_window_list_request(const char* statusText) {
@@ -96,6 +102,12 @@ void push_session_toolbar_state() {
 void set_picker_visible_and_sync_stream(bool visible) {
   gPicker.visible.store(visible, std::memory_order_relaxed);
   if (visible) {
+    // The picker is GDI, the video is a flip-model swapchain on the same HWND, and DWM composites
+    // the swapchain ON TOP. Leaving it bound meant the picker was drawn underneath and the user
+    // just saw the last video frame, frozen. Dropping the swapchain hands the window back to GDI;
+    // the next present after the picker closes rebuilds it. The D3D device survives (the decoder
+    // shares it). (Viewer ledger F-21.)
+    gUi.nv12Renderer.release_swapchain();
     gPicker.shownAtUs.store(qpc_now_us(), std::memory_order_relaxed);
     gPicker.CancelPress();
     // Mid-session the stream KEEPS RUNNING behind the picker overlay. Stopping it here made every
@@ -182,7 +194,8 @@ void apply_window_selected_result(const ControlWindowSelectedMessage& msg) {
 void scroll_window_list(HWND hwnd, int deltaSteps) {
   const ClientLayout layout = compute_client_layout(hwnd);
   const CardGridMetrics grid = compute_card_grid(layout.listRect);
-  const int totalCards = 1 + static_cast<int>(gPicker.windowPanel.Snapshot().items.size());
+  const int totalCards =
+      kPickerListsWindows ? 1 + static_cast<int>(gPicker.windowPanel.Snapshot().items.size()) : 1;
   const int totalRows = (totalCards + grid.cols - 1) / grid.cols;
   const int maxScrollRow = std::max(0, totalRows - grid.visibleRows);
   const int cur = gPicker.gridScrollRow.load(std::memory_order_relaxed);
@@ -204,6 +217,7 @@ bool try_hit_window_list_item(HWND hwnd, int x, int y, uint64_t* outWindowId) {
     *outWindowId = 0;
     return true;
   }
+  if (!kPickerListsWindows) return false;  // desktop is the only target (F-21)
   const int itemIndex = cardIndex - 1;
   if (itemIndex < 0 || itemIndex >= static_cast<int>(snap.items.size())) return false;
   *outWindowId = snap.items[static_cast<size_t>(itemIndex)].id;

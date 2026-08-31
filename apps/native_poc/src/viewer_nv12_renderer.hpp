@@ -47,18 +47,46 @@ struct Nv12D3dRenderer {
   uint64_t rtvResizeCount = 0;
   bool ready = false;
 
+  // Drop the swapchain so DWM stops compositing the last presented frame over this window.
+  //
+  // A flip-model swapchain bound to the HWND is composited ABOVE anything GDI draws into the same
+  // window, so the picker overlay was painted underneath it and never seen: the user pressed
+  // "target select" and got a frozen-looking last frame instead of the picker. Releasing the
+  // swapchain returns the window to ordinary GDI redirection.
+  //
+  // The device and context deliberately survive -- the hardware decoder shares them
+  // (viewer_startup.cpp binds ctx.dec.d3dDevice to this device), so tearing them down here would
+  // break decoding. init() below reuses an existing device and only rebuilds the swapchain.
+  // (Viewer ledger F-21.)
+  void release_swapchain() {
+    if (context) {
+      ID3D11RenderTargetView* none[] = {nullptr};
+      context->OMSetRenderTargets(1, none, nullptr);
+      context->Flush();
+    }
+    rtv.Reset();
+    rtvW = 0;
+    rtvH = 0;
+    swapChain.Reset();
+    ready = false;
+  }
+
   bool init(HWND hwnd) {
-    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
-    D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0};
-    D3D_FEATURE_LEVEL outLevel = D3D_FEATURE_LEVEL_11_0;
-    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
-                                   levels, ARRAYSIZE(levels), D3D11_SDK_VERSION,
-                                   &device, &outLevel, &context);
-    if (FAILED(hr)) {
-      hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags,
-                             levels, ARRAYSIZE(levels), D3D11_SDK_VERSION,
-                             &device, &outLevel, &context);
-      if (FAILED(hr)) return false;
+    // Reused on a picker round trip: release_swapchain() keeps the device alive because the
+    // decoder holds it, so only recreate one when there is none. (F-21.)
+    if (!device || !context) {
+      UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+      D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0};
+      D3D_FEATURE_LEVEL outLevel = D3D_FEATURE_LEVEL_11_0;
+      HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
+                                     levels, ARRAYSIZE(levels), D3D11_SDK_VERSION,
+                                     &device, &outLevel, &context);
+      if (FAILED(hr)) {
+        hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags,
+                               levels, ARRAYSIZE(levels), D3D11_SDK_VERSION,
+                               &device, &outLevel, &context);
+        if (FAILED(hr)) return false;
+      }
     }
 
     Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
