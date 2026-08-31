@@ -14,23 +14,10 @@ void enqueue_control_input_message(ViewerState& ctx, const QueuedControlInputMes
 void enqueue_input_text_units(ViewerState& ctx, const uint16_t* text, size_t count) {
   if (kInputPolicyForceBlock) return;
   if (!ctx.session.inputEnabled.load()) return;
-  if (!text || count == 0) return;
-  size_t offset = 0;
-  while (offset < count) {
-    const size_t remaining = count - offset;
-    const size_t chunk = std::min<size_t>(remaining, remote60::native_poc::kControlInputTextMaxUtf16);
-    QueuedControlInputMessage msg{};
-    msg.type = MessageType::ControlInputText;
-    msg.inputText.header.magic = remote60::native_poc::kMagic;
-    msg.inputText.header.type = static_cast<uint16_t>(MessageType::ControlInputText);
-    msg.inputText.header.size = static_cast<uint16_t>(sizeof(msg.inputText));
-    msg.inputText.seq = ctx.control.inputQueue.NextSequence();
-    msg.inputText.utf16Count = static_cast<uint16_t>(chunk);
-    std::memcpy(msg.inputText.utf16, text + offset, chunk * sizeof(uint16_t));
-    msg.inputText.clientSendQpcUs = qpc_now_us();
-    enqueue_control_input_message(ctx, msg);
-    offset += chunk;
-  }
+  // Chunking and sequencing are the shared enqueue_control_input_text (F-09), the same code the
+  // Android session runs.
+  (void)remote60::native_poc::enqueue_control_input_text(ctx.control.inputQueue, text, count,
+                                                         qpc_now_us());
 }
 
 bool local_hotkey_modifiers_active() {
@@ -123,19 +110,11 @@ void enqueue_release_for_pressed_keys(ViewerState& ctx) {
 void enqueue_input_event(ViewerState& ctx, uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode) {
   if (kInputPolicyForceBlock) return;
   if (!ctx.session.inputEnabled.load()) return;
-  QueuedControlInputMessage msg{};
-  msg.type = MessageType::ControlInputEvent;
-  msg.inputEvent.header.magic = remote60::native_poc::kMagic;
-  msg.inputEvent.header.type = static_cast<uint16_t>(MessageType::ControlInputEvent);
-  msg.inputEvent.header.size = static_cast<uint16_t>(sizeof(msg.inputEvent));
-  msg.inputEvent.seq = ctx.control.inputQueue.NextSequence();
-  msg.inputEvent.kind = kind;
-  msg.inputEvent.buttons = ctx.input.mouseButtons.load();
-  msg.inputEvent.x = x;
-  msg.inputEvent.y = y;
-  msg.inputEvent.wheelDelta = wheelDelta;
-  msg.inputEvent.keyCode = keyCode;
-  msg.inputEvent.clientSendQpcUs = qpc_now_us();
+  // The message is the shared make_control_input_event (F-09); only the live button state and
+  // the macro tap are this side's.
+  const QueuedControlInputMessage msg = remote60::native_poc::make_control_input_event(
+      ctx.control.inputQueue, kind, ctx.input.mouseButtons.load(), x, y, wheelDelta, keyCode,
+      qpc_now_us());
   // Recording taps the send path, so the macro sees exactly what the host will see -- the
   // engine keeps pointer actions and drops keys on its own.
   if (ctx.input.macro.IsRecording()) {
@@ -148,20 +127,11 @@ void enqueue_input_event(ViewerState& ctx, uint16_t kind, int32_t x, int32_t y, 
 void enqueue_macro_step(ViewerState& ctx, const remote60::native_poc::MacroStep& step) {
   if (kInputPolicyForceBlock) return;
   if (!ctx.session.inputEnabled.load()) return;
-  QueuedControlInputMessage msg{};
-  msg.type = MessageType::ControlInputEvent;
-  msg.inputEvent.header.magic = remote60::native_poc::kMagic;
-  msg.inputEvent.header.type = static_cast<uint16_t>(MessageType::ControlInputEvent);
-  msg.inputEvent.header.size = static_cast<uint16_t>(sizeof(msg.inputEvent));
-  msg.inputEvent.seq = ctx.control.inputQueue.NextSequence();
-  msg.inputEvent.kind = step.kind;
-  msg.inputEvent.buttons = step.buttons;
-  msg.inputEvent.x = step.x;
-  msg.inputEvent.y = step.y;
-  msg.inputEvent.wheelDelta = step.wheelDelta;
-  msg.inputEvent.keyCode = step.keyCode;
-  msg.inputEvent.clientSendQpcUs = qpc_now_us();
-  enqueue_control_input_message(ctx, msg);
+  enqueue_control_input_message(
+      ctx, remote60::native_poc::make_control_input_event(ctx.control.inputQueue, step.kind,
+                                                          step.buttons, step.x, step.y,
+                                                          step.wheelDelta, step.keyCode,
+                                                          qpc_now_us()));
 }
 
 void toggle_macro_window(ViewerState& ctx, HWND owner) {

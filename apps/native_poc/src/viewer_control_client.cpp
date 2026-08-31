@@ -15,11 +15,13 @@ namespace remote60::native_poc::viewer {
 
 int ControlClient::fetch_one_thumbnail(remote60::native_poc::ControlLink& link) {
   // Routed through the ControlLink, not the raw socket, so a directory session (control
-  // tunnelled over the punched UDP socket) fetches previews too -- modelled on the
-  // Android ClientSessionController::FetchOneThumbnailLocked. One card per idle action
-  // keeps the strict request/response loop from being starved. Only invoked when the
-  // host advertised the capability, because an older host would drain the request and
-  // never reply. Returns: 1 fetched, 0 nothing to do, -1 link failure (stream desynced).
+  // tunnelled over the punched UDP socket) fetches previews too. The exchange itself is the
+  // shared fetch_window_thumbnail, the same code the Android ClientSessionController runs
+  // (F-09); this side only picks the card and stores the pixels -- GDI wants BGRA, which is the
+  // wire order. One card per idle action keeps the strict request/response loop from being
+  // starved. Only invoked when the host advertised the capability, because an older host would
+  // drain the request and never reply. Returns: 1 fetched, 0 nothing to do, -1 link failure
+  // (stream desynced).
   if (!ctx.picker.hostSupportsThumbnails.load(std::memory_order_relaxed)) return 0;
   uint64_t id = 0;
   {
@@ -28,35 +30,15 @@ int ControlClient::fetch_one_thumbnail(remote60::native_poc::ControlLink& link) 
     id = ctx.picker.thumbFetchQueue.front();
     ctx.picker.thumbFetchQueue.pop_front();
   }
-  remote60::native_poc::ControlWindowThumbnailRequestMessage req{};
-  req.header.magic = remote60::native_poc::kMagic;
-  req.header.type =
-      static_cast<uint16_t>(MessageType::ControlWindowThumbnailRequest);
-  req.header.size = static_cast<uint16_t>(sizeof(req));
-  req.seq = 0;
-  req.windowId = id;
-  req.maxWidth = 256;
-  req.maxHeight = 160;
-  req.clientSendQpcUs = qpc_now_us();
-  // One request is one message; EndMessage() draws the boundary UDP needs and TCP ignores.
-  if (!link.Write(&req, sizeof(req)) || !link.EndMessage()) return -1;
-  remote60::native_poc::ControlWindowThumbnailHeader rsp{};
-  if (!link.Read(&rsp, sizeof(rsp))) return -1;
-  if (rsp.header.magic != remote60::native_poc::kMagic ||
-      rsp.header.type != static_cast<uint16_t>(MessageType::ControlWindowThumbnail) ||
-      rsp.payloadSize > remote60::native_poc::kWindowThumbnailMaxPayloadBytes) {
+  remote60::native_poc::WindowThumbnailReply reply;
+  if (!remote60::native_poc::fetch_window_thumbnail(link, id, 256, 160, qpc_now_us(), &reply)) {
     return -1;
   }
-  std::vector<uint8_t> payload(rsp.payloadSize);
-  if (rsp.payloadSize > 0 && !link.Read(payload.data(), payload.size())) {
-    return -1;
-  }
-  if ((rsp.flags & 0x1u) != 0 && rsp.width > 0 && rsp.height > 0 &&
-      payload.size() == static_cast<size_t>(rsp.width) * rsp.height * 4u) {
+  if (reply.present) {
     auto thumb = std::make_shared<WindowThumb>();
-    thumb->width = rsp.width;
-    thumb->height = rsp.height;
-    thumb->bgra = std::move(payload);
+    thumb->width = reply.width;
+    thumb->height = reply.height;
+    thumb->bgra = std::move(reply.bgra);
     thumb->fetchedUs = qpc_now_us();
     {
       std::lock_guard<std::mutex> lk(ctx.picker.thumbMu);

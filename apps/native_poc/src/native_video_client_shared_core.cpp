@@ -99,6 +99,50 @@ void ClientInputQueue::Reset() {
   nextSeq_.store(0, std::memory_order_relaxed);
 }
 
+QueuedControlInputMessage make_control_input_event(ClientInputQueue& queue, uint16_t kind,
+                                                   uint16_t buttons, int32_t x, int32_t y,
+                                                   int32_t wheelDelta, uint32_t keyCode,
+                                                   uint64_t nowUs) {
+  QueuedControlInputMessage msg{};
+  msg.type = MessageType::ControlInputEvent;
+  msg.inputEvent.header.magic = kMagic;
+  msg.inputEvent.header.type = static_cast<uint16_t>(MessageType::ControlInputEvent);
+  msg.inputEvent.header.size = static_cast<uint16_t>(sizeof(msg.inputEvent));
+  msg.inputEvent.seq = queue.NextSequence();
+  msg.inputEvent.kind = kind;
+  msg.inputEvent.buttons = static_cast<uint16_t>(buttons & 0x7u);
+  msg.inputEvent.x = x;
+  msg.inputEvent.y = y;
+  msg.inputEvent.wheelDelta = wheelDelta;
+  msg.inputEvent.keyCode = keyCode;
+  msg.inputEvent.clientSendQpcUs = nowUs;
+  return msg;
+}
+
+size_t enqueue_control_input_text(ClientInputQueue& queue, const uint16_t* text, size_t count,
+                                  uint64_t nowUs) {
+  if (!text || count == 0) return 0;
+  size_t queued = 0;
+  size_t offset = 0;
+  while (offset < count) {
+    const size_t remaining = count - offset;
+    const size_t chunk = std::min<size_t>(remaining, kControlInputTextMaxUtf16);
+    QueuedControlInputMessage msg{};
+    msg.type = MessageType::ControlInputText;
+    msg.inputText.header.magic = kMagic;
+    msg.inputText.header.type = static_cast<uint16_t>(MessageType::ControlInputText);
+    msg.inputText.header.size = static_cast<uint16_t>(sizeof(msg.inputText));
+    msg.inputText.seq = queue.NextSequence();
+    msg.inputText.utf16Count = static_cast<uint16_t>(chunk);
+    std::memcpy(msg.inputText.utf16, text + offset, chunk * sizeof(uint16_t));
+    msg.inputText.clientSendQpcUs = nowUs;
+    queue.Enqueue(msg);
+    offset += chunk;
+    ++queued;
+  }
+  return queued;
+}
+
 KeyframeRequestState::KeyframeRequestState(uint64_t minIntervalUs, uint64_t tokenRefillUs, uint32_t tokenCapacity)
     : minIntervalUs_(minIntervalUs),
       tokenRefillUs_(tokenRefillUs),

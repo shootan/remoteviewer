@@ -359,41 +359,27 @@ int connect_media_socket(ViewerContext& ctx) {
     return 5;
   }
   if (ctx.dec.transport == VideoTransport::Udp) {
-    int timeoutMs = 200;
-    (void)setsockopt(ctx.session.sock, SOL_SOCKET, SO_RCVTIMEO,
-                     reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
-    bool handshakeOk = false;
-    for (int attempt = 0; attempt < 40 && !handshakeOk; ++attempt) {
-      UdpHelloPacket hello{};
-      hello.kind = static_cast<uint16_t>(UdpPacketKind::Hello);
-      // The capability from /api/connect. Without it the host treats this as a plain LAN client
-      // and refuses anything that needs authorisation -- secure-desktop input in particular.
-      if (!ctx.directoryPunchToken.empty()) {
-        std::snprintf(hello.authToken, sizeof(hello.authToken), "%s", ctx.directoryPunchToken.c_str());
-      }
-      const int sent = send(ctx.session.sock, reinterpret_cast<const char*>(&hello), sizeof(hello), 0);
-      if (sent <= 0) {
-        Sleep(50);
-        continue;
-      }
-      UdpHelloPacket ack{};
-      const int n = recv(ctx.session.sock, reinterpret_cast<char*>(&ack), sizeof(ack), 0);
-      if (n >= static_cast<int>(sizeof(UdpHelloPacket)) &&
-          ack.magic == remote60::native_poc::kMagic &&
-          ack.kind == static_cast<uint16_t>(UdpPacketKind::HelloAck) &&
-          ack.version == remote60::native_poc::kUdpProtocolVersion &&
-          (ack.features & remote60::native_poc::kUdpFeatureVideoFec) != 0) {
-        handshakeOk = true;
-        break;
-      }
-      Sleep(50);
-    }
-    timeoutMs = 0;
+    // The same exchange the Android session performs (F-09), at this viewer's old cadence: up to
+    // ten seconds of Hello, a 200 ms wait each, a 50 ms pause between tries. The capability from
+    // /api/connect rides in the packet; without it the host treats this as a plain LAN client and
+    // refuses anything that needs authorisation -- secure-desktop input in particular. A token that
+    // was sent now also has to come back acknowledged (kUdpFeatureDirectoryAuth), which the mobile
+    // client always required and this path used to skip.
+    remote60::native_poc::UdpHelloOptions hello;
+    hello.authToken = ctx.directoryPunchToken;
+    hello.budgetMs = 10000;
+    hello.sliceMaxMs = 200;
+    hello.retrySleepMs = 50;
+    std::string helloError;
+    const bool handshakeOk =
+        remote60::native_poc::udp_hello_handshake(ctx.session.sock, hello, nullptr, &helloError);
+    // Back to a blocking read, as before; the control tunnel (if any) sets its own timeout next.
+    int timeoutMs = 0;
     (void)setsockopt(ctx.session.sock, SOL_SOCKET, SO_RCVTIMEO,
                      reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
     if (!handshakeOk) {
       std::cerr << "[native-video-client] udp handshake failed " << ctx.resolvedArgs.host << ":"
-                << ctx.resolvedArgs.port << "\n";
+                << ctx.resolvedArgs.port << " (" << helloError << ")\n";
       closesocket(ctx.session.sock);
       ctx.session.sock = INVALID_SOCKET;
       if (ctx.dec.mfStarted) MFShutdown();

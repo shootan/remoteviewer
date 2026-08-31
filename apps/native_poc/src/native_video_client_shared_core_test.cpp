@@ -1,9 +1,12 @@
+#include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <chrono>
 #include <functional>
 #include <iostream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "native_socket.hpp"
 #include "native_video_client_shared_core.hpp"
@@ -547,11 +550,54 @@ bool test_session_controller() {
   return true;
 }
 
+// The shared input-message builders (F-09): one event, masked buttons, sequence from the queue;
+// text split into kControlInputTextMaxUtf16-unit chunks, sequenced after it, queued in order.
+bool test_input_message_builders() {
+  ClientInputQueue queue;
+  const auto ev = remote60::native_poc::make_control_input_event(queue, 2, 0xFFu, 10, -20, 120,
+                                                                 65, 777);
+  if (!expect(ev.type == MessageType::ControlInputEvent, "builder: event type")) return false;
+  if (!expect(ev.inputEvent.header.magic == remote60::native_poc::kMagic &&
+                  ev.inputEvent.header.type == static_cast<uint16_t>(MessageType::ControlInputEvent) &&
+                  ev.inputEvent.header.size == sizeof(ev.inputEvent),
+              "builder: event header")) return false;
+  if (!expect(ev.inputEvent.seq == 1 && ev.inputEvent.kind == 2 && ev.inputEvent.buttons == 0x7u &&
+                  ev.inputEvent.x == 10 && ev.inputEvent.y == -20 && ev.inputEvent.wheelDelta == 120 &&
+                  ev.inputEvent.keyCode == 65 && ev.inputEvent.clientSendQpcUs == 777,
+              "builder: event fields (buttons masked to 3 bits, seq from the queue)")) return false;
+
+  std::vector<uint16_t> text(130);  // 64 + 64 + 2
+  for (size_t i = 0; i < text.size(); ++i) text[i] = static_cast<uint16_t>(0x3131 + i);
+  if (!expect(remote60::native_poc::enqueue_control_input_text(queue, text.data(), text.size(), 900) == 3,
+              "builder: 130 units split into 3 chunks")) return false;
+  if (!expect(remote60::native_poc::enqueue_control_input_text(queue, nullptr, 5, 900) == 0 &&
+                  remote60::native_poc::enqueue_control_input_text(queue, text.data(), 0, 900) == 0,
+              "builder: empty text queues nothing")) return false;
+  QueuedControlInputMessage out{};
+  size_t seen = 0;
+  size_t offset = 0;
+  uint32_t expectSeq = 2;
+  while (queue.TryDequeue(&out)) {
+    if (!expect(out.type == MessageType::ControlInputText, "builder: queued item is text")) return false;
+    if (!expect(out.inputText.seq == expectSeq++, "builder: chunks sequenced in order after the event")) return false;
+    const size_t want = std::min<size_t>(text.size() - offset,
+                                         remote60::native_poc::kControlInputTextMaxUtf16);
+    if (!expect(out.inputText.utf16Count == want, "builder: chunk length")) return false;
+    if (!expect(std::memcmp(out.inputText.utf16, text.data() + offset, want * sizeof(uint16_t)) == 0,
+                "builder: chunk content")) return false;
+    if (!expect(out.inputText.clientSendQpcUs == 900, "builder: chunk stamp")) return false;
+    offset += want;
+    ++seen;
+  }
+  return expect(seen == 3 && offset == text.size(), "builder: all three chunks dequeued");
+}
+
 }  // namespace
 
 int main() {
   if (!test_ping_and_metrics_order()) return 1;
   if (!test_window_and_input_actions()) return 1;
+  if (!test_input_message_builders()) return 1;
   if (!test_capture_runtime_and_keyframe_actions()) return 1;
   if (!test_udp_assembler()) return 1;
   if (!test_session_controller()) return 1;

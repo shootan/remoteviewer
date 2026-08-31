@@ -225,20 +225,8 @@ bool ClientSessionController::QueueInputEvent(uint16_t kind, int32_t x, int32_t 
   }
   if (kind < 1 || kind > 6) return false;
 
-  QueuedControlInputMessage msg{};
-  msg.type = MessageType::ControlInputEvent;
-  msg.inputEvent.header.magic = kMagic;
-  msg.inputEvent.header.type = static_cast<uint16_t>(MessageType::ControlInputEvent);
-  msg.inputEvent.header.size = static_cast<uint16_t>(sizeof(msg.inputEvent));
-  msg.inputEvent.seq = inputQueue_.NextSequence();
-  msg.inputEvent.kind = kind;
-  msg.inputEvent.buttons = static_cast<uint16_t>(buttons & 0x7u);
-  msg.inputEvent.x = x;
-  msg.inputEvent.y = y;
-  msg.inputEvent.wheelDelta = wheelDelta;
-  msg.inputEvent.keyCode = keyCode;
-  msg.inputEvent.clientSendQpcUs = now_us();
-  inputQueue_.Enqueue(msg);
+  inputQueue_.Enqueue(make_control_input_event(inputQueue_, kind, buttons, x, y, wheelDelta,
+                                               keyCode, now_us()));
   return true;
 }
 
@@ -247,25 +235,7 @@ bool ClientSessionController::QueueInputText(const uint16_t* text, size_t count)
     std::lock_guard<std::mutex> lock(mu_);
     if (!CanQueueControlRequestLocked()) return false;
   }
-  if (!text || count == 0) return false;
-
-  size_t offset = 0;
-  while (offset < count) {
-    const size_t remaining = count - offset;
-    const size_t chunk = std::min<size_t>(remaining, kControlInputTextMaxUtf16);
-    QueuedControlInputMessage msg{};
-    msg.type = MessageType::ControlInputText;
-    msg.inputText.header.magic = kMagic;
-    msg.inputText.header.type = static_cast<uint16_t>(MessageType::ControlInputText);
-    msg.inputText.header.size = static_cast<uint16_t>(sizeof(msg.inputText));
-    msg.inputText.seq = inputQueue_.NextSequence();
-    msg.inputText.utf16Count = static_cast<uint16_t>(chunk);
-    std::memcpy(msg.inputText.utf16, text + offset, chunk * sizeof(uint16_t));
-    msg.inputText.clientSendQpcUs = now_us();
-    inputQueue_.Enqueue(msg);
-    offset += chunk;
-  }
-  return true;
+  return enqueue_control_input_text(inputQueue_, text, count, now_us()) > 0;
 }
 
 bool ClientSessionController::IsValidPort(int port) {
@@ -495,38 +465,21 @@ int ClientSessionController::FetchOneThumbnailLocked(ControlLink& link) {
     id = thumbFetchQueue_.front();
     thumbFetchQueue_.pop_front();
   }
-  ControlWindowThumbnailRequestMessage req{};
-  req.header.magic = kMagic;
-  req.header.type = static_cast<uint16_t>(MessageType::ControlWindowThumbnailRequest);
-  req.header.size = static_cast<uint16_t>(sizeof(req));
-  req.windowId = id;
-  req.maxWidth = 256;
-  req.maxHeight = 160;
-  req.clientSendQpcUs = now_us();
-  if (!link.Write(&req, sizeof(req)) || !link.EndMessage()) return -1;
-  ControlWindowThumbnailHeader rsp{};
-  if (!link.Read(&rsp, sizeof(rsp))) return -1;
-  if (rsp.header.magic != kMagic ||
-      rsp.header.type != static_cast<uint16_t>(MessageType::ControlWindowThumbnail) ||
-      rsp.payloadSize > kWindowThumbnailMaxPayloadBytes) {
-    return -1;
-  }
-  std::vector<uint8_t> payload(rsp.payloadSize);
-  if (rsp.payloadSize > 0 && !link.Read(payload.data(), payload.size())) {
-    return -1;
-  }
-  if ((rsp.flags & 0x1u) != 0 && rsp.width > 0 && rsp.height > 0 &&
-      payload.size() == static_cast<size_t>(rsp.width) * rsp.height * 4u) {
+  // The exchange is the shared fetch_window_thumbnail (F-09); this side only picks the card and
+  // converts the pixels.
+  WindowThumbnailReply reply;
+  if (!fetch_window_thumbnail(link, id, 256, 160, now_us(), &reply)) return -1;
+  if (reply.present) {
     // Wire format is BGRA; Android Bitmap.copyPixelsFromBuffer wants RGBA byte order.
-    for (size_t i = 0; i + 3 < payload.size(); i += 4) {
-      std::swap(payload[i], payload[i + 2]);
+    for (size_t i = 0; i + 3 < reply.bgra.size(); i += 4) {
+      std::swap(reply.bgra[i], reply.bgra[i + 2]);
     }
     std::lock_guard<std::mutex> lk(thumbMu_);
     auto& t = thumbs_[id];
-    t.width = rsp.width;
-    t.height = rsp.height;
-    t.version = rsp.version;
-    t.rgba = std::move(payload);
+    t.width = reply.width;
+    t.height = reply.height;
+    t.version = reply.version;
+    t.rgba = std::move(reply.bgra);
   }
   return 1;
 }
@@ -784,46 +737,16 @@ bool ClientSessionController::ConnectUdpVideo(const ClientSessionConnectArgs& ar
     }
   }
 
-  UdpHelloPacket hello{};
-  std::snprintf(hello.authToken, sizeof(hello.authToken), "%s", args.peerAuthToken.c_str());
   // A directory connect and the host heartbeat are independent HTTP requests. The first
   // authenticated Hello can therefore reach the host a few milliseconds before its matching
   // capability. Retry on the already-punched socket instead of turning that harmless race into
-  // the intermittent "connecting -> error" seen by the mobile client.
-  const uint32_t handshakeBudgetMs =
-      args.peerAuthToken.empty() ? std::max<uint32_t>(1, args.udpHandshakeTimeoutMs)
-                                 : std::max<uint32_t>(3000, args.udpHandshakeTimeoutMs);
-  const uint64_t handshakeDeadlineUs =
-      now_us() + static_cast<uint64_t>(handshakeBudgetMs) * 1000ULL;
-  bool helloAcknowledged = false;
-  while (!stopRequested_.load(std::memory_order_acquire) && now_us() < handshakeDeadlineUs) {
-    const int sent = send(connected, reinterpret_cast<const char*>(&hello), sizeof(hello), 0);
-    if (sent != static_cast<int>(sizeof(hello))) {
-      if (error) *error = "udp hello send failed";
-      close_socket(&connected);
-      return false;
-    }
-
-    const uint64_t remainingUs = handshakeDeadlineUs > now_us() ? handshakeDeadlineUs - now_us() : 0;
-    const uint32_t receiveSliceMs = static_cast<uint32_t>(
-        std::clamp<uint64_t>((remainingUs + 999ULL) / 1000ULL, 1ULL, 250ULL));
-    (void)set_recv_timeout(connected, receiveSliceMs);
-
-    UdpHelloPacket ack{};
-    const int received = recv(connected, reinterpret_cast<char*>(&ack), sizeof(ack), 0);
-    const bool validAck =
-        received >= static_cast<int>(sizeof(UdpHelloPacket)) && ack.magic == kMagic &&
-        ack.kind == static_cast<uint16_t>(UdpPacketKind::HelloAck) &&
-        ack.version == kUdpProtocolVersion && (ack.features & kUdpFeatureVideoFec) != 0;
-    const bool directoryAuthorized =
-        args.peerAuthToken.empty() || (ack.features & kUdpFeatureDirectoryAuth) != 0;
-    if (validAck && directoryAuthorized) {
-      helloAcknowledged = true;
-      break;
-    }
-  }
-  if (!helloAcknowledged) {
-    if (error) *error = "udp hello ack failed";
+  // the intermittent "connecting -> error" seen by the mobile client. The exchange itself is the
+  // shared udp_hello_handshake (F-09); a failed send stays fatal here (retrySleepMs = 0).
+  UdpHelloOptions hello;
+  hello.authToken = args.peerAuthToken;
+  hello.budgetMs = args.peerAuthToken.empty() ? std::max<uint32_t>(1, args.udpHandshakeTimeoutMs)
+                                              : std::max<uint32_t>(3000, args.udpHandshakeTimeoutMs);
+  if (!udp_hello_handshake(connected, hello, &stopRequested_, error)) {
     close_socket(&connected);
     return false;
   }

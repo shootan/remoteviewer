@@ -35,6 +35,20 @@ class ClientInputQueue {
   std::atomic<uint64_t> dropped_{0};
 };
 
+// The two input messages, built one way for every client (viewer ledger F-09: the Android session
+// and the Windows viewer each assembled them by hand, field for field).
+//
+// One ControlInputEvent: header, the queue's next sequence, the fields, the send stamp. `buttons`
+// is masked to the three mouse bits the host reads.
+QueuedControlInputMessage make_control_input_event(ClientInputQueue& queue, uint16_t kind,
+                                                   uint16_t buttons, int32_t x, int32_t y,
+                                                   int32_t wheelDelta, uint32_t keyCode,
+                                                   uint64_t nowUs);
+// Splits UTF-16 text into ControlInputText messages of at most kControlInputTextMaxUtf16 units,
+// sequenced and queued in order. Returns how many were queued (0 for no text).
+size_t enqueue_control_input_text(ClientInputQueue& queue, const uint16_t* text, size_t count,
+                                  uint64_t nowUs);
+
 struct KeyframeRequestAttempt {
   bool queued = false;
   const char* throttleCause = "none";
