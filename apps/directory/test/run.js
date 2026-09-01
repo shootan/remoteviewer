@@ -161,7 +161,30 @@ function cleanup() {
 
   await stopServer(server);
   fs.rmSync(logDir, { recursive: true, force: true });
+  if (logs !== 0) {
+    cleanup();
+    console.log('\nRESULT: FAILED');
+    process.exit(logs);
+  }
+
+  // The host on the server's own LAN: the advertised address is made deliberately unreachable
+  // so that any server datagram aimed at it, rather than at the observed wire tuple, is lost.
+  console.log('\n--- same-lan host (advertised vs wire) ---');
+  const lanEnv = { ...env, REMOTE60_PUBLIC_IP: '203.0.113.9', T_PUBLIC_IP: '203.0.113.9',
+                   REMOTE60_RELAY_ENABLED: '1', REMOTE60_RELAY_IP: '127.0.0.1',
+                   REMOTE60_RELAY_PORT: '18443', REMOTE60_RELAY_GRACE_MS: '400',
+                   REMOTE60_RELAY_ALLOW_IPS: '127.0.0.1', REMOTE60_RELAY_ALLOW_ACCOUNTS: 'tester',
+                   T_RELAY: '18443' };
+  server = spawn(process.execPath, [serverPath], { env: lanEnv, stdio: 'ignore' });
+  await sleep(1500);
+  const sameLan = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(__dirname, 'same_lan_test.js')],
+                        { env: lanEnv, stdio: 'inherit' });
+    child.on('exit', (code) => resolve(code ?? 1));
+  });
+
+  await stopServer(server);
   cleanup();
-  console.log(logs === 0 ? '\nRESULT: ALL PASS' : '\nRESULT: FAILED');
-  process.exit(logs);
+  console.log(sameLan === 0 ? '\nRESULT: ALL PASS' : '\nRESULT: FAILED');
+  process.exit(sameLan);
 })();

@@ -7968,3 +7968,23 @@ Next action
 - 주의: 로그에 창 제목·프로세스명·IP가 들어가는데 디렉터리는 TLS가 꺼져 있어 **평문으로 공용망을 건넌다**(#330 동일). 상시화는 TLS 이후.
 - 다음 액션: 새 설치본·APK 설치 → 호스트/뷰어/폰의 디렉터리 URL을 `http://175.209.236.194:29180`으로 → 회사에서 두 케이스 실기
   (회사wifi→회사PC, 회사→집PC). 로그는 이제 서버에서 바로 읽는다.
+
+### 332) 2026-09-01 광고 주소 / 송신 주소 분리 — 코덱스 검증(A 승인·B High 2건·C Low 2건) 반영 (브랜치 refactor/viewer-split)
+
+- 계기: 회사 PC → 집 호스트 실기(17:07)에서 43000 포워딩 없이 실패. 서버 저널 `[wake] tx host=175.209.236.194:43000`, `[relay] closed reason=no HelloAck c2h=39 h2c=0` —
+  #329의 관측 보정이 `host.publicIp`를 WAN으로 덮어쓰면서 **서버 자신의 송신(wake·릴레이 host leg)까지** 집 공인 주소로 나갔다. 같은 LAN 안에서는 포워딩 없이 안 닿는다.
+- 수정(`apps/directory/server.js`): 관측 맵에 `wireIp/wirePort`(실제 rinfo) 병행 저장 → 하트비트가 `host.wireIp/wirePort`로 → wake(콜백 안 late-binding)와 릴레이 host leg가 wire 튜플 사용.
+  **광고(`connectCandidatesFor`, `hostPublicIp`)는 그대로 WAN.** 호스트가 집 밖이면 두 값이 같아 무변화. 사설 IP를 광고하는 것이 아니라 **받은 패킷의 출발지로 답하는 것**이다.
+- 발견: HEAD의 wake는 setTimeout 콜백 안에서 `host.publicIp`를 매번 읽어 사이에 온 하트비트를 따라간다. 호출 시점 캡처로 바꾸자 `directory_test` wake 케이스가 결정적으로 실패(HEAD 2/2 통과, 캡처판 2/2 실패) → late-binding 복원. 코덱스 판정: 의도된 동작이 맞고 테스트로 명시할 것.
+- 코덱스 검증(remote#ptyr3fi8): A(#329) 승인 · B 설계 승인, 배포 전 High 2건 · C(#328) 승인, Low 2건 · "직접 펀칭 보장" 기각 · "포워딩 없는 릴레이 성공 가능성" 동의.
+  서버→호스트 송신에 publicIp 잔존 없음(전수), wake·릴레이 c2h 모두 observe 소켓(`startUdp` 반환 소켓)에서 나감 확정.
+- High 1 → `test/same_lan_test.js` 신설(11건): 호스트를 이 PC의 LAN IP에 bind, `REMOTE60_PUBLIC_IP=203.0.113.9`(아무도 안 받는 문서용 주소)로 광고/송신을 **일부러 다르게** 만든다.
+  광고 후보는 203.0.113.9 · wake는 wire로 도착(observe 소켓 출발) · 릴레이 Hello가 wire로 도착·Ack 왕복 · **호스트가 소켓을 옮긴 뒤** 클라 미디어가 새 튜플로, 호스트 미디어가 클라로, 다음 wake도 새 튜플로.
+- High 2 → `relayFollowHostWire()`: 인증된 하트비트가 wire 튜플 변화를 감지하면 활성 릴레이 세션의 `hostIp/hostPort`를 갱신하고 `relaySessionByHost` 인덱스를 unindex→reindex(충돌 세션은 drop). 코덱스 권고 A안. 단순 패킷별 late-binding은 인바운드 인덱스가 못 따라가 h2c=0이 지속되므로 채택하지 않음.
+- Low: 재등록 시 `wireIp/wirePort` 보존(이전엔 public만 보존해 첫 하트비트 전 wake가 public 폴백) · wake가 콜백에서 목적지가 바뀌면 `[wake] … tx moved to` 기록 ·
+  뷰어 `directory_session_bootstrap.cpp`: http 포트 65535면 관측 포트가 0으로 wrap → 명시 오류로 거부 · `test/run.js`의 stage 간 `cleanup()` 순서(로그 단계 뒤) 정리.
+- 문구 정정(코덱스 Q2): "보정 전보다 나빠지지 않는다"는 **릴레이 자격이 있는 클라에 한정**해서만 성립한다(allowlist 밖·릴레이 off·4초 예산 초과·레거시 클라는 폴백 보장 없음). 절대 보장 표현 금지.
+- 검증: `node apps/directory/test/run.js` **ALL PASS**(기존 + 관측 보정 3 + 로그 7 + same-lan 11) · 뷰어·`remote60_directory_session_client_test` 빌드 exit 0, 테스트 PASS.
+- 실기 게이트(코덱스 제시, 직접 펀칭 성공이 아니라 이걸 먼저 본다): 서버 저널 `[relay] bound … host=192.168.0.1:43000` · `h2c>0` · HelloAck auth bit · state=active · 양방향 미디어.
+- 미처리: 클라이언트 업로드 로그 타임스탬프(사용자 중단으로 미적용) · 안드로이드 관측 포트 65535 overflow(Low) · https는 C++ 거부/안드로이드 허용으로 규칙이 다름(문서 문구만).
+- 남은 리스크(코덱스 Q5, 그대로 기록): 집 공유기가 destination-dependent 매핑이면 관측 포트≠회사향 매핑 포트 · 회사 NAT의 endpoint-dependent 필터/CGN · wake→관측(최대 6×250ms)+하트비트 지연이 릴레이 grace보다 늦으면 토큰 전 Hello 도착 · 4초 예산 대비 grace 2.5초 여유 1.5초 · 헤어핀 매핑 timeout < 하트비트 25초.

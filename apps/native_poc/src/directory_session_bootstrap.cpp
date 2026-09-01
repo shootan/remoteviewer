@@ -43,6 +43,12 @@ bool directory_session_open(const DirectorySessionRequest& request, DirectorySes
   if (!directory::parse_directory_url(request.url, &directoryHost, &directoryHttpPort, outError)) {
     return false;
   }
+  if (request.directoryUdpPort == 0 && directoryHttpPort == 65535) {
+    // httpPort + 1 would wrap to 0 in a uint16_t and dial nothing. A url on the last port has
+    // to say its observe port explicitly.
+    if (outError) *outError = "directory http port 65535 leaves no room for the observe port";
+    return false;
+  }
   const uint16_t observePort = request.directoryUdpPort != 0
                                    ? request.directoryUdpPort
                                    : static_cast<uint16_t>(directoryHttpPort + 1);

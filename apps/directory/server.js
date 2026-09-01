@@ -196,17 +196,23 @@ const correctionLogged = new Set();
  * for this router (bindPort=43000 -> public=...:43000) and the hairpin probe showed it again
  * (source port 60765 came back unchanged). Where it does not hold, the peer ends up on the relay
  * -- which is where an unusable candidate was sending it anyway, so this cannot be worse.
+ *
+ * The substitution answers "what should others dial", which is not the same question as "where do
+ * we send". We send to `wire`, the tuple the packet actually arrived from, because that is the
+ * one our own datagrams can reach -- it is how the reply to this very OBSERVE gets home. For a
+ * peer beyond our NAT the two are identical and nothing changes.
  */
 function observedAddressFor(rinfo) {
+  const wire = { wireIp: rinfo.address, wirePort: rinfo.port };
   if (!PUBLIC_IP || !onServerLan(rinfo.address)) {
-    return { ip: rinfo.address, port: rinfo.port };
+    return { ip: rinfo.address, port: rinfo.port, ...wire };
   }
   if (!correctionLogged.has(rinfo.address)) {
     correctionLogged.add(rinfo.address);
-    console.log(`[observe] ${rinfo.address} is on our own lan; reporting ${PUBLIC_IP} instead ` +
-                `(port ${rinfo.port} kept)`);
+    console.log(`[observe] ${rinfo.address} is on our own lan; advertising ${PUBLIC_IP} ` +
+                `(port ${rinfo.port} kept), still sending to ${rinfo.address}`);
   }
-  return { ip: PUBLIC_IP, port: rinfo.port };
+  return { ip: PUBLIC_IP, port: rinfo.port, ...wire };
 }
 
 // ---------------------------------------------------------------- log collection
@@ -661,6 +667,8 @@ async function handleHostRegister(req, res) {
     lastSeen: previous ? previous.lastSeen : 0,
     publicIp: previous ? previous.publicIp : '',
     publicUdpPort: previous ? previous.publicUdpPort : 0,
+    wireIp: previous ? previous.wireIp || previous.publicIp : '',
+    wirePort: previous ? previous.wirePort || previous.publicUdpPort : 0,
     localIps: previous ? previous.localIps || [] : [],
     localUdpPort: previous ? previous.localUdpPort || 0 : 0,
     alternateUdpPort: previous ? previous.alternateUdpPort || 0 : 0,
@@ -794,10 +802,21 @@ function sendWakePunch(sock, host, connectId) {
   wakeStats.sent++;
 
   const packet = buildPunchPacket();
-  console.log(`[wake] connect=${connectId} tx host=${host.publicIp}:${host.publicUdpPort}`);
+  console.log(`[wake] connect=${connectId} tx host=${host.wireIp || host.publicIp}:` +
+              `${host.wirePort || host.publicUdpPort}` +
+              ((host.wireIp || host.publicIp) !== host.publicIp
+                 ? ` (advertised ${host.publicIp}:${host.publicUdpPort})` : ''));
+  const scheduledKey = endpointKey(host.wireIp || host.publicIp, host.wirePort || host.publicUdpPort);
   for (const delay of WAKE_PACKETS) {
     setTimeout(() => {
-      sock.send(packet, host.publicUdpPort, host.publicIp, (err) => {
+      // Read the address here rather than above: a heartbeat arriving between these three
+      // datagrams moves the host's mapping, and the later ones should follow it.
+      const ip = host.wireIp || host.publicIp;
+      const port = host.wirePort || host.publicUdpPort;
+      if (endpointKey(ip, port) !== scheduledKey) {
+        console.log(`[wake] connect=${connectId} tx moved to ${ip}:${port} (+${delay}ms)`);
+      }
+      sock.send(packet, port, ip, (err) => {
         if (err) {
           wakeStats.failed++;
           console.error(`[wake] connect=${connectId} tx failed: ${err.message}`);
@@ -867,6 +886,33 @@ function relayDropSession(session, reason) {
               `state=${session.state} c2h=${session.pktC2H}/${session.bytesC2H}B ` +
               `h2c=${session.pktH2C}/${session.bytesH2C}B ` +
               `ackMs=${session.ackMs === null ? 'never' : session.ackMs}`);
+}
+
+/**
+ * Keeps an active relay session pointed at the host after a heartbeat moved its wire tuple.
+ *
+ * The session captured the host's address when it was bound, and the inbound index is keyed by
+ * that same address. Updating only the outbound side would leave the host's replies unmatched --
+ * they would arrive from the new tuple and find nothing under it, so h2c would sit at zero while
+ * c2h kept flowing. The heartbeat is authenticated by the host's own token, which is what makes it
+ * safe to re-key the session on its word rather than on whatever packet shows up next.
+ */
+function relayFollowHostWire(host, previousWire) {
+  const session = relayLeaseByHost.get(host.hostId);
+  if (!session || session.dropped) return;
+  if (session.hostIp === host.wireIp && session.hostPort === host.wirePort) return;
+  const newKey = endpointKey(host.wireIp, host.wirePort);
+  const squatter = relaySessionByHost.get(newKey);
+  if (squatter && squatter !== session && !squatter.dropped) {
+    relayDropSession(squatter, 'host moved onto its endpoint');
+  }
+  relayUnindex(relaySessionByHost, endpointKey(session.hostIp, session.hostPort), session);
+  console.log(`[relay] connect=${session.connectId} host moved ${session.hostIp}:${session.hostPort}` +
+              ` -> ${host.wireIp}:${host.wirePort}` +
+              (previousWire.ip ? '' : ' (first heartbeat)'));
+  session.hostIp = host.wireIp;
+  session.hostPort = host.wirePort;
+  relaySessionByHost.set(newKey, session);
 }
 
 // One sweep for every expiring thing here. Called on a timer rather than per packet so the hot
@@ -953,8 +999,8 @@ function relayBindSession(rinfo, parsed) {
     hostId: auth.hostId,
     clientIp: rinfo.address,
     clientPort: rinfo.port,
-    hostIp: host.publicIp,
-    hostPort: host.publicUdpPort,
+    hostIp: host.wireIp || host.publicIp,
+    hostPort: host.wirePort || host.publicUdpPort,
     state: 'provisional',
     createdAt: now,
     lastClientAt: now,
@@ -1091,8 +1137,14 @@ async function handleHostHeartbeat(req, res) {
   // The observation token ties this heartbeat to the UDP packet that came from the very
   // socket the host will stream on, so the port we hand out is the one NAT actually mapped.
   const obs = observed.get(String(body.observeToken || ''));
+  const previousWire = { ip: host.wireIp, port: host.wirePort };
   host.publicIp = obs ? obs.ip : remoteIp(req);
   host.publicUdpPort = obs ? obs.port : Number(body.udpPort || 0);
+  // Where our own datagrams go. Same as the advertised pair unless the host is on our own LAN,
+  // in which case the advertised one is the router's WAN address and cannot be sent to from here.
+  host.wireIp = (obs && obs.wireIp) ? obs.wireIp : host.publicIp;
+  host.wirePort = (obs && obs.wirePort) ? obs.wirePort : host.publicUdpPort;
+  relayFollowHostWire(host, previousWire);
   host.hostName = String(body.hostName || host.hostName).slice(0, 64);
   // Where else this host can be reached. The public address is ours to determine -- we see the
   // mapping NAT actually made -- but a LAN address and a second listening port are only knowable
@@ -1240,7 +1292,11 @@ function startUdp() {
         const token = text.slice(8).trim().slice(0, 64);
         if (!token) return;
         const seen = observedAddressFor(rinfo);
-        observed.set(token, { ip: seen.ip, port: seen.port, at: Date.now() });
+        observed.set(token, {
+          ip: seen.ip, port: seen.port,
+          wireIp: seen.wireIp, wirePort: seen.wirePort,
+          at: Date.now(),
+        });
         // The reply goes back to where the packet actually came from; only its contents are
         // corrected, because that is what the peer will advertise about itself.
         const reply = Buffer.from(JSON.stringify({ ip: seen.ip, port: seen.port }));
