@@ -5,6 +5,8 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
+#include <ctime>
 #include <deque>
 #include <map>
 #include <mutex>
@@ -18,6 +20,30 @@
 
 namespace remote60::native_poc {
 namespace {
+
+// A tiny always-on trace the uploader writes itself, to %LOCALAPPDATA%\GNLink\log_upload.diag.
+// The uploader runs inside the shell process, whose own stdout/stderr is captured nowhere -- so
+// when uploads fail there is otherwise no trace at all, which is exactly the hole that made the
+// first "logs stop after one batch" bug un-diagnosable. Kept append-only and tiny (a line per
+// flush that did something), so it never itself becomes the disk problem it reports on.
+void diag(const std::string& text) {
+  static std::mutex diagMu;
+  const std::string base = env_string_or_empty("LOCALAPPDATA");
+  if (base.empty()) return;
+  std::lock_guard<std::mutex> lk(diagMu);
+  const std::string path = base + "\\GNLink\\log_upload.diag";
+  std::FILE* f = std::fopen(path.c_str(), "a");
+  if (!f) return;
+  std::time_t t = std::time(nullptr);
+  std::tm tm{};
+  localtime_s(&tm, &t);
+  char stamp[24]{};
+  std::strftime(stamp, sizeof(stamp), "%m-%d %H:%M:%S ", &tm);
+  std::fputs(stamp, f);
+  std::fputs(text.c_str(), f);
+  std::fputc('\n', f);
+  std::fclose(f);
+}
 
 struct QueuedLine {
   std::string stream;
@@ -66,6 +92,9 @@ void send_batch(UploaderState& s, const std::string& stream, const std::string& 
   const bool sent = directory::http_post(s.host, s.port, "/api/logs", "text/plain", headers, body,
                                          &status, nullptr);
   if (!sent || status < 200 || status >= 300) {
+    diag("send FAILED stream=" + stream + " bytes=" + std::to_string(body.size()) +
+         " reached=" + (sent ? "1" : "0") + " status=" + std::to_string(status) +
+         " host=" + s.host + ":" + std::to_string(s.port));
     std::lock_guard<std::mutex> lk(s.mu);
     ++s.failedBatches;
   }
@@ -73,6 +102,9 @@ void send_batch(UploaderState& s, const std::string& stream, const std::string& 
 
 void worker_loop() {
   UploaderState& s = state();
+  diag("worker started host=" + s.host + ":" + std::to_string(s.port));
+  uint64_t cycles = 0;
+  uint64_t sentBatches = 0;
   for (;;) {
     std::vector<QueuedLine> batch;
     {
@@ -80,7 +112,15 @@ void worker_loop() {
       s.cv.wait_for(lk, std::chrono::milliseconds(s.config.flushIntervalMs),
                     [&s] { return s.stopping || s.queuedBytes >= s.config.batchMaxBytes; });
       if (s.queue.empty()) {
-        if (s.stopping) return;
+        if (s.stopping) {
+          diag("worker exiting (stop) sentBatches=" + std::to_string(sentBatches));
+          return;
+        }
+        // A quiet minute still proves the worker is alive, which is the thing the first bug hid.
+        if (++cycles % 30 == 0) {
+          diag("idle alive cycles=" + std::to_string(cycles) + " sentBatches=" +
+               std::to_string(sentBatches) + " dropped=" + std::to_string(s.droppedLines));
+        }
         continue;
       }
       size_t taken = 0;
@@ -101,6 +141,12 @@ void worker_loop() {
       body.push_back('\n');
     }
     for (const auto& [stream, body] : bodies) send_batch(s, stream, body);
+    ++sentBatches;
+    // First batch and then every ~20th: enough to prove batches keep flowing without spamming.
+    if (sentBatches == 1 || sentBatches % 20 == 0) {
+      diag("flushed batches=" + std::to_string(sentBatches) + " lines=" +
+           std::to_string(batch.size()) + " failedBatches=" + std::to_string(s.failedBatches));
+    }
   }
 }
 
