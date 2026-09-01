@@ -120,7 +120,6 @@ function cleanup() {
   });
 
   await stopServer(server);
-  cleanup();
   if (relay !== 0) {
     cleanup();
     console.log('\nRESULT: FAILED');
@@ -140,7 +139,29 @@ function cleanup() {
   });
 
   await stopServer(server);
+  if (observe !== 0) {
+    cleanup();
+    console.log('\nRESULT: FAILED');
+    process.exit(observe);
+  }
+
+  // The log sink writes files, so it gets a scratch directory of its own and a budget small
+  // enough that a handful of small batches can prove the limiter actually bites.
+  console.log('\n--- log collection ---');
+  const logDir = path.join(os.tmpdir(), `remote60-directory-logs-${process.pid}`);
+  fs.rmSync(logDir, { recursive: true, force: true });
+  const logEnv = { ...env, REMOTE60_LOG_DIR: logDir, REMOTE60_LOG_RATE_KB_PER_MIN: '8' };
+  server = spawn(process.execPath, [serverPath], { env: logEnv, stdio: 'ignore' });
+  await sleep(1500);
+  const logs = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(__dirname, 'logs_test.js')],
+                        { env: logEnv, stdio: 'inherit' });
+    child.on('exit', (code) => resolve(code ?? 1));
+  });
+
+  await stopServer(server);
+  fs.rmSync(logDir, { recursive: true, force: true });
   cleanup();
-  console.log(observe === 0 ? '\nRESULT: ALL PASS' : '\nRESULT: FAILED');
-  process.exit(observe);
+  console.log(logs === 0 ? '\nRESULT: ALL PASS' : '\nRESULT: FAILED');
+  process.exit(logs);
 })();

@@ -7922,3 +7922,23 @@ Next action
   서버 로그에 `[observe] 192.168.0.1 is on our own lan; reporting 175.209.236.194 instead (port 59178 kept)`.
 - 다음 액션: 호스트/뷰어 디렉터리 URL을 `http://175.209.236.194:29180`으로 전환 → 회사에서 두 케이스 실기(회사→회사PC, 회사→집PC) →
   결과 보고 43000 포워딩 제거 가능 여부와 N13(펀칭 개선) 착수 판단.
+
+### 330) 2026-09-01 디렉터리 서버에 로그 수집 엔드포인트 신설 — POST /api/logs (브랜치 refactor/viewer-split)
+
+- 목적: 호스트·클라이언트·APK 로그를 사람이 세 대에서 복사해 나르는 대신 한자리로 모은다. 특히 APK 로그는 지금 사실상 접근이 안 된다.
+- 설계 판단: 새 포트로 raw TCP를 여는 대신 **이미 열린 HTTP(29180)에 엔드포인트 추가**. 포트·방화벽·포워딩이 늘지 않고, 디렉터리의 기존 토큰 체계를
+  그대로 인증에 쓸 수 있다(새 비밀값 관리 불필요). 본문은 JSON이 아니라 **raw text**(줄 단위이므로 양쪽에서 escape 왕복이 낭비).
+- `apps/directory/server.js`: `POST /api/logs` — 세션 토큰(`Authorization: Bearer`) 또는 호스트 토큰(`x-host-token`)으로 인증,
+  `x-log-device`/`x-log-stream` 헤더로 분류, `logs/<계정>/<기기>/<스트림>.log`에 append. 경로 세그먼트는 `[A-Za-z0-9._-]` 외 전부 `_`로 치환하고
+  선행 점을 제거해 상위 탈출을 막는다(거부가 아니라 평탄화 — 이름이 이상한 기기도 로그는 남아야 하고, 조용히 실패하면 나중에 찾을 때 없다).
+  요청당 512KB 상한, 기기당 분당 예산(기본 2MB) 초과 시 429, 16MB에서 `.1~.3` 로테이션, 14일 지난 파일은 6시간 주기 sweep으로 삭제.
+  환경변수 `REMOTE60_LOG_DISABLED/DIR/MAX_FILE_MB/KEEP/RETENTION_DAYS/RATE_KB_PER_MIN`.
+- 테스트: `apps/directory/test/logs_test.js` 신설 7건 — 무토큰 401 · 세션 토큰 저장 · 경로 배치 · append · **경로 탈출 평탄화** ·
+  플러딩 429(9/12) · 예산은 기기별이라 다른 기기 무영향. `test/run.js`에 전용 서버 단계 추가(스크래치 로그 디렉터리 + 8KB/min 예산).
+- 겸사: 러너의 `cleanup()`이 relay·observe 단계 직후에 계정 저장소를 지워 뒤 단계가 로그인할 수 없었다. 최종 단계로 옮겼다.
+- 검증: `node test/run.js` **ALL PASS**(기존 전 케이스 + 관측 보정 3 + 로그 7). NAS 재배포 후 기동 로그 확인 —
+  `[logs] collecting into /opt/gnlink/remote60-directory/logs; 2048KB/min per device, rotate at 16MB x3, keep 14d`.
+- 다음 액션: C++ 업로더(바운드 큐 + 전용 스레드 + 배치 POST)를 만들어 `client_shell_main.cpp`의 `viewer_log_write_line`과 `host_app_main.cpp`의
+  자식 stdout 리더에 연결 — 엔진은 stdout으로만 찍고 셸이 파일에 쓰는 구조라 **깔때기 두 곳만 손대면 전부 잡힌다.** 그 다음 안드로이드.
+- 주의(기록): 디렉터리는 TLS가 꺼져 있고 클라이언트가 `https://`를 거부한다. 로그에는 창 제목·프로세스명·IP가 들어가므로 **평문으로 공용망을 건넌다.**
+  상시 켜기보다 진단 시 켜는 옵션으로 두고, 상시화는 TLS 지원 이후로 미룬다.

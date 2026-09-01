@@ -19,6 +19,14 @@
  *   REMOTE60_PUBLIC_IP       this server's own public IPv4; lets it correct the observation
  *                            made for a peer that sits on its own LAN (default: the relay ip)
  *
+ * Log collection (POST /api/logs; authenticated, so it is on by default):
+ *   REMOTE60_LOG_DISABLED      1 = refuse uploads
+ *   REMOTE60_LOG_DIR           where they land        (default <data dir>/logs)
+ *   REMOTE60_LOG_MAX_FILE_MB   rotate past this       (default 16)
+ *   REMOTE60_LOG_KEEP          rotated generations    (default 3)
+ *   REMOTE60_LOG_RETENTION_DAYS  delete older files   (default 14)
+ *   REMOTE60_LOG_RATE_KB_PER_MIN per device budget    (default 2048)
+ *
  * Wake (on by default; a connection often depends on it):
  *   REMOTE60_WAKE_DISABLED     1 = do not poke the host when a connect is requested
  *
@@ -199,6 +207,152 @@ function observedAddressFor(rinfo) {
                 `(port ${rinfo.port} kept)`);
   }
   return { ip: PUBLIC_IP, port: rinfo.port };
+}
+
+// ---------------------------------------------------------------- log collection
+
+const LOG_DISABLED = process.env.REMOTE60_LOG_DISABLED === '1';
+const LOG_DIR = process.env.REMOTE60_LOG_DIR || path.join(path.dirname(DATA_PATH), 'logs');
+const LOG_MAX_FILE_BYTES = Number(process.env.REMOTE60_LOG_MAX_FILE_MB || 16) * 1024 * 1024;
+const LOG_KEEP = Number(process.env.REMOTE60_LOG_KEEP || 3);
+const LOG_RETENTION_DAYS = Number(process.env.REMOTE60_LOG_RETENTION_DAYS || 14);
+const LOG_RATE_BYTES_PER_MIN = Number(process.env.REMOTE60_LOG_RATE_KB_PER_MIN || 2048) * 1024;
+const LOG_MAX_UPLOAD_BYTES = 512 * 1024;
+
+/**
+ * One path segment, safe to join.
+ *
+ * Everything outside the allowed set becomes '_' rather than being rejected: a device that names
+ * itself badly should still get its logs stored, and the alternative is an upload that fails for
+ * a reason nobody will see until they go looking for logs that were never written.
+ */
+function logSegment(raw, fallback) {
+  const cleaned = String(raw || '').replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '').slice(0, 64);
+  return cleaned || fallback;
+}
+
+/** Per-device budget. A device that floods loses the excess, not the connection. */
+const logBudgets = new Map();
+function logBudgetAllows(key, bytes) {
+  const now = Date.now();
+  const b = logBudgets.get(key);
+  if (!b || now - b.since >= 60 * 1000) {
+    logBudgets.set(key, { since: now, used: bytes });
+    return true;
+  }
+  if (b.used + bytes > LOG_RATE_BYTES_PER_MIN) return false;
+  b.used += bytes;
+  return true;
+}
+
+/** Reads a raw body up to `cap`, rejecting anything longer rather than truncating it silently. */
+function readRawBody(req, cap) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > cap) {
+        reject(new Error('log batch too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+function rotateLogIfNeeded(file) {
+  let size = 0;
+  try {
+    size = fs.statSync(file).size;
+  } catch {
+    return;
+  }
+  if (size < LOG_MAX_FILE_BYTES) return;
+  try {
+    fs.rmSync(`${file}.${LOG_KEEP}`, { force: true });
+    for (let i = LOG_KEEP - 1; i >= 1; i--) {
+      if (fs.existsSync(`${file}.${i}`)) fs.renameSync(`${file}.${i}`, `${file}.${i + 1}`);
+    }
+    fs.renameSync(file, `${file}.1`);
+  } catch (err) {
+    console.error('[logs] rotate failed:', err.message);
+  }
+}
+
+/** Deletes anything past the retention window; cheap enough to walk on a timer. */
+function sweepLogs() {
+  const cutoff = Date.now() - LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  const walk = (dir) => {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        walk(full);
+        try { fs.rmdirSync(full); } catch { /* not empty, which is fine */ }
+      } else {
+        try {
+          if (fs.statSync(full).mtimeMs < cutoff) fs.rmSync(full, { force: true });
+        } catch { /* raced with a writer */ }
+      }
+    }
+  };
+  walk(LOG_DIR);
+}
+setInterval(sweepLogs, 6 * 60 * 60 * 1000).unref();
+
+/**
+ * Accepts a batch of log lines from a host, a client or the phone.
+ *
+ * The body is raw text rather than JSON because these are already lines: wrapping them in an
+ * array would cost an escape pass on both sides for nothing. Identity comes from the same tokens
+ * everything else here uses, so no new secret has to be managed -- and without one of them the
+ * upload is refused, because an open endpoint on someone's home NAS is a disk-filling invitation.
+ */
+async function handleLogs(req, res) {
+  if (LOG_DISABLED) return sendJson(res, 503, { error: 'log collection is off' });
+
+  let accountId = '';
+  const session = sessionFor(req);
+  if (session) {
+    accountId = session.accountId;
+  } else {
+    const hostToken = String(req.headers['x-host-token'] || '');
+    const hostId = hostToken ? hostTokens.get(hashToken(hostToken)) : undefined;
+    const host = hostId ? store.hosts[hostId] : null;
+    if (!host) return sendJson(res, 401, { error: 'unknown session or host token' });
+    accountId = host.accountId;
+  }
+
+  const device = logSegment(req.headers['x-log-device'], 'unknown-device');
+  const stream = logSegment(req.headers['x-log-stream'], 'log');
+  const body = await readRawBody(req, LOG_MAX_UPLOAD_BYTES);
+  if (!body.length) return sendJson(res, 200, { ok: true, bytes: 0 });
+
+  const budgetKey = `${accountId}/${device}`;
+  if (!logBudgetAllows(budgetKey, body.length)) {
+    return sendJson(res, 429, { error: 'log rate limit' });
+  }
+
+  const dir = path.join(LOG_DIR, logSegment(accountId, 'unknown-account'), device);
+  const file = path.join(dir, `${stream}.log`);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    rotateLogIfNeeded(file);
+    fs.appendFileSync(file, body);
+  } catch (err) {
+    console.error('[logs] write failed:', err.message);
+    return sendJson(res, 500, { error: 'could not store logs' });
+  }
+  return sendJson(res, 200, { ok: true, bytes: body.length });
 }
 
 const RELAY_AUTH_TTL_MS = 60 * 1000;      // how long a connect stays relay-eligible
@@ -1052,6 +1206,7 @@ const routes = {
   'POST /api/host/heartbeat': handleHostHeartbeat,
   'GET /api/hosts': handleHosts,
   'POST /api/connect': handleConnect,
+  'POST /api/logs': handleLogs,
 };
 
 async function onRequest(req, res) {
@@ -1138,6 +1293,10 @@ if (!addAccountFromCli()) {
     : http.createServer(onRequest);
   server.listen(HTTP_PORT, () => {
     console.log(`[directory] ${useTls ? 'https' : 'http'} on ${HTTP_PORT}`);
+    console.log(LOG_DISABLED
+      ? '[logs] collection off'
+      : `[logs] collecting into ${LOG_DIR}; ${LOG_RATE_BYTES_PER_MIN / 1024}KB/min per device, ` +
+        `rotate at ${LOG_MAX_FILE_BYTES / 1024 / 1024}MB x${LOG_KEEP}, keep ${LOG_RETENTION_DAYS}d`);
     if (!useTls) {
       console.warn('[directory] TLS is off — tokens travel in clear. Set REMOTE60_DIR_TLS_KEY/CERT for anything but local testing.');
     }
