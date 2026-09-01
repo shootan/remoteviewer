@@ -29,7 +29,10 @@ struct DirectorySessionRequest {
   std::string url;              // http://host[:port] of the directory
   std::string sessionToken;     // from directory_login
   std::string hostId;
-  uint16_t directoryUdpPort = 8081;
+  // 0 = derive it from the url as httpPort + 1, which is what the host
+  // (directory_client.cpp) and the Android client (DirectoryClient.observePortFor) already do.
+  // A fixed 8081 only ever matched because the http port happened to be 8080.
+  uint16_t directoryUdpPort = 0;
   // The client gives up on the handshake soon after this, so a longer budget buys nothing.
   uint32_t punchBudgetMs = 4000;
 };

@@ -3,6 +3,7 @@
 #include <random>
 #include <sstream>
 
+#include "directory_client.hpp"
 #include "directory_rendezvous.hpp"
 #include "directory_session_client.hpp"
 
@@ -35,29 +36,23 @@ bool directory_session_open(const DirectorySessionRequest& request, DirectorySes
     return false;
   }
 
+  // The observation is UDP on its own port, so the url gives both halves: the host to dial and,
+  // when the caller did not pin one, the port that sits one above the http port.
   std::string directoryHost;
-  {
-    // Only the host part; the observation is UDP on its own port, not HTTP.
-    const std::string stripped =
-        request.url.rfind("http://", 0) == 0 ? request.url.substr(7) : request.url;
-    const size_t colon = stripped.find(':');
-    const size_t slash = stripped.find('/');
-    const size_t end = std::min(colon == std::string::npos ? stripped.size() : colon,
-                                slash == std::string::npos ? stripped.size() : slash);
-    directoryHost = stripped.substr(0, end);
-  }
-  if (directoryHost.empty()) {
-    if (outError) *outError = "could not read a host out of the directory url";
+  uint16_t directoryHttpPort = 0;
+  if (!directory::parse_directory_url(request.url, &directoryHost, &directoryHttpPort, outError)) {
     return false;
   }
+  const uint16_t observePort = request.directoryUdpPort != 0
+                                   ? request.directoryUdpPort
+                                   : static_cast<uint16_t>(directoryHttpPort + 1);
 
   // Owns the socket for the whole exchange. Released to the caller only once a candidate is
   // settled, so every early return closes it.
   DirectoryRendezvous rendezvous;
   const std::string observeToken = make_observe_token();
   std::string observed;
-  if (!rendezvous.Observe(directoryHost, request.directoryUdpPort, observeToken, &observed,
-                          outError)) {
+  if (!rendezvous.Observe(directoryHost, observePort, observeToken, &observed, outError)) {
     return false;
   }
 
