@@ -18,6 +18,14 @@ param(
   # repository; the deployer supplies it and hands it to whoever should be able to sign up.
   [string]$SignupKey = "",
   [int]$MinPasswordLength = 8,
+  # Relay: off unless asked for. Both allow lists must pass, so leaving either empty means the
+  # candidate is never handed out -- that is the fail-closed default the POC was built around.
+  [switch]$RelayEnabled,
+  [string]$RelayIp = "",
+  [int]$RelayPort = 29190,
+  [string]$RelayAllowIps = "*",
+  [string]$RelayAllowAccounts = "*",
+  [int]$RelayGraceMs = 2500,
   [switch]$SkipService
 )
 
@@ -28,6 +36,10 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 $sourceDir = Join-Path $repoRoot "apps\directory"
 if (-not (Test-Path (Join-Path $sourceDir "server.js"))) {
   throw "directory sources not found at $sourceDir"
+}
+
+if ($RelayEnabled -and [string]::IsNullOrWhiteSpace($RelayIp)) {
+  throw "-RelayEnabled needs -RelayIp: clients dial that address, so the server cannot guess it"
 }
 
 $sshArgs = @("-i", $KeyPath, "-p", "$Port", "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes")
@@ -144,6 +156,12 @@ Environment=REMOTE60_DIR_UDP_PORT=$UdpPort
 Environment=REMOTE60_DIR_DATA=DATA_PATH_PLACEHOLDER
 Environment=REMOTE60_DIR_SIGNUP_KEY=SIGNUP_KEY_PLACEHOLDER
 Environment=REMOTE60_DIR_MIN_PASSWORD=MIN_PASSWORD_PLACEHOLDER
+Environment=REMOTE60_RELAY_ENABLED=$(if ($RelayEnabled) { "1" } else { "0" })
+Environment=REMOTE60_RELAY_IP=$RelayIp
+Environment=REMOTE60_RELAY_PORT=$RelayPort
+Environment="REMOTE60_RELAY_ALLOW_IPS=$RelayAllowIps"
+Environment="REMOTE60_RELAY_ALLOW_ACCOUNTS=$RelayAllowAccounts"
+Environment=REMOTE60_RELAY_GRACE_MS=$RelayGraceMs
 ExecStart=NODE_PLACEHOLDER INSTALL_PLACEHOLDER/server.js
 Restart=always
 RestartSec=3
@@ -195,7 +213,12 @@ Write-Host "[deploy] service state: $($state | Select-Object -Last 1)"
 $health = & ssh @sshArgs $target "curl -fsS --max-time 5 http://127.0.0.1:$HttpPort/healthz || echo UNREACHABLE"
 Write-Host "[deploy] healthz: $($health | Select-Object -Last 1)"
 Write-Host "[deploy] done. http=$HttpPort udp=$UdpPort"
-Write-Host "[deploy] the cloud firewall (ACG) must allow inbound TCP $HttpPort and UDP $UdpPort"
+if ($RelayEnabled) {
+  Write-Host "[deploy] relay ON ip=$RelayIp port=$RelayPort allowIps=$RelayAllowIps allowAccounts=$RelayAllowAccounts grace=${RelayGraceMs}ms"
+} else {
+  Write-Host "[deploy] relay OFF"
+}
+Write-Host "[deploy] the firewall must allow inbound TCP $HttpPort and UDP $UdpPort$(if ($RelayEnabled) { " and UDP $RelayPort" })"
 if ([string]::IsNullOrEmpty($SignupKey)) {
   Write-Host "[deploy] account creation is disabled (pass -SignupKey to enable it)"
 } else {

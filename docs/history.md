@@ -7867,3 +7867,23 @@ Next action
 - 코덱스: 설계(seq 837)·구현 diff(seq 838) 검증 요청 발신, delivered=1(onCall 꺼짐 → 우편함 대기). 답이 오면 후속 커밋으로 반영.
 - 이로써 뷰어 원장 F-01~F-21 **전부 처리**, 호스트 원장 H-01~H-28 전부 처리. 다음 액션: 0.2.64 실기 판정(0.2.63 항목 + 디렉터리
   경로 접속 1회 — DirectoryAuth 검사 확인).
+
+### 327) 2026-09-01 디렉터리 서비스를 네이버클라우드 → 집 NAS(CHO)로 이전 + 릴레이 상시화 (브랜치 refactor/viewer-split)
+
+- 목표: 랑데부/릴레이 서버를 자체 인프라로 옮기고, 흔한 포트(8080/8081) 노출을 피한다. 릴레이는 기본 포함(직접 경로 우선, 실패 시 전환).
+- 변경 파일: `automation/deploy_directory.ps1` — 릴레이 파라미터 6개 신설(`-RelayEnabled/-RelayIp/-RelayPort/-RelayAllowIps/-RelayAllowAccounts/-RelayGraceMs`)
+  + systemd 유닛에 `REMOTE60_RELAY_*` 환경변수 6줄 추가 + `-RelayEnabled`인데 `-RelayIp`가 비면 즉시 실패. **이전에는 릴레이 설정을 유닛에 넣을 방법이 없어
+  수동으로 넣어도 다음 배포에 사라졌다.**
+- 서버 이전: `gnlink@192.168.0.6`(CHO, Ubuntu 6.8, sudo 없는 전용 계정) → user systemd + linger, 설치 경로 `/opt/gnlink/remote60-directory`,
+  Node v20.18.1 자동 설치. **포트 8080/8081 → TCP 29180 / UDP 29181**(관측 포트는 클라가 `HTTP+1`로 계산하므로 연속이어야 함), 릴레이 **UDP 29190**.
+  29180을 고른 근거: 리눅스 ephemeral 대역(32768~60999) 아래여야 리스닝 포트가 아웃바운드 소스포트와 충돌하지 않는다.
+- 릴레이: `ENABLED ip=175.209.236.194 port=29190 grace=2500ms allowIps=* allowAccounts=*`. 허용목록은 **IP·계정 둘 다 통과해야** 하므로(`server.js:523~525`)
+  양쪽을 `*`로 뒀다(모바일이 임의 회선에서 붙어야 함). grace 2.5초라 직접 경로가 되는 환경에서는 릴레이가 채택되지 않는다.
+- 데이터 이전: 구 서버(`223.130.132.180`, user systemd)의 `directory-data.json`(계정 1·호스트 1, 1781B) 백업 후 NAS로 복사, 서비스 재기동.
+- 검증: `healthz {"ok":true}` · `systemctl --user is-active` = active · 리스너 3개 확인(TCP 29180 / UDP 29181 / UDP 29190) ·
+  로그에 `[relay] ENABLED`, `[wake] on`, `[directory] udp observe on 29181`. **LAN(`192.168.0.6:29180`) 접속 성공.**
+- **미완**: 공유기 포트포워딩이 아직 없어 공인 IP(`175.209.236.194:29180`)로는 도달하지 않는다 → 사용자 작업 대기. TCP 443은 포워딩+헤어핀이 동작 중이므로
+  라우터 자체는 헤어핀을 지원한다(이 PC → 집 공인 IP:443 established 4건으로 확인).
+- 다음 액션: 공유기 포워딩 3개(TCP 29180 / UDP 29181 / UDP 29190, 외부·내부 동일 번호) → 공인 IP로 healthz + UDP observe 재검증 →
+  호스트/뷰어 디렉터리 URL을 `http://175.209.236.194:29180`으로 변경 → 뷰어의 관측 포트 하드코딩(8081) 제거(`directory_session_bootstrap.hpp:32`)가 선행돼야 뷰어가 붙는다.
+- 구 서버(네이버클라우드)는 롤백용으로 살려 둔다.
