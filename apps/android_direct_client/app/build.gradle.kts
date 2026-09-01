@@ -11,8 +11,8 @@ android {
     applicationId = "com.remote60.androiddirect"
     minSdk = 28
     targetSdk = 34
-    versionCode = 10
-    versionName = "0.2.11"
+    versionCode = 11
+    versionName = "0.2.12"
 
     externalNativeBuild {
       cmake {

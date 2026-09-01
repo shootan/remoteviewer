@@ -51,8 +51,15 @@ object DirectoryClient {
     private val CONNECT_TIMEOUT_MS = TimeUnit.SECONDS.toMillis(8).toInt()
     private val READ_TIMEOUT_MS = TimeUnit.SECONDS.toMillis(10).toInt()
 
-    /** Default UDP probe port, matching the server's own relationship between its two ports. */
-    fun observePortFor(url: String): Int = httpPortFor(url) + 1
+    /**
+     * Default UDP probe port, matching the server's own relationship between its two ports.
+     * 0 when the http port is the last one: +1 has nowhere to go, and a url on 65535 has to name
+     * its observe port itself rather than have us dial 65536 (or, cast narrower, port 0).
+     */
+    fun observePortFor(url: String): Int {
+        val http = httpPortFor(url)
+        return if (http >= 65535) 0 else http + 1
+    }
 
     fun hostFor(url: String): String =
         try {

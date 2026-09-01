@@ -195,9 +195,16 @@ std::wstring log_dir_path() {
 }
 
 void log_line(const std::string& text) {
-  remote60::native_poc::log_upload_enqueue("client", text);
   static std::mutex logMu;
   std::lock_guard<std::mutex> lock(logMu);
+  SYSTEMTIME now{};
+  GetLocalTime(&now);
+  char stamp[32]{};
+  std::snprintf(stamp, sizeof(stamp), "%02d-%02d %02d:%02d:%02d ", now.wMonth, now.wDay,
+                now.wHour, now.wMinute, now.wSecond);
+  // The upload gets the same stamped line the file gets: a line without its time cannot be
+  // placed against the server's journal, which is the whole reason it is being uploaded.
+  remote60::native_poc::log_upload_enqueue("client", std::string(stamp) + text);
   const std::wstring path = log_dir_path() + L"\\client.log";
 
   // A few lines per session, but appended forever: without a cap this is the one file in the
@@ -206,11 +213,6 @@ void log_line(const std::string& text) {
 
   std::ofstream file(path, std::ios::app);
   if (!file) return;
-  SYSTEMTIME now{};
-  GetLocalTime(&now);
-  char stamp[32]{};
-  std::snprintf(stamp, sizeof(stamp), "%02d-%02d %02d:%02d:%02d ", now.wMonth, now.wDay,
-                now.wHour, now.wMinute, now.wSecond);
   file << stamp << text << "\n";
 }
 
@@ -223,7 +225,6 @@ void log_line(const std::string& text) {
  * is opened with FILE_SHARE_DELETE so our own sink never pins the rotation rename (an external reader opened without share-delete still can; the next line simply retries the rotate).
  */
 void viewer_log_write_line(const std::string& line) {
-  remote60::native_poc::log_upload_enqueue("viewer", line);
   static std::mutex mu;
   static HANDLE sink = INVALID_HANDLE_VALUE;
   std::lock_guard<std::mutex> lock(mu);
@@ -243,12 +244,13 @@ void viewer_log_write_line(const std::string& line) {
       sink = open_sink();
     }
   }
-  if (sink == INVALID_HANDLE_VALUE) return;
   SYSTEMTIME now{};
   GetLocalTime(&now);
   char stamp[40]{};
   std::snprintf(stamp, sizeof(stamp), "%02d-%02d %02d:%02d:%02d.%03d ", now.wMonth, now.wDay,
                 now.wHour, now.wMinute, now.wSecond, now.wMilliseconds);
+  remote60::native_poc::log_upload_enqueue("viewer", std::string(stamp) + line);
+  if (sink == INVALID_HANDLE_VALUE) return;
   std::string out = std::string(stamp) + line + "\n";
   DWORD wrote = 0;
   WriteFile(sink, out.data(), static_cast<DWORD>(out.size()), &wrote, nullptr);

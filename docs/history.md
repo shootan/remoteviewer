@@ -7988,3 +7988,16 @@ Next action
 - 실기 게이트(코덱스 제시, 직접 펀칭 성공이 아니라 이걸 먼저 본다): 서버 저널 `[relay] bound … host=192.168.0.1:43000` · `h2c>0` · HelloAck auth bit · state=active · 양방향 미디어.
 - 미처리: 클라이언트 업로드 로그 타임스탬프(사용자 중단으로 미적용) · 안드로이드 관측 포트 65535 overflow(Low) · https는 C++ 거부/안드로이드 허용으로 규칙이 다름(문서 문구만).
 - 남은 리스크(코덱스 Q5, 그대로 기록): 집 공유기가 destination-dependent 매핑이면 관측 포트≠회사향 매핑 포트 · 회사 NAT의 endpoint-dependent 필터/CGN · wake→관측(최대 6×250ms)+하트비트 지연이 릴레이 grace보다 늦으면 토큰 전 Hello 도착 · 4초 예산 대비 grace 2.5초 여유 1.5초 · 헤어핀 매핑 timeout < 하트비트 25초.
+
+### 333) 2026-09-01 업로드 로그 타임스탬프 + 관측 포트 overflow(안드로이드) — 0.2.66 / APK 0.2.12 (브랜치 refactor/viewer-split)
+
+- 문제: #331의 업로드 훅이 셸의 스탬프 생성 **앞**에 걸려 서버에 도착한 `client.log`/`viewer.log` 줄에 시각이 없었다. 서버 저널과 대조할 때 필요한 유일한 필드라 사실상 못 쓴다.
+- 호스트는 해당 없음: `GNLinkStream`이 `host_log.hpp`의 streambuf에서 매 줄 `timestamp_now()`를 붙여 stdout으로 내보내므로 `ReadChildOutput`이 받는 줄에 이미 시각이 있다.
+  안드로이드도 `SessionDiagnosticsLog.log()`가 스탬프를 넣은 뒤 enqueue한다. **윈도우 셸 두 곳만** 문제였다.
+- 수정(`client_shell_main.cpp`): `log_line`/`viewer_log_write_line` 모두 스탬프를 먼저 만들고 `stamp + line`을 enqueue. 파일이 안 열려도 업로드는 되도록 스탬프·enqueue를 sink 검사 **앞**으로 옮겼다.
+  파일 포맷은 불변(client: 초 단위, viewer: ms 단위 — 기존 그대로).
+- 코덱스 Low: 안드로이드 `DirectoryClient.observePortFor`가 http 포트 65535면 0을 돌려주도록(뷰어 C++ 가드와 짝). https 규칙 차이(C++ 거부 / 안드로이드 443→444)는 문서 기록으로만.
+- 검증: 클라 셸·설치본 빌드 exit 0, `assembleDebug` BUILD SUCCESSFUL, `viewer_split_gate.sh --e2e` 빌드 + 뷰어 e2e C-1/C-2/C-3 ALL PASS.
+  스탬프가 실제로 업로드되는지는 계정 로그인이 필요해 미확인 — 다음 실기의 서버 `client.log` 첫 줄로 판정(`09-01 HH:MM:SS log upload on …` 형태여야 함).
+- 산출물: `dist/GNLinkSetup-0.2.66.exe`(임베드 `0.2.66`×3 / `0.2.65`×0), `dist/GNLink-0.2.12.apk`(versionCode 11).
+- 실기 대상 정리(최신본): 호스트 `0.2.66`(집 PC) · 클라 `0.2.66`(회사 PC) · APK `0.2.12`. 서버는 #332 배포본 그대로.
