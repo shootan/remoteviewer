@@ -121,6 +121,26 @@ function cleanup() {
 
   await stopServer(server);
   cleanup();
-  console.log(relay === 0 ? '\nRESULT: ALL PASS' : '\nRESULT: FAILED');
-  process.exit(relay);
+  if (relay !== 0) {
+    cleanup();
+    console.log('\nRESULT: FAILED');
+    process.exit(relay);
+  }
+
+  // Its own server again, because the correction only exists when the server knows its own
+  // public address, and "unset means the raw observation" is what the other passes rely on.
+  console.log('\n--- observe correction (own lan) ---');
+  const observeEnv = { ...env, REMOTE60_PUBLIC_IP: '203.0.113.9', T_PUBLIC_IP: '203.0.113.9' };
+  server = spawn(process.execPath, [serverPath], { env: observeEnv, stdio: 'ignore' });
+  await sleep(1500);
+  const observe = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(__dirname, 'observe_correction_test.js')],
+                        { env: observeEnv, stdio: 'inherit' });
+    child.on('exit', (code) => resolve(code ?? 1));
+  });
+
+  await stopServer(server);
+  cleanup();
+  console.log(observe === 0 ? '\nRESULT: ALL PASS' : '\nRESULT: FAILED');
+  process.exit(observe);
 })();

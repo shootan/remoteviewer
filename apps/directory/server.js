@@ -16,6 +16,8 @@
  *   REMOTE60_DIR_TLS_CERT    PEM cert
  *   REMOTE60_DIR_SIGNUP_KEY  shared secret that allows account creation; unset = no signup
  *   REMOTE60_DIR_MIN_PASSWORD  shortest password signup will accept (default 8)
+ *   REMOTE60_PUBLIC_IP       this server's own public IPv4; lets it correct the observation
+ *                            made for a peer that sits on its own LAN (default: the relay ip)
  *
  * Wake (on by default; a connection often depends on it):
  *   REMOTE60_WAKE_DISABLED     1 = do not poke the host when a connect is requested
@@ -40,6 +42,7 @@ const dgram = require('dgram');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const os = require('os');
 
 const HTTP_PORT = Number(process.env.REMOTE60_DIR_PORT || 8080);
 const UDP_PORT = Number(process.env.REMOTE60_DIR_UDP_PORT || 8081);
@@ -131,6 +134,72 @@ function parseAllowList(raw) {
 }
 const RELAY_ALLOW_IPS = parseAllowList(process.env.REMOTE60_RELAY_ALLOW_IPS);
 const RELAY_ALLOW_ACCOUNTS = parseAllowList(process.env.REMOTE60_RELAY_ALLOW_ACCOUNTS);
+
+// This server's own public address, used to repair observations that never crossed a NAT.
+const PUBLIC_IP = process.env.REMOTE60_PUBLIC_IP || RELAY_IP || '';
+
+function ipToInt(ip) {
+  const parts = String(ip).split('.');
+  if (parts.length !== 4) return null;
+  let v = 0;
+  for (const p of parts) {
+    const n = Number(p);
+    if (!Number.isInteger(n) || n < 0 || n > 255) return null;
+    v = ((v << 8) | n) >>> 0;
+  }
+  return v >>> 0;
+}
+
+/** The IPv4 subnets this machine is directly attached to. */
+const LOCAL_SUBNETS = (() => {
+  const out = [];
+  for (const addrs of Object.values(os.networkInterfaces())) {
+    for (const a of addrs || []) {
+      if (a.family !== 'IPv4' || a.internal || !a.netmask) continue;
+      const ip = ipToInt(a.address);
+      const mask = ipToInt(a.netmask);
+      if (ip === null || mask === null) continue;
+      out.push({ net: (ip & mask) >>> 0, mask: mask >>> 0 });
+    }
+  }
+  return out;
+})();
+
+/** True when `ip` is on one of the subnets this server is attached to. */
+function onServerLan(ip) {
+  const v = ipToInt(ip);
+  if (v === null) return false;
+  return LOCAL_SUBNETS.some((s) => ((v & s.mask) >>> 0) === s.net);
+}
+
+const correctionLogged = new Set();
+
+/**
+ * What to record as a peer's public address.
+ *
+ * The observation means something only when the packet crossed the peer's NAT on the way here:
+ * the source we then see is the mapping the rest of the internet would use. A peer on our own LAN
+ * never crosses it. Worse, a router doing hairpin NAT rewrites the source to its own LAN address
+ * -- measured here as 192.168.0.1 -- so what we would record is not merely local, it is a router
+ * interface that answers for nobody, and the host would advertise it as its public candidate.
+ *
+ * For those we substitute our own public address and keep the observed port. The port is the part
+ * that has to survive, and it does when the router preserves ports: 구현계획.md E2 measured that
+ * for this router (bindPort=43000 -> public=...:43000) and the hairpin probe showed it again
+ * (source port 60765 came back unchanged). Where it does not hold, the peer ends up on the relay
+ * -- which is where an unusable candidate was sending it anyway, so this cannot be worse.
+ */
+function observedAddressFor(rinfo) {
+  if (!PUBLIC_IP || !onServerLan(rinfo.address)) {
+    return { ip: rinfo.address, port: rinfo.port };
+  }
+  if (!correctionLogged.has(rinfo.address)) {
+    correctionLogged.add(rinfo.address);
+    console.log(`[observe] ${rinfo.address} is on our own lan; reporting ${PUBLIC_IP} instead ` +
+                `(port ${rinfo.port} kept)`);
+  }
+  return { ip: PUBLIC_IP, port: rinfo.port };
+}
 
 const RELAY_AUTH_TTL_MS = 60 * 1000;      // how long a connect stays relay-eligible
 const RELAY_IDLE_TTL_MS = 60 * 1000;      // a session with no traffic either way is finished
@@ -1015,8 +1084,11 @@ function startUdp() {
       if (text.startsWith('OBSERVE ')) {
         const token = text.slice(8).trim().slice(0, 64);
         if (!token) return;
-        observed.set(token, { ip: rinfo.address, port: rinfo.port, at: Date.now() });
-        const reply = Buffer.from(JSON.stringify({ ip: rinfo.address, port: rinfo.port }));
+        const seen = observedAddressFor(rinfo);
+        observed.set(token, { ip: seen.ip, port: seen.port, at: Date.now() });
+        // The reply goes back to where the packet actually came from; only its contents are
+        // corrected, because that is what the peer will advertise about itself.
+        const reply = Buffer.from(JSON.stringify({ ip: seen.ip, port: seen.port }));
         sock.send(reply, rinfo.port, rinfo.address);
         return;
       }
@@ -1030,7 +1102,8 @@ function startUdp() {
       try { sock.setRecvBufferSize(4 * 1024 * 1024); } catch { /* best effort */ }
       try { sock.setSendBufferSize(4 * 1024 * 1024); } catch { /* best effort */ }
     }
-    console.log(`[directory] udp observe on ${UDP_PORT}`);
+    console.log(`[directory] udp observe on ${UDP_PORT}` +
+                (PUBLIC_IP ? `; own-lan observations reported as ${PUBLIC_IP}` : ''));
   });
   return sock;
 }
