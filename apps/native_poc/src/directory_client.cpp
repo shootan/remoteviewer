@@ -316,9 +316,8 @@ bool HostAgent::ConsumeUdpPacket(const void* data, size_t len, const sockaddr_in
   return true;
 }
 
-namespace {
-
-bool post_json(const std::string& httpHost_, uint16_t httpPort_, const std::string& path,
+bool http_post(const std::string& httpHost_, uint16_t httpPort_, const std::string& path,
+               const std::string& contentType, const std::string& extraHeaders,
                const std::string& body, uint32_t* outStatus, std::string* outResponse) {
   sockaddr_in addr{};
   if (!resolve_ipv4(httpHost_, httpPort_, &addr)) return false;
@@ -328,8 +327,9 @@ bool post_json(const std::string& httpHost_, uint16_t httpPort_, const std::stri
   std::ostringstream req;
   req << "POST " << path << " HTTP/1.1\r\n"
       << "Host: " << httpHost_ << ":" << httpPort_ << "\r\n"
-      << "Content-Type: application/json\r\n"
+      << "Content-Type: " << contentType << "\r\n"
       << "Content-Length: " << body.size() << "\r\n"
+      << extraHeaders
       << "Connection: close\r\n\r\n"
       << body;
   const std::string reqText = req.str();
@@ -364,6 +364,15 @@ bool post_json(const std::string& httpHost_, uint16_t httpPort_, const std::stri
     *outResponse = bodyStart == std::string::npos ? std::string() : raw.substr(bodyStart + 4);
   }
   return true;
+}
+
+namespace {
+
+/** The json flavour every directory call uses. */
+bool post_json(const std::string& httpHost_, uint16_t httpPort_, const std::string& path,
+               const std::string& body, uint32_t* outStatus, std::string* outResponse) {
+  return http_post(httpHost_, httpPort_, path, "application/json", std::string(), body, outStatus,
+                   outResponse);
 }
 
 }  // namespace

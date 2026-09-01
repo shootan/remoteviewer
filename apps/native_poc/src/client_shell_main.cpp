@@ -37,6 +37,7 @@
 #include "client_shell_bridge.hpp"
 #include "directory_session_client.hpp"
 #include "json_profile.hpp"
+#include "log_upload.hpp"
 #include "product_version.hpp"
 
 using Microsoft::WRL::Callback;
@@ -194,6 +195,7 @@ std::wstring log_dir_path() {
 }
 
 void log_line(const std::string& text) {
+  remote60::native_poc::log_upload_enqueue("client", text);
   static std::mutex logMu;
   std::lock_guard<std::mutex> lock(logMu);
   const std::wstring path = log_dir_path() + L"\\client.log";
@@ -221,6 +223,7 @@ void log_line(const std::string& text) {
  * is opened with FILE_SHARE_DELETE so our own sink never pins the rotation rename (an external reader opened without share-delete still can; the next line simply retries the rotate).
  */
 void viewer_log_write_line(const std::string& line) {
+  remote60::native_poc::log_upload_enqueue("viewer", line);
   static std::mutex mu;
   static HANDLE sink = INVALID_HANDLE_VALUE;
   std::lock_guard<std::mutex> lock(mu);
@@ -320,6 +323,17 @@ void begin_login(std::string server, std::string accountId, std::string password
       gServerUrl = server;
       gAccountId = accountId;
       gSessionToken = token;
+    }
+    {
+      // Now that a token exists the shell can hand its logs to the directory, which is the only
+      // way the phone's and this machine's logs ever sit side by side.
+      remote60::native_poc::LogUploadConfig upload;
+      upload.directoryUrl = server;
+      upload.sessionToken = token;
+      std::string reason;
+      log_line(remote60::native_poc::log_upload_start(upload, &reason)
+                   ? "log upload on " + reason
+                   : "log upload off: " + reason);
     }
     {
       std::lock_guard<std::mutex> lock(gStateMu);

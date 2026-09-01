@@ -34,6 +34,7 @@ class SessionDiagnosticsLog(context: Context) {
     fun log(tag: String, message: String) {
         val line = timestampFormat.format(Date()) + " [" + tag + "] " + message
         Log.i(LOG_TAG, line)
+        LogUploader.enqueue(line)
         writer.execute {
             synchronized(lock) {
                 try {

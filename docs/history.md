@@ -7942,3 +7942,29 @@ Next action
   자식 stdout 리더에 연결 — 엔진은 stdout으로만 찍고 셸이 파일에 쓰는 구조라 **깔때기 두 곳만 손대면 전부 잡힌다.** 그 다음 안드로이드.
 - 주의(기록): 디렉터리는 TLS가 꺼져 있고 클라이언트가 `https://`를 거부한다. 로그에는 창 제목·프로세스명·IP가 들어가므로 **평문으로 공용망을 건넌다.**
   상시 켜기보다 진단 시 켜는 옵션으로 두고, 상시화는 TLS 지원 이후로 미룬다.
+
+### 331) 2026-09-01 로그 원격 수집 완성 — 윈도우 셸 2종 + APK → 서버, 0.2.65 / APK 0.2.11 (브랜치 refactor/viewer-split)
+
+- 목표: 호스트·클라이언트·폰 로그를 사람이 옮기지 않고 디렉터리 서버 한자리에서 읽는다. 서버측(#330)에 이어 클라이언트측 완성.
+- 신설 `apps/native_poc/src/log_upload.{hpp,cpp}`: 프로세스 전역 싱크. 바운드 큐(기본 4MB) + 전용 워커 스레드 + 2초/192KB 배치 POST.
+  `Enqueue`는 뮤텍스 잡고 push 후 즉시 반환 — **네트워크를 기다리지 않는다.** 큐가 차면 **앞에서** 버린다(넘치는 로그에서 볼 값어치가 있는 건 끝부분).
+  전송 실패는 재시도 없이 카운트만 — 디스크 사본이 정본이므로. `REMOTE60_LOG_UPLOAD=0`으로만 끈다.
+- `directory_client`의 비공개 `post_json`을 `http_post(host,port,path,contentType,extraHeaders,body,...)`로 일반화해 헤더에 공개
+  → HTTP 클라이언트를 두 벌 만들지 않았다. 기존 호출부는 얇은 `post_json` 래퍼로 그대로 유지.
+- 연결 지점은 **깔때기 두 곳뿐**(엔진 코드 무수정): `client_shell_main.cpp`의 `log_line`(client)·`viewer_log_write_line`(viewer),
+  `host_app_main.cpp`의 `ReadChildOutput`(host). 인증은 각 셸이 이미 들고 있는 토큰 재사용 — 클라는 세션 토큰, 호스트는 hostToken.
+  호스트는 로그인 시점과 **캐시 로드 시점** 양쪽에서 시작한다(이미 로그인된 호스트는 다시 로그인하지 않으므로 후자가 일반적).
+- 안드로이드: `LogUploader.kt` 신설(같은 정책: 512KB 큐·3초 배치·드롭 카운트), `SessionDiagnosticsLog.log()`에 한 줄 연결,
+  로그인/세션 복원 양쪽에서 `configure`. 스트림 이름 `apk`, 기기명은 모델+ANDROID_ID 앞 6자.
+- 검증:
+  - `node apps/directory/test/run.js` ALL PASS (#330의 로그 7건 포함)
+  - 빌드: `remote60_host_app`/`remote60_client_shell`/설치본 exit 0, `./gradlew assembleDebug` BUILD SUCCESSFUL
+  - **공인 IP 경유 왕복 실측**: 임시 계정으로 `POST http://175.209.236.194:29180/api/logs` → `{"ok":true,"bytes":46}`,
+    서버에 `logs/logprobe/winpc-probe/viewer.log` 생성·내용 일치 확인. 검증 후 임시 계정과 그 로그 삭제(남은 계정 `shotan`).
+  - `automation/viewer_split_gate.sh --e2e` — 빌드 + 뷰어 e2e C-1/C-2/C-3 ALL PASS
+- 산출물: `dist/GNLinkSetup-0.2.65.exe`(임베드 검증 `L"0.2.65"` ×3 / `L"0.2.64"` ×0), `dist/GNLink-0.2.11.apk`(versionCode 10, assembleDebug).
+- 미검증: 실제 GNLinkClient/GNLinkHost가 로그인한 상태의 업로드는 계정 비밀번호가 필요해 확인하지 못했다 — 설치 후 첫 로그인 시
+  `client.log`에 `log upload on device=... -> 175.209.236.194:29180`이 남는지로 판정한다.
+- 주의: 로그에 창 제목·프로세스명·IP가 들어가는데 디렉터리는 TLS가 꺼져 있어 **평문으로 공용망을 건넌다**(#330 동일). 상시화는 TLS 이후.
+- 다음 액션: 새 설치본·APK 설치 → 호스트/뷰어/폰의 디렉터리 URL을 `http://175.209.236.194:29180`으로 → 회사에서 두 케이스 실기
+  (회사wifi→회사PC, 회사→집PC). 로그는 이제 서버에서 바로 읽는다.

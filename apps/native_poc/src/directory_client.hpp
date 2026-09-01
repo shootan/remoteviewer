@@ -92,6 +92,17 @@ bool parse_directory_url(const std::string& url, std::string* outHost, uint16_t*
                          std::string* outError);
 
 /**
+ * One POST, one connection, read to EOF.
+ *
+ * `extraHeaders` is appended verbatim and must already be CRLF terminated. Returns false when the
+ * exchange did not complete at all; a completed exchange reports the server's status instead, so
+ * a caller can tell "could not reach it" from "it said no".
+ */
+bool http_post(const std::string& host, uint16_t port, const std::string& path,
+               const std::string& contentType, const std::string& extraHeaders,
+               const std::string& body, uint32_t* outStatus, std::string* outResponse);
+
+/**
  * Keeps the host registered and reachable.
  *
  * Runs one background thread that registers, refreshes its public address, heartbeats, and

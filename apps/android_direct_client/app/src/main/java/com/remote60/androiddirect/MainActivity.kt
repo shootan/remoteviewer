@@ -3080,6 +3080,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             try {
                 val (token, expiresAt) = DirectoryClient.login(url, id, password)
                 DirectoryClient.saveSession(this, url, id, token, expiresAt)
+                LogUploader.configure(this, url, token)
                 runOnUiThread {
                     setDirectoryBusy(false)
                     manualConnectMode = false
@@ -3103,6 +3104,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun loadHosts(reason: String) {
         val url = DirectoryClient.savedUrl(this)
         val token = DirectoryClient.savedSessionToken(this)
+        LogUploader.configure(this, url, token)
         if (url.isEmpty() || token.isEmpty()) {
             currentScene = UiScene.LOGIN
             renderStatus()

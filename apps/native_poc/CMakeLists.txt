@@ -251,6 +251,7 @@ target_link_libraries(remote60_native_video_client_shared_core_test PRIVATE
 add_executable(remote60_host_app WIN32
   src/host_app_main.cpp
   src/directory_client.cpp
+  src/log_upload.cpp
   host_app.rc
 )
 set_target_properties(remote60_host_app PROPERTIES OUTPUT_NAME "GNLinkHost")
@@ -580,6 +581,7 @@ if(GNLINK_HAVE_WEBVIEW2)
     src/client_shell_bridge.cpp
     src/directory_session_client.cpp
     src/directory_client.cpp
+    src/log_upload.cpp
   )
   target_include_directories(remote60_client_shell PRIVATE src "${GNLINK_WEBVIEW2_DIR}/include")
   if(MSVC)

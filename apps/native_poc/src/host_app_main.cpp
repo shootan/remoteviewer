@@ -41,6 +41,7 @@
 #include <vector>
 
 #include "directory_client.hpp"
+#include "log_upload.hpp"
 #include "host_command_line.hpp"
 #include "product_version.hpp"
 
@@ -313,6 +314,7 @@ class StreamingHostProcess {
           log = OpenLog();
         }
         AppendLogLine(log, line);
+        remote60::native_poc::log_upload_enqueue("host", line);
         const size_t marker = line.find("directory ");
         if (marker != std::string::npos) {
           std::lock_guard<std::mutex> lock(statusMu_);
@@ -780,6 +782,23 @@ void apply_signed_in_ui(bool signedIn) {
 
   update_tray_tip();
   relayout();
+}
+
+/**
+ * Hands this machine's log to the directory once there is a token to authenticate with.
+ *
+ * Called from both places a token appears -- a fresh sign-in and a cache loaded at startup --
+ * because a host that was already signed in never signs in again, and that is the common case.
+ * Starting twice is harmless; the uploader returns early when it is already running.
+ */
+void start_log_upload() {
+  remote60::native_poc::LogUploadConfig upload;
+  upload.directoryUrl = g.cache.directoryUrl;
+  upload.hostToken = g.cache.hostToken;
+  upload.device = g.cache.machineId;
+  std::string reason;
+  const bool on = remote60::native_poc::log_upload_start(upload, &reason);
+  std::printf("[gnlink-host] log upload %s %s\n", on ? "on" : "off", reason.c_str());
 }
 
 void start_streaming() {
@@ -1314,6 +1333,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         g.cache.hostName = result->hostName;
         g.cache.hostId = result->hostId;
         g.cache.hostToken = result->hostToken;
+        start_log_upload();
         // Only the token is written; the password never reaches disk.
         (void)directory::save_host_cache(g.cachePath, g.cache);
         SetWindowTextW(g.passwordEdit, L"");
@@ -1410,6 +1430,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR commandLine, int) {
   } else {
     g.cachePath = directory::default_host_cache_path();
     haveToken = directory::load_host_cache(g.cachePath, &g.cache);
+    if (haveToken) start_log_upload();
   }
   SetWindowTextW(g.serverEdit, widen(g.cache.directoryUrl).c_str());
   SetWindowTextW(g.accountEdit, widen(g.cache.accountId).c_str());
