@@ -8087,3 +8087,13 @@ Next action
 - **부수 관찰(기록만)**: 사용자 보고 "접속 직후 영어 입력이 처음엔 안 쳐진다"(IME/포커스 또는 초기 키 유실 의심). 재현/원인 미확인 — 별도 확인 필요 시 항목화.
 - 변경: `docs/history.md`, `docs/구현계획.md`(G1 원인 확정 반영)만. 코드 변경 없음.
 - 다음: 어댑터 변경 시 장치 재생성 수정(G1/R1) 착수 승인 → 0.2.70.
+
+### 340) 2026-09-02 G1/R1 수정 — 어댑터 이동 시 D3D 장치 재생성 후 DXGI 재시도 — 0.2.70 (브랜치 refactor/viewer-split)
+
+- 대상: #339에서 확정한 원인(RDP 끊김 → 데스크톱이 AMD로 이동했는데 캡처 장치는 옛 RDP 어댑터(출력 0)에 남아 DXGI가 `dxgi_adapter_changed`로 실패 → WGC 고착 → 잠금화면 검은화면/해제 후 열화).
+- 수정(`host_capture_session.cpp` `RestartCaptureSessionImpl`): `dxgiCaptureSession.Start`를 람다로 빼고, 실패 detail이 `dxgi_adapter_changed`면 **현재 데스크톱 어댑터로 D3D 장치를 재생성**(`create_d3d11_device_for_primary_monitor`) → 인코더 `set_d3d11_device` 재설정 → gpuScaler 재초기화 → `CreateStaging`으로 readback 새 장치에 재구축 → `config.d3dDevice` 갱신 → **DXGI 1회 재시도**, 그래도 실패할 때만 WGC. 성공 시 `desktop-backend-restored reason=adapter_recreated backend=dxgi` 로그.
+- 핵심 근거: 함수 상단에서 `capture.monitorInfo = primary_monitor_info()`로 크기·모니터는 이미 현재 주 모니터(AMD 1920x1080)로 갱신돼 있었다. 어긋난 건 **장치의 어댑터뿐**이라 장치만 새로 만들면 된다. R1은 이 재생성을 "호출자에게 위임"만 하고 실제 배선이 없던 것 → 이번에 그 절반을 채움.
+- 빌드: `remote60_installer` Release exit 0. 임베드 GNLinkHost/GNLinkSetup 0.2.70 확인. 산출물 `dist/GNLinkSetup-0.2.70.exe`(직전 0.2.69 보존). host 타겟 컴파일 0 에러.
+- **실기 검증 필수(내가 못 하는 판정)**: RDP 끊고 잠금화면/해제 상태에서 접속 → host_app.log에 `dxgi_adapter_changed: recreating...` → `desktop-backend-restored ... backend=dxgi` 뜨고 `desktop_backend=wgc` 대신 DXGI로 붙는지, 화면이 나오는지. 재접속만으로도 복귀되는지(장치 재생성이 restart 경로에 있으니 이제 됨).
+- 범위 분리: 이번 빌드는 G1/R1만. G2(끊긴 세션 잠금해제)·G3(PC 뷰어 잠금 UI)는 별도. G4(자체 가상 디스플레이)는 #339로 **불필요 가능성 커짐**(데스크톱이 AMD에 attached 출력으로 이미 존재 — "출력 없음"이 아니라 "어댑터 불일치"였음). OSLink/가상 디스플레이 없는 완전 무출력 머신에서만 G4 의미.
+- 다음: 0.2.70 실기 → DXGI 복귀 확인. 통과 시 G2 착수(콘솔 세션 타겟 + U5 ack).

@@ -399,24 +399,63 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
         capture.dxgiPointerUpdateUs.store(qpc_now_us(), std::memory_order_release);
       };
       std::string dxgiDetail;
-      const bool started = dxgiCaptureSession.Start(
-          config,
-          [&](ID3D11Texture2D* texture, uint32_t width, uint32_t height,
-              uint32_t accumulatedFrames) {
-            if (stop.load()) return;
-            if (!clientSession.streamControlActive.load(std::memory_order_acquire)) return;
-            const uint64_t callbackUs = qpc_now_us();
-            capture.PublishCapturedTexture(res, texture, callbackUs, callbackUs, 0, 0,
-                                     accumulatedFrames > 0);
-          },
-          [&](const std::string&, const std::string& message) {
-            std::cout << "[native-video-host] " << message << "\n";
-          },
-          [&](const std::string& reason) {
-            capture.SetDxgiFallbackReason(reason);
-            capture.dxgiFallbackRequested.store(true, std::memory_order_release);
-          },
-          &dxgiDetail);
+      auto startDxgi = [&](std::string* detailOut) {
+        return dxgiCaptureSession.Start(
+            config,
+            [&](ID3D11Texture2D* texture, uint32_t width, uint32_t height,
+                uint32_t accumulatedFrames) {
+              if (stop.load()) return;
+              if (!clientSession.streamControlActive.load(std::memory_order_acquire)) return;
+              const uint64_t callbackUs = qpc_now_us();
+              capture.PublishCapturedTexture(res, texture, callbackUs, callbackUs, 0, 0,
+                                       accumulatedFrames > 0);
+            },
+            [&](const std::string&, const std::string& message) {
+              std::cout << "[native-video-host] " << message << "\n";
+            },
+            [&](const std::string& reason) {
+              capture.SetDxgiFallbackReason(reason);
+              capture.dxgiFallbackRequested.store(true, std::memory_order_release);
+            },
+            detailOut);
+      };
+      bool started = startDxgi(&dxgiDetail);
+      // G1 / R1 missing half: the desktop moved to another adapter -- typically an RDP disconnect,
+      // where the device was created on the Remote Display Adapter (which then loses its output)
+      // while the desktop returns to the physical GPU. DXGI can only duplicate outputs on its own
+      // device's adapter, so resolve_output reports dxgi_adapter_changed and the code used to concede
+      // straight to WGC: a black lock screen, then a soft keyframe-thrashing desktop. R1 detects the
+      // move but deliberately left the device recreation to the caller, which never did it. This is
+      // that half. monitorInfo / newW / newH were already refreshed to the current primary at the top
+      // of this function, so recreate the D3D device on that adapter, rebuild the readback on it, and
+      // retry DXGI once before falling back to WGC. (history #339)
+      if (!started && dxgiDetail == "dxgi_adapter_changed") {
+        std::cout << "[native-video-host] dxgi_adapter_changed: recreating D3D device on the current desktop adapter\n";
+        d3d.Reset();
+        res.ctx.Reset();
+        const HRESULT reHr = create_d3d11_device_for_primary_monitor(&d3d, &res.ctx, &res.fl);
+        if (SUCCEEDED(reHr) && d3d && res.ctx) {
+          if (useH264) (void)encoder.codec.set_d3d11_device(d3d.Get());
+          res.gpuScaler = GpuBgraScaler();
+          capture.gpuScalerHealthy = false;
+          if (capture.gpuScalerRequested) {
+            capture.gpuScalerHealthy = res.gpuScaler.initialize(d3d.Get(), res.ctx.Get(), &res.d3dContextMu);
+          }
+          if (capture.CreateStaging(res, encoder, useH264, newW, newH)) {
+            config.d3dDevice = d3d.Get();
+            started = startDxgi(&dxgiDetail);
+            if (started) {
+              std::cout << "[native-video-host] desktop-backend-restored reason=adapter_recreated backend=dxgi\n";
+            } else {
+              std::cout << "[native-video-host] adapter recreate: DXGI still failed detail=" << dxgiDetail << "\n";
+            }
+          } else {
+            std::cerr << "[native-video-host] adapter recreate: staging rebuild failed\n";
+          }
+        } else {
+          std::cerr << "[native-video-host] adapter recreate: device create failed hr=" << hr_hex(reHr) << "\n";
+        }
+      }
       if (!started) {
         std::cout << "[native-video-host] fallback_reason=" << dxgiDetail << "\n";
         backend.active = DesktopCaptureBackend::Wgc;
