@@ -8156,3 +8156,12 @@ Next action
 - 빌드: `remote60_installer` Release exit 0, 임베드 GNLinkHost/GNLinkSetup 0.2.72. 산출물 `dist/GNLinkSetup-0.2.72.exe`(직전 0.2.71 보존).
 - 미해결(별개): P8 텍스트 화질(QP32/속도우선 튜닝) — 창모드로도 남는 근본 화질. 별도 결정(stable_text+QP26 또는 토글).
 - 다음: 0.2.72 설치 → P7 플래핑 사라지는지 + 창모드에서 GMux 텍스트 선명한지 확인. 그다음 P8.
+
+### 347) 2026-09-02 PC 뷰어 창모드 복원 (F-21 되돌림, 사용자 재요청) — 0.2.73 (브랜치 refactor/viewer-split)
+
+- 사용자: PC 클라에 GMux 창모드가 없다, 다시 넣어야겠다("내가 빼라 했었어"로 F-21 재확인). 데스크톱 모드로 GMux 보면 작아서 글자 깨짐.
+- 원인 확인: F-21(`c3678b9`, 0.2.62)에서 `kPickerListsWindows=false`로 PC 피커를 desktop만 표시하게 막았음 — (a) flip-model 스왑체인이 GDI 피커를 덮던 버그 + (b) 당시 사용자 요청. (b)를 사용자가 되돌림.
+- 수정(`viewer_picker.hpp`): `kPickerListsWindows` false→**true**. 그리기(`viewer_overlay_draw.cpp`)·히트테스트·썸네일(`viewer_picker.cpp`)이 전부 이 플래그로 게이트되므로 한 곳만 뒤집으면 창 목록/선택/썸네일이 함께 복원. (a) 버그의 수정(피커 진입 시 `release_swapchain()`으로 GDI 합성 복귀)은 그대로라 피커는 보임 — 이번엔 창 카드만 다시 그려짐.
+- 빌드: `remote60_installer` Release exit 0, viewer_picker_gesture_test PASS. 임베드 GNLinkHost/GNLinkSetup 0.2.73. 산출물 `dist/GNLinkSetup-0.2.73.exe`(직전 0.2.72 보존).
+- 정정: 사용자가 의심한 "느림이 저 수정 때문" — 창모드 부재는 F-21(사용자 과거 요청)이지 최근 수정 아님. 느림은 데스크톱모드 작은 텍스트 + P7 플래핑(0.2.72에서 해결). 정적 화면 저프레임은 변화기반 캡처의 본질.
+- 다음: 0.2.73 설치 → PC 피커에서 GMux 창 선택되는지 + 창모드 텍스트 선명한지. 그다음 P8(텍스트 QP 튜닝)로 더 개선.

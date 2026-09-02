@@ -27,7 +27,12 @@ namespace remote60::native_poc::viewer {
 // (~33ms each on the host's control thread) plus grid scrolling. What the picker is actually for
 // here is the pause before the stream starts: it lets you size the window before the picture
 // appears. That is the part worth keeping. (Viewer ledger F-21.)
-inline constexpr bool kPickerListsWindows = false;
+// Re-enabled 2026-09-02 at the user's request: the PC picker lists windows again so a text window
+// (GMux, an editor) can be captured directly and stay sharp, instead of showing as a small region
+// of the whole desktop. F-21 disabled it for two reasons -- a flip-model overlay bug and the user's
+// own "desktop only" request. The overlay bug's fix (release_swapchain() on picker entry) stays, so
+// the picker is visible; only the listing was gated here. (history #347)
+inline constexpr bool kPickerListsWindows = true;
 
 ClientControlMetricsSnapshot capture_client_control_metrics_snapshot(ViewerState& ctx);
 
