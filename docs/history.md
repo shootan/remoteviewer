@@ -8097,3 +8097,14 @@ Next action
 - **실기 검증 필수(내가 못 하는 판정)**: RDP 끊고 잠금화면/해제 상태에서 접속 → host_app.log에 `dxgi_adapter_changed: recreating...` → `desktop-backend-restored ... backend=dxgi` 뜨고 `desktop_backend=wgc` 대신 DXGI로 붙는지, 화면이 나오는지. 재접속만으로도 복귀되는지(장치 재생성이 restart 경로에 있으니 이제 됨).
 - 범위 분리: 이번 빌드는 G1/R1만. G2(끊긴 세션 잠금해제)·G3(PC 뷰어 잠금 UI)는 별도. G4(자체 가상 디스플레이)는 #339로 **불필요 가능성 커짐**(데스크톱이 AMD에 attached 출력으로 이미 존재 — "출력 없음"이 아니라 "어댑터 불일치"였음). OSLink/가상 디스플레이 없는 완전 무출력 머신에서만 G4 의미.
 - 다음: 0.2.70 실기 → DXGI 복귀 확인. 통과 시 G2 착수(콘솔 세션 타겟 + U5 ack).
+
+### 341) 2026-09-02 0.2.70 실기: 어댑터 재생성 성공(DXGI 복귀) but 영상 시 혼잡 붕괴 재발 — ABR이 피드백 소실로 미강등 (기록)
+
+- 실기(호스트 0.2.70):
+  - **G1/R1 성공**: 14:40:31 `dxgi_adapter_changed: recreating D3D device...` → `desktop-backend-restored reason=adapter_recreated backend=dxgi` → `from=wgc to=dxgi`. 이후 14:44~14:47 내내 `desktop_backend=dxgi` 유지, WGC 미폴백. **어댑터 수정 실기 통과.**
+  - **14:46 멈춤 = 혼잡 붕괴(#337 재발)**: 14:46:48 stat `encodedFrames=58 mbps=37.5 abrProfile=high abrModSec=0 abrSevSec=0` → 14:46:49 `udp control session ended reason=peer-lost`. 영상 시 인코더가 VBR 피크(≈37Mbps, 목표 12의 3배)로 폭주, **ABR은 high 고정(압력 0)**. 14:47:03 재접속으로 즉시 복구.
+- **근본 진단(신규)**: 혼잡이 심해지면 클라 피드백이 호스트에 못 옴 → `metricsFresh=false`. P6(0.2.69, 손실 반응)는 클라 지표(clUdpDropPm/지연)에 의존하는데 그 지표가 소실돼 발동 못 함. 호스트는 cb2e(인코딩)만 보고 정상으로 판단 → 강등 안 함. **붕괴가 ABR의 강등 신호 자체를 끊는다.** P4/P5/P6로는 이 경로(피드백 소실형 붕괴)를 못 막는다.
+- **미확인**: 회사 PC(뷰어) 버전. P5(클라측 키프레임 폭주 감쇠)는 뷰어 0.2.70이어야 적용. 호스트만 0.2.70이면 클라측 P5 미적용 가능 → keyframe-request reason=2 지속(로그상 여전히 다발).
+- 신규 항목 P7(아래): 호스트 자체 관측(송신 큐 적체/피드백 staleness)으로 클라 지표 없이도 ABR 강등 + 릴레이에서 VBR 피크·목표 상한. 이게 없으면 릴레이+고화질 영상은 계속 붕괴.
+- 변경: `docs/history.md`, `docs/구현계획.md`(P7) 문서만. 코드 변경 없음.
+- 다음: (a) 회사 PC 0.2.70 설치 확인, (b) P7 착수 승인 → 피드백 소실형 혼잡 붕괴 차단.
