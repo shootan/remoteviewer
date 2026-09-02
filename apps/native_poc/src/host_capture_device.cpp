@@ -293,7 +293,9 @@ DeviceAdapterOutputState device_adapter_output_state(ID3D11Device* device) {
   // Tri-state on purpose (Codex review #356): tear a working capture device down ONLY when we are
   // certain its adapter has zero attached outputs. Any probe failure returns Unknown so a transient
   // COM error never triggers a recreate churn loop.
-  if (!device) return DeviceAdapterOutputState::Unknown;
+  // A null device is definitely unusable (not "cannot tell"), so report None so the caller recreates
+  // rather than preserving a dead handle (Codex review #357).
+  if (!device) return DeviceAdapterOutputState::None;
   Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
   if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) || !dxgiDevice)
     return DeviceAdapterOutputState::Unknown;

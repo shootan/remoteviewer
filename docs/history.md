@@ -8265,3 +8265,13 @@ Next action
 - G1(dxgi_adapter_changed)도 인라인 split-brain 재생성 제거하고 헬퍼로 통일. WGC-branch 재생성 블록 삭제(조기검사가 창모드 포함 전 경로 커버).
 - 빌드: host 컴파일 OK, installer Release, host_abr_test PASS, shared_core_test PASS. 임베드 0.2.79. 산출물 `dist/GNLinkSetup-0.2.79.exe`. **0.2.78은 폐기(설치 금지)**.
 - 여전히 블라인드(화면 확인 불가) 수정 — Codex 재리뷰 요청 + 실기(RDP-on 기동→RDP-off→창 선택→first-frame) 필수.
+
+### 358) 2026-09-02 WGCDEV — CreateStaging 폴백 split-brain 봉합 + GDI 가용성 게이트 — 0.2.80 (브랜치 refactor/viewer-split)
+
+- 0.2.79 재리뷰에서 Codex(remote#nhxsk5vr)가 3번째 필드 블로커 확인: 주 트랜잭션은 승인됐으나 `CaptureState::CreateStaging` 내부 폴백(readback.Initialize 실패 시)이 여전히 **네이티브 장치만** 재생성(res.d3d/ctx만 교체, res.d3dDevice winrt는 옛 어댑터 유지)해서 실패복구 경로에 0.2.78과 같은 cross-device split-brain이 남아 있었다.
+- **수정(FIELD BLOCKER, Codex 권고 B)**: 트랜잭션 헬퍼 `RecreateCaptureDeviceOnPrimary`를 CreateStaging *위*(파일 상단 anon namespace, :69)로 이동해 장치 재생성의 유일 소유자로 일원화. CreateStaging 폴백의 네이티브-only 재생성(구 :74~99)을 헬퍼 호출로 교체 → winrt 래퍼까지 lockstep 재구축. d3d/ctx는 res 참조라 커밋 후 새 장치 반영.
+- **수정(HIGH, GDI 가용성 회귀)**: 조기검사를 `needsGpuCaptureDevice = windowModeActive || backend.active != Gdi`로 게이트. GDI(별도 CPU 프로세스, 라이브 어댑터 GPU 장치 불필요)는 None이어도 재생성 강제 안 함 → 원래 서비스 가능한 GDI 재시작이 helper 실패로 중단되던 회귀 제거. GDI→WGC 폴백 시 그 경로 CreateStaging이 풀 트랜잭션을 돌려 dead-adapter 여전히 커버.
+- **수정(소):** `device_adapter_output_state`에서 device==nullptr → Unknown이 아니라 **None**(확정 unusable → 재생성). QI/GetAdapter/EnumOutputs mid-walk 실패는 Unknown 유지.
+- Codex Q1~Q3 답: 정상 경로 race/leak 없음(Detach 선행 + attachmentCookie 재검사 + old readback strong ref + 후속 Shutdown), 조기검사는 None에서만 동작해 정상 DXGI/GDI no-op, RDP 전환 churn은 Unknown 폴백으로 방어. HIGH 2(encoder MFT) 원장 D3 기록 정확 동의.
+- 빌드: host 컴파일 OK, host_abr_test PASS, shared_core_test PASS. 임베드 0.2.80. 산출물 `dist/GNLinkSetup-0.2.80.exe`. 0.2.78/0.2.79 폐기.
+- 실기 로그 게이트(Codex): "device-recreate committed"만 보지 말고 **final native adapter LUID == unwrapped WinRT adapter LUID**, staging initialized, wgc first-frame까지 묶어 확인. RDP-on 기동→off→창 선택→first-frame.

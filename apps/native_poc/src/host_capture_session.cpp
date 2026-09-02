@@ -59,6 +59,65 @@ using remote60::host::DxgiDesktopCaptureSession;
 
 namespace remote60::native_poc {
 
+namespace {
+// WGCDEV transaction (Codex review #356): rebuild the capture D3D device and its WinRT projection on
+// the primary adapter atomically. Every handle is built into a local first; res.d3d / res.ctx /
+// res.inspectable / res.d3dDevice are committed together only after all steps succeed. A WinRT
+// wrapper failure can therefore never leave a split-brain device -- native on the new adapter, WinRT
+// on the old -- which a later restart (whose predicate only looks at res.d3d) would never re-detect.
+// Returns false with res untouched on any failure.
+bool RecreateCaptureDeviceOnPrimary(CaptureState& capture, CaptureResources& res,
+                                    EncoderState& encoder, bool useH264, const char* reason) {
+  Microsoft::WRL::ComPtr<ID3D11Device> newD3d;
+  Microsoft::WRL::ComPtr<ID3D11DeviceContext> newCtx;
+  D3D_FEATURE_LEVEL newFl = D3D_FEATURE_LEVEL_11_0;
+  const HRESULT devHr = create_d3d11_device_for_primary_monitor(&newD3d, &newCtx, &newFl);
+  if (FAILED(devHr) || !newD3d || !newCtx) {
+    std::cerr << "[native-video-host] device-recreate(" << reason << ") create failed hr="
+              << hr_hex(devHr) << "\n";
+    return false;
+  }
+  Microsoft::WRL::ComPtr<IDXGIDevice> dxgiWr;
+  if (FAILED(newD3d.As(&dxgiWr)) || !dxgiWr) {
+    std::cerr << "[native-video-host] device-recreate(" << reason << ") IDXGIDevice query failed\n";
+    return false;
+  }
+  winrt::com_ptr<::IInspectable> newInspectable;
+  const HRESULT wrapHr = CreateDirect3D11DeviceFromDXGIDevice(dxgiWr.Get(), newInspectable.put());
+  if (FAILED(wrapHr) || !newInspectable) {
+    std::cerr << "[native-video-host] device-recreate(" << reason << ") winrt wrapper failed hr="
+              << hr_hex(wrapHr) << "\n";
+    return false;
+  }
+  winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice newWinrt{nullptr};
+  try {
+    newWinrt = newInspectable.as<winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice>();
+  } catch (...) {
+    std::cerr << "[native-video-host] device-recreate(" << reason << ") winrt projection threw\n";
+    return false;
+  }
+  // All locals valid -> commit the quartet together.
+  res.d3d = newD3d;
+  res.ctx = newCtx;
+  res.fl = newFl;
+  res.inspectable = newInspectable;
+  res.d3dDevice = newWinrt;
+  // Rebind device-scoped dependents on the fresh device. NOTE (ledger #356 / HIGH 2): encoder
+  // set_d3d11_device does not rebind a running MFT (only initialize() sends SET_D3D_MANAGER), so this
+  // is only correct while the encoder uses the CPU readback path (default). NV12 surface mode would
+  // need a full encoder reinit here -- tracked in docs/구현계획.md, not fixed in this hotfix.
+  if (useH264) (void)encoder.codec.set_d3d11_device(res.d3d.Get());
+  res.gpuScaler = GpuBgraScaler();
+  capture.gpuScalerHealthy = false;
+  if (capture.gpuScalerRequested) {
+    capture.gpuScalerHealthy =
+        res.gpuScaler.initialize(res.d3d.Get(), res.ctx.Get(), &res.d3dContextMu);
+  }
+  std::cout << "[native-video-host] device-recreate(" << reason << ") committed on primary adapter\n";
+  return true;
+}
+}  // namespace
+
 bool CaptureState::CreateStaging(CaptureResources& res, EncoderState& encoder, bool useH264, uint32_t srcW, uint32_t srcH) {
   CaptureState& capture = *this;
   auto& d3d = res.d3d;
@@ -73,23 +132,13 @@ bool CaptureState::CreateStaging(CaptureResources& res, EncoderState& encoder, b
                                   capture.stagingSlotCount, capturePublishFn)) {
     std::cerr << "[native-video-host] recreating D3D device after readback init failure size="
               << srcW << "x" << srcH << "\n";
-    d3d.Reset();
-    ctx.Reset();
-    const HRESULT recreateHr = create_d3d11_device_for_primary_monitor(&d3d, &ctx, &fl);
-    if (FAILED(recreateHr) || !d3d || !ctx) {
-      std::cerr << "[native-video-host] D3D11 device recreate failed hr="
-                << hr_hex(recreateHr) << "\n";
+    // Codex review #357 (field blocker): recreate via the single device transaction so the WinRT
+    // wrapper (res.d3dDevice) is rebuilt in lockstep with the native device. The old native-only
+    // recreate here left res.d3dDevice on the previous adapter, reopening the same cross-device
+    // split-brain the early transaction closes -- but on the readback-init failure path. d3d/ctx are
+    // references into res, so they reflect the committed new device after the helper returns.
+    if (!RecreateCaptureDeviceOnPrimary(capture, res, encoder, useH264, "readback-init-fallback")) {
       return false;
-    }
-    if (useH264) {
-      (void)encoder.codec.set_d3d11_device(d3d.Get());
-    }
-    gpuScaler = GpuBgraScaler();
-    capture.gpuScalerHealthy = false;
-    if (capture.gpuScalerRequested) {
-      capture.gpuScalerHealthy = gpuScaler.initialize(d3d.Get(), ctx.Get(), &d3dContextMu);
-      std::cout << "[native-video-host] gpu scaler reinit after device recreate ready="
-                << (capture.gpuScalerHealthy ? 1 : 0) << "\n";
     }
     if (!captureReadback.Initialize(d3d.Get(), ctx.Get(), &d3dContextMu, srcW, srcH,
                                     capture.stagingSlotCount, capturePublishFn)) {
@@ -302,65 +351,6 @@ void CaptureState::DetachCaptureSession(CaptureResources& res, winrt::event_toke
   pool = nullptr;
 }
 
-namespace {
-// WGCDEV transaction (Codex review #356): rebuild the capture D3D device and its WinRT projection on
-// the primary adapter atomically. Every handle is built into a local first; res.d3d / res.ctx /
-// res.inspectable / res.d3dDevice are committed together only after all steps succeed. A WinRT
-// wrapper failure can therefore never leave a split-brain device -- native on the new adapter, WinRT
-// on the old -- which a later restart (whose predicate only looks at res.d3d) would never re-detect.
-// Returns false with res untouched on any failure.
-bool RecreateCaptureDeviceOnPrimary(CaptureState& capture, CaptureResources& res,
-                                    EncoderState& encoder, bool useH264, const char* reason) {
-  Microsoft::WRL::ComPtr<ID3D11Device> newD3d;
-  Microsoft::WRL::ComPtr<ID3D11DeviceContext> newCtx;
-  D3D_FEATURE_LEVEL newFl = D3D_FEATURE_LEVEL_11_0;
-  const HRESULT devHr = create_d3d11_device_for_primary_monitor(&newD3d, &newCtx, &newFl);
-  if (FAILED(devHr) || !newD3d || !newCtx) {
-    std::cerr << "[native-video-host] device-recreate(" << reason << ") create failed hr="
-              << hr_hex(devHr) << "\n";
-    return false;
-  }
-  Microsoft::WRL::ComPtr<IDXGIDevice> dxgiWr;
-  if (FAILED(newD3d.As(&dxgiWr)) || !dxgiWr) {
-    std::cerr << "[native-video-host] device-recreate(" << reason << ") IDXGIDevice query failed\n";
-    return false;
-  }
-  winrt::com_ptr<::IInspectable> newInspectable;
-  const HRESULT wrapHr = CreateDirect3D11DeviceFromDXGIDevice(dxgiWr.Get(), newInspectable.put());
-  if (FAILED(wrapHr) || !newInspectable) {
-    std::cerr << "[native-video-host] device-recreate(" << reason << ") winrt wrapper failed hr="
-              << hr_hex(wrapHr) << "\n";
-    return false;
-  }
-  winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice newWinrt{nullptr};
-  try {
-    newWinrt = newInspectable.as<winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice>();
-  } catch (...) {
-    std::cerr << "[native-video-host] device-recreate(" << reason << ") winrt projection threw\n";
-    return false;
-  }
-  // All locals valid -> commit the quartet together.
-  res.d3d = newD3d;
-  res.ctx = newCtx;
-  res.fl = newFl;
-  res.inspectable = newInspectable;
-  res.d3dDevice = newWinrt;
-  // Rebind device-scoped dependents on the fresh device. NOTE (ledger #356 / HIGH 2): encoder
-  // set_d3d11_device does not rebind a running MFT (only initialize() sends SET_D3D_MANAGER), so this
-  // is only correct while the encoder uses the CPU readback path (default). NV12 surface mode would
-  // need a full encoder reinit here -- tracked in docs/구현계획.md, not fixed in this hotfix.
-  if (useH264) (void)encoder.codec.set_d3d11_device(res.d3d.Get());
-  res.gpuScaler = GpuBgraScaler();
-  capture.gpuScalerHealthy = false;
-  if (capture.gpuScalerRequested) {
-    capture.gpuScalerHealthy =
-        res.gpuScaler.initialize(res.d3d.Get(), res.ctx.Get(), &res.d3dContextMu);
-  }
-  std::cout << "[native-video-host] device-recreate(" << reason << ") committed on primary adapter\n";
-  return true;
-}
-}  // namespace
-
 bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBackendState& backend, SessionState& clientSession, EncoderState& encoder, std::atomic<bool>& stop, bool useH264, winrt::Windows::Graphics::Capture::GraphicsCaptureItem& item, winrt::event_token& token) {
   CaptureState& capture = *this;
   auto& d3d = res.d3d;
@@ -433,7 +423,14 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
     // primary now. Only a certain `None` (zero outputs) triggers a recreate; `Unknown` is left alone
     // so a transient probe error never churns a working device. Covers window mode too (window
     // capture never enters the DXGI adapter-changed branch below).
-    if (device_adapter_output_state(res.d3d.Get()) == DeviceAdapterOutputState::None) {
+    // GDI desktop capture runs in a separate CPU process and needs no live-adapter GPU device, so a
+    // recreate failure must not abort an otherwise-serviceable GDI restart (Codex review #357). Window
+    // mode and WGC/DXGI do need it. If GDI later falls back to WGC, that path's CreateStaging runs the
+    // full transaction on init failure, so the dead-adapter case is still covered there.
+    const bool needsGpuCaptureDevice =
+        capture.windowModeActive || backend.active != DesktopCaptureBackend::Gdi;
+    if (needsGpuCaptureDevice &&
+        device_adapter_output_state(res.d3d.Get()) == DeviceAdapterOutputState::None) {
       std::cout << "[native-video-host] capture-device-adapter-stale: no attached output, "
                    "recreating on primary before staging\n";
       if (!RecreateCaptureDeviceOnPrimary(capture, res, encoder, useH264, "no-attached-output")) {
