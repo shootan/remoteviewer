@@ -8214,3 +8214,12 @@ Next action
 - 결정 판정식: 드래그 시 moveGenPerSec≈60인데 inputSentPerSec≈1/RTT(예 6~7) + inputRttAvg≈RTT → 입력 직렬화가 5~10Hz의 root 확정 → P1a 착수. (host contentAcquires 분리·inject→content join은 필요 시 확장.)
 - 빌드: installer Release exit 0, 임베드 0.2.75. 산출물 `dist/GNLinkSetup-0.2.75.exe`(직전 0.2.74 보존).
 - 다음: 0.2.75 설치 → 드래그 실측 → NAS viewer.log `[input-p0]` 라인 확인 → 직렬화 확정 시 P1a(마우스 fast lane) 구현(구현도 Codex 검증).
+
+### 353) 2026-09-02 P0 확장 — 호스트 DXGI content/pointer 분리(사용자 "한 번에 측정") — 0.2.76 (브랜치 refactor/viewer-split)
+
+- 사용자 지시: P0 측정을 한 번에 하게 호스트 쪽도 넣어라. Codex 조건 4 반영.
+- 구현(`libs/capture/src/capture_backend_dxgi.cpp`): AcquireStats에 contentAcquires/pointerOnlyAcquires 추가, 획득 루프에서 content=LastPresentTime!=0 / pointer-only=LastPresentTime==0&&LastMouseUpdateTime!=0 로 분류(hot path 카운터만), `dxgi-acquire` 초당 로그에 `dxgiContentAcquires=`/`dxgiPointerOnly=` 병기. 기존 acquires는 둘을 섞어 오독됐음.
+- 이제 한 드래그로: 클라 `[input-p0] moveGenPerSec vs inputSentPerSec + RTT`(0.2.75) + 호스트 `dxgi-acquire dxgiContentAcquires`(초당 실제 화면 변화)를 함께 봄. 판정: sent≈content≈1/RTT면 입력 직렬화 root, sent≈60인데 content≈6이면 컴포지터.
+- 코덱스 조건 중 **미포함(보류)**: inject→content join(candidateInputToContentUs, 조건 3 full) — 크로스모듈 atomic 필요, rate 비교로 root가 갈리면 불필요. RTT는 avg+max(조건 2의 p50/p95 히스토그램 대신, 저표본 1s window엔 충분). 애매하면 확장.
+- 빌드: installer Release exit 0, 임베드 0.2.76. 산출물 `dist/GNLinkSetup-0.2.76.exe`(직전 0.2.75 보존).
+- 다음: 0.2.76 설치 → 드래그 실측 → 클라/호스트 로그 조인 판정 → P1a 착수.

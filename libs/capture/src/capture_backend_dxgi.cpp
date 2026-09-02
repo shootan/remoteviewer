@@ -321,6 +321,12 @@ struct DxgiDesktopCaptureSession::Impl {
     uint32_t accumulatedTotal = 0;
     uint32_t accumulatedMax = 0;
     uint32_t coalescedAcquires = 0;  // acquires that carried more than one update
+    // P0 (input serialization diagnosis, #351): the existing `acquires` mixes desktop-content and
+    // pointer-only frames. Split them so a drag shows the REAL screen-change rate. content =
+    // LastPresentTime!=0; pointer-only = LastPresentTime==0 && LastMouseUpdateTime!=0. If a drag
+    // makes the client SEND ~1/RTT and this contentAcquires tracks it, the source is not the limit.
+    uint32_t contentAcquires = 0;
+    uint32_t pointerOnlyAcquires = 0;
     uint64_t holdTotalUs = 0;
     uint64_t holdMaxUs = 0;
   } stats;
@@ -339,6 +345,8 @@ struct DxgiDesktopCaptureSession::Impl {
     if (nowUs - stats.windowStartUs < 1000000ULL) return;
     std::ostringstream oss;
     oss << "dxgi-acquire acquires=" << stats.acquires << " timeouts=" << stats.timeouts
+        << " dxgiContentAcquires=" << stats.contentAcquires
+        << " dxgiPointerOnly=" << stats.pointerOnlyAcquires
         << " coalesced=" << stats.coalescedAcquires
         << " accumTotal=" << stats.accumulatedTotal << " accumMax=" << stats.accumulatedMax
         << " holdAvgUs=" << (stats.acquires ? stats.holdTotalUs / stats.acquires : 0)
@@ -411,6 +419,14 @@ struct DxgiDesktopCaptureSession::Impl {
       }
 
       ++stats.acquires;
+      // P0 (#351): classify this acquire. A content frame carries new desktop pixels
+      // (LastPresentTime!=0); a pointer-only frame carries just a cursor move. Hot path: counter
+      // increments only, no log/mutex.
+      if (frameInfo.LastPresentTime.QuadPart != 0) {
+        ++stats.contentAcquires;
+      } else if (frameInfo.LastMouseUpdateTime.QuadPart != 0) {
+        ++stats.pointerOnlyAcquires;
+      }
       if (progress) {
         progress->lastAccumulatedFrames.store(frameInfo.AccumulatedFrames, std::memory_order_release);
       }
