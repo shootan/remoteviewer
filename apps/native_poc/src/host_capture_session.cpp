@@ -113,7 +113,42 @@ bool RecreateCaptureDeviceOnPrimary(CaptureState& capture, CaptureResources& res
     capture.gpuScalerHealthy =
         res.gpuScaler.initialize(res.d3d.Get(), res.ctx.Get(), &res.d3dContextMu);
   }
-  std::cout << "[native-video-host] device-recreate(" << reason << ") committed on primary adapter\n";
+  // Field-verification gate (Codex review #357): both halves are built from newD3d so they resolve to
+  // one adapter by construction, but log native adapter LUID and the LUID the WinRT wrapper unwraps to
+  // so the field capture proves there is no split-brain (nativeLuid == winrtLuid). Best-effort: a probe
+  // failure only degrades the log, never the commit.
+  auto luid_lo = [](const LUID& l) { return static_cast<long>(l.LowPart); };
+  LUID nativeLuid{};
+  {
+    Microsoft::WRL::ComPtr<IDXGIDevice> nd;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> na;
+    DXGI_ADAPTER_DESC nDesc{};
+    if (SUCCEEDED(res.d3d.As(&nd)) && nd && SUCCEEDED(nd->GetAdapter(&na)) && na &&
+        SUCCEEDED(na->GetDesc(&nDesc))) {
+      nativeLuid = nDesc.AdapterLuid;
+    }
+  }
+  LUID winrtLuid{};
+  {
+    // Unwrap the WinRT projection back to its native IDXGIDevice via IDirect3DDxgiInterfaceAccess
+    // (the inverse of CreateDirect3D11DeviceFromDXGIDevice) off res.inspectable, the com_ptr we just
+    // committed. winrt::as<>() rejects raw COM interfaces on this toolchain, so QI through WRL.
+    Microsoft::WRL::ComPtr<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess> access;
+    Microsoft::WRL::ComPtr<IDXGIDevice> wd;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> wa;
+    DXGI_ADAPTER_DESC wDesc{};
+    if (res.inspectable &&
+        SUCCEEDED(res.inspectable->QueryInterface(IID_PPV_ARGS(access.GetAddressOf()))) && access &&
+        SUCCEEDED(access.Get()->GetInterface(IID_PPV_ARGS(wd.GetAddressOf()))) && wd &&
+        SUCCEEDED(wd->GetAdapter(&wa)) && wa && SUCCEEDED(wa->GetDesc(&wDesc))) {
+      winrtLuid = wDesc.AdapterLuid;
+    }
+  }
+  const bool luidMatch = nativeLuid.HighPart == winrtLuid.HighPart &&
+                         nativeLuid.LowPart == winrtLuid.LowPart;
+  std::cout << "[native-video-host] device-recreate(" << reason
+            << ") committed on primary adapter nativeLuid=" << luid_lo(nativeLuid)
+            << " winrtLuid=" << luid_lo(winrtLuid) << " luidMatch=" << (luidMatch ? 1 : 0) << "\n";
   return true;
 }
 }  // namespace

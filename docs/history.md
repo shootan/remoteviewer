@@ -8275,3 +8275,11 @@ Next action
 - Codex Q1~Q3 답: 정상 경로 race/leak 없음(Detach 선행 + attachmentCookie 재검사 + old readback strong ref + 후속 Shutdown), 조기검사는 None에서만 동작해 정상 DXGI/GDI no-op, RDP 전환 churn은 Unknown 폴백으로 방어. HIGH 2(encoder MFT) 원장 D3 기록 정확 동의.
 - 빌드: host 컴파일 OK, host_abr_test PASS, shared_core_test PASS. 임베드 0.2.80. 산출물 `dist/GNLinkSetup-0.2.80.exe`. 0.2.78/0.2.79 폐기.
 - 실기 로그 게이트(Codex): "device-recreate committed"만 보지 말고 **final native adapter LUID == unwrapped WinRT adapter LUID**, staging initialized, wgc first-frame까지 묶어 확인. RDP-on 기동→off→창 선택→first-frame.
+
+### 359) 2026-09-02 WGCDEV — 실기 검증용 LUID 대조 로그 추가 — 0.2.81 (브랜치 refactor/viewer-split)
+
+- Codex 재리뷰가 지정한 실기 게이트("final native adapter LUID == unwrapped WinRT adapter LUID")를 로그로 구현. 블라인드 수정이라 이 로그가 split-brain 부재를 확인하는 유일 창.
+- `RecreateCaptureDeviceOnPrimary` 커밋 직후: res.d3d(native)의 어댑터 LUID와, res.inspectable을 `IDirect3DDxgiInterfaceAccess::GetInterface`로 언랩한 IDXGIDevice의 어댑터 LUID를 각각 조회해 `device-recreate(reason) committed on primary adapter nativeLuid=.. winrtLuid=.. luidMatch=0/1` 출력. best-effort(probe 실패는 로그만 저하, 커밋 무영향).
+- 구조상 두 핸들 모두 newD3d 1개에서 파생돼 luidMatch=1이 보장되지만, 필드 캡처가 자명하도록 명시. (네임스페이스: `::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess` — winrt 투영 아님, WRL QI로 언랩.)
+- 빌드: host 컴파일 OK, host_abr_test PASS, shared_core_test PASS. 임베드 0.2.81. 산출물 `dist/GNLinkSetup-0.2.81.exe`. 0.2.78/79/80 폐기.
+- 실기 확인 항목: `capture-device-adapter-stale` → `device-recreate(...) committed ... luidMatch=1` → staging → `desktop_backend=wgc_window capture-started=1` + first-callback. RDP-on 기동→off→창 선택.
