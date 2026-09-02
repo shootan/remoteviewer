@@ -8044,3 +8044,20 @@ Next action
 - 가상 디스플레이 서명/비용 결론(#335 연장): IddCx는 **사용자 모드(UMDF)** 라 커널 드라이버용 Microsoft attestation(EV 인증서, 연 수십만원) 벽에 안 걸린다. 일반 코드서명이면 되고, 오픈소스는 SignPath로 무료. **MikeTheTech VDD(MIT)가 이 PC에서 정식 서명으로 동작 중**이 산증거. 제품은 이걸 번들·설치하면 서명 비용 0. 자체 드라이버 작성 시에만 유료.
 - 빌드: `remote60_installer` Release exit 0. 임베드 확인 GNLinkHost.exe / GNLinkSetup.exe 둘 다 **0.2.68**(UTF-16 스캔). 산출물 `dist/GNLinkSetup-0.2.68.exe`(직전 0.2.67 보존). **RDP 접속 중이라 캡처/성능 판정 안 함**(CLAUDE.md) — 빌드 컴파일 확인까지만.
 - 다음 액션: 사용자 헤드리스 테스트(RDP off + OSLink off, 우리 세션 접속) → NAS host.log의 `dxgi_no_usable_output`/`dxgi_output` 라인으로 VDD가 왜 걸러졌는지 확정 → 그 결과로 실제 수정 결정(가상 디스플레이 attach-primary 강제 / 캡처가 소비자 역할 / 자체 VDD 번들+설치+구동 중 택).
+
+### 337) 2026-09-02 실기 재현: 고화질 영상 켜자 정지 — 캡처는 정상, 키프레임 폭주/ABR 미반응 death spiral (브랜치 refactor/viewer-split, 진단만)
+
+- 사용자 실기(0.2.68 설치 확인): 헤드리스(물리 모니터 없음, RDP off, OSLink는 클라우드 연결 유지)에서 GNLink 접속 후 고화질 영상 켜자 12:02:22 직후 정지. **이건 어제(#335, WGC 기아)와 다른 정지.**
+- 로그 교차(로컬 host_app.log 0.2.68 / NAS viewer.log):
+  - **캡처는 정상**: 내내 `desktop_backend=dxgi`, 0.2.68 신규 진단(`dxgi_no_usable_output`) **미발화** = DXGI 선택 실패 없음. OSLink가 VDD를 살려둬 어제 기아는 재현 안 됨.
+  - 영상 전 12:02:00~21: 클라 recvFrames=4/s **전부 synthetic**(정적 refresh), mbps~1.2 — 유휴.
+  - 12:02:22 영상 시작: 클라 recvFrames 32(12:02:23), 실프레임 유입.
+  - 12:02:29 첫 패킷 손실(client `dropPm=142`) → 클라가 `handle_udp_discontinuity`(`viewer_video_receiver.cpp:156`)로 **디코더 reset + keyframe-request reason=2**.
+  - 이후 손실→불완전프레임→reason=2 반복. 호스트가 매 요청에 큰 IDR 응답 → **송신 mbps=36.97**(목표 12), `forceKeyInputCount=25`, `keyReqTotal=36`.
+  - **ABR 미반응**: `abrProfile=high abrModSec=0 abrSevSec=0` — 손실 심한데 한 번도 강등 안 함(피드백 자체가 혼잡에 묻힘 추정).
+  - 릴레이 경로 용량 초과: 호스트 37Mbps 송신인데 클라 수신 ~10Mbps → 70%+ 손실 → 조립 불가 → 더 많은 keyframe 요청 → death spiral → 12:02:59 `udp control session ended reason=peer-lost` → 정지.
+  - 12:03:12 재접속 후에도 12:03:14 mbps=36.97로 재폭주, 이후 저fps 유휴(synthetic)로 안착. 12:05:16 클라 recvFrames=8 synthetic=4.
+- **결론**: 오늘 정지 = **키프레임 폭주 + ABR 미반응 + 릴레이 대역 초과의 혼잡 붕괴**(클라/전송 계층). 가상 디스플레이·캡처 문제 아님. 즉 지금 원장에 **별개 결함 2개**: (1) 헤드리스 캡처 기아(#335, VDD 작업 대상), (2) 고화질/손실 환경 혼잡 붕괴(신규).
+- 수정 후보(미착수): (a) ABR이 클라 손실/미수신에 반응해 **강하게 강등**(현재 트리거가 손실 신호를 못 받음), (b) `handle_udp_discontinuity`가 손실 지속 시 매번 decoder reset+IDR 하지 않도록 감쇠(현 120ms 리미터로도 폭주), (c) 손실 지속 시 호스트 비트레이트 상한을 목표 이하로 강제. (d) 릴레이 대역: 회사→집 경로 실효 대역 확인.
+- 변경: `docs/history.md`만. 코드 변경 없음. RDP 아님(console)이라 측정 유효.
+- 다음: 사용자 결정 — 오늘 혼잡 붕괴(재현 쉬움·실사용 직결)부터 고칠지, 가상 디스플레이(OSLink off 케이스)부터 갈지.
