@@ -338,7 +338,7 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
     // ABR only runs when no manual override or M9 is lowering encoder.activeFps, so here it is the
     // authoritative target. All four thresholds and the sparse floor share it.
     const AbrInputs abrIn{metricsFresh, clDecodedFpsX100, clAvgLatencyUs, clAvgDecodeTailUs, cb2eAvgUs,
-                          sender.sentFrames, frameGating.staticMode, encoder.activeFps, startUs};
+                          sender.sentFrames, frameGating.staticMode, encoder.activeFps, startUs, clUdpDropPm};
     const AbrDecision abrDecision = rate.DecideAbrProfile(abrIn, t);
     const int targetProfile = abrDecision.targetProfile;
     const char* abrReason = abrDecision.reason;

@@ -8061,3 +8061,15 @@ Next action
 - 수정 후보(미착수): (a) ABR이 클라 손실/미수신에 반응해 **강하게 강등**(현재 트리거가 손실 신호를 못 받음), (b) `handle_udp_discontinuity`가 손실 지속 시 매번 decoder reset+IDR 하지 않도록 감쇠(현 120ms 리미터로도 폭주), (c) 손실 지속 시 호스트 비트레이트 상한을 목표 이하로 강제. (d) 릴레이 대역: 회사→집 경로 실효 대역 확인.
 - 변경: `docs/history.md`만. 코드 변경 없음. RDP 아님(console)이라 측정 유효.
 - 다음: 사용자 결정 — 오늘 혼잡 붕괴(재현 쉬움·실사용 직결)부터 고칠지, 가상 디스플레이(OSLink off 케이스)부터 갈지.
+
+### 338) 2026-09-02 오늘 발견 혼잡/ABR 결함 수정 + 서버 로그 로테이션 10개 — 0.2.69 (브랜치 refactor/viewer-split)
+
+- 사용자 지시: "오늘 나온 것부터 수정 다 진행", 서버 로그 로테이션(최대 10개), 그리고 원격 커서 미추종은 **기록만 하고 보류**.
+- **P4 (ABR 정적 화면 회복)** `host_abr.hpp`: 혼잡으로 720p/low 강등 후 글 읽는 정적 화면에서 영영 안 올라오던 것(#337). `hostOfferSparse`가 강등뿐 아니라 승격도 막아 low가 고착됐다. 정적/희소 초에도 링크가 깨끗하면(지연·tail 낮고 손실<20‰) `abrSparseRecoverySeconds`를 쌓아 8초(quality-first 6초) 뒤 한 단계 승격(`reason=static_recovery`). 강등은 여전히 `!hostOfferSparse`라 flapping 없음.
+- **P6 (ABR 손실 반응)** `host_abr.hpp` + `host_stage_stats_h264.cpp`: `AbrInputs`에 `clUdpDropPm` 추가(이미 M9가 쓰던 값, ABR만 안 봤다). 손실 severe>100‰ / moderate>35‰(quality-first 60/20)를 강등 조건에 추가 → 지연·fps가 무너지기 전에 손실만으로도 강등.
+- **P5 (키프레임/디코더 리셋 폭주 감쇠)** `viewer_video_receiver.cpp`: `handle_udp_discontinuity`가 손실마다 decoder.reset()+keyframe-request 하던 것을 **손실 에피소드당 1회**로. 이미 `waitForKeyFrame`이면 재리셋·재요청 생략(프레임 게이트가 도착 프레임마다 재요청하므로 회복은 유지). 매 IDR 스파이크가 marginal 링크를 밀어내던 death spiral(#337) 완화.
+- 단위 테스트 추가(`host_abr_test.cpp`): `TestAbrStaticRecoveryPromotesFromLow`(정적+깨끗→8초 후 low→mid, 정적+고지연→미승격), `TestAbrClientLossTriggersDemotion`(손실만으로 강등). host_abr_test PASS, viewer_frame_gate_test PASS.
+- **서버 로그 로테이션** `apps/directory/server.js` `REMOTE60_LOG_KEEP` 기본 3→10, `automation/deploy_directory.ps1` 유닛에 `Environment=REMOTE60_LOG_KEEP=10` 명시. 로그는 이미 계정/기기별 + 스트림별(apk/client/viewer/host)로 각각 파일 분리돼 있고 16MB마다 로테이션. 이제 스트림당 활성 1 + 백업 10. directory 테스트 전체 PASS(logs_test 포함). **NAS 재배포 필요**(claude 계정은 읽기전용이라 사용자가 `deploy_directory.ps1` 실행).
+- **G5 기록만**: 원격 커서가 클라에서 안 따라 움직임(가상 디스플레이 연관 의심). 사용자 지시로 미착수, 구현계획.md에 등재.
+- 빌드: `remote60_installer` Release exit 0. 임베드 GNLinkHost/GNLinkSetup 0.2.69 확인. 산출물 `dist/GNLinkSetup-0.2.69.exe`(직전 0.2.68 보존). **RDP 아님(console)이나 캡처 판정은 실기에서** — 이번 변경은 단위테스트로 검증, 실사용 검증은 사용자 테스트 대기.
+- 다음: 0.2.69 설치 → 고화질 영상 재현으로 (1) 강등 후 정적 화면에서 1080p 복귀(P4) (2) 손실 시 조기 강등·폭주 감소(P5/P6) 확인. 서버는 재배포 후 로테이션 10개 확인.

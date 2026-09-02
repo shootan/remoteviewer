@@ -162,6 +162,7 @@ Environment=REMOTE60_RELAY_PORT=$RelayPort
 Environment="REMOTE60_RELAY_ALLOW_IPS=$RelayAllowIps"
 Environment="REMOTE60_RELAY_ALLOW_ACCOUNTS=$RelayAllowAccounts"
 Environment=REMOTE60_RELAY_GRACE_MS=$RelayGraceMs
+Environment=REMOTE60_LOG_KEEP=10
 ExecStart=NODE_PLACEHOLDER INSTALL_PLACEHOLDER/server.js
 Restart=always
 RestartSec=3

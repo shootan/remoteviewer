@@ -156,10 +156,19 @@ void VideoReceiver::run_udp() {
     auto handle_udp_discontinuity = [&]() {
       if (discontinuityHandled) return;
       discontinuityHandled = true;
+      // P5: one decoder reset + one keyframe request per loss EPISODE, not per lost frame. Under
+      // sustained loss every frame is a discontinuity; resetting the decoder and asking for an IDR
+      // each time kept the reference chain permanently broken and turned each answer into a large
+      // IDR spike that tipped a marginal link further over -- a death spiral that ended in
+      // peer-lost. While already waiting for a keyframe the frame gate keeps re-asking on its own
+      // timeout as complete frames arrive, so suppressing the repeat only removes churn, never the
+      // eventual recovery. (history #337, item P5)
+      const bool alreadyWaiting = gate.waitForKeyFrame;
       gate.waitForKeyFrame = true;
+      ++st.udpAssemblyKeyReqCount;
+      if (alreadyWaiting) return;
       dec.decoder.reset();
       request_keyframe(ctx, 2);
-      ++st.udpAssemblyKeyReqCount;
     };
     if (assembleResult.droppedPreviousIncomplete) {
       ++assemblyDropped;

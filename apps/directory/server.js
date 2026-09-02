@@ -23,7 +23,7 @@
  *   REMOTE60_LOG_DISABLED      1 = refuse uploads
  *   REMOTE60_LOG_DIR           where they land        (default <data dir>/logs)
  *   REMOTE60_LOG_MAX_FILE_MB   rotate past this       (default 16)
- *   REMOTE60_LOG_KEEP          rotated generations    (default 3)
+ *   REMOTE60_LOG_KEEP          rotated generations    (default 10; live + 10 backups per stream)
  *   REMOTE60_LOG_RETENTION_DAYS  delete older files   (default 14)
  *   REMOTE60_LOG_RATE_KB_PER_MIN per device budget    (default 2048)
  *
@@ -220,7 +220,7 @@ function observedAddressFor(rinfo) {
 const LOG_DISABLED = process.env.REMOTE60_LOG_DISABLED === '1';
 const LOG_DIR = process.env.REMOTE60_LOG_DIR || path.join(path.dirname(DATA_PATH), 'logs');
 const LOG_MAX_FILE_BYTES = Number(process.env.REMOTE60_LOG_MAX_FILE_MB || 16) * 1024 * 1024;
-const LOG_KEEP = Number(process.env.REMOTE60_LOG_KEEP || 3);
+const LOG_KEEP = Number(process.env.REMOTE60_LOG_KEEP || 10);
 const LOG_RETENTION_DAYS = Number(process.env.REMOTE60_LOG_RETENTION_DAYS || 14);
 const LOG_RATE_BYTES_PER_MIN = Number(process.env.REMOTE60_LOG_RATE_KB_PER_MIN || 2048) * 1024;
 const LOG_MAX_UPLOAD_BYTES = 512 * 1024;

@@ -26,6 +26,7 @@ struct AbrInputs {
   bool staticMode = false;        // frame gating is in static mode
   uint32_t activeFps = 0;         // the encoder's current fps target
   uint64_t startUs = 0;           // stream start (warmup anchor)
+  uint32_t clUdpDropPm = 0;       // client UDP assembly drop per-mille (P6)
 };
 struct AbrDecision {
   int targetProfile = 0;          // 0 high, 1 mid, 2 low (== abrProfile: hold)
@@ -104,6 +105,7 @@ struct RateControlState {
   // Runtime decision state, advanced by the 1s stats tick.
   uint64_t abrCooldownUntilUs = 0;
   uint32_t abrGoodSeconds = 0;
+  uint32_t abrSparseRecoverySeconds = 0;  // P4: consecutive healthy sparse/static seconds toward a promote
   uint32_t abrModeratePressureSeconds = 0;
   uint32_t abrSeverePressureSeconds = 0;
   int m9Level = 0;
@@ -171,17 +173,24 @@ struct RateControlState {
     const uint64_t moderateTailUs = rate.abrQualityFirst ? 120000ULL : 90000ULL;
     const uint64_t emergencyLatencyUs = rate.abrQualityFirst ? 260000ULL : 220000ULL;
     const uint64_t emergencyTailUs = rate.abrQualityFirst ? 190000ULL : 160000ULL;
+    // P6: client packet loss is direct congestion evidence ABR ignored before -- it reacted only
+    // once latency/fps had already collapsed, by which point the session was dying. Sustained loss
+    // now drives the same down verdicts. (history #337)
+    const uint32_t severeDropPm = rate.abrQualityFirst ? 60u : 100u;
+    const uint32_t moderateDropPm = rate.abrQualityFirst ? 20u : 35u;
 
     const bool severeDownByClient =
         in.metricsFresh &&
         (in.clAvgLatencyUs > severeLatencyUs ||
          in.clAvgDecodeTailUs > severeTailUs ||
+         in.clUdpDropPm > severeDropPm ||
          (in.clDecodedFpsX100 < minSevereFpsX100 &&
           (in.clAvgLatencyUs > (severeLatencyUs - 30000ULL) || in.clAvgDecodeTailUs > (severeTailUs - 40000ULL))));
     const bool moderateDownByClient =
         in.metricsFresh &&
         (in.clAvgLatencyUs > moderateLatencyUs ||
          in.clAvgDecodeTailUs > moderateTailUs ||
+         in.clUdpDropPm > moderateDropPm ||
          (in.clDecodedFpsX100 < minDegradeFpsX100 &&
           (in.clAvgLatencyUs > (moderateLatencyUs - 50000ULL) ||
            in.clAvgDecodeTailUs > (moderateTailUs - 30000ULL))));
@@ -231,8 +240,30 @@ struct RateControlState {
       const uint32_t midToLowModerateSec = rate.abrQualityFirst ? 8u : 5u;
       const uint32_t lowToMidGoodSec = rate.abrQualityFirst ? 8u : 5u;
       const uint32_t midToHighGoodSec = rate.abrQualityFirst ? 12u : 8u;
+      const uint32_t staticRecoverSec = rate.abrQualityFirst ? 6u : 8u;
 
-      if (rate.abrProfile == 0) {
+      if (!hostOfferSparse) rate.abrSparseRecoverySeconds = 0;
+      if (hostOfferSparse) {
+        // P4: a still/sparse desktop must not stay soft. Down verdicts are already suppressed when
+        // sparse (they require !hostOfferSparse), but so was every promote -- the normal gate needs
+        // an fps a static screen never produces, so a low profile entered during motion stuck at
+        // 720p forever while reading text. When the link shows no congestion, step the profile back
+        // up one rung after a short hold; motion still decides against the unchanged thresholds.
+        // (history #337, item P4)
+        const bool sparseHealthy =
+            !in.metricsFresh ||
+            (in.clAvgLatencyUs < moderateLatencyUs && in.clAvgDecodeTailUs < moderateTailUs &&
+             in.clUdpDropPm < 20u);
+        if (rate.abrProfile > 0 && sparseHealthy) {
+          if (++rate.abrSparseRecoverySeconds >= staticRecoverSec) {
+            targetProfile = (rate.abrProfile == 2) ? (rate.abrHasMidProfile ? 1 : 0) : 0;
+            abrReason = "static_recovery";
+          }
+        } else {
+          rate.abrSparseRecoverySeconds = 0;
+        }
+        rate.abrGoodSeconds = 0;
+      } else if (rate.abrProfile == 0) {
         if (emergencyDown && rate.abrHasLowProfile && rate.abrSeverePressureSeconds >= 1) {
           targetProfile = 2;
           abrReason = "client_emergency";
@@ -286,6 +317,7 @@ struct RateControlState {
     rate.encodeLadderReduced = ladderReduced;
     rate.abrProfile = targetProfile;
     rate.abrGoodSeconds = 0;
+    rate.abrSparseRecoverySeconds = 0;
     rate.abrModeratePressureSeconds = 0;
     rate.abrSeverePressureSeconds = 0;
     rate.abrCooldownUntilUs = t + 4000000ULL;

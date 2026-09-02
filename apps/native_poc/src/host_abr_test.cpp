@@ -211,6 +211,41 @@ void TestAbrWithoutLowerProfilesHolds() {
   expect(p == 0, "abr: nothing to demote to -> high holds");
 }
 
+// P4: a low profile entered during motion must climb back on a still desktop with a clean link,
+// otherwise text stays soft at 720p forever while reading. A still desktop with a bad link must not.
+void TestAbrStaticRecoveryPromotesFromLow() {
+  RateControlState r = MakeAbr(false);
+  r.abrProfile = 2;
+  AbrInputs still = Healthy();
+  still.staticMode = true;  // sparse: no down verdict, but P4 must still recover on a clean link
+  int at = 0;
+  std::string reason;
+  const int p = RunAbr(r, still, kStartUs + 3 * kSec, 8, &at, &reason);
+  expect(p == 1 && at == 8 && reason == "static_recovery",
+         "abr(P4): static screen recovers low->mid on a clean link after 8s");
+
+  RateControlState bad = MakeAbr(false);
+  bad.abrProfile = 2;
+  AbrInputs stillBad = Healthy();
+  stillBad.staticMode = true;
+  stillBad.clAvgLatencyUs = 200000;  // congested: sparseHealthy false, no recovery
+  const int pb = RunAbr(bad, stillBad, kStartUs + 3 * kSec, 12);
+  expect(pb == 2, "abr(P4): static screen with high latency does not recover");
+}
+
+// P6: sustained client packet loss is congestion evidence on its own, even when latency and fps
+// still read fine (loss shows up before the queue backs up).
+void TestAbrClientLossTriggersDemotion() {
+  RateControlState r = MakeAbr(false);
+  AbrInputs lossy = Healthy();
+  lossy.clUdpDropPm = 150;  // > severeDropPm (100): severe by loss alone
+  int at = 0;
+  std::string reason;
+  const int p = RunAbr(r, lossy, kStartUs + 3 * kSec, 2, &at, &reason);
+  expect(p == 1 && at == 2 && reason == "high_to_mid_severe",
+         "abr(P6): sustained packet loss demotes even with healthy latency/fps");
+}
+
 // ---------------- M9 ----------------
 
 RateControlState MakeM9() {
@@ -357,6 +392,8 @@ int main() {
   TestAbrRecoversMidToHighAfterGoodSeconds();
   TestAbrLowToMidAndLowToHighWithoutMid();
   TestAbrWithoutLowerProfilesHolds();
+  TestAbrStaticRecoveryPromotesFromLow();
+  TestAbrClientLossTriggersDemotion();
   TestM9DownRequiresConsecutiveSecondsAndCooldown();
   TestM9PressureStreakResets();
   TestM9UpAfterRecoverySeconds();
