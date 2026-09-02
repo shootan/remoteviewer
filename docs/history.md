@@ -8122,3 +8122,10 @@ Next action
 - 솔직 기록: P4/P5/P6(0.2.69)·P7-stale(초기안)로는 이 붕괴를 못 막았다. 못 막은 진짜 이유가 "fps 급락인데 지연은 정상이라 트리거 안 됨"이었고, P7-fps가 그걸 정면으로 잡는다. 이게 세 번째 시도이며 실기 검증 필요.
 - **실기 검증(양쪽 0.2.71 설치)**: 고화질 영상 재생 시 host_app.log에서 `abrProfile=high→mid→low`로 강등되고 mbps가 목표 밑으로 떨어지며 peer-lost 없이 저화질로라도 유지되는지. abrModSec/abrSevSec 증가 확인.
 - 다음: 0.2.71 실기 → 강등 동작 확인. 여전히 붕괴면 recv<<send 갭 트리거(P7 확장) 또는 릴레이 대역 자체 상향.
+
+### 343) 2026-09-02 실기: 창모드 자체는 정상, LDPlayer 창만 WGC 무프레임 (기록)
+
+- 사용자: 모바일에서 LDPlayer 1번 창 눌러도 안 됨("원래 창모드 잘 됐는데").
+- 로그: LDPlayer 창(dnplayer id=527608) 선택 streamGen 4·5·8 **모두 first-frame 0장**, `desktop_backend=wgc_window capture-started=1`만 뜸. 같은 세션 gmux 창(streamGen 6)은 first-frame 정상. 이 구간 어댑터 재생성 없음 → G1/R1 무관, 창모드 일반 회귀 아님.
+- 진단: WGC per-window가 LDPlayer(안드로이드 VM GPU 렌더/오버레이) 창을 못 잡는 한계. 남은 로그(어제~오늘)에 LDPlayer 창 성공 기록 없어 "예전에 됨"은 다른 경로 추정.
+- 조치: 코드 변경 없음. 계획서 G6(창모드 무프레임 폴백: 데스크톱을 창 rect로 크롭) 신설. 즉시 완화는 LDPlayer 렌더링 DirectX 전환.
