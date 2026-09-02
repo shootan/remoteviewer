@@ -18,6 +18,9 @@ struct QueuedControlInputMessage {
   MessageType type = MessageType::ControlInputEvent;
   ControlInputEventMessage inputEvent{};
   ControlInputTextMessage inputText{};
+  // P0 telemetry (#351): when the UI generated this event, kept CLIENT-LOCAL (never on the wire, so
+  // no Android/old-host size contract change). clientSendQpcUs on the wire is overwritten at send.
+  uint64_t generatedUs = 0;
 };
 
 class ClientInputQueue {
@@ -26,6 +29,7 @@ class ClientInputQueue {
   void Enqueue(const QueuedControlInputMessage& msg);
   bool TryDequeue(QueuedControlInputMessage* out);
   uint64_t dropped_count() const;
+  uint64_t coalesced_move_count() const;  // P0 (#351): moves replaced by a newer one (latest-wins)
   void Reset();
 
  private:
@@ -33,6 +37,7 @@ class ClientInputQueue {
   std::deque<QueuedControlInputMessage> queue_;
   std::atomic<uint32_t> nextSeq_{0};
   std::atomic<uint64_t> dropped_{0};
+  std::atomic<uint64_t> coalescedMoves_{0};  // P0 (#351)
 };
 
 // The two input messages, built one way for every client (viewer ledger F-09: the Android session
@@ -210,6 +215,7 @@ struct ControlOutboundAction {
   ControlDesktopBackendRequestMessage desktopBackend{};
   ControlInputEventMessage inputEvent{};
   ControlInputTextMessage inputText{};
+  uint64_t inputGeneratedUs = 0;  // P0 (#351): local diagnostic — when the UI generated this input
 };
 
 class ClientControlScheduler {

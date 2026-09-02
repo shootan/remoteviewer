@@ -190,6 +190,12 @@ void ControlSessionServer::Serve(ControlLink& link) {
     return link.Write(&ack, sizeof(ack));
   };
 
+  // P0 telemetry (input serialization diagnosis, #351): host-side move recv/inject rate, one line
+  // per second, to place against client moveSent and DXGI content per second.
+  uint64_t p0hMoveRecv = 0;
+  uint64_t p0hMoveInjected = 0;
+  uint64_t p0hMoveInjectFail = 0;
+  uint64_t p0hLastEmitUs = 0;
   while (!stop.load()) {
     MessageHeader header{};
     if (!link.Read(&header, sizeof(header))) break;
@@ -414,11 +420,38 @@ void ControlSessionServer::Serve(ControlLink& link) {
                       << "\n";
           }
         }
+        // P0 (#351): host-side move rate — moves RECEIVED and how many injected/failed, placed
+        // against client moveSent and DXGI content per second.
+        if (input.kind == 1) {
+          ++p0hMoveRecv;
+          if (injectResult == InputInjectResult::Injected) {
+            ++p0hMoveInjected;
+          } else if (injectResult == InputInjectResult::Failed ||
+                     injectResult == InputInjectResult::NoTarget ||
+                     injectResult == InputInjectResult::Unsupported) {
+            ++p0hMoveInjectFail;
+          }
+        }
       } else if (args.inputLogEvery > 0 && (input.seq % args.inputLogEvery) == 0) {
         std::cout << "[native-video-host][input] blocked seq=" << input.seq
                   << " key=" << input.keyCode
                   << " kind=" << input.kind
                   << "\n";
+      }
+      {
+        // P0 (#351): emit host move rate about once a second (driven by input arrivals).
+        const uint64_t p0NowUs = qpc_now_us();
+        if (p0hLastEmitUs == 0) p0hLastEmitUs = p0NowUs;
+        if (p0NowUs - p0hLastEmitUs >= 1000000ULL) {
+          std::cout << "[native-video-host][input-p0] windowUs=" << (p0NowUs - p0hLastEmitUs)
+                    << " moveRecv=" << p0hMoveRecv
+                    << " moveInjected=" << p0hMoveInjected
+                    << " moveInjectFail=" << p0hMoveInjectFail << "\n";
+          p0hMoveRecv = 0;
+          p0hMoveInjected = 0;
+          p0hMoveInjectFail = 0;
+          p0hLastEmitUs = p0NowUs;
+        }
       }
       if (!send_input_ack(input.seq)) break;
       continue;

@@ -70,6 +70,7 @@ void ClientInputQueue::Enqueue(const QueuedControlInputMessage& msg) {
       queue_.back().type == MessageType::ControlInputEvent &&
       queue_.back().inputEvent.kind == 1) {
     queue_.back() = msg;
+    coalescedMoves_.fetch_add(1, std::memory_order_relaxed);  // P0 (#351): a move replaced in place
     return;
   }
   if (queue_.size() >= kMaxInputQueueSize) {
@@ -92,10 +93,15 @@ uint64_t ClientInputQueue::dropped_count() const {
   return dropped_.load(std::memory_order_relaxed);
 }
 
+uint64_t ClientInputQueue::coalesced_move_count() const {
+  return coalescedMoves_.load(std::memory_order_relaxed);
+}
+
 void ClientInputQueue::Reset() {
   std::lock_guard<std::mutex> lk(mu_);
   queue_.clear();
   dropped_.store(0, std::memory_order_relaxed);
+  coalescedMoves_.store(0, std::memory_order_relaxed);
   nextSeq_.store(0, std::memory_order_relaxed);
 }
 
@@ -116,6 +122,7 @@ QueuedControlInputMessage make_control_input_event(ClientInputQueue& queue, uint
   msg.inputEvent.wheelDelta = wheelDelta;
   msg.inputEvent.keyCode = keyCode;
   msg.inputEvent.clientSendQpcUs = nowUs;
+  msg.generatedUs = nowUs;  // P0 (#351): local-only generation stamp; wire clientSendQpcUs is reset at send
   return msg;
 }
 
@@ -565,6 +572,7 @@ bool ClientControlScheduler::NextAction(uint64_t nowUs,
   if (inputQueue->TryDequeue(&outbound)) {
     out->expectedResponseType = MessageType::ControlInputAck;
     out->expectedResponseSize = expected_message_size(MessageType::ControlInputAck);
+    out->inputGeneratedUs = outbound.generatedUs;  // P0 (#351): carry local generation stamp for queue-age
     if (outbound.type == MessageType::ControlInputEvent) {
       out->kind = ControlOutboundActionKind::InputEvent;
       out->inputEvent = outbound.inputEvent;

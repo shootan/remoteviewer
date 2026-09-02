@@ -8223,3 +8223,15 @@ Next action
 - 코덱스 조건 중 **미포함(보류)**: inject→content join(candidateInputToContentUs, 조건 3 full) — 크로스모듈 atomic 필요, rate 비교로 root가 갈리면 불필요. RTT는 avg+max(조건 2의 p50/p95 히스토그램 대신, 저표본 1s window엔 충분). 애매하면 확장.
 - 빌드: installer Release exit 0, 임베드 0.2.76. 산출물 `dist/GNLinkSetup-0.2.76.exe`(직전 0.2.75 보존).
 - 다음: 0.2.76 설치 → 드래그 실측 → 클라/호스트 로그 조인 판정 → P1a 착수.
+
+### 354) 2026-09-02 P0 보완 — Codex 리뷰 BLOCKER 1·2 + HIGH 3·4 반영 — 0.2.77 (브랜치 refactor/viewer-split)
+
+- Codex diff 리뷰: DXGI 분리(def1d72) PASS. client/host P0는 실측 전 4건 보완 요구 → 후속 커밋으로 처리(amend 아님).
+- BLOCKER 1 (move 전용): `viewer_control_client.cpp` — inputSentPerSec(모든 kind, ACK 후)를 **move(kind==1) 전용** moveSent/moveRtt(avg·max)/moveQueueAge로 교체. 버튼·키 제외.
+- BLOCKER 2 (coalesce): `native_video_client_shared_core` ClientInputQueue에 coalescedMoves_ atomic + coalesced_move_count() + Reset. latest-wins 교체 시 증가. 로그에 moveCoalesced(초당 delta). 불변식 moveGen≈moveCoalesced+moveSent 확인 가능.
+- HIGH 3 (queue age): QueuedControlInputMessage.generatedUs(로컬 전용, 와이어 무변경) + make_control_input_event에서 설정 + ControlOutboundAction.inputGeneratedUs로 전달 → 송신 시 now-generatedUs를 moveQueueAge로 집계.
+- HIGH 4 (host): `host_control_session.cpp` — move recv/injected/injectFail 카운트 + `[native-video-host][input-p0] windowUs/moveRecv/moveInjected/moveInjectFail` 초당 로그.
+- 추가정확도: 클라·호스트 로그에 windowUs 병기(control thread가 execute에서 막혀 정확한 1s tick 아님). moveGeneratedCount 주석은 PC 마우스 드래그 전용으로 좁힘.
+- 보류(Codex 동의): inject→content full join(candidateInputToContentUs), p50/p95 히스토그램(avg+max로 충분). rate chain(moveGen≈60, coalesced≈53, moveSent≈moveRecv≈injected≈7, dxgiContent≈7)이 어긋나는 단계가 있을 때만 join 추가.
+- 빌드: installer Release exit 0, shared_core_test PASS, 임베드 0.2.77. 산출물 `dist/GNLinkSetup-0.2.77.exe`(직전 0.2.76 보존).
+- 다음: 0.2.77 설치 → 드래그 실측 → 클라(input-p0)·호스트(input-p0)·dxgi-acquire 조인 판정 → P1a.
