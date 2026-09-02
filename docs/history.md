@@ -8108,3 +8108,17 @@ Next action
 - 신규 항목 P7(아래): 호스트 자체 관측(송신 큐 적체/피드백 staleness)으로 클라 지표 없이도 ABR 강등 + 릴레이에서 VBR 피크·목표 상한. 이게 없으면 릴레이+고화질 영상은 계속 붕괴.
 - 변경: `docs/history.md`, `docs/구현계획.md`(P7) 문서만. 코드 변경 없음.
 - 다음: (a) 회사 PC 0.2.70 설치 확인, (b) P7 착수 승인 → 피드백 소실형 혼잡 붕괴 차단.
+
+### 342) 2026-09-02 P7 — 혼잡 붕괴 시 ABR 강등 배선 + VBR 피크 축소 — 0.2.71 (브랜치 refactor/viewer-split)
+
+- 근거(#341 실기 로그 재분석): 14:46 붕괴 때 클라는 침묵하지 않았다. NAS viewer.log에서 **클라가 초당 3~9프레임만 받으며 지표를 계속 보고**(호스트는 60fps 전송). 즉 metricsFresh=true인데 도착한 소수 프레임의 지연은 정상이라, 기존 severe 조건("fps 저하 **AND** 지연 높음")이 발동 못 했다. 그래서 ABR이 high 고정 → 37Mbps 유지 → peer-lost.
+- 수정(`host_abr.hpp` `DecideAbrProfile`):
+  - **P7-fps**: `severeDownByClient`의 fps 절을 **지연 게이트 제거한 단독 조건**으로. severeDown은 이미 `!hostOfferSparse`(호스트가 이번 초 풀 카덴스 송신)로 게이트되므로, 그 상황에서 클라 디코드 fps가 severe 임계(activeFps×35%) 밑이면 = 프레임이 와이어에서 유실된 혼잡 → 단독으로 severe. 정적 화면 오탐은 hostOfferSparse가 배제.
+  - **P7-stale**: 활성 송신 중 클라 피드백이 끊기면(`!metricsFresh && !hostOfferSparse`) `abrStaleActiveSeconds` 누적, 2초(quality-first 3초) 지속 시 severe. 완전 침묵형 붕괴 대비(벨트+멜빵).
+  - Commit 시 카운터 리셋 추가.
+- 수정(`mf_h264_codec.cpp`): VBR 피크 배수 기본값 **300%→200%**(`REMOTE60_NATIVE_PEAK_BITRATE_PERCENT`). 고화질 영상의 순간 버스트 상한을 목표의 3배(36M)→2배(24M)로. env로 조정 가능. LAN 모션 화질 소폭 트레이드, 릴레이 안정 우선.
+- 테스트(`host_abr_test.cpp`): `TestAbrStaleFeedbackDuringActiveSendDemotes`, `TestAbrLowClientFpsDemotesDespiteLowLatency` 추가. host_abr_test 전체 PASS.
+- 빌드: `remote60_installer` Release exit 0. 임베드 GNLinkHost/GNLinkSetup 0.2.71. 산출물 `dist/GNLinkSetup-0.2.71.exe`(직전 0.2.70 보존).
+- 솔직 기록: P4/P5/P6(0.2.69)·P7-stale(초기안)로는 이 붕괴를 못 막았다. 못 막은 진짜 이유가 "fps 급락인데 지연은 정상이라 트리거 안 됨"이었고, P7-fps가 그걸 정면으로 잡는다. 이게 세 번째 시도이며 실기 검증 필요.
+- **실기 검증(양쪽 0.2.71 설치)**: 고화질 영상 재생 시 host_app.log에서 `abrProfile=high→mid→low`로 강등되고 mbps가 목표 밑으로 떨어지며 peer-lost 없이 저화질로라도 유지되는지. abrModSec/abrSevSec 증가 확인.
+- 다음: 0.2.71 실기 → 강등 동작 확인. 여전히 붕괴면 recv<<send 갭 트리거(P7 확장) 또는 릴레이 대역 자체 상향.

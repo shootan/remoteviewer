@@ -1464,7 +1464,7 @@ bool H264Encoder::apply_rate_control(const char* reason) {
   if (!enc_) return false;
   const bool useCbr = env_string_equals_ci("REMOTE60_NATIVE_RATE_CONTROL", "cbr");
   const uint32_t peakMultiplierPercent =
-      env_u32_or("REMOTE60_NATIVE_PEAK_BITRATE_PERCENT", useCbr ? 110u : 300u);
+      env_u32_or("REMOTE60_NATIVE_PEAK_BITRATE_PERCENT", useCbr ? 110u : 200u);
   const uint32_t maxBitrate = static_cast<uint32_t>(std::min<uint64_t>(
       (static_cast<uint64_t>(bitrate_) * std::max<uint32_t>(100u, peakMultiplierPercent)) / 100ULL,
       200000000ULL));

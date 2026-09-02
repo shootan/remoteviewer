@@ -106,6 +106,7 @@ struct RateControlState {
   uint64_t abrCooldownUntilUs = 0;
   uint32_t abrGoodSeconds = 0;
   uint32_t abrSparseRecoverySeconds = 0;  // P4: consecutive healthy sparse/static seconds toward a promote
+  uint32_t abrStaleActiveSeconds = 0;     // P7: consecutive seconds of stale feedback while actively sending
   uint32_t abrModeratePressureSeconds = 0;
   uint32_t abrSeverePressureSeconds = 0;
   int m9Level = 0;
@@ -184,8 +185,13 @@ struct RateControlState {
         (in.clAvgLatencyUs > severeLatencyUs ||
          in.clAvgDecodeTailUs > severeTailUs ||
          in.clUdpDropPm > severeDropPm ||
-         (in.clDecodedFpsX100 < minSevereFpsX100 &&
-          (in.clAvgLatencyUs > (severeLatencyUs - 30000ULL) || in.clAvgDecodeTailUs > (severeTailUs - 40000ULL))));
+         // P7: severeDown is gated by !hostOfferSparse below, so this only fires when the host sent
+         // a full cadence this second. A client decoding far under that means frames were lost on
+         // the wire -- the relay-collapse case where the few frames that DO arrive still look
+         // low-latency, so the old latency-gated fps clause never fired and ABR sat at high straight
+         // into peer-lost (measured 14:46, client 3-9 fps while host sent 60). Low decoded fps under
+         // an active send is congestion on its own. (history #341)
+         in.clDecodedFpsX100 < minSevereFpsX100);
     const bool moderateDownByClient =
         in.metricsFresh &&
         (in.clAvgLatencyUs > moderateLatencyUs ||
@@ -200,11 +206,23 @@ struct RateControlState {
          in.clAvgDecodeTailUs > emergencyTailUs);
     const bool severeDownByHost = (!in.metricsFresh && in.cb2eAvgUs > (rate.abrQualityFirst ? 110000ULL : 90000ULL));
     const bool moderateDownByHost = (!in.metricsFresh && in.cb2eAvgUs > (rate.abrQualityFirst ? 90000ULL : 70000ULL));
+    // P7: client feedback lost WHILE still actively sending is congestion that neither client
+    // metrics (they stopped arriving) nor cb2e (encoding stays fine while the network dies) can
+    // show. Under a relay-bandwidth collapse the encoder held the VBR peak (~3x mean) and ABR sat
+    // at high because every down verdict needs a signal that had gone silent -> peer-lost. Count
+    // stale seconds during active send and treat a short run as severe so ABR still steps the
+    // target -- and with it the peak -- down. (history #341)
+    if (abrWarmupDone && !in.metricsFresh && !hostOfferSparse) {
+      ++rate.abrStaleActiveSeconds;
+    } else {
+      rate.abrStaleActiveSeconds = 0;
+    }
+    const bool staleActiveCongestion = rate.abrStaleActiveSeconds >= (rate.abrQualityFirst ? 3u : 2u);
     // !hostOfferSparse on every up/down verdict: a sparse second neither degrades nor
     // recovers the profile. The pressure and good counters below fall to their else
     // branch and reset, so the profile holds until a second with real cadence arrives.
     const bool severeDown =
-        abrWarmupDone && !hostOfferSparse && (severeDownByClient || severeDownByHost);
+        abrWarmupDone && !hostOfferSparse && (severeDownByClient || severeDownByHost || staleActiveCongestion);
     const bool moderateDown =
         abrWarmupDone && !hostOfferSparse && (moderateDownByClient || moderateDownByHost);
     const bool emergencyDown = abrWarmupDone && !hostOfferSparse && emergencyDownByClient;
@@ -318,6 +336,7 @@ struct RateControlState {
     rate.abrProfile = targetProfile;
     rate.abrGoodSeconds = 0;
     rate.abrSparseRecoverySeconds = 0;
+    rate.abrStaleActiveSeconds = 0;
     rate.abrModeratePressureSeconds = 0;
     rate.abrSeverePressureSeconds = 0;
     rate.abrCooldownUntilUs = t + 4000000ULL;

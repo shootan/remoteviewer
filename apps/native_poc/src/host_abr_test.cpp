@@ -246,6 +246,45 @@ void TestAbrClientLossTriggersDemotion() {
          "abr(P6): sustained packet loss demotes even with healthy latency/fps");
 }
 
+// P7: client feedback goes silent (metricsFresh=false) while the host is still actively sending --
+// the relay-collapse signature -- must demote, because neither client metrics nor cb2e can show it.
+// An idle (sparse) stale second must not demote.
+void TestAbrStaleFeedbackDuringActiveSendDemotes() {
+  RateControlState r = MakeAbr(false);
+  AbrInputs stale = Healthy();
+  stale.metricsFresh = false;  // client went silent under congestion
+  stale.cb2eAvgUs = 5000;      // host encoding still fine -> only P7 catches this
+  int at = 0;
+  std::string reason;
+  // 2 stale seconds arm staleActiveCongestion, then 2 severe seconds (highToMidSevereSec) demote:
+  // first severe second is tick 2, second is tick 3 -> switch at tick 3.
+  const int p = RunAbr(r, stale, kStartUs + 3 * kSec, 3, &at, &reason);
+  expect(p == 1 && at == 3 && reason == "high_to_mid_severe",
+         "abr(P7): stale feedback while actively sending demotes");
+
+  RateControlState idle = MakeAbr(false);
+  AbrInputs staleIdle = stale;
+  staleIdle.sentFrames = 1;  // sparse: not actively sending -> not treated as congestion
+  const int pi = RunAbr(idle, staleIdle, kStartUs + 3 * kSec, 6);
+  expect(pi == 0, "abr(P7): stale feedback while idle/sparse does not demote");
+}
+
+// P7: the measured 14:46 collapse -- fresh metrics, but the client decodes far below target while
+// the host sends a full cadence (relay dropping most frames). The few frames that arrive look
+// low-latency, so this must demote on the fps shortfall alone.
+void TestAbrLowClientFpsDemotesDespiteLowLatency() {
+  RateControlState r = MakeAbr(false);
+  AbrInputs lying = Healthy();
+  lying.clDecodedFpsX100 = kFps * 8;  // ~8% of target: most frames lost on the wire
+  lying.clAvgLatencyUs = 40000;       // the few that arrive are fine
+  lying.clAvgDecodeTailUs = 20000;
+  int at = 0;
+  std::string reason;
+  const int p = RunAbr(r, lying, kStartUs + 3 * kSec, 2, &at, &reason);
+  expect(p == 1 && at == 2 && reason == "high_to_mid_severe",
+         "abr(P7): low client fps under active send demotes despite low latency");
+}
+
 // ---------------- M9 ----------------
 
 RateControlState MakeM9() {
@@ -394,6 +433,8 @@ int main() {
   TestAbrWithoutLowerProfilesHolds();
   TestAbrStaticRecoveryPromotesFromLow();
   TestAbrClientLossTriggersDemotion();
+  TestAbrStaleFeedbackDuringActiveSendDemotes();
+  TestAbrLowClientFpsDemotesDespiteLowLatency();
   TestM9DownRequiresConsecutiveSecondsAndCooldown();
   TestM9PressureStreakResets();
   TestM9UpAfterRecoverySeconds();
