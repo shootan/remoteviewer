@@ -279,6 +279,35 @@ std::optional<PrimaryMonitorInfo> primary_monitor_info() {
   return out;
 }
 
+// WGCDEV (#355): does this D3D device sit on the adapter that owns the primary monitor?
+//
+// WGC's frame pool must be created on the adapter the target window renders on (the primary GPU).
+// If the device is on a stale adapter -- the classic case is the host starting over RDP, where the
+// device lands on the Microsoft Remote Display Adapter, and RDP then disconnecting so that adapter
+// loses every output -- the pool still creates but DWM never shares a surface, so no frame ever
+// arrives and window capture is silently dead. G1 rebuilds res.d3d for the DXGI/desktop path on an
+// adapter change but left the WGC/res.d3dDevice path stale; this predicate is how the WGC path
+// notices it must rebuild. Conservative: if the answer cannot be determined, returns true so a
+// healthy device is never torn down on a probe failure.
+bool d3d_device_owns_primary_monitor(ID3D11Device* device) {
+  if (!device) return true;
+  const HMONITOR primary = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
+  if (!primary) return true;
+  Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
+  if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) || !dxgiDevice) return true;
+  Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+  if (FAILED(dxgiDevice->GetAdapter(&adapter)) || !adapter) return true;
+  for (UINT i = 0;; ++i) {
+    Microsoft::WRL::ComPtr<IDXGIOutput> output;
+    const HRESULT hr = adapter->EnumOutputs(i, &output);
+    if (hr == DXGI_ERROR_NOT_FOUND) break;
+    if (FAILED(hr) || !output) break;
+    DXGI_OUTPUT_DESC desc{};
+    if (SUCCEEDED(output->GetDesc(&desc)) && desc.Monitor == primary) return true;
+  }
+  return false;  // adapter enumerated but does not own the primary monitor -> stale device
+}
+
 HRESULT create_d3d11_device_for_primary_monitor(Microsoft::WRL::ComPtr<ID3D11Device>* outDevice,
                                                 Microsoft::WRL::ComPtr<ID3D11DeviceContext>* outContext,
                                                 D3D_FEATURE_LEVEL* outLevel) {

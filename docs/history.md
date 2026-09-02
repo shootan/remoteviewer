@@ -8244,3 +8244,13 @@ Next action
 - 즉시 워크어라운드: RDP off 상태에서 GNLinkHost 재시작 → res.d3d+res.d3dDevice 둘 다 AMD로 생성 → 창모드 정상. (현재 RDP off, 데스크톱 AMD.)
 - 실제 수정(WGC-DEV, 착수 예정): (a) G1 재생성 시 res.inspectable/res.d3dDevice도 새 res.d3d에서 재구축, (b) 창모드 캡처 시작(RestartCaptureSessionImpl WGC 분기)에서 현재 장치 어댑터가 타겟 창 출력과 다르면 res.d3d+res.d3dDevice 재생성 후 재시도. G1의 WGC 짝. Codex 검증 대상.
 - 실행 호스트 0.2.74(내 P0 0.2.75~77 미설치). 코드 변경 없음(진단).
+
+### 356) 2026-09-02 A: WGCDEV(창모드 어댑터 복구) + B: 구현계획 정정·P0 단위테스트 — 0.2.78 (브랜치 refactor/viewer-split)
+
+- 사용자 지시 "A 하고 B도": A=창모드 회귀 수정, B=입력 트랙 정리(구현계획 정정+테스트).
+- **A (WGCDEV, #355)**: `host_capture_device.cpp` `d3d_device_owns_primary_monitor(ID3D11Device*)` 신설(장치 어댑터가 주 모니터 출력을 소유하는지, 판정 불가 시 true). `host_capture_session.cpp` WGC 프레임풀 생성(:549) 직전에 소유 안 하면 res.d3d를 primary 어댑터로 재생성 + winrt(res.inspectable/res.d3dDevice) 재구축 + encoder.set_d3d11_device + gpuScaler 재초기화. G1 dxgi_adapter_changed 경로에도 winrt 재구축 추가(데스크톱→창 전환 일관성). 이로써 "호스트가 RDP 중 기동→장치가 RDP 어댑터→RDP 해제 후 창모드 전부 무프레임"이 자동 복구(재시작 불필요).
+- **B (P0 정리)**: `docs/구현계획.md` G4를 재부상(#348)→**최후수단 강등(#351)**으로 정정(근본은 입력 직렬화, INPUT 트랙; DXGI change-driven이라 60Hz모드≠60fps, MTT pipe frame-pull 불가). `native_video_client_shared_core_test.cpp`에 `test_input_coalesce_and_generated_us` 추가: move 2연속→coalesced=1·최신 x/generatedUs 보존, Reset=0, NextAction이 inputGeneratedUs 전달+wire send stamp 갱신 검증. PASS.
+- Codex 리뷰 LOW 2건(moveSent≈moveAcked 명명, host moveRecv가 injectionEnabled 내부)은 field-test 무영향으로 보류.
+- 빌드: installer Release exit 0, shared_core_test PASS, host 컴파일 OK. 임베드 0.2.78. 산출물 `dist/GNLinkSetup-0.2.78.exe`(직전 0.2.77 보존).
+- **주의**: WGCDEV는 D3D/WinRT 장치 수명주기 변경이라 화면 확인 불가한 블라인드 수정 — 실기 검증 필수. Codex에 diff 리뷰 요청.
+- 다음: 0.2.78 설치 → (A) 창모드 즉시 정상인지(로그 wgc-device-adapter-restored + first-frame) (B) 드래그 실측 input-p0 rate chain. A 통과 시 창모드 닫힘, B 확정 시 P1a.

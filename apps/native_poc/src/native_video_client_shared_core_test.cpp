@@ -594,9 +594,64 @@ bool test_input_message_builders() {
 
 }  // namespace
 
+// P0 (#351/#354): the diagnosis relies on latest-wins move coalescing being counted, the newest
+// move's local generatedUs surviving the coalesce, Reset clearing the counters, and NextAction
+// carrying generatedUs to the action while the wire send time is (re)stamped at send.
+bool test_input_coalesce_and_generated_us() {
+  ClientInputQueue q;
+  auto mkMove = [&q](int32_t x, uint64_t gen) {
+    QueuedControlInputMessage m{};
+    m.type = MessageType::ControlInputEvent;
+    m.inputEvent.kind = 1;
+    m.inputEvent.x = x;
+    m.inputEvent.seq = q.NextSequence();
+    m.inputEvent.clientSendQpcUs = gen;
+    m.generatedUs = gen;
+    return m;
+  };
+  q.Enqueue(mkMove(10, 1000));
+  q.Enqueue(mkMove(20, 2000));  // latest-wins: replaces the first in place
+  if (!expect(q.coalesced_move_count() == 1, "second move coalesces the first (count=1)")) return false;
+  QueuedControlInputMessage out{};
+  if (!expect(q.TryDequeue(&out), "one move remains after coalesce")) return false;
+  if (!expect(out.inputEvent.x == 20 && out.generatedUs == 2000,
+              "coalesce keeps the newest move and its generatedUs")) return false;
+  if (!expect(!q.TryDequeue(&out), "queue empty after the single coalesced move")) return false;
+
+  q.Reset();
+  if (!expect(q.coalesced_move_count() == 0 && q.dropped_count() == 0, "Reset clears counters")) return false;
+
+  ClientControlScheduler scheduler;
+  WindowPanelStateModel windowPanel;
+  StreamStateControl streamState;
+  CaptureModeRequestState captureMode;
+  KeyframeRequestState keyframe(120000, 300000, 3);
+  RuntimeTuneState runtimeTune(300000, 30000000, 250000, 1, 240);
+  scheduler.Reset(1000, 0);
+  scheduler.OnPingCompleted(0);
+  q.Enqueue(mkMove(5, 500));
+  bool gotInput = false;
+  ControlOutboundAction act{};
+  for (int i = 0; i < 12 && !gotInput; ++i) {
+    ControlOutboundAction a{};
+    if (scheduler.NextAction(100000 + static_cast<uint64_t>(i) * 1000, {}, &windowPanel, &streamState,
+                             &captureMode, &keyframe, &runtimeTune, &q, &a) &&
+        a.kind == ControlOutboundActionKind::InputEvent) {
+      act = a;
+      gotInput = true;
+    }
+  }
+  if (!expect(gotInput, "input action surfaced from the scheduler")) return false;
+  if (!expect(act.inputGeneratedUs == 500, "action carries the local generatedUs")) return false;
+  if (!expect(act.inputEvent.clientSendQpcUs != 500,
+              "wire send time is stamped at send, not at generation")) return false;
+  return true;
+}
+
 int main() {
   if (!test_ping_and_metrics_order()) return 1;
   if (!test_window_and_input_actions()) return 1;
+  if (!test_input_coalesce_and_generated_us()) return 1;
   if (!test_input_message_builders()) return 1;
   if (!test_capture_runtime_and_keyframe_actions()) return 1;
   if (!test_udp_assembler()) return 1;

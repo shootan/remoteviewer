@@ -69,4 +69,8 @@ HRESULT create_d3d11_device_for_primary_monitor(Microsoft::WRL::ComPtr<ID3D11Dev
                                                 Microsoft::WRL::ComPtr<ID3D11DeviceContext>* outContext,
                                                 D3D_FEATURE_LEVEL* outLevel);
 
+// WGCDEV (#355): true if `device`'s adapter owns the primary monitor. Used by the WGC path to
+// notice a stale device (e.g. left on the Remote Display Adapter after RDP disconnect) and rebuild.
+bool d3d_device_owns_primary_monitor(ID3D11Device* device);
+
 }  // namespace remote60::native_poc

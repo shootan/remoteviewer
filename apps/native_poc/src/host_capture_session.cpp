@@ -441,6 +441,18 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
           if (capture.gpuScalerRequested) {
             capture.gpuScalerHealthy = res.gpuScaler.initialize(d3d.Get(), res.ctx.Get(), &res.d3dContextMu);
           }
+          // WGCDEV (#355): the winrt device WGC uses is derived from res.d3d, so rebuild it here too;
+          // otherwise a later window-mode switch would find res.d3dDevice still on the old adapter.
+          {
+            Microsoft::WRL::ComPtr<IDXGIDevice> dxgiWr;
+            if (SUCCEEDED(d3d.As(&dxgiWr)) && dxgiWr) {
+              res.inspectable = nullptr;
+              if (SUCCEEDED(CreateDirect3D11DeviceFromDXGIDevice(dxgiWr.Get(), res.inspectable.put()))) {
+                res.d3dDevice =
+                    res.inspectable.as<winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice>();
+              }
+            }
+          }
           if (capture.CreateStaging(res, encoder, useH264, newW, newH)) {
             config.d3dDevice = d3d.Get();
             started = startDxgi(&dxgiDetail);
@@ -544,6 +556,39 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
         capture.sizeChangePending.store(0, std::memory_order_release);
         std::cout << "[native-video-host] desktop_backend=gdi capture-started=1 processIsolated=1\n";
         return true;
+      }
+    }
+    // WGCDEV (#355): the WGC frame pool must sit on the adapter the target renders on (the primary
+    // GPU). If our device is stale -- the host started over RDP so the device landed on the Remote
+    // Display Adapter, and RDP has since disconnected leaving that adapter with no output -- the
+    // pool creates but DWM never shares a surface and no frame ever arrives (window capture silently
+    // dead: applied=ok, wgc_window started, zero first-callback). G1 rebuilds res.d3d for the DXGI
+    // path but left res.d3dDevice (this WGC device) stale, and window mode never enters the G1
+    // branch at all. Rebuild the device on the primary adapter here before the pool is created.
+    if (!d3d_device_owns_primary_monitor(res.d3d.Get())) {
+      std::cout << "[native-video-host] wgc-device-adapter-stale: recreating D3D on primary adapter\n";
+      res.d3d.Reset();
+      res.ctx.Reset();
+      const HRESULT reHr = create_d3d11_device_for_primary_monitor(&res.d3d, &res.ctx, &res.fl);
+      if (SUCCEEDED(reHr) && res.d3d && res.ctx) {
+        if (useH264) (void)encoder.codec.set_d3d11_device(res.d3d.Get());
+        res.gpuScaler = GpuBgraScaler();
+        capture.gpuScalerHealthy = false;
+        if (capture.gpuScalerRequested) {
+          capture.gpuScalerHealthy =
+              res.gpuScaler.initialize(res.d3d.Get(), res.ctx.Get(), &res.d3dContextMu);
+        }
+        Microsoft::WRL::ComPtr<IDXGIDevice> dxgiWr;
+        if (SUCCEEDED(res.d3d.As(&dxgiWr)) && dxgiWr) {
+          res.inspectable = nullptr;
+          if (SUCCEEDED(CreateDirect3D11DeviceFromDXGIDevice(dxgiWr.Get(), res.inspectable.put()))) {
+            res.d3dDevice =
+                res.inspectable.as<winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice>();
+          }
+        }
+        std::cout << "[native-video-host] wgc-device-adapter-restored on primary\n";
+      } else {
+        std::cerr << "[native-video-host] wgc device recreate failed hr=" << hr_hex(reHr) << "\n";
       }
     }
     pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
