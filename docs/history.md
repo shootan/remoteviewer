@@ -8146,3 +8146,13 @@ Next action
   - **깨짐**: `maxQp=32` + `QualityVsSpeed=100`(속도 우선), 해상도는 풀(1920x1080, 다운스케일 아님) → 순수 QP/튜닝 문제. H.264가 텍스트 고주파를 QP32에서 뭉갬. 인코더 `stable_text` 튜닝(QualityVsSpeed=68 + text VBV, `mf_h264_codec.cpp:1445/1471/1513`)은 꺼져 있음.
 - 즉시 완화(호스트 env + 재시작): `REMOTE60_NATIVE_ENCODER_TUNE_MODE=stable_text`, `REMOTE60_NATIVE_MAX_QP=26`.
 - 근본(P8): 텍스트/인터랙티브 모드 — stable_text 튜닝 + QP 하향 + 최소 프레임 바닥 상향. 영상과 트레이드라 자동 감지 또는 토글이 이상적. 코드 변경 없음(진단만).
+
+### 346) 2026-09-02 P7 오판 회귀 수정(20fps를 붕괴로 오인) + GMux는 데스크톱모드라 텍스트 작음 — 0.2.72 (브랜치 refactor/viewer-split)
+
+- 사용자: GMux가 "갑자기 엄청 심해졌다"(깨짐·느림). 아까는 이 정도 아니었음.
+- 진단 1(모드): 지금 **데스크톱 모드**(captureTargetProc=monitor, selectedId=0, 전체 1920x1080). GMux는 그 안 작은 창이라 글자 픽셀이 적고 QP32에서 깨짐. 창모드로 GMux 창을 직접 고르면 화면을 꽉 채워 선명. → 즉시 완화는 창모드.
+- 진단 2(회귀): 15:33:34 `[abr] high_to_mid_severe clientDecodedFps=20` — 내가 넣은 P7-fps(`<minSevereFps`=35%=21fps)가 **정상 인터랙티브 20fps를 붕괴로 오판**해 mid 강등, 곧 static_recovery로 복귀 → high<->mid 플래핑. 텍스트에서 비트레이트가 출렁여 체감 악화.
+- 수정(`host_abr.hpp`): P7-fps 단독 강등 임계를 `minSevereFpsX100`(35%)에서 **`collapseFpsX100`(기본 12% / quality-first 18%)**로 하향. 실측 붕괴(≈8%, 5fps)는 잡고 인터랙티브 20~33fps는 안 건드림. 해상도 유지. `TestAbrLowClientFpsDemotesDespiteLowLatency`에 "33% dip은 강등 안 함" 케이스 추가, host_abr_test PASS.
+- 빌드: `remote60_installer` Release exit 0, 임베드 GNLinkHost/GNLinkSetup 0.2.72. 산출물 `dist/GNLinkSetup-0.2.72.exe`(직전 0.2.71 보존).
+- 미해결(별개): P8 텍스트 화질(QP32/속도우선 튜닝) — 창모드로도 남는 근본 화질. 별도 결정(stable_text+QP26 또는 토글).
+- 다음: 0.2.72 설치 → P7 플래핑 사라지는지 + 창모드에서 GMux 텍스트 선명한지 확인. 그다음 P8.

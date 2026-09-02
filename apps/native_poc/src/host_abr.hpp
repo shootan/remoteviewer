@@ -151,6 +151,11 @@ struct RateControlState {
     const uint32_t minOkayFpsX100 = abrExpectedFps * (rate.abrQualityFirst ? 90u : 85u);
     const uint32_t minDegradeFpsX100 = abrExpectedFps * (rate.abrQualityFirst ? 55u : 45u);
     const uint32_t minSevereFpsX100 = abrExpectedFps * (rate.abrQualityFirst ? 45u : 35u);
+    // P7 collapse floor: only a genuine relay collapse -- the client decoding a tiny fraction of
+    // the sent cadence -- trips ABR on fps alone. Normal interactive/low-motion use where the
+    // client decodes, say, 20 of 60 fps is NOT congestion and must not demote (that flapped
+    // high<->mid on a GMux text window). The measured 14:46 collapse was ~5 fps (8%). (history #345)
+    const uint32_t collapseFpsX100 = abrExpectedFps * (rate.abrQualityFirst ? 18u : 12u);
     const bool abrWarmupDone = (t >= (in.startUs + 4000000ULL));
 
     // A second in which the host offered almost no frames carries no usable evidence
@@ -191,7 +196,7 @@ struct RateControlState {
          // low-latency, so the old latency-gated fps clause never fired and ABR sat at high straight
          // into peer-lost (measured 14:46, client 3-9 fps while host sent 60). Low decoded fps under
          // an active send is congestion on its own. (history #341)
-         in.clDecodedFpsX100 < minSevereFpsX100);
+         in.clDecodedFpsX100 < collapseFpsX100);
     const bool moderateDownByClient =
         in.metricsFresh &&
         (in.clAvgLatencyUs > moderateLatencyUs ||

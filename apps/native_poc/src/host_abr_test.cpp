@@ -283,6 +283,14 @@ void TestAbrLowClientFpsDemotesDespiteLowLatency() {
   const int p = RunAbr(r, lying, kStartUs + 3 * kSec, 2, &at, &reason);
   expect(p == 1 && at == 2 && reason == "high_to_mid_severe",
          "abr(P7): low client fps under active send demotes despite low latency");
+
+  // Interactive/low-motion use: the client decodes 20 of 60 fps with fine latency. That is NOT a
+  // collapse (the floor is ~12%) and must hold, or ABR flaps high<->mid on a text window. (#345)
+  RateControlState ok = MakeAbr(false);
+  AbrInputs interactive = Healthy();
+  interactive.clDecodedFpsX100 = kFps * 33;  // ~33% of target: normal, not congestion
+  const int pi = RunAbr(ok, interactive, kStartUs + 3 * kSec, 6);
+  expect(pi == 0, "abr(P7): a 20-of-60 fps interactive dip does not demote");
 }
 
 // ---------------- M9 ----------------
