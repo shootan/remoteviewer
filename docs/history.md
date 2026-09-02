@@ -8235,3 +8235,12 @@ Next action
 - 보류(Codex 동의): inject→content full join(candidateInputToContentUs), p50/p95 히스토그램(avg+max로 충분). rate chain(moveGen≈60, coalesced≈53, moveSent≈moveRecv≈injected≈7, dxgiContent≈7)이 어긋나는 단계가 있을 때만 join 추가.
 - 빌드: installer Release exit 0, shared_core_test PASS, 임베드 0.2.77. 산출물 `dist/GNLinkSetup-0.2.77.exe`(직전 0.2.76 보존).
 - 다음: 0.2.77 설치 → 드래그 실측 → 클라(input-p0)·호스트(input-p0)·dxgi-acquire 조인 판정 → P1a.
+
+### 355) 2026-09-02 창모드 전부 실패 = WGC 장치(res.d3dDevice) 잘못된 어댑터 (G1이 res.d3d만 고침) (기록)
+
+- 사용자: PC·모바일 둘 다 창모드(LDPlayer/putty/explorer docs) 전부 실패. 18:00 이후 반복.
+- 로그: 모든 window-select `applied=1 reason=ok` + `desktop_backend=wgc_window capture-started=1` 인데 **first-callback/first-frame 0장**(putty streamGen=14, explorer=15는 콜백조차 없음; dnplayer 16/20은 콜백만). 데스크톱(DXGI)은 first-frame 정상. 즉 창(WGC)만 프레임 0.
+- 확정 원인: WGC 프레임 풀은 `host_capture_session.cpp:549 CreateFreeThreaded(res.d3dDevice, ...)`. `res.d3dDevice`는 `host_startup_graphics.cpp:422 res.inspectable.as<IDirect3DDevice>()`로 **기동 시점 res.d3d 파생, 1회만**. #340 G1은 어댑터 이동 시 res.d3d만 재생성하고 res.d3dDevice/res.inspectable은 그대로 뒀다. 호스트가 16:15 RDP 접속 중 기동→장치가 RDP 어댑터. RDP 해제 후 데스크톱은 AMD로 이동, DXGI는 G1으로 복구되나 **WGC는 RDP 어댑터의 res.d3dDevice라 AMD 창을 못 잡음**. 게다가 창모드에선 DXGI 분기(G1)가 아예 안 돌아 자가복구 경로도 없음.
+- 즉시 워크어라운드: RDP off 상태에서 GNLinkHost 재시작 → res.d3d+res.d3dDevice 둘 다 AMD로 생성 → 창모드 정상. (현재 RDP off, 데스크톱 AMD.)
+- 실제 수정(WGC-DEV, 착수 예정): (a) G1 재생성 시 res.inspectable/res.d3dDevice도 새 res.d3d에서 재구축, (b) 창모드 캡처 시작(RestartCaptureSessionImpl WGC 분기)에서 현재 장치 어댑터가 타겟 창 출력과 다르면 res.d3d+res.d3dDevice 재생성 후 재시도. G1의 WGC 짝. Codex 검증 대상.
+- 실행 호스트 0.2.74(내 P0 0.2.75~77 미설치). 코드 변경 없음(진단).
