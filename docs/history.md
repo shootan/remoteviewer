@@ -8034,3 +8034,13 @@ Next action
 - 제안 순서(미착수): (P1) 요청 세션이 `WTSDisconnected`면 콘솔 세션을 타겟 + 주입 결과 ack(U5) → (P2) PC 뷰어 툴바에 잠금해제 버튼: 잠금 플래그 또는 N초 무프레임이면 표시, 호스트별 저장(DPAPI), Enter→비번→Enter → (P3) 호스트가 "GPU 출력 없음+WGC 기아"를 pong 플래그로 알리고 부착된 출력의 어댑터로 DXGI 재시도; 장기적으로 자체 가상 디스플레이. 즉시 완화: 호스트 물리 모니터 켜두기(또는 더미 플러그).
 - 변경 파일: `docs/history.md`만. 코드 변경·빌드·테스트 없음(RDP 접속 중이라 테스트 불가 규칙).
 - 다음: 사용자 결정 — P1→P2→P3 순 착수 여부, 회귀 A/B 필요 여부.
+
+### 336) 2026-09-02 헤드리스 정지 진단 계측 + 가상 디스플레이 설계 확정 — 0.2.68 (브랜치 refactor/viewer-split)
+
+- 배경(#335 후속): 사용자 요청 "가상 디스플레이 만들어 물리 없으면 그걸 쓰게". 설계 확정: **물리 출력 우선(물리 모니터 → RDP 어댑터 → 가상), 가상은 헤드리스 폴백**. 호스트는 이미 "있는 출력을 골라 캡처"라 물리 우선은 기존 동작 그대로.
+- **작업을 바꾼 발견**: 어제 정지 순간 이 PC엔 **이미 가상 디스플레이가 있었다** — OSLink가 깐 MikeTheTech VDD(`ROOT\DISPLAY\0001`, `mttvdd.inf`, SignPath Foundation 서명, 테스트서명 OFF에서 정식 로드). 데스크톱이 실제로 그 위 1920x1080으로 옮겨갔는데도(`capture-size-updated new=1920x1080`) 우리 DXGI가 `dxgi_select_no_usable_output` → WGC → 30초당 2~9장. 즉 "가상 디스플레이 존재"만으로는 안 고쳐진다(있었는데 굶었다).
+- 유력 가설: **소비자 없는 유휴 indirect display는 합성이 거의 안 됨.** OSLink 켜짐=OSLink가 그 VDD를 소비→합성 돌아 우리 캡처도 60fps(오늘 `DesktopUpdateRate` 실측 idle 4/s, 동작 시 25~60/s). OSLink 꺼짐=소비자 없음→합성 정지→DXGI/WGC 둘 다 기아. 확정하려면 헤드리스(RDP off + OSLink off)에서 재현 필요.
+- 조치(계측만, `libs/capture/src/capture_backend_dxgi.cpp`): `resolve_output`의 no_usable_output 폴백에서 **전체 토폴로지를 덤프**. `dxgi_no_usable_output reason=.. deviceLuid=.. outputs=N` + 출력별 `dxgi_output adapter=".." luid=.. name=.. extent=WxH attached=0/1 portrait=0/1 onDeviceAdapter=0/1`. 지금은 이유 코드 한 줄뿐이라 "VDD가 detached(extent 0)라 걸러졌나 / 다른 어댑터라 못 봤나"를 구분 못 한다. 이 경로는 이미 실패한 지점이라 **동작 무변경, 순수 진단**. 코드베이스 교훈("성공/실패 경로에 계측 없으면 원인 안 보인다") 그대로.
+- 가상 디스플레이 서명/비용 결론(#335 연장): IddCx는 **사용자 모드(UMDF)** 라 커널 드라이버용 Microsoft attestation(EV 인증서, 연 수십만원) 벽에 안 걸린다. 일반 코드서명이면 되고, 오픈소스는 SignPath로 무료. **MikeTheTech VDD(MIT)가 이 PC에서 정식 서명으로 동작 중**이 산증거. 제품은 이걸 번들·설치하면 서명 비용 0. 자체 드라이버 작성 시에만 유료.
+- 빌드: `remote60_installer` Release exit 0. 임베드 확인 GNLinkHost.exe / GNLinkSetup.exe 둘 다 **0.2.68**(UTF-16 스캔). 산출물 `dist/GNLinkSetup-0.2.68.exe`(직전 0.2.67 보존). **RDP 접속 중이라 캡처/성능 판정 안 함**(CLAUDE.md) — 빌드 컴파일 확인까지만.
+- 다음 액션: 사용자 헤드리스 테스트(RDP off + OSLink off, 우리 세션 접속) → NAS host.log의 `dxgi_no_usable_output`/`dxgi_output` 라인으로 VDD가 왜 걸러졌는지 확정 → 그 결과로 실제 수정 결정(가상 디스플레이 attach-primary 강제 / 캡처가 소비자 역할 / 자체 VDD 번들+설치+구동 중 택).

@@ -249,8 +249,27 @@ struct DxgiDesktopCaptureSession::Impl {
     std::vector<Microsoft::WRL::ComPtr<IDXGIOutput>> allHandles;
     std::string enumerateDetail;
     if (enumerate_outputs(&all, &allHandles, &enumerateDetail)) {
-      const auto wide = select_dxgi_output(all, targetId, config.landscapeOnly);
       const uint64_t deviceLuid = device_adapter_luid();
+      // Nothing on the device's own adapter was usable. Dump the whole topology so a headless
+      // host (no physical monitor, RDP gone, an idle virtual display) says WHY every output was
+      // rejected instead of hiding behind one reason code. An indirect display with no active
+      // consumer reports detached (zero extent), which is exactly what select_dxgi_output filters
+      // out -- and the single "no_usable_output" line could never tell that apart from a genuine
+      // adapter move. (Diagnostics only: this path already failed; it does not change behaviour.)
+      log("capture", "dxgi_no_usable_output reason=" +
+                         std::string(dxgi_selection_reason_name(selection.reason)) +
+                         " deviceLuid=" + std::to_string(deviceLuid) +
+                         " outputs=" + std::to_string(all.size()));
+      for (const auto& o : all) {
+        log("capture",
+            "dxgi_output adapter=\"" + o.adapterDescription + "\" luid=" +
+                std::to_string(o.adapterLuid) + " name=" + o.deviceName + " extent=" +
+                std::to_string(o.right - o.left) + "x" + std::to_string(o.bottom - o.top) +
+                " attached=" + std::to_string(o.attachedToDesktop ? 1 : 0) + " portrait=" +
+                std::to_string(o.rotatedPortrait ? 1 : 0) + " onDeviceAdapter=" +
+                std::to_string((deviceLuid != 0 && o.adapterLuid == deviceLuid) ? 1 : 0));
+      }
+      const auto wide = select_dxgi_output(all, targetId, config.landscapeOnly);
       if (wide.found && deviceLuid != 0 && wide.output.adapterLuid != deviceLuid) {
         // Under RDP the desktop composes onto the Microsoft Remote Display Adapter while the
         // device stays on the physical GPU. Retrying the same device against it can never work;
