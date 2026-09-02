@@ -8014,3 +8014,23 @@ Next action
   이건 진단 계측이지 근본 수정이 아니다. GNLinkHost가 관리자 권한이라 실행 중 바이너리 버전을 비특권에서 못 읽어(경로/버전 빈값), 어느 빌드가 재현 중인지도 관측 없이는 불명이었다.
 - 빌드: 호스트·클라·설치본 exit 0, viewer gate PASS. 산출물 `dist/GNLinkSetup-0.2.67.exe`(임베드 0.2.67×3/0.2.66×0). APK는 이 버그와 무관(별도 Kotlin 업로더)이라 0.2.12 유지.
 - 다음: 0.2.67 설치 후 재접속 → 로컬 `log_upload.diag`(집 호스트는 내가 직접 읽음)로 첫 배치 후 send FAILED status가 찍히는지(→ http_post 반복 실패) vs idle alive만 찍히는지(→ enqueue/worker) 판정 → 그 결과로 실제 수정.
+
+### 335) 2026-09-02 "RDP 끊은 뒤 잠금 못 풀고, OSLink로 푼 뒤 GNLink가 멈춤" 원인 규명 (브랜치 refactor/viewer-split, 문서만)
+
+- 사용자 보고: RDP 종료 → 호스트 잠김 → GNLink로는 못 풀고 OSLink로 풀어 OSLink 종료 → GNLink 접속 → 쓰다가 화면 정지. "항상 이랬다".
+  질문 3개: PC 뷰어 잠금해제 버튼은 언제 / 정지는 리팩터 회귀냐 / 빠른 복구(호스트 재갱신)는 언제.
+- 로그 3종 교차(NAS `logs/shotan/8ec6…/host.log`, `68f7…/viewer.log`, 호스트 `%ProgramData%\GNLink\secure_input.log`). **오늘(09-02)은 세션이 없고**, 해당 사건은 09-01 18:41~18:49.
+- 타임라인(호스트 시각):
+  - 18:41:21 접속(RDP 중, DXGI 2236x1232 정상) → **18:41:31 RDP 종료**: `duplication_recreate 0x887A0026` → `CreateForMonitor failed` ×4(끊긴 세션엔 모니터가 없다) → 뷰어 `secure-desktop-active=1`(잠금 보고는 됨).
+  - 18:41:38~46 뷰어가 잠금 화면에 키 35개 전송 → `secure_input.log`: `target session=1 source=requester (console=5)` · `attach=ok journal=ok` · **`inject FAILED at SendInput err=5` 전부**. 호스트 통계는 `secureInputDelivered=35`로 성공 보고(U5 그대로).
+  - 18:42:13 재접속(OSLink로 해제 후): `capture-size 2236x1232→1920x1080`, **`fallback_reason=dxgi_select_no_usable_output`**(GPU 출력에 데스크톱 없음) → WGC. 이후 30초마다 승격 재시도 실패(`captureRestarts` 4→25).
+  - 18:43:29~18:49:51 본 세션: **WGC `callbackFrames` 30초당 2~9장**(실질 0.1~0.3fps), 그동안 `inputEvents` 165→1012(사용자는 조작 중) → 18:46:22 이후 입력 0(포기). 뷰어는 `d3dPresentSuccess` 증가·`paintEnter` 정상 = 렌더/F-20 아님. 인코더 `encodedFrames==callbackFrames` = 인코더/송신 아님. `trailingKickCount=246` = 호스트는 같은 정지 프레임을 계속 재전송하고 있었음.
+- 현재 디스플레이 실측(RDP 중): `Virtual Display Driver`(OSLink VDD by MTT) **1920x1080@60 Active**, `Microsoft Remote Display Adapter` 2236x1232@32 Active, `AMD Radeon` 물리 출력의 모니터 `Generic Monitor (2777M)` **Present=False**(물리 모니터 꺼짐/미검출). OSLink `ldremote.exe`(세션 1, 08-29부터) · `ldremoteevent.exe`(**콘솔 세션 6**) · `capture.exe`(세션 1) 상주.
+- 결론:
+  1. **잠금 해제 실패 원인**: RDP를 끊으면 호스트 세션 1은 *끊긴(disconnected)* 세션이고 콘솔에는 별도 로그온 세션(5/6)의 LogonUI가 뜬다. 우리 SYSTEM 에이전트는 `resolve_target_session`이 requester(세션 1)를 우선해 **끊긴 세션의 Winlogon**에 SendInput → `err=5`. OSLink는 이벤트 에이전트를 **콘솔 세션**에 두고(실측 세션 6) 거기서 로그온시켜 세션 1을 콘솔로 되붙인다. 즉 잠금해제는 콘솔 세션 LogonUI를 쳐야 한다. 토큰 경로는 이미 SYSTEM 토큰+`TokenSessionId`라 콘솔 세션 생성 가능.
+  2. **정지 원인**: 물리 모니터가 없어서 OSLink 해제 후 데스크톱이 **OSLink 가상 디스플레이(VDD by MTT) 위에만** 있다(`dxgi_select_no_usable_output`이 그 증거). OSLink를 끄면 그 VDD의 소비자가 없어져 DWM 합성이 거의 멈추고 WGC에 프레임이 안 온다. 코덱/전송/뷰어 회귀 아님. 승격 재시도 루프(`6d0c418`, 08-06)도 리팩터 이전 것. **리팩터 회귀 근거 없음** — 단 동일 시나리오 A/B(0.2.57 vs 0.2.67)는 안 했다.
+  3. **"호스트가 재갱신해 다시 보내면 되지 않나"**: 그 층(세션 barrier IDR·RequestKeyframe 6종·trailing kick·2fps static refresh)은 이미 있고 어제도 동작했다(kick 246회). 소스(WGC)가 새 픽셀을 못 받으면 같은 정지 화면을 IDR로 다시 보낼 뿐이라 이 정지는 **캡처/디스플레이 층**에서 풀어야 한다.
+  4. PC 뷰어 잠금해제 UI: **미구현**. 호스트 플래그(`kCaptureFlagSecureDesktopActive`)는 오고 있고 PC 뷰어는 로그 한 줄만 찍는다(`viewer_control_client.cpp:62`). 안드로이드만 U6 오버레이가 있고 "[ ] 실기 확인" 미완.
+- 제안 순서(미착수): (P1) 요청 세션이 `WTSDisconnected`면 콘솔 세션을 타겟 + 주입 결과 ack(U5) → (P2) PC 뷰어 툴바에 잠금해제 버튼: 잠금 플래그 또는 N초 무프레임이면 표시, 호스트별 저장(DPAPI), Enter→비번→Enter → (P3) 호스트가 "GPU 출력 없음+WGC 기아"를 pong 플래그로 알리고 부착된 출력의 어댑터로 DXGI 재시도; 장기적으로 자체 가상 디스플레이. 즉시 완화: 호스트 물리 모니터 켜두기(또는 더미 플러그).
+- 변경 파일: `docs/history.md`만. 코드 변경·빌드·테스트 없음(RDP 접속 중이라 테스트 불가 규칙).
+- 다음: 사용자 결정 — P1→P2→P3 순 착수 여부, 회귀 A/B 필요 여부.
