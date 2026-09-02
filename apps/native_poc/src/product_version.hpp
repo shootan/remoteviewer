@@ -9,6 +9,6 @@ namespace remote60::native_poc {
 // all is to answer "did the update actually take?" -- a question that came up because several
 // releases in a row were diagnostic-only and looked identical from outside. A version that could
 // drift from the binary it labels would be worse than showing nothing.
-constexpr wchar_t kProductVersion[] = L"0.2.78";
+constexpr wchar_t kProductVersion[] = L"0.2.79";
 
 }  // namespace remote60::native_poc

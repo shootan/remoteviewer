@@ -69,8 +69,15 @@ HRESULT create_d3d11_device_for_primary_monitor(Microsoft::WRL::ComPtr<ID3D11Dev
                                                 Microsoft::WRL::ComPtr<ID3D11DeviceContext>* outContext,
                                                 D3D_FEATURE_LEVEL* outLevel);
 
-// WGCDEV (#355): true if `device`'s adapter owns the primary monitor. Used by the WGC path to
-// notice a stale device (e.g. left on the Remote Display Adapter after RDP disconnect) and rebuild.
-bool d3d_device_owns_primary_monitor(ID3D11Device* device);
+// WGCDEV (#355, #356): whether `device`'s adapter still has any attached desktop output.
+//
+// The minimal, safe signal that a capture device has gone stale is that its adapter no longer owns
+// a single attached output -- the exact state the Microsoft Remote Display Adapter enters when the
+// host started over RDP and RDP later disconnected. "Owns the primary monitor" was rejected as the
+// trigger: a window/monitor target can legitimately live on a secondary monitor or another adapter,
+// and hybrid-GPU / IddCx cross-adapter composition is normal. Recreate only on `None`; `Unknown`
+// (probe could not decide) must never tear a working device down.
+enum class DeviceAdapterOutputState { HasAttached, None, Unknown };
+DeviceAdapterOutputState device_adapter_output_state(ID3D11Device* device);
 
 }  // namespace remote60::native_poc

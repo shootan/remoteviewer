@@ -8254,3 +8254,14 @@ Next action
 - 빌드: installer Release exit 0, shared_core_test PASS, host 컴파일 OK. 임베드 0.2.78. 산출물 `dist/GNLinkSetup-0.2.78.exe`(직전 0.2.77 보존).
 - **주의**: WGCDEV는 D3D/WinRT 장치 수명주기 변경이라 화면 확인 불가한 블라인드 수정 — 실기 검증 필수. Codex에 diff 리뷰 요청.
 - 다음: 0.2.78 설치 → (A) 창모드 즉시 정상인지(로그 wgc-device-adapter-restored + first-frame) (B) 드래그 실측 input-p0 rate chain. A 통과 시 창모드 닫힘, B 확정 시 P1a.
+
+### 357) 2026-09-02 WGCDEV 재작성 — Codex BLOCKER 2건 수정, 트랜잭션 장치 재생성 — 0.2.79 (브랜치 refactor/viewer-split)
+
+- 0.2.78 WGCDEV를 Codex(remote#nhxsk5vr)가 실기 승인 불가로 판정. 지적된 BLOCKER 2건이 실제 버그라 확인하고 재작성.
+- **BLOCKER 1 (cross-device staging)**: 0.2.78은 장치 교체를 CreateStaging(:370) *뒤*(WGC 풀 직전 :549)에 해서, readback/staging은 옛 장치·WGC 풀은 새 장치로 갈렸다 → PublishCapturedTexture의 CopyResource가 cross-device로 실패("풀은 살아났는데 인코드 0"). **수정**: 장치 트랜잭션을 CreateStaging *앞*으로 이동. 이제 순서 = Detach → target/size → device transaction → CreateStaging → pool. staging·encoder·WGC 풀이 한 장치 공유.
+- **BLOCKER 2 (split-brain)**: winrt 래퍼 실패 시 res.d3d=NEW·res.d3dDevice=OLD인데 "restored" 출력 후 stale 장치로 진행, 이후 predicate가 res.d3d만 봐서 영영 미검출. **수정**: `RecreateCaptureDeviceOnPrimary()` 트랜잭션 헬퍼 — newD3d/newCtx/newInspectable/newWinrt 전부 local로 만들고 **전 단계 성공 후에만** quartet 동시 commit, 중간 실패 시 res 무손상 + HRESULT 로그 + return false. G1·조기검사 두 경로가 공용.
+- **HIGH 1 (predicate)**: `d3d_device_owns_primary_monitor`(primary 소유) → `device_adapter_output_state`(tri-state: HasAttached/None/Unknown)로 교체. **None(출력 0개 확정)만** 재생성, Unknown(probe 실패)은 working 장치 보존. secondary/hybrid/IddCx cross-adapter 오판 제거.
+- **HIGH 2 (encoder MFT 재바인드)**: set_d3d11_device가 실행 중 MFT 미재바인드 — CPU readback(기본) 무해, NV12 surface 모드만 영향. 인라인 수정 금지 규칙대로 **원장 D3**(구현계획.md)에 기록, hotfix 미수정.
+- G1(dxgi_adapter_changed)도 인라인 split-brain 재생성 제거하고 헬퍼로 통일. WGC-branch 재생성 블록 삭제(조기검사가 창모드 포함 전 경로 커버).
+- 빌드: host 컴파일 OK, installer Release, host_abr_test PASS, shared_core_test PASS. 임베드 0.2.79. 산출물 `dist/GNLinkSetup-0.2.79.exe`. **0.2.78은 폐기(설치 금지)**.
+- 여전히 블라인드(화면 확인 불가) 수정 — Codex 재리뷰 요청 + 실기(RDP-on 기동→RDP-off→창 선택→first-frame) 필수.

@@ -289,23 +289,32 @@ std::optional<PrimaryMonitorInfo> primary_monitor_info() {
 // adapter change but left the WGC/res.d3dDevice path stale; this predicate is how the WGC path
 // notices it must rebuild. Conservative: if the answer cannot be determined, returns true so a
 // healthy device is never torn down on a probe failure.
-bool d3d_device_owns_primary_monitor(ID3D11Device* device) {
-  if (!device) return true;
-  const HMONITOR primary = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
-  if (!primary) return true;
+DeviceAdapterOutputState device_adapter_output_state(ID3D11Device* device) {
+  // Tri-state on purpose (Codex review #356): tear a working capture device down ONLY when we are
+  // certain its adapter has zero attached outputs. Any probe failure returns Unknown so a transient
+  // COM error never triggers a recreate churn loop.
+  if (!device) return DeviceAdapterOutputState::Unknown;
   Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
-  if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) || !dxgiDevice) return true;
+  if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) || !dxgiDevice)
+    return DeviceAdapterOutputState::Unknown;
   Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
-  if (FAILED(dxgiDevice->GetAdapter(&adapter)) || !adapter) return true;
+  if (FAILED(dxgiDevice->GetAdapter(&adapter)) || !adapter)
+    return DeviceAdapterOutputState::Unknown;
+  bool hasAttached = false;
   for (UINT i = 0;; ++i) {
     Microsoft::WRL::ComPtr<IDXGIOutput> output;
     const HRESULT hr = adapter->EnumOutputs(i, &output);
-    if (hr == DXGI_ERROR_NOT_FOUND) break;
-    if (FAILED(hr) || !output) break;
+    if (hr == DXGI_ERROR_NOT_FOUND) break;  // enumeration ran to completion
+    if (FAILED(hr) || !output) return DeviceAdapterOutputState::Unknown;  // probe failed mid-walk
     DXGI_OUTPUT_DESC desc{};
-    if (SUCCEEDED(output->GetDesc(&desc)) && desc.Monitor == primary) return true;
+    if (FAILED(output->GetDesc(&desc))) return DeviceAdapterOutputState::Unknown;
+    if (desc.AttachedToDesktop &&
+        desc.DesktopCoordinates.right > desc.DesktopCoordinates.left &&
+        desc.DesktopCoordinates.bottom > desc.DesktopCoordinates.top) {
+      hasAttached = true;
+    }
   }
-  return false;  // adapter enumerated but does not own the primary monitor -> stale device
+  return hasAttached ? DeviceAdapterOutputState::HasAttached : DeviceAdapterOutputState::None;
 }
 
 HRESULT create_d3d11_device_for_primary_monitor(Microsoft::WRL::ComPtr<ID3D11Device>* outDevice,
