@@ -113,12 +113,14 @@ bool RecreateCaptureDeviceOnPrimary(CaptureState& capture, CaptureResources& res
     capture.gpuScalerHealthy =
         res.gpuScaler.initialize(res.d3d.Get(), res.ctx.Get(), &res.d3dContextMu);
   }
-  // Field-verification gate (Codex review #357): both halves are built from newD3d so they resolve to
-  // one adapter by construction, but log native adapter LUID and the LUID the WinRT wrapper unwraps to
-  // so the field capture proves there is no split-brain (nativeLuid == winrtLuid). Best-effort: a probe
-  // failure only degrades the log, never the commit.
-  auto luid_lo = [](const LUID& l) { return static_cast<long>(l.LowPart); };
+  // Field-verification gate (Codex review #357, #359): both halves are built from newD3d so they
+  // resolve to one adapter by construction, but log native adapter LUID and the LUID the WinRT wrapper
+  // unwraps to so the field capture proves there is no split-brain. Track *Known flags separately:
+  // if a probe fails both LUIDs stay 0:0, so a value-only compare would print a false luidMatch=1.
+  // luidMatch is meaningful only when both probes succeeded. Best-effort: a probe failure degrades the
+  // log, never the commit.
   LUID nativeLuid{};
+  bool nativeKnown = false;
   {
     Microsoft::WRL::ComPtr<IDXGIDevice> nd;
     Microsoft::WRL::ComPtr<IDXGIAdapter> na;
@@ -126,9 +128,11 @@ bool RecreateCaptureDeviceOnPrimary(CaptureState& capture, CaptureResources& res
     if (SUCCEEDED(res.d3d.As(&nd)) && nd && SUCCEEDED(nd->GetAdapter(&na)) && na &&
         SUCCEEDED(na->GetDesc(&nDesc))) {
       nativeLuid = nDesc.AdapterLuid;
+      nativeKnown = true;
     }
   }
   LUID winrtLuid{};
+  bool winrtKnown = false;
   {
     // Unwrap the WinRT projection back to its native IDXGIDevice via IDirect3DDxgiInterfaceAccess
     // (the inverse of CreateDirect3D11DeviceFromDXGIDevice) off res.inspectable, the com_ptr we just
@@ -142,13 +146,26 @@ bool RecreateCaptureDeviceOnPrimary(CaptureState& capture, CaptureResources& res
         SUCCEEDED(access.Get()->GetInterface(IID_PPV_ARGS(wd.GetAddressOf()))) && wd &&
         SUCCEEDED(wd->GetAdapter(&wa)) && wa && SUCCEEDED(wa->GetDesc(&wDesc))) {
       winrtLuid = wDesc.AdapterLuid;
+      winrtKnown = true;
     }
   }
-  const bool luidMatch = nativeLuid.HighPart == winrtLuid.HighPart &&
+  const bool luidMatch = nativeKnown && winrtKnown &&
+                         nativeLuid.HighPart == winrtLuid.HighPart &&
                          nativeLuid.LowPart == winrtLuid.LowPart;
+  // Confirm the freshly committed device actually owns an attached output -- rules out a headless
+  // recreate loop where the fallback adapter itself has zero outputs (Codex review #359 Q3).
+  const DeviceAdapterOutputState newState = device_adapter_output_state(res.d3d.Get());
+  const char* newStateStr = newState == DeviceAdapterOutputState::HasAttached ? "has"
+                            : newState == DeviceAdapterOutputState::None       ? "none"
+                                                                              : "unknown";
+  // create_d3d11_device_for_primary_monitor falls back to another adapter (or default hardware) when
+  // the primary is unresolved, so the target is "primary-or-fallback", not guaranteed primary.
   std::cout << "[native-video-host] device-recreate(" << reason
-            << ") committed on primary adapter nativeLuid=" << luid_lo(nativeLuid)
-            << " winrtLuid=" << luid_lo(winrtLuid) << " luidMatch=" << (luidMatch ? 1 : 0) << "\n";
+            << ") committed target=primary-or-fallback nativeKnown=" << (nativeKnown ? 1 : 0)
+            << " winrtKnown=" << (winrtKnown ? 1 : 0)
+            << " nativeLuid=" << nativeLuid.HighPart << ":" << static_cast<long>(nativeLuid.LowPart)
+            << " winrtLuid=" << winrtLuid.HighPart << ":" << static_cast<long>(winrtLuid.LowPart)
+            << " luidMatch=" << (luidMatch ? 1 : 0) << " newAdapterState=" << newStateStr << "\n";
   return true;
 }
 }  // namespace
@@ -621,6 +638,15 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
       if (!started) {
         std::cout << "[native-video-host] fallback_reason=" << gdiDetail << "\n";
         backend.active = DesktopCaptureBackend::Wgc;
+        // Codex review #359: GDI skipped the early transaction (it needs no GPU device), so on the
+        // GDI->WGC fallback the device may still be stranded on a dead adapter. WGC needs a live one,
+        // and CreateStaging can succeed on a stale-but-valid device without triggering its own
+        // recreate, so run the transaction here -- before this path's CreateStaging -- to keep staging
+        // and the WGC pool on one live device.
+        if (device_adapter_output_state(res.d3d.Get()) == DeviceAdapterOutputState::None &&
+            !RecreateCaptureDeviceOnPrimary(capture, res, encoder, useH264, "gdi-wgc-fallback")) {
+          return false;
+        }
         auto refreshedItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(gdi-fallback)");
         if (!refreshedItem) return false;
         item = refreshedItem;

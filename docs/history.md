@@ -8283,3 +8283,12 @@ Next action
 - 구조상 두 핸들 모두 newD3d 1개에서 파생돼 luidMatch=1이 보장되지만, 필드 캡처가 자명하도록 명시. (네임스페이스: `::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess` — winrt 투영 아님, WRL QI로 언랩.)
 - 빌드: host 컴파일 OK, host_abr_test PASS, shared_core_test PASS. 임베드 0.2.81. 산출물 `dist/GNLinkSetup-0.2.81.exe`. 0.2.78/79/80 폐기.
 - 실기 확인 항목: `capture-device-adapter-stale` → `device-recreate(...) committed ... luidMatch=1` → staging → `desktop_backend=wgc_window capture-started=1` + first-callback. RDP-on 기동→off→창 선택.
+
+### 360) 2026-09-02 WGCDEV — LUID 게이트 false-PASS 수정 + GDI→WGC 폴백 갭 봉합 — 0.2.82 (브랜치 refactor/viewer-split)
+
+- Codex가 0.2.81 실기를 승인하면서 후속 HIGH 2건 지적 → 실기 전에 마저 처리(0.2.81 미설치라 대체).
+- **진단 HIGH (LUID false-PASS)**: b29c791의 nativeLuid/winrtLuid가 {0:0} 시작이라 두 probe 모두 실패 시 값만 비교해 luidMatch=1(거짓 PASS)이 찍혔다. 또 LowPart만 로깅. **수정**: nativeKnown/winrtKnown 플래그 추가, luidMatch = 둘 다 known && High/Low 동일일 때만. 로그에 nativeKnown/winrtKnown + HighPart:LowPart 전체 + `newAdapterState`(재생성 장치가 attached output 소유하는지, headless 재생성 루프 배제) 병기. 문구 "committed on primary adapter"→"committed target=primary-or-fallback"(create_d3d11_device_for_primary_monitor가 primary 미해결 시 fallback/default로 떨어질 수 있음, Codex Low).
+- **HIGH (GDI→WGC 폴백 갭)**: GDI는 조기검사를 skip(needsGpuCaptureDevice=false)하는데, GDI가 stale-but-valid 장치에서 CreateStaging 성공 후 GDI 프로세스 실패로 WGC 폴백하면 그 경로 CreateStaging도 stale에서 성공해 트랜잭션 helper 미호출 → old WGC wrapper로 갈 수 있었다("init 실패 시에만 커버"가 정확한 조건). **수정**: GDI→WGC 폴백 블록에서 backend=Wgc 설정 직후·CreateStaging 전에 device state None이면 RecreateCaptureDeviceOnPrimary 실행. intended window-mode 실기는 windowMode=true라 조기 트랜잭션이 먼저 돌아 무관했으나 완전성 확보.
+- Codex Q1(트랜잭션 race/leak) PASS 확인, Q2/Q3도 정상경로 no-op·churn 방어 확인. HIGH 2(encoder MFT) 원장 D3 유지.
+- 빌드: host 컴파일 OK, host_abr_test PASS, shared_core_test PASS. 임베드 0.2.82. 산출물 `dist/GNLinkSetup-0.2.82.exe`. 0.2.78~81 폐기.
+- 최종 실기 게이트(Codex): 1)capture-device-adapter-stale 2)device-recreate nativeKnown=1·winrtKnown=1·luidMatch=1·newAdapterState=has 3)staging 정상 4)desktop_backend=wgc_window capture-started=1 5)first callback/encoded key/present 6)30초 stats 지속 7)input-p0 rate chain.
