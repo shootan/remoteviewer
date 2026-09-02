@@ -3,6 +3,8 @@
 // anonymous namespace were file-private in the host before and stay private here.
 
 #include <windows.h>
+#include <imm.h>
+#pragma comment(lib, "imm32.lib")
 #ifdef min
 #undef min
 #endif
@@ -329,6 +331,54 @@ bool send_desktop_unicode_char(wchar_t ch) {
   return SendInput(2, in, sizeof(INPUT)) == 2;
 }
 
+// G7: keep the host IME out of the way of injected keystrokes. English letters travel as VK key
+// events through SendInput, which the host IME composes -- so when the host IME sits in Korean /
+// native mode, injected English is eaten and never appears (the user had to click the host tray
+// toggle to unstick it, and the client-side Han/Yeong never reached the host). Korean does not need
+// the host IME at all: the PC client composes it locally and sends the finished text, injected as
+// Unicode (KEYEVENTF_UNICODE) which bypasses the IME entirely. So the correct state for a remote
+// session is host IME OFF -- English VK lands, Korean still arrives via the text path. Force the
+// focused control's IME to alphanumeric on keydown, throttled and env-gated (set
+// REMOTE60_NATIVE_IME_NEUTRALIZE_OFF=1 to disable). Low regression risk: it can only fail to help
+// English; it cannot break the Unicode-injected Korean. (history #349)
+void ensure_foreground_ime_alphanumeric() {
+  static std::atomic<bool> enabledInit{false};
+  static std::atomic<bool> enabled{true};
+  if (!enabledInit.exchange(true)) {
+    char buf[8]{};
+    const DWORD n = GetEnvironmentVariableA("REMOTE60_NATIVE_IME_NEUTRALIZE_OFF", buf, sizeof(buf));
+    if (n > 0 && (buf[0] == '1' || buf[0] == 't' || buf[0] == 'T' || buf[0] == 'y' || buf[0] == 'Y')) {
+      enabled.store(false, std::memory_order_relaxed);
+    }
+  }
+  if (!enabled.load(std::memory_order_relaxed)) return;
+
+  static std::atomic<uint64_t> lastUs{0};
+  const uint64_t nowUs = qpc_now_us();
+  const uint64_t last = lastUs.load(std::memory_order_relaxed);
+  if (last != 0 && nowUs - last < 250000ULL) return;  // at most ~4x/s: this is a syscall dance
+  lastUs.store(nowUs, std::memory_order_relaxed);
+
+  const HWND fg = GetForegroundWindow();
+  if (!fg) return;
+  const DWORD fgThread = GetWindowThreadProcessId(fg, nullptr);
+  const DWORD myThread = GetCurrentThreadId();
+  const bool attached =
+      (fgThread != 0 && fgThread != myThread && AttachThreadInput(myThread, fgThread, TRUE));
+  const HWND focus = GetFocus();  // the actual focused control; needs the attach to read cross-thread
+  const HWND target = focus ? focus : fg;
+  const HIMC imc = ImmGetContext(target);
+  if (imc) {
+    DWORD conv = 0;
+    DWORD sentence = 0;
+    if (ImmGetConversionStatus(imc, &conv, &sentence) && (conv & IME_CMODE_NATIVE)) {
+      (void)ImmSetConversionStatus(imc, conv & ~(IME_CMODE_NATIVE | IME_CMODE_FULLSHAPE), sentence);
+    }
+    (void)ImmReleaseContext(target, imc);
+  }
+  if (attached) AttachThreadInput(myThread, fgThread, FALSE);
+}
+
 bool send_desktop_virtual_key(uint32_t vk, bool keyUp) {
   INPUT in{};
   in.type = INPUT_KEYBOARD;
@@ -598,6 +648,9 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
       HWND focusHwnd = GetForegroundWindow();
       *resolvedTargetOut = focusHwnd ? describe_input_target(focusHwnd) : std::string("sendinput");
     }
+    // G7: before an injected keydown lands, make sure the host IME is not sitting in Korean mode
+    // and about to eat an English letter. Keydown only (the up carries no character), throttled.
+    if (!keyUp) ensure_foreground_ime_alphanumeric();
     SetLastError(ERROR_SUCCESS);
     if (!send_desktop_virtual_key(input.keyCode, keyUp)) return fail(InputFailStage::SendInputKey);
     if (desktopInputState) {

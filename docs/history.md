@@ -8175,3 +8175,12 @@ Next action
 - **함의: G4(자체 60Hz 가상 디스플레이) 재부상.** G1으로 "검은 화면"은 해결됐지만, **부드러운 인터랙션/모션은 60Hz로 present하는 디스플레이가 필요**. 대안: (a) 더미 HDMI 플러그가 실제 감지(현재 미감지) → AMD 60Hz 출력, (b) 물리 모니터, (c) 자체 VDD를 60Hz로 구동.
 - 별개 미해결: G7(영어 입력 안 됨) 실기 재확인 — 호스트 IME 한글모드에서 영어 VK 먹힘, 한/영 토글 무효.
 - 코드 변경 없음(진단만).
+
+### 349) 2026-09-02 G7 — PC 뷰어 영어 입력: 호스트 IME 중립화 — 0.2.74 (브랜치 refactor/viewer-split)
+
+- 대상(#344): PC 클라 접속 시 영어 안 됨. 원인은 영어가 VK 키로 전송→호스트 `SendInput`이 **호스트 IME 통과**→호스트가 한글 모드면 조합기에 먹힘. 한글은 클라가 조합해 유니코드로 보내 IME 우회(잘 됨).
+- 수정(`host_input_inject.cpp`): 키다운(kind 5) 주입 직전 `ensure_foreground_ime_alphanumeric()` — `AttachThreadInput`으로 포그라운드 스레드에 붙어 `GetFocus`의 IMC를 얻고, `IME_CMODE_NATIVE`가 켜져 있으면 `ImmSetConversionStatus`로 alphanumeric(영문)로 내림(FULLSHAPE도 해제). 250ms 스로틀, `imm32` 링크(`#pragma comment`). env `REMOTE60_NATIVE_IME_NEUTRALIZE_OFF=1`로 끌 수 있음.
+- 설계 근거: 원격 세션의 올바른 상태 = **호스트 IME OFF**. 영어 VK는 그대로 박히고, 한글은 클라 조합→`KEYEVENTF_UNICODE`라 IME 상태와 무관하게 박힘. 클라의 한/영 토글이 이제 실효: 클라 한글모드→한글(유니코드), 클라 영문모드→영어(호스트 IME off라 landed). **회귀 위험 낮음**: 최악이라도 영어가 안 될 뿐, 유니코드 한글은 못 깨뜨림.
+- 빌드: `remote60_installer` Release exit 0, imm32 링크 OK. 임베드 GNLinkHost/GNLinkSetup 0.2.74. 산출물 `dist/GNLinkSetup-0.2.74.exe`(직전 0.2.73 보존).
+- 실기 검증 필요: PC 클라 첫 접속부터 영어 즉시 입력되는지, 한/영 전환(클라 IME)으로 한글·영어 오가는지, 한글 중복 주입 없는지.
+- 다음: 0.2.74 실기(영어 입력) → 통과 시 G4(60Hz 가상 디스플레이 구동)로.
