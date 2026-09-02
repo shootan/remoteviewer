@@ -8184,3 +8184,10 @@ Next action
 - 빌드: `remote60_installer` Release exit 0, imm32 링크 OK. 임베드 GNLinkHost/GNLinkSetup 0.2.74. 산출물 `dist/GNLinkSetup-0.2.74.exe`(직전 0.2.73 보존).
 - 실기 검증 필요: PC 클라 첫 접속부터 영어 즉시 입력되는지, 한/영 전환(클라 IME)으로 한글·영어 오가는지, 한글 중복 주입 없는지.
 - 다음: 0.2.74 실기(영어 입력) → 통과 시 G4(60Hz 가상 디스플레이 구동)로.
+
+### 350) 2026-09-02 실기: picker(B) 카드 미표시 확정 + 한글 조합 지연, 급선무 G4로 수렴 (기록)
+
+- picker 복귀 (B): 대상선택 시 카드가 **아예 안 뜨고** 얼어붙은 마지막 영상이 덮음(클릭은 먹힘 — 호스트 로그상 stream-state active=0 + window-list + select 정상). onTargets→`set_picker_visible_and_sync_stream(true)`가 `release_swapchain()`+InvalidateRect까지 정상 호출되는데도 flip-model 스왑체인이 GDI draw_overlay 위를 계속 덮음. release_swapchain의 `swapChain.Reset()`이 이 환경(하드웨어 NV12 render_surface 경로 추정)에서 마지막 프레임 합성을 못 걷어냄. **정석 해법: picker를 툴바처럼 별도 top-level 창으로 분리**(GDI/flip-model 겹침 회피). 블라인드 수정 위험(화면 확인 불가).
+- 한글 조합 지연("각" 치면 "가"가 다음 글자 칠 때까지 안 보임): (1) 한글은 클라 IME가 **완성 후에만**(GCS_RESULTSTR) 전송 — 조합 중(GCS_COMPSTR)은 미전송. (2) 호스트 화면 갱신 5~10Hz(헤드리스). 둘 다지만 (2)가 더 큼.
+- **급선무 수렴**: 드래그 끊김·타이핑 지연·전반 느림의 공통 뿌리 = **헤드리스 데스크톱 5~10Hz**. → **G4(60Hz 가상 디스플레이 구동) 최우선**. 그다음 picker(B) 별도창, P8 텍스트, G7(0.2.74) 검증.
+- 코드 변경 없음(진단·정리).
