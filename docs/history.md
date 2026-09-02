@@ -8191,3 +8191,17 @@ Next action
 - 한글 조합 지연("각" 치면 "가"가 다음 글자 칠 때까지 안 보임): (1) 한글은 클라 IME가 **완성 후에만**(GCS_RESULTSTR) 전송 — 조합 중(GCS_COMPSTR)은 미전송. (2) 호스트 화면 갱신 5~10Hz(헤드리스). 둘 다지만 (2)가 더 큼.
 - **급선무 수렴**: 드래그 끊김·타이핑 지연·전반 느림의 공통 뿌리 = **헤드리스 데스크톱 5~10Hz**. → **G4(60Hz 가상 디스플레이 구동) 최우선**. 그다음 picker(B) 별도창, P8 텍스트, G7(0.2.74) 검증.
 - 코드 변경 없음(진단·정리).
+
+### 351) 2026-09-02 G4 교차검증(검증용Codex) — 5~10Hz 근본은 VDD 아닌 입력 ACK 직렬화, G4 강등 (기록)
+
+- 사용자 지시로 G4(60Hz 가상 디스플레이) 계획을 버스의 검증용Codex(remote#nhxsk5vr)에 교차검증 요청. 결과: **내 VDD 가설 기각**, 방향 전환.
+- Codex 지적(코드로 확인함):
+  - 입력이 **왕복 1회당 1개로 직렬화**. `native_video_client_tcp_control.cpp` execute_control_action = send 후 recv_control_response 동기 대기. `native_video_client_shared_core.cpp:565~578` scheduler는 input 1개 dequeue→ControlInputAck 기대. RTT 150ms면 6~7/s → 드래그 5~10Hz·타이핑 "각→가" 지연과 정합. **이게 5~10Hz의 더 가까운 원인.**
+  - MTT VDD pipe(`\.\pipe\MTTVirtualDisplayPipe`)는 control-plane(RELOAD/config/PING)일 뿐 frame 운반 안 함 → "우리가 pipe로 소비자 역할" 불가(공개 소스 확인). 실 소비자는 드라이버 SwapChainProcessor.
+  - DesktopUpdateRate 로그 235초 median=4/p95=5, 60은 3초뿐 → "프로브가 항상 60"은 반증. 즉시-release라 present/invalidate 안 함. "드래그5~10 vs 프로브60" 모순 아님(입력창 vs 자율60fps콘텐츠).
+  - DXGI Duplication은 change-driven → **60Hz 모드 ≠ 60fps 캡처**. 강제 present도 원래 5~10번만 움직인 창의 중간 위치를 발명 못 함. DwmFlush 무의미.
+  - 출력 identity 미확정(프로브 AMD DISPLAY22 vs MTT ROOT\DISPLAY\0001, 같은 1920x1080이라고 동일 출력 단정 불가).
+- 확정 계획: **P0 조인 텔레메트리**(client mouse gen/enq/coalesce/sent/ack per s + action RTT, host input recv/inject per s, DXGI accumTotal/LastPresentTime per s) → **P1 입력 비직렬화**(mouse move = UDP latest-wins seq, no per-input ack; button/key down/up = reliable-ordered + edge packet에 pos+buttonmask). key 지연은 파이프라이닝/ack대기 제거 검토. G4 자체 VDD는 P4 최후수단으로 강등.
+- Codex에 P1 전송 설계 3문항(전송 위치/ host 적용/ key 처리) 재질의 중.
+- 작업목록.md 최상단을 INPUT(입력 직렬화 제거)로 교체, G4를 14번 최후수단으로.
+- 코드 변경 없음(교차검증·계획 정정). 다음: Codex P1 답 → P0 텔레메트리 빌드 → 실측 → P1 구현(구현도 Codex 검증).
