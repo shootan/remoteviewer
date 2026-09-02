@@ -8129,3 +8129,11 @@ Next action
 - 로그: LDPlayer 창(dnplayer id=527608) 선택 streamGen 4·5·8 **모두 first-frame 0장**, `desktop_backend=wgc_window capture-started=1`만 뜸. 같은 세션 gmux 창(streamGen 6)은 first-frame 정상. 이 구간 어댑터 재생성 없음 → G1/R1 무관, 창모드 일반 회귀 아님.
 - 진단: WGC per-window가 LDPlayer(안드로이드 VM GPU 렌더/오버레이) 창을 못 잡는 한계. 남은 로그(어제~오늘)에 LDPlayer 창 성공 기록 없어 "예전에 됨"은 다른 경로 추정.
 - 조치: 코드 변경 없음. 계획서 G6(창모드 무프레임 폴백: 데스크톱을 창 rect로 크롭) 신설. 즉시 완화는 LDPlayer 렌더링 DirectX 전환.
+
+### 344) 2026-09-02 PC 뷰어 한/영 입력 문제 = 호스트 IME 미중립(영어 VK가 호스트 IME에 먹힘) (기록)
+
+- 사용자: PC 클라 첫 접속 시 한글만 써지고 영어 안 됨. 한/영 토글해도 안 됨. **호스트 PC의 한/영 표시를 직접 클릭**해 영어로 맞추면 그때부터 영어 됨. 한글은 자음모음 조합돼 완성.
+- 코드 확인: `viewer_input_forward.cpp` — 한글은 클라 IME가 조합→`WM_IME_COMPOSITION GCS_RESULTSTR`→유니코드 텍스트로 전송, 호스트 `host_input_inject.cpp:327` `KEYEVENTF_UNICODE`로 주입(호스트 IME 우회). 영어 등 비조합 키는 VK 키 이벤트로 전송, 호스트가 VK/scancode `SendInput`(호스트 IME 통과).
+- 확정 원인: **호스트 IME가 한글 모드면 클라가 보낸 영어 VK가 호스트 조합기에 먹힘**. 클라·호스트 IME 2개가 어긋남. 사용자 워크어라운드(호스트 IME 영어로 직접 전환)가 원인 확증.
+- 수정 방향(미착수): 원격 세션 중 **호스트 IME를 영어/직접 입력으로 중립화**(한글은 클라가 유니코드로 보내므로 호스트 IME 불필요). 단 `viewer_input_forward.cpp` 주석의 과거 사고("type 11 get 22" 중복 주입, IME result 카운터 오프)로 신중 설계 필요. 계획 G7 신설.
+- 코드 변경 없음.
