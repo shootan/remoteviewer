@@ -216,6 +216,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int32_t vx = 0;
         int32_t vy = 0;
         if (!map_client_point_to_video_coords(ctx, hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &vx, &vy)) return 0;
+        ctx.input.moveGeneratedCount.fetch_add(1, std::memory_order_relaxed);  // P0 telemetry (#351)
         enqueue_input_event(ctx, 1, vx, vy, 0, 0);
       }
       return 0;

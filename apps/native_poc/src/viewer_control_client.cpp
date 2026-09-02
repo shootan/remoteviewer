@@ -166,11 +166,38 @@ void ControlClient::Run() {
     controlLink = std::make_unique<remote60::native_poc::TcpControlLink>(controlSock);
   }
 
+  // P0 telemetry accumulators (input serialization diagnosis, #351): one line per second.
+  uint64_t p0InputSent = 0;
+  uint64_t p0InputRttSumUs = 0;
+  uint64_t p0InputRttMaxUs = 0;
+  uint64_t p0LastEmitUs = 0;
+  uint64_t p0LastMoveGen = 0;
+
   while (ctx.session.running.load()) {
     // Drives retransmission and gap recovery; cheap when there is nothing outstanding.
     if (ctx.control.overUdp.load(std::memory_order_acquire)) ctx.control.udpControl.Tick();
     bool didWork = false;
     const uint64_t nowUs = qpc_now_us();
+    // P0: once a second, print how many mouse-moves the UI generated vs how many input events were
+    // actually sent, with the send->ack RTT. moveGen>>sent means the drag is serialized 1-per-RTT.
+    if (p0LastEmitUs == 0) p0LastEmitUs = nowUs;
+    if (nowUs - p0LastEmitUs >= 1000000ULL) {
+      const uint64_t moveGenNow = ctx.input.moveGeneratedCount.load(std::memory_order_relaxed);
+      const uint64_t moveGenDelta = moveGenNow - p0LastMoveGen;
+      const uint64_t rttAvg = p0InputSent ? (p0InputRttSumUs / p0InputSent) : 0;
+      std::cout << "[native-video-client][input-p0] moveGenPerSec=" << moveGenDelta
+                << " inputSentPerSec=" << p0InputSent
+                << " droppedTotal=" << ctx.control.inputQueue.dropped_count()
+                << " inputRttAvgUs=" << rttAvg
+                << " inputRttMaxUs=" << p0InputRttMaxUs
+                << " transport=" << (ctx.control.overUdp.load(std::memory_order_acquire) ? "udp" : "tcp")
+                << "\n";
+      p0LastMoveGen = moveGenNow;
+      p0InputSent = 0;
+      p0InputRttSumUs = 0;
+      p0InputRttMaxUs = 0;
+      p0LastEmitUs = nowUs;
+    }
     ControlOutboundAction action{};
     if (ctx.control.scheduler.NextAction(
             nowUs, capture_client_control_metrics_snapshot(ctx), &ctx.picker.windowPanel,
@@ -216,6 +243,11 @@ void ControlClient::Run() {
                     << " kind=" << action.inputEvent.kind
                     << " seq=" << action.inputEvent.seq << "\n";
         }
+        // P0 telemetry (input serialization diagnosis, #351): accumulate this second's input sends
+        // and their per-action RTT (actionUs = send + wait-for-ack, the serial round trip).
+        ++p0InputSent;
+        if (actionUs > p0InputRttMaxUs) p0InputRttMaxUs = actionUs;
+        p0InputRttSumUs += actionUs;
       }
       didWork = true;
 

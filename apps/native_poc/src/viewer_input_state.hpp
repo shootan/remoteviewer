@@ -31,6 +31,11 @@ struct InputState {
   std::atomic<uint64_t> suppressMouseUntilUs{0};
   std::atomic<uint32_t> activeTouchPointerId{0};
   std::atomic<bool> activeTouchDown{false};
+  // P0 telemetry (input serialization diagnosis, history #351): every mouse-move that passes the
+  // guards and is enqueued, counted BEFORE latest-wins coalescing. Compared per second against the
+  // count actually sent (inputEventsSent) to show whether a drag generates ~60/s but only ~1/RTT
+  // reaches the host.
+  std::atomic<uint64_t> moveGeneratedCount{0};
   remote60::native_poc::InputMacro macro;
 };
 

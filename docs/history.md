@@ -8205,3 +8205,12 @@ Next action
 - Codex에 P1 전송 설계 3문항(전송 위치/ host 적용/ key 처리) 재질의 중.
 - 작업목록.md 최상단을 INPUT(입력 직렬화 제거)로 교체, G4를 14번 최후수단으로.
 - 코드 변경 없음(교차검증·계획 정정). 다음: Codex P1 답 → P0 텔레메트리 빌드 → 실측 → P1 구현(구현도 Codex 검증).
+
+### 352) 2026-09-02 P0 입력 직렬화 진단 텔레메트리 (Codex 설계) — 0.2.75 (브랜치 refactor/viewer-split)
+
+- Codex(remote#nhxsk5vr) P0/P1 설계 확정 후 P0 착수. P1 방향: 같은 UDP 소켓 별도 논리 레인 — 마우스=UdpPacketKind::InputFast(cookie+peer+epoch+feature, latest-wins, no-ack, FastInputSender 60~120Hz→host FastInputMailbox→단일 executor), 키=별도 reliable sliding-window. 순서 P0→P1a(드래그)→P1b(타이핑) 2커밋. G4(자체 VDD)는 P4 최후수단.
+- P0 구현(측정만, 동작 무변경): 클라 뷰어에 초당 1줄 `[input-p0] moveGenPerSec / inputSentPerSec / droppedTotal / inputRttAvgUs / inputRttMaxUs / transport`.
+  - `viewer_input_state.hpp` moveGeneratedCount 추가, `viewer_window_proc.cpp` 마우스move enqueue 직전 증가(coalesce 전 생성 수), `viewer_control_client.cpp` Run 루프에서 InputEvent action의 actionUs(=send+ack 왕복)를 초당 집계해 로그.
+- 결정 판정식: 드래그 시 moveGenPerSec≈60인데 inputSentPerSec≈1/RTT(예 6~7) + inputRttAvg≈RTT → 입력 직렬화가 5~10Hz의 root 확정 → P1a 착수. (host contentAcquires 분리·inject→content join은 필요 시 확장.)
+- 빌드: installer Release exit 0, 임베드 0.2.75. 산출물 `dist/GNLinkSetup-0.2.75.exe`(직전 0.2.74 보존).
+- 다음: 0.2.75 설치 → 드래그 실측 → NAS viewer.log `[input-p0]` 라인 확인 → 직렬화 확정 시 P1a(마우스 fast lane) 구현(구현도 Codex 검증).
