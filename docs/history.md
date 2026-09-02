@@ -8073,3 +8073,17 @@ Next action
 - **G5 기록만**: 원격 커서가 클라에서 안 따라 움직임(가상 디스플레이 연관 의심). 사용자 지시로 미착수, 구현계획.md에 등재.
 - 빌드: `remote60_installer` Release exit 0. 임베드 GNLinkHost/GNLinkSetup 0.2.69 확인. 산출물 `dist/GNLinkSetup-0.2.69.exe`(직전 0.2.68 보존). **RDP 아님(console)이나 캡처 판정은 실기에서** — 이번 변경은 단위테스트로 검증, 실사용 검증은 사용자 테스트 대기.
 - 다음: 0.2.69 설치 → 고화질 영상 재현으로 (1) 강등 후 정적 화면에서 1080p 복귀(P4) (2) 손실 시 조기 강등·폭주 감소(P5/P6) 확인. 서버는 재배포 후 로테이션 10개 확인.
+
+### 339) 2026-09-02 RDP 끊김 후 검은 화면/열화 = 어댑터 불일치 확정(R1 미완의 절반), 실기 로그 (브랜치 refactor/viewer-split, 기록)
+
+- 사용자 실기: 14:13~14:14 RDP 끊고 잠금화면 상태에서 gnlink 접속 → **아무 화면도 안 나오고 연결도 안 되는 것처럼 보임**. 이후 OSLink로 잠금해제하고 다시 접속(14:18~).
+- **이건 RDP 이슈이고 곧 R1의 미완 절반이다.** R1(어댑터 이동 감지)은 감지만 하고 "세션 내부에서 D3D 장치를 재생성하지 않는다"로 재생성을 호출자에게 넘겼는데, 그 호출자가 재생성을 안 해서 `dxgi_adapter_changed` 뒤 곧장 WGC로 떨어진다. 그 빈틈이 G1(헤드리스 검은 화면)으로 나타난 것.
+- 0.2.68 신규 진단이 원인을 확정(이전 "소비자 없는 유휴 indirect display" 가설은 **정정**):
+  - 14:13:45 잠금화면: `dxgi_no_usable_output reason=no_outputs deviceLuid=99594 outputs=0` → CreateForMonitor 전부 실패 → `desktop_backend=wgc` via `CreateForWindow(GetShellWindow())`. 잠금화면에서 셸 윈도우 캡처는 쓸 그림이 없어 **검은 화면**.
+  - 14:14:24 / 14:18:22 / 14:18:52 (해제 후): `dxgi_no_usable_output outputs=1` + `dxgi_output adapter="AMD Radeon" luid=48969 name=DISPLAY177/DISPLAY22 extent=2236x1232→1920x1080 attached=1 onDeviceAdapter=0` + `dxgi_desktop_moved` → `fallback_reason=dxgi_adapter_changed` → WGC.
+- **확정 원인**: 호스트 D3D 캡처 장치가 어댑터 LUID **99594**(호스트가 11:53 RDP 접속 중 기동 → 그때 primary였던 Microsoft Remote Display Adapter 추정, RDP 끊기니 출력 0)에 만들어져 있고, 데스크톱은 **AMD Radeon 48969**로 옮겨감. DXGI는 자기 어댑터 출력만 복제 가능 → 데스크톱이 attached여도 못 잡음. 코드가 `dxgi_adapter_changed`로 인식만 하고 장치를 AMD로 재생성하지 않아 매번 WGC 폴백.
+- **현재 상태(14:18~14:19)**: 세션 활성, 입력 도달(gmux/chrome), 백엔드 WGC, 같은 불일치 지속(장치 99594 출력0 / 데스크톱 AMD 48969 DISPLAY22 1920x1080). 잠금 해제 상태라 WGC가 그림은 잡음(검지 않음)이나 DXGI 미사용 열화 + keyframe-request reason=2 지속.
+- **수정 방향(미착수, 승인 대기)**: `resolve_output`이 `dxgi_adapter_changed`를 반환하면 호출부(host_stage_backend / capture 시작)가 `create_d3d11_device_for_primary_monitor`로 **현재 데스크톱 어댑터에 장치를 재생성한 뒤 DXGI 재시도**, 실패 시에만 WGC. 이 함수는 이미 primary monitor의 어댑터를 고르게 돼 있어 선택 로직은 재사용. G1 = R1의 재생성 절반 완성.
+- **부수 관찰(기록만)**: 사용자 보고 "접속 직후 영어 입력이 처음엔 안 쳐진다"(IME/포커스 또는 초기 키 유실 의심). 재현/원인 미확인 — 별도 확인 필요 시 항목화.
+- 변경: `docs/history.md`, `docs/구현계획.md`(G1 원인 확정 반영)만. 코드 변경 없음.
+- 다음: 어댑터 변경 시 장치 재생성 수정(G1/R1) 착수 승인 → 0.2.70.
