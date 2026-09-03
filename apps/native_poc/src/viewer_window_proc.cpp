@@ -44,10 +44,15 @@ void restore_local_ime(HWND hwnd) {
 // Release every physical key still held (focus loss / mode change / destroy), so a modifier can't
 // strand on the host. (Codex #370 BLOCKER 6.)
 void release_all_physical(ViewerState& ctx) {
-  for (uint16_t key : gPhysicalDown) {
-    enqueue_physical_key(ctx, false, 0, static_cast<uint16_t>(key & 0xff), (key & 0x100) != 0, false);
+  for (auto it = gPhysicalDown.begin(); it != gPhysicalDown.end();) {
+    const uint16_t key = *it;
+    if (enqueue_physical_key(ctx, false, 0, static_cast<uint16_t>(key & 0xff), (key & 0x100) != 0,
+                             false)) {
+      it = gPhysicalDown.erase(it);  // released; forget it
+    } else {
+      ++it;  // enqueue rejected (input disabled): keep it for a later retry, do not lose the edge
+    }
   }
-  gPhysicalDown.clear();
 }
 // One physical key transition: detach IME on the first down, track pressed state, forward the scan.
 // A key-up is only forwarded for a key we actually sent as down (Codex #370): a spurious SYS key-up
@@ -63,8 +68,12 @@ void forward_physical(ViewerState& ctx, HWND hwnd, WPARAM wp, LPARAM lp, bool do
     if (enqueue_physical_key(ctx, true, static_cast<uint16_t>(wp), scan, ext, (lp & (1 << 30)) != 0)) {
       gPhysicalDown.insert(key);
     }
-  } else if (gPhysicalDown.erase(key) > 0) {
-    enqueue_physical_key(ctx, false, static_cast<uint16_t>(wp), scan, ext, false);
+  } else if (gPhysicalDown.count(key) > 0) {
+    // Only forget the key once the up is actually accepted; otherwise a disabled-input window would
+    // clear the set while the host still holds the key down. (Codex 4th review.)
+    if (enqueue_physical_key(ctx, false, static_cast<uint16_t>(wp), scan, ext, false)) {
+      gPhysicalDown.erase(key);
+    }
   }
 }
 }  // namespace

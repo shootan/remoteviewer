@@ -8419,3 +8419,10 @@ Next action
   - LOW: dead gUnlockThreadHandle 전역 제거(service_main이 native_handle 직접 사용), 릴레이 workerThreadHandle_ join 후 clear.
 - 잔여(IME 완전자연): capability-after-focus 즉시 detach(pong→UI post)·재접속 HIMC restore·초기 영문 sync·P1b. 원장 D4(unlock UI 전 릴레이 복합키/TTL/jobId/IPC검증). host physical 상태의 TCP/UDP rollover·release 실패 복구는 후속.
 - 단위테스트 PASS.
+
+### 376) 2026-09-04 4차 리뷰 반영 — 큐 오버플로 키edge 보존 + 뷰어 키업 erase-after-success → 0.2.87
+- Codex 4차: 0.2.86 기본모드/dormant 승인. REMOTE60_HOST_IME=1 필드 전 2건:
+  - **큐 오버플로**: ClientInputQueue::Enqueue가 256 초과 시 pop_front(키업 유실 가능) → **이동(kind1)만** 희생, key/button/physical edge는 보존(희생할 이동 없으면 큐 일시 성장, 들어오는 게 이동이면 그것만 드롭). 회귀테스트 추가(키업 flood 후 생존, 이동 coalesce) PASS.
+  - **뷰어 키업**: erase 후 enqueue였던 것 → enqueue 성공 시에만 erase, 실패 시 set 유지(재시도). release_all_physical도 성공분만 제거.
+- 잔여(필드/후속): capability-after-focus 즉시 detach(pong→UI post, 결정론), 재접속 HIMC restore, host physical의 TCP/UDP rollover epoch·release 실패 복구, 초기 영문 sync + P1b. 원장 D4(unlock UI). challenge limiter idempotent 재응답 개선.
+- 단위테스트 전부 PASS.

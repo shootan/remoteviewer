@@ -648,10 +648,56 @@ bool test_input_coalesce_and_generated_us() {
   return true;
 }
 
+bool test_input_queue_preserves_key_edges_on_overflow() {
+  using namespace remote60::native_poc;
+  ClientInputQueue q;
+  // A queued key-up (physical) must survive even when the queue floods past its cap with later input
+  // -- otherwise a modifier strands down on the host. (Codex 4th review.)
+  QueuedControlInputMessage up{};
+  up.type = MessageType::ControlPhysicalKey;
+  up.physicalKey.down = 0;
+  up.physicalKey.scanCode = 0x1d;  // LCtrl
+  q.Enqueue(up);
+  for (int i = 0; i < 400; ++i) {  // non-coalescing key-down edges force overflow past kMaxInputQueueSize
+    QueuedControlInputMessage k{};
+    k.type = MessageType::ControlInputEvent;
+    k.inputEvent.kind = 5;
+    k.inputEvent.keyCode = static_cast<uint32_t>(0x41 + (i % 20));
+    q.Enqueue(k);
+  }
+  int physUps = 0;
+  QueuedControlInputMessage o{};
+  while (q.TryDequeue(&o)) {
+    if (o.type == MessageType::ControlPhysicalKey && o.physicalKey.down == 0) ++physUps;
+  }
+  if (physUps != 1) {
+    std::cout << "FAIL: physical key-up dropped on queue overflow (physUps=" << physUps << ")\n";
+    return false;
+  }
+  // A pure move flood, by contrast, coalesces and is safely bounded.
+  ClientInputQueue q2;
+  for (int i = 0; i < 500; ++i) {
+    QueuedControlInputMessage mv{};
+    mv.type = MessageType::ControlInputEvent;
+    mv.inputEvent.kind = 1;
+    mv.inputEvent.x = i;
+    q2.Enqueue(mv);
+  }
+  int moves = 0;
+  while (q2.TryDequeue(&o)) ++moves;
+  if (moves > 8) {  // consecutive moves coalesce to ~1
+    std::cout << "FAIL: moves not coalesced (moves=" << moves << ")\n";
+    return false;
+  }
+  std::cout << "  ok input queue preserves key edges on overflow, coalesces moves\n";
+  return true;
+}
+
 int main() {
   if (!test_ping_and_metrics_order()) return 1;
   if (!test_window_and_input_actions()) return 1;
   if (!test_input_coalesce_and_generated_us()) return 1;
+  if (!test_input_queue_preserves_key_edges_on_overflow()) return 1;
   if (!test_input_message_builders()) return 1;
   if (!test_capture_runtime_and_keyframe_actions()) return 1;
   if (!test_udp_assembler()) return 1;

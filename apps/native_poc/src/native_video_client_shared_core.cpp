@@ -64,18 +64,33 @@ uint32_t ClientInputQueue::NextSequence() {
 
 void ClientInputQueue::Enqueue(const QueuedControlInputMessage& msg) {
   std::lock_guard<std::mutex> lk(mu_);
-  if (msg.type == MessageType::ControlInputEvent &&
-      msg.inputEvent.kind == 1 &&
-      !queue_.empty() &&
-      queue_.back().type == MessageType::ControlInputEvent &&
-      queue_.back().inputEvent.kind == 1) {
+  // Only a pointer move (ControlInputEvent kind 1) is disposable; key / button / physical-key edges
+  // (down/up) must never be dropped, or a modifier can strand on the host. (Codex 4th review.)
+  const auto is_move = [](const QueuedControlInputMessage& m) {
+    return m.type == MessageType::ControlInputEvent && m.inputEvent.kind == 1;
+  };
+  if (is_move(msg) && !queue_.empty() && is_move(queue_.back())) {
     queue_.back() = msg;
     coalescedMoves_.fetch_add(1, std::memory_order_relaxed);  // P0 (#351): a move replaced in place
     return;
   }
   if (queue_.size() >= kMaxInputQueueSize) {
-    queue_.pop_front();
-    dropped_.fetch_add(1, std::memory_order_relaxed);
+    // Overflow: sacrifice the oldest move rather than pop_front (which could be a queued key-up).
+    bool droppedMove = false;
+    for (auto it = queue_.begin(); it != queue_.end(); ++it) {
+      if (is_move(*it)) {
+        queue_.erase(it);
+        dropped_.fetch_add(1, std::memory_order_relaxed);
+        droppedMove = true;
+        break;
+      }
+    }
+    // No move to give up: drop the incoming if it is itself a move (latest-wins); otherwise let the
+    // queue grow temporarily rather than lose a key/button/physical edge.
+    if (!droppedMove && is_move(msg)) {
+      dropped_.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
   }
   queue_.push_back(msg);
 }
