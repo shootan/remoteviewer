@@ -8349,3 +8349,9 @@ Next action
 - 흐름: ChallengeRequest → (requester 세션이 실제 Locked인지 WTSSessionInfoEx로 확인, 아니면 RejectedPolicy) ECDH 키+salt+challengeId 생성, topologyGeneration snapshot, account_id(WTSUserName+Domain FNV) bind, Issue → ChallengeResponse. SealedRequest → 챌린지 Verify + topology 재검증(복호 전) → DeriveAesKey+AesGcmOpen(실패=DecryptFailed, 챌린지 미소비, 5회 시 폐기) → topology 재검증(복호 후) → Consume(exactly-once) → UnpackPassword → **WTSConnectSessionW(requester, console, pw, TRUE)** → lock 상태 폴링으로 SessionUnlocked/WtsConnectAccepted 판정, 실패는 gle로 AuthFailed/InternalError. 비번 버퍼 전부 SecureZero. terminal 결과 requestId별 캐시(중복 재실행 방지).
 - 서비스에 remote60_sealed_unlock 링크. 컴파일 OK. 빌드 안 함(전체 후 1개).
 - WTSConnectSession의 실제 잠금해제 동작은 실기 spike 필요(Codex). 다음: 호스트 릴레이(뷰어 control ↔ 언락 파이프) + Pong 능력/잠금상태 광고 → 뷰어 크립토/DPAPI/UI → 한영 IME → 빌드.
+
+### 368) 2026-09-03 잠금해제 — 호스트 릴레이(뷰어 컨트롤 ↔ 서비스 언락 파이프) (Codex 커밋3/6)
+
+- `host_unlock_relay.hpp/.cpp`(신규): 백그라운드 워커 1개 + duplex 파이프(GNLinkUnlock) 소유. ChallengeSync(컨트롤 스레드 동기, 빠름) / SealedAsync(즉시 반환+워커가 WTSConnectSession 수행) / PollResult(폴링). 호스트는 키/비번 절대 안 봄(불투명 릴레이). 세션 쿠키로 챌린지↔sealed 바인딩.
+- host_control_session.cpp: 컨트롤 루프에 정적 릴레이 + 커넥션별 쿠키, Pong에 kCaptureFlagUnlockSealedV1 광고, ControlUnlockChallengeRequest→ChallengeSync→Challenge, SealedRequest→SealedAsync+즉시 Accepted(+ciphertext SecureZero), StatusRequest→PollResult→StatusResult. WTSConnectSession blocking이 컨트롤 채널을 막지 않도록 sealed는 비동기+폴링(Codex HOL 경고 반영).
+- 호스트 컴파일 OK. 빌드 안 함(전체 후 1개). 다음: 뷰어(클라) 크립토 클라 + DPAPI 비번저장 + 언락 UI + 컨트롤 송수신 → 한영 IME → 빌드.

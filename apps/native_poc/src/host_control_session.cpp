@@ -18,6 +18,8 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+
+#include "host_unlock_relay.hpp"
 #include <mutex>
 #include <string>
 #include <thread>
@@ -196,6 +198,12 @@ void ControlSessionServer::Serve(ControlLink& link) {
   uint64_t p0hMoveInjected = 0;
   uint64_t p0hMoveInjectFail = 0;
   uint64_t p0hLastEmitUs = 0;
+  // Sealed-unlock relay: process-wide (one worker + one pipe to the SYSTEM service). The cookie binds
+  // this control connection to the challenge it requests, so a sealed reply from another session is
+  // rejected by the service. (Codex #365/#366.)
+  static remote60::native_poc::HostUnlockRelay gUnlockRelay;
+  const uint64_t unlockCookie =
+      (static_cast<uint64_t>(qpc_now_us()) << 20) ^ reinterpret_cast<uintptr_t>(&stop);
   while (!stop.load()) {
     MessageHeader header{};
     if (!link.Read(&header, sizeof(header))) break;
@@ -228,6 +236,8 @@ void ControlSessionServer::Serve(ControlLink& link) {
       if (!interactive_desktop_is_default()) {
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagSecureDesktopActive;
       }
+      // Advertise sealed-unlock v1 support so a viewer only sends the unlock messages here.
+      pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagUnlockSealedV1;
       pong.captureRebindCount = target.rebindCount;
       pong.captureTargetHwnd = target.targetHwnd;
       std::snprintf(pong.captureTargetProcess, sizeof(pong.captureTargetProcess), "%s",
@@ -235,6 +245,60 @@ void ControlSessionServer::Serve(ControlLink& link) {
       std::snprintf(pong.captureTargetTitle, sizeof(pong.captureTargetTitle), "%s",
                     target.title.c_str());
       if (!link.Write(&pong, sizeof(pong))) break;
+      continue;
+    }
+
+    // --- Sealed unlock (host relays to/from the SYSTEM service; never sees key material) ---------
+    if (type == MessageType::ControlUnlockChallengeRequest &&
+        header.size == sizeof(ControlUnlockChallengeRequestMessage)) {
+      ControlUnlockChallengeRequestMessage req{};
+      req.header = header;
+      if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+      ControlUnlockChallengeMessage rsp{};
+      if (!gUnlockRelay.ChallengeSync(req, unlockCookie, &rsp)) {
+        rsp = ControlUnlockChallengeMessage{};
+        rsp.requestId = req.requestId;
+        rsp.status = static_cast<uint16_t>(UnlockStage::InternalError);
+      }
+      rsp.header.magic = remote60::native_poc::kMagic;
+      rsp.header.type = static_cast<uint16_t>(MessageType::ControlUnlockChallenge);
+      rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
+      if (!link.Write(&rsp, sizeof(rsp))) break;
+      continue;
+    }
+
+    if (type == MessageType::ControlUnlockSealedRequest &&
+        header.size == sizeof(ControlUnlockSealedRequestMessage)) {
+      ControlUnlockSealedRequestMessage req{};
+      req.header = header;
+      if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+      gUnlockRelay.SealedAsync(req, unlockCookie);
+      SecureZeroMemory(&req, sizeof(req));  // drop the ciphertext copy promptly
+      ControlUnlockAcceptedMessage rsp{};
+      rsp.header.magic = remote60::native_poc::kMagic;
+      rsp.header.type = static_cast<uint16_t>(MessageType::ControlUnlockAccepted);
+      rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
+      rsp.requestId = req.requestId;
+      rsp.accepted = 1;
+      if (!link.Write(&rsp, sizeof(rsp))) break;
+      continue;
+    }
+
+    if (type == MessageType::ControlUnlockStatusRequest &&
+        header.size == sizeof(ControlUnlockStatusRequestMessage)) {
+      ControlUnlockStatusRequestMessage req{};
+      req.header = header;
+      if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+      ControlUnlockStatusResultMessage rsp{};
+      if (!gUnlockRelay.PollResult(req.requestId, &rsp)) {
+        rsp.requestId = req.requestId;
+        rsp.stage = static_cast<uint16_t>(UnlockStage::ConnectStarted);  // still running
+        rsp.terminal = 0;
+      }
+      rsp.header.magic = remote60::native_poc::kMagic;
+      rsp.header.type = static_cast<uint16_t>(MessageType::ControlUnlockStatusResult);
+      rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
+      if (!link.Write(&rsp, sizeof(rsp))) break;
       continue;
     }
 
