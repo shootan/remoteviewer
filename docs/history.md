@@ -8342,3 +8342,10 @@ Next action
 - `unlock_wire.hpp`: 챌린지 wire ↔ UnlockContext 매핑 **단일 소스**(FillChallengeFromContext/ContextFromChallenge) — 호스트/클라가 동일 AAD/KDF 만들도록(드리프트=모든 open 실패, Codex 지적).
 - `unlock_protocol_test`: wire 바이트 왕복 동일, 양측 AAD/KDF 동일, challengeId 다르면 AAD 다름, Fill↔Context 역함수 — PASS. sealed_unlock_test(KAT 포함) 재확인 PASS.
 - 빌드 안 함(전체 후 1개). 다음 커밋3: 서비스 unlock duplex IPC + WTSConnectSession spike(로컬), U5 결과경로.
+
+### 367) 2026-09-03 잠금해제 3단계 — 서비스 언락 실행부(WTSConnectSession + duplex 파이프) (Codex 커밋3)
+
+- secure_input_service_main.cpp에 언락 전용 스레드 + duplex 파이프(`\.\pipe\GNLinkUnlock`, 입력 파이프와 분리) 추가. 이 스레드가 언락 크립토/챌린지 상태 단독 소유, WTSConnectSession(blocking)도 여기서만.
+- 흐름: ChallengeRequest → (requester 세션이 실제 Locked인지 WTSSessionInfoEx로 확인, 아니면 RejectedPolicy) ECDH 키+salt+challengeId 생성, topologyGeneration snapshot, account_id(WTSUserName+Domain FNV) bind, Issue → ChallengeResponse. SealedRequest → 챌린지 Verify + topology 재검증(복호 전) → DeriveAesKey+AesGcmOpen(실패=DecryptFailed, 챌린지 미소비, 5회 시 폐기) → topology 재검증(복호 후) → Consume(exactly-once) → UnpackPassword → **WTSConnectSessionW(requester, console, pw, TRUE)** → lock 상태 폴링으로 SessionUnlocked/WtsConnectAccepted 판정, 실패는 gle로 AuthFailed/InternalError. 비번 버퍼 전부 SecureZero. terminal 결과 requestId별 캐시(중복 재실행 방지).
+- 서비스에 remote60_sealed_unlock 링크. 컴파일 OK. 빌드 안 함(전체 후 1개).
+- WTSConnectSession의 실제 잠금해제 동작은 실기 spike 필요(Codex). 다음: 호스트 릴레이(뷰어 control ↔ 언락 파이프) + Pong 능력/잠금상태 광고 → 뷰어 크립토/DPAPI/UI → 한영 IME → 빌드.

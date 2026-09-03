@@ -143,6 +143,7 @@ target_include_directories(remote60_secure_input_service PRIVATE src)
 target_link_libraries(remote60_secure_input_service PRIVATE
   advapi32
   user32
+  remote60_sealed_unlock
 )
 
 add_executable(remote60_native_video_client_poc

@@ -3,6 +3,12 @@
 #include <wtsapi32.h>
 #pragma comment(lib, "Wtsapi32.lib")
 
+#include <thread>
+
+#include "poc_protocol.hpp"
+#include "sealed_unlock.hpp"
+#include "secure_unlock_ipc.hpp"
+
 #include <atomic>
 #include <algorithm>
 #include <cstdint>
@@ -83,6 +89,7 @@ std::atomic<uint32_t> gPendingSessionId{0};
 // a session that changed mid-flight -- the semantic fence d9a2444's lazy reset does not give ordinary
 // input. (Codex review #365.)
 std::atomic<uint32_t> gSessionTopologyGeneration{0};
+std::atomic<uint32_t> gUnlockJobCounter{0};
 
 struct AgentProcess {
   HANDLE process = nullptr;
@@ -394,6 +401,340 @@ HANDLE create_secure_pipe() {
   return pipe;
 }
 
+// ================= Sealed unlock (SYSTEM side) ==================================================
+// Runs on its own thread over a dedicated DUPLEX pipe, separate from the fire-and-forget input pipe.
+// This thread is the sole owner of the unlock crypto/challenge state and is where WTSConnectSession
+// (which can block) runs -- never the SCM handler or the input path. (Codex review #365/#366.)
+
+namespace {
+
+uint64_t now_ms() { return GetTickCount64(); }
+
+uint16_t stage_code(remote60::native_poc::UnlockStage s) { return static_cast<uint16_t>(s); }
+
+// Stable-ish host id (computer name hash). Only needs to be consistent within a session pair; the
+// client echoes it in the AAD.
+uint64_t host_id() {
+  wchar_t name[256]{};
+  DWORD n = 256;
+  uint64_t h = 1469598103934665603ull;
+  if (GetComputerNameW(name, &n)) {
+    for (DWORD i = 0; i < n; ++i) { h ^= static_cast<uint16_t>(name[i]); h *= 1099511628211ull; }
+  }
+  return h;
+}
+
+// FNV-1a over WTSUserName+WTSDomainName so a stored credential is bound to the account, not the
+// session number.
+uint64_t account_id_of(uint32_t session) {
+  uint64_t h = 1469598103934665603ull;
+  auto mix = [&](LPWSTR str) {
+    if (!str) return;
+    for (LPWSTR p = str; *p; ++p) { h ^= static_cast<uint16_t>(*p); h *= 1099511628211ull; }
+  };
+  LPWSTR buf = nullptr;
+  DWORD bytes = 0;
+  if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session, WTSUserName, &buf, &bytes) && buf) {
+    mix(buf);
+    WTSFreeMemory(buf);
+  }
+  buf = nullptr;
+  bytes = 0;
+  if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session, WTSDomainName, &buf, &bytes) && buf) {
+    mix(buf);
+    WTSFreeMemory(buf);
+  }
+  return h;
+}
+
+// True when `session` is locked (secure LogonUI), distinct from a UAC/CAD secure desktop. Win11, so
+// the historic Win7 reversed-flag quirk does not apply. *known=false if the query failed.
+bool session_is_locked(uint32_t session, bool* known) {
+  *known = false;
+  if (session == kInvalidSessionId) return false;
+  WTSINFOEXW* info = nullptr;
+  DWORD bytes = 0;
+  bool locked = false;
+  if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session, WTSSessionInfoEx,
+                                  reinterpret_cast<LPWSTR*>(&info), &bytes) &&
+      info && bytes >= sizeof(WTSINFOEXW) && info->Level == 1) {
+    *known = true;
+    locked = (info->Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_LOCK);
+  }
+  if (info) WTSFreeMemory(info);
+  return locked;
+}
+
+using remote60::native_poc::SecureUnlockChallengeRequest;
+using remote60::native_poc::SecureUnlockChallengeResponse;
+using remote60::native_poc::SecureUnlockSealedRequest;
+using remote60::native_poc::SecureUnlockResult;
+using remote60::native_poc::UnlockStage;
+namespace su = remote60::native_poc::sealed_unlock;
+
+// Per-connection unlock state, owned by the unlock thread.
+struct UnlockSession {
+  su::EcdhKeyPair key;
+  su::UnlockChallengeState challenge;
+  su::UnlockContext ctx{};                 // the issued context (clientPub filled at seal time)
+  uint8_t salt[su::kSaltBytes] = {};
+  bool hasChallenge = false;
+  uint32_t badAttempts = 0;                // invalid-tag DoS guard
+  uint32_t terminalRequestId = 0;          // cached terminal result (idempotent duplicate)
+  bool hasTerminal = false;
+  SecureUnlockResult terminal{};
+};
+
+HANDLE create_unlock_pipe() {
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+          L"D:P(A;;GA;;;SY)(A;;GA;;;BA)", SDDL_REVISION_1, &descriptor, nullptr)) {
+    return INVALID_HANDLE_VALUE;
+  }
+  SECURITY_ATTRIBUTES security{};
+  security.nLength = sizeof(security);
+  security.lpSecurityDescriptor = descriptor;
+  HANDLE pipe = CreateNamedPipeW(
+      remote60::native_poc::kSecureUnlockPipeName,
+      PIPE_ACCESS_DUPLEX,
+      PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+      1, 8 * 1024, 8 * 1024, 0, &security);
+  LocalFree(descriptor);
+  return pipe;
+}
+
+SecureUnlockResult make_result(uint32_t requestId, uint32_t jobId, UnlockStage stage, bool terminal,
+                               uint32_t win32 = 0) {
+  SecureUnlockResult r{};
+  r.requestId = requestId;
+  r.jobId = jobId;
+  r.stage = stage_code(stage);
+  r.terminal = terminal ? 1 : 0;
+  r.win32Error = win32;
+  return r;
+}
+
+void handle_challenge_request(UnlockSession& us, const SecureUnlockChallengeRequest& req, HANDLE pipe) {
+  SecureUnlockChallengeResponse resp{};
+  resp.requestId = req.requestId;
+  resp.clientSessionCookie = req.clientSessionCookie;
+
+  const uint32_t requester = gRequesterSession.load(std::memory_order_acquire);
+  const uint32_t console = WTSGetActiveConsoleSessionId();
+  bool lockKnown = false;
+  const bool locked = session_is_locked(requester, &lockKnown);
+  const uint32_t topo = gSessionTopologyGeneration.load(std::memory_order_acquire);
+
+  // Only issue for a genuinely locked, resolvable session. Not-locked / unknown -> RejectedPolicy so
+  // a password is never sealed toward a UAC prompt or an already-usable desktop.
+  if (requester == kInvalidSessionId || !lockKnown || !locked) {
+    resp.stage = stage_code(UnlockStage::RejectedPolicy);
+    (void)write_exact(pipe, &resp, sizeof(resp));
+    return;
+  }
+
+  us.hasChallenge = false;
+  if (!us.key.Generate()) {
+    resp.stage = stage_code(UnlockStage::InternalError);
+    (void)write_exact(pipe, &resp, sizeof(resp));
+    return;
+  }
+  uint8_t hostPub[su::kPubKeyBytes] = {};
+  uint8_t challengeId[su::kChallengeIdBytes] = {};
+  if (!us.key.ExportPublic(hostPub) || !su::RandomBytes(us.salt, su::kSaltBytes) ||
+      !su::RandomBytes(challengeId, su::kChallengeIdBytes)) {
+    resp.stage = stage_code(UnlockStage::InternalError);
+    (void)write_exact(pipe, &resp, sizeof(resp));
+    return;
+  }
+
+  su::UnlockContext c{};
+  c.protocolVersion = 1;
+  c.hostId = host_id();
+  c.clientSessionCookie = req.clientSessionCookie;
+  std::memcpy(c.challengeId, challengeId, su::kChallengeIdBytes);
+  c.requestId = req.requestId;
+  c.requesterSession = requester;
+  c.consoleSession = console;
+  c.lockGeneration = topo;   // lock/unlock bumps the topology counter too
+  c.topologyGeneration = topo;
+  c.issuedMs = now_ms();
+  c.expiresMs = c.issuedMs + 30000;
+  c.accountId = account_id_of(requester);
+  std::memcpy(c.hostPub, hostPub, su::kPubKeyBytes);
+  us.ctx = c;
+  us.challenge.Issue(challengeId, req.clientSessionCookie, topo, c.issuedMs, c.expiresMs);
+  us.hasChallenge = true;
+  us.badAttempts = 0;
+
+  resp.stage = stage_code(UnlockStage::ChallengeIssued);
+  std::memcpy(resp.challengeId, challengeId, su::kChallengeIdBytes);
+  std::memcpy(resp.hostPub, hostPub, su::kPubKeyBytes);
+  std::memcpy(resp.salt, us.salt, su::kSaltBytes);
+  resp.hostId = c.hostId;
+  resp.accountId = c.accountId;
+  resp.requesterSession = c.requesterSession;
+  resp.consoleSession = c.consoleSession;
+  resp.lockGeneration = c.lockGeneration;
+  resp.topologyGeneration = c.topologyGeneration;
+  resp.issuedMs = c.issuedMs;
+  resp.expiresMs = c.expiresMs;
+  diag("unlock challenge issued requestId=%u requester=%u console=%u topo=%u", req.requestId,
+       requester, console, topo);
+  (void)write_exact(pipe, &resp, sizeof(resp));
+}
+
+void handle_sealed_request(UnlockSession& us, const SecureUnlockSealedRequest& req, HANDLE pipe) {
+  const uint32_t jobId = gUnlockJobCounter.fetch_add(1, std::memory_order_relaxed) + 1;
+
+  // Idempotent duplicate of a finished job.
+  if (us.hasTerminal && us.terminalRequestId == req.requestId) {
+    SecureUnlockResult r = us.terminal;
+    r.jobId = jobId;
+    (void)write_exact(pipe, &r, sizeof(r));
+    return;
+  }
+
+  auto reject = [&](UnlockStage stage, uint32_t win32 = 0) {
+    const SecureUnlockResult r = make_result(req.requestId, jobId, stage, true, win32);
+    us.hasTerminal = true;
+    us.terminalRequestId = req.requestId;
+    us.terminal = r;
+    (void)write_exact(pipe, &r, sizeof(r));
+  };
+  auto rejectNoCache = [&](UnlockStage stage) {  // do not cache: allows a fresh retry after new challenge
+    const SecureUnlockResult r = make_result(req.requestId, jobId, stage, true);
+    (void)write_exact(pipe, &r, sizeof(r));
+  };
+
+  if (!us.hasChallenge) { rejectNoCache(UnlockStage::RejectedPolicy); return; }
+
+  const uint32_t topoNow = gSessionTopologyGeneration.load(std::memory_order_acquire);
+  const auto verdict = us.challenge.Verify(req.challengeId, req.clientSessionCookie,
+                                           us.ctx.topologyGeneration, now_ms());
+  if (verdict == su::ChallengeVerdict::AlreadyConsumed) {
+    if (us.hasTerminal && us.terminalRequestId == req.requestId) {
+      SecureUnlockResult r = us.terminal; r.jobId = jobId; (void)write_exact(pipe, &r, sizeof(r)); return;
+    }
+    rejectNoCache(UnlockStage::RejectedPolicy); return;
+  }
+  if (verdict == su::ChallengeVerdict::Expired) { rejectNoCache(UnlockStage::Timeout); return; }
+  if (verdict != su::ChallengeVerdict::Valid) { rejectNoCache(UnlockStage::RejectedPolicy); return; }
+  // Topology changed since issue (session moved/locked/unlocked): refuse before touching crypto.
+  if (topoNow != us.ctx.topologyGeneration) { rejectNoCache(UnlockStage::RejectedStaleTopology); return; }
+
+  // Rebuild the exact context (add the client's public point) and derive the key.
+  su::UnlockContext c = us.ctx;
+  std::memcpy(c.clientPub, req.clientPub, su::kPubKeyBytes);
+  const auto kdf = su::BuildKdfInfo(c);
+  const auto aad = su::BuildAad(c);
+  uint8_t aesKey[su::kAesKeyBytes] = {};
+  if (!su::DeriveAesKey(us.key, req.clientPub, us.salt, kdf.data(), kdf.size(), aesKey)) {
+    su::SecureZero(aesKey, sizeof(aesKey));
+    rejectNoCache(UnlockStage::InternalError);
+    return;
+  }
+  uint8_t plain[su::kPlaintextBytes] = {};
+  const bool opened = su::AesGcmOpen(aesKey, req.nonce, aad.data(), aad.size(), req.cipher,
+                                     su::kPlaintextBytes, req.tag, plain);
+  su::SecureZero(aesKey, sizeof(aesKey));
+  if (!opened) {
+    su::SecureZero(plain, sizeof(plain));
+    if (++us.badAttempts >= 5) { us.challenge.ClearOutstanding(); us.hasChallenge = false; }
+    rejectNoCache(UnlockStage::DecryptFailed);  // invalid tag does NOT consume the challenge
+    return;
+  }
+  // Re-check topology one last time right before we commit + act.
+  if (gSessionTopologyGeneration.load(std::memory_order_acquire) != us.ctx.topologyGeneration) {
+    su::SecureZero(plain, sizeof(plain));
+    rejectNoCache(UnlockStage::RejectedStaleTopology);
+    return;
+  }
+  us.challenge.Consume(req.challengeId);  // exactly-once from here
+  us.hasChallenge = false;
+
+  uint16_t pw[su::kMaxPasswordUtf16] = {};
+  uint16_t pwCount = 0;
+  const bool unpacked = su::UnpackPassword(plain, pw, &pwCount);
+  su::SecureZero(plain, sizeof(plain));
+  if (!unpacked) { su::SecureZero(pw, sizeof(pw)); reject(UnlockStage::InternalError); return; }
+
+  wchar_t pwz[su::kMaxPasswordUtf16 + 1] = {};
+  for (uint16_t i = 0; i < pwCount; ++i) pwz[i] = static_cast<wchar_t>(pw[i]);
+  su::SecureZero(pw, sizeof(pw));
+
+  // Reconnect the disconnected requester session onto the console with the account's password.
+  SetLastError(0);
+  const BOOL ok = WTSConnectSessionW(us.ctx.requesterSession, us.ctx.consoleSession, pwz, TRUE);
+  const DWORD gle = GetLastError();
+  su::SecureZero(pwz, sizeof(pwz));
+
+  if (ok) {
+    // WTSConnectSession returned true; confirm the unlock actually took by polling lock state.
+    bool unlocked = false;
+    for (int i = 0; i < 20 && gRunning.load(std::memory_order_acquire); ++i) {
+      bool k = false;
+      if (!session_is_locked(us.ctx.requesterSession, &k) && k) { unlocked = true; break; }
+      Sleep(150);
+    }
+    diag("unlock WTSConnectSession ok, unlocked=%d requester=%u console=%u", unlocked ? 1 : 0,
+         us.ctx.requesterSession, us.ctx.consoleSession);
+    reject(unlocked ? UnlockStage::SessionUnlocked : UnlockStage::WtsConnectAccepted);
+  } else {
+    diag("unlock WTSConnectSession failed gle=%lu requester=%u console=%u", gle,
+         us.ctx.requesterSession, us.ctx.consoleSession);
+    // Wrong password / account restriction -> AuthFailed (no retry storm). Others -> InternalError.
+    const UnlockStage stage =
+        (gle == ERROR_LOGON_FAILURE || gle == ERROR_ACCOUNT_RESTRICTION ||
+         gle == ERROR_PASSWORD_EXPIRED || gle == ERROR_ACCOUNT_DISABLED)
+            ? UnlockStage::AuthFailed
+            : UnlockStage::InternalError;
+    reject(stage, gle);
+  }
+}
+
+void unlock_pipe_loop() {
+  while (gRunning.load(std::memory_order_acquire)) {
+    HANDLE pipe = create_unlock_pipe();
+    if (pipe == INVALID_HANDLE_VALUE) { Sleep(500); continue; }
+    const BOOL connected =
+        ConnectNamedPipe(pipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED;
+    if (connected) {
+      UnlockSession us;
+      uint8_t buf[512];
+      while (gRunning.load(std::memory_order_acquire)) {
+        DWORD read = 0;
+        if (!ReadFile(pipe, buf, sizeof(buf), &read, nullptr) || read < 8) break;
+        uint32_t magic = 0;
+        std::memcpy(&magic, buf, 4);
+        if (magic != remote60::native_poc::kSecureUnlockMagic) break;
+        uint16_t size = 0, kind = 0;
+        std::memcpy(&size, buf + 4, 2);
+        std::memcpy(&kind, buf + 6, 2);
+        if (size != read) break;
+        if (kind == static_cast<uint16_t>(remote60::native_poc::SecureUnlockKind::ChallengeRequest) &&
+            read == sizeof(SecureUnlockChallengeRequest)) {
+          SecureUnlockChallengeRequest req{};
+          std::memcpy(&req, buf, sizeof(req));
+          handle_challenge_request(us, req, pipe);
+        } else if (kind == static_cast<uint16_t>(remote60::native_poc::SecureUnlockKind::SealedRequest) &&
+                   read == sizeof(SecureUnlockSealedRequest)) {
+          SecureUnlockSealedRequest req{};
+          std::memcpy(&req, buf, sizeof(req));
+          handle_sealed_request(us, req, pipe);
+          su::SecureZero(&req, sizeof(req));
+        } else {
+          break;  // unknown/malformed
+        }
+      }
+      (void)DisconnectNamedPipe(pipe);
+    }
+    CloseHandle(pipe);
+  }
+}
+
+}  // namespace
+
 void WINAPI service_main(DWORD, wchar_t**) {
   // Ex rather than the plain handler so SERVICE_CONTROL_SESSIONCHANGE can be delivered; the
   // plain form cannot receive it, and without it the agent outlives the session it was made for.
@@ -403,6 +744,10 @@ void WINAPI service_main(DWORD, wchar_t**) {
   report_service_status(SERVICE_START_PENDING);
   gRunning.store(true, std::memory_order_release);
   report_service_status(SERVICE_RUNNING);
+
+  // The sealed-unlock exchange lives on its own thread + duplex pipe so its request/response (and a
+  // possibly-blocking WTSConnectSession) never touch the input path. (Codex #365/#366.)
+  std::thread unlockThread(unlock_pipe_loop);
 
   while (gRunning.load(std::memory_order_acquire)) {
     HANDLE pipe = create_secure_pipe();
@@ -434,6 +779,7 @@ void WINAPI service_main(DWORD, wchar_t**) {
     }
   }
   stop_agent();
+  if (unlockThread.joinable()) unlockThread.join();
   report_service_status(SERVICE_STOPPED);
 }
 
