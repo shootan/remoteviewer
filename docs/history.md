@@ -8327,3 +8327,10 @@ Next action
 - 리플레이 상태머신 `UnlockChallengeState`(순수): 단일 미결 챌린지, 소비 CAS(exactly-once), 만료/세션·락제너레이션 불일치/중복 거부. 무효 tag는 소비 안 함(DoS 방지)은 상위 로직에서.
 - 단위테스트 `sealed_unlock_test`: 양측 동일 32B 유도, GCM 왕복, ciphertext/tag/AAD/salt 변조 전부 거부, not-on-curve 공개키 거부, 패딩 경계, 리플레이 매트릭스(unknown/valid/wrong-cookie/wrong-gen/expired/consumed/supersede/clear) — **PASS**.
 - 빌드 안 함(전체는 잠금해제+IME 완료 후 1개). 다음(Codex 커밋순): 2 프로토콜(challenge/sealed/status 메시지+capability, default off), 3 서비스 unlock IPC+WTSConnectSession, 4 잠금상태 감지, 5 뷰어 DPAPI 저장, 6 unlock 흐름, 7 뷰어 UI, (8 Winlogon fallback 보류).
+
+### 365) 2026-09-03 잠금해제 — 토폴로지 세대 카운터 추가 + G2 상태 기록 (Codex #365 보강)
+
+- Codex가 d9a2444를 메모리안전 hotfix로 승인. 단 남은 의미적 TOCTOU 지적: 소유 스레드가 pending=false 확인 후 WriteFile 하는 사이 세션이 바뀌면 한 건이 old 세션으로 갈 수 있음 — 일반 입력엔 허용(작은 라우팅 창)이나 **비번/unlock 명령엔 불가**.
+- 반영: 서비스에 `gSessionTopologyGeneration` atomic 추가, 세션변경 핸들러가 fetch_add(release). 잠금해제 경로가 챌린지 발급 시 snapshot하고 복호 직전·직후+WTSConnectSession 직전 재검증(RejectedStaleTopology+비번 zero+새 챌린지) — unlock은 fire-and-forget forward 재사용 금지. 상세는 구현계획.md 섹션 I "토폴로지 세대 3중 재검증".
+- G3 전체 설계 답은 Codex seq=903(P-256/HKDF/GCM 조건부 승인 + on-demand one-shot challenge + WTSConnect 우선 + async U5 + control-level capability). 커밋1(edab229)은 이미 이 기준.
+- 서비스 컴파일 OK. 빌드 안 함(전체 후 1개). 다음: 2단계 프로토콜(challenge/sealed/status 메시지 — topologyGeneration 필드 포함, capability, default off).

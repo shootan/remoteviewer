@@ -78,6 +78,11 @@ std::atomic<uint32_t> gRequesterSession{kInvalidSessionId};
 std::atomic<bool> gSessionChangePending{false};
 std::atomic<uint32_t> gPendingSessionEvent{0};
 std::atomic<uint32_t> gPendingSessionId{0};
+// Bumped on every session-topology change. The unlock path snapshots it at challenge issue and
+// re-checks it before decrypt and before WTSConnectSession, so a password can never be injected into
+// a session that changed mid-flight -- the semantic fence d9a2444's lazy reset does not give ordinary
+// input. (Codex review #365.)
+std::atomic<uint32_t> gSessionTopologyGeneration{0};
 
 struct AgentProcess {
   HANDLE process = nullptr;
@@ -345,6 +350,7 @@ DWORD WINAPI service_control(DWORD control, DWORD eventType, LPVOID eventData, L
       gPendingSessionEvent.store(eventType, std::memory_order_relaxed);
       gPendingSessionId.store(notification ? notification->dwSessionId : 0u,
                               std::memory_order_relaxed);
+      gSessionTopologyGeneration.fetch_add(1, std::memory_order_release);
       gSessionChangePending.store(true, std::memory_order_release);
     }
     return NO_ERROR;
