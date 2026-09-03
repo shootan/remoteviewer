@@ -8292,3 +8292,12 @@ Next action
 - Codex Q1(트랜잭션 race/leak) PASS 확인, Q2/Q3도 정상경로 no-op·churn 방어 확인. HIGH 2(encoder MFT) 원장 D3 유지.
 - 빌드: host 컴파일 OK, host_abr_test PASS, shared_core_test PASS. 임베드 0.2.82. 산출물 `dist/GNLinkSetup-0.2.82.exe`. 0.2.78~81 폐기.
 - 최종 실기 게이트(Codex): 1)capture-device-adapter-stale 2)device-recreate nativeKnown=1·winrtKnown=1·luidMatch=1·newAdapterState=has 3)staging 정상 4)desktop_backend=wgc_window capture-started=1 5)first callback/encoded key/present 6)30초 stats 지속 7)input-p0 rate chain.
+
+### 361) 2026-09-03 실기(0.2.82, RDP off): 창모드/어댑터 해결 확인, 텍스트 지연 2원인 분리 + 한글 IME 재설계 Codex 검증
+
+- 실기(RDP off, OSLink 잠금해제, GNLink 데스크톱): 창모드 드래그 정상(WGCDEV 성공), 고화질 영상 정상, 화질 저하/30↔60 깜빡임 없음.
+- **데스크톱 정적 멈춤의 진짜 원인 = 캡처 D3D 장치가 "출력 없는 어댑터"에 안착**(12:11 세션 nativeLuid=99594 newAdapterState=none, captureUnmapWait 138ms/8fps). 장치가 VDD 출력 어댑터(48969, has)에 안착한 14:12 세션은 리드백 2.6ms·영상 정상. 즉 ABR/VBR 되돌릴 필요 없음(그건 느린 캡처가 트리거한 오판이었음). 가상 디스플레이는 **이미 설치·활성**(MikeTheTech "Virtual Display Driver" 1920x1080; Parsec VDA도 설치됨) — 새로 만들 필요 없음. env REMOTE60_DESKTOP_CAPTURE_BACKEND=wgc는 자식 프로세스 미전파로 미적용(추적 보류).
+- **텍스트 지연 = 2원인 분리**(사용자 관찰로 확정): ① 한글 조합이 호스트에서 안 됨(완성돼야 보임), 영어는 VK 즉시. ② 키마다 RTT 직렬(stop-and-wait). 사용자: 한/영 토글이 G7 중립화를 켰다 껐다 → 한 상태에선 호스트 live 조합 됨(호스트측 IME 가능 증거).
+- 원인 코드 확정: host_input_inject.cpp:653 매 keydown ensure_foreground_ime_alphanumeric()=영어강제; viewer_window_proc.cpp WM_IME_SETCONTEXT 조합UI 억제+WM_IME_COMPOSITION 완성텍스트만; viewer_input_forward.cpp:46 VK_PROCESSKEY(조합중 자모) 미전달. 프로토콜 ControlInputEventMessage(poc_protocol.hpp:181)엔 VK만·scan/E0 없음.
+- **한글 IME 재설계 Codex 검증 완료**(remote#nhxsk5vr): host-side IME 방향 승인, 단일 커밋 반대. 협상 dual-mode(HostPhysicalIme/LegacyCommittedText)+P1b reliable 키전송+PhysicalKeyV2. 상세·6단계 커밋순서·필수테스트는 docs/구현계획.md 섹션 I. 사용자 결정: 6단계 전부 구현 후 빌드 1개.
+- 코드 변경 없음(이 엔트리는 진단+계획 확정). 다음: 섹션 I 1→6 순 구현, 최종 빌드 전 Codex 재리뷰.
