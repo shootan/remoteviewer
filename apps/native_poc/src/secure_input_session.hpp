@@ -48,11 +48,27 @@ inline constexpr uint32_t kInvalidSessionId = 0xffffffffu;
  * desktop, so an agent created there could attach to nothing -- and it is exactly what a
  * requester running as a service would report.
  */
-inline SessionChoice resolve_target_session(uint32_t requesterSession, uint32_t consoleSession) {
+inline SessionChoice resolve_target_session(uint32_t requesterSession, bool requesterStateKnown,
+                                            bool requesterActive, uint32_t consoleSession) {
   const auto usable = [](uint32_t session) {
     return session != kInvalidSessionId && session != 0u;
   };
-  if (usable(requesterSession)) return {requesterSession, SessionSource::Requester};
+  // Requester and console being the same session is itself proof the requester owns the console's
+  // attach right now (WTSGetActiveConsoleSessionId named it), so honor it regardless of the
+  // connect-state probe -- the ordinary "sitting at the machine" case. (Codex review #362.)
+  if (usable(requesterSession) && requesterSession == consoleSession) {
+    return {requesterSession, SessionSource::Requester};
+  }
+  // Otherwise the requester is only the right target while it is ACTIVELY connected. A disconnected
+  // requester -- the RDP session after the client drops, which Windows leaves "signed in but not
+  // connected, e.g. exited to the lock screen" -- has its desktop off the active input desktop, so
+  // SendInput there returns ERROR_ACCESS_DENIED (measured: secure_input.log err=5, requester=1
+  // Disconnected while the LogonUI ran on console=13). Fall to the console in that case. When the
+  // state probe failed (stateKnown=false) treat the requester as not-active for the same reason: a
+  // valid console is the stronger signal, and we must never inject into a stale disconnected session.
+  if (usable(requesterSession) && requesterStateKnown && requesterActive) {
+    return {requesterSession, SessionSource::Requester};
+  }
   if (usable(consoleSession)) return {consoleSession, SessionSource::Console};
   return {kInvalidSessionId, SessionSource::None};
 }

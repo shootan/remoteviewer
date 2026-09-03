@@ -1,5 +1,7 @@
 #include <windows.h>
 #include <sddl.h>
+#include <wtsapi32.h>
+#pragma comment(lib, "Wtsapi32.lib")
 
 #include <atomic>
 #include <algorithm>
@@ -203,16 +205,45 @@ bool start_agent(DWORD sessionId, const std::wstring& desktopName) {
   return true;
 }
 
+// True when `session` is actively connected (WTSActive). *known=false when the state could not be
+// queried -- the resolver then treats the requester as not-active so a valid console wins, which is
+// the safe choice (never inject into a stale, disconnected session). The service runs as LocalSystem
+// and is the session authority, so it asks WTS directly rather than trusting a value over the pipe.
+// (Codex review #362.)
+bool query_session_active(uint32_t session, bool* known) {
+  *known = false;
+  if (session == kInvalidSessionId || session == 0u) return false;
+  LPWSTR buffer = nullptr;
+  DWORD bytes = 0;
+  bool active = false;
+  if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session, WTSConnectState, &buffer,
+                                  &bytes) &&
+      buffer && bytes >= sizeof(WTS_CONNECTSTATE_CLASS)) {
+    const WTS_CONNECTSTATE_CLASS state = *reinterpret_cast<const WTS_CONNECTSTATE_CLASS*>(buffer);
+    *known = true;
+    active = (state == WTSActive);
+  }
+  if (buffer) WTSFreeMemory(buffer);
+  return active;
+}
+
 // Resolves the session the agent belongs in and says why, once per change. Silence here is what
 // let the wrong-session bug live: the write succeeded, so everything downstream looked healthy.
 DWORD target_session() {
   const uint32_t requester = gRequesterSession.load(std::memory_order_acquire);
-  const auto choice = resolve_target_session(requester, WTSGetActiveConsoleSessionId());
+  bool requesterKnown = false;
+  const bool requesterActive = query_session_active(requester, &requesterKnown);
+  const DWORD console = WTSGetActiveConsoleSessionId();
+  const auto choice =
+      resolve_target_session(requester, requesterKnown, requesterActive, console);
   static uint32_t reported = kInvalidSessionId;
-  if (choice.sessionId != reported) {
+  static remote60::native_poc::SessionSource reportedSource = remote60::native_poc::SessionSource::None;
+  if (choice.sessionId != reported || choice.source != reportedSource) {
     reported = choice.sessionId;
-    diag("target session=%u source=%s (requester=%u console=%u)", choice.sessionId,
-         session_source_name(choice.source), requester, WTSGetActiveConsoleSessionId());
+    reportedSource = choice.source;
+    diag("target session=%u source=%s (requester=%u known=%d active=%d console=%lu)",
+         choice.sessionId, session_source_name(choice.source), requester,
+         requesterKnown ? 1 : 0, requesterActive ? 1 : 0, console);
   }
   return choice.sessionId;
 }
@@ -268,7 +299,8 @@ bool forward_to_agent(const SecureInputMessage& message) {
 void report_service_status(DWORD state, DWORD error = NO_ERROR) {
   gStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
   gStatus.dwCurrentState = state;
-  gStatus.dwControlsAccepted = state == SERVICE_RUNNING ? SERVICE_ACCEPT_STOP : 0;
+  gStatus.dwControlsAccepted =
+      state == SERVICE_RUNNING ? (SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SESSIONCHANGE) : 0;
   gStatus.dwWin32ExitCode = error;
   gStatus.dwCheckPoint = 0;
   gStatus.dwWaitHint = 0;
@@ -281,10 +313,20 @@ DWORD WINAPI service_control(DWORD control, DWORD eventType, LPVOID eventData, L
   // input silently goes nowhere.
   if (control == SERVICE_CONTROL_SESSIONCHANGE) {
     const auto* notification = static_cast<const WTSSESSION_NOTIFICATION*>(eventData);
-    if (notification && (eventType == WTS_SESSION_LOGOFF || eventType == WTS_SESSION_LOGON ||
-                         eventType == WTS_CONSOLE_DISCONNECT || eventType == WTS_REMOTE_DISCONNECT)) {
-      diag("session change event=%lu session=%lu", eventType, notification->dwSessionId);
-      if (gAgent.process && gAgent.sessionId == notification->dwSessionId) {
+    // Any of these can move the input desktop or the active session out from under the agent: a lock
+    // raises the Winlogon secure desktop, a reconnect moves the session to or from the console, a
+    // logoff takes the desktop away entirely. The agent lives inside one session+desktop, so drop it
+    // and let the next message re-resolve where input actually needs to go (target_session now reads
+    // the requester's connect state) rather than writing into a desktop no longer in front. This
+    // only fires once SERVICE_ACCEPT_SESSIONCHANGE is advertised -- it was not, so this handler was
+    // effectively dead. (Codex review #362.) The handler stays short; re-creation is lazy.
+    if (eventType == WTS_SESSION_LOGOFF || eventType == WTS_SESSION_LOGON ||
+        eventType == WTS_CONSOLE_CONNECT || eventType == WTS_CONSOLE_DISCONNECT ||
+        eventType == WTS_REMOTE_CONNECT || eventType == WTS_REMOTE_DISCONNECT ||
+        eventType == WTS_SESSION_LOCK || eventType == WTS_SESSION_UNLOCK) {
+      diag("session change event=%lu session=%lu (agent session=%u)", eventType,
+           notification ? notification->dwSessionId : 0u, gAgent.sessionId);
+      if (gAgent.process) {
         stop_agent();  // the next message re-resolves and re-creates it where it belongs
       }
     }

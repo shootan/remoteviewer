@@ -8301,3 +8301,12 @@ Next action
 - 원인 코드 확정: host_input_inject.cpp:653 매 keydown ensure_foreground_ime_alphanumeric()=영어강제; viewer_window_proc.cpp WM_IME_SETCONTEXT 조합UI 억제+WM_IME_COMPOSITION 완성텍스트만; viewer_input_forward.cpp:46 VK_PROCESSKEY(조합중 자모) 미전달. 프로토콜 ControlInputEventMessage(poc_protocol.hpp:181)엔 VK만·scan/E0 없음.
 - **한글 IME 재설계 Codex 검증 완료**(remote#nhxsk5vr): host-side IME 방향 승인, 단일 커밋 반대. 협상 dual-mode(HostPhysicalIme/LegacyCommittedText)+P1b reliable 키전송+PhysicalKeyV2. 상세·6단계 커밋순서·필수테스트는 docs/구현계획.md 섹션 I. 사용자 결정: 6단계 전부 구현 후 빌드 1개.
 - 코드 변경 없음(이 엔트리는 진단+계획 확정). 다음: 섹션 I 1→6 순 구현, 최종 빌드 전 Codex 재리뷰.
+
+### 362) 2026-09-03 G2 착수 — 보안입력 세션 선택에 연결상태 반영 + 서비스 SESSIONCHANGE 활성화 (Codex 검증, 빌드 전)
+
+- 화면 없는 잠금해제(사용자 우선순위)의 1단계. Codex(remote#nhxsk5vr) 검증 반영. 로그 증거: secure_input.log 12:06:14 target session=1 source=requester (requester=1 console=13), Winlogon attach=ok·inject err=5 → 끊긴 requester(RDP 세션1) 타겟이 원인, 잠금화면 LogonUI는 console=13.
+- **resolve_target_session**(secure_input_session.hpp): 인자에 requesterStateKnown/requesterActive 추가. 규칙 — requester==console면 그대로(콘솔 API가 attach 증명), 아니면 requester가 stateKnown&&active일 때만 requester, 그 외 usable console, 없으면 None. Disconnected/probe실패 requester는 console로 폴백(err=5 회피).
+- **secure_input_service_main.cpp**: query_session_active()가 WTSQuerySessionInformationW(WTSConnectState)로 조회(SYSTEM이 세션 authority). target_session이 이를 resolver에 전달+로그(known/active/console). `#include <wtsapi32.h>`+`#pragma comment(lib,"Wtsapi32.lib")`.
+- **서비스 SESSIONCHANGE 버그(Codex 추가 발견)**: report_service_status가 SERVICE_ACCEPT_STOP만 광고 → SCM이 SERVICE_CONTROL_SESSIONCHANGE 안 보냄 → 기존 세션변경 핸들러가 死. `SERVICE_ACCEPT_STOP|SERVICE_ACCEPT_SESSIONCHANGE`로 수정. 이벤트도 LOCK/UNLOCK/CONSOLE_CONNECT/REMOTE_CONNECT 추가, 발생 시 에이전트 stop→다음 메시지에서 재해결(연결상태 반영).
+- 테스트: secure_input_session_test에 G2 매트릭스 추가(active→requester, disconnected/connecting/unknown→console, req==console→requester, transition→None 등) — PASS. 서비스 컴파일 OK.
+- **빌드 안 함**(사용자 지시: 잠금해제+IME 전부 구현 후 1개). 다음: WTSConnectSession spike(비번은 호스트 로컬 저장, 뷰어는 트리거만 — 평문 전송 금지) → U5 결과경로 → 잠금상태 status → 뷰어 UI. G3 비번 전송은 보안상 N4 전까지 host-local credential 방식.
