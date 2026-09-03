@@ -54,6 +54,10 @@ struct DesktopInputState {
 // for why the secure desktop -- lock screen, UAC, Ctrl+Alt+Del -- has to be detected here).
 // The uncached variant performs the OpenInputDesktop query every call; the cached one answers
 // from a 250ms cache because it runs per input event.
+// Host-side IME v1: inject one physical key by scan code, letting the host IME compose (no
+// neutralization). Public so the control session can route ControlPhysicalKey here. (Codex #366.)
+bool inject_physical_scan_key(uint16_t scanCode, bool down, bool extended);
+
 bool interactive_desktop_is_default_uncached();
 bool interactive_desktop_is_default();
 

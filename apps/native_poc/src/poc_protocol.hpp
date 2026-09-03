@@ -41,6 +41,9 @@ enum class MessageType : uint16_t {
   ControlUnlockAccepted = 43,
   ControlUnlockStatusRequest = 44,
   ControlUnlockStatusResult = 45,
+  // Host-side IME v1: raw physical key (vk+scan+flags) so the host IME composes live. Advertised via
+  // kCaptureFlagHostImeV1; sent only when the viewer opts in and the host advertised support.
+  ControlPhysicalKey = 46,
 };
 
 enum class UdpPacketKind : uint16_t {
@@ -168,6 +171,8 @@ constexpr uint32_t kCaptureFlagSecureDesktopActive = 0x4u;
 // host that understands them (an old host drains an unknown control opcode without replying, which
 // would hang the client's strict request/response loop). Control-level so TCP and UDP both see it.
 constexpr uint32_t kCaptureFlagUnlockSealedV1 = 0x8u;
+// The host advertises host-side IME (raw physical-key injection) support here.
+constexpr uint32_t kCaptureFlagHostImeV1 = 0x10u;
 
 struct ControlPongMessage {
   MessageHeader header{};
@@ -620,6 +625,19 @@ struct ControlUnlockStatusResultMessage {
   uint64_t clientSendQpcUs = 0;
 };
 static_assert(sizeof(ControlUnlockStatusResultMessage) == 36, "unlock status-result wire drift");
+
+// Host-side IME: one physical key transition, carrying the scan code so the host can inject with
+// KEYEVENTF_SCANCODE (layout/IME independent) and let the host IME compose live. down=1 keydown.
+struct ControlPhysicalKeyMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint16_t down = 0;      // 1 = keydown, 0 = keyup
+  uint16_t vk = 0;        // virtual key (diagnostic / fallback)
+  uint16_t scanCode = 0;  // hardware scan code from the client's WM_KEY* lParam
+  uint16_t flags = 0;     // bit0: extended (E0), bit1: repeat
+  uint64_t clientSendQpcUs = 0;
+};
+static_assert(sizeof(ControlPhysicalKeyMessage) == 28, "physical-key wire drift");
 
 constexpr uint16_t kUdpVideoFecGroupSize = 8;
 #pragma pack(pop)

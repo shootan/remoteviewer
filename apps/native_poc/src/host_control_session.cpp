@@ -302,6 +302,18 @@ void ControlSessionServer::Serve(ControlLink& link) {
       continue;
     }
 
+    if (type == MessageType::ControlPhysicalKey &&
+        header.size == sizeof(ControlPhysicalKeyMessage)) {
+      ControlPhysicalKeyMessage k{};
+      k.header = header;
+      if (!link.Read(&k.seq, sizeof(k) - sizeof(MessageHeader))) break;
+      // Host-side IME: inject the raw scan code and let the host IME compose. No neutralization, so
+      // Hangul composes live and the client's Han/Yeong key toggles the host IME like a real keyboard.
+      (void)inject_physical_scan_key(k.scanCode, k.down != 0, (k.flags & 0x1u) != 0);
+      send_input_ack(k.seq);
+      continue;
+    }
+
     if (type == MessageType::ControlInputEvent && header.size == sizeof(ControlInputEventMessage)) {
       ControlInputEventMessage input{};
       input.header = header;

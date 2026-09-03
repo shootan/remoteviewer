@@ -400,6 +400,20 @@ bool send_desktop_virtual_key(uint32_t vk, bool keyUp) {
 
 }  // namespace
 
+// Host-side IME v1: inject one physical key by its client scan code (KEYEVENTF_SCANCODE, wVk=0) so
+// the host keyboard layout + IME resolve it and compose live -- no IME neutralization here. This is
+// the path that makes remote Hangul actually compose in the host app. (Codex #366, host-side IME.)
+bool inject_physical_scan_key(uint16_t scanCode, bool down, bool extended) {
+  INPUT in{};
+  in.type = INPUT_KEYBOARD;
+  in.ki.wVk = 0;
+  in.ki.wScan = static_cast<WORD>(scanCode);
+  in.ki.dwFlags = KEYEVENTF_SCANCODE | (down ? 0u : KEYEVENTF_KEYUP) |
+                  (extended ? KEYEVENTF_EXTENDEDKEY : 0u);
+  return SendInput(1, &in, sizeof(INPUT)) == 1;
+}
+
+
 InputInjectionMode parse_input_injection_mode(std::string raw) {
   raw = ascii_lower(trim_ascii(raw));
   if (raw.empty() || raw == "none" || raw == "disabled" || raw == "off") {

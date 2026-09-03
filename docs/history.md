@@ -8355,3 +8355,11 @@ Next action
 - `host_unlock_relay.hpp/.cpp`(신규): 백그라운드 워커 1개 + duplex 파이프(GNLinkUnlock) 소유. ChallengeSync(컨트롤 스레드 동기, 빠름) / SealedAsync(즉시 반환+워커가 WTSConnectSession 수행) / PollResult(폴링). 호스트는 키/비번 절대 안 봄(불투명 릴레이). 세션 쿠키로 챌린지↔sealed 바인딩.
 - host_control_session.cpp: 컨트롤 루프에 정적 릴레이 + 커넥션별 쿠키, Pong에 kCaptureFlagUnlockSealedV1 광고, ControlUnlockChallengeRequest→ChallengeSync→Challenge, SealedRequest→SealedAsync+즉시 Accepted(+ciphertext SecureZero), StatusRequest→PollResult→StatusResult. WTSConnectSession blocking이 컨트롤 채널을 막지 않도록 sealed는 비동기+폴링(Codex HOL 경고 반영).
 - 호스트 컴파일 OK. 빌드 안 함(전체 후 1개). 다음: 뷰어(클라) 크립토 클라 + DPAPI 비번저장 + 언락 UI + 컨트롤 송수신 → 한영 IME → 빌드.
+
+### 369) 2026-09-03 한영 IME 1 — 프로토콜 PhysicalKey + 호스트 스캔코드 주입(호스트측 IME) (Codex 커밋4/5 호스트분)
+
+- poc_protocol.hpp: MessageType::ControlPhysicalKey(46) + ControlPhysicalKeyMessage(down/vk/scanCode/flags, sizeof 28 static_assert) + 능력플래그 kCaptureFlagHostImeV1(0x10, Pong 광고).
+- host_input_inject.cpp: `inject_physical_scan_key(scan,down,extended)` — KEYEVENTF_SCANCODE+wVk=0로 주입해 호스트 레이아웃/IME가 해석·조합. **IME 중립화 없음**(그 경로는 ControlInputEvent 전용). 한글이 호스트 앱에서 live 조합되고 한/영 키도 실제 키보드처럼 토글됨.
+- host_control_session.cpp: ControlPhysicalKey 핸들러 → inject_physical_scan_key + send_input_ack.
+- 호스트 컴파일 OK. 안전: 기본 동작 불변(뷰어가 옵트인+호스트 능력 확인 시에만 PhysicalKey 전송, 아니면 기존 VK 경로). 빌드 안 함(전체 후 1개).
+- 다음: 뷰어측 — 옵트인 시 로컬 IME 분리(ImmAssociateContext NULL) + WM_KEY→PhysicalKey(scan) 전송 + 클라 조합경로 억제. 그다음 빌드.
