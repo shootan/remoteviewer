@@ -9,6 +9,7 @@
 
 #include "poc_protocol.hpp"
 #include "sealed_unlock.hpp"
+#include "secure_unlock_ipc.hpp"
 #include "unlock_wire.hpp"
 
 using namespace remote60::native_poc;
