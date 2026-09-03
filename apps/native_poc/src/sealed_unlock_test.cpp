@@ -180,6 +180,24 @@ void TestPackBounds() {
   check(!UnpackPassword(block, out, &count), "bogus length field -> unpack fails");
 }
 
+// RFC 5869 Test Case 1 (SHA-256), first 32 bytes of OKM. Pins the hand-rolled HKDF against the
+// standard so a subtle HMAC/extract/expand mistake cannot silently ship. (Codex review #365.)
+void TestHkdfRfc5869() {
+  std::printf("HKDF-SHA256 matches RFC 5869 test vector 1\n");
+  uint8_t ikm[22];
+  std::memset(ikm, 0x0b, sizeof(ikm));
+  uint8_t salt[13];
+  for (int i = 0; i < 13; ++i) salt[i] = static_cast<uint8_t>(i);  // 00 01 ... 0c
+  const uint8_t info[10] = {0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9};
+  const uint8_t wantOkm32[32] = {0x3c, 0xb2, 0x5f, 0x25, 0xfa, 0xac, 0xd5, 0x7a, 0x90, 0x43, 0x4f,
+                                 0x64, 0xd0, 0x36, 0x2f, 0x2a, 0x2d, 0x2d, 0x0a, 0x90, 0xcf, 0x1a,
+                                 0x5a, 0x4c, 0x5d, 0xb0, 0x2d, 0x56, 0xec, 0xc4, 0xc5, 0xbf};
+  uint8_t out[32];
+  check(Hkdf_Sha256_32(ikm, sizeof(ikm), salt, sizeof(salt), info, sizeof(info), out),
+        "HKDF derives");
+  check(std::memcmp(out, wantOkm32, 32) == 0, "HKDF output equals RFC 5869 OKM[0:32]");
+}
+
 // The replay state machine: exactly-once execution and rejection of stale/foreign/expired/duplicate.
 void TestReplayStateMachine() {
   std::printf("challenge/replay state machine\n");
@@ -222,6 +240,7 @@ int main() {
   TestTamperAndContextRejected();
   TestMalformedPublicKeyRejected();
   TestPackBounds();
+  TestHkdfRfc5869();
   TestReplayStateMachine();
 
   if (gFailures != 0) {

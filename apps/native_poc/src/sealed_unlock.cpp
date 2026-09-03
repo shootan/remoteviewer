@@ -117,6 +117,12 @@ void SecureZero(void* p, size_t len) {
   if (p && len) SecureZeroMemory(p, len);
 }
 
+bool Hkdf_Sha256_32(const uint8_t* ikm, size_t ikmLen, const uint8_t* salt, size_t saltLen,
+                    const uint8_t* info, size_t infoLen, uint8_t out[32]) {
+  if (!out || (ikmLen && !ikm) || (saltLen && !salt) || (infoLen && !info)) return false;
+  return hkdf_sha256_32(ikm, ikmLen, salt, saltLen, info, infoLen, out);
+}
+
 // --- EcdhKeyPair --------------------------------------------------------------------------------
 
 EcdhKeyPair::~EcdhKeyPair() { Reset(); }

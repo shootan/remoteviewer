@@ -8,8 +8,10 @@
 // the service never touch raw key material directly.
 //
 // Design (Codex review #364):
-//   - P-256 ECDH (ephemeral, one keypair per unlock challenge) + HKDF-SHA256 (2-step CNG sequence:
-//     salt-and-finalize on the agreed secret, then expand with an info label) -> a 32-byte AES key.
+//   - P-256 ECDH (ephemeral, one keypair per unlock challenge). The raw shared secret is extracted
+//     and run through HKDF-SHA256 (RFC 5869, implemented over HMAC) with a per-challenge salt and an
+//     info label -> a 32-byte AES key. (CNG's HKDF-on-secret-handle path did not derive on the target
+//     environment; the HMAC implementation is pinned by a known-answer test.)
 //   - AES-256-GCM with a fresh 12-byte random nonce and a 16-byte tag; the AAD binds the ciphertext
 //     to the challenge/session context so it cannot be replayed into a different unlock.
 //   - One challenge -> one derived key -> one encryption, so a GCM nonce can never repeat for a key.
@@ -92,6 +94,11 @@ bool AesGcmSeal(const uint8_t key[kAesKeyBytes], const uint8_t nonce[kNonceBytes
 bool AesGcmOpen(const uint8_t key[kAesKeyBytes], const uint8_t nonce[kNonceBytes], const uint8_t* aad,
                 size_t aadLen, const uint8_t* cipher, size_t cipherLen, const uint8_t tag[kTagBytes],
                 uint8_t* plainOut);
+
+// HKDF-SHA256 producing exactly 32 bytes (RFC 5869, one expand block). Exposed so a known-answer
+// test can pin the hand-rolled implementation against the RFC vectors. out must hold 32 bytes.
+bool Hkdf_Sha256_32(const uint8_t* ikm, size_t ikmLen, const uint8_t* salt, size_t saltLen,
+                    const uint8_t* info, size_t infoLen, uint8_t out[32]);
 
 // --- plaintext padding (hides password length) --------------------------------------------------
 // Packs a UTF-16 password into the fixed kPlaintextBytes block with random padding. Returns false if
