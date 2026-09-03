@@ -8409,3 +8409,13 @@ Next action
   - HIGH: 챌린지 정책에서 requester state unknown=fail-closed(거부), 요청자 파이프 교체 시 topologyGeneration bump.
 - 남은(원장 D4, unlock UI dormant): 릴레이 결과맵 복합키/TTL·jobId·IPC검증. IME 후속: capability-after-focus 즉시 detach(pong post), 재접속 시 hostImeSupported reset+HIMC restore, P1b, 초기 영문정렬. Winlogon fallback 미구현.
 - 단위테스트 5종 PASS.
+
+### 375) 2026-09-04 3차 리뷰 반영 — 미매칭 키업/set 일관성/rate-limit/WTS identity fence → 0.2.86
+- Codex 3차: 0.2.85 기본경로 설치 OK, REMOTE60_HOST_IME=1/unlock 필드판정 전 HIGH 마감 요구. 반영:
+  - 호스트: 미매칭 physical key-up은 전송/주입 안 함(physicalDown에 있는 것만 release).
+  - 뷰어: enqueue_physical_key가 bool 반환, 실제 큐 수락 시에만 gPhysicalDown insert(입력 disabled 중 stale 방지). SYSKEYUP도 set 기반이라 소비 하튼키의 up 미전송.
+  - 뷰어: shutdown 시 hostImeSupported=false 리셋.
+  - 서비스: 챌린지 rate-limit(500ms, capability가 wire 광고되므로), WTS 직전 gRequesterSession/console identity 직접 재검증(generation 창+누락 이벤트 마감).
+  - LOW: dead gUnlockThreadHandle 전역 제거(service_main이 native_handle 직접 사용), 릴레이 workerThreadHandle_ join 후 clear.
+- 잔여(IME 완전자연): capability-after-focus 즉시 detach(pong→UI post)·재접속 HIMC restore·초기 영문 sync·P1b. 원장 D4(unlock UI 전 릴레이 복합키/TTL/jobId/IPC검증). host physical 상태의 TCP/UDP rollover·release 실패 복구는 후속.
+- 단위테스트 PASS.

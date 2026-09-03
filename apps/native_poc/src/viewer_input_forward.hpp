@@ -59,7 +59,7 @@ void enqueue_release_for_pressed_keys(ViewerState& ctx);
 void enqueue_input_event(ViewerState& ctx, uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode);
 // Host-side IME (opt-in): true when raw physical keys should be forwarded instead of VK/composed text.
 bool host_ime_mode(ViewerState& ctx);
-void enqueue_physical_key(ViewerState& ctx, bool down, uint16_t vk, uint16_t scan, bool extended,
+bool enqueue_physical_key(ViewerState& ctx, bool down, uint16_t vk, uint16_t scan, bool extended,
                           bool repeat);
 
 /** A replayed step carries its own recorded button state instead of today's live one. */

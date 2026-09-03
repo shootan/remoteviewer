@@ -74,11 +74,6 @@ SERVICE_STATUS_HANDLE gStatusHandle = nullptr;
 SERVICE_STATUS gStatus{};
 std::atomic<bool> gRunning{true};
 std::atomic<HANDLE> gClientPipe{INVALID_HANDLE_VALUE};
-// The unlock worker's OS thread handle, published so shutdown can CancelSynchronousIo it out of a
-// blocking ConnectNamedPipe/ReadFile. The worker exclusively owns and closes its pipe (Codex #370
-// BLOCKER A: a controller-close raced with the worker's stale local handle). (native_handle set
-// after the thread starts.)
-std::atomic<void*> gUnlockThreadHandle{nullptr};
 // The session of the process holding the control pipe -- the streaming host. Captured once when
 // the pipe connects, because that is the only moment the requester is identifiable.
 std::atomic<uint32_t> gRequesterSession{kInvalidSessionId};
@@ -493,6 +488,7 @@ struct UnlockSession {
   uint32_t terminalRequestId = 0;          // cached terminal result (idempotent duplicate)
   bool hasTerminal = false;
   SecureUnlockResult terminal{};
+  uint64_t lastChallengeMs = 0;            // rate-limit issuance (capability is advertised on the wire)
 };
 
 HANDLE create_unlock_pipe() {
@@ -547,6 +543,16 @@ void handle_challenge_request(UnlockSession& us, const SecureUnlockChallengeRequ
     (void)write_exact(pipe, &resp, sizeof(resp));
     return;
   }
+
+  // Rate-limit challenge issuance: the capability is advertised on the wire, so an external client can
+  // ask; do not let it spin ECDH keygen / WTS queries. (Codex 3rd review.)
+  const uint64_t nowChallengeMs = now_ms();
+  if (us.lastChallengeMs != 0 && nowChallengeMs - us.lastChallengeMs < 500) {
+    resp.stage = stage_code(UnlockStage::RejectedPolicy);
+    (void)write_exact(pipe, &resp, sizeof(resp));
+    return;
+  }
+  us.lastChallengeMs = nowChallengeMs;
 
   us.hasChallenge = false;
   if (!us.key.Generate()) {
@@ -695,6 +701,15 @@ void handle_sealed_request(UnlockSession& us, const SecureUnlockSealedRequest& r
     reject(UnlockStage::RejectedStaleTopology);
     return;
   }
+  // Directly re-verify the requester/console identity right before the irreversible call: the topology
+  // counter has a tiny store-vs-bump window on requester change, and a missed WTS event could leave it
+  // stale. If identity moved, abort. (Codex 3rd review.)
+  if (gRequesterSession.load(std::memory_order_acquire) != us.ctx.requesterSession ||
+      WTSGetActiveConsoleSessionId() != us.ctx.consoleSession) {
+    su::SecureZero(pwz, sizeof(pwz));
+    reject(UnlockStage::RejectedStaleTopology);
+    return;
+  }
   // Reconnect the disconnected requester session onto the console with the account's password. bWait
   // FALSE returns promptly (Codex #370 BLOCKER 3): we confirm the unlock by polling the lock state
   // rather than blocking this thread inside WTS.
@@ -788,7 +803,6 @@ void WINAPI service_main(DWORD, wchar_t**) {
   // The sealed-unlock exchange lives on its own thread + duplex pipe so its request/response (and a
   // possibly-blocking WTSConnectSession) never touch the input path. (Codex #365/#366.)
   std::thread unlockThread(unlock_pipe_loop);
-  gUnlockThreadHandle.store(unlockThread.native_handle(), std::memory_order_release);
 
   while (gRunning.load(std::memory_order_acquire)) {
     HANDLE pipe = create_secure_pipe();

@@ -68,6 +68,7 @@ void HostUnlockRelay::Stop() {
       while (WaitForSingleObject(h, 50) == WAIT_TIMEOUT) (void)CancelSynchronousIo(h);
     }
     if (worker_.joinable()) worker_.join();
+    workerThreadHandle_.store(nullptr, std::memory_order_release);
   }
 }
 

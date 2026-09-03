@@ -58,8 +58,11 @@ void forward_physical(ViewerState& ctx, HWND hwnd, WPARAM wp, LPARAM lp, bool do
   const uint16_t key = static_cast<uint16_t>(scan | (ext ? 0x100 : 0));
   if (down) {
     ensure_local_ime_off(hwnd);
-    gPhysicalDown.insert(key);
-    enqueue_physical_key(ctx, true, static_cast<uint16_t>(wp), scan, ext, (lp & (1 << 30)) != 0);
+    // Track only keys we actually enqueued, so a down dropped while input is disabled cannot leave a
+    // stale entry whose up gets sent later. (Codex 3rd review.)
+    if (enqueue_physical_key(ctx, true, static_cast<uint16_t>(wp), scan, ext, (lp & (1 << 30)) != 0)) {
+      gPhysicalDown.insert(key);
+    }
   } else if (gPhysicalDown.erase(key) > 0) {
     enqueue_physical_key(ctx, false, static_cast<uint16_t>(wp), scan, ext, false);
   }

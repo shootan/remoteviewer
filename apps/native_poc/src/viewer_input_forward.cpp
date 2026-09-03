@@ -23,10 +23,10 @@ bool host_ime_mode(ViewerState& ctx) {
 
 // Host-side IME: forward one raw physical key (scan code) so the host IME composes live. Not
 // coalesced (type != ControlInputEvent), so keys never merge like moves do.
-void enqueue_physical_key(ViewerState& ctx, bool down, uint16_t vk, uint16_t scan, bool extended,
+bool enqueue_physical_key(ViewerState& ctx, bool down, uint16_t vk, uint16_t scan, bool extended,
                           bool repeat) {
-  if (kInputPolicyForceBlock) return;
-  if (!ctx.session.inputEnabled.load()) return;
+  if (kInputPolicyForceBlock) return false;
+  if (!ctx.session.inputEnabled.load()) return false;
   QueuedControlInputMessage msg{};
   msg.type = MessageType::ControlPhysicalKey;
   msg.physicalKey.header.magic = remote60::native_poc::kMagic;
@@ -39,6 +39,7 @@ void enqueue_physical_key(ViewerState& ctx, bool down, uint16_t vk, uint16_t sca
   msg.physicalKey.flags = (extended ? 0x1u : 0u) | (repeat ? 0x2u : 0u);
   msg.generatedUs = qpc_now_us();
   enqueue_control_input_message(ctx, msg);
+  return true;
 }
 
 void enqueue_input_text_units(ViewerState& ctx, const uint16_t* text, size_t count) {

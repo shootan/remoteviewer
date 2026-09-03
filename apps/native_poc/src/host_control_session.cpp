@@ -341,10 +341,10 @@ void ControlSessionServer::Serve(ControlLink& link) {
           physicalDown.insert(physKey);
         }
       } else {
-        // A key we injected as down is always released, gate or no gate, so nothing sticks.
+        // Release only a key we actually injected as down (gate or no gate, so nothing sticks). An
+        // unmatched up -- e.g. a down that failed the gate or SendInput -- is dropped, never injected.
+        // (Codex 3rd review.)
         if (physicalDown.erase(physKey) > 0) {
-          (void)inject_physical_scan_key(k.scanCode, false, physExt);
-        } else if (gate_open()) {
           (void)inject_physical_scan_key(k.scanCode, false, physExt);
         }
       }
