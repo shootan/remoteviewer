@@ -33,6 +33,14 @@ enum class MessageType : uint16_t {
   ControlMonitorListRequest = 37,
   ControlMonitorList = 38,
   ControlMonitorSelect = 39,
+  // Sealed unlock v1 (lock-screen password over an encrypted, replay-bound challenge). Advertised
+  // via kCaptureFlagUnlockSealedV1; an old peer is never sent these.
+  ControlUnlockChallengeRequest = 40,
+  ControlUnlockChallenge = 41,
+  ControlUnlockSealedRequest = 42,
+  ControlUnlockAccepted = 43,
+  ControlUnlockStatusRequest = 44,
+  ControlUnlockStatusResult = 45,
 };
 
 enum class UdpPacketKind : uint16_t {
@@ -156,6 +164,10 @@ struct ControlPingMessage {
 constexpr uint32_t kCaptureFlagWindowTargetEnabled = 0x1u;
 constexpr uint32_t kCaptureFlagClientAreaOnly = 0x2u;
 constexpr uint32_t kCaptureFlagSecureDesktopActive = 0x4u;
+// The host advertises sealed-unlock v1 support here so a client only sends the unlock messages to a
+// host that understands them (an old host drains an unknown control opcode without replying, which
+// would hang the client's strict request/response loop). Control-level so TCP and UDP both see it.
+constexpr uint32_t kCaptureFlagUnlockSealedV1 = 0x8u;
 
 struct ControlPongMessage {
   MessageHeader header{};
@@ -505,6 +517,110 @@ struct UdpVideoChunkHeader {
   uint64_t encodeEndQpcUs = 0;
   uint64_t sendQpcUs = 0;
 };
+// --- Sealed unlock v1 messages ------------------------------------------------------------------
+// Wire array sizes mirror sealed_unlock.hpp (literals kept here so this wire header stays standalone):
+//   pub point 64 (P-256 X||Y), salt 32, challengeId 16, nonce 12, tag 16, padded plaintext 258.
+// Layout is deterministic under the file's #pragma pack(1); static_asserts below pin it against drift.
+
+enum class UnlockStage : uint16_t {
+  Unknown = 0,
+  RejectedPolicy = 1,        // not locked / not authorized / cooldown
+  RejectedStaleTopology = 2, // the session topology changed between challenge and execution
+  ChallengeIssued = 3,
+  DecryptFailed = 4,         // bad tag / bad challenge binding
+  TargetResolved = 5,
+  ConnectStarted = 6,
+  WtsConnectAccepted = 7,
+  Injected = 8,              // Winlogon fallback keystrokes queued (not proof of unlock)
+  SessionUnlocked = 9,       // authoritative success: the WTS unlock transition
+  AuthFailed = 10,           // wrong password / account restriction
+  Timeout = 11,
+  InternalError = 12,
+};
+
+// client -> host: the user pressed Unlock. The host replies with a fresh one-shot challenge.
+struct ControlUnlockChallengeRequestMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t requestId = 0;
+  uint64_t clientSendQpcUs = 0;
+};
+static_assert(sizeof(ControlUnlockChallengeRequestMessage) == 24, "unlock challenge-req wire drift");
+
+// host -> client: the one-shot challenge and every binding field (mirrors sealed_unlock::UnlockContext).
+struct ControlUnlockChallengeMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t requestId = 0;
+  uint16_t status = 0;  // 0 = issued; otherwise an UnlockStage rejection reason
+  uint16_t reserved = 0;
+  uint8_t challengeId[16] = {};
+  uint8_t hostPub[64] = {};
+  uint8_t salt[32] = {};
+  uint64_t hostId = 0;
+  uint64_t clientSessionCookie = 0;
+  uint64_t accountId = 0;
+  uint32_t requesterSession = 0;
+  uint32_t consoleSession = 0;
+  uint32_t lockGeneration = 0;
+  uint32_t topologyGeneration = 0;
+  uint64_t issuedMs = 0;
+  uint64_t expiresMs = 0;
+  uint64_t clientSendQpcUs = 0;
+};
+static_assert(sizeof(ControlUnlockChallengeMessage) == 196, "unlock challenge wire drift");
+
+// client -> host: the sealed password for that challenge.
+struct ControlUnlockSealedRequestMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t requestId = 0;
+  uint8_t challengeId[16] = {};
+  uint8_t clientPub[64] = {};
+  uint8_t nonce[12] = {};
+  uint8_t tag[16] = {};
+  uint8_t cipher[258] = {};  // AES-256-GCM over the padded plaintext block
+  uint64_t clientSendQpcUs = 0;
+};
+static_assert(sizeof(ControlUnlockSealedRequestMessage) == 390, "unlock sealed-req wire drift");
+
+// host -> client: the unlock job was accepted (NOT completed). Poll status for the terminal result.
+struct ControlUnlockAcceptedMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t requestId = 0;
+  uint32_t jobId = 0;
+  uint16_t accepted = 0;  // 1 = accepted, 0 = rejected
+  uint16_t stage = 0;     // UnlockStage on immediate rejection
+  uint64_t clientSendQpcUs = 0;
+};
+static_assert(sizeof(ControlUnlockAcceptedMessage) == 32, "unlock accepted wire drift");
+
+// client -> host: poll a job's result.
+struct ControlUnlockStatusRequestMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t requestId = 0;
+  uint32_t jobId = 0;
+  uint32_t reserved = 0;
+  uint64_t clientSendQpcUs = 0;
+};
+static_assert(sizeof(ControlUnlockStatusRequestMessage) == 32, "unlock status-req wire drift");
+
+// host -> client: a job's current/terminal result. Terminal results are cached and idempotent, so a
+// duplicate status request never re-runs the unlock.
+struct ControlUnlockStatusResultMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t requestId = 0;
+  uint32_t jobId = 0;
+  uint16_t stage = 0;      // UnlockStage
+  uint16_t terminal = 0;   // 1 once stage is final
+  uint32_t win32Error = 0; // GetLastError from WTSConnectSession / injection when relevant
+  uint64_t clientSendQpcUs = 0;
+};
+static_assert(sizeof(ControlUnlockStatusResultMessage) == 36, "unlock status-result wire drift");
+
 constexpr uint16_t kUdpVideoFecGroupSize = 8;
 #pragma pack(pop)
 

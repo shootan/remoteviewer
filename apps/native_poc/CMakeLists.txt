@@ -536,6 +536,12 @@ add_executable(remote60_sealed_unlock_test
 target_include_directories(remote60_sealed_unlock_test PRIVATE src)
 target_link_libraries(remote60_sealed_unlock_test PRIVATE remote60_sealed_unlock)
 
+add_executable(remote60_unlock_protocol_test
+  src/unlock_protocol_test.cpp
+)
+target_include_directories(remote60_unlock_protocol_test PRIVATE src)
+target_link_libraries(remote60_unlock_protocol_test PRIVATE remote60_sealed_unlock)
+
 add_executable(remote60_dxgi_output_selection_test
   ${CMAKE_SOURCE_DIR}/libs/capture/src/dxgi_output_selection_test.cpp
 )

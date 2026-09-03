@@ -120,6 +120,7 @@ struct UnlockContext {
   uint32_t requesterSession = 0;
   uint32_t consoleSession = 0;
   uint32_t lockGeneration = 0;
+  uint32_t topologyGeneration = 0;  // service session-topology counter, bound so a mid-flight session change invalidates
   uint64_t issuedMs = 0;
   uint64_t expiresMs = 0;
   uint64_t accountId = 0;            // hash of the account the credential belongs to

@@ -8334,3 +8334,11 @@ Next action
 - 반영: 서비스에 `gSessionTopologyGeneration` atomic 추가, 세션변경 핸들러가 fetch_add(release). 잠금해제 경로가 챌린지 발급 시 snapshot하고 복호 직전·직후+WTSConnectSession 직전 재검증(RejectedStaleTopology+비번 zero+새 챌린지) — unlock은 fire-and-forget forward 재사용 금지. 상세는 구현계획.md 섹션 I "토폴로지 세대 3중 재검증".
 - G3 전체 설계 답은 Codex seq=903(P-256/HKDF/GCM 조건부 승인 + on-demand one-shot challenge + WTSConnect 우선 + async U5 + control-level capability). 커밋1(edab229)은 이미 이 기준.
 - 서비스 컴파일 OK. 빌드 안 함(전체 후 1개). 다음: 2단계 프로토콜(challenge/sealed/status 메시지 — topologyGeneration 필드 포함, capability, default off).
+
+### 366) 2026-09-03 잠금해제 2단계 — 프로토콜 메시지 + 능력협상 + 매핑 단일소스 + 테스트 (Codex 커밋2)
+
+- poc_protocol.hpp: MessageType 40~45(ControlUnlock ChallengeRequest/Challenge/SealedRequest/Accepted/StatusRequest/StatusResult) + UnlockStage enum(0~12, SessionUnlocked=권위 성공) + 능력플래그 kCaptureFlagUnlockSealedV1(Pong flags, control-level이라 TCP/UDP 공통, 구peer엔 미송신). 전 메시지 #pragma pack(1) 고정 레이아웃 + sizeof static_assert(24/196/390/32/32/36)로 드리프트 방지(Codex "padding/sizeof 의존 금지" 충족).
+- sealed_unlock UnlockContext에 topologyGeneration 추가 + AAD/KDF 직렬화 반영(#365 바인딩).
+- `unlock_wire.hpp`: 챌린지 wire ↔ UnlockContext 매핑 **단일 소스**(FillChallengeFromContext/ContextFromChallenge) — 호스트/클라가 동일 AAD/KDF 만들도록(드리프트=모든 open 실패, Codex 지적).
+- `unlock_protocol_test`: wire 바이트 왕복 동일, 양측 AAD/KDF 동일, challengeId 다르면 AAD 다름, Fill↔Context 역함수 — PASS. sealed_unlock_test(KAT 포함) 재확인 PASS.
+- 빌드 안 함(전체 후 1개). 다음 커밋3: 서비스 unlock duplex IPC + WTSConnectSession spike(로컬), U5 결과경로.

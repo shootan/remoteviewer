@@ -58,6 +58,7 @@ std::vector<uint8_t> serialize_context(const UnlockContext& c) {
   append_u32(v, c.requesterSession);
   append_u32(v, c.consoleSession);
   append_u32(v, c.lockGeneration);
+  append_u32(v, c.topologyGeneration);
   append_u64(v, c.issuedMs);
   append_u64(v, c.expiresMs);
   append_u64(v, c.accountId);
