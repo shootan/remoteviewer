@@ -8310,3 +8310,12 @@ Next action
 - **서비스 SESSIONCHANGE 버그(Codex 추가 발견)**: report_service_status가 SERVICE_ACCEPT_STOP만 광고 → SCM이 SERVICE_CONTROL_SESSIONCHANGE 안 보냄 → 기존 세션변경 핸들러가 死. `SERVICE_ACCEPT_STOP|SERVICE_ACCEPT_SESSIONCHANGE`로 수정. 이벤트도 LOCK/UNLOCK/CONSOLE_CONNECT/REMOTE_CONNECT 추가, 발생 시 에이전트 stop→다음 메시지에서 재해결(연결상태 반영).
 - 테스트: secure_input_session_test에 G2 매트릭스 추가(active→requester, disconnected/connecting/unknown→console, req==console→requester, transition→None 등) — PASS. 서비스 컴파일 OK.
 - **빌드 안 함**(사용자 지시: 잠금해제+IME 전부 구현 후 1개). 다음: WTSConnectSession spike(비번은 호스트 로컬 저장, 뷰어는 트리거만 — 평문 전송 금지) → U5 결과경로 → 잠금상태 status → 뷰어 UI. G3 비번 전송은 보안상 N4 전까지 host-local credential 방식.
+
+### 363) 2026-09-03 G2 hotfix — 세션변경 핸들러의 gAgent 레이스 제거(단독 소유) (Codex #363 BLOCKER)
+
+- Codex가 b0d8d27을 열어보고 실제 BLOCKER 확인: SERVICE_ACCEPT_SESSIONCHANGE를 켜자, SCM 컨트롤 디스패처 스레드의 세션변경 핸들러가 `stop_agent()`(CloseHandle/TerminateProcess+블로킹 대기)를 호출 — 메인 스레드가 동기화 없이 gAgent(writePipe/process)를 read/write하는 동안 → 데이터 레이스 + 핸들 use-after-close. 게다가 HandlerEx 계약 위반(핸들러가 무거운 블로킹·파일 I/O 수행).
+- 수정: 핸들러는 **플래그만**(gPendingSessionEvent/Id + gSessionChangePending atomics) 세우고 즉시 반환 — gAgent 미접촉, diag 파일 I/O 제거. 소유 스레드의 `ensure_agent()`가 시작 시 플래그를 소비(diag + stop_agent). gAgent는 이제 메인 스레드 단독 소유 → 레이스 구조적 제거. (ensure_agent는 이미 매 forward마다 target_session 재해결+desktop 비교로 재생성하므로 소비는 그 위에 얹힘.)
+- STOP 경로는 기존대로 gClientPipe atomic exchange + CancelIoEx(선재, 표준 패턴)라 별개.
+- 빌드: 서비스 컴파일 OK. (전체 빌드는 잠금해제+IME 완료 후 1개.)
+- 한계: 순수 resolver 단위테스트는 이 동시성 회귀를 못 잡음 — 단독 소유로 by-construction 보장(핸들러가 gAgent를 아예 안 만짐). 실기 fault(에이전트 write 중 세션변경)로 최종 확인 예정.
+- 다음: Codex의 G3 sealed-box 설계 답(seq 901) 반영 → 잠금해제 구현 → 한영 IME.

@@ -72,6 +72,13 @@ std::atomic<HANDLE> gClientPipe{INVALID_HANDLE_VALUE};
 // the pipe connects, because that is the only moment the requester is identifiable.
 std::atomic<uint32_t> gRequesterSession{kInvalidSessionId};
 
+// Set by the SCM SESSIONCHANGE handler (the service control-dispatcher thread) and consumed by the
+// agent-owning main thread in ensure_agent. The handler must never touch gAgent itself -- see the
+// handler for why. Signalling through atomics keeps gAgent single-owner. (Codex review #363.)
+std::atomic<bool> gSessionChangePending{false};
+std::atomic<uint32_t> gPendingSessionEvent{0};
+std::atomic<uint32_t> gPendingSessionId{0};
+
 struct AgentProcess {
   HANDLE process = nullptr;
   HANDLE writePipe = nullptr;
@@ -265,6 +272,16 @@ std::wstring current_input_desktop_name() {
 }
 
 bool ensure_agent() {
+  // Consume any session change signalled by the SCM handler here, on the agent-owning thread. The
+  // handler only sets a flag because it runs on the SCM dispatcher thread while this thread owns
+  // gAgent; tearing the agent down there raced with our WriteFile/start_agent and use-after-closed
+  // the handles once SERVICE_ACCEPT_SESSIONCHANGE was advertised. (Codex review #363.)
+  if (gSessionChangePending.exchange(false, std::memory_order_acq_rel)) {
+    diag("session change consumed event=%lu session=%lu (agent session=%u)",
+         gPendingSessionEvent.load(std::memory_order_relaxed),
+         gPendingSessionId.load(std::memory_order_relaxed), gAgent.sessionId);
+    if (gAgent.process) stop_agent();
+  }
   const DWORD sessionId = target_session();
   if (sessionId == kInvalidSessionId) return false;
   const std::wstring desktop = current_input_desktop_name();
@@ -312,23 +329,23 @@ DWORD WINAPI service_control(DWORD control, DWORD eventType, LPVOID eventData, L
   // disconnects takes the agent's desktop with it, and continuing to write to that agent is how
   // input silently goes nowhere.
   if (control == SERVICE_CONTROL_SESSIONCHANGE) {
-    const auto* notification = static_cast<const WTSSESSION_NOTIFICATION*>(eventData);
-    // Any of these can move the input desktop or the active session out from under the agent: a lock
-    // raises the Winlogon secure desktop, a reconnect moves the session to or from the console, a
-    // logoff takes the desktop away entirely. The agent lives inside one session+desktop, so drop it
-    // and let the next message re-resolve where input actually needs to go (target_session now reads
-    // the requester's connect state) rather than writing into a desktop no longer in front. This
-    // only fires once SERVICE_ACCEPT_SESSIONCHANGE is advertised -- it was not, so this handler was
-    // effectively dead. (Codex review #362.) The handler stays short; re-creation is lazy.
+    // HandlerEx contract: record and return immediately -- no blocking, no file I/O. Crucially, do
+    // NOT touch gAgent here. gAgent is owned by the service's main thread (ensure_agent / forward /
+    // stop_agent); calling CloseHandle/TerminateProcess from this SCM dispatcher thread while the
+    // main thread is mid WriteFile or start_agent is a data race and a handle use-after-close. That
+    // was the live bug b0d8d27 created by advertising SERVICE_ACCEPT_SESSIONCHANGE (before that the
+    // handler never ran). Just flag it; ensure_agent consumes it on the owning thread and re-resolves
+    // the target (a lock raises Winlogon, a reconnect moves the session; both need a re-resolve, and
+    // target_session now reads the requester's connect state). (Codex review #362, #363.)
     if (eventType == WTS_SESSION_LOGOFF || eventType == WTS_SESSION_LOGON ||
         eventType == WTS_CONSOLE_CONNECT || eventType == WTS_CONSOLE_DISCONNECT ||
         eventType == WTS_REMOTE_CONNECT || eventType == WTS_REMOTE_DISCONNECT ||
         eventType == WTS_SESSION_LOCK || eventType == WTS_SESSION_UNLOCK) {
-      diag("session change event=%lu session=%lu (agent session=%u)", eventType,
-           notification ? notification->dwSessionId : 0u, gAgent.sessionId);
-      if (gAgent.process) {
-        stop_agent();  // the next message re-resolves and re-creates it where it belongs
-      }
+      const auto* notification = static_cast<const WTSSESSION_NOTIFICATION*>(eventData);
+      gPendingSessionEvent.store(eventType, std::memory_order_relaxed);
+      gPendingSessionId.store(notification ? notification->dwSessionId : 0u,
+                              std::memory_order_relaxed);
+      gSessionChangePending.store(true, std::memory_order_release);
     }
     return NO_ERROR;
   }
