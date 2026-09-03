@@ -18,6 +18,7 @@ struct QueuedControlInputMessage {
   MessageType type = MessageType::ControlInputEvent;
   ControlInputEventMessage inputEvent{};
   ControlInputTextMessage inputText{};
+  ControlPhysicalKeyMessage physicalKey{};
   // P0 telemetry (#351): when the UI generated this event, kept CLIENT-LOCAL (never on the wire, so
   // no Android/old-host size contract change). clientSendQpcUs on the wire is overwritten at send.
   uint64_t generatedUs = 0;
@@ -194,6 +195,7 @@ enum class ControlOutboundActionKind : uint8_t {
   DesktopBackend,
   InputEvent,
   InputText,
+  PhysicalKey,
   MonitorListRequest,
   MonitorSelect,
 };
@@ -215,6 +217,7 @@ struct ControlOutboundAction {
   ControlDesktopBackendRequestMessage desktopBackend{};
   ControlInputEventMessage inputEvent{};
   ControlInputTextMessage inputText{};
+  ControlPhysicalKeyMessage physicalKey{};
   uint64_t inputGeneratedUs = 0;  // P0 (#351): local diagnostic — when the UI generated this input
 };
 

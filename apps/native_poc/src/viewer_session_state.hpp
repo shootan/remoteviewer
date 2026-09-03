@@ -33,6 +33,9 @@ struct SessionState {
   uint32_t windowH = 900;
   // cross-thread: main sets at connect / clears at shutdown; UI input path and toolbar read.
   std::atomic<bool> inputEnabled{false};
+  // Host advertised sealed host-side IME support (kCaptureFlagHostImeV1). Host-IME key path is used
+  // only when this is set AND the user opted in (env REMOTE60_HOST_IME=1). (Codex #366.)
+  std::atomic<bool> hostImeSupported{false};
   // Which candidate won the race. The relay is billed per byte, so the session says which one it
   // is rather than leaving the user to guess from the bill.
   std::atomic<bool> relayPath{false};

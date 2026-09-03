@@ -35,6 +35,8 @@ bool send_control_action(ControlLink& link, const ControlOutboundAction& action)
       return link.Write(&action.inputEvent, sizeof(action.inputEvent));
     case ControlOutboundActionKind::InputText:
       return link.Write(&action.inputText, sizeof(action.inputText));
+    case ControlOutboundActionKind::PhysicalKey:
+      return link.Write(&action.physicalKey, sizeof(action.physicalKey));
     case ControlOutboundActionKind::None:
     default:
       return false;

@@ -2,6 +2,9 @@
 
 #include "viewer_window_proc.hpp"
 
+#include <imm.h>
+#pragma comment(lib, "imm32.lib")
+
 #include "viewer_common.hpp"
 #include "viewer_cursor_overlay.hpp"
 #include "viewer_gdi_util.hpp"
@@ -17,6 +20,17 @@
 #include <iostream>
 
 namespace remote60::native_poc::viewer {
+
+namespace {
+// Host-side IME: disable this window's local IME once, so keys arrive as raw VK (no VK_PROCESSKEY)
+// and no local composition happens -- the host IME composes instead. Reversible on process exit.
+void ensure_local_ime_off(HWND hwnd) {
+  static bool done = false;
+  if (done) return;
+  ImmAssociateContext(hwnd, nullptr);
+  done = true;
+}
+}  // namespace
 
 // WM_RBUTTONDOWN / WM_RBUTTONUP / WM_MBUTTONDOWN / WM_MBUTTONUP: identical apart from the button bit
 // (2 = right, 4 = middle) and the virtual key the host receives.
@@ -427,23 +441,48 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     case WM_IME_COMPOSITION:
       if (kInputPolicyForceBlock) return 0;
+      if (host_ime_mode(ctx)) return 0;  // host composes; no local composition to forward
       (void)send_ime_result_text(ctx, hwnd, lp);
       return 0;
     case WM_KEYDOWN:
       if (on_local_hotkey(ctx, hwnd, wp)) return 0;
       if (kInputPolicyForceBlock) return 0;
+      if (host_ime_mode(ctx)) {
+        ensure_local_ime_off(hwnd);
+        enqueue_physical_key(ctx, true, static_cast<uint16_t>(wp),
+                             static_cast<uint16_t>((lp >> 16) & 0xff), (lp & (1 << 24)) != 0,
+                             (lp & (1 << 30)) != 0);
+        return 0;
+      }
       if (forward_key_down(ctx, wp)) enqueue_input_event(ctx, 5, 0, 0, 0, static_cast<uint32_t>(wp));
       return 0;
     case WM_KEYUP:
       if (kInputPolicyForceBlock) return 0;
+      if (host_ime_mode(ctx)) {
+        enqueue_physical_key(ctx, false, static_cast<uint16_t>(wp),
+                             static_cast<uint16_t>((lp >> 16) & 0xff), (lp & (1 << 24)) != 0, false);
+        return 0;
+      }
       if (forward_key_up(ctx, wp)) enqueue_input_event(ctx, 6, 0, 0, 0, static_cast<uint32_t>(wp));
       return 0;
     case WM_SYSKEYDOWN:
       if (kInputPolicyForceBlock) return 0;
+      if (host_ime_mode(ctx)) {
+        ensure_local_ime_off(hwnd);
+        enqueue_physical_key(ctx, true, static_cast<uint16_t>(wp),
+                             static_cast<uint16_t>((lp >> 16) & 0xff), (lp & (1 << 24)) != 0,
+                             (lp & (1 << 30)) != 0);
+        return 0;
+      }
       if (forward_key_down(ctx, wp)) enqueue_input_event(ctx, 5, 0, 0, 0, static_cast<uint32_t>(wp));
       return 0;
     case WM_SYSKEYUP:
       if (kInputPolicyForceBlock) return 0;
+      if (host_ime_mode(ctx)) {
+        enqueue_physical_key(ctx, false, static_cast<uint16_t>(wp),
+                             static_cast<uint16_t>((lp >> 16) & 0xff), (lp & (1 << 24)) != 0, false);
+        return 0;
+      }
       if (forward_key_up(ctx, wp)) enqueue_input_event(ctx, 6, 0, 0, 0, static_cast<uint32_t>(wp));
       return 0;
     case WM_KILLFOCUS:

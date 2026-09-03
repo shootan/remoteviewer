@@ -8363,3 +8363,12 @@ Next action
 - host_control_session.cpp: ControlPhysicalKey 핸들러 → inject_physical_scan_key + send_input_ack.
 - 호스트 컴파일 OK. 안전: 기본 동작 불변(뷰어가 옵트인+호스트 능력 확인 시에만 PhysicalKey 전송, 아니면 기존 VK 경로). 빌드 안 함(전체 후 1개).
 - 다음: 뷰어측 — 옵트인 시 로컬 IME 분리(ImmAssociateContext NULL) + WM_KEY→PhysicalKey(scan) 전송 + 클라 조합경로 억제. 그다음 빌드.
+
+### 370) 2026-09-03 한영 IME 2 — 뷰어측 호스트-IME 경로(옵트인) + 로컬 IME 분리 (Codex 커밋4)
+
+- 뷰어(클라): host_ime_mode(ctx) = env REMOTE60_HOST_IME=1 && 호스트가 kCaptureFlagHostImeV1 광고 시에만 true(기본 off → 기존 VK/조합텍스트 경로 100% 불변, 회귀 0).
+- host-IME 모드에서 WM_KEYDOWN/UP/SYSKEY*: 로컬 IME 1회 분리(ImmAssociateContext NULL, 키가 VK_PROCESSKEY 아닌 raw로 옴) + WM_KEY lParam의 scan(16-23)/E0(24)/repeat(30) 추출해 ControlPhysicalKey(enqueue_physical_key) 전송. WM_IME_COMPOSITION은 host-IME 모드면 skip(호스트가 조합).
+- shared core: ControlOutboundActionKind::PhysicalKey + ControlOutboundAction/QueuedControlInputMessage에 physicalKey 필드, NextAction 매핑, send_control_action 케이스(응답=ControlInputAck). PhysicalKey는 type이 ControlInputEvent가 아니라 move coalesce 대상 아님.
+- 뷰어 세션에 hostImeSupported(pong에서 셋). viewer_control_client.cpp handle_pong 반영.
+- 빌드: shared_core_test PASS(coalesce 무영향), 뷰어/호스트 컴파일 OK. 빌드본은 전체 후 1개.
+- 참고: P1b(키당 RTT 제거, 부드러운 타이핑)는 미포함 — 현재 host-IME는 조합이 화면에 보이나 키당 왕복 지연 잔존. 후속.

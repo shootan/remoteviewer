@@ -585,6 +585,12 @@ bool ClientControlScheduler::NextAction(uint64_t nowUs,
       out->inputText.clientSendQpcUs = nowUs;
       return true;
     }
+    if (outbound.type == MessageType::ControlPhysicalKey) {
+      out->kind = ControlOutboundActionKind::PhysicalKey;
+      out->physicalKey = outbound.physicalKey;
+      out->physicalKey.clientSendQpcUs = nowUs;
+      return true;
+    }
   }
 
   return false;

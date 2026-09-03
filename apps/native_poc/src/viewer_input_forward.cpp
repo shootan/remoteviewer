@@ -11,6 +11,36 @@ void enqueue_control_input_message(ViewerState& ctx, const QueuedControlInputMes
   ctx.control.inputQueue.Enqueue(msg);
 }
 
+// Host-side IME opt-in: on only when the user set the env AND the host advertised support. Default
+// off => the existing VK/composed-text path is completely unchanged (zero regression). (Codex #366.)
+bool host_ime_mode(ViewerState& ctx) {
+  static const bool optIn = [] {
+    const char* v = std::getenv("REMOTE60_HOST_IME");
+    return v && (v[0] == '1' || v[0] == 't' || v[0] == 'T' || v[0] == 'y' || v[0] == 'Y');
+  }();
+  return optIn && ctx.session.hostImeSupported.load(std::memory_order_relaxed);
+}
+
+// Host-side IME: forward one raw physical key (scan code) so the host IME composes live. Not
+// coalesced (type != ControlInputEvent), so keys never merge like moves do.
+void enqueue_physical_key(ViewerState& ctx, bool down, uint16_t vk, uint16_t scan, bool extended,
+                          bool repeat) {
+  if (kInputPolicyForceBlock) return;
+  if (!ctx.session.inputEnabled.load()) return;
+  QueuedControlInputMessage msg{};
+  msg.type = MessageType::ControlPhysicalKey;
+  msg.physicalKey.header.magic = remote60::native_poc::kMagic;
+  msg.physicalKey.header.type = static_cast<uint16_t>(MessageType::ControlPhysicalKey);
+  msg.physicalKey.header.size = static_cast<uint16_t>(sizeof(ControlPhysicalKeyMessage));
+  msg.physicalKey.seq = ctx.control.inputQueue.NextSequence();
+  msg.physicalKey.down = down ? 1 : 0;
+  msg.physicalKey.vk = vk;
+  msg.physicalKey.scanCode = scan;
+  msg.physicalKey.flags = (extended ? 0x1u : 0u) | (repeat ? 0x2u : 0u);
+  msg.generatedUs = qpc_now_us();
+  enqueue_control_input_message(ctx, msg);
+}
+
 void enqueue_input_text_units(ViewerState& ctx, const uint16_t* text, size_t count) {
   if (kInputPolicyForceBlock) return;
   if (!ctx.session.inputEnabled.load()) return;

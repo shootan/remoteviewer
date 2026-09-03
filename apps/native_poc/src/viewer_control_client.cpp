@@ -61,6 +61,9 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
     const bool secure =
         (pong.captureTargetFlags &
          remote60::native_poc::kCaptureFlagSecureDesktopActive) != 0;
+    ctx.session.hostImeSupported.store(
+        (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagHostImeV1) != 0,
+        std::memory_order_relaxed);
     if (secure != ctx.control.reportedSecure) {
       ctx.control.reportedSecure = secure;
       std::cout << "[native-video-client] secure-desktop-active="
