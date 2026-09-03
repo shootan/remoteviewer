@@ -8319,3 +8319,11 @@ Next action
 - 빌드: 서비스 컴파일 OK. (전체 빌드는 잠금해제+IME 완료 후 1개.)
 - 한계: 순수 resolver 단위테스트는 이 동시성 회귀를 못 잡음 — 단독 소유로 by-construction 보장(핸들러가 gAgent를 아예 안 만짐). 실기 fault(에이전트 write 중 세션변경)로 최종 확인 예정.
 - 다음: Codex의 G3 sealed-box 설계 답(seq 901) 반영 → 잠금해제 구현 → 한영 IME.
+
+### 364) 2026-09-03 잠금해제 1단계 — sealed unlock 크립토/리플레이 모듈(CNG) + 단위테스트 (Codex 검증)
+
+- Codex(remote#nhxsk5vr) G3 설계 판정 반영. 사용자 결정: 비번은 클라 DPAPI 저장, 비번만 sealed-box 암호화 전송, TOFU 생략(능동 MITM 위험 수용 — "인증 없는 sealed unlock v1").
+- 신규 `sealed_unlock.hpp/.cpp`(정적 lib `remote60_sealed_unlock`, bcrypt): P-256 ECDH(BCRYPT_ECDH_P256, 공개점 X||Y 64B 고정 와이어·CNG struct 미전송) → **원시 시크릿 추출 후 HKDF-SHA256 직접 구현**(HMAC-SHA256, RFC5869; CNG HKDF-on-secret-handle는 이 환경에서 미도출이라 우회) → AES-256-GCM(12B 랜덤 nonce, 16B tag). AAD/KDF-info는 struct memcpy 금지, 명시 LE 바이트 직렬화(challengeId/세션/락제너레이션/키해시 등 공개 컨텍스트만; peer IP/port·streamGeneration 제외). 비번 평문은 고정 258B 패딩(길이 side-channel 은닉). RAII 핸들 + SecureZero.
+- 리플레이 상태머신 `UnlockChallengeState`(순수): 단일 미결 챌린지, 소비 CAS(exactly-once), 만료/세션·락제너레이션 불일치/중복 거부. 무효 tag는 소비 안 함(DoS 방지)은 상위 로직에서.
+- 단위테스트 `sealed_unlock_test`: 양측 동일 32B 유도, GCM 왕복, ciphertext/tag/AAD/salt 변조 전부 거부, not-on-curve 공개키 거부, 패딩 경계, 리플레이 매트릭스(unknown/valid/wrong-cookie/wrong-gen/expired/consumed/supersede/clear) — **PASS**.
+- 빌드 안 함(전체는 잠금해제+IME 완료 후 1개). 다음(Codex 커밋순): 2 프로토콜(challenge/sealed/status 메시지+capability, default off), 3 서비스 unlock IPC+WTSConnectSession, 4 잠금상태 감지, 5 뷰어 DPAPI 저장, 6 unlock 흐름, 7 뷰어 UI, (8 Winlogon fallback 보류).

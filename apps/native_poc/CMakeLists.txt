@@ -523,6 +523,19 @@ add_executable(remote60_secure_input_session_test
 )
 target_include_directories(remote60_secure_input_session_test PRIVATE src)
 
+# Sealed unlock v1 crypto + replay primitives (CNG). Shared by the test now and the service/host later.
+add_library(remote60_sealed_unlock STATIC
+  src/sealed_unlock.cpp
+)
+target_include_directories(remote60_sealed_unlock PUBLIC src)
+target_link_libraries(remote60_sealed_unlock PUBLIC bcrypt)
+
+add_executable(remote60_sealed_unlock_test
+  src/sealed_unlock_test.cpp
+)
+target_include_directories(remote60_sealed_unlock_test PRIVATE src)
+target_link_libraries(remote60_sealed_unlock_test PRIVATE remote60_sealed_unlock)
+
 add_executable(remote60_dxgi_output_selection_test
   ${CMAKE_SOURCE_DIR}/libs/capture/src/dxgi_output_selection_test.cpp
 )
