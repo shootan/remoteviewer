@@ -59,9 +59,14 @@ HostUnlockRelay::~HostUnlockRelay() { Stop(); }
 void HostUnlockRelay::Stop() {
   if (running_.exchange(false)) {
     cv_.notify_all();
-    // Unblock a worker parked in ConnectNamedPipe/ReadFile so join() does not hang. (Codex #370 B4.)
-    HANDLE p = static_cast<HANDLE>(pipeHandle_.load(std::memory_order_acquire));
-    if (p != nullptr && p != INVALID_HANDLE_VALUE) (void)CancelIoEx(p, nullptr);
+    // Wake the worker whether it is parked on the condition variable (notify above) or blocked in a
+    // synchronous ConnectNamedPipe/ReadFile. CancelSynchronousIo only acts while the thread is inside
+    // a synchronous wait, so loop until the thread ends. The worker owns and closes its own pipe, so
+    // there is no controller-close handle race. (Codex #370 BLOCKER B.)
+    HANDLE h = static_cast<HANDLE>(workerThreadHandle_.load(std::memory_order_acquire));
+    if (h != nullptr) {
+      while (WaitForSingleObject(h, 50) == WAIT_TIMEOUT) (void)CancelSynchronousIo(h);
+    }
     if (worker_.joinable()) worker_.join();
   }
 }
@@ -70,6 +75,7 @@ void HostUnlockRelay::EnsureWorker() {
   bool expected = false;
   if (running_.compare_exchange_strong(expected, true)) {
     worker_ = std::thread([this] { WorkerLoop(); });
+    workerThreadHandle_.store(worker_.native_handle(), std::memory_order_release);
   }
 }
 
@@ -94,12 +100,10 @@ void HostUnlockRelay::WorkerLoop() {
   auto ensure_pipe = [&]() -> bool {
     if (pipe != INVALID_HANDLE_VALUE) return true;
     pipe = static_cast<HANDLE>(ConnectPipe());
-    pipeHandle_.store(pipe == INVALID_HANDLE_VALUE ? nullptr : pipe, std::memory_order_release);
     return pipe != INVALID_HANDLE_VALUE;
   };
   auto drop_pipe = [&]() {
     if (pipe != INVALID_HANDLE_VALUE) {
-      pipeHandle_.store(nullptr, std::memory_order_release);
       CloseHandle(pipe);
       pipe = INVALID_HANDLE_VALUE;
     }

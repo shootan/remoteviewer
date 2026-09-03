@@ -74,9 +74,11 @@ SERVICE_STATUS_HANDLE gStatusHandle = nullptr;
 SERVICE_STATUS gStatus{};
 std::atomic<bool> gRunning{true};
 std::atomic<HANDLE> gClientPipe{INVALID_HANDLE_VALUE};
-// The unlock duplex pipe, stored so SERVICE_CONTROL_STOP can CancelIoEx/close it -- otherwise the
-// unlock thread blocks in ConnectNamedPipe/ReadFile and service stop hangs. (Codex #370 BLOCKER 3.)
-std::atomic<HANDLE> gUnlockPipe{INVALID_HANDLE_VALUE};
+// The unlock worker's OS thread handle, published so shutdown can CancelSynchronousIo it out of a
+// blocking ConnectNamedPipe/ReadFile. The worker exclusively owns and closes its pipe (Codex #370
+// BLOCKER A: a controller-close raced with the worker's stale local handle). (native_handle set
+// after the thread starts.)
+std::atomic<void*> gUnlockThreadHandle{nullptr};
 // The session of the process holding the control pipe -- the streaming host. Captured once when
 // the pipe connects, because that is the only moment the requester is identifiable.
 std::atomic<uint32_t> gRequesterSession{kInvalidSessionId};
@@ -374,12 +376,8 @@ DWORD WINAPI service_control(DWORD control, DWORD eventType, LPVOID eventData, L
     (void)DisconnectNamedPipe(pipe);
     CloseHandle(pipe);
   }
-  HANDLE upipe = gUnlockPipe.exchange(INVALID_HANDLE_VALUE, std::memory_order_acq_rel);
-  if (upipe != INVALID_HANDLE_VALUE) {
-    (void)CancelIoEx(upipe, nullptr);
-    (void)DisconnectNamedPipe(upipe);
-    CloseHandle(upipe);
-  }
+  // The unlock worker is woken by service_main's shutdown (CancelSynchronousIo); the STOP handler
+  // must stay short and must not touch the worker's pipe. (Codex #370 BLOCKER A.)
   return NO_ERROR;
 }
 
@@ -544,7 +542,7 @@ void handle_challenge_request(UnlockSession& us, const SecureUnlockChallengeRequ
   // reconnect it onto (Codex #370 HIGH 2). Not-locked / still-active / no-console -> RejectedPolicy,
   // so we never move an active RDP session or seal a password toward a UAC prompt / usable desktop.
   if (requester == kInvalidSessionId || !lockKnown || !locked || !consoleUsable ||
-      (reqStateKnown && reqActive)) {
+      !reqStateKnown || reqActive) {
     resp.stage = stage_code(UnlockStage::RejectedPolicy);
     (void)write_exact(pipe, &resp, sizeof(resp));
     return;
@@ -631,6 +629,10 @@ void handle_sealed_request(UnlockSession& us, const SecureUnlockSealedRequest& r
   };
 
   if (!us.hasChallenge) { rejectNoCache(UnlockStage::RejectedPolicy); return; }
+  // The sealed request's outer requestId must equal the challenge's, or a valid ciphertext could be
+  // replayed under a different outer id and cached against it (Codex #370 BLOCKER D). The AAD binds
+  // us.ctx.requestId, so a mismatch would also fail the tag; reject before we even try.
+  if (req.requestId != us.ctx.requestId) { rejectNoCache(UnlockStage::RejectedPolicy); return; }
 
   const uint32_t topoNow = gSessionTopologyGeneration.load(std::memory_order_acquire);
   const auto verdict = us.challenge.Verify(req.challengeId, req.clientSessionCookie,
@@ -729,12 +731,12 @@ void unlock_pipe_loop() {
   while (gRunning.load(std::memory_order_acquire)) {
     HANDLE pipe = create_unlock_pipe();
     if (pipe == INVALID_HANDLE_VALUE) { Sleep(500); continue; }
-    gUnlockPipe.store(pipe, std::memory_order_release);
+    // ConnectNamedPipe blocks; shutdown wakes it with CancelSynchronousIo on this thread, which
+    // returns ERROR_OPERATION_ABORTED. Re-check gRunning after it returns, however it returned.
     const BOOL connected =
         ConnectNamedPipe(pipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED;
     if (!gRunning.load(std::memory_order_acquire)) {
-      HANDLE ex = pipe;
-      if (gUnlockPipe.compare_exchange_strong(ex, INVALID_HANDLE_VALUE)) CloseHandle(pipe);
+      CloseHandle(pipe);
       break;
     }
     if (connected) {
@@ -767,8 +769,7 @@ void unlock_pipe_loop() {
       }
       (void)DisconnectNamedPipe(pipe);
     }
-    HANDLE ex = pipe;
-    if (gUnlockPipe.compare_exchange_strong(ex, INVALID_HANDLE_VALUE)) CloseHandle(pipe);
+    CloseHandle(pipe);  // the worker exclusively owns this pipe
   }
 }
 
@@ -787,6 +788,7 @@ void WINAPI service_main(DWORD, wchar_t**) {
   // The sealed-unlock exchange lives on its own thread + duplex pipe so its request/response (and a
   // possibly-blocking WTSConnectSession) never touch the input path. (Codex #365/#366.)
   std::thread unlockThread(unlock_pipe_loop);
+  gUnlockThreadHandle.store(unlockThread.native_handle(), std::memory_order_release);
 
   while (gRunning.load(std::memory_order_acquire)) {
     HANDLE pipe = create_secure_pipe();
@@ -798,6 +800,7 @@ void WINAPI service_main(DWORD, wchar_t**) {
       // the host's session can be learned, and everything downstream depends on it.
       const uint32_t requester = requester_session_of(pipe);
       gRequesterSession.store(requester, std::memory_order_release);
+      gSessionTopologyGeneration.fetch_add(1, std::memory_order_release);  // requester changed -> fence
       diag("control pipe connected, requester session=%u", requester);
       // A new requester may live in a different session than the agent already running.
       if (gAgent.process && gAgent.sessionId != target_session()) stop_agent();
@@ -810,6 +813,7 @@ void WINAPI service_main(DWORD, wchar_t**) {
       (void)DisconnectNamedPipe(pipe);
       // The requester is gone; do not keep its session as the answer for whoever connects next.
       gRequesterSession.store(kInvalidSessionId, std::memory_order_release);
+      gSessionTopologyGeneration.fetch_add(1, std::memory_order_release);  // requester gone -> fence
     }
     HANDLE expected = pipe;
     if (gClientPipe.compare_exchange_strong(expected, INVALID_HANDLE_VALUE,
@@ -818,7 +822,16 @@ void WINAPI service_main(DWORD, wchar_t**) {
     }
   }
   stop_agent();
-  if (unlockThread.joinable()) unlockThread.join();
+  // Wake the unlock worker out of any blocking ConnectNamedPipe/ReadFile and wait for it to exit.
+  // CancelSynchronousIo only acts while the thread is inside a synchronous wait, so loop until the
+  // thread actually ends. (Codex #370 BLOCKER A.)
+  if (unlockThread.joinable()) {
+    HANDLE h = static_cast<HANDLE>(unlockThread.native_handle());
+    while (WaitForSingleObject(h, 50) == WAIT_TIMEOUT) {
+      (void)CancelSynchronousIo(h);
+    }
+    unlockThread.join();
+  }
   report_service_status(SERVICE_STOPPED);
 }
 

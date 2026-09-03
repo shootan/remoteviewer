@@ -21,6 +21,7 @@
 
 #include "host_unlock_relay.hpp"
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -204,6 +205,16 @@ void ControlSessionServer::Serve(ControlLink& link) {
   static remote60::native_poc::HostUnlockRelay gUnlockRelay;
   const uint64_t unlockCookie =
       (static_cast<uint64_t>(qpc_now_us()) << 20) ^ reinterpret_cast<uintptr_t>(&stop);
+  // Host-side IME: scan|E0 of physical keys we actually injected as down. Their matching up must be
+  // released even if the policy gate has since closed (foreground/secure change), or a modifier
+  // stays stuck on the host. Released for all on connection end. (Codex #370 BLOCKER C.)
+  std::set<uint16_t> physicalDown;
+  auto release_all_physical_host = [&]() {
+    for (uint16_t key : physicalDown) {
+      (void)inject_physical_scan_key(static_cast<uint16_t>(key & 0xff), false, (key & 0x100) != 0);
+    }
+    physicalDown.clear();
+  };
   while (!stop.load()) {
     MessageHeader header{};
     if (!link.Read(&header, sizeof(header))) break;
@@ -314,21 +325,29 @@ void ControlSessionServer::Serve(ControlLink& link) {
       // type into a UAC/lock screen), and either desktop mode is active or the selected window is the
       // foreground window -- otherwise a physical key would leak into whatever app is in front. The ack
       // is a transport receipt (the client's one-per-RTT loop needs it), not an injection-success claim.
-      bool physInjected = false;
-      if (inputRouter.injectionEnabled && interactive_desktop_is_default()) {
+      const bool physExt = (k.flags & 0x1u) != 0;
+      const uint16_t physKey = static_cast<uint16_t>(k.scanCode | (physExt ? 0x100 : 0));
+      auto gate_open = [&]() {
+        if (!inputRouter.injectionEnabled || !interactive_desktop_is_default()) return false;
         const bool desktopMode = !inputRouter.targetCriteria.enabled() &&
                                  (capture.selectedWindowId.load(std::memory_order_acquire) == 0);
-        bool foregroundOk = desktopMode;
-        if (!desktopMode) {
-          const HWND tgt = reinterpret_cast<HWND>(
-              static_cast<uintptr_t>(capture.targetHwnd.load(std::memory_order_acquire)));
-          foregroundOk = (tgt != nullptr && GetForegroundWindow() == tgt);
+        if (desktopMode) return true;
+        const HWND tgt = reinterpret_cast<HWND>(
+            static_cast<uintptr_t>(capture.targetHwnd.load(std::memory_order_acquire)));
+        return tgt != nullptr && GetForegroundWindow() == tgt;
+      };
+      if (k.down != 0) {
+        if (gate_open() && inject_physical_scan_key(k.scanCode, true, physExt)) {
+          physicalDown.insert(physKey);
         }
-        if (foregroundOk) {
-          physInjected = inject_physical_scan_key(k.scanCode, k.down != 0, (k.flags & 0x1u) != 0);
+      } else {
+        // A key we injected as down is always released, gate or no gate, so nothing sticks.
+        if (physicalDown.erase(physKey) > 0) {
+          (void)inject_physical_scan_key(k.scanCode, false, physExt);
+        } else if (gate_open()) {
+          (void)inject_physical_scan_key(k.scanCode, false, physExt);
         }
       }
-      (void)physInjected;
       send_input_ack(k.seq);
       continue;
     }
@@ -863,6 +882,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
 
     if (bodySize > 0 && !link.Discard(bodySize)) break;
   }
+  release_all_physical_host();  // release any physical keys still held on the host at session end
   // Only if we are still the current session. A TCP control thread and the UDP dispatcher can be
   // alive at the same time, and this unconditional store meant whichever finished last switched
   // the OTHER one's video off -- the viewer would sit on a frozen picture with a healthy link.

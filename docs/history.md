@@ -8398,3 +8398,14 @@ Next action
 - 단위테스트 5종 전부 PASS(sealed_unlock KAT·consumed복합키, unlock_protocol, secure_input_session, shared_core, host_abr). installer Release, 임베드 0.2.84. 산출물 `dist/GNLinkSetup-0.2.84.exe`(0.2.83 삭제).
 - 0.2.83 대비: host-IME 실제 발동(Pong 능력광고+정책게이트+modifier release+포커스 조기분리+SYS hotkey), 서비스/릴레이 종료 hang 제거, unlock topology 3중·챌린지정책·consumed복합키.
 - 테스트법: 뷰어에 env REMOTE60_HOST_IME=1 후 접속→메모장 한글/영어. 기본 off는 기존동작.
+
+### 374) 2026-09-04 0.2.84 재리뷰 반영 — 종료 race 정공법+키스턱+sealed requestId → 0.2.85 (Codex #2차)
+
+- Codex 2차: 0.2.84도 보류. BLOCKER A/B(종료 race), C(키업 스턱), D(sealed requestId 미결합), HIGH들 반영:
+  - **A(서비스 종료)**: CancelIoEx+atomic 방식 폐기. unlock 워커가 파이프를 **단독 소유·close**, service_main 종료 시 워커 OS 스레드에 **CancelSynchronousIo 루프**(스레드 종료까지)로 ConnectNamedPipe/ReadFile 언블록. STOP 핸들러는 파이프 안 건드림. WTS는 bWait=FALSE(2단계 유지).
+  - **B(릴레이 종료)**: 동일 — workerThreadHandle_ 게시, Stop이 CancelSynchronousIo 루프, 워커 단독 close(핸들 재사용 ABA 제거).
+  - **C(키업 스턱)**: 호스트가 주입 성공한 down(scan|E0)을 physicalDown 집합에 보유. 매칭 up은 **게이트 닫혀도** release, 연결 종료 시 release-all. 뷰어도 실제 눌렀던 키만 up 전송(spurious SYS up 억제), WM_DESTROY release.
+  - **D(sealed requestId)**: 복호 전 req.requestId == us.ctx.requestId 필수 검증(외부 id만 바꾼 재사용 차단).
+  - HIGH: 챌린지 정책에서 requester state unknown=fail-closed(거부), 요청자 파이프 교체 시 topologyGeneration bump.
+- 남은(원장 D4, unlock UI dormant): 릴레이 결과맵 복합키/TTL·jobId·IPC검증. IME 후속: capability-after-focus 즉시 detach(pong post), 재접속 시 hostImeSupported reset+HIMC restore, P1b, 초기 영문정렬. Winlogon fallback 미구현.
+- 단위테스트 5종 PASS.

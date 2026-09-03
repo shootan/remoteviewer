@@ -41,13 +41,8 @@ void restore_local_ime(HWND hwnd) {
   gImeDetached = false;
   gPrevHimc = nullptr;
 }
-void note_physical(uint16_t scan, bool ext, bool down) {
-  const uint16_t key = static_cast<uint16_t>(scan | (ext ? 0x100 : 0));
-  if (down) gPhysicalDown.insert(key);
-  else gPhysicalDown.erase(key);
-}
-// Release every physical key still held (focus loss / mode change), so a modifier can't strand on
-// the host. (Codex #370 BLOCKER 6.)
+// Release every physical key still held (focus loss / mode change / destroy), so a modifier can't
+// strand on the host. (Codex #370 BLOCKER 6.)
 void release_all_physical(ViewerState& ctx) {
   for (uint16_t key : gPhysicalDown) {
     enqueue_physical_key(ctx, false, 0, static_cast<uint16_t>(key & 0xff), (key & 0x100) != 0, false);
@@ -55,13 +50,19 @@ void release_all_physical(ViewerState& ctx) {
   gPhysicalDown.clear();
 }
 // One physical key transition: detach IME on the first down, track pressed state, forward the scan.
+// A key-up is only forwarded for a key we actually sent as down (Codex #370): a spurious SYS key-up
+// (e.g. after a swallowed hotkey down) must not be injected on the host.
 void forward_physical(ViewerState& ctx, HWND hwnd, WPARAM wp, LPARAM lp, bool down) {
   const uint16_t scan = static_cast<uint16_t>((lp >> 16) & 0xff);
   const bool ext = (lp & (1 << 24)) != 0;
-  if (down) ensure_local_ime_off(hwnd);
-  note_physical(scan, ext, down);
-  enqueue_physical_key(ctx, down, static_cast<uint16_t>(wp), scan, ext,
-                       down ? ((lp & (1 << 30)) != 0) : false);
+  const uint16_t key = static_cast<uint16_t>(scan | (ext ? 0x100 : 0));
+  if (down) {
+    ensure_local_ime_off(hwnd);
+    gPhysicalDown.insert(key);
+    enqueue_physical_key(ctx, true, static_cast<uint16_t>(wp), scan, ext, (lp & (1 << 30)) != 0);
+  } else if (gPhysicalDown.erase(key) > 0) {
+    enqueue_physical_key(ctx, false, static_cast<uint16_t>(wp), scan, ext, false);
+  }
 }
 }  // namespace
 
@@ -197,6 +198,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       DestroyWindow(hwnd);
       return 0;
     case WM_DESTROY:
+      release_all_physical(ctx);  // nothing should stay held on the host
       restore_local_ime(hwnd);  // re-attach the IME we detached for host-side IME mode
       remote60::native_poc::session_toolbar_destroy();
       destroy_cached_gdi_objects(ctx);
