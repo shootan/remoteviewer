@@ -8380,3 +8380,16 @@ Next action
 - installer Release 빌드, 임베드 0.2.83(GNLinkHost/Setup), 페이로드 4종 이번 세션 신규 빌드. 산출물 `dist/GNLinkSetup-0.2.83.exe`.
 - **테스트 가능**: 한영 IME — 뷰어에서 env REMOTE60_HOST_IME=1 설정 후 접속하면 host-side IME(한글 live 조합, 한/영 실제 토글). 기본 off라 미설정 시 기존 동작 그대로(회귀 0).
 - **미완(정직)**: 잠금해제 뷰어 UI(비번 입력창+트리거+클라 크립토/DPAPI) 미구현 — 백엔드(서비스 WTSConnectSession+호스트릴레이+프로토콜)는 완료·dormant. WTSConnectSession 실제 해제 동작은 실기 spike 필요. P1b(키당 RTT 제거)도 후속.
+
+### 372) 2026-09-04 0.2.83 리뷰 반영 — BLOCKER 6종+HIGH 다수 수정 → 0.2.84 (Codex #370)
+
+- Codex가 0.2.83에서 실기 보류 판정. 반영:
+  - **B2(치명)** Pong이 kCaptureFlagHostImeV1 미광고 → host-IME가 아예 dormant였음. 이제 광고(+입력정책/키상태 수정 후 활성). **즉 0.2.83에선 한영이 실제로 안 됐음.**
+  - **B1** ControlUnlockAccepted requestId가 SecureZero(&req) 뒤 읽어 항상 0 → zero 전 보존.
+  - **B3** 서비스 unlock 스레드가 ConnectNamedPipe/ReadFile에 블록돼 STOP hang → gUnlockPipe 전역화, STOP에서 CancelIoEx+close. WTSConnectSession bWait TRUE→FALSE(블로킹 제거, lock 폴링으로 확인).
+  - **B4** 호스트 릴레이 Stop이 워커 ReadFile 블록에 hang → pipeHandle_ atomic, Stop에서 CancelIoEx.
+  - **B5** PhysicalKey가 입력정책 우회 → injectionEnabled + 비보안 데스크톱 + (desktop모드 || 선택창=foreground)일 때만 주입(오포그라운드 앱 유출 방지). ack은 전송 receipt.
+  - **B6/IME** 뷰어 physical pressed-set 추적 + 포커스 상실/모드전환 시 release-all(modifier stuck 방지). WM_SETFOCUS에서 IME 조기 분리(첫 글자 손실 방지). WM_SYSKEYDOWN에도 on_local_hotkey(Ctrl+Alt 계열). WM_DESTROY에서 이전 HIMC 복원.
+  - HIGH: 서비스 topology **3중** fence(WTSConnect 직전 추가) + 챌린지 정책(끊긴 requester+유효 console만) + account unknown 거부+구분자. sealed_unlock Verify consumed **복합키**(cookie+lockGen+challengeId) + 테스트. 상태값 문서(UnlockStage) 정정.
+  - 남은 dormant unlock HIGH(릴레이 복합키/TTL, jobId 계약, IPC 검증)와 Winlogon fallback 미구현은 원장 D4로 이관(뷰어 UI 구축 시).
+- WTSConnect 인자방향·crypto 코어는 Codex 승인. 0.2.83 폐기.

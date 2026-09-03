@@ -227,7 +227,9 @@ void TestReplayStateMachine() {
   st.Issue(id2, cookie, gen, 50000, 80000);
   check(st.Verify(id2, cookie, gen, 51000) == ChallengeVerdict::Valid, "new challenge valid");
   check(st.Verify(id, cookie, gen, 51000) == ChallengeVerdict::AlreadyConsumed,
-        "the just-consumed id is still remembered as consumed");
+        "the just-consumed id is still remembered as consumed (same context)");
+  check(st.Verify(id, cookie + 99, gen, 51000) != ChallengeVerdict::AlreadyConsumed,
+        "consumed id under a different cookie is NOT treated as consumed");
 
   st.ClearOutstanding();
   check(st.Verify(id2, cookie, gen, 51000) == ChallengeVerdict::Unknown, "cleared outstanding -> unknown");

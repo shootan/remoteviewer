@@ -53,6 +53,7 @@ class HostUnlockRelay {
 
   std::thread worker_;
   std::atomic<bool> running_{false};
+  std::atomic<void*> pipeHandle_{nullptr};  // published so Stop() can CancelIoEx a blocked ReadFile
   std::mutex mu_;
   std::condition_variable cv_;
   std::deque<Command> queue_;

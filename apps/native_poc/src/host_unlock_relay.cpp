@@ -59,6 +59,9 @@ HostUnlockRelay::~HostUnlockRelay() { Stop(); }
 void HostUnlockRelay::Stop() {
   if (running_.exchange(false)) {
     cv_.notify_all();
+    // Unblock a worker parked in ConnectNamedPipe/ReadFile so join() does not hang. (Codex #370 B4.)
+    HANDLE p = static_cast<HANDLE>(pipeHandle_.load(std::memory_order_acquire));
+    if (p != nullptr && p != INVALID_HANDLE_VALUE) (void)CancelIoEx(p, nullptr);
     if (worker_.joinable()) worker_.join();
   }
 }
@@ -91,10 +94,12 @@ void HostUnlockRelay::WorkerLoop() {
   auto ensure_pipe = [&]() -> bool {
     if (pipe != INVALID_HANDLE_VALUE) return true;
     pipe = static_cast<HANDLE>(ConnectPipe());
+    pipeHandle_.store(pipe == INVALID_HANDLE_VALUE ? nullptr : pipe, std::memory_order_release);
     return pipe != INVALID_HANDLE_VALUE;
   };
   auto drop_pipe = [&]() {
     if (pipe != INVALID_HANDLE_VALUE) {
+      pipeHandle_.store(nullptr, std::memory_order_release);
       CloseHandle(pipe);
       pipe = INVALID_HANDLE_VALUE;
     }

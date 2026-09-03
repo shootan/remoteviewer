@@ -168,6 +168,8 @@ class UnlockChallengeState {
   uint64_t expiresMs_ = 0;
   bool hasConsumedId_ = false;
   uint8_t consumedId_[kChallengeIdBytes] = {};
+  uint64_t consumedCookie_ = 0;
+  uint32_t consumedLockGeneration_ = 0;
 };
 
 }  // namespace remote60::native_poc::sealed_unlock

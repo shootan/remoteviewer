@@ -391,7 +391,10 @@ ChallengeVerdict UnlockChallengeState::Verify(const uint8_t challengeId[kChallen
                                               uint64_t nowMs) const {
   // A late duplicate of the just-consumed challenge reports AlreadyConsumed so the caller returns the
   // cached result instead of re-running the unlock.
-  if (hasConsumedId_ && std::memcmp(challengeId, consumedId_, kChallengeIdBytes) == 0) {
+  // Composite match (Codex #370 HIGH 9): a consumed challenge only shadows a *duplicate* of the same
+  // request context, not any request that happens to reuse the id under a different session/topology.
+  if (hasConsumedId_ && std::memcmp(challengeId, consumedId_, kChallengeIdBytes) == 0 &&
+      clientSessionCookie == consumedCookie_ && lockGeneration == consumedLockGeneration_) {
     return ChallengeVerdict::AlreadyConsumed;
   }
   if (!hasOutstanding_ ||
@@ -409,6 +412,8 @@ void UnlockChallengeState::Consume(const uint8_t challengeId[kChallengeIdBytes])
   consumed_ = true;
   hasConsumedId_ = true;
   std::memcpy(consumedId_, outstandingId_, kChallengeIdBytes);
+  consumedCookie_ = clientSessionCookie_;
+  consumedLockGeneration_ = lockGeneration_;
 }
 
 void UnlockChallengeState::ClearOutstanding() {

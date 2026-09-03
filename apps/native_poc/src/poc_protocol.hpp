@@ -557,7 +557,7 @@ struct ControlUnlockChallengeMessage {
   MessageHeader header{};
   uint32_t seq = 0;
   uint32_t requestId = 0;
-  uint16_t status = 0;  // 0 = issued; otherwise an UnlockStage rejection reason
+  uint16_t status = 0;  // UnlockStage: ChallengeIssued(3) on success, else a rejection stage
   uint16_t reserved = 0;
   uint8_t challengeId[16] = {};
   uint8_t hostPub[64] = {};

@@ -74,6 +74,9 @@ SERVICE_STATUS_HANDLE gStatusHandle = nullptr;
 SERVICE_STATUS gStatus{};
 std::atomic<bool> gRunning{true};
 std::atomic<HANDLE> gClientPipe{INVALID_HANDLE_VALUE};
+// The unlock duplex pipe, stored so SERVICE_CONTROL_STOP can CancelIoEx/close it -- otherwise the
+// unlock thread blocks in ConnectNamedPipe/ReadFile and service stop hangs. (Codex #370 BLOCKER 3.)
+std::atomic<HANDLE> gUnlockPipe{INVALID_HANDLE_VALUE};
 // The session of the process holding the control pipe -- the streaming host. Captured once when
 // the pipe connects, because that is the only moment the requester is identifiable.
 std::atomic<uint32_t> gRequesterSession{kInvalidSessionId};
@@ -371,6 +374,12 @@ DWORD WINAPI service_control(DWORD control, DWORD eventType, LPVOID eventData, L
     (void)DisconnectNamedPipe(pipe);
     CloseHandle(pipe);
   }
+  HANDLE upipe = gUnlockPipe.exchange(INVALID_HANDLE_VALUE, std::memory_order_acq_rel);
+  if (upipe != INVALID_HANDLE_VALUE) {
+    (void)CancelIoEx(upipe, nullptr);
+    (void)DisconnectNamedPipe(upipe);
+    CloseHandle(upipe);
+  }
   return NO_ERROR;
 }
 
@@ -426,7 +435,8 @@ uint64_t host_id() {
 
 // FNV-1a over WTSUserName+WTSDomainName so a stored credential is bound to the account, not the
 // session number.
-uint64_t account_id_of(uint32_t session) {
+uint64_t account_id_of(uint32_t session, bool* known) {
+  if (known) *known = false;
   uint64_t h = 1469598103934665603ull;
   auto mix = [&](LPWSTR str) {
     if (!str) return;
@@ -435,11 +445,13 @@ uint64_t account_id_of(uint32_t session) {
   LPWSTR buf = nullptr;
   DWORD bytes = 0;
   if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session, WTSUserName, &buf, &bytes) && buf) {
+    if (buf[0] && known) *known = true;
     mix(buf);
     WTSFreeMemory(buf);
   }
   buf = nullptr;
   bytes = 0;
+  h ^= 0x5eULL; h *= 1099511628211ull;  // separator between user and domain (Codex #370)
   if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session, WTSDomainName, &buf, &bytes) && buf) {
     mix(buf);
     WTSFreeMemory(buf);
@@ -524,10 +536,15 @@ void handle_challenge_request(UnlockSession& us, const SecureUnlockChallengeRequ
   bool lockKnown = false;
   const bool locked = session_is_locked(requester, &lockKnown);
   const uint32_t topo = gSessionTopologyGeneration.load(std::memory_order_acquire);
+  bool reqStateKnown = false;
+  const bool reqActive = query_session_active(requester, &reqStateKnown);
+  const bool consoleUsable = (console != kInvalidSessionId && console != 0u);
 
-  // Only issue for a genuinely locked, resolvable session. Not-locked / unknown -> RejectedPolicy so
-  // a password is never sealed toward a UAC prompt or an already-usable desktop.
-  if (requester == kInvalidSessionId || !lockKnown || !locked) {
+  // Only issue for a genuinely locked requester that is DISCONNECTED, with a valid console to
+  // reconnect it onto (Codex #370 HIGH 2). Not-locked / still-active / no-console -> RejectedPolicy,
+  // so we never move an active RDP session or seal a password toward a UAC prompt / usable desktop.
+  if (requester == kInvalidSessionId || !lockKnown || !locked || !consoleUsable ||
+      (reqStateKnown && reqActive)) {
     resp.stage = stage_code(UnlockStage::RejectedPolicy);
     (void)write_exact(pipe, &resp, sizeof(resp));
     return;
@@ -560,7 +577,13 @@ void handle_challenge_request(UnlockSession& us, const SecureUnlockChallengeRequ
   c.topologyGeneration = topo;
   c.issuedMs = now_ms();
   c.expiresMs = c.issuedMs + 30000;
-  c.accountId = account_id_of(requester);
+  bool accountKnown = false;
+  c.accountId = account_id_of(requester, &accountKnown);
+  if (!accountKnown) {
+    resp.stage = stage_code(UnlockStage::RejectedPolicy);
+    (void)write_exact(pipe, &resp, sizeof(resp));
+    return;
+  }
   std::memcpy(c.hostPub, hostPub, su::kPubKeyBytes);
   us.ctx = c;
   us.challenge.Issue(challengeId, req.clientSessionCookie, topo, c.issuedMs, c.expiresMs);
@@ -663,9 +686,18 @@ void handle_sealed_request(UnlockSession& us, const SecureUnlockSealedRequest& r
   for (uint16_t i = 0; i < pwCount; ++i) pwz[i] = static_cast<wchar_t>(pw[i]);
   su::SecureZero(pw, sizeof(pw));
 
-  // Reconnect the disconnected requester session onto the console with the account's password.
+  // Third topology fence, right before the irreversible WTS call (Codex #370 HIGH 1): if the session
+  // moved/locked/unlocked since the password was decrypted, do not act on a stale target.
+  if (gSessionTopologyGeneration.load(std::memory_order_acquire) != us.ctx.topologyGeneration) {
+    su::SecureZero(pwz, sizeof(pwz));
+    reject(UnlockStage::RejectedStaleTopology);
+    return;
+  }
+  // Reconnect the disconnected requester session onto the console with the account's password. bWait
+  // FALSE returns promptly (Codex #370 BLOCKER 3): we confirm the unlock by polling the lock state
+  // rather than blocking this thread inside WTS.
   SetLastError(0);
-  const BOOL ok = WTSConnectSessionW(us.ctx.requesterSession, us.ctx.consoleSession, pwz, TRUE);
+  const BOOL ok = WTSConnectSessionW(us.ctx.requesterSession, us.ctx.consoleSession, pwz, FALSE);
   const DWORD gle = GetLastError();
   su::SecureZero(pwz, sizeof(pwz));
 
@@ -697,8 +729,14 @@ void unlock_pipe_loop() {
   while (gRunning.load(std::memory_order_acquire)) {
     HANDLE pipe = create_unlock_pipe();
     if (pipe == INVALID_HANDLE_VALUE) { Sleep(500); continue; }
+    gUnlockPipe.store(pipe, std::memory_order_release);
     const BOOL connected =
         ConnectNamedPipe(pipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED;
+    if (!gRunning.load(std::memory_order_acquire)) {
+      HANDLE ex = pipe;
+      if (gUnlockPipe.compare_exchange_strong(ex, INVALID_HANDLE_VALUE)) CloseHandle(pipe);
+      break;
+    }
     if (connected) {
       UnlockSession us;
       uint8_t buf[512];
@@ -729,7 +767,8 @@ void unlock_pipe_loop() {
       }
       (void)DisconnectNamedPipe(pipe);
     }
-    CloseHandle(pipe);
+    HANDLE ex = pipe;
+    if (gUnlockPipe.compare_exchange_strong(ex, INVALID_HANDLE_VALUE)) CloseHandle(pipe);
   }
 }
 

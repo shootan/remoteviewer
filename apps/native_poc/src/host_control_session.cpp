@@ -238,6 +238,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
       }
       // Advertise sealed-unlock v1 support so a viewer only sends the unlock messages here.
       pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagUnlockSealedV1;
+      pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagHostImeV1;
       pong.captureRebindCount = target.rebindCount;
       pong.captureTargetHwnd = target.targetHwnd;
       std::snprintf(pong.captureTargetProcess, sizeof(pong.captureTargetProcess), "%s",
@@ -272,13 +273,14 @@ void ControlSessionServer::Serve(ControlLink& link) {
       ControlUnlockSealedRequestMessage req{};
       req.header = header;
       if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+      const uint32_t sealedRequestId = req.requestId;  // preserve before we wipe the ciphertext copy
       gUnlockRelay.SealedAsync(req, unlockCookie);
       SecureZeroMemory(&req, sizeof(req));  // drop the ciphertext copy promptly
       ControlUnlockAcceptedMessage rsp{};
       rsp.header.magic = remote60::native_poc::kMagic;
       rsp.header.type = static_cast<uint16_t>(MessageType::ControlUnlockAccepted);
       rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
-      rsp.requestId = req.requestId;
+      rsp.requestId = sealedRequestId;
       rsp.accepted = 1;
       if (!link.Write(&rsp, sizeof(rsp))) break;
       continue;
@@ -307,9 +309,26 @@ void ControlSessionServer::Serve(ControlLink& link) {
       ControlPhysicalKeyMessage k{};
       k.header = header;
       if (!link.Read(&k.seq, sizeof(k) - sizeof(MessageHeader))) break;
-      // Host-side IME: inject the raw scan code and let the host IME compose. No neutralization, so
-      // Hangul composes live and the client's Han/Yeong key toggles the host IME like a real keyboard.
-      (void)inject_physical_scan_key(k.scanCode, k.down != 0, (k.flags & 0x1u) != 0);
+      // Host-side IME: inject the raw scan code so the host IME composes live. Gate it like the mouse
+      // path (Codex #370 BLOCKER 5): only when injection is enabled, the desktop is NOT secure (never
+      // type into a UAC/lock screen), and either desktop mode is active or the selected window is the
+      // foreground window -- otherwise a physical key would leak into whatever app is in front. The ack
+      // is a transport receipt (the client's one-per-RTT loop needs it), not an injection-success claim.
+      bool physInjected = false;
+      if (inputRouter.injectionEnabled && interactive_desktop_is_default()) {
+        const bool desktopMode = !inputRouter.targetCriteria.enabled() &&
+                                 (capture.selectedWindowId.load(std::memory_order_acquire) == 0);
+        bool foregroundOk = desktopMode;
+        if (!desktopMode) {
+          const HWND tgt = reinterpret_cast<HWND>(
+              static_cast<uintptr_t>(capture.targetHwnd.load(std::memory_order_acquire)));
+          foregroundOk = (tgt != nullptr && GetForegroundWindow() == tgt);
+        }
+        if (foregroundOk) {
+          physInjected = inject_physical_scan_key(k.scanCode, k.down != 0, (k.flags & 0x1u) != 0);
+        }
+      }
+      (void)physInjected;
       send_input_ack(k.seq);
       continue;
     }

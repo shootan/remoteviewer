@@ -5,6 +5,8 @@
 #include <imm.h>
 #pragma comment(lib, "imm32.lib")
 
+#include <set>
+
 #include "viewer_common.hpp"
 #include "viewer_cursor_overlay.hpp"
 #include "viewer_gdi_util.hpp"
@@ -22,13 +24,44 @@
 namespace remote60::native_poc::viewer {
 
 namespace {
-// Host-side IME: disable this window's local IME once, so keys arrive as raw VK (no VK_PROCESSKEY)
-// and no local composition happens -- the host IME composes instead. Reversible on process exit.
+// Host-side IME state (UI thread only). Detaching the local IME makes keys arrive as raw VK (no
+// VK_PROCESSKEY) with no local composition -- the host IME composes instead. (Codex #370.)
+HIMC gPrevHimc = nullptr;
+bool gImeDetached = false;
+std::set<uint16_t> gPhysicalDown;  // pressed physical keys: scan | (E0 ? 0x100 : 0)
+
 void ensure_local_ime_off(HWND hwnd) {
-  static bool done = false;
-  if (done) return;
-  ImmAssociateContext(hwnd, nullptr);
-  done = true;
+  if (gImeDetached) return;
+  gPrevHimc = ImmAssociateContext(hwnd, nullptr);  // keep the previous context so we can restore it
+  gImeDetached = true;
+}
+void restore_local_ime(HWND hwnd) {
+  if (!gImeDetached) return;
+  ImmAssociateContext(hwnd, gPrevHimc);
+  gImeDetached = false;
+  gPrevHimc = nullptr;
+}
+void note_physical(uint16_t scan, bool ext, bool down) {
+  const uint16_t key = static_cast<uint16_t>(scan | (ext ? 0x100 : 0));
+  if (down) gPhysicalDown.insert(key);
+  else gPhysicalDown.erase(key);
+}
+// Release every physical key still held (focus loss / mode change), so a modifier can't strand on
+// the host. (Codex #370 BLOCKER 6.)
+void release_all_physical(ViewerState& ctx) {
+  for (uint16_t key : gPhysicalDown) {
+    enqueue_physical_key(ctx, false, 0, static_cast<uint16_t>(key & 0xff), (key & 0x100) != 0, false);
+  }
+  gPhysicalDown.clear();
+}
+// One physical key transition: detach IME on the first down, track pressed state, forward the scan.
+void forward_physical(ViewerState& ctx, HWND hwnd, WPARAM wp, LPARAM lp, bool down) {
+  const uint16_t scan = static_cast<uint16_t>((lp >> 16) & 0xff);
+  const bool ext = (lp & (1 << 24)) != 0;
+  if (down) ensure_local_ime_off(hwnd);
+  note_physical(scan, ext, down);
+  enqueue_physical_key(ctx, down, static_cast<uint16_t>(wp), scan, ext,
+                       down ? ((lp & (1 << 30)) != 0) : false);
 }
 }  // namespace
 
@@ -164,6 +197,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       DestroyWindow(hwnd);
       return 0;
     case WM_DESTROY:
+      restore_local_ime(hwnd);  // re-attach the IME we detached for host-side IME mode
       remote60::native_poc::session_toolbar_destroy();
       destroy_cached_gdi_objects(ctx);
       PostQuitMessage(0);
@@ -448,10 +482,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       if (on_local_hotkey(ctx, hwnd, wp)) return 0;
       if (kInputPolicyForceBlock) return 0;
       if (host_ime_mode(ctx)) {
-        ensure_local_ime_off(hwnd);
-        enqueue_physical_key(ctx, true, static_cast<uint16_t>(wp),
-                             static_cast<uint16_t>((lp >> 16) & 0xff), (lp & (1 << 24)) != 0,
-                             (lp & (1 << 30)) != 0);
+        forward_physical(ctx, hwnd, wp, lp, true);
         return 0;
       }
       if (forward_key_down(ctx, wp)) enqueue_input_event(ctx, 5, 0, 0, 0, static_cast<uint32_t>(wp));
@@ -459,19 +490,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_KEYUP:
       if (kInputPolicyForceBlock) return 0;
       if (host_ime_mode(ctx)) {
-        enqueue_physical_key(ctx, false, static_cast<uint16_t>(wp),
-                             static_cast<uint16_t>((lp >> 16) & 0xff), (lp & (1 << 24)) != 0, false);
+        forward_physical(ctx, hwnd, wp, lp, false);
         return 0;
       }
       if (forward_key_up(ctx, wp)) enqueue_input_event(ctx, 6, 0, 0, 0, static_cast<uint32_t>(wp));
       return 0;
     case WM_SYSKEYDOWN:
+      if (on_local_hotkey(ctx, hwnd, wp)) return 0;
       if (kInputPolicyForceBlock) return 0;
       if (host_ime_mode(ctx)) {
-        ensure_local_ime_off(hwnd);
-        enqueue_physical_key(ctx, true, static_cast<uint16_t>(wp),
-                             static_cast<uint16_t>((lp >> 16) & 0xff), (lp & (1 << 24)) != 0,
-                             (lp & (1 << 30)) != 0);
+        forward_physical(ctx, hwnd, wp, lp, true);
         return 0;
       }
       if (forward_key_down(ctx, wp)) enqueue_input_event(ctx, 5, 0, 0, 0, static_cast<uint32_t>(wp));
@@ -479,16 +507,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_SYSKEYUP:
       if (kInputPolicyForceBlock) return 0;
       if (host_ime_mode(ctx)) {
-        enqueue_physical_key(ctx, false, static_cast<uint16_t>(wp),
-                             static_cast<uint16_t>((lp >> 16) & 0xff), (lp & (1 << 24)) != 0, false);
+        forward_physical(ctx, hwnd, wp, lp, false);
         return 0;
       }
       if (forward_key_up(ctx, wp)) enqueue_input_event(ctx, 6, 0, 0, 0, static_cast<uint32_t>(wp));
       return 0;
+    case WM_SETFOCUS:
+      // Detach the local IME before the first keystroke so no first char is eaten as VK_PROCESSKEY.
+      if (host_ime_mode(ctx)) ensure_local_ime_off(hwnd);
+      return 0;
     case WM_KILLFOCUS:
       // Focus is about to leave, so no more key-ups will reach this window. Release whatever
       // is held now, before Alt/Win/Alt+Tab strands it on the host.
-      if (!kInputPolicyForceBlock) enqueue_release_for_pressed_keys(ctx);
+      if (!kInputPolicyForceBlock) {
+        enqueue_release_for_pressed_keys(ctx);
+        release_all_physical(ctx);
+      }
       ctx.picker.CancelPress();
       return 0;
     case WM_CHAR:
