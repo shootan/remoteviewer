@@ -8372,3 +8372,11 @@ Next action
 - 뷰어 세션에 hostImeSupported(pong에서 셋). viewer_control_client.cpp handle_pong 반영.
 - 빌드: shared_core_test PASS(coalesce 무영향), 뷰어/호스트 컴파일 OK. 빌드본은 전체 후 1개.
 - 참고: P1b(키당 RTT 제거, 부드러운 타이핑)는 미포함 — 현재 host-IME는 조합이 화면에 보이나 키당 왕복 지연 잔존. 후속.
+
+### 371) 2026-09-04 빌드 0.2.83 — 한영 IME(옵트인) + 잠금해제 백엔드 전체 (goal: 한영까지+빌드)
+
+- 사용자 goal "한영까지 다 작업하고 빌드해서 설치파일까지 뽑고 보고". 이번 사이클 산출: 잠금해제(G2~서비스~호스트릴레이) + 한영 IME(호스트+뷰어, 옵트인) 통합 빌드.
+- 단위테스트 전부 PASS: sealed_unlock(KAT), unlock_protocol, secure_input_session(G2 매트릭스), shared_core(coalesce), host_abr.
+- installer Release 빌드, 임베드 0.2.83(GNLinkHost/Setup), 페이로드 4종 이번 세션 신규 빌드. 산출물 `dist/GNLinkSetup-0.2.83.exe`.
+- **테스트 가능**: 한영 IME — 뷰어에서 env REMOTE60_HOST_IME=1 설정 후 접속하면 host-side IME(한글 live 조합, 한/영 실제 토글). 기본 off라 미설정 시 기존 동작 그대로(회귀 0).
+- **미완(정직)**: 잠금해제 뷰어 UI(비번 입력창+트리거+클라 크립토/DPAPI) 미구현 — 백엔드(서비스 WTSConnectSession+호스트릴레이+프로토콜)는 완료·dormant. WTSConnectSession 실제 해제 동작은 실기 spike 필요. P1b(키당 RTT 제거)도 후속.
