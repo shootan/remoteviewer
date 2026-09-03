@@ -8393,3 +8393,8 @@ Next action
   - HIGH: 서비스 topology **3중** fence(WTSConnect 직전 추가) + 챌린지 정책(끊긴 requester+유효 console만) + account unknown 거부+구분자. sealed_unlock Verify consumed **복합키**(cookie+lockGen+challengeId) + 테스트. 상태값 문서(UnlockStage) 정정.
   - 남은 dormant unlock HIGH(릴레이 복합키/TTL, jobId 계약, IPC 검증)와 Winlogon fallback 미구현은 원장 D4로 이관(뷰어 UI 구축 시).
 - WTSConnect 인자방향·crypto 코어는 Codex 승인. 0.2.83 폐기.
+
+### 373) 2026-09-04 빌드 0.2.84 — 리뷰 반영본, 한영 IME 실동작 (0.2.83 폐기)
+- 단위테스트 5종 전부 PASS(sealed_unlock KAT·consumed복합키, unlock_protocol, secure_input_session, shared_core, host_abr). installer Release, 임베드 0.2.84. 산출물 `dist/GNLinkSetup-0.2.84.exe`(0.2.83 삭제).
+- 0.2.83 대비: host-IME 실제 발동(Pong 능력광고+정책게이트+modifier release+포커스 조기분리+SYS hotkey), 서비스/릴레이 종료 hang 제거, unlock topology 3중·챌린지정책·consumed복합키.
+- 테스트법: 뷰어에 env REMOTE60_HOST_IME=1 후 접속→메모장 한글/영어. 기본 off는 기존동작.
