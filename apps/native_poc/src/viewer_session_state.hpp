@@ -36,6 +36,7 @@ struct SessionState {
   // Host advertised sealed host-side IME support (kCaptureFlagHostImeV1). Host-IME key path is used
   // only when this is set AND the user opted in (env REMOTE60_HOST_IME=1). (Codex #366.)
   std::atomic<bool> hostImeSupported{false};
+  std::atomic<bool> unlockRequested{false};  // set by the unlock hotkey; the control thread runs it
   // Which candidate won the race. The relay is billed per byte, so the session says which one it
   // is rather than leaving the user to guess from the bill.
   std::atomic<bool> relayPath{false};

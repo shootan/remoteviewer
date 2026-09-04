@@ -198,6 +198,9 @@ enum class ControlOutboundActionKind : uint8_t {
   PhysicalKey,
   MonitorListRequest,
   MonitorSelect,
+  UnlockChallengeRequest,
+  UnlockSealedRequest,
+  UnlockStatusRequest,
 };
 
 struct ControlOutboundAction {
@@ -218,6 +221,9 @@ struct ControlOutboundAction {
   ControlInputEventMessage inputEvent{};
   ControlInputTextMessage inputText{};
   ControlPhysicalKeyMessage physicalKey{};
+  ControlUnlockChallengeRequestMessage unlockChallengeReq{};
+  ControlUnlockSealedRequestMessage unlockSealed{};
+  ControlUnlockStatusRequestMessage unlockStatusReq{};
   uint64_t inputGeneratedUs = 0;  // P0 (#351): local diagnostic — when the UI generated this input
 };
 

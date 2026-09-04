@@ -11,6 +11,8 @@
 #include "viewer_log.hpp"
 #include "viewer_picker.hpp"
 
+#include "viewer_unlock.hpp"
+
 namespace remote60::native_poc::viewer {
 
 int ControlClient::fetch_one_thumbnail(remote60::native_poc::ControlLink& link) {
@@ -217,6 +219,17 @@ void ControlClient::Run() {
       p0MoveQueueAgeSumUs = 0;
       p0MoveQueueAgeMaxUs = 0;
       p0LastEmitUs = nowUs;
+    }
+    if (ctx.session.unlockRequested.exchange(false, std::memory_order_acq_rel)) {
+      std::wstring pw;
+      if (load_unlock_password(0, &pw)) {
+        std::string status;
+        (void)run_unlock_exchange(*controlLink, 0, pw, &status);
+        if (!pw.empty()) SecureZeroMemory(&pw[0], pw.size() * sizeof(wchar_t));
+        std::cout << "[native-video-client][unlock] " << status << "\n";
+      } else {
+        std::cout << "[native-video-client][unlock] no stored password (Ctrl+Alt+U to set)\n";
+      }
     }
     ControlOutboundAction action{};
     if (ctx.control.scheduler.NextAction(

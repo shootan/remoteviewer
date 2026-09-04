@@ -156,6 +156,7 @@ add_executable(remote60_native_video_client_poc
   src/viewer_selection_gate.cpp
   src/viewer_frame_gate.cpp
   src/viewer_control_client.cpp
+  src/viewer_unlock.cpp
   src/viewer_video_receiver.cpp
   src/viewer_video_receiver_frame.cpp
   src/viewer_window_proc.cpp
@@ -215,6 +216,8 @@ endif()
 
 target_link_libraries(remote60_native_video_client_poc PRIVATE
   common
+  remote60_sealed_unlock
+  crypt32
   ws2_32
   d3d11
   dxgi

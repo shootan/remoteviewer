@@ -12,6 +12,7 @@
 #include "viewer_gdi_util.hpp"
 #include "viewer_state.hpp"
 #include "viewer_input_forward.hpp"
+#include "viewer_unlock.hpp"
 #include "viewer_layout.hpp"
 #include "viewer_log.hpp"
 #include "viewer_nv12_renderer.hpp"
@@ -156,6 +157,16 @@ void picker_release(ViewerState& ctx, HWND hwnd, const ClientLayout& layout, int
 // The Ctrl+Alt local hotkeys of WM_KEYDOWN: F5 refresh the window list, F9 capture overview,
 // [ ] bitrate down/up, ; ' keyint down/up. True when consumed.
 bool on_local_hotkey(ViewerState& ctx, HWND hwnd, WPARAM wp) {
+  if (local_hotkey_modifiers_active() && wp == 'U') {  // Ctrl+Alt+U: unlock the host lock screen
+    if (!has_unlock_password(0)) {
+      std::wstring pw;
+      if (!prompt_unlock_password(hwnd, &pw)) return true;  // cancelled
+      save_unlock_password(0, pw);
+      if (!pw.empty()) SecureZeroMemory(&pw[0], pw.size() * sizeof(wchar_t));
+    }
+    ctx.session.unlockRequested.store(true, std::memory_order_release);
+    return true;
+  }
   if (local_hotkey_modifiers_active() && wp == VK_F5) {
     queue_window_list_request(ctx, "window_list_request pending");
     InvalidateRect(hwnd, nullptr, FALSE);

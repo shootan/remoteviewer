@@ -37,6 +37,12 @@ bool send_control_action(ControlLink& link, const ControlOutboundAction& action)
       return link.Write(&action.inputText, sizeof(action.inputText));
     case ControlOutboundActionKind::PhysicalKey:
       return link.Write(&action.physicalKey, sizeof(action.physicalKey));
+    case ControlOutboundActionKind::UnlockChallengeRequest:
+      return link.Write(&action.unlockChallengeReq, sizeof(action.unlockChallengeReq));
+    case ControlOutboundActionKind::UnlockSealedRequest:
+      return link.Write(&action.unlockSealed, sizeof(action.unlockSealed));
+    case ControlOutboundActionKind::UnlockStatusRequest:
+      return link.Write(&action.unlockStatusReq, sizeof(action.unlockStatusReq));
     case ControlOutboundActionKind::None:
     default:
       return false;
@@ -79,6 +85,21 @@ bool recv_control_response(ControlLink& link, const ControlOutboundAction& actio
       out->kind = TcpControlResponseKind::MonitorList;
       out->monitorList.header = header;
       return link.Read(&out->monitorList.seq, sizeof(out->monitorList) - sizeof(MessageHeader));
+    case MessageType::ControlUnlockChallenge:
+      out->kind = TcpControlResponseKind::UnlockChallenge;
+      out->unlockChallenge.header = header;
+      return link.Read(&out->unlockChallenge.seq,
+                       sizeof(out->unlockChallenge) - sizeof(MessageHeader));
+    case MessageType::ControlUnlockAccepted:
+      out->kind = TcpControlResponseKind::UnlockAccepted;
+      out->unlockAccepted.header = header;
+      return link.Read(&out->unlockAccepted.seq,
+                       sizeof(out->unlockAccepted) - sizeof(MessageHeader));
+    case MessageType::ControlUnlockStatusResult:
+      out->kind = TcpControlResponseKind::UnlockStatusResult;
+      out->unlockStatusResult.header = header;
+      return link.Read(&out->unlockStatusResult.seq,
+                       sizeof(out->unlockStatusResult) - sizeof(MessageHeader));
     default:
       out->kind = TcpControlResponseKind::None;
       return link.Discard(header.size - sizeof(MessageHeader));

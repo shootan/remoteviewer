@@ -149,9 +149,13 @@ void HostUnlockRelay::WorkerLoop() {
                 ReadFile(pipe, buf, sizeof(buf), &read, nullptr) &&
                 read == sizeof(SecureUnlockChallengeResponse);
       ControlUnlockChallengeMessage out{};
-      if (ok) {
-        SecureUnlockChallengeResponse resp{};
-        std::memcpy(&resp, buf, sizeof(resp));
+      SecureUnlockChallengeResponse resp{};
+      if (ok) std::memcpy(&resp, buf, sizeof(resp));
+      // Validate the service reply before trusting it (Codex D4): magic/size/kind must match and the
+      // requestId must be the one we asked for, or a crossed/malformed reply is rejected.
+      if (ok && resp.magic == kSecureUnlockMagic && resp.size == sizeof(resp) &&
+          resp.kind == static_cast<uint16_t>(SecureUnlockKind::ChallengeResponse) &&
+          resp.requestId == req.requestId) {
         out = to_control_challenge(resp);
       } else {
         out.requestId = cmd.challenge.requestId;
@@ -168,9 +172,11 @@ void HostUnlockRelay::WorkerLoop() {
                 ReadFile(pipe, buf, sizeof(buf), &read, nullptr) &&
                 read == sizeof(SecureUnlockResult);
       ControlUnlockStatusResultMessage out{};
-      if (ok) {
-        SecureUnlockResult resp{};
-        std::memcpy(&resp, buf, sizeof(resp));
+      SecureUnlockResult resp{};
+      if (ok) std::memcpy(&resp, buf, sizeof(resp));
+      if (ok && resp.magic == kSecureUnlockMagic && resp.size == sizeof(resp) &&
+          resp.kind == static_cast<uint16_t>(SecureUnlockKind::Result) &&
+          resp.requestId == cmd.seal.requestId) {
         out = to_control_result(resp);
       } else {
         out.requestId = cmd.seal.requestId;

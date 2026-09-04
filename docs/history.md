@@ -8426,3 +8426,12 @@ Next action
   - **뷰어 키업**: erase 후 enqueue였던 것 → enqueue 성공 시에만 erase, 실패 시 set 유지(재시도). release_all_physical도 성공분만 제거.
 - 잔여(필드/후속): capability-after-focus 즉시 detach(pong→UI post, 결정론), 재접속 HIMC restore, host physical의 TCP/UDP rollover epoch·release 실패 복구, 초기 영문 sync + P1b. 원장 D4(unlock UI). challenge limiter idempotent 재응답 개선.
 - 단위테스트 전부 PASS.
+
+### 377) 2026-09-04 잠금해제 뷰어 UI 완성 — 사용자가 실제 사용 가능 → 0.2.88
+- 사용자 "잠금해제 왜 미완?" → 백엔드만 있고 뷰어 UI가 없었음. 이번에 완성:
+  - `viewer_unlock.hpp/.cpp`(신규): DPAPI(CryptProtectData user scope, CRYPTPROTECT_UI_FORBIDDEN)로 호스트 비번 로컬 저장/로드/삭제(%LOCALAPPDATA%\GNLink\unlock_*.cred), ES_PASSWORD 모달 입력창, run_unlock_exchange(ChallengeRequest→클라 ECDH keygen+DeriveAesKey+PackPassword+AesGcmSeal→SealedRequest→StatusRequest 폴링). 평문 비번 즉시 SecureZero.
+  - 프로토콜 플러밍: ControlOutboundActionKind::Unlock{Challenge,Sealed,Status}Request + TcpControlResponseKind::Unlock{Challenge,Accepted,StatusResult} + send/recv 케이스.
+  - 트리거: 뷰어 Ctrl+Alt+U(비번 없으면 입력창→DPAPI 저장) → unlockRequested 플래그 → 컨트롤 스레드가 load+run_unlock_exchange+SecureZero+상태 로그.
+  - 릴레이 IPC 응답 검증(magic/size/kind/requestId) 추가(D4 일부).
+- 이제 흐름 완결: 뷰어 Ctrl+Alt+U → 비번(암호화 sealed) → 호스트 릴레이 → 서비스 복호 → WTSConnectSession → 결과 폴링. 비번은 클라 DPAPI 저장·sealed 전송(평문 미노출; 인증없는 sealed라 능동MITM엔 취약, 사용자 수용).
+- 단위테스트 전부 PASS. 남은 D4: 릴레이 결과맵 (cookie,requestId) 복합키+TTL(다중세션), jobId 계약. WTSConnectSession 실제 해제는 실기 확인 필요.
