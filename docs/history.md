@@ -8444,3 +8444,16 @@ Next action
   - **프롬프트 종료**: WM_DESTROY의 PostQuitMessage 제거(done 플래그, 앱 WM_QUIT 재전달) — UI 스레드 quit 오염 방지.
 - **사용자 redirection**: 잠금해제 버튼을 뷰어 영상 화면(Ctrl+Alt+U)에 두면 RDP 잠금 시 영상이 검어 무용 → **대상선택(picker) 화면에 잠금해제 메뉴**로 이동해 영상과 무관하게. + picker "대상선택 시 멈춤"(PICK) 미해결도 지적.
 - 남은(다음): picker에 unlock 진입점, PICK 멈춤 수정, D4(릴레이/서비스 (cookie,requestId) 복합키+TTL, jobId), hostId 네임스페이스(directoryHostId), WTS 실기. 아직 unlock 배포 빌드 보류(트리거 picker 이동 후).
+
+### 379) 2026-09-04 정적화면 멈춤 근본원인 수정 — stale-reference 오탐(느린 소스를 혼잡으로 오판) → 0.2.90
+- 증상: 정적 화면에서 글씨를 계속 쳐도 화면이 5초 넘게 멈췄다가 GMux 등 큰 변화가 생기면 풀림. "1~2초에 한번씩 갱신"되는 느낌. 지우는 게 안 보여 과다 삭제.
+- 진단(호스트+뷰어 로그 대조, RDP OFF 유효):
+  - 뷰어 로그(NAS `/opt/gnlink/remote60-directory/logs/shotan/<device>/viewer.log`)에서 결정적 증거:
+    `dropPm=0`(UDP 유실 거의 없음), 키프레임 정상 조립·디코드(`decodeUs~16ms`), `decodeQueueLagUs=103~364us`(클라 전혀 안 밀림), `presentBacklog=0`(더 새 프레임 없음)인데도
+    `stale-reference recovery count=1694↑`가 폭주하며 매번 `reason=6(stale_reference_gap)` 키프레임 요청+디코더 리셋+델타 드랍 → `frameGapUs=1.2초` 프리즈. 호스트는 이에 응답해 230KB IDR을 초당 여러 번 뱉어 storm.
+  - 근본원인: `staleBehindLatestUs`(현재 프레임이 "본 최신 캡처"보다 뒤처진 정도)가 `kStaleCaptureDropUs=50ms`를 초과하면 stale로 드랍/복구. 그런데 타이핑 중 호스트는 **변경기반**이라 프레임을 200~400ms 간격으로 보냄 → 모든 프레임이 50ms 초과로 오판. 실제로는 그 프레임이 가장 최신 라이브 콘텐츠이고 클라는 안 밀림.
+- 수정(`viewer_frame_gate.cpp` admit): **stale-behind-latest 판정을 조밀 도착(denseArrival)일 때만 적용**. 희소 도착(recvGap>150ms=느린 소스)엔 억제 — `note_packet`의 "sparse=source stall" 논리와 동일. `staleBehindPresented`(이미 표시한 것보다 오래된 프레임=되감기 방지)는 그대로 유지해 화면 되감기 없음. 진짜 백로그/리오더(조밀)는 여전히 정상 복구.
+- 회귀테스트 추가(`viewer_frame_gate_test.cpp` `test_sparse_slow_source_decodes_not_stale`): 희소+behind-latest→Decode(리셋·reason6 없음), 조밀+behind-latest→여전히 DropStale+복구. 프레임게이트 단위테스트 9종 전부 PASS.
+- 빌드: 0.2.89→0.2.90 범프, `remote60_installer` 재빌드(GNLinkViewer.exe 포함), payload 버전 0.2.90 확인, `dist/GNLinkSetup-0.2.90.exe`.
+- 부수: NAS(디렉터리 서버 192.168.0.6, 로그 `/opt/gnlink/remote60-directory/logs/`)가 host/client/viewer 로그 수집처임을 CLAUDE.md·메모리에 기록(원격 뷰어 로그는 이 PC에 없음).
+- 남은: host physical rollover, 한/영 토글, GMux창 입력, picker unlock 이동+PICK 멈춤, D4.

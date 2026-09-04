@@ -139,11 +139,24 @@ FrameGateVerdict FrameGate::admit(const FrameGateInputs& in, FrameGateLag* lag) 
       (gate.latestCaptureSeenUs > in.captureQpcUs)
           ? (gate.latestCaptureSeenUs - in.captureQpcUs)
           : 0;
-  if (staleBehindPresentedUs > gate.staleCaptureDropUs || staleBehindLatestUs > gate.staleCaptureDropUs) {
+  // "Behind latest" means a newer capture is already queued, so this older frame can be skipped and
+  // the newer one shown instead -- but that only holds when frames arrive DENSELY (a real backlog).
+  // With a change-driven / low-fps source (typing on an otherwise static screen) frames legitimately
+  // arrive 200-400ms apart, so every frame reads as >50ms "behind latest" even though it IS the
+  // freshest live content and the client is not behind at all (decodeQueueLag ~= 0, presentBacklog
+  // = 0). Treating it as stale drops it, resets the decoder and fires request_keyframe(6) every
+  // frame -- which freezes the screen for seconds and triggers a full-IDR storm (field report:
+  // "정적 화면에서 5초 넘게 멈춤"). Gate the latest-drop on dense arrival; sparse arrival is a slow
+  // source, not congestion (same reasoning as note_packet's recvGap>250ms guard). staleBehindLatest
+  // stays authoritative when frames really do pile up (dense), so genuine catch-up is unaffected.
+  const bool denseArrival = (in.recvGapUs == 0 || in.recvGapUs <= gate.denseArrivalMaxGapUs);
+  const bool staleBehindLatest = (staleBehindLatestUs > gate.staleCaptureDropUs) && denseArrival;
+  const bool staleBehindPresented = (staleBehindPresentedUs > gate.staleCaptureDropUs);
+  if (staleBehindPresented || staleBehindLatest) {
     ++st.skippedQueued;
     ++gate.lagDropCount;
     ++gate.staleDropCount;
-    if (staleBehindLatestUs > gate.staleCaptureDropUs) {
+    if (staleBehindLatest) {
       ++gate.holdLatestDropCount;
     }
     // Dropping a frame that is NOT older than the last decoded keyframe breaks the still-live
@@ -178,7 +191,7 @@ FrameGateVerdict FrameGate::admit(const FrameGateInputs& in, FrameGateLag* lag) 
   const bool lagTrigger =
       (decodeQueueLagEstimateUs > gate.decodeQueueLagDropUs) ||
       (in.presentedCapUs > 0 && streamLagUs > gate.catchupLagDropUs);
-  const bool denseArrival = (in.recvGapUs == 0 || in.recvGapUs <= gate.denseArrivalMaxGapUs);
+  // denseArrival computed above (reused by the stale-behind-latest gate).
   if (lagTrigger && denseArrival && !in.catchupSuppressed && !in.synthetic) {
     if (gate.lagTriggerStreak < std::numeric_limits<uint32_t>::max()) {
       ++gate.lagTriggerStreak;

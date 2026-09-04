@@ -444,8 +444,45 @@ void test_congestion_entry_tunables() {
   }
 }
 
+// Field bug ("정적 화면 멈춤"): a change-driven / low-fps source emits frames 200-400 ms apart. Once a
+// newer capture has been seen, a subsequent real frame reads as >50 ms "behind latest" even though it
+// is the freshest live content and the client is not behind (sparse arrival, tiny decode-queue lag).
+// The stale-behind-latest drop must NOT fire on sparse arrival: dropping it reset the decoder and
+// fired request_keyframe(6) every frame, freezing the screen for seconds and triggering an IDR storm.
+void test_sparse_slow_source_decodes_not_stale() {
+  std::printf("[T1] sparse slow source: a frame behind latest but arriving sparsely decodes (no reset/reason-6 storm)\n");
+  Rig r;
+  uint64_t t = 5000 * kMs;
+  FrameGateInputs in{};
+  CHECK(r.feed(t, t, true, 0, false, nullptr, &in) == FrameGateVerdict::Decode);
+  r.decoded(in);  // anchor + latest = t
+  // a newer capture arrives sparsely (300 ms later): advances latestCaptureSeenUs to t2
+  const uint64_t t2 = t + 300 * kMs;
+  CHECK(r.feed(t2, t2, false, 0, false, nullptr, &in) == FrameGateVerdict::Decode);
+  r.decoded(in);
+  // now a frame 100 ms behind the newest capture, arriving sparsely (recvGap ~300 ms > 150 ms):
+  // a slow source, not congestion. Must decode -- no stale reset, no reason-6 keyframe request.
+  const uint64_t t3 = t2 + 300 * kMs;
+  const uint32_t resetsBefore = r.sink.resets;
+  CHECK(r.feed(t3, t2 - 100 * kMs, false, 0, false, nullptr, &in) == FrameGateVerdict::Decode);
+  CHECK(r.gate.staleReferenceRecoveryCount == 0);
+  CHECK(r.sink.resets == resetsBefore);
+  CHECK(r.sink.requests(6) == 0);
+  CHECK(!r.gate.waitForKeyFrame);
+  // but the same lateness with DENSE arrival is still treated as stale (a real backlog / reorder):
+  Rig d;
+  CHECK(d.feed(t, t, true, 0, false, nullptr, &in) == FrameGateVerdict::Decode);
+  d.decoded(in);
+  const uint64_t d2 = t + 300 * kMs;
+  CHECK(d.feed(d2, d2, false, 0, false, nullptr, &in) == FrameGateVerdict::Decode);
+  d.decoded(in);
+  CHECK(d.feed(d2 + kFrame, d2 - 100 * kMs, false, 0, false) == FrameGateVerdict::DropStale);
+  CHECK(d.gate.staleReferenceRecoveryCount == 1);
+}
+
 int main() {
   test_congestion_entry_tunables();
+  test_sparse_slow_source_decodes_not_stale();
   test_synthetic_frames_do_not_drive_congestion();
   test_keyframe_wait_then_decode();
   test_stale_drop_quiet_vs_reference_chain();

@@ -34,3 +34,13 @@
 ## 기타
 
 - 워크플로우·커밋 규칙은 `AGENTS.md`를 따른다.
+
+## 로그 위치 (필수 인지)
+
+- **host / client / viewer 로그는 전부 NAS(디렉터리 서버)로 업로드된다.** 뷰어가 회사 등 원격에
+  있으면 그 `viewer.log` 는 이 PC 에 없다 — **NAS(192.168.0.6, LAN)** 에서 봐야 한다.
+  - 접속: `plink`/`ssh claude@192.168.0.6` (읽기전용 계정, pw 는 메모리 참조).
+  - 저장 경로: 디렉터리 서버(`apps/directory/server.js`) `<LOG_DIR>/<account>/<device>/<stream>.log`
+    (stream = host.log / client.log / viewer.log). 계정: software30@chronostudio.net.
+  - 이 PC `%LOCALAPPDATA%\GNLink\` 의 `client.log`·`viewer.log` 는 로컬 뷰어 것뿐이라 원격 테스트 땐 낡음.
+  - 퍼블릭 175.209.236.194:29180 은 호스트 업로드용 NAT 주소일 뿐, 접속은 LAN 192.168.0.6 으로.
