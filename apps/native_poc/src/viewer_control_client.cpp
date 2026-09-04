@@ -66,6 +66,9 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
     ctx.session.hostImeSupported.store(
         (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagHostImeV1) != 0,
         std::memory_order_relaxed);
+    ctx.session.unlockSupported.store(
+        (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagUnlockSealedV1) != 0,
+        std::memory_order_relaxed);
     if (secure != ctx.control.reportedSecure) {
       ctx.control.reportedSecure = secure;
       std::cout << "[native-video-client] secure-desktop-active="
@@ -221,14 +224,26 @@ void ControlClient::Run() {
       p0LastEmitUs = nowUs;
     }
     if (ctx.session.unlockRequested.exchange(false, std::memory_order_acq_rel)) {
-      std::wstring pw;
-      if (load_unlock_password(0, &pw)) {
-        std::string status;
-        (void)run_unlock_exchange(*controlLink, 0, pw, &status);
-        if (!pw.empty()) SecureZeroMemory(&pw[0], pw.size() * sizeof(wchar_t));
-        std::cout << "[native-video-client][unlock] " << status << "\n";
+      if (!ctx.session.unlockSupported.load(std::memory_order_relaxed)) {
+        std::cout << "[native-video-client][unlock] host does not support sealed unlock\n";
       } else {
-        std::cout << "[native-video-client][unlock] no stored password (Ctrl+Alt+U to set)\n";
+        std::wstring pw;
+        if (load_unlock_password(0, &pw)) {
+          std::string status;
+          bool clearCred = false;
+          (void)run_unlock_exchange(*controlLink, 0, pw, &status, &clearCred);
+          if (!pw.empty()) SecureZeroMemory(&pw[0], pw.size() * sizeof(wchar_t));
+          if (clearCred) {  // wrong/corrupt password: drop it so it is not auto-reused (lockout guard)
+            clear_unlock_password(0);
+            std::cout << "[native-video-client][unlock] " << status
+                      << " (stored password cleared; set it again to retry)\n";
+          } else {
+            std::cout << "[native-video-client][unlock] " << status << "\n";
+          }
+        } else {
+          clear_unlock_password(0);  // a present-but-unreadable file would block re-prompt forever
+          std::cout << "[native-video-client][unlock] no usable stored password (set it again)\n";
+        }
       }
     }
     ControlOutboundAction action{};

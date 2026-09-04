@@ -8435,3 +8435,12 @@ Next action
   - 릴레이 IPC 응답 검증(magic/size/kind/requestId) 추가(D4 일부).
 - 이제 흐름 완결: 뷰어 Ctrl+Alt+U → 비번(암호화 sealed) → 호스트 릴레이 → 서비스 복호 → WTSConnectSession → 결과 폴링. 비번은 클라 DPAPI 저장·sealed 전송(평문 미노출; 인증없는 sealed라 능동MITM엔 취약, 사용자 수용).
 - 단위테스트 전부 PASS. 남은 D4: 릴레이 결과맵 (cookie,requestId) 복합키+TTL(다중세션), jobId 계약. WTSConnectSession 실제 해제는 실기 확인 필요.
+
+### 378) 2026-09-04 잠금해제 리뷰 안전수정(계정잠금 방지 등) + 사용자 redirection(picker 잠금해제) 기록
+- Codex 0.2.88 리뷰: 위험 버그 다수. 반영(트리거 위치와 무관한 안전/정합):
+  - **계정잠금 방지**: AuthFailed/DecryptFailed 시 clearCredential=true → 저장 비번 삭제(자동 재사용 금지). load 실패(손상 파일)도 삭제 후 재입력 유도. 과길이 비번 거부(truncate 금지).
+  - **응답 correlation**: challenge/accepted/status의 requestId를 현재 요청과 대조.
+  - **능력 게이트**: Pong의 kCaptureFlagUnlockSealedV1을 unlockSupported에 저장, 미지원 호스트엔 unlock 미전송(구호스트 desync 방지).
+  - **프롬프트 종료**: WM_DESTROY의 PostQuitMessage 제거(done 플래그, 앱 WM_QUIT 재전달) — UI 스레드 quit 오염 방지.
+- **사용자 redirection**: 잠금해제 버튼을 뷰어 영상 화면(Ctrl+Alt+U)에 두면 RDP 잠금 시 영상이 검어 무용 → **대상선택(picker) 화면에 잠금해제 메뉴**로 이동해 영상과 무관하게. + picker "대상선택 시 멈춤"(PICK) 미해결도 지적.
+- 남은(다음): picker에 unlock 진입점, PICK 멈춤 수정, D4(릴레이/서비스 (cookie,requestId) 복합키+TTL, jobId), hostId 네임스페이스(directoryHostId), WTS 실기. 아직 unlock 배포 빌드 보류(트리거 picker 이동 후).

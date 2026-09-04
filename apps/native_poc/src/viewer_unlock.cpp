@@ -106,6 +106,7 @@ namespace {
 struct PromptState {
   std::wstring* out = nullptr;
   bool ok = false;
+  bool done = false;
   HWND edit = nullptr;
 };
 
@@ -128,7 +129,7 @@ LRESULT CALLBACK prompt_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       DestroyWindow(hwnd);
       return 0;
     case WM_DESTROY:
-      PostQuitMessage(0);
+      if (st) st->done = true;  // do NOT PostQuitMessage: that is the whole UI thread's quit signal
       return 0;
   }
   return DefWindowProcW(hwnd, msg, wp, lp);
@@ -176,7 +177,13 @@ bool prompt_unlock_password(HWND owner, std::wstring* out) {
   if (owner) EnableWindow(owner, FALSE);
 
   MSG m{};
-  while (GetMessageW(&m, nullptr, 0, 0)) {
+  while (!st.done) {
+    const BOOL got = GetMessageW(&m, nullptr, 0, 0);
+    if (got == 0) {          // app is quitting: re-post so the outer viewer loop still sees WM_QUIT
+      PostQuitMessage(static_cast<int>(m.wParam));
+      break;
+    }
+    if (got == -1) break;    // GetMessage error
     if (m.hwnd == st.edit && m.message == WM_KEYDOWN && m.wParam == VK_RETURN) {
       SendMessageW(hwnd, WM_COMMAND, 1, 0);
       continue;
@@ -218,8 +225,9 @@ const char* stage_name(uint16_t stage) {
 }  // namespace
 
 bool run_unlock_exchange(remote60::native_poc::ControlLink& link, uint64_t hostId,
-                         const std::wstring& password, std::string* status) {
+                         const std::wstring& password, std::string* status, bool* clearCredential) {
   using namespace remote60::native_poc;
+  if (clearCredential) *clearCredential = false;
   auto set_status = [&](const std::string& s) { if (status) *status = s; };
   static uint32_t rid = 1;
   const uint32_t requestId = ++rid;
@@ -239,12 +247,17 @@ bool run_unlock_exchange(remote60::native_poc::ControlLink& link, uint64_t hostI
     return false;
   }
   const ControlUnlockChallengeMessage ch = r.unlockChallenge;
+  if (ch.requestId != requestId) { set_status("response id mismatch"); return false; }
   if (ch.status != static_cast<uint16_t>(UnlockStage::ChallengeIssued)) {
     set_status(std::string("challenge rejected: ") + stage_name(ch.status));
     return false;
   }
 
   // 2) Seal the password to the host's ephemeral key.
+  if (password.size() > su::kMaxPasswordUtf16) {  // never silently truncate (Codex: truncation -> lockout)
+    set_status("password too long");
+    return false;
+  }
   su::EcdhKeyPair key;
   uint8_t clientPub[su::kPubKeyBytes] = {};
   if (!key.Generate() || !key.ExportPublic(clientPub)) { set_status("crypto init failed"); return false; }
@@ -285,7 +298,8 @@ bool run_unlock_exchange(remote60::native_poc::ControlLink& link, uint64_t hostI
   TcpControlResponse ra{};
   const bool acc = execute_control_action(link, s, &ra);
   su::SecureZero(&s.unlockSealed, sizeof(s.unlockSealed));
-  if (!acc || ra.kind != TcpControlResponseKind::UnlockAccepted || ra.unlockAccepted.accepted != 1) {
+  if (!acc || ra.kind != TcpControlResponseKind::UnlockAccepted ||
+      ra.unlockAccepted.requestId != requestId || ra.unlockAccepted.accepted != 1) {
     set_status("host did not accept");
     return false;
   }
@@ -306,9 +320,17 @@ bool run_unlock_exchange(remote60::native_poc::ControlLink& link, uint64_t hostI
       set_status("status poll failed");
       return false;
     }
+    if (rs.unlockStatusResult.requestId != requestId) continue;  // ignore a stale/foreign result
     if (rs.unlockStatusResult.terminal) {
       const uint16_t stage = rs.unlockStatusResult.stage;
       set_status(std::string("unlock: ") + stage_name(stage));
+      // Wrong password / bad decrypt -> tell the caller to drop the stored credential so it is not
+      // auto-reused (which would march toward a Windows account lockout). (Codex #370 review.)
+      if (clearCredential &&
+          (static_cast<UnlockStage>(stage) == UnlockStage::AuthFailed ||
+           static_cast<UnlockStage>(stage) == UnlockStage::DecryptFailed)) {
+        *clearCredential = true;
+      }
       return static_cast<UnlockStage>(stage) == UnlockStage::SessionUnlocked;
     }
     Sleep(250);

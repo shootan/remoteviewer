@@ -41,6 +41,6 @@ bool prompt_unlock_password(HWND owner, std::wstring* out);
 // password. Drives ChallengeRequest -> (seal) -> SealedRequest -> StatusRequest poll. Writes a short
 // human-readable outcome to `status`. Returns true only on an authoritative unlock success.
 bool run_unlock_exchange(remote60::native_poc::ControlLink& link, uint64_t hostId,
-                         const std::wstring& password, std::string* status);
+                         const std::wstring& password, std::string* status, bool* clearCredential);
 
 }  // namespace remote60::native_poc::viewer
