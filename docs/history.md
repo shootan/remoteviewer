@@ -8498,3 +8498,9 @@ Next action
 - 수정(`viewer_frame_gate.cpp`+state+constants+startup): **stale-reference recovery 쿨다운(기본 1s, env REMOTE60_NATIVE_STALE_RECOVERY_MIN_INTERVAL_US)**. 쿨다운 중 behind-latest in-chain 프레임은 reset+IDR 대신 **순서대로 디코드**(약간 지연 감수, 폭주 차단). 백로그는 idle 때 자연 배수, 진짜 큰 백로그는 congestion 경로가 처리. staleBehindPresented(되감기 방지)·조밀 stale-drop은 유지.
 - 회귀테스트 추가(cooldown 후 in-chain decode, 재발동 0) → 프레임게이트 12종 PASS.
 - 빌드 0.2.93→0.2.94, dist/GNLinkSetup-0.2.94.exe. (churn 수정은 뷰어 코드 → 회사 뷰어도 0.2.94 설치 필요.)
+
+### 384) 2026-09-04 A2A 완료 구현 리뷰 금지 정책
+- 목표: 다른 A2A 세션의 설계·구현계획 상담은 계속하되, 완료된 구현·diff·커밋의 리뷰 요청은 사용자 지시에 따라 거절하도록 작업 경계를 고정.
+- 변경 파일: `AGENTS.md`, `docs/history.md`, `docs/history/history_2026-W36.md`, `docs/구현계획.md`.
+- 검증: 정책 문구가 계획 상담 허용, 완료 구현 리뷰 거절, 현재 대화의 사용자 명시 요청만 1회 예외로 구분되는지 diff 검토.
+- 다음 액션: 이후 A2A 완료 구현 리뷰 요청에는 저장소를 열지 않고 사용자 지시로 검토하지 않는다고 회신.
