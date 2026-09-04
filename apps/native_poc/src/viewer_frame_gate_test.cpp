@@ -51,6 +51,7 @@ struct Rig {
     // the env defaults main() reads (viewer_constants.hpp) and a 60 fps hint
     gate.catchupReenterMinIntervalUs = kCatchupReenterMinIntervalUsDefault;   // 600 ms
     gate.staleCaptureDropUs = kStaleCaptureDropUs;                            // 50 ms
+    gate.staleReferenceRecoveryMinIntervalUs = kStaleRecoveryMinIntervalUsDefault;  // 1 s
     gate.congestionRecoverMinUs = kCongestionRecoverMinUsDefault;             // 250 ms
     gate.congestionRecoveryTimeoutUs = kCongestionRecoveryTimeoutUsDefault;   // 1.5 s
     gate.decodeQueueLagDropUs = kDecodeQueueLagDropUs;                        // 300 ms (F-18)
@@ -504,10 +505,44 @@ void test_idle_resume_no_false_congestion() {
   CHECK(r.sink.requests(1) == 0);  // no catchup keyframe request
 }
 
+// Field bug ("UAC 다녀오면 끊김이 시작"): a secure-desktop backend flush leaves the client a few
+// hundred ms behind with dense arrival. Each stale-reference recovery requests a ~285KB IDR that
+// takes as long to deliver as the lag -> a self-sustaining keyframe storm. After one recovery, a
+// behind-latest in-chain frame within the cooldown must DECODE in order (no second IDR).
+void test_stale_recovery_cooldown_decodes_in_order() {
+  std::printf("[T1] stale-reference cooldown: after one recovery, a behind-latest in-chain frame within 1s decodes (no IDR storm)\n");
+  Rig r;
+  uint64_t t = 4000 * kMs;
+  FrameGateInputs in{};
+  CHECK(r.feed(t, t, true, 0, false, nullptr, &in) == FrameGateVerdict::Decode);
+  r.decoded(in);  // anchor + latest = t
+  const uint64_t t2 = t + 200 * kMs;
+  CHECK(r.feed(t2, t2, false, 0, false, nullptr, &in) == FrameGateVerdict::Decode);
+  r.decoded(in);  // non-key: anchor stays t, latest = t2
+  // dense frame behind latest, in the live chain -> first recovery fires
+  CHECK(r.feed(t2 + kFrame, t2 - 100 * kMs, false, 0, false) == FrameGateVerdict::DropStale);
+  CHECK(r.gate.staleReferenceRecoveryCount == 1);
+  CHECK(r.gate.waitForKeyFrame);
+  // the requested IDR lands: waitForKeyFrame clears, anchor moves
+  const uint64_t t3 = t2 + 2 * kFrame;
+  CHECK(r.feed(t3, t3, true, 0, false, nullptr, &in) == FrameGateVerdict::Decode);
+  r.decoded(in);
+  CHECK(!r.gate.waitForKeyFrame);
+  const uint64_t t4 = t3 + 200 * kMs;  // still within the 1 s recovery cooldown
+  CHECK(r.feed(t4, t4, false, 0, false, nullptr, &in) == FrameGateVerdict::Decode);
+  r.decoded(in);  // latest = t4, anchor stays t3
+  const uint32_t recBefore = r.gate.staleReferenceRecoveryCount;
+  // behind latest, dense, in chain, not waiting -> cooldown active -> decode in order, NO new IDR
+  CHECK(r.feed(t4 + kFrame, t4 - 100 * kMs, false, 0, false) == FrameGateVerdict::Decode);
+  CHECK(r.gate.staleReferenceRecoveryCount == recBefore);
+  CHECK(!r.gate.waitForKeyFrame);
+}
+
 int main() {
   test_congestion_entry_tunables();
   test_sparse_slow_source_decodes_not_stale();
   test_idle_resume_no_false_congestion();
+  test_stale_recovery_cooldown_decodes_in_order();
   test_synthetic_frames_do_not_drive_congestion();
   test_keyframe_wait_then_decode();
   test_stale_drop_quiet_vs_reference_chain();

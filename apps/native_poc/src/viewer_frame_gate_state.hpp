@@ -101,6 +101,11 @@ struct FrameGateState {
   // backlog and trip false congestion -> catchup -> keyframe-wait freeze. Only a genuine backlog
   // (frames arriving DENSELY faster than they present) leaves the floor stale and still trips it.
   uint64_t presentAnchorFloorUs = 0;
+  // Rate-limit for stale-reference recovery (decoder reset + IDR request). Within
+  // staleReferenceRecoveryMinIntervalUs of the last one, a behind-latest in-chain frame is decoded
+  // in order instead of storming another IDR. (0.2.94: post-UAC keyframe churn.)
+  uint64_t staleReferenceRecoveryMinIntervalUs = 0;
+  uint64_t lastStaleRecoveryUs = 0;
   uint64_t recoveringSinceUs = 0;
   uint32_t recoveringHealthyStreak = 0;
   uint64_t lastRecoveryRequestUs = 0;

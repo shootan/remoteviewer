@@ -38,6 +38,13 @@ constexpr uint64_t kKeyframeRequestMinIntervalUsDefault = 120000;  // 120ms
 constexpr uint64_t kKeyframeRequestTokenRefillUsDefault = 300000;  // 300ms / token
 constexpr uint32_t kKeyframeRequestTokenCapacityDefault = 3;
 constexpr uint64_t kCatchupReenterMinIntervalUsDefault = 600000;  // 600ms
+// Minimum spacing between stale-reference recoveries (decoder reset + IDR request). A behind-latest
+// frame in the live chain normally needs an IDR to skip, but if the client is only a few hundred ms
+// behind (e.g. a burst after a UAC/secure-desktop backend flush), the ~285KB IDRs take as long to
+// deliver as the lag they chase -> a self-sustaining keyframe storm. Within this window, decode the
+// in-chain frame in order instead (accept a little latency); a genuinely large backlog is caught by
+// the congestion path. (0.2.94: post-UAC keyframe churn.)
+constexpr uint64_t kStaleRecoveryMinIntervalUsDefault = 1000000;  // 1s
 constexpr uint64_t kCongestionRecoverMinUsDefault = 250000;  // 250ms
 constexpr uint64_t kCongestionRecoveryTimeoutUsDefault = 1500000;  // 1.5s
 // F-18: the congestion-entry gate, previously fixed. 150 ms "dense arrival" and a streak of 3 are

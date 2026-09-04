@@ -175,7 +175,20 @@ FrameGateVerdict FrameGate::admit(const FrameGateInputs& in, FrameGateLag* lag) 
   // frames were keyframes) that itself dropped chunks and got slower. Reverted to dense-only. (0.2.93)
   const bool staleBehindLatest = (staleBehindLatestUs > gate.staleCaptureDropUs) && denseArrival;
   const bool staleBehindPresented = (staleBehindPresentedUs > gate.staleCaptureDropUs);
-  if (staleBehindPresented || staleBehindLatest) {
+  // Rate-limit the stale-reference recovery (reset + IDR). A behind-latest in-chain frame would fire
+  // it, but a UAC/secure-desktop backend flush leaves the client a few hundred ms behind with dense
+  // arrival, and each recovery's ~285KB IDR takes as long to deliver as the lag it chases -> a
+  // self-sustaining keyframe storm (field: stutter that starts right after a UAC). Within the
+  // cooldown, decode such a frame IN ORDER instead (accept a little latency); the backlog drains as
+  // the source idles, and a genuinely large/growing backlog is still caught by the congestion path.
+  const bool inLiveReferenceChain = (in.captureQpcUs >= gate.lastDecodedKeyCaptureUs);
+  const bool recoveryCoolingDown =
+      gate.lastStaleRecoveryUs != 0 &&
+      in.packetNowUs < gate.lastStaleRecoveryUs + gate.staleReferenceRecoveryMinIntervalUs;
+  const bool suppressStaleForCooldown = staleBehindLatest && !staleBehindPresented &&
+                                        inLiveReferenceChain && !gate.waitForKeyFrame &&
+                                        recoveryCoolingDown;
+  if ((staleBehindPresented || staleBehindLatest) && !suppressStaleForCooldown) {
     ++st.skippedQueued;
     ++gate.lagDropCount;
     ++gate.staleDropCount;
@@ -190,9 +203,11 @@ FrameGateVerdict FrameGate::admit(const FrameGateInputs& in, FrameGateLag* lag) 
     // A frame older than the anchor is a late/reordered straggler the decoder already resynced
     // past, so quiet-drop stays safe there. Recover once per gap; the wait gate below then
     // drops non-key frames until the IDR and request_keyframe's limiter throttles the ask.
-    const bool inLiveReferenceChain = (in.captureQpcUs >= gate.lastDecodedKeyCaptureUs);
+    // (inLiveReferenceChain computed above; the cooldown gate already let the churn case fall
+    // through to decode, so reaching here means a recovery is due.)
     if (inLiveReferenceChain && !gate.waitForKeyFrame) {
       gate.waitForKeyFrame = true;
+      gate.lastStaleRecoveryUs = in.packetNowUs;  // stamp for the recovery cooldown
       sink.reset_decoder();
       sink.request_keyframe(6);  // stale_reference_gap
       ++gate.congestionRecoveryRequestCount;

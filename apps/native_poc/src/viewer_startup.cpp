@@ -68,6 +68,9 @@ void load_config(ViewerContext& ctx, int argc, char** argv) {
   ctx.gate.staleCaptureDropUs = env_u32_clamped(
       "REMOTE60_NATIVE_STALE_CAPTURE_DROP_US",
       static_cast<uint32_t>(kStaleCaptureDropUs), 1000, 2000000);
+  ctx.gate.staleReferenceRecoveryMinIntervalUs = env_u32_clamped(
+      "REMOTE60_NATIVE_STALE_RECOVERY_MIN_INTERVAL_US",
+      static_cast<uint32_t>(kStaleRecoveryMinIntervalUsDefault), 100000, 5000000);
   ctx.gate.congestionRecoverMinUs = env_u32_clamped(
       "REMOTE60_NATIVE_CONGEST_RECOVER_MIN_US",
       static_cast<uint32_t>(kCongestionRecoverMinUsDefault), 50000, 5000000);

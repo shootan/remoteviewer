@@ -8491,3 +8491,10 @@ Next action
 - 수정: stale-drop을 **조밀 도착일 때만**으로 되돌림(0.2.90 동작). 고화질 영상 프리즈는 사실 0.2.92의 **idle-reanchor**가 잡은 것이므로 유지 → 영상도 안 돌아옴. 즉 0.2.93 = 0.2.90 stale-drop + 0.2.92 idle-reanchor.
 - 프레임게이트 테스트 11종 PASS. 빌드 0.2.92→0.2.93, dist/GNLinkSetup-0.2.93.exe.
 - 로그 규칙 재확인: viewer/host/apk 전부 **NAS**에서 확인(로컬 host_app.log 금지) — CLAUDE.md·메모리 강화(커밋 3d0b766).
+
+### 383) 2026-09-04 UAC 다녀온 뒤 키프레임 churn 수정 — stale-reference recovery 쿨다운 → 0.2.94
+- 사용자 발견: "UAC 화면 갔다 돌아오면 그때부터 끊김 시작". NAS 로그 확정: stale-reference UAC 전(17:28-37)=0, 후(17:38-42)=50.
+- 메커니즘(NAS host 8ec6ecb1+viewer 68f79d01): UAC=보안데스크톱→DXGI 0x80070005 차단→WGC 폴백→3s 뒤 DXGI 복귀. 복귀 직후 밀린 상태에서 뷰어가 stale-reference recovery를 **1~2초마다** 발동, 매번 **285KB IDR(~300청크)** 요청. **키프레임 전송시간(~260ms)이 밀린 양(~260ms)과 비슷해 자기지속 폭주**(따라잡으려는 키프레임이 밀림을 다시 만듦). gen 변경/타임라인 점프 아님(staleBehindLatestUs 107~362ms).
+- 수정(`viewer_frame_gate.cpp`+state+constants+startup): **stale-reference recovery 쿨다운(기본 1s, env REMOTE60_NATIVE_STALE_RECOVERY_MIN_INTERVAL_US)**. 쿨다운 중 behind-latest in-chain 프레임은 reset+IDR 대신 **순서대로 디코드**(약간 지연 감수, 폭주 차단). 백로그는 idle 때 자연 배수, 진짜 큰 백로그는 congestion 경로가 처리. staleBehindPresented(되감기 방지)·조밀 stale-drop은 유지.
+- 회귀테스트 추가(cooldown 후 in-chain decode, 재발동 0) → 프레임게이트 12종 PASS.
+- 빌드 0.2.93→0.2.94, dist/GNLinkSetup-0.2.94.exe. (churn 수정은 뷰어 코드 → 회사 뷰어도 0.2.94 설치 필요.)
