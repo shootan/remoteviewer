@@ -36,6 +36,19 @@ struct SessionState {
   // Host advertised sealed host-side IME support (kCaptureFlagHostImeV1). Host-IME key path is used
   // only when this is set AND the user opted in (env REMOTE60_HOST_IME=1). (Codex #366.)
   std::atomic<bool> hostImeSupported{false};
+  // Host advertised host-IME v2 (kCaptureFlagHostImePulseStateV2): make-only pulse + ImeState
+  // handshake. The default-on host-IME path activates only against a v2 host; a v1-only host stays
+  // on legacy client-side IME. (Codex v2.)
+  std::atomic<bool> hostImeV2Supported{false};
+  // Host-IME routing state: 0 Disabled (legacy client IME, local HIMC attached), 2 Active (local
+  // HIMC detached, keys forwarded as physical scans). Written ONLY on the UI thread (WM_APP_IME_*
+  // handlers) so the detach and the mode flip are atomic w.r.t. key handling; read on the UI thread
+  // (routing) and control thread (pump gate). (Codex Edge 4, simplified: negotiation lives in the
+  // control-thread pump as imeEnterPending, not as a separate routing state.)
+  std::atomic<int> imeMode{0};
+  std::atomic<uint32_t> imeGeneration{0};      // bumped each entry; fences a stale ImeState response
+  std::atomic<int> imeReportedOpen{-1};        // host-authoritative: -1 unknown/?, 0 EN, 1 KR
+  std::atomic<bool> imeEnterPending{false};    // control thread: run the EN-align exchange, then activate
   std::atomic<bool> unlockRequested{false};  // set by the unlock trigger; the control thread runs it
   std::atomic<bool> unlockSupported{false};  // host advertised kCaptureFlagUnlockSealedV1 (Pong)
   // Which candidate won the race. The relay is billed per byte, so the session says which one it

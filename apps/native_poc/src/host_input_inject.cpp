@@ -403,6 +403,72 @@ bool send_desktop_virtual_key(uint32_t vk, bool keyUp) {
 // Host-side IME v1: inject one physical key by its client scan code (KEYEVENTF_SCANCODE, wVk=0) so
 // the host keyboard layout + IME resolve it and compose live -- no IME neutralization here. This is
 // the path that makes remote Hangul actually compose in the host app. (Codex #366, host-side IME.)
+bool target_has_focus(HWND target) {
+  if (!target) return false;
+  const HWND fg = GetForegroundWindow();
+  if (!fg) return false;
+  if (fg == target) return true;
+  // GetForegroundWindow is a top-level window; the injection target may be a child control of it.
+  // Base test is the target's top-level root being foreground (Codex). Owned modal/dialog focus
+  // (GA_ROOTOWNER) is deliberately NOT accepted here yet -- it needs its own field test before
+  // widening, or a real keystroke could land behind an owned dialog that actually holds focus.
+  if (GetAncestor(target, GA_ROOT) == fg) return true;
+  return false;
+}
+
+HostImeAlignResult host_ime_align_query(bool setEnglish) {
+  HostImeAlignResult r{};  // defaults to status=1 (unknown)
+  const HWND fg0 = GetForegroundWindow();
+  if (!fg0) {
+    r.status = 3;  // no target
+    return r;
+  }
+  const DWORD fgThread = GetWindowThreadProcessId(fg0, nullptr);
+  const DWORD myThread = GetCurrentThreadId();
+  const bool attached =
+      (fgThread != 0 && fgThread != myThread && AttachThreadInput(myThread, fgThread, TRUE));
+  const HWND focus = GetFocus();  // real focused control; needs the attach to read cross-thread
+  const HWND target = focus ? focus : fg0;
+  const HIMC imc = ImmGetContext(target);
+  if (!imc) {
+    // No IMM context (app without an IMM32 bridge, e.g. some TSF-only surfaces). Unknown -- never
+    // guess a toggle.
+    if (attached) AttachThreadInput(myThread, fgThread, FALSE);
+    r.status = 1;
+    return r;
+  }
+  DWORD conv = 0, sentence = 0;
+  BOOL open = ImmGetOpenStatus(imc);
+  const bool convOk = ImmGetConversionStatus(imc, &conv, &sentence) != 0;
+  if (setEnglish && convOk) {
+    // Target fence: re-check the foreground+thread right before mutating. If focus moved, do NOT
+    // touch the previous app's IME -- report stale-target so the viewer retries. (Codex Edge 3.)
+    const HWND fg1 = GetForegroundWindow();
+    const DWORD fg1Thread = fg1 ? GetWindowThreadProcessId(fg1, nullptr) : 0;
+    if (fg1 != fg0 || fg1Thread != fgThread) {
+      (void)ImmReleaseContext(target, imc);
+      if (attached) AttachThreadInput(myThread, fgThread, FALSE);
+      r.status = 2;  // stale-target
+      return r;
+    }
+    (void)ImmSetOpenStatus(imc, FALSE);
+    (void)ImmSetConversionStatus(imc, conv & ~(IME_CMODE_NATIVE | IME_CMODE_FULLSHAPE), sentence);
+    // Re-query the ACTUAL post-set state; API success alone is not proof of English.
+    open = ImmGetOpenStatus(imc);
+    (void)ImmGetConversionStatus(imc, &conv, &sentence);
+  }
+  (void)ImmReleaseContext(target, imc);
+  if (attached) AttachThreadInput(myThread, fgThread, FALSE);
+  if (convOk) {
+    r.status = 0;  // known
+    r.open = open ? 1 : 0;
+    r.conversionMode = conv;
+  } else {
+    r.status = 1;  // query failed -> unknown
+  }
+  return r;
+}
+
 bool inject_physical_scan_key(uint16_t scanCode, bool down, bool extended) {
   INPUT in{};
   in.type = INPUT_KEYBOARD;
@@ -597,10 +663,7 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
       // Same reasoning as the text path: a posted WM_KEYDOWN never reaches Chrome and
       // friends, and a modifier posted this way does not establish real key state, so
       // Ctrl+C could never work. Use real keystrokes whenever the target holds focus.
-      const HWND foreground = GetForegroundWindow();
-      const bool targetHasFocus =
-          foreground && (foreground == keyTargetHwnd ||
-                         GetAncestor(keyTargetHwnd, GA_ROOT) == foreground);
+      const bool targetHasFocus = target_has_focus(keyTargetHwnd);
       InputFailStage keyStage = InputFailStage::PostMessage;
       bool ok = false;
       SetLastError(ERROR_SUCCESS);
@@ -707,10 +770,7 @@ InputInjectResult apply_input_text_message(const ControlInputTextMessage& text,
   // Window mode targets a specific window without stealing focus, so posted messages are the
   // deliberate mechanism. If that window already holds focus, real keystrokes reach far more
   // applications, so prefer them.
-  const HWND foreground = GetForegroundWindow();
-  const bool targetHasFocus =
-      foreground && (foreground == targetHwnd || IsChild(foreground, targetHwnd) ||
-                     GetAncestor(targetHwnd, GA_ROOT) == foreground);
+  const bool targetHasFocus = target_has_focus(targetHwnd);
   for (uint16_t i = 0; i < text.utf16Count; ++i) {
     const uint16_t ch = text.utf16[i];
     if (ch == 0) continue;

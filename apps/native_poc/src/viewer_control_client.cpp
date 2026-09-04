@@ -7,7 +7,9 @@
 #include <memory>
 #include <sstream>
 
+#include "viewer_constants.hpp"
 #include "viewer_env_util.hpp"
+#include "viewer_input_forward.hpp"
 #include "viewer_log.hpp"
 #include "viewer_picker.hpp"
 
@@ -66,6 +68,18 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
     ctx.session.hostImeSupported.store(
         (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagHostImeV1) != 0,
         std::memory_order_relaxed);
+    const bool imeV2 =
+        (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagHostImePulseStateV2) != 0;
+    ctx.session.hostImeV2Supported.store(imeV2, std::memory_order_relaxed);
+    // Enter host-IME negotiation once, when the user opted in and the host speaks v2. Disabled ->
+    // pending; the control loop's align pump then aligns the host to EN and posts activate. A
+    // v1-only host never enters, so it stays on the unchanged legacy client-IME path. (Codex Edge 4.)
+    if (host_ime_optin() && imeV2 &&
+        ctx.session.imeMode.load(std::memory_order_acquire) == 0 &&
+        !ctx.session.imeEnterPending.exchange(true, std::memory_order_acq_rel)) {
+      const uint32_t gen = ctx.session.imeGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+      std::cout << "[native-video-client][ime] enter negotiation gen=" << gen << "\n";
+    }
     ctx.session.unlockSupported.store(
         (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagUnlockSealedV1) != 0,
         std::memory_order_relaxed);
@@ -246,6 +260,50 @@ void ControlClient::Run() {
         }
       }
     }
+    // Host-IME entry: before draining input, align the host IME to English and confirm, so the
+    // switch to physical routing (posted below) never lets an English key compose as jamo. Runs at
+    // most one round-trip; keeps ordering because it precedes NextAction on the serial link.
+    if (ctx.session.imeEnterPending.load(std::memory_order_acquire)) {
+      const uint32_t gen = ctx.session.imeGeneration.load(std::memory_order_acquire);
+      ControlOutboundAction imeAction{};
+      imeAction.kind = ControlOutboundActionKind::ImeStateRequest;
+      imeAction.expectedResponseType = MessageType::ControlImeStateResponse;
+      imeAction.expectedResponseSize = sizeof(ControlImeStateResponseMessage);
+      imeAction.imeStateReq.header.magic = remote60::native_poc::kMagic;
+      imeAction.imeStateReq.header.type =
+          static_cast<uint16_t>(MessageType::ControlImeStateRequest);
+      imeAction.imeStateReq.header.size = sizeof(ControlImeStateRequestMessage);
+      imeAction.imeStateReq.seq = gen;
+      imeAction.imeStateReq.targetGeneration = gen;
+      imeAction.imeStateReq.action = 1;  // set to English, then query
+      imeAction.imeStateReq.clientSendQpcUs = qpc_now_us();
+      TcpControlResponse imeResp{};
+      if (!execute_control_action(*controlLink, imeAction, &imeResp)) {
+        std::cout << "[native-video-client][control] action failed kind=ime-align\n";
+        break;
+      }
+      if (imeResp.kind == TcpControlResponseKind::ImeStateResponse &&
+          imeResp.imeStateResponse.targetGeneration == gen) {
+        const uint16_t st = imeResp.imeStateResponse.status;
+        if (st == 2) {
+          // Host reported stale-target (focus moved mid-align); keep pending and retry next loop.
+          std::cout << "[native-video-client][ime] align stale-target; retrying\n";
+        } else {
+          const int open = (st == 0) ? static_cast<int>(imeResp.imeStateResponse.open) : 2;  // 2=?
+          ctx.session.imeEnterPending.store(false, std::memory_order_release);
+          if (ctx.session.hwnd)
+            PostMessageW(ctx.session.hwnd, kMsgHostImeActivate, static_cast<WPARAM>(open), 0);
+          std::cout << "[native-video-client][ime] align done status=" << st << " open=" << open
+                    << "\n";
+        }
+      } else {
+        // Generation mismatch or unexpected reply: drop pending so we do not spin; a later pong
+        // re-enters if still applicable.
+        ctx.session.imeEnterPending.store(false, std::memory_order_release);
+      }
+      didWork = true;
+      continue;
+    }
     ControlOutboundAction action{};
     if (ctx.control.scheduler.NextAction(
             nowUs, capture_client_control_metrics_snapshot(ctx), &ctx.picker.windowPanel,
@@ -363,6 +421,12 @@ void ControlClient::Run() {
     if (!didWork) Sleep(2);
   }
   ctx.control.connected.store(false, std::memory_order_relaxed);
+  // Host-IME: control is gone, so restore the local IME and stop physical routing on the UI thread.
+  // A reconnect renegotiates from scratch (generation bumps, pending re-arms on the next pong).
+  ctx.session.imeEnterPending.store(false, std::memory_order_release);
+  if (ctx.session.imeMode.load(std::memory_order_acquire) != 0 && ctx.session.hwnd) {
+    PostMessageW(ctx.session.hwnd, kMsgHostImeDeactivate, 0, 0);
+  }
   ctx.control.runtimeTune.SetEnabled(false);
   // A selection cannot complete once control is gone: drop the pending state so the picker
   // re-enables instead of staying locked on "waiting for first frame". The viewer exits

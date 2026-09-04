@@ -201,6 +201,7 @@ enum class ControlOutboundActionKind : uint8_t {
   UnlockChallengeRequest,
   UnlockSealedRequest,
   UnlockStatusRequest,
+  ImeStateRequest,
 };
 
 struct ControlOutboundAction {
@@ -224,6 +225,7 @@ struct ControlOutboundAction {
   ControlUnlockChallengeRequestMessage unlockChallengeReq{};
   ControlUnlockSealedRequestMessage unlockSealed{};
   ControlUnlockStatusRequestMessage unlockStatusReq{};
+  ControlImeStateRequestMessage imeStateReq{};
   uint64_t inputGeneratedUs = 0;  // P0 (#351): local diagnostic — when the UI generated this input
 };
 

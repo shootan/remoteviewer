@@ -63,6 +63,12 @@ constexpr UINT kMsgRevealStreamView = WM_APP + 10;
 // thread applies it and frees it. Applying it needs the visible card count, which comes from the
 // window's client rect and DPI -- UI state that the control thread was computing itself. (F-07.)
 constexpr UINT kMsgApplyWindowList = WM_APP + 11;
+// Host-side IME routing flips, posted by the control thread so ImmAssociateContext runs on the
+// window's own thread. ACTIVATE: detach the local IME + imeMode=Active (after the host aligned EN).
+// DEACTIVATE: release held physical keys + restore the local IME + imeMode=Disabled. wParam carries
+// the host-authoritative open state for ACTIVATE (0 EN, 1 KR, 2 unknown/?). (Codex Edge 4.)
+constexpr UINT kMsgHostImeActivate = WM_APP + 12;
+constexpr UINT kMsgHostImeDeactivate = WM_APP + 13;
 
 constexpr uint64_t kThumbRefreshUs = 5000000;  // refresh a preview after 5 s
 

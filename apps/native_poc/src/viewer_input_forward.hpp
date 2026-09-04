@@ -57,10 +57,15 @@ void enqueue_release_for_pressed_mouse_buttons(ViewerState& ctx);
 void enqueue_release_for_pressed_keys(ViewerState& ctx);
 
 void enqueue_input_event(ViewerState& ctx, uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode);
-// Host-side IME (opt-in): true when raw physical keys should be forwarded instead of VK/composed text.
+// Host-side IME opt-in (env REMOTE60_HOST_IME): whether the user asked for the host-IME path at all.
+bool host_ime_optin();
+// Host-side IME active: true when raw physical keys should be forwarded instead of VK/composed text
+// (imeMode == Active). See viewer_session_state ImeMode.
 bool host_ime_mode(ViewerState& ctx);
+// `makeOnly` marks a dedicated Hangul(scan 0xF2)/Hanja(0xF1) toggle key, which hardware reports as a
+// make with no break. It is sent as a single down pulse, never tracked as held, and never released.
 bool enqueue_physical_key(ViewerState& ctx, bool down, uint16_t vk, uint16_t scan, bool extended,
-                          bool repeat);
+                          bool repeat, bool makeOnly = false);
 
 /** A replayed step carries its own recorded button state instead of today's live one. */
 void enqueue_macro_step(ViewerState& ctx, const remote60::native_poc::MacroStep& step);

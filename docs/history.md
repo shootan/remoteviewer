@@ -8457,3 +8457,18 @@ Next action
 - 빌드: 0.2.89→0.2.90 범프, `remote60_installer` 재빌드(GNLinkViewer.exe 포함), payload 버전 0.2.90 확인, `dist/GNLinkSetup-0.2.90.exe`.
 - 부수: NAS(디렉터리 서버 192.168.0.6, 로그 `/opt/gnlink/remote60-directory/logs/`)가 host/client/viewer 로그 수집처임을 CLAUDE.md·메모리에 기록(원격 뷰어 로그는 이 PC에 없음).
 - 남은: host physical rollover, 한/영 토글, GMux창 입력, picker unlock 이동+PICK 멈춤, D4.
+
+### 380) 2026-09-04 host-side IME 기본 활성화(V2) — 한글 실시간 조합·GMux 입력·한/영 토글 → 0.2.91
+- 로그 진단(호스트+NAS viewer.log): 설치본 런처가 REMOTE60_HOST_IME 미설정 → host_ime_mode=false → **host-side IME 꺼진 채 클라측 IME 경로**(kind=5/6 VK + 완성 utf16). 그래서 노트패드 영어만 즉시, 한글은 완성돼야 표시, GMux(Electron)는 SendInput만 받고 호스트 IME 한글모드가 영문을 자모로 조합 → 영어 안 보임.
+- 검증용Codex와 설계 합의(6조건). 사용자 "다 만들고 한 번에 빌드" 선택. 반영:
+  - **B 공용 focus helper**: `host_input_inject`에 `target_has_focus(HWND)`(target==fg || GA_ROOT==fg) 신설. 키·텍스트·physical 3경로가 공유 → 창모드 GMux 입력 게이트가 exact-HWND에서 root 인식으로 확장(GMux 창모드 입력 먹통 해소). GA_ROOTOWNER는 별도 필드테스트 후로 보류.
+  - **Edge1 한/영·한자 make-only pulse**: ControlPhysicalKey flags bit2. 뷰어가 실제 scan 0xF1/0xF2만 make-only로 감지→down 1회 펄스, 추적/release 제외, 후속 up drop. 호스트도 make 1회 주입·미추적. RightAlt/RightCtrl(38/1D+E0)은 정상 make/break 유지. 스턱키 방지.
+  - **capability V2**: kCaptureFlagHostImePulseStateV2(0x20). 호스트 Pong이 V1+V2 광고. 뷰어는 **V2 호스트에만** 신 pulse/StateRequest 사용(구 0.2.87~90 V1 호스트엔 legacy client IME 폴백 — 스턱/HOL 방지).
+  - **Edge4 3상태 전환**: ImeMode Disabled(0)/Active(2). Pong V2+opt-in → imeEnterPending. 제어루프 EN-align 펌프가 ControlImeStateRequest(action=setEN) 왕복(입력 드레인보다 먼저 → 순서로 EN-first 보장) → 응답 후 UI스레드에 kMsgHostImeActivate post → 로컬 IME detach + imeMode=Active(원자적). 종료/재접속 → kMsgHostImeDeactivate(physical release + HIMC restore + Disabled). host_ime_mode=(imeMode==Active).
+  - **Edge2 초기 EN sync + target fence**: 호스트 `host_ime_align_query(setEnglish)` — AttachThreadInput→ImmGetContext→Get Open/Conversion, **set 직전 foreground/thread 재확인**(바뀌면 StaleTarget, 이전 앱 IME 안 건드림), known일 때만 ImmSetOpenStatus(FALSE)+NATIVE/FULLSHAPE clear 후 **actual 재-query**해 응답. API성공만으로 EN단정 안 함. unknown이면 '?'.
+  - **Edge3(최소)**: 호스트-권위 {status,open}을 ControlImeStateResponse로 전달·로그(초기정렬 성공/실패 가시화). 뷰어 imeReportedOpen 저장(툴바 표시는 후속).
+  - **telemetry 개인정보**: 일반 문자키 vk/scan 연속로그 안 함. 토글/정렬/활성전환만 로그.
+  - **런처**: GetEnvironmentVariable 미설정 시에만 REMOTE60_HOST_IME=1(0/false/off opt-out 보존). **field-test default**.
+- 프로토콜: MessageType 47/48(ControlImeStateRequest/Response), ControlImeStateRequestMessage(28)/ResponseMessage(32) static_assert. ControlOutboundActionKind::ImeStateRequest + TcpControlResponseKind::ImeStateResponse + send/recv 케이스.
+- 빌드: Stream/Host/Viewer/Client/Installer 전부 컴파일 성공. 단위테스트 shared_core·frame_gate PASS. 0.2.90→0.2.91, `dist/GNLinkSetup-0.2.91.exe`(host 버전·런처 env 확인).
+- 남은/실기검증: 전용 한/영·한자키의 실제 scan/E0값·토글 실동작(F1/F2 pulse), Electron/GMux에서 ImmSetOpenStatus 실효성, 초기 EN 정렬 성공률, GA_ROOTOWNER(owned modal), 툴바 EN/KR/? 표시. Codex 필드 합격기준(V1구호스트 pulse/StateRequest wire 0, trackedDown peak 0 등) 로그로 확인 예정. (Codex 사용량 리미트로 이후 리뷰는 보류.)

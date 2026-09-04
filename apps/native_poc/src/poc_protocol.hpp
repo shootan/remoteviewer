@@ -44,6 +44,11 @@ enum class MessageType : uint16_t {
   // Host-side IME v1: raw physical key (vk+scan+flags) so the host IME composes live. Advertised via
   // kCaptureFlagHostImeV1; sent only when the viewer opts in and the host advertised support.
   ControlPhysicalKey = 46,
+  // Host-side IME v2: the viewer asks the host to align its IME (to English) for the current target
+  // and report the authoritative state; the host answers with ControlImeStateResponse. Gated on
+  // kCaptureFlagHostImePulseStateV2 so an old v1 host never sees these (it would drop them silently).
+  ControlImeStateRequest = 47,
+  ControlImeStateResponse = 48,
 };
 
 enum class UdpPacketKind : uint16_t {
@@ -173,6 +178,11 @@ constexpr uint32_t kCaptureFlagSecureDesktopActive = 0x4u;
 constexpr uint32_t kCaptureFlagUnlockSealedV1 = 0x8u;
 // The host advertises host-side IME (raw physical-key injection) support here.
 constexpr uint32_t kCaptureFlagHostImeV1 = 0x10u;
+// Host-side IME v2: host understands the make-only (Hangul/Hanja pulse) physical-key flag and the
+// ControlImeStateRequest/Response handshake. The default-on host-IME path uses the v2 pulse/state
+// features only when this is advertised; a v1-only host falls back to legacy client-side IME so the
+// new viewer never strands a make-only key or blocks on a state request an old host cannot answer.
+constexpr uint32_t kCaptureFlagHostImePulseStateV2 = 0x20u;
 
 struct ControlPongMessage {
   MessageHeader header{};
@@ -634,10 +644,34 @@ struct ControlPhysicalKeyMessage {
   uint16_t down = 0;      // 1 = keydown, 0 = keyup
   uint16_t vk = 0;        // virtual key (diagnostic / fallback)
   uint16_t scanCode = 0;  // hardware scan code from the client's WM_KEY* lParam
-  uint16_t flags = 0;     // bit0: extended (E0), bit1: repeat
+  uint16_t flags = 0;     // bit0: extended (E0), bit1: repeat, bit2: make-only (Hangul/Hanja pulse)
   uint64_t clientSendQpcUs = 0;
 };
 static_assert(sizeof(ControlPhysicalKeyMessage) == 28, "physical-key wire drift");
+
+// Host-side IME v2 handshake. The viewer sends a request when it (re)enters host-IME mode for a
+// target; the host aligns/queries its IME under a target fence and answers with a response echoing
+// the seq and targetGeneration so the viewer can discard a stale/crossed reply.
+struct ControlImeStateRequestMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t targetGeneration = 0;  // viewer's host-IME session generation; bumped on reconnect/retarget
+  uint16_t action = 0;            // 0: query only, 1: set to English (open=false) then query
+  uint16_t reserved = 0;
+  uint64_t clientSendQpcUs = 0;
+};
+static_assert(sizeof(ControlImeStateRequestMessage) == 28, "ime state-req wire drift");
+
+struct ControlImeStateResponseMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;               // echoes the request seq
+  uint32_t targetGeneration = 0;  // echoes the request targetGeneration
+  uint16_t status = 0;            // 0: known, 1: unknown, 2: stale-target, 3: no-target/error
+  uint16_t open = 0;              // IME open? 1=composing(KR-ish) 0=alphanumeric(EN); valid iff status==0
+  uint32_t conversionMode = 0;    // raw IMC conversion bits (NATIVE/FULLSHAPE...), diagnostic
+  uint64_t hostQpcUs = 0;
+};
+static_assert(sizeof(ControlImeStateResponseMessage) == 32, "ime state-resp wire drift");
 
 constexpr uint16_t kUdpVideoFecGroupSize = 8;
 #pragma pack(pop)

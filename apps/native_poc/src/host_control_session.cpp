@@ -250,6 +250,8 @@ void ControlSessionServer::Serve(ControlLink& link) {
       // Advertise sealed-unlock v1 support so a viewer only sends the unlock messages here.
       pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagUnlockSealedV1;
       pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagHostImeV1;
+      // v2: this host understands the make-only (Hangul/Hanja) pulse flag and the ImeState handshake.
+      pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagHostImePulseStateV2;
       pong.captureRebindCount = target.rebindCount;
       pong.captureTargetHwnd = target.targetHwnd;
       std::snprintf(pong.captureTargetProcess, sizeof(pong.captureTargetProcess), "%s",
@@ -326,16 +328,32 @@ void ControlSessionServer::Serve(ControlLink& link) {
       // foreground window -- otherwise a physical key would leak into whatever app is in front. The ack
       // is a transport receipt (the client's one-per-RTT loop needs it), not an injection-success claim.
       const bool physExt = (k.flags & 0x1u) != 0;
+      const bool physMakeOnly = (k.flags & 0x4u) != 0;
       const uint16_t physKey = static_cast<uint16_t>(k.scanCode | (physExt ? 0x100 : 0));
       auto gate_open = [&]() {
         if (!inputRouter.injectionEnabled || !interactive_desktop_is_default()) return false;
         const bool desktopMode = !inputRouter.targetCriteria.enabled() &&
                                  (capture.selectedWindowId.load(std::memory_order_acquire) == 0);
         if (desktopMode) return true;
+        // Window mode: inject only when the selected window actually holds focus, so a physical key
+        // never leaks into whatever app is in front. Use the shared focus test (root/owner aware)
+        // so the host-IME physical path agrees with the legacy key/text paths -- exact-HWND was too
+        // narrow and silently dropped every key for a windowed Electron target (GMux). (Codex B.)
         const HWND tgt = reinterpret_cast<HWND>(
             static_cast<uintptr_t>(capture.targetHwnd.load(std::memory_order_acquire)));
-        return tgt != nullptr && GetForegroundWindow() == tgt;
+        return target_has_focus(tgt);
       };
+      if (physMakeOnly) {
+        // Dedicated Hangul/Hanja key: a single make, never tracked and never released, so the host
+        // IME toggles the same way the physical key does. A stray up (should not arrive) is ignored
+        // -- it is not in physicalDown, so the release-all path never fabricates a break for it.
+        // (Codex Edge 1.)
+        if (k.down != 0 && gate_open()) {
+          (void)inject_physical_scan_key(k.scanCode, true, physExt);
+        }
+        send_input_ack(k.seq);
+        continue;
+      }
       if (k.down != 0) {
         if (gate_open() && inject_physical_scan_key(k.scanCode, true, physExt)) {
           physicalDown.insert(physKey);
@@ -349,6 +367,41 @@ void ControlSessionServer::Serve(ControlLink& link) {
         }
       }
       send_input_ack(k.seq);
+      continue;
+    }
+
+    if (type == MessageType::ControlImeStateRequest &&
+        header.size == sizeof(ControlImeStateRequestMessage)) {
+      ControlImeStateRequestMessage req{};
+      req.header = header;
+      if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+      // Host-side IME v2: align/query the focused app's IME under a target fence and report the
+      // authoritative state. Only when injection is enabled and the desktop is not secure (never
+      // touch a lock/UAC screen's IME). Otherwise report unknown so the viewer proceeds as '?'.
+      ControlImeStateResponseMessage rsp{};
+      rsp.header.magic = kMagic;
+      rsp.header.type = static_cast<uint16_t>(MessageType::ControlImeStateResponse);
+      rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
+      rsp.seq = req.seq;
+      rsp.targetGeneration = req.targetGeneration;
+      rsp.hostQpcUs = static_cast<uint64_t>(qpc_now_us());
+      if (inputRouter.injectionEnabled && interactive_desktop_is_default()) {
+        const bool setEnglish = (req.action == 1);
+        const HostImeAlignResult a = host_ime_align_query(setEnglish);
+        rsp.status = a.status;
+        rsp.open = a.open;
+        rsp.conversionMode = a.conversionMode;
+        std::cout << "[native-video-host][ime] state-req seq=" << req.seq
+                  << " gen=" << req.targetGeneration << " action=" << req.action
+                  << " -> status=" << a.status << " open=" << a.open
+                  << " conv=0x" << std::hex << a.conversionMode << std::dec << "\n";
+      } else {
+        rsp.status = 3;  // no-target / not allowed here
+        std::cout << "[native-video-host][ime] state-req seq=" << req.seq
+                  << " rejected inject=" << (inputRouter.injectionEnabled ? 1 : 0)
+                  << " secureDesktop=" << (interactive_desktop_is_default() ? 0 : 1) << "\n";
+      }
+      if (!link.Write(&rsp, sizeof(rsp))) break;
       continue;
     }
 

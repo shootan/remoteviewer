@@ -13,18 +13,26 @@ void enqueue_control_input_message(ViewerState& ctx, const QueuedControlInputMes
 
 // Host-side IME opt-in: on only when the user set the env AND the host advertised support. Default
 // off => the existing VK/composed-text path is completely unchanged (zero regression). (Codex #366.)
-bool host_ime_mode(ViewerState& ctx) {
+bool host_ime_optin() {
   static const bool optIn = [] {
     const char* v = std::getenv("REMOTE60_HOST_IME");
     return v && (v[0] == '1' || v[0] == 't' || v[0] == 'T' || v[0] == 'y' || v[0] == 'Y');
   }();
-  return optIn && ctx.session.hostImeSupported.load(std::memory_order_relaxed);
+  return optIn;
+}
+// Keys route as physical scans only once negotiation reached Active (local HIMC detached AND the
+// host has aligned its IME to English). Before that, imeMode==Disabled and the legacy client-IME
+// path runs unchanged -- so English/Korean during the brief connect-time negotiation still work via
+// the local IME, and the switch to physical is atomic (Codex Edge 4). The env opt-in and the v2
+// capability are folded into imeMode: the control thread only enters Active when both hold.
+bool host_ime_mode(ViewerState& ctx) {
+  return ctx.session.imeMode.load(std::memory_order_acquire) == 2;
 }
 
 // Host-side IME: forward one raw physical key (scan code) so the host IME composes live. Not
 // coalesced (type != ControlInputEvent), so keys never merge like moves do.
 bool enqueue_physical_key(ViewerState& ctx, bool down, uint16_t vk, uint16_t scan, bool extended,
-                          bool repeat) {
+                          bool repeat, bool makeOnly) {
   if (kInputPolicyForceBlock) return false;
   if (!ctx.session.inputEnabled.load()) return false;
   QueuedControlInputMessage msg{};
@@ -36,7 +44,8 @@ bool enqueue_physical_key(ViewerState& ctx, bool down, uint16_t vk, uint16_t sca
   msg.physicalKey.down = down ? 1 : 0;
   msg.physicalKey.vk = vk;
   msg.physicalKey.scanCode = scan;
-  msg.physicalKey.flags = (extended ? 0x1u : 0u) | (repeat ? 0x2u : 0u);
+  msg.physicalKey.flags =
+      (extended ? 0x1u : 0u) | (repeat ? 0x2u : 0u) | (makeOnly ? 0x4u : 0u);
   msg.generatedUs = qpc_now_us();
   enqueue_control_input_message(ctx, msg);
   return true;

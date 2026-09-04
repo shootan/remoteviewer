@@ -62,6 +62,20 @@ void forward_physical(ViewerState& ctx, HWND hwnd, WPARAM wp, LPARAM lp, bool do
   const uint16_t scan = static_cast<uint16_t>((lp >> 16) & 0xff);
   const bool ext = (lp & (1 << 24)) != 0;
   const uint16_t key = static_cast<uint16_t>(scan | (ext ? 0x100 : 0));
+  // Dedicated Hangul(0xF2)/Hanja(0xF1) keys: hardware emits a make with no break, so they must be
+  // sent as a one-shot down pulse and never tracked -- tracking them would strand a phantom "held"
+  // key that the host then tries to release with a break that never physically happens. Identify by
+  // the actual scan code, NOT the VK: a Right-Alt/Right-Ctrl remapped to VK_HANGUL/VK_HANJA keeps a
+  // normal make/break scan (0x38/0x1D +E0) and must stay on the tracked path. (Codex Edge 1.)
+  const bool makeOnly = (scan == 0xF1 || scan == 0xF2);
+  if (makeOnly) {
+    if (down) {  // up (if the stack even sends one) is ignored: nothing to release
+      ensure_local_ime_off(hwnd);
+      (void)enqueue_physical_key(ctx, true, static_cast<uint16_t>(wp), scan, ext,
+                                 (lp & (1 << 30)) != 0, /*makeOnly=*/true);
+    }
+    return;
+  }
   if (down) {
     ensure_local_ime_off(hwnd);
     // Track only keys we actually enqueued, so a down dropped while input is disabled cannot leave a
@@ -232,6 +246,31 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       // window dies is one small leak at exit, which is cheaper than a drain protocol.
       std::unique_ptr<ControlWindowListMessage> msg(reinterpret_cast<ControlWindowListMessage*>(lp));
       if (msg) apply_window_list_snapshot(ctx, *msg);
+      return 0;
+    }
+    case kMsgHostImeActivate: {
+      // Host aligned its IME (to EN) and confirmed; flip to physical routing atomically on this
+      // thread. Cancel any in-flight local composition first, then detach the local IME so no local
+      // composer competes with the host, then arm Active. (Codex Edge 4.)
+      if (HIMC imc = ImmGetContext(hwnd)) {
+        (void)ImmNotifyIME(imc, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
+        (void)ImmReleaseContext(hwnd, imc);
+      }
+      ensure_local_ime_off(hwnd);
+      ctx.session.imeReportedOpen.store(static_cast<int>(wp), std::memory_order_relaxed);
+      ctx.session.imeMode.store(2, std::memory_order_release);  // Active
+      std::cout << "[native-video-client][ime] activated reportedOpen=" << static_cast<int>(wp)
+                << " (0=EN 1=KR 2=?)\n";
+      return 0;
+    }
+    case kMsgHostImeDeactivate: {
+      // Leaving host-IME (capability lost / reconnect / shutdown): stop physical routing first, send
+      // ups for anything still held on the host, then restore the local IME for the legacy path.
+      ctx.session.imeMode.store(0, std::memory_order_release);  // Disabled
+      release_all_physical(ctx);
+      restore_local_ime(hwnd);
+      ctx.session.imeReportedOpen.store(-1, std::memory_order_relaxed);
+      std::cout << "[native-video-client][ime] deactivated (legacy client IME restored)\n";
       return 0;
     }
     case kMsgRevealStreamView: {

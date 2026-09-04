@@ -505,6 +505,16 @@ void begin_session(const ShellConnectRequest& request) {
   // turned on for the child rather than left to how it was built -- the same thing the host app
   // does for the streaming host.
   SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
+  // Host-side IME v2 is the field-test default for this build: Korean composes live in the host app,
+  // English/GMux (Electron) get real scan input, and Han/Yeong toggles the host IME. Set it ONLY
+  // when the user has not already chosen -- an explicit REMOTE60_HOST_IME=0/false/off is preserved as
+  // the instant rollback to the legacy client-side IME path. (Codex: env-unset -> 1, 0 opt-out kept.)
+  {
+    wchar_t existing[8]{};
+    if (GetEnvironmentVariableW(L"REMOTE60_HOST_IME", existing, 8) == 0) {
+      SetEnvironmentVariableW(L"REMOTE60_HOST_IME", L"1");
+    }
+  }
   // The viewer is a console-subsystem executable, and without this flag Windows gives it a
   // console window -- a black cmd box full of scrolling telemetry next to every session.
   // Launched from a terminal by hand it still inherits that terminal, so probes and manual

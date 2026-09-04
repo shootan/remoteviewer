@@ -58,6 +58,30 @@ struct DesktopInputState {
 // neutralization). Public so the control session can route ControlPhysicalKey here. (Codex #366.)
 bool inject_physical_scan_key(uint16_t scanCode, bool down, bool extended);
 
+// Shared foreground-focus test for window-targeted injection. True when `target`'s top-level window
+// is the foreground, so a real SendInput keystroke (or Chrome/Electron, which ignore PostMessage)
+// will actually land in it. Covers target itself, its GA_ROOT top-level, and -- for an owned
+// modal/dialog that took focus -- its GA_ROOTOWNER. The legacy key, text and host-IME physical
+// paths all gate on this one helper so they agree instead of drifting apart. (Codex: one helper,
+// not three copies; window-mode physical gate was too narrow at exact-HWND.)
+bool target_has_focus(HWND target);
+
+// Result of a host-IME align/query for the current foreground focus. `status`: 0 known, 1 unknown
+// (no IMM context / query failed -- do not guess), 2 stale-target (focus moved mid-call, nothing
+// changed), 3 no-target. `open` (valid iff status==0): 1 = IME open/composing, 0 = alphanumeric(EN).
+struct HostImeAlignResult {
+  uint16_t status = 1;
+  uint16_t open = 0;
+  uint32_t conversionMode = 0;
+};
+
+// Query, and if `setEnglish` also force to English, the IME of the current foreground focus. Sampled
+// under a target fence: the foreground window+thread are captured once and re-checked immediately
+// before any mutation, so a focus change mid-call never flips the wrong app's IME (returns
+// stale-target). After a set, the ACTUAL post-set state is re-queried -- API success is not taken as
+// proof. Runs on the control thread (AttachThreadInput to read the cross-thread focus). (Codex v2.)
+HostImeAlignResult host_ime_align_query(bool setEnglish);
+
 bool interactive_desktop_is_default_uncached();
 bool interactive_desktop_is_default();
 

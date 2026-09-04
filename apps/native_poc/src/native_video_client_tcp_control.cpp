@@ -43,6 +43,8 @@ bool send_control_action(ControlLink& link, const ControlOutboundAction& action)
       return link.Write(&action.unlockSealed, sizeof(action.unlockSealed));
     case ControlOutboundActionKind::UnlockStatusRequest:
       return link.Write(&action.unlockStatusReq, sizeof(action.unlockStatusReq));
+    case ControlOutboundActionKind::ImeStateRequest:
+      return link.Write(&action.imeStateReq, sizeof(action.imeStateReq));
     case ControlOutboundActionKind::None:
     default:
       return false;
@@ -100,6 +102,11 @@ bool recv_control_response(ControlLink& link, const ControlOutboundAction& actio
       out->unlockStatusResult.header = header;
       return link.Read(&out->unlockStatusResult.seq,
                        sizeof(out->unlockStatusResult) - sizeof(MessageHeader));
+    case MessageType::ControlImeStateResponse:
+      out->kind = TcpControlResponseKind::ImeStateResponse;
+      out->imeStateResponse.header = header;
+      return link.Read(&out->imeStateResponse.seq,
+                       sizeof(out->imeStateResponse) - sizeof(MessageHeader));
     default:
       out->kind = TcpControlResponseKind::None;
       return link.Discard(header.size - sizeof(MessageHeader));

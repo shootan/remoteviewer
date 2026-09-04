@@ -21,6 +21,7 @@ enum class TcpControlResponseKind : uint8_t {
   UnlockChallenge,
   UnlockAccepted,
   UnlockStatusResult,
+  ImeStateResponse,
 };
 
 struct TcpControlResponse {
@@ -33,6 +34,7 @@ struct TcpControlResponse {
   ControlUnlockChallengeMessage unlockChallenge{};
   ControlUnlockAcceptedMessage unlockAccepted{};
   ControlUnlockStatusResultMessage unlockStatusResult{};
+  ControlImeStateResponseMessage imeStateResponse{};
 };
 
 // These take a ControlLink rather than a socket because the same exchange runs over TCP on a
