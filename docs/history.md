@@ -8483,3 +8483,11 @@ Next action
 - 회귀테스트 2종 추가(idle-resume 가짜혼잡 없음, 희소 slow-source decode) + 기존 recovery-timeout 포함 **프레임게이트 9→11종 PASS**. shared_core PASS.
 - 빌드 0.2.91→0.2.92, `dist/GNLinkSetup-0.2.92.exe`.
 - 참고: 고화질 12Mbps 멈춤은 회선(기가랜)이 아니라 순간 버스트 UDP 유실/수신처리 문제로 보이며 ABR-override(runtime-config가 ABR 강하를 되돌림)와 별개 과제. 작업관리자창 미표시는 조사 중(시스템 핫키 클라 OS 가로채기 의심).
+
+### 382) 2026-09-04 정적화면 키프레임 churn 수정 — 0.2.92의 stale-drop 과민 반응 되돌림 → 0.2.93
+- 사용자: 0.2.92에서 에뮬(LDPlayer) 끈 뒤에도 정적화면이 서서히 느려짐/끊김. "회귀".
+- NAS 로그 진단(host=8ec6ecb1, viewer=68f79d01): 호스트 최근 40프레임 중 **키프레임 7개(17%!)** 각 ~200KB, 뷰어 `stale-reference 115회`+`keyReq 25`+dropPm>0. RTT 3ms(대역폭 아님). = **키프레임 churn**: stale-reference→키프레임요청→200KB IDR 버스트→수신 청크 유실→조립실패→재요청 악순환.
+- 원인: 0.2.92의 `clientKeepingUp`(희소 도착이어도 decodeQueueLag>50ms면 stale-drop+IDR)이 **정적화면의 순간 지연에도 매번 발동** → 키프레임 폭주. (LDPlayer는 화면부하(38KB·29acquires)로 별개 기여했고 끈 뒤에도 churn은 남음.)
+- 수정: stale-drop을 **조밀 도착일 때만**으로 되돌림(0.2.90 동작). 고화질 영상 프리즈는 사실 0.2.92의 **idle-reanchor**가 잡은 것이므로 유지 → 영상도 안 돌아옴. 즉 0.2.93 = 0.2.90 stale-drop + 0.2.92 idle-reanchor.
+- 프레임게이트 테스트 11종 PASS. 빌드 0.2.92→0.2.93, dist/GNLinkSetup-0.2.93.exe.
+- 로그 규칙 재확인: viewer/host/apk 전부 **NAS**에서 확인(로컬 host_app.log 금지) — CLAUDE.md·메모리 강화(커밋 3d0b766).

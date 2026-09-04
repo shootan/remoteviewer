@@ -166,16 +166,14 @@ FrameGateVerdict FrameGate::admit(const FrameGateInputs& in, FrameGateLag* lag) 
   // source, not congestion (same reasoning as note_packet's recvGap>250ms guard). staleBehindLatest
   // stays authoritative when frames really do pile up (dense), so genuine catch-up is unaffected.
   const bool denseArrival = (in.recvGapUs == 0 || in.recvGapUs <= gate.denseArrivalMaxGapUs);
-  // Suppress the drop ONLY for a genuinely slow source the client is keeping up with: sparse arrival
-  // AND a near-zero decode-queue lag. A high-bitrate video the client has fallen behind on also
-  // arrives sparsely (each large frame spans >150ms on a constrained link), but there the decode
-  // queue lag is large -- that frame must still be dropped to catch up, or the client decodes an
-  // ever-growing backlog of stale frames and freezes. 0.2.90 gated on arrival spacing alone, which
-  // regressed high-quality (12 Mbps) video; also require the client to be keeping up. (0.2.92)
-  const bool clientKeepingUp = (decodeQueueLagEstimateUs <= gate.staleCaptureDropUs);
-  const bool slowSourceKeepingUp = !denseArrival && clientKeepingUp;
-  const bool staleBehindLatest =
-      (staleBehindLatestUs > gate.staleCaptureDropUs) && !slowSourceKeepingUp;
+  // Drop-as-stale ONLY on dense arrival. A sparse stream is a slow/idle source (typing on a static
+  // screen), where the current frame is the freshest live content -- dropping it and requesting an
+  // IDR just churns keyframes. A high-bitrate video the client has fallen behind on arrives DENSELY
+  // (frames pile up) and is caught here; the idle re-anchor above already stops idle time from
+  // faking a backlog. 0.2.92 also fired this on "sparse + decode-lag>50ms", but on a lossy static
+  // screen a transient lag tripped it every few frames -> a 200KB-IDR keyframe storm (7 of 40
+  // frames were keyframes) that itself dropped chunks and got slower. Reverted to dense-only. (0.2.93)
+  const bool staleBehindLatest = (staleBehindLatestUs > gate.staleCaptureDropUs) && denseArrival;
   const bool staleBehindPresented = (staleBehindPresentedUs > gate.staleCaptureDropUs);
   if (staleBehindPresented || staleBehindLatest) {
     ++st.skippedQueued;
