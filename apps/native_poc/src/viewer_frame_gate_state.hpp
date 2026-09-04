@@ -95,6 +95,12 @@ struct FrameGateState {
   // AFTER it still sits in the live reference chain, so dropping it needs an IDR resync.
   uint64_t lastDecodedKeyCaptureUs = 0;
   uint64_t latestCaptureSeenUs = 0;
+  // Capture-time floor for the decode-queue-lag estimate. Re-anchored to the resume frame's capture
+  // whenever the source was idle (a large recvGap): on a static screen nothing is captured for
+  // seconds, so captureQpc - lastPresentedCapture would otherwise read that idle time as a decode
+  // backlog and trip false congestion -> catchup -> keyframe-wait freeze. Only a genuine backlog
+  // (frames arriving DENSELY faster than they present) leaves the floor stale and still trips it.
+  uint64_t presentAnchorFloorUs = 0;
   uint64_t recoveringSinceUs = 0;
   uint32_t recoveringHealthyStreak = 0;
   uint64_t lastRecoveryRequestUs = 0;

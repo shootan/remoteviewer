@@ -124,9 +124,25 @@ FrameGateVerdict FrameGate::admit(const FrameGateInputs& in, FrameGateLag* lag) 
   }
   const uint64_t streamLagUs = aligned_lag_us(
       in.captureQpcUs, in.packetNowUs, gate.captureTimelineReady, gate.captureRemoteBaseUs, gate.captureLocalBaseUs);
+  // A large recvGap means the source was idle (a static screen produces no frames). Re-anchor the
+  // decode-queue-lag floor to this resume frame so the seconds of idle are not misread as a decode
+  // backlog. Sparse (typing) streams re-anchor every frame -> lag ~0 -> no false congestion; a dense
+  // real backlog never re-anchors -> the floor stays old -> genuine catch-up still fires. (static
+  // freeze root cause: idle time counted as decode lag.)
+  // Only re-anchor while healthy. During Congested/Recovering the present anchor is intentionally
+  // frozen (deltas are being dropped waiting for an IDR), and that lag is real -- re-anchoring there
+  // would hide it and break the recovery-timeout re-request. So the floor (and its use) apply to the
+  // congestion-ENTRY estimate in the Normal state only.
+  const bool congestionHealthy = (gate.congestionState == ClientCongestionState::Normal);
+  if (in.recvGapUs > 250000 && !in.synthetic && congestionHealthy &&
+      in.captureQpcUs > gate.presentAnchorFloorUs) {
+    gate.presentAnchorFloorUs = in.captureQpcUs;
+  }
+  const uint64_t effectivePresentedCapUs =
+      congestionHealthy ? std::max(in.presentedCapUs, gate.presentAnchorFloorUs) : in.presentedCapUs;
   const uint64_t decodeQueueLagEstimateUs =
-      (in.presentedCapUs > 0 && in.captureQpcUs >= in.presentedCapUs)
-          ? (in.captureQpcUs - in.presentedCapUs)
+      (effectivePresentedCapUs > 0 && in.captureQpcUs >= effectivePresentedCapUs)
+          ? (in.captureQpcUs - effectivePresentedCapUs)
           : 0;
   lag->streamLagUs = streamLagUs;
   lag->decodeQueueLagEstimateUs = decodeQueueLagEstimateUs;
@@ -150,7 +166,16 @@ FrameGateVerdict FrameGate::admit(const FrameGateInputs& in, FrameGateLag* lag) 
   // source, not congestion (same reasoning as note_packet's recvGap>250ms guard). staleBehindLatest
   // stays authoritative when frames really do pile up (dense), so genuine catch-up is unaffected.
   const bool denseArrival = (in.recvGapUs == 0 || in.recvGapUs <= gate.denseArrivalMaxGapUs);
-  const bool staleBehindLatest = (staleBehindLatestUs > gate.staleCaptureDropUs) && denseArrival;
+  // Suppress the drop ONLY for a genuinely slow source the client is keeping up with: sparse arrival
+  // AND a near-zero decode-queue lag. A high-bitrate video the client has fallen behind on also
+  // arrives sparsely (each large frame spans >150ms on a constrained link), but there the decode
+  // queue lag is large -- that frame must still be dropped to catch up, or the client decodes an
+  // ever-growing backlog of stale frames and freezes. 0.2.90 gated on arrival spacing alone, which
+  // regressed high-quality (12 Mbps) video; also require the client to be keeping up. (0.2.92)
+  const bool clientKeepingUp = (decodeQueueLagEstimateUs <= gate.staleCaptureDropUs);
+  const bool slowSourceKeepingUp = !denseArrival && clientKeepingUp;
+  const bool staleBehindLatest =
+      (staleBehindLatestUs > gate.staleCaptureDropUs) && !slowSourceKeepingUp;
   const bool staleBehindPresented = (staleBehindPresentedUs > gate.staleCaptureDropUs);
   if (staleBehindPresented || staleBehindLatest) {
     ++st.skippedQueued;

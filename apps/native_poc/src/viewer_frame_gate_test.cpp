@@ -480,9 +480,34 @@ void test_sparse_slow_source_decodes_not_stale() {
   CHECK(d.gate.staleReferenceRecoveryCount == 1);
 }
 
+// Field bug ("정적 화면에서 갑자기 멈춤"): a static screen produces no frames for seconds; the last
+// presented capture stays old. When activity resumes as a dense burst, captureQpc - presentedCapture
+// reads the idle seconds as a decode backlog, tripping false congestion -> catchup -> keyframe wait
+// -> multi-second freeze. The idle re-anchor must keep decodeQueueLag ~0 across the resume so no
+// false congestion fires, while a genuine dense backlog (no idle) still trips it (covered elsewhere).
+void test_idle_resume_no_false_congestion() {
+  std::printf("[T1] idle resume: static-then-dense-burst is not read as a decode backlog (no false catchup)\n");
+  Rig r;
+  uint64_t t = 8000 * kMs;
+  FrameGateInputs in{};
+  CHECK(r.feed(t, t, true, 0, false, nullptr, &in) == FrameGateVerdict::Decode);
+  r.decoded(in);  // present anchor conceptually t; waitForKeyFrame cleared
+  // 8 s static, then a dense burst resumes while the present anchor is still the old capture t.
+  const uint64_t resume = t + 8000 * kMs;
+  CHECK(r.feed(resume, resume, false, /*presented=*/t, false, nullptr, &in) == FrameGateVerdict::Decode);
+  for (int i = 1; i <= 4; ++i) {
+    CHECK(r.feed(resume + i * kFrame, resume + i * kFrame, false, /*presented=*/t, false, nullptr, &in) ==
+          FrameGateVerdict::Decode);
+  }
+  CHECK(r.gate.congestionState == ClientCongestionState::Normal);
+  CHECK(r.gate.lagTriggerStreak == 0);
+  CHECK(r.sink.requests(1) == 0);  // no catchup keyframe request
+}
+
 int main() {
   test_congestion_entry_tunables();
   test_sparse_slow_source_decodes_not_stale();
+  test_idle_resume_no_false_congestion();
   test_synthetic_frames_do_not_drive_congestion();
   test_keyframe_wait_then_decode();
   test_stale_drop_quiet_vs_reference_chain();

@@ -8472,3 +8472,14 @@ Next action
 - 프로토콜: MessageType 47/48(ControlImeStateRequest/Response), ControlImeStateRequestMessage(28)/ResponseMessage(32) static_assert. ControlOutboundActionKind::ImeStateRequest + TcpControlResponseKind::ImeStateResponse + send/recv 케이스.
 - 빌드: Stream/Host/Viewer/Client/Installer 전부 컴파일 성공. 단위테스트 shared_core·frame_gate PASS. 0.2.90→0.2.91, `dist/GNLinkSetup-0.2.91.exe`(host 버전·런처 env 확인).
 - 남은/실기검증: 전용 한/영·한자키의 실제 scan/E0값·토글 실동작(F1/F2 pulse), Electron/GMux에서 ImmSetOpenStatus 실효성, 초기 EN 정렬 성공률, GA_ROOTOWNER(owned modal), 툴바 EN/KR/? 표시. Codex 필드 합격기준(V1구호스트 pulse/StateRequest wire 0, trackedDown peak 0 등) 로그로 확인 예정. (Codex 사용량 리미트로 이후 리뷰는 보류.)
+
+### 381) 2026-09-04 정적화면 "갑자기 멈춤" 2차 근본수정 — idle 시간을 디코드 밀림으로 오인 → 0.2.92
+- 사용자: 0.2.91에서 한/영·한자·재접속 OK지만 **정적화면에서 갑자기 7초+ 멈춤 재발**. 고화질 아님. "하나 고치면 회귀".
+- 로그 진단(host+NAS viewer, RDP off): 멈춤 순간 **호스트는 wire 프레임을 계속 전송**(seq 끊김 0) → 호스트 아님. 뷰어가 `congestion state=congested reason=decode_queue decodeQueueLagUs=8.6초` → catchup → 모든 델타 드랍(waitForKeyFrame) → 299KB 키프레임 7.7초 대기 → present gap 7.69초. stale-reference recovery=0(내 0.2.90 수정과 무관), dropPm 미미, RTT 2.7ms(대역폭 아님).
+- 근본원인: `decodeQueueLagEstimateUs = captureQpc - lastPresentedCapture`. 정적화면은 몇 초간 캡처가 없어 lastPresentedCapture가 옛값 → 활동 재개 시 그 **idle 시간(8초)을 디코드 백로그로 오인** → 가짜 혼잡 → catchup → 멈춤.
+- 수정(`viewer_frame_gate.cpp` + `viewer_frame_gate_state.hpp`):
+  - **idle 재기준점(presentAnchorFloorUs)**: recvGap>250ms(소스 idle)이고 **congestion Normal일 때만** floor를 이 재개 프레임 캡처로 갱신. decodeQueueLag는 `max(presentedCap, floor)` 기준으로 계산 → idle 시간이 백로그로 안 잡힘. 희소(타이핑)는 매 프레임 재기준→lag~0, 조밀 실백로그는 floor가 안 갱신돼 정상 감지. **혼잡/복구 중엔 floor 미적용**(의도적 앵커 고정 유지, recovery-timeout 보존).
+  - **stale-behind-latest 정교화(0.2.90 보강)**: 희소일 때 무조건 억제 → **"클라가 실제로 따라갈 때(decodeQueueLag≤50ms)만" 억제**. 고비트레이트로 밀린 경우(희소여도 lag 큼)는 다시 drop해 catch-up(고화질 catch-up 방해 방지).
+- 회귀테스트 2종 추가(idle-resume 가짜혼잡 없음, 희소 slow-source decode) + 기존 recovery-timeout 포함 **프레임게이트 9→11종 PASS**. shared_core PASS.
+- 빌드 0.2.91→0.2.92, `dist/GNLinkSetup-0.2.92.exe`.
+- 참고: 고화질 12Mbps 멈춤은 회선(기가랜)이 아니라 순간 버스트 UDP 유실/수신처리 문제로 보이며 ABR-override(runtime-config가 ABR 강하를 되돌림)와 별개 과제. 작업관리자창 미표시는 조사 중(시스템 핫키 클라 OS 가로채기 의심).
