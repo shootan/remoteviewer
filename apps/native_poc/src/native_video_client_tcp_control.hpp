@@ -70,8 +70,12 @@ struct UdpHelloOptions {
   uint32_t budgetMs = 800;    // how long to keep re-sending Hello
   uint32_t sliceMaxMs = 250;  // longest single wait for an ack
   uint32_t retrySleepMs = 0;  // pause after a failed send or a bad ack; 0 = a failed send is fatal
+  bool requestNack = false;   // advertise kUdpFeatureVideoNack in the Hello (video NACK.)
 };
+// `outAckFeatures` (optional) receives the host's HelloAck feature bits on success, so the caller
+// learns whether the host supports NACK (kUdpFeatureVideoNack) etc.
 bool udp_hello_handshake(SocketHandle sock, const UdpHelloOptions& options,
-                         const std::atomic<bool>* stop, std::string* error);
+                         const std::atomic<bool>* stop, std::string* error,
+                         uint32_t* outAckFeatures = nullptr);
 
 }  // namespace remote60::native_poc

@@ -317,6 +317,10 @@ int startup_connect_client(HostContext& hx) {
       ack.kind = static_cast<uint16_t>(UdpPacketKind::HelloAck);
       ack.features = remote60::native_poc::kUdpFeatureVideoFec |
                      (hello.features & remote60::native_poc::kUdpFeatureVideoFecInterleaved);
+      // Video NACK: advertise host support; serve retransmits only if the client asked. (video NACK.)
+      ack.features |= remote60::native_poc::kUdpFeatureVideoNack;
+      sender.nackEnabled.store((hello.features & remote60::native_poc::kUdpFeatureVideoNack) != 0,
+                               std::memory_order_relaxed);
       size_t tokenLen = 0;
       while (tokenLen < sizeof(hello.authToken) && hello.authToken[tokenLen] != '\0') ++tokenLen;
       if (tokenLen > 0) {

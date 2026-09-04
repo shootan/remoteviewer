@@ -30,6 +30,46 @@
 
 namespace remote60::native_poc {
 
+void SenderState::StoreAu(uint64_t generation, uint32_t seq, const UdpVideoChunkHeader& baseHeader,
+                          uint32_t mtu, const uint8_t* payload, size_t payloadSize) {
+  if (!nackEnabled.load(std::memory_order_relaxed) || !payload || payloadSize == 0) return;
+  std::lock_guard<std::mutex> lk(nackCacheMu);
+  nackCache.emplace_back();
+  CachedAu& e = nackCache.back();
+  e.generation = generation;
+  e.seq = seq;
+  e.mtu = mtu;
+  e.baseHeader = baseHeader;
+  e.payload.assign(payload, payload + payloadSize);
+  while (nackCache.size() > kNackCacheMaxAus) nackCache.pop_front();
+}
+
+void SenderState::RetransmitAu(SOCKET sock, const sockaddr_in& peer, uint64_t generation,
+                               uint32_t seq, const uint16_t* missing, uint16_t count) {
+  if (!nackEnabled.load(std::memory_order_relaxed) || !missing || count == 0) return;
+  nackRequests.fetch_add(1, std::memory_order_relaxed);
+  // Copy out what we need under the lock, then send outside it (sendto can block briefly).
+  std::vector<uint8_t> payload;
+  UdpVideoChunkHeader baseHeader{};
+  uint32_t mtu = 0;
+  {
+    std::lock_guard<std::mutex> lk(nackCacheMu);
+    auto it = std::find_if(nackCache.rbegin(), nackCache.rend(), [&](const CachedAu& e) {
+      return e.generation == generation && e.seq == seq;
+    });
+    if (it == nackCache.rend()) {
+      nackMisses.fetch_add(1, std::memory_order_relaxed);
+      return;  // too old / rolled out -> client falls back to a keyframe request
+    }
+    payload = it->payload;
+    baseHeader = it->baseHeader;
+    mtu = it->mtu;
+  }
+  (void)send_udp_chunk_indices(sock, peer, payload.data(), payload.size(), baseHeader, mtu, missing,
+                               count);
+  nackRetransmitChunks.fetch_add(count, std::memory_order_relaxed);
+}
+
 void SenderState::StartThread(VideoTransport transport, bool useH264, const Args& args,
                               SessionState& clientSession, MainLoopMailbox& mailbox) {
   SenderState& sender = *this;
@@ -117,6 +157,10 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
                                 item.mediaEpoch, egress);
       const uint64_t sendDoneUs = qpc_now_us();
       if (outcome == UdpSendOutcome::Sent) {
+        // Cache this AU so a client NACK can be answered with just the missing chunks (no-op unless
+        // the client negotiated NACK). (video NACK.)
+        sender.StoreAu(item.udpHdr.streamGeneration, item.udpHdr.seq, item.udpHdr, args.udpMtu,
+                       item.bytes.data(), item.bytes.size());
         const uint64_t durUs = (sendDoneUs >= sendStartUs) ? (sendDoneUs - sendStartUs) : 0;
         sender.lastSendStartUs.store(sendStartUs, std::memory_order_relaxed);
         sender.txFrames.fetch_add(1, std::memory_order_relaxed);

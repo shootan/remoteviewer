@@ -241,4 +241,39 @@ UdpSendOutcome send_udp_chunks_timed(SOCKET s, const sockaddr_in& peer, const ui
                               itemEpoch, egress);
 }
 
+UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const uint8_t* payload,
+                                      size_t payloadSize, const UdpVideoChunkHeader& baseHeader,
+                                      uint32_t mtuBytes, const uint16_t* indices, uint16_t count) {
+  if (!payload || payloadSize == 0 || s == INVALID_SOCKET || !indices || count == 0)
+    return UdpSendOutcome::TransportError;
+  if (payloadSize > std::numeric_limits<uint32_t>::max()) return UdpSendOutcome::TransportError;
+  const uint32_t safeMtu = clamp_udp_mtu(mtuBytes);
+  if (safeMtu <= sizeof(UdpVideoChunkHeader)) return UdpSendOutcome::TransportError;
+  const uint32_t maxChunk = safeMtu - static_cast<uint32_t>(sizeof(UdpVideoChunkHeader));
+  const uint32_t chunkCount = static_cast<uint32_t>((payloadSize + maxChunk - 1) / maxChunk);
+  std::vector<uint8_t> datagram(safeMtu);
+  for (uint16_t i = 0; i < count; ++i) {
+    const uint32_t chunkIndex = indices[i];
+    if (chunkIndex >= chunkCount) continue;  // stale/garbled request -- skip, never index OOB
+    const size_t offset = static_cast<size_t>(chunkIndex) * maxChunk;
+    const uint32_t chunkSize =
+        static_cast<uint32_t>(std::min<size_t>(maxChunk, payloadSize - offset));
+    UdpVideoChunkHeader h = baseHeader;  // same seq / streamGeneration / codec / flags(key) / sizes
+    h.chunkOffset = static_cast<uint32_t>(offset);
+    h.chunkSize = chunkSize;
+    h.chunkIndex = static_cast<uint16_t>(chunkIndex);
+    h.chunkCount = static_cast<uint16_t>(chunkCount);
+    h.chunkStride = maxChunk;
+    h.flags &= static_cast<uint16_t>(~(0x2u | 0x4u | 0x10u));  // recompute first/last, never parity
+    if (offset == 0) h.flags |= 0x2u;
+    if (offset + chunkSize >= payloadSize) h.flags |= 0x4u;
+    std::memcpy(datagram.data(), &h, sizeof(h));
+    std::memcpy(datagram.data() + sizeof(h), payload + offset, chunkSize);
+    (void)sendto(s, reinterpret_cast<const char*>(datagram.data()),
+                 static_cast<int>(sizeof(h) + chunkSize), 0,
+                 reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
+  }
+  return UdpSendOutcome::Sent;
+}
+
 }  // namespace remote60::native_poc

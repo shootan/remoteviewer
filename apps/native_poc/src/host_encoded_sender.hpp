@@ -76,6 +76,29 @@ struct SenderState {
   std::atomic<uint32_t> pacePeakBps{0};
   std::atomic<uint32_t> keyframePacePeakBps{100000000};
   std::atomic<bool> fecInterleaved{false};
+  // ---- Video NACK (selective retransmit) ----
+  // Set from the client's Hello: true only when the client advertised kUdpFeatureVideoNack, so an
+  // old client is never handed retransmits it did not ask for. Reader thread writes, sender reads.
+  std::atomic<bool> nackEnabled{false};
+  struct CachedAu {
+    uint64_t generation = 0;
+    uint32_t seq = 0;
+    uint32_t mtu = 0;
+    UdpVideoChunkHeader baseHeader{};
+    std::vector<uint8_t> payload;
+  };
+  static constexpr size_t kNackCacheMaxAus = 24;
+  std::mutex nackCacheMu;
+  std::deque<CachedAu> nackCache;  // most-recent at back; bounded by kNackCacheMaxAus
+  std::atomic<uint64_t> nackRetransmitChunks{0};  // telemetry: chunks replayed answering NACKs
+  std::atomic<uint64_t> nackRequests{0};          // telemetry: NACK packets served
+  std::atomic<uint64_t> nackMisses{0};            // telemetry: NACKs for an AU no longer cached
+  // Cache one just-sent AU for possible retransmit; drops the oldest past the bound. (sender thread)
+  void StoreAu(uint64_t generation, uint32_t seq, const UdpVideoChunkHeader& baseHeader,
+               uint32_t mtu, const uint8_t* payload, size_t payloadSize);
+  // Answer a NACK: replay the requested chunks of (generation, seq) if still cached. (reader thread)
+  void RetransmitAu(SOCKET sock, const sockaddr_in& peer, uint64_t generation, uint32_t seq,
+                    const uint16_t* missing, uint16_t count);
   // Taken once per dequeue so one frame is paced and chunked by a single consistent set.
   UdpEgressConfig EgressSnapshot() const {
     UdpEgressConfig c;

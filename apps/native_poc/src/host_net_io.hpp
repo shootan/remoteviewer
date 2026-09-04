@@ -104,4 +104,12 @@ UdpSendOutcome send_udp_chunks_timed(SOCKET s, const sockaddr_in& peer, const ui
                                      const std::atomic<uint64_t>* liveEpoch, uint64_t itemEpoch,
                                      const UdpEgressConfig& egress);
 
+// Selective retransmit: re-send only the data chunks named in `indices` for the AU described by
+// `payload`/`baseHeader`/`mtuBytes`, using the exact same chunk geometry as the original send (so
+// the client assembles them into the same frame). No FEC and no pacing -- it is a handful of small
+// datagrams answering a NACK on a low-RTT path. Out-of-range indices are skipped. (video NACK.)
+UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const uint8_t* payload,
+                                      size_t payloadSize, const UdpVideoChunkHeader& baseHeader,
+                                      uint32_t mtuBytes, const uint16_t* indices, uint16_t count);
+
 }  // namespace remote60::native_poc

@@ -8504,3 +8504,13 @@ Next action
 - 변경 파일: `AGENTS.md`, `docs/history.md`, `docs/history/history_2026-W36.md`, `docs/구현계획.md`.
 - 검증: 정책 문구가 계획 상담 허용, 완료 구현 리뷰 거절, 현재 대화의 사용자 명시 요청만 1회 예외로 구분되는지 diff 검토.
 - 다음 액션: 이후 A2A 완료 구현 리뷰 요청에는 저장소를 열지 않고 사용자 지시로 검토하지 않는다고 회신.
+
+### 384) 2026-09-04 영상 NACK 선택적 재전송(근본) — 정적화면 손실 취약성 해결 → 0.2.95
+- 배경: 정적화면 끊김의 근본이 IPPP 스트림의 손실 취약성. 정적화면은 프레임이 드물어 패킷 1개만 유실돼도 참조 붕괴→풀 IDR(285KB) 필요→그것도 유실→churn. 검증용Codex 리뷰(계획): dropPm은 패킷손실이 아니라 frame-assembly-discontinuity율(실제 손실 1~2%로도 IDR 12~50% 실패). 근본해법 1순위=NACK(RTT 6~9ms라 잃은 청크만 재전송이 압도적으로 쌈). Codex는 계획만 리뷰(구현 리뷰는 토큰 절약).
+- 구현(capability-gated, 협상 안 되면 기존과 100% 동일 — 회귀 0):
+  - 프로토콜: `UdpPacketKind::VideoNack(308)`, `kUdpFeatureVideoNack(0x10)`, `UdpVideoNackPacket`(streamGeneration+seq+chunkCount+missing[48], static_assert). Hello/HelloAck features로 협상.
+  - 호스트: `SenderState`에 최근 AU 캐시(24개, 송신 성공 시 StoreAu). NACK 수신 시 `RetransmitAu`→`send_udp_chunk_indices`(host_net_io, 원본과 동일 청크 지오메트리로 요청 index만 재송신, FEC/pacing 없음). host_startup_control/connect의 HelloAck가 NACK 광고 + 클라 요청 시 nackEnabled. telemetry(nackRequests/RetransmitChunks/Misses).
+  - 클라: `UdpH264FrameAssembler::OldestIncomplete`(가장 오래된 미완성 AU의 미싱 data chunk 열거). 수신루프가 recv 타임아웃(정적화면 손실감지 시계)·datagram마다 NACK 송신 — reorder grace 12ms, 라운드 18ms×최대4, 실패 시 기존 IDR 경로 폴백. handshake가 NACK 요청+HelloAck로 hostSupportsNack 확인 후에만 전송(REMOTE60 없음, 항상 요청).
+- 효과: 정적화면 패킷 1개 유실→그 청크만 ~18ms 재전송→참조 끊기기 전 복구→IDR churn/멈춤 근본 제거.
+- 빌드: Stream/Host/Viewer/Installer 컴파일 통과, shared_core·frame_gate 테스트 PASS. 0.2.94→0.2.95, dist/GNLinkSetup-0.2.95.exe. **뷰어 코드라 회사 뷰어도 0.2.95 설치 필요.**
+- 잔여/후속: 실기 로그로 nack 효과 검증(assembly-discontinuity↓, IDR 비율↓, present gap↓), 릴레이 자체 드랍 계측(NAS server.js queue/error), FEC 강화 A/B는 후순위.

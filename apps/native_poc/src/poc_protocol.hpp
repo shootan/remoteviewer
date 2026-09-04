@@ -69,6 +69,10 @@ enum class UdpPacketKind : uint16_t {
   // an old viewer drops the unknown kind before its video-size guard, so both directions stay
   // compatible without a handshake.
   CursorPos = 307,
+  // Selective retransmit request (client -> host) for missing video chunks of one AU. Sent on the
+  // media socket; the host replays just those chunks from a small recent-AU cache. Negotiated via
+  // kUdpFeatureVideoNack, so an old host that never advertised it is never sent one. (video NACK.)
+  VideoNack = 308,
 };
 
 // Control messages are numbered per direction so a peer can tell a retransmission from a new
@@ -439,7 +443,18 @@ constexpr uint32_t kUdpFeatureDirectoryAuth = 0x4u;
 // hits each group once and every packet in it is recoverable. Negotiated rather than assumed
 // so a host and viewer built at different times still agree on the layout.
 constexpr uint32_t kUdpFeatureVideoFecInterleaved = 0x8u;
+// Selective retransmit (NACK) of missing video chunks. When both peers advertise it, the client
+// asks for just the missing chunks of an incomplete AU and the host replays them from a small
+// recent-AU cache -- far cheaper than a full 300-chunk IDR, and it repairs a P reference before the
+// chain breaks. RTT on this path is a few ms, so 1-2 retransmit rounds cost almost nothing. An old
+// peer that never sets this bit is never sent a NACK and behaves exactly as before. (video NACK.)
+constexpr uint32_t kUdpFeatureVideoNack = 0x10u;
 constexpr uint32_t kUdpProtocolVersion = 2u;
+
+// One NACK datagram asks for up to this many missing chunkIndex values of a single AU. A 1080p IDR
+// is ~300 chunks; at the low real loss this path targets, a handful are missing, and the client can
+// send more than one NACK if needed. Fixed-size so the packet is a single small datagram.
+constexpr uint16_t kUdpVideoNackMaxMissing = 48;
 
 struct UdpHelloPacket {
   uint32_t magic = kMagic;
@@ -475,6 +490,24 @@ struct UdpCursorPosPacket {
   uint64_t hostQpcUs = 0;
 };
 static_assert(sizeof(UdpCursorPosPacket) == 44, "cursor packet wire layout must not drift");
+
+// Selective retransmit request: client -> host over the media socket, asking for specific missing
+// chunkIndex values of AU `seq` in stream generation `streamGeneration`. The host replays just those
+// chunks from a small recent-AU cache. Only ever sent when both peers advertised kUdpFeatureVideoNack.
+struct UdpVideoNackPacket {
+  uint32_t magic = kMagic;
+  uint16_t kind = static_cast<uint16_t>(UdpPacketKind::VideoNack);
+  uint16_t size = static_cast<uint16_t>(sizeof(UdpVideoNackPacket));
+  uint64_t streamGeneration = 0;
+  uint32_t seq = 0;             // AU to repair
+  uint16_t chunkCount = 0;      // total data chunks the client believes this AU has (sanity)
+  uint16_t missingCount = 0;    // valid entries in missing[]
+  uint16_t round = 0;           // retransmit round for this AU (diagnostic + host rate policy)
+  uint16_t reserved = 0;
+  uint16_t missing[kUdpVideoNackMaxMissing];  // chunkIndex values requested
+};
+static_assert(sizeof(UdpVideoNackPacket) == 28 + 2 * kUdpVideoNackMaxMissing,
+              "video nack wire layout must not drift");
 
 // One fragment of a control message. Fragments of a message are sent back to back; the
 // receiver asks for what is missing rather than the sender waiting for each piece.

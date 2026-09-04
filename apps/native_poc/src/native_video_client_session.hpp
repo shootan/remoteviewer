@@ -179,6 +179,7 @@ class ClientSessionController {
   std::unordered_map<uint64_t, WindowThumbnail> thumbs_;
   std::deque<uint64_t> thumbFetchQueue_;
   std::atomic<bool> hostSupportsThumbnails_{false};
+  std::atomic<bool> hostSupportsNack_{false};  // host advertised kUdpFeatureVideoNack (video NACK.)
   // Set while a UAC prompt or the lock screen is in front of the desktop. Nothing can capture
   // that, so the picture stops; saying so beats a frozen rectangle nobody can explain.
   std::atomic<bool> hostSecureDesktopActive_{false};

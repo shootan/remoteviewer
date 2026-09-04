@@ -623,6 +623,29 @@ void UdpH264FrameAssembler::Reset() {
   lastDeliveredSeq_ = 0;
 }
 
+bool UdpH264FrameAssembler::OldestIncomplete(uint16_t* missingOut, uint16_t maxMissing,
+                                             IncompleteAuInfo* info) const {
+  for (const Assembly& a : assemblies_) {
+    if (a.receivedCount >= a.chunkCount) continue;  // data complete; only awaiting delivery
+    uint16_t total = 0;
+    uint16_t filled = 0;
+    for (uint32_t i = 0; i < a.chunkCount; ++i) {
+      if (i < a.received.size() && a.received[i]) continue;  // already have this data chunk
+      ++total;
+      if (missingOut && filled < maxMissing) missingOut[filled++] = static_cast<uint16_t>(i);
+    }
+    if (total == 0) continue;
+    if (info) {
+      info->seq = a.seq;
+      info->generation = a.header.streamGeneration;
+      info->chunkCount = a.chunkCount;
+      info->missingTotal = total;
+    }
+    return true;
+  }
+  return false;
+}
+
 UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* data, size_t len) {
   UdpH264AssemblyStepResult result{};
   if (!data || len < sizeof(UdpVideoChunkHeader)) return result;

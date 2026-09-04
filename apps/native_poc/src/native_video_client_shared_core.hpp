@@ -291,6 +291,17 @@ class UdpH264FrameAssembler {
   void Reset();
   UdpH264AssemblyStepResult PushDatagram(const uint8_t* data, size_t len);
 
+  struct IncompleteAuInfo {
+    uint32_t seq = 0;
+    uint64_t generation = 0;
+    uint16_t chunkCount = 0;
+    uint16_t missingTotal = 0;  // total missing data chunks (may exceed what fit in missingOut)
+  };
+  // Video NACK: describe the oldest still-incomplete AU (the one blocking delivery) and list up to
+  // `maxMissing` of its missing data-chunk indices in `missingOut`. Returns false when every held
+  // assembly has all its data chunks. Pure query. (video NACK.)
+  bool OldestIncomplete(uint16_t* missingOut, uint16_t maxMissing, IncompleteAuInfo* info) const;
+
  private:
   struct Assembly {
     uint32_t seq = 0;

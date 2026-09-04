@@ -154,8 +154,10 @@ bool fetch_window_thumbnail(ControlLink& link, uint64_t windowId, uint32_t maxWi
 }
 
 bool udp_hello_handshake(SocketHandle sock, const UdpHelloOptions& options,
-                         const std::atomic<bool>* stop, std::string* error) {
+                         const std::atomic<bool>* stop, std::string* error,
+                         uint32_t* outAckFeatures) {
   UdpHelloPacket hello{};
+  if (options.requestNack) hello.features |= kUdpFeatureVideoNack;  // video NACK.
   std::snprintf(hello.authToken, sizeof(hello.authToken), "%s", options.authToken.c_str());
   const auto stopped = [stop]() { return stop && stop->load(std::memory_order_acquire); };
   const auto now_ms = []() {
@@ -190,6 +192,7 @@ bool udp_hello_handshake(SocketHandle sock, const UdpHelloOptions& options,
         options.authToken.empty() || (ack.features & kUdpFeatureDirectoryAuth) != 0;
     if (validAck && directoryAuthorized) {
       if (error) error->clear();
+      if (outAckFeatures) *outAckFeatures = ack.features;
       return true;
     }
     if (options.retrySleepMs > 0) {

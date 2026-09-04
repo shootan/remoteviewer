@@ -292,6 +292,12 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
             ack.features =
                 remote60::native_poc::kUdpFeatureVideoFec |
                 (hello.features & remote60::native_poc::kUdpFeatureVideoFecInterleaved);
+            // Video NACK: the host supports selective retransmit; advertise it, and serve
+            // retransmits only when this client asked for it. (video NACK.)
+            ack.features |= remote60::native_poc::kUdpFeatureVideoNack;
+            sender.nackEnabled.store(
+                (hello.features & remote60::native_poc::kUdpFeatureVideoNack) != 0,
+                std::memory_order_relaxed);
             size_t tokenLen = 0;
             while (tokenLen < sizeof(hello.authToken) && hello.authToken[tokenLen] != '\0') {
               ++tokenLen;
@@ -350,6 +356,24 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
           }
         }
 
+        // Video NACK: replay just the missing chunks of an AU from the sender's recent-AU cache.
+        // A no-op unless the client negotiated it (sender.nackEnabled). (video NACK.)
+        if (len >= sizeof(UdpVideoNackPacket)) {
+          UdpVideoNackPacket nack{};
+          std::memcpy(&nack, rx, sizeof(nack));
+          if (nack.magic == remote60::native_poc::kMagic &&
+              nack.kind == static_cast<uint16_t>(UdpPacketKind::VideoNack) &&
+              nack.size == sizeof(nack)) {
+            uint16_t missingCount = nack.missingCount;
+            if (missingCount > remote60::native_poc::kUdpVideoNackMaxMissing)
+              missingCount = remote60::native_poc::kUdpVideoNackMaxMissing;
+            if (missingCount > 0) {
+              sender.RetransmitAu(clientSession.clientSock, peer, nack.streamGeneration, nack.seq,
+                                  nack.missing, missingCount);
+            }
+            continue;
+          }
+        }
         if (clientSession.udpControlChannel.OnPacket(rx, len)) continue;
         (void)clientSession.directoryAgent.ConsumeUdpPacket(rx, len, peer);
       }

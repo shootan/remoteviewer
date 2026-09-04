@@ -511,6 +511,56 @@ void ClientSessionController::VideoReceiveMain() {
   uint64_t fecRecoveredCount = 0;
   bool waitForKeyframe = true;
 
+  // Video NACK: ask the host to replay the missing chunks of the oldest stuck AU, instead of
+  // waiting for the next (on a static screen, far-off) frame to reveal the loss and then eating a
+  // full IDR. Only when the host advertised support. Bounded by a reorder grace and a few rounds;
+  // if it does not recover, the existing keyframe path takes over. (video NACK.)
+  uint32_t nackSeq = 0;
+  uint64_t nackFirstUs = 0;
+  uint64_t nackLastUs = 0;
+  uint32_t nackRounds = 0;
+  auto maybe_send_nack = [&](SocketHandle sock) {
+    if (sock == kInvalidSocket || !hostSupportsNack_.load(std::memory_order_relaxed)) return;
+    if (waitForKeyframe) {  // already resyncing to an IDR -> repairing the old AU is moot
+      nackSeq = 0;
+      nackRounds = 0;
+      return;
+    }
+    uint16_t missing[remote60::native_poc::kUdpVideoNackMaxMissing];
+    UdpH264FrameAssembler::IncompleteAuInfo info{};
+    if (!assembler.OldestIncomplete(missing, remote60::native_poc::kUdpVideoNackMaxMissing, &info)) {
+      nackSeq = 0;
+      nackRounds = 0;
+      return;
+    }
+    const uint64_t now = now_us();
+    if (info.seq != nackSeq) {  // a different AU is now the blocker -> restart the round schedule
+      nackSeq = info.seq;
+      nackFirstUs = now;
+      nackLastUs = 0;
+      nackRounds = 0;
+    }
+    constexpr uint64_t kNackGraceUs = 12000;   // let a brief reorder settle before asking
+    constexpr uint64_t kNackRoundUs = 18000;   // spacing between rounds (a few RTTs on this path)
+    constexpr uint32_t kNackMaxRounds = 4;     // then give up and let the IDR path recover
+    if (now - nackFirstUs < kNackGraceUs) return;
+    if (nackRounds >= kNackMaxRounds) return;
+    if (nackLastUs != 0 && now - nackLastUs < kNackRoundUs) return;
+    const uint16_t count =
+        std::min<uint16_t>(info.missingTotal, remote60::native_poc::kUdpVideoNackMaxMissing);
+    if (count == 0) return;
+    UdpVideoNackPacket nack{};
+    nack.streamGeneration = info.generation;
+    nack.seq = info.seq;
+    nack.chunkCount = info.chunkCount;
+    nack.missingCount = count;
+    nack.round = static_cast<uint16_t>(nackRounds);
+    std::memcpy(nack.missing, missing, static_cast<size_t>(count) * sizeof(uint16_t));
+    (void)send(sock, reinterpret_cast<const char*>(&nack), sizeof(nack), 0);
+    ++nackRounds;
+    nackLastUs = now;
+  };
+
   while (!stopRequested_.load(std::memory_order_acquire)) {
     SocketHandle udpSocket = kInvalidSocket;
     ClientEncodedFrameSink* sink = nullptr;
@@ -528,6 +578,9 @@ void ClientSessionController::VideoReceiveMain() {
         // The read timeout is also the channel's heartbeat: without it a stalled control
         // transfer would sit unrecovered on an otherwise silent link.
         if (controlOverUdp_.load(std::memory_order_acquire)) udpControl_.Tick();
+        // A quiet socket on a static screen is exactly when a lost chunk goes unnoticed: use the
+        // timeout wakeup to NACK the stuck AU rather than wait for the next frame. (video NACK.)
+        maybe_send_nack(udpSocket);
         continue;
       }
       SignalRuntimeFailure("udp video receive failed");
@@ -593,6 +646,9 @@ void ClientSessionController::VideoReceiveMain() {
         (void)keyframeRequests_.Request(2, now_us());
       }
     }
+    // After each datagram, on a busy link, also nudge the NACK for any still-stuck earlier AU
+    // (round-interval gated inside). (video NACK.)
+    maybe_send_nack(udpSocket);
   }
 }
 
@@ -746,10 +802,14 @@ bool ClientSessionController::ConnectUdpVideo(const ClientSessionConnectArgs& ar
   hello.authToken = args.peerAuthToken;
   hello.budgetMs = args.peerAuthToken.empty() ? std::max<uint32_t>(1, args.udpHandshakeTimeoutMs)
                                               : std::max<uint32_t>(3000, args.udpHandshakeTimeoutMs);
-  if (!udp_hello_handshake(connected, hello, &stopRequested_, error)) {
+  hello.requestNack = true;  // ask for selective retransmit (video NACK.)
+  uint32_t ackFeatures = 0;
+  if (!udp_hello_handshake(connected, hello, &stopRequested_, error, &ackFeatures)) {
     close_socket(&connected);
     return false;
   }
+  hostSupportsNack_.store(
+      (ackFeatures & remote60::native_poc::kUdpFeatureVideoNack) != 0, std::memory_order_relaxed);
 
   (void)set_recv_timeout(connected, kVideoReceiveTimeoutMs);
   if (stopRequested_.load(std::memory_order_acquire)) {
