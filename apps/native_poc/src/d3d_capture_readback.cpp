@@ -649,6 +649,9 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
   constexpr auto kPollMinUs = std::chrono::microseconds(500);
   constexpr auto kPollMaxUs = std::chrono::microseconds(2000);
   auto pollBackoff = kPollMinUs;
+  // Per-publish attribution (0.2.98): accumulated across the polls that lead to one publish.
+  uint64_t workerCtxWaitAccUs = 0;
+  uint64_t workerD3dCallAccUs = 0;
   while (running_.load(std::memory_order_acquire)) {
     Slot slotCopy;
     Slot* slotRef = nullptr;
@@ -670,7 +673,9 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
       std::vector<uint64_t> seq(slots_.size(), 0);
       std::vector<bool> ready(slots_.size(), false);
       {
+        const uint64_t sweepLockStartUs = qpc_us();
         std::lock_guard<std::mutex> d3dLock(*contextMu_);
+        workerCtxWaitAccUs += qpc_us() - sweepLockStartUs;
         for (size_t i = 0; i < slots_.size(); ++i) {
           if (slots_[i].state != SlotState::GpuPending || !slots_[i].query) continue;
           seq[i] = slots_[i].submitSeq;
@@ -679,8 +684,10 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
           // the GPU by the time we poll. Without the flag every poll is allowed to flush the
           // context -- and this loop polls while holding the immediate-context lock the capture
           // callback needs to submit the NEXT frame. (Ledger H-17.)
+          const uint64_t getDataStartUs = qpc_us();
           const HRESULT hr = context_->GetData(slots_[i].query.Get(), &done, sizeof(done),
                                                D3D11_ASYNC_GETDATA_DONOTFLUSH);
+          workerD3dCallAccUs += qpc_us() - getDataStartUs;
           ready[i] = (hr == S_OK && done);
           if (FAILED(hr) && hr != S_FALSE) {
             // Device loss: this query will never signal. Free the slot instead of leaving it
@@ -745,10 +752,13 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
     D3D11_MAPPED_SUBRESOURCE map{};
     bool mapHeld = false;
     {
+      const uint64_t mapLockStartUs = qpc_us();
       std::lock_guard<std::mutex> d3dLock(*contextMu_);
       const uint64_t mapStartUs = qpc_us();
+      workerCtxWaitAccUs += mapStartUs - mapLockStartUs;
       if (SUCCEEDED(context_->Map(slotCopy.staging.Get(), 0, D3D11_MAP_READ, 0, &map))) {
         mapUs = qpc_us() - mapStartUs;
+        workerD3dCallAccUs += mapUs;
         mapHeld = true;
       }
     }
@@ -773,8 +783,12 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
       }
       memcpyUs = qpc_us() - memcpyStartUs;
       {
+        const uint64_t unmapLockStartUs = qpc_us();
         std::lock_guard<std::mutex> d3dLock(*contextMu_);
+        const uint64_t unmapStartUs = qpc_us();
+        workerCtxWaitAccUs += unmapStartUs - unmapLockStartUs;
         context_->Unmap(slotCopy.staging.Get(), 0);
+        workerD3dCallAccUs += qpc_us() - unmapStartUs;
       }
       mapped = true;
     }
@@ -830,8 +844,12 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
       // note in CreateSlotsLocked, which already reclaimed it. (Ledger H-03b.)
     }
     if (handOff) {
+      slotCopy.meta.workerCtxWaitUs = workerCtxWaitAccUs;  // `meta` aliases slotCopy.meta
+      slotCopy.meta.workerD3dCallUs = workerD3dCallAccUs;
       publish_(std::move(payload), outW, outH, outStride, meta, gpuPendingUs, mapUs, memcpyUs);
     }
+    workerCtxWaitAccUs = 0;
+    workerD3dCallAccUs = 0;
   }
 }
 

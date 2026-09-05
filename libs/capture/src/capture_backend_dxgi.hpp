@@ -25,6 +25,11 @@ struct DxgiDesktopCaptureConfig {
   ID3D11Device* d3dDevice = nullptr;
   HMONITOR monitor = nullptr;
   uint32_t acquireTimeoutMs = 100;
+  // After DXGI_ERROR_WAIT_TIMEOUT, sleep this long OUTSIDE AcquireNextFrame (no frame held, no
+  // device lock) before re-entering it. Desktop duplication holds an internal, unfair D3D11 device
+  // lock for the whole call, so on a still desktop an immediate re-entry starves every other user
+  // of the device (readback worker, MF encoder). 0 = re-enter immediately (legacy behaviour).
+  uint32_t acquireIdleSleepUs = 0;
   bool landscapeOnly = true;
   DxgiDesktopPointerHandler onPointer;  // optional; see DxgiDesktopPointerHandler
 };

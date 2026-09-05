@@ -107,6 +107,7 @@ bool RecreateCaptureDeviceOnPrimary(CaptureState& capture, CaptureResources& res
   // is only correct while the encoder uses the CPU readback path (default). NV12 surface mode would
   // need a full encoder reinit here -- tracked in docs/구현계획.md, not fixed in this hotfix.
   if (useH264) (void)encoder.codec.set_d3d11_device(res.d3d.Get());
+  std::cout << d3d_multithread_log_line("device-recreated", res.d3d.Get(), res.ctx.Get());
   res.gpuScaler = GpuBgraScaler();
   capture.gpuScalerHealthy = false;
   if (capture.gpuScalerRequested) {
@@ -399,8 +400,10 @@ void CaptureState::DetachCaptureSession(CaptureResources& res, winrt::event_toke
     if (pool) pool.Close();
   } catch (...) {
   }
+  const bool hadPool = static_cast<bool>(pool);
   session = nullptr;
   pool = nullptr;
+  if (hadPool) std::cout << d3d_multithread_log_line("wgc-closed", res.d3d.Get(), res.ctx.Get());
 }
 
 bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBackendState& backend, SessionState& clientSession, EncoderState& encoder, std::atomic<bool>& stop, bool useH264, winrt::Windows::Graphics::Capture::GraphicsCaptureItem& item, winrt::event_token& token) {
@@ -510,6 +513,11 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
       config.d3dDevice = d3d.Get();
       config.monitor = capture.monitorInfo->monitor;
       config.landscapeOnly = true;
+      // 0.2.98: short acquire timeout + idle sleep outside the call so the duplication's internal
+      // device lock is released often on a still desktop (see capture_backend_dxgi.cpp). Both env
+      // tunable for the A/B the field test needs: 100/0 = legacy, 8/0 = timeout only, 8/2000 = both.
+      config.acquireTimeoutMs = env_u32_clamped("REMOTE60_NATIVE_DXGI_ACQUIRE_TIMEOUT_MS", 8, 1, 1000);
+      config.acquireIdleSleepUs = env_u32_clamped("REMOTE60_NATIVE_DXGI_ACQUIRE_IDLE_SLEEP_US", 2000, 0, 100000);
       // Capture-thread side of the cursor forwarder: just stores the latest sample; the main
       // loop's pump_cursor_forward() throttles and sends. No lock, no send from this thread.
       config.onPointer = [&](int32_t px, int32_t py, bool visible) {
@@ -593,7 +601,9 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
         capture.sessionStartedUs = qpc_now_us();
         capture.sessionReady.store(true, std::memory_order_release);
         capture.sizeChangePending.store(0, std::memory_order_release);
-        std::cout << "[native-video-host] desktop_backend=dxgi capture-started=1\n";
+        std::cout << "[native-video-host] desktop_backend=dxgi capture-started=1 acquireTimeoutMs="
+                  << config.acquireTimeoutMs << " acquireIdleSleepUs=" << config.acquireIdleSleepUs
+                  << " d3dMt=" << d3d_multithread_state_name(d3d_multithread_state(res.ctx.Get())) << "\n";
         return true;
       }
     }
@@ -675,6 +685,7 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
     // runs once at the top of this function (before CreateStaging) via the "no attached output"
     // check, which covers window mode too -- window capture never enters the DXGI adapter-changed
     // branch. Nothing device-related is left to do here.
+    std::cout << d3d_multithread_log_line("wgc-pool-before", res.d3d.Get(), res.ctx.Get());
     pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
         d3dDevice, winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized,
         capture.framePoolBuffers, capture.size);
@@ -695,6 +706,7 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
     }
     capture.AttachFrameArrived(res, clientSession, stop, token);
     session.StartCapture();
+    std::cout << d3d_multithread_log_line("wgc-started", res.d3d.Get(), res.ctx.Get());
     capture.sessionStartedUs = qpc_now_us();
     capture.sessionReady.store(true, std::memory_order_release);
     capture.sizeChangePending.store(0, std::memory_order_release);
@@ -921,6 +933,8 @@ void CaptureState::PublishFrame(CaptureResources& res, HostStats& stats,
     res.frame.captureMemcpyUs = workerMemcpyUs;        // worker memcpy incl. crop
     res.frame.captureUnmapWaitUs = gpuPendingUs;       // submit -> GPU copy finished
     res.frame.captureUnmapUs = workerMapUs;            // worker Map of the finished copy
+    res.frame.captureWorkerCtxWaitUs = meta.workerCtxWaitUs;  // worker waits on res.d3dContextMu (0.2.98)
+    res.frame.captureWorkerD3dCallUs = meta.workerD3dCallUs;  // worker GetData+Map+Unmap call time (0.2.98)
     res.frame.seq += 1;
     res.frame.version += 1;
     currentVersion = res.frame.version;

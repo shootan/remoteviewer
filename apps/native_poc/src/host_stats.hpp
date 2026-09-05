@@ -67,6 +67,10 @@ struct HostStats {
   uint64_t captureUnmapWaitMaxUs = 0;
   uint64_t captureUnmapSumUs = 0;
   uint64_t captureUnmapMaxUs = 0;
+  uint64_t captureWorkerCtxWaitSumUs = 0;  // 0.2.98 readback attribution
+  uint64_t captureWorkerCtxWaitMaxUs = 0;
+  uint64_t captureWorkerD3dCallSumUs = 0;
+  uint64_t captureWorkerD3dCallMaxUs = 0;
   uint64_t captureAgeSumUs = 0;
   uint64_t captureAgeMaxUs = 0;
   uint64_t callbackToEncodeStartSumUs = 0;

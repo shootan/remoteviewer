@@ -399,6 +399,16 @@ struct DxgiDesktopCaptureSession::Impl {
         // The routine 100ms idle path -- markProgress above already refreshed the heartbeat, so a
         // static desktop keeps the worker "young" and never trips the wedge watchdog.
         ++stats.timeouts;
+        // Leave a guaranteed lock-free window before re-entering AcquireNextFrame: the call holds
+        // an internal, unfair D3D11 device lock for its whole duration (Sunshine display_base.cpp
+        // documents the same starvation and sleeps after a timeout), and once WGC/MF have turned
+        // multithread protection on for the shared device, an immediate re-entry starves the
+        // readback worker and the encoder -- measured 100-500ms readback waits on a still desktop
+        // right after a WGC round trip (GNLink 0.2.98). Success path untouched: a frame is never
+        // held here and ReleaseFrame timing is unchanged.
+        if (config.acquireIdleSleepUs > 0 && !stopRequested.load()) {
+          std::this_thread::sleep_for(std::chrono::microseconds(config.acquireIdleSleepUs));
+        }
         continue;
       }
       if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_ACCESS_DENIED) {

@@ -112,6 +112,8 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
   auto& captureMemcpyUs = tc.captureMemcpyUs;
   auto& captureUnmapWaitUs = tc.captureUnmapWaitUs;
   auto& captureUnmapUs = tc.captureUnmapUs;
+  auto& captureWorkerCtxWaitUs = tc.captureWorkerCtxWaitUs;
+  auto& captureWorkerD3dCallUs = tc.captureWorkerD3dCallUs;
   auto& version = tc.version;
   auto& nv12Slot = tc.nv12Slot;
   auto& nv12Generation = tc.nv12Generation;
@@ -287,6 +289,8 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
     captureMemcpyUs = res.frame.captureMemcpyUs;
     captureUnmapWaitUs = res.frame.captureUnmapWaitUs;
     captureUnmapUs = res.frame.captureUnmapUs;
+    captureWorkerCtxWaitUs = res.frame.captureWorkerCtxWaitUs;
+    captureWorkerD3dCallUs = res.frame.captureWorkerD3dCallUs;
     nv12Slot = res.frame.nv12Slot;
     nv12Generation = res.frame.nv12Generation;
     nv12W = res.frame.nv12W;
@@ -338,6 +342,10 @@ captureToQueueUs =
     stats.captureUnmapWaitMaxUs = std::max(stats.captureUnmapWaitMaxUs, captureUnmapWaitUs);
     stats.captureUnmapSumUs += captureUnmapUs;
     stats.captureUnmapMaxUs = std::max(stats.captureUnmapMaxUs, captureUnmapUs);
+    stats.captureWorkerCtxWaitSumUs += captureWorkerCtxWaitUs;
+    stats.captureWorkerCtxWaitMaxUs = std::max(stats.captureWorkerCtxWaitMaxUs, captureWorkerCtxWaitUs);
+    stats.captureWorkerD3dCallSumUs += captureWorkerD3dCallUs;
+    stats.captureWorkerD3dCallMaxUs = std::max(stats.captureWorkerD3dCallMaxUs, captureWorkerD3dCallUs);
   }
   queueWaitUs =
       (queuePopUs > 0 && queuePushUs > 0 && queuePopUs >= queuePushUs) ? (queuePopUs - queuePushUs) : 0;

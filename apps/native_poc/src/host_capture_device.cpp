@@ -9,7 +9,9 @@
 #undef max
 #endif
 
+#include <cstdio>
 #include <d3d11.h>
+#include <d3d11_4.h>
 #include <dxgi1_2.h>
 #include <windows.graphics.capture.interop.h>
 #include <windows.graphics.directx.direct3d11.interop.h>
@@ -317,6 +319,42 @@ DeviceAdapterOutputState device_adapter_output_state(ID3D11Device* device) {
     }
   }
   return hasAttached ? DeviceAdapterOutputState::HasAttached : DeviceAdapterOutputState::None;
+}
+
+D3dMultithreadState d3d_multithread_state(ID3D11DeviceContext* context) {
+  if (!context) return D3dMultithreadState::Unknown;
+  Microsoft::WRL::ComPtr<ID3D11Multithread> mt;
+  if (FAILED(context->QueryInterface(IID_PPV_ARGS(&mt))) || !mt) return D3dMultithreadState::Unknown;
+  return mt->GetMultithreadProtected() ? D3dMultithreadState::On : D3dMultithreadState::Off;
+}
+
+const char* d3d_multithread_state_name(D3dMultithreadState state) {
+  switch (state) {
+    case D3dMultithreadState::Off: return "off";
+    case D3dMultithreadState::On: return "on";
+    default: return "unknown";
+  }
+}
+
+std::string d3d_multithread_log_line(const char* where, ID3D11Device* device, ID3D11DeviceContext* context) {
+  LUID luid{};
+  bool haveLuid = false;
+  if (device) {
+    Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    DXGI_ADAPTER_DESC desc{};
+    if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) && dxgiDevice &&
+        SUCCEEDED(dxgiDevice->GetAdapter(&adapter)) && adapter && SUCCEEDED(adapter->GetDesc(&desc))) {
+      luid = desc.AdapterLuid;
+      haveLuid = true;
+    }
+  }
+  char buf[192];
+  std::snprintf(buf, sizeof(buf), "[native-video-host] d3d-mt at=%s state=%s dev=%p luid=%ld:%lu\n",
+                where ? where : "?", d3d_multithread_state_name(d3d_multithread_state(context)),
+                static_cast<void*>(device), haveLuid ? luid.HighPart : 0L,
+                haveLuid ? static_cast<unsigned long>(luid.LowPart) : 0UL);
+  return std::string(buf);
 }
 
 HRESULT create_d3d11_device_for_primary_monitor(Microsoft::WRL::ComPtr<ID3D11Device>* outDevice,

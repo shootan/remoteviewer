@@ -135,8 +135,10 @@ int startup_init_graphics(HostContext& hx) {
     if (encoder.mfStarted) MFShutdown();
     return 7;
   }
+  std::cout << d3d_multithread_log_line("device-created", res.d3d.Get(), res.ctx.Get());
   if (useH264) {
     (void)encoder.codec.set_d3d11_device(res.d3d.Get());
+    std::cout << d3d_multithread_log_line("mf-device-set", res.d3d.Get(), res.ctx.Get());
   }
   if (capture.gpuScalerRequested) {
     capture.gpuScalerHealthy = res.gpuScaler.initialize(res.d3d.Get(), res.ctx.Get(), &res.d3dContextMu);
@@ -420,6 +422,7 @@ int startup_init_encoder(HostContext& hx) {
   res.d3d.As(&dxgi);
   winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(dxgi.Get(), res.inspectable.put()));
   res.d3dDevice = res.inspectable.as<IDirect3DDevice>();
+  std::cout << d3d_multithread_log_line("winrt-wrapper", res.d3d.Get(), res.ctx.Get());
   return 0;
 }
 

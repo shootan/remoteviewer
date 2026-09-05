@@ -40,6 +40,12 @@ struct CaptureFrameMeta {
   uint64_t d3dWaitUs = 0;
   uint64_t submitCopyUs = 0;
   uint64_t submitUs = 0;
+  // Worker-side attribution for a slow readback (0.2.98): time spent waiting for the host's own
+  // context mutex vs time spent INSIDE D3D calls (GetData / Map / Unmap) between the submit and
+  // this publish. Large D3D call time with a small mutex wait means the runtime's internal device
+  // lock (held by AcquireNextFrame) is what stalls the worker.
+  uint64_t workerCtxWaitUs = 0;
+  uint64_t workerD3dCallUs = 0;
   // Snapshot of the window-client crop taken on the callback thread (a cheap rect query);
   // the pixel work happens on the worker or, when the GPU preprocessor runs, in the blt.
   bool cropActive = false;

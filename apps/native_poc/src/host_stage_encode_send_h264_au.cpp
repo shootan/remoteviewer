@@ -478,6 +478,8 @@ if (args.traceEvery > 0 && (hdr.seq % args.traceEvery) == 0 &&
             << " captureMemcpyUs=" << captureMemcpyUs
             << " captureUnmapWaitUs=" << captureUnmapWaitUs
             << " captureUnmapUs=" << captureUnmapUs
+            << " workerCtxWaitUs=" << tc.captureWorkerCtxWaitUs
+            << " workerD3dCallUs=" << tc.captureWorkerD3dCallUs
             << " selectWaitUs=" << frameAgeAtSelectUs
              << " queueSelectWaitUs=" << queueSelectWaitUs
              << " queueGapFrames=" << queueGapFrames
@@ -584,6 +586,8 @@ std::cout << "[native-video-host][user-feedback] seq=" << hdr.seq
             << " captureMemcpyUs=" << captureMemcpyUs
             << " captureUnmapWaitUs=" << captureUnmapWaitUs
             << " captureUnmapUs=" << captureUnmapUs
+            << " workerCtxWaitUs=" << tc.captureWorkerCtxWaitUs
+            << " workerD3dCallUs=" << tc.captureWorkerD3dCallUs
             << " captureToQueueUs=" << captureToQueueUs
            << " queueWaitUs=" << queueWaitUs
            << " queueWaitReason=" << queueWaitReason

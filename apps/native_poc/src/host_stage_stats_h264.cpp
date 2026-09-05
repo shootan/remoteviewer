@@ -113,6 +113,10 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
       (stats.captureReadbackSamples > 0) ? (stats.captureUnmapWaitSumUs / stats.captureReadbackSamples) : 0;
   const uint64_t captureUnmapAvgUs =
       (stats.captureReadbackSamples > 0) ? (stats.captureUnmapSumUs / stats.captureReadbackSamples) : 0;
+  const uint64_t captureWorkerCtxWaitAvgUs =
+      (stats.captureReadbackSamples > 0) ? (stats.captureWorkerCtxWaitSumUs / stats.captureReadbackSamples) : 0;
+  const uint64_t captureWorkerD3dCallAvgUs =
+      (stats.captureReadbackSamples > 0) ? (stats.captureWorkerD3dCallSumUs / stats.captureReadbackSamples) : 0;
   const uint64_t gpuScaleD3DWaitAvgUs =
       (stats.gpuScaleTimedCount > 0) ? (stats.gpuScaleD3DWaitSumUs / stats.gpuScaleTimedCount) : 0;
   const uint64_t gpuScaleCopyMapAvgUs =
@@ -237,6 +241,11 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
             << " lastPublishAgeUs=" << lastPublishAgeUs
             << " captureUnmapAvgUs=" << captureUnmapAvgUs
             << " captureUnmapMaxUs=" << stats.captureUnmapMaxUs
+            << " workerCtxWaitAvgUs=" << captureWorkerCtxWaitAvgUs
+            << " workerCtxWaitMaxUs=" << stats.captureWorkerCtxWaitMaxUs
+            << " workerD3dCallAvgUs=" << captureWorkerD3dCallAvgUs
+            << " workerD3dCallMaxUs=" << stats.captureWorkerD3dCallMaxUs
+            << " d3dMt=" << d3d_multithread_state_name(d3d_multithread_state(res.ctx.Get()))
             << " mbps=" << mbps
             << " rawEquivMbps=" << rawEquivMbps
             << " encRatioX100=" << encRatioX100

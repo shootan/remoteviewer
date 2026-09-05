@@ -44,6 +44,8 @@ struct FrameState {
   uint64_t captureMemcpyUs = 0;
   uint64_t captureUnmapWaitUs = 0;
   uint64_t captureUnmapUs = 0;
+  uint64_t captureWorkerCtxWaitUs = 0;  // readback worker waits on d3dContextMu (0.2.98)
+  uint64_t captureWorkerD3dCallUs = 0;  // readback worker time inside GetData/Map/Unmap (0.2.98)
   // GPU NV12 conversion of this frame for the zero-copy encode path; -1 when absent.
   // Whoever pops the frame claims the slot and must release it.
   int32_t nv12Slot = -1;

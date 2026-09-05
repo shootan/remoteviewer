@@ -171,6 +171,8 @@ struct TickContext {
   uint64_t captureMemcpyUs = 0;
   uint64_t captureUnmapWaitUs = 0;
   uint64_t captureUnmapUs = 0;
+  uint64_t captureWorkerCtxWaitUs = 0;
+  uint64_t captureWorkerD3dCallUs = 0;
   uint64_t version = 0;
   int32_t nv12Slot = -1;
   uint64_t nv12Generation = 0;

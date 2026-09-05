@@ -80,4 +80,16 @@ HRESULT create_d3d11_device_for_primary_monitor(Microsoft::WRL::ComPtr<ID3D11Dev
 enum class DeviceAdapterOutputState { HasAttached, None, Unknown };
 DeviceAdapterOutputState device_adapter_output_state(ID3D11Device* device);
 
+// D3D11 multithread-protection state of the device's immediate context (ID3D11Multithread, QI on
+// the context; a failed QI is Unknown, never Off). Read-only diagnostic (0.2.98): WGC / MF may switch
+// it on behind our back, and with it on AcquireNextFrame's internal lock starves every other user of
+// the shared device. Never Set it from here -- observe only.
+enum class D3dMultithreadState { Off, On, Unknown };
+D3dMultithreadState d3d_multithread_state(ID3D11DeviceContext* context);
+const char* d3d_multithread_state_name(D3dMultithreadState state);
+// One log line "[native-video-host] d3d-mt at=<where> state=<on|off|unknown> dev=<ptr> luid=<hi:lo>"
+// (with trailing newline) so the protection flag can be followed across device / backend boundaries
+// without mistaking a device swap for a state flip.
+std::string d3d_multithread_log_line(const char* where, ID3D11Device* device, ID3D11DeviceContext* context);
+
 }  // namespace remote60::native_poc

@@ -433,6 +433,10 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
     }
     stats.captureUnmapSumUs = 0;
     stats.captureUnmapMaxUs = 0;
+    stats.captureWorkerCtxWaitSumUs = 0;
+    stats.captureWorkerCtxWaitMaxUs = 0;
+    stats.captureWorkerD3dCallSumUs = 0;
+    stats.captureWorkerD3dCallMaxUs = 0;
     stats.gpuScaleTimedCount = 0;
     stats.gpuScaleD3DWaitSumUs = 0;
     stats.gpuScaleD3DWaitMaxUs = 0;
