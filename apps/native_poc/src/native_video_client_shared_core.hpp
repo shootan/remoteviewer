@@ -296,9 +296,16 @@ class UdpH264FrameAssembler {
     uint64_t generation = 0;
     uint16_t chunkCount = 0;
     uint16_t missingTotal = 0;  // total missing data chunks (may exceed what fit in missingOut)
+    // Highest received data-chunk index + 1. A missing index < highWater is a confirmed hole (a
+    // later chunk already arrived, so its tail is here); a missing index >= highWater is the
+    // still-in-flight tail and must NOT be NACKed early (premature NACK ignites a retransmit flood
+    // on large frames whose send time exceeds the reorder grace). (Codex: frame-end aware NACK.)
+    uint16_t highWater = 0;
+    bool keyFrame = false;  // repairing the keyframe is allowed even while waiting for a keyframe
   };
   // Video NACK: describe the oldest still-incomplete AU (the one blocking delivery) and list up to
-  // `maxMissing` of its missing data-chunk indices in `missingOut`. Returns false when every held
+  // `maxMissing` of its missing data-chunk indices in `missingOut` (indices are ascending, so the
+  // caller can split holes < highWater from the in-flight tail). Returns false when every held
   // assembly has all its data chunks. Pure query. (video NACK.)
   bool OldestIncomplete(uint16_t* missingOut, uint16_t maxMissing, IncompleteAuInfo* info) const;
 

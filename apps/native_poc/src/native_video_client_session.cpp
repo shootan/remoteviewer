@@ -521,14 +521,18 @@ void ClientSessionController::VideoReceiveMain() {
   uint32_t nackRounds = 0;
   auto maybe_send_nack = [&](SocketHandle sock) {
     if (sock == kInvalidSocket || !hostSupportsNack_.load(std::memory_order_relaxed)) return;
-    if (waitForKeyframe) {  // already resyncing to an IDR -> repairing the old AU is moot
+    constexpr uint16_t kMax = remote60::native_poc::kUdpVideoNackMaxMissing;
+    uint16_t missing[kMax];
+    UdpH264FrameAssembler::IncompleteAuInfo info{};
+    if (!assembler.OldestIncomplete(missing, kMax, &info)) {
       nackSeq = 0;
       nackRounds = 0;
       return;
     }
-    uint16_t missing[remote60::native_poc::kUdpVideoNackMaxMissing];
-    UdpH264FrameAssembler::IncompleteAuInfo info{};
-    if (!assembler.OldestIncomplete(missing, remote60::native_poc::kUdpVideoNackMaxMissing, &info)) {
+    // While waiting for an IDR, only repairing THAT keyframe helps -- a non-key incomplete AU will
+    // be resynced by the coming IDR. But the keyframe itself MUST be repairable here, or a lossy
+    // 200KB IDR never completes and the picture is stuck (the 60s freeze). (Codex.)
+    if (waitForKeyframe && !info.keyFrame) {
       nackSeq = 0;
       nackRounds = 0;
       return;
@@ -540,22 +544,36 @@ void ClientSessionController::VideoReceiveMain() {
       nackLastUs = 0;
       nackRounds = 0;
     }
-    constexpr uint64_t kNackGraceUs = 12000;   // let a brief reorder settle before asking
-    constexpr uint64_t kNackRoundUs = 18000;   // spacing between rounds (a few RTTs on this path)
-    constexpr uint32_t kNackMaxRounds = 4;     // then give up and let the IDR path recover
-    if (now - nackFirstUs < kNackGraceUs) return;
-    if (nackRounds >= kNackMaxRounds) return;
-    if (nackLastUs != 0 && now - nackLastUs < kNackRoundUs) return;
-    const uint16_t count =
-        std::min<uint16_t>(info.missingTotal, remote60::native_poc::kUdpVideoNackMaxMissing);
-    if (count == 0) return;
+    // A missing index below highWater is a confirmed hole (a later chunk already arrived); ask for
+    // it after a short reorder grace. A missing index at/above highWater is the still-in-flight tail
+    // of a large frame -- NACKing it early is exactly what ignites a retransmit flood, so wait a much
+    // longer grace (the whole frame should have arrived) before touching it. (Codex: frame-end aware.)
+    constexpr uint64_t kGapGraceUs = 25000;    // reorder settle for a confirmed hole
+    constexpr uint64_t kTailGraceUs = 120000;  // large frame fully sent by now
+    constexpr uint64_t kRoundUs = 25000;       // spacing between rounds (>= a few RTTs)
+    constexpr uint32_t kMaxRounds = 3;         // then give up -> the IDR path recovers
+    if (nackRounds >= kMaxRounds) return;
+    if (nackLastUs != 0 && now - nackLastUs < kRoundUs) return;
+    const uint64_t age = now - nackFirstUs;
+    const bool gapEligible = age >= kGapGraceUs;
+    const bool tailEligible = age >= kTailGraceUs;
+    if (!gapEligible && !tailEligible) return;
+    const uint16_t have = std::min<uint16_t>(info.missingTotal, kMax);
+    uint16_t out[kMax];
+    uint16_t outCount = 0;
+    for (uint16_t i = 0; i < have; ++i) {
+      const bool isTail = missing[i] >= info.highWater;
+      if (isTail ? !tailEligible : !gapEligible) continue;
+      out[outCount++] = missing[i];
+    }
+    if (outCount == 0) return;  // only the tail remains and its long grace has not elapsed yet
     UdpVideoNackPacket nack{};
     nack.streamGeneration = info.generation;
     nack.seq = info.seq;
     nack.chunkCount = info.chunkCount;
-    nack.missingCount = count;
+    nack.missingCount = outCount;
     nack.round = static_cast<uint16_t>(nackRounds);
-    std::memcpy(nack.missing, missing, static_cast<size_t>(count) * sizeof(uint16_t));
+    std::memcpy(nack.missing, out, static_cast<size_t>(outCount) * sizeof(uint16_t));
     (void)send(sock, reinterpret_cast<const char*>(&nack), sizeof(nack), 0);
     ++nackRounds;
     nackLastUs = now;

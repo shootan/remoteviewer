@@ -627,6 +627,10 @@ bool UdpH264FrameAssembler::OldestIncomplete(uint16_t* missingOut, uint16_t maxM
                                              IncompleteAuInfo* info) const {
   for (const Assembly& a : assemblies_) {
     if (a.receivedCount >= a.chunkCount) continue;  // data complete; only awaiting delivery
+    uint32_t highWater = 0;  // highest received index + 1 (0 = nothing received yet)
+    for (uint32_t i = 0; i < a.chunkCount && i < a.received.size(); ++i) {
+      if (a.received[i]) highWater = i + 1;
+    }
     uint16_t total = 0;
     uint16_t filled = 0;
     for (uint32_t i = 0; i < a.chunkCount; ++i) {
@@ -640,6 +644,8 @@ bool UdpH264FrameAssembler::OldestIncomplete(uint16_t* missingOut, uint16_t maxM
       info->generation = a.header.streamGeneration;
       info->chunkCount = a.chunkCount;
       info->missingTotal = total;
+      info->highWater = static_cast<uint16_t>(highWater);
+      info->keyFrame = (a.header.flags & kEncodedFrameFlagKeyFrame) != 0;
     }
     return true;
   }

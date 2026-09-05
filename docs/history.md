@@ -8514,3 +8514,13 @@ Next action
 - 효과: 정적화면 패킷 1개 유실→그 청크만 ~18ms 재전송→참조 끊기기 전 복구→IDR churn/멈춤 근본 제거.
 - 빌드: Stream/Host/Viewer/Installer 컴파일 통과, shared_core·frame_gate 테스트 PASS. 0.2.94→0.2.95, dist/GNLinkSetup-0.2.95.exe. **뷰어 코드라 회사 뷰어도 0.2.95 설치 필요.**
 - 잔여/후속: 실기 로그로 nack 효과 검증(assembly-discontinuity↓, IDR 비율↓, present gap↓), 릴레이 자체 드랍 계측(NAS server.js queue/error), FEC 강화 A/B는 후순위.
+
+### 385) 2026-09-05 NACK 고화질 회귀 수정 — 조기 NACK 점화 + 키프레임 복구 교착 → 0.2.96
+- 증상(0.2.95): 정적화면은 NACK으로 해결됐으나 고화질(12M/60fps)만 시작 1~2초 뒤 멈춤→최대 60초 정지. 로그: 11:20:42 완벽(30~60fps)→seq 3261 고정 60초, 그동안 호스트는 108프레임(키프레임 223KB 포함) 계속 전송=클라 교착. dropPm(=조립불연속)50%, ABR high→mid→high(static_recovery 오판)+runtime-config 12M 재강제.
+- 검증용Codex 진단(계획 검증만): ① **최초 점화=조기 NACK** — 12ms grace가 대형 프레임/223KB IDR 전송시간보다 짧아, 아직 안 온 tail을 손실로 오판해 NACK→microburst→실제손실→폭주. ② **직접 지속=waitForKeyframe 중 키프레임 NACK 금지** → 거대 키프레임이 손실나면 복구점이 없어 60초 정지. ③ 재전송 byte cap 부재가 증폭.
+- 수정(a+b 원자적):
+  - **발화조건(점화 차단)**: assembler `OldestIncomplete`가 highWater(최고 수신 index)와 keyFrame 반환. 클라는 **highWater 미만의 확정 hole만 짧은 grace(25ms) 후 NACK**, tail(≥highWater)은 **긴 grace(120ms=프레임 완전전송) 후에만**. round 25ms×최대3. datagram마다 같은 set 스팸 안 함(round 간격).
+  - **키프레임 복구 허용(교착 해소)**: waitForKeyframe 중엔 non-key는 NACK 중단하되 **incomplete keyframe은 NACK 허용**(유일 복구점).
+  - **호스트 byte 예산(폭주 차단)**: RetransmitAu에 토큰버킷(라이브 비트레이트 ~15%, ~0.5s 버스트) — 초과 시 재전송 스킵(nackSuppressed), 클라 IDR 폴백. 캐시 조회 후 실제 mtu로 예산 산정.
+- 남은(c, 후속): ABR hold-down — runtime-config 12M을 ceiling로(loss 중 floor 강제 금지), high→mid 후 15~30s+저손실일 때만 승격, static_recovery는 outstanding loss 중 승격 금지. (a+b가 이미 graceful degradation 제공.)
+- 빌드/버전: 0.2.95→0.2.96. Codex 합격게이트(첫 NACK seenEnd=1·premature 0, retransmit/original<10~20%, 키프레임 손실주입 복구, burst시 폭주 대신 ABR down 수렴)로 실기 검증 예정.

@@ -93,6 +93,12 @@ struct SenderState {
   std::atomic<uint64_t> nackRetransmitChunks{0};  // telemetry: chunks replayed answering NACKs
   std::atomic<uint64_t> nackRequests{0};          // telemetry: NACK packets served
   std::atomic<uint64_t> nackMisses{0};            // telemetry: NACKs for an AU no longer cached
+  std::atomic<uint64_t> nackSuppressed{0};        // telemetry: retransmits skipped over the budget
+  // Retransmit byte budget (token bucket): caps replayed bytes to a fraction of the live send rate
+  // so a NACK storm cannot amplify congestion. Guarded by nackBudgetMu; refilled on demand. (Codex.)
+  std::mutex nackBudgetMu;
+  uint64_t nackBudgetTokensBytes = 0;
+  uint64_t nackBudgetLastUs = 0;
   // Cache one just-sent AU for possible retransmit; drops the oldest past the bound. (sender thread)
   void StoreAu(uint64_t generation, uint32_t seq, const UdpVideoChunkHeader& baseHeader,
                uint32_t mtu, const uint8_t* payload, size_t payloadSize);

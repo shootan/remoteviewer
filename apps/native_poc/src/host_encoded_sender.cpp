@@ -48,7 +48,7 @@ void SenderState::RetransmitAu(SOCKET sock, const sockaddr_in& peer, uint64_t ge
                                uint32_t seq, const uint16_t* missing, uint16_t count) {
   if (!nackEnabled.load(std::memory_order_relaxed) || !missing || count == 0) return;
   nackRequests.fetch_add(1, std::memory_order_relaxed);
-  // Copy out what we need under the lock, then send outside it (sendto can block briefly).
+  // Copy out what we need under the cache lock, then send outside it (sendto can block briefly).
   std::vector<uint8_t> payload;
   UdpVideoChunkHeader baseHeader{};
   uint32_t mtu = 0;
@@ -64,6 +64,29 @@ void SenderState::RetransmitAu(SOCKET sock, const sockaddr_in& peer, uint64_t ge
     payload = it->payload;
     baseHeader = it->baseHeader;
     mtu = it->mtu;
+  }
+  // Retransmit byte budget: refill a token bucket at ~15% of the live send rate and only spend if
+  // the requested chunks fit, so a NACK storm cannot amplify congestion. (Codex: byte budget.)
+  {
+    const uint64_t nowUs = static_cast<uint64_t>(qpc_now_us());
+    const uint32_t peakBps = pacePeakBps.load(std::memory_order_relaxed);  // bits/s; 0 = unpaced
+    const uint64_t rateBytesPerSec =
+        ((peakBps > 0 ? static_cast<uint64_t>(peakBps) : 48000000ULL) / 8ULL) * 15ULL / 100ULL;
+    const uint64_t capBytes = rateBytesPerSec / 2ULL + 65536ULL;  // ~0.5s burst + one frame's slack
+    const uint64_t estBytes = static_cast<uint64_t>(count) * static_cast<uint64_t>(mtu ? mtu : 1400);
+    std::lock_guard<std::mutex> lk(nackBudgetMu);
+    if (nackBudgetLastUs == 0) {
+      nackBudgetTokensBytes = capBytes;  // prime the bucket on first use
+    } else if (nowUs > nackBudgetLastUs) {
+      nackBudgetTokensBytes += (nowUs - nackBudgetLastUs) * rateBytesPerSec / 1000000ULL;
+      if (nackBudgetTokensBytes > capBytes) nackBudgetTokensBytes = capBytes;
+    }
+    nackBudgetLastUs = nowUs;
+    if (nackBudgetTokensBytes < estBytes) {
+      nackSuppressed.fetch_add(1, std::memory_order_relaxed);
+      return;  // over budget -> let the client's IDR fallback handle it instead of flooding
+    }
+    nackBudgetTokensBytes -= estBytes;
   }
   (void)send_udp_chunk_indices(sock, peer, payload.data(), payload.size(), baseHeader, mtu, missing,
                                count);
