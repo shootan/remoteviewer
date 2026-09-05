@@ -667,6 +667,19 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
         return false;
       });
       if (!running_.load(std::memory_order_acquire)) return;
+      bool anyPending = false;
+      for (const auto& s : slots_) {
+        if (s.state == SlotState::GpuPending) { anyPending = true; break; }
+      }
+      if (!anyPending) {
+        // Idle (the 1ms wait timed out with nothing submitted): do not take the context lock --
+        // sweeping an empty ring only contends with the capture thread -- and do not let the
+        // idle-period mutex waits leak into the NEXT frame's attribution (Codex a769ab4 review,
+        // WARP probe: a 250ms idle lock hold was reported against a 3ms frame).
+        workerCtxWaitAccUs = 0;
+        workerD3dCallAccUs = 0;
+        continue;  // slotMu_ released by scope exit
+      }
 
       // Which pending copies has the GPU finished? Checked outside the slot loop so the
       // latest-wins pick sees a consistent snapshot.
@@ -756,11 +769,10 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
       std::lock_guard<std::mutex> d3dLock(*contextMu_);
       const uint64_t mapStartUs = qpc_us();
       workerCtxWaitAccUs += mapStartUs - mapLockStartUs;
-      if (SUCCEEDED(context_->Map(slotCopy.staging.Get(), 0, D3D11_MAP_READ, 0, &map))) {
-        mapUs = qpc_us() - mapStartUs;
-        workerD3dCallAccUs += mapUs;
-        mapHeld = true;
-      }
+      const HRESULT mapHr = context_->Map(slotCopy.staging.Get(), 0, D3D11_MAP_READ, 0, &map);
+      mapUs = qpc_us() - mapStartUs;
+      workerD3dCallAccUs += mapUs;  // a failed Map still cost this time
+      if (SUCCEEDED(mapHr)) mapHeld = true;
     }
     if (mapHeld) {
       // Copy outside the context lock. A mapping is a property of the resource, not of the
@@ -844,6 +856,9 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
       // note in CreateSlotsLocked, which already reclaimed it. (Ledger H-03b.)
     }
     if (handOff) {
+      // Attribution window = the polls since the last publish (or since the ring went idle) while
+      // at least one slot was GpuPending. With several slots in flight the numbers describe that
+      // batch, not one frame; a hand-off that fails (Map error, superseded slot) is not reported.
       slotCopy.meta.workerCtxWaitUs = workerCtxWaitAccUs;  // `meta` aliases slotCopy.meta
       slotCopy.meta.workerD3dCallUs = workerD3dCallAccUs;
       publish_(std::move(payload), outW, outH, outStride, meta, gpuPendingUs, mapUs, memcpyUs);

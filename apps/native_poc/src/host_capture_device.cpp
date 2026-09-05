@@ -349,11 +349,16 @@ std::string d3d_multithread_log_line(const char* where, ID3D11Device* device, ID
       haveLuid = true;
     }
   }
+  char luidBuf[48];
+  if (haveLuid) {
+    std::snprintf(luidBuf, sizeof(luidBuf), "%ld:%lu", luid.HighPart, static_cast<unsigned long>(luid.LowPart));
+  } else {
+    std::snprintf(luidBuf, sizeof(luidBuf), "?");
+  }
   char buf[192];
-  std::snprintf(buf, sizeof(buf), "[native-video-host] d3d-mt at=%s state=%s dev=%p luid=%ld:%lu\n",
+  std::snprintf(buf, sizeof(buf), "[native-video-host] d3d-mt at=%s state=%s dev=%p luid=%s\n",
                 where ? where : "?", d3d_multithread_state_name(d3d_multithread_state(context)),
-                static_cast<void*>(device), haveLuid ? luid.HighPart : 0L,
-                haveLuid ? static_cast<unsigned long>(luid.LowPart) : 0UL);
+                static_cast<void*>(device), luidBuf);
   return std::string(buf);
 }
 
