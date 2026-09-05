@@ -273,6 +273,13 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
    const bool keyWanted = encoder.forceKeyNext || (encoder.encodedSeq == 0) || scheduledKey;
    const bool forceKeyFrame = keyWanted && !forceKeyInFlight;
     const uint64_t encodeInputUs = captureStampUs;
+    // Provenance rides the encoder's accepted-input FIFO so the wire synthetic flag lands on the AU
+    // this input produces (an async MFT emits an older input's AU during this call). The stamp is
+    // also the floor for the next real frame's stamp (KickState::ClampRealStamp) from the moment it
+    // is handed over -- an input the MFT accepted but whose call failed later still sits in its
+    // timeline. (0.2.97)
+    encoder.codec.set_next_input_synthetic(servedBootstrap);
+    kick.NoteEncoderStamp(encodeInputUs, servedBootstrap);
     if (capture.timelineOriginUs < 0) {
       capture.timelineOriginUs = static_cast<int64_t>(encodeInputUs);
     }

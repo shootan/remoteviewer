@@ -32,6 +32,20 @@ struct KickState {
   // A window/monitor selection must open with an IDR: non-key AUs of that generation are dropped.
   uint64_t selectionFirstKeyframePendingGeneration = 0;
   uint64_t selectionFirstKeyframeDropCount = 0;
+  // Encoder/wire capture-stamp monotonic guard (0.2.97). A kick/refresh is stamped "now" (a synthetic
+  // frame has no capture time of its own), but a REAL frame that a slow readback publishes late (GPU
+  // copy 100-300ms under contention; common right after a UAC/secure-desktop backend restart) then
+  // reaches the encoder AFTER that kick carrying an OLDER stamp. The MFT input-timestamp FIFO hands
+  // the reversal to the wire, the viewer reads it as a stale reference (behind latest / behind
+  // presented) and answers with a decoder reset + IDR -- once per cooldown, i.e. a ~1 Hz IDR storm
+  // that decodes 2-4 fps (field: "slow after a UAC"; NAS host 8ec6ecb1 / viewer 68f79d01, 09-05
+  // 12:21-12:33). Clamp the real stamp to strictly after the last stamp handed to the encoder; the
+  // raw captureUs/callbackUs stay untouched so telemetry still shows the true readback delay.
+  uint64_t lastEncoderStampUs = 0;      // last capture stamp handed to the encoder (real or synthetic)
+  uint64_t lastSyntheticStampUs = 0;    // last kick/refresh stamp (telemetry: what the clamp chases)
+  uint64_t stampClampCount = 0;         // telemetry: real frames whose stamp was moved forward
+  uint64_t stampClampMaxUs = 0;         // telemetry: largest forward move
+  uint64_t stampClampLastLogUs = 0;     // 1 Hz log rate limit
 
   // --- behaviour (Phase 2-1: former main() lambdas arm_trailing_kick / cancel_trailing_kick) ---
   static constexpr uint64_t kTrailingKickDelayUs = 150000;  // 150ms trailing edge
@@ -65,6 +79,17 @@ struct KickState {
   }
   // One-shot per held input: remember which input the kick just re-served.
   void MarkKickedForCurrentInput() { lastKickedForInputCaptureUs = lastRealInputCaptureUs; }
+  // Stamp a REAL frame must carry so the encoder/wire timeline never runs backwards past a stamp
+  // already fed (a kick's "now"): strictly after it, else its own. Pure; host_kick_test.cpp.
+  static uint64_t ClampRealStamp(uint64_t realStampUs, uint64_t lastEncoderStampUs) {
+    return (lastEncoderStampUs != 0 && realStampUs <= lastEncoderStampUs) ? lastEncoderStampUs + 1
+                                                                            : realStampUs;
+  }
+  // Record the stamp actually handed to the encoder (after any clamp). Only ever moves forward.
+  void NoteEncoderStamp(uint64_t stampUs, bool synthetic) {
+    if (stampUs > lastEncoderStampUs) lastEncoderStampUs = stampUs;
+    if (synthetic && stampUs > lastSyntheticStampUs) lastSyntheticStampUs = stampUs;
+  }
   // Periodic static refresh cadence (the kick-side half of the stage condition): no kick pending, an AU
   // has been seen, and both the emitted-AU and the attempt anchors are at least one interval old.
   bool StaticRefreshDue(uint64_t nowUs) const {

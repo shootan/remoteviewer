@@ -238,6 +238,7 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
     std::vector<DecodedFrameNv12> outFrames;
     const int64_t inputSampleTimeHns = static_cast<int64_t>(h.captureQpcUs) * 10;
     bool pendingTimestampOverflow = false;
+    dec.decoder.set_next_input_synthetic(synthetic);  // rides the decoder's pending-input FIFO (0.2.97)
     if (!dec.decoder.decode_access_unit(*payloadPtr, keyFrame, inputSampleTimeHns, &outFrames,
                                     &pendingTimestampOverflow)) {
       fg.note_decode_failure(in, lag);
@@ -258,6 +259,9 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
     fg.clear_empty_streak();
 
     auto& decoded = outFrames.back();
+    // Provenance of THIS decoded frame (a decoder may return an older input's picture during this
+    // call); the packet's flag `synthetic` stays the gate's input. (0.2.97)
+    const bool decodedSynthetic = decoded.synthetic;
     const bool tsFromMft = decoded.sampleTimeFromOutput && (decoded.sampleTimeHns > 0);
     const bool tsFromInputFallback = (!decoded.sampleTimeFromOutput) && (decoded.sampleTimeHns > 0);
     const bool tsFromHeaderFallback = (decoded.sampleTimeHns <= 0);
@@ -316,11 +320,12 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
       ctx.frameBuf.frame.decodeToQueueUs = decodeToQueueUs;
       ctx.frameBuf.frame.streamGeneration = h.streamGeneration;
       ctx.frameBuf.frame.key = keyFrame;
+      ctx.frameBuf.frame.synthetic = decodedSynthetic;
       // Paced playout (F-11): where on the local clock this frame belongs. Synthetic refresh
       // frames carry the kick time, not a capture time, so they go straight through rather than
       // teaching the clock a false cadence.
       ctx.frameBuf.frame.presentAtUs = 0;
-      if (ctx.frameBuf.pacedPlayout && !synthetic) {
+      if (ctx.frameBuf.pacedPlayout && !decodedSynthetic) {
         const auto decision = ctx.frameBuf.playout.Schedule(nowUs, decodedCaptureUs, h.streamGeneration);
         ctx.frameBuf.frame.presentAtUs = decision.presentAtUs;
         if (decision.reanchored) {
@@ -412,7 +417,7 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
         decodedCaptureUs, nowUs, gate.captureTimelineReady, gate.captureRemoteBaseUs, gate.captureLocalBaseUs);
     const uint64_t decodeTailUs = FrameGate::aligned_lag_us(
         h.sendQpcUs, nowUs, gate.sendTimelineReady, gate.sendRemoteBaseUs, gate.sendLocalBaseUs);
-    if (synthetic) {
+    if (decodedSynthetic) {
       // Counted, shown, but not measured: a re-encoded cached frame carries the kick time as its
       // capture stamp and would pull every pipeline average toward a number that means nothing --
       // on a still desktop, where the 1Hz refresh may be ALL that flows, it was the whole average,

@@ -89,6 +89,7 @@ LRESULT paint_video_frame(ViewerState& ctx, HWND hwnd) {
   uint32_t visL = 0, visT = 0;
   uint32_t seq = 0;
   bool frameKey = false;
+  bool frameSynthetic = false;
   uint64_t frameStreamGeneration = 0;
   uint64_t captureUs = 0;
   uint64_t encodeStartUs = 0;
@@ -118,6 +119,7 @@ LRESULT paint_video_frame(ViewerState& ctx, HWND hwnd) {
       visT = ctx.frameBuf.frame.visibleTop;
       seq = ctx.frameBuf.frame.seq;
       frameKey = ctx.frameBuf.frame.key;
+      frameSynthetic = ctx.frameBuf.frame.synthetic;
       frameStreamGeneration = ctx.frameBuf.frame.streamGeneration;
       captureUs = ctx.frameBuf.frame.captureUs;
       encodeStartUs = ctx.frameBuf.frame.encodeStartUs;
@@ -224,7 +226,12 @@ LRESULT paint_video_frame(ViewerState& ctx, HWND hwnd) {
   if (presented) {
     ctx.present.hasPresentedAtLeastOneFrame = true;
     ctx.frameBuf.lastPresentedVersion.store(frameVersion, std::memory_order_relaxed);
-    ctx.frameBuf.lastPresentedCaptureUs.store(captureUs, std::memory_order_relaxed);
+    // A synthetic (kick / refresh) frame carries the kick time, not a capture time: it must not move
+    // the present anchor, or the next real frame a slow host readback delivers late reads as "behind
+    // presented" and is dropped with a decoder reset + IDR request (0.2.97).
+    if (!frameSynthetic) {
+      ctx.frameBuf.lastPresentedCaptureUs.store(captureUs, std::memory_order_relaxed);
+    }
     const uint64_t presentUs = qpc_now_us();
     const uint64_t presentGapUs = (ctx.present.lastPresentUs > 0) ? (presentUs - ctx.present.lastPresentUs) : 0;
     const uint64_t queueToPaintUs = (paintStartUs >= queueSetUs) ? (paintStartUs - queueSetUs) : 0;

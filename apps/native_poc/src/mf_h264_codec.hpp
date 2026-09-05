@@ -17,6 +17,10 @@ struct H264AccessUnit {
   bool keyFrame = false;
   int64_t sampleTimeHns = 0;
   bool sampleTimeFromOutput = false;
+  // Provenance of the INPUT that produced this AU (host kick / static refresh = synthetic). Carried
+  // through the accepted-input FIFO next to the timestamp, because an async MFT returns an older
+  // input's AU during the current call -- the call's own flag would land on the wrong AU. (0.2.97)
+  bool synthetic = false;
 };
 
 struct DecodedFrameNv12 {
@@ -32,6 +36,9 @@ struct DecodedFrameNv12 {
   uint32_t visibleHeight = 0;
   int64_t sampleTimeHns = 0;
   bool sampleTimeFromOutput = false;
+  // Provenance of the input AU this output came from (wire synthetic flag), mapped through the
+  // pending-input FIFO like the timestamp, so a delayed decoder output keeps its own flag. (0.2.97)
+  bool synthetic = false;
   std::vector<uint8_t> bytes;
   // Hardware decoders expose their NV12 output as a D3D11 surface. Keeping both the sample
   // and texture alive prevents the decoder pool from reusing the surface before paint.
@@ -96,6 +103,9 @@ class H264Encoder {
                             H264EncodeFrameStats* encodeStats = nullptr);
   const char* backend_name() const { return backendName_; }
   bool using_hardware() const { return usingHardware_; }
+  // Provenance of the NEXT input (kick / static refresh = true); rides the accepted-input FIFO so
+  // each AU reports the flag of the input that produced it. (0.2.97)
+  void set_next_input_synthetic(bool synthetic) { nextInputSynthetic_ = synthetic; }
   void shutdown();
 
  private:
@@ -120,6 +130,8 @@ class H264Encoder {
   // input. Keep the accepted input timeline so each output is stamped with the frame that
   // actually produced it, rather than the input from the current encode call.
   std::deque<int64_t> pendingInputSampleTimesHns_;
+  std::deque<bool> pendingInputSynthetic_;  // lockstep with pendingInputSampleTimesHns_ (0.2.97)
+  bool nextInputSynthetic_ = false;
   std::vector<uint8_t> sequenceHeaderAnnexb_;
   bool spsProfileReported_ = false;
   bool started_ = false;
@@ -148,6 +160,9 @@ class H264Decoder {
                           bool* outPendingTimestampOverflow = nullptr);
   const char* backend_name() const { return backendName_; }
   bool using_hardware() const { return usingHardware_; }
+  // Provenance of the NEXT input AU (wire synthetic flag); mapped to the decoded frame through the
+  // pending-input FIFO like its timestamp. (0.2.97)
+  void set_next_input_synthetic(bool synthetic) { nextInputSynthetic_ = synthetic; }
   void reset();
   void shutdown();
 
@@ -172,6 +187,8 @@ class H264Decoder {
   const char* backendName_ = "unknown";
   uint64_t missingOutputTimestampCount_ = 0;
   std::deque<int64_t> pendingInputSampleTimesHns_;
+  std::deque<bool> pendingInputSynthetic_;  // lockstep with pendingInputSampleTimesHns_ (0.2.97)
+  bool nextInputSynthetic_ = false;
   uint32_t d3dManagerResetToken_ = 0;
   Microsoft::WRL::ComPtr<IMFDXGIDeviceManager> d3dManager_;
   Microsoft::WRL::ComPtr<IMFVideoSampleAllocatorEx> videoAllocator_;

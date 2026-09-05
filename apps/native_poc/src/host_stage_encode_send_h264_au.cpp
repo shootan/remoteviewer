@@ -239,7 +239,10 @@ hdr.payloadSize = static_cast<uint32_t>(au.bytes.size());
 hdr.flags = encodedKeyFrame ? kEncodedFrameFlagKeyFrame : 0u;
 // A kick / static-refresh frame is the cached picture re-encoded, not new content; tell the
 // viewer so it keeps the frame out of its latency and congestion arithmetic. (F-10 / H-13.)
-if (servedBootstrap) hdr.flags |= kEncodedFrameFlagSynthetic;
+// The flag is the AU's own provenance (accepted-input FIFO), not this call's servedBootstrap: an
+// async MFT emits the held REAL frame during the kick call and the kick's AU during the next real
+// call, so the call flag marked the wrong frames. (0.2.97)
+if (au.synthetic) hdr.flags |= kEncodedFrameFlagSynthetic;
 hdr.streamGeneration = streamGeneration;
 hdr.captureQpcUs =
     static_cast<uint64_t>(std::max<int64_t>(0, auCaptureUs));
@@ -491,6 +494,7 @@ if (args.traceEvery > 0 && (hdr.seq % args.traceEvery) == 0 &&
              << " captureTimelineRelativeUs=" << captureTimelineRelativeUs
              << " auTimelineRelativeUs=" << auTimelineRelativeUs
               << " frameCaptureUs=" << captureStampUs
+              << " stampClampUs=" << tc.captureStampClampUs
               << " captureToAuUs=" << captureToAuUs
               << " auCaptureUs=" << static_cast<uint64_t>(auCaptureUs)
               << " encodeInputUs=" << encodeInputUs
@@ -616,6 +620,7 @@ std::cout << "[native-video-host][user-feedback] seq=" << hdr.seq
               << " captureTimelineRelativeUs=" << captureTimelineRelativeUs
               << " auTimelineRelativeUs=" << auTimelineRelativeUs
               << " frameCaptureUs=" << captureStampUs
+              << " stampClampUs=" << tc.captureStampClampUs
               << " captureToAuUs=" << captureToAuUs
              << " auCaptureUs=" << static_cast<uint64_t>(auCaptureUs)
              << " encodeInputUs=" << encodeInputUs

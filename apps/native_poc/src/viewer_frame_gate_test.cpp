@@ -538,11 +538,55 @@ void test_stale_recovery_cooldown_decodes_in_order() {
   CHECK(!r.gate.waitForKeyFrame);
 }
 
+// Field bug (0.2.97, "slow after a UAC"): the host stamps a kick/refresh with the kick time; a real
+// frame that a slow host readback publishes late arrives right after it (dense) with an OLDER stamp.
+// The synthetic stamp must not become "latest": the real in-chain frame decodes -- no recovery, no IDR.
+// (The matching present-anchor guard lives in viewer_present.cpp; the gate sees it as `presented`.)
+void test_synthetic_stamp_does_not_stale_later_real_frame() {
+  std::printf("[T1b] synthetic stamp never anchors behind-latest: a late real in-chain frame after a kick decodes (no recovery)\n");
+  Rig r;
+  uint64_t t = 5000 * kMs;
+  FrameGateInputs in{};
+  CHECK(r.feed(t, t, true, 0, false, nullptr, &in) == FrameGateVerdict::Decode);
+  r.decoded(in);  // anchor + latest = t
+  // the kick: stamped 300 ms after the last real capture, arrives 300 ms later (sparse)
+  const uint64_t tk = t + 300 * kMs;
+  CHECK(r.feed(tk, tk, false, t, false, nullptr, &in, true) == FrameGateVerdict::Decode);
+  r.decoded(in);
+  CHECK(r.gate.latestCaptureSeenUs == t);  // the synthetic stamp did not move the anchor
+  // the late real frame: captured 100 ms after t (200 ms behind the kick stamp), arrives 50 ms after
+  // the kick (dense); the present anchor is still the last REAL presented capture (t)
+  const uint32_t recBefore = r.gate.staleReferenceRecoveryCount;
+  CHECK(r.feed(tk + 50 * kMs, t + 100 * kMs, false, t, false, nullptr, &in) == FrameGateVerdict::Decode);
+  r.decoded(in);
+  CHECK(r.gate.staleReferenceRecoveryCount == recBefore);
+  CHECK(!r.gate.waitForKeyFrame);
+  CHECK(r.sink.requests(6) == 0);
+  CHECK(r.gate.latestCaptureSeenUs == t + 100 * kMs);
+
+  // Variant: the kick carried the IDR (closed barrier) -- the reference chain restarts at it, and a
+  // late real P behind it (older stamp, dense) must still decode in order: no drop, no recovery.
+  Rig r2;
+  const uint64_t t0 = 9000 * kMs;
+  CHECK(r2.feed(t0, t0, true, 0, false, nullptr, &in) == FrameGateVerdict::Decode);
+  r2.decoded(in);
+  const uint64_t tkey = t0 + 400 * kMs;  // synthetic IDR stamped with the kick time
+  CHECK(r2.feed(tkey, tkey, true, t0, false, nullptr, &in, true) == FrameGateVerdict::Decode);
+  r2.decoded(in);
+  CHECK(!r2.gate.waitForKeyFrame);
+  CHECK(r2.gate.latestCaptureSeenUs == t0);
+  CHECK(r2.feed(tkey + 40 * kMs, t0 + 150 * kMs, false, t0, false, nullptr, &in) == FrameGateVerdict::Decode);
+  r2.decoded(in);
+  CHECK(r2.gate.staleReferenceRecoveryCount == 0);
+  CHECK(r2.sink.requests(6) == 0);
+}
+
 int main() {
   test_congestion_entry_tunables();
   test_sparse_slow_source_decodes_not_stale();
   test_idle_resume_no_false_congestion();
   test_stale_recovery_cooldown_decodes_in_order();
+  test_synthetic_stamp_does_not_stale_later_real_frame();
   test_synthetic_frames_do_not_drive_congestion();
   test_keyframe_wait_then_decode();
   test_stale_drop_quiet_vs_reference_chain();

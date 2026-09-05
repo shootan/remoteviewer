@@ -119,7 +119,12 @@ uint64_t FrameGate::note_packet(uint64_t packetNowUs) {
 }
 
 FrameGateVerdict FrameGate::admit(const FrameGateInputs& in, FrameGateLag* lag) {
-  if (in.captureQpcUs > gate.latestCaptureSeenUs) {
+  // "Latest capture seen" anchors the behind-latest stale drop. A synthetic frame (kick / static
+  // refresh) is stamped with the kick time, not a capture time; letting it advance the anchor made
+  // every real frame a slow host readback delivered after it (older stamp, dense arrival) a "stale
+  // reference" -> decoder reset + IDR once per cooldown, a ~1 Hz IDR storm that decoded 2-4 fps
+  // (field: "slow after a UAC", 0.2.97). Only real captures may move the anchor.
+  if (!in.synthetic && in.captureQpcUs > gate.latestCaptureSeenUs) {
     gate.latestCaptureSeenUs = in.captureQpcUs;
   }
   const uint64_t streamLagUs = aligned_lag_us(

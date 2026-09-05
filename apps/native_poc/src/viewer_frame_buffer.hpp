@@ -52,6 +52,9 @@ struct SharedFrame {
   uint64_t streamGeneration = 0;
   // Diagnostics-only: keyframe flag carried to the present stage for stream telemetry.
   bool key = false;
+  // Host re-encoded its cached picture (kick / static refresh): its capture stamp is the kick time.
+  // The present stage must not re-anchor lastPresentedCaptureUs on it (0.2.97).
+  bool synthetic = false;
   // Paced playout (F-11 / P3): when the frame may be shown, on the local QPC clock; 0 = now.
   // Set by the recv thread from VideoPlayoutClock when pacing is on; WM_PAINT holds a frame that
   // is not yet due and re-arms itself for the remainder instead of presenting it early.

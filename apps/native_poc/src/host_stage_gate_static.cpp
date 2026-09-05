@@ -88,6 +88,7 @@ Flow stage_gate_static(HostContext& hx, TickContext& tc) {
   auto& clientMetrics = hx.clientMetrics;
   auto& encoder = hx.encoder;
   auto& stats = hx.stats;
+  auto& kick = hx.kick;
   auto& payload = tc.payload;
   auto& w = tc.w;
   auto& h = tc.h;
@@ -148,6 +149,26 @@ Flow stage_gate_static(HostContext& hx, TickContext& tc) {
     stats.lastVersionSent = version;
   }
   captureStampUs = (callbackUs > 0) ? callbackUs : captureUs;
+  // Monotonic guard (0.2.97): a real frame that a slow readback published late must not carry a
+  // stamp older than the kick/refresh already handed to the encoder -- see KickState::ClampRealStamp.
+  // Only the encoder/wire stamp moves; captureUs/callbackUs (telemetry) keep the true capture time.
+  if (!servedBootstrap) {
+    const uint64_t clampedStampUs = KickState::ClampRealStamp(captureStampUs, kick.lastEncoderStampUs);
+    if (clampedStampUs != captureStampUs) {
+      const uint64_t behindUs = clampedStampUs - captureStampUs;
+      tc.captureStampClampUs = behindUs;
+      ++kick.stampClampCount;
+      kick.stampClampMaxUs = std::max(kick.stampClampMaxUs, behindUs);
+      const uint64_t nowUs = qpc_now_us();
+      if (kick.stampClampLastLogUs == 0 || nowUs >= kick.stampClampLastLogUs + 1'000'000) {
+        kick.stampClampLastLogUs = nowUs;
+        std::cout << "[native-video-host] capture-stamp clamped behind-synthetic behindUs=" << behindUs
+                  << " count=" << kick.stampClampCount << " maxUs=" << kick.stampClampMaxUs
+                  << " readbackWaitUs=" << tc.captureUnmapWaitUs << "\n";
+      }
+      captureStampUs = clampedStampUs;
+    }
+  }
 
  
  

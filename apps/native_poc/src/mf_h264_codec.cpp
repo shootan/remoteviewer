@@ -1554,6 +1554,7 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
   sampleTimeOutputTimestampTotalSamples_ = 0;
   sampleTimeOutputTimestampFallbackCount_ = 0;
   pendingInputSampleTimesHns_.clear();
+  pendingInputSynthetic_.clear();
   frameIndex_ = 0;
   sequenceHeaderAnnexb_.clear();
 
@@ -1827,6 +1828,7 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
         // back. Leaving its timestamp in the queue would offset every later access unit by a
         // frame, permanently, and the client paces playout off those timestamps.
         pendingInputSampleTimesHns_.pop_front();
+        if (!pendingInputSynthetic_.empty()) pendingInputSynthetic_.pop_front();
         ++sampleTimeOutputTimestampFallbackCount_;
       }
       if (haveBytes) {
@@ -1853,9 +1855,12 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
         // order, so the accepted-input FIFO is the stable source of truth even for vendor
         // encoders that rewrite output timestamps to a private zero-based timeline.
         int64_t normalizedAuSampleTimeHns = sampleTime;
+        bool auSynthetic = nextInputSynthetic_;  // FIFO empty -> this call's input (old behaviour)
         if (!pendingInputSampleTimesHns_.empty()) {
           normalizedAuSampleTimeHns = pendingInputSampleTimesHns_.front();
+          if (!pendingInputSynthetic_.empty()) auSynthetic = pendingInputSynthetic_.front();
           pendingInputSampleTimesHns_.pop_front();
+          if (!pendingInputSynthetic_.empty()) pendingInputSynthetic_.pop_front();
         } else {
           ++sampleTimeOutputTimestampFallbackCount_;
         }
@@ -1865,6 +1870,7 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
                 kEncoderOutputTsSkewHns;
         au.sampleTimeHns = normalizedAuSampleTimeHns;
         au.sampleTimeFromOutput = sampleTimeFromOutput;
+        au.synthetic = auSynthetic;
         if (maybeKey && !sequenceHeaderAnnexb_.empty() &&
             !annexb_contains_idr(sequenceHeaderAnnexb_.data(), sequenceHeaderAnnexb_.size())) {
           // Keep existing behavior if sequence blob is malformed.
@@ -1911,9 +1917,11 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
     return finish_call(false);
   }
   pendingInputSampleTimesHns_.push_back(sampleTime);
+  pendingInputSynthetic_.push_back(nextInputSynthetic_);
   constexpr size_t kPendingEncoderTimestampMax = 64;
   if (pendingInputSampleTimesHns_.size() > kPendingEncoderTimestampMax) {
     pendingInputSampleTimesHns_.pop_front();
+    if (!pendingInputSynthetic_.empty()) pendingInputSynthetic_.pop_front();
     ++sampleTimeOutputTimestampFallbackCount_;
     ++pendingInputOverflowTotal_;
     if (env_truthy_local("REMOTE60_NATIVE_DEBUG_CODEC")) {
@@ -2005,6 +2013,7 @@ void H264Encoder::shutdown() {
   sampleTimeOutputTimestampTotalSamples_ = 0;
   sampleTimeOutputTimestampFallbackCount_ = 0;
   pendingInputSampleTimesHns_.clear();
+  pendingInputSynthetic_.clear();
   frameIndex_ = 0;
   sequenceHeaderAnnexb_.clear();
   asyncTransform_ = false;
@@ -2283,6 +2292,7 @@ bool H264Decoder::initialize(uint32_t width, uint32_t height, uint32_t fps) {
   sampleIndex_ = 0;
   missingOutputTimestampCount_ = 0;
   pendingInputSampleTimesHns_.clear();
+  pendingInputSynthetic_.clear();
   return true;
 }
 
@@ -2368,9 +2378,12 @@ bool H264Decoder::decode_access_unit(const std::vector<uint8_t>& annexb, bool ke
           visH = outH;
         }
         int64_t mappedInputSampleTimeHns = 0;
+        bool mappedSynthetic = nextInputSynthetic_;  // FIFO empty -> this call's input
         if (!pendingInputSampleTimesHns_.empty()) {
           mappedInputSampleTimeHns = pendingInputSampleTimesHns_.front();
+          if (!pendingInputSynthetic_.empty()) mappedSynthetic = pendingInputSynthetic_.front();
           pendingInputSampleTimesHns_.pop_front();
+          if (!pendingInputSynthetic_.empty()) pendingInputSynthetic_.pop_front();
         }
 
         Microsoft::WRL::ComPtr<ID3D11Texture2D> surfaceTexture;
@@ -2387,6 +2400,7 @@ bool H264Decoder::decode_access_unit(const std::vector<uint8_t>& annexb, bool ke
         }
         if (hasSurface || !bytes.empty()) {
           DecodedFrameNv12 frame{};
+          frame.synthetic = mappedSynthetic;
           frame.width = outW;
           frame.height = outH;
           frame.visibleLeft = visLeft;
@@ -2434,9 +2448,11 @@ bool H264Decoder::decode_access_unit(const std::vector<uint8_t>& annexb, bool ke
   if (FAILED(inHr)) return false;
   ++sampleIndex_;
   pendingInputSampleTimesHns_.push_back(sampleTime);
+  pendingInputSynthetic_.push_back(nextInputSynthetic_);
   constexpr size_t kPendingInputTimestampMax = 512;
   if (pendingInputSampleTimesHns_.size() > kPendingInputTimestampMax) {
     pendingInputSampleTimesHns_.pop_front();
+    if (!pendingInputSynthetic_.empty()) pendingInputSynthetic_.pop_front();
     if (outPendingTimestampOverflow) *outPendingTimestampOverflow = true;
     if (env_truthy_local("REMOTE60_NATIVE_DEBUG_CODEC")) {
       codec_debug_log("decoder pending input timestamp queue overflowed; caller must recover");
@@ -2452,6 +2468,7 @@ void H264Decoder::reset() {
   (void)dec_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
   sampleIndex_ = 0;
   pendingInputSampleTimesHns_.clear();
+  pendingInputSynthetic_.clear();
 }
 
 void H264Decoder::shutdown() {
@@ -2471,6 +2488,7 @@ void H264Decoder::shutdown() {
   backendName_ = "unknown";
   missingOutputTimestampCount_ = 0;
   pendingInputSampleTimesHns_.clear();
+  pendingInputSynthetic_.clear();
   d3dManager_.Reset();
   d3dManagerResetToken_ = 0;
 }

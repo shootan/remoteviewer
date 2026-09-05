@@ -189,6 +189,7 @@ struct TickContext {
   uint64_t queueGapFrames = 0;
   uint64_t queueDepthAtPop = 0;
   uint64_t captureStampUs = 0;
+  uint64_t captureStampClampUs = 0;  // how far captureStampUs was moved past a synthetic stamp (0.2.97)
   bool sendFailed = false;
 };
 

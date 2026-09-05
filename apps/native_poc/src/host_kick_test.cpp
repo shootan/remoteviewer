@@ -84,11 +84,43 @@ void TestStaticRefreshCadence() {
 
 }  // namespace
 
+// Field bug (0.2.97, "slow after a UAC"): a kick is stamped "now"; a real frame that a slow readback
+// publishes late reaches the encoder after it with an OLDER stamp, and the viewer reads the reversal
+// as a stale reference (~1 Hz decoder-reset + IDR storm). The real stamp must be clamped to strictly
+// after the last stamp handed to the encoder; a real frame that is already newer keeps its own stamp.
+void TestRealStampClampedBehindSyntheticStamp() {
+  KickState k;
+  expect(KickState::ClampRealStamp(10 * kSec, 0) == 10 * kSec, "stamp: nothing fed yet -> real stamp untouched");
+  k.NoteEncoderStamp(10 * kSec, false);           // real frame captured at 10s fed
+  k.NoteEncoderStamp(10 * kSec + 150000, true);   // trailing kick stamped "now" = 10.15s
+  expect(k.lastEncoderStampUs == 10 * kSec + 150000 && k.lastSyntheticStampUs == 10 * kSec + 150000,
+         "stamp: the kick stamp is recorded as the last encoder stamp");
+  // a real frame captured at 10.05s but published only now (slow readback) -> behind the kick
+  const uint64_t late = KickState::ClampRealStamp(10 * kSec + 50000, k.lastEncoderStampUs);
+  expect(late == 10 * kSec + 150001, "stamp: a late real frame moves to just after the kick stamp");
+  k.NoteEncoderStamp(late, false);
+  expect(k.lastSyntheticStampUs == 10 * kSec + 150000, "stamp: a real note leaves the synthetic record alone");
+  // a second late real frame (captured 10.08s, also published late) lands strictly after the first
+  const uint64_t late2 = KickState::ClampRealStamp(10 * kSec + 80000, k.lastEncoderStampUs);
+  expect(late2 == 10 * kSec + 150002, "stamp: consecutive late real frames keep strictly increasing stamps");
+  k.NoteEncoderStamp(late2, false);
+  // a real frame captured after the kick keeps its own stamp
+  expect(KickState::ClampRealStamp(10 * kSec + 400000, k.lastEncoderStampUs) == 10 * kSec + 400000,
+         "stamp: a newer real frame is not touched");
+  // an equal stamp is a reversal too (the timeline must be strictly increasing)
+  expect(KickState::ClampRealStamp(k.lastEncoderStampUs, k.lastEncoderStampUs) == k.lastEncoderStampUs + 1,
+         "stamp: an equal stamp is bumped by one microsecond");
+  // an older note never moves the record backwards
+  k.NoteEncoderStamp(5 * kSec, false);
+  expect(k.lastEncoderStampUs == late2, "stamp: the record only moves forward");
+}
+
 int main() {
   TestArmDueCancel();
   TestOneKickPerHeldInput();
   TestBarrierOverridesTheGuard();
   TestStaticRefreshCadence();
+  TestRealStampClampedBehindSyntheticStamp();
   if (gFailures == 0) {
     std::printf("host_kick_test: PASS\n");
     return 0;

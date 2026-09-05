@@ -290,6 +290,8 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
             << " trailingKickCount=" << kick.count
             << " staticRefreshCount=" << kick.staticRefreshCount
             << " lastKickSourceAgeUs=" << kick.lastSourceAgeUs
+            << " stampClampCount=" << kick.stampClampCount
+            << " stampClampMaxUs=" << kick.stampClampMaxUs
             << " mediaEpoch=" << sender.mediaSessionEpoch.load(std::memory_order_acquire)
             << " forceKeyInputCount=" << encoder.forceKeyInputCount
             << " nonKeyAuWhileWaiting=" << sender.nonKeyAuWhileWaiting
