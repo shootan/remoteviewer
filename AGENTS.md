@@ -24,8 +24,3 @@ After each meaningful task is completed, do all of the following in order:
 - Keep role separation strict:
   - write history narrative only in `docs/history.md`
   - update only checklist/progress status in `docs/구현계획.md`
-
-## A2A Review Boundary
-- Review and discuss design proposals, implementation plans, sequencing, risks, and validation plans from other A2A sessions.
-- When another A2A session says an implementation is complete and asks for a code, diff, commit, or full implementation review, do not inspect the implementation, run review tests, or provide an approval verdict. Reply that the user instructed this session not to review completed implementations and that only plan/design consultation is accepted.
-- A direct, explicit request from the user in the current conversation to review a specific completed implementation overrides this boundary for that request only.

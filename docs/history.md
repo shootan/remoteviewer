@@ -8544,3 +8544,12 @@ Next action
 - 계측(호스트, 읽기만): `d3d_multithread_state()`(context→ID3D11Multithread QI, 실패=unknown, Set 없음) + `d3d-mt at=<device-created|mf-device-set|winrt-wrapper|wgc-pool-before|wgc-started|wgc-closed|device-recreated> state= dev= luid=` 로그, 30s stats `d3dMt=`. readback worker 귀속: CaptureFrameMeta.workerCtxWaitUs(자체 contextMu 대기) / workerD3dCallUs(GetData+Map+Unmap 호출 시간) → user-feedback `workerCtxWaitUs= workerD3dCallUs=`, 30s stats `workerCtxWait/ D3dCall Avg/Max`. D3D 호출 시간이 크고 mutex 대기가 작으면 런타임 내부 락(AcquireNextFrame) 확정.
 - 검증: capture_readback/host_kick/host_frame_gate/dxgi_output_selection PASS, 전체 빌드 OK → `dist/GNLinkSetup-0.2.98.exe`(호스트만 바뀜; 뷰어 0.2.97 그대로 호환). **실기 판정 기준(Codex 15)**: UAC 전후 captureUnmapWait/oldestGpuPendingPeak·stampClamp 횟수·입력→화면 반응이 정상 범위로 복귀, 60fps 모션·MF 실패·decoder reset 악화 없음. 확정 관측: 같은 device 에서 WGC 전 off → 후 on → close 뒤 on 과 지연 시점 일치.
 - 실패 시 대안(Codex 18): 복제 전용 device/context 분리 + shareable texture 명시 동기화(범위 큼, 0.2.98 미포함).
+
+### 388) 2026-09-05 A2A 완료 구현 리뷰 제한 제거 및 0.2.98 검증
+- 목표: 사용자의 직접 지시에 따라 A2A 완료 구현 리뷰 금지 정책을 제거하고, 커밋 `a769ab4a778673a79da9c8df98b563da34aa4d0e`의 0.2.98 구현을 검증한다.
+- 변경 파일: `AGENTS.md`의 A2A Review Boundary 삭제, `docs/구현계획.md`의 해당 정책 상태만 취소로 변경, `docs/history/history_2026-W36.md`에 철회 상태 표시, `docs/history.md`에 결과 기록. 제품 소스는 수정하지 않았다.
+- 검증: Release 호스트 및 관련 테스트 6종 빌드 성공. capture_readback / host_kick / host_frame_gate / dxgi_output_selection / viewer_frame_gate / native_video_client_shared_core 모두 exit 0.
+- 발견 사항(P2): `d3d_capture_readback.cpp:676-678`은 GpuPending이 없는 유휴 sweep의 contextMu 대기까지 누적하고, `pick == SIZE_MAX`에서 리셋 없이 다음 프레임으로 이월한다. 별도 WARP 장치로 프레임 생성 전에 250ms의 유휴 락 경합을 만든 뒤 100ms 후 프레임을 Submit한 결과, 실제 capture→publish 2,951us에 workerCtxWaitUs=248,684us가 붙었다. per-frame submit→publish 귀속값으로 해석하면 원인을 오판한다. 재현 소스/로그는 로컬 `.claude/a769ab4-probe/`에 두며 커밋에서 제외한다.
+- 추가 확인: DXGI timeout 뒤 sleep은 프레임 미보유·앱 락 밖이며 성공/ReleaseFrame 경로는 불변. sleep_for는 취소 가능한 대기가 아니므로 stop 2ms 상한은 보장하지 않는다(기본 acquire 8ms 및 스케줄링 지연도 존재). meta는 slotCopy.meta의 const 참조여서 publish 직전 같은 객체의 필드 갱신을 안전하게 읽는다. handOff=false 리셋은 실패 시도 계측을 버리며 전역 작업량 집계가 아니다. 보호 상태 QI 실패=unknown, Windows의 %p/%ld/%lu 인수 타입 일치, Set 호출 없음. 프로토콜/뷰어 소스 변경이 없어 0.2.97과 와이어 형식 차이 없음.
+- 한계: 현재 계측만으로 내부 런타임 락과 다른 D3D/드라이버 대기를 단정할 수 없다. WGC 생성/StartCapture 첫 callback 및 실제 MFT 초기화 사이 세부 경계는 추가 계측이 필요하다. 실제 UAC 왕복과 100/0·8/0·8/2000 A/B는 실행하지 않았으며, 필드 성능 해결 판정은 유보한다.
+- 다음 액션: 유휴·세대·슬롯별 worker 계측의 집계 범위를 고쳐 위 WARP 재현을 회귀로 고정한 후, UAC 전후 실제 capture→publish와 입력 반응 및 CPU를 비교한다. A2A 완료 구현 검증 요청은 더 이상 정책상 거절하지 않는다.
