@@ -8559,3 +8559,14 @@ Next action
 - 수정: (a) 유휴(GpuPending 0)면 컨텍스트 락 sweep 자체를 건너뛰고 누적값 초기화 — 유휴 경합이 다음 프레임에 새지 않고, 빈 링 sweep 의 불필요한 락 경합도 제거. (b) Map 실패 시간도 D3D 호출 시간에 포함. (c) 귀속 창 정의 주석(마지막 publish 이후·GpuPending 동안·배치 단위·실패 hand-off 미보고) + "확정이 아니라 consistent-with" 로 완화. (d) LUID 미상은 `luid=?`. 버전 0.2.98→0.2.99(0.2.98 인스톨러는 미설치 상태라 dist 에서 제거).
 - 검증: Codex 프로브를 수정 코드로 재빌드·재실행 → `workerCtxWaitUs=0 workerD3dCallUs=52 captureToPublishUs=2009` **NOT REPRODUCED**. capture_readback/host_kick PASS, 전체 빌드 OK → `dist/GNLinkSetup-0.2.99.exe`(호스트만; 뷰어 0.2.97 호환).
 - 후속: 실기 A/B(100/0·8/0·8/2000) 와 `d3d-mt` 상태 전이 확인은 그대로 남음. 유휴 프로브를 정식 회귀(WARP 통합 테스트)로 승격하는 것은 미착수.
+
+### 390) 2026-09-06 정적 화면 지연·고화질 영상 장기 정지 원인 분석
+- 목표: 사용자가 반복 보고한 PC 뷰어 고화질 영상 정지/재시작 후 회복과 정적 화면·UAC 뒤 지연을, 실제 실행 경로 및 NAS 로그와 재현 실험으로 구분한다.
+- 변경 파일: `docs/stream_freeze_diagnosis_2026-09-06.md`(분석 보고서), `docs/history.md`, `docs/구현계획.md`(P2/P5 진단 상태 및 착수 근거 확인 상태만 갱신). 제품 코드 수정 없음. 원본 로그·분석 스크립트·별도 C++ 프로브는 `.claude/freeze-diagnosis-20260905/`에 보관하고 커밋에서 제외한다.
+- 확인 1: Windows `GNLinkViewer`는 `viewer_startup.cpp`에서 requestNack=false 기본값을 사용하며, 실제 `VideoReceiver::run_udp()`에는 영상 NACK 구동이 없다. 구현은 별도 `ClientSessionController` 경로에만 존재하고 shared_core_test도 그 경로를 링크한다. 기존 테스트 성공을 Windows 제품의 재전송 적용으로 해석할 수 없다.
+- 확인 2: 실제 FrameGate를 링크한 결정론적 프로브에서 Congested 진입 후 60초간 P프레임 3,600개 모두 폐기, 최초 IDR 요청 이후 재요청 0회. early return이 뒤쪽 waitForKey 재요청과 복구 deadline을 우회한다. 합성 프레임 뒤 6ms 실제 프레임 묶음도 정적 시간을 포함한 2,006,000us backlog로 오판하여 reason 1 복구가 발동했다.
+- 확인 3: 실제 assembler 프로브에서 무손실 IDR seq=1→3이 Completed+key+droppedPreviousIncomplete를 반환하여 Windows 수신부의 추가 IDR 요청 경로를 탄다. 09-05 15:44~15:53 저장 세션의 실제 reason=2 요청 90/90회가 완성된 키프레임+gap 직후와 일치했다(throttled 1건은 제외).
+- 호스트 측 근거: 동일 세션의 WGC→DXGI 복귀 후 readback pending 관찰 평균 4.193ms→71.581~500.052ms, peak 약1.017s. 캡처→큐 약1s 샘플도 존재. runtime 락·GPU·드라이버 대기의 최종 구분은 당시 로그로 불가하며 0.2.99의 실기 성공을 주장하지 않는다.
+- 장기 정지 사건: 11:20:42.749 seq=3261 이후 viewer 영상 진행 로그 중단, 약7초 후 제어도 peer-lost. host는 이 사이 키프레임을 포함해 계속 송신했다. 해당 사건의 마지막 congestionState는 normal이므로 위 Congested 결함만으로 동일 원인이라고 단정하지 않는다. 수신 스레드 정체와 UDP 전달 중단의 구분에는 별도 진행 heartbeat/패킷 근거가 필요하다.
+- 검증: 기존 viewer_frame_gate_test 및 native_video_client_shared_core_test PASS. 별도 viewer_gate_probe 2/2, assembly_gap_probe 1/1 문제 경로 재현(exit 0). 소프트웨어 상태 머신/조립기 검증이며 실기 네트워크·UAC 재현은 수행하지 않았다. 09-06 NAS 확인에서 해당 viewer의 최신 기록은 여전히 09-05 15:53 종료였다.
+- 다음 액션: Windows NACK 연결·완성 IDR 중복 요청 제거·프레임 도착과 독립된 복구 타이머를 먼저 구현/검증하고, synthetic idle 앵커와 호스트 readback 대기 A/B를 분리한다. 실제 Windows 바이너리 경로의 손실/복구 통합 테스트로 완료 판정한다.
