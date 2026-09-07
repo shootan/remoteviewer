@@ -805,6 +805,42 @@ void scenario_congested_first_idr_lost_recovers_by_timer() {
   CHECK(rig.gate.recoveryRetryCount >= 1, "the gate's timer drove the re-ask");
 }
 
+// S10: a still screen -- the host re-encodes its cached picture as synthetic frames every 150 ms
+// (a trailing kick per input, the 1 Hz refresh) -- then real content resumes as a burst of three
+// frames within a few ms, before the renderer has presented any of them. The burst must not be read
+// as a decode backlog (Congested + IDR); the field showed exactly this with streamLag ~0.
+void scenario_synthetic_idle_then_real_burst_no_false_congestion() {
+  std::printf("[S10] synthetic idle (kicks) then real burst: no false congestion\n");
+  FakeHost host;
+  ViewerRig rig;
+  LossPlan plan;
+  if (!start_session(host, rig, plan)) { ++gFailures; return; }
+  const uint64_t requestsBefore = host.keyframe_requests();
+  const uint64_t transitionsBefore = rig.gate.congestionTransitionCount;
+  // The renderer showed the last real frame; from here it does not advance the anchor (synthetic
+  // frames never do in viewer_present.cpp, and the burst lands before the next vsync).
+  sleep_ms(40);
+  rig.pinPresentAnchor = true;
+  for (int i = 0; i < 12; ++i) {
+    (void)host.TakeKeyframeRequest(rig.ctx.control.keyframeRequests);
+    (void)host.SendFrame(false, true, qpc_now_us());
+    sleep_ms(150);
+  }
+  const uint64_t burstStartUs = qpc_now_us();
+  for (int i = 0; i < 3; ++i) {
+    (void)host.SendFrame(false, false, burstStartUs + static_cast<uint64_t>(i) * kFrameIntervalUs);
+  }
+  sleep_ms(120);
+  CHECK(rig.gate.congestionTransitionCount == transitionsBefore,
+        "no congestion transition (state " + state_name(rig) + ", transitions +" +
+            std::to_string(rig.gate.congestionTransitionCount - transitionsBefore) + ")");
+  CHECK(host.keyframe_requests() == requestsBefore, "no keyframe request");
+  rig.pinPresentAnchor = false;
+  pump(host, rig, 300);
+  CHECK(rig.gate.congestionState == ClientCongestionState::Normal, "state " + state_name(rig));
+  CHECK(!rig.gate.waitForKeyFrame, "not waiting for a keyframe");
+}
+
 }  // namespace
 
 int main() {
@@ -827,6 +863,7 @@ int main() {
   scenario_completed_idr_after_seq_gap_needs_no_request();
   scenario_keyframe_wait_retries_on_timer_when_source_stops();
   scenario_congested_first_idr_lost_recovers_by_timer();
+  scenario_synthetic_idle_then_real_burst_no_false_congestion();
   MFShutdown();
   if (gFailures == 0) {
     std::printf("viewer_udp_recovery_test: PASS\n");

@@ -161,7 +161,10 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
     if (!payloadPtr) return true;
     ++st.recvFrames;
     st.recvBytes += h.payloadSize;
-    const uint64_t recvGapUs = fg.note_packet(packetNowUs);
+    // The gate keeps a real-content clock next to the heartbeat: a kick / static refresh must not
+    // make the next real frame look like a dense continuation (history #390 item 4).
+    const uint64_t recvGapUs =
+        fg.note_packet(packetNowUs, (h.flags & kEncodedFrameFlagSynthetic) != 0);
 
     if (!dec.useH264) {
       ++st.skippedQueued;

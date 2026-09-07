@@ -67,7 +67,14 @@ struct FrameGateState {
   uint64_t decodeEmptyStreakStartUs = 0;
   uint64_t waitingKeyDropCount = 0;
   uint64_t lagDropCount = 0;
+  // Two arrival clocks (history #390 item 4). lastPacketRecvUs is the heartbeat: every completed
+  // frame, host kicks and static refreshes included. lastRealPacketRecvUs is the real-content
+  // clock. The idle re-anchor and the dense-arrival test judge a REAL frame by the gap since the
+  // last REAL frame: a kick 150 ms after a sparse capture used to make the next real burst look
+  // dense (gap < 250 ms -> no re-anchor) while its capture sat 350-570 ms past the last presented
+  // real frame -> "decode backlog" -> Congested + IDR, with streamLag ~0 and presentBacklog 0.
   uint64_t lastPacketRecvUs = 0;
+  uint64_t lastRealPacketRecvUs = 0;
   uint32_t lagTriggerStreak = 0;
   uint64_t lastCatchupEnterUs = 0;
   uint64_t catchupEnterThrottledCount = 0;

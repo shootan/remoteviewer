@@ -72,7 +72,7 @@ struct Rig {
     in.seq = ++seq;
     in.keyFrame = key;
     in.packetNowUs = t;
-    in.recvGapUs = fg.note_packet(t);
+    in.recvGapUs = fg.note_packet(t, synthetic);
     in.presentedCapUs = presented;
     in.catchupSuppressed = suppressed;
     in.synthetic = synthetic;
@@ -665,7 +665,94 @@ void test_recovery_timer_without_frames_and_backoff_per_wait() {
   CHECK(off.sink.requests(7) == 0);
 }
 
+// history #390 item 4 (the probe in .claude/freeze-diagnosis-20260905, expectation inverted): a still
+// screen fed 2 s of synthetic frames (kicks / refreshes every 100 ms), then three real frames landed
+// within 6 ms, before the renderer's next vsync moved the present anchor. The synthetic arrivals kept
+// recvGap under the 250 ms idle threshold, so the resume frame never re-anchored the lag floor and
+// its 2 s of idle read as a decode backlog -> Congested + reason-1 IDR. The real-content clock fixes
+// that; a genuine dense backlog still trips.
+void test_synthetic_gap_then_real_burst_no_false_congestion() {
+  std::printf("[T1] synthetic idle then real burst: no false congestion; a real dense backlog still trips\n");
+  Rig r;
+  FrameGateInputs in{};
+  FrameGateLag lag{};
+  const uint64_t start = 1000 * kMs;
+  CHECK(r.feed(start, start, true, 0, false, &lag, &in) == FrameGateVerdict::Decode);
+  r.decoded(in);
+  // Still screen: synthetics every 100 ms are rendered, but the last REAL presented stamp stays `start`.
+  for (int n = 1; n <= 20; ++n) {
+    const uint64_t now = start + n * 100 * kMs;
+    CHECK(r.feed(now, now, false, start, false, &lag, &in, true) == FrameGateVerdict::Decode);
+    r.decoded(in);
+  }
+  // Fresh real frames after the idle, 2 ms apart, with only 6 ms before a 60 Hz renderer can paint.
+  for (int n = 1; n <= 3; ++n) {
+    const uint64_t now = start + 2000 * kMs + n * 2 * kMs;
+    CHECK(r.feed(now, now, false, start, false, &lag, &in, false) == FrameGateVerdict::Decode);
+    r.decoded(in);
+    CHECK(lag.decodeQueueLagEstimateUs < kDecodeQueueLagDropUs);  // the resume frame re-anchored the floor
+  }
+  CHECK(r.gate.congestionState == ClientCongestionState::Normal);
+  CHECK(r.gate.lagTriggerStreak == 0);
+  CHECK(r.sink.requests(1) == 0);
+  CHECK(r.sink.resets == 0);
+
+  // Not weakened: the same synthetic run, then a REAL backlog -- 25 real frames 16.7 ms apart while
+  // the present anchor never moves -- still enters Congested once the lag passes 300 ms.
+  Rig r2;
+  CHECK(r2.feed(start, start, true, 0, false, &lag, &in) == FrameGateVerdict::Decode);
+  r2.decoded(in);
+  for (int n = 1; n <= 20; ++n) {
+    const uint64_t now = start + n * 100 * kMs;
+    CHECK(r2.feed(now, now, false, start, false, &lag, &in, true) == FrameGateVerdict::Decode);
+    r2.decoded(in);
+  }
+  bool congested = false;
+  for (int n = 1; n <= 25 && !congested; ++n) {
+    const uint64_t now = start + 2000 * kMs + n * kFrame;
+    const uint64_t presented = start + 2000 * kMs + kFrame;  // the first real resume frame was presented, then nothing
+    const auto v = r2.feed(now, now, false, presented, false, &lag, &in, false);
+    if (v == FrameGateVerdict::Decode) r2.decoded(in);
+    congested = (r2.gate.congestionState == ClientCongestionState::Congested);
+  }
+  CHECK(congested);
+  CHECK(r2.sink.requests(1) == 1);
+}
+
+// While the gate waits for an IDR nothing is presented, so every dropped P frame reads as more
+// "decode lag"; that streak used to enter Congested (reset + reason-1 request) on top of a wait that
+// was already asking for the IDR. The wait's own drops must not feed the congestion trigger.
+void test_keyframe_wait_drops_do_not_enter_congested() {
+  std::printf("[T1] keyframe wait: dropped P frames with a stale present anchor do not enter Congested\n");
+  Rig r;
+  FrameGateInputs in{};
+  const uint64_t start = 1000 * kMs;
+  CHECK(r.feed(start, start, true, 0, false, nullptr, &in) == FrameGateVerdict::Decode);
+  r.decoded(in);
+  r.gate.waitForKeyFrame = true;  // a lost frame (the receiver's discontinuity path)
+  for (int n = 1; n <= 60; ++n) {
+    const uint64_t now = start + n * kFrame;
+    CHECK(r.feed(now, now, false, /*presented=*/start, false) == FrameGateVerdict::DropWaitingKeyframe);
+  }
+  CHECK(r.gate.congestionState == ClientCongestionState::Normal);
+  CHECK(r.gate.lagTriggerStreak == 0);
+  CHECK(r.sink.requests(1) == 0);
+  CHECK(r.sink.resets == 0);
+  // The IDR decodes; a genuine backlog afterwards still trips as before.
+  const uint64_t tIdr = start + 61 * kFrame;
+  CHECK(r.feed(tIdr, tIdr, true, start, false, nullptr, &in) == FrameGateVerdict::Decode);
+  r.decoded(in);
+  for (int n = 1; n <= 3; ++n) {
+    const uint64_t now = tIdr + n * kFrame;
+    r.feed(now, now, false, now - 400 * kMs, false, nullptr, &in);
+    if (n < 3) r.decoded(in);
+  }
+  CHECK(r.gate.congestionState == ClientCongestionState::Congested);
+}
+
 int main() {
+  test_keyframe_wait_drops_do_not_enter_congested();
+  test_synthetic_gap_then_real_burst_no_false_congestion();
   test_recovery_timer_retries_while_congested_without_idr();
   test_recovery_timer_without_frames_and_backoff_per_wait();
   test_congestion_entry_tunables();

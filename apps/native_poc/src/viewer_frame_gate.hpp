@@ -70,8 +70,10 @@ class FrameGate {
  public:
   FrameGate(FrameGateState& gate, RecvStats& st, FrameGateSink& sink) : gate(gate), st(st), sink(sink) {}
 
-  // Packet arrival bookkeeping: returns recvGapUs and resets the lag-trigger streak on sparse arrival.
-  uint64_t note_packet(uint64_t packetNowUs);
+  // Packet arrival bookkeeping: returns the frame's recvGapUs and resets the lag-trigger streak on
+  // sparse arrival. A real frame's gap is measured since the last REAL frame (kicks and static
+  // refreshes do not shorten it); a synthetic frame's gap is since any frame.
+  uint64_t note_packet(uint64_t packetNowUs, bool synthetic = false);
   // Pre-decode gating (stale / congestion / keyframe wait). `lag` receives the estimates.
   FrameGateVerdict admit(const FrameGateInputs& in, FrameGateLag* lag);
   // decode_access_unit failed.

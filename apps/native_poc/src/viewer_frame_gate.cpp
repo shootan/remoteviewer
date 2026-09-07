@@ -110,10 +110,20 @@ uint64_t FrameGate::aligned_lag_us(uint64_t remoteTsUs, uint64_t localNowUs,
     return (localNowUs >= expectedLocalUs) ? (localNowUs - expectedLocalUs) : 0;
 }
 
-uint64_t FrameGate::note_packet(uint64_t packetNowUs) {
-  const uint64_t recvGapUs =
+uint64_t FrameGate::note_packet(uint64_t packetNowUs, bool synthetic) {
+  const uint64_t anyGapUs =
       (gate.lastPacketRecvUs > 0 && packetNowUs >= gate.lastPacketRecvUs) ? (packetNowUs - gate.lastPacketRecvUs) : 0;
+  const uint64_t realGapUs =
+      (gate.lastRealPacketRecvUs > 0 && packetNowUs >= gate.lastRealPacketRecvUs)
+          ? (packetNowUs - gate.lastRealPacketRecvUs)
+          : 0;
   gate.lastPacketRecvUs = packetNowUs;
+  if (!synthetic) gate.lastRealPacketRecvUs = packetNowUs;
+  // A real frame is judged on the real-content clock: the seconds a still screen spent sending
+  // kicks / refreshes are idle time for the decode pipeline, and the resume frame must re-anchor
+  // the lag floor (admit) exactly as it does after a silent idle. A synthetic frame keeps reporting
+  // the heartbeat gap; it never feeds the congestion trigger anyway.
+  const uint64_t recvGapUs = synthetic ? anyGapUs : realGapUs;
   if (recvGapUs > 250000) {
     // Sparse arrival usually means source/capture stall, not decoder backlog.
     gate.lagTriggerStreak = 0;
@@ -237,8 +247,13 @@ FrameGateVerdict FrameGate::admit(const FrameGateInputs& in, FrameGateLag* lag) 
   const bool lagTrigger =
       (decodeQueueLagEstimateUs > gate.decodeQueueLagDropUs) ||
       (in.presentedCapUs > 0 && streamLagUs > gate.catchupLagDropUs);
+  // A non-key frame the keyframe wait is about to drop is not evidence of a backlog: nothing is
+  // presented while the gate waits, so the lag estimate only measures the wait itself, and the
+  // streak it built entered Congested (decoder reset + reason-1 request) on top of a wait that
+  // was already asking for the same IDR. Integration test S8 showed this on every resume.
+  const bool keyWaitDrop = gate.waitForKeyFrame && !in.keyFrame;
   // denseArrival computed above (reused by the stale-behind-latest gate).
-  if (lagTrigger && denseArrival && !in.catchupSuppressed && !in.synthetic) {
+  if (lagTrigger && denseArrival && !in.catchupSuppressed && !in.synthetic && !keyWaitDrop) {
     if (gate.lagTriggerStreak < std::numeric_limits<uint32_t>::max()) {
       ++gate.lagTriggerStreak;
     }
