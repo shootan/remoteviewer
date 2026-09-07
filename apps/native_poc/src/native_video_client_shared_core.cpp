@@ -12,8 +12,6 @@ namespace {
 constexpr size_t kMaxInputQueueSize = 256;
 constexpr uint32_t kMaxUdpAssembledPayloadBytes = 16u * 1024u * 1024u;
 constexpr uint16_t kMaxUdpVideoChunks = 16384;
-constexpr size_t kMaxConcurrentVideoAssemblies = 3;
-
 bool sequence_is_newer(uint32_t value, uint32_t reference) {
   return static_cast<int32_t>(value - reference) > 0;
 }
@@ -623,6 +621,63 @@ void UdpH264FrameAssembler::Reset() {
   lastDeliveredSeq_ = 0;
 }
 
+void UdpH264FrameAssembler::ConfigureInOrderHold(uint64_t maxHoldUs, size_t maxConcurrent) {
+  holdMaxUs_ = maxHoldUs;
+  maxConcurrent_ = std::max<size_t>(1, maxConcurrent);
+}
+
+// Hand one assembled AU out: the completion block PushDatagram used to run inline, so the legacy
+// immediate path and the in-order hold path deliver byte-identical results.
+UdpH264AssemblyStepResult UdpH264FrameAssembler::DeliverAssembly(Assembly& assembly) {
+  UdpH264AssemblyStepResult result{};
+  result.packetSeq = assembly.seq;
+  result.expectedSeq = deliveredAny_ ? lastDeliveredSeq_ + 1u : assembly.seq;
+  assembly.header.payloadSize = assembly.payloadSize;
+  result.disposition = UdpH264AssemblyDisposition::Completed;
+  result.frame.header = assembly.header;
+  result.frame.payload = std::move(assembly.payload);
+  result.fecRecovered = assembly.fecRecoveredChunks > 0;
+  result.fecRecoveredChunks = assembly.fecRecoveredChunks;
+  if (deliveredAny_ && assembly.seq != lastDeliveredSeq_ + 1u) {
+    result.droppedPreviousIncomplete = true;
+  }
+  deliveredAny_ = true;
+  lastDeliveredSeq_ = assembly.seq;
+  assemblies_.erase(std::remove_if(assemblies_.begin(), assemblies_.end(),
+                                   [&](const Assembly& item) {
+                                     return !sequence_is_newer(item.seq, lastDeliveredSeq_);
+                                   }),
+                    assemblies_.end());
+  return result;
+}
+
+bool UdpH264FrameAssembler::PopDelivery(uint64_t nowUs, bool repairNonKey,
+                                        UdpH264AssemblyStepResult* out) {
+  if (!out) return false;
+  while (!assemblies_.empty()) {
+    // Sequence order, not arrival order: a reordered network can start a newer AU first.
+    auto oldest = std::min_element(assemblies_.begin(), assemblies_.end(),
+                                   [](const Assembly& a, const Assembly& b) {
+                                     return sequence_is_newer(b.seq, a.seq);
+                                   });
+    if (oldest->complete) {
+      *out = DeliverAssembly(*oldest);
+      return true;
+    }
+    const bool anyComplete = std::any_of(assemblies_.begin(), assemblies_.end(),
+                                         [](const Assembly& a) { return a.complete; });
+    if (!anyComplete) return false;  // nothing behind it to release anyway
+    const bool keyFrame = (oldest->header.flags & kEncodedFrameFlagKeyFrame) != 0;
+    const bool worthHolding = (repairNonKey || keyFrame) &&
+                              holdMaxUs_ > 0 && nowUs < oldest->firstPacketUs + holdMaxUs_;
+    if (worthHolding) return false;  // its retransmit may still land
+    // Hold expired (or not worth it): give the AU up. The next delivery then carries the seq gap
+    // as droppedPreviousIncomplete, exactly as the legacy path reported it.
+    assemblies_.erase(oldest);
+  }
+  return false;
+}
+
 bool UdpH264FrameAssembler::OldestIncomplete(uint16_t* missingOut, uint16_t maxMissing,
                                              IncompleteAuInfo* info) const {
   for (const Assembly& a : assemblies_) {
@@ -646,6 +701,7 @@ bool UdpH264FrameAssembler::OldestIncomplete(uint16_t* missingOut, uint16_t maxM
       info->missingTotal = total;
       info->highWater = static_cast<uint16_t>(highWater);
       info->keyFrame = (a.header.flags & kEncodedFrameFlagKeyFrame) != 0;
+      info->firstPacketUs = a.firstPacketUs;
     }
     return true;
   }
@@ -653,6 +709,11 @@ bool UdpH264FrameAssembler::OldestIncomplete(uint16_t* missingOut, uint16_t maxM
 }
 
 UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* data, size_t len) {
+  return PushDatagram(data, len, 0);
+}
+
+UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* data, size_t len,
+                                                              uint64_t nowUs) {
   UdpH264AssemblyStepResult result{};
   if (!data || len < sizeof(UdpVideoChunkHeader)) return result;
 
@@ -731,12 +792,21 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* dat
   auto assemblyIt = std::find_if(assemblies_.begin(), assemblies_.end(),
                                  [&](const Assembly& item) { return item.seq == packet.seq; });
   if (assemblyIt == assemblies_.end()) {
-    if (assemblies_.size() >= kMaxConcurrentVideoAssemblies) {
-      assemblies_.pop_front();
+    if (assemblies_.size() >= maxConcurrent_) {
+      if (holdMaxUs_ > 0) {
+        // The oldest by sequence is the stuck head (complete ones were already popped).
+        assemblies_.erase(std::min_element(assemblies_.begin(), assemblies_.end(),
+                                           [](const Assembly& a, const Assembly& b) {
+                                             return sequence_is_newer(b.seq, a.seq);
+                                           }));
+      } else {
+        assemblies_.pop_front();
+      }
       result.droppedPreviousIncomplete = true;
     }
     Assembly created{};
     created.seq = packet.seq;
+    created.firstPacketUs = nowUs;
     created.payloadSize = packet.payloadSize;
     created.chunkCount = packet.chunkCount;
     created.chunkStride = packet.chunkStride;
@@ -836,6 +906,7 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* dat
     ++assembly.receivedCount;
     result.fecRecovered = true;
     ++result.fecRecoveredChunks;
+    ++assembly.fecRecoveredChunks;
   }
 
   for (uint16_t index = 0; index < assembly.chunkCount; ++index) {
@@ -849,20 +920,20 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* dat
     return result;
   }
 
-  assembly.header.payloadSize = assembly.payloadSize;
-  result.disposition = UdpH264AssemblyDisposition::Completed;
-  result.frame.header = assembly.header;
-  result.frame.payload = std::move(assembly.payload);
-  if (deliveredAny_ && packet.seq != lastDeliveredSeq_ + 1u) {
-    result.droppedPreviousIncomplete = true;
+  if (holdMaxUs_ > 0) {
+    // In-order hold: complete, but PopDelivery decides when it goes out.
+    assembly.complete = true;
+    result.disposition = UdpH264AssemblyDisposition::Queued;
+    return result;
   }
-  deliveredAny_ = true;
-  lastDeliveredSeq_ = packet.seq;
-  assemblies_.erase(std::remove_if(assemblies_.begin(), assemblies_.end(),
-                                   [&](const Assembly& item) {
-                                     return !sequence_is_newer(item.seq, lastDeliveredSeq_);
-                                   }),
-                    assemblies_.end());
+  const bool droppedByEviction = result.droppedPreviousIncomplete;
+  const bool fecRecovered = result.fecRecovered;
+  const uint32_t fecRecoveredChunks = result.fecRecoveredChunks;
+  result = DeliverAssembly(assembly);
+  result.packetChunkOffset = packet.chunkOffset;
+  result.droppedPreviousIncomplete = result.droppedPreviousIncomplete || droppedByEviction;
+  result.fecRecovered = fecRecovered;
+  result.fecRecoveredChunks = fecRecoveredChunks;
   return result;
 }
 

@@ -263,6 +263,9 @@ enum class UdpH264AssemblyDisposition : uint8_t {
   Completed,
   Malformed,
   Dropped,
+  // In-order hold on (ConfigureInOrderHold): this datagram completed its AU, which now waits in
+  // sequence order for PopDelivery instead of being handed out here. (Windows NACK wiring.)
+  Queued,
 };
 
 struct UdpH264AssembledFrame {
@@ -290,6 +293,27 @@ class UdpH264FrameAssembler {
  public:
   void Reset();
   UdpH264AssemblyStepResult PushDatagram(const uint8_t* data, size_t len);
+  // Same, stamping the AU's first arrival with `nowUs` (the in-order hold clock below).
+  UdpH264AssemblyStepResult PushDatagram(const uint8_t* data, size_t len, uint64_t nowUs);
+
+  // --- In-order delivery hold (video NACK) ---
+  // Without it a completed AU is delivered the moment it completes and every OLDER incomplete AU
+  // is discarded with it (the seq gap then reads as loss). At 60 fps the next P completes ~16 ms
+  // after a lost chunk, before a NACK round (25 ms grace) can bring the chunk back -- so NACK only
+  // ever helped a sparse (static-screen) stream. With maxHoldUs > 0, PushDatagram returns Queued
+  // for a completed AU and PopDelivery hands AUs out in sequence order: a completed AU waits behind
+  // an older incomplete one for up to maxHoldUs (its retransmit may still land); past that the
+  // older AU is dropped and delivery resumes carrying droppedPreviousIncomplete. maxHoldUs = 0
+  // keeps the legacy immediate delivery (the Android path is unchanged). `maxConcurrent` bounds
+  // the assemblies held (legacy 3; a hold of ~120 ms at 60 fps needs ~8).
+  void ConfigureInOrderHold(uint64_t maxHoldUs, size_t maxConcurrent);
+  bool InOrderHoldEnabled() const { return holdMaxUs_ > 0; }
+  // Deliver the next AU in sequence order if one is ready, or if the incomplete AU ahead of it has
+  // outlived its hold. `repairNonKey` false: an IDR is awaited, so an incomplete NON-key head is
+  // not worth waiting for and is released at once (an incomplete keyframe still is -- it is the
+  // only recovery point). Call after every datagram and on every receive timeout, until false.
+  bool PopDelivery(uint64_t nowUs, bool repairNonKey, UdpH264AssemblyStepResult* out);
+  size_t PendingCount() const { return assemblies_.size(); }
 
   struct IncompleteAuInfo {
     uint32_t seq = 0;
@@ -302,6 +326,9 @@ class UdpH264FrameAssembler {
     // on large frames whose send time exceeds the reorder grace). (Codex: frame-end aware NACK.)
     uint16_t highWater = 0;
     bool keyFrame = false;  // repairing the keyframe is allowed even while waiting for a keyframe
+    // When the AU's first datagram arrived (PushDatagram's nowUs; 0 on the legacy overload), so the
+    // NACK graces run from the AU's own age rather than from when the scheduler first saw it.
+    uint64_t firstPacketUs = 0;
   };
   // Video NACK: describe the oldest still-incomplete AU (the one blocking delivery) and list up to
   // `maxMissing` of its missing data-chunk indices in `missingOut` (indices are ascending, so the
@@ -323,11 +350,20 @@ class UdpH264FrameAssembler {
     std::vector<uint8_t> parityReceived;
     // Which layout this frame's parity uses, learned from the first parity packet to arrive.
     uint8_t parityInterleaved = 0;
+    // In-order hold bookkeeping: when the first datagram of this AU arrived (the hold clock), whether
+    // every data chunk is in (awaiting PopDelivery), and how many chunks parity repaired.
+    uint64_t firstPacketUs = 0;
+    bool complete = false;
+    uint32_t fecRecoveredChunks = 0;
   };
+
+  UdpH264AssemblyStepResult DeliverAssembly(Assembly& assembly);
 
   std::deque<Assembly> assemblies_;
   bool deliveredAny_ = false;
   uint32_t lastDeliveredSeq_ = 0;
+  uint64_t holdMaxUs_ = 0;      // 0 = legacy immediate delivery
+  size_t maxConcurrent_ = 3;    // kMaxConcurrentVideoAssemblies unless ConfigureInOrderHold raised it
 };
 
 struct WindowTargetUiEntry {

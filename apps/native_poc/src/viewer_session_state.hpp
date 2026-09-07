@@ -51,6 +51,12 @@ struct SessionState {
   std::atomic<bool> imeEnterPending{false};    // control thread: run the EN-align exchange, then activate
   std::atomic<bool> unlockRequested{false};  // set by the unlock trigger; the control thread runs it
   std::atomic<bool> unlockSupported{false};  // host advertised kCaptureFlagUnlockSealedV1 (Pong)
+  // UDP video handshake result: the HelloAck feature bits, and whether the host acknowledged
+  // kUdpFeatureVideoNack so the recv thread may ask for selective retransmits. main sets both at
+  // connect, before the threads start; the recv thread reads. (Windows NACK wiring: the viewer
+  // used to discard the ack bits, so the 0.2.95/96 NACK path never ran in GNLinkViewer.)
+  uint32_t udpHelloAckFeatures = 0;
+  bool hostSupportsNack = false;
   // Which candidate won the race. The relay is billed per byte, so the session says which one it
   // is rather than leaving the user to guess from the bill.
   std::atomic<bool> relayPath{false};

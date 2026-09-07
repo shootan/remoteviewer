@@ -28,10 +28,18 @@ namespace remote60::native_poc::viewer {
 
 class VideoReceiver {
  public:
+  // Video NACK policy of this session (Windows NACK wiring): `enabled` = the host acknowledged
+  // kUdpFeatureVideoNack (and the env did not turn it off), `holdUs` = the assembler's in-order
+  // hold while a retransmit may still repair an older AU (0 = legacy immediate delivery).
+  struct NackOptions {
+    bool enabled = false;
+    uint64_t holdUs = 0;
+  };
   VideoReceiver(ViewerState& ctx, const Args& args, DecoderState& dec, FrameGateState& gate,
-                uint64_t startUs, uint32_t udpSimDropPm, uint32_t udpSimDropSeed)
+                uint64_t startUs, uint32_t udpSimDropPm, uint32_t udpSimDropSeed,
+                NackOptions nack = {})
       : ctx(ctx), args(args), dec(dec), gate(gate), startUs(startUs), udpSimDropPm(udpSimDropPm),
-        udpSimDropSeed(udpSimDropSeed) {}
+        udpSimDropSeed(udpSimDropSeed), nack(nack) {}
   // The thread body (formerly the recvThread lambda).
   void Run();
 
@@ -45,6 +53,7 @@ class VideoReceiver {
   const uint64_t startUs;
   const uint32_t udpSimDropPm;
   const uint32_t udpSimDropSeed;
+  const NackOptions nack;
   RecvStats st;
   // what the frame gate may do to the decoder and the control path
   struct DecoderSink : FrameGateSink {

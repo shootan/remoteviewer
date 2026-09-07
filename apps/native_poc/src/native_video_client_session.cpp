@@ -2,6 +2,7 @@
 
 #include "native_video_client_tcp_control.hpp"
 #include "poc_protocol.hpp"
+#include "udp_video_nack.hpp"
 
 #include <algorithm>
 #include <array>
@@ -513,70 +514,19 @@ void ClientSessionController::VideoReceiveMain() {
 
   // Video NACK: ask the host to replay the missing chunks of the oldest stuck AU, instead of
   // waiting for the next (on a static screen, far-off) frame to reveal the loss and then eating a
-  // full IDR. Only when the host advertised support. Bounded by a reorder grace and a few rounds;
-  // if it does not recover, the existing keyframe path takes over. (video NACK.)
-  uint32_t nackSeq = 0;
-  uint64_t nackFirstUs = 0;
-  uint64_t nackLastUs = 0;
-  uint32_t nackRounds = 0;
+  // full IDR. Only when the host advertised support. The grace / round policy lives in the shared
+  // VideoNackScheduler (udp_video_nack.hpp) so the Windows viewer drives the same rules; if it does
+  // not recover, the existing keyframe path takes over. (video NACK; Windows NACK wiring.)
+  VideoNackScheduler nackScheduler;
   auto maybe_send_nack = [&](SocketHandle sock) {
     if (sock == kInvalidSocket || !hostSupportsNack_.load(std::memory_order_relaxed)) return;
-    constexpr uint16_t kMax = remote60::native_poc::kUdpVideoNackMaxMissing;
-    uint16_t missing[kMax];
-    UdpH264FrameAssembler::IncompleteAuInfo info{};
-    if (!assembler.OldestIncomplete(missing, kMax, &info)) {
-      nackSeq = 0;
-      nackRounds = 0;
-      return;
-    }
     // While waiting for an IDR, only repairing THAT keyframe helps -- a non-key incomplete AU will
     // be resynced by the coming IDR. But the keyframe itself MUST be repairable here, or a lossy
     // 200KB IDR never completes and the picture is stuck (the 60s freeze). (Codex.)
-    if (waitForKeyframe && !info.keyFrame) {
-      nackSeq = 0;
-      nackRounds = 0;
-      return;
-    }
-    const uint64_t now = now_us();
-    if (info.seq != nackSeq) {  // a different AU is now the blocker -> restart the round schedule
-      nackSeq = info.seq;
-      nackFirstUs = now;
-      nackLastUs = 0;
-      nackRounds = 0;
-    }
-    // A missing index below highWater is a confirmed hole (a later chunk already arrived); ask for
-    // it after a short reorder grace. A missing index at/above highWater is the still-in-flight tail
-    // of a large frame -- NACKing it early is exactly what ignites a retransmit flood, so wait a much
-    // longer grace (the whole frame should have arrived) before touching it. (Codex: frame-end aware.)
-    constexpr uint64_t kGapGraceUs = 25000;    // reorder settle for a confirmed hole
-    constexpr uint64_t kTailGraceUs = 120000;  // large frame fully sent by now
-    constexpr uint64_t kRoundUs = 25000;       // spacing between rounds (>= a few RTTs)
-    constexpr uint32_t kMaxRounds = 3;         // then give up -> the IDR path recovers
-    if (nackRounds >= kMaxRounds) return;
-    if (nackLastUs != 0 && now - nackLastUs < kRoundUs) return;
-    const uint64_t age = now - nackFirstUs;
-    const bool gapEligible = age >= kGapGraceUs;
-    const bool tailEligible = age >= kTailGraceUs;
-    if (!gapEligible && !tailEligible) return;
-    const uint16_t have = std::min<uint16_t>(info.missingTotal, kMax);
-    uint16_t out[kMax];
-    uint16_t outCount = 0;
-    for (uint16_t i = 0; i < have; ++i) {
-      const bool isTail = missing[i] >= info.highWater;
-      if (isTail ? !tailEligible : !gapEligible) continue;
-      out[outCount++] = missing[i];
-    }
-    if (outCount == 0) return;  // only the tail remains and its long grace has not elapsed yet
     UdpVideoNackPacket nack{};
-    nack.streamGeneration = info.generation;
-    nack.seq = info.seq;
-    nack.chunkCount = info.chunkCount;
-    nack.missingCount = outCount;
-    nack.round = static_cast<uint16_t>(nackRounds);
-    std::memcpy(nack.missing, out, static_cast<size_t>(outCount) * sizeof(uint16_t));
-    (void)send(sock, reinterpret_cast<const char*>(&nack), sizeof(nack), 0);
-    ++nackRounds;
-    nackLastUs = now;
+    if (nackScheduler.Poll(assembler, !waitForKeyframe, now_us(), &nack)) {
+      (void)send(sock, reinterpret_cast<const char*>(&nack), sizeof(nack), 0);
+    }
   };
 
   while (!stopRequested_.load(std::memory_order_acquire)) {

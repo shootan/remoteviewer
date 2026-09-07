@@ -94,6 +94,9 @@ void load_config(ViewerContext& ctx, int argc, char** argv) {
       "REMOTE60_NATIVE_UDP_SIM_DROP_PM", 0, 0, 1000);
   ctx.udpSimDropSeed = env_u32_clamped(
       "REMOTE60_NATIVE_UDP_SIM_DROP_SEED", 0, 0, 0x7fffffffu);
+  ctx.videoNackEnabled = env_u32_clamped("REMOTE60_NATIVE_VIDEO_NACK", 1, 0, 1) != 0;
+  ctx.videoNackHoldUs = env_u32_clamped("REMOTE60_NATIVE_VIDEO_NACK_HOLD_US", 120000, 0, 2000000);
+  ctx.udpRecvTimeoutMs = env_u32_clamped("REMOTE60_NATIVE_UDP_RECV_TIMEOUT_MS", 25, 1, 1000);
   ctx.control.keyframeRequests.Reset();
 }
 
@@ -373,13 +376,21 @@ int connect_media_socket(ViewerContext& ctx) {
     hello.budgetMs = 10000;
     hello.sliceMaxMs = 200;
     hello.retrySleepMs = 50;
+    // Ask for selective retransmit (kUdpFeatureVideoNack) and keep the HelloAck bits: the recv
+    // thread only NACKs against a host that acknowledged it, and an old host that never sets the
+    // bit is never sent one. (Windows NACK wiring -- the ack used to be discarded here.)
+    hello.requestNack = ctx.videoNackEnabled;
+    uint32_t ackFeatures = 0;
     std::string helloError;
-    const bool handshakeOk =
-        remote60::native_poc::udp_hello_handshake(ctx.session.sock, hello, nullptr, &helloError);
-    // Back to a blocking read, as before; the control tunnel (if any) sets its own timeout next.
-    int timeoutMs = 0;
+    const bool handshakeOk = remote60::native_poc::udp_hello_handshake(
+        ctx.session.sock, hello, nullptr, &helloError, &ackFeatures);
+    // A short receive timeout from here on, on BOTH the direct and the tunnelled path. It is the
+    // clock of everything the recv thread does on a quiet link -- NACK rounds, the in-order hold,
+    // the keyframe recovery deadline, the control tunnel's retransmits -- and the direct path used
+    // to block forever, which left a lost chunk on a static screen unrepaired until the next frame.
+    const DWORD recvTimeoutMs = ctx.udpRecvTimeoutMs;
     (void)setsockopt(ctx.session.sock, SOL_SOCKET, SO_RCVTIMEO,
-                     reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
+                     reinterpret_cast<const char*>(&recvTimeoutMs), sizeof(recvTimeoutMs));
     if (!handshakeOk) {
       std::cerr << "[native-video-client] udp handshake failed " << ctx.resolvedArgs.host << ":"
                 << ctx.resolvedArgs.port << " (" << helloError << ")\n";
@@ -388,6 +399,15 @@ int connect_media_socket(ViewerContext& ctx) {
       if (ctx.dec.mfStarted) MFShutdown();
       return 6;
     }
+    ctx.session.udpHelloAckFeatures = ackFeatures;
+    ctx.session.hostSupportsNack =
+        ctx.videoNackEnabled &&
+        (ackFeatures & remote60::native_poc::kUdpFeatureVideoNack) != 0;
+    std::cout << "[native-video-client] udp hello ack features=0x" << std::hex << ackFeatures
+              << std::dec << " nackRequested=" << (ctx.videoNackEnabled ? 1 : 0)
+              << " nackNegotiated=" << (ctx.session.hostSupportsNack ? 1 : 0)
+              << " nackHoldUs=" << ctx.videoNackHoldUs
+              << " recvTimeoutMs=" << ctx.udpRecvTimeoutMs << "\n";
   }
   return 0;
 }
@@ -404,11 +424,8 @@ void attach_control_tunnel_and_log(ViewerContext& ctx) {
         remote60::native_poc::kUdpControlStreamClientToHost,
         remote60::native_poc::kUdpControlStreamHostToClient, ctx.args.udpMtu);
     ctx.control.overUdp.store(true, std::memory_order_release);
-    // Without this the receive blocks forever on a link that has gone quiet, and the tick above
-    // never runs -- which is the one moment recovery is needed.
-    DWORD recvTimeoutMs = 200;
-    setsockopt(ctx.session.sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&recvTimeoutMs),
-               sizeof(recvTimeoutMs));
+    // The receive timeout that lets the tick above run on a quiet link is set once for every UDP
+    // session in connect_media_socket (it used to be set here, for the tunnel only).
     std::cout << "[native-video-client] control tunnelled over the media socket\n";
   }
 
@@ -511,7 +528,11 @@ void connect_control(ViewerContext& ctx) {
 
 void start_receiver(ViewerContext& ctx) {
   ctx.startUs = qpc_now_us();
-  ctx.receiver.emplace(ctx, ctx.args, ctx.dec, ctx.gate, ctx.startUs, ctx.udpSimDropPm, ctx.udpSimDropSeed);
+  VideoReceiver::NackOptions nack;
+  nack.enabled = ctx.session.hostSupportsNack;
+  nack.holdUs = ctx.videoNackHoldUs;
+  ctx.receiver.emplace(ctx, ctx.args, ctx.dec, ctx.gate, ctx.startUs, ctx.udpSimDropPm, ctx.udpSimDropSeed,
+                       nack);
   ctx.recvThread = std::thread([&ctx]() { ctx.receiver->Run(); });
 }
 
