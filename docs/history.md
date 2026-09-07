@@ -8747,3 +8747,9 @@ Next action
 - 빌드·산출물: 전체 Release 빌드 exit 0. `dist/GNLinkSetup-0.2.103.exe` — 3,466,240 bytes, sha256 c263758bba03c8c2f3a3e2e9e6eeae96649a8739b96526e352e4e8b0e4268daf, 임베드 버전 0.2.103(0.2.102 문자열 없음), 빌드 트리 = 1005ebe + 이 커밋의 product_version.hpp; 빌드 로그 `.claude/release_build_0.2.103.log`. 설치·push·서버 배포 없음.
 - 검증: 릴리스 바이너리 sweep(`.claude/release_0.2.103_sweep.txt`) 40종 = **38 PASS + 2 FAIL** — (1) `udp_control_e2e_test` 환경(UDP 43000 = PID 13856 GNLinkStream.exe 라이브 호스트, 미중지), (2) `viewer_udp_recovery_test` **S12** 간헐 FAIL(`release_0.2.103_sweep_fail_remote60_viewer_udp_recovery_test.log`:162 `host.corrupted_keys()==1` — `SendFrame(forceKey)` 직후 검사하지만 비동기 인코더 호출에서는 IDR 이 그 호출에 안 나올 수 있어 corrupt 가 뒤의 pump 에서 일어남; 0.2.100 부터 있던 하네스 타이밍 문제, S13 수정과 무관, 이번 계획 범위 밖이라 **미수정·발견사항으로 보고**). S13 은 수정 후 모든 실행(단독 3·sweep 2·릴리스 sweep 1·릴리스 단독 1)에서 PASS. 릴리스 바이너리 단독 재실행 `.claude/release_0.2.103_recovery_standalone.log` PASS(특성 파악용, 상쇄 근거 아님). 앞선 수정 후 sweep ×2 는 #409.
 - 상태: 검증용 Claude 의 "구현 OK" 와 Codex 최종 확인 전 — 완료 아님(task working). 미검증: 사용자 실기(호스트 재시작·재로그인 뒤 NAS 로그, 회사 클라 재로그인, UAC 2회, 정적 타이핑·영상 회귀, 원점 변경 배치; 다중 모니터 장비 없음).
+
+### 411) 2026-09-07 검증용 NEEDS_CHANGES(경미) 반영 — T-P11d 문구(e08de14)·S12 하네스 발견사항 F-22 기록 (A2A task t-5ahw0t5x)
+- 검증용 최종 검사(seq 1115 계열, 우편함 지연 수신): 40b836e/d980ff0/1005ebe/acd8233 diff 대조 OK, 검증용 직접 실행 frame_gate·recovery PASS, 설치본 c263758b… payload 6개 = Release 빌드 sha256 동일. NEEDS_CHANGES 1건 = T-P11d 문구(이미 **e08de14** test(viewer) 로 반영: printf·주석 "decoded keyframe" → "fresh keyframe (anchored at admit)", 동작 변경 없음).
+- 이 커밋: `docs/뷰어_리팩터_발견사항.md` F-22 — S12 `viewer_udp_recovery_test.cpp:1294` 단정이 비동기 인코더와 경쟁(하네스, 제품 회귀 아님, 범위 밖·미수정, Codex 범위 판단 대기). `docs/history.md` #411.
+- 설치본: 제품 소스는 acd8233 과 동일(e08de14·이 커밋은 테스트/문서만) → `dist/GNLinkSetup-0.2.103.exe` 재생성 불필요, build-local 제품 바이너리 미변경. 테스트 exe(`remote60_viewer_frame_gate_test`)만 재빌드해 1회 실행(로그 `.claude/tp11d_frame_gate_e08de14.log`).
+- 상태: task working 유지, 검증용 재검사 대기. 설치·push·서버 배포 없음.
