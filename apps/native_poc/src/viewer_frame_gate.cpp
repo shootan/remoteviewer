@@ -153,8 +153,9 @@ FrameGateVerdict FrameGate::admit(const FrameGateInputs& in, FrameGateLag* lag) 
   // would hide it and break the recovery-timeout re-request. So the floor (and its use) apply to the
   // congestion-ENTRY estimate in the Normal state only.
   const bool congestionHealthy = (gate.congestionState == ClientCongestionState::Normal);
-  // Lifetime: pending is a Normal-state, same-episode notion. A state change, a keyframe wait or
-  // a decoder resync (note_reference_sync) ends it.
+  // Lifetime: pending is a Normal-state, same-episode notion. It ends on a fresh anchor (below),
+  // the budget, a state change or a keyframe wait -- all decided here. A decoded frame, key or
+  // not, does NOT end it (note_reference_sync): a held or stamp-unknown keyframe keeps it.
   if (!congestionHealthy || gate.waitForKeyFrame) gate.resumeAnchorPending = false;
   // P11: the resume frame must be provably FRESH to anchor. hostHoldUs is host-clock only (send -
   // capture): the host's own age for this picture, not a network or viewer backlog. A frame the
@@ -472,7 +473,12 @@ void FrameGate::note_timestamp_overflow(const FrameGateInputs& in, const FrameGa
 }
 
 void FrameGate::note_reference_sync(const FrameGateInputs& in) {
-  gate.resumeAnchorPending = false;  // a decoded keyframe is the anchor; any pending ends here (P11)
+  // Deliberately no resumeAnchorPending change here (P11, 2026-09-07 S13 regression): the
+  // receiver calls this for EVERY decoded frame, so clearing pending here ended it the moment the
+  // held resume frame itself decoded, and the fresh burst behind it read as an 0.8 s backlog. A
+  // fresh keyframe already ends pending in admit (it is the anchor); a held or stamp-unknown
+  // keyframe is a held picture like any other and keeps it. Pending's lifetime is decided in
+  // admit: fresh anchor, budget, state change, keyframe wait.
   gate.waitForKeyFrame = false;
   if (in.keyFrame) {
     // Advance the reference-chain anchor: a successfully decoded IDR resyncs the decoder, so

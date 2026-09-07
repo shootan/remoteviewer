@@ -116,6 +116,9 @@ struct FrameGateState {
   // leaves the anchor PENDING; the first fresh frame after it (hold <= resumeAnchorMaxHoldUs)
   // anchors. Bounded: after resumeAnchorPendingMaxFrames or resumeAnchorPendingMaxUs without a
   // fresh frame -- a genuine backlog holds every frame -- the old rule resumes and the lag trips.
+  // Lifetime is decided in admit only: fresh anchor, budget, state change, keyframe wait. A
+  // decoded frame does not end it -- a held or stamp-unknown IDR keeps pending like any held
+  // frame (the S13 regression of 2026-09-07 came from ending it on every decode).
   uint64_t resumeAnchorMaxHoldUs = 300000;
   uint32_t resumeAnchorPendingMaxFrames = 8;
   uint64_t resumeAnchorPendingMaxUs = 500000;

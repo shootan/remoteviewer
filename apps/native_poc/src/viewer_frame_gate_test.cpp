@@ -84,11 +84,34 @@ struct Rig {
     if (inOut) *inOut = in;
     return v;
   }
-  // A frame that decoded: what the receiver does on the Decode verdict when the decoder succeeds.
+  // A frame that decoded: what the receiver does on the Decode verdict when the decoder succeeds
+  // (viewer_video_receiver_frame.cpp: note_decode_ok -> note_reference_sync for EVERY decoded
+  // frame, key or not -> clear_empty_streak). Tests that model the real path call this after
+  // every Decode verdict, not only after keyframes.
   void decoded(const FrameGateInputs& in) {
     fg.note_decode_ok();
     fg.note_reference_sync(in);
     fg.clear_empty_streak();
+  }
+  // The decoder accepted the AU but produced no picture (async decoder holding it): the receiver
+  // still calls note_reference_sync, then note_decode_empty.
+  void decodedEmpty(const FrameGateInputs& in, const FrameGateLag& lag) {
+    fg.note_decode_ok();
+    fg.note_reference_sync(in);
+    fg.note_decode_empty(in, lag);
+  }
+  // The decoder rejected the AU.
+  void decodeFailed(const FrameGateInputs& in, const FrameGateLag& lag) { fg.note_decode_failure(in, lag); }
+  // Receiver-faithful feed: admit, and on Decode do what the receiver does after a successful decode.
+  FrameGateVerdict feedDecoded(uint64_t t, uint64_t captureUs, bool key, uint64_t presented, uint64_t sendUs,
+                               FrameGateLag* lag = nullptr, FrameGateInputs* inOut = nullptr) {
+    FrameGateInputs in{};
+    FrameGateLag l{};
+    const FrameGateVerdict v = feed(t, captureUs, key, presented, false, &l, &in, false, sendUs);
+    if (v == FrameGateVerdict::Decode) decoded(in);
+    if (lag) *lag = l;
+    if (inOut) *inOut = in;
+    return v;
   }
 };
 
@@ -494,25 +517,24 @@ void test_sparse_slow_source_decodes_not_stale() {
 // stamp 800 ms behind its send stamp -- and fresh frames follow 2 ms apart. The held frame must
 // not anchor the floor (no false backlog); the first fresh frame does; nothing is requested.
 void test_held_resume_frame_does_not_anchor() {
-  std::printf("[T-P11a] held resume frame after a silence: shown, not the anchor; the fresh frame anchors; no congestion\n");
+  std::printf("[T-P11a] held resume frame after a silence: shown, not the anchor; the fresh frame anchors; no congestion (receiver-faithful)\n");
   Rig r;
   uint64_t t = 8000 * kMs;
-  FrameGateInputs in{};
-  CHECK(r.feed(t, t, true, 0, false, nullptr, &in, false, t + 10 * kMs) == FrameGateVerdict::Decode);
-  r.decoded(in);
-  // A still screen served sparsely: fresh frames 260 ms apart.
+  CHECK(r.feedDecoded(t, t, true, 0, t + 10 * kMs) == FrameGateVerdict::Decode);
+  // A still screen served sparsely: fresh frames 260 ms apart, each decoded.
   uint64_t cap = t;
   for (int i = 1; i <= 4; ++i) {
     const uint64_t at = t + i * 260 * kMs;
     const uint64_t prev = cap;
     cap = at;
-    CHECK(r.feed(at, cap, false, prev, false, nullptr, &in, false, cap + 20 * kMs) == FrameGateVerdict::Decode);
+    CHECK(r.feedDecoded(at, cap, false, prev, cap + 20 * kMs) == FrameGateVerdict::Decode);
   }
   const uint64_t lastRealCap = cap;
-  // 800 ms of nothing, then the held picture: captured 30 ms after the last real, sent 800 ms later.
+  // 800 ms of nothing, then the held picture: captured 30 ms after the last real, sent 800 ms
+  // later -- and DECODED (non-key), as the receiver does before the next frame is judged.
   const uint64_t resumeAt = lastRealCap + 830 * kMs;
   const uint64_t heldCap = lastRealCap + 30 * kMs;
-  CHECK(r.feed(resumeAt, heldCap, false, lastRealCap, false, nullptr, &in, false, resumeAt) == FrameGateVerdict::Decode);
+  CHECK(r.feedDecoded(resumeAt, heldCap, false, lastRealCap, resumeAt) == FrameGateVerdict::Decode);
   CHECK(r.gate.resumeAnchorPending);
   CHECK(r.gate.presentAnchorFloorUs == lastRealCap);  // not moved to the held stamp
   CHECK(r.gate.heldResumeFrames == 1);
@@ -521,13 +543,138 @@ void test_held_resume_frame_does_not_anchor() {
     const uint64_t at = resumeAt + 5 * kMs + i * 2 * kMs;
     const uint64_t c = at - 15 * kMs;
     FrameGateLag lag{};
-    CHECK(r.feed(at, c, false, heldCap, false, &lag, &in, false, at) == FrameGateVerdict::Decode);
+    CHECK(r.feedDecoded(at, c, false, heldCap, at, &lag) == FrameGateVerdict::Decode);
     CHECK(lag.decodeQueueLagEstimateUs < 100 * kMs);
   }
   CHECK(!r.gate.resumeAnchorPending);
   CHECK(r.gate.presentAnchorFloorUs >= resumeAt - 15 * kMs);  // anchored on the first fresh frame
   CHECK(r.gate.congestionState == ClientCongestionState::Normal);
   CHECK(r.gate.lagTriggerStreak == 0);
+  CHECK(r.sink.requests(1) == 0);
+}
+
+// (g) The S13 sweep failure, pinned at the gate: the held resume frame is decoded (non-key) --
+// which is exactly what the receiver does before the next frame -- and pending must survive
+// that decode, so the first fresh frame of the burst anchors and nothing trips.
+void test_held_resume_decoded_nonkey_keeps_pending() {
+  std::printf("[T-P11g] held resume frame decoded as a non-key: pending survives; first fresh frame anchors; no congestion\n");
+  Rig r;
+  uint64_t t = 8000 * kMs;
+  FrameGateInputs in{};
+  CHECK(r.feedDecoded(t, t, true, 0, t + 10 * kMs) == FrameGateVerdict::Decode);
+  const uint64_t heldAt = t + 830 * kMs;
+  const uint64_t heldCap = t + 30 * kMs;
+  CHECK(r.feed(heldAt, heldCap, false, t, false, nullptr, &in, false, heldAt) == FrameGateVerdict::Decode);
+  CHECK(r.gate.resumeAnchorPending);
+  r.decoded(in);  // the receiver decodes it: non-key
+  CHECK(r.gate.resumeAnchorPending);  // FAILS on 1287883: note_reference_sync cleared it
+  // The fresh burst: the renderer has not presented anything newer than the held frame.
+  for (int i = 0; i < 4; ++i) {
+    const uint64_t at = heldAt + 5 * kMs + i * 2 * kMs;
+    FrameGateLag lag{};
+    CHECK(r.feedDecoded(at, at - 15 * kMs, false, heldCap, at, &lag) == FrameGateVerdict::Decode);
+    CHECK(lag.decodeQueueLagEstimateUs < 100 * kMs);
+  }
+  CHECK(!r.gate.resumeAnchorPending);
+  CHECK(r.gate.presentAnchorFloorUs >= heldAt - 15 * kMs);
+  CHECK(r.gate.congestionState == ClientCongestionState::Normal);
+  CHECK(r.gate.lagTriggerStreak == 0);
+  CHECK(r.sink.requests(1) == 0);
+}
+
+// (h) Same, but the decoder accepted the held frame and returned no picture yet (async decoder):
+// the receiver still calls note_reference_sync then note_decode_empty. Pending must survive.
+void test_held_resume_accepted_empty_keeps_pending() {
+  std::printf("[T-P11h] held resume frame accepted with empty output: pending survives; fresh frame anchors\n");
+  Rig r;
+  uint64_t t = 8000 * kMs;
+  FrameGateInputs in{};
+  FrameGateLag lag{};
+  CHECK(r.feedDecoded(t, t, true, 0, t + 10 * kMs) == FrameGateVerdict::Decode);
+  const uint64_t heldAt = t + 830 * kMs;
+  const uint64_t heldCap = t + 30 * kMs;
+  CHECK(r.feed(heldAt, heldCap, false, t, false, &lag, &in, false, heldAt) == FrameGateVerdict::Decode);
+  CHECK(r.gate.resumeAnchorPending);
+  r.decodedEmpty(in, lag);
+  CHECK(r.gate.resumeAnchorPending);
+  CHECK(r.gate.congestionState == ClientCongestionState::Normal);  // one empty output is not a wedge
+  for (int i = 0; i < 4; ++i) {
+    const uint64_t at = heldAt + 5 * kMs + i * 2 * kMs;
+    FrameGateLag l{};
+    CHECK(r.feedDecoded(at, at - 15 * kMs, false, heldCap, at, &l) == FrameGateVerdict::Decode);
+    CHECK(l.decodeQueueLagEstimateUs < 100 * kMs);
+  }
+  CHECK(!r.gate.resumeAnchorPending);
+  CHECK(r.gate.congestionState == ClientCongestionState::Normal);
+  CHECK(r.sink.requests(1) == 0);
+}
+
+// (i) A decode FAILURE while pending: the receiver's note_decode_failure requests a key (reason 4)
+// and enters the keyframe wait; the next admit ends pending and drops non-key frames until the
+// IDR -- the existing behaviour, unchanged by the P11 rule.
+void test_decode_failure_while_pending_enters_keyframe_wait() {
+  std::printf("[T-P11i] decode failure while pending: keyframe wait, pending ends at the next admit\n");
+  Rig r;
+  uint64_t t = 8000 * kMs;
+  FrameGateInputs in{};
+  FrameGateLag lag{};
+  CHECK(r.feedDecoded(t, t, true, 0, t + 10 * kMs) == FrameGateVerdict::Decode);
+  const uint64_t heldAt = t + 830 * kMs;
+  const uint64_t heldCap = t + 30 * kMs;
+  CHECK(r.feed(heldAt, heldCap, false, t, false, &lag, &in, false, heldAt) == FrameGateVerdict::Decode);
+  CHECK(r.gate.resumeAnchorPending);
+  r.decodeFailed(in, lag);
+  CHECK(r.gate.waitForKeyFrame);
+  CHECK(r.sink.requests(4) >= 1);
+  CHECK(r.gate.congestionState == ClientCongestionState::Congested);  // decode_fail transition (existing)
+  // The next (non-key) frame: pending ends at admit (state is no longer Normal), and the frame is
+  // dropped by the catch-up rule that the decode_fail transition armed -- ahead of the key wait.
+  const uint64_t next = heldAt + 5 * kMs;
+  CHECK(r.feed(next, next - 15 * kMs, false, heldCap, false, &lag, &in, false, next) == FrameGateVerdict::DropCongested);
+  CHECK(!r.gate.resumeAnchorPending);
+  CHECK(r.gate.waitForKeyFrame);
+  // The IDR arrives fresh: decodes, the wait ends, no pending.
+  const uint64_t keyAt = next + 20 * kMs;
+  CHECK(r.feedDecoded(keyAt, keyAt - 10 * kMs, true, heldCap, keyAt) == FrameGateVerdict::Decode);
+  CHECK(!r.gate.waitForKeyFrame && !r.gate.resumeAnchorPending);
+}
+
+// (j) Keyframes: a FRESH IDR ends pending in admit (it is the anchor); a HELD IDR (hold > 300 ms)
+// is a held picture like any other and keeps pending -- the fresh P behind it anchors. Confirmed
+// rule (Codex, 2026-09-07): note_reference_sync does not touch pending.
+void test_fresh_idr_ends_pending_held_idr_keeps_it() {
+  std::printf("[T-P11j] fresh IDR ends pending; a held IDR keeps it and the fresh P behind it anchors\n");
+  Rig r;
+  uint64_t t = 8000 * kMs;
+  FrameGateInputs in{};
+  CHECK(r.feedDecoded(t, t, true, 0, t + 10 * kMs) == FrameGateVerdict::Decode);
+  // Held resume frame, decoded (non-key) -> pending.
+  const uint64_t held1 = t + 830 * kMs;
+  CHECK(r.feedDecoded(held1, t + 30 * kMs, false, t, held1) == FrameGateVerdict::Decode);
+  CHECK(r.gate.resumeAnchorPending);
+  // A fresh IDR 5 ms later: admit anchors on it and ends pending; the decode keeps it ended.
+  const uint64_t freshKeyAt = held1 + 5 * kMs;
+  CHECK(r.feedDecoded(freshKeyAt, freshKeyAt - 10 * kMs, true, t + 30 * kMs, freshKeyAt) == FrameGateVerdict::Decode);
+  CHECK(!r.gate.resumeAnchorPending);
+  CHECK(r.gate.presentAnchorFloorUs == freshKeyAt - 10 * kMs);
+  // Another silence, another held resume frame -> pending again.
+  const uint64_t held2 = freshKeyAt + 900 * kMs;
+  const uint64_t held2Cap = freshKeyAt + 20 * kMs;
+  CHECK(r.feedDecoded(held2, held2Cap, false, freshKeyAt - 10 * kMs, held2) == FrameGateVerdict::Decode);
+  CHECK(r.gate.resumeAnchorPending);
+  // A HELD IDR 3 ms later (captured right after the held P, sent now: hold ~880 ms). Decoded as a
+  // key. Pending stays: an old picture's IDR is not where the content is now.
+  const uint64_t heldKeyAt = held2 + 3 * kMs;
+  CHECK(r.feedDecoded(heldKeyAt, held2Cap + 16 * kMs, true, held2Cap, heldKeyAt) == FrameGateVerdict::Decode);
+  CHECK(r.gate.resumeAnchorPending);  // a held IDR keeps pending (failed on 1287883, where the decode cleared it)
+  CHECK(r.gate.lastDecodedKeyCaptureUs == held2Cap + 16 * kMs);  // the reference-chain anchor still moved
+  // The fresh P behind it anchors and ends pending; no congestion.
+  const uint64_t freshAt = heldKeyAt + 2 * kMs;
+  FrameGateLag lag{};
+  CHECK(r.feedDecoded(freshAt, freshAt - 15 * kMs, false, held2Cap + 16 * kMs, freshAt, &lag) == FrameGateVerdict::Decode);
+  CHECK(!r.gate.resumeAnchorPending);
+  CHECK(lag.decodeQueueLagEstimateUs < 100 * kMs);
+  CHECK(r.gate.congestionState == ClientCongestionState::Normal);
   CHECK(r.sink.requests(1) == 0);
 }
 
@@ -546,7 +693,7 @@ void test_backlog_after_silence_still_trips() {
     const uint64_t at = silenceEnd + i * 2 * kMs;              // dense arrival
     const uint64_t c = t + 400 * kMs + i * 16 * kMs;           // captures 400+ ms past the stuck anchor...
     const uint64_t sendUs = c + 800 * kMs;                     // ...each held 800 ms by the host
-    (void)r.feed(at, c, false, t, false, nullptr, &in, false, sendUs);
+    (void)r.feedDecoded(at, c, false, t, sendUs, nullptr, &in);  // decoded like the receiver does
     tripped = r.gate.congestionState != ClientCongestionState::Normal;
   }
   CHECK(tripped);
@@ -937,6 +1084,10 @@ void test_keyframe_wait_drops_do_not_enter_congested() {
 int main() {
   test_keyframe_wait_drops_do_not_enter_congested();
   test_held_resume_frame_does_not_anchor();
+  test_held_resume_decoded_nonkey_keeps_pending();
+  test_held_resume_accepted_empty_keeps_pending();
+  test_decode_failure_while_pending_enters_keyframe_wait();
+  test_fresh_idr_ends_pending_held_idr_keeps_it();
   test_backlog_after_silence_still_trips();
   test_small_host_hold_renderer_stalled_still_trips();
   test_pending_lifetime_ends_on_state_changes();

@@ -1119,7 +1119,11 @@ void scenario_pre_fix_host_shapes_no_false_congestion() {
   ViewerRig rig;
   LossPlan plan;
   if (!start_session(host, rig, plan)) { ++gFailures; return; }
-  for (int shape = 0; shape < 2; ++shape) {
+  // shape 2 = (a') the same old-real->fresh burst with the present anchor PINNED while the burst
+  // is judged: the renderer has not shown the held frame yet, so nothing but the gate's own rule
+  // can keep the fresh frames from reading as an 0.8 s backlog. Deterministic where shapes 0/1
+  // depend on the present thread's timing (the sweep-load failure of 2026-09-07).
+  for (int shape = 0; shape < 3; ++shape) {
     for (int i = 0; i < 4; ++i) {
       (void)host.TakeKeyframeRequest(rig.ctx.control.keyframeRequests);
       (void)host.SendFrame(false, false, qpc_now_us(), false);
@@ -1130,15 +1134,20 @@ void scenario_pre_fix_host_shapes_no_false_congestion() {
     idle(host, rig, 800);  // the hold: nothing on the wire
     const uint64_t requestsBefore = host.keyframe_requests();
     const uint64_t transitionsBefore = rig.gate.congestionTransitionCount;
+    if (shape == 2) rig.pinPresentAnchor = true;
     (void)host.SendFrame(false, false, lastRealUs + 30000, false);  // the held picture, its true old stamp
     const uint64_t burstUs = qpc_now_us();
     (void)host.SendFrame(shape == 1, false, burstUs, shape == 1);
     for (int i = 1; i < 4; ++i) (void)host.SendFrame(false, false, burstUs + static_cast<uint64_t>(i) * 2000, false);
+    if (shape == 2) {
+      sleep_ms(60);  // the burst is judged with the anchor still pinned
+      rig.pinPresentAnchor = false;
+    }
     pump(host, rig, 700);
     const uint64_t requests = host.keyframe_requests() - requestsBefore;
     const uint64_t transitions = rig.gate.congestionTransitionCount - transitionsBefore;
     std::printf("  shape %s: congestion transitions +%llu, keyframe requests +%llu, heldResume=%llu, state %s\n",
-                shape == 0 ? "old-real->fresh" : "old-real->IDR->fresh",
+                shape == 0 ? "old-real->fresh" : shape == 1 ? "old-real->IDR->fresh" : "old-real->fresh (present anchor pinned)",
                 static_cast<unsigned long long>(transitions), static_cast<unsigned long long>(requests),
                 static_cast<unsigned long long>(rig.gate.heldResumeFrames), state_name(rig).c_str());
     CHECK(transitions == 0, "no congestion transition (got " + std::to_string(transitions) + ")");
