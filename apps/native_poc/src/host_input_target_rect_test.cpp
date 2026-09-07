@@ -65,6 +65,22 @@ void test_selected_monitor_negative_origin() {
   CHECK(q.x == 3839 && q.y == -1);
 }
 
+// Same resolution, different origin: the primary moved in the arrangement (or the RDP display
+// and the console display happen to share a size). No capture restart follows a pure origin
+// change, so the periodic re-derivation must see it as a change and re-push.
+void test_origin_only_change_is_a_change() {
+  std::printf("[2b] an origin-only change at the same size is a change\n");
+  const InputTargetRect before = derive_input_target_rect(false, MonitorPhysicalRect{0, 0, 1920, 1080});
+  const InputTargetRect after = derive_input_target_rect(false, MonitorPhysicalRect{1920, 0, 1920, 1080});
+  CHECK(!input_target_rect_same(before, after));
+  CHECK(after.originX == 1920 && after.width == 1920);
+  const MappedPoint p = map_client_point(0, 0, 1920, 1080, as_desktop(after));
+  CHECK(p.x == 1920 && p.y == 0);
+  // And the y axis alone.
+  const InputTargetRect shifted = derive_input_target_rect(false, MonitorPhysicalRect{0, 1080, 1920, 1080});
+  CHECK(!input_target_rect_same(before, shifted) && !input_target_rect_same(after, shifted));
+}
+
 // Window mode never routes to the agent; the rect is zero so the agent's own virtual-screen
 // fallback applies if it ever is asked.
 void test_window_mode_is_zero() {
@@ -92,6 +108,7 @@ void test_unknown_monitor_is_zero() {
 int main() {
   test_rdp_to_console_transition();
   test_selected_monitor_negative_origin();
+  test_origin_only_change_is_a_change();
   test_window_mode_is_zero();
   test_unknown_monitor_is_zero();
   if (gFailures == 0) {

@@ -82,12 +82,26 @@ using remote60::host::DxgiDesktopCaptureSession;
 namespace remote60::native_poc {
 
 void sync_input_target_rect(CaptureState& capture, InputRouterState& inputRouter, const char* reason) {
+  // The rect of the monitor the capture session opened, read LIVE: a display arrangement change
+  // that keeps the resolution (the primary moved, a monitor re-ordered) changes the origin
+  // without a size change, so no restart would follow -- the periodic call (stats tick) catches
+  // it here. The handle comes from the capture (primary_monitor_info at (re)start); if Windows
+  // no longer knows it the last known geometry stands and the source says so.
   MonitorPhysicalRect monitor;
   if (capture.monitorInfo.has_value()) {
-    monitor.originX = capture.monitorInfo->originX;
-    monitor.originY = capture.monitorInfo->originY;
-    monitor.width = capture.monitorInfo->width;
-    monitor.height = capture.monitorInfo->height;
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (capture.monitorInfo->monitor && GetMonitorInfoW(capture.monitorInfo->monitor, &info)) {
+      monitor.originX = info.rcMonitor.left;
+      monitor.originY = info.rcMonitor.top;
+      monitor.width = static_cast<uint32_t>(std::max<LONG>(0, info.rcMonitor.right - info.rcMonitor.left));
+      monitor.height = static_cast<uint32_t>(std::max<LONG>(0, info.rcMonitor.bottom - info.rcMonitor.top));
+    } else {
+      monitor.originX = capture.monitorInfo->originX;
+      monitor.originY = capture.monitorInfo->originY;
+      monitor.width = capture.monitorInfo->width;
+      monitor.height = capture.monitorInfo->height;
+    }
   }
   const InputTargetRect next =
       derive_input_target_rect(capture.windowModeActive.load(std::memory_order_acquire), monitor);

@@ -8692,3 +8692,10 @@ Next action
 - 변경(`log_upload.{hpp,cpp}`): owner key = identity + 정규화 host:port + device. owner 변경(계정/URL/장치)과 `clear_credentials` 는 `ownerEpoch` 를 올리고 큐·보관 배치를 폐기; 모든 send job 이 `ownerEpoch` 를 스냅샷하고, 응답 처리에서 epoch 이 다르면 **pause/보관/현재 인증 상태를 건드리지 않고 배치만 폐기**(`foreignAnswersDiscarded`, diag `late answer for a previous owner discarded`). 같은 owner 의 토큰 교체만 구 401 배치를 새 토큰으로 재시도. 상태에 `foreignAnswersDiscarded` 추가.
 - 테스트(`remote60_log_upload_test`): 기존 7 케이스 + 신규 [9] ×8 — A 의 요청을 서버가 400ms 붙든 채 (a) B 계정 전환 (b) URL 변경(제2 가짜 서버) (c) device 변경 (d) 로그아웃→같은 계정 재로그인 뒤 old 401 / old 500 각각 반환: 새 수신자에 old body 미전송, 새 세션 pause 없음(콜백 0), 보관 0, `foreignAnswersDiscarded==1`, 새 줄은 새 토큰/장치로 전송. diag 에 토큰 없음 유지. PASS ×2. `node test/run.js` ALL PASS(되돌린 계약 포함). GNLinkHost/GNLinkClient 는 API 불변(재빌드는 릴리스 빌드에서).
 - 미검증: 실제 NAS 업로드(설치 후 실기), 서버 배포 없음.
+
+### 404) 2026-09-07 P9 보강 — target rect 를 실제 캡처 HMONITOR 의 live 기하로 읽고 1초마다 재확인(같은 해상도·원점만 변경 포함) (A2A task t-xox45oo5, Codex 리뷰 반영)
+- 배경: #402 는 "모든 기하 변경은 캡처 재시작을 지난다" 는 가정 위에 있었다. Codex 지적대로 같은 해상도에서 모니터 원점/주모니터 배치만 바뀌면 size-change 가 없어 재시작이 없을 수 있다.
+- 변경: `sync_input_target_rect`(`host_loop_helpers.cpp`) 가 캐시된 `monitorInfo` 의 rect 가 아니라 캡처가 연 HMONITOR(`capture.monitorInfo->monitor`)에 `GetMonitorInfoW` 를 **live** 로 물어 물리 rect+원점을 도출(핸들이 무효면 마지막 기하 유지). 호출 지점에 `stage_stats` 의 1초 tick(`"periodic"`) 추가 — GetMonitorInfo 1회+비교, 값이 바뀔 때만 `SetTargetRect`+로그. broker 자체 mutex 유지, 창모드 skip 유지, virtual 전체 치환 없음.
+- 테스트: `remote60_host_input_target_rect_test` +1 — 같은 1920x1080 에서 원점 (0,0)→(1920,0)/(0,1080) 변경이 rect 변경으로 판정되고 매핑이 새 원점으로 감. PASS. GNLinkStream 빌드 OK.
+- 미검증: 실제 배치 변경(다중 모니터 장비 없음); 실기 시 호스트 로그 `secure-input target rect= … reason=periodic` 으로 확인 가능.
+- Ledger 유지: 모니터 선택이 다음 재시작에서 주모니터로 되돌아가는 결함은 이번 범위 밖(#402).

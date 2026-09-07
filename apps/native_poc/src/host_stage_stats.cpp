@@ -105,6 +105,10 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
   const uint64_t t = qpc_now_us();
   if (t >= stats.nextAtUs) {
     ++stats.ticks;
+    // Once a second: the secure-input agent's target rect follows the captured monitor's live
+    // geometry (P9). Origin-only changes never restart the capture, so the restart-time sync is
+    // not enough on its own; this is one GetMonitorInfo and a compare, and logs only on change.
+    sync_input_target_rect(capture, inputRouter, "periodic");
     const bool statsPrintDue = (stats.ticks % stats.printEverySec) == 0;
     const double mbps = (sender.sentBytes * 8.0) / (1000.0 * 1000.0);
     const std::string targetProcessName = capture.SnapshotTarget().process;
