@@ -203,8 +203,11 @@ class FakeHost {
   const char* encoder_backend() const { return enc_.backend_name(); }
 
   // The product host consumes a seq for a frame its sender queue then discards (EnqueueKey clears
-  // the queue; HoldForKey drops deltas): the next AU on the wire has a gap without any loss.
-  void SkipSeq() { ++seq_; }
+  // the queue; HoldForKey drops deltas): the next AU on the wire has a gap without any loss. The
+  // gap is applied right before the next KEYFRAME goes out -- on an asynchronous encoder the call
+  // that submits the forced key may first return the previous P, and a gap in front of that P
+  // would be a different (lossy) shape than the product's "gap then IDR".
+  void SkipSeq() { skipBeforeNextKey_ = true; }
 
   // What the viewer asked for, read where the control thread reads it. Counts every request.
   bool TakeKeyframeRequest(KeyframeRequestState& requests) {
@@ -254,6 +257,10 @@ class FakeHost {
 
   uint32_t SendAu(const std::vector<uint8_t>& bytes, bool key, bool synthetic, uint64_t captureUs) {
     CachedAu au;
+    if (key && skipBeforeNextKey_) {
+      ++seq_;
+      skipBeforeNextKey_ = false;
+    }
     au.seq = ++seq_;
     au.payload = bytes;
     if (key && corruptNextKey_.exchange(false)) {
@@ -407,6 +414,7 @@ class FakeHost {
   EpochGate gate_;
   uint64_t epoch_ = 1;
   bool forceKeyPending_ = false;
+  bool skipBeforeNextKey_ = false;
   bool flushPending_ = false;
   bool stampFromAu_ = false;
   uint64_t gateDroppedOld_ = 0;
