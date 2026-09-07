@@ -724,10 +724,11 @@ void test_small_host_hold_renderer_stalled_still_trips() {
   CHECK(r.sink.requests(1) >= 1);
 }
 
-// P11 lifetime: a pending resume anchor ends on a keyframe wait, on a decoded keyframe, and on a
-// congestion state change; it never outlives the episode it started in.
+// P11 lifetime: a pending resume anchor ends on a keyframe wait, on a fresh keyframe (anchored at
+// admit), and on a congestion state change; it never outlives the episode it started in. Decoding a
+// frame, key or not, does not end it (S13, 2026-09-07).
 void test_pending_lifetime_ends_on_state_changes() {
-  std::printf("[T-P11d] pending ends on keyframe wait / decoded keyframe / state change\n");
+  std::printf("[T-P11d] pending ends on keyframe wait / fresh keyframe (anchored at admit) / state change\n");
   Rig r;
   uint64_t t = 8000 * kMs;
   FrameGateInputs in{};
@@ -736,7 +737,7 @@ void test_pending_lifetime_ends_on_state_changes() {
   const uint64_t heldAt = t + 830 * kMs;
   (void)r.feed(heldAt, t + 30 * kMs, false, t, false, nullptr, &in, false, heldAt);  // held resume frame
   CHECK(r.gate.resumeAnchorPending);
-  // A decoded keyframe (resync) ends it.
+  // A fresh keyframe ends it at admit (the anchor moves to it); the decode afterwards changes nothing.
   (void)r.feed(heldAt + 5 * kMs, heldAt, true, t + 30 * kMs, false, nullptr, &in, false, heldAt + 6 * kMs);
   r.decoded(in);
   CHECK(!r.gate.resumeAnchorPending);
