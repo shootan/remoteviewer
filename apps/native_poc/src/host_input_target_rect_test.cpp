@@ -10,6 +10,7 @@
 #include <string>
 
 #include "host_input_target_rect.hpp"
+#include "host_secure_target_rect.hpp"
 #include "secure_input_mapping.hpp"
 
 using namespace remote60::native_poc;
@@ -81,6 +82,37 @@ void test_origin_only_change_is_a_change() {
   CHECK(!input_target_rect_same(before, shifted) && !input_target_rect_same(after, shifted));
 }
 
+// The dispatch-time decision (host_secure_target_rect.hpp): the origin moved right after the
+// last sync and the first secure click arrives before the next tick -- the click must go with the
+// NEW rect; an unreadable monitor refuses the click instead of aiming at the old rect or at the
+// whole virtual screen.
+void test_dispatch_decision() {
+  std::printf("[2c] dispatch: origin moved since the last sync -> updated before the click; unknown -> refused\n");
+  const InputTargetRect synced = derive_input_target_rect(false, MonitorPhysicalRect{0, 0, 1920, 1080});
+  // (a) the primary moved to the right by one screen; the 1 s tick has not fired yet.
+  SecureRectDecision d = decide_secure_target_rect(false, true, MonitorPhysicalRect{1920, 0, 1920, 1080}, synced);
+  CHECK(d.send && d.update);
+  CHECK(d.rect.originX == 1920 && d.rect.width == 1920);
+  CHECK(map_client_point(841, 703, 1920, 1080, as_desktop(d.rect)).x == 1920 + 841);
+  // (b) nothing moved: send, no update, no log churn.
+  d = decide_secure_target_rect(false, true, MonitorPhysicalRect{0, 0, 1920, 1080}, synced);
+  CHECK(d.send && !d.update);
+  // (c) the monitor query failed: refuse -- not the old rect, not a zero rect.
+  d = decide_secure_target_rect(false, false, MonitorPhysicalRect{}, synced);
+  CHECK(!d.send && !d.update);
+  CHECK(std::string(d.why) == "monitor-query-failed");
+  // (d) the query answered an empty rect: refuse as well.
+  d = decide_secure_target_rect(false, true, MonitorPhysicalRect{0, 0, 0, 0}, synced);
+  CHECK(!d.send);
+  CHECK(std::string(d.why) == "monitor-rect-invalid");
+  // (e) window mode: the secure path never routes it.
+  d = decide_secure_target_rect(true, true, MonitorPhysicalRect{0, 0, 1920, 1080}, synced);
+  CHECK(!d.send);
+  // (f) the broker holds no rect yet (0x0): a readable monitor updates and sends.
+  d = decide_secure_target_rect(false, true, MonitorPhysicalRect{0, 0, 1920, 1080}, InputTargetRect{});
+  CHECK(d.send && d.update);
+}
+
 // Window mode never routes to the agent; the rect is zero so the agent's own virtual-screen
 // fallback applies if it ever is asked.
 void test_window_mode_is_zero() {
@@ -109,6 +141,7 @@ int main() {
   test_rdp_to_console_transition();
   test_selected_monitor_negative_origin();
   test_origin_only_change_is_a_change();
+  test_dispatch_decision();
   test_window_mode_is_zero();
   test_unknown_monitor_is_zero();
   if (gFailures == 0) {

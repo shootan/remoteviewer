@@ -201,6 +201,10 @@ bool restart_capture_session(HostContext& hx);
 // (host_input_target_rect.hpp) and hands it to the broker when it changed, with a log line.
 // Called after every capture (re)start and once at startup. Main loop only.
 void sync_input_target_rect(CaptureState& capture, InputRouterState& inputRouter, const char* reason);
+// Control thread, right before a secure-desktop event goes to the agent: re-reads the captured
+// monitor's live rect (host_secure_target_rect.hpp) and updates the broker if it moved; false =
+// the rect is not knowable now and the event must NOT be sent (fail closed, counted, logged).
+bool secure_target_rect_ready(CaptureState& capture, InputRouterState& inputRouter);
 void pump_cursor_forward(HostContext& hx, uint64_t nowUs);
 bool reconnect_tcp_data_session(HostContext& hx, const char* reason);
 bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId, uint64_t nowUs,

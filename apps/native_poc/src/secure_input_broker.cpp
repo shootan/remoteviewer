@@ -190,6 +190,15 @@ void SecureInputBrokerClient::SetTargetRect(int32_t originX, int32_t originY, ui
   targetHeight_ = height;
 }
 
+void SecureInputBrokerClient::GetTargetRect(int32_t* originX, int32_t* originY, uint32_t* width,
+                                            uint32_t* height) const {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (originX) *originX = targetOriginX_;
+  if (originY) *originY = targetOriginY_;
+  if (width) *width = targetWidth_;
+  if (height) *height = targetHeight_;
+}
+
 void SecureInputBrokerClient::apply_target_rect_locked(SecureInputMessage* message) const {
   // Left zero when the host has not told us where the capture sits, which makes the agent fall
   // back to the virtual screen rather than guess.

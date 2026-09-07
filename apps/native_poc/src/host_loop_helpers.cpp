@@ -59,6 +59,7 @@
 #include "host_input_inject.hpp"
 #include "host_input_router.hpp"
 #include "host_input_target_rect.hpp"
+#include "host_secure_target_rect.hpp"
 #include "host_kick.hpp"
 #include "host_log.hpp"
 #include "host_main_loop.hpp"
@@ -81,36 +82,82 @@ using remote60::host::DxgiDesktopCaptureSession;
 
 namespace remote60::native_poc {
 
+bool query_monitor_physical_rect(HMONITOR monitor, MonitorPhysicalRect* out) {
+  if (!monitor || !out) return false;
+  MONITORINFO info{};
+  info.cbSize = sizeof(info);
+  if (!GetMonitorInfoW(monitor, &info)) return false;
+  out->originX = info.rcMonitor.left;
+  out->originY = info.rcMonitor.top;
+  out->width = static_cast<uint32_t>(std::max<LONG>(0, info.rcMonitor.right - info.rcMonitor.left));
+  out->height = static_cast<uint32_t>(std::max<LONG>(0, info.rcMonitor.bottom - info.rcMonitor.top));
+  return out->valid();
+}
+
+InputTargetRect broker_target_rect(const InputRouterState& inputRouter) {
+  InputTargetRect r;
+  inputRouter.broker.GetTargetRect(&r.originX, &r.originY, &r.width, &r.height);
+  r.source = (r.width && r.height) ? "broker" : "none";
+  return r;
+}
+
 void sync_input_target_rect(CaptureState& capture, InputRouterState& inputRouter, const char* reason) {
   // The rect of the monitor the capture session opened, read LIVE: a display arrangement change
   // that keeps the resolution (the primary moved, a monitor re-ordered) changes the origin
   // without a size change, so no restart would follow -- the periodic call (stats tick) catches
-  // it here. The handle comes from the capture (primary_monitor_info at (re)start); if Windows
-  // no longer knows it the last known geometry stands and the source says so.
-  MonitorPhysicalRect monitor;
-  if (capture.monitorInfo.has_value()) {
-    MONITORINFO info{};
-    info.cbSize = sizeof(info);
-    if (capture.monitorInfo->monitor && GetMonitorInfoW(capture.monitorInfo->monitor, &info)) {
-      monitor.originX = info.rcMonitor.left;
-      monitor.originY = info.rcMonitor.top;
-      monitor.width = static_cast<uint32_t>(std::max<LONG>(0, info.rcMonitor.right - info.rcMonitor.left));
-      monitor.height = static_cast<uint32_t>(std::max<LONG>(0, info.rcMonitor.bottom - info.rcMonitor.top));
-    } else {
-      monitor.originX = capture.monitorInfo->originX;
-      monitor.originY = capture.monitorInfo->originY;
-      monitor.width = capture.monitorInfo->width;
-      monitor.height = capture.monitorInfo->height;
+  // it here, and the secure dispatch re-reads it per event (secure_target_rect_ready). The handle
+  // is mirrored for the control thread. A failed query does NOT keep the previous rect: the
+  // broker's rect is cleared, so no secure event is sent until the monitor is known again.
+  const bool windowMode = capture.windowModeActive.load(std::memory_order_acquire);
+  const HMONITOR monitor = (!windowMode && capture.monitorInfo.has_value()) ? capture.monitorInfo->monitor : nullptr;
+  capture.captureMonitorHandle.store(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(monitor)), std::memory_order_release);
+  MonitorPhysicalRect live;
+  const bool queryOk = !windowMode && query_monitor_physical_rect(monitor, &live);
+  const InputTargetRect next = windowMode ? derive_input_target_rect(true, live)
+                               : queryOk ? derive_input_target_rect(false, live)
+                                         : derive_input_target_rect(false, MonitorPhysicalRect{});
+  const InputTargetRect current = broker_target_rect(inputRouter);
+  if (!windowMode && !queryOk) {
+    ++inputRouter.targetRectQueryFailures;
+    if (inputRouter.targetRectQueryFailures <= 3 || (inputRouter.targetRectQueryFailures % 60) == 0) {
+      std::cout << "[native-video-host] secure-input target rect UNKNOWN (monitor query failed) reason="
+                << (reason ? reason : "-") << " failures=" << inputRouter.targetRectQueryFailures
+                << " -> secure input refused until known\n";
     }
   }
-  const InputTargetRect next =
-      derive_input_target_rect(capture.windowModeActive.load(std::memory_order_acquire), monitor);
   const bool first = std::string(inputRouter.targetRectSent.source) == "none";
-  if (!first && input_target_rect_same(inputRouter.targetRectSent, next)) return;
+  if (!first && input_target_rect_same(current, next) && input_target_rect_same(inputRouter.targetRectSent, next)) return;
   inputRouter.broker.SetTargetRect(next.originX, next.originY, next.width, next.height);
   inputRouter.targetRectSent = next;
   std::cout << "[native-video-host] secure-input target rect=" << describe_input_target_rect(next)
             << " reason=" << (reason ? reason : "-") << "\n";
+}
+
+bool secure_target_rect_ready(CaptureState& capture, InputRouterState& inputRouter) {
+  const bool windowMode = capture.windowModeActive.load(std::memory_order_acquire);
+  const HMONITOR monitor = reinterpret_cast<HMONITOR>(
+      static_cast<uintptr_t>(capture.captureMonitorHandle.load(std::memory_order_acquire)));
+  MonitorPhysicalRect live;
+  const bool queryOk = !windowMode && query_monitor_physical_rect(monitor, &live);
+  const InputTargetRect current = broker_target_rect(inputRouter);
+  const SecureRectDecision d = decide_secure_target_rect(windowMode, queryOk, live, current);
+  if (d.send && d.update) {
+    inputRouter.broker.SetTargetRect(d.rect.originX, d.rect.originY, d.rect.width, d.rect.height);
+    inputRouter.secureRectUpdatedAtDispatch.fetch_add(1, std::memory_order_relaxed);
+    std::cout << "[native-video-host] secure-input target rect=" << describe_input_target_rect(d.rect)
+              << " reason=dispatch (was " << describe_input_target_rect(current) << ")\n";
+  }
+  if (!d.send) {
+    static std::atomic<uint64_t> lastLogUs{0};
+    const uint64_t nowUs = qpc_now_us();
+    const uint64_t last = lastLogUs.load(std::memory_order_relaxed);
+    if (nowUs - last > 1'000'000) {
+      lastLogUs.store(nowUs, std::memory_order_relaxed);
+      std::cout << "[native-video-host] secure-input event refused why=" << d.why
+                << " (captured monitor rect not knowable; not injecting at an unknown place)\n";
+    }
+  }
+  return d.send;
 }
 
 bool restart_capture_session(HostContext& hx) {

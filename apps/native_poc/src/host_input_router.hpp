@@ -17,6 +17,14 @@
 
 namespace remote60::native_poc {
 
+struct CaptureState;
+struct InputRouterState;
+// Control thread, right before a secure-desktop event goes to the agent: re-reads the captured
+// monitor's live rect (host_secure_target_rect.hpp) and updates the broker if it moved; false =
+// the rect is not knowable now and the event must NOT be sent (fail closed, counted, logged).
+// Defined in host_loop_helpers.cpp. (P9)
+bool secure_target_rect_ready(CaptureState& capture, InputRouterState& inputRouter);
+
 // Viewer input routing (Phase 1-9 state struct): the configured injection mode, the SYSTEM
 // input-broker client used when the secure desktop (UAC / lock screen) blocks direct injection,
 // the client's input coordinate domain, the explicit --input-target criteria, the last-target /
@@ -39,6 +47,9 @@ struct InputRouterState {
   std::atomic<uint64_t> secureBrokerFailed{0};         // agent unreachable; fell back, cannot land
   std::atomic<uint64_t> secureSkipWindowMode{0};       // window mode never routes to the agent
   std::atomic<uint64_t> secureSkipUnauthenticated{0};  // no directory capability to act on
+  std::atomic<uint64_t> secureSkipRectUnknown{0};      // captured monitor's rect not knowable at dispatch: refused (P9)
+  std::atomic<uint64_t> secureRectUpdatedAtDispatch{0};  // rect changed between the last sync and this event
+  uint64_t targetRectQueryFailures = 0;                  // main loop: sync could not read the monitor
   // cross-thread: the size the client's coordinates are expressed in (main writes, control reads).
   std::atomic<uint32_t> domainW{0};
   std::atomic<uint32_t> domainH{0};

@@ -438,6 +438,10 @@ void ControlSessionServer::Serve(ControlLink& link) {
             // A plain-LAN session has no capability token, and the agent will not act without
             // one. Nothing about the click is wrong; it simply cannot be authorised.
             inputRouter.secureSkipUnauthenticated.fetch_add(1, std::memory_order_relaxed);
+          } else if (!secure_target_rect_ready(capture, inputRouter)) {
+            // The captured monitor's rect is not knowable right now (P9): do not aim at the
+            // previous rect or at the whole virtual screen. Counted; the next event re-checks.
+            inputRouter.secureSkipRectUnknown.fetch_add(1, std::memory_order_relaxed);
           } else if (!inputRouter.broker.SendInputEvent(input, domainW, domainH)) {
             inputRouter.secureBrokerFailed.fetch_add(1, std::memory_order_relaxed);
           } else {
@@ -636,6 +640,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
         InputInjectResult injectResult = InputInjectResult::Failed;
         if (desktopMode && clientSession.directoryAuthenticated.load(std::memory_order_acquire) &&
             !interactive_desktop_is_default() &&
+            secure_target_rect_ready(capture, inputRouter) &&
             inputRouter.broker.SendInputText(text,
                                             inputRouter.domainW.load(std::memory_order_acquire),
                                             inputRouter.domainH.load(std::memory_order_acquire))) {
