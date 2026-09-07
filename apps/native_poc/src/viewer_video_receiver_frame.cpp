@@ -219,6 +219,7 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
     in.keyFrame = keyFrame;
     in.packetNowUs = packetNowUs;
     in.recvGapUs = recvGapUs;
+    in.sendQpcUs = h.sendQpcUs;
     in.presentedCapUs = ctx.frameBuf.lastPresentedCaptureUs.load(std::memory_order_relaxed);
     // The picker overlay pauses presents on purpose; lag measured against a frozen present
     // anchor is not congestion. Same for the short post-close grace until the anchor is fresh.

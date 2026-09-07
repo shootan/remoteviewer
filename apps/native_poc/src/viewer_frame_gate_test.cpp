@@ -67,9 +67,10 @@ struct Rig {
   // One frame: packet arrival at `t`, capture timestamp `captureUs`, present anchor `presented`.
   FrameGateVerdict feed(uint64_t t, uint64_t captureUs, bool key, uint64_t presented, bool suppressed,
                         FrameGateLag* lag = nullptr, FrameGateInputs* inOut = nullptr,
-                        bool synthetic = false) {
+                        bool synthetic = false, uint64_t sendUs = 0) {
     FrameGateInputs in{};
     in.captureQpcUs = captureUs;
+    in.sendQpcUs = sendUs;  // 0 = unknown: the pre-P11 rules
     in.seq = ++seq;
     in.keyFrame = key;
     in.packetNowUs = t;
@@ -489,6 +490,70 @@ void test_sparse_slow_source_decodes_not_stale() {
 // reads the idle seconds as a decode backlog, tripping false congestion -> catchup -> keyframe wait
 // -> multi-second freeze. The idle re-anchor must keep decodeQueueLag ~0 across the resume so no
 // false congestion fires, while a genuine dense backlog (no idle) still trips it (covered elsewhere).
+// P11 (field 2026-09-07 15:15): after a silence the first frame is one the host HELD -- capture
+// stamp 800 ms behind its send stamp -- and fresh frames follow 2 ms apart. The held frame must
+// not anchor the floor (no false backlog); the first fresh frame does; nothing is requested.
+void test_held_resume_frame_does_not_anchor() {
+  std::printf("[T-P11a] held resume frame after a silence: shown, not the anchor; the fresh frame anchors; no congestion\n");
+  Rig r;
+  uint64_t t = 8000 * kMs;
+  FrameGateInputs in{};
+  CHECK(r.feed(t, t, true, 0, false, nullptr, &in, false, t + 10 * kMs) == FrameGateVerdict::Decode);
+  r.decoded(in);
+  // A still screen served sparsely: fresh frames 260 ms apart.
+  uint64_t cap = t;
+  for (int i = 1; i <= 4; ++i) {
+    const uint64_t at = t + i * 260 * kMs;
+    const uint64_t prev = cap;
+    cap = at;
+    CHECK(r.feed(at, cap, false, prev, false, nullptr, &in, false, cap + 20 * kMs) == FrameGateVerdict::Decode);
+  }
+  const uint64_t lastRealCap = cap;
+  // 800 ms of nothing, then the held picture: captured 30 ms after the last real, sent 800 ms later.
+  const uint64_t resumeAt = lastRealCap + 830 * kMs;
+  const uint64_t heldCap = lastRealCap + 30 * kMs;
+  CHECK(r.feed(resumeAt, heldCap, false, lastRealCap, false, nullptr, &in, false, resumeAt) == FrameGateVerdict::Decode);
+  CHECK(r.gate.resumeAnchorPending);
+  CHECK(r.gate.presentAnchorFloorUs == lastRealCap);  // not moved to the held stamp
+  CHECK(r.gate.heldResumeFrames == 1);
+  // The fresh burst, 2 ms apart, captured ~15 ms before arrival; the renderer shows the held one.
+  for (int i = 0; i < 4; ++i) {
+    const uint64_t at = resumeAt + 5 * kMs + i * 2 * kMs;
+    const uint64_t c = at - 15 * kMs;
+    FrameGateLag lag{};
+    CHECK(r.feed(at, c, false, heldCap, false, &lag, &in, false, at) == FrameGateVerdict::Decode);
+    CHECK(lag.decodeQueueLagEstimateUs < 100 * kMs);
+  }
+  CHECK(!r.gate.resumeAnchorPending);
+  CHECK(r.gate.presentAnchorFloorUs >= resumeAt - 15 * kMs);  // anchored on the first fresh frame
+  CHECK(r.gate.congestionState == ClientCongestionState::Normal);
+  CHECK(r.gate.lagTriggerStreak == 0);
+  CHECK(r.sink.requests(1) == 0);
+}
+
+// P11 guard: a genuine backlog after a silence -- every frame arrives held (send 800 ms after its
+// capture), densely -- must still trip the lag rule once the pending bound is spent.
+void test_backlog_after_silence_still_trips() {
+  std::printf("[T-P11b] genuine backlog after a silence (every frame held): still trips after the pending bound\n");
+  Rig r;
+  uint64_t t = 8000 * kMs;
+  FrameGateInputs in{};
+  CHECK(r.feed(t, t, true, 0, false, nullptr, &in, false, t + 10 * kMs) == FrameGateVerdict::Decode);
+  r.decoded(in);
+  const uint64_t silenceEnd = t + 800 * kMs;
+  bool tripped = false;
+  for (int i = 0; i < 16 && !tripped; ++i) {
+    const uint64_t at = silenceEnd + i * 2 * kMs;              // dense arrival
+    const uint64_t c = t + 400 * kMs + i * 16 * kMs;           // captures 400+ ms past the stuck anchor...
+    const uint64_t sendUs = c + 800 * kMs;                     // ...each held 800 ms by the host
+    (void)r.feed(at, c, false, t, false, nullptr, &in, false, sendUs);
+    tripped = r.gate.congestionState != ClientCongestionState::Normal;
+  }
+  CHECK(tripped);
+  CHECK(r.gate.heldResumeExpired == 1);
+  CHECK(r.sink.requests(1) >= 1);
+}
+
 void test_idle_resume_no_false_congestion() {
   std::printf("[T1] idle resume: static-then-dense-burst is not read as a decode backlog (no false catchup)\n");
   Rig r;
@@ -779,6 +844,8 @@ void test_keyframe_wait_drops_do_not_enter_congested() {
 
 int main() {
   test_keyframe_wait_drops_do_not_enter_congested();
+  test_held_resume_frame_does_not_anchor();
+  test_backlog_after_silence_still_trips();
   test_synthetic_gap_then_real_burst_no_false_congestion();
   test_recovery_timer_retries_while_congested_without_idr();
   test_recovery_timer_without_frames_and_backoff_per_wait();

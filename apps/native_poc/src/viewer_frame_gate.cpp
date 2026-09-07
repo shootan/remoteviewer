@@ -153,12 +153,44 @@ FrameGateVerdict FrameGate::admit(const FrameGateInputs& in, FrameGateLag* lag) 
   // would hide it and break the recovery-timeout re-request. So the floor (and its use) apply to the
   // congestion-ENTRY estimate in the Normal state only.
   const bool congestionHealthy = (gate.congestionState == ClientCongestionState::Normal);
-  if (in.recvGapUs > 250000 && !in.synthetic && congestionHealthy &&
-      in.captureQpcUs > gate.presentAnchorFloorUs) {
+  if (!congestionHealthy) gate.resumeAnchorPending = false;
+  // P11: the resume frame must be FRESH to anchor. hostHoldUs is host-clock only (send - capture):
+  // a frame the host sat on for longer than resumeAnchorMaxHoldUs is a held picture (the async
+  // encoder's pre-flush output after a UAC switch; the last capture kept through a still secure
+  // desktop), not where the content is now. It is shown, but the anchor waits for the first fresh
+  // frame behind it; while pending the entry estimate treats the incoming stamp as the floor.
+  const uint64_t hostHoldUs = (in.sendQpcUs > in.captureQpcUs) ? (in.sendQpcUs - in.captureQpcUs) : 0;
+  const bool fresh = (in.sendQpcUs == 0) || (hostHoldUs <= gate.resumeAnchorMaxHoldUs);
+  bool anchorHere = false;
+  if (in.recvGapUs > 250000 && !in.synthetic && congestionHealthy) {
+    if (fresh) {
+      anchorHere = true;
+      gate.resumeAnchorPending = false;
+    } else {
+      gate.resumeAnchorPending = true;
+      gate.resumeAnchorPendingSinceUs = in.packetNowUs;
+      gate.resumeAnchorPendingFrames = 0;
+      ++gate.heldResumeFrames;
+    }
+  } else if (gate.resumeAnchorPending && !in.synthetic && congestionHealthy) {
+    ++gate.resumeAnchorPendingFrames;
+    if (fresh) {
+      anchorHere = true;
+      gate.resumeAnchorPending = false;
+    } else if (gate.resumeAnchorPendingFrames >= gate.resumeAnchorPendingMaxFrames ||
+               in.packetNowUs >= gate.resumeAnchorPendingSinceUs + gate.resumeAnchorPendingMaxUs) {
+      // Every frame since the silence was held: a genuine backlog. Back to the old rule.
+      gate.resumeAnchorPending = false;
+      ++gate.heldResumeExpired;
+    }
+  }
+  if (anchorHere && in.captureQpcUs > gate.presentAnchorFloorUs) {
     gate.presentAnchorFloorUs = in.captureQpcUs;
   }
+  const uint64_t entryFloorUs = gate.resumeAnchorPending ? std::max(gate.presentAnchorFloorUs, in.captureQpcUs)
+                                                         : gate.presentAnchorFloorUs;
   const uint64_t effectivePresentedCapUs =
-      congestionHealthy ? std::max(in.presentedCapUs, gate.presentAnchorFloorUs) : in.presentedCapUs;
+      congestionHealthy ? std::max(in.presentedCapUs, entryFloorUs) : in.presentedCapUs;
   const uint64_t decodeQueueLagEstimateUs =
       (effectivePresentedCapUs > 0 && in.captureQpcUs >= effectivePresentedCapUs)
           ? (in.captureQpcUs - effectivePresentedCapUs)

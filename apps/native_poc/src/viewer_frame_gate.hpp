@@ -46,6 +46,9 @@ struct FrameGateInputs {
   uint64_t packetNowUs = 0;
   uint64_t recvGapUs = 0;           // from note_packet()
   uint64_t presentedCapUs = 0;      // FrameBuffer::lastPresentedCaptureUs
+  // The host's send stamp (wire). With captureQpcUs -- both host clock -- it says how long the
+  // host held this picture before sending it; 0 = unknown (older host / test). (P11)
+  uint64_t sendQpcUs = 0;
   bool catchupSuppressed = false;   // picker visible || packetNowUs < catchupSuppressUntilUs
   // The host re-encoded its cached picture (kick / static refresh). Decoded and shown like any
   // frame, but it must not feed the congestion trigger or the queue-depth histogram: its capture

@@ -1555,6 +1555,7 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
   sampleTimeOutputTimestampFallbackCount_ = 0;
   pendingInputSampleTimesHns_.clear();
   pendingInputSynthetic_.clear();
+  pendingInputEpoch_.clear();
   frameIndex_ = 0;
   sequenceHeaderAnnexb_.clear();
 
@@ -1856,11 +1857,14 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
         // encoders that rewrite output timestamps to a private zero-based timeline.
         int64_t normalizedAuSampleTimeHns = sampleTime;
         bool auSynthetic = nextInputSynthetic_;  // FIFO empty -> this call's input (old behaviour)
+        uint64_t auEpoch = nextInputEpoch_;
         if (!pendingInputSampleTimesHns_.empty()) {
           normalizedAuSampleTimeHns = pendingInputSampleTimesHns_.front();
           if (!pendingInputSynthetic_.empty()) auSynthetic = pendingInputSynthetic_.front();
+          if (!pendingInputEpoch_.empty()) auEpoch = pendingInputEpoch_.front();
           pendingInputSampleTimesHns_.pop_front();
           if (!pendingInputSynthetic_.empty()) pendingInputSynthetic_.pop_front();
+          if (!pendingInputEpoch_.empty()) pendingInputEpoch_.pop_front();
         } else {
           ++sampleTimeOutputTimestampFallbackCount_;
         }
@@ -1871,6 +1875,7 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
         au.sampleTimeHns = normalizedAuSampleTimeHns;
         au.sampleTimeFromOutput = sampleTimeFromOutput;
         au.synthetic = auSynthetic;
+        au.inputEpoch = auEpoch;
         if (maybeKey && !sequenceHeaderAnnexb_.empty() &&
             !annexb_contains_idr(sequenceHeaderAnnexb_.data(), sequenceHeaderAnnexb_.size())) {
           // Keep existing behavior if sequence blob is malformed.
@@ -1918,10 +1923,12 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
   }
   pendingInputSampleTimesHns_.push_back(sampleTime);
   pendingInputSynthetic_.push_back(nextInputSynthetic_);
+  pendingInputEpoch_.push_back(nextInputEpoch_);
   constexpr size_t kPendingEncoderTimestampMax = 64;
   if (pendingInputSampleTimesHns_.size() > kPendingEncoderTimestampMax) {
     pendingInputSampleTimesHns_.pop_front();
     if (!pendingInputSynthetic_.empty()) pendingInputSynthetic_.pop_front();
+    if (!pendingInputEpoch_.empty()) pendingInputEpoch_.pop_front();
     ++sampleTimeOutputTimestampFallbackCount_;
     ++pendingInputOverflowTotal_;
     if (env_truthy_local("REMOTE60_NATIVE_DEBUG_CODEC")) {
@@ -2014,6 +2021,7 @@ void H264Encoder::shutdown() {
   sampleTimeOutputTimestampFallbackCount_ = 0;
   pendingInputSampleTimesHns_.clear();
   pendingInputSynthetic_.clear();
+  pendingInputEpoch_.clear();
   frameIndex_ = 0;
   sequenceHeaderAnnexb_.clear();
   asyncTransform_ = false;

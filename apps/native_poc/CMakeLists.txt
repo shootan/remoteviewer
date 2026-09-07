@@ -466,6 +466,23 @@ add_executable(remote60_host_kick_test
 )
 target_include_directories(remote60_host_kick_test PRIVATE src)
 
+# P11 on the real MF H264Encoder: the flush epoch rides the accepted-input FIFO, a pre-flush AU
+# surfacing after the flush is reproduced and then gated (the new epoch's first send is its IDR),
+# the gate's rules and bounds on fabricated AUs, and the hold as observed on this backend.
+add_executable(remote60_host_encode_epoch_test
+  src/mf_h264_codec.cpp
+  src/host_encode_epoch_test.cpp
+)
+target_include_directories(remote60_host_encode_epoch_test PRIVATE src)
+target_link_libraries(remote60_host_encode_epoch_test PRIVATE
+  d3d11
+  mfplat
+  mf
+  mfuuid
+  wmcodecdspuuid
+  ole32
+)
+
 add_executable(remote60_host_main_loop_mailbox_test
   src/host_main_loop_mailbox_test.cpp
 )

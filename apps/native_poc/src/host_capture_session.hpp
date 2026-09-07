@@ -154,6 +154,11 @@ struct CaptureState {
   std::atomic<uint32_t> selectedMonitorId{0};
   // cross-thread: selection / capture-mode requests from the control thread, consumed by main.
   std::atomic<uint64_t> streamGenerationState{1};
+  // Flush epoch (P11): bumped by EncoderState::ResetTimelineAnchors, i.e. on every capture flush,
+  // restart, confirmed geometry change and encoder reset. Tags encoder inputs (H264Encoder FIFO)
+  // so an AU the async MFT emits from a pre-flush input is recognised at the emit stage and the
+  // new epoch's first send is its own IDR (host_epoch_gate.hpp).
+  std::atomic<uint64_t> inputEpoch{1};
   std::atomic<bool> windowSelectionLocked{false};
   // Window target (from --capture-window-* / the picker).
   CaptureWindowCriteria windowCriteria{};
@@ -302,7 +307,7 @@ struct CaptureState {
   // Drop everything queued for the encoder after a target/backend/size change.
   void FlushCapturePipelineState(CaptureResources& res, FrameGatingState& frameGating, HostStats& stats, const char* reason);
   void LogFirstSentGeneration(CaptureResources& res, HostStats& stats, const char* path, uint64_t streamGeneration,
-                              uint64_t sendStartUs, uint64_t captureStampUs, uint32_t width, uint32_t height);
+                              uint64_t sendStartUs, uint64_t captureStampUs, uint32_t width, uint32_t height, uint64_t auEpoch = 0, uint64_t currentEpoch = 0);
   // Serve the cached bootstrap frame for a trailing kick / static refresh, if still valid.
   bool KickTryFill(SessionState& clientSession, KickState& kick, std::shared_ptr<std::vector<uint8_t>>& outPayload,
                    uint32_t& outW, uint32_t& outH, uint32_t& outStride, uint64_t nowUs);

@@ -140,6 +140,63 @@ AuFlow encode_send_h264_emit_au(HostContext& hx, TickContext& tc, H264AuBatch& b
   auto& countedRawForInput = b.countedRawForInput;
   auto& senderBacklogged = b.senderBacklogged;
   if (au.bytes.empty()) return AuFlow::Continue;
+  // P11 -- the epoch gate. An async MFT returns an OLDER input's AU during the current call, so
+  // the first call after a flush emits the pre-flush picture: true old capture stamp, flagged real,
+  // on the new generation (2026-09-07 15:15:59 seq 24484, 820 ms behind its send time; the viewer
+  // made it the resume anchor and read the fresh frames behind it as an 848 ms backlog). Nothing
+  // from an older epoch goes out, and the first AU of the new epoch must be its IDR: a P before
+  // it is dropped and the key re-forced; past the bound the encoder is rebuilt.
+  const uint64_t inputEpochNow = capture.inputEpoch.load(std::memory_order_acquire);
+  {
+    const int64_t gateStampUs = (au.sampleTimeHns > 0) ? (au.sampleTimeHns / 10) : 0;
+    const uint64_t gateHoldUs =
+        (encodeStartUs >= static_cast<uint64_t>(gateStampUs)) ? (encodeStartUs - static_cast<uint64_t>(gateStampUs)) : 0;
+    const EpochVerdict verdict =
+        epoch_gate_judge(encoder.epochGate, inputEpochNow, au.inputEpoch, au.keyFrame, au.bytes.size(), encodeStartUs);
+    switch (verdict) {
+      case EpochVerdict::Emit:
+        break;
+      case EpochVerdict::AcceptKey:
+        std::cout << "[native-video-host] epoch-gate key-accepted curEpoch=" << inputEpochNow
+                  << " waitedUs=" << (encodeStartUs - encoder.epochGate.awaitSinceUs)
+                  << " droppedOld=" << encoder.epochGate.droppedOldEpoch
+                  << " droppedNonKey=" << encoder.epochGate.droppedAwaitingKey << "\n";
+        break;
+      case EpochVerdict::DropOldEpoch:
+        std::cout << "[native-video-host] epoch-gate dropped-old auEpoch=" << au.inputEpoch << " curEpoch=" << inputEpochNow
+                  << " auCaptureUs=" << gateStampUs << " holdUs=" << gateHoldUs << " key=" << (au.keyFrame ? 1 : 0)
+                  << " bytes=" << au.bytes.size() << "\n";
+        return AuFlow::Continue;
+      case EpochVerdict::DropAwaitingKey:
+        // The forced IDR did not come (ignored or delayed): ask again; this P would reference a
+        // chain the viewer will never have.
+        encoder.forceKeyNext = true;
+        std::cout << "[native-video-host] epoch-gate dropped-nonkey curEpoch=" << inputEpochNow
+                  << " auCaptureUs=" << gateStampUs << " reforce=1 awaitDropped=" << encoder.epochGate.awaitDropped << "\n";
+        return AuFlow::Continue;
+      case EpochVerdict::ResetEncoder: {
+        // Bound exceeded (kAwaitMaxUs / kAwaitMaxDropped without the new epoch's IDR): the same
+        // rebuild the stale-output guard does; a fresh MFT starts with an IDR.
+        std::cout << "[native-video-host] epoch-gate encoder reset curEpoch=" << inputEpochNow
+                  << " awaitDropped=" << encoder.epochGate.awaitDropped << " resets=" << encoder.epochGate.resetsRequested << "\n";
+        encoder.codec.shutdown();
+        if (!encoder.codec.initialize(encoder.activeEncodeW, encoder.activeEncodeH, encoder.activeFps, encoder.activeBitrate, encoder.activeKeyint)) {
+          std::cerr << "[native-video-host] encoder reinitialize failed (epoch gate)\n";
+          sendFailed = true;
+          return AuFlow::Break;
+        }
+        encoder.ResetTimelineAnchors(capture);  // a new epoch again; the gate re-judges for it
+        encoder.ResetStarvationEpisode();
+        encoder.forceKeySubmittedAtUs = 0;
+        ++encoder.resetCount;
+        encoder.consecutiveStaleFrames = 0;
+        encoder.forceKeyNext = true;
+        epoch_gate_note_reset(encoder.epochGate, qpc_now_us());
+        encoderResetTriggered = true;
+        return AuFlow::Break;
+      }
+    }
+  }
   const int64_t auCaptureUs = (au.sampleTimeHns > 0) ? (au.sampleTimeHns / 10) : static_cast<int64_t>(encodeInputUs);
   // This AU carries the capture timestamp of the input frame it was produced from (the async
   // MFT preserves input sample times FIFO). Observing it is the proof a given real input has
@@ -372,7 +429,7 @@ if (sentOk) {
   stats.lastSendStartUs = sendStartUs;
   capture.LogFirstSentGeneration(res, stats, 
       transport == VideoTransport::Tcp ? "h264-tcp" : "h264-udp",
-      streamGeneration, sendStartUs, hdr.captureQpcUs, hdr.width, hdr.height);
+      streamGeneration, sendStartUs, hdr.captureQpcUs, hdr.width, hdr.height, au.inputEpoch, inputEpochNow);
   if (kick.selectionFirstKeyframePendingGeneration != 0 &&
       streamGeneration == kick.selectionFirstKeyframePendingGeneration &&
       (hdr.flags & 1u) != 0) {
@@ -500,6 +557,7 @@ if (args.traceEvery > 0 && (hdr.seq % args.traceEvery) == 0 &&
               << " captureToAuUs=" << captureToAuUs
               << " auCaptureUs=" << static_cast<uint64_t>(auCaptureUs)
               << " encodeInputUs=" << encodeInputUs
+              << " auEpoch=" << au.inputEpoch << " curEpoch=" << inputEpochNow
               << " captureToQueueUs=" << captureToQueueUs
              << " queueWaitUs=" << queueWaitUs
              << " queueWaitReason=" << queueWaitReason
@@ -628,6 +686,7 @@ std::cout << "[native-video-host][user-feedback] seq=" << hdr.seq
               << " captureToAuUs=" << captureToAuUs
              << " auCaptureUs=" << static_cast<uint64_t>(auCaptureUs)
              << " encodeInputUs=" << encodeInputUs
+              << " auEpoch=" << au.inputEpoch << " curEpoch=" << inputEpochNow
            << " cb2eUs=" << callbackToEncodeStartUs
            << " cb2sUs=" << callbackToSendStartUs
             << " sendCallCount=" << sendCallCount

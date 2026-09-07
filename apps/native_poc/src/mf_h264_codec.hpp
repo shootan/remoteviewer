@@ -21,6 +21,9 @@ struct H264AccessUnit {
   // through the accepted-input FIFO next to the timestamp, because an async MFT returns an older
   // input's AU during the current call -- the call's own flag would land on the wrong AU. (0.2.97)
   bool synthetic = false;
+  // The host's flush epoch the input was accepted in (0 = untagged). Same FIFO: lets the emit
+  // stage tell a pre-flush AU from the first AU of the new epoch (P11, host_epoch_gate.hpp).
+  uint64_t inputEpoch = 0;
 };
 
 struct DecodedFrameNv12 {
@@ -106,6 +109,8 @@ class H264Encoder {
   // Provenance of the NEXT input (kick / static refresh = true); rides the accepted-input FIFO so
   // each AU reports the flag of the input that produced it. (0.2.97)
   void set_next_input_synthetic(bool synthetic) { nextInputSynthetic_ = synthetic; }
+  // Flush epoch of the NEXT input (CaptureState::inputEpoch); same FIFO, same reason. (P11)
+  void set_next_input_epoch(uint64_t epoch) { nextInputEpoch_ = epoch; }
   void shutdown();
 
  private:
@@ -132,6 +137,8 @@ class H264Encoder {
   std::deque<int64_t> pendingInputSampleTimesHns_;
   std::deque<bool> pendingInputSynthetic_;  // lockstep with pendingInputSampleTimesHns_ (0.2.97)
   bool nextInputSynthetic_ = false;
+  std::deque<uint64_t> pendingInputEpoch_;  // lockstep too (P11)
+  uint64_t nextInputEpoch_ = 0;
   std::vector<uint8_t> sequenceHeaderAnnexb_;
   bool spsProfileReported_ = false;
   bool started_ = false;

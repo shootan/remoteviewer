@@ -16,6 +16,7 @@
 #include "host_capture_session.hpp"
 #include "host_frame_gate.hpp"
 #include "mf_h264_codec.hpp"
+#include "host_epoch_gate.hpp"
 
 namespace remote60::native_poc {
 
@@ -117,6 +118,9 @@ struct EncoderState {
   // Force-key: next input must be an IDR; submit latch so one request forces one input.
   bool forceKeyNext = true;
   uint64_t forceKeySubmittedAtUs = 0;
+  // Epoch gate (P11, host_epoch_gate.hpp): after a flush, nothing encoded from a pre-flush input
+  // goes out and the first AU sent is the new epoch's IDR.
+  EpochGate epochGate;
   // Zero-copy NV12 surfaces reserved until the encoder has provably consumed them.
   std::deque<Nv12PendingRelease> nv12PendingReleases;
   bool surfaceEncodeHealthy = true;
@@ -177,6 +181,10 @@ struct EncoderState {
   void ResetTimelineAnchors(CaptureState& capture) {
     capture.timelineOriginUs = -1;
     auTimelineOriginUs = -1;
+    // Every caller is a flush / restart / confirmed geometry change / encoder reset: the boundary
+    // after which an AU from an older input is pre-flush. Most callers also force the next input
+    // to be an IDR; the epoch gate re-forces it itself if one does not (P11).
+    capture.inputEpoch.fetch_add(1, std::memory_order_acq_rel);
   }
   // The single choke point every encoder parameter change goes through (runtime tune, capture-UI
   // overview/focus, ABR/M9 refit): fits the box to the source aspect, rebuilds or re-tunes the MFT,

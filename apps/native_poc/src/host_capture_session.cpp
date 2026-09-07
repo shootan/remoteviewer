@@ -781,7 +781,7 @@ void CaptureState::FlushCapturePipelineState(CaptureResources& res, FrameGatingS
             << "\n";
 }
 
-void CaptureState::LogFirstSentGeneration(CaptureResources& res, HostStats& stats, const char* path, uint64_t streamGeneration, uint64_t sendStartUs, uint64_t captureStampUs, uint32_t width, uint32_t height) {
+void CaptureState::LogFirstSentGeneration(CaptureResources& res, HostStats& stats, const char* path, uint64_t streamGeneration, uint64_t sendStartUs, uint64_t captureStampUs, uint32_t width, uint32_t height, uint64_t auEpoch, uint64_t currentEpoch) {
   CaptureState& capture = *this;
   auto& frame = res.frame;
   if (streamGeneration == 0 || stats.firstSentLoggedGeneration == streamGeneration) return;
@@ -792,7 +792,10 @@ void CaptureState::LogFirstSentGeneration(CaptureResources& res, HostStats& stat
             << " sendQpcUs=" << sendStartUs
             << " captureQpcUs=" << captureStampUs
             << " size=" << width << "x" << height
-            << "\n";
+            // P11: whose input this AU is (auEpoch < curEpoch would be a pre-flush picture) and how
+            // long it sat between its capture stamp and the send-ready time (not a wire delay).
+            << " auEpoch=" << auEpoch << " curEpoch=" << currentEpoch
+            << " holdUs=" << ((sendStartUs >= captureStampUs) ? (sendStartUs - captureStampUs) : 0) << "\n";
 }
 
 bool CaptureState::KickTryFill(SessionState& clientSession, KickState& kick, std::shared_ptr<std::vector<uint8_t>>& outPayload, uint32_t& outW, uint32_t& outH, uint32_t& outStride, uint64_t nowUs) {

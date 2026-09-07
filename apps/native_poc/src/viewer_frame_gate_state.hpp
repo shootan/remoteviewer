@@ -108,6 +108,22 @@ struct FrameGateState {
   // backlog and trip false congestion -> catchup -> keyframe-wait freeze. Only a genuine backlog
   // (frames arriving DENSELY faster than they present) leaves the floor stale and still trips it.
   uint64_t presentAnchorFloorUs = 0;
+  // P11 (2026-09-07 15:15:57 / :59): the frame that ends a silence can be a picture the host had
+  // been HOLDING -- its capture stamp far behind its send stamp, both host-side: the async
+  // encoder's pre-flush output after a UAC switch, or the last capture kept through a still
+  // secure desktop. Anchoring the floor to it made the fresh frames right behind it read as a
+  // 0.5-0.8 s decode backlog (Congested + IDR, presentBacklog 0). Such a resume frame is shown but
+  // leaves the anchor PENDING; the first fresh frame after it (hold <= resumeAnchorMaxHoldUs)
+  // anchors. Bounded: after resumeAnchorPendingMaxFrames or resumeAnchorPendingMaxUs without a
+  // fresh frame -- a genuine backlog holds every frame -- the old rule resumes and the lag trips.
+  uint64_t resumeAnchorMaxHoldUs = 300000;
+  uint32_t resumeAnchorPendingMaxFrames = 8;
+  uint64_t resumeAnchorPendingMaxUs = 500000;
+  bool resumeAnchorPending = false;
+  uint64_t resumeAnchorPendingSinceUs = 0;
+  uint32_t resumeAnchorPendingFrames = 0;
+  uint64_t heldResumeFrames = 0;   // telemetry: resume frames judged held
+  uint64_t heldResumeExpired = 0;  // telemetry: pendings that hit the bound (the backlog path)
   // Rate-limit for stale-reference recovery (decoder reset + IDR request). Within
   // staleReferenceRecoveryMinIntervalUs of the last one, a behind-latest in-chain frame is decoded
   // in order instead of storming another IDR. (0.2.94: post-UAC keyframe churn.)
