@@ -785,19 +785,22 @@ void apply_signed_in_ui(bool signedIn) {
 }
 
 /**
- * Hands this machine's log to the directory once there is a token to authenticate with.
+ * Hands this machine's log to the directory with the token it holds right now.
  *
- * Called from both places a token appears -- a fresh sign-in and a cache loaded at startup --
- * because a host that was already signed in never signs in again, and that is the common case.
- * Starting twice is harmless; the uploader returns early when it is already running.
+ * Called from both places a token appears -- a fresh sign-in and a cache loaded at startup.
+ * The second call is not a no-op: a sign-in re-registers the host, and the server retires the
+ * previous token that instant (server.js handleHostRegister), so an uploader still holding it
+ * gets 401 for the rest of the process's life -- which is what emptied the NAS of host logs on
+ * 2026-09-07 (P10). The uploader is re-pointed; what it queued under the same account stays.
  */
 void start_log_upload() {
   remote60::native_poc::LogUploadConfig upload;
   upload.directoryUrl = g.cache.directoryUrl;
   upload.hostToken = g.cache.hostToken;
   upload.device = g.cache.machineId;
+  upload.identity = g.cache.accountId + "/" + g.cache.machineId;
   std::string reason;
-  const bool on = remote60::native_poc::log_upload_start(upload, &reason);
+  const bool on = remote60::native_poc::log_upload_configure(upload, &reason);
   std::printf("[gnlink-host] log upload %s %s\n", on ? "on" : "off", reason.c_str());
 }
 
@@ -898,6 +901,8 @@ void sign_out(bool keepAccount) {
   g.cache.hostToken.clear();
   g.cache.hostId.clear();
   (void)directory::save_host_cache(g.cachePath, g.cache);
+  // The token is gone; so is the owner of whatever the uploader still holds.
+  remote60::native_poc::log_upload_clear_credentials("signed out");
   apply_signed_in_ui(false);
   SetWindowTextW(g.passwordEdit, L"");
   if (!keepAccount) SetWindowTextW(g.accountEdit, L"");
@@ -1196,6 +1201,11 @@ void refresh_status_text() {
   }
   const uint32_t restarts = g.streaming.Restarts();
   if (restarts > 0) detail += L"\nStreaming host restarts: " + std::to_wstring(restarts);
+  // The uploader learns about a retired token before the heartbeat does (it posts every few
+  // seconds); a pause there is the same "sign in again" and must not stay invisible.
+  if (remote60::native_poc::log_upload_status().authRejected) {
+    detail += L"\nLog upload: the server rejected this PC's token. Use Change account to sign in again.";
+  }
   set_status(detail);
 }
 

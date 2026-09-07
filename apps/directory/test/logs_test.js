@@ -111,6 +111,43 @@ function request(method, urlPath, { body, headers = {} } = {}) {
   });
   check('another device is unaffected by that budget', other.status === 200, `status=${other.status}`);
 
+  // 7. a host token authenticates too: the host app has no session, only its registration
+  const hostReg = { id: 'tester', pw: 'test-pass-1234', hostName: 'Log PC', machineId: 'machine-logs' };
+  const reg = await request('POST', '/api/host/register', { body: hostReg });
+  const hostToken = reg.body && reg.body.hostToken;
+  check('a host registers for an upload token', reg.status === 200 && !!hostToken, `status=${reg.status}`);
+  const viaHost = await request('POST', '/api/logs', {
+    body: 'host line\n',
+    headers: { 'x-host-token': hostToken, 'x-log-device': 'pc1', 'x-log-stream': 'host' },
+  });
+  check('a host token stores the batch', viaHost.status === 200, `status=${viaHost.status}`);
+  const hostFile = path.join(LOG_DIR, 'tester', 'pc1', 'host.log');
+  check('host lines land under the host\'s account',
+        fs.existsSync(hostFile) && fs.readFileSync(hostFile, 'utf8').includes('host line'), hostFile);
+
+  // 8. re-registering retires the previous token for uploads as well -- the uploader has to be
+  //    re-pointed at the new one (P10, 2026-09-07: four minutes of the old token = 401 for 2 hours)
+  const reg2 = await request('POST', '/api/host/register', { body: hostReg });
+  const rotated = reg2.body && reg2.body.hostToken;
+  check('re-registration issues a different token', reg2.status === 200 && rotated && rotated !== hostToken);
+  const oldAfter = await request('POST', '/api/logs', {
+    body: 'stale\n',
+    headers: { 'x-host-token': hostToken, 'x-log-device': 'pc1', 'x-log-stream': 'host' },
+  });
+  check('the retired host token is refused for uploads', oldAfter.status === 401, `status=${oldAfter.status}`);
+  const newAfter = await request('POST', '/api/logs', {
+    body: 'fresh\n',
+    headers: { 'x-host-token': rotated, 'x-log-device': 'pc1', 'x-log-stream': 'host' },
+  });
+  check('the rotated host token is accepted', newAfter.status === 200, `status=${newAfter.status}`);
+
+  // 9. a session the server does not know (restarted before persistence, expired, made up)
+  const stale = await request('POST', '/api/logs', {
+    body: 'x\n',
+    headers: { authorization: 'Bearer not-a-session', 'x-log-device': 'dev1', 'x-log-stream': 'viewer' },
+  });
+  check('an unknown session token is refused', stale.status === 401, `status=${stale.status}`);
+
   console.log(failures === 0 ? '\nlogs_test: PASS' : `\nlogs_test: ${failures} FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 })().catch((e) => {

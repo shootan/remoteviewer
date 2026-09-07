@@ -253,6 +253,16 @@ target_link_libraries(remote60_native_video_client_shared_core_test PRIVATE
   ws2_32
 )
 
+# The log uploader's credential lifecycle (P10): token replaced / identity changed / 401 pause /
+# bounded retry / permanent discard, against an in-process fake directory on 127.0.0.1.
+add_executable(remote60_log_upload_test
+  src/log_upload.cpp
+  src/directory_client.cpp
+  src/log_upload_test.cpp
+)
+target_include_directories(remote60_log_upload_test PRIVATE src)
+target_link_libraries(remote60_log_upload_test PRIVATE common ws2_32 iphlpapi shell32)
+
 # The thing a user installs: sign-in window plus tray, supervising the streaming host.
 add_executable(remote60_host_app WIN32
   src/host_app_main.cpp

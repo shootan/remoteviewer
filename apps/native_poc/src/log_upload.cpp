@@ -2,7 +2,7 @@
 
 #include "log_upload.hpp"
 
-#include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -26,6 +26,8 @@ namespace {
 // when uploads fail there is otherwise no trace at all, which is exactly the hole that made the
 // first "logs stop after one batch" bug un-diagnosable. Kept append-only and tiny (a line per
 // flush that did something), so it never itself becomes the disk problem it reports on.
+//
+// Never a token: the diag is world-readable for the user and gets pasted into bug reports.
 void diag(const std::string& text) {
   static std::mutex diagMu;
   const std::string base = env_string_or_empty("LOCALAPPDATA");
@@ -45,18 +47,68 @@ void diag(const std::string& text) {
   std::fclose(f);
 }
 
+uint64_t steady_now_us() {
+  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                   std::chrono::steady_clock::now().time_since_epoch())
+                                   .count());
+}
+
 struct QueuedLine {
   std::string stream;
   std::string text;
 };
+
+// A batch that failed once and is waiting: for its retry delay, or for a new token.
+struct HeldBatch {
+  std::string stream;
+  std::string body;
+  uint32_t attempts = 0;        // sends already made
+  uint64_t firstAttemptUs = 0;  // steady; the age bound counts from here
+  uint64_t dueUs = 0;           // earliest next attempt; 0 = as soon as a token allows
+  bool awaitingToken = false;   // held by a 401, not by the retry schedule
+};
+
+// Bound on what a 401 or an outage may keep in memory besides the line queue: a few batches,
+// oldest discarded first. The queue cap already bounds the lines behind them.
+constexpr size_t kHeldMaxBatches = 4;
+
+enum class Outcome { Ok, Auth, Transient, Permanent };
+
+Outcome classify(bool sent, uint32_t status) {
+  if (!sent) return Outcome::Transient;  // unreachable / no http answer
+  if (status >= 200 && status < 300) return Outcome::Ok;
+  if (status == 401) return Outcome::Auth;
+  if (status == 408 || status == 429 || status >= 500) return Outcome::Transient;
+  return Outcome::Permanent;  // 400, 403, 404, 413 ...: the server's final word on this body
+}
+
+const char* outcome_name(Outcome o) {
+  switch (o) {
+    case Outcome::Ok: return "ok";
+    case Outcome::Auth: return "auth";
+    case Outcome::Transient: return "transient";
+    case Outcome::Permanent: return "permanent";
+  }
+  return "?";
+}
 
 struct UploaderState {
   std::mutex mu;
   std::condition_variable cv;
   std::deque<QueuedLine> queue;
   size_t queuedBytes = 0;
-  uint64_t droppedLines = 0;      // lines the queue could not hold
-  uint64_t failedBatches = 0;     // batches the server did not take
+  std::deque<HeldBatch> held;
+  size_t heldBytes = 0;
+  // Counters (LogUploadStatus).
+  uint64_t sentBatches = 0;
+  uint64_t failedSends = 0;
+  uint64_t retriedBatches = 0;
+  uint64_t discardedBatches = 0;
+  uint64_t droppedLines = 0;
+  uint64_t discardedLines = 0;
+  uint32_t lastStatus = 0;
+  uint64_t lastOkUs = 0;
+  uint64_t lastRejectUs = 0;
   bool running = false;
   bool stopping = false;
   std::thread worker;
@@ -64,7 +116,14 @@ struct UploaderState {
   LogUploadConfig config;
   std::string host;
   uint16_t port = 0;
-  std::string headers;            // the auth + identity headers, built once
+  std::string device;
+  std::string headers;      // the auth + identity headers for the CURRENT credentials
+  bool credentials = false;
+  bool authRejected = false;
+  uint64_t configGeneration = 0;  // bumped by every credential change; a send remembers its own
+  uint64_t wakeSeq = 0;           // bumped whenever the worker should re-read its config now
+  std::function<void()> authRejectedCallback;
+  uint64_t lastTransientDiagUs = 0;
 };
 
 UploaderState& state() {
@@ -84,80 +143,218 @@ std::string build_headers(const LogUploadConfig& config, const std::string& devi
   return os.str();
 }
 
-/** Sends one stream's worth of lines. Failures are counted, not retried: the disk copy stands. */
-void send_batch(UploaderState& s, const std::string& stream, const std::string& body) {
-  if (body.empty()) return;
-  uint32_t status = 0;
-  const std::string headers = s.headers + "x-log-stream: " + stream + "\r\n";
-  const bool sent = directory::http_post(s.host, s.port, "/api/logs", "text/plain", headers, body,
-                                         &status, nullptr);
-  if (!sent || status < 200 || status >= 300) {
-    diag("send FAILED stream=" + stream + " bytes=" + std::to_string(body.size()) +
-         " reached=" + (sent ? "1" : "0") + " status=" + std::to_string(status) +
-         " host=" + s.host + ":" + std::to_string(s.port));
-    std::lock_guard<std::mutex> lk(s.mu);
-    ++s.failedBatches;
+// Requires s.mu. Drops the queue and the held batches; the caller says why.
+void discard_all_locked(UploaderState& s, uint64_t* outLines, uint64_t* outBatches) {
+  *outLines = s.queue.size();
+  *outBatches = s.held.size();
+  s.discardedLines += s.queue.size();
+  s.discardedBatches += s.held.size();
+  s.queue.clear();
+  s.queuedBytes = 0;
+  s.held.clear();
+  s.heldBytes = 0;
+}
+
+// Requires s.mu. Keeps the hold bounded: oldest out.
+void hold_locked(UploaderState& s, HeldBatch batch) {
+  while (s.held.size() >= kHeldMaxBatches) {
+    s.heldBytes -= (std::min)(s.heldBytes, s.held.front().body.size());
+    s.held.pop_front();
+    ++s.discardedBatches;
   }
+  s.heldBytes += batch.body.size();
+  s.held.push_back(std::move(batch));
+}
+
+struct SendJob {
+  std::string stream;
+  std::string body;
+  std::string headers;
+  std::string host;
+  uint16_t port = 0;
+  uint64_t configGeneration = 0;
+  uint32_t attempts = 0;        // before this send
+  uint64_t firstAttemptUs = 0;  // 0 = first send
+};
+
+// Requires s.mu. Picks the next thing to send: a held batch that is due, else a fresh batch
+// from the queue. False when there is nothing (or nothing may go yet).
+bool next_job_locked(UploaderState& s, uint64_t nowUs, SendJob* job) {
+  if (!s.credentials || s.authRejected) return false;
+  for (auto it = s.held.begin(); it != s.held.end(); ++it) {
+    if (it->awaitingToken || it->dueUs <= nowUs) {
+      job->stream = std::move(it->stream);
+      job->body = std::move(it->body);
+      job->attempts = it->attempts;
+      job->firstAttemptUs = it->firstAttemptUs;
+      s.heldBytes -= (std::min)(s.heldBytes, job->body.size());
+      s.held.erase(it);
+      break;
+    }
+  }
+  if (job->body.empty()) {
+    if (s.queue.empty()) return false;
+    // One stream per request: take lines of the front line's stream, in order, up to the
+    // batch size; the other streams follow on the next pass.
+    const std::string stream = s.queue.front().stream;
+    size_t taken = 0;
+    std::string body;
+    for (auto it = s.queue.begin(); it != s.queue.end() && taken < s.config.batchMaxBytes;) {
+      if (it->stream != stream) {
+        ++it;
+        continue;
+      }
+      taken += it->text.size() + 1;
+      body.append(it->text);
+      body.push_back('\n');
+      it = s.queue.erase(it);
+    }
+    s.queuedBytes = s.queuedBytes > taken ? s.queuedBytes - taken : 0;
+    job->stream = stream;
+    job->body = std::move(body);
+    job->attempts = 0;
+    job->firstAttemptUs = 0;
+  }
+  job->headers = s.headers + "x-log-stream: " + job->stream + "\r\n";
+  job->host = s.host;
+  job->port = s.port;
+  job->configGeneration = s.configGeneration;
+  return true;
 }
 
 void worker_loop() {
   UploaderState& s = state();
   diag("worker started host=" + s.host + ":" + std::to_string(s.port));
   uint64_t cycles = 0;
-  uint64_t sentBatches = 0;
+  uint64_t flushes = 0;
+  uint64_t seenWake = 0;
   for (;;) {
-    std::vector<QueuedLine> batch;
+    SendJob job;
+    bool finalPass = false;
     {
       std::unique_lock<std::mutex> lk(s.mu);
-      s.cv.wait_for(lk, std::chrono::milliseconds(s.config.flushIntervalMs),
-                    [&s] { return s.stopping || s.queuedBytes >= s.config.batchMaxBytes; });
-      if (s.queue.empty()) {
+      // A configure / clear bumps wakeSeq so a worker asleep on the old cadence re-reads its
+      // config now instead of at the end of the old interval.
+      s.cv.wait_for(lk, std::chrono::milliseconds(s.config.flushIntervalMs), [&s, seenWake] {
+        return s.stopping || s.queuedBytes >= s.config.batchMaxBytes || s.wakeSeq != seenWake;
+      });
+      seenWake = s.wakeSeq;
+      finalPass = s.stopping;
+      const uint64_t nowUs = steady_now_us();
+      if (!next_job_locked(s, nowUs, &job)) {
         if (s.stopping) {
-          diag("worker exiting (stop) sentBatches=" + std::to_string(sentBatches));
+          uint64_t lines = 0, batches = 0;
+          discard_all_locked(s, &lines, &batches);  // paused with no way to send them
+          diag("worker exiting (stop) sent=" + std::to_string(s.sentBatches) +
+               " discardedLines=" + std::to_string(lines) + " heldDiscarded=" + std::to_string(batches));
           return;
         }
         // A quiet minute still proves the worker is alive, which is the thing the first bug hid.
         if (++cycles % 30 == 0) {
-          diag("idle alive cycles=" + std::to_string(cycles) + " sentBatches=" +
-               std::to_string(sentBatches) + " dropped=" + std::to_string(s.droppedLines));
+          diag("idle alive cycles=" + std::to_string(cycles) + " sent=" + std::to_string(s.sentBatches) +
+               " dropped=" + std::to_string(s.droppedLines) + " held=" + std::to_string(s.held.size()) +
+               (s.authRejected ? " authRejected=1" : "") + (s.credentials ? "" : " credentials=0"));
         }
         continue;
       }
-      size_t taken = 0;
-      while (!s.queue.empty() && taken < s.config.batchMaxBytes) {
-        taken += s.queue.front().text.size() + 1;
-        batch.push_back(std::move(s.queue.front()));
-        s.queue.pop_front();
-      }
-      s.queuedBytes = s.queuedBytes > taken ? s.queuedBytes - taken : 0;
     }
 
-    // Group by stream so each request carries one file's worth of lines; ordinary sessions only
-    // ever have one or two streams in flight, so the map costs nothing.
-    std::map<std::string, std::string> bodies;
-    for (auto& line : batch) {
-      std::string& body = bodies[line.stream];
-      body.append(line.text);
-      body.push_back('\n');
+    // ---- the send, outside the lock ----
+    uint32_t status = 0;
+    const bool sent = directory::http_post(job.host, job.port, "/api/logs", "text/plain",
+                                           job.headers, job.body, &status, nullptr);
+    const Outcome outcome = classify(sent, status);
+    const uint64_t nowUs = steady_now_us();
+    std::function<void()> callback;
+    {
+      std::lock_guard<std::mutex> lk(s.mu);
+      s.lastStatus = status;
+      if (job.attempts > 0) ++s.retriedBatches;
+      ++flushes;
+      switch (outcome) {
+        case Outcome::Ok:
+          ++s.sentBatches;
+          s.lastOkUs = nowUs;
+          // First batch and then every ~20th: enough to prove batches keep flowing without spamming.
+          if (s.sentBatches == 1 || s.sentBatches % 20 == 0) {
+            diag("flushed sent=" + std::to_string(s.sentBatches) + " failed=" + std::to_string(s.failedSends) +
+                 " discarded=" + std::to_string(s.discardedBatches) + " dropped=" + std::to_string(s.droppedLines));
+          }
+          break;
+        case Outcome::Auth: {
+          ++s.failedSends;
+          s.lastRejectUs = nowUs;
+          HeldBatch h;
+          h.stream = job.stream;
+          h.body = std::move(job.body);
+          h.attempts = job.attempts;  // a 401 does not spend the retry budget
+          h.firstAttemptUs = job.firstAttemptUs ? job.firstAttemptUs : nowUs;
+          h.awaitingToken = true;
+          if (finalPass) {
+            ++s.discardedBatches;
+          } else {
+            hold_locked(s, std::move(h));
+          }
+          if (job.configGeneration != s.configGeneration) {
+            // The token was replaced while this request was in flight: the answer is about the
+            // old one. The held batch goes out with the new token on the next pass.
+            break;
+          }
+          if (!s.authRejected) {
+            s.authRejected = true;
+            callback = s.authRejectedCallback;
+            diag("auth rejected status=401 stream=" + job.stream + " bytes=" + std::to_string(job.body.size()) +
+                 " -> paused until a new token; held=" + std::to_string(s.held.size()));
+          }
+          break;
+        }
+        case Outcome::Transient: {
+          ++s.failedSends;
+          const uint32_t attempts = job.attempts + 1;
+          const uint64_t firstUs = job.firstAttemptUs ? job.firstAttemptUs : nowUs;
+          const uint64_t ageMs = (nowUs - firstUs) / 1000;
+          const bool budgetLeft = attempts < s.config.retryMaxAttempts && ageMs < s.config.retryMaxAgeMs;
+          if (budgetLeft && !finalPass) {
+            HeldBatch h;
+            h.stream = job.stream;
+            h.body = std::move(job.body);
+            h.attempts = attempts;
+            h.firstAttemptUs = firstUs;
+            uint64_t delayMs = s.config.retryBaseDelayMs;
+            for (uint32_t i = 1; i < attempts && delayMs < (1u << 20); ++i) delayMs *= 2;
+            h.dueUs = nowUs + delayMs * 1000;
+            hold_locked(s, std::move(h));
+            if (nowUs - s.lastTransientDiagUs >= 10'000'000) {
+              s.lastTransientDiagUs = nowUs;
+              diag("send FAILED stream=" + job.stream + " reached=" + (sent ? "1" : "0") +
+                   " status=" + std::to_string(status) + " host=" + job.host + ":" + std::to_string(job.port) +
+                   " -> retry " + std::to_string(attempts) + "/" + std::to_string(s.config.retryMaxAttempts) +
+                   " in " + std::to_string(delayMs) + "ms");
+            }
+          } else {
+            ++s.discardedBatches;
+            diag("send FAILED stream=" + job.stream + " reached=" + (sent ? "1" : "0") +
+                 " status=" + std::to_string(status) + " -> gave up attempts=" + std::to_string(attempts) +
+                 " ageMs=" + std::to_string(ageMs) + (finalPass ? " (stopping)" : ""));
+          }
+          break;
+        }
+        case Outcome::Permanent:
+          ++s.failedSends;
+          ++s.discardedBatches;
+          diag("send REJECTED stream=" + job.stream + " status=" + std::to_string(status) +
+               " bytes=" + std::to_string(job.body.size()) + " -> discarded (" + outcome_name(outcome) + ")");
+          break;
+      }
     }
-    for (const auto& [stream, body] : bodies) send_batch(s, stream, body);
-    ++sentBatches;
-    // First batch and then every ~20th: enough to prove batches keep flowing without spamming.
-    if (sentBatches == 1 || sentBatches % 20 == 0) {
-      diag("flushed batches=" + std::to_string(sentBatches) + " lines=" +
-           std::to_string(batch.size()) + " failedBatches=" + std::to_string(s.failedBatches));
-    }
+    if (callback) callback();
   }
 }
 
 }  // namespace
 
-bool log_upload_start(const LogUploadConfig& config, std::string* outReason) {
+bool log_upload_configure(const LogUploadConfig& config, std::string* outReason) {
   UploaderState& s = state();
-  {
-    std::lock_guard<std::mutex> lk(s.mu);
-    if (s.running) return true;
-  }
 
   // Off by an explicit switch only: the whole point is that logs arrive without anyone asking.
   const std::string enabled = env_string_or_empty("REMOTE60_LOG_UPLOAD");
@@ -181,30 +378,99 @@ bool log_upload_start(const LogUploadConfig& config, std::string* outReason) {
     if (outReason) *outReason = parseError;
     return false;
   }
-
   const std::string device = config.device.empty() ? directory::machine_id() : config.device;
+  const std::string headers = build_headers(config, device);
+  const char* auth = config.sessionToken.empty() ? "host-token" : "bearer";
 
+  std::string reason;
   {
     std::lock_guard<std::mutex> lk(s.mu);
-    s.config = config;
-    s.host = host;
-    s.port = port;
-    s.headers = build_headers(config, device);
-    s.stopping = false;
-    s.running = true;
-    s.worker = std::thread(worker_loop);
+    if (s.running && !s.stopping) {
+      const bool sameCredentials = s.credentials && s.headers == headers && s.host == host && s.port == port;
+      const bool sameIdentity = s.config.identity == config.identity;
+      if (sameCredentials && sameIdentity) {
+        // Same owner, same token: only the tunables may differ (a caller adjusting the cadence).
+        s.config = config;
+        ++s.wakeSeq;
+        s.cv.notify_all();
+        if (outReason) *outReason = "unchanged";
+        return true;
+      }
+      uint64_t lines = 0, batches = 0;
+      if (!sameIdentity) discard_all_locked(s, &lines, &batches);
+      const bool wasRejected = s.authRejected;
+      s.config = config;
+      s.host = host;
+      s.port = port;
+      s.device = device;
+      s.headers = headers;
+      s.credentials = true;
+      s.authRejected = false;
+      ++s.configGeneration;
+      for (auto& h : s.held) {
+        if (h.awaitingToken) h.dueUs = 0;  // the new token is what it was waiting for
+      }
+      reason = std::string(sameIdentity ? "token replaced" : "identity changed") + " auth=" + auth +
+               " device=" + device + " -> " + host + ":" + std::to_string(port) +
+               (sameIdentity ? "" : " discardedLines=" + std::to_string(lines) + " discardedBatches=" +
+                                        std::to_string(batches)) +
+               (wasRejected ? " (resumes after 401, held=" + std::to_string(s.held.size()) + ")" : "");
+      ++s.wakeSeq;
+      s.cv.notify_all();
+    } else {
+      s.config = config;
+      s.host = host;
+      s.port = port;
+      s.device = device;
+      s.headers = headers;
+      s.credentials = true;
+      s.authRejected = false;
+      s.stopping = false;
+      s.running = true;
+      ++s.configGeneration;
+      s.worker = std::thread(worker_loop);
+      reason = std::string("started auth=") + auth + " device=" + device + " -> " + host + ":" +
+               std::to_string(port);
+    }
   }
-  if (outReason) *outReason = "device=" + device + " -> " + host + ":" + std::to_string(port);
+  diag("configured " + reason + " identity=" + (config.identity.empty() ? "-" : config.identity));
+  if (outReason) *outReason = reason;
   return true;
+}
+
+void log_upload_clear_credentials(const char* reason) {
+  UploaderState& s = state();
+  uint64_t lines = 0, batches = 0;
+  {
+    std::lock_guard<std::mutex> lk(s.mu);
+    if (!s.running) return;
+    discard_all_locked(s, &lines, &batches);
+    s.credentials = false;
+    s.authRejected = false;
+    s.headers.clear();
+    s.config.sessionToken.clear();
+    s.config.hostToken.clear();
+    ++s.configGeneration;
+    ++s.wakeSeq;
+    s.cv.notify_all();
+  }
+  diag(std::string("credentials cleared (") + (reason ? reason : "-") + ") discardedLines=" +
+       std::to_string(lines) + " discardedBatches=" + std::to_string(batches));
 }
 
 void log_upload_enqueue(const char* stream, const std::string& line) {
   UploaderState& s = state();
   std::lock_guard<std::mutex> lk(s.mu);
   if (!s.running || s.stopping || line.empty()) return;
-
-  // Drop from the front: when a log is overflowing, the end is the part worth keeping.
-  while (s.queuedBytes + line.size() + 1 > s.config.queueCapBytes && !s.queue.empty()) {
+  if (!s.credentials) {
+    // Nobody to send it as: a line produced while signed out must not ride the next account's
+    // token. The disk copy has it.
+    ++s.droppedLines;
+    return;
+  }
+  // Drop from the front: when a log is overflowing, the end is the part worth keeping. Held
+  // batches count against the same cap so a long 401 stays bounded.
+  while (s.queuedBytes + s.heldBytes + line.size() + 1 > s.config.queueCapBytes && !s.queue.empty()) {
     const size_t freed = s.queue.front().text.size() + 1;
     s.queue.pop_front();
     s.queuedBytes = s.queuedBytes > freed ? s.queuedBytes - freed : 0;
@@ -228,12 +494,51 @@ void log_upload_stop() {
   if (worker.joinable()) worker.join();
   std::lock_guard<std::mutex> lk(s.mu);
   s.running = false;
+  s.stopping = false;
+  s.credentials = false;
+  s.authRejected = false;
+  s.headers.clear();
+  s.queue.clear();
+  s.queuedBytes = 0;
+  s.held.clear();
+  s.heldBytes = 0;
+  s.sentBatches = s.failedSends = s.retriedBatches = s.discardedBatches = 0;
+  s.droppedLines = s.discardedLines = 0;
+  s.lastStatus = 0;
+  s.lastOkUs = s.lastRejectUs = 0;
+  s.lastTransientDiagUs = 0;
 }
 
 bool log_upload_running() {
   UploaderState& s = state();
   std::lock_guard<std::mutex> lk(s.mu);
   return s.running && !s.stopping;
+}
+
+LogUploadStatus log_upload_status() {
+  UploaderState& s = state();
+  std::lock_guard<std::mutex> lk(s.mu);
+  LogUploadStatus st;
+  st.running = s.running && !s.stopping;
+  st.credentials = s.credentials;
+  st.authRejected = s.authRejected;
+  st.sentBatches = s.sentBatches;
+  st.failedSends = s.failedSends;
+  st.retriedBatches = s.retriedBatches;
+  st.discardedBatches = s.discardedBatches;
+  st.droppedLines = s.droppedLines;
+  st.discardedLines = s.discardedLines;
+  st.heldBatches = s.held.size();
+  st.lastStatus = s.lastStatus;
+  st.lastOkUs = s.lastOkUs;
+  st.lastRejectUs = s.lastRejectUs;
+  return st;
+}
+
+void log_upload_set_auth_rejected_callback(std::function<void()> callback) {
+  UploaderState& s = state();
+  std::lock_guard<std::mutex> lk(s.mu);
+  s.authRejectedCallback = std::move(callback);
 }
 
 }  // namespace remote60::native_poc

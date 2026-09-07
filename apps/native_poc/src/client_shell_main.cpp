@@ -328,12 +328,19 @@ void begin_login(std::string server, std::string accountId, std::string password
     }
     {
       // Now that a token exists the shell can hand its logs to the directory, which is the only
-      // way the phone's and this machine's logs ever sit side by side.
+      // way the phone's and this machine's logs ever sit side by side. A second login re-points
+      // the uploader (a restarted server forgets every session; the old token then gets 401),
+      // and a login as a different account discards what was queued under the previous one.
+      remote60::native_poc::log_upload_set_auth_rejected_callback([] {
+        log_line("log upload: the server rejected the session token; sign in again to resume");
+        post_status("error", "로그 업로드 인증이 만료됐습니다. 다시 로그인하면 재개됩니다.");
+      });
       remote60::native_poc::LogUploadConfig upload;
       upload.directoryUrl = server;
       upload.sessionToken = token;
+      upload.identity = accountId + "@" + server;
       std::string reason;
-      log_line(remote60::native_poc::log_upload_start(upload, &reason)
+      log_line(remote60::native_poc::log_upload_configure(upload, &reason)
                    ? "log upload on " + reason
                    : "log upload off: " + reason);
     }
@@ -616,6 +623,7 @@ void handle_page_message(const std::string& json) {
       std::lock_guard<std::mutex> lock(gStateMu);
       gSessionToken.clear();
     }
+    remote60::native_poc::log_upload_clear_credentials("logged out");
     post_to_page("{\"type\":\"signedOut\"}");
     return;
   }
