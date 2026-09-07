@@ -8570,3 +8570,10 @@ Next action
 - 장기 정지 사건: 11:20:42.749 seq=3261 이후 viewer 영상 진행 로그 중단, 약7초 후 제어도 peer-lost. host는 이 사이 키프레임을 포함해 계속 송신했다. 해당 사건의 마지막 congestionState는 normal이므로 위 Congested 결함만으로 동일 원인이라고 단정하지 않는다. 수신 스레드 정체와 UDP 전달 중단의 구분에는 별도 진행 heartbeat/패킷 근거가 필요하다.
 - 검증: 기존 viewer_frame_gate_test 및 native_video_client_shared_core_test PASS. 별도 viewer_gate_probe 2/2, assembly_gap_probe 1/1 문제 경로 재현(exit 0). 소프트웨어 상태 머신/조립기 검증이며 실기 네트워크·UAC 재현은 수행하지 않았다. 09-06 NAS 확인에서 해당 viewer의 최신 기록은 여전히 09-05 15:53 종료였다.
 - 다음 액션: Windows NACK 연결·완성 IDR 중복 요청 제거·프레임 도착과 독립된 복구 타이머를 먼저 구현/검증하고, synthetic idle 앵커와 호스트 readback 대기 A/B를 분리한다. 실제 Windows 바이너리 경로의 손실/복구 통합 테스트로 완료 판정한다.
+
+### 391) 2026-09-07 Windows 복구 경로 수정 위임안 및 사전 크로스체크 조건 문서화
+- 목표: 사용자가 요청한 원인 분석 문서 업데이트와 remote Claude 작업 위임을 준비하고, 구현 전에 독립 크로스체크를 수행하도록 순서와 완료 조건을 구체화한다.
+- 변경 파일: `docs/windows_viewer_recovery_work_order.md`(작업 지시), `docs/stream_freeze_diagnosis_2026-09-06.md`(후속 작업 연결), `docs/history.md`, `docs/구현계획.md`(교차 확인 대기 상태만 반영).
+- 작업 순서: 실제 Windows NACK 경로, Congested 재요청, 완성 IDR 중복 요청, synthetic idle 앵커를 먼저 코드·프로브로 확인/반증/조건부 분류한 후 확인된 항목부터 수정. 제품 경로 손실 주입·복구 타이머·무수신·구버전 peer 검증을 완료 조건에 포함하고 호스트 UAC readback 원인 미확정은 별도 실기로 남긴다.
+- 검증: 기존 분석 커밋 `5e32126` 및 현 제품 기준 `bae7d99` 확인. A2A 후보 조회에서 remote Claude 세션 2개(`0gk0hr8u` onCall=true, `rda5l808` onCall=false)를 확인했고, 사용자가 온콜이 켜진 `remote#0gk0hr8u`를 선택했다. 제품 파일 수정·새 빌드·실기 실행은 없음.
+- 다음 액션: 확인된 Claude 세션에 문서 기반 A2A task를 pin하여 전달하고, 구현 전 교차 확인 결과와 작업 진행을 추적한다.
