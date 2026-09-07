@@ -11,6 +11,7 @@
 #include <cstdint>
 
 #include "host_input_inject.hpp"
+#include "host_input_target_rect.hpp"
 #include "host_window_enum.hpp"
 #include "secure_input_broker.hpp"
 
@@ -28,6 +29,9 @@ struct InputRouterState {
   InputInjectionMode injectionMode = InputInjectionMode::Disabled;
   bool injectionEnabled = false;
   SecureInputBrokerClient broker;
+  // The rect last handed to the broker (main loop only): a restart on the same monitor neither
+  // logs nor churns it. source "none" until the first sync_input_target_rect.
+  InputTargetRect targetRectSent;
   std::atomic<uint64_t> events{0};
   // Split of what happened while a security prompt or the lock screen was in front.
   std::atomic<uint64_t> secureAttempts{0};             // events seen while the secure desktop was up

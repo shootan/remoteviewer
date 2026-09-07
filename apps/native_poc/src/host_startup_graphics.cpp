@@ -230,9 +230,10 @@ int startup_select_capture_target(HostContext& hx) {
   }
   // Tell the SYSTEM agent where the captured pixels live. Without it the agent can only assume,
   // and its old assumption -- the primary monitor -- put every click on the wrong screen when the
-  // prompt opened somewhere else.
-  inputRouter.broker.SetTargetRect(capture.monitorInfo->originX, capture.monitorInfo->originY, capture.monitorInfo->width,
-                                  capture.monitorInfo->height);
+  // prompt opened somewhere else. This is only the FIRST value: it is re-derived after every
+  // capture restart (P9) -- a host started over RDP saw the RDP display here and kept it for the
+  // console session it later served, scaling every UAC click by 2236/1920 x 1232/1080.
+  sync_input_target_rect(capture, inputRouter, "startup");
 
   if (capture.windowModeActive || backend.active == DesktopCaptureBackend::Wgc) {
     item = capture.windowModeActive

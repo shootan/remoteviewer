@@ -18,6 +18,7 @@
 #include "secure_input_mapping.hpp"
 #include "secure_input_protocol.hpp"
 #include "secure_input_session.hpp"
+#include "secure_input_diag_budget.hpp"
 
 namespace {
 
@@ -960,7 +961,7 @@ void diag_inject_failure(const char* where, const SecureInputMessage& message, D
        error);
 }
 
-// Records where a click actually landed, for the first few button events only.
+// Records where a click actually landed, for the first few button events of each episode.
 //
 // Until injection started working there was nothing to record: the only coordinate log ran on
 // failure. Now that clicks land, "they land in the wrong place" has three candidate causes that
@@ -972,8 +973,12 @@ void diag_inject_failure(const char* where, const SecureInputMessage& message, D
 // returns something else, the offset is being applied below us. `virt` is logged alongside
 // because the agent's own view of the virtual screen is what the fallback path would have used.
 void diag_inject_landing(const SecureInputMessage& message, long mapped_x, long mapped_y) {
-  static std::atomic<int> remaining{12};
-  if (remaining.fetch_sub(1, std::memory_order_relaxed) <= 0) return;
+  // Per episode, not per process: a 2 s quiet gap refills the 12 lines, 60 per minute at most
+  // (secure_input_diag_budget.hpp). The agent outlives a UAC prompt -- it is recreated only when
+  // the desktop name changes -- so the old one-shot budget recorded the first prompt of the day
+  // and nothing after it (2026-09-07 15:15 left no line). Single message thread.
+  static remote60::native_poc::DiagLandingBudget budget;
+  if (!remote60::native_poc::diag_landing_budget_take(budget, now_ms() * 1000ULL)) return;
   POINT actual{};
   const bool got = GetCursorPos(&actual) != FALSE;
   diag("inject landed: eventKind=%u in=(%d,%d)/%ux%u target=(%d,%d)/%ux%u mapped=(%ld,%ld) "

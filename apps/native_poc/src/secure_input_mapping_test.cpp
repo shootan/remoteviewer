@@ -4,7 +4,9 @@
 // coordinate that was simply somewhere else.
 
 #include "secure_input_mapping.hpp"
+#include "secure_input_diag_budget.hpp"
 
+#include <cstdint>
 #include <cstdio>
 #include <string>
 
@@ -78,6 +80,69 @@ void TestDegenerateInputSpace() {
   expect("single pixel", 0, 0, 1, 1, screen, 100, 200);
 }
 
+// The 2026-09-07 defect, pinned (P9): the same click in the same 1920x1080 domain lands where it
+// was aimed with the live console rect and 138/99 px down-right with the RDP-era rect the host
+// kept from its start. The mapper is right both times; the rect it was fed was not.
+void TestStaleRdpRectScalesTheClick() {
+  std::printf("a stale 2236x1232 rect scales a 1920x1080 click; the live rect does not\n");
+  const DesktopRect stale{0, 0, 2236, 1232};
+  const DesktopRect live{0, 0, 1920, 1080};
+  expect("field click 14:27:25, stale rect", 841, 703, 1920, 1080, stale, 979, 802);
+  expect("field click 14:27:25, live rect", 841, 703, 1920, 1080, live, 841, 703);
+  expect("field click 14:27:27, stale rect", 808, 704, 1920, 1080, stale, 941, 803);
+  expect("field click 14:27:27, live rect", 808, 704, 1920, 1080, live, 808, 704);
+}
+
+void check(bool cond, const char* what) {
+  if (!cond) {
+    std::printf("  FAIL %s\n", what);
+    ++gFailures;
+  } else {
+    std::printf("  ok   %s\n", what);
+  }
+}
+
+// The landing diag budget: 12 per episode, refilled by a 2 s quiet gap, 60 per minute at most.
+void TestLandingBudgetRefillsPerEpisode() {
+  std::printf("the landing diag budget refills per episode and caps per minute\n");
+  using remote60::native_poc::DiagLandingBudget;
+  using remote60::native_poc::diag_landing_budget_take;
+  DiagLandingBudget b;
+  uint64_t t = 1'000'000;
+  int granted = 0;
+  for (int i = 0; i < 20; ++i) {
+    if (diag_landing_budget_take(b, t)) ++granted;
+    t += 50'000;
+  }
+  check(granted == 12, "12 lines in the first episode, the 13th+ refused");
+  // The next UAC prompt, 2.5 s later, gets its own 12 -- the case the one-shot budget lost.
+  t += 2'500'000;
+  granted = 0;
+  for (int i = 0; i < 20; ++i) {
+    if (diag_landing_budget_take(b, t)) ++granted;
+    t += 50'000;
+  }
+  check(granted == 12, "a 2 s gap refills the episode");
+  // A click every 100 ms for 3 s stays in one episode: no refill inside it.
+  granted = 0;
+  for (int i = 0; i < 30; ++i) {
+    if (diag_landing_budget_take(b, t)) ++granted;
+    t += 100'000;
+  }
+  check(granted == 0, "continuous clicking does not refill");
+  // Pathological: 30 prompts 2.5 s apart. Minute one (started at t=1.0 s) already granted 24, so
+  // 36 more; minute two grants at most 60; the rest are refused. 96 lines for 360 clicks.
+  granted = 0;
+  for (int e = 0; e < 30; ++e) {
+    t += 2'500'000;
+    for (int i = 0; i < 12; ++i) {
+      if (diag_landing_budget_take(b, t)) ++granted;
+      t += 1'000;
+    }
+  }
+  check(granted == 96, "the per-minute ceiling holds across many episodes");
+}
+
 }  // namespace
 
 int main() {
@@ -87,6 +152,8 @@ int main() {
   TestScaledClientSpace();
   TestOutOfRangeIsClampedNotDropped();
   TestDegenerateInputSpace();
+  TestStaleRdpRectScalesTheClick();
+  TestLandingBudgetRefillsPerEpisode();
 
   if (gFailures != 0) {
     std::printf("secure_input_mapping_test: FAIL (%d)\n", gFailures);

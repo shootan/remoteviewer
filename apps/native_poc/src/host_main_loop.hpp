@@ -197,6 +197,10 @@ struct TickContext {
 
 // Helpers (former main() lambdas).
 bool restart_capture_session(HostContext& hx);
+// Re-derives the SYSTEM input agent's target rect from the current capture target
+// (host_input_target_rect.hpp) and hands it to the broker when it changed, with a log line.
+// Called after every capture (re)start and once at startup. Main loop only.
+void sync_input_target_rect(CaptureState& capture, InputRouterState& inputRouter, const char* reason);
 void pump_cursor_forward(HostContext& hx, uint64_t nowUs);
 bool reconnect_tcp_data_session(HostContext& hx, const char* reason);
 bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId, uint64_t nowUs,

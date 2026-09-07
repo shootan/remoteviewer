@@ -58,6 +58,7 @@
 #include "host_gpu_scaler.hpp"
 #include "host_input_inject.hpp"
 #include "host_input_router.hpp"
+#include "host_input_target_rect.hpp"
 #include "host_kick.hpp"
 #include "host_log.hpp"
 #include "host_main_loop.hpp"
@@ -79,6 +80,24 @@ using remote60::host::DxgiDesktopCaptureConfig;
 using remote60::host::DxgiDesktopCaptureSession;
 
 namespace remote60::native_poc {
+
+void sync_input_target_rect(CaptureState& capture, InputRouterState& inputRouter, const char* reason) {
+  MonitorPhysicalRect monitor;
+  if (capture.monitorInfo.has_value()) {
+    monitor.originX = capture.monitorInfo->originX;
+    monitor.originY = capture.monitorInfo->originY;
+    monitor.width = capture.monitorInfo->width;
+    monitor.height = capture.monitorInfo->height;
+  }
+  const InputTargetRect next =
+      derive_input_target_rect(capture.windowModeActive.load(std::memory_order_acquire), monitor);
+  const bool first = std::string(inputRouter.targetRectSent.source) == "none";
+  if (!first && input_target_rect_same(inputRouter.targetRectSent, next)) return;
+  inputRouter.broker.SetTargetRect(next.originX, next.originY, next.width, next.height);
+  inputRouter.targetRectSent = next;
+  std::cout << "[native-video-host] secure-input target rect=" << describe_input_target_rect(next)
+            << " reason=" << (reason ? reason : "-") << "\n";
+}
 
 bool restart_capture_session(HostContext& hx) {
   auto& useH264 = hx.useH264;
@@ -107,6 +126,9 @@ bool restart_capture_session(HostContext& hx) {
     finalH = capture.height;
   }
   encoder.ApplyConfirmedCaptureGeometry(capture, res, frameGating, inputRouter, sender, finalW, finalH, "capture-restart");
+  // The agent's rect follows what was just opened: RDP<->console, DXGI<->WGC<->GDI, a monitor
+  // select and a geometry change all come through here (P9).
+  sync_input_target_rect(capture, inputRouter, "capture-restart");
   return true;
 }
 

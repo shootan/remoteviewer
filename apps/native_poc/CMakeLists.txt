@@ -609,6 +609,13 @@ add_executable(remote60_secure_input_mapping_test
 )
 target_include_directories(remote60_secure_input_mapping_test PRIVATE src)
 
+# The secure-input target rect rule (P9): the agent's rect follows the monitor the capture opened
+# and is re-derived on every restart; window mode = no rect; origin-preserving for multi-monitor.
+add_executable(remote60_host_input_target_rect_test
+  src/host_input_target_rect_test.cpp
+)
+target_include_directories(remote60_host_input_target_rect_test PRIVATE src)
+
 add_executable(remote60_connect_candidates_test
   src/connect_candidates_test.cpp
 )

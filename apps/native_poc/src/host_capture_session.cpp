@@ -418,12 +418,18 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
   auto& gdiCaptureProcess = res.gdiCaptureProcess;
   capture.DetachCaptureSession(res, token);
   try {
-    if (!capture.windowModeActive && backend.active == DesktopCaptureBackend::Dxgi) {
+    if (!capture.windowModeActive) {
+      // Every desktop backend opens the primary monitor (DXGI duplicates it, the WGC restart item
+      // and the GDI worker read it), so its geometry is refreshed for all of them: the secure
+      // input agent's target rect is derived from it right after this restart (P9), and a host
+      // that started under RDP must not keep the RDP display's rect once the console is back.
       capture.monitorInfo = primary_monitor_info();
       if (!capture.monitorInfo.has_value()) {
         std::cerr << "[native-video-host] primary monitor query failed on restart\n";
-        return false;
+        if (backend.active == DesktopCaptureBackend::Dxgi) return false;
       }
+    }
+    if (!capture.windowModeActive && backend.active == DesktopCaptureBackend::Dxgi) {
       if (capture.monitorInfo->width < capture.monitorInfo->height) {
         backend.active = DesktopCaptureBackend::Wgc;
         capture.SetDxgiFallbackReason("rotation_unsupported");
