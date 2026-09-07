@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <deque>
 #include <functional>
+#include <algorithm>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -234,7 +235,10 @@ class FakeHost {
         firstAfterFlushKey_ = au.keyFrame;
         flushPending_ = false;
       }
-      if (au.keyFrame) ++keyframesSent_;
+      if (au.keyFrame) {
+        ++keyframesSent_;
+        lastKeySeq_ = lastSeq;
+      }
     }
     return lastSeq;
   }
@@ -284,6 +288,7 @@ class FakeHost {
   uint64_t keyframe_requests() const { return keyframeRequests_.load(); }
   uint16_t last_keyframe_reason() const { return lastKeyframeReason_.load(); }
   uint64_t keyframes_sent() const { return keyframesSent_; }
+  uint32_t last_key_seq() const { return lastKeySeq_; }  // seq the last key AU left with (F-22)
   uint64_t dropped_chunks() const { return droppedChunks_; }
   uint32_t last_seq() const { return seq_; }
 
@@ -521,6 +526,7 @@ class FakeHost {
   std::atomic<uint64_t> keyframeRequests_{0};
   std::atomic<uint16_t> lastKeyframeReason_{0};
   uint64_t keyframesSent_ = 0;
+  uint32_t lastKeySeq_ = 0;
   uint64_t droppedChunks_ = 0;
   std::atomic<bool> corruptNextKey_{false};
   uint64_t corruptedKeys_ = 0;
@@ -547,6 +553,23 @@ struct ViewerRig {
   std::atomic<uint32_t> lastPublishedSeq{0};
   std::atomic<uint32_t> maxPublishedSeq{0};
   std::atomic<uint64_t> lastPublishedCaptureUs{0};
+  // F-22: which key frames were actually published (by seq), so a scenario can assert that one
+  // exact IDR was shown rather than "some frame at or past its seq". missedPublishes counts
+  // frame versions the 2 ms poll below never saw -- diagnostics for a miss, not a pass.
+  std::atomic<uint32_t> lastPublishedKeySeq{0};
+  std::atomic<uint64_t> missedPublishes{0};
+  std::mutex publishedMu;
+  std::vector<uint32_t> publishedKeySeqs;
+  bool published_key(uint32_t seq) {
+    std::lock_guard<std::mutex> lk(publishedMu);
+    return std::find(publishedKeySeqs.begin(), publishedKeySeqs.end(), seq) != publishedKeySeqs.end();
+  }
+  std::string published_key_seqs() {
+    std::lock_guard<std::mutex> lk(publishedMu);
+    std::string s;
+    for (uint32_t q : publishedKeySeqs) { if (!s.empty()) s += ","; s += std::to_string(q); }
+    return s.empty() ? "none" : s;
+  }
 
   ViewerRig() {
     args.codec = "h264";
@@ -632,11 +655,17 @@ struct ViewerRig {
         std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
         auto& f = ctx.frameBuf.frame;
         if (f.version != seenVersion) {
+          if (seenVersion != 0 && f.version > seenVersion + 1) missedPublishes += f.version - seenVersion - 1;
           seenVersion = f.version;
           ++publishedCount;
           lastPublishedSeq = f.seq;
           if (f.seq > maxPublishedSeq.load()) maxPublishedSeq = f.seq;
           lastPublishedCaptureUs = f.captureUs;
+          if (f.key) {
+            lastPublishedKeySeq = f.seq;
+            std::lock_guard<std::mutex> pl(publishedMu);
+            publishedKeySeqs.push_back(f.seq);
+          }
           ctx.frameBuf.lastPresentedVersion.store(f.version, std::memory_order_relaxed);
           if (!f.synthetic && !pinPresentAnchor.load()) {
             ctx.frameBuf.lastPresentedCaptureUs.store(f.captureUs, std::memory_order_relaxed);
@@ -696,6 +725,48 @@ void idle(FakeHost& host, ViewerRig& rig, uint32_t ms) {
     (void)host.TakeKeyframeRequest(rig.ctx.control.keyframeRequests);
     sleep_ms(2);
   }
+}
+
+// F-22 (2026-09-07): the product encoder may be asynchronous -- SendFrame(true) can emit the
+// previous picture (a P) or nothing at all, and the forced IDR leaves in a later call. A scenario
+// that needs "the IDR is on the wire" observes it (keyframes_sent / last_key_seq) within a bound
+// instead of assuming it left in the same call. Exactly one forced key: the follow-up calls are
+// plain pictures, never a second forced key, so a corrupt injection or a "next good IDR" stays
+// one AU. The order is only recorded, not asserted: a synchronous encoder passes on call 1.
+struct KeyOnWire {
+  uint32_t firstSeq = 0;      // what the forcing call returned (0 = no AU left in that call)
+  bool firstWasKey = false;   // that AU was the IDR itself (synchronous encoder)
+  uint32_t keySeq = 0;        // the seq the IDR actually left with
+  uint32_t calls = 0;         // SendFrame calls made, including the forcing one
+  uint64_t waitedUs = 0;
+  bool ok = false;
+};
+KeyOnWire send_key_and_wait_on_wire(FakeHost& host, const char* what, uint32_t maxExtraCalls = 30, uint32_t maxMs = 1500) {
+  KeyOnWire r;
+  const uint64_t keysBefore = host.keyframes_sent();
+  const uint64_t startUs = qpc_now_us();
+  r.firstSeq = host.SendFrame(true, false, startUs);
+  r.calls = 1;
+  r.firstWasKey = host.keyframes_sent() > keysBefore;
+  uint64_t nextUs = startUs + kFrameIntervalUs;
+  while (host.keyframes_sent() == keysBefore) {
+    if (r.calls > maxExtraCalls || qpc_now_us() - startUs > static_cast<uint64_t>(maxMs) * 1000ULL) break;
+    const uint64_t nowUs = qpc_now_us();
+    if (nowUs < nextUs) {
+      std::this_thread::sleep_for(std::chrono::microseconds(std::min<uint64_t>(nextUs - nowUs, 2000)));
+      continue;
+    }
+    nextUs += kFrameIntervalUs;
+    (void)host.SendFrame(false, false, nowUs);  // a plain picture: never a second forced key
+    ++r.calls;
+  }
+  r.ok = host.keyframes_sent() > keysBefore;
+  r.keySeq = r.ok ? host.last_key_seq() : 0;
+  r.waitedUs = qpc_now_us() - startUs;
+  std::printf("  S12 order (%s): first call emitted %s seq=%u; IDR seq=%u on call %u (%llu ms)\n", what,
+              r.firstSeq == 0 ? "nothing" : (r.firstWasKey ? "the IDR" : "P"), r.firstSeq, r.keySeq, r.calls,
+              static_cast<unsigned long long>(r.waitedUs / 1000));
+  return r;
 }
 
 std::string state_name(const ViewerRig& rig) { return congestion_state_name(rig.gate.congestionState); }
@@ -1290,7 +1361,10 @@ void scenario_corrupted_idr_does_not_wedge_or_storm() {
   const uint64_t requestsBefore = host.keyframe_requests();
   host.SkipSeq();  // the gap the IDR closes
   host.CorruptNextKey();
-  (void)host.SendFrame(true, false, qpc_now_us());
+  // F-22: the IDR may leave in a later call than the forcing one; wait for it on the wire (bounded,
+  // one forced key only) and then assert exactly as before.
+  const KeyOnWire zeroed = send_key_and_wait_on_wire(host, "zeroed IDR");
+  CHECK(zeroed.ok, "the zeroed IDR reached the wire (" + std::to_string(zeroed.calls) + " calls, " + std::to_string(zeroed.waitedUs / 1000) + " ms)");
   CHECK(host.corrupted_keys() == 1, "a zeroed IDR went out");
   pump(host, rig, 700);
   CHECK(!rig.gate.waitForKeyFrame, "not left waiting for a keyframe (state " + state_name(rig) + ")");
@@ -1298,13 +1372,21 @@ void scenario_corrupted_idr_does_not_wedge_or_storm() {
         "no IDR storm (" + std::to_string(host.keyframe_requests() - requestsBefore) + " requests)");
   // The next good IDR is decoded and published.
   const uint64_t publishedBefore = rig.publishedCount.load();
-  const uint32_t goodIdr = host.SendFrame(true, false, qpc_now_us());
+  // F-22: the good IDR's seq is the one it actually left with, not the forcing call's return
+  // (which can be 0 or the previous P on an asynchronous encoder).
+  const KeyOnWire good = send_key_and_wait_on_wire(host, "good IDR");
+  const uint32_t goodIdr = good.keySeq;
   CHECK(goodIdr != 0, "a good IDR went out");
-  const bool shown = pump_until(host, rig, 3000, [&]() {
-    return rig.publishedCount.load() > publishedBefore && rig.maxPublishedSeq.load() >= goodIdr;
-  });
-  CHECK(shown, "the good IDR was decoded and published (max seq " + std::to_string(rig.maxPublishedSeq.load()) + ")");
+  CHECK(host.corrupted_keys() == 1, "the good IDR left intact (corrupted_keys " + std::to_string(host.corrupted_keys()) + ")");
+  // Exactly that IDR, published as a key frame -- not "some frame at or past its seq" (a later P
+  // would pass that) and never a 0 sentinel (goodIdr != 0 is asserted above).
+  const bool shown = pump_until(host, rig, 3000, [&]() { return goodIdr != 0 && rig.published_key(goodIdr); });
+  CHECK(shown, "the good IDR seq " + std::to_string(goodIdr) + " itself was decoded and published as a key frame (key seqs published " +
+                   rig.published_key_seqs() + ", max seq " + std::to_string(rig.maxPublishedSeq.load()) + ", missed publishes " +
+                   std::to_string(rig.missedPublishes.load()) + ")");
+  CHECK(rig.publishedCount.load() > publishedBefore, "the good IDR produced output (published " + std::to_string(rig.publishedCount.load() - publishedBefore) + ")");
   CHECK(rig.gate.congestionState == ClientCongestionState::Normal, "state " + state_name(rig));
+  CHECK(host.corrupted_keys() == 1, "exactly one zeroed IDR in the whole scenario (" + std::to_string(host.corrupted_keys()) + ")");
 }
 
 }  // namespace
