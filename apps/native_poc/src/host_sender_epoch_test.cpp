@@ -20,6 +20,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -233,23 +235,97 @@ void test_in_flight_old_au_completes_then_idr(Rig& rig) {
   CHECK(rig.sender.inputEpochDropCount.load() == dropsBefore + 1);
 }
 
+// [B'] the case [B] is not: the old AU was dequeued and passed the early check, then held by
+// pacing; the flush lands BEFORE its first datagram. Its first datagram was never permitted, so
+// it must not start -- the in-flight exception covers only an AU already permitted.
+void test_flush_between_dequeue_and_first_datagram(Rig& rig) {
+  std::printf("[B'] flush after dequeue but before the first datagram: the AU never starts; the IDR is next\n");
+  const uint64_t dropsBefore = rig.sender.inputEpochDropCount.load();
+  std::mutex hookMu;
+  std::condition_variable hookCv;
+  bool paused = false;
+  bool release = false;
+  rig.sender.beforeFirstDatagramHook = [&](const EncodedSendItem& item) {
+    if (item.udpHdr.seq != 40) return;
+    std::unique_lock<std::mutex> lk(hookMu);
+    paused = true;
+    hookCv.notify_all();
+    hookCv.wait(lk, [&] { return release; });
+  };
+  {
+    std::lock_guard<std::mutex> lk(rig.sender.mu);
+    rig.sender.queue.push_back(rig.Item(40, false, 3, 20000));  // current epoch when dequeued
+  }
+  rig.sender.cv.notify_all();
+  {
+    std::unique_lock<std::mutex> lk(hookMu);
+    CHECK(hookCv.wait_for(lk, std::chrono::seconds(2), [&] { return paused; }));  // held at the permission point
+  }
+  // The flush lands while the sender holds seq 40 before its first datagram; the IDR is queued.
+  {
+    std::lock_guard<std::mutex> lk(rig.sender.mu);
+    rig.epoch.store(4, std::memory_order_release);
+    rig.sender.queue.push_back(rig.Item(41, true, 4, 60000));
+  }
+  rig.sender.cv.notify_all();
+  {
+    std::lock_guard<std::mutex> lk(hookMu);
+    release = true;
+  }
+  hookCv.notify_all();
+  const auto wire = rig.Drain(150);
+  rig.sender.beforeFirstDatagramHook = nullptr;
+  const auto per = chunks_per_seq(wire);
+  CHECK(per.count(40) == 0);  // never started: not one datagram
+  CHECK(per.count(41) == 1);
+  CHECK(!wire.empty() && wire.front().seq == 41 && wire.front().key);
+  CHECK(rig.sender.inputEpochDropCount.load() == dropsBefore + 1);
+}
+
 // [C]
 void test_fence_is_the_epoch_not_the_generation(Rig& rig) {
-  std::printf("[C] the fence is the epoch: old-epoch AU with the current generation is dropped; untagged is not fenced\n");
+  std::printf("[C] the fence is the epoch: old / untagged / future epochs are dropped whatever the generation says\n");
   const uint64_t dropsBefore = rig.sender.inputEpochDropCount.load();
   {
     std::lock_guard<std::mutex> lk(rig.sender.mu);
-    rig.sender.queue.push_back(rig.Item(30, false, 2, 20000, /*generation=*/7));  // old epoch, "new" target id
-    rig.sender.queue.push_back(rig.Item(31, false, 0, 20000, 7));                 // untagged (raw path)
-    rig.sender.queue.push_back(rig.Item(32, true, 3, 60000, 7));
+    rig.sender.queue.push_back(rig.Item(30, false, 3, 20000, /*generation=*/7));  // old epoch, "new" target id
+    rig.sender.queue.push_back(rig.Item(31, false, 0, 20000, 7));                 // untagged: fence active -> dropped
+    rig.sender.queue.push_back(rig.Item(33, false, 9, 20000, 7));                 // future epoch: dropped
+    rig.sender.queue.push_back(rig.Item(32, true, 4, 60000, 7));                  // current: sent
   }
   rig.sender.cv.notify_all();
   const auto wire = rig.Drain(150);
   const auto per = chunks_per_seq(wire);
   CHECK(per.count(30) == 0);
-  CHECK(per.count(31) == 1);
+  CHECK(per.count(31) == 0);
+  CHECK(per.count(33) == 0);
   CHECK(per.count(32) == 1);
-  CHECK(rig.sender.inputEpochDropCount.load() == dropsBefore + 1);
+  CHECK(rig.sender.inputEpochDropCount.load() == dropsBefore + 3);
+  // The sent AU keeps the metadata it was encoded with (no relabelling): generation 7 on the wire.
+  for (const auto& w : wire) {
+    if (w.seq == 32) CHECK(w.generation == 7);
+  }
+}
+
+// [D] legacy: with the fence inactive (no epoch reference) an untagged item passes.
+void test_untagged_passes_only_when_fence_inactive(Rig& rig) {
+  std::printf("[D] untagged items pass only while the fence is inactive\n");
+  rig.sender.inputEpochRef = nullptr;
+  {
+    std::lock_guard<std::mutex> lk(rig.sender.mu);
+    rig.sender.queue.push_back(rig.Item(50, false, 0, 20000));
+  }
+  rig.sender.cv.notify_all();
+  auto wire = rig.Drain(150);
+  CHECK(chunks_per_seq(wire).count(50) == 1);
+  rig.sender.inputEpochRef = &rig.epoch;
+  {
+    std::lock_guard<std::mutex> lk(rig.sender.mu);
+    rig.sender.queue.push_back(rig.Item(51, false, 0, 20000));
+  }
+  rig.sender.cv.notify_all();
+  wire = rig.Drain(150);
+  CHECK(chunks_per_seq(wire).count(51) == 0);
 }
 
 }  // namespace
@@ -264,7 +340,9 @@ int main() {
   }
   test_queued_old_aus_are_fenced(rig);
   test_in_flight_old_au_completes_then_idr(rig);
+  test_flush_between_dequeue_and_first_datagram(rig);
   test_fence_is_the_epoch_not_the_generation(rig);
+  test_untagged_passes_only_when_fence_inactive(rig);
   rig.Stop();
   WSACleanup();
   if (gFailures == 0) {

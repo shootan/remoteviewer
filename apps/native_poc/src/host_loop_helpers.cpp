@@ -110,7 +110,20 @@ void sync_input_target_rect(CaptureState& capture, InputRouterState& inputRouter
   // broker's rect is cleared, so no secure event is sent until the monitor is known again.
   const bool windowMode = capture.windowModeActive.load(std::memory_order_acquire);
   const HMONITOR monitor = (!windowMode && capture.monitorInfo.has_value()) ? capture.monitorInfo->monitor : nullptr;
-  capture.captureMonitorHandle.store(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(monitor)), std::memory_order_release);
+  {
+    // The control thread's one-record view of the capture target (P9): version moves only when
+    // something changed, so a dispatch that straddles a target switch can tell.
+    std::lock_guard<std::mutex> lk(capture.inputTargetMu);
+    const uint64_t handle = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(monitor));
+    const uint64_t gen = capture.streamGenerationState.load(std::memory_order_acquire);
+    if (capture.inputTarget.windowMode != windowMode || capture.inputTarget.monitorHandle != handle ||
+        capture.inputTarget.streamGeneration != gen) {
+      capture.inputTarget.windowMode = windowMode;
+      capture.inputTarget.monitorHandle = handle;
+      capture.inputTarget.streamGeneration = gen;
+      ++capture.inputTarget.version;
+    }
+  }
   MonitorPhysicalRect live;
   const bool queryOk = !windowMode && query_monitor_physical_rect(monitor, &live);
   const InputTargetRect next = windowMode ? derive_input_target_rect(true, live)
@@ -133,31 +146,67 @@ void sync_input_target_rect(CaptureState& capture, InputRouterState& inputRouter
             << " reason=" << (reason ? reason : "-") << "\n";
 }
 
-bool secure_target_rect_ready(CaptureState& capture, InputRouterState& inputRouter) {
-  const bool windowMode = capture.windowModeActive.load(std::memory_order_acquire);
-  const HMONITOR monitor = reinterpret_cast<HMONITOR>(
-      static_cast<uintptr_t>(capture.captureMonitorHandle.load(std::memory_order_acquire)));
-  MonitorPhysicalRect live;
-  const bool queryOk = !windowMode && query_monitor_physical_rect(monitor, &live);
-  const InputTargetRect current = broker_target_rect(inputRouter);
-  const SecureRectDecision d = decide_secure_target_rect(windowMode, queryOk, live, current);
-  if (d.send && d.update) {
-    inputRouter.broker.SetTargetRect(d.rect.originX, d.rect.originY, d.rect.width, d.rect.height);
-    inputRouter.secureRectUpdatedAtDispatch.fetch_add(1, std::memory_order_relaxed);
-    std::cout << "[native-video-host] secure-input target rect=" << describe_input_target_rect(d.rect)
-              << " reason=dispatch (was " << describe_input_target_rect(current) << ")\n";
-  }
-  if (!d.send) {
+namespace {
+
+SecureDispatchOutcome secure_dispatch_impl(CaptureState& capture, InputRouterState& inputRouter,
+                                           const std::function<bool(const InputTargetRect&)>& send) {
+  SecureDispatchPorts ports;
+  ports.snapshot = [&capture]() {
+    std::lock_guard<std::mutex> lk(capture.inputTargetMu);
+    InputTargetSnapshotView v;
+    v.version = capture.inputTarget.version;
+    v.windowMode = capture.inputTarget.windowMode;
+    v.monitorHandle = capture.inputTarget.monitorHandle;
+    v.streamGeneration = capture.inputTarget.streamGeneration;
+    return v;
+  };
+  ports.queryMonitor = [](uint64_t handle, MonitorPhysicalRect* out) {
+    return query_monitor_physical_rect(reinterpret_cast<HMONITOR>(static_cast<uintptr_t>(handle)), out);
+  };
+  ports.send = send;
+  const SecureDispatchResult r = secure_dispatch(ports);
+  SecureDispatchOutcome out;
+  out.sent = r.sent;
+  out.writeFailed = r.writeFailed;
+  out.why = r.why;
+  if (r.sent) {
+    if (!input_target_rect_same(inputRouter.lastDispatchedRect, r.rect)) {
+      inputRouter.secureRectUpdatedAtDispatch.fetch_add(1, std::memory_order_relaxed);
+      std::cout << "[native-video-host] secure-input target rect=" << describe_input_target_rect(r.rect)
+                << " reason=dispatch gen=" << r.streamGeneration << " (was "
+                << describe_input_target_rect(inputRouter.lastDispatchedRect) << ")\n";
+      inputRouter.lastDispatchedRect = r.rect;
+    }
+  } else if (!r.writeFailed) {
+    inputRouter.secureSkipRectUnknown.fetch_add(1, std::memory_order_relaxed);
     static std::atomic<uint64_t> lastLogUs{0};
     const uint64_t nowUs = qpc_now_us();
     const uint64_t last = lastLogUs.load(std::memory_order_relaxed);
     if (nowUs - last > 1'000'000) {
       lastLogUs.store(nowUs, std::memory_order_relaxed);
-      std::cout << "[native-video-host] secure-input event refused why=" << d.why
-                << " (captured monitor rect not knowable; not injecting at an unknown place)\n";
+      std::cout << "[native-video-host] secure-input event refused why=" << r.why
+                << " (rect not knowable for this event; not injecting at an unknown place)\n";
     }
   }
-  return d.send;
+  return out;
+}
+
+}  // namespace
+
+SecureDispatchOutcome secure_dispatch_event(CaptureState& capture, InputRouterState& inputRouter,
+                                            const ControlInputEventMessage& input, uint32_t domainW, uint32_t domainH) {
+  return secure_dispatch_impl(capture, inputRouter, [&](const InputTargetRect& rect) {
+    return inputRouter.broker.SendInputEventWithRect(input, domainW, domainH, rect.originX, rect.originY, rect.width,
+                                                     rect.height);
+  });
+}
+
+SecureDispatchOutcome secure_dispatch_text(CaptureState& capture, InputRouterState& inputRouter,
+                                           const ControlInputTextMessage& text, uint32_t domainW, uint32_t domainH) {
+  return secure_dispatch_impl(capture, inputRouter, [&](const InputTargetRect& rect) {
+    return inputRouter.broker.SendInputTextWithRect(text, domainW, domainH, rect.originX, rect.originY, rect.width,
+                                                    rect.height);
+  });
 }
 
 bool restart_capture_session(HostContext& hx) {

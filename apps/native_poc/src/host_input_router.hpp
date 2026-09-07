@@ -19,11 +19,19 @@ namespace remote60::native_poc {
 
 struct CaptureState;
 struct InputRouterState;
-// Control thread, right before a secure-desktop event goes to the agent: re-reads the captured
-// monitor's live rect (host_secure_target_rect.hpp) and updates the broker if it moved; false =
-// the rect is not knowable now and the event must NOT be sent (fail closed, counted, logged).
-// Defined in host_loop_helpers.cpp. (P9)
-bool secure_target_rect_ready(CaptureState& capture, InputRouterState& inputRouter);
+// The ONE path by which a secure-desktop event / text reaches the SYSTEM agent (P9,
+// host_secure_target_rect.hpp): capture-target snapshot -> live monitor rect -> stamped into this
+// message -> written. Refuses (returns sent=false, counted, logged) when the rect is not knowable
+// or the target changed meanwhile. Defined in host_loop_helpers.cpp.
+struct SecureDispatchOutcome {
+  bool sent = false;
+  bool writeFailed = false;  // the broker write failed (the pipe), as opposed to a refusal
+  const char* why = "";
+};
+SecureDispatchOutcome secure_dispatch_event(CaptureState& capture, InputRouterState& inputRouter,
+                                            const ControlInputEventMessage& input, uint32_t domainW, uint32_t domainH);
+SecureDispatchOutcome secure_dispatch_text(CaptureState& capture, InputRouterState& inputRouter,
+                                           const ControlInputTextMessage& text, uint32_t domainW, uint32_t domainH);
 
 // Viewer input routing (Phase 1-9 state struct): the configured injection mode, the SYSTEM
 // input-broker client used when the secure desktop (UAC / lock screen) blocks direct injection,
@@ -47,9 +55,10 @@ struct InputRouterState {
   std::atomic<uint64_t> secureBrokerFailed{0};         // agent unreachable; fell back, cannot land
   std::atomic<uint64_t> secureSkipWindowMode{0};       // window mode never routes to the agent
   std::atomic<uint64_t> secureSkipUnauthenticated{0};  // no directory capability to act on
-  std::atomic<uint64_t> secureSkipRectUnknown{0};      // captured monitor's rect not knowable at dispatch: refused (P9)
-  std::atomic<uint64_t> secureRectUpdatedAtDispatch{0};  // rect changed between the last sync and this event
+  std::atomic<uint64_t> secureSkipRectUnknown{0};      // captured monitor's rect not knowable / target changed at dispatch: refused (P9)
+  std::atomic<uint64_t> secureRectUpdatedAtDispatch{0};  // the dispatched rect differed from the last one dispatched
   uint64_t targetRectQueryFailures = 0;                  // main loop: sync could not read the monitor
+  InputTargetRect lastDispatchedRect;                    // control thread only: for the change log
   // cross-thread: the size the client's coordinates are expressed in (main writes, control reads).
   std::atomic<uint32_t> domainW{0};
   std::atomic<uint32_t> domainH{0};

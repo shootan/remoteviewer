@@ -141,22 +141,24 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
         sender.dropCount.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
-      // Flush epoch fence (P11): an AU encoded from an input the host accepted before the last
-      // flush may not START on the wire after it -- the new epoch's IDR must be the first. Queued
-      // items are fenced here; an item already being chunked when the flush lands completes (the
-      // documented in-flight exception; the viewer's held-resume rule covers its stamp).
-      if (sender.inputEpochRef && item.inputEpoch != 0 &&
-          item.inputEpoch < sender.inputEpochRef->load(std::memory_order_acquire)) {
+      // Flush epoch fence (P11), early pass: an item of another epoch is dropped here without
+      // costing a pacing slot. The decisive check is the permission point right before the first
+      // datagram (below) -- a flush can land during pacing, and an AU whose first datagram was not
+      // yet permitted then must not start. See SenderState::inputEpochRef for the exact contract.
+      auto epoch_fence_drops = [&](const EncodedSendItem& it, const char* where) -> bool {
+        if (!sender.inputEpochRef) return false;  // fence inactive: legacy pass-through
+        const uint64_t cur = sender.inputEpochRef->load(std::memory_order_acquire);
+        if (it.inputEpoch == cur) return false;
         const uint64_t n = sender.inputEpochDropCount.fetch_add(1, std::memory_order_relaxed) + 1;
         sender.dropCount.fetch_add(1, std::memory_order_relaxed);
         if (n <= 5 || (n % 50) == 0) {
-          std::cout << "[native-video-host] sender dropped pre-flush AU seq=" << item.udpHdr.seq
-                    << " auEpoch=" << item.inputEpoch
-                    << " curEpoch=" << sender.inputEpochRef->load(std::memory_order_acquire)
-                    << " key=" << (item.keyFrame ? 1 : 0) << " total=" << n << "\n";
+          std::cout << "[native-video-host] sender dropped AU of another epoch at " << where << " seq=" << it.udpHdr.seq
+                    << " auEpoch=" << it.inputEpoch << " curEpoch=" << cur
+                    << " key=" << (it.keyFrame ? 1 : 0) << " total=" << n << "\n";
         }
-        continue;
-      }
+        return true;
+      };
+      if (epoch_fence_drops(item, "dequeue")) continue;
       if (!peerReady) {
         sender.txNoPeer.fetch_add(1, std::memory_order_relaxed);
         continue;
@@ -186,6 +188,13 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
         cadenceScheduledUs = std::max<uint64_t>(nowUs, earliestSendUs);
       } else {
         cadenceScheduledUs = nowUs;
+      }
+      if (sender.beforeFirstDatagramHook) sender.beforeFirstDatagramHook(item);
+      // Permission point (P11): the epoch is read once more right before the first datagram. An
+      // item that passed the dequeue check but whose epoch moved during pacing is dropped here.
+      if (epoch_fence_drops(item, "first-datagram")) {
+        cadenceScheduledUs = 0;
+        continue;
       }
       const uint64_t sendStartUs = qpc_now_us();
       item.udpHdr.sendQpcUs = sendStartUs;

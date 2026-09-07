@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -133,10 +134,22 @@ struct SenderState {
   bool waitingForKey = false;  // deltas held back until the requested keyframe passes
   // Session media barrier: bumped (under mu) by the rollover transaction; starts at 1 like clientSession.epoch.
   std::atomic<uint64_t> mediaSessionEpoch{1};
-  // The host's flush epoch (CaptureState::inputEpoch), read by the sender thread at dequeue to
-  // fence queued pre-flush AUs (P11). Set once at startup; nullptr = no fencing (tests / raw).
+  // The host's flush epoch (CaptureState::inputEpoch), read by the sender thread to fence AUs of
+  // another epoch (P11). nullptr = the fence is inactive (legacy / tests), the only case in which
+  // an untagged item passes. With the fence active an item is sent only if its epoch EQUALS the
+  // current one at the permission point -- old, untagged (0) and future epochs are all dropped.
+  //
+  // Permission point: right before the first datagram, after pacing. What the fence guarantees is
+  // therefore: no AU whose first datagram was not yet permitted when the flush landed starts on
+  // the wire after it. The exception is one AU per flush whose first datagram WAS permitted before
+  // the flush (the window between that check and the first sendto is a few microseconds and is not
+  // closed; the AU then completes with the metadata it was encoded with -- nothing is relabelled).
+  // A single sender thread means at most one such AU exists at a time.
   const std::atomic<uint64_t>* inputEpochRef = nullptr;
   std::atomic<uint64_t> inputEpochDropCount{0};
+  // Test seam: called after pacing, right before the permission check for the first datagram, so a
+  // test can hold the sender there, move the epoch and resume. Never set in production.
+  std::function<void(const EncodedSendItem&)> beforeFirstDatagramHook;
   std::atomic<bool> stop{false};
   std::atomic<bool> sendFailed{false};
   // requestKey / recoveryPending used to live here: two flags for "the stream needs an IDR",

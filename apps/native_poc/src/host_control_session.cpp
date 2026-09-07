@@ -438,15 +438,16 @@ void ControlSessionServer::Serve(ControlLink& link) {
             // A plain-LAN session has no capability token, and the agent will not act without
             // one. Nothing about the click is wrong; it simply cannot be authorised.
             inputRouter.secureSkipUnauthenticated.fetch_add(1, std::memory_order_relaxed);
-          } else if (!secure_target_rect_ready(capture, inputRouter)) {
-            // The captured monitor's rect is not knowable right now (P9): do not aim at the
-            // previous rect or at the whole virtual screen. Counted; the next event re-checks.
-            inputRouter.secureSkipRectUnknown.fetch_add(1, std::memory_order_relaxed);
-          } else if (!inputRouter.broker.SendInputEvent(input, domainW, domainH)) {
-            inputRouter.secureBrokerFailed.fetch_add(1, std::memory_order_relaxed);
           } else {
-            inputRouter.secureDelivered.fetch_add(1, std::memory_order_relaxed);
-            routedToAgent = true;
+            // The one dispatch path (P9): the rect is verified for this event and stamped into
+            // it; a refusal (rect not knowable, target changed) is counted inside.
+            const SecureDispatchOutcome d = secure_dispatch_event(capture, inputRouter, input, domainW, domainH);
+            if (d.sent) {
+              inputRouter.secureDelivered.fetch_add(1, std::memory_order_relaxed);
+              routedToAgent = true;
+            } else if (d.writeFailed) {
+              inputRouter.secureBrokerFailed.fetch_add(1, std::memory_order_relaxed);
+            }
           }
         }
         // Set once the outcome has already been tallied (the secure-desktop path), so the result
@@ -501,7 +502,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
               // Actually secure now. Retry THIS event through the SYSTEM broker exactly once.
               if (desktopMode &&
                   clientSession.directoryAuthenticated.load(std::memory_order_acquire) &&
-                  inputRouter.broker.SendInputEvent(input, domainW, domainH)) {
+                  secure_dispatch_event(capture, inputRouter, input, domainW, domainH).sent) {
                 injectResult = InputInjectResult::Injected;
                 resolvedTarget = " secure-system-agent(reprobe)";
                 inputRouter.freshProbeReroute.fetch_add(1, std::memory_order_relaxed);
@@ -531,7 +532,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
               if (brokerRetryableStage && desktopMode &&
                   clientSession.directoryAuthenticated.load(std::memory_order_acquire)) {
                 inputRouter.defaultBrokerFallback.fetch_add(1, std::memory_order_relaxed);
-                if (inputRouter.broker.SendInputEvent(input, domainW, domainH)) {
+                if (secure_dispatch_event(capture, inputRouter, input, domainW, domainH).sent) {
                   // Queued to the agent, not confirmed landed (the broker does not ACK). Mark
                   // Injected so the host stops re-reporting inject-fail, but the honest signal
                   // is inputRouter.defaultBrokerQueued + the service log, not this result.
@@ -640,10 +641,9 @@ void ControlSessionServer::Serve(ControlLink& link) {
         InputInjectResult injectResult = InputInjectResult::Failed;
         if (desktopMode && clientSession.directoryAuthenticated.load(std::memory_order_acquire) &&
             !interactive_desktop_is_default() &&
-            secure_target_rect_ready(capture, inputRouter) &&
-            inputRouter.broker.SendInputText(text,
-                                            inputRouter.domainW.load(std::memory_order_acquire),
-                                            inputRouter.domainH.load(std::memory_order_acquire))) {
+            secure_dispatch_text(capture, inputRouter, text,
+                                 inputRouter.domainW.load(std::memory_order_acquire),
+                                 inputRouter.domainH.load(std::memory_order_acquire)).sent) {
           injectResult = InputInjectResult::Injected;
           resolvedTarget = " secure-system-agent";
         } else {

@@ -87,30 +87,105 @@ void test_origin_only_change_is_a_change() {
 // NEW rect; an unreadable monitor refuses the click instead of aiming at the old rect or at the
 // whole virtual screen.
 void test_dispatch_decision() {
-  std::printf("[2c] dispatch: origin moved since the last sync -> updated before the click; unknown -> refused\n");
-  const InputTargetRect synced = derive_input_target_rect(false, MonitorPhysicalRect{0, 0, 1920, 1080});
-  // (a) the primary moved to the right by one screen; the 1 s tick has not fired yet.
-  SecureRectDecision d = decide_secure_target_rect(false, true, MonitorPhysicalRect{1920, 0, 1920, 1080}, synced);
-  CHECK(d.send && d.update);
-  CHECK(d.rect.originX == 1920 && d.rect.width == 1920);
-  CHECK(map_client_point(841, 703, 1920, 1080, as_desktop(d.rect)).x == 1920 + 841);
-  // (b) nothing moved: send, no update, no log churn.
-  d = decide_secure_target_rect(false, true, MonitorPhysicalRect{0, 0, 1920, 1080}, synced);
-  CHECK(d.send && !d.update);
-  // (c) the monitor query failed: refuse -- not the old rect, not a zero rect.
-  d = decide_secure_target_rect(false, false, MonitorPhysicalRect{}, synced);
-  CHECK(!d.send && !d.update);
-  CHECK(std::string(d.why) == "monitor-query-failed");
-  // (d) the query answered an empty rect: refuse as well.
-  d = decide_secure_target_rect(false, true, MonitorPhysicalRect{0, 0, 0, 0}, synced);
-  CHECK(!d.send);
-  CHECK(std::string(d.why) == "monitor-rect-invalid");
-  // (e) window mode: the secure path never routes it.
-  d = decide_secure_target_rect(true, true, MonitorPhysicalRect{0, 0, 1920, 1080}, synced);
-  CHECK(!d.send);
-  // (f) the broker holds no rect yet (0x0): a readable monitor updates and sends.
-  d = decide_secure_target_rect(false, true, MonitorPhysicalRect{0, 0, 1920, 1080}, InputTargetRect{});
-  CHECK(d.send && d.update);
+  std::printf("[2c] dispatch helper with fake ports: first click after an origin change goes with the NEW rect; unknown / changed target -> no send\n");
+  // Fake boundaries: the capture snapshot, the monitor query, the broker write. Every branch the
+  // host routes to the agent (secure, re-probe, default-broker fallback, text) goes through
+  // secure_dispatch, so what this pins is the final send decision and the rect the message carries.
+  struct Fake {
+    InputTargetSnapshotView snap{7, false, 0x1234, 3};
+    bool queryOk = true;
+    MonitorPhysicalRect live{0, 0, 1920, 1080};
+    int queries = 0;
+    int sends = 0;
+    bool writeOk = true;
+    InputTargetRect lastSent;
+    uint64_t versionAfterQuery = 0;  // 0 = unchanged; else the snapshot version the second read returns
+    int snapshotReads = 0;
+    SecureDispatchPorts ports() {
+      SecureDispatchPorts p;
+      p.snapshot = [this]() {
+        ++snapshotReads;
+        InputTargetSnapshotView v = snap;
+        if (snapshotReads >= 2 && versionAfterQuery != 0) v.version = versionAfterQuery;
+        return v;
+      };
+      p.queryMonitor = [this](uint64_t handle, MonitorPhysicalRect* out) {
+        ++queries;
+        CHECK(handle == snap.monitorHandle);
+        if (!queryOk) return false;
+        *out = live;
+        return true;
+      };
+      p.send = [this](const InputTargetRect& r) {
+        ++sends;
+        lastSent = r;
+        return writeOk;
+      };
+      return p;
+    }
+  };
+  // (a) the primary moved right by one screen right after the 1 s tick; the first click arrives
+  //     before the next tick: the live query sees the new origin and the message carries it.
+  {
+    Fake f;
+    f.live = MonitorPhysicalRect{1920, 0, 1920, 1080};
+    const SecureDispatchResult r = secure_dispatch(f.ports());
+    CHECK(r.sent && f.sends == 1 && f.queries == 1);
+    CHECK(f.lastSent.originX == 1920 && f.lastSent.width == 1920);
+    CHECK(map_client_point(841, 703, 1920, 1080, as_desktop(f.lastSent)).x == 1920 + 841);
+    CHECK(r.streamGeneration == 3);
+  }
+  // (b) the monitor query fails: no send at all -- not the old rect, not a zero rect.
+  {
+    Fake f;
+    f.queryOk = false;
+    const SecureDispatchResult r = secure_dispatch(f.ports());
+    CHECK(!r.sent && f.sends == 0 && !r.writeFailed);
+    CHECK(std::string(r.why) == "monitor-query-failed");
+  }
+  // (c) an empty rect answers: no send.
+  {
+    Fake f;
+    f.live = MonitorPhysicalRect{0, 0, 0, 0};
+    const SecureDispatchResult r = secure_dispatch(f.ports());
+    CHECK(!r.sent && f.sends == 0);
+    CHECK(std::string(r.why) == "monitor-rect-invalid");
+  }
+  // (d) the monitor is unknown (sync could not read it, or window mode): no send, no query.
+  {
+    Fake f;
+    f.snap.monitorHandle = 0;
+    const SecureDispatchResult r = secure_dispatch(f.ports());
+    CHECK(!r.sent && f.sends == 0 && f.queries == 0);
+    CHECK(std::string(r.why) == "monitor-unknown");
+    Fake w;
+    w.snap.windowMode = true;
+    CHECK(!secure_dispatch(w.ports()).sent && w.sends == 0);
+  }
+  // (e) the target changed while the monitor was queried (a monitor select / restart on the main
+  //     loop moved the snapshot version): the rect belongs to a target that is gone -> no send.
+  {
+    Fake f;
+    f.versionAfterQuery = 8;
+    const SecureDispatchResult r = secure_dispatch(f.ports());
+    CHECK(!r.sent && f.sends == 0 && f.queries == 1);
+    CHECK(std::string(r.why) == "target-changed");
+  }
+  // (f) the broker write itself fails: reported as a write failure, not a refusal.
+  {
+    Fake f;
+    f.writeOk = false;
+    const SecureDispatchResult r = secure_dispatch(f.ports());
+    CHECK(!r.sent && r.writeFailed && f.sends == 1);
+  }
+  // (g) nothing moved: sent with the current rect; the snapshot was read twice (before and after
+  //     the query) and once is enough for the query.
+  {
+    Fake f;
+    const SecureDispatchResult r = secure_dispatch(f.ports());
+    CHECK(r.sent && f.snapshotReads == 2 && f.queries == 1);
+    CHECK(input_target_rect_same(f.lastSent, derive_input_target_rect(false, MonitorPhysicalRect{0, 0, 1920, 1080})));
+  }
 }
 
 // Window mode never routes to the agent; the rect is zero so the agent's own virtual-screen

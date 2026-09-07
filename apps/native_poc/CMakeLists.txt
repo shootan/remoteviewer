@@ -561,6 +561,9 @@ target_include_directories(remote60_viewer_liveness_test PRIVATE src)
 # calls are stubbed in the test; no window, swap chain or capture backend is involved, so unlike the
 # GNLinkStream+GNLinkViewer e2e it does not depend on the RDP state of the machine.
 add_executable(remote60_viewer_udp_recovery_test
+  src/host_encoded_sender.cpp
+  src/host_net_io.cpp
+  src/directory_client.cpp
   src/viewer_video_receiver.cpp
   src/viewer_video_receiver_frame.cpp
   src/viewer_frame_gate.cpp
@@ -575,8 +578,12 @@ add_executable(remote60_viewer_udp_recovery_test
 )
 target_include_directories(remote60_viewer_udp_recovery_test PRIVATE src)
 target_link_libraries(remote60_viewer_udp_recovery_test PRIVATE
+  capture
   common
   ws2_32
+  runtimeobject
+  windowsapp
+  advapi32
   d3d11
   dxgi
   gdi32

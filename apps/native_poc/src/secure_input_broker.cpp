@@ -190,6 +190,44 @@ void SecureInputBrokerClient::SetTargetRect(int32_t originX, int32_t originY, ui
   targetHeight_ = height;
 }
 
+bool SecureInputBrokerClient::SendInputEventWithRect(const ControlInputEventMessage& input, uint32_t inputWidth,
+                                                     uint32_t inputHeight, int32_t originX, int32_t originY,
+                                                     uint32_t width, uint32_t height) {
+  SecureInputMessage message{};
+  message.kind = static_cast<uint16_t>(SecureInputKind::InputEvent);
+  message.inputWidth = inputWidth;
+  message.inputHeight = inputHeight;
+  message.eventKind = input.kind;
+  message.buttons = input.buttons;
+  message.x = input.x;
+  message.y = input.y;
+  message.wheelDelta = input.wheelDelta;
+  message.keyCode = input.keyCode;
+  message.targetOriginX = originX;
+  message.targetOriginY = originY;
+  message.targetWidth = width;
+  message.targetHeight = height;
+  std::lock_guard<std::mutex> lock(mu_);
+  return WriteLocked(message);
+}
+
+bool SecureInputBrokerClient::SendInputTextWithRect(const ControlInputTextMessage& text, uint32_t inputWidth,
+                                                    uint32_t inputHeight, int32_t originX, int32_t originY,
+                                                    uint32_t width, uint32_t height) {
+  SecureInputMessage message{};
+  message.kind = static_cast<uint16_t>(SecureInputKind::InputText);
+  message.inputWidth = inputWidth;
+  message.inputHeight = inputHeight;
+  message.textCount = std::min<uint16_t>(text.utf16Count, kSecureInputTextMax);
+  std::copy_n(text.utf16, message.textCount, message.text);
+  message.targetOriginX = originX;
+  message.targetOriginY = originY;
+  message.targetWidth = width;
+  message.targetHeight = height;
+  std::lock_guard<std::mutex> lock(mu_);
+  return WriteLocked(message);
+}
+
 void SecureInputBrokerClient::GetTargetRect(int32_t* originX, int32_t* originY, uint32_t* width,
                                             uint32_t* height) const {
   std::lock_guard<std::mutex> lock(mu_);

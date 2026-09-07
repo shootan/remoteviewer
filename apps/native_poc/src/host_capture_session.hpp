@@ -159,9 +159,19 @@ struct CaptureState {
   // so an AU the async MFT emits from a pre-flush input is recognised at the emit stage and the
   // new epoch's first send is its own IDR (host_epoch_gate.hpp).
   std::atomic<uint64_t> inputEpoch{1};
-  // HMONITOR the capture session opened (0 = window mode / unknown), mirrored for the control
-  // thread: the secure-input dispatch re-reads that monitor's live rect before every event (P9).
-  std::atomic<uint64_t> captureMonitorHandle{0};
+  // What the capture is targeting, as one record for the control thread's secure-input dispatch
+  // (P9, host_secure_target_rect.hpp): window mode + the HMONITOR the session opened + the
+  // stream generation, with a version that moves whenever any of them changes. Written by the
+  // main loop (sync_input_target_rect), read under inputTargetMu; a reader's copy is valid for
+  // one event only -- the dispatch re-reads the version before it sends.
+  struct InputTargetSnapshot {
+    uint64_t version = 0;
+    bool windowMode = false;
+    uint64_t monitorHandle = 0;
+    uint64_t streamGeneration = 0;
+  };
+  std::mutex inputTargetMu;
+  InputTargetSnapshot inputTarget;
   std::atomic<bool> windowSelectionLocked{false};
   // Window target (from --capture-window-* / the picker).
   CaptureWindowCriteria windowCriteria{};
