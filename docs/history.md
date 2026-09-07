@@ -8750,6 +8750,6 @@ Next action
 
 ### 411) 2026-09-07 검증용 NEEDS_CHANGES(경미) 반영 — T-P11d 문구(e08de14)·S12 하네스 발견사항 F-22 기록 (A2A task t-5ahw0t5x)
 - 검증용 최종 검사(seq 1115 계열, 우편함 지연 수신): 40b836e/d980ff0/1005ebe/acd8233 diff 대조 OK, 검증용 직접 실행 frame_gate·recovery PASS, 설치본 c263758b… payload 6개 = Release 빌드 sha256 동일. NEEDS_CHANGES 1건 = T-P11d 문구(이미 **e08de14** test(viewer) 로 반영: printf·주석 "decoded keyframe" → "fresh keyframe (anchored at admit)", 동작 변경 없음).
-- 이 커밋: `docs/뷰어_리팩터_발견사항.md` F-22 — S12 `viewer_udp_recovery_test.cpp:1294` 단정이 비동기 인코더와 경쟁(하네스, 제품 회귀 아님, 범위 밖·미수정, Codex 범위 판단 대기). `docs/history.md` #411.
+- 이 커밋: `docs/뷰어_리팩터_발견사항.md` F-22 — S12 `viewer_udp_recovery_test.cpp:1294` 단정이 비동기 인코더와 경쟁(하네스, 제품 회귀 아님, 범위 밖·미수정, Codex 범위 판단 대기). `docs/history.md` #411. 후속 docs 커밋: 검증용 지적대로 단정 지점을 `:1294`(`corrupted_keys()==1`)·`:1302`(`goodIdr != 0`) 두 곳으로 정정 — 둘 다 `SendFrame(true)` 의 동기 송출 가정.
 - 설치본: 제품 소스는 acd8233 과 동일(e08de14·이 커밋은 테스트/문서만) → `dist/GNLinkSetup-0.2.103.exe` 재생성 불필요, build-local 제품 바이너리 미변경. 테스트 exe(`remote60_viewer_frame_gate_test`)만 재빌드해 1회 실행(로그 `.claude/tp11d_frame_gate_e08de14.log`).
 - 상태: task working 유지, 검증용 재검사 대기. 설치·push·서버 배포 없음.
