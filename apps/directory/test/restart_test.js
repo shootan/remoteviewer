@@ -1,12 +1,12 @@
-// A host -- and a signed-in client -- must stay signed in across a server restart.
+// A host must stay signed in across a server restart.
 //
 // Host tokens once lived only in memory, so every deploy or reboot quietly invalidated them.
 // Each PC would then be told its token was unknown, and since the host app deliberately does
-// not keep the password, someone had to walk to the machine and sign in again. Sessions had the
-// same flaw until 2026-09-07 (P10): a restart signed every client out, and the client shell,
-// which keeps no password either, kept uploading its log with a dead token. This runs in two
+// not keep the password, someone had to walk to the machine and sign in again. This runs in two
 // phases around a restart performed by the runner; the register phase hands the runner
-// "hostToken:sessionToken".
+// "hostToken:sessionToken". Client sessions are in memory by contract (the server's auth
+// lifetime is a separate scope): the verify phase pins that a restart DOES forget them and that
+// an unknown session is refused, which is what the client shell's uploader must cope with.
 
 const http = require('http');
 
@@ -72,9 +72,9 @@ function api(method, path, body, token) {
     if (!plaintextAbsent) failures++;
 
     r = await api('GET', '/api/hosts', null, sessionToken);
-    const sessionSurvived = r.status === 200;
-    console.log(`${sessionSurvived ? 'PASS' : 'FAIL'}  client session survives a server restart  status=${r.status}`);
-    if (!sessionSurvived) failures++;
+    const sessionForgotten = r.status === 401;
+    console.log(`${sessionForgotten ? 'PASS' : 'FAIL'}  a client session does not survive a server restart (in-memory by contract)  status=${r.status}`);
+    if (!sessionForgotten) failures++;
 
     r = await api('GET', '/api/hosts', null, 'not-a-real-session');
     const sessionRejected = r.status === 401;

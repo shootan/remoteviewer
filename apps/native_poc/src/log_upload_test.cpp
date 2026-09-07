@@ -300,7 +300,7 @@ void test_identity_change_discards_queue(FakeLogServer& server) {
   c.sessionToken = "SESSION-BOB";
   c.flushIntervalMs = kFast;
   CHECK(log_upload_configure(c, &reason));
-  CHECK(reason.rfind("identity changed", 0) == 0);
+  CHECK(reason.rfind("owner changed", 0) == 0);
   CHECK(log_upload_status().discardedLines == 1);
   log_upload_enqueue("client", "bob line");
   CHECK(server.WaitFor(1, 2000));
@@ -481,18 +481,72 @@ void test_stale_401_after_replacement(FakeLogServer& server) {
   log_upload_stop();
 }
 
+// 9. Owner fencing: a request of owner A is in flight (the server sits on it) when the owner
+//    changes -- another account, another server, another device, or a sign-out followed by the
+//    same account signing in again. The late answer, 401 or 500, must not pause the new session,
+//    must not resurrect the batch, and A's body must never reach the new owner's destination.
+void late_answer_for_previous_owner(FakeLogServer& server, FakeLogServer& server2, int status, int change) {
+  const char* what = change == 0 ? "account" : change == 1 ? "server url" : change == 2 ? "device" : "sign-out + same account";
+  std::printf("[9] late %d after an owner change (%s) is discarded\n", status, what);
+  server.Clear();
+  server2.Clear();
+  server.ScriptSteps({FakeLogServer::Step{status, 400}});  // the answer arrives 400 ms later
+  std::atomic<int> callbacks{0};
+  log_upload_set_auth_rejected_callback([&callbacks] { ++callbacks; });
+  LogUploadConfig a = base_config(server, "alice/machine-A");
+  a.sessionToken = "SESSION-A";
+  std::string reason;
+  CHECK(log_upload_configure(a, &reason));
+  log_upload_enqueue("client", "alice private line");
+  CHECK(server.WaitFor(1, 2000));  // in flight; the server is sitting on it
+  FakeLogServer* receiver = &server;
+  LogUploadConfig b = a;
+  switch (change) {
+    case 0: b.identity = "bob/machine-A"; b.sessionToken = "SESSION-B"; break;
+    case 1: b.directoryUrl = server2.url(); receiver = &server2; break;
+    case 2: b.device = "other-device"; break;
+    default: log_upload_clear_credentials("logged out"); b.sessionToken = "SESSION-A2"; break;
+  }
+  CHECK(log_upload_configure(b, &reason));
+  CHECK(reason.rfind("owner changed", 0) == 0);
+  const size_t before = receiver->Count();
+  log_upload_enqueue("client", "new owner line");
+  CHECK(receiver->WaitFor(before + 1, 2000));
+  // Let the late answer land and anything it might wrongly trigger play out.
+  CHECK(wait_until([] { return log_upload_status().foreignAnswersDiscarded == 1; }, 2000));
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  for (FakeLogServer* srv : {&server, &server2}) {
+    const auto reqs = srv->Requests();
+    for (size_t i = 0; i < reqs.size(); ++i) {
+      if (srv == &server && i == 0) continue;  // the in-flight request itself
+      CHECK(reqs[i].body.find("alice private line") == std::string::npos);
+      CHECK(reqs[i].auth() == "Bearer " + b.sessionToken);
+      CHECK(reqs[i].device() == b.device);
+    }
+  }
+  const LogUploadStatus st = log_upload_status();
+  CHECK(!st.authRejected);
+  CHECK(st.heldBatches == 0);
+  CHECK(st.foreignAnswersDiscarded == 1);
+  CHECK(st.sentBatches == 1);
+  CHECK(callbacks.load() == 0);
+  log_upload_set_auth_rejected_callback({});
+  log_upload_stop();
+}
+
 // 8. The diag never contains a token, whatever happened above.
 void test_diag_has_no_token() {
   std::printf("[8] diag holds no token\n");
   const std::string d = read_diag();
   CHECK(!d.empty());
   for (const char* secret : {"HOST-TOKEN-ONE", "HOST-TOKEN-TWO", "SESSION-ALICE", "SESSION-BOB", "STALE",
-                             "FRESH"}) {
+                             "FRESH", "SESSION-A", "SESSION-B", "SESSION-A2"}) {
     CHECK(d.find(secret) == std::string::npos);
   }
   CHECK(d.find("auth rejected status=401") != std::string::npos);
-  CHECK(d.find("identity changed") != std::string::npos);
+  CHECK(d.find("owner changed") != std::string::npos);
   CHECK(d.find("gave up") != std::string::npos);
+  CHECK(d.find("late answer for a previous owner discarded") != std::string::npos);
 }
 
 }  // namespace
@@ -512,8 +566,9 @@ int main() {
   _putenv_s("REMOTE60_LOG_UPLOAD", "");
 
   FakeLogServer server;
-  if (!server.Start()) {
-    std::printf("log_upload_test: could not start the fake server\n");
+  FakeLogServer server2;
+  if (!server.Start() || !server2.Start()) {
+    std::printf("log_upload_test: could not start the fake servers\n");
     return 2;
   }
   test_token_replaced_same_identity(server);
@@ -523,8 +578,12 @@ int main() {
   test_permanent_discards_at_once(server);
   test_clear_credentials(server);
   test_stale_401_after_replacement(server);
+  for (const int status : {401, 500}) {
+    for (int change = 0; change < 4; ++change) late_answer_for_previous_owner(server, server2, status, change);
+  }
   test_diag_has_no_token();
   server.Stop();
+  server2.Stop();
 
   DeleteFileA((gDiagDir + "\\GNLink\\log_upload.diag").c_str());
   RemoveDirectoryA((gDiagDir + "\\GNLink").c_str());

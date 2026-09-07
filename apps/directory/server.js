@@ -403,21 +403,19 @@ const MAX_BODY_BYTES = 16 * 1024;
 
 // ---------------------------------------------------------------- persistence
 
-/** @type {{accounts: Object, hosts: Object, sessions: Object}} */
-let store = { accounts: {}, hosts: {}, sessions: {} };
+/** @type {{accounts: Object, hosts: Object}} */
+let store = { accounts: {}, hosts: {} };
 
 function loadStore() {
   try {
     store = JSON.parse(fs.readFileSync(DATA_PATH, 'utf8'));
     if (!store.accounts) store.accounts = {};
     if (!store.hosts) store.hosts = {};
-    if (!store.sessions) store.sessions = {};
   } catch (err) {
     if (err.code !== 'ENOENT') console.error('[directory] store read failed:', err.message);
-    store = { accounts: {}, hosts: {}, sessions: {} };
+    store = { accounts: {}, hosts: {} };
   }
   indexHostTokens();
-  indexSessions();
 }
 
 /**
@@ -431,23 +429,6 @@ function indexHostTokens() {
   for (const host of Object.values(store.hosts)) {
     if (host.tokenHash) hostTokens.set(host.tokenHash, host.hostId);
   }
-}
-
-/**
- * Sessions survive a restart too (P10, 2026-09-07). They were purely in memory, so a deploy
- * signed every client out at once: the client shell keeps no password, its log uploader kept
- * posting with the dead token, and the office viewer's log never reached the NAS again. As with
- * host tokens only the hash is stored; the 12 h TTL is unchanged and enforced on load.
- */
-function indexSessions() {
-  sessions.clear();
-  const now = Date.now();
-  let dropped = 0;
-  for (const [hash, s] of Object.entries(store.sessions)) {
-    if (s && s.accountId && s.expiresAt > now) sessions.set(hash, { accountId: s.accountId, expiresAt: s.expiresAt });
-    else { delete store.sessions[hash]; dropped++; }
-  }
-  if (dropped) saveStoreSoon();
 }
 
 let saveTimer = null;
@@ -506,7 +487,7 @@ function hashToken(token) {
 
 // ---------------------------------------------------------------- volatile state
 
-const sessions = new Map();      // sha256(sessionToken) -> {accountId, expiresAt}, mirrored in store.sessions
+const sessions = new Map();      // sessionToken -> {accountId, expiresAt}
 const hostTokens = new Map();    // sha256(hostToken) -> hostId, rebuilt from the store
 const pendingPunch = new Map();  // hostId       -> [{ip, port, punchToken, expiresAt}]
 const observed = new Map();      // observeToken -> {ip, port, at}
@@ -514,15 +495,7 @@ const loginFailures = new Map(); // accountId    -> {count, nextAllowedAt}
 
 function sweep() {
   const now = Date.now();
-  let expired = 0;
-  for (const [hash, s] of sessions) {
-    if (s.expiresAt <= now) {
-      sessions.delete(hash);
-      delete store.sessions[hash];
-      expired++;
-    }
-  }
-  if (expired) saveStoreSoon();
+  for (const [token, s] of sessions) if (s.expiresAt <= now) sessions.delete(token);
   for (const [hostId, list] of pendingPunch) {
     const live = list.filter((p) => p.expiresAt > now);
     if (live.length) pendingPunch.set(hostId, live);
@@ -583,7 +556,7 @@ function bearerToken(req) {
 function sessionFor(req) {
   const token = bearerToken(req);
   if (!token) return null;
-  const s = sessions.get(hashToken(token));
+  const s = sessions.get(token);
   if (!s || s.expiresAt <= Date.now()) return null;
   return s;
 }
@@ -655,11 +628,7 @@ async function handleLogin(req, res) {
   loginFailures.delete(id);
   const token = randomToken();
   const expiresAt = Date.now() + SESSION_TTL_MS;
-  const session = { accountId: id, expiresAt };
-  sessions.set(hashToken(token), session);
-  store.sessions[hashToken(token)] = session;
-  // Now, not in 200 ms: a deploy right after a login must not sign that client out again.
-  saveStoreNow();
+  sessions.set(token, { accountId: id, expiresAt });
   sendJson(res, 200, { sessionToken: token, expiresAt });
 }
 

@@ -3,6 +3,7 @@
 #include "log_upload.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -120,6 +121,13 @@ struct UploaderState {
   std::string headers;      // the auth + identity headers for the CURRENT credentials
   bool credentials = false;
   bool authRejected = false;
+  // Who the queued lines belong to and where they go: account identity + normalised server
+  // host:port + device. A change (or a sign-out) bumps ownerEpoch; a send carries the epoch it
+  // was made under, and an answer for a previous epoch may not touch anything -- not the pause
+  // state, not the hold, and its body is never re-sent under the new owner's credentials.
+  std::string ownerKey;
+  uint64_t ownerEpoch = 0;
+  uint64_t foreignAnswersDiscarded = 0;
   uint64_t configGeneration = 0;  // bumped by every credential change; a send remembers its own
   uint64_t wakeSeq = 0;           // bumped whenever the worker should re-read its config now
   std::function<void()> authRejectedCallback;
@@ -172,10 +180,17 @@ struct SendJob {
   std::string headers;
   std::string host;
   uint16_t port = 0;
+  uint64_t ownerEpoch = 0;
   uint64_t configGeneration = 0;
   uint32_t attempts = 0;        // before this send
   uint64_t firstAttemptUs = 0;  // 0 = first send
 };
+
+std::string owner_key(const std::string& identity, const std::string& host, uint16_t port, const std::string& device) {
+  std::string h = host;
+  for (auto& c : h) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return identity + "|" + h + ":" + std::to_string(port) + "|" + device;
+}
 
 // Requires s.mu. Picks the next thing to send: a held batch that is due, else a fresh batch
 // from the queue. False when there is nothing (or nothing may go yet).
@@ -218,6 +233,7 @@ bool next_job_locked(UploaderState& s, uint64_t nowUs, SendJob* job) {
   job->headers = s.headers + "x-log-stream: " + job->stream + "\r\n";
   job->host = s.host;
   job->port = s.port;
+  job->ownerEpoch = s.ownerEpoch;
   job->configGeneration = s.configGeneration;
   return true;
 }
@@ -268,6 +284,16 @@ void worker_loop() {
     std::function<void()> callback;
     {
       std::lock_guard<std::mutex> lk(s.mu);
+      if (job.ownerEpoch != s.ownerEpoch) {
+        // A late answer for a batch whose owner is gone (another account, another server or
+        // device, a sign-out): whatever it says -- 401, 5xx, even 200 -- it describes a session
+        // that no longer exists. Discard the batch; the current owner's state is untouched.
+        ++s.foreignAnswersDiscarded;
+        ++s.discardedBatches;
+        diag("late answer for a previous owner discarded status=" + std::to_string(status) + " reached=" +
+             (sent ? "1" : "0") + " stream=" + job.stream + " bytes=" + std::to_string(job.body.size()));
+        continue;
+      }
       s.lastStatus = status;
       if (job.attempts > 0) ++s.retriedBatches;
       ++flushes;
@@ -381,13 +407,17 @@ bool log_upload_configure(const LogUploadConfig& config, std::string* outReason)
   const std::string device = config.device.empty() ? directory::machine_id() : config.device;
   const std::string headers = build_headers(config, device);
   const char* auth = config.sessionToken.empty() ? "host-token" : "bearer";
+  const std::string ownerKey = owner_key(config.identity, host, port, device);
 
   std::string reason;
   {
     std::lock_guard<std::mutex> lk(s.mu);
     if (s.running && !s.stopping) {
-      const bool sameCredentials = s.credentials && s.headers == headers && s.host == host && s.port == port;
-      const bool sameIdentity = s.config.identity == config.identity;
+      // Same owner = same account, same server (host:port) and same device: only then does a new
+      // token inherit the queue and the held batches. Anything else is a different destination for
+      // what is queued, and what is queued is discarded.
+      const bool sameIdentity = s.credentials && s.ownerKey == ownerKey;
+      const bool sameCredentials = sameIdentity && s.headers == headers;
       if (sameCredentials && sameIdentity) {
         // Same owner, same token: only the tunables may differ (a caller adjusting the cadence).
         s.config = config;
@@ -397,20 +427,24 @@ bool log_upload_configure(const LogUploadConfig& config, std::string* outReason)
         return true;
       }
       uint64_t lines = 0, batches = 0;
-      if (!sameIdentity) discard_all_locked(s, &lines, &batches);
+      if (!sameIdentity) {
+        discard_all_locked(s, &lines, &batches);
+        ++s.ownerEpoch;  // answers still in flight for the previous owner are discarded on arrival
+      }
       const bool wasRejected = s.authRejected;
       s.config = config;
       s.host = host;
       s.port = port;
       s.device = device;
       s.headers = headers;
+      s.ownerKey = ownerKey;
       s.credentials = true;
       s.authRejected = false;
       ++s.configGeneration;
       for (auto& h : s.held) {
         if (h.awaitingToken) h.dueUs = 0;  // the new token is what it was waiting for
       }
-      reason = std::string(sameIdentity ? "token replaced" : "identity changed") + " auth=" + auth +
+      reason = std::string(sameIdentity ? "token replaced" : "owner changed") + " auth=" + auth +
                " device=" + device + " -> " + host + ":" + std::to_string(port) +
                (sameIdentity ? "" : " discardedLines=" + std::to_string(lines) + " discardedBatches=" +
                                         std::to_string(batches)) +
@@ -423,6 +457,8 @@ bool log_upload_configure(const LogUploadConfig& config, std::string* outReason)
       s.port = port;
       s.device = device;
       s.headers = headers;
+      s.ownerKey = ownerKey;
+      ++s.ownerEpoch;
       s.credentials = true;
       s.authRejected = false;
       s.stopping = false;
@@ -448,6 +484,8 @@ void log_upload_clear_credentials(const char* reason) {
     s.credentials = false;
     s.authRejected = false;
     s.headers.clear();
+    s.ownerKey.clear();
+    ++s.ownerEpoch;  // a late answer for anything sent before the sign-out is discarded
     s.config.sessionToken.clear();
     s.config.hostToken.clear();
     ++s.configGeneration;
@@ -504,6 +542,8 @@ void log_upload_stop() {
   s.heldBytes = 0;
   s.sentBatches = s.failedSends = s.retriedBatches = s.discardedBatches = 0;
   s.droppedLines = s.discardedLines = 0;
+  s.foreignAnswersDiscarded = 0;
+  s.ownerKey.clear();
   s.lastStatus = 0;
   s.lastOkUs = s.lastRejectUs = 0;
   s.lastTransientDiagUs = 0;
@@ -529,6 +569,7 @@ LogUploadStatus log_upload_status() {
   st.droppedLines = s.droppedLines;
   st.discardedLines = s.discardedLines;
   st.heldBatches = s.held.size();
+  st.foreignAnswersDiscarded = s.foreignAnswersDiscarded;
   st.lastStatus = s.lastStatus;
   st.lastOkUs = s.lastOkUs;
   st.lastRejectUs = s.lastRejectUs;

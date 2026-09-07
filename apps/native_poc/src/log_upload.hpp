@@ -35,9 +35,10 @@ struct LogUploadConfig {
   std::string sessionToken;   // account session -> Authorization: Bearer
   std::string hostToken;      // host registration -> x-host-token (used when there is no session)
   std::string device;         // empty = machine_id()
-  // Whose lines these are, as the caller knows it (account plus host/machine). When it changes,
-  // whatever is still queued was produced under the previous owner and is discarded rather than
-  // sent under the new credentials into the new account's directory.
+  // Whose lines these are, as the caller knows it (the account). Together with the server
+  // (host:port) and the device it forms the OWNER of what is queued: when any of the three
+  // changes, whatever is still queued -- and any answer still in flight -- belonged to the
+  // previous owner and is discarded rather than sent under the new credentials to the new place.
   std::string identity;
   // A queue this size holds roughly a minute of ordinary logging. Past it the oldest lines go,
   // because the interesting part of a log that is overflowing is its end, not its beginning.
@@ -64,6 +65,7 @@ struct LogUploadStatus {
   uint64_t droppedLines = 0;      // queue overflow (oldest first) or no credentials to send with
   uint64_t discardedLines = 0;    // identity change / credentials cleared
   uint64_t heldBatches = 0;       // waiting for a retry slot or for a new token
+  uint64_t foreignAnswersDiscarded = 0;  // late answers for a previous owner (account/server/device/sign-out)
   uint32_t lastStatus = 0;        // http status of the last send (0 = unreachable)
   uint64_t lastOkUs = 0;          // steady-clock microseconds of the last accepted batch
   uint64_t lastRejectUs = 0;      // ... of the last 401
@@ -75,8 +77,9 @@ struct LogUploadStatus {
  * Returns false when it is switched off, when there is no url, or when neither token is present
  * -- all of which are ordinary states rather than failures, so callers log the reason and carry
  * on writing to disk. A running uploader keeps its queue when only the token changed (same
- * identity) and discards it when the identity changed. A 401 pause ends here: held batches go
- * out with the new token first. Calling it again with identical values is a no-op.
+ * owner: identity, server and device) and discards it when the owner changed. A 401 pause ends
+ * here: held batches go out with the new token first. Calling it again with identical values is
+ * a no-op.
  */
 bool log_upload_configure(const LogUploadConfig& config, std::string* outReason);
 
