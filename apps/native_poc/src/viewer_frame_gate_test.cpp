@@ -60,6 +60,7 @@ struct Rig {
     gate.lagTriggerStreakMin = kLagTriggerStreakMinDefault;                   // 3
     gate.recoveryRetryIntervalUs = kKeyRecoveryRetryUsDefault;                // 500 ms
     gate.recoveryRetryMaxIntervalUs = kKeyRecoveryRetryMaxUsDefault;          // 2 s
+    gate.recoveryRetryDeferMaxUs = kKeyRecoveryDeferMaxUsDefault;             // 300 ms
     gate.frameIntervalUs = 16667;
     gate.waitForKeyFrame = true;  // an H.264 session starts waiting for its first IDR
   }
@@ -657,6 +658,32 @@ void test_recovery_timer_without_frames_and_backoff_per_wait() {
   r.fg.tick(t3 + 500 * kMs);
   CHECK(r.sink.requests(7) == 4);
   CHECK(r.gate.recoveryRetryEpisodes == 2);
+  // A NACK repair in progress holds the re-ask (checked again next tick); telemetry counts it.
+  Rig d;
+  d.gate.waitForKeyFrame = true;
+  d.fg.tick(start);
+  d.fg.tick(start + 500 * kMs, /*repairInProgress=*/true);
+  CHECK(d.sink.requests(7) == 0);
+  CHECK(d.gate.recoveryRetryDeferred == 1);
+  d.fg.tick(start + 525 * kMs, false);
+  CHECK(d.sink.requests(7) == 1);
+  // ... and the deferral is bounded: a repair that is "in progress" on every tick (a new AU to
+  // chase each time) still lets the re-ask out 300 ms after it first fell due (Codex invariant 1).
+  Rig e;
+  e.gate.waitForKeyFrame = true;
+  e.fg.tick(start);
+  int asks = 0;
+  uint64_t askedAtUs = 0;
+  for (uint64_t t = start; t <= start + 2000 * kMs; t += 25 * kMs) {
+    e.fg.tick(t, /*repairInProgress=*/true);
+    if (e.sink.requests(7) > asks) {
+      asks = e.sink.requests(7);
+      if (askedAtUs == 0) askedAtUs = t;
+    }
+  }
+  CHECK(asks >= 1);
+  CHECK(askedAtUs >= start + 800 * kMs && askedAtUs <= start + 850 * kMs);  // 500 ms due + 300 ms cap
+  CHECK(e.gate.recoveryRetryDeferred >= 10);
   // Off switch: interval 0 never asks.
   Rig off;
   off.gate.recoveryRetryIntervalUs = 0;

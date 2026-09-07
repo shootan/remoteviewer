@@ -306,8 +306,12 @@ class UdpH264FrameAssembler {
   // older AU is dropped and delivery resumes carrying droppedPreviousIncomplete. maxHoldUs = 0
   // keeps the legacy immediate delivery (the Android path is unchanged). `maxConcurrent` bounds
   // the assemblies held (legacy 3; a hold of ~120 ms at 60 fps needs ~8).
-  void ConfigureInOrderHold(uint64_t maxHoldUs, size_t maxConcurrent);
+  // `maxHeldBytes` bounds the payload held across assemblies (0 = unbounded); past it the
+  // oldest assembly is given up, exactly like the count cap. (Codex condition 1.)
+  void ConfigureInOrderHold(uint64_t maxHoldUs, size_t maxConcurrent,
+                            size_t maxHeldBytes = 8u * 1024u * 1024u);
   bool InOrderHoldEnabled() const { return holdMaxUs_ > 0; }
+  size_t HeldBytes() const;
   // Deliver the next AU in sequence order if one is ready, or if the incomplete AU ahead of it has
   // outlived its hold. `repairNonKey` false: an IDR is awaited, so an incomplete NON-key head is
   // not worth waiting for and is released at once (an incomplete keyframe still is -- it is the
@@ -364,6 +368,7 @@ class UdpH264FrameAssembler {
   uint32_t lastDeliveredSeq_ = 0;
   uint64_t holdMaxUs_ = 0;      // 0 = legacy immediate delivery
   size_t maxConcurrent_ = 3;    // kMaxConcurrentVideoAssemblies unless ConfigureInOrderHold raised it
+  size_t maxHeldBytes_ = 0;     // hold mode only; 0 = unbounded
 };
 
 struct WindowTargetUiEntry {

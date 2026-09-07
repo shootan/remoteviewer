@@ -72,6 +72,7 @@ void FrameGate::append_congestion_fields(std::ostream& os) {
         (gate.congestionRecoveryCount > 0) ? (gate.congestionRecoveryTotalUs / gate.congestionRecoveryCount) : 0;
     os << " congestionState=" << congestion_state_name(gate.congestionState)
        << " keyRetries=" << gate.recoveryRetryCount
+       << " keyRetryDeferred=" << gate.recoveryRetryDeferred
        << " keyRetryEpisodes=" << gate.recoveryRetryEpisodes
        << " keyWaitMaxUs=" << gate.keyWaitMaxUs
        << " congestionTransitions=" << gate.congestionTransitionCount
@@ -488,7 +489,7 @@ void FrameGate::clear_empty_streak() {
   gate.decodeEmptyStreakStartUs = 0;
 }
 
-void FrameGate::tick(uint64_t nowUs) {
+void FrameGate::tick(uint64_t nowUs, bool repairInProgress) {
   const bool waiting =
       gate.waitForKeyFrame || gate.congestionState == ClientCongestionState::Congested;
   if (!waiting) {
@@ -499,6 +500,7 @@ void FrameGate::tick(uint64_t nowUs) {
     gate.keyWaitSinceUs = 0;
     gate.recoveryNextRetryUs = 0;
     gate.recoveryRetryCurrentUs = 0;
+    gate.recoveryDeferSinceUs = 0;
     return;
   }
   if (gate.recoveryRetryIntervalUs == 0) return;
@@ -511,6 +513,19 @@ void FrameGate::tick(uint64_t nowUs) {
     return;
   }
   if (nowUs < gate.recoveryNextRetryUs) return;
+  if (repairInProgress) {
+    // A retransmit may still complete the missing AU (or the missing IDR itself): asking for a
+    // fresh IDR now would have both answers on the wire. Checked again on the next tick -- but
+    // only for recoveryRetryDeferMaxUs from the first deferral of THIS re-ask: a repair that keeps
+    // finding a new AU to chase must not hold the IDR path back indefinitely.
+    if (gate.recoveryDeferSinceUs == 0) gate.recoveryDeferSinceUs = nowUs;
+    const uint64_t deferredUs = (nowUs >= gate.recoveryDeferSinceUs) ? (nowUs - gate.recoveryDeferSinceUs) : 0;
+    if (deferredUs < gate.recoveryRetryDeferMaxUs) {
+      ++gate.recoveryRetryDeferred;
+      return;
+    }
+  }
+  gate.recoveryDeferSinceUs = 0;
   const bool firstRetry = (gate.recoveryRetryCurrentUs == gate.recoveryRetryIntervalUs);
   sink.request_keyframe(7);  // recovery_timer
   ++gate.congestionRecoveryRequestCount;

@@ -124,10 +124,13 @@ struct FrameGateState {
   // recoveryRetryMaxIntervalUs, reset when an IDR decodes. 0 = off (config, REMOTE60_NATIVE_KEY_RECOVERY_RETRY_US).
   uint64_t recoveryRetryIntervalUs = 0;
   uint64_t recoveryRetryMaxIntervalUs = 0;
+  uint64_t recoveryRetryDeferMaxUs = 0;  // config: the longest a due re-ask waits for a NACK repair
+  uint64_t recoveryDeferSinceUs = 0;     // first deferral of the current due re-ask (0 = none)
   uint64_t keyWaitSinceUs = 0;          // when the current wait began (0 = not waiting)
   uint64_t recoveryNextRetryUs = 0;     // the next scheduled re-ask
   uint64_t recoveryRetryCurrentUs = 0;  // the current backoff step
   uint64_t recoveryRetryCount = 0;      // telemetry: timer-driven requests (reason 7)
+  uint64_t recoveryRetryDeferred = 0;   // telemetry: ticks that held the re-ask for a NACK repair
   uint64_t recoveryRetryEpisodes = 0;   // telemetry: waits that needed at least one retry
   uint64_t keyWaitMaxUs = 0;            // telemetry: the longest wait for an IDR so far
 };

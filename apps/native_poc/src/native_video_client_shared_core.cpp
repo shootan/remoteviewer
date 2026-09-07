@@ -621,9 +621,17 @@ void UdpH264FrameAssembler::Reset() {
   lastDeliveredSeq_ = 0;
 }
 
-void UdpH264FrameAssembler::ConfigureInOrderHold(uint64_t maxHoldUs, size_t maxConcurrent) {
+void UdpH264FrameAssembler::ConfigureInOrderHold(uint64_t maxHoldUs, size_t maxConcurrent,
+                                                 size_t maxHeldBytes) {
   holdMaxUs_ = maxHoldUs;
   maxConcurrent_ = std::max<size_t>(1, maxConcurrent);
+  maxHeldBytes_ = maxHeldBytes;
+}
+
+size_t UdpH264FrameAssembler::HeldBytes() const {
+  size_t total = 0;
+  for (const Assembly& a : assemblies_) total += a.payloadSize;
+  return total;
 }
 
 // Hand one assembled AU out: the completion block PushDatagram used to run inline, so the legacy
@@ -667,6 +675,22 @@ bool UdpH264FrameAssembler::PopDelivery(uint64_t nowUs, bool repairNonKey,
     const bool anyComplete = std::any_of(assemblies_.begin(), assemblies_.end(),
                                          [](const Assembly& a) { return a.complete; });
     if (!anyComplete) return false;  // nothing behind it to release anyway
+    // A complete keyframe behind the broken chain is the recovery point: nothing older than it
+    // can be decoded without the missing reference anyway, and the IDR does not need it. Give up
+    // everything ahead of the newest complete IDR at once, so the IDR goes out now and the gap it
+    // carries is closed by the IDR itself (no request). (Codex condition 1.)
+    auto newestKey = assemblies_.end();
+    for (auto it = assemblies_.begin(); it != assemblies_.end(); ++it) {
+      if (!it->complete || (it->header.flags & kEncodedFrameFlagKeyFrame) == 0) continue;
+      if (newestKey == assemblies_.end() || sequence_is_newer(it->seq, newestKey->seq)) newestKey = it;
+    }
+    if (newestKey != assemblies_.end()) {
+      const uint32_t keySeq = newestKey->seq;
+      assemblies_.erase(std::remove_if(assemblies_.begin(), assemblies_.end(),
+                                       [&](const Assembly& a) { return sequence_is_newer(keySeq, a.seq); }),
+                        assemblies_.end());
+      continue;
+    }
     const bool keyFrame = (oldest->header.flags & kEncodedFrameFlagKeyFrame) != 0;
     const bool worthHolding = (repairNonKey || keyFrame) &&
                               holdMaxUs_ > 0 && nowUs < oldest->firstPacketUs + holdMaxUs_;
@@ -792,7 +816,7 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* dat
   auto assemblyIt = std::find_if(assemblies_.begin(), assemblies_.end(),
                                  [&](const Assembly& item) { return item.seq == packet.seq; });
   if (assemblyIt == assemblies_.end()) {
-    if (assemblies_.size() >= maxConcurrent_) {
+    const auto evict_oldest = [&]() {
       if (holdMaxUs_ > 0) {
         // The oldest by sequence is the stuck head (complete ones were already popped).
         assemblies_.erase(std::min_element(assemblies_.begin(), assemblies_.end(),
@@ -803,6 +827,13 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* dat
         assemblies_.pop_front();
       }
       result.droppedPreviousIncomplete = true;
+    };
+    if (assemblies_.size() >= maxConcurrent_) evict_oldest();
+    // Hold mode: the payload held across assemblies is bounded too (a burst of large IDRs must
+    // not pile up behind one stuck AU). (Codex condition 1.)
+    while (holdMaxUs_ > 0 && maxHeldBytes_ > 0 && !assemblies_.empty() &&
+           HeldBytes() + packet.payloadSize > maxHeldBytes_) {
+      evict_oldest();
     }
     Assembly created{};
     created.seq = packet.seq;

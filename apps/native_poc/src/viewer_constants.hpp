@@ -54,6 +54,11 @@ constexpr uint64_t kCongestionRecoveryTimeoutUsDefault = 1500000;  // 1.5s
 // KeyframeRequestState limiter still bounds the wire rate.
 constexpr uint64_t kKeyRecoveryRetryUsDefault = 500000;      // 500ms
 constexpr uint64_t kKeyRecoveryRetryMaxUsDefault = 2000000;  // 2s
+// How long a due re-ask may be held back for a NACK repair in progress (the assembler's hold is
+// 120 ms and the rounds fit inside it). Measured from the first deferral of that re-ask; a new
+// datagram, a new AU or a new NACK round does not restart it, so a repair that never ends cannot
+// starve the IDR path. (Codex invariant 1.)
+constexpr uint64_t kKeyRecoveryDeferMaxUsDefault = 300000;   // 300ms
 // F-18: the congestion-entry gate, previously fixed. 150 ms "dense arrival" and a streak of 3 are
 // the values the field has run on; they stay the defaults.
 constexpr uint64_t kDenseArrivalMaxGapUsDefault = 150000;  // 150ms

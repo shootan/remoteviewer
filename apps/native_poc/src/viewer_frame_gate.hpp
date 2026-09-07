@@ -92,7 +92,9 @@ class FrameGate {
   // the gate waits for an IDR (waitForKeyFrame or Congested) it re-asks on a backoff schedule
   // (reason 7, recovery_timer) so recovery does not depend on frames arriving; otherwise it clears
   // the wait bookkeeping. Cheap when idle.
-  void tick(uint64_t nowUs);
+  // `repairInProgress`: a NACK retransmit is still being chased for the AU that would otherwise
+  // need this IDR; the re-ask waits so the two recoveries do not race (Codex condition 2).
+  void tick(uint64_t nowUs, bool repairInProgress = false);
 
   // formerly VideoReceiver members, verbatim
   uint32_t queue_depth_frames(uint64_t lagUs);

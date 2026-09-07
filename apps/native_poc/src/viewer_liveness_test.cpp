@@ -4,9 +4,12 @@
 //
 // Build: remote60_viewer_liveness_test (CMake). Run: prints "viewer_liveness_test: PASS", exit 0.
 
+#include <chrono>
 #include <cstdio>
+#include <thread>
 
 #include "viewer_recv_liveness.hpp"
+#include "viewer_thread_join.hpp"
 
 using namespace remote60::native_poc::viewer;
 
@@ -159,6 +162,21 @@ int main() {
     const auto v = evaluate_session_liveness(s, cfg);
     CHECK(v.linkSilent);
     CHECK(!v.sessionDead);
+  }
+
+  std::printf("[J1] join_with_timeout: a thread that does not return within the timeout is reported, not waited for\n");
+  {
+    std::thread slow([]() { std::this_thread::sleep_for(std::chrono::milliseconds(600)); });
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool joined = join_with_timeout(slow, 100);
+    const auto waitedMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    CHECK(!joined);
+    CHECK(waitedMs < 500);
+    CHECK(slow.joinable());
+    CHECK(join_with_timeout(slow, 5000));  // it does finish; a generous wait joins it
+    CHECK(!slow.joinable());
+    std::thread none;
+    CHECK(join_with_timeout(none, 10));  // nothing to join
   }
 
   if (gFailures == 0) {

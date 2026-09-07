@@ -61,7 +61,11 @@ class VideoNackScheduler {
     lastUs_ = 0;
     rounds_ = 0;
     exhaustedCounted_ = false;
+    tailPhase_ = false;
   }
+  // An AU is being chased and still has rounds left: the keyframe recovery timer defers to it so
+  // a retransmit and a fresh IDR do not race for the same loss. (Codex condition 2.)
+  bool busy() const { return seq_ != 0 && rounds_ < cfg_.maxRounds; }
 
   // Decide whether a NACK is due now for the assembler's oldest incomplete AU. `repairNonKey`
   // false means the caller is waiting for a keyframe: a non-key incomplete AU will be resynced by
@@ -90,6 +94,21 @@ class VideoNackScheduler {
       lastUs_ = 0;
       rounds_ = 0;
       exhaustedCounted_ = false;
+      tailPhase_ = false;
+    }
+    const uint64_t age = (nowUs >= firstUs_) ? (nowUs - firstUs_) : 0;
+    const bool gapEligible = age >= cfg_.gapGraceUs;
+    const bool tailEligible = age >= cfg_.tailGraceUs;
+    const uint16_t have = std::min<uint16_t>(info.missingTotal, kMax);
+    // Holes and the tail are two phases with a round budget each: rounds spent chasing a hole
+    // while a large frame's tail was still (legitimately) in flight must not leave the tail with
+    // none once its long grace passes. (Codex condition 2.)
+    const bool hasTail = have > 0 && missing[have - 1] >= info.highWater;
+    if (tailEligible && hasTail && !tailPhase_) {
+      tailPhase_ = true;
+      rounds_ = 0;
+      lastUs_ = 0;
+      exhaustedCounted_ = false;
     }
     if (rounds_ >= cfg_.maxRounds) {
       if (!exhaustedCounted_) {
@@ -99,11 +118,7 @@ class VideoNackScheduler {
       return false;
     }
     if (lastUs_ != 0 && nowUs - lastUs_ < cfg_.roundUs) return false;
-    const uint64_t age = (nowUs >= firstUs_) ? (nowUs - firstUs_) : 0;
-    const bool gapEligible = age >= cfg_.gapGraceUs;
-    const bool tailEligible = age >= cfg_.tailGraceUs;
     if (!gapEligible && !tailEligible) return false;
-    const uint16_t have = std::min<uint16_t>(info.missingTotal, kMax);
     UdpVideoNackPacket nack{};
     uint16_t outCount = 0;
     for (uint16_t i = 0; i < have; ++i) {
@@ -134,6 +149,7 @@ class VideoNackScheduler {
   uint64_t lastUs_ = 0;
   uint32_t rounds_ = 0;
   bool exhaustedCounted_ = false;
+  bool tailPhase_ = false;
 };
 
 }  // namespace remote60::native_poc

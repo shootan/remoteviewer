@@ -594,6 +594,27 @@ bool test_video_nack_scheduler() {
   if (!expect(s.Poll(a, false, t3 + 50000, &pkt) && pkt.seq == 21,
               "nack: an incomplete IDR is repaired even while an IDR is awaited")) return false;
 
+  // The tail phase has its own round budget: rounds spent on a hole while the tail was still in
+  // flight do not leave the tail with none (Codex condition 2).
+  a.Reset();
+  s.Reset();
+  const uint64_t t5 = t0 + 2000000;
+  (void)push_chunk(a, 50, 0, 24, 4, false, t5);  // 6 chunks: 0 and 2 in, hole 1, tail 3..5
+  (void)push_chunk(a, 50, 2, 24, 4, false, t5);
+  if (!expect(s.Poll(a, true, t5 + 25000, &pkt) && pkt.missingCount == 1 && pkt.missing[0] == 1,
+              "nack: hole round 0")) return false;
+  if (!expect(s.busy(), "nack: busy while rounds remain")) return false;
+  (void)s.Poll(a, true, t5 + 50000, &pkt);
+  (void)s.Poll(a, true, t5 + 75000, &pkt);
+  if (!expect(!s.Poll(a, true, t5 + 100000, &pkt) && !s.busy(), "nack: hole rounds spent, not busy")) return false;
+  if (!expect(s.Poll(a, true, t5 + 120000, &pkt) && pkt.round == 0 && pkt.missingCount == 4 &&
+                  pkt.missing[0] == 1 && pkt.missing[3] == 5,
+              "nack: the tail phase starts with a fresh round 0 (hole + tail)")) return false;
+  if (!expect(s.busy(), "nack: busy again in the tail phase")) return false;
+  (void)s.Poll(a, true, t5 + 145000, &pkt);
+  if (!expect(s.Poll(a, true, t5 + 170000, &pkt) && pkt.round == 2, "nack: tail round 2")) return false;
+  if (!expect(!s.Poll(a, true, t5 + 195000, &pkt) && !s.busy(), "nack: tail rounds spent")) return false;
+
   // Blocker change restarts the schedule: AU 30 exhausted its rounds, AU 31 gets fresh ones.
   a.Reset();
   s.Reset();
@@ -696,6 +717,56 @@ bool test_udp_assembler_in_order_hold() {
   (void)push_chunk(b, 12, 1, 8, 4, false, t0 + 3000);
   if (!expect(b.PopDelivery(t0 + 3000, true, &out) && out.frame.header.seq == 12,
               "hold: the evicted one was AU 11 (oldest), AU 12 survived")) return false;
+
+  // A complete IDR behind a broken chain is the recovery point: everything ahead of it is given
+  // up at once and the IDR goes out immediately, carrying the gap (Codex condition 1).
+  UdpH264FrameAssembler c;
+  c.ConfigureInOrderHold(100000, 8);
+  (void)push_chunk(c, 19, 0, 4, 4, false, t0 - 1000);   // something delivered before, so a gap is a gap
+  if (!expect(c.PopDelivery(t0 - 1000, true, &out) && out.frame.header.seq == 19, "hold: AU 19 delivered")) return false;
+  (void)push_chunk(c, 20, 0, 8, 4, false, t0);          // incomplete P
+  (void)push_chunk(c, 21, 0, 4, 4, false, t0 + 1000);   // complete P behind it
+  (void)push_chunk(c, 22, 0, 4, 4, true, t0 + 2000);    // complete IDR
+  if (!expect(c.PopDelivery(t0 + 2000, true, &out) && out.frame.header.seq == 22 &&
+                  out.droppedPreviousIncomplete && c.PendingCount() == 0,
+              "hold: a complete IDR releases the broken chain ahead of it at once")) return false;
+  if (!expect(!c.PopDelivery(t0 + 2000, true, &out), "hold: nothing left behind the IDR")) return false;
+
+  // The byte cap: three 8-byte assemblies fit in 24 bytes, the fourth evicts the oldest.
+  UdpH264FrameAssembler d;
+  d.ConfigureInOrderHold(100000, 8, 24);
+  (void)push_chunk(d, 30, 0, 8, 4, false, t0);
+  (void)push_chunk(d, 31, 0, 8, 4, false, t0 + 1000);
+  r = push_chunk(d, 32, 0, 8, 4, false, t0 + 2000);
+  if (!expect(!r.droppedPreviousIncomplete && d.HeldBytes() == 24, "hold: within the byte cap")) return false;
+  r = push_chunk(d, 33, 0, 8, 4, false, t0 + 3000);
+  if (!expect(r.droppedPreviousIncomplete && d.HeldBytes() == 24 && d.PendingCount() == 3,
+              "hold: the byte cap evicts the oldest")) return false;
+  (void)push_chunk(d, 31, 1, 8, 4, false, t0 + 4000);
+  if (!expect(d.PopDelivery(t0 + 4000, true, &out) && out.frame.header.seq == 31,
+              "hold: AU 30 was the eviction, AU 31 survived")) return false;
+
+  // Sequence wrap: 0xFFFFFFFF then 0 are contiguous, in that order.
+  UdpH264FrameAssembler w;
+  w.ConfigureInOrderHold(100000, 8);
+  (void)push_chunk(w, 0u, 0, 4, 4, false, t0 + 1000);
+  (void)push_chunk(w, 0xFFFFFFFFu, 0, 4, 4, false, t0);
+  if (!expect(w.PopDelivery(t0 + 1000, true, &out) && out.frame.header.seq == 0xFFFFFFFFu,
+              "hold: the pre-wrap AU goes first")) return false;
+  if (!expect(w.PopDelivery(t0 + 1000, true, &out) && out.frame.header.seq == 0 &&
+                  !out.droppedPreviousIncomplete,
+              "hold: the wrapped AU follows without a gap")) return false;
+
+  // A duplicate (retransmit of a chunk that did arrive) is absorbed, and the payload is intact.
+  UdpH264FrameAssembler dup;
+  dup.ConfigureInOrderHold(100000, 8);
+  (void)push_chunk(dup, 40, 0, 8, 4, false, t0);
+  r = push_chunk(dup, 40, 0, 8, 4, false, t0 + 1000);
+  if (!expect(r.disposition == UdpH264AssemblyDisposition::Partial, "hold: duplicate chunk keeps the AU partial")) return false;
+  r = push_chunk(dup, 40, 1, 8, 4, false, t0 + 2000);
+  if (!expect(r.disposition == UdpH264AssemblyDisposition::Queued && dup.PopDelivery(t0 + 2000, true, &out) &&
+                  out.frame.payload.size() == 8 && out.frame.payload[4] == static_cast<uint8_t>(40 * 16 + 4),
+              "hold: the AU completes once and its payload is intact")) return false;
 
   // Legacy (no hold) is unchanged: AU 2 completing discards the half AU 1 and reports the gap.
   UdpH264FrameAssembler legacy;

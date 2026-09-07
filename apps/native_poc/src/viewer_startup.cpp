@@ -4,6 +4,7 @@
 // (viewer split refactor Phase 2-10 / 3)
 
 #include "viewer_startup.hpp"
+#include "viewer_udp_session.hpp"
 
 #include <iostream>
 #include <vector>
@@ -97,11 +98,15 @@ void load_config(ViewerContext& ctx, int argc, char** argv) {
   ctx.gate.recoveryRetryMaxIntervalUs = env_u32_clamped(
       "REMOTE60_NATIVE_KEY_RECOVERY_RETRY_MAX_US",
       static_cast<uint32_t>(kKeyRecoveryRetryMaxUsDefault), 100000, 30000000);
+  ctx.gate.recoveryRetryDeferMaxUs = env_u32_clamped(
+      "REMOTE60_NATIVE_KEY_RECOVERY_DEFER_MAX_US",
+      static_cast<uint32_t>(kKeyRecoveryDeferMaxUsDefault), 0, 5000000);
   ctx.udpSimDropPm = env_u32_clamped(
       "REMOTE60_NATIVE_UDP_SIM_DROP_PM", 0, 0, 1000);
   ctx.udpSimDropSeed = env_u32_clamped(
       "REMOTE60_NATIVE_UDP_SIM_DROP_SEED", 0, 0, 0x7fffffffu);
-  ctx.videoNackEnabled = env_u32_clamped("REMOTE60_NATIVE_VIDEO_NACK", 1, 0, 1) != 0;
+  ctx.videoNackEnabled =
+      env_u32_clamped("REMOTE60_NATIVE_VIDEO_NACK", kVideoNackEnabledDefault ? 1u : 0u, 0, 1) != 0;
   ctx.session.deadSessionUs =
       env_u32_clamped("REMOTE60_NATIVE_DEAD_SESSION_MS", 5000, 1000, 600000) * 1000u;
   ctx.session.deadSessionExit = env_u32_clamped("REMOTE60_NATIVE_DEAD_SESSION_EXIT", 1, 0, 1) != 0;
@@ -381,15 +386,11 @@ int connect_media_socket(ViewerContext& ctx) {
     // refuses anything that needs authorisation -- secure-desktop input in particular. A token that
     // was sent now also has to come back acknowledged (kUdpFeatureDirectoryAuth), which the mobile
     // client always required and this path used to skip.
-    remote60::native_poc::UdpHelloOptions hello;
-    hello.authToken = ctx.directoryPunchToken;
-    hello.budgetMs = 10000;
-    hello.sliceMaxMs = 200;
-    hello.retrySleepMs = 50;
-    // Ask for selective retransmit (kUdpFeatureVideoNack) and keep the HelloAck bits: the recv
-    // thread only NACKs against a host that acknowledged it, and an old host that never sets the
-    // bit is never sent one. (Windows NACK wiring -- the ack used to be discarded here.)
-    hello.requestNack = ctx.videoNackEnabled;
+    // The Hello (with the NACK request), the ack bits kept, the receive timeout armed: the three
+    // pieces the receive-path integration test runs through the same functions
+    // (viewer_udp_session.hpp), so a regression here fails that test.
+    const remote60::native_poc::UdpHelloOptions hello =
+        viewer_udp_hello_options(ctx.directoryPunchToken, ctx.videoNackEnabled);
     uint32_t ackFeatures = 0;
     std::string helloError;
     const bool handshakeOk = remote60::native_poc::udp_hello_handshake(
@@ -398,9 +399,7 @@ int connect_media_socket(ViewerContext& ctx) {
     // clock of everything the recv thread does on a quiet link -- NACK rounds, the in-order hold,
     // the keyframe recovery deadline, the control tunnel's retransmits -- and the direct path used
     // to block forever, which left a lost chunk on a static screen unrepaired until the next frame.
-    const DWORD recvTimeoutMs = ctx.udpRecvTimeoutMs;
-    (void)setsockopt(ctx.session.sock, SOL_SOCKET, SO_RCVTIMEO,
-                     reinterpret_cast<const char*>(&recvTimeoutMs), sizeof(recvTimeoutMs));
+    (void)viewer_arm_udp_recv_timeout(ctx.session.sock, ctx.udpRecvTimeoutMs);
     if (!handshakeOk) {
       std::cerr << "[native-video-client] udp handshake failed " << ctx.resolvedArgs.host << ":"
                 << ctx.resolvedArgs.port << " (" << helloError << ")\n";
@@ -409,10 +408,7 @@ int connect_media_socket(ViewerContext& ctx) {
       if (ctx.dec.mfStarted) MFShutdown();
       return 6;
     }
-    ctx.session.udpHelloAckFeatures = ackFeatures;
-    ctx.session.hostSupportsNack =
-        ctx.videoNackEnabled &&
-        (ackFeatures & remote60::native_poc::kUdpFeatureVideoNack) != 0;
+    viewer_apply_udp_hello_ack(ackFeatures, ctx.videoNackEnabled, ctx.session);
     std::cout << "[native-video-client] udp hello ack features=0x" << std::hex << ackFeatures
               << std::dec << " nackRequested=" << (ctx.videoNackEnabled ? 1 : 0)
               << " nackNegotiated=" << (ctx.session.hostSupportsNack ? 1 : 0)

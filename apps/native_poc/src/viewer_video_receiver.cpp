@@ -208,7 +208,7 @@ void VideoReceiver::run_udp() {
         if (ctx.control.overUdp.load(std::memory_order_acquire)) ctx.control.udpControl.Tick();
         if (!drain_deliveries()) break;
         maybe_send_nack(qpc_now_us());
-        fg.tick(qpc_now_us());  // the keyframe recovery clock runs with or without frames
+        fg.tick(qpc_now_us(), nackScheduler.busy());  // the keyframe recovery clock runs with or without frames
         continue;
       }
       break;
@@ -330,7 +330,7 @@ void VideoReceiver::run_udp() {
     if (!drain_deliveries()) break;
     // On a busy link, also nudge the NACK for any still-stuck earlier AU (round-gated inside).
     maybe_send_nack(qpc_now_us());
-    fg.tick(qpc_now_us());
+    fg.tick(qpc_now_us(), nackScheduler.busy());
 
     const uint64_t nowUs = qpc_now_us();
     if (nowUs >= udpAssemblyStatAtUs) {

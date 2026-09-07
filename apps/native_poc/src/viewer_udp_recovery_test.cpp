@@ -39,6 +39,7 @@
 #include "viewer_picker.hpp"
 #include "viewer_present.hpp"
 #include "viewer_state.hpp"
+#include "viewer_udp_session.hpp"
 #include "viewer_video_receiver.hpp"
 
 using namespace remote60::native_poc;
@@ -135,6 +136,11 @@ class FakeHost {
 
   uint16_t port() const { return port_; }
   bool peer_known() const { return peerKnown_.load(); }
+  // The feature bits the viewer's Hello actually carried on the wire.
+  uint32_t hello_features() const { return helloFeatures_.load(); }
+  // Zero the next IDR's payload: the assembler completes it, the decoder cannot use it.
+  void CorruptNextKey() { corruptNextKey_ = true; }
+  uint64_t corrupted_keys() const { return corruptedKeys_; }
 
   // Encode the next picture and put it on the wire. `noisy` makes a big AU (a large IDR / a
   // multi-chunk P), `synthetic` re-sends the previous picture flagged as a host kick / refresh.
@@ -209,6 +215,10 @@ class FakeHost {
     CachedAu au;
     au.seq = ++seq_;
     au.payload = bytes;
+    if (key && corruptNextKey_.exchange(false)) {
+      std::fill(au.payload.begin(), au.payload.end(), 0);
+      ++corruptedKeys_;
+    }
     au.base.seq = au.seq;
     au.base.codec = static_cast<uint16_t>(UdpCodec::H264);
     au.base.flags = static_cast<uint16_t>((key ? 0x1u : 0u) | (synthetic ? kUdpVideoChunkFlagSynthetic : 0u));
@@ -363,6 +373,8 @@ class FakeHost {
   std::atomic<uint16_t> lastKeyframeReason_{0};
   uint64_t keyframesSent_ = 0;
   uint64_t droppedChunks_ = 0;
+  std::atomic<bool> corruptNextKey_{false};
+  uint64_t corruptedKeys_ = 0;
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -405,6 +417,7 @@ struct ViewerRig {
     gate.lagTriggerStreakMin = kLagTriggerStreakMinDefault;
     gate.recoveryRetryIntervalUs = kKeyRecoveryRetryUsDefault;
     gate.recoveryRetryMaxIntervalUs = kKeyRecoveryRetryMaxUsDefault;
+    gate.recoveryRetryDeferMaxUs = kKeyRecoveryDeferMaxUsDefault;
     gate.waitForKeyFrame = true;  // init_decoder: an H.264 session starts waiting for its first IDR
     ctx.picker.visible.store(false, std::memory_order_relaxed);
     ctx.control.keyframeRequests.Reset();
@@ -424,22 +437,20 @@ struct ViewerRig {
     // takes ~100 ms, during which the next frames must fit in the socket, not spill.
     const int recvBuf = 1024 * 1024;
     (void)setsockopt(s, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&recvBuf), sizeof(recvBuf));
-    // The same handshake connect_media_socket runs, with the same options.
-    UdpHelloOptions hello;
-    hello.budgetMs = 2000;
-    hello.sliceMaxMs = 200;
-    hello.retrySleepMs = 20;
-    hello.requestNack = requestNack;
+    // The product's own negotiation (viewer_udp_session.hpp, what connect_media_socket runs):
+    // the Hello options, the ack bits kept, the receive timeout armed. Not a test-only handshake,
+    // so a product default that stops requesting NACK fails S1 here (Codex condition 5).
+    UdpHelloOptions hello = viewer_udp_hello_options(std::string(), requestNack);
+    hello.budgetMs = 2000;  // a local fake host answers at once; keep a failed run short
     uint32_t ackFeatures = 0;
     std::string error;
     if (!udp_hello_handshake(s, hello, nullptr, &error, &ackFeatures)) {
       std::printf("  viewer: hello failed: %s\n", error.c_str());
       return false;
     }
-    (void)set_recv_timeout(s, recvTimeoutMs);
+    (void)viewer_arm_udp_recv_timeout(s, recvTimeoutMs);
     ctx.session.sock = s;
-    ctx.session.udpHelloAckFeatures = ackFeatures;
-    ctx.session.hostSupportsNack = requestNack && (ackFeatures & kUdpFeatureVideoNack) != 0;
+    viewer_apply_udp_hello_ack(ackFeatures, requestNack, ctx.session);
     VideoReceiver::NackOptions nack;
     nack.enabled = ctx.session.hostSupportsNack;
     nack.holdUs = holdUs;
@@ -541,8 +552,8 @@ void idle(FakeHost& host, ViewerRig& rig, uint32_t ms) {
 std::string state_name(const ViewerRig& rig) { return congestion_state_name(rig.gate.congestionState); }
 
 // Bring a session up: hello, first IDR, a second of clean streaming. Returns false on setup failure.
-bool start_session(FakeHost& host, ViewerRig& rig, const LossPlan& plan, bool requestNack = true,
-                   uint64_t holdUs = 120000) {
+bool start_session(FakeHost& host, ViewerRig& rig, const LossPlan& plan,
+                   bool requestNack = kVideoNackEnabledDefault, uint64_t holdUs = 120000) {
   if (!host.Start(plan)) {
     std::printf("  setup: fake host failed to start\n");
     return false;
@@ -577,6 +588,9 @@ void scenario_p_chunk_loss_repaired_by_nack() {
     return seq == target.load() && idx == 1;
   };
   if (!start_session(host, rig, plan)) { ++gFailures; return; }
+  // Observed on the wire, not assumed: the product's default Hello asks for NACK.
+  CHECK((host.hello_features() & kUdpFeatureVideoNack) != 0, "the Hello carried kUdpFeatureVideoNack");
+  CHECK((rig.ctx.session.udpHelloAckFeatures & kUdpFeatureVideoNack) != 0, "the HelloAck bits were kept");
   CHECK(rig.hostSupportsNack(), "NACK negotiated");
   const uint64_t requestsBefore = host.keyframe_requests();
   pump(host, rig, 1500);
@@ -628,6 +642,7 @@ void scenario_old_host_without_nack() {
     return seq == target.load() && idx == 1;
   };
   if (!start_session(host, rig, plan)) { ++gFailures; return; }
+  CHECK((host.hello_features() & kUdpFeatureVideoNack) != 0, "the viewer still asked (the host declined)");
   CHECK(!rig.hostSupportsNack(), "NACK not negotiated");
   const uint64_t requestsBefore = host.keyframe_requests();
   pump(host, rig, 1500);
@@ -862,6 +877,120 @@ void scenario_synthetic_idle_then_real_burst_no_false_congestion() {
   CHECK(!rig.gate.waitForKeyFrame, "not waiting for a keyframe");
 }
 
+// S11: the decoder without a reset across a gap. The receiver no longer flushes the decoder when
+// a complete IDR closes a seq gap; the MFT's pending-input FIFO (timestamp + synthetic provenance)
+// must still map every output to its own input, and nothing decoded before the IDR may surface
+// after it. Checked on the real H264Encoder/H264Decoder, no sockets. (Codex condition 3.)
+void scenario_decoder_provenance_without_reset_across_gap() {
+  std::printf("[S11] decoder: skip a P, feed the IDR without reset -> outputs keep their own stamps, none leak past the IDR\n");
+  H264Encoder enc;
+  if (!enc.initialize(kWidth, kHeight, 60, 3000000, 600)) { std::printf("  encoder init failed\n"); ++gFailures; return; }
+  H264Decoder dec;
+  if (!dec.initialize(kWidth, kHeight, 60)) { std::printf("  decoder init failed\n"); ++gFailures; return; }
+  std::vector<uint8_t> nv12(static_cast<size_t>(kWidth) * kHeight * 3 / 2, 96);
+  struct Au { std::vector<uint8_t> bytes; bool key; int64_t timeHns; bool synthetic; };
+  std::vector<Au> aus;
+  const int64_t base = 5000000;  // 0.5 s, in 100 ns units
+  for (int i = 0; i < 8; ++i) {
+    for (uint32_t row = 0; row < kHeight; ++row) nv12[row * kWidth + ((i * 40) % kWidth)] = 235;
+    const bool synthetic = (i == 2);
+    const bool forceKey = (i == 5);
+    enc.set_next_input_synthetic(synthetic);
+    std::vector<H264AccessUnit> units;
+    const int64_t t = base + static_cast<int64_t>(i) * 166667;
+    if (!enc.encode_frame(nv12, forceKey, t, &units)) { std::printf("  encode failed\n"); ++gFailures; return; }
+    for (auto& u : units) aus.push_back(Au{u.bytes, u.keyFrame, u.sampleTimeHns, u.synthetic});
+  }
+  // Drain what an async encoder may still hold, so the IDR forced at 5 is present.
+  for (int extra = 0; extra < 4 && aus.size() < 8; ++extra) {
+    std::vector<H264AccessUnit> units;
+    enc.set_next_input_synthetic(false);
+    if (!enc.encode_frame(nv12, false, base + static_cast<int64_t>(8 + extra) * 166667, &units)) break;
+    for (auto& u : units) aus.push_back(Au{u.bytes, u.keyFrame, u.sampleTimeHns, u.synthetic});
+  }
+  size_t idrIndex = 0;
+  for (size_t i = 1; i < aus.size(); ++i) if (aus[i].key) { idrIndex = i; break; }
+  CHECK(idrIndex >= 3, "an IDR was produced past the first frames (index " + std::to_string(idrIndex) + ")");
+  if (idrIndex < 3) return;
+  const size_t skipped = idrIndex - 1;  // the P just before the IDR is "lost"
+  std::vector<int64_t> outTimes;
+  std::vector<bool> outSynthetic;
+  auto decode = [&](const Au& au) {
+    std::vector<DecodedFrameNv12> out;
+    bool overflow = false;
+    dec.set_next_input_synthetic(au.synthetic);
+    const bool ok = dec.decode_access_unit(au.bytes, au.key, au.timeHns, &out, &overflow);
+    for (auto& f : out) { outTimes.push_back(f.sampleTimeHns); outSynthetic.push_back(f.synthetic); }
+    return ok;
+  };
+  for (size_t i = 0; i < aus.size(); ++i) {
+    if (i == skipped) continue;  // the gap; no reset follows
+    CHECK(decode(aus[i]), "decode of AU " + std::to_string(i) + " ok");
+  }
+  // Every output carries the stamp of one of its inputs, in input order, never the skipped one.
+  CHECK(!outTimes.empty(), "the decoder produced output");
+  bool monotonic = true;
+  bool onlyKnown = true;
+  bool skippedLeaked = false;
+  for (size_t i = 0; i < outTimes.size(); ++i) {
+    if (i > 0 && outTimes[i] <= outTimes[i - 1]) monotonic = false;
+    bool known = false;
+    for (size_t k = 0; k < aus.size(); ++k) {
+      if (k == skipped) continue;
+      if (aus[k].timeHns == outTimes[i]) { known = true; if (outSynthetic[i] != aus[k].synthetic) onlyKnown = false; }
+    }
+    if (!known) onlyKnown = false;
+    if (outTimes[i] == aus[skipped].timeHns) skippedLeaked = true;
+  }
+  CHECK(monotonic, "output stamps are in input order across the gap");
+  CHECK(onlyKnown, "every output stamp + synthetic flag matches its own input");
+  CHECK(!skippedLeaked, "the lost frame's stamp never surfaces");
+  bool idrSeen = false;
+  bool preIdrAfterIdr = false;
+  for (const int64_t t : outTimes) {
+    if (t == aus[idrIndex].timeHns) idrSeen = true;
+    else if (idrSeen && t < aus[idrIndex].timeHns) preIdrAfterIdr = true;
+  }
+  CHECK(idrSeen, "the IDR decoded");
+  CHECK(!preIdrAfterIdr, "nothing decoded before the IDR surfaces after it");
+  dec.shutdown();
+  enc.shutdown();
+}
+
+// S12: a complete IDR the decoder cannot use (payload zeroed) behind a seq gap. Observed on this
+// machine's hardware MFT: the zeroed AU is swallowed without an error and without an output, and
+// the P frames behind it decode against the references the (un-reset) decoder still holds. So
+// there is no decoder-reported failure to recover from -- and no request must be manufactured
+// either (that was the 90/90 churn). What is guaranteed: the gate is not stuck waiting, nothing
+// storms, and the next good IDR is decoded and shown. A decoder that DOES report the failure
+// takes the reason-4 path, which viewer_frame_gate_test covers (test_decode_failure_rebuild_
+// threshold); a run of empty outputs takes the reason-5 path. (Codex condition 3.)
+void scenario_corrupted_idr_does_not_wedge_or_storm() {
+  std::printf("[S12] zeroed complete IDR behind a gap: no wedge, no storm, the next good IDR shows\n");
+  FakeHost host;
+  ViewerRig rig;
+  LossPlan plan;
+  if (!start_session(host, rig, plan)) { ++gFailures; return; }
+  const uint64_t requestsBefore = host.keyframe_requests();
+  host.SkipSeq();  // the gap the IDR closes
+  host.CorruptNextKey();
+  (void)host.SendFrame(true, false, qpc_now_us());
+  CHECK(host.corrupted_keys() == 1, "a zeroed IDR went out");
+  pump(host, rig, 700);
+  CHECK(!rig.gate.waitForKeyFrame, "not left waiting for a keyframe (state " + state_name(rig) + ")");
+  CHECK(host.keyframe_requests() <= requestsBefore + 2,
+        "no IDR storm (" + std::to_string(host.keyframe_requests() - requestsBefore) + " requests)");
+  // The next good IDR is decoded and published.
+  const uint64_t publishedBefore = rig.publishedCount.load();
+  const uint32_t goodIdr = host.SendFrame(true, false, qpc_now_us());
+  CHECK(goodIdr != 0, "a good IDR went out");
+  const bool shown = pump_until(host, rig, 3000, [&]() {
+    return rig.publishedCount.load() > publishedBefore && rig.maxPublishedSeq.load() >= goodIdr;
+  });
+  CHECK(shown, "the good IDR was decoded and published (max seq " + std::to_string(rig.maxPublishedSeq.load()) + ")");
+  CHECK(rig.gate.congestionState == ClientCongestionState::Normal, "state " + state_name(rig));
+}
+
 }  // namespace
 
 int main() {
@@ -885,6 +1014,8 @@ int main() {
   scenario_keyframe_wait_retries_on_timer_when_source_stops();
   scenario_congested_first_idr_lost_recovers_by_timer();
   scenario_synthetic_idle_then_real_burst_no_false_congestion();
+  scenario_decoder_provenance_without_reset_across_gap();
+  scenario_corrupted_idr_does_not_wedge_or_storm();
   MFShutdown();
   if (gFailures == 0) {
     std::printf("viewer_udp_recovery_test: PASS\n");
