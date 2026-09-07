@@ -19,6 +19,7 @@
 #include "viewer_overlay_draw.hpp"
 #include "viewer_picker.hpp"
 #include "viewer_present.hpp"
+#include "viewer_session_watchdog.hpp"
 
 #include <iostream>
 
@@ -614,6 +615,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // a newer frame is sitting unpresented and asks again. Correctness lives in
         // request_video_paint; this only bounds the damage to one tick. (Viewer ledger F-20.)
         poll_video_paint_liveness(ctx, hwnd);
+        // Once a second: is the recv thread moving, is anything arriving, is the session dead?
+        poll_session_liveness(ctx, hwnd);
         return 0;
       }
       break;

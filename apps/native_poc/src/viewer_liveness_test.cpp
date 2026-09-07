@@ -1,0 +1,170 @@
+// Unit test for the session-liveness verdict (viewer_recv_liveness.hpp): a stalled recv thread, a
+// silent link and a dead session are told apart from the recv heartbeat and the control state,
+// with the ages the watchdog logs. No threads, no sockets.
+//
+// Build: remote60_viewer_liveness_test (CMake). Run: prints "viewer_liveness_test: PASS", exit 0.
+
+#include <cstdio>
+
+#include "viewer_recv_liveness.hpp"
+
+using namespace remote60::native_poc::viewer;
+
+namespace {
+
+int gFailures = 0;
+#define CHECK(cond)                                                    \
+  do {                                                                 \
+    if (!(cond)) {                                                     \
+      std::printf("  FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);    \
+      ++gFailures;                                                     \
+    }                                                                  \
+  } while (0)
+
+constexpr uint64_t kMs = 1000;
+constexpr uint64_t kS = 1000 * kMs;
+
+SessionLivenessSample healthy(uint64_t now) {
+  SessionLivenessSample s;
+  s.nowUs = now;
+  s.stage = RecvStage::Recv;
+  s.stageEnterUs = now - 10 * kMs;
+  s.loopIterations = 1000;
+  s.lastDatagramUs = now - 5 * kMs;
+  s.lastAssembledUs = now - 20 * kMs;
+  s.lastDecodeReturnUs = now - 20 * kMs;
+  s.lastPublishUs = now - 20 * kMs;
+  s.controlConnected = true;
+  s.tunnelClosed = false;
+  s.controlGoneSinceUs = 0;
+  return s;
+}
+
+}  // namespace
+
+int main() {
+  const SessionLivenessConfig cfg;  // 2 s stall, 3 s silent, 5 s dead
+  const uint64_t now = 100 * kS;
+
+  std::printf("[L1] healthy: nothing flagged\n");
+  {
+    const auto v = evaluate_session_liveness(healthy(now), cfg);
+    CHECK(!v.recvStalled && !v.linkSilent && !v.sessionDead);
+    CHECK(v.datagramAgeUs == 5 * kMs);
+  }
+
+  std::printf("[L2] recv thread wedged in decode for 3 s: stalled, not dead while control is up\n");
+  {
+    auto s = healthy(now);
+    s.stage = RecvStage::Decode;
+    s.stageEnterUs = now - 3 * kS;
+    s.lastDatagramUs = now - 3 * kS;
+    s.lastPublishUs = now - 3 * kS;
+    const auto v = evaluate_session_liveness(s, cfg);
+    CHECK(v.recvStalled);
+    CHECK(v.stageAgeUs == 3 * kS);
+    CHECK(!v.linkSilent);  // a stall is not a silent link
+    CHECK(!v.sessionDead);
+  }
+
+  std::printf("[L3] recv() not returning for 3 s (25 ms timeout): stalled too\n");
+  {
+    auto s = healthy(now);
+    s.stage = RecvStage::Recv;
+    s.stageEnterUs = now - 3 * kS;
+    const auto v = evaluate_session_liveness(s, cfg);
+    CHECK(v.recvStalled);
+  }
+
+  std::printf("[L4] loop cycling, no datagram for 4 s, control up: silent link\n");
+  {
+    auto s = healthy(now);
+    s.lastDatagramUs = now - 4 * kS;
+    s.lastPublishUs = now - 4 * kS;
+    const auto v = evaluate_session_liveness(s, cfg);
+    CHECK(v.linkSilent);
+    CHECK(!v.recvStalled);
+    CHECK(!v.sessionDead);
+    CHECK(v.datagramAgeUs == 4 * kS);
+  }
+
+  std::printf("[L5] control gone (tunnel peer-lost) 6 s, no publish 6 s: dead\n");
+  {
+    auto s = healthy(now);
+    s.controlConnected = false;
+    s.tunnelClosed = true;
+    s.controlGoneSinceUs = now - 6 * kS;
+    s.lastDatagramUs = now - 6 * kS;
+    s.lastPublishUs = now - 6 * kS;
+    const auto v = evaluate_session_liveness(s, cfg);
+    CHECK(v.sessionDead);
+    CHECK(v.controlGoneUs == 6 * kS);
+    CHECK(!v.linkSilent);  // control is not up, so this is not the silent-link case
+  }
+
+  std::printf("[L6] control gone 6 s but frames still publish: not dead\n");
+  {
+    auto s = healthy(now);
+    s.controlConnected = false;
+    s.controlGoneSinceUs = now - 6 * kS;
+    const auto v = evaluate_session_liveness(s, cfg);
+    CHECK(!v.sessionDead);
+  }
+
+  std::printf("[L7] control gone only 3 s: not dead yet\n");
+  {
+    auto s = healthy(now);
+    s.controlConnected = false;
+    s.controlGoneSinceUs = now - 3 * kS;
+    s.lastPublishUs = now - 6 * kS;
+    const auto v = evaluate_session_liveness(s, cfg);
+    CHECK(!v.sessionDead);
+  }
+
+  std::printf("[L8] recv loop exited + control gone 6 s: dead even with a recent publish\n");
+  {
+    auto s = healthy(now);
+    s.stage = RecvStage::Exited;
+    s.controlConnected = false;
+    s.controlGoneSinceUs = now - 6 * kS;
+    const auto v = evaluate_session_liveness(s, cfg);
+    CHECK(v.sessionDead);
+    CHECK(!v.recvStalled);  // an exited loop is not a stall
+  }
+
+  std::printf("[L9] never connected: control absence is not a death; deadSessionUs=0 never kills\n");
+  {
+    auto s = healthy(now);
+    s.controlConnected = false;
+    s.controlGoneSinceUs = 0;  // the watchdog only stamps this after control had been up
+    s.lastPublishUs = 0;
+    const auto v = evaluate_session_liveness(s, cfg);
+    CHECK(!v.sessionDead);
+    auto s2 = healthy(now);
+    s2.controlConnected = false;
+    s2.tunnelClosed = true;
+    s2.controlGoneSinceUs = now - 60 * kS;
+    s2.lastPublishUs = now - 60 * kS;
+    SessionLivenessConfig off = cfg;
+    off.deadSessionUs = 0;
+    CHECK(!evaluate_session_liveness(s2, off).sessionDead);
+    CHECK(evaluate_session_liveness(s2, cfg).sessionDead);
+  }
+
+  std::printf("[L10] a UAC pause: video stops but control keeps answering -> silent link at most, never dead\n");
+  {
+    auto s = healthy(now);
+    s.lastDatagramUs = now - 20 * kS;
+    s.lastPublishUs = now - 20 * kS;
+    const auto v = evaluate_session_liveness(s, cfg);
+    CHECK(v.linkSilent);
+    CHECK(!v.sessionDead);
+  }
+
+  if (gFailures == 0) {
+    std::printf("viewer_liveness_test: PASS\n");
+    return 0;
+  }
+  std::printf("viewer_liveness_test: FAIL (%d)\n", gFailures);
+  return 1;
+}

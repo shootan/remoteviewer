@@ -27,6 +27,7 @@
 #include "viewer_remote_cursor.hpp"
 #include "viewer_ui_resources.hpp"
 #include "viewer_frame_gate_state.hpp"
+#include "viewer_recv_liveness.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -41,6 +42,7 @@ struct ViewerState {
   InputState input;              // 1-8  mouse/key/touch state, macro engine
   RemoteCursorState cursor;      // 1-9  remote cursor sample + overlay window
   UiResources ui;                // 1-10 fonts, dpi, brush cache, NV12 presenter
+  RecvLiveness recvLive;         // 1-11 recv-thread progress heartbeat + the UI watchdog's state (history #390 item 5)
 };
 
 }  // namespace remote60::native_poc::viewer

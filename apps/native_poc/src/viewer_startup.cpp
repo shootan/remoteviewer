@@ -102,6 +102,9 @@ void load_config(ViewerContext& ctx, int argc, char** argv) {
   ctx.udpSimDropSeed = env_u32_clamped(
       "REMOTE60_NATIVE_UDP_SIM_DROP_SEED", 0, 0, 0x7fffffffu);
   ctx.videoNackEnabled = env_u32_clamped("REMOTE60_NATIVE_VIDEO_NACK", 1, 0, 1) != 0;
+  ctx.session.deadSessionUs =
+      env_u32_clamped("REMOTE60_NATIVE_DEAD_SESSION_MS", 5000, 1000, 600000) * 1000u;
+  ctx.session.deadSessionExit = env_u32_clamped("REMOTE60_NATIVE_DEAD_SESSION_EXIT", 1, 0, 1) != 0;
   ctx.videoNackHoldUs = env_u32_clamped("REMOTE60_NATIVE_VIDEO_NACK_HOLD_US", 120000, 0, 2000000);
   ctx.udpRecvTimeoutMs = env_u32_clamped("REMOTE60_NATIVE_UDP_RECV_TIMEOUT_MS", 25, 1, 1000);
   ctx.control.keyframeRequests.Reset();

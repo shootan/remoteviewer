@@ -57,6 +57,12 @@ struct SessionState {
   // used to discard the ack bits, so the 0.2.95/96 NACK path never ran in GNLinkViewer.)
   uint32_t udpHelloAckFeatures = 0;
   bool hostSupportsNack = false;
+  // Session watchdog (viewer_session_watchdog.cpp): a session whose control channel is gone for
+  // good and whose video has not progressed for deadSessionUs is declared dead; deadSessionExit
+  // then ends the viewer so the shell offers a reconnect (REMOTE60_NATIVE_DEAD_SESSION_EXIT=0 only
+  // notifies). main sets both; the UI thread reads.
+  uint32_t deadSessionUs = 5000000;
+  bool deadSessionExit = true;
   // Which candidate won the race. The relay is billed per byte, so the session says which one it
   // is rather than leaving the user to guess from the bill.
   std::atomic<bool> relayPath{false};

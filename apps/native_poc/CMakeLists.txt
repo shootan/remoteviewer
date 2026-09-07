@@ -159,6 +159,7 @@ add_executable(remote60_native_video_client_poc
   src/viewer_unlock.cpp
   src/viewer_video_receiver.cpp
   src/viewer_video_receiver_frame.cpp
+  src/viewer_session_watchdog.cpp
   src/viewer_window_proc.cpp
   src/viewer_cursor_overlay.cpp
   src/viewer_overlay_draw.cpp
@@ -493,6 +494,12 @@ add_executable(remote60_viewer_frame_gate_test
 )
 target_include_directories(remote60_viewer_frame_gate_test PRIVATE src)
 target_link_libraries(remote60_viewer_frame_gate_test PRIVATE common)
+
+# The session-liveness verdict (recv-thread stall / silent link / dead session), pure logic.
+add_executable(remote60_viewer_liveness_test
+  src/viewer_liveness_test.cpp
+)
+target_include_directories(remote60_viewer_liveness_test PRIVATE src)
 
 # Windows receive-path integration test (Windows NACK wiring / recovery state machine): the real
 # VideoReceiver::run_udp -> assembler (in-order hold) -> FrameGate -> MF H264Decoder chain on a real

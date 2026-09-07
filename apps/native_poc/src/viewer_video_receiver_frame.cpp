@@ -242,8 +242,11 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
     const int64_t inputSampleTimeHns = static_cast<int64_t>(h.captureQpcUs) * 10;
     bool pendingTimestampOverflow = false;
     dec.decoder.set_next_input_synthetic(synthetic);  // rides the decoder's pending-input FIFO (0.2.97)
-    if (!dec.decoder.decode_access_unit(*payloadPtr, keyFrame, inputSampleTimeHns, &outFrames,
-                                    &pendingTimestampOverflow)) {
+    ctx.recvLive.Enter(RecvStage::Decode, decodeStartUs);
+    const bool decodedOk = dec.decoder.decode_access_unit(*payloadPtr, keyFrame, inputSampleTimeHns,
+                                                          &outFrames, &pendingTimestampOverflow);
+    ctx.recvLive.lastDecodeReturnUs.store(qpc_now_us(), std::memory_order_relaxed);
+    if (!decodedOk) {
       fg.note_decode_failure(in, lag);
       flush_stats_if_due(packetNowUs, h.width, h.height, false, 0, 0);
       return true;
@@ -293,6 +296,7 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
     const uint64_t nowUs = qpc_now_us();
     const uint64_t queueSetUs = nowUs;
     const uint64_t decodeToQueueUs = (queueSetUs >= decodeEndUs) ? (queueSetUs - decodeEndUs) : 0;
+    ctx.recvLive.Enter(RecvStage::Publish, nowUs);
     {
       std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
       const uint64_t prevVersion = ctx.frameBuf.frame.version;
@@ -359,6 +363,7 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
     // The reveal above and the picker-close handler invalidate on their own, so the newest
     // decoded frame still shows the moment the picker leaves.
     request_video_paint(ctx, ctx.session.hwnd);
+    ctx.recvLive.lastPublishUs.store(qpc_now_us(), std::memory_order_relaxed);
 
     if (args.traceEvery > 0 && (h.seq % args.traceEvery) == 0 &&
         (args.traceMax == 0 || ctx.present.traceRecvPrinted.load() < args.traceMax)) {

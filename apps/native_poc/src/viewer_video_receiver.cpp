@@ -142,6 +142,7 @@ void VideoReceiver::run_udp() {
   auto deliver_completed = [&](UdpH264AssemblyStepResult& r) -> bool {
     ++st.udpAssemblyCompletedCount;
     const uint64_t packetNowUs = qpc_now_us();
+    ctx.recvLive.lastAssembledUs.store(packetNowUs, std::memory_order_relaxed);
     // GNLink stream telemetry (diagnostics only): one line per assembled keyframe, plus any
     // non-key frame that needed FEC repair or showed loss/reorder, so a periodic-stutter
     // session joins the host 'wire seq=' log by seq+gen while steady play stays quiet.
@@ -180,6 +181,7 @@ void VideoReceiver::run_udp() {
     return true;
   };
 
+  ctx.recvLive.Enter(RecvStage::Recv, qpc_now_us());
   while (ctx.session.running.load()) {
     // At the top of the loop, so it also runs on the receive timeouts a quiet link produces --
     // previously it sat after the packet processing and a socket that stayed silent never
@@ -187,6 +189,13 @@ void VideoReceiver::run_udp() {
     // the socket close. (F-13.)
     if (args.seconds > 0 && qpc_now_us() >= startUs + static_cast<uint64_t>(args.seconds) * 1000000ULL) break;
     discontinuityHandled = false;
+    {
+      // Liveness heartbeat for the UI watchdog: one pass per loop, timeouts included.
+      const uint64_t loopUs = qpc_now_us();
+      ctx.recvLive.loopIterations.fetch_add(1, std::memory_order_relaxed);
+      ctx.recvLive.lastLoopUs.store(loopUs, std::memory_order_relaxed);
+      ctx.recvLive.Enter(RecvStage::Recv, loopUs);
+    }
     const int n = recv(ctx.session.sock, reinterpret_cast<char*>(datagram.data()), static_cast<int>(datagram.size()), 0);
     if (n <= 0) {
       // A read timeout is not a dead socket. It is also the tunnel's heartbeat: the control
@@ -203,6 +212,11 @@ void VideoReceiver::run_udp() {
         continue;
       }
       break;
+    }
+    {
+      const uint64_t gotUs = qpc_now_us();
+      ctx.recvLive.lastDatagramUs.store(gotUs, std::memory_order_relaxed);
+      ctx.recvLive.Enter(RecvStage::Control, gotUs);
     }
     if (ctx.control.overUdp.load(std::memory_order_acquire)) ctx.control.udpControl.Tick();
     // Control is offered the datagram BEFORE the video length guard, and the order is the
@@ -265,6 +279,11 @@ void VideoReceiver::run_udp() {
     ++udpSimAcceptedCount;
     ++st.udpChunkRecvCount;
 
+    {
+      const uint64_t chunkUs = qpc_now_us();
+      ctx.recvLive.lastVideoChunkUs.store(chunkUs, std::memory_order_relaxed);
+      ctx.recvLive.Enter(RecvStage::Assembly, chunkUs);
+    }
     auto assembleResult = assembler.PushDatagram(datagram.data(), static_cast<size_t>(n), qpc_now_us());
     if (assembleResult.fecRecovered) {
       st.udpAssemblyFecRecoveredCount += assembleResult.fecRecoveredChunks;
@@ -372,20 +391,29 @@ void VideoReceiver::run_udp() {
     }
   }
 
+  ctx.recvLive.Enter(RecvStage::Exited, qpc_now_us());
   ctx.session.running = false;
   if (ctx.session.hwnd) PostMessageW(ctx.session.hwnd, WM_CLOSE, 0, 0);
   return;
 }
 
 void VideoReceiver::run_tcp() {
+  ctx.recvLive.Enter(RecvStage::Recv, qpc_now_us());
   while (ctx.session.running.load()) {
     if (args.seconds > 0 && qpc_now_us() >= startUs + static_cast<uint64_t>(args.seconds) * 1000000ULL) break;
+    {
+      const uint64_t loopUs = qpc_now_us();
+      ctx.recvLive.loopIterations.fetch_add(1, std::memory_order_relaxed);
+      ctx.recvLive.lastLoopUs.store(loopUs, std::memory_order_relaxed);
+      ctx.recvLive.Enter(RecvStage::Recv, loopUs);
+    }
     // The TCP socket has no receive timeout, so recv_all would block for as long as the host
     // stays quiet; a bounded select in front of it keeps the checks above alive. (F-13.)
     if (!wait_readable(ctx.session.sock, 200)) continue;
     MessageHeader header{};
     if (!remote60::native_poc::recv_all(ctx.session.sock, &header, sizeof(header))) break;
     if (header.magic != remote60::native_poc::kMagic || header.size < sizeof(header)) break;
+    ctx.recvLive.lastDatagramUs.store(qpc_now_us(), std::memory_order_relaxed);
     const auto msgType = static_cast<MessageType>(header.type);
 
     if (msgType == MessageType::RawFrameBgra && header.size == sizeof(RawFrameHeader)) {
@@ -493,6 +521,7 @@ void VideoReceiver::run_tcp() {
     }
 
   }
+  ctx.recvLive.Enter(RecvStage::Exited, qpc_now_us());
   ctx.session.running = false;
   if (ctx.session.hwnd) PostMessageW(ctx.session.hwnd, WM_CLOSE, 0, 0);
 }
