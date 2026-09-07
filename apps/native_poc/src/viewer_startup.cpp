@@ -90,6 +90,13 @@ void load_config(ViewerContext& ctx, int argc, char** argv) {
       static_cast<uint32_t>(kDenseArrivalMaxGapUsDefault), 10000, 2000000);
   ctx.gate.lagTriggerStreakMin = env_u32_clamped(
       "REMOTE60_NATIVE_CONGEST_TRIGGER_STREAK", kLagTriggerStreakMinDefault, 1, 60);
+  // Time-based keyframe recovery (FrameGate::tick): 0 turns the timer off.
+  ctx.gate.recoveryRetryIntervalUs = env_u32_clamped(
+      "REMOTE60_NATIVE_KEY_RECOVERY_RETRY_US",
+      static_cast<uint32_t>(kKeyRecoveryRetryUsDefault), 0, 10000000);
+  ctx.gate.recoveryRetryMaxIntervalUs = env_u32_clamped(
+      "REMOTE60_NATIVE_KEY_RECOVERY_RETRY_MAX_US",
+      static_cast<uint32_t>(kKeyRecoveryRetryMaxUsDefault), 100000, 30000000);
   ctx.udpSimDropPm = env_u32_clamped(
       "REMOTE60_NATIVE_UDP_SIM_DROP_PM", 0, 0, 1000);
   ctx.udpSimDropSeed = env_u32_clamped(
@@ -442,6 +449,8 @@ void attach_control_tunnel_and_log(ViewerContext& ctx) {
             << " staleCaptureDropUs=" << ctx.gate.staleCaptureDropUs
             << " congestionRecoverMinUs=" << ctx.gate.congestionRecoverMinUs
             << " congestionRecoveryTimeoutUs=" << ctx.gate.congestionRecoveryTimeoutUs
+            << " keyRecoveryRetryUs=" << ctx.gate.recoveryRetryIntervalUs
+            << " keyRecoveryRetryMaxUs=" << ctx.gate.recoveryRetryMaxIntervalUs
             << "\n";
   if (kInputPolicyForceBlock) {
     std::cout << "[native-video-client] input channel blocked by compile-time policy\n";

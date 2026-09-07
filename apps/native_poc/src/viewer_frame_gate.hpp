@@ -86,6 +86,11 @@ class FrameGate {
   void note_decode_empty(const FrameGateInputs& in, const FrameGateLag& lag);
   // a frame came out: the empty-output streak ends.
   void clear_empty_streak();
+  // The clock: called by the receive loop after every datagram AND on every receive timeout. While
+  // the gate waits for an IDR (waitForKeyFrame or Congested) it re-asks on a backoff schedule
+  // (reason 7, recovery_timer) so recovery does not depend on frames arriving; otherwise it clears
+  // the wait bookkeeping. Cheap when idle.
+  void tick(uint64_t nowUs);
 
   // formerly VideoReceiver members, verbatim
   uint32_t queue_depth_frames(uint64_t lagUs);

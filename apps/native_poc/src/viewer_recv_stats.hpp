@@ -52,6 +52,7 @@ struct RecvStats {
   uint64_t udpAssemblyMalformedCount = 0;
   uint64_t udpAssemblyReorderCount = 0;
   uint64_t udpAssemblyKeyReqCount = 0;
+  uint64_t udpAssemblyKeyResyncCount = 0;  // seq gaps closed by the complete IDR that revealed them (no request)
   uint64_t udpAssemblyFecRecoveredCount = 0;
   uint64_t udpNackSentCount = 0;   // video NACK datagrams sent (Windows NACK wiring)
   uint64_t udpNackChunkCount = 0;  // missing chunk indices they carried

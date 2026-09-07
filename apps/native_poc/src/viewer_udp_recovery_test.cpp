@@ -403,6 +403,8 @@ struct ViewerRig {
     gate.catchupLagDropUs = kCatchupLagDropUs;
     gate.denseArrivalMaxGapUs = kDenseArrivalMaxGapUsDefault;
     gate.lagTriggerStreakMin = kLagTriggerStreakMinDefault;
+    gate.recoveryRetryIntervalUs = kKeyRecoveryRetryUsDefault;
+    gate.recoveryRetryMaxIntervalUs = kKeyRecoveryRetryMaxUsDefault;
     gate.waitForKeyFrame = true;  // init_decoder: an H.264 session starts waiting for its first IDR
     ctx.picker.visible.store(false, std::memory_order_relaxed);
     ctx.control.keyframeRequests.Reset();
@@ -711,6 +713,98 @@ void scenario_nack_unanswered_falls_back_to_idr() {
   CHECK(!rig.gate.waitForKeyFrame, "not waiting for a keyframe at the end");
 }
 
+// S7: the host consumed seqs it never sent (its sender queue was cleared by an IDR) and the next AU
+// on the wire is that complete IDR. The gap is not loss and the IDR is the resync: no decoder reset
+// + IDR request may follow, or every host-answered IDR breeds the next request (the 90/90 pattern).
+void scenario_completed_idr_after_seq_gap_needs_no_request() {
+  std::printf("[S7] complete IDR behind a seq gap: no extra IDR request\n");
+  FakeHost host;
+  ViewerRig rig;
+  LossPlan plan;
+  if (!start_session(host, rig, plan)) { ++gFailures; return; }
+  const uint64_t requestsBefore = host.keyframe_requests();
+  const uint64_t keyframesBefore = host.keyframes_sent();
+  const uint32_t before = host.last_seq();
+  for (int i = 0; i < 3; ++i) {
+    pump(host, rig, 300);
+    host.SkipSeq();
+    (void)host.SendFrame(true, false, qpc_now_us());
+  }
+  pump(host, rig, 500);
+  CHECK(host.keyframes_sent() >= keyframesBefore + 3, "three unsolicited IDRs went out");
+  CHECK(host.keyframe_requests() == requestsBefore, "no keyframe request (got " + std::to_string(host.keyframe_requests() - requestsBefore) + ")");
+  CHECK(rig.maxPublishedSeq.load() > before + 60, "stream flowed (max seq " + std::to_string(rig.maxPublishedSeq.load()) + ")");
+  CHECK(!rig.gate.waitForKeyFrame, "not waiting for a keyframe");
+  CHECK(rig.gate.congestionState == ClientCongestionState::Normal, "state " + state_name(rig));
+}
+
+// S8: a whole P frame is lost, the host never answers the IDR request, and the source stops. The
+// viewer must keep asking on the clock -- not per frame, there are none -- and resume once an IDR
+// finally comes.
+void scenario_keyframe_wait_retries_on_timer_when_source_stops() {
+  std::printf("[S8] keyframe wait + source stop: timer-driven re-requests, then recovery\n");
+  FakeHost host;
+  ViewerRig rig;
+  std::atomic<uint32_t> lostP{0};
+  LossPlan plan;
+  plan.dropFirstSend = [&](uint32_t seq, uint16_t, bool key, uint16_t) {
+    if (!key && seq >= 40 && lostP.load() == 0) lostP = seq;
+    return seq == lostP.load();  // the whole frame
+  };
+  if (!start_session(host, rig, plan)) { ++gFailures; return; }
+  host.SetHonorKeyframeRequests(false);
+  CHECK(pump_until(host, rig, 3000, [&]() { return rig.gate.waitForKeyFrame; }), "the lost P frame opened a keyframe wait");
+  // Let the first (loss-driven, reason 2) request be consumed, then stop the source.
+  idle(host, rig, 50);
+  const uint64_t requestsAtStop = host.keyframe_requests();
+  const uint64_t stopUs = qpc_now_us();
+  idle(host, rig, 2600);
+  const uint64_t retries = host.keyframe_requests() - requestsAtStop;
+  CHECK(retries >= 2 && retries <= 4, "timer re-asks while nothing arrives: " + std::to_string(retries));
+  CHECK(rig.gate.waitForKeyFrame, "still waiting: nothing was sent");
+  CHECK(rig.gate.recoveryRetryCount >= 2, "gate counted the retries (" + std::to_string(rig.gate.recoveryRetryCount) + ")");
+  // The host is back: the next request is honoured and the stream resumes.
+  host.SetHonorKeyframeRequests(true);
+  const bool resumed = pump_until(host, rig, 5000, [&]() {
+    return !rig.gate.waitForKeyFrame && rig.maxPublishedSeq.load() > lostP.load() + 5;
+  });
+  CHECK(resumed, "resumed after the IDR (max seq " + std::to_string(rig.maxPublishedSeq.load()) + ")");
+  CHECK(host.keyframe_requests() <= requestsAtStop + 6, "no IDR storm (" + std::to_string(host.keyframe_requests() - requestsAtStop) + " since the stop)");
+  (void)stopUs;
+}
+
+// S9: a frozen present anchor makes dense frames read as a decode backlog -> Congested + IDR
+// request; the first recovery IDR is lost entirely. The viewer must re-ask on the clock and come
+// back through the next IDR, instead of dropping every P frame until the host's next spontaneous
+// one (the probe's 60 s / 0 re-requests).
+void scenario_congested_first_idr_lost_recovers_by_timer() {
+  std::printf("[S9] Congested, first recovery IDR lost: timer re-request, recovery\n");
+  FakeHost host;
+  ViewerRig rig;
+  std::atomic<bool> armed{false};
+  std::atomic<uint32_t> lostIdr{0};
+  LossPlan plan;
+  plan.dropFirstSend = [&](uint32_t seq, uint16_t, bool key, uint16_t) {
+    if (armed.load() && key && lostIdr.load() == 0) lostIdr = seq;
+    return seq == lostIdr.load();  // the whole IDR
+  };
+  if (!start_session(host, rig, plan)) { ++gFailures; return; }
+  const uint64_t requestsBefore = host.keyframe_requests();
+  rig.pinPresentAnchor = true;  // the renderer stops advancing the anchor: lag climbs 16.7 ms per frame
+  armed = true;
+  CHECK(pump_until(host, rig, 3000, [&]() { return rig.gate.congestionState == ClientCongestionState::Congested; }),
+        "entered Congested (state " + state_name(rig) + ")");
+  CHECK(pump_until(host, rig, 3000, [&]() { return lostIdr.load() != 0 && host.keyframe_requests() >= requestsBefore + 2; }),
+        "the lost IDR was followed by a second request on the clock (requests " + std::to_string(host.keyframe_requests() - requestsBefore) + ")");
+  rig.pinPresentAnchor = false;
+  CHECK(pump_until(host, rig, 5000, [&]() {
+          return rig.gate.congestionState == ClientCongestionState::Normal && !rig.gate.waitForKeyFrame;
+        }),
+        "back to Normal (state " + state_name(rig) + ")");
+  CHECK(host.keyframe_requests() <= requestsBefore + 6, "no IDR storm (" + std::to_string(host.keyframe_requests() - requestsBefore) + ")");
+  CHECK(rig.gate.recoveryRetryCount >= 1, "the gate's timer drove the re-ask");
+}
+
 }  // namespace
 
 int main() {
@@ -730,6 +824,9 @@ int main() {
   scenario_large_idr_tail_is_not_nacked();
   scenario_reordered_chunks();
   scenario_nack_unanswered_falls_back_to_idr();
+  scenario_completed_idr_after_seq_gap_needs_no_request();
+  scenario_keyframe_wait_retries_on_timer_when_source_stops();
+  scenario_congested_first_idr_lost_recovers_by_timer();
   MFShutdown();
   if (gFailures == 0) {
     std::printf("viewer_udp_recovery_test: PASS\n");

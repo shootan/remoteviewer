@@ -109,6 +109,20 @@ struct FrameGateState {
   uint64_t recoveringSinceUs = 0;
   uint32_t recoveringHealthyStreak = 0;
   uint64_t lastRecoveryRequestUs = 0;
+  // Time-based keyframe recovery (FrameGate::tick). The frame-driven re-asks (reason 3 every 30
+  // dropped frames, the Recovering timeout) never ran while Congested and never ran at all when no
+  // frame arrived, so a lost recovery IDR or a stalled source left the gate waiting for an IDR
+  // nobody would send (history #390 item 2: 60 s of P frames, 0 re-requests). tick() re-asks on
+  // the clock instead: recoveryRetryIntervalUs after the wait began, then doubling up to
+  // recoveryRetryMaxIntervalUs, reset when an IDR decodes. 0 = off (config, REMOTE60_NATIVE_KEY_RECOVERY_RETRY_US).
+  uint64_t recoveryRetryIntervalUs = 0;
+  uint64_t recoveryRetryMaxIntervalUs = 0;
+  uint64_t keyWaitSinceUs = 0;          // when the current wait began (0 = not waiting)
+  uint64_t recoveryNextRetryUs = 0;     // the next scheduled re-ask
+  uint64_t recoveryRetryCurrentUs = 0;  // the current backoff step
+  uint64_t recoveryRetryCount = 0;      // telemetry: timer-driven requests (reason 7)
+  uint64_t recoveryRetryEpisodes = 0;   // telemetry: waits that needed at least one retry
+  uint64_t keyWaitMaxUs = 0;            // telemetry: the longest wait for an IDR so far
 };
 
 }  // namespace remote60::native_poc::viewer

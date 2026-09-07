@@ -47,6 +47,13 @@ constexpr uint64_t kCatchupReenterMinIntervalUsDefault = 600000;  // 600ms
 constexpr uint64_t kStaleRecoveryMinIntervalUsDefault = 1000000;  // 1s
 constexpr uint64_t kCongestionRecoverMinUsDefault = 250000;  // 250ms
 constexpr uint64_t kCongestionRecoveryTimeoutUsDefault = 1500000;  // 1.5s
+// Time-based keyframe recovery (Windows recovery state machine, history #390 item 2): while the
+// gate waits for an IDR (keyframe wait or Congested) it re-asks on the clock, first after this
+// much, doubling per retry up to the max -- independent of frames arriving, so a lost recovery IDR
+// or a stalled source cannot leave the picture frozen until the host's next spontaneous IDR. The
+// KeyframeRequestState limiter still bounds the wire rate.
+constexpr uint64_t kKeyRecoveryRetryUsDefault = 500000;      // 500ms
+constexpr uint64_t kKeyRecoveryRetryMaxUsDefault = 2000000;  // 2s
 // F-18: the congestion-entry gate, previously fixed. 150 ms "dense arrival" and a streak of 3 are
 // the values the field has run on; they stay the defaults.
 constexpr uint64_t kDenseArrivalMaxGapUsDefault = 150000;  // 150ms

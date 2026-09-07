@@ -58,6 +58,8 @@ struct Rig {
     gate.catchupLagDropUs = kCatchupLagDropUs;                                // 450 ms
     gate.denseArrivalMaxGapUs = kDenseArrivalMaxGapUsDefault;                 // 150 ms
     gate.lagTriggerStreakMin = kLagTriggerStreakMinDefault;                   // 3
+    gate.recoveryRetryIntervalUs = kKeyRecoveryRetryUsDefault;                // 500 ms
+    gate.recoveryRetryMaxIntervalUs = kKeyRecoveryRetryMaxUsDefault;          // 2 s
     gate.frameIntervalUs = 16667;
     gate.waitForKeyFrame = true;  // an H.264 session starts waiting for its first IDR
   }
@@ -581,7 +583,91 @@ void test_synthetic_stamp_does_not_stale_later_real_frame() {
   CHECK(r2.sink.requests(6) == 0);
 }
 
+// The recovery timer (history #390 item 2). Before it, the probe in .claude/freeze-diagnosis-20260905
+// fed 60 s of P frames into a Congested gate and counted 0 re-requests: the Congested early return
+// bypassed the reason-3 re-ask and the Recovering timeout, and nothing ran when no frame arrived.
+void test_recovery_timer_retries_while_congested_without_idr() {
+  std::printf("[T1] recovery timer: Congested + 60 s of P frames -> re-asks on the clock (0.5 s, x2 up to 2 s), never per frame\n");
+  Rig r;
+  FrameGateInputs in{};
+  FrameGateLag lag{};
+  const uint64_t start = 1000 * kMs;
+  CHECK(r.feed(start, start, true, 0, false, &lag, &in) == FrameGateVerdict::Decode);
+  r.decoded(in);
+  // A real decoder failure enters Congested and asks for one replacement IDR (reason 4).
+  r.fg.note_decode_failure(in, lag);
+  CHECK(r.gate.congestionState == ClientCongestionState::Congested);
+  const size_t before = r.sink.keyframeReasons.size();
+  int dropped = 0;
+  for (int n = 1; n <= 3600; ++n) {
+    const uint64_t now = start + n * kFrame;
+    if (r.feed(now, now, false, start, false) == FrameGateVerdict::DropCongested) ++dropped;
+    r.fg.tick(now);  // what run_udp does after every datagram
+  }
+  CHECK(dropped == 3600);
+  const int retries = r.sink.requests(7);
+  // +0.5 s, +1.5 s, +3.5 s, then every 2 s: 3 + (60 - 3.5) / 2 = 31
+  CHECK(retries >= 28 && retries <= 33);
+  CHECK(r.sink.keyframeReasons.size() - before == static_cast<size_t>(retries));  // nothing per frame
+  CHECK(r.sink.requests(3) == 0);  // the Congested drop never reached the reason-3 path, as before
+  CHECK(r.gate.recoveryRetryCount == static_cast<uint64_t>(retries));
+  CHECK(r.gate.recoveryRetryEpisodes == 1);
+  CHECK(r.gate.recoveryRetryCurrentUs == kKeyRecoveryRetryMaxUsDefault);
+  // The IDR lands: Recovering, the timer stops, the wait bookkeeping clears.
+  const uint64_t tIdr = start + 3601 * kFrame;
+  CHECK(r.feed(tIdr, tIdr, true, tIdr - 100 * kMs, false, &lag, &in) == FrameGateVerdict::Decode);
+  r.decoded(in);
+  r.fg.tick(tIdr);
+  CHECK(r.gate.congestionState == ClientCongestionState::Recovering);
+  CHECK(r.gate.keyWaitSinceUs == 0);
+  CHECK(r.gate.keyWaitMaxUs >= 60 * 1000 * kMs);
+  for (int n = 1; n <= 200; ++n) r.fg.tick(tIdr + n * 25 * kMs);
+  CHECK(r.sink.requests(7) == retries);
+}
+
+void test_recovery_timer_without_frames_and_backoff_per_wait() {
+  std::printf("[T1] recovery timer: no frames at all -> 0.5 / 1.5 / 3.5 s re-asks; stops on the IDR; a new wait starts over\n");
+  Rig r;
+  FrameGateInputs in{};
+  const uint64_t start = 2000 * kMs;
+  CHECK(r.feed(start, start, true, 0, false, nullptr, &in) == FrameGateVerdict::Decode);
+  r.decoded(in);
+  r.fg.tick(start);
+  CHECK(r.gate.keyWaitSinceUs == 0);
+  // A lost frame: the receiver sets the wait (and asks once itself, reason 2 -- not through the gate).
+  r.gate.waitForKeyFrame = true;
+  uint64_t t = start;
+  for (; t <= start + 4000 * kMs; t += 25 * kMs) r.fg.tick(t);
+  CHECK(r.sink.requests(7) == 3);
+  CHECK(r.gate.recoveryRetryEpisodes == 1);
+  // The IDR arrives and decodes: the wait ends, no further asks.
+  CHECK(r.feed(t, t, true, 0, false, nullptr, &in) == FrameGateVerdict::Decode);
+  r.decoded(in);
+  CHECK(!r.gate.waitForKeyFrame);
+  r.fg.tick(t);
+  CHECK(r.gate.keyWaitSinceUs == 0);
+  for (uint64_t t2 = t; t2 <= t + 4000 * kMs; t2 += 25 * kMs) r.fg.tick(t2);
+  CHECK(r.sink.requests(7) == 3);
+  // A second wait backs off from 0.5 s again, not from where the last one left off.
+  const uint64_t t3 = t + 5000 * kMs;
+  r.gate.waitForKeyFrame = true;
+  r.fg.tick(t3);
+  r.fg.tick(t3 + 499 * kMs);
+  CHECK(r.sink.requests(7) == 3);
+  r.fg.tick(t3 + 500 * kMs);
+  CHECK(r.sink.requests(7) == 4);
+  CHECK(r.gate.recoveryRetryEpisodes == 2);
+  // Off switch: interval 0 never asks.
+  Rig off;
+  off.gate.recoveryRetryIntervalUs = 0;
+  off.gate.waitForKeyFrame = true;
+  for (uint64_t t4 = start; t4 <= start + 5000 * kMs; t4 += 25 * kMs) off.fg.tick(t4);
+  CHECK(off.sink.requests(7) == 0);
+}
+
 int main() {
+  test_recovery_timer_retries_while_congested_without_idr();
+  test_recovery_timer_without_frames_and_backoff_per_wait();
   test_congestion_entry_tunables();
   test_sparse_slow_source_decodes_not_stale();
   test_idle_resume_no_false_congestion();

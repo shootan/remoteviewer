@@ -71,6 +71,9 @@ void FrameGate::append_congestion_fields(std::ostream& os) {
     const uint64_t recoveryAvgUs =
         (gate.congestionRecoveryCount > 0) ? (gate.congestionRecoveryTotalUs / gate.congestionRecoveryCount) : 0;
     os << " congestionState=" << congestion_state_name(gate.congestionState)
+       << " keyRetries=" << gate.recoveryRetryCount
+       << " keyRetryEpisodes=" << gate.recoveryRetryEpisodes
+       << " keyWaitMaxUs=" << gate.keyWaitMaxUs
        << " congestionTransitions=" << gate.congestionTransitionCount
        << " congestionRecoveryCount=" << gate.congestionRecoveryCount
        << " congestionRecoveryAvgUs=" << recoveryAvgUs
@@ -468,6 +471,45 @@ void FrameGate::note_decode_empty(const FrameGateInputs& in, const FrameGateLag&
 void FrameGate::clear_empty_streak() {
   gate.decodeEmptyStreak = 0;
   gate.decodeEmptyStreakStartUs = 0;
+}
+
+void FrameGate::tick(uint64_t nowUs) {
+  const bool waiting =
+      gate.waitForKeyFrame || gate.congestionState == ClientCongestionState::Congested;
+  if (!waiting) {
+    if (gate.keyWaitSinceUs != 0) {
+      const uint64_t waitedUs = (nowUs >= gate.keyWaitSinceUs) ? (nowUs - gate.keyWaitSinceUs) : 0;
+      if (waitedUs > gate.keyWaitMaxUs) gate.keyWaitMaxUs = waitedUs;
+    }
+    gate.keyWaitSinceUs = 0;
+    gate.recoveryNextRetryUs = 0;
+    gate.recoveryRetryCurrentUs = 0;
+    return;
+  }
+  if (gate.recoveryRetryIntervalUs == 0) return;
+  if (gate.keyWaitSinceUs == 0) {
+    // The wait just began. Whoever opened it (a loss, a congestion entry, a decode failure)
+    // asked once already; the first re-ask comes one interval later.
+    gate.keyWaitSinceUs = nowUs;
+    gate.recoveryRetryCurrentUs = gate.recoveryRetryIntervalUs;
+    gate.recoveryNextRetryUs = nowUs + gate.recoveryRetryCurrentUs;
+    return;
+  }
+  if (nowUs < gate.recoveryNextRetryUs) return;
+  const bool firstRetry = (gate.recoveryRetryCurrentUs == gate.recoveryRetryIntervalUs);
+  sink.request_keyframe(7);  // recovery_timer
+  ++gate.congestionRecoveryRequestCount;
+  ++gate.recoveryRetryCount;
+  if (firstRetry) ++gate.recoveryRetryEpisodes;
+  const uint64_t waitedUs = (nowUs >= gate.keyWaitSinceUs) ? (nowUs - gate.keyWaitSinceUs) : 0;
+  const uint64_t maxUs = std::max<uint64_t>(gate.recoveryRetryIntervalUs, gate.recoveryRetryMaxIntervalUs);
+  gate.recoveryRetryCurrentUs = std::min<uint64_t>(gate.recoveryRetryCurrentUs * 2, maxUs);
+  gate.recoveryNextRetryUs = nowUs + gate.recoveryRetryCurrentUs;
+  std::cout << "[native-video-client] keyframe recovery retry count=" << gate.recoveryRetryCount
+            << " waitedUs=" << waitedUs
+            << " state=" << congestion_state_name(gate.congestionState)
+            << " waitForKey=" << (gate.waitForKeyFrame ? 1 : 0)
+            << " nextRetryUs=" << gate.recoveryRetryCurrentUs << "\n";
 }
 
 }  // namespace remote60::native_poc::viewer

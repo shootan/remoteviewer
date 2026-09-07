@@ -92,6 +92,7 @@ void VideoReceiver::run_udp() {
   uint64_t lastUdpAssemblyMalformedCount = 0;
   uint64_t lastUdpAssemblyReorderCount = 0;
   uint64_t lastUdpAssemblyKeyReqCount = 0;
+  uint64_t lastUdpAssemblyKeyResyncCount = 0;
   uint64_t lastUdpAssemblyFecRecoveredCount = 0;
   uint64_t lastUdpSimDroppedCount = 0;
   uint64_t lastUdpSimAcceptedCount = 0;
@@ -116,9 +117,24 @@ void VideoReceiver::run_udp() {
   };
   // The delivered AU's seq is not the previous one + 1: whatever sat between them is gone.
   auto note_sequence_gap = [&](const UdpH264AssemblyStepResult& r) {
-    (void)r;
     ++assemblyDropped;
     ++st.udpAssemblyDroppedCount;
+    const bool completedKey =
+        r.disposition == UdpH264AssemblyDisposition::Completed &&
+        (r.frame.header.flags & kEncodedFrameFlagKeyFrame) != 0;
+    if (completedKey) {
+      // The AU that revealed the gap is itself a complete IDR: it resyncs the decoder on its own
+      // (an IDR clears the reference set), so asking the host for ANOTHER one only buys a second
+      // ~300KB IDR -- and because the host clears its send queue when it enqueues that IDR, the
+      // answer arrives behind a fresh gap and asks again (09-05 log: 90 of 90 reason-2 requests
+      // came right after a complete keyframe). A gap here is normal host behaviour (EnqueueKey /
+      // HoldForKey consume seqs they never send), not loss. The wait flag still closes the gate
+      // until this IDR decodes; if it fails, note_decode_failure asks (reason 4). (history #390
+      // item 3.)
+      ++st.udpAssemblyKeyResyncCount;
+      gate.waitForKeyFrame = true;
+      return;
+    }
     handle_udp_discontinuity();
   };
   // Everything that used to follow a Completed disposition inline: the telemetry line, then the
@@ -183,6 +199,7 @@ void VideoReceiver::run_udp() {
         if (ctx.control.overUdp.load(std::memory_order_acquire)) ctx.control.udpControl.Tick();
         if (!drain_deliveries()) break;
         maybe_send_nack(qpc_now_us());
+        fg.tick(qpc_now_us());  // the keyframe recovery clock runs with or without frames
         continue;
       }
       break;
@@ -294,6 +311,7 @@ void VideoReceiver::run_udp() {
     if (!drain_deliveries()) break;
     // On a busy link, also nudge the NACK for any still-stuck earlier AU (round-gated inside).
     maybe_send_nack(qpc_now_us());
+    fg.tick(qpc_now_us());
 
     const uint64_t nowUs = qpc_now_us();
     if (nowUs >= udpAssemblyStatAtUs) {
@@ -303,6 +321,7 @@ void VideoReceiver::run_udp() {
       const uint64_t malformedDelta = st.udpAssemblyMalformedCount - lastUdpAssemblyMalformedCount;
       const uint64_t reorderDelta = st.udpAssemblyReorderCount - lastUdpAssemblyReorderCount;
       const uint64_t keyReqDelta = st.udpAssemblyKeyReqCount - lastUdpAssemblyKeyReqCount;
+      const uint64_t keyResyncDelta = st.udpAssemblyKeyResyncCount - lastUdpAssemblyKeyResyncCount;
       const uint64_t fecRecoveredDelta =
           st.udpAssemblyFecRecoveredCount - lastUdpAssemblyFecRecoveredCount;
       const uint64_t nackSentDelta = st.udpNackSentCount - lastUdpNackSentCount;
@@ -325,6 +344,7 @@ void VideoReceiver::run_udp() {
                 << " malformed=" << malformedDelta
                 << " reorder=" << reorderDelta
                 << " keyReq=" << keyReqDelta
+                << " keyResync=" << keyResyncDelta
                 << " fecRecovered=" << fecRecoveredDelta
                 << " simDropPm=" << simDropPermille
                 << " simDropTotal=" << simDroppedDelta
@@ -342,6 +362,7 @@ void VideoReceiver::run_udp() {
       lastUdpAssemblyMalformedCount = st.udpAssemblyMalformedCount;
       lastUdpAssemblyReorderCount = st.udpAssemblyReorderCount;
       lastUdpAssemblyKeyReqCount = st.udpAssemblyKeyReqCount;
+      lastUdpAssemblyKeyResyncCount = st.udpAssemblyKeyResyncCount;
       lastUdpAssemblyFecRecoveredCount = st.udpAssemblyFecRecoveredCount;
       lastUdpNackSentCount = st.udpNackSentCount;
       lastUdpNackChunkCount = st.udpNackChunkCount;
