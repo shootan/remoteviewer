@@ -9,3 +9,9 @@
 ## 2026-09-05 — 정책 상태
 
 - A2A 완료 구현 리뷰 금지: **철회**. 변경·검증 기록: `docs/history.md` #388.
+
+## 2026-09-07 — Agent Role Separation: Codex 계획·감독, Claude 실행
+
+- 사용자 지시("두뇌는 Codex, 손발은 Claude")를 `AGENTS.md` "Agent Role Separation" 절로 명문화. Codex = 요구사항·분석·계획·A2A 지시·진행 관리·근거 검토·보고, Claude = 파일 변경·구현·빌드·테스트·버전/설치본·기록·커밋.
+- 읽기 전용 조사와 완료 구현 리뷰는 Codex 의 감독 업무로 허용(위 철회 상태 유지). 최상위 삭제 제한·Mandatory Workflow·Scope Control 불변.
+- 상태: **적용**. 기록: `docs/history.md` #398 (A2A task t-7w636lty).
