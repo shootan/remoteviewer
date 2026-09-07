@@ -141,6 +141,22 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
         sender.dropCount.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
+      // Flush epoch fence (P11): an AU encoded from an input the host accepted before the last
+      // flush may not START on the wire after it -- the new epoch's IDR must be the first. Queued
+      // items are fenced here; an item already being chunked when the flush lands completes (the
+      // documented in-flight exception; the viewer's held-resume rule covers its stamp).
+      if (sender.inputEpochRef && item.inputEpoch != 0 &&
+          item.inputEpoch < sender.inputEpochRef->load(std::memory_order_acquire)) {
+        const uint64_t n = sender.inputEpochDropCount.fetch_add(1, std::memory_order_relaxed) + 1;
+        sender.dropCount.fetch_add(1, std::memory_order_relaxed);
+        if (n <= 5 || (n % 50) == 0) {
+          std::cout << "[native-video-host] sender dropped pre-flush AU seq=" << item.udpHdr.seq
+                    << " auEpoch=" << item.inputEpoch
+                    << " curEpoch=" << sender.inputEpochRef->load(std::memory_order_acquire)
+                    << " key=" << (item.keyFrame ? 1 : 0) << " total=" << n << "\n";
+        }
+        continue;
+      }
       if (!peerReady) {
         sender.txNoPeer.fetch_add(1, std::memory_order_relaxed);
         continue;

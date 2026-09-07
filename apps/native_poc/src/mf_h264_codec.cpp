@@ -1857,7 +1857,10 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
         // encoders that rewrite output timestamps to a private zero-based timeline.
         int64_t normalizedAuSampleTimeHns = sampleTime;
         bool auSynthetic = nextInputSynthetic_;  // FIFO empty -> this call's input (old behaviour)
-        uint64_t auEpoch = nextInputEpoch_;
+        // No FIFO entry = no provenance. The epoch is NOT dressed up as this call's: the emit
+        // gate treats 0 as unknown and fails closed (host_epoch_gate.hpp), so an output the
+        // FIFO lost track of (overflow, a desynchronised encoder) can never open the gate.
+        uint64_t auEpoch = 0;
         if (!pendingInputSampleTimesHns_.empty()) {
           normalizedAuSampleTimeHns = pendingInputSampleTimesHns_.front();
           if (!pendingInputSynthetic_.empty()) auSynthetic = pendingInputSynthetic_.front();

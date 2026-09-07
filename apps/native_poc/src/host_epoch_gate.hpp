@@ -16,6 +16,17 @@
 // on the new generation. On 2026-09-07 15:15:59 that was seq 24484: a 101-byte P of the
 // pre-switch screen 820 ms behind its send time, presented as the resume anchor; the fresh frames
 // right behind it then read as an 848 ms decode backlog (viewer Congested, IDR, burst drops).
+// The mechanism is reproduced on this PC's hardware MFT through the D3D11 NV12 surface input
+// path (host_encode_epoch_test); the field host of that day ran the BGRA buffer input path
+// (stats nv12SurfaceFrames=0), on which the same MFT answered each call with its own AU in the
+// test, so the field host's exact cause stays unconfirmed. The gate is a contract on the wire
+// order either way: what it drops can only ever be followed by the new epoch's IDR.
+//
+// Scope of the guarantee: this gate sits at the EMIT stage. An old-epoch AU already handed to
+// the sender is fenced at dequeue by EncodedSendItem::inputEpoch (host_encoded_sender.cpp); one
+// AU whose chunks were already being sent when the flush happened completes -- that in-flight AU
+// is the documented exception, and the viewer's held-resume rule (viewer_frame_gate.cpp) keeps it
+// from becoming the anchor.
 //
 // The rule (Codex review seq 1052): every input carries the flush epoch it was accepted in
 // (H264Encoder FIFO, lockstep with timestamp and synthetic). After a flush the gate waits for a
@@ -37,33 +48,50 @@
 namespace remote60::native_poc {
 
 struct EpochGate {
+  // Policy values under test, not a field latency guarantee: how long / how many AUs the gate
+  // waits for the new epoch's IDR before asking for an encoder rebuild.
   static constexpr uint64_t kAwaitMaxUs = 700000;  // > 2x the 300 ms forceKey in-flight window
   static constexpr uint32_t kAwaitMaxDropped = 12;
+  // Rebuild cap: at most kResetMaxPerWindow rebuilds per kResetWindowUs; past it the gate keeps
+  // dropping and re-forcing the key but stops rebuilding, so a wedged encoder cannot turn into
+  // an endless re-initialisation loop.
+  static constexpr uint32_t kResetMaxPerWindow = 3;
+  static constexpr uint64_t kResetWindowUs = 10'000'000;
 
   uint64_t epoch = 0;          // the epoch the gate is judging for
   bool awaitingKey = false;    // true from the flush until the first current-epoch keyframe
   uint64_t awaitSinceUs = 0;   // first AU judged in this epoch (0 = none yet)
   uint32_t awaitDropped = 0;   // AUs discarded while waiting, this epoch
+  uint64_t resetWindowStartUs = 0;
+  uint32_t resetsInWindow = 0;
   // Process-lifetime counters (stats line).
   uint64_t droppedOldEpoch = 0;
+  uint64_t droppedUnknownEpoch = 0;  // untagged (0) or future epoch: fail closed
   uint64_t droppedAwaitingKey = 0;
   uint64_t droppedBytes = 0;
   uint64_t keysAccepted = 0;
   uint64_t resetsRequested = 0;
+  uint64_t resetsSuppressed = 0;
   uint64_t epochsSeen = 0;
 };
 
 enum class EpochVerdict : uint8_t {
-  Emit = 0,           // current epoch, gate open (or an untagged AU): send as usual
-  DropOldEpoch = 1,   // pre-flush input: discard, count
+  Emit = 0,             // current epoch, gate open: send as usual
+  DropOldEpoch = 1,     // pre-flush input: discard, count
   DropAwaitingKey = 2,  // current epoch but not a keyframe while the gate is closed: discard; caller re-forces the key
-  AcceptKey = 3,      // the new epoch's first keyframe: send, gate opens
-  ResetEncoder = 4,   // the wait exceeded its bound: caller rebuilds the encoder and forces a key
+  AcceptKey = 3,        // the new epoch's first keyframe: send, gate opens
+  ResetEncoder = 4,     // the wait exceeded its bound: caller rebuilds the encoder and forces a key
+  DropUnknownEpoch = 5, // no FIFO provenance (0) or an epoch the host has not reached: never sent
 };
 
 /**
  * Judge one AU. `epochNow` is CaptureState::inputEpoch at emission; `auEpoch` the AU's
- * H264AccessUnit::inputEpoch (0 = untagged -> never held back); `nowUs` any monotonic clock.
+ * H264AccessUnit::inputEpoch; `nowUs` any monotonic clock.
+ *
+ * Fail closed: an AU whose epoch is unknown (0: the encoder FIFO had no entry for it -- an
+ * overflow or a desynchronised output) or ahead of the host's own epoch (a tag the host never
+ * issued) is never sent and never opens the gate. A valid current-epoch keyframe is accepted
+ * before any bound is checked: the bound only applies to what is being dropped.
  */
 inline EpochVerdict epoch_gate_judge(EpochGate& g, uint64_t epochNow, uint64_t auEpoch, bool auKey,
                                      size_t auBytes, uint64_t nowUs) {
@@ -75,29 +103,44 @@ inline EpochVerdict epoch_gate_judge(EpochGate& g, uint64_t epochNow, uint64_t a
     g.awaitDropped = 0;
     ++g.epochsSeen;
   }
-  if (auEpoch == 0) return EpochVerdict::Emit;
-  if (auEpoch < epochNow) {
-    ++g.droppedOldEpoch;
-    g.droppedBytes += auBytes;
-    if (g.awaitingKey) ++g.awaitDropped;
-    return (g.awaitingKey && (g.awaitDropped >= EpochGate::kAwaitMaxDropped || nowUs >= g.awaitSinceUs + EpochGate::kAwaitMaxUs))
-               ? (++g.resetsRequested, EpochVerdict::ResetEncoder)
-               : EpochVerdict::DropOldEpoch;
+  if (auEpoch == epochNow) {
+    if (!g.awaitingKey) return EpochVerdict::Emit;
+    if (auKey) {
+      g.awaitingKey = false;
+      ++g.keysAccepted;
+      return EpochVerdict::AcceptKey;
+    }
   }
-  if (!g.awaitingKey) return EpochVerdict::Emit;
-  if (auKey) {
-    g.awaitingKey = false;
-    ++g.keysAccepted;
-    return EpochVerdict::AcceptKey;
-  }
-  ++g.droppedAwaitingKey;
-  g.droppedBytes += auBytes;
-  ++g.awaitDropped;
-  if (g.awaitDropped >= EpochGate::kAwaitMaxDropped || nowUs >= g.awaitSinceUs + EpochGate::kAwaitMaxUs) {
+  // Everything below is a drop; which kind, and whether the wait has run out.
+  auto bound_exceeded = [&]() {
+    return g.awaitingKey &&
+           (g.awaitDropped >= EpochGate::kAwaitMaxDropped || nowUs >= g.awaitSinceUs + EpochGate::kAwaitMaxUs);
+  };
+  auto request_reset = [&]() -> EpochVerdict {
+    if (g.resetWindowStartUs == 0 || nowUs >= g.resetWindowStartUs + EpochGate::kResetWindowUs) {
+      g.resetWindowStartUs = nowUs;
+      g.resetsInWindow = 0;
+    }
+    if (g.resetsInWindow >= EpochGate::kResetMaxPerWindow) {
+      ++g.resetsSuppressed;
+      return EpochVerdict::DropAwaitingKey;  // keep dropping + re-forcing, no more rebuilds this window
+    }
+    ++g.resetsInWindow;
     ++g.resetsRequested;
     return EpochVerdict::ResetEncoder;
+  };
+  g.droppedBytes += auBytes;
+  if (g.awaitingKey) ++g.awaitDropped;
+  if (auEpoch == 0 || auEpoch > epochNow) {
+    ++g.droppedUnknownEpoch;
+    return bound_exceeded() ? request_reset() : EpochVerdict::DropUnknownEpoch;
   }
-  return EpochVerdict::DropAwaitingKey;
+  if (auEpoch < epochNow) {
+    ++g.droppedOldEpoch;
+    return bound_exceeded() ? request_reset() : EpochVerdict::DropOldEpoch;
+  }
+  ++g.droppedAwaitingKey;  // current epoch, not a key, gate closed
+  return bound_exceeded() ? request_reset() : EpochVerdict::DropAwaitingKey;
 }
 
 /** After the caller rebuilt the encoder: the wait restarts with a fresh bound. */
@@ -114,6 +157,7 @@ inline const char* epoch_verdict_name(EpochVerdict v) {
     case EpochVerdict::DropAwaitingKey: return "drop-awaiting-key";
     case EpochVerdict::AcceptKey: return "accept-key";
     case EpochVerdict::ResetEncoder: return "reset-encoder";
+    case EpochVerdict::DropUnknownEpoch: return "drop-unknown-epoch";
   }
   return "?";
 }

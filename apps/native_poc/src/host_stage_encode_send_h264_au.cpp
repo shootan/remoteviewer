@@ -167,6 +167,12 @@ AuFlow encode_send_h264_emit_au(HostContext& hx, TickContext& tc, H264AuBatch& b
                   << " auCaptureUs=" << gateStampUs << " holdUs=" << gateHoldUs << " key=" << (au.keyFrame ? 1 : 0)
                   << " bytes=" << au.bytes.size() << "\n";
         return AuFlow::Continue;
+      case EpochVerdict::DropUnknownEpoch:
+        // No FIFO provenance (0) or an epoch this host never issued: fail closed, never on the wire.
+        std::cout << "[native-video-host] epoch-gate dropped-unknown auEpoch=" << au.inputEpoch << " curEpoch=" << inputEpochNow
+                  << " auCaptureUs=" << gateStampUs << " key=" << (au.keyFrame ? 1 : 0)
+                  << " total=" << encoder.epochGate.droppedUnknownEpoch << "\n";
+        return AuFlow::Continue;
       case EpochVerdict::DropAwaitingKey:
         // The forced IDR did not come (ignored or delayed): ask again; this P would reference a
         // chain the viewer will never have.
@@ -366,6 +372,7 @@ if (transport == VideoTransport::Tcp) {
       // dequeue. This is also how the static bootstrap IDR gets tagged for the new epoch --
       // it flows through this same enqueue path and needs no special case.
       item.mediaEpoch = sender.mediaSessionEpoch.load(std::memory_order_acquire);
+      item.inputEpoch = au.inputEpoch;  // sender-side fence for AUs queued before a flush (P11)
       item.enqueueUs = qpc_now_us();  // AU handed to sender; sender derives queueWaitUs
       switch (decide_sender_queue_action(item.keyFrame, sender.waitingForKey, senderBacklogged,
                                          sender.queue.size(), kSenderQueueMaxFrames)) {

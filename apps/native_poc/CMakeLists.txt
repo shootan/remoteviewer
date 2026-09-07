@@ -507,6 +507,31 @@ add_executable(remote60_host_sender_queue_policy_test
 )
 target_include_directories(remote60_host_sender_queue_policy_test PRIVATE src)
 
+# P11 sender boundary on the real sender thread over loopback UDP: old-epoch AUs queued when the
+# flush lands never start on the wire, an AU already being chunked completes (the documented
+# exception), the new epoch's IDR is the next AU, and the fence is the epoch, not the generation.
+add_executable(remote60_host_sender_epoch_test
+  src/host_encoded_sender.cpp
+  src/host_net_io.cpp
+  src/directory_client.cpp
+  src/host_sender_epoch_test.cpp
+)
+target_include_directories(remote60_host_sender_epoch_test PRIVATE src)
+target_link_libraries(remote60_host_sender_epoch_test PRIVATE
+  capture
+  common
+  ws2_32
+  d3d11
+  mfplat
+  mf
+  mfuuid
+  wmcodecdspuuid
+  ole32
+  runtimeobject
+  windowsapp
+  advapi32
+)
+
 add_executable(remote60_host_backend_policy_test
   src/host_backend_policy_test.cpp
 )

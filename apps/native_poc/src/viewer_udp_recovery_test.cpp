@@ -167,6 +167,7 @@ class FakeHost {
     for (auto& au : units) {
       switch (epoch_gate_judge(gate_, epoch_, au.inputEpoch, au.keyFrame, au.bytes.size(), qpc_now_us())) {
         case EpochVerdict::DropOldEpoch: ++gateDroppedOld_; continue;
+        case EpochVerdict::DropUnknownEpoch: ++gateDroppedUnknown_; continue;
         case EpochVerdict::DropAwaitingKey: ++gateDroppedNonKey_; forceKeyPending_ = true; continue;
         case EpochVerdict::ResetEncoder: ++gateResets_; forceKeyPending_ = true; continue;
         case EpochVerdict::AcceptKey: ++gateKeysAccepted_; break;
@@ -418,6 +419,7 @@ class FakeHost {
   bool flushPending_ = false;
   bool stampFromAu_ = false;
   uint64_t gateDroppedOld_ = 0;
+  uint64_t gateDroppedUnknown_ = 0;
   uint64_t gateDroppedNonKey_ = 0;
   uint64_t gateKeysAccepted_ = 0;
   uint64_t gateResets_ = 0;

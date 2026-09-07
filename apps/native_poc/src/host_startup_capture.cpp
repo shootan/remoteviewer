@@ -329,6 +329,7 @@ int startup_start_capture(HostContext& hx) {
   // stale-hide timeout does not blank a stationary cursor. Unreliable by design; no resend.
 
 
+  sender.inputEpochRef = &capture.inputEpoch;  // P11: fence queued pre-flush AUs at dequeue
   sender.StartThread(transport, useH264, args, clientSession, hx.mailbox);
 
 

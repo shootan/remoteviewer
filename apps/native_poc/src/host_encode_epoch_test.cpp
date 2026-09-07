@@ -116,30 +116,67 @@ struct SurfaceRig {
 
 SurfaceRig gSurface;
 
+// The three ways the host feeds the MFT. The 2026-09-07 field host ran the BGRA buffer path
+// (its stats: nv12SurfaceFrames=0, nv12Converted=0), so [2] is run on every path this machine
+// offers and reports on which of them the pre-flush AU surfaces after the flush.
+enum class InputPath { Surface, Bgra, Nv12Cpu };
+InputPath gPath = InputPath::Nv12Cpu;
+
+const char* path_name() {
+  switch (gPath) {
+    case InputPath::Surface: return "surface(D3D11 NV12)";
+    case InputPath::Bgra: return "bgra-buffer";
+    case InputPath::Nv12Cpu: return "nv12-buffer";
+  }
+  return "?";
+}
+
+std::vector<uint8_t> picture_bgra(uint32_t index) {
+  const std::vector<uint8_t> nv12 = picture(index);
+  std::vector<uint8_t> bgra(static_cast<size_t>(kW) * kH * 4);
+  for (uint32_t row = 0; row < kH; ++row) {
+    for (uint32_t x = 0; x < kW; ++x) {
+      const uint8_t v = nv12[row * kW + x];
+      uint8_t* p = &bgra[(static_cast<size_t>(row) * kW + x) * 4];
+      p[0] = v; p[1] = v; p[2] = v; p[3] = 255;
+    }
+  }
+  return bgra;
+}
+
 std::vector<H264AccessUnit> encode(H264Encoder& enc, const Input& in) {
   std::vector<H264AccessUnit> units;
   enc.set_next_input_synthetic(in.synthetic);
   enc.set_next_input_epoch(in.epoch);
-  const std::vector<uint8_t> nv12 = picture(in.index);
   const int64_t tHns = static_cast<int64_t>(in.tUs) * kHnsPerUs;
-  const bool okEncode = gSurface.ok ? enc.encode_frame_surface(gSurface.Fill(nv12), in.key, tHns, &units)
-                                    : enc.encode_frame(nv12, in.key, tHns, &units);
+  bool okEncode = false;
+  switch (gPath) {
+    case InputPath::Surface:
+      okEncode = enc.encode_frame_surface(gSurface.Fill(picture(in.index)), in.key, tHns, &units);
+      break;
+    case InputPath::Bgra: {
+      const std::vector<uint8_t> bgra = picture_bgra(in.index);
+      okEncode = enc.encode_frame_bgra(bgra.data(), kW, kH, kW * 4, in.key, tHns, &units);
+      break;
+    }
+    case InputPath::Nv12Cpu:
+      okEncode = enc.encode_frame(picture(in.index), in.key, tHns, &units);
+      break;
+  }
   if (!okEncode) {
-    std::printf("  encode failed (%s path)\n", gSurface.ok ? "surface" : "cpu");
+    std::printf("  encode failed (%s path)\n", path_name());
     ++gFailures;
   }
   return units;
 }
 
 bool init(H264Encoder& enc) {
-  if (gSurface.ok) (void)enc.set_d3d11_device(gSurface.device.Get());
+  if (gPath == InputPath::Surface) (void)enc.set_d3d11_device(gSurface.device.Get());
   if (enc.initialize(kW, kH, 60, 2000000, 600)) return true;
   std::printf("  encoder init failed\n");
   ++gFailures;
   return false;
 }
-
-const char* path_name() { return gSurface.ok ? "surface" : "cpu"; }
 
 // [1]
 void test_epoch_rides_the_fifo() {
@@ -269,8 +306,23 @@ void test_gate_rules_on_fabricated_aus() {
   CHECK(judge(4, au(3, true)) == EpochVerdict::DropOldEpoch);
   CHECK(judge(4, au(4, true)) == EpochVerdict::AcceptKey);
   CHECK(g.epochsSeen == 3);
-  // Untagged AUs (epoch 0) are never held back.
-  CHECK(judge(4, au(0, false)) == EpochVerdict::Emit);
+  // Fail closed: no provenance (0) and a future epoch are never sent and never open the gate.
+  CHECK(judge(4, au(0, false)) == EpochVerdict::DropUnknownEpoch);
+  CHECK(judge(4, au(0, true)) == EpochVerdict::DropUnknownEpoch);
+  CHECK(judge(4, au(9, true)) == EpochVerdict::DropUnknownEpoch);
+  CHECK(!g.awaitingKey && g.droppedUnknownEpoch == 3);
+  CHECK(judge(4, au(4, false)) == EpochVerdict::Emit);
+  {
+    // ...and while the gate is closed (epoch 5 flush), an unknown/future key does not open it.
+    EpochGate h;
+    uint64_t t2 = 5000000;
+    auto j = [&](uint64_t e, const H264AccessUnit& a) { t2 += 16667; return epoch_gate_judge(h, e, a.inputEpoch, a.keyFrame, a.bytes.size(), t2); };
+    CHECK(j(5, au(0, true)) == EpochVerdict::DropUnknownEpoch);
+    CHECK(j(5, au(6, true)) == EpochVerdict::DropUnknownEpoch);
+    CHECK(h.awaitingKey);
+    CHECK(j(5, au(5, true)) == EpochVerdict::AcceptKey);
+    CHECK(!h.awaitingKey);
+  }
   // Bound by count: epoch 5, the IDR never comes -> after kAwaitMaxDropped drops, reset.
   EpochVerdict v = EpochVerdict::Emit;
   uint32_t drops = 0;
@@ -289,6 +341,35 @@ void test_gate_rules_on_fabricated_aus() {
   CHECK(judge(6, au(5, false)) == EpochVerdict::DropOldEpoch);
   CHECK(judge(6, au(5, false), 800000) == EpochVerdict::ResetEncoder);
   CHECK(g.resetsRequested == 2);
+  // A valid current-epoch IDR is accepted even when the wait has long run out.
+  epoch_gate_note_reset(g, t);
+  CHECK(judge(6, au(6, true), 5000000) == EpochVerdict::AcceptKey);
+  // Rebuild cap: past kResetMaxPerWindow rebuilds within kResetWindowUs the gate keeps dropping
+  // and re-forcing but asks for no more rebuilds (no endless re-initialisation).
+  {
+    EpochGate c;
+    uint64_t t3 = 100000000;
+    auto j = [&](uint64_t e, const H264AccessUnit& a, uint64_t dt) { t3 += dt; return epoch_gate_judge(c, e, a.inputEpoch, a.keyFrame, a.bytes.size(), t3); };
+    CHECK(j(1, au(1, true), 0) == EpochVerdict::AcceptKey);
+    uint32_t resets = 0, suppressed = 0;
+    for (int round = 0; round < 5; ++round) {
+      EpochVerdict v = EpochVerdict::Emit;
+      for (uint32_t i = 0; i < EpochGate::kAwaitMaxDropped + 1 && v != EpochVerdict::ResetEncoder; ++i) {
+        v = j(2, au(2, false), 1000);
+      }
+      if (v == EpochVerdict::ResetEncoder) { ++resets; epoch_gate_note_reset(c, t3); }
+      else { ++suppressed; c.awaitDropped = 0; }  // the stage keeps re-forcing; model its next wait
+    }
+    CHECK(resets == EpochGate::kResetMaxPerWindow);
+    CHECK(suppressed == 5 - EpochGate::kResetMaxPerWindow);
+    CHECK(c.resetsSuppressed >= 1);
+    // The window passes: a rebuild is allowed again.
+    EpochVerdict v = EpochVerdict::Emit;
+    for (uint32_t i = 0; i < EpochGate::kAwaitMaxDropped + 1 && v != EpochVerdict::ResetEncoder; ++i) {
+      v = j(2, au(2, false), i == 0 ? EpochGate::kResetWindowUs : 1000);
+    }
+    CHECK(v == EpochVerdict::ResetEncoder);
+  }
 }
 
 // [3]
@@ -344,11 +425,17 @@ int main() {
     std::printf("host_encode_epoch_test: MFStartup failed\n");
     return 2;
   }
-  if (!gSurface.Init()) {
-    std::printf("note: no D3D11 hardware device / NV12 texture; falling back to the CPU input path\n");
-  }
+  const bool surface = gSurface.Init();
+  if (!surface) std::printf("note: no D3D11 hardware device / NV12 texture; the surface path is skipped\n");
+  gPath = surface ? InputPath::Surface : InputPath::Bgra;
   test_epoch_rides_the_fifo();
-  test_pre_flush_au_reproduced_then_gated();
+  // [2] on every input path: the field host's BGRA buffer path first, then the others.
+  for (const InputPath p : {InputPath::Bgra, InputPath::Nv12Cpu, InputPath::Surface}) {
+    if (p == InputPath::Surface && !surface) continue;
+    gPath = p;
+    test_pre_flush_au_reproduced_then_gated();
+  }
+  gPath = surface ? InputPath::Surface : InputPath::Bgra;
   test_gate_rules_on_fabricated_aus();
   test_hold_observed_with_and_without_kick();
   MFShutdown();

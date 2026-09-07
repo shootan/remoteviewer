@@ -47,6 +47,11 @@ struct EncodedSendItem {
   // encoded for the previous client. The sender drops any dequeued item whose mediaEpoch no
   // longer matches the current one (see mediaSessionEpoch).
   uint64_t mediaEpoch = 0;
+  // Flush epoch of the input this AU was encoded from (H264AccessUnit::inputEpoch, P11). The
+  // sender drops a dequeued item whose epoch is behind CaptureState::inputEpoch: an AU queued
+  // before a flush must not start on the wire after it (host_epoch_gate.hpp states the scope --
+  // one AU already being chunked when the flush happens completes). 0 = untagged (raw path).
+  uint64_t inputEpoch = 0;
 };
 
 // Encoded-frame sender (Phase 1-2 state struct). The encode/main thread enqueues AUs; the sender
@@ -128,6 +133,10 @@ struct SenderState {
   bool waitingForKey = false;  // deltas held back until the requested keyframe passes
   // Session media barrier: bumped (under mu) by the rollover transaction; starts at 1 like clientSession.epoch.
   std::atomic<uint64_t> mediaSessionEpoch{1};
+  // The host's flush epoch (CaptureState::inputEpoch), read by the sender thread at dequeue to
+  // fence queued pre-flush AUs (P11). Set once at startup; nullptr = no fencing (tests / raw).
+  const std::atomic<uint64_t>* inputEpochRef = nullptr;
+  std::atomic<uint64_t> inputEpochDropCount{0};
   std::atomic<bool> stop{false};
   std::atomic<bool> sendFailed{false};
   // requestKey / recoveryPending used to live here: two flags for "the stream needs an IDR",
