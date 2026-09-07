@@ -8632,3 +8632,19 @@ Next action
   - (조건 5) `viewer_udp_session.hpp`(신규): `viewer_udp_hello_options()`/`viewer_apply_udp_hello_ack()`/`viewer_arm_udp_recv_timeout()` + `kVideoNackEnabledDefault` — `connect_media_socket` 과 통합테스트 rig 가 같은 함수를 호출. 가짜 호스트가 실제 Hello 의 `kUdpFeatureVideoNack` 비트를 관측해 S1/S2 에서 assertion(제품 기본값 회귀 시 실패). 구버전 peer(S2)는 NACK/hold 꺼진 경로 유지.
   - (조건 6) history #392 및 크로스체크 문서의 11:20 문구를 "이 결함으로 설명할 근거 없음 — 원인 미확정" 으로 정정.
 - 검증: `remote60_native_video_client_shared_core_test` PASS(hold/NACK 신규 케이스 포함), `remote60_viewer_frame_gate_test` PASS(유예·유예상한 케이스 포함), `remote60_viewer_liveness_test` PASS(L1~L10 + J1 bounded join), `remote60_viewer_udp_recovery_test` **12/12 PASS**(S11 provenance, S12 손상 IDR 무폭주 포함), GNLinkViewer·udp_control_e2e_test 빌드 OK. 실기 미실행(RDP Active).
+
+### 397) 2026-09-07 Windows 뷰어 정지·지연 복구 작업 마감 → 0.2.100 (설치본 생성, 실기 미검증)
+- 목표: 복구 작업 1~5단계(#392~#396)를 한 설치본으로 묶는다. 호스트 소스는 이번 작업에서 변경하지 않았다(0.2.99 호스트와 와이어 호환: NACK 은 호스트가 이미 광고·서비스 중이었고 Windows 뷰어만 요청하지 않았던 것).
+- 변경 파일: `product_version.hpp` 0.2.99→0.2.100, `docs/history.md`, `docs/구현계획.md`.
+- 검증: 전체 Release 빌드 OK(GNLinkStream/GNLinkViewer/GNLinkClient/GNLinkHost/GNLinkSetup 포함, exit 0). 테스트 24종 exit 0: shared_core / viewer_frame_gate / viewer_liveness / viewer_selection_gate / viewer_picker_gesture / viewer_layout / udp_fec_interleave / udp_control_channel / video_playout_clock / host_kick / host_frame_gate / host_sender_queue_policy / host_abr / capture_cadence_gate / dxgi_output_selection / capture_readback / mf_h264_codec / input_macro / encode_resolution_ladder / host_backend_policy / connect_candidates / bind_port_candidates / punch_any / **viewer_udp_recovery 12/12**. 설치본 `dist/GNLinkSetup-0.2.100.exe`(3,409,920 bytes) — 임베드 버전 확인: GNLinkHost/GNLinkClient/GNLinkSetup 에 0.2.100, 0.2.99 잔존 0(뷰어는 원래 버전 문자열 미포함). 미실행: gdi_capture_process_test(RDP 에서 물리적으로 FAIL 하는 테스트), udp_control_e2e_test·viewer_split_e2e.sh(실제 호스트 필요·캡처 의존).
+- 실기 수행 여부: **미수행.** 작업 내내 `qwinsta` 가 `rdp-tcp#0 Active`(RDP 접속 중)라 CLAUDE.md 규칙에 따라 GNLinkStream+GNLinkViewer e2e(캡처 의존)와 호스트 UAC A/B(100/0·8/0·8/2000)는 실행하지 않았다. 판정에 쓴 것은 캡처와 무관한 단위·통합테스트뿐이다. 설치본 생성과 현장 설치 후 검증은 별개다.
+- 검증 완료 / 미검증 구분:
+  - 완료(자동 테스트): Windows 실제 수신 경로의 NACK 협상·송신·hold 배달, P/IDR 청크 손실·큰 IDR tail·재정렬·NACK 무응답·구버전 peer·seq gap 완성 IDR·source 정지·Congested+첫 IDR 손실·synthetic→real burst·디코더 provenance·손상 IDR 무폭주, 복구 타이머·유예 상한, liveness 판정·bounded join.
+  - 미검증(실기 필요): 실제 호스트·네트워크에서의 NACK 효과(assembly-discontinuity↓·IDR 비율↓), UAC 뒤 readback 지연 A/B, 11:20 유형 정지의 최초 방아쇠, dead-session 종료·bounded termination 의 실제 hang 상황 동작, 셸 복귀 UX.
+- 남은 미확정/위험:
+  - 11:20 장기 정지의 최초 방아쇠(recv 스레드 정지 vs UDP 전달 중단)는 미확정. 0.2.100 의 `[liveness]` 로그가 다음 재현에서 둘을 가른다. dead-session 종료·bounded termination 은 제한된 종료이지 복구가 아니다.
+  - 호스트 UAC/readback 지연 원인 미확정(0.2.98/99 계측 그대로, 보호 OFF·디바이스 분리 미착수).
+  - in-order hold 는 손실 시에만 최대 120ms 지연을 더한다(무손실 시 0). 상한·grace 는 env 로 조정 가능.
+  - 디코더가 실패를 보고하지 않는 손상 완성 IDR 은 감지 불가(S12 관찰). 과거의 중복 요청이 우연히 덮던 경우.
+  - Android(`ClientSessionController`)는 공용 스케줄러로 바뀌었을 뿐 동작 동일(hold 미사용); 완성 IDR 중복 요청은 그 경로에도 남아 있다(별도 항목).
+  - 실기 판정 기준(설치 후): `udp hello ack … nackNegotiated=1`, 손실 구간에서 `video-nack`/`nackSent>0` 와 `keyReq` 감소, `keyResync>0` 이 reason=2 요청 없이 나타남, 정적→활동 전환에서 `reason=decode_queue` 진입 소멸, `keyRetries` 가 폭주 없이 소수, 정지 시 `[liveness]` 라인으로 stage 구분, 제어 peer-lost 뒤 5s 내 `session-dead` 로그와 셸 복귀.
