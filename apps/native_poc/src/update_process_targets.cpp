@@ -32,6 +32,10 @@ const std::vector<std::wstring>& product_image_names() {
   static const std::vector<std::wstring> names = {
       L"GNLinkHost.exe",   L"GNLinkStream.exe", L"GNLinkCapture.exe",
       L"GNLinkInputService.exe", L"GNLinkClient.exe", L"GNLinkViewer.exe",
+      // The installer counts too, now that it is a member of the update package. If one is
+      // running, an uninstall may be in progress -- replacing its binary underneath that is worse
+      // than not updating, and the identity check means a stale PID cannot be mistaken for it.
+      L"GNLinkSetup.exe",
   };
   return names;
 }

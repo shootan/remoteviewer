@@ -9176,3 +9176,26 @@ Next action
 - 변경 파일: `apps/native_poc/src/payload_name.hpp`·`payload_name.cpp`·`payload_name_test.cpp`(신규) · `src/update_effects.hpp`·`update_effects.cpp` · `apps/native_poc/CMakeLists.txt` · `docs/history.md` · `docs/구현계획.md`.
 - 버전 인상·설치본 생성·설치·라이브 조작·서버 배포·push 없음.
 - 상태: 검증용 검사 대기. **전체 완료 아님.**
+
+### 443) 2026-09-08 업데이트 step4-6 — 패키지 계약 ① 본체: Setup 을 패키지 구성원으로, 버전 일관성, 자기 교체 금지 (Codex 조건 3·4·5·6·7)
+- 배경: 조사 5(구버전 `GNLinkSetup.exe` 가 유지보수 바이너리로 영구히 남는 문제)의 결정이 **①(새 Setup 을 서명 검증된 패키지의 구성원으로)** 으로 확정됐다. **②(별도 사후 복사)는 롤백에 참여하지 않아 "새 언인스톨러 + 구 바이너리" 를 남길 수 있어 현 상태보다 나쁘고**, **③(매니페스트 기반 uninstall)은 이미 설치된 구 Setup 이 매니페스트를 읽지 않아 당면 문제를 못 고친다** — ③은 원장 후속 항목으로만 남긴다. 조건 2(payload 이름 검증)는 #442 에서 먼저 처리했다.
+- **핵심 구분(검증용 지적)**: `kPayload` 는 **설치기의 임베드 리소스 목록**이라 자기를 넣을 수 없지만, **업데이터의 `payloadNames` 는 다운로드한 패키지에서 읽는 별개 목록**이라 그 제약이 없다.
+- **조건 3 — 완전한 구성원**: `GNLinkSetup.exe` 가 제품 파일과 **동일한 staging·백업·교체·롤백 대상**이 된다. 별도 사후 복사나 실행 우회는 없다. 회귀에서 **교체 후 `GNLinkSetup.exe` 도 새 바이트**임을 단정한다.
+- **조건 4 — 버전 일관성**: `file_contains_utf16_version()` 신설. 설치기에 VERSIONINFO 리소스가 없으므로(확인함) **프로젝트가 이미 쓰는 방식**(UTF-16 문자열 검사, history #426)을 따른다. `VerifyDownload` 가 해시 검사 뒤에 ① staged 아티팩트가 기대 버전 문자열을 담는지 ② manifest 의 version 이 기대값과 같은지를 확인하고, 어긋나면 진행하지 않는다.
+  - **한계를 코드 주석에 명시했다**: 문자열을 찾았다는 것은 그 바이너리가 **그 버전을 언급한다**는 것이지 **그 버전이라는 증명이 아니다**(한 바이너리에 여러 버전 문자열이 있을 수 있다). 이것은 **일치해야 할 두 출처 사이의 정합성 검사**이고, 어떤 바이트가 도착했는지를 실제로 고정하는 것은 manifest 의 해시다.
+- **조건 6 — 업데이터는 자기를 교체하지 않는다**: `updaterImagePath` 를 설정에 추가하고 `validate()` 가 ① 자기 이미지 이름이 `payloadNames` 에 있는지 ② 자기 파일이 `installDir` 안에 있는지를 **검사한다**. 설계 3.2 가 업데이터를 설치 경로 밖에 두지만 **"설계상 그렇다" 는 보장이 아니다** — 잘못된 설정이 그대로 걸어 들어갈 수 있으므로 믿지 않고 확인한다.
+- **조건 7 — 기존 Setup 실행 중**: `product_image_names()` 에 `GNLinkSetup.exe` 를 추가했다. 실행 중이면 **언인스톨이 진행 중일 수 있고**, 그 밑에서 바이너리를 갈아 끼우는 것은 업데이트를 안 하는 것보다 나쁘다. 이름은 후보를 찾는 수단일 뿐이고 실제 판정은 기존 `ProcessTarget` 신원(경로+생성시각+핸들)이 한다.
+- **조건 5 — 회귀 3종 추가**(전부 실제 OS 동작):
+  - **Setup 해시 불일치** → 검증 거부, **구 Setup·구 제품 파일 모두 무손상**.
+  - **Setup 잠김**(공유 0 으로 실제 잠금) → 교체 실패, **제품 파일이 신버전으로 남지 않고**, 백업 잔재 없음, 잠긴 Setup 도 구버전 그대로.
+  - **교체 후 후속 실패**(`registerInstall` 실패) → `RolledBack`, **롤백이 제품 파일과 구 Setup 을 함께 복원**하고 백업 잔재 없음.
+- 검증 — **`qwinsta`: `console` 만 Active, `rdp-tcp` 는 `Listen` → RDP 미접속.**
+  - `remote60_update_effects_test` **126 checks / 0 failed**(#442 의 98 → 126), exit 0.
+  - 업데이트 **8종 합계 526 checks / 0 failed**, 전부 exit 0. `remote60_installer` 재빌드 exit 0.
+  - **라이브 `GNLinkHost`(5156)·`GNLinkInputService`(10820)·`GNLinkStream`(19384) PID 불변.**
+- **조건 1·9 표현 준수**: 이 문서와 커밋 메시지에 **"자가 치유" 를 쓰지 않았다.** ①이 하는 일은 **"유지보수 코드가 현재 버전으로 갱신된다"** 까지이고, **과거에 제거·개명된 파일이나 구 서비스 잔재를 자동으로 정리하지 않는다.** 정리가 필요하면 명시적 설치 소유권과 롤백 계획 안에서만 하며 **범용 폴더 청소는 금지**다. 다중 파일 교체도 **"staging + 복원 가능한 교체"** 로만 기술하고 OS 전체 원자 트랜잭션이라 부르지 않는다. 조건 8(폴더명·서비스명 변경)은 범위 밖이라 손대지 않았다.
+- **불가피한 한계(명시)**: ①을 해도 **첫 업데이트가 도달하기 전까지는 현재 설치된 0.2.104 의 Setup 이 언인스톨을 지배한다.** 그 바이너리는 자기 컴파일 시점 상수(payload 목록·서비스명·폴더명·바로가기명·키 경로)에 묶여 있고 바꿀 방법이 없다.
+- 미착수·미검증: **다중 파일 패키지 형식이 아직 없다** — 현재 staged 아티팩트는 파일 하나이고 `Swap()` 은 그것을 각 payload 이름으로 복사한다(테스트용 단순화). 실제 패키지 포맷과 그 추출은 미구현이다. 실제 서비스 등록·방화벽·시작메뉴 0회 · 실 HTTPS 왕복 0회 · 관리자 권한 실증 없음 · `enumerate_product_processes`/`request_process_stop` 실행 0회 · 업데이터 `RegisterInstall` 배선 · `Relaunch`/`HealthCheck` production · 클라 셸 시작 시 비동기 확인.
+- 변경 파일: `apps/native_poc/src/update_effects.hpp`·`update_effects.cpp`·`update_effects_test.cpp`·`update_process_targets.cpp` · `docs/history.md` · `docs/구현계획.md`.
+- 버전 인상·설치본 생성·설치·라이브 조작·서버 배포·push 없음.
+- 상태: 검증용 검사 대기. **전체 완료 아님.**

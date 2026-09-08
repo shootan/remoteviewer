@@ -124,6 +124,23 @@ struct UpdateEffectsConfig {
   /** Observes that the new build works (design 3.6). */
   std::function<bool()> healthCheck;
 
+  /**
+   * The version the manifest claims. Checked against what the staged artifact carries.
+   *
+   * Empty disables the check, which is what the older tests do; production sets it from a
+   * verified manifest.
+   */
+  std::string expectedVersion;
+
+  /**
+   * Full path of the running updater, so it can refuse to replace itself.
+   *
+   * The updater lives outside installDir by design (3.2), but "by design" is not a guarantee --
+   * a mistaken config could name its own image among the payload and the swap would move the
+   * running executable aside mid-update. Supplying this makes validate() check rather than trust.
+   */
+  std::wstring updaterImagePath;
+
   /** How long Quiesce waits for the targets to go away before giving up. Never forces. */
   uint32_t quiesceTimeoutMs = 15000;
 
@@ -192,6 +209,20 @@ class WindowsUpdateEffects : public UpdateEffects {
 
 /** SHA-256 of a file, lowercase hex. Empty on failure. */
 std::string sha256_file_hex(const std::wstring& path);
+
+/**
+ * Whether `version` appears inside `path` as a UTF-16 literal.
+ *
+ * This is how the project already checks that a built installer carries the version it claims
+ * (history #426), and it is used here to catch the realistic mismatch: a manifest paired with the
+ * wrong artifact. GNLinkSetup.exe has no VERSIONINFO resource to read instead.
+ *
+ * Be clear about what it does NOT establish. Finding the string proves the binary mentions that
+ * version, not that it IS that version -- a binary could contain several. It is a consistency
+ * check between two things that should agree, not an identity proof, and the artifact hash from
+ * the manifest is what actually pins which bytes arrived.
+ */
+bool file_contains_utf16_version(const std::wstring& path, const std::string& version);
 
 /** Size in bytes, or false when the file cannot be read. */
 bool file_size_bytes(const std::wstring& path, uint64_t* out);
