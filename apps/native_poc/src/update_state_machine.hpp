@@ -65,8 +65,17 @@ enum class UpdateResult {
    */
   AbandonedNotRelaunched,
   // The swap or what follows it failed and the previous version was restored, AND the product
-  // that was running before is running again.
+  // that was running before is running again and reported itself healthy.
   RolledBack,
+  /**
+   * Restored and running, and it does not look right.
+   *
+   * The previous version is back on disk and started, but it did not report itself healthy --
+   * which may mean the restore was incomplete, or that whatever broke the update also affects the
+   * version being restored to. Not reported as a successful rollback, because "we put it back"
+   * and "it works" are different claims and only the first one has been established.
+   */
+  RestoredButUnhealthy,
   /**
    * Restored, but nothing came back up.
    *
@@ -80,6 +89,44 @@ enum class UpdateResult {
   // the only one where the install may be inconsistent and a human has to look.
   RollbackFailed,
 };
+
+/**
+ * What a relaunch achieved, in the only terms the decision needs.
+ *
+ * A bool cannot express this. A client that did not come back is an inconvenience the user fixes
+ * from the Start menu; a HOST that did not come back leaves a remote user with no way into the
+ * machine at all, and the right response to those is not the same one. Folding both into false
+ * meant every relaunch failure committed the update and dropped the backups -- including the one
+ * case where the backups were the only way back.
+ */
+enum class RelaunchVerdict {
+  /** Everything that was supposed to come back did. */
+  AllBack,
+  /**
+   * Something came back but something optional did not -- in practice the client.
+   *
+   * Not a rollback. The files are the new version and they are consistent, and undoing a good
+   * install because a window did not reopen would be the worse outcome.
+   */
+  OptionalMissing,
+  /**
+   * Something the machine needs did not come back: the host, or the input service.
+   *
+   * This is a rollback. Not because the files are wrong -- they are fine -- but because a machine
+   * nobody can reach is worth less than an older version somebody can.
+   */
+  RequiredMissing,
+};
+
+/** Inline so that reading a verdict does not drag the whole state machine into a link. */
+inline const char* relaunch_verdict_name(RelaunchVerdict verdict) {
+  switch (verdict) {
+    case RelaunchVerdict::AllBack: return "all-back";
+    case RelaunchVerdict::OptionalMissing: return "optional-missing";
+    case RelaunchVerdict::RequiredMissing: return "required-missing";
+  }
+  return "unknown";
+}
 
 /**
  * Everything the state machine needs the outside world to do.
@@ -124,7 +171,7 @@ class UpdateEffects {
   virtual bool RegisterInstall() = 0;
 
   /** Brings the product back in whatever configuration it was running in before. */
-  virtual bool Relaunch() = 0;
+  virtual RelaunchVerdict Relaunch() = 0;
 
   /** Observes that the new build is actually working (design 3.6). */
   virtual bool HealthCheck() = 0;

@@ -82,7 +82,7 @@ class ReadySignaller : public UpdateEffects {
   bool Quiesce() override { return inner_.Quiesce(); }
   bool Swap() override { return inner_.Swap(); }
   bool RegisterInstall() override { return inner_.RegisterInstall(); }
-  bool Relaunch() override { return inner_.Relaunch(); }
+  RelaunchVerdict Relaunch() override { return inner_.Relaunch(); }
   bool HealthCheck() override { return inner_.HealthCheck(); }
 
   bool Rollback() override {
@@ -312,15 +312,23 @@ UpdateOutcome UpdaterEffects::run(const std::string& platform) {
     RelaunchConfig live = relaunchConfig;
     live.expectedVersion = *expectedVersion;
     *relaunchEffects = deps.makeRelaunch(live, *stopped);
-    if (!relaunchEffects->relaunch) return false;
-    const bool ok = relaunchEffects->relaunch();
+    // No relaunch to run means nothing came back. Reported as the severe verdict rather than the
+    // mild one: an assembly that produced no relaunch has not established that the machine is
+    // reachable, and guessing in the reassuring direction is how this class of defect starts.
+    if (!relaunchEffects->relaunch) return RelaunchVerdict::RequiredMissing;
+    const RelaunchVerdict verdict = relaunchEffects->relaunch();
     if (relaunchEffects->lastOutcomes) {
       for (const RelaunchOutcome& outcome : relaunchEffects->lastOutcomes()) {
         deps.log("relaunch " + to_utf8(outcome.imageName) + ": " + outcome.detail);
       }
     }
     if (relaunchEffects->userNotice) *notice = relaunchEffects->userNotice();
-    return ok;
+    return verdict;
+  };
+  // Wired to the same relaunch effects, so what is stopped is exactly what they started.
+  config.releaseBeforeRollback = [relaunchEffects]() {
+    if (!relaunchEffects->stopStarted) return 0;
+    return relaunchEffects->stopStarted();
   };
   config.healthCheck = [deps, relaunchEffects]() {
     if (!relaunchEffects->healthCheck) return false;

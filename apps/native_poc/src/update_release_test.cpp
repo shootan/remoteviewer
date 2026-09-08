@@ -388,7 +388,7 @@ int wmain() {
     c.captureRegistration = []() { return true; };
     c.registerInstall = []() { return true; };
     c.restoreRegistration = []() { return true; };
-    c.relaunch = []() { return true; };
+    c.relaunch = []() { return RelaunchVerdict::AllBack; };
     c.healthCheck = []() { return true; };
     c.quiesceTimeoutMs = 5000;
     wchar_t self[MAX_PATH]{};
@@ -725,7 +725,10 @@ int wmain() {
     e.set_manifest(a.document, std::string(128, '0'));
 
     const UpdateOutcome out = run_update(e, accept, "windows");
-    check("R4b: the attempt rolls back", out.result == UpdateResult::RolledBack,
+    // The same injected health check answers after the rollback as before it, so the restored
+    // build is unhealthy too and that is reported. The files are what this case is about, and
+    // they are checked below.
+    check("R4b: the attempt rolls back", out.result == UpdateResult::RestoredButUnhealthy,
           std::string(result_name(out.result)) + " / " + e.last_error());
     const std::string diff = describe_difference(before, snapshot(install));
     check("R4b: every file is the previous build again", diff.empty(), diff);
@@ -874,7 +877,8 @@ int wmain() {
       e.set_manifest(grown.document, std::string(128, '0'));
 
       const UpdateOutcome out = run_update(e, accept, "windows");
-      check("R5: the abandoned attempt rolls back", out.result == UpdateResult::RolledBack,
+      check("R5: the abandoned attempt rolls back",
+            out.result == UpdateResult::RestoredButUnhealthy,
             std::string(result_name(out.result)) + " / " + e.last_error());
       const std::string diff = describe_difference(before, snapshot(install));
       check("R5: the installation is byte-identical again", diff.empty(), diff);

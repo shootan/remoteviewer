@@ -57,6 +57,7 @@ const char* result_name(UpdateResult r) {
     case UpdateResult::AbandonedBeforeSwap: return "AbandonedBeforeSwap";
     case UpdateResult::AbandonedNotRelaunched: return "AbandonedNotRelaunched";
     case UpdateResult::RolledBack: return "RolledBack";
+    case UpdateResult::RestoredButUnhealthy: return "RestoredButUnhealthy";
     case UpdateResult::RolledBackNotRelaunched: return "RolledBackNotRelaunched";
     case UpdateResult::RollbackFailed: return "RollbackFailed";
   }
@@ -82,11 +83,11 @@ UpdateOutcome run_update(UpdateEffects& effects,
    */
   const auto abandon = [&](const char* why) {
     out.detail = why;
-    if (effects.Relaunch()) {
-      out.result = UpdateResult::AbandonedBeforeSwap;
-    } else {
-      out.result = UpdateResult::AbandonedNotRelaunched;
-    }
+    // Anything that did not come back matters here, required or not: nothing was changed, so the
+    // only thing this path can get wrong is leaving something down that it took down.
+    out.result = (effects.Relaunch() == RelaunchVerdict::AllBack)
+                     ? UpdateResult::AbandonedBeforeSwap
+                     : UpdateResult::AbandonedNotRelaunched;
     return out;
   };
 
@@ -105,15 +106,18 @@ UpdateOutcome run_update(UpdateEffects& effects,
       // attempt, and a loop here would sit between the user and a machine that is already in its
       // restored state.
       enter(UpdateState::Relaunch);
-      if (effects.Relaunch()) {
-        // And the restored build is checked the same way a new one would be. What is on disk now
-        // is the previous version, so this is a question about that -- the caller is responsible
-        // for the health check knowing which version to expect.
-        enter(UpdateState::Health);
-        (void)effects.HealthCheck();
-        out.result = UpdateResult::RolledBack;
-      } else {
+      if (effects.Relaunch() != RelaunchVerdict::AllBack) {
         out.result = UpdateResult::RolledBackNotRelaunched;
+      } else {
+        // And the restored build is checked the same way a new one would be. What is on disk now
+        // is the previous version, so this is a question about that.
+        //
+        // The answer is USED. It was discarded, which meant a restore that came back broken was
+        // reported as a successful rollback -- "we put it back" and "it works" are different
+        // claims and only the first one had been established.
+        enter(UpdateState::Health);
+        out.result = effects.HealthCheck() ? UpdateResult::RolledBack
+                                           : UpdateResult::RestoredButUnhealthy;
       }
     } else {
       // The only outcome where the install may be inconsistent. Named distinctly so it cannot be
@@ -202,9 +206,17 @@ UpdateOutcome run_update(UpdateEffects& effects,
   if (!effects.RegisterInstall()) return rollback("registration failed");
 
   enter(UpdateState::Relaunch);
-  const bool relaunched = effects.Relaunch();
+  const RelaunchVerdict relaunched = effects.Relaunch();
 
-  if (!relaunched) {
+  if (relaunched == RelaunchVerdict::RequiredMissing) {
+    // The files are the new version and they are fine. The machine is not reachable, and a
+    // machine nobody can reach is worth less than an older one somebody can -- so this goes back,
+    // which is only possible because nothing has been committed yet and the backups are still
+    // there. Folding this into the same branch as a missing client dropped those backups.
+    return rollback("something the machine needs did not come back");
+  }
+
+  if (relaunched == RelaunchVerdict::OptionalMissing) {
     // NOT a rollback. The files are the new version and they are consistent; undoing a good
     // install because it did not restart itself would be the worse outcome, and the user can
     // start it from the Start menu. Reported distinctly so it is visible rather than silent.

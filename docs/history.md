@@ -9580,3 +9580,28 @@ Next action
 - 검증 — **`qwinsta`: console 만 Active.** C++ 업데이트 **14종 930 checks / 0 failed**. JS 디렉터리 스위트 전부 통과. 라이브 무영향: PID 3종 불변, `DisplayVersion` **0.2.104**.
 - 변경 파일: `updater_assembly_test.cpp` · `docs/수동확인_체크리스트.md` · `docs/history.md`.
 - 버전 인상·설치본·설치·라이브 조작·배포·push 없음. **검증용 전체 재검사 대기.**
+
+### 466) 2026-09-09 Codex 재반려 3건 — **타입을 만든 것과 결정 지점에 도달하는 것은 다르다**
+- 지난번에 `RelaunchOutcome` 을 만들고 "호스트 실패와 클라 실패를 구분한다" 고 보고했는데, **그 목록이 상태기계 분기의 입력이 아니었다.** `allStarted` bool 로 접혀 `!relaunched` 하나로 귀결됐고, **Host CreateProcess 실패도 서비스 실패도 구분 없이 `Commit()` + `UpdatedButNotRelaunched`** 였다 — **백업을 지우고 수동 시작으로 끝냈다.** 타입의 **존재**를 보고했지 **도달**을 보고하지 않았다.
+
+**① `RelaunchVerdict` 로 결정 지점까지 연결**
+- `bool` → `RelaunchVerdict{AllBack, OptionalMissing, RequiredMissing}`. 필수는 **Host·서비스**(`RelaunchKind::ElevatedProcess`/`Service`), 선택은 클라이언트.
+- 상태기계가 **세 갈래**로 분기: 전부 복귀 → Health · **선택만 실패 → `Commit` + `UpdatedButNotRelaunched`**(설치는 유지) · **필수 실패 → 롤백**. 롤백이 가능한 이유는 **아직 Commit 하지 않아 백업이 남아 있기 때문**이고, 예전처럼 한 갈래로 접으면 **그 백업을 지웠다.**
+- 둘 다 실패면 **필수가 이긴다**(그쪽이 다음 행동을 결정한다).
+
+**② 롤백이 health 결과를 버리던 것**
+- `(void)effects.HealthCheck();` 뒤 **무조건 `RolledBack`** — 구 Host 가 비정상이어도 "복구됨" 이었다. **`RestoredButUnhealthy` 신설**: **"되돌렸다" 와 "동작한다" 는 다른 주장**이고 전자만 확인됐다.
+- ⚠️ **롤백의 첫 단계가 `DeleteFile`/`MoveFile` 이었다.** 롤백 사유가 "방금 띄운 프로세스가 비정상" 일 때 **그 프로세스가 새 파일을 잡고 있어 복원이 바로 그 파일에서 실패**한다. `releaseBeforeRollback` 신설 — **이 시도가 띄운 것만**, pid + **이미지 이름 대조** 후 정지하고, **파일이 하나도 움직이기 전에** 한다.
+- `stopStarted()` 가 **실제로 끝난 것만 센다**(`TerminateProcess` 성공 + wait 신호). 안 죽은 것을 "정지함" 으로 보고하면 롤백을 **막으려던 실패로 그대로 밀어 넣고 롤백 탓처럼 보이게** 된다. 성공하면 pid 를 잊어 **두 번째 호출은 0** 을 답한다.
+
+**③ abandon 이 살아 있는 것까지 재실행하던 것**
+- captured 전체를 무조건 `Relaunch` 했다. **Prepare 실패·Quiesce 부분실패에서는 아직 살아 있을 수 있어 중복 프로세스**가 생긴다. **신원 capture 는 그것이 나갔다는 뜻이 아니다.**
+- `RelaunchConfig::isStillRunning` 주입 + `RelaunchOutcome::alreadyRunning` 신설. 살아 있으면 **띄우지 않고, 실패로도 치지 않는다**(되살릴 것이 없었으므로).
+
+- **회귀 E10~E12 신설**(relaunch 90→**106**): 살아 있으면 미실행 + **대조군**(떠났으면 실행) · **필수/선택/둘다** 세 verdict · **이 시도가 띄운 것만 정확히 1개 정지**(2회째 0, **실제로 죽었는지까지 확인**).
+  - ⚠️ **E12 첫 판이 헛단정이었다**: `stopped >= 0` 은 **항상 참**이고, `.cmd` 는 `cmd.exe` 로 떠서 이미지 대조가 (옳게) 거부해 **아무것도 안 죽였는데 통과**했다. 실제 `.exe`(`%COMSPEC%` 복사본)로 바꾸고 **정확히 1** 을 단정했다.
+- **대조군 실측 3회**: liveness 스킵 끄고 verdict 접으면 **6 FAIL**, 롤백 health 결과 버리면 **5 FAIL**.
+- 부수: job guard 테스트가 **자기가 세운 protected DACL 때문에 지워지지 않는 임시 디렉터리를 %TEMP% 에 남기고 있었다**(14개 발견). 정리 전 상속 복원하도록 수정, 잔여 0 확인.
+- 검증 — **`qwinsta`: console 만 Active.** C++ 업데이트 **14종 955 checks / 0 failed**. JS 디렉터리 스위트 전부 통과. 라이브 무영향: PID 3종 불변, `DisplayVersion` **0.2.104**.
+- 변경 파일: `update_state_machine.{hpp,cpp}`·`update_state_machine_test.cpp` · `update_relaunch.{hpp,cpp}`·`update_relaunch_test.cpp` · `update_effects.{hpp,cpp}`·`update_effects_test.cpp` · `update_release_test.cpp` · `updater_effects.cpp` · `updater_assembly_test.cpp` · `update_job_guard_test.cpp` · `apps/native_poc/CMakeLists.txt` · `docs/history.md`.
+- 버전 인상·설치본·설치·라이브 조작·배포·push 없음.

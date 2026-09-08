@@ -491,6 +491,16 @@ bool WindowsUpdateEffects::Swap() {
 
 bool WindowsUpdateEffects::Rollback() {
   bool ok = true;
+  // First, and before a single file moves. When the rollback is happening BECAUSE something this
+  // attempt started is unhealthy, that something is running and holding the new files open --
+  // and the restore would fail on precisely the files it exists to restore. Only what this
+  // attempt started, identified by more than a pid; nothing else on the machine is ours to stop.
+  if (config_.releaseBeforeRollback) {
+    const int stopped = config_.releaseBeforeRollback();
+    if (stopped > 0) {
+      lastError_ = "stopped " + std::to_string(stopped) + " process(es) started by this attempt";
+    }
+  }
   // Remove whatever was placed, then put back exactly the files that were moved aside. Files that
   // were never moved are left alone -- restoring something that was not backed up would be
   // inventing state.
@@ -553,12 +563,12 @@ void WindowsUpdateEffects::Commit() {
   movedAside_.clear();
 }
 
-bool WindowsUpdateEffects::Relaunch() {
-  if (!config_.relaunch()) {
-    lastError_ = "relaunch failed";
-    return false;
+RelaunchVerdict WindowsUpdateEffects::Relaunch() {
+  const RelaunchVerdict verdict = config_.relaunch();
+  if (verdict != RelaunchVerdict::AllBack) {
+    lastError_ = std::string("relaunch: ") + relaunch_verdict_name(verdict);
   }
-  return true;
+  return verdict;
 }
 
 bool WindowsUpdateEffects::HealthCheck() {

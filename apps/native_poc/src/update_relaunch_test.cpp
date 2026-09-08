@@ -531,9 +531,9 @@ int main() {
       DeleteFileW(witness.c_str());
       RelaunchEffects e = make_relaunch_effects(base(), {stopped_dummy(L"DummyHost.cmd", 100)},
                                                 dummies);
-      const bool all = e.relaunch();
-      check("E1: the elevated-process entry reports started", all,
-            all ? "" : "relaunch() said false");
+      const RelaunchVerdict all = e.relaunch();
+      check("E1: the elevated-process entry reports started", all == RelaunchVerdict::AllBack,
+            relaunch_verdict_name(all));
       check("E1: and the dummy really ran",
             wait_for_witness(witness, "DummyHost.cmd", 5000), read_witness(witness));
       const auto outcomes = e.lastOutcomes();
@@ -563,8 +563,9 @@ int main() {
       RelaunchEffects e = make_relaunch_effects(
           base(), {stopped_dummy(L"DummyHost.cmd", 100), stopped_dummy(L"DummyChild.cmd", 101)},
           dummies);
-      const bool all = e.relaunch();
-      check("E3: skipping a supervised child is not a failure", all);
+      const RelaunchVerdict all = e.relaunch();
+      check("E3: skipping a supervised child is not a failure", all == RelaunchVerdict::AllBack,
+            relaunch_verdict_name(all));
       check("E3: the host ran", wait_for_witness(witness, "DummyHost.cmd", 5000));
       Sleep(300);
       check("E3: the supervised child did NOT run",
@@ -595,13 +596,13 @@ int main() {
       DeleteFileW(witness.c_str());
       RelaunchEffects e = make_relaunch_effects(base(), {stopped_dummy(L"DummyClient.cmd", 100)},
                                                 dummies);
-      const bool all = e.relaunch();
+      const RelaunchVerdict all = e.relaunch();
       const std::string note = e.userNotice();
       // The shell route needs an interactive desktop with Explorer. When it is there this must
       // succeed; when it is not, the REQUIRED behaviour is a recorded failure -- never a silent
       // success, and never an elevated fallback. Both are asserted, so the case is meaningful
       // either way rather than passing by not running.
-      if (all) {
+      if (all == RelaunchVerdict::AllBack) {
         check("E5: the client started through the shell",
               wait_for_witness(witness, "DummyClient.cmd", 5000), read_witness(witness));
         check("E5: and nothing is reported to the user", note.empty(), note);
@@ -620,14 +621,15 @@ int main() {
       set_shell_launch_disabled_for_test(true);
       RelaunchEffects e = make_relaunch_effects(base(), {stopped_dummy(L"DummyClient.cmd", 100)},
                                                 dummies);
-      const bool all = e.relaunch();
+      const RelaunchVerdict all = e.relaunch();
       set_shell_launch_disabled_for_test(false);
       Sleep(300);
       // The absence of a fallback, asserted. Without this, removing the "no fallback" rule would
       // break nothing that anyone would notice.
       check("E6: with no shell route, nothing is started at all",
             count_occurrences(read_witness(witness), "DummyClient.cmd") == 0, read_witness(witness));
-      check("E6: and it is NOT reported as success", !all);
+      check("E6: and it is NOT reported as success", all != RelaunchVerdict::AllBack,
+            relaunch_verdict_name(all));
 
       // -------------------------------------------------------- E6b: a safe failure is a failure
       const auto outcomes = e.lastOutcomes();
@@ -674,15 +676,144 @@ int main() {
       write_dummy(root + L"\\DummyHost.cmd", L"DummyHost.cmd", witness);  // put it back
     }
 
+    // -------------------------------------- E10: what never left is not started again
+    {
+      // Abandoning after a waiting caller was released is the case where some of the product has
+      // gone and some has not. Capturing an identity says nothing about whether that process then
+      // exited -- and relaunching one that never went produces a second instance.
+      DeleteFileW(witness.c_str());
+      RelaunchConfig c = base();
+      // As if the host were still up: it was captured, but it is there.
+      c.isStillRunning = [](const ProcessTarget&) { return true; };
+      RelaunchEffects e = make_relaunch_effects(c, {stopped_dummy(L"DummyHost.cmd", 100)},
+                                                dummies);
+      const RelaunchVerdict verdict = e.relaunch();
+      Sleep(300);
+      check("E10: something still running is not started again",
+            count_occurrences(read_witness(witness), "DummyHost.cmd") == 0, read_witness(witness));
+      check("E10: and that is not a failure -- there was nothing to bring back",
+            verdict == RelaunchVerdict::AllBack, relaunch_verdict_name(verdict));
+      const auto outcomes = e.lastOutcomes();
+      check("E10: recorded as already running, not as started",
+            outcomes.size() == 1 && outcomes[0].alreadyRunning && !outcomes[0].started &&
+                !outcomes[0].failed());
+      check("E10: and the user is told nothing", e.userNotice().empty(), e.userNotice());
+    }
+    {
+      // The control. Without it, "not started" above could be what happens to everything.
+      DeleteFileW(witness.c_str());
+      RelaunchConfig c = base();
+      c.isStillRunning = [](const ProcessTarget&) { return false; };
+      RelaunchEffects e = make_relaunch_effects(c, {stopped_dummy(L"DummyHost.cmd", 100)},
+                                                dummies);
+      e.relaunch();
+      check("E10: something that did leave IS started again",
+            wait_for_witness(witness, "DummyHost.cmd", 5000), read_witness(witness));
+    }
+
+    // -------------------------------------- E11: required and optional are not the same failure
+    {
+      // A client that did not come back is an inconvenience. A host that did not leaves a remote
+      // user with no way into the machine. Folding both into one bool committed the update in
+      // the case where the backups were the only way back.
+      set_shell_launch_disabled_for_test(true);
+      RelaunchEffects clientOnly = make_relaunch_effects(
+          base(), {stopped_dummy(L"DummyClient.cmd", 100)}, dummies);
+      const RelaunchVerdict clientVerdict = clientOnly.relaunch();
+      set_shell_launch_disabled_for_test(false);
+      check("E11: only the client missing is the mild verdict",
+            clientVerdict == RelaunchVerdict::OptionalMissing,
+            relaunch_verdict_name(clientVerdict));
+
+      DeleteFileW((root + L"\\DummyHost.cmd").c_str());  // make the host unstartable
+      RelaunchEffects hostGone = make_relaunch_effects(
+          base(), {stopped_dummy(L"DummyHost.cmd", 100)}, dummies);
+      const RelaunchVerdict hostVerdict = hostGone.relaunch();
+      check("E11: the host missing is the severe verdict",
+            hostVerdict == RelaunchVerdict::RequiredMissing, relaunch_verdict_name(hostVerdict));
+      check("E11: and the two are different", clientVerdict != hostVerdict);
+
+      // Both gone: the severe one wins, because that is the one that decides what happens next.
+      set_shell_launch_disabled_for_test(true);
+      RelaunchEffects both = make_relaunch_effects(
+          base(), {stopped_dummy(L"DummyHost.cmd", 100), stopped_dummy(L"DummyClient.cmd", 101)},
+          dummies);
+      const RelaunchVerdict bothVerdict = both.relaunch();
+      set_shell_launch_disabled_for_test(false);
+      check("E11: with both missing, the severe verdict wins",
+            bothVerdict == RelaunchVerdict::RequiredMissing, relaunch_verdict_name(bothVerdict));
+      write_dummy(root + L"\\DummyHost.cmd", L"DummyHost.cmd", witness);  // put it back
+    }
+
+    // -------------------------------------- E12: stopping only what this attempt started
+    {
+      // A rollback has to move files the newly started processes are holding open, so they go
+      // first -- and only they. Anything else on the machine is not this function's business.
+      //
+      // A real .exe, not the .cmd the other cases use. A batch file runs as cmd.exe, so the
+      // identity check would see cmd.exe where it expected DummyHost, refuse to touch it, and
+      // this case would pass while proving nothing. That is what the first version of it did.
+      const std::wstring exeName = L"DummyHostExe.exe";
+      const std::wstring exePath = root + L"\\" + exeName;
+      wchar_t comspec[MAX_PATH]{};
+      const bool haveShell = GetEnvironmentVariableW(L"COMSPEC", comspec, MAX_PATH) > 0;
+      const bool copied = haveShell && CopyFileW(comspec, exePath.c_str(), FALSE) != FALSE;
+      check("E12: a real executable is available to start", copied, narrow(exePath));
+
+      if (copied) {
+        const std::vector<KnownImage> exeTable = {
+            {exeName.c_str(), L"dummyhostexe.exe", RelaunchKind::ElevatedProcess, "a real exe"}};
+        ProcessTarget t;
+        t.pid = 4242;
+        t.imagePath = exePath;
+        t.creationTime = 99;
+
+        RelaunchEffects e = make_relaunch_effects(base(), {t}, exeTable);
+        const RelaunchVerdict verdict = e.relaunch();
+        check("E12: it started", verdict == RelaunchVerdict::AllBack,
+              relaunch_verdict_name(verdict));
+        const auto outcomes = e.lastOutcomes();
+        check("E12: and the pid was remembered",
+              outcomes.size() == 1 && outcomes[0].startedPid != 0,
+              outcomes.empty() ? "" : std::to_string(outcomes[0].startedPid));
+
+        // The assertion that matters, and an exact count rather than ">= 0" -- which is what the
+        // first version compared and is true of everything.
+        const int stopped = e.stopStarted();
+        check("E12: exactly the one process this attempt started is stopped", stopped == 1,
+              std::to_string(stopped));
+        check("E12: and a second call stops nothing, because there is nothing left",
+              e.stopStarted() == 0);
+
+        // And it really is gone, not merely reported as stopped.
+        if (!outcomes.empty() && outcomes[0].startedPid != 0) {
+          HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, outcomes[0].startedPid);
+          const bool alive = h && WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
+          if (h) CloseHandle(h);
+          check("E12: the process is actually gone", !alive);
+        }
+        DeleteFileW(exePath.c_str());
+      }
+    }
+    {
+      // The control for the identity check: a pid this attempt never started is not touched, even
+      // if it is recorded. Nothing else on the machine is this function's business.
+      RelaunchEffects e = make_relaunch_effects(base(), {}, dummies);
+      e.relaunch();
+      check("E12: with nothing started, nothing is stopped", e.stopStarted() == 0);
+    }
+
     // -------------------------------------------------------------- E7: the service failure path
     {
       RelaunchEffects e = make_relaunch_effects(base(), {stopped_dummy(L"DummySvc.cmd", 100)},
                                                 dummies);
-      const bool all = e.relaunch();
+      const RelaunchVerdict all = e.relaunch();
       // Starting a real service needs administrator, so only this half is covered here; the
       // success path is UPD-FIELD-05. What must hold is that a service that cannot be started is
       // a failure with a reason, not a silent pass.
-      check("E7: a service that does not exist is a failure", !all);
+      // A service is something the machine needs, so its absence is the severe verdict.
+      check("E7: a service that does not exist is a required failure",
+            all == RelaunchVerdict::RequiredMissing, relaunch_verdict_name(all));
       const auto outcomes = e.lastOutcomes();
       check("E7: recorded as failed with a reason",
             outcomes.size() == 1 && outcomes[0].failed() && !outcomes[0].detail.empty(),

@@ -148,11 +148,30 @@ struct UpdateEffectsConfig {
   /** Puts the captured registration back. Called during rollback, never with the new values. */
   std::function<bool()> restoreRegistration;
 
-  /** Brings the product back in the configuration it was running in. */
-  std::function<bool()> relaunch;
+  /**
+   * Brings the product back in the configuration it was running in, and says what it managed.
+   *
+   * A verdict rather than a bool: a missing client and a missing host call for different
+   * responses, and folding them together committed the update in the one case where the backups
+   * were the only way back.
+   */
+  std::function<RelaunchVerdict()> relaunch;
 
   /** Observes that the new build works (design 3.6). */
   std::function<bool()> healthCheck;
+
+  /**
+   * Stops what this attempt started, before a rollback touches the files they hold open.
+   *
+   * Rollback used to begin with DeleteFile and MoveFile, which is the wrong first step when the
+   * reason for rolling back is that a process this attempt just launched is unhealthy: it is
+   * running, it has the new files open, and the restore fails on exactly the files that matter.
+   * Returns how many it stopped, for the log.
+   *
+   * Optional. Absent means nothing was started, which is true on every path that rolls back
+   * before Relaunch.
+   */
+  std::function<int()> releaseBeforeRollback;
 
   /**
    * The version the manifest claims. Checked against what the staged artifact carries.
@@ -209,7 +228,7 @@ class WindowsUpdateEffects : public UpdateEffects {
   bool Quiesce() override;
   bool Swap() override;
   bool RegisterInstall() override;
-  bool Relaunch() override;
+  RelaunchVerdict Relaunch() override;
   bool HealthCheck() override;
   bool Rollback() override;
   void Commit() override;

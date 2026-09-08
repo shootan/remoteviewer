@@ -235,11 +235,13 @@ RelaunchEffects make_relaunch_effects(RelaunchConfig config,
     uint64_t logMark = 0;
     bool marked = false;
     std::vector<RelaunchOutcome> outcomes;
+    std::vector<ProcessTarget> stopped;
     std::string healthDetail;
   };
   auto shared = std::make_shared<Shared>();
   shared->config = std::move(config);
   shared->plan = relaunch_plan(stopped, table);
+  shared->stopped = stopped;
 
   RelaunchEffects effects;
 
@@ -249,11 +251,28 @@ RelaunchEffects make_relaunch_effects(RelaunchConfig config,
     shared->logMark = file_size_or_zero(shared->config.healthLogPath);
     shared->marked = true;
 
-    bool allStarted = true;
     for (const RelaunchEntry& entry : shared->plan) {
       RelaunchOutcome outcome;
       outcome.imageName = entry.imageName;
       outcome.kind = entry.kind;
+
+      // Still there? Then it never left, and starting it would produce a second instance. This is
+      // the ordinary case when an attempt is abandoned after a waiting caller was released: some
+      // of the product went and some did not, and having captured an identity says nothing about
+      // whether that process has since exited.
+      if (shared->config.isStillRunning) {
+        bool alive = false;
+        for (const ProcessTarget& target : shared->stopped) {
+          if (image_leaf_lower(target.imagePath) != image_leaf_lower(entry.imageName)) continue;
+          if (shared->config.isStillRunning(target)) alive = true;
+        }
+        if (alive) {
+          outcome.alreadyRunning = true;
+          outcome.detail = "still running -- nothing to bring back";
+          shared->outcomes.push_back(outcome);
+          continue;
+        }
+      }
 
       if (entry.kind == RelaunchKind::SupervisedByAnother) {
         // Not started, and not a failure. Something else owns its lifetime.
@@ -287,16 +306,28 @@ RelaunchEffects make_relaunch_effects(RelaunchConfig config,
           CloseHandle(pi.hThread);
           CloseHandle(pi.hProcess);
           outcome.started = true;
+          // Remembered so a rollback can stop what this attempt started before it tries to move
+          // the files those processes are holding open.
+          outcome.startedPid = pi.dwProcessId;
           outcome.detail = "started";
         } else {
           outcome.detail = "could not be started (error " + std::to_string(GetLastError()) + ")";
         }
       }
 
-      if (outcome.failed()) allStarted = false;
       shared->outcomes.push_back(outcome);
     }
-    return allStarted;
+
+    // Folded into a verdict rather than a bool, because a missing client and a missing host call
+    // for different responses: one is an inconvenience, the other leaves a remote user with no
+    // way into the machine.
+    RelaunchVerdict verdict = RelaunchVerdict::AllBack;
+    for (const RelaunchOutcome& outcome : shared->outcomes) {
+      if (!outcome.failed()) continue;
+      if (outcome.required()) return RelaunchVerdict::RequiredMissing;  // decides on its own
+      verdict = RelaunchVerdict::OptionalMissing;
+    }
+    return verdict;
   };
 
   effects.healthCheck = [shared]() {
@@ -342,6 +373,38 @@ RelaunchEffects make_relaunch_effects(RelaunchConfig config,
     }
   };
 
+  effects.stopStarted = [shared]() {
+    // Only what THIS attempt started, identified by the pid it was handed at creation and checked
+    // against the image before anything is done to it. Nothing else on the machine is this
+    // function's business, and a pid alone is not an identity.
+    int stopped = 0;
+    for (RelaunchOutcome& outcome : shared->outcomes) {
+      if (!outcome.started || outcome.startedPid == 0) continue;
+      HANDLE h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                             FALSE, outcome.startedPid);
+      if (!h) {
+        // Cannot be opened: already gone, and there is nothing left to do about it.
+        outcome.startedPid = 0;
+        continue;
+      }
+      wchar_t image[MAX_PATH]{};
+      DWORD size = MAX_PATH;
+      const bool named = QueryFullProcessImageNameW(h, 0, image, &size) != FALSE;
+      if (named && image_leaf_lower(image) == image_leaf_lower(outcome.imageName)) {
+        // Counted only when it actually ended. Reporting a stop for something still holding the
+        // files open would send a rollback into exactly the failure this call exists to prevent,
+        // and it would look like the rollback's fault.
+        if (TerminateProcess(h, 0) && WaitForSingleObject(h, 5000) == WAIT_OBJECT_0) {
+          ++stopped;
+          // Forgotten, so a second call does not count it again -- "nothing left to stop" is the
+          // answer then, and it should be visible as one.
+          outcome.startedPid = 0;
+        }
+      }
+      CloseHandle(h);
+    }
+    return stopped;
+  };
   effects.lastOutcomes = [shared]() { return shared->outcomes; };
   effects.userNotice = [shared]() { return relaunch_user_notice(shared->outcomes); };
   effects.lastHealthDetail = [shared]() { return shared->healthDetail; };

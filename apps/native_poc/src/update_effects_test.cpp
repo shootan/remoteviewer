@@ -142,7 +142,7 @@ UpdateEffectsConfig base_config(const std::wstring& install, const std::wstring&
   c.captureRegistration = []() { return true; };
   c.registerInstall = []() { return true; };
   c.restoreRegistration = []() { return true; };
-  c.relaunch = []() { return true; };
+  c.relaunch = []() { return RelaunchVerdict::AllBack; };
   c.healthCheck = []() { return true; };
   c.quiesceTimeoutMs = 5000;
   // The updater's own image, so validate() can check it is not among the payload rather than
@@ -630,7 +630,10 @@ int main(int argc, char** argv) {
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
       }
-      return ok != FALSE;
+      // A real launch that really failed, reported as an OPTIONAL image failing -- which is the
+      // case this block is about: the install is good and stays. The severe verdict has its own
+      // case in the state machine suite, where it rolls back.
+      return ok ? RelaunchVerdict::AllBack : RelaunchVerdict::OptionalMissing;
     };
     WindowsUpdateEffects e(c);
     e.set_installed_version("0.2.104");
@@ -1083,7 +1086,7 @@ int main(int argc, char** argv) {
       c.captureRegistration = reg.capture;
       c.registerInstall = reg.apply;
       c.restoreRegistration = reg.restore;
-      c.relaunch = []() { return true; };
+      c.relaunch = []() { return RelaunchVerdict::AllBack; };
       c.healthCheck = []() { return false; };  // fails after registration
 
       WindowsUpdateEffects e(c);
@@ -1092,8 +1095,11 @@ int main(int argc, char** argv) {
                      std::string(128, '0'));
       const auto accept = [](const std::string&, const std::vector<uint8_t>&) { return true; };
       const UpdateOutcome out = run_update(e, accept, "windows");
-      check("wiring: a health failure rolls back", out.result == UpdateResult::RolledBack,
-            std::string(result_name(out.result)) + " " + out.detail);
+      // The restored build is unhealthy too here -- the injected health check answers the same way
+    // either side of the rollback -- so this is the honest outcome rather than a clean rollback.
+    check("wiring: a health failure rolls back and the restore is not healthy either",
+          out.result == UpdateResult::RestoredButUnhealthy,
+          std::string(result_name(out.result)) + " " + out.detail);
       check("wiring: files went back to the old version",
             read_text(install + L"\\AlphaPayload.bin") == kOldAlpha);
       check("wiring: DisplayVersion went back to the PREVIOUS version, not 0.3.0",

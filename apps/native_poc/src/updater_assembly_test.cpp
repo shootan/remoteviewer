@@ -223,7 +223,7 @@ int main() {
       effects.relaunch = [rec]() {
         ++rec->relaunchCount;
         rec->note("relaunch");
-        return true;
+        return RelaunchVerdict::AllBack;
       };
       effects.healthCheck = [rec]() {
         rec->note("health");

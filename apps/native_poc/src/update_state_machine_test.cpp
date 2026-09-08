@@ -67,7 +67,11 @@ class FakeEffects : public UpdateEffects {
   bool quiesceOk = true;
   bool swapOk = true;
   bool registerOk = true;
-  bool relaunchOk = true;
+  /**
+   * What the relaunch reports. A verdict, not a bool, because the machine differs on whether the
+   * thing that did not come back was one it needs.
+   */
+  RelaunchVerdict relaunchVerdict = RelaunchVerdict::AllBack;
   bool healthOk = true;
   bool rollbackOk = true;
   std::string installed = "0.2.104";
@@ -109,7 +113,10 @@ class FakeEffects : public UpdateEffects {
   bool Quiesce() override { calls.push_back("Quiesce"); return quiesceOk; }
   bool Swap() override { calls.push_back("Swap"); return swapOk; }
   bool RegisterInstall() override { calls.push_back("RegisterInstall"); return registerOk; }
-  bool Relaunch() override { calls.push_back("Relaunch"); return relaunchOk; }
+  RelaunchVerdict Relaunch() override {
+    calls.push_back("Relaunch");
+    return relaunchVerdict;
+  }
   bool HealthCheck() override { calls.push_back("HealthCheck"); return healthOk; }
   bool Rollback() override { calls.push_back("Rollback"); return rollbackOk; }
   void Commit() override { calls.push_back("Commit"); ++commitCount; }
@@ -270,6 +277,49 @@ int main() {
     check("swap fails -> registration never ran", !f.ran("RegisterInstall"));
   }
   {
+    // A rollback whose restored build DOES come up healthy. The distinction the case above cannot
+    // make on its own: without this, "RestoredButUnhealthy" could be what every rollback reports.
+    FakeEffects f;
+    f.healthOk = false;
+    const UpdateOutcome first = run_update(f, accepting(), "windows");
+    check("an unhealthy restore is not called a clean rollback",
+          first.result == UpdateResult::RestoredButUnhealthy, result_name(first.result));
+
+    FakeEffects g;
+    g.registerOk = false;  // forces a rollback with health still answering yes
+    const UpdateOutcome second = run_update(g, accepting(), "windows");
+    check("a rollback whose restore is healthy is a clean rollback",
+          second.result == UpdateResult::RolledBack, result_name(second.result));
+  }
+  {
+    // The contract that a single bool could not express. A client that did not come back is not
+    // a reason to undo a good install; a host that did not is, because a machine nobody can reach
+    // is worth less than an older one somebody can.
+    FakeEffects f;
+    f.relaunchVerdict = RelaunchVerdict::OptionalMissing;
+    const UpdateOutcome o = run_update(f, accepting(), "windows");
+    check("only an optional image missing -> the update stands",
+          o.result == UpdateResult::UpdatedButNotRelaunched, result_name(o.result));
+    check("...and it is committed, because it is not going back", f.commitCount == 1,
+          std::to_string(f.commitCount));
+    check("...and no rollback happened", !f.ran("Rollback"));
+  }
+  {
+    FakeEffects f;
+    f.relaunchVerdict = RelaunchVerdict::RequiredMissing;
+    const UpdateOutcome o = run_update(f, accepting(), "windows");
+    check("something the machine needs missing -> rollback", f.ran("Rollback"));
+    check("...and NOT committed, because the backups are the way back", f.commitCount == 0,
+          std::to_string(f.commitCount));
+    check("...and the result is a rollback, not a partial success",
+          o.result == UpdateResult::RolledBack ||
+              o.result == UpdateResult::RolledBackNotRelaunched ||
+              o.result == UpdateResult::RestoredButUnhealthy,
+          result_name(o.result));
+    check("...and it is never reported as UpdatedButNotRelaunched",
+          o.result != UpdateResult::UpdatedButNotRelaunched, result_name(o.result));
+  }
+  {
     // Giving up after a caller has already been released on this update's behalf.
     //
     // Nothing on disk was touched -- no file replaced, no registration changed -- and yet the
@@ -288,7 +338,7 @@ int main() {
   {
     FakeEffects f;
     f.prepareOk = false;
-    f.relaunchOk = false;
+    f.relaunchVerdict = RelaunchVerdict::OptionalMissing;
     const UpdateOutcome o = run_update(f, accepting(), "windows");
     // Distinguished, because "we changed nothing" and "the machine is reachable" are separate
     // claims and only one of them is true here.
@@ -323,7 +373,7 @@ int main() {
     // a remote user: the files are right and the machine is unreachable.
     FakeEffects f;
     f.registerOk = false;
-    f.relaunchOk = false;
+    f.relaunchVerdict = RelaunchVerdict::OptionalMissing;
     const UpdateOutcome o = run_update(f, accepting(), "windows");
     check("rolled back but not relaunched is its own outcome",
           o.result == UpdateResult::RolledBackNotRelaunched, result_name(o.result));
@@ -353,7 +403,12 @@ int main() {
     FakeEffects f;
     f.healthOk = false;
     const UpdateOutcome o = run_update(f, accepting(), "windows");
-    check("health fails -> RolledBack", o.result == UpdateResult::RolledBack, result_name(o.result));
+    // The fake's health check answers the same way after the rollback as before it, so the
+    // restored build is unhealthy too -- and that is now reported instead of discarded. It used
+    // to say RolledBack regardless, which claimed the machine was fine on the strength of a
+    // result nobody had looked at.
+    check("health fails, and the restore is unhealthy too -> RestoredButUnhealthy",
+          o.result == UpdateResult::RestoredButUnhealthy, result_name(o.result));
     check("health fails -> rollback ran", f.ran("Rollback"));
     check("health fails -> never committed, so the backups survived for it",
           f.commitCount == 0, std::to_string(f.commitCount));
@@ -371,7 +426,7 @@ int main() {
 
   {
     FakeEffects f;
-    f.relaunchOk = false;
+    f.relaunchVerdict = RelaunchVerdict::OptionalMissing;
     const UpdateOutcome o = run_update(f, accepting(), "windows");
     check("relaunch fails -> UpdatedButNotRelaunched",
           o.result == UpdateResult::UpdatedButNotRelaunched, result_name(o.result));
@@ -397,7 +452,7 @@ int main() {
         {"quiesce fails", [](FakeEffects& f) { f.quiesceOk = false; }},
         {"swap fails", [](FakeEffects& f) { f.swapOk = false; }},
         {"rollback fails", [](FakeEffects& f) { f.swapOk = false; f.rollbackOk = false; }},
-        {"relaunch fails", [](FakeEffects& f) { f.relaunchOk = false; }},
+        {"relaunch fails", [](FakeEffects& f) { f.relaunchVerdict = RelaunchVerdict::OptionalMissing; }},
         {"success", [](FakeEffects&) {}},
     };
     for (const Variant& v : variants) {

@@ -176,6 +176,9 @@ int main() {
       check("a user-writable directory is refused", false,
             "could not set a test ACL -- needs to be run where the temp tree is writable");
     }
+    (void)SetNamedSecurityInfoW(const_cast<wchar_t*>(dir.c_str()), SE_FILE_OBJECT,
+                                DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                                nullptr, nullptr, nullptr, nullptr);
     RemoveDirectoryW(dir.c_str());
   }
 
@@ -190,6 +193,12 @@ int main() {
     } else {
       check("an administrators-only directory is accepted", false, "could not set a test ACL");
     }
+    // The protected DACL this case installs can outlive the process that set it, so the
+    // inheritance is put back before the directory is removed -- otherwise the test leaves
+    // undeletable directories in %TEMP%, which it did.
+    (void)SetNamedSecurityInfoW(const_cast<wchar_t*>(dir.c_str()), SE_FILE_OBJECT,
+                                DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                                nullptr, nullptr, nullptr, nullptr);
     RemoveDirectoryW(dir.c_str());
   }
 

@@ -29,6 +29,7 @@
 #include "update_effects.hpp"
 #include "update_health_log.hpp"
 #include "update_relaunch_plan.hpp"
+#include "update_state_machine.hpp"
 
 namespace remote60::native_poc::update {
 
@@ -46,13 +47,28 @@ struct RelaunchOutcome {
   RelaunchKind kind = RelaunchKind::ElevatedProcess;
   /** True only when the thing is actually running now. Skipped entries are not "started". */
   bool started = false;
+  /**
+   * True when it never left, so there was nothing to bring back.
+   *
+   * Distinct from `started`: relaunching something that is still running produces a second
+   * instance. Abandoning after a caller was released is exactly the case -- some of the product
+   * may have gone and some may not, and capturing an identity is not the same as that process
+   * having exited.
+   */
+  bool alreadyRunning = false;
+  /** The process this attempt started, when it started one. 0 otherwise. */
+  uint32_t startedPid = 0;
   /** True when the plan deliberately did not start it (a supervised child). Not a failure. */
   bool skipped = false;
   /** Why, for the log and for what the user is told. */
   std::string detail;
 
   /** A failure that matters: something that should have come back did not. */
-  bool failed() const { return !started && !skipped; }
+  bool failed() const { return !started && !skipped && !alreadyRunning; }
+  /** Whether the machine needs this one. A host or a service, not a client. */
+  bool required() const {
+    return kind == RelaunchKind::ElevatedProcess || kind == RelaunchKind::Service;
+  }
 };
 
 struct RelaunchConfig {
@@ -81,6 +97,19 @@ struct RelaunchConfig {
   uint32_t healthTimeoutMs = 30000;
   /** How often it looks. */
   uint32_t healthPollMs = 500;
+
+  /**
+   * Whether a captured target is still running under the same identity.
+   *
+   * Injected so a test can answer without real processes, and needed because capturing an
+   * identity is not the same as that process having left. Abandoning after a waiting caller was
+   * released is exactly the case where some of the product has gone and some has not -- and
+   * relaunching something that never went produces a second instance.
+   *
+   * Empty means "assume everything left", which is right for the paths that follow a completed
+   * Quiesce.
+   */
+  std::function<bool(const ProcessTarget&)> isStillRunning;
 };
 
 /**
@@ -91,8 +120,24 @@ struct RelaunchConfig {
  * previous run's lines, which is the failure mode that makes a health check worthless.
  */
 struct RelaunchEffects {
-  std::function<bool()> relaunch;
+  /**
+   * Brings back what was stopped, and says what it managed.
+   *
+   * Returns a verdict rather than a bool because the caller has to treat a missing host
+   * differently from a missing client -- see RelaunchVerdict.
+   */
+  std::function<RelaunchVerdict()> relaunch;
   std::function<bool()> healthCheck;
+  /**
+   * Stops the processes THIS attempt started, and returns how many.
+   *
+   * A rollback has to move files those processes are holding open, so they have to go first.
+   * Restricted to what this attempt started and checked against the image name before anything
+   * happens to it: a pid is not an identity, and nothing else on the machine is this function's
+   * business.
+   */
+  std::function<int()> stopStarted;
+
   /** What the last relaunch did, per entry. Empty until relaunch() has run. */
   std::function<std::vector<RelaunchOutcome>()> lastOutcomes;
   /**
