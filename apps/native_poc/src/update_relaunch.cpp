@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include <tlhelp32.h>
+
 #include <exdisp.h>
 #include <shldisp.h>
 #include <shlobj.h>
@@ -86,6 +88,38 @@ bool shell_dispatch(ComPtr<IShellDispatch2>* out) {
   return SUCCEEDED(application.As(out));
 }
 
+/**
+ * Pids currently running the image at `path`.
+ *
+ * Needed because a shell-routed launch reports no pid: the shell starts the process, not us, so
+ * ShellExecute has nothing to hand back. Without this the client this attempt started could never
+ * be stopped -- and a rollback that has to move the client's file would fail on it, holding open
+ * by a process the rollback itself had launched.
+ *
+ * Compared on the full path, so a same-named program somewhere else is not ours.
+ */
+std::vector<DWORD> pids_running_image(const std::wstring& path) {
+  std::vector<DWORD> pids;
+  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snapshot == INVALID_HANDLE_VALUE) return pids;
+  PROCESSENTRY32W entry{};
+  entry.dwSize = sizeof(entry);
+  if (Process32FirstW(snapshot, &entry)) {
+    do {
+      HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
+      if (!h) continue;
+      wchar_t image[MAX_PATH]{};
+      DWORD size = MAX_PATH;
+      if (QueryFullProcessImageNameW(h, 0, image, &size) && _wcsicmp(image, path.c_str()) == 0) {
+        pids.push_back(entry.th32ProcessID);
+      }
+      CloseHandle(h);
+    } while (Process32NextW(snapshot, &entry));
+  }
+  CloseHandle(snapshot);
+  return pids;
+}
+
 bool wait_for_service_state(SC_HANDLE service, DWORD wanted, uint32_t timeoutMs,
                             std::string* detail) {
   const DWORD deadline = GetTickCount() + timeoutMs;
@@ -118,6 +152,11 @@ bool gShellLaunchDisabled = false;
 void set_shell_launch_disabled_for_test(bool disabled) { gShellLaunchDisabled = disabled; }
 
 bool launch_via_shell(const std::wstring& exePath, const std::wstring& arguments) {
+  // Asked before the shell is involved. ShellExecute through the desktop has no "do not show UI"
+  // option, so handing it a path that is not there puts a modal error dialog on the desktop --
+  // from an updater, on a machine that may have nobody in front of it, at the moment the product
+  // is supposed to be coming back. Answering the question ourselves avoids that entirely.
+  if (GetFileAttributesW(exePath.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
   // The one branch that cannot be arranged by any other means: a machine with no route to the
   // user's context. What must NOT happen there is a fallback to starting it as a child.
   if (gShellLaunchDisabled) return false;
@@ -288,7 +327,22 @@ RelaunchEffects make_relaunch_effects(RelaunchConfig config,
         outcome.started = start_service_and_wait(shared->config.serviceName, 30000, &detail);
         outcome.detail = outcome.started ? "service running" : ("service did not start -- " + detail);
       } else if (entry.kind == RelaunchKind::UserProcess) {
+        // Taken before, so the one that appears afterwards can be told from any that were
+        // already there. The shell starts it, so there is no pid to be handed back.
+        const std::vector<DWORD> before = pids_running_image(exePath);
         outcome.started = launch_via_shell(exePath, L"");
+        if (outcome.started) {
+          // Briefly: the shell hands off asynchronously, so the process may not exist yet.
+          for (int attempt = 0; attempt < 20 && outcome.startedPid == 0; ++attempt) {
+            for (DWORD pid : pids_running_image(exePath)) {
+              if (std::find(before.begin(), before.end(), pid) == before.end()) {
+                outcome.startedPid = pid;
+                break;
+              }
+            }
+            if (outcome.startedPid == 0) Sleep(50);
+          }
+        }
         // Not started, and deliberately not retried as a child of this process. Starting it here
         // would give it an administrator token it never had. That is a safe failure, not a
         // success, so it is recorded as a failure and the user is told.

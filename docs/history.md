@@ -9605,3 +9605,17 @@ Next action
 - 검증 — **`qwinsta`: console 만 Active.** C++ 업데이트 **14종 955 checks / 0 failed**. JS 디렉터리 스위트 전부 통과. 라이브 무영향: PID 3종 불변, `DisplayVersion` **0.2.104**.
 - 변경 파일: `update_state_machine.{hpp,cpp}`·`update_state_machine_test.cpp` · `update_relaunch.{hpp,cpp}`·`update_relaunch_test.cpp` · `update_effects.{hpp,cpp}`·`update_effects_test.cpp` · `update_release_test.cpp` · `updater_effects.cpp` · `updater_assembly_test.cpp` · `update_job_guard_test.cpp` · `apps/native_poc/CMakeLists.txt` · `docs/history.md`.
 - 버전 인상·설치본·설치·라이브 조작·배포·push 없음.
+
+### 467) 2026-09-09 여섯 시나리오 조합 회귀 — 실제 프로세스로, **다섯 개만**
+- Codex 요구: verdict 가 상태기계에서 갈리는 것과, **업데이터가 실제로 조립했을 때 그 갈래가 옳은 종착·백업 수명·프로세스 개수를 만드는 것**은 다른 주장이다. 신규 `remote60_updater_scenarios_test` (**21 checks**) 가 **제품이 쓰는 `UpdaterEffects`** 를 실제 `.exe`(명령 해석기 복사본, 새 버전은 뒤에 바이트를 덧붙여 **실행 가능하면서 다른 파일**)로 돌린다.
+- **덮은 다섯**: ① Host 실패 → 롤백·구 바이트 복귀·백업 잔여 0 ③ 둘 다 실패 → 필수가 결정 ④ **새 빌드 health 실패 → 실행 중인 프로세스 밑에서 복원 성공** ⑤ 구 빌드도 불건강 → `RestoredButUnhealthy` ⑥ Quiesce 미완 → 교체 전 포기·**중복 없음**.
+- **대조군**: **실행 중인 이미지는 삭제가 실패하고**(`ERROR_ACCESS_DENIED`) 정지 뒤에는 성공한다 — 정지가 파일 조작보다 앞서야 하는 이유의 OS 수준 증거.
+  - ⚠️ **이 대조군의 첫 판이 틀렸다**: "실행 중 이미지는 **이름 변경**이 실패한다" 고 단정했는데 **Windows 는 실행 중 이미지의 rename 을 허용한다.** 실패하는 것은 **삭제**이고, 그게 롤백이 하는 일이다. 오류 코드를 읽고 나서야 알았다.
+- ⚠️ **② Client 실패는 이 파일에서 못 덮었다 — 지우지 않고 이유를 적어 뒀다.** 이 fixture 로 만들면 relaunch 에 닿기도 전에 **swap 이 실패**한다(먼저 실행해도, 설치 디렉터리를 비운 것을 확인해도 재현). **원인을 찾지 못했고 파고들기를 멈췄다.** 주변 네 시나리오는 relaunch 가 뒤에 무엇을 보고하느냐만 다른데 그것들은 통과하므로, 대상 코드가 아니라 fixture 문제로 판단했다. **다른 곳에서 덮이는 것**: 상태기계 스위트(OptionalMissing → 유지·1회 commit·롤백 없음), relaunch E11(실제 실행 실패에서 verdict 생성). **어디에서도 안 덮이는 것**: 이 종착의 **백업 수명**을 실제 조합에서.
+- ⚠️ **제품 결함을 또 하나 잡았다**: `launch_via_shell` 이 **없는 파일을 셸에 넘기면 모달 오류 대화상자**가 뜬다 — 업데이터가, **사람이 없을 수도 있는 기계에서**, 제품이 돌아와야 할 그 순간에. 셸 경유 `ShellExecute` 에는 UI 억제 옵션이 없으므로 **넘기기 전에 파일 존재를 직접 확인**한다.
+- ⚠️ **또 하나**: 셸 실행은 **pid 를 돌려주지 않아** `stopStarted` 가 자기가 띄운 클라이언트를 **영원히 정지시킬 수 없었다** — 그러면 클라 파일을 옮겨야 하는 롤백이 **자기가 띄운 프로세스 때문에** 실패한다. 실행 전후 스냅샷 차이로 pid 를 찾도록 고쳤다.
+- **설정 주입 확대**: `payloadNames`·`relaunchTable` 을 `UpdaterDeps` 로. 조합이 스스로 정하면 **실제 제품 말고는 아무것도 상대로 돌릴 수 없고**, 그게 이 계층이 시험되지 않은 채 다섯 결함을 품고 있던 이유다.
+- 검증 — **`qwinsta`: console 만 Active.** C++ 업데이트 **15종 976 checks / 0 failed**(신규 scenarios 21, assembly 40, relaunch 106). JS 디렉터리 스위트 전부 통과. 라이브 무영향: PID 3종 불변, `DisplayVersion` **0.2.104**.
+- **알려진 결함(테스트 위생)**: 시나리오 스위트가 `%TEMP%` 에 디렉터리를 남길 수 있다(명령 해석기의 무해한 사본). 셸 실행이 비동기라 마지막 sweep 뒤에 프로세스가 나타나면 디렉터리가 잠긴다. **원인을 끝까지 못 봤고 파일 주석에 그대로 적었다.**
+- 변경 파일: `updater_scenarios_test.cpp`(신규) · `updater_effects.{hpp,cpp}` · `updater_assembly_test.cpp` · `update_relaunch.cpp` · `apps/native_poc/CMakeLists.txt` · `docs/history.md`.
+- 버전 인상·설치본·설치·라이브 조작·배포·push 없음.

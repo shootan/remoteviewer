@@ -758,6 +758,38 @@ if(MSVC)
   target_compile_options(remote60_update_job_guard_test PRIVATE /utf-8)
 endif()
 
+# Six ways an update can end, driven through the real assembly with real running processes.
+#
+# The verdict logic and the state machine each have suites and both pass. What neither shows is
+# that when the UPDATER assembles them, every ending produces the right terminal result, the right
+# backup lifetime and the right number of processes afterwards -- which is what a user actually
+# has, and is decided by the combination.
+add_executable(remote60_updater_scenarios_test
+  src/updater_scenarios_test.cpp
+  src/updater_effects.cpp
+  src/updater_options.cpp
+  src/update_state_machine.cpp
+  src/update_effects.cpp
+  src/update_manifest.cpp
+  src/update_signature.cpp
+  src/update_http.cpp
+  src/payload_name.cpp
+  src/install_registration.cpp
+  src/update_registration_wiring.cpp
+  src/update_process_targets.cpp
+  src/update_relaunch.cpp
+  src/update_relaunch_plan.cpp
+  src/update_health.cpp
+  src/update_health_log.cpp
+)
+target_include_directories(remote60_updater_scenarios_test PRIVATE src)
+target_link_libraries(remote60_updater_scenarios_test PRIVATE
+  bcrypt winhttp advapi32 ole32 oleaut32 uuid shell32 user32
+)
+if(MSVC)
+  target_compile_options(remote60_updater_scenarios_test PRIVATE /utf-8)
+endif()
+
 # The updater's own assembly, driven end to end.
 #
 # Every other suite builds an UpdateEffectsConfig by hand; this one drives UpdaterEffects -- the

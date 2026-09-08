@@ -58,6 +58,19 @@ struct UpdaterDeps {
   std::function<void(const std::string&)> log;
   /** This process's own image, so the swap can refuse to replace it. */
   std::wstring selfImagePath;
+  /**
+   * What a swap replaces, and what the relaunch plan may start.
+   *
+   * Production passes the product's own lists. They are dependencies rather than constants for
+   * the same reason everything else here is: an assembly that decides them for itself cannot be
+   * driven against anything but the real product, which is how this layer went untested while
+   * five defects lived in it.
+   *
+   * The two are related on purpose -- the set that is stopped and the set that is replaced must
+   * not drift apart -- so they are supplied together.
+   */
+  std::vector<std::wstring> payloadNames;
+  std::vector<KnownImage> relaunchTable;
 
   /** False when anything required is missing. */
   bool validate(std::string* detail = nullptr) const;

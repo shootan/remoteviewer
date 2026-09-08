@@ -184,6 +184,13 @@ int main() {
     UpdaterDeps deps;
     deps.log = [](const std::string&) {};
     deps.selfImagePath = root + L"\\work\\GNLinkUpdater.exe";  // outside installDir
+    // The product's own lists, because this suite seeds the install directory from them. They
+    // are dependencies rather than constants so that a test CAN supply its own -- the scenario
+    // suite does exactly that.
+    deps.payloadNames = product_image_names();
+    deps.payloadNames.push_back(L"ui\\shell.html");
+    deps.payloadNames.push_back(L"ui\\macro.html");
+    deps.relaunchTable = product_images();
 
     deps.fetchText = [&manifest, rec](const std::string& url, size_t, std::string* body,
                                       std::string*) {

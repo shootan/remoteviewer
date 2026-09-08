@@ -123,6 +123,8 @@ bool UpdaterDeps::validate(std::string* detail) const {
   if (!verifier) return fail("verifier not set");
   if (!log) return fail("log not set");
   if (selfImagePath.empty()) return fail("selfImagePath not set");
+  if (payloadNames.empty()) return fail("payloadNames not set");
+  if (relaunchTable.empty()) return fail("relaunchTable not set");
   // signalReady may be absent: an update nobody is waiting on is an ordinary case.
   return true;
 }
@@ -144,7 +146,7 @@ UpdaterDeps production_updater_deps(std::function<void(const std::string&)> log)
   deps.requestStop = [](const ProcessTarget& target) { return request_process_stop(target); };
   deps.registrationOps = production_registration_ops();
   deps.makeRelaunch = [](const RelaunchConfig& config, const std::vector<ProcessTarget>& stopped) {
-    return make_relaunch_effects(config, stopped);
+    return make_relaunch_effects(config, stopped, product_images());
   };
   // The compiled-in trust anchor. A test passes its own instead, which is how a signed fixture
   // can be exercised without this ever changing.
@@ -159,6 +161,13 @@ UpdaterDeps production_updater_deps(std::function<void(const std::string&)> log)
   wchar_t self[MAX_PATH]{};
   GetModuleFileNameW(nullptr, self, MAX_PATH);
   deps.selfImagePath = self;
+  // The executables come from the same list the process enumerator uses, so the set that is
+  // stopped and the set that is replaced cannot drift apart; the two data files are named
+  // alongside them.
+  deps.payloadNames = product_image_names();
+  deps.payloadNames.push_back(L"ui\shell.html");
+  deps.payloadNames.push_back(L"ui\macro.html");
+  deps.relaunchTable = product_images();
   return deps;
 }
 
