@@ -56,11 +56,30 @@ async function login() {
 }
 
 (async () => {
+  // This test does not start a server; run.js owns that, because the endpoint only exists when
+  // REMOTE60_UPDATE_DIR points somewhere and publishing a manifest is part of the setup. Run
+  // directly and every case fails with HTTP 0, which reads like fifteen separate bugs. So the
+  // reachability check comes first and stops here.
+  {
+    const probe = await request('/healthz');
+    if (probe.status === 0) {
+      console.log(`FAIL  no server on 127.0.0.1:${PORT}`);
+      console.log('      This test needs the server run.js starts with REMOTE60_UPDATE_DIR set.');
+      console.log('      Run the suite instead:  node test/run.js');
+      process.exit(2);
+    }
+    check('server is reachable', probe.status === 200, `HTTP ${probe.status}`);
+  }
+
   // Anonymous first: the endpoint must not be an open list of what every machine should be running.
   {
     const r = await request('/api/update/manifest?platform=windows');
     check('anonymous is refused', r.status === 401, `HTTP ${r.status}`);
-    check('and nothing leaks in the body', !r.body.includes('schema='), r.body.slice(0, 60));
+    // Gated on having actually received a response. Without that, "the body has no manifest in
+    // it" is satisfied by there being no body at all -- the assertion would pass hardest exactly
+    // when the server was unreachable, which is the opposite of useful.
+    check('and nothing leaks in the body', r.status !== 0 && !r.body.includes('schema='),
+          `HTTP ${r.status} ${r.body.slice(0, 60)}`);
   }
 
   const token = await login();

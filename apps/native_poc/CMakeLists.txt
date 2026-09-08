@@ -268,6 +268,11 @@ add_executable(remote60_host_app WIN32
   src/host_app_main.cpp
   src/directory_client.cpp
   src/log_upload.cpp
+  # The tray's "Check for updates" entry point and everything it needs to answer honestly.
+  src/update_check.cpp
+  src/update_http.cpp
+  src/update_manifest.cpp
+  src/update_signature.cpp
   host_app.rc
 )
 set_target_properties(remote60_host_app PROPERTIES OUTPUT_NAME "GNLinkHost")
@@ -280,6 +285,8 @@ target_link_libraries(remote60_host_app PRIVATE
   ws2_32
   comctl32
   shlwapi
+  bcrypt
+  winhttp
 )
 if(MSVC)
   # Input into elevated windows and installation of the secure-desktop broker both require an
@@ -560,6 +567,21 @@ target_include_directories(remote60_update_http_test PRIVATE src)
 target_link_libraries(remote60_update_http_test PRIVATE winhttp ws2_32)
 if(MSVC)
   target_compile_options(remote60_update_http_test PRIVATE /utf-8)
+endif()
+
+# What the tray item and the client's start-up check ask, with the fetcher injected so no test
+# opens a socket. Pins that "could not reach it" never comes back as "up to date".
+add_executable(remote60_update_check_test
+  src/update_check.cpp
+  src/update_http.cpp
+  src/update_manifest.cpp
+  src/update_signature.cpp
+  src/update_check_test.cpp
+)
+target_include_directories(remote60_update_check_test PRIVATE src)
+target_link_libraries(remote60_update_check_test PRIVATE bcrypt winhttp)
+if(MSVC)
+  target_compile_options(remote60_update_check_test PRIVATE /utf-8)
 endif()
 
 # Registration under a scratch HKCU key, with netsh, the SCM and the Start menu all recorded

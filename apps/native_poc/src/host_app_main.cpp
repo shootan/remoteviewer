@@ -44,6 +44,8 @@
 #include "log_upload.hpp"
 #include "host_command_line.hpp"
 #include "product_version.hpp"
+#include "env_util.hpp"
+#include "update_check.hpp"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -55,6 +57,10 @@ using remote60::native_poc::build_windows_command_line;
 
 constexpr wchar_t kWindowClass[] = L"Remote60HostApp";
 constexpr UINT kTrayMessage = WM_APP + 1;
+// An update check finishes on a worker thread, and a worker thread must not touch this
+// window. The answer comes back as a posted message carrying a heap-allocated string the
+// UI thread takes ownership of.
+constexpr UINT kUpdateCheckDoneMessage = WM_APP + 3;
 constexpr UINT_PTR kStatusTimer = 1;
 constexpr UINT kStatusIntervalMs = 2000;
 // Matches IDI_GNLINK in host_app.rc.
@@ -96,6 +102,7 @@ enum MenuId : int {
   IdMenuOpen = 2001,
   IdMenuChangeAccount,
   IdMenuSignOut,
+  IdMenuCheckUpdate,
   IdMenuExit,
 };
 
@@ -161,6 +168,19 @@ std::wstring log_file_path() {
   std::wstring dir = std::wstring(base) + L"\\GNLink";
   CreateDirectoryW(dir.c_str(), nullptr);
   return dir + L"\\host_app.log";
+}
+
+/** One stamped line into host_app.log. Free function because the supervisor's own is a member. */
+void append_host_app_log(const std::string& line) {
+  const std::wstring path = log_file_path();
+  if (path.empty()) return;
+  std::FILE* file = nullptr;
+  if (_wfopen_s(&file, path.c_str(), L"a") != 0 || !file) return;
+  SYSTEMTIME now{};
+  GetLocalTime(&now);
+  std::fprintf(file, "%02d-%02d %02d:%02d:%02d %s\n", now.wMonth, now.wDay, now.wHour,
+               now.wMinute, now.wSecond, line.c_str());
+  std::fclose(file);
 }
 
 // Everything the sign-in worker produces, handed to the UI thread by value. Deliberately plain
@@ -726,6 +746,59 @@ void remove_tray_icon() {
   g.trayAdded = false;
 }
 
+/**
+ * Asks whether there is a newer build, without blocking the tray.
+ *
+ * The check runs on a detached thread and posts its answer back; the menu closes immediately
+ * either way. That matters more than it looks: the failure this guards against is a socket
+ * timeout freezing the tray icon of a product whose whole job is to be running quietly.
+ *
+ * With no trusted key compiled in, the honest answer is that this build cannot check -- said
+ * plainly rather than dressed up as a server error.
+ */
+void start_update_check(HWND window) {
+  namespace upd = remote60::native_poc::update;
+
+  upd::CheckConfig config;
+  config.manifestUrl = remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL");
+  config.trustedPublicKeyHex = upd::trusted_public_key_hex();
+  config.platform = "windows";
+  config.installedVersion = narrow(kProductVersion);
+
+  upd::check_for_update_async(
+      config, upd::https_manifest_fetcher(), upd::default_verifier(),
+      [window](upd::CheckResult result) {
+        std::wstring text;
+        switch (result.outcome) {
+          case upd::CheckOutcome::UpdateAvailable:
+            text = L"A newer version is available: " + widen(result.availableVersion) +
+                   L"\n\nInstalling it from here is not implemented yet.";
+            break;
+          case upd::CheckOutcome::UpToDate:
+            text = L"This is the latest version.";
+            break;
+          case upd::CheckOutcome::NotConfigured:
+            // Not an error, and not "up to date" either. Saying which is the point.
+            text = L"This build cannot check for updates.\n\n" + widen(result.detail);
+            break;
+          case upd::CheckOutcome::Unreachable:
+            text = L"Could not reach the update server, so it is not known whether a newer "
+                   L"version exists.\n\n" + widen(result.detail);
+            break;
+          case upd::CheckOutcome::Rejected:
+            text = L"The update information could not be trusted and was ignored.\n\n" +
+                   widen(result.detail);
+            break;
+        }
+        append_host_app_log(std::string("[host-app] update check: ") +
+                            upd::check_outcome_name(result.outcome) +
+                            (result.detail.empty() ? "" : " " + result.detail));
+        // Posted, not called: this runs on the worker thread.
+        PostMessageW(window, kUpdateCheckDoneMessage, 0,
+                     reinterpret_cast<LPARAM>(new std::wstring(std::move(text))));
+      });
+}
+
 void show_tray_menu(HWND window) {
   HMENU menu = CreatePopupMenu();
   if (!menu) return;
@@ -734,6 +807,10 @@ void show_tray_menu(HWND window) {
   AppendMenuW(menu, MF_STRING | (g.signedIn ? 0 : MF_GRAYED), IdMenuChangeAccount,
               L"Change account");
   AppendMenuW(menu, MF_STRING | (g.signedIn ? 0 : MF_GRAYED), IdMenuSignOut, L"Sign out");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  // Always enabled, including when signed out: "is there a newer build" does not depend on being
+  // signed in, and greying it out would make an unconfigured build look like a broken one.
+  AppendMenuW(menu, MF_STRING, IdMenuCheckUpdate, L"Check for updates");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, IdMenuExit, L"Exit");
 
@@ -1322,11 +1399,25 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         SetForegroundWindow(window);
         return 0;
       }
+      if (id == IdMenuCheckUpdate) {
+        start_update_check(window);
+        return 0;
+      }
       if (id == IdMenuExit) {
         DestroyWindow(window);
         return 0;
       }
       break;
+    }
+
+    case kUpdateCheckDoneMessage: {
+      // Ownership of the string transfers here. Shown from the UI thread, which is the reason
+      // the worker posts instead of calling MessageBox itself.
+      std::unique_ptr<std::wstring> text(reinterpret_cast<std::wstring*>(lParam));
+      if (text) {
+        MessageBoxW(window, text->c_str(), kProductName, MB_OK | MB_ICONINFORMATION);
+      }
+      return 0;
     }
 
     case WM_APP + 2: {
