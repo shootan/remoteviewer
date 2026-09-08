@@ -64,6 +64,29 @@ struct RelaunchEntry {
 };
 
 /**
+ * One image the product knows, and how it comes back.
+ *
+ * A table rather than a hard-coded chain so that it can be HANDED IN. That matters for one
+ * reason: until it could be, the code that starts processes had no way to start anything but the
+ * real product, so it was linked into nothing and had never executed. Passing a table of dummy
+ * names lets the same code run for real against a temp directory.
+ *
+ * The allow-list property is unchanged by this. A name that is not in the table still cannot be
+ * started. What moved is where the table comes from, not whether there is one.
+ */
+struct KnownImage {
+  /** As spelled in the install directory. A launcher builds its path from this. */
+  const wchar_t* name;
+  /** The same, lowercased, for matching an observed image path. */
+  const wchar_t* lower;
+  RelaunchKind kind;
+  const char* reason;
+};
+
+/** The product's own table. The default, and the only one production ever passes. */
+const std::vector<KnownImage>& product_images();
+
+/**
  * The plan for a set of processes that were stopped.
  *
  * Only what was actually running appears. Duplicates collapse: two instances of one image are one
@@ -75,6 +98,10 @@ struct RelaunchEntry {
  * a manifest is data, and data does not get to name an executable to run.
  */
 std::vector<RelaunchEntry> relaunch_plan(const std::vector<ProcessTarget>& stopped);
+
+/** The same, against a table the caller supplies. Tests pass their own dummies. */
+std::vector<RelaunchEntry> relaunch_plan(const std::vector<ProcessTarget>& stopped,
+                                         const std::vector<KnownImage>& table);
 
 /**
  * The entries a caller is expected to actually start, in order.

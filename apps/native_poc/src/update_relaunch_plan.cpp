@@ -5,15 +5,6 @@
 namespace remote60::native_poc::update {
 namespace {
 
-struct KnownImage {
-  /** As it is spelled in the install directory. This is what a launcher builds a path from. */
-  const wchar_t* name;
-  /** The same name lowercased, for matching an observed image path against it. */
-  const wchar_t* lower;
-  RelaunchKind kind;
-  const char* reason;
-};
-
 /**
  * The product's processes and how each one comes back.
  *
@@ -21,7 +12,7 @@ struct KnownImage {
  * they are worth reading together. Everything not listed is unknown, and unknown means not
  * started -- see relaunch_plan.
  */
-const KnownImage kKnownImages[] = {
+const std::vector<KnownImage> kKnownImages = {
     {L"GNLinkHost.exe", L"gnlinkhost.exe", RelaunchKind::ElevatedProcess,
      "the host is requireAdministrator and was elevated before the update, so a child of the "
      "updater inherits the same token and no prompt appears"},
@@ -40,8 +31,9 @@ const KnownImage kKnownImages[] = {
      "the client shell starts the viewer when a connection is made, not at start-up"},
 };
 
-const KnownImage* find_known(const std::wstring& leafLower) {
-  for (const KnownImage& image : kKnownImages) {
+const KnownImage* find_known(const std::wstring& leafLower,
+                             const std::vector<KnownImage>& table) {
+  for (const KnownImage& image : table) {
     if (leafLower == image.lower) return &image;
   }
   return nullptr;
@@ -70,7 +62,14 @@ std::wstring image_leaf_lower(const std::wstring& path) {
   return leaf;
 }
 
+const std::vector<KnownImage>& product_images() { return kKnownImages; }
+
 std::vector<RelaunchEntry> relaunch_plan(const std::vector<ProcessTarget>& stopped) {
+  return relaunch_plan(stopped, product_images());
+}
+
+std::vector<RelaunchEntry> relaunch_plan(const std::vector<ProcessTarget>& stopped,
+                                         const std::vector<KnownImage>& table) {
   std::vector<RelaunchEntry> plan;
   std::vector<std::wstring> seen;
 
@@ -80,7 +79,7 @@ std::vector<RelaunchEntry> relaunch_plan(const std::vector<ProcessTarget>& stopp
     // One entry per image. The product runs one of each, and two would be worse than none.
     if (std::find(seen.begin(), seen.end(), leaf) != seen.end()) continue;
 
-    const KnownImage* known = find_known(leaf);
+    const KnownImage* known = find_known(leaf, table);
     // Not one of ours. Dropped rather than started: an image name that arrived from outside is
     // data, and data does not get to nominate an executable for this process to run.
     if (!known) continue;

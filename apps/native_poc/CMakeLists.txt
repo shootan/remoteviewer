@@ -683,12 +683,18 @@ endif()
 # deliberately NOT in this target. The decisions are testable; making them happen is not something
 # this binary should be able to do.
 add_executable(remote60_update_relaunch_test
+  # update_relaunch.cpp IS linked here now. It was not, and that was wrong: the code that starts
+  # processes had never executed, and "linked into nothing" was written up as isolation when it
+  # was really an admission. Every path, name, service name and log it touches is an argument, so
+  # this test points it at a temp directory full of dummies and runs the real OS path.
+  src/update_relaunch.cpp
   src/update_relaunch_plan.cpp
   src/update_health.cpp
   src/update_health_log.cpp
   src/update_relaunch_test.cpp
 )
 target_include_directories(remote60_update_relaunch_test PRIVATE src)
+target_link_libraries(remote60_update_relaunch_test PRIVATE advapi32 ole32 oleaut32 shell32)
 if(MSVC)
   target_compile_options(remote60_update_relaunch_test PRIVATE /utf-8)
 endif()
