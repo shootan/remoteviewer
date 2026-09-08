@@ -504,6 +504,21 @@ if(MSVC)
   target_compile_options(remote60_version_compare_test PRIVATE /utf-8)
 endif()
 
+# Manifest parsing plus real CNG signature verification, and the ordering between them.
+add_executable(remote60_update_manifest_test
+  src/update_manifest.cpp
+  src/update_signature.cpp
+  src/update_manifest_test.cpp
+)
+target_include_directories(remote60_update_manifest_test PRIVATE src)
+target_link_libraries(remote60_update_manifest_test PRIVATE bcrypt)
+target_compile_definitions(remote60_update_manifest_test PRIVATE
+  "REMOTE60_UPDATE_VECTORS_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/../shared/update_manifest\""
+)
+if(MSVC)
+  target_compile_options(remote60_update_manifest_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_host_command_line_test
   src/host_command_line_test.cpp
 )
