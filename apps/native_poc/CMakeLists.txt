@@ -561,6 +561,23 @@ if(MSVC)
   target_compile_options(remote60_update_process_targets PRIVATE /utf-8)
 endif()
 
+# The other production-only half of the updater, alongside remote60_update_process_targets and
+# for the same reason: this is the code that creates processes, talks to the SCM and reads the
+# live host log. Built so it cannot rot, linked into nothing, so no test binary contains those
+# symbols. The DECISIONS behind it (update_relaunch_plan.cpp, update_health.cpp) are separate and
+# are linked into remote60_update_relaunch_test.
+add_library(remote60_update_relaunch STATIC
+  src/update_relaunch.cpp
+  src/update_relaunch_plan.cpp
+  src/update_health.cpp
+  src/update_health_log.cpp
+)
+target_include_directories(remote60_update_relaunch PRIVATE src)
+target_link_libraries(remote60_update_relaunch PRIVATE advapi32 ole32 oleaut32 shell32)
+if(MSVC)
+  target_compile_options(remote60_update_relaunch PRIVATE /utf-8)
+endif()
+
 # The update path's HTTPS client. The security rules it enforces are pure functions, so most of
 # this suite needs no server; the one case that opens a socket points a TLS client at a cleartext
 # listener on loopback and requires it to fail.
@@ -658,6 +675,22 @@ target_compile_definitions(remote60_update_release_test PRIVATE
 target_link_libraries(remote60_update_release_test PRIVATE bcrypt winhttp advapi32 ole32 uuid shell32)
 if(MSVC)
   target_compile_options(remote60_update_release_test PRIVATE /utf-8)
+endif()
+
+# The two decisions behind Relaunch and HealthCheck.
+#
+# src/update_relaunch.cpp -- the code that actually starts processes and talks to the SCM -- is
+# deliberately NOT in this target. The decisions are testable; making them happen is not something
+# this binary should be able to do.
+add_executable(remote60_update_relaunch_test
+  src/update_relaunch_plan.cpp
+  src/update_health.cpp
+  src/update_health_log.cpp
+  src/update_relaunch_test.cpp
+)
+target_include_directories(remote60_update_relaunch_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_update_relaunch_test PRIVATE /utf-8)
 endif()
 
 add_executable(remote60_host_command_line_test
@@ -886,6 +919,13 @@ if(GNLINK_HAVE_WEBVIEW2)
     src/directory_session_client.cpp
     src/directory_client.cpp
     src/log_upload.cpp
+    # The start-up update check. Asking is all the client does: it is not elevated, so it cannot
+    # replace anything in %ProgramFiles% itself.
+    src/update_check.cpp
+    src/update_http.cpp
+    src/update_manifest.cpp
+    src/payload_name.cpp
+    src/update_signature.cpp
   )
   target_include_directories(remote60_client_shell PRIVATE src "${GNLINK_WEBVIEW2_DIR}/include")
   if(MSVC)
@@ -897,7 +937,7 @@ if(GNLINK_HAVE_WEBVIEW2)
   target_link_libraries(remote60_client_shell PRIVATE
     common
     "${GNLINK_WEBVIEW2_DIR}/x64/WebView2LoaderStatic.lib"
-    ws2_32 iphlpapi user32 ole32 shell32 shlwapi version gdi32
+    ws2_32 iphlpapi user32 ole32 shell32 shlwapi version gdi32 bcrypt winhttp
   )
   set_target_properties(remote60_client_shell PROPERTIES OUTPUT_NAME "GNLinkClient")
 

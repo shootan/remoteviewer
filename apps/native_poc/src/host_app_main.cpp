@@ -870,7 +870,7 @@ void apply_signed_in_ui(bool signedIn) {
  * gets 401 for the rest of the process's life -- which is what emptied the NAS of host logs on
  * 2026-09-07 (P10). The uploader is re-pointed; what it queued under the same account stays.
  */
-void start_log_upload() {
+bool start_log_upload() {
   remote60::native_poc::LogUploadConfig upload;
   upload.directoryUrl = g.cache.directoryUrl;
   upload.hostToken = g.cache.hostToken;
@@ -879,7 +879,29 @@ void start_log_upload() {
   std::string reason;
   const bool on = remote60::native_poc::log_upload_configure(upload, &reason);
   std::printf("[gnlink-host] log upload %s %s\n", on ? "on" : "off", reason.c_str());
+  return on;
 }
+
+/**
+ * The one line an updater reads to decide whether this build came up.
+ *
+ * An updater cannot learn this by looking at the process list: a host that starts and then fails
+ * to do its job is exactly the failure a health check exists for, and its existence proves
+ * nothing. So the host says, about itself, which version it is and whether it has reached the
+ * directory. Written more than once as the answer becomes known; the reader takes the last.
+ *
+ * `directory=not-configured` is not a failure. No account signed in means there is nothing to
+ * reach, and an updater that rolled back for that would be inventing a fault it did not cause.
+ *
+ * Format is parsed by update_health.cpp -- keep them together.
+ */
+void write_health_report(const char* directoryState) {
+  append_host_app_log(std::string("[host-app] health version=") + narrow(kProductVersion) +
+                      " directory=" + directoryState);
+}
+
+/** True once the directory has accepted something from us, so the report is written only once. */
+bool gDirectoryReported = false;
 
 void start_streaming() {
   if (g.uiPreview) return;
@@ -1434,7 +1456,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         g.cache.hostName = result->hostName;
         g.cache.hostId = result->hostId;
         g.cache.hostToken = result->hostToken;
-        start_log_upload();
+        // A fresh sign-in changes the answer to "is a directory reachable", so the report is
+        // renewed rather than left saying what was true before signing in.
+        gDirectoryReported = false;
+        write_health_report(start_log_upload() ? "pending" : "not-configured");
         // Only the token is written; the password never reaches disk.
         (void)directory::save_host_cache(g.cachePath, g.cache);
         SetWindowTextW(g.passwordEdit, L"");
@@ -1460,6 +1485,12 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
       if (wParam == kStatusTimer) {
         refresh_status_text();
         update_tray_tip();
+        // The first batch the directory accepts is the observable fact that this build can reach
+        // it. Reported once; an updater waiting on it stops waiting here.
+        if (!gDirectoryReported && remote60::native_poc::log_upload_status().sentBatches > 0) {
+          gDirectoryReported = true;
+          write_health_report("ok");
+        }
       }
       return 0;
 
@@ -1531,7 +1562,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR commandLine, int) {
   } else {
     g.cachePath = directory::default_host_cache_path();
     haveToken = directory::load_host_cache(g.cachePath, &g.cache);
-    if (haveToken) start_log_upload();
+    bool uploaderOn = false;
+    if (haveToken) uploaderOn = start_log_upload();
+    // Said as soon as it is known, so an updater is not waiting on a machine that has nothing to
+    // report. `pending` means an answer is coming; the other two mean none is.
+    write_health_report(uploaderOn ? "pending" : "not-configured");
   }
   SetWindowTextW(g.serverEdit, widen(g.cache.directoryUrl).c_str());
   SetWindowTextW(g.accountEdit, widen(g.cache.accountId).c_str());

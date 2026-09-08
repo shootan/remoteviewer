@@ -9285,3 +9285,26 @@ Next action
 - 변경 파일: `apps/native_poc/src/update_release_test.cpp`(신규) · `update_effects.hpp`·`update_effects.cpp`·`update_effects_test.cpp` · `update_manifest.hpp`·`update_manifest.cpp` · `apps/native_poc/CMakeLists.txt` · `docs/업데이트_기능_설계.md`(3.8·3.9·3.10) · `docs/history.md` · `docs/구현계획.md`.
 - 버전 인상·설치본 생성·설치·라이브 조작·서버 배포·push 없음.
 - 상태: 검증용 검사 대기. **전체 완료 아님.**
+
+### 448) 2026-09-08 업데이트 step4-10 — `Relaunch`/`HealthCheck` production + 클라이언트 시작 시 비동기 확인
+- **결정과 실행을 분리**했다. 무엇을 다시 띄울지(`update_relaunch_plan.cpp`)와 무엇을 건강의 증거로 받을지(`update_health.cpp`, `update_health_log.cpp`)는 **테스트에 링크되고**, 실제로 프로세스를 만들고 SCM 을 건드리고 라이브 로그를 읽는 코드(`update_relaunch.cpp`)는 **어디에도 링크되지 않는 static 라이브러리**다 — `remote60_update_process_targets` 와 같은 배치, 같은 이유.
+- **Relaunch — 제품의 프로세스는 서로 대등하지 않다.** 대등하게 다루면 한 번에 네 가지가 어긋난다:
+  - `GNLinkHost.exe` 는 업데이터의 자식(이미 `requireAdministrator` 였으므로 토큰 상속 → **UAC 프롬프트 없음**).
+  - `GNLinkClient.exe` 는 **셸을 통해 비승격으로**. 승격된 업데이터의 자식으로 띄우면 관리자 토큰을 물려받아 **이후 세션 전체가 관리자로 돈다**. 셸 경로가 안 되면 **띄우지 않는다** — 자식으로 대신 띄우는 폴백은 없다. 그 폴백이 바로 피하려던 결과다.
+  - `GNLinkInputService.exe` 는 SCM(프로세스를 직접 만들면 서비스가 되지 않는다).
+  - `GNLinkStream/Capture/Viewer.exe` 는 **띄우지 않는다** — 감독자가 있는 자식이다. 여기서 띄우면 **아무도 감독하지 않는 인스턴스** + 감독자가 띄운 **두 번째**가 생긴다.
+  - 계획은 **정지시킨 목록**에서 만든다(돌지 않던 것은 안 띄운다). 같은 이미지 중복은 **항목 하나**. 제품이 모르는 이름은 **버린다** — 데이터가 실행할 파일을 지명하게 두지 않는다.
+- **HealthCheck — 프로세스의 존재는 증거가 아니다.** 떠서 곧바로 제 일을 못 하는 것이 바로 이 검사가 잡으라고 있는 실패다. 그래서 제품이 자기 자신에 대해 쓰는 한 줄을 읽는다: `[host-app] health version=<v> directory=<ok|pending|not-configured>`.
+  - ⚠️ **증거는 이번 실행의 것이어야 한다.** 로그에는 **교체된 그 버전**의 보고가 남아 있고, 파일 전체를 읽는 검사는 그걸 보고 성공을 보고한다 — **정확히 이 검사가 잡으라고 있는 상황에서**. 그래서 재실행 **전에** 로그 크기를 기록하고 그 뒤에 덧붙은 바이트만 본다. 회귀로 고정: 전체를 읽으면 구버전 보고가 "healthy" 로 판정되고, mark 뒤로 읽으면 **자기 버전으로도 healthy 가 아니다**.
+  - `pending`(아직) 과 실패는 다르다. `not-configured`(로그인 계정 없음) 는 **실패가 아니다** — 그걸로 롤백하면 업데이트가 만들지 않은 결함을 지어내는 것이다. **구버전 보고는 지연이 아니라 실패**(`WrongVersion`, 즉시 종료 — 더 기다려도 안 바뀐다). 모르는 `directory=` 값은 **무시**(새 제품의 상태가 옛 업데이터를 우연히 만족시키면 안 된다).
+  - 로그는 **공유 열기**로 읽는다. 배타적으로 열면 검사가 자기가 기다리는 증거를 막는다.
+- **호스트가 그 한 줄을 쓴다**(`host_app_main.cpp`): 시작 시 캐시 로드 직후 `pending`/`not-configured`, 상태 타이머에서 `log_upload_status().sentBatches > 0` 이 되면 **한 번** `ok`, 새 로그인 때 갱신.
+- **클라이언트 시작 시 비동기 확인**(`client_shell_main.cpp`): 창을 띄운 **직후 · WebView 생성 전**에 시작하고 **기다리지 않는다**. 최적화가 아니라 요구사항 — 서버가 답할 때까지 로그인 창을 안 보여주면 그 서버로 가는 경로가 없는 기계에서 **쓸 수 없다**. 사용자에게 말하는 것은 **"새 버전이 있다" 뿐**이고 나머지는 로그로만 간다(시작 시 확인은 서버에 못 닿는 것이 일상인 노트북에서 돈다 — 대화상자로 만들면 사용자는 **닫는 법을 배우고** 다음에 중요한 것도 같이 닫는다). `Unreachable` 은 로그에서도 **"최신" 으로 기록되지 않는다**. 답이 페이지보다 먼저 오면 **버리지 않고 들고 있다가** `ready` 때 보낸다.
+- 검증 — **`qwinsta`: `console` 만 Active, `rdp-tcp` 는 Listen → RDP 미접속.**
+  - C++ 업데이트 **10종 합계 729 checks / 0 failed**(신규 relaunch **57**, release 80, effects 147, manifest 82, state_machine 61, http 36, check 28, payload_name 54, version_compare 139, install_registration 45). `client_shell_bridge_test` PASS(시작 시 확인의 침묵 정책 7건 추가). 전체 빌드 오류 0.
+  - JS 디렉터리 스위트 exit 0. Kotlin 소스 변경 없어 미실행.
+  - 라이브 무영향 실측: `GNLinkHost`(5156)·`GNLinkInputService`(10820)·`GNLinkStream`(19384) PID 동일, `DisplayVersion` = **0.2.104** 그대로.
+- **미검증 한계(누적 정리)**: ① 실 HTTPS 왕복 0회 — 모든 fetch 는 주입 함수 ② 실제 서비스/방화벽/시작메뉴 등록 0회 — 기록만 ③ 관리자 권한 실증 없음 — UAC 프롬프트 0회/1회 조건 미실증 ④ **`update_relaunch.cpp` 는 실행 실증 0** — `CreateProcessW`·`StartServiceW`·셸 경유 비승격 실행 모두 미실행(라이브를 건드리지 않기 위해 의도적으로 링크하지 않음) ⑤ 호스트/클라이언트 **UI 실동작 미검증** — 빌드한 바이너리를 실행하면 라이브 0.2.104 와 충돌 ⑥ 실서버 배포·운영 서명키 없음.
+- 변경 파일: `update_relaunch_plan.{hpp,cpp}`·`update_health.{hpp,cpp}`·`update_health_log.{hpp,cpp}`·`update_relaunch.{hpp,cpp}`·`update_relaunch_test.cpp`(전부 신규) · `host_app_main.cpp` · `client_shell_main.cpp` · `client_shell_bridge.{hpp,cpp}`·`client_shell_bridge_test.cpp` · `apps/native_poc/CMakeLists.txt` · `docs/업데이트_기능_설계.md`(3.11·3.12·3.13) · `docs/history.md` · `docs/구현계획.md`.
+- 버전 인상·설치본 생성·설치·라이브 조작·서버 배포·push 없음.
+- 상태: 검증용 검사 대기. **전체 완료 아님.**

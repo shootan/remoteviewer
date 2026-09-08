@@ -73,6 +73,43 @@ std::string shell_status_json(const std::string& state, const std::string& detai
   return oss.str();
 }
 
+ShellUpdateNotice shell_update_notice(const std::string& outcome,
+                                      const std::string& availableVersion,
+                                      const std::string& detail) {
+  ShellUpdateNotice notice;
+  if (outcome == "UpdateAvailable") {
+    notice.show = true;
+    notice.text = availableVersion.empty()
+                      ? std::string("새 버전이 있습니다.")
+                      : "새 버전 " + availableVersion + " 이 있습니다.";
+    notice.logLine = "update check: newer version available " + availableVersion;
+    return notice;
+  }
+  if (outcome == "UpToDate") {
+    notice.logLine = "update check: up to date";
+    return notice;
+  }
+  if (outcome == "NotConfigured") {
+    // Not a failure. This build simply cannot check, and saying so to the user would be
+    // reporting a fault that does not exist.
+    notice.logLine = "update check: not configured -- " + detail;
+    return notice;
+  }
+  if (outcome == "Unreachable") {
+    // Explicitly NOT "up to date". The distinction is kept in the log even though the user is
+    // not interrupted with it.
+    notice.logLine = "update check: server unreachable, so it is not known whether a newer "
+                     "version exists -- " + detail;
+    return notice;
+  }
+  if (outcome == "Rejected") {
+    notice.logLine = "update check: the answer did not verify and was ignored -- " + detail;
+    return notice;
+  }
+  notice.logLine = "update check: unrecognised outcome " + outcome;
+  return notice;
+}
+
 std::string shell_restore_json(const std::string& server, const std::string& accountId,
                                const ShellRuntimeSettings& settings) {
   std::ostringstream oss;

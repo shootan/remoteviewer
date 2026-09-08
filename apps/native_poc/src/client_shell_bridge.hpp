@@ -65,4 +65,34 @@ bool shell_parse_settings(const std::string& json, ShellRuntimeSettings* out);
 /** The "type" field, or empty when the message is not something we recognise. */
 std::string shell_message_type(const std::string& json);
 
+/** What a start-up update check should say to the user, if anything. */
+struct ShellUpdateNotice {
+  /**
+   * False for every outcome except "there is a newer version".
+   *
+   * The client checks at start-up, and a start-up check that cannot reach the server is the
+   * ordinary case for a laptop opened on a train. Telling the user about it teaches them to
+   * dismiss a dialog, and the next time it says something that matters they will dismiss that
+   * too. Failures go to the log, where someone diagnosing a problem will look for them.
+   *
+   * "Up to date" is silent for the same reason: it is the answer the user already assumed.
+   */
+  bool show = false;
+  std::string text;
+  /** Always present, for the log, including the outcomes that say nothing to the user. */
+  std::string logLine;
+};
+
+/**
+ * Decides what a check outcome means for the user.
+ *
+ * Takes the outcome as a string (from update_check's check_outcome_name) rather than the enum, so
+ * the UI boundary does not drag the whole update stack into everything that includes this header.
+ * An outcome this build does not recognise is logged and shown to nobody -- a name that is not
+ * one of the five is not a reason to interrupt someone.
+ */
+ShellUpdateNotice shell_update_notice(const std::string& outcome,
+                                      const std::string& availableVersion,
+                                      const std::string& detail);
+
 }  // namespace remote60::native_poc
