@@ -1513,11 +1513,20 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
   stableTextTune_ = env_string_equals_ci("REMOTE60_NATIVE_ENCODER_TUNE_MODE", "stable_text");
   sampleDurationHns_ = std::max<int64_t>(1, 10000000LL / static_cast<int64_t>(fps_));
 
-  IMFTransform* encRaw = nullptr;
-  codec_debug_log("encoder initialize: create transform");
-  if (!create_h264_encoder_transform(&encRaw, &usingHardware_, &backendName_) || !encRaw) return false;
-  codec_debug_log("encoder initialize: transform created");
-  enc_.Attach(encRaw);
+  if (testTransform_) {
+    // Test seam only (set_transform_for_test): adopt the caller's transform and skip the
+    // enumeration. Everything after this point runs exactly as it does for an enumerated one.
+    enc_ = testTransform_;
+    usingHardware_ = false;
+    backendName_ = "test_transform";
+    codec_debug_log("encoder initialize: using the injected test transform");
+  } else {
+    IMFTransform* encRaw = nullptr;
+    codec_debug_log("encoder initialize: create transform");
+    if (!create_h264_encoder_transform(&encRaw, &usingHardware_, &backendName_) || !encRaw) return false;
+    codec_debug_log("encoder initialize: transform created");
+    enc_.Attach(encRaw);
+  }
   (void)set_mf_attr_u32(enc_.Get(), MF_TRANSFORM_ASYNC_UNLOCK, 1);
   if (d3dManager_) {
     codec_debug_log("encoder initialize: set d3d manager");

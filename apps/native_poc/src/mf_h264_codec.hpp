@@ -196,6 +196,19 @@ class H264Encoder {
   // provenance (every AU goes out tagged epoch 0, which the emit gate refuses). Only a rebuild --
   // shutdown() followed by a successful initialize() -- clears it.
   bool provenance_invalid() const { return pendingInputs_.provenance_invalid(); }
+  /**
+   * Test seam (A06 regression only): initialize() adopts this transform instead of enumerating
+   * one, so a test can drive the accepted-input FIFO and the drain path deterministically --
+   * an overflow followed by a failing drain cannot be produced through a real encoder.
+   *
+   * Product code never calls this and its behaviour is unchanged when it is unset: the
+   * enumeration, the backend choice and every configuration step stay exactly as they are.
+   * Ownership: this encoder holds its own reference (ComPtr) from here until shutdown() releases
+   * it, like any enumerated transform; the caller keeps its own reference. Passing nullptr
+   * restores the enumeration path. If initialize() fails after adopting it, shutdown() (which
+   * initialize() calls on entry and on failure) releases it as usual.
+   */
+  void set_transform_for_test(IMFTransform* transform) { testTransform_ = transform; }
   void shutdown();
 
  private:
@@ -208,6 +221,7 @@ class H264Encoder {
   void report_sps_profile_once(const uint8_t* data, size_t size);
 
   Microsoft::WRL::ComPtr<IMFTransform> enc_;
+  Microsoft::WRL::ComPtr<IMFTransform> testTransform_;  // see set_transform_for_test
   uint32_t width_ = 0;
   uint32_t height_ = 0;
   uint32_t fps_ = 0;

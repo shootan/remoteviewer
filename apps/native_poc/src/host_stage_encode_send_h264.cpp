@@ -295,10 +295,17 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     watchdog.EnterMainPhase(MainLoopPhase::EncodeCall);
     if (wantSurfaceEncode) {
       auto nv12Tex = res.captureReadback.Nv12SlotTexture(nv12Slot, nv12Generation);
-      if (nv12Tex &&
-          encoder.codec.encode_frame_surface(nv12Tex.Get(), forceKeyFrame,
-                                       static_cast<int64_t>(encodeInputUs) * 10, &units,
-                                       &encodeStats)) {
+      const EncoderState::EncodeCallResult surfaceCall =
+          nv12Tex ? encoder.EncodeSurfaceWithProvenance(nv12Tex.Get(), forceKeyFrame,
+                                                        static_cast<int64_t>(encodeInputUs) * 10,
+                                                        &units, &encodeStats)
+                  : EncoderState::EncodeCallResult{};
+      if (surfaceCall.provenanceLatched) {
+        std::cout << "[native-video-host] encoder provenance invalid (surface encode call):"
+                  << " pendingOverflow=" << encodeStats.pendingInputOverflowTotal
+                  << " -> gate closed, encoder rebuild requested\n";
+      }
+      if (nv12Tex && surfaceCall.ok) {
         surfaceEncoded = true;
         ++encoder.nv12SurfaceEncodeCount;
         Nv12PendingRelease pending;
@@ -334,30 +341,30 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
         res.captureReadback.SetNv12Enabled(false);
         std::cout << "[native-video-host] nv12 surface encode rejected backend="
                   << encoder.codec.backend_name() << "; falling back to cpu nv12\n";
-        // A06: this call may still have overflowed the accepted-input FIFO before it failed.
-        if (encoder.NoteProvenance(encoder.codec.provenance_invalid())) {
-          std::cout << "[native-video-host] encoder provenance invalid (surface encode rejected)"
-                    << " -> gate closed, encoder rebuild requested\n";
-        }
+        // A06: the provenance handling for this call already ran inside
+        // EncodeSurfaceWithProvenance above, so this early return cannot skip it.
         return Flow::Continue;
       }
     }
-   if (!surfaceEncoded &&
-       !encoder.codec.encode_frame_bgra(encodeSrc, encodeSrcW, encodeSrcH, encodeSrcStride,
-                                  forceKeyFrame, static_cast<int64_t>(encodeInputUs) * 10,
-                                  &units, &encodeStats)) {
+   EncoderState::EncodeCallResult bgraCall{};
+   if (!surfaceEncoded) {
+     bgraCall = encoder.EncodeBgraWithProvenance(encodeSrc, encodeSrcW, encodeSrcH, encodeSrcStride,
+                                                 forceKeyFrame,
+                                                 static_cast<int64_t>(encodeInputUs) * 10, &units,
+                                                 &encodeStats);
+     if (bgraCall.provenanceLatched) {
+       std::cout << "[native-video-host] encoder provenance invalid (bgra encode call):"
+                 << " pendingOverflow=" << encodeStats.pendingInputOverflowTotal
+                 << " -> gate closed, encoder rebuild requested\n";
+     }
+   }
+   if (!surfaceEncoded && !bgraCall.ok) {
     ++encoder.encodeFailCount;
     if ((encoder.encodeFailCount % 60) == 1) {
       std::cout << "[native-video-host] encode failed count=" << encoder.encodeFailCount << "\n";
     }
-    // A06: an encode can fail AFTER the MFT accepted the input -- that call may be the one that
-    // overflowed the FIFO. Record it before leaving, or the tick retry never sees a pending
-    // request and the gate stays open on an encoder whose output order is undescribed.
-    if (encoder.NoteProvenance(encoder.codec.provenance_invalid())) {
-      std::cout << "[native-video-host] encoder provenance invalid (encode failed):"
-                << " pendingOverflow=" << encodeStats.pendingInputOverflowTotal
-                << " -> gate closed, encoder rebuild requested\n";
-    }
+    // A06: the provenance handling ran inside EncodeBgraWithProvenance above, so this early
+    // return cannot skip it either.
     return Flow::Continue;
   }
   // Encode returned; back to ordinary work for the watchdog's threshold.

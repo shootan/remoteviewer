@@ -142,6 +142,54 @@ struct EncoderState {
     provenanceResyncPending = true;
     return true;
   }
+
+  /** What one encode call did: its own answer, and whether it was the call that lost provenance. */
+  struct EncodeCallResult {
+    bool ok = false;                 // what encode_frame_* returned
+    bool provenanceLatched = false;  // NoteProvenance latched here (first time only: log once)
+  };
+
+  /**
+   * One encode call and the provenance handling that must follow it. This is a
+   * BEHAVIOUR-PRESERVING EXTRACTION of what the encode stage did inline, not a pure function:
+   * it drives the encoder and moves this object's state. It exists so that no exit from an
+   * encode call can skip the provenance check -- an encode that fails AFTER the MFT accepted the
+   * input may be the very call that overflowed the accepted-input FIFO, and the stage returns
+   * early on failure, so a check placed after the failure branch was never reached (A06). Every
+   * encode path -- surface, BGRA, and the test's -- goes through here, so the order
+   * `encode -> provenance -> the caller's failure handling` is a property of the code, not of
+   * remembering to repeat it.
+   */
+  template <typename EncodeFn>
+  EncodeCallResult RunEncodeCall(EncodeFn&& encodeCall) {
+    EncodeCallResult result{};
+    result.ok = encodeCall();
+    result.provenanceLatched = NoteProvenance(codec.provenance_invalid());
+    return result;
+  }
+
+  /** The stage's BGRA path, with the provenance handling it must not skip. */
+  EncodeCallResult EncodeBgraWithProvenance(const uint8_t* bgra, uint32_t width, uint32_t height,
+                                            uint32_t stride, bool forceKeyFrame,
+                                            int64_t inputSampleTimeHns,
+                                            std::vector<H264AccessUnit>* outUnits,
+                                            H264EncodeFrameStats* encodeStats) {
+    return RunEncodeCall([&] {
+      return codec.encode_frame_bgra(bgra, width, height, stride, forceKeyFrame,
+                                     inputSampleTimeHns, outUnits, encodeStats);
+    });
+  }
+
+  /** The stage's zero-copy path, same contract. */
+  EncodeCallResult EncodeSurfaceWithProvenance(ID3D11Texture2D* texture, bool forceKeyFrame,
+                                               int64_t inputSampleTimeHns,
+                                               std::vector<H264AccessUnit>* outUnits,
+                                               H264EncodeFrameStats* encodeStats) {
+    return RunEncodeCall([&] {
+      return codec.encode_frame_surface(texture, forceKeyFrame, inputSampleTimeHns, outUnits,
+                                        encodeStats);
+    });
+  }
   /**
    * A02/A06: rebuilds the encoder because its accepted-input FIFO lost provenance. Only a
    * rebuild helps -- clearing the FIFO alone would let the outputs the MFT still holds consume
