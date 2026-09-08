@@ -352,11 +352,11 @@ class UdpH264FrameAssembler {
   //     generation. On a refusal nothing changes -- not the candidates, not the floor, not the
   //     delivery state -- so a generation the viewer would refuse anyway cannot evict a good
   //     candidate or raise the floor past it.
-  // The episode ends when the caller reports that one of the delivered candidates was actually
-  // accepted for decoding (NoteKeyAccepted): that key is the recovery point, so everything the
-  // watermark covers is retired. If newer records still hold the list at the cap, the episode
-  // continues. There is no time-based exit and no eviction; a new session object is the only
-  // other way back to a clean state.
+  // The episode ends when the caller reports that one of the delivered candidates passed the
+  // admission boundary (NoteKeyAccepted -- assembly/gate admission, not a decode success): that
+  // key is the recovery point, so everything the watermark covers is retired. If newer records
+  // still hold the list at the cap, the episode continues. There is no time-based exit and no
+  // eviction; a new session object is the only other way back to a clean state.
   //
   // The filter is the caller's own generation gate (the viewer passes SelectionGateState::
   // AdmitGeneration). Unset -- the Android path -- means "admit", so that path is unchanged.

@@ -662,9 +662,12 @@ void UdpH264FrameAssembler::NoteKeyAccepted(uint64_t generation, uint32_t seq) {
       std::any_of(deliveredKeyCandidates_.begin(), deliveredKeyCandidates_.end(),
                   [&](const AbandonedAu& c) { return c.generation == generation && c.seq == seq; });
   if (!wasCandidate) return;  // not one of this episode's candidates: nothing is released
-  // That key is the recovery point: every identity at or before it is behind the decoder's new
-  // reference now, whatever generation it was recorded under -- the host's sequence is monotone
-  // across the session -- and the ordinary stale guard takes over for their late chunks.
+  // That key is the recovery point at the assembly/gate admission boundary -- the receiver
+  // admitted it for decoding, which is not a claim that it decoded (a decode failure afterwards
+  // is the existing reason 4/5/7 recovery's job, not this list's). From that boundary on, every
+  // identity at or before its seq is behind the point the stream resumed from, whatever
+  // generation it was recorded under -- the host's sequence is monotone across the session --
+  // and the ordinary stale guard takes over for their late chunks.
   abandoned_.erase(std::remove_if(abandoned_.begin(), abandoned_.end(),
                                   [&](const AbandonedAu& a) { return !sequence_is_newer(a.seq, seq); }),
                    abandoned_.end());
