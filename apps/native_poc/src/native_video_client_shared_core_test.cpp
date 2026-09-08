@@ -715,30 +715,19 @@ bool test_udp_assembler_abandoned_tombstone() {
     if (!expect(r2.disposition == UdpH264AssemblyDisposition::Partial,
                 "tombstone: the same seq in another generation assembles normally")) return false;
   }
-  // A delivery in another generation retires entries of the old seq space as well.
-  {
-    UdpH264FrameAssembler c;
-    c.ConfigureInOrderHold(120000, 8);
-    (void)push_chunk(c, 50, 0, 12, 4, false, t0);
-    if (!expect(c.GiveUpIncomplete(1, 50, t0), "tombstone: gen 1 seq 50 given up")) return false;
-    const auto g2 = make_video_chunk(7, 0, 4, 4, true, 2);
-    (void)c.PushDatagram(g2.data(), g2.size(), t0 + 1000);
-    UdpH264AssemblyStepResult out2{};
-    if (!expect(c.PopDelivery(t0 + 1000, true, &out2) && out2.frame.header.seq == 7,
-                "tombstone: the new generation's AU delivers")) return false;
-    if (!expect(c.AbandonedCount() == 0, "tombstone: the old generation's entries are retired")) return false;
-  }
-  // Capacity: at most kAbandonedMax outstanding identities with no delivery between them.
+  // Many identities abandoned with no delivery in between: nothing is forgotten (that is the
+  // unfinished, release-blocking case -- see the header note; forgetting one would let it be
+  // accepted again, which is the defect this exists to prevent).
   {
     UdpH264FrameAssembler d;
     d.ConfigureInOrderHold(120000, 32);
     for (uint32_t i = 0; i < 20; ++i) {
       (void)push_chunk(d, 100 + i, 0, 12, 4, false, t0 + i * 1000);
-      if (!expect(d.GiveUpIncomplete(1, 100 + i, t0 + i * 1000), "tombstone: capacity fill")) return false;
+      if (!expect(d.GiveUpIncomplete(1, 100 + i, t0 + i * 1000), "tombstone: many give-ups")) return false;
     }
-    if (!expect(d.AbandonedCount() == 16, "tombstone: bounded at 16 (" + std::to_string(d.AbandonedCount()) + ")")) return false;
-    if (!expect(d.IsAbandoned(1, 119) && !d.IsAbandoned(1, 100),
-                "tombstone: the oldest identities are the ones dropped")) return false;
+    if (!expect(d.AbandonedCount() == 20, "tombstone: every identity is still remembered (" + std::to_string(d.AbandonedCount()) + ")")) return false;
+    if (!expect(d.IsAbandoned(1, 100) && d.IsAbandoned(1, 119),
+                "tombstone: the first identity is remembered as well as the last")) return false;
   }
   a.Reset();
   if (!expect(!a.IsAbandoned(1, 30), "tombstone: Reset clears it")) return false;

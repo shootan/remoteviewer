@@ -653,7 +653,7 @@ bool UdpH264FrameAssembler::GiveUpIncomplete(uint64_t generation, uint32_t seq, 
   if (it == assemblies_.end() || it->complete) return false;  // gone, or completed meanwhile: cancelled
   assemblies_.erase(it);
   // Remember it, so the chunks still on their way do not re-create it (see the header note).
-  while (abandoned_.size() >= kAbandonedMax) abandoned_.pop_front();
+  // Nothing is dropped to make room: forgetting an identity would let it be accepted again.
   abandoned_.push_back(AbandonedAu{generation, seq, nowUs});
   return true;
 }
@@ -675,15 +675,16 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::DeliverAssembly(Assembly& assem
   }
   deliveredAny_ = true;
   lastDeliveredSeq_ = assembly.seq;
-  // Retire the tombstones this delivery makes redundant (see the header note): everything the
-  // stale guard now covers in this generation, and everything from any other generation.
+  // Retire the tombstones this delivery makes redundant (see the header note): in this
+  // generation, everything the ordinary stale guard covers from now on. Entries of another
+  // generation are left alone -- whether a delivery may retire them is not settled.
   {
     const uint64_t deliveredGeneration = assembly.header.streamGeneration;
     const uint32_t deliveredSeq = assembly.seq;
     abandoned_.erase(std::remove_if(abandoned_.begin(), abandoned_.end(),
                                     [&](const AbandonedAu& a) {
-                                      if (a.generation != deliveredGeneration) return true;
-                                      return !sequence_is_newer(a.seq, deliveredSeq);
+                                      return a.generation == deliveredGeneration &&
+                                             !sequence_is_newer(a.seq, deliveredSeq);
                                     }),
                      abandoned_.end());
   }

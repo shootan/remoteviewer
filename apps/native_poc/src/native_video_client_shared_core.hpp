@@ -392,22 +392,23 @@ class UdpH264FrameAssembler {
   //
   // Retirement is by BOUNDARY, not by a clock: a host that keeps resending the abandoned AU for
   // longer than any timeout would otherwise get it re-assembled and abandoned a second time. An
-  // entry is retired when
-  //   - delivery has moved past it in its own generation (`lastDeliveredSeq_` is at or beyond it):
-  //     the ordinary stale guard covers those chunks from then on, so the tombstone is redundant;
-  //   - a delivery of a DIFFERENT generation happens: the old seq space is gone and its entries
-  //     can never match a packet again;
-  //   - Reset() (a new session / decoder resync);
-  //   - or the capacity bound is reached: kAbandonedMax identities may be outstanding with no
-  //     delivery at all between them, and the oldest is dropped. That is a real (bounded) hole --
-  //     16 heads abandoned before a single AU gets through -- and it is preferred to unbounded
-  //     growth; the give-up rule itself is what keeps that number small.
+  // entry is retired when delivery has moved past it in its own generation (`lastDeliveredSeq_`
+  // is at or beyond it): from then on the ordinary stale guard covers those chunks, so the
+  // tombstone is redundant. Reset() clears everything with the rest of the assembler state.
+  //
+  // UNFINISHED, RELEASE-BLOCKING: what happens when many identities are abandoned with no
+  // delivery in between is not decided yet. Dropping the oldest record was rejected -- forgetting
+  // an identity means accepting it again, which is the very defect this exists to prevent -- and
+  // a time-to-live was rejected for the same reason. Today the list simply grows in that case
+  // (each entry is 24 bytes and the give-up rule makes many outstanding give-ups without a single
+  // delivery a pathological case), and the saturation design that closes it properly is being
+  // confirmed. Retirement on a generation change is likewise not settled: the assembler must not
+  // follow a late packet's generation, and today nothing calls Reset() from the receive path.
   struct AbandonedAu {
     uint64_t generation = 0;
     uint32_t seq = 0;
     uint64_t atUs = 0;  // diagnostics only
   };
-  static constexpr size_t kAbandonedMax = 16;
   std::deque<AbandonedAu> abandoned_;
 
   std::deque<Assembly> assemblies_;
