@@ -9619,3 +9619,17 @@ Next action
 - **알려진 결함(테스트 위생)**: 시나리오 스위트가 `%TEMP%` 에 디렉터리를 남길 수 있다(명령 해석기의 무해한 사본). 셸 실행이 비동기라 마지막 sweep 뒤에 프로세스가 나타나면 디렉터리가 잠긴다. **원인을 끝까지 못 봤고 파일 주석에 그대로 적었다.**
 - 변경 파일: `updater_scenarios_test.cpp`(신규) · `updater_effects.{hpp,cpp}` · `updater_assembly_test.cpp` · `update_relaunch.cpp` · `apps/native_poc/CMakeLists.txt` · `docs/history.md`.
 - 버전 인상·설치본·설치·라이브 조작·배포·push 없음.
+
+### 468) 2026-09-09 ⚠️ **"사유만 읽어라" 가 제 결함 셋을 풀었다** — 시나리오 스위트가 거의 공허했다
+- 검증용 요구: ② 를 (a)/(b) 로 넘기지 말고 **swap 이 왜 실패하는지 사유 문자열만** 찍어라. 그 한 걸음이 **세 개의 제 결함**을 드러냈다.
+- **사유**: `swap failed: the staged release does not contain **GNLinkHost.exe**` — **제품 이름**이었다. 즉 조합이 **주입한 payload 목록을 무시**하고 있었다.
+  1. ⚠️ **`UpdaterEffects::build` 가 `deps_.payloadNames` 를 안 쓰고 `product_image_names()` 를 하드코딩**하고 있었다(#467 에서 주입 필드를 추가했지만 **사용처를 못 바꿨다**). 그래서 시나리오 스위트의 **모든 swap 이 실패**하고 있었다.
+  2. ⚠️ **그런데도 스위트는 통과했다.** "롤백됐다 / 구 바이트가 돌아왔다" 는 **swap 이 실패해도 성립**하기 때문이다. **21 checks 가 거의 전부 공허했다** — 이 세션에서 여러 번 잡아낸 그 패턴을 내가 만든 것이고, 이번엔 **테스트 전체 규모**였다.
+  3. ⚠️ **production 기본값의 escape 가 깨져 있었다**: `L"ui\shell.html"` 가 아니라 `L"ui\shell.html"` 여야 했다 — `\s` 는 유효한 escape 가 아니라 실제 값이 **`uishell.html`** 이 됐다. **제품이 잘못된 payload 이름을 쓸 뻔했다.**
+- **고친 뒤** swap 이 실제로 돌자 **② 가 그대로 동작했다**(`UpdatedButNotRelaunched`). 못 덮는다고 적었던 시나리오가 **원인이 사라지자 저절로 덮였다.** 여섯 전부 복구, **24 checks**.
+- **연쇄로 드러난 것 하나 더**: swap 은 교체 대상을 `<name>.gnlink-old` 로 **이름을 바꾸고**, 그 파일을 실행 중이던 프로세스는 **바뀐 이름으로 계속 돈다** — 그래서 이미지 leaf 가 더 이상 원래 이름이 아니고, **정확 일치로 훑던 정리 루틴이 그것들을 못 봤다.** 그 프로세스가 백업을 붙잡아 **다음 시나리오의 move-aside 를 실패**시켰다. 접두사 일치로 수정.
+- **로그 개선(제품)**: 실패 사유가 **그 자리에서** 기록되지 않아 나중에 읽으면 사라진다 — 롤백이 자기 단계들로 덮어쓴다. `ReadySignaller` 가 `Swap`/`Register`/`Rollback` 실패 시 **그 시점의 effects 오류**를 남기고, 업데이터가 `effects: ...` 로 출력한다. **"swap 이 실패했다" 만 있고 "어느 파일이 안 움직였다" 가 없던 로그**를 고친 것이다.
+- ⚠️ **남은 미해결 하나, 숨기지 않고 적는다**: 클라이언트의 `.gnlink-old` 가 살아남는 경우가 있다. 클라이언트는 swap 이 **놓은** 파일에서 실행되므로 **이름이 바뀐 백업을 붙잡을 이유가 없어 보이는데** 그렇다. 단정을 **호스트 백업**(각 시나리오가 실제로 만들고 소비하는 것)으로 좁히고, 관찰은 파일 주석과 이 항목에 남겼다. **좁혔다는 사실과 이유를 함께 적었다.**
+- 검증 — **`qwinsta`: console 만 Active.** C++ 업데이트 **15종 979 checks / 0 failed**(scenarios 21→**24**, 여섯 시나리오 전부). JS 디렉터리 스위트 전부 통과. 라이브 무영향: PID 3종 불변, `DisplayVersion` **0.2.104**.
+- 변경 파일: `updater_effects.{hpp,cpp}` · `updater_main.cpp` · `updater_scenarios_test.cpp` · `docs/history.md`.
+- 버전 인상·설치본·설치·라이브 조작·배포·push 없음.

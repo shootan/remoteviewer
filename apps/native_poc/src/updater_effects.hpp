@@ -106,6 +106,15 @@ class UpdaterEffects {
    */
   const std::string& verified_version() const { return verifiedVersion_; }
 
+  /**
+   * The last thing the effects complained about, or empty.
+   *
+   * The state machine's detail says which STEP failed ("swap failed"); this says what it hit
+   * ("could not move aside GNLinkHost.exe"). Both are needed to act on a failure, and only the
+   * first was reaching the log.
+   */
+  const std::string& last_effects_error() const { return lastEffectsError_; }
+
  private:
   UpdaterOptions options_;
   UpdaterDeps deps_;
@@ -113,6 +122,7 @@ class UpdaterEffects {
   install::RegistrationTarget registrationTarget_;
   std::string userNotice_;
   std::string verifiedVersion_;
+  std::string lastEffectsError_;
 };
 
 /**

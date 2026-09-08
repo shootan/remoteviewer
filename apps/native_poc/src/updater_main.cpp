@@ -195,6 +195,11 @@ int wmain(int argc, wchar_t** argv) {
 
   const UpdateOutcome outcome = effects.run(options.platform);
   log_line(std::string("result: ") + result_name(outcome.result) + " -- " + outcome.detail);
+  // Which step failed is in the detail; what it actually hit is here. A log with only the first
+  // tells an operator that the swap failed and not which file would not move.
+  if (!effects.last_effects_error().empty()) {
+    log_line("effects: " + effects.last_effects_error());
+  }
   // Logged because it is the thing that used to be silently wrong: an empty value here would mean
   // nothing was ever verified, and the old code would have registered a version anyway.
   log_line("version verified: " + (effects.verified_version().empty()

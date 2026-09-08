@@ -51,14 +51,17 @@ class ReadySignaller : public UpdateEffects {
                  std::shared_ptr<std::string> versionToInstall,
                  std::shared_ptr<std::string> expectedVersion, std::string installedVersion,
                  std::function<void()> captureTargets,
-                 std::function<void(const std::wstring&)> signalReady)
+                 std::function<void(const std::wstring&)> signalReady,
+                 WindowsUpdateEffects* concrete, std::function<void(const std::string&)> log)
       : inner_(inner),
         eventName_(std::move(eventName)),
         versionToInstall_(std::move(versionToInstall)),
         expectedVersion_(std::move(expectedVersion)),
         installedVersion_(std::move(installedVersion)),
         captureTargets_(std::move(captureTargets)),
-        signalReady_(std::move(signalReady)) {}
+        signalReady_(std::move(signalReady)),
+        concrete_(concrete),
+        log_(std::move(log)) {}
 
   bool AcquireLock() override { return inner_.AcquireLock(); }
   void ReleaseLock() override { inner_.ReleaseLock(); }
@@ -80,10 +83,20 @@ class ReadySignaller : public UpdateEffects {
   void DiscardDownload() override { inner_.DiscardDownload(); }
   bool PrepareForSwap() override { return inner_.PrepareForSwap(); }
   bool Quiesce() override { return inner_.Quiesce(); }
-  bool Swap() override { return inner_.Swap(); }
-  bool RegisterInstall() override { return inner_.RegisterInstall(); }
+  // Logged AT the failure, not afterwards. Read later it is gone: the rollback that follows runs
+  // its own steps and each one overwrites the message, so an operator was left with "swap failed"
+  // and no idea which file would not move.
+  bool Swap() override { return note("swap", inner_.Swap()); }
+  bool RegisterInstall() override { return note("register", inner_.RegisterInstall()); }
   RelaunchVerdict Relaunch() override { return inner_.Relaunch(); }
   bool HealthCheck() override { return inner_.HealthCheck(); }
+
+  bool note(const char* step, bool ok) {
+    if (!ok && log_ && concrete_) {
+      log_(std::string(step) + " failed: " + concrete_->last_error());
+    }
+    return ok;
+  }
 
   bool Rollback() override {
     // The files are going back to what was installed before, so anything checking the product
@@ -91,7 +104,7 @@ class ReadySignaller : public UpdateEffects {
     // would wait for the version the update was carrying, which is no longer on disk, and report
     // a failure the rollback had just finished preventing.
     *expectedVersion_ = installedVersion_;
-    return inner_.Rollback();
+    return note("rollback", inner_.Rollback());
   }
 
   void Commit() override { inner_.Commit(); }
@@ -104,6 +117,8 @@ class ReadySignaller : public UpdateEffects {
   std::string installedVersion_;
   std::function<void()> captureTargets_;
   std::function<void(const std::wstring&)> signalReady_;
+  WindowsUpdateEffects* concrete_ = nullptr;
+  std::function<void(const std::string&)> log_;
 };
 
 }  // namespace
@@ -165,8 +180,8 @@ UpdaterDeps production_updater_deps(std::function<void(const std::string&)> log)
   // stopped and the set that is replaced cannot drift apart; the two data files are named
   // alongside them.
   deps.payloadNames = product_image_names();
-  deps.payloadNames.push_back(L"ui\shell.html");
-  deps.payloadNames.push_back(L"ui\macro.html");
+  deps.payloadNames.push_back(L"ui\\shell.html");
+  deps.payloadNames.push_back(L"ui\\macro.html");
   deps.relaunchTable = product_images();
   return deps;
 }
@@ -183,9 +198,11 @@ bool UpdaterEffects::build(std::string* detail) {
   config.lockName = L"Global\\GNLinkUpdate";
   // What a swap replaces. The executables come from the same list the process enumerator uses, so
   // the set that is stopped and the set that is replaced cannot drift apart.
-  config.payloadNames = product_image_names();
-  config.payloadNames.push_back(L"ui\\shell.html");
-  config.payloadNames.push_back(L"ui\\macro.html");
+  // What a swap replaces, as supplied. It used to be built here from the product's own
+  // lists, which meant the assembly could only ever be run against the real product -- and
+  // a test that handed it anything else was quietly ignored, so its scenarios passed while
+  // every swap failed for want of a file nobody had staged.
+  config.payloadNames = deps_.payloadNames;
   config.registryRoot = options_.registryRoot;
   config.serviceName = options_.serviceName;
   config.expectedVersion = {};  // filled once the manifest says which version this is
@@ -354,9 +371,11 @@ UpdateOutcome UpdaterEffects::run(const std::string& platform) {
     if (stopped->empty()) *stopped = enumerate();
   };
   ReadySignaller signaller(effects, options_.readyEventName, versionToInstall, expectedVersion,
-                           options_.installedVersion, captureNow, deps_.signalReady);
+                           options_.installedVersion, captureNow, deps_.signalReady, &effects,
+                           deps_.log);
   const UpdateOutcome outcome = run_update(signaller, deps_.verifier, platform);
   verifiedVersion_ = *versionToInstall;
+  lastEffectsError_ = effects.last_error();
   return outcome;
 }
 
