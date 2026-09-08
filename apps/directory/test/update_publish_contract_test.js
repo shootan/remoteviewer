@@ -13,6 +13,7 @@
 // Design: docs/업데이트_배선_계획.md W8.
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { buildManifest, loadManifest, parseFields, SUPPORTED_SCHEMA } =
@@ -130,6 +131,56 @@ check('versionCode is readable even though it follows the artifact lines',
 // a real value.
 check('a windows release has no versionCode line', !published.includes('versionCode='),
       published.replace(/\n/g, ' | '));
+
+// ---------------------------------------------------------------- one release per platform
+
+// The schema carries `platform` at the document level, and the server keeps one file per platform
+// (`<platform>.manifest`). That is what expresses "the two platforms ship different files" -- and
+// it is worth asserting rather than assuming, because the failure it prevents is an installer
+// happily fetching the wrong platform's list and replacing files that do not exist.
+const windowsNames = parseFields(published).fields.artifacts.map((a) => a.name);
+const androidNames = parseFields(androidDoc).fields.artifacts.map((a) => a.name);
+check('the two platforms list different files',
+      windowsNames.every((n) => !androidNames.includes(n)),
+      `windows=[${windowsNames}] android=[${androidNames}]`);
+check('and each says which platform it is for',
+      published.includes('platform=windows') && androidDoc.includes('platform=android'));
+
+// A client asked for one platform must not accept the other's document, whatever else is right
+// about it.
+//
+// Really signed, and that matters: with a junk signature both of these are refused before the
+// platform is ever looked at, and the check would pass without testing anything. The first
+// version of this did exactly that -- both said SignatureInvalid, which is the right answer to a
+// different question.
+const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+const jwk = publicKey.export({ format: 'jwk' });
+const keyHex = Buffer.concat([Buffer.from(jwk.x, 'base64url'),
+                              Buffer.from(jwk.y, 'base64url')]).toString('hex');
+const signHex = (doc) => crypto.sign('sha256', Buffer.from(doc, 'utf8'),
+                                     { key: privateKey, dsaEncoding: 'ieee-p1363' }).toString('hex');
+
+// The control first: correctly signed and asked for as what it is, each one loads. Without this,
+// "refused" below could mean the documents were simply unloadable.
+const windowsOk = loadManifest(published, signHex(published), keyHex, 'windows', 'x64');
+check('a signed windows document loads as windows', windowsOk.status === 'Ok',
+      String(windowsOk.status) + ' ' + (windowsOk.detail || ''));
+const androidOk = loadManifest(androidDoc, signHex(androidDoc), keyHex, 'android', 'arm64');
+check('a signed android document loads as android', androidOk.status === 'Ok',
+      String(androidOk.status) + ' ' + (androidOk.detail || ''));
+
+// And now the property, reached because the signature is real: the platform is what refuses it.
+const androidToWindows = loadManifest(androidDoc, signHex(androidDoc), keyHex, 'windows', 'x64');
+check('an android document is refused for BEING android, not for its signature',
+      androidToWindows.status === 'WrongPlatform', String(androidToWindows.status));
+const windowsToAndroid = loadManifest(published, signHex(published), keyHex, 'android', 'arm64');
+check('and a windows document for being windows',
+      windowsToAndroid.status === 'WrongPlatform', String(windowsToAndroid.status));
+
+// The architectures differ too, and for the same reason: one signed document describes one build
+// for one target, and nothing downstream has to work out which parts apply to it.
+check('the two releases name different architectures',
+      published.includes('arch=x64') && androidDoc.includes('arch=arm64'));
 
 // ---------------------------------------------------------------- the loader agrees
 
