@@ -268,8 +268,10 @@ add_executable(remote60_host_app WIN32
   src/host_app_main.cpp
   src/directory_client.cpp
   src/log_upload.cpp
-  # The tray's "Check for updates" entry point and everything it needs to answer honestly.
+  # The tray's "Check for updates" entry point and everything it needs to answer honestly, plus
+  # the handoff that decides when this process may get out of the updater's way.
   src/update_check.cpp
+  src/update_handoff.cpp
   src/update_http.cpp
   src/update_manifest.cpp
   src/payload_name.cpp
@@ -739,6 +741,17 @@ if(MSVC)
   target_link_options(remote60_updater PRIVATE
     "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'"
   )
+endif()
+
+# When the host may get out of the way, and what it hands over. Pure decisions -- nothing here
+# starts a process or waits on a handle.
+add_executable(remote60_update_handoff_test
+  src/update_handoff.cpp
+  src/update_handoff_test.cpp
+)
+target_include_directories(remote60_update_handoff_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_update_handoff_test PRIVATE /utf-8)
 endif()
 
 # What the updater accepts as instructions. Pure parsing and validation -- the entry point that

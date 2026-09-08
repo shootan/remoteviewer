@@ -46,6 +46,7 @@
 #include "product_version.hpp"
 #include "env_util.hpp"
 #include "update_check.hpp"
+#include "update_handoff.hpp"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -61,6 +62,9 @@ constexpr UINT kTrayMessage = WM_APP + 1;
 // window. The answer comes back as a posted message carrying a heap-allocated string the
 // UI thread takes ownership of.
 constexpr UINT kUpdateCheckDoneMessage = WM_APP + 3;
+// The waiter thread's verdict. Posted rather than acted on directly because deciding to exit is
+// a UI-thread decision, and because the wait can outlive the dialog the user answered.
+constexpr UINT kUpdateHandoffDoneMessage = WM_APP + 4;
 constexpr UINT_PTR kStatusTimer = 1;
 constexpr UINT kStatusIntervalMs = 2000;
 // Matches IDI_GNLINK in host_app.rc.
@@ -771,8 +775,9 @@ void start_update_check(HWND window) {
         std::wstring text;
         switch (result.outcome) {
           case upd::CheckOutcome::UpdateAvailable:
-            text = L"A newer version is available: " + widen(result.availableVersion) +
-                   L"\n\nInstalling it from here is not implemented yet.";
+            text = L"새 버전 " + widen(result.availableVersion) + L" 이 있습니다.\n\n"
+                   L"지금 업데이트하시겠습니까?\n"
+                   L"업데이트 중에는 원격 연결이 잠시 끊깁니다.";
             break;
           case upd::CheckOutcome::UpToDate:
             text = L"This is the latest version.";
@@ -793,8 +798,10 @@ void start_update_check(HWND window) {
         append_host_app_log(std::string("[host-app] update check: ") +
                             upd::check_outcome_name(result.outcome) +
                             (result.detail.empty() ? "" : " " + result.detail));
-        // Posted, not called: this runs on the worker thread.
-        PostMessageW(window, kUpdateCheckDoneMessage, 0,
+        // Posted, not called: this runs on the worker thread. wParam says whether there is a
+        // decision to offer -- only UpdateAvailable is a question, the rest are statements.
+        const WPARAM actionable = result.actionable() ? 1u : 0u;
+        PostMessageW(window, kUpdateCheckDoneMessage, actionable,
                      reinterpret_cast<LPARAM>(new std::wstring(std::move(text))));
       });
 }
@@ -902,6 +909,105 @@ void write_health_report(const char* directoryState) {
 
 /** True once the directory has accepted something from us, so the report is written only once. */
 bool gDirectoryReported = false;
+
+/**
+ * Hands the update over to GNLinkUpdater.exe and waits for permission to exit.
+ *
+ * The host is one of the files being replaced, so it has to leave for the swap to happen. When it
+ * leaves is the whole question. If it exits as soon as the updater starts and the update then
+ * fails -- unreachable server, hash mismatch, a file that will not move -- there is nothing left
+ * running to put the product back, and what the user sees is that their program is gone. So the
+ * updater signals only after it holds the lock and has a verified download, and only then does
+ * this window close. Everything before that point is undone by doing nothing.
+ *
+ * Every way of not getting that signal is treated the same, on purpose: the host keeps running
+ * and the update does not happen this time.
+ */
+void start_update_handoff(HWND window) {
+  namespace upd = remote60::native_poc::update;
+
+  const std::wstring installDir = executable_dir();
+  // A sibling of the install directory, never a child: a child would be inside the directory the
+  // updater is about to replace, and it refuses to run from there.
+  const std::wstring workDir = installDir + L".update";
+
+  upd::UpdaterLaunchSpec spec;
+  spec.installDir = installDir;
+  spec.stagingDir = workDir + L"\\staging";
+  spec.workDir = workDir;
+  spec.manifestUrl = remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL");
+  spec.platform = "windows";
+  spec.installedVersion = narrow(kProductVersion);
+  spec.healthLogPath = log_file_path();
+  spec.logPath = workDir + L"\\updater.log";
+  spec.serviceName = L"GNLinkSecureInput";
+  spec.registryRoot = L"HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\GNLink";
+  spec.parentPid = GetCurrentProcessId();
+  spec.readyEventName =
+      upd::make_ready_event_name(GetCurrentProcessId(), GetTickCount64());
+
+  // Created before the updater starts, so there is no window in which it signals an event nobody
+  // is listening on. Manual-reset: the waiter must not consume it before it has been observed.
+  HANDLE readyEvent = CreateEventW(nullptr, TRUE, FALSE, spec.readyEventName.c_str());
+  if (!readyEvent) {
+    append_host_app_log("[host-app] update: could not create the ready event");
+    MessageBoxW(window, L"업데이트를 시작하지 못했습니다.", kProductName, MB_OK | MB_ICONWARNING);
+    return;
+  }
+
+  std::wstring commandLine = L"\"" + installDir + L"\\GNLinkUpdater.exe\"";
+  for (const std::wstring& arg : upd::updater_arguments(spec)) {
+    commandLine += L" \"";
+    commandLine += arg;
+    commandLine += L"\"";
+  }
+
+  STARTUPINFOW si{};
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION pi{};
+  // The host is already elevated, so the child inherits the token and no prompt appears.
+  // CREATE_BREAKAWAY_FROM_JOB because an updater inside this process's job object would die when
+  // this process is asked to stop -- which is the next thing that happens (design 3.2 (2)).
+  BOOL started = CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, FALSE,
+                                CREATE_BREAKAWAY_FROM_JOB, nullptr, installDir.c_str(), &si, &pi);
+  if (!started) {
+    started = CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                             installDir.c_str(), &si, &pi);
+    if (started) append_host_app_log("[host-app] update: the updater could not break away from a job object");
+  }
+  if (!started) {
+    append_host_app_log("[host-app] update: could not start the updater (error " +
+                        std::to_string(GetLastError()) + ")");
+    CloseHandle(readyEvent);
+    MessageBoxW(window, L"업데이터를 시작하지 못했습니다.", kProductName, MB_OK | MB_ICONWARNING);
+    return;
+  }
+  CloseHandle(pi.hThread);
+  append_host_app_log("[host-app] update: handed over to the updater, waiting for its signal");
+
+  // Waits off the UI thread: this window has to keep responding while the download runs, and the
+  // user may still be using the product right up to the moment it is replaced.
+  std::thread([window, readyEvent, process = pi.hProcess]() {
+    HANDLE handles[2] = {readyEvent, process};
+    // Long enough for a download on a slow link, short enough that a wedged updater does not keep
+    // the host waiting forever. Running out is not an error -- it just means no update today.
+    const DWORD waited = WaitForMultipleObjects(2, handles, FALSE, 10 * 60 * 1000);
+    const bool signalled = (waited == WAIT_OBJECT_0);
+    const bool exited = (waited == WAIT_OBJECT_0 + 1);
+    const bool timedOut = (waited == WAIT_TIMEOUT);
+
+    std::string why;
+    const upd::HandoffVerdict verdict =
+        upd::handoff_verdict(signalled, exited, timedOut, &why);
+    CloseHandle(readyEvent);
+    CloseHandle(process);
+
+    auto* detail = new std::string(std::string(upd::handoff_verdict_name(verdict)) + ": " + why);
+    PostMessageW(window, kUpdateHandoffDoneMessage,
+                 static_cast<WPARAM>(verdict == upd::HandoffVerdict::ExitNow),
+                 reinterpret_cast<LPARAM>(detail));
+  }).detach();
+}
 
 void start_streaming() {
   if (g.uiPreview) return;
@@ -1436,9 +1542,38 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
       // Ownership of the string transfers here. Shown from the UI thread, which is the reason
       // the worker posts instead of calling MessageBox itself.
       std::unique_ptr<std::wstring> text(reinterpret_cast<std::wstring*>(lParam));
-      if (text) {
-        MessageBoxW(window, text->c_str(), kProductName, MB_OK | MB_ICONINFORMATION);
+      if (!text) return 0;
+      // wParam is set when there is actually a newer version. Only then is there a decision to
+      // make; the other four outcomes are statements, and offering to "update" after "could not
+      // reach the server" would be offering something that cannot happen.
+      if (wParam != 0) {
+        const int answer = MessageBoxW(window, text->c_str(), kProductName,
+                                       MB_YESNO | MB_ICONQUESTION);
+        // Later is an ordinary answer, not a dismissal to work around. Nothing happens and the
+        // product keeps running exactly as it was.
+        if (answer == IDYES) start_update_handoff(window);
+        else append_host_app_log("[host-app] update: the user chose later");
+        return 0;
       }
+      MessageBoxW(window, text->c_str(), kProductName, MB_OK | MB_ICONINFORMATION);
+      return 0;
+    }
+
+    case kUpdateHandoffDoneMessage: {
+      std::unique_ptr<std::string> detail(reinterpret_cast<std::string*>(lParam));
+      append_host_app_log("[host-app] update: " + (detail ? *detail : std::string("no detail")));
+      if (wParam != 0) {
+        // The updater holds the lock and has a verified download, so leaving is safe and
+        // necessary -- this process is one of the files it is about to replace.
+        DestroyWindow(window);
+        return 0;
+      }
+      // Every other outcome means nothing on disk changed. Say so rather than leaving the user
+      // wondering whether an update half happened.
+      MessageBoxW(window,
+                  L"업데이트를 시작하지 못했습니다.\n\n"
+                  L"설치된 버전은 그대로이며 계속 사용할 수 있습니다.",
+                  kProductName, MB_OK | MB_ICONINFORMATION);
       return 0;
     }
 
