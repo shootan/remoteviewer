@@ -318,6 +318,14 @@ class UdpH264FrameAssembler {
   // only recovery point). Call after every datagram and on every receive timeout, until false.
   bool PopDelivery(uint64_t nowUs, bool repairNonKey, UdpH264AssemblyStepResult* out);
   size_t PendingCount() const { return assemblies_.size(); }
+  // True when a held assembly is complete -- PopDelivery has something to release once the
+  // incomplete head ahead of it is given up. False on a quiet link with only the stuck head.
+  bool AnyComplete() const;
+  // Gives up exactly the incomplete assembly (generation, seq) the caller judged -- never an
+  // "oldest" by arrival or sequence order -- because its repair is over (A04 rule). False, and
+  // nothing removed, when it is not held or completed meanwhile (the give-up is cancelled). The
+  // next delivery reports the seq gap exactly as an expired hold does.
+  bool GiveUpIncomplete(uint64_t generation, uint32_t seq);
 
   struct IncompleteAuInfo {
     uint32_t seq = 0;
@@ -333,6 +341,9 @@ class UdpH264FrameAssembler {
     // When the AU's first datagram arrived (PushDatagram's nowUs; 0 on the legacy overload), so the
     // NACK graces run from the AU's own age rather than from when the scheduler first saw it.
     uint64_t firstPacketUs = 0;
+    // Last time this AU made progress: a NEW data chunk arrived or FEC recovered one. A duplicate
+    // chunk, a parity packet that repairs nothing, control traffic or another AU do not count.
+    uint64_t lastProgressUs = 0;
   };
   // Video NACK: describe the oldest still-incomplete AU (the one blocking delivery) and list up to
   // `maxMissing` of its missing data-chunk indices in `missingOut` (indices are ascending, so the
@@ -357,6 +368,7 @@ class UdpH264FrameAssembler {
     // In-order hold bookkeeping: when the first datagram of this AU arrived (the hold clock), whether
     // every data chunk is in (awaiting PopDelivery), and how many chunks parity repaired.
     uint64_t firstPacketUs = 0;
+    uint64_t lastProgressUs = 0;  // see IncompleteAuInfo::lastProgressUs
     bool complete = false;
     uint32_t fecRecoveredChunks = 0;
   };

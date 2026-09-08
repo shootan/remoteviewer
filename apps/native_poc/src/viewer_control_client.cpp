@@ -95,6 +95,8 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
   }
   const uint64_t rttUs =
       (doneUs >= action.ping.clientSendQpcUs) ? (doneUs - action.ping.clientSendQpcUs) : 0;
+  ctx.control.lastRttUs.store(rttUs, std::memory_order_relaxed);
+  ctx.control.lastRttAtUs.store(doneUs, std::memory_order_relaxed);
   std::cout << "[native-video-client][control] seq=" << pong.seq
             << " rttUs=" << rttUs
             << " hostQueueUs=" << ((pong.hostSendQpcUs >= pong.hostRecvQpcUs)

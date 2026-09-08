@@ -539,6 +539,8 @@ void start_receiver(ViewerContext& ctx) {
   VideoReceiver::NackOptions nack;
   nack.enabled = ctx.session.hostSupportsNack;
   nack.holdUs = ctx.videoNackHoldUs;
+  nack.giveUpHardCapUs = static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_VIDEO_GIVEUP_HARDCAP_MS", 5000, 300, 60000)) * 1000ULL;
+  nack.replyAllowanceMaxUs = static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_VIDEO_REPLY_ALLOWANCE_MAX_MS", 1000, 50, 5000)) * 1000ULL;
   ctx.receiver.emplace(ctx, ctx.args, ctx.dec, ctx.gate, ctx.startUs, ctx.udpSimDropPm, ctx.udpSimDropSeed,
                        nack);
   ctx.recvThread = std::thread([&ctx]() { ctx.receiver->Run(); });

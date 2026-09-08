@@ -634,6 +634,19 @@ size_t UdpH264FrameAssembler::HeldBytes() const {
   return total;
 }
 
+bool UdpH264FrameAssembler::AnyComplete() const {
+  return std::any_of(assemblies_.begin(), assemblies_.end(), [](const Assembly& a) { return a.complete; });
+}
+
+bool UdpH264FrameAssembler::GiveUpIncomplete(uint64_t generation, uint32_t seq) {
+  auto it = std::find_if(assemblies_.begin(), assemblies_.end(), [&](const Assembly& a) {
+    return a.seq == seq && a.header.streamGeneration == generation;
+  });
+  if (it == assemblies_.end() || it->complete) return false;  // gone, or completed meanwhile: cancelled
+  assemblies_.erase(it);
+  return true;
+}
+
 // Hand one assembled AU out: the completion block PushDatagram used to run inline, so the legacy
 // immediate path and the in-order hold path deliver byte-identical results.
 UdpH264AssemblyStepResult UdpH264FrameAssembler::DeliverAssembly(Assembly& assembly) {
@@ -726,6 +739,7 @@ bool UdpH264FrameAssembler::OldestIncomplete(uint16_t* missingOut, uint16_t maxM
       info->highWater = static_cast<uint16_t>(highWater);
       info->keyFrame = (a.header.flags & kEncodedFrameFlagKeyFrame) != 0;
       info->firstPacketUs = a.firstPacketUs;
+      info->lastProgressUs = a.lastProgressUs;
     }
     return true;
   }
@@ -838,6 +852,7 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* dat
     Assembly created{};
     created.seq = packet.seq;
     created.firstPacketUs = nowUs;
+    created.lastProgressUs = nowUs;
     created.payloadSize = packet.payloadSize;
     created.chunkCount = packet.chunkCount;
     created.chunkStride = packet.chunkStride;
@@ -896,6 +911,7 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* dat
                 data + sizeof(UdpVideoChunkHeader), packet.chunkSize);
     assembly.received[packet.chunkIndex] = 1;
     ++assembly.receivedCount;
+    assembly.lastProgressUs = nowUs;  // a new data chunk is progress; a duplicate (above) is not
   }
 
   const uint16_t groupCount = static_cast<uint16_t>(assembly.parity.size());
@@ -935,6 +951,7 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* dat
     std::memcpy(assembly.payload.data() + recoveredOffset, recovered.data(), recoveredSize);
     assembly.received[missingIndex] = 1;
     ++assembly.receivedCount;
+    assembly.lastProgressUs = nowUs;  // an FEC-recovered chunk is progress too
     result.fecRecovered = true;
     ++result.fecRecoveredChunks;
     ++assembly.fecRecoveredChunks;

@@ -51,7 +51,15 @@ class VideoNackScheduler {
   const VideoNackConfig& config() const { return cfg_; }
   const VideoNackStats& stats() const { return stats_; }
   uint32_t current_seq() const { return seq_; }
+  uint64_t current_generation() const { return generation_; }
   uint32_t current_round() const { return rounds_; }
+  // The chased AU has used every round of its LAST applicable phase: the tail rounds when the
+  // loss includes a tail (`hasTail`, from the assembler's missing list vs highWater), else the
+  // hole rounds. Hole rounds spent while a tail phase is still to come are not "spent" (the
+  // tail phase restarts the budget). last_sent_us() is the last NACK actually sent (0 = none), so
+  // the caller can leave one reply allowance after it before giving the AU up (A04 rule).
+  bool spent_for(bool hasTail) const { return seq_ != 0 && rounds_ >= cfg_.maxRounds && (tailPhase_ || !hasTail); }
+  uint64_t last_sent_us() const { return lastUs_; }
 
   // Forget the AU being chased (a new stream generation, a decoder resync).
   void Reset() {

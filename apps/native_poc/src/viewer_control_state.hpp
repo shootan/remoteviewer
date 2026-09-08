@@ -51,6 +51,10 @@ struct ControlChannelState {
   // cross-thread: control writes, recv ticks + OnPacket, main configures/closes.
   remote60::native_poc::UdpControlChannel udpControl;
   std::atomic<bool> overUdp{false};
+  // cross-thread: control writes after every pong, recv reads (the A04 give-up's reply allowance
+  // is 2 x this RTT, when fresh). 0 = no pong yet.
+  std::atomic<uint64_t> lastRttUs{0};
+  std::atomic<uint64_t> lastRttAtUs{0};  // qpc of the pong that measured it
   // cross-thread: main/control write, UI/picker read.
   std::atomic<bool> connected{false};
   // control thread only: say the secure-desktop transition once (was a function static). reset: never (F-14).

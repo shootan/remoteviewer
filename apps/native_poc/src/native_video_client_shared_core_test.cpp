@@ -637,6 +637,39 @@ bool test_video_nack_scheduler() {
 // The assembler's in-order delivery hold (ConfigureInOrderHold / PopDelivery): a completed AU
 // waits behind an older incomplete one until the hold expires; the keyframe-wait rule; the legacy
 // immediate path is untouched. (Windows NACK wiring.)
+// A04 give-up support in the assembler: lastProgressUs moves only on a NEW data chunk (a duplicate
+// is not progress), and GiveUpIncomplete removes exactly the judged (generation, seq) -- not an
+// "oldest" by arrival or by sequence -- and cancels itself if that AU completed meanwhile.
+bool test_udp_assembler_progress_and_give_up() {
+  UdpH264FrameAssembler a;
+  a.ConfigureInOrderHold(120000, 8);
+  UdpH264FrameAssembler::IncompleteAuInfo info{};
+  const uint64_t t0 = 9000000;
+  (void)push_chunk(a, 10, 0, 12, 4, false, t0);
+  if (!expect(a.OldestIncomplete(nullptr, 0, &info) && info.seq == 10 && info.lastProgressUs == t0,
+              "progress: the first chunk stamps lastProgressUs")) return false;
+  (void)push_chunk(a, 10, 0, 12, 4, false, t0 + 10000);  // duplicate
+  if (!expect(a.OldestIncomplete(nullptr, 0, &info) && info.lastProgressUs == t0,
+              "progress: a duplicate chunk is not progress")) return false;
+  (void)push_chunk(a, 10, 2, 12, 4, false, t0 + 20000);  // a new chunk
+  if (!expect(a.OldestIncomplete(nullptr, 0, &info) && info.lastProgressUs == t0 + 20000,
+              "progress: a new data chunk is progress")) return false;
+  // A second incomplete AU behind it; give up 11 by identity: 10 stays, 11 goes.
+  (void)push_chunk(a, 11, 0, 12, 4, false, t0 + 30000);
+  if (!expect(a.PendingCount() == 2 && !a.AnyComplete(), "give-up: two incomplete AUs, none complete")) return false;
+  if (!expect(!a.GiveUpIncomplete(1, 12), "give-up: an AU that is not held -> false")) return false;
+  if (!expect(a.GiveUpIncomplete(1, 11) && a.PendingCount() == 1, "give-up: exactly seq 11 removed")) return false;
+  if (!expect(a.OldestIncomplete(nullptr, 0, &info) && info.seq == 10, "give-up: seq 10 untouched")) return false;
+  // 10 completes: a give-up judged earlier is cancelled (false, nothing removed) and it delivers.
+  (void)push_chunk(a, 10, 1, 12, 4, false, t0 + 40000);
+  if (!expect(a.AnyComplete(), "give-up: seq 10 completed")) return false;
+  if (!expect(!a.GiveUpIncomplete(1, 10) && a.PendingCount() == 1, "give-up: a completed AU is not given up")) return false;
+  UdpH264AssemblyStepResult out{};
+  if (!expect(a.PopDelivery(t0 + 40000, true, &out) && out.frame.header.seq == 10 && out.frame.payload.size() == 12,
+              "give-up: seq 10 delivered intact")) return false;
+  return true;
+}
+
 bool test_udp_assembler_in_order_hold() {
   UdpH264FrameAssembler a;
   a.ConfigureInOrderHold(100000, 8);
@@ -1002,6 +1035,7 @@ int main() {
   if (!test_udp_assembler()) return 1;
   if (!test_video_nack_scheduler()) return 1;
   if (!test_udp_assembler_in_order_hold()) return 1;
+  if (!test_udp_assembler_progress_and_give_up()) return 1;
   if (!test_session_controller()) return 1;
   std::cout << "[shared-core-test] PASS\n";
   return 0;

@@ -91,6 +91,7 @@ struct LossPlan {
   std::function<bool(uint32_t seq, uint16_t chunkIndex, bool key, uint16_t chunkCount)> dropFirstSend;
   bool advertiseNack = true;          // HelloAck carries kUdpFeatureVideoNack
   bool answerNacks = true;            // false: NACKs are counted but never answered
+  uint32_t nackAnswerDelayMs = 0;     // answer NACKs this late (a slow link: S19)
   bool dropRetransmits = false;       // retransmits are sent but "lost" too
   bool honorKeyframeRequests = true;  // false: requests are counted, no IDR is produced for them
   bool reverseChunkOrder = false;     // send every AU's chunks last-to-first
@@ -99,6 +100,9 @@ struct LossPlan {
   // epoch fence) instead of the fake host's direct sendto: what the viewer then receives is the
   // real sender's output stream. The loss plan / NACK answers do not apply in this mode.
   bool realSender = false;
+  // Once dropFirstSend has fired, no later AU is sent at all -- the screen went static right after
+  // the loss, whatever the asynchronous encoder still emits in the same call (S17/S18).
+  bool stopAfterDrop = false;
 };
 
 struct CachedAu {
@@ -196,6 +200,28 @@ class FakeHost {
   // Zero the next IDR's payload: the assembler completes it, the decoder cannot use it.
   void CorruptNextKey() { corruptNextKey_ = true; }
   uint64_t corrupted_keys() const { return corruptedKeys_; }
+  // The static screen ends: AUs go out again (after LossPlan::stopAfterDrop fired).
+  void ResumeAfterDrop() { dropHappened_ = false; }
+  // A datagram the viewer's receive loop reads and ignores (too short for any video header, not a
+  // control kind it handles): the shape of a control keepalive / ACK. Enough of them and recv()
+  // never times out, which is the V14 starvation. (S16)
+  void SendNoise() {
+    sockaddr_in peer{};
+    {
+      std::lock_guard<std::mutex> lk(peerMu_);
+      if (!peerKnown_.load()) return;
+      peer = peer_;
+    }
+    uint8_t buf[16]{};
+    const uint32_t magic = kMagic;
+    const uint16_t kind = static_cast<uint16_t>(UdpPacketKind::Punch);
+    const uint16_t size = static_cast<uint16_t>(sizeof(buf));
+    std::memcpy(buf, &magic, sizeof(magic));
+    std::memcpy(buf + 4, &kind, sizeof(kind));
+    std::memcpy(buf + 6, &size, sizeof(size));
+    (void)sendto(sock_, reinterpret_cast<const char*>(buf), sizeof(buf), 0,
+                 reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
+  }
 
   // Encode the next picture and put it on the wire. `noisy` makes a big AU (a large IDR / a
   // multi-chunk P), `synthetic` re-sends the previous picture flagged as a host kick / refresh.
@@ -219,6 +245,7 @@ class FakeHost {
     }
     uint32_t lastSeq = 0;
     for (auto& au : units) {
+      if (plan_.stopAfterDrop && dropHappened_.load()) continue;  // static after the loss: nothing more goes out
       switch (epoch_gate_judge(gate_, epoch_.load(std::memory_order_acquire), au.inputEpoch, au.keyFrame, au.bytes.size(), qpc_now_us())) {
         case EpochVerdict::DropOldEpoch: ++gateDroppedOld_; continue;
         case EpochVerdict::DropUnknownEpoch: ++gateDroppedUnknown_; continue;
@@ -276,6 +303,7 @@ class FakeHost {
     return plan_.honorKeyframeRequests;
   }
   void SetHonorKeyframeRequests(bool honor) { plan_.honorKeyframeRequests = honor; }
+  void SetKeyInterChunkDelayUs(uint32_t us) { plan_.keyInterChunkDelayUs = us; }
   void SetAnswerNacks(bool answer) { plan_.answerNacks = answer; }
 
   uint64_t nacks_received() const { return nacksReceived_.load(); }
@@ -383,6 +411,7 @@ class FakeHost {
       if (!only && plan_.dropFirstSend &&
           plan_.dropFirstSend(au.seq, idx, key, static_cast<uint16_t>(chunkCount))) {
         ++droppedChunks_;
+        dropHappened_ = true;
         continue;
       }
       if (only && plan_.dropRetransmits) continue;
@@ -423,7 +452,11 @@ class FakeHost {
       int fromLen = sizeof(from);
       const int n = recvfrom(sock_, reinterpret_cast<char*>(rx.data()), static_cast<int>(rx.size()), 0,
                              reinterpret_cast<sockaddr*>(&from), &fromLen);
-      if (n <= 0) continue;
+      if (n <= 0) {
+        FlushDelayedAnswers();
+        continue;
+      }
+      FlushDelayedAnswers();
       if (n >= static_cast<int>(sizeof(UdpHelloPacket))) {
         UdpHelloPacket hello{};
         std::memcpy(&hello, rx.data(), sizeof(hello));
@@ -472,6 +505,17 @@ class FakeHost {
           }
           if (!found) continue;
           const uint16_t count = std::min<uint16_t>(nack.missingCount, kUdpVideoNackMaxMissing);
+          if (plan_.nackAnswerDelayMs > 0) {
+            // A slow link: the answer leaves later. Queued for the reader loop itself (below), so it
+            // never outlives this object.
+            DelayedAnswer d;
+            d.dueUs = qpc_now_us() + static_cast<uint64_t>(plan_.nackAnswerDelayMs) * 1000ULL;
+            d.au = au;
+            d.only.assign(nack.missing, nack.missing + count);
+            delayed_.push_back(std::move(d));
+            retransmitChunks_ += count;
+            continue;
+          }
           SendChunks(au, nack.missing, count);
           retransmitChunks_ += count;
           continue;
@@ -480,6 +524,20 @@ class FakeHost {
     }
   }
 
+  struct DelayedAnswer {
+    uint64_t dueUs = 0;
+    CachedAu au;
+    std::vector<uint16_t> only;
+  };
+  std::deque<DelayedAnswer> delayed_;  // reader thread only
+  void FlushDelayedAnswers() {
+    const uint64_t nowUs = qpc_now_us();
+    while (!delayed_.empty() && delayed_.front().dueUs <= nowUs) {
+      DelayedAnswer d = std::move(delayed_.front());
+      delayed_.pop_front();
+      SendChunks(d.au, d.only.data(), static_cast<uint16_t>(d.only.size()));
+    }
+  }
   LossPlan plan_;
   SOCKET sock_ = INVALID_SOCKET;
   uint16_t port_ = 0;
@@ -529,6 +587,7 @@ class FakeHost {
   uint32_t lastKeySeq_ = 0;
   uint64_t droppedChunks_ = 0;
   std::atomic<bool> corruptNextKey_{false};
+  std::atomic<bool> dropHappened_{false};
   uint64_t corruptedKeys_ = 0;
 };
 
@@ -549,6 +608,13 @@ struct ViewerRig {
   // viewer_present.cpp does). `pinPresentAnchor` freezes it to model a renderer that has not had
   // its next vsync yet, or a paused present.
   std::atomic<bool> pinPresentAnchor{false};
+  // A04 give-up tunables for the scenarios (0 = product default), set before Connect().
+  uint64_t giveUpHardCapUs = 0;
+  // What the control thread would have measured: the give-up's reply allowance reads it.
+  void SetControlRtt(uint64_t rttUs) {
+    ctx.control.lastRttUs.store(rttUs, std::memory_order_relaxed);
+    ctx.control.lastRttAtUs.store(qpc_now_us(), std::memory_order_relaxed);
+  }
   std::atomic<uint64_t> publishedCount{0};
   std::atomic<uint32_t> lastPublishedSeq{0};
   std::atomic<uint32_t> maxPublishedSeq{0};
@@ -563,6 +629,17 @@ struct ViewerRig {
   bool published_key(uint32_t seq) {
     std::lock_guard<std::mutex> lk(publishedMu);
     return std::find(publishedKeySeqs.begin(), publishedKeySeqs.end(), seq) != publishedKeySeqs.end();
+  }
+  // Recovery: THAT IDR or a later one was shown as a key frame. A recovery under load can be
+  // served by a newer IDR (the viewer's own re-ask), which is still a recovery -- but a P frame
+  // or a 0 sentinel never satisfies it.
+  bool published_key_at_or_after(uint32_t seq) {
+    if (seq == 0) return false;
+    std::lock_guard<std::mutex> lk(publishedMu);
+    for (uint32_t q : publishedKeySeqs) {
+      if (q == seq || static_cast<int32_t>(q - seq) > 0) return true;  // wrap-safe 'at or after'
+    }
+    return false;
   }
   std::string published_key_seqs() {
     std::lock_guard<std::mutex> lk(publishedMu);
@@ -626,6 +703,7 @@ struct ViewerRig {
     VideoReceiver::NackOptions nack;
     nack.enabled = ctx.session.hostSupportsNack;
     nack.holdUs = holdUs;
+    if (giveUpHardCapUs != 0) nack.giveUpHardCapUs = giveUpHardCapUs;
     receiver.emplace(ctx, args, dec, gate, qpc_now_us(), 0, 0, nack);
     recvThread = std::thread([this]() { receiver->Run(); });
     presentThread = std::thread([this]() { PresentLoop(); });
@@ -724,6 +802,33 @@ void idle(FakeHost& host, ViewerRig& rig, uint32_t ms) {
   while (qpc_now_us() < endUs) {
     (void)host.TakeKeyframeRequest(rig.ctx.control.keyframeRequests);
     sleep_ms(2);
+  }
+}
+
+// Wait for `pred` or timeout without sending frames (the screen is static); requests are drained.
+bool pump_until_idle(FakeHost& host, ViewerRig& rig, uint32_t timeoutMs, const std::function<bool()>& pred) {
+  const uint64_t endUs = qpc_now_us() + static_cast<uint64_t>(timeoutMs) * 1000ULL;
+  while (qpc_now_us() < endUs) {
+    if (pred()) return true;
+    (void)host.TakeKeyframeRequest(rig.ctx.control.keyframeRequests);
+    sleep_ms(2);
+  }
+  return pred();
+}
+
+// Idle wait (no frames) that also hands the viewer an ignorable datagram every `everyMs`: the
+// receive loop then never sees a timeout -- a control-only link. (S16)
+void idle_with_noise(FakeHost& host, ViewerRig& rig, uint32_t ms, uint32_t everyMs) {
+  const uint64_t endUs = qpc_now_us() + static_cast<uint64_t>(ms) * 1000ULL;
+  uint64_t nextUs = qpc_now_us();
+  while (qpc_now_us() < endUs) {
+    (void)host.TakeKeyframeRequest(rig.ctx.control.keyframeRequests);
+    const uint64_t nowUs = qpc_now_us();
+    if (nowUs >= nextUs) {
+      host.SendNoise();
+      nextUs = nowUs + static_cast<uint64_t>(everyMs) * 1000ULL;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 }
 
@@ -1389,6 +1494,273 @@ void scenario_corrupted_idr_does_not_wedge_or_storm() {
   CHECK(host.corrupted_keys() == 1, "exactly one zeroed IDR in the whole scenario (" + std::to_string(host.corrupted_keys()) + ")");
 }
 
+
+// S16 (V14): control / keepalive datagrams every 5 ms keep recv() from ever timing out. The receive
+// loop's clock work (hold drain, NACK rounds, keyframe recovery timer) used to run only after a
+// video chunk or a receive timeout, so a link carrying nothing but control traffic starved the
+// recovery timer: a lost frame's keyframe wait was never re-asked. Same shape as S8, plus noise.
+void scenario_control_noise_does_not_starve_recovery_timer() {
+  std::printf("[S16] keyframe wait + 5 ms control noise, no video: the recovery timer still re-asks\n");
+  FakeHost host;
+  ViewerRig rig;
+  std::atomic<uint32_t> lostP{0};
+  LossPlan plan;
+  plan.dropFirstSend = [&](uint32_t seq, uint16_t, bool key, uint16_t) {
+    if (!key && seq >= 40 && lostP.load() == 0) lostP = seq;
+    return seq == lostP.load();  // the whole frame
+  };
+  if (!start_session(host, rig, plan)) { ++gFailures; return; }
+  host.SetHonorKeyframeRequests(false);
+  CHECK(pump_until(host, rig, 3000, [&]() { return rig.gate.waitForKeyFrame; }), "the lost P frame opened a keyframe wait");
+  idle(host, rig, 50);
+  const uint64_t requestsAtStop = host.keyframe_requests();
+  idle_with_noise(host, rig, 2600, 5);
+  const uint64_t retries = host.keyframe_requests() - requestsAtStop;
+  CHECK(retries >= 2 && retries <= 4, "timer re-asks under 5 ms control noise: " + std::to_string(retries));
+  CHECK(rig.gate.waitForKeyFrame, "still waiting: no video was sent");
+  host.SetHonorKeyframeRequests(true);
+  const bool resumed = pump_until(host, rig, 5000, [&]() {
+    return !rig.gate.waitForKeyFrame && rig.maxPublishedSeq.load() > lostP.load() + 5;
+  });
+  CHECK(resumed, "resumed after the IDR (max seq " + std::to_string(rig.maxPublishedSeq.load()) + ")");
+  CHECK(host.keyframe_requests() <= requestsAtStop + 6, "no IDR storm (" + std::to_string(host.keyframe_requests() - requestsAtStop) + ")");
+}
+
+// Shared body of S17 / S18 (A04 / N3): a static screen -- the LAST AU's final chunk is lost, the
+// host does not answer NACKs and sends nothing after it. Nothing complete sits behind the stuck
+// head, so the hold never released it and no discontinuity was raised: the viewer kept the old
+// picture with a silent, exhausted NACK. Now the spent head is given up and the keyframe path
+// recovers with one request; the host's next IDR resumes the stream.
+void run_static_tail_loss_unanswered(const char* label, bool lostIsKey) {
+  FakeHost host;
+  ViewerRig rig;
+  std::atomic<uint32_t> armFrom{0};
+  std::atomic<uint32_t> target{0};
+  LossPlan plan;
+  plan.answerNacks = false;
+  plan.stopAfterDrop = true;
+  plan.dropFirstSend = [&](uint32_t seq, uint16_t idx, bool key, uint16_t count) {
+    if (armFrom.load() == 0 || seq < armFrom.load() || key != lostIsKey || count < 2) return false;
+    if (target.load() == 0) target = seq;
+    return seq == target.load() && idx == count - 1;
+  };
+  if (!start_session(host, rig, plan)) { ++gFailures; return; }
+  idle(host, rig, 200);  // everything in flight settles; the screen is static from here
+  const uint64_t requestsBefore = host.keyframe_requests();
+  armFrom = host.last_seq() + 1;
+  // One picture at a time until the drop happens, then nothing more.
+  for (int i = 0; i < 20 && target.load() == 0; ++i) {
+    (void)host.SendFrame(lostIsKey, false, qpc_now_us());
+    sleep_ms(20);
+  }
+  const uint32_t t = target.load();
+  CHECK(t != 0, std::string(label) + ": a multi-chunk AU lost its last chunk");
+  CHECK(host.last_seq() == t, std::string(label) + ": nothing was sent after it (last seq " + std::to_string(host.last_seq()) + ")");
+  idle(host, rig, 900);
+  const uint64_t requests = host.keyframe_requests() - requestsBefore;
+  std::printf("  %s: seq=%u nacks=%llu keyReq=+%llu waitForKey=%d\n", label, t,
+              static_cast<unsigned long long>(host.nacks_for(t)), static_cast<unsigned long long>(requests),
+              rig.gate.waitForKeyFrame ? 1 : 0);
+  CHECK(host.nacks_for(t) >= 1 && host.nacks_for(t) <= 3, std::string(label) + ": bounded NACK rounds (" + std::to_string(host.nacks_for(t)) + ")");
+  CHECK(requests >= 1 && requests <= 2, std::string(label) + ": the spent head was given up and a keyframe asked for (+" + std::to_string(requests) + ", timer re-ask allowed)");
+  CHECK(rig.gate.waitForKeyFrame, std::string(label) + ": waiting for the keyframe it asked for");
+  // The host answers with an IDR: the viewer resumes, and the complete IDR closes the gap itself.
+  const uint64_t publishedBefore = rig.publishedCount.load();
+  host.ResumeAfterDrop();
+  const KeyOnWire idr = send_key_and_wait_on_wire(host, label);
+  CHECK(idr.ok, std::string(label) + ": the recovery IDR went out");
+  const bool resumed = pump_until(host, rig, 3000, [&]() {
+    return !rig.gate.waitForKeyFrame && rig.publishedCount.load() > publishedBefore && rig.published_key_at_or_after(idr.keySeq);
+  });
+  CHECK(resumed, std::string(label) + ": resumed on the IDR seq " + std::to_string(idr.keySeq) + " (key seqs " + rig.published_key_seqs() + ")");
+  CHECK(host.keyframe_requests() <= requestsBefore + 3, std::string(label) + ": no IDR storm (" + std::to_string(host.keyframe_requests() - requestsBefore) + ")");
+  CHECK(rig.gate.congestionState == ClientCongestionState::Normal, std::string(label) + ": state " + state_name(rig));
+}
+
+void scenario_static_last_p_tail_loss_unanswered_recovers() {
+  std::printf("[S17] static screen: last P's tail chunk lost, NACK unanswered, no successor -> give up, keyframe request, recovery\n");
+  run_static_tail_loss_unanswered("S17", false);
+}
+
+void scenario_static_last_idr_tail_loss_unanswered_recovers() {
+  std::printf("[S18] static screen: last IDR's tail chunk lost, NACK unanswered, no successor -> give up, keyframe request, recovery\n");
+  run_static_tail_loss_unanswered("S18", true);
+}
+
+
+// Shared shape of S19..S21: a static screen whose LAST AU lost its final chunk (a tail loss with no
+// successor), under different NACK conditions. Returns the lost seq (0 = setup failure).
+uint32_t arm_static_tail_loss(FakeHost& host, ViewerRig& rig, std::atomic<uint32_t>& armFrom,
+                              std::atomic<uint32_t>& target, const char* label) {
+  idle(host, rig, 200);
+  armFrom = host.last_seq() + 1;
+  for (int i = 0; i < 20 && target.load() == 0; ++i) {
+    (void)host.SendFrame(false, false, qpc_now_us());
+    sleep_ms(20);
+  }
+  const uint32_t t = target.load();
+  CHECK(t != 0, std::string(label) + ": a multi-chunk P frame lost its last chunk");
+  CHECK(host.last_seq() == t, std::string(label) + ": nothing was sent after it (last seq " + std::to_string(host.last_seq()) + ")");
+  return t;
+}
+
+LossPlan static_tail_loss_plan(std::atomic<uint32_t>& armFrom, std::atomic<uint32_t>& target, uint16_t alsoDropIdx = 0xFFFF) {
+  LossPlan plan;
+  plan.stopAfterDrop = true;
+  plan.dropFirstSend = [&armFrom, &target, alsoDropIdx](uint32_t seq, uint16_t idx, bool key, uint16_t count) {
+    if (armFrom.load() == 0 || seq < armFrom.load() || key || count < 4) return false;
+    if (target.load() == 0) target = seq;
+    if (seq != target.load()) return false;
+    return idx == count - 1 || idx == alsoDropIdx;
+  };
+  return plan;
+}
+
+// S19 (A04 rule, reply allowance from the RTT): the tail NACK is answered LATE (200 ms) on a link
+// whose control RTT is 150 ms. The allowance is 2 x RTT = 300 ms, so the head waits for the late
+// reply, completes, and no keyframe is asked for. With the 50 ms default the same reply would be
+// too late -- which is what the RTT term is for.
+void scenario_late_tail_reply_accepted_with_rtt_allowance() {
+  std::printf("[S19] static tail loss, NACK answered 200 ms late, control RTT 150 ms: the reply is waited for, no IDR request\n");
+  FakeHost host;
+  ViewerRig rig;
+  std::atomic<uint32_t> armFrom{0};
+  std::atomic<uint32_t> target{0};
+  LossPlan plan = static_tail_loss_plan(armFrom, target);
+  plan.nackAnswerDelayMs = 200;
+  if (!start_session(host, rig, plan)) { ++gFailures; return; }
+  rig.SetControlRtt(150000);
+  const uint64_t requestsBefore = host.keyframe_requests();
+  const uint64_t publishedBefore = rig.publishedCount.load();
+  const uint32_t t = arm_static_tail_loss(host, rig, armFrom, target, "S19");
+  if (t == 0) return;
+  const bool repaired = pump_until_idle(host, rig, 1200, [&]() { return rig.maxPublishedSeq.load() >= t; });
+  std::printf("  S19: seq=%u nacks=%llu keyReq=+%llu published=%llu\n", t, static_cast<unsigned long long>(host.nacks_for(t)),
+              static_cast<unsigned long long>(host.keyframe_requests() - requestsBefore),
+              static_cast<unsigned long long>(rig.publishedCount.load() - publishedBefore));
+  CHECK(repaired, "S19: the late retransmit completed the AU and it was shown (max seq " + std::to_string(rig.maxPublishedSeq.load()) + ")");
+  CHECK(host.nacks_for(t) >= 1, "S19: a NACK went out");
+  CHECK(host.keyframe_requests() == requestsBefore, "S19: no keyframe request (+" + std::to_string(host.keyframe_requests() - requestsBefore) + ")");
+  CHECK(!rig.gate.waitForKeyFrame, "S19: not waiting for a keyframe");
+}
+
+// S20 (A04 rule (1)): the loss has a hole (index 1) AND a tail (the last chunk), unanswered. The
+// hole rounds are spent by ~100 ms, but the tail phase is still to come at 120 ms: giving the AU
+// up on the spent hole rounds would forfeit the tail's own rounds. It must wait for the tail
+// phase to be spent too (6 NACKs), then fall back once.
+void scenario_hole_spent_but_tail_phase_pending_is_not_given_up_early() {
+  std::printf("[S20] hole + tail loss, unanswered: hole rounds spent early do not end it; the tail rounds run, then one fallback\n");
+  FakeHost host;
+  ViewerRig rig;
+  std::atomic<uint32_t> armFrom{0};
+  std::atomic<uint32_t> target{0};
+  LossPlan plan = static_tail_loss_plan(armFrom, target, 1);
+  plan.answerNacks = false;
+  if (!start_session(host, rig, plan)) { ++gFailures; return; }
+  const uint64_t requestsBefore = host.keyframe_requests();
+  const uint32_t t = arm_static_tail_loss(host, rig, armFrom, target, "S20");
+  if (t == 0) return;
+  idle(host, rig, 150);  // hole rounds (25/50/75 ms) are spent; the tail phase has just begun
+  CHECK(host.keyframe_requests() == requestsBefore, "S20: not given up while the tail phase is pending (+" + std::to_string(host.keyframe_requests() - requestsBefore) + ")");
+  CHECK(!rig.gate.waitForKeyFrame, "S20: no keyframe wait yet");
+  idle(host, rig, 750);
+  std::printf("  S20: seq=%u nacks=%llu keyReq=+%llu waitForKey=%d\n", t, static_cast<unsigned long long>(host.nacks_for(t)),
+              static_cast<unsigned long long>(host.keyframe_requests() - requestsBefore), rig.gate.waitForKeyFrame ? 1 : 0);
+  CHECK(host.nacks_for(t) >= 4 && host.nacks_for(t) <= 6, "S20: hole rounds and then tail rounds (" + std::to_string(host.nacks_for(t)) + ")");
+  CHECK(host.keyframe_requests() >= requestsBefore + 1 && host.keyframe_requests() <= requestsBefore + 2, "S20: one fallback after the tail rounds (+" + std::to_string(host.keyframe_requests() - requestsBefore) + ")");
+  CHECK(rig.gate.waitForKeyFrame, "S20: waiting for the keyframe");
+}
+
+// S21 (A04 rule without NACK): an old host that declined NACK, a static tail loss. There is no
+// scheduler to wait for: no progress for one allowance and terminalMin of age bound the wait,
+// then the keyframe path recovers. (Legacy immediate delivery: the hold is off.)
+void scenario_nack_off_static_tail_loss_falls_back() {
+  std::printf("[S21] NACK not negotiated, static tail loss: no-progress + terminalMin fallback, then recovery\n");
+  FakeHost host;
+  ViewerRig rig;
+  std::atomic<uint32_t> armFrom{0};
+  std::atomic<uint32_t> target{0};
+  LossPlan plan = static_tail_loss_plan(armFrom, target);
+  plan.advertiseNack = false;
+  if (!start_session(host, rig, plan)) { ++gFailures; return; }
+  CHECK(!rig.hostSupportsNack(), "S21: NACK not negotiated");
+  const uint64_t requestsBefore = host.keyframe_requests();
+  const uint32_t t = arm_static_tail_loss(host, rig, armFrom, target, "S21");
+  if (t == 0) return;
+  idle(host, rig, 900);
+  std::printf("  S21: seq=%u nacks=%llu keyReq=+%llu waitForKey=%d\n", t, static_cast<unsigned long long>(host.nacks_received()),
+              static_cast<unsigned long long>(host.keyframe_requests() - requestsBefore), rig.gate.waitForKeyFrame ? 1 : 0);
+  CHECK(host.nacks_received() == 0, "S21: no NACK against an old host");
+  CHECK(host.keyframe_requests() >= requestsBefore + 1 && host.keyframe_requests() <= requestsBefore + 2, "S21: bounded fallback (+" + std::to_string(host.keyframe_requests() - requestsBefore) + ")");
+  CHECK(rig.gate.waitForKeyFrame, "S21: waiting for the keyframe");
+  const uint64_t publishedBefore = rig.publishedCount.load();
+  host.ResumeAfterDrop();
+  const KeyOnWire idr = send_key_and_wait_on_wire(host, "S21");
+  CHECK(idr.ok, "S21: the recovery IDR went out");
+  const bool resumed = pump_until(host, rig, 3000, [&]() {
+    return !rig.gate.waitForKeyFrame && rig.publishedCount.load() > publishedBefore && rig.published_key_at_or_after(idr.keySeq);
+  });
+  CHECK(resumed, "S21: resumed on the IDR seq " + std::to_string(idr.keySeq));
+}
+
+// S22 (A04 rule (3)/(5)): a big IDR whose chunks keep arriving slowly -- 40 chunks paced 30 ms
+// apart, 1.2 s in all, NACKs unanswered. Every chunk is progress, so the head is preserved past
+// terminalMin and the spent tail rounds, and completes; the hard cap (5 s) is never reached.
+void scenario_slow_progressing_large_au_is_preserved() {
+  std::printf("[S22] large IDR paced 30 ms per chunk (1.2 s), NACK unanswered: progress keeps it, no give-up, it completes\n");
+  FakeHost host;
+  ViewerRig rig;
+  LossPlan plan;
+  plan.answerNacks = false;
+  if (!start_session(host, rig, plan)) { ++gFailures; return; }
+  idle(host, rig, 200);
+  const uint64_t requestsBefore = host.keyframe_requests();
+  const uint64_t publishedBefore = rig.publishedCount.load();
+  host.SetKeyInterChunkDelayUs(30000);
+  const KeyOnWire idr = send_key_and_wait_on_wire(host, "S22", 30, 3000);
+  CHECK(idr.ok, "S22: the paced IDR went out");
+  host.SetKeyInterChunkDelayUs(0);
+  const bool shown = pump_until_idle(host, rig, 3000, [&]() { return rig.published_key(idr.keySeq); });
+  std::printf("  S22: idr=%u nacks=%llu keyReq=+%llu published=%llu\n", idr.keySeq, static_cast<unsigned long long>(host.nacks_for(idr.keySeq)),
+              static_cast<unsigned long long>(host.keyframe_requests() - requestsBefore),
+              static_cast<unsigned long long>(rig.publishedCount.load() - publishedBefore));
+  CHECK(shown, "S22: the slow IDR completed and was shown (key seqs " + rig.published_key_seqs() + ")");
+  CHECK(host.keyframe_requests() == requestsBefore, "S22: no keyframe request while it progressed (+" + std::to_string(host.keyframe_requests() - requestsBefore) + ")");
+  CHECK(!rig.gate.waitForKeyFrame, "S22: not waiting");
+}
+
+// S23 (A04 rule (5)): the same slow IDR against a hard cap of 1 s (tunable, here lowered for the
+// test): progress or not, at the cap the AU is given up ONCE -- one keyframe request episode, the
+// existing backoff -- and the next IDR resumes the stream.
+void scenario_hard_cap_gives_up_once_despite_progress() {
+  std::printf("[S23] slow IDR (2 s of chunks) against a 1 s hard cap: one give-up episode, then recovery\n");
+  FakeHost host;
+  ViewerRig rig;
+  rig.giveUpHardCapUs = 1000000;
+  LossPlan plan;
+  plan.answerNacks = false;
+  if (!start_session(host, rig, plan)) { ++gFailures; return; }
+  idle(host, rig, 200);
+  const uint64_t requestsBefore = host.keyframe_requests();
+  host.SetKeyInterChunkDelayUs(50000);  // ~40 chunks -> ~2 s on the wire
+  const KeyOnWire idr = send_key_and_wait_on_wire(host, "S23", 30, 4000);
+  CHECK(idr.ok, "S23: the paced IDR went out");
+  host.SetKeyInterChunkDelayUs(0);
+  idle(host, rig, 400);
+  std::printf("  S23: idr=%u keyReq=+%llu waitForKey=%d\n", idr.keySeq,
+              static_cast<unsigned long long>(host.keyframe_requests() - requestsBefore), rig.gate.waitForKeyFrame ? 1 : 0);
+  CHECK(host.keyframe_requests() >= requestsBefore + 1 && host.keyframe_requests() <= requestsBefore + 2, "S23: one give-up episode at the hard cap (+" + std::to_string(host.keyframe_requests() - requestsBefore) + ")");
+  CHECK(rig.gate.waitForKeyFrame, "S23: waiting for a keyframe after the cap");
+  const uint64_t publishedBefore = rig.publishedCount.load();
+  const KeyOnWire fresh = send_key_and_wait_on_wire(host, "S23 recovery");
+  CHECK(fresh.ok, "S23: the recovery IDR went out");
+  const bool resumed = pump_until(host, rig, 6000, [&]() {
+    return !rig.gate.waitForKeyFrame && rig.publishedCount.load() > publishedBefore && rig.published_key_at_or_after(fresh.keySeq);
+  });
+  CHECK(resumed, "S23: resumed on the fresh IDR seq " + std::to_string(fresh.keySeq));
+  CHECK(host.keyframe_requests() <= requestsBefore + 3, "S23: no request storm (+" + std::to_string(host.keyframe_requests() - requestsBefore) + ")");
+}
+
 }  // namespace
 
 int main() {
@@ -1414,6 +1786,14 @@ int main() {
   scenario_synthetic_idle_then_real_burst_no_false_congestion();
   scenario_decoder_provenance_without_reset_across_gap();
   scenario_corrupted_idr_does_not_wedge_or_storm();
+  scenario_control_noise_does_not_starve_recovery_timer();
+  scenario_static_last_p_tail_loss_unanswered_recovers();
+  scenario_static_last_idr_tail_loss_unanswered_recovers();
+  scenario_late_tail_reply_accepted_with_rtt_allowance();
+  scenario_hole_spent_but_tail_phase_pending_is_not_given_up_early();
+  scenario_nack_off_static_tail_loss_falls_back();
+  scenario_slow_progressing_large_au_is_preserved();
+  scenario_hard_cap_gives_up_once_despite_progress();
   scenario_pre_fix_host_shapes_no_false_congestion();
   scenario_host_epoch_gate_end_to_end();
   scenario_real_sender_flush_boundary_end_to_end();

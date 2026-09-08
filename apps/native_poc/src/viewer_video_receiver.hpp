@@ -34,6 +34,15 @@ class VideoReceiver {
   struct NackOptions {
     bool enabled = false;
     uint64_t holdUs = 0;
+    // A04 give-up rule (viewer_video_receiver.cpp maintenance): a stuck incomplete head with no
+    // complete AU behind it is given up once every repair avenue had its chance. replyAllowance =
+    // clamp(max(replyAllowanceMinUs, 2 x recent control RTT), replyAllowanceMaxUs), the minimum
+    // when the RTT is unknown or older than rttStaleUs. giveUpHardCapUs is a failure budget for
+    // an AU that keeps making (useless) progress, never less than terminalMin.
+    uint64_t replyAllowanceMinUs = 50000;
+    uint64_t replyAllowanceMaxUs = 1000000;
+    uint64_t rttStaleUs = 5000000;
+    uint64_t giveUpHardCapUs = 5000000;
   };
   VideoReceiver(ViewerState& ctx, const Args& args, DecoderState& dec, FrameGateState& gate,
                 uint64_t startUs, uint32_t udpSimDropPm, uint32_t udpSimDropSeed,
