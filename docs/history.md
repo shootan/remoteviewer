@@ -9467,3 +9467,20 @@ Next action
 - **다음: W8** 서버 발행 ↔ 클라이언트 소비 추적표.
 - 변경 파일: `UpdateDecision.kt`·`UpdateInstaller.kt`·`UpdateFlow.kt`·`UpdateDecisionTest.kt`(신규) · `MainActivity.kt` · `AndroidManifest.xml` · `app/build.gradle.kts` · `docs/history.md`.
 - 버전 인상·설치본 배포·설치·라이브 조작·push 없음.
+
+### 459) 2026-09-08 W8 — 서버 발행 ↔ 세 런타임 소비를 **표가 아니라 테스트가** 지키게 했다 (+ Android 3중 게이트 회귀)
+- **세 런타임이 공유 벡터와 일치한다는 것은 각자의 스위트가 이미 보인다. 보이지 않는 것은 서버가 실제로 발행하는 문서가 그 벡터와 같은 모양이냐다.** 여기가 어긋나면 **세 스위트가 전부 초록인 채로 현장에서는 아무것도 설치되지 않는다.** 문서 표만 두면 낡는다.
+- **신규 `apps/directory/test/update_publish_contract_test.js` (20 checks)** — `buildManifest` 출력의 **키 집합**과 **공유 벡터의 키 집합**을 기계적으로 비교하고, 서버가 자기 출력을 되읽어 각 필드가 살아남는지 확인한다. `test/run.js` 에 등록.
+  - 특히 고정한 둘: **이름 안의 구분자가 안 뭉개진다**(`ui\shell.html` 이 `uishell.html` 로 오면 다른 곳에 쓴다) · **windows 릴리스에는 `versionCode` 줄이 없다**(없는 것이 0 으로 읽혀 실제 값처럼 다뤄지면 안 된다). 그리고 android 문서에서 `versionCode` 는 **artifact 줄들 뒤에** 나오는데, 첫 artifact 줄에서 멈추는 파서였다면 이걸 잃고 **Android 는 아무것도 설치하지 않는다.**
+- **설계문서 3.14 신설** — 필드별로 **서버 발행 / C++ 이 쓰는 곳 / Kotlin 이 쓰는 곳 / 없으면 무슨 일이 생기는지**. `releaseId` 가 C++ 에서는 staging 키인데 Kotlin 에서는 미사용이고, `versionCode` 는 그 반대라는 **비대칭**이 표에서 드러난다.
+- **Android 3중 게이트 회귀 신설 `UpdateGatesTest` (7건)** (검증용 지적 반영: "하나라도 빠지면 나머지가 무의미해지는 조합"):
+  - 게이트를 **따로따로가 아니라 조합으로** 시험한다. 같은 릴리스를 통과시킨 뒤 **한 번에 하나씩만 망가뜨려** 매번 거부를 요구한다.
+  - **서명**: 다른 키의 서명 거부 · **서명 뒤 문서 수정**(`versionCode=12`→`999`, 강제 설치를 노리면 바꿀 바로 그 값) 거부.
+  - **`versionCode`**: **서명이 완벽히 통과해도** `versionCode` 가 없으면 거부 — **유효한 서명이 설치 가능성을 만들지 않는다.** 낮으면 `Downgrade`.
+  - **sha256**: 게이트 1·2 를 다 통과한 뒤에도 **도착한 바이트는 별개 문제**. 크기·해시 각각 거부, 맞으면 통과.
+  - 마지막 케이스가 셋을 **한 자리에서** 보인다 — 어느 하나를 걷어내면 그 셋 중 하나가 통과한다.
+  - 이를 위해 `UpdateFlow.evaluateDocument()` 를 분리했다(네트워크 없이 게이트 전체를 구동).
+- 검증 — **`qwinsta`: console 만 Active.** Android **JVM 38건 / 0 실패**(신규 gates 7 + decision 18, manifest 11, versionCompare 2), `assembleDebug` 성공. JS 디렉터리 스위트 **전부 통과**(신규 contract 20 포함). C++ 업데이트 **12종 845 checks / 0 failed**. 라이브 무영향: PID 3종 불변, `DisplayVersion` **0.2.104**.
+- **이것으로 `docs/업데이트_배선_계획.md` §1 의 W1~W8 이 전부 끝났다.** 남은 것은 실기(UPD-FIELD-00~06)와 배포 준비다.
+- 변경 파일: `apps/directory/test/update_publish_contract_test.js`(신규)·`test/run.js` · `UpdateGatesTest.kt`(신규)·`UpdateFlow.kt` · `docs/업데이트_기능_설계.md`(3.14) · `docs/history.md`.
+- 버전 인상·설치본 배포·설치·라이브 조작·push 없음.

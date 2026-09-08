@@ -68,6 +68,17 @@ function cleanup() {
     process.exit(manifestModule.code);
   }
 
+  // The three runtimes all agree with the shared vectors. What that does NOT establish is
+  // that the document this server actually emits has the same shape -- it could drift and
+  // every suite would stay green while nothing in the field could install anything.
+  console.log('\n--- update publish contract (server output vs shared vectors) ---');
+  const publishContract = await runTest(['update_publish_contract_test.js']);
+  if (publishContract.code !== 0) {
+    cleanup();
+    console.log('\nRESULT: FAILED');
+    process.exit(publishContract.code);
+  }
+
   let server = startServer();
   await sleep(1500);
 

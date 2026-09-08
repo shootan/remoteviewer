@@ -85,7 +85,33 @@ object UpdateFlow {
         val signature = fetchText("$manifestUrl.sig")?.trim() ?: return Outcome(
             UpdateDecision.Verdict.NotForUs, null, "", "could not fetch the signature")
 
-        val result = UpdateManifest.load(document, signature, trustedPublicKeyHex, "android")
+        return evaluateDocument(document, signature, trustedPublicKeyHex, installedVersionCode)
+    }
+
+    /**
+     * The gates between a fetched document and a decision to install.
+     *
+     * Separated from the fetching so all of it can be driven without a network, because what
+     * matters here is that there are THREE checks and that each one alone is enough to refuse:
+     *
+     *   1. the signature, which says the document is ours;
+     *   2. `versionCode`, which says the package may replace this one;
+     *   3. and later, at download time, the sha256, which says the bytes are the ones signed for.
+     *
+     * They are not independent conveniences. The signature makes the versionCode and the hash
+     * trustworthy; the hash makes the signature mean something about the file rather than about a
+     * document; the versionCode is what Android will enforce whatever the other two say. Remove
+     * any one and the remaining two stop being worth having -- a verified manifest pointing at
+     * unverified bytes, or verified bytes nobody vouched for, or a package the system refuses
+     * after the user approved it.
+     */
+    fun evaluateDocument(
+        document: String,
+        signatureHex: String,
+        trustedPublicKeyHex: String,
+        installedVersionCode: Long,
+    ): Outcome {
+        val result = UpdateManifest.load(document, signatureHex, trustedPublicKeyHex, "android")
         if (result.status != UpdateManifest.Status.Ok || result.fields == null) {
             return Outcome(UpdateDecision.Verdict.NotForUs, null, "",
                            "manifest ${result.status}: ${result.detail}")
