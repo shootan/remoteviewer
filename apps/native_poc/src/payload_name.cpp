@@ -110,6 +110,7 @@ const char* payload_name_verdict_name(PayloadNameVerdict verdict) {
     case PayloadNameVerdict::TooLong: return "TooLong";
     case PayloadNameVerdict::EmptyComponent: return "EmptyComponent";
     case PayloadNameVerdict::Duplicate: return "Duplicate";
+    case PayloadNameVerdict::NonAscii: return "NonAscii";
   }
   return "?";
 }
@@ -130,6 +131,36 @@ PayloadNameVerdict check_payload_name(const std::wstring& name) {
   std::wstring folded = name;
   std::replace(folded.begin(), folded.end(), L'/', L'\\');
   return check_normalised(folded);
+}
+
+PayloadNameVerdict check_payload_name_utf8(const std::string& name) {
+  std::wstring wide;
+  wide.reserve(name.size());
+  for (unsigned char c : name) {
+    // Refused, not decoded. Every name this product ships is ASCII, and admitting more would mean
+    // reasoning about normalisation and homoglyphs on a string about to become a path.
+    if (c >= 0x80) return PayloadNameVerdict::NonAscii;
+    wide.push_back(static_cast<wchar_t>(c));
+  }
+  return check_payload_name(wide);
+}
+
+bool check_payload_names_utf8(const std::vector<std::string>& names, size_t* badIndex,
+                              PayloadNameVerdict* verdict) {
+  std::vector<std::wstring> wide;
+  wide.reserve(names.size());
+  for (size_t i = 0; i < names.size(); ++i) {
+    const PayloadNameVerdict v = check_payload_name_utf8(names[i]);
+    if (v != PayloadNameVerdict::Ok) {
+      if (badIndex) *badIndex = i;
+      if (verdict) *verdict = v;
+      return false;
+    }
+    std::wstring w;
+    for (unsigned char c : names[i]) w.push_back(static_cast<wchar_t>(c));
+    wide.push_back(std::move(w));
+  }
+  return check_payload_names(wide, badIndex, verdict);
 }
 
 bool check_payload_names(const std::vector<std::wstring>& names, size_t* badIndex,

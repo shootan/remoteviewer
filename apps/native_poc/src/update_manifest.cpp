@@ -1,5 +1,6 @@
 #include "update_manifest.hpp"
 
+#include "payload_name.hpp"
 #include "update_signature.hpp"
 #include "version_compare.hpp"
 
@@ -86,6 +87,10 @@ bool parse_fields(const std::string& document, ManifestFields* out, std::string*
       }
     } else if (key == "sha256") {
       out->sha256 = value;
+    } else if (key == "payload") {
+      // Repeatable. Order is kept because the swap moves files aside in it, and a stable order
+      // makes a failure reproducible.
+      out->payloadNames.push_back(value);
     } else if (key == "versionCode") {
       if (!parse_u64(value, &out->androidVersionCode)) {
         *detail = "versionCode is not a number";
@@ -172,6 +177,21 @@ ManifestResult load_manifest(const std::string& document,
     result.detail = "sha256 is not 64 lowercase hex characters";
     return result;
   }
+  // The lock goes on the door here: names that arrived in a manifest are checked before anything
+  // can hold a VerifiedManifest carrying them. A caller building an install config from a
+  // verified manifest therefore cannot receive an unsafe name -- there is no path that produces
+  // one.
+  if (!fields.payloadNames.empty()) {
+    size_t bad = 0;
+    PayloadNameVerdict verdict = PayloadNameVerdict::Ok;
+    if (!check_payload_names_utf8(fields.payloadNames, &bad, &verdict)) {
+      result.status = ManifestStatus::Malformed;
+      result.detail = "payload name " + std::to_string(bad) + " rejected: " +
+                      payload_name_verdict_name(verdict);
+      return result;
+    }
+  }
+
   if (!expectedPlatform.empty() && fields.platform != expectedPlatform) {
     result.status = ManifestStatus::WrongPlatform;
     result.detail = fields.platform;

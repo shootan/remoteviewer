@@ -39,6 +39,7 @@ enum class PayloadNameVerdict {
   TooLong,
   EmptyComponent,  // a doubled separator -- ambiguous, and a way to smuggle an empty segment
   Duplicate,       // the same file named twice in one list
+  NonAscii,        // a byte outside ASCII in a name that arrived as UTF-8
 };
 
 const char* payload_name_verdict_name(PayloadNameVerdict verdict);
@@ -48,6 +49,19 @@ const char* payload_name_verdict_name(PayloadNameVerdict verdict);
  * again, so a mixed-separator name cannot pass by looking different in each form.
  */
 PayloadNameVerdict check_payload_name(const std::wstring& name);
+
+/**
+ * The same check for a name that arrived as UTF-8, which is how a manifest carries it.
+ *
+ * Anything outside ASCII is refused rather than decoded. Every name this product ships is ASCII,
+ * and accepting more would mean reasoning about normalisation forms and homoglyphs on a string
+ * that is about to become a path -- a much larger problem than the one being solved.
+ */
+PayloadNameVerdict check_payload_name_utf8(const std::string& name);
+
+/** Whole-list form for UTF-8, including the duplicate check. */
+bool check_payload_names_utf8(const std::vector<std::string>& names, size_t* badIndex,
+                              PayloadNameVerdict* verdict);
 
 /** Convenience: Ok or not. */
 inline bool payload_name_is_safe(const std::wstring& name) {

@@ -52,6 +52,15 @@ struct ManifestFields {
   uint64_t size = 0;
   std::string sha256;          // lowercase hex, 64 characters
   uint64_t androidVersionCode = 0;  // 0 when absent; only meaningful for platform=android
+  /**
+   * Files the package replaces, relative to the install directory. One `payload=` line each.
+   *
+   * These become filesystem paths used with administrator rights, so every one is checked by
+   * check_payload_names_utf8() during load_manifest -- a manifest carrying a traversal, an
+   * absolute path or a reserved device name is Malformed and never produces a VerifiedManifest.
+   * The signature says the bytes are ours; it does not say the names in them are safe.
+   */
+  std::vector<std::string> payloadNames;
 };
 
 /**

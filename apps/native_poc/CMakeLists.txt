@@ -272,6 +272,7 @@ add_executable(remote60_host_app WIN32
   src/update_check.cpp
   src/update_http.cpp
   src/update_manifest.cpp
+  src/payload_name.cpp
   src/update_signature.cpp
   host_app.rc
 )
@@ -518,6 +519,7 @@ endif()
 # Manifest parsing plus real CNG signature verification, and the ordering between them.
 add_executable(remote60_update_manifest_test
   src/update_manifest.cpp
+  src/payload_name.cpp
   src/update_signature.cpp
   src/update_manifest_test.cpp
 )
@@ -535,6 +537,7 @@ endif()
 add_executable(remote60_update_state_machine_test
   src/update_state_machine.cpp
   src/update_manifest.cpp
+  src/payload_name.cpp
   src/update_signature.cpp
   src/update_state_machine_test.cpp
 )
@@ -575,6 +578,7 @@ add_executable(remote60_update_check_test
   src/update_check.cpp
   src/update_http.cpp
   src/update_manifest.cpp
+  src/payload_name.cpp
   src/update_signature.cpp
   src/update_check_test.cpp
 )
