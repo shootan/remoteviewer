@@ -109,12 +109,20 @@ bool UpdateEffectsConfig::validate(std::string* detail) const {
   // to put anything back. It lives outside installDir by design (3.2), but design is not a
   // guarantee -- a config that named its own image would sail straight into it, so this checks.
   if (!updaterImagePath.empty()) {
-    const size_t slash = updaterImagePath.find_last_of(L"\\/");
-    const std::wstring updaterName =
-        (slash == std::wstring::npos) ? updaterImagePath : updaterImagePath.substr(slash + 1);
+    // Compared as full DESTINATION PATHS, not as file names.
+    //
+    // It used to compare names, and that was too coarse in a way that mattered. The updater has
+    // to be replaceable by an update -- otherwise it becomes a second permanent maintenance
+    // binary frozen at its compile-time constants, which is the exact trap that ruled out
+    // re-running the old installer for registration (history #440). The way it stays replaceable
+    // is to run from a copy of itself outside installDir while the installed copy is swapped.
+    // With a name comparison that is refused, even though the file being replaced is not the file
+    // running. What actually has to be true is narrower: no destination of this swap may be the
+    // image this process is executing.
     for (const std::wstring& name : payloadNames) {
-      if (_wcsicmp(name.c_str(), updaterName.c_str()) == 0) {
-        return fail("payloadNames includes the running updater");
+      const std::wstring destination = installDir + L"\\" + name;
+      if (_wcsicmp(destination.c_str(), updaterImagePath.c_str()) == 0) {
+        return fail("a payload destination is the running updater");
       }
     }
     // And the updater's own file must not sit inside the directory being replaced.

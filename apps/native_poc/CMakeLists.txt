@@ -699,6 +699,54 @@ if(MSVC)
   target_compile_options(remote60_update_relaunch_test PRIVATE /utf-8)
 endif()
 
+# GNLinkUpdater.exe -- the first and only caller of run_update.
+#
+# This is where every update_*.cpp finally connects. It is also the only production binary that
+# links update_process_targets.cpp and update_relaunch.cpp: the two translation units that can
+# reach a real GNLinkHost.exe by name and actually start processes.
+add_executable(remote60_updater
+  src/updater_main.cpp
+  src/updater_options.cpp
+  src/update_state_machine.cpp
+  src/update_effects.cpp
+  src/update_manifest.cpp
+  src/update_signature.cpp
+  src/update_http.cpp
+  src/update_check.cpp
+  src/payload_name.cpp
+  src/install_registration.cpp
+  src/update_registration_wiring.cpp
+  src/update_process_targets.cpp
+  src/update_relaunch.cpp
+  src/update_relaunch_plan.cpp
+  src/update_health.cpp
+  src/update_health_log.cpp
+)
+set_target_properties(remote60_updater PROPERTIES OUTPUT_NAME "GNLinkUpdater")
+target_include_directories(remote60_updater PRIVATE src)
+target_link_libraries(remote60_updater PRIVATE
+  bcrypt winhttp advapi32 ole32 oleaut32 uuid shell32 user32
+)
+if(MSVC)
+  target_compile_options(remote60_updater PRIVATE /utf-8)
+  # It replaces files in %ProgramFiles% and restarts a service. Asking for the rights up front
+  # means it fails at launch rather than half way through a swap.
+  target_link_options(remote60_updater PRIVATE
+    "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'"
+  )
+endif()
+
+# What the updater accepts as instructions. Pure parsing and validation -- the entry point that
+# uses it is remote60_updater, which this does not link.
+add_executable(remote60_updater_options_test
+  src/updater_options.cpp
+  src/updater_options_test.cpp
+)
+target_include_directories(remote60_updater_options_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_updater_options_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_host_command_line_test
   src/host_command_line_test.cpp
 )

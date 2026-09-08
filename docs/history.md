@@ -9375,3 +9375,23 @@ Next action
 - **아직 배선은 안 됐다.** `run_update` 제품 호출자는 여전히 0건이다 — 다음이 W1(업데이터 실행 파일)이다.
 - 변경 파일: `update_relaunch_plan.{hpp,cpp}` · `update_relaunch.{hpp,cpp}` · `update_relaunch_test.cpp` · `apps/native_poc/CMakeLists.txt` · `docs/업데이트_배선_계획.md`(W4a·W4b·W4c·E6b·E6c) · `docs/수동확인_체크리스트.md`(UPD-FIELD-00 신설, 01 수락기준 정정) · `docs/history.md`.
 - 버전 인상·설치본·설치·라이브 조작·배포·push 없음. 상태: **W1 착수 예정.**
+
+### 454) 2026-09-08 **`run_update` 에 드디어 제품 호출자가 생겼다** — `GNLinkUpdater.exe` (W1) + W2a 설치 위치 확정
+- **`grep run_update` 결과가 바뀌었다**: `update_state_machine.cpp:64`(정의) · `updater_main.cpp:297`(**호출**). #452 이후 이 줄이 이번 작업의 진척 지표다.
+- **W2a 결정 — 업데이터를 어디에 설치하는가**: 두 안 중 **(나) `installDir` 안에 넣고 실행할 때 자기 복사본으로 재실행**을 골랐다.
+  - (가) 목적지를 항목별 속성으로 두고 `installDir` **밖**에 설치 → **치명적**: payload 이름은 상대 경로만 허용하고 traversal 을 거부하므로(#442·#444) **밖에 있는 파일은 교체 대상이 될 수 없다.** 업데이터가 **컴파일 시점 상수에 묶여 영원히 남는 두 번째 유지보수 바이너리**가 된다 — 등록에서 (C)안을 탈락시킨 것과 **똑같은 덫**(#440). 언인스톨이 `installDir` 을 지우므로 밖의 파일은 **고아**로도 남는다.
+  - (나)는 설치 코드에 새 구조가 전혀 생기지 않는다(`kPayload` 루프도 언인스톨도 그대로). 실행 시 `%ProgramFiles%\GNLink.update\` 로 자기를 복사해 그 복사본이 일하고, `installDir\GNLinkUpdater.exe` 는 **보통 파일처럼 교체·백업·롤백**된다.
+  - ⚠️ **작업 디렉터리는 관리자 전용이어야 한다.** 복사본이 상승된 채 실행되므로 사용자 쓰기 가능한 곳에 두면 **복사와 실행 사이에 바꿔치기할 창**이 생긴다 — 권한 상승 취약점. **초안이 `%ProgramData%` 를 적었던 것을 정정했다** — 설계 1차 조사(#427)가 이미 `%TEMP%`/`%ProgramData%` 를 **명시적으로 배제**해 뒀고(설치기가 지키는 "LocalSystem 바이너리는 사용자 쓰기 가능한 폴더에 두지 않는다" 불변식을 되돌리므로), 위치는 **`%ProgramFiles%\GNLink.update\`** 다. `%ProgramFiles%` 아래는 기본 ACL 이 이미 관리자 전용이라 **ACL 을 세울 필요가 없다 — 세워야 하는 방어는 빠뜨릴 수 있는 방어다.** `GNLink.update` 는 `GNLink` 의 형제이지 하위가 아니므로(다음 글자가 구분자가 아니라 `.`) "work 가 installDir 안" 검사에 걸리지 않는다(회귀로 고정).
+- ⚠️ **`validate()` 를 이름 비교 → 전체 목적지 경로 비교로 고쳤다.** 이름으로 비교하면 (나)가 원천 봉쇄된다 — 교체되는 파일과 실행 중인 파일이 **다른데도** 이름이 같아 거부된다. 실제로 참이어야 하는 명제는 더 좁다: **이 스왑의 어떤 목적지도 지금 실행 중인 이미지여서는 안 된다.** 디렉터리 검사(업데이터가 `installDir` 안이면 거부)는 그대로라 방어는 줄지 않는다. 회귀 3종으로 고정: 목적지가 실행 이미지면 거부 / **이름만 같고 디렉터리가 다르면 허용**(이게 자기 갱신을 가능하게 하는 지점) / 이름이 달라도 목적지가 실행 이미지면 거부.
+- **`updater_options.{hpp,cpp}` + 47 checks** — 관리자로 도는 프로세스의 명령줄이라 **거부가 본론**이다. 필수 10개 전부 없으면 거부(각각 이름을 댐) · **모르는 인자는 무시가 아니라 오류**(오타난 플래그를 관리자 권한으로 "나머지는 실행" 하는 것이 더 나쁘다) · 상대 경로 거부 · **https 강제** · staging/work 가 `installDir` 안이면 거부 · 비슷한 이름의 형제 디렉터리는 "안" 이 아님.
+- **`updater_main.cpp` — 여기서 전부 연결된다**: `enumerate_product_processes`/`request_process_stop`(W5) · `make_registration_effects`(버전을 manifest 에서) · `make_relaunch_effects`(**Quiesce 가 실제로 정지시킨 목록**을 캡처해 넘김, W6) · `https_get_file`(아티팩트 크기가 곧 상한) · `run_update`.
+  - **`ReadySignaller` 데코레이터**: `VerifyDownload` 성공 **그 지점에서만** ready event 를 signal 한다. 락을 쥐고 바이트를 검증한 뒤라, **호스트가 그때 나가도 이 프로세스가 끝내지 못할 상태로 남지 않는다.** 그전에 나가면 실패 시 되살릴 주체가 없다.
+  - **`CREATE_BREAKAWAY_FROM_JOB`**: 호스트가 job object 에 속해 있으면 그 자식인 업데이터도 호스트 정지와 함께 죽는다(설계 3.2 ②). 실패 시 그 플래그 없이 재시도하고 **그 사실을 로그에 남긴다**.
+  - **종료 코드로 결과를 구분**: 0 성공/할 일 없음 · **10 `UpdatedButNotRelaunched`**(설치는 됐고 무언가 안 돌아옴) · 11 교체 전 포기 · 12 롤백 · **13 롤백 실패**(사람이 봐야 하는 유일한 경우).
+- **`remote60_updater` 는 `update_process_targets.cpp` 와 `update_relaunch.cpp` 를 링크하는 유일한 제품 바이너리다** — 실제 `GNLinkHost.exe` 를 이름으로 찾고 프로세스를 띄우는 두 TU 가 처음으로 제품에 들어갔다.
+- 검증 — **`qwinsta`: console 만 Active.** C++ 업데이트 **11종 807 checks / 0 failed**(신규 updater_options 47, effects 147→**149**). 전체 빌드 오류 0. `GNLinkUpdater.exe` 397,824 bytes 생성. JS 디렉터리 스위트 exit 0.
+- **업데이터를 실행하지 않았다** — `requireAdministrator` 라 실행하면 사용자에게 UAC 프롬프트가 뜬다. 명령줄 로직은 `remote60_updater_options_test` 47 checks 로 덮여 있고, 바이너리 자체의 실행은 UPD-FIELD 로 남는다.
+- 라이브 무영향: `GNLinkHost`(5156)·`GNLinkInputService`(10820)·`GNLinkStream`(19384) PID 불변, `DisplayVersion` **0.2.104**.
+- **다음: W2**(설치기 payload 에 `GNLinkUpdater.exe` + `%ProgramFiles%\GNLink.update\` 생성) **→ W3·W4**(Host update/later + handoff, Client 승격 실행).
+- 변경 파일: `updater_options.{hpp,cpp}`·`updater_options_test.cpp`·`updater_main.cpp`(신규) · `update_effects.cpp`·`update_effects_test.cpp` · `apps/native_poc/CMakeLists.txt` · `docs/업데이트_배선_계획.md`(W2a) · `docs/history.md`.
+- 버전 인상·설치본·설치·라이브 조작·배포·push 없음.
