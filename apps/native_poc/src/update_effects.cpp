@@ -24,6 +24,44 @@ std::string to_utf8(const std::wstring& w) {
   return out;
 }
 
+/** Artifact names are ASCII by contract (payload_name refuses anything else). */
+std::wstring widen_name(const std::string& name) {
+  std::wstring out;
+  out.reserve(name.size());
+  for (unsigned char c : name) out.push_back(static_cast<wchar_t>(c));
+  return out;
+}
+
+/**
+ * Creates every missing directory on the way to `path`'s parent, appending each one it actually
+ * created to `created` so a rollback can undo exactly that much.
+ *
+ * The name behind `path` has already been through check_payload_names, which is what makes this
+ * safe to do at all: the relative part cannot climb out of the install directory, name a drive,
+ * or carry an alternate data stream. This creates directories under a checked relative path; it
+ * does not decide what that path may be.
+ */
+bool ensure_parent_dirs(const std::wstring& root,
+                        const std::wstring& relative,
+                        std::vector<std::wstring>* created) {
+  std::wstring current = root;
+  size_t start = 0;
+  for (size_t i = 0; i < relative.size(); ++i) {
+    if (relative[i] != L'\\' && relative[i] != L'/') continue;
+    const std::wstring component = relative.substr(start, i - start);
+    start = i + 1;
+    if (component.empty()) continue;
+    current += L'\\';
+    current += component;
+    if (CreateDirectoryW(current.c_str(), nullptr)) {
+      created->push_back(current);
+      continue;
+    }
+    if (GetLastError() != ERROR_ALREADY_EXISTS) return false;
+  }
+  return true;
+}
+
 bool file_exists(const std::wstring& path) {
   return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
@@ -113,6 +151,32 @@ std::wstring WindowsUpdateEffects::staged_artifact_path() const {
   return config_.stagingDir + L"\\artifact.staged";
 }
 
+std::wstring WindowsUpdateEffects::staging_dir_for(const std::string& releaseId) const {
+  // Keyed by release. Two releases cannot occupy the same staging directory, so a half-downloaded
+  // attempt at one cannot be finished with files from another.
+  std::wstring wide;
+  for (unsigned char c : releaseId) {
+    // Release identities go into a path, so they get the same treatment every other name gets:
+    // anything outside a conservative set becomes an underscore rather than being trusted.
+    const bool safe = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                      c == '-' || c == '.' || c == '_';
+    wide.push_back(safe ? static_cast<wchar_t>(c) : L'_');
+  }
+  return config_.stagingDir + L"\\r-" + wide;
+}
+
+std::wstring WindowsUpdateEffects::staged_path_for(const std::string& releaseId,
+                                                   const std::wstring& name) const {
+  // The name has already been through check_payload_names by the time a verified manifest exists,
+  // but it can contain a separator (ui\shell.html), so the leaf is flattened rather than creating
+  // subdirectories in staging. The destination keeps the real relative path.
+  std::wstring flat = name;
+  for (wchar_t& c : flat) {
+    if (c == L'\\' || c == L'/') c = L'_';
+  }
+  return staging_dir_for(releaseId) + L"\\" + flat;
+}
+
 void WindowsUpdateEffects::set_manifest(std::string document, std::string signatureHex) {
   manifestDocument_ = std::move(document);
   manifestSignatureHex_ = std::move(signatureHex);
@@ -172,57 +236,103 @@ std::string WindowsUpdateEffects::InstalledVersion() { return installedVersion_;
 // ---------------------------------------------------------------- download and verification
 
 bool WindowsUpdateEffects::Download(const ManifestFields& fields) {
+  stagedReleaseId_.clear();
+  stagedNames_.clear();
+
+  if (fields.artifacts.empty()) {
+    lastError_ = "manifest lists no artifacts";
+    return false;
+  }
+  if (fields.releaseId.empty()) {
+    lastError_ = "manifest has no release identity";
+    return false;
+  }
+
   if (!CreateDirectoryW(config_.stagingDir.c_str(), nullptr) &&
       GetLastError() != ERROR_ALREADY_EXISTS) {
     lastError_ = "could not create the staging directory";
     return false;
   }
-  // Anything left from a previous attempt is removed first, so a short write cannot be mistaken
-  // for a complete one by whatever runs next.
-  DeleteFileW(staged_artifact_path().c_str());
-  if (!config_.fetchArtifact(fields, staged_artifact_path())) {
-    lastError_ = "artifact fetch failed";
+  const std::wstring dir = staging_dir_for(fields.releaseId);
+  if (!CreateDirectoryW(dir.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
+    lastError_ = "could not create the release staging directory";
     return false;
   }
+
+  // Every file of ONE release, from the list a single verified manifest gave. Nothing here asks
+  // what "latest" is between files: doing so is how an update ends up half one build and half
+  // another.
+  for (const ManifestArtifact& artifact : fields.artifacts) {
+    const std::wstring dest = staged_path_for(fields.releaseId, widen_name(artifact.name));
+    // Anything left from a previous attempt goes first, so a short write cannot be mistaken for a
+    // complete one by whatever runs next.
+    DeleteFileW(dest.c_str());
+    if (!config_.fetchArtifact(artifact, dest)) {
+      lastError_ = "fetch failed for " + artifact.name;
+      // A partial release is not kept. Leaving some files behind would invite a later attempt to
+      // treat them as already done.
+      DiscardDownload();
+      return false;
+    }
+    stagedNames_.push_back(widen_name(artifact.name));
+  }
+  stagedReleaseId_ = fields.releaseId;
   return true;
 }
 
 bool WindowsUpdateEffects::VerifyDownload(const ManifestFields& fields) {
-  uint64_t size = 0;
-  if (!file_size_bytes(staged_artifact_path(), &size)) {
-    lastError_ = "staged artifact is not readable";
+  if (stagedReleaseId_.empty() || stagedReleaseId_ != fields.releaseId) {
+    lastError_ = "nothing staged for this release";
     return false;
   }
-  // Size first: it is cheap, and a size mismatch means the hash is going to fail anyway.
-  if (size != fields.size) {
-    lastError_ = "size mismatch";
-    return false;
-  }
-  const std::string actual = sha256_file_hex(staged_artifact_path());
-  if (actual.empty()) {
-    lastError_ = "could not hash the staged artifact";
-    return false;
-  }
-  if (actual != fields.sha256) {
-    lastError_ = "sha256 mismatch";
+  if (fields.artifacts.empty()) {
+    lastError_ = "manifest lists no artifacts";
     return false;
   }
 
-  // The hash pins WHICH bytes arrived; this asks whether those bytes agree with what the manifest
-  // says they are. The realistic failure it catches is a manifest paired with the wrong artifact
-  // -- a publishing mistake rather than an attack, since an attacker who could choose the bytes
-  // would have had to defeat the signature first.
-  if (!config_.expectedVersion.empty()) {
-    if (!file_contains_utf16_version(staged_artifact_path(), config_.expectedVersion)) {
-      lastError_ = "staged artifact does not carry version " + config_.expectedVersion;
+  // EVERY file, before the update is allowed anywhere near the install directory. One bad file
+  // means the whole release is abandoned -- there is no such thing as updating most of it.
+  for (const ManifestArtifact& artifact : fields.artifacts) {
+    const std::wstring staged = staged_path_for(fields.releaseId, widen_name(artifact.name));
+
+    uint64_t size = 0;
+    if (!file_size_bytes(staged, &size)) {
+      lastError_ = "staged " + artifact.name + " is not readable";
       return false;
     }
-    // The manifest's own version must be the one we were told to expect, or two sources disagree
-    // about what is being installed and neither is obviously right.
+    // Size first: it is cheap, and a size mismatch means the hash is going to fail anyway.
+    if (size != artifact.size) {
+      lastError_ = "size mismatch for " + artifact.name;
+      return false;
+    }
+    const std::string actual = sha256_file_hex(staged);
+    if (actual.empty()) {
+      lastError_ = "could not hash staged " + artifact.name;
+      return false;
+    }
+    if (actual != artifact.sha256) {
+      lastError_ = "sha256 mismatch for " + artifact.name;
+      return false;
+    }
+  }
+
+  // The version the artifacts claim, checked against what we were told to expect. Catches a
+  // manifest paired with the wrong build -- a publishing mistake rather than an attack, since an
+  // attacker choosing the bytes would have had to defeat the signature first.
+  if (!config_.expectedVersion.empty()) {
     if (!fields.version.empty() && fields.version != config_.expectedVersion) {
       lastError_ = "manifest version " + fields.version + " does not match the expected " +
                    config_.expectedVersion;
       return false;
+    }
+    // Only the artifact that carries a version string is checked for it; the others are data.
+    for (const ManifestArtifact& artifact : fields.artifacts) {
+      if (artifact.name.find("Setup") == std::string::npos) continue;
+      const std::wstring staged = staged_path_for(fields.releaseId, widen_name(artifact.name));
+      if (!file_contains_utf16_version(staged, config_.expectedVersion)) {
+        lastError_ = artifact.name + " does not carry version " + config_.expectedVersion;
+        return false;
+      }
     }
   }
   return true;
@@ -230,6 +340,14 @@ bool WindowsUpdateEffects::VerifyDownload(const ManifestFields& fields) {
 
 void WindowsUpdateEffects::DiscardDownload() {
   DeleteFileW(staged_artifact_path().c_str());
+  if (stagedReleaseId_.empty()) return;
+  const std::wstring dir = staging_dir_for(stagedReleaseId_);
+  for (const std::wstring& name : stagedNames_) {
+    DeleteFileW(staged_path_for(stagedReleaseId_, name).c_str());
+  }
+  RemoveDirectoryW(dir.c_str());
+  stagedReleaseId_.clear();
+  stagedNames_.clear();
 }
 
 // ---------------------------------------------------------------- stopping the product
@@ -281,7 +399,24 @@ bool WindowsUpdateEffects::Quiesce() {
 
 bool WindowsUpdateEffects::Swap() {
   movedAside_.clear();
+  createdDirs_.clear();
+  placed_.clear();
   swapped_ = false;
+
+  // Nothing moves unless a whole release is staged. This is what makes "one attempt, one release"
+  // structural rather than a convention: a Swap with nothing staged, or with a release other than
+  // the one that was verified, simply does not happen.
+  if (stagedReleaseId_.empty()) {
+    lastError_ = "no verified release is staged";
+    return false;
+  }
+  for (const std::wstring& name : config_.payloadNames) {
+    if (GetFileAttributesW(staged_path_for(stagedReleaseId_, name).c_str()) ==
+        INVALID_FILE_ATTRIBUTES) {
+      lastError_ = "the staged release does not contain " + to_utf8(name);
+      return false;
+    }
+  }
 
   // Before a single file moves. Capturing later would capture the state the update is creating,
   // and a rollback to that would leave the previous build's files under the new version's name.
@@ -305,16 +440,23 @@ bool WindowsUpdateEffects::Swap() {
     movedAside_.push_back(name);
   }
 
-  // Phase two: put the new files in. The staged artifact is a single file in this build; each
-  // payload name is written from it. Splitting a multi-file payload out of one artifact is the
-  // installer's job and is not modelled here.
+  // Phase two: put the new files in, each from its own staged file. Every one of them was
+  // verified before this function ran, and they all came from the same release.
   for (const std::wstring& name : config_.payloadNames) {
     const std::wstring live = install_path(name);
-    if (!CopyFileW(staged_artifact_path().c_str(), live.c_str(), FALSE)) {
+    const std::wstring staged = staged_path_for(stagedReleaseId_, name);
+    // A release may add a file in a folder this install does not have yet.
+    if (!ensure_parent_dirs(config_.installDir, name, &createdDirs_)) {
+      lastError_ = "could not create the destination folder for " + to_utf8(name);
+      (void)Rollback();
+      return false;
+    }
+    if (!CopyFileW(staged.c_str(), live.c_str(), FALSE)) {
       lastError_ = "could not place " + to_utf8(name);
       (void)Rollback();
       return false;
     }
+    placed_.push_back(name);
   }
 
   swapped_ = true;
@@ -331,7 +473,13 @@ bool WindowsUpdateEffects::Rollback() {
     const std::wstring backup = backup_path(name);
     const bool hasBackup =
         std::find(movedAside_.begin(), movedAside_.end(), name) != movedAside_.end();
-    if (!hasBackup) continue;
+    if (!hasBackup) {
+      // Nothing was moved aside for this name, so if something is there now, this attempt put it
+      // there and it did not exist before. Removing it is what restores the installation.
+      const bool wasPlaced = std::find(placed_.begin(), placed_.end(), name) != placed_.end();
+      if (wasPlaced && file_exists(live) && !DeleteFileW(live.c_str())) ok = false;
+      continue;
+    }
     if (file_exists(live) && !DeleteFileW(live.c_str())) {
       ok = false;
       continue;
@@ -341,7 +489,15 @@ bool WindowsUpdateEffects::Rollback() {
     }
   }
   movedAside_.clear();
+  placed_.clear();
   swapped_ = false;
+
+  // Folders this attempt created are removed deepest first, and only while empty -- a directory
+  // that has something else in it was not this update's to take away.
+  for (auto it = createdDirs_.rbegin(); it != createdDirs_.rend(); ++it) {
+    RemoveDirectoryW(it->c_str());
+  }
+  createdDirs_.clear();
 
   // The registration goes back to what was captured, not to the version being abandoned.
   if (!config_.restoreRegistration()) {

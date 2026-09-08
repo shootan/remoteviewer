@@ -67,12 +67,6 @@ struct ManifestFields {
   uint32_t schema = 0;
   std::string platform;
   std::string version;
-  // Single-artifact fields, kept for the effects layer that has not been migrated to artifacts[]
-  // yet. Schema 2 does NOT parse them from the document -- they are set by callers that still
-  // work one file at a time, and they will go when the staging path consumes the list.
-  std::string artifact;
-  uint64_t size = 0;
-  std::string sha256;          // lowercase hex, 64 characters
   uint64_t androidVersionCode = 0;  // 0 when absent; only meaningful for platform=android
   /**
    * Files the package replaces, relative to the install directory. One `payload=` line each.

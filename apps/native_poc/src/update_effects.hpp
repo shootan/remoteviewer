@@ -89,8 +89,14 @@ struct UpdateEffectsConfig {
   /** Named mutex for mutual exclusion. `Global\` prefixed in production (design 3.3). */
   std::wstring lockName;
 
-  /** Writes the artifact to `destPath`. Injected so no test ever opens a socket. */
-  std::function<bool(const ManifestFields& fields, const std::wstring& destPath)> fetchArtifact;
+  /**
+   * Writes one artifact to `destPath`. Injected so no test ever opens a socket.
+   *
+   * Called once per artifact. The updater does not ask what "latest" is between calls -- it works
+   * from the list a single verified manifest gave it, which is what stops a release changing
+   * underneath an update in progress.
+   */
+  std::function<bool(const ManifestArtifact& artifact, const std::wstring& destPath)> fetchArtifact;
 
   /**
    * The processes to stop, each with a full identity.
@@ -206,6 +212,9 @@ class WindowsUpdateEffects : public UpdateEffects {
 
  private:
   std::wstring staged_artifact_path() const;
+  /** Where one artifact of a release is staged. Keyed by release, so two cannot be mixed. */
+  std::wstring staged_path_for(const std::string& releaseId, const std::wstring& name) const;
+  std::wstring staging_dir_for(const std::string& releaseId) const;
   std::wstring install_path(const std::wstring& name) const;
   std::wstring backup_path(const std::wstring& name) const;
 
@@ -217,6 +226,31 @@ class WindowsUpdateEffects : public UpdateEffects {
   std::string lastError_;
   /** Names moved aside during the current swap, so a partial failure can be undone exactly. */
   std::vector<std::wstring> movedAside_;
+  /**
+   * Names this swap actually placed.
+   *
+   * Not the same list as movedAside_, and the difference is the point: a release that ADDS a file
+   * places something that has no backup, so "put back what was moved aside" would leave it there.
+   * A rollback has to remove those too, or an abandoned update still changes the installation.
+   */
+  std::vector<std::wstring> placed_;
+  /**
+   * Directories this swap created under installDir, deepest last.
+   *
+   * A payload name may name a destination in a subdirectory (`ui\\shell.html`), and a release
+   * that adds a file under a folder that does not exist yet has to be able to place it. Rollback
+   * removes these again, so an abandoned update does not leave folders behind that the previous
+   * build never had.
+   */
+  std::vector<std::wstring> createdDirs_;
+  /**
+   * The release currently staged, and the files staged for it.
+   *
+   * Set by Download and read by Swap. A Swap that finds a different release than the one that was
+   * verified refuses -- that is the mechanism that keeps one attempt to one release.
+   */
+  std::string stagedReleaseId_;
+  std::vector<std::wstring> stagedNames_;
   bool swapped_ = false;
 };
 

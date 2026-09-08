@@ -129,7 +129,7 @@ UpdateEffectsConfig base_config(const std::wstring& install, const std::wstring&
   c.stagingDir = staging;
   c.payloadNames = {L"AlphaPayload.bin", L"BetaPayload.bin"};
   c.lockName = L"Local\\gnlink-update-test-" + std::to_wstring(GetCurrentProcessId());
-  c.fetchArtifact = [](const ManifestFields&, const std::wstring& dest) {
+  c.fetchArtifact = [](const ManifestArtifact&, const std::wstring& dest) {
     write_text(dest, kArtifactBytes);
     return true;
   };
@@ -164,16 +164,41 @@ UpdateEffectsConfig setup_member_config(const std::wstring& install, const std::
   return c;
 }
 
-ManifestFields artifact_fields() {
+/**
+ * A signed-shaped document listing exactly the files a swap will replace.
+ *
+ * The staging path checks that every payload name is present in the staged release before it
+ * moves anything, so a document naming other files is not merely inconvenient -- it is refused,
+ * which is the behaviour worth having.
+ */
+std::string manifest_for(const std::string& version, const std::vector<std::wstring>& names) {
+  std::string doc = "schema=2\nreleaseId=r-" + version +
+                    "\nplatform=windows\narch=x64\nversion=" + version + "\n";
+  for (const std::wstring& n : names) {
+    const std::string narrow(n.begin(), n.end());
+    doc += "artifact=" + narrow + "|" +
+           std::to_string(std::char_traits<char>::length(kArtifactBytes)) + "|" + gArtifactSha +
+           "|https://u.example/" + narrow + "\n";
+  }
+  return doc;
+}
+
+ManifestFields artifact_fields(const std::vector<std::string>& names = {"AlphaPayload.bin",
+                                                                          "BetaPayload.bin"}) {
   ManifestFields f;
   f.schema = 2;
   f.releaseId = "r-0.2.105";
   f.arch = "x64";
+  for (const std::string& n : names) {
+    ManifestArtifact a;
+    a.name = n;
+    a.size = std::char_traits<char>::length(kArtifactBytes);
+    a.sha256 = gArtifactSha;
+    a.url = "https://u.example/" + n;
+    f.artifacts.push_back(a);
+  }
   f.platform = "windows";
   f.version = "0.2.105";
-  f.artifact = "test.bin";
-  f.size = std::char_traits<char>::length(kArtifactBytes);
-  f.sha256 = gArtifactSha;
   return f;
 }
 
@@ -301,11 +326,11 @@ int main(int argc, char** argv) {
     check("verification accepts a matching artifact", e.VerifyDownload(f), e.last_error());
 
     ManifestFields wrongSize = f;
-    wrongSize.size = f.size + 1;
+    wrongSize.artifacts[0].size = f.artifacts[0].size + 1;
     check("verification rejects a size mismatch", !e.VerifyDownload(wrongSize), e.last_error());
 
     ManifestFields wrongHash = f;
-    wrongHash.sha256 = std::string(64, 'a');
+    wrongHash.artifacts[0].sha256 = std::string(64, 'a');
     check("verification rejects a hash mismatch", !e.VerifyDownload(wrongHash), e.last_error());
 
     e.DiscardDownload();
@@ -315,7 +340,7 @@ int main(int argc, char** argv) {
   {
     // A fetch that half-writes must not leave bytes that a later attempt mistakes for complete.
     UpdateEffectsConfig c = base_config(install, staging);
-    c.fetchArtifact = [](const ManifestFields&, const std::wstring& dest) {
+    c.fetchArtifact = [](const ManifestArtifact&, const std::wstring& dest) {
       write_text(dest, "short");
       return false;  // reports failure after writing
     };
@@ -500,8 +525,7 @@ int main(int argc, char** argv) {
     // A manifest whose signature the injected verifier accepts. Real signature verification has
     // its own suite; what is exercised here is the effects behind the state machine.
     e.set_manifest(
-        "schema=2\nreleaseId=r-0.2.105\nplatform=windows\narch=x64\nversion=0.2.105\nartifact=test.bin|" +
-                       std::to_string(artifact_fields().size) + "|" + gArtifactSha + "|https://u.example/a\n",
+        manifest_for("0.2.105", {L"AlphaPayload.bin", L"BetaPayload.bin"}),
         std::string(128, '0'));
 
     const auto accept = [](const std::string&, const std::vector<uint8_t>&) { return true; };
@@ -521,8 +545,7 @@ int main(int argc, char** argv) {
     WindowsUpdateEffects e(c);
     e.set_installed_version("0.2.106");
     e.set_manifest(
-        "schema=2\nreleaseId=r-0.2.105\nplatform=windows\narch=x64\nversion=0.2.105\nartifact=test.bin|" +
-                       std::to_string(artifact_fields().size) + "|" + gArtifactSha + "|https://u.example/a\n",
+        manifest_for("0.2.105", {L"AlphaPayload.bin", L"BetaPayload.bin"}),
         std::string(128, '0'));
     const auto accept = [](const std::string&, const std::vector<uint8_t>&) { return true; };
     const UpdateOutcome out = run_update(e, accept, "windows");
@@ -611,8 +634,7 @@ int main(int argc, char** argv) {
     };
     WindowsUpdateEffects e(c);
     e.set_installed_version("0.2.104");
-    e.set_manifest("schema=2\nreleaseId=r-0.2.105\nplatform=windows\narch=x64\nversion=0.2.105\nartifact=test.bin|" +
-                       std::to_string(artifact_fields().size) + "|" + gArtifactSha + "|https://u.example/a\n",
+    e.set_manifest(manifest_for("0.2.105", {L"AlphaPayload.bin", L"BetaPayload.bin"}),
                    std::string(128, '0'));
     const auto accept = [](const std::string&, const std::vector<uint8_t>&) { return true; };
     const UpdateOutcome out = run_update(e, accept, "windows");
@@ -695,8 +717,7 @@ int main(int argc, char** argv) {
 
       // And the state machine turns that into "not now" rather than an error or a wait.
       e.set_installed_version("0.2.104");
-      e.set_manifest("schema=2\nreleaseId=r-0.2.105\nplatform=windows\narch=x64\nversion=0.2.105\nartifact=test.bin|" +
-                       std::to_string(artifact_fields().size) + "|" + gArtifactSha + "|https://u.example/a\n",
+      e.set_manifest(manifest_for("0.2.105", {L"AlphaPayload.bin", L"BetaPayload.bin"}),
                      std::string(128, '0'));
       const auto accept = [](const std::string&, const std::vector<uint8_t>&) { return true; };
       const UpdateOutcome out = run_update(e, accept, "windows");
@@ -752,7 +773,7 @@ int main(int argc, char** argv) {
     seed_with_setup();
     UpdateEffectsConfig c = setup_member_config(install, staging);
     WindowsUpdateEffects e(c);
-    const ManifestFields f = artifact_fields();
+    const ManifestFields f = artifact_fields({"AlphaPayload.bin", "GNLinkSetup.exe"});
     check("setup-member: download", e.Download(f), e.last_error());
     check("setup-member: swap succeeds", e.Swap(), e.last_error());
     check("setup-member: the product file was replaced",
@@ -771,9 +792,9 @@ int main(int argc, char** argv) {
     seed_with_setup();
     UpdateEffectsConfig c = setup_member_config(install, staging);
     WindowsUpdateEffects e(c);
-    ManifestFields f = artifact_fields();
+    ManifestFields f = artifact_fields({"AlphaPayload.bin", "GNLinkSetup.exe"});
     e.Download(f);
-    f.sha256 = std::string(64, 'b');
+    f.artifacts[1].sha256 = std::string(64, 'b');
     check("hash mismatch is refused", !e.VerifyDownload(f), e.last_error());
     check("and the old Setup is untouched",
           read_text(install + L"\\GNLinkSetup.exe") == kOldSetup);
@@ -788,7 +809,7 @@ int main(int argc, char** argv) {
     seed_with_setup();
     UpdateEffectsConfig c = setup_member_config(install, staging);
     WindowsUpdateEffects e(c);
-    e.Download(artifact_fields());
+    e.Download(artifact_fields({"AlphaPayload.bin", "GNLinkSetup.exe"}));
 
     HANDLE held = CreateFileW((install + L"\\GNLinkSetup.exe").c_str(), GENERIC_READ, 0, nullptr,
                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -813,8 +834,7 @@ int main(int argc, char** argv) {
     c.registerInstall = []() { return false; };  // fails after the swap
     WindowsUpdateEffects e(c);
     e.set_installed_version("0.2.104");
-    e.set_manifest("schema=2\nreleaseId=r-0.2.105\nplatform=windows\narch=x64\nversion=0.2.105\nartifact=test.bin|" +
-                       std::to_string(artifact_fields().size) + "|" + gArtifactSha + "|https://u.example/a\n",
+    e.set_manifest(manifest_for("0.2.105", {L"AlphaPayload.bin", L"BetaPayload.bin"}),
                    std::string(128, '0'));
     const auto accept = [](const std::string&, const std::vector<uint8_t>&) { return true; };
     const UpdateOutcome out = run_update(e, accept, "windows");
@@ -873,35 +893,61 @@ int main(int argc, char** argv) {
   }
 
   {
-    // Wired in: an artifact that does not carry the expected version fails verification even
-    // though its hash is right.
+    // The version string is looked for in the Setup, which is the artifact that carries one --
+    // the rest are data. Here it does not, even though its hash is right.
     UpdateEffectsConfig c = base_config(install, staging);
     c.expectedVersion = "0.2.105";
+    c.payloadNames = {L"GNLinkSetup.exe"};
     WindowsUpdateEffects e(c);
-    const ManifestFields f = artifact_fields();
-    e.Download(f);
-    check("an artifact without the expected version is refused", !e.VerifyDownload(f),
+    const ManifestFields f = artifact_fields({"GNLinkSetup.exe"});
+    check("download for the version case", e.Download(f), e.last_error());
+    check("a Setup that does not carry the expected version is refused", !e.VerifyDownload(f),
           e.last_error());
     check("and the reason names the version",
           e.last_error().find("0.2.105") != std::string::npos, e.last_error());
     e.DiscardDownload();
   }
   {
+    // And an artifact that DOES carry it passes, so the case above is not passing for the trivial
+    // reason that the check always fails.
+    UpdateEffectsConfig c = base_config(install, staging);
+    c.expectedVersion = "0.2.105";
+    c.payloadNames = {L"GNLinkSetup.exe"};
+    std::string utf16;
+    for (char ch : std::string("0.2.105")) { utf16.push_back(ch); utf16.push_back('\0'); }
+    c.fetchArtifact = [utf16](const ManifestArtifact&, const std::wstring& dest) {
+      write_text(dest, utf16);
+      return true;
+    };
+    WindowsUpdateEffects e(c);
+    ManifestFields f = artifact_fields({"GNLinkSetup.exe"});
+    {
+      const std::wstring probe = staging + L"\\probe_v.bin";
+      write_text(probe, utf16);
+      uint64_t size = 0;
+      file_size_bytes(probe, &size);
+      f.artifacts[0].size = size;
+      f.artifacts[0].sha256 = sha256_file_hex(probe);
+      DeleteFileW(probe.c_str());
+    }
+    check("download for the positive version case", e.Download(f), e.last_error());
+    check("a Setup that carries the expected version passes", e.VerifyDownload(f), e.last_error());
+    e.DiscardDownload();
+  }
+  {
     // And the manifest's own version must agree with what we were told to expect.
     UpdateEffectsConfig c = base_config(install, staging);
     c.expectedVersion = "0.2.105";
-    c.fetchArtifact = [](const ManifestFields&, const std::wstring& dest) {
+    c.fetchArtifact = [](const ManifestArtifact&, const std::wstring& dest) {
       std::string utf16;
       for (char ch : std::string("0.2.105")) { utf16.push_back(ch); utf16.push_back('\0'); }
       write_text(dest, utf16);
       return true;
     };
+    c.payloadNames = {L"GNLinkSetup.exe"};
     WindowsUpdateEffects e(c);
-    ManifestFields f;
-    f.schema = 1;
-    f.platform = "windows";
+    ManifestFields f = artifact_fields({"GNLinkSetup.exe"});
     f.version = "0.9.9";  // disagrees with expectedVersion
-    f.artifact = "test.bin";
     {
       // Size and hash have to match the bytes the fetcher writes, or the earlier checks fire first.
       const std::wstring probe = staging + L"\\probe2.bin";
@@ -910,11 +956,11 @@ int main(int argc, char** argv) {
       write_text(probe, utf16);
       uint64_t size = 0;
       file_size_bytes(probe, &size);
-      f.size = size;
-      f.sha256 = sha256_file_hex(probe);
+      f.artifacts[0].size = size;
+      f.artifacts[0].sha256 = sha256_file_hex(probe);
       DeleteFileW(probe.c_str());
     }
-    e.Download(f);
+    check("download for the disagreement case", e.Download(f), e.last_error());
     check("a manifest version that disagrees with the expected one is refused",
           !e.VerifyDownload(f), e.last_error());
     check("and the reason names both", e.last_error().find("0.9.9") != std::string::npos,
@@ -1014,8 +1060,7 @@ int main(int argc, char** argv) {
 
       WindowsUpdateEffects e(c);
       e.set_installed_version("0.2.105");
-      e.set_manifest("schema=2\nreleaseId=r-0.3.0\nplatform=windows\narch=x64\nversion=0.3.0\nartifact=test.bin|" +
-                       std::to_string(artifact_fields().size) + "|" + gArtifactSha + "|https://u.example/a\n",
+      e.set_manifest(manifest_for("0.3.0", {L"AlphaPayload.bin", L"BetaPayload.bin"}),
                      std::string(128, '0'));
       const auto accept = [](const std::string&, const std::vector<uint8_t>&) { return true; };
       const UpdateOutcome out = run_update(e, accept, "windows");
