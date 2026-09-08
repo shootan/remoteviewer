@@ -19,6 +19,22 @@ android {
         cppFlags += "-std=c++20"
       }
     }
+
+    // Where updates come from, and the key that says a manifest is ours.
+    //
+    // Empty by default, and empty is a real answer rather than a stub: UpdateFlow reports "this
+    // build has no update endpoint or trusted key" and does nothing, which is correct for every
+    // build made before an operational key and a release host exist. Filling them in with
+    // plausible-looking values would make a build that tries to check and fails, which is worse
+    // than one that knows it cannot.
+    buildConfigField("String", "UPDATE_MANIFEST_URL",
+      "\"" + (project.findProperty("gnlink.updateManifestUrl") ?: "") + "\"")
+    buildConfigField("String", "UPDATE_PUBLIC_KEY_HEX",
+      "\"" + (project.findProperty("gnlink.updatePublicKeyHex") ?: "") + "\"")
+  }
+
+  buildFeatures {
+    buildConfig = true
   }
 
   buildTypes {

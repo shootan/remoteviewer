@@ -9445,3 +9445,25 @@ Next action
 - **다음: W7 Android → W8 추적표.**
 - 변경 파일: `update_handoff.{hpp,cpp}`·`update_handoff_test.cpp` · `update_relaunch.{hpp,cpp}`·`update_relaunch_test.cpp` · `updater_main.cpp` · `client_shell_main.cpp` · `apps/native_poc/CMakeLists.txt` · `docs/업데이트_기능_설계.md`((b) 연결) · `docs/history.md`.
 - 버전 인상·설치본 배포·설치·라이브 조작·push 없음.
+
+### 458) 2026-09-08 W7 — Android 업데이트 전 흐름 배선 (확인·다운로드·검증·설치 승인/취소/권한거부)
+- **`UpdateManifest.kt` 는 파싱만 있고 부르는 사람이 0명이었다.** 이번에 확인→다운로드→검증→설치가 실제로 연결됐고, `MainActivity` 가 그것을 부른다(C++ 쪽에 적용한 **"제품에서 이 경로가 불리는가"** 를 Android 에도 그대로 적용).
+- **결정과 실행을 분리**했다 — C++ 쪽과 같은 배치:
+  - **`UpdateDecision.kt`(순수, JVM 테스트 18건)** — 무엇을 설치할지·무엇이 도착했는지·거절이 무엇인지.
+  - **`UpdateInstaller.kt`(기기 필요)** — 권한 확인, `PackageInstaller` 세션, 상태 수신.
+  - **`UpdateFlow.kt`** — 둘을 잇는 얇은 층. 규칙은 전부 테스트가 닿는 곳에 있다.
+- ⚠️ **`versionCode` 가 권위이지 `versionName` 이 아니다.** Android 는 패키지 교체 여부를 `versionCode` 로 판단하므로, **이름은 더 새로운데 코드가 크지 않으면 사용자가 승인을 누른 뒤에 시스템이 거절한다.** 묻기 전에 아는 편이 낫다. `versionCode` 가 없으면 **설치하지 않는다** — 이름만 보고 설치하는 것은 시스템이 절대 추측하지 않는 그 하나를 추측하는 것이다.
+- **다운그레이드를 `UpToDate` 와 분리**했다. Android 가 어차피 거절하고, 대개 **배포 실수**를 뜻하므로 로그에 따로 남을 값어치가 있다.
+- **APK 는 정확히 1개일 때만** 고른다. 없으면 우리 것이 아니고, 여럿이면 고를 근거가 없다 — 첫 번째를 집는 것은 **서명이 표현하지 않은 규칙을 지어내는 것**이다.
+- ⚠️ **거절은 답이지 실패가 아니다.** `InstallOutcome{Installed, Cancelled, PermissionDenied, Failed}` + `isUserDecision()`. 시스템 대화상자를 닫은 것(`STATUS_FAILURE_ABORTED`=3)과 설치 권한을 안 준 것은 **오류 메시지를 띄우지 않는다** — 사용자는 여전히 동작하는 앱을 갖고 있고 그게 거절할 수 있었던 이유다. **회귀로 성질을 고정**했다: 열거값 전체 중 사용자 결정이 정확히 2개 — 새 결과를 추가하면 어느 쪽인지 정하지 않고는 통과하지 못한다.
+- **`STATUS_PENDING_USER_ACTION` 은 결과가 아니다.** 시스템이 확인 화면을 띄워 달라는 것이고, 이것을 결과로 다루면 **사용자에게 묻기도 전에 실패를 보고**하게 된다.
+- **`PackageInstaller` 세션(B안)**: 스트림을 받으므로 **`FileProvider` 불필요**, content URI 를 남에게 주지 않으며 APK 가 앱 전용 저장소를 벗어나지 않는다. 그리고 **상태 코드를 돌려주므로 닫힌 대화상자와 진짜 실패를 구분**할 수 있다 — 파일 Intent 방식에서는 둘 다 "아무 일도 없음" 으로 보인다.
+- **다운로드는 앱 전용 캐시에**, 파일명은 **manifest 의 이름을 쓰지 않고 고정**한다(검사를 통과한 이름이지만 문서에서 온 문자열이 경로가 되는 것 자체를 없앤다). 크기 초과는 **도착하는 중에** 끊는다. 검증 실패 파일은 **지운다** — 남겨 두면 나중에 좋은 것으로 오인될 수 있다.
+- **시작 시 확인은 기다리지 않는다**(daemon 스레드). 서버에 못 닿는 것이 일상인 기기에서 **로그인 화면이 안 뜨면 기차에서 못 쓴다**. 사용자에게 말하는 것은 **"새 버전이 있다" 뿐**이고 나머지는 진단 로그로 간다. **"나중에" 는 답**이고 그 실행에서 다시 묻지 않는다.
+- **권한을 다운로드 전에 확인**한다 — 없는데 먼저 받으면 **다 쓰고 나서야 권한이 필요하다는 걸 알게 된다.** 권한 화면으로 보낸 뒤 **자동 재시도하지 않는다**(거절은 답이고 쫓아다닐 일이 아니다).
+- `AndroidManifest.xml` 에 **`REQUEST_INSTALL_PACKAGES`** 선언. `BuildConfig.UPDATE_MANIFEST_URL` / `UPDATE_PUBLIC_KEY_HEX` 는 **기본 빈 값**이고, 빈 값은 스텁이 아니라 **진짜 답**이다("이 빌드는 확인할 수 없다"). 그럴듯한 값을 박아 두면 **확인을 시도하고 실패하는 빌드**가 되는데, 못 한다는 걸 아는 빌드보다 나쁘다.
+- 검증 — **`qwinsta`: console 만 Active.** Android **`assembleDebug` 성공**, **JVM 단위 테스트 31건 / 0 실패**(신규 `UpdateDecisionTest` **18**, 기존 manifest 11 + versionCompare 2). C++ 업데이트 12종 **845 checks / 0 failed**, JS 디렉터리 스위트 exit 0. 라이브 무영향: PID 3종 불변, `DisplayVersion` **0.2.104**.
+- **APK 를 기기에 설치하거나 실행하지 않았다.** 실제 설치·권한·취소 경로는 실기 항목이다.
+- **다음: W8** 서버 발행 ↔ 클라이언트 소비 추적표.
+- 변경 파일: `UpdateDecision.kt`·`UpdateInstaller.kt`·`UpdateFlow.kt`·`UpdateDecisionTest.kt`(신규) · `MainActivity.kt` · `AndroidManifest.xml` · `app/build.gradle.kts` · `docs/history.md`.
+- 버전 인상·설치본 배포·설치·라이브 조작·push 없음.

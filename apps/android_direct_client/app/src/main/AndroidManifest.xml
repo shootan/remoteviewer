@@ -3,6 +3,13 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!--
+        Lets the app ask the system to install an APK it downloaded. Asking is all it does: from
+        API 26 the user grants this per app in settings and can take it back, and the system still
+        shows its own confirmation before anything is installed. Declining either of those is an
+        ordinary answer, not a failure - see UpdateDecision.isUserDecision.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:allowBackup="true"
