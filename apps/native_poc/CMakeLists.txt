@@ -491,6 +491,19 @@ add_executable(remote60_host_main_loop_mailbox_test
 )
 target_include_directories(remote60_host_main_loop_mailbox_test PRIVATE src)
 
+# The version-comparison contract, checked against the vectors the JS and Kotlin suites also
+# read. The vectors path is baked in so the test can be run from any working directory.
+add_executable(remote60_version_compare_test
+  src/version_compare_test.cpp
+)
+target_include_directories(remote60_version_compare_test PRIVATE src)
+target_compile_definitions(remote60_version_compare_test PRIVATE
+  "REMOTE60_VERSION_VECTORS_PATH=\"${CMAKE_CURRENT_SOURCE_DIR}/../shared/version_compare_vectors.txt\""
+)
+if(MSVC)
+  target_compile_options(remote60_version_compare_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_host_command_line_test
   src/host_command_line_test.cpp
 )

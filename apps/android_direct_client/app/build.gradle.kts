@@ -50,4 +50,9 @@ android {
 
 dependencies {
   implementation("androidx.core:core-ktx:1.12.0")
+
+  // JVM unit tests only. The version-comparison contract is pure string logic shared with the
+  // C++ and JS suites (apps/shared/version_compare_vectors.txt), so it needs a JVM and not a
+  // device -- nothing here ships in the APK.
+  testImplementation("junit:junit:4.13.2")
 }

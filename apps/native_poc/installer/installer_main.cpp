@@ -22,6 +22,7 @@
 
 #include "installer_ids.h"
 #include "product_version.hpp"
+#include "version_compare.hpp"
 
 namespace {
 
@@ -439,27 +440,10 @@ std::wstring read_installed_version() {
   return buffer;
 }
 
-// Negative when a < b, 0 when equal, positive when a > b. Missing components count as zero, so
-// "0.1" and "0.1.0" compare equal.
-int compare_versions(const std::wstring& a, const std::wstring& b) {
-  size_t i = 0;
-  size_t j = 0;
-  while (i < a.size() || j < b.size()) {
-    unsigned long left = 0;
-    while (i < a.size() && a[i] >= L'0' && a[i] <= L'9') left = left * 10 + (a[i++] - L'0');
-    unsigned long right = 0;
-    while (j < b.size() && b[j] >= L'0' && b[j] <= L'9') right = right * 10 + (b[j++] - L'0');
-    if (left != right) return left < right ? -1 : 1;
-    if (i < a.size() && a[i] == L'.') ++i;
-    if (j < b.size() && b[j] == L'.') ++j;
-    // Anything that is not a digit or a separator ends the comparison.
-    if ((i < a.size() && (a[i] < L'0' || a[i] > L'9')) ||
-        (j < b.size() && (b[j] < L'0' || b[j] > L'9'))) {
-      break;
-    }
-  }
-  return 0;
-}
+// The comparison itself now lives in version_compare.hpp, shared with the updater and covered by
+// the vectors in apps/shared/version_compare_vectors.txt -- it used to be file-local here with no
+// test at all, and the updater needs exactly the same answer the installer gives.
+using remote60::native_poc::compare_versions;
 
 enum class InstalledState { None, Same, Older, Newer };
 

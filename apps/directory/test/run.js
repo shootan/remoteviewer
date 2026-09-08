@@ -48,6 +48,16 @@ function cleanup() {
 }
 
 (async () => {
+  // First, and without a server: the version-comparison contract. It shares its vectors with the
+  // C++ and Kotlin suites, so a drift between the three shows up here before anything else runs.
+  console.log('--- version comparison contract ---');
+  const versions = await runTest(['version_compare_test.js']);
+  if (versions.code !== 0) {
+    cleanup();
+    console.log('\nRESULT: FAILED');
+    process.exit(versions.code);
+  }
+
   let server = startServer();
   await sleep(1500);
 
