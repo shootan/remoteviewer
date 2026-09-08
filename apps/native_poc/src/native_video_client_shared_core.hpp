@@ -325,7 +325,15 @@ class UdpH264FrameAssembler {
   // "oldest" by arrival or sequence order -- because its repair is over (A04 rule). False, and
   // nothing removed, when it is not held or completed meanwhile (the give-up is cancelled). The
   // next delivery reports the seq gap exactly as an expired hold does.
-  bool GiveUpIncomplete(uint64_t generation, uint32_t seq);
+  //
+  // The identity is remembered (a tombstone), because the host may still be sending that AU's
+  // chunks: without it the next late chunk re-creates the very assembly that was just abandoned
+  // and blocks the head again, so the caller gives the same AU up over and over (measured: the
+  // same seq abandoned 3 times, and the good AU behind it never delivered). `nowUs` stamps the
+  // tombstone; 0 (the legacy overload's clock) means it only ages out by count.
+  bool GiveUpIncomplete(uint64_t generation, uint32_t seq, uint64_t nowUs = 0);
+  // True while (generation, seq) is tombstoned: its chunks are ignored as stale traffic.
+  bool IsAbandoned(uint64_t generation, uint32_t seq, uint64_t nowUs = 0) const;
 
   struct IncompleteAuInfo {
     uint32_t seq = 0;
@@ -374,6 +382,22 @@ class UdpH264FrameAssembler {
   };
 
   UdpH264AssemblyStepResult DeliverAssembly(Assembly& assembly);
+
+  // A04: identities given up on. Deliberately NOT expressed by moving lastDeliveredSeq_ forward:
+  // that would claim the AU was delivered, change what the next delivery reports as a sequence
+  // gap (and with it the IDR recovery contract), and swallow AUs that were never judged. A
+  // tombstone blocks exactly the judged (generation, seq) and nothing else -- another generation
+  // restarts the seq space and never matches one. Bounded both ways: at most kAbandonedMax
+  // entries (oldest dropped first) and kAbandonedTtlUs of age when the caller passes a clock, so
+  // a long session cannot accumulate them; Reset() (a new session / decoder resync) clears them.
+  struct AbandonedAu {
+    uint64_t generation = 0;
+    uint32_t seq = 0;
+    uint64_t atUs = 0;  // 0 = no clock: ages out by count only
+  };
+  static constexpr size_t kAbandonedMax = 16;
+  static constexpr uint64_t kAbandonedTtlUs = 5'000'000;
+  std::deque<AbandonedAu> abandoned_;
 
   std::deque<Assembly> assemblies_;
   bool deliveredAny_ = false;

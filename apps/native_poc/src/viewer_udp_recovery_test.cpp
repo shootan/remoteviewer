@@ -200,6 +200,16 @@ class FakeHost {
   // Zero the next IDR's payload: the assembler completes it, the decoder cannot use it.
   void CorruptNextKey() { corruptNextKey_ = true; }
   uint64_t corrupted_keys() const { return corruptedKeys_; }
+  // Data-chunk count of a cached AU (0 = not cached), so a scenario can name its last chunk.
+  uint16_t chunks_for(uint32_t seq) {
+    std::lock_guard<std::mutex> lk(cacheMu_);
+    for (auto it = cache_.rbegin(); it != cache_.rend(); ++it) {
+      if (it->seq != seq) continue;
+      const uint32_t maxChunk = kMtu - static_cast<uint32_t>(sizeof(UdpVideoChunkHeader));
+      return static_cast<uint16_t>((it->payload.size() + maxChunk - 1) / maxChunk);
+    }
+    return 0;
+  }
   // The static screen ends: AUs go out again (after LossPlan::stopAfterDrop fired).
   void ResumeAfterDrop() { dropHappened_ = false; }
   // A datagram the viewer's receive loop reads and ignores (too short for any video header, not a
@@ -304,6 +314,19 @@ class FakeHost {
   }
   void SetHonorKeyframeRequests(bool honor) { plan_.honorKeyframeRequests = honor; }
   void SetKeyInterChunkDelayUs(uint32_t us) { plan_.keyInterChunkDelayUs = us; }
+  // Replays chunks of an AU the host still has cached -- a retransmit that arrives after the
+  // viewer has already given that AU up (S24). Returns false when the AU is no longer cached.
+  bool ResendChunks(uint32_t seq, const std::vector<uint16_t>& idx) {
+    CachedAu au;
+    {
+      std::lock_guard<std::mutex> lk(cacheMu_);
+      auto it = std::find_if(cache_.rbegin(), cache_.rend(), [&](const CachedAu& c) { return c.seq == seq; });
+      if (it == cache_.rend()) return false;
+      au = *it;
+    }
+    SendChunks(au, idx.data(), static_cast<uint16_t>(idx.size()));
+    return true;
+  }
   void SetAnswerNacks(bool answer) { plan_.answerNacks = answer; }
 
   uint64_t nacks_received() const { return nacksReceived_.load(); }
@@ -610,6 +633,9 @@ struct ViewerRig {
   std::atomic<bool> pinPresentAnchor{false};
   // A04 give-up tunables for the scenarios (0 = product default), set before Connect().
   uint64_t giveUpHardCapUs = 0;
+  // A04: how many incomplete heads the receiver has abandoned (RecvStats). The keyframe-request
+  // limiter can hide a repeated give-up, so scenarios assert on this rather than on requests.
+  uint64_t give_ups() const { return receiver ? receiver->stats().udpStuckHeadGiveUps : 0; }
   // What the control thread would have measured: the give-up's reply allowance reads it.
   void SetControlRtt(uint64_t rttUs) {
     ctx.control.lastRttUs.store(rttUs, std::memory_order_relaxed);
@@ -1547,6 +1573,7 @@ void run_static_tail_loss_unanswered(const char* label, bool lostIsKey) {
   if (!start_session(host, rig, plan)) { ++gFailures; return; }
   idle(host, rig, 200);  // everything in flight settles; the screen is static from here
   const uint64_t requestsBefore = host.keyframe_requests();
+  const uint64_t giveUpsBefore = rig.give_ups();
   armFrom = host.last_seq() + 1;
   // One picture at a time until the drop happens, then nothing more.
   for (int i = 0; i < 20 && target.load() == 0; ++i) {
@@ -1563,6 +1590,9 @@ void run_static_tail_loss_unanswered(const char* label, bool lostIsKey) {
               rig.gate.waitForKeyFrame ? 1 : 0);
   CHECK(host.nacks_for(t) >= 1 && host.nacks_for(t) <= 3, std::string(label) + ": bounded NACK rounds (" + std::to_string(host.nacks_for(t)) + ")");
   CHECK(requests >= 1 && requests <= 2, std::string(label) + ": the spent head was given up and a keyframe asked for (+" + std::to_string(requests) + ", timer re-ask allowed)");
+  // The keyframe-request limiter can hide repeated give-ups (120 ms minimum interval, 3 tokens),
+  // so the give-up itself is counted: the same AU may be abandoned once, never twice.
+  CHECK(rig.give_ups() - giveUpsBefore == 1, std::string(label) + ": the head was given up exactly once (" + std::to_string(rig.give_ups() - giveUpsBefore) + ")");
   CHECK(rig.gate.waitForKeyFrame, std::string(label) + ": waiting for the keyframe it asked for");
   // The host answers with an IDR: the viewer resumes, and the complete IDR closes the gap itself.
   const uint64_t publishedBefore = rig.publishedCount.load();
@@ -1685,6 +1715,7 @@ void scenario_nack_off_static_tail_loss_falls_back() {
   if (!start_session(host, rig, plan)) { ++gFailures; return; }
   CHECK(!rig.hostSupportsNack(), "S21: NACK not negotiated");
   const uint64_t requestsBefore = host.keyframe_requests();
+  const uint64_t giveUpsBefore = rig.give_ups();
   const uint32_t t = arm_static_tail_loss(host, rig, armFrom, target, "S21");
   if (t == 0) return;
   idle(host, rig, 900);
@@ -1692,6 +1723,7 @@ void scenario_nack_off_static_tail_loss_falls_back() {
               static_cast<unsigned long long>(host.keyframe_requests() - requestsBefore), rig.gate.waitForKeyFrame ? 1 : 0);
   CHECK(host.nacks_received() == 0, "S21: no NACK against an old host");
   CHECK(host.keyframe_requests() >= requestsBefore + 1 && host.keyframe_requests() <= requestsBefore + 2, "S21: bounded fallback (+" + std::to_string(host.keyframe_requests() - requestsBefore) + ")");
+  CHECK(rig.give_ups() - giveUpsBefore == 1, "S21: the head was given up exactly once (" + std::to_string(rig.give_ups() - giveUpsBefore) + ")");
   CHECK(rig.gate.waitForKeyFrame, "S21: waiting for the keyframe");
   const uint64_t publishedBefore = rig.publishedCount.load();
   host.ResumeAfterDrop();
@@ -1733,7 +1765,7 @@ void scenario_slow_progressing_large_au_is_preserved() {
 // test): progress or not, at the cap the AU is given up ONCE -- one keyframe request episode, the
 // existing backoff -- and the next IDR resumes the stream.
 void scenario_hard_cap_gives_up_once_despite_progress() {
-  std::printf("[S23] slow IDR (2 s of chunks) against a 1 s hard cap: one give-up episode, then recovery\n");
+  std::printf("[S23] IDR progressing every 30 ms for ~1.4 s against a 1 s hard cap: one give-up episode, then recovery\n");
   FakeHost host;
   ViewerRig rig;
   rig.giveUpHardCapUs = 1000000;
@@ -1742,7 +1774,10 @@ void scenario_hard_cap_gives_up_once_despite_progress() {
   if (!start_session(host, rig, plan)) { ++gFailures; return; }
   idle(host, rig, 200);
   const uint64_t requestsBefore = host.keyframe_requests();
-  host.SetKeyInterChunkDelayUs(50000);  // ~40 chunks -> ~2 s on the wire
+  const uint64_t giveUpsBefore = rig.give_ups();
+  // A chunk every 30 ms: inside the 50 ms reply allowance, so rule (3) never fires and only the
+  // hard cap can end it -- which is the point of this scenario.
+  host.SetKeyInterChunkDelayUs(30000);
   const KeyOnWire idr = send_key_and_wait_on_wire(host, "S23", 30, 4000);
   CHECK(idr.ok, "S23: the paced IDR went out");
   host.SetKeyInterChunkDelayUs(0);
@@ -1750,6 +1785,10 @@ void scenario_hard_cap_gives_up_once_despite_progress() {
   std::printf("  S23: idr=%u keyReq=+%llu waitForKey=%d\n", idr.keySeq,
               static_cast<unsigned long long>(host.keyframe_requests() - requestsBefore), rig.gate.waitForKeyFrame ? 1 : 0);
   CHECK(host.keyframe_requests() >= requestsBefore + 1 && host.keyframe_requests() <= requestsBefore + 2, "S23: one give-up episode at the hard cap (+" + std::to_string(host.keyframe_requests() - requestsBefore) + ")");
+  // The episode is ONE give-up. Before the tombstone the chunks still arriving re-created the
+  // abandoned assembly and the same AU was given up two or three times (the request limiter hid
+  // it), and the good IDR behind it never got through.
+  CHECK(rig.give_ups() - giveUpsBefore == 1, "S23: exactly one give-up episode (" + std::to_string(rig.give_ups() - giveUpsBefore) + ")");
   CHECK(rig.gate.waitForKeyFrame, "S23: waiting for a keyframe after the cap");
   const uint64_t publishedBefore = rig.publishedCount.load();
   const KeyOnWire fresh = send_key_and_wait_on_wire(host, "S23 recovery");
@@ -1759,6 +1798,46 @@ void scenario_hard_cap_gives_up_once_despite_progress() {
   });
   CHECK(resumed, "S23: resumed on the fresh IDR seq " + std::to_string(fresh.keySeq));
   CHECK(host.keyframe_requests() <= requestsBefore + 3, "S23: no request storm (+" + std::to_string(host.keyframe_requests() - requestsBefore) + ")");
+}
+
+
+// S24 (A04 follow-up): the chunks of an AU the viewer has already given up keep arriving -- the
+// host was still sending them, or a retransmit crossed the decision. They must be ignored: before
+// the tombstone they re-created the very assembly that was abandoned, blocked the head again, and
+// the same AU was given up two and three times over while the good AU behind it waited.
+void scenario_late_chunks_of_abandoned_au_do_not_reblock() {
+  std::printf("[S24] late chunks of a given-up AU: ignored, no second give-up, the next IDR still arrives\n");
+  FakeHost host;
+  ViewerRig rig;
+  std::atomic<uint32_t> armFrom{0};
+  std::atomic<uint32_t> target{0};
+  LossPlan plan = static_tail_loss_plan(armFrom, target);
+  plan.answerNacks = false;
+  if (!start_session(host, rig, plan)) { ++gFailures; return; }
+  const uint64_t requestsBefore = host.keyframe_requests();
+  const uint64_t giveUpsBefore = rig.give_ups();
+  const uint32_t t = arm_static_tail_loss(host, rig, armFrom, target, "S24");
+  if (t == 0) return;
+  CHECK(pump_until_idle(host, rig, 1500, [&]() { return rig.give_ups() > giveUpsBefore; }),
+        "S24: the spent head was given up");
+  CHECK(rig.gate.waitForKeyFrame, "S24: waiting for a keyframe after the give-up");
+  // The withheld chunk finally shows up (and the whole AU once more, as a retransmit would).
+  const uint16_t lastIdx = static_cast<uint16_t>(host.chunks_for(t) - 1);
+  CHECK(host.ResendChunks(t, {lastIdx}), "S24: the host still had the AU cached");
+  idle(host, rig, 300);
+  CHECK(rig.give_ups() - giveUpsBefore == 1,
+        "S24: the late chunk did not re-create the abandoned AU (give-ups " + std::to_string(rig.give_ups() - giveUpsBefore) + ")");
+  // ... and the recovery IDR is delivered, which is what the re-block used to prevent.
+  const uint64_t publishedBefore = rig.publishedCount.load();
+  host.ResumeAfterDrop();
+  const KeyOnWire idr = send_key_and_wait_on_wire(host, "S24");
+  CHECK(idr.ok, "S24: the recovery IDR went out");
+  const bool resumed = pump_until(host, rig, 4000, [&]() {
+    return !rig.gate.waitForKeyFrame && rig.publishedCount.load() > publishedBefore && rig.published_key(idr.keySeq);
+  });
+  CHECK(resumed, "S24: resumed on the IDR seq " + std::to_string(idr.keySeq) + " (key seqs " + rig.published_key_seqs() + ")");
+  CHECK(rig.give_ups() - giveUpsBefore == 1, "S24: still one give-up after the recovery");
+  CHECK(host.keyframe_requests() <= requestsBefore + 3, "S24: no request storm (+" + std::to_string(host.keyframe_requests() - requestsBefore) + ")");
 }
 
 }  // namespace
@@ -1794,6 +1873,7 @@ int main() {
   scenario_nack_off_static_tail_loss_falls_back();
   scenario_slow_progressing_large_au_is_preserved();
   scenario_hard_cap_gives_up_once_despite_progress();
+  scenario_late_chunks_of_abandoned_au_do_not_reblock();
   scenario_pre_fix_host_shapes_no_false_congestion();
   scenario_host_epoch_gate_end_to_end();
   scenario_real_sender_flush_boundary_end_to_end();

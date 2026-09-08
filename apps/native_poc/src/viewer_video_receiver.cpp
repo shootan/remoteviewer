@@ -265,11 +265,12 @@ void VideoReceiver::run_udp() {
         } else if (noProgress && oldEnough) {
           why = nackEnabled ? "no-progress" : "no-progress-nack-off";
         }
-        if (why && assembler.GiveUpIncomplete(info.generation, info.seq)) {
+        if (why && assembler.GiveUpIncomplete(info.generation, info.seq, nowUs)) {
           if (chased) nackScheduler.Reset();
           ++assemblyDropped;
           ++st.udpAssemblyDroppedCount;
           ++stuckHeadGiveUps;
+          ++st.udpStuckHeadGiveUps;
           if (stuckHeadGiveUps <= 5 || (stuckHeadGiveUps % 100) == 1) {
             std::cout << "[native-video-client] stuck head given up seq=" << info.seq
                       << " gen=" << info.generation << " missing=" << info.missingTotal

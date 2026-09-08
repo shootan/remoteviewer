@@ -670,6 +670,46 @@ bool test_udp_assembler_progress_and_give_up() {
   return true;
 }
 
+// A04 follow-up: a given-up identity is tombstoned, so the chunks still arriving for it cannot
+// re-create the assembly (which used to re-block the head and cause repeated give-ups). Only that
+// exact (generation, seq): another generation restarts the seq space and must not be shadowed.
+bool test_udp_assembler_abandoned_tombstone() {
+  UdpH264FrameAssembler a;
+  a.ConfigureInOrderHold(120000, 8);
+  const uint64_t t0 = 12000000;
+  (void)push_chunk(a, 30, 0, 12, 4, false, t0);
+  if (!expect(a.GiveUpIncomplete(1, 30, t0 + 1000), "tombstone: seq 30 given up")) return false;
+  if (!expect(a.IsAbandoned(1, 30, t0 + 2000), "tombstone: it is remembered")) return false;
+  // A late chunk of it is stale traffic, not a new assembly.
+  auto r = push_chunk(a, 30, 1, 12, 4, false, t0 + 3000);
+  if (!expect(r.disposition == UdpH264AssemblyDisposition::Ignored && a.PendingCount() == 0,
+              "tombstone: a late chunk of the abandoned AU is ignored")) return false;
+  // The next AU is unaffected and delivers.
+  r = push_chunk(a, 31, 0, 4, 4, true, t0 + 4000);
+  UdpH264AssemblyStepResult out{};
+  if (!expect(a.PopDelivery(t0 + 4000, true, &out) && out.frame.header.seq == 31,
+              "tombstone: the next AU still delivers")) return false;
+  // Another generation with the same seq is a different AU: the tombstone must not shadow it.
+  // (In a fresh assembler, so the ordinary "older than the last delivered seq" rule is not what
+  // answers here.)
+  {
+    UdpH264FrameAssembler b;
+    b.ConfigureInOrderHold(120000, 8);
+    (void)push_chunk(b, 40, 0, 12, 4, false, t0);
+    if (!expect(b.GiveUpIncomplete(1, 40, t0 + 1000), "tombstone: seq 40 of generation 1 given up")) return false;
+    if (!expect(!b.IsAbandoned(2, 40, t0 + 2000), "tombstone: it is keyed by generation too")) return false;
+    const auto d = make_video_chunk(40, 0, 12, 4, false, 2);
+    const auto r2 = b.PushDatagram(d.data(), d.size(), t0 + 2000);
+    if (!expect(r2.disposition == UdpH264AssemblyDisposition::Partial,
+                "tombstone: the same seq in another generation assembles normally")) return false;
+  }
+  // It ages out (5 s) and Reset() clears it.
+  if (!expect(!a.IsAbandoned(1, 30, t0 + 6'000'000), "tombstone: expires with the ttl")) return false;
+  a.Reset();
+  if (!expect(!a.IsAbandoned(1, 30, t0 + 2000), "tombstone: Reset clears it")) return false;
+  return true;
+}
+
 bool test_udp_assembler_in_order_hold() {
   UdpH264FrameAssembler a;
   a.ConfigureInOrderHold(100000, 8);
@@ -1036,6 +1076,7 @@ int main() {
   if (!test_video_nack_scheduler()) return 1;
   if (!test_udp_assembler_in_order_hold()) return 1;
   if (!test_udp_assembler_progress_and_give_up()) return 1;
+  if (!test_udp_assembler_abandoned_tombstone()) return 1;
   if (!test_session_controller()) return 1;
   std::cout << "[shared-core-test] PASS\n";
   return 0;

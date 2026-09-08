@@ -49,6 +49,10 @@ class VideoReceiver {
                 NackOptions nack = {})
       : ctx(ctx), args(args), dec(dec), gate(gate), startUs(startUs), udpSimDropPm(udpSimDropPm),
         udpSimDropSeed(udpSimDropSeed), nack(nack) {}
+  // Read-only view of the receive counters (the A04 give-up count among them), for the
+  // integration test: the keyframe-request limiter can hide a repeated give-up, so the test
+  // asserts on the count itself.
+  const RecvStats& stats() const { return st; }
   // The thread body (formerly the recvThread lambda).
   void Run();
 

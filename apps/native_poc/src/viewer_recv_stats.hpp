@@ -56,6 +56,7 @@ struct RecvStats {
   uint64_t udpAssemblyFecRecoveredCount = 0;
   uint64_t udpNackSentCount = 0;   // video NACK datagrams sent (Windows NACK wiring)
   uint64_t udpNackChunkCount = 0;  // missing chunk indices they carried
+  uint64_t udpStuckHeadGiveUps = 0;  // A04: incomplete heads abandoned by the terminal rule
   uint32_t udpAssemblyDropPmLast = 0;
   uint64_t queueDepthSampleCount = 0;
   uint64_t queueDepthHist[5] = {0, 0, 0, 0, 0};

@@ -617,6 +617,7 @@ uint64_t ClientControlScheduler::RecordInputAck(uint32_t inputLogEvery) {
 
 void UdpH264FrameAssembler::Reset() {
   assemblies_.clear();
+  abandoned_.clear();
   deliveredAny_ = false;
   lastDeliveredSeq_ = 0;
 }
@@ -638,12 +639,24 @@ bool UdpH264FrameAssembler::AnyComplete() const {
   return std::any_of(assemblies_.begin(), assemblies_.end(), [](const Assembly& a) { return a.complete; });
 }
 
-bool UdpH264FrameAssembler::GiveUpIncomplete(uint64_t generation, uint32_t seq) {
+bool UdpH264FrameAssembler::IsAbandoned(uint64_t generation, uint32_t seq, uint64_t nowUs) const {
+  for (const AbandonedAu& a : abandoned_) {
+    if (a.seq != seq || a.generation != generation) continue;
+    if (nowUs != 0 && a.atUs != 0 && nowUs > a.atUs + kAbandonedTtlUs) return false;  // aged out
+    return true;
+  }
+  return false;
+}
+
+bool UdpH264FrameAssembler::GiveUpIncomplete(uint64_t generation, uint32_t seq, uint64_t nowUs) {
   auto it = std::find_if(assemblies_.begin(), assemblies_.end(), [&](const Assembly& a) {
     return a.seq == seq && a.header.streamGeneration == generation;
   });
   if (it == assemblies_.end() || it->complete) return false;  // gone, or completed meanwhile: cancelled
   assemblies_.erase(it);
+  // Remember it, so the chunks still on their way do not re-create it (see the header note).
+  while (abandoned_.size() >= kAbandonedMax) abandoned_.pop_front();
+  abandoned_.push_back(AbandonedAu{generation, seq, nowUs});
   return true;
 }
 
@@ -818,6 +831,15 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* dat
     }
   }
 
+  if (IsAbandoned(packet.streamGeneration, packet.seq, nowUs)) {
+    // A04: this AU's repair was given up (its rounds and its grace were spent). Its late data or
+    // FEC chunks are stale traffic now -- re-creating the assembly would block the head again and
+    // make the caller abandon the same AU a second and third time, while the good AU behind it
+    // waits. Only this exact (generation, seq) is affected.
+    result.disposition = UdpH264AssemblyDisposition::Ignored;
+    result.reorderDetected = true;
+    return result;
+  }
   if (deliveredAny_ && !sequence_is_newer(packet.seq, lastDeliveredSeq_)) {
     // Parity packets intentionally follow all data packets. A no-loss frame can therefore
     // complete before its parity arrives; that harmless late repair packet must not reset the
