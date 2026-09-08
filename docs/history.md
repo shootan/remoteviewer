@@ -9708,3 +9708,17 @@ Next action
 - **검증**(콘솔, 활성 RDP 없음): update 12종 전부 PASS — check 28 / effects **198** / handoff 33 / http 36 / job_guard 19 / manifest 82 / relaunch 107 / release 80 / state_machine 92 / assembly 40 / options 48 / scenarios **100**. 나머지 C++ 바이너리 전부 exit 0. 스위트 실행 후 **잔존 프로세스 0 · `.claude/scenario-runs/` 0개 · `%TEMP%\gnlink-scn-*` 0개**.
 - 변경 파일: `apps/native_poc/src/update_relaunch.{hpp,cpp}` · `update_effects.cpp` · `update_effects_test.cpp` · `updater_scenarios_test.cpp` · `apps/native_poc/CMakeLists.txt` · `docs/history.md` · `docs/full_code_audit_2026-09-08.md`.
 - 라이브·설치·배포·버전 인상·릴리스 보류 그대로. 산출물 없음.
+
+### 472) 2026-09-09 문서 정합성 점검 — **설계가 아직 "셸 경유" 만 말하고 있었다**
+- **설계문서 정정**(`docs/업데이트_기능_설계.md`):
+  - 재실행 표의 `GNLinkClient.exe` 행이 **"셸을 통해 비승격으로"** 로만 적혀 있었다. 기본 경로는 이제 **사용자 토큰(`CreateProcessWithTokenW`)** 이고 셸은 폴백이다. **3.11.1 절 신설** — 두 경로의 차이는 무결성 수준이 아니라(그건 같다) **handle 을 돌려받는가**이고, handle 이 필요한 이유는 **롤백이 먼저 멈춰야 하기 때문**이다. 스냅샷 차분이 소유 증거가 아니라는 것과, 폴백은 소유를 주장하지 않아 **롤백에 들어가지 않는다**는 것도 같은 자리에 적었다.
+  - 상태표 9행이 **"재실행 실패는 롤백 사유가 아니라 보고 사유"** 라고만 돼 있었다 → **필수/선택 구분**과 `Unknown` 을 성공으로 세지 않는다는 규칙 추가.
+  - 상태표 10행에 **"선택 이미지가 안 떴어도 Health 를 먼저 묻는다"** 추가 — `CreateProcess` 가 돌아온 것은 호스트가 떴다는 뜻이 아니다(#470).
+- **배선 계획 정정**(`docs/업데이트_배선_계획.md`): E5 를 토큰 경로 기준으로 바꾸고, **E5b 신설**(폴백이 소유를 주장하지 않고 롤백이 시작되지 않는지 — 시나리오 7 + 역대조).
+- **체크리스트 정정**(`docs/수동확인_체크리스트.md`):
+  - UPD-FIELD-01 제목을 "비승격 재실행(기본은 사용자 토큰, 셸은 폴백)" 으로. **무결성 수준으로는 두 경로를 구분할 수 없으므로 로그로 판정**하는 기준을 적었다. 상승 권한 업데이터에서 **폴백이 상시로 쓰이면 그 자체가 결함**이라는 것도.
+  - 클라이언트 백업 행: **"재현되지 않는다"** 로 갱신. 시나리오 8 이 그 형태를 재현하고 고아가 안 생긴다. **미상으로 남은 것은 "무엇이 없앴는지"** 하나이며, 다시 나타나면 `RmGetList` 가 홀더 이름을 함께 낸다.
+- **깨진 참조 정리**: 설계문서가 원장을 `full_code_audit_2026-09-08.md:94` 로 **줄 번호**로 가리켰는데 `I01` 은 **95행**이었다(원장이 자라면서 밀림). 두 곳 모두 **ID 참조**로 바꿨다 — 줄 번호는 자라는 문서를 가리키기에 부적합하다.
+- **하네스 죽은 주석 제거**: `report_leftovers` 머리에 삭제하던 시절의 "KNOWN WART ... **Scoped to this test's own name pattern, so it can never remove anything else**" 가 남아 있었다. **그 문장이 바로 그 삭제를 괜찮아 보이게 만든 추론**이라 함께 지웠다.
+- 검증: `updater_scenarios_test` **ALL PASS (100 checks, 0 failed)**, 잔존 프로세스 0. 제품 코드 변경 없음(주석 1건 + 문서).
+- 변경 파일: `apps/native_poc/src/updater_scenarios_test.cpp`(주석) · `docs/업데이트_기능_설계.md` · `docs/업데이트_배선_계획.md` · `docs/수동확인_체크리스트.md` · `docs/history.md`.

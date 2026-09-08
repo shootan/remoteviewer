@@ -331,13 +331,12 @@ void stop_everything_under(const std::wstring& dir) {
 /**
  * Removes what previous runs left behind.
  *
- * KNOWN WART, stated rather than hidden: this does not always succeed, and a run can leave a
- * directory in %TEMP% holding an inert copy of the command interpreter. A shell-routed launch
- * hands off asynchronously, so a process can appear after the final sweep has stopped looking,
- * and it keeps its directory alive. I did not get to the bottom of it and stopped digging -- the
- * leftovers are harmless and the suite's subject is the updater, not its own housekeeping.
+ * Names what earlier runs left behind. It does not remove any of it.
  *
- * Scoped to this test's own name pattern, so it can never remove anything else.
+ * The header used to describe a cleanup that ran here, and admitted it did not always work. Both
+ * halves are gone: the cleanup because it was deleting outside the repository, and the excuse
+ * because "scoped to this test's own name pattern, so it can never remove anything else" was the
+ * exact reasoning that made it seem acceptable. A name pattern is not ownership of a directory.
  */
 void report_leftovers() {
   // READ ONLY. Nothing in here deletes anything.
