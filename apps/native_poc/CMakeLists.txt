@@ -533,6 +533,36 @@ if(MSVC)
   target_compile_options(remote60_update_state_machine_test PRIVATE /utf-8)
 endif()
 
+# Compiled but linked into nothing yet. This is the code that finds a real GNLinkHost.exe by
+# name; it has no consumer until the updater is wired into a product binary. Building it as its
+# own library keeps it honest -- it cannot silently rot while unused -- without putting those
+# symbols anywhere a test could reach them.
+add_library(remote60_update_process_targets STATIC
+  src/update_process_targets.cpp
+)
+target_include_directories(remote60_update_process_targets PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_update_process_targets PRIVATE /utf-8)
+endif()
+
+# The production UpdateEffects, driven inside a temp directory.
+#
+# NOTE: src/update_process_targets.cpp is deliberately NOT in this target. That file is the only
+# code that can find a real GNLinkHost.exe by name, and leaving it unlinked means this test
+# cannot reach it even by mistake -- the symbols are not in the binary.
+add_executable(remote60_update_effects_test
+  src/update_effects.cpp
+  src/update_state_machine.cpp
+  src/update_manifest.cpp
+  src/update_signature.cpp
+  src/update_effects_test.cpp
+)
+target_include_directories(remote60_update_effects_test PRIVATE src)
+target_link_libraries(remote60_update_effects_test PRIVATE bcrypt)
+if(MSVC)
+  target_compile_options(remote60_update_effects_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_host_command_line_test
   src/host_command_line_test.cpp
 )

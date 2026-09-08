@@ -9033,3 +9033,27 @@ Next action
 - 변경 파일: `apps/native_poc/src/update_state_machine.hpp`·`update_state_machine.cpp`·`update_state_machine_test.cpp`(신규) · `apps/native_poc/CMakeLists.txt` · `docs/history.md` · `docs/구현계획.md`.
 - 버전 인상·설치본 생성·설치·라이브 조작·서버 배포·push 없음. 운영 서명키 관련 결정 없음.
 - 상태: **step2 3항목 전부 구현 완료**(#433 계약·벡터 / #434 manifest·서명 / #435 상태기계). 검증용 검사 대기 — **전체 완료 아님.**
+
+### 436) 2026-09-08 업데이트 step3 — `UpdateEffects` production 구현(락·다운로드·검증·정지·교체·롤백), 격리를 링크 단위로 강제 (설계 3.1~3.6, 검증용 remote#0jkgf453 보류 해제)
+- 목적: seam 뒤에 실제 구현을 채운다. 단 **사용자가 0.2.104 실기 중이고 이 PC 에서 제품이 실제로 돌고 있다** — 착수 시점 `GNLinkHost`(5156)·`GNLinkInputService`(10820)·`GNLinkStream`(19384) 실행 중 확인. 그래서 검증용이 건 안전 제약 4개를 **관례가 아니라 구조로** 구현했다.
+- **격리 ① 링크 단위**(가장 강한 것): 이름으로 제품 프로세스를 찾는 코드는 `update_process_targets.cpp` 한 파일에 격리하고 **테스트 타깃에 링크하지 않았다.** 테스트는 그 심볼을 호출할 수 없다 — 바이너리에 없기 때문이다. **실증**: 테스트 exe 에서 `GNLinkHost`/`GNLinkStream`/`GNLinkViewer`/`GNLinkClient` 문자열이 **각 0회**, 같은 검색이 `remote60_update_process_targets.lib` 에서는 발견됨. 이 파일은 소비자가 없어 조용히 썩지 않도록 **static 라이브러리로 빌드만** 해 둔다.
+- **격리 ② 기본값 없음**: `UpdateEffectsConfig` 의 어떤 필드도 실제 경로·이미지 이름으로 기본값을 갖지 않는다. `validate()` 가 미설정 필드를 거부하고, `AcquireLock()` 이 그 검사를 먼저 하므로 **설정이 불완전하면 아무것도 시작되지 않는다**(테스트가 필드 10개를 하나씩 비워 각각 확인). 추가로 **stagingDir 이 installDir 안이면 거부**한다(설계 3.2).
+- **격리 ③ 임시 디렉터리만**: 스테이징·교체·롤백 테스트 전부 `%TEMP%` 하위. 테스트가 시작하면서 **"install 경로에 Program Files 가 없다"** 를 스스로 단정한다.
+- **격리 ④ 네트워크 없음**: 아티팩트 다운로드는 주입된 함수가 고정 바이트를 쓴다. 실제 디렉터리 서버·NAS 로 나가지 않았다.
+- **구현 내용**:
+  - **락**(설계 3.3): 명명 뮤텍스 + `WaitForSingleObject(h, 0)` — **절대 기다리지 않는다.**
+  - **다운로드/검증**: 스테이징 전 이전 잔재를 지우고(짧은 쓰기가 완전한 것으로 오인되지 않도록), 검증은 **크기 먼저 → SHA-256**(BCrypt `BCryptCreateHash`/`HashData`/`FinishHash` 스트리밍).
+  - **정지**(설계 3.2): `PrepareForSwap` 이 주입된 PID 목록에 각각 정지를 **요청**하고, `Quiesce` 는 **그 정확한 PID 를 `OpenProcess(SYNCHRONIZE)` 로 기다린다.** 이름 sweep 없음, `/T` 없음, **`TerminateProcess` 없음** — 응하지 않는 대상은 타임아웃으로 실패하고 상태기계가 `AbandonedBeforeSwap` 으로 물러난다.
+  - **교체**(원장 **I01** 대응): 2단계다. ① 기존 파일을 전부 `.gnlink-old` 로 **먼저 옮기고** ② 새 파일을 넣는다. 어느 단계든 실패하면 **옮긴 것만 정확히 되돌린다.** `.gnlink-old` 백업은 **등록(`RegisterInstall`) 성공 뒤에야** 지운다 — 그전에 지우면 복구 가능한 실패를 복구 불가능한 실패로 바꾸는 것이다.
+  - `request_process_stop` 은 WM_CLOSE → 콘솔 CTRL_BREAK 순으로 **요청만** 하고, 둘 다 안 되면 false 를 돌려 업데이트를 포기시킨다(스트리밍 중인 호스트를 죽여 가며 업데이트할 이유가 없다).
+- 검증 — **`qwinsta`: `console` 만 Active, `rdp-tcp` 는 `Listen`(Active 인 rdp-tcp#N 없음) → RDP 미접속.**
+  - `remote60_update_effects_test` **64 checks / 0 failed**, exit 0. 내역: 설정 검증 13종 · 락 3종(**두 번째 획득은 별도 스레드에서** — Windows 뮤텍스는 소유 스레드에 재진입 가능해 같은 스레드 재획득은 아무것도 증명하지 못한다) · 다운로드/검증 6종(크기·해시 불일치, 실패한 fetch 의 잔재 제거) · **교체·롤백 12종** · 프로세스 정지 6종 · 종단 6종.
+  - **I01 회귀 핵심**: 두 payload 중 **두 번째를 공유 0 으로 잠근** 상태에서 교체를 시도 → 교체 실패, **첫 번째 payload 가 구버전 그대로**(혼합버전 없음), 백업 잔재 없음. 현행 설치기는 이 상황에서 앞 파일을 이미 덮은 뒤 실패한다.
+  - **강제 종료 안 함 회귀**: 응하지 않는 더미를 두고 `Quiesce` 가 실패한 뒤 **그 더미가 여전히 살아 있음**을 단정한다.
+  - 업데이트 관련 4종 동시 재실행 전부 exit 0: version_compare **139/0** · update_manifest **41/0** · state_machine **57/0** · effects **64/0**.
+  - **테스트 전후로 라이브 `GNLinkHost`(5156)·`GNLinkInputService`(10820)·`GNLinkStream`(19384) 의 PID 가 그대로임을 확인**했다.
+  - **수정 전 FAIL 없음** — 신규 코드다. (작성 중 테스트 자체 결함 2건은 있었다: 같은 스레드 뮤텍스 재진입, 공유 0 으로 잠근 파일을 테스트가 스스로 읽으려 한 것. 둘 다 제품이 아니라 테스트를 고쳤다.)
+- **미검증(중요)**: 이 결과는 **격리 하네스 안에서의 검증**이다. **실제 제품 프로세스 종료·실제 `%ProgramFiles%\GNLink` 교체·실제 서버 다운로드는 한 번도 수행하지 않았다** — 승인된 계획의 "live 실기 환경에서는 실제 제품 중지/교체 금지, 사용자 후속 실기로 남김" 그대로다. `enumerate_product_processes`/`request_process_stop` 은 **컴파일만 됐고 실행된 적이 없다.** 진입점(트레이·클라 시작 시 확인) 미배선, `FetchManifest` 는 주입된 문자열이라 **HTTP 경로 미구현**(설계 4.1.1 의 WinHTTP 클라이언트 미착수), `RegisterInstall`/`Relaunch`/`HealthCheck` 는 주입 콜백이라 **production 구현 없음**. 릴리스 키 부재로 실제 아티팩트 서명 검증 0회.
+- 변경 파일: `apps/native_poc/src/update_effects.hpp`·`update_effects.cpp`·`update_process_targets.hpp`·`update_process_targets.cpp`·`update_effects_test.cpp`(전부 신규) · `apps/native_poc/CMakeLists.txt` · `docs/history.md` · `docs/구현계획.md`.
+- 버전 인상·설치본 생성·설치·라이브 조작·서버 배포·push·새 캡처 없음. 운영 서명키 관련 결정 없음.
+- 상태: 검증용 검사 대기 — **전체 완료 아님.** 실기 검증은 사용자 후속 실기 몫이다.
