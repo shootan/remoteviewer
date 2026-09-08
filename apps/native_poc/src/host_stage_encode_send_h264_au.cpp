@@ -169,8 +169,15 @@ AuFlow encode_send_h264_emit_au(HostContext& hx, TickContext& tc, H264AuBatch& b
         return AuFlow::Continue;
       case EpochVerdict::DropUnknownEpoch:
         // No FIFO provenance (0) or an epoch this host never issued: fail closed, never on the wire.
+        // HN07: if this arrived while the gate was open, the gate has just closed the verified
+        // chain again (an output nobody can vouch for may reference pictures the viewer has not
+        // got), so the key is re-forced -- the same answer as DropAwaitingKey. A DropOldEpoch
+        // above does not do this: its provenance is certain and the chain is still good.
+        encoder.forceKeyNext = true;
         std::cout << "[native-video-host] epoch-gate dropped-unknown auEpoch=" << au.inputEpoch << " curEpoch=" << inputEpochNow
                   << " auCaptureUs=" << gateStampUs << " key=" << (au.keyFrame ? 1 : 0)
+                  << " provenanceInvalid=" << (encoder.epochGate.provenanceInvalid ? 1 : 0)
+                  << " reclosed=" << encoder.epochGate.reclosedByUnknown
                   << " total=" << encoder.epochGate.droppedUnknownEpoch << "\n";
         return AuFlow::Continue;
       case EpochVerdict::DropAwaitingKey:
@@ -339,7 +346,13 @@ if (transport == VideoTransport::Tcp) {
            send_all_timed(clientSession.clientSock, au.bytes.data(), au.bytes.size(), &sendPathStats.payloadUs,
                          &sendPathStats.payloadCallCount);
 } else {
-  if (!sender.udpPeerReady) {
+  if (encoder.epochGate.provenanceInvalid) {
+    // A06 belt and braces at the only enqueue point: the gate already refuses these (their epoch
+    // is 0 -> DropUnknownEpoch), so reaching here would mean an AU from an encoder whose output
+    // order nothing describes was about to hit the wire. Never send it; the rebuild is pending.
+    ++sender.udpTxNoPeer;
+    sentOk = false;
+  } else if (!sender.udpPeerReady) {
     ++sender.udpTxNoPeer;
     sentOk = false;
   } else {

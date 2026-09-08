@@ -60,6 +60,10 @@ struct EpochGate {
 
   uint64_t epoch = 0;          // the epoch the gate is judging for
   bool awaitingKey = false;    // true from the flush until the first current-epoch keyframe
+  // A06: the encoder lost input provenance (its accepted-input FIFO overflowed), so no output
+  // may be trusted -- not even one that looks like the current epoch's keyframe. The stage sets
+  // this from H264Encoder::provenance_invalid() and clears it after a successful rebuild.
+  bool provenanceInvalid = false;
   uint64_t awaitSinceUs = 0;   // first AU judged in this epoch (0 = none yet)
   uint32_t awaitDropped = 0;   // AUs discarded while waiting, this epoch
   uint64_t resetWindowStartUs = 0;
@@ -73,6 +77,8 @@ struct EpochGate {
   uint64_t resetsRequested = 0;
   uint64_t resetsSuppressed = 0;
   uint64_t epochsSeen = 0;
+  uint64_t reclosedByUnknown = 0;    // HN07: verified chains closed again by an unprovenanced output
+  uint64_t droppedProvenanceInvalid = 0;  // A06: dropped because the encoder's provenance is void
 };
 
 enum class EpochVerdict : uint8_t {
@@ -95,6 +101,13 @@ enum class EpochVerdict : uint8_t {
  */
 inline EpochVerdict epoch_gate_judge(EpochGate& g, uint64_t epochNow, uint64_t auEpoch, bool auKey,
                                      size_t auBytes, uint64_t nowUs) {
+  if (g.provenanceInvalid && !g.awaitingKey) {
+    // A06: provenance is void from here until the encoder is rebuilt. Close the verified chain
+    // now, so nothing rides out on a tag the FIFO can no longer vouch for.
+    g.awaitingKey = true;
+    g.awaitSinceUs = nowUs;
+    g.awaitDropped = 0;
+  }
   if (epochNow != g.epoch) {
     // A flush happened (possibly several): judge for the newest epoch, wait for its keyframe.
     g.epoch = epochNow;
@@ -103,7 +116,7 @@ inline EpochVerdict epoch_gate_judge(EpochGate& g, uint64_t epochNow, uint64_t a
     g.awaitDropped = 0;
     ++g.epochsSeen;
   }
-  if (auEpoch == epochNow) {
+  if (auEpoch == epochNow && !g.provenanceInvalid) {
     if (!g.awaitingKey) return EpochVerdict::Emit;
     if (auKey) {
       g.awaitingKey = false;
@@ -117,6 +130,7 @@ inline EpochVerdict epoch_gate_judge(EpochGate& g, uint64_t epochNow, uint64_t a
            (g.awaitDropped >= EpochGate::kAwaitMaxDropped || nowUs >= g.awaitSinceUs + EpochGate::kAwaitMaxUs);
   };
   auto request_reset = [&]() -> EpochVerdict {
+    // Same budget as a provenance rebuild (epoch_gate_take_reset_budget), declared below.
     if (g.resetWindowStartUs == 0 || nowUs >= g.resetWindowStartUs + EpochGate::kResetWindowUs) {
       g.resetWindowStartUs = nowUs;
       g.resetsInWindow = 0;
@@ -131,8 +145,25 @@ inline EpochVerdict epoch_gate_judge(EpochGate& g, uint64_t epochNow, uint64_t a
   };
   g.droppedBytes += auBytes;
   if (g.awaitingKey) ++g.awaitDropped;
+  if (g.provenanceInvalid) {
+    // Everything is refused while the latch is up; the stage is rebuilding the encoder. The
+    // bound still applies, so a rebuild that never happens becomes a ResetEncoder request.
+    ++g.droppedProvenanceInvalid;
+    if (auEpoch == 0 || auEpoch > epochNow) ++g.droppedUnknownEpoch;
+    return bound_exceeded() ? request_reset() : EpochVerdict::DropUnknownEpoch;
+  }
   if (auEpoch == 0 || auEpoch > epochNow) {
     ++g.droppedUnknownEpoch;
+    if (!g.awaitingKey) {
+      // HN07: an output with no provenance (0) or an epoch this host never issued may belong to
+      // a chain the viewer cannot have. The verified chain is closed again and the caller forces
+      // a fresh IDR. A DropOldEpoch below deliberately does NOT do this: its provenance is
+      // certain, the current chain is still valid, and re-closing would only cost an extra IDR.
+      g.awaitingKey = true;
+      g.awaitSinceUs = nowUs;
+      g.awaitDropped = 1;
+      ++g.reclosedByUnknown;
+    }
     return bound_exceeded() ? request_reset() : EpochVerdict::DropUnknownEpoch;
   }
   if (auEpoch < epochNow) {
@@ -141,6 +172,25 @@ inline EpochVerdict epoch_gate_judge(EpochGate& g, uint64_t epochNow, uint64_t a
   }
   ++g.droppedAwaitingKey;  // current epoch, not a key, gate closed
   return bound_exceeded() ? request_reset() : EpochVerdict::DropAwaitingKey;
+}
+
+/**
+ * Takes one rebuild from the gate's budget (kResetMaxPerWindow per kResetWindowUs), the same one
+ * request_reset() uses, so a provenance rebuild cannot bypass it. False = spent for this window;
+ * the caller keeps its request pending and retries on a later tick.
+ */
+inline bool epoch_gate_take_reset_budget(EpochGate& g, uint64_t nowUs) {
+  if (g.resetWindowStartUs == 0 || nowUs >= g.resetWindowStartUs + EpochGate::kResetWindowUs) {
+    g.resetWindowStartUs = nowUs;
+    g.resetsInWindow = 0;
+  }
+  if (g.resetsInWindow >= EpochGate::kResetMaxPerWindow) {
+    ++g.resetsSuppressed;
+    return false;
+  }
+  ++g.resetsInWindow;
+  ++g.resetsRequested;
+  return true;
 }
 
 /** After the caller rebuilt the encoder: the wait restarts with a fresh bound. */

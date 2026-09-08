@@ -1553,9 +1553,7 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
   started_ = true;
   sampleTimeOutputTimestampTotalSamples_ = 0;
   sampleTimeOutputTimestampFallbackCount_ = 0;
-  pendingInputSampleTimesHns_.clear();
-  pendingInputSynthetic_.clear();
-  pendingInputEpoch_.clear();
+  pendingInputs_.Reset();  // a fresh MFT holds nothing: provenance is trustworthy again (A06)
   frameIndex_ = 0;
   sequenceHeaderAnnexb_.clear();
 
@@ -1757,11 +1755,12 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
     const uint64_t encodeCallEndUs = qpc_now_us();
     encodeStats->encodeCallUs = (encodeCallEndUs >= encodeCallStartUs) ? (encodeCallEndUs - encodeCallStartUs) : 0;
     // Stamp the held-input FIFO depth at the TRUE end of the call. drain_outputs() pops produced
-    // frames from pendingInputSampleTimesHns_, so stamping before the poll/drain would overstate the
+    // frames from the accepted-input FIFO, so stamping before the poll/drain would overstate the
     // depth on healthy calls and mislead the starvation diagnosis (depth is a decisive field).
     // pendingInputOverflowTotal_ is object-lifetime cumulative.
-    encodeStats->pendingInputDepth = static_cast<uint32_t>(pendingInputSampleTimesHns_.size());
+    encodeStats->pendingInputDepth = static_cast<uint32_t>(pendingInputs_.size());
     encodeStats->pendingInputOverflowTotal = pendingInputOverflowTotal_;
+    encodeStats->provenanceInvalid = pendingInputs_.provenance_invalid() ? 1u : 0u;
     return ok;
   };
   constexpr int64_t kEncoderOutputTsSkewHns = 50000LL * 10LL;
@@ -1824,12 +1823,14 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
       IMFSample* produced = odb.pSample ? odb.pSample : outSample.Get();
       std::vector<uint8_t> bytes;
       const bool haveBytes = produced && sample_to_bytes(produced, &bytes) && !bytes.empty();
-      if (!haveBytes && produced && !pendingInputSampleTimesHns_.empty()) {
+      if (!haveBytes && produced) {
         // The MFT consumed an input to produce this output even though nothing usable came
-        // back. Leaving its timestamp in the queue would offset every later access unit by a
-        // frame, permanently, and the client paces playout off those timestamps.
-        pendingInputSampleTimesHns_.pop_front();
-        if (!pendingInputSynthetic_.empty()) pendingInputSynthetic_.pop_front();
+        // back. Leaving its entry in the queue would offset every later access unit by a frame,
+        // permanently -- the client paces playout off those timestamps, and the emit gate judges
+        // the epoch that rides with them (the pre-A02 code popped the timestamp and the synthetic
+        // flag here but not the epoch, so every later AU carried the previous input's epoch: the
+        // IDR forced by a flush was then judged old and dropped).
+        pendingInputs_.PopForEmptyOutput();
         ++sampleTimeOutputTimestampFallbackCount_;
       }
       if (haveBytes) {
@@ -1861,16 +1862,17 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
         // gate treats 0 as unknown and fails closed (host_epoch_gate.hpp), so an output the
         // FIFO lost track of (overflow, a desynchronised encoder) can never open the gate.
         uint64_t auEpoch = 0;
-        if (!pendingInputSampleTimesHns_.empty()) {
-          normalizedAuSampleTimeHns = pendingInputSampleTimesHns_.front();
-          if (!pendingInputSynthetic_.empty()) auSynthetic = pendingInputSynthetic_.front();
-          if (!pendingInputEpoch_.empty()) auEpoch = pendingInputEpoch_.front();
-          pendingInputSampleTimesHns_.pop_front();
-          if (!pendingInputSynthetic_.empty()) pendingInputSynthetic_.pop_front();
-          if (!pendingInputEpoch_.empty()) pendingInputEpoch_.pop_front();
+        PendingInput provenance{};
+        if (pendingInputs_.Pop(&provenance)) {
+          normalizedAuSampleTimeHns = provenance.tsHns;
+          auSynthetic = provenance.synthetic;
+          auEpoch = provenance.epoch;
         } else {
           ++sampleTimeOutputTimestampFallbackCount_;
         }
+        // A06: after an overflow the queue no longer describes what the MFT holds, so no output
+        // may claim an epoch until the encoder is rebuilt -- 0 is "unknown" and the gate refuses it.
+        if (pendingInputs_.provenance_invalid()) auEpoch = 0;
         const bool sampleTimeFromOutput =
             hasOutputSampleTime &&
             std::llabs(outSampleTimeHns - normalizedAuSampleTimeHns) <=
@@ -1924,19 +1926,14 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
     }
     return finish_call(false);
   }
-  pendingInputSampleTimesHns_.push_back(sampleTime);
-  pendingInputSynthetic_.push_back(nextInputSynthetic_);
-  pendingInputEpoch_.push_back(nextInputEpoch_);
-  constexpr size_t kPendingEncoderTimestampMax = 64;
-  if (pendingInputSampleTimesHns_.size() > kPendingEncoderTimestampMax) {
-    pendingInputSampleTimesHns_.pop_front();
-    if (!pendingInputSynthetic_.empty()) pendingInputSynthetic_.pop_front();
-    if (!pendingInputEpoch_.empty()) pendingInputEpoch_.pop_front();
+  const bool overflowedBefore = pendingInputs_.provenance_invalid();
+  pendingInputs_.Push(PendingInput{sampleTime, nextInputSynthetic_, nextInputEpoch_});
+  if (pendingInputs_.provenance_invalid() && !overflowedBefore) {
+    // A06: 64 accepted inputs with no output. The FIFO has latched itself invalid and emptied;
+    // from here every AU is tagged epoch 0 until the stage rebuilds this encoder.
     ++sampleTimeOutputTimestampFallbackCount_;
     ++pendingInputOverflowTotal_;
-    if (env_truthy_local("REMOTE60_NATIVE_DEBUG_CODEC")) {
-      codec_debug_log("encoder pending input timestamp queue overflowed");
-    }
+    codec_debug_log("encoder pending input FIFO overflowed: provenance invalid until rebuild");
   }
   ++frameIndex_;
 
@@ -2022,9 +2019,7 @@ void H264Encoder::shutdown() {
   started_ = false;
   sampleTimeOutputTimestampTotalSamples_ = 0;
   sampleTimeOutputTimestampFallbackCount_ = 0;
-  pendingInputSampleTimesHns_.clear();
-  pendingInputSynthetic_.clear();
-  pendingInputEpoch_.clear();
+  pendingInputs_.Clear();  // the latch (A06) survives: only a successful initialize() clears it
   frameIndex_ = 0;
   sequenceHeaderAnnexb_.clear();
   asyncTransform_ = false;

@@ -446,6 +446,36 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     }
   }
 
+  // A02/A06 -- provenance. Checked here, right after the encode call and OUTSIDE the AU batch
+  // below, because the call that overflows the accepted-input FIFO often returns no AU at all:
+  // waiting for one would leave the gate open while the encoder emits AUs whose epoch tag is a
+  // newer input's. The gate closes now, and the rebuild that re-synchronises input and output
+  // is asked for on the gate's own budget (EncoderState::TryProvenanceResync). Until it succeeds
+  // every AU carries epoch 0 and the gate refuses it (DropUnknownEpoch), so nothing reaches the
+  // wire from an encoder whose output order is no longer described by anything.
+  if (encoder.codec.provenance_invalid() && !encoder.epochGate.provenanceInvalid) {
+    encoder.epochGate.provenanceInvalid = true;
+    encoder.provenanceResyncPending = true;
+    std::cout << "[native-video-host] encoder provenance invalid (input FIFO overflow):"
+              << " pendingOverflow=" << encodeStats.pendingInputOverflowTotal
+              << " pendingDepth=" << encodeStats.pendingInputDepth
+              << " -> gate closed, encoder rebuild requested\n";
+  }
+  if (encoder.provenanceResyncPending) {
+    const uint64_t resyncNowUs = qpc_now_us();
+    if (encoder.TryProvenanceResync(capture, resyncNowUs)) {
+      std::cout << "[native-video-host] encoder provenance resync ok resets=" << encoder.provenanceResyncCount
+                << " curEpoch=" << capture.inputEpoch.load(std::memory_order_acquire)
+                << " -> forcing a key\n";
+      units.clear();  // this call's AUs came from the encoder that is now gone
+    } else if ((encoder.provenanceResyncFailed % 30) == 1 || encoder.provenanceResyncFailed == 0) {
+      std::cout << "[native-video-host] encoder provenance resync deferred (budget or init failure)"
+                << " failed=" << encoder.provenanceResyncFailed
+                << " resetsInWindow=" << encoder.epochGate.resetsInWindow
+                << " suppressed=" << encoder.epochGate.resetsSuppressed << "\n";
+    }
+  }
+
   if (units.empty()) return Flow::Continue;
 
   stats.captureAgeSumUs += captureAgeAtCallbackUs;

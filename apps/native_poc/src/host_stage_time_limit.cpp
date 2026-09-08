@@ -99,6 +99,15 @@ Flow stage_time_limit(HostContext& hx, TickContext& tc) {
     return Flow::Break;
   }
   sender.PumpUdpHello(transport, encoder);
+  // A02/A06: a provenance rebuild that could not run yet (the epoch gate's budget was spent, or
+  // initialize() failed) is retried here, on the tick -- not in the encode path, which a static
+  // desktop never reaches. The gate stays closed and every AU stays epoch 0 until it succeeds.
+  if (encoder.provenanceResyncPending && encoder.TryProvenanceResync(capture, nowUs)) {
+    std::cout << "[native-video-host] encoder provenance resync ok (tick) resets=" << encoder.provenanceResyncCount
+              << " curEpoch=" << capture.inputEpoch.load(std::memory_order_acquire)
+              << " -> forcing a key\n";
+    kick.Arm(nowUs, useH264);  // a still screen needs the kick to carry the forced IDR out
+  }
   pump_cursor_forward(hx, nowUs);
   // Arm the trailing-edge kick on a fresh viewer/decoder (bumped session epoch) and on a capture
   // identity change (a new stream generation -- window select, reattach, backend change). The kick

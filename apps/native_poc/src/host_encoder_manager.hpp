@@ -121,6 +121,41 @@ struct EncoderState {
   // Epoch gate (P11, host_epoch_gate.hpp): after a flush, nothing encoded from a pre-flush input
   // goes out and the first AU sent is the new epoch's IDR.
   EpochGate epochGate;
+  // A02/A06: the codec latched "provenance invalid" and only a rebuild re-synchronises its input
+  // FIFO with what the MFT still holds. Stays true until one succeeds, so the retry does not
+  // depend on a new frame arriving (a static screen would never bring one).
+  bool provenanceResyncPending = false;
+  uint64_t provenanceResyncCount = 0;
+  uint64_t provenanceResyncFailed = 0;
+  /**
+   * A02/A06: rebuilds the encoder because its accepted-input FIFO lost provenance. Only a
+   * rebuild helps -- clearing the FIFO alone would let the outputs the MFT still holds consume
+   * the tags of new inputs and desynchronise again -- and the codec's latch clears exactly on a
+   * successful initialize(). Takes one rebuild from the epoch gate's budget (3 per 10 s), so
+   * this cannot become a re-initialisation loop; when the budget is spent, or the rebuild fails,
+   * the request stays pending, the gate stays closed and the caller retries on a later tick
+   * (a static screen never brings a frame to retry on). Returns true when the encoder is new.
+   */
+  bool TryProvenanceResync(CaptureState& capture, uint64_t nowUs) {
+    if (!provenanceResyncPending) return false;
+    if (!epoch_gate_take_reset_budget(epochGate, nowUs)) return false;  // budget spent: stay pending
+    codec.shutdown();
+    if (!codec.initialize(activeEncodeW, activeEncodeH, activeFps, activeBitrate, activeKeyint)) {
+      ++provenanceResyncFailed;
+      return false;  // still invalid, still pending, gate still closed
+    }
+    ResetTimelineAnchors(capture);  // a new epoch: the gate re-judges and waits for its IDR
+    ResetStarvationEpisode();
+    forceKeySubmittedAtUs = 0;
+    ++resetCount;
+    ++provenanceResyncCount;
+    consecutiveStaleFrames = 0;
+    forceKeyNext = true;
+    epochGate.provenanceInvalid = false;
+    epoch_gate_note_reset(epochGate, nowUs);
+    provenanceResyncPending = false;
+    return true;
+  }
   // Zero-copy NV12 surfaces reserved until the encoder has provably consumed them.
   std::deque<Nv12PendingRelease> nv12PendingReleases;
   bool surfaceEncodeHealthy = true;

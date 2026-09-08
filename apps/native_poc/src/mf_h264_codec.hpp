@@ -74,6 +74,9 @@ struct H264EncodeFrameStats {
   // drops. A depth pinned near the 64 cap with output stalled is decisive starvation evidence.
   uint32_t pendingInputDepth = 0;
   uint64_t pendingInputOverflowTotal = 0;
+  // A06: the accepted-input FIFO overflowed and no output carries trustworthy provenance until
+  // the encoder is rebuilt. The stage closes the emit gate and asks for that rebuild.
+  uint8_t provenanceInvalid = 0;
   uint8_t asyncEnabled = 0;
 };
 
@@ -82,6 +85,84 @@ bool bgra_to_nv12(const uint8_t* bgra, uint32_t width, uint32_t height, uint32_t
 bool bgra_to_nv12_buffer(const uint8_t* bgra, uint32_t width, uint32_t height,
                          uint32_t bgraStride, uint8_t* outNv12, size_t outNv12Size);
 bool nv12_to_bgra(const uint8_t* nv12, uint32_t width, uint32_t height, std::vector<uint8_t>* outBgra);
+
+// One entry per input the encoder's MFT accepted, in order (A02). An asynchronous MFT answers a
+// call with an OLDER input's access unit, so every output is stamped from the front of this queue
+// rather than from the current call: the capture timestamp the viewer paces on, the synthetic flag
+// the wire carries, and the flush epoch the emit gate judges (host_epoch_gate.hpp). The three used
+// to be three parallel deques and one path (an output with no usable bytes) popped only two of
+// them, which shifted every later AU's epoch by one for the rest of the session -- so they are one
+// record now and every path moves them together.
+struct PendingInput {
+  int64_t tsHns = 0;
+  bool synthetic = false;
+  uint64_t epoch = 0;
+};
+
+// The FIFO itself, separate from the codec so the rules are testable without an MFT.
+//
+// Overflow (A06): 64 accepted inputs with no output means the queue no longer describes what the
+// MFT will emit. Dropping the oldest entry would silently re-label later outputs with a NEWER
+// input's provenance -- including its epoch, which can open the emit gate for a pre-flush picture.
+// Instead the FIFO latches `provenance invalid`: it empties, every later output is stamped epoch 0
+// (unknown -> the gate fails closed), and only a successful encoder rebuild (Reset, from
+// H264Encoder::initialize) clears the latch, because only a rebuild also empties what the MFT is
+// still holding. Clear() -- the shutdown half of a rebuild -- deliberately keeps the latch.
+class PendingInputFifo {
+ public:
+  static constexpr size_t kMaxEntries = 64;
+
+  void Push(const PendingInput& in) {
+    entries_.push_back(in);
+    if (entries_.size() <= kMaxEntries) return;
+    ++overflowTotal_;
+    ++fallbackTotal_;
+    provenanceInvalid_ = true;
+    entries_.clear();
+  }
+
+  // An output that carries bytes: takes the provenance of the input that produced it. False when
+  // the queue is empty (no provenance: the caller stamps epoch 0 and counts a fallback).
+  bool Pop(PendingInput* out) {
+    if (entries_.empty()) {
+      ++fallbackTotal_;
+      return false;
+    }
+    if (out) *out = entries_.front();
+    entries_.pop_front();
+    return true;
+  }
+
+  // An output with no usable bytes: the MFT consumed an input for it all the same, so its entry
+  // goes too -- all three fields at once (the 0.2.97 fix, and the epoch the pre-A02 code forgot).
+  void PopForEmptyOutput() {
+    if (entries_.empty()) return;
+    entries_.pop_front();
+    ++fallbackTotal_;
+  }
+
+  // True while no output may be trusted with provenance (see the overflow note above).
+  bool provenance_invalid() const { return provenanceInvalid_; }
+  size_t size() const { return entries_.size(); }
+  uint64_t overflow_total() const { return overflowTotal_; }
+  uint64_t fallback_total() const { return fallbackTotal_; }
+  void NoteFallback() { ++fallbackTotal_; }
+
+  // shutdown(): the queue is meaningless without the MFT, but the latch survives -- a rebuild is
+  // only complete when initialize() succeeds.
+  void Clear() { entries_.clear(); }
+  // A successful initialize(): a fresh MFT holds nothing, so provenance starts trustworthy again.
+  void Reset() {
+    entries_.clear();
+    provenanceInvalid_ = false;
+  }
+
+ private:
+  std::deque<PendingInput> entries_;
+  bool provenanceInvalid_ = false;
+  uint64_t overflowTotal_ = 0;
+  uint64_t fallbackTotal_ = 0;
+};
 
 class H264Encoder {
  public:
@@ -111,6 +192,10 @@ class H264Encoder {
   void set_next_input_synthetic(bool synthetic) { nextInputSynthetic_ = synthetic; }
   // Flush epoch of the NEXT input (CaptureState::inputEpoch); same FIFO, same reason. (P11)
   void set_next_input_epoch(uint64_t epoch) { nextInputEpoch_ = epoch; }
+  // A06: the accepted-input FIFO overflowed, so nothing this encoder emits may be trusted with
+  // provenance (every AU goes out tagged epoch 0, which the emit gate refuses). Only a rebuild --
+  // shutdown() followed by a successful initialize() -- clears it.
+  bool provenance_invalid() const { return pendingInputs_.provenance_invalid(); }
   void shutdown();
 
  private:
@@ -134,10 +219,8 @@ class H264Encoder {
   // Hardware/async MFTs can return one or more older outputs while accepting the current
   // input. Keep the accepted input timeline so each output is stamped with the frame that
   // actually produced it, rather than the input from the current encode call.
-  std::deque<int64_t> pendingInputSampleTimesHns_;
-  std::deque<bool> pendingInputSynthetic_;  // lockstep with pendingInputSampleTimesHns_ (0.2.97)
+  PendingInputFifo pendingInputs_;
   bool nextInputSynthetic_ = false;
-  std::deque<uint64_t> pendingInputEpoch_;  // lockstep too (P11)
   uint64_t nextInputEpoch_ = 0;
   std::vector<uint8_t> sequenceHeaderAnnexb_;
   bool spsProfileReported_ = false;

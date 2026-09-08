@@ -474,7 +474,10 @@ add_executable(remote60_host_encode_epoch_test
   src/host_encode_epoch_test.cpp
 )
 target_include_directories(remote60_host_encode_epoch_test PRIVATE src)
+# [4] drives the product's own EncoderState::TryProvenanceResync (host_encoder_manager.hpp), which
+# reaches the capture backend headers through host_capture_session.hpp.
 target_link_libraries(remote60_host_encode_epoch_test PRIVATE
+  capture
   d3d11
   mfplat
   mf
