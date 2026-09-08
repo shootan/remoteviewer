@@ -9077,3 +9077,18 @@ Next action
 - 변경 파일: `apps/native_poc/src/update_effects.hpp`·`update_effects.cpp`·`update_process_targets.hpp`·`update_process_targets.cpp`·`update_effects_test.cpp` · `docs/history.md` · `docs/구현계획.md`.
 - 버전 인상·설치본 생성·설치·라이브 조작·서버 배포·push 없음.
 - 상태: 검증용 검사 대기. 다음은 자율 진행 범위(JS/Kotlin manifest 소비자 · 서버 발행 배선 · UI 진입점). **전체 완료 아님.**
+
+### 438) 2026-09-08 업데이트 step4-1 — 업데이트 전용 WinHTTP HTTPS 클라이언트 (설계 4.1.1, 검증용 remote#0jkgf453 자율 진행 범위)
+- 목적: 설계 4.1.1 확정대로 **업데이트 경로 전용 HTTPS 클라이언트를 신설**한다. 기존 `directory_client` 는 손대지 않는다 — 그쪽은 POST 전용, 응답 64KB 절단, `https://` 명시 거부(`directory_client.cpp:83-93`)라 이 일을 할 수 없고, 제품 전체가 의존하는 코드를 업데이트 때문에 갈아엎을 이유가 없다.
+- **보안 결정을 순수 함수로 뺐다**: `parse_https_url()` 과 `redirect_is_allowed()` 는 I/O 가 없다. "http:// 를 받지 않는다" 와 "평문으로 내려가는 redirect 를 따르지 않는다" 는 확신이 필요한 두 규칙인데, WinHTTP 콜백 안에 묻어 두면 **서버를 세워야만 검증할 수 있다.** 함수로 두면 호출해서 검증한다.
+- **어떤 설정으로도 하지 않는 것 3가지**(주석에 명시): 인증서 검증 비활성화(`WINHTTP_OPTION_SECURITY_FLAGS` 를 **아예 설정하지 않는다**) · 인증서 오류 후 진행 · **https→http redirect**(`WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP` 로 스택 차원에서도 강제). TLS 1.2 이상만 협상한다 — 업데이트 아티팩트는 관리자 권한으로 실행되므로 하향 협상할 이유가 없다.
+- **URL 정책**: `http://`(대문자 포함)·스킴 없음·`ftp`·`file` 전부 거부. **URL 안의 자격증명 거부** — 한 호스트로 읽히고 다른 호스트로 해석되는 고전적 수법이라 파싱하지 않고 막는다(단, 첫 `/` 뒤의 `@` 는 경로의 일부라 허용). 포트 0·65535 초과·비숫자 거부.
+- **크기 상한은 힌트가 아니라 강제**: manifest 는 수백 바이트이므로 그보다 훨씬 크다고 주장하는 것은 manifest 가 아니다. 초과 시 **자르지 않고 중단**한다 — 잘린 manifest 는 어차피 서명 검증에서 실패하는데, 여기서 멈추면 **이유가 남는다**. 아티팩트 다운로드는 실패 시 **부분 파일을 삭제**해 이후 단계가 완결된 다운로드로 오인하지 못하게 한다.
+- 검증 — **`qwinsta`: `console` 만 Active, `rdp-tcp` 는 `Listen` → RDP 미접속.**
+  - `remote60_update_http_test` **36 checks / 0 failed**, exit 0. 스킴 거부 9 · URL 파싱 11 · redirect 정책 6 · 진입점의 http 거부 4(연결 시도조차 하지 않고 파일도 만들지 않음) · **실제 소켓 2**.
+  - **실제 소켓 케이스**: 루프백 임의 포트에 **평문 HTTP 로 응답하는 리스너**를 띄우고 그것을 `https://` 로 지목한다 → 실패해야 하고, **본문이 비어 있음**까지 단정해 조용히 평문으로 말하지 않았음을 확인한다. 아무것도 비활성화하지 않고 통과한다 — 나중에 누군가 "이번만" 우회를 넣으면 **이 케이스가 엉뚱한 이유로 통과하기 시작**한다. 그리고 아무도 듣지 않는 포트는 `ConnectFailed` 로 구분된다(URL 문제로 보고되지 않는다).
+  - 실제 디렉터리 서버·NAS 로는 나가지 않았다.
+- 미착수·미검증: **실제 HTTPS 서버 대상 왕복 0회**(인증서를 신뢰 저장소에 넣지 않고는 검증을 약화시키지 않고 할 수 없어 하지 않았다 — 검증을 끄는 쪽은 선택지가 아니다). `UpdateEffects` 와의 배선도 아직이다(아래 보고 항목 참조).
+- 변경 파일: `apps/native_poc/src/update_http.hpp`·`update_http.cpp`·`update_http_test.cpp`(신규) · `apps/native_poc/CMakeLists.txt` · `docs/history.md` · `docs/구현계획.md`.
+- 버전 인상·설치본 생성·설치·라이브 조작·서버 배포·push 없음.
+- 상태: **차단 요인 1건을 검증용에 질의 중**(`RegisterInstall` 을 자체 구현할지 설치기 `/S` 재사용할지 — 후자는 업데이터의 2단계 안전 교체를 설치기의 안전하지 않은 교체가 우회하게 된다). 답이 오기 전까지 ②는 진행하지 않는다. **전체 완료 아님.**

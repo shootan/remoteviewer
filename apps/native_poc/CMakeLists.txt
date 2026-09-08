@@ -545,6 +545,19 @@ if(MSVC)
   target_compile_options(remote60_update_process_targets PRIVATE /utf-8)
 endif()
 
+# The update path's HTTPS client. The security rules it enforces are pure functions, so most of
+# this suite needs no server; the one case that opens a socket points a TLS client at a cleartext
+# listener on loopback and requires it to fail.
+add_executable(remote60_update_http_test
+  src/update_http.cpp
+  src/update_http_test.cpp
+)
+target_include_directories(remote60_update_http_test PRIVATE src)
+target_link_libraries(remote60_update_http_test PRIVATE winhttp ws2_32)
+if(MSVC)
+  target_compile_options(remote60_update_http_test PRIVATE /utf-8)
+endif()
+
 # The production UpdateEffects, driven inside a temp directory.
 #
 # NOTE: src/update_process_targets.cpp is deliberately NOT in this target. That file is the only
