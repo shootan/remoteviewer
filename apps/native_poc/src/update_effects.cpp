@@ -47,6 +47,10 @@ bool UpdateEffectsConfig::validate(std::string* detail) const {
   if (!registerInstall) return fail("registerInstall not set");
   if (!relaunch) return fail("relaunch not set");
   if (!healthCheck) return fail("healthCheck not set");
+  // Nothing reads these yet. Requiring them now means a future RegisterInstall cannot be
+  // written against hardcoded HKLM and GNLinkSecureInput without this check failing first.
+  if (registryRoot.empty()) return fail("registryRoot not set");
+  if (serviceName.empty()) return fail("serviceName not set");
 
   // Staging inside the directory being replaced would make the updater's own working files part
   // of the swap. Design 3.2 puts it alongside instead.
@@ -179,10 +183,10 @@ void WindowsUpdateEffects::DiscardDownload() {
 bool WindowsUpdateEffects::PrepareForSwap() {
   // Asking is separate from waiting. If a target cannot even be asked to stop, the attempt is
   // abandoned here -- before anything on disk is touched -- rather than escalated.
-  const std::vector<uint32_t> targets = config_.enumerateTargets();
-  for (uint32_t pid : targets) {
-    if (!config_.requestStop(pid)) {
-      lastError_ = "could not ask pid " + std::to_string(pid) + " to stop";
+  const std::vector<ProcessTarget> targets = config_.enumerateTargets();
+  for (const ProcessTarget& target : targets) {
+    if (!config_.requestStop(target)) {
+      lastError_ = "could not ask pid " + std::to_string(target.pid) + " to stop";
       return false;
     }
   }
@@ -194,10 +198,17 @@ bool WindowsUpdateEffects::Quiesce() {
   // and no forced termination: a target that will not exit means the update does not happen
   // (design 3.2, and the state machine turns this into AbandonedBeforeSwap).
   const DWORD deadline = GetTickCount() + config_.quiesceTimeoutMs;
-  for (uint32_t pid : config_.enumerateTargets()) {
-    HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, pid);
+  for (const ProcessTarget& target : config_.enumerateTargets()) {
+    HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, target.pid);
     if (!h) {
       // Already gone, or not ours to wait on. Either way there is nothing to wait for.
+      continue;
+    }
+    // The PID may have been reused between enumeration and now. If what is behind it is not the
+    // process that was described, our target has already exited -- which is what we were waiting
+    // for -- and waiting on the stranger would be waiting for the wrong thing.
+    if (!process_identity_matches(h, target)) {
+      CloseHandle(h);
       continue;
     }
     const DWORD now = GetTickCount();
@@ -205,7 +216,7 @@ bool WindowsUpdateEffects::Quiesce() {
     const DWORD waited = WaitForSingleObject(h, remaining);
     CloseHandle(h);
     if (waited != WAIT_OBJECT_0) {
-      lastError_ = "pid " + std::to_string(pid) + " did not exit";
+      lastError_ = "pid " + std::to_string(target.pid) + " did not exit";
       return false;
     }
   }
@@ -301,6 +312,52 @@ bool WindowsUpdateEffects::HealthCheck() {
     lastError_ = "health check failed";
     return false;
   }
+  return true;
+}
+
+// ---------------------------------------------------------------- process identity
+
+namespace {
+
+uint64_t creation_time_of(HANDLE process) {
+  FILETIME created{}, exited{}, kernel{}, user{};
+  if (!GetProcessTimes(process, &created, &exited, &kernel, &user)) return 0;
+  ULARGE_INTEGER v{};
+  v.LowPart = created.dwLowDateTime;
+  v.HighPart = created.dwHighDateTime;
+  return v.QuadPart;
+}
+
+std::wstring image_path_of(HANDLE process) {
+  wchar_t buffer[MAX_PATH * 2]{};
+  DWORD size = static_cast<DWORD>(std::size(buffer));
+  if (!QueryFullProcessImageNameW(process, 0, buffer, &size)) return {};
+  return std::wstring(buffer, size);
+}
+
+}  // namespace
+
+bool capture_process_identity(uint32_t pid, ProcessTarget* out) {
+  if (!out) return false;
+  HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (!h) return false;
+  out->pid = pid;
+  out->creationTime = creation_time_of(h);
+  out->imagePath = image_path_of(h);
+  CloseHandle(h);
+  // A creation time of zero would make every later comparison vacuous, so it is treated as a
+  // failure to identify rather than as an identity.
+  return out->creationTime != 0;
+}
+
+bool process_identity_matches(void* handle, const ProcessTarget& target) {
+  HANDLE h = static_cast<HANDLE>(handle);
+  if (!h) return false;
+  if (target.creationTime == 0) return false;  // nothing to compare against
+  if (creation_time_of(h) != target.creationTime) return false;
+  // The creation time alone is already decisive in practice; the path is compared too because it
+  // costs nothing and makes a deliberately crafted collision harder.
+  if (!target.imagePath.empty() && image_path_of(h) != target.imagePath) return false;
   return true;
 }
 

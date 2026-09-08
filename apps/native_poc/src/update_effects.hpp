@@ -27,6 +27,43 @@
 namespace remote60::native_poc::update {
 
 /**
+ * A process to stop, identified by more than its number.
+ *
+ * A PID alone is not an identity. Windows reuses them, and the window between enumerating a
+ * process and waiting on it is long enough for the original to exit and something unrelated to
+ * inherit the number -- at which point stopping "that PID" stops a stranger. So the image path
+ * and the creation time are captured alongside it, and an opened handle is checked against both
+ * before it is treated as the process that was meant.
+ *
+ * A mismatch is not an error. It means the target is already gone, which is exactly the outcome
+ * Quiesce was waiting for.
+ */
+struct ProcessTarget {
+  uint32_t pid = 0;
+  std::wstring imagePath;    // full path as observed at enumeration time
+  uint64_t creationTime = 0; // FILETIME as a single value; 0 when it could not be read
+
+  bool operator==(const ProcessTarget& other) const {
+    return pid == other.pid && creationTime == other.creationTime && imagePath == other.imagePath;
+  }
+};
+
+/**
+ * Reads a live process's identity. Returns false when it cannot be opened or has already exited.
+ *
+ * Used both by the production enumerator and by tests to describe the dummies they started, so
+ * both sides agree on what "the same process" means.
+ */
+bool capture_process_identity(uint32_t pid, ProcessTarget* out);
+
+/**
+ * True when the process behind `handle` is still the one `target` described.
+ *
+ * False means the PID was reused or the process is gone -- either way, not our target.
+ */
+bool process_identity_matches(void* handle, const ProcessTarget& target);
+
+/**
  * Everything the effects need, with nothing supplied by default.
  *
  * `validate()` is what makes the injection structural: an instance missing any required field
@@ -47,18 +84,29 @@ struct UpdateEffectsConfig {
   std::function<bool(const ManifestFields& fields, const std::wstring& destPath)> fetchArtifact;
 
   /**
-   * The processes to stop, as PIDs.
+   * The processes to stop, each with a full identity.
    *
-   * Injected rather than discovered here, and that is the point: a test supplies the PIDs of
-   * dummies it started itself. The production enumerator that finds them by image name is in a
-   * separate translation unit the test does not link.
+   * Injected rather than discovered here, and that is the point: a test supplies dummies it
+   * started itself. The production enumerator that finds them by image name is in a separate
+   * translation unit the test does not link.
    */
-  std::function<std::vector<uint32_t>()> enumerateTargets;
+  std::function<std::vector<ProcessTarget>()> enumerateTargets;
 
   /** Asks one process to exit cleanly. False means it could not even be asked. */
-  std::function<bool(uint32_t pid)> requestStop;
+  std::function<bool(const ProcessTarget& target)> requestStop;
 
-  /** Service registration, firewall, shortcuts, DisplayVersion. Injected; touches HKLM. */
+  /**
+   * The registry root and service name a registration would touch.
+   *
+   * There is no production RegisterInstall yet, so nothing reads these -- they exist now so that
+   * when one is written it has to be handed a root and a service name rather than reaching for
+   * HKLM\...\Uninstall\GNLink and GNLinkSecureInput on its own. A test that supplies scratch
+   * values cannot be made to disturb the real installation later.
+   */
+  std::wstring registryRoot;
+  std::wstring serviceName;
+
+  /** Service registration, firewall, shortcuts, DisplayVersion. Injected. */
   std::function<bool()> registerInstall;
 
   /** Brings the product back in the configuration it was running in. */

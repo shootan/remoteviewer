@@ -15,6 +15,8 @@
 #include <string>
 #include <vector>
 
+#include "update_effects.hpp"
+
 namespace remote60::native_poc::update {
 
 /**
@@ -25,7 +27,7 @@ namespace remote60::native_poc::update {
  * process did not start -- but the result is a list of exact PIDs, and everything downstream
  * works from that list rather than from names.
  */
-std::vector<uint32_t> enumerate_product_processes(const std::vector<std::wstring>& imageNames);
+std::vector<ProcessTarget> enumerate_product_processes(const std::vector<std::wstring>& imageNames);
 
 /**
  * Asks one process to close: WM_CLOSE to its top-level windows, then a console CTRL event for the
@@ -35,7 +37,7 @@ std::vector<uint32_t> enumerate_product_processes(const std::vector<std::wstring
  * update is abandoned before anything on disk changes -- which is the correct outcome, because
  * whatever the product is busy with is worth more than an update.
  */
-bool request_process_stop(uint32_t pid);
+bool request_process_stop(const ProcessTarget& target);
 
 /** The images an update replaces, in the order the installer's payload lists them. */
 const std::vector<std::wstring>& product_image_names();
