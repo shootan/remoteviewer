@@ -9216,3 +9216,24 @@ Next action
 - 변경 파일: `apps/native_poc/src/payload_name.hpp`·`payload_name.cpp`(UTF-8 경로) · `update_manifest.hpp`·`update_manifest.cpp`(payload 필드 + 검사) · `update_manifest_test.cpp` · `apps/native_poc/CMakeLists.txt` · `docs/history.md` · `docs/구현계획.md`.
 - 버전 인상·설치본 생성·설치·라이브 조작·서버 배포·push 없음.
 - 상태: 검증용 검사 대기. **전체 완료 아님.**
+
+### 445) 2026-09-08 업데이트 step4-8 — 등록 배선 + **커밋 지점 신설**(테스트가 잡은 실제 버그), 표현 정정 2건
+- 목적: 업데이터의 `Register`/`Rollback` 을 공유 등록 단위(#440)에 연결한다. Codex 조건 1(롤백 등록은 **이전 설치 값**)을 구조로 만족시키는 것이 핵심이다.
+- **배선**: `update_registration_wiring.{hpp,cpp}` 신설. `make_registration_effects()` 가 **스냅샷 하나를 공유하는 세 콜백**(`capture`/`apply`/`restore`)을 함께 만든다 — 따로 배선하면 어긋날 수 있고, 어긋나면 **롤백이 새 버전을 복원해 구 파일이 신버전을 주장**하게 된다. (C)를 배제한 것과 같은 오염이다. `UpdateEffectsConfig` 에 `captureRegistration`·`restoreRegistration` 을 **필수 seam** 으로 추가했다(기본값 fallback 없음).
+- **`Swap()` 이 파일을 옮기기 전에 캡처**한다. 나중에 캡처하면 업데이트가 만든 상태를 캡처하게 되고, 그것으로 롤백하면 구 파일이 신버전 이름을 달게 된다. 캡처 실패는 **교체를 시작하지 않는다**.
+- **⚠️ 테스트가 잡은 실제 버그 — 커밋 지점이 없었다**: `RegisterInstall()` 이 성공 직후 `.gnlink-old` 백업을 지우고 있었다. 그런데 상태기계 순서는 `Register → Relaunch → Health` 이고 **Health 실패는 롤백**이다. 즉 **롤백이 돌 때 복원할 백업이 이미 없었다.** 회귀("health 실패 후 파일이 구버전으로 돌아갔는가")가 이것을 잡았다.
+  - 수정: `UpdateEffects` 에 **`Commit()`** 을 신설하고 상태기계가 **`Done` 과 `UpdatedButNotRelaunched` 에서만** 부른다. 그 둘이 **롤백하지 않는 유일한 종착점**이다. `RegisterInstall()` 은 이제 백업을 건드리지 않는다.
+  - 회귀 추가: 정상 경로 `commitCount==1` · **swap 실패·health 실패에서 `commitCount==0`**(롤백이 필요로 하는 백업이 살아남았다는 뜻) · relaunch 실패에서는 `commitCount==1`(이 종착점은 롤백하지 않으므로).
+  - **오래된 단정 하나가 버그를 고정하고 있었다**: "backups are dropped only after registration". 그 문장이 참이었기 때문에 버그가 통과하고 있었다. **"등록 뒤에도 백업은 살아 있어야 한다"** 로 뒤집고, `Commit()` 뒤에야 사라지는 것을 별도로 단정했다.
+- **격리**: 배선 회귀는 `HKCU\Software\GNLinkUpdateWiringTest\<pid>` 를 쓰고 netsh·SCM·바로가기는 **기록만** 한다. 테스트가 시작하며 "이 키가 실제 Uninstall 경로가 아님" 을 단정한다. **실측**: 테스트 후 실제 `HKLM\...\Uninstall\GNLink` 의 `DisplayVersion` = **0.2.104 그대로**, 라이브 PID 3개 불변, HKCU 잔재 없음.
+- 회귀 5종 추가: 정상 배선(등록 후 `DisplayVersion` = 새 버전, 공유 단위가 4단계 완료 보고) · **health 실패 → 파일도 레지스트리도 이전 버전으로 복귀**(0.3.0 이 아니라 0.2.105) · 캡처 실패 시 교체 미시작 · 캡처 없이 restore 는 **성공으로 보고**(되돌릴 것이 없다는 참인 진술이며, 실패로 치면 평범한 롤백이 `RollbackFailed` 가 된다).
+- **표현 정정 2건(Codex 조건 0·1)**:
+  - **"아카이브를 안 쓰면 취약점 부류 전체가 성립하지 않는다" 는 과장이다.** 사라지는 것은 **압축·추출 관련 처리**까지이고 **manifest 의 이름·URL 공격면은 그대로 남는다** — payload 이름 검증(#442·#444)과 URL 정책(#438)이 필요한 이유가 그것이다. 이 취지를 문서·주석에 쓰지 않는다.
+  - **effects 의 checks 수를 다중 파일 업데이트의 증명으로 표기하지 않는다.** 단일 blob 을 이름만 달리 복사하는 현재 테스트는 **"해당 OS 부분 경로 검증"** 까지다.
+- 검증 — **`qwinsta`: `console` 만 Active, `rdp-tcp` 는 `Listen` → RDP 미접속.**
+  - `remote60_update_effects_test` **143 checks / 0 failed**(126→143) · `remote60_update_state_machine_test` **61 checks**(57→61).
+  - 업데이트 **8종 합계 571 checks / 0 failed**, 전부 exit 0.
+- 미착수: 다중 파일 패키지(manifest `artifacts[]`, **Codex 승인됨 — 다음 작업**) · `Relaunch`/`HealthCheck` production · 클라 셸 시작 시 비동기 확인 · 실 HTTPS 왕복 · 실제 서비스/방화벽/시작메뉴 0회 · 관리자 권한 실증 없음.
+- 변경 파일: `apps/native_poc/src/update_registration_wiring.hpp`·`update_registration_wiring.cpp`(신규) · `update_effects.hpp`·`update_effects.cpp`·`update_effects_test.cpp` · `update_state_machine.hpp`·`update_state_machine.cpp`·`update_state_machine_test.cpp` · `apps/native_poc/CMakeLists.txt` · `docs/history.md` · `docs/구현계획.md`.
+- 버전 인상·설치본 생성·설치·라이브 조작·서버 배포·push 없음.
+- 상태: 검증용 검사 대기. **전체 완료 아님.**

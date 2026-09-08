@@ -618,13 +618,15 @@ endif()
 add_executable(remote60_update_effects_test
   src/update_effects.cpp
   src/payload_name.cpp
+  src/update_registration_wiring.cpp
+  src/install_registration.cpp
   src/update_state_machine.cpp
   src/update_manifest.cpp
   src/update_signature.cpp
   src/update_effects_test.cpp
 )
 target_include_directories(remote60_update_effects_test PRIVATE src)
-target_link_libraries(remote60_update_effects_test PRIVATE bcrypt)
+target_link_libraries(remote60_update_effects_test PRIVATE bcrypt advapi32 ole32 uuid shell32)
 if(MSVC)
   target_compile_options(remote60_update_effects_test PRIVATE /utf-8)
 endif()

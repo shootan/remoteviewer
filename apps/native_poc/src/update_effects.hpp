@@ -115,8 +115,20 @@ struct UpdateEffectsConfig {
   std::wstring registryRoot;
   std::wstring serviceName;
 
+  /**
+   * Records what is registered now, so a rollback can put it back.
+   *
+   * Called before the swap. Separate from registerInstall because the two have to happen at
+   * different moments -- capturing after the swap would capture the new state, and rolling back
+   * to that would leave old files claiming to be the new version.
+   */
+  std::function<bool()> captureRegistration;
+
   /** Service registration, firewall, shortcuts, DisplayVersion. Injected. */
   std::function<bool()> registerInstall;
+
+  /** Puts the captured registration back. Called during rollback, never with the new values. */
+  std::function<bool()> restoreRegistration;
 
   /** Brings the product back in the configuration it was running in. */
   std::function<bool()> relaunch;
@@ -182,6 +194,7 @@ class WindowsUpdateEffects : public UpdateEffects {
   bool Relaunch() override;
   bool HealthCheck() override;
   bool Rollback() override;
+  void Commit() override;
 
   /** Manifest bytes, injected rather than fetched, so tests never reach the network. */
   void set_manifest(std::string document, std::string signatureHex);

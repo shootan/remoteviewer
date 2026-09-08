@@ -57,7 +57,9 @@ bool UpdateEffectsConfig::validate(std::string* detail) const {
   if (!fetchArtifact) return fail("fetchArtifact not set");
   if (!enumerateTargets) return fail("enumerateTargets not set");
   if (!requestStop) return fail("requestStop not set");
+  if (!captureRegistration) return fail("captureRegistration not set");
   if (!registerInstall) return fail("registerInstall not set");
+  if (!restoreRegistration) return fail("restoreRegistration not set");
   if (!relaunch) return fail("relaunch not set");
   if (!healthCheck) return fail("healthCheck not set");
   // Nothing reads these yet. Requiring them now means a future RegisterInstall cannot be
@@ -281,6 +283,13 @@ bool WindowsUpdateEffects::Swap() {
   movedAside_.clear();
   swapped_ = false;
 
+  // Before a single file moves. Capturing later would capture the state the update is creating,
+  // and a rollback to that would leave the previous build's files under the new version's name.
+  if (!config_.captureRegistration()) {
+    lastError_ = "could not record the current registration";
+    return false;
+  }
+
   // Phase one: move every existing file aside. Nothing new is put in place yet, so a failure here
   // is undone by moving back exactly what was moved.
   for (const std::wstring& name : config_.payloadNames) {
@@ -333,7 +342,13 @@ bool WindowsUpdateEffects::Rollback() {
   }
   movedAside_.clear();
   swapped_ = false;
-  if (!ok) lastError_ = "rollback could not restore every file";
+
+  // The registration goes back to what was captured, not to the version being abandoned.
+  if (!config_.restoreRegistration()) {
+    ok = false;
+    lastError_ = "rollback could not restore the registration";
+  }
+  if (!ok && lastError_.empty()) lastError_ = "rollback could not restore every file";
   return ok;
 }
 
@@ -342,13 +357,18 @@ bool WindowsUpdateEffects::RegisterInstall() {
     lastError_ = "registration failed";
     return false;
   }
-  // The backups are only dropped once the new install is registered. Until then they are the way
-  // back, and deleting them earlier would trade a recoverable failure for an unrecoverable one.
+  // NOT where the backups are dropped. Registration succeeding does not mean the update is
+  // finished -- relaunch and the health check can still fail into a rollback, and that rollback
+  // needs these files. They go in Commit().
+  return true;
+}
+
+void WindowsUpdateEffects::Commit() {
+  // The update is not going to be rolled back, so the way back is no longer needed.
   for (const std::wstring& name : movedAside_) {
     DeleteFileW(backup_path(name).c_str());
   }
   movedAside_.clear();
-  return true;
 }
 
 bool WindowsUpdateEffects::Relaunch() {

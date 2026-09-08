@@ -111,6 +111,17 @@ class UpdateEffects {
 
   /** Puts the previous version back. */
   virtual bool Rollback() = 0;
+
+  /**
+   * The update succeeded and will not be rolled back.
+   *
+   * Until this is called the previous version has to remain restorable, which means the backups
+   * a swap made must survive registration AND relaunch AND the health check -- every one of
+   * those can still fail into a rollback. Dropping them any earlier turns a recoverable failure
+   * into an unrecoverable one, which is how this method came to exist: a test rolled back after
+   * a health failure and found nothing left to restore.
+   */
+  virtual void Commit() = 0;
 };
 
 struct UpdateOutcome {

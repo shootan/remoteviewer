@@ -171,6 +171,9 @@ UpdateOutcome run_update(UpdateEffects& effects,
     // NOT a rollback. The files are the new version and they are consistent; undoing a good
     // install because it did not restart itself would be the worse outcome, and the user can
     // start it from the Start menu. Reported distinctly so it is visible rather than silent.
+    // Committed too: this outcome does not roll back, so the way back is no longer needed and
+    // leaving stale backups beside the install would be litter that a later rollback might trust.
+    effects.Commit();
     effects.DiscardDownload();
     out.result = UpdateResult::UpdatedButNotRelaunched;
     out.detail = "installed, but the product did not come back up";
@@ -181,6 +184,8 @@ UpdateOutcome run_update(UpdateEffects& effects,
   if (!effects.HealthCheck()) return rollback("new build did not come up healthy");
 
   enter(UpdateState::Done);
+  // Only here. Everything before this point could still have ended in a rollback.
+  effects.Commit();
   effects.DiscardDownload();
   out.result = UpdateResult::Updated;
   out.detail = fields.version;

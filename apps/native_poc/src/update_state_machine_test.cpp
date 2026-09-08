@@ -75,6 +75,7 @@ class FakeEffects : public UpdateEffects {
 
   std::vector<std::string> calls;
   int discardCount = 0;
+  int commitCount = 0;
   bool lockReleased = false;
 
   bool ran(const std::string& name) const {
@@ -102,6 +103,7 @@ class FakeEffects : public UpdateEffects {
   bool Relaunch() override { calls.push_back("Relaunch"); return relaunchOk; }
   bool HealthCheck() override { calls.push_back("HealthCheck"); return healthOk; }
   bool Rollback() override { calls.push_back("Rollback"); return rollbackOk; }
+  void Commit() override { calls.push_back("Commit"); ++commitCount; }
 };
 
 std::string joined(const std::vector<std::string>& v) {
@@ -132,6 +134,7 @@ int main() {
               UpdateState::Relaunch, UpdateState::Health, UpdateState::Done},
           joined(f.calls));
     check("staging is cleaned up on success", f.discardCount == 1, std::to_string(f.discardCount));
+    check("the update is committed exactly once", f.commitCount == 1, std::to_string(f.commitCount));
     check("lock is released", f.lockReleased);
   }
 
@@ -252,6 +255,9 @@ int main() {
     const UpdateOutcome o = run_update(f, accepting(), "windows");
     check("swap fails -> RolledBack", o.result == UpdateResult::RolledBack, result_name(o.result));
     check("swap fails -> rollback ran", f.ran("Rollback"), joined(f.calls));
+    // The rule the Commit method exists for: nothing commits on a path that rolls back, so the
+    // backups a rollback needs are still there when it runs.
+    check("swap fails -> never committed", f.commitCount == 0, std::to_string(f.commitCount));
     check("swap fails -> registration never ran", !f.ran("RegisterInstall"));
   }
   {
@@ -269,6 +275,8 @@ int main() {
     const UpdateOutcome o = run_update(f, accepting(), "windows");
     check("health fails -> RolledBack", o.result == UpdateResult::RolledBack, result_name(o.result));
     check("health fails -> rollback ran", f.ran("Rollback"));
+    check("health fails -> never committed, so the backups survived for it",
+          f.commitCount == 0, std::to_string(f.commitCount));
   }
   {
     FakeEffects f;
@@ -292,6 +300,8 @@ int main() {
     check("relaunch fails -> health is not claimed", !o.entered(UpdateState::Health));
     check("relaunch fails -> staging still cleaned up", f.discardCount == 1,
           std::to_string(f.discardCount));
+    check("relaunch fails -> still committed (this outcome does not roll back)",
+          f.commitCount == 1, std::to_string(f.commitCount));
   }
 
   // ---------------------------------------------------------------- the lock always comes back
