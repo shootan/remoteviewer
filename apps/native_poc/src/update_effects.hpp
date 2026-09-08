@@ -125,10 +125,17 @@ struct UpdateEffectsConfig {
 /**
  * UpdateEffects backed by the real filesystem, a real named mutex, and injected everything else.
  *
- * The swap is all-or-nothing by construction: every file is moved aside to a `.gnlink-old`
- * sibling first, and if any single move fails the ones already done are put back before
- * returning. That is what closes ledger item I01 -- the installer's current behaviour overwrites
- * files one at a time and leaves a mixture behind when one is locked.
+ * THE FILE SWAP is all-or-nothing: every file is moved aside to a `.gnlink-old` sibling first,
+ * and if any single move fails the ones already done are put back before returning. That is what
+ * closes ledger item I01 -- the installer's current behaviour overwrites files one at a time and
+ * leaves a mixture behind when one is locked.
+ *
+ * The UPDATE as a whole is not atomic and cannot be made so here. Replacing several files and
+ * then registering four separate system facts -- a service, a firewall rule, two shortcuts, a
+ * registry key -- is a sequence, not a transaction. What it has instead is a recoverable-step
+ * contract: each step reports whether it happened, the file swap never leaves a mixture, and a
+ * failure after the swap rolls the files AND the registration back to what was captured before
+ * it started. Read any claim about "atomicity" in this code as scoped to the file swap.
  */
 class WindowsUpdateEffects : public UpdateEffects {
  public:

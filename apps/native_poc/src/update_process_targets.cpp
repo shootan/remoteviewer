@@ -65,15 +65,22 @@ std::vector<ProcessTarget> enumerate_product_processes(const std::vector<std::ws
 }
 
 bool request_process_stop(const ProcessTarget& target) {
-  // Confirm the PID still belongs to the process that was enumerated before asking it to do
-  // anything. Without this, a reused PID would receive a close request meant for something else.
-  {
-    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, target.pid);
-    if (!h) return true;  // already gone; nothing to ask
-    const bool same = process_identity_matches(h, target);
-    CloseHandle(h);
-    if (!same) return true;  // the process we meant has exited
+  // Open, verify, and then KEEP THE HANDLE OPEN for the rest of this function.
+  //
+  // Verifying and then closing would leave a window: between the check and the WM_CLOSE the
+  // process could exit and its PID be reused, and the message would go to a stranger. An open
+  // handle is what closes that window -- Windows will not recycle a PID while a handle to it
+  // exists, so holding one makes the identity checked above stay true for as long as it is held.
+  HANDLE held = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, target.pid);
+  if (!held) return true;  // already gone; nothing to ask
+  if (!process_identity_matches(held, target)) {
+    CloseHandle(held);
+    return true;  // the process we meant has exited
   }
+  struct HandleGuard {
+    HANDLE h;
+    ~HandleGuard() { if (h) CloseHandle(h); }
+  } guard{held};
 
   const uint32_t pid = target.pid;
   // A GUI process gets WM_CLOSE on its top-level windows.

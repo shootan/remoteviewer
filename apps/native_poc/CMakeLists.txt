@@ -372,6 +372,10 @@ add_custom_target(remote60_installer_payload
 
 add_executable(remote60_installer WIN32
   installer/installer_main.cpp
+  # Registration is shared with the updater so the two cannot drift, and so the version written
+  # into DisplayVersion is an argument rather than a constant compiled into whichever binary
+  # happens to be doing the registering.
+  src/install_registration.cpp
   installer/installer_ui.rc
   "${CMAKE_CURRENT_BINARY_DIR}/installer_payload.rc"
 )
@@ -556,6 +560,18 @@ target_include_directories(remote60_update_http_test PRIVATE src)
 target_link_libraries(remote60_update_http_test PRIVATE winhttp ws2_32)
 if(MSVC)
   target_compile_options(remote60_update_http_test PRIVATE /utf-8)
+endif()
+
+# Registration under a scratch HKCU key, with netsh, the SCM and the Start menu all recorded
+# rather than performed. Nothing here touches the real uninstall key or GNLinkSecureInput.
+add_executable(remote60_install_registration_test
+  src/install_registration.cpp
+  src/install_registration_test.cpp
+)
+target_include_directories(remote60_install_registration_test PRIVATE src)
+target_link_libraries(remote60_install_registration_test PRIVATE advapi32)
+if(MSVC)
+  target_compile_options(remote60_install_registration_test PRIVATE /utf-8)
 endif()
 
 # The production UpdateEffects, driven inside a temp directory.

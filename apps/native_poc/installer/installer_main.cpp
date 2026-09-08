@@ -23,10 +23,14 @@
 #include "installer_ids.h"
 #include "product_version.hpp"
 #include "version_compare.hpp"
+#include "install_registration.hpp"
 
 namespace {
 
 using remote60::native_poc::kProductVersion;
+// Registration is shared with the updater, so the version written into DisplayVersion is an
+// argument rather than whatever constant the registering binary happens to carry.
+namespace install = remote60::native_poc::install;
 
 constexpr wchar_t kProductName[] = L"GNLink Host";
 // The other half. Named apart from the host so the Start menu says which one is being opened:
@@ -209,7 +213,7 @@ void run_netsh(const std::wstring& arguments) {
 
 // Without these the host binds its ports but every inbound datagram is dropped, so a freshly
 // installed machine looks connected and never shows a picture.
-void add_firewall_rules(const std::wstring& directory) {
+[[maybe_unused]] void add_firewall_rules(const std::wstring& directory) {
   const std::wstring hostExe = directory + L"\\GNLinkStream.exe";
   run_netsh(L"advfirewall firewall add rule name=\"" + std::wstring(kFirewallRuleName) +
             L"\" dir=in action=allow program=\"" + hostExe + L"\" enable=yes profile=any");
@@ -217,6 +221,13 @@ void add_firewall_rules(const std::wstring& directory) {
 
 void remove_firewall_rules() {
   run_netsh(L"advfirewall firewall delete rule name=\"" + std::wstring(kFirewallRuleName) + L"\"");
+}
+
+/** For rendering an ASCII step name into a message. Not a general converter. */
+std::wstring widen_ascii(const char* text) {
+  std::wstring out;
+  for (const char* p = text; p && *p; ++p) out.push_back(static_cast<wchar_t>(*p));
+  return out;
 }
 
 bool create_start_menu_shortcut(const std::wstring& target, const wchar_t* linkName,
@@ -254,7 +265,10 @@ bool create_start_menu_shortcut(const std::wstring& target, const wchar_t* linkN
   return ok;
 }
 
-void write_uninstall_entry(const std::wstring& directory, const std::wstring& setupPath) {
+// Superseded by install::register_install on the install path; kept only if some other caller
+// needs it. Marked [[maybe_unused]] so removing the last caller does not become a build break.
+[[maybe_unused]] void write_uninstall_entry(const std::wstring& directory,
+                                            const std::wstring& setupPath) {
   HKEY key = nullptr;
   if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, kUninstallKey, 0, nullptr, 0, KEY_WRITE, nullptr, &key,
                       nullptr) != ERROR_SUCCESS) {
@@ -314,23 +328,48 @@ int do_install() {
     (void)CopyFileW(self.c_str(), setupPath.c_str(), FALSE);
   }
 
-  const std::wstring serviceExe = directory + L"\\GNLinkInputService.exe";
-  const int serviceResult = run_and_wait(serviceExe, L"--install-service");
-  if (serviceResult != 0) {
-    report(L"Installed, but registering the secure input service failed (code " +
-               std::to_wstring(serviceResult) +
-               L").\nInput to elevated windows and the lock screen will not work.",
+  // Service, firewall, shortcuts and the uninstall key now go through the shared registration
+  // unit, which the updater also uses. The version is passed in rather than read from a constant
+  // inside the registering binary -- that is the whole reason the unit is shared, since after an
+  // update the GNLinkSetup.exe on disk is still the previous build (it is not in kPayload) and
+  // registering through it would write the old version into DisplayVersion.
+  install::RegistrationTarget registration;
+  registration.installDir = directory;
+  registration.setupPath = setupPath;
+  registration.version = kProductVersion;
+  registration.productName = kProductName;
+  registration.clientShortcutName = kClientShortcutName;
+  registration.publisher = L"GNLink";
+  registration.serviceName = kServiceName;
+  registration.firewallRuleName = kFirewallRuleName;
+  registration.uninstallRoot = HKEY_LOCAL_MACHINE;
+  registration.uninstallSubkey = kUninstallKey;
+  registration.hostExeName = L"GNLinkHost.exe";
+  registration.clientExeName = L"GNLinkClient.exe";
+  registration.serviceExeName = L"GNLinkInputService.exe";
+  registration.streamExeName = L"GNLinkStream.exe";
+
+  install::RegistrationOps ops;
+  ops.runProcess = [](const std::wstring& exe, const std::wstring& args) {
+    return run_and_wait(exe, args);
+  };
+  ops.createShortcut = [](const std::wstring& target, const std::wstring& linkName,
+                          const std::wstring& description) {
+    return create_start_menu_shortcut(target, linkName.c_str(), description.c_str(), nullptr);
+  };
+
+  const install::RegistrationResult registered = install::register_install(registration, ops);
+  if (!registered.ok) {
+    // Same user-visible behaviour as before -- the install is still reported as done and the
+    // failure is named -- but now the step is named too, instead of only the service being
+    // singled out.
+    report(L"Installed, but registration did not finish (" +
+               std::wstring(registered.failedAt
+                                ? widen_ascii(install::step_name(*registered.failedAt))
+                                : L"unknown step") +
+               L").\nSome features may not work until this is repaired.",
            true);
   }
-
-  add_firewall_rules(directory);
-  // Two entries, because the machine can play either part and the names have to say which is
-  // which -- "GNLink" alone would leave the user guessing which one they are opening.
-  (void)create_start_menu_shortcut(directory + L"\\GNLinkHost.exe", kProductName,
-                                   L"GNLink remote desktop host", nullptr);
-  (void)create_start_menu_shortcut(directory + L"\\GNLinkClient.exe", kClientShortcutName,
-                                   L"GNLink — connect to another PC", nullptr);
-  write_uninstall_entry(directory, setupPath);
 
   report(L"GNLink Host was installed to\n" + directory +
              L"\n\nStart it from the Start menu. Because the files now live in an "
