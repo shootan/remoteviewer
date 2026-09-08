@@ -87,4 +87,31 @@ const char* handoff_verdict_name(HandoffVerdict verdict);
 HandoffVerdict handoff_verdict(bool readySignalled, bool updaterExited, bool timedOut,
                                std::string* detail);
 
+/**
+ * What a request to run something elevated came back as.
+ *
+ * Cancelled is separated from Failed because they are different events with different correct
+ * responses. A user who declines the prompt has made a choice, and the right answer is to carry
+ * on exactly as before -- not to show an error, not to retry, and certainly not to look for
+ * another way to get elevated. Collapsing it into "failed" is how an application ends up telling
+ * someone that the thing they just declined did not work.
+ */
+enum class ElevationOutcome {
+  Launched,
+  /** The user said no. An ordinary answer. */
+  Cancelled,
+  /** It could not be asked at all, or the launch itself failed. */
+  Failed,
+};
+
+const char* elevation_outcome_name(ElevationOutcome outcome);
+
+/**
+ * Reads the result of an elevated launch.
+ *
+ * `lastError` is the Win32 error when `succeeded` is false. ERROR_CANCELLED is the one the shell
+ * reports when a user dismisses the consent prompt.
+ */
+ElevationOutcome elevation_outcome(bool succeeded, uint32_t lastError);
+
 }  // namespace remote60::native_poc::update

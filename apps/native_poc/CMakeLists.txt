@@ -994,6 +994,7 @@ if(GNLINK_HAVE_WEBVIEW2)
     # The start-up update check. Asking is all the client does: it is not elevated, so it cannot
     # replace anything in %ProgramFiles% itself.
     src/update_check.cpp
+    src/update_handoff.cpp
     src/update_http.cpp
     src/update_manifest.cpp
     src/payload_name.cpp

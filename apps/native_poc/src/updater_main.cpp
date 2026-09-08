@@ -276,6 +276,9 @@ class UpdaterEffects {
     relaunchConfig.serviceName = options_.serviceName;
     relaunchConfig.healthLogPath = options_.healthLogPath;
     relaunchConfig.expectedVersion = to_utf8(target.version);
+    // Only the host writes a health report. When it was not running before the update -- a
+    // client-initiated update on a machine nobody is hosting from -- there is nothing to wait for.
+    relaunchConfig.healthReporterImage = L"GNLinkHost.exe";
 
     // Deferred: the plan needs what Quiesce stopped, and Quiesce has not run yet when this is
     // wired. The lambda reads `stopped` at the moment it is called, which is after.

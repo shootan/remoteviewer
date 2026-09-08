@@ -9428,3 +9428,20 @@ Next action
 - **다음: W4** — Client 의 승격 실행(UAC 정확히 1회, **취소는 오류가 아님**) → W7 Android → W8 추적표.
 - 변경 파일: `update_handoff.{hpp,cpp}`·`update_handoff_test.cpp`(신규) · `host_app_main.cpp` · `apps/native_poc/CMakeLists.txt` · `docs/history.md`.
 - 버전 인상·설치본 배포·설치·라이브 조작·push 없음.
+
+### 457) 2026-09-08 W4 — 클라이언트의 승격 실행(**취소는 오류가 아니다**) + ⚠️ 호스트가 안 돌던 기계에서 좋은 업데이트를 롤백하던 결함
+- **클라이언트는 비상승**이라 `%ProgramFiles%` 를 스스로 교체할 수 없다. `ShellExecuteExW(L"runas")` 로 업데이터를 띄워 **UAC 를 정확히 1회** 발생시킨다.
+- ⚠️ **취소는 답이지 실패가 아니다.** `ElevationOutcome{Launched, Cancelled, Failed}` 로 나눴다(`ERROR_CANCELLED`=1223). 거절하면 **아무것도 보여주지 않고, 재시도하지 않고, 다른 승격 경로를 찾지도 않는다** — 사용자는 여전히 동작하는 프로그램을 갖고 있고, 그게 애초에 거절할 수 있었던 이유다. **거절을 오류로 보고하는 것은 방금 고른 것이 안 됐다고 말하는 것**이다. `Failed` 와 분리한 이유가 그것이고, 둘의 올바른 반응이 다르다.
+- 클라이언트는 **ready event 를 쓰지 않는다** — 비상승이라 나갈 허락을 기다릴 필요가 없고, 업데이터가 다른 제품 프로세스와 똑같이 정지시킨다.
+- 페이지가 `type:"update"` 를 보내면 실행하되, **확인이 실제로 찾은 버전이 있을 때만** 한다. 없는데 승격하면 **뒤에 아무것도 없는 UAC 프롬프트**가 되고, 그건 안 띄우느니만 못하다.
+
+- ⚠️⚠️ **배선하다 실제 결함을 발견했다 — 좋은 업데이트를 롤백하고 있었다.**
+  - 클라이언트발 업데이트를 **호스트가 안 돌고 있는 기계**에서 하면: 정지된 목록에 호스트가 없다 → 재실행 계획에 호스트가 없다 → **호스트가 health 보고를 영원히 안 쓴다** → `HealthCheck` 타임아웃 → **롤백**. 파일은 완벽히 맞는데 **애초에 돌지 않던 프로세스의 증거를 요구해서** 되돌린다.
+  - `RelaunchConfig::healthReporterImage` 신설. **그 이미지가 재실행되지 않았으면 health 는 즉시 만족**하고 이유를 남긴다("nothing that reports health was relaunched"). 지름길이 아니다 — **없던 프로세스의 증거를 요구하는 것은 실패를 지어내는 것**이고, `directory=not-configured` 를 실패로 치지 않는 것과 같은 논리다.
+  - **회귀 E9 + 대조군**: reporter 미재실행 시 **즉시**(0 ms, 타임아웃을 기다리지 않음) 만족 / reporter 가 재실행됐으면 **보고 없으면 여전히 실패**. 대조군이 없으면 "아무것도 안 기다리는 health" 로도 통과한다.
+
+- **원장 (b) 와의 연결을 설계문서에 기록**(요청분): `/T` 폐기를 축으로 세 가지가 함께 성립해야 닫힌다 — ① 업데이터를 `stop_running_product()` 의 `kImages` 에 **넣지 않음**(넣으면 `taskkill /F /T` 가 업데이터와 **그 자식인 재실행된 제품까지** 죽인다 — (b) 를 고치러 와서 (b) 를 새로 만드는 것. 그리고 돌고 있는 업데이터는 복사본이라 `installDir` 의 파일을 하나도 잠그지 않으므로 **넣을 이유도 없다**) ② 자기 복사본 재실행(W2a) ③ `CREATE_BREAKAWAY_FROM_JOB`. 언인스톨의 `MOVEFILE_DELAY_UNTIL_REBOOT` 재사용도 함께 적었다 — **새 메커니즘을 만들지 않았다.**
+- 검증 — **`qwinsta`: console 만 Active.** 전체 빌드 오류 0. C++ 업데이트 **12종 845 checks / 0 failed**(relaunch 86→**90**, handoff 29→**33**). `client_shell_bridge_test` PASS. 라이브 무영향: PID 3종 불변, `DisplayVersion` **0.2.104**. **호스트·클라이언트·업데이터·설치기 전부 미실행.**
+- **다음: W7 Android → W8 추적표.**
+- 변경 파일: `update_handoff.{hpp,cpp}`·`update_handoff_test.cpp` · `update_relaunch.{hpp,cpp}`·`update_relaunch_test.cpp` · `updater_main.cpp` · `client_shell_main.cpp` · `apps/native_poc/CMakeLists.txt` · `docs/업데이트_기능_설계.md`((b) 연결) · `docs/history.md`.
+- 버전 인상·설치본 배포·설치·라이브 조작·push 없음.

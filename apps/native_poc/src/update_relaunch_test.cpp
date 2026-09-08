@@ -691,6 +691,42 @@ int main() {
             count_occurrences(read_witness(witness), "DummySvc.cmd") == 0, read_witness(witness));
     }
 
+    // ------------------------------------------------- E9: nothing reports, so nothing is waited on
+    {
+      // A client-initiated update on a machine where the host is not running. No host is
+      // relaunched, so no host will ever write a health report -- and waiting for one anyway
+      // would time out and roll back an update whose files are perfectly correct.
+      RelaunchConfig c = base();
+      c.healthReporterImage = L"DummyHost.cmd";
+      RelaunchEffects e = make_relaunch_effects(c, {stopped_dummy(L"DummyClient.cmd", 100)},
+                                                dummies);
+      e.relaunch();
+      const DWORD before = GetTickCount();
+      const bool healthy = e.healthCheck();
+      const DWORD took = GetTickCount() - before;
+      check("E9: with no reporter relaunched, health is satisfied", healthy,
+            e.lastHealthDetail());
+      // Immediately, not after the timeout -- the point is that it does not wait at all.
+      check("E9: and it does not wait for a report that cannot come", took < 500,
+            std::to_string(took) + "ms");
+      check("E9: the reason says why", e.lastHealthDetail().find("nothing that reports") !=
+                                           std::string::npos,
+            e.lastHealthDetail());
+    }
+    {
+      // And the control: when the reporter IS relaunched, the wait is real again. Without this,
+      // the case above could be satisfied by a health check that never waits for anything.
+      RelaunchConfig c = base();
+      c.healthReporterImage = L"DummyHost.cmd";
+      c.healthTimeoutMs = 600;
+      RelaunchEffects e = make_relaunch_effects(c, {stopped_dummy(L"DummyHost.cmd", 100)},
+                                                dummies);
+      e.relaunch();
+      const bool healthy = e.healthCheck();
+      check("E9: with the reporter relaunched, a missing report still fails", !healthy,
+            e.lastHealthDetail());
+    }
+
     // -------------------------------------------------------------- E8: health, end to end
     {
       RelaunchEffects e = make_relaunch_effects(base(), {stopped_dummy(L"DummyHost.cmd", 100)},

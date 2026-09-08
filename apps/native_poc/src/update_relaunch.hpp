@@ -62,6 +62,19 @@ struct RelaunchConfig {
   std::wstring serviceName;
   /** The log the product writes its health report into. */
   std::wstring healthLogPath;
+  /**
+   * The image whose report counts as evidence of health.
+   *
+   * Named rather than assumed, because it decides what happens when that image was not running
+   * before the update. An update started from the client on a machine where the host is not
+   * running relaunches no host, so no host will ever write a report -- and a health check that
+   * waited for one anyway would time out and roll back a perfectly good update. Demanding
+   * evidence from a process that was never there is inventing a failure, in the same way that
+   * treating "no account signed in" as a directory failure would.
+   *
+   * Empty means nothing reports, and health is then satisfied by the swap having succeeded.
+   */
+  std::wstring healthReporterImage;
   /** The version the update installed. A report naming a different one is a failure. */
   std::string expectedVersion;
   /** How long HealthCheck waits for the report before giving up. */

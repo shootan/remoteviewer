@@ -175,6 +175,28 @@ int main() {
           std::to_string(exitNowCount));
   }
 
+  // ---------------------------------------------------------------- declining is an answer
+  //
+  // The client is not an administrator program, so replacing files in %ProgramFiles% means asking
+  // for consent once. What the user says to that prompt is a decision, not a fault.
+
+  {
+    check("a successful elevated launch", elevation_outcome(true, 0) == ElevationOutcome::Launched);
+    // 1223 is ERROR_CANCELLED -- what the shell reports when the consent prompt is dismissed.
+    check("declining the prompt is Cancelled, not Failed",
+          elevation_outcome(false, 1223) == ElevationOutcome::Cancelled,
+          elevation_outcome_name(elevation_outcome(false, 1223)));
+    // Kept apart because the responses differ: one carries on silently, the other is worth
+    // saying out loud. Reporting a decline as an error tells someone that the thing they just
+    // declined did not work.
+    check("anything else is Failed",
+          elevation_outcome(false, 5) == ElevationOutcome::Failed &&
+              elevation_outcome(false, 2) == ElevationOutcome::Failed,
+          elevation_outcome_name(elevation_outcome(false, 5)));
+    check("and a success is never mistaken for a decline",
+          elevation_outcome(true, 1223) == ElevationOutcome::Launched);
+  }
+
   std::cout << (gFailures == 0 ? "RESULT: ALL PASS  (" : "RESULT: FAILED  (") << gChecks
             << " checks, " << gFailures << " failed)\n";
   return gFailures == 0 ? 0 : 1;

@@ -300,6 +300,22 @@ RelaunchEffects make_relaunch_effects(RelaunchConfig config,
   };
 
   effects.healthCheck = [shared]() {
+    // Nothing that reports was brought back, so there is nothing to wait for. This is not a
+    // shortcut: waiting anyway would time out and roll back an update whose files are correct,
+    // for the sole reason that the process which writes the report was not running beforehand.
+    if (!shared->config.healthReporterImage.empty()) {
+      bool reporterStarted = false;
+      for (const RelaunchOutcome& outcome : shared->outcomes) {
+        if (outcome.imageName == shared->config.healthReporterImage && outcome.started) {
+          reporterStarted = true;
+        }
+      }
+      if (!reporterStarted) {
+        shared->healthDetail = "nothing that reports health was relaunched, so there is no "
+                               "report to wait for";
+        return true;
+      }
+    }
     if (!shared->marked) {
       // Nothing was relaunched, so there is nothing that could have reported. Saying "healthy"
       // here would be answering a question that was never asked.

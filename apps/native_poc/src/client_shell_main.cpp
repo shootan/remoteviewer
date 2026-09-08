@@ -37,6 +37,7 @@
 #include "client_shell_bridge.hpp"
 #include "env_util.hpp"
 #include "update_check.hpp"
+#include "update_handoff.hpp"
 #include "directory_session_client.hpp"
 #include "json_profile.hpp"
 #include "log_upload.hpp"
@@ -313,6 +314,8 @@ void post_status(const std::string& state, const std::string& detail) {
 std::mutex gUpdateNoticeMu;
 std::string gPendingUpdateNotice;
 bool gPageReady = false;
+/** The version the last check found, empty when there is nothing to install. */
+std::string gAvailableVersion;
 
 void deliver_update_notice(const std::string& json) {
   {
@@ -348,6 +351,91 @@ void flush_pending_update_notice() {
  *
  * Design: docs/업데이트_기능_설계.md 3.5.
  */
+/**
+ * Asks for consent once, and starts the updater with it.
+ *
+ * The client is not an administrator program, so it cannot replace anything in %ProgramFiles%
+ * itself. It asks the shell to run the updater elevated, which puts exactly one consent prompt in
+ * front of the user.
+ *
+ * Declining is an answer, not a failure. Nothing is shown, nothing is retried, and the client
+ * carries on exactly as it was -- the user still has a working program, which is the whole reason
+ * the prompt could be declined in the first place. Reporting a decline as an error would be
+ * telling someone that the thing they just chose did not work.
+ */
+/** Where the host writes its health report. Mirrors host_app_main.cpp's log_file_path(). */
+std::wstring host_health_log_path() {
+  wchar_t base[MAX_PATH]{};
+  const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
+  if (n == 0 || n >= MAX_PATH) return {};
+  return std::wstring(base) + L"\\GNLink\\host_app.log";
+}
+
+void start_client_update(const std::string& availableVersion) {
+  namespace upd = remote60::native_poc::update;
+
+  const std::wstring installDir = executable_dir();
+  // A sibling of the install directory, never a child: a child would be inside the directory the
+  // updater is about to replace, and it refuses to run from there.
+  const std::wstring workDir = installDir + L".update";
+
+  upd::UpdaterLaunchSpec spec;
+  spec.installDir = installDir;
+  spec.stagingDir = workDir + L"\\staging";
+  spec.workDir = workDir;
+  spec.manifestUrl = remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL");
+  spec.platform = "windows";
+  spec.installedVersion = narrow(kProductVersion);
+  // The HOST's log, not this process's: health evidence is the host reporting its own version,
+  // and this program does not write that line.
+  spec.healthLogPath = host_health_log_path();
+  spec.logPath = workDir + L"\\updater.log";
+  spec.serviceName = L"GNLinkSecureInput";
+  spec.registryRoot = L"HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\GNLink";
+  spec.parentPid = GetCurrentProcessId();
+  // No ready event: this process is not elevated and does not need to wait for permission to
+  // leave. The updater stops the client the same way it stops any other product process.
+  spec.readyEventName.clear();
+
+  std::wstring parameters;
+  for (const std::wstring& arg : upd::updater_arguments(spec)) {
+    if (!parameters.empty()) parameters += L" ";
+    parameters += L"\"";
+    parameters += arg;
+    parameters += L"\"";
+  }
+  const std::wstring exePath = installDir + L"\\GNLinkUpdater.exe";
+
+  SHELLEXECUTEINFOW info{};
+  info.cbSize = sizeof(info);
+  info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+  info.lpVerb = L"runas";  // one consent prompt, and only one
+  info.lpFile = exePath.c_str();
+  info.lpParameters = parameters.c_str();
+  info.lpDirectory = installDir.c_str();
+  info.nShow = SW_SHOWNORMAL;
+
+  const BOOL launched = ShellExecuteExW(&info);
+  const upd::ElevationOutcome outcome =
+      upd::elevation_outcome(launched != FALSE, static_cast<uint32_t>(GetLastError()));
+  if (info.hProcess) CloseHandle(info.hProcess);
+
+  switch (outcome) {
+    case upd::ElevationOutcome::Launched:
+      log_line("update: started the updater for " + availableVersion);
+      post_status("idle", "업데이트를 시작했습니다. 잠시 후 프로그램이 다시 시작됩니다.");
+      return;
+    case upd::ElevationOutcome::Cancelled:
+      // Recorded, not shown. The user declined and still has a working program.
+      log_line("update: the user declined the elevation prompt");
+      return;
+    case upd::ElevationOutcome::Failed:
+      log_line("update: could not start the updater");
+      post_status("error", "업데이트를 시작하지 못했습니다. 설치된 버전은 그대로입니다.");
+      return;
+  }
+}
+
 void start_update_check() {
   namespace upd = remote60::native_poc::update;
 
@@ -363,7 +451,13 @@ void start_update_check() {
         const ShellUpdateNotice notice = shell_update_notice(
             upd::check_outcome_name(result.outcome), result.availableVersion, result.detail);
         log_line(notice.logLine);
-        if (notice.show) deliver_update_notice(shell_status_json("idle", notice.text));
+        if (notice.show) {
+          {
+            std::lock_guard<std::mutex> lock(gUpdateNoticeMu);
+            gAvailableVersion = result.availableVersion;
+          }
+          deliver_update_notice(shell_status_json("idle", notice.text));
+        }
       });
 }
 
@@ -655,6 +749,21 @@ void handle_page_message(const std::string& json) {
     post_to_page(shell_restore_json(server, accountId, settings));
     // Anything the start-up check found while the page was still loading goes out now.
     flush_pending_update_notice();
+    return;
+  }
+  if (type == "update") {
+    std::string version;
+    {
+      std::lock_guard<std::mutex> lock(gUpdateNoticeMu);
+      version = gAvailableVersion;
+    }
+    // Only when a check actually found something. A page that asked otherwise would be asking to
+    // elevate for no reason, and one consent prompt with nothing behind it is worse than none.
+    if (version.empty()) {
+      post_status("idle", "설치할 새 버전이 없습니다.");
+      return;
+    }
+    start_client_update(version);
     return;
   }
   if (type == "settings") {

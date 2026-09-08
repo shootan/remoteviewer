@@ -86,4 +86,21 @@ HandoffVerdict handoff_verdict(bool readySignalled, bool updaterExited, bool tim
   return HandoffVerdict::KeepRunning;
 }
 
+const char* elevation_outcome_name(ElevationOutcome outcome) {
+  switch (outcome) {
+    case ElevationOutcome::Launched: return "launched";
+    case ElevationOutcome::Cancelled: return "cancelled";
+    case ElevationOutcome::Failed: return "failed";
+  }
+  return "unknown";
+}
+
+ElevationOutcome elevation_outcome(bool succeeded, uint32_t lastError) {
+  if (succeeded) return ElevationOutcome::Launched;
+  // 1223 is ERROR_CANCELLED. Written as a literal so this file does not need windows.h -- it is
+  // the decision, not the mechanism, and the tests that cover it start no processes.
+  if (lastError == 1223u) return ElevationOutcome::Cancelled;
+  return ElevationOutcome::Failed;
+}
+
 }  // namespace remote60::native_poc::update
