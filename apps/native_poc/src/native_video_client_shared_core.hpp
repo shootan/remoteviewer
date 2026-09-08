@@ -329,11 +329,12 @@ class UdpH264FrameAssembler {
   // The identity is remembered (a tombstone), because the host may still be sending that AU's
   // chunks: without it the next late chunk re-creates the very assembly that was just abandoned
   // and blocks the head again, so the caller gives the same AU up over and over (measured: the
-  // same seq abandoned 3 times, and the good AU behind it never delivered). `nowUs` stamps the
-  // tombstone; 0 (the legacy overload's clock) means it only ages out by count.
+  // same seq abandoned 3 times, and the good AU behind it never delivered). `nowUs` only stamps
+  // the record for diagnostics -- retirement is by boundary, not by clock (see abandoned_).
   bool GiveUpIncomplete(uint64_t generation, uint32_t seq, uint64_t nowUs = 0);
   // True while (generation, seq) is tombstoned: its chunks are ignored as stale traffic.
-  bool IsAbandoned(uint64_t generation, uint32_t seq, uint64_t nowUs = 0) const;
+  bool IsAbandoned(uint64_t generation, uint32_t seq) const;
+  size_t AbandonedCount() const { return abandoned_.size(); }
 
   struct IncompleteAuInfo {
     uint32_t seq = 0;
@@ -387,16 +388,26 @@ class UdpH264FrameAssembler {
   // that would claim the AU was delivered, change what the next delivery reports as a sequence
   // gap (and with it the IDR recovery contract), and swallow AUs that were never judged. A
   // tombstone blocks exactly the judged (generation, seq) and nothing else -- another generation
-  // restarts the seq space and never matches one. Bounded both ways: at most kAbandonedMax
-  // entries (oldest dropped first) and kAbandonedTtlUs of age when the caller passes a clock, so
-  // a long session cannot accumulate them; Reset() (a new session / decoder resync) clears them.
+  // restarts the seq space and never matches one.
+  //
+  // Retirement is by BOUNDARY, not by a clock: a host that keeps resending the abandoned AU for
+  // longer than any timeout would otherwise get it re-assembled and abandoned a second time. An
+  // entry is retired when
+  //   - delivery has moved past it in its own generation (`lastDeliveredSeq_` is at or beyond it):
+  //     the ordinary stale guard covers those chunks from then on, so the tombstone is redundant;
+  //   - a delivery of a DIFFERENT generation happens: the old seq space is gone and its entries
+  //     can never match a packet again;
+  //   - Reset() (a new session / decoder resync);
+  //   - or the capacity bound is reached: kAbandonedMax identities may be outstanding with no
+  //     delivery at all between them, and the oldest is dropped. That is a real (bounded) hole --
+  //     16 heads abandoned before a single AU gets through -- and it is preferred to unbounded
+  //     growth; the give-up rule itself is what keeps that number small.
   struct AbandonedAu {
     uint64_t generation = 0;
     uint32_t seq = 0;
-    uint64_t atUs = 0;  // 0 = no clock: ages out by count only
+    uint64_t atUs = 0;  // diagnostics only
   };
   static constexpr size_t kAbandonedMax = 16;
-  static constexpr uint64_t kAbandonedTtlUs = 5'000'000;
   std::deque<AbandonedAu> abandoned_;
 
   std::deque<Assembly> assemblies_;

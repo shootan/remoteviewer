@@ -679,16 +679,28 @@ bool test_udp_assembler_abandoned_tombstone() {
   const uint64_t t0 = 12000000;
   (void)push_chunk(a, 30, 0, 12, 4, false, t0);
   if (!expect(a.GiveUpIncomplete(1, 30, t0 + 1000), "tombstone: seq 30 given up")) return false;
-  if (!expect(a.IsAbandoned(1, 30, t0 + 2000), "tombstone: it is remembered")) return false;
+  if (!expect(a.IsAbandoned(1, 30), "tombstone: it is remembered")) return false;
   // A late chunk of it is stale traffic, not a new assembly.
   auto r = push_chunk(a, 30, 1, 12, 4, false, t0 + 3000);
   if (!expect(r.disposition == UdpH264AssemblyDisposition::Ignored && a.PendingCount() == 0,
               "tombstone: a late chunk of the abandoned AU is ignored")) return false;
-  // The next AU is unaffected and delivers.
-  r = push_chunk(a, 31, 0, 4, 4, true, t0 + 4000);
+  // No clock retires it: a host that keeps resending the abandoned AU for longer than any timeout
+  // would otherwise get it re-assembled and abandoned again. Even 10 s later, with no delivery in
+  // between, it is still ignored and still held.
+  r = push_chunk(a, 30, 2, 12, 4, false, t0 + 10'000'000);
+  if (!expect(r.disposition == UdpH264AssemblyDisposition::Ignored && a.PendingCount() == 0,
+              "tombstone: a much later chunk of the abandoned AU is still ignored")) return false;
+  if (!expect(a.AbandonedCount() == 1, "tombstone: still held while no delivery has passed it")) return false;
+  // The next AU is unaffected and delivers -- and that retires the tombstone, because from here
+  // the ordinary stale guard covers seq 30.
+  r = push_chunk(a, 31, 0, 4, 4, true, t0 + 11'000'000);
   UdpH264AssemblyStepResult out{};
-  if (!expect(a.PopDelivery(t0 + 4000, true, &out) && out.frame.header.seq == 31,
+  if (!expect(a.PopDelivery(t0 + 11'000'000, true, &out) && out.frame.header.seq == 31,
               "tombstone: the next AU still delivers")) return false;
+  if (!expect(a.AbandonedCount() == 0, "tombstone: retired once delivery passed it")) return false;
+  r = push_chunk(a, 30, 0, 12, 4, false, t0 + 12'000'000);  // index 3 would be out of range (3 chunks)
+  if (!expect(r.disposition == UdpH264AssemblyDisposition::Ignored,
+              "tombstone: after retirement the stale guard still ignores it")) return false;
   // Another generation with the same seq is a different AU: the tombstone must not shadow it.
   // (In a fresh assembler, so the ordinary "older than the last delivered seq" rule is not what
   // answers here.)
@@ -697,16 +709,39 @@ bool test_udp_assembler_abandoned_tombstone() {
     b.ConfigureInOrderHold(120000, 8);
     (void)push_chunk(b, 40, 0, 12, 4, false, t0);
     if (!expect(b.GiveUpIncomplete(1, 40, t0 + 1000), "tombstone: seq 40 of generation 1 given up")) return false;
-    if (!expect(!b.IsAbandoned(2, 40, t0 + 2000), "tombstone: it is keyed by generation too")) return false;
+    if (!expect(!b.IsAbandoned(2, 40), "tombstone: it is keyed by generation too")) return false;
     const auto d = make_video_chunk(40, 0, 12, 4, false, 2);
     const auto r2 = b.PushDatagram(d.data(), d.size(), t0 + 2000);
     if (!expect(r2.disposition == UdpH264AssemblyDisposition::Partial,
                 "tombstone: the same seq in another generation assembles normally")) return false;
   }
-  // It ages out (5 s) and Reset() clears it.
-  if (!expect(!a.IsAbandoned(1, 30, t0 + 6'000'000), "tombstone: expires with the ttl")) return false;
+  // A delivery in another generation retires entries of the old seq space as well.
+  {
+    UdpH264FrameAssembler c;
+    c.ConfigureInOrderHold(120000, 8);
+    (void)push_chunk(c, 50, 0, 12, 4, false, t0);
+    if (!expect(c.GiveUpIncomplete(1, 50, t0), "tombstone: gen 1 seq 50 given up")) return false;
+    const auto g2 = make_video_chunk(7, 0, 4, 4, true, 2);
+    (void)c.PushDatagram(g2.data(), g2.size(), t0 + 1000);
+    UdpH264AssemblyStepResult out2{};
+    if (!expect(c.PopDelivery(t0 + 1000, true, &out2) && out2.frame.header.seq == 7,
+                "tombstone: the new generation's AU delivers")) return false;
+    if (!expect(c.AbandonedCount() == 0, "tombstone: the old generation's entries are retired")) return false;
+  }
+  // Capacity: at most kAbandonedMax outstanding identities with no delivery between them.
+  {
+    UdpH264FrameAssembler d;
+    d.ConfigureInOrderHold(120000, 32);
+    for (uint32_t i = 0; i < 20; ++i) {
+      (void)push_chunk(d, 100 + i, 0, 12, 4, false, t0 + i * 1000);
+      if (!expect(d.GiveUpIncomplete(1, 100 + i, t0 + i * 1000), "tombstone: capacity fill")) return false;
+    }
+    if (!expect(d.AbandonedCount() == 16, "tombstone: bounded at 16 (" + std::to_string(d.AbandonedCount()) + ")")) return false;
+    if (!expect(d.IsAbandoned(1, 119) && !d.IsAbandoned(1, 100),
+                "tombstone: the oldest identities are the ones dropped")) return false;
+  }
   a.Reset();
-  if (!expect(!a.IsAbandoned(1, 30, t0 + 2000), "tombstone: Reset clears it")) return false;
+  if (!expect(!a.IsAbandoned(1, 30), "tombstone: Reset clears it")) return false;
   return true;
 }
 

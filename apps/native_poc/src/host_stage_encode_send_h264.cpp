@@ -334,6 +334,11 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
         res.captureReadback.SetNv12Enabled(false);
         std::cout << "[native-video-host] nv12 surface encode rejected backend="
                   << encoder.codec.backend_name() << "; falling back to cpu nv12\n";
+        // A06: this call may still have overflowed the accepted-input FIFO before it failed.
+        if (encoder.NoteProvenance(encoder.codec.provenance_invalid())) {
+          std::cout << "[native-video-host] encoder provenance invalid (surface encode rejected)"
+                    << " -> gate closed, encoder rebuild requested\n";
+        }
         return Flow::Continue;
       }
     }
@@ -344,6 +349,14 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     ++encoder.encodeFailCount;
     if ((encoder.encodeFailCount % 60) == 1) {
       std::cout << "[native-video-host] encode failed count=" << encoder.encodeFailCount << "\n";
+    }
+    // A06: an encode can fail AFTER the MFT accepted the input -- that call may be the one that
+    // overflowed the FIFO. Record it before leaving, or the tick retry never sees a pending
+    // request and the gate stays open on an encoder whose output order is undescribed.
+    if (encoder.NoteProvenance(encoder.codec.provenance_invalid())) {
+      std::cout << "[native-video-host] encoder provenance invalid (encode failed):"
+                << " pendingOverflow=" << encodeStats.pendingInputOverflowTotal
+                << " -> gate closed, encoder rebuild requested\n";
     }
     return Flow::Continue;
   }
@@ -453,9 +466,7 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
   // is asked for on the gate's own budget (EncoderState::TryProvenanceResync). Until it succeeds
   // every AU carries epoch 0 and the gate refuses it (DropUnknownEpoch), so nothing reaches the
   // wire from an encoder whose output order is no longer described by anything.
-  if (encoder.codec.provenance_invalid() && !encoder.epochGate.provenanceInvalid) {
-    encoder.epochGate.provenanceInvalid = true;
-    encoder.provenanceResyncPending = true;
+  if (encoder.NoteProvenance(encoder.codec.provenance_invalid())) {
     std::cout << "[native-video-host] encoder provenance invalid (input FIFO overflow):"
               << " pendingOverflow=" << encodeStats.pendingInputOverflowTotal
               << " pendingDepth=" << encodeStats.pendingInputDepth
@@ -468,7 +479,11 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
                 << " curEpoch=" << capture.inputEpoch.load(std::memory_order_acquire)
                 << " -> forcing a key\n";
       units.clear();  // this call's AUs came from the encoder that is now gone
-    } else if ((encoder.provenanceResyncFailed % 30) == 1 || encoder.provenanceResyncFailed == 0) {
+    } else if (encoder.provenanceDeferLogUs == 0 ||
+               resyncNowUs >= encoder.provenanceDeferLogUs + 1'000'000) {
+      // Time-throttled: a spent budget does not touch provenanceResyncFailed, so a count-based
+      // throttle printed this on every frame while the window ran out.
+      encoder.provenanceDeferLogUs = resyncNowUs;
       std::cout << "[native-video-host] encoder provenance resync deferred (budget or init failure)"
                 << " failed=" << encoder.provenanceResyncFailed
                 << " resetsInWindow=" << encoder.epochGate.resetsInWindow

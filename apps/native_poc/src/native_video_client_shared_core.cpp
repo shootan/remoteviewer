@@ -639,11 +639,9 @@ bool UdpH264FrameAssembler::AnyComplete() const {
   return std::any_of(assemblies_.begin(), assemblies_.end(), [](const Assembly& a) { return a.complete; });
 }
 
-bool UdpH264FrameAssembler::IsAbandoned(uint64_t generation, uint32_t seq, uint64_t nowUs) const {
+bool UdpH264FrameAssembler::IsAbandoned(uint64_t generation, uint32_t seq) const {
   for (const AbandonedAu& a : abandoned_) {
-    if (a.seq != seq || a.generation != generation) continue;
-    if (nowUs != 0 && a.atUs != 0 && nowUs > a.atUs + kAbandonedTtlUs) return false;  // aged out
-    return true;
+    if (a.seq == seq && a.generation == generation) return true;
   }
   return false;
 }
@@ -677,6 +675,18 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::DeliverAssembly(Assembly& assem
   }
   deliveredAny_ = true;
   lastDeliveredSeq_ = assembly.seq;
+  // Retire the tombstones this delivery makes redundant (see the header note): everything the
+  // stale guard now covers in this generation, and everything from any other generation.
+  {
+    const uint64_t deliveredGeneration = assembly.header.streamGeneration;
+    const uint32_t deliveredSeq = assembly.seq;
+    abandoned_.erase(std::remove_if(abandoned_.begin(), abandoned_.end(),
+                                    [&](const AbandonedAu& a) {
+                                      if (a.generation != deliveredGeneration) return true;
+                                      return !sequence_is_newer(a.seq, deliveredSeq);
+                                    }),
+                     abandoned_.end());
+  }
   assemblies_.erase(std::remove_if(assemblies_.begin(), assemblies_.end(),
                                    [&](const Assembly& item) {
                                      return !sequence_is_newer(item.seq, lastDeliveredSeq_);
@@ -831,7 +841,7 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* dat
     }
   }
 
-  if (IsAbandoned(packet.streamGeneration, packet.seq, nowUs)) {
+  if (IsAbandoned(packet.streamGeneration, packet.seq)) {
     // A04: this AU's repair was given up (its rounds and its grace were spent). Its late data or
     // FEC chunks are stale traffic now -- re-creating the assembly would block the head again and
     // make the caller abandon the same AU a second and third time, while the good AU behind it

@@ -127,6 +127,21 @@ struct EncoderState {
   bool provenanceResyncPending = false;
   uint64_t provenanceResyncCount = 0;
   uint64_t provenanceResyncFailed = 0;
+  uint64_t provenanceDeferLogUs = 0;  // last "resync deferred" line (time-throttled)
+  /**
+   * Records what the codec reported about its input provenance after an encode call -- whatever
+   * that call returned. An encode that fails LATE (the MFT accepted the input, then a drain or
+   * ProcessOutput failed) can be the very call that overflowed the FIFO, and the stage returns
+   * early on failure: without this the gate would stay open and the rebuild would never be
+   * asked for, because the tick retry only looks at `provenanceResyncPending`. Idempotent.
+   * Returns true the first time it latches, so the caller can log it once.
+   */
+  bool NoteProvenance(bool codecProvenanceInvalid) {
+    if (!codecProvenanceInvalid || epochGate.provenanceInvalid) return false;
+    epochGate.provenanceInvalid = true;
+    provenanceResyncPending = true;
+    return true;
+  }
   /**
    * A02/A06: rebuilds the encoder because its accepted-input FIFO lost provenance. Only a
    * rebuild helps -- clearing the FIFO alone would let the outputs the MFT still holds consume
