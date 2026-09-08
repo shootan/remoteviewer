@@ -400,6 +400,54 @@ int main() {
     check("and names what is missing", why.find("fetchText") != std::string::npos, why);
   }
 
+  // ================================================================ the production set is whole
+  //
+  // Everything above crosses an injected boundary, so nothing above looks at what production
+  // actually puts on the other side of it. A field left empty there would show up only when
+  // validate() ran on a user's machine -- which is to say, the first time anyone found out would
+  // be the first time it mattered.
+  //
+  // The limit of this is worth stating: it fixes that every wire is PRESENT, not that any of them
+  // behaves correctly. Whether the real WinHTTP client, the real enumerator and the real SCM do
+  // their jobs is a field test (UPD-FIELD-00..07) and nothing here changes that.
+
+  {
+    const UpdaterDeps deps = production_updater_deps([](const std::string&) {});
+    std::string why;
+    check("the production dependency set is complete", deps.validate(&why), why);
+
+    // Named one at a time as well, so a failure says which wire is missing rather than only that
+    // one is. Each of these is a thing the updater cannot do for itself.
+    check("production supplies a text fetcher", static_cast<bool>(deps.fetchText));
+    check("production supplies a file fetcher", static_cast<bool>(deps.fetchFile));
+    check("production supplies a process enumerator", static_cast<bool>(deps.enumerateTargets));
+    check("production supplies a way to ask a process to stop",
+          static_cast<bool>(deps.requestStop));
+    check("production supplies registration operations",
+          static_cast<bool>(deps.registrationOps.runProcess) &&
+              static_cast<bool>(deps.registrationOps.createShortcut));
+    check("production supplies a relaunch builder", static_cast<bool>(deps.makeRelaunch));
+    // The one that decides whether anything is trusted at all.
+    check("production supplies a signature verifier", static_cast<bool>(deps.verifier));
+    check("production supplies a way to release a waiting caller",
+          static_cast<bool>(deps.signalReady));
+    check("production knows its own image path", !deps.selfImagePath.empty(),
+          narrow(deps.selfImagePath));
+    // And that image is a real file: an empty or bogus path would make the swap's refusal to
+    // replace the running updater compare against nothing.
+    check("and that image path is this executable",
+          GetFileAttributesW(deps.selfImagePath.c_str()) != INVALID_FILE_ATTRIBUTES,
+          narrow(deps.selfImagePath));
+  }
+
+  {
+    // A log is optional to the caller and required by validate, so production must fill it in
+    // even when handed nothing.
+    const UpdaterDeps deps = production_updater_deps(nullptr);
+    std::string why;
+    check("production is complete even with no logger given", deps.validate(&why), why);
+  }
+
   // ================================================================ the working copy's order
 
   {
