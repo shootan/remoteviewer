@@ -41,6 +41,19 @@ bool UpdateEffectsConfig::validate(std::string* detail) const {
   if (stagingDir.empty()) return fail("stagingDir not set");
   if (lockName.empty()) return fail("lockName not set");
   if (payloadNames.empty()) return fail("payloadNames is empty");
+  {
+    // Defence in depth: a payload name is manifest data on its way to becoming a path, and
+    // the updater writes with administrator rights. Refused rather than sanitised.
+    size_t bad = 0;
+    PayloadNameVerdict verdict = PayloadNameVerdict::Ok;
+    if (!check_payload_names(payloadNames, &bad, &verdict)) {
+      if (detail) {
+        *detail = std::string("payload name ") + std::to_string(bad) + " rejected: " +
+                  payload_name_verdict_name(verdict);
+      }
+      return false;
+    }
+  }
   if (!fetchArtifact) return fail("fetchArtifact not set");
   if (!enumerateTargets) return fail("enumerateTargets not set");
   if (!requestStop) return fail("requestStop not set");

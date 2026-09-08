@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 
+#include "payload_name.hpp"
 #include "update_state_machine.hpp"
 
 namespace remote60::native_poc::update {
@@ -75,7 +76,15 @@ struct UpdateEffectsConfig {
   std::wstring installDir;
   /** Where the download is staged. Must be OUTSIDE installDir -- see design 3.2. */
   std::wstring stagingDir;
-  /** File names, relative to installDir, that a swap replaces. */
+  /**
+   * File names, relative to installDir, that a swap replaces.
+   *
+   * These come from a manifest, which means they are data being turned into paths. Every
+   * one is checked by check_payload_names() before anything runs -- traversal, absolute
+   * paths, drive letters, alternate data streams, reserved device names and duplicates are
+   * all refused. The signature check is the first lock on that door; this is the second,
+   * and it does not assume the first one held.
+   */
   std::vector<std::wstring> payloadNames;
   /** Named mutex for mutual exclusion. `Global\` prefixed in production (design 3.3). */
   std::wstring lockName;

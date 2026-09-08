@@ -9154,3 +9154,25 @@ Next action
 - 변경 파일: `apps/native_poc/src/update_check.hpp`·`update_check.cpp`·`update_check_test.cpp`(신규) · `src/host_app_main.cpp` · `apps/native_poc/CMakeLists.txt` · `apps/directory/test/update_route_test.js` · `docs/history.md` · `docs/구현계획.md`.
 - 버전 인상·설치본 생성·설치·라이브 조작·서버 배포·push 없음.
 - 상태: 검증용 검사 대기. **전체 완료 아님.**
+
+### 442) 2026-09-08 업데이트 step4-5 — payload 이름을 임의 경로 쓰기 수단으로 만들지 않기 (패키지 계약 ① 조건 2, 심층 방어)
+- 배경: 패키지 계약 ① 승인에 딸린 **새 보안 요건**. manifest 에서 온 이름을 그대로 경로로 쓰면 **설치 디렉터리 밖에 쓰는 원시 수단**이 된다 — 그것도 **관리자 권한으로**. ①과 무관하게 먼저 처리했다.
+- **왜 서명이 있는데도 필요한가**: 서명 검증은 첫 번째 자물쇠이고 이건 두 번째다. 심층 방어란 **서명이 올바르게 검증됐다는 것에, 서명키가 새지 않는다는 것에, 발행 측이 이상한 것에 서명하도록 속지 않는다는 것에 의존하지 않는다**는 뜻이다. 셋 중 무엇이 어긋나도 임의 위치 쓰기로 끝나서는 안 된다.
+- **정제가 아니라 거부**: 적대적인 이름을 안전한 이름으로 바꾸는 것은 이미 안전한지 판정하는 것보다 훨씬 어려운 문제이고, 제품이 실제로 배포하는 이름의 집합은 작고 지루하다. 그래서 화이트리스트다.
+- `apps/native_poc/src/payload_name.{hpp,cpp}` 신설. 거부 사유를 13종으로 이름 붙여 진단이 남게 했다: `Traversal` · `Absolute` · `DriveRelative` · `AlternateStream` · `ReservedDeviceName` · `TrailingDotOrSpace` · `Wildcard` · `ControlCharacter` · `EmptyComponent` · `Duplicate` · `CurrentDir` · `Empty` · `TooLong`.
+- **Windows 특유의 함정 3가지를 특히 다뤘다**:
+  - **예약 장치명**: `NUL`·`CON`·`COM1` 등은 파일을 만들지 않고 장치를 연다. payload 가 `NUL` 이면 교체가 **아무것도 쓰지 않고 성공한 것처럼 보인다**. 확장자 앞 stem 으로 판정하되(`CON.txt` 도 CON) **접두사 매칭이 아니라 정확 일치**다(`NULL.txt`·`COM10`·`console.html` 은 통과).
+  - **후행 점·공백**: Windows 가 조용히 잘라내므로 `a.` 와 `a` 가 같은 파일이 된다 — 두 항목이 **중복처럼 보이지 않으면서 충돌**할 수 있다.
+  - **대체 데이터 스트림**: `GNLinkHost.exe:hidden` 은 기존 파일 안에 보이지 않는 내용을 쓴다.
+- **구분자 양쪽 형태로 검사**: 정방향 슬래시를 접어 다시 검사한다. 한 형태에서는 무해해 보이고 다른 형태에서는 적대적인 이름이 **한쪽만 검사해서 통과하는 일**이 없게 했다.
+- **중복은 정돈 문제가 아니다**: 교체는 쓰기 전에 **모든 대상 파일을 먼저 옆으로 옮기므로**, 같은 이름이 두 번 있으면 두 번째 move-aside 가 **첫 번째의 백업을 덮어쓰고** 롤백이 **엉뚱한 바이트를 복원**한다. 대소문자·구분자 차이도 같은 파일로 본다(파일시스템이 그러므로).
+- **배선**: `UpdateEffectsConfig::validate()` 가 `check_payload_names()` 를 통과하지 못하면 **거부하고, 몇 번째 항목이 왜 거부됐는지 detail 에 남긴다.** `AcquireLock()` 이 validate 를 먼저 부르므로 **나쁜 이름이 하나라도 있으면 업데이트가 시작되지 않는다.**
+- **작성 중 발견한 자체 결함 1건**: 처음에는 성분을 `\` 로만 쪼개서 `ui/..\evil.exe` 를 `ui/..` 한 성분으로 보고 **`TrailingDotOrSpace` 로 거부**했다 — 거부는 맞지만 **이유가 틀렸다**. 진짜 traversal 을 겉치레 불평 뒤에 숨기는 형태라, **양쪽 구분자로 쪼개도록** 고쳤다. 테스트가 잡았다.
+- 검증 — **`qwinsta`: `console` 만 Active, `rdp-tcp` 는 `Listen` → RDP 미접속.**
+  - `remote60_payload_name_test` **54 checks / 0 failed**, exit 0. 제품이 실제로 쓰는 6종 통과 · traversal 7종(**혼합 구분자 포함**) · 절대·드라이브 상대 6종(UNC 포함) · NTFS 3종 · 예약 장치명 9종(**통과해야 하는 3종 포함**) · 형식 오류 9종 · 목록 5종(위치·사유 보고, 대소문자/구분자 다른 중복).
+  - 업데이트 관련 **8종 동시 재실행 전부 exit 0, 합계 498 checks / 0 failed**: version_compare 139 · manifest 41 · state_machine 57 · effects 98 · http 36 · registration 45 · check 28 · payload_name 54.
+  - **라이브 `GNLinkHost`(5156)·`GNLinkInputService`(10820)·`GNLinkStream`(19384) PID 불변.**
+- 미착수(패키지 계약 ① 본체와 나머지 조건): Setup 을 패키지 구성원으로 넣기(조건 3) · 버전 일관성 3중 검사(조건 4) · 회귀 3종(Setup 해시 불일치·잠김·후속 실패에서 **구 Setup 까지 롤백**, 조건 5) · 기존 Setup 실행 중 정책(조건 7) · 업데이터 `RegisterInstall` 배선 · `Relaunch`/`HealthCheck` production · 클라이언트 셸 시작 시 비동기 확인. **조건 1(자가 치유 표현 금지)·8(범위 밖)·9(원자성 표현)은 문서 작성 시 반영한다.**
+- 변경 파일: `apps/native_poc/src/payload_name.hpp`·`payload_name.cpp`·`payload_name_test.cpp`(신규) · `src/update_effects.hpp`·`update_effects.cpp` · `apps/native_poc/CMakeLists.txt` · `docs/history.md` · `docs/구현계획.md`.
+- 버전 인상·설치본 생성·설치·라이브 조작·서버 배포·push 없음.
+- 상태: 검증용 검사 대기. **전체 완료 아님.**

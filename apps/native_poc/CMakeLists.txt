@@ -596,6 +596,16 @@ if(MSVC)
   target_compile_options(remote60_install_registration_test PRIVATE /utf-8)
 endif()
 
+# Payload names from a manifest, and every shape of them that must not become a path.
+add_executable(remote60_payload_name_test
+  src/payload_name.cpp
+  src/payload_name_test.cpp
+)
+target_include_directories(remote60_payload_name_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_payload_name_test PRIVATE /utf-8)
+endif()
+
 # The production UpdateEffects, driven inside a temp directory.
 #
 # NOTE: src/update_process_targets.cpp is deliberately NOT in this target. That file is the only
@@ -603,6 +613,7 @@ endif()
 # cannot reach it even by mistake -- the symbols are not in the binary.
 add_executable(remote60_update_effects_test
   src/update_effects.cpp
+  src/payload_name.cpp
   src/update_state_machine.cpp
   src/update_manifest.cpp
   src/update_signature.cpp
