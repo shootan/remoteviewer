@@ -168,10 +168,14 @@ struct UpdateEffectsConfig {
    * running, it has the new files open, and the restore fails on exactly the files that matter.
    * Returns how many it stopped, for the log.
    *
+   * Returns false when something it started could not be stopped -- and a rollback then does NOT
+   * begin. Restoring files while something may still hold them leaves a half-restored
+   * installation, and the reason reads as the rollback's fault rather than as this.
+   *
    * Optional. Absent means nothing was started, which is true on every path that rolls back
    * before Relaunch.
    */
-  std::function<int()> releaseBeforeRollback;
+  std::function<bool()> releaseBeforeRollback;
 
   /**
    * The version the manifest claims. Checked against what the staged artifact carries.
@@ -192,6 +196,17 @@ struct UpdateEffectsConfig {
 
   /** How long Quiesce waits for the targets to go away before giving up. Never forces. */
   uint32_t quiesceTimeoutMs = 15000;
+
+  /**
+   * The names of every injected seam that nothing has filled in.
+   *
+   * Exists because of how the defects in this layer were found -- one at a time, each after a
+   * test had set a seam that production never set. A seam nobody wires is not a missing feature
+   * that shows up as a failure; it is a step that silently does not happen, which is why the
+   * manifest was never fetched and the liveness check never ran. Enumerating them turns "did
+   * anyone remember" into a question a caller can actually ask.
+   */
+  std::vector<std::string> unwired() const;
 
   /** False when anything required is missing. Reason goes to `detail` when given. */
   bool validate(std::string* detail = nullptr) const;
@@ -240,6 +255,8 @@ class WindowsUpdateEffects : public UpdateEffects {
 
   /** Last failure reason, for the log and for test messages. */
   const std::string& last_error() const { return lastError_; }
+  /** Backups that survived a commit, if any. Empty is the normal case. */
+  const std::vector<std::wstring>& orphaned_backups() const { return orphanedBackups_; }
 
  private:
   std::wstring staged_artifact_path() const;
@@ -265,6 +282,13 @@ class WindowsUpdateEffects : public UpdateEffects {
    * A rollback has to remove those too, or an abandoned update still changes the installation.
    */
   std::vector<std::wstring> placed_;
+  /**
+   * Backups that could not be deleted at commit time.
+   *
+   * Recorded because they used to vanish: the delete result was ignored and the list cleared, so
+   * a file that stayed beside the installation left no trace of itself anywhere.
+   */
+  std::vector<std::wstring> orphanedBackups_;
   /**
    * Directories this swap created under installDir, deepest last.
    *

@@ -644,6 +644,7 @@ endif()
 # cannot reach it even by mistake -- the symbols are not in the binary.
 add_executable(remote60_update_effects_test
   src/update_effects.cpp
+  src/update_process_identity.cpp
   src/payload_name.cpp
   src/update_registration_wiring.cpp
   src/install_registration.cpp
@@ -668,6 +669,7 @@ endif()
 # suite and the JavaScript and Kotlin manifest suites are reading the same bytes.
 add_executable(remote60_update_release_test
   src/update_effects.cpp
+  src/update_process_identity.cpp
   src/payload_name.cpp
   src/update_registration_wiring.cpp
   src/install_registration.cpp
@@ -699,6 +701,9 @@ add_executable(remote60_update_relaunch_test
   src/update_relaunch_plan.cpp
   src/update_health.cpp
   src/update_health_log.cpp
+  # The real identity comparison, not a stand-in. The liveness check decides whether to start
+  # something, and a test answering that question its own way would be testing its own answer.
+  src/update_process_identity.cpp
   src/update_relaunch_test.cpp
 )
 target_include_directories(remote60_update_relaunch_test PRIVATE src)
@@ -719,6 +724,7 @@ add_executable(remote60_updater
   src/update_job_guard.cpp
   src/update_state_machine.cpp
   src/update_effects.cpp
+  src/update_process_identity.cpp
   src/update_manifest.cpp
   src/update_signature.cpp
   src/update_http.cpp
@@ -770,6 +776,7 @@ add_executable(remote60_updater_scenarios_test
   src/updater_options.cpp
   src/update_state_machine.cpp
   src/update_effects.cpp
+  src/update_process_identity.cpp
   src/update_manifest.cpp
   src/update_signature.cpp
   src/update_http.cpp
@@ -804,6 +811,7 @@ add_executable(remote60_updater_assembly_test
   src/updater_options.cpp
   src/update_state_machine.cpp
   src/update_effects.cpp
+  src/update_process_identity.cpp
   src/update_manifest.cpp
   src/update_signature.cpp
   src/update_http.cpp

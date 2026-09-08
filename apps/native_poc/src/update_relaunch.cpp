@@ -120,6 +120,39 @@ std::vector<DWORD> pids_running_image(const std::wstring& path) {
   return pids;
 }
 
+/**
+ * Whether `target` is still the process it was when captured.
+ *
+ * The real answer, used whenever a caller does not supply one -- which in production is always.
+ * It used to default to "everything left", so this check existed only in tests: the code that
+ * shipped skipped it entirely, and the suites that covered it were covering a configuration
+ * nobody ran.
+ *
+ * A process that cannot be opened is NOT assumed gone. Access can be denied for reasons that have
+ * nothing to do with whether it is alive, and reading that as "exited" is what leads to starting
+ * a second copy of something that is still running.
+ */
+RelaunchConfig::Liveness real_liveness(const ProcessTarget& target) {
+  HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, target.pid);
+  if (!h) {
+    // ERROR_INVALID_PARAMETER is what a pid that no longer exists gives; anything else means the
+    // question could not be asked, which is a different answer.
+    const DWORD err = GetLastError();
+    return (err == ERROR_INVALID_PARAMETER) ? RelaunchConfig::Liveness::Exited
+                                            : RelaunchConfig::Liveness::Unknown;
+  }
+  const bool signalled = WaitForSingleObject(h, 0) == WAIT_OBJECT_0;
+  if (signalled) {
+    CloseHandle(h);
+    return RelaunchConfig::Liveness::Exited;
+  }
+  // Alive -- but is it the one that was captured? A pid can be reused, and stopping or skipping a
+  // stranger because it inherited a number is exactly what identity checking is for.
+  const bool same = process_identity_matches(h, target);
+  CloseHandle(h);
+  return same ? RelaunchConfig::Liveness::Running : RelaunchConfig::Liveness::Exited;
+}
+
 bool wait_for_service_state(SC_HANDLE service, DWORD wanted, uint32_t timeoutMs,
                             std::string* detail) {
   const DWORD deadline = GetTickCount() + timeoutMs;
@@ -275,7 +308,33 @@ RelaunchEffects make_relaunch_effects(RelaunchConfig config,
     bool marked = false;
     std::vector<RelaunchOutcome> outcomes;
     std::vector<ProcessTarget> stopped;
+    /**
+     * Handles for processes this attempt created, by image name.
+     *
+     * A handle IS ownership: it names one process for as long as it is held, which is precisely
+     * what a pid does not do. Kept so a rollback can stop what this attempt started without
+     * having to guess which pid is still the right one.
+     */
+    std::vector<std::pair<std::wstring, HANDLE>> ownedHandles;
     std::string healthDetail;
+
+    /**
+     * Every handle this attempt kept is released when the attempt is over.
+     *
+     * Not housekeeping. An open handle to a process that has ALREADY EXITED keeps the process
+     * object alive, and while that object is alive Windows still holds its image file -- so the
+     * file cannot be replaced or deleted, and it reports ACCESS_DENIED as if something were still
+     * running it. Nothing appears in a process snapshot, because nothing is running; the lock is
+     * held by the handle alone.
+     *
+     * Keeping the handles is what makes ownership provable, so this is the price of that, and it
+     * is paid here rather than left to whoever noticed a file that would not move.
+     */
+    ~Shared() {
+      for (const auto& owned : ownedHandles) {
+        if (owned.second) CloseHandle(owned.second);
+      }
+    }
   };
   auto shared = std::make_shared<Shared>();
   shared->config = std::move(config);
@@ -299,15 +358,33 @@ RelaunchEffects make_relaunch_effects(RelaunchConfig config,
       // the ordinary case when an attempt is abandoned after a waiting caller was released: some
       // of the product went and some did not, and having captured an identity says nothing about
       // whether that process has since exited.
-      if (shared->config.isStillRunning) {
+      {
+        // The supplied check, or the real one. There is no "skip this" branch any more: that
+        // branch was what production took, so the check shipped switched off.
+        const auto ask = shared->config.isStillRunning
+                             ? shared->config.isStillRunning
+                             : std::function<RelaunchConfig::Liveness(const ProcessTarget&)>(
+                                   real_liveness);
         bool alive = false;
+        bool unknown = false;
         for (const ProcessTarget& target : shared->stopped) {
           if (image_leaf_lower(target.imagePath) != image_leaf_lower(entry.imageName)) continue;
-          if (shared->config.isStillRunning(target)) alive = true;
+          const RelaunchConfig::Liveness answer = ask(target);
+          if (answer == RelaunchConfig::Liveness::Running) alive = true;
+          if (answer == RelaunchConfig::Liveness::Unknown) unknown = true;
         }
         if (alive) {
           outcome.alreadyRunning = true;
           outcome.detail = "still running -- nothing to bring back";
+          shared->outcomes.push_back(outcome);
+          continue;
+        }
+        if (unknown) {
+          // Neither started nor excused. Starting it might make two; not starting it might leave
+          // the machine down -- so it is reported as a failure and the caller decides, which for
+          // a required image means rolling back rather than declaring success.
+          outcome.livenessUnknown = true;
+          outcome.detail = "could not determine whether it is still running, so it was not started";
           shared->outcomes.push_back(outcome);
           continue;
         }
@@ -333,23 +410,52 @@ RelaunchEffects make_relaunch_effects(RelaunchConfig config,
         outcome.started = launch_via_shell(exePath, L"");
         if (outcome.started) {
           // Briefly: the shell hands off asynchronously, so the process may not exist yet.
-          for (int attempt = 0; attempt < 20 && outcome.startedPid == 0; ++attempt) {
+          std::vector<DWORD> appeared;
+          for (int attempt = 0; attempt < 20 && appeared.empty(); ++attempt) {
             for (DWORD pid : pids_running_image(exePath)) {
               if (std::find(before.begin(), before.end(), pid) == before.end()) {
-                outcome.startedPid = pid;
-                break;
+                appeared.push_back(pid);
               }
             }
-            if (outcome.startedPid == 0) Sleep(50);
+            if (appeared.empty()) Sleep(50);
+          }
+          // ONE new process running exactly this image, appearing between the snapshot and now.
+          // That is per-launch correlation, and it is the only basis on which this claims to own
+          // something the shell created. Two would mean the user started one at the same moment,
+          // and a rollback that terminated on a guess would be terminating a stranger's window --
+          // so ambiguity is left unowned, which later reads as "could not be stopped" and stops
+          // the rollback rather than proceeding on an assumption.
+          if (appeared.size() == 1) {
+            outcome.startedPid = appeared[0];
+            HANDLE h = OpenProcess(
+                SYNCHRONIZE | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                appeared[0]);
+            if (h) {
+              // Checked again through the handle. Between the snapshot and the open the pid could
+              // have been reused, and from here on the handle -- not the number -- is the
+              // identity, so this is the last moment the check can be made at all.
+              wchar_t image[MAX_PATH]{};
+              DWORD size = MAX_PATH;
+              if (QueryFullProcessImageNameW(h, 0, image, &size) &&
+                  _wcsicmp(image, exePath.c_str()) == 0) {
+                shared->ownedHandles.push_back({entry.imageName, h});
+              } else {
+                CloseHandle(h);
+              }
+            }
+          } else if (appeared.size() > 1) {
+            outcome.detail = "started, but more than one appeared -- not claimed as ours";
           }
         }
         // Not started, and deliberately not retried as a child of this process. Starting it here
         // would give it an administrator token it never had. That is a safe failure, not a
         // success, so it is recorded as a failure and the user is told.
-        outcome.detail = outcome.started
-                             ? "started in the user context"
-                             : "could not be started in the user context, and was NOT started "
-                               "elevated instead";
+        if (outcome.detail.empty()) {
+          outcome.detail = outcome.started
+                               ? "started in the user context"
+                               : "could not be started in the user context, and was NOT started "
+                                 "elevated instead";
+        }
       } else {
         STARTUPINFOW si{};
         si.cb = sizeof(si);
@@ -358,10 +464,11 @@ RelaunchEffects make_relaunch_effects(RelaunchConfig config,
         if (CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, FALSE, 0, nullptr,
                            shared->config.installDir.c_str(), &si, &pi)) {
           CloseHandle(pi.hThread);
-          CloseHandle(pi.hProcess);
+          // The handle is KEPT, not closed. It is the only proof of ownership there is -- while it
+          // is held the pid cannot be reused, so "this handle" and "the process we started" stay
+          // the same thing. Matching a pid to an image name later is not the same claim.
+          shared->ownedHandles.push_back({entry.imageName, pi.hProcess});
           outcome.started = true;
-          // Remembered so a rollback can stop what this attempt started before it tries to move
-          // the files those processes are holding open.
           outcome.startedPid = pi.dwProcessId;
           outcome.detail = "started";
         } else {
@@ -428,37 +535,44 @@ RelaunchEffects make_relaunch_effects(RelaunchConfig config,
   };
 
   effects.stopStarted = [shared]() {
-    // Only what THIS attempt started, identified by the pid it was handed at creation and checked
-    // against the image before anything is done to it. Nothing else on the machine is this
-    // function's business, and a pid alone is not an identity.
-    int stopped = 0;
-    for (RelaunchOutcome& outcome : shared->outcomes) {
-      if (!outcome.started || outcome.startedPid == 0) continue;
-      HANDLE h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
-                             FALSE, outcome.startedPid);
-      if (!h) {
-        // Cannot be opened: already gone, and there is nothing left to do about it.
-        outcome.startedPid = 0;
+    RelaunchEffects::StopReport report;
+    // Only processes this attempt created, identified by the handle it was given at creation.
+    for (auto& owned : shared->ownedHandles) {
+      if (!owned.second) continue;
+      if (WaitForSingleObject(owned.second, 0) == WAIT_OBJECT_0) {
+        // Already exited on its own.
+        CloseHandle(owned.second);
+        owned.second = nullptr;
         continue;
       }
-      wchar_t image[MAX_PATH]{};
-      DWORD size = MAX_PATH;
-      const bool named = QueryFullProcessImageNameW(h, 0, image, &size) != FALSE;
-      if (named && image_leaf_lower(image) == image_leaf_lower(outcome.imageName)) {
-        // Counted only when it actually ended. Reporting a stop for something still holding the
-        // files open would send a rollback into exactly the failure this call exists to prevent,
-        // and it would look like the rollback's fault.
-        if (TerminateProcess(h, 0) && WaitForSingleObject(h, 5000) == WAIT_OBJECT_0) {
-          ++stopped;
-          // Forgotten, so a second call does not count it again -- "nothing left to stop" is the
-          // answer then, and it should be visible as one.
-          outcome.startedPid = 0;
-        }
+      if (TerminateProcess(owned.second, 0) &&
+          WaitForSingleObject(owned.second, 5000) == WAIT_OBJECT_0) {
+        ++report.stopped;
+        CloseHandle(owned.second);
+        owned.second = nullptr;
+        continue;
       }
-      CloseHandle(h);
+      // Asked and it did not go. Reported, not assumed away -- a rollback that moved files now
+      // would be moving files something is still holding.
+      report.unstoppable.push_back(owned.first);
     }
-    return stopped;
+
+    // Anything started through the shell that could NOT be tied to one process. The shell creates
+    // it, so there is no handle to inherit; a handle is only claimed when exactly one process
+    // running exactly that image appeared between the before-snapshot and the after-snapshot. When
+    // that correlation did not hold -- nothing appeared, or several did -- there is no identity to
+    // act on, and killing by name would mean killing whatever else answers to it.
+    for (const RelaunchOutcome& outcome : shared->outcomes) {
+      if (outcome.kind != RelaunchKind::UserProcess || !outcome.started) continue;
+      bool owned = false;
+      for (const auto& pair : shared->ownedHandles) {
+        if (pair.first == outcome.imageName) owned = true;
+      }
+      if (!owned) report.unstoppable.push_back(outcome.imageName);
+    }
+    return report;
   };
+
   effects.lastOutcomes = [shared]() { return shared->outcomes; };
   effects.userNotice = [shared]() { return relaunch_user_notice(shared->outcomes); };
   effects.lastHealthDetail = [shared]() { return shared->healthDetail; };

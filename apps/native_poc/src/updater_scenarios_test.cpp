@@ -117,34 +117,46 @@ std::vector<std::pair<std::wstring, DWORD>> running_under(const std::wstring& di
   entry.dwSize = sizeof(entry);
   if (Process32FirstW(snapshot, &entry)) {
     do {
-      HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
-      if (!h) continue;
-      wchar_t image[MAX_PATH]{};
-      DWORD size = MAX_PATH;
-      if (QueryFullProcessImageNameW(h, 0, image, &size)) {
-        // Matched on the FILE NAME, not on a path prefix. A path can come back in short (8.3)
-        // form or with different case depending on how the process was started -- and a
-        // shell-routed launch is exactly the case where it does -- so a prefix comparison misses
-        // processes that are certainly ours. The two names this test uses appear nowhere else on
-        // a machine, which is what makes the narrower comparison safe.
-        const std::wstring path = image;
-        const size_t slash = path.find_last_of(L"\/");
-        const std::wstring leaf = (slash == std::wstring::npos) ? path : path.substr(slash + 1);
-        (void)dir;
-        // A PREFIX match, not an exact one. A swap renames the file it is replacing to
-        // `<name>.gnlink-old`, and a process that was running it keeps running from the renamed
-        // file -- so its image leaf is no longer the name it started as. Matching exactly missed
-        // exactly those, they held their backups alive, and the NEXT scenario could not move its
-        // own file aside. That looked like a swap defect for a long time.
-        const auto starts_with = [&leaf](const wchar_t* name) {
-          const size_t n = wcslen(name);
-          return leaf.size() >= n && _wcsnicmp(leaf.c_str(), name, n) == 0;
-        };
-        if (starts_with(kHostName) || starts_with(kClientName)) {
-          found.push_back({path, entry.th32ProcessID});
+      // Identified from the SNAPSHOT, with no OpenProcess.
+      //
+      // This used to open each process to read its full image path, and skip any it could not
+      // open -- which turned out to be exactly the processes it existed to stop. They were listed
+      // in the snapshot by name the whole time; the sweep simply could not see them, reported
+      // nothing running, and left them holding their images. The next scenario then could not
+      // write its starting bytes, and failed an assertion about bytes with no process visible
+      // anywhere to explain it.
+      //
+      // A prefix match on the name, because a swap renames what it replaces to
+      // `<name>.gnlink-old` and a process running that file keeps running under the new name.
+      // These two names appear nowhere else on a machine, which is what makes a name enough.
+      const std::wstring leaf = entry.szExeFile;
+      const auto starts_with = [&leaf](const wchar_t* name) {
+        const size_t n = wcslen(name);
+        return leaf.size() >= n && _wcsnicmp(leaf.c_str(), name, n) == 0;
+      };
+      if (!starts_with(kHostName) && !starts_with(kClientName)) continue;
+      // Scoped by directory when the directory can be established, and INCLUDED when it cannot.
+      //
+      // The path needs a handle, and a process this cannot open is precisely the one that was
+      // being missed -- so an unreadable path is not grounds for leaving something alone. It is
+      // the other way round: known-elsewhere is the only reason to skip. Scenario 6 relies on
+      // that, running a stub under the same name outside the install directory so the sweep
+      // leaves it to be the process that will not quiesce.
+      bool mine = true;
+      if (!dir.empty()) {
+        HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
+        if (h) {
+          wchar_t image[MAX_PATH]{};
+          DWORD size = MAX_PATH;
+          if (QueryFullProcessImageNameW(h, 0, image, &size)) {
+            const std::wstring path = image;
+            mine = path.size() >= dir.size() &&
+                   _wcsnicmp(path.c_str(), dir.c_str(), dir.size()) == 0;
+          }
+          CloseHandle(h);
         }
       }
-      CloseHandle(h);
+      if (mine) found.push_back({leaf, entry.th32ProcessID});
     } while (Process32NextW(snapshot, &entry));
   }
   CloseHandle(snapshot);
@@ -156,11 +168,23 @@ void stop_everything_under(const std::wstring& dir) {
   // Swept repeatedly, because a shell-routed launch hands off asynchronously: a process started
   // moments ago may not be visible on the first pass, and one missed here holds a file open in
   // the NEXT scenario -- which looks like that scenario's swap failing, and is not.
-  for (int pass = 0; pass < 40; ++pass) {
+  // EIGHT consecutive empty passes -- 1.6 seconds of seeing nothing -- not two.
+  //
+  // Two was not enough and the shortfall was cumulative. A shell-routed launch hands off through
+  // explorer, and the process can appear more than half a second after the launch returned; the
+  // sweep saw two empty passes, stopped looking, and the client turned up immediately after. It
+  // then held its own image for the rest of the test process, so the next scenario could not
+  // write its starting bytes and failed an assertion about bytes -- and the one after that
+  // inherited another one. Four of them were still running when the suite finished.
+  int emptyPasses = 0;
+  for (int pass = 0; pass < 60; ++pass) {
     const auto found = running_under(dir);
-    // Two consecutive empty passes, not one: a shell-routed launch hands off asynchronously, so
-    // a single empty look is not evidence that nothing is coming.
-    if (found.empty() && pass > 1) return;
+    if (found.empty()) {
+      if (++emptyPasses >= 8) return;
+      Sleep(200);
+      continue;
+    }
+    emptyPasses = 0;
     for (const auto& pair : found) {
       HANDLE h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pair.second);
       if (!h) continue;
@@ -276,13 +300,56 @@ int main() {
   clientTarget.imagePath = install + L"\\" + kClientName;
 
   const auto seed = [&]() {
-    write_file(install + L"\\" + kHostName, oldBody);
-    write_file(install + L"\\" + kClientName, oldBody);
-    // After the sweep above, nothing is running from these, so they really can go. A backup left
-    // behind blocks the next move-aside and the swap fails for a reason that has nothing to do
-    // with the scenario.
-    DeleteFileW((install + L"\\" + kHostName + L".gnlink-old").c_str());
-    DeleteFileW((install + L"\\" + kClientName + L".gnlink-old").c_str());
+    // The backups go FIRST, and the wait is the point.
+    //
+    // A leftover `<name>.gnlink-old` blocks the next move-aside -- the swap replaces it, and a
+    // file that will not delete will not be replaced either -- so the scenario after it fails for
+    // a reason that has nothing to do with what it tests. That is not hypothetical: scenarios 3
+    // through 6 failed exactly this way, reporting "the old bytes are back" and "nothing on disk
+    // changed", while the actual cause was one file left over from scenario 2.
+    //
+    // The delete is retried because the lock is released on its own, just not immediately, and
+    // ignoring the result is what turned a few seconds of waiting into four misleading failures.
+    for (const std::wstring& name : {kHostName, kClientName}) {
+      const std::wstring backup = install + L"\\" + name + L".gnlink-old";
+      for (int attempt = 0; attempt < 20; ++attempt) {
+        if (DeleteFileW(backup.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND) break;
+        // A file that will not go is a file something is running. Sweeping again is the answer,
+        // because the thing running it is a shell-routed launch that appeared after the previous
+        // sweep had already stopped looking -- waiting alone never clears it.
+        stop_everything_under(install);
+      }
+      // Said out loud rather than left to become the next scenario's failure.
+      check("the previous scenario left nothing that blocks this one",
+            GetFileAttributesW(backup.c_str()) == INVALID_FILE_ATTRIBUTES, narrow(backup));
+    }
+    // Written, and then READ BACK.
+    //
+    // write_file cannot overwrite a file something is still running, and it said nothing when it
+    // failed -- so a scenario could begin on the previous one's bytes and then fail an assertion
+    // about bytes, which is what "3 both fail: the old bytes are back" was really reporting. The
+    // starting state is either established or said out loud; it is never assumed.
+    for (const std::wstring& name : {kHostName, kClientName}) {
+      const std::wstring path = install + L"\\" + name;
+      for (int attempt = 0; attempt < 20; ++attempt) {
+        write_file(path, oldBody);
+        if (read_file(path) == oldBody) break;
+        // Same reason as above: the file cannot be overwritten because a process launched by the
+        // previous scenario is running it, and it turned up after that scenario's final sweep.
+        stop_everything_under(install);
+      }
+      std::string who;
+      for (const auto& pair : running_under(install)) {
+        who += narrow(pair.first) + "#" + std::to_string(pair.second) + " ";
+      }
+      HANDLE probe = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                                 FILE_ATTRIBUTE_NORMAL, nullptr);
+      const DWORD openErr = (probe == INVALID_HANDLE_VALUE) ? GetLastError() : 0;
+      if (probe != INVALID_HANDLE_VALUE) CloseHandle(probe);
+      check("this scenario starts from the old bytes", read_file(path) == oldBody,
+            narrow(name) + " is " + std::to_string(read_file(path).size()) +
+                " bytes; open-for-write said " + std::to_string(openErr) + "; running: " + who);
+    }
     DeleteFileW(log.c_str());
   };
 
@@ -313,6 +380,16 @@ int main() {
 
   struct Result {
     UpdateOutcome outcome;
+    /**
+     * Seams the production assembly left empty. Asserted per scenario rather than once, because
+     * the post-manifest half of the assembly is built inside run() -- a single check before any
+     * run would not have seen the half where the defects actually were.
+     */
+    std::vector<std::string> unwired;
+    /** Backups the commit could not delete. The unexplained .gnlink-old, now named. */
+    std::vector<std::wstring> orphaned;
+    /** Image leaves of everything still running out of the install directory when the run ended. */
+    std::vector<std::wstring> runningLeaves;
     std::string log;
     std::string effectsError;
     /** How many processes are running each payload image afterwards. */
@@ -365,7 +442,10 @@ int main() {
       RelaunchConfig live = config;
       // Nothing is "still running" in these scenarios except where a knob says the stop did not
       // complete -- Quiesce failing is exactly the case where some of it is still there.
-      live.isStillRunning = [knobs](const ProcessTarget&) { return !knobs.quiesceOk; };
+      live.isStillRunning = [knobs](const ProcessTarget&) {
+        return knobs.quiesceOk ? RelaunchConfig::Liveness::Exited
+                               : RelaunchConfig::Liveness::Running;
+      };
       RelaunchEffects real = make_relaunch_effects(live, stopped, table);
 
       RelaunchEffects wrapped = real;
@@ -416,6 +496,8 @@ int main() {
     Result r;
     r.outcome = outcome;
     r.effectsError = effects.last_effects_error();
+    r.unwired = effects.unwired_seams();
+    r.orphaned = effects.orphaned_backups();
     for (const std::string& line : *logs) {
       if (!r.log.empty()) r.log += " | ";
       r.log += line;
@@ -431,6 +513,7 @@ int main() {
     // asynchronously, so the pid is sometimes not known when the launch returns -- and what the
     // assertions want is "how many of it are running", not "did we manage to note it down".
     for (const auto& pair : running_under(install)) {
+      r.runningLeaves.push_back(pair.first);
       if (pair.first.find(kHostName) != std::wstring::npos) ++r.hostInstances;
       if (pair.first.find(kClientName) != std::wstring::npos) ++r.clientInstances;
     }
@@ -439,9 +522,67 @@ int main() {
     // is holding open. Without this a leftover process makes the NEXT scenario fail its swap,
     // which is what happened and looked like a defect in the swap.
     stop_everything_under(install);
+
+    // Every seam the production assembly is supposed to fill. Not a count and not a total: the
+    // list is empty or it names what nobody wired.
+    {
+      std::string names;
+      for (const std::string& name : r.unwired) {
+        if (!names.empty()) names += ", ";
+        names += name;
+      }
+      check("production wires every injected seam", r.unwired.empty(), names);
+    }
+
+    // A backup that outlives a committed update is either deleted or named. It used to be
+    // neither: the delete result was thrown away and the list cleared, so a surviving
+    // .gnlink-old was indistinguishable from one that had been removed -- which is why a client
+    // backup kept turning up here with no explanation available anywhere in the code.
+    const bool committed = r.outcome.result == UpdateResult::Updated ||
+                           r.outcome.result == UpdateResult::UpdatedButNotRelaunched;
+    if (committed) {
+      const auto named = [&r](const std::wstring& image) {
+        for (const std::wstring& name : r.orphaned) {
+          if (name == image) return true;
+        }
+        return false;
+      };
+      std::string detail;
+      for (const std::wstring& name : r.orphaned) detail += narrow(name) + " ";
+      check("a surviving host backup is named, not silent",
+            !r.hostBackupLeft || named(kHostName), detail);
+      check("a surviving client backup is named, not silent",
+            !r.clientBackupLeft || named(kClientName), detail);
+      // And the other direction: nothing is reported as left behind that is not actually there.
+      // Without this the two checks above would also pass if every commit named everything.
+      check("nothing is reported as left behind unless it really is",
+            (!named(kHostName) || r.hostBackupLeft) &&
+                (!named(kClientName) || r.clientBackupLeft),
+            detail);
+
+      // And the reason, as far as it is known. A surviving backup is recorded WITH the error the
+      // delete returned, because "it did not delete" cannot be acted on and "it returned 5" can.
+      //
+      // What that 5 means here is not settled. ACCESS_DENIED on a plain archive file (attrs 32)
+      // is what Windows returns for a running image -- but no process is running this one at the
+      // moment the snapshot is taken, and a second of retries does not clear it. The obvious
+      // explanation, that something exited and the image section had not been released yet, does
+      // not survive the retry. So the assertion is about what is recorded, not about a cause
+      // nobody has established; the open question is in the ledger rather than hidden in a check
+      // that would have to be written vaguely enough to pass.
+      for (const std::wstring& name : r.orphaned) {
+        check("a surviving backup carries the reason the delete failed",
+              r.effectsError.find(narrow(name)) != std::string::npos &&
+                  r.effectsError.find("error ") != std::string::npos,
+              r.effectsError);
+      }
+    }
     return r;
   };
 
+  // Asserted for every scenario below, from inside the runner, so a seam that production stops
+  // wiring is caught by whichever scenario runs first rather than by nobody.
+  //
   // ================================================================ 1. the host does not come back
 
   {

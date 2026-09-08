@@ -72,7 +72,20 @@ class FakeEffects : public UpdateEffects {
    * thing that did not come back was one it needs.
    */
   RelaunchVerdict relaunchVerdict = RelaunchVerdict::AllBack;
+  /**
+   * What the relaunch of the RESTORED build reports, when it differs. Absent means the same
+   * verdict -- fine for most cases, but a test that wants to see a clean RolledBack after a new
+   * build failed needs the second attempt to succeed where the first did not.
+   */
+  const RelaunchVerdict* relaunchAfterRollback = nullptr;
   bool healthOk = true;
+  /**
+   * What health says about the RESTORED build, when that differs from what it said about the new
+   * one. -1 means "the same answer", which is what every case wanted until a case needed the new
+   * build to be unhealthy and the old one fine -- the two are different questions asked of
+   * different installations, and one bool could not tell them apart.
+   */
+  int healthAfterRollback = -1;
   bool rollbackOk = true;
   std::string installed = "0.2.104";
   std::string document = kDocument;
@@ -114,10 +127,17 @@ class FakeEffects : public UpdateEffects {
   bool Swap() override { calls.push_back("Swap"); return swapOk; }
   bool RegisterInstall() override { calls.push_back("RegisterInstall"); return registerOk; }
   RelaunchVerdict Relaunch() override {
+    const bool restored = ran("Rollback");
     calls.push_back("Relaunch");
+    if (restored && relaunchAfterRollback) return *relaunchAfterRollback;
     return relaunchVerdict;
   }
-  bool HealthCheck() override { calls.push_back("HealthCheck"); return healthOk; }
+  bool HealthCheck() override {
+    const bool restored = ran("Rollback");
+    calls.push_back("HealthCheck");
+    if (restored && healthAfterRollback >= 0) return healthAfterRollback != 0;
+    return healthOk;
+  }
   bool Rollback() override { calls.push_back("Rollback"); return rollbackOk; }
   void Commit() override { calls.push_back("Commit"); ++commitCount; }
 };
@@ -126,6 +146,16 @@ std::string joined(const std::vector<std::string>& v) {
   std::string s;
   for (const auto& c : v) { if (!s.empty()) s += ","; s += c; }
   return s;
+}
+
+/** Whether `first` ran before `second`. Both must have run. */
+bool ran_before(const FakeEffects& f, const std::string& first, const std::string& second) {
+  int a = -1, b = -1;
+  for (size_t i = 0; i < f.calls.size(); ++i) {
+    if (a < 0 && f.calls[i] == first) a = static_cast<int>(i);
+    if (b < 0 && f.calls[i] == second) b = static_cast<int>(i);
+  }
+  return a >= 0 && b >= 0 && a < b;
 }
 
 /** Shorthand for "the destructive steps never ran". */
@@ -303,6 +333,52 @@ int main() {
     check("...and it is committed, because it is not going back", f.commitCount == 1,
           std::to_string(f.commitCount));
     check("...and no rollback happened", !f.ran("Rollback"));
+    // The order, not just the outcome. This branch used to commit without health having been
+    // asked at all, so "committed" was true here for the wrong reason and the case below could
+    // not exist.
+    check("...and health was asked BEFORE the backups were dropped",
+          ran_before(f, "HealthCheck", "Commit"), joined(f.calls));
+  }
+  {
+    // Host launched-but-unhealthy + client launch fails.
+    //
+    // The two halves are individually harmless and together were a trap. The relaunch reports
+    // OptionalMissing because the client did not come back -- which on its own is not worth
+    // undoing an install for. But the host DID launch, so the verdict says nothing is missing
+    // that the machine needs, and the host then failed to come up. The old order committed on the
+    // optional verdict alone, deleted the backups, and reported a partial success for a machine
+    // that was not reachable and had nothing left to go back to.
+    //
+    // "Required started" is not "required healthy": CreateProcess returning tells you a process
+    // exists, and health is the only thing that asks whether the product is answering.
+    FakeEffects f;
+    f.relaunchVerdict = RelaunchVerdict::OptionalMissing;
+    f.healthOk = false;             // the host came up and is not answering
+    f.healthAfterRollback = 1;      // the version it goes back to is fine
+    const RelaunchVerdict backUp = RelaunchVerdict::AllBack;
+    f.relaunchAfterRollback = &backUp;  // and it comes back complete
+    const UpdateOutcome o = run_update(f, accepting(), "windows");
+    check("unhealthy host + missing client -> rolled back, not a partial success",
+          o.result == UpdateResult::RolledBack, result_name(o.result));
+    check("...and NOT reported as UpdatedButNotRelaunched",
+          o.result != UpdateResult::UpdatedButNotRelaunched, result_name(o.result));
+    check("...and the backups were never dropped", f.commitCount == 0,
+          std::to_string(f.commitCount));
+    check("...and the rollback actually ran", f.ran("Rollback"), joined(f.calls));
+    check("...and health was asked before anything was decided",
+          ran_before(f, "HealthCheck", "Rollback"), joined(f.calls));
+  }
+  {
+    // The counter-control for the case above: same missing client, host healthy. If the new order
+    // simply rolled back whenever something was missing, this would fail -- so the two together
+    // say health is what decides, not the verdict.
+    FakeEffects f;
+    f.relaunchVerdict = RelaunchVerdict::OptionalMissing;
+    f.healthOk = true;
+    const UpdateOutcome o = run_update(f, accepting(), "windows");
+    check("healthy host + missing client -> the install still stands",
+          o.result == UpdateResult::UpdatedButNotRelaunched, result_name(o.result));
+    check("...and it did not roll back", !f.ran("Rollback"), joined(f.calls));
   }
   {
     FakeEffects f;
@@ -432,7 +508,11 @@ int main() {
           o.result == UpdateResult::UpdatedButNotRelaunched, result_name(o.result));
     check("relaunch fails -> does NOT roll a good install back", !f.ran("Rollback"),
           joined(f.calls));
-    check("relaunch fails -> health is not claimed", !o.entered(UpdateState::Health));
+    // This required the OPPOSITE, and it was protecting the defect above: it said that when
+    // something optional did not come back, health was never asked. That was true, and it was the
+    // bug -- the machine's own health went unexamined and the backups were dropped anyway.
+    check("relaunch fails -> health IS asked, because the install is being kept",
+          o.entered(UpdateState::Health), joined(f.calls));
     check("relaunch fails -> staging still cleaned up", f.discardCount == 1,
           std::to_string(f.discardCount));
     check("relaunch fails -> still committed (this outcome does not roll back)",

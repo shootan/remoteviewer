@@ -68,6 +68,24 @@ bool file_exists(const std::wstring& path) {
 
 }  // namespace
 
+std::vector<std::string> UpdateEffectsConfig::unwired() const {
+  // Every std::function on this struct, by name. The list is here rather than at a call site so
+  // that adding a seam and forgetting to wire it is one edit away from being reported, instead of
+  // depending on someone noticing at the point where it would have been used.
+  std::vector<std::string> missing;
+  if (!fetchManifest) missing.push_back("fetchManifest");
+  if (!fetchArtifact) missing.push_back("fetchArtifact");
+  if (!enumerateTargets) missing.push_back("enumerateTargets");
+  if (!requestStop) missing.push_back("requestStop");
+  if (!captureRegistration) missing.push_back("captureRegistration");
+  if (!registerInstall) missing.push_back("registerInstall");
+  if (!restoreRegistration) missing.push_back("restoreRegistration");
+  if (!relaunch) missing.push_back("relaunch");
+  if (!healthCheck) missing.push_back("healthCheck");
+  if (!releaseBeforeRollback) missing.push_back("releaseBeforeRollback");
+  return missing;
+}
+
 bool UpdateEffectsConfig::validate(std::string* detail) const {
   const auto fail = [detail](const char* why) {
     if (detail) *detail = why;
@@ -457,9 +475,29 @@ bool WindowsUpdateEffects::Swap() {
     const std::wstring live = install_path(name);
     if (!file_exists(live)) continue;  // a file that is not there does not need a backup
     const std::wstring backup = backup_path(name);
-    DeleteFileW(backup.c_str());
+    // A backup from an earlier update may still be sitting on this name. Normally it deletes and
+    // the question does not arise; when it will not, the whole update used to stop here -- a file
+    // that is only litter blocking the next release from being installed at all.
+    //
+    // So it is moved out of the name instead. RENAMING a file nothing can delete is allowed --
+    // that asymmetry is the reason the swap works this way at all, since it renames images that
+    // are running -- and it costs one more piece of litter to keep the update possible. The
+    // survivor is recorded, not forgotten, for the same reason the commit records its own.
+    if (!DeleteFileW(backup.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND) {
+      for (int n = 1; n <= 50; ++n) {
+        const std::wstring aside = backup + L"." + std::to_wstring(n);
+        if (GetFileAttributesW(aside.c_str()) != INVALID_FILE_ATTRIBUTES) continue;
+        if (MoveFileExW(backup.c_str(), aside.c_str(), 0)) {
+          orphanedBackups_.push_back(name);
+          lastError_ = "an older backup of " + to_utf8(name) +
+                       " could not be deleted and was moved to " + to_utf8(aside);
+        }
+        break;
+      }
+    }
     if (!MoveFileExW(live.c_str(), backup.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-      lastError_ = "could not move aside " + to_utf8(name);
+      lastError_ = "could not move aside " + to_utf8(name) + " (error " +
+                   std::to_string(GetLastError()) + ")";
       (void)Rollback();
       return false;
     }
@@ -495,11 +533,12 @@ bool WindowsUpdateEffects::Rollback() {
   // attempt started is unhealthy, that something is running and holding the new files open --
   // and the restore would fail on precisely the files it exists to restore. Only what this
   // attempt started, identified by more than a pid; nothing else on the machine is ours to stop.
-  if (config_.releaseBeforeRollback) {
-    const int stopped = config_.releaseBeforeRollback();
-    if (stopped > 0) {
-      lastError_ = "stopped " + std::to_string(stopped) + " process(es) started by this attempt";
-    }
+  if (config_.releaseBeforeRollback && !config_.releaseBeforeRollback()) {
+    // Refused before a single file moves. Everything stays exactly as it is -- the backups, the
+    // placed files, the registration -- because a partial restore is worse than none and leaves
+    // nothing to try again from. The caller reports this as a rollback that did not happen.
+    lastError_ = "not rolling back: something this attempt started could not be stopped";
+    return false;
   }
   // Remove whatever was placed, then put back exactly the files that were moved aside. Files that
   // were never moved are left alone -- restoring something that was not backed up would be
@@ -557,10 +596,43 @@ bool WindowsUpdateEffects::RegisterInstall() {
 
 void WindowsUpdateEffects::Commit() {
   // The update is not going to be rolled back, so the way back is no longer needed.
+  //
+  // The result of each delete is READ. It was not, and the list was cleared regardless, so a
+  // backup that could not be removed was forgotten twice over: the file stayed beside the
+  // installation and nothing recorded that it had. That is the mechanism behind a stale
+  // .gnlink-old nobody could explain.
+  std::vector<std::wstring> stuck;
+  std::vector<DWORD> reasons;
   for (const std::wstring& name : movedAside_) {
-    DeleteFileW(backup_path(name).c_str());
+    const std::wstring backup = backup_path(name);
+    // Not retried. It was, for a second, and it changed nothing -- the failure below is not the
+    // transient "the image section has not been released yet" that a retry would clear. What the
+    // second did do was slow every commit down and shift the timing of the scenarios around it,
+    // which is a cost paid for no result.
+    if (DeleteFileW(backup.c_str())) continue;
+    const DWORD why = GetLastError();
+    if (why == ERROR_FILE_NOT_FOUND) continue;  // already gone is the desired state
+    stuck.push_back(name);
+    reasons.push_back(why);
   }
   movedAside_.clear();
+  orphanedBackups_ = stuck;
+  if (!stuck.empty()) {
+    std::string names;
+    for (size_t i = 0; i < stuck.size(); ++i) {
+      if (!names.empty()) names += ", ";
+      // The error code, because "it did not delete" and "why it did not delete" are different
+      // facts and only the second one can be acted on. 32 is a sharing violation -- something has
+      // it open; 5 is access denied -- typically a process is RUNNING it.
+      const DWORD attrs = GetFileAttributesW(backup_path(stuck[i]).c_str());
+      names += to_utf8(stuck[i]) + " (error " + std::to_string(reasons[i]) + ", attrs " +
+               std::to_string(attrs) + ")";
+    }
+    // Not a failure of the update -- the files on disk are correct -- but litter that a person
+    // should be able to find out about, and that a later attempt will trip over when it tries to
+    // move a file aside onto a name that is already taken.
+    lastError_ = "backups left behind after commit: " + names;
+  }
 }
 
 RelaunchVerdict WindowsUpdateEffects::Relaunch() {
@@ -579,51 +651,12 @@ bool WindowsUpdateEffects::HealthCheck() {
   return true;
 }
 
-// ---------------------------------------------------------------- process identity
-
-namespace {
-
-uint64_t creation_time_of(HANDLE process) {
-  FILETIME created{}, exited{}, kernel{}, user{};
-  if (!GetProcessTimes(process, &created, &exited, &kernel, &user)) return 0;
-  ULARGE_INTEGER v{};
-  v.LowPart = created.dwLowDateTime;
-  v.HighPart = created.dwHighDateTime;
-  return v.QuadPart;
-}
-
-std::wstring image_path_of(HANDLE process) {
-  wchar_t buffer[MAX_PATH * 2]{};
-  DWORD size = static_cast<DWORD>(std::size(buffer));
-  if (!QueryFullProcessImageNameW(process, 0, buffer, &size)) return {};
-  return std::wstring(buffer, size);
-}
-
-}  // namespace
-
-bool capture_process_identity(uint32_t pid, ProcessTarget* out) {
-  if (!out) return false;
-  HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-  if (!h) return false;
-  out->pid = pid;
-  out->creationTime = creation_time_of(h);
-  out->imagePath = image_path_of(h);
-  CloseHandle(h);
-  // A creation time of zero would make every later comparison vacuous, so it is treated as a
-  // failure to identify rather than as an identity.
-  return out->creationTime != 0;
-}
-
-bool process_identity_matches(void* handle, const ProcessTarget& target) {
-  HANDLE h = static_cast<HANDLE>(handle);
-  if (!h) return false;
-  if (target.creationTime == 0) return false;  // nothing to compare against
-  if (creation_time_of(h) != target.creationTime) return false;
-  // The creation time alone is already decisive in practice; the path is compared too because it
-  // costs nothing and makes a deliberately crafted collision harder.
-  if (!target.imagePath.empty() && image_path_of(h) != target.imagePath) return false;
-  return true;
-}
+// Process identity lives in update_process_identity.cpp.
+//
+// It moved because update_relaunch.cpp needs to ask "is this still the process I captured?" and
+// linking all of this file into that test to get one comparison would have dragged the whole file
+// and registry layer in with it. What actually happened first was worse: rather than link it, the
+// liveness check was left unwired.
 
 // ---------------------------------------------------------------- file helpers
 

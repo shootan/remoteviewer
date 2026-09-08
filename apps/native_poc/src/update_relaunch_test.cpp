@@ -684,7 +684,7 @@ int main() {
       DeleteFileW(witness.c_str());
       RelaunchConfig c = base();
       // As if the host were still up: it was captured, but it is there.
-      c.isStillRunning = [](const ProcessTarget&) { return true; };
+      c.isStillRunning = [](const ProcessTarget&) { return RelaunchConfig::Liveness::Running; };
       RelaunchEffects e = make_relaunch_effects(c, {stopped_dummy(L"DummyHost.cmd", 100)},
                                                 dummies);
       const RelaunchVerdict verdict = e.relaunch();
@@ -703,7 +703,7 @@ int main() {
       // The control. Without it, "not started" above could be what happens to everything.
       DeleteFileW(witness.c_str());
       RelaunchConfig c = base();
-      c.isStillRunning = [](const ProcessTarget&) { return false; };
+      c.isStillRunning = [](const ProcessTarget&) { return RelaunchConfig::Liveness::Exited; };
       RelaunchEffects e = make_relaunch_effects(c, {stopped_dummy(L"DummyHost.cmd", 100)},
                                                 dummies);
       e.relaunch();
@@ -779,11 +779,16 @@ int main() {
 
         // The assertion that matters, and an exact count rather than ">= 0" -- which is what the
         // first version compared and is true of everything.
-        const int stopped = e.stopStarted();
-        check("E12: exactly the one process this attempt started is stopped", stopped == 1,
-              std::to_string(stopped));
+        const RelaunchEffects::StopReport stopped = e.stopStarted();
+        check("E12: exactly the one process this attempt started is stopped", stopped.stopped == 1,
+              std::to_string(stopped.stopped));
+        // It was stopped through the handle received at creation, so nothing is left in doubt and
+        // a rollback is allowed to proceed. This is the half of the report the rollback reads.
+        check("E12: and nothing is left unaccounted for, so a rollback may proceed",
+              stopped.complete());
+        const RelaunchEffects::StopReport again = e.stopStarted();
         check("E12: and a second call stops nothing, because there is nothing left",
-              e.stopStarted() == 0);
+              again.stopped == 0 && again.complete());
 
         // And it really is gone, not merely reported as stopped.
         if (!outcomes.empty() && outcomes[0].startedPid != 0) {
@@ -800,7 +805,9 @@ int main() {
       // if it is recorded. Nothing else on the machine is this function's business.
       RelaunchEffects e = make_relaunch_effects(base(), {}, dummies);
       e.relaunch();
-      check("E12: with nothing started, nothing is stopped", e.stopStarted() == 0);
+      const RelaunchEffects::StopReport none = e.stopStarted();
+      check("E12: with nothing started, nothing is stopped",
+            none.stopped == 0 && none.complete());
     }
 
     // -------------------------------------------------------------- E7: the service failure path

@@ -352,9 +352,16 @@ UpdateOutcome UpdaterEffects::run(const std::string& platform) {
     return verdict;
   };
   // Wired to the same relaunch effects, so what is stopped is exactly what they started.
-  config.releaseBeforeRollback = [relaunchEffects]() {
-    if (!relaunchEffects->stopStarted) return 0;
-    return relaunchEffects->stopStarted();
+  config.releaseBeforeRollback = [deps, relaunchEffects]() {
+    if (!relaunchEffects->stopStarted) return true;  // nothing was started, nothing to stop
+    const RelaunchEffects::StopReport report = relaunchEffects->stopStarted();
+    for (const std::wstring& name : report.unstoppable) {
+      deps.log("could not stop " + to_utf8(name) + " -- it was started by this attempt but there "
+               "is no proof of ownership, or it did not exit");
+    }
+    // False stops the rollback before it touches a file. Restoring while something may still hold
+    // the files produces a half-restored installation, and the reason looks like the rollback.
+    return report.complete();
   };
   config.healthCheck = [deps, relaunchEffects]() {
     if (!relaunchEffects->healthCheck) return false;
@@ -362,6 +369,28 @@ UpdateOutcome UpdaterEffects::run(const std::string& platform) {
     if (relaunchEffects->lastHealthDetail) deps.log("health: " + relaunchEffects->lastHealthDetail());
     return ok;
   };
+
+  // Nothing runs until every seam is filled. This is the check that would have caught the manifest
+  // fetch that was never wired and the version that never reached registration: both were
+  // assembled, both were exercised through a config a TEST had filled in, and production shipped
+  // with the field empty. An unwired seam is not a failure -- it is a step that quietly does not
+  // happen, which is far harder to see.
+  {
+    const std::vector<std::string> missing = config.unwired();
+    unwiredSeams_ = missing;
+    if (!missing.empty()) {
+      std::string names;
+      for (const std::string& name : missing) {
+        if (!names.empty()) names += ", ";
+        names += name;
+      }
+      deps_.log("refusing to run: these are not wired -- " + names);
+      UpdateOutcome broken;
+      broken.result = UpdateResult::AbandonedBeforeSwap;
+      broken.detail = "the updater was not fully assembled: " + names;
+      return broken;
+    }
+  }
 
   WindowsUpdateEffects effects(config);
   effects.set_installed_version(options_.installedVersion);
@@ -376,6 +405,11 @@ UpdateOutcome UpdaterEffects::run(const std::string& platform) {
   const UpdateOutcome outcome = run_update(signaller, deps_.verifier, platform);
   verifiedVersion_ = *versionToInstall;
   lastEffectsError_ = effects.last_error();
+  orphanedBackups_ = effects.orphaned_backups();
+  for (const std::wstring& name : orphanedBackups_) {
+    deps_.log("a backup could not be removed and is still beside the installation: " +
+              to_utf8(name) + ".gnlink-old");
+  }
   return outcome;
 }
 

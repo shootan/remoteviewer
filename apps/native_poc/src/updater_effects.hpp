@@ -115,6 +115,24 @@ class UpdaterEffects {
    */
   const std::string& last_effects_error() const { return lastEffectsError_; }
 
+  /**
+   * Seams the assembly left empty on the last run. Empty is the only acceptable value.
+   *
+   * Exposed rather than merely logged because "production wires everything a test wires" is the
+   * question this layer kept answering wrongly, and it should be answerable by an assertion
+   * instead of by reading the assembly and hoping.
+   */
+  const std::vector<std::string>& unwired_seams() const { return unwiredSeams_; }
+
+  /**
+   * Backups the commit could not delete, from the last run.
+   *
+   * They used to leave no trace: the delete result was ignored, so a file that stayed beside the
+   * installation was indistinguishable from one that had been removed. A surviving .gnlink-old
+   * with nothing to explain it is exactly what this records.
+   */
+  const std::vector<std::wstring>& orphaned_backups() const { return orphanedBackups_; }
+
  private:
   UpdaterOptions options_;
   UpdaterDeps deps_;
@@ -123,6 +141,8 @@ class UpdaterEffects {
   std::string userNotice_;
   std::string verifiedVersion_;
   std::string lastEffectsError_;
+  std::vector<std::string> unwiredSeams_;
+  std::vector<std::wstring> orphanedBackups_;
 };
 
 /**

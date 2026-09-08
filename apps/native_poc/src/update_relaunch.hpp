@@ -48,6 +48,13 @@ struct RelaunchOutcome {
   /** True only when the thing is actually running now. Skipped entries are not "started". */
   bool started = false;
   /**
+   * True when the check could not answer.
+   *
+   * Not started, and not silently counted as fine: something that might be down is not something
+   * to report as back.
+   */
+  bool livenessUnknown = false;
+  /**
    * True when it never left, so there was nothing to bring back.
    *
    * Distinct from `started`: relaunching something that is still running produces a second
@@ -101,15 +108,17 @@ struct RelaunchConfig {
   /**
    * Whether a captured target is still running under the same identity.
    *
-   * Injected so a test can answer without real processes, and needed because capturing an
-   * identity is not the same as that process having left. Abandoning after a waiting caller was
-   * released is exactly the case where some of the product has gone and some has not -- and
-   * relaunching something that never went produces a second instance.
+   * Three answers, not two, and the third is the point: a check that could not be completed must
+   * not be read as "it exited". Assuming departure relaunches something that is still there and
+   * leaves two of it; assuming presence leaves a machine down while reporting success. Neither is
+   * safe to guess, so Unknown is carried through and refused.
    *
-   * Empty means "assume everything left", which is right for the paths that follow a completed
-   * Quiesce.
+   * Injected so a test can answer without real processes. When it is empty the real check is
+   * used -- it used to default to "everything left", which meant PRODUCTION never performed this
+   * check at all while the tests that exercised it passed.
    */
-  std::function<bool(const ProcessTarget&)> isStillRunning;
+  enum class Liveness { Running, Exited, Unknown };
+  std::function<Liveness(const ProcessTarget&)> isStillRunning;
 };
 
 /**
@@ -128,15 +137,30 @@ struct RelaunchEffects {
    */
   std::function<RelaunchVerdict()> relaunch;
   std::function<bool()> healthCheck;
+  /** What stopping the processes this attempt started achieved. */
+  struct StopReport {
+    int stopped = 0;
+    /**
+     * Things this attempt started that it could not prove it owns, or could not stop.
+     *
+     * Non-empty means a rollback must not begin. Restoring files while something may still be
+     * holding them produces a half-restored installation, and the reason will look like the
+     * rollback's fault rather than like this.
+     */
+    std::vector<std::wstring> unstoppable;
+    bool complete() const { return unstoppable.empty(); }
+  };
+
   /**
-   * Stops the processes THIS attempt started, and returns how many.
+   * Stops the processes THIS attempt started.
    *
-   * A rollback has to move files those processes are holding open, so they have to go first.
-   * Restricted to what this attempt started and checked against the image name before anything
-   * happens to it: a pid is not an identity, and nothing else on the machine is this function's
-   * business.
+   * Ownership is proved by the handle received when the process was created, not by matching a
+   * pid to an image name. A name match is not ownership: a pid can be reused, and another process
+   * of the same name may be someone else's. Anything started through the shell has no such handle
+   * -- the shell created it, not us -- so it is reported as unstoppable rather than killed on a
+   * guess.
    */
-  std::function<int()> stopStarted;
+  std::function<StopReport()> stopStarted;
 
   /** What the last relaunch did, per entry. Empty until relaunch() has run. */
   std::function<std::vector<RelaunchOutcome>()> lastOutcomes;
