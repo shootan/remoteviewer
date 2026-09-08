@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -336,6 +337,40 @@ class UdpH264FrameAssembler {
   bool IsAbandoned(uint64_t generation, uint32_t seq) const;
   size_t AbandonedCount() const { return abandoned_.size(); }
 
+  // Saturation (A04). The abandoned list has a cap, but reaching it must never make the
+  // assembler forget an identity: forgetting one means accepting it again, which is the defect
+  // the list exists to prevent. Instead the cap starts a single RECOVERY EPISODE:
+  //   - no new non-key assembly is started (the ones already held keep being repaired; the
+  //     non-key ones still held when the episode begins are dropped, and need no record because
+  //     they cannot be re-created while it lasts);
+  //   - at most kSaturationKeyCandidates keyframes assemble at once. A newer key replaces the
+  //     oldest candidate, and the floor rises to the replaced candidate's seq so its late chunks
+  //     cannot re-create it. The floor only rises within the episode, survives having no
+  //     candidate at all, and never hides a candidate that is still assembling (a live lookup
+  //     comes first, so a repair in progress is never interrupted by it);
+  //   - a candidate is only created or replaced when the caller's admission filter accepts the
+  //     generation. On a refusal nothing changes -- not the candidates, not the floor, not the
+  //     delivery state -- so a generation the viewer would refuse anyway cannot evict a good
+  //     candidate or raise the floor past it.
+  // The episode ends when the caller reports that one of the delivered candidates was actually
+  // accepted for decoding (NoteKeyAccepted): that key is the recovery point, so everything the
+  // watermark covers is retired. If newer records still hold the list at the cap, the episode
+  // continues. There is no time-based exit and no eviction; a new session object is the only
+  // other way back to a clean state.
+  //
+  // The filter is the caller's own generation gate (the viewer passes SelectionGateState::
+  // AdmitGeneration). Unset -- the Android path -- means "admit", so that path is unchanged.
+  void SetSaturationAdmitFilter(std::function<bool(uint64_t)> admit) { saturationAdmit_ = std::move(admit); }
+  bool saturated() const { return saturated_; }
+  bool saturation_floor_set() const { return saturationFloorSet_; }
+  uint32_t saturation_floor_seq() const { return saturationFloorSeq_; }
+  size_t saturation_candidates() const;
+  // Called by the receiver immediately after a completed key AU passed its generation gate and
+  // the frame gate's Decode verdict, BEFORE the decode itself: the claim is "this key was
+  // accepted as the recovery point", not "it decoded". Ignored unless it names one of the key
+  // candidates this episode delivered.
+  void NoteKeyAccepted(uint64_t generation, uint32_t seq);
+
   struct IncompleteAuInfo {
     uint32_t seq = 0;
     uint64_t generation = 0;
@@ -410,6 +445,16 @@ class UdpH264FrameAssembler {
     uint64_t atUs = 0;  // diagnostics only
   };
   std::deque<AbandonedAu> abandoned_;
+  // Saturation episode (see SetSaturationAdmitFilter). kAbandonedSaturationCap is the trigger,
+  // never an eviction bound.
+  static constexpr size_t kAbandonedSaturationCap = 16;
+  static constexpr size_t kSaturationKeyCandidates = 2;
+  bool saturated_ = false;
+  bool saturationFloorSet_ = false;
+  uint64_t saturationFloorGen_ = 0;
+  uint32_t saturationFloorSeq_ = 0;
+  std::deque<AbandonedAu> deliveredKeyCandidates_;  // delivered during this episode
+  std::function<bool(uint64_t)> saturationAdmit_;
 
   std::deque<Assembly> assemblies_;
   bool deliveredAny_ = false;

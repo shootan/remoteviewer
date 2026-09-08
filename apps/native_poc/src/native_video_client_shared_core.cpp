@@ -618,6 +618,11 @@ uint64_t ClientControlScheduler::RecordInputAck(uint32_t inputLogEvery) {
 void UdpH264FrameAssembler::Reset() {
   assemblies_.clear();
   abandoned_.clear();
+  deliveredKeyCandidates_.clear();
+  saturated_ = false;
+  saturationFloorSet_ = false;
+  saturationFloorGen_ = 0;
+  saturationFloorSeq_ = 0;
   deliveredAny_ = false;
   lastDeliveredSeq_ = 0;
 }
@@ -639,6 +644,33 @@ bool UdpH264FrameAssembler::AnyComplete() const {
   return std::any_of(assemblies_.begin(), assemblies_.end(), [](const Assembly& a) { return a.complete; });
 }
 
+size_t UdpH264FrameAssembler::saturation_candidates() const {
+  return static_cast<size_t>(std::count_if(assemblies_.begin(), assemblies_.end(), [](const Assembly& a) {
+    return (a.header.flags & kEncodedFrameFlagKeyFrame) != 0;
+  }));
+}
+
+void UdpH264FrameAssembler::NoteKeyAccepted(uint64_t generation, uint32_t seq) {
+  if (!saturated_) return;
+  const bool wasCandidate =
+      std::any_of(deliveredKeyCandidates_.begin(), deliveredKeyCandidates_.end(),
+                  [&](const AbandonedAu& c) { return c.generation == generation && c.seq == seq; });
+  if (!wasCandidate) return;  // not one of this episode's candidates: nothing is released
+  // That key is the recovery point: every identity it covers is behind the decoder's new
+  // reference now, and the ordinary stale guard takes over for their late chunks.
+  abandoned_.erase(std::remove_if(abandoned_.begin(), abandoned_.end(),
+                                  [&](const AbandonedAu& a) {
+                                    return a.generation == generation && !sequence_is_newer(a.seq, seq);
+                                  }),
+                   abandoned_.end());
+  deliveredKeyCandidates_.clear();
+  saturationFloorSet_ = false;
+  saturationFloorGen_ = 0;
+  saturationFloorSeq_ = 0;
+  // Newer records may still hold the list at the cap: then the episode simply continues.
+  saturated_ = abandoned_.size() >= kAbandonedSaturationCap;
+}
+
 bool UdpH264FrameAssembler::IsAbandoned(uint64_t generation, uint32_t seq) const {
   for (const AbandonedAu& a : abandoned_) {
     if (a.seq == seq && a.generation == generation) return true;
@@ -655,6 +687,19 @@ bool UdpH264FrameAssembler::GiveUpIncomplete(uint64_t generation, uint32_t seq, 
   // Remember it, so the chunks still on their way do not re-create it (see the header note).
   // Nothing is dropped to make room: forgetting an identity would let it be accepted again.
   abandoned_.push_back(AbandonedAu{generation, seq, nowUs});
+  if (!saturated_ && abandoned_.size() >= kAbandonedSaturationCap) {
+    // The cap starts a recovery episode instead of evicting anything. The non-key assemblies
+    // still held go with it: while the episode lasts only keyframes may start a new assembly, so
+    // they cannot be re-created and need no record of their own.
+    saturated_ = true;
+    saturationFloorSet_ = false;
+    deliveredKeyCandidates_.clear();
+    assemblies_.erase(std::remove_if(assemblies_.begin(), assemblies_.end(),
+                                     [](const Assembly& a) {
+                                       return (a.header.flags & kEncodedFrameFlagKeyFrame) == 0;
+                                     }),
+                      assemblies_.end());
+  }
   return true;
 }
 
@@ -675,6 +720,12 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::DeliverAssembly(Assembly& assem
   }
   deliveredAny_ = true;
   lastDeliveredSeq_ = assembly.seq;
+  if (saturated_ && (assembly.header.flags & kEncodedFrameFlagKeyFrame) != 0) {
+    // A key candidate reached the caller. Only one it then ACCEPTS ends the episode
+    // (NoteKeyAccepted); delivery alone is not enough.
+    deliveredKeyCandidates_.push_back(
+        AbandonedAu{assembly.header.streamGeneration, assembly.seq, 0});
+  }
   // Retire the tombstones this delivery makes redundant (see the header note): in this
   // generation, everything the ordinary stale guard covers from now on. Entries of another
   // generation are left alone -- whether a delivery may retire them is not settled.
@@ -862,6 +913,48 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* dat
 
   auto assemblyIt = std::find_if(assemblies_.begin(), assemblies_.end(),
                                  [&](const Assembly& item) { return item.seq == packet.seq; });
+  // A live assembly is answered above and below whatever the episode says: a repair in progress
+  // is never interrupted by the floor.
+  if (assemblyIt == assemblies_.end() && saturated_) {
+    const bool keyFrame = (packet.flags & 0x1u) != 0;
+    if (!keyFrame) {
+      // Only keyframes may start an assembly during the episode: a new P would just become the
+      // next stuck head, and the recovery this episode is waiting for is a key.
+      result.disposition = UdpH264AssemblyDisposition::Ignored;
+      return result;
+    }
+    if (saturationFloorSet_ && packet.streamGeneration == saturationFloorGen_ &&
+        !sequence_is_newer(packet.seq, saturationFloorSeq_)) {
+      // At or below the floor: this candidate was already replaced once. Its late chunks may not
+      // re-create it (and must not touch any timer or progress stamp).
+      result.disposition = UdpH264AssemblyDisposition::Ignored;
+      result.reorderDetected = true;
+      return result;
+    }
+    if (saturationAdmit_ && !saturationAdmit_(packet.streamGeneration)) {
+      // The caller's own generation gate would refuse this frame anyway. Nothing changes: it may
+      // not evict a candidate the viewer is waiting for, nor raise the floor past it.
+      result.disposition = UdpH264AssemblyDisposition::Ignored;
+      return result;
+    }
+    if (saturation_candidates() >= kSaturationKeyCandidates) {
+      // Slots are reused, not added to: the oldest candidate by sequence gives way, and the floor
+      // rises to it so it cannot come back.
+      auto oldest = std::min_element(assemblies_.begin(), assemblies_.end(),
+                                     [](const Assembly& a, const Assembly& b) {
+                                       return sequence_is_newer(b.seq, a.seq);
+                                     });
+      if (oldest != assemblies_.end()) {
+        if (!saturationFloorSet_ || (oldest->header.streamGeneration == saturationFloorGen_ &&
+                                     sequence_is_newer(oldest->seq, saturationFloorSeq_))) {
+          saturationFloorSet_ = true;
+          saturationFloorGen_ = oldest->header.streamGeneration;
+          saturationFloorSeq_ = oldest->seq;
+        }
+        assemblies_.erase(oldest);
+      }
+    }
+  }
   if (assemblyIt == assemblies_.end()) {
     const auto evict_oldest = [&]() {
       if (holdMaxUs_ > 0) {

@@ -63,6 +63,19 @@ void VideoReceiver::run_udp() {
   const bool holdEnabled = nackEnabled && nack.holdUs > 0;
   constexpr size_t kHoldMaxConcurrentAssemblies = 8;  // ~120 ms of 60 fps AUs in flight
   if (holdEnabled) assembler.ConfigureInOrderHold(nack.holdUs, kHoldMaxConcurrentAssemblies);
+  // A04 saturation: the assembler asks the viewer's own generation gate before it starts or
+  // replaces a key candidate, rather than deciding admissibility itself (shared_core must not
+  // depend on viewer state). The final gate in the decode path is unchanged and still decides.
+  assembler.SetSaturationAdmitFilter([this](uint64_t generation) {
+    return ctx.sel.AdmitGeneration(generation) == SelectionAdmit::Accept;
+  });
+  // The frame path (process_h264_frame) reports the accepted recovery key back to the assembler.
+  // Valid only for this call's lifetime; cleared on the way out.
+  activeAssembler_ = &assembler;
+  struct AssemblerScope {
+    UdpH264FrameAssembler** slot;
+    ~AssemblerScope() { *slot = nullptr; }
+  } assemblerScope{&activeAssembler_};
   VideoNackScheduler nackScheduler;
   uint64_t lastUdpNackSentCount = 0;
   uint64_t lastUdpNackChunkCount = 0;

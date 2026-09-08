@@ -237,6 +237,13 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
       case FrameGateVerdict::Decode:
         break;
     }
+    if (keyFrame && activeAssembler_ != nullptr) {
+      // A04 saturation: this key passed the generation gate and the frame gate, so it is the
+      // recovery point the episode was waiting for -- reported before the decode, because the
+      // claim is acceptance, not decode success (a failure afterwards is handled by the existing
+      // reason 4/5/7 recovery).
+      activeAssembler_->NoteKeyAccepted(h.streamGeneration, h.seq);
+    }
 
     const uint64_t decodeStartUs = qpc_now_us();
     std::vector<DecodedFrameNv12> outFrames;

@@ -53,6 +53,9 @@ class VideoReceiver {
   // integration test: the keyframe-request limiter can hide a repeated give-up, so the test
   // asserts on the count itself.
   const RecvStats& stats() const { return st; }
+  // The assembler run_udp owns, while it runs (A04 saturation: the frame path reports the key it
+  // accepted back to it). Null outside run_udp and on the TCP path.
+  UdpH264FrameAssembler* activeAssembler_ = nullptr;
   // The thread body (formerly the recvThread lambda).
   void Run();
 
