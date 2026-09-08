@@ -363,8 +363,11 @@ class UdpH264FrameAssembler {
   void SetSaturationAdmitFilter(std::function<bool(uint64_t)> admit) { saturationAdmit_ = std::move(admit); }
   bool saturated() const { return saturated_; }
   bool saturation_floor_set() const { return saturationFloorSet_; }
+  // Raises the episode's floor (monotone within the episode).
+  void RaiseSaturationFloor(uint32_t seq);
   uint32_t saturation_floor_seq() const { return saturationFloorSeq_; }
   size_t saturation_candidates() const;
+  size_t delivered_key_candidates() const { return deliveredKeyCandidates_.size(); }
   // Called by the receiver immediately after a completed key AU passed its generation gate and
   // the frame gate's Decode verdict, BEFORE the decode itself: the claim is "this key was
   // accepted as the recovery point", not "it decoded". Ignored unless it names one of the key
@@ -449,11 +452,18 @@ class UdpH264FrameAssembler {
   // never an eviction bound.
   static constexpr size_t kAbandonedSaturationCap = 16;
   static constexpr size_t kSaturationKeyCandidates = 2;
+  static constexpr size_t kDeliveredKeyCandidateRing = 8;
   bool saturated_ = false;
   bool saturationFloorSet_ = false;
-  uint64_t saturationFloorGen_ = 0;
+  // Session-wide sequence, not a per-generation one: the host's seq is monotone across a UDP
+  // session (it only restarts with a new session object), so a key of any generation at or below
+  // the floor is one this episode has already moved past.
   uint32_t saturationFloorSeq_ = 0;
-  std::deque<AbandonedAu> deliveredKeyCandidates_;  // delivered during this episode
+  // Candidates this episode delivered, bounded: a caller whose final gate keeps refusing
+  // completed keys must not grow it without end. A key pushed out of the ring can no longer end
+  // the episode even if it is accepted later -- conservative on purpose: it costs a further
+  // recovery attempt, and no abandoned identity is forgotten by it.
+  std::deque<AbandonedAu> deliveredKeyCandidates_;
   std::function<bool(uint64_t)> saturationAdmit_;
 
   std::deque<Assembly> assemblies_;

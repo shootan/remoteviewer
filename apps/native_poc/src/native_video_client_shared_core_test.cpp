@@ -816,21 +816,17 @@ bool test_udp_assembler_saturation_episode() {
   {
     UdpH264FrameAssembler a;
     a.ConfigureInOrderHold(120000, 32);
-    fill_to_saturation(a, 200, 16);
+    // The records are made BEFORE the episode (inside it a failing candidate is another attempt,
+    // not a new record) and all of them are newer than the recovery key that follows.
+    fill_to_saturation(a, 500, 16);
     if (!expect(a.saturated(), "saturation(latch): episode started")) return false;
-    // Sixteen key candidates above the coming recovery key, each given up in turn.
-    for (uint32_t i = 0; i < 16; ++i) {
-      const uint32_t seq = 600 + i;
-      (void)push_chunk(a, seq, 0, 12, 4, true, t0 + 500000 + i * 1000);
-      if (!expect(a.GiveUpIncomplete(1, seq, t0 + 500000 + i * 1000), "saturation(latch): candidate given up")) return false;
-    }
-    // The recovery key is older than all of them: delivering and accepting it retires nothing newer.
-    (void)push_chunk(a, 500, 0, 4, 4, true, t0 + 600000);
+    // The recovery key is older than every record: accepting it retires none of them.
+    (void)push_chunk(a, 400, 0, 4, 4, true, t0 + 600000);
     UdpH264AssemblyStepResult out{};
-    if (!expect(a.PopDelivery(t0 + 600000, true, &out) && out.frame.header.seq == 500,
+    if (!expect(a.PopDelivery(t0 + 600000, true, &out) && out.frame.header.seq == 400,
                 "saturation(latch): the recovery key is delivered")) return false;
     if (!expect(a.AbandonedCount() >= 16, "saturation(latch): the newer records survive the delivery")) return false;
-    a.NoteKeyAccepted(1, 500);
+    a.NoteKeyAccepted(1, 400);
     if (!expect(a.saturated(), "saturation(latch): newer records at the cap keep the episode")) return false;
     if (!expect(!a.saturation_floor_set(), "saturation(latch): the floor was cleared with the release")) return false;
   }
@@ -884,6 +880,161 @@ bool test_udp_assembler_saturation_episode() {
                 "saturation(reorder): 30 is not blocked by the give-up of 31")) return false;
   }
   return true;
+}
+
+// A04 saturation, boundary behaviour (the six cases the verifying Claude found missing). Each one
+// asserts product state directly, because a passing scenario run does not prove any of them.
+bool test_udp_assembler_saturation_bounds() {
+  bool ok = true;  // every case runs, so one failure does not hide the others
+  const uint64_t t0 = 30000000;
+  auto saturate = [&](UdpH264FrameAssembler& a, uint32_t firstSeq) {
+    for (uint32_t i = 0; i < 16; ++i) {
+      const uint32_t seq = firstSeq + i;
+      (void)push_chunk(a, seq, 0, 12, 4, false, t0 + i * 1000);
+      (void)a.GiveUpIncomplete(1, seq, t0 + i * 1000);
+    }
+  };
+
+  // (1) A candidate that fails during the episode is another attempt at the same recovery, not a
+  //     new retirement: twenty of them must not grow the record list by one.
+  {
+    UdpH264FrameAssembler a;
+    a.ConfigureInOrderHold(120000, 8);
+    saturate(a, 100);
+    ok = expect(a.saturated() && a.AbandonedCount() == 16, "bounds(1): episode started") && ok;
+    const size_t before = a.AbandonedCount();
+    for (uint32_t i = 0; i < 20; ++i) {
+      const uint32_t seq = 1000 + i;
+      (void)push_chunk(a, seq, 0, 12, 4, true, t0 + 100000 + i * 1000);  // a key candidate
+      (void)a.GiveUpIncomplete(1, seq, t0 + 100000 + i * 1000);          // ... which then fails
+    }
+    ok = expect(a.AbandonedCount() == before,
+                "bounds(1): candidate failures add no records (" + std::to_string(a.AbandonedCount()) + ")") && ok;
+    ok = expect(a.saturated(), "bounds(1): still one episode") && ok;
+  }
+
+  // (2) A key that is newer than the floor but OLDER than both candidates must not evict one --
+  //     and the packet that is refused must not disturb the live assemblies (the erase used to
+  //     invalidate the iterator the caller then compared).
+  {
+    UdpH264FrameAssembler a;
+    a.ConfigureInOrderHold(120000, 8);
+    saturate(a, 100);
+    (void)push_chunk(a, 200, 0, 12, 4, true, t0 + 200000);
+    (void)push_chunk(a, 202, 0, 12, 4, true, t0 + 201000);
+    ok = expect(a.saturation_candidates() == 2, "bounds(2): two candidates") && ok;
+    // Older than BOTH candidates (reordering), yet past the floor: it must not take a slot from a
+    // candidate that is already being repaired.
+    const auto r = push_chunk(a, 198, 0, 12, 4, true, t0 + 202000);
+    ok = expect(r.disposition == UdpH264AssemblyDisposition::Ignored,
+                "bounds(2): a key older than both candidates is refused") && ok;
+    ok = expect(a.saturation_candidates() == 2 && !a.saturation_floor_set(),
+                "bounds(2): candidates and floor untouched") && ok;
+    // The live candidates still work, and a chunk for one of them is handled normally.
+    const auto live = push_chunk(a, 202, 1, 12, 4, true, t0 + 203000);
+    ok = expect(live.disposition == UdpH264AssemblyDisposition::Partial,
+                "bounds(2): the live candidate still takes chunks") && ok;
+    // A genuinely newer key does replace the oldest, and the floor rises to it.
+    const auto newer = push_chunk(a, 203, 0, 12, 4, true, t0 + 204000);
+    ok = expect(newer.disposition == UdpH264AssemblyDisposition::Partial &&
+                    a.saturation_candidates() == 2 && a.saturation_floor_set() &&
+                    a.saturation_floor_seq() == 200,
+                "bounds(2): a newer key replaces the oldest and raises the floor") && ok;
+  }
+
+  // (3) The floor is a session-wide sequence, not a per-generation one: a late key of another
+  //     generation at or below it is refused just the same.
+  {
+    UdpH264FrameAssembler a;
+    a.ConfigureInOrderHold(120000, 8);
+    saturate(a, 100);
+    (void)push_chunk(a, 300, 0, 12, 4, true, t0 + 300000);
+    (void)push_chunk(a, 302, 0, 12, 4, true, t0 + 301000);
+    (void)push_chunk(a, 304, 0, 12, 4, true, t0 + 302000);  // replaces 300, floor = 300
+    ok = expect(a.saturation_floor_set() && a.saturation_floor_seq() == 300, "bounds(3): floor at 300") && ok;
+    const auto other = make_video_chunk(300, 0, 12, 4, true, 9);  // generation 9, same seq
+    const auto r = a.PushDatagram(other.data(), other.size(), t0 + 303000);
+    ok = expect(r.disposition == UdpH264AssemblyDisposition::Ignored,
+                "bounds(3): another generation at the floor is refused too") && ok;
+  }
+
+  // (4) Retirement follows the session-wide sequence as well: records made under an older
+  //     generation are retired by a newer generation's accepted key, so P frames resume.
+  {
+    UdpH264FrameAssembler a;
+    a.ConfigureInOrderHold(120000, 8);
+    saturate(a, 400);  // records 400..415 under generation 1
+    const auto key = make_video_chunk(500, 0, 4, 4, true, 2);  // generation 2 recovery key
+    const auto r = a.PushDatagram(key.data(), key.size(), t0 + 400000);
+    ok = expect(r.disposition == UdpH264AssemblyDisposition::Queued, "bounds(4): the new generation's key completed") && ok;
+    UdpH264AssemblyStepResult out{};
+    ok = expect(a.PopDelivery(t0 + 400000, true, &out) && out.frame.header.seq == 500,
+                "bounds(4): it is delivered") && ok;
+    a.NoteKeyAccepted(2, 500);
+    ok = expect(a.AbandonedCount() == 0, "bounds(4): the older generation's records are retired (" + std::to_string(a.AbandonedCount()) + ")") && ok;
+    ok = expect(!a.saturated(), "bounds(4): the episode ended") && ok;
+    const auto p = make_video_chunk(501, 0, 4, 4, false, 2);
+    const auto rp = a.PushDatagram(p.data(), p.size(), t0 + 401000);
+    ok = expect(rp.disposition == UdpH264AssemblyDisposition::Queued, "bounds(4): P frames resume") && ok;
+  }
+
+  // (5) The delivered-candidate list is bounded: fifty completed keys the caller never accepts
+  //     must not make it grow without end.
+  {
+    UdpH264FrameAssembler a;
+    a.ConfigureInOrderHold(120000, 8);
+    saturate(a, 600);
+    UdpH264AssemblyStepResult out{};
+    for (uint32_t i = 0; i < 50; ++i) {
+      const uint32_t seq = 700 + i;
+      (void)push_chunk(a, seq, 0, 4, 4, true, t0 + 500000 + i * 1000);
+      (void)a.PopDelivery(t0 + 500000 + i * 1000, true, &out);  // delivered, never accepted
+    }
+    ok = expect(a.delivered_key_candidates() <= 8,
+                "bounds(5): the delivered-candidate list is bounded (" + std::to_string(a.delivered_key_candidates()) + ")") && ok;
+  }
+
+  // (6) Entering the episode trims the key assemblies to the two slots (the newest), raising the
+  //     floor to what it drops; and a release that keeps the latch keeps the floor with it.
+  {
+    UdpH264FrameAssembler a;
+    a.ConfigureInOrderHold(120000, 8);
+    for (uint32_t i = 0; i < 4; ++i) {
+      (void)push_chunk(a, 800 + i, 0, 12, 4, true, t0 + 600000 + i * 1000);  // four key assemblies
+    }
+    ok = expect(a.saturation_candidates() == 4, "bounds(6): four key assemblies before the episode") && ok;
+    for (uint32_t i = 0; i < 16; ++i) {
+      const uint32_t seq = 900 + i;
+      (void)push_chunk(a, seq, 0, 12, 4, false, t0 + 700000 + i * 1000);
+      (void)a.GiveUpIncomplete(1, seq, t0 + 700000 + i * 1000);
+    }
+    ok = expect(a.saturated(), "bounds(6): episode started") && ok;
+    ok = expect(a.saturation_candidates() == 2,
+                "bounds(6): trimmed to two slots (" + std::to_string(a.saturation_candidates()) + ")") && ok;
+    ok = expect(a.saturation_floor_set() && a.saturation_floor_seq() == 801,
+                "bounds(6): the floor rose to the newest one dropped") && ok;
+  }
+
+  // (6b) A release that leaves the list at the cap keeps both the latch and the floor.
+  {
+    UdpH264FrameAssembler a;
+    a.ConfigureInOrderHold(120000, 8);
+    saturate(a, 500);                     // records 500..515, episode starts
+    (void)push_chunk(a, 400, 0, 12, 4, true, t0 + 800000);   // an older key candidate
+    (void)push_chunk(a, 402, 0, 12, 4, true, t0 + 801000);
+    (void)push_chunk(a, 404, 0, 12, 4, true, t0 + 802000);   // replaces 400: floor = 400
+    ok = expect(a.saturation_floor_set() && a.saturation_floor_seq() == 400, "bounds(6b): floor at 400") && ok;
+    (void)push_chunk(a, 402, 1, 12, 4, true, t0 + 803000);
+    (void)push_chunk(a, 402, 2, 12, 4, true, t0 + 804000);
+    UdpH264AssemblyStepResult out{};
+    ok = expect(a.PopDelivery(t0 + 805000, true, &out) && out.frame.header.seq == 402,
+                "bounds(6b): the candidate is delivered") && ok;
+    a.NoteKeyAccepted(1, 402);
+    ok = expect(a.saturated(), "bounds(6b): records above it keep the episode") && ok;
+    ok = expect(a.saturation_floor_set() && a.saturation_floor_seq() == 400,
+                "bounds(6b): the floor is kept while the episode lasts") && ok;
+  }
+  return ok;
 }
 
 bool test_udp_assembler_in_order_hold() {
@@ -1254,6 +1405,7 @@ int main() {
   if (!test_udp_assembler_progress_and_give_up()) return 1;
   if (!test_udp_assembler_abandoned_tombstone()) return 1;
   if (!test_udp_assembler_saturation_episode()) return 1;
+  if (!test_udp_assembler_saturation_bounds()) return 1;
   if (!test_session_controller()) return 1;
   std::cout << "[shared-core-test] PASS\n";
   return 0;
