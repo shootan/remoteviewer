@@ -9509,3 +9509,33 @@ Next action
 - 문서만 변경. 제품 코드·빌드·테스트 변경 없음. 검증 수치 불변(C++ 845 · Kotlin 38 · JS 전부 통과).
 - 변경 파일: `docs/수동확인_체크리스트.md` · `docs/구현계획.md` · `docs/history.md`.
 - 버전 인상·설치본·설치·라이브 조작·배포·push 없음. **검증용의 전체 재검사 대기.**
+
+### 462) 2026-09-08 ⚠️ **사슬은 이어졌는데 데이터가 안 흘렀다** — Codex 재반려 5건 수정
+- #452 에서 "호출자가 없다" 를 고쳤더니, 이번엔 **호출자는 있는데 값이 안 흐르는** 층이 남아 있었다. **호출 사슬이 있다는 것과 그 경로에 데이터가 흐른다는 것은 또 다른 이야기다.** 다섯 건 전부 `grep` 으로 직접 재확인했고 사실이었다.
+
+**① 업데이터가 manifest 를 절대 못 받았다 (가장 치명적)**
+- `set_manifest` **제품 호출자 0건**(정의·선언뿐). `FetchManifest` 는 문서가 비면 `"no manifest available"` 로 false → **모든 실행이 첫 단계에서 끝났다.** 서명 검증·버전 비교·staging·swap·등록·재실행·health 가 **전부 옳고 전부 도달 불가**였다. 운영키를 넣어도 마찬가지였을 것이다.
+- → `UpdateEffectsConfig::fetchManifest` 신설. 업데이터가 `options.manifestUrl` 과 `<url>.sig` 를 `https_get_text` 로 받아 주입한다. **한 번만 받아 보관** — 단계마다 다시 받으면 서버가 도중에 설치 대상을 바꿀 수 있고, 그건 `releaseId` 가 한 층 아래에서 막는 것과 같은 위험이다.
+- **회귀 4종 + 대조군**: 문서도 fetcher 도 없으면 실패 / fetcher 가 공급 / **fetcher 는 정확히 1회** / 주입된 문서가 우선(테스트는 네트워크에 안 감). 배선을 끄면 **6 FAIL**.
+
+**② 검증된 버전이 등록·health 로 안 흘렀다**
+- `versionToInstall_` 에 **대입이 없어** 항상 `kProductVersion` 폴백 — `DisplayVersion` 과 health 가 **검증된 새 버전이 아니라 이 바이너리의 컴파일 시점 버전**이었다. 등록에서 (C)안을 탈락시킨 **기준점 오염과 같은 것**이 반대편에서 재현된 셈이다.
+- → 등록·재실행 설정을 **호출 시점에 lazy 로** 만들고, `ReadySignaller` 가 **`VerifyDownload` 성공 지점**(버전이 알려지고 동시에 신뢰할 수 있게 되는 첫 순간)에서 공유 값에 기록한다.
+
+**③ 롤백이 제품을 다시 띄우지 않았다 — Host 무인재시작 계약 위반**
+- `Rollback()` 은 파일·등록만 복원했다. **원격 사용자에게는 파일이 맞는데 기계가 unreachable** 이다 — 호스트는 교체하려고 정지시킨 프로세스 중 하나이고, 안 돌아오면 **고치러 들어갈 방법이 없다.**
+- → 롤백 성공 뒤 **Relaunch 1회(재시도 없음) + HealthCheck**. `RolledBackNotRelaunched` 신설(종료코드 14) — **"복원됨" 과 "쓸 수 있음" 은 다른 주장**이다. 롤백 시 health 의 expectedVersion 은 **디스크에 실제로 있는 구버전**으로 되돌린다.
+- ⚠️ **이 결함을 지키던 단정이 있었다**: `"registration fails -> relaunch never ran"`. 참이었고 통과했고, 그래서 **기계를 unreachable 로 만드는 동작을 사양으로 기록**하고 있었다. 뒤집었다.
+
+**④ BREAKAWAY 실패 후 그냥 진행했다**
+- 호스트·업데이터 둘 다 flags 0 으로 재시도하고 **경고만 남기고 계속**했다. job 을 못 벗어난 채 진행하는 것은 **원장 (b) 를 허용하는 것**이다 — 경고는 완화가 아니라 **허가**다.
+- → `update_job_guard.{hpp,cpp}` 신설. `IsProcessInJob` + `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 로 **세 상태**(job 없음 / 무해한 job / 죽이는 job)를 구분해, **죽이는 job 에서 breakaway 실패면 거부**하고 나머지는 진행한다. 모든 job 에서 거부하면 위험하지도 않은 기계에서 실패하고, **그게 안전장치가 꺼지는 경로**다. **`Unknown` 은 통과가 아니다.**
+
+**⑤ 작업 디렉터리 ACL 이 주석뿐이었다 (보안)**
+- `ensure_directory` 는 **이미 있으면 그냥 수락**했다. 공격자가 먼저 약한 ACL 로 만들어 두면 **상승된 프로세스가 그가 제어하는 곳에 실행 파일을 복사해 실행**한다.
+- → `check_work_directory()`: **reparse point 거부**(이름이 쓰기 위치를 결정하지 않는다) · **NULL DACL 거부**(제한 없음을 뜻한다) · **Users/Everyone/Authenticated/Interactive 에 쓰기 권한이 있으면 거부**. 생성·복사 **전에** 검사한다.
+- **회귀 19건**: 8조합 전부에 대해 "진행하는 경우는 breakaway 했거나 애초에 위험하지 않았다" 를 성질로 고정 · 실제 ACL 을 세운 임시 디렉터리로 **사용자 쓰기 가능 → 거부 / 관리자 전용 → 수락**(대조군 없으면 "전부 거부" 로도 통과).
+- 검증 — **`qwinsta`: console 만 Active.** C++ 업데이트 **13종 880 checks / 0 failed**(신규 job_guard 19, effects 149→**161**, state_machine 61→**65**). JS 디렉터리 스위트 전부 통과. 라이브 무영향: PID 3종 불변, `DisplayVersion` **0.2.104**.
+- **문서 재정정**: 체크리스트의 "남은 것은 전부 실기" 서술을 고쳤다 — **그것도 일렀다.**
+- 변경 파일: `update_effects.{hpp,cpp}`·`update_effects_test.cpp` · `update_state_machine.{hpp,cpp}`·`update_state_machine_test.cpp` · `updater_main.cpp` · `host_app_main.cpp` · `update_job_guard.{hpp,cpp}`·`update_job_guard_test.cpp`(신규) · `apps/native_poc/CMakeLists.txt` · `docs/수동확인_체크리스트.md` · `docs/history.md`.
+- 버전 인상·설치본·설치·라이브 조작·배포·push 없음.

@@ -37,6 +37,7 @@
 #include "update_check.hpp"
 #include "update_effects.hpp"
 #include "update_http.hpp"
+#include "update_job_guard.hpp"
 #include "update_process_targets.hpp"
 #include "update_registration_wiring.hpp"
 #include "update_relaunch.hpp"
@@ -81,6 +82,17 @@ void log_line(const std::string& text) {
   std::fclose(file);
 }
 
+std::wstring widen(const std::string& text) {
+  if (text.empty()) return {};
+  const int size = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()),
+                                       nullptr, 0);
+  std::wstring out(size <= 0 ? 0 : static_cast<size_t>(size), L'\0');
+  if (size > 0) {
+    MultiByteToWideChar(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), out.data(), size);
+  }
+  return out;
+}
+
 std::wstring self_image_path() {
   wchar_t path[MAX_PATH]{};
   GetModuleFileNameW(nullptr, path, MAX_PATH);
@@ -110,6 +122,19 @@ bool ensure_directory(const std::wstring& path) {
  * decides nothing for itself.
  */
 bool run_from_copy(const UpdaterOptions& options, const std::vector<std::wstring>& originalArgs) {
+  // Checked BEFORE creating it and before copying into it. A directory that already exists was
+  // made by somebody, and accepting it because CreateDirectory reported ERROR_ALREADY_EXISTS is
+  // accepting whatever permissions they gave it -- at which point this elevated process copies an
+  // executable into a place they control and runs it.
+  {
+    std::string why;
+    const LaunchGuardVerdict verdict = check_work_directory(options.workDir, &why);
+    if (verdict != LaunchGuardVerdict::Ok) {
+      log_line(std::string("refusing to use the working directory: ") +
+               launch_guard_verdict_name(verdict) + " -- " + why);
+      return false;
+    }
+  }
   if (!ensure_directory(options.workDir)) {
     log_line("could not create the working directory " + to_utf8(options.workDir));
     return false;
@@ -142,11 +167,27 @@ bool run_from_copy(const UpdaterOptions& options, const std::vector<std::wstring
   BOOL started = CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, FALSE,
                                 CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP, nullptr,
                                 options.workDir.c_str(), &si, &pi);
+  bool brokeAway = started != FALSE;
   if (!started) {
+    // Breakaway was refused. Whether that matters depends on the job we are in -- and it is asked
+    // rather than assumed, because refusing on every job would fail on machines where nothing was
+    // ever at risk, and that is how a safety check ends up switched off.
+    const JobKind kind = job_kind_of_current_process();
+    const LaunchGuardVerdict verdict = judge_launch(kind, false);
+    if (verdict != LaunchGuardVerdict::Ok) {
+      // Not a warning. Proceeding here permits exactly what ledger item (b) describes: the host
+      // being stopped -- which is the next thing that happens -- taking the updater with it, part
+      // way through replacing files, with nothing left running to put them back.
+      log_line(std::string("refusing to start the working copy: ") +
+               launch_guard_verdict_name(verdict) +
+               " (job kind " + std::to_string(static_cast<int>(kind)) + ")");
+      return false;
+    }
     started = CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, FALSE,
                              CREATE_NEW_PROCESS_GROUP, nullptr, options.workDir.c_str(), &si, &pi);
-    if (started) log_line("the working copy could not break away from its job object");
+    if (started) log_line("breakaway was not needed: this process is not in a job that kills its children");
   }
+  (void)brokeAway;
   if (!started) {
     log_line("could not start the working copy (error " + std::to_string(GetLastError()) + ")");
     return false;
@@ -202,6 +243,38 @@ class UpdaterEffects {
     config.expectedVersion = {};  // filled once the manifest says which version this is
     config.updaterImagePath = self_image_path();
 
+    // THE step that was missing. Without it FetchManifest had nothing to return and every run
+    // ended at the first stage; the signature check, the version comparison, the staging, the
+    // swap and everything after it were correct and unreachable.
+    //
+    // Fetched once, here, and kept: the document and its signature are read together and the rest
+    // of the attempt works from that one snapshot. Re-fetching per stage would let the server
+    // change what is being installed part way through -- the same hazard releaseId exists for,
+    // one level up.
+    const std::string manifestUrl = options_.manifestUrl;
+    config.fetchManifest = [manifestUrl](std::string* document, std::string* signatureHex) {
+      std::string error;
+      const FetchStatus doc = https_get_text(manifestUrl, 64 * 1024, document, &error);
+      if (doc != FetchStatus::Ok) {
+        log_line(std::string("manifest fetch failed: ") + fetch_status_name(doc) + " " + error);
+        return false;
+      }
+      // The detached signature lives beside the document. Fetched separately so the bytes that
+      // are verified are exactly the bytes that arrived, with nothing wrapping them.
+      const FetchStatus sig =
+          https_get_text(manifestUrl + ".sig", 4 * 1024, signatureHex, &error);
+      if (sig != FetchStatus::Ok) {
+        log_line(std::string("signature fetch failed: ") + fetch_status_name(sig) + " " + error);
+        return false;
+      }
+      while (!signatureHex->empty() &&
+             (signatureHex->back() == '\n' || signatureHex->back() == '\r' ||
+              signatureHex->back() == ' ')) {
+        signatureHex->pop_back();
+      }
+      return true;
+    };
+
     config.fetchArtifact = [](const ManifestArtifact& artifact, const std::wstring& destPath) {
       std::string error;
       // The manifest's own size is the cap. A body larger than what was signed for is refused
@@ -251,6 +324,23 @@ class UpdaterEffects {
    * of processes that were actually stopped, which does not exist until Quiesce has run.
    */
   UpdateOutcome run(const std::string& platform) {
+    /**
+     * The version this attempt is installing, learned from the verified manifest.
+     *
+     * Shared and read late on purpose. Registration and relaunch are configured before
+     * run_update starts, at which point nobody knows what version the server is offering -- and
+     * a field filled in then would carry THIS binary's compile-time version into DisplayVersion
+     * and into the health check. That is the same reference-point poisoning that ruled out
+     * re-running the old installer for registration (history #440), arrived at from the other
+     * side.
+     *
+     * Set at exactly one point: after VerifyDownload succeeds, which is the first moment the
+     * version is both known and trustworthy.
+     */
+    auto versionToInstall = std::make_shared<std::string>();
+    // Starts as what is installed now, so a rollback path -- which puts the OLD files back --
+    // checks the health of the version that is actually on disk afterwards.
+    auto expectedVersion = std::make_shared<std::string>(options_.installedVersion);
     // Captured here so the relaunch built afterwards describes the configuration that was
     // running, rather than everything the product could run.
     auto stopped = std::make_shared<std::vector<ProcessTarget>>();
@@ -262,20 +352,39 @@ class UpdaterEffects {
       return targets;
     };
 
-    install::RegistrationTarget target = registrationTarget_;
-    target.version = versionToInstall_.empty() ? std::wstring(remote60::native_poc::kProductVersion)
-                                               : versionToInstall_;
-    RegistrationEffects registration =
-        make_registration_effects(target, production_registration_ops());
-    config.captureRegistration = registration.capture;
-    config.registerInstall = registration.apply;
-    config.restoreRegistration = registration.restore;
+    // Built lazily, when each callback is actually invoked, so they see the verified version
+    // rather than a placeholder captured before the manifest was read.
+    install::RegistrationTarget baseTarget = registrationTarget_;
+    auto registration = std::make_shared<RegistrationEffects>();
+    const auto ensureRegistration = [baseTarget, registration, versionToInstall]() {
+      if (registration->apply) return;
+      install::RegistrationTarget target = baseTarget;
+      target.version = widen(*versionToInstall);
+      *registration = make_registration_effects(target, production_registration_ops());
+    };
+    // capture runs before the swap and before RegisterInstall, and it only reads what is already
+    // registered -- so it does not need the new version, but it must share the same snapshot as
+    // the restore that may follow it.
+    config.captureRegistration = [ensureRegistration, registration]() {
+      ensureRegistration();
+      return registration->capture();
+    };
+    config.registerInstall = [ensureRegistration, registration, versionToInstall]() {
+      if (versionToInstall->empty()) return false;  // nothing verified: nothing to register as
+      ensureRegistration();
+      return registration->apply();
+    };
+    config.restoreRegistration = [ensureRegistration, registration]() {
+      ensureRegistration();
+      return registration->restore();
+    };
 
     RelaunchConfig relaunchConfig;
     relaunchConfig.installDir = options_.installDir;
     relaunchConfig.serviceName = options_.serviceName;
     relaunchConfig.healthLogPath = options_.healthLogPath;
-    relaunchConfig.expectedVersion = to_utf8(target.version);
+    // Read when relaunch runs, not now: after a rollback this holds the version that is back on
+    // disk, and health must check for THAT rather than for the one the update was carrying.
     // Only the host writes a health report. When it was not running before the update -- a
     // client-initiated update on a machine nobody is hosting from -- there is nothing to wait for.
     relaunchConfig.healthReporterImage = L"GNLinkHost.exe";
@@ -283,8 +392,10 @@ class UpdaterEffects {
     // Deferred: the plan needs what Quiesce stopped, and Quiesce has not run yet when this is
     // wired. The lambda reads `stopped` at the moment it is called, which is after.
     auto relaunchEffects = std::make_shared<RelaunchEffects>();
-    config.relaunch = [this, relaunchConfig, stopped, relaunchEffects]() {
-      *relaunchEffects = make_relaunch_effects(relaunchConfig, *stopped);
+    config.relaunch = [this, relaunchConfig, stopped, relaunchEffects, expectedVersion]() {
+      RelaunchConfig live = relaunchConfig;
+      live.expectedVersion = *expectedVersion;
+      *relaunchEffects = make_relaunch_effects(live, *stopped);
       const bool ok = relaunchEffects->relaunch();
       for (const RelaunchOutcome& outcome : relaunchEffects->lastOutcomes()) {
         log_line("relaunch " + to_utf8(outcome.imageName) + ": " + outcome.detail);
@@ -301,7 +412,8 @@ class UpdaterEffects {
 
     WindowsUpdateEffects effects(config);
     effects.set_installed_version(options_.installedVersion);
-    ReadySignaller signaller(effects, options_.readyEventName);
+    ReadySignaller signaller(effects, options_.readyEventName, versionToInstall, expectedVersion);
+    signaller.set_installed_version(options_.installedVersion);
     const UpdateOutcome outcome = run_update(signaller, default_verifier(), platform);
     return outcome;
   }
@@ -318,8 +430,13 @@ class UpdaterEffects {
    */
   class ReadySignaller : public UpdateEffects {
    public:
-    ReadySignaller(UpdateEffects& inner, std::wstring eventName)
-        : inner_(inner), eventName_(std::move(eventName)) {}
+    ReadySignaller(UpdateEffects& inner, std::wstring eventName,
+                   std::shared_ptr<std::string> versionToInstall,
+                   std::shared_ptr<std::string> expectedVersion)
+        : inner_(inner),
+          eventName_(std::move(eventName)),
+          versionToInstall_(std::move(versionToInstall)),
+          expectedVersion_(std::move(expectedVersion)) {}
 
     bool AcquireLock() override { return inner_.AcquireLock(); }
     void ReleaseLock() override { inner_.ReleaseLock(); }
@@ -330,9 +447,16 @@ class UpdaterEffects {
     bool Download(const ManifestFields& f) override { return inner_.Download(f); }
     bool VerifyDownload(const ManifestFields& f) override {
       const bool ok = inner_.VerifyDownload(f);
-      // Here and nowhere else. The lock is held and the bytes are verified, so the host exiting
-      // now cannot leave the product in a state this process could not finish.
-      if (ok) signal_ready(eventName_);
+      if (ok) {
+        // The first moment the version is both KNOWN and TRUSTWORTHY. Registration and health
+        // read it from here, so DisplayVersion and the health check describe the release that
+        // was actually verified rather than whatever this binary was compiled as.
+        *versionToInstall_ = f.version;
+        *expectedVersion_ = f.version;
+        // Here and nowhere else. The lock is held and the bytes are verified, so the host exiting
+        // now cannot leave the product in a state this process could not finish.
+        signal_ready(eventName_);
+      }
       return ok;
     }
     void DiscardDownload() override { inner_.DiscardDownload(); }
@@ -342,12 +466,25 @@ class UpdaterEffects {
     bool RegisterInstall() override { return inner_.RegisterInstall(); }
     bool Relaunch() override { return inner_.Relaunch(); }
     bool HealthCheck() override { return inner_.HealthCheck(); }
-    bool Rollback() override { return inner_.Rollback(); }
+    bool Rollback() override {
+      // The files are going back to what was installed before, so anything that checks the
+      // product afterwards has to look for THAT version. Without this the health check that
+      // follows a rollback would wait for the version the update was carrying, which is no
+      // longer on disk, and report a failure that the rollback had just finished preventing.
+      *expectedVersion_ = installedVersion_;
+      return inner_.Rollback();
+    }
     void Commit() override { inner_.Commit(); }
 
    private:
     UpdateEffects& inner_;
     std::wstring eventName_;
+    std::shared_ptr<std::string> versionToInstall_;
+    std::shared_ptr<std::string> expectedVersion_;
+    std::string installedVersion_;
+
+   public:
+    void set_installed_version(std::string v) { installedVersion_ = std::move(v); }
   };
 
   UpdaterOptions options_;
@@ -408,6 +545,10 @@ int wmain(int argc, wchar_t** argv) {
       return 11;
     case UpdateResult::RolledBack:
       return 12;
+    // Worse than 12 and better than 13: the files are right, but nothing is running. A remote
+    // user cannot reach this machine until someone starts it at the keyboard.
+    case UpdateResult::RolledBackNotRelaunched:
+      return 14;
     case UpdateResult::RollbackFailed:
       // The only outcome where a human has to look.
       return 13;

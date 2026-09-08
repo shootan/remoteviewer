@@ -78,6 +78,15 @@ class FakeEffects : public UpdateEffects {
   int commitCount = 0;
   bool lockReleased = false;
 
+  /** How many times a step ran. "once, not in a loop" is a claim worth being able to make. */
+  int count(const std::string& name) const {
+    int n = 0;
+    for (const std::string& c : calls) {
+      if (c == name) ++n;
+    }
+    return n;
+  }
+
   bool ran(const std::string& name) const {
     for (const auto& c : calls) if (c == name) return true;
     return false;
@@ -261,13 +270,35 @@ int main() {
     check("swap fails -> registration never ran", !f.ran("RegisterInstall"));
   }
   {
+    // And the outcome when the restore works but nothing comes back up. Worse than RolledBack for
+    // a remote user: the files are right and the machine is unreachable.
+    FakeEffects f;
+    f.registerOk = false;
+    f.relaunchOk = false;
+    const UpdateOutcome o = run_update(f, accepting(), "windows");
+    check("rolled back but not relaunched is its own outcome",
+          o.result == UpdateResult::RolledBackNotRelaunched, result_name(o.result));
+    check("...and it is not reported as an ordinary rollback",
+          o.result != UpdateResult::RolledBack);
+    // No retry. A second identical attempt is unlikely to differ, and looping here would sit
+    // between the user and a machine that is already in its restored state.
+    check("relaunch is attempted once, not repeated", f.count("Relaunch") == 1,
+          std::to_string(f.count("Relaunch")));
+  }
+  {
     FakeEffects f;
     f.registerOk = false;
     const UpdateOutcome o = run_update(f, accepting(), "windows");
     check("registration fails -> RolledBack", o.result == UpdateResult::RolledBack,
           result_name(o.result));
     check("registration fails -> rollback ran", f.ran("Rollback"));
-    check("registration fails -> relaunch never ran", !f.ran("Relaunch"));
+    // This assertion used to require the opposite, and it was protecting a real defect: putting
+    // the files back and stopping there leaves a machine whose files are correct and whose host
+    // is not running. The host is one of the processes stopped to do the swap, so for a remote
+    // user that is an unreachable machine with no way in to fix it. Restoring is only half of a
+    // rollback; the other half is that what was running is running again.
+    check("registration fails -> the previous version is started again", f.ran("Relaunch"));
+    check("registration fails -> and its health is checked", f.ran("HealthCheck"));
   }
   {
     FakeEffects f;

@@ -56,6 +56,7 @@ const char* result_name(UpdateResult r) {
     case UpdateResult::UpdatedButNotRelaunched: return "UpdatedButNotRelaunched";
     case UpdateResult::AbandonedBeforeSwap: return "AbandonedBeforeSwap";
     case UpdateResult::RolledBack: return "RolledBack";
+    case UpdateResult::RolledBackNotRelaunched: return "RolledBackNotRelaunched";
     case UpdateResult::RollbackFailed: return "RollbackFailed";
   }
   return "?";
@@ -73,7 +74,25 @@ UpdateOutcome run_update(UpdateEffects& effects,
     enter(UpdateState::Rollback);
     out.detail = why;
     if (effects.Rollback()) {
-      out.result = UpdateResult::RolledBack;
+      // Putting the files back is only half of it. The host was stopped to do the swap, and a
+      // machine whose files are correct but whose host is not running is one a remote user cannot
+      // reach -- there is no way back in to fix anything. So the previous version is started
+      // again, and whether that worked is reported rather than assumed.
+      //
+      // Once. No retry: a relaunch that failed once is unlikely to succeed on a second identical
+      // attempt, and a loop here would sit between the user and a machine that is already in its
+      // restored state.
+      enter(UpdateState::Relaunch);
+      if (effects.Relaunch()) {
+        // And the restored build is checked the same way a new one would be. What is on disk now
+        // is the previous version, so this is a question about that -- the caller is responsible
+        // for the health check knowing which version to expect.
+        enter(UpdateState::Health);
+        (void)effects.HealthCheck();
+        out.result = UpdateResult::RolledBack;
+      } else {
+        out.result = UpdateResult::RolledBackNotRelaunched;
+      }
     } else {
       // The only outcome where the install may be inconsistent. Named distinctly so it cannot be
       // mistaken for an ordinary failed update in a log.

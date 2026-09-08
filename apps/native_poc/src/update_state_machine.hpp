@@ -54,8 +54,18 @@ enum class UpdateResult {
   UpdatedButNotRelaunched,
   // Stopped before anything on disk was touched. The install is untouched and still works.
   AbandonedBeforeSwap,
-  // The swap or what follows it failed and the previous version was restored.
+  // The swap or what follows it failed and the previous version was restored, AND the product
+  // that was running before is running again.
   RolledBack,
+  /**
+   * Restored, but nothing came back up.
+   *
+   * Separate from RolledBack because for a remote user it is the worse outcome of the two. The
+   * files on disk are correct and the machine is unreachable: the host is one of the processes
+   * that was stopped to do the swap, and if it does not return there is no way back in to fix
+   * anything. "Restored" and "usable" are not the same claim.
+   */
+  RolledBackNotRelaunched,
   // The swap failed AND the rollback failed. The worst outcome, reported distinctly because it is
   // the only one where the install may be inconsistent and a human has to look.
   RollbackFailed,

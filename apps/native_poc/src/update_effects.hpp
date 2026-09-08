@@ -99,6 +99,18 @@ struct UpdateEffectsConfig {
   std::function<bool(const ManifestArtifact& artifact, const std::wstring& destPath)> fetchArtifact;
 
   /**
+   * Fetches the manifest and its detached signature. Required unless one was injected.
+   *
+   * This was missing, and its absence was not visible from anywhere: FetchManifest returned the
+   * document set_manifest had been given, set_manifest had no production caller, and so the
+   * updater ended every run at its first step reporting "no manifest available". Every later
+   * stage was correct and unreachable. Making it a config field means a production instance that
+   * neither injects a document nor supplies a fetcher fails validate() instead of failing
+   * silently at run time.
+   */
+  std::function<bool(std::string* document, std::string* signatureHex)> fetchManifest;
+
+  /**
    * The processes to stop, each with a full identity.
    *
    * Injected rather than discovered here, and that is the point: a test supplies dummies it

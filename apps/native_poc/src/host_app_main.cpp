@@ -47,6 +47,7 @@
 #include "env_util.hpp"
 #include "update_check.hpp"
 #include "update_handoff.hpp"
+#include "update_job_guard.hpp"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -971,9 +972,25 @@ void start_update_handoff(HWND window) {
   BOOL started = CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, FALSE,
                                 CREATE_BREAKAWAY_FROM_JOB, nullptr, installDir.c_str(), &si, &pi);
   if (!started) {
+    // Refused breakaway only matters if this process is in a job that would take its children
+    // down. Asked rather than assumed, and answered no by default: an updater that dies when this
+    // process stops -- which is the very next step -- leaves files half replaced and nothing
+    // running to restore them (ledger (b)).
+    namespace upd = remote60::native_poc::update;
+    const upd::JobKind kind = upd::job_kind_of_current_process();
+    const upd::LaunchGuardVerdict verdict = upd::judge_launch(kind, false);
+    if (verdict != upd::LaunchGuardVerdict::Ok) {
+      append_host_app_log(std::string("[host-app] update: refusing to start the updater -- ") +
+                          upd::launch_guard_verdict_name(verdict));
+      CloseHandle(readyEvent);
+      MessageBoxW(window,
+                  L"지금은 업데이트를 시작할 수 없습니다.\n\n"
+                  L"설치된 버전은 그대로이며 계속 사용할 수 있습니다.",
+                  kProductName, MB_OK | MB_ICONINFORMATION);
+      return;
+    }
     started = CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, FALSE, 0, nullptr,
                              installDir.c_str(), &si, &pi);
-    if (started) append_host_app_log("[host-app] update: the updater could not break away from a job object");
   }
   if (!started) {
     append_host_app_log("[host-app] update: could not start the updater (error " +

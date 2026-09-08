@@ -272,6 +272,7 @@ add_executable(remote60_host_app WIN32
   # the handoff that decides when this process may get out of the updater's way.
   src/update_check.cpp
   src/update_handoff.cpp
+  src/update_job_guard.cpp
   src/update_http.cpp
   src/update_manifest.cpp
   src/payload_name.cpp
@@ -714,6 +715,7 @@ endif()
 add_executable(remote60_updater
   src/updater_main.cpp
   src/updater_options.cpp
+  src/update_job_guard.cpp
   src/update_state_machine.cpp
   src/update_effects.cpp
   src/update_manifest.cpp
@@ -741,6 +743,18 @@ if(MSVC)
   target_link_options(remote60_updater PRIVATE
     "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'"
   )
+endif()
+
+# Two conditions that used to be assumed and are now refused by default: surviving the process
+# that started us, and a working directory only administrators can write.
+add_executable(remote60_update_job_guard_test
+  src/update_job_guard.cpp
+  src/update_job_guard_test.cpp
+)
+target_include_directories(remote60_update_job_guard_test PRIVATE src)
+target_link_libraries(remote60_update_job_guard_test PRIVATE advapi32)
+if(MSVC)
+  target_compile_options(remote60_update_job_guard_test PRIVATE /utf-8)
 endif()
 
 # When the host may get out of the way, and what it hands over. Pure decisions -- nothing here

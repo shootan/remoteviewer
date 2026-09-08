@@ -98,6 +98,9 @@ bool UpdateEffectsConfig::validate(std::string* detail) const {
   if (!captureRegistration) return fail("captureRegistration not set");
   if (!registerInstall) return fail("registerInstall not set");
   if (!restoreRegistration) return fail("restoreRegistration not set");
+  // Not required here, because a test may inject the document instead -- but the updater's own
+  // options DO require the url that builds it, so the production path cannot reach run_update
+  // without one. See updater_options.validate().
   if (!relaunch) return fail("relaunch not set");
   if (!healthCheck) return fail("healthCheck not set");
   // Nothing reads these yet. Requiring them now means a future RegisterInstall cannot be
@@ -230,6 +233,21 @@ void WindowsUpdateEffects::ReleaseLock() {
 // ---------------------------------------------------------------- manifest and version
 
 bool WindowsUpdateEffects::FetchManifest(std::string* document, std::string* signatureHex) {
+  // An injected document wins, so a test that supplies one never reaches the network. Production
+  // supplies no document and a fetcher instead.
+  if (manifestDocument_.empty() && config_.fetchManifest) {
+    std::string fetched;
+    std::string fetchedSignature;
+    if (!config_.fetchManifest(&fetched, &fetchedSignature)) {
+      lastError_ = "could not fetch the manifest";
+      return false;
+    }
+    // Kept, so everything downstream in this attempt reads the same bytes that were fetched once.
+    // Re-fetching per stage would let the server change what is being installed mid-update, which
+    // is the same hazard releaseId exists for one level down.
+    manifestDocument_ = std::move(fetched);
+    manifestSignatureHex_ = std::move(fetchedSignature);
+  }
   if (manifestDocument_.empty() || manifestSignatureHex_.empty()) {
     lastError_ = "no manifest available";
     return false;
