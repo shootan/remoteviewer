@@ -69,6 +69,7 @@ struct LogUploadStatus {
   uint32_t lastStatus = 0;        // http status of the last send (0 = unreachable)
   uint64_t lastOkUs = 0;          // steady-clock microseconds of the last accepted batch
   uint64_t lastRejectUs = 0;      // ... of the last 401
+  uint64_t workerCycles = 0;      // worker loop iterations (wake-ups); a spin shows here first
 };
 
 /**

@@ -132,6 +132,7 @@ struct UploaderState {
   uint64_t wakeSeq = 0;           // bumped whenever the worker should re-read its config now
   std::function<void()> authRejectedCallback;
   uint64_t lastTransientDiagUs = 0;
+  uint64_t workerCycles = 0;
 };
 
 UploaderState& state() {
@@ -244,17 +245,28 @@ void worker_loop() {
   uint64_t cycles = 0;
   uint64_t flushes = 0;
   uint64_t seenWake = 0;
+  uint64_t lastIdleDiagUs = 0;
+  constexpr uint64_t kIdleAliveDiagIntervalUs = 60'000'000;  // one "idle alive" line per minute at most
   for (;;) {
     SendJob job;
     bool finalPass = false;
     {
       std::unique_lock<std::mutex> lk(s.mu);
       // A configure / clear bumps wakeSeq so a worker asleep on the old cadence re-reads its
-      // config now instead of at the end of the old interval.
+      // config now instead of at the end of the old interval. A full batch wakes the worker only
+      // when it may actually send: paused on a 401 (or without credentials) the queue can sit at
+      // or past batchMaxBytes for as long as the pause lasts, and a wake condition that stayed
+      // true made this loop spin on a core and write an "idle alive" diag line every 30 cycles --
+      // 772 KB/s of diag, measured (A01, stabilization audit U3 / probe Q1). While paused the
+      // worker sleeps the flush interval like an idle one; the new token's configure bumps
+      // wakeSeq and it drains at once.
       s.cv.wait_for(lk, std::chrono::milliseconds(s.config.flushIntervalMs), [&s, seenWake] {
-        return s.stopping || s.queuedBytes >= s.config.batchMaxBytes || s.wakeSeq != seenWake;
+        return s.stopping || s.wakeSeq != seenWake ||
+               (s.credentials && !s.authRejected && s.queuedBytes >= s.config.batchMaxBytes);
       });
       seenWake = s.wakeSeq;
+      ++cycles;
+      s.workerCycles = cycles;
       finalPass = s.stopping;
       const uint64_t nowUs = steady_now_us();
       if (!next_job_locked(s, nowUs, &job)) {
@@ -266,11 +278,16 @@ void worker_loop() {
           return;
         }
         // A quiet minute still proves the worker is alive, which is the thing the first bug hid.
-        if (++cycles % 30 == 0) {
+        // On the clock, not per cycle: a cycle count is only a minute when the loop sleeps its
+        // interval, and the one time it did not (A01) this line was the disk flood.
+        if (lastIdleDiagUs == 0) lastIdleDiagUs = nowUs;
+        if (nowUs - lastIdleDiagUs >= kIdleAliveDiagIntervalUs) {
+          lastIdleDiagUs = nowUs;
           diag("idle alive cycles=" + std::to_string(cycles) + " sent=" + std::to_string(s.sentBatches) +
                " dropped=" + std::to_string(s.droppedLines) + " held=" + std::to_string(s.held.size()) +
                (s.authRejected ? " authRejected=1" : "") + (s.credentials ? "" : " credentials=0"));
         }
+        // Nothing to send: back to the timed wait above (never an immediate re-run).
         continue;
       }
     }
@@ -547,6 +564,7 @@ void log_upload_stop() {
   s.lastStatus = 0;
   s.lastOkUs = s.lastRejectUs = 0;
   s.lastTransientDiagUs = 0;
+  s.workerCycles = 0;
 }
 
 bool log_upload_running() {
@@ -573,6 +591,7 @@ LogUploadStatus log_upload_status() {
   st.lastStatus = s.lastStatus;
   st.lastOkUs = s.lastOkUs;
   st.lastRejectUs = s.lastRejectUs;
+  st.workerCycles = s.workerCycles;
   return st;
 }
 
