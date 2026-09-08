@@ -52,8 +52,18 @@ enum class UpdateResult {
   // The new build is in place but did not come back up on its own. NOT rolled back -- the files
   // are the new version and the user can start it from the Start menu.
   UpdatedButNotRelaunched,
-  // Stopped before anything on disk was touched. The install is untouched and still works.
+  // Stopped before anything on disk was touched. The install is untouched and still works, and
+  // whatever left on our account has been started again.
   AbandonedBeforeSwap,
+  /**
+   * Nothing on disk was touched, and something that left is not back.
+   *
+   * The worst-looking outcome for its cause. Nothing went wrong with the update -- no file was
+   * replaced, no registration changed -- and yet the machine may be unreachable, because the
+   * product was asked to make way and then nobody asked it back. Harder to diagnose than a failed
+   * update precisely because there is no damage to find.
+   */
+  AbandonedNotRelaunched,
   // The swap or what follows it failed and the previous version was restored, AND the product
   // that was running before is running again.
   RolledBack,
@@ -165,6 +175,18 @@ struct UpdateOutcome {
  *   - A failed Relaunch does NOT roll back. The files on disk are the new version and they are
  *     consistent; undoing a good install because it did not restart itself would be the worse
  *     outcome.
+ */
+/**
+ * NOTE on the order of Quiesce and readiness.
+ *
+ * A caller may be waiting to exit on this update's behalf, and it is released as soon as the
+ * download verifies -- before Quiesce enumerates anything. That means a process which left
+ * BECAUSE of that release is already gone by the time targets are enumerated, so it cannot appear
+ * in the list of things to bring back. Implementations that signal readiness must therefore
+ * capture the target identities BEFORE they signal, not when Quiesce asks.
+ *
+ * The state machine cannot enforce that -- it does not know a signal exists -- so it is stated
+ * here and the updater's decorator does it.
  */
 UpdateOutcome run_update(UpdateEffects& effects,
                          const SignatureVerifier& verifier,

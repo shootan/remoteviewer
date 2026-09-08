@@ -412,7 +412,13 @@ class UpdaterEffects {
 
     WindowsUpdateEffects effects(config);
     effects.set_installed_version(options_.installedVersion);
-    ReadySignaller signaller(effects, options_.readyEventName, versionToInstall, expectedVersion);
+    // Reads the enumerator once and remembers the result, so the identities exist before anyone
+    // is told they may leave.
+    const auto captureNow = [enumerate, stopped]() {
+      if (stopped->empty()) *stopped = enumerate();
+    };
+    ReadySignaller signaller(effects, options_.readyEventName, versionToInstall, expectedVersion,
+                             captureNow);
     signaller.set_installed_version(options_.installedVersion);
     const UpdateOutcome outcome = run_update(signaller, default_verifier(), platform);
     return outcome;
@@ -432,11 +438,13 @@ class UpdaterEffects {
    public:
     ReadySignaller(UpdateEffects& inner, std::wstring eventName,
                    std::shared_ptr<std::string> versionToInstall,
-                   std::shared_ptr<std::string> expectedVersion)
+                   std::shared_ptr<std::string> expectedVersion,
+                   std::function<void()> captureTargets)
         : inner_(inner),
           eventName_(std::move(eventName)),
           versionToInstall_(std::move(versionToInstall)),
-          expectedVersion_(std::move(expectedVersion)) {}
+          expectedVersion_(std::move(expectedVersion)),
+          captureTargets_(std::move(captureTargets)) {}
 
     bool AcquireLock() override { return inner_.AcquireLock(); }
     void ReleaseLock() override { inner_.ReleaseLock(); }
@@ -453,6 +461,11 @@ class UpdaterEffects {
         // was actually verified rather than whatever this binary was compiled as.
         *versionToInstall_ = f.version;
         *expectedVersion_ = f.version;
+        // BEFORE the signal, and that order is the whole point. The moment the caller is released
+        // it starts exiting, and a process that has already exited cannot be enumerated -- so
+        // asking Quiesce to discover the targets later would produce a list that is missing
+        // exactly the process this update told to leave, and nothing would ever bring it back.
+        if (captureTargets_) captureTargets_();
         // Here and nowhere else. The lock is held and the bytes are verified, so the host exiting
         // now cannot leave the product in a state this process could not finish.
         signal_ready(eventName_);
@@ -481,6 +494,7 @@ class UpdaterEffects {
     std::wstring eventName_;
     std::shared_ptr<std::string> versionToInstall_;
     std::shared_ptr<std::string> expectedVersion_;
+    std::function<void()> captureTargets_;
     std::string installedVersion_;
 
    public:
@@ -543,6 +557,11 @@ int wmain(int argc, wchar_t** argv) {
       return 10;
     case UpdateResult::AbandonedBeforeSwap:
       return 11;
+    // Nothing was changed and something is not running. No damage to find, and possibly no way
+    // in to look -- its own code so an operator is not left reading "abandoned" and assuming all
+    // is well.
+    case UpdateResult::AbandonedNotRelaunched:
+      return 15;
     case UpdateResult::RolledBack:
       return 12;
     // Worse than 12 and better than 13: the files are right, but nothing is running. A remote

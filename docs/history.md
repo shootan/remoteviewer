@@ -9539,3 +9539,13 @@ Next action
 - **문서 재정정**: 체크리스트의 "남은 것은 전부 실기" 서술을 고쳤다 — **그것도 일렀다.**
 - 변경 파일: `update_effects.{hpp,cpp}`·`update_effects_test.cpp` · `update_state_machine.{hpp,cpp}`·`update_state_machine_test.cpp` · `updater_main.cpp` · `host_app_main.cpp` · `update_job_guard.{hpp,cpp}`·`update_job_guard_test.cpp`(신규) · `apps/native_poc/CMakeLists.txt` · `docs/수동확인_체크리스트.md` · `docs/history.md`.
 - 버전 인상·설치본·설치·라이브 조작·배포·push 없음.
+
+### 463) 2026-09-08 abandon 경로 복귀 — **아무 문제도 없었는데 기계가 unreachable** 이던 창을 닫았다
+- #462 에서 스스로 남겨 둔 구멍이다. `PrepareForSwap`·`Quiesce` 실패는 **ready 신호 이후**인데 `AbandonedBeforeSwap` 은 롤백 경로를 안 타므로 **아무도 제품을 다시 안 띄웠다.** **파일은 하나도 안 바뀌었는데 기계가 unreachable** 이고, **고칠 손상이 없어서 원인 찾기가 더 어렵다.**
+- ⚠️ **더 깊은 문제가 있었다 — 되살릴 목록에 호스트가 애초에 들어갈 수 없었다.** `Quiesce` 가 `enumerateTargets()` 를 **그때** 부르는데, 호스트는 **ready 신호 때문에 이미 나간 뒤**다. **이미 종료한 프로세스는 열거되지 않으므로**, 이 업데이트가 나가라고 시킨 바로 그 프로세스가 **목록에서 빠진다.** abandon 에 Relaunch 를 붙여도 호스트는 안 돌아왔을 것이다.
+  - → **신원 확보를 신호보다 앞으로** 옮겼다. `ReadySignaller` 가 `VerifyDownload` 성공 시 **`captureTargets()` 를 먼저 부르고 그다음에** signal 한다. 순서 자체가 요구사항이므로 `run_update` 선언부에 주석으로 명시했다 — 상태기계는 신호의 존재를 모르므로 강제할 수 없고, 구현이 지켜야 한다.
+- **abandon 람다 신설**: 네 갈래(Download·Verify·Prepare·Quiesce 실패)가 전부 이걸 통과한다. **Relaunch 를 항상 부른다** — 아무도 안 나간 경로에서는 목록이 비어 있어 아무 일도 안 하므로, **어느 경로가 필요한지 추측하는 것보다 전부 부르는 편이 안전하다.** 1회, 반복 없음.
+- **`AbandonedNotRelaunched` 신설**(종료코드 15). **"아무것도 안 바꿨다" 와 "기계에 닿을 수 있다" 는 별개 주장**이고 여기서는 하나만 참이다. 운영자가 "abandoned" 만 보고 괜찮다고 여기지 않도록 코드를 나눴다.
+- 검증 — **`qwinsta`: console 만 Active.** C++ 업데이트 **13종 890 checks / 0 failed**(state_machine 65→**75**). JS 디렉터리 스위트 전부 통과. **대조군**: abandon 의 Relaunch 를 끄면 **5 FAIL**. 라이브 무영향: PID 3종 불변, `DisplayVersion` **0.2.104**.
+- 변경 파일: `update_state_machine.{hpp,cpp}`·`update_state_machine_test.cpp` · `updater_main.cpp` · `docs/history.md`.
+- 버전 인상·설치본·설치·라이브 조작·배포·push 없음.

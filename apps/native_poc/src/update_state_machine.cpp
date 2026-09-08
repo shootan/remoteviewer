@@ -55,6 +55,7 @@ const char* result_name(UpdateResult r) {
     case UpdateResult::Updated: return "Updated";
     case UpdateResult::UpdatedButNotRelaunched: return "UpdatedButNotRelaunched";
     case UpdateResult::AbandonedBeforeSwap: return "AbandonedBeforeSwap";
+    case UpdateResult::AbandonedNotRelaunched: return "AbandonedNotRelaunched";
     case UpdateResult::RolledBack: return "RolledBack";
     case UpdateResult::RolledBackNotRelaunched: return "RolledBackNotRelaunched";
     case UpdateResult::RollbackFailed: return "RollbackFailed";
@@ -67,6 +68,27 @@ UpdateOutcome run_update(UpdateEffects& effects,
                          const std::string& platform) {
   UpdateOutcome out;
   const auto enter = [&out](UpdateState s) { out.visited.push_back(s); };
+
+  /**
+   * Gives up without having changed anything, and puts back whatever left on our account.
+   *
+   * The second half is the part that was missing. A caller may already have exited because this
+   * update told it the download was verified, and abandoning after that point left a machine with
+   * every file intact and nothing running -- which for a remote user is an unreachable machine,
+   * arrived at without a single thing going wrong. Nothing to repair, nothing to find.
+   *
+   * Relaunch is safe on the paths where nothing left: no targets were captured, so the plan is
+   * empty and it does nothing. Attempted once, never in a loop.
+   */
+  const auto abandon = [&](const char* why) {
+    out.detail = why;
+    if (effects.Relaunch()) {
+      out.result = UpdateResult::AbandonedBeforeSwap;
+    } else {
+      out.result = UpdateResult::AbandonedNotRelaunched;
+    }
+    return out;
+  };
 
   // Everything past this point either rolls back or is abandoned cleanly, so the rollback path
   // is written once here and reused.
@@ -144,17 +166,13 @@ UpdateOutcome run_update(UpdateEffects& effects,
   enter(UpdateState::Download);
   if (!effects.Download(fields)) {
     effects.DiscardDownload();  // a partial file must not survive to be picked up later
-    out.result = UpdateResult::AbandonedBeforeSwap;
-    out.detail = "download did not complete";
-    return out;
+    return abandon("download did not complete");
   }
 
   enter(UpdateState::Verify);
   if (!effects.VerifyDownload(fields)) {
     effects.DiscardDownload();
-    out.result = UpdateResult::AbandonedBeforeSwap;
-    out.detail = "downloaded artifact did not match the manifest";
-    return out;
+    return abandon("downloaded artifact did not match the manifest");
   }
 
   enter(UpdateState::Prepare);
@@ -162,17 +180,17 @@ UpdateOutcome run_update(UpdateEffects& effects,
     // Deliberately does NOT escalate to a forced shutdown. The product is in the middle of doing
     // something, and an update is worth less than whatever that is. The verified download is kept
     // so the next attempt starts here rather than at the top.
-    out.result = UpdateResult::AbandonedBeforeSwap;
-    out.detail = "product did not reach a safe point";
-    return out;
+    //
+    // Past the point where a waiting caller has been released, so this owes a restoration.
+    return abandon("product did not reach a safe point");
   }
 
   enter(UpdateState::Quiesce);
   if (!effects.Quiesce()) {
-    // Same rule, same reason. Nothing on disk has been touched yet, so backing out costs nothing.
-    out.result = UpdateResult::AbandonedBeforeSwap;
-    out.detail = "product did not shut down cleanly";
-    return out;
+    // Same rule, same reason. Nothing on disk has been touched yet, so backing out costs nothing
+    // -- except that some of the product may already have stopped, and putting it back is this
+    // path's job.
+    return abandon("product did not shut down cleanly");
   }
 
   // ---- past here the installation is being modified, so every failure rolls back.
