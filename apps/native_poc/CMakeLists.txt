@@ -797,7 +797,7 @@ target_compile_definitions(remote60_updater_scenarios_test
 target_include_directories(remote60_updater_scenarios_test PRIVATE src)
 target_link_libraries(remote60_updater_scenarios_test PRIVATE
   bcrypt winhttp advapi32 ole32 oleaut32 uuid shell32 user32
-)
+ rstrtmgr)
 if(MSVC)
   target_compile_options(remote60_updater_scenarios_test PRIVATE /utf-8)
 endif()

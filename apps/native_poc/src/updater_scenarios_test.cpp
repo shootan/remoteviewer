@@ -25,6 +25,9 @@
 
 #include <windows.h>
 
+// Restart Manager, used read-only: it is the supported way to ask which processes hold a file.
+#include <RestartManager.h>
+
 #include <tlhelp32.h>
 
 #include <cstdio>
@@ -151,18 +154,27 @@ std::vector<std::pair<std::wstring, DWORD>> running_under(const std::wstring& di
   entry.dwSize = sizeof(entry);
   if (Process32FirstW(snapshot, &entry)) {
     do {
-      // Identified from the SNAPSHOT, with no OpenProcess.
+      // THE RULE: the name narrows the candidates; the PATH decides. A process whose path cannot
+      // be read is reported and left running -- never stopped.
       //
-      // This used to open each process to read its full image path, and skip any it could not
-      // open -- which turned out to be exactly the processes it existed to stop. They were listed
-      // in the snapshot by name the whole time; the sweep simply could not see them, reported
-      // nothing running, and left them holding their images. The next scenario then could not
-      // write its starting bytes, and failed an assertion about bytes with no process visible
-      // anywhere to explain it.
+      // Two true things meet at this line and it is easy to take the wrong one for the rule.
       //
-      // A prefix match on the name, because a swap renames what it replaces to
-      // `<name>.gnlink-old` and a process running that file keeps running under the new name.
-      // These two names appear nowhere else on a machine, which is what makes a name enough.
+      // The first: a sweep that needed a handle to see a process was blind to exactly the
+      // processes it existed to stop. They sat in the snapshot by name the whole time, so it
+      // reported nothing running and left them holding their images, and the next scenario could
+      // not write its starting bytes.
+      //
+      // The second, and the one that governs here: seeing something by name is not owning it.
+      // Reading "the name is enough" out of the first fact is how this came to terminate
+      // processes it could not identify -- and "nothing else on this machine is called
+      // ScnHost.exe" is a guess about the machine, not evidence about a process.
+      //
+      // So both hold. The name gets a process LOOKED at; only a path under `dir` gets it stopped.
+      // If the loop below ever loses its OpenProcess again, this stops being a scope and starts
+      // being a list of everything that shares a name -- which is what it was.
+      //
+      // The match is a prefix, because a swap renames what it replaces to `<name>.gnlink-old` and
+      // a process running that file keeps running under the new name.
       const std::wstring leaf = entry.szExeFile;
       const auto starts_with = [&leaf](const wchar_t* name) {
         const size_t n = wcslen(name);
@@ -197,6 +209,51 @@ std::vector<std::pair<std::wstring, DWORD>> running_under(const std::wstring& di
   }
   CloseHandle(snapshot);
   return found;
+}
+
+/**
+ * Who is holding `path`, asked of Windows rather than inferred.
+ *
+ * READ ONLY -- Restart Manager is being used purely as a question. It exists so an installer can
+ * ask "what would I have to close to replace this file", and it answers with the processes that
+ * have the file open or are running it, including ones a process snapshot cannot explain.
+ *
+ * This is here because a backup kept surviving a commit with no visible reason: the delete
+ * returned ACCESS_DENIED on a plain archive file with nothing running it that could be found by
+ * enumerating processes. Guessing produced three wrong answers in a row -- a running image, a
+ * stale image section, an open process handle -- and each was tested and disproved. Asking is
+ * cheaper than any of them, and it is the difference between a note that says "unexplained" and
+ * one that names a process.
+ */
+std::vector<std::wstring> holders_of(const std::wstring& path) {
+  std::vector<std::wstring> holders;
+  DWORD session = 0;
+  WCHAR key[CCH_RM_SESSION_KEY + 1]{};
+  if (RmStartSession(&session, 0, key) != ERROR_SUCCESS) return holders;
+
+  LPCWSTR files[1] = {path.c_str()};
+  if (RmRegisterResources(session, 1, files, 0, nullptr, 0, nullptr) == ERROR_SUCCESS) {
+    UINT needed = 0;
+    UINT count = 32;
+    std::vector<RM_PROCESS_INFO> info(count);
+    DWORD reason = 0;
+    const DWORD rc = RmGetList(session, &needed, &count, info.data(), &reason);
+    if (rc == ERROR_MORE_DATA) {
+      info.assign(needed, RM_PROCESS_INFO{});
+      count = needed;
+      if (RmGetList(session, &needed, &count, info.data(), &reason) != ERROR_SUCCESS) count = 0;
+    } else if (rc != ERROR_SUCCESS) {
+      count = 0;
+    }
+    for (UINT i = 0; i < count; ++i) {
+      std::wstring who = info[i].strAppName;
+      if (who.empty()) who = L"(unnamed)";
+      who += L"#" + std::to_wstring(info[i].Process.dwProcessId);
+      holders.push_back(who);
+    }
+  }
+  RmEndSession(session);
+  return holders;
 }
 
 /**
@@ -441,6 +498,13 @@ int main() {
   struct Knobs {
     bool startHost = true;      // whether the host is allowed to start
     bool startClient = true;    // ditto the client
+    /**
+     * Whether the client can be started by a route that hands back a handle.
+     *
+     * False models an elevated updater whose token launch fails and which falls through to the
+     * shell -- started, and no way to say which process it is. The consequence is the point.
+     */
+    bool clientOwnable = true;
     bool newHealthOk = true;    // does the NEW build report healthy
     bool oldHealthOk = true;    // does the RESTORED build report healthy
     bool quiesceOk = true;      // whether the stop completes
@@ -530,6 +594,33 @@ int main() {
         return knobs.quiesceOk ? RelaunchConfig::Liveness::Exited
                                : RelaunchConfig::Liveness::Running;
       };
+      // The user-context launch, modelling the elevated updater.
+      //
+      // Production duplicates the shell's token and calls CreateProcessWithTokenW, which needs
+      // SeImpersonatePrivilege -- an elevated process has it, and the updater is elevated. A test
+      // runner usually is not, so the real call fails here and the product falls through to the
+      // shell; that fall-through is a real path and gets its own case below, but it is not what
+      // an installed updater does, and letting it stand in for one would make every scenario
+      // measure the fallback.
+      //
+      // What matters is the shape and not the API: a launch that HANDS BACK A HANDLE. This does
+      // that, so ownership downstream is real ownership.
+      live.launchInUserContext = [knobs](const std::wstring& exePath, const std::wstring& workDir,
+                                        void** handleOut, uint32_t* pidOut) {
+        if (!knobs.clientOwnable) return false;  // "the token launch did not work here"
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        std::wstring cmd = L"\"" + exePath + L"\"";
+        if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                            nullptr, workDir.empty() ? nullptr : workDir.c_str(), &si, &pi)) {
+          return false;
+        }
+        CloseHandle(pi.hThread);
+        if (handleOut) *handleOut = pi.hProcess; else CloseHandle(pi.hProcess);
+        if (pidOut) *pidOut = pi.dwProcessId;
+        return true;
+      };
       RelaunchEffects real = make_relaunch_effects(live, stopped, table);
 
       RelaunchEffects wrapped = real;
@@ -577,6 +668,11 @@ int main() {
     // and give up. A pid that cannot be opened looks like "already gone", so a live one is used.
     UpdateOutcome outcome = effects.run("windows");
 
+    // EVERYTHING the assertions read is captured HERE, before this run's cleanup touches
+    // anything. It has to be: the sweep below terminates processes and the tree is removed at the
+    // end, so a check that looked afterwards could see a file freed or a process gone because
+    // THIS TEST tidied up, and report it as the product having restored or stopped something.
+    // "It is not running now" is only evidence if nothing in between was trying to make that true.
     Result r;
     r.outcome = outcome;
     r.effectsError = effects.last_effects_error();
@@ -655,10 +751,17 @@ int main() {
       // nobody has established; the open question is in the ledger rather than hidden in a check
       // that would have to be written vaguely enough to pass.
       for (const std::wstring& name : r.orphaned) {
+        // Asked, not guessed. Whoever holds it is named here.
+        std::string who;
+        for (const std::wstring& holder : holders_of(install + L"\\" + name + L".gnlink-old")) {
+          if (!who.empty()) who += ", ";
+          who += narrow(holder);
+        }
+        if (who.empty()) who = "(Restart Manager names nobody)";
         check("a surviving backup carries the reason the delete failed",
               r.effectsError.find(narrow(name)) != std::string::npos &&
                   r.effectsError.find("error ") != std::string::npos,
-              r.effectsError);
+              r.effectsError + " -- held by: " + who);
       }
     }
     return r;
@@ -837,6 +940,76 @@ int main() {
     // The point of the liveness check: what never left is not started again, so no duplicates.
     check("6 quiesce incomplete: the stubborn process was not duplicated",
           r.hostInstances <= 1, std::to_string(r.hostInstances));
+  }
+
+  // ============================================ 7. started, and nobody can say which process it is
+  //
+  // The client comes back through the shell because the owning route did not work. It is running
+  // and this attempt cannot prove which process it is, so it will not stop it -- and a rollback
+  // that would have to move the file it is holding does not begin.
+  //
+  // Refusing costs something real: the machine keeps the new build when it wanted the old one.
+  // The alternative costs more. Terminating on the strength of a name or a snapshot difference
+  // means terminating whatever else answers to it, and a half-finished restore leaves an
+  // installation that is part old and part new with the rollback blamed for it.
+
+  {
+    Knobs k;
+    k.stopped = {hostTarget, clientTarget};
+    k.clientOwnable = false;  // the token launch fails; the shell takes over
+    k.newHealthOk = false;    // and the new build is unhealthy, so a rollback is wanted
+    const Result r = run_scenario(k);
+    check("7 unowned client: the rollback does not proceed",
+          r.outcome.result == UpdateResult::RollbackFailed, result_name(r.outcome.result));
+    check("7 unowned client: and it says why -- no proof of ownership",
+          r.log.find("no proof of ownership") != std::string::npos, r.log);
+    check("7 unowned client: the reason names the refusal, not a file error",
+          r.effectsError.find("not rolling back") != std::string::npos, r.effectsError);
+    // Nothing was half-restored. The files are still the new ones, consistently, which is what
+    // makes another attempt possible.
+    check("7 unowned client: the files were left as the swap left them", r.hostBytes == newBody,
+          std::to_string(r.hostBytes.size()));
+    check("7 unowned client: and the backups are still there to go back with", r.hostBackupLeft);
+  }
+  {
+    // The counter-control. Same scenario, same unhealthy build, and the client started by a route
+    // that returns a handle -- so it can be stopped and the rollback runs. Without this the case
+    // above would also pass if rollbacks simply never worked.
+    Knobs k;
+    k.stopped = {hostTarget, clientTarget};
+    k.clientOwnable = true;
+    k.newHealthOk = false;
+    const Result r = run_scenario(k);
+    check("7 counter-control: an owned client is stopped and the rollback runs",
+          r.outcome.result != UpdateResult::RollbackFailed, result_name(r.outcome.result));
+    check("7 counter-control: the old bytes really are back", r.hostBytes == oldBody,
+          std::to_string(r.hostBytes.size()));
+  }
+
+  // ================================== 8. the shell-routed client, on a path that commits
+  //
+  // Scenario 2 with the owning launch taken away: the client comes back through the shell, the
+  // host is healthy, and the update commits. This is the shape the surviving `.gnlink-old` was
+  // first seen in, and it is reproduced here rather than left to a machine -- with Restart
+  // Manager asked directly about anything that survives, so the answer is a name and not a guess.
+
+  {
+    Knobs k;
+    k.stopped = {hostTarget, clientTarget};
+    k.clientOwnable = false;  // shell route, no handle
+    const Result r = run_scenario(k);
+    check("8 shell-routed client: the update still stands",
+          r.outcome.result == UpdateResult::Updated ||
+              r.outcome.result == UpdateResult::UpdatedButNotRelaunched,
+          std::string(result_name(r.outcome.result)) + " / " + r.outcome.detail);
+    check("8 shell-routed client: the new bytes are in place", r.hostBytes == newBody,
+          std::to_string(r.hostBytes.size()));
+    // Whatever happens to the backup, it is accounted for -- deleted, or named with its reason
+    // and its holder. The runner's own checks above assert that; this states the pairing.
+    check("8 shell-routed client: a backup that survives is one that was reported",
+          !r.clientBackupLeft || !r.orphaned.empty(),
+          std::to_string(r.orphaned.size()) + " reported, left=" +
+              std::to_string(r.clientBackupLeft ? 1 : 0));
   }
 
   // ================================================================ control: whose process is it

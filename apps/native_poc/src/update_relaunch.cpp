@@ -88,37 +88,6 @@ bool shell_dispatch(ComPtr<IShellDispatch2>* out) {
   return SUCCEEDED(application.As(out));
 }
 
-/**
- * Pids currently running the image at `path`.
- *
- * Needed because a shell-routed launch reports no pid: the shell starts the process, not us, so
- * ShellExecute has nothing to hand back. Without this the client this attempt started could never
- * be stopped -- and a rollback that has to move the client's file would fail on it, holding open
- * by a process the rollback itself had launched.
- *
- * Compared on the full path, so a same-named program somewhere else is not ours.
- */
-std::vector<DWORD> pids_running_image(const std::wstring& path) {
-  std::vector<DWORD> pids;
-  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-  if (snapshot == INVALID_HANDLE_VALUE) return pids;
-  PROCESSENTRY32W entry{};
-  entry.dwSize = sizeof(entry);
-  if (Process32FirstW(snapshot, &entry)) {
-    do {
-      HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
-      if (!h) continue;
-      wchar_t image[MAX_PATH]{};
-      DWORD size = MAX_PATH;
-      if (QueryFullProcessImageNameW(h, 0, image, &size) && _wcsicmp(image, path.c_str()) == 0) {
-        pids.push_back(entry.th32ProcessID);
-      }
-      CloseHandle(h);
-    } while (Process32NextW(snapshot, &entry));
-  }
-  CloseHandle(snapshot);
-  return pids;
-}
 
 /**
  * Whether `target` is still the process it was when captured.
@@ -183,6 +152,61 @@ bool gShellLaunchDisabled = false;
 }  // namespace
 
 void set_shell_launch_disabled_for_test(bool disabled) { gShellLaunchDisabled = disabled; }
+
+/**
+ * Starts `exePath` as the logged-on user and returns a handle to it.
+ *
+ * The shell's own process is the reference for "the interactive user": whoever owns the desktop
+ * owns that window, so duplicating its token gets the right user, the right session and the right
+ * integrity level without this having to work any of that out. CreateProcessWithTokenW then
+ * behaves like an ordinary launch -- it returns a PROCESS_INFORMATION -- which is the difference
+ * that matters. ShellExecute through the desktop does the same job and hands back nothing.
+ *
+ * Needs SeImpersonatePrivilege. An elevated process has it; that is the reason this belongs to
+ * the updater rather than to something the product does for itself.
+ */
+bool launch_as_shell_user(const std::wstring& exePath, const std::wstring& workDir,
+                          void** processHandleOut, uint32_t* pidOut) {
+  if (gShellLaunchDisabled) return false;  // the same switch the tests use for the other route
+  // Asked before anything else: a path that is not there cannot be started, and finding that out
+  // here keeps it out of the shell fallback, which has no way to fail quietly.
+  if (GetFileAttributesW(exePath.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+
+  HWND shell = GetShellWindow();
+  if (!shell) return false;  // no interactive desktop -- nothing to run as
+  DWORD shellPid = 0;
+  GetWindowThreadProcessId(shell, &shellPid);
+  if (!shellPid) return false;
+
+  HANDLE shellProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, shellPid);
+  if (!shellProcess) return false;
+  HANDLE shellToken = nullptr;
+  const BOOL gotToken = OpenProcessToken(shellProcess, TOKEN_DUPLICATE | TOKEN_QUERY, &shellToken);
+  CloseHandle(shellProcess);
+  if (!gotToken) return false;
+
+  HANDLE primary = nullptr;
+  const BOOL duplicated = DuplicateTokenEx(shellToken, MAXIMUM_ALLOWED, nullptr,
+                                           SecurityImpersonation, TokenPrimary, &primary);
+  CloseHandle(shellToken);
+  if (!duplicated) return false;
+
+  STARTUPINFOW si{};
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION pi{};
+  std::wstring commandLine = L"\"" + exePath + L"\"";
+  const BOOL started =
+      CreateProcessWithTokenW(primary, 0, nullptr, commandLine.data(), 0, nullptr,
+                              workDir.empty() ? nullptr : workDir.c_str(), &si, &pi);
+  CloseHandle(primary);
+  if (!started) return false;
+
+  CloseHandle(pi.hThread);
+  if (processHandleOut) *processHandleOut = pi.hProcess;
+  else CloseHandle(pi.hProcess);
+  if (pidOut) *pidOut = pi.dwProcessId;
+  return true;
+}
 
 bool launch_via_shell(const std::wstring& exePath, const std::wstring& arguments) {
   // Asked before the shell is involved. ShellExecute through the desktop has no "do not show UI"
@@ -404,57 +428,39 @@ RelaunchEffects make_relaunch_effects(RelaunchConfig config,
         outcome.started = start_service_and_wait(shared->config.serviceName, 30000, &detail);
         outcome.detail = outcome.started ? "service running" : ("service did not start -- " + detail);
       } else if (entry.kind == RelaunchKind::UserProcess) {
-        // Taken before, so the one that appears afterwards can be told from any that were
-        // already there. The shell starts it, so there is no pid to be handed back.
-        const std::vector<DWORD> before = pids_running_image(exePath);
-        outcome.started = launch_via_shell(exePath, L"");
-        if (outcome.started) {
-          // Briefly: the shell hands off asynchronously, so the process may not exist yet.
-          std::vector<DWORD> appeared;
-          for (int attempt = 0; attempt < 20 && appeared.empty(); ++attempt) {
-            for (DWORD pid : pids_running_image(exePath)) {
-              if (std::find(before.begin(), before.end(), pid) == before.end()) {
-                appeared.push_back(pid);
-              }
-            }
-            if (appeared.empty()) Sleep(50);
-          }
-          // ONE new process running exactly this image, appearing between the snapshot and now.
-          // That is per-launch correlation, and it is the only basis on which this claims to own
-          // something the shell created. Two would mean the user started one at the same moment,
-          // and a rollback that terminated on a guess would be terminating a stranger's window --
-          // so ambiguity is left unowned, which later reads as "could not be stopped" and stops
-          // the rollback rather than proceeding on an assumption.
-          if (appeared.size() == 1) {
-            outcome.startedPid = appeared[0];
-            HANDLE h = OpenProcess(
-                SYNCHRONIZE | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
-                appeared[0]);
-            if (h) {
-              // Checked again through the handle. Between the snapshot and the open the pid could
-              // have been reused, and from here on the handle -- not the number -- is the
-              // identity, so this is the last moment the check can be made at all.
-              wchar_t image[MAX_PATH]{};
-              DWORD size = MAX_PATH;
-              if (QueryFullProcessImageNameW(h, 0, image, &size) &&
-                  _wcsicmp(image, exePath.c_str()) == 0) {
-                shared->ownedHandles.push_back({entry.imageName, h});
-              } else {
-                CloseHandle(h);
-              }
-            }
-          } else if (appeared.size() > 1) {
-            outcome.detail = "started, but more than one appeared -- not claimed as ours";
-          }
-        }
-        // Not started, and deliberately not retried as a child of this process. Starting it here
-        // would give it an administrator token it never had. That is a safe failure, not a
-        // success, so it is recorded as a failure and the user is told.
-        if (outcome.detail.empty()) {
-          outcome.detail = outcome.started
-                               ? "started in the user context"
-                               : "could not be started in the user context, and was NOT started "
-                                 "elevated instead";
+        // Owned, or declared unowned. There is no third option any more.
+        //
+        // This used to launch through the shell and then work out which process appeared by
+        // comparing snapshots taken either side of the call. One new process meant "that is
+        // ours". It does not: a user starting the same program in that window produces the same
+        // single difference, and the handle opened on the strength of it fixes a STRANGER's
+        // identity -- which a rollback would then terminate. The snapshot comparison is gone.
+        const auto launch =
+            shared->config.launchInUserContext
+                ? shared->config.launchInUserContext
+                : std::function<bool(const std::wstring&, const std::wstring&, void**, uint32_t*)>(
+                      launch_as_shell_user);
+        void* handle = nullptr;
+        uint32_t pid = 0;
+        if (launch(exePath, shared->config.installDir, &handle, &pid)) {
+          outcome.started = true;
+          outcome.startedPid = pid;
+          if (handle) shared->ownedHandles.push_back({entry.imageName, static_cast<HANDLE>(handle)});
+          outcome.detail = "started in the user context";
+        } else if (launch_via_shell(exePath, L"")) {
+          // Running, and unidentified. Reported as such rather than guessed at: the consequence
+          // is that this attempt will not stop it and a rollback will not start, which is the
+          // correct trade against terminating something that might belong to the user.
+          outcome.started = true;
+          outcome.ownershipUnknown = true;
+          outcome.detail = "started by the shell, which returns no handle -- this attempt cannot "
+                           "prove which process is its own, so it will not stop it";
+        } else {
+          // Not started, and deliberately not retried as a child of this process. Starting it
+          // here would give it an administrator token it never had. A safe failure, not a
+          // success, so it is recorded as a failure and the user is told.
+          outcome.detail = "could not be started in the user context, and was NOT started "
+                           "elevated instead";
         }
       } else {
         STARTUPINFOW si{};

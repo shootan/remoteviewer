@@ -441,6 +441,15 @@ bool WindowsUpdateEffects::Quiesce() {
 
 // ---------------------------------------------------------------- swap and rollback
 
+/**
+ * How many undeletable backups may be set aside before a swap gives up.
+ *
+ * Each one is a file that could not be removed, so letting them accumulate without limit would
+ * hide a repeating failure behind a growing directory. Reaching the limit is reported as its own
+ * cause rather than as the move-aside failure it produces.
+ */
+constexpr int kMaxStaleBackups = 50;
+
 bool WindowsUpdateEffects::Swap() {
   movedAside_.clear();
   createdDirs_.clear();
@@ -475,6 +484,8 @@ bool WindowsUpdateEffects::Swap() {
     const std::wstring live = install_path(name);
     if (!file_exists(live)) continue;  // a file that is not there does not need a backup
     const std::wstring backup = backup_path(name);
+    // Why the name could not be freed, when it could not be. Empty in the ordinary case.
+    std::string blocked;
     // A backup from an earlier update may still be sitting on this name. Normally it deletes and
     // the question does not arise; when it will not, the whole update used to stop here -- a file
     // that is only litter blocking the next release from being installed at all.
@@ -484,20 +495,33 @@ bool WindowsUpdateEffects::Swap() {
     // are running -- and it costs one more piece of litter to keep the update possible. The
     // survivor is recorded, not forgotten, for the same reason the commit records its own.
     if (!DeleteFileW(backup.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND) {
-      for (int n = 1; n <= 50; ++n) {
+      // Bounded on purpose. Every one of these is a file nobody could delete, so an unbounded
+      // count would quietly turn a recurring failure into an accumulating pile -- the failure
+      // should become visible, not become litter.
+      bool moved = false;
+      for (int n = 1; n <= kMaxStaleBackups; ++n) {
         const std::wstring aside = backup + L"." + std::to_wstring(n);
         if (GetFileAttributesW(aside.c_str()) != INVALID_FILE_ATTRIBUTES) continue;
         if (MoveFileExW(backup.c_str(), aside.c_str(), 0)) {
+          moved = true;
           orphanedBackups_.push_back(name);
           lastError_ = "an older backup of " + to_utf8(name) +
                        " could not be deleted and was moved to " + to_utf8(aside);
         }
         break;
       }
+      if (!moved) {
+        // Carried to the failure below rather than written to lastError_ here, because the
+        // move-aside about to fail would overwrite it -- leaving the operator the symptom ("the
+        // file would not move") and none of the cause. That is exactly what happened the first
+        // time this was written.
+        blocked = " -- an older backup of the same name cannot be deleted and there is nowhere "
+                  "left to put it (" + std::to_string(kMaxStaleBackups) + " already set aside)";
+      }
     }
     if (!MoveFileExW(live.c_str(), backup.c_str(), MOVEFILE_REPLACE_EXISTING)) {
       lastError_ = "could not move aside " + to_utf8(name) + " (error " +
-                   std::to_string(GetLastError()) + ")";
+                   std::to_string(GetLastError()) + ")" + blocked;
       (void)Rollback();
       return false;
     }

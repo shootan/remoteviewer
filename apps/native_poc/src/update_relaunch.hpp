@@ -63,8 +63,21 @@ struct RelaunchOutcome {
    * having exited.
    */
   bool alreadyRunning = false;
-  /** The process this attempt started, when it started one. 0 otherwise. */
+  /** The process this attempt started, when it started one AND can prove which. 0 otherwise. */
   uint32_t startedPid = 0;
+  /**
+   * True when something was started but this attempt cannot say which process it is.
+   *
+   * Started and owned are different facts, and they were being conflated. A launch routed through
+   * the shell is performed by the shell, so nothing comes back: no handle, no PID. Comparing
+   * process snapshots taken either side of the call looks like it recovers the PID, and it does
+   * not -- a user starting the same program at that moment produces exactly the same difference,
+   * and the handle opened on that basis pins a stranger's identity rather than establishing ours.
+   *
+   * So it is recorded as unknown. Nothing unknown is terminated, and a rollback does not begin
+   * while one exists, because a rollback moves files this process may still be holding.
+   */
+  bool ownershipUnknown = false;
   /** True when the plan deliberately did not start it (a supervised child). Not a failure. */
   bool skipped = false;
   /** Why, for the log and for what the user is told. */
@@ -119,6 +132,30 @@ struct RelaunchConfig {
    */
   enum class Liveness { Running, Exited, Unknown };
   std::function<Liveness(const ProcessTarget&)> isStillRunning;
+
+  /**
+   * Starts an image in the interactive user's context and hands back a handle to the process.
+   *
+   * The handle is the whole point. The client must not be started with the updater's
+   * administrator token -- it would run with rights it has never had -- so it has to be launched
+   * as the logged-on user; and the route that does that through the shell performs the launch in
+   * another process and returns nothing. Without a handle there is no way to say which process
+   * was the one asked for, and everything downstream that stops or waits on it is guesswork.
+   *
+   * The real implementation duplicates the shell's own token and calls CreateProcessWithTokenW,
+   * which returns a PROCESS_INFORMATION like any other launch. It needs SeImpersonatePrivilege,
+   * which the updater has because it runs elevated, and which is exactly why the updater is the
+   * right place to do this.
+   *
+   * Empty means the real one -- not "skip it". An optional seam here would be the same defect as
+   * the liveness check that production never filled in: switched off in the only build that
+   * matters, while every test passed.
+   *
+   * `processHandleOut` receives a handle the caller owns. `pidOut` receives its PID.
+   */
+  std::function<bool(const std::wstring& exePath, const std::wstring& workDir,
+                     void** processHandleOut, uint32_t* pidOut)>
+      launchInUserContext;
 };
 
 /**
