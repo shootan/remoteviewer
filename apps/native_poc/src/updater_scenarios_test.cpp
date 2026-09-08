@@ -52,13 +52,47 @@ void check(const std::string& name, bool ok, const std::string& detail = {}) {
 
 std::string narrow(const std::wstring& s) { return std::string(s.begin(), s.end()); }
 
-std::wstring temp_root() {
-  wchar_t base[MAX_PATH]{};
-  GetTempPathW(MAX_PATH, base);
-  wchar_t path[MAX_PATH]{};
-  swprintf(path, MAX_PATH, L"%sgnlink-scn-%lu", base, GetCurrentProcessId());
-  CreateDirectoryW(path, nullptr);
+/** The configured root, with separators normalised. Never guessed at runtime. */
+std::wstring scn_root_base() {
+  std::wstring base = GNLINK_SCN_ROOT;
+  for (wchar_t& c : base) {
+    if (c == L'/') c = L'\\';
+  }
+  return base;
+}
+
+/**
+ * Where this run puts its files: INSIDE the repository, never %TEMP%.
+ *
+ * It used to build its tree under GetTempPath and then delete everything matching
+ * `gnlink-scn-*` there on startup. That is deleting outside the repository root, which the
+ * top-level rule forbids outright -- and permission to run a test is not permission to remove
+ * files elsewhere on the machine. That the pattern happened to match only this suite's own output
+ * is not the point; the point is that nothing here gets to decide that about a directory it does
+ * not own.
+ *
+ * The root comes from the build (GNLINK_SCN_ROOT, from CMAKE_SOURCE_DIR), so it cannot drift.
+ */
+std::wstring run_root() {
+  const std::wstring base = scn_root_base();
+  // Component by component, because the parents may not exist and this must not assume they do.
+  std::wstring built;
+  for (size_t i = 0; i < base.size(); ++i) {
+    built.push_back(base[i]);
+    if (base[i] == L'\\' || i + 1 == base.size()) CreateDirectoryW(built.c_str(), nullptr);
+  }
+  wchar_t leaf[64]{};
+  swprintf(leaf, 64, L"scn-%lu", GetCurrentProcessId());
+  const std::wstring path = base + L"\\" + leaf;
+  CreateDirectoryW(path.c_str(), nullptr);
   return path;
+}
+
+/** True when `path` really is inside this suite's own root. Nothing is removed without it. */
+bool inside_run_root(const std::wstring& path) {
+  const std::wstring base = scn_root_base();
+  if (base.empty() || path.size() <= base.size()) return false;
+  return _wcsnicmp(path.c_str(), base.c_str(), base.size()) == 0;
 }
 
 void remove_tree(const std::wstring& dir) {
@@ -135,35 +169,72 @@ std::vector<std::pair<std::wstring, DWORD>> running_under(const std::wstring& di
         return leaf.size() >= n && _wcsnicmp(leaf.c_str(), name, n) == 0;
       };
       if (!starts_with(kHostName) && !starts_with(kClientName)) continue;
-      // Scoped by directory when the directory can be established, and INCLUDED when it cannot.
+      // The path must be READ, and it must be under `dir`. A name is not ownership.
       //
-      // The path needs a handle, and a process this cannot open is precisely the one that was
-      // being missed -- so an unreadable path is not grounds for leaving something alone. It is
-      // the other way round: known-elsewhere is the only reason to skip. Scenario 6 relies on
-      // that, running a stub under the same name outside the install directory so the sweep
-      // leaves it to be the process that will not quiesce.
-      bool mine = true;
-      if (!dir.empty()) {
-        HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
-        if (h) {
-          wchar_t image[MAX_PATH]{};
-          DWORD size = MAX_PATH;
-          if (QueryFullProcessImageNameW(h, 0, image, &size)) {
-            const std::wstring path = image;
-            mine = path.size() >= dir.size() &&
-                   _wcsnicmp(path.c_str(), dir.c_str(), dir.size()) == 0;
-          }
-          CloseHandle(h);
-        }
+      // This defaulted to "mine" when the path could not be read, so a process this could not
+      // identify was terminated on the strength of its file name -- and "nothing else on this
+      // machine is called ScnHost.exe" is a guess about the whole machine, not evidence about one
+      // process. A second run of this same suite would have been killed by the first. A PID can
+      // also be reused between the snapshot and the terminate, so the name is not even evidence
+      // about the PID.
+      //
+      // Unreadable is UNKNOWN now, and unknown is never terminated -- it is reported, which is
+      // the same rule the product follows for a liveness check that cannot be completed.
+      if (dir.empty()) continue;  // an empty scope is not a narrow scope, it is no scope
+      HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
+      if (!h) continue;
+      wchar_t image[MAX_PATH]{};
+      DWORD size = MAX_PATH;
+      const bool readPath = QueryFullProcessImageNameW(h, 0, image, &size) != FALSE;
+      CloseHandle(h);
+      if (!readPath) continue;
+      const std::wstring path = image;
+      if (path.size() < dir.size() || _wcsnicmp(path.c_str(), dir.c_str(), dir.size()) != 0) {
+        continue;  // same name, somewhere else. Not ours, and not touched.
       }
-      if (mine) found.push_back({leaf, entry.th32ProcessID});
+      found.push_back({path, entry.th32ProcessID});
     } while (Process32NextW(snapshot, &entry));
   }
   CloseHandle(snapshot);
   return found;
 }
 
-/** Stops everything running out of `dir`. Only this test's temp tree is ever passed here. */
+/**
+ * Processes carrying this suite's names that could NOT be placed -- no handle, or no path.
+ *
+ * Reported, never stopped. These are exactly the ones the sweep used to kill on the strength of a
+ * name; whatever they are, this run has no evidence that they belong to it.
+ */
+std::vector<DWORD> named_but_unidentified() {
+  std::vector<DWORD> unknown;
+  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snapshot == INVALID_HANDLE_VALUE) return unknown;
+  PROCESSENTRY32W entry{};
+  entry.dwSize = sizeof(entry);
+  if (Process32FirstW(snapshot, &entry)) {
+    do {
+      const std::wstring leaf = entry.szExeFile;
+      const auto starts_with = [&leaf](const wchar_t* name) {
+        const size_t n = wcslen(name);
+        return leaf.size() >= n && _wcsnicmp(leaf.c_str(), name, n) == 0;
+      };
+      if (!starts_with(kHostName) && !starts_with(kClientName)) continue;
+      HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
+      if (!h) {
+        unknown.push_back(entry.th32ProcessID);
+        continue;
+      }
+      wchar_t image[MAX_PATH]{};
+      DWORD size = MAX_PATH;
+      if (!QueryFullProcessImageNameW(h, 0, image, &size)) unknown.push_back(entry.th32ProcessID);
+      CloseHandle(h);
+    } while (Process32NextW(snapshot, &entry));
+  }
+  CloseHandle(snapshot);
+  return unknown;
+}
+
+/** Stops what is running out of `dir` -- and only what was confirmed to be running out of it. */
 void stop_everything_under(const std::wstring& dir) {
   // Swept repeatedly, because a shell-routed launch hands off asynchronously: a process started
   // moments ago may not be visible on the first pass, and one missed here holds a file open in
@@ -211,22 +282,33 @@ void stop_everything_under(const std::wstring& dir) {
  *
  * Scoped to this test's own name pattern, so it can never remove anything else.
  */
-void remove_stale_runs() {
-  wchar_t base[MAX_PATH]{};
-  GetTempPathW(MAX_PATH, base);
-  const std::wstring pattern = std::wstring(base) + L"gnlink-scn-*";
-  std::vector<std::wstring> stale;
-  WIN32_FIND_DATAW find{};
-  HANDLE h = FindFirstFileW(pattern.c_str(), &find);
-  if (h != INVALID_HANDLE_VALUE) {
+void report_leftovers() {
+  // READ ONLY. Nothing in here deletes anything.
+  //
+  // This used to enumerate %TEMP% for `gnlink-scn-*` and remove_tree every match -- deleting
+  // outside the repository root, which is forbidden, on the authority of a filename pattern.
+  // Earlier runs did leave directories there. They are LISTED so that a person can decide, and
+  // that decision is not this program's to make.
+  const auto list = [](const std::wstring& pattern, const std::wstring& base, const char* where) {
+    WIN32_FIND_DATAW find{};
+    HANDLE h = FindFirstFileW(pattern.c_str(), &find);
+    if (h == INVALID_HANDLE_VALUE) return;
     do {
       const std::wstring name = find.cFileName;
       if (name == L"." || name == L"..") continue;
-      stale.push_back(std::wstring(base) + name);
+      std::cout << "NOTE  left by an earlier run, NOT removed (" << where
+                << "): " << narrow(base + name) << "\n";
     } while (FindNextFileW(h, &find));
     FindClose(h);
-  }
-  for (const std::wstring& dir : stale) remove_tree(dir);
+  };
+
+  const std::wstring base = scn_root_base() + L"\\";
+  list(base + L"scn-*", base, "this suite's own root");
+
+  wchar_t temp[MAX_PATH]{};
+  GetTempPathW(MAX_PATH, temp);
+  // Where this suite used to write. Named so the older litter is visible, and left alone.
+  list(std::wstring(temp) + L"gnlink-scn-*", temp, "%TEMP%, from before this moved into the repo");
 }
 
 int main() {
@@ -234,12 +316,14 @@ int main() {
   // report is one that is lost exactly when it is needed.
   setvbuf(stdout, nullptr, _IONBF, 0);
   std::cout.setf(std::ios::unitbuf);
-  // Previous runs first: their leftovers are inert copies of a shell, but litter that grows is
-  // still litter, and this file has already been the source of some.
-  stop_everything_under(L"");
-  remove_stale_runs();
+  // What earlier runs left is LISTED, not swept and not deleted.
+  //
+  // The sweep used to run with an empty scope -- `stop_everything_under(L"")` -- which is not a
+  // narrow scope but the absence of one: every process on the machine whose name began with one
+  // of these two, whoever had started it. Nothing here has any business doing that.
+  report_leftovers();
 
-  const std::wstring root = temp_root();
+  const std::wstring root = run_root();
   const std::wstring install = root + L"\\install";
   const std::wstring staging = root + L"\\staging";
   const std::wstring log = root + L"\\health.log";
@@ -755,6 +839,92 @@ int main() {
           r.hostInstances <= 1, std::to_string(r.hostInstances));
   }
 
+  // ================================================================ control: whose process is it
+  //
+  // The sweep terminates processes. What stops it terminating somebody else's is the only
+  // question that matters about it, and until now nothing asked: it matched on the file NAME and
+  // killed anything that matched, including -- when it could not read a path -- processes it had
+  // no evidence about at all. A second run of this suite would have been shot by the first.
+
+  {
+    // Same name, different directory: the stub scenario 6 depends on, stated as its own claim.
+    const std::wstring elsewhere = root + L"\\" L"elsewhere";
+    CreateDirectoryW(elsewhere.c_str(), nullptr);
+    const std::wstring stranger = elsewhere + L"\\" + kHostName;
+    CopyFileW(comspec, stranger.c_str(), FALSE);
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    std::wstring cmd = L"\"" + stranger + L"\"";
+    const BOOL up = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                                   nullptr, elsewhere.c_str(), &si, &pi);
+    check("ownership control: a same-named process exists outside the install directory",
+          up != FALSE);
+    if (up) {
+      stop_everything_under(install);
+      const bool alive = WaitForSingleObject(pi.hProcess, 0) == WAIT_TIMEOUT;
+      check("ownership control: sweeping the install directory does not touch it", alive);
+      TerminateProcess(pi.hProcess, 0);
+      WaitForSingleObject(pi.hProcess, 3000);
+      CloseHandle(pi.hThread);
+      CloseHandle(pi.hProcess);
+    }
+    DeleteFileW(stranger.c_str());
+    RemoveDirectoryW(elsewhere.c_str());
+  }
+
+  {
+    // A CONCURRENT RUN of this same suite: same names, same layout, a sibling root. This is the
+    // one the old sweep would certainly have killed -- it ran with an empty scope at startup,
+    // which is not a narrow scope but the absence of one.
+    const std::wstring neighbour = scn_root_base() + L"\\" L"scn-neighbour-probe";
+    const std::wstring neighbourInstall = neighbour + L"\\" L"install";
+    CreateDirectoryW(neighbour.c_str(), nullptr);
+    CreateDirectoryW(neighbourInstall.c_str(), nullptr);
+    const std::wstring theirs = neighbourInstall + L"\\" + kClientName;
+    CopyFileW(comspec, theirs.c_str(), FALSE);
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    std::wstring cmd = L"\"" + theirs + L"\"";
+    const BOOL up = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                                   nullptr, neighbourInstall.c_str(), &si, &pi);
+    check("ownership control: another run's process exists", up != FALSE);
+    if (up) {
+      stop_everything_under(install);
+      stop_everything_under(root);
+      const bool alive = WaitForSingleObject(pi.hProcess, 0) == WAIT_TIMEOUT;
+      check("ownership control: sweeping this run does not touch another run's process", alive);
+      TerminateProcess(pi.hProcess, 0);
+      WaitForSingleObject(pi.hProcess, 3000);
+      CloseHandle(pi.hThread);
+      CloseHandle(pi.hProcess);
+    }
+    // Removed by the run that created it, which is this one -- and it is under the configured
+    // root, so the guard that protects everything else is not being stepped around here.
+    for (int attempt = 0; attempt < 20; ++attempt) {
+      if (DeleteFileW(theirs.c_str()) || GetFileAttributesW(theirs.c_str()) ==
+                                             INVALID_FILE_ATTRIBUTES) {
+        break;
+      }
+      Sleep(50);
+    }
+    RemoveDirectoryW(neighbourInstall.c_str());
+    RemoveDirectoryW(neighbour.c_str());
+    check("ownership control: the probe cleans up after itself",
+          GetFileAttributesW(neighbour.c_str()) == INVALID_FILE_ATTRIBUTES, narrow(neighbour));
+  }
+
+  {
+    // And the refusal, stated directly: a path outside the configured root is never removed.
+    check("ownership control: the run root is inside the repository", inside_run_root(root),
+          narrow(root));
+    wchar_t temp[MAX_PATH]{};
+    GetTempPathW(MAX_PATH, temp);
+    check("ownership control: %TEMP% is not inside it, so it can never be removed",
+          !inside_run_root(std::wstring(temp) + L"gnlink-scn-1"), narrow(temp));
+  }
+
   // ================================================================ control
   //
   // Scenario 4 without the release-before-rollback step. Without this, "the old bytes are back"
@@ -802,7 +972,18 @@ int main() {
   stop_everything_under(root);
   Sleep(2000);
   stop_everything_under(root);
-  remove_tree(root);
+  // Only this run's own directory, and only after checking that is what it is. A path that does
+  // not sit under the configured root is left alone, however it came to be passed here.
+  if (inside_run_root(root)) {
+    remove_tree(root);
+  } else {
+    std::cout << "NOTE  refusing to remove " << narrow(root)
+              << " -- it is not under this suite's root\n";
+  }
+  for (DWORD pid : named_but_unidentified()) {
+    std::cout << "NOTE  named like this suite's fixtures but not identifiable, so left running: "
+              << "pid " << pid << "\n";
+  }
   {
     HKEY parent = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software", 0, KEY_WRITE, &parent) == ERROR_SUCCESS) {

@@ -789,6 +789,11 @@ add_executable(remote60_updater_scenarios_test
   src/update_health.cpp
   src/update_health_log.cpp
 )
+# The suite's files live INSIDE the repository. It used to build its tree under %TEMP% and then
+# delete everything there matching its own name pattern, which is deleting outside the repository
+# root -- forbidden, and not something running a test grants permission for.
+target_compile_definitions(remote60_updater_scenarios_test
+  PRIVATE GNLINK_SCN_ROOT=L"${CMAKE_SOURCE_DIR}/.claude/scenario-runs")
 target_include_directories(remote60_updater_scenarios_test PRIVATE src)
 target_link_libraries(remote60_updater_scenarios_test PRIVATE
   bcrypt winhttp advapi32 ole32 oleaut32 uuid shell32 user32
