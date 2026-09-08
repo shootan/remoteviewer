@@ -9012,3 +9012,24 @@ Next action
 - 변경 파일: `apps/native_poc/src/update_manifest.hpp`·`update_manifest.cpp`·`update_signature.hpp`·`update_signature.cpp`·`update_manifest_test.cpp`(전부 신규) · `apps/shared/update_manifest/README.txt`·`test_manifest.txt`·`test_manifest.sig`·`test_public_key.txt`(신규) · `apps/native_poc/CMakeLists.txt` · `docs/history.md` · `docs/구현계획.md`.
 - 버전 인상·설치본 생성·설치·라이브 조작·서버 배포·push 없음. 운영 서명키 관련 결정 없음.
 - 상태: step2 3항목 중 2번 완료. 다음은 업데이터 상태기계 골격(seam·결정론 테스트까지, 실제 종료·파일 교체 미연결). **전체 완료 아님.**
+
+### 435) 2026-09-08 업데이트 step2-3 — 업데이터 상태기계 골격, 순서·실패 규칙을 seam 위에서 고정 (설계 3.1/3.3/3.6, 검증용 remote#0jkgf453 지시)
+- 목적: 설계 3.1 의 단계와 3.6 완료조건을 **실제 프로세스 종료·파일 교체를 붙이기 전에** 코드로 고정한다. 지시대로 `UpdateEffects` seam 까지만 만들고 **production 구현은 붙이지 않았다.**
+- **왜 이 순서인가**(파일 주석에 그대로): 제대로 정해야 하는 것은 대부분 **순서와 실패 처리**다 — quiesce 가 끝나지 않았는데 swap 을 시도하는가, 재실행 실패가 멀쩡한 설치를 되돌려야 하는가, 서버가 죽으면 동작 중인 제품이 망가질 수 있는가. **실제 종료·교체가 붙고 나면 이 실패 경로들을 원할 때 재현하는 것이 거의 불가능해진다.** 그래서 위험한 절반보다 이쪽을 먼저 만들었다.
+- **상태**: `Idle → CheckRequested → Evaluate → Download → Verify → Prepare → Quiesce → Swap → Register → Relaunch → Health → Done`, 실패 시 `Rollback`. 결과는 6종으로 구분 — `NothingToDo`(할 일 없음, 실패 아님) · `Updated` · **`UpdatedButNotRelaunched`** · **`AbandonedBeforeSwap`**(디스크 무손상) · `RolledBack` · **`RollbackFailed`**(설치가 불일치일 수 있는 유일한 결과라 별도 이름).
+- **고정한 규칙 4개(각각 테스트 있음)**:
+  - **락은 절대 기다리지 않는다**(설계 3.3). 못 잡으면 `AcquireLock` 하나만 호출하고 끝 — manifest 조회조차 하지 않는다. 업데이트는 미룰 수 있고, 두 프로세스가 같은 디렉터리를 교체하는 것은 미룰 수 없다.
+  - **서버가 죽어도 동작 중인 설치를 건드리지 못한다.** manifest 를 못 받으면 `NothingToDo` 이며 실패가 아니다. 설계의 "서버 연결 장애만으로 무한롤백 금지" 를 이 형태로 구현했다.
+  - **Prepare/Quiesce 실패는 강제 종료로 승격하지 않는다.** 그대로 물러나고(`AbandonedBeforeSwap`), **검증된 다운로드는 다음 시도를 위해 남긴다**(`discardCount==0` 으로 단정). 디스크는 손대지 않았으므로 물러나는 비용이 0이다.
+  - **Relaunch 실패는 롤백 사유가 아니다.** 파일은 신버전이고 일관돼 있으며 사용자는 시작메뉴로 켤 수 있다 — 좋은 설치를 "스스로 재시작하지 못했다" 는 이유로 되돌리는 쪽이 더 나쁘다. 대신 `UpdatedButNotRelaunched` 로 **드러나게** 보고한다.
+- **서명-후-비교 순서는 여기서 다시 구현하지 않았다.** `load_manifest` 의 타입이 이미 강제하므로(#434) 상태기계는 그것을 호출만 한다 — 같은 규칙의 사본은 그 규칙이 썩을 자리를 하나 더 만드는 것이다. 테스트는 나쁜 서명일 때 **`InstalledVersion()` 조차 호출되지 않음**을 단정해 비교가 실제로 일어나지 않았음을 보인다.
+- 검증 — **`qwinsta`: `console` 만 Active, `rdp-tcp` 는 `Listen`(Active 인 rdp-tcp#N 없음) → RDP 미접속.** 캡처/GDI/e2e 계열은 실행하지 않았다.
+  - `remote60_update_state_machine_test` **57 checks / 0 failed**, exit 0. 내역: 정상 경로가 12단계를 **정확한 순서로** 방문 · `NothingToDo` 6종(락 점유·서버 불통·나쁜 서명·같은 버전·더 새 버전 설치됨·플랫폼 불일치) · `AbandonedBeforeSwap` 4종(다운로드·검증·prepare·quiesce) + 각각 **디스크 무손상**과 staging 처리 · 롤백 4종(swap·register·health·rollback 자체 실패) · relaunch 실패가 롤백이 아님 · **8개 변형 전부에서 락이 물려 있지 않음**.
+  - 신규 3종 동시 재실행: version_compare **139/0**, update_manifest **41/0**, state_machine **57/0** — 전부 exit 0.
+  - **수정 전 FAIL 없음** — 전부 신규 코드다.
+- **추가 기록(검증용 요청)**: #433 의 성분 **wrap → 포화** 변경은 세 런타임 일치를 위한 선택인 동시에 **부수적 안전 개선**이다. 옛 `left = left * 10 + digit`(unsigned long)은 넘치면 **큰 버전이 작은 버전으로 뒤집혀** 업데이트 판정에서 최악의 오류 방향을 만든다. 포화는 절대 뒤집지 않고 **단조성을 지키며**, 최악이라야 터무니없는 값끼리 같다고 볼 뿐이다.
+- **보고 정정(검증용 지적)**: #433 보고에서 부모를 `c81a610` 으로 적었으나 실제 `f0beef9^` 는 **`7fba419`** 다. 사슬 자체는 정상이며 앞으로 부모 해시를 정확히 싣는다.
+- 미검증·미착수: `UpdateEffects` 의 **production 구현이 없다**(실제 락·다운로드·종료·교체·롤백 전부). 따라서 이 테스트는 **순서와 실패 규칙을 검증한 것이지 실제 업데이트가 동작함을 보인 것이 아니다.** 진입점(트레이 메뉴·클라 시작 시 확인)도 아직 배선되지 않았다.
+- 변경 파일: `apps/native_poc/src/update_state_machine.hpp`·`update_state_machine.cpp`·`update_state_machine_test.cpp`(신규) · `apps/native_poc/CMakeLists.txt` · `docs/history.md` · `docs/구현계획.md`.
+- 버전 인상·설치본 생성·설치·라이브 조작·서버 배포·push 없음. 운영 서명키 관련 결정 없음.
+- 상태: **step2 3항목 전부 구현 완료**(#433 계약·벡터 / #434 manifest·서명 / #435 상태기계). 검증용 검사 대기 — **전체 완료 아님.**

@@ -519,6 +519,20 @@ if(MSVC)
   target_compile_options(remote60_update_manifest_test PRIVATE /utf-8)
 endif()
 
+# The updater's ordering and failure rules, against a fake seam -- no real process termination
+# or file replacement is attached yet, which is the point.
+add_executable(remote60_update_state_machine_test
+  src/update_state_machine.cpp
+  src/update_manifest.cpp
+  src/update_signature.cpp
+  src/update_state_machine_test.cpp
+)
+target_include_directories(remote60_update_state_machine_test PRIVATE src)
+target_link_libraries(remote60_update_state_machine_test PRIVATE bcrypt)
+if(MSVC)
+  target_compile_options(remote60_update_state_machine_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_host_command_line_test
   src/host_command_line_test.cpp
 )
