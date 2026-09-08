@@ -9092,3 +9092,24 @@ Next action
 - 변경 파일: `apps/native_poc/src/update_http.hpp`·`update_http.cpp`·`update_http_test.cpp`(신규) · `apps/native_poc/CMakeLists.txt` · `docs/history.md` · `docs/구현계획.md`.
 - 버전 인상·설치본 생성·설치·라이브 조작·서버 배포·push 없음.
 - 상태: **차단 요인 1건을 검증용에 질의 중**(`RegisterInstall` 을 자체 구현할지 설치기 `/S` 재사용할지 — 후자는 업데이터의 2단계 안전 교체를 설치기의 안전하지 않은 교체가 우회하게 된다). 답이 오기 전까지 ②는 진행하지 않는다. **전체 완료 아님.**
+
+### 439) 2026-09-08 업데이트 step4-2 — 서버 manifest 발행 라우트 + JS·Kotlin 소비자, 세 런타임이 같은 서명을 검증 (설계 4.3/4.4, 자율 진행 범위)
+- 목적: manifest 를 **읽는 쪽 세 벌**(C++·JS·Kotlin)과 **내는 쪽 한 벌**(서버)을 맞춘다. 확정된 설계(4.3 스키마 / 4.4 엔드포인트)에 애매한 지점이 없어 질의 없이 진행했다.
+- **핵심 성과 — 세 구현이 같은 아티팩트에 합의한다**: `apps/shared/update_manifest/` 의 **고정 벡터 한 벌**(문서·서명·공개키)을 C++·JS·Kotlin 테스트가 각각 검증한다. "각자 자기 자신과 일치한다" 가 아니라 **서로 다른 세 구현이 하나의 실제 서명을 같이 받아들이고 같은 변조를 같이 거부한다** — 이쪽이 훨씬 강한 진술이다.
+- **JS**(`apps/directory/update_manifest.js`): node `crypto` 로 검증(raw X||Y → JWK 로 키 구성, `dsaEncoding: 'ieee-p1363'` 으로 raw r||s). 파싱 규칙·상태 이름을 C++ 과 **한 글자씩 맞췄다**(양쪽 로그가 같게 읽히도록). `buildManifest()` 는 **필드 순서를 고정**한다 — 서명이 바이트를 덮으므로 "객체 키가 마침 그 순서였다" 는 명세가 아니다.
+- **Kotlin**(`UpdateManifest.kt`): 여기만 표현 변환이 필요하다 — JCA `SHA256withECDSA` 는 **DER** 를 기대하는데 와이어 형식은 raw r||s(CNG 가 그걸 원하므로)다. `rawSignatureToDer()` 로 변환한다(DER INTEGER 의 최소 길이 + 최상위 비트 시 0x00 패딩까지). 공개키도 raw X||Y → `ECPublicKeySpec`. **와이어를 바꾸는 대신 여기서 변환**해 세 런타임에 표현 한 벌만 둔다.
+- **서버 라우트** `GET /api/update/manifest?platform=<windows|android>`:
+  - **아티팩트는 여기서 내보내지 않는다.** 이 프로세스는 릴레이와 하트비트를 같은 이벤트 루프에서 돌리므로, 수 MB 설치본을 흘리면 그 박스의 모든 세션이 다운로드 뒤에 줄을 선다. manifest 가 위치를 가리키고, 파일 서빙은 파일 서빙용이 한다.
+  - 인증은 **기존 Bearer 세션 또는 `x-host-token` 재사용**. 업데이트 확인은 로그인된 기계가 하는 일이고, 이걸 위해 세 번째 자격증명을 만들면 틀릴 곳이 하나 더 늘 뿐이다. manifest 는 어차피 서명돼 있으므로 이건 전송을 믿는 문제가 아니라 **플릿의 업데이트 상태를 아무에게나 공개하지 않는** 문제다.
+  - `platform` 은 파일명 일부가 되므로 **화이트리스트**다(정제가 아니라). 플랫폼은 둘뿐이라 그 밖을 받아들인 뒤 안전하게 만들 이유가 없다.
+  - `REMOTE60_UPDATE_DIR` 미설정이면 **엔드포인트가 꺼진다**(503). 기본 디렉터리로 떨어지지 않는다. `REMOTE60_UPDATE_PUBLIC_KEY` 가 설정돼 있으면 **내보내기 전에 읽어서 검증**한다 — 서명이 틀린 manifest 는 모든 클라이언트에서 실패할 텐데, 그걸 처음 알게 되는 사람이 사용자여선 안 된다.
+- 검증 — **`qwinsta`: `console` 만 Active, `rdp-tcp` 는 `Listen` → RDP 미접속.**
+  - JS `update_manifest_test.js` **34 checks / 0 failed**. 서명 8종 · **다른 키로 만든 유효한 서명이 우리 키로는 통과하지 못함**(모양만 보고 출처를 안 보는 검증기를 잡는 케이스, 그 서명이 자기 키로는 통과하는 것까지 확인해 테스트가 의미 있음을 보임) · 순서 2 · **build→sign→read 왕복**(서명 후 size 한 글자 수정 시 깨짐) · 필드 5 · 플랫폼 2.
+  - Kotlin `UpdateManifestTest` **tests=9 failures=0 errors=0**(+ 기존 `VersionCompareTest` 2/0). DER↔raw 왕복을 테스트 쪽에서 역방향으로 구현해 production 변환의 반대편도 실행된다.
+  - 서버 `update_route_test.js` **16 checks / 0 failed**. **익명 거부**(401, 본문에 아무것도 새지 않음) · 정상 200 + 문서/서명/**서명된 그대로 개행으로 끝남** · 미발행 플랫폼 404 · **경로 주입 시도 포함 platform 5종 거부** · 라우트 근접 오타 404 · 잘못된 세션 토큰 401.
+  - **디렉터리 스위트 전체 `node test/run.js` exit 0, 전 구간 ALL PASS** (신규 2종이 각각 최상단·중간에서 통과).
+- **작업 중 사고 1건(기록)**: 서버 구문 확인을 `node -e "require('./apps/directory/server.js')"` 로 하면서 **로컬 8080 에 실제 서버가 약 3초간 떴다.** 즉시 확인해 종료했고(PID 10648), 포트 해제·부산물 없음을 확인했다. **NAS·실서버·라이브 제품과 무관한 이 PC 로컬 프로세스**였지만, 구문 검사는 `node --check` 로 했어야 했다.
+- 미착수·미검증: 실제 HTTPS 왕복 없음(#438 그대로) · `UpdateEffects` 와 HTTPS 클라이언트 배선 미완 · **UI 진입점 미착수** · `RegisterInstall`/`Relaunch`/`HealthCheck` production 은 **설계 질의 답 대기**(등록을 자체 구현할지 설치기 `/S` 재사용할지 — 후자는 업데이터의 원자 교체를 설치기의 비원자 교체가 우회한다) · 서버는 **배포하지 않았다**(코드만).
+- 변경 파일: `apps/directory/update_manifest.js`·`test/update_manifest_test.js`·`test/update_route_test.js`(신규) · `apps/directory/server.js`·`test/run.js` · `.../androiddirect/UpdateManifest.kt`·`app/src/test/.../UpdateManifestTest.kt`(신규) · `docs/history.md` · `docs/구현계획.md`.
+- 버전 인상·설치본 생성·설치·라이브 조작·서버 배포·push 없음. 키는 양쪽 모두 fail-closed(`trusted_public_key_hex()` / `trustedPublicKeyHex()` 빈 문자열, Kotlin 테스트가 그것을 단정).
+- 상태: 검증용 검사 대기. **전체 완료 아님.**

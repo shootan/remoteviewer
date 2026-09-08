@@ -46,6 +46,7 @@
 
 const http = require('http');
 const https = require('https');
+const updateManifest = require('./update_manifest');
 const dgram = require('dgram');
 const fs = require('fs');
 const path = require('path');
@@ -60,6 +61,10 @@ const TLS_CERT = process.env.REMOTE60_DIR_TLS_CERT || '';
 // Account creation is off unless a key is configured: this server is reachable from the
 // internet, and an open signup endpoint would let anyone register on it.
 const SIGNUP_KEY = process.env.REMOTE60_DIR_SIGNUP_KEY || '';
+// Where published update manifests live: <UPDATE_DIR>/<platform>.manifest and .sig.
+// Unset means the update endpoint is off, which is the state every server is in until
+// someone deliberately publishes something -- there is no default directory to fall into.
+const UPDATE_DIR = process.env.REMOTE60_UPDATE_DIR || '';
 // The operator's call, not ours. Short passwords are genuinely weak on a server that
 // grants remote control of a PC, so the default stays at 8 and lowering it is explicit.
 const MIN_PASSWORD = Math.max(1, Number(process.env.REMOTE60_DIR_MIN_PASSWORD || 8));
@@ -359,6 +364,63 @@ async function handleLogs(req, res) {
     return sendJson(res, 500, { error: 'could not store logs' });
   }
   return sendJson(res, 200, { ok: true, bytes: body.length });
+}
+
+/**
+ * Hands out the published manifest for one platform.
+ *
+ * The artifact itself is NOT served from here. This process also runs the relay and the
+ * heartbeat on the same event loop, and streaming a multi-megabyte installer through it would
+ * make every session on the box wait behind the download. The manifest says where the artifact
+ * is; something built to serve files serves it.
+ *
+ * Authentication reuses what already exists -- a client session or a host token -- because an
+ * update check is something a signed-in machine does, and inventing a third credential for it
+ * would be a third thing to get wrong. The manifest is signed either way, so this is about not
+ * publishing the fleet's update state to anyone who asks, not about trusting the transport.
+ */
+async function handleUpdateManifest(req, res) {
+  if (!UPDATE_DIR) return sendJson(res, 503, { error: 'updates are not published on this server' });
+
+  const session = sessionFor(req);
+  if (!session) {
+    const hostToken = String(req.headers['x-host-token'] || '');
+    const hostId = hostToken ? hostTokens.get(hashToken(hostToken)) : undefined;
+    if (!hostId || !store.hosts[hostId]) {
+      return sendJson(res, 401, { error: 'unknown session or host token' });
+    }
+  }
+
+  const query = new URL(req.url, 'http://localhost').searchParams;
+  const platform = String(query.get('platform') || '');
+  // Whitelisted rather than sanitised. This value becomes part of a file name, and the set of
+  // platforms is two -- there is no reason to accept anything else and then try to make it safe.
+  if (platform !== 'windows' && platform !== 'android') {
+    return sendJson(res, 400, { error: 'platform must be windows or android' });
+  }
+
+  let manifest;
+  let signature;
+  try {
+    manifest = fs.readFileSync(path.join(UPDATE_DIR, `${platform}.manifest`), 'utf8');
+    signature = fs.readFileSync(path.join(UPDATE_DIR, `${platform}.sig`), 'utf8').trim();
+  } catch {
+    // Nothing published for this platform is an ordinary answer, not a server fault.
+    return sendJson(res, 404, { error: `no manifest published for ${platform}` });
+  }
+
+  // Read back what is about to be handed out. A manifest whose signature does not check here
+  // would fail on every client instead, and the first person to find out should not be a user.
+  const trusted = String(process.env.REMOTE60_UPDATE_PUBLIC_KEY || '');
+  if (trusted) {
+    const checked = updateManifest.loadManifest(manifest, signature, trusted, platform);
+    if (checked.status !== updateManifest.Status.OK) {
+      console.error(`[update] refusing to serve ${platform}: ${checked.status} ${checked.detail}`);
+      return sendJson(res, 500, { error: 'published manifest did not verify' });
+    }
+  }
+
+  return sendJson(res, 200, { manifest, signature });
 }
 
 const RELAY_AUTH_TTL_MS = 60 * 1000;      // how long a connect stays relay-eligible
@@ -1259,6 +1321,7 @@ const routes = {
   'GET /api/hosts': handleHosts,
   'POST /api/connect': handleConnect,
   'POST /api/logs': handleLogs,
+  'GET /api/update/manifest': handleUpdateManifest,
 };
 
 async function onRequest(req, res) {
@@ -1356,6 +1419,9 @@ if (!addAccountFromCli()) {
     if (!useTls) {
       console.warn('[directory] TLS is off — tokens travel in clear. Set REMOTE60_DIR_TLS_KEY/CERT for anything but local testing.');
     }
+    console.log(UPDATE_DIR
+      ? `[update] serving manifests from ${UPDATE_DIR}`
+      : '[update] off (REMOTE60_UPDATE_DIR unset)');
   });
   observeSock = startUdp();
   relaySock = startRelayListener();
