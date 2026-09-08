@@ -9549,3 +9549,17 @@ Next action
 - 검증 — **`qwinsta`: console 만 Active.** C++ 업데이트 **13종 890 checks / 0 failed**(state_machine 65→**75**). JS 디렉터리 스위트 전부 통과. **대조군**: abandon 의 Relaunch 를 끄면 **5 FAIL**. 라이브 무영향: PID 3종 불변, `DisplayVersion` **0.2.104**.
 - 변경 파일: `update_state_machine.{hpp,cpp}`·`update_state_machine_test.cpp` · `updater_main.cpp` · `docs/history.md`.
 - 버전 인상·설치본·설치·라이브 조작·배포·push 없음.
+
+### 464) 2026-09-08 조합 계층에 테스트를 붙였다 — **890 checks 가 초록인 채 다섯 결함이 살아 있던 그 자리**
+- 검증용 지적: `updater_main.cpp` 는 **제품 바이너리 하나에만 링크**되고 `UpdaterEffects` 를 쓰는 테스트가 **0건**이었다. 그런데 #462·#463 의 결함이 **전부 그 조합 계층**에 있었다 — manifest 미fetch · 검증 버전 미전달 · capture/signal 순서. **누가 내일 같은 배선을 끊어도 890 은 그대로 통과**했을 것이다. `update_relaunch.cpp` 가 어디에도 링크되지 않았던 것과 **같은 구조**다.
+- **`updater_effects.{hpp,cpp}` 로 조합을 분리**했다. `updater_main.cpp` 에는 실행 파일만 하는 일(명령줄·자기 복사본 인계·종료 코드)이 남았다. `UpdaterDeps` 로 경계를 주입한다 — 요점은 "바꿔 끼울 수 있다" 가 아니라 **"업데이터가 이걸 제대로 배선했는가" 를 물을 수 있게 된 것**이다.
+  - ⚠️ **서명 검증기도 주입 대상**이다. production 은 컴파일된 신뢰 앵커를 쓰고, 테스트는 **자기 것**을 넣는다 — **운영 신뢰키를 바꾸지도, 빌드 플래그로 production 이 믿는 것을 바꾸지도 않고** 서명된 fixture 를 끝까지 돌릴 수 있다(Codex 요구사항).
+- **신규 `remote60_updater_assembly_test` 28 checks** — 제품 바이너리가 쓰는 **바로 그 `UpdaterEffects`** 를 돌린다(재구성이 아니라).
+  - **manifest 가 실제로 받아지는가**(url + `.sig` 둘 다) · **manifest 의 버전이 등록·health 에 도달하는가**(이 바이너리의 컴파일 버전도, 설치돼 있던 버전도 아님) · **capture 가 signal 보다 먼저인가**(순서를 인덱스로 단정) · 재실행 계획이 **캡처된 것으로** 만들어지는가.
+  - **대조군 4종**: manifest fetch 실패 → 아무것도 안 바뀜 · 아티팩트 다운로드 실패 → abandon · **서명 거부 → 아무것도 설치 안 됨**(나머지 넷을 값지게 만드는 검사) · **의존성에 구멍이 있으면 build 자체가 거부**.
+  - **작업 복사본의 순서**를 `prepare_working_copy()` 로 분리해 단정한다 — **판단 → 생성 → 복사 → 실행**. 복사 뒤에 검사하면 **이미 실행 파일을 받은 디렉터리를 검사**하는 것이다. 거부되면 **아무것도 복사되지 않음**도 단정한다.
+  - **대조군 실측 2회**: capture 를 signal 뒤로 옮기면 **1 FAIL**, 버전 대입을 지우면 **6 FAIL**.
+- ⚠️ **조합 테스트가 곧바로 또 하나를 잡았다**: **`--registry-root` 가 필수 인자인데 아무것도 제어하지 않았다.** 조합이 `HKEY_LOCAL_MACHINE` 과 고정 subkey 를 직접 썼다. **아무것도 바꾸지 않는 필수 인자는 없는 것보다 나쁘다 — 보증처럼 읽힌다.** `split_registry_root()` 신설(HKLM/HKCU 만, 그 외는 **기본값으로 매핑하지 않고 거부**), `validate()` 가 진입점에서 검사한다.
+- 검증 — **`qwinsta`: console 만 Active.** C++ 업데이트 **14종 918 checks / 0 failed**(신규 assembly 28). JS 디렉터리 스위트 전부 통과. 라이브 무영향: PID 3종 불변, `DisplayVersion` **0.2.104**.
+- 변경 파일: `updater_effects.{hpp,cpp}`·`updater_assembly_test.cpp`(신규) · `updater_main.cpp`(축소) · `updater_options.{hpp,cpp}` · `apps/native_poc/CMakeLists.txt` · `docs/history.md`.
+- 버전 인상·설치본·설치·라이브 조작·배포·push 없음.

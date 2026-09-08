@@ -1,5 +1,7 @@
 #include "updater_options.hpp"
 
+#include <windows.h>
+
 #include <cwchar>
 
 namespace remote60::native_poc::update {
@@ -90,6 +92,12 @@ bool UpdaterOptions::validate(std::string* detail) const {
   // hands this an http url is told so rather than having it quietly refused three layers down.
   if (manifestUrl.rfind("https://", 0) != 0) return fail("--manifest-url must be https");
 
+  // Checked here so a root this build cannot use fails at the entry point rather than at the
+  // registration stage, half way through an update.
+  if (!split_registry_root(registryRoot, nullptr, nullptr)) {
+    return fail("--registry-root must be HKLM\\... or HKCU\\...");
+  }
+
   return true;
 }
 
@@ -170,6 +178,29 @@ ParseResult parse_updater_options(const std::vector<std::wstring>& arguments) {
   }
 
   return result;
+}
+
+bool split_registry_root(const std::wstring& text, void** hive, std::wstring* subkey) {
+  const size_t slash = text.find_first_of(L"\\/");
+  if (slash == std::wstring::npos || slash == 0) return false;
+  const std::wstring prefix = text.substr(0, slash);
+  std::wstring rest = text.substr(slash + 1);
+  if (rest.empty()) return false;
+
+  // Only the two hives this product ever registers under. Anything else is refused rather than
+  // mapped to a default -- an updater writing to a hive nobody asked for is the failure this
+  // whole argument exists to prevent.
+  if (_wcsicmp(prefix.c_str(), L"HKLM") == 0 ||
+      _wcsicmp(prefix.c_str(), L"HKEY_LOCAL_MACHINE") == 0) {
+    if (hive) *hive = HKEY_LOCAL_MACHINE;
+  } else if (_wcsicmp(prefix.c_str(), L"HKCU") == 0 ||
+             _wcsicmp(prefix.c_str(), L"HKEY_CURRENT_USER") == 0) {
+    if (hive) *hive = HKEY_CURRENT_USER;
+  } else {
+    return false;
+  }
+  if (subkey) *subkey = rest;
+  return true;
 }
 
 std::wstring updater_copy_path(const std::wstring& workDir, const std::wstring& selfImagePath) {

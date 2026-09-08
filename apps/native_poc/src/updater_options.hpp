@@ -100,6 +100,19 @@ ParseResult parse_updater_options(const std::vector<std::wstring>& arguments);
 const char* parse_status_name(ParseStatus status);
 
 /**
+ * Splits `HKLM\\Some\\Sub\\Key` into the hive and the rest.
+ *
+ * Exists because `--registry-root` was required, documented, and ignored: the assembly wrote
+ * HKEY_LOCAL_MACHINE and a fixed subkey directly, so the option named something it did not
+ * control. A required argument that changes nothing is worse than an absent one -- it reads like
+ * a guarantee.
+ *
+ * `hive` receives HKEY_LOCAL_MACHINE or HKEY_CURRENT_USER as a void* (the header does not want
+ * windows.h). Returns false for anything else, rather than guessing at a hive.
+ */
+bool split_registry_root(const std::wstring& text, void** hive, std::wstring* subkey);
+
+/**
  * The path the copy runs from, given the work directory and this process's image.
  *
  * Deterministic so a caller can find and clean up a previous run's copy, rather than accumulating

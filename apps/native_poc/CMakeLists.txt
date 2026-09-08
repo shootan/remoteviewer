@@ -714,6 +714,7 @@ endif()
 # reach a real GNLinkHost.exe by name and actually start processes.
 add_executable(remote60_updater
   src/updater_main.cpp
+  src/updater_effects.cpp
   src/updater_options.cpp
   src/update_job_guard.cpp
   src/update_state_machine.cpp
@@ -755,6 +756,40 @@ target_include_directories(remote60_update_job_guard_test PRIVATE src)
 target_link_libraries(remote60_update_job_guard_test PRIVATE advapi32)
 if(MSVC)
   target_compile_options(remote60_update_job_guard_test PRIVATE /utf-8)
+endif()
+
+# The updater's own assembly, driven end to end.
+#
+# Every other suite builds an UpdateEffectsConfig by hand; this one drives UpdaterEffects -- the
+# same class the product binary uses. That layer had no test, and all five defects found in review
+# lived in it while 890 checks stayed green.
+#
+# It links update_process_targets.cpp because product_image_names() defines what a swap replaces.
+# Nothing here calls the enumerator: UpdaterDeps supplies it, and this test supplies its own.
+add_executable(remote60_updater_assembly_test
+  src/updater_assembly_test.cpp
+  src/updater_effects.cpp
+  src/updater_options.cpp
+  src/update_state_machine.cpp
+  src/update_effects.cpp
+  src/update_manifest.cpp
+  src/update_signature.cpp
+  src/update_http.cpp
+  src/payload_name.cpp
+  src/install_registration.cpp
+  src/update_registration_wiring.cpp
+  src/update_process_targets.cpp
+  src/update_relaunch.cpp
+  src/update_relaunch_plan.cpp
+  src/update_health.cpp
+  src/update_health_log.cpp
+)
+target_include_directories(remote60_updater_assembly_test PRIVATE src)
+target_link_libraries(remote60_updater_assembly_test PRIVATE
+  bcrypt winhttp advapi32 ole32 oleaut32 uuid shell32 user32
+)
+if(MSVC)
+  target_compile_options(remote60_updater_assembly_test PRIVATE /utf-8)
 endif()
 
 # When the host may get out of the way, and what it hands over. Pure decisions -- nothing here
