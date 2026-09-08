@@ -15,6 +15,11 @@
 // a ui subdirectory beside them.
 #define IDR_PAYLOAD_CLIENT_UI 206
 #define IDR_PAYLOAD_MACRO_UI 207
+// The updater. A payload file like any other, deliberately: a binary installed outside the
+// product directory could never be replaced by an update, because payload names are relative and
+// refuse traversal -- it would be frozen at its compile-time constants forever. It runs from a
+// copy of itself instead. See docs/업데이트_배선_계획.md W2a.
+#define IDR_PAYLOAD_UPDATER 208
 
 #define IDD_MAIN 300
 #define IDC_APP_ICON 301

@@ -9395,3 +9395,18 @@ Next action
 - **다음: W2**(설치기 payload 에 `GNLinkUpdater.exe` + `%ProgramFiles%\GNLink.update\` 생성) **→ W3·W4**(Host update/later + handoff, Client 승격 실행).
 - 변경 파일: `updater_options.{hpp,cpp}`·`updater_options_test.cpp`·`updater_main.cpp`(신규) · `update_effects.cpp`·`update_effects_test.cpp` · `apps/native_poc/CMakeLists.txt` · `docs/업데이트_배선_계획.md`(W2a) · `docs/history.md`.
 - 버전 인상·설치본·설치·라이브 조작·배포·push 없음.
+
+### 455) 2026-09-08 W2 — 설치기가 업데이터를 함께 설치한다 (payload + 작업 디렉터리 + 언인스톨)
+- W2a 결정(#454) 덕분에 **설치 코드에 새 구조가 생기지 않았다.** 업데이터가 `installDir` 안으로 들어가므로 `kPayload` 루프도 언인스톨 루프도 그대로 쓰인다 — "목적지가 다른 항목을 다룰 자리가 없다" 는 문제 자체가 사라졌다.
+- **payload 추가**: `IDR_PAYLOAD_UPDATER 208` · `payload.rc.in` 한 줄 · CMake staging(`GNLINK_PAYLOAD_UPDATER` + `copy_if_different` + `DEPENDS remote60_updater` + `remote60_installer_payload`) · `kPayload` 항목. 넣은 자리마다 **왜 밖이 아니라 안인지**를 주석으로 남겼다(밖이면 payload 이름이 상대 경로 전용이라 **영원히 교체 불가**, 언인스톨은 **고아**).
+- **작업 디렉터리 `%ProgramFiles%\GNLink.update`**: 설치 시 만든다. 업데이터도 스스로 만들지만, 설치 때 만들어 두면 **무엇이 쓰이기 전에 `%ProgramFiles%` 에서 상속된 ACL 을 갖고 시작한다.** 실패해도 설치는 계속한다 — 사용자는 제품을 설치하러 온 것이고 이 폴더는 첫 업데이트 때만 의미가 있다.
+  - **형제이지 자식이 아니다.** 자식이면 교체 대상 디렉터리 안이라 업데이터가 거부한다. 그리고 관리자 전용이어야 한다 — 여기서 도는 것이 상승된 채 돌기 때문이다. `%ProgramFiles%` 아래는 기본 ACL 이 이미 그러하므로 **세울 것이 없고 따라서 빠뜨릴 것도 없다.**
+- **언인스톨이 지운다**: `installDir` 을 지워도 **밖에 있는 작업 복사본은 따라가지 않는다.** 파일을 지우고 디렉터리를 없애되, 지금 업데이트가 돌고 있으면 복사본이 열려 있으므로 설치기 자기 이미지와 **같은 `MOVEFILE_DELAY_UNTIL_REBOOT` 폴백**을 쓴다.
+- `stop_running_product()` 의 `kImages` 는 **건드리지 않았다.** 돌고 있는 업데이터는 `GNLink.update` 의 복사본이고 설치 디렉터리의 파일은 잠겨 있지 않으므로, 설치기가 필요한 것을 막지 않는다. (`taskkill /F /T` 로 업데이터를 죽이면 그 자식인 재실행된 제품까지 딸려 죽는다 — 원장 (b) 와 같은 성질이다.)
+- 검증 — **`qwinsta`: console 만 Active.** 전체 빌드 오류 0. C++ 업데이트 **11종 808 checks / 0 failed**.
+  - **업데이터가 실제로 Setup 안에 박혔는지 바이트로 확인**: `GNLinkSetup.exe` 에 업데이터의 명령줄 리터럴 `--running-from-copy` 가 **UTF-16 으로 존재**. staging 디렉터리에 `GNLinkUpdater.exe` 397,824 bytes, Setup 4,009,984 bytes.
+  - **설치기·업데이터 둘 다 실행하지 않았다** — 실행하면 실제로 설치되거나 UAC 프롬프트가 뜬다. `C:\Program Files\GNLink.update` 가 **생기지 않았음**을 확인했다.
+- 라이브 무영향: `GNLinkHost`(5156)·`GNLinkInputService`(10820)·`GNLinkStream`(19384) PID 불변, `DisplayVersion` **0.2.104**.
+- **다음: W3·W4** — Host 의 update/later 승인 + **권한·락·staging 확보 뒤에만 종료**하는 handoff, Client 의 승격 실행(UAC 정확히 1회, 취소는 오류 아님).
+- 변경 파일: `installer/installer_ids.h`·`installer/payload.rc.in`·`installer/installer_main.cpp` · `apps/native_poc/CMakeLists.txt` · `docs/history.md`.
+- 버전 인상·설치본 배포·설치·라이브 조작·push 없음.
