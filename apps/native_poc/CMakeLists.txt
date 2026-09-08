@@ -519,12 +519,13 @@ endif()
 # Manifest parsing plus real CNG signature verification, and the ordering between them.
 add_executable(remote60_update_manifest_test
   src/update_manifest.cpp
+  src/update_http.cpp
   src/payload_name.cpp
   src/update_signature.cpp
   src/update_manifest_test.cpp
 )
 target_include_directories(remote60_update_manifest_test PRIVATE src)
-target_link_libraries(remote60_update_manifest_test PRIVATE bcrypt)
+target_link_libraries(remote60_update_manifest_test PRIVATE bcrypt winhttp)
 target_compile_definitions(remote60_update_manifest_test PRIVATE
   "REMOTE60_UPDATE_VECTORS_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/../shared/update_manifest\""
 )
@@ -537,12 +538,13 @@ endif()
 add_executable(remote60_update_state_machine_test
   src/update_state_machine.cpp
   src/update_manifest.cpp
+  src/update_http.cpp
   src/payload_name.cpp
   src/update_signature.cpp
   src/update_state_machine_test.cpp
 )
 target_include_directories(remote60_update_state_machine_test PRIVATE src)
-target_link_libraries(remote60_update_state_machine_test PRIVATE bcrypt)
+target_link_libraries(remote60_update_state_machine_test PRIVATE bcrypt winhttp)
 if(MSVC)
   target_compile_options(remote60_update_state_machine_test PRIVATE /utf-8)
 endif()
@@ -622,11 +624,12 @@ add_executable(remote60_update_effects_test
   src/install_registration.cpp
   src/update_state_machine.cpp
   src/update_manifest.cpp
+  src/update_http.cpp
   src/update_signature.cpp
   src/update_effects_test.cpp
 )
 target_include_directories(remote60_update_effects_test PRIVATE src)
-target_link_libraries(remote60_update_effects_test PRIVATE bcrypt advapi32 ole32 uuid shell32)
+target_link_libraries(remote60_update_effects_test PRIVATE bcrypt winhttp advapi32 ole32 uuid shell32)
 if(MSVC)
   target_compile_options(remote60_update_effects_test PRIVATE /utf-8)
 endif()

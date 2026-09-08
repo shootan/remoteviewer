@@ -43,11 +43,33 @@ enum class ManifestStatus {
   UnsupportedSchema,
 };
 
+/**
+ * One file in a release.
+ *
+ * Every field is covered by the manifest's single signature, so a name cannot be paired with a
+ * different hash, and a hash cannot be paired with a different URL, without the signature failing.
+ * That is why there is no archive: the manifest IS the container, and it contains identities
+ * rather than bytes.
+ *
+ * What skipping an archive does NOT do is remove attack surface. There is no compression or
+ * extraction code to get wrong, but the names and URLs in here are still attacker-chosen input if
+ * anything upstream goes wrong, which is why both are checked (payload_name.hpp, update_http.hpp).
+ */
+struct ManifestArtifact {
+  std::string name;    // destination, relative to the install directory
+  uint64_t size = 0;
+  std::string sha256;  // lowercase hex, 64 characters
+  std::string url;     // https only
+};
+
 /** The fields a manifest carries. All of them are covered by the one signature. */
 struct ManifestFields {
   uint32_t schema = 0;
   std::string platform;
   std::string version;
+  // Single-artifact fields, kept for the effects layer that has not been migrated to artifacts[]
+  // yet. Schema 2 does NOT parse them from the document -- they are set by callers that still
+  // work one file at a time, and they will go when the staging path consumes the list.
   std::string artifact;
   uint64_t size = 0;
   std::string sha256;          // lowercase hex, 64 characters
@@ -61,6 +83,22 @@ struct ManifestFields {
    * The signature says the bytes are ours; it does not say the names in them are safe.
    */
   std::vector<std::string> payloadNames;
+
+  /**
+   * The release this manifest describes, as one opaque identity.
+   *
+   * It exists so a set of files can be pinned to ONE release. Downloading each file against
+   * whatever "latest" says at the moment it is fetched would let a release change underneath an
+   * update in progress and produce an install that is half one build and half another. Everything
+   * staged for one attempt carries this identity, and a mismatch abandons the attempt.
+   */
+  std::string releaseId;
+
+  /** Architecture the artifacts are for. Part of the signed identity, like platform. */
+  std::string arch;
+
+  /** The files this release replaces. Empty is not allowed in schema 2. */
+  std::vector<ManifestArtifact> artifacts;
 };
 
 /**
@@ -106,10 +144,19 @@ struct ManifestResult {
 using SignatureVerifier =
     std::function<bool(const std::string& document, const std::vector<uint8_t>& signature)>;
 
+/** Limits on an artifact list, so a signed-but-absurd manifest cannot exhaust the machine. */
+struct ManifestLimits {
+  size_t maxArtifacts = 64;
+  uint64_t maxArtifactBytes = 512ull * 1024 * 1024;
+  uint64_t maxTotalBytes = 2048ull * 1024 * 1024;
+};
+
 ManifestResult load_manifest(const std::string& document,
                              const std::string& signatureHex,
                              const std::string& expectedPlatform,
-                             const SignatureVerifier& verifier);
+                             const SignatureVerifier& verifier,
+                             const std::string& expectedArch = "x64",
+                             const ManifestLimits& limits = {});
 
 /** The production verifier: ECDSA P-256/SHA-256 against the public key compiled into the build. */
 SignatureVerifier default_verifier();

@@ -54,6 +54,15 @@ std::string chomp(const std::string& s) {
   return out;
 }
 
+/** A valid schema-2 head. Cases append or override, so each shows only what it is testing. */
+std::string doc_head(const char* platform = "windows", const char* arch = "x64",
+                     const char* version = "1.0.0") {
+  return std::string("schema=2\nreleaseId=r-test\nplatform=") + platform + "\narch=" + arch +
+         "\nversion=" + version + "\n";
+}
+const char* kGoodArtifact =
+    "artifact=GNLinkHost.exe|24|0000000000000000000000000000000000000000000000000000000000000000|https://u.example/h.exe\n";
+
 const char* status_name(ManifestStatus s) {
   switch (s) {
     case ManifestStatus::Ok: return "Ok";
@@ -144,10 +153,25 @@ int main(int argc, char** argv) {
     if (r.manifest) {
       const ManifestFields& f = r.manifest->fields();
       check("version parsed", f.version == "0.2.105", f.version);
-      check("artifact parsed", f.artifact == "GNLinkSetup-0.2.105.exe", f.artifact);
-      check("size parsed", f.size == 3475968u, std::to_string(f.size));
-      check("sha256 parsed", f.sha256.size() == 64, f.sha256);
-      check("schema parsed", f.schema == 1u, std::to_string(f.schema));
+      check("schema parsed", f.schema == 2u, std::to_string(f.schema));
+      check("release identity parsed", f.releaseId == "r-0.2.105-test", f.releaseId);
+      check("arch parsed", f.arch == "x64", f.arch);
+      // Three artifacts of DIFFERENT sizes and contents, so nothing can pass by treating them as
+      // interchangeable -- and GNLinkSetup.exe is among them, because the installer travels in
+      // the package it installs.
+      check("three artifacts from the shared vectors", f.artifacts.size() == 3,
+            std::to_string(f.artifacts.size()));
+      if (f.artifacts.size() == 3) {
+        check("first is the host", f.artifacts[0].name == "GNLinkHost.exe", f.artifacts[0].name);
+        check("the Setup is a member", f.artifacts[2].name == "GNLinkSetup.exe",
+              f.artifacts[2].name);
+        check("sizes differ", f.artifacts[0].size != f.artifacts[1].size &&
+                                  f.artifacts[1].size != f.artifacts[2].size);
+        check("hashes differ", f.artifacts[0].sha256 != f.artifacts[2].sha256);
+        check("every URL is https",
+              f.artifacts[0].url.rfind("https://", 0) == 0 &&
+                  f.artifacts[2].url.rfind("https://", 0) == 0);
+      }
       // The comparison lives on the verified object, so it cannot be reached without a signature.
       check("newer than an older install", r.manifest->is_newer_than("0.2.104"));
       check("not newer than itself", !r.manifest->is_newer_than("0.2.105"));
@@ -200,40 +224,65 @@ int main(int argc, char** argv) {
 
   struct Case {
     const char* name;
-    const char* doc;
+    std::string doc;
     ManifestStatus expect;
   };
   const Case cases[] = {
-      {"missing schema", "platform=windows\nversion=1\nartifact=a\nsize=1\n"
-                         "sha256=0000000000000000000000000000000000000000000000000000000000000000\n",
+      {"a well formed manifest", doc_head() + kGoodArtifact, ManifestStatus::Ok},
+      {"missing schema", std::string("releaseId=r\nplatform=windows\narch=x64\nversion=1\n") +
+                             kGoodArtifact,
        ManifestStatus::Malformed},
-      {"unknown schema", "schema=99\nplatform=windows\nversion=1\nartifact=a\nsize=1\n"
-                         "sha256=0000000000000000000000000000000000000000000000000000000000000000\n",
+      {"unknown schema", std::string("schema=99\nreleaseId=r\nplatform=windows\narch=x64\n"
+                                     "version=1\n") + kGoodArtifact,
        ManifestStatus::UnsupportedSchema},
-      {"wrong platform", "schema=1\nplatform=android\nversion=1\nartifact=a\nsize=1\n"
-                         "sha256=0000000000000000000000000000000000000000000000000000000000000000\n",
+      {"schema 1 is no longer accepted",
+       std::string("schema=1\nreleaseId=r\nplatform=windows\narch=x64\nversion=1\n") +
+           kGoodArtifact,
+       ManifestStatus::UnsupportedSchema},
+      {"missing releaseId",
+       std::string("schema=2\nplatform=windows\narch=x64\nversion=1\n") + kGoodArtifact,
+       ManifestStatus::Malformed},
+      {"missing arch",
+       std::string("schema=2\nreleaseId=r\nplatform=windows\nversion=1\n") + kGoodArtifact,
+       ManifestStatus::Malformed},
+      // Not for this machine is not an error, the same way a platform mismatch is not.
+      {"a different arch", doc_head("windows", "arm64") + kGoodArtifact,
        ManifestStatus::WrongPlatform},
-      {"zero size", "schema=1\nplatform=windows\nversion=1\nartifact=a\nsize=0\n"
-                    "sha256=0000000000000000000000000000000000000000000000000000000000000000\n",
+      {"a different platform", doc_head("android") + kGoodArtifact, ManifestStatus::WrongPlatform},
+      {"missing version", std::string("schema=2\nreleaseId=r\nplatform=windows\narch=x64\n") +
+                              kGoodArtifact,
+       ManifestStatus::Malformed},
+      {"no artifacts at all", doc_head(), ManifestStatus::Malformed},
+      {"zero size", doc_head() + "artifact=a.exe|0|" + std::string(64, '0') +
+                        "|https://u.example/a\n",
+       ManifestStatus::Malformed},
+      {"an artifact larger than the per-file limit",
+       doc_head() + "artifact=a.exe|999999999999|" + std::string(64, '0') +
+           "|https://u.example/a\n",
        ManifestStatus::Malformed},
       {"uppercase sha256 rejected",
-       "schema=1\nplatform=windows\nversion=1\nartifact=a\nsize=1\n"
-       "sha256=ABCDEF0000000000000000000000000000000000000000000000000000000000\n",
+       doc_head() + "artifact=a.exe|1|ABCDEF" + std::string(58, '0') + "|https://u.example/a\n",
        ManifestStatus::Malformed},
-      {"short sha256 rejected", "schema=1\nplatform=windows\nversion=1\nartifact=a\nsize=1\n"
-                                "sha256=abcdef\n",
+      {"short sha256 rejected", doc_head() + "artifact=a.exe|1|abcdef|https://u.example/a\n",
        ManifestStatus::Malformed},
-      {"missing version", "schema=1\nplatform=windows\nartifact=a\nsize=1\n"
-                          "sha256=0000000000000000000000000000000000000000000000000000000000000000\n",
+      // The transport boundary is enforced at parse time, not only at fetch time -- so a caller
+      // that fetched some other way could not bypass it.
+      {"an http:// artifact URL is refused",
+       doc_head() + "artifact=a.exe|1|" + std::string(64, '0') + "|http://u.example/a\n",
+       ManifestStatus::Malformed},
+      {"a URL with credentials is refused",
+       doc_head() + "artifact=a.exe|1|" + std::string(64, '0') +
+           "|https://evil@u.example/a\n",
+       ManifestStatus::Malformed},
+      {"a malformed artifact line is refused",
+       doc_head() + "artifact=a.exe|1|onlythree\n", ManifestStatus::Malformed},
+      {"a non-numeric size is refused",
+       doc_head() + "artifact=a.exe|big|" + std::string(64, '0') + "|https://u.example/a\n",
        ManifestStatus::Malformed},
       {"unknown key is ignored, not rejected",
-       "schema=1\nplatform=windows\nversion=1\nartifact=a\nsize=1\nfutureField=whatever\n"
-       "sha256=0000000000000000000000000000000000000000000000000000000000000000\n",
-       ManifestStatus::Ok},
+       doc_head() + "futureField=whatever\n" + kGoodArtifact, ManifestStatus::Ok},
       {"comments and blank lines are ignored",
-       "# a comment\n\nschema=1\nplatform=windows\nversion=1\nartifact=a\nsize=1\n"
-       "sha256=0000000000000000000000000000000000000000000000000000000000000000\n",
-       ManifestStatus::Ok},
+       std::string("# a comment\n\n") + doc_head() + kGoodArtifact, ManifestStatus::Ok},
   };
   for (const Case& c : cases) {
     const ManifestResult r = load_manifest(c.doc, sigHex, "windows", acceptingVerifier);
@@ -244,84 +293,72 @@ int main(int argc, char** argv) {
 
   // ---------------------------------------------------------------- the lock on the door
 
-  // The payload-name rules exist to stop a name from becoming a path outside the install
-  // directory. Until now nothing connected them to a manifest, so they were a good lock not yet
-  // fitted to a door. These cases are that connection: an unsafe name in a SIGNED manifest must
-  // still be refused, and no VerifiedManifest carrying one can exist.
+  // Names in a manifest become filesystem paths used with administrator rights. Each case here is
+  // SIGNED by the accepting verifier, so the only thing rejecting it is the name check.
   {
-    const std::string base =
-        "schema=1\nplatform=windows\nversion=1\nartifact=a\nsize=1\n"
-        "sha256=0000000000000000000000000000000000000000000000000000000000000000\n";
-
-    struct Case {
-      const char* name;
-      const char* payloadLines;
-      ManifestStatus expect;
+    struct NameCase { const char* name; std::string artifactLine; ManifestStatus expect; };
+    const auto line = [&](const std::string& name) {
+      return "artifact=" + name + "|1|" + std::string(64, '0') + "|https://u.example/a\n";
     };
-    const Case cases[] = {
-        {"no payload lines is fine", "", ManifestStatus::Ok},
-        {"ordinary names are accepted",
-         "payload=GNLinkHost.exe\npayload=ui\\shell.html\npayload=GNLinkSetup.exe\n",
+    const NameCase cases[] = {
+        {"ordinary names are accepted", line("GNLinkHost.exe") + line("ui\\shell.html"),
          ManifestStatus::Ok},
-        // Each of these is signed by the accepting verifier, so the ONLY thing rejecting them is
-        // the name check.
-        {"a traversal in a signed manifest is refused", "payload=..\\evil.exe\n",
+        {"a traversal in a signed manifest is refused", line("..\\evil.exe"),
          ManifestStatus::Malformed},
-        {"a mixed-separator traversal is refused", "payload=ui/../../evil.exe\n",
+        {"a mixed-separator traversal is refused", line("ui/../../evil.exe"),
          ManifestStatus::Malformed},
-        {"an absolute path is refused", "payload=C:\\Windows\\System32\\evil.dll\n",
+        {"an absolute path is refused", line("C:\\Windows\\evil.dll"), ManifestStatus::Malformed},
+        {"a UNC path is refused", line("\\\\server\\share\\evil.exe"), ManifestStatus::Malformed},
+        {"an alternate data stream is refused", line("GNLinkHost.exe:hidden"),
          ManifestStatus::Malformed},
-        {"a UNC path is refused", "payload=\\\\server\\share\\evil.exe\n",
+        {"a reserved device name is refused", line("NUL"), ManifestStatus::Malformed},
+        {"a trailing dot is refused", line("GNLinkHost.exe."), ManifestStatus::Malformed},
+        {"a duplicate is refused", line("GNLinkHost.exe") + line("gnlinkhost.EXE"),
          ManifestStatus::Malformed},
-        {"an alternate data stream is refused", "payload=GNLinkHost.exe:hidden\n",
-         ManifestStatus::Malformed},
-        {"a reserved device name is refused", "payload=NUL\n", ManifestStatus::Malformed},
-        {"a trailing dot is refused", "payload=GNLinkHost.exe.\n", ManifestStatus::Malformed},
-        {"a duplicate is refused",
-         "payload=GNLinkHost.exe\npayload=gnlinkhost.EXE\n", ManifestStatus::Malformed},
-        {"a non-ASCII name is refused", "payload=\xed\x95\x9c.exe\n", ManifestStatus::Malformed},
+        {"a non-ASCII name is refused", line("\xed\x95\x9c.exe"), ManifestStatus::Malformed},
     };
-
-    for (const Case& c : cases) {
-      const std::string doc = base + c.payloadLines;
+    for (const NameCase& c : cases) {
+      const std::string doc = doc_head() + c.artifactLine;
       const ManifestResult r = load_manifest(doc, sigHex, "windows", acceptingVerifier);
-      check(std::string("payload: ") + c.name, r.status == c.expect,
+      check(std::string("artifact name: ") + c.name, r.status == c.expect,
             std::string("expected ") + status_name(c.expect) + " got " + status_name(r.status) +
                 " " + r.detail);
       if (c.expect != ManifestStatus::Ok) {
-        // The point of the connection: nothing carrying an unsafe name can exist.
-        check(std::string("payload: ") + c.name + " -> no VerifiedManifest", !r.manifest.has_value());
+        check(std::string("artifact name: ") + c.name + " -> no VerifiedManifest",
+              !r.manifest.has_value());
       }
     }
   }
 
   {
-    // And the names that DO come through are the ones that were written, in order -- the swap
-    // moves files aside in this order, so a reordering would change which backup a rollback used.
-    const std::string doc =
-        "schema=1\nplatform=windows\nversion=1\nartifact=a\nsize=1\n"
-        "sha256=0000000000000000000000000000000000000000000000000000000000000000\n"
-        "payload=GNLinkHost.exe\npayload=GNLinkStream.exe\npayload=ui\\shell.html\n";
+    // Order is kept, because the swap moves files aside in it and a reordering would change which
+    // backup a rollback restores from.
+    const std::string doc = doc_head() +
+        "artifact=GNLinkHost.exe|1|" + std::string(64, '0') + "|https://u.example/1\n"
+        "artifact=GNLinkStream.exe|2|" + std::string(64, '0') + "|https://u.example/2\n"
+        "artifact=ui\\shell.html|3|" + std::string(64, '0') + "|https://u.example/3\n";
     const ManifestResult r = load_manifest(doc, sigHex, "windows", acceptingVerifier);
-    check("payload names survive verification", r.status == ManifestStatus::Ok, r.detail);
+    check("artifact list survives verification", r.status == ManifestStatus::Ok, r.detail);
     if (r.manifest) {
-      const auto& names = r.manifest->fields().payloadNames;
-      check("three names", names.size() == 3, std::to_string(names.size()));
+      const auto& a = r.manifest->fields().artifacts;
+      check("three artifacts", a.size() == 3, std::to_string(a.size()));
       check("in the order written",
-            names.size() == 3 && names[0] == "GNLinkHost.exe" &&
-                names[1] == "GNLinkStream.exe" && names[2] == "ui\\shell.html");
+            a.size() == 3 && a[0].name == "GNLinkHost.exe" && a[1].name == "GNLinkStream.exe" &&
+                a[2].name == "ui\\shell.html");
+      check("sizes are per-artifact, not shared",
+            a.size() == 3 && a[0].size == 1 && a[1].size == 2 && a[2].size == 3);
+      check("release identity is carried", r.manifest->fields().releaseId == "r-test",
+            r.manifest->fields().releaseId);
     }
   }
 
   {
-    // A bad payload name with a BAD signature must still report SignatureInvalid -- the ordering
-    // holds even for the newest check.
-    const std::string doc =
-        "schema=1\nplatform=windows\nversion=1\nartifact=a\nsize=1\n"
-        "sha256=0000000000000000000000000000000000000000000000000000000000000000\n"
-        "payload=..\\evil.exe\n";
+    // A bad name with a BAD signature must still report SignatureInvalid -- the ordering holds
+    // even for the newest check.
+    const std::string doc = doc_head() + "artifact=..\evil.exe|1|" + std::string(64, '0') +
+                            "|https://u.example/a\n";
     const ManifestResult r = load_manifest(doc, sigHex, "windows", rejectingVerifier);
-    check("unsafe payload + bad signature -> SignatureInvalid (not Malformed)",
+    check("unsafe artifact name + bad signature -> SignatureInvalid (not Malformed)",
           r.status == ManifestStatus::SignatureInvalid, status_name(r.status));
   }
 

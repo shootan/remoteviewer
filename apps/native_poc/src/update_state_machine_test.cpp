@@ -36,12 +36,12 @@ void check(const std::string& name, bool ok, const std::string& detail = {}) {
 
 /** A manifest that parses and is newer than the fake installed version. */
 const char* kDocument =
-    "schema=1\n"
+    "schema=2\n"
+    "releaseId=r-0.2.105\n"
     "platform=windows\n"
+    "arch=x64\n"
     "version=0.2.105\n"
-    "artifact=GNLinkSetup-0.2.105.exe\n"
-    "size=3475968\n"
-    "sha256=039b3a47d36850292c2049400719ddeb0b17fd39f50ce73dec445e6d5d4dff2f\n";
+    "artifact=GNLinkSetup.exe|3475968|0000000000000000000000000000000000000000000000000000000000000000|https://u.example/s.exe\n";
 
 /** 128 hex characters, so it decodes to a 64-byte signature. Content is irrelevant to the fake. */
 const char* kSignatureHex =

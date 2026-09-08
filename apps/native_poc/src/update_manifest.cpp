@@ -1,6 +1,7 @@
 #include "update_manifest.hpp"
 
 #include "payload_name.hpp"
+#include "update_http.hpp"
 #include "update_signature.hpp"
 #include "version_compare.hpp"
 
@@ -9,7 +10,9 @@
 namespace remote60::native_poc::update {
 namespace {
 
-constexpr uint32_t kSupportedSchema = 1;
+// Schema 1 named a single artifact and was never published. Schema 2 carries a release
+// identity, an architecture and a list of files, which is what a real update needs.
+constexpr uint32_t kSupportedSchema = 2;
 
 std::string trim(const std::string& s) {
   size_t b = 0;
@@ -78,15 +81,35 @@ bool parse_fields(const std::string& document, ManifestFields* out, std::string*
       out->platform = value;
     } else if (key == "version") {
       out->version = value;
+    } else if (key == "releaseId") {
+      out->releaseId = value;
+    } else if (key == "arch") {
+      out->arch = value;
     } else if (key == "artifact") {
-      out->artifact = value;
-    } else if (key == "size") {
-      if (!parse_u64(value, &out->size)) {
-        *detail = "size is not a number";
+      // name|size|sha256|url. Pipe-separated rather than nested syntax because the whole document
+      // is signed as bytes -- a format with one obvious reading has nothing to disagree about.
+      // A pipe cannot appear in a name (payload_name rejects it) or in a hash.
+      std::vector<std::string> parts;
+      size_t start = 0;
+      for (;;) {
+        const size_t bar = value.find('|', start);
+        parts.push_back(value.substr(start, (bar == std::string::npos ? value.size() : bar) - start));
+        if (bar == std::string::npos) break;
+        start = bar + 1;
+      }
+      if (parts.size() != 4) {
+        *detail = "artifact line needs name|size|sha256|url";
         return false;
       }
-    } else if (key == "sha256") {
-      out->sha256 = value;
+      ManifestArtifact a;
+      a.name = trim(parts[0]);
+      if (!parse_u64(trim(parts[1]), &a.size)) {
+        *detail = "artifact size is not a number";
+        return false;
+      }
+      a.sha256 = trim(parts[2]);
+      a.url = trim(parts[3]);
+      out->artifacts.push_back(std::move(a));
     } else if (key == "payload") {
       // Repeatable. Order is kept because the swap moves files aside in it, and a stable order
       // makes a failure reproducible.
@@ -126,7 +149,9 @@ bool VerifiedManifest::is_newer_than(const std::string& installedVersion) const 
 ManifestResult load_manifest(const std::string& document,
                              const std::string& signatureHex,
                              const std::string& expectedPlatform,
-                             const SignatureVerifier& verifier) {
+                             const SignatureVerifier& verifier,
+                             const std::string& expectedArch,
+                             const ManifestLimits& limits) {
   ManifestResult result;
 
   // Step one, before the document is looked at in any way. A malformed document with a bad
@@ -162,25 +187,94 @@ ManifestResult load_manifest(const std::string& document,
     result.detail = "schema " + std::to_string(fields.schema);
     return result;
   }
-  if (fields.version.empty() || fields.artifact.empty() || fields.platform.empty()) {
+  if (fields.version.empty() || fields.platform.empty()) {
     result.status = ManifestStatus::Malformed;
-    result.detail = "missing platform, version or artifact";
+    result.detail = "missing platform or version";
     return result;
   }
-  if (fields.size == 0) {
+  if (fields.releaseId.empty()) {
     result.status = ManifestStatus::Malformed;
-    result.detail = "missing or zero size";
+    result.detail = "missing releaseId";
     return result;
   }
-  if (!is_lowercase_sha256_hex(fields.sha256)) {
+  if (fields.arch.empty()) {
     result.status = ManifestStatus::Malformed;
-    result.detail = "sha256 is not 64 lowercase hex characters";
+    result.detail = "missing arch";
     return result;
   }
-  // The lock goes on the door here: names that arrived in a manifest are checked before anything
-  // can hold a VerifiedManifest carrying them. A caller building an install config from a
-  // verified manifest therefore cannot receive an unsafe name -- there is no path that produces
-  // one.
+  if (!expectedArch.empty() && fields.arch != expectedArch) {
+    // Not an error, the same way a platform mismatch is not: this release is simply not for this
+    // machine.
+    result.status = ManifestStatus::WrongPlatform;
+    result.detail = "arch " + fields.arch;
+    return result;
+  }
+
+  // ---- the artifact list. Every rule here is enforced BEFORE a VerifiedManifest exists, so
+  // nothing downstream can be handed a name, a size or a URL that has not been through it.
+  if (fields.artifacts.empty()) {
+    result.status = ManifestStatus::Malformed;
+    result.detail = "no artifacts listed";
+    return result;
+  }
+  if (fields.artifacts.size() > limits.maxArtifacts) {
+    result.status = ManifestStatus::Malformed;
+    result.detail = "too many artifacts (" + std::to_string(fields.artifacts.size()) + ")";
+    return result;
+  }
+
+  std::vector<std::string> artifactNames;
+  artifactNames.reserve(fields.artifacts.size());
+  uint64_t total = 0;
+  for (size_t i = 0; i < fields.artifacts.size(); ++i) {
+    const ManifestArtifact& a = fields.artifacts[i];
+    const std::string where = "artifact " + std::to_string(i);
+
+    if (a.size == 0 || a.size > limits.maxArtifactBytes) {
+      result.status = ManifestStatus::Malformed;
+      result.detail = where + " size out of range";
+      return result;
+    }
+    // Checked as a running total rather than at the end, so an overflowing sum cannot wrap past
+    // the limit on its way there.
+    if (total > limits.maxTotalBytes - a.size) {
+      result.status = ManifestStatus::Malformed;
+      result.detail = "artifacts exceed the total size limit";
+      return result;
+    }
+    total += a.size;
+
+    if (!is_lowercase_sha256_hex(a.sha256)) {
+      result.status = ManifestStatus::Malformed;
+      result.detail = where + " sha256 is not 64 lowercase hex characters";
+      return result;
+    }
+    // The transport boundary is enforced here too, not only at fetch time: a manifest naming an
+    // http:// URL is refused outright rather than refused later by the client, so the rule cannot
+    // be bypassed by a caller that fetches some other way.
+    HttpsUrl parsed;
+    std::string urlError;
+    if (!parse_https_url(a.url, &parsed, &urlError)) {
+      result.status = ManifestStatus::Malformed;
+      result.detail = where + " url rejected: " + urlError;
+      return result;
+    }
+    artifactNames.push_back(a.name);
+  }
+
+  // The lock on the door: names that arrived in a manifest are checked before anything can hold a
+  // VerifiedManifest carrying them. A caller building an install config from a verified manifest
+  // therefore cannot receive an unsafe name -- there is no path that produces one.
+  {
+    size_t bad = 0;
+    PayloadNameVerdict verdict = PayloadNameVerdict::Ok;
+    if (!check_payload_names_utf8(artifactNames, &bad, &verdict)) {
+      result.status = ManifestStatus::Malformed;
+      result.detail = "artifact name " + std::to_string(bad) + " rejected: " +
+                      payload_name_verdict_name(verdict);
+      return result;
+    }
+  }
   if (!fields.payloadNames.empty()) {
     size_t bad = 0;
     PayloadNameVerdict verdict = PayloadNameVerdict::Ok;
@@ -196,6 +290,17 @@ ManifestResult load_manifest(const std::string& document,
     result.status = ManifestStatus::WrongPlatform;
     result.detail = fields.platform;
     return result;
+  }
+
+  // Transitional bridge, and marked as one. The effects layer still stages and verifies a single
+  // file, so when a release happens to contain exactly one artifact its identity is mirrored into
+  // the legacy fields that layer reads. This goes away when staging consumes artifacts[] -- and
+  // deliberately does NOT fire for a multi-artifact release, so nothing can silently update using
+  // only the first file of several.
+  if (fields.artifacts.size() == 1) {
+    fields.artifact = fields.artifacts[0].name;
+    fields.size = fields.artifacts[0].size;
+    fields.sha256 = fields.artifacts[0].sha256;
   }
 
   result.status = ManifestStatus::Ok;

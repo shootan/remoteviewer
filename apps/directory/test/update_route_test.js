@@ -89,7 +89,12 @@ async function login() {
   {
     const r = await request('/api/update/manifest?platform=windows', auth);
     check('a published manifest is returned', r.status === 200, `HTTP ${r.status} ${r.body.slice(0, 80)}`);
-    check('it carries the document', !!(r.json && r.json.manifest && r.json.manifest.includes('schema=1')));
+    check('it carries the document',
+          !!(r.json && r.json.manifest && r.json.manifest.includes('schema=2')));
+    // Served byte-for-byte, so the artifact list the client verifies is the one that was signed.
+    check('and the artifact list is intact',
+          !!(r.json && (r.json.manifest.match(/^artifact=/gm) || []).length === 3),
+          r.json ? String((r.json.manifest.match(/^artifact=/gm) || []).length) : 'none');
     check('and its signature', !!(r.json && typeof r.json.signature === 'string' && r.json.signature.length === 128),
           r.json ? String(r.json.signature || '').length : 'none');
     // The document must come back byte-identical or its signature stops matching.

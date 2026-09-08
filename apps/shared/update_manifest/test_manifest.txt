@@ -1,7 +1,9 @@
 # GNLink update manifest -- TEST DATA, signed with a throwaway key.
-schema=1
+schema=2
+releaseId=r-0.2.105-test
 platform=windows
+arch=x64
 version=0.2.105
-artifact=GNLinkSetup-0.2.105.exe
-size=3475968
-sha256=039b3a47d36850292c2049400719ddeb0b17fd39f50ce73dec445e6d5d4dff2f
+artifact=GNLinkHost.exe|24|1fb43173d5ada3025f4c2e9573a27d10da91980b1c5096998cefee0bc7740285|https://updates.example/0.2.105/GNLinkHost.exe
+artifact=ui\shell.html|18|691f5a3987e42edce6b9d95757c5652959ee80316c7ab4a97ee5a01a2bdbed6b|https://updates.example/0.2.105/ui/shell.html
+artifact=GNLinkSetup.exe|48|1f16140b6990db39a8acb13004ea34865cfda3bb47114b68abf32a9c40330344|https://updates.example/0.2.105/GNLinkSetup.exe

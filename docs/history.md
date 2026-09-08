@@ -9237,3 +9237,26 @@ Next action
 - 변경 파일: `apps/native_poc/src/update_registration_wiring.hpp`·`update_registration_wiring.cpp`(신규) · `update_effects.hpp`·`update_effects.cpp`·`update_effects_test.cpp` · `update_state_machine.hpp`·`update_state_machine.cpp`·`update_state_machine_test.cpp` · `apps/native_poc/CMakeLists.txt` · `docs/history.md` · `docs/구현계획.md`.
 - 버전 인상·설치본 생성·설치·라이브 조작·서버 배포·push 없음.
 - 상태: 검증용 검사 대기. **전체 완료 아님.**
+
+### 446) 2026-09-08 업데이트 step4-9 — manifest 스키마 2(`artifacts[]`) 를 세 런타임에 동시 반영 (Codex 승인 포맷 + 조건 0~8)
+- 배경: 다중 파일 패키지 포맷이 **아카이브 없이 manifest 가 파일별로 열거**하는 방식으로 확정됐다. 아카이브를 도입하면 압축·추출 코드가 새 표면이 되지만, **그것을 안 쓴다고 공격면이 사라지는 것은 아니다** — 사라지는 것은 압축·추출 처리까지이고 **manifest 의 이름·URL 은 여전히 경로와 요청이 되는 입력**이다. 그래서 이름 검증(#442·#444)과 URL 정책(#438)이 필요하다. (검증용이 자기 표현을 과장이라고 정정했고, 그 정정을 그대로 따랐다.)
+- **스키마 2**: `schema=2` · `releaseId` · `platform` · `arch` · `version` · **`artifact=name|size|sha256|url` 반복**. 파이프 구분은 문서가 **바이트로 서명**되기 때문이다 — 읽는 방법이 하나뿐인 형식은 서명자와 검증자 사이에서 어긋날 것이 없다. 파이프는 이름(payload 검증이 거부)에도 해시에도 나타날 수 없다.
+- **`releaseId` 가 존재하는 이유**: 파일마다 그 시점의 "latest" 를 다시 물으면 **업데이트 도중 릴리스가 바뀌어 절반은 이 빌드, 절반은 저 빌드인 설치**가 나온다. 한 시도에 staging 되는 모든 파일이 하나의 릴리스 정체성을 공유한다.
+- **서명 범위(조건 2)**: 하나의 서명이 **릴리스ID·플랫폼·아키텍처·버전·파일 목록 전체**를 덮는다. 따라서 이름을 다른 해시와, 해시를 다른 URL 과 짝지을 수 없다. **검증 전에는 이름·URL 로 다운로드도 쓰기도 시작하지 않는다** — `VerifiedManifest` 타입 강제가 그것을 구조로 만든다.
+- **목록 정책(조건 3)**: 아티팩트 최소 1개 · **최대 64개** · **파일당 512MB** · **총 2GB**(합계는 누적 검사로, 합이 넘쳐 한계를 지나치지 못하게) · 크기 0 거부 · **소문자 sha256 64자만** · **https 전용 + URL 자격증명 거부**(조건 4를 manifest 를 읽는 곳에서 강제하므로 다른 경로로 받는 호출자도 우회 불가) · 이름은 payload 규칙 전부 적용 + 중복 거부. **세 런타임이 같은 한계를 강제한다.**
+- **세 런타임 동시 반영(조건 8)**:
+  - **C++** `update_manifest.{hpp,cpp}` — `ManifestArtifact`, `ManifestLimits`, `expectedArch`. 스키마 1 의 `artifact=`/`size=`/`sha256=` 핸들러를 제거했다(그것이 먼저 걸려 새 형식이 도달하지 못하는 버그가 있었고 테스트가 잡았다).
+  - **JS** `apps/directory/update_manifest.js` — 같은 규칙·같은 한계, `buildManifest` 가 **아티팩트를 주어진 순서 그대로** 방출한다.
+  - **Kotlin** `UpdateManifest.kt` — 같은 규칙. `expectedArch` 추가.
+  - **공유 벡터 재생성**: `apps/shared/update_manifest/` 가 이제 **서로 다른 바이트·다른 크기의 아티팩트 3개**를 담고 그중 하나가 `GNLinkSetup.exe` 다. 파일 본문도 `files/` 에 함께 둬 테스트가 **manifest 가 주장하는 해시를 실제로 갖는 파일**을 스테이징할 수 있다. 개인키는 생성 후 폐기했다.
+- **전환 브리지(명시)**: effects 계층은 아직 파일 하나를 staging·검증한다. 그래서 `load_manifest` 는 **아티팩트가 정확히 1개일 때만** 그 정체성을 legacy 단일 필드에 복사한다. **여러 개일 때는 복사하지 않는다** — 여러 파일 중 첫 번째만으로 조용히 업데이트하는 일이 없도록. 이 브리지는 staging 이 목록을 소비하면 없어진다.
+- 검증 — **`qwinsta`: `console` 만 Active, `rdp-tcp` 는 `Listen` → RDP 미접속.**
+  - C++ 업데이트 **8종 합계 588 checks / 0 failed**(manifest 65→**82**), 전부 exit 0. 전체 빌드 오류 0.
+  - JS `update_manifest_test.js` **54 checks / 0 failed**, 디렉터리 스위트 전체 exit 0(라우트 **18 checks**, 발행된 문서가 스키마 2이고 **아티팩트 3줄이 그대로 전달**되는지 확인).
+  - Kotlin `UpdateManifestTest` **tests=11 failures=0**(+ `VersionCompareTest` 2/0).
+  - 세 런타임 모두 **같은 고정 벡터의 실제 서명**을 검증하고 같은 변조를 거부한다.
+- **조건 1 표기 준수**: effects 의 checks 수를 **다중 파일 업데이트의 증명으로 쓰지 않는다.** 현재 effects 테스트는 단일 blob 을 이름만 달리 복사하므로 **"해당 OS 부분 경로 검증"** 까지다.
+- 미착수(조건 5·6·7 의 실행분): **단일 릴리스 스냅샷 staging**(모든 파일을 받아 검증한 뒤에만 교체 진입) · **실제 파일 N개 실행 회귀 4종**(정확 목적지 / 누락·해시오류·중간실패 시 종료 0·설치변경 0 / latest 변경 중 혼합 0 / 교체 중간 실패 시 전부 복원) · `Relaunch`/`HealthCheck` production · 클라 셸 시작 시 비동기 확인 · 실 HTTPS 왕복 0회 · 실제 서비스/방화벽/시작메뉴 0회 · 관리자 권한 실증 없음.
+- 변경 파일: `apps/native_poc/src/update_manifest.hpp`·`update_manifest.cpp`·`update_manifest_test.cpp`·`update_state_machine_test.cpp`·`update_check_test.cpp`·`update_effects_test.cpp` · `apps/native_poc/CMakeLists.txt` · `apps/directory/update_manifest.js`·`test/update_manifest_test.js`·`test/update_route_test.js` · `.../androiddirect/UpdateManifest.kt`·`app/src/test/.../UpdateManifestTest.kt` · `apps/shared/update_manifest/`(README + 벡터 재생성 + `files/`) · `docs/history.md` · `docs/구현계획.md`.
+- 버전 인상·설치본 생성·설치·라이브 조작·서버 배포·push 없음.
+- 상태: 검증용 검사 대기. **전체 완료 아님.**

@@ -166,7 +166,9 @@ UpdateEffectsConfig setup_member_config(const std::wstring& install, const std::
 
 ManifestFields artifact_fields() {
   ManifestFields f;
-  f.schema = 1;
+  f.schema = 2;
+  f.releaseId = "r-0.2.105";
+  f.arch = "x64";
   f.platform = "windows";
   f.version = "0.2.105";
   f.artifact = "test.bin";
@@ -498,8 +500,8 @@ int main(int argc, char** argv) {
     // A manifest whose signature the injected verifier accepts. Real signature verification has
     // its own suite; what is exercised here is the effects behind the state machine.
     e.set_manifest(
-        "schema=1\nplatform=windows\nversion=0.2.105\nartifact=test.bin\nsize=" +
-            std::to_string(artifact_fields().size) + "\nsha256=" + gArtifactSha + "\n",
+        "schema=2\nreleaseId=r-0.2.105\nplatform=windows\narch=x64\nversion=0.2.105\nartifact=test.bin|" +
+                       std::to_string(artifact_fields().size) + "|" + gArtifactSha + "|https://u.example/a\n",
         std::string(128, '0'));
 
     const auto accept = [](const std::string&, const std::vector<uint8_t>&) { return true; };
@@ -519,8 +521,8 @@ int main(int argc, char** argv) {
     WindowsUpdateEffects e(c);
     e.set_installed_version("0.2.106");
     e.set_manifest(
-        "schema=1\nplatform=windows\nversion=0.2.105\nartifact=test.bin\nsize=" +
-            std::to_string(artifact_fields().size) + "\nsha256=" + gArtifactSha + "\n",
+        "schema=2\nreleaseId=r-0.2.105\nplatform=windows\narch=x64\nversion=0.2.105\nartifact=test.bin|" +
+                       std::to_string(artifact_fields().size) + "|" + gArtifactSha + "|https://u.example/a\n",
         std::string(128, '0'));
     const auto accept = [](const std::string&, const std::vector<uint8_t>&) { return true; };
     const UpdateOutcome out = run_update(e, accept, "windows");
@@ -609,8 +611,8 @@ int main(int argc, char** argv) {
     };
     WindowsUpdateEffects e(c);
     e.set_installed_version("0.2.104");
-    e.set_manifest("schema=1\nplatform=windows\nversion=0.2.105\nartifact=test.bin\nsize=" +
-                       std::to_string(artifact_fields().size) + "\nsha256=" + gArtifactSha + "\n",
+    e.set_manifest("schema=2\nreleaseId=r-0.2.105\nplatform=windows\narch=x64\nversion=0.2.105\nartifact=test.bin|" +
+                       std::to_string(artifact_fields().size) + "|" + gArtifactSha + "|https://u.example/a\n",
                    std::string(128, '0'));
     const auto accept = [](const std::string&, const std::vector<uint8_t>&) { return true; };
     const UpdateOutcome out = run_update(e, accept, "windows");
@@ -693,8 +695,8 @@ int main(int argc, char** argv) {
 
       // And the state machine turns that into "not now" rather than an error or a wait.
       e.set_installed_version("0.2.104");
-      e.set_manifest("schema=1\nplatform=windows\nversion=0.2.105\nartifact=test.bin\nsize=" +
-                         std::to_string(artifact_fields().size) + "\nsha256=" + gArtifactSha + "\n",
+      e.set_manifest("schema=2\nreleaseId=r-0.2.105\nplatform=windows\narch=x64\nversion=0.2.105\nartifact=test.bin|" +
+                       std::to_string(artifact_fields().size) + "|" + gArtifactSha + "|https://u.example/a\n",
                      std::string(128, '0'));
       const auto accept = [](const std::string&, const std::vector<uint8_t>&) { return true; };
       const UpdateOutcome out = run_update(e, accept, "windows");
@@ -811,8 +813,8 @@ int main(int argc, char** argv) {
     c.registerInstall = []() { return false; };  // fails after the swap
     WindowsUpdateEffects e(c);
     e.set_installed_version("0.2.104");
-    e.set_manifest("schema=1\nplatform=windows\nversion=0.2.105\nartifact=test.bin\nsize=" +
-                       std::to_string(artifact_fields().size) + "\nsha256=" + gArtifactSha + "\n",
+    e.set_manifest("schema=2\nreleaseId=r-0.2.105\nplatform=windows\narch=x64\nversion=0.2.105\nartifact=test.bin|" +
+                       std::to_string(artifact_fields().size) + "|" + gArtifactSha + "|https://u.example/a\n",
                    std::string(128, '0'));
     const auto accept = [](const std::string&, const std::vector<uint8_t>&) { return true; };
     const UpdateOutcome out = run_update(e, accept, "windows");
@@ -1012,8 +1014,8 @@ int main(int argc, char** argv) {
 
       WindowsUpdateEffects e(c);
       e.set_installed_version("0.2.105");
-      e.set_manifest("schema=1\nplatform=windows\nversion=0.3.0\nartifact=test.bin\nsize=" +
-                         std::to_string(artifact_fields().size) + "\nsha256=" + gArtifactSha + "\n",
+      e.set_manifest("schema=2\nreleaseId=r-0.3.0\nplatform=windows\narch=x64\nversion=0.3.0\nartifact=test.bin|" +
+                       std::to_string(artifact_fields().size) + "|" + gArtifactSha + "|https://u.example/a\n",
                      std::string(128, '0'));
       const auto accept = [](const std::string&, const std::vector<uint8_t>&) { return true; };
       const UpdateOutcome out = run_update(e, accept, "windows");
