@@ -93,6 +93,9 @@ Kotlin 경로는 `apps/android_direct_client/app/src/main/java/com/remote60/andr
 | ID | 판정 | 코드·문제 | 수정/완료 기준 |
 |---|---|---|---|
 | I01 | P1, 업데이트 조건부 | `installer/installer_main.cpp:160-162` stop 목록은 Client/Viewer 제외, payload에는 포함. `:293-308` 앞 파일들을 직접 덮은 뒤 client 잠금에서 실패 가능 | payload/프로세스 목록 일원화·사전 준비·원자 교체/rollback. Client/Viewer 실행 중 실패해도 구버전 완전성 또는 새버전 일관성 보장 |
+| I09 | P1, 업데이트 해소됨 (2026-09-09, history #468) | `updater_effects.cpp` 조합이 주입받은 payload 목록을 무시하고 `product_image_names()` 를 하드코딩. 실제 제품 말고는 아무것도 상대로 돌릴 수 없었고, **그 계층의 시나리오 스위트가 전부 공허하게 통과**했다 | 주입값을 쓰도록 수정. 교훈: 테스트 가능성이 없으면 테스트가 없고, 테스트가 없으면 결함이 산다 |
+| I10 | P0, 업데이트 해소됨 (2026-09-09, history #468) | production payload 기본값이 `L"ui\shell.html"` — `\s` 는 유효한 escape 가 아니라 값이 **`uishell.html`** 이 된다. `\m` 도 같다. **출시된 업데이터가 없는 파일 두 개를 찾아 모든 swap 이 실패**했을 것이고, 현장에서만 드러났을 것이다 | escape 수정. 빌드 산출물에서 `ui\shell.html` 1건·깨진 이름 0건 확인. **컴파일러는 조용했고 파이썬은 같은 문자열에 경고를 냈다** |
+| I11 | P2, 업데이트 해소됨 (2026-09-09, history #468) | swap 이 교체 대상을 `<name>.gnlink-old` 로 **이름을 바꾸면** 그 파일을 실행 중이던 프로세스는 바뀐 이름으로 계속 돈다. 이미지 이름이 불변이라 가정하고 **정확 일치로 훑던 정리 경로가 그것들을 못 봤다** | 접두사 일치로 수정. **swap 자체가 그 가정을 깬다**는 것이 요점 |
 | I02 | P2, 명령행 파싱 | `installer_main.cpp:580-606` 전체 command line substring으로 /s/-s 판정. 실행파일명 `GNLinkSetup-signed.exe`도 silent 판정 | argv 토큰의 정확한 option 비교. 파일명/폴더명/유사옵션에 반응하지 않음 |
 | I03 | P2, 삭제 결과 불일치 | `installer_main.cpp:396-418`: 지워지지 않은 payload를 재부팅 삭제한다고 알리지만 예약하는 것은 setup 파일뿐. ui 디렉터리도 남을 수 있음 | 실제 실패 파일별 예약/상태 보존, 빈 하위폴더 정리. 실패 시 registry/성공표시 계약 검증 |
 | I04 | P2, 설치 성공 오판 | `installer_main.cpp:319-340`: service install 실패 메시지 뒤에도 최종 성공/return0, firewall/shortcut 결과도 무시 | 성공·부분설치·실패를 구분하고 서비스/방화벽 요구조건을 검증. 실행중 timed-out child 수명도 정리 |
