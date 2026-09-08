@@ -8767,3 +8767,11 @@ Next action
 - 지연 판정: 정적 host AU capture→입큐 전 송신 준비 표본102~185ms와 trailing kick150ms 정책, UAC 후 readback 평균약8ms 확인. 입력 종단 지연은 미측정. raw cross-PC QPC 차감으로 `netUs/totalUs=0`이 되는 계측 오류를 추가 기록했다. 선택된 wire/경고 표본을 전체 FPS·총지연으로 합산하지 않았다.
 - 검증: Codex의 NAS SSH 원본 조회, 로컬 NAS 사본 사건/누적 카운터/해시 계산, 소스 분기·호출자 대조, 문서 참조/수치/diff 검사. 기존 401 spin 프로브(3초 CPU2.91초·diag2,372,858B)와 assembler/FIFO 모델은 검증용 실행 결과를 Codex가 직접 읽어 확인한 근거로 구분. 이번 제품 빌드·테스트·설치본 재생성은 없음. 제품/서버 설정·라이브 프로세스 변경 없음, push 없음.
 - 다음: A01 업로더 spin, A02/A06 provenance, A03~A05 NACK 복구 계약을 수정·검증하고 단절 대응/재접속 초기 전송 정책을 설계한다. 최초 유입 중단 지점은 동일 seq의 양단 NIC 캡처로 구분해야 한다. 문서화 완료를 제품 안정화 완료로 표시하지 않는다.
+
+
+### 414) 2026-09-08 중단된 멀티에이전트 전수조사 이슈 재확인·추적 원장
+- 목표: 사용자의 “아까 전수조사에서 나온 이슈 확인” 요청에 따라 중단 당시 초안과 프로브 출력을 Codex가 직접 대조한다. 에이전트 재가동·새 제품 구현 없음.
+- 변경: `docs/full_code_audit_2026-09-08.md` 신규 — host12/viewer14/server9/Android 계정5/native directory3의 초안43건과 메인 설치·입력 검토8건을 분류·보존. 총51개 검토 항목은 신규 실기 재현 버그51개라는 뜻이 아니며, 기존 D3/Android 후속 공백·옵션/오류 조건·설계 개선을 구분했다. `docs/구현계획.md`는 체크리스트 상태만 갱신.
+- 직접 확인: 마지막 content frame cadence 거절 뒤 old cache 재송출(HN01), 생성 AU가 후속실패의 bool false 때문에 버려짐(HN04), restart/encoder 실패를 잃는 상태전환(HN05/06), 명시 창 실패의 다른화면 fallback(HN08), decoder 출력 metadata에 현재 입력 header를 붙이는 문제(V06), control-only traffic에서 recovery maintenance 생략(V14), 서버 credential backoff/로그 namespace/저장 성공 계약 등. 09:59 첫 UDP 단절의 물리적 원인으로 귀속하지 않았다.
+- 검증: 이전 격리 산출물 result.txt/codec_partial_result.txt/server_audit_probe.out 직접 열람 및 제품 소스·호출자 대조. codec partial-output 프로브는 실제 codec+fake transform이며 실제 HW MFT 재현이 아님을 정정했다. 새 빌드/제품 테스트/실기/설치/서버 부하/배포 없음. 문서의 항목 수·링크·UTF-8·diff 범위 검사, Git MCP 문서 커밋. 기존 .claude 초안·프로브 보존, push 없음.
+- 다음: latest-content 보존 → EncoderResult/provenance/reference-chain → transactional capture/encoder restart → common ReceiveMaintenance/renderer recovery → auth/storage/install 계약 순으로 설계를 확정하고 해당 실패 조건 회귀를 수행한다. 검토 완료와 제품 수정 완료를 구분한다.
