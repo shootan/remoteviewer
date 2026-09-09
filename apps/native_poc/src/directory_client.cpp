@@ -482,7 +482,14 @@ bool HostAgent::ConsumeUdpPacket(const void* data, size_t len, const sockaddr_in
   const std::string text(reinterpret_cast<const char*>(bytes), len);
   std::string ip;
   uint32_t port = 0;
-  if (!json_get_string(text, "ip", &ip) || !json_get_u32(text, "port", &port) || port == 0) {
+  // Checked in full before anything is stored. The loose reader used here before took the digits
+  // in front of a '.' (so 29181.5 became 29181) and had no upper bound at all -- only `port == 0`
+  // was refused -- so 65537 survived the cast to uint16_t as **1**. That is not a value anything
+  // rejects downstream: it is a plausible port, published as this host's public one, and a host
+  // nobody can reach looks exactly like a network fault. A refusal here leaves the previous
+  // observation in place and the next probe replaces it.
+  if (!json_get_string(text, "ip", &ip) || ip.empty() ||
+      !json_get_exact_u32(text, "port", &port) || port == 0 || port > 65535) {
     return true;  // it came from the directory, so do not hand it back to the media protocol
   }
   std::lock_guard<std::mutex> lock(mu_);

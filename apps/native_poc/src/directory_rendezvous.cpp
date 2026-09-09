@@ -44,13 +44,27 @@ bool parse_observed(const std::string& json, std::string* outIp, int* outPort) {
   if (cursor == std::string::npos) return false;
   ++cursor;
   while (cursor < json.size() && (json[cursor] == ' ' || json[cursor] == '\t')) ++cursor;
-  int port = 0;
+  const size_t digitsBegin = cursor;
+  long port = 0;
   while (cursor < json.size() && json[cursor] >= '0' && json[cursor] <= '9') {
     port = port * 10 + (json[cursor] - '0');
+    // Stop accumulating well before an int can wrap. Anything this long is already out of range,
+    // and signed overflow would be undefined rather than merely wrong.
+    if (port > 65535) return false;
     ++cursor;
   }
+  if (cursor == digitsBegin) return false;
+  // What follows has to end the value. Without this, "29181.5" read as 29181 -- digits taken from
+  // in front of a '.' -- which is a plausible port that nothing downstream refuses.
+  if (cursor < json.size()) {
+    const char after = json[cursor];
+    if (after != ',' && after != '}' && after != ' ' && after != '\t' && after != '\r' &&
+        after != '\n') {
+      return false;
+    }
+  }
   if (port <= 0 || port > 65535) return false;
-  *outPort = port;
+  *outPort = static_cast<int>(port);
   return !outIp->empty();
 }
 
