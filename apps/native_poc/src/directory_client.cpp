@@ -272,8 +272,9 @@ update::UpdateEndpoint update_endpoint_for(const std::string& override_,
                                           const std::string& directoryUrl,
                                           const std::string& platform,
                                           const std::string& credentialHeader,
-                                          uint64_t ownerEpoch) {
+                                          const std::string& ownerKey, uint64_t ownerEpoch) {
   update::UpdateEndpoint endpoint;
+  endpoint.ownerKey = ownerKey;
   endpoint.ownerEpoch = ownerEpoch;
   if (!override_.empty()) {
     // An operator's own url. No credential, whatever it points at -- including our own host.

@@ -61,6 +61,15 @@ HWND gWindow = nullptr;
 std::mutex gStateMu;
 std::string gServerUrl;
 std::string gAccountId;
+/**
+ * Counts sign-ins and server changes in this process.
+ *
+ * The account name and the server address are not enough to tell one sign-in from the next: sign
+ * out and back in as the same user and both are identical, while the session token -- the thing
+ * actually handed to an updater -- is a different one. An attempt authorised under the old
+ * session must not inherit the new token, and comparing urls cannot see that.
+ */
+uint64_t gOwnerEpoch = 0;
 std::string gSessionToken;
 // Defaults chosen for a desktop rather than a phone: this is usually wired or on home Wi-Fi,
 // where the picture is worth more than the bytes. The relay is the exception, and the interface
@@ -407,15 +416,20 @@ void start_client_update(const std::string& availableVersion) {
   spec.workDir = workDir;
   // The same snapshot the check used.
   std::string launchSession;
+  std::string launchOwner;
+  uint64_t launchEpoch = 0;
   {
     std::lock_guard<std::mutex> lock(gStateMu);
     launchSession = gSessionToken;
+    launchOwner = gAccountId;
+    launchEpoch = gOwnerEpoch;
   }
   const upd::UpdateEndpoint launchEndpoint =
       remote60::native_poc::directory::update_endpoint_for(
           remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
           configured_directory_url(), "windows",
-          launchSession.empty() ? std::string() : "Authorization: Bearer " + launchSession);
+          launchSession.empty() ? std::string() : "Authorization: Bearer " + launchSession,
+          launchOwner, launchEpoch);
   spec.manifestUrl = launchEndpoint.url;
   spec.derivedEndpoint = launchEndpoint.derived;
   // A name, not the credential.
@@ -432,9 +446,19 @@ void start_client_update(const std::string& availableVersion) {
   spec.serviceName = L"GNLinkSecureInput";
   spec.registryRoot = L"HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\GNLink";
   spec.parentPid = GetCurrentProcessId();
-  // No ready event: this process is not elevated and does not need to wait for permission to
-  // leave. The updater stops the client the same way it stops any other product process.
-  spec.readyEventName.clear();
+  // Without a credential there is nothing to withhold, so there is nothing to wait for: this
+  // process is not elevated and does not need permission to leave, and the updater stops it the
+  // same way it stops any other product process.
+  //
+  // With one, the handshake is the only place the update can still be stopped. The download takes
+  // minutes and the user can sign out or sign in as somebody else while it runs; the
+  // acknowledgement is checked against the owner and withheld if it changed, and an updater that
+  // is not acknowledged stops nothing. That is why the client now takes part in a handshake it
+  // used to skip.
+  spec.readyEventName =
+      spec.credentialPipeName.empty()
+          ? std::wstring()
+          : upd::make_ready_event_name(GetCurrentProcessId(), GetTickCount64());
 
   std::wstring parameters;
   for (const std::wstring& arg : upd::updater_arguments(spec)) {
@@ -448,11 +472,26 @@ void start_client_update(const std::string& availableVersion) {
   // Created before the elevated process starts. The client used to launch and immediately walk
   // away; with a credential to hand over it has to stay for the exchange, and the deadline below
   // is what keeps "stay" from becoming "hang".
-  upd::CredentialServer credentialServer;
+  auto credentialServer = std::make_shared<upd::CredentialServer>();
+  HANDLE readyEvent = nullptr;
+  HANDLE ackEvent = nullptr;
   if (!spec.credentialPipeName.empty()) {
     std::string error;
-    if (!credentialServer.Create(spec.credentialPipeName, &error)) {
+    if (!credentialServer->Create(spec.credentialPipeName, &error)) {
       log_line("update: could not open the credential channel -- " + error);
+      post_status("error", "업데이트를 시작하지 못했습니다.");
+      return;
+    }
+    // Both made before the updater starts, and from one stem, so an attempt cannot end up
+    // answering on another's channel.
+    const std::wstring ackName = upd::make_ack_event_name(spec.readyEventName);
+    ackEvent = CreateEventW(nullptr, TRUE, FALSE, ackName.c_str());
+    readyEvent = CreateEventW(nullptr, TRUE, FALSE, spec.readyEventName.c_str());
+    if (!readyEvent || !ackEvent) {
+      if (readyEvent) CloseHandle(readyEvent);
+      if (ackEvent) CloseHandle(ackEvent);
+      credentialServer->Close();
+      log_line("update: could not create the handshake events");
       post_status("error", "업데이트를 시작하지 못했습니다.");
       return;
     }
@@ -472,34 +511,103 @@ void start_client_update(const std::string& availableVersion) {
       upd::elevation_outcome(launched != FALSE, static_cast<uint32_t>(GetLastError()));
 
   if (launched && info.hProcess && !spec.credentialPipeName.empty()) {
-    // Re-read rather than reused: the user may have signed out or changed servers between the
-    // decision to update and the consent prompt they just answered. An attempt whose owner has
-    // changed gets no credential, and fails at the fetch instead of installing on behalf of
-    // somebody who is no longer there.
-    std::string nowSession;
-    {
-      std::lock_guard<std::mutex> lock(gStateMu);
-      nowSession = gSessionToken;
-    }
-    const upd::UpdateEndpoint nowEndpoint =
-        remote60::native_poc::directory::update_endpoint_for(
-            remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
-            configured_directory_url(), "windows",
-            nowSession.empty() ? std::string() : "Authorization: Bearer " + nowSession);
-    std::string payload;
-    if (nowEndpoint.url == launchEndpoint.url && nowEndpoint.origin == launchEndpoint.origin &&
-        !nowEndpoint.credentialHeader.empty()) {
-      payload = nowEndpoint.credentialHeader;
-    } else {
-      log_line("update: the signed-in owner changed after the updater was started; "
-               "no credential sent");
-    }
-    std::string error;
-    if (payload.empty() || !credentialServer.Serve(info.hProcess, payload, 120000, &error)) {
-      log_line("update: the updater did not receive the credential -- " +
-               (error.empty() ? std::string("owner changed") : error));
-    }
-    credentialServer.Close();
+    // Off the UI thread. This wait can last as long as an elevation prompt plus a slow start, and
+    // it used to sit inline in the page-message handler -- so the window stopped answering for up
+    // to two minutes while it ran. Overlapped I/O does not help when the caller waits for it on
+    // the thread that has to keep painting.
+    //
+    // The process handle and the pipe move with it: the handle is what pins the process id the
+    // check compares against, so it cannot be closed here.
+    HANDLE elevated = info.hProcess;
+    info.hProcess = nullptr;  // owned by the thread now
+    std::thread([elevated, credentialServer, launchEndpoint, readyEvent, ackEvent,
+                 readyName = spec.readyEventName]() {
+      // Re-read rather than reused: the user may have signed out, signed back in, or changed
+      // servers between deciding to update and answering the consent prompt.
+      std::string nowSession;
+      std::string nowOwner;
+      uint64_t nowEpoch = 0;
+      {
+        std::lock_guard<std::mutex> lock(gStateMu);
+        nowSession = gSessionToken;
+        nowOwner = gAccountId;
+        nowEpoch = gOwnerEpoch;
+      }
+      const upd::UpdateEndpoint nowEndpoint =
+          remote60::native_poc::directory::update_endpoint_for(
+              remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
+              configured_directory_url(), "windows",
+              nowSession.empty() ? std::string() : "Authorization: Bearer " + nowSession, nowOwner,
+              nowEpoch);
+
+      std::string payload;
+      std::string why;
+      // The owner, not the destination. Comparing the url and the origin asks whether the SERVER
+      // changed; sign out and back in on the same server and both are identical while the token
+      // is a different one -- so that comparison would hand an attempt authorised by one sign-in
+      // the credential of the next.
+      if (!nowEndpoint.same_owner_as(launchEndpoint)) {
+        why = "the signed-in owner changed after the updater was started";
+      } else if (nowEndpoint.url != launchEndpoint.url ||
+                 nowEndpoint.origin != launchEndpoint.origin) {
+        why = "the update endpoint changed after the updater was started";
+      } else if (nowEndpoint.credentialHeader.empty()) {
+        why = "there is no longer a session to authorise the update with";
+      } else {
+        payload = upd::encode_update_descriptor(nowEndpoint);
+        if (payload.empty()) why = "the credential descriptor could not be built";
+      }
+
+      bool delivered = false;
+      if (!payload.empty()) {
+        std::string error;
+        delivered = credentialServer->Serve(elevated, payload, 120000, &error);
+        if (!delivered) why = error;
+      }
+      credentialServer->Close();
+
+      if (delivered) {
+        log_line("update: the updater received its credential");
+        // And now the veto. The updater signals when it has a verified download and waits to be
+        // told it may proceed; the owner is checked at that moment, because that is the last
+        // point at which anything can still be withheld.
+        std::string why;
+        const upd::HandoffStep step = upd::await_handoff(
+            readyEvent, ackEvent, elevated, readyName, 10 * 60 * 1000, nullptr, &why, [&]() {
+              std::string checkSession;
+              std::string checkOwner;
+              uint64_t checkEpoch = 0;
+              {
+                std::lock_guard<std::mutex> lock(gStateMu);
+                checkSession = gSessionToken;
+                checkOwner = gAccountId;
+                checkEpoch = gOwnerEpoch;
+              }
+              const upd::UpdateEndpoint atReady =
+                  remote60::native_poc::directory::update_endpoint_for(
+                      remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
+                      configured_directory_url(), "windows",
+                      checkSession.empty() ? std::string()
+                                           : "Authorization: Bearer " + checkSession,
+                      checkOwner, checkEpoch);
+              return atReady.same_owner_as(launchEndpoint) && atReady.url == launchEndpoint.url;
+            });
+        log_line(std::string("update: handoff ") + upd::handoff_step_name(step) + ": " + why);
+        if (step != upd::HandoffStep::ExitNow) {
+          post_status("error", "업데이트가 진행되지 않았습니다. " + why);
+        }
+      } else {
+        // Distinct from "started". The updater is running and will stop without installing
+        // anything; saying the update began would leave the user waiting for a result that is
+        // not coming.
+        log_line("update: no credential was delivered -- " + why);
+        post_status("error", "업데이트를 시작하지 못했습니다. 다시 로그인한 뒤 시도해 주세요.");
+      }
+      // Closed last: the handle is what pins the process id, and await_handoff watches it.
+      CloseHandle(elevated);
+      if (readyEvent) CloseHandle(readyEvent);
+      if (ackEvent) CloseHandle(ackEvent);
+    }).detach();
   }
 
   if (info.hProcess) CloseHandle(info.hProcess);
@@ -527,15 +635,19 @@ void start_update_check() {
   // not signed in yet has no credential to send, which is normal: the server says so, and that
   // answer is an update-check failure rather than a reason to sign out.
   std::string session;
+  std::string owner;
+  uint64_t epoch = 0;
   {
     std::lock_guard<std::mutex> lock(gStateMu);
     session = gSessionToken;
+    owner = gAccountId;
+    epoch = gOwnerEpoch;
   }
   const upd::UpdateEndpoint endpoint =
       remote60::native_poc::directory::update_endpoint_for(
           remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
           configured_directory_url(), "windows",
-          session.empty() ? std::string() : "Authorization: Bearer " + session);
+          session.empty() ? std::string() : "Authorization: Bearer " + session, owner, epoch);
 
   upd::CheckConfig config;
   config.manifestUrl = endpoint.url;
@@ -586,6 +698,7 @@ void begin_login(std::string server, std::string accountId, std::string password
       gServerUrl = server;
       gAccountId = accountId;
       gSessionToken = token;
+      ++gOwnerEpoch;
     }
     {
       // Now that a token exists the shell can hand its logs to the directory, which is the only

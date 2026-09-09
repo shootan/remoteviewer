@@ -275,15 +275,41 @@ int wmain(int argc, wchar_t** argv) {
   log_line("starting: install=" + to_utf8(options.installDir) +
            " staging=" + to_utf8(options.stagingDir) + " installed=" + options.installedVersion);
 
-  // What the worker may send, and where. Derived urls are on the directory's own origin by
-  // construction, so that is the one origin this credential may reach; every artifact url is
-  // judged against it separately.
+  // What the worker may send, and where -- taken from the frame, not rebuilt from argv.
+  //
+  // The credential arrives over a channel that proved who was listening. If the origin it may be
+  // sent to were rebuilt here from --manifest-url, that part would have proved nothing: anything
+  // able to start this process with a different url could aim a real credential somewhere else.
+  // So the frame carries url, origin, owner and shape, and the two are checked against each
+  // other. Disagreeing is itself the answer.
   UpdateEndpoint endpoint;
   endpoint.url = options.manifestUrl;
   endpoint.derived = options.derivedEndpoint;
-  if (options.derivedEndpoint && !credential.empty()) {
-    endpoint.credentialHeader = credential;
-    endpoint.origin = url_origin_key(options.manifestUrl);
+  if (!credential.empty()) {
+    std::string descriptorError;
+    UpdateEndpoint fromFrame;
+    if (!decode_update_descriptor(credential, &fromFrame, &descriptorError)) {
+      log_line("the credential frame did not parse: " + descriptorError);
+      return 6;
+    }
+    if (fromFrame.url != options.manifestUrl) {
+      log_line("the credential was issued for a different url than this run was given");
+      return 6;
+    }
+    if (fromFrame.derived != options.derivedEndpoint) {
+      log_line("the credential was issued for a different wire shape than this run was given");
+      return 6;
+    }
+    if (fromFrame.derived && fromFrame.origin.empty()) {
+      log_line("the credential frame names no origin");
+      return 6;
+    }
+    endpoint = fromFrame;
+    // Belt and braces: whatever the frame said, a derived url is on its own origin.
+    if (endpoint.derived && endpoint.origin != url_origin_key(options.manifestUrl)) {
+      log_line("the credential's origin is not the manifest url's own");
+      return 6;
+    }
   }
 
   UpdaterEffects effects(options, production_updater_deps(log_line, endpoint));

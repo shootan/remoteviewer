@@ -652,6 +652,15 @@ struct AppState {
   bool uiPreview = false;
   std::string cachePath;
   directory::HostCache cache;
+  /**
+   * Counts sign-ins in this process.
+   *
+   * A re-register issues a NEW host token for the same account on the same machine, so the
+   * account name, the machine id and the url are all identical across it. An attempt authorised
+   * before that must not be handed the token issued after it, and no comparison of the
+   * destination can see the difference.
+   */
+  uint64_t ownerEpoch = 0;
   StreamingHostProcess streaming;
   std::atomic<bool> signInBusy{false};
 };
@@ -774,7 +783,8 @@ void start_update_check(HWND window) {
   const upd::UpdateEndpoint endpoint = directory::update_endpoint_for(
       remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
       g.cache.directoryUrl, "windows",
-      g.cache.hostToken.empty() ? std::string() : "x-host-token: " + g.cache.hostToken);
+      g.cache.hostToken.empty() ? std::string() : "x-host-token: " + g.cache.hostToken,
+      g.cache.accountId + "|" + g.cache.machineId, g.ownerEpoch);
 
   upd::CheckConfig config;
   config.manifestUrl = endpoint.url;
@@ -957,7 +967,8 @@ void start_update_handoff(HWND window) {
   const upd::UpdateEndpoint launchEndpoint = directory::update_endpoint_for(
       remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
       g.cache.directoryUrl, "windows",
-      g.cache.hostToken.empty() ? std::string() : "x-host-token: " + g.cache.hostToken);
+      g.cache.hostToken.empty() ? std::string() : "x-host-token: " + g.cache.hostToken,
+      g.cache.accountId + "|" + g.cache.machineId, g.ownerEpoch);
   spec.manifestUrl = launchEndpoint.url;
   spec.derivedEndpoint = launchEndpoint.derived;
   // A name, not the credential. The credential goes over the pipe, and only after the process
@@ -1061,11 +1072,17 @@ void start_update_handoff(HWND window) {
     const upd::UpdateEndpoint nowEndpoint = directory::update_endpoint_for(
         remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
         g.cache.directoryUrl, "windows",
-        g.cache.hostToken.empty() ? std::string() : "x-host-token: " + g.cache.hostToken);
+        g.cache.hostToken.empty() ? std::string() : "x-host-token: " + g.cache.hostToken,
+        g.cache.accountId + "|" + g.cache.machineId, g.ownerEpoch);
     std::string payload;
-    if (nowEndpoint.url == launchEndpoint.url && nowEndpoint.origin == launchEndpoint.origin &&
-        !nowEndpoint.credentialHeader.empty()) {
-      payload = nowEndpoint.credentialHeader;
+    // The owner, not the destination: a re-register keeps the url and the origin and changes the
+    // token, so comparing those two would hand the new token to an older attempt.
+    if (nowEndpoint.same_owner_as(launchEndpoint) && nowEndpoint.url == launchEndpoint.url &&
+        nowEndpoint.origin == launchEndpoint.origin && !nowEndpoint.credentialHeader.empty()) {
+      payload = upd::encode_update_descriptor(nowEndpoint);
+      if (payload.empty()) {
+        append_host_app_log("[host-app] update: the credential descriptor could not be built");
+      }
     } else {
       append_host_app_log("[host-app] update: the owner changed after the updater was started; "
                           "no credential sent");
@@ -1084,13 +1101,23 @@ void start_update_handoff(HWND window) {
   // Waits off the UI thread: this window has to keep responding while the download runs, and the
   // user may still be using the product right up to the moment it is replaced.
   std::thread([window, readyEvent, ackEvent, bootstrap = pi.hProcess,
-               readyName = spec.readyEventName]() {
+               readyName = spec.readyEventName, launchEndpoint]() {
     // Long enough for a download on a slow link, short enough that a wedged updater does not keep
     // the host waiting forever. Running out is not an error -- it just means no update today.
     std::string why;
-    const upd::HandoffStep step =
-        upd::await_handoff(readyEvent, ackEvent, bootstrap, readyName, 10 * 60 * 1000,
-                           nullptr, &why);
+    const upd::HandoffStep step = upd::await_handoff(
+        readyEvent, ackEvent, bootstrap, readyName, 10 * 60 * 1000, nullptr, &why, [&]() {
+          // Asked at the acknowledgement, not at the launch. A re-register during the download
+          // issues a new token for the same account on the same server -- identical url, identical
+          // origin -- so only the owner comparison can see it.
+          const upd::UpdateEndpoint nowEndpoint = directory::update_endpoint_for(
+              remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
+              g.cache.directoryUrl, "windows",
+              g.cache.hostToken.empty() ? std::string() : "x-host-token: " + g.cache.hostToken,
+              g.cache.accountId + "|" + g.cache.machineId, g.ownerEpoch);
+          return nowEndpoint.same_owner_as(launchEndpoint) &&
+                 nowEndpoint.url == launchEndpoint.url;
+        });
 
     CloseHandle(bootstrap);
     if (ackEvent) CloseHandle(ackEvent);
@@ -1687,6 +1714,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         g.cache.hostName = result->hostName;
         g.cache.hostId = result->hostId;
         g.cache.hostToken = result->hostToken;
+        ++g.ownerEpoch;
         // A fresh sign-in changes the answer to "is a directory reachable", so the report is
         // renewed rather than left saying what was true before signing in.
         gDirectoryReported = false;

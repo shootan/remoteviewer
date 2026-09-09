@@ -157,6 +157,7 @@ update::UpdateEndpoint update_endpoint_for(const std::string& override_,
                                            const std::string& directoryUrl,
                                            const std::string& platform,
                                            const std::string& credentialHeader = {},
+                                           const std::string& ownerKey = {},
                                            uint64_t ownerEpoch = 0);
 
 /**

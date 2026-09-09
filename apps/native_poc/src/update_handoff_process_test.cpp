@@ -34,6 +34,7 @@ void check(const std::string& name, bool ok, const std::string& detail = {}) {
   if (!ok) ++gFailures;
   std::cout << (ok ? "PASS  " : "FAIL  ") << name;
   if (!detail.empty()) std::cout << "  " << detail;
+
   std::cout << "\n";
 }
 
@@ -107,7 +108,7 @@ int main() {
   const auto run = [&](int bootstrapExit, int delayMs, bool signal, DWORD hostTimeoutMs,
                        int ackWaitMs, bool dieEarly = false, bool openAckLate = false,
                        int ackOpenDelayMs = 0, bool withoutAckChannel = false,
-                       bool ackUnwritable = false) {
+                       bool ackUnwritable = false, bool ownerChanged = false) {
     Attempt a;
     ++attemptNo;
     wchar_t stem[128]{};
@@ -160,8 +161,14 @@ int main() {
     const DWORD waitBegan = GetTickCount();
     // `withoutAckChannel` hands the wait no channel at all -- the caller cannot answer. It must
     // not agree to exit on that basis.
+    // `ownerChanged` is the case where everything worked and the answer must still be no: the
+    // download is verified and the updater is waiting, but the person who authorised it is no
+    // longer the person signed in. Withholding the acknowledgement is the only thing that stops
+    // it, because after the acknowledgement the updater stops the product and replaces files.
     a.step = await_handoff(ready, withoutAckChannel ? nullptr : ack, pi.hProcess, readyName,
-                           hostTimeoutMs, nullptr, &a.why);
+                           hostTimeoutMs, nullptr, &a.why,
+                           ownerChanged ? std::function<bool()>([]() { return false; })
+                                        : std::function<bool()>());
     a.waitMs = GetTickCount() - waitBegan;
 
     // Released IMMEDIATELY, the way the host releases them -- before the worker has necessarily
@@ -353,6 +360,23 @@ int main() {
           std::string("exit=") + (sawExit ? "yes" : "no") + " keep=" + (sawKeep ? "yes" : "no"));
   }
 
+  // ---------------------------------------------------------------- the owner changed
+  //
+  // Everything about the update worked: the download is verified and the updater is waiting to be
+  // told it may proceed. The answer is still no, because the person who authorised it signed out
+  // while it downloaded. This is the last point at which anything can be withheld -- after the
+  // acknowledgement the updater stops the product and swaps files.
+  {
+    const Attempt a = run(0, 200, true, 15000, 4000, false, false, 0, false, false, true);
+    check("an owner change withholds the acknowledgement", a.step != HandoffStep::ExitNow,
+          std::string(handoff_step_name(a.step)) + ": " + a.why);
+    check("...and says which of the two it was",
+          a.why.find("owner") != std::string::npos, a.why);
+    // The witness is the worker's own account of what it decided. It must have stood down: an
+    // acknowledgement that was never sent cannot have told it to stop anything.
+    check("...and the worker stood down instead of stopping the product",
+          a.witness.find("worker stood down") != std::string::npos, a.witness);
+  }
   // Only this run's own directory, and only if it is under the configured root.
   {
     std::wstring base = GNLINK_HANDOFF_ROOT;
@@ -378,7 +402,9 @@ int main() {
     }
   }
 
+
   std::cout << (gFailures == 0 ? "RESULT: ALL PASS  (" : "RESULT: FAILED  (") << gChecks
+
             << " checks, " << gFailures << " failed)\n";
   return gFailures == 0 ? 0 : 1;
 }

@@ -189,9 +189,22 @@ uint32_t remaining_ms(uint64_t startedAt, uint64_t now, uint32_t timeoutMs);
  * departs without answering leaves it with a product it is not allowed to stop and nobody to
  * stop it for.
  */
+/**
+ * `ownerStillValid` is asked once, immediately before the acknowledgement is sent, and never
+ * after. Returning false withholds the acknowledgement, so the updater stands down without
+ * stopping anything.
+ *
+ * It exists because "the owner was right when we launched" is a different statement from "the
+ * owner is right now". A download takes minutes; a user can sign out, sign in as somebody else,
+ * or repoint the client at another server while it runs. The acknowledgement is the last moment
+ * anything can be withheld -- after it, the updater stops the product and swaps files.
+ *
+ * Empty means no owner condition, which is the behaviour this had before.
+ */
 HandoffStep await_handoff(void* readyEvent, void* ackEvent, void* bootstrap,
                           const std::wstring& readyName, uint32_t timeoutMs,
-                          const std::function<uint64_t()>& now, std::string* detail);
+                          const std::function<uint64_t()>& now, std::string* detail,
+                          const std::function<bool()>& ownerStillValid = {});
 
 /** What the waiting caller should do. */
 enum class HandoffVerdict {

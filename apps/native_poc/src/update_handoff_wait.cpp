@@ -27,7 +27,8 @@ namespace remote60::native_poc::update {
 
 HandoffStep await_handoff(void* readyEvent, void* ackEvent, void* bootstrap,
                           const std::wstring& readyName, uint32_t timeoutMs,
-                          const std::function<uint64_t()>& now, std::string* detail) {
+                          const std::function<uint64_t()>& now, std::string* detail,
+                          const std::function<bool()>& ownerStillValid) {
   const std::function<uint64_t()> clock =
       now ? now : std::function<uint64_t()>([]() { return static_cast<uint64_t>(GetTickCount64()); });
   HANDLE ready = static_cast<HANDLE>(readyEvent);
@@ -137,6 +138,17 @@ HandoffStep await_handoff(void* readyEvent, void* ackEvent, void* bootstrap,
   // would then be gone while the product it was meant to hand over to has stood down. Agreeing to
   // exit is only safe when the agreement was received.
   if (step == HandoffStep::ExitNow) {
+    // The last moment anything can be withheld. After the acknowledgement the updater stops the
+    // product and replaces files, so the owner is checked HERE and not only at launch: the
+    // download took minutes, and in those minutes the user may have signed out, signed in as
+    // somebody else, or repointed this client at another server.
+    if (ownerStillValid && !ownerStillValid()) {
+      if (detail) {
+        *detail = "the signed-in owner changed while the update was downloading, so the "
+                  "acknowledgement was withheld and nothing was stopped";
+      }
+      return HandoffStep::KeepRunning;
+    }
     if (!ack || !SetEvent(ack)) {
       if (detail) {
         *detail = "the updater was ready, but the acknowledgement could not be delivered, so "
