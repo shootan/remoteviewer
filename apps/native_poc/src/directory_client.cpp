@@ -18,6 +18,8 @@
 #include "connect_candidates.hpp"
 #include "json_profile.hpp"
 #include "poc_protocol.hpp"
+#include "update_endpoint.hpp"
+#include "url_origin.hpp"
 #include "winhttp_transport.hpp"
 
 #pragma comment(lib, "shell32.lib")
@@ -242,18 +244,10 @@ bool directory_url_is_secure(const std::string& url) {
 }
 
 std::string directory_origin_key(const std::string& url) {
-  std::string host;
-  uint16_t port = 0;
-  bool secure = false;
-  if (!parse_directory_url(url, &host, &port, nullptr, &secure)) {
-    // Not parseable, so there is no origin to name. Returned lowercased and trimmed so an
-    // unusable value still compares equal to itself rather than to nothing.
-    std::string fallback = trim(url);
-    for (char& c : fallback) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-    return fallback;
-  }
-  for (char& c : host) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-  return (secure ? "https://" : "http://") + host + ":" + std::to_string(port);
+  // One implementation, in url_origin.cpp, because the updater tree needs the same answer and
+  // does not link this file. Two copies would disagree about a trailing slash or a written-out
+  // default port on the day it mattered.
+  return url_origin_key(url);
 }
 
 std::string directory_update_manifest_url(const std::string& directoryUrl,
@@ -272,6 +266,28 @@ std::string update_manifest_url_for(const std::string& override_, const std::str
                                     const std::string& platform) {
   if (!override_.empty()) return override_;
   return directory_update_manifest_url(directoryUrl, platform);
+}
+
+update::UpdateEndpoint update_endpoint_for(const std::string& override_,
+                                          const std::string& directoryUrl,
+                                          const std::string& platform,
+                                          const std::string& credentialHeader,
+                                          uint64_t ownerEpoch) {
+  update::UpdateEndpoint endpoint;
+  endpoint.ownerEpoch = ownerEpoch;
+  if (!override_.empty()) {
+    // An operator's own url. No credential, whatever it points at -- including our own host.
+    // What decides is where the url came from, and an override did not come from here.
+    endpoint.url = override_;
+    endpoint.derived = false;
+    return endpoint;
+  }
+  endpoint.url = directory_update_manifest_url(directoryUrl, platform);
+  if (endpoint.url.empty()) return endpoint;  // an http directory, or none at all
+  endpoint.derived = true;
+  endpoint.credentialHeader = credentialHeader;
+  endpoint.origin = directory_origin_key(directoryUrl);
+  return endpoint;
 }
 
 bool parse_directory_url(const std::string& url, std::string* outHost, uint16_t* outPort,

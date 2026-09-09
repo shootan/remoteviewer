@@ -1,6 +1,7 @@
 #pragma once
 
 #include "directory_observe.hpp"
+#include "update_endpoint.hpp"
 
 // Directory-service client for the host.
 //
@@ -142,6 +143,21 @@ std::string directory_origin_key(const std::string& url);
  */
 std::string directory_update_manifest_url(const std::string& directoryUrl,
                                           const std::string& platform);
+
+/**
+ * Builds the snapshot an update fetch runs from (see update_endpoint.hpp).
+ *
+ * The override wins and gets no credential; otherwise the url is derived from the directory and
+ * carries one. `credentialHeader` is what this process holds -- `x-host-token: ...` on a host, an
+ * `Authorization: Bearer ...` session elsewhere. Passing an empty one is normal: a client that is
+ * not signed in has nothing to send, and the server will say so with a 401 that means "the update
+ * check failed", not "sign in again".
+ */
+update::UpdateEndpoint update_endpoint_for(const std::string& override_,
+                                           const std::string& directoryUrl,
+                                           const std::string& platform,
+                                           const std::string& credentialHeader = {},
+                                           uint64_t ownerEpoch = 0);
 
 /**
  * The explicit override when there is one, otherwise the derived url.

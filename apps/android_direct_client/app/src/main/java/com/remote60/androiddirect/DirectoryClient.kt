@@ -200,6 +200,62 @@ object DirectoryClient {
                           platform: String = "android"): String =
         if (override.isNotBlank()) override else updateManifestUrlFor(directoryUrl, platform)
 
+    /**
+     * One update fetch, decided once, where the answers are known.
+     *
+     * A snapshot rather than loose values: reading the url back out of stored state later and
+     * deciding *then* whether to attach a credential is the shape of the mistake. Between the
+     * decision and the send, the account can change and the server address can change.
+     *
+     * [derived] selects the wire shape and is not inferred from a response -- our directory
+     * answers one object carrying both fields, an operator's own url is a document with a
+     * detached `url.sig` beside it, and a truncated answer of one kind looks like a valid answer
+     * of the other.
+     *
+     * [credentialHeader] may only be sent to [origin]. An override gets none even when it points
+     * at the same host: what decides is where the url came from, not what it looks like.
+     */
+    data class UpdateEndpoint(
+        val url: String = "",
+        val derived: Boolean = false,
+        val credentialHeader: String = "",
+        val origin: String = "",
+        val ownerEpoch: Long = 0,
+    ) {
+        val configured: Boolean get() = url.isNotEmpty()
+
+        /**
+         * Whether this credential may go to [targetUrl] -- the destination of the request about
+         * to be made, not the one this snapshot was built from. A signed manifest says its
+         * artifacts are the bytes signed for; it says nothing about whether our directory's
+         * credential belongs to the host they are published on.
+         */
+        fun credentialAllowedFor(targetUrl: String): Boolean =
+            derived && credentialHeader.isNotEmpty() && origin.isNotEmpty() &&
+                targetUrl.isNotEmpty() && originKey(targetUrl) == origin
+    }
+
+    /** Builds that snapshot: override wins and carries no credential, otherwise derived. */
+    fun updateEndpointFor(
+        override: String,
+        directoryUrl: String,
+        sessionToken: String = "",
+        platform: String = "android",
+        ownerEpoch: Long = 0,
+    ): UpdateEndpoint {
+        if (override.isNotBlank()) return UpdateEndpoint(override, false, "", "", ownerEpoch)
+        val url = updateManifestUrlFor(directoryUrl, platform)
+        if (url.isEmpty()) return UpdateEndpoint(ownerEpoch = ownerEpoch)
+        return UpdateEndpoint(
+            url = url,
+            derived = true,
+            credentialHeader =
+                if (sessionToken.isBlank()) "" else "Authorization: Bearer $sessionToken",
+            origin = originKey(directoryUrl),
+            ownerEpoch = ownerEpoch,
+        )
+    }
+
     /** Where the probe should go, or why it cannot go anywhere. */
     sealed class ObserveTarget {
         data class Ready(

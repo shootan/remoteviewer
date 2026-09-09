@@ -37,6 +37,9 @@ std::vector<std::wstring> updater_arguments(const UpdaterLaunchSpec& spec) {
   add(L"--staging-dir", spec.stagingDir);
   add(L"--work-dir", spec.workDir);
   add(L"--manifest-url", widen_ascii(spec.manifestUrl));
+  // The shape travels with the url. Without it the worker would have to decide from the response,
+  // and that decision is exactly the one that cannot be made safely.
+  if (spec.derivedEndpoint) args.push_back(L"--manifest-envelope");
   add(L"--platform", widen_ascii(spec.platform));
   add(L"--installed-version", widen_ascii(spec.installedVersion));
   add(L"--health-log", spec.healthLogPath);

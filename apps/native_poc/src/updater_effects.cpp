@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include "product_version.hpp"
+#include "update_endpoint.hpp"
 #include "update_handoff.hpp"
 #include "update_http.hpp"
 #include "update_process_targets.hpp"
@@ -311,19 +312,33 @@ bool UpdaterEffects::build(std::string* detail) {
   config.updaterImagePath = deps_.selfImagePath;
 
   const std::string manifestUrl = options_.manifestUrl;
+  const bool envelope = options_.derivedEndpoint;
   UpdaterDeps deps = deps_;
   // The step whose absence made every later stage unreachable: FetchManifest had nothing to
   // return, because nothing ever put anything there. Fetched once and kept, so the rest of the
   // attempt works from one snapshot -- re-fetching per stage would let the server change what is
   // being installed part way through.
-  config.fetchManifest = [manifestUrl, deps](std::string* document, std::string* signatureHex) {
+  config.fetchManifest = [manifestUrl, envelope, deps](std::string* document,
+                                                       std::string* signatureHex) {
     std::string error;
-    if (!deps.fetchText(manifestUrl, 64 * 1024, document, &error)) {
+    std::string body;
+    if (!deps.fetchText(manifestUrl, 64 * 1024, envelope ? &body : document, &error)) {
       deps.log("manifest fetch failed: " + error);
       return false;
     }
-    // The detached signature lives beside the document, fetched separately so the bytes verified
-    // are exactly the bytes that arrived with nothing wrapping them.
+    if (envelope) {
+      // Our directory answers one object carrying both. Asking for `url + ".sig"` here appended
+      // to a query string -- `...?platform=windows.sig` -- an address the server has never
+      // served. It never showed because the url only came from an environment variable, so this
+      // line had never run against the real server.
+      if (!parse_manifest_envelope(body, document, signatureHex, &error)) {
+        deps.log("manifest response malformed: " + error);
+        return false;
+      }
+      return true;
+    }
+    // An operator's own url: the detached signature lives beside the document, fetched separately
+    // so the bytes verified are exactly the bytes that arrived with nothing wrapping them.
     if (!deps.fetchText(manifestUrl + ".sig", 4 * 1024, signatureHex, &error)) {
       deps.log("signature fetch failed: " + error);
       return false;

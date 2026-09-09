@@ -764,18 +764,28 @@ void remove_tray_icon() {
 void start_update_check(HWND window) {
   namespace upd = remote60::native_poc::update;
 
-  upd::CheckConfig config;
-  // The override still wins; otherwise it comes from the directory this host is registered with,
-  // so a machine configured with only a server address can check for updates.
-  config.manifestUrl = directory::update_manifest_url_for(
+  // One snapshot: the url, the shape it answers with, and what may be sent to it. Built here,
+  // where the account and the server address are known, rather than read back later from state
+  // that can have changed by then.
+  //
+  // A host authenticates with its own token, not a session -- it has no session, and the server
+  // accepts either on this route.
+  const upd::UpdateEndpoint endpoint = directory::update_endpoint_for(
       remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
-      g.cache.directoryUrl, "windows");
+      g.cache.directoryUrl, "windows",
+      g.cache.hostToken.empty() ? std::string() : "x-host-token: " + g.cache.hostToken);
+
+  upd::CheckConfig config;
+  config.manifestUrl = endpoint.url;
+  config.derivedEndpoint = endpoint.derived;
+  config.credentialHeader = endpoint.credentialHeader;
+  config.credentialOrigin = endpoint.origin;
   config.trustedPublicKeyHex = upd::trusted_public_key_hex();
   config.platform = "windows";
   config.installedVersion = narrow(kProductVersion);
 
   upd::check_for_update_async(
-      config, upd::https_manifest_fetcher(), upd::default_verifier(),
+      config, upd::manifest_fetcher_for(config), upd::default_verifier(),
       [window](upd::CheckResult result) {
         std::wstring text;
         switch (result.outcome) {
@@ -940,11 +950,19 @@ void start_update_handoff(HWND window) {
   spec.installDir = installDir;
   spec.stagingDir = workDir + L"\\staging";
   spec.workDir = workDir;
-  // The same url the check used, from the same rule: the updater must fetch what the user was
-  // told about, not a second opinion about where updates live.
-  spec.manifestUrl = directory::update_manifest_url_for(
-      remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
-      g.cache.directoryUrl, "windows");
+  // The same snapshot the check used: the updater must fetch what the user was told about, not
+  // a second opinion about where updates live.
+  //
+  // ⚠️ No credential travels with it. Handing one to an elevated worker needs an access-limited
+  // channel bound to that process, which is a separate decision -- so a derived url gets a 401
+  // from the worker today, and that is an update failure, not a sign-out.
+  {
+    const upd::UpdateEndpoint launchEndpoint = directory::update_endpoint_for(
+        remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
+        g.cache.directoryUrl, "windows");
+    spec.manifestUrl = launchEndpoint.url;
+    spec.derivedEndpoint = launchEndpoint.derived;
+  }
   spec.platform = "windows";
   spec.installedVersion = narrow(kProductVersion);
   spec.healthLogPath = log_file_path();

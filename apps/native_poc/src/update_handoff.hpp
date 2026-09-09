@@ -31,6 +31,8 @@ struct UpdaterLaunchSpec {
   std::wstring stagingDir;
   std::wstring workDir;
   std::string manifestUrl;
+  /** See UpdaterOptions::derivedEndpoint -- the wire shape travels with the url. */
+  bool derivedEndpoint = false;
   std::string platform;
   std::string installedVersion;
   std::wstring healthLogPath;

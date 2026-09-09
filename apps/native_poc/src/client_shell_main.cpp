@@ -404,10 +404,16 @@ void start_client_update(const std::string& availableVersion) {
   spec.installDir = installDir;
   spec.stagingDir = workDir + L"\\staging";
   spec.workDir = workDir;
-  // The same rule the check used: the updater fetches what the user was told about.
-  spec.manifestUrl = remote60::native_poc::directory::update_manifest_url_for(
-      remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
-      configured_directory_url(), "windows");
+  // The same snapshot the check used. ⚠️ No credential travels to the elevated worker -- that
+  // needs an access-limited channel bound to that process, which is a separate decision.
+  {
+    const upd::UpdateEndpoint launchEndpoint =
+        remote60::native_poc::directory::update_endpoint_for(
+            remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
+            configured_directory_url(), "windows");
+    spec.manifestUrl = launchEndpoint.url;
+    spec.derivedEndpoint = launchEndpoint.derived;
+  }
   spec.platform = "windows";
   spec.installedVersion = narrow(kProductVersion);
   // The HOST's log, not this process's: health evidence is the host reporting its own version,
@@ -463,17 +469,31 @@ void start_client_update(const std::string& availableVersion) {
 void start_update_check() {
   namespace upd = remote60::native_poc::update;
 
+  // One snapshot, built where the session and the server address are known. A shell that has
+  // not signed in yet has no credential to send, which is normal: the server says so, and that
+  // answer is an update-check failure rather than a reason to sign out.
+  std::string session;
+  {
+    std::lock_guard<std::mutex> lock(gStateMu);
+    session = gSessionToken;
+  }
+  const upd::UpdateEndpoint endpoint =
+      remote60::native_poc::directory::update_endpoint_for(
+          remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
+          configured_directory_url(), "windows",
+          session.empty() ? std::string() : "Authorization: Bearer " + session);
+
   upd::CheckConfig config;
-  // The override still wins; otherwise it is derived from the directory address this shell uses.
-  config.manifestUrl = remote60::native_poc::directory::update_manifest_url_for(
-      remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
-      configured_directory_url(), "windows");
+  config.manifestUrl = endpoint.url;
+  config.derivedEndpoint = endpoint.derived;
+  config.credentialHeader = endpoint.credentialHeader;
+  config.credentialOrigin = endpoint.origin;
   config.trustedPublicKeyHex = upd::trusted_public_key_hex();
   config.platform = "windows";
   config.installedVersion = narrow(kProductVersion);
 
   upd::check_for_update_async(
-      config, upd::https_manifest_fetcher(), upd::default_verifier(),
+      config, upd::manifest_fetcher_for(config), upd::default_verifier(),
       [](upd::CheckResult result) {
         const ShellUpdateNotice notice = shell_update_notice(
             upd::check_outcome_name(result.outcome), result.availableVersion, result.detail);

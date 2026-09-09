@@ -149,7 +149,12 @@ int main() {
     const uint64_t size = std::char_traits<char>::length(kBody);
     DeleteFileW(probe.c_str());
 
-    manifest = "schema=2\nreleaseId=r-0.2.105\nplatform=windows\narch=x64\nversion=0.2.105\n";
+    // 99.0.0 rather than a real release number, deliberately: the assertion below is that
+    // the version came from the manifest and NOT from kProductVersion, and it can only say
+    // that while the two differ. Pinned to 0.2.105 it passed until the build was bumped to
+    // 0.2.105 -- at which point it went red for the right reason, having until then been
+    // checking a moving target against a literal.
+    manifest = "schema=2\nreleaseId=r-99.0.0\nplatform=windows\narch=x64\nversion=99.0.0\n";
     const auto add = [&](const std::wstring& name) {
       manifest += "artifact=" + narrow(name) + "|" + std::to_string(size) + "|" + sha +
                   "|https://u.example/" + narrow(name) + "\n";
@@ -320,11 +325,12 @@ int main() {
 
     // The defect this replaces: versionToInstall_ was never assigned, so registration and the
     // health check used whatever version the updater binary was compiled as. The manifest says
-    // 0.2.105 and the installed version is 0.2.104; neither is this binary's kProductVersion.
+    // 99.0.0 and the installed version is 0.2.104; neither can ever be this binary's
+    // kProductVersion, which is what makes the next two checks mean anything.
     check("the version the manifest carried is the one that was verified",
-          effects.verified_version() == "0.2.105", effects.verified_version());
+          effects.verified_version() == "99.0.0", effects.verified_version());
     check("and it is what the health check was told to expect",
-          rec.healthExpectedVersion == "0.2.105", rec.healthExpectedVersion);
+          rec.healthExpectedVersion == "99.0.0", rec.healthExpectedVersion);
     check("not the version this binary was compiled as",
           rec.healthExpectedVersion != std::string(narrow(remote60::native_poc::kProductVersion)),
           rec.healthExpectedVersion);

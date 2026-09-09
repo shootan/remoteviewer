@@ -1222,9 +1222,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
      * including the next one, which matters. Everything else goes to the diagnostics log.
      */
     private fun startUpdateCheck() {
-        val url = updateManifestUrl()
+        val endpoint = updateEndpoint()
         val key = trustedUpdateKeyHex()
-        UpdateFlow.checkAsync(url, key, installedVersionCode()) { outcome ->
+        UpdateFlow.checkAsync(endpoint, key, installedVersionCode()) { outcome ->
             diagnosticsLog.log("update_check",
                 "verdict=${outcome.verdict} version=${outcome.version} ${outcome.detail}")
             if (outcome.verdict == UpdateDecision.Verdict.Install && outcome.artifact != null) {
@@ -1329,8 +1329,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
      * phone signs in to. Empty still means NotConfigured rather than a failure -- an http
      * directory with no override has nowhere safe to fetch an installable APK from.
      */
-    private fun updateManifestUrl(): String = DirectoryClient.updateManifestUrl(
-        BuildConfig.UPDATE_MANIFEST_URL, DirectoryClient.savedUrl(this)
+    private fun updateEndpoint(): DirectoryClient.UpdateEndpoint = DirectoryClient.updateEndpointFor(
+        BuildConfig.UPDATE_MANIFEST_URL,
+        DirectoryClient.savedUrl(this),
+        DirectoryClient.savedSessionToken(this),
     )
 
     /** Empty until an operational key exists. Empty means this build cannot check, not that it failed. */

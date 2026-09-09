@@ -90,6 +90,8 @@ add_executable(remote60_native_video_host_poc
   src/host_stage_stats_h264.cpp
   src/d3d_capture_readback.cpp
   src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
   src/winhttp_transport.cpp
   src/gdi_capture_process.cpp
   src/udp_control_channel.cpp
@@ -186,6 +188,8 @@ add_executable(remote60_native_video_client_poc
   src/directory_session_bootstrap.cpp
   src/directory_rendezvous.cpp
   src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
   # The macro window is a page too, so the viewer needs the same shell the client uses.
   src/macro_shell_bridge.cpp
 )
@@ -260,6 +264,8 @@ target_link_libraries(remote60_native_video_client_shared_core_test PRIVATE
 add_executable(remote60_log_upload_test
   src/log_upload.cpp
   src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
   src/winhttp_transport.cpp
   src/log_upload_test.cpp
 )
@@ -270,11 +276,15 @@ target_link_libraries(remote60_log_upload_test PRIVATE common ws2_32 iphlpapi sh
 add_executable(remote60_host_app WIN32
   src/host_app_main.cpp
   src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
   src/winhttp_transport.cpp
   src/log_upload.cpp
   # The tray's "Check for updates" entry point and everything it needs to answer honestly, plus
   # the handoff that decides when this process may get out of the updater's way.
   src/update_check.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
   src/update_handoff.cpp
   src/update_handoff_wait.cpp
   src/update_job_guard.cpp
@@ -521,6 +531,8 @@ target_include_directories(remote60_host_main_loop_mailbox_test PRIVATE src)
 add_executable(remote60_observe_vectors_test
   src/observe_vectors_test.cpp
   src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
   src/winhttp_transport.cpp
 )
 target_include_directories(remote60_observe_vectors_test PRIVATE src)
@@ -624,6 +636,8 @@ endif()
 # opens a socket. Pins that "could not reach it" never comes back as "up to date".
 add_executable(remote60_update_check_test
   src/update_check.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
   src/update_http.cpp
   src/update_manifest.cpp
   src/payload_name.cpp
@@ -745,6 +759,8 @@ endif()
 add_executable(remote60_updater
   src/updater_main.cpp
   src/updater_effects.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
   src/update_handoff.cpp
   src/update_handoff_wait.cpp
   src/updater_options.cpp
@@ -756,6 +772,8 @@ add_executable(remote60_updater
   src/update_signature.cpp
   src/update_http.cpp
   src/update_check.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
   src/payload_name.cpp
   src/install_registration.cpp
   src/update_registration_wiring.cpp
@@ -812,6 +830,8 @@ endif()
 add_executable(remote60_updater_scenarios_test
   src/updater_scenarios_test.cpp
   src/updater_effects.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
   src/update_handoff.cpp
   src/update_handoff_wait.cpp
   src/updater_options.cpp
@@ -858,6 +878,8 @@ endif()
 add_executable(remote60_updater_assembly_test
   src/updater_assembly_test.cpp
   src/updater_effects.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
   src/update_handoff.cpp
   src/update_handoff_wait.cpp
   src/updater_options.cpp
@@ -961,6 +983,8 @@ add_executable(remote60_host_sender_epoch_test
   src/host_encoded_sender.cpp
   src/host_net_io.cpp
   src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
   src/winhttp_transport.cpp
   src/host_sender_epoch_test.cpp
 )
@@ -1012,6 +1036,8 @@ add_executable(remote60_viewer_udp_recovery_test
   src/host_encoded_sender.cpp
   src/host_net_io.cpp
   src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
   src/winhttp_transport.cpp
   src/viewer_video_receiver.cpp
   src/viewer_video_receiver_frame.cpp
@@ -1127,6 +1153,8 @@ target_include_directories(remote60_encode_resolution_ladder_test PRIVATE src)
 add_executable(remote60_directory_session_client_test
   src/directory_session_client_test.cpp
   src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
   src/winhttp_transport.cpp
   src/directory_session_bootstrap.cpp
   src/directory_rendezvous.cpp
@@ -1140,6 +1168,8 @@ add_executable(remote60_directory_retry_test
   src/directory_retry_test.cpp
   src/directory_session_client.cpp
   src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
   src/winhttp_transport.cpp
   src/directory_session_bootstrap.cpp
   src/directory_rendezvous.cpp
@@ -1179,10 +1209,16 @@ if(GNLINK_HAVE_WEBVIEW2)
     src/directory_session_client.cpp
   src/winhttp_transport.cpp
     src/directory_client.cpp
+    src/update_endpoint.cpp
+    src/url_origin.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
     src/log_upload.cpp
     # The start-up update check. Asking is all the client does: it is not elevated, so it cannot
     # replace anything in %ProgramFiles% itself.
     src/update_check.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
     src/update_handoff.cpp
   src/update_handoff_wait.cpp
     src/update_http.cpp
@@ -1243,6 +1279,8 @@ target_link_libraries(remote60_winhttp_tls_posture_test PRIVATE winhttp)
 add_executable(remote60_directory_http_contract_test
   src/directory_http_contract_test.cpp
   src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
   src/winhttp_transport.cpp
 )
 target_include_directories(remote60_directory_http_contract_test PRIVATE src)
@@ -1255,6 +1293,8 @@ add_executable(remote60_directory_login_probe
   src/directory_session_client.cpp
   src/winhttp_transport.cpp
   src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
 )
 target_include_directories(remote60_directory_login_probe PRIVATE src)
 target_link_libraries(remote60_directory_login_probe PRIVATE common ws2_32 iphlpapi shell32)

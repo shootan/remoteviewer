@@ -10022,3 +10022,36 @@ GET https://rem.shotan.net/healthz → HTTP 200  {"ok":true}
 "Host·PC·APK 접속 주소를 하나로" 기준으로 훑었다. 하나의 주소에서 나오는 것: **login · hosts · connect · 관측 엔드포인트 · 로그 업로드 · (이번에) 업데이트 manifest**. 제품 코드에 **하드코딩된 운영 주소·포트는 0건**(`rem.shotan.net`·공인 IP·`29180` 모두 0). 유일한 리터럴은 `host_app_main.cpp` 의 **`--ui-preview` 전용 `http://127.0.0.1:8080`** 으로, 실제 접속 경로가 아니다. **릴레이 주소는 서버 응답에서 온다.**
 
 **실행**(`^PASS`, RDP 종료 상태): `directory_session_client` **105**(93→105) · `directory_retry` 44 · `observe_vectors` 34 · `directory_http_contract` 43 · JS 335 — 전부 exit 0 / FAIL 0. Android **65 tests / 0 failures / skipped=0**(`DirectoryObserve` 26). 전체 재빌드 오류 0.
+
+### 485) 2026-09-09 업데이트 fetch 계약 통일 + 자격증명 범위 — **worker IPC 는 착수 안 함**
+- Codex 승인 범위. **Host/Client → elevated worker 자격증명 전달(IPC)은 승인 대기라 손대지 않았다.**
+
+**① 🔴 C++ 소비자 둘이 서로 다른 계약을 쓰고 있었다**
+서버는 **envelope 하나**를 낸다: `sendJson(res, 200, { manifest, signature })`.
+- `update_check.cpp`(UI 확인) — envelope 를 읽는다 ✓
+- **`updater_effects.cpp`(승격 worker) — `manifestUrl + ".sig"` 를 따로 요청** ✗ → 파생 URL 이면 **`...?platform=windows.sig`**, **서버가 낸 적 없는 주소**다.
+**Android 에서 고친 것과 같은 결함이 Windows worker 에 그대로 남아 있었다.** 안 터진 이유도 같다 — `manifestUrl` 이 env 전용이라 **그 줄이 실서버를 상대로 실행된 적이 없다.**
+- ⚠️ **override 의 detached 계약은 실재한다** — 정적 호스팅이면 `url` 과 `url.sig` 가 진짜 별도 파일이다. 그래서 **응답을 보고 추측하지 않는다**: 한쪽의 잘린 응답이 다른 쪽의 정상 응답처럼 보이기 때문이다. **URL 의 출처가 모양을 정한다** — **파생 = envelope**, **명시 override = detached**. worker 에는 `--manifest-envelope` 플래그로 **모양이 URL 과 함께 이동**한다.
+
+**② 자격증명 — 스냅샷 하나, 목적지마다 판정**
+- `UpdateEndpoint`(`update_endpoint.hpp`): **url · derived · credentialHeader · origin · ownerEpoch**. 값 하나가 아니라 **묶음**인 이유는, **나중에 전역에서 url 을 다시 읽어 그때 붙일지 정하는 것이 TOCTOU** 이기 때문이다 — 결정과 송신 사이에 계정도 서버 주소도 바뀔 수 있다.
+- 규칙: **Host = `x-host-token`**, **PC·Android = 세션 Bearer**. **명시 override 는 무인증** — **같은 host 를 가리켜도** 그렇다. 결정하는 것은 **url 의 출처**이지 생김새가 아니다. 생김새로 정하는 규칙은 **비교**이고, **비교는 틀리는 날이 온다.**
+- **목적지마다 다시 판정한다**(`credential_allowed`): manifest url 도, manifest 가 지목한 **artifact url 각각도**. **서명된 manifest 는 바이트가 맞다는 말이지, 우리 디렉터리의 자격증명이 그 아티팩트를 호스팅하는 서버에 속한다는 말이 아니다.**
+- **자격증명이 붙은 요청은 redirect 를 따라가지 않는다**(WinHTTP `WINHTTP_DISABLE_REDIRECTS`, Android `instanceFollowRedirects = false`). https→http 거부만으로는 부족하다 — **`https://evil` 도 https 다.** redirect 는 "이 요청을 다른 곳에 다시 보내라" 이고, 그 다른 곳은 **응답한 쪽이 고른다.**
+
+**③ 중복을 만들지 않으려고 파일 둘을 새로 뺐다**
+`url_origin.{hpp,cpp}`(`url_origin_key`) · `update_endpoint.{hpp,cpp}`(스냅샷 · 범위 판정 · envelope 파서). **제품 트리와 업데이터 트리는 일부러 분리돼 있어** 업데이터가 `directory_client.cpp` 를 링크하지 않는다. 공유 파일이 없으면 origin 정규화가 **두 벌**이 되고, 둘은 후행 슬래시나 명시된 기본 포트에서 **다르게 판단**한다 — 이 저장소가 이미 스킴 판정에서 겪은 그 분열이다. `directory_origin_key()` 는 이제 `url_origin_key()` 로 위임한다.
+
+**④ 🔴 회귀 한계 — 헤더를 실제로 관측하지 못했다**
+요구는 *"테스트 서버 2개를 세우고 수신 헤더를 직접 확인"* 이었다. **못 했다.** 업데이트 경로는 **https 전용**이고(정책상 http 를 말하지 않는다), 헤더가 나가려면 **핸드셰이크가 성립해야** 한다 — 그러려면 **기계가 신뢰하는 인증서**가 필요하고, 그것은 강등 실경로 회귀를 막고 있는 것과 **같은 벽**이다. 자체서명으로는 헤더가 나가기 전에 끊긴다.
+→ 넣은 것은 **결정 함수의 전수 회귀**(C++ 12건 · Kotlin 3건): 파생 같은 origin 허용 · **다른 host/포트/스킴 거부** · **artifact 가 다른 origin 이면 거부** · **override 는 우리 host 를 가리켜도 거부** · 세션 없음 · http 디렉터리.
+⚠️ **"헤더가 실제로 안 나갔다" 는 관측하지 않았다.** 게이트가 맞다는 것과 게이트가 실제로 잠갔다는 것은 다른 사실이고, **후자는 미검증**이다.
+
+**⑤ 🔴 여전히 401 — 그리고 이번에도 고치지 않았다**
+worker 는 자격증명을 받지 못한다(IPC 미승인). 그래서 **worker 가 파생 URL 로 받아오면 401** 이다. **업데이트 실패이지 로그아웃이 아니다** — 토큰을 지우거나 재로그인을 강제하지 않는다.
+
+**⑥ 범위 밖에서 발견해 고친 것 1건 — `updater_assembly_test` 가 빨간 상태였다**
+*"not the version this binary was compiled as"* 가 FAIL. 원인은 이번 작업이 아니라 **`9ff1716` 의 0.2.105 버전 인상**이다: 픽스처 manifest 가 `0.2.105` 로 **박혀 있었고** `kProductVersion` 도 `0.2.105` 가 되면서 *"manifest 에서 온 값이지 컴파일된 값이 아니다"* 라는 단정이 **성립할 수 없게** 됐다.
+→ 픽스처를 **`99.0.0`**(릴리스 번호가 될 수 없는 값)으로 바꿔 **두 값이 영원히 다르게** 했다. **박힌 리터럴이 움직이는 값을 쫓아가는 단정**은, 충돌 전까지는 **아무것도 검사하지 않으면서 초록**이다.
+
+**실행**(`^PASS`, RDP 종료 상태, 전체 재빌드 오류 0): `directory_session_client` **129**(105→129) · `updater_scenarios` 142 · `update_effects` 199 · `update_manifest` 82 · `update_handoff` 50 · `updater_options` 50 · `updater_assembly` **41**(수정 후) · `directory_retry` 44 · `observe_vectors` 34 · `directory_http_contract` 43 · `update_check` 28 · `update_http` 36 — 전부 exit 0 / FAIL 0. **JS 335** · **Android 68 tests / 0 failures / skipped=0**.

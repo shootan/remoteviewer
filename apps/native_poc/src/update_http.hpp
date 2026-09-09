@@ -17,6 +17,7 @@
 //   * disable certificate validation (no SECURITY_FLAG_IGNORE_* anywhere)
 //   * continue after a certificate error
 //   * follow a redirect from https to http
+//   * follow ANY redirect on a request that carries a credential -- see below
 //
 // Design: docs/업데이트_기능_설계.md 4.1.1.
 
@@ -62,6 +63,21 @@ enum class FetchStatus {
 const char* fetch_status_name(FetchStatus s);
 
 /**
+ * `credentialHeader`, when non-empty, is one header line ("Name: value", no CRLF) sent with the
+ * request. Two things change when it is present:
+ *
+ *   * redirects are turned off entirely for that request. A redirect is a request to send this
+ *     again somewhere else, and "somewhere else" is exactly where a credential must not go. The
+ *     https-to-http policy is not enough on its own: https://evil is still https.
+ *   * nothing else. There is no configuration in which a credential goes out over http, because
+ *     there is no configuration in which this client speaks http at all.
+ *
+ * Deciding WHETHER to pass one is not this file's job: the caller knows which origin it obtained
+ * the credential from and where it is about to send it. This only guarantees that if it is
+ * passed, it goes to that one request and no other.
+ */
+
+/**
  * Fetches a small document into memory.
  *
  * `maxBytes` is a hard cap, not a hint: a manifest is a few hundred bytes and anything claiming
@@ -69,7 +85,7 @@ const char* fetch_status_name(FetchStatus s);
  * manifest would fail its signature check anyway, and failing early says why.
  */
 FetchStatus https_get_text(const std::string& url, size_t maxBytes, std::string* out,
-                           std::string* error);
+                           std::string* error, const std::string& credentialHeader = {});
 
 /**
  * Streams a larger response to a file.
@@ -78,6 +94,6 @@ FetchStatus https_get_text(const std::string& url, size_t maxBytes, std::string*
  * failure, so nothing downstream can mistake a short write for a complete download.
  */
 FetchStatus https_get_file(const std::string& url, const std::wstring& destPath, uint64_t maxBytes,
-                           std::string* error);
+                           std::string* error, const std::string& credentialHeader = {});
 
 }  // namespace remote60::native_poc::update

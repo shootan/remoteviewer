@@ -137,7 +137,8 @@ namespace {
  * Opens a session, connects, and sends the request. Shared by both fetch entry points so the TLS
  * posture is written once and cannot drift between them.
  */
-FetchStatus open_request(const std::string& url, WinHttpHandle* session, WinHttpHandle* connect,
+FetchStatus open_request(const std::string& url, const std::string& credentialHeader,
+                         WinHttpHandle* session, WinHttpHandle* connect,
                          WinHttpHandle* request, std::string* error) {
   HttpsUrl parsed;
   if (!parse_https_url(url, &parsed, error)) return FetchStatus::BadUrl;
@@ -180,7 +181,21 @@ FetchStatus open_request(const std::string& url, WinHttpHandle* session, WinHttp
     return FetchStatus::ConnectFailed;
   }
 
-  if (!WinHttpSendRequest(request->h, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0,
+  // A credentialed request follows nothing. A redirect asks for this request to be repeated at
+  // another address, and that address is chosen by whoever answered -- which is the one party a
+  // credential must not be handed to on request. Turned off at the handle rather than inspected
+  // per hop, because an inspection is a decision that can be wrong.
+  std::wstring headers;
+  if (!credentialHeader.empty()) {
+    DWORD disable = WINHTTP_DISABLE_REDIRECTS;
+    WinHttpSetOption(request->h, WINHTTP_OPTION_DISABLE_FEATURE, &disable, sizeof(disable));
+    headers = widen(credentialHeader);
+    headers += L"\r\n";
+  }
+
+  if (!WinHttpSendRequest(request->h,
+                          headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
+                          headers.empty() ? 0 : static_cast<DWORD>(-1), WINHTTP_NO_REQUEST_DATA, 0,
                           0, 0)) {
     const DWORD err = GetLastError();
     // ERROR_WINHTTP_SECURE_FAILURE is the one worth naming: it means the certificate did not
@@ -213,12 +228,13 @@ FetchStatus open_request(const std::string& url, WinHttpHandle* session, WinHttp
 }  // namespace
 
 FetchStatus https_get_text(const std::string& url, size_t maxBytes, std::string* out,
-                           std::string* error) {
+                           std::string* error, const std::string& credentialHeader) {
   if (!out) return FetchStatus::BadUrl;
   out->clear();
 
   WinHttpHandle session, connect, request;
-  const FetchStatus opened = open_request(url, &session, &connect, &request, error);
+  const FetchStatus opened =
+      open_request(url, credentialHeader, &session, &connect, &request, error);
   if (opened != FetchStatus::Ok) return opened;
 
   std::vector<char> buffer(16 * 1024);
@@ -243,9 +259,10 @@ FetchStatus https_get_text(const std::string& url, size_t maxBytes, std::string*
 }
 
 FetchStatus https_get_file(const std::string& url, const std::wstring& destPath, uint64_t maxBytes,
-                           std::string* error) {
+                           std::string* error, const std::string& credentialHeader) {
   WinHttpHandle session, connect, request;
-  const FetchStatus opened = open_request(url, &session, &connect, &request, error);
+  const FetchStatus opened =
+      open_request(url, credentialHeader, &session, &connect, &request, error);
   if (opened != FetchStatus::Ok) return opened;
 
   HANDLE file = CreateFileW(destPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,

@@ -53,6 +53,18 @@ struct CheckResult {
 /** What a check needs. Empty url or key means NotConfigured -- there is no default endpoint. */
 struct CheckConfig {
   std::string manifestUrl;
+  /**
+   * Which wire shape this url answers with, and what may be sent to it.
+   *
+   * True means our directory's route: one body carrying the document and its signature, and a
+   * credential this process is allowed to send there. False means an operator's own url: a
+   * document with a detached `url.sig`, and nothing sent with it -- an override is somebody
+   * else's server by definition, even when it points at the same host.
+   */
+  bool derivedEndpoint = false;
+  /** "Name: value", no CRLF. Sent only when the fetch destination is `credentialOrigin`. */
+  std::string credentialHeader;
+  std::string credentialOrigin;
   std::string trustedPublicKeyHex;
   std::string platform;
   std::string installedVersion;
@@ -83,6 +95,19 @@ void check_for_update_async(CheckConfig config, ManifestFetcher fetch, Signature
                             std::function<void(CheckResult)> onResult);
 
 /** The production fetcher, backed by the update path's HTTPS client. */
+/** The fetcher for a url the directory gave us: one body carrying both fields. */
 ManifestFetcher https_manifest_fetcher();
+
+/**
+ * The fetcher for an operator's own url: the document, then `url.sig` beside it, no credential.
+ *
+ * Both shapes exist because both are real. A static host publishes two files; our server answers
+ * one object. Guessing between them from the response would turn a truncated answer of one kind
+ * into a plausible answer of the other.
+ */
+ManifestFetcher detached_manifest_fetcher();
+
+/** Picks the fetcher the config's endpoint kind calls for, and binds its credential to it. */
+ManifestFetcher manifest_fetcher_for(const CheckConfig& config);
 
 }  // namespace remote60::native_poc::update

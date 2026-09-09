@@ -41,6 +41,17 @@ struct UpdaterOptions {
   std::wstring workDir;
   /** Where the manifest is fetched from. https only. */
   std::string manifestUrl;
+  /**
+   * Whether that url is our directory's route (one body carrying document and signature) or an
+   * operator's own (a document with a detached `url.sig`).
+   *
+   * Passed in rather than guessed, because both shapes are real and a truncated answer of one
+   * looks like a valid answer of the other. The worker used to assume the detached shape always,
+   * which meant a derived url made it ask for `...?platform=windows.sig` -- an address the server
+   * has never served. Nobody saw it because the url only ever came from an environment variable,
+   * so that line never ran against the real server.
+   */
+  bool derivedEndpoint = false;
   /** Matched against the manifest's platform field. */
   std::string platform;
   /** The version currently installed, for the comparison. */

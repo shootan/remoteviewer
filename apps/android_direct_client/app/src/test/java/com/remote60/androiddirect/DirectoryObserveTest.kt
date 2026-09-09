@@ -328,6 +328,47 @@ class DirectoryObserveTest {
         assertEquals(null, UpdateFlow.jsonStringField("""{"manifest":"schema=2""", "manifest"))
     }
 
+    // ---------------------------------------------------------------- what may be sent, where
+
+    @Test
+    fun `a derived endpoint carries a credential for its own origin only`() {
+        val e = DirectoryClient.updateEndpointFor("", "https://rem.example", "session-token")
+        assertTrue(e.derived)
+        assertEquals("Authorization: Bearer session-token", e.credentialHeader)
+        assertEquals("https://rem.example:443", e.origin)
+
+        assertTrue(e.credentialAllowedFor(e.url))
+        assertTrue(e.credentialAllowedFor("https://REM.example:443/api/update/artifact"))
+        // A manifest may name artifacts anywhere. Its signature says the bytes are the right
+        // bytes; it says nothing about who may be handed our directory's session.
+        assertFalse(e.credentialAllowedFor("https://cdn.example/app.apk"))
+        assertFalse(e.credentialAllowedFor("https://rem.example:8443/x"))
+        assertFalse(e.credentialAllowedFor("http://rem.example/x"))
+        assertFalse(e.credentialAllowedFor(""))
+    }
+
+    @Test
+    fun `an override carries nothing, even pointed at our own directory`() {
+        val e = DirectoryClient.updateEndpointFor(
+            "https://rem.example/m", "https://rem.example", "session-token"
+        )
+        assertFalse(e.derived)
+        assertEquals("", e.credentialHeader)
+        assertEquals("", e.origin)
+        assertFalse(e.credentialAllowedFor("https://rem.example/m"))
+    }
+
+    @Test
+    fun `no session yet is normal, and an http directory has nothing to attach to`() {
+        val anonymous = DirectoryClient.updateEndpointFor("", "https://rem.example", "")
+        assertTrue(anonymous.configured)
+        assertFalse(anonymous.credentialAllowedFor(anonymous.url))
+
+        val cleartext = DirectoryClient.updateEndpointFor("", "http://rem.example", "token")
+        assertFalse(cleartext.configured)
+        assertFalse(cleartext.credentialAllowedFor("http://rem.example/m"))
+    }
+
     // ---------------------------------------------------------------- the url, normalised once
 
     @Test

@@ -47,14 +47,14 @@ object UpdateFlow {
      * than treated as a failure -- nothing is wrong, the feature is simply not switched on.
      */
     fun checkAsync(
-        manifestUrl: String,
+        endpoint: DirectoryClient.UpdateEndpoint,
         trustedPublicKeyHex: String,
         installedVersionCode: Long,
         onResult: (Outcome) -> Unit,
     ) {
         val main = Handler(Looper.getMainLooper())
         Thread {
-            val outcome = check(manifestUrl, trustedPublicKeyHex, installedVersionCode)
+            val outcome = check(endpoint, trustedPublicKeyHex, installedVersionCode)
             main.post { onResult(outcome) }
         }.apply {
             isDaemon = true  // never keeps the process alive on its own
@@ -65,10 +65,11 @@ object UpdateFlow {
 
     /** The same, synchronously. Called by checkAsync; separated so it can be reasoned about. */
     fun check(
-        manifestUrl: String,
+        endpoint: DirectoryClient.UpdateEndpoint,
         trustedPublicKeyHex: String,
         installedVersionCode: Long,
     ): Outcome {
+        val manifestUrl = endpoint.url
         if (manifestUrl.isEmpty() || trustedPublicKeyHex.isEmpty()) {
             return Outcome(UpdateDecision.Verdict.NotForUs, null, "",
                            "this build has no update endpoint or trusted key")
@@ -80,15 +81,27 @@ object UpdateFlow {
             return Outcome(UpdateDecision.Verdict.NotForUs, null, "", "the update url is not https")
         }
 
-        val body = fetchText(manifestUrl) ?: return Outcome(
-            UpdateDecision.Verdict.NotForUs, null, "", "could not reach the update server")
+        // The credential goes to the destination of THIS request, judged now, or nowhere.
+        val credential =
+            if (endpoint.credentialAllowedFor(manifestUrl)) endpoint.credentialHeader else ""
 
-        // One response carries both. The signature used to be fetched from "$manifestUrl.sig",
-        // which the server has never served: its route is /api/update/manifest?platform=android
-        // and appending ".sig" lands on a query value, not a file. Nobody noticed because the url
-        // came from a build constant that was empty, so this line never ran. It runs now that the
-        // url is derived from the directory, so it has to match what the server actually
-        // publishes -- the same shape the Windows client reads.
+        if (!endpoint.derived) {
+            // An operator's own url: two files, and nothing sent with either. This is somebody
+            // else's server by definition.
+            val document = fetchText(manifestUrl) ?: return Outcome(
+                UpdateDecision.Verdict.NotForUs, null, "", "could not reach the update server")
+            val signature = fetchText("$manifestUrl.sig")?.trim() ?: return Outcome(
+                UpdateDecision.Verdict.NotForUs, null, "", "could not fetch the signature")
+            return evaluateDocument(document, signature, trustedPublicKeyHex, installedVersionCode)
+        }
+
+        // Our directory: one response carrying both. It used to ask for "$manifestUrl.sig" here
+        // too, which the server has never served -- its route is
+        // /api/update/manifest?platform=android, so appending ".sig" lands on a query value, not
+        // a file. Nobody noticed because the url came from a build constant that was empty, so
+        // this line never ran. Deriving the url is what made it reachable.
+        val body = fetchText(manifestUrl, credential) ?: return Outcome(
+            UpdateDecision.Verdict.NotForUs, null, "", "could not reach the update server")
         val document = jsonStringField(body, "manifest") ?: return Outcome(
             UpdateDecision.Verdict.NotForUs, null, "", "the update server sent no manifest")
         val signature = jsonStringField(body, "signature")?.trim() ?: return Outcome(
@@ -208,7 +221,7 @@ object UpdateFlow {
         return target
     }
 
-    private fun openHttps(url: String): HttpsURLConnection? {
+    private fun openHttps(url: String, credentialHeader: String = ""): HttpsURLConnection? {
         val connection = URL(url).openConnection()
         if (connection !is HttpsURLConnection) return null
         connection.connectTimeout = 15_000
@@ -216,12 +229,26 @@ object UpdateFlow {
         // Redirects are followed by the platform, but never from https to http: that downgrade is
         // refused by HttpsURLConnection itself, which is the behaviour we want and the reason no
         // custom redirect handling is written here.
-        connection.instanceFollowRedirects = true
+        //
+        // A request carrying a credential follows nothing at all. A redirect asks for this
+        // request to be repeated at an address chosen by whoever answered, and that is the one
+        // party a credential must not be handed to on request. https://elsewhere is still https,
+        // so the downgrade rule alone does not cover it.
+        connection.instanceFollowRedirects = credentialHeader.isEmpty()
+        if (credentialHeader.isNotEmpty()) {
+            val split = credentialHeader.indexOf(':')
+            if (split > 0) {
+                connection.setRequestProperty(
+                    credentialHeader.substring(0, split).trim(),
+                    credentialHeader.substring(split + 1).trim(),
+                )
+            }
+        }
         return connection
     }
 
-    private fun fetchText(url: String): String? = try {
-        openHttps(url)?.use { connection ->
+    private fun fetchText(url: String, credentialHeader: String = ""): String? = try {
+        openHttps(url, credentialHeader)?.use { connection ->
             if (connection.responseCode != HttpURLConnection.HTTP_OK) {
                 null
             } else {
