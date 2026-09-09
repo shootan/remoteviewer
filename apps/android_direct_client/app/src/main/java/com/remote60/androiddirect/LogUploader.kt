@@ -109,7 +109,13 @@ object LogUploader {
     private fun send(directoryUrl: String, sessionToken: String, deviceName: String, body: String) {
         var connection: HttpURLConnection? = null
         try {
-            val base = if (directoryUrl.startsWith("http")) directoryUrl else "http://$directoryUrl"
+            // The same normalisation the rest of the app uses, rather than a second one here.
+            // The old test was startsWith("http"), which is true of "https://" and also of
+            // "httpx://" -- and for anything else it prepended http:// itself, so this file
+            // decided the scheme for a url the directory client had already decided about. A
+            // session token goes out in a header on this request; which scheme carries it is not
+            // a question two places should answer separately.
+            val base = DirectoryClient.normalizedUrl(directoryUrl)
             connection = (URL(base.trimEnd('/') + "/api/logs").openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
                 connectTimeout = CONNECT_TIMEOUT_MS

@@ -71,4 +71,9 @@ dependencies {
   // C++ and JS suites (apps/shared/version_compare_vectors.txt), so it needs a JVM and not a
   // device -- nothing here ships in the APK.
   testImplementation("junit:junit:4.13.2")
+  // The real org.json, not the stub android.jar ships for unit tests. That stub throws on every
+  // call unless returnDefaultValues is turned on, and turning it on would make JSONObject hand
+  // back nulls and zeros -- so a parser test would pass while parsing nothing. Nothing here ships
+  // in the APK; on a device the platform's own org.json is used.
+  testImplementation("org.json:json:20240303")
 }

@@ -678,6 +678,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var directoryHosts: List<DirectoryClient.Host> = emptyList()
     private lateinit var hostListAdapter: HostCardAdapter
     private var directoryBusy = false
+
+    /** What the directory advertised at login, if anything. Absence has its own rule. */
+    private var directoryObserveEndpoint = DirectoryClient.ObserveEndpoint()
     /** Set while a directory-brokered connection is being established, to keep the UI honest. */
     private var directoryConnectingName = ""
     // The host this session reached through the directory, so a saved unlock password belongs to
@@ -3211,8 +3214,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         diagnosticsLog.log("login_attempt", "server=$url id=$id")
         directoryExecutor.execute {
             try {
-                val (token, expiresAt) = DirectoryClient.login(url, id, password)
-                DirectoryClient.saveSession(this, url, id, token, expiresAt)
+                val result = DirectoryClient.login(url, id, password)
+                val token = result.sessionToken
+                // Where observations go rides on the login response. Kept for this run so the
+                // connect below does not have to ask again; a run that starts from a stored
+                // session asks /healthz instead, because it never sees a login response.
+                directoryObserveEndpoint = result.advertised
+                DirectoryClient.saveSession(this, url, id, token, result.expiresAt)
                 LogUploader.configure(this, url, token)
                 runOnUiThread {
                     setDirectoryBusy(false)
@@ -3299,22 +3307,66 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         diagnosticsLog.log("directory_connect", "host=${host.hostName} id=${host.hostId}")
 
         val observeToken = DirectoryClient.newObserveToken()
-        val directoryHost = DirectoryClient.hostFor(url)
-        val observePort = DirectoryClient.observePortFor(url)
 
         directoryExecutor.execute {
             try {
-                val observed = NativeSessionBridge.nativeDirectoryObserve(
-                    directoryHost, observePort, observeToken
-                )
-                if (observed.isEmpty()) {
+                // A run that resumed from a stored session never saw a login response, so it asks
+                // the health route -- which needs no session and carries the same value.
+                if (!directoryObserveEndpoint.known) {
+                    val health = DirectoryClient.observeFromHealth(url)
+                    // A server that could not be reached and a server that said nothing are not
+                    // the same thing. On https the second one means "this server needs a setting",
+                    // and reporting that about a server that is simply down would send whoever
+                    // reads it to the wrong place entirely.
+                    if (!health.reached && DirectoryClient.urlIsSecure(url)) {
+                        throw DirectoryClient.DirectoryException(
+                            "디렉터리 서버에 연결할 수 없습니다" +
+                                if (health.error.isEmpty()) "" else " (${health.error})"
+                        )
+                    }
+                    directoryObserveEndpoint = health.advertised
+                }
+                val advertised = directoryObserveEndpoint
+                val directoryHost = DirectoryClient.observeHostFor(url, advertised)
+                val observePort = DirectoryClient.observePortFor(url, advertised)
+                if (observePort == 0) {
+                    // Only reachable on https against a server that has not been told its observe
+                    // port. Said plainly: dialling 444 instead would fail as silence, and silence
+                    // reads like a broken PC rather than a server that needs one setting.
                     throw DirectoryClient.DirectoryException(
-                        NativeSessionBridge.nativeDirectoryLastError().ifEmpty { "주소 확인 실패" }
+                        "이 디렉터리 서버에 주소 확인 포트가 설정되어 있지 않습니다"
                     )
                 }
-                diagnosticsLog.log("directory_observed", observed)
+                if (advertised.hostRejected) {
+                    diagnosticsLog.log("directory_observe_host_rejected", "using $directoryHost")
+                }
 
-                val target = DirectoryClient.connect(url, token, host.hostId, observeToken)
+                val observe = {
+                    val seen = NativeSessionBridge.nativeDirectoryObserve(
+                        directoryHost, observePort, observeToken
+                    )
+                    if (seen.isEmpty()) {
+                        throw DirectoryClient.DirectoryException(
+                            NativeSessionBridge.nativeDirectoryLastError().ifEmpty { "주소 확인 실패" }
+                        )
+                    }
+                    diagnosticsLog.log("directory_observed", seen)
+                }
+                observe()
+
+                // One retry, and only when the directory says it has no observation for us. That
+                // is a state this end can repair -- send another from the same socket -- and it is
+                // not an authentication failure, so the session stays and nothing signs out. A
+                // loop here would spin against a server refusing for a reason the phone cannot
+                // fix, with the user waiting on it.
+                val target = try {
+                    DirectoryClient.connect(url, token, host.hostId, observeToken)
+                } catch (e: DirectoryClient.DirectoryException) {
+                    if (e.status != 409 || !e.serverError.startsWith("observation")) throw e
+                    diagnosticsLog.log("directory_reobserve", e.serverError)
+                    observe()
+                    DirectoryClient.connect(url, token, host.hostId, observeToken)
+                }
                 diagnosticsLog.log("directory_target", target.candidates.joinToString(" "))
 
                 val started = NativeSessionBridge.nativeDirectoryConnectAny(
