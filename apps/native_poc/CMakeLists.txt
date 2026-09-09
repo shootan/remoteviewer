@@ -1273,6 +1273,15 @@ add_executable(remote60_winhttp_tls_posture_test
 target_include_directories(remote60_winhttp_tls_posture_test PRIVATE src)
 target_link_libraries(remote60_winhttp_tls_posture_test PRIVATE winhttp)
 
+# The credential channel: framing, and the check that refuses a client that is not the process we
+# started. The refusal is driven by really connecting from the wrong process.
+add_executable(remote60_update_credential_channel_test
+  src/update_credential_channel_test.cpp
+  src/update_credential_channel.cpp
+)
+target_include_directories(remote60_update_credential_channel_test PRIVATE src)
+target_link_libraries(remote60_update_credential_channel_test PRIVATE advapi32)
+
 # Holds the two http transports against one another. The socket path carries http and WinHTTP
 # carries https, and the scheme decides which -- so any difference between them is a defect that
 # shows up on one kind of deployment only. The server is in-process on an ephemeral loopback port.
