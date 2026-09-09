@@ -91,7 +91,26 @@ struct ObserveEndpoint {
   uint16_t port = 0;
   /** Empty means the directory host itself, which is the ordinary case. */
   std::string host;
+  /**
+   * True when a host WAS advertised and was thrown away for being unusable.
+   *
+   * Kept because the fallback is silent otherwise. The server does not validate this value -- it
+   * trims it and sends it -- so a configuration slip arrives here looking like an address, and
+   * dialling it produces a timeout that reads as a network fault. Falling back is right; falling
+   * back without saying so leaves nobody able to find the actual mistake.
+   */
+  bool hostRejected = false;
 };
+
+/**
+ * Whether an advertised observe host is safe to dial.
+ *
+ * A hostname or an IPv4 literal, and nothing else: no scheme, no port, no path, no spaces, no
+ * control characters. Anything with those in it is a configuration mistake rather than an
+ * address, and resolving it would either fail slowly or -- worse -- succeed against something
+ * unintended.
+ */
+bool observe_host_is_usable(const std::string& host);
 
 /**
  * Reads the optional `observe` metadata out of a login or register response.
