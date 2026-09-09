@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <winhttp.h>
 
+#include <string>
 #include <vector>
 
 #pragma comment(lib, "winhttp.lib")
@@ -58,7 +59,7 @@ void apply_tls_posture(HINTERNET session) {
 }  // namespace
 
 bool http_exchange(const std::string& host, uint16_t port, bool secure, const char* method,
-                   const std::string& path, const std::string& authToken,
+                   const std::string& path, const std::string& extraHeaders,
                    const std::string& body, const char* contentType, uint32_t timeoutMs,
                    HttpResult* out) {
   if (!out) return false;
@@ -101,11 +102,7 @@ bool http_exchange(const std::string& host, uint16_t port, bool secure, const ch
     headers += widen(contentType);
     headers += L"\r\n";
   }
-  if (!authToken.empty()) {
-    headers += L"Authorization: Bearer ";
-    headers += widen(authToken);
-    headers += L"\r\n";
-  }
+  headers += widen(extraHeaders);
 
   const bool sent = WinHttpSendRequest(
       request.h, headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
@@ -145,8 +142,18 @@ bool http_exchange(const std::string& host, uint16_t port, bool secure, const ch
     DWORD read = 0;
     if (!WinHttpReadData(request.h, chunk.data(), available, &read) || read == 0) break;
     out->body.append(chunk.data(), read);
-    // A server that never stops talking must not be allowed to grow this without limit.
-    if (out->body.size() > (4u << 20)) break;
+    // A server that never stops talking must not be allowed to grow this without limit -- and a
+    // truncated body handed back as if it were the whole one is worse than no body at all.
+    if (out->body.size() > kMaxHttpResponseBytes) {
+      // The status goes too. A false return means the exchange did not happen as far as the
+      // caller is concerned, and leaving a 200 behind it invites code that checks the status
+      // without checking the return -- the socket path leaves 0 here, so this one does too.
+      const std::string tooBig = "the response is larger than " +
+                                 std::to_string(kMaxHttpResponseBytes) + " bytes";
+      *out = HttpResult{};
+      out->error = tooBig;
+      return false;
+    }
   }
 
   out->sent = true;

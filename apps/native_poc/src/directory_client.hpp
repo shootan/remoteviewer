@@ -90,9 +90,18 @@ bool create_account(const std::string& url, const std::string& accountId,
                     const std::string& password, const std::string& signupKey,
                     std::string* outError);
 
-/** Splits http://host[:port] into its parts; rejects https, which is not supported yet. */
+/**
+ * Splits http://host[:port] or https://host[:port] into its parts.
+ *
+ * `outSecure` is how the caller learns which one it was, and it is the only place that answer
+ * should come from: whoever dials has to use the same answer the parser used to pick the default
+ * port, or the two disagree about a url neither of them rejected. The scheme is compared without
+ * case, which is what a scheme is -- `HTTP://` used to be read as no scheme at all.
+ *
+ * The default port follows the scheme: 80 for http, 443 for https.
+ */
 bool parse_directory_url(const std::string& url, std::string* outHost, uint16_t* outPort,
-                         std::string* outError);
+                         std::string* outError, bool* outSecure = nullptr);
 
 /**
  * One POST, one connection, read to EOF.
@@ -101,7 +110,7 @@ bool parse_directory_url(const std::string& url, std::string* outHost, uint16_t*
  * exchange did not complete at all; a completed exchange reports the server's status instead, so
  * a caller can tell "could not reach it" from "it said no".
  */
-bool http_post(const std::string& host, uint16_t port, const std::string& path,
+bool http_post(const std::string& host, uint16_t port, bool secure, const std::string& path,
                const std::string& contentType, const std::string& extraHeaders,
                const std::string& body, uint32_t* outStatus, std::string* outResponse);
 

@@ -105,6 +105,23 @@ int main() {
     check("and it does not think it is the copy", !parsed.options.runningFromCopy);
   }
 
+  // ------------------------------------------------------- the updater still refuses cleartext
+  //
+  // The directory client learned to speak https in the same change that gave both of them one
+  // WinHTTP transport. Sharing a transport is not sharing a policy: the directory accepts http
+  // because existing deployments are reached that way, and the updater must not have picked that
+  // up. What it fetches runs with administrator rights, so a cleartext hop is a place to swap it,
+  // and the signature check behind this is the second lock, not the only one.
+  {
+    std::string why;
+    std::vector<std::wstring> args = complete();
+    for (auto& arg : args) {
+      if (arg.rfind(L"https://", 0) == 0) arg = L"http://updates.example/api/update/manifest";
+    }
+    check("an http manifest url is refused at the entry point", !accepts(args, &why), why);
+    check("...and the reason says why", why.find("https") != std::string::npos, why);
+  }
+
   // ---------------------------------------------------------------- nothing is defaulted
 
   {

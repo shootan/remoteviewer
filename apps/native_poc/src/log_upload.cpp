@@ -117,6 +117,7 @@ struct UploaderState {
   LogUploadConfig config;
   std::string host;
   uint16_t port = 0;
+  bool secure = false;
   std::string device;
   std::string headers;      // the auth + identity headers for the CURRENT credentials
   bool credentials = false;
@@ -181,16 +182,23 @@ struct SendJob {
   std::string headers;
   std::string host;
   uint16_t port = 0;
+  bool secure = false;
   uint64_t ownerEpoch = 0;
   uint64_t configGeneration = 0;
   uint32_t attempts = 0;        // before this send
   uint64_t firstAttemptUs = 0;  // 0 = first send
 };
 
-std::string owner_key(const std::string& identity, const std::string& host, uint16_t port, const std::string& device) {
+std::string owner_key(const std::string& identity, const std::string& host, uint16_t port,
+                      bool secure, const std::string& device) {
   std::string h = host;
   for (auto& c : h) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  return identity + "|" + h + ":" + std::to_string(port) + "|" + device;
+  // The scheme is part of the destination, not decoration on it. The same host:port over http and
+  // over https is two different servers as far as anything queued here is concerned -- one of
+  // them may not even be listening -- so a scheme change is an owner change, and what is queued
+  // for the old owner does not silently follow.
+  return identity + "|" + (secure ? "https://" : "http://") + h + ":" + std::to_string(port) +
+         "|" + device;
 }
 
 // Requires s.mu. Picks the next thing to send: a held batch that is due, else a fresh batch
@@ -234,6 +242,7 @@ bool next_job_locked(UploaderState& s, uint64_t nowUs, SendJob* job) {
   job->headers = s.headers + "x-log-stream: " + job->stream + "\r\n";
   job->host = s.host;
   job->port = s.port;
+  job->secure = s.secure;
   job->ownerEpoch = s.ownerEpoch;
   job->configGeneration = s.configGeneration;
   return true;
@@ -294,8 +303,8 @@ void worker_loop() {
 
     // ---- the send, outside the lock ----
     uint32_t status = 0;
-    const bool sent = directory::http_post(job.host, job.port, "/api/logs", "text/plain",
-                                           job.headers, job.body, &status, nullptr);
+    const bool sent = directory::http_post(job.host, job.port, job.secure, "/api/logs",
+                                           "text/plain", job.headers, job.body, &status, nullptr);
     const Outcome outcome = classify(sent, status);
     const uint64_t nowUs = steady_now_us();
     std::function<void()> callback;
@@ -417,14 +426,15 @@ bool log_upload_configure(const LogUploadConfig& config, std::string* outReason)
   std::string host;
   uint16_t port = 0;
   std::string parseError;
-  if (!directory::parse_directory_url(config.directoryUrl, &host, &port, &parseError)) {
+  bool secure = false;
+  if (!directory::parse_directory_url(config.directoryUrl, &host, &port, &parseError, &secure)) {
     if (outReason) *outReason = parseError;
     return false;
   }
   const std::string device = config.device.empty() ? directory::machine_id() : config.device;
   const std::string headers = build_headers(config, device);
   const char* auth = config.sessionToken.empty() ? "host-token" : "bearer";
-  const std::string ownerKey = owner_key(config.identity, host, port, device);
+  const std::string ownerKey = owner_key(config.identity, host, port, secure, device);
 
   std::string reason;
   {
@@ -452,6 +462,7 @@ bool log_upload_configure(const LogUploadConfig& config, std::string* outReason)
       s.config = config;
       s.host = host;
       s.port = port;
+      s.secure = secure;
       s.device = device;
       s.headers = headers;
       s.ownerKey = ownerKey;
@@ -472,6 +483,7 @@ bool log_upload_configure(const LogUploadConfig& config, std::string* outReason)
       s.config = config;
       s.host = host;
       s.port = port;
+      s.secure = secure;
       s.device = device;
       s.headers = headers;
       s.ownerKey = ownerKey;

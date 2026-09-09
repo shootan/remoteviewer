@@ -12,6 +12,7 @@
 #include "directory_client.hpp"
 #include "json_profile.hpp"
 #include "native_socket.hpp"
+#include "winhttp_transport.hpp"
 
 namespace remote60::native_poc {
 
@@ -26,7 +27,9 @@ namespace {
 constexpr int kHttpTimeoutMs = 8000;
 // Nothing the directory returns comes close; this only stops a hostile or broken server from
 // making us read forever.
-constexpr size_t kMaxResponseBytes = 256 * 1024;
+// The limit lives with the transport contract now: this path and the WinHTTP one must refuse the
+// same size, or a response that works over http fails over https.
+constexpr size_t kMaxResponseBytes = net::kMaxHttpResponseBytes;
 
 bool resolve_ipv4(const std::string& host, uint16_t port, sockaddr_in* out) {
   if (!out) return false;
@@ -72,9 +75,22 @@ SOCKET connect_with_timeout(const sockaddr_in& addr, int timeoutMs) {
  * a sign-in, a list refresh, a connect -- so a pool would be complexity bought for nothing, and
  * `Connection: close` means the body ends at EOF instead of needing a chunked-encoding parser.
  */
-bool http_request(const std::string& host, uint16_t port, const char* method,
+bool http_request(const std::string& host, uint16_t port, bool secure, const char* method,
                   const std::string& path, const std::string& bearer, const std::string& body,
                   uint32_t* outStatus, std::string* outResponse) {
+  if (secure) {
+    // Same split as the host agent's: TLS on WinHTTP, cleartext on the socket that already
+    // works. The bearer header is written here in the shape the raw path writes it, so the two
+    // send the same request rather than two requests that resemble each other.
+    net::HttpResult result;
+    const std::string headers =
+        bearer.empty() ? std::string() : "Authorization: Bearer " + bearer + "\r\n";
+    const bool ok = net::http_exchange(host, port, true, method, path, headers, body,
+                                       "application/json", kHttpTimeoutMs, &result);
+    if (outStatus) *outStatus = result.status;
+    if (outResponse) *outResponse = result.body;
+    return ok;
+  }
   sockaddr_in addr{};
   if (!resolve_ipv4(host, port, &addr)) return false;
   SOCKET s = connect_with_timeout(addr, kHttpTimeoutMs);
@@ -110,13 +126,18 @@ bool http_request(const std::string& host, uint16_t port, const char* method,
 
   std::string raw;
   char buf[4096];
+  bool tooLarge = false;
   for (;;) {
     const int n = recv(s, buf, sizeof(buf), 0);
     if (n <= 0) break;
     raw.append(buf, static_cast<size_t>(n));
-    if (raw.size() > kMaxResponseBytes) break;
+    if (raw.size() > kMaxResponseBytes) {
+      tooLarge = true;
+      break;
+    }
   }
   closesocket(s);
+  if (tooLarge) return false;
 
   if (raw.rfind("HTTP/", 0) != 0) return false;
   const size_t statusStart = raw.find(' ');
@@ -189,8 +210,9 @@ std::vector<std::string> json_array_objects(const std::string& json, const std::
   return out;
 }
 
-bool split_url(const std::string& url, std::string* host, uint16_t* port, std::string* error) {
-  return directory::parse_directory_url(url, host, port, error);
+bool split_url(const std::string& url, std::string* host, uint16_t* port, bool* secure,
+               std::string* error) {
+  return directory::parse_directory_url(url, host, port, error, secure);
 }
 
 }  // namespace
@@ -200,11 +222,12 @@ bool directory_observe_from_health(const std::string& url, directory::ObserveEnd
   if (!outObserve) return false;
   std::string host;
   uint16_t port = 0;
-  if (!split_url(url, &host, &port, outError)) return false;
+  bool secure = false;
+  if (!split_url(url, &host, &port, &secure, outError)) return false;
 
   uint32_t status = 0;
   std::string response;
-  if (!http_request(host, port, "GET", "/healthz", {}, {}, &status, &response)) {
+  if (!http_request(host, port, secure, "GET", "/healthz", {}, {}, &status, &response)) {
     if (outError) *outError = "cannot reach the server";
     return false;
   }
@@ -221,14 +244,15 @@ bool directory_login(const std::string& url, const std::string& accountId,
                      directory::ObserveEndpoint* outObserve) {
   std::string host;
   uint16_t port = 0;
-  if (!split_url(url, &host, &port, outError)) return false;
+  bool secure = false;
+  if (!split_url(url, &host, &port, &secure, outError)) return false;
 
   std::ostringstream body;
   body << "{\"id\":\"" << json_escape(accountId) << "\",\"pw\":\"" << json_escape(password) << "\"}";
 
   uint32_t status = 0;
   std::string response;
-  if (!http_request(host, port, "POST", "/api/login", {}, body.str(), &status, &response)) {
+  if (!http_request(host, port, secure, "POST", "/api/login", {}, body.str(), &status, &response)) {
     if (outError) *outError = "cannot reach the server";
     return false;
   }
@@ -252,11 +276,12 @@ bool directory_list_hosts(const std::string& url, const std::string& sessionToke
                           std::vector<DirectoryHostEntry>* outHosts, std::string* outError) {
   std::string host;
   uint16_t port = 0;
-  if (!split_url(url, &host, &port, outError)) return false;
+  bool secure = false;
+  if (!split_url(url, &host, &port, &secure, outError)) return false;
 
   uint32_t status = 0;
   std::string response;
-  if (!http_request(host, port, "GET", "/api/hosts", sessionToken, {}, &status, &response)) {
+  if (!http_request(host, port, secure, "GET", "/api/hosts", sessionToken, {}, &status, &response)) {
     if (outError) *outError = "cannot reach the server";
     return false;
   }
@@ -285,7 +310,8 @@ bool directory_connect(const std::string& url, const std::string& sessionToken,
                        DirectoryConnectTarget* outTarget, std::string* outError) {
   std::string host;
   uint16_t port = 0;
-  if (!split_url(url, &host, &port, outError)) return false;
+  bool secure = false;
+  if (!split_url(url, &host, &port, &secure, outError)) return false;
 
   std::ostringstream body;
   body << "{\"hostId\":\"" << json_escape(hostId) << "\",\"observeToken\":\""
@@ -293,7 +319,7 @@ bool directory_connect(const std::string& url, const std::string& sessionToken,
 
   uint32_t status = 0;
   std::string response;
-  if (!http_request(host, port, "POST", "/api/connect", sessionToken, body.str(), &status,
+  if (!http_request(host, port, secure, "POST", "/api/connect", sessionToken, body.str(), &status,
                     &response)) {
     if (outError) *outError = "cannot reach the server";
     return false;

@@ -1199,6 +1199,17 @@ if(GNLINK_HAVE_WEBVIEW2)
   set_target_properties(remote60_webview2_spike PROPERTIES OUTPUT_NAME "WebView2Spike")
 endif()
 
+# Holds the two http transports against one another. The socket path carries http and WinHTTP
+# carries https, and the scheme decides which -- so any difference between them is a defect that
+# shows up on one kind of deployment only. The server is in-process on an ephemeral loopback port.
+add_executable(remote60_directory_http_contract_test
+  src/directory_http_contract_test.cpp
+  src/directory_client.cpp
+  src/winhttp_transport.cpp
+)
+target_include_directories(remote60_directory_http_contract_test PRIVATE src)
+target_link_libraries(remote60_directory_http_contract_test PRIVATE common ws2_32 iphlpapi shell32 winhttp)
+
 # Diagnostic only. The parsing has unit tests; this answers the other half -- whether the requests
 # are shaped the way a real directory expects.
 add_executable(remote60_directory_login_probe

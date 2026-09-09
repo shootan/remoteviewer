@@ -40,7 +40,9 @@ bool directory_session_open(const DirectorySessionRequest& request, DirectorySes
   // when the caller did not pin one, the port that sits one above the http port.
   std::string directoryHost;
   uint16_t directoryHttpPort = 0;
-  if (!directory::parse_directory_url(request.url, &directoryHost, &directoryHttpPort, outError)) {
+  bool directorySecure = false;
+  if (!directory::parse_directory_url(request.url, &directoryHost, &directoryHttpPort, outError,
+                                      &directorySecure)) {
     return false;
   }
   // The rule lives in one place and this uses it, rather than adding one above the http port and
@@ -52,7 +54,6 @@ bool directory_session_open(const DirectorySessionRequest& request, DirectorySes
   // called /api/connect, so it never learned the relay address either. Failing with a reason is
   // the difference between "this server needs configuring" and a connection that just does not
   // work.
-  const bool directorySecure = directory::directory_url_is_secure(request.url);
   const uint16_t observePort =
       request.directoryUdpPort != 0
           ? request.directoryUdpPort

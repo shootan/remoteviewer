@@ -74,7 +74,13 @@ bool DirectoryRendezvous::Observe(const std::string& directoryHost, int director
 
   sockaddr_in directory{};
   if (!resolve_udp(directoryHost, directoryUdpPort, &directory)) {
-    if (outError) *outError = "cannot resolve directory host";
+    // Named, because the observe endpoint is no longer always the directory's own host and port:
+    // the server can advertise a different one. "cannot resolve directory host" on its own sent
+    // whoever read it to look at the url, which may be the one thing here that is correct.
+    if (outError) {
+      *outError = "cannot resolve directory observe endpoint '" + directoryHost + ":" +
+                  std::to_string(directoryUdpPort) + "'";
+    }
     return false;
   }
 

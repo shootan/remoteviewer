@@ -20,6 +20,16 @@
 
 namespace remote60::native_poc::net {
 
+/**
+ * The most a response may be, for either transport.
+ *
+ * One number, because there were three -- 64 KiB on the host agent's socket, 256 KiB on the
+ * viewer's, 4 MiB here -- and all three answered an oversized response by silently returning a
+ * truncated one. The caller then parsed a cut-off body and reported malformed json, which is a
+ * true statement about the wrong thing. Past this, the exchange fails and says why.
+ */
+constexpr size_t kMaxHttpResponseBytes = 4u << 20;
+
 /** What a request came back as. `status` is the HTTP code; 0 means it never got that far. */
 struct HttpResult {
   bool sent = false;
@@ -36,14 +46,15 @@ struct HttpResult {
  * the moment they would leave https, and certificate validation left alone -- there is no
  * parameter here that turns it off, because the way that gets turned off is someone adding one.
  *
- * `authToken` is sent as a bearer header when non-empty. `body` is sent when non-empty, with the
- * caller's content type.
+ * `extraHeaders` is appended verbatim and must already be CRLF terminated -- the same contract
+ * the raw-socket path has, so a caller can be moved between them without its headers changing
+ * shape. `body` is sent when non-empty, with the caller's content type.
  *
  * Returns false only when the exchange did not happen at all; an HTTP error status is a completed
  * request and comes back in `status` for the caller to judge.
  */
 bool http_exchange(const std::string& host, uint16_t port, bool secure, const char* method,
-                   const std::string& path, const std::string& authToken,
+                   const std::string& path, const std::string& extraHeaders,
                    const std::string& body, const char* contentType, uint32_t timeoutMs,
                    HttpResult* out);
 
