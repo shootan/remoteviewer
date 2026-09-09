@@ -9822,6 +9822,8 @@ Next action
   - 설치기 안에 **0.2.105 가 3건, 0.2.104 는 0건**(UTF-16 스캔). payload 이름 **`GNLinkUpdater.exe`·`GNLinkHost.exe`·`ui\shell.html`·`macro.html`** 존재 — `ui\shell.html` 이 **깨지지 않은 형태**로 들어 있다(#468 의 escape 결함 회귀 확인).
   - payload 스테이징 9종 전부(`GNLinkUpdater.exe` **482,816 B** 포함).
   - APK: **package `com.remote60.androiddirect`**(불변) · **versionCode 12**(배포본 11 초과) · **서명 SHA-256 `dcc806aeb30b2e3c53e4a0b96b9675f9e25af2bf071dbb37a3cb09f6b8ec2990`** — **배포본과 같은 debug keystore**, `assembleDebug` 산출물. **새 키를 만들지 않았다.**
+- ⚠️ **APK 권한이 하나 늘었다 — 배포본과의 사용자 가시 차이다.** 배포본 0.2.12 는 `INTERNET`·`ACCESS_NETWORK_STATE`(+ 동적 리시버용 자체 권한) 뿐이었는데, 0.2.13 에는 **`android.permission.REQUEST_INSTALL_PACKAGES`** 가 추가됐다(`aapt2 dump badging` 으로 두 APK 직접 대조). W7 의 `PackageInstaller` 경로가 요구하는 권한이라 **의도된 것**이지만, 사용자에게는 **"알 수 없는 앱 설치" 허용을 요구하는 새 항목**으로 보인다. **설치 전에 알아야 하는 차이**이므로 여기 적는다. history #331·#333 시점 기록("`REQUEST_INSTALL_PACKAGES` 없음")은 **그때의 사실**이고 지금은 아니다.
+  - **검증용의 산출물 검사에서 걸렸다.** 내 릴리스 기록에는 빠져 있었다 — 산출물이 무엇을 바꾸는지 적을 때 **버전과 해시만 적고 권한을 안 봤다.**
 - ⚠️ **이 후보는 지금 업데이트를 확인하지도 설치하지도 못한다. 그리고 그것이 정상 동작이다.**
   - `trusted_public_key_hex()` 가 **빈 문자열**이고(`update_manifest.cpp:300`, "Deliberately empty"), `default_verifier()` 는 **키 길이가 안 맞으면 거부**한다(`key.size() != kP256PublicKeyBytes` → `false`). 따라서 **어떤 manifest 도 서명 검증을 통과하지 못한다.**
   - Android 도 같다: `UPDATE_MANIFEST_URL`·`UPDATE_PUBLIC_KEY_HEX` 가 **빈 기본값**이고, `UpdateFlow` 는 "이 빌드에는 업데이트 엔드포인트도 신뢰키도 없다" 를 보고하고 **아무것도 하지 않는다.**
