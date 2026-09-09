@@ -23,6 +23,8 @@
 #include "connect_candidates.hpp"
 #include "native_socket.hpp"
 
+#include "directory_observe.hpp"
+
 namespace remote60::native_poc {
 
 struct DirectorySessionRequest {
@@ -33,6 +35,14 @@ struct DirectorySessionRequest {
   // (directory_client.cpp) and the Android client (DirectoryClient.observePortFor) already do.
   // A fixed 8081 only ever matched because the http port happened to be 8080.
   uint16_t directoryUdpPort = 0;
+  /**
+   * What the directory said about its observe endpoint, when it said anything.
+   *
+   * Filled from the login response. Left default it means "nothing was said", which is not the
+   * same as "use the default" -- on https there is no safe default and the attempt stops with a
+   * reason instead of dialling 443 + 1.
+   */
+  directory::ObserveEndpoint advertised;
   // The client gives up on the handshake soon after this, so a longer budget buys nothing.
   uint32_t punchBudgetMs = 4000;
 };

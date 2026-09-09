@@ -265,13 +265,25 @@ int open_media_socket(ViewerContext& ctx) {
     }
     std::string directoryError;
     std::string sessionToken = ctx.args.directorySession;
-    if (sessionToken.empty() &&
-        !remote60::native_poc::directory_login(ctx.args.directoryUrl, ctx.args.directoryAccount,
-                                               ctx.args.directoryPassword, &sessionToken,
-                                               &directoryError)) {
-      std::cerr << "[native-video-client] directory login failed: " << directoryError << "\n";
-      if (ctx.dec.mfStarted) MFShutdown();
-      return 3;
+    // Where the directory says observations go. It rides on the login response, so the branch
+    // that reuses a cached session never sees it -- and on an https directory that would mean
+    // refusing to observe, so a reconnect would fail where a fresh connect succeeds. The health
+    // probe carries the same value and needs no session, so that path asks for it there.
+    remote60::native_poc::directory::ObserveEndpoint advertised;
+    if (sessionToken.empty()) {
+      if (!remote60::native_poc::directory_login(ctx.args.directoryUrl, ctx.args.directoryAccount,
+                                                 ctx.args.directoryPassword, &sessionToken,
+                                                 &directoryError, &advertised)) {
+        std::cerr << "[native-video-client] directory login failed: " << directoryError << "\n";
+        if (ctx.dec.mfStarted) MFShutdown();
+        return 3;
+      }
+    } else {
+      // Absence is not an error: an older directory says nothing, and observe_port_for has a
+      // rule for exactly that.
+      std::string ignored;
+      remote60::native_poc::directory_observe_from_health(ctx.args.directoryUrl, &advertised,
+                                                          &ignored);
     }
 
     std::string hostId = ctx.args.directoryHostId;
@@ -303,6 +315,7 @@ int open_media_socket(ViewerContext& ctx) {
     request.url = ctx.args.directoryUrl;
     request.sessionToken = sessionToken;
     request.hostId = hostId;
+    request.advertised = advertised;
     remote60::native_poc::DirectorySessionResult session{};
     if (!remote60::native_poc::directory_session_open(request, &session, &directoryError)) {
       std::cerr << "[native-video-client] directory connect failed: " << directoryError << "\n";

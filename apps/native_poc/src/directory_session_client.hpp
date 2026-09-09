@@ -17,6 +17,8 @@
 
 #include "connect_candidates.hpp"
 
+#include "directory_observe.hpp"
+
 namespace remote60::native_poc {
 
 /** One PC on the account, as the directory reports it. */
@@ -44,9 +46,23 @@ struct DirectoryConnectTarget {
  * again. `outError` receives the server's own message when it rejects, because "wrong password"
  * and "too many attempts, retry in 40s" need different reactions from the person reading it.
  */
+/**
+ * Asks the directory where observations go, without holding a session.
+ *
+ * For the path where a session came from cache and no login happened, so the login response --
+ * where this normally rides -- was never seen. Without it a cached session on an https directory
+ * would fall into "nothing was advertised" and refuse to observe, which would make reconnecting
+ * worse than connecting fresh.
+ *
+ * Returns false when the server says nothing usable; that is a state, not an error.
+ */
+bool directory_observe_from_health(const std::string& url, directory::ObserveEndpoint* outObserve,
+                                   std::string* outError);
+
 bool directory_login(const std::string& url, const std::string& accountId,
                      const std::string& password, std::string* outSessionToken,
-                     std::string* outError);
+                     std::string* outError,
+                     directory::ObserveEndpoint* outObserve = nullptr);
 
 /** The PCs registered to the signed-in account, online ones first. */
 bool directory_list_hosts(const std::string& url, const std::string& sessionToken,

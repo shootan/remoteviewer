@@ -195,9 +195,30 @@ bool split_url(const std::string& url, std::string* host, uint16_t* port, std::s
 
 }  // namespace
 
+bool directory_observe_from_health(const std::string& url, directory::ObserveEndpoint* outObserve,
+                                   std::string* outError) {
+  if (!outObserve) return false;
+  std::string host;
+  uint16_t port = 0;
+  if (!split_url(url, &host, &port, outError)) return false;
+
+  uint32_t status = 0;
+  std::string response;
+  if (!http_request(host, port, "GET", "/healthz", {}, {}, &status, &response)) {
+    if (outError) *outError = "cannot reach the server";
+    return false;
+  }
+  if (status != 200) {
+    if (outError) *outError = error_from_response(status, response);
+    return false;
+  }
+  return directory::parse_observe_metadata(response, outObserve);
+}
+
 bool directory_login(const std::string& url, const std::string& accountId,
                      const std::string& password, std::string* outSessionToken,
-                     std::string* outError) {
+                     std::string* outError,
+                     directory::ObserveEndpoint* outObserve) {
   std::string host;
   uint16_t port = 0;
   if (!split_url(url, &host, &port, outError)) return false;
@@ -216,6 +237,9 @@ bool directory_login(const std::string& url, const std::string& accountId,
     return false;
   }
   std::string token;
+  // Optional and additive: an older directory does not send it, and that is a documented state
+  // rather than an error -- see observe_port_for.
+  if (outObserve) directory::parse_observe_metadata(response, outObserve);
   if (!json_get_string(response, "sessionToken", &token) || token.empty()) {
     if (outError) *outError = "server did not return a session";
     return false;
