@@ -112,9 +112,16 @@ int main() {
     receiver.join();
 
     check("a client that is not the started process is refused", !served, error);
+    // The mechanism by which a credential reaches a log is an error message that quotes it. Every
+    // failure string here is checked for that, because the log itself is written from these.
+    check("...and the reason does not quote the credential",
+          error.find("fixture-token-not-a-real-credential") == std::string::npos, error);
     check("...and the refusal names the mismatch",
           error.find("not the one that was started") != std::string::npos, error);
     check("...and nothing was received", !receiverDone.load() && received.empty(), received);
+    check("...and the receiver's own reason is clean too",
+          receiveError.find("fixture-token-not-a-real-credential") == std::string::npos,
+          receiveError);
     check("...and the payload was cleared on the way out", payload.empty(), payload);
 
     if (started) {
@@ -184,6 +191,8 @@ int main() {
     const DWORD elapsed = GetTickCount() - began;
 
     check("a client that never connects is a failure, not a wait", !served, error);
+    check("...and says so without quoting the credential",
+          error.find("fixture-token-not-a-real-credential") == std::string::npos, error);
     check("...bounded by the deadline it was given", elapsed < 3000, std::to_string(elapsed));
     check("...and nothing was left to send later", payload.empty());
 
