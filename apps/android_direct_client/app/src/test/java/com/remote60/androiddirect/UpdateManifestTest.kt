@@ -25,6 +25,25 @@ import java.security.spec.ECGenParameterSpec
 class UpdateManifestTest {
 
     private fun vectorsDir(): File {
+        // An override, so this can be pointed at a fixture without touching the shared vectors.
+        //
+        // The C++ suite takes the directory as argv[1] and the server suite as argv[2]; this one
+        // could only ever read apps/shared/update_manifest, which meant checking a newly created
+        // signing key here would have required editing the vectors the three runtimes agree on --
+        // and those exist precisely so that nobody edits them to make something pass.
+        // ⚠️ Gradle must be run with --no-daemon for this to be seen. Test workers are forked
+        // from the daemon, and a daemon started earlier keeps the environment it started with --
+        // so setting the variable and running normally gives a PASS that used the shared vectors
+        // and never looked at the override at all. That happened, and it was caught only by
+        // pointing the variable at a directory that does not exist and checking the run FAILS.
+        // If it passes with a bad path, the override is not in effect and any result is about
+        // some other key.
+        val override = System.getenv("GNLINK_UPDATE_VECTORS")
+        if (!override.isNullOrBlank()) {
+            val chosen = File(override)
+            if (chosen.isDirectory) return chosen
+            throw AssertionError("GNLINK_UPDATE_VECTORS is set but is not a directory: $override")
+        }
         var dir: File? = File(System.getProperty("user.dir") ?: ".").absoluteFile
         val tried = mutableListOf<String>()
         while (dir != null) {
