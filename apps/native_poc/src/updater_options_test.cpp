@@ -105,6 +105,27 @@ int main() {
     check("and it does not think it is the copy", !parsed.options.runningFromCopy);
   }
 
+  // --------------------------------------------------- the credential arrives by name, not value
+  //
+  // What travels in the argument list is the NAME of a pipe. The credential itself never appears
+  // in an argument, an environment block, a file or a log -- which is the whole reason there is a
+  // pipe rather than one more flag.
+  {
+    std::vector<std::wstring> args = complete();
+    args.push_back(L"--credential-pipe");
+    args.push_back(L"\\\\.\\pipe\\GNLinkUpdateCred-123-456");
+    args.push_back(L"--manifest-envelope");
+    const ParseResult parsed = parse_updater_options(args);
+    check("a credential pipe name is accepted", parsed.ok(), parsed.detail);
+    check("...and kept as given",
+          parsed.options.credentialPipeName == L"\\\\.\\pipe\\GNLinkUpdateCred-123-456");
+    check("...alongside the wire shape", parsed.options.derivedEndpoint);
+
+    const ParseResult without = parse_updater_options(complete());
+    check("without it there is no channel", without.options.credentialPipeName.empty());
+    check("...and the shape is the detached one", !without.options.derivedEndpoint);
+  }
+
   // ------------------------------------------------------- the updater still refuses cleartext
   //
   // The directory client learned to speak https in the same change that gave both of them one

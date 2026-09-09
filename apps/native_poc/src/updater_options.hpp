@@ -52,6 +52,17 @@ struct UpdaterOptions {
    * so that line never ran against the real server.
    */
   bool derivedEndpoint = false;
+  /**
+   * The pipe this process reads its credential from, when there is one.
+   *
+   * A NAME, not the credential: the name is worthless to anyone who cannot also prove they are
+   * the process that was started, which is what the channel checks before writing. The credential
+   * itself never appears in an argument, an environment block, a file or a log.
+   *
+   * Empty means no credential is coming, which is the ordinary case for an override endpoint --
+   * somebody else's server gets nothing from us.
+   */
+  std::wstring credentialPipeName;
   /** Matched against the manifest's platform field. */
   std::string platform;
   /** The version currently installed, for the comparison. */

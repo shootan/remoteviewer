@@ -139,6 +139,9 @@ ParseResult parse_updater_options(const std::vector<std::wstring>& arguments) {
         result.detail = "--manifest-url must be ascii";
         return result;
       }
+    } else if (arg == L"--credential-pipe") {
+      if (!(value = need_value(i, L"--credential-pipe"))) return result;
+      result.options.credentialPipeName = *value;
     } else if (arg == L"--manifest-envelope") {
       // A flag, not a value: the parent knows the shape because it built the url, and there is
       // nothing here for a caller to get subtly wrong.

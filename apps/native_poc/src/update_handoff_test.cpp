@@ -67,6 +67,46 @@ bool has_flag(const std::vector<std::wstring>& args, const std::wstring& flag) {
 int main() {
   // ---------------------------------------------------------------- what gets handed over
 
+  // ---------------------------------------------- what the argument list may and may not carry
+  //
+  // The pipe name is in here. The credential is not, and cannot be: there is no field on the spec
+  // that could hold one. Asserted rather than assumed, because "we would never put it there" is
+  // the kind of thing that stops being true in a hurry once somebody needs it quickly.
+  {
+    UpdaterLaunchSpec spec = complete_spec();
+    spec.credentialPipeName = L"\\\\.\\pipe\\GNLinkUpdateCred-1-2";
+    spec.derivedEndpoint = true;
+    const auto args = updater_arguments(spec);
+
+    bool named = false;
+    bool envelope = false;
+    for (size_t i = 0; i < args.size(); ++i) {
+      if (args[i] == L"--credential-pipe" && i + 1 < args.size() &&
+          args[i + 1] == spec.credentialPipeName) {
+        named = true;
+      }
+      if (args[i] == L"--manifest-envelope") envelope = true;
+    }
+    check("the pipe is named in the arguments", named);
+    check("and so is the wire shape", envelope);
+
+    // The token a real run would hold. It must not be reachable from anything the launch writes.
+    const std::wstring fixtureToken = L"fixture-token-not-a-real-credential";
+    bool leaked = false;
+    for (const std::wstring& arg : args) {
+      if (arg.find(fixtureToken) != std::wstring::npos) leaked = true;
+    }
+    check("no credential is anywhere in the argument list", !leaked);
+
+    UpdaterLaunchSpec plain = complete_spec();
+    const auto plainArgs = updater_arguments(plain);
+    bool mentionsChannel = false;
+    for (const std::wstring& arg : plainArgs) {
+      if (arg == L"--credential-pipe" || arg == L"--manifest-envelope") mentionsChannel = true;
+    }
+    check("a launch with no credential names no channel", !mentionsChannel);
+  }
+
   {
     const auto args = updater_arguments(complete_spec());
     check("the install directory is passed",

@@ -40,6 +40,11 @@ std::vector<std::wstring> updater_arguments(const UpdaterLaunchSpec& spec) {
   // The shape travels with the url. Without it the worker would have to decide from the response,
   // and that decision is exactly the one that cannot be made safely.
   if (spec.derivedEndpoint) args.push_back(L"--manifest-envelope");
+  // The name only. Whoever reads it still has to prove it is the process we started before
+  // anything is written to it.
+  if (!spec.credentialPipeName.empty()) {
+    add(L"--credential-pipe", spec.credentialPipeName);
+  }
   add(L"--platform", widen_ascii(spec.platform));
   add(L"--installed-version", widen_ascii(spec.installedVersion));
   add(L"--health-log", spec.healthLogPath);

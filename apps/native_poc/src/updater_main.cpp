@@ -29,11 +29,18 @@
 #include "update_handoff.hpp"
 #include "update_job_guard.hpp"
 #include "updater_effects.hpp"
+#include "update_credential_channel.hpp"
+#include "update_endpoint.hpp"
 #include "updater_options.hpp"
+#include "url_origin.hpp"
 
 namespace {
 
 using namespace remote60::native_poc::update;
+using remote60::native_poc::url_origin_key;
+
+/** How long either hop waits. Long enough for an elevation prompt, bounded so nothing hangs. */
+constexpr uint32_t kCredentialDeadlineMs = 120000;
 
 std::wstring gLogPath;
 
@@ -87,8 +94,28 @@ std::wstring self_image_path() {
  * and %ProgramData% are out; %ProgramFiles%\\GNLink.update is admin-only by its default ACL, so
  * there is no ACL to set and therefore none to forget.
  */
-bool run_from_copy(const UpdaterOptions& options, const std::vector<std::wstring>& originalArgs) {
+/**
+ * Hands the credential on to the working copy, over a second pipe of the bootstrap's own.
+ *
+ * Two hops because the launch has two. The bootstrap cannot forward the pipe it read from -- that
+ * one was proved against the bootstrap's own process id -- so it opens its own, names it in the
+ * copy's arguments, and applies the same check to whoever connects.
+ *
+ * The handle from CreateProcessW is kept for the whole exchange. The bootstrap used to close it
+ * immediately and leave; closing it here would leave the check comparing against a process id
+ * that is no longer pinned to anything, which is exactly the case the check exists to refuse.
+ */
+bool run_from_copy(const UpdaterOptions& options, const std::vector<std::wstring>& originalArgs,
+                   const std::string& credential);
+
+bool run_from_copy(const UpdaterOptions& options, const std::vector<std::wstring>& originalArgs,
+                   const std::string& credential) {
   const std::wstring copyPath = updater_copy_path(options.workDir, self_image_path());
+  // The bootstrap's own channel. It cannot forward the one it read from: that pipe was proved
+  // against the bootstrap's process id, and the working copy is a different process.
+  const std::wstring childPipeName =
+      credential.empty() ? std::wstring()
+                         : make_credential_pipe_name(GetCurrentProcessId(), GetTickCount64());
 
   WorkingCopySteps steps;
   steps.checkDirectory = [&options]() {
@@ -112,7 +139,7 @@ bool run_from_copy(const UpdaterOptions& options, const std::vector<std::wstring
     log_line("could not place the working copy (error " + std::to_string(GetLastError()) + ")");
     return false;
   };
-  steps.launch = [&options, &originalArgs, &copyPath]() {
+  steps.launch = [&options, &originalArgs, &copyPath, &childPipeName, &credential]() {
     std::wstring commandLine = L"\"" + copyPath + L"\"";
     for (const std::wstring& arg : originalArgs) {
       commandLine += L" \"";
@@ -120,6 +147,23 @@ bool run_from_copy(const UpdaterOptions& options, const std::vector<std::wstring
       commandLine += L"\"";
     }
     commandLine += L" --running-from-copy";
+    // The name of the bootstrap's pipe replaces the parent's. Passing the parent's would send the
+    // copy to a channel that has already been served and closed.
+    if (!childPipeName.empty()) {
+      commandLine += L" --credential-pipe \"";
+      commandLine += childPipeName;
+      commandLine += L"\"";
+    }
+
+    // Created before the copy is started, so the name never exists without an owner.
+    CredentialServer credentialServer;
+    if (!credential.empty()) {
+      std::string error;
+      if (!credentialServer.Create(childPipeName, &error)) {
+        log_line("could not open the credential channel for the working copy: " + error);
+        return false;
+      }
+    }
 
     STARTUPINFOW si{};
     si.cb = sizeof(si);
@@ -147,8 +191,23 @@ bool run_from_copy(const UpdaterOptions& options, const std::vector<std::wstring
       return false;
     }
     CloseHandle(pi.hThread);
+
+    bool handedOver = true;
+    if (!credential.empty()) {
+      // The handle is still open here, and stays open until the exchange is finished: that is
+      // what keeps the process id from being recycled underneath the check.
+      std::string payload = credential;
+      std::string error;
+      handedOver = credentialServer.Serve(pi.hProcess, payload, kCredentialDeadlineMs, &error);
+      if (!handedOver) {
+        log_line("the working copy did not receive the credential: " + error);
+      }
+    }
     CloseHandle(pi.hProcess);
-    return true;
+    // A copy that never got its credential will fail its own fetch and stop. Reported as a
+    // failure here so the exit code says so, rather than reporting success for a run that cannot
+    // do the thing it was started for.
+    return handedOver;
   };
 
   const WorkingCopyResult result = prepare_working_copy(steps);
@@ -180,9 +239,25 @@ int wmain(int argc, wchar_t** argv) {
   }
   gLogPath = options.logPath;
 
+  // The credential, if one is coming, before anything else happens. Read once here and once in
+  // the working copy; it is never written down in between.
+  std::string credential;
+  if (!options.credentialPipeName.empty()) {
+    std::string error;
+    if (!receive_credential(options.credentialPipeName, kCredentialDeadlineMs, &credential,
+                            &error)) {
+      // Not "carry on without it": the fetch would then get a 401 nobody can explain, and the
+      // failure would look like the server's rather than ours.
+      log_line("no credential arrived: " + error);
+      return 5;
+    }
+  }
+
   if (!options.runningFromCopy) {
     // Hand over to a copy of ourselves so the installed original can be replaced by this update.
-    return run_from_copy(options, arguments) ? 0 : 3;
+    const bool ok = run_from_copy(options, arguments, credential);
+    SecureZeroMemory(credential.data(), credential.size());
+    return ok ? 0 : 3;
   }
 
   // Held for as long as this process lives, and never by the bootstrap. Whoever is waiting can
@@ -200,7 +275,18 @@ int wmain(int argc, wchar_t** argv) {
   log_line("starting: install=" + to_utf8(options.installDir) +
            " staging=" + to_utf8(options.stagingDir) + " installed=" + options.installedVersion);
 
-  UpdaterEffects effects(options, production_updater_deps(log_line));
+  // What the worker may send, and where. Derived urls are on the directory's own origin by
+  // construction, so that is the one origin this credential may reach; every artifact url is
+  // judged against it separately.
+  UpdateEndpoint endpoint;
+  endpoint.url = options.manifestUrl;
+  endpoint.derived = options.derivedEndpoint;
+  if (options.derivedEndpoint && !credential.empty()) {
+    endpoint.credentialHeader = credential;
+    endpoint.origin = url_origin_key(options.manifestUrl);
+  }
+
+  UpdaterEffects effects(options, production_updater_deps(log_line, endpoint));
   if (!effects.build(&why)) {
     log_line("could not assemble the effects: " + why);
     return 4;

@@ -37,6 +37,7 @@
 #include "client_shell_bridge.hpp"
 #include "env_util.hpp"
 #include "update_check.hpp"
+#include "update_credential_channel.hpp"
 #include "update_handoff.hpp"
 #include "directory_client.hpp"
 #include "directory_session_client.hpp"
@@ -404,15 +405,23 @@ void start_client_update(const std::string& availableVersion) {
   spec.installDir = installDir;
   spec.stagingDir = workDir + L"\\staging";
   spec.workDir = workDir;
-  // The same snapshot the check used. ⚠️ No credential travels to the elevated worker -- that
-  // needs an access-limited channel bound to that process, which is a separate decision.
+  // The same snapshot the check used.
+  std::string launchSession;
   {
-    const upd::UpdateEndpoint launchEndpoint =
-        remote60::native_poc::directory::update_endpoint_for(
-            remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
-            configured_directory_url(), "windows");
-    spec.manifestUrl = launchEndpoint.url;
-    spec.derivedEndpoint = launchEndpoint.derived;
+    std::lock_guard<std::mutex> lock(gStateMu);
+    launchSession = gSessionToken;
+  }
+  const upd::UpdateEndpoint launchEndpoint =
+      remote60::native_poc::directory::update_endpoint_for(
+          remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
+          configured_directory_url(), "windows",
+          launchSession.empty() ? std::string() : "Authorization: Bearer " + launchSession);
+  spec.manifestUrl = launchEndpoint.url;
+  spec.derivedEndpoint = launchEndpoint.derived;
+  // A name, not the credential.
+  if (!launchEndpoint.credentialHeader.empty()) {
+    spec.credentialPipeName =
+        upd::make_credential_pipe_name(GetCurrentProcessId(), GetTickCount64());
   }
   spec.platform = "windows";
   spec.installedVersion = narrow(kProductVersion);
@@ -436,6 +445,19 @@ void start_client_update(const std::string& availableVersion) {
   }
   const std::wstring exePath = installDir + L"\\GNLinkUpdater.exe";
 
+  // Created before the elevated process starts. The client used to launch and immediately walk
+  // away; with a credential to hand over it has to stay for the exchange, and the deadline below
+  // is what keeps "stay" from becoming "hang".
+  upd::CredentialServer credentialServer;
+  if (!spec.credentialPipeName.empty()) {
+    std::string error;
+    if (!credentialServer.Create(spec.credentialPipeName, &error)) {
+      log_line("update: could not open the credential channel -- " + error);
+      post_status("error", "업데이트를 시작하지 못했습니다.");
+      return;
+    }
+  }
+
   SHELLEXECUTEINFOW info{};
   info.cbSize = sizeof(info);
   info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
@@ -448,6 +470,38 @@ void start_client_update(const std::string& availableVersion) {
   const BOOL launched = ShellExecuteExW(&info);
   const upd::ElevationOutcome outcome =
       upd::elevation_outcome(launched != FALSE, static_cast<uint32_t>(GetLastError()));
+
+  if (launched && info.hProcess && !spec.credentialPipeName.empty()) {
+    // Re-read rather than reused: the user may have signed out or changed servers between the
+    // decision to update and the consent prompt they just answered. An attempt whose owner has
+    // changed gets no credential, and fails at the fetch instead of installing on behalf of
+    // somebody who is no longer there.
+    std::string nowSession;
+    {
+      std::lock_guard<std::mutex> lock(gStateMu);
+      nowSession = gSessionToken;
+    }
+    const upd::UpdateEndpoint nowEndpoint =
+        remote60::native_poc::directory::update_endpoint_for(
+            remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
+            configured_directory_url(), "windows",
+            nowSession.empty() ? std::string() : "Authorization: Bearer " + nowSession);
+    std::string payload;
+    if (nowEndpoint.url == launchEndpoint.url && nowEndpoint.origin == launchEndpoint.origin &&
+        !nowEndpoint.credentialHeader.empty()) {
+      payload = nowEndpoint.credentialHeader;
+    } else {
+      log_line("update: the signed-in owner changed after the updater was started; "
+               "no credential sent");
+    }
+    std::string error;
+    if (payload.empty() || !credentialServer.Serve(info.hProcess, payload, 120000, &error)) {
+      log_line("update: the updater did not receive the credential -- " +
+               (error.empty() ? std::string("owner changed") : error));
+    }
+    credentialServer.Close();
+  }
+
   if (info.hProcess) CloseHandle(info.hProcess);
 
   switch (outcome) {

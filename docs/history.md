@@ -10090,3 +10090,38 @@ worker 는 자격증명을 받지 못한다(IPC 미승인). 그래서 **worker �
 4. **owner epoch 재검증** — 숫자를 메시지에 넣는 것만으로는 검증이 안 된다. **최종 진행 직전에 부모의 현재 owner/origin 이 같은 attempt 인지 다시 보고**, 취소를 worker 에 전달
 5. **자격증명 수신 전 ready 0 / quiesce 0**
 6. **3프로세스 × 2파이프 회귀**, **인증 헤더 실관측**(신뢰 인증서 필요 — 여전히 막혀 있음)
+
+### 487) 2026-09-09 자격증명 2-hop 배선 — **이제 제품 경로에서 공급·소비된다**
+- #486 의 원시를 **실제로 배선**했다. 아래 사슬은 **테스트가 아니라 제품 코드**다.
+
+**공급·소비 사슬 (요구하신 "실 production 배선 확인")**
+1. `host_app_main.cpp:961` / `client_shell_main.cpp:417` — `update_endpoint_for(...)` 로 **스냅샷**을 만든다(Host `x-host-token`, Client 세션 Bearer).
+2. 자격증명이 있으면 `spec.credentialPipeName = make_credential_pipe_name(...)` — **이름만**.
+3. `host_app_main.cpp:1007` / `client_shell_main.cpp:454` — **자식보다 먼저** `CredentialServer::Create`.
+4. `update_handoff.cpp:45` — `--credential-pipe <이름>` 을 인자에 넣는다. **자격증명은 인자에 없다.**
+5. `host_app_main.cpp:1075` / `client_shell_main.cpp:498` — 기동 뒤 `Serve(pi.hProcess | info.hProcess, ...)`.
+6. `updater_main.cpp:247` — bootstrap 이 **가장 먼저** `receive_credential`. 못 받으면 **exit 5**, 아무것도 하지 않는다.
+7. `updater_main.cpp:112·201` — bootstrap 이 **자기 파이프**를 새로 만들고, 복사본 명령행에 그 이름을 넣고, **`pi.hProcess` 를 쥔 채** `Serve` 한 뒤 **ack 를 받고서야** 닫는다.
+8. `updater_main.cpp:289` — worker 가 `UpdateEndpoint` 를 구성해 `production_updater_deps(log_line, endpoint)` 에 넘긴다.
+9. `updater_effects.cpp:236·243` — `fetchText`·`fetchFile` 이 **요청마다** `credential_allowed(endpoint, url)` 로 판정해 붙이거나 붙이지 않는다.
+
+**지적된 구멍 2개, 둘 다 실재했다**
+- **부모가 쥔 handle 은 bootstrap 이다.** `updater_main.cpp:150` 이 `CloseHandle(pi.hProcess)` 후 즉시 나갔다 → **hop 2 를 만들지 않으면 worker 는 검사할 수 있는 상대가 없다.** 이제 bootstrap 이 handle 을 **교환 내내 보유**한다. 닫아버리면 그 PID 는 **아무것에도 고정돼 있지 않고**, 그게 바로 이 검사가 막으려는 상태다.
+- **Client 는 `readyEventName` 이 없다**(`client_shell_main.cpp:428` 이 **일부러 `clear()`**). 그래서 파이프 이름을 **ready 이벤트에서 파생시키지 않고** 별도 체계(`make_credential_pipe_name`)로 만들었다. **부모가 기다리든 말든 자격증명 채널에는 신원이 필요하다.**
+- ⚠️ 그리고 이것은 **Client 의 성격을 바꾼다**: 지금까지는 승격 프로세스를 띄우고 **바로 빠졌다.** 이제는 **수신·검증이 끝날 때까지 붙들고 있다.** 붙들기가 **행이 되지 않게 하는 것은 마감**(120초 — 승격 프롬프트가 뜰 시간은 되고, 무한은 아니다)이다.
+
+**owner epoch — 숫자를 넣는 것으로는 검증이 안 된다는 지적 그대로**
+전송 **직전에 스냅샷을 다시 만들어** url·origin·자격증명 유무를 **그때의 상태와 대조**한다(`host_app_main.cpp:1060`, `client_shell_main.cpp:479`). 사용자가 승격 프롬프트에 답하는 사이에 **로그아웃하거나 서버를 바꿨으면** 그 attempt 는 주인이 없고, **자격증명을 보내지 않는다.** 보내지 않으면 worker 는 fetch 에서 실패하고 멈춘다 — **주인이 사라진 갱신을 대신 설치하지 않는다.**
+
+**자격증명 수신 전에는 아무것도 일어나지 않는다**
+`receive_credential` 실패는 `effects.run()` **이전**에 `return 5` 다. 그래서 **ready 를 신호하지 않고**, 제품을 멈추지도 않는다.
+
+**회귀**
+- `updater_options_test` **55**(+5): `--credential-pipe` 파싱 · 없을 때 빈 값 · `--manifest-envelope` 동반.
+- `update_handoff_test` **54**(+4): 인자에 **파이프 이름이 있고** · 모양 플래그가 있고 · **fixture 토큰 문자열이 인자 어디에도 없고** · 자격증명 없는 기동은 **채널을 언급조차 하지 않는다.**
+- `update_credential_channel_test` 25(#486).
+
+**🔴 아직 없는 것 — 완료로 읽지 말 것**
+1. **3프로세스 × 2파이프 실회귀**(hop1/hop2 PID 불일치 · 선점 · 부분 프레임 · 양쪽 timeout · bootstrap 조기 사망 · late ack · 실패 시 제품 정지 0). 원시 수준에서는 구동했지만 **세 프로세스를 실제로 세운 것은 아니다.**
+2. **인증 헤더 실관측** — 신뢰 인증서가 필요해 **여전히 막혀 있다**(강등 실경로와 같은 벽).
+3. **fixture 토큰이 env·로그·파일에 없는지의 검사** — 인자에 대해서만 했다.

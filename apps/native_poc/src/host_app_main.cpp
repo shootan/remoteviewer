@@ -46,6 +46,7 @@
 #include "product_version.hpp"
 #include "env_util.hpp"
 #include "update_check.hpp"
+#include "update_credential_channel.hpp"
 #include "update_handoff.hpp"
 #include "update_job_guard.hpp"
 
@@ -953,15 +954,17 @@ void start_update_handoff(HWND window) {
   // The same snapshot the check used: the updater must fetch what the user was told about, not
   // a second opinion about where updates live.
   //
-  // ⚠️ No credential travels with it. Handing one to an elevated worker needs an access-limited
-  // channel bound to that process, which is a separate decision -- so a derived url gets a 401
-  // from the worker today, and that is an update failure, not a sign-out.
-  {
-    const upd::UpdateEndpoint launchEndpoint = directory::update_endpoint_for(
-        remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
-        g.cache.directoryUrl, "windows");
-    spec.manifestUrl = launchEndpoint.url;
-    spec.derivedEndpoint = launchEndpoint.derived;
+  const upd::UpdateEndpoint launchEndpoint = directory::update_endpoint_for(
+      remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
+      g.cache.directoryUrl, "windows",
+      g.cache.hostToken.empty() ? std::string() : "x-host-token: " + g.cache.hostToken);
+  spec.manifestUrl = launchEndpoint.url;
+  spec.derivedEndpoint = launchEndpoint.derived;
+  // A name, not the credential. The credential goes over the pipe, and only after the process
+  // that connects has been shown to be the one this launch started.
+  if (!launchEndpoint.credentialHeader.empty()) {
+    spec.credentialPipeName =
+        upd::make_credential_pipe_name(GetCurrentProcessId(), GetTickCount64());
   }
   spec.platform = "windows";
   spec.installedVersion = narrow(kProductVersion);
@@ -994,6 +997,20 @@ void start_update_handoff(HWND window) {
     commandLine += L" \"";
     commandLine += arg;
     commandLine += L"\"";
+  }
+
+  // Created BEFORE the updater starts, for the same reason as the handshake events: a name that
+  // exists with nobody owning it is a name somebody else can own.
+  upd::CredentialServer credentialServer;
+  if (!spec.credentialPipeName.empty()) {
+    std::string error;
+    if (!credentialServer.Create(spec.credentialPipeName, &error)) {
+      append_host_app_log("[host-app] update: could not open the credential channel -- " + error);
+      CloseHandle(readyEvent);
+      CloseHandle(ackEvent);
+      MessageBoxW(window, L"업데이트를 시작하지 못했습니다.", kProductName, MB_OK | MB_ICONWARNING);
+      return;
+    }
   }
 
   STARTUPINFOW si{};
@@ -1035,6 +1052,33 @@ void start_update_handoff(HWND window) {
     return;
   }
   CloseHandle(pi.hThread);
+
+  if (!spec.credentialPipeName.empty()) {
+    // Re-read now, not reused from the snapshot built minutes ago: if the account or the server
+    // changed while the user was deciding, this attempt belongs to nobody and the credential is
+    // not sent. The updater then fails its fetch and stops, which is the correct end for an
+    // attempt whose owner is gone.
+    const upd::UpdateEndpoint nowEndpoint = directory::update_endpoint_for(
+        remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
+        g.cache.directoryUrl, "windows",
+        g.cache.hostToken.empty() ? std::string() : "x-host-token: " + g.cache.hostToken);
+    std::string payload;
+    if (nowEndpoint.url == launchEndpoint.url && nowEndpoint.origin == launchEndpoint.origin &&
+        !nowEndpoint.credentialHeader.empty()) {
+      payload = nowEndpoint.credentialHeader;
+    } else {
+      append_host_app_log("[host-app] update: the owner changed after the updater was started; "
+                          "no credential sent");
+    }
+    std::string error;
+    if (payload.empty() ||
+        !credentialServer.Serve(pi.hProcess, payload, 120000, &error)) {
+      append_host_app_log("[host-app] update: the updater did not receive the credential -- " +
+                          (error.empty() ? std::string("owner changed") : error));
+    }
+    credentialServer.Close();
+  }
+
   append_host_app_log("[host-app] update: handed over to the updater, waiting for its signal");
 
   // Waits off the UI thread: this window has to keep responding while the download runs, and the

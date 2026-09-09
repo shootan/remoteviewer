@@ -25,6 +25,7 @@
 
 #include "install_registration.hpp"
 #include "update_effects.hpp"
+#include "update_endpoint.hpp"
 #include "update_relaunch.hpp"
 #include "update_state_machine.hpp"
 #include "updater_options.hpp"
@@ -125,7 +126,13 @@ struct UpdaterDeps {
 };
 
 /** The production set: WinHTTP, the real enumerator, the real SCM, the compiled trusted key. */
-UpdaterDeps production_updater_deps(std::function<void(const std::string&)> log);
+/**
+ * `endpoint` decides what may be attached to which request. An endpoint with no credential -- an
+ * override, or a run that never received one -- produces fetchers that send nothing, which is the
+ * behaviour this had before there was a credential at all.
+ */
+UpdaterDeps production_updater_deps(std::function<void(const std::string&)> log,
+                                    const UpdateEndpoint& endpoint = {});
 
 /**
  * Assembles the effects from options and dependencies, and runs one update.

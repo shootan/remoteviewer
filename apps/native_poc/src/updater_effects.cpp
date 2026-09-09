@@ -229,17 +229,25 @@ bool UpdaterDeps::validate(std::string* detail) const {
   return true;
 }
 
-UpdaterDeps production_updater_deps(std::function<void(const std::string&)> log) {
+UpdaterDeps production_updater_deps(std::function<void(const std::string&)> log,
+                                   const UpdateEndpoint& endpoint) {
   UpdaterDeps deps;
   deps.log = log ? std::move(log) : [](const std::string&) {};
 
-  deps.fetchText = [](const std::string& url, size_t maxBytes, std::string* body,
-                      std::string* error) {
-    return https_get_text(url, maxBytes, body, error) == FetchStatus::Ok;
+  // Judged per request, against the url about to be fetched. The manifest may name artifacts on
+  // any host; a signature over it says those bytes are the right bytes, not that our directory's
+  // credential belongs to whoever serves them.
+  deps.fetchText = [endpoint](const std::string& url, size_t maxBytes, std::string* body,
+                              std::string* error) {
+    const std::string credential =
+        credential_allowed(endpoint, url) ? endpoint.credentialHeader : std::string();
+    return https_get_text(url, maxBytes, body, error, credential) == FetchStatus::Ok;
   };
-  deps.fetchFile = [](const std::string& url, const std::wstring& destPath, uint64_t maxBytes,
-                      std::string* error) {
-    return https_get_file(url, destPath, maxBytes, error) == FetchStatus::Ok;
+  deps.fetchFile = [endpoint](const std::string& url, const std::wstring& destPath,
+                              uint64_t maxBytes, std::string* error) {
+    const std::string credential =
+        credential_allowed(endpoint, url) ? endpoint.credentialHeader : std::string();
+    return https_get_file(url, destPath, maxBytes, error, credential) == FetchStatus::Ok;
   };
   // The two calls that can reach a real GNLinkHost.exe.
   deps.enumerateTargets = []() { return enumerate_product_processes(product_image_names()); };

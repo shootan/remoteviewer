@@ -286,6 +286,7 @@ add_executable(remote60_host_app WIN32
   src/update_endpoint.cpp
   src/url_origin.cpp
   src/update_handoff.cpp
+  src/update_credential_channel.cpp
   src/update_handoff_wait.cpp
   src/update_job_guard.cpp
   src/update_http.cpp
@@ -762,6 +763,7 @@ add_executable(remote60_updater
   src/update_endpoint.cpp
   src/url_origin.cpp
   src/update_handoff.cpp
+  src/update_credential_channel.cpp
   src/update_handoff_wait.cpp
   src/updater_options.cpp
   src/update_job_guard.cpp
@@ -833,6 +835,7 @@ add_executable(remote60_updater_scenarios_test
   src/update_endpoint.cpp
   src/url_origin.cpp
   src/update_handoff.cpp
+  src/update_credential_channel.cpp
   src/update_handoff_wait.cpp
   src/updater_options.cpp
   src/update_state_machine.cpp
@@ -881,6 +884,7 @@ add_executable(remote60_updater_assembly_test
   src/update_endpoint.cpp
   src/url_origin.cpp
   src/update_handoff.cpp
+  src/update_credential_channel.cpp
   src/update_handoff_wait.cpp
   src/updater_options.cpp
   src/update_state_machine.cpp
@@ -912,6 +916,7 @@ endif()
 add_executable(remote60_handoff_fixture
   src/handoff_fixture_main.cpp
   src/update_handoff.cpp
+  src/update_credential_channel.cpp
 )
 target_include_directories(remote60_handoff_fixture PRIVATE src)
 if(MSVC)
@@ -924,6 +929,7 @@ endif()
 # stayed wrong.
 add_executable(remote60_update_handoff_process_test
   src/update_handoff.cpp
+  src/update_credential_channel.cpp
   src/update_handoff_wait.cpp
   src/update_handoff_process_test.cpp
 )
@@ -938,6 +944,7 @@ endif()
 
 add_executable(remote60_update_handoff_test
   src/update_handoff.cpp
+  src/update_credential_channel.cpp
   src/update_handoff_wait.cpp
   src/update_handoff_test.cpp
 )
@@ -1220,6 +1227,8 @@ if(GNLINK_HAVE_WEBVIEW2)
   src/update_endpoint.cpp
   src/url_origin.cpp
     src/update_handoff.cpp
+    src/update_credential_channel.cpp
+  src/update_credential_channel.cpp
   src/update_handoff_wait.cpp
     src/update_http.cpp
     src/update_manifest.cpp

@@ -33,6 +33,8 @@ struct UpdaterLaunchSpec {
   std::string manifestUrl;
   /** See UpdaterOptions::derivedEndpoint -- the wire shape travels with the url. */
   bool derivedEndpoint = false;
+  /** The name of the pipe the credential will be served on. A name, never the credential. */
+  std::wstring credentialPipeName;
   std::string platform;
   std::string installedVersion;
   std::wstring healthLogPath;
