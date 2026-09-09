@@ -199,7 +199,110 @@ class DirectoryObserveTest {
         )
     }
 
+    // ---------------------------------------------------------------- the wiring itself
+    //
+    // Three states arrive at the connect flow -- already known, learned from the health route, and
+    // not learned at all -- and two of them used to be indistinguishable. Exercised without a
+    // server, which is the only way the not-learned branches can be reached at all.
+
+    private fun health(reached: Boolean, port: Int = 0, error: String = "") =
+        DirectoryClient.HealthObserve(
+            reached,
+            if (port == 0) DirectoryClient.ObserveEndpoint()
+            else DirectoryClient.ObserveEndpoint(known = true, port = port),
+            error,
+        )
+
+    @Test
+    fun `a known endpoint is not asked for again`() {
+        var asked = 0
+        val target = DirectoryClient.resolveObserveTarget(
+            "https://rem.example",
+            DirectoryClient.ObserveEndpoint(known = true, port = 29181),
+        ) { asked++; health(true) }
+        assertEquals(0, asked)
+        assertEquals(29181, (target as DirectoryClient.ObserveTarget.Ready).port)
+    }
+
+    @Test
+    fun `the health route supplies what login did not`() {
+        val target = DirectoryClient.resolveObserveTarget("https://rem.example") {
+            health(true, 29181)
+        }
+        val ready = target as DirectoryClient.ObserveTarget.Ready
+        assertEquals(29181, ready.port)
+        assertEquals("rem.example", ready.host)
+    }
+
+    @Test
+    fun `a server that cannot be reached is not reported as one that needs configuring`() {
+        val target = DirectoryClient.resolveObserveTarget("https://rem.example") {
+            health(false, error = "timeout")
+        }
+        val refused = target as DirectoryClient.ObserveTarget.Refused
+        assertTrue(refused.message, refused.message.contains("연결할 수 없습니다"))
+        assertFalse("that is a different server problem",
+            refused.message.contains("설정되어"))
+    }
+
+    @Test
+    fun `a server that answers but says nothing is the one that needs configuring`() {
+        val target = DirectoryClient.resolveObserveTarget("https://rem.example") { health(true) }
+        val refused = target as DirectoryClient.ObserveTarget.Refused
+        assertTrue(refused.message, refused.message.contains("설정되어"))
+        assertFalse("444 is never dialled", refused.message.contains("444"))
+    }
+
+    @Test
+    fun `on http a failed probe is not fatal, because the default still applies`() {
+        val target = DirectoryClient.resolveObserveTarget("http://rem.example:29180") {
+            health(false, error = "timeout")
+        }
+        assertEquals(29181, (target as DirectoryClient.ObserveTarget.Ready).port)
+    }
+
+    @Test
+    fun `an advertised host is dialled, and a rejected one falls back`() {
+        val withHost = DirectoryClient.resolveObserveTarget(
+            "https://rem.example",
+            DirectoryClient.ObserveEndpoint(known = true, port = 1, host = "obs.example"),
+        ) { health(false) }
+        assertEquals("obs.example", (withHost as DirectoryClient.ObserveTarget.Ready).host)
+
+        val rejected = DirectoryClient.resolveObserveTarget(
+            "https://rem.example",
+            DirectoryClient.ObserveEndpoint(known = true, port = 1, hostRejected = true),
+        ) { health(false) }
+        val ready = rejected as DirectoryClient.ObserveTarget.Ready
+        assertEquals("rem.example", ready.host)
+        assertTrue("the fallback is recorded, not silent", ready.advertised.hostRejected)
+    }
+
     // ---------------------------------------------------------------- the url, normalised once
+
+    @Test
+    fun `two spellings of one server compare equal, and two servers do not`() {
+        val base = DirectoryClient.originKey("http://rem.example:8080")
+        assertEquals(base, DirectoryClient.originKey("http://rem.example:8080/"))
+        assertEquals(base, DirectoryClient.originKey("http://rem.example:8080/api"))
+        assertEquals(base, DirectoryClient.originKey(" http://REM.example:8080 "))
+        assertEquals(
+            DirectoryClient.originKey("http://rem.example"),
+            DirectoryClient.originKey("http://rem.example:80")
+        )
+        assertEquals(
+            DirectoryClient.originKey("https://rem.example"),
+            DirectoryClient.originKey("https://rem.example:443")
+        )
+        // A bare host is http here, the same as everywhere else in the app.
+        assertEquals(DirectoryClient.originKey("http://rem.example"),
+            DirectoryClient.originKey("rem.example"))
+
+        assertFalse(base == DirectoryClient.originKey("http://rem.example:8081"))
+        assertFalse(base == DirectoryClient.originKey("http://other.example:8080"))
+        assertFalse("https is not http, and a token issued to one is not for the other",
+            base == DirectoryClient.originKey("https://rem.example:8080"))
+    }
 
     @Test
     fun `an https url is never rewritten to http`() {

@@ -241,6 +241,21 @@ bool directory_url_is_secure(const std::string& url) {
   return scheme_end(url, "https://") != 0;
 }
 
+std::string directory_origin_key(const std::string& url) {
+  std::string host;
+  uint16_t port = 0;
+  bool secure = false;
+  if (!parse_directory_url(url, &host, &port, nullptr, &secure)) {
+    // Not parseable, so there is no origin to name. Returned lowercased and trimmed so an
+    // unusable value still compares equal to itself rather than to nothing.
+    std::string fallback = trim(url);
+    for (char& c : fallback) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    return fallback;
+  }
+  for (char& c : host) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+  return (secure ? "https://" : "http://") + host + ":" + std::to_string(port);
+}
+
 bool parse_directory_url(const std::string& url, std::string* outHost, uint16_t* outPort,
                          std::string* outError, bool* outSecure) {
   std::string rest = trim(url);
@@ -694,7 +709,12 @@ bool HostAgent::LoadCache() {
   if (!load_host_cache(cfg_.cachePath, &cached)) return false;
 
   // A token is only meaningful for the account, server and machine it was issued against.
-  if (cached.directoryUrl != cfg_.url || cached.machineId != machineId_) return false;
+  // Compared by origin, so a trailing slash or a written-out default port does not read as a
+  // different server -- and so http and https still do.
+  if (directory_origin_key(cached.directoryUrl) != directory_origin_key(cfg_.url) ||
+      cached.machineId != machineId_) {
+    return false;
+  }
   if (!cfg_.accountId.empty() && cached.accountId != cfg_.accountId) return false;
 
   hostToken_ = cached.hostToken;

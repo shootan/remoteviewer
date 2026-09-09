@@ -161,6 +161,45 @@ int main() {
     }
   }
 
+  // ------------------------------------------------------- two spellings of the same server
+  //
+  // Whether a cached host token still belongs where it was issued was a string comparison against
+  // the url as typed, so a trailing slash cost an unattended PC its credentials and a fresh
+  // registration. Nothing unsafe -- but the fix must not go the other way either: http and https
+  // are different origins and a token issued to one must not be sent to the other.
+  {
+    using directory::directory_origin_key;
+    const std::string base = directory_origin_key("http://rem.example:8080");
+    check("a trailing slash is the same server",
+          directory_origin_key("http://rem.example:8080/") == base, base);
+    check("a path is the same server",
+          directory_origin_key("http://rem.example:8080/api") == base, base);
+    check("surrounding space is the same server",
+          directory_origin_key("  http://rem.example:8080  ") == base, base);
+    check("the host case is the same server",
+          directory_origin_key("http://REM.example:8080") == base, base);
+    check("the scheme case is the same server",
+          directory_origin_key("HTTP://rem.example:8080") == base, base);
+    check("the written-out default port is the same server",
+          directory_origin_key("http://rem.example:80") == directory_origin_key("http://rem.example"),
+          directory_origin_key("http://rem.example"));
+    check("and on https it is 443",
+          directory_origin_key("https://rem.example:443") == directory_origin_key("https://rem.example"),
+          directory_origin_key("https://rem.example"));
+
+    check("a different port is a different server",
+          directory_origin_key("http://rem.example:8081") != base);
+    check("a different host is a different server",
+          directory_origin_key("http://other.example:8080") != base);
+    check("https is not http",
+          directory_origin_key("https://rem.example:8080") != base,
+          directory_origin_key("https://rem.example:8080"));
+    check("an unusable url still equals itself",
+          directory_origin_key("ftp://rem.example") == directory_origin_key("ftp://rem.example"));
+    check("...and is not the same as a real one",
+          directory_origin_key("ftp://rem.example") != base);
+  }
+
   // --------------------------------------------------------------- what the parser now accepts
   //
   // https used to be refused outright, which is why the 444 defect could not even be reproduced

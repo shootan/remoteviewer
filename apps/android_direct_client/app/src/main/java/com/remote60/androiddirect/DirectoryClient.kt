@@ -170,6 +170,54 @@ object DirectoryClient {
         }
     }
 
+    /** Where the probe should go, or why it cannot go anywhere. */
+    sealed class ObserveTarget {
+        data class Ready(
+            val host: String,
+            val port: Int,
+            val advertised: ObserveEndpoint,
+        ) : ObserveTarget()
+
+        data class Refused(val message: String) : ObserveTarget()
+    }
+
+    /**
+     * Everything between "the user tapped a PC" and "send the probe here".
+     *
+     * A function rather than a stretch of the activity, because this is where the mistakes are:
+     * three states arrive here -- already known, learned from the health route, and not learned
+     * at all -- and two of them used to end up looking identical. [probe] is a parameter so the
+     * decision can be exercised without a server, which is the only way the not-learned-at-all
+     * branches get tested at all.
+     *
+     * Unreachable and silent are answered differently on purpose. On https, silent means "this
+     * server needs one setting"; saying that about a server that is simply down sends whoever
+     * reads it to configure a machine that is not the problem. On http neither matters -- the
+     * documented default still applies -- so a failed probe there is not fatal.
+     */
+    fun resolveObserveTarget(
+        url: String,
+        cached: ObserveEndpoint = ObserveEndpoint(),
+        probe: (String) -> HealthObserve = ::observeFromHealth,
+    ): ObserveTarget {
+        var advertised = cached
+        if (!advertised.known) {
+            val health = probe(url)
+            if (!health.reached && urlIsSecure(url)) {
+                return ObserveTarget.Refused(
+                    "디렉터리 서버에 연결할 수 없습니다" +
+                        if (health.error.isEmpty()) "" else " (${health.error})"
+                )
+            }
+            advertised = health.advertised
+        }
+        val port = observePortFor(url, advertised)
+        if (port == 0) {
+            return ObserveTarget.Refused("이 디렉터리 서버에 주소 확인 포트가 설정되어 있지 않습니다")
+        }
+        return ObserveTarget.Ready(observeHostFor(url, advertised), port, advertised)
+    }
+
     /**
      * Asks /healthz where observations go, for the path that never logs in.
      *
@@ -206,6 +254,22 @@ object DirectoryClient {
 
     /** Public because the log uploader needs the same answer; two of these is how they drift. */
     fun normalizedUrl(url: String): String = normalize(url)
+
+    /**
+     * "scheme://host:port" for deciding whether two spellings mean the same server.
+     *
+     * A trailing slash and a written-out default port are the same server; http and https are
+     * not. Used for comparison only -- what the user typed stays stored and shown, because
+     * rewriting that under them is its own surprise.
+     */
+    fun originKey(url: String): String =
+        try {
+            val parsed = java.net.URL(normalize(url))
+            val port = if (parsed.port > 0) parsed.port else if (parsed.protocol == "https") 443 else 80
+            parsed.protocol.lowercase() + "://" + parsed.host.lowercase() + ":" + port
+        } catch (e: Exception) {
+            normalize(url).lowercase()
+        }
 
     private fun normalize(url: String): String {
         val trimmed = url.trim().trimEnd('/')

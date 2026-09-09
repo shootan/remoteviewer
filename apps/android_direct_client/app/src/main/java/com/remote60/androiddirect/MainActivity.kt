@@ -3312,32 +3312,17 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             try {
                 // A run that resumed from a stored session never saw a login response, so it asks
                 // the health route -- which needs no session and carries the same value.
-                if (!directoryObserveEndpoint.known) {
-                    val health = DirectoryClient.observeFromHealth(url)
-                    // A server that could not be reached and a server that said nothing are not
-                    // the same thing. On https the second one means "this server needs a setting",
-                    // and reporting that about a server that is simply down would send whoever
-                    // reads it to the wrong place entirely.
-                    if (!health.reached && DirectoryClient.urlIsSecure(url)) {
-                        throw DirectoryClient.DirectoryException(
-                            "디렉터리 서버에 연결할 수 없습니다" +
-                                if (health.error.isEmpty()) "" else " (${health.error})"
-                        )
-                    }
-                    directoryObserveEndpoint = health.advertised
+                // The decision lives in DirectoryClient, where it can be exercised without a
+                // server. Here it is only applied.
+                val target = DirectoryClient.resolveObserveTarget(url, directoryObserveEndpoint)
+                if (target is DirectoryClient.ObserveTarget.Refused) {
+                    throw DirectoryClient.DirectoryException(target.message)
                 }
-                val advertised = directoryObserveEndpoint
-                val directoryHost = DirectoryClient.observeHostFor(url, advertised)
-                val observePort = DirectoryClient.observePortFor(url, advertised)
-                if (observePort == 0) {
-                    // Only reachable on https against a server that has not been told its observe
-                    // port. Said plainly: dialling 444 instead would fail as silence, and silence
-                    // reads like a broken PC rather than a server that needs one setting.
-                    throw DirectoryClient.DirectoryException(
-                        "이 디렉터리 서버에 주소 확인 포트가 설정되어 있지 않습니다"
-                    )
-                }
-                if (advertised.hostRejected) {
+                val ready = target as DirectoryClient.ObserveTarget.Ready
+                directoryObserveEndpoint = ready.advertised
+                val directoryHost = ready.host
+                val observePort = ready.port
+                if (ready.advertised.hostRejected) {
                     diagnosticsLog.log("directory_observe_host_rejected", "using $directoryHost")
                 }
 
@@ -3359,7 +3344,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 // not an authentication failure, so the session stays and nothing signs out. A
                 // loop here would spin against a server refusing for a reason the phone cannot
                 // fix, with the user waiting on it.
-                val target = try {
+                val connected = try {
                     DirectoryClient.connect(url, token, host.hostId, observeToken)
                 } catch (e: DirectoryClient.DirectoryException) {
                     if (e.status != 409 || !e.serverError.startsWith("observation")) throw e
@@ -3367,10 +3352,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     observe()
                     DirectoryClient.connect(url, token, host.hostId, observeToken)
                 }
-                diagnosticsLog.log("directory_target", target.candidates.joinToString(" "))
+                diagnosticsLog.log("directory_target", connected.candidates.joinToString(" "))
 
                 val started = NativeSessionBridge.nativeDirectoryConnectAny(
-                    target.candidates.toTypedArray(), 4000, target.punchToken
+                    connected.candidates.toTypedArray(), 4000, connected.punchToken
                 )
                 // Which address won matters when something goes wrong later: "private" means the
                 // traffic never left the LAN, and a fallback with no answer explains a slow start.

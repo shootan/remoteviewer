@@ -105,6 +105,24 @@ bool parse_directory_url(const std::string& url, std::string* outHost, uint16_t*
                          std::string* outError, bool* outSecure = nullptr);
 
 /**
+ * "scheme://host:port" for deciding whether two spellings mean the same server.
+ *
+ * Whether a cached host token still belongs where it was issued used to be a string comparison
+ * against the url as typed. So `http://rem.example:8080/` and `http://rem.example:8080` were two
+ * servers, and so were `http://rem.example` and `http://rem.example:80` -- and each mismatch
+ * threw the token away and re-registered. Nothing was unsafe about it; it just made a trailing
+ * slash cost an unattended PC its cached credentials.
+ *
+ * The port is always written out and the host is lowercased, so the defaults and the case cannot
+ * make two names of one server look different. The scheme stays in it: http and https are not the
+ * same origin, and a token issued to one has no business being sent to the other.
+ *
+ * This is for comparison only. What the user typed is what stays stored and shown -- rewriting
+ * that under them is a different kind of surprise.
+ */
+std::string directory_origin_key(const std::string& url);
+
+/**
  * One POST, one connection, read to EOF.
  *
  * `extraHeaders` is appended verbatim and must already be CRLF terminated. Returns false when the
