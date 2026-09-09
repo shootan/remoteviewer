@@ -21,9 +21,13 @@ target 의 **manifest 를 운영키로 서명**했다. **NAS 는 ① 서버앱 �
 | 두 빌드의 차이 | ⚠️ **버전 값뿐이다.** 인앱 업데이트를 시험하려면 "낮은 것" 과 "높은 것" 이 둘 다 필요해서 만든 쌍이다 |
 
 ⚠️ **"버전 값뿐" 을 실제로 확인했다.** 두 APK 를 항목 단위로 비교하면 **내용이 다른 항목은 두 개**뿐이다 —
-`AndroidManifest.xml`(versionCode·versionName)과 `classes3.dex`(`BuildConfig` 상수). 나머지 118개 항목은 **CRC 까지 같다.**
-- 다만 **APK 파일 크기는 다르다**(11,518,126 vs 11,846,438). 압축 방식은 같고 **모든 항목의 원본 크기도 같으므로**,
-  차이는 **내용이 아니라 아카이브 압축·배치**에서 온다. **크기가 같아야 한다고 기대하지 말 것.**
+`AndroidManifest.xml`(versionCode·versionName)과 `classes3.dex`(`BuildConfig` 상수). 나머지 118개 항목은 **CRC 까지 같고**,
+**파일 크기도 11,518,126 으로 같다.**
+- ⚠️ 처음 만든 target APK 는 **11,846,438** 이었다. 328,312 바이트가 더 있었는데, **항목에 들어 있지 않았다** —
+  `classes2.dex` 와 첫 네이티브 라이브러리 **사이의 빈 공간**이었다(증분 빌드가 남긴 죽은 바이트). 유효한 APK 이고 서명도
+  통과했지만, **설명할 수 없는 바이트가 든 산출물**이라 **clean 빌드로 다시 만들었다.** 지금 것은 빈 공간 **0** 이다.
+- 두 APK 에 **공개키가 실제로 들어 있다**(dex 문자열 검색으로 확인). baseline 에 키가 없으면 **사용자가 baseline 을 깔아도
+  target manifest 를 검증하지 못한다** — 이 쌍의 전제다.
 
 `47a63b9` 는 버전 상수가 **0.2.108 / 0.2.16(vc15)** 인 상태로 커밋돼 있다. baseline 은 그 상수만 낮춘 채 빌드했고
 **커밋하지 않았다**(트리는 커밋 상태로 되돌려 두었다).
@@ -37,14 +41,14 @@ target 의 **manifest 를 운영키로 서명**했다. **NAS 는 ① 서버앱 �
 | 파일 | 크기 | SHA256 |
 |---|---|---|
 | `dist/GNLinkSetup-0.2.107.exe` | 4,339,712 | `51ba24b9f78eb0dee8dfe772410040293ff91a6f35ac5d66f7ad5258f5c5fa95` |
-| `dist/GNLink-0.2.15.apk` | 11,518,126 | `9748a54eb0e845188558663665be8611c191b234a648e88e72c61866f6eaed99` |
+| `dist/GNLink-0.2.15.apk` | 11,518,126 | `cd33168c49a13d09531a6c97dba2d14038e49e0f2475c21a1a22841c80e8548e` |
 
 ### 2.2 **서버가 배포**할 target
 
 | 파일 | 크기 | SHA256 |
 |---|---|---|
 | `dist/GNLinkSetup-0.2.108.exe` | 4,339,712 | `def1e344a7a5d928d9ce3477e392b63472801908d110d34bf429f822e2dc465c` |
-| `dist/GNLink-0.2.16.apk` | **11,846,438** | `c4077363a87fcf245dc13e5479fa52293bf1709b8d1e6d0761a0e347924f2d4f` |
+| `dist/GNLink-0.2.16.apk` | 11,518,126 | `91c7f0c764fc0a53a2aac2ba7bc59a7c44cf58f78df975b91f2d5e3b8f098c6c` |
 
 > ⚠️ 설치기(`GNLinkSetup-*.exe`)는 **업데이트 아티팩트가 아니다.** 인앱 업데이트가 받는 것은 **아래 3.2 의 개별 파일**이다.
 > 설치기는 사용자가 baseline 을 손으로 깔 때만 쓴다.
@@ -59,7 +63,7 @@ target 의 **manifest 를 운영키로 서명**했다. **NAS 는 ① 서버앱 �
 |---|---|---|---|
 | `.claude/rel/0.2.108/windows.manifest` | 1,533 | `b65e2198021780244b0dbf3f5c0dc2575227f2f34cf8472a9b1625a156855907` | `<REMOTE60_UPDATE_DIR>/windows.manifest` |
 | `.claude/rel/0.2.108/windows.sig` | 128 | (서명 hex 자체) | `<REMOTE60_UPDATE_DIR>/windows.sig` |
-| `.claude/rel/0.2.108/android.manifest` | 326 | `78737f8bce97096f65b9fcdef8a2b0cdfd987b21efbfd1a9bd631ae940d9e13d` | `<REMOTE60_UPDATE_DIR>/android.manifest` |
+| `.claude/rel/0.2.108/android.manifest` | 326 | `dcc87276f0ac00cada35e5fe9184bc62a9ba9610f68a34b5a21bff208742432a` | `<REMOTE60_UPDATE_DIR>/android.manifest` |
 | `.claude/rel/0.2.108/android.sig` | 128 | (서명 hex 자체) | `<REMOTE60_UPDATE_DIR>/android.sig` |
 
 ⚠️ **바이트를 그대로 옮겨야 한다.** 서명은 **정확한 바이트**를 덮는다 — 편집기로 열어 저장하거나, 줄바꿈을 바꾸거나,
@@ -82,13 +86,18 @@ manifest 가 지목하는 URL(그대로 맞춰야 함):
 | `/updates/0.2.108/GNLinkClient.exe` | 〃 `GNLinkClient.exe` | 705,536 | `3d79e981cd8e81fc93a7a939bcc694bceb2aead59dc7e3829841b6b2ef8664a0` |
 | `/updates/0.2.108/GNLinkViewer.exe` | 〃 `GNLinkViewer.exe` | 864,256 | `3de194a9291399db0df8cf79f59db2827c6993d5ede4c1f666edd77ca63ce4ed` |
 | `/updates/0.2.108/GNLinkUpdater.exe` | 〃 `GNLinkUpdater.exe` | 532,480 | `a42687a8072d531a13ce6786b70cdf9b96618d2f878b178667a9cfe05bdf2505` |
-| `/updates/0.2.108/ui/shell.html` | 〃 `shell.html` | 12,648 | `15aa648adf28a6a27b62a4e0548c425d6339ff2bd45ce700d3c4c79aeee4b4a4` |
-| `/updates/0.2.108/ui/macro.html` | 〃 `macro.html` | 10,996 | `f589f5df16d24fc8932d230da35f1661f0e97c1c63a6f2d43ad7a8fcc095529b` |
-| `/updates/0.2.16/GNLink-0.2.16.apk` | `dist/GNLink-0.2.16.apk` | **11,846,438** | `c4077363a87fcf245dc13e5479fa52293bf1709b8d1e6d0761a0e347924f2d4f` |
+| `/updates/0.2.108/ui/shell.html` | 〃 `ui/shell.html` | 12,648 | `15aa648adf28a6a27b62a4e0548c425d6339ff2bd45ce700d3c4c79aeee4b4a4` |
+| `/updates/0.2.108/ui/macro.html` | 〃 `ui/macro.html` | 10,996 | `f589f5df16d24fc8932d230da35f1661f0e97c1c63a6f2d43ad7a8fcc095529b` |
+| `/updates/0.2.16/GNLink-0.2.16.apk` | `dist/GNLink-0.2.16.apk` | 11,518,126 | `91c7f0c764fc0a53a2aac2ba7bc59a7c44cf58f78df975b91f2d5e3b8f098c6c` |
 
 - **읽기 권한**: 익명 GET 으로 받을 수 있어야 한다(클라이언트는 아티팩트 요청에 **자격증명을 붙이지 않는다**).
 - **HTTPS 필수**: 클라이언트는 `https://` 가 아닌 아티팩트 URL 을 **거부**한다.
 - 경로 이름을 바꾸려면 **manifest 를 다시 만들고 다시 서명해야 한다** — URL 이 서명 대상 안에 있다.
+- ⚠️ **스테이징 배치는 URL 과 같은 모양이어야 한다.** `ui/` 두 개는 `payload/ui/` 아래에 있다.
+  평면으로 두면 exe 7개는 받아지고 **html 2개만 404** 가 되며, 증상은 **다운로드 도중 실패**라 **서버 문제처럼 보인다.**
+- **올린 뒤 대조**: manifest 의 모든 `artifact=` 줄을 **실제 파일의 크기·SHA256 과 다시 맞춰 볼 것.**
+  ⚠️ **서명 검증은 이것을 대신하지 못한다** — 서명은 *"문서가 서명 이후 바뀌지 않았다"* 만 말하고,
+  *"문서가 실제로 존재하는 파일을 가리킨다"* 는 말하지 않는다. 이 PC 에서도 그 둘이 갈린 적이 있다(9절).
 
 ---
 
@@ -264,6 +273,9 @@ curl -sI https://rem.shotan.net/healthz
 | 서명 직후 자체 검증(공개키로) | windows·android 둘 다 **True** |
 | 설치기 payload 바이트 대조 | 이전 후보에서 9/9 일치(같은 방식) |
 | APK signer | 기존과 **동일 인증서**, `versionCode` 14 → 15 |
+| **manifest ↔ 실제 파일 대조** | **10/10 일치**(크기·SHA256, 스테이징 경로 그대로). ⚠️ 이 검사가 없었을 때 **서명은 통과하는데 APK 해시가 낡은** 상태를 만들었다 — 서명 검증은 그것을 잡지 못한다 |
+| baseline 에 공개키 존재 | 0.2.15 · 0.2.16 **둘 다 dex 안에 128자 존재**(0.2.14 에는 없다) |
+| 두 APK 차이 | 내용이 다른 항목 **2개**(`AndroidManifest.xml` · `classes3.dex`), 나머지 118개 **CRC 동일**, 파일 크기도 동일 |
 | 전체 회귀 | C++ 62 스위트 `^PASS` 1733 · JS 335 · Android 68 |
 
 ⚠️ **Kotlin 검증기로는 실제 android.manifest 를 통과시켜 보지 않았다.** Kotlin 테스트는 platform=windows 로 고정돼 있어
