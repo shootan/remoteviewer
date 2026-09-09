@@ -106,7 +106,8 @@ int main() {
    */
   const auto run = [&](int bootstrapExit, int delayMs, bool signal, DWORD hostTimeoutMs,
                        int ackWaitMs, bool dieEarly = false, bool openAckLate = false,
-                       int ackOpenDelayMs = 0, bool withoutAckChannel = false) {
+                       int ackOpenDelayMs = 0, bool withoutAckChannel = false,
+                       bool ackUnwritable = false) {
     Attempt a;
     ++attemptNo;
     wchar_t stem[128]{};
@@ -122,6 +123,15 @@ int main() {
     // otherwise be indistinguishable from it.
     HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, readyName.c_str());
     HANDLE ack = CreateEventW(nullptr, TRUE, FALSE, ackName.c_str());
+    // A handle that can be waited on but NOT set. `SetEvent` fails on it with access denied,
+    // which is a different case from having no channel at all: here there is something, and the
+    // answer still cannot be sent. Opening with only SYNCHRONIZE is a deterministic way to get
+    // that, rather than closing a handle and relying on undefined behaviour.
+    HANDLE ackOwned = nullptr;
+    if (ackUnwritable && ack) {
+      ackOwned = ack;
+      ack = OpenEventW(SYNCHRONIZE, FALSE, ackName.c_str());
+    }
 
     std::wstring command = L"\"" + fixture + L"\" --bootstrap --exit-code " +
                            std::to_wstring(bootstrapExit) + L" --ready \"" + readyName +
@@ -141,6 +151,7 @@ int main() {
       a.why = "the fixture would not start";
       if (ready) CloseHandle(ready);
       if (ack) CloseHandle(ack);
+      if (ackOwned) CloseHandle(ackOwned);
       return a;
     }
     CloseHandle(pi.hThread);
@@ -158,8 +169,10 @@ int main() {
     // the attempt would close it and the test would prove nothing.
     if (ready) CloseHandle(ready);
     if (ack) CloseHandle(ack);
+    if (ackOwned) CloseHandle(ackOwned);
     ready = nullptr;
     ack = nullptr;
+    ackOwned = nullptr;
 
     // The worker outlives the bootstrap, so the witness is read after giving it time to finish.
     // Waiting on it is what a host cannot do and a test can.
@@ -294,6 +307,23 @@ int main() {
     check("6 no channel: and says the acknowledgement could not be delivered",
           a.why.find("could not be delivered") != std::string::npos, a.why);
     check("6 no channel: the worker stands down too",
+          a.witness.find("worker stood down") != std::string::npos, a.witness);
+  }
+
+  {
+    // The channel exists and the answer cannot be SENT -- distinct from having no channel, and
+    // the distinction matters because the code path is different: one skips the send, the other
+    // attempts it and is refused. Both must end the same way, with the caller staying put.
+    const Attempt a = run(/*bootstrapExit=*/0, /*delayMs=*/300, /*signal=*/true,
+                          /*hostTimeoutMs=*/20000, /*ackWaitMs=*/1000, /*dieEarly=*/false,
+                          /*openAckLate=*/false, /*ackOpenDelayMs=*/0,
+                          /*withoutAckChannel=*/false, /*ackUnwritable=*/true);
+    check("6 unwritable channel: the host does NOT agree to exit",
+          a.step == HandoffStep::KeepRunning,
+          std::string(handoff_step_name(a.step)) + ": " + a.why);
+    check("6 unwritable channel: and says the acknowledgement could not be delivered",
+          a.why.find("could not be delivered") != std::string::npos, a.why);
+    check("6 unwritable channel: the worker stands down rather than stopping anything",
           a.witness.find("worker stood down") != std::string::npos, a.witness);
   }
 
