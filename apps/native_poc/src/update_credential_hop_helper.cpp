@@ -61,6 +61,23 @@ void record(const std::wstring& path, const std::string& line) {
   fclose(file);
 }
 
+/**
+ * A log file written the way updater_main writes one: timestamped lines, built from the same
+ * error strings. The point of writing one here is that a test can then READ it -- "the message
+ * does not quote the credential" and "the file on disk does not contain it" are different
+ * statements, and only the second one is about a file.
+ */
+void log_line(const std::wstring& logPath, const std::string& text) {
+  if (logPath.empty()) return;
+  FILE* file = nullptr;
+  if (_wfopen_s(&file, logPath.c_str(), L"ab") != 0 || !file) return;
+  SYSTEMTIME now{};
+  GetLocalTime(&now);
+  fprintf(file, "%02d:%02d:%02d [cred-hop] %s\n", now.wHour, now.wMinute,
+          now.wSecond, text.c_str());
+  fclose(file);
+}
+
 /** Everything this process was given, so the test can look for what should not be in it. */
 void record_surroundings(const std::wstring& path) {
   record(path, std::string("cmdline=") + narrow(GetCommandLineW()));
@@ -97,7 +114,11 @@ int wmain(int argc, wchar_t** argv) {
           ? 5000
           : static_cast<uint32_t>(_wtoi(value_of(args, L"--deadline").c_str()));
 
+  const std::wstring logBase = value_of(args, L"--log");
+  const std::wstring logPath = logBase.empty() ? std::wstring() : logBase + L"." + role;
+
   record_surroundings(recordPath);
+  log_line(logPath, "starting role=" + narrow(role));
 
   if (role == L"worker") {
     if (has_flag(args, L"--never-read")) {
@@ -109,9 +130,12 @@ int wmain(int argc, wchar_t** argv) {
     std::string payload;
     std::string error;
     if (!receive_credential(inPipe, deadline, &payload, &error)) {
+      log_line(logPath, "no credential arrived: " + error);
       record(recordPath, "worker-failed=" + error);
       return 4;
     }
+    // The log gets the fact, never the value -- that is the whole discipline being tested.
+    log_line(logPath, "credential received");
     record(recordPath, "worker-received=" + payload);
     return 0;
   }
@@ -124,6 +148,7 @@ int wmain(int argc, wchar_t** argv) {
   std::string credential;
   std::string error;
   if (!receive_credential(inPipe, deadline, &credential, &error)) {
+    log_line(logPath, "no credential arrived: " + error);
     record(recordPath, "bootstrap-failed=" + error);
     return 5;
   }
@@ -145,6 +170,7 @@ int wmain(int argc, wchar_t** argv) {
   std::wstring command = L"\"" + value_of(args, L"--child") + L"\" --role worker --in \"" +
                          childPipe + L"\"";
   if (!recordBase.empty()) command += L" --record \"" + recordBase + L"\"";
+  if (!logBase.empty()) command += L" --log \"" + logBase + L"\"";
   if (has_flag(args, L"--child-never-reads")) command += L" --never-read";
   command += L" --deadline " + std::to_wstring(deadline);
 
@@ -163,6 +189,8 @@ int wmain(int argc, wchar_t** argv) {
   // The handle stays open across the whole exchange -- that is what keeps this process id pinned
   // to the process it names.
   const bool served = server.Serve(pi.hProcess, credential, deadline, &error);
+  log_line(logPath, served ? "handed the credential to the working copy"
+                           : "the working copy did not receive the credential: " + error);
   record(recordPath, served ? "bootstrap-served=1" : "bootstrap-serve-failed=" + error);
   WaitForSingleObject(pi.hProcess, deadline);
   CloseHandle(pi.hProcess);

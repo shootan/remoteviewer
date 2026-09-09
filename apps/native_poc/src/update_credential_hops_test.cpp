@@ -59,6 +59,11 @@ std::string read_all(const std::wstring& base) {
   return read_one(base + L".bootstrap") + read_one(base + L".worker");
 }
 
+/** True when the fixture credential is nowhere in a file that was actually written to disk. */
+bool file_is_clean(const std::wstring& path) {
+  return read_one(path).find("fixture-token-not-a-real-credential") == std::string::npos;
+}
+
 struct Child {
   PROCESS_INFORMATION pi{};
   bool started = false;
@@ -113,10 +118,11 @@ int main() {
     check("the parent's pipe is created before the bootstrap", server.Create(pipeName, &error),
           error);
 
+    const std::wstring logPath = dir + L"\\ok.log";
     Child bootstrap;
     const std::wstring command = L"\"" + helper + L"\" --role bootstrap --in \"" + pipeName +
                                  L"\" --child \"" + helper + L"\" --record \"" + recordPath +
-                                 L"\" --deadline 8000";
+                                 L"\" --log \"" + logPath + L"\" --deadline 8000";
     check("the bootstrap starts", start(command, &bootstrap));
 
     std::string payload = kFixtureToken;
@@ -147,6 +153,16 @@ int main() {
       }
       check("the credential is in no command line and no environment block", !leaked);
     }
+
+    // A log file, written to disk from the same error strings an updater's log is written from,
+    // and then read back. "The message does not quote it" and "the file does not contain it" are
+    // different statements, and only the second one is about a file.
+    check("both processes wrote a log",
+          !read_one(logPath + L".bootstrap").empty() && !read_one(logPath + L".worker").empty());
+    check("...and the credential is in neither",
+          file_is_clean(logPath + L".bootstrap") && file_is_clean(logPath + L".worker"));
+    check("...while the log still says what happened",
+          read_one(logPath + L".worker").find("credential received") != std::string::npos);
   }
 
   // ---------------------------------------------------------------- the bootstrap dies with it
@@ -181,6 +197,7 @@ int main() {
   // ---------------------------------------------------------------- nobody acknowledges
   {
     const std::wstring recordPath = dir + L"\\noack.txt";
+    const std::wstring noackLog = dir + L"\\noack.log";
     const std::wstring pipeName =
         make_credential_pipe_name(GetCurrentProcessId(), GetTickCount64());
     CredentialServer server;
@@ -190,6 +207,7 @@ int main() {
     Child bootstrap;
     const std::wstring command = L"\"" + helper + L"\" --role bootstrap --in \"" + pipeName +
                                  L"\" --child \"" + helper + L"\" --record \"" + recordPath +
+                                 L"\" --log \"" + noackLog +
                                  L"\" --deadline 1500 --child-never-reads";
     start(command, &bootstrap);
 
@@ -205,6 +223,9 @@ int main() {
     const std::string record = read_all(recordPath);
     check("...and the failure is recorded as a failure",
           record.find("bootstrap-serve-failed=") != std::string::npos);
+    // The failure path writes the reason to the log. That reason must not carry the value.
+    check("...and that log line does not quote the credential",
+          file_is_clean(noackLog + L".bootstrap"));
   }
 
   // ---------------------------------------------------------------- the parent never serves
@@ -235,6 +256,10 @@ int main() {
   // ---------------------------------------------------------------- teardown, path-confirmed
   if (dir.find(L"cred-hops-") != std::wstring::npos) {
     for (const wchar_t* name : {L"ok.txt", L"die.txt", L"noack.txt", L"silent.txt"}) {
+      DeleteFileW((dir + L"\\" + name + L".bootstrap").c_str());
+      DeleteFileW((dir + L"\\" + name + L".worker").c_str());
+    }
+    for (const wchar_t* name : {L"ok.log", L"noack.log"}) {
       DeleteFileW((dir + L"\\" + name + L".bootstrap").c_str());
       DeleteFileW((dir + L"\\" + name + L".worker").c_str());
     }
