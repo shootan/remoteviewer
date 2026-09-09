@@ -14,6 +14,7 @@
 
 // The parsing helpers are internal to the translation unit, so the test includes it directly
 // rather than widening the header for testing's sake.
+#include "directory_session_bootstrap.hpp"
 #include "directory_session_client.cpp"
 
 using namespace remote60::native_poc;
@@ -31,6 +32,28 @@ void check(const char* name, bool cond, const std::string& detail = {}) {
 }  // namespace
 
 int main() {
+  // ---------------------------------------------------------------- the bootstrap's own refusal
+  //
+  // Through the real directory_session_open, not the rule in isolation: this is the path that used
+  // to add one to the http port unconditionally. It returns before any socket is touched, so the
+  // refusal is checkable here.
+  //
+  // The https half of the same branch is NOT reachable yet -- parse_directory_url still rejects
+  // https before the port rule runs -- so it is not asserted here and must not be read as covered.
+  // It becomes reachable in (C), and the assertion belongs with that change.
+  {
+    DirectorySessionRequest request{};
+    request.url = "http://directory.example:65535";
+    request.sessionToken = "t";
+    request.hostId = "h";
+    DirectorySessionResult session{};
+    std::string error;
+    const bool opened = directory_session_open(request, &session, &error);
+    check("a directory on 65535 is refused rather than dialling port 0", !opened, error);
+    check("...and the reason names the port, not the network",
+          error.find("65535") != std::string::npos, error);
+  }
+
   // ---------------------------------------------------------------- where observations go
   //
   // The clients used to derive this as httpPort + 1. Behind TLS on 443 that is 444, nothing
@@ -76,6 +99,24 @@ int main() {
     const uint16_t nestedPort = got.port;
     check("the observe object wins over an unrelated port", nestedWins && nestedPort == 29181,
           std::to_string(nestedPort));
+
+    // ---- the scheme decision, which used to be made in three places
+    //
+    // The parser compared the scheme case-sensitively while two callers lowercased first, so
+    // `HTTPS://host` was "unsupported scheme" to one and "secure" to the others. That answer picks
+    // the transport, so the disagreement was between encrypting and not.
+    using directory::directory_url_is_secure;
+    check("https is secure", directory_url_is_secure("https://rem.shotan.net"));
+    check("http is not", !directory_url_is_secure("http://rem.shotan.net"));
+    check("the scheme is case-insensitive", directory_url_is_secure("HTTPS://rem.shotan.net"));
+    check("mixed case too", directory_url_is_secure("HtTpS://rem.shotan.net"));
+    check("leading whitespace does not hide it",
+          directory_url_is_secure("   https://rem.shotan.net"));
+    check("HTTP in any case is still not secure", !directory_url_is_secure("HTTP://x"));
+    check("a bare host is not secure", !directory_url_is_secure("rem.shotan.net"));
+    check("a name that merely starts with https is not a scheme",
+          !directory_url_is_secure("httpsx://x"));
+    check("empty is not secure", !directory_url_is_secure(""));
 
     // ---- the advertised host, which the server does NOT validate
     //

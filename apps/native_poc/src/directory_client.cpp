@@ -212,10 +212,21 @@ uint16_t observe_port_for(const ObserveEndpoint& advertised, uint16_t httpPort, 
   return static_cast<uint16_t>(httpPort + 1);
 }
 
+bool directory_url_is_secure(const std::string& url) {
+  size_t at = 0;
+  while (at < url.size() && isspace(static_cast<unsigned char>(url[at]))) ++at;
+  const std::string scheme = "https://";
+  if (url.size() - at < scheme.size()) return false;
+  for (size_t i = 0; i < scheme.size(); ++i) {
+    if (tolower(static_cast<unsigned char>(url[at + i])) != scheme[i]) return false;
+  }
+  return true;
+}
+
 bool parse_directory_url(const std::string& url, std::string* outHost, uint16_t* outPort,
                          std::string* outError) {
   std::string rest = trim(url);
-  if (rest.rfind("https://", 0) == 0) {
+  if (directory_url_is_secure(rest)) {
     if (outError) {
       *outError =
           "https is not supported by the host yet; terminate TLS in front of the directory "
@@ -359,17 +370,10 @@ bool HostAgent::Start(const HostAgentConfig& cfg, SendFn send, std::string* outE
   }
   if (cfg_.heartbeatSeconds < 5) cfg_.heartbeatSeconds = 5;
 
-  // Noted before the parse, because it decides what an absent advertisement means. The parser
-  // still refuses https today -- that is (C)'s job -- and when it stops refusing, this is already
-  // carrying the right answer rather than needing to be remembered.
-  {
-    std::string lowered = cfg_.url;
-    for (char& c : lowered) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-    while (!lowered.empty() && isspace(static_cast<unsigned char>(lowered.front()))) {
-      lowered.erase(lowered.begin());
-    }
-    httpSecure_ = lowered.rfind("https://", 0) == 0;
-  }
+  // The same answer the parser uses, from the same function. It decides what an absent
+  // advertisement means, and a second opinion here would be a second opinion about whether to
+  // encrypt.
+  httpSecure_ = directory_url_is_secure(cfg_.url);
   if (!parse_directory_url(cfg_.url, &httpHost_, &httpPort_, outError)) return false;
 
   // Aimed as far as it can be aimed before talking to anyone. A configured port wins outright; a

@@ -12,6 +12,20 @@
 namespace remote60::native_poc::directory {
 
 /**
+ * Whether a directory URL asks for TLS.
+ *
+ * One implementation, because there were three and they did not agree. The parser tested the
+ * scheme case-sensitively while two callers lowercased first, so `HTTPS://host` was "unsupported
+ * scheme" to one and "secure" to the others. That disagreement decides whether the transport uses
+ * TLS, so the two answers are "encrypt this" and "do not" -- not a cosmetic difference, and not
+ * one that announces itself.
+ *
+ * Leading whitespace is ignored and the scheme is compared without case, which is what a URL
+ * scheme actually is.
+ */
+bool directory_url_is_secure(const std::string& url);
+
+/**
  * Where the server says address observations should be sent.
  *
  * The clients used to work this out themselves as httpPort + 1, which held only while the

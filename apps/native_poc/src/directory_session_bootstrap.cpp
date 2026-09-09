@@ -52,15 +52,7 @@ bool directory_session_open(const DirectorySessionRequest& request, DirectorySes
   // called /api/connect, so it never learned the relay address either. Failing with a reason is
   // the difference between "this server needs configuring" and a connection that just does not
   // work.
-  bool directorySecure = false;
-  {
-    std::string lowered = request.url;
-    for (char& c : lowered) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-    while (!lowered.empty() && isspace(static_cast<unsigned char>(lowered.front()))) {
-      lowered.erase(lowered.begin());
-    }
-    directorySecure = lowered.rfind("https://", 0) == 0;
-  }
+  const bool directorySecure = directory::directory_url_is_secure(request.url);
   const uint16_t observePort =
       request.directoryUdpPort != 0
           ? request.directoryUdpPort
