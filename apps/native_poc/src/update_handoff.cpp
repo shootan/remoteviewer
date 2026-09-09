@@ -65,6 +65,11 @@ std::wstring make_ack_event_name(const std::wstring& readyEventName) {
   return readyEventName + L".ack";
 }
 
+std::wstring make_alive_mutex_name(const std::wstring& readyEventName) {
+  if (readyEventName.empty()) return {};
+  return readyEventName + L".alive";
+}
+
 const char* handoff_step_name(HandoffStep step) {
   switch (step) {
     case HandoffStep::KeepWaiting: return "KeepWaiting";

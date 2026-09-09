@@ -26,6 +26,7 @@
 #include <string>
 #include <vector>
 
+#include "update_handoff.hpp"
 #include "update_job_guard.hpp"
 #include "updater_effects.hpp"
 #include "updater_options.hpp"
@@ -182,6 +183,18 @@ int wmain(int argc, wchar_t** argv) {
   if (!options.runningFromCopy) {
     // Hand over to a copy of ourselves so the installed original can be replaced by this update.
     return run_from_copy(options, arguments) ? 0 : 3;
+  }
+
+  // Held for as long as this process lives, and never by the bootstrap. Whoever is waiting can
+  // then tell "the working copy is still going" from "it is gone" without either side having to
+  // remember to say anything -- including in the death that gets to run no cleanup at all.
+  HANDLE aliveMutex = nullptr;
+  {
+    const std::wstring aliveName = make_alive_mutex_name(options.readyEventName);
+    if (!aliveName.empty()) {
+      aliveMutex = CreateMutexW(nullptr, TRUE, aliveName.c_str());
+      if (!aliveMutex) log_line("could not hold the liveness mutex; the caller will have to wait");
+    }
   }
 
   log_line("starting: install=" + to_utf8(options.installDir) +

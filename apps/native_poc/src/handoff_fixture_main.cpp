@@ -102,8 +102,25 @@ int wmain(int argc, wchar_t** argv) {
   }
 
   // ---------------------------------------------------------------- the working copy
+  const std::wstring readyForAlive = value_of(args, L"--ready");
+  // Held for this process's lifetime, exactly as the real working copy holds it. Whoever is
+  // waiting learns of a death without this having to announce one -- which is the point, because
+  // the death worth catching is the one that runs no cleanup.
+  HANDLE alive = nullptr;
+  {
+    const std::wstring aliveName = make_alive_mutex_name(readyForAlive);
+    if (!aliveName.empty()) alive = CreateMutexW(nullptr, TRUE, aliveName.c_str());
+  }
+
   const std::wstring delay = value_of(args, L"--delay");
   if (!delay.empty()) Sleep(static_cast<DWORD>(_wtoi(delay.c_str())));
+
+  if (has_flag(args, L"--die-before-signal")) {
+    // Stops without releasing anything, the way a crash does. The mutex goes with the process and
+    // the waiter sees it abandoned -- which is the whole reason it is a mutex.
+    record(witness, "worker died before signalling");
+    TerminateProcess(GetCurrentProcess(), 99);
+  }
 
   const std::wstring readyName = value_of(args, L"--ready");
   bool delivered = false;
@@ -135,5 +152,9 @@ int wmain(int argc, wchar_t** argv) {
   const bool proceed = may_stop_the_product(delivered, acked, &why);
   record(witness, std::string(proceed ? "worker WOULD stop the product" : "worker stood down")
                       + ": " + why);
+  if (alive) {
+    ReleaseMutex(alive);
+    CloseHandle(alive);
+  }
   return proceed ? 0 : 20;
 }

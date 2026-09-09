@@ -75,6 +75,19 @@ std::wstring make_ready_event_name(uint32_t pid, uint64_t tick);
  */
 std::wstring make_ack_event_name(const std::wstring& readyEventName);
 
+/**
+ * The name of the mutex the working copy holds for as long as it is alive.
+ *
+ * A mutex rather than an event, because the property wanted is "this process still exists" and
+ * that is exactly what a mutex handle gives for free: when the holder dies, the wait is released
+ * -- abandoned, but released. Nothing has to remember to signal anything on the way out, which
+ * matters because the interesting death is the one that does not get to run any cleanup.
+ *
+ * The BOOTSTRAP must not hold it. It exits immediately by design, and a name held by the process
+ * whose exit means nothing would say the worker had died every single time.
+ */
+std::wstring make_alive_mutex_name(const std::wstring& readyEventName);
+
 /** What the waiting caller should do NEXT, which is not always a final answer. */
 enum class HandoffStep {
   /**
@@ -131,8 +144,8 @@ bool may_stop_the_product(bool signalDelivered, bool acknowledged, std::string* 
  * Lives here, and not inside the caller, because a wait that can only be run by starting the
  * product is a wait nobody runs. This one was wrong for exactly as long as that was true of it.
  */
-HandoffStep await_handoff(void* readyEvent, void* ackEvent, void* bootstrap, uint32_t timeoutMs,
-                          std::string* detail);
+HandoffStep await_handoff(void* readyEvent, void* ackEvent, void* bootstrap,
+                          const std::wstring& readyName, uint32_t timeoutMs, std::string* detail);
 
 /** What the waiting caller should do. */
 enum class HandoffVerdict {

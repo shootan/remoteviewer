@@ -1013,12 +1013,13 @@ void start_update_handoff(HWND window) {
 
   // Waits off the UI thread: this window has to keep responding while the download runs, and the
   // user may still be using the product right up to the moment it is replaced.
-  std::thread([window, readyEvent, ackEvent, bootstrap = pi.hProcess]() {
+  std::thread([window, readyEvent, ackEvent, bootstrap = pi.hProcess,
+               readyName = spec.readyEventName]() {
     // Long enough for a download on a slow link, short enough that a wedged updater does not keep
     // the host waiting forever. Running out is not an error -- it just means no update today.
     std::string why;
     const upd::HandoffStep step =
-        upd::await_handoff(readyEvent, ackEvent, bootstrap, 10 * 60 * 1000, &why);
+        upd::await_handoff(readyEvent, ackEvent, bootstrap, readyName, 10 * 60 * 1000, &why);
 
     CloseHandle(bootstrap);
     if (ackEvent) CloseHandle(ackEvent);
