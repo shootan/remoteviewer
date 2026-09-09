@@ -388,7 +388,8 @@ int wmain() {
     c.captureRegistration = []() { return true; };
     c.registerInstall = []() { return true; };
     c.restoreRegistration = []() { return true; };
-    c.relaunch = []() { return RelaunchVerdict::AllBack; };
+    c.relaunchRequired = []() { return RelaunchVerdict::AllBack; };
+    c.relaunchOptional = []() { return RelaunchVerdict::AllBack; };
     c.healthCheck = []() { return true; };
     c.quiesceTimeoutMs = 5000;
     wchar_t self[MAX_PATH]{};

@@ -80,7 +80,8 @@ std::vector<std::string> UpdateEffectsConfig::unwired() const {
   if (!captureRegistration) missing.push_back("captureRegistration");
   if (!registerInstall) missing.push_back("registerInstall");
   if (!restoreRegistration) missing.push_back("restoreRegistration");
-  if (!relaunch) missing.push_back("relaunch");
+  if (!relaunchRequired) missing.push_back("relaunchRequired");
+  if (!relaunchOptional) missing.push_back("relaunchOptional");
   if (!healthCheck) missing.push_back("healthCheck");
   if (!releaseBeforeRollback) missing.push_back("releaseBeforeRollback");
   return missing;
@@ -119,7 +120,8 @@ bool UpdateEffectsConfig::validate(std::string* detail) const {
   // Not required here, because a test may inject the document instead -- but the updater's own
   // options DO require the url that builds it, so the production path cannot reach run_update
   // without one. See updater_options.validate().
-  if (!relaunch) return fail("relaunch not set");
+  if (!relaunchRequired) return fail("relaunchRequired not set");
+  if (!relaunchOptional) return fail("relaunchOptional not set");
   if (!healthCheck) return fail("healthCheck not set");
   // Nothing reads these yet. Requiring them now means a future RegisterInstall cannot be
   // written against hardcoded HKLM and GNLinkSecureInput without this check failing first.
@@ -659,10 +661,20 @@ void WindowsUpdateEffects::Commit() {
   }
 }
 
-RelaunchVerdict WindowsUpdateEffects::Relaunch() {
-  const RelaunchVerdict verdict = config_.relaunch();
+RelaunchVerdict WindowsUpdateEffects::RelaunchRequired() {
+  const RelaunchVerdict verdict = config_.relaunchRequired();
   if (verdict != RelaunchVerdict::AllBack) {
-    lastError_ = std::string("relaunch: ") + relaunch_verdict_name(verdict);
+    lastError_ = std::string("relaunch (required): ") + relaunch_verdict_name(verdict);
+  }
+  return verdict;
+}
+
+RelaunchVerdict WindowsUpdateEffects::RelaunchOptional() {
+  const RelaunchVerdict verdict = config_.relaunchOptional();
+  if (verdict != RelaunchVerdict::AllBack) {
+    // Said separately so a log can tell "the machine did not come back" from "a window did not
+    // reopen". They arrive at different points in the sequence and mean different things.
+    lastError_ = std::string("relaunch (optional): ") + relaunch_verdict_name(verdict);
   }
   return verdict;
 }

@@ -172,7 +172,25 @@ struct RelaunchEffects {
    * Returns a verdict rather than a bool because the caller has to treat a missing host
    * differently from a missing client -- see RelaunchVerdict.
    */
-  std::function<RelaunchVerdict()> relaunch;
+  /**
+   * Starts the images the machine needs -- the host and the service -- and nothing else.
+   *
+   * Split from the optional ones because of WHEN each may run, not because they are started
+   * differently. These run while a rollback is still possible, so every one of them is launched
+   * by a route that hands back a handle and can therefore be stopped again.
+   */
+  std::function<RelaunchVerdict()> relaunchRequired;
+
+  /**
+   * Starts the images a person wants back -- the client -- and nothing else.
+   *
+   * Runs after the update is committed. The client is started as the logged-on user, and when the
+   * route that returns a handle is unavailable the shell starts it and returns nothing; such a
+   * process cannot be stopped, and a rollback would have to move the files it holds. After the
+   * commit there is no rollback left to block, which is what makes that acceptable here and not
+   * one step earlier.
+   */
+  std::function<RelaunchVerdict()> relaunchOptional;
   std::function<bool()> healthCheck;
   /** What stopping the processes this attempt started achieved. */
   struct StopReport {

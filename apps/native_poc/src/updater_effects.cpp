@@ -88,7 +88,8 @@ class ReadySignaller : public UpdateEffects {
   // and no idea which file would not move.
   bool Swap() override { return note("swap", inner_.Swap()); }
   bool RegisterInstall() override { return note("register", inner_.RegisterInstall()); }
-  RelaunchVerdict Relaunch() override { return inner_.Relaunch(); }
+  RelaunchVerdict RelaunchRequired() override { return inner_.RelaunchRequired(); }
+  RelaunchVerdict RelaunchOptional() override { return inner_.RelaunchOptional(); }
   bool HealthCheck() override { return inner_.HealthCheck(); }
 
   bool note(const char* step, bool ok) {
@@ -334,21 +335,57 @@ UpdateOutcome UpdaterEffects::run(const std::string& platform) {
   auto relaunchEffects = std::make_shared<RelaunchEffects>();
   UpdaterDeps deps = deps_;
   std::string* notice = &userNotice_;
-  config.relaunch = [deps, relaunchConfig, stopped, relaunchEffects, expectedVersion, notice]() {
+  // Built ONCE, on whichever phase runs first, and reused by the other.
+  //
+  // The two phases share one set of relaunch effects on purpose: the handles the required phase
+  // takes are the ones a rollback stops, and the log mark the health check reads is taken before
+  // anything starts. Building a second set for the optional phase would take a second mark, after
+  // the host had already written its banner, and the health check would then be reading against a
+  // mark that came after the evidence it is looking for.
+  auto ensure = [deps, relaunchConfig, stopped, relaunchEffects, expectedVersion]() {
+    if (relaunchEffects->relaunchRequired || relaunchEffects->relaunchOptional) return;
     RelaunchConfig live = relaunchConfig;
     live.expectedVersion = *expectedVersion;
     *relaunchEffects = deps.makeRelaunch(live, *stopped);
-    // No relaunch to run means nothing came back. Reported as the severe verdict rather than the
-    // mild one: an assembly that produced no relaunch has not established that the machine is
-    // reachable, and guessing in the reassuring direction is how this class of defect starts.
-    if (!relaunchEffects->relaunch) return RelaunchVerdict::RequiredMissing;
-    const RelaunchVerdict verdict = relaunchEffects->relaunch();
+  };
+  // Outcomes accumulate across the two phases, so this logs only what the phase just added --
+  // otherwise the optional phase would repeat every line the required one already wrote.
+  auto reported = std::make_shared<size_t>(0);
+  const auto report = [deps, relaunchEffects, notice, reported](const char* phase) {
     if (relaunchEffects->lastOutcomes) {
-      for (const RelaunchOutcome& outcome : relaunchEffects->lastOutcomes()) {
-        deps.log("relaunch " + to_utf8(outcome.imageName) + ": " + outcome.detail);
+      const std::vector<RelaunchOutcome> all = relaunchEffects->lastOutcomes();
+      if (*reported > all.size()) *reported = 0;  // the list was reset for a new attempt
+      for (size_t i = *reported; i < all.size(); ++i) {
+        deps.log(std::string("relaunch (") + phase + ") " + to_utf8(all[i].imageName) + ": " +
+                 all[i].detail);
       }
+      *reported = all.size();
     }
-    if (relaunchEffects->userNotice) *notice = relaunchEffects->userNotice();
+    // Read after both phases have contributed, so a client that did not come back is still named
+    // even though the phase that failed was not the last one to run.
+    if (relaunchEffects->userNotice) {
+      const std::string current = relaunchEffects->userNotice();
+      if (!current.empty()) *notice = current;
+    }
+  };
+  config.relaunchRequired = [ensure, report, relaunchEffects]() {
+    ensure();
+    // Nothing to run means nothing came back. Reported as the severe verdict rather than the mild
+    // one: an assembly that produced no relaunch has not established that the machine is
+    // reachable, and guessing in the reassuring direction is how this class of defect starts.
+    if (!relaunchEffects->relaunchRequired) return RelaunchVerdict::RequiredMissing;
+    const RelaunchVerdict verdict = relaunchEffects->relaunchRequired();
+    report("required");
+    return verdict;
+  };
+  config.relaunchOptional = [ensure, report, relaunchEffects]() {
+    ensure();
+    // The mild verdict when there is nothing to run. This phase happens after the commit, so
+    // there is no longer a decision it could change -- reporting it as severe would turn a
+    // finished, healthy update into an alarm.
+    if (!relaunchEffects->relaunchOptional) return RelaunchVerdict::OptionalMissing;
+    const RelaunchVerdict verdict = relaunchEffects->relaunchOptional();
+    report("optional");
     return verdict;
   };
   // Wired to the same relaunch effects, so what is stopped is exactly what they started.

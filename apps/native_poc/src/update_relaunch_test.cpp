@@ -27,6 +27,7 @@
 #include <windows.h>
 
 #include <fstream>
+#include <cstdio>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -143,7 +144,29 @@ bool wait_for_witness(const std::wstring& witness, const std::string& needle, in
 
 }  // namespace
 
+/**
+ * Runs the whole plan, both phases, and folds the two verdicts into one.
+ *
+ * Most cases here are about the plan -- which images are started, how often, under what identity
+ * -- and not about the ordering that split the phases apart. Those cases ask the same question
+ * they always did, so they ask it of both phases at once.
+ *
+ * The fold matches how the state machine reads them: anything required missing decides on its
+ * own, an optional one only downgrades. Cases that care about WHICH phase started something call
+ * the two directly.
+ */
+RelaunchVerdict run_all(RelaunchEffects& e) {
+  const RelaunchVerdict required = e.relaunchRequired();
+  const RelaunchVerdict optional = e.relaunchOptional();
+  if (required != RelaunchVerdict::AllBack) return required;
+  return optional;
+}
+
 int main() {
+  // Unbuffered: this test starts real processes, and a report that is lost to buffering is lost
+  // exactly when something goes wrong badly enough to take the process down with it.
+  setvbuf(stdout, nullptr, _IONBF, 0);
+  std::cout.setf(std::ios::unitbuf);
   const std::wstring dir = L"C:\\Program Files\\GNLink\\";
 
   // ---------------------------------------------------------------- what comes back
@@ -531,7 +554,7 @@ int main() {
       DeleteFileW(witness.c_str());
       RelaunchEffects e = make_relaunch_effects(base(), {stopped_dummy(L"DummyHost.cmd", 100)},
                                                 dummies);
-      const RelaunchVerdict all = e.relaunch();
+      const RelaunchVerdict all = run_all(e);
       check("E1: the elevated-process entry reports started", all == RelaunchVerdict::AllBack,
             relaunch_verdict_name(all));
       check("E1: and the dummy really ran",
@@ -549,7 +572,7 @@ int main() {
       RelaunchEffects e = make_relaunch_effects(
           base(), {stopped_dummy(L"DummyHost.cmd", 100), stopped_dummy(L"DummyHost.cmd", 101)},
           dummies);
-      e.relaunch();
+      run_all(e);
       check("E2: two instances stopped, one started",
             wait_for_witness(witness, "DummyHost.cmd", 5000));
       Sleep(300);  // give a second launch, if there were one, time to show up
@@ -563,7 +586,7 @@ int main() {
       RelaunchEffects e = make_relaunch_effects(
           base(), {stopped_dummy(L"DummyHost.cmd", 100), stopped_dummy(L"DummyChild.cmd", 101)},
           dummies);
-      const RelaunchVerdict all = e.relaunch();
+      const RelaunchVerdict all = run_all(e);
       check("E3: skipping a supervised child is not a failure", all == RelaunchVerdict::AllBack,
             relaunch_verdict_name(all));
       check("E3: the host ran", wait_for_witness(witness, "DummyHost.cmd", 5000));
@@ -583,7 +606,7 @@ int main() {
       write_dummy(root + L"\\Stranger.cmd", L"Stranger.cmd", witness);
       RelaunchEffects e = make_relaunch_effects(base(), {stopped_dummy(L"Stranger.cmd", 100)},
                                                 dummies);
-      e.relaunch();
+      run_all(e);
       Sleep(300);
       check("E4: a name outside the table is never started",
             count_occurrences(read_witness(witness), "Stranger.cmd") == 0, read_witness(witness));
@@ -596,7 +619,7 @@ int main() {
       DeleteFileW(witness.c_str());
       RelaunchEffects e = make_relaunch_effects(base(), {stopped_dummy(L"DummyClient.cmd", 100)},
                                                 dummies);
-      const RelaunchVerdict all = e.relaunch();
+      const RelaunchVerdict all = run_all(e);
       const std::string note = e.userNotice();
       // The shell route needs an interactive desktop with Explorer. When it is there this must
       // succeed; when it is not, the REQUIRED behaviour is a recorded failure -- never a silent
@@ -621,7 +644,7 @@ int main() {
       set_shell_launch_disabled_for_test(true);
       RelaunchEffects e = make_relaunch_effects(base(), {stopped_dummy(L"DummyClient.cmd", 100)},
                                                 dummies);
-      const RelaunchVerdict all = e.relaunch();
+      const RelaunchVerdict all = run_all(e);
       set_shell_launch_disabled_for_test(false);
       Sleep(300);
       // The absence of a fallback, asserted. Without this, removing the "no fallback" rule would
@@ -652,13 +675,13 @@ int main() {
       DeleteFileW((root + L"\\DummyHost.cmd").c_str());  // make the host unstartable
       RelaunchEffects hostFailed = make_relaunch_effects(
           base(), {stopped_dummy(L"DummyHost.cmd", 100)}, dummies);
-      hostFailed.relaunch();
+      run_all(hostFailed);
       const auto hostOut = hostFailed.lastOutcomes();
 
       set_shell_launch_disabled_for_test(true);
       RelaunchEffects clientFailed = make_relaunch_effects(
           base(), {stopped_dummy(L"DummyClient.cmd", 100)}, dummies);
-      clientFailed.relaunch();
+      run_all(clientFailed);
       set_shell_launch_disabled_for_test(false);
       const auto clientOut = clientFailed.lastOutcomes();
 
@@ -687,7 +710,7 @@ int main() {
       c.isStillRunning = [](const ProcessTarget&) { return RelaunchConfig::Liveness::Running; };
       RelaunchEffects e = make_relaunch_effects(c, {stopped_dummy(L"DummyHost.cmd", 100)},
                                                 dummies);
-      const RelaunchVerdict verdict = e.relaunch();
+      const RelaunchVerdict verdict = run_all(e);
       Sleep(300);
       check("E10: something still running is not started again",
             count_occurrences(read_witness(witness), "DummyHost.cmd") == 0, read_witness(witness));
@@ -706,7 +729,7 @@ int main() {
       c.isStillRunning = [](const ProcessTarget&) { return RelaunchConfig::Liveness::Exited; };
       RelaunchEffects e = make_relaunch_effects(c, {stopped_dummy(L"DummyHost.cmd", 100)},
                                                 dummies);
-      e.relaunch();
+      run_all(e);
       check("E10: something that did leave IS started again",
             wait_for_witness(witness, "DummyHost.cmd", 5000), read_witness(witness));
     }
@@ -719,7 +742,7 @@ int main() {
       set_shell_launch_disabled_for_test(true);
       RelaunchEffects clientOnly = make_relaunch_effects(
           base(), {stopped_dummy(L"DummyClient.cmd", 100)}, dummies);
-      const RelaunchVerdict clientVerdict = clientOnly.relaunch();
+      const RelaunchVerdict clientVerdict = run_all(clientOnly);
       set_shell_launch_disabled_for_test(false);
       check("E11: only the client missing is the mild verdict",
             clientVerdict == RelaunchVerdict::OptionalMissing,
@@ -728,7 +751,7 @@ int main() {
       DeleteFileW((root + L"\\DummyHost.cmd").c_str());  // make the host unstartable
       RelaunchEffects hostGone = make_relaunch_effects(
           base(), {stopped_dummy(L"DummyHost.cmd", 100)}, dummies);
-      const RelaunchVerdict hostVerdict = hostGone.relaunch();
+      const RelaunchVerdict hostVerdict = run_all(hostGone);
       check("E11: the host missing is the severe verdict",
             hostVerdict == RelaunchVerdict::RequiredMissing, relaunch_verdict_name(hostVerdict));
       check("E11: and the two are different", clientVerdict != hostVerdict);
@@ -738,7 +761,7 @@ int main() {
       RelaunchEffects both = make_relaunch_effects(
           base(), {stopped_dummy(L"DummyHost.cmd", 100), stopped_dummy(L"DummyClient.cmd", 101)},
           dummies);
-      const RelaunchVerdict bothVerdict = both.relaunch();
+      const RelaunchVerdict bothVerdict = run_all(both);
       set_shell_launch_disabled_for_test(false);
       check("E11: with both missing, the severe verdict wins",
             bothVerdict == RelaunchVerdict::RequiredMissing, relaunch_verdict_name(bothVerdict));
@@ -769,7 +792,7 @@ int main() {
         t.creationTime = 99;
 
         RelaunchEffects e = make_relaunch_effects(base(), {t}, exeTable);
-        const RelaunchVerdict verdict = e.relaunch();
+        const RelaunchVerdict verdict = run_all(e);
         check("E12: it started", verdict == RelaunchVerdict::AllBack,
               relaunch_verdict_name(verdict));
         const auto outcomes = e.lastOutcomes();
@@ -804,7 +827,7 @@ int main() {
       // The control for the identity check: a pid this attempt never started is not touched, even
       // if it is recorded. Nothing else on the machine is this function's business.
       RelaunchEffects e = make_relaunch_effects(base(), {}, dummies);
-      e.relaunch();
+      run_all(e);
       const RelaunchEffects::StopReport none = e.stopStarted();
       check("E12: with nothing started, nothing is stopped",
             none.stopped == 0 && none.complete());
@@ -814,7 +837,7 @@ int main() {
     {
       RelaunchEffects e = make_relaunch_effects(base(), {stopped_dummy(L"DummySvc.cmd", 100)},
                                                 dummies);
-      const RelaunchVerdict all = e.relaunch();
+      const RelaunchVerdict all = run_all(e);
       // Starting a real service needs administrator, so only this half is covered here; the
       // success path is UPD-FIELD-05. What must hold is that a service that cannot be started is
       // a failure with a reason, not a silent pass.
@@ -838,7 +861,7 @@ int main() {
       c.healthReporterImage = L"DummyHost.cmd";
       RelaunchEffects e = make_relaunch_effects(c, {stopped_dummy(L"DummyClient.cmd", 100)},
                                                 dummies);
-      e.relaunch();
+      run_all(e);
       const DWORD before = GetTickCount();
       const bool healthy = e.healthCheck();
       const DWORD took = GetTickCount() - before;
@@ -859,7 +882,7 @@ int main() {
       c.healthTimeoutMs = 600;
       RelaunchEffects e = make_relaunch_effects(c, {stopped_dummy(L"DummyHost.cmd", 100)},
                                                 dummies);
-      e.relaunch();
+      run_all(e);
       const bool healthy = e.healthCheck();
       check("E9: with the reporter relaunched, a missing report still fails", !healthy,
             e.lastHealthDetail());
@@ -871,7 +894,7 @@ int main() {
                                                 dummies);
       // A previous run's report, which must not satisfy anything.
       append_line(log, "09-08 11:00:00 [host-app] health version=0.2.105 directory=ok");
-      e.relaunch();  // takes the mark here
+      run_all(e);  // takes the mark here
       // Called into a variable first: the detail belongs to THIS call, and C++ does not promise
       // that the arguments of check() are evaluated left to right.
       const bool staleAccepted = e.healthCheck();

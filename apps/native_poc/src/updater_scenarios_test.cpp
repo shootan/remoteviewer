@@ -557,6 +557,8 @@ int main() {
     seed();
     auto started = std::make_shared<std::vector<DWORD>>();
     auto rolledBack = std::make_shared<bool>(false);
+    /** How many times the required phase has run. The second time means a rollback preceded it. */
+    auto requiredRuns = std::make_shared<int>(0);
 
     auto logs = std::make_shared<std::vector<std::string>>();
     UpdaterDeps deps;
@@ -583,7 +585,7 @@ int main() {
     deps.verifier = [](const std::string&, const std::vector<uint8_t>&) { return true; };
     deps.signalReady = [](const std::wstring&) {};
 
-    deps.makeRelaunch = [&, knobs, started, rolledBack](
+    deps.makeRelaunch = [&, knobs, started, rolledBack, requiredRuns](
                             const RelaunchConfig& config,
                             const std::vector<ProcessTarget>& stopped) {
       RelaunchConfig live = config;
@@ -623,28 +625,44 @@ int main() {
       RelaunchEffects real = make_relaunch_effects(live, stopped, table);
 
       RelaunchEffects wrapped = real;
-      wrapped.relaunch = [real, knobs, started, install]() mutable {
+      // Both phases, wrapped the same way. The knobs act on whichever phase starts the image
+      // they name, so a scenario says "the host does not start" once and does not have to know
+      // which phase that lands in.
+      auto wrap = std::make_shared<std::function<RelaunchVerdict(bool)>>();
+      *wrap = [real, knobs, started, install, rolledBack, requiredRuns](bool requiredPhase) mutable {
         // Refusing to start something is done by removing its file, so the failure is a real
-        // CreateProcessW failure rather than a lambda saying no.
-        // The host is refused by taking its file away, so the failure is a real CreateProcessW
-        // failure. The client is refused through the seam built for it -- deleting ITS file makes
-        // the shell put a modal error dialog on the desktop, which hangs an unattended run. That
-        // is worth knowing about the product too, and is why launch_via_shell now checks first.
+        // CreateProcessW failure rather than a lambda saying no. The client is refused through
+        // the seam built for it -- deleting ITS file makes the shell put a modal error dialog on
+        // the desktop, which hangs an unattended run.
         std::string savedHost;
-        if (!knobs.startHost) {
+        if (requiredPhase && !knobs.startHost) {
           savedHost = read_file(install + L"\\" + kHostName);
           DeleteFileW((install + L"\\" + kHostName).c_str());
         }
-        if (!knobs.startClient) set_shell_launch_disabled_for_test(true);
-        RelaunchVerdict verdict = real.relaunch();
-        if (knobs.forceVerdict) verdict = knobs.verdict;
-        if (!knobs.startClient) set_shell_launch_disabled_for_test(false);
+        if (!requiredPhase && !knobs.startClient) set_shell_launch_disabled_for_test(true);
+        // The SECOND required phase means a rollback happened in between -- the state machine
+        // only runs it again to bring the restored build back up. That is what tells the health
+        // knob which installation it is being asked about.
+        //
+        // Nothing set this before, so `oldHealthOk` never fired and every restored build was
+        // judged by `newHealthOk`. The cases expecting RestoredButUnhealthy passed for a reason
+        // they were not testing, and a clean RolledBack could not be produced at all.
+        if (requiredPhase) {
+          if (*requiredRuns > 0) *rolledBack = true;
+          ++*requiredRuns;
+        }
+        RelaunchVerdict verdict =
+            requiredPhase ? real.relaunchRequired() : real.relaunchOptional();
+        if (knobs.forceVerdict && !requiredPhase) verdict = knobs.verdict;
+        if (!requiredPhase && !knobs.startClient) set_shell_launch_disabled_for_test(false);
         if (!savedHost.empty()) write_file(install + L"\\" + kHostName, savedHost);
         for (const RelaunchOutcome& o : real.lastOutcomes()) {
           if (o.startedPid != 0) started->push_back(o.startedPid);
         }
         return verdict;
       };
+      wrapped.relaunchRequired = [wrap]() { return (*wrap)(true); };
+      wrapped.relaunchOptional = [wrap]() { return (*wrap)(false); };
       // The health answer differs either side of a rollback: before it the NEW build is being
       // judged, after it the restored one.
       wrapped.healthCheck = [knobs, rolledBack]() {
@@ -941,48 +959,55 @@ int main() {
           r.hostInstances <= 1, std::to_string(r.hostInstances));
   }
 
-  // ============================================ 7. started, and nobody can say which process it is
+  // ================== 7. the unownable client can no longer be in the way of a rollback
   //
-  // The client comes back through the shell because the owning route did not work. It is running
-  // and this attempt cannot prove which process it is, so it will not stop it -- and a rollback
-  // that would have to move the file it is holding does not begin.
+  // This scenario used to assert the opposite, and it was right at the time. The client came back
+  // through the shell before the rollback, nothing could prove which process it was, and so the
+  // rollback refused -- correctly, because restoring files a process may be holding produces an
+  // installation that is part old and part new. The cost was real: the machine kept a build it
+  // wanted to undo.
   //
-  // Refusing costs something real: the machine keeps the new build when it wanted the old one.
-  // The alternative costs more. Terminating on the strength of a name or a snapshot difference
-  // means terminating whatever else answers to it, and a half-finished restore leaves an
-  // installation that is part old and part new with the rollback blamed for it.
+  // The order removes the situation instead of handling it. The optional images start after the
+  // commit, so at the moment a rollback is still possible there is no unownable process to be in
+  // the way. Reclassifying after the fact could never have achieved this -- by the time the shell
+  // fall-through is discovered the process already exists.
 
   {
     Knobs k;
     k.stopped = {hostTarget, clientTarget};
-    k.clientOwnable = false;  // the token launch fails; the shell takes over
+    k.clientOwnable = false;  // the token launch fails; the shell would take over
     k.newHealthOk = false;    // and the new build is unhealthy, so a rollback is wanted
+    k.oldHealthOk = true;     // the version it goes back to is fine
     const Result r = run_scenario(k);
-    check("7 unowned client: the rollback does not proceed",
-          r.outcome.result == UpdateResult::RollbackFailed, result_name(r.outcome.result));
-    check("7 unowned client: and it says why -- no proof of ownership",
-          r.log.find("no proof of ownership") != std::string::npos, r.log);
-    check("7 unowned client: the reason names the refusal, not a file error",
-          r.effectsError.find("not rolling back") != std::string::npos, r.effectsError);
-    // Nothing was half-restored. The files are still the new ones, consistently, which is what
-    // makes another attempt possible.
-    check("7 unowned client: the files were left as the swap left them", r.hostBytes == newBody,
+    check("7 unownable client: the rollback proceeds", r.outcome.result == UpdateResult::RolledBack,
+          std::string(result_name(r.outcome.result)) + " / " + r.effectsError);
+    check("7 unownable client: and it is NOT blocked", r.outcome.result != UpdateResult::RollbackFailed,
+          result_name(r.outcome.result));
+    check("7 unownable client: the old bytes really are back", r.hostBytes == oldBody,
           std::to_string(r.hostBytes.size()));
-    check("7 unowned client: and the backups are still there to go back with", r.hostBackupLeft);
+    // The reason it could proceed: nothing optional had been started when the decision was made.
+    // The order, read off the log: the optional launch comes after the LAST health check, which
+    // is the one on the restored build -- so it happened after the rollback, not before it.
+    check("7 unownable client: the optional launch came after the restore, not before",
+          r.log.find("relaunch (optional)") != std::string::npos &&
+              r.log.rfind("health:") < r.log.find("relaunch (optional)"),
+          r.log);
   }
   {
-    // The counter-control. Same scenario, same unhealthy build, and the client started by a route
-    // that returns a handle -- so it can be stopped and the rollback runs. Without this the case
-    // above would also pass if rollbacks simply never worked.
+    // The counter-control for the ORDER, at the level where it can be seen: the same unownable
+    // client on a path that commits. Here it does start -- after the commit -- and the update
+    // stands. If the optional phase were still running before the commit, this and the case above
+    // could not both hold.
     Knobs k;
     k.stopped = {hostTarget, clientTarget};
-    k.clientOwnable = true;
-    k.newHealthOk = false;
+    k.clientOwnable = false;
     const Result r = run_scenario(k);
-    check("7 counter-control: an owned client is stopped and the rollback runs",
-          r.outcome.result != UpdateResult::RollbackFailed, result_name(r.outcome.result));
-    check("7 counter-control: the old bytes really are back", r.hostBytes == oldBody,
-          std::to_string(r.hostBytes.size()));
+    check("7 counter-control: on a committing path the unownable client is started",
+          r.log.find("started by the shell") != std::string::npos, r.log);
+    check("7 counter-control: and the update stands",
+          r.outcome.result == UpdateResult::Updated ||
+              r.outcome.result == UpdateResult::UpdatedButNotRelaunched,
+          std::string(result_name(r.outcome.result)) + " / " + r.outcome.detail);
   }
 
   // ================================== 8. the shell-routed client, on a path that commits
@@ -1009,6 +1034,33 @@ int main() {
           !r.clientBackupLeft || !r.orphaned.empty(),
           std::to_string(r.orphaned.size()) + " reported, left=" +
               std::to_string(r.clientBackupLeft ? 1 : 0));
+  }
+
+  // ============================================ 9. client-only: the host was not running at all
+  //
+  // Nothing required is in the plan, because the plan is built from what was actually stopped and
+  // the host was never up. So there is nothing to bring back, nothing that writes a health report,
+  // and nothing to wait for -- and waiting anyway would time out and roll back an update whose
+  // files are perfectly correct, for the sole reason that a process was not running beforehand.
+
+  {
+    Knobs k;
+    k.stopped = {clientTarget};  // the client only -- no host was running
+    const Result r = run_scenario(k);
+    check("9 client-only: the update completes", r.outcome.result == UpdateResult::Updated,
+          std::string(result_name(r.outcome.result)) + " / " + r.outcome.detail);
+    check("9 client-only: the new bytes are in place", r.hostBytes == newBody,
+          std::to_string(r.hostBytes.size()));
+    // No host was started, so nothing waited on a report nobody was going to write.
+    check("9 client-only: nothing waited for a health report",
+          r.log.find("nothing that reports health was relaunched") != std::string::npos ||
+              r.log.find("health:") != std::string::npos,
+          r.log);
+    check("9 client-only: the host was never started, so it cannot have been duplicated",
+          r.hostInstances == 0, std::to_string(r.hostInstances));
+    // And the client did come back -- after the commit, as the logged-on user.
+    check("9 client-only: the client came back", r.clientInstances >= 1,
+          std::to_string(r.clientInstances) + " -- " + r.log);
   }
 
   // ================================================================ control: whose process is it

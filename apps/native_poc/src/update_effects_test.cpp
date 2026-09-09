@@ -142,7 +142,8 @@ UpdateEffectsConfig base_config(const std::wstring& install, const std::wstring&
   c.captureRegistration = []() { return true; };
   c.registerInstall = []() { return true; };
   c.restoreRegistration = []() { return true; };
-  c.relaunch = []() { return RelaunchVerdict::AllBack; };
+  c.relaunchRequired = []() { return RelaunchVerdict::AllBack; };
+  c.relaunchOptional = []() { return RelaunchVerdict::AllBack; };
   c.healthCheck = []() { return true; };
   c.quiesceTimeoutMs = 5000;
   // The updater's own image, so validate() can check it is not among the payload rather than
@@ -262,7 +263,8 @@ int main(int argc, char** argv) {
         {"enumerateTargets", [](UpdateEffectsConfig& x) { x.enumerateTargets = nullptr; }},
         {"requestStop", [](UpdateEffectsConfig& x) { x.requestStop = nullptr; }},
         {"registerInstall", [](UpdateEffectsConfig& x) { x.registerInstall = nullptr; }},
-        {"relaunch", [](UpdateEffectsConfig& x) { x.relaunch = nullptr; }},
+        {"relaunchRequired", [](UpdateEffectsConfig& x) { x.relaunchRequired = nullptr; }},
+        {"relaunchOptional", [](UpdateEffectsConfig& x) { x.relaunchOptional = nullptr; }},
         {"healthCheck", [](UpdateEffectsConfig& x) { x.healthCheck = nullptr; }},
         {"captureRegistration", [](UpdateEffectsConfig& x) { x.captureRegistration = nullptr; }},
         {"restoreRegistration", [](UpdateEffectsConfig& x) { x.restoreRegistration = nullptr; }},
@@ -851,7 +853,10 @@ int main(int argc, char** argv) {
     // A genuine CreateProcessW against a path that does not exist -- not a lambda returning false.
     seed_install();
     UpdateEffectsConfig c = base_config(install, staging);
-    c.relaunch = [&]() {
+    // The OPTIONAL phase, because that is what this block is about: an image the machine does not
+    // need failing to come back. It runs after the commit now, which is the point -- the install
+    // is already final by the time this fails, and it stays final.
+    c.relaunchOptional = [&]() {
       std::wstring cmd = install + L"\\NoSuchProduct.exe";
       STARTUPINFOW si{};
       si.cb = sizeof(si);
@@ -1318,7 +1323,8 @@ int main(int argc, char** argv) {
       c.captureRegistration = reg.capture;
       c.registerInstall = reg.apply;
       c.restoreRegistration = reg.restore;
-      c.relaunch = []() { return RelaunchVerdict::AllBack; };
+      c.relaunchRequired = []() { return RelaunchVerdict::AllBack; };
+  c.relaunchOptional = []() { return RelaunchVerdict::AllBack; };
       c.healthCheck = []() { return false; };  // fails after registration
 
       WindowsUpdateEffects e(c);

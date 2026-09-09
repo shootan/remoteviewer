@@ -101,6 +101,17 @@ bool shell_dispatch(ComPtr<IShellDispatch2>* out) {
  * nothing to do with whether it is alive, and reading that as "exited" is what leads to starting
  * a second copy of something that is still running.
  */
+/**
+ * Whether the machine needs this image, as opposed to a person wanting it.
+ *
+ * The same rule RelaunchOutcome::required() applies, stated once for the plan so the phase filter
+ * and the verdict cannot disagree about what "required" means. If they ever did, an image could
+ * be started in the optional phase and then judged by the required rule, or the reverse.
+ */
+bool required_kind(RelaunchKind kind) {
+  return kind == RelaunchKind::ElevatedProcess || kind == RelaunchKind::Service;
+}
+
 RelaunchConfig::Liveness real_liveness(const ProcessTarget& target) {
   HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, target.pid);
   if (!h) {
@@ -367,13 +378,33 @@ RelaunchEffects make_relaunch_effects(RelaunchConfig config,
 
   RelaunchEffects effects;
 
-  effects.relaunch = [shared]() {
-    shared->outcomes.clear();
-    // Before anything is started, so nothing written by a previous run can be read as evidence.
-    shared->logMark = file_size_or_zero(shared->config.healthLogPath);
-    shared->marked = true;
+  // One body, two entry points. `wantRequired` selects which half of the plan runs, and the two
+  // halves never overlap: an entry is required or it is not.
+  //
+  // Written once rather than twice because everything except the filter -- the liveness check, the
+  // ownership rules, the log mark -- must be identical for both. Two copies of this would drift,
+  // and the half that drifted would be the one that runs after the commit, where nothing is
+  // watching any more.
+  const auto run_phase = [shared](bool wantRequired) {
+    if (!shared->marked) {
+      // Taken once per attempt, before anything is started, so nothing written by a previous run
+      // can be read as evidence. The optional phase runs later and must NOT move the mark -- the
+      // health check has already been made against this one.
+      shared->logMark = file_size_or_zero(shared->config.healthLogPath);
+      shared->marked = true;
+    }
+    // Cleared at the START of an attempt, which is the required phase, and appended to by the
+    // optional one. So `lastOutcomes` means "everything this attempt tried", not "whatever ran
+    // last" -- and a caller that reads it after both phases still sees the host.
+    //
+    // Clearing per phase looked tidier and quietly dropped half the record: the required outcomes
+    // vanished the moment the optional phase ran, so anything reading afterwards saw an empty
+    // list and indexed into it. A rollback calls the required phase again, and that is a new
+    // attempt against the restored build, so clearing there is right.
+    if (wantRequired) shared->outcomes.clear();
 
     for (const RelaunchEntry& entry : shared->plan) {
+      if (required_kind(entry.kind) != wantRequired) continue;
       RelaunchOutcome outcome;
       outcome.imageName = entry.imageName;
       outcome.kind = entry.kind;
@@ -496,6 +527,9 @@ RelaunchEffects make_relaunch_effects(RelaunchConfig config,
     }
     return verdict;
   };
+
+  effects.relaunchRequired = [run_phase]() { return run_phase(true); };
+  effects.relaunchOptional = [run_phase]() { return run_phase(false); };
 
   effects.healthCheck = [shared]() {
     // Nothing that reports was brought back, so there is nothing to wait for. This is not a

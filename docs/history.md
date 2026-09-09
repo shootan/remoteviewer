@@ -9698,7 +9698,7 @@ Next action
   - **시나리오 7 신설**: 셸 경유 + 새 빌드 불건강 → **`RollbackFailed`**, 로그에 "no proof of ownership", 파일은 swap 이 남긴 그대로, 백업도 그대로(재시도 가능). **역대조**: 같은 상황에서 소유 가능한 경로면 정지되고 롤백이 실제로 돈다.
   - ⚠️ **남는 위험(판단 요청)**: 데스크톱이 있는데 토큰 경로만 실패하면 **셸로 뜬 클라이언트 때문에 롤백이 영구히 막힌다.** 대안은 (a) 소유 못 하는 optional 은 commit 이후에만 시작 (b) 현행 유지. 조용히 정하지 않고 올린다.
 - **백업 홀더 — 추측을 그만두고 물었다**(`updater_scenarios_test.cpp`):
-  - **Restart Manager(`RmStartSession`/`RmRegisterResources`/`RmGetList`) 를 읽기 전용으로** 붙였다. 고아 백업이 나오면 **누가 잡고 있는지 이름으로** 찍는다. 추측은 세 번 연속 틀렸다(실행 중 이미지 / 잔여 image section / 열린 프로세스 handle — 전부 검증하고 기각). **묻는 편이 셋 다보다 쌌다.**
+  - **Restart Manager(`RmStartSession`/`RmRegisterResources`/`RmGetList`) 를 읽기 전용으로** 붙였다. 고아 백업이 나오면 **누가 잡고 있는지 이름으로** 찍는다. 추측 셋을 각각 **한 가지 통제 조건에서** 시험했다: 실행 중 이미지 → **1초 재시도로 안 풀림**, 잔여 image section → **같은 재시도로 안 풀림**, 열린 프로세스 handle → **`~Shared()` 로 먼저 닫아도 안 풀림**. **"모든 원인을 기각했다" 는 뜻이 아니다** — 각 실험은 그 조건에서 그 설명이 성립하지 않음을 보였을 뿐이고, 남은 조합이나 다른 홀더는 배제하지 못했다. **묻는 편이 세 번 추측하는 것보다 쌌다.**
   - **시나리오 8 신설**: 셸 경유 클라이언트 + commit 하는 경로 — 문제의 그 형태를 격리에서 재현. **현재는 고아가 발생하지 않는다**(백업이 깨끗이 삭제됨). 스냅샷 상관관계와 그것이 붙들던 handle 이 사라진 뒤로 재현되지 않는데, **둘 중 무엇이 없앴는지는 특정하지 못했다.**
 - **`.gnlink-old.N` 은 `Commit` 이 아니라 `Swap()` 안이다**(검증용 정정 반영). 증거를 붙였다(`update_effects_test`):
   - **다음 시도 성공**: 지울 수 없는 백업(**실행 중 이미지**)이 이름을 차지해도 다음 업데이트가 **막히지 않는다**. 옮겨진 것은 `.1` 로 남고, 기록되고, **롤백은 원본 바이트를 정확히 복원**한다.
@@ -9722,3 +9722,26 @@ Next action
 - **하네스 죽은 주석 제거**: `report_leftovers` 머리에 삭제하던 시절의 "KNOWN WART ... **Scoped to this test's own name pattern, so it can never remove anything else**" 가 남아 있었다. **그 문장이 바로 그 삭제를 괜찮아 보이게 만든 추론**이라 함께 지웠다.
 - 검증: `updater_scenarios_test` **ALL PASS (100 checks, 0 failed)**, 잔존 프로세스 0. 제품 코드 변경 없음(주석 1건 + 문서).
 - 변경 파일: `apps/native_poc/src/updater_scenarios_test.cpp`(주석) · `docs/업데이트_기능_설계.md` · `docs/업데이트_배선_계획.md` · `docs/수동확인_체크리스트.md` · `docs/history.md`.
+
+### 473) 2026-09-09 재실행을 두 단계로 — **Required → health → commit → Optional**
+- **왜 순서인가**: 클라이언트는 로그인 사용자 컨텍스트로 띄운다. handle 을 돌려주는 경로가 실패하면 셸이 대신 띄우고 **아무것도 돌려주지 않는다** — 어느 프로세스인지 확정할 수 없으니 **멈출 수도 없고**, 롤백은 그 프로세스가 잡고 있는 파일을 옮겨야 한다. **띄운 뒤에 소유 불가를 알아내는 방식은 구조적으로 늦다**(그때는 이미 프로세스가 존재한다). 그래서 **선택 이미지는 되돌릴 것이 없어진 뒤에** 띄운다.
+- **인터페이스 분리**: `UpdateEffects::Relaunch()` → **`RelaunchRequired()` / `RelaunchOptional()`**. `RelaunchEffects`·`UpdateEffectsConfig`·조합 배선·`unwired()` 전부 두 seam 으로. 계획 필터는 `required_kind()` 하나를 `RelaunchOutcome::required()` 옆에 두어 **둘이 어긋날 수 없게** 했다.
+- **본문은 하나, 진입점만 둘**(`run_phase(bool)`): 생존 검사·소유 규칙·로그 mark 가 두 벌이 되면 갈라지고, **갈라지는 쪽은 commit 뒤에 도는 쪽**이라 아무도 안 본다.
+- **outcome 은 시도 단위로 누적**한다. 단계마다 비웠더니 **required 기록이 optional 단계와 함께 사라져** 그 뒤에 읽는 쪽이 **빈 벡터를 인덱싱**했다(실측 segfault). 로그는 새로 늘어난 것만 찍는다.
+- **롤백 경로도 같은 순서**: 복원 → **구 required** → health → **구 optional**. 선택 이미지 실패가 **필수 health 판정을 가리거나 파일 복구를 막지 않는다.**
+- **종착 계약 정정**: `RolledBackNotRelaunched` 는 이제 **복원 뒤 필수가 안 돌아온 경우**만이다. 창 하나가 안 열린 것과 **기계에 닿을 수 없는 것**을 같은 이름으로 부르고 있었다. commit 뒤 optional 실패는 `UpdatedButNotRelaunched` + 안내(**`Updated` 로 숨기지 않는다**).
+- **회귀 7종**(요청받은 그대로, `update_state_machine_test` 115 checks):
+  1. 토큰 실패 + 셸 가능 + 새 host 불건강 → **롤백 성공**, **롤백 전 optional 기동 0**
+  2. RequiredMissing 이 OptionalMissing 을 이긴다, 그리고 optional 단계에 도달하지 않는다
+  3. 정상 경로: **commit 전 optional 0 / 후 1**, required 는 health 앞
+  4. 롤백 뒤 **구 optional 복귀**(required·health 뒤에)
+  5. client-only: 필수 계획 없음 → 정상 → commit → optional, **health 1회**
+  6. commit 뒤 optional 실패 → `UpdatedButNotRelaunched`, 백업은 이미 없고 롤백 없음
+  7. 부분 quiesce → 디스크 무변경 abandon, **두 단계 각 1회**
+- **실제 제품 경로 회귀**(`updater_scenarios_test` 115 checks): **시나리오 7 을 뒤집었다.** 예전엔 "소유 불가 클라이언트 때문에 롤백이 거부된다" 를 고정했는데, 이제는 **"그 상황 자체가 생기지 않는다"** 를 고정한다 — 롤백이 정상 수행되고 구 바이트가 돌아온다. **역대조**: 같은 소유 불가 클라이언트라도 commit 하는 경로에서는 실제로 셸로 뜬다. **시나리오 9 신설**: client-only 실제 경로.
+- ⚠️ **반대 증거(순서를 되돌려 측정)**: state machine **3건 실패**(호출 흔적이 `... RelaunchRequired, RelaunchOptional, HealthCheck, Commit ...`), 시나리오 **4건 실패** — 시나리오 7 이 **`RollbackFailed`** 로 바뀌고 로그가 `started by the shell ... | could not stop ScnClient.exe ... | rollback failed: not rolling back` 을 그대로 찍는다. **이 순서가 없으면 실기에서 롤백이 막힌다는 것이 제품 경로에서 재현된다.**
+- **하네스 결함 1건**: `oldHealthOk` 노브가 **한 번도 발화하지 않았다** — `rolledBack` 을 아무도 true 로 만들지 않아 복원된 빌드도 `newHealthOk` 로 판정됐다. `RestoredButUnhealthy` 를 기대하던 케이스들이 **테스트하지 않는 이유로** 통과하고 있었고, 깨끗한 `RolledBack` 은 만들 수조차 없었다. 두 번째 required 단계를 롤백 신호로 삼아 연결했다.
+- **`update_relaunch_test` 를 unbuffered 로**: 이 스위트는 실제 프로세스를 띄우므로, 죽는 순간의 보고가 버퍼에 남아 사라지면 **정확히 필요할 때** 없다. 위 segfault 를 이것 없이는 못 짚었다.
+- **검증**(콘솔, 활성 RDP 없음): update 12종 전부 PASS — check 28 / effects 199 / handoff 33 / http 36 / job_guard 19 / manifest 82 / relaunch 107 / release 80 / **state_machine 115** / assembly 40 / options 48 / **scenarios 115**. 나머지 C++ 바이너리 전부 exit 0. 잔존 프로세스 0 · `.claude/scenario-runs/` 0.
+- 변경 파일: `update_state_machine.{hpp,cpp}` · `update_relaunch.{hpp,cpp}` · `update_effects.{hpp,cpp}` · `updater_effects.cpp` · 테스트 6종 · `docs/history.md` · `docs/업데이트_기능_설계.md` · `docs/full_code_audit_2026-09-08.md`.
+- 라이브·설치·배포·버전 인상·릴리스 보류 그대로.

@@ -171,7 +171,27 @@ class UpdateEffects {
   virtual bool RegisterInstall() = 0;
 
   /** Brings the product back in whatever configuration it was running in before. */
-  virtual RelaunchVerdict Relaunch() = 0;
+  /**
+   * Brings back the images the machine NEEDS: the host and the service.
+   *
+   * Separate from the optional ones because of when each may run. This one happens while a
+   * rollback is still possible, so anything it starts can still be stopped and undone.
+   */
+  virtual RelaunchVerdict RelaunchRequired() = 0;
+
+  /**
+   * Brings back the images a person wants but the machine does not need -- the client.
+   *
+   * Runs only AFTER the update is committed, and that is the whole point of it being its own
+   * step. The client is started in the user's context, and when the route that hands back a
+   * handle is unavailable the shell starts it instead and nothing comes back: no handle, no way
+   * to say which process is ours, and therefore no way to stop it. A rollback has to move the
+   * files such a process is holding, so starting one before the commit means discovering, too
+   * late, that the way back has been closed by the act of restoring the product.
+   *
+   * After the commit there is nothing left to undo, so an unownable process costs nothing.
+   */
+  virtual RelaunchVerdict RelaunchOptional() = 0;
 
   /** Observes that the new build is actually working (design 3.6). */
   virtual bool HealthCheck() = 0;

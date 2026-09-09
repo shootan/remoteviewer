@@ -155,7 +155,14 @@ struct UpdateEffectsConfig {
    * responses, and folding them together committed the update in the one case where the backups
    * were the only way back.
    */
-  std::function<RelaunchVerdict()> relaunch;
+  std::function<RelaunchVerdict()> relaunchRequired;
+  /**
+   * The optional images, run only after the commit.
+   *
+   * Its own seam because the two happen at different points in the sequence, and the whole reason
+   * for the split is when rather than how -- see UpdateEffects::RelaunchOptional.
+   */
+  std::function<RelaunchVerdict()> relaunchOptional;
 
   /** Observes that the new build works (design 3.6). */
   std::function<bool()> healthCheck;
@@ -243,7 +250,8 @@ class WindowsUpdateEffects : public UpdateEffects {
   bool Quiesce() override;
   bool Swap() override;
   bool RegisterInstall() override;
-  RelaunchVerdict Relaunch() override;
+  RelaunchVerdict RelaunchRequired() override;
+  RelaunchVerdict RelaunchOptional() override;
   bool HealthCheck() override;
   bool Rollback() override;
   void Commit() override;

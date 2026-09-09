@@ -227,9 +227,13 @@ int main() {
       rec->healthExpectedVersion = config.expectedVersion;
       rec->note("makeRelaunch:targets=" + std::to_string(stopped.size()));
       RelaunchEffects effects;
-      effects.relaunch = [rec]() {
+      effects.relaunchRequired = [rec]() {
         ++rec->relaunchCount;
-        rec->note("relaunch");
+        rec->note("relaunch:required");
+        return RelaunchVerdict::AllBack;
+      };
+      effects.relaunchOptional = [rec]() {
+        rec->note("relaunch:optional");
         return RelaunchVerdict::AllBack;
       };
       effects.healthCheck = [rec]() {

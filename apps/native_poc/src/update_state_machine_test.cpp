@@ -71,13 +71,20 @@ class FakeEffects : public UpdateEffects {
    * What the relaunch reports. A verdict, not a bool, because the machine differs on whether the
    * thing that did not come back was one it needs.
    */
-  RelaunchVerdict relaunchVerdict = RelaunchVerdict::AllBack;
+  RelaunchVerdict requiredVerdict = RelaunchVerdict::AllBack;
+  /**
+   * What the OPTIONAL phase reports. Its own knob, because the two phases now happen at different
+   * points in the sequence and a case usually means one or the other -- "the client did not come
+   * back" and "the host did not come back" were the same field, which made it impossible to say
+   * that the client was started after the commit and the host before it.
+   */
+  RelaunchVerdict optionalVerdict = RelaunchVerdict::AllBack;
   /**
    * What the relaunch of the RESTORED build reports, when it differs. Absent means the same
    * verdict -- fine for most cases, but a test that wants to see a clean RolledBack after a new
    * build failed needs the second attempt to succeed where the first did not.
    */
-  const RelaunchVerdict* relaunchAfterRollback = nullptr;
+  const RelaunchVerdict* requiredAfterRollback = nullptr;
   bool healthOk = true;
   /**
    * What health says about the RESTORED build, when that differs from what it said about the new
@@ -126,11 +133,15 @@ class FakeEffects : public UpdateEffects {
   bool Quiesce() override { calls.push_back("Quiesce"); return quiesceOk; }
   bool Swap() override { calls.push_back("Swap"); return swapOk; }
   bool RegisterInstall() override { calls.push_back("RegisterInstall"); return registerOk; }
-  RelaunchVerdict Relaunch() override {
+  RelaunchVerdict RelaunchRequired() override {
     const bool restored = ran("Rollback");
-    calls.push_back("Relaunch");
-    if (restored && relaunchAfterRollback) return *relaunchAfterRollback;
-    return relaunchVerdict;
+    calls.push_back("RelaunchRequired");
+    if (restored && requiredAfterRollback) return *requiredAfterRollback;
+    return requiredVerdict;
+  }
+  RelaunchVerdict RelaunchOptional() override {
+    calls.push_back("RelaunchOptional");
+    return optionalVerdict;
   }
   bool HealthCheck() override {
     const bool restored = ran("Rollback");
@@ -326,7 +337,7 @@ int main() {
     // a reason to undo a good install; a host that did not is, because a machine nobody can reach
     // is worth less than an older one somebody can.
     FakeEffects f;
-    f.relaunchVerdict = RelaunchVerdict::OptionalMissing;
+    f.optionalVerdict = RelaunchVerdict::OptionalMissing;
     const UpdateOutcome o = run_update(f, accepting(), "windows");
     check("only an optional image missing -> the update stands",
           o.result == UpdateResult::UpdatedButNotRelaunched, result_name(o.result));
@@ -352,11 +363,11 @@ int main() {
     // "Required started" is not "required healthy": CreateProcess returning tells you a process
     // exists, and health is the only thing that asks whether the product is answering.
     FakeEffects f;
-    f.relaunchVerdict = RelaunchVerdict::OptionalMissing;
+    f.optionalVerdict = RelaunchVerdict::OptionalMissing;
     f.healthOk = false;             // the host came up and is not answering
     f.healthAfterRollback = 1;      // the version it goes back to is fine
     const RelaunchVerdict backUp = RelaunchVerdict::AllBack;
-    f.relaunchAfterRollback = &backUp;  // and it comes back complete
+    f.requiredAfterRollback = &backUp;  // and it comes back complete
     const UpdateOutcome o = run_update(f, accepting(), "windows");
     check("unhealthy host + missing client -> rolled back, not a partial success",
           o.result == UpdateResult::RolledBack, result_name(o.result));
@@ -373,7 +384,7 @@ int main() {
     // simply rolled back whenever something was missing, this would fail -- so the two together
     // say health is what decides, not the verdict.
     FakeEffects f;
-    f.relaunchVerdict = RelaunchVerdict::OptionalMissing;
+    f.optionalVerdict = RelaunchVerdict::OptionalMissing;
     f.healthOk = true;
     const UpdateOutcome o = run_update(f, accepting(), "windows");
     check("healthy host + missing client -> the install still stands",
@@ -382,7 +393,7 @@ int main() {
   }
   {
     FakeEffects f;
-    f.relaunchVerdict = RelaunchVerdict::RequiredMissing;
+    f.requiredVerdict = RelaunchVerdict::RequiredMissing;
     const UpdateOutcome o = run_update(f, accepting(), "windows");
     check("something the machine needs missing -> rollback", f.ran("Rollback"));
     check("...and NOT committed, because the backups are the way back", f.commitCount == 0,
@@ -405,7 +416,8 @@ int main() {
     FakeEffects f;
     f.prepareOk = false;
     const UpdateOutcome o = run_update(f, accepting(), "windows");
-    check("prepare fails -> what left is started again", f.ran("Relaunch"));
+    check("prepare fails -> what left is started again",
+          f.ran("RelaunchRequired") && f.ran("RelaunchOptional"), joined(f.calls));
     check("prepare fails -> AbandonedBeforeSwap", o.result == UpdateResult::AbandonedBeforeSwap,
           result_name(o.result));
     check("prepare fails -> nothing was swapped or registered",
@@ -414,7 +426,7 @@ int main() {
   {
     FakeEffects f;
     f.prepareOk = false;
-    f.relaunchVerdict = RelaunchVerdict::OptionalMissing;
+    f.optionalVerdict = RelaunchVerdict::OptionalMissing;
     const UpdateOutcome o = run_update(f, accepting(), "windows");
     // Distinguished, because "we changed nothing" and "the machine is reachable" are separate
     // claims and only one of them is true here.
@@ -422,14 +434,16 @@ int main() {
           o.result == UpdateResult::AbandonedNotRelaunched, result_name(o.result));
     check("...and not reported as an ordinary abandon",
           o.result != UpdateResult::AbandonedBeforeSwap);
-    check("relaunch is attempted once", f.count("Relaunch") == 1,
-          std::to_string(f.count("Relaunch")));
+    check("relaunch is attempted once per phase",
+          f.count("RelaunchRequired") == 1 && f.count("RelaunchOptional") == 1,
+          joined(f.calls));
   }
   {
     FakeEffects f;
     f.quiesceOk = false;
     const UpdateOutcome o = run_update(f, accepting(), "windows");
-    check("quiesce fails -> what stopped is started again", f.ran("Relaunch"));
+    check("quiesce fails -> what stopped is started again",
+          f.ran("RelaunchRequired") && f.ran("RelaunchOptional"), joined(f.calls));
     check("quiesce fails -> still an abandon", o.result == UpdateResult::AbandonedBeforeSwap,
           result_name(o.result));
   }
@@ -447,9 +461,14 @@ int main() {
   {
     // And the outcome when the restore works but nothing comes back up. Worse than RolledBack for
     // a remote user: the files are right and the machine is unreachable.
+    // "Rolled back and the machine is unreachable" now means the REQUIRED images did not come
+    // back after the restore. It used to mean any relaunch failure, which lumped a client window
+    // that did not reopen in with a host nobody can reach -- and those are not the same event for
+    // the person on the other end.
     FakeEffects f;
     f.registerOk = false;
-    f.relaunchVerdict = RelaunchVerdict::OptionalMissing;
+    const RelaunchVerdict stillMissing = RelaunchVerdict::RequiredMissing;
+    f.requiredAfterRollback = &stillMissing;
     const UpdateOutcome o = run_update(f, accepting(), "windows");
     check("rolled back but not relaunched is its own outcome",
           o.result == UpdateResult::RolledBackNotRelaunched, result_name(o.result));
@@ -457,8 +476,8 @@ int main() {
           o.result != UpdateResult::RolledBack);
     // No retry. A second identical attempt is unlikely to differ, and looping here would sit
     // between the user and a machine that is already in its restored state.
-    check("relaunch is attempted once, not repeated", f.count("Relaunch") == 1,
-          std::to_string(f.count("Relaunch")));
+    check("relaunch is attempted once, not repeated",
+          f.count("RelaunchRequired") == 1, joined(f.calls));
   }
   {
     FakeEffects f;
@@ -472,7 +491,8 @@ int main() {
     // is not running. The host is one of the processes stopped to do the swap, so for a remote
     // user that is an unreachable machine with no way in to fix it. Restoring is only half of a
     // rollback; the other half is that what was running is running again.
-    check("registration fails -> the previous version is started again", f.ran("Relaunch"));
+    check("registration fails -> the previous version is started again",
+          f.ran("RelaunchRequired"), joined(f.calls));
     check("registration fails -> and its health is checked", f.ran("HealthCheck"));
   }
   {
@@ -498,11 +518,119 @@ int main() {
           o.result == UpdateResult::RollbackFailed, result_name(o.result));
   }
 
+  // ------------------------------------------- the order: required, health, commit, then optional
+  //
+  // The optional images start AFTER the commit, and the reason is not tidiness. The client is
+  // started as the logged-on user, and when the route that hands back a handle is unavailable the
+  // shell starts it and returns nothing -- no handle, no way to know which process is ours, no way
+  // to stop it. A rollback has to move the files such a process holds. Starting it before the
+  // commit therefore risks closing the way back at the exact moment the way back is needed.
+  //
+  // Reclassifying afterwards does not help: by the time the fall-through is discovered the process
+  // exists. The order is the fix, so the order is what these assert.
+
+  {
+    // 1. The token launch fails and the shell would take over -- and the new host is unhealthy.
+    // The rollback must succeed, and NOTHING optional may have been started before it.
+    FakeEffects f;
+    f.healthOk = false;
+    f.healthAfterRollback = 1;
+    f.optionalVerdict = RelaunchVerdict::OptionalMissing;  // the shell route, unownable
+    const UpdateOutcome o = run_update(f, accepting(), "windows");
+    check("unhealthy host -> the rollback runs and succeeds", o.result == UpdateResult::RolledBack,
+          result_name(o.result));
+    // The assertion this whole reordering exists for.
+    check("...and no optional image was started before the rollback",
+          !ran_before(f, "RelaunchOptional", "Rollback"), joined(f.calls));
+    check("...and none was committed either", f.commitCount == 0, std::to_string(f.commitCount));
+  }
+  {
+    // 2. Required missing beats optional missing. Both fail; the severe one decides.
+    FakeEffects f;
+    f.requiredVerdict = RelaunchVerdict::RequiredMissing;
+    f.optionalVerdict = RelaunchVerdict::OptionalMissing;
+    const UpdateOutcome o = run_update(f, accepting(), "windows");
+    check("required missing decides, whatever the optional one says", f.ran("Rollback"),
+          joined(f.calls));
+    check("...and it is never a partial success",
+          o.result != UpdateResult::UpdatedButNotRelaunched, result_name(o.result));
+    // And the optional phase never ran on the way there -- there was nothing to run it for.
+    check("...and the optional phase was not reached before the rollback",
+          !ran_before(f, "RelaunchOptional", "Rollback"), joined(f.calls));
+  }
+  {
+    // 3. The ordinary success: zero optional launches before the commit, exactly one after.
+    FakeEffects f;
+    const UpdateOutcome o = run_update(f, accepting(), "windows");
+    check("happy path -> Updated", o.result == UpdateResult::Updated, result_name(o.result));
+    check("nothing optional starts before the commit", ran_before(f, "Commit", "RelaunchOptional"),
+          joined(f.calls));
+    check("...and exactly one optional phase runs after it",
+          f.count("RelaunchOptional") == 1, joined(f.calls));
+    check("...while the required one ran before health", ran_before(f, "RelaunchRequired", "HealthCheck"),
+          joined(f.calls));
+  }
+  {
+    // 4. After a rollback the OLD optional comes back too. Restoring the files and leaving the
+    // user without their window is half a restore.
+    FakeEffects f;
+    f.registerOk = false;  // forces a rollback
+    const UpdateOutcome o = run_update(f, accepting(), "windows");
+    check("a rollback brings the old optional images back as well",
+          ran_before(f, "Rollback", "RelaunchOptional"), joined(f.calls));
+    check("...after the required ones and their health check",
+          ran_before(f, "RelaunchRequired", "RelaunchOptional") &&
+              ran_before(f, "HealthCheck", "RelaunchOptional"),
+          joined(f.calls));
+    check("...and the result is a clean rollback", o.result == UpdateResult::RolledBack,
+          result_name(o.result));
+  }
+  {
+    // 5. Client-only: the host was never running, so there is no required plan. Nothing waits on
+    // a health report that nobody was ever going to write.
+    FakeEffects f;
+    f.requiredVerdict = RelaunchVerdict::AllBack;  // an empty required plan reports AllBack
+    const UpdateOutcome o = run_update(f, accepting(), "windows");
+    check("client-only -> the update completes", o.result == UpdateResult::Updated,
+          result_name(o.result));
+    check("client-only -> the client still comes back, after the commit",
+          ran_before(f, "Commit", "RelaunchOptional"), joined(f.calls));
+    check("client-only -> health is still asked once, not skipped and not repeated",
+          f.count("HealthCheck") == 1, joined(f.calls));
+  }
+  {
+    // 6. Optional failing after the commit: the backups are already gone and that is correct,
+    // and the outcome is NOT reported as a plain success.
+    FakeEffects f;
+    f.optionalVerdict = RelaunchVerdict::OptionalMissing;
+    const UpdateOutcome o = run_update(f, accepting(), "windows");
+    check("optional failing after the commit -> UpdatedButNotRelaunched",
+          o.result == UpdateResult::UpdatedButNotRelaunched, result_name(o.result));
+    check("...not hidden as Updated", o.result != UpdateResult::Updated, result_name(o.result));
+    check("...the commit already happened and is not undone",
+          f.commitCount == 1 && !f.ran("Rollback"), joined(f.calls));
+    check("...and the detail says what happened",
+          o.detail.find("optional") != std::string::npos, o.detail);
+  }
+  {
+    // 7. A partial quiesce: something never left. It must not be started a second time, and the
+    // abandon path brings back both kinds because nothing on disk was touched.
+    FakeEffects f;
+    f.quiesceOk = false;
+    const UpdateOutcome o = run_update(f, accepting(), "windows");
+    check("partial quiesce -> abandoned without touching the disk", disk_untouched(f),
+          joined(f.calls));
+    check("...and both phases are attempted exactly once",
+          f.count("RelaunchRequired") == 1 && f.count("RelaunchOptional") == 1, joined(f.calls));
+    check("...and it is an abandon, not an update", o.result == UpdateResult::AbandonedBeforeSwap,
+          result_name(o.result));
+  }
+
   // ---------------------------------------------------------------- relaunch is not a rollback
 
   {
     FakeEffects f;
-    f.relaunchVerdict = RelaunchVerdict::OptionalMissing;
+    f.optionalVerdict = RelaunchVerdict::OptionalMissing;
     const UpdateOutcome o = run_update(f, accepting(), "windows");
     check("relaunch fails -> UpdatedButNotRelaunched",
           o.result == UpdateResult::UpdatedButNotRelaunched, result_name(o.result));
@@ -532,7 +660,7 @@ int main() {
         {"quiesce fails", [](FakeEffects& f) { f.quiesceOk = false; }},
         {"swap fails", [](FakeEffects& f) { f.swapOk = false; }},
         {"rollback fails", [](FakeEffects& f) { f.swapOk = false; f.rollbackOk = false; }},
-        {"relaunch fails", [](FakeEffects& f) { f.relaunchVerdict = RelaunchVerdict::OptionalMissing; }},
+        {"relaunch fails", [](FakeEffects& f) { f.optionalVerdict = RelaunchVerdict::OptionalMissing; }},
         {"success", [](FakeEffects&) {}},
     };
     for (const Variant& v : variants) {
