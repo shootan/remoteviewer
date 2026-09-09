@@ -13,6 +13,18 @@
 //
 // The same fixture covers directory_observe_from_health(), which had no test at all: it is the
 // route a viewer uses when it resumed from a stored session and so never saw a login response.
+//
+// THIS SUITE TAKES ABOUT 140 SECONDS, AND THAT IS NOT A HANG.
+//
+// Every wait here is bounded (the polls are 150 x 100ms and then fail), but the waits are real:
+// the product floors the heartbeat interval at five seconds -- `if (cfg_.heartbeatSeconds < 5)
+// cfg_.heartbeatSeconds = 5` -- so a test cannot ask for a faster cycle, and each HostAgent
+// scenario has to sit through one. The only way to make this quicker is to let the interval be
+// injected, the way the update tests inject their lock name.
+//
+// Recorded here because the tempting fix is to delete scenarios, and the scenarios are the point:
+// what they assert is the number of requests, which is the only thing that separates "repaired it
+// once" from "retried in a loop" or "signed out on the way to succeeding".
 
 #ifndef NOMINMAX
 #define NOMINMAX  // or windows.h's min/max macros eat the (std::min) in native_socket.hpp
