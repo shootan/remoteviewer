@@ -27,8 +27,9 @@
 namespace remote60::native_poc::directory {
 
 struct HostAgentConfig {
-  // Base URL of the directory service, e.g. http://example.org:8080. Only http:// is
-  // understood today; https:// is rejected rather than silently downgraded.
+  // Base URL of the directory service, e.g. http://example.org:8080 or https://example.org.
+  // The scheme picks the transport and the default port, and it is decided once, by
+  // parse_directory_url.
   std::string url;
   std::string accountId;
   // Used once to obtain a host token. Never written to disk and never logged.

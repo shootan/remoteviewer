@@ -105,6 +105,9 @@ bool directory_session_open(const DirectorySessionRequest& request, DirectorySes
                            &target, outError)) {
       return false;
     }
+    // The first attempt's message is not the outcome. Left in place, a caller that logs outError
+    // on success would report a failure that was repaired.
+    if (outError) outError->clear();
   }
   if (target.candidates.empty()) {
     if (outError) *outError = "the directory returned no address for this host";

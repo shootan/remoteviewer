@@ -1,0 +1,469 @@
+// What the clients do when the directory says it has no address observation for them.
+//
+// The server answers 409 for that now, and it is a state either end can repair: send another
+// observation and ask again. The dangerous shapes are the two either side of doing it right --
+// treating it as an authentication failure (which signs the host out and makes it re-register,
+// fixing nothing and losing the cached token) and retrying in a loop (which spins against a
+// server refusing for a reason the client cannot fix, with a user waiting on it).
+//
+// Neither shape shows up in a passing suite unless something counts the requests. So this file
+// stands up a directory -- http and udp, in this process, on ports the OS picks -- scripts what it
+// answers, and counts what arrives. The assertions are about the number of requests as much as the
+// outcome: "it worked" is also true of a client that tried forty times.
+//
+// The same fixture covers directory_observe_from_health(), which had no test at all: it is the
+// route a viewer uses when it resumed from a stored session and so never saw a login response.
+
+#ifndef NOMINMAX
+#define NOMINMAX  // or windows.h's min/max macros eat the (std::min) in native_socket.hpp
+#endif
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <map>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "directory_client.hpp"
+#include "directory_session_bootstrap.hpp"
+#include "directory_session_client.hpp"
+
+#pragma comment(lib, "ws2_32.lib")
+
+namespace {
+
+int gFailures = 0;
+
+void check(const char* name, bool cond, const std::string& detail = {}) {
+  std::printf("%s  %s%s%s\n", cond ? "PASS" : "FAIL", name, detail.empty() ? "" : "  ",
+              detail.c_str());
+  if (!cond) ++gFailures;
+}
+
+struct Reply {
+  int status = 200;
+  std::string body;
+};
+
+/**
+ * A directory that answers what the test tells it to, and remembers what it was asked.
+ *
+ * Both halves, because the flow needs both: the UDP probe is what makes an observation, and the
+ * HTTP call is where the server's opinion of that observation comes back.
+ */
+class FakeDirectory {
+ public:
+  bool Start() {
+    http_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    udp_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (http_ == INVALID_SOCKET || udp_ == INVALID_SOCKET) return false;
+    if (!Bind(http_, &httpPort_) || !Bind(udp_, &udpPort_)) return false;
+    if (::listen(http_, 8) != 0) return false;
+    httpThread_ = std::thread([this] { ServeHttp(); });
+    udpThread_ = std::thread([this] { ServeUdp(); });
+    return true;
+  }
+
+  void Stop() {
+    stopping_ = true;
+    if (http_ != INVALID_SOCKET) { closesocket(http_); http_ = INVALID_SOCKET; }
+    if (udp_ != INVALID_SOCKET) { closesocket(udp_); udp_ = INVALID_SOCKET; }
+    if (httpThread_.joinable()) httpThread_.join();
+    if (udpThread_.joinable()) udpThread_.join();
+  }
+
+  ~FakeDirectory() { Stop(); }
+
+  /** Queued answers for a path. The last one repeats once the queue runs out. */
+  void Script(const std::string& path, std::vector<Reply> replies) {
+    std::lock_guard<std::mutex> lk(mu_);
+    scripts_[path] = std::move(replies);
+    served_[path] = 0;
+  }
+
+  int Count(const std::string& path) {
+    std::lock_guard<std::mutex> lk(mu_);
+    return counts_[path];
+  }
+
+  int ObserveProbes() const { return probes_.load(); }
+
+  std::string url() const { return "http://127.0.0.1:" + std::to_string(httpPort_); }
+  uint16_t udpPort() const { return udpPort_; }
+
+ private:
+  static bool Bind(SOCKET s, uint16_t* outPort) {
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);  // loopback only
+    addr.sin_port = 0;                              // the OS picks
+    if (bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) return false;
+    int len = sizeof(addr);
+    if (getsockname(s, reinterpret_cast<sockaddr*>(&addr), &len) != 0) return false;
+    *outPort = ntohs(addr.sin_port);
+    return true;
+  }
+
+  Reply Next(const std::string& path) {
+    std::lock_guard<std::mutex> lk(mu_);
+    ++counts_[path];
+    auto it = scripts_.find(path);
+    if (it == scripts_.end() || it->second.empty()) return Reply{404, "{\"error\":\"no script\"}"};
+    size_t& at = served_[path];
+    const Reply reply = it->second[at < it->second.size() ? at : it->second.size() - 1];
+    ++at;
+    return reply;
+  }
+
+  void ServeHttp() {
+    while (!stopping_) {
+      SOCKET c = accept(http_, nullptr, nullptr);
+      if (c == INVALID_SOCKET) return;
+      std::string raw;
+      char buf[4096];
+      size_t headEnd = std::string::npos;
+      size_t want = 0;
+      for (;;) {
+        if (headEnd == std::string::npos) {
+          headEnd = raw.find("\r\n\r\n");
+          if (headEnd != std::string::npos) {
+            const size_t at = raw.find("Content-Length:");
+            want = at == std::string::npos ? 0 : strtoul(raw.c_str() + at + 15, nullptr, 10);
+            if (raw.size() >= headEnd + 4 + want) break;
+          }
+        } else if (raw.size() >= headEnd + 4 + want) {
+          break;
+        }
+        const int n = recv(c, buf, sizeof(buf), 0);
+        if (n <= 0) break;
+        raw.append(buf, static_cast<size_t>(n));
+      }
+
+      // "POST /api/connect HTTP/1.1" -> "/api/connect"
+      std::string path;
+      const size_t firstSpace = raw.find(' ');
+      const size_t secondSpace = firstSpace == std::string::npos
+                                     ? std::string::npos
+                                     : raw.find(' ', firstSpace + 1);
+      if (firstSpace != std::string::npos && secondSpace != std::string::npos) {
+        path = raw.substr(firstSpace + 1, secondSpace - firstSpace - 1);
+      }
+      const Reply reply = Next(path);
+      const std::string out = "HTTP/1.1 " + std::to_string(reply.status) + " X\r\nContent-Length: " +
+                              std::to_string(reply.body.size()) +
+                              "\r\nConnection: close\r\n\r\n" + reply.body;
+      size_t sent = 0;
+      while (sent < out.size()) {
+        const int n = send(c, out.data() + sent, static_cast<int>(out.size() - sent), 0);
+        if (n <= 0) break;
+        sent += static_cast<size_t>(n);
+      }
+      shutdown(c, SD_SEND);
+      closesocket(c);
+    }
+  }
+
+  void ServeUdp() {
+    char buf[512];
+    while (!stopping_) {
+      sockaddr_in from{};
+      int fromLen = sizeof(from);
+      const int n = recvfrom(udp_, buf, sizeof(buf) - 1, 0, reinterpret_cast<sockaddr*>(&from),
+                            &fromLen);
+      if (n <= 0) return;
+      buf[n] = '\0';
+      if (std::string(buf, static_cast<size_t>(n)).rfind("OBSERVE ", 0) != 0) continue;
+      ++probes_;
+      char ip[INET_ADDRSTRLEN] = {};
+      inet_ntop(AF_INET, &from.sin_addr, ip, sizeof(ip));
+      const std::string reply = std::string("{\"ip\":\"") + ip + "\",\"port\":" +
+                                std::to_string(ntohs(from.sin_port)) + "}";
+      sendto(udp_, reply.data(), static_cast<int>(reply.size()), 0,
+             reinterpret_cast<sockaddr*>(&from), fromLen);
+    }
+  }
+
+  SOCKET http_ = INVALID_SOCKET;
+  SOCKET udp_ = INVALID_SOCKET;
+  uint16_t httpPort_ = 0;
+  uint16_t udpPort_ = 0;
+  std::map<std::string, std::vector<Reply>> scripts_;
+  std::map<std::string, size_t> served_;
+  std::map<std::string, int> counts_;
+  std::atomic<int> probes_{0};
+  std::mutex mu_;
+  std::thread httpThread_;
+  std::thread udpThread_;
+  std::atomic<bool> stopping_{false};
+};
+
+std::string candidateBody() {
+  // One candidate that resolves and answers nothing. PunchAny falls back to the first candidate
+  // rather than giving up, so the session still opens -- which is what lets this test end at the
+  // directory exchange instead of needing a peer.
+  return "{\"punchToken\":\"" + std::string(32, 'a') +
+         "\",\"hostPublicIp\":\"127.0.0.1\",\"hostPublicUdpPort\":9,"
+         "\"candidates\":[{\"ip\":\"127.0.0.1\",\"port\":9,\"kind\":\"public\"}]}";
+}
+
+/**
+ * Runs a HostAgent against the fake directory for a few seconds.
+ *
+ * The agent never owns a socket -- the address the directory observes has to be the one media
+ * arrives on -- so the test supplies one, forwards what the agent sends, and feeds the replies
+ * back in through ConsumeUdpPacket. That is the same wiring the real host has.
+ */
+std::string exe_directory() {
+  char path[MAX_PATH] = {};
+  GetModuleFileNameA(nullptr, path, MAX_PATH);
+  std::string text(path);
+  const size_t slash = text.find_last_of("\/");
+  return slash == std::string::npos ? std::string(".") : text.substr(0, slash);
+}
+
+void RunHost(FakeDirectory& dir, const char* label, int wantHeartbeats, int wantRegisters) {
+  SOCKET media = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  sockaddr_in bindAddr{};
+  bindAddr.sin_family = AF_INET;
+  bindAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  bind(media, reinterpret_cast<sockaddr*>(&bindAddr), sizeof(bindAddr));
+  DWORD timeout = 200;
+  setsockopt(media, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout),
+             sizeof(timeout));
+
+  remote60::native_poc::directory::HostAgent agent;
+  std::atomic<bool> pumping{true};
+  std::thread pump([&] {
+    char buf[2048];
+    while (pumping.load()) {
+      sockaddr_in from{};
+      int fromLen = sizeof(from);
+      const int n = recvfrom(media, buf, sizeof(buf), 0, reinterpret_cast<sockaddr*>(&from),
+                             &fromLen);
+      if (n > 0) agent.ConsumeUdpPacket(buf, static_cast<size_t>(n), from);
+    }
+  });
+
+  remote60::native_poc::directory::HostAgentConfig cfg;
+  cfg.url = dir.url();
+  cfg.accountId = "tester";
+  cfg.password = "test-pass-1234";
+  cfg.hostName = "Fixture PC";
+  // Beside this executable and unique per case, so no run reads another's cached token and
+  // nothing outside the build tree is written.
+  cfg.cachePath = exe_directory() + "\retry-fixture-" + std::string(label) + ".json";
+  cfg.observeUdpPort = dir.udpPort();
+  cfg.heartbeatSeconds = 5;
+
+  std::string error;
+  const bool started = agent.Start(cfg, [&](const void* data, size_t len, const sockaddr_in& to) {
+    sendto(media, static_cast<const char*>(data), static_cast<int>(len), 0,
+           reinterpret_cast<const sockaddr*>(&to), sizeof(to));
+  }, &error);
+  check((std::string("the host agent starts (") + label + ")").c_str(), started, error);
+
+  // Waits for what this case is about rather than for a fixed span: the repaired 409 retries
+  // immediately, while a cleared token waits out a heartbeat cycle before registering again.
+  // Bounded, so a client that never gets there fails rather than hangs.
+  for (int i = 0; i < 150; ++i) {
+    if (dir.Count("/api/host/heartbeat") >= wantHeartbeats &&
+        dir.Count("/api/host/register") >= wantRegisters) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+  agent.Stop();
+  pumping = false;
+  closesocket(media);
+  if (pump.joinable()) pump.join();
+  DeleteFileA(cfg.cachePath.c_str());
+}
+
+}  // namespace
+
+int main() {
+  WSADATA wsa{};
+  if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+    std::printf("FAIL  winsock did not start\n");
+    return 1;
+  }
+
+  using namespace remote60::native_poc;
+
+  // ------------------------------------------------- directory_observe_from_health(), untested
+  //
+  // The route a viewer takes when it resumed from a stored session: it never saw a login
+  // response, so this is the only place the observe endpoint can come from. On an https
+  // directory, getting nothing here means refusing to observe -- so a reconnect would fail where
+  // a fresh sign-in works, and the difference would look like nothing at all.
+  {
+    FakeDirectory dir;
+    check("the fake directory starts", dir.Start());
+
+    dir.Script("/healthz", {Reply{200, "{\"ok\":true,\"observe\":{\"port\":29181}}"}});
+    directory::ObserveEndpoint got;
+    std::string error;
+    check("the health route carries the observe endpoint",
+          directory_observe_from_health(dir.url(), &got, &error), error);
+    check("...with the port the server named", got.known && got.port == 29181,
+          std::to_string(got.port));
+
+    dir.Script("/healthz", {Reply{200, "{\"ok\":true,\"observe\":{\"port\":29181,\"host\":\"obs.example\"}}"}});
+    got = directory::ObserveEndpoint{};
+    check("...and the host when there is one",
+          directory_observe_from_health(dir.url(), &got, &error) && got.host == "obs.example",
+          got.host);
+
+    // An older directory says nothing. That is a documented state, not a failure of this call --
+    // the port rule has an answer for absence, and reporting it as an error would turn every
+    // older server into a broken one.
+    dir.Script("/healthz", {Reply{200, "{\"ok\":true}"}});
+    got = directory::ObserveEndpoint{};
+    error.clear();
+    const bool silent = directory_observe_from_health(dir.url(), &got, &error);
+    check("a directory that says nothing leaves the endpoint unknown", !silent && !got.known);
+    check("...and does not invent a port", got.port == 0, std::to_string(got.port));
+
+    dir.Script("/healthz", {Reply{500, "{\"error\":\"broken\"}"}});
+    got = directory::ObserveEndpoint{};
+    error.clear();
+    check("a server error is an error", !directory_observe_from_health(dir.url(), &got, &error));
+    check("...and it says something", !error.empty(), error);
+
+    const std::string deadUrl = dir.url();
+    dir.Stop();
+    got = directory::ObserveEndpoint{};
+    error.clear();
+    check("a directory that is not there is reported as unreachable",
+          !directory_observe_from_health(deadUrl, &got, &error) &&
+              error.find("cannot reach") != std::string::npos,
+          error);
+  }
+
+  // ------------------------------------------------------- the viewer's retry, counted
+  {
+    FakeDirectory dir;
+    dir.Start();
+    dir.Script("/api/connect", {Reply{409, "{\"error\":\"observation_required\"}"},
+                                Reply{200, candidateBody()}});
+
+    DirectorySessionRequest request{};
+    request.url = dir.url();
+    request.sessionToken = "session";
+    request.hostId = "host";
+    request.directoryUdpPort = dir.udpPort();
+    request.punchBudgetMs = 300;
+    DirectorySessionResult session{};
+    std::string error;
+    const bool opened = directory_session_open(request, &session, &error);
+    check("a 409 on connect is repaired rather than reported", opened, error);
+    check("...by asking exactly twice", dir.Count("/api/connect") == 2,
+          std::to_string(dir.Count("/api/connect")));
+    check("...and by observing again first", dir.ObserveProbes() >= 2,
+          std::to_string(dir.ObserveProbes()));
+    check("...and without signing in again", dir.Count("/api/login") == 0,
+          std::to_string(dir.Count("/api/login")));
+    if (session.socket != kInvalidSocket) closesocket(session.socket);
+    dir.Stop();
+  }
+
+  {
+    // Refused twice: the client must give up, not keep going. This is the assertion that a loop
+    // would fail -- the outcome is the same either way, only the count differs.
+    FakeDirectory dir;
+    dir.Start();
+    dir.Script("/api/connect", {Reply{409, "{\"error\":\"observation_required\"}"}});
+
+    DirectorySessionRequest request{};
+    request.url = dir.url();
+    request.sessionToken = "session";
+    request.hostId = "host";
+    request.directoryUdpPort = dir.udpPort();
+    request.punchBudgetMs = 300;
+    DirectorySessionResult session{};
+    std::string error;
+    check("a directory that keeps refusing is not retried forever",
+          !directory_session_open(request, &session, &error), error);
+    check("...and it stopped at two attempts", dir.Count("/api/connect") == 2,
+          std::to_string(dir.Count("/api/connect")));
+    dir.Stop();
+  }
+
+  {
+    // Every other refusal is not repairable from here, so it must not cost a second round trip.
+    FakeDirectory dir;
+    dir.Start();
+    dir.Script("/api/connect", {Reply{404, "{\"error\":\"host not found\"}"}});
+
+    DirectorySessionRequest request{};
+    request.url = dir.url();
+    request.sessionToken = "session";
+    request.hostId = "host";
+    request.directoryUdpPort = dir.udpPort();
+    request.punchBudgetMs = 300;
+    DirectorySessionResult session{};
+    std::string error;
+    check("a 404 is not treated as a missing observation",
+          !directory_session_open(request, &session, &error), error);
+    check("...and is asked once", dir.Count("/api/connect") == 1,
+          std::to_string(dir.Count("/api/connect")));
+    dir.Stop();
+  }
+
+  // ------------------------------------------------------------- the host's retry, end to end
+  //
+  // Through HostAgent itself, not a piece of it: register, observe, heartbeat, and the 409 that
+  // arrives in the middle. Two things must be true and only one of them is about the outcome.
+  //
+  // The heartbeat has to be sent twice -- once refused, once accepted -- and the host must NOT
+  // register again. A 401 clears the cached token and re-registers, which is right for a token
+  // the server has forgotten and wrong for this: nothing is wrong with the token, and dropping it
+  // would lose the one thing that lets an unattended PC come back without someone walking to it.
+  {
+    FakeDirectory dir;
+    dir.Start();
+    dir.Script("/api/host/register",
+               {Reply{200, "{\"hostId\":\"h1\",\"hostToken\":\"" + std::string(32, 'b') + "\"}"}});
+    dir.Script("/api/host/heartbeat", {Reply{409, "{\"error\":\"observation_required\"}"},
+                                       Reply{200, "{\"ok\":true}"}});
+    RunHost(dir, "409-then-200", 2, 1);
+
+    check("the host heartbeats again after a 409", dir.Count("/api/host/heartbeat") == 2,
+          std::to_string(dir.Count("/api/host/heartbeat")));
+    check("...and does not register again, so the cached token survives",
+          dir.Count("/api/host/register") == 1,
+          std::to_string(dir.Count("/api/host/register")));
+    check("...and it observed more than once", dir.ObserveProbes() >= 2,
+          std::to_string(dir.ObserveProbes()));
+    dir.Stop();
+  }
+
+  {
+    // The contrast that gives the assertion above its meaning: 401 IS the token being gone, and
+    // it does re-register. If both statuses took the same path, the test above would pass for a
+    // client that treated every refusal as a lost token.
+    FakeDirectory dir;
+    dir.Start();
+    dir.Script("/api/host/register",
+               {Reply{200, "{\"hostId\":\"h1\",\"hostToken\":\"" + std::string(32, 'b') + "\"}"}});
+    dir.Script("/api/host/heartbeat", {Reply{401, "{\"error\":\"unknown host token\"}"},
+                                       Reply{200, "{\"ok\":true}"}});
+    RunHost(dir, "401", 1, 2);
+
+    check("a 401 does register again", dir.Count("/api/host/register") >= 2,
+          std::to_string(dir.Count("/api/host/register")));
+    dir.Stop();
+  }
+
+  WSACleanup();
+  std::printf(gFailures == 0 ? "\nall retry checks passed\n" : "\n%d FAILED\n", gFailures);
+  return gFailures == 0 ? 0 : 1;
+}

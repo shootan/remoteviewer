@@ -1118,6 +1118,19 @@ add_executable(remote60_directory_session_client_test
 target_include_directories(remote60_directory_session_client_test PRIVATE src)
 target_link_libraries(remote60_directory_session_client_test PRIVATE common ws2_32)
 
+# Counts what the clients ask for when the directory refuses with 409. The outcome alone does not
+# separate "repaired it once" from "retried in a loop", so the assertions are about the counts.
+add_executable(remote60_directory_retry_test
+  src/directory_retry_test.cpp
+  src/directory_session_client.cpp
+  src/directory_client.cpp
+  src/winhttp_transport.cpp
+  src/directory_session_bootstrap.cpp
+  src/directory_rendezvous.cpp
+)
+target_include_directories(remote60_directory_retry_test PRIVATE src)
+target_link_libraries(remote60_directory_retry_test PRIVATE common ws2_32)
+
 add_executable(remote60_client_shell_bridge_test
   src/client_shell_bridge_test.cpp
   src/client_shell_bridge.cpp
