@@ -1282,6 +1282,24 @@ add_executable(remote60_winhttp_tls_posture_test
 target_include_directories(remote60_winhttp_tls_posture_test PRIVATE src)
 target_link_libraries(remote60_winhttp_tls_posture_test PRIVATE winhttp)
 
+# The two hops in real processes. The helper ships nowhere; it performs the same sequence
+# updater_main performs so the chain can be driven without running the real updater (which would
+# copy itself into an admin-only directory and stop product processes).
+add_executable(remote60_cred_hop_helper
+  src/update_credential_hop_helper.cpp
+  src/update_credential_channel.cpp
+)
+target_include_directories(remote60_cred_hop_helper PRIVATE src)
+target_link_libraries(remote60_cred_hop_helper PRIVATE advapi32)
+
+add_executable(remote60_update_credential_hops_test
+  src/update_credential_hops_test.cpp
+  src/update_credential_channel.cpp
+)
+target_include_directories(remote60_update_credential_hops_test PRIVATE src)
+target_link_libraries(remote60_update_credential_hops_test PRIVATE advapi32)
+add_dependencies(remote60_update_credential_hops_test remote60_cred_hop_helper)
+
 # The credential channel: framing, and the check that refuses a client that is not the process we
 # started. The refusal is driven by really connecting from the wrong process.
 add_executable(remote60_update_credential_channel_test
