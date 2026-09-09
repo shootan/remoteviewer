@@ -516,6 +516,22 @@ add_executable(remote60_host_main_loop_mailbox_test
 )
 target_include_directories(remote60_host_main_loop_mailbox_test PRIVATE src)
 
+# The observe-endpoint contract, against the vectors the JS and Kotlin suites also read. All
+# three runtimes had this rule wrong in the same way once, which is what a shared file is for.
+add_executable(remote60_observe_vectors_test
+  src/observe_vectors_test.cpp
+  src/directory_client.cpp
+  src/winhttp_transport.cpp
+)
+target_include_directories(remote60_observe_vectors_test PRIVATE src)
+target_link_libraries(remote60_observe_vectors_test PRIVATE common ws2_32 iphlpapi shell32)
+target_compile_definitions(remote60_observe_vectors_test PRIVATE
+  "REMOTE60_OBSERVE_VECTORS_PATH=\"${CMAKE_CURRENT_SOURCE_DIR}/../shared/observe_endpoint_vectors.txt\""
+)
+if(MSVC)
+  target_compile_options(remote60_observe_vectors_test PRIVATE /utf-8)
+endif()
+
 # The version-comparison contract, checked against the vectors the JS and Kotlin suites also
 # read. The vectors path is baked in so the test can be run from any working directory.
 add_executable(remote60_version_compare_test

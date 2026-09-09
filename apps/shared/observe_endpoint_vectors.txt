@@ -1,0 +1,94 @@
+# Address-observation endpoint contract -- shared test vectors.
+#
+# Three runtimes have to agree on where a client sends its UDP address probe: the directory server
+# (JS) advertises the endpoint, the Windows host and viewer (C++) read it, and the Android client
+# (Kotlin) reads it too. A header cannot be shared across those three, so the agreement is pinned
+# here instead -- one file, read by all three test suites.
+#
+# This exists because the rule used to be "http port + 1" everywhere, with no server involved.
+# Behind TLS on 443 that is 444. Nothing answers there, so the observation never lands; the host
+# then never completes a heartbeat and never appears in anyone's list, and the viewer never
+# reaches /api/connect, so it never learns the relay address either. One arithmetic assumption,
+# and the product does not work at all -- while every test passes, because every test made the
+# same assumption.
+#
+# THE CONTRACT
+#   1. The server may advertise an observe endpoint. What it advertises wins over every default:
+#      it knows which port it listens on and no client does.
+#   2. The port is read from inside the "observe" object. A "port" belonging to anything else --
+#      the relay, a top-level field -- is not this port.
+#   3. Only a whole number in 1..65535 is a port. 29181.5, "29181", -1, 0 and 65536 are not, and a
+#      value that is not a port means the server said nothing usable, not that it said zero.
+#   4. With no advertisement and an http url, the port is the http port plus one. That is the
+#      server's own default relationship between its two ports, and every current deployment.
+#   5. With no advertisement and an https url, there is NO default. 443 + 1 is not a fallback.
+#      The client refuses and says the server needs configuring, because a probe sent into silence
+#      produces a failure that looks like a broken PC rather than a missing setting.
+#   6. An http port of 65535 has the same answer for a different reason: +1 has nowhere to go, and
+#      the cast would make it port 0.
+#   7. The server does not validate the advertised host -- it is published as whatever the
+#      operator typed -- so each client validates it. A value carrying a scheme, a path, a port, a
+#      space, an empty or over-long label, a trailing dot, or a leading/trailing '-' is not a host
+#      name and is dropped. Dropping it does NOT discard the port that came with it: the rejection
+#      is recorded so a server-side mistake is findable instead of appearing as a timeout.
+#   8. A host that is empty or only whitespace was not sent at all. That is absence, not a
+#      rejection, and the client falls back to the directory's own host either way.
+#   9. Absence of the whole advertisement is not an error. An older server does not send it, and
+#      rule 4 has the answer.
+#
+# FORMAT
+#   parse|<json>|<known 0/1>|<port>|<host>|<hostRejected 0/1>
+#   port|<known 0/1>|<advertised port>|<http port>|<secure 0/1>|<expected port>
+#
+#   In a parse row an empty <host> means "no host". Lines starting with # and blank lines are
+#   ignored. The json field contains no '|' and no spaces.
+
+# ---- rule 1, 2: the advertisement, read from the right place
+parse|{"sessionToken":"t","observe":{"port":29181}}|1|29181||0
+parse|{"observe":{"port":29181},"port":9999}|1|29181||0
+parse|{"port":9999,"relay":{"port":43000}}|0|0||0
+parse|{"observe":{"host":"obs.example"}}|0|0||0
+
+# ---- rule 3: what is not a port
+parse|{"observe":{"port":29181.5}}|0|0||0
+parse|{"observe":{"port":"29181"}}|0|0||0
+parse|{"observe":{"port":-1}}|0|0||0
+parse|{"observe":{"port":0}}|0|0||0
+parse|{"observe":{"port":65536}}|0|0||0
+parse|{"observe":{"port":65535}}|1|65535||0
+parse|{"observe":{"port":1}}|1|1||0
+
+# ---- rule 7: the advertised host, which the server does not check
+parse|{"observe":{"port":29181,"host":"obs.example.net"}}|1|29181|obs.example.net|0
+parse|{"observe":{"port":29181,"host":"http://obs.example"}}|1|29181||1
+parse|{"observe":{"port":29181,"host":"obs.example:29181"}}|1|29181||1
+parse|{"observe":{"port":29181,"host":"obs.example/path"}}|1|29181||1
+parse|{"observe":{"port":29181,"host":"obs..example"}}|1|29181||1
+parse|{"observe":{"port":29181,"host":"obs.example."}}|1|29181||1
+parse|{"observe":{"port":29181,"host":"-obs.example"}}|1|29181||1
+parse|{"observe":{"port":29181,"host":"obs.example-"}}|1|29181||1
+
+# ---- rule 8: nothing sent is not a rejection
+parse|{"observe":{"port":29181,"host":""}}|1|29181||0
+
+# ---- rule 9: an older server
+parse|{"sessionToken":"t"}|0|0||0
+parse|{}|0|0||0
+
+# ---- rule 1: the advertisement wins, whatever the scheme
+port|1|29181|8080|0|29181
+port|1|29181|443|1|29181
+port|1|1|65535|0|1
+
+# ---- rule 4: http keeps its documented default
+port|0|0|8080|0|8081
+port|0|0|29180|0|29181
+port|0|0|80|0|81
+
+# ---- rule 5: https has no default, and 444 is not one
+port|0|0|443|1|0
+port|0|0|8443|1|0
+
+# ---- rule 6: the last port has nowhere to add one
+port|0|0|65535|0|0
+port|0|0|65534|0|65535

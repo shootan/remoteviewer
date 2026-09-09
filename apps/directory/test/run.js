@@ -79,6 +79,17 @@ function cleanup() {
     process.exit(publishContract.code);
   }
 
+  // The third leg of the observe-endpoint contract: the C++ and Kotlin suites check that they
+  // read the shared vectors the same way, and this checks that what the server emits is one
+  // of the shapes those rules accept. Starts its own servers on its own ports.
+  console.log('\n--- observe endpoint contract (server output vs shared vectors) ---');
+  const observeContract = await runTest(['observe_contract_test.js']);
+  if (observeContract.code !== 0) {
+    cleanup();
+    console.log('\nRESULT: FAILED');
+    process.exit(observeContract.code);
+  }
+
   // Serverless as far as this runner is concerned: it starts its own server on its own ports,
   // behind its own proxy, because the whole point is what the server sees when the client's
   // socket is not the one it is talking to.
