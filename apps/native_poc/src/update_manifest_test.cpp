@@ -362,18 +362,51 @@ int main(int argc, char** argv) {
           r.status == ManifestStatus::SignatureInvalid, status_name(r.status));
   }
 
-  // ---------------------------------------------------------------- the shipped key rejects all
+  // ---------------------------------------------------------------- the shipped key
 
   {
-    // No release key is compiled in, on purpose. Until one is deliberately put there, the default
-    // verifier must accept nothing -- including a signature that is genuinely valid under the
-    // test key. This is the safe direction and it should fail loudly if someone drops in a
-    // placeholder that happens to verify.
+    // The release key is compiled in now. What this asserts is the same safety property as
+    // before, from the other side: the shipped verifier must refuse a document signed by any
+    // OTHER key -- and the shared test vectors are signed by exactly such a key, so they are the
+    // right thing to hand it.
+    //
+    // Before the key existed, this block asserted the key was empty. That assertion was about a
+    // temporary state, and keeping it would now mean asserting the product cannot check updates.
+    // Which answer is correct depends on whose key signed the vectors, and the test knows: the
+    // fixture carries its own public key. Run against the shared TEST vectors this must refuse;
+    // run against a fixture signed with the release key it must accept. Asserting only the
+    // refusal would leave "the shipped key can verify anything at all" untested -- and a verifier
+    // that refuses everything passes a refusal test perfectly.
+    const bool signedByShippedKey = keyHex == trusted_public_key_hex();
     const ManifestResult r = load_manifest(document, sigHex, "windows", default_verifier());
-    check("default verifier rejects while no release key is compiled in",
-          r.status == ManifestStatus::SignatureInvalid, status_name(r.status));
-    check("trusted key is empty in this build",
-          std::string(trusted_public_key_hex()).empty(), trusted_public_key_hex());
+    if (signedByShippedKey) {
+      check("the shipped verifier accepts a document signed by the release key",
+            r.status == ManifestStatus::Ok, status_name(r.status));
+
+      // And still refuses it once a byte moves. Acceptance on its own would also be true of a
+      // verifier that never looks.
+      std::string tampered = document;
+      tampered[tampered.size() / 2] ^= 0x01;
+      const ManifestResult t = load_manifest(tampered, sigHex, "windows", default_verifier());
+      check("...and refuses the same document with one byte changed",
+            t.status == ManifestStatus::SignatureInvalid || t.status == ManifestStatus::Malformed,
+            status_name(t.status));
+    } else {
+      check("the shipped verifier rejects a document signed by another key",
+            r.status == ManifestStatus::SignatureInvalid, status_name(r.status));
+    }
+
+    // The two encodings of the same key are easy to swap and the mistake is silent: the SPKI form
+    // decodes fine and then fails the length check inside the verifier, so every update is
+    // refused with no error anywhere.
+    const std::string key = trusted_public_key_hex();
+    check("a release key is compiled in", !key.empty());
+    check("...as raw X||Y, which is 64 bytes", key.size() == 128, std::to_string(key.size()));
+    check("...in lower-case hex and nothing else",
+          key.find_first_not_of("0123456789abcdef") == std::string::npos, key);
+    // The SPKI DER form of a P-256 key is 91 bytes: this is the length that would silently
+    // disable every check if it were pasted here instead.
+    check("...and not the 91-byte SPKI form", key.size() != 182, std::to_string(key.size()));
   }
 
   std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED")

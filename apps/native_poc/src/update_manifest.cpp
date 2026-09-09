@@ -298,9 +298,17 @@ ManifestResult load_manifest(const std::string& document,
 }
 
 const char* trusted_public_key_hex() {
-  // Deliberately empty. See the header: the release key is an approved decision this code does
-  // not get to make, and an empty key means default_verifier() accepts nothing.
-  return "";
+  // The operational release key, as raw X||Y -- 64 bytes, 128 hex characters.
+  //
+  // NOT the SPKI form, and the difference is silent: decode_hex() would happily accept the 91-byte
+  // SPKI encoding and default_verifier() would then refuse every manifest at the length check
+  // below, with no error anywhere. A build that cannot verify anything looks exactly like a build
+  // with nothing published.
+  //
+  // Public by nature. It is the value every client must hold to check a release, and it is
+  // recorded in docs/history.md #480 alongside the SPKI fingerprint used to identify the key.
+  // The private half is DPAPI-protected outside this repository and appears in no build.
+  return "8709ea70daac6464af4ed0fff1ed7489ec9e9a4a908d48babe5b62753242d9a872a4556df0c9ffa2e98dc70e6c553a624a8a235e8c4303488743f37ba240193e";
 }
 
 SignatureVerifier default_verifier() {

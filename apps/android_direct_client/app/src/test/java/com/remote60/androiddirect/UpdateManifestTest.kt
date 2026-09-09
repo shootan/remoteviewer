@@ -273,15 +273,26 @@ class UpdateManifestTest {
     }
 
     /**
-     * No release key is compiled in, and the Android side must be fail-closed exactly as Windows
-     * is. A placeholder that happened to verify something would be worse than no key at all, so
-     * this fails loudly if one appears.
+     * The release key is compiled in now, and the same safety property is asserted from the other
+     * side: the shipped key must refuse a document signed by any other key. The shared vectors are
+     * signed by exactly such a key, so they are the right thing to hand it.
+     *
+     * This used to assert the key was empty. That was a statement about a temporary state, and
+     * keeping it would now mean asserting the app cannot check updates at all.
+     *
+     * The two encodings are easy to swap and the mistake is silent: the SPKI form decodes and then
+     * fails a length check inside the verifier, so every update is refused with no error anywhere.
      */
     @Test
-    fun noReleaseKeyIsCompiledIn() {
-        assertEquals("", UpdateManifest.trustedPublicKeyHex())
-        assertFalse("the empty trusted key must verify nothing",
-            UpdateManifest.verifySignature(document, signatureHex,
-                UpdateManifest.trustedPublicKeyHex()))
+    fun theShippedKeyIsRawXyAndRefusesOtherKeys() {
+        val key = UpdateManifest.trustedPublicKeyHex()
+        assertTrue("a release key is compiled in", key.isNotEmpty())
+        assertEquals("raw X||Y is 64 bytes", 128, key.length)
+        assertTrue("lower-case hex and nothing else", key.all { it in "0123456789abcdef" })
+        // 182 would be the 91-byte SPKI DER form -- the value that silently disables every check.
+        assertTrue("not the SPKI form", key.length != 182)
+
+        assertFalse("the shipped key must not verify a document signed by another key",
+            UpdateManifest.verifySignature(document, signatureHex, key))
     }
 }

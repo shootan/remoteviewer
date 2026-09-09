@@ -275,11 +275,14 @@ object UpdateManifest {
     /**
      * The key this build trusts, as raw X||Y hex.
      *
-     * Empty, exactly as on the Windows side. No release key is compiled in, so nothing verifies
-     * until one is deliberately put here -- and a placeholder that happened to verify something
-     * would be worse than no key at all. Choosing and storing a real key is a separate approved
-     * decision (design 4.5).
+     * Delegates to BuildConfig rather than holding a second copy. It used to return a hard-coded
+     * "" while the value the app actually verifies with came from BuildConfig -- two answers to
+     * one question, and the one the tests asked was not the one the product used. Embedding the
+     * release key made them disagree, which is how that was noticed.
+     *
+     * Empty is still a legitimate answer: a build made without the key verifies nothing, which is
+     * the fail-closed direction.
      */
     @JvmStatic
-    fun trustedPublicKeyHex(): String = ""
+    fun trustedPublicKeyHex(): String = BuildConfig.UPDATE_PUBLIC_KEY_HEX
 }
