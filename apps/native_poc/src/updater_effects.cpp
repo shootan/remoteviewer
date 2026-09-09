@@ -53,8 +53,10 @@ class ReadySignaller : public UpdateEffects {
                  std::shared_ptr<std::string> expectedVersion, std::string installedVersion,
                  std::function<void()> captureTargets,
                  std::function<bool(const std::wstring&)> signalReady,
-                 std::function<bool(const std::wstring&, uint32_t)> awaitAck,
-                 WindowsUpdateEffects* concrete, std::function<void(const std::string&)> log)
+                 std::function<void*(const std::wstring&)> openAck,
+                 std::function<bool(void*, uint32_t)> awaitAck,
+                 std::function<void(void*)> closeAck, WindowsUpdateEffects* concrete,
+                 std::function<void(const std::string&)> log)
       : inner_(inner),
         eventName_(std::move(eventName)),
         versionToInstall_(std::move(versionToInstall)),
@@ -62,9 +64,13 @@ class ReadySignaller : public UpdateEffects {
         installedVersion_(std::move(installedVersion)),
         captureTargets_(std::move(captureTargets)),
         signalReady_(std::move(signalReady)),
+        openAck_(std::move(openAck)),
         awaitAck_(std::move(awaitAck)),
+        closeAck_(std::move(closeAck)),
         concrete_(concrete),
         log_(std::move(log)) {}
+
+  ~ReadySignaller() { release_ack(); }
 
   bool AcquireLock() override { return inner_.AcquireLock(); }
   void ReleaseLock() override { inner_.ReleaseLock(); }
@@ -81,6 +87,23 @@ class ReadySignaller : public UpdateEffects {
       // Recorded, not discarded. Whether anyone received this decides whether the product may be
       // stopped, and that decision is made at PrepareForSwap -- the last point before anything
       // is touched.
+      // The channel is opened FIRST and held. Signalling before holding it leaves a window in
+      // which the caller answers, closes its handle, and the named object goes with it -- so the
+      // answer that was delivered cannot be found, and this stands down after having already told
+      // the caller to leave.
+      if (!eventName_.empty()) {
+        ackHandle_ = openAck_ ? openAck_(eventName_) : nullptr;
+        if (!ackHandle_) {
+          // No channel means no way to be answered. Not signalling is the safe half of that: the
+          // caller keeps running because it was never told to go.
+          if (log_) {
+            log_("the acknowledgement channel could not be opened, so nothing was signalled -- "
+                 "no update this time");
+          }
+          signalDelivered_ = false;
+          return ok;
+        }
+      }
       signalDelivered_ = signalReady_ ? signalReady_(eventName_) : false;
       if (!signalDelivered_ && log_ && !eventName_.empty()) {
         log_("the ready signal could not be delivered -- nothing is waiting for this update");
@@ -95,9 +118,13 @@ class ReadySignaller : public UpdateEffects {
     // moved. Failing here abandons the attempt with the disk untouched, which is the correct
     // outcome of a handover nobody completed.
     if (!eventName_.empty()) {
-      const bool acked = awaitAck_ ? awaitAck_(eventName_, kAckTimeoutMs) : false;
+      // Waited on the handle held since before the signal -- not opened here, which is where the
+      // window was.
+      const bool acked = (awaitAck_ && ackHandle_) ? awaitAck_(ackHandle_, kAckTimeoutMs) : false;
       std::string why;
-      if (!may_stop_the_product(signalDelivered_, acked, &why)) {
+      const bool proceed = may_stop_the_product(signalDelivered_, acked, &why);
+      release_ack();
+      if (!proceed) {
         if (log_) log_("not going ahead: " + why);
         return false;
       }
@@ -150,8 +177,17 @@ class ReadySignaller : public UpdateEffects {
   std::string installedVersion_;
   std::function<void()> captureTargets_;
   std::function<bool(const std::wstring&)> signalReady_;
-  std::function<bool(const std::wstring&, uint32_t)> awaitAck_;
+  std::function<void*(const std::wstring&)> openAck_;
+  std::function<bool(void*, uint32_t)> awaitAck_;
+  std::function<void(void*)> closeAck_;
+  void* ackHandle_ = nullptr;
   bool signalDelivered_ = false;
+
+  /** Releases the channel once, whenever this ends -- answered, refused or abandoned. */
+  void release_ack() {
+    if (ackHandle_ && closeAck_) closeAck_(ackHandle_);
+    ackHandle_ = nullptr;
+  }
   WindowsUpdateEffects* concrete_ = nullptr;
   std::function<void(const std::string&)> log_;
 };
@@ -179,8 +215,15 @@ bool UpdaterDeps::validate(std::string* detail) const {
   // signalReady and awaitAck may be absent: an update nobody is waiting on is an ordinary case,
   // and then there is no handshake to complete. What must not happen is one without the other --
   // signalling with no way to hear the answer is exactly the shape of the defect they exist for.
-  if (static_cast<bool>(signalReady) != static_cast<bool>(awaitAck)) {
-    return fail("signalReady and awaitAck must be supplied together");
+  const int handshakeParts = static_cast<int>(static_cast<bool>(signalReady)) +
+                             static_cast<int>(static_cast<bool>(openAck)) +
+                             static_cast<int>(static_cast<bool>(awaitAck)) +
+                             static_cast<int>(static_cast<bool>(closeAck));
+  if (handshakeParts != 0 && handshakeParts != 4) {
+    // All or none. A partial handshake is the shape of the defect they exist for: signalling with
+    // no way to hear the answer, or opening a channel with no way to hold it.
+    return fail("the handshake seams must be supplied together: signalReady, openAck, awaitAck, "
+                "closeAck");
   }
   return true;
 }
@@ -217,14 +260,17 @@ UpdaterDeps production_updater_deps(std::function<void(const std::string&)> log)
     CloseHandle(event);
     return set;
   };
-  deps.awaitAck = [](const std::wstring& readyEventName, uint32_t timeoutMs) {
+  deps.openAck = [](const std::wstring& readyEventName) -> void* {
     const std::wstring ackName = make_ack_event_name(readyEventName);
-    if (ackName.empty()) return false;
-    HANDLE event = OpenEventW(SYNCHRONIZE, FALSE, ackName.c_str());
-    if (!event) return false;
-    const bool acked = WaitForSingleObject(event, timeoutMs) == WAIT_OBJECT_0;
-    CloseHandle(event);
-    return acked;
+    if (ackName.empty()) return nullptr;
+    return OpenEventW(SYNCHRONIZE, FALSE, ackName.c_str());
+  };
+  deps.awaitAck = [](void* ackHandle, uint32_t timeoutMs) {
+    if (!ackHandle) return false;
+    return WaitForSingleObject(static_cast<HANDLE>(ackHandle), timeoutMs) == WAIT_OBJECT_0;
+  };
+  deps.closeAck = [](void* ackHandle) {
+    if (ackHandle) CloseHandle(static_cast<HANDLE>(ackHandle));
   };
   wchar_t self[MAX_PATH]{};
   GetModuleFileNameW(nullptr, self, MAX_PATH);
@@ -493,7 +539,7 @@ UpdateOutcome UpdaterEffects::run(const std::string& platform) {
   };
   ReadySignaller signaller(effects, options_.readyEventName, versionToInstall, expectedVersion,
                            options_.installedVersion, captureNow, deps_.signalReady,
-                           deps_.awaitAck, &effects, deps_.log);
+                           deps_.openAck, deps_.awaitAck, deps_.closeAck, &effects, deps_.log);
   const UpdateOutcome outcome = run_update(signaller, deps_.verifier, platform);
   verifiedVersion_ = *versionToInstall;
   lastEffectsError_ = effects.last_error();

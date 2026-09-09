@@ -105,7 +105,8 @@ int main() {
    * signalling, `signal` whether it signals at all, and `hostTimeoutMs` how long the host waits.
    */
   const auto run = [&](int bootstrapExit, int delayMs, bool signal, DWORD hostTimeoutMs,
-                       int ackWaitMs, bool dieEarly = false) {
+                       int ackWaitMs, bool dieEarly = false, bool openAckLate = false,
+                       int ackOpenDelayMs = 0, bool withoutAckChannel = false) {
     Attempt a;
     ++attemptNo;
     wchar_t stem[128]{};
@@ -128,6 +129,8 @@ int main() {
                            std::to_wstring(delayMs) + L" --ack-wait " + std::to_wstring(ackWaitMs);
     if (!signal) command += L" --no-signal";
     if (dieEarly) command += L" --die-before-signal";
+    if (openAckLate) command += L" --open-ack-late";
+    if (ackOpenDelayMs > 0) command += L" --ack-open-delay " + std::to_wstring(ackOpenDelayMs);
 
     STARTUPINFOW si{};
     si.cb = sizeof(si);
@@ -144,8 +147,19 @@ int main() {
 
     // The product's own wait. Not a copy of it -- a copy is what let the original stay wrong.
     const DWORD waitBegan = GetTickCount();
-    a.step = await_handoff(ready, ack, pi.hProcess, readyName, hostTimeoutMs, &a.why);
+    // `withoutAckChannel` hands the wait no channel at all -- the caller cannot answer. It must
+    // not agree to exit on that basis.
+    a.step = await_handoff(ready, withoutAckChannel ? nullptr : ack, pi.hProcess, readyName,
+                           hostTimeoutMs, nullptr, &a.why);
     a.waitMs = GetTickCount() - waitBegan;
+
+    // Released IMMEDIATELY, the way the host releases them -- before the worker has necessarily
+    // got to its side of the handshake. That is the window; leaving them open until the end of
+    // the attempt would close it and the test would prove nothing.
+    if (ready) CloseHandle(ready);
+    if (ack) CloseHandle(ack);
+    ready = nullptr;
+    ack = nullptr;
 
     // The worker outlives the bootstrap, so the witness is read after giving it time to finish.
     // Waiting on it is what a host cannot do and a test can.
@@ -161,8 +175,6 @@ int main() {
       Sleep(100);
     }
     a.witness = read_text(witness);
-    if (ready) CloseHandle(ready);
-    if (ack) CloseHandle(ack);
     return a;
   };
 
@@ -233,6 +245,56 @@ int main() {
           std::to_string(a.waitMs) + "ms of a 20000ms deadline");
     check("4b worker dies: and the reason says the working copy stopped, not that time ran out",
           a.why.find("stopped before") != std::string::npos, a.why);
+  }
+
+  // ---------------------------------------------------------------- 6. the acknowledgement window
+  {
+    // The channel is held from before the signal. The host answers and lets go of its handle at
+    // once -- as it does -- and the worker must still find the answer, because its own handle has
+    // been keeping the object alive the whole time.
+    const Attempt a = run(/*bootstrapExit=*/0, /*delayMs=*/300, /*signal=*/true,
+                          /*hostTimeoutMs=*/20000, /*ackWaitMs=*/5000, /*dieEarly=*/false,
+                          /*openAckLate=*/false, /*ackOpenDelayMs=*/600);
+    check("6 ack held early: the host agrees to exit", a.step == HandoffStep::ExitNow,
+          std::string(handoff_step_name(a.step)) + ": " + a.why);
+    check("6 ack held early: the worker held the channel before signalling",
+          a.witness.find("holds the ack channel before signalling") != std::string::npos,
+          a.witness);
+    check("6 ack held early: and the answer was still there after the host let go",
+          a.witness.find("worker WOULD stop the product") != std::string::npos, a.witness);
+  }
+  {
+    // The counter-example, and it is the defect: open the channel only when the answer is wanted.
+    // By then the host has answered and closed, the named object is gone with the last handle,
+    // and the answer that WAS delivered cannot be found. The update stands down having already
+    // told the host to leave.
+    //
+    // A test on the return value of the wait would not see this. The host returned ExitNow and
+    // was right to; the handle stopped existing.
+    const Attempt a = run(/*bootstrapExit=*/0, /*delayMs=*/300, /*signal=*/true,
+                          /*hostTimeoutMs=*/20000, /*ackWaitMs=*/2000, /*dieEarly=*/false,
+                          /*openAckLate=*/true, /*ackOpenDelayMs=*/600);
+    check("6 counter-example: the host still agreed to exit", a.step == HandoffStep::ExitNow,
+          std::string(handoff_step_name(a.step)) + ": " + a.why);
+    check("6 counter-example: opening late finds nothing",
+          a.witness.find("late and it was gone") != std::string::npos, a.witness);
+    check("6 counter-example: so the worker stands down -- which is why it opens early",
+          a.witness.find("worker stood down") != std::string::npos, a.witness);
+  }
+  {
+    // No channel at all on the caller's side. It cannot answer, so it must not leave: the updater
+    // is waiting to be told it may go ahead, and a caller that departs unable to say so leaves it
+    // holding a product it is not allowed to stop.
+    const Attempt a = run(/*bootstrapExit=*/0, /*delayMs=*/300, /*signal=*/true,
+                          /*hostTimeoutMs=*/20000, /*ackWaitMs=*/1000, /*dieEarly=*/false,
+                          /*openAckLate=*/false, /*ackOpenDelayMs=*/0,
+                          /*withoutAckChannel=*/true);
+    check("6 no channel: the host does NOT agree to exit", a.step == HandoffStep::KeepRunning,
+          std::string(handoff_step_name(a.step)) + ": " + a.why);
+    check("6 no channel: and says the acknowledgement could not be delivered",
+          a.why.find("could not be delivered") != std::string::npos, a.why);
+    check("6 no channel: the worker stands down too",
+          a.witness.find("worker stood down") != std::string::npos, a.witness);
   }
 
   // ---------------------------------------------------------------- 5. the race, both directions

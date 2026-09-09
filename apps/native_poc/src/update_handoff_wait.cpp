@@ -26,7 +26,10 @@
 namespace remote60::native_poc::update {
 
 HandoffStep await_handoff(void* readyEvent, void* ackEvent, void* bootstrap,
-                          const std::wstring& readyName, uint32_t timeoutMs, std::string* detail) {
+                          const std::wstring& readyName, uint32_t timeoutMs,
+                          const std::function<uint64_t()>& now, std::string* detail) {
+  const std::function<uint64_t()> clock =
+      now ? now : std::function<uint64_t()>([]() { return static_cast<uint64_t>(GetTickCount64()); });
   HANDLE ready = static_cast<HANDLE>(readyEvent);
   HANDLE ack = static_cast<HANDLE>(ackEvent);
   HANDLE boot = static_cast<HANDLE>(bootstrap);
@@ -38,7 +41,7 @@ HandoffStep await_handoff(void* readyEvent, void* ackEvent, void* bootstrap,
   // The deadline belongs to the WHOLE attempt. The bootstrap exits almost immediately and the
   // wait then resumes for the working copy; restarting the clock each time would give a slow
   // download unbounded time, and measuring only the last leg would give it almost none.
-  const DWORD deadline = GetTickCount() + timeoutMs;
+  const uint64_t startedAt = clock();
   HandoffStep step = HandoffStep::KeepWaiting;
   std::string why;
 
@@ -53,8 +56,7 @@ HandoffStep await_handoff(void* readyEvent, void* ackEvent, void* bootstrap,
   bool lookedForWorker = false;
 
   while (step == HandoffStep::KeepWaiting) {
-    const DWORD now = GetTickCount();
-    const DWORD remaining = (deadline > now) ? (deadline - now) : 0;
+    const DWORD remaining = remaining_ms(startedAt, clock(), timeoutMs);
 
     // Once the bootstrap has gone there is one thing left to wait for. Passing a signalled handle
     // again would return immediately, every time, forever.
@@ -72,6 +74,14 @@ HandoffStep await_handoff(void* readyEvent, void* ackEvent, void* bootstrap,
     const bool workerGone =
         (!boot && alive && (waited == WAIT_OBJECT_0 + 1 || waited == WAIT_ABANDONED_0 + 1));
     const bool outOfTime = remaining == 0;
+    if (waited == WAIT_FAILED) {
+      // The wait itself could not be performed -- a closed handle, an invalid one. Ended here and
+      // named: without this the loop would spin on the same failure for the rest of the deadline,
+      // burning a core and then reporting a timeout that hides the real cause.
+      if (alive) CloseHandle(alive);
+      if (detail) *detail = "the wait failed (error " + std::to_string(GetLastError()) + ")";
+      return HandoffStep::KeepRunning;
+    }
 
     DWORD exitCode = 0;
     if (bootExited && !GetExitCodeProcess(boot, &exitCode)) {
@@ -120,10 +130,21 @@ HandoffStep await_handoff(void* readyEvent, void* ackEvent, void* bootstrap,
 
   if (alive) CloseHandle(alive);
 
-  // The answer, and it goes out before this returns. An updater waiting to be acknowledged finds
-  // it here or not at all -- and not at all means the caller is staying, which means the updater
-  // must not stop it.
-  if (step == HandoffStep::ExitNow && ack) SetEvent(ack);
+  // The answer, and whether it was actually delivered decides the verdict.
+  //
+  // Setting it and hoping was not enough. If the answer does not arrive, the updater will not go
+  // ahead -- it is waiting to be told it may -- and a caller that has already decided to leave
+  // would then be gone while the product it was meant to hand over to has stood down. Agreeing to
+  // exit is only safe when the agreement was received.
+  if (step == HandoffStep::ExitNow) {
+    if (!ack || !SetEvent(ack)) {
+      if (detail) {
+        *detail = "the updater was ready, but the acknowledgement could not be delivered, so "
+                  "this attempt is closed and nothing will be stopped";
+      }
+      return HandoffStep::KeepRunning;
+    }
+  }
 
   if (detail) *detail = why;
   return step;

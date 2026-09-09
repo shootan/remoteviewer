@@ -19,6 +19,7 @@
 // Design: docs/업데이트_기능_설계.md 3.5-3.6, docs/업데이트_배선_계획.md W3.
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -85,6 +86,19 @@ std::wstring make_ack_event_name(const std::wstring& readyEventName);
  *
  * The BOOTSTRAP must not hold it. It exits immediately by design, and a name held by the process
  * whose exit means nothing would say the worker had died every single time.
+ *
+ * WHAT IT DOES NOT COVER, stated because the measured number invites a wider claim than it earns:
+ *
+ *   * A death BEFORE the mutex is taken. There is no object yet, so there is nothing to be
+ *     released, and the wait falls through to the timeout exactly as it did before. The window is
+ *     from the working copy starting to its first few instructions -- small, and not zero.
+ *   * It follows the THREAD that holds it, not the process. That is the same thing only because
+ *     the working copy takes it on its main thread and holds it to exit. If that ever stops being
+ *     true -- taken on a worker thread, released early -- this reports a death that has not
+ *     happened, which is worse than missing one.
+ *
+ * So it is a contract, not a property of the operating system: the holder must be the process
+ * whose life is being reported, and must take it as early as it can.
  */
 std::wstring make_alive_mutex_name(const std::wstring& readyEventName);
 
@@ -144,8 +158,36 @@ bool may_stop_the_product(bool signalDelivered, bool acknowledged, std::string* 
  * Lives here, and not inside the caller, because a wait that can only be run by starting the
  * product is a wait nobody runs. This one was wrong for exactly as long as that was true of it.
  */
+/**
+ * Milliseconds left of `timeoutMs`, given a monotonic clock.
+ *
+ * Its own function so the arithmetic can be tested at the values that break it. The wait used to
+ * compute `deadline = GetTickCount() + timeoutMs` and compare -- both 32-bit, so on a machine up
+ * for 49.7 days the sum wraps past zero, `deadline > now` is false immediately, and the wait ends
+ * at once reporting that the updater ran out of time. It would have been reported as a flaky
+ * update on long-lived machines and nothing else.
+ *
+ * `startedAt` and `now` come from a 64-bit monotonic source. Zero means the time is up.
+ */
+uint32_t remaining_ms(uint64_t startedAt, uint64_t now, uint32_t timeoutMs);
+
+/**
+ * Runs the wait to a decision, and acknowledges when the decision is to stand down.
+ *
+ * Handles are `void*` so this header stays free of windows.h; they are HANDLEs. `bootstrap` may be
+ * null when there is nothing to watch besides the event.
+ *
+ * `now` supplies the monotonic clock, so a test can run this at values a real machine would take
+ * weeks to reach. Empty uses the real one.
+ *
+ * ExitNow is returned ONLY when the acknowledgement was actually delivered. A caller that cannot
+ * answer must not leave: the updater is waiting to be told it may go ahead, and a caller that
+ * departs without answering leaves it with a product it is not allowed to stop and nobody to
+ * stop it for.
+ */
 HandoffStep await_handoff(void* readyEvent, void* ackEvent, void* bootstrap,
-                          const std::wstring& readyName, uint32_t timeoutMs, std::string* detail);
+                          const std::wstring& readyName, uint32_t timeoutMs,
+                          const std::function<uint64_t()>& now, std::string* detail);
 
 /** What the waiting caller should do. */
 enum class HandoffVerdict {

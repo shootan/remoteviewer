@@ -1019,7 +1019,8 @@ void start_update_handoff(HWND window) {
     // the host waiting forever. Running out is not an error -- it just means no update today.
     std::string why;
     const upd::HandoffStep step =
-        upd::await_handoff(readyEvent, ackEvent, bootstrap, readyName, 10 * 60 * 1000, &why);
+        upd::await_handoff(readyEvent, ackEvent, bootstrap, readyName, 10 * 60 * 1000,
+                           nullptr, &why);
 
     CloseHandle(bootstrap);
     if (ackEvent) CloseHandle(ackEvent);

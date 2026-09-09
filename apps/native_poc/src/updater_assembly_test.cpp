@@ -258,10 +258,18 @@ int main() {
     };
     // Supplied together with signalReady, because one without the other is the defect they exist
     // for: signalling with no way to hear the answer.
-    deps.awaitAck = [rec](const std::wstring&, uint32_t) {
+    // A real handle stands in for the channel, so the ORDER is observable: it must be opened
+    // before the signal goes out and released after the answer, not opened when the answer is
+    // wanted -- which is where the window was.
+    deps.openAck = [rec](const std::wstring&) -> void* {
+      rec->note("openAck");
+      return reinterpret_cast<void*>(1);
+    };
+    deps.awaitAck = [rec](void*, uint32_t) {
       rec->note("awaitAck");
       return true;
     };
+    deps.closeAck = [rec](void*) { rec->note("closeAck"); };
     return deps;
   };
 

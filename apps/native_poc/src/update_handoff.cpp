@@ -65,6 +65,16 @@ std::wstring make_ack_event_name(const std::wstring& readyEventName) {
   return readyEventName + L".ack";
 }
 
+uint32_t remaining_ms(uint64_t startedAt, uint64_t now, uint32_t timeoutMs) {
+  // Subtraction first, and in 64 bits. The old form added the timeout to the clock and compared
+  // the sum, which overflows a 32-bit tick count on a machine that has been up seven weeks --
+  // and then every wait ends immediately, reporting a timeout that never happened.
+  if (now <= startedAt) return timeoutMs;  // a clock that went backwards is not evidence of delay
+  const uint64_t elapsed = now - startedAt;
+  if (elapsed >= timeoutMs) return 0;
+  return static_cast<uint32_t>(timeoutMs - elapsed);
+}
+
 std::wstring make_alive_mutex_name(const std::wstring& readyEventName) {
   if (readyEventName.empty()) return {};
   return readyEventName + L".alive";

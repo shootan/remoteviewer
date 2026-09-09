@@ -565,6 +565,13 @@ int main() {
     bool signalDelivered = true;
     /** Whether the waiting caller answered. False = it gave up and told the user so. */
     bool ackAnswers = true;
+    /**
+     * Whether the acknowledgement channel could be opened at all.
+     *
+     * False models the caller having answered and closed its handle before this one opened its
+     * own -- the named object goes with the last handle, and the answer becomes unfindable.
+     */
+    bool ackChannelOpens = true;
     bool newHealthOk = true;    // does the NEW build report healthy
     bool oldHealthOk = true;    // does the RESTORED build report healthy
     bool quiesceOk = true;      // whether the stop completes
@@ -656,7 +663,11 @@ int main() {
     // signal is delivered and nobody answers, because the waiting caller has already given up and
     // told the user no update would happen.
     deps.signalReady = [knobs](const std::wstring&) { return knobs.signalDelivered; };
-    deps.awaitAck = [knobs](const std::wstring&, uint32_t) { return knobs.ackAnswers; };
+    deps.openAck = [knobs](const std::wstring&) -> void* {
+      return knobs.ackChannelOpens ? reinterpret_cast<void*>(1) : nullptr;
+    };
+    deps.awaitAck = [knobs](void*, uint32_t) { return knobs.ackAnswers; };
+    deps.closeAck = [](void*) {};
 
     deps.makeRelaunch = [&, knobs, started, rolledBack, requiredRuns](
                             const RelaunchConfig& config,

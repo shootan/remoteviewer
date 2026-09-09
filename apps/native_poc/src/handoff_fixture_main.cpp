@@ -123,6 +123,22 @@ int wmain(int argc, wchar_t** argv) {
   }
 
   const std::wstring readyName = value_of(args, L"--ready");
+  const std::wstring ackName = make_ack_event_name(readyName);
+
+  // The channel is opened BEFORE the signal, as the updater does. The caller closes its own
+  // handle the moment it has answered, so a handle opened later can find nothing there -- the
+  // named object goes with the last handle. Holding one from before the signal keeps it alive
+  // across the window where both sides are letting go.
+  //
+  // --open-ack-late is that window, made deliberate: it is what the code did before, and it is
+  // here so the difference can be measured rather than argued about.
+  const bool openLate = has_flag(args, L"--open-ack-late");
+  HANDLE ack = nullptr;
+  if (!openLate && !ackName.empty()) ack = OpenEventW(SYNCHRONIZE, FALSE, ackName.c_str());
+  record(witness, ack ? "worker holds the ack channel before signalling"
+                      : (openLate ? "worker deferred opening the ack channel"
+                                  : "worker could not open the ack channel"));
+
   bool delivered = false;
   if (!has_flag(args, L"--no-signal") && !readyName.empty()) {
     HANDLE event = OpenEventW(EVENT_MODIFY_STATE, FALSE, readyName.c_str());
@@ -136,14 +152,21 @@ int wmain(int argc, wchar_t** argv) {
 
   const std::wstring ackWait = value_of(args, L"--ack-wait");
   const DWORD ackTimeout = ackWait.empty() ? 5000 : static_cast<DWORD>(_wtoi(ackWait.c_str()));
+
+  // Long enough, when asked for, that the caller has certainly answered and let go by now.
+  const std::wstring openDelay = value_of(args, L"--ack-open-delay");
+  if (!openDelay.empty()) Sleep(static_cast<DWORD>(_wtoi(openDelay.c_str())));
+  if (openLate && !ackName.empty()) {
+    ack = OpenEventW(SYNCHRONIZE, FALSE, ackName.c_str());
+    record(witness, ack ? "worker opened the ack channel late and found it"
+                        : "worker opened the ack channel late and it was gone");
+  }
+
   bool acked = false;
-  const std::wstring ackName = make_ack_event_name(readyName);
-  if (!ackName.empty()) {
-    HANDLE event = OpenEventW(SYNCHRONIZE, FALSE, ackName.c_str());
-    if (event) {
-      acked = WaitForSingleObject(event, ackTimeout) == WAIT_OBJECT_0;
-      CloseHandle(event);
-    }
+  if (ack) {
+    acked = WaitForSingleObject(ack, ackTimeout) == WAIT_OBJECT_0;
+    CloseHandle(ack);
+    ack = nullptr;
   }
 
   // The decision, taken by the SAME function the updater uses. A fixture that decided for itself

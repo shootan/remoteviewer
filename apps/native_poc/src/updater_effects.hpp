@@ -70,7 +70,25 @@ struct UpdaterDeps {
    * must not then be shut down by an updater that arrived late, so the updater waits to be told
    * "yes, I am standing down" before it stops anything.
    */
-  std::function<bool(const std::wstring& readyEventName, uint32_t timeoutMs)> awaitAck;
+  /**
+   * Opens the acknowledgement channel and hands back a handle to HOLD. Null when it cannot.
+   *
+   * Opened BEFORE the ready signal goes out, and that order is the whole point. The caller
+   * creates the channel and closes it the moment it has answered -- so if the updater waits until
+   * it needs the answer before opening it, the last handle can be gone by then and the named
+   * object with it. The open fails, the answer looks absent, and the update stands down having
+   * already told the caller to leave.
+   *
+   * Holding it from before the signal until after the answer keeps the object alive across the
+   * window where both sides are letting go.
+   */
+  std::function<void*(const std::wstring& readyEventName)> openAck;
+
+  /** Waits on a handle from `openAck`. Returns whether the answer came. */
+  std::function<bool(void* ackHandle, uint32_t timeoutMs)> awaitAck;
+
+  /** Releases a handle from `openAck`. */
+  std::function<void(void* ackHandle)> closeAck;
   /** Where log lines go. */
   std::function<void(const std::string&)> log;
   /** This process's own image, so the swap can refuse to replace it. */
