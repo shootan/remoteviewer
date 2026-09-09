@@ -9767,3 +9767,13 @@ Next action
 - **검증**(콘솔, 활성 RDP 없음): update 12종 전부 PASS — check 28 / effects 199 / handoff 33 / http 36 / job_guard 19 / manifest 82 / relaunch 107 / release 80 / state_machine 115 / **assembly 41** / options 48 / scenarios 115. 실행 후 **잔존 프로세스 0**, 새 `%TEMP%` 디렉터리 0, 시나리오 스위트가 **자기 디렉터리를 스스로 회수**(보류 NOTE 없음).
 - **손대지 않은 잔재**(지시대로): `%TEMP%\gnlink-exec-*` 3건 · `.claude/scenario-runs/scn-27308` 1건.
 - 변경 파일: `updater_effects.{hpp,cpp}` · `updater_assembly_test.cpp` · `updater_scenarios_test.cpp` · `docs/history.md` · `docs/full_code_audit_2026-09-08.md`.
+
+### 476) 2026-09-09 문서 정합성 2차 — **수동 검사가 일어날 수 없는 결과를 보라고 시키고 있었다**
+- ⚠️ **UPD-FIELD-01 정정**: "폴백으로 떴으면 일부러 실패를 만들어 **`RollbackFailed`** 가 나오는지 보라" 고 적혀 있었다. **#473 이후 일어나지 않는 결과다** — 선택 이미지는 commit 뒤에만 뜨므로 **롤백이 가능한 구간에 소유 불가 프로세스가 존재하지 않는다.** 실기하는 사람이 **시키는 대로 해도 답이 안 나오는 지시**였다. 지우고, 그 성질은 시나리오 7 이 단정한다고 적었다. (앞 라운드의 "무결성 수준으로 경로를 판정하라" 와 같은 부류 — **수동 검사판 공허한 단정**이 이틀 연속 나왔다.)
+- **로그 예시도 실제 출력과 달랐다**: `relaunch GNLinkClient.exe: ...` → 단계 분리 뒤 실제 형식은 **`relaunch (optional) GNLinkClient.exe: ...`** 다.
+- **UPD-FIELD-01 에 순서 항목 추가**: 클라이언트는 **commit 뒤**에 뜨므로 **몇 초 늦게 나타나는 것이 정상**이고, **호스트보다 먼저 뜨면 그것이 결함**이다.
+- **배선 계획 W4a 정리**: `lastActions` 를 "이미 만들지만 아무도 읽지 않는다" 고 적고 있었는데 **그 함수는 지웠다**(읽히지 않는 출력은 기록이 아니라 미결이다) → `lastOutcomes` + 단계별 로그로 갱신. "`relaunch` 는 `bool` 하나를 돌려준다" 도 **verdict → 두 단계**까지 왔음을 표시. **E5c 추가**(선택 이미지가 commit 뒤에만 뜨는가, 반대 증거 포함).
+- **"0. 먼저 사실부터" 표에 경고 배너**: `72d81d9` 시점 기록인데 현재처럼 읽힐 수 있었다. 첫 두 줄(`run_update` 호출자 0건 등)은 **`GNLinkUpdater.exe` 로 이미 해소**됐고 줄 번호도 전부 밀렸다. **당시 기록으로 읽으라**고 명시.
+- **깨진 줄 참조 정리**: `update_state_machine.cpp:167-178` → 이름 참조. 이 파일들에 대한 줄 참조는 이제 **0건**(다른 파일 것은 이번 작업 범위 밖이라 두었다).
+- 문서만 변경. 제품 코드·테스트 변경 없음.
+- 변경 파일: `docs/수동확인_체크리스트.md` · `docs/업데이트_배선_계획.md` · `docs/history.md`.
