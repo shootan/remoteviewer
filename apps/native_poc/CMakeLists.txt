@@ -1199,6 +1199,15 @@ if(GNLINK_HAVE_WEBVIEW2)
   set_target_properties(remote60_webview2_spike PROPERTIES OUTPUT_NAME "WebView2Spike")
 endif()
 
+# Reads the TLS posture back off a live WinHTTP session, and dials a self-signed loopback fixture
+# to see a bad certificate refused. What it deliberately does NOT test is in the file's header.
+add_executable(remote60_winhttp_tls_posture_test
+  src/winhttp_tls_posture_test.cpp
+  src/winhttp_transport.cpp
+)
+target_include_directories(remote60_winhttp_tls_posture_test PRIVATE src)
+target_link_libraries(remote60_winhttp_tls_posture_test PRIVATE winhttp)
+
 # Holds the two http transports against one another. The socket path carries http and WinHTTP
 # carries https, and the scheme decides which -- so any difference between them is a defect that
 # shows up on one kind of deployment only. The server is in-process on an ephemeral loopback port.

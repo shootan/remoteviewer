@@ -58,6 +58,10 @@ void apply_tls_posture(HINTERNET session) {
 
 }  // namespace
 
+void apply_tls_posture_handle(void* session) {
+  if (session) apply_tls_posture(static_cast<HINTERNET>(session));
+}
+
 bool http_exchange(const std::string& host, uint16_t port, bool secure, const char* method,
                    const std::string& path, const std::string& extraHeaders,
                    const std::string& body, const char* contentType, uint32_t timeoutMs,

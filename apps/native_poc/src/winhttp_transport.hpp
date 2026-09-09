@@ -53,6 +53,17 @@ struct HttpResult {
  * Returns false only when the exchange did not happen at all; an HTTP error status is a completed
  * request and comes back in `status` for the caller to judge.
  */
+/**
+ * Applies this file's TLS posture to a WinHTTP session handle (an HINTERNET, passed as void* so
+ * this header stays free of windows.h).
+ *
+ * Exposed for one reason: WinHttpSetOption can fail quietly, and "the code calls SetOption" is a
+ * weaker claim than "a live session carries the value". A test opens a session, hands it here,
+ * and reads the options back off it. That still is not proof that a redirect was refused -- only
+ * that the option is set on the handle that would refuse it.
+ */
+void apply_tls_posture_handle(void* session);
+
 bool http_exchange(const std::string& host, uint16_t port, bool secure, const char* method,
                    const std::string& path, const std::string& extraHeaders,
                    const std::string& body, const char* contentType, uint32_t timeoutMs,
