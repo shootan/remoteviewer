@@ -1324,8 +1324,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         0L
     }
 
-    /** Empty until a release endpoint exists, which reports NotConfigured rather than failing. */
-    private fun updateManifestUrl(): String = BuildConfig.UPDATE_MANIFEST_URL
+    /**
+     * The build constant when one was set, otherwise derived from the directory address this
+     * phone signs in to. Empty still means NotConfigured rather than a failure -- an http
+     * directory with no override has nowhere safe to fetch an installable APK from.
+     */
+    private fun updateManifestUrl(): String = DirectoryClient.updateManifestUrl(
+        BuildConfig.UPDATE_MANIFEST_URL, DirectoryClient.savedUrl(this)
+    )
 
     /** Empty until an operational key exists. Empty means this build cannot check, not that it failed. */
     private fun trustedUpdateKeyHex(): String = BuildConfig.UPDATE_PUBLIC_KEY_HEX

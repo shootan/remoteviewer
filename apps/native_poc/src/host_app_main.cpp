@@ -765,7 +765,11 @@ void start_update_check(HWND window) {
   namespace upd = remote60::native_poc::update;
 
   upd::CheckConfig config;
-  config.manifestUrl = remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL");
+  // The override still wins; otherwise it comes from the directory this host is registered with,
+  // so a machine configured with only a server address can check for updates.
+  config.manifestUrl = directory::update_manifest_url_for(
+      remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
+      g.cache.directoryUrl, "windows");
   config.trustedPublicKeyHex = upd::trusted_public_key_hex();
   config.platform = "windows";
   config.installedVersion = narrow(kProductVersion);
@@ -936,7 +940,11 @@ void start_update_handoff(HWND window) {
   spec.installDir = installDir;
   spec.stagingDir = workDir + L"\\staging";
   spec.workDir = workDir;
-  spec.manifestUrl = remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL");
+  // The same url the check used, from the same rule: the updater must fetch what the user was
+  // told about, not a second opinion about where updates live.
+  spec.manifestUrl = directory::update_manifest_url_for(
+      remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
+      g.cache.directoryUrl, "windows");
   spec.platform = "windows";
   spec.installedVersion = narrow(kProductVersion);
   spec.healthLogPath = log_file_path();

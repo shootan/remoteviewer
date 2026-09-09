@@ -170,6 +170,36 @@ object DirectoryClient {
         }
     }
 
+    /**
+     * Where update manifests live, derived from the directory the user already signed in to.
+     *
+     * The url used to come only from a build constant, so a phone configured with nothing but a
+     * server address could never check for updates -- the address was there, the route was there,
+     * and nothing joined them.
+     *
+     * Built from the origin rather than by pasting strings ([originKey] decides scheme, host and
+     * port), with the path and platform query appended whole. The server returns the document and
+     * its detached signature in one response, so there is no second `.sig` request.
+     *
+     * Empty when there is nothing to derive from, and **empty for an http directory**: upgrading
+     * the caller to https invents a server nobody configured, and following it down to http would
+     * fetch an installable artifact over a hop anyone can rewrite. An http deployment that wants
+     * updates says so with an explicit override.
+     */
+    fun updateManifestUrlFor(directoryUrl: String, platform: String = "android"): String {
+        if (directoryUrl.isBlank() || platform.isBlank()) return ""
+        if (!urlIsSecure(directoryUrl)) return ""
+        return originKey(directoryUrl) + "/api/update/manifest?platform=" + platform
+    }
+
+    /**
+     * The explicit override when there is one, otherwise the derived url. A build that set the
+     * constant is not moved onto a different server by this.
+     */
+    fun updateManifestUrl(override: String, directoryUrl: String,
+                          platform: String = "android"): String =
+        if (override.isNotBlank()) override else updateManifestUrlFor(directoryUrl, platform)
+
     /** Where the probe should go, or why it cannot go anywhere. */
     sealed class ObserveTarget {
         data class Ready(

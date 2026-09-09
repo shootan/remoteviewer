@@ -38,6 +38,7 @@
 #include "env_util.hpp"
 #include "update_check.hpp"
 #include "update_handoff.hpp"
+#include "directory_client.hpp"
 #include "directory_session_client.hpp"
 #include "json_profile.hpp"
 #include "log_upload.hpp"
@@ -149,6 +150,25 @@ void load_settings(std::string* server, std::string* accountId, ShellRuntimeSett
     read_u32(&settings->fps);
     read_u32(&settings->monitorId);
   }
+}
+
+/**
+ * The directory this shell is signed in to, or the one it last remembered.
+ *
+ * The start-up update check runs before the page has restored anything, so gServerUrl is still
+ * empty then; the saved address is the only thing that exists at that moment, and it is the same
+ * address the user will sign in to a second later.
+ */
+std::string configured_directory_url() {
+  {
+    std::lock_guard<std::mutex> lock(gStateMu);
+    if (!gServerUrl.empty()) return gServerUrl;
+  }
+  std::string server;
+  std::string accountId;
+  ShellRuntimeSettings settings;
+  load_settings(&server, &accountId, &settings);
+  return server;
 }
 
 /**
@@ -379,11 +399,15 @@ void start_client_update(const std::string& availableVersion) {
   // updater is about to replace, and it refuses to run from there.
   const std::wstring workDir = installDir + L".update";
 
+
   upd::UpdaterLaunchSpec spec;
   spec.installDir = installDir;
   spec.stagingDir = workDir + L"\\staging";
   spec.workDir = workDir;
-  spec.manifestUrl = remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL");
+  // The same rule the check used: the updater fetches what the user was told about.
+  spec.manifestUrl = remote60::native_poc::directory::update_manifest_url_for(
+      remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
+      configured_directory_url(), "windows");
   spec.platform = "windows";
   spec.installedVersion = narrow(kProductVersion);
   // The HOST's log, not this process's: health evidence is the host reporting its own version,
@@ -440,7 +464,10 @@ void start_update_check() {
   namespace upd = remote60::native_poc::update;
 
   upd::CheckConfig config;
-  config.manifestUrl = remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL");
+  // The override still wins; otherwise it is derived from the directory address this shell uses.
+  config.manifestUrl = remote60::native_poc::directory::update_manifest_url_for(
+      remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
+      configured_directory_url(), "windows");
   config.trustedPublicKeyHex = upd::trusted_public_key_hex();
   config.platform = "windows";
   config.installedVersion = narrow(kProductVersion);

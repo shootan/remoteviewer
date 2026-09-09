@@ -278,6 +278,56 @@ class DirectoryObserveTest {
         assertTrue("the fallback is recorded, not silent", ready.advertised.hostRejected)
     }
 
+    // ---------------------------------------------------------------- where updates come from
+
+    @Test
+    fun `an https directory names its own update route`() {
+        assertEquals(
+            "https://rem.example:443/api/update/manifest?platform=android",
+            DirectoryClient.updateManifestUrlFor("https://rem.example")
+        )
+        assertEquals(
+            "https://rem.example:8443/api/update/manifest?platform=android",
+            DirectoryClient.updateManifestUrlFor("https://rem.example:8443")
+        )
+        // Built from the origin, so a trailing slash or a path cannot end up inside the url.
+        assertEquals(
+            DirectoryClient.updateManifestUrlFor("https://rem.example"),
+            DirectoryClient.updateManifestUrlFor("https://REM.example/api/")
+        )
+    }
+
+    @Test
+    fun `an http directory derives nothing and is not upgraded`() {
+        assertEquals("", DirectoryClient.updateManifestUrlFor("http://rem.example"))
+        assertEquals("", DirectoryClient.updateManifestUrlFor("rem.example"))
+        assertEquals("", DirectoryClient.updateManifestUrlFor(""))
+    }
+
+    @Test
+    fun `the build constant wins, and one address is enough without it`() {
+        assertEquals(
+            "https://updates.example/m",
+            DirectoryClient.updateManifestUrl("https://updates.example/m", "https://rem.example")
+        )
+        assertEquals(
+            "https://rem.example:443/api/update/manifest?platform=android",
+            DirectoryClient.updateManifestUrl("", "https://rem.example")
+        )
+        // An http directory with no override has nowhere safe to fetch an installable APK from.
+        assertEquals("", DirectoryClient.updateManifestUrl("", "http://rem.example"))
+    }
+
+    @Test
+    fun `the manifest and its signature come out of one response`() {
+        val body = """{"manifest":"schema=2\nversion=0.2.105\n","signature":"abcd"}"""
+        assertEquals("schema=2\nversion=0.2.105\n", UpdateFlow.jsonStringField(body, "manifest"))
+        assertEquals("abcd", UpdateFlow.jsonStringField(body, "signature"))
+        assertEquals(null, UpdateFlow.jsonStringField(body, "nothing"))
+        // A truncated response is not a field.
+        assertEquals(null, UpdateFlow.jsonStringField("""{"manifest":"schema=2""", "manifest"))
+    }
+
     // ---------------------------------------------------------------- the url, normalised once
 
     @Test

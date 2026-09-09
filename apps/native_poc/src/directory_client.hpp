@@ -123,6 +123,36 @@ bool parse_directory_url(const std::string& url, std::string* outHost, uint16_t*
 std::string directory_origin_key(const std::string& url);
 
 /**
+ * Where update manifests live, derived from the directory the user already signed in to.
+ *
+ * Until now the manifest url only came from an environment variable, so a machine configured with
+ * nothing but a server address could never check for updates -- the address was there, the route
+ * was there, and nothing joined them.
+ *
+ * Built from the origin, not by pasting strings: `directory_origin_key()` decides the scheme,
+ * host and port so this cannot disagree with the client about which server it is, and the path
+ * and the platform query are appended whole. The server hands back the document and its detached
+ * signature in one response, so there is no second `.sig` request to get wrong.
+ *
+ * Empty when there is nothing to derive from, and **empty for an http directory**. This is not a
+ * place to guess: upgrading the caller to https on its behalf would invent a server nobody
+ * configured, and following the directory down to http would fetch an administrator-privileged
+ * artifact over a hop anyone can rewrite. An http deployment that wants updates says so with an
+ * explicit https override.
+ */
+std::string directory_update_manifest_url(const std::string& directoryUrl,
+                                          const std::string& platform);
+
+/**
+ * The explicit override when there is one, otherwise the derived url.
+ *
+ * The override keeps working exactly as before -- a deployment that set it is not moved onto a
+ * different server by this change.
+ */
+std::string update_manifest_url_for(const std::string& override_, const std::string& directoryUrl,
+                                    const std::string& platform);
+
+/**
  * One POST, one connection, read to EOF.
  *
  * `extraHeaders` is appended verbatim and must already be CRLF terminated. Returns false when the

@@ -256,6 +256,24 @@ std::string directory_origin_key(const std::string& url) {
   return (secure ? "https://" : "http://") + host + ":" + std::to_string(port);
 }
 
+std::string directory_update_manifest_url(const std::string& directoryUrl,
+                                          const std::string& platform) {
+  if (directoryUrl.empty() || platform.empty()) return {};
+  // http is refused rather than upgraded or followed. See the header.
+  if (!directory_url_is_secure(directoryUrl)) return {};
+  std::string host;
+  uint16_t port = 0;
+  bool secure = false;
+  if (!parse_directory_url(directoryUrl, &host, &port, nullptr, &secure) || !secure) return {};
+  return directory_origin_key(directoryUrl) + "/api/update/manifest?platform=" + platform;
+}
+
+std::string update_manifest_url_for(const std::string& override_, const std::string& directoryUrl,
+                                    const std::string& platform) {
+  if (!override_.empty()) return override_;
+  return directory_update_manifest_url(directoryUrl, platform);
+}
+
 bool parse_directory_url(const std::string& url, std::string* outHost, uint16_t* outPort,
                          std::string* outError, bool* outSecure) {
   std::string rest = trim(url);
