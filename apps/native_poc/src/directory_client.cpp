@@ -825,6 +825,42 @@ std::vector<std::string> local_ipv4_addresses() {
 }
 
 bool HostAgent::Heartbeat(std::vector<PunchTarget>* outPunch) {
+  uint32_t status = 0;
+  std::string serverError;
+  if (HeartbeatAttempt(outPunch, &status, &serverError)) return true;
+
+  // 409 means the directory has no usable observation for this host. It is not an authentication
+  // problem -- the token is fine, and treating it as one would sign the host out and make it
+  // re-register, which fixes nothing and loses the cached token. The observation is something
+  // this end can produce: send one from the socket the host streams on and try again.
+  if (status != 409) return false;  // the attempt already said what went wrong
+
+  SetStatus(serverError == "observation_expired"
+                ? "the directory's address observation expired; sending a new one"
+                : "the directory has no address observation yet; sending one");
+  observedReady_ = false;
+  if (!RefreshObservedAddress()) {
+    // Nothing more to try this cycle. The heartbeat loop's ordinary wait is the backoff, and no
+    // stream in progress is touched: the socket was only used to send a probe on.
+    SetStatus("could not reach the directory's observe port; retrying on the next heartbeat");
+    return false;
+  }
+
+  // Exactly one retry. A loop here would spin against a server that is refusing for a reason
+  // this end cannot fix, and the caller already comes back in 25 seconds.
+  status = 0;
+  serverError.clear();
+  if (HeartbeatAttempt(outPunch, &status, &serverError)) return true;
+  if (status == 409) {
+    SetStatus("the directory did not accept the address observation (" +
+              (serverError.empty() ? std::string("no reason given") : serverError) +
+              "); retrying on the next heartbeat");
+  }
+  return false;
+}
+
+bool HostAgent::HeartbeatAttempt(std::vector<PunchTarget>* outPunch, uint32_t* outStatus,
+                                 std::string* outServerError) {
   std::ostringstream body;
   body << "{\"hostToken\":\"" << json_escape(hostToken_) << "\","
        << "\"hostName\":\"" << json_escape(cfg_.hostName) << "\","
@@ -878,6 +914,16 @@ bool HostAgent::Heartbeat(std::vector<PunchTarget>* outPunch) {
   std::string resp;
   if (!HttpPostJson("/api/host/heartbeat", body.str(), &status, &resp)) {
     SetStatus("directory unreachable");
+    return false;
+  }
+  if (outStatus) *outStatus = status;
+  if (outServerError) {
+    outServerError->clear();
+    json_get_string(resp, "error", outServerError);
+  }
+  if (status == 409) {
+    // Left to Heartbeat(): this is a state the client can repair, and the status it deserves
+    // depends on whether repairing it worked.
     return false;
   }
   if (status == 401) {

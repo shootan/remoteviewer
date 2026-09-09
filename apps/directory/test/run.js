@@ -79,6 +79,17 @@ function cleanup() {
     process.exit(publishContract.code);
   }
 
+  // Serverless as far as this runner is concerned: it starts its own server on its own ports,
+  // behind its own proxy, because the whole point is what the server sees when the client's
+  // socket is not the one it is talking to.
+  console.log('\n--- proxy contamination (own server, own proxy) ---');
+  const proxied = await runTest(['proxy_contamination_test.js']);
+  if (proxied.code !== 0) {
+    cleanup();
+    console.log('\nRESULT: FAILED');
+    process.exit(proxied.code);
+  }
+
   let server = startServer();
   await sleep(1500);
 

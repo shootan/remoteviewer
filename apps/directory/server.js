@@ -480,7 +480,10 @@ const UDP_TOKEN_OFFSET = 16;              // char authToken[33] follows the five
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;   // 12 h
 const HOST_OFFLINE_MS = 90 * 1000;            // no heartbeat for 90 s = offline
 const PUNCH_TTL_MS = 30 * 1000;
-const OBSERVE_TTL_MS = 5 * 60 * 1000;
+// How long an address observation stays usable. Overridable because "what happens when it
+// expires" is now a real branch with its own status code, and a test that had to wait five
+// minutes to reach it would not be written. The default is unchanged.
+const OBSERVE_TTL_MS = Math.max(1, Number(process.env.REMOTE60_DIR_OBSERVE_TTL_MS || 5 * 60 * 1000));
 const MAX_BODY_BYTES = 16 * 1024;
 
 // ---------------------------------------------------------------- persistence
@@ -583,7 +586,11 @@ function sweep() {
     if (live.length) pendingPunch.set(hostId, live);
     else pendingPunch.delete(hostId);
   }
-  for (const [token, o] of observed) if (now - o.at > OBSERVE_TTL_MS) observed.delete(token);
+  // Kept for a while past expiry rather than deleted at it. An expired observation and one that
+  // was never made are different mistakes -- a client that waited too long, versus one that never
+  // sent the UDP packet at all -- and a client can only be told which if the record is still here
+  // to say so.
+  for (const [token, o] of observed) if (now - o.at > OBSERVE_TTL_MS * 2) observed.delete(token);
 }
 setInterval(sweep, 30 * 1000).unref();
 
@@ -624,10 +631,33 @@ function readJsonBody(req) {
   });
 }
 
-/** Client address as seen from here; honours a trusted proxy header only when configured. */
-function remoteIp(req) {
-  const raw = req.socket.remoteAddress || '';
-  return raw.startsWith('::ffff:') ? raw.slice(7) : raw;
+/**
+ * The observation for a token, or why there is not one.
+ *
+ * There used to be a fallback here: no observation meant the address of the socket this HTTP
+ * request arrived on. That address is only the client's when nothing sits in between. Behind a
+ * proxy, a load balancer or any TLS terminator it is the middle box's address, and every host
+ * that heartbeats without an observation is then published at the same address as every other --
+ * so the punch packets go to the proxy, which is not listening, and the addresses of two
+ * unrelated accounts become indistinguishable.
+ *
+ * The old comment above this said the proxy header was honoured when configured. Nothing here
+ * read a header, configured or not. The fallback is gone rather than corrected: the observation
+ * is the only thing that knows the port NAT actually mapped, so a heartbeat without one has
+ * nothing to publish, and saying so is the whole answer.
+ */
+function observationFor(token, now = Date.now()) {
+  const o = observed.get(String(token || ''));
+  if (!o) return { state: 'missing' };
+  if (now - o.at > OBSERVE_TTL_MS) return { state: 'expired' };
+  return { state: 'ok', obs: o };
+}
+
+/** 409, not 401: the caller's credentials are fine, its state is not -- so it must not sign out. */
+function rejectWithoutObservation(res, observation) {
+  return sendJson(res, 409, {
+    error: observation.state === 'expired' ? 'observation_expired' : 'observation_required',
+  });
 }
 
 function bearerToken(req) {
@@ -1218,14 +1248,22 @@ async function handleHostHeartbeat(req, res) {
 
   // The observation token ties this heartbeat to the UDP packet that came from the very
   // socket the host will stream on, so the port we hand out is the one NAT actually mapped.
-  const obs = observed.get(String(body.observeToken || ''));
+  //
+  // Checked before anything is written. A rejected heartbeat must leave this host exactly as it
+  // was -- including lastSeen, because refreshing it would keep a host listed as online while
+  // publishing an address nobody can reach, and would consume the pending punch below on the way
+  // past. The client retries; nothing here has changed under it.
+  const observation = observationFor(body.observeToken);
+  if (observation.state !== 'ok') return rejectWithoutObservation(res, observation);
+  const obs = observation.obs;
+
   const previousWire = { ip: host.wireIp, port: host.wirePort };
-  host.publicIp = obs ? obs.ip : remoteIp(req);
-  host.publicUdpPort = obs ? obs.port : Number(body.udpPort || 0);
+  host.publicIp = obs.ip;
+  host.publicUdpPort = obs.port;
   // Where our own datagrams go. Same as the advertised pair unless the host is on our own LAN,
   // in which case the advertised one is the router's WAN address and cannot be sent to from here.
-  host.wireIp = (obs && obs.wireIp) ? obs.wireIp : host.publicIp;
-  host.wirePort = (obs && obs.wirePort) ? obs.wirePort : host.publicUdpPort;
+  host.wireIp = obs.wireIp || host.publicIp;
+  host.wirePort = obs.wirePort || host.publicUdpPort;
   relayFollowHostWire(host, previousWire);
   host.hostName = String(body.hostName || host.hostName).slice(0, 64);
   // Where else this host can be reached. The public address is ours to determine -- we see the
@@ -1276,9 +1314,15 @@ async function handleConnect(req, res) {
     return sendJson(res, 409, { error: 'host is offline' });
   }
 
-  const obs = observed.get(String(body.observeToken || ''));
-  const clientIp = obs ? obs.ip : remoteIp(req);
-  const clientPort = obs ? obs.port : Number(body.udpPort || 0);
+  // Same rule as the heartbeat, and for the same reason: without an observation the only address
+  // available is this HTTP socket's, which behind a proxy is the proxy's. A punch aimed there
+  // reaches nothing, and relay eligibility keyed on it would put unrelated clients in one bucket.
+  // Nothing has been written at this point -- pendingPunch is set below -- so the refusal costs
+  // the caller nothing but a retry.
+  const observation = observationFor(body.observeToken);
+  if (observation.state !== 'ok') return rejectWithoutObservation(res, observation);
+  const clientIp = observation.obs.ip;
+  const clientPort = observation.obs.port;
   if (!clientPort) return sendJson(res, 400, { error: 'client udp port unknown' });
 
   const punchToken = crypto.randomBytes(16).toString('hex');

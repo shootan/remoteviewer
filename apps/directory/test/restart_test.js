@@ -9,8 +9,10 @@
 // an unknown session is refused, which is what the client shell's uploader must cope with.
 
 const http = require('http');
+const dgram = require('dgram');
 
 const HTTP = Number(process.env.T_PORT || 18080);
+const UDP = Number(process.env.T_UDP || 18081);
 const phase = process.argv[2];
 
 function api(method, path, body, token) {
@@ -32,6 +34,18 @@ function api(method, path, body, token) {
     req.on('error', reject);
     if (payload) req.write(payload);
     req.end();
+  });
+}
+
+// A heartbeat needs an observation now: the server publishes the address the UDP packet came
+// from and has no second-best answer, so this sends one from a socket of its own first.
+function observe(token) {
+  return new Promise((resolve, reject) => {
+    const sock = dgram.createSocket('udp4');
+    const timer = setTimeout(() => { sock.close(); reject(new Error('observe timeout')); }, 3000);
+    sock.on('message', () => { clearTimeout(timer); sock.close(); resolve(); });
+    sock.on('error', (e) => { clearTimeout(timer); reject(e); });
+    sock.send(Buffer.from('OBSERVE ' + token), UDP, '127.0.0.1');
   });
 }
 
@@ -59,7 +73,16 @@ function api(method, path, body, token) {
     const sessionToken = handed[1] || '';
     let failures = 0;
 
+    // Two halves, because they fail differently: a forgotten token is 401 and comes from the
+    // token check, while a missing observation is 409 and comes from after it. Asserting only the
+    // 200 would let a 409 read as "the token did not survive", which is the opposite of true.
     let r = await api('POST', '/api/host/heartbeat', { hostToken: token });
+    const recognised = r.status === 409 && r.body.error === 'observation_required';
+    console.log(`${recognised ? 'PASS' : 'FAIL'}  the restored token is recognised (and still needs an observation)  status=${r.status} error=${r.body.error}`);
+    if (!recognised) failures++;
+
+    await observe('restart-observe-1');
+    r = await api('POST', '/api/host/heartbeat', { hostToken: token, observeToken: 'restart-observe-1' });
     const survived = r.status === 200 && r.body.ok === true;
     console.log(`${survived ? 'PASS' : 'FAIL'}  host token survives a server restart  status=${r.status}`);
     if (!survived) failures++;

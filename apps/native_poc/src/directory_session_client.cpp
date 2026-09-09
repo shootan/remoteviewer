@@ -307,7 +307,8 @@ bool directory_list_hosts(const std::string& url, const std::string& sessionToke
 
 bool directory_connect(const std::string& url, const std::string& sessionToken,
                        const std::string& hostId, const std::string& observeToken,
-                       DirectoryConnectTarget* outTarget, std::string* outError) {
+                       DirectoryConnectTarget* outTarget, std::string* outError,
+                       uint32_t* outStatus) {
   std::string host;
   uint16_t port = 0;
   bool secure = false;
@@ -324,6 +325,7 @@ bool directory_connect(const std::string& url, const std::string& sessionToken,
     if (outError) *outError = "cannot reach the server";
     return false;
   }
+  if (outStatus) *outStatus = status;
   if (status != 200) {
     if (outError) *outError = error_from_response(status, response);
     return false;

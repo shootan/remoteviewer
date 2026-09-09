@@ -164,6 +164,10 @@ class HostAgent {
   /** Aims the observe socket from the configured port, or what the server advertised. */
   bool ApplyObserveEndpoint();
   bool Heartbeat(std::vector<PunchTarget>* outPunch);
+  // One attempt, reporting the status and the server's error name so the caller can tell a
+  // missing observation apart from every other refusal. Heartbeat() is the policy on top.
+  bool HeartbeatAttempt(std::vector<PunchTarget>* outPunch, uint32_t* outStatus,
+                        std::string* outServerError);
   void Punch(const std::vector<PunchTarget>& targets);
   void SetStatus(const std::string& status);
 

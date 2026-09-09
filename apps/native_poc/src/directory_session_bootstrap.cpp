@@ -86,9 +86,25 @@ bool directory_session_open(const DirectorySessionRequest& request, DirectorySes
   }
 
   DirectoryConnectTarget target;
+  uint32_t connectStatus = 0;
   if (!directory_connect(request.url, request.sessionToken, request.hostId, observeToken, &target,
-                         outError)) {
-    return false;
+                         outError, &connectStatus)) {
+    // 409 is the directory saying it has no address observation for this client. That is a state
+    // this end can repair -- send another one from the same socket -- and it is not an
+    // authentication failure, so the session stays and nothing signs out.
+    //
+    // One retry, and only on 409. Looping would spin against a server refusing for a reason the
+    // viewer cannot fix, and the user is waiting on this call.
+    if (connectStatus != 409) return false;
+    std::string reobserveError;
+    if (!rendezvous.Observe(observeHost, observePort, observeToken, &observed, &reobserveError)) {
+      if (outError) *outError = reobserveError;
+      return false;
+    }
+    if (!directory_connect(request.url, request.sessionToken, request.hostId, observeToken,
+                           &target, outError)) {
+      return false;
+    }
   }
   if (target.candidates.empty()) {
     if (outError) *outError = "the directory returned no address for this host";

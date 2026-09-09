@@ -76,8 +76,14 @@ bool directory_list_hosts(const std::string& url, const std::string& sessionToke
  * punch towards. Passing a token from a different socket produces a session that connects and
  * then receives nothing.
  */
+/**
+ * `outStatus` carries the http status when the exchange happened at all, so a caller can tell a
+ * 409 -- the directory has no address observation for this client, which is repairable here by
+ * sending one -- from every other refusal, which is not.
+ */
 bool directory_connect(const std::string& url, const std::string& sessionToken,
                        const std::string& hostId, const std::string& observeToken,
-                       DirectoryConnectTarget* outTarget, std::string* outError);
+                       DirectoryConnectTarget* outTarget, std::string* outError,
+                       uint32_t* outStatus = nullptr);
 
 }  // namespace remote60::native_poc
