@@ -61,6 +61,79 @@ std::vector<std::wstring> updater_arguments(const UpdaterLaunchSpec& spec);
  */
 std::wstring make_ready_event_name(uint32_t pid, uint64_t tick);
 
+/**
+ * The acknowledgement event that belongs to a ready event.
+ *
+ * Derived from the ready name rather than passed separately, so the two cannot be given to
+ * different attempts. One attempt, one stem, two events.
+ *
+ * The acknowledgement is what makes the handshake two-sided. Signalling ready tells the host the
+ * download is verified; it does not tell the UPDATER that anyone heard. Without an answer the
+ * updater goes on to stop the product on the assumption that someone is leaving, and if nobody
+ * was listening -- the host gave up, the host was never there, the event had already been closed
+ * -- it stops a product that nothing is going to bring back for a swap nobody agreed to.
+ */
+std::wstring make_ack_event_name(const std::wstring& readyEventName);
+
+/** What the waiting caller should do NEXT, which is not always a final answer. */
+enum class HandoffStep {
+  /**
+   * Nothing has been decided. Keep waiting.
+   *
+   * This is the case that did not exist, and its absence was the defect. The process the host
+   * starts is a BOOTSTRAP: it copies the updater into a working directory, launches that copy and
+   * exits immediately, because it cannot hold open the file the update has to replace. Its exit is
+   * the normal, successful path -- and the host was treating it as the updater dying.
+   *
+   * So the host told the user "the installed version is unchanged and you can carry on", closed
+   * the ready event, and stopped listening. The copy, meanwhile, was downloading perfectly well;
+   * it then signalled into an event nobody held and stopped the very host that had just promised
+   * nothing would happen. For a remote user that is being told the update was cancelled and then
+   * losing the machine.
+   */
+  KeepWaiting,
+  /** The updater has a verified download. Getting out of the way is now safe. */
+  ExitNow,
+  /** It is not going to happen this time. Carry on as though nothing had been attempted. */
+  KeepRunning,
+};
+
+const char* handoff_step_name(HandoffStep step);
+
+/**
+ * What to do when the wait wakes up.
+ *
+ * `bootstrapExitCode` is only read when `bootstrapExited` is true. Zero means it handed over and
+ * left on purpose; anything else means it failed before there was a worker to wait for, and there
+ * is nothing more to wait for either.
+ */
+HandoffStep handoff_step(bool readySignalled, bool bootstrapExited, uint32_t bootstrapExitCode,
+                         bool timedOut, std::string* detail);
+
+/**
+ * Whether the updater may go on to stop the product.
+ *
+ * Both halves are required. The signal has to have been DELIVERED -- an event that could not be
+ * opened means nobody is waiting -- and it has to have been ANSWERED, because a host that has
+ * already given up and told the user so must not then be shut down by a late arrival.
+ *
+ * Returning false here is not a failure of the update. Nothing has been touched at this point, so
+ * the correct outcome is that no update happens and everything keeps running.
+ */
+bool may_stop_the_product(bool signalDelivered, bool acknowledged, std::string* detail);
+
+/**
+ * Runs the wait to a decision, and acknowledges when the decision is to stand down.
+ *
+ * Handles are `void*` so this header stays free of windows.h; they are HANDLEs. `bootstrap` may be
+ * null when there is nothing to watch besides the event.
+ *
+ * Lives here, and not inside the caller, because a wait that can only be run by starting the
+ * product is a wait nobody runs. This one was wrong for exactly as long as that was true of it.
+ */
+HandoffStep await_handoff(void* readyEvent, void* ackEvent, void* bootstrap, uint32_t timeoutMs,
+                          std::string* detail);
+
 /** What the waiting caller should do. */
 enum class HandoffVerdict {
   /** The updater has the lock and a verified download. Getting out of the way is now safe. */

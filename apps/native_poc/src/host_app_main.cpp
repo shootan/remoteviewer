@@ -949,9 +949,16 @@ void start_update_handoff(HWND window) {
 
   // Created before the updater starts, so there is no window in which it signals an event nobody
   // is listening on. Manual-reset: the waiter must not consume it before it has been observed.
+  // Both events, made together and named from the same stem, so one attempt cannot end up
+  // answering on another's channel. The acknowledgement exists because signalling ready tells the
+  // host something; it does not tell the updater that anyone heard.
+  const std::wstring ackEventName = upd::make_ack_event_name(spec.readyEventName);
+  HANDLE ackEvent = CreateEventW(nullptr, TRUE, FALSE, ackEventName.c_str());
   HANDLE readyEvent = CreateEventW(nullptr, TRUE, FALSE, spec.readyEventName.c_str());
-  if (!readyEvent) {
-    append_host_app_log("[host-app] update: could not create the ready event");
+  if (!readyEvent || !ackEvent) {
+    if (readyEvent) CloseHandle(readyEvent);
+    if (ackEvent) CloseHandle(ackEvent);
+    append_host_app_log("[host-app] update: could not create the handshake events");
     MessageBoxW(window, L"업데이트를 시작하지 못했습니다.", kProductName, MB_OK | MB_ICONWARNING);
     return;
   }
@@ -983,6 +990,7 @@ void start_update_handoff(HWND window) {
       append_host_app_log(std::string("[host-app] update: refusing to start the updater -- ") +
                           upd::launch_guard_verdict_name(verdict));
       CloseHandle(readyEvent);
+      CloseHandle(ackEvent);
       MessageBoxW(window,
                   L"지금은 업데이트를 시작할 수 없습니다.\n\n"
                   L"설치된 버전은 그대로이며 계속 사용할 수 있습니다.",
@@ -996,6 +1004,7 @@ void start_update_handoff(HWND window) {
     append_host_app_log("[host-app] update: could not start the updater (error " +
                         std::to_string(GetLastError()) + ")");
     CloseHandle(readyEvent);
+    CloseHandle(ackEvent);
     MessageBoxW(window, L"업데이터를 시작하지 못했습니다.", kProductName, MB_OK | MB_ICONWARNING);
     return;
   }
@@ -1004,24 +1013,20 @@ void start_update_handoff(HWND window) {
 
   // Waits off the UI thread: this window has to keep responding while the download runs, and the
   // user may still be using the product right up to the moment it is replaced.
-  std::thread([window, readyEvent, process = pi.hProcess]() {
-    HANDLE handles[2] = {readyEvent, process};
+  std::thread([window, readyEvent, ackEvent, bootstrap = pi.hProcess]() {
     // Long enough for a download on a slow link, short enough that a wedged updater does not keep
     // the host waiting forever. Running out is not an error -- it just means no update today.
-    const DWORD waited = WaitForMultipleObjects(2, handles, FALSE, 10 * 60 * 1000);
-    const bool signalled = (waited == WAIT_OBJECT_0);
-    const bool exited = (waited == WAIT_OBJECT_0 + 1);
-    const bool timedOut = (waited == WAIT_TIMEOUT);
-
     std::string why;
-    const upd::HandoffVerdict verdict =
-        upd::handoff_verdict(signalled, exited, timedOut, &why);
-    CloseHandle(readyEvent);
-    CloseHandle(process);
+    const upd::HandoffStep step =
+        upd::await_handoff(readyEvent, ackEvent, bootstrap, 10 * 60 * 1000, &why);
 
-    auto* detail = new std::string(std::string(upd::handoff_verdict_name(verdict)) + ": " + why);
+    CloseHandle(bootstrap);
+    if (ackEvent) CloseHandle(ackEvent);
+    CloseHandle(readyEvent);
+
+    auto* detail = new std::string(std::string(upd::handoff_step_name(step)) + ": " + why);
     PostMessageW(window, kUpdateHandoffDoneMessage,
-                 static_cast<WPARAM>(verdict == upd::HandoffVerdict::ExitNow),
+                 static_cast<WPARAM>(step == upd::HandoffStep::ExitNow),
                  reinterpret_cast<LPARAM>(detail));
   }).detach();
 }

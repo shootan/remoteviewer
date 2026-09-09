@@ -1,0 +1,264 @@
+// The handover, across three real processes.
+//
+// This test exists because the defect it pins could not be seen anywhere else. Every part was
+// right on its own: the bootstrap exits at once (it must -- it is running from a file the update
+// replaces), the working copy signals when it has a verified download, and the host waits for that
+// signal. Put together, the host was watching the BOOTSTRAP, saw it exit, and concluded the
+// updater had died. It told the user the installed version was unchanged and stopped listening --
+// while the working copy was still downloading. Then the copy signalled into an event nobody held
+// and went on to stop the host it had just been promised would be left alone.
+//
+// A remote user is told the update was cancelled, and then loses the machine.
+//
+// So: real bootstrap, real worker, and the host's own wait -- `await_handoff`, the function the
+// product calls, not a copy of it. The one thing played in-process is the host, because what is
+// under test is its decision.
+
+#include <windows.h>
+
+#include <iostream>
+#include <string>
+#include <vector>
+
+#include "update_handoff.hpp"
+
+namespace {
+
+using namespace remote60::native_poc::update;
+
+int gFailures = 0;
+int gChecks = 0;
+
+void check(const std::string& name, bool ok, const std::string& detail = {}) {
+  ++gChecks;
+  if (!ok) ++gFailures;
+  std::cout << (ok ? "PASS  " : "FAIL  ") << name;
+  if (!detail.empty()) std::cout << "  " << detail;
+  std::cout << "\n";
+}
+
+std::string narrow(const std::wstring& s) { return std::string(s.begin(), s.end()); }
+
+std::string read_text(const std::wstring& path) {
+  HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) return {};
+  std::string out;
+  char buffer[4096];
+  DWORD read = 0;
+  while (ReadFile(file, buffer, sizeof(buffer), &read, nullptr) && read > 0) {
+    out.append(buffer, read);
+  }
+  CloseHandle(file);
+  return out;
+}
+
+/** Where this run keeps its witness files: inside the repository, never %TEMP%. */
+std::wstring run_root() {
+  std::wstring base = GNLINK_HANDOFF_ROOT;
+  for (wchar_t& c : base) {
+    if (c == L'/') c = L'\\';
+  }
+  std::wstring built;
+  for (size_t i = 0; i < base.size(); ++i) {
+    built.push_back(base[i]);
+    if (base[i] == L'\\' || i + 1 == base.size()) CreateDirectoryW(built.c_str(), nullptr);
+  }
+  wchar_t leaf[64]{};
+  swprintf(leaf, 64, L"\\handoff-%lu", GetCurrentProcessId());
+  const std::wstring path = base + leaf;
+  CreateDirectoryW(path.c_str(), nullptr);
+  return path;
+}
+
+/** One attempt, driven end to end. Everything the assertions need comes back in here. */
+struct Attempt {
+  HandoffStep step = HandoffStep::KeepRunning;
+  std::string why;
+  std::string witness;
+  DWORD workerExit = 0xFFFFFFFF;
+  bool workerFinished = false;
+};
+
+}  // namespace
+
+int main() {
+  setvbuf(stdout, nullptr, _IONBF, 0);
+  std::cout.setf(std::ios::unitbuf);
+
+  const std::wstring root = run_root();
+  const std::wstring fixture = GNLINK_HANDOFF_FIXTURE;
+  int attemptNo = 0;
+
+  /**
+   * Runs one handover.
+   *
+   * `bootstrapExit` is what the bootstrap returns, `delayMs` how long the worker waits before
+   * signalling, `signal` whether it signals at all, and `hostTimeoutMs` how long the host waits.
+   */
+  const auto run = [&](int bootstrapExit, int delayMs, bool signal, DWORD hostTimeoutMs,
+                       int ackWaitMs) {
+    Attempt a;
+    ++attemptNo;
+    wchar_t stem[128]{};
+    swprintf(stem, 128, L"Local\\GNLinkHandoffTest-%lu-%d", GetCurrentProcessId(), attemptNo);
+    const std::wstring readyName = stem;
+    const std::wstring ackName = make_ack_event_name(readyName);
+    wchar_t witnessLeaf[64]{};
+    swprintf(witnessLeaf, 64, L"\\witness-%d.txt", attemptNo);
+    const std::wstring witness = root + witnessLeaf;
+
+    // Created BEFORE anything is started, so there is no window in which the worker signals an
+    // event nobody holds -- which is a different failure from the one under test and would
+    // otherwise be indistinguishable from it.
+    HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, readyName.c_str());
+    HANDLE ack = CreateEventW(nullptr, TRUE, FALSE, ackName.c_str());
+
+    std::wstring command = L"\"" + fixture + L"\" --bootstrap --exit-code " +
+                           std::to_wstring(bootstrapExit) + L" --ready \"" + readyName +
+                           L"\" --witness \"" + witness + L"\" --delay " +
+                           std::to_wstring(delayMs) + L" --ack-wait " + std::to_wstring(ackWaitMs);
+    if (!signal) command += L" --no-signal";
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    const BOOL started = CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE,
+                                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    if (!started) {
+      a.why = "the fixture would not start";
+      if (ready) CloseHandle(ready);
+      if (ack) CloseHandle(ack);
+      return a;
+    }
+    CloseHandle(pi.hThread);
+
+    // The product's own wait. Not a copy of it -- a copy is what let the original stay wrong.
+    a.step = await_handoff(ready, ack, pi.hProcess, hostTimeoutMs, &a.why);
+
+    // The worker outlives the bootstrap, so the witness is read after giving it time to finish.
+    // Waiting on it is what a host cannot do and a test can.
+    CloseHandle(pi.hProcess);
+    for (int waited = 0; waited < 15000; waited += 100) {
+      const std::string text = read_text(witness);
+      if (text.find("worker WOULD stop") != std::string::npos ||
+          text.find("worker stood down") != std::string::npos) {
+        a.workerFinished = true;
+        break;
+      }
+      Sleep(100);
+    }
+    a.witness = read_text(witness);
+    if (ready) CloseHandle(ready);
+    if (ack) CloseHandle(ack);
+    return a;
+  };
+
+  // ---------------------------------------------------------------- 1. the defect itself
+  {
+    // The bootstrap exits immediately with 0 -- as it always does -- and the worker takes a
+    // moment before it is ready. This is the ordinary, healthy update, and it was the broken one.
+    const Attempt a = run(/*bootstrapExit=*/0, /*delayMs=*/700, /*signal=*/true,
+                          /*hostTimeoutMs=*/20000, /*ackWaitMs=*/5000);
+    check("1 bootstrap exits at once: the host keeps waiting and then agrees to exit",
+          a.step == HandoffStep::ExitNow, std::string(handoff_step_name(a.step)) + ": " + a.why);
+    check("1 the worker was acknowledged and would go ahead",
+          a.witness.find("worker WOULD stop the product") != std::string::npos, a.witness);
+  }
+
+  // ---------------------------------------------------------------- 2. the bootstrap really fails
+  {
+    // A non-zero exit means it never got as far as starting a worker. There is nothing left to
+    // wait for, and the host must say so rather than sitting out the full timeout.
+    const DWORD before = GetTickCount();
+    const Attempt a = run(/*bootstrapExit=*/3, /*delayMs=*/0, /*signal=*/false,
+                          /*hostTimeoutMs=*/20000, /*ackWaitMs=*/1000);
+    const DWORD took = GetTickCount() - before;
+    check("2 bootstrap failure: the host stops waiting", a.step == HandoffStep::KeepRunning,
+          std::string(handoff_step_name(a.step)) + ": " + a.why);
+    check("2 bootstrap failure: and does not sit out the whole timeout", took < 15000,
+          std::to_string(took) + "ms");
+  }
+
+  // ---------------------------------------------------------------- 3. the worker never signals
+  {
+    // Nothing is wrong with the bootstrap; the worker simply does not get there -- a download
+    // that failed, a server that was unreachable. The host waits, gives up, and keeps running.
+    const Attempt a = run(/*bootstrapExit=*/0, /*delayMs=*/0, /*signal=*/false,
+                          /*hostTimeoutMs=*/2000, /*ackWaitMs=*/500);
+    check("3 no signal: the host keeps running", a.step == HandoffStep::KeepRunning,
+          std::string(handoff_step_name(a.step)) + ": " + a.why);
+    check("3 no signal: and the worker stands down rather than stopping anything",
+          a.witness.find("worker stood down") != std::string::npos, a.witness);
+  }
+
+  // ---------------------------------------------------------------- 4. late: after the host gave up
+  {
+    // THE case. The host's patience runs out, it decides no update is happening -- in the product
+    // it says so to the user -- and the worker turns up afterwards. It must not be acknowledged,
+    // and it must not stop anything.
+    const Attempt a = run(/*bootstrapExit=*/0, /*delayMs=*/2500, /*signal=*/true,
+                          /*hostTimeoutMs=*/700, /*ackWaitMs=*/3000);
+    check("4 late worker: the host had already decided to keep running",
+          a.step == HandoffStep::KeepRunning, std::string(handoff_step_name(a.step)) + ": " + a.why);
+    check("4 late worker: it is never acknowledged, so it stands down",
+          a.witness.find("worker stood down") != std::string::npos, a.witness);
+    check("4 late worker: and it does NOT decide to stop the product",
+          a.witness.find("worker WOULD stop the product") == std::string::npos, a.witness);
+  }
+
+  // ---------------------------------------------------------------- 5. the race, both directions
+  {
+    // The host decides at the same moment the worker signals. Whichever way it lands, the two
+    // must agree: acknowledged means the worker goes ahead, not acknowledged means it does not.
+    // What must never happen is the host keeping running while the worker goes ahead anyway.
+    // The timeout is swept ACROSS the worker's delay so the decision lands on both sides. A
+    // fixed timing produced the same answer every run, and a race test that only ever sees one
+    // outcome is not testing the race -- it would pass unchanged if the other side were broken.
+    bool sawExit = false;
+    bool sawKeep = false;
+    for (int timeout = 200; timeout <= 900; timeout += 100) {
+      const Attempt a = run(/*bootstrapExit=*/0, /*delayMs=*/500, /*signal=*/true,
+                            /*hostTimeoutMs=*/static_cast<DWORD>(timeout), /*ackWaitMs=*/2000);
+      const bool hostLeaving = a.step == HandoffStep::ExitNow;
+      const bool workerGoing = a.witness.find("worker WOULD stop the product") != std::string::npos;
+      sawExit = sawExit || hostLeaving;
+      sawKeep = sawKeep || !hostLeaving;
+      // The one thing that must never happen: the host stays and the updater goes ahead anyway.
+      check("5 race: the host and the worker never disagree", hostLeaving == workerGoing,
+            std::to_string(timeout) + "ms: " + handoff_step_name(a.step) + " vs " + a.witness);
+    }
+    // Non-vacuity, stated rather than assumed: the sweep really did land on both sides.
+    check("5 race: both outcomes actually occurred", sawExit && sawKeep,
+          std::string("exit=") + (sawExit ? "yes" : "no") + " keep=" + (sawKeep ? "yes" : "no"));
+  }
+
+  // Only this run's own directory, and only if it is under the configured root.
+  {
+    std::wstring base = GNLINK_HANDOFF_ROOT;
+    for (wchar_t& c : base) {
+      if (c == L'/') c = L'\\';
+    }
+    const bool mine = root.size() > base.size() &&
+                      _wcsnicmp(root.c_str(), base.c_str(), base.size()) == 0;
+    if (mine) {
+      WIN32_FIND_DATAW find{};
+      HANDLE h = FindFirstFileW((root + L"\\*").c_str(), &find);
+      if (h != INVALID_HANDLE_VALUE) {
+        do {
+          const std::wstring name = find.cFileName;
+          if (name == L"." || name == L"..") continue;
+          DeleteFileW((root + L"\\" + name).c_str());
+        } while (FindNextFileW(h, &find));
+        FindClose(h);
+      }
+      RemoveDirectoryW(root.c_str());
+    } else {
+      std::cout << "NOTE  refusing to remove " << narrow(root) << " -- not under the test root\n";
+    }
+  }
+
+  std::cout << (gFailures == 0 ? "RESULT: ALL PASS  (" : "RESULT: FAILED  (") << gChecks
+            << " checks, " << gFailures << " failed)\n";
+  return gFailures == 0 ? 0 : 1;
+}

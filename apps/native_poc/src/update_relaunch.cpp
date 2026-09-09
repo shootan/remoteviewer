@@ -230,8 +230,14 @@ bool launch_via_shell(const std::wstring& exePath, const std::wstring& arguments
   // not hypothetical -- a test deleted its own fixtures after firing one of these, and the dialog
   // arrived on a real desktop afterwards. What prevents it is the file still being there when the
   // request lands, which is a question about who may delete it and when, not about checking
-  // first. Here that holds because the installation directory is not removed, and because the
-  // optional images are started only after the commit, so no rollback follows to replace them.
+  // first.
+  //
+  // FOR THE REST OF THIS ATTEMPT that holds: the optional images start only after the commit, so
+  // no rollback follows to move them, and nothing in this attempt removes the installation
+  // directory. It is NOT a claim about the file's existence in general. A later update, or an
+  // uninstall, may replace or remove it, and a shell request still in flight from this attempt
+  // would then find whatever they left. That window is small and nothing here can close it --
+  // saying so is better than implying a guarantee this does not have.
   if (GetFileAttributesW(exePath.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
   // The one branch that cannot be arranged by any other means: a machine with no route to the
   // user's context. What must NOT happen there is a fallback to starting it as a child.

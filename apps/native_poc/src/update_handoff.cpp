@@ -60,6 +60,70 @@ const char* handoff_verdict_name(HandoffVerdict verdict) {
   return "unknown";
 }
 
+std::wstring make_ack_event_name(const std::wstring& readyEventName) {
+  if (readyEventName.empty()) return {};
+  return readyEventName + L".ack";
+}
+
+const char* handoff_step_name(HandoffStep step) {
+  switch (step) {
+    case HandoffStep::KeepWaiting: return "KeepWaiting";
+    case HandoffStep::ExitNow: return "ExitNow";
+    case HandoffStep::KeepRunning: return "KeepRunning";
+  }
+  return "?";
+}
+
+HandoffStep handoff_step(bool readySignalled, bool bootstrapExited, uint32_t bootstrapExitCode,
+                         bool timedOut, std::string* detail) {
+  const auto say = [detail](const char* text) {
+    if (detail) *detail = text;
+  };
+
+  if (readySignalled) {
+    // First, deliberately. A signal that arrived is decisive whatever else has happened since.
+    say("the updater holds the lock and has a verified download");
+    return HandoffStep::ExitNow;
+  }
+  if (bootstrapExited) {
+    if (bootstrapExitCode == 0) {
+      // The normal path, and the one that used to be read as death. The bootstrap's whole job is
+      // to start the working copy and get out of the way -- it cannot stay, because the file it
+      // is running from is one of the files the update replaces.
+      say("the bootstrap handed over and exited, which is what it is meant to do -- still "
+          "waiting for the working copy");
+      return HandoffStep::KeepWaiting;
+    }
+    say("the bootstrap failed before it could hand over, so there is nothing to wait for");
+    return HandoffStep::KeepRunning;
+  }
+  if (timedOut) {
+    say("the updater did not reach a verified download in time");
+    return HandoffStep::KeepRunning;
+  }
+  say("the updater did not signal");
+  return HandoffStep::KeepRunning;
+}
+
+bool may_stop_the_product(bool signalDelivered, bool acknowledged, std::string* detail) {
+  const auto say = [detail](const char* text) {
+    if (detail) *detail = text;
+  };
+  if (!signalDelivered) {
+    // The event could not be opened. Either nobody was ever waiting, or whoever was has closed it
+    // and moved on -- and in both cases stopping the product would be stopping something that is
+    // not expecting to be stopped and has nobody to bring it back.
+    say("the ready signal could not be delivered -- nothing is waiting for this update");
+    return false;
+  }
+  if (!acknowledged) {
+    say("the ready signal was delivered but never answered -- whoever was waiting has given up");
+    return false;
+  }
+  say("the waiting caller acknowledged and is standing down");
+  return true;
+}
+
 HandoffVerdict handoff_verdict(bool readySignalled, bool updaterExited, bool timedOut,
                                std::string* detail) {
   const auto say = [detail](const char* text) {

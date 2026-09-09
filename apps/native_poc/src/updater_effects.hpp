@@ -53,7 +53,24 @@ struct UpdaterDeps {
   /** Checks the manifest signature. Production uses the compiled-in trusted key. */
   SignatureVerifier verifier;
   /** Releases a caller waiting to exit. Called at exactly one point; see UpdaterEffects::run. */
-  std::function<void(const std::wstring& eventName)> signalReady;
+  /**
+   * Tells whoever is waiting that the download is verified. Returns whether it was DELIVERED.
+   *
+   * The return value used to be void, and that was half of a defect: an updater whose signal went
+   * nowhere carried on and stopped the product anyway. Nobody was waiting, so nobody was going to
+   * bring it back.
+   */
+  std::function<bool(const std::wstring& eventName)> signalReady;
+
+  /**
+   * Waits for the acknowledgement that belongs to `readyEventName`. Returns whether it came.
+   *
+   * The other half. A signal that was delivered still does not mean anyone acted on it -- the
+   * waiting caller may have already given up and told the user that no update would happen. It
+   * must not then be shut down by an updater that arrived late, so the updater waits to be told
+   * "yes, I am standing down" before it stops anything.
+   */
+  std::function<bool(const std::wstring& readyEventName, uint32_t timeoutMs)> awaitAck;
   /** Where log lines go. */
   std::function<void(const std::string&)> log;
   /** This process's own image, so the swap can refuse to replace it. */

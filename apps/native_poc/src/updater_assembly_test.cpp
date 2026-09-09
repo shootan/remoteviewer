@@ -252,7 +252,16 @@ int main() {
     // Accepts anything: what is under test here is the wiring, and the signature algorithm has
     // its own suite. Production compiles in the real anchor and is untouched by this.
     deps.verifier = [](const std::string&, const std::vector<uint8_t>&) { return true; };
-    deps.signalReady = [rec](const std::wstring&) { rec->note("signalReady"); };
+    deps.signalReady = [rec](const std::wstring&) {
+      rec->note("signalReady");
+      return true;
+    };
+    // Supplied together with signalReady, because one without the other is the defect they exist
+    // for: signalling with no way to hear the answer.
+    deps.awaitAck = [rec](const std::wstring&, uint32_t) {
+      rec->note("awaitAck");
+      return true;
+    };
     return deps;
   };
 

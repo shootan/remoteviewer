@@ -272,6 +272,7 @@ add_executable(remote60_host_app WIN32
   # the handoff that decides when this process may get out of the updater's way.
   src/update_check.cpp
   src/update_handoff.cpp
+  src/update_handoff_wait.cpp
   src/update_job_guard.cpp
   src/update_http.cpp
   src/update_manifest.cpp
@@ -724,6 +725,8 @@ endif()
 add_executable(remote60_updater
   src/updater_main.cpp
   src/updater_effects.cpp
+  src/update_handoff.cpp
+  src/update_handoff_wait.cpp
   src/updater_options.cpp
   src/update_job_guard.cpp
   src/update_state_machine.cpp
@@ -789,6 +792,8 @@ endif()
 add_executable(remote60_updater_scenarios_test
   src/updater_scenarios_test.cpp
   src/updater_effects.cpp
+  src/update_handoff.cpp
+  src/update_handoff_wait.cpp
   src/updater_options.cpp
   src/update_state_machine.cpp
   src/update_effects.cpp
@@ -833,6 +838,8 @@ endif()
 add_executable(remote60_updater_assembly_test
   src/updater_assembly_test.cpp
   src/updater_effects.cpp
+  src/update_handoff.cpp
+  src/update_handoff_wait.cpp
   src/updater_options.cpp
   src/update_state_machine.cpp
   src/update_effects.cpp
@@ -859,8 +866,37 @@ endif()
 
 # When the host may get out of the way, and what it hands over. Pure decisions -- nothing here
 # starts a process or waits on a handle.
+# The two roles the handover test cannot play itself, as real processes.
+add_executable(remote60_handoff_fixture
+  src/handoff_fixture_main.cpp
+  src/update_handoff.cpp
+)
+target_include_directories(remote60_handoff_fixture PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_handoff_fixture PRIVATE /utf-8)
+endif()
+
+# The handover across three real processes. Two of them are started for real, and the host's own
+# wait -- await_handoff, the function the product calls -- runs in this one. A test that reproduced
+# the wait instead of calling it would be testing the reproduction, which is how the original
+# stayed wrong.
+add_executable(remote60_update_handoff_process_test
+  src/update_handoff.cpp
+  src/update_handoff_wait.cpp
+  src/update_handoff_process_test.cpp
+)
+add_dependencies(remote60_update_handoff_process_test remote60_handoff_fixture)
+target_include_directories(remote60_update_handoff_process_test PRIVATE src)
+target_compile_definitions(remote60_update_handoff_process_test PRIVATE
+  GNLINK_HANDOFF_FIXTURE=L"$<TARGET_FILE:remote60_handoff_fixture>"
+  GNLINK_HANDOFF_ROOT=L"${CMAKE_SOURCE_DIR}/.claude/handoff-runs")
+if(MSVC)
+  target_compile_options(remote60_update_handoff_process_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_update_handoff_test
   src/update_handoff.cpp
+  src/update_handoff_wait.cpp
   src/update_handoff_test.cpp
 )
 target_include_directories(remote60_update_handoff_test PRIVATE src)
@@ -1109,6 +1145,7 @@ if(GNLINK_HAVE_WEBVIEW2)
     # replace anything in %ProgramFiles% itself.
     src/update_check.cpp
     src/update_handoff.cpp
+  src/update_handoff_wait.cpp
     src/update_http.cpp
     src/update_manifest.cpp
     src/payload_name.cpp

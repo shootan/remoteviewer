@@ -483,6 +483,10 @@ int main() {
   options.logPath = root + L"\\updater.log";
   options.serviceName = L"GNLinkScenarioTestService";
   options.registryRoot = L"HKCU\\Software\\GNLinkScenarioTest";
+  // A ready-event name, so the handshake is actually exercised. Empty means "nobody is waiting"
+  // and the gate is skipped -- which is a real case, and also the one that would let every
+  // scenario here pass without ever touching the handshake.
+  options.readyEventName = L"Local\\GNLinkScenarioTestReady";
 
   ProcessTarget hostTarget;
   hostTarget.pid = 1001;
@@ -557,6 +561,10 @@ int main() {
      * shell -- started, and no way to say which process it is. The consequence is the point.
      */
     bool clientOwnable = true;
+    /** Whether anything was listening when the updater said it was ready. */
+    bool signalDelivered = true;
+    /** Whether the waiting caller answered. False = it gave up and told the user so. */
+    bool ackAnswers = true;
     bool newHealthOk = true;    // does the NEW build report healthy
     bool oldHealthOk = true;    // does the RESTORED build report healthy
     bool quiesceOk = true;      // whether the stop completes
@@ -644,7 +652,11 @@ int main() {
     deps.registrationOps.createShortcut = [](const std::wstring&, const std::wstring&,
                                              const std::wstring&) { return true; };
     deps.verifier = [](const std::string&, const std::vector<uint8_t>&) { return true; };
-    deps.signalReady = [](const std::wstring&) {};
+    // The handshake, modelled. `ackAnswers` false is the case the whole thing exists for: the
+    // signal is delivered and nobody answers, because the waiting caller has already given up and
+    // told the user no update would happen.
+    deps.signalReady = [knobs](const std::wstring&) { return knobs.signalDelivered; };
+    deps.awaitAck = [knobs](const std::wstring&, uint32_t) { return knobs.ackAnswers; };
 
     deps.makeRelaunch = [&, knobs, started, rolledBack, requiredRuns](
                             const RelaunchConfig& config,
@@ -1152,6 +1164,59 @@ int main() {
     // depend on processes staying alive, which is what left them lying around.
     check("9 client-only: the client actually ran", wait_for_witness(kClientName, 10000),
           witness_text() + " -- " + r.log);
+  }
+
+  // ============================ 10. the handshake nobody answered
+  //
+  // The updater said it was ready and nothing answered. That happens when the caller waiting for
+  // it has already given up -- and it has usually told the user "the installed version is
+  // unchanged, carry on" before doing so. Going ahead from here would stop the very product that
+  // was just promised nothing would happen to it, and for a remote user that is being told the
+  // update was cancelled and then losing the machine.
+  //
+  // Abandoned before the swap, with nothing on disk touched.
+
+  {
+    Knobs k;
+    k.stopped = {hostTarget, clientTarget};
+    k.ackAnswers = false;  // delivered, never answered
+    const Result r = run_scenario(k);
+    check("10 unanswered handshake: abandoned before the swap",
+          r.outcome.result == UpdateResult::AbandonedBeforeSwap ||
+              r.outcome.result == UpdateResult::AbandonedNotRelaunched,
+          std::string(result_name(r.outcome.result)) + " / " + r.outcome.detail);
+    check("10 unanswered handshake: nothing on disk changed", r.hostBytes == oldBody,
+          std::to_string(r.hostBytes.size()));
+    check("10 unanswered handshake: no backup was made", !r.hostBackupLeft && !r.clientBackupLeft);
+    check("10 unanswered handshake: and it says why",
+          r.log.find("never answered") != std::string::npos, r.log);
+  }
+  {
+    // Delivered to nobody at all -- the event could not even be opened. Same outcome, different
+    // reason, and the reason has to survive because they call for different investigations.
+    Knobs k;
+    k.stopped = {hostTarget, clientTarget};
+    k.signalDelivered = false;
+    const Result r = run_scenario(k);
+    check("10 undelivered signal: abandoned before the swap",
+          r.outcome.result == UpdateResult::AbandonedBeforeSwap ||
+              r.outcome.result == UpdateResult::AbandonedNotRelaunched,
+          result_name(r.outcome.result));
+    check("10 undelivered signal: nothing on disk changed", r.hostBytes == oldBody,
+          std::to_string(r.hostBytes.size()));
+    check("10 undelivered signal: the reason names delivery, not the answer",
+          r.log.find("could not be delivered") != std::string::npos, r.log);
+  }
+  {
+    // The counter-control. Same path, and the handshake completes -- so it goes ahead. Without
+    // this the two above would also pass if the updater simply never got past Prepare.
+    Knobs k;
+    k.stopped = {hostTarget, clientTarget};
+    const Result r = run_scenario(k);
+    check("10 counter-control: an answered handshake proceeds",
+          r.outcome.result == UpdateResult::Updated, result_name(r.outcome.result));
+    check("10 counter-control: and the new bytes are in place", r.hostBytes == newBody,
+          std::to_string(r.hostBytes.size()));
   }
 
   // ================================================================ control: whose process is it

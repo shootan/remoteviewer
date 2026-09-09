@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include "product_version.hpp"
+#include "update_handoff.hpp"
 #include "update_http.hpp"
 #include "update_process_targets.hpp"
 #include "update_registration_wiring.hpp"
@@ -51,7 +52,8 @@ class ReadySignaller : public UpdateEffects {
                  std::shared_ptr<std::string> versionToInstall,
                  std::shared_ptr<std::string> expectedVersion, std::string installedVersion,
                  std::function<void()> captureTargets,
-                 std::function<void(const std::wstring&)> signalReady,
+                 std::function<bool(const std::wstring&)> signalReady,
+                 std::function<bool(const std::wstring&, uint32_t)> awaitAck,
                  WindowsUpdateEffects* concrete, std::function<void(const std::string&)> log)
       : inner_(inner),
         eventName_(std::move(eventName)),
@@ -60,6 +62,7 @@ class ReadySignaller : public UpdateEffects {
         installedVersion_(std::move(installedVersion)),
         captureTargets_(std::move(captureTargets)),
         signalReady_(std::move(signalReady)),
+        awaitAck_(std::move(awaitAck)),
         concrete_(concrete),
         log_(std::move(log)) {}
 
@@ -75,13 +78,33 @@ class ReadySignaller : public UpdateEffects {
       *versionToInstall_ = f.version;
       *expectedVersion_ = f.version;
       if (captureTargets_) captureTargets_();  // before anyone is told they may leave
-      if (signalReady_) signalReady_(eventName_);
+      // Recorded, not discarded. Whether anyone received this decides whether the product may be
+      // stopped, and that decision is made at PrepareForSwap -- the last point before anything
+      // is touched.
+      signalDelivered_ = signalReady_ ? signalReady_(eventName_) : false;
+      if (!signalDelivered_ && log_ && !eventName_.empty()) {
+        log_("the ready signal could not be delivered -- nothing is waiting for this update");
+      }
     }
     return ok;
   }
 
   void DiscardDownload() override { inner_.DiscardDownload(); }
-  bool PrepareForSwap() override { return inner_.PrepareForSwap(); }
+  bool PrepareForSwap() override {
+    // The gate, and it sits here because this is the last step before anything is stopped or
+    // moved. Failing here abandons the attempt with the disk untouched, which is the correct
+    // outcome of a handover nobody completed.
+    if (!eventName_.empty()) {
+      const bool acked = awaitAck_ ? awaitAck_(eventName_, kAckTimeoutMs) : false;
+      std::string why;
+      if (!may_stop_the_product(signalDelivered_, acked, &why)) {
+        if (log_) log_("not going ahead: " + why);
+        return false;
+      }
+      if (log_) log_(why);
+    }
+    return inner_.PrepareForSwap();
+  }
   bool Quiesce() override { return inner_.Quiesce(); }
   // Logged AT the failure, not afterwards. Read later it is gone: the rollback that follows runs
   // its own steps and each one overwrites the message, so an operator was left with "swap failed"
@@ -91,6 +114,15 @@ class ReadySignaller : public UpdateEffects {
   RelaunchVerdict RelaunchRequired() override { return inner_.RelaunchRequired(); }
   RelaunchVerdict RelaunchOptional() override { return inner_.RelaunchOptional(); }
   bool HealthCheck() override { return inner_.HealthCheck(); }
+
+  /**
+   * How long to wait for the acknowledgement.
+   *
+   * Generous, because the answer comes from a UI thread that may be busy, and short enough that
+   * an update does not sit indefinitely against a caller that has gone. Timing out here costs
+   * nothing: nothing has been touched.
+   */
+  static constexpr uint32_t kAckTimeoutMs = 30000;
 
   bool note(const char* step, bool ok) {
     if (!ok && log_ && concrete_) {
@@ -117,7 +149,9 @@ class ReadySignaller : public UpdateEffects {
   std::shared_ptr<std::string> expectedVersion_;
   std::string installedVersion_;
   std::function<void()> captureTargets_;
-  std::function<void(const std::wstring&)> signalReady_;
+  std::function<bool(const std::wstring&)> signalReady_;
+  std::function<bool(const std::wstring&, uint32_t)> awaitAck_;
+  bool signalDelivered_ = false;
   WindowsUpdateEffects* concrete_ = nullptr;
   std::function<void(const std::string&)> log_;
 };
@@ -142,7 +176,12 @@ bool UpdaterDeps::validate(std::string* detail) const {
   if (lockName.empty()) return fail("lockName not set");
   if (payloadNames.empty()) return fail("payloadNames not set");
   if (relaunchTable.empty()) return fail("relaunchTable not set");
-  // signalReady may be absent: an update nobody is waiting on is an ordinary case.
+  // signalReady and awaitAck may be absent: an update nobody is waiting on is an ordinary case,
+  // and then there is no handshake to complete. What must not happen is one without the other --
+  // signalling with no way to hear the answer is exactly the shape of the defect they exist for.
+  if (static_cast<bool>(signalReady) != static_cast<bool>(awaitAck)) {
+    return fail("signalReady and awaitAck must be supplied together");
+  }
   return true;
 }
 
@@ -169,11 +208,23 @@ UpdaterDeps production_updater_deps(std::function<void(const std::string&)> log)
   // can be exercised without this ever changing.
   deps.verifier = default_verifier();
   deps.signalReady = [](const std::wstring& eventName) {
-    if (eventName.empty()) return;
+    if (eventName.empty()) return false;
     HANDLE event = OpenEventW(EVENT_MODIFY_STATE, FALSE, eventName.c_str());
-    if (!event) return;
-    SetEvent(event);
+    // Could not be opened, so nobody holds it. That is not "signalled anyway" -- it is the
+    // absence of anyone to signal, and the caller has to be able to tell the difference.
+    if (!event) return false;
+    const bool set = SetEvent(event) != FALSE;
     CloseHandle(event);
+    return set;
+  };
+  deps.awaitAck = [](const std::wstring& readyEventName, uint32_t timeoutMs) {
+    const std::wstring ackName = make_ack_event_name(readyEventName);
+    if (ackName.empty()) return false;
+    HANDLE event = OpenEventW(SYNCHRONIZE, FALSE, ackName.c_str());
+    if (!event) return false;
+    const bool acked = WaitForSingleObject(event, timeoutMs) == WAIT_OBJECT_0;
+    CloseHandle(event);
+    return acked;
   };
   wchar_t self[MAX_PATH]{};
   GetModuleFileNameW(nullptr, self, MAX_PATH);
@@ -441,8 +492,8 @@ UpdateOutcome UpdaterEffects::run(const std::string& platform) {
     if (stopped->empty()) *stopped = enumerate();
   };
   ReadySignaller signaller(effects, options_.readyEventName, versionToInstall, expectedVersion,
-                           options_.installedVersion, captureNow, deps_.signalReady, &effects,
-                           deps_.log);
+                           options_.installedVersion, captureNow, deps_.signalReady,
+                           deps_.awaitAck, &effects, deps_.log);
   const UpdateOutcome outcome = run_update(signaller, deps_.verifier, platform);
   verifiedVersion_ = *versionToInstall;
   lastEffectsError_ = effects.last_error();
