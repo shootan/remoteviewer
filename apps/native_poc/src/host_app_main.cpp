@@ -661,6 +661,15 @@ struct AppState {
    * destination can see the difference.
    */
   uint64_t ownerEpoch = 0;
+  /**
+   * Guards `cache` and `ownerEpoch` against the background threads that read them.
+   *
+   * The update handover reads the account, the machine id, the server address, the token and the
+   * epoch from a thread that is not the UI thread, while signing in and signing out write those
+   * same fields. std::string is not safe to read while another thread assigns it, so this was a
+   * data race -- undefined behaviour, not merely a stale value.
+   */
+  std::mutex ownerMu;
   StreamingHostProcess streaming;
   std::atomic<bool> signInBusy{false};
 };
@@ -762,6 +771,22 @@ void remove_tray_icon() {
 }
 
 /**
+ * The update endpoint as it stands right now, read once under the lock.
+ *
+ * A function rather than four reads at each call site: read separately, the account, the machine
+ * id, the server address, the token and the epoch can come from either side of a sign-out, and
+ * the answer is then a mixture of two owners that never existed together.
+ */
+remote60::native_poc::update::UpdateEndpoint current_update_endpoint() {
+  std::lock_guard<std::mutex> lock(g.ownerMu);
+  return directory::update_endpoint_for(
+      remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
+      g.cache.directoryUrl, "windows",
+      g.cache.hostToken.empty() ? std::string() : "x-host-token: " + g.cache.hostToken,
+      g.cache.accountId + "|" + g.cache.machineId, g.ownerEpoch);
+}
+
+/**
  * Asks whether there is a newer build, without blocking the tray.
  *
  * The check runs on a detached thread and posts its answer back; the menu closes immediately
@@ -780,11 +805,7 @@ void start_update_check(HWND window) {
   //
   // A host authenticates with its own token, not a session -- it has no session, and the server
   // accepts either on this route.
-  const upd::UpdateEndpoint endpoint = directory::update_endpoint_for(
-      remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
-      g.cache.directoryUrl, "windows",
-      g.cache.hostToken.empty() ? std::string() : "x-host-token: " + g.cache.hostToken,
-      g.cache.accountId + "|" + g.cache.machineId, g.ownerEpoch);
+  const upd::UpdateEndpoint endpoint = current_update_endpoint();
 
   upd::CheckConfig config;
   config.manifestUrl = endpoint.url;
@@ -964,11 +985,7 @@ void start_update_handoff(HWND window) {
   // The same snapshot the check used: the updater must fetch what the user was told about, not
   // a second opinion about where updates live.
   //
-  const upd::UpdateEndpoint launchEndpoint = directory::update_endpoint_for(
-      remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
-      g.cache.directoryUrl, "windows",
-      g.cache.hostToken.empty() ? std::string() : "x-host-token: " + g.cache.hostToken,
-      g.cache.accountId + "|" + g.cache.machineId, g.ownerEpoch);
+  const upd::UpdateEndpoint launchEndpoint = current_update_endpoint();
   spec.manifestUrl = launchEndpoint.url;
   spec.derivedEndpoint = launchEndpoint.derived;
   // A name, not the credential. The credential goes over the pipe, and only after the process
@@ -1012,10 +1029,12 @@ void start_update_handoff(HWND window) {
 
   // Created BEFORE the updater starts, for the same reason as the handshake events: a name that
   // exists with nobody owning it is a name somebody else can own.
-  upd::CredentialServer credentialServer;
+  // Shared because the thread below outlives this function and the pipe has to live as long as
+  // the exchange does.
+  auto credentialServer = std::make_shared<upd::CredentialServer>();
   if (!spec.credentialPipeName.empty()) {
     std::string error;
-    if (!credentialServer.Create(spec.credentialPipeName, &error)) {
+    if (!credentialServer->Create(spec.credentialPipeName, &error)) {
       append_host_app_log("[host-app] update: could not open the credential channel -- " + error);
       CloseHandle(readyEvent);
       CloseHandle(ackEvent);
@@ -1064,59 +1083,60 @@ void start_update_handoff(HWND window) {
   }
   CloseHandle(pi.hThread);
 
-  if (!spec.credentialPipeName.empty()) {
-    // Re-read now, not reused from the snapshot built minutes ago: if the account or the server
-    // changed while the user was deciding, this attempt belongs to nobody and the credential is
-    // not sent. The updater then fails its fetch and stops, which is the correct end for an
-    // attempt whose owner is gone.
-    const upd::UpdateEndpoint nowEndpoint = directory::update_endpoint_for(
-        remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
-        g.cache.directoryUrl, "windows",
-        g.cache.hostToken.empty() ? std::string() : "x-host-token: " + g.cache.hostToken,
-        g.cache.accountId + "|" + g.cache.machineId, g.ownerEpoch);
-    std::string payload;
-    // The owner, not the destination: a re-register keeps the url and the origin and changes the
-    // token, so comparing those two would hand the new token to an older attempt.
-    if (nowEndpoint.same_owner_as(launchEndpoint) && nowEndpoint.url == launchEndpoint.url &&
-        nowEndpoint.origin == launchEndpoint.origin && !nowEndpoint.credentialHeader.empty()) {
-      payload = upd::encode_update_descriptor(nowEndpoint);
-      if (payload.empty()) {
-        append_host_app_log("[host-app] update: the credential descriptor could not be built");
-      }
-    } else {
-      append_host_app_log("[host-app] update: the owner changed after the updater was started; "
-                          "no credential sent");
-    }
-    std::string error;
-    if (payload.empty() ||
-        !credentialServer.Serve(pi.hProcess, payload, 120000, &error)) {
-      append_host_app_log("[host-app] update: the updater did not receive the credential -- " +
-                          (error.empty() ? std::string("owner changed") : error));
-    }
-    credentialServer.Close();
-  }
-
   append_host_app_log("[host-app] update: handed over to the updater, waiting for its signal");
 
   // Waits off the UI thread: this window has to keep responding while the download runs, and the
   // user may still be using the product right up to the moment it is replaced.
+  // Everything after the launch runs here, including the credential handover. It used to be
+  // inline: the menu item's handler waited up to two minutes on the UI thread while the elevated
+  // process connected. Moving only the client left the host doing exactly that.
+  //
+  // The process handle travels with it and is closed here, not before: the handle is what pins
+  // the process id the channel's check compares against.
   std::thread([window, readyEvent, ackEvent, bootstrap = pi.hProcess,
-               readyName = spec.readyEventName, launchEndpoint]() {
+               readyName = spec.readyEventName, launchEndpoint, credentialServer,
+               pipeName = spec.credentialPipeName]() {
+    if (!pipeName.empty()) {
+      // Re-read at the moment of sending, not reused from the snapshot built before the user
+      // answered. The owner is the question, not the destination: a re-register keeps the url and
+      // the origin and changes the token.
+      const upd::UpdateEndpoint nowEndpoint = current_update_endpoint();
+      std::string payload;
+      if (nowEndpoint.same_owner_as(launchEndpoint) && nowEndpoint.url == launchEndpoint.url &&
+          nowEndpoint.origin == launchEndpoint.origin &&
+          !nowEndpoint.credentialHeader.empty()) {
+        payload = upd::encode_update_descriptor(nowEndpoint);
+        if (payload.empty()) {
+          append_host_app_log("[host-app] update: the credential descriptor could not be built");
+        }
+      } else {
+        append_host_app_log("[host-app] update: the owner changed after the updater was started; "
+                            "no credential sent");
+      }
+      std::string error;
+      if (payload.empty() ||
+          !credentialServer->Serve(bootstrap, payload, 120000, &error)) {
+        append_host_app_log("[host-app] update: the updater did not receive the credential -- " +
+                            (error.empty() ? std::string("owner changed") : error));
+      }
+      credentialServer->Close();
+    }
+
     // Long enough for a download on a slow link, short enough that a wedged updater does not keep
     // the host waiting forever. Running out is not an error -- it just means no update today.
     std::string why;
     const upd::HandoffStep step = upd::await_handoff(
         readyEvent, ackEvent, bootstrap, readyName, 10 * 60 * 1000, nullptr, &why, [&]() {
           // Asked at the acknowledgement, not at the launch. A re-register during the download
-          // issues a new token for the same account on the same server -- identical url, identical
-          // origin -- so only the owner comparison can see it.
-          const upd::UpdateEndpoint nowEndpoint = directory::update_endpoint_for(
-              remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
-              g.cache.directoryUrl, "windows",
-              g.cache.hostToken.empty() ? std::string() : "x-host-token: " + g.cache.hostToken,
-              g.cache.accountId + "|" + g.cache.machineId, g.ownerEpoch);
-          return nowEndpoint.same_owner_as(launchEndpoint) &&
-                 nowEndpoint.url == launchEndpoint.url;
+          // issues a new token for the same account on the same machine -- identical url,
+          // identical origin -- so only the owner comparison can see it.
+          //
+          // And a credential has to still exist. Signing out clears the token and bumps the
+          // epoch; without the emptiness check a build where the epoch did not move would
+          // acknowledge an attempt for a user who is no longer signed in.
+          const upd::UpdateEndpoint atReady = current_update_endpoint();
+          return atReady.same_owner_as(launchEndpoint) && atReady.url == launchEndpoint.url &&
+                 !atReady.credentialHeader.empty();
         });
 
     CloseHandle(bootstrap);
@@ -1224,10 +1244,18 @@ void perform_sign_in() {
   }).detach();
 }
 
+
 void sign_out(bool keepAccount) {
   g.streaming.Stop();
-  g.cache.hostToken.clear();
-  g.cache.hostId.clear();
+  {
+    std::lock_guard<std::mutex> lock(g.ownerMu);
+    g.cache.hostToken.clear();
+    g.cache.hostId.clear();
+    // Signing out is an owner change. Without this the account and the machine id are unchanged
+    // and the epoch is unchanged, so `same_owner_as` stays true and an attempt authorised while
+    // signed in would still be acknowledged -- after the user had signed out.
+    ++g.ownerEpoch;
+  }
   (void)directory::save_host_cache(g.cachePath, g.cache);
   // The token is gone; so is the owner of whatever the uploader still holds.
   remote60::native_poc::log_upload_clear_credentials("signed out");
@@ -1713,8 +1741,11 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         g.cache.machineId = result->machineId;
         g.cache.hostName = result->hostName;
         g.cache.hostId = result->hostId;
-        g.cache.hostToken = result->hostToken;
-        ++g.ownerEpoch;
+        {
+          std::lock_guard<std::mutex> lock(g.ownerMu);
+          g.cache.hostToken = result->hostToken;
+          ++g.ownerEpoch;
+        }
         // A fresh sign-in changes the answer to "is a directory reachable", so the report is
         // renewed rather than left saying what was true before signing in.
         gDirectoryReported = false;

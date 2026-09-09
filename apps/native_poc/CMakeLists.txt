@@ -932,9 +932,14 @@ add_executable(remote60_update_handoff_process_test
   src/update_credential_channel.cpp
   src/update_handoff_wait.cpp
   src/update_handoff_process_test.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/directory_client.cpp
+  src/winhttp_transport.cpp
 )
 add_dependencies(remote60_update_handoff_process_test remote60_handoff_fixture)
 target_include_directories(remote60_update_handoff_process_test PRIVATE src)
+target_link_libraries(remote60_update_handoff_process_test PRIVATE common ws2_32 iphlpapi shell32 winhttp advapi32)
 target_compile_definitions(remote60_update_handoff_process_test PRIVATE
   GNLINK_HANDOFF_FIXTURE=L"$<TARGET_FILE:remote60_handoff_fixture>"
   GNLINK_HANDOFF_ROOT=L"${CMAKE_SOURCE_DIR}/.claude/handoff-runs")

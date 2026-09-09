@@ -14,6 +14,10 @@
 // product calls, not a copy of it. The one thing played in-process is the host, because what is
 // under test is its decision.
 
+// Before windows.h: directory_client.hpp brings winsock2, and windows.h would otherwise pull
+// in the older winsock and the two redefine each other.
+#include "directory_client.hpp"
+
 #include <windows.h>
 
 #include <iostream>
@@ -108,7 +112,8 @@ int main() {
   const auto run = [&](int bootstrapExit, int delayMs, bool signal, DWORD hostTimeoutMs,
                        int ackWaitMs, bool dieEarly = false, bool openAckLate = false,
                        int ackOpenDelayMs = 0, bool withoutAckChannel = false,
-                       bool ackUnwritable = false, bool ownerChanged = false) {
+                       bool ackUnwritable = false,
+                       std::function<bool()> ownerStillValid = {}) {
     Attempt a;
     ++attemptNo;
     wchar_t stem[128]{};
@@ -166,9 +171,7 @@ int main() {
     // longer the person signed in. Withholding the acknowledgement is the only thing that stops
     // it, because after the acknowledgement the updater stops the product and replaces files.
     a.step = await_handoff(ready, withoutAckChannel ? nullptr : ack, pi.hProcess, readyName,
-                           hostTimeoutMs, nullptr, &a.why,
-                           ownerChanged ? std::function<bool()>([]() { return false; })
-                                        : std::function<bool()>());
+                           hostTimeoutMs, nullptr, &a.why, ownerStillValid);
     a.waitMs = GetTickCount() - waitBegan;
 
     // Released IMMEDIATELY, the way the host releases them -- before the worker has necessarily
@@ -367,8 +370,23 @@ int main() {
   // while it downloaded. This is the last point at which anything can be withheld -- after the
   // acknowledgement the updater stops the product and swaps files.
   {
-    const Attempt a = run(0, 200, true, 15000, 4000, false, false, 0, false, false, true);
-    check("an owner change withholds the acknowledgement", a.step != HandoffStep::ExitNow,
+    // The predicate is the product's own comparison over endpoints the product's own builder
+    // produced -- not a stub that returns false. A stub would prove the wiring and nothing about
+    // whether a real sign-out actually reads as a different owner.
+    using remote60::native_poc::directory::update_endpoint_for;
+    const auto atLaunch = update_endpoint_for("", "https://rem.example", "windows",
+                                              "x-host-token: aaa", "alice|machine-1", 3);
+    // What the host holds after sign_out(): the token is cleared and the epoch moves. The account
+    // and the machine id are untouched, which is the case a url comparison cannot see.
+    const auto afterSignOut =
+        update_endpoint_for("", "https://rem.example", "windows", "", "alice|machine-1", 4);
+
+    const Attempt a = run(0, 200, true, 15000, 4000, false, false, 0, false, false, [&]() {
+      return afterSignOut.same_owner_as(atLaunch) && afterSignOut.url == atLaunch.url &&
+             !afterSignOut.credentialHeader.empty();
+    });
+    check("a sign-out during the download withholds the acknowledgement",
+          a.step != HandoffStep::ExitNow,
           std::string(handoff_step_name(a.step)) + ": " + a.why);
     check("...and says which of the two it was",
           a.why.find("owner") != std::string::npos, a.why);
@@ -376,6 +394,32 @@ int main() {
     // acknowledgement that was never sent cannot have told it to stop anything.
     check("...and the worker stood down instead of stopping the product",
           a.witness.find("worker stood down") != std::string::npos, a.witness);
+
+    // Without this, every assertion above would also pass for a predicate that always says no --
+    // and for a build where nothing can ever be acknowledged.
+    const Attempt ok = run(0, 200, true, 15000, 4000, false, false, 0, false, false, [&]() {
+      const auto unchanged = update_endpoint_for("", "https://rem.example", "windows",
+                                                 "x-host-token: aaa", "alice|machine-1", 3);
+      return unchanged.same_owner_as(atLaunch) && unchanged.url == atLaunch.url &&
+             !unchanged.credentialHeader.empty();
+    });
+    check("an unchanged owner is acknowledged", ok.step == HandoffStep::ExitNow,
+          std::string(handoff_step_name(ok.step)) + ": " + ok.why);
+    check("...and the worker was told it may proceed",
+          ok.witness.find("worker WOULD stop the product") != std::string::npos, ok.witness);
+
+    // A re-login: same account, same machine, a NEW token and a moved epoch. The url and the
+    // origin are identical, so only the owner comparison can refuse it.
+    const auto afterRelogin = update_endpoint_for("", "https://rem.example", "windows",
+                                                  "x-host-token: bbb", "alice|machine-1", 5);
+    const Attempt again = run(0, 200, true, 15000, 4000, false, false, 0, false, false, [&]() {
+      return afterRelogin.same_owner_as(atLaunch) && afterRelogin.url == atLaunch.url &&
+             !afterRelogin.credentialHeader.empty();
+    });
+    check("a re-login during the download is also withheld", again.step != HandoffStep::ExitNow,
+          std::string(handoff_step_name(again.step)) + ": " + again.why);
+    check("...even though it has a perfectly good token",
+          !afterRelogin.credentialHeader.empty());
   }
   // Only this run's own directory, and only if it is under the configured root.
   {

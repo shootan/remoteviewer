@@ -163,6 +163,20 @@ void load_settings(std::string* server, std::string* accountId, ShellRuntimeSett
 }
 
 /**
+ * Everything an update attempt is judged against, read once under one lock.
+ *
+ * Read separately, these four can disagree: the session can be cleared between reading the
+ * account and reading the epoch, and the answer is then a mixture of two owners that never
+ * existed at the same time. One lock, one snapshot.
+ */
+struct OwnerSnapshot {
+  std::string session;
+  std::string account;
+  std::string serverUrl;
+  uint64_t epoch = 0;
+};
+
+/**
  * The directory this shell is signed in to, or the one it last remembered.
  *
  * The start-up update check runs before the page has restored anything, so gServerUrl is still
@@ -415,6 +429,8 @@ void start_client_update(const std::string& availableVersion) {
   spec.stagingDir = workDir + L"\\staging";
   spec.workDir = workDir;
   // The same snapshot the check used.
+  // One lock, one snapshot. Read separately these three can straddle a sign-out and describe an
+  // owner that never existed at any single moment.
   std::string launchSession;
   std::string launchOwner;
   uint64_t launchEpoch = 0;
@@ -590,7 +606,12 @@ void start_client_update(const std::string& availableVersion) {
                       checkSession.empty() ? std::string()
                                            : "Authorization: Bearer " + checkSession,
                       checkOwner, checkEpoch);
-              return atReady.same_owner_as(launchEndpoint) && atReady.url == launchEndpoint.url;
+              // A credential has to still exist as well: signing out clears the session and
+              // moves the epoch, and without this an attempt would be acknowledged for a user
+              // who has left even if the epoch comparison were ever to miss it.
+              return atReady.same_owner_as(launchEndpoint) &&
+                     atReady.url == launchEndpoint.url &&
+                     !atReady.credentialHeader.empty();
             });
         log_line(std::string("update: handoff ") + upd::handoff_step_name(step) + ": " + why);
         if (step != upd::HandoffStep::ExitNow) {
@@ -1013,6 +1034,10 @@ void handle_page_message(const std::string& json) {
     {
       std::lock_guard<std::mutex> lock(gStateMu);
       gSessionToken.clear();
+      // Signing out is an owner change. Without this the account name and the server address are
+      // unchanged and the epoch is unchanged, so an attempt started while signed in would still
+      // compare as the same owner -- and would be acknowledged after the user had left.
+      ++gOwnerEpoch;
     }
     remote60::native_poc::log_upload_clear_credentials("logged out");
     post_to_page("{\"type\":\"signedOut\"}");

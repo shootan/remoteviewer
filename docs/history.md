@@ -10193,3 +10193,29 @@ worker 는 자격증명을 받지 못한다(IPC 미승인). 그래서 **worker �
 
 **전체 스위트**: 62개 고유 실행 파일 · **`^PASS` 1707**(이후 회귀 추가로 1726) · 실패 2건은 그대로 환경(`gdi_capture_process`·`udp_control_e2e`).
 ⚠️ **GDI/e2e 표기 정정**(검증용 지적): *"파일 겹침 0"* 은 **무관을 시사할 뿐 원인을 증명하지 않는다.** → **원인 미확정**으로 둔다.
+
+### 490) 2026-09-09 Codex NEEDS_CHANGES 2차 — **한 곳을 고치고 부류 전체를 고쳤다고 말한 것**
+검증용도 `client_shell_main.cpp` 의 스레드만 보고 *"Host/Client 전부 이동"* 이라고 적었다. **Host 는 확인하지 않았다.** 세 건 다 실재했다.
+
+**① Host 는 여전히 UI 스레드에서 최대 2분 기다리고 있었다**
+`Serve(pi.hProcess, payload, 120000, …)` 가 **스레드 생성보다 앞**에 있었다. Client 만 옮겨졌고 **Host 는 메뉴 클릭 → 핸들러 안에서 그대로 대기**했다.
+→ Host 도 같은 모양으로 옮겼다: **소유 핸들·파이프를 그 스레드가 쥐고**(핸들이 PID 를 고정하므로 먼저 닫으면 안 된다) 자격증명 전달·최종 대기를 전부 그 안에서 한다.
+⚠️ 회귀는 **스레드 생성을 시험하지 않는다** — 그건 `std::thread` 를 시험하는 것이다. 대신 **소유 핸들·파이프가 실제로 worker 에 도달하는 경로**를 3프로세스 러너가 이미 돌고 있다.
+
+**② 🔴 데이터 레이스였다 — 낡은 값이 아니라 UB**
+`ownerStillValid` 람다가 **백그라운드 스레드에서** `g.cache.directoryUrl`·`hostToken`·`accountId`·`machineId`(전부 `std::string`)와 **`g.ownerEpoch`(atomic 아님)** 를 직접 읽었다. UI 스레드의 sign-in·sign-out 이 **같은 것들을 씁니다.** `std::string` 은 **다른 스레드가 대입하는 동안 읽어도 되는 물건이 아니다.**
+→ `AppState` 에 **`ownerMu`** 를 두고, **`current_update_endpoint()`** 가 **한 번의 잠금으로 스냅샷**을 만든다. 호출 지점(확인·기동·전송·최종 ack) 전부 그것을 쓴다. **따로 읽으면 다섯 값이 sign-out 을 사이에 두고 걸쳐** **어느 순간에도 존재하지 않았던 주인**을 만든다.
+Client 도 같은 이유로 세 값을 **한 잠금**에서 읽는다.
+
+**③ 🔴 로그아웃해도 ack 이 나갔다**
+`++g.ownerEpoch` 가 **등록 한 곳에만** 있었다. `sign_out()` 은 토큰만 지우고 **epoch 을 올리지 않았다** → `keepAccount=true` 면 `accountId|machineId` 도 그대로라 **`same_owner_as()` 가 참**이다. 게다가 최종 조건에 **자격증명 존재 검사가 없어** 토큰이 비어도 통과했다. **로그아웃한 뒤에도 기존 attempt 가 ack 을 받는다.**
+→ **sign-out 에서도 epoch 을 올리고**(Host·Client 양쪽), 최종 조건에 **`!credentialHeader.empty()`** 를 넣었다. 두 가지를 다 넣는 이유: epoch 이 어떤 이유로든 움직이지 않는 빌드에서도 **자격증명이 없으면 승인되지 않아야** 한다.
+
+**회귀 — 콜백 스텁이 아니라 제품 상태 전이로**
+`update_handoff_process_test` **36 → 40**. 술어를 `[]{return false;}` 가 아니라 **제품의 `update_endpoint_for` 로 만든 두 상태의 비교**로 바꿨다. 스텁은 **배선은 증명해도 실제 sign-out 이 다른 주인으로 읽히는지는 아무 말도 하지 않는다.**
+- **sign-out 중**(토큰 비고 epoch 이동) → **ack 보류**, worker **stand down**
+- **재로그인 중**(같은 계정·같은 기계, **새 토큰**·epoch 이동) → **ack 보류**. *"...even though it has a perfectly good token"* 을 같이 단정한다 — url·origin 이 같으므로 **소유자 비교만이 거부할 수 있다.**
+- **불변** → **ack 됨**, worker 가 **진행 허가를 받음**. 이 양성 대조가 없으면 위 두 줄은 **아무것도 승인하지 않는 빌드**에게도 초록이다.
+
+**전체 스위트**: 62개 · **`^PASS` 1730** · 실패 **1건**(`udp_control_e2e`).
+⚠️ 이번 실행에서 **`gdi_capture_process` 는 통과**했다. 같은 코드에서 결과가 갈렸다는 것은 **환경 의존이라는 가설을 지지**하지만, 여전히 **원인을 증명하지는 않는다.**
