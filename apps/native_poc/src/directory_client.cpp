@@ -81,6 +81,63 @@ std::string random_token(size_t bytes) {
 }  // namespace
 
 /** http://host[:port][/...] -> host, port. Anything else is refused with a reason. */
+namespace {
+
+/**
+ * The text of a nested JSON object, by key. Empty when it is not there.
+ *
+ * Enough for one flat object inside another, which is all this metadata is. Written rather than
+ * reaching for the flat getters because those find the FIRST key of that name anywhere in the
+ * document -- so a top-level "port" belonging to something else would be read as the observe
+ * port. It happens to be unambiguous today; it would not stay that way, and the failure would be
+ * a wrong port rather than an error.
+ */
+std::string json_object_field(const std::string& text, const std::string& key) {
+  const std::string needle = "\"" + key + "\"";
+  size_t at = text.find(needle);
+  if (at == std::string::npos) return {};
+  at = text.find(':', at + needle.size());
+  if (at == std::string::npos) return {};
+  while (at < text.size() && (text[at] == ':' || isspace(static_cast<unsigned char>(text[at])))) {
+    ++at;
+  }
+  if (at >= text.size() || text[at] != '{') return {};
+  int depth = 0;
+  for (size_t i = at; i < text.size(); ++i) {
+    if (text[i] == '{') ++depth;
+    if (text[i] == '}') {
+      --depth;
+      if (depth == 0) return text.substr(at, i - at + 1);
+    }
+  }
+  return {};
+}
+
+}  // namespace
+
+bool parse_observe_metadata(const std::string& json, ObserveEndpoint* out) {
+  if (!out) return false;
+  *out = ObserveEndpoint{};
+  const std::string object = json_object_field(json, "observe");
+  if (object.empty()) return false;
+
+  uint32_t port = 0;
+  if (!json_profile::json_get_u32(object, "port", &port)) return false;
+  if (port < 1 || port > 65535) return false;  // absent, not clamped
+
+  out->known = true;
+  out->port = static_cast<uint16_t>(port);
+  json_get_string(object, "host", &out->host);
+  return true;
+}
+
+uint16_t observe_port_for(const ObserveEndpoint& advertised, uint16_t httpPort, bool secure) {
+  if (advertised.known) return advertised.port;
+  if (secure) return 0;  // 443 + 1 is not a fallback; see the header
+  if (httpPort >= 65535) return 0;
+  return static_cast<uint16_t>(httpPort + 1);
+}
+
 bool parse_directory_url(const std::string& url, std::string* outHost, uint16_t* outPort,
                          std::string* outError) {
   std::string rest = trim(url);
@@ -228,13 +285,33 @@ bool HostAgent::Start(const HostAgentConfig& cfg, SendFn send, std::string* outE
   }
   if (cfg_.heartbeatSeconds < 5) cfg_.heartbeatSeconds = 5;
 
+  // Noted before the parse, because it decides what an absent advertisement means. The parser
+  // still refuses https today -- that is (C)'s job -- and when it stops refusing, this is already
+  // carrying the right answer rather than needing to be remembered.
+  {
+    std::string lowered = cfg_.url;
+    for (char& c : lowered) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    while (!lowered.empty() && isspace(static_cast<unsigned char>(lowered.front()))) {
+      lowered.erase(lowered.begin());
+    }
+    httpSecure_ = lowered.rfind("https://", 0) == 0;
+  }
   if (!parse_directory_url(cfg_.url, &httpHost_, &httpPort_, outError)) return false;
 
-  const uint16_t observePort = cfg_.observeUdpPort ? cfg_.observeUdpPort
-                                                   : static_cast<uint16_t>(httpPort_ + 1);
-  if (!resolve_ipv4(httpHost_, observePort, &observeAddr_)) {
-    if (outError) *outError = "cannot resolve directory host '" + httpHost_ + "'";
-    return false;
+  // Aimed as far as it can be aimed before talking to anyone. A configured port wins outright; a
+  // plain-http URL still has its documented default. An https URL has neither until the server
+  // answers, and that is not a failure to start -- registration comes first on every cycle, and
+  // ApplyObserveEndpoint() aims the socket once the answer is in.
+  const uint16_t startupPort =
+      cfg_.observeUdpPort ? cfg_.observeUdpPort
+                          : observe_port_for(ObserveEndpoint{}, httpPort_, httpSecure_);
+  observeAddrReady_ = false;
+  if (startupPort != 0) {
+    if (!resolve_ipv4(httpHost_, startupPort, &observeAddr_)) {
+      if (outError) *outError = "cannot resolve directory host '" + httpHost_ + "'";
+      return false;
+    }
+    observeAddrReady_ = true;
   }
 
   machineId_ = machine_id();
@@ -385,7 +462,8 @@ bool HostAgent::HttpPostJson(const std::string& path, const std::string& body, u
 bool register_host(const std::string& url, const std::string& accountId,
                    const std::string& password, const std::string& hostName,
                    const std::string& machineId, std::string* outHostId,
-                   std::string* outHostToken, std::string* outError) {
+                   std::string* outHostToken, std::string* outError,
+                   ObserveEndpoint* outObserve) {
   std::string host;
   uint16_t port = 0;
   if (!parse_directory_url(url, &host, &port, outError)) return false;
@@ -422,6 +500,9 @@ bool register_host(const std::string& url, const std::string& accountId,
   }
   if (outHostToken) *outHostToken = token;
   if (outHostId) json_get_string(resp, "hostId", outHostId);
+  // Optional, and absence is not an error: an older server does not send it and the caller has a
+  // rule for that.
+  if (outObserve) parse_observe_metadata(resp, outObserve);
   return true;
 }
 
@@ -525,16 +606,45 @@ bool HostAgent::EnsureRegistered() {
     return false;
   }
   std::string token, id, error;
+  ObserveEndpoint advertised;
   if (!register_host(cfg_.url, cfg_.accountId, cfg_.password, cfg_.hostName, machineId_, &id,
-                     &token, &error)) {
+                     &token, &error, &advertised)) {
     SetStatus(error);
     return false;
   }
   hostToken_ = token;
   hostId_ = id;
+  observeAdvertised_ = advertised;
+  if (!ApplyObserveEndpoint()) return false;
   SaveCache();
   std::cout << "[native-video-host] directory registered hostId=" << hostId_
             << " name=" << cfg_.hostName << "\n";
+  return true;
+}
+
+bool HostAgent::ApplyObserveEndpoint() {
+  // A configured port is the operator's decision and outranks anything the server says.
+  const uint16_t port = cfg_.observeUdpPort
+                            ? cfg_.observeUdpPort
+                            : observe_port_for(observeAdvertised_, httpPort_, httpSecure_);
+  if (port == 0) {
+    // Only reachable on https with a server that says nothing. Said plainly, because the machine
+    // will otherwise sit there looking like a network problem: the observation times out, the
+    // heartbeat is skipped, and the host simply never appears.
+    SetStatus("this directory has not told us where to send address observations; the server "
+              "needs REMOTE60_DIR_OBSERVE_PORT set (or use an http url)");
+    observeAddrReady_ = false;
+    return false;
+  }
+  // An advertised host is used when given; otherwise the directory's own hostname, which is the
+  // ordinary case and the documented default.
+  const std::string& target = observeAdvertised_.host.empty() ? httpHost_ : observeAdvertised_.host;
+  if (!resolve_ipv4(target, port, &observeAddr_)) {
+    SetStatus("cannot resolve the observe host '" + target + "'");
+    observeAddrReady_ = false;
+    return false;
+  }
+  observeAddrReady_ = true;
   return true;
 }
 
@@ -545,6 +655,7 @@ bool HostAgent::RefreshObservedAddress() {
   }
   const std::string probe = "OBSERVE " + observeToken_;
   for (int attempt = 0; attempt < kObserveAttempts && running_.load(); ++attempt) {
+    if (!observeAddrReady_) return false;  // nowhere to send it; the status already says why
     send_(probe.data(), probe.size(), observeAddr_);
     std::this_thread::sleep_for(std::chrono::milliseconds(kObserveWaitMs));
     std::lock_guard<std::mutex> lock(mu_);

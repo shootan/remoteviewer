@@ -11,6 +11,10 @@
  * Configuration (environment only; never commit credentials):
  *   REMOTE60_DIR_PORT        HTTP port                       (default 8080)
  *   REMOTE60_DIR_UDP_PORT    UDP address-observation port    (default 8081)
+ *   REMOTE60_DIR_OBSERVE_PORT  the observe port ADVERTISED to clients (default: the listen port).
+ *                              Set it when a NAT mapping or proxy presents a different one.
+ *   REMOTE60_DIR_OBSERVE_HOST  the observe host advertised to clients (default: empty, meaning
+ *                              the host the client already dialled).
  *   REMOTE60_DIR_DATA        account/host store path         (default ./directory-data.json)
  *   REMOTE60_DIR_TLS_KEY     PEM key  — enables HTTPS when both are set
  *   REMOTE60_DIR_TLS_CERT    PEM cert
@@ -55,6 +59,22 @@ const os = require('os');
 
 const HTTP_PORT = Number(process.env.REMOTE60_DIR_PORT || 8080);
 const UDP_PORT = Number(process.env.REMOTE60_DIR_UDP_PORT || 8081);
+// What to TELL clients the observe socket is reachable on, which is not always where it listens.
+//
+// Clients used to derive it as httpPort + 1. That held only while the directory was reached
+// directly on its own two ports; behind a TLS terminator on 443 it becomes 444, which is nothing,
+// and address observation fails -- and a host whose observation fails skips its heartbeat, so it
+// never appears in the list at all. The relay cannot cover for that either: the relay address
+// arrives in the /api/connect response, and the viewer returns before it ever calls connect.
+//
+// So the server says where to go. The advertised port may differ from the listen port because a
+// NAT mapping or a proxy may present a different one, which is exactly why it is configurable
+// rather than derived from anything.
+const OBSERVE_ADVERTISE_PORT =
+  Number(process.env.REMOTE60_DIR_OBSERVE_PORT || UDP_PORT);
+// Empty means "the same host the client already dialled". Set it only when the observe socket is
+// somewhere else entirely.
+const OBSERVE_ADVERTISE_HOST = String(process.env.REMOTE60_DIR_OBSERVE_HOST || '').trim();
 const DATA_PATH = process.env.REMOTE60_DIR_DATA || path.join(__dirname, 'directory-data.json');
 const TLS_KEY = process.env.REMOTE60_DIR_TLS_KEY || '';
 const TLS_CERT = process.env.REMOTE60_DIR_TLS_CERT || '';
@@ -691,7 +711,7 @@ async function handleLogin(req, res) {
   const token = randomToken();
   const expiresAt = Date.now() + SESSION_TTL_MS;
   sessions.set(token, { accountId: id, expiresAt });
-  sendJson(res, 200, { sessionToken: token, expiresAt });
+  sendJson(res, 200, withObserve({ sessionToken: token, expiresAt }));
 }
 
 async function handleHostRegister(req, res) {
@@ -737,7 +757,7 @@ async function handleHostRegister(req, res) {
   };
   hostTokens.set(tokenHash, hostId);
   saveStoreNow();
-  sendJson(res, 200, { hostId, hostToken, hostName });
+  sendJson(res, 200, withObserve({ hostId, hostToken, hostName }));
 }
 
 // Whatever a host reports about itself is untrusted input that ends up in another client's
@@ -1313,6 +1333,30 @@ async function handleConnect(req, res) {
   });
 }
 
+/**
+ * What to tell a client about the observe endpoint, or null when there is nothing sound to say.
+ *
+ * Returned as optional metadata on responses the client already reads, so an older client that
+ * does not look for it is unaffected and no new route exists to version.
+ *
+ * A port outside 1..65535 is not advertised at all. Sending a wrong one would be worse than
+ * sending none: none leaves the client on its documented fallback, wrong sends it somewhere that
+ * will never answer and looks like a network fault.
+ */
+function observeAdvertisement() {
+  if (!Number.isInteger(OBSERVE_ADVERTISE_PORT)) return null;
+  if (OBSERVE_ADVERTISE_PORT < 1 || OBSERVE_ADVERTISE_PORT > 65535) return null;
+  const out = { port: OBSERVE_ADVERTISE_PORT };
+  if (OBSERVE_ADVERTISE_HOST) out.host = OBSERVE_ADVERTISE_HOST;
+  return out;
+}
+
+/** Adds the observe metadata to a response body, when there is any. */
+function withObserve(body) {
+  const observe = observeAdvertisement();
+  return observe ? { ...body, observe } : body;
+}
+
 const routes = {
   'POST /api/signup': handleSignup,
   'POST /api/login': handleLogin,
@@ -1326,7 +1370,10 @@ const routes = {
 
 async function onRequest(req, res) {
   const url = (req.url || '').split('?')[0];
-  if (url === '/healthz') return sendJson(res, 200, { ok: true });
+  // The health probe carries it too, so a client can learn the endpoint without holding a
+  // session -- and so an operator can see what this server is advertising without logging in.
+  // Nothing here is sensitive: it is a port number that has to be reachable to be useful.
+  if (url === '/healthz') return sendJson(res, 200, withObserve({ ok: true }));
   const handler = routes[`${req.method} ${url}`];
   if (!handler) return sendJson(res, 404, { error: 'not found' });
   try {

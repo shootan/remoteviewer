@@ -73,10 +73,55 @@ bool save_host_cache(const std::string& path, const HostCache& cache);
  * Exchanges an id and password for a host token. Also the only way to check credentials
  * without starting a session, which is what the sign-in window needs.
  */
+/**
+ * Where the server says address observations should be sent.
+ *
+ * The clients used to work this out themselves as httpPort + 1, which held only while the
+ * directory was reached directly on its own two ports. Behind a TLS terminator on 443 that
+ * becomes 444 -- nothing listens there, observation fails, and a host whose observation fails
+ * skips its heartbeat and so never appears in the list at all. The relay cannot stand in for it
+ * either: the relay address arrives in the /api/connect response, and the viewer gives up before
+ * it ever calls connect.
+ *
+ * So the server tells us. `known` false means it did not, and the caller decides what that means
+ * for the scheme it is using -- see observe_port_for().
+ */
+struct ObserveEndpoint {
+  bool known = false;
+  uint16_t port = 0;
+  /** Empty means the directory host itself, which is the ordinary case. */
+  std::string host;
+};
+
+/**
+ * Reads the optional `observe` metadata out of a login or register response.
+ *
+ * Returns false when the server said nothing, or said something unusable. A port outside
+ * 1..65535 is treated as absent rather than clamped: a wrong port is worse than no port, because
+ * no port leaves the caller on a documented fallback while a wrong one sends it somewhere that
+ * will never answer and looks like a network fault.
+ */
+bool parse_observe_metadata(const std::string& json, ObserveEndpoint* out);
+
+/**
+ * The port to send observations to, or 0 when there is no safe answer.
+ *
+ * `secure` is whether the directory URL is https. The rules differ by scheme on purpose:
+ *
+ *   * The server said so -> use it, whatever the scheme.
+ *   * Plain http and no metadata -> httpPort + 1, which is what every existing deployment does
+ *     and what an unchanged server still expects.
+ *   * https and no metadata -> 0. NOT 443 + 1. That address is not a fallback, it is a guess
+ *     that cannot be right, and dialling it turns "this server needs configuring" into a silent
+ *     timeout. The caller reports it instead.
+ */
+uint16_t observe_port_for(const ObserveEndpoint& advertised, uint16_t httpPort, bool secure);
+
 bool register_host(const std::string& url, const std::string& accountId,
                    const std::string& password, const std::string& hostName,
                    const std::string& machineId, std::string* outHostId,
-                   std::string* outHostToken, std::string* outError);
+                   std::string* outHostToken, std::string* outError,
+                   ObserveEndpoint* outObserve = nullptr);
 
 /**
  * Creates an account, so a user can choose their own id and password rather than asking the
@@ -149,6 +194,8 @@ class HostAgent {
   void Run();
   bool EnsureRegistered();
   bool RefreshObservedAddress();
+  /** Aims the observe socket from the configured port, or what the server advertised. */
+  bool ApplyObserveEndpoint();
   bool Heartbeat(std::vector<PunchTarget>* outPunch);
   void Punch(const std::vector<PunchTarget>& targets);
   void SetStatus(const std::string& status);
@@ -165,6 +212,17 @@ class HostAgent {
   std::string httpHost_;
   uint16_t httpPort_ = 0;
   sockaddr_in observeAddr_{};
+  /**
+   * What the server last said about the observe endpoint, and whether the socket is aimed there.
+   *
+   * Registration happens before the first observation on every cycle, so the answer is available
+   * before it is needed. It is re-applied rather than assumed: a cached registration that skipped
+   * the exchange would otherwise leave the socket pointed wherever startup guessed.
+   */
+  ObserveEndpoint observeAdvertised_{};
+  bool observeAddrReady_ = false;
+  /** Whether the directory URL is https, which changes what an absent advertisement means. */
+  bool httpSecure_ = false;
 
   std::string machineId_;
   std::string hostId_;
