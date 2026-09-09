@@ -9845,13 +9845,25 @@ Next action
   - ⚠️ **둘을 바꿔 쓰면 조용히 죽는다.** 세 검증기 전부 raw X‖Y 64바이트만 받는다(C++ `update_signature.hpp:25` · Kotlin `UpdateManifest.kt:129,132` · Node `update_manifest.js:67`). SPKI hex 를 박으면 `decode_hex` 는 통과하고 `key.size() != 64` 에서 거부되어 **에러 없이 모든 업데이트가 영원히 무시**된다.
 - **보관 방식**: 개인키는 **평문으로 디스크에 쓰이지 않는다.** OS 가 만든 P-256 키를 `BCRYPT_ECCKEY_BLOB` 으로 메모리에 꺼내 **DPAPI(CurrentUser)** 로 보호한 것만 기록(`private.ecc.dpapi`, 326 B). 키는 **이름 없는 ephemeral** 이라 키 컨테이너에 남지 않고, 평문 배열은 종료 전에 zero 화한다. 비밀값은 stdout·로그·A2A·Git 어디에도 나가지 않았다.
 - **저장 전 왕복 자체검사**: `Unprotect → Import → SignData → 기록할 public_xy.hex 로 만든 공개키로 Verify`, 그리고 **부정 케이스**(probe 1바이트 뒤집으면 거부). 하나라도 실패하면 **아무것도 쓰지 않는다.** "감싸서 썼다" 는 "쓸 수 있는 키다" 가 아니다.
-- **ACL**: Owner `shotan\shotan`. `Users`·`Everyone`·`Authenticated Users` **없음**. 미해결 SID 1건(`S-1-5-21-…-2881406636`, Write+ReadAndExecute)이 있는데 **`%LOCALAPPDATA%` 전체에서 상속된 기존 조건**이고 계정이 해석되지 않는다(삭제된 계정). **이 디렉터리가 만든 것이 아니라 손대지 않았다** — 저장소 밖 ACL 을 요청 없이 바꾸지 않는다. 개인키는 DPAPI CurrentUser 라 읽기 권한만으로는 풀 수 없다.
+- **ACL**(생성 시점): Owner `shotan\shotan`. `Users`·`Everyone`·`Authenticated Users` **없음**. 미해결 SID 1건(`S-1-5-21-…-2881406636`, Write+ReadAndExecute)이 **`%LOCALAPPDATA%` 전체에서 상속**되고 있었다. 그 자리에서는 손대지 않았다 — 저장소 밖 ACL 을 요청 없이 바꾸지 않는다. **#481 에서 승인을 받아 키 폴더만 상속을 끊었다.**
+  - ⚠️ **정정(#481)**: 여기 "계정이 해석되지 않는다(**삭제된 계정**)" 이라고 적었는데 **근거 없는 단정이었다.** SID 해석 실패는 도메인 미도달·다른 머신의 계정 등으로도 난다 — **해석 불가는 주체 없음이 아니다.** 실제로 그 SID 의 도메인부는 이 PC 사용자 SID(`S-1-5-21-3755351295-…`)와 **다르다**(`S-1-5-21-2456923259-…`). 다른 프로필/머신에서 온 것이고, **그것을 해석할 수 있는 환경이 존재할 수 있다.** 그래서 상속을 끊는 것이 필요했다.
 - **세 검증기 확인**(배포용 아닌 fixture 1건, `.claude/keyfixture/` 미추적). 문서는 공유 TEST 벡터를 **바이트 그대로** 복사하고 **서명만 새 키로** 만들었다 — 그 문서는 첫 줄이 TEST DATA 이고 URL 이 `updates.example`, 아티팩트가 24·18·48 B 라 유출돼도 실제 업데이트를 구동할 수 없다. **공유 벡터는 건드리지 않았다**(세 런타임 합의의 기준이라 새 키로 바꾸면 안 된다).
   - **C++** `remote60_update_manifest_test .claude/keyfixture` → **82 checks / 0 failed**. `verify_ecdsa_p256_sha256` 에 **키를 주입**하는 경로다(‼️ `default_verifier()` 는 공백키라 무조건 false 이므로 쓰지 않았다). 요구 3종: 정상 통과 · 문서 변조 거부 · 다른 키 거부.
   - **Node** `update_manifest_test.js .claude/keyfixture` → **54 checks / 0 failed**. 같은 3종 + 서명 변조 거부.
   - **Kotlin** `testDebugUnitTest --tests *UpdateManifestTest*` → **11 tests / 0 failures**. 3종은 `verifiesTheSignatureWindowsAlsoVerifies` · `rejectsTampering` · `rejectsAValidSignatureFromTheWrongKey`.
 - ⚠️ **Kotlin 에 vectors override 를 추가했다** — 다른 둘은 이미 있었다(C++ `argv[1]`, Node `argv[2]`). 없으면 **공유 벡터를 새 키로 덮어야만** 검사할 수 있는데, 그 벡터는 정확히 그런 일을 막으려고 있는 것이다.
 - ⚠️ **그리고 그 override 로 한 첫 실행은 거짓 양성이었다.** Gradle 테스트 워커는 **데몬에서 fork** 되고, 앞서 뜬 데몬은 그때의 환경을 유지한다 — 환경변수를 걸고 그냥 돌리면 **공유 벡터(옛 키)로 통과**한다. **없는 경로를 가리켜 실패하는지 확인**하고서야 알았다. `--no-daemon` 이 필요하고, 그 함정을 코드 주석에 적었다. **통과했다는 사실만으로는 무엇을 검사했는지 알 수 없다.**
-- **백업 — 하지 않았고, "완료" 로 적지 않는다.** DPAPI CurrentUser 는 **이 PC · 이 Windows 사용자 프로필 종속**이다. OS 재설치·프로필 손실·계정 삭제면 **복구 불가**이고, **같은 디스크로 파일을 복사하는 것은 독립 백업이 아니다**(프로필이 사라지면 사본도 못 푼다). 독립 복구를 원한다면 남은 사용자 동작은 둘 중 하나다: ⓐ 외부 매체에 **별도 암호로 다시 감싼** 사본을 두거나, ⓑ 이 키를 잃으면 **새 키로 다시 서명·재배포**한다고 정하는 것. **아직 아무 결정도 내려지지 않았다.**
+- **백업 — 하지 않았고, "완료" 로 적지 않는다.** DPAPI CurrentUser 는 **이 PC · 이 Windows 사용자 프로필 종속**이다. OS 재설치·프로필 손실·계정 삭제면 **복구 불가**이고, **같은 디스크로 파일을 복사하는 것은 독립 백업이 아니다**(프로필이 사라지면 사본도 못 푼다). 독립 복구를 원한다면 남은 사용자 동작은 둘 중 하나다: ⓐ 외부 매체에 **별도 암호로 다시 감싼** 사본을 두거나, ⓑ 이 키를 잃으면 **새 키로 다시 서명하고 재배포**한다고 정하는 것. **아직 아무 결정도 내려지지 않았다.**
+  - ⚠️ **정정(#481)**: ⓑ 를 "간단히 새 키로 복구" 로 읽으면 안 된다. **이미 설치된 제품에는 옛 공개키가 박혀 있어 새 키로 서명한 manifest 를 신뢰하지 않는다.** 즉 **업데이트 경로로는 넘어갈 수 없고**, 사용자가 **손으로 설치본을 받아 다시 설치**해야 그제서야 새 키가 신뢰된다. ⓑ 는 저렴한 선택지가 아니라 **현장 재배포와 신뢰 전환**을 뜻한다.
 - **하지 않은 것**: `trusted_public_key_hex()` 수정 · 재빌드 · 설치 · 서버 게시 · 실제 릴리스 manifest 발행 · APK keystore 변경 · TLS 인증서 · endpoint 선정. 라이브 PID 3종 불변.
 - 변경 파일: `apps/android_direct_client/app/src/test/java/com/remote60/androiddirect/UpdateManifestTest.kt`(vectors override + 데몬 함정 주석) · `docs/history.md`. **개인키는 저장소 밖이고, 저장소 안에 키 재료 0건**을 확인했다.
+
+### 481) 2026-09-09 키 폴더 ACL 상속 차단 — **해석 안 되는 SID 는 "주체 없음" 이 아니다**
+- **범위**(Codex 승인, 이것만): `%LOCALAPPDATA%\GNLink\ReleaseSigning\p256-a0e184579c5d4c2d\` **폴더와 그 안 파일**. 상속 차단 + **명시 3주체만**(현재 사용자 · `SYSTEM` · `BUILTIN\Administrators`).
+- **왜**: 그 폴더가 `%LOCALAPPDATA%` 에서 미해결 SID 1건(`S-1-5-21-2456923259-…-2881406636`, Write+ReadAndExecute)을 상속하고 있었다. #480 에서 나는 이것을 "삭제된 계정" 이라 적었는데 **그렇게 단정할 근거가 없다** — 해석 실패는 도메인 미도달이나 **다른 머신의 계정**으로도 난다. 실제로 도메인부가 이 PC 사용자 SID 와 **다르다.** **해석 불가 ≠ 주체 없음** 이므로 끊는 것이 맞다.
+- **절차**: 변경 전 **원 ACL 을 `.claude/key_acl_before.clixml` 로 보존**하고, 소유자가 현재 사용자인지 먼저 확인(아니면 중단). 실패하면 **원 ACL 로 되돌린다** — 여기서 잘못되면 DPAPI 로 보호된 개인키가 든 폴더에 **본인도 못 들어간다.**
+- **결과**: `protected=True`, ACE 3개 전부 `inherited=False` — `NT AUTHORITY\SYSTEM` · `BUILTIN\Administrators` · `shotan\shotan`, 각 FullControl. **미해결 SID 사라짐.** 파일 4개는 그 폴더에서만 상속받는다(`private.ecc.dpapi` 확인: 세 주체뿐).
+- **변경 후 확인 3가지**: ⓐ 현재 사용자로 **파일 4개 읽기 성공** ⓑ **DPAPI 서명 성공**(Unprotect→Import→Sign→기록된 공개키로 Verify, **변조 probe 거부**까지) ⓒ **예상 외 주체 0** — 폴더와 파일 전부.
+- **건드리지 않은 것**: `%LOCALAPPDATA%` · `GNLink` · `ReleaseSigning` **상위 3개는 그대로**(여전히 `protected=False`, 그 SID 유지). 범위가 키 폴더 하나였다. **키 재생성 없음, 파일 내용 변경 없음, 삭제 없음.** 개인키 원문 출력 없음.
+- **여전히 미결**: **독립 백업.** DPAPI CurrentUser 는 이 PC·이 프로필 종속이고, **ACL 을 조인다고 백업이 되는 것은 아니다** — 프로필이 사라지면 사본도 못 푼다. 사용자 결정(외부 매체+별도 암호 사본 / 분실 시 재배포) 대기.
+- 변경 파일: `docs/history.md`(#480 정정 2건 + 이 항목). 제품 코드·산출물·공유 벡터 변경 0.
