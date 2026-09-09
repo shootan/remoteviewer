@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "update_credential_channel.hpp"
+#include "update_endpoint.hpp"
 
 namespace {
 
@@ -136,6 +137,26 @@ int wmain(int argc, wchar_t** argv) {
     }
     // The log gets the fact, never the value -- that is the whole discipline being tested.
     log_line(logPath, "credential received");
+    // The same check updater_main makes: the frame and the arguments have to agree. The frame
+    // arrived over a channel that proved who was listening; the arguments proved nothing, so
+    // neither is trusted alone and a disagreement is the answer.
+    const std::wstring expectUrl = value_of(args, L"--expect-url");
+    if (!expectUrl.empty()) {
+      UpdateEndpoint fromFrame;
+      std::string decodeError;
+      if (!decode_update_descriptor(payload, &fromFrame, &decodeError)) {
+        log_line(logPath, "the credential frame did not parse: " + decodeError);
+        record(recordPath, "worker-frame-bad=" + decodeError);
+        return 6;
+      }
+      if (fromFrame.url != narrow(expectUrl)) {
+        log_line(logPath, "the credential was issued for a different url than this run was given");
+        record(recordPath, "worker-url-mismatch=1");
+        return 6;
+      }
+      record(recordPath, "worker-owner=" + fromFrame.ownerKey + "/" +
+                             std::to_string(fromFrame.ownerEpoch));
+    }
     record(recordPath, "worker-received=" + payload);
     return 0;
   }
@@ -172,6 +193,9 @@ int wmain(int argc, wchar_t** argv) {
   if (!recordBase.empty()) command += L" --record \"" + recordBase + L"\"";
   if (!logBase.empty()) command += L" --log \"" + logBase + L"\"";
   if (has_flag(args, L"--child-never-reads")) command += L" --never-read";
+  if (!value_of(args, L"--expect-url").empty()) {
+    command += L" --expect-url \"" + value_of(args, L"--expect-url") + L"\"";
+  }
   command += L" --deadline " + std::to_wstring(deadline);
 
   STARTUPINFOW si{};
