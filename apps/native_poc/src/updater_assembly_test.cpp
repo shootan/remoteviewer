@@ -187,6 +187,10 @@ int main() {
     // The product's own lists, because this suite seeds the install directory from them. They
     // are dependencies rather than constants so that a test CAN supply its own -- the scenario
     // suite does exactly that.
+    // Not the production name. This assembly is driven against a temp tree, and inheriting
+    // `Global\\GNLinkUpdate` would put it in contention with the installed product on the
+    // machine running the test -- in both directions.
+    deps.lockName = L"Local\\GNLinkAssemblyTest";
     deps.payloadNames = product_image_names();
     deps.payloadNames.push_back(L"ui\\shell.html");
     deps.payloadNames.push_back(L"ui\\macro.html");
@@ -444,6 +448,11 @@ int main() {
           static_cast<bool>(deps.signalReady));
     check("production knows its own image path", !deps.selfImagePath.empty(),
           narrow(deps.selfImagePath));
+    // The machine-wide name, and it must come from production rather than from a constant buried
+    // in the assembly -- where it was, which is why every test that drove this competed with the
+    // installed product for it.
+    check("production supplies the machine-wide lock name",
+          deps.lockName == L"Global\\GNLinkUpdate", narrow(deps.lockName));
     // And that image is a real file: an empty or bogus path would make the swap's refusal to
     // replace the running updater compare against nothing.
     check("and that image path is this executable",

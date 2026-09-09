@@ -9757,3 +9757,13 @@ Next action
 - **하지 않은 것**: `%TEMP%` 삭제·광역 이름 kill·대화상자 닫기 **전부 안 했다.** `%TEMP%\gnlink-exec-*` 3건은 **목록만** 남긴다(모두 실제 `.cmd` 를 담고 있어 늦은 요청이 와도 대화상자가 아니라 dummy 가 뜬다). `.claude/scenario-runs/scn-27308` 1건은 **위 규칙이 스스로 남긴 것**이라 그대로 둔다.
 - **검증**(콘솔, 활성 RDP 없음): update 12종 전부 PASS — check 28 / effects 199 / handoff 33 / http 36 / job_guard 19 / manifest 82 / **relaunch 107** / release 80 / state_machine 115 / assembly 40 / options 48 / **scenarios 115**. 실행 후 **잔존 프로세스 0**, 새 `%TEMP%` 디렉터리 0건.
 - 변경 파일: `apps/native_poc/src/scn_dummy_main.cpp`(신설) · `updater_scenarios_test.cpp` · `update_relaunch_test.cpp` · `update_relaunch.cpp`(주석) · `apps/native_poc/CMakeLists.txt` · `docs/history.md` · `docs/full_code_audit_2026-09-08.md`.
+
+### 475) 2026-09-09 ⚠️ **테스트가 라이브 제품과 같은 전역 뮤텍스를 쓰고 있었다**, 그리고 잡아두는 통제가 안 잡고 있었다
+- ⚠️ **`Global\GNLinkUpdate` 를 조합이 상수로 박고 있었다**(`updater_effects.cpp:199`). 이 조합을 돌리는 **모든 테스트가 설치된 제품과 같은 기계 전역 뮤텍스를 두고 경쟁**한다. 가정이 아니다 — 실행 하나가 `another update or installer holds the lock` 로 실패했고(`NothingToDo`, 시나리오 2·4·5·6 연쇄 실패), **반대 방향이면 테스트가 진짜 업데이트를 막는다.**
+  - `UpdaterDeps::lockName` 으로 **주입 대상**으로 바꿨다. `validate()` 가 요구하고, 생산은 `production_updater_deps()` 에서 기계 전역 이름을 넣는다. 시나리오는 `Local\GNLinkScenarioTest-<pid>`, 조합 테스트는 `Local\GNLinkAssemblyTest`.
+  - 회귀: **생산이 여전히 `Global\GNLinkUpdate` 를 공급하는지**를 조합 테스트가 단정한다(주입으로 바꾸면서 생산 값이 조용히 바뀌는 것이 이 세션의 반복 형태였다).
+- **"실행 중 이미지를 잡고 있다" 던 통제가 잡고 있지 않았다**: fixture 를 자기 종결형으로 바꾼 뒤, 그 통제의 victim 도 **즉시 종료**하게 됐다. `DeleteFileW` 가 실패하는지 보는 단정이 **타이밍에 따라** 통과했다. 그 통제에만 **종료하지 않는 명령 해석기 사본**을 쓰도록 되돌렸다(직접 `CreateProcessW`, 받은 handle 로 정지 — 셸 경유 아님).
+- **보류 사유를 시나리오 단위로 지목**: "셸 launch 가 기록을 안 남겼다" 만으로는 **어느 케이스인지 알 수 없어** 조치할 수 없다. 30초 안에 안 오면 그 시나리오의 로그를 함께 찍는다.
+- **검증**(콘솔, 활성 RDP 없음): update 12종 전부 PASS — check 28 / effects 199 / handoff 33 / http 36 / job_guard 19 / manifest 82 / relaunch 107 / release 80 / state_machine 115 / **assembly 41** / options 48 / scenarios 115. 실행 후 **잔존 프로세스 0**, 새 `%TEMP%` 디렉터리 0, 시나리오 스위트가 **자기 디렉터리를 스스로 회수**(보류 NOTE 없음).
+- **손대지 않은 잔재**(지시대로): `%TEMP%\gnlink-exec-*` 3건 · `.claude/scenario-runs/scn-27308` 1건.
+- 변경 파일: `updater_effects.{hpp,cpp}` · `updater_assembly_test.cpp` · `updater_scenarios_test.cpp` · `docs/history.md` · `docs/full_code_audit_2026-09-08.md`.

@@ -69,6 +69,19 @@ struct UpdaterDeps {
    * The two are related on purpose -- the set that is stopped and the set that is replaced must
    * not drift apart -- so they are supplied together.
    */
+  /**
+   * The mutual-exclusion name (design 3.3). A dependency, not a constant.
+   *
+   * It was hardcoded to the production name, which meant every test that drove this assembly
+   * competed with the INSTALLED product for the same machine-wide mutex. That is not theoretical:
+   * a run here failed with "another update or installer holds the lock" because something else on
+   * the machine had it -- and the same collision in the other direction would have a test block a
+   * real update from starting.
+   *
+   * Production supplies `Global\\GNLinkUpdate`; a test supplies something of its own.
+   */
+  std::wstring lockName;
+
   std::vector<std::wstring> payloadNames;
   std::vector<KnownImage> relaunchTable;
 

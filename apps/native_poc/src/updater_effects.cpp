@@ -139,6 +139,7 @@ bool UpdaterDeps::validate(std::string* detail) const {
   if (!verifier) return fail("verifier not set");
   if (!log) return fail("log not set");
   if (selfImagePath.empty()) return fail("selfImagePath not set");
+  if (lockName.empty()) return fail("lockName not set");
   if (payloadNames.empty()) return fail("payloadNames not set");
   if (relaunchTable.empty()) return fail("relaunchTable not set");
   // signalReady may be absent: an update nobody is waiting on is an ordinary case.
@@ -180,6 +181,9 @@ UpdaterDeps production_updater_deps(std::function<void(const std::string&)> log)
   // The executables come from the same list the process enumerator uses, so the set that is
   // stopped and the set that is replaced cannot drift apart; the two data files are named
   // alongside them.
+  // The machine-wide name, because one machine has one installation and two updaters replacing
+  // the same directory is the thing this exists to prevent.
+  deps.lockName = L"Global\\GNLinkUpdate";
   deps.payloadNames = product_image_names();
   deps.payloadNames.push_back(L"ui\\shell.html");
   deps.payloadNames.push_back(L"ui\\macro.html");
@@ -196,7 +200,7 @@ bool UpdaterEffects::build(std::string* detail) {
   UpdateEffectsConfig config;
   config.installDir = options_.installDir;
   config.stagingDir = options_.stagingDir;
-  config.lockName = L"Global\\GNLinkUpdate";
+  config.lockName = deps_.lockName;
   // What a swap replaces. The executables come from the same list the process enumerator uses, so
   // the set that is stopped and the set that is replaced cannot drift apart.
   // What a swap replaces, as supplied. It used to be built here from the product's own

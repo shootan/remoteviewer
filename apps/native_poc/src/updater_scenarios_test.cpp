@@ -617,6 +617,14 @@ int main() {
     UpdaterDeps deps;
     deps.log = [logs](const std::string& line) { logs->push_back(line); };
     deps.selfImagePath = root + L"\\work\\Updater.exe";
+    // This suite's OWN lock, in the session namespace. It used to inherit the production name and
+    // therefore contend with the installed product on this machine -- a run failed on exactly
+    // that, and the reverse collision would have a test hold off a real update.
+    {
+      wchar_t own[128]{};
+      swprintf(own, 128, L"Local\\GNLinkScenarioTest-%lu", GetCurrentProcessId());
+      deps.lockName = own;
+    }
     deps.payloadNames = {kHostName, kClientName};
     deps.relaunchTable = table;
     deps.fetchText = [&manifest](const std::string& url, size_t, std::string* body, std::string*) {
@@ -750,7 +758,19 @@ int main() {
       // next scenario's seed() clears the witness, so asking at teardown asks about the wrong
       // run -- and the answer would be "it never happened", which is what made the first version
       // keep a directory it did not need to keep.
-      if (!wait_for_witness(kClientName, 30000)) shellPending = true;
+      if (!wait_for_witness(kClientName, 30000)) {
+        shellPending = true;
+        // Which scenario, and what it did. "A launch never landed" with no way to tell which one
+        // is a note nobody can act on -- and the directory it keeps alive is charged to the whole
+        // run rather than to the case that caused it.
+        std::string trace;
+        for (const std::string& line : *logs) {
+          if (!trace.empty()) trace += " | ";
+          trace += line;
+        }
+        std::cout << "NOTE  a shell-routed launch did not record itself within 30s: " << trace
+                  << "\n";
+      }
     }
 
     // EVERYTHING the assertions read is captured HERE, before this run's cleanup touches
@@ -1229,8 +1249,14 @@ int main() {
     seed();
     // Reproduces the ordering defect directly: a process holding the file, and a restore that
     // starts by moving it.
+    //
+    // The victim is a copy of the command interpreter, NOT the ordinary fixture. This control
+    // needs a process that keeps its image open, and the fixture exits the moment it has recorded
+    // itself -- so with the fixture the file was usually free again before the delete was even
+    // attempted, and "deleting a running image fails" passed or failed on timing. It is started
+    // directly here and stopped through the handle it was given; it never goes near the shell.
     const std::wstring victim = install + L"\\" + kHostName;
-    write_file(victim, newBody);
+    CopyFileW(comspec, victim.c_str(), FALSE);
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
