@@ -220,10 +220,18 @@ bool launch_as_shell_user(const std::wstring& exePath, const std::wstring& workD
 }
 
 bool launch_via_shell(const std::wstring& exePath, const std::wstring& arguments) {
-  // Asked before the shell is involved. ShellExecute through the desktop has no "do not show UI"
-  // option, so handing it a path that is not there puts a modal error dialog on the desktop --
-  // from an updater, on a machine that may have nobody in front of it, at the moment the product
-  // is supposed to be coming back. Answering the question ourselves avoids that entirely.
+  // Asked before the shell is involved, because ShellExecute through the desktop has no "do not
+  // show UI" option and a path that is not there becomes a modal error dialog -- from an updater,
+  // on a machine that may have nobody in front of it, at the moment the product is supposed to be
+  // coming back.
+  //
+  // It does NOT close the hole, and it must not be read as if it did. The shell performs the
+  // launch later, in another process; between this check and that moment the file can go. That is
+  // not hypothetical -- a test deleted its own fixtures after firing one of these, and the dialog
+  // arrived on a real desktop afterwards. What prevents it is the file still being there when the
+  // request lands, which is a question about who may delete it and when, not about checking
+  // first. Here that holds because the installation directory is not removed, and because the
+  // optional images are started only after the commit, so no rollback follows to replace them.
   if (GetFileAttributesW(exePath.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
   // The one branch that cannot be arranged by any other means: a machine with no route to the
   // user's context. What must NOT happen there is a fallback to starting it as a child.

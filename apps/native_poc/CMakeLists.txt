@@ -706,6 +706,10 @@ add_executable(remote60_update_relaunch_test
   src/update_process_identity.cpp
   src/update_relaunch_test.cpp
 )
+# Inside the repository: this suite fires launches through the user's shell, and the files it
+# leaves behind are the ones a late request will look for.
+target_compile_definitions(remote60_update_relaunch_test
+  PRIVATE GNLINK_EXEC_ROOT=L"${CMAKE_SOURCE_DIR}/.claude/relaunch-runs")
 target_include_directories(remote60_update_relaunch_test PRIVATE src)
 target_link_libraries(remote60_update_relaunch_test PRIVATE advapi32 ole32 oleaut32 shell32)
 if(MSVC)
@@ -770,6 +774,18 @@ endif()
 # that when the UPDATER assembles them, every ending produces the right terminal result, the right
 # backup lifetime and the right number of processes afterwards -- which is what a user actually
 # has, and is decided by the combination.
+# The fixture the scenario suite runs as a stand-in for a product executable.
+#
+# A real PE, so the launch paths under test are the real ones -- but one that RECORDS that it ran
+# and then exits. Copies of cmd.exe were used before, and they never exit; every scenario left one
+# behind, which is why the suite needed a sweep that terminated processes by name. Worse, nothing
+# could tell whether a shell-routed launch had actually happened, so the suite removed its
+# directory while a request was still on its way and the user got a "cannot find" dialog.
+add_executable(remote60_scn_dummy src/scn_dummy_main.cpp)
+if(MSVC)
+  target_compile_options(remote60_scn_dummy PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_updater_scenarios_test
   src/updater_scenarios_test.cpp
   src/updater_effects.cpp
@@ -794,6 +810,10 @@ add_executable(remote60_updater_scenarios_test
 # root -- forbidden, and not something running a test grants permission for.
 target_compile_definitions(remote60_updater_scenarios_test
   PRIVATE GNLINK_SCN_ROOT=L"${CMAKE_SOURCE_DIR}/.claude/scenario-runs")
+# The suite needs the fixture built before it runs, and needs to know where it landed.
+add_dependencies(remote60_updater_scenarios_test remote60_scn_dummy)
+target_compile_definitions(remote60_updater_scenarios_test
+  PRIVATE GNLINK_SCN_DUMMY=L"$<TARGET_FILE:remote60_scn_dummy>")
 target_include_directories(remote60_updater_scenarios_test PRIVATE src)
 target_link_libraries(remote60_updater_scenarios_test PRIVATE
   bcrypt winhttp advapi32 ole32 oleaut32 uuid shell32 user32

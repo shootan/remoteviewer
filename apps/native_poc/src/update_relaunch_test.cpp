@@ -109,12 +109,30 @@ int count_occurrences(const std::string& haystack, const std::string& needle) {
   return n;
 }
 
-std::wstring make_temp_dir_named(const wchar_t* tag) {
-  wchar_t base[MAX_PATH]{};
-  GetTempPathW(MAX_PATH, base);
-  wchar_t unique[MAX_PATH]{};
-  swprintf(unique, MAX_PATH, L"%sgnlink-exec-%lu-%s", base, GetCurrentProcessId(), tag);
-  CreateDirectoryW(unique, nullptr);
+/**
+ * A directory for this run's fixtures, inside the repository.
+ *
+ * It was under %TEMP%. Nothing here deletes anything it did not create, so that was not the same
+ * violation the scenario suite had -- but the reason to move is the one that matters more: this
+ * test fires launches through the user's shell, and the files it leaves are the files a late
+ * request will look for. They belong where this project can see them.
+ */
+std::wstring make_run_dir_named(const wchar_t* tag) {
+  std::wstring base = GNLINK_EXEC_ROOT;
+  for (wchar_t& c : base) {
+    if (c == L'/') c = L'\\';
+  }
+  std::wstring built;
+  for (size_t i = 0; i < base.size(); ++i) {
+    built.push_back(base[i]);
+    if (base[i] == L'\\' || i + 1 == base.size()) {
+      CreateDirectoryW(built.c_str(), nullptr);
+    }
+  }
+  wchar_t leaf[128]{};
+  swprintf(leaf, 128, L"exec-%lu-%s", GetCurrentProcessId(), tag);
+  const std::wstring unique = base + L"\\" + leaf;
+  CreateDirectoryW(unique.c_str(), nullptr);
   return unique;
 }
 
@@ -518,7 +536,7 @@ int main() {
   // Same code the product will run. Different table, different directory, different names.
 
   {
-    const std::wstring root = make_temp_dir_named(L"root");
+    const std::wstring root = make_run_dir_named(L"root");
     const std::wstring witness = root + L"\\witness.txt";
     const std::wstring log = root + L"\\dummy.log";
 
@@ -904,11 +922,27 @@ int main() {
       check("E8: a report written after the mark does", freshAccepted, e.lastHealthDetail());
     }
 
-    // The dummies exit on their own, but a .cmd still running holds its file open and the
-    // directory will not go. Give them a moment rather than leaving litter in %TEMP%.
-    Sleep(500);
-    DeleteFileW(witness.c_str());
-    remove_tree_flat(root);
+    // A launch routed through the shell is performed by explorer, later, and nothing here can ask
+    // whether it has happened yet. Removing these files while a request is still in flight is
+    // what puts "Windows cannot find ..." on the user's desktop -- from a test, on a machine
+    // somebody is using. That happened, from this suite's sibling.
+    //
+    // So the client's witness line is waited for, and if it never arrives the directory STAYS.
+    // A late request then finds a real dummy, which writes its line and exits. Litter inside the
+    // repository is a small price; a dialog on somebody's screen is not something to trade
+    // against it.
+    bool landed = false;
+    for (int waited = 0; waited < 30000 && !landed; waited += 250) {
+      if (read_witness(witness).find("DummyClient.cmd") != std::string::npos) landed = true;
+      if (!landed) Sleep(250);
+    }
+    if (landed) {
+      DeleteFileW(witness.c_str());
+      remove_tree_flat(root);
+    } else {
+      std::cout << "NOTE  a shell-routed launch never recorded itself; keeping " << narrow(root)
+                << " so a late request finds a real file rather than a dialog\n";
+    }
   }
 
   std::cout << (gFailures == 0 ? "RESULT: ALL PASS  (" : "RESULT: FAILED  (") << gChecks

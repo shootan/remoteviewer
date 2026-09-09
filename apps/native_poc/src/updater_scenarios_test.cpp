@@ -390,12 +390,64 @@ int main() {
   // holds its image open. A copy of the command interpreter is a valid PE that stays up waiting
   // on input, and appending bytes to it leaves it runnable while making it a different file --
   // which is what "the new version" has to be.
+  // Still needed for exactly one thing: a process that refuses to exit, for the quiesce timeout.
+  // It is started directly by this test with CreateProcessW and stopped through the handle it was
+  // given -- it never goes near the shell, and nothing else here uses it.
   wchar_t comspec[MAX_PATH]{};
   if (GetEnvironmentVariableW(L"COMSPEC", comspec, MAX_PATH) == 0) {
     std::cout << "RESULT: FAILED  (no command interpreter to build fixtures from)\n";
     return 1;
   }
-  const std::string oldBody = read_file(comspec);
+  // The product stand-in is remote60_scn_dummy: a real PE that RECORDS that it ran and exits.
+  //
+  // Copies of the command interpreter were used here, and they do not exit -- every scenario left
+  // one running, which is why this suite needed a sweep that hunted processes down by name. And
+  // nothing could tell whether a shell-routed launch had actually happened, so the suite removed
+  // its directory while a request was still in flight and the user got a "Windows cannot find
+  // ...\\ScnClient.exe" dialog on their desktop. A fixture that leaves a witness turns that from
+  // a guess into something this can wait for.
+  const std::wstring dummySource = GNLINK_SCN_DUMMY;
+  const std::string oldBody = read_file(dummySource);
+  if (oldBody.empty()) {
+    std::cout << "RESULT: FAILED  (the fixture executable was not built: " << narrow(dummySource)
+              << ")\n";
+    return 1;
+  }
+  /** Where a launched fixture records itself. Cleared per scenario by seed(). */
+  const std::wstring witnessPath = install + L"\\" L"witness.txt";
+  const auto witness_text = [&witnessPath]() { return read_file(witnessPath); };
+  const auto witness_count = [&witness_text](const std::wstring& name) {
+    const std::string text = witness_text();
+    const std::string needle = narrow(name);
+    int n = 0;
+    for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) {
+      ++n;
+    }
+    return n;
+  };
+  /**
+   * Waits until `name` has recorded itself, or the wait runs out.
+   *
+   * This is the replacement for "check the file is there before asking the shell to run it". That
+   * check answered a question about the past; a shell launch happens later, in another process,
+   * and the only honest way to know it happened is that the thing it started said so.
+   */
+  /**
+   * True once any scenario has fired a launch through the shell.
+   *
+   * Teardown reads it. A shell request is handed to explorer and executed whenever explorer gets
+   * to it, so this run cannot finish tidying up on the assumption that it has already happened.
+   */
+  bool shellFired = false;
+  /** True when a shell-routed launch was fired and never recorded itself. Teardown reads it. */
+  bool shellPending = false;
+  const auto wait_for_witness = [&witness_count](const std::wstring& name, int timeoutMs) {
+    for (int waited = 0; waited < timeoutMs; waited += 100) {
+      if (witness_count(name) > 0) return true;
+      Sleep(100);
+    }
+    return witness_count(name) > 0;
+  };
   const std::string newBody = oldBody + "-gnlink-scn-v105";
   if (oldBody.empty()) {
     std::cout << "RESULT: FAILED  (could not read the fixture executable)\n";
@@ -491,6 +543,7 @@ int main() {
                 " bytes; open-for-write said " + std::to_string(openErr) + "; running: " + who);
     }
     DeleteFileW(log.c_str());
+    DeleteFileW(witnessPath.c_str());
   };
 
   /** Everything a scenario varies. */
@@ -684,6 +737,21 @@ int main() {
     // Quiesce failing is expressed by leaving a target that never exits; the effects wait on it
     // and give up. A pid that cannot be opened looks like "already gone", so a live one is used.
     UpdateOutcome outcome = effects.run("windows");
+
+    // Noted before anything is cleaned up: a launch that went through the shell has not
+    // necessarily happened yet, and teardown has to know that one is outstanding.
+    bool firedHere = false;
+    for (const std::string& line : *logs) {
+      if (line.find("started by the shell") != std::string::npos) firedHere = true;
+    }
+    if (firedHere) {
+      shellFired = true;
+      // Waited for HERE, while the fixture and its witness still belong to this scenario. The
+      // next scenario's seed() clears the witness, so asking at teardown asks about the wrong
+      // run -- and the answer would be "it never happened", which is what made the first version
+      // keep a directory it did not need to keep.
+      if (!wait_for_witness(kClientName, 30000)) shellPending = true;
+    }
 
     // EVERYTHING the assertions read is captured HERE, before this run's cleanup touches
     // anything. It has to be: the sweep below terminates processes and the tree is removed at the
@@ -1059,8 +1127,11 @@ int main() {
     check("9 client-only: the host was never started, so it cannot have been duplicated",
           r.hostInstances == 0, std::to_string(r.hostInstances));
     // And the client did come back -- after the commit, as the logged-on user.
-    check("9 client-only: the client came back", r.clientInstances >= 1,
-          std::to_string(r.clientInstances) + " -- " + r.log);
+    // The witness, not a process list. The fixture exits as soon as it has recorded itself, so
+    // "is it running now" is the wrong question -- and it was the question that made this suite
+    // depend on processes staying alive, which is what left them lying around.
+    check("9 client-only: the client actually ran", wait_for_witness(kClientName, 10000),
+          witness_text() + " -- " + r.log);
   }
 
   // ================================================================ control: whose process is it
@@ -1196,14 +1267,30 @@ int main() {
   stop_everything_under(root);
   Sleep(2000);
   stop_everything_under(root);
-  // Only this run's own directory, and only after checking that is what it is. A path that does
-  // not sit under the configured root is left alone, however it came to be passed here.
-  if (inside_run_root(root)) {
-    remove_tree(root);
-  } else {
+
+  // A shell-routed launch is performed by explorer, later, and there is no way to ask whether it
+  // has happened yet. If one was fired and the thing it starts has not recorded itself, the
+  // request may still be in flight -- and removing the directory now is what puts "Windows cannot
+  // find ...\ScnClient.exe" on the user's desktop. That happened.
+  //
+  // So the directory is KEPT when that is in doubt. Litter in the repository is a small price; a
+  // modal dialog on somebody's screen, from a test, is not something to trade it against. The
+  // file staying where it is means a late request finds a real executable, which records itself
+  // and exits.
+  // Two separate reasons not to remove this, and they are reported separately -- a message giving
+  // the wrong reason is worse than none, because it sends the reader somewhere else. The first
+  // version of this printed "not under this suite's root" for a directory that was under it,
+  // because the pending-launch case fell into the same else.
+  if (shellPending) {
+    std::cout << "NOTE  a shell-routed launch never recorded itself; keeping " << narrow(root)
+              << " so a late request finds a real file rather than a dialog\n";
+  } else if (!inside_run_root(root)) {
     std::cout << "NOTE  refusing to remove " << narrow(root)
               << " -- it is not under this suite's root\n";
+  } else {
+    remove_tree(root);
   }
+  (void)shellFired;
   for (DWORD pid : named_but_unidentified()) {
     std::cout << "NOTE  named like this suite's fixtures but not identifiable, so left running: "
               << "pid " << pid << "\n";
