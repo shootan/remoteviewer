@@ -353,11 +353,12 @@ upload_artifacts() {
 
 verify_on_server() {
   step "verify on the server"
-  local i remote_file line remote_sha remote_size bad=0
+  local i remote_file line remote_sha remote_size bad=0 checked=0 skipped=0
   for i in "${!ART_NAME[@]}"; do
     remote_file="$(remote_path_for_url "${ART_URL[$i]}")"
     if [ "$DRY_RUN" = "1" ] && ! remote_sh "test -f '$remote_file'"; then
       log "  ? ${ART_NAME[$i]}  (dry-run, nothing uploaded to check)"
+      skipped=$(( skipped + 1 ))
       continue
     fi
     line="$(remote_sh "if [ -f '$remote_file' ]; then printf '%s %s %s' \"\$(sha256sum -- '$remote_file' | cut -d' ' -f1)\" \"\$(wc -c < '$remote_file' | tr -d ' ')\" \"\$(stat -c %a -- '$remote_file')\"; else echo 'ABSENT 0 0'; fi")"
@@ -372,9 +373,17 @@ verify_on_server() {
       *4|*5|*6|*7) : ;;  # world-readable
       *) warn "${ART_NAME[$i]}: mode $mode is not world-readable; nginx will answer 403"; bad=$(( bad + 1 )) ;;
     esac
+    checked=$(( checked + 1 ))
   done
   [ "$bad" = "0" ] || die "$bad artifact(s) on the server do not match the manifest -- the manifest was NOT swapped, the previous release is still the published one"
-  log "all ${#ART_NAME[@]} artifacts on the server match the manifest and are readable"
+  # The number CHECKED, not the number in the manifest. A dry run skips whatever it did not
+  # upload, and reporting the manifest's count here said "all 10 match" after looking at none of
+  # them -- a summary line that does not describe the work it just did.
+  if [ "$skipped" -gt 0 ]; then
+    log "$checked of ${#ART_NAME[@]} artifacts checked on the server; $skipped not present yet (dry run)"
+  else
+    log "all $checked artifacts on the server match the manifest and are readable"
+  fi
 }
 
 # ---------------------------------------------------------------------------- publish
