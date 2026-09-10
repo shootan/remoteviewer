@@ -42,4 +42,26 @@ bool request_process_stop(const ProcessTarget& target);
 /** The images an update replaces, in the order the installer's payload lists them. */
 const std::vector<std::wstring>& product_image_names();
 
+/**
+ * Everything a release replaces: the images above, the updater, and the two data files.
+ *
+ * Kept separate from product_image_names() because the two lists answer different questions --
+ * "what must not be running while we replace it" and "what do we replace" -- and there is exactly
+ * one file where the answers differ. GNLinkUpdater.exe has to be REPLACED (otherwise it becomes a
+ * permanent maintenance binary frozen at its compile-time constants, which is the trap that ruled
+ * out re-running the old installer) but must not be a STOP target: the running updater is a copy
+ * outside installDir, so the installed one is not running, and anything else answering to that
+ * name is not ours to close.
+ *
+ * The lists were the same one for a while, on the argument that sharing prevents drift. It did
+ * not: GNLinkUpdater.exe was missing from the payload for every release, so the updater has never
+ * once been updated by an update. The anti-drift property is kept by DERIVING this from that --
+ * the stop list cannot gain an entry this one lacks -- which is the invariant that actually
+ * matters. product_payload_list_contract() asserts it.
+ */
+std::vector<std::wstring> product_payload_names();
+
+/** True when every stop target is also replaced. Nothing may be closed and then left stale. */
+bool product_payload_list_contract();
+
 }  // namespace remote60::native_poc::update

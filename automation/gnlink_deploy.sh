@@ -231,7 +231,21 @@ preflight() {
     warn "node or update_manifest.js unavailable: the signature was NOT checked here"
   fi
 
-  # 2. The document against the disk. A signature says the document has not changed since it was
+  # 2. The manifest against the list the product actually replaces. This is the check whose
+  #    absence published 0.2.109 without GNLinkSetup.exe: everything downloaded, verified and
+  #    hashed, and the release died at the swap with the host already going down.
+  if command -v python >/dev/null; then
+    if python "$REPO_ROOT/automation/gnlink_check_payload_set.py" "$MANIFEST" >/dev/null 2>&1; then
+      log "payload set    the manifest names everything the update replaces"
+    else
+      python "$REPO_ROOT/automation/gnlink_check_payload_set.py" "$MANIFEST" >&2 || true
+      die "the manifest does not name everything this update replaces -- nothing was uploaded"
+    fi
+  else
+    warn "python unavailable: the payload set was NOT compared against the product's list"
+  fi
+
+  # 3. The document against the disk. A signature says the document has not changed since it was
   #    signed. It says nothing about whether the files it names exist, and on 0.2.108 those two
   #    came apart -- everything verified, and the APK hash belonged to a build that was gone.
   local i local_file actual_size actual_sha
@@ -248,7 +262,7 @@ preflight() {
   done
   log "artifacts     ${#ART_NAME[@]}/${#ART_NAME[@]} match the manifest, byte for byte"
 
-  # 3. The server. Reachability, the directories we own, and room.
+  # 4. The server. Reachability, the directories we own, and room.
   local probe
   probe="$(remote_sh "mkdir -p '$UPDATES_DIR' '$MANIFEST_DIR' '$BACKUP_DIR' 2>&1 && \
                       test -w '$UPDATES_DIR' && test -w '$MANIFEST_DIR' && test -w '$BACKUP_DIR' && \

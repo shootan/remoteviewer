@@ -340,6 +340,36 @@ int main(int argc, char** argv) {
   }
 
   {
+    // The 0.2.109 failure, as a unit.
+    //
+    // A manifest that does not name a file the swap replaces used to pass everything here --
+    // signature, sizes, hashes -- and die at the swap, by which time the product had been asked
+    // to stop and the user was looking at a closed application. The answer was available before
+    // any of that: the manifest is in hand and so is the list of what will be replaced.
+    UpdateEffectsConfig c = base_config(install, staging);
+    c.payloadNames = {L"AlphaPayload.bin", L"BetaPayload.bin", L"GNLinkSetup.exe"};
+    WindowsUpdateEffects e(c);
+    const ManifestFields f = artifact_fields();  // Alpha and Beta only -- no Setup
+    check("download still writes what the manifest does name", e.Download(f), e.last_error());
+    check("a manifest missing a replaced file is refused before the swap", !e.VerifyDownload(f),
+          e.last_error());
+    check("...and the reason names the missing file",
+          e.last_error().find("GNLinkSetup.exe") != std::string::npos, e.last_error());
+
+    // The same release with the file named passes, so the refusal above is about the omission and
+    // not about the case existing at all.
+    UpdateEffectsConfig ok = base_config(install, staging);
+    ok.payloadNames = {L"AlphaPayload.bin", L"BetaPayload.bin", L"GNLinkSetup.exe"};
+    WindowsUpdateEffects e2(ok);
+    const ManifestFields complete =
+        artifact_fields({"AlphaPayload.bin", "BetaPayload.bin", "GNLinkSetup.exe"});
+    check("naming it makes the same release acceptable",
+          e2.Download(complete) && e2.VerifyDownload(complete), e2.last_error());
+    e2.DiscardDownload();
+    e.DiscardDownload();
+  }
+
+  {
     // A fetch that half-writes must not leave bytes that a later attempt mistakes for complete.
     UpdateEffectsConfig c = base_config(install, staging);
     c.fetchArtifact = [](const ManifestArtifact&, const std::wstring& dest) {
@@ -1074,8 +1104,14 @@ int main(int argc, char** argv) {
     c.registerInstall = []() { return false; };  // fails after the swap
     WindowsUpdateEffects e(c);
     e.set_installed_version("0.2.104");
-    e.set_manifest(manifest_for("0.2.105", {L"AlphaPayload.bin", L"BetaPayload.bin"}),
-                   std::string(128, '0'));
+    // GNLinkSetup.exe is named here because this config REPLACES it. The fixture used to leave it
+    // out, and nothing minded -- which is the same shape as the release that was published
+    // without it: a document describing a release that could not complete. VerifyDownload now
+    // refuses that combination, so a case about what happens AFTER the swap has to describe a
+    // release that can reach the swap.
+    e.set_manifest(
+        manifest_for("0.2.105", {L"AlphaPayload.bin", L"BetaPayload.bin", L"GNLinkSetup.exe"}),
+        std::string(128, '0'));
     const auto accept = [](const std::string&, const std::vector<uint8_t>&) { return true; };
     const UpdateOutcome out = run_update(e, accept, "windows");
     check("a post-swap failure rolls back", out.result == UpdateResult::RolledBack,

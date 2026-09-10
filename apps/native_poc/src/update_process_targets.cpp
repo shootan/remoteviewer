@@ -40,6 +40,32 @@ const std::vector<std::wstring>& product_image_names() {
   return names;
 }
 
+std::vector<std::wstring> product_payload_names() {
+  std::vector<std::wstring> names = product_image_names();
+  // Replaced but never stopped -- see the header. The destination is installDir\\GNLinkUpdater.exe
+  // while the process runs from the working copy outside it, which is what makes this safe;
+  // UpdateEffectsConfig::validate() checks that as full destination paths, not names.
+  names.push_back(L"GNLinkUpdater.exe");
+  names.push_back(L"ui\\shell.html");
+  names.push_back(L"ui\\macro.html");
+  return names;
+}
+
+bool product_payload_list_contract() {
+  const std::vector<std::wstring> payload = product_payload_names();
+  for (const std::wstring& stopped : product_image_names()) {
+    bool found = false;
+    for (const std::wstring& name : payload) {
+      if (_wcsicmp(stopped.c_str(), name.c_str()) == 0) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) return false;
+  }
+  return true;
+}
+
 std::vector<ProcessTarget> enumerate_product_processes(const std::vector<std::wstring>& imageNames) {
   std::vector<ProcessTarget> targets;
   HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);

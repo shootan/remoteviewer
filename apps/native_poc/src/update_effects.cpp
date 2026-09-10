@@ -336,6 +336,27 @@ bool WindowsUpdateEffects::VerifyDownload(const ManifestFields& fields) {
     return false;
   }
 
+  // Everything this swap will need, checked here rather than at the swap itself.
+  //
+  // Swap already refuses when a payload file is missing from staging -- but by then the product
+  // has been asked to stop and the user is looking at a closed application. 0.2.109 shipped a
+  // manifest without GNLinkSetup.exe and that is exactly what happened: download, signature and
+  // hashes all passed, and the release died at the swap with the host already going down. The
+  // same answer is available here, before anything is asked to close.
+  for (const std::wstring& name : config_.payloadNames) {
+    bool named = false;
+    for (const ManifestArtifact& artifact : fields.artifacts) {
+      if (_wcsicmp(widen_name(artifact.name).c_str(), name.c_str()) == 0) {
+        named = true;
+        break;
+      }
+    }
+    if (!named) {
+      lastError_ = "the manifest does not name " + to_utf8(name) + ", which this update replaces";
+      return false;
+    }
+  }
+
   // EVERY file, before the update is allowed anywhere near the install directory. One bad file
   // means the whole release is abandoned -- there is no such thing as updating most of it.
   for (const ManifestArtifact& artifact : fields.artifacts) {

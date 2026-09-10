@@ -278,6 +278,45 @@ int main() {
     return deps;
   };
 
+  // ================================================================ what is stopped vs replaced
+
+  {
+    // These were one list, on the argument that sharing them prevents drift. It did not: the
+    // updater was in neither, so no release has ever replaced GNLinkUpdater.exe, and a fix to the
+    // updater could not be delivered by an update. They are two lists now, one derived from the
+    // other, and the invariant that actually matters is asserted rather than assumed.
+    const std::vector<std::wstring> stop = product_image_names();
+    const std::vector<std::wstring> payload = product_payload_names();
+    const auto has = [](const std::vector<std::wstring>& v, const wchar_t* name) {
+      for (const std::wstring& n : v) {
+        if (_wcsicmp(n.c_str(), name) == 0) return true;
+      }
+      return false;
+    };
+
+    check("everything stopped is also replaced", product_payload_list_contract());
+    check("the updater is replaced", has(payload, L"GNLinkUpdater.exe"));
+    // Stopping it would be either a no-op or self-sabotage: the running updater is a copy outside
+    // installDir, and anything else answering to that name is not ours to close.
+    check("...and is NOT a stop target", !has(stop, L"GNLinkUpdater.exe"));
+    check("the installer is both", has(stop, L"GNLinkSetup.exe") && has(payload, L"GNLinkSetup.exe"));
+    check("the data files are replaced", has(payload, L"ui\\shell.html") &&
+                                             has(payload, L"ui\\macro.html"));
+    check("...and are not processes", !has(stop, L"ui\\shell.html"));
+    check("the payload is exactly the stop list plus three", payload.size() == stop.size() + 3,
+          std::to_string(payload.size()) + " vs " + std::to_string(stop.size()));
+
+    // No duplicates: a name listed twice would be swapped twice, and the second swap would move
+    // the file just written aside as if it were the old one.
+    bool duplicate = false;
+    for (size_t i = 0; i < payload.size(); ++i) {
+      for (size_t j = i + 1; j < payload.size(); ++j) {
+        if (_wcsicmp(payload[i].c_str(), payload[j].c_str()) == 0) duplicate = true;
+      }
+    }
+    check("no name appears twice", !duplicate);
+  }
+
   const auto seed_install = [&]() {
     for (const std::wstring& name : product_image_names()) {
       write_file(install + L"\\" + name, "old-" + narrow(name));

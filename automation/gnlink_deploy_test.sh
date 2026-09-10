@@ -21,7 +21,10 @@ set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEPLOY="$REPO/automation/gnlink_deploy.sh"
-SOURCE_REL="${GNLINK_TEST_RELEASE:-$REPO/.claude/rel/0.2.109}"
+# 0.2.109-r2, not 0.2.109: the first cut of that release did not name GNLinkSetup.exe, and the
+# preflight gate now refuses it -- correctly. A fixture has to be a release that could actually be
+# published, or every case downstream is testing the refusal instead of the thing it names.
+SOURCE_REL="${GNLINK_TEST_RELEASE:-$REPO/.claude/rel/0.2.109-r2}"
 
 failures=0
 check() {
@@ -85,8 +88,12 @@ printf '\n== a publish puts the artifacts up first and the manifest last\n'
 ROOT="$WORK/root2"; mkdir -p "$ROOT"
 run_deploy "$ROOT" "$REL"; rc=$?
 check "publish succeeds" "$([ $rc -eq 0 ] && echo 1 || echo 0)" "exit=$rc"
+# Counted from the manifest, not written down. A hard-coded 9 silently became wrong the moment
+# the release gained a tenth artifact, and a fixture that disagrees with its own release tests
+# nothing.
+expected="$(grep -c '^artifact=' "$REL/windows.manifest" | tr -d ' ')"
 count="$(find "$ROOT/updates/0.2.109" -type f 2>/dev/null | wc -l | tr -d ' ')"
-check "all nine artifacts are there" "$([ "$count" = "9" ] && echo 1 || echo 0)" "$count"
+check "every artifact is there" "$([ "$count" = "$expected" ] && echo 1 || echo 0)" "$count/$expected"
 check "the manifest is published" \
       "$([ "$(published_sha "$ROOT")" = "$(sha256sum -- "$REL/windows.manifest" | cut -d' ' -f1)" ] && echo 1 || echo 0)"
 check "the signature went with it" "$([ -f "$ROOT/update-manifests/windows.sig" ] && echo 1 || echo 0)"
@@ -102,7 +109,7 @@ printf '\n== running it again is safe\n'
 before="$(published_sha "$ROOT")"
 run_deploy "$ROOT" "$REL"; rc=$?
 check "a second run succeeds" "$([ $rc -eq 0 ] && echo 1 || echo 0)" "exit=$rc"
-check "...uploading nothing again" "$(grep -q 'uploaded 0, already present 9' "$LAST_OUT" && echo 1 || echo 0)"
+check "...uploading nothing again"       "$(grep -q "uploaded 0, already present $expected" "$LAST_OUT" && echo 1 || echo 0)"
 check "...and what is published is unchanged" \
       "$([ "$(published_sha "$ROOT")" = "$before" ] && echo 1 || echo 0)"
 
@@ -129,7 +136,17 @@ printf '\n== a manifest that does not verify never reaches the server\n'
 ROOT5="$WORK/root5"; mkdir -p "$ROOT5"
 REL5="$WORK/rel5"; copy_release "$REL5"
 # One byte of the signature. The document is untouched, so only the signature check can catch it.
-sed -i 's/^0/1/' "$REL5/windows.sig"
+#
+# Written as a substitution keyed on the character that is actually there, because the previous
+# version replaced a leading '0' -- and the moment a signature began with something else it edited
+# nothing at all. The case then "passed" by publishing a perfectly valid release.
+sig="$(cat "$REL5/windows.sig")"
+first="${sig:0:1}"
+if [ "$first" = "a" ]; then rest="b"; else rest="a"; fi
+printf '%s%s' "$rest" "${sig:1}" > "$REL5/windows.sig"
+[ "$(cat "$REL5/windows.sig")" != "$sig" ] || {
+  printf 'FAIL  the signature tamper did not change anything
+'; failures=$(( failures + 1 )); }
 run_deploy "$ROOT5" "$REL5"; rc=$?
 check "it refuses" "$([ $rc -ne 0 ] && echo 1 || echo 0)" "exit=$rc"
 check "...before uploading anything" \

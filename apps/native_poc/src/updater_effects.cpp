@@ -284,15 +284,14 @@ UpdaterDeps production_updater_deps(std::function<void(const std::string&)> log,
   wchar_t self[MAX_PATH]{};
   GetModuleFileNameW(nullptr, self, MAX_PATH);
   deps.selfImagePath = self;
-  // The executables come from the same list the process enumerator uses, so the set that is
-  // stopped and the set that is replaced cannot drift apart; the two data files are named
-  // alongside them.
+  // Derived from the list the process enumerator uses, so the set that is stopped cannot gain an
+  // entry the set that is replaced lacks. They are not the SAME list: GNLinkUpdater.exe is
+  // replaced and not stopped, and while they were one list it was in neither -- so no release has
+  // ever updated the updater. See product_payload_names().
   // The machine-wide name, because one machine has one installation and two updaters replacing
   // the same directory is the thing this exists to prevent.
   deps.lockName = L"Global\\GNLinkUpdate";
-  deps.payloadNames = product_image_names();
-  deps.payloadNames.push_back(L"ui\\shell.html");
-  deps.payloadNames.push_back(L"ui\\macro.html");
+  deps.payloadNames = product_payload_names();
   deps.relaunchTable = product_images();
   return deps;
 }
