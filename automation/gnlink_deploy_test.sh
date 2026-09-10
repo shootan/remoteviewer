@@ -204,6 +204,32 @@ check "...with its signature, as a pair" \
 check "...and the hashes recorded" \
       "$([ -s "$ROOT10/manifest-backups/0.2.108/SHA256SUMS" ] && echo 1 || echo 0)"
 
+# ---------------------------------------------------------------------------- 10b. a revision
+
+printf '
+== publishing a revision of the SAME version does not eat its own rollback point
+'
+# The recovery case: 0.2.109 is already published and a corrected manifest for 0.2.109 goes out.
+# The backup is named after the published version, so a naive second copy would overwrite the
+# original pair with the new one -- leaving nothing to roll back TO.
+ROOT10B="$WORK/root10b"; mkdir -p "$ROOT10B/update-manifests"
+printf 'version=0.2.109
+schema=2
+' > "$ROOT10B/update-manifests/windows.manifest"
+printf 'the-original-signature
+' > "$ROOT10B/update-manifests/windows.sig"
+original="$(sha256sum -- "$ROOT10B/update-manifests/windows.manifest" | cut -d' ' -f1)"
+run_deploy "$ROOT10B" "$REL"; rc=$?
+check "the first publish succeeds" "$([ $rc -eq 0 ] && echo 1 || echo 0)" "exit=$rc"
+check "...backing the original up under its version"       "$([ -f "$ROOT10B/manifest-backups/0.2.109/windows.manifest" ] && echo 1 || echo 0)"
+# Now publish again, exactly as a retry or a further revision would.
+run_deploy "$ROOT10B" "$REL"; rc=$?
+check "a second publish of the same version succeeds" "$([ $rc -eq 0 ] && echo 1 || echo 0)" "exit=$rc"
+kept="$(sha256sum -- "$ROOT10B/manifest-backups/0.2.109/windows.manifest" 2>/dev/null | cut -d' ' -f1)"
+check "...and the ORIGINAL backup is still the original"       "$([ "$kept" = "$original" ] && echo 1 || echo 0)" "${kept:-missing}"
+extra="$(find "$ROOT10B/manifest-backups" -maxdepth 1 -name '0.2.109-*' -type d 2>/dev/null | wc -l | tr -d ' ')"
+check "...and the second one went somewhere of its own"       "$([ "$extra" -ge 1 ] && echo 1 || echo 0)" "$extra"
+
 # ---------------------------------------------------------------------------- 11. path containment
 
 printf '\n== an artifact url outside the public base is refused\n'

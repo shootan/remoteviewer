@@ -376,6 +376,16 @@ backup_current_pair() {
   cur_version="$(remote_sh "sed -n 's/^version=//p' '$cur_manifest' | head -n 1")"
   stamp="${cur_version:-unknown}"
   local dest="$BACKUP_DIR/$stamp"
+  # Naming the backup after the published version alone is right exactly once. Publishing a
+  # revision of a version that is ALREADY published -- adding an artifact, re-cutting a manifest --
+  # computes the same name a second time, and copying over it would replace the rollback point
+  # with the thing you would be rolling back FROM. The idempotence that makes re-running this
+  # script safe everywhere else is what makes it unsafe here, so an existing backup is never
+  # written over.
+  if remote_sh "test -d '$dest'"; then
+    dest="$BACKUP_DIR/$stamp-$(date -u +%Y%m%dT%H%M%SZ)"
+    log "a backup of $stamp already exists; this one goes to $(basename "$dest")"
+  fi
   assert_inside_root "$dest"
   if [ "$DRY_RUN" = "1" ]; then
     log "would back up $stamp -> $dest (dry-run)"
@@ -416,6 +426,13 @@ publish_pair() {
 
 verify_from_outside() {
   step "verify from outside, over https"
+  if [ "$DRY_RUN" = "1" ]; then
+    # A dry run uploads nothing, so every artifact it would have added still 404s. Checking anyway
+    # would make a dry run of any new release exit nonzero -- and an exit code that is always 1
+    # stops being a signal, which is worse than not checking.
+    log "SKIPPED -- a dry run uploads nothing, so anything new would 404. Not attempted, not verified."
+    return 0
+  fi
   if [ "$GNLINK_VERIFY_PUBLIC" != "1" ] || [ "$GNLINK_REMOTE_MODE" = "local" ]; then
     log "SKIPPED -- not attempted, so not verified. Nothing below claims otherwise."
     return 0
