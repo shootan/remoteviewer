@@ -915,7 +915,8 @@ bool HostAgent::FetchObserveEndpointFromHealth() {
     SetStatus(error.empty()
                   ? "this directory does not say where to send address observations"
                   : "could not ask the directory where observations go: " + error);
-    observeFetchCooldown_ = observeFetchAttempts_ * 2;  // 2, 4, 6 ... cycles
+    // Cycles of the loop below, not seconds: 2, 4, 6 ... at the default 25 s heartbeat interval.
+    observeFetchCooldown_ = observeFetchAttempts_ * 2;
     return false;
   }
   observeAdvertised_ = advertised;

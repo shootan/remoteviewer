@@ -255,6 +255,16 @@ class HostAgent {
    *
    * Asked over the same origin's health route, which needs no session. Bounded: a server that
    * does not advertise yet may start later, so this retries with backoff and then stops asking.
+   *
+   * The cooldown counts CYCLES of Run(), not seconds: 2, 4, 6 ... at the default heartbeat
+   * interval of 25 s. Writing it as "2, 4, 6" without the unit reads like seconds and is out by
+   * more than an order of magnitude.
+   *
+   * WARNING: LIMIT, stated rather than implied: after kMaxFetchAttempts the asking stops for the rest of
+   * this process's life. A directory that is given an observe port LATER will not be picked up,
+   * and the host has to be restarted to see it. That is a deliberate bound -- an omission on the
+   * server should not turn into a machine that talks to it forever -- but it is not permanent
+   * self-recovery, and it should not be described as such.
    */
   bool FetchObserveEndpointFromHealth();
   bool Heartbeat(std::vector<PunchTarget>* outPunch);

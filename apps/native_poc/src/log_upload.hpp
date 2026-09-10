@@ -115,6 +115,11 @@ void log_upload_stop();
  * directory_client's 6 s timeout on connect and on receive, so the bound is 3 s + up to ~12 s
  * against a host that accepts and never answers; against an unreachable one, 3 s + ~6 s. Called
  * with no uploader or UI lock held -- see LogUploadShutdown.
+ *
+ * WARNING: The 5,997 ms in log_upload_shutdown_test is what THAT fixture measured -- a loopback server
+ * that accepts and never answers. It is one point on the bound above, not a guarantee about every
+ * https destination: a slow TLS handshake, a different timeout, or a proxy in the path all move
+ * it. Quote it as a measurement of that case, never as the ceiling.
  */
 void log_upload_shutdown();
 
