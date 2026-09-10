@@ -1817,6 +1817,26 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR commandLine, int) {
   WSADATA wsa{};
   WSAStartup(MAKEWORD(2, 2), &wsa);
 
+  // The three things this process owns, unwound in the order they depend on each other. Written
+  // as scope guards rather than as lines at the end of the function because destructors run after
+  // those lines, not before -- so a join written at the end would happen after WSACleanup, with
+  // the uploader's worker still inside a socket call. Declared first is destroyed last.
+  //
+  // 1. sockets, 2. the window's GDI objects, 3. the uploader -- joined before either.
+  struct WsaScope {
+    ~WsaScope() { WSACleanup(); }
+  } wsaScope;
+  struct UiScope {
+    ~UiScope() {
+      if (g.font) DeleteObject(g.font);
+      if (g.titleFont) DeleteObject(g.titleFont);
+    }
+  } uiScope;
+  // Nothing in this product called log_upload_stop(); the static holding the worker was destroyed
+  // with the thread still joinable, which is std::terminate. This is the call, on the message
+  // loop's own thread and holding no lock -- the worker's auth callback marshals to this thread.
+  const remote60::native_poc::LogUploadShutdown uploaderShutdown;
+
   WNDCLASSEXW wc{};
   wc.cbSize = sizeof(wc);
   wc.lpfnWndProc = window_proc;
@@ -1886,8 +1906,5 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR commandLine, int) {
     }
   }
 
-  if (g.font) DeleteObject(g.font);
-  if (g.titleFont) DeleteObject(g.titleFont);
-  WSACleanup();
-  return 0;
+  return 0;  // uploaderShutdown -> uiScope -> wsaScope, in that order
 }

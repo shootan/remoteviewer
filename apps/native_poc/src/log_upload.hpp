@@ -93,8 +93,48 @@ void log_upload_clear_credentials(const char* reason);
 /** Queues one line under `stream` ("viewer", "client", "host"). Never blocks; may drop. */
 void log_upload_enqueue(const char* stream, const std::string& line);
 
-/** Sends what it can once, stops the worker and resets the state. Safe when never started. */
+/**
+ * Sends what it can once, stops the worker and resets the state. Safe when never started.
+ *
+ * Bounded: the drain stops STARTING new requests after kStopDrainBudgetMs, so a server that has
+ * gone away cannot turn a queue into a shutdown that lasts as long as the queue is deep. One
+ * request may already be in flight, and that one is waited out -- see log_upload_shutdown().
+ * The uploader can be configured again afterwards; log_upload_shutdown() is the terminal form.
+ */
 void log_upload_stop();
+
+/**
+ * The terminal stop, for a process that is going away.
+ *
+ * Same as log_upload_stop(), plus two things it deliberately does not do: it latches, so a
+ * configure arriving afterwards (a sign-in racing the close) cannot start a second worker for
+ * the join to miss; and it drops the auth-rejected callback once the worker is joined, because
+ * that callback runs on the worker thread and touches the caller's UI.
+ *
+ * Worst case wait = kStopDrainBudgetMs + one in-flight http_post. On this tree the log path uses
+ * directory_client's 6 s timeout on connect and on receive, so the bound is 3 s + up to ~12 s
+ * against a host that accepts and never answers; against an unreachable one, 3 s + ~6 s. Called
+ * with no uploader or UI lock held -- see LogUploadShutdown.
+ */
+void log_upload_shutdown();
+
+/**
+ * The uploader's shutdown contract, as an object.
+ *
+ * The worker is a std::thread owned by a function-local static, and nothing in the product ever
+ * called log_upload_stop() -- only the tests did, nine times, which is exactly why the gap kept
+ * looking covered. At exit the static's destructor then destroyed a *joinable* thread, and that
+ * is std::terminate() by definition: no exception, no stack, a process that dies while tidying
+ * up. Declare one in each owner's entry function, before anything may configure the uploader and
+ * outside whatever the worker needs to finish (sockets, in particular).
+ */
+class LogUploadShutdown {
+ public:
+  LogUploadShutdown() = default;
+  ~LogUploadShutdown();
+  LogUploadShutdown(const LogUploadShutdown&) = delete;
+  LogUploadShutdown& operator=(const LogUploadShutdown&) = delete;
+};
 
 /** True once a configure succeeded; lets callers skip building strings they cannot send. */
 bool log_upload_running();

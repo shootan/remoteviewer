@@ -1102,6 +1102,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
     return 1;
   }
 
+  // The uploader's worker is a std::thread inside a static, and nothing here used to stop it: the
+  // static was destroyed with the thread still joinable, which is std::terminate(). Declared
+  // after the sockets it needs and before anything that can configure it -- a sign-in arrives on
+  // a page message, so from here on -- and it covers the early returns below as well as the end
+  // of the message loop. This thread holds no lock at that point, which matters: the auth
+  // callback runs on the worker and posts to this window.
+  const remote60::native_poc::LogUploadShutdown uploaderShutdown;
+
   WNDCLASSEXW wc{};
   wc.cbSize = sizeof(wc);
   wc.lpfnWndProc = wnd_proc;

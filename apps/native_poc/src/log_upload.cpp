@@ -83,6 +83,11 @@ Outcome classify(bool sent, uint32_t status) {
   return Outcome::Permanent;  // 400, 403, 404, 413 ...: the server's final word on this body
 }
 
+// How long the final drain may keep starting requests. Not a total: a request already in flight
+// is waited out on top of this. Picked so a close is over within a couple of seconds of the last
+// send that can still succeed, rather than however long the queue happens to be.
+constexpr uint64_t kStopDrainBudgetMs = 3000;
+
 const char* outcome_name(Outcome o) {
   switch (o) {
     case Outcome::Ok: return "ok";
@@ -112,6 +117,13 @@ struct UploaderState {
   uint64_t lastRejectUs = 0;
   bool running = false;
   bool stopping = false;
+  // Latched by log_upload_shutdown(): the process is going away. Checked under the same lock that
+  // starts the worker, so a configure racing the close cannot slip a second thread past the join.
+  bool shutdown = false;
+  // When the final drain must stop starting new requests. A stop is not free -- the worker sends
+  // what it can and every send is a blocking http_post -- so without this the wait is as long as
+  // the queue is deep times the http timeout, on whichever thread called stop.
+  uint64_t stopDeadlineUs = 0;
   std::thread worker;
 
   LogUploadConfig config;
@@ -278,6 +290,17 @@ void worker_loop() {
       s.workerCycles = cycles;
       finalPass = s.stopping;
       const uint64_t nowUs = steady_now_us();
+      if (finalPass && s.stopDeadlineUs != 0 && nowUs >= s.stopDeadlineUs) {
+        // The drain has had its budget. Whoever called stop is blocked in join() -- on the UI
+        // thread, in the case this exists for -- and a server that accepts and never answers
+        // would otherwise hold the window open for one http timeout per queued batch.
+        uint64_t lines = 0, batches = 0;
+        discard_all_locked(s, &lines, &batches);
+        diag("worker exiting (stop budget spent) sent=" + std::to_string(s.sentBatches) +
+             " discardedLines=" + std::to_string(lines) +
+             " heldDiscarded=" + std::to_string(batches));
+        return;
+      }
       if (!next_job_locked(s, nowUs, &job)) {
         if (s.stopping) {
           uint64_t lines = 0, batches = 0;
@@ -439,6 +462,13 @@ bool log_upload_configure(const LogUploadConfig& config, std::string* outReason)
   std::string reason;
   {
     std::lock_guard<std::mutex> lk(s.mu);
+    if (s.shutdown) {
+      // Under the same lock as the start below, on purpose: checking earlier would leave a window
+      // in which this call passes the check, the shutdown latches and joins, and then this one
+      // starts a worker nobody will ever join.
+      if (outReason) *outReason = "shutting down";
+      return false;
+    }
     if (s.running && !s.stopping) {
       // Same owner = same account, same server (host:port) and same device: only then does a new
       // token inherit the queue and the held batches. Anything else is a different destination for
@@ -555,6 +585,7 @@ void log_upload_stop() {
     std::lock_guard<std::mutex> lk(s.mu);
     if (!s.running) return;
     s.stopping = true;
+    s.stopDeadlineUs = steady_now_us() + kStopDrainBudgetMs * 1000;
     worker = std::move(s.worker);
   }
   s.cv.notify_all();
@@ -577,7 +608,29 @@ void log_upload_stop() {
   s.lastOkUs = s.lastRejectUs = 0;
   s.lastTransientDiagUs = 0;
   s.workerCycles = 0;
+  s.stopDeadlineUs = 0;
 }
+
+void log_upload_shutdown() {
+  UploaderState& s = state();
+  {
+    std::lock_guard<std::mutex> lk(s.mu);
+    s.shutdown = true;
+  }
+  // No lock held here: the worker takes s.mu on every cycle, so joining while holding it would
+  // hang the process instead of ending it. The caller must likewise not hold a UI lock -- the
+  // auth-rejected callback runs on this thread and marshals to the UI with PostMessage.
+  log_upload_stop();
+  {
+    // After the join, not before. Clearing it earlier would not stop a callback already running;
+    // once the worker is joined, nothing can start another, so this is when the caller's UI stops
+    // being reachable from here.
+    std::lock_guard<std::mutex> lk(s.mu);
+    s.authRejectedCallback = nullptr;
+  }
+}
+
+LogUploadShutdown::~LogUploadShutdown() { log_upload_shutdown(); }
 
 bool log_upload_running() {
   UploaderState& s = state();
