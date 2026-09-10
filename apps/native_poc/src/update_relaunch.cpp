@@ -434,14 +434,36 @@ RelaunchEffects make_relaunch_effects(RelaunchConfig config,
                              ? shared->config.isStillRunning
                              : std::function<RelaunchConfig::Liveness(const ProcessTarget&)>(
                                    real_liveness);
+        const auto evaluate = [&](bool* outAlive, bool* outUnknown) {
+          *outAlive = false;
+          *outUnknown = false;
+          for (const ProcessTarget& target : shared->stopped) {
+            if (image_leaf_lower(target.imagePath) != image_leaf_lower(entry.imageName)) continue;
+            const RelaunchConfig::Liveness answer = ask(target);
+            if (answer == RelaunchConfig::Liveness::Running) *outAlive = true;
+            if (answer == RelaunchConfig::Liveness::Unknown) *outUnknown = true;
+          }
+        };
+
         bool alive = false;
         bool unknown = false;
-        for (const ProcessTarget& target : shared->stopped) {
-          if (image_leaf_lower(target.imagePath) != image_leaf_lower(entry.imageName)) continue;
-          const RelaunchConfig::Liveness answer = ask(target);
-          if (answer == RelaunchConfig::Liveness::Running) alive = true;
-          if (answer == RelaunchConfig::Liveness::Unknown) unknown = true;
+        evaluate(&alive, &unknown);
+
+        // Everything here was asked to stop, so "still running" is as likely to mean "closing" as
+        // "refused". Asked once, nine milliseconds after the acknowledgement, the two are
+        // indistinguishable -- and the field run resolved that ambiguity the wrong way, skipped
+        // the relaunch, and left the machine with nothing running once the host finished closing.
+        //
+        // So a Running answer is re-asked until it settles or the grace runs out. Running out is
+        // not an exit: it stays Running and the skip below happens for the reason it names.
+        if (alive && shared->config.closingGraceMs > 0) {
+          const DWORD deadline = GetTickCount() + shared->config.closingGraceMs;
+          while (alive && GetTickCount() < deadline) {
+            Sleep(50);
+            evaluate(&alive, &unknown);
+          }
         }
+
         if (alive) {
           outcome.alreadyRunning = true;
           outcome.detail = "still running -- nothing to bring back";

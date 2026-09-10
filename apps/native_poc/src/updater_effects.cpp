@@ -293,6 +293,10 @@ UpdaterDeps production_updater_deps(std::function<void(const std::string&)> log,
   deps.lockName = L"Global\\GNLinkUpdate";
   deps.payloadNames = product_payload_names();
   deps.relaunchTable = product_images();
+  // The supervisor is asked to close and then read for liveness almost immediately. Without a
+  // grace the two happen close enough together that a process which is closing reads as one that
+  // refused -- which is what left a machine with nothing running after an abandoned attempt.
+  deps.closingGraceMs = 15000;
   return deps;
 }
 
@@ -454,6 +458,7 @@ UpdateOutcome UpdaterEffects::run(const std::string& platform) {
   // Only the host writes a health report. When it was not running before the update, there is
   // nothing to wait for.
   relaunchConfig.healthReporterImage = L"GNLinkHost.exe";
+  relaunchConfig.closingGraceMs = deps_.closingGraceMs;
 
   auto relaunchEffects = std::make_shared<RelaunchEffects>();
   UpdaterDeps deps = deps_;

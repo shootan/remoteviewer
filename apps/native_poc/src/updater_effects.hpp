@@ -120,6 +120,12 @@ struct UpdaterDeps {
 
   std::vector<std::wstring> payloadNames;
   std::vector<KnownImage> relaunchTable;
+  /**
+   * How long a process asked to stop is given to finish closing before "still running" is
+   * believed. See RelaunchConfig::closingGraceMs -- zero means no grace, which is right for a
+   * test injecting a fixed liveness answer and wrong for anything reading a real process.
+   */
+  uint32_t closingGraceMs = 0;
 
   /** False when anything required is missing. */
   bool validate(std::string* detail = nullptr) const;

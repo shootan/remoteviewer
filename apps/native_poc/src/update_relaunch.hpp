@@ -119,6 +119,23 @@ struct RelaunchConfig {
   uint32_t healthPollMs = 500;
 
   /**
+   * How long a process that was ASKED to stop is given to finish closing before "still running"
+   * is believed.
+   *
+   * The field log has the whole failure in two lines: at 18:56:20.266 the host acknowledged and
+   * was standing down, and at 18:56:20.275 -- nine milliseconds later -- this read it as still
+   * running and brought nothing back. The attempt was abandoned, the host closed on its own a
+   * moment later, and there was no longer anything to restart.
+   *
+   * Exhausting the grace is NOT an exit. A process that is still there when the time is up stays
+   * Running, and the relaunch is skipped for the honest reason that it really is still there.
+   *
+   * Zero by default so a test injecting a fixed answer does not pay a real timeout for a constant.
+   * Production sets it (updater_effects.cpp); anything driving the real liveness check should.
+   */
+  uint32_t closingGraceMs = 0;
+
+  /**
    * Whether a captured target is still running under the same identity.
    *
    * Three answers, not two, and the third is the point: a check that could not be completed must

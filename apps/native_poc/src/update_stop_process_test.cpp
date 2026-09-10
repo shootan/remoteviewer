@@ -285,6 +285,29 @@ int main(int argc, char** argv) {
           std::to_string(fixture_children(parentPid).size()) + " left at the end of the wait");
   }
 
+  // ---------------------------------------------------------------- gone vs cannot look
+  //
+  // These were the same answer. "Could not open the process" was reported as "asked successfully",
+  // so a process we have no rights to look at counted as one that had already exited -- and the
+  // swap would then proceed over something that may still hold the files it is about to replace.
+  {
+    ProcessTarget departed;
+    departed.pid = child ? child->pid : 0;
+    departed.imagePath = child ? child->imagePath : std::wstring();
+    departed.creationTime = child ? child->creationTime : 0;
+    check("a process that really has exited counts as asked", request_process_stop(departed),
+          "pid " + std::to_string(departed.pid) + ", already gone");
+
+    // The System process: it exists, and it cannot be opened. The honest answer is "unknown",
+    // and the update is abandoned rather than proceeding on an assumption.
+    ProcessTarget protectedTarget;
+    protectedTarget.pid = 4;
+    protectedTarget.imagePath = L"System";
+    protectedTarget.creationTime = 1;
+    check("a process we cannot even open does NOT count as asked",
+          !request_process_stop(protectedTarget), "pid 4");
+  }
+
   // ---------------------------------------------------------------- the production path, for real
   ResetEvent(quitEvent);
   PROCESS_INFORMATION pi2{};
