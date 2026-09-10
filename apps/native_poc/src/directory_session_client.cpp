@@ -219,23 +219,10 @@ bool split_url(const std::string& url, std::string* host, uint16_t* port, bool* 
 
 bool directory_observe_from_health(const std::string& url, directory::ObserveEndpoint* outObserve,
                                    std::string* outError) {
-  if (!outObserve) return false;
-  std::string host;
-  uint16_t port = 0;
-  bool secure = false;
-  if (!split_url(url, &host, &port, &secure, outError)) return false;
-
-  uint32_t status = 0;
-  std::string response;
-  if (!http_request(host, port, secure, "GET", "/healthz", {}, {}, &status, &response)) {
-    if (outError) *outError = "cannot reach the server";
-    return false;
-  }
-  if (status != 200) {
-    if (outError) *outError = error_from_response(status, response);
-    return false;
-  }
-  return directory::parse_observe_metadata(response, outObserve);
+  // One implementation, in directory_client. It used to live here, which is why the host -- which
+  // does not link this file -- had no way to ask the question at all, and a host resuming from a
+  // cached token therefore never learned where observations go.
+  return directory::observe_endpoint_from_health(url, outObserve, outError);
 }
 
 bool directory_login(const std::string& url, const std::string& accountId,

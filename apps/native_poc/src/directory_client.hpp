@@ -176,6 +176,21 @@ std::string update_manifest_url_for(const std::string& override_, const std::str
  * exchange did not complete at all; a completed exchange reports the server's status instead, so
  * a caller can tell "could not reach it" from "it said no".
  */
+/**
+ * Asks a directory where address observations go, over its health route.
+ *
+ * Needs no session, which is the point: a host that resumed from a cached token never registered
+ * and so never saw the response that carries the advertisement. Returns false when the server
+ * could not be reached (`outError` says why) and also when it simply said nothing -- absence is a
+ * documented state, not a failure, and the caller tells them apart by whether `outError` is set.
+ */
+bool observe_endpoint_from_health(const std::string& url, ObserveEndpoint* out,
+                                  std::string* outError);
+
+/** A GET over the same two transports as http_post. */
+bool http_get(const std::string& host, uint16_t port, bool secure, const std::string& path,
+              uint32_t* outStatus, std::string* outResponse);
+
 bool http_post(const std::string& host, uint16_t port, bool secure, const std::string& path,
                const std::string& contentType, const std::string& extraHeaders,
                const std::string& body, uint32_t* outStatus, std::string* outResponse);
@@ -229,6 +244,19 @@ class HostAgent {
   bool RefreshObservedAddress();
   /** Aims the observe socket from the configured port, or what the server advertised. */
   bool ApplyObserveEndpoint();
+  /**
+   * Gets the observe endpoint from the directory when registration did not supply one.
+   *
+   * A host that starts with a cached token never registers, so it never saw the login response
+   * that carries the advertisement -- and on https there is no default to fall back to, so it
+   * could not observe, could not heartbeat, and never appeared in anyone's list. The cache
+   * holding a perfectly good token was what made this permanent: the more successful the last
+   * run, the more certainly the next one was stuck.
+   *
+   * Asked over the same origin's health route, which needs no session. Bounded: a server that
+   * does not advertise yet may start later, so this retries with backoff and then stops asking.
+   */
+  bool FetchObserveEndpointFromHealth();
   bool Heartbeat(std::vector<PunchTarget>* outPunch);
   // One attempt, reporting the status and the server's error name so the caller can tell a
   // missing observation apart from every other refusal. Heartbeat() is the policy on top.
@@ -258,6 +286,10 @@ class HostAgent {
    */
   ObserveEndpoint observeAdvertised_{};
   bool observeAddrReady_ = false;
+  /** How many times the health route has been asked, so the asking is bounded. */
+  int observeFetchAttempts_ = 0;
+  /** Cycles left to wait before asking again. Grows, so a silent server is not polled forever. */
+  int observeFetchCooldown_ = 0;
   /** Whether the directory URL is https, which changes what an absent advertisement means. */
   bool httpSecure_ = false;
 

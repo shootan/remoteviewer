@@ -543,6 +543,98 @@ bool HostAgent::ConsumeUdpPacket(const void* data, size_t len, const sockaddr_in
   return true;
 }
 
+/**
+ * A GET, on the same two transports and by the same rule as http_post: TLS through WinHTTP, plain
+ * http on the socket that already works.
+ *
+ * Here rather than borrowed from the session client because ten targets link this file and do not
+ * link that one -- and a host that needs to ask the directory a question should not drag the
+ * viewer's session code in behind it.
+ */
+bool http_get(const std::string& host, uint16_t port, bool secure, const std::string& path,
+              uint32_t* outStatus, std::string* outResponse) {
+  if (secure) {
+    net::HttpResult result;
+    const bool ok = net::http_exchange(host, port, true, "GET", path, std::string(), std::string(),
+                                       nullptr, kHttpTimeoutMs, &result);
+    if (outStatus) *outStatus = result.status;
+    if (outResponse) *outResponse = result.body;
+    return ok;
+  }
+
+  sockaddr_in addr{};
+  if (!resolve_ipv4(host, port, &addr)) return false;
+  SOCKET s = connect_with_timeout(addr, kHttpTimeoutMs);
+  if (s == INVALID_SOCKET) return false;
+
+  std::ostringstream req;
+  req << "GET " << path << " HTTP/1.1\r\n"
+      << "Host: " << host << ":" << port << "\r\n"
+      << "Connection: close\r\n\r\n";
+  const std::string reqText = req.str();
+  size_t sent = 0;
+  while (sent < reqText.size()) {
+    const int n = send(s, reqText.data() + sent, static_cast<int>(reqText.size() - sent), 0);
+    if (n <= 0) {
+      closesocket(s);
+      return false;
+    }
+    sent += static_cast<size_t>(n);
+  }
+
+  std::string raw;
+  char buf[2048];
+  bool tooLarge = false;
+  for (;;) {
+    const int n = recv(s, buf, sizeof(buf), 0);
+    if (n <= 0) break;
+    raw.append(buf, static_cast<size_t>(n));
+    if (raw.size() > net::kMaxHttpResponseBytes) {
+      tooLarge = true;
+      break;
+    }
+  }
+  closesocket(s);
+  if (tooLarge) return false;
+
+  if (raw.rfind("HTTP/", 0) != 0) return false;
+  const size_t statusStart = raw.find(' ');
+  if (statusStart == std::string::npos) return false;
+  if (outStatus) {
+    *outStatus = static_cast<uint32_t>(std::strtoul(raw.c_str() + statusStart + 1, nullptr, 10));
+  }
+  const size_t bodyStart = raw.find("\r\n\r\n");
+  if (outResponse) {
+    *outResponse = bodyStart == std::string::npos ? std::string() : raw.substr(bodyStart + 4);
+  }
+  return true;
+}
+
+bool observe_endpoint_from_health(const std::string& url, ObserveEndpoint* out,
+                                  std::string* outError) {
+  if (!out) return false;
+  *out = ObserveEndpoint{};
+  std::string host;
+  uint16_t port = 0;
+  bool secure = false;
+  if (!parse_directory_url(url, &host, &port, outError, &secure)) return false;
+
+  uint32_t status = 0;
+  std::string response;
+  if (!http_get(host, port, secure, "/healthz", &status, &response)) {
+    if (outError) *outError = "cannot reach the server";
+    return false;
+  }
+  if (status != 200) {
+    if (outError) *outError = "the server answered " + std::to_string(status);
+    return false;
+  }
+  // Absence is not an error here: an older directory says nothing and observe_port_for has a rule
+  // for that. The caller distinguishes the two by whether outError was set.
+  if (outError) outError->clear();
+  return parse_observe_metadata(response, out);
+}
+
 bool http_post(const std::string& httpHost_, uint16_t httpPort_, bool secure,
                const std::string& path, const std::string& contentType,
                const std::string& extraHeaders, const std::string& body, uint32_t* outStatus,
@@ -797,6 +889,39 @@ bool HostAgent::EnsureRegistered() {
   std::cout << "[native-video-host] directory registered hostId=" << hostId_
             << " name=" << cfg_.hostName << "\n";
   return true;
+}
+
+bool HostAgent::FetchObserveEndpointFromHealth() {
+  // Only when there is nothing else to go on. A configured port is the operator's decision and an
+  // advertisement already in hand does not need refreshing.
+  if (cfg_.observeUdpPort != 0 || observeAdvertised_.known) return true;
+
+  // Bounded, and deliberately not a poll. A directory that has not been given an observe port may
+  // be given one later, so asking again is right; asking forever would turn a server-side
+  // omission into a machine that talks to it every twenty-five seconds until someone notices.
+  constexpr int kMaxFetchAttempts = 6;
+  if (observeFetchCooldown_ > 0) {
+    --observeFetchCooldown_;
+    return false;
+  }
+  if (observeFetchAttempts_ >= kMaxFetchAttempts) return false;
+  ++observeFetchAttempts_;
+
+  ObserveEndpoint advertised;
+  std::string error;
+  if (!observe_endpoint_from_health(cfg_.url, &advertised, &error)) {
+    // Absent is not an error -- an older directory says nothing, and observe_port_for has a rule
+    // for that. Unreachable is an error, and the two read differently to whoever is looking.
+    SetStatus(error.empty()
+                  ? "this directory does not say where to send address observations"
+                  : "could not ask the directory where observations go: " + error);
+    observeFetchCooldown_ = observeFetchAttempts_ * 2;  // 2, 4, 6 ... cycles
+    return false;
+  }
+  observeAdvertised_ = advertised;
+  observeFetchAttempts_ = 0;
+  observeFetchCooldown_ = 0;
+  return ApplyObserveEndpoint();
 }
 
 bool HostAgent::ApplyObserveEndpoint() {
@@ -1111,10 +1236,23 @@ void HostAgent::Run() {
     const auto cycleStart = std::chrono::steady_clock::now();
 
     if (EnsureRegistered()) {
+      // A host that started from a cached token never registered, so nothing has told it where
+      // observations go. Asked here rather than inside EnsureRegistered, because that function
+      // returns immediately when a token is cached -- which is exactly the case that needs this.
+      //
+      // The trigger is "we are guessing", not "we have nowhere to aim". On https there is nowhere
+      // to aim and the symptom is obvious; on http the guess is httpPort + 1, which RESOLVES and
+      // then goes nowhere if the server listens elsewhere -- a working-looking aim at the wrong
+      // place. Asking covers both, and the answer is only used when the server gives one.
+      FetchObserveEndpointFromHealth();
+
       // The observation must precede the heartbeat: the heartbeat is what publishes the
       // address, and it publishes whatever the observation last recorded.
       if (!RefreshObservedAddress()) {
-        SetStatus("address observation timed out");
+        // Only when there is nothing better to say. The specific reason -- no advertisement, an
+        // unusable host, a port that cannot be derived -- was already set by whoever found it,
+        // and overwriting it with "timed out" turned every one of those into a network symptom.
+        if (observeAddrReady_) SetStatus("address observation timed out");
       } else {
         std::vector<PunchTarget> punch;
         if (Heartbeat(&punch)) {
