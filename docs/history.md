@@ -10906,3 +10906,6 @@ manifest-backups/0.2.109-20260910T151705Z/   1703B  artifact=10  releaseId=r-0.2
 
 **gdi 건**: 검증용이 세 번째 가설(Debug config)을 **철회**했고, *"이 건에서 연속 3회 틀렸으니 내 판단은 근거로 쓰지 말고 측정만 쓰라"* 고 했다. #508 의 정리(문턱 20.0ms 가 관측 분산 16.8~23.3ms 한가운데)를 유지한다.
 **Release sweep 결과**(요청받은 것): `config=Release built=2026-09-11T00:26` **64 스위트 `^PASS` 1803 · 실패 1건**(`udp_control_e2e` 1P/17F). **`update_stop_process_test` 15 PASS 로 포함**됐고, **`viewer_udp_recovery` rc=127 은 재현되지 않았다**(rc=0).
+- ⚠️ **검증용은 이 총합 1803 을 재현하지 않았다**(의도적 — 총합을 근거로 쓰지 않기로 한 상태에서 긴 재빌드를 쓸 이유가 없다). 그쪽이 대조한 것은 **스위트별 사실**이다: `udp_control_e2e` 를 자기 Debug sweep 에서 **rc=0/18 PASS** 로 본 적이 있고 나중엔 rc=1 이었다는 것(= **같은 스위트가 시각에 따라 갈리는 것을 직접 관측**), `viewer_udp_recovery` rc=127 은 자기 트리의 빌드 시각이 섞인 탓이라는 것, 그리고 **`stop_process` 가 Release 에서 15 PASS 로 돈다는 것**(직접 빌드·실행).
+- ⚠️ **`update_stop_process_test` 가 Release 에 없던 것은 배선 결함이 아니었다.** `CMakeLists.txt` 에 `EXCLUDE_FROM_ALL` 은 **0개**이고, `:603` 선언은 `:740` 의 `update_effects_test` 와 같은 형태다 — 기본 빌드에 포함된다. **타깃 추가 뒤 재빌드를 하지 않은 트리였을 뿐이다.** 지적 자체는 유효했다(출하 config 에서 반례가 도는지 확인해야 했다).
+- **provenance 연결 확인**: `dist/GNLinkSetup-0.2.110.exe` 4,358,144B `3f0c3f5ca6b3fa42…` 가 **검증용이 공개 URL 에서 직접 받은 바이트와 일치**한다 — 로컬 산출물과 게시본이 이어진다.
