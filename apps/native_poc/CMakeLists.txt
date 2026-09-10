@@ -595,6 +595,29 @@ if(MSVC)
   target_compile_options(remote60_verify_release PRIVATE /utf-8)
 endif()
 
+# The stop request against REAL processes, through the production functions.
+#
+# Links update_process_targets.cpp on purpose -- every other suite deliberately does not, and the
+# result was that request_process_stop() had one caller in the product and none in any test. The
+# branch that failed in the field had never been executed.
+add_executable(remote60_update_stop_process_test
+  src/update_effects.cpp
+  src/update_process_targets.cpp
+  src/update_process_identity.cpp
+  src/update_relaunch_plan.cpp
+  src/update_state_machine.cpp
+  src/update_manifest.cpp
+  src/update_http.cpp
+  src/payload_name.cpp
+  src/update_signature.cpp
+  src/update_stop_process_test.cpp
+)
+target_include_directories(remote60_update_stop_process_test PRIVATE src)
+target_link_libraries(remote60_update_stop_process_test PRIVATE bcrypt winhttp user32 advapi32)
+if(MSVC)
+  target_compile_options(remote60_update_stop_process_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_update_manifest_test
   src/update_manifest.cpp
   src/update_http.cpp

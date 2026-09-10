@@ -130,14 +130,14 @@ int main() {
   CreateDirectoryW(install.c_str(), nullptr);
   CreateDirectoryW(staging.c_str(), nullptr);
 
-  // The names the assembly will try to replace come from the product's own image list, so the
-  // install directory is seeded with all of them.
-  for (const std::wstring& name : product_image_names()) {
+  // Seeded from product_payload_names(), which is the list production actually replaces. It used
+  // to be seeded from product_image_names() plus the two data files -- a list that differed from
+  // production's by exactly the file this suite exists to cover, so the assembly was being driven
+  // with a payload the product does not use.
+  CreateDirectoryW((install + L"\\ui").c_str(), nullptr);
+  for (const std::wstring& name : product_payload_names()) {
     write_file(install + L"\\" + name, "old-" + narrow(name));
   }
-  CreateDirectoryW((install + L"\\ui").c_str(), nullptr);
-  write_file(install + L"\\ui\\shell.html", "old-shell");
-  write_file(install + L"\\ui\\macro.html", "old-macro");
 
   // A manifest describing that same set, at a newer version.
   std::string manifest;
@@ -159,9 +159,7 @@ int main() {
       manifest += "artifact=" + narrow(name) + "|" + std::to_string(size) + "|" + sha +
                   "|https://u.example/" + narrow(name) + "\n";
     };
-    for (const std::wstring& name : product_image_names()) add(name);
-    add(L"ui\\shell.html");
-    add(L"ui\\macro.html");
+    for (const std::wstring& name : product_payload_names()) add(name);
   }
 
   UpdaterOptions options;
@@ -196,9 +194,7 @@ int main() {
     // `Global\\GNLinkUpdate` would put it in contention with the installed product on the
     // machine running the test -- in both directions.
     deps.lockName = L"Local\\GNLinkAssemblyTest";
-    deps.payloadNames = product_image_names();
-    deps.payloadNames.push_back(L"ui\\shell.html");
-    deps.payloadNames.push_back(L"ui\\macro.html");
+    deps.payloadNames = product_payload_names();
     deps.relaunchTable = product_images();
 
     deps.fetchText = [&manifest, rec](const std::string& url, size_t, std::string* body,

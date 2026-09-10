@@ -1056,6 +1056,58 @@ int main(int argc, char** argv) {
     e.DiscardDownload();
   }
 
+  // ---------------------------------------------------------------- the updater replaces itself
+
+  {
+    // The list said GNLinkUpdater.exe was a member. Nothing had ever put a new one in staging and
+    // watched the installed one change, so "the updater can now be updated" rested on a name
+    // being in a vector -- which is the same shape as the mistake that left it out for every
+    // release. This replaces it for real.
+    //
+    // The reason it is safe is that the running updater is a copy OUTSIDE installDir, so the
+    // destination of this swap is not the image executing it. updaterImagePath is set to that
+    // working-copy shape here, exactly as updater_effects builds it in production.
+    const std::string kOldUpdater = "OLD-UPDATER-BINARY";
+    write_text(install + L"\\AlphaPayload.bin", kOldAlpha);
+    write_text(install + L"\\GNLinkUpdater.exe", kOldUpdater);
+
+    const std::wstring workingCopy = staging + L"\\..\\gnlink-updater-workingcopy";
+    CreateDirectoryW(workingCopy.c_str(), nullptr);
+
+    UpdateEffectsConfig c = base_config(install, staging);
+    c.payloadNames = {L"AlphaPayload.bin", L"GNLinkUpdater.exe"};
+    c.updaterImagePath = workingCopy + L"\\GNLinkUpdater.exe";
+    std::string why;
+    check("updater-member: the config is accepted", c.validate(&why), why);
+
+    WindowsUpdateEffects e(c);
+    const ManifestFields f = artifact_fields({"AlphaPayload.bin", "GNLinkUpdater.exe"});
+    check("updater-member: download", e.Download(f), e.last_error());
+    check("updater-member: swap succeeds", e.Swap(), e.last_error());
+    check("updater-member: the installed GNLinkUpdater.exe really changed",
+          read_text(install + L"\\GNLinkUpdater.exe") == kArtifactBytes,
+          read_text(install + L"\\GNLinkUpdater.exe"));
+    check("updater-member: ...and the old one was kept as a backup",
+          exists(install + L"\\GNLinkUpdater.exe.gnlink-old"));
+    e.DiscardDownload();
+
+    // The guard that makes the above safe, from the other side: an updater running from INSIDE
+    // the directory being replaced must be refused. Without this the first check would pass for
+    // the wrong reason -- because nothing was checking, rather than because the layout is right.
+    UpdateEffectsConfig bad = base_config(install, staging);
+    bad.payloadNames = {L"AlphaPayload.bin", L"GNLinkUpdater.exe"};
+    bad.updaterImagePath = install + L"\\GNLinkUpdater.exe";
+    std::string badWhy;
+    check("updater-member: an updater running from the install directory is refused",
+          !bad.validate(&badWhy), badWhy);
+    check("updater-member: ...and the reason says so",
+          badWhy.find("running updater") != std::string::npos ||
+              badWhy.find("inside the directory") != std::string::npos,
+          badWhy);
+
+    RemoveDirectoryW(workingCopy.c_str());
+  }
+
   {
     // Condition 5, first regression: the artifact does not match its hash. Nothing may be
     // replaced -- including the Setup.

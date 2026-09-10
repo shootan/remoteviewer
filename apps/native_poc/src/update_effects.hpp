@@ -43,7 +43,18 @@ struct ProcessTarget {
   uint32_t pid = 0;
   std::wstring imagePath;    // full path as observed at enumeration time
   uint64_t creationTime = 0; // FILETIME as a single value; 0 when it could not be read
+  // Who started it, and whether it can be asked to close the way a person would close it.
+  //
+  // Both exist so that a windowless process can be routed to its supervisor instead of being
+  // asked directly. Asking directly is what could not work: the only mechanism for a process
+  // without a window is a console control event, and that needs a shared console the product's
+  // own supervisor does not give it. 0 / false mean "not known", and a target that is not known
+  // to be owned is asked directly rather than assumed to belong to someone.
+  uint32_t parentPid = 0;
+  bool hasWindow = false;
 
+  // Identity only. parentPid and hasWindow describe the moment, not the process: the same process
+  // is the same process whether or not it had opened a window yet.
   bool operator==(const ProcessTarget& other) const {
     return pid == other.pid && creationTime == other.creationTime && imagePath == other.imagePath;
   }
@@ -314,6 +325,12 @@ class WindowsUpdateEffects : public UpdateEffects {
    */
   std::string stagedReleaseId_;
   std::vector<std::wstring> stagedNames_;
+  // The exact processes PrepareForSwap asked about, kept so that Quiesce waits for those and not
+  // for whatever a second enumeration happens to find. Re-enumerating meant a process that
+  // started in between became something to wait for, and one that had already gone silently
+  // stopped being checked at all.
+  std::vector<ProcessTarget> preparedTargets_;
+  std::vector<uint32_t> ownedChildPids_;
   bool swapped_ = false;
 };
 
