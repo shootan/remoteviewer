@@ -45,6 +45,53 @@
   - 검증용의 명시적 OK 뒤에만 Codex 에 최종 확인을 요청한다(진행 보고는 언제든 가능). 전체 task 는 그 전까지 working 으로 두고, subtask 완료와 전체 완료를 구분한다. 단독 실행 PASS 로 재현된 회귀 FAIL 을 상쇄하지 않는다.
 - **공통**: 답장·위임은 identity+sessionId 로 pin 한다. 이 문서의 응답 규칙(수행된 작업 요약)·테스트 규칙(`qwinsta`)·로그 위치 규칙은 두 역할 모두에 그대로 적용된다.
 
+## 릴리스 배포 계정 (NAS)
+
+- **배포는 `gnlink` 계정으로 이 PC에서 직접 한다.** 키는 `~/.ssh/remote60_deploy`(등록된 공개키
+  `remote60_deploy.pub`), 접속은 `ssh -i ~/.ssh/remote60_deploy gnlink@192.168.0.6`.
+  키 전용·LAN 한정(`sshd AllowUsers gnlink@192.168.0.*`)이고, 홈은 `/opt/gnlink`(OS 디스크).
+- 이 계정이 **소유**하므로 sudo 없이 되는 것:
+  - `/opt/gnlink/updates/<버전>/` 생성과 아티팩트 게시
+  - `/opt/gnlink/update-manifests/{windows,android}.{manifest,sig}` 교체
+- **sudo가 없어 못 하는 것**: nginx 설정, systemd 유닛·dropin(=env 변경), ACL, 패키지 설치.
+  이들은 최초 구축(0.2.108) 때 끝났으므로 **평시 릴리스에는 필요 없다.** 필요해지면 그때만 사람이 붙는다.
+- **서비스 재시작은 평시 불필요하다.** `server.js`의 manifest 핸들러가 요청마다 디스크를 읽고 캐시하지
+  않으므로, `.manifest`/`.sig` 두 파일을 짝으로 교체하면 다음 요청부터 반영된다.
+  재시작이 필요한 경우는 **env를 바꿀 때뿐**이고, 그건 위의 "못 하는 것"에 해당한다.
+- 게시 순서는 고정이다: **아티팩트 전량 업로드 → 크기·SHA256 전량 검증 → `.manifest`+`.sig`를 짝으로
+  마지막에 원자적 교체**(`.tmp` → `mv`). 반대로 하면 manifest가 아직 없는 파일을 가리키는 창이 생긴다.
+- 아티팩트는 **버전별 불변 경로**에 둔다. 기존 버전 디렉터리를 덮어쓰거나 지우지 않는다
+  (manifest가 가리키는 URL의 바이트가 나중에 달라지면 서명이 무의미해진다).
+- 롤백은 **`.manifest`+`.sig` 두 파일을 정확한 짝으로 원복**하는 것이 전부다. 아티팩트는 그대로 둔다.
+- 게시 전후로 **문서와 디스크의 해시가 같은지** 확인한다. 서명 검증은 "문서가 서명 이후 바뀌지 않았다"만
+  말하지 **"문서가 실제로 존재하는 파일을 가리킨다"는 말하지 않는다.** 둘은 따로 확인해야 한다.
+
+### 배포는 손이 아니라 스크립트로 한다 (2026-09-10)
+
+- **`automation/gnlink_deploy.sh` 가 위 절차의 구현이다.** 손으로 하는 게시는 하지 않는다 —
+  위 순서는 전부 *"빼먹기 쉽고 나중에 보이지 않는"* 단계이고, 0.2.108 의 낡은 해시와 403 이 정확히 그 자리였다.
+  ```
+  automation/gnlink_deploy.sh --release-dir .claude/rel/<버전> --verify-only   # 남의 서버 상태를 처음 볼 때
+  automation/gnlink_deploy.sh --release-dir .claude/rel/<버전> --dry-run
+  automation/gnlink_deploy.sh --release-dir .claude/rel/<버전>
+  ```
+- **처음 쓰는 서버에는 `--verify-only` 부터.** 불필요한 재게시·재시작을 하지 않고, **테스트 목적으로 버전을 올리지 않는다.**
+- 스크립트가 지키는 것: **재실행 멱등** · **동시 배포 배타(lock)** · **같은 버전 다른 bytes 거부**(게시된 URL 의 바이트가 달라지면 그 URL 에 대한 서명이 전부 거짓이 된다) ·
+  **모드 명시 지정**(umask 에 기대지 않는다) · **실패 시 이전 릴리스 유지** · **비밀 없는 진단**.
+- **`gnlink` 로 불가능한 작업은 `ESCALATE` 로 구체 조작을 출력하고 exit 3.** 그 출력을 그대로 NAS 세션에 넘긴다 —
+  *"NAS 에 넘겨라"* 만 적으면 추측이 옮겨갈 뿐이다.
+- **`sudo` 를 우회하지 않는다.** 권한 승격·ACL 완화·다른 서비스 변경은 이 스크립트의 일이 아니다.
+- **서버앱(디렉터리 서버)을 갱신할 때 산출물 정의에 반드시 포함할 것**:
+  - **의존 모듈 전량** — `server.js` · `update_manifest.js` · `version_compare.js` · `package.json`.
+    ⚠️ 지난번 *"server.js 단독"* 으로 올려 첫 재시작이 `MODULE_NOT_FOUND` 였다. 외부 npm 의존은 없다(전부 node 내장).
+  - **env 차분**, **재시작 필요 여부**.
+- **평시 릴리스는 재시작하지 않는다** — manifest 핸들러가 요청마다 디스크를 읽는다(`apps/directory/server.js`).
+  재시작이 필요한 경우는 **env 를 바꿀 때뿐**이고, 그건 `gnlink` 권한 밖이라 NAS 경로다.
+- manifest 엔드포인트 확인에 자격이 필요하면 **승인된 전용 credential 을 안전하게 넣고 출력에 노출하지 않는다.**
+  ⚠️ **무인증 401 만으로 업데이트 성공을 검증하지 않는다** — 잠금장치를 확인한 것이지 방 안을 본 것이 아니다.
+- 회귀는 `automation/gnlink_deploy_test.sh` (격리 target · dry-run · 멱등 · 실패 전 공개 불변 · 서명/해시 실패 거부 · lock).
+  ⚠️ **ssh 와 curl 은 이 회귀가 대신하지 못한다.** 그 둘은 실서버에서만 드러난다.
+
 ## 기타
 
 - 워크플로우·커밋 규칙은 `AGENTS.md`를 따른다.
