@@ -1263,6 +1263,33 @@ add_executable(remote60_directory_retry_test
 target_include_directories(remote60_directory_retry_test PRIVATE src)
 target_link_libraries(remote60_directory_retry_test PRIVATE common ws2_32)
 
+# The client's update check, through the production chain against a real socket. The check had
+# one call site, before sign-in, so it always answered "not configured" and never ran again --
+# a decision that lived where no test could reach it.
+add_executable(remote60_client_update_flow_test
+  src/client_update_flow_test.cpp
+  src/client_update_gate.cpp
+  src/client_shell_bridge.cpp
+  src/update_check.cpp
+  src/update_manifest.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/update_http.cpp
+  src/payload_name.cpp
+  src/update_signature.cpp
+  src/directory_client.cpp
+  src/winhttp_transport.cpp
+)
+target_include_directories(remote60_client_update_flow_test PRIVATE src)
+target_compile_definitions(remote60_client_update_flow_test PRIVATE
+  "REMOTE60_UPDATE_VECTORS_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/../shared/update_manifest\""
+  "REMOTE60_CLIENT_SHELL_SRC=\"${CMAKE_CURRENT_SOURCE_DIR}/src/client_shell_main.cpp\""
+)
+target_link_libraries(remote60_client_update_flow_test PRIVATE common ws2_32 bcrypt winhttp iphlpapi shell32)
+if(MSVC)
+  target_compile_options(remote60_client_update_flow_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_client_shell_bridge_test
   src/client_shell_bridge_test.cpp
   src/client_shell_bridge.cpp
@@ -1292,6 +1319,7 @@ if(GNLINK_HAVE_WEBVIEW2)
   add_executable(remote60_client_shell WIN32
     src/client_shell_main.cpp
     src/client_shell_bridge.cpp
+    src/client_update_gate.cpp
     src/directory_session_client.cpp
   src/winhttp_transport.cpp
     src/directory_client.cpp

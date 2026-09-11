@@ -35,6 +35,7 @@
 
 #include "WebView2.h"
 #include "client_shell_bridge.hpp"
+#include "client_update_gate.hpp"
 #include "env_util.hpp"
 #include "update_check.hpp"
 #include "update_credential_channel.hpp"
@@ -649,25 +650,53 @@ void start_client_update(const std::string& availableVersion) {
   }
 }
 
+/** The gate's memory. Guarded by gStateMu, like everything else it is compared against. */
+remote60::native_poc::client::UpdateGateState gUpdateGate;
+
 void start_update_check() {
   namespace upd = remote60::native_poc::update;
+  namespace cli = remote60::native_poc::client;
 
-  // One snapshot, built where the session and the server address are known. A shell that has
-  // not signed in yet has no credential to send, which is normal: the server says so, and that
-  // answer is an update-check failure rather than a reason to sign out.
+  // ONE snapshot, and the url is part of it.
+  //
+  // It used to read the session under the lock and then call configured_directory_url(), which
+  // takes the same lock again -- so the two halves could describe different moments. They are
+  // read together now; the settings-file fallback happens after, outside the lock, and only when
+  // nothing is signed in (in which case there is no session to be inconsistent with).
   std::string session;
   std::string owner;
   uint64_t epoch = 0;
+  std::string url;
   {
     std::lock_guard<std::mutex> lock(gStateMu);
     session = gSessionToken;
     owner = gAccountId;
     epoch = gOwnerEpoch;
+    url = gServerUrl;
   }
+  if (url.empty()) {
+    std::string server;
+    std::string accountId;
+    ShellRuntimeSettings settings;
+    load_settings(&server, &accountId, &settings);
+    url = server;
+  }
+
+  {
+    // Invited from more than one place now -- start-up and every sign-in -- so the same session
+    // must not be asked twice. Signing in again moves the epoch, which is a new question.
+    std::lock_guard<std::mutex> lock(gStateMu);
+    if (!cli::should_check(gUpdateGate, owner, epoch)) {
+      log_line("update check: already asked for this session");
+      return;
+    }
+    cli::note_checked(&gUpdateGate, owner, epoch);
+  }
+
   const upd::UpdateEndpoint endpoint =
       remote60::native_poc::directory::update_endpoint_for(
           remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
-          configured_directory_url(), "windows",
+          url, "windows",
           session.empty() ? std::string() : "Authorization: Bearer " + session, owner, epoch);
 
   upd::CheckConfig config;
@@ -681,17 +710,30 @@ void start_update_check() {
 
   upd::check_for_update_async(
       config, upd::manifest_fetcher_for(config), upd::default_verifier(),
-      [](upd::CheckResult result) {
+      [owner, epoch](upd::CheckResult result) {
         const ShellUpdateNotice notice = shell_update_notice(
             upd::check_outcome_name(result.outcome), result.availableVersion, result.detail);
         log_line(notice.logLine);
-        if (notice.show) {
-          {
-            std::lock_guard<std::mutex> lock(gUpdateNoticeMu);
-            gAvailableVersion = result.availableVersion;
-          }
-          deliver_update_notice(shell_status_json("idle", notice.text));
+        if (!notice.show) return;
+        // The answer describes the session that asked. A sign-out or a sign-in as somebody else
+        // while this was in flight makes it an answer about a session that no longer exists, and
+        // publishing it would put one account's update notice on another's screen.
+        std::string currentOwner;
+        uint64_t currentEpoch = 0;
+        {
+          std::lock_guard<std::mutex> lock(gStateMu);
+          currentOwner = gAccountId;
+          currentEpoch = gOwnerEpoch;
         }
+        if (!remote60::native_poc::client::may_publish(owner, epoch, currentOwner, currentEpoch)) {
+          log_line("update check: answer arrived for a session that has ended; not shown");
+          return;
+        }
+        {
+          std::lock_guard<std::mutex> lock(gUpdateNoticeMu);
+          gAvailableVersion = result.availableVersion;
+        }
+        deliver_update_notice(shell_status_json("idle", notice.text));
       });
 }
 
@@ -743,6 +785,12 @@ void begin_login(std::string server, std::string accountId, std::string password
       std::lock_guard<std::mutex> lock(gStateMu);
       save_settings(server, accountId, gSettings);
     }
+
+    // The check that ran at start-up had neither a token nor an address and reported "not
+    // configured" -- correctly, and then nothing asked again, so signing in never produced an
+    // update check at all. Signing in is exactly the moment both appear, so it is asked here.
+    // Asynchronous, not waited on: a server that never answers must not hold up the host list.
+    start_update_check();
 
     std::string message = shell_hosts_json(hosts);
     // The page shows which account it is listing, so it travels with the list.
