@@ -131,6 +131,11 @@
   }
   #updateLater { background: transparent; border: 1px solid var(--line); color: var(--muted); }
   #updateLater:hover { background: var(--panel-hover); }
+  /* `.hidden` is a class (0-0-1-0) and `#updateBar` is an id (0-1-0-0), so the id won and the bar
+     was on screen from the first paint -- offer and all -- no matter what the script said. Adding
+     the id here makes the hiding rule the more specific of the two. Everything else that hides
+     lives in a .card, where a class is enough. */
+  #updateBar.hidden { display: none; }
   @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>

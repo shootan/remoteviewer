@@ -245,6 +245,33 @@ const wchar_t* kPressableFn =
 /** The same predicate as a standalone script, for when it is asked on its own. */
 std::wstring pressable_script() { return std::wstring(kPressableFn) + L"()"; }
 
+/**
+ * Whether the offer is actually on the screen.
+ *
+ * Asked of the rendered result, not of the class list. `classList.contains('hidden')` was true
+ * for the entire life of the bug in 2026-09-11: the class was applied exactly as the script
+ * intended and `#updateBar { display: flex }` (an id, 0-1-0-0) beat `.hidden { display: none }`
+ * (a class, 0-0-1-0), so the bar was painted from the first frame. A test that reads the class
+ * is reading the intention; this reads the outcome.
+ */
+const wchar_t* kVisibleFn =
+    L"(function(){"
+    L"  var b=document.getElementById('updateBar');"
+    L"  if(!b) return 'no element';"
+    L"  var s=getComputedStyle(b);"
+    L"  if(s.display==='none') return 'hidden';"
+    L"  if(s.visibility!=='visible') return 'visibility:'+s.visibility;"
+    L"  if(parseFloat(s.opacity)<0.01) return 'transparent';"
+    L"  var r=b.getBoundingClientRect();"
+    L"  if(r.width<1||r.height<1) return 'zero size';"
+    L"  if(r.bottom<=0||r.top>=innerHeight) return 'off viewport';"
+    L"  var hit=document.elementFromPoint(r.left+r.width/2, r.top+r.height/2);"
+    L"  if(!hit||!(hit===b||b.contains(hit))) return 'covered';"
+    L"  return 'shown';"
+    L"})";
+
+std::wstring visible_script() { return std::wstring(kVisibleFn) + L"()"; }
+
 std::string sha256_hex_of_file(const std::wstring& path) {
   std::ifstream file(path, std::ios::binary);
   if (!file) return {};
@@ -482,8 +509,10 @@ int wmain() {
   }
 
   // ------------------------------------------------------------------ negative: nothing offered yet
-  ok(eval(L"document.getElementById('updateBar').classList.contains('hidden')") == "true",
-     "before any check, there is no offer on screen");
+  // Read from the rendering, not the class list -- that distinction is the whole point of this
+  // block now.
+  const std::string atStart = eval(visible_script());
+  ok(atStart == "\"hidden\"", "before any check, there is no offer on screen", atStart);
   gFromPage.clear();
   eval(L"document.getElementById('updateNow').click()");
   ok(!page_sent("update"),
@@ -502,8 +531,7 @@ int wmain() {
      "the version travels in a field of its own", available);
 
   gWebView->PostWebMessageAsString(widen(available).c_str());
-  ok(wait_for(L"document.getElementById('updateBar').classList.contains('hidden')", "false", 8000),
-     "the offer appears on the shipped page");
+  ok(wait_for(visible_script(), "\"shown\"", 8000), "the offer appears on the shipped page");
   ok(eval(L"document.getElementById('updateText').textContent").find("0.2.115") !=
          std::string::npos,
      "and it names the version");
@@ -553,6 +581,38 @@ int wmain() {
          controls.find("\\\"uncovered\\\":\\\"pressable\\\"") != std::string::npos,
      "and pressable again once each obstruction is removed", controls);
 
+  // ------------------------------------------------------------------ the CSS that shipped broken
+  //
+  // 0.2.116 put the bar on screen before sign-in and kept it there, because `.hidden` is a class
+  // and `#updateBar` is an id. Removing the `#updateBar.hidden` rule puts the page back in that
+  // state; the class still gets applied and the bar still shows. If this control ever reports
+  // "hidden", the fix has been lost and nothing else here would notice.
+  const std::string reverted = eval(
+      L"(function(){"
+      L"  var removed=0;"
+      L"  for (var i=0;i<document.styleSheets.length;i++){"
+      L"    var rules=document.styleSheets[i].cssRules;"
+      L"    for (var j=rules.length-1;j>=0;j--){"
+      L"      if (rules[j].selectorText==='#updateBar.hidden'){"
+      L"        document.styleSheets[i].deleteRule(j); removed++;"
+      L"      }"
+      L"    }"
+      L"  }"
+      L"  document.getElementById('updateBar').classList.add('hidden');"
+      L"  var b=document.getElementById('updateBar');"
+      L"  return removed + ':' + getComputedStyle(b).display;"
+      L"})()");
+  ok(reverted == "\"1:flex\"",
+     "negative control: without the id-scoped rule the bar shows despite the hidden class",
+     reverted);
+  // Put it back, so the rest of the run tests the page as it ships.
+  eval(L"document.styleSheets[0].insertRule('#updateBar.hidden{display:none}',"
+       L"document.styleSheets[0].cssRules.length)");
+  const std::string restored = eval(visible_script());
+  ok(restored == "\"hidden\"", "and the shipped rule hides it again", restored);
+  gWebView->PostWebMessageAsString(widen(available).c_str());
+  wait_for(visible_script(), "\"shown\"", 8000);
+
   // ------------------------------------------------------------------ the click that was missing
   gFromPage.clear();
   eval(L"document.getElementById('updateNow').click()");
@@ -578,22 +638,22 @@ int wmain() {
 
   // ------------------------------------------------------------------ 나중에 defers, nothing more
   eval(L"document.getElementById('updateLater').click()");
-  ok(eval(L"document.getElementById('updateBar').classList.contains('hidden')") == "true",
-     "나중에 takes the offer down");
+  const std::string afterLater = eval(visible_script());
+  ok(afterLater == "\"hidden\"", "나중에 takes the offer down", afterLater);
   ok(eval(L"document.getElementById('signInCard').classList.contains('hidden')") == "false",
      "and leaves signing in exactly where it was");
 
   // ------------------------------------------------------------------ withdrawn
   gWebView->PostWebMessageAsString(widen(available).c_str());
-  wait_for(L"document.getElementById('updateBar').classList.contains('hidden')", "false", 8000);
+  wait_for(visible_script(), "\"shown\"", 8000);
   gWebView->PostWebMessageAsString(widen(shell_update_cleared_json()).c_str());
-  ok(wait_for(L"document.getElementById('updateBar').classList.contains('hidden')", "true", 5000),
+  ok(wait_for(visible_script(), "\"hidden\"", 5000),
      "a check that finds nothing takes the offer back down");
 
   gWebView->PostWebMessageAsString(widen(available).c_str());
-  wait_for(L"document.getElementById('updateBar').classList.contains('hidden')", "false", 8000);
+  wait_for(visible_script(), "\"shown\"", 8000);
   gWebView->PostWebMessageAsString(L"{\"type\":\"signedOut\"}");
-  ok(wait_for(L"document.getElementById('updateBar').classList.contains('hidden')", "true", 5000),
+  ok(wait_for(visible_script(), "\"hidden\"", 5000),
      "signing out withdraws an offer found for that session");
 
   gFromPage.clear();

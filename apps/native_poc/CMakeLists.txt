@@ -315,6 +315,12 @@ add_executable(remote60_host_app WIN32
   host_app.rc
 )
 set_target_properties(remote60_host_app PROPERTIES OUTPUT_NAME "GNLinkHost")
+# The Korean the user reads comes from wide literals in host_app_main.cpp, and that file is UTF-8.
+# Without /utf-8 MSVC reads it in the system code page (949 here) and stores what it misread --
+# which is exactly what C4819 has been warning about on this target for a long time. The client
+# and a dozen test targets already carry this flag; the Host, the one with the message boxes the
+# user actually reads, did not.
+target_compile_options(remote60_host_app PRIVATE /utf-8)
 
 target_include_directories(remote60_host_app PRIVATE
   src
