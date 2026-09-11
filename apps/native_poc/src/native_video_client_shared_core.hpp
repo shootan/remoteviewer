@@ -501,7 +501,19 @@ struct WindowPanelSnapshot {
   uint32_t selectedWidth = 0;
   uint32_t selectedHeight = 0;
   bool selectionLocked = false;
+  /**
+   * The machine-readable token. Matched by prefix (`should_append_selected_title`) and written to
+   * the log, so its spelling is a contract -- do not translate it.
+   */
   std::string status = "waiting_control";
+  /**
+   * The same moment, said to the user.
+   *
+   * Kept apart because one field could not be both: `window_list_received count=3` was appearing
+   * on screen as the picker's subheading, which is a log line wearing a user's clothes. Empty
+   * means the drawing code falls back to whatever it showed before.
+   */
+  std::string displayStatus;
   uint32_t lastSelectSeq = 0;
   bool lastSelectOk = false;
   uint64_t lastSelectWindowId = 0;

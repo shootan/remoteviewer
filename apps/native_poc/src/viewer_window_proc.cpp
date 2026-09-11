@@ -644,7 +644,9 @@ bool create_window(ViewerState& ctx) {
   wc.lpszClassName = cls;
   if (!RegisterClassExW(&wc)) return false;
 
-  ctx.session.hwnd = CreateWindowExW(0, cls, L"remote60 native video client",
+  // The user sees this in the taskbar and in Alt-Tab. "remote60 native video client" is the
+  // name of a prototype; set_viewer_window_title() puts the target beside it once one is chosen.
+  ctx.session.hwnd = CreateWindowExW(0, cls, L"GNLink",
                           WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                           static_cast<int>(ctx.session.windowW), static_cast<int>(ctx.session.windowH),
                           nullptr, nullptr, inst, &ctx);  // lpParam: WndProc pins it at WM_NCCREATE

@@ -90,6 +90,7 @@ void draw_overlay(ViewerState& ctx, HDC hdc) {
   const std::vector<WindowTargetUiEntry>& windowItems = windowPanel.items;
   const uint64_t selectedId = windowPanel.selectedId;
   const std::string& panelStatus = windowPanel.status;
+  const std::string& panelDisplayStatus = windowPanel.displayStatus;
   const bool selectionLocked = windowPanel.selectionLocked;
 
   // Header: product title and status on the left, actions on the right.
@@ -99,7 +100,9 @@ void draw_overlay(ViewerState& ctx, HDC hdc) {
   {
     HGDIOBJ old = ctx.ui.titleFont ? SelectObject(hdc, ctx.ui.titleFont) : nullptr;
     RECT t = titleRect;
-    DrawTextW(hdc, L"Remote60", -1, &t, DT_LEFT | DT_SINGLELINE);
+    // The product name was already on the window title; what this screen needs to say is what
+    // it is for.
+    DrawTextW(hdc, L"공유 화면 선택", -1, &t, DT_LEFT | DT_SINGLELINE);
     if (old) SelectObject(hdc, old);
   }
   // Once a target is picked the picker locks: the buttons and cards read as disabled while the
@@ -111,20 +114,34 @@ void draw_overlay(ViewerState& ctx, HDC hdc) {
   RECT subRect = titleRect;
   subRect.top += dpi_scale(ctx, 28);
   SetTextColor(hdc, RGB(150, 158, 170));
-  std::string statusLine =
-      selectionLocked ? std::string("Target locked by host config") : panelStatus;
-  if (selectionPending) {
-    statusLine = awaitingAck ? std::string("Selecting target...")
-                             : std::string("Waiting for first frame...");
+  // panelDisplayStatus, not panelStatus: the latter is the token the code matches on
+  // (`window_list_received count=3`), and it used to be drawn here verbatim.
+  // The list line is written here rather than in the shared core: that file is compiled into two
+  // dozen targets without /utf-8, where a Korean literal does not survive the lexer.
+  std::string listedLine;
+  if (ctx.control.connected.load(std::memory_order_relaxed)) {
+    listedLine = windowItems.empty()
+                     ? std::string("공유할 수 있는 창이 없습니다. 전체 화면을 선택하세요.")
+                     : "공유할 수 있는 창 " + std::to_string(windowItems.size()) + "개";
   }
-  if (!ctx.control.connected.load(std::memory_order_relaxed)) statusLine = "Connecting to host...";
+  std::string statusLine = selectionLocked
+                               ? std::string("호스트 설정으로 대상이 고정돼 있습니다")
+                               : (panelDisplayStatus.empty() ? listedLine : panelDisplayStatus);
+  if (selectionPending) {
+    statusLine = awaitingAck ? std::string("선택하는 중…")
+                             : std::string("첫 화면을 기다리는 중…");
+  }
+  if (!ctx.control.connected.load(std::memory_order_relaxed)) {
+    statusLine = "호스트에 연결하는 중…";
+  }
   draw_text_utf8(ctx, hdc, statusLine, &subRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
   const bool actionsDisabled =
       !ctx.control.connected.load(std::memory_order_relaxed) || selectionLocked || selectionPending;
-  draw_panel_button(ctx, hdc, layout.refreshButtonRect, "Refresh", false,
+  draw_panel_button(ctx, hdc, layout.refreshButtonRect, "새로 고침", false,
                     !ctx.control.connected.load(std::memory_order_relaxed) || selectionPending);
-  draw_panel_button(ctx, hdc, layout.desktopButtonRect, "Desktop", selectedId == 0, actionsDisabled);
+  draw_panel_button(ctx, hdc, layout.desktopButtonRect, "전체 화면", selectedId == 0,
+                    actionsDisabled);
 
   // Card grid: desktop preview first, then one card per shareable window.
   const CardGridMetrics grid = compute_card_grid(ctx, layout.listRect);

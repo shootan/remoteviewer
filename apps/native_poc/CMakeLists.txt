@@ -193,6 +193,14 @@ add_executable(remote60_native_video_client_poc
   # The macro window is a page too, so the viewer needs the same shell the client uses.
   src/macro_shell_bridge.cpp
 )
+# Korean literals reach the user from this target: the macro window's messages, and the picker's
+# header and status lines. The flag used to sit inside the WebView2 conditional, which made the
+# encoding of user-visible text depend on whether an unrelated SDK was found -- the same shape as
+# the Host bug where /utf-8 was simply absent (history #523).
+if(MSVC)
+  target_compile_options(remote60_native_video_client_poc PRIVATE /utf-8)
+endif()
+
 set_target_properties(remote60_native_video_client_poc PROPERTIES OUTPUT_NAME "GNLinkViewer")
 
 target_include_directories(remote60_native_video_client_poc PRIVATE
@@ -207,10 +215,6 @@ if(GNLINK_HAVE_WEBVIEW2)
     "${GNLINK_WEBVIEW2_DIR}/include")
   target_link_libraries(remote60_native_video_client_poc PRIVATE
     "${GNLINK_WEBVIEW2_DIR}/x64/WebView2LoaderStatic.lib" ole32 shlwapi version)
-  if(MSVC)
-    # The macro window's messages are Korean in std::string, on their way to a UTF-8 page.
-    target_compile_options(remote60_native_video_client_poc PRIVATE /utf-8)
-  endif()
   add_custom_command(TARGET remote60_native_video_client_poc POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory
             "$<TARGET_FILE_DIR:remote60_native_video_client_poc>/ui"
@@ -1409,6 +1413,19 @@ if(GNLINK_HAVE_WEBVIEW2)
   # test's Korean arrives at the page as CP949 and the screenshot shows mojibake that the product
   # does not have.
   target_compile_options(remote60_client_update_ui_test PRIVATE /utf-8)
+
+  # Photographs the shipping page in each state. A tool, not a test: it asserts nothing, so the
+  # thing that produces the evidence is not also the thing that judges it.
+  add_executable(remote60_ui_preview
+    tools/ui_preview.cpp
+    src/client_shell_bridge.cpp
+  )
+  target_include_directories(remote60_ui_preview PRIVATE src "${GNLINK_WEBVIEW2_DIR}/include")
+  target_link_libraries(remote60_ui_preview PRIVATE
+    "${GNLINK_WEBVIEW2_DIR}/x64/WebView2LoaderStatic.lib"
+    user32 ole32 shlwapi shell32 version
+  )
+  target_compile_options(remote60_ui_preview PRIVATE /utf-8)
 endif()
 
 # Reads the TLS posture back off a live WinHTTP session, and dials a self-signed loopback fixture

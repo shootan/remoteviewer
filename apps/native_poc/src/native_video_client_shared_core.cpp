@@ -1283,6 +1283,11 @@ WindowListApplyResult WindowPanelStateModel::ApplyWindowList(const ControlWindow
   const int maxScroll = std::max<int>(0, static_cast<int>(state_.items.size()) - clampedVisibleCount);
   state_.scrollIndex = std::clamp(state_.scrollIndex, 0, maxScroll);
   state_.status = std::string("window_list_received count=") + std::to_string(count);
+  // The sentence is composed where it is drawn, not here. This file is compiled into two dozen
+  // targets and most of them do not pass /utf-8, so a Korean literal in it is read in code page
+  // 949 and the lexer loses the closing quote -- the same misreading that mangled the Host's
+  // message boxes, except here it will not even build. `displayStatus` stays empty and the
+  // picker builds the line from the item count.
 
   std::ostringstream oss;
   oss << "[native-video-client][control] window-list seq=" << msg.seq

@@ -89,6 +89,12 @@
   .dot.on { background: var(--online); box-shadow: 0 0 8px rgba(62, 207, 142, .55); }
   .host .name { font-size: 14px; font-weight: 500; }
   .host .state { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+  /* The card that is connecting says so on itself. The status line under the list was the only
+     place it appeared, so the card kept its green dot and "연결 가능" while the connection was
+     being made -- not missing information, wrong information. */
+  .host[data-connecting="1"] { border-color: var(--accent); opacity: 1; }
+  .host[data-connecting="1"] .state { color: var(--accent); }
+  .host[data-connecting="1"] .dot { background: var(--accent); box-shadow: none; }
   .empty { color: var(--muted); font-size: 12.5px; text-align: center; padding: 26px 0; }
 
   .row { display: flex; justify-content: space-between; margin-top: 4px; }
@@ -121,13 +127,17 @@
      another. */
   #updateBar {
     position: fixed; top: 0; left: 0; right: 0; z-index: 10;
-    display: flex; align-items: center; gap: 12px;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
     padding: 10px 16px;
     background: #14304f; border-bottom: 1px solid var(--accent);
   }
-  #updateBar .what { flex: 1; font-size: 13px; }
+  /* Wraps as a row of its own rather than squeezing. At 360px the one-line layout gave the text a
+     column six characters wide and broke "업데이트" across two lines inside its own button; the
+     buttons now drop below the sentence instead. */
+  #updateBar .what { flex: 1 1 190px; font-size: 13px; }
   #updateBar button {
     width: auto; margin: 0; padding: 7px 14px; font-size: 13px;
+    white-space: nowrap; flex: 0 0 auto;
   }
   #updateLater { background: transparent; border: 1px solid var(--line); color: var(--muted); }
   #updateLater:hover { background: var(--panel-hover); }
@@ -226,6 +236,12 @@
   let busy = false;
   function setBusy(on, text) {
     busy = on;
+    // Whatever ended the wait -- connected, failed, signed out -- the card stops claiming it.
+    // The mark disappearing is how "back to normal" is observed.
+    if (!on && connectingId) {
+      connectingId = '';
+      if (lastHosts.length) renderHosts(lastHosts);
+    }
     $('signIn').disabled = on;
     $('signIn').innerHTML = on ? '<span class="spinner"></span>' + (text || '연결 중') : '로그인';
     document.querySelectorAll('.host').forEach((b) => { b.disabled = on || b.dataset.online !== '1'; });
@@ -276,7 +292,12 @@
     message($('settingsMsg'), '저장했습니다.');
   };
 
+  // Remembered so the list can be redrawn when only the connecting target changes.
+  let lastHosts = [];
+  let connectingId = '';
+
   function renderHosts(hosts) {
+    lastHosts = hosts;
     const list = $('hostList');
     list.innerHTML = '';
     if (!hosts.length) {
@@ -285,19 +306,24 @@
     }
     for (const host of hosts) {
       const button = document.createElement('button');
+      const connecting = host.hostId === connectingId;
       button.className = 'host';
       button.dataset.online = host.online ? '1' : '0';
-      button.disabled = !host.online;
+      if (connecting) button.dataset.connecting = '1';
+      button.disabled = !host.online || busy;
+      const state = connecting ? '연결하는 중…' : (host.online ? '연결 가능' : '오프라인');
       button.innerHTML =
-        '<span class="dot' + (host.online ? ' on' : '') + '"></span>' +
-        '<span><span class="name"></span><div class="state">' +
-        (host.online ? '연결 가능' : '오프라인') + '</div></span>';
+        (connecting ? '<span class="spinner"></span>'
+                    : '<span class="dot' + (host.online ? ' on' : '') + '"></span>') +
+        '<span><span class="name"></span><div class="state">' + state + '</div></span>';
       // textContent, not innerHTML: the name came off another machine.
       button.querySelector('.name').textContent = host.hostName || host.hostId;
       button.onclick = () => {
         if (busy) return;
+        connectingId = host.hostId;
         setBusy(true);
         message($('hostsMsg'), (host.hostName || 'PC') + '에 연결하는 중');
+        renderHosts(lastHosts);
         send({ type: 'connect', hostId: host.hostId, hostName: host.hostName });
       };
       list.appendChild(button);
@@ -318,7 +344,17 @@
   // Cleared on sign-out, so an offer found for one account is never left standing for the next.
   let updateVersion = '';
 
-  const showUpdateBar = (on) => show($('updateBar'), on);
+  // The bar is position:fixed, so it sits over the page rather than in it. A fixed offset would
+  // be wrong at every width except the one it was measured at: at 360px the text wraps to four
+  // lines and covered the GNLink wordmark entirely. The page is pushed down by whatever the bar
+  // actually measures, after it has been laid out.
+  const showUpdateBar = (on) => {
+    const bar = $('updateBar');
+    show(bar, on);
+    requestAnimationFrame(() => {
+      document.body.style.paddingTop = on ? bar.offsetHeight + 'px' : '';
+    });
+  };
 
   $('updateNow').onclick = () => {
     if (!updateVersion) return;
@@ -395,6 +431,14 @@
       const failed = msg.state === 'error';
       if (failed || msg.state === 'idle') setBusy(false);
       message(target, msg.detail, failed);
+    }
+  });
+
+  // A window that is resized while the offer is up rewraps the bar; the offset has to follow.
+  window.addEventListener('resize', () => {
+    const bar = $('updateBar');
+    if (!bar.classList.contains('hidden')) {
+      document.body.style.paddingTop = bar.offsetHeight + 'px';
     }
   });
 
