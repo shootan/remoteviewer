@@ -10911,3 +10911,42 @@ manifest-backups/0.2.109-20260910T151705Z/   1703B  artifact=10  releaseId=r-0.2
 - ⚠️ **검증용은 이 총합 1803 을 재현하지 않았다**(의도적 — 총합을 근거로 쓰지 않기로 한 상태에서 긴 재빌드를 쓸 이유가 없다). 그쪽이 대조한 것은 **스위트별 사실**이다: `udp_control_e2e` 를 자기 Debug sweep 에서 **rc=0/18 PASS** 로 본 적이 있고 나중엔 rc=1 이었다는 것(= **같은 스위트가 시각에 따라 갈리는 것을 직접 관측**), `viewer_udp_recovery` rc=127 은 자기 트리의 빌드 시각이 섞인 탓이라는 것, 그리고 **`stop_process` 가 Release 에서 15 PASS 로 돈다는 것**(직접 빌드·실행).
 - ⚠️ **`update_stop_process_test` 가 Release 에 없던 것은 배선 결함이 아니었다.** `CMakeLists.txt` 에 `EXCLUDE_FROM_ALL` 은 **0개**이고, `:603` 선언은 `:740` 의 `update_effects_test` 와 같은 형태다 — 기본 빌드에 포함된다. **타깃 추가 뒤 재빌드를 하지 않은 트리였을 뿐이다.** 지적 자체는 유효했다(출하 config 에서 반례가 도는지 확인해야 했다).
 - **provenance 연결 확인**: `dist/GNLinkSetup-0.2.110.exe` 4,358,144B `3f0c3f5ca6b3fa42…` 가 **검증용이 공개 URL 에서 직접 받은 바이트와 일치**한다 — 로컬 산출물과 게시본이 이어진다.
+
+### 511) 2026-09-11 `0.2.111` — **버전 전용 인앱 시험 릴리스** (기능 변경 0)
+**부트스트랩이 끝났다.** 검증용 실측: 설치본 `C:\Program Files\GNLink\GNLinkUpdater.exe` = **538,624B `0ac7aea84d5268aa…`**(09-11 09:55) — **수정된 업데이터가 실제로 설치돼 있다.** 사용자가 0.2.110 을 손으로 깔았다.
+그런데 **설치 0.2.110 + 게시 0.2.110 은 `is_newer=false` 라 아무 일도 일어나지 않는다.** 인앱 경로를 실기로 태우려면 **더 높은 버전 하나**가 필요하다 — 그것이 이 릴리스의 전부다.
+
+**변경 범위**: `product_version.hpp` 의 **버전 상수 한 줄**(`0.2.110` → `0.2.111`). 기능 추가·리팩터·무관 fix **없음**. **Android `0.2.16` 무변경.** 기존 0.2.110 파일·서명 **보존**(새 버전 디렉터리).
+
+**산출물** (빌드 commit **`8e2ab0f`** 기준 — 아래 커밋)
+| 파일 | 크기 | sha256 |
+|---|---|---|
+| `GNLinkHost.exe` | 660,480 | `97bb02586b07de24…` |
+| `GNLinkStream.exe` | 1,000,448 | `a23a656cd2518799…` (110 과 동일) |
+| `GNLinkInputService.exe` | 226,304 | `1fd2aa569880cbe9…` (동일) |
+| `GNLinkCapture.exe` | 127,488 | `253734df347adb2b…` (동일) |
+| `GNLinkClient.exe` | 707,584 | `ab9202f6d89ec0c8…` |
+| `GNLinkViewer.exe` | 867,328 | `82b79c2046ed37f8…` (동일) |
+| `GNLinkSetup.exe` | 4,358,144 | `bde79817af80a280…` |
+| `GNLinkUpdater.exe` | 538,624 | `3022e9b0e9cdde85…` |
+| `ui\shell.html` | 12,648 | `15aa648adf28a6a2…` (동일) |
+| `ui\macro.html` | 10,996 | `f589f5df16d24fc8…` (동일) |
+- manifest **1,687B `1cf08822c0a84f8d…`**(artifact 10줄) · `windows.sig` 파일 `adfa79e62c0b2c4b…`
+- ⚠️ **버전 상수를 임베드하는 바이너리만 해시가 바뀌었다**(Host·Client·Updater·Setup). Stream·Capture·InputService·Viewer·html 2개는 **110 과 바이트 동일**하다 — 새 버전 디렉터리이므로 불변성 가드와 무관하다.
+
+**검사**
+- preflight **7번 게이트**: `payload set    the manifest names everything the update replaces` · `artifacts 10/10 match the manifest, byte for byte`
+- 제품 C++ `default_verifier()` — **게시 전 문서** Ok / 1바이트 변조 SignatureInvalid, **게시 후 서버에서 되받은 바이트**로 다시 Ok(`version=0.2.111 releaseId=r-0.2.111 artifacts=10`). 되받은 pair 는 서명본과 **바이트 동일**.
+- 설치기 임베드 대조 **9/9**(`verify_installer.ps1`, RCDATA 를 바이트로 해시). Setup 자신은 자기를 임베드할 수 없으므로 9개이고, manifest 의 10번째가 Setup 이다.
+  ⚠️ 처음엔 **2건 FAIL** 이었다 — `-PayloadDir` 을 설치 이름 레이아웃(`ui/`)으로 줬는데 설치기는 **평면**(`shell.html`)으로 임베드한다. **도구 인자를 잘못 준 것이지 결함이 아니다**(0.2.108 때와 같은 자리). 두 html 은 양쪽 경로에서 **바이트 동일**함을 따로 확인했다.
+- 버전 민감 스위트(Release): `updater_assembly` 49 · `update_release` 80 · `update_effects` 210 · `version_compare` 139 · `update_manifest` 85 · `update_stop_process` 15 — 전부 rc=0. **제품 로직 무변경이라 전체 스위트는 반복하지 않았다.**
+- **외부 공개 URL 10개 전부 200 + size·hash 일치.**
+- **재시작 0 · env 0 · 동시 배포 가드·동일버전 다른바이트 가드 준수.**
+
+**⭐ 백업이 이제 정상이다** — `manifest-backups/0.2.110/` = `7c030901…`(manifest) + `142e0a7e…`(sig), **artifact 10개**. #510 에서 *"맨 이름 백업은 전부 swap 을 끝낼 수 없다"* 고 적었는데, **이번 백업부터는 맨 이름도 유효한 롤백 지점**이다. 7번 게이트가 앞으로 그 형태를 막는다는 예상이 실제로 그렇게 됐다.
+현재 백업: `0.2.108`(9, 무효) · `0.2.109`(9, 무효) · `0.2.109-20260910T151705Z`(10) · **`0.2.110`(10, 유효)**.
+
+**미검증 — 이 릴리스의 목적 그 자체**
+**인앱 업데이트 완주는 아직 확인되지 않았다.** ⚠️ **화면 표시만으로 성공을 단정하지 않는다.** 판정은 사용자가 0.2.110 Host 에서 업데이트 확인을 직접 실행한 뒤 `updater.log` 의 **Req → Quiesce → Swap 10파일 → Register → RequiredHealth → Commit → Optional** 과 **설치된 version · `GNLinkUpdater.exe` 바이트**로 한다.
+그 외: 언인스톨 항목 실제 갱신 · 별건 0.0.4~0.0.7.
+**하지 않은 것**: 앱 임의 설치·종료 없음 · **업데이트 버튼 실행 없음** · `git push` 없음 · 광역 cleanup 없음 · NAS 다른 서비스 변경 없음 · APK 무변경 · 새 서명키 없음.
