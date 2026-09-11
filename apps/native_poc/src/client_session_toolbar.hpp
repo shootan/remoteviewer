@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <vector>
 
 #include <windows.h>
@@ -22,6 +23,17 @@ struct SessionToolbarCallbacks {
   std::function<void()> onTargets;  // back to the capture-target picker
   std::function<void()> onMacro;    // show/hide the macro window
   std::function<void(uint32_t monitorId)> onMonitor;
+  /**
+   * Where this window says what it did with a click.
+   *
+   * "대상 선택 does nothing" has several possible meanings and the toolbar can distinguish three
+   * of them on its own: the press was never recorded, the pointer left the button before release,
+   * or the callback was invoked and the rest of the chain is where it stopped. Without this they
+   * all look the same from outside -- two of the branches below `return 0` in silence.
+   *
+   * Optional. Diagnostics only; it must not decide anything.
+   */
+  std::function<void(const std::string& line)> onLog;
 };
 
 struct SessionToolbarMonitor {

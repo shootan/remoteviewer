@@ -135,13 +135,22 @@ toolbar WM_LBUTTONUP → onTargets(viewer_startup)
 ⚠️ **callback 이 있는 것을 확인하고도 handler 를 더 얹는 방식은 쓰지 않는다.** 아래 다섯을 **분리해
 격리 재현**한 뒤에 고친다:
 
-| # | 가설 | 분리 방법 |
-|---|---|---|
-| 1 | 클릭이 도착하지 않음 | `WM_LBUTTONUP` 수신 계수 |
-| 2 | visible 전환이 안 됨 | 전환 전후 플래그 관측 |
-| 3 | paint 가 안 옴 | `Invalidate` 후 `WM_PAINT` 도달 여부 |
-| 4 | input gate 가 먹음 | 입력 라우팅 상태 |
-| 5 | reveal 경합 | swapchain 해제와 표시의 순서 |
+| # | 가설 | 계측 | 나오는 로그 |
+|---|---|---|---|
+| 1a | **down 이 기록되지 않음** | `WM_LBUTTONDOWN` 의 hit id | `[toolbar] down id=N x=.. y=..` |
+| 1b | **누른 곳과 뗀 곳이 다름** | `WM_LBUTTONUP` 의 두 early return | `[toolbar] up ignored: no press recorded` / `... released over A but pressed B` |
+| 1c | **callback 이 비어 있음** | 호출 직전 유무 | `[toolbar] targets clicked, callback present\|MISSING` |
+| 2 | visible 전환이 안 됨 | `exchange` 로 전후를 한 번에 | `[picker] visible 0->1 activeGen=N` |
+| 3 | **paint 가 안 옴** | 표시 1회당 첫 그리기에서만 | `[picker] first paint after show, client=WxH` |
+| 4·5 | input gate / reveal 경합 | 2와 3 사이의 시간차 + `activeGen` | 위 두 줄의 시각 간격 |
+
+⚠️ **이 계측은 아무 결정도 바꾸지 않는다.** 1b 의 두 갈래는 **원래 있던 `return 0`** 이고, 조용했을
+뿐이다 — 정상 동작(버튼 밖에서 뗌)과 죽은 버튼이 밖에서 똑같이 보였다.
+
+**읽는 법**: `down` 은 있는데 `up ignored` 면 **1b**(제품 결함 아님, 안내 문제). `targets clicked` 까지
+가고 `[picker] visible` 이 없으면 **2**. `visible 0->1` 은 있는데 `first paint` 가 없으면 **3** —
+swapchain 이 위에 합성되므로 **그리기가 안 온 것과 영상이 멈춘 것이 화면에서 구분되지 않는다.** 둘 다
+있는데 화면이 그대로면 **4·5**.
 
 **기대 동작**: 클릭 → **같은 세션에서** picker 표시 → 새 선택/닫기 후 **영상·입력 정상 복귀**. 실패 시
 사유 안내. **새로 고침도 반응이 보여야 한다.**

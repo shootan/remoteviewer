@@ -13,6 +13,7 @@
 #include "viewer_state.hpp"
 #include "viewer_input_forward.hpp"
 #include "viewer_picker.hpp"
+#include "viewer_log.hpp"
 #include "viewer_window_proc.hpp"
 
 namespace remote60::native_poc::viewer {
@@ -193,6 +194,7 @@ int create_window_and_toolbar(ViewerContext& ctx) {
     // With the invisible legacy top-left buttons removed, this is the ONLY road back to target
     // selection during a session, so it must exist.
     // The callbacks outlive nothing: the toolbar is destroyed in WM_DESTROY, long before ctx.
+    toolbarCallbacks.onLog = [&ctx](const std::string& line) { log_client_line(ctx, line); };
     toolbarCallbacks.onTargets = [&ctx] {
       set_picker_visible_and_sync_stream(ctx, true);
       push_session_toolbar_state(ctx);

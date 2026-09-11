@@ -317,6 +317,11 @@ LRESULT CALLBACK toolbar_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN:
       g.pressed = hit_test(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
       if (g.pressed != kButtonNone) SetCapture(hwnd);
+      if (g.callbacks.onLog) {
+        g.callbacks.onLog("[toolbar] down id=" + std::to_string(g.pressed) + " x=" +
+                          std::to_string(GET_X_LPARAM(lp)) + " y=" +
+                          std::to_string(GET_Y_LPARAM(lp)));
+      }
       InvalidateRect(hwnd, nullptr, FALSE);
       return 0;
     case WM_LBUTTONUP: {
@@ -324,9 +329,25 @@ LRESULT CALLBACK toolbar_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       g.pressed = kButtonNone;
       if (GetCapture() == hwnd) ReleaseCapture();
       InvalidateRect(hwnd, nullptr, FALSE);
-      if (pressed == kButtonNone) return 0;
-      if (hit_test(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) != pressed) return 0;
+      if (pressed == kButtonNone) {
+        // No press was recorded. The button never saw the down, or something else consumed it.
+        if (g.callbacks.onLog) g.callbacks.onLog("[toolbar] up ignored: no press recorded");
+        return 0;
+      }
+      if (const int over = hit_test(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); over != pressed) {
+        // Released off the button. Correct behaviour, and indistinguishable from a dead button
+        // unless it is said out loud.
+        if (g.callbacks.onLog) {
+          g.callbacks.onLog("[toolbar] up ignored: released over " + std::to_string(over) +
+                            " but pressed " + std::to_string(pressed));
+        }
+        return 0;
+      }
       if (pressed == kButtonTargets) {
+        if (g.callbacks.onLog) {
+          g.callbacks.onLog(std::string("[toolbar] targets clicked, callback ") +
+                            (g.callbacks.onTargets ? "present" : "MISSING"));
+        }
         if (g.callbacks.onTargets) g.callbacks.onTargets();
       } else if (pressed == kButtonMacro) {
         if (g.callbacks.onMacro) g.callbacks.onMacro();

@@ -99,7 +99,13 @@ void push_session_toolbar_state(ViewerState& ctx) {
 // picker transitions: startup leaves the host's default-active stream alone, so headless
 // harness clients that never open the picker keep receiving video unchanged.
 void set_picker_visible_and_sync_stream(ViewerState& ctx, bool visible) {
-  ctx.picker.visible.store(visible, std::memory_order_relaxed);
+  const bool was = ctx.picker.visible.exchange(visible, std::memory_order_relaxed);
+  // The transition, and the generation that decides whether the stream is held off. Between them
+  // these separate "the flag never changed" from "it changed and nothing was drawn".
+  log_client_line(ctx, std::string("[picker] visible ") + (was ? "1" : "0") + "->" +
+                           (visible ? "1" : "0") + " activeGen=" +
+                           std::to_string(ctx.sel.activeStreamGeneration.load(
+                               std::memory_order_acquire)));
   if (visible) {
     // The picker is GDI, the video is a flip-model swapchain on the same HWND, and DWM composites
     // the swapchain ON TOP. Leaving it bound meant the picker was drawn underneath and the user

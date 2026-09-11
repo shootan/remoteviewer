@@ -1,5 +1,6 @@
 // See viewer_overlay_draw.hpp. Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0).
 
+#include "viewer_log.hpp"
 #include "viewer_overlay_draw.hpp"
 #include "viewer_picker.hpp"
 
@@ -78,6 +79,23 @@ void draw_target_card(ViewerState& ctx, HDC hdc, const RECT& card, const CardGri
 void draw_overlay(ViewerState& ctx, HDC hdc) {
   const ClientLayout layout = compute_client_layout(ctx, ctx.session.hwnd);
   const bool pickerVisible = ctx.picker.visible.load(std::memory_order_relaxed);
+
+  // Said once per showing, not once per paint. "The flag flipped" and "something was actually
+  // drawn" are different claims, and only the second one is what the user means by the picker
+  // appearing -- the swapchain composites on top, so a paint that never arrives looks exactly
+  // like a frozen video frame.
+  {
+    static thread_local uint64_t reportedShownAtUs = 0;
+    const uint64_t shownAt = ctx.picker.shownAtUs.load(std::memory_order_relaxed);
+    if (pickerVisible && shownAt != 0 && shownAt != reportedShownAtUs) {
+      reportedShownAtUs = shownAt;
+      log_client_line(ctx, "[picker] first paint after show, client=" +
+                               std::to_string(layout.clientRect.right - layout.clientRect.left) +
+                               "x" +
+                               std::to_string(layout.clientRect.bottom - layout.clientRect.top));
+    }
+  }
+
   if (!pickerVisible) {
     // Nothing to draw over the stream: the legacy Targets/Macro buttons were invisible ghost
     // hit-zones under the flip-model video (see compute_client_layout); the toolbar owns that UI.
