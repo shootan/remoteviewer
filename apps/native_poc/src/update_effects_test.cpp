@@ -1358,7 +1358,7 @@ int main(int argc, char** argv) {
     install::RegistrationOps recordingOps;
     recordingOps.runProcess = [](const std::wstring&, const std::wstring&) { return 0; };
     recordingOps.createShortcut = [](const std::wstring&, const std::wstring&,
-                                     const std::wstring&) { return true; };
+                                     const std::wstring&, std::string*) { return true; };
 
     const auto read_version = [&]() -> std::wstring {
       HKEY key = nullptr;

@@ -657,7 +657,7 @@ int main() {
     deps.requestStop = [](const ProcessTarget&) { return true; };
     deps.registrationOps.runProcess = [](const std::wstring&, const std::wstring&) { return 0; };
     deps.registrationOps.createShortcut = [](const std::wstring&, const std::wstring&,
-                                             const std::wstring&) { return true; };
+                                             const std::wstring&, std::string*) { return true; };
     deps.verifier = [](const std::string&, const std::vector<uint8_t>&) { return true; };
     // The handshake, modelled. `ackAnswers` false is the case the whole thing exists for: the
     // signal is delivered and nobody answers, because the waiting caller has already given up and

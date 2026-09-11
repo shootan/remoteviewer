@@ -331,6 +331,10 @@ class WindowsUpdateEffects : public UpdateEffects {
   // stopped being checked at all.
   std::vector<ProcessTarget> preparedTargets_;
   std::vector<uint32_t> ownedChildPids_;
+  // Windowless targets with nobody to ask: their parent is not among the targets, which means it
+  // has already exited. Waited for rather than asked, and told apart from the owned ones so the
+  // log says which situation it was.
+  std::vector<uint32_t> orphanPids_;
   bool swapped_ = false;
 };
 

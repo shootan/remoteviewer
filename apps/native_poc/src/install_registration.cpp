@@ -125,13 +125,17 @@ RegistrationResult register_install(const RegistrationTarget& target, const Regi
   // ---- shortcuts. Two, because this machine can play either part and the names have to say
   // which one is being opened.
   {
+    std::string why;
     if (!ops.createShortcut(target.installDir + L"\\" + target.hostExeName, target.productName,
-                            L"GNLink remote desktop host")) {
-      return fail(RegistrationStep::Shortcuts, "could not create the host shortcut");
+                            L"GNLink remote desktop host", &why)) {
+      return fail(RegistrationStep::Shortcuts,
+                  "could not create the host shortcut" + (why.empty() ? "" : ": " + why));
     }
+    why.clear();
     if (!ops.createShortcut(target.installDir + L"\\" + target.clientExeName,
-                            target.clientShortcutName, L"GNLink - connect to another PC")) {
-      return fail(RegistrationStep::Shortcuts, "could not create the client shortcut");
+                            target.clientShortcutName, L"GNLink - connect to another PC", &why)) {
+      return fail(RegistrationStep::Shortcuts,
+                  "could not create the client shortcut" + (why.empty() ? "" : ": " + why));
     }
     result.completed.push_back(RegistrationStep::Shortcuts);
   }

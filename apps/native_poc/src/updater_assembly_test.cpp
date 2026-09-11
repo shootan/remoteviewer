@@ -224,7 +224,7 @@ int main() {
     };
     deps.registrationOps.runProcess = [](const std::wstring&, const std::wstring&) { return 0; };
     deps.registrationOps.createShortcut = [](const std::wstring&, const std::wstring&,
-                                             const std::wstring&) { return true; };
+                                             const std::wstring&, std::string*) { return true; };
     deps.makeRelaunch = [rec](const RelaunchConfig& config,
                               const std::vector<ProcessTarget>& stopped) {
       // Records what the assembly asked for rather than starting anything. The expected version

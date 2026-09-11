@@ -424,6 +424,7 @@ bool WindowsUpdateEffects::PrepareForSwap() {
   // abandoned here -- before anything on disk is touched -- rather than escalated.
   preparedTargets_ = config_.enumerateTargets();
   ownedChildPids_.clear();
+  orphanPids_.clear();
 
   // Who can be asked, and who belongs to somebody who can.
   //
@@ -452,10 +453,49 @@ bool WindowsUpdateEffects::PrepareForSwap() {
     return nullptr;
   };
 
+  // An orphan is a narrower thing than "its parent is not in this list", and getting that wrong
+  // is how the first version of this broke every caller that describes its targets by hand: a
+  // ProcessTarget with parentPid == 0 means "not known", and treating an unknown as a dead parent
+  // routed processes into a wait that nothing had asked to stop.
+  //
+  // Unknown parentage is asked directly -- the conservative answer, and the one the field code
+  // took before any of this. A parent that is ALIVE but not one of our targets is not an orphan
+  // either: it has a supervisor, just not one we are stopping, so waiting for it would be waiting
+  // for nobody. Only a parent that has actually exited leaves a process with nobody to ask.
+  const auto parent_has_exited = [](uint32_t pid) {
+    if (pid == 0) return false;  // not known, which is not the same as gone
+    SetLastError(0);
+    HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, pid);
+    if (h) {
+      const bool signalled = WaitForSingleObject(h, 0) == WAIT_OBJECT_0;
+      CloseHandle(h);
+      return signalled;
+    }
+    // ERROR_INVALID_PARAMETER is a pid that is no longer a process. Anything else (access denied)
+    // means the question could not be asked, and an unanswered question is not a yes.
+    return GetLastError() == ERROR_INVALID_PARAMETER;
+  };
+
   for (const ProcessTarget& target : preparedTargets_) {
-    if (!target.hasWindow && owner_of(target) != nullptr) {
-      ownedChildPids_.push_back(target.pid);
-      continue;
+    if (!target.hasWindow) {
+      if (owner_of(target) != nullptr) {
+        ownedChildPids_.push_back(target.pid);
+        continue;
+      }
+      if (parent_has_exited(target.parentPid)) {
+        // An orphan: no window, and the process that started it has exited. This is what the
+        // field log recorded -- the host had already closed (the relaunch line proves it), leaving
+        // a console child behind, and with the parent gone the ownership check could not pass. It
+        // fell through to a direct request, which for a windowless process cannot succeed, and the
+        // attempt was abandoned.
+        //
+        // There is nobody to ask, and asking it is the thing that does not work. So it is waited
+        // for instead: a child whose supervisor has gone is usually already on its way out. If it
+        // is not gone by the deadline the update is abandoned anyway -- which is exactly what
+        // happens today, so this can only turn a certain failure into a possible success.
+        orphanPids_.push_back(target.pid);
+        continue;
+      }
     }
     if (!config_.requestStop(target)) {
       lastError_ = "could not ask pid " + std::to_string(target.pid) + " to stop";
@@ -511,9 +551,21 @@ bool WindowsUpdateEffects::Quiesce() {
       const bool owned =
           std::find(ownedChildPids_.begin(), ownedChildPids_.end(), target.pid) !=
           ownedChildPids_.end();
-      lastError_ = owned ? "pid " + std::to_string(target.pid) + " (started by pid " +
-                               std::to_string(target.parentPid) + ") outlived its parent"
-                         : "pid " + std::to_string(target.pid) + " did not exit";
+      const bool orphan =
+          std::find(orphanPids_.begin(), orphanPids_.end(), target.pid) != orphanPids_.end();
+      // Three different situations that used to share one sentence. Which one it was decides
+      // where to look: a supervisor that ignored the request, a child its supervisor left behind,
+      // or a windowless process nobody was left to ask.
+      if (owned) {
+        lastError_ = "pid " + std::to_string(target.pid) + " (started by pid " +
+                     std::to_string(target.parentPid) + ") outlived its parent";
+      } else if (orphan) {
+        lastError_ = "orphaned windowless pid " + std::to_string(target.pid) +
+                     " did not exit (its parent " + std::to_string(target.parentPid) +
+                     " was already gone, so there was nobody to ask)";
+      } else {
+        lastError_ = "pid " + std::to_string(target.pid) + " did not exit";
+      }
       return false;
     }
   }

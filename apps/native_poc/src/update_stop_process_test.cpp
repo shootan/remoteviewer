@@ -285,6 +285,120 @@ int main(int argc, char** argv) {
           std::to_string(fixture_children(parentPid).size()) + " left at the end of the wait");
   }
 
+  // ---------------------------------------------------------------- the orphan
+  //
+  // The field's FIRST attempt, which the supervisor routing did not cover. The host had already
+  // closed -- the log's "relaunch (required) GNLinkHost.exe: started" proves it -- leaving a
+  // console child behind. With the parent gone it is not among the targets, so ownership cannot be
+  // verified, and the child fell through to a direct request that cannot succeed for a process
+  // with no window. "could not ask pid 13528 to stop", every time.
+  {
+    ResetEvent(quitEvent);
+    PROCESS_INFORMATION po{};
+    std::vector<wchar_t> cmdO(cmd.begin(), cmd.end());
+    cmdO.push_back(L'\0');
+    if (CreateProcessW(nullptr, cmdO.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                       nullptr, &si, &po)) {
+      CloseHandle(po.hThread);
+      const uint32_t op = po.dwProcessId;
+      const bool upO = wait_until([op] { return fixture_children(op).size() == 2; }, 15000);
+
+      // Make the child an orphan: end the parent WITHOUT letting it tidy up, so the child is
+      // still running with a parent that no longer exists. TerminateProcess on a process this test
+      // started is the only way to produce that shape; nothing in the product does this.
+      TerminateProcess(po.hProcess, 0);
+      WaitForSingleObject(po.hProcess, 10000);
+      CloseHandle(po.hProcess);
+
+      const bool orphaned = wait_until([op] {
+        const std::vector<ProcessTarget> t = fixture_children(op);
+        return t.size() == 1 && !t[0].hasWindow;
+      }, 15000);
+      const std::vector<ProcessTarget> left = fixture_children(op);
+      check("a windowless child outlives its parent", upO && orphaned && left.size() == 1,
+            std::to_string(left.size()) + " left");
+
+      if (left.size() == 1) {
+        check("...and asking it directly still cannot work", !request_process_stop(left[0]));
+
+        wchar_t temp[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, temp);
+        const std::wstring inst = std::wstring(temp) + L"gnlink-orphan-install";
+        const std::wstring stg = std::wstring(temp) + L"gnlink-orphan-staging";
+        CreateDirectoryW(inst.c_str(), nullptr);
+        CreateDirectoryW(stg.c_str(), nullptr);
+        UpdateEffectsConfig c = config_for(inst, stg, op);
+        c.quiesceTimeoutMs = 10000;
+        WindowsUpdateEffects e(c);
+        // Prepare must no longer refuse: there is nobody to ask, so it waits instead.
+        const bool prepared = e.PrepareForSwap();
+        check("PrepareForSwap does not refuse an orphan it cannot ask", prepared, e.last_error());
+        // Release it, as its own supervisor would have.
+        SetEvent(quitEvent);
+        const bool quiesced = prepared && e.Quiesce();
+        check("...and Quiesce waits for it to go", quiesced, e.last_error());
+        RemoveDirectoryW(stg.c_str());
+        RemoveDirectoryW(inst.c_str());
+      }
+      SetEvent(quitEvent);
+      wait_until([op] { return fixture_children(op).empty(); }, 10000);
+    }
+  }
+
+  // ---------------------------------------------------------------- the orphan that will not go
+  //
+  // The other branch, and the one that decides whether waiting is a fix or only a better message.
+  // An orphan that is on its way out gets picked up by the wait above. An orphan that simply keeps
+  // running cannot be helped by waiting: the deadline expires and the update is abandoned, exactly
+  // as it is today. What must be different is the REASON -- "nobody was left to ask" is a different
+  // problem from "it refused", and they used to print the same sentence.
+  {
+    ResetEvent(quitEvent);
+    PROCESS_INFORMATION pk{};
+    std::vector<wchar_t> cmdK(cmd.begin(), cmd.end());
+    cmdK.push_back(L'\0');
+    if (CreateProcessW(nullptr, cmdK.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                       nullptr, &si, &pk)) {
+      CloseHandle(pk.hThread);
+      const uint32_t kp = pk.dwProcessId;
+      wait_until([kp] { return fixture_children(kp).size() == 2; }, 15000);
+      TerminateProcess(pk.hProcess, 0);
+      WaitForSingleObject(pk.hProcess, 10000);
+      CloseHandle(pk.hProcess);
+      const bool orphaned = wait_until([kp] {
+        const std::vector<ProcessTarget> t = fixture_children(kp);
+        return t.size() == 1 && !t[0].hasWindow;
+      }, 15000);
+      check("an orphan that keeps running is still there", orphaned,
+            std::to_string(fixture_children(kp).size()) + " left");
+
+      wchar_t temp[MAX_PATH]{};
+      GetTempPathW(MAX_PATH, temp);
+      const std::wstring inst = std::wstring(temp) + L"gnlink-orphan2-install";
+      const std::wstring stg = std::wstring(temp) + L"gnlink-orphan2-staging";
+      CreateDirectoryW(inst.c_str(), nullptr);
+      CreateDirectoryW(stg.c_str(), nullptr);
+      UpdateEffectsConfig c = config_for(inst, stg, kp);
+      c.quiesceTimeoutMs = 2000;  // short: the point is what the expiry says
+      WindowsUpdateEffects e(c);
+      const bool prepared = e.PrepareForSwap();
+      check("...PrepareForSwap still does not refuse it", prepared, e.last_error());
+      const bool quiesced = prepared && e.Quiesce();
+      check("...but Quiesce gives up when it never leaves", !quiesced, e.last_error());
+      check("...and the reason says nobody was left to ask",
+            e.last_error().find("orphaned windowless") != std::string::npos &&
+                e.last_error().find("nobody to ask") != std::string::npos,
+            e.last_error());
+      check("...and it is NOT reported as a refusal to be asked",
+            e.last_error().find("could not ask") == std::string::npos, e.last_error());
+      RemoveDirectoryW(stg.c_str());
+      RemoveDirectoryW(inst.c_str());
+
+      SetEvent(quitEvent);
+      wait_until([kp] { return fixture_children(kp).empty(); }, 10000);
+    }
+  }
+
   // ---------------------------------------------------------------- gone vs cannot look
   //
   // These were the same answer. "Could not open the process" was reported as "asked successfully",

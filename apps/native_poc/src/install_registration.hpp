@@ -77,8 +77,17 @@ struct RegistrationTarget {
 struct RegistrationOps {
   /** Returns the process exit code, or a negative value when it could not be started. */
   std::function<int(const std::wstring& exePath, const std::wstring& arguments)> runProcess;
-  /** target, link name, description. */
-  std::function<bool(const std::wstring&, const std::wstring&, const std::wstring&)> createShortcut;
+  /**
+   * target, link name, description, and where the failure was when it fails.
+   *
+   * `detail` may be null. It exists because the only thing the caller could previously report was
+   * "could not create the host shortcut" -- true, and indistinguishable from every other reason a
+   * shell link does not get written. The one that actually happened in the field was COM not being
+   * initialised, and that is an HRESULT nobody could see.
+   */
+  std::function<bool(const std::wstring&, const std::wstring&, const std::wstring&,
+                     std::string* detail)>
+      createShortcut;
 };
 
 struct RegistrationResult {

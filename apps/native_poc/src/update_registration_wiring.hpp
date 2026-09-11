@@ -48,7 +48,13 @@ struct RegistrationEffects {
 RegistrationEffects make_registration_effects(install::RegistrationTarget target,
                                               install::RegistrationOps ops);
 
-/** The operations a real installation needs: a process runner and a Start menu shortcut writer. */
-install::RegistrationOps production_registration_ops();
+/**
+ * The operations a real installation needs: a process runner and a Start menu shortcut writer.
+ *
+ * `shortcutFolder` empty means the machine's Start menu, which is what production passes. A test
+ * passes a directory of its own so that it can drive these exact functions -- real COM, real
+ * IPersistFile::Save -- without writing into every user's Start menu.
+ */
+install::RegistrationOps production_registration_ops(const std::wstring& shortcutFolder = {});
 
 }  // namespace remote60::native_poc::update

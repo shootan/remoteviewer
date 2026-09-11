@@ -81,8 +81,12 @@ struct Recorder {
           }
           return processResult;
         },
-        [this](const std::wstring& target, const std::wstring& link, const std::wstring&) {
+        [this](const std::wstring& target, const std::wstring& link, const std::wstring&,
+               std::string* detail) {
           shortcuts.push_back(link + L" -> " + target);
+          // A stub that fails still has to say something, or the caller's detail-plumbing is
+          // never exercised by anything.
+          if (!shortcutResult && detail) *detail = "stub refused";
           return shortcutResult;
         },
     };

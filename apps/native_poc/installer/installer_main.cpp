@@ -390,7 +390,9 @@ int do_install() {
     return run_and_wait(exe, args);
   };
   ops.createShortcut = [](const std::wstring& target, const std::wstring& linkName,
-                          const std::wstring& description) {
+                          const std::wstring& description, std::string*) {
+    // The installer initialises COM in its own main, which is why this path never needed the
+    // apartment scope the updater's copy does.
     return create_start_menu_shortcut(target, linkName.c_str(), description.c_str(), nullptr);
   };
 

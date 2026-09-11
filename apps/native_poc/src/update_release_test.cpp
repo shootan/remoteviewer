@@ -351,7 +351,7 @@ int wmain() {
   };
   install::RegistrationOps recordingOps;
   recordingOps.runProcess = [](const std::wstring&, const std::wstring&) { return 0; };
-  recordingOps.createShortcut = [](const std::wstring&, const std::wstring&, const std::wstring&) {
+  recordingOps.createShortcut = [](const std::wstring&, const std::wstring&, const std::wstring&, std::string*) {
     return true;
   };
   const auto read_display_version = [&]() -> std::wstring {

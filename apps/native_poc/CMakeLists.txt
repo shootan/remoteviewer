@@ -600,6 +600,21 @@ endif()
 # Links update_process_targets.cpp on purpose -- every other suite deliberately does not, and the
 # result was that request_process_stop() had one caller in the product and none in any test. The
 # branch that failed in the field had never been executed.
+# The registration path's COM dependency, with the real shell APIs. The updater had no apartment
+# at all, so CLSID_ShellLink was refused and every update rolled back after a successful swap --
+# reported only as "registration failed". Links go to a directory beside the test binary, never the
+# machine's Start menu.
+add_executable(remote60_update_registration_com_test
+  src/update_registration_wiring.cpp
+  src/install_registration.cpp
+  src/update_registration_com_test.cpp
+)
+target_include_directories(remote60_update_registration_com_test PRIVATE src)
+target_link_libraries(remote60_update_registration_com_test PRIVATE ole32 shell32 advapi32 uuid)
+if(MSVC)
+  target_compile_options(remote60_update_registration_com_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_update_stop_process_test
   src/update_effects.cpp
   src/update_process_targets.cpp
