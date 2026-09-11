@@ -22,6 +22,8 @@ After each meaningful task is completed, do all of the following in order:
    - what was validated
 
 ## Scope Control
+- **의미 있는 기능·릴리스·조사 단위로 기록하고 커밋한다.** 문서 문구 정정 같은 사소한 변경까지
+  history·계획·커밋 3종을 매번 강제하지 않는다.
 - Do not include unrelated files in commits.
 - Do not revert user changes unless explicitly requested.
 - If no file change is required, state why and skip commit.
@@ -44,11 +46,14 @@ After each meaningful task is completed, do all of the following in order:
 
 사용자 지시: *"gnlink 권한으로 안 되는 것만 NAS Claude 한테. 배포 자동화 스크립트 만들어놓으면 문제없잖아. 이제부터 버전 올라가서 빌드되면 자동배포하는 것까지가 완료고 실기 테스트 대기 상태."*
 
-- **완료 흐름** — 이 순서를 다 지난 것만 "완료" 다:
+- **두 개의 완료를 이름으로 구분한다.** 아래 순서를 다 지나면 **배포가 완료**된 것이고,
+  **task 완료는 사용자 행동 검증까지**다. 이 둘을 같은 단어로 부르면 0.2.115 처럼 8단계를 전부
+  통과하고도 **누를 버튼이 없는 릴리스**가 "완료" 로 나간다.
+- **배포 완료 흐름** — 이 순서를 다 지난 것이 **배포 완료(마일스톤)** 다:
   1. 버전 확정/인상 → 2. 빌드 → 3. 관련 검증과 **검증용 Claude 의 명시적 OK**(대상 commit·파일 해시 고정)
   → 4. 릴리스 서명 → 5. **`gnlink` 계정으로 자동 배포**(`automation/gnlink_deploy.sh`)
   → 6. **외부 검증**(HTTPS 도달·manifest 서명·버전·아티팩트 hash·필요 API 계약) → 7. Codex 최종 근거 확인
-  → 8. **"배포 완료 · 실기 테스트 대기"**.
+  → 8. **"배포 완료(마일스톤) · 실기 테스트 대기"**.
 - ⚠️ **빌드 성공·파일 생성·서버 복사만으로 완료 처리하지 않는다.** 6단계까지 근거가 있어야 완료다.
 - ⚠️ **사용자 행동이 되지 않으면 배포해도 완료가 아니다.** 요청된 행동(실행·로그인·선택·클릭·성공/실패)이
   실제로 되는지가 완료 조건이고, 소스 grep·handler 존재·문구 표시·테스트 총합은 그 증거가 아니다.
