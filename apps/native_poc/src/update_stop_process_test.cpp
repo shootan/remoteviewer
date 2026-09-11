@@ -26,6 +26,8 @@
 #include <chrono>
 #include <cstdio>
 #include <functional>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -466,6 +468,40 @@ int main(int argc, char** argv) {
     RemoveDirectoryW(staging.c_str());
     RemoveDirectoryW(install.c_str());
   }
+
+  // ---------------------------------------------------------------- the host's own exit contract
+  //
+  // ⚠ STATIC WIRING CHECK, not a behavioural one. It reads the source and confirms the handoff
+  // exit path stops the child and writes down whether it went. It does NOT prove the Host does
+  // that when it really stands down -- only running the real Host can show that, and that belongs
+  // to the field re-test. Labelled so nobody reads it as more than it is.
+  //
+  // Worth having anyway: the defect was that the exit path stopped nothing verifiably and said
+  // nothing, so a child that outlived its parent left no trace until the NEXT host failed to bind.
+#ifdef REMOTE60_HOST_APP_SRC
+  {
+    std::ifstream in(REMOTE60_HOST_APP_SRC, std::ios::binary);
+    std::ostringstream os;
+    os << in.rdbuf();
+    const std::string src = os.str();
+    const size_t exitNow = src.find("The updater holds the lock and has a verified download");
+    const size_t stopCall = exitNow == std::string::npos
+                                ? std::string::npos
+                                : src.find("g.streaming.Stop(&detail)", exitNow);
+    const size_t destroy = exitNow == std::string::npos
+                               ? std::string::npos
+                               : src.find("DestroyWindow(window)", exitNow);
+    check("(static) the handoff exit stops the child", stopCall != std::string::npos);
+    check("(static) ...before destroying the window",
+          stopCall != std::string::npos && destroy != std::string::npos && stopCall < destroy);
+    check("(static) ...and records whether it went",
+          src.find("update: standing down -- ") != std::string::npos);
+    check("(static) ...and warns when a child outlived it",
+          src.find("a streaming child outlived this process") != std::string::npos);
+  }
+#else
+  check("(static) the host exit contract is checked", false, "REMOTE60_HOST_APP_SRC not defined");
+#endif
 
   // ---------------------------------------------------------------- cleanup
   SetEvent(quitEvent);

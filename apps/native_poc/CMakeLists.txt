@@ -628,6 +628,9 @@ add_executable(remote60_update_stop_process_test
   src/update_stop_process_test.cpp
 )
 target_include_directories(remote60_update_stop_process_test PRIVATE src)
+target_compile_definitions(remote60_update_stop_process_test PRIVATE
+  "REMOTE60_HOST_APP_SRC=\"${CMAKE_CURRENT_SOURCE_DIR}/src/host_app_main.cpp\""
+)
 target_link_libraries(remote60_update_stop_process_test PRIVATE bcrypt winhttp user32 advapi32)
 if(MSVC)
   target_compile_options(remote60_update_stop_process_test PRIVATE /utf-8)
