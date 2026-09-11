@@ -116,10 +116,33 @@
     border-top-color: #fff; border-radius: 50%; display: inline-block;
     animation: spin .7s linear infinite; vertical-align: -3px; margin-right: 7px;
   }
+  /* Fixed to the top rather than placed in a card: the offer belongs to the program, not to the
+     screen that happens to be showing, and it has to survive sign-in replacing one card with
+     another. */
+  #updateBar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 16px;
+    background: #14304f; border-bottom: 1px solid var(--accent);
+  }
+  #updateBar .what { flex: 1; font-size: 13px; }
+  #updateBar button {
+    width: auto; margin: 0; padding: 7px 14px; font-size: 13px;
+  }
+  #updateLater { background: transparent; border: 1px solid var(--line); color: var(--muted); }
+  #updateLater:hover { background: var(--panel-hover); }
   @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
+
+<!-- Hidden until a check finds something. The version is filled in from the message's field, not
+     read out of the sentence beside it. -->
+<div id="updateBar" class="hidden">
+  <div class="what" id="updateText"></div>
+  <button id="updateNow">업데이트</button>
+  <button id="updateLater">나중에</button>
+</div>
 
 <div class="card" id="signInCard">
   <div class="brand">GN<span>Link</span></div>
@@ -285,6 +308,22 @@
     return data && typeof data === 'object' ? data : null;
   }
 
+  // Cleared on sign-out, so an offer found for one account is never left standing for the next.
+  let updateVersion = '';
+
+  const showUpdateBar = (on) => show($('updateBar'), on);
+
+  $('updateNow').onclick = () => {
+    if (!updateVersion) return;
+    // Disabled here as well as by the native side. This stops the ordinary double click; the
+    // native flag stops the two messages that were already in flight when it happened.
+    $('updateNow').disabled = true;
+    send({ type: 'update' });
+  };
+  // A deferral and nothing else: it takes the bar down for this run and does not touch signing
+  // in, the host list, or whether the next check offers it again.
+  $('updateLater').onclick = () => showUpdateBar(false);
+
   window.chrome.webview.addEventListener('message', (event) => {
     const msg = readMessage(event.data);
     if (!msg) return;
@@ -311,10 +350,33 @@
     }
     if (msg.type === 'signedOut') {
       setBusy(false);
+      updateVersion = '';
+      showUpdateBar(false);
       show($('hostsCard'), false);
       show($('signInCard'), true);
       $('password').value = '';
       message($('signInMsg'), '');
+      return;
+    }
+    if (msg.type === 'updateAvailable') {
+      updateVersion = msg.version || '';
+      $('updateText').textContent = msg.text || ('새 버전 ' + updateVersion + ' 이 있습니다.');
+      $('updateNow').disabled = false;
+      showUpdateBar(true);
+      return;
+    }
+    if (msg.type === 'updateCleared') {
+      updateVersion = '';
+      $('updateNow').disabled = false;
+      showUpdateBar(false);
+      return;
+    }
+    if (msg.type === 'updateBusy') {
+      // Re-enabled when the attempt ends, whichever way it ended. A button that stays dead after
+      // a failure leaves the user with a notice and no way to act on it -- which is the state
+      // this whole change exists to remove.
+      $('updateNow').disabled = !!msg.busy;
+      $('updateNow').textContent = msg.busy ? '준비 중…' : '업데이트';
       return;
     }
     if (msg.type === 'status') {

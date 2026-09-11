@@ -73,6 +73,20 @@ std::string shell_status_json(const std::string& state, const std::string& detai
   return oss.str();
 }
 
+std::string shell_update_available_json(const std::string& version, const std::string& text) {
+  std::ostringstream oss;
+  oss << "{\"type\":\"updateAvailable\",\"version\":\"" << escape(version) << "\",\"text\":\""
+      << escape(text) << "\"}";
+  return oss.str();
+}
+
+std::string shell_update_cleared_json() { return "{\"type\":\"updateCleared\"}"; }
+
+std::string shell_update_busy_json(bool busy) {
+  return busy ? "{\"type\":\"updateBusy\",\"busy\":true}"
+              : "{\"type\":\"updateBusy\",\"busy\":false}";
+}
+
 ShellUpdateNotice shell_update_notice(const std::string& outcome,
                                       const std::string& availableVersion,
                                       const std::string& detail) {

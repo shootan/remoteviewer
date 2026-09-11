@@ -361,6 +361,14 @@ std::string gPendingUpdateNotice;
 bool gPageReady = false;
 /** The version the last check found, empty when there is nothing to install. */
 std::string gAvailableVersion;
+/**
+ * Set from the moment an install is asked for until it has been started or has failed.
+ *
+ * The page disables its button while this is true, but the page is not where this can be
+ * enforced: a second message can already be in flight when the first one is being handled. The
+ * decision lives on this side, where there is one of it.
+ */
+bool gUpdateStarting = false;
 
 void deliver_update_notice(const std::string& json) {
   {
@@ -733,7 +741,10 @@ void start_update_check() {
           std::lock_guard<std::mutex> lock(gUpdateNoticeMu);
           gAvailableVersion = result.availableVersion;
         }
-        deliver_update_notice(shell_status_json("idle", notice.text));
+        // A message with the version in a field of its own. The status line still carries the
+        // sentence; what the page needs in order to put up a button is the version, and reading
+        // it back out of Korean prose would break the first time the wording changed.
+        deliver_update_notice(shell_update_available_json(result.availableVersion, notice.text));
       });
 }
 
@@ -1039,14 +1050,31 @@ void handle_page_message(const std::string& json) {
     {
       std::lock_guard<std::mutex> lock(gUpdateNoticeMu);
       version = gAvailableVersion;
+      // Two clicks arriving together must not become two updaters, each asking for consent and
+      // each replacing the same files. The page disables its button, but a message can already
+      // be in flight when it does; this is the check that actually decides.
+      if (gUpdateStarting) {
+        log_line("update: already starting; the second request was ignored");
+        return;
+      }
+      if (!version.empty()) gUpdateStarting = true;
     }
     // Only when a check actually found something. A page that asked otherwise would be asking to
     // elevate for no reason, and one consent prompt with nothing behind it is worse than none.
     if (version.empty()) {
       post_status("idle", "설치할 새 버전이 없습니다.");
+      post_to_page(shell_update_cleared_json());
       return;
     }
+    post_to_page(shell_update_busy_json(true));
     start_client_update(version);
+    // start_client_update reports its own outcome. Whatever it was, the request is over: leaving
+    // the flag set would mean a failed attempt could never be retried.
+    {
+      std::lock_guard<std::mutex> lock(gUpdateNoticeMu);
+      gUpdateStarting = false;
+    }
+    post_to_page(shell_update_busy_json(false));
     return;
   }
   if (type == "settings") {
@@ -1088,6 +1116,14 @@ void handle_page_message(const std::string& json) {
       ++gOwnerEpoch;
     }
     remote60::native_poc::log_upload_clear_credentials("logged out");
+    {
+      // The answer described the session that asked for it. Leaving the button up would offer
+      // the next person to sign in an install that was found for somebody else.
+      std::lock_guard<std::mutex> lock(gUpdateNoticeMu);
+      gAvailableVersion.clear();
+      gPendingUpdateNotice.clear();
+    }
+    post_to_page(shell_update_cleared_json());
     post_to_page("{\"type\":\"signedOut\"}");
     return;
   }

@@ -1381,6 +1381,24 @@ if(GNLINK_HAVE_WEBVIEW2)
     user32 ole32 shell32 version
   )
   set_target_properties(remote60_webview2_spike PROPERTIES OUTPUT_NAME "WebView2Spike")
+
+  # Renders the page that ships and presses the button on it. Guarded by the same SDK check as
+  # the client itself: without WebView2 there is no page to render, and a source-reading
+  # substitute is exactly what missed the button being absent in the first place.
+  add_executable(remote60_client_update_ui_test
+    src/client_update_ui_test.cpp
+    src/client_shell_bridge.cpp
+  )
+  target_include_directories(remote60_client_update_ui_test
+    PRIVATE src "${GNLINK_WEBVIEW2_DIR}/include")
+  target_link_libraries(remote60_client_update_ui_test PRIVATE
+    "${GNLINK_WEBVIEW2_DIR}/x64/WebView2LoaderStatic.lib"
+    user32 ole32 shlwapi shell32 version
+  )
+  # The client is built with /utf-8 and this renders the client's own strings; without it the
+  # test's Korean arrives at the page as CP949 and the screenshot shows mojibake that the product
+  # does not have.
+  target_compile_options(remote60_client_update_ui_test PRIVATE /utf-8)
 endif()
 
 # Reads the TLS posture back off a live WinHTTP session, and dials a self-signed loopback fixture

@@ -95,4 +95,33 @@ ShellUpdateNotice shell_update_notice(const std::string& outcome,
                                       const std::string& availableVersion,
                                       const std::string& detail);
 
+/**
+ * Tells the page there is a version to install, and which one.
+ *
+ * Separate from the status line on purpose. The status line is prose, and a page that had to read
+ * "새 버전 0.2.115 이 있습니다." to learn the version would be parsing a sentence written for a
+ * human -- which changes whenever the wording does. The version travels as a field.
+ *
+ * This message is what puts a button on the screen. Before it existed the client could say a new
+ * version was available and offer no way to install it: the native side already handled a
+ * {"type":"update"} message, but nothing in the page ever sent one.
+ */
+std::string shell_update_available_json(const std::string& version, const std::string& text);
+
+/**
+ * Takes the offer back down.
+ *
+ * Sent when signing out, because the answer described the session that asked, and when a check
+ * finds nothing to install. Not sent on a failed check -- see ShellUpdateNotice::show.
+ */
+std::string shell_update_cleared_json();
+
+/**
+ * Whether the page's install button should be usable.
+ *
+ * False while an update is being started, so a second click cannot launch a second updater; true
+ * again if starting failed, because a failure the user can do nothing about is a dead end.
+ */
+std::string shell_update_busy_json(bool busy);
+
 }  // namespace remote60::native_poc
