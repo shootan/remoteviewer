@@ -13,23 +13,41 @@
 // the click is a DOM click on the rendered element, and the assertion is that a message comes
 // back out. A screenshot is written next to the results so a person can see what the user sees.
 //
-// What this does NOT prove, and is not claimed anywhere: that a live check against the real
-// server produces this message. That needs an account and a network, and it is a separate step.
-// This proves the half that was missing -- that when the message arrives, there is a button, and
-// pressing it sends what the native side is waiting for.
+// Evidence is graded here, and the grades are not interchangeable:
+//
+//   (1) the page posts a WebMessage           <- what this test observes
+//   (2) the native side receives it and acts  <- NOT observed here
+//   (3) a real updater starts                 <- NOT observed here
+//
+// (1) is never quoted as evidence of (2) or (3). Nor does any of this show that a live check
+// against the real server produces the message in the first place: that needs an account and a
+// network and is a separate step. What is shown is that the HTML which will be published can put
+// a pressable button on screen and emit the message the native side has always been waiting for.
+//
+// "Pressable" is meant literally. `disabled === false` was the first version of that check and it
+// is not enough: a button can be enabled and off-screen, transparent, or underneath something
+// else. The three negative controls below cover exactly those, and if they ever stop failing the
+// check has become decoration.
 
 #include <windows.h>
 #include <shlwapi.h>
 #include <wrl.h>
 
 #include <atomic>
+#include <memory>
 #include <cstdio>
+#include <bcrypt.h>
+
+#include <fstream>
 #include <functional>
+#include <iterator>
 #include <string>
 #include <vector>
 
 #include "WebView2.h"
 #include "client_shell_bridge.hpp"
+#include "update_manifest.hpp"
+#include "update_signature.hpp"
 
 using Microsoft::WRL::Callback;
 using Microsoft::WRL::ComPtr;
@@ -105,6 +123,42 @@ std::wstring production_page_path() {
   return {};
 }
 
+/**
+ * The newest signed release staged in this working copy.
+ *
+ * Deliberately not a fixed version: the pin has to follow the release being prepared, and a
+ * version typed in here would rot into pinning against something that shipped months ago.
+ */
+std::wstring release_manifest_path() {
+  const wchar_t* roots[] = {
+      L"\\..\\..\\..\\..\\.claude\\rel",
+      L"\\..\\..\\..\\.claude\\rel",
+  };
+  std::wstring best;
+  for (const wchar_t* suffix : roots) {
+    wchar_t root[MAX_PATH]{};
+    if (!PathCanonicalizeW(root, (executable_dir() + suffix).c_str())) continue;
+    WIN32_FIND_DATAW found{};
+    const HANDLE search = FindFirstFileW((std::wstring(root) + L"\\*").c_str(), &found);
+    if (search == INVALID_HANDLE_VALUE) continue;
+    do {
+      if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+      const std::wstring candidate =
+          std::wstring(root) + L"\\" + found.cFileName + L"\\windows.manifest";
+      if (!PathFileExistsW(candidate.c_str())) continue;
+      // Lexical order is enough for 0.2.NNN and keeps this from needing a version parser.
+      if (candidate > best) best = candidate;
+    } while (FindNextFileW(search, &found));
+    FindClose(search);
+    if (!best.empty()) return best;
+  }
+  return best;
+}
+
+std::wstring manifest_sig_path(const std::wstring& manifestPath) {
+  return manifestPath.substr(0, manifestPath.size() - 8) + L"sig";
+}
+
 // ---------------------------------------------------------------------------- the harness
 
 ComPtr<ICoreWebView2Controller> gController;
@@ -130,21 +184,118 @@ bool pump_until(const std::function<bool()>& done, DWORD budgetMs) {
   return true;
 }
 
-/** Evaluates script in the page and returns its JSON result. Empty when it did not answer. */
+/**
+ * Evaluates script in the page and returns its JSON result. Empty when it did not answer.
+ *
+ * The answer is held in a shared block rather than captured by reference. The first version
+ * captured two locals of this function, which is fine right up until a call times out: this
+ * returns, the frame goes away, and the completion handler arrives later and writes through two
+ * dangling references. That crashed the run at the first script that was slow to answer, which
+ * looked like a fault in the page and was a fault in this harness.
+ */
 std::string eval(const std::wstring& script, DWORD budgetMs = 5000) {
+  struct Answer {
+    std::string text;
+    std::atomic<bool> done{false};
+  };
+  auto answer = std::make_shared<Answer>();
+  gWebView->ExecuteScript(script.c_str(),
+                          Callback<ICoreWebView2ExecuteScriptCompletedHandler>(
+                              [answer](HRESULT, LPCWSTR result) -> HRESULT {
+                                if (result) answer->text = narrow(result);
+                                answer->done = true;
+                                return S_OK;
+                              })
+                              .Get());
+  if (!pump_until([answer]() { return answer->done.load(); }, budgetMs)) {
+    std::printf("      (script did not answer within %lums)\n",
+                static_cast<unsigned long>(budgetMs));
+    return {};
+  }
+  return answer->text;
+}
+
+/**
+ * Whether a person could actually press this, expressed as one script.
+ *
+ * Every clause is here because it can be true while the others are false: an element can be
+ * enabled and `display:none`; visible and scrolled out of the viewport; on screen and fully
+ * transparent; opaque and covered by something with a higher z-index. `elementFromPoint` is the
+ * one that catches the last case, because it answers what the mouse would actually hit.
+ */
+const wchar_t* kPressableFn =
+    L"(function(){"
+    L"  var b=document.getElementById('updateNow');"
+    L"  if(!b) return 'no element';"
+    L"  if(b.disabled) return 'disabled';"
+    L"  if(!b.offsetParent) return 'not laid out';"
+    L"  var s=getComputedStyle(b);"
+    L"  if(s.visibility!=='visible') return 'visibility:'+s.visibility;"
+    L"  if(parseFloat(s.opacity)<0.99) return 'opacity:'+s.opacity;"
+    L"  var r=b.getBoundingClientRect();"
+    L"  if(r.width<1||r.height<1) return 'zero size';"
+    L"  if(r.bottom<=0||r.right<=0||r.top>=innerHeight||r.left>=innerWidth) return 'off viewport';"
+    L"  var hit=document.elementFromPoint(r.left+r.width/2, r.top+r.height/2);"
+    L"  if(!hit||!(hit===b||b.contains(hit))) return 'covered by '+(hit?hit.id||hit.tagName:'nothing');"
+    L"  b.focus();"
+    L"  if(document.activeElement!==b) return 'cannot take focus';"
+    L"  return 'pressable';"
+    L"})";
+
+/** The same predicate as a standalone script, for when it is asked on its own. */
+std::wstring pressable_script() { return std::wstring(kPressableFn) + L"()"; }
+
+std::string sha256_hex_of_file(const std::wstring& path) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file) return {};
+  const std::string bytes((std::istreambuf_iterator<char>(file)),
+                          std::istreambuf_iterator<char>());
+  BCRYPT_ALG_HANDLE alg = nullptr;
+  if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) != 0) return {};
+  unsigned char digest[32]{};
+  const NTSTATUS hashed =
+      BCryptHash(alg, nullptr, 0, reinterpret_cast<PUCHAR>(const_cast<char*>(bytes.data())),
+                 static_cast<ULONG>(bytes.size()), digest, sizeof(digest));
+  BCryptCloseAlgorithmProvider(alg, 0);
+  if (hashed != 0) return {};
+  static const char* kHex = "0123456789abcdef";
   std::string out;
-  std::atomic<bool> answered{false};
-  gWebView->ExecuteScript(
-      script.c_str(),
-      Callback<ICoreWebView2ExecuteScriptCompletedHandler>(
-          [&out, &answered](HRESULT, LPCWSTR result) -> HRESULT {
-            if (result) out = narrow(result);
-            answered = true;
-            return S_OK;
-          })
-          .Get());
-  pump_until([&answered]() { return answered.load(); }, budgetMs);
+  for (unsigned char byte : digest) {
+    out += kHex[byte >> 4];
+    out += kHex[byte & 0x0f];
+  }
   return out;
+}
+
+std::string read_file(const std::wstring& path) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file) return {};
+  return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+}
+
+/**
+ * Waits for a script to answer with `expected`, without nesting one pump inside another.
+ *
+ * `eval` already runs a message loop, so using it inside a `pump_until` predicate meant two loops
+ * pumping the same queue, one from inside the other. That arrangement ran fine for a while and
+ * then fell over part-way through a run, differently each time -- which is what re-entrant
+ * dispatch looks like. Here the loop is on the outside and `eval` is called once per turn.
+ */
+bool wait_for(const std::wstring& script, const std::string& expected, DWORD budgetMs) {
+  const DWORD deadline = GetTickCount() + budgetMs;
+  std::string seen;
+  for (;;) {
+    seen = eval(script);
+    if (seen == expected) return true;
+    if (GetTickCount() > deadline) {
+      // Says what it actually saw. A bare "timed out" sent the last diagnosis chasing the page
+      // when the page was right and the comparison was wrong.
+      std::printf("      (waited %lums for [%s], last saw [%s])\n",
+                  static_cast<unsigned long>(budgetMs), expected.c_str(), seen.c_str());
+      return false;
+    }
+    Sleep(50);
+  }
 }
 
 bool page_sent(const std::string& type) {
@@ -170,15 +321,18 @@ void write_screenshot(const std::wstring& path) {
                                     TRUE, nullptr, &stream))) {
     return;
   }
-  std::atomic<bool> done{false};
+  // Shared, not captured by reference. Every crash in this file's history happened after this
+  // function had returned: the capture completed late, and the handler wrote `done` on a frame
+  // that no longer existed. The same mistake was in eval(); this was the other half of it.
+  auto done = std::make_shared<std::atomic<bool>>(false);
   gWebView->CapturePreview(COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, stream.Get(),
                            Callback<ICoreWebView2CapturePreviewCompletedHandler>(
-                               [&done](HRESULT) -> HRESULT {
-                                 done = true;
+                               [done](HRESULT) -> HRESULT {
+                                 *done = true;
                                  return S_OK;
                                })
                                .Get());
-  pump_until([&done]() { return done.load(); }, 8000);
+  pump_until([done]() { return done->load(); }, 8000);
 }
 
 }  // namespace
@@ -284,6 +438,41 @@ int wmain() {
     return 1;
   }
 
+  // ------------------------------------------------------------------ the page must be THE page
+  //
+  // Not "the repository copy", which is only the candidate until something says so. The signed
+  // manifest names a sha256 for ui\\shell.html; the file loaded below has to be that file. Same
+  // commit and same toolchain do not make two builds identical, so the hash is the only fixed
+  // point there is.
+  const std::string pageSha = sha256_hex_of_file(page);
+  std::printf("sha   %s\n", pageSha.c_str());
+  const std::wstring manifestPath = release_manifest_path();
+  if (manifestPath.empty()) {
+    ok(false, "a signed manifest to pin against was not found");
+  } else {
+    // The production verifier, with the key compiled into this build. A manifest that did not
+    // verify is not allowed to say what the page should be -- otherwise the pin could be moved
+    // by editing a text file.
+    namespace upd = remote60::native_poc::update;
+    const upd::ManifestResult loaded =
+        upd::load_manifest(read_file(manifestPath), read_file(manifest_sig_path(manifestPath)),
+                           "windows", upd::default_verifier());
+    if (loaded.status != upd::ManifestStatus::Ok || !loaded.manifest.has_value()) {
+      ok(false, "the manifest pinned against did not verify", loaded.detail);
+    } else {
+      std::string named;
+      for (const upd::ManifestArtifact& artifact : loaded.manifest->fields().artifacts) {
+        if (artifact.name == "ui\\shell.html") named = artifact.sha256;
+      }
+      std::printf("pin   %s  version=%s\n", narrow(manifestPath).c_str(),
+                  loaded.manifest->fields().version.c_str());
+      ok(!named.empty() && named == pageSha,
+         "the page under test is the one the signed manifest names",
+         named.empty() ? std::string("the manifest names no ui shell.html")
+                       : named.substr(0, 16) + " vs " + pageSha.substr(0, 16));
+    }
+  }
+
   gWebView->Navigate(page.c_str());
   ok(pump_until([]() { return gReady.load(); }, 30000),
      "the shipped page loads and reports ready");
@@ -313,21 +502,56 @@ int wmain() {
      "the version travels in a field of its own", available);
 
   gWebView->PostWebMessageAsString(widen(available).c_str());
-  ok(pump_until(
-         []() {
-           return eval(L"document.getElementById('updateBar').classList.contains('hidden')") ==
-                  "false";
-         },
-         8000),
+  ok(wait_for(L"document.getElementById('updateBar').classList.contains('hidden')", "false", 8000),
      "the offer appears on the shipped page");
   ok(eval(L"document.getElementById('updateText').textContent").find("0.2.115") !=
          std::string::npos,
      "and it names the version");
-  ok(eval(L"document.getElementById('updateNow').disabled") == "false",
-     "the install button is usable");
+  {
+    const std::string state = eval(pressable_script());
+    ok(state == "\"pressable\"", "the install button is actually pressable", state);
+  }
+  std::fflush(stdout);
 
   write_screenshot(executable_dir() + L"\\client_update_ui.png");
   std::printf("shot  %s\n", narrow(executable_dir() + L"\\client_update_ui.png").c_str());
+
+  // ------------------------------------------------------------------ the controls that must fail
+  //
+  // Three ways a button can be present, enabled, and still unpressable. If any of these comes
+  // back "pressable", the check above is measuring nothing and every PASS beside it is worthless.
+  //
+  // Run before the click, while the offer is up and untouched. Doing it afterwards meant putting
+  // the offer back first, and that extra round trip was state this does not need.
+  //
+  // Read once per assertion: calling eval() twice inside one ok() would pump the message loop
+  // twice from within a single expression, and the two answers could describe different moments.
+  //
+  // All three run inside one script and report together. Doing them as seven separate round
+  // trips left the page mutated between calls, and each round trip is another chance for the
+  // harness rather than the page to decide the answer.
+  const std::string controls = eval(
+      L"(function(){"
+      L"  var b=document.getElementById('updateNow');"
+      L"  var check=" + std::wstring(kPressableFn) +
+      L";"
+      L"  var out={};"
+      L"  b.style.display='none';        out.hidden=check();"
+      L"  b.style.display='';            out.restored=check();"
+      L"  var o=document.createElement('div'); o.id='blocker';"
+      L"  o.style.cssText='position:fixed;left:0;top:0;right:0;bottom:0;z-index:99999;"
+      L"background:rgba(0,0,0,0)';"
+      L"  document.body.appendChild(o);  out.covered=check();"
+      L"  o.remove();                    out.uncovered=check();"
+      L"  return JSON.stringify(out);"
+      L"})()");
+  ok(controls.find("\\\"hidden\\\":\\\"not laid out\\\"") != std::string::npos,
+     "negative control: display:none is not pressable", controls);
+  ok(controls.find("\\\"covered\\\":\\\"covered by blocker\\\"") != std::string::npos,
+     "negative control: a transparent cover is not pressable", controls);
+  ok(controls.find("\\\"restored\\\":\\\"pressable\\\"") != std::string::npos &&
+         controls.find("\\\"uncovered\\\":\\\"pressable\\\"") != std::string::npos,
+     "and pressable again once each obstruction is removed", controls);
 
   // ------------------------------------------------------------------ the click that was missing
   gFromPage.clear();
@@ -339,13 +563,18 @@ int wmain() {
 
   // ------------------------------------------------------------------ busy, then released
   gWebView->PostWebMessageAsString(widen(shell_update_busy_json(true)).c_str());
-  ok(pump_until([]() { return eval(L"document.getElementById('updateNow').disabled") == "true"; },
-                5000),
+  ok(wait_for(L"document.getElementById('updateNow').disabled", "true", 5000),
      "while an install is starting the button stays disabled");
   gWebView->PostWebMessageAsString(widen(shell_update_busy_json(false)).c_str());
-  ok(pump_until([]() { return eval(L"document.getElementById('updateNow').disabled") == "false"; },
-                5000),
-     "a failed start hands the button back rather than leaving a dead end");
+  // One eval per statement, never two inside one expression. Two pumping calls interleaved in a
+  // single expression is what made earlier runs die part-way through, in a different place each
+  // time; the message loop cannot be re-entered from both halves of one argument list.
+  const bool released = wait_for(L"document.getElementById('updateNow').disabled", "false", 5000);
+  const std::string releasedState =
+      eval(L"JSON.stringify({disabled:document.getElementById('updateNow').disabled,"
+           L"label:document.getElementById('updateNow').textContent})");
+  ok(released, "a failed start hands the button back rather than leaving a dead end",
+     releasedState);
 
   // ------------------------------------------------------------------ 나중에 defers, nothing more
   eval(L"document.getElementById('updateLater').click()");
@@ -356,40 +585,51 @@ int wmain() {
 
   // ------------------------------------------------------------------ withdrawn
   gWebView->PostWebMessageAsString(widen(available).c_str());
-  pump_until(
-      []() {
-        return eval(L"document.getElementById('updateBar').classList.contains('hidden')") ==
-               "false";
-      },
-      8000);
+  wait_for(L"document.getElementById('updateBar').classList.contains('hidden')", "false", 8000);
   gWebView->PostWebMessageAsString(widen(shell_update_cleared_json()).c_str());
-  ok(pump_until(
-         []() {
-           return eval(L"document.getElementById('updateBar').classList.contains('hidden')") ==
-                  "true";
-         },
-         5000),
+  ok(wait_for(L"document.getElementById('updateBar').classList.contains('hidden')", "true", 5000),
      "a check that finds nothing takes the offer back down");
 
   gWebView->PostWebMessageAsString(widen(available).c_str());
-  pump_until(
-      []() {
-        return eval(L"document.getElementById('updateBar').classList.contains('hidden')") ==
-               "false";
-      },
-      8000);
+  wait_for(L"document.getElementById('updateBar').classList.contains('hidden')", "false", 8000);
   gWebView->PostWebMessageAsString(L"{\"type\":\"signedOut\"}");
-  ok(pump_until(
-         []() {
-           return eval(L"document.getElementById('updateBar').classList.contains('hidden')") ==
-                  "true";
-         },
-         5000),
+  ok(wait_for(L"document.getElementById('updateBar').classList.contains('hidden')", "true", 5000),
      "signing out withdraws an offer found for that session");
 
   gFromPage.clear();
   eval(L"document.getElementById('updateNow').click()");
   ok(!page_sent("update"), "and the withdrawn button asks for nothing");
+
+  // ------------------------------------------------------------------ negative control: the old page
+  //
+  // The page as it shipped in 0.2.115 -- notice, no button. Loading it has to fail the same
+  // assertions, because the whole point of this file is that it would have caught that release.
+  const std::wstring stalePath = std::wstring(tempDir) + L"gnlink-stale-shell.html";
+  {
+    std::string stale = read_file(page);
+    const std::string barStart = "<div id=\"updateBar\"";
+    const size_t from = stale.find(barStart);
+    const size_t to = stale.find("</div>", stale.find("id=\"updateLater\""));
+    if (from != std::string::npos && to != std::string::npos) {
+      stale.erase(from, (to + 6) - from);
+    }
+    std::ofstream out(stalePath, std::ios::binary);
+    out.write(stale.data(), static_cast<std::streamsize>(stale.size()));
+  }
+  gReady = false;
+  gFromPage.clear();
+  gWebView->Navigate(stalePath.c_str());
+  pump_until([]() { return gReady.load(); }, 20000);
+  gWebView->PostWebMessageAsString(widen(available).c_str());
+  Sleep(500);
+  const std::string staleState = eval(pressable_script());
+  ok(staleState != "\"pressable\"",
+     "negative control: a page with no update button fails this test", staleState);
+  gFromPage.clear();
+  eval(L"var b=document.getElementById('updateNow'); if(b) b.click();");
+  Sleep(500);
+  ok(!page_sent("update"), "and it cannot send the message either");
+  DeleteFileW(stalePath.c_str());
 
   if (gController) gController->Close();
   DestroyWindow(gWindow);
