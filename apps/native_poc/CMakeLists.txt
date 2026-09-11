@@ -1306,6 +1306,14 @@ endif()
 # Sends real mouse messages to a real toolbar window and checks that each of the three outcomes
 # reports itself. Without it, an empty diagnostic log has two readings -- nobody clicked, or the
 # logging was never wired -- and telling those apart afterwards is impossible.
+# Runs the real viewer against a dead port and checks it does not disappear. Process-level
+# because the thing being guarded is the process's lifetime.
+add_executable(remote60_viewer_startup_failure_test
+  src/viewer_startup_failure_test.cpp
+)
+target_link_libraries(remote60_viewer_startup_failure_test PRIVATE user32 ws2_32)
+add_dependencies(remote60_viewer_startup_failure_test remote60_native_video_client_poc)
+
 add_executable(remote60_session_toolbar_click_test
   src/session_toolbar_click_test.cpp
   src/client_session_toolbar.cpp
