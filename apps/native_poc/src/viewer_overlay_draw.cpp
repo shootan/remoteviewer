@@ -97,6 +97,30 @@ void draw_overlay(ViewerState& ctx, HDC hdc) {
   }
 
   if (!pickerVisible) {
+    // Before any frame has been presented there is nothing underneath, and returning here is what
+    // produced the window a user actually gets when a host does not answer: black, titled GNLink,
+    // saying nothing, and then gone. This says what is happening.
+    //
+    // `lastPresentedVersion` and not `lastPresentedCaptureUs`: the picker resets the latter on
+    // every close, so it would be zero again mid-session and this would paint over live video.
+    // The version only ever counts up.
+    if (ctx.frameBuf.lastPresentedVersion.load(std::memory_order_relaxed) == 0) {
+      static uint64_t waitingSinceUs = 0;
+      const uint64_t now = qpc_now_us();
+      if (waitingSinceUs == 0) waitingSinceUs = now;
+
+      draw_alpha_rect(ctx, hdc, layout.clientRect, RGB(13, 15, 20), 255);
+      SetBkMode(hdc, TRANSPARENT);
+      SetTextColor(hdc, RGB(200, 206, 216));
+      RECT line = layout.clientRect;
+      // Changes once the wait stops looking instantaneous, so a slow answer does not read as a
+      // frozen program. Nothing here is a diagnosis -- it says what is being waited for.
+      const bool slow = now - waitingSinceUs > 4000000ULL;
+      draw_text_utf8(ctx, hdc,
+                     slow ? std::string("응답을 기다리는 중입니다…")
+                          : std::string("연결하는 중…"),
+                     &line, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
     // Nothing to draw over the stream: the legacy Targets/Macro buttons were invisible ghost
     // hit-zones under the flip-model video (see compute_client_layout); the toolbar owns that UI.
     return;
