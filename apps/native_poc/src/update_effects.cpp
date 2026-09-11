@@ -498,6 +498,19 @@ bool WindowsUpdateEffects::PrepareForSwap() {
       }
     }
     if (!config_.requestStop(target)) {
+      // Asking can fail because the process is already leaving. That is the outcome this step
+      // wants, not a reason to abandon the update.
+      //
+      // 2026-09-11, three attempts in a row: the host acknowledged the handoff and began
+      // standing down, and ~70ms later the updater asked its window to close. The window was
+      // already destroyed, the request failed, and the attempt ended as AbandonedBeforeSwap --
+      // "could not ask pid 7332 to stop" about a process that was doing exactly what had just
+      // been asked of it. The enumeration and the request are two moments and the target moved
+      // between them.
+      //
+      // Only a target that is genuinely gone is forgiven. A live process that refused is still a
+      // failure, and nothing here terminates anything.
+      if (parent_has_exited(target.pid)) continue;
       lastError_ = "could not ask pid " + std::to_string(target.pid) + " to stop";
       return false;
     }

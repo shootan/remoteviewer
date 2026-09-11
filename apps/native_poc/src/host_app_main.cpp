@@ -55,6 +55,9 @@
 
 namespace {
 
+/** Defined below, beside the health report it writes; declared here for the pipe reader. */
+void note_child_log_line(const std::string& line);
+
 namespace directory = remote60::native_poc::directory;
 using remote60::native_poc::build_windows_command_line;
 
@@ -389,6 +392,7 @@ class StreamingHostProcess {
           log = OpenLog();
         }
         AppendLogLine(log, line);
+        note_child_log_line(line);
         remote60::native_poc::log_upload_enqueue("host", line);
         const size_t marker = line.find("directory ");
         if (marker != std::string::npos) {
@@ -1019,8 +1023,31 @@ void write_health_report(const char* directoryState) {
                       " directory=" + directoryState);
 }
 
-/** True once the directory has accepted something from us, so the report is written only once. */
-bool gDirectoryReported = false;
+/**
+ * True once the directory has accepted something from us, so the report is written only once.
+ *
+ * Atomic because two different threads can be the first to know: the status timer on the UI
+ * thread, and the pipe reader that carries the child's output.
+ */
+std::atomic<bool> gDirectoryReported{false};
+
+/**
+ * The child says "directory online" and that is the fact the updater is waiting for.
+ *
+ * 2026-09-11: an update rolled back because health stayed `pending` for thirty seconds while the
+ * host was, in fact, online the whole time -- `directory online public=...` was in the log one
+ * second after the new host started. Health only ever turned `ok` when the LOG UPLOADER sent its
+ * first batch, which is a different subsystem with its own credentials and its own schedule. The
+ * report said "waiting for the directory" and was waiting for something else.
+ *
+ * The child's stdout already passes through this process. This reads the one line that answers
+ * the question.
+ */
+void note_child_log_line(const std::string& line) {
+  if (line.find("directory online") == std::string::npos) return;
+  if (gDirectoryReported.exchange(true)) return;
+  write_health_report("ok");
+}
 
 /**
  * Hands the update over to GNLinkUpdater.exe and waits for permission to exit.
@@ -1861,8 +1888,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         update_tray_tip();
         // The first batch the directory accepts is the observable fact that this build can reach
         // it. Reported once; an updater waiting on it stops waiting here.
-        if (!gDirectoryReported && remote60::native_poc::log_upload_status().sentBatches > 0) {
-          gDirectoryReported = true;
+        // Still a valid answer -- an accepted batch also proves this build reaches the server --
+        // but no longer the only one. The child's "directory online" usually arrives first.
+        if (remote60::native_poc::log_upload_status().sentBatches > 0 &&
+            !gDirectoryReported.exchange(true)) {
           write_health_report("ok");
         }
       }

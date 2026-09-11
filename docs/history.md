@@ -11368,3 +11368,44 @@ manifest `e0d17d3a…` · 서버 10/10 · **공개 URL 10/10** · **서버 pair 
 거기서 버튼을 눌러 118 로 올리는 것이 시험이다.
 
 **미검증**: 인앱 완주 · 실제 Host 창의 한글 렌더 · C(간헐 업데이트 실패)는 별도 조사 중.
+
+### 524) 2026-09-11 `0.2.119` — **간헐 업데이트 실패의 원인 2개, 로그로 확정**
+사용자 "3번만에 성공" 은 체감이라 분리하고, `updater.log` 4회 시도를 한 줄씩 읽었다. **두 개의 다른
+결함**이었고 둘 다 *"상태를 잘못 읽었다"* 는 같은 모양이다.
+
+**C1. 물러나는 중인 Host 를 "요청 실패" 로 읽었다** (3/4 시도)
+```
+16:49:08.634 the waiting caller acknowledged and is standing down
+16:49:08.706 result: AbandonedBeforeSwap -- product did not reach a safe point
+16:49:08.706 effects: could not ask pid 7332 to stop      ← 70ms 전에 스스로 물러나겠다고 답한 그 프로세스
+```
+16:46:05·16:49:07·16:49:17 세 번 모두 같은 모양(pid 18388·7332·26632). **열거와 요청은 다른 순간**이고
+그 사이에 창이 사라진다. 요청이 닿지 않은 이유가 **"이미 나갔기 때문"** 인데, 그것이 바로 이 단계가
+원하는 결과다.
+수정(`update_effects.cpp:500`): `requestStop` 이 실패하면 **그 프로세스가 실제로 사라졌는지 확인**하고,
+사라졌으면 통과시킨다. ⚠️ **살아 있는데 거부하는 것은 여전히 실패**이고, **아무것도 종료시키지 않는다.**
+반례 **양쪽 다** 넣었다: 사라진 대상 → 통과 / **살아 있는 대상 → 여전히 실패 + pid 를 말한다**.
+후자가 없으면 앞의 관용이 모든 거부를 덮는다. `update_effects_test` **210 → 219 PASS**.
+
+**C2. health 가 기다린 것은 디렉터리가 아니라 로그 업로더였다** (4번째 시도)
+```
+16:49:37 [host-app] update: standing down -- child pid 29712 exited   ← 고아 수정은 동작했다
+16:49:37 [host-app] health version=0.2.117 directory=pending
+16:49:38.025 [native-video-host] directory online public=175.207.45.151:38212   ← 1초 뒤 온라인
+16:50:07.644 [updater] health: timed out -- version 0.2.117, waiting for the directory
+16:50:07.681 result: RollbackFailed
+```
+🔴 **호스트는 올라와 있었고 업데이터가 그걸 못 봤다.** `write_health_report("ok")` 의 유일한 조건이
+**`log_upload_status().sentBatches > 0`** — **로그 업로더의 첫 배치**였다. 자격 증명과 일정이 따로 노는
+**다른 서브시스템**이다. 보고 문구는 *"waiting for the directory"* 라고 말하면서 다른 것을 기다렸다.
+자식의 stdout 은 이미 부모를 지나간다(`host_app_main.cpp:487` 주석이 *"자식 stdout 이 디렉터리 결과가
+보고되는 유일한 곳"* 이라고 적어 두었다). 그 줄을 읽어 health 로 옮겼다 — `note_child_log_line()`.
+업로더 경로도 **유효한 답이라 남겨 두었고**(둘 중 먼저 오는 쪽), 플래그는 두 스레드가 만지므로 atomic 이다.
+⚠️ **30초 timeout 을 늘리지 않았다.** 늘렸다면 원인을 덮었을 뿐이다.
+
+**릴리스** `0.2.119`: 변경 4(Host `71b2e9ad…` · Client `f9af2118…` · Setup `3385fffb…` ·
+Updater `9f337637…`), **`ui\shell.html` 포함 6개 동일**. 설치기 RCDATA 9/9 · 게이트 2개 ·
+manifest `b8277467…` · 서버 10/10 · 공개 URL 10/10 · **서버 pair 되받아 재검증** · 0.2.118 pair 백업.
+
+**미검증**: 실기 완주. 위 둘은 **로그로 원인이 확정됐고 회귀로 반례가 있지만**, 실제 업데이트가 끝까지
+가는 것은 아직 못 봤다. 특히 **C2 수정이 실제로 health 를 ok 로 만드는지는 실기에서만 보인다.**
