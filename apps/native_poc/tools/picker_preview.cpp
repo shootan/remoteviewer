@@ -191,6 +191,12 @@ int wmain() {
       {L"picker-list.png", "connected, four windows", 4, true, false, 0, ""},
       {L"picker-selected.png", "a window is the current target", 4, true, false, 2, ""},
       {L"picker-locked.png", "target fixed by host config", 4, true, true, 0, ""},
+      // Locked AND empty. Producible: host_control_session.cpp:88 sets the locked flag and then
+      // enumerates the windows regardless, so a machine with nothing shareable sends a locked,
+      // empty list. It is the state the middle used to claim the list was "hidden by host
+      // configuration", which was never what the flag meant.
+      {L"picker-locked-empty.png", "target fixed by host config, nothing shareable", 0, true, true,
+       0, ""},
       // The real failure tokens the product sets, not an invented sentence: these are what
       // viewer_control_client / viewer_session_watchdog / viewer_startup actually write.
       // `connected` here matches what the product does at each site, because a screenshot of a

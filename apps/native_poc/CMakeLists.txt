@@ -1206,6 +1206,13 @@ if(MSVC)
   target_compile_options(remote60_picker_preview PRIVATE /utf-8)
 endif()
 
+# The picker's empty-state decision, tested as a table with a negative control. Header-only logic:
+# no window, no GDI, and no /utf-8 needed because it holds no Korean.
+add_executable(remote60_picker_empty_state_test
+  src/picker_empty_state_test.cpp
+)
+target_include_directories(remote60_picker_empty_state_test PRIVATE src)
+
 add_executable(remote60_viewer_layout_test
   src/viewer_layout_test.cpp
 )

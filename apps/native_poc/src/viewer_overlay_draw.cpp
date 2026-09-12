@@ -2,6 +2,8 @@
 
 #include "viewer_log.hpp"
 #include "viewer_overlay_draw.hpp"
+
+#include "viewer_picker_empty_line.hpp"
 #include "viewer_picker.hpp"
 
 #include "viewer_common.hpp"
@@ -234,7 +236,14 @@ void draw_overlay(ViewerState& ctx, HDC hdc) {
                     !ctx.control.connected.load(std::memory_order_relaxed) || selectionPending);
   // No 전체 화면 button: the first card is the desktop and selecting it does the same thing. Two
   // controls for one outcome, both accent-coloured, made "which one is selected" ambiguous.
-  (void)actionsDisabled;
+
+  // What the middle says when there is nothing to list. Assembled here, decided in
+  // viewer_picker_empty_line.hpp.
+  PickerEmptyInputs emptyInputs;
+  emptyInputs.selectionLocked = selectionLocked;
+  emptyInputs.controlUp = controlUp;
+  emptyInputs.headerExplains = !tokenLine.empty();
+  emptyInputs.listReceived = panelStatus.rfind("window_list_received", 0) == 0;
 
   // Card grid: desktop preview first, then one card per shareable window.
   const CardGridMetrics grid = compute_card_grid(ctx, layout.listRect);
@@ -250,12 +259,15 @@ void draw_overlay(ViewerState& ctx, HDC hdc) {
     if (cardIndex >= totalCards) break;
     const RECT card = card_rect_for_slot(layout.listRect, grid, slot);
     if (cardIndex == 0) {
-      draw_target_card(ctx, hdc, card, grid, 0, "전체 화면", selectedId == 0,
-                       selectionLocked || selectionPending);
+      // actionsDisabled, not just locked/pending: with the control channel down
+      // begin_pc_target_selection refuses the click (viewer_picker.cpp), and the refresh button
+      // beside these cards already draws itself disabled for exactly that reason. A card that
+      // still looks pressable while the press is refused is the same defect in a smaller place.
+      draw_target_card(ctx, hdc, card, grid, 0, "전체 화면", selectedId == 0, actionsDisabled);
     } else {
       const auto& entry = windowItems[static_cast<size_t>(cardIndex - 1)];
       draw_target_card(ctx, hdc, card, grid, entry.id, entry.title, entry.id == selectedId,
-                       selectionLocked || selectionPending);
+                       actionsDisabled);
     }
   }
 
@@ -264,24 +276,15 @@ void draw_overlay(ViewerState& ctx, HDC hdc) {
     emptyRect.top += grid.cardH + dpi_scale(ctx, 18);
     SetTextColor(hdc, RGB(150, 158, 170));
 
-    // "Empty" is three different situations and this line used to say the same thing in all of
-    // them. On a failed connect the screen read: header "호스트에 연결하지 못했습니다", middle
-    // "창이 없습니다. 새로 고침을 눌러 보세요.", and a 새로 고침 button that was disabled --
-    // two contradictory statements plus an instruction the user could not carry out.
-    //
-    // An empty list means nothing on its own; what it means is whatever the state says.
+    // The sentences live here rather than in the header that picks between them: that header is
+    // included by targets built without /utf-8, where a Korean literal does not survive the lexer.
     std::string emptyLine;
-    if (selectionLocked) {
-      emptyLine = "호스트 설정으로 창 목록이 숨겨져 있습니다";
-    } else if (!tokenLine.empty() && panelStatus != "window_list_received" &&
-               panelStatus.rfind("window_list_received", 0) != 0) {
-      // The header already explains this state. Repeating a different explanation underneath is
-      // how the two came to disagree; say nothing and let the header speak.
-      emptyLine.clear();
-    } else if (!controlUp) {
-      emptyLine.clear();
-    } else {
-      emptyLine = "공유할 수 있는 창이 없습니다. 새로 고침을 눌러 보세요.";
+    switch (picker_empty_line(emptyInputs)) {
+      case PickerEmptyLine::kNoWindows:
+        emptyLine = "공유할 수 있는 창이 없습니다. 새로 고침을 눌러 보세요.";
+        break;
+      case PickerEmptyLine::kNone:
+        break;
     }
     if (!emptyLine.empty()) {
       draw_text_utf8(ctx, hdc, emptyLine, &emptyRect, DT_CENTER | DT_SINGLELINE);
