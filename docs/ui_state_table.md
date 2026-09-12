@@ -535,5 +535,28 @@ error 화면을 찍으려고 `SetStatus()` 에 오류 문구를 넣었더니 **�
 ⚠️ **레지스트리를 지금 건드리지 않았다.** 이 변경은 **사용자가 자동 시작을 토글할 때** 작동한다.
 
 **부수 관찰(고치지 않음, 이 PC 상태)**: 현재 이 PC 의 Run 항목은
-`remote60 → "D:emoteemoteuild-local\...emote60_host_app.exe" --tray` 로,
+`remote60 → "D:
+emote
+emoteuild-local\...
+emote60_host_app.exe" --tray` 로,
 **설치본이 아니라 개발 빌드 경로**를 가리킨다. 사용자 기기 상태라 읽기만 했고 바꾸지 않았다.
+
+---
+
+## 21. toolbar auto-hide — **관측 결과 결함 없음** (v2 항목 4)
+
+지시대로 **고치기 전에 봤다.**
+
+**"누르는 중 사라짐"**: `collapse_toolbar()`(`client_session_toolbar.cpp:250`)에 이미
+`if (g.menuOpen || g.pressed != kButtonNone || g.hovered != kButtonNone) return;` 가 있다.
+주석을 믿지 않고 **실제 메시지로 시험**했다 — 버튼을 누른 채 마우스를 소환 구역 밖(`10,400`)으로
+알려 collapse 타이머를 걸고 **1200ms**(지연 800ms보다 길게) 돌렸다. **바는 그대로 있었다.**
+⚠️ 그것만으로는 *"아예 안 접히는 바"* 도 통과하므로 **반대쪽도 넣었다**: 누른 것도 hover 도 없을 때는
+**실제로 접힌다**(1500ms 뒤 `IsWindowVisible == 0`). 두 단정이 함께 있어야 의미가 있다.
+
+**"원격 클릭 가로채기"**: 접힌 동안은 `ShowWindow(SW_HIDE)` 라 **픽셀을 차지하지 않는다**
+(`:52` 주석 그대로). 펼침은 상단 중앙 **250ms dwell** 로만 일어나고, dwell 타이머는 **움직일 때마다
+재시작**되므로 지나가는 마우스가 바를 불러내 자기 경로에 놓는 일이 없다.
+
+**결론: 고치지 않았다.** 두 우려 모두 이미 처리돼 있고, 없는 문제를 고치면 회귀만 생긴다.
+`session_toolbar_click_test` **17 → 19 PASS**.

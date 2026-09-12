@@ -201,6 +201,36 @@ int wmain() {
   ok(unknown != direct && direct != relay && unknown != relay,
      "the three readings differ from each other in text, not only in colour");
 
+  // ------------------------------------------------------------------ auto-hide while pressed
+  //
+  // Observed before being changed. The worry was that the bar hides itself out from under a
+  // finger that is already on a button; `collapse_toolbar` has a guard for exactly that, and
+  // this checks the guard rather than trusting the comment beside it.
+  //
+  // The mouse is reported far from the summon band, which is what arms the collapse timer, and
+  // the loop runs well past the 800ms delay.
+  SendMessageW(bar, WM_LBUTTONDOWN, 0, at(hitX, midY));
+  remote60::native_poc::session_toolbar_notify_mouse(10, 400, 1280);
+  pump(1200);
+  ok(IsWindowVisible(bar) != 0,
+     "the bar does not hide itself while a button is held down",
+     IsWindowVisible(bar) ? std::string("still up after 1200ms") : std::string("vanished"));
+  // Release it so the press does not leak into the next case.
+  SendMessageW(bar, WM_LBUTTONUP, 0, at(hitX, midY));
+
+  // And the other half: with nothing pressed or hovered, moving away DOES collapse it. Without
+  // this the guard above would pass just as well on a bar that never hides at all.
+  gLines.clear();
+  remote60::native_poc::session_toolbar_notify_mouse(10, 400, 1280);
+  pump(1500);
+  ok(IsWindowVisible(bar) == 0,
+     "and it does hide once nothing is pressed or hovered",
+     IsWindowVisible(bar) ? std::string("still up") : std::string("hidden"));
+  // Bring it back for whatever runs after this.
+  remote60::native_poc::session_toolbar_set_visible(true);
+  remote60::native_poc::session_toolbar_follow_owner();
+  pump(300);
+
   // ------------------------------------------------------------------ the negative control
   //
   // If this ever passes while the assertions above also pass, the lines are being produced by
