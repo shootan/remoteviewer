@@ -11618,3 +11618,32 @@ ready=0, swapChain=null          repaint·SWP_FRAMECHANGED·리사이즈 전부 
 `session_toolbar_click_test`(26) · `picker_open_chain_test`(11) · `viewer_layout_test` ·
 `viewer_picker_gesture_test` · `viewer_startup_failure_test`(4) · `update_effects_test`(219) ·
 `client_update_ui_test`(27) 전부 rc=0.
+
+### 531) 2026-09-12 `0.2.122` 게시 — #529·#530 의 수정을 싣는 최소 릴리스
+검증용 v2.2 ③-3. **⑴⑵ 를 실을 최소 새 버전 1개.**
+
+**들어간 것** (게시된 `0.2.121` 에는 없던 것)
+- 빈 목록 문구가 **상태를 본다** — 오류·대기 화면에서는 중앙이 침묵한다(#529⑴, #530 §27)
+- **카드가 계약대로 그려진다** — `!connected` 면 선택이 거부되므로 카드도 흐리게(옆의 새로 고침과 같게)
+- 잠금 문구 `창 목록이 숨겨져 있습니다` **삭제** — 호스트는 잠겨 있어도 목록을 보낸다. 거짓이었다.
+- 자동 시작 마이그레이션이 **쓰기 성공을 확인한 뒤에만** legacy 를 지운다(#529⑵)
+- 툴바 **눌림이 화면에 보인다** — press 를 따라가고 hover 에 묶이지 않는다(#530 1b)
+- 마우스 게이트가 **삼킨 것을 말한다** — 창당 1줄 + 카운터(#530 4)
+
+**변경 5**: Client · Host · Setup · Updater · Viewer. **`ui\shell.html` 은 무변경**(19028B,
+`3e59eb07…`) — `client_update_ui_test` 의 해시 pin 이 0.2.121 과 같은 바이트로 계속 맞는다.
+
+**게이트**: payload-set **10/10** · 제품 `default_verifier` **Ok + 1바이트 변조 거부** ·
+설치기 RCDATA **9/9**(manifest 해시와 동일).
+**게시**: manifest `56134534…`(1687B) / sig `4813cfce…` · 서버 10/10 · **공개 URL 10/10 해시 일치** ·
+**서버가 내주는 pair 를 되받아 제품 검증기로 재검증**(서명 바이트 동일) · `0.2.121` pair 백업 ·
+**`0.2.121` 아티팩트 3종 공개 URL 재확인 = 불변** · 부분 pair 실패 없음 · 재시작 불필요.
+`dist/GNLinkSetup-0.2.122.exe` = **공개 URL 바이트와 `cmp` 동일**.
+회귀(게시 후): `client_update_ui_test` 27 · `picker_empty_state_test` 19 ·
+`viewer_window_proc_isolated_test` 14 · `session_toolbar_click_test` 26 · `picker_open_chain_test` 11 ·
+`update_effects_test` 219 — 전부 rc=0.
+
+**미검증**: 인앱 완주 · **가설 5 는 재현만 했고 고치지 않았다**(present 경로 설계 결정, Codex 확정 대기) ·
+1b·4 의 실기 · 실제 고DPI 모니터.
+⚠️ 이번 회차를 **"UI 전면 개선 완료" 로 말하지 않는다.** 고친 항목과 **확인 후 그대로 둔 항목**
+(썸네일 종횡비·auto-hide·목록/설정 디자인 = **결함 없음 확인**)은 다르다.
