@@ -1333,6 +1333,33 @@ add_executable(remote60_viewer_startup_failure_test
 target_link_libraries(remote60_viewer_startup_failure_test PRIVATE user32 ws2_32)
 add_dependencies(remote60_viewer_startup_failure_test remote60_native_video_client_poc)
 
+# Drives the whole target-selection chain with real mouse messages and the product's own picker
+# call, and decides between the hypotheses by comparing pixels rather than reading a log line.
+add_executable(remote60_picker_open_chain_test
+  src/picker_open_chain_test.cpp
+  src/client_session_toolbar.cpp
+  src/viewer_picker.cpp
+  src/viewer_picker_state.cpp
+  src/viewer_selection_gate.cpp
+  src/client_macro_window.cpp
+  src/input_macro.cpp
+  src/macro_shell_bridge.cpp
+  src/viewer_overlay_draw.cpp
+  src/viewer_gdi_util.cpp
+  src/viewer_layout.cpp
+  src/viewer_log.cpp
+  src/native_video_client_shared_core.cpp
+)
+# The macro window is part of the toolbar's callbacks, and it is a WebView2 window.
+target_include_directories(remote60_picker_open_chain_test
+  PRIVATE src "${GNLINK_WEBVIEW2_DIR}/include")
+target_link_libraries(remote60_picker_open_chain_test PRIVATE
+  "${GNLINK_WEBVIEW2_DIR}/x64/WebView2LoaderStatic.lib"
+  user32 gdi32 shell32 ole32 shlwapi version ws2_32)
+if(MSVC)
+  target_compile_options(remote60_picker_open_chain_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_session_toolbar_click_test
   src/session_toolbar_click_test.cpp
   src/client_session_toolbar.cpp
