@@ -302,7 +302,8 @@ void test_identity_change_discards_queue(FakeLogServer& server) {
   CHECK(log_upload_configure(c, &reason));
   CHECK(reason.rfind("owner changed", 0) == 0);
   CHECK(log_upload_status().discardedLines == 1);
-  log_upload_enqueue("client", "bob line");
+  log_upload_enqueue_for_identity("client", "alice live child after owner switch", "alice/machine-A");
+  log_upload_enqueue_for_identity("client", "bob live child", "bob/machine-A");
   CHECK(server.WaitFor(1, 2000));
   std::this_thread::sleep_for(std::chrono::milliseconds(120));
   const auto reqs = server.Requests();
@@ -310,6 +311,7 @@ void test_identity_change_discards_queue(FakeLogServer& server) {
   for (const auto& r : reqs) {
     CHECK(r.auth() == "Bearer SESSION-BOB");
     CHECK(r.body.find("alice") == std::string::npos);
+    CHECK(r.body.find("bob live child") != std::string::npos);
   }
   log_upload_stop();
 }

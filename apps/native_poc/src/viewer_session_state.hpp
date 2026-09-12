@@ -26,6 +26,9 @@ namespace remote60::native_poc::viewer {
 struct SessionState {
   // cross-thread: every thread polls `running`; recv reads `sock`; the control tunnel sends on it.
   std::atomic<bool> running{true};
+  std::atomic<int> recoveryExitCode{0};
+  std::atomic<uint64_t> uiHeartbeatUs{0};
+  bool controlRequired = false;
   SOCKET sock = INVALID_SOCKET;
   // cross-thread: set once by create_window; recv/control thread call InvalidateRect/PostMessage on it.
   HWND hwnd = nullptr;
@@ -36,6 +39,7 @@ struct SessionState {
   // Host advertised sealed host-side IME support (kCaptureFlagHostImeV1). Host-IME key path is used
   // only when this is set AND the user opted in (env REMOTE60_HOST_IME=1). (Codex #366.)
   std::atomic<bool> hostImeSupported{false};
+  std::atomic<bool> hostFrameHeartbeat{false};
   // Host advertised host-IME v2 (kCaptureFlagHostImePulseStateV2): make-only pulse + ImeState
   // handshake. The default-on host-IME path activates only against a v2 host; a v1-only host stays
   // on legacy client-side IME. (Codex v2.)

@@ -25,6 +25,8 @@
 namespace remote60::native_poc::viewer {
 
 struct PresentStats {
+  uint64_t failureSinceUs = 0;  // UI thread: continuous failure, not one slow/occluded frame
+  bool rebuildAttempted = false;
   // cross-thread: UI increments, recv reads (1s stats deltas).
   std::atomic<uint64_t> d3dPresentSuccessCount{0};
   std::atomic<uint64_t> d3dPresentFailCount{0};

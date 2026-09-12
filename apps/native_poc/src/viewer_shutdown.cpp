@@ -3,6 +3,8 @@
 // (viewer split refactor Phase 2-11)
 
 #include "viewer_shutdown.hpp"
+#include "bounded_process_exit.hpp"
+#include <cstdio>
 
 #include <iostream>
 
@@ -26,16 +28,11 @@ constexpr uint32_t kControlThreadJoinTimeoutMs = 3000;
 // log names the stage; exit code 44 tells the shell this was an abnormal end. This is a bounded
 // termination, not a recovery and not a reconnect. (Codex invariant 2.)
 [[noreturn]] void abandon_thread_and_exit(ViewerContext& ctx, const char* which, uint32_t waitedMs) {
-  const uint64_t nowUs = qpc_now_us();
-  std::cout << "[native-video-client][liveness] " << which << " thread did not exit within " << waitedMs
-            << " ms at shutdown stage=" << recv_stage_name(ctx.recvLive.current_stage())
-            << " stageAgeUs=" << liveness_age_us(nowUs, ctx.recvLive.stageEnterUs.load(std::memory_order_relaxed))
-            << " loops=" << ctx.recvLive.loopIterations.load(std::memory_order_relaxed)
-            << " control=" << (ctx.control.connected.load(std::memory_order_relaxed) ? 1 : 0)
-            << "; terminating the process (bounded termination, not a recovery)" << std::endl;
-  std::cout.flush();
-  TerminateProcess(GetCurrentProcess(), 44);
-  ExitProcess(44);
+  char text[256];
+  const int count = std::snprintf(text, sizeof(text),
+      "[viewer][liveness] %s did not stop in %u ms, recv stage=%s; terminating exit44\n",
+      which, waitedMs, recv_stage_name(ctx.recvLive.current_stage()));
+  remote60::native_poc::terminate_with_diagnostic(44, text, static_cast<DWORD>(count > 0 ? count : 0));
 }
 }  // namespace
 
@@ -51,13 +48,9 @@ void shutdown_viewer(ViewerContext& ctx) {
   remote60::native_poc::macro_window_destroy();
   if (ctx.session.sock != INVALID_SOCKET) {
     shutdown(ctx.session.sock, SD_BOTH);
-    closesocket(ctx.session.sock);
-    ctx.session.sock = INVALID_SOCKET;
   }
   if (ctx.controlSock != INVALID_SOCKET) {
     shutdown(ctx.controlSock, SD_BOTH);
-    closesocket(ctx.controlSock);
-    ctx.controlSock = INVALID_SOCKET;
   }
   // Bounded joins. A thread wedged inside a decoder / D3D / socket call never returns; blocking
   // here would turn a dead session into a hung process the shell cannot restart. Only a thread
@@ -69,6 +62,8 @@ void shutdown_viewer(ViewerContext& ctx) {
   if (!join_with_timeout(ctx.recvThread, kRecvThreadJoinTimeoutMs)) {
     abandon_thread_and_exit(ctx, "recv", kRecvThreadJoinTimeoutMs);
   }
+  if (ctx.session.sock != INVALID_SOCKET) { closesocket(ctx.session.sock); ctx.session.sock = INVALID_SOCKET; }
+  if (ctx.controlSock != INVALID_SOCKET) { closesocket(ctx.controlSock); ctx.controlSock = INVALID_SOCKET; }
 
   if (ctx.dec.useH264) {
     {
@@ -80,6 +75,8 @@ void shutdown_viewer(ViewerContext& ctx) {
     ctx.dec.decoder.shutdown();
     if (ctx.dec.mfStarted) MFShutdown();
   }
+  ctx.uiWatchdogStop.store(true);
+  if (ctx.uiWatchdog.joinable()) ctx.uiWatchdog.join();
 }
 
 }  // namespace remote60::native_poc::viewer

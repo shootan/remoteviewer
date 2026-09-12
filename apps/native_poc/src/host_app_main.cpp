@@ -38,6 +38,10 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include "bounded_process_exit.hpp"
+#include "host_recovery_policy.hpp"
+#include "async_worker_group.hpp"
+#include "child_environment.hpp"
 #include <vector>
 
 #include "directory_client.hpp"
@@ -196,6 +200,7 @@ void append_host_app_log(const std::string& line) {
 // data: the worker must not reach into shared state, and the UI thread is the only writer of
 // g.cache. (Ledger H-07.)
 struct SignInResult {
+  uint64_t requestEpoch = 0;
   bool ok = false;
   std::string url;
   std::string account;
@@ -215,6 +220,10 @@ struct SignInResult {
  */
 class StreamingHostProcess {
  public:
+  ~StreamingHostProcess() {
+    Stop();
+    if (childJob_) CloseHandle(childJob_);
+  }
   void Configure(const std::wstring& directoryUrl, const std::wstring& accountId,
                  const std::wstring& hostName) {
     directoryUrl_ = directoryUrl;
@@ -224,6 +233,19 @@ class StreamingHostProcess {
 
   void Start() {
     if (running_.exchange(true)) return;
+    if (!childJob_) {
+      childJob_ = CreateJobObjectW(nullptr, nullptr);
+      JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+      limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+      if (!childJob_ || !SetInformationJobObject(childJob_, JobObjectExtendedLimitInformation,
+                                                &limits, sizeof(limits))) {
+        if (childJob_) CloseHandle(childJob_);
+        childJob_ = nullptr;
+        running_ = false;
+        AppendLogLineOnce("[host-app] could not create child lifetime job");
+        return;
+      }
+    }
     // Opt-in GPU surface encode via the shell's own environment, so a user can try it on a
     // contended GPU without a rebuild while it stays off for everyone else. A tray toggle is
     // the eventual home; the environment is the seam until then.
@@ -269,7 +291,14 @@ class StreamingHostProcess {
       return true;
     }
     TerminateChild();
-    if (supervisor_.joinable()) supervisor_.join();
+    if (supervisor_.joinable()) {
+      if (WaitForSingleObject(supervisor_.native_handle(), 10000) != WAIT_OBJECT_0) {
+        if (childJob_) TerminateJobObject(childJob_, 45);
+        const char message[] = "[host-app] shutdown deadline exceeded; closing owned child job\n";
+        remote60::native_poc::terminate_with_diagnostic(45, message, sizeof(message) - 1);
+      }
+      supervisor_.join();
+    }
     // The join is the real guarantee: Supervise() only returns once its wait on the child has
     // returned. Checked anyway, because this is the one place whose failure leaves a process
     // holding the ports the next one needs.
@@ -452,7 +481,14 @@ class StreamingHostProcess {
     constexpr DWORD kChildDxgiWorkerWatchdogExitCode = 44;
     uint32_t watchdogRecoveries = 0;
     uint64_t watchdogWindowStartMs = 0;
+    remote60::native_poc::HostRecoveryPolicy recoveryPolicy;
+    const std::wstring requestedBackend = [] {
+      wchar_t value[64]{};
+      const DWORD n = GetEnvironmentVariableW(L"REMOTE60_DESKTOP_CAPTURE_BACKEND", value, 64);
+      return n > 0 && n < 64 ? std::wstring(value) : std::wstring(L"dxgi");
+    }();
     while (running_.load(std::memory_order_relaxed)) {
+      const bool useRecoveryWgc = recoveryPolicy.UseWgc(GetTickCount64());
       const bool nv12SurfaceForcedOff = crashStreak >= 2;
       // The control port serves clients on the same network that dial this PC directly. One
       // arriving through the directory tunnels control over the media socket instead, but with
@@ -533,11 +569,14 @@ class StreamingHostProcess {
                             ? "[host-app] starting the streaming host (tune=low_latency, nv12-surface=on)"
                             : "[host-app] starting the streaming host (tune=low_latency)");
       const uint64_t spawnTickMs = GetTickCount64();
+      const auto childEnvironment = remote60::native_poc::child_environment_with(
+          L"REMOTE60_DESKTOP_CAPTURE_BACKEND", useRecoveryWgc ? L"wgc" : requestedBackend);
 
       // lpApplicationName names the exe by path, so the child is chosen outright instead of by
       // parsing the first token of the command line. (Ledger H-20.)
       if (!CreateProcessW(exe.c_str(), mutableCommand.data(), nullptr, nullptr, TRUE,
-                          CREATE_NO_WINDOW, nullptr, executable_dir().c_str(), &si, &pi)) {
+                          CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+                          const_cast<wchar_t*>(childEnvironment.data()), executable_dir().c_str(), &si, &pi)) {
         if (readEnd) CloseHandle(readEnd);
         if (writeEnd) CloseHandle(writeEnd);
         childAlive_.store(false, std::memory_order_relaxed);
@@ -552,6 +591,16 @@ class StreamingHostProcess {
         continue;
       }
 
+      if (!AssignProcessToJobObject(childJob_, pi.hProcess) || ResumeThread(pi.hThread) == DWORD(-1)) {
+        TerminateProcess(pi.hProcess, 45);
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        if (writeEnd) CloseHandle(writeEnd);
+        if (readEnd) CloseHandle(readEnd);
+        AppendLogLineOnce("[host-app] child lifetime assignment failed; launch refused");
+        for (int i = 0; i < 30 && running_.load(); ++i) Sleep(100);
+        continue;
+      }
+      if (useRecoveryWgc) AppendLogLineOnce("[host-app] repeated DXGI wedge: using WGC recovery backend");
       // Ours must close or the reader never sees end-of-file when the child exits.
       if (writeEnd) CloseHandle(writeEnd);
       std::thread reader;
@@ -574,6 +623,7 @@ class StreamingHostProcess {
       DWORD childExitCode = 0;
       GetExitCodeProcess(pi.hProcess, &childExitCode);
       const uint64_t ranMs = GetTickCount64() - spawnTickMs;
+      recoveryPolicy.OnExit(childExitCode, ranMs, GetTickCount64());
       if (reader.joinable()) reader.join();
       if (readEnd) CloseHandle(readEnd);
       // A nonzero exit within a few seconds is a crash, not a session that ran and ended.
@@ -642,6 +692,7 @@ class StreamingHostProcess {
   }
 
   std::wstring directoryUrl_;
+  HANDLE childJob_ = nullptr;
   std::wstring accountId_;
   std::wstring hostName_;
   std::mutex mu_;
@@ -744,6 +795,10 @@ struct AppState {
 };
 
 AppState g;
+remote60::native_poc::AsyncWorkerGroup& host_workers() {
+  static remote60::native_poc::AsyncWorkerGroup workers([] { PostMessageW(g.window, WM_APP + 7, 0, 0); });
+  return workers;
+}
 
 void relayout();
 
@@ -1212,7 +1267,7 @@ void start_update_handoff(HWND window) {
   //
   // The process handle travels with it and is closed here, not before: the handle is what pins
   // the process id the channel's check compares against.
-  std::thread([window, readyEvent, ackEvent, bootstrap = pi.hProcess,
+  host_workers().Launch([window, readyEvent, ackEvent, bootstrap = pi.hProcess,
                readyName = spec.readyEventName, launchEndpoint, credentialServer,
                pipeName = spec.credentialPipeName]() {
     if (!pipeName.empty()) {
@@ -1266,7 +1321,7 @@ void start_update_handoff(HWND window) {
     PostMessageW(window, kUpdateHandoffDoneMessage,
                  static_cast<WPARAM>(step == upd::HandoffStep::ExitNow),
                  reinterpret_cast<LPARAM>(detail));
-  }).detach();
+  });
 }
 
 void start_streaming() {
@@ -1320,6 +1375,9 @@ void perform_sign_in() {
   // Remember where they were signing in to before knowing whether it worked; retyping the
   // server address after every failed attempt is needless. The token goes with the account it
   // was issued for, so it is dropped when either the account or the server changes.
+  uint64_t requestEpoch = 0;
+  {
+    std::lock_guard<std::mutex> lock(g.ownerMu);
   if (g.cache.accountId != account ||
       directory::directory_origin_key(g.cache.directoryUrl) !=
           directory::directory_origin_key(url)) {
@@ -1330,6 +1388,8 @@ void perform_sign_in() {
   g.cache.accountId = account;
   g.cache.hostName = hostName;
   g.cache.machineId = directory::machine_id();
+    requestEpoch = ++g.ownerEpoch;
+  }
   (void)directory::save_host_cache(g.cachePath, g.cache);
 
   set_status(creating ? L"Creating the account..." : L"Signing in...");
@@ -1343,15 +1403,16 @@ void perform_sign_in() {
   // That is a data race on std::string, not just a stale read, and it was not covered by the
   // "don't touch windows from a worker" rule the old comment stated. Now the UI thread performs
   // every g.cache write and the disk save, in the WM_APP+2 handler. (Ledger H-07.)
-  std::thread([url, account, password, hostName, creating, signupKey]() {
+  host_workers().Launch([url, account, password, hostName, creating, signupKey, requestEpoch]() {
     auto* result = new SignInResult{};
+    result->requestEpoch = requestEpoch;
     result->url = url;
     result->account = account;
     result->hostName = hostName;
     std::string error;
     if (creating && !directory::create_account(url, account, password, signupKey, &error)) {
       result->error = widen(error);
-      PostMessageW(g.window, WM_APP + 2, 0, reinterpret_cast<LPARAM>(result));
+      if (!PostMessageW(g.window, WM_APP + 2, 0, reinterpret_cast<LPARAM>(result))) delete result;
       return;
     }
     result->ok = directory::register_host(url, account, password, hostName,
@@ -1359,13 +1420,12 @@ void perform_sign_in() {
                                           &result->hostToken, &error);
     result->machineId = directory::machine_id();
     result->error = widen(error);
-    PostMessageW(g.window, WM_APP + 2, result->ok ? 1 : 0, reinterpret_cast<LPARAM>(result));
-  }).detach();
+    if (!PostMessageW(g.window, WM_APP + 2, result->ok ? 1 : 0, reinterpret_cast<LPARAM>(result))) delete result;
+  });
 }
 
 
 void sign_out(bool keepAccount) {
-  g.streaming.Stop();
   {
     std::lock_guard<std::mutex> lock(g.ownerMu);
     g.cache.hostToken.clear();
@@ -1375,6 +1435,9 @@ void sign_out(bool keepAccount) {
     // signed in would still be acknowledged -- after the user had signed out.
     ++g.ownerEpoch;
   }
+  g.signInBusy.store(false);
+  EnableWindow(g.signInButton, TRUE);
+  g.streaming.Stop();  // owner invalidation must precede this potentially slow stop
   (void)directory::save_host_cache(g.cachePath, g.cache);
   // The token is gone; so is the owner of whatever the uploader still holds.
   remote60::native_poc::log_upload_clear_credentials("signed out");
@@ -1871,18 +1934,19 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
       // value; every g.cache mutation and the disk save happen here, on the UI thread, so the
       // strings the status timer and the tray tip read have exactly one writer. (Ledger H-07.)
       std::unique_ptr<SignInResult> result(reinterpret_cast<SignInResult*>(lParam));
+      { std::lock_guard<std::mutex> lock(g.ownerMu);
+        if (result && result->requestEpoch != g.ownerEpoch) return 0; }
       g.signInBusy.store(false);
       EnableWindow(g.signInButton, TRUE);
       if (result && result->ok) {
+        {
+        std::lock_guard<std::mutex> lock(g.ownerMu);
         g.cache.directoryUrl = result->url;
         g.cache.accountId = result->account;
         g.cache.machineId = result->machineId;
         g.cache.hostName = result->hostName;
         g.cache.hostId = result->hostId;
-        {
-          std::lock_guard<std::mutex> lock(g.ownerMu);
-          g.cache.hostToken = result->hostToken;
-          ++g.ownerEpoch;
+        g.cache.hostToken = result->hostToken;
         }
         // A fresh sign-in changes the answer to "is a directory reachable", so the report is
         // renewed rather than left saying what was true before signing in.
@@ -1930,7 +1994,12 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
       ShowWindow(window, SW_HIDE);
       return 0;
 
+    case WM_APP + 7:
+      g.signInBusy.store(false); EnableWindow(g.signInButton, TRUE);
+      set_status(L"작업 중 오류가 발생했습니다. 다시 시도해 주세요.");
+      return 0;
     case WM_DESTROY: {
+      { std::lock_guard<std::mutex> lock(g.ownerMu); ++g.ownerEpoch; }
       KillTimer(window, kStatusTimer);
       // Ordinarily a no-op by now: the handoff path above already stopped it. Still reported,
       // because "already stopped, no child" and "a child is somehow still alive" are different
@@ -2053,5 +2122,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR commandLine, int) {
     }
   }
 
-  return 0;  // uploaderShutdown -> uiScope -> wsaScope, in that order
+  { std::lock_guard<std::mutex> lock(g.ownerMu); ++g.ownerEpoch; }
+  host_workers().Shutdown();
+  return 0;  // workers joined before uploaderShutdown -> uiScope -> wsaScope
 }

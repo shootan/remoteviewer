@@ -146,6 +146,10 @@ int main(int argc, char** argv) {
   // A remote host cannot wake itself after Windows enters S3. Keep the machine reachable
   // while the host is running; the display requirement is enabled only for an active stream.
   HostPowerKeepalive powerKeepalive;
+  // Outlive every capture/encoder/session owner, including their destructors after shutdown_host.
+  // A GPU resource Release may block too; disarming before those destructors left a teardown gap.
+  WatchdogState watchdog;
+  MainLoopWatchdogThread mainLoopWatchdog;
   startup_process_setup();
 
   const Args args = parse_args(argc, argv);
@@ -168,7 +172,6 @@ int main(int argc, char** argv) {
   // NV12 surface bookkeeping, starvation heartbeat, encode counters (EncoderState, Phase 1-5).
   EncoderState encoder;
   // Capture liveness watchdogs + main-loop liveness stamps (WatchdogState, Phase 1-11).
-  WatchdogState watchdog;
   // Trailing-edge kick / static refresh / selection-first-keyframe state (KickState, Phase 1-8).
   KickState kick;
   WinsockScope ws;
@@ -206,7 +209,6 @@ int main(int argc, char** argv) {
   // Main-loop liveness watchdog. Declared here -- after `watchdog` and `stop`, which its thread
   // reads -- so reverse destruction order joins the thread before that state dies. It used to be
   // detached, which left a ~1s window after main() returned where it read freed stack. (H-06)
-  MainLoopWatchdogThread mainLoopWatchdog;
   uint64_t streamActiveSinceUs = 0;
   // Per-interval / lifetime pipeline statistics for the stats line (HostStats, Phase 1-12).
   HostStats stats;
@@ -229,15 +231,20 @@ int main(int argc, char** argv) {
 
   // Startup, in the monolith's order (host_startup.hpp). Each step is one former block of main();
   // the ones that can fail return the exit code main() used to return at that point.
+  try {
   if (const int rc = startup_configure_from_env(host)) return rc;
   if (!ws.ok) {
     std::cerr << "[native-video-host] WSAStartup failed\n";
     return 1;
   }
   if (const int rc = resolve_transport(args, useRaw, useH264, transport)) return rc;
+  watchdog.MarkMainProgress(remote60::native_poc::MainLoopPhase::Startup);
+  startup_start_main_loop_watchdog(host, mainLoopWatchdog);
+  remote60::native_poc::HostRunGuard runGuard{host};
   startup_log_config(host);
   startup_configure_session(host);
   if (const int rc = startup_connect_client(host)) return rc;
+  watchdog.MarkMainProgress(remote60::native_poc::MainLoopPhase::Startup);
   startup_configure_control_state(host);
   startup_start_control_threads(host, controlServer);
   if (const int rc = startup_init_graphics(host)) return rc;
@@ -247,7 +254,6 @@ int main(int argc, char** argv) {
   startup_start_dxgi_watchdog(host, dxgiWatchdogStop, dxgiWorkerWatchdog);
   if (const int rc = startup_create_readback(host)) return rc;
   if (const int rc = startup_start_capture(host)) return rc;
-  startup_start_main_loop_watchdog(host, mainLoopWatchdog);
 
   // One tick = the twelve stages of host_main_loop.cpp, in order. A stage that used to
   // `continue`/`break`/`return` from the loop body reports it through Flow.
@@ -278,6 +284,11 @@ int main(int argc, char** argv) {
   }
 
   shutdown_host(host);
+  runGuard.active = false;
   std::cout << "[native-video-host] done\n";
   return 0;
+  } catch (...) {
+    // Catching outside HostRunGuard ensures a real unwind, including partially started workers.
+    return 49;
+  }
 }

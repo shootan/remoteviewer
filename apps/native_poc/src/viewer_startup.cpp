@@ -6,6 +6,7 @@
 #include <windowsx.h>
 #include "viewer_gdi_util.hpp"
 #include "viewer_startup.hpp"
+#include "bounded_process_exit.hpp"
 #include "viewer_udp_session.hpp"
 
 #include <iostream>
@@ -614,6 +615,7 @@ void attach_control_tunnel_and_log(ViewerContext& ctx) {
 }
 
 void connect_control(ViewerContext& ctx) {
+  ctx.session.controlRequired = ctx.control.overUdp.load() || ctx.resolvedArgs.controlPort > 0;
   ctx.controlClient.emplace(ctx, ctx.args, ctx.startInPicker);
   // Two ways to reach the host's control protocol, and the session only ever has one of them.
   // A direct host answers on its own TCP port; a host behind NAT is reachable solely through
@@ -658,7 +660,13 @@ void connect_control(ViewerContext& ctx) {
       // storing true after the spawn could land on top of that and leave "connected" stale for
       // the rest of the session. The window was milliseconds wide; it is now zero. (F-06.)
       ctx.control.connected.store(true, std::memory_order_relaxed);
-      ctx.controlThread = std::thread([&ctx]() { ctx.controlClient->Run(); });
+      ctx.controlThread = std::thread([&ctx]() {
+        try { ctx.controlClient->Run(); } catch (...) {
+          ctx.control.connected.store(false);
+          ctx.session.recoveryExitCode.store(43); ctx.session.running.store(false);
+          PostMessageW(ctx.session.hwnd, WM_CLOSE, 0, 0);
+        }
+      });
     }
     if (ctx.controlReady) {
       ctx.control.runtimeTune.SetEnabled(ctx.dec.useH264);
@@ -692,12 +700,29 @@ void start_receiver(ViewerContext& ctx) {
   nack.replyAllowanceMaxUs = static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_VIDEO_REPLY_ALLOWANCE_MAX_MS", 1000, 50, 5000)) * 1000ULL;
   ctx.receiver.emplace(ctx, ctx.args, ctx.dec, ctx.gate, ctx.startUs, ctx.udpSimDropPm, ctx.udpSimDropSeed,
                        nack);
-  ctx.recvThread = std::thread([&ctx]() { ctx.receiver->Run(); });
+  ctx.recvThread = std::thread([&ctx]() {
+    try { ctx.receiver->Run(); } catch (...) {
+      ctx.session.recoveryExitCode.store(43); ctx.session.running.store(false);
+      PostMessageW(ctx.session.hwnd, WM_CLOSE, 0, 0);
+    }
+  });
 }
 
 void run_message_pump(ViewerContext& ctx) {
+  ctx.session.uiHeartbeatUs.store(qpc_now_us());
+  ctx.uiWatchdog = std::thread([&ctx] {
+    while (!ctx.uiWatchdogStop.load()) {
+      Sleep(250);
+      const uint64_t age = qpc_now_us() - ctx.session.uiHeartbeatUs.load();
+      if (!ctx.uiWatchdogStop.load() && age >= 15000000ULL) {
+        const char text[] = "[viewer] UI stopped progressing; rebuilding session process\n";
+        remote60::native_poc::terminate_with_diagnostic(43, text, sizeof(text) - 1);
+      }
+    }
+  });
   MSG msg{};
   while (ctx.session.running.load()) {
+    ctx.session.uiHeartbeatUs.store(qpc_now_us());
     bool hadMessage = false;
     while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
       hadMessage = true;
@@ -707,6 +732,7 @@ void run_message_pump(ViewerContext& ctx) {
       }
       TranslateMessage(&msg);
       DispatchMessageW(&msg);
+      ctx.session.uiHeartbeatUs.store(qpc_now_us());
     }
     if (!ctx.session.running.load()) break;
 

@@ -510,8 +510,10 @@ bool HostAgent::ConsumeUdpPacket(const void* data, size_t len, const sockaddr_in
     }
   }
 
-  const bool fromDirectory = from.sin_addr.s_addr == observeAddr_.sin_addr.s_addr &&
-                             from.sin_port == observeAddr_.sin_port;
+  sockaddr_in observeAddress{};
+  { std::lock_guard<std::mutex> lock(mu_); observeAddress = observeAddr_; }
+  const bool fromDirectory = from.sin_addr.s_addr == observeAddress.sin_addr.s_addr &&
+                             from.sin_port == observeAddress.sin_port;
   if (!fromDirectory || bytes[0] != '{') return false;
 
   const std::string text(reinterpret_cast<const char*>(bytes), len);
@@ -904,8 +906,7 @@ bool HostAgent::FetchObserveEndpointFromHealth() {
     --observeFetchCooldown_;
     return false;
   }
-  if (observeFetchAttempts_ >= kMaxFetchAttempts) return false;
-  ++observeFetchAttempts_;
+  observeFetchAttempts_ = (std::min)(observeFetchAttempts_ + 1, kMaxFetchAttempts);
 
   ObserveEndpoint advertised;
   std::string error;
@@ -949,11 +950,13 @@ bool HostAgent::ApplyObserveEndpoint() {
               "directory host instead");
   }
   const std::string& target = observeAdvertised_.host.empty() ? httpHost_ : observeAdvertised_.host;
-  if (!resolve_ipv4(target, port, &observeAddr_)) {
+  sockaddr_in resolvedAddress{};
+  if (!resolve_ipv4(target, port, &resolvedAddress)) {
     SetStatus("cannot resolve the observe host '" + target + "'");
     observeAddrReady_ = false;
     return false;
   }
+  { std::lock_guard<std::mutex> lock(mu_); observeAddr_ = resolvedAddress; }
   observeAddrReady_ = true;
   return true;
 }
@@ -966,7 +969,9 @@ bool HostAgent::RefreshObservedAddress() {
   const std::string probe = "OBSERVE " + observeToken_;
   for (int attempt = 0; attempt < kObserveAttempts && running_.load(); ++attempt) {
     if (!observeAddrReady_) return false;  // nowhere to send it; the status already says why
-    send_(probe.data(), probe.size(), observeAddr_);
+    sockaddr_in address{};
+    { std::lock_guard<std::mutex> lock(mu_); address = observeAddr_; }
+    send_(probe.data(), probe.size(), address);
     std::this_thread::sleep_for(std::chrono::milliseconds(kObserveWaitMs));
     std::lock_guard<std::mutex> lock(mu_);
     if (observedReady_) return true;

@@ -235,6 +235,29 @@ void run_case(const char* label, double lossRate, size_t messageBytes, int messa
 }  // namespace
 
 int main() {
+  {
+    using namespace remote60::native_poc;
+    UdpControlChannel channel;
+    channel.Configure([](const void*, size_t) { return true; }, 2, 1, 1200);
+    auto feed = [&](uint32_t seq, uint32_t total, uint16_t index, uint16_t count, uint32_t offset, uint16_t size) {
+      UdpControlChunkHeader header{};
+      header.magic = kMagic; header.kind = static_cast<uint16_t>(UdpPacketKind::ControlData);
+      header.streamId = 1; header.messageSeq = seq; header.totalSize = total;
+      header.fragIndex = index; header.fragCount = count; header.fragOffset = offset; header.fragSize = size;
+      std::vector<uint8_t> packet(sizeof(header) + size, 1);
+      std::memcpy(packet.data(), &header, sizeof(header));
+      channel.OnPacket(packet.data(), packet.size());
+    };
+    feed(1, 4, 0, 2, 0, 2); feed(1, 4, 1, 2, 1, 2);
+    std::vector<uint8_t> out;
+    check("overlapping fragments never form a valid message", !channel.Receive(&out, 1) &&
+          channel.CloseReason() == ControlCloseReason::MalformedMessage);
+    channel.Reset();
+    for (uint32_t seq = 1; seq <= 6; ++seq) feed(seq, 8u * 1024u * 1024u, 0, 2, 0, 1);
+    check("incomplete control payloads have an aggregate budget", channel.IsClosed() &&
+          channel.CloseReason() == ControlCloseReason::ResourceLimit &&
+          channel.GetStats().inboundBytes <= 32u * 1024u * 1024u);
+  }
   run_handover_case();
   run_case("small messages, clean link", 0.0, 64, 20);
   run_case("small messages, 10% loss", 0.10, 64, 20);

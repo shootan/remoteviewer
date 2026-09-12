@@ -27,6 +27,7 @@
 
 #include "capture_backend_dxgi.hpp"
 #include "capture_cadence_gate.hpp"
+#include "capture_callback_gate.hpp"
 #include "d3d_capture_readback.hpp"
 #include "gdi_capture_process.hpp"
 #include "host_frame_state.hpp"
@@ -152,6 +153,7 @@ struct CaptureState {
   std::string targetTitle;
   std::atomic<uint64_t> selectedWindowId{0};
   std::atomic<uint32_t> selectedMonitorId{0};
+  std::wstring selectedMonitorDevice;  // main-loop owned stable device name, not an enum index
   // cross-thread: selection / capture-mode requests from the control thread, consumed by main.
   std::atomic<uint64_t> streamGenerationState{1};
   // Flush epoch (P11): bumped by EncoderState::ResetTimelineAnchors, i.e. on every capture flush,
@@ -192,10 +194,16 @@ struct CaptureState {
   int64_t timelineOriginUs = -1;
   // Backend session flags, restart accounting and fallback reasons.
   std::atomic<bool> sessionReady{false};
+  std::shared_ptr<CaptureCallbackGate> callbackGate;
+  std::atomic<bool> frameHeartbeatEnabled{false};
   std::atomic<bool> dxgiFallbackRequested{false};
   std::atomic<bool> gdiFallbackRequested{false};
   uint64_t sessionStartedUs = 0;
   uint64_t restartCount = 0;
+  // Main-loop retry state outlives the request flag and a failed attachment.
+  bool restartPending = false;
+  uint64_t restartRetryAtUs = 0;
+  uint32_t restartFailures = 0;
   bool dxgiStarted = false;
   bool gdiStarted = false;
   std::mutex fallbackReasonMu;

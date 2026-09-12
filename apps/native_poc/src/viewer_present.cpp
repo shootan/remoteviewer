@@ -111,6 +111,26 @@ bool ensure_picker_surface(ViewerState& ctx, int w, int h) {
 // somewhere nobody could see. Every line of the drawing is unchanged: draw_overlay renders into an
 // offscreen DIB instead of the window, and the finished bitmap is uploaded and presented through
 // the same swapchain the video uses.
+// Recover on the UI thread. The decoder shares the device, so device loss rebuilds the
+// process through the shell rather than releasing device pointers while decode is using them.
+void note_present_result(ViewerState& ctx, HWND hwnd, bool ok) {
+  if (ok) { ctx.present.failureSinceUs = 0; ctx.present.rebuildAttempted = false; return; }
+  const uint64_t nowUs = qpc_now_us();
+  if (!ctx.present.failureSinceUs) ctx.present.failureSinceUs = nowUs;
+  auto& renderer = ctx.ui.nv12Renderer;
+  const bool lost = renderer.device && FAILED(renderer.device->GetDeviceRemovedReason());
+  if (lost || nowUs - ctx.present.failureSinceUs >= 2000000ULL) {
+    ctx.session.recoveryExitCode.store(43);
+    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+  } else {
+    if (!ctx.present.rebuildAttempted && renderer.ready) {
+      ctx.present.rebuildAttempted = true;
+      renderer.release_swapchain();  // keeps the decoder's device alive
+    }
+    SetTimer(hwnd, kRenderRetryTimerId, 100, nullptr);
+  }
+}
+
 bool present_picker_frame(ViewerState& ctx, HWND hwnd) {
   RECT rc{};
   GetClientRect(hwnd, &rc);
@@ -273,7 +293,7 @@ LRESULT paint_video_frame(ViewerState& ctx, HWND hwnd) {
           fallbackReason = renderTelemetry.failStage;
         }
       }
-      if (!presented && local) {
+      if (!presented && local && ctx.ui.nv12Renderer.gdi_reaches_the_screen()) {
         std::vector<uint8_t> bgra;
         if (nv12_to_bgra(local->data(), codedW, codedH, &bgra) && !bgra.empty()) {
           // The DIB carries the coded plane; the source rect and a row-offset base
@@ -287,20 +307,20 @@ LRESULT paint_video_frame(ViewerState& ctx, HWND hwnd) {
           bmi.bmiHeader.biCompression = BI_RGB;
           SetStretchBltMode(hdc, COLORONCOLOR);
           FillRect(hdc, &videoRect, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
-          StretchDIBits(hdc, contentRect.left, contentRect.top,
+          const int blitted = StretchDIBits(hdc, contentRect.left, contentRect.top,
                         contentRect.right - contentRect.left, contentRect.bottom - contentRect.top,
                         static_cast<int>(visL), 0, static_cast<int>(w), static_cast<int>(h),
                         bgra.data() + static_cast<size_t>(visT) * codedW * 4, &bmi,
                         DIB_RGB_COLORS, SRCCOPY);
-          presented = true;
-          ++ctx.present.gdiFallbackPresentedCount;
+          presented = blitted != 0 && blitted != static_cast<int>(GDI_ERROR);
+          if (presented) ++ctx.present.gdiFallbackPresentedCount;
           renderPath = "gdi_nv12_fallback";
         } else {
           ++ctx.present.fallbackNv12ConvertFailCount;
           fallbackReason = "nv12_to_bgra_fail";
         }
       }
-    } else if (localFormat == SharedFrame::PixelFormat::Bgra32) {
+    } else if (localFormat == SharedFrame::PixelFormat::Bgra32 && ctx.ui.nv12Renderer.gdi_reaches_the_screen()) {
       BITMAPINFO bmi{};
       bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
       bmi.bmiHeader.biWidth = static_cast<LONG>(w);
@@ -310,14 +330,15 @@ LRESULT paint_video_frame(ViewerState& ctx, HWND hwnd) {
       bmi.bmiHeader.biCompression = BI_RGB;
       SetStretchBltMode(hdc, COLORONCOLOR);
       FillRect(hdc, &videoRect, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
-      StretchDIBits(hdc, contentRect.left, contentRect.top,
+      const int blitted = StretchDIBits(hdc, contentRect.left, contentRect.top,
                     contentRect.right - contentRect.left, contentRect.bottom - contentRect.top,
                     0, 0, static_cast<int>(w), static_cast<int>(h),
                     local->data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
-      presented = true;
+      presented = blitted != 0 && blitted != static_cast<int>(GDI_ERROR);
       renderPath = "gdi_bgra";
     }
   }
+  if (!pickerVisible && (local || localSurfaceTexture) && w > 0 && h > 0) note_present_result(ctx, hwnd, presented);
   if (presented) {
     ctx.present.hasPresentedAtLeastOneFrame = true;
     ctx.frameBuf.lastPresentedVersion.store(frameVersion, std::memory_order_relaxed);
@@ -478,7 +499,7 @@ LRESULT paint_video_frame(ViewerState& ctx, HWND hwnd) {
   // and the picker is blitted into it as it always was. After, GDI does not reach the screen at
   // all, and the picker has to go through the swapchain -- see present_picker_frame above.
   if (pickerVisible && !ctx.ui.nv12Renderer.gdi_reaches_the_screen()) {
-    present_picker_frame(ctx, hwnd);
+    note_present_result(ctx, hwnd, present_picker_frame(ctx, hwnd));
   } else {
     if (pickerVisible) {
       FillRect(hdc, &videoRect, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));

@@ -259,6 +259,8 @@ std::wstring macro_page_uri() {
   return L"file:///" + executable_dir() + L"\\..\\..\\..\\..\\apps\\native_poc\\ui\\macro.html";
 }
 
+void create_window(HINSTANCE instance, HWND owner);
+
 LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   switch (msg) {
     case WM_SIZE:
@@ -272,6 +274,21 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       // dismissed, and rebuilding the WebView each time is slow enough to be noticed.
       ShowWindow(hwnd, SW_HIDE);
       return 0;
+    case WM_APP + 2: {
+      static uint64_t windowStart = 0; static uint32_t failures = 0;
+      const uint64_t now = GetTickCount64();
+      if (!windowStart || now - windowStart > 60000) { windowStart = now; failures = 0; }
+      if (++failures > 3 && MessageBoxW(hwnd, L"매크로 화면을 다시 여시겠습니까?", L"GNLink",
+                                        MB_RETRYCANCEL | MB_ICONERROR) != IDRETRY) {
+        DestroyWindow(hwnd); return 0;
+      }
+      HWND owner = GetWindow(hwnd, GW_OWNER);
+      HINSTANCE instance = reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE));
+      DestroyWindow(hwnd);
+      create_window(instance, owner);
+      if (gWindow) ShowWindow(gWindow, SW_SHOW);
+      return 0;
+    }
     case WM_DESTROY:
       KillTimer(hwnd, kPumpTimerId);
       gController.Reset();
@@ -324,6 +341,11 @@ void create_window(HINSTANCE instance, HWND owner) {
                       }
 
                       EventRegistrationToken token{};
+                      gWebView->add_ProcessFailed(
+                          Callback<ICoreWebView2ProcessFailedEventHandler>(
+                            [](ICoreWebView2*, ICoreWebView2ProcessFailedEventArgs*) -> HRESULT {
+                              if (gWindow) PostMessageW(gWindow, WM_APP + 2, 0, 0); return S_OK;
+                            }).Get(), &token);
                       gWebView->add_WebMessageReceived(
                           Callback<ICoreWebView2WebMessageReceivedEventHandler>(
                               [](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* args)

@@ -110,8 +110,6 @@ int startup_init_graphics(HostContext& hx) {
   winrt::init_apartment(winrt::apartment_type::multi_threaded);
   if (!GraphicsCaptureSession::IsSupported()) {
     std::cerr << "[native-video-host] WGC not supported\n";
-    closesocket(clientSession.clientSock);
-    if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
     return 6;
   }
 
@@ -120,8 +118,6 @@ int startup_init_graphics(HostContext& hx) {
     if (FAILED(hr)) {
       std::cerr << "[native-video-host] MFStartup failed hr=0x" << std::hex << static_cast<unsigned long>(hr)
                 << std::dec << "\n";
-      closesocket(clientSession.clientSock);
-      if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
       return 12;
     }
     encoder.mfStarted = true;
@@ -130,9 +126,6 @@ int startup_init_graphics(HostContext& hx) {
   HRESULT hr = create_d3d11_device_for_primary_monitor(&res.d3d, &res.ctx, &res.fl);
   if (FAILED(hr)) {
     std::cerr << "[native-video-host] D3D11CreateDevice failed\n";
-    closesocket(clientSession.clientSock);
-    if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
-    if (encoder.mfStarted) MFShutdown();
     return 7;
   }
   std::cout << d3d_multithread_log_line("device-created", res.d3d.Get(), res.ctx.Get());
@@ -218,9 +211,6 @@ int startup_select_capture_target(HostContext& hx) {
   capture.monitorInfo = primary_monitor_info();
   if (!capture.monitorInfo.has_value()) {
     std::cerr << "[native-video-host] primary monitor query failed\n";
-    closesocket(clientSession.clientSock);
-    if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
-    if (encoder.mfStarted) MFShutdown();
     return 8;
   }
   if (!capture.windowModeActive && backend.requested == DesktopCaptureBackend::Dxgi &&
@@ -241,9 +231,6 @@ int startup_select_capture_target(HostContext& hx) {
                : CreateItemForPrimaryMonitor();
     if (!item) {
       std::cerr << "[native-video-host] capture item create failed\n";
-      closesocket(clientSession.clientSock);
-      if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
-      if (encoder.mfStarted) MFShutdown();
       return 8;
     }
     capture.size = item.Size();
@@ -257,9 +244,6 @@ int startup_select_capture_target(HostContext& hx) {
   }
   if (capture.width < 2 || capture.height < 2) {
     std::cerr << "[native-video-host] invalid capture size\n";
-    closesocket(clientSession.clientSock);
-    if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
-    if (encoder.mfStarted) MFShutdown();
     return 9;
   }
   std::cout << "[native-video-host] desktop_backend="
@@ -393,9 +377,6 @@ int startup_init_encoder(HostContext& hx) {
   if (useH264) {
     if (!encoder.codec.initialize(encoder.activeEncodeW, encoder.activeEncodeH, encoder.activeFps, encoder.activeBitrate, encoder.activeKeyint)) {
       std::cerr << "[native-video-host] H264 encoder initialize failed\n";
-      closesocket(clientSession.clientSock);
-      if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
-      if (encoder.mfStarted) MFShutdown();
       return 13;
     }
     encoder.ResetTimelineAnchors(capture);

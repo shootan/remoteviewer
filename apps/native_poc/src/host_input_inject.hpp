@@ -117,7 +117,8 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
                                                 DesktopInputState* desktopInputState,
                                                 std::string* resolvedTargetOut = nullptr,
                                                 InputFailStage* failStageOut = nullptr,
-                                                DWORD* failErrorOut = nullptr);
+                                                DWORD* failErrorOut = nullptr,
+                                                HMONITOR targetMonitor = nullptr);
 
 InputInjectResult apply_input_text_message(const ControlInputTextMessage& text,
                                            const std::atomic<uint64_t>& captureTargetHwnd,

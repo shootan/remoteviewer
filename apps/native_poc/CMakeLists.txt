@@ -1,4 +1,11 @@
 # The WebView2 SDK is a NuGet package of headers and a static loader, fetched into third_party
+add_executable(remote60_recovery_process_test src/recovery_process_test.cpp src/udp_control_channel.cpp)
+target_include_directories(remote60_recovery_process_test PRIVATE src)
+target_link_libraries(remote60_recovery_process_test PRIVATE ws2_32)
+add_executable(remote60_winhttp_recovery_test src/winhttp_recovery_test.cpp src/winhttp_transport.cpp)
+target_include_directories(remote60_winhttp_recovery_test PRIVATE src)
+target_link_libraries(remote60_winhttp_recovery_test PRIVATE winhttp)
+
 # rather than vendored: it is 45 MB of which the build uses two files. Detected up here because
 # both the client shell and the viewer's macro window depend on it.
 set(GNLINK_WEBVIEW2_DIR "${CMAKE_SOURCE_DIR}/third_party/webview2/build/native")
@@ -99,6 +106,26 @@ add_executable(remote60_native_video_host_poc
   src/secure_input_broker.cpp
 )
 set_target_properties(remote60_native_video_host_poc PROPERTIES OUTPUT_NAME "GNLinkStream")
+
+# Reuse this worktree's compiled production objects for the entry/unwind fixture. The only
+# replacement TU is main; all shutdown/control/watchdog implementations are the product objects.
+# These object paths belong to the Visual Studio generator, so do not assume them on Ninja.
+if(CMAKE_GENERATOR MATCHES "Visual Studio")
+  get_target_property(_host_failure_sources remote60_native_video_host_poc SOURCES)
+  set(_host_failure_objects)
+  foreach(_source IN LISTS _host_failure_sources)
+    if(_source MATCHES "\\.cpp$" AND NOT _source MATCHES "native_video_host_main.cpp$")
+      get_filename_component(_object_name "${_source}" NAME_WE)
+      list(APPEND _host_failure_objects "${CMAKE_CURRENT_BINARY_DIR}/remote60_native_video_host_poc.dir/$<CONFIG>/${_object_name}.obj")
+    endif()
+  endforeach()
+  add_executable(remote60_host_runtime_failure_test src/host_runtime_failure_test.cpp)
+  target_include_directories(remote60_host_runtime_failure_test PRIVATE src "${CMAKE_SOURCE_DIR}/libs/capture/src")
+  target_link_libraries(remote60_host_runtime_failure_test PRIVATE ${_host_failure_objects})
+  target_link_libraries(remote60_host_runtime_failure_test PRIVATE $<TARGET_PROPERTY:remote60_native_video_host_poc,LINK_LIBRARIES>)
+  target_compile_definitions(remote60_host_runtime_failure_test PRIVATE $<TARGET_PROPERTY:remote60_native_video_host_poc,COMPILE_DEFINITIONS>)
+  add_dependencies(remote60_host_runtime_failure_test remote60_native_video_host_poc)
+endif()
 
 add_executable(remote60_gdi_capture_worker
   src/gdi_capture_worker_main.cpp
@@ -1472,6 +1499,20 @@ if(GNLINK_HAVE_WEBVIEW2)
     ws2_32 iphlpapi user32 ole32 shell32 shlwapi version gdi32 bcrypt winhttp
   )
   set_target_properties(remote60_client_shell PROPERTIES OUTPUT_NAME "GNLinkClient")
+  # HTML-only fixes must be staged even when the executable does not need linking.
+  add_custom_target(remote60_client_ui_assets
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:remote60_client_shell>/ui"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/ui/shell.html"
+            "$<TARGET_FILE_DIR:remote60_client_shell>/ui/shell.html")
+  add_dependencies(remote60_client_shell remote60_client_ui_assets)
+  get_target_property(_recovery_shell_sources remote60_client_shell SOURCES)
+  list(FILTER _recovery_shell_sources EXCLUDE REGEX "client_shell_main.cpp$")
+  list(REMOVE_DUPLICATES _recovery_shell_sources)
+  add_executable(remote60_client_recovery_ui_test src/client_recovery_ui_test.cpp ${_recovery_shell_sources})
+  target_include_directories(remote60_client_recovery_ui_test PRIVATE src "${GNLINK_WEBVIEW2_DIR}/include")
+  get_target_property(_recovery_shell_links remote60_client_shell LINK_LIBRARIES)
+  target_link_libraries(remote60_client_recovery_ui_test PRIVATE ${_recovery_shell_links})
+  add_dependencies(remote60_client_recovery_ui_test remote60_client_shell)
 
   # The page is loaded from disk rather than compiled in, so it can be adjusted without a
   # rebuild; copied beside the executable so a build tree behaves like an install.

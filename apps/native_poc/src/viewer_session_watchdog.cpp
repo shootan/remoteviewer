@@ -29,7 +29,7 @@ void poll_session_liveness(ViewerState& ctx, HWND hwnd) {
   if (connected && !tunnelClosed) {
     w.controlEverConnected = true;
     w.controlGoneSinceUs = 0;
-  } else if (w.controlEverConnected && w.controlGoneSinceUs == 0) {
+  } else if ((w.controlEverConnected || ctx.session.controlRequired) && w.controlGoneSinceUs == 0) {
     w.controlGoneSinceUs = nowUs;
   }
 
@@ -45,6 +45,13 @@ void poll_session_liveness(ViewerState& ctx, HWND hwnd) {
   s.controlConnected = connected;
   s.tunnelClosed = tunnelClosed;
   s.controlGoneSinceUs = w.controlGoneSinceUs;
+  s.streamExpected = (!ctx.picker.visible.load() || ctx.sel.pending.load()) &&
+                     !ctx.control.reportedSecure.load() &&
+                     (ctx.session.hostFrameHeartbeat.load() || s.lastPublishUs == 0 || ctx.sel.pending.load());
+  s.controlRequired = ctx.session.controlRequired;
+  if (!s.streamExpected) w.streamExpectedSinceUs = 0;
+  else if (!w.streamExpectedSinceUs) w.streamExpectedSinceUs = nowUs;
+  s.streamExpectedSinceUs = w.streamExpectedSinceUs;
   SessionLivenessConfig cfg;
   cfg.deadSessionUs = static_cast<uint64_t>(ctx.session.deadSessionUs);
   const SessionLivenessVerdict v = evaluate_session_liveness(s, cfg);
@@ -88,6 +95,7 @@ void poll_session_liveness(ViewerState& ctx, HWND hwnd) {
     set_window_panel_status(ctx, "session_lost");
     if (hwnd) InvalidateRect(hwnd, nullptr, FALSE);
     if (exitSession && hwnd) {
+      ctx.session.recoveryExitCode.store(43);
       // Nothing on this session can recover: the control thread has exited and the tunnel (if
       // any) is closed for good, and no frame has been published for deadSessionUs. Ending the
       // viewer hands the shell back its host list, where one click reconnects -- the same thing

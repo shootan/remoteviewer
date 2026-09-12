@@ -68,6 +68,8 @@ bool http_exchange(const std::string& host, uint16_t port, bool secure, const ch
                    HttpResult* out) {
   if (!out) return false;
   *out = HttpResult{};
+  const uint32_t budgetMs = timeoutMs ? timeoutMs : 5000;
+  const uint64_t deadline = GetTickCount64() + budgetMs;
   if (host.empty() || !method || path.empty()) {
     out->error = "malformed request";
     return false;
@@ -99,6 +101,19 @@ bool http_exchange(const std::string& host, uint16_t port, bool secure, const ch
     out->error = "cannot open the request";
     return false;
   }
+  const auto remaining_timeout = [&]() {
+    const uint64_t now = GetTickCount64();
+    if (now >= deadline) {
+      *out = HttpResult{}; out->error = "HTTP exchange deadline exceeded"; return false;
+    }
+    const int remaining = static_cast<int>((deadline - now) > 0x7fffffffULL ? 0x7fffffffULL : deadline - now);
+    // WinHttpSetTimeouts accepts request handles as well as session handles (Microsoft Learn).
+    // Shrinking the timeout before every read prevents a peer from keeping a body alive by drip-feeding.
+    if (!WinHttpSetTimeouts(request.h, remaining, remaining, remaining, remaining)) {
+      *out = HttpResult{}; out->error = "cannot set HTTP deadline"; return false;
+    }
+    return true;
+  };
 
   std::wstring headers;
   if (!body.empty() && contentType) {
@@ -108,6 +123,7 @@ bool http_exchange(const std::string& host, uint16_t port, bool secure, const ch
   }
   headers += widen(extraHeaders);
 
+  if (!remaining_timeout()) return false;
   const bool sent = WinHttpSendRequest(
       request.h, headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
       headers.empty() ? 0 : static_cast<DWORD>(-1),
@@ -122,6 +138,7 @@ bool http_exchange(const std::string& host, uint16_t port, bool secure, const ch
                      : "cannot reach the server (" + std::to_string(err) + ")";
     return false;
   }
+  if (!remaining_timeout()) return false;
   if (!WinHttpReceiveResponse(request.h, nullptr)) {
     out->error = "no response (" + std::to_string(GetLastError()) + ")";
     return false;
@@ -136,15 +153,41 @@ bool http_exchange(const std::string& host, uint16_t port, bool secure, const ch
     return false;
   }
   out->status = statusCode;
+  DWORD expectedBytes = 0;
+  DWORD expectedSize = sizeof(expectedBytes);
+  const bool hasLength = WinHttpQueryHeaders(request.h, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
+      WINHTTP_HEADER_NAME_BY_INDEX, &expectedBytes, &expectedSize, WINHTTP_NO_HEADER_INDEX) != FALSE;
+  const DWORD lengthError = hasLength ? ERROR_SUCCESS : GetLastError();
+  const bool hasBody = _stricmp(method, "HEAD") != 0 && statusCode != 204 && statusCode != 304;
+  if (hasBody && ((!hasLength && lengthError != ERROR_WINHTTP_HEADER_NOT_FOUND) ||
+                  (hasLength && expectedBytes > kMaxHttpResponseBytes))) {
+    *out = HttpResult{}; out->error = "invalid or excessive HTTP response length"; return false;
+  }
 
   // The body is read whatever the status: the server's own error text is what the caller shows,
   // and throwing it away on a non-200 would leave "something went wrong" and nothing else.
   for (;;) {
+    if (!remaining_timeout()) return false;
     DWORD available = 0;
-    if (!WinHttpQueryDataAvailable(request.h, &available) || available == 0) break;
+    if (!WinHttpQueryDataAvailable(request.h, &available)) {
+      const DWORD error = GetLastError();
+      *out = HttpResult{};
+      out->error = "response availability failed: " + std::to_string(error);
+      return false;
+    }
+    if (available == 0) break;
+    const size_t remainingCapacity = kMaxHttpResponseBytes + 1 - out->body.size();
+    if (available > remainingCapacity) available = static_cast<DWORD>(remainingCapacity);
     std::vector<char> chunk(available);
     DWORD read = 0;
-    if (!WinHttpReadData(request.h, chunk.data(), available, &read) || read == 0) break;
+    if (!remaining_timeout()) return false;
+    if (!WinHttpReadData(request.h, chunk.data(), available, &read)) {
+      const DWORD error = GetLastError();
+      *out = HttpResult{};
+      out->error = "response read failed: " + std::to_string(error);
+      return false;
+    }
+    if (read == 0) break;
     out->body.append(chunk.data(), read);
     // A server that never stops talking must not be allowed to grow this without limit -- and a
     // truncated body handed back as if it were the whole one is worse than no body at all.
@@ -160,6 +203,9 @@ bool http_exchange(const std::string& host, uint16_t port, bool secure, const ch
     }
   }
 
+  if (hasBody && hasLength && out->body.size() != expectedBytes) {
+    *out = HttpResult{}; out->error = "incomplete HTTP response body"; return false;
+  }
   out->sent = true;
   return true;
 }

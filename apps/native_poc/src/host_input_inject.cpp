@@ -252,16 +252,13 @@ bool resolve_message_target_at_screen_point(HWND seedHwnd, const POINT& screenPt
 }
 
 bool map_input_to_primary_monitor_point(int32_t x, int32_t y, uint32_t inputW, uint32_t inputH,
-                                        POINT* outPt) {
+                                        POINT* outPt, HMONITOR targetMonitor) {
   if (!outPt) return false;
-  HMONITOR primaryMon = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
+  HMONITOR primaryMon = targetMonitor ? targetMonitor : MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
   MONITORINFO monInfo{};
   monInfo.cbSize = sizeof(monInfo);
   if (!GetMonitorInfo(primaryMon, &monInfo)) {
-    monInfo.rcMonitor.left = 0;
-    monInfo.rcMonitor.top = 0;
-    monInfo.rcMonitor.right = GetSystemMetrics(SM_CXSCREEN);
-    monInfo.rcMonitor.bottom = GetSystemMetrics(SM_CYSCREEN);
+    return false;
   }
   const int monW = std::max<int>(1, monInfo.rcMonitor.right - monInfo.rcMonitor.left);
   const int monH = std::max<int>(1, monInfo.rcMonitor.bottom - monInfo.rcMonitor.top);
@@ -566,7 +563,7 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
                                                 DesktopInputState* desktopInputState,
                                                 std::string* resolvedTargetOut,
                                                 InputFailStage* failStageOut,
-                                                DWORD* failErrorOut) {
+                                                DWORD* failErrorOut, HMONITOR targetMonitor) {
   // SetLastError(ERROR_SUCCESS) before each stamped API, capture immediately on failure: per the
   // SendInput contract a UIPI block can return with no error at all, so a preserved 0 next to a
   // stage is itself the signal (stage set, error 0 = swallowed, not skipped).
@@ -686,7 +683,7 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
   }
 
   POINT screenPt{};
-  if (!map_input_to_primary_monitor_point(input.x, input.y, inputDomainW, inputDomainH, &screenPt)) {
+  if (!map_input_to_primary_monitor_point(input.x, input.y, inputDomainW, inputDomainH, &screenPt, targetMonitor)) {
     return failVal(InputFailStage::MapPoint, ERROR_INVALID_PARAMETER);
   }
   resolve_desktop_input_target(screenPt, desktopInputState, nullptr, nullptr, resolvedTargetOut);

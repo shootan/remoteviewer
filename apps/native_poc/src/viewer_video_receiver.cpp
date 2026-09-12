@@ -2,6 +2,7 @@
 // verbatim (viewer split refactor Phase 2-1).
 
 #include "viewer_video_receiver.hpp"
+#include "udp_receive_pump.hpp"
 
 #include "viewer_frame_gate.hpp"
 
@@ -48,6 +49,11 @@ bool wait_readable(SOCKET s, int timeoutMs) {
 }  // namespace
 
 void VideoReceiver::run_udp() {
+  UdpReceivePump socketPump(ctx.session.sock,
+      [&](const void* data, size_t size) {
+        ctx.recvLive.lastDatagramUs.store(qpc_now_us(), std::memory_order_relaxed);
+        return ctx.control.overUdp.load() && ctx.control.udpControl.OnPacket(data, size);
+      }, [&] { if (ctx.control.overUdp.load()) ctx.control.udpControl.Tick(); });
   std::array<uint8_t, 1600> datagram{};
   const uint32_t effectiveUdpSimDropSeed = (udpSimDropSeed > 0)
                                                ? udpSimDropSeed
@@ -320,7 +326,7 @@ void VideoReceiver::run_udp() {
     }
     // Every path through the loop passes here first (see maintenance above).
     if (!maintenance(qpc_now_us(), false)) break;
-    const int n = recv(ctx.session.sock, reinterpret_cast<char*>(datagram.data()), static_cast<int>(datagram.size()), 0);
+    const int n = socketPump.Read(datagram.data(), datagram.size());
     if (n <= 0) {
       // A read timeout is not a dead socket. It is also the tunnel's heartbeat: the control
       // thread spends most of its time blocked waiting for a reply, so if retransmission
@@ -478,6 +484,7 @@ void VideoReceiver::run_udp() {
           : 0;
       st.udpAssemblyDropPmLast = static_cast<uint32_t>(std::min<uint64_t>(dropPermille, 1000ULL));
       std::cout << "[native-video-client] udp-assembly chunks=" << chunksDelta
+                << " socketQueueDrops=" << socketPump.Drops()
                 << " completed=" << completedDelta
                 << " dropped=" << droppedDelta
                 << " dropPm=" << dropPermille
@@ -513,6 +520,7 @@ void VideoReceiver::run_udp() {
   }
 
   ctx.recvLive.Enter(RecvStage::Exited, qpc_now_us());
+  if (ctx.session.running.load() && args.seconds == 0) ctx.session.recoveryExitCode.store(43);
   ctx.session.running = false;
   if (ctx.session.hwnd) PostMessageW(ctx.session.hwnd, WM_CLOSE, 0, 0);
   return;
@@ -531,8 +539,12 @@ void VideoReceiver::run_tcp() {
     // The TCP socket has no receive timeout, so recv_all would block for as long as the host
     // stays quiet; a bounded select in front of it keeps the checks above alive. (F-13.)
     if (!wait_readable(ctx.session.sock, 200)) continue;
+    const auto messageDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    const auto readMessage = [&](void* data, size_t size) {
+      return remote60::native_poc::recv_all_until(ctx.session.sock, data, size, messageDeadline);
+    };
     MessageHeader header{};
-    if (!remote60::native_poc::recv_all(ctx.session.sock, &header, sizeof(header))) break;
+    if (!readMessage(&header, sizeof(header))) break;
     if (header.magic != remote60::native_poc::kMagic || header.size < sizeof(header)) break;
     ctx.recvLive.lastDatagramUs.store(qpc_now_us(), std::memory_order_relaxed);
     const auto msgType = static_cast<MessageType>(header.type);
@@ -540,9 +552,13 @@ void VideoReceiver::run_tcp() {
     if (msgType == MessageType::RawFrameBgra && header.size == sizeof(RawFrameHeader)) {
       RawFrameHeader h{};
       h.header = header;
-      if (!remote60::native_poc::recv_all(ctx.session.sock, &h.seq, sizeof(h) - sizeof(MessageHeader))) break;
+      if (!readMessage(&h.seq, sizeof(h) - sizeof(MessageHeader))) break;
+      if (!h.width || !h.height || h.width > 16384 || h.height > 16384 ||
+          h.stride != static_cast<uint64_t>(h.width) * 4 ||
+          static_cast<uint64_t>(h.stride) * h.height != h.payloadSize ||
+          h.payloadSize > 128u * 1024u * 1024u) break;
       std::vector<uint8_t> payload(h.payloadSize);
-      if (!remote60::native_poc::recv_all(ctx.session.sock, payload.data(), payload.size())) break;
+      if (!readMessage(payload.data(), payload.size())) break;
 
       if (!dec.useRaw) {
         ++st.skippedQueued;
@@ -630,19 +646,22 @@ void VideoReceiver::run_tcp() {
     } else if (msgType == MessageType::EncodedFrameH264 && header.size == sizeof(EncodedFrameHeader)) {
       EncodedFrameHeader h{};
       h.header = header;
-      if (!remote60::native_poc::recv_all(ctx.session.sock, &h.seq, sizeof(h) - sizeof(MessageHeader))) break;
+      if (!readMessage(&h.seq, sizeof(h) - sizeof(MessageHeader))) break;
+      if (!h.payloadSize || h.payloadSize > 16u * 1024u * 1024u) break;
       std::vector<uint8_t> payload(h.payloadSize);
-      if (!remote60::native_poc::recv_all(ctx.session.sock, payload.data(), payload.size())) break;
+      if (!readMessage(payload.data(), payload.size())) break;
       const uint64_t packetNowUs = qpc_now_us();
       if (!process_h264_frame(h, &payload, packetNowUs)) break;
     } else {
       const size_t bodySize = static_cast<size_t>(header.size - sizeof(header));
-      if (bodySize > 0 && !remote60::native_poc::recv_discard(ctx.session.sock, bodySize)) break;
+      std::vector<uint8_t> discard(bodySize);
+      if (bodySize > 0 && !readMessage(discard.data(), bodySize)) break;
       ++st.skippedQueued;
     }
 
   }
   ctx.recvLive.Enter(RecvStage::Exited, qpc_now_us());
+  if (ctx.session.running.load() && args.seconds == 0) ctx.session.recoveryExitCode.store(43);
   ctx.session.running = false;
   if (ctx.session.hwnd) PostMessageW(ctx.session.hwnd, WM_CLOSE, 0, 0);
 }

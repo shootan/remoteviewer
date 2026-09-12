@@ -47,6 +47,7 @@ struct SocketCloser {
   enum class DirectoryHello { Rejected, Retransmit, NewSession };
 
 struct SessionState {
+  ~SessionState() { directoryAgent.Stop(); }  // before member/socket destruction, including early startup failure
   // Directory service credentials (args or REMOTE60_DIRECTORY_* env) and the agent.
   std::string directoryUrl;
   std::string directoryId;

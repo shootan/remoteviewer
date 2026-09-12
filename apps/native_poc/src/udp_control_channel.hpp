@@ -33,6 +33,8 @@ enum class ControlCloseReason : uint8_t {
   PeerLost,          // retransmits exhausted -- the client stopped answering
   SessionRollover,   // a new client authenticated; this channel belongs to the previous one
   Shutdown,          // the process is going away
+  ResourceLimit,
+  MalformedMessage,
 };
 
 const char* to_string(ControlCloseReason reason);
@@ -73,6 +75,8 @@ class UdpControlChannel {
     uint64_t fragmentsSent = 0;
     uint64_t fragmentRetransmits = 0;
     uint64_t nacksSent = 0;
+    uint64_t pendingMessages = 0;
+    uint64_t inboundBytes = 0;
   };
   Stats GetStats() const;
 
@@ -90,9 +94,11 @@ class UdpControlChannel {
     uint16_t fragCount = 0;
     std::vector<uint8_t> bytes;
     std::vector<bool> have;
+    std::vector<std::pair<uint32_t, uint32_t>> ranges;
     uint16_t haveCount = 0;
     uint64_t lastProgressUs = 0;
     uint64_t lastNackUs = 0;
+    uint64_t createdUs = 0;
   };
 
   void SendFragments(const Outbound& msg, const std::vector<uint16_t>* only);

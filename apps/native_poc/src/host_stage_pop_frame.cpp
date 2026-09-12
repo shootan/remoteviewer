@@ -81,6 +81,10 @@ using remote60::host::DxgiDesktopCaptureSession;
 namespace remote60::native_poc {
 
 Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
+  if (hx.encoder.targetPending) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    return Flow::Continue;
+  }
   auto& useH264 = hx.useH264;
   auto& transport = hx.transport;
   auto& stop = hx.stop;

@@ -555,10 +555,11 @@ void log_upload_clear_credentials(const char* reason) {
        std::to_string(lines) + " discardedBatches=" + std::to_string(batches));
 }
 
-void log_upload_enqueue(const char* stream, const std::string& line) {
+static void enqueue_for_owner(const char* stream, const std::string& line, const std::string* identity) {
   UploaderState& s = state();
   std::lock_guard<std::mutex> lk(s.mu);
   if (!s.running || s.stopping || line.empty()) return;
+  if (identity && s.config.identity != *identity) { ++s.droppedLines; return; }
   if (!s.credentials) {
     // Nobody to send it as: a line produced while signed out must not ride the next account's
     // token. The disk copy has it.
@@ -576,6 +577,13 @@ void log_upload_enqueue(const char* stream, const std::string& line) {
   s.queue.push_back(QueuedLine{stream ? stream : "log", line});
   s.queuedBytes += line.size() + 1;
   if (s.queuedBytes >= s.config.batchMaxBytes) s.cv.notify_one();
+}
+
+void log_upload_enqueue(const char* stream, const std::string& line) {
+  enqueue_for_owner(stream, line, nullptr);
+}
+void log_upload_enqueue_for_identity(const char* stream, const std::string& line, const std::string& identity) {
+  enqueue_for_owner(stream, line, &identity);
 }
 
 void log_upload_stop() {

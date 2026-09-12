@@ -58,7 +58,7 @@ struct ControlChannelState {
   // cross-thread: main/control write, UI/picker read.
   std::atomic<bool> connected{false};
   // control thread only: say the secure-desktop transition once (was a function static). reset: never (F-14).
-  bool reportedSecure = false;
+  std::atomic<bool> reportedSecure{false};
 };
 
 }  // namespace remote60::native_poc::viewer

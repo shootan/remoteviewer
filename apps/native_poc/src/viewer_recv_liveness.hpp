@@ -54,6 +54,7 @@ struct SessionWatchdogState {
   uint64_t lastStallLogUs = 0;
   uint64_t lastSilentLogUs = 0;
   bool deadReported = false;
+  uint64_t streamExpectedSinceUs = 0;
 };
 
 struct RecvLiveness {
@@ -92,12 +93,17 @@ struct SessionLivenessSample {
   bool controlConnected = false;       // ctx.control.connected
   bool tunnelClosed = false;           // control over UDP and the tunnel reported closed
   uint64_t controlGoneSinceUs = 0;     // 0 = control is up (or never was)
+  bool streamExpected = false;
+  bool controlRequired = false;
+  uint64_t streamExpectedSinceUs = 0;
 };
 
 struct SessionLivenessConfig {
   uint64_t stallUs = 2000000;        // the recv thread inside one stage this long = stalled
   uint64_t silentLinkUs = 3000000;   // no datagram this long while control is up = silent link
   uint64_t deadSessionUs = 5000000;  // control gone AND no publish this long = dead; 0 = never
+  uint64_t outputTimeoutUs = 15000000;
+  uint64_t stuckThreadUs = 8000000;
 };
 
 struct SessionLivenessVerdict {
@@ -138,6 +144,14 @@ inline SessionLivenessVerdict evaluate_session_liveness(const SessionLivenessSam
                             (s.lastPublishUs == 0) || (v.publishAgeUs >= c.deadSessionUs);
   v.sessionDead = c.deadSessionUs > 0 && controlGone && v.controlGoneUs >= c.deadSessionUs &&
                   videoStopped;
+  const uint64_t outputBase = s.lastPublishUs > s.streamExpectedSinceUs
+                                 ? s.lastPublishUs : s.streamExpectedSinceUs;
+  const bool outputLost = s.streamExpected && outputBase > 0 &&
+                         liveness_age_us(s.nowUs, outputBase) >= c.outputTimeoutUs;
+  const bool threadLost = v.recvStalled && v.stageAgeUs >= c.stuckThreadUs;
+  if (c.deadSessionUs > 0 && (outputLost || threadLost)) v.sessionDead = true;
+  if (c.deadSessionUs > 0 && s.controlRequired && controlGone && v.controlGoneUs >= c.deadSessionUs)
+    v.sessionDead = true;
   return v;
 }
 

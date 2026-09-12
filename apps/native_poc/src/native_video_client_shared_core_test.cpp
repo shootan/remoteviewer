@@ -1365,14 +1365,17 @@ bool test_input_queue_preserves_key_edges_on_overflow() {
     q.Enqueue(k);
   }
   int physUps = 0;
+  int drained = 0;
   QueuedControlInputMessage o{};
   while (q.TryDequeue(&o)) {
+    ++drained;
     if (o.type == MessageType::ControlPhysicalKey && o.physicalKey.down == 0) ++physUps;
   }
   if (physUps != 1) {
     std::cout << "FAIL: physical key-up dropped on queue overflow (physUps=" << physUps << ")\n";
     return false;
   }
+  if (!expect(drained <= 256 && q.dropped_count() > 0, "key/text overflow is bounded and observable")) return false;
   // A pure move flood, by contrast, coalesces and is safely bounded.
   ClientInputQueue q2;
   for (int i = 0; i < 500; ++i) {

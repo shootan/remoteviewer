@@ -39,6 +39,19 @@ bool EncoderState::ApplyTarget(CaptureState& capture, CaptureResources& res, Fra
   // let another quietly revert the override with its own cached keyint. Ceiling bookkeeping
   // upstream stays based on what the CLIENT actually requested.
   if (encoder.keyintOverride != 0) targetKeyint = encoder.keyintOverride;
+  const uint64_t nowUs = qpc_now_us();
+  const auto& previousTarget = encoder.retryTarget;
+  if (encoder.targetPending && nowUs < encoder.targetRetryAtUs &&
+      previousTarget.w == targetW && previousTarget.h == targetH &&
+      previousTarget.fps == targetFps && previousTarget.bitrate == targetBitrate &&
+      previousTarget.keyint == targetKeyint) return false;
+  encoder.retryTarget = {targetW, targetH, targetFps, targetBitrate, targetKeyint};
+  const auto failed = [&] {
+    encoder.targetPending = encoder.codecNeedsInit = true;
+    encoder.targetFailures = std::min<uint32_t>(encoder.targetFailures + 1, 5);
+    encoder.targetRetryAtUs = qpc_now_us() + (250000ULL << encoder.targetFailures);
+    return false;
+  };
   // Callers pass the nominal box for the current ABR/M9 level. Remember it so a later
   // source-size change can be re-fitted against the same budget instead of ratcheting down.
   encoder.nominalEncodeW = targetW;
@@ -50,7 +63,8 @@ bool EncoderState::ApplyTarget(CaptureState& capture, CaptureResources& res, Fra
   const bool resizeChanged = (targetW != encoder.activeEncodeW || targetH != encoder.activeEncodeH);
   const bool bitrateChanged = (targetBitrate != encoder.activeBitrate);
 
-  if (keyintChanged || fpsChanged || resizeChanged) {
+  if (encoder.codecNeedsInit || keyintChanged || fpsChanged || resizeChanged) {
+    encoder.codecNeedsInit = true;
     encoder.codec.shutdown();
     // The shutdown flushed the MFT, so every in-flight surface is released.
     for (const auto& pending : encoder.nv12PendingReleases) {
@@ -59,7 +73,7 @@ bool EncoderState::ApplyTarget(CaptureState& capture, CaptureResources& res, Fra
     encoder.nv12PendingReleases.clear();
     encoder.surfaceEncodeHealthy = true;
     if (!encoder.codec.initialize(targetW, targetH, targetFps, targetBitrate, targetKeyint)) {
-      return false;
+      return failed();
     }
     encoder.ResetTimelineAnchors(capture);
     encoder.ResetStarvationEpisode();
@@ -70,7 +84,7 @@ bool EncoderState::ApplyTarget(CaptureState& capture, CaptureResources& res, Fra
     if (!encoder.codec.reconfigure_bitrate(targetBitrate)) {
       encoder.codec.shutdown();
       if (!encoder.codec.initialize(targetW, targetH, targetFps, targetBitrate, targetKeyint)) {
-        return false;
+        return failed();
       }
       encoder.ResetTimelineAnchors(capture);
       encoder.ResetStarvationEpisode();
@@ -80,6 +94,10 @@ bool EncoderState::ApplyTarget(CaptureState& capture, CaptureResources& res, Fra
   }
 
   encoder.activeEncodeW = targetW;
+  encoder.targetPending = encoder.codecNeedsInit = false;
+  encoder.targetRetryAtUs = encoder.encodeErrorSinceUs = 0;
+  encoder.targetFailures = 0;
+  encoder.forceKeyNext = true;
   encoder.activeEncodeH = targetH;
   encoder.activeFps = targetFps;
   encoder.activeBitrate = targetBitrate;

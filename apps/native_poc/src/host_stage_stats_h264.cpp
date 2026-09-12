@@ -87,6 +87,7 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
                      const std::string& targetProcessName, uint64_t queuePushPerSec,
                      uint64_t callbackFramesPerSec, uint64_t idleHoldPerSec,
                      const CaptureCadenceGate::Counters& cadence) {
+  if (hx.encoder.targetPending) return Flow::Next;
   auto& transport = hx.transport;
   auto& startUs = hx.startUs;
   auto& frameGating = hx.frameGating;
@@ -373,7 +374,7 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
 
       if (!encoder.ApplyTarget(capture, res, frameGating, inputRouter, sender, targetW, targetH, encoder.activeFps, targetBitrate, encoder.activeKeyint)) {
         std::cerr << "[native-video-host][abr] encoder profile apply failed\n";
-        return Flow::Break;
+        return Flow::Next;
       }
       // Committed only once the encoder accepted the target, so a failed reinit cannot
       // leave the hysteresis state describing an encoder that does not exist.
@@ -431,7 +432,7 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
       if (rate.m9Apply) {
         if (!encoder.ApplyTarget(capture, res, frameGating, inputRouter, sender, targetW, targetH, targetFps, targetBitrate, encoder.activeKeyint)) {
           std::cerr << "[native-video-host][m9] encoder target apply failed level=" << targetLevel << "\n";
-          return Flow::Break;
+          return Flow::Next;
         }
         encoder.forceKeyNext = true;
       }

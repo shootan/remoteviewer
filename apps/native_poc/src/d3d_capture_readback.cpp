@@ -29,7 +29,10 @@ uint64_t qpc_us() {
   LARGE_INTEGER c{};
   QueryPerformanceFrequency(&f);
   QueryPerformanceCounter(&c);
-  return static_cast<uint64_t>(c.QuadPart) * 1000000ULL / static_cast<uint64_t>(f.QuadPart);
+  const uint64_t ticks = static_cast<uint64_t>(c.QuadPart);
+  const uint64_t frequency = static_cast<uint64_t>(f.QuadPart);
+  if (!frequency) return 0;
+  return (ticks / frequency) * 1000000ULL + (ticks % frequency) * 1000000ULL / frequency;
 }
 
 }  // namespace

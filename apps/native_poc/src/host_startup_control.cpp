@@ -270,6 +270,14 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
             std::cout << "[native-video-host] udp reader recv error err=" << err
                       << " (continuing)\n";
           }
+          if (err == WSAENOTSOCK || err == WSAEINVAL || err == WSAESHUTDOWN) {
+            // The descriptor cannot recover by reading it again. End this runtime so the
+            // supervisor can construct new sockets, instead of advertising a dead listener.
+            stop.store(true, std::memory_order_release);
+            clientSession.udpControlChannel.Close(ControlCloseReason::Shutdown);
+            clientSession.epochCv.notify_all();
+            break;
+          }
           clientSession.udpControlChannel.Tick();
           Sleep(50);
           continue;

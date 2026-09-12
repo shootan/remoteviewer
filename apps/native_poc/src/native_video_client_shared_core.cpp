@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <chrono>
 #include <limits>
 #include <sstream>
 
@@ -10,6 +11,24 @@ namespace remote60::native_poc {
 namespace {
 
 constexpr size_t kMaxInputQueueSize = 256;
+uint64_t queue_now_ms() {
+  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+uint32_t release_identity(const QueuedControlInputMessage& msg) {
+  if (msg.type == MessageType::ControlInputEvent && msg.inputEvent.keyCode <= 255) {
+    if (msg.inputEvent.kind == 6) return 1 + msg.inputEvent.keyCode;
+    if (msg.inputEvent.kind == 3 && (msg.inputEvent.keyCode == 1 || msg.inputEvent.keyCode == 2 ||
+                                   msg.inputEvent.keyCode == 4)) return 257 + msg.inputEvent.keyCode;
+  }
+  if (msg.type == MessageType::ControlPhysicalKey && !msg.physicalKey.down &&
+      msg.physicalKey.vk <= 255 && msg.physicalKey.scanCode <= 255) {
+    return msg.physicalKey.scanCode
+        ? 1024 + (msg.physicalKey.scanCode << 1) + (msg.physicalKey.flags & 1)
+        : 512 + msg.physicalKey.vk;
+  }
+  return 0;
+}
 constexpr uint32_t kMaxUdpAssembledPayloadBytes = 16u * 1024u * 1024u;
 constexpr uint16_t kMaxUdpVideoChunks = 16384;
 bool sequence_is_newer(uint32_t value, uint32_t reference) {
@@ -62,44 +81,47 @@ uint32_t ClientInputQueue::NextSequence() {
 
 void ClientInputQueue::Enqueue(const QueuedControlInputMessage& msg) {
   std::lock_guard<std::mutex> lk(mu_);
-  // Only a pointer move (ControlInputEvent kind 1) is disposable; key / button / physical-key edges
-  // (down/up) must never be dropped, or a modifier can strand on the host. (Codex 4th review.)
-  const auto is_move = [](const QueuedControlInputMessage& m) {
-    return m.type == MessageType::ControlInputEvent && m.inputEvent.kind == 1;
+  const auto isMove = [](const QueuedControlInputMessage& value) {
+    return value.type == MessageType::ControlInputEvent && value.inputEvent.kind == 1;
   };
-  if (is_move(msg) && !queue_.empty() && is_move(queue_.back())) {
-    queue_.back() = msg;
-    coalescedMoves_.fetch_add(1, std::memory_order_relaxed);  // P0 (#351): a move replaced in place
-    return;
+  if (!backpressured_ && isMove(msg) && !queue_.empty() && isMove(queue_.back())) {
+    queue_.back() = msg; queue_.back().queuedAtMs = queue_now_ms(); ++coalescedMoves_; return;
   }
-  if (queue_.size() >= kMaxInputQueueSize) {
-    // Overflow: sacrifice the oldest move rather than pop_front (which could be a queued key-up).
-    bool droppedMove = false;
-    for (auto it = queue_.begin(); it != queue_.end(); ++it) {
-      if (is_move(*it)) {
-        queue_.erase(it);
-        dropped_.fetch_add(1, std::memory_order_relaxed);
-        droppedMove = true;
-        break;
-      }
+  if (queue_.size() >= kMaxInputQueueSize && !backpressured_) {
+    // Cancel unsent actions, never release edges. New presses/text are refused until releases
+    // drain. Since all intervening downs are now gone, equal release identities can coalesce.
+    backpressured_ = true;
+    for (auto it = queue_.begin(); it != queue_.end();) {
+      if (!release_identity(*it)) { it = queue_.erase(it); ++dropped_; }
+      else ++it;
     }
-    // No move to give up: drop the incoming if it is itself a move (latest-wins); otherwise let the
-    // queue grow temporarily rather than lose a key/button/physical edge.
-    if (!droppedMove && is_move(msg)) {
-      dropped_.fetch_add(1, std::memory_order_relaxed);
-      return;
-    }
+  }
+  if (backpressured_) {
+    const uint32_t identity = release_identity(msg);
+    if (!identity) { ++dropped_; return; }
+    for (const auto& pending : queue_) if (release_identity(pending) == identity) return;
+    // The finite set of valid release identities plus the original 256 entries bounds this
+    // reserve below 1536 items. Arbitrary key/scan values cannot enlarge it.
   }
   queue_.push_back(msg);
+  queue_.back().queuedAtMs = queue_now_ms();
 }
 
 bool ClientInputQueue::TryDequeue(QueuedControlInputMessage* out) {
   if (!out) return false;
   std::lock_guard<std::mutex> lk(mu_);
-  if (queue_.empty()) return false;
-  *out = queue_.front();
-  queue_.pop_front();
-  return true;
+  const uint64_t now = queue_now_ms();
+  while (!queue_.empty()) {
+    const auto& next = queue_.front();
+    if (!release_identity(next) && next.queuedAtMs && now - next.queuedAtMs > 2000) {
+      queue_.pop_front(); ++dropped_; continue;
+    }
+    *out = next; queue_.pop_front();
+    if (queue_.empty()) backpressured_ = false;
+    return true;
+  }
+  backpressured_ = false;
+  return false;
 }
 
 uint64_t ClientInputQueue::dropped_count() const {
@@ -113,6 +135,7 @@ uint64_t ClientInputQueue::coalesced_move_count() const {
 void ClientInputQueue::Reset() {
   std::lock_guard<std::mutex> lk(mu_);
   queue_.clear();
+  backpressured_ = false;
   dropped_.store(0, std::memory_order_relaxed);
   coalescedMoves_.store(0, std::memory_order_relaxed);
   nextSeq_.store(0, std::memory_order_relaxed);

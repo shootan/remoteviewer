@@ -42,6 +42,7 @@
 #include "host_bgra_scale.hpp"
 #include "host_capture_device.hpp"
 #include "host_capture_session.hpp"
+#include "bounded_process_exit.hpp"
 #include "host_encoder_manager.hpp"
 #include "host_frame_gate.hpp"
 #include "host_input_inject.hpp"
@@ -272,8 +273,12 @@ void CaptureState::AttachFrameArrived(CaptureResources& res, SessionState& clien
   CaptureState& capture = *this;
   auto& frame = res.frame;
   auto& pool = res.pool;
-  token = pool.FrameArrived([&](Direct3D11CaptureFramePool const& framePool,
+  auto gate = std::make_shared<CaptureCallbackGate>();
+  capture.callbackGate = gate;
+  token = pool.FrameArrived([&, gate](Direct3D11CaptureFramePool const& framePool,
                                 winrt::Windows::Foundation::IInspectable const&) {
+    CaptureCallbackLease lease(gate.get());
+    if (!lease) return;
     if (stop.load()) return;
     // Snapshot the capture attachment cookie on entry, before reading any capture geometry or
     // generation. If a main-thread recreate bumps it while this callback runs, the pre-publish
@@ -369,6 +374,8 @@ void CaptureState::DetachCaptureSession(CaptureResources& res, winrt::event_toke
   auto& session = res.session;
   auto& dxgiCaptureSession = res.dxgiCaptureSession;
   auto& gdiCaptureProcess = res.gdiCaptureProcess;
+  auto gate = capture.callbackGate;
+  if (gate) gate->Close();
   // Invalidate any capture callback or readback completion that began under the current
   // attachment before we tear the pool down: bumping the cookie makes that in-flight work drop
   // instead of being published under the post-recreate target/geometry/generation.
@@ -401,6 +408,11 @@ void CaptureState::DetachCaptureSession(CaptureResources& res, winrt::event_toke
   } catch (...) {
   }
   const bool hadPool = static_cast<bool>(pool);
+  if (gate && !gate->Drain(std::chrono::milliseconds(10000))) {
+    const char message[] = "[capture] WGC callback did not drain; stopping before resource destruction\n";
+    terminate_with_diagnostic(44, message, sizeof(message) - 1);
+  }
+  capture.callbackGate.reset();
   session = nullptr;
   pool = nullptr;
   if (hadPool) std::cout << d3d_multithread_log_line("wgc-closed", res.d3d.Get(), res.ctx.Get());
@@ -424,6 +436,25 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
       // input agent's target rect is derived from it right after this restart (P9), and a host
       // that started under RDP must not keep the RDP display's rect once the console is back.
       capture.monitorInfo = primary_monitor_info();
+      if (!capture.selectedMonitorDevice.empty()) {
+        capture.monitorInfo.reset();
+        const auto monitors = enumerate_monitors();
+        for (size_t i = 0; i < monitors.size(); ++i) {
+          MONITORINFOEXW info{}; info.cbSize = sizeof(info);
+          if (GetMonitorInfoW(monitors[i].handle, &info) &&
+              capture.selectedMonitorDevice == info.szDevice) {
+            const auto& m = monitors[i];
+            capture.monitorInfo = PrimaryMonitorInfo{m.handle, m.width, m.height, m.x, m.y};
+            capture.selectedMonitorId.store(static_cast<uint32_t>(i), std::memory_order_release);
+            // The GDI helper's IPC currently describes only the primary monitor. WGC captures
+            // the explicitly selected monitor without lying about its pixels or input origin.
+            if (backend.active == DesktopCaptureBackend::Gdi && !m.primary)
+              backend.active = DesktopCaptureBackend::Wgc;
+            break;
+          }
+        }
+        if (!capture.monitorInfo) return false;  // unplugged: retry the same device, not primary
+      }
       if (!capture.monitorInfo.has_value()) {
         std::cerr << "[native-video-host] primary monitor query failed on restart\n";
         if (backend.active == DesktopCaptureBackend::Dxgi) return false;
@@ -439,14 +470,20 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
     if (capture.windowModeActive) {
       const uintptr_t hwndRaw = static_cast<uintptr_t>(capture.targetHwnd.load(std::memory_order_relaxed));
       HWND targetHwnd = reinterpret_cast<HWND>(hwndRaw);
+      if (!targetHwnd || !IsWindow(targetHwnd)) return false;
+      DWORD livePid = 0;
+      GetWindowThreadProcessId(targetHwnd, &livePid);
+      const uint32_t expectedPid = capture.targetPid.load(std::memory_order_relaxed);
+      if (expectedPid && livePid != expectedPid) return false;  // recycled HWND is a different source
       if (targetHwnd && IsWindow(targetHwnd)) {
         auto refreshedItem = CreateItemForPrimaryMonitor(targetHwnd, "CreateForWindow(restart-refresh)");
-        if (refreshedItem) {
-          item = refreshedItem;
-        }
+        if (!refreshedItem) return false;
+        item = refreshedItem;
       }
     } else if (backend.active == DesktopCaptureBackend::Wgc) {
-      auto refreshedItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(restart-refresh)");
+      auto refreshedItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(restart-refresh)",
+                                                      capture.monitorInfo ? capture.monitorInfo->monitor : nullptr);
+      if (!refreshedItem) return false;
       if (refreshedItem) {
         item = refreshedItem;
       }
@@ -588,7 +625,8 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
       if (!started) {
         std::cout << "[native-video-host] fallback_reason=" << dxgiDetail << "\n";
         backend.active = DesktopCaptureBackend::Wgc;
-        auto refreshedItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(dxgi-fallback)");
+        auto refreshedItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(dxgi-fallback)",
+                                                        capture.monitorInfo ? capture.monitorInfo->monitor : nullptr);
         if (!refreshedItem) return false;
         item = refreshedItem;
         newSize = item.Size();
@@ -663,7 +701,8 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
             !RecreateCaptureDeviceOnPrimary(capture, res, encoder, useH264, "gdi-wgc-fallback")) {
           return false;
         }
-        auto refreshedItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(gdi-fallback)");
+        auto refreshedItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(gdi-fallback)",
+                                                        capture.monitorInfo ? capture.monitorInfo->monitor : nullptr);
         if (!refreshedItem) return false;
         item = refreshedItem;
         newSize = item.Size();

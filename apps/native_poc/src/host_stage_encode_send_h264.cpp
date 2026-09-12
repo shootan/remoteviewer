@@ -184,8 +184,8 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
           // apply_encoder_target already shut the encoder down; without a working encoder
           // every later frame fails silently, so treat this like the other callers do.
           std::cerr << "[native-video-host] encode-refit failed source=" << w << "x" << h
-                    << "; stopping stream\n";
-          return Flow::Break;
+                    << "; retry scheduled\n";
+          return Flow::Continue;
         }
       }
     }
@@ -359,6 +359,16 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
      }
    }
    if (!surfaceEncoded && !bgraCall.ok) {
+    // Dropped output breaks the reference chain; a rejected input by itself does not. Avoid
+    // turning ordinary MFT input backpressure into an IDR storm while recovering real output loss.
+    if (!units.empty() || encodeStats.processOutputErrorCount > 0) {
+      encoder.ResetTimelineAnchors(capture);
+      encoder.forceKeyNext = true;
+    }
+    const uint64_t failureUs = qpc_now_us();
+    if (!encoder.encodeErrorSinceUs) encoder.encodeErrorSinceUs = failureUs;
+    if (failureUs - encoder.encodeErrorSinceUs >= 2000000ULL)
+      encoder.RequestOutputRepair(failureUs);
     ++encoder.encodeFailCount;
     if ((encoder.encodeFailCount % 60) == 1) {
       std::cout << "[native-video-host] encode failed count=" << encoder.encodeFailCount << "\n";
@@ -368,6 +378,7 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     return Flow::Continue;
   }
   // Encode returned; back to ordinary work for the watchdog's threshold.
+  encoder.encodeErrorSinceUs = 0;
   watchdog.EnterMainPhase(MainLoopPhase::Loop);
   if (forceKeyFrame) {
     // Latch/count only for inputs the encoder actually ACCEPTED: a failed encode never
@@ -400,7 +411,7 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
   // starved encoder -- which returns empty on every call -- is still observed here; the old
   // `continue` skipped the whole 1s stats / self-heal tail, so a wedge produced no telemetry at
   // all. A frame was just handed to the MFT this call, so input is advancing; only the OUTPUT is
-  // in question. This block changes no control flow (diagnostic only).
+  // in question. Persistent output starvation schedules bounded encoder repair below.
   ++encoder.inputAcceptedTotal;
   if (servedBootstrap) {
     ++encoder.syntheticInputAccepted;
@@ -418,8 +429,7 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     encoder.starveNeedInputAccum = encoder.starveHaveOutputAccum = encoder.starveNoEventAccum = 0;
     encoder.starveNotAcceptingAccum = encoder.starveNeedMoreAccum = encoder.starveNeedInputOnlyCalls = 0;
     // Revive watchdog.mainLoopLastSeq (previously declared but never stored, so the watchdog record read
-    // a constant 0): publish real encoder-output progress, not loop iterations. A follow-up can
-    // make the watchdog fire on this age while input is still being accepted.
+    // a constant 0): publish real encoder-output progress, not loop iterations.
     watchdog.mainLoopLastSeq.store(encoder.outputSamplesTotal, std::memory_order_release);
   } else {
     ++encoder.acceptedNoOutputStreak;
@@ -436,11 +446,14 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
         (encoder.noOutputSinceUs > 0 && encodeEndUs > encoder.noOutputSinceUs)
             ? (encodeEndUs - encoder.noOutputSinceUs)
             : 0;
+    if (clientSession.streamControlActive.load(std::memory_order_acquire) &&
+        encoder.acceptedNoOutputStreak >= 8 && noOutputAgeUs >= 5000000ULL)
+      encoder.RequestOutputRepair(encodeEndUs);
     // Stream active + encoder keeps accepting input but produces no output for a while = the
     // async-MFT output-starvation wedge (video frozen, main loop spinning, liveness watchdog
     // green). Emit one rate-limited anomaly line with the streak-accumulated async counters so a
     // field recurrence tells a host event-driving bug (NeedInput accrues, HaveOutput stays 0)
-    // from a genuine vendor/hardware stall. Recovery is a separate follow-up; diagnostic only.
+    // from a vendor/hardware stall. The counters accompany the repair scheduled above.
     if (clientSession.streamControlActive.load(std::memory_order_acquire) &&
         encoder.acceptedNoOutputStreak >= 8 && noOutputAgeUs >= 1000000ULL &&
         (encoder.lastStarvationLogUs == 0 ||

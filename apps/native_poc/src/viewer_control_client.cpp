@@ -68,6 +68,8 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
     ctx.session.hostImeSupported.store(
         (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagHostImeV1) != 0,
         std::memory_order_relaxed);
+    ctx.session.hostFrameHeartbeat.store(
+        (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagFrameHeartbeat) != 0);
     const bool imeV2 =
         (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagHostImePulseStateV2) != 0;
     ctx.session.hostImeV2Supported.store(imeV2, std::memory_order_relaxed);

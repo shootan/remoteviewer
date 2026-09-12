@@ -117,6 +117,14 @@ bool mouse_suppressed(ViewerState& ctx, const char* what) {
 }
 
 LRESULT on_secondary_button(ViewerState& ctx, HWND hwnd, bool down, uint16_t buttonBit, uint32_t vk, int x, int y) {
+  if (!down && (ctx.input.mouseButtons.load() & buttonBit)) {
+    int32_t vx = ctx.input.lastVideoX.load(), vy = ctx.input.lastVideoY.load();
+    map_client_point_to_video_coords(ctx, hwnd, x, y, &vx, &vy);
+    ctx.input.mouseButtons.fetch_and(static_cast<uint16_t>(~buttonBit));
+    enqueue_input_event(ctx, 3, vx, vy, 0, vk);
+    release_mouse_capture_if_idle(ctx, hwnd);
+    return 0;
+  }
   if (mouse_suppressed(ctx, "secondary button")) return 0;
   if (point_in_toggle_button(ctx, hwnd, x, y)) return 0;
   if (point_in_macro_button(ctx, hwnd, x, y)) return 0;
@@ -249,6 +257,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   auto* state = reinterpret_cast<ViewerState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
   if (!state) return DefWindowProcW(hwnd, msg, wp, lp);
   ViewerState& ctx = *state;
+  ctx.session.uiHeartbeatUs.store(qpc_now_us(), std::memory_order_relaxed);
   switch (msg) {
     case WM_CLOSE:
       ctx.session.running = false;
@@ -395,6 +404,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       }
       return 0;
     case WM_LBUTTONUP: {
+      // A remotely pressed button must be released even over chrome, letterboxing, outside the
+      // window, or during touch suppression. Picker-only presses do not set mouseButtons.
+      if (ctx.input.mouseButtons.load(std::memory_order_relaxed) & 1u) {
+        int32_t vx = ctx.input.lastVideoX.load(), vy = ctx.input.lastVideoY.load();
+        map_client_point_to_video_coords(ctx, hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &vx, &vy);
+        ctx.input.mouseButtons.fetch_and(static_cast<uint16_t>(~1u));
+        enqueue_input_event(ctx, 3, vx, vy, 0, VK_LBUTTON);
+        release_mouse_capture_if_idle(ctx, hwnd);
+        return 0;
+      }
       if (mouse_suppressed(ctx, "up")) return 0;
       const int x = GET_X_LPARAM(lp);
       const int y = GET_Y_LPARAM(lp);
@@ -634,6 +653,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       // Avoid background erase flicker between frames.
       return 1;
     case WM_TIMER:
+      if (wp == kRenderRetryTimerId) {
+        KillTimer(hwnd, kRenderRetryTimerId);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+      }
       if (wp == kPacedPresentTimerId) {
         // One-shot: the held frame's wait is over (F-11).
         KillTimer(hwnd, kPacedPresentTimerId);
@@ -656,6 +680,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     default:
       return DefWindowProcW(hwnd, msg, wp, lp);
   }
+  return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
 // UNICODE is not defined for this target, so the generic Win32 names resolve to the ANSI

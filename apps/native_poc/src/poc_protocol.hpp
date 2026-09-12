@@ -187,6 +187,9 @@ constexpr uint32_t kCaptureFlagHostImeV1 = 0x10u;
 // features only when this is advertised; a v1-only host falls back to legacy client-side IME so the
 // new viewer never strands a make-only key or blocks on a state request an old host cannot answer.
 constexpr uint32_t kCaptureFlagHostImePulseStateV2 = 0x20u;
+// Active H.264 streams periodically refresh even a static desktop. Without this capability a
+// legacy/change-driven host may legitimately send no pixels while its control remains alive.
+constexpr uint32_t kCaptureFlagFrameHeartbeat = 0x40u;
 
 struct ControlPongMessage {
   MessageHeader header{};

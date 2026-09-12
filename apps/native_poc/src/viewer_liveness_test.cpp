@@ -166,6 +166,19 @@ int main() {
 
   std::printf("[J1] join_with_timeout: a thread that does not return within the timeout is reported, not waited for\n");
   {
+    auto s = healthy(now);
+    s.streamExpected = true; s.streamExpectedSinceUs = now - 20 * kS;
+    s.lastPublishUs = now - 20 * kS;
+    CHECK(evaluate_session_liveness(s, cfg).sessionDead);
+    s.streamExpected = false;  // picker / secure desktop is not a missing output episode
+    CHECK(!evaluate_session_liveness(s, cfg).sessionDead);
+    s.controlRequired = true; s.controlConnected = false;
+    s.controlGoneSinceUs = now - 6 * kS; s.lastPublishUs = now - kMs;
+    CHECK(evaluate_session_liveness(s, cfg).sessionDead);  // video cannot hide dead input control
+    s = healthy(now); s.stage = RecvStage::Decode; s.stageEnterUs = now - 9 * kS;
+    CHECK(evaluate_session_liveness(s, cfg).sessionDead);
+  }
+  {
     std::thread slow([]() { std::this_thread::sleep_for(std::chrono::milliseconds(600)); });
     const auto t0 = std::chrono::steady_clock::now();
     const bool joined = join_with_timeout(slow, 100);
