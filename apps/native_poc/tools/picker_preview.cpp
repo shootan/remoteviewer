@@ -20,6 +20,7 @@
 #include <gdiplus.h>
 #include <shlwapi.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -138,6 +139,12 @@ int wmain() {
       {L"picker-locked.png", "target fixed by host config", 4, true, true, 0, ""},
       {L"picker-error.png", "the host refused the list", 0, true, false, 0,
        "화면 목록을 가져오지 못했습니다."},
+      // The boundaries the grid rule turns on: one card, a few, the point where growing stops,
+      // and a list too long to fit at the preferred width.
+      {L"picker-count-01.png", "one window", 1, true, false, 0, ""},
+      {L"picker-count-04.png", "four windows", 4, true, false, 0, ""},
+      {L"picker-count-12.png", "twelve windows", 12, true, false, 0, ""},
+      {L"picker-count-30.png", "thirty windows (scrolls)", 30, true, false, 0, ""},
   };
 
   for (const Shot& shot : shots) {
@@ -157,9 +164,13 @@ int wmain() {
       const char* titles[] = {"메모장 - 회의록.txt", "Visual Studio Code", "Chrome - GNLink",
                               "탐색기"};
       const uint32_t sizes[][2] = {{1280, 720}, {1920, 1080}, {1600, 900}, {1024, 768}};
-      msg.itemCount = static_cast<uint32_t>(shot.count);
-      for (int i = 0; i < shot.count && i < 4; ++i) {
-        msg.items[i] = entry(static_cast<uint64_t>(i + 1), titles[i], sizes[i][0], sizes[i][1]);
+      const int count =
+          std::min(shot.count, static_cast<int>(remote60::native_poc::kControlWindowListMaxEntries));
+      msg.itemCount = static_cast<uint32_t>(count);
+      for (int i = 0; i < count; ++i) {
+        char title[96];
+        std::snprintf(title, sizeof(title), "%s", titles[i % 4]);
+        msg.items[i] = entry(static_cast<uint64_t>(i + 1), title, sizes[i % 4][0], sizes[i % 4][1]);
       }
       ctx.picker.windowPanel.ApplyWindowList(msg, 8);
     }

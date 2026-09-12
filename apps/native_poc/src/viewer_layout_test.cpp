@@ -68,6 +68,37 @@ void test_card_grid() {
   // a tiny grid still yields one column and one row
   CardGridMetrics m3 = compute_card_grid_at(make_rect(0, 0, 10, 10), 96);
   CHECK(m3.cols == 1 && m3.visibleRows == 1 && m3.cardW == 140);
+  // ---- with a count, the cards grow to use the room -------------------------------------
+  //
+  // The expectations below are derived from the rule, not copied from the output: fewest columns
+  // first, so the largest card that still lets every row fit the height without scrolling.
+  //
+  // Five cards in a 1552x610 grid: one column would be 1552 wide, past the 420 cap, so it is
+  // skipped. Two columns give (1552-14)/2 = 769, also past the cap. The first column count whose
+  // card is within the cap is 4 -> (1552-3*14)/4 = 377, thumb 235, card 265; two rows need
+  // 2*(265+14)-14 = 544 <= 610, so four columns it is.
+  const CardGridMetrics few = compute_card_grid_at(grid, 96, 5);
+  CHECK(few.cols == 4);
+  CHECK(few.cardW == (1552 - 3 * 14) / 4);
+  CHECK(few.cardW > m.cardW);              // bigger than the count-blind layout, which is the point
+  CHECK(few.cardW <= 420);                 // and never a poster
+
+  // One card: still capped, so a single window does not fill the screen with itself.
+  const CardGridMetrics one = compute_card_grid_at(grid, 96, 1);
+  CHECK(one.cardW <= 420);
+
+  // Thirty cards cannot fit the height without going below the preferred width, and shrinking is
+  // not what this parameter is for, so it falls back to the fixed layout and scrolls -- exactly
+  // what a crowded picker did before.
+  const CardGridMetrics many = compute_card_grid_at(grid, 96, 30);
+  CHECK(many.cols == m.cols);
+  CHECK(many.cardW == m.cardW);
+
+  // Zero means "caller does not know" and must reproduce the old layout bit for bit, because
+  // every expectation above this line was written against it.
+  const CardGridMetrics unknown = compute_card_grid_at(grid, 96, 0);
+  CHECK(unknown.cols == m.cols && unknown.cardW == m.cardW && unknown.cardH == m.cardH);
+
   // slot rects tile left-to-right then top-to-bottom
   const RECT s0 = card_rect_for_slot(grid, m, 0);
   const RECT s1 = card_rect_for_slot(grid, m, 1);

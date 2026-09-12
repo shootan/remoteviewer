@@ -64,19 +64,56 @@ inline bool point_in_rect(const RECT& r, int x, int y) {
   return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
 }
 
-inline CardGridMetrics compute_card_grid_at(const RECT& gridRect, int dpi) {
+/**
+ * The card grid.
+ *
+ * `itemCount` is how many cards there are, or 0 when the caller does not know. Zero reproduces
+ * the original layout exactly: a fixed preferred card width, however much room that leaves over.
+ *
+ * With a count, the cards grow to use the space. Five of them used to occupy a fifth of the
+ * window and leave the rest black, because a layout computed from a preferred width alone cannot
+ * tell "five cards" from "the first five of forty".
+ */
+inline CardGridMetrics compute_card_grid_at(const RECT& gridRect, int dpi, int itemCount = 0) {
   CardGridMetrics m;
   m.gap = scale_dpi(14, dpi);
   const int gridW = std::max<int>(1, gridRect.right - gridRect.left);
   const int gridH = std::max<int>(1, gridRect.bottom - gridRect.top);
   const int preferredCardW = scale_dpi(232, dpi);
-  m.cols = std::max<int>(1, (gridW + m.gap) / (preferredCardW + m.gap));
-  m.cardW = std::max<int>(scale_dpi(140, dpi), (gridW - (m.cols - 1) * m.gap) / m.cols);
-  m.thumbH = (m.cardW * 10) / 16;
-  m.cardH = m.thumbH + scale_dpi(30, dpi);
-  m.visibleRows = std::max<int>(1, (gridH + m.gap) / (m.cardH + m.gap));
-  m.visibleCards = m.visibleRows * m.cols;
-  return m;
+  const int minCardW = scale_dpi(140, dpi);
+  // An upper bound, because one card in a wide window should not become a poster.
+  const int maxCardW = scale_dpi(420, dpi);
+
+  const auto shape = [&](int cols) {
+    CardGridMetrics out;
+    out.gap = m.gap;
+    out.cols = std::max<int>(1, cols);
+    out.cardW = std::max<int>(minCardW, (gridW - (out.cols - 1) * out.gap) / out.cols);
+    out.thumbH = (out.cardW * 10) / 16;
+    out.cardH = out.thumbH + scale_dpi(30, dpi);
+    out.visibleRows = std::max<int>(1, (gridH + out.gap) / (out.cardH + out.gap));
+    out.visibleCards = out.visibleRows * out.cols;
+    return out;
+  };
+
+  if (itemCount > 0) {
+    // Fewest columns first, which is the largest card. The first arrangement whose rows fit the
+    // height without scrolling wins; if none do, fall through to the fixed-width layout and let
+    // it scroll, which is what it has always done.
+    for (int cols = 1; cols <= itemCount; ++cols) {
+      const CardGridMetrics candidate = shape(cols);
+      if (candidate.cardW > maxCardW) continue;
+      // Only ever grow. Letting this shrink below the preferred width would squeeze a long list
+      // into one screenful of tiny cards, which is a different design decision than the one this
+      // parameter is for -- and it would change what a crowded picker looks like today.
+      if (candidate.cardW < preferredCardW) break;
+      const int rows = (itemCount + cols - 1) / cols;
+      const int neededH = rows * (candidate.cardH + candidate.gap) - candidate.gap;
+      if (neededH <= gridH) return candidate;
+    }
+  }
+
+  return shape(std::max<int>(1, (gridW + m.gap) / (preferredCardW + m.gap)));
 }
 
 inline RECT card_rect_for_slot(const RECT& gridRect, const CardGridMetrics& m, int slot) {

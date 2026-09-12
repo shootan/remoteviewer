@@ -9,7 +9,10 @@
 namespace remote60::native_poc::viewer {
 
 CardGridMetrics compute_card_grid(ViewerState& ctx, const RECT& gridRect) {
-  return compute_card_grid_at(gridRect, ctx.ui.dpi);
+  // The desktop card plus one per window: the same total the drawing and the hit test both walk.
+  // Taken from the panel here so every caller agrees without having to remember to pass it.
+  const int itemCount = 1 + static_cast<int>(ctx.picker.windowPanel.Snapshot().items.size());
+  return compute_card_grid_at(gridRect, ctx.ui.dpi, itemCount);
 }
 
 bool resolve_active_video_content_size(ViewerState& ctx, uint32_t* outWidth, uint32_t* outHeight) {
