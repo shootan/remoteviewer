@@ -39,6 +39,23 @@ struct Nv12D3dRenderer {
   Microsoft::WRL::ComPtr<ID3D11Texture2D> texUV;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srvY;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srvUV;
+  // The picker's path onto the screen: one dynamic BGRA texture and a shader that just copies it.
+  Microsoft::WRL::ComPtr<ID3D11PixelShader> psBgra;
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> texBgra;
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srvBgra;
+  uint32_t bgraW = 0;
+  uint32_t bgraH = 0;
+  // Sticky, and deliberately not cleared by release_swapchain(): what kills GDI on this window is
+  // that a flip present HAPPENED, and destroying the swapchain does not undo it.
+  bool usedFlipModel = false;
+  bool everPresented = false;
+  // Which device the swapchain is on. WARP is the software fallback and is not a claim about the
+  // hardware path: a result measured there says what WARP does.
+  bool usedWarp = false;
+  // Counted separately so "does the video path pay for the picker?" is a reading rather than an
+  // argument. The picker uploads only when the picker repaints; a video frame must never touch it.
+  uint64_t videoPresentCount = 0;
+  uint64_t pickerPresentCount = 0;
   uint32_t texW = 0;
   uint32_t texH = 0;
   UINT rtvW = 0;
@@ -47,12 +64,17 @@ struct Nv12D3dRenderer {
   uint64_t rtvResizeCount = 0;
   bool ready = false;
 
-  // Drop the swapchain so DWM stops compositing the last presented frame over this window.
+  // Drop the swapchain. Device loss, teardown, a window going away.
   //
-  // A flip-model swapchain bound to the HWND is composited ABOVE anything GDI draws into the same
-  // window, so the picker overlay was painted underneath it and never seen: the user pressed
-  // "target select" and got a frozen-looking last frame instead of the picker. Releasing the
-  // swapchain returns the window to ordinary GDI redirection.
+  // ⚠️ This does NOT hand the window back to GDI, and it used to say it did. Once a flip-model
+  // swapchain has presented on an HWND, GDI drawn into that window no longer reaches the screen,
+  // and that survives the swapchain being destroyed -- documented for DXGI_SWAP_EFFECT_FLIP_*, and
+  // measured here first: release_swapchain() left ready=0 and a null pointer while the screen went
+  // on showing the last video frame, through a forced repaint, SWP_FRAMECHANGED and a resize
+  // (viewer_window_proc_isolated_test, docs/ui_state_table.md §28.3).
+  //
+  // So the picker no longer calls this on the way in. It presents itself through the swapchain
+  // instead -- present_bgra() below. (F-21 is superseded; see viewer_picker.cpp.)
   //
   // The device and context deliberately survive -- the hardware decoder shares them
   // (viewer_startup.cpp binds ctx.dec.d3dDevice to this device), so tearing them down here would
@@ -86,6 +108,7 @@ struct Nv12D3dRenderer {
                                levels, ARRAYSIZE(levels), D3D11_SDK_VERSION,
                                &device, &outLevel, &context);
         if (FAILED(hr)) return false;
+        usedWarp = true;
       }
     }
 
@@ -107,8 +130,10 @@ struct Nv12D3dRenderer {
     // the legacy discard model costs a full-frame copy per present. Falls back for the
     // rare pre-Win10 driver that rejects the flip model.
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    usedFlipModel = true;
     if (FAILED(factory->CreateSwapChain(device.Get(), &sd, &swapChain))) {
       sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+      usedFlipModel = false;
       if (FAILED(factory->CreateSwapChain(device.Get(), &sd, &swapChain))) return false;
     }
     factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
@@ -141,6 +166,15 @@ struct Nv12D3dRenderer {
         "  return float4(saturate(r), saturate(g), saturate(b), 1.0);"
         "}";
 
+    // The picker is already a finished BGRA image by the time it gets here; this only puts it on
+    // the back buffer. Alpha is forced opaque -- see present_bgra().
+    static const char* kPsBgraSrc =
+        "Texture2D tex : register(t0);"
+        "SamplerState smp : register(s0);"
+        "float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {"
+        "  return float4(tex.Sample(smp, uv).rgb, 1.0);"
+        "}";
+
     Microsoft::WRL::ComPtr<ID3DBlob> vsBlob;
     Microsoft::WRL::ComPtr<ID3DBlob> psBlob;
     Microsoft::WRL::ComPtr<ID3DBlob> errBlob;
@@ -156,6 +190,15 @@ struct Nv12D3dRenderer {
       return false;
     }
     if (FAILED(device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &ps))) {
+      return false;
+    }
+    Microsoft::WRL::ComPtr<ID3DBlob> psBgraBlob;
+    if (FAILED(D3DCompile(kPsBgraSrc, std::strlen(kPsBgraSrc), nullptr, nullptr, nullptr,
+                          "main", "ps_4_0", 0, 0, &psBgraBlob, &errBlob))) {
+      return false;
+    }
+    if (FAILED(device->CreatePixelShader(psBgraBlob->GetBufferPointer(), psBgraBlob->GetBufferSize(),
+                                         nullptr, &psBgra))) {
       return false;
     }
 
@@ -303,9 +346,138 @@ struct Nv12D3dRenderer {
     const HRESULT hr = swapChain->Present(0, 0);
     const uint64_t presentDoneUs = qpc_now_us();
     if (telemetry) telemetry->presentBlockUs = presentDoneUs - presentStartUs;
-    if (!(SUCCEEDED(hr) || hr == DXGI_STATUS_OCCLUDED) && telemetry) telemetry->failStage = "present";
-    return SUCCEEDED(hr) || hr == DXGI_STATUS_OCCLUDED;
+    const bool presented = SUCCEEDED(hr) || hr == DXGI_STATUS_OCCLUDED;
+    if (!presented && telemetry) telemetry->failStage = "present";
+    if (presented) {
+      everPresented = true;
+      ++videoPresentCount;
+    }
+    return presented;
   }
+
+  // ---------------------------------------------------------------- the picker's way onto the screen
+  //
+  // Once a flip-model swapchain has presented on an HWND, GDI drawn into that window does not
+  // reach the screen -- and destroying the swapchain does not give it back. That is the documented
+  // behaviour of DXGI_SWAP_EFFECT_FLIP_*, and it was measured here before it was read
+  // (viewer_window_proc_isolated_test, docs/ui_state_table.md §28.3): the window's own DC held the
+  // picker while the screen held the last video frame.
+  //
+  // So the picker goes through the same swapchain the video does. It is still drawn by exactly the
+  // same GDI code into an offscreen DIB -- draw_overlay and everything under it is untouched --
+  // and only the last step changes: the finished bitmap is uploaded and presented instead of being
+  // blitted into a window that cannot show it.
+  bool ensure_bgra_texture(uint32_t w, uint32_t h) {
+    if (!device) return false;
+    if (texBgra && srvBgra && bgraW == w && bgraH == h) return true;
+    texBgra.Reset();
+    srvBgra.Reset();
+    bgraW = 0;
+    bgraH = 0;
+
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = w;
+    desc.Height = h;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DYNAMIC;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    if (FAILED(device->CreateTexture2D(&desc, nullptr, &texBgra))) return false;
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+    srvDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+    if (FAILED(device->CreateShaderResourceView(texBgra.Get(), &srvDesc, &srvBgra))) return false;
+
+    bgraW = w;
+    bgraH = h;
+    return true;
+  }
+
+  // `pixels` is top-down BGRA, `strideBytes` the source row pitch. Opaque: the alpha the GDI text
+  // routines leave behind is ignored and 1.0 is written, so an antialiased glyph cannot punch a
+  // hole through to whatever the previous frame left in the back buffer.
+  bool present_bgra(HWND hwnd, const void* pixels, uint32_t w, uint32_t h, uint32_t strideBytes,
+                    Nv12RenderTelemetry* telemetry) {
+    if (telemetry) *telemetry = Nv12RenderTelemetry{};
+    if (!ready || !pixels || w == 0 || h == 0) {
+      if (telemetry) telemetry->failStage = "bgra_args";
+      return false;
+    }
+    if (!ensure_rtv(hwnd)) {
+      if (telemetry) telemetry->failStage = "ensure_rtv";
+      return false;
+    }
+    if (!ensure_bgra_texture(w, h)) {
+      if (telemetry) telemetry->failStage = "ensure_bgra_texture";
+      return false;
+    }
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(context->Map(texBgra.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+      if (telemetry) telemetry->failStage = "map_bgra";
+      return false;
+    }
+    const uint8_t* src = static_cast<const uint8_t*>(pixels);
+    uint8_t* dst = static_cast<uint8_t*>(mapped.pData);
+    const size_t row = static_cast<size_t>(w) * 4;
+    for (uint32_t y = 0; y < h; ++y) {
+      std::memcpy(dst + static_cast<size_t>(y) * mapped.RowPitch,
+                  src + static_cast<size_t>(y) * strideBytes, row);
+    }
+    context->Unmap(texBgra.Get(), 0);
+
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    D3D11_VIEWPORT vp{};
+    vp.TopLeftX = 0.0f;
+    vp.TopLeftY = 0.0f;
+    vp.Width = static_cast<float>(std::max<LONG>(1, rc.right - rc.left));
+    vp.Height = static_cast<float>(std::max<LONG>(1, rc.bottom - rc.top));
+    vp.MinDepth = 0.0f;
+    vp.MaxDepth = 1.0f;
+
+    ID3D11RenderTargetView* rtvs[] = {rtv.Get()};
+    context->OMSetRenderTargets(1, rtvs, nullptr);
+    context->RSSetViewports(1, &vp);
+    const float clearColor[4] = {0, 0, 0, 1};
+    context->ClearRenderTargetView(rtv.Get(), clearColor);
+    context->IASetInputLayout(nullptr);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context->VSSetShader(vs.Get(), nullptr, 0);
+    context->PSSetShader(psBgra.Get(), nullptr, 0);
+    ID3D11ShaderResourceView* srvs[] = {srvBgra.Get()};
+    context->PSSetShaderResources(0, 1, srvs);
+    ID3D11SamplerState* samplers[] = {sampler.Get()};
+    context->PSSetSamplers(0, 1, samplers);
+    const uint64_t drawStartUs = qpc_now_us();
+    context->Draw(3, 0);
+    ID3D11ShaderResourceView* nullSrvs[] = {nullptr};
+    context->PSSetShaderResources(0, 1, nullSrvs);
+    if (telemetry) telemetry->drawUs = qpc_now_us() - drawStartUs;
+
+    const uint64_t presentStartUs = qpc_now_us();
+    const HRESULT hr = swapChain->Present(0, 0);
+    if (telemetry) telemetry->presentBlockUs = qpc_now_us() - presentStartUs;
+    const bool ok = SUCCEEDED(hr) || hr == DXGI_STATUS_OCCLUDED;
+    if (!ok && telemetry) telemetry->failStage = "present";
+    if (ok) {
+      everPresented = true;
+      ++pickerPresentCount;
+    }
+    return ok;
+  }
+
+  // Whether GDI drawn into this window can still reach the screen.
+  //
+  // Two conditions, because only their conjunction kills GDI: the swapchain has to be a flip-model
+  // one (the pre-Win10 fallback below is DXGI_SWAP_EFFECT_DISCARD, which composites the old way and
+  // leaves GDI working), and it has to have actually presented. Before the first present the window
+  // is an ordinary GDI window and the picker can be blitted into it as it always was.
+  bool gdi_reaches_the_screen() const { return !(usedFlipModel && everPresented); }
 
   bool render_surface(HWND hwnd, const RECT& destRect, ID3D11Texture2D* texture,
                       uint32_t subresource, uint32_t codedW, uint32_t codedH,

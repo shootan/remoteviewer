@@ -26,6 +26,20 @@ struct UiResources {
   // Paint-time solid brushes, cached by color (was brush_cache()'s function static).
   std::unordered_map<COLORREF, HBRUSH> brushCache;
   Nv12D3dRenderer nv12Renderer;
+
+  // Where the picker is drawn before it is presented.
+  //
+  // GDI does not reach a window that a flip-model swapchain has presented on, so the picker is
+  // drawn into this offscreen top-down BGRA surface by the same code as ever and then uploaded and
+  // presented through that swapchain (viewer_present.cpp). Kept rather than rebuilt per paint: a
+  // burst of arriving thumbnails repaints the picker several times in a row, and this is a
+  // full-window bitmap.
+  HDC pickerDc = nullptr;
+  HBITMAP pickerBitmap = nullptr;
+  HGDIOBJ pickerOldBitmap = nullptr;
+  void* pickerBits = nullptr;
+  int pickerW = 0;
+  int pickerH = 0;
 };
 
 }  // namespace remote60::native_poc::viewer

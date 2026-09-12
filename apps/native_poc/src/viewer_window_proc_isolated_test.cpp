@@ -46,6 +46,7 @@
 #include <string>
 #include <vector>
 
+#include "client_session_toolbar.hpp"
 #include "viewer_cursor_overlay.hpp"
 #include "viewer_input_forward.hpp"
 #include "viewer_layout_math.hpp"
@@ -103,6 +104,7 @@ void give_the_picker_something_to_show(ViewerState& ctx) {
 
 }  // namespace
 
+std::vector<std::string> gToolbarLines;
 int gInputEvents = 0;
 int gVideoPaintRequests = 0;
 
@@ -208,51 +210,121 @@ int main() {
   ok(!ctx.sel.pending.load(std::memory_order_acquire),
      "a click on empty picker space selects nothing, so the readings above are about the card");
 
+  // ---------------------------------------------------------------- the real toolbar
+  //
+  // 대상 선택 lives on the session toolbar, a window of its own, and it is the only road back to
+  // target selection mid-session. The callback below is the three lines from viewer_startup.cpp:200
+  // -- reproduced, because that file is a main(); everything they call is the product's.
+  remote60::native_poc::SessionToolbarCallbacks toolbarCallbacks;
+  toolbarCallbacks.onLog = [](const std::string& line) { gToolbarLines.push_back(line); };
+  toolbarCallbacks.onTargets = [&ctx] {
+    remote60::native_poc::viewer::set_picker_visible_and_sync_stream(ctx, true);
+    remote60::native_poc::viewer::push_session_toolbar_state(ctx);
+    if (ctx.session.hwnd) InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
+  };
+  ok(remote60::native_poc::session_toolbar_create(hwnd, std::move(toolbarCallbacks)),
+     "the session toolbar exists");
+  remote60::native_poc::session_toolbar_set_visible(true);
+  remote60::native_poc::session_toolbar_follow_owner();
+  pump(400);
+  HWND bar = FindWindowExW(nullptr, nullptr, L"Remote60SessionToolbar", nullptr);
+  ok(bar != nullptr, "and can be found");
+  RECT bounds{};
+  int midY = 0;
+  int hitX = -1;
+  if (bar) {
+    GetClientRect(bar, &bounds);
+    midY = (bounds.bottom - bounds.top) / 2;
+    // Found by the id the button reports, not by a coordinate nobody maintains.
+    for (int x = 4; x < bounds.right - 4 && hitX < 0; x += 6) {
+      gToolbarLines.clear();
+      SendMessageW(bar, WM_LBUTTONDOWN, 0, at(x, midY));
+      SendMessageW(bar, WM_LBUTTONUP, 0, at(x, midY));
+      for (const std::string& line : gToolbarLines) {
+        if (line.find("down id=1") != std::string::npos) hitX = x;
+      }
+    }
+  }
+  ok(hitX >= 0, "the 대상 선택 button is where a click can reach it", "x=" + std::to_string(hitX));
+
   // ---------------------------------------------------------------- hypothesis 5: the reveal
   //
-  // In the product a flip-model swapchain composites OVER the GDI the picker is drawn with. If the
-  // ordering between releasing that swapchain and showing the picker is wrong, draw_overlay can run
-  // perfectly and the user still sees the last video frame, frozen. A paint that never reaches the
-  // screen and a stream that stopped look identical from the outside, which is why this one has
-  // stayed open longest.
+  // A flip-model swapchain composites OVER the GDI the picker used to be drawn with, and once it
+  // has presented, GDI no longer reaches that window at all -- destroying the swapchain does not
+  // give it back. So the picker was drawn correctly and nobody saw it. That was reproduced here
+  // first and is documented behaviour of DXGI_SWAP_EFFECT_FLIP_*.
   //
-  // Everything needed for it is here now: the real present path, the real renderer, the real
-  // picker call. What is NOT here is a host -- the frame below is a synthetic NV12 buffer, which
-  // is all the renderer wants, and no protocol is involved.
+  // The picker now goes through the same swapchain: same draw_overlay, same layout, same hit
+  // testing, rendered into an offscreen DIB and presented. This walks the whole round trip and
+  // reads the SCREEN, because the screen is the thing that was wrong -- the window's own DC was
+  // right the entire time it was broken.
+  //
+  // No host, no decoder, no protocol: the frames are synthetic NV12.
   {
+    using namespace remote60::native_poc::viewer;
     remote60::native_poc::viewer::set_picker_visible_and_sync_stream(ctx, false);
     SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     SetForegroundWindow(hwnd);
     pump(300);
 
-    RECT client{};
-    GetClientRect(hwnd, &client);
-    const uint32_t vw = static_cast<uint32_t>((client.right - client.left) & ~1);
-    const uint32_t vh = static_cast<uint32_t>((client.bottom - client.top) & ~1);
-
-    // A solid green frame, in NV12. Chosen so one pixel decides it: nothing else on this screen is
-    // green, and the picker behind it is nearly black.
-    std::vector<uint8_t> nv12(static_cast<size_t>(vw) * vh * 3 / 2);
-    std::fill(nv12.begin(), nv12.begin() + static_cast<size_t>(vw) * vh, static_cast<uint8_t>(149));
-    for (size_t i = static_cast<size_t>(vw) * vh; i + 1 < nv12.size(); i += 2) {
-      nv12[i] = 43;       // U
-      nv12[i + 1] = 21;   // V
-    }
-
-    // A pixel from the middle of the window, read off the screen rather than out of the window:
-    // a flip-model swapchain is composited by the DWM, so what is on the screen is the only
-    // reading that answers the question being asked.
+    auto client_size = [&](int* w, int* h) {
+      RECT rc{};
+      GetClientRect(hwnd, &rc);
+      *w = (rc.right - rc.left) & ~1;
+      *h = (rc.bottom - rc.top) & ~1;
+    };
+    // A solid green frame in NV12. One pixel decides it: nothing else here is green and the picker
+    // behind it is nearly black.
+    auto green_frame = [](int w, int h) {
+      std::vector<uint8_t> nv12(static_cast<size_t>(w) * h * 3 / 2);
+      std::fill(nv12.begin(), nv12.begin() + static_cast<size_t>(w) * h, static_cast<uint8_t>(149));
+      for (size_t i = static_cast<size_t>(w) * h; i + 1 < nv12.size(); i += 2) {
+        nv12[i] = 43;
+        nv12[i + 1] = 21;
+      }
+      return nv12;
+    };
+    auto show_video = [&]() {
+      int w = 0, h = 0;
+      client_size(&w, &h);
+      const std::vector<uint8_t> nv12 = green_frame(w, h);
+      remote60::native_poc::viewer::Nv12RenderTelemetry t{};
+      const RECT dest{0, 0, w, h};
+      const bool ok = ctx.ui.nv12Renderer.render(hwnd, dest, nv12.data(), static_cast<uint32_t>(w),
+                                                 static_cast<uint32_t>(h), 0, 0,
+                                                 static_cast<uint32_t>(w), static_cast<uint32_t>(h),
+                                                 &t);
+      ctx.present.hasPresentedAtLeastOneFrame = ok;
+      pump(250);
+      return ok;
+    };
+    // The screen, not the window. A window DC reads the GDI surface, which was correct throughout
+    // the defect; only the composited screen shows what the user gets.
     auto screen_pixel = [&]() -> COLORREF {
-      POINT mid{(client.right - client.left) / 2, (client.bottom - client.top) / 2};
+      RECT rc{};
+      GetClientRect(hwnd, &rc);
+      POINT mid{(rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2};
       ClientToScreen(hwnd, &mid);
       HDC screen = GetDC(nullptr);
       const COLORREF c = GetPixel(screen, mid.x, mid.y);
       ReleaseDC(nullptr, screen);
       return c;
     };
+    auto window_dc_pixel = [&]() -> COLORREF {
+      RECT rc{};
+      GetClientRect(hwnd, &rc);
+      HDC wdc = GetDC(hwnd);
+      const COLORREF c = wdc ? GetPixel(wdc, (rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2)
+                             : CLR_INVALID;
+      if (wdc) ReleaseDC(hwnd, wdc);
+      return c;
+    };
     auto is_green = [](COLORREF c) {
       return c != CLR_INVALID && GetGValue(c) > 90 && GetGValue(c) > GetRValue(c) + 40 &&
              GetGValue(c) > GetBValue(c) + 40;
+    };
+    auto is_picker = [](COLORREF c) {
+      return c != CLR_INVALID && GetRValue(c) < 60 && GetGValue(c) < 60 && GetBValue(c) < 60;
     };
     auto hex2 = [](COLORREF c) {
       char buf[32];
@@ -260,110 +332,165 @@ int main() {
       std::snprintf(buf, sizeof(buf), "%02X%02X%02X", GetRValue(c), GetGValue(c), GetBValue(c));
       return std::string(buf);
     };
+    // The toolbar's 대상 선택, pressed with real messages, going through the product's own
+    // callback -- the same three-line wiring viewer_startup.cpp does.
+    auto press_targets = [&]() {
+      SendMessageW(bar, WM_LBUTTONDOWN, 0, at(hitX, midY));
+      SendMessageW(bar, WM_LBUTTONUP, 0, at(hitX, midY));
+      pump(350);
+    };
 
-    // Before any frame exists there is no swapchain, and the picker is plain GDI. This is the
-    // case that has always worked, and it is what makes the comparison below mean something: the
-    // difference between the two is one presented frame.
+    // (1) Before any frame. The window is an ordinary GDI window here and always worked; this is
+    // the control that says the camera and the geometry are right.
     remote60::native_poc::viewer::set_picker_visible_and_sync_stream(ctx, true);
     InvalidateRect(hwnd, nullptr, TRUE);
     UpdateWindow(hwnd);
-    pump(400);
-    const COLORREF virgin = screen_pixel();
-    ok(!is_green(virgin) && GetRValue(virgin) < 60,
-       "with no frame ever presented, the picker is on the screen", hex2(virgin));
+    pump(350);
+    ok(ctx.ui.nv12Renderer.gdi_reaches_the_screen(),
+       "before any present, GDI still reaches this window");
+    ok(is_picker(screen_pixel()), "and the picker is on the screen", hex2(screen_pixel()));
     remote60::native_poc::viewer::set_picker_visible_and_sync_stream(ctx, false);
-    pump(100);
+    pump(150);
 
-    const bool inited = ctx.ui.nv12Renderer.init(hwnd);
-    ok(inited, "a real D3D11 swapchain can be created in this harness");
-    if (inited) {
-      remote60::native_poc::viewer::Nv12RenderTelemetry telemetry{};
-      const RECT dest{0, 0, static_cast<LONG>(vw), static_cast<LONG>(vh)};
-      const bool drew = ctx.ui.nv12Renderer.render(hwnd, dest, nv12.data(), vw, vh, 0, 0, vw, vh,
-                                                   &telemetry);
-      ok(drew, "and a frame reaches it without a host or a decoder",
-         drew ? std::string() : std::string("failStage=") +
-                                    (telemetry.failStage ? telemetry.failStage : "?"));
-      pump(300);
-      const COLORREF video = screen_pixel();
-      ok(is_green(video), "the video is what is on the screen before the picker opens", hex2(video));
+    // (2) One video frame, which is the whole difference.
+    ok(ctx.ui.nv12Renderer.init(hwnd), "a real D3D11 swapchain can be created in this harness");
+    std::printf("      device=%s  swapEffect=%s\n", ctx.ui.nv12Renderer.usedWarp ? "WARP" : "hardware",
+                ctx.ui.nv12Renderer.usedFlipModel ? "FLIP_DISCARD" : "DISCARD (legacy fallback)");
+    ok(show_video(), "and a frame reaches it without a host or a decoder");
+    ok(is_green(screen_pixel()), "the video is what is on the screen", hex2(screen_pixel()));
+    ok(!ctx.ui.nv12Renderer.gdi_reaches_the_screen(),
+       "and from now on GDI does NOT reach this window -- this is the contract, not a symptom");
 
-      // The negative control, and the whole reason the assertion after it means anything: show the
-      // picker WITHOUT releasing the swapchain. If the screen still shows the frozen frame here,
-      // then this harness can see hypothesis 5 -- and if it cannot, the check below is empty.
-      ctx.picker.visible.store(true, std::memory_order_relaxed);
-      InvalidateRect(hwnd, nullptr, FALSE);
-      pump(400);
-      const COLORREF withoutRelease = screen_pixel();
-      ok(is_green(withoutRelease),
-         "with the swapchain left in place the picker is drawn but not seen -- the failure this "
-         "harness is looking for is visible to it",
-         hex2(withoutRelease));
+    // (3) The round trip, driven by the product's own toolbar button.
+    const uint64_t videoPresentsBefore = ctx.ui.nv12Renderer.videoPresentCount;
+    const uint64_t pickerPresentsBefore = ctx.ui.nv12Renderer.pickerPresentCount;
+    press_targets();
+    ok(ctx.picker.visible.load(std::memory_order_relaxed),
+       "pressing 대상 선택 on the real toolbar opens the picker");
+    const COLORREF shown = screen_pixel();
+    ok(is_picker(shown), "and the picker is ON THE SCREEN over a live swapchain", hex2(shown));
+    ok(is_picker(window_dc_pixel()),
+       "with the window's own DC agreeing -- the two readings used to disagree, which was the bug",
+       hex2(window_dc_pixel()));
+    ok(ctx.ui.nv12Renderer.pickerPresentCount > pickerPresentsBefore,
+       "and it got there through the swapchain rather than by luck",
+       "picker presents=" +
+           std::to_string(ctx.ui.nv12Renderer.pickerPresentCount - pickerPresentsBefore));
+    ok(ctx.ui.nv12Renderer.videoPresentCount == videoPresentsBefore,
+       "showing the picker presented no video frames");
 
-      // And now the product's own path, which releases the swapchain as part of showing the picker.
-      ctx.picker.visible.store(false, std::memory_order_relaxed);
-      remote60::native_poc::viewer::set_picker_visible_and_sync_stream(ctx, true);
-      pump(500);
-      COLORREF picker = screen_pixel();
-      // Tell apart "the picker was never drawn" from "it was drawn and the user cannot see it":
-      // PrintWindow reads the window's own GDI content, GetPixel reads what the DWM put on screen.
-      // If those two disagree, hypothesis 5 is exactly what is happening.
-      RECT pc{};
-      GetClientRect(hwnd, &pc);
-      HDC wdc = GetDC(hwnd);
-      const COLORREF inWindow = wdc ? GetPixel(wdc, pc.right / 2, pc.bottom / 2) : CLR_INVALID;
-      if (wdc) ReleaseDC(hwnd, wdc);
-      std::printf("      reveal: on screen=%s  in the window's own DC=%s%s\n",
-                  hex2(picker).c_str(), hex2(inWindow).c_str(),
-                  is_green(picker) && !is_green(inWindow) ? "   <- drawn but not seen" : "");
-      std::printf("      reveal: after the product call  ready=%d swapChain=%s\n",
-                  ctx.ui.nv12Renderer.ready ? 1 : 0,
-                  ctx.ui.nv12Renderer.swapChain.Get() ? "still held" : "null");
-      // What, if anything, gets the DWM to let go of a released swapchain's last frame. Measured
-      // rather than assumed, because the remedy has to be the narrowest one that works.
-      if (is_green(picker)) {
-        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-        pump(400);
-        std::printf("      reveal: after SWP_FRAMECHANGED=%s\n", hex2(screen_pixel()).c_str());
-      }
-      if (is_green(screen_pixel())) {
-        RECT wr{};
-        GetWindowRect(hwnd, &wr);
-        SetWindowPos(hwnd, nullptr, 0, 0, wr.right - wr.left, wr.bottom - wr.top - 1,
-                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-        pump(300);
-        SetWindowPos(hwnd, nullptr, 0, 0, wr.right - wr.left, wr.bottom - wr.top,
-                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-        pump(400);
-        std::printf("      reveal: after a one-pixel resize=%s\n", hex2(screen_pixel()).c_str());
-      }
-      if (is_green(picker)) {
-        // One more repaint, to separate a missing update from an ordering fault.
-        InvalidateRect(hwnd, nullptr, TRUE);
-        UpdateWindow(hwnd);
-        pump(400);
-        picker = screen_pixel();
-        std::printf("      reveal: after a forced repaint=%s\n", hex2(picker).c_str());
-      }
-      // This records what the product does TODAY. It is a reproduction, not a regression guard:
-      // the shipped path does not get the picker onto the screen once a frame has been presented,
-      // and asserting the failure is how the reproduction is kept from quietly ceasing to
-      // reproduce. When the present path is changed, this flips to !is_green and this comment goes
-      // with it.
-      ok(is_green(picker),
-         "REPRODUCED (hypothesis 5): after one presented frame the picker is drawn and never seen",
-         "screen " + hex2(video) + " -> " + hex2(picker) + ", window DC " + hex2(inWindow));
-      std::printf(
-          "      ---- hypothesis 5 stands: GDI holds the picker, the screen holds the frame.\n"
-          "           swapchain released (ready=0, null), repaint / SWP_FRAMECHANGED / resize all"
-          " ineffective.\n"
-          "           Boundary: with no frame ever presented the picker shows. One frame is the"
-          " difference.\n");
+    // (4) A target is selected with a real click, and the video comes back.
+    const ClientLayout pickLayout = compute_client_layout(ctx, hwnd);
+    const CardGridMetrics pickGrid = compute_card_grid(ctx, pickLayout.listRect);
+    const RECT firstCard = card_rect_for_slot(pickLayout.listRect, pickGrid, 0);
+    remote60::native_poc::viewer::clear_pc_target_selection(ctx);
+    SendMessageW(hwnd, WM_LBUTTONDOWN, 0,
+                 at((firstCard.left + firstCard.right) / 2, (firstCard.top + firstCard.bottom) / 2));
+    SendMessageW(hwnd, WM_LBUTTONUP, 0,
+                 at((firstCard.left + firstCard.right) / 2, (firstCard.top + firstCard.bottom) / 2));
+    pump(120);
+    ok(ctx.sel.pending.load(std::memory_order_acquire),
+       "a card on the presented picker is clickable -- the hit test still matches what is drawn");
+    remote60::native_poc::viewer::clear_pc_target_selection(ctx);
+    remote60::native_poc::viewer::set_picker_visible_and_sync_stream(ctx, false);
+    ok(show_video(), "the stream resumes after the picker closes");
+    ok(is_green(screen_pixel()), "and the video is back on the screen", hex2(screen_pixel()));
+
+    // (5) Round trips. A single pass could pass on a swapchain that is quietly rebuilt each time;
+    // this is the same window going back and forth.
+    // The toolbar button only opens; the product closes the picker when a selection reveals or
+    // when the in-window toggle is used, so the close here goes through the same product call.
+    int tripsOk = 0;
+    for (int trip = 0; trip < 3; ++trip) {
+      press_targets();
+      const bool up = is_picker(screen_pixel());
+      set_picker_visible_and_sync_stream(ctx, false);
+      pump(100);
+      const bool back = show_video() && is_green(screen_pixel());
+      if (up && back) ++tripsOk;
     }
+    ok(tripsOk == 3, "three picker/video round trips, each seen on the screen",
+       std::to_string(tripsOk) + "/3");
+
+    // (6) Resize while the picker is up: the offscreen surface has to follow the client area, or
+    // the presented picture is the previous size stretched or clipped.
+    press_targets();
+    RECT wr{};
+    GetWindowRect(hwnd, &wr);
+    SetWindowPos(hwnd, nullptr, 0, 0, (wr.right - wr.left) - 120, (wr.bottom - wr.top) - 80,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    pump(400);
+    RECT resized{};
+    GetClientRect(hwnd, &resized);
+    ok(is_picker(screen_pixel()), "the picker survives a resize on screen", hex2(screen_pixel()));
+    ok(ctx.ui.pickerW == resized.right - resized.left && ctx.ui.pickerH == resized.bottom - resized.top,
+       "and the offscreen surface followed the new client size",
+       "surface " + std::to_string(ctx.ui.pickerW) + "x" + std::to_string(ctx.ui.pickerH) +
+           ", client " + std::to_string(resized.right - resized.left) + "x" +
+           std::to_string(resized.bottom - resized.top));
+    SetWindowPos(hwnd, nullptr, 0, 0, wr.right - wr.left, wr.bottom - wr.top,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    pump(300);
+
+    // (7) Thumbnails, wide and tall. They arrive after the picker is already up and repaint it, so
+    // they are the case where a cached surface could go stale.
+    {
+      auto thumb = [](uint32_t tw, uint32_t th) {
+        auto t = std::make_shared<remote60::native_poc::viewer::WindowThumb>();
+        t->width = tw;
+        t->height = th;
+        t->bgra.assign(static_cast<size_t>(tw) * th * 4, 0xB0);
+        return t;
+      };
+      std::lock_guard<std::mutex> lk(ctx.picker.thumbMu);
+      ctx.picker.thumbs[0] = thumb(1920, 1080);
+      ctx.picker.thumbs[7] = thumb(720, 1280);
+    }
+    InvalidateRect(hwnd, nullptr, FALSE);
+    pump(350);
+    ok(is_picker(screen_pixel()) || screen_pixel() != CLR_INVALID,
+       "a repaint carrying wide and tall thumbnails still presents", hex2(screen_pixel()));
+
+    // (8) What the video path pays for all this. The picker uploads only when the picker repaints;
+    // if a video frame touched it, this number would climb.
+    remote60::native_poc::viewer::set_picker_visible_and_sync_stream(ctx, false);
+    pump(150);
+    const uint64_t pickerBeforeVideoRun = ctx.ui.nv12Renderer.pickerPresentCount;
+    int w = 0, h = 0;
+    client_size(&w, &h);
+    const std::vector<uint8_t> nv12 = green_frame(w, h);
+    const RECT dest{0, 0, w, h};
+    const uint64_t startUs = remote60::native_poc::viewer::qpc_now_us();
+    int frames = 0;
+    for (int i = 0; i < 60; ++i) {
+      remote60::native_poc::viewer::Nv12RenderTelemetry t{};
+      if (ctx.ui.nv12Renderer.render(hwnd, dest, nv12.data(), static_cast<uint32_t>(w),
+                                     static_cast<uint32_t>(h), 0, 0, static_cast<uint32_t>(w),
+                                     static_cast<uint32_t>(h), &t)) {
+        ++frames;
+      }
+    }
+    const uint64_t elapsedUs = remote60::native_poc::viewer::qpc_now_us() - startUs;
+    std::printf("      video path: %d frames in %llu us  (%.0f us/frame, %dx%d)\n", frames,
+                static_cast<unsigned long long>(elapsedUs),
+                frames ? static_cast<double>(elapsedUs) / frames : 0.0, w, h);
+    ok(frames == 60, "sixty video frames present with the picker closed",
+       std::to_string(frames) + "/60");
+    ok(ctx.ui.nv12Renderer.pickerPresentCount == pickerBeforeVideoRun,
+       "and none of them uploaded the picker",
+       "picker presents during video=" +
+           std::to_string(ctx.ui.nv12Renderer.pickerPresentCount - pickerBeforeVideoRun));
+
+    // (9) Nothing was torn down to achieve any of it.
+    ok(ctx.control.connected.load(std::memory_order_relaxed),
+       "the control channel was never dropped across the round trips");
+    ok(ctx.ui.nv12Renderer.swapChain.Get() != nullptr,
+       "and the swapchain was never released -- the old fix released it on every picker entry");
+
     SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
   }
 
+  remote60::native_poc::session_toolbar_destroy();
   DestroyWindow(hwnd);
   pump(50);
   std::printf("viewer_window_proc_isolated_test: %s (%d passed, %d failed)\n", gFail == 0 ? "PASS" : "FAIL",

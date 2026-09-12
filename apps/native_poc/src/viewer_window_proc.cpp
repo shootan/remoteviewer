@@ -315,9 +315,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     }
     // The toolbar is a window of its own, so it does not move with this one for free.
-    case WM_WINDOWPOSCHANGED:
+    case WM_WINDOWPOSCHANGED: {
       remote60::native_poc::session_toolbar_follow_owner();
+      // A resize has to reach the picker. This class sets no CS_HREDRAW/CS_VREDRAW and there is no
+      // WM_SIZE handler, so shrinking the window repaints nothing. That was invisible while the
+      // picker was GDI drawn into a window the screen was ignoring; now that the picker is
+      // presented through the swapchain it shows as the previous size stretched, because DXGI
+      // scales the last presented frame until something presents at the new one.
+      const WINDOWPOS* pos = reinterpret_cast<const WINDOWPOS*>(lp);
+      if (pos && (pos->flags & SWP_NOSIZE) == 0 &&
+          ctx.picker.visible.load(std::memory_order_relaxed)) {
+        InvalidateRect(hwnd, nullptr, FALSE);
+      }
       return DefWindowProcW(hwnd, msg, wp, lp);
+    }
     case WM_DPICHANGED: {
       ensure_ui_font(ctx, hwnd);
       const RECT* suggested = reinterpret_cast<const RECT*>(lp);

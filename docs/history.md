@@ -11645,5 +11645,53 @@ ready=0, swapChain=null          repaint·SWP_FRAMECHANGED·리사이즈 전부 
 
 **미검증**: 인앱 완주 · **가설 5 는 재현만 했고 고치지 않았다**(present 경로 설계 결정, Codex 확정 대기) ·
 1b·4 의 실기 · 실제 고DPI 모니터.
+
+### 532) 2026-09-12 게임 원격 장애 조사 기록 — 14:40 멈춤부터 14:50 부분 호전
+
+- 목표: 사용자 보고의 멈춤·반복 드래그·프레임/화질 저하와 후속 호전을 근거별로 보존.
+- 변경: `docs/incident_2026-09-12_remote_game.md`, `docs/incident_2026-09-12_evidence_sha256.txt`, 본 이력, `docs/구현계획.md` 체크리스트.
+- 확인: gnlink SSH로 NAS Host 2대와 Client/Viewer 로그 수집, 원본 스냅샷 SHA-256 고정, 소스 경로 대조. Host A Release 단계 5.05초 정체·감시기 종료/재기동, Host B 60fps 적용·조립 손실/복구·ABR 720p 하향 확인. 드래그는 영상 밖 UP 누락 코드 경로만 확인했으며 사건 연결은 미확정.
+- 추가 관측: 14:48 새 세션 후 14:50에 1080p 수신/디코딩 59~60fps, 표시 40~42회 및 뒤이은 제어 RTT 1.5~2ms. 부분 호전이며 실제 입력 반응·60fps 표시 완전 복구 판정 아님.
+- 검증: 문서와 원본 필드 대조, SHA-256 목록 및 diff 공백 검사. 문서 전용으로 빌드/제품 실행 시험 없음. 별도 제품 변경 6개 파일은 미수정.
+- 다음: 드라이버 호출 내부 정체, 최초 프레임 손실 위치, 드래그 재현, 원본 캡처 공급 및 종단 입력 지연 측정. 이번 작업은 기록이며 수정/설치/배포 없음.
+- 커밋: 세션에 Git MCP 도구가 없어 저장소의 Git MCP 전용 규칙에 따라 미수행. push 미실행.
+
+후속 사용자 요청의 코드 조사: `docs/incident_2026-09-12_code_review.md` 추가 및 사건 문서/계획 연결. UP 조기 반환, 응답 대기 직렬 제어, 영상 decode와 ACK 수신의 동일 스레드, 표시 시각에 기반한 혼잡 추정, 최신 한 슬롯/paint 병합, NACK 대기·ABR static recovery, 5초 캡처 감시기 경로를 추적했다. 기존 로그에서 입력 큐 대기 최대 252525us를 확인했고, 14:44~47에 기록된 decode 호출 최대는 22544us로 수백 ms 지연을 단일 decode 정체로 확정하지 않았다. 제품 수정·재현·빌드 없음. 다음은 선행 action 지연 계측과 UP 재현, 최초 수신/표시 정체 경계 검증이다. Git MCP 미제공으로 커밋·push 미수행 상태 유지.
 ⚠️ 이번 회차를 **"UI 전면 개선 완료" 로 말하지 않는다.** 고친 항목과 **확인 후 그대로 둔 항목**
 (썸네일 종횡비·auto-hide·목록/설정 디자인 = **결함 없음 확인**)은 다르다.
+
+### 532) 2026-09-12 가설 5 수정 — picker 를 **같은 swapchain 으로 present** (Codex 확정 ⒜)
+`0.2.122` 까지 재현만 해 두었던 것을 고쳤다. 근거가 **관측에서 계약으로** 올라갔다:
+`DXGI_SWAP_EFFECT_FLIP_*` 는 **flip present 이후 그 HWND 에서 GDI 가 화면에 닿지 않고, swapchain 을
+파괴해도 그렇다.** §28.3 에서 잰 것이 바로 이것이었다.
+
+🔴 **제품 주석 세 곳이 정반대를 말하고 있었다** — `viewer_nv12_renderer.hpp:55` *"returns the window
+to ordinary GDI redirection"* · `viewer_picker.cpp:112` *"hands the window back to GDI"* ·
+`viewer_startup.cpp:194` *"its repaint is composited"*. 마지막 것은 **고쳐지기 전에 고쳐졌다고**
+적혀 있었다. 세 문장이 서로를 뒷받침해 **틀린 전제가 세 곳에서 확인되는 것처럼 보였다.** 전부 고쳤다.
+
+**바꾼 것은 마지막 한 걸음뿐이다.** picker 는 **`draw_overlay` 한 줄도 고치지 않고** offscreen BGRA
+DIB 에 그려진 뒤 **같은 swapchain 으로 present** 된다. 영상은 FLIP_DISCARD·장치 공유·NV12 경로
+그대로. picker 진입 때 **`release_swapchain()` 을 부르지 않는다**(F-21 폐기 — 효과가 없었고 복귀 때
+재생성만 유발했다). 어느 길인지는 `gdi_reaches_the_screen()`(= flip 모델 **그리고** 이미 present)이
+정한다. **GDI fallback 은 깔지 않았다** — present 실패는 로그로 말한다. 조용히 흘리면 이 변경이
+없애려는 증상으로 정확히 되돌아간다.
+
+**검증에서 새 결함이 하나 나왔다**: **리사이즈가 picker 를 다시 그리지 않았다.** `CS_?REDRAW` 도
+`WM_SIZE` 핸들러도 없다. GDI 시절엔 어차피 안 보여 드러나지 않았고, present 로 바꾸니 **이전 크기가
+늘어난 그림**으로 보인다. picker 가 떠 있을 때만 invalidate 한다.
+
+**실측** `viewer_window_proc_isolated_test` **33 PASS rc=0** (device=hardware, FLIP_DISCARD):
+첫 present 전 화면 `0D0F14` → 영상 `00E600` → **실제 툴바 대상 선택** → 화면 `0D0F14` **창 DC 도
+`0D0F14`**(예전엔 이 둘이 어긋난 것이 결함) → 카드 클릭 선택됨 → 닫으면 `00E600` → **왕복 3/3** →
+리사이즈 후 표면 1464x780 = 클라이언트 → 썸네일 가로·세로 → **영상 60/60, 그동안 picker 업로드 0**,
+711~1029 us/frame → 제어 유지 · swapchain 한 번도 해제 안 됨.
+회귀 전량 rc=0(`picker_open_chain` 11 · `picker_empty_state` 19 · `session_toolbar_click` 26 ·
+`viewer_layout` · `viewer_picker_gesture` · `viewer_startup_failure` 4 · `update_effects` 219 ·
+`client_update_ui` 27).
+
+**확인되지 않은 것**: **WARP 경로 미실행**(하드웨어 장치가 만들어져 fallback 에 안 들어간다) ·
+**영상 경로 A/B 미측정**(그 경로 변경은 성공 분기 안 스칼라 대입 2개뿐이라 A/B 노이즈가 변경보다
+크다. 수치는 변경 후 값) · 다른 GPU·드라이버 · 실기.
+🔴 **사용자 원래 증상과 이 재현의 원인이 같다고 증명된 것은 아니다** — 모양과 경계가 맞을 뿐이고,
+실기 확인 전까지 같다고 적지 않는다.

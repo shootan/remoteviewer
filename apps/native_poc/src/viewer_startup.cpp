@@ -192,7 +192,11 @@ int create_window_and_toolbar(ViewerContext& ctx) {
   {
     remote60::native_poc::SessionToolbarCallbacks toolbarCallbacks;
     // Re-enabled: the reason this was unset -- entering the picker mid-session looked like a
-    // freeze -- is fixed (the picker no longer stops the stream, and its repaint is composited).
+    // freeze -- is fixed. Two separate things had to be true. The picker no longer stops the
+    // stream, which was done long ago. And its repaint actually reaches the screen, which this
+    // comment claimed before it was true: releasing the swapchain does not give a flip-model
+    // window back to GDI, so the picker was drawn and never seen until it was presented through
+    // the swapchain instead (viewer_present.cpp present_picker_frame, history #532).
     // With the invisible legacy top-left buttons removed, this is the ONLY road back to target
     // selection during a session, so it must exist.
     // The callbacks outlive nothing: the toolbar is destroyed in WM_DESTROY, long before ctx.

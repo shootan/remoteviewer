@@ -30,8 +30,11 @@ namespace remote60::native_poc::viewer {
 // Re-enabled 2026-09-02 at the user's request: the PC picker lists windows again so a text window
 // (GMux, an editor) can be captured directly and stay sharp, instead of showing as a small region
 // of the whole desktop. F-21 disabled it for two reasons -- a flip-model overlay bug and the user's
-// own "desktop only" request. The overlay bug's fix (release_swapchain() on picker entry) stays, so
-// the picker is visible; only the listing was gated here. (history #347)
+// own "desktop only" request. Only the listing was gated here. (history #347)
+// ⚠️ That overlay bug's "fix" was release_swapchain() on picker entry, and it did not work: a
+// flip-model swapchain that has presented leaves GDI unable to reach the window whether it is
+// released or not. The picker is now presented through the swapchain instead
+// (viewer_present.cpp present_picker_frame, history #532).
 inline constexpr bool kPickerListsWindows = true;
 
 ClientControlMetricsSnapshot capture_client_control_metrics_snapshot(ViewerState& ctx);

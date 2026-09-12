@@ -57,6 +57,19 @@ void destroy_cached_gdi_objects(ViewerState& ctx) {
     DeleteObject(ctx.ui.titleFont);
     ctx.ui.titleFont = nullptr;
   }
+  if (ctx.ui.pickerDc) {
+    if (ctx.ui.pickerOldBitmap) SelectObject(ctx.ui.pickerDc, ctx.ui.pickerOldBitmap);
+    DeleteDC(ctx.ui.pickerDc);
+    ctx.ui.pickerDc = nullptr;
+    ctx.ui.pickerOldBitmap = nullptr;
+  }
+  if (ctx.ui.pickerBitmap) {
+    DeleteObject(ctx.ui.pickerBitmap);
+    ctx.ui.pickerBitmap = nullptr;
+  }
+  ctx.ui.pickerBits = nullptr;
+  ctx.ui.pickerW = 0;
+  ctx.ui.pickerH = 0;
 }
 
 void draw_text_utf8(ViewerState& ctx, HDC hdc, const std::string& text, RECT* rect, UINT format) {

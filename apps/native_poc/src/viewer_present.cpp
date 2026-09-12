@@ -55,6 +55,101 @@ void poll_video_paint_liveness(ViewerState& ctx, HWND hwnd) {
   request_video_paint(ctx, hwnd);
 }
 
+// The picker's surface: a top-down 32-bit DIB the size of the client area, kept between paints.
+bool ensure_picker_surface(ViewerState& ctx, int w, int h) {
+  if (ctx.ui.pickerDc && ctx.ui.pickerBits && ctx.ui.pickerW == w && ctx.ui.pickerH == h) {
+    return true;
+  }
+  if (ctx.ui.pickerDc) {
+    if (ctx.ui.pickerOldBitmap) SelectObject(ctx.ui.pickerDc, ctx.ui.pickerOldBitmap);
+    DeleteDC(ctx.ui.pickerDc);
+    ctx.ui.pickerDc = nullptr;
+    ctx.ui.pickerOldBitmap = nullptr;
+  }
+  if (ctx.ui.pickerBitmap) {
+    DeleteObject(ctx.ui.pickerBitmap);
+    ctx.ui.pickerBitmap = nullptr;
+  }
+  ctx.ui.pickerBits = nullptr;
+  ctx.ui.pickerW = 0;
+  ctx.ui.pickerH = 0;
+
+  HDC screen = GetDC(nullptr);
+  if (!screen) return false;
+  HDC mem = CreateCompatibleDC(screen);
+  ReleaseDC(nullptr, screen);
+  if (!mem) return false;
+
+  BITMAPINFO bi{};
+  bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+  bi.bmiHeader.biWidth = w;
+  bi.bmiHeader.biHeight = -h;  // negative: top-down, so row 0 is the top row the upload expects
+  bi.bmiHeader.biPlanes = 1;
+  bi.bmiHeader.biBitCount = 32;
+  bi.bmiHeader.biCompression = BI_RGB;
+  void* bits = nullptr;
+  HBITMAP dib = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+  if (!dib || !bits) {
+    if (dib) DeleteObject(dib);
+    DeleteDC(mem);
+    return false;
+  }
+  ctx.ui.pickerOldBitmap = SelectObject(mem, dib);
+  ctx.ui.pickerDc = mem;
+  ctx.ui.pickerBitmap = dib;
+  ctx.ui.pickerBits = bits;
+  ctx.ui.pickerW = w;
+  ctx.ui.pickerH = h;
+  return true;
+}
+
+// Draw the picker as it has always been drawn, then put it on the screen the only way that works.
+//
+// Once a flip-model swapchain has presented on an HWND, GDI drawn into that window no longer
+// reaches the screen, and destroying the swapchain does not give it back -- so the old approach of
+// releasing the swapchain and blitting the overlay into the window DC drew a correct picker
+// somewhere nobody could see. Every line of the drawing is unchanged: draw_overlay renders into an
+// offscreen DIB instead of the window, and the finished bitmap is uploaded and presented through
+// the same swapchain the video uses.
+bool present_picker_frame(ViewerState& ctx, HWND hwnd) {
+  RECT rc{};
+  GetClientRect(hwnd, &rc);
+  const int w = rc.right - rc.left;
+  const int h = rc.bottom - rc.top;
+  if (w <= 0 || h <= 0) return false;  // minimised: nothing to present, and not a failure
+  if (!ensure_picker_surface(ctx, w, h)) {
+    log_client_line(ctx, "[picker] present: could not build the offscreen surface");
+    return false;
+  }
+  // The picker paints the whole client area itself (draw_overlay opens with a full-rect fill), but
+  // a surface that has just been resized would otherwise carry a band of the previous size's
+  // pixels wherever the new drawing happens not to reach.
+  RECT full{0, 0, w, h};
+  FillRect(ctx.ui.pickerDc, &full, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+  draw_overlay(ctx, ctx.ui.pickerDc);
+  // GDI is queued; the upload below reads the bits directly.
+  GdiFlush();
+
+  if (!ctx.ui.nv12Renderer.ready && !ctx.ui.nv12Renderer.init(hwnd)) {
+    log_client_line(ctx, "[picker] present: the renderer is not available, picker not shown");
+    return false;
+  }
+  Nv12RenderTelemetry telemetry{};
+  const bool ok = ctx.ui.nv12Renderer.present_bgra(hwnd, ctx.ui.pickerBits,
+                                                   static_cast<uint32_t>(w),
+                                                   static_cast<uint32_t>(h),
+                                                   static_cast<uint32_t>(w) * 4u, &telemetry);
+  if (!ok) {
+    // Said, not swallowed. There is deliberately no GDI fallback here: on this window GDI would
+    // draw nothing visible, and a silent fallback would turn a present failure back into the
+    // symptom this whole change exists to remove -- a picker that is drawn and never seen.
+    log_client_line(ctx, std::string("[picker] present FAILED at ") +
+                             (telemetry.failStage ? telemetry.failStage : "?") +
+                             "; the picker is not on the screen");
+  }
+  return ok;
+}
+
 LRESULT paint_video_frame(ViewerState& ctx, HWND hwnd) {
   PAINTSTRUCT ps{};
   HDC hdc = BeginPaint(hwnd, &ps);
@@ -373,11 +468,23 @@ LRESULT paint_video_frame(ViewerState& ctx, HWND hwnd) {
       ctx.present.lastUserFeedbackOverwrite = overwriteCountNow;
     }
     ctx.present.lastPresentUs = presentUs;
-  } else if (pickerVisible || !ctx.present.hasPresentedAtLeastOneFrame) {
+  } else if (!ctx.present.hasPresentedAtLeastOneFrame && !pickerVisible) {
     // Before first successful frame, keep a deterministic background.
     FillRect(hdc, &videoRect, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
   }
-  draw_overlay(ctx, hdc);
+  // Two ways to the screen, and which one is correct is not a preference.
+  //
+  // Before this window's swapchain has presented in the flip model, it is an ordinary GDI window
+  // and the picker is blitted into it as it always was. After, GDI does not reach the screen at
+  // all, and the picker has to go through the swapchain -- see present_picker_frame above.
+  if (pickerVisible && !ctx.ui.nv12Renderer.gdi_reaches_the_screen()) {
+    present_picker_frame(ctx, hwnd);
+  } else {
+    if (pickerVisible) {
+      FillRect(hdc, &videoRect, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+    }
+    draw_overlay(ctx, hdc);
+  }
   EndPaint(hwnd, &ps);
   uint64_t latestVersion = 0;
   {

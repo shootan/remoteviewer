@@ -108,12 +108,18 @@ void set_picker_visible_and_sync_stream(ViewerState& ctx, bool visible) {
                            std::to_string(ctx.sel.activeStreamGeneration.load(
                                std::memory_order_acquire)));
   if (visible) {
-    // The picker is GDI, the video is a flip-model swapchain on the same HWND, and DWM composites
-    // the swapchain ON TOP. Leaving it bound meant the picker was drawn underneath and the user
-    // just saw the last video frame, frozen. Dropping the swapchain hands the window back to GDI;
-    // the next present after the picker closes rebuilds it. The D3D device survives (the decoder
-    // shares it). (Viewer ledger F-21.)
-    ctx.ui.nv12Renderer.release_swapchain();
+    // 🔴 F-21 superseded. It used to release the swapchain here, on the premise that dropping it
+    // "hands the window back to GDI". It does not: once a flip-model swapchain has presented on an
+    // HWND, GDI drawn into that window stops reaching the screen, and destroying the swapchain
+    // does not undo that. Documented for DXGI_SWAP_EFFECT_FLIP_*, and measured here first -- the
+    // window's own DC held the picker while the screen held the last video frame, through a forced
+    // repaint, SWP_FRAMECHANGED and a resize (viewer_window_proc_isolated_test,
+    // docs/ui_state_table.md §28.3). So the release made no difference to what the user saw and
+    // cost a swapchain rebuild on the way back.
+    //
+    // The swapchain now stays, and the picker is presented through it: drawn by the same GDI code
+    // into an offscreen surface and uploaded (viewer_present.cpp present_picker_frame). The video
+    // path, the device the decoder shares, and the NV12 rendering are all unchanged.
     ctx.picker.shownAtUs.store(qpc_now_us(), std::memory_order_relaxed);
     ctx.picker.CancelPress();
     // Mid-session the stream KEEPS RUNNING behind the picker overlay. Stopping it here made every

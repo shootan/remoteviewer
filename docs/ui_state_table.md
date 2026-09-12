@@ -839,3 +839,63 @@ cmake --build <build> --target remote60_viewer_window_proc_isolated_test --confi
 🔴 **고치는 방법은 present 경로 설계 결정이라 여기서 손대지 않았다** — 후보(picker 를 swapchain 에
 그리기 / 영상을 자식 창으로 분리 / bitblt 모델 복귀)는 성능·구조에 각각 값이 다르다. **Codex 확정
 사항**으로 올린다.
+
+
+## 29. 가설 5 수정 — picker 를 같은 swapchain 으로 present (2026-09-12, Codex 확정 ⒜)
+
+### 29.1 관측이 계약으로 올라갔다
+`DXGI_SWAP_EFFECT_FLIP_*` 문서: **flip present 가 한 번 성공한 HWND 에서는 GDI 가 화면에 닿지
+않고, swapchain 을 파괴해도 그렇다.** §28.3 에서 측정한 것이 바로 이것이다 — 재현이 먼저였고 계약이
+나중에 확인됐다.
+
+🔴 **제품 주석 세 곳이 정반대로 적혀 있었고 전부 고쳤다.**
+| 위치 | 적혀 있던 것 |
+|---|---|
+| `viewer_nv12_renderer.hpp:55` | *"Releasing the swapchain returns the window to ordinary GDI redirection"* |
+| `viewer_picker.cpp:112` | *"Dropping the swapchain hands the window back to GDI"* |
+| `viewer_startup.cpp:194` | *"its repaint is composited"* ← **고쳐지기 전에 고쳐졌다고 적혀 있었다** |
+세 문장이 서로를 뒷받침해서 **틀린 전제가 세 곳에서 확인되는 것처럼 보였다.**
+
+### 29.2 무엇을 바꿨나 (좁게)
+- 영상은 **FLIP_DISCARD 유지**, 장치·디코더 공유 유지, NV12 렌더 경로 **무변경**.
+- picker 는 **`draw_overlay` 한 줄도 고치지 않고** offscreen top-down BGRA DIB(`ctx.ui.picker*`)에
+  그린 뒤, **같은 swapchain 에 불투명 프레임으로 present**(`present_picker_frame` ·
+  `Nv12D3dRenderer::present_bgra`, 복사 셰이더 하나 추가).
+- **picker 진입 시 `release_swapchain()` 을 부르지 않는다**(F-21 폐기). 효과가 없었고 복귀 때
+  swapchain 재생성만 유발했다.
+- 갱신은 **picker 가 다시 그려질 때만**. 영상 프레임은 picker 를 건드리지 않는다(측정으로 단정).
+- **GDI fallback 을 깔지 않았다.** present 가 실패하면 **로그로 말한다** — 조용히 GDI 로 흘리면
+  이 변경이 없애려는 증상(그려졌는데 안 보임)으로 정확히 되돌아간다.
+- 어느 길로 갈지는 `gdi_reaches_the_screen()` 이 정한다 = **flip 모델 && 이미 present 했음**.
+  둘 다여야 GDI 가 죽는다 — 구형 드라이버 fallback(`DISCARD`)은 GDI 가 살아 있고, 첫 present
+  전에는 평범한 GDI 창이다.
+
+### 29.3 검증에서 **새 결함이 하나 나왔다**
+**리사이즈가 picker 를 다시 그리지 않았다.** 창 클래스에 `CS_HREDRAW/CS_VREDRAW` 가 없고 `WM_SIZE`
+핸들러도 없어 `WM_WINDOWPOSCHANGED` 가 그대로 `DefWindowProc` 으로 간다. **GDI 시절에는 어차피
+보이지 않아 드러나지 않았고**, present 로 바꾸자 **이전 크기가 늘어난 그림**으로 보인다(DXGI 가 마지막
+프레임을 새 크기에 맞춰 늘린다). → picker 가 떠 있을 때만 invalidate.
+
+### 29.4 실측 (`viewer_window_proc_isolated_test` **33 PASS rc=0**)
+```
+device=hardware   swapEffect=FLIP_DISCARD
+첫 present 전       GDI 도달 O · 화면 0D0F14(picker)
+영상 1장            화면 00E600 · 이후 GDI 도달 X ← 증상이 아니라 계약
+대상 선택(실제 툴바) 화면 0D0F14 · 창 DC 0D0F14 ← 예전엔 이 둘이 어긋난 것이 결함이었다
+                    picker present 1회 · 영상 present 0회
+카드 클릭           선택 시작됨(그린 것과 히트테스트가 여전히 일치)
+picker 닫기→영상    화면 00E600 · 왕복 3회 3/3
+리사이즈            화면 picker 유지 · 표면 1464x780 = 클라이언트 1464x780
+썸네일(가로·세로)    present 유지
+영상 60프레임        60/60 · 그동안 picker 업로드 **0** · 711~1029 us/frame(1584x860)
+연결·swapchain      제어 유지 · swapchain 한 번도 해제되지 않음
+```
+
+### 29.5 확인되지 않은 것
+- **WARP 경로는 실행되지 않았다** — 하드웨어 장치가 만들어졌으므로 fallback 에 들어가지 않는다.
+  WARP 에서의 동작은 **미측정**이다.
+- **영상 경로 A/B 는 재지 않았다.** 그 경로의 변경은 성공 분기 안의 **스칼라 대입 2개**뿐이라
+  이 규모에서 A/B 노이즈가 변경보다 크다. 위 수치는 **변경 후 값**이다.
+- 🔴 **사용자가 보고한 원래 증상과 이 재현의 원인이 같다고 증명된 것은 아니다.** 모양이 같고 경계
+  (세션 중간에만)가 맞을 뿐이다. 실기에서 확인되기 전까지는 **같다고 적지 않는다.**
+- 이 PC 1대·콘솔 세션. 다른 GPU·드라이버는 미확인.
