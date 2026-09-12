@@ -11695,3 +11695,14 @@ DIB 에 그려진 뒤 **같은 swapchain 으로 present** 된다. 영상은 FLIP
 크다. 수치는 변경 후 값) · 다른 GPU·드라이버 · 실기.
 🔴 **사용자 원래 증상과 이 재현의 원인이 같다고 증명된 것은 아니다** — 모양과 경계가 맞을 뿐이고,
 실기 확인 전까지 같다고 적지 않는다.
+
+### 533) 2026-09-12 `0.2.123` 게시 — 가설 5 수정을 싣는 릴리스
+**변경 5**: Client · Host · Setup · Updater · Viewer. `ui\shell.html` 무변경(19028B `3e59eb07…`)
+→ `client_update_ui_test` 핀 유지(27 rc=0).
+**게이트**: payload-set 10/10 · 제품 검증기 **Ok + 1바이트 변조 거부** · 설치기 RCDATA 9/9.
+**게시**: manifest `28895aa8…`(1687B) / sig `5bf4e780…` · 서버 10/10 · **공개 URL 10/10 해시 일치** ·
+**서버 pair 되받아 재검증**(서명 바이트 동일) · `0.2.122` pair 백업 · **`0.2.122` 아티팩트 2종 불변
+확인** · 재시작 불필요 · `dist/GNLinkSetup-0.2.123.exe` = **공개 URL 바이트와 `cmp` 동일**.
+회귀(게시 후) `client_update_ui` 27 · `viewer_window_proc_isolated` **33** · `picker_open_chain` 11 ·
+`update_effects` 219 — 전부 rc=0.
+**미검증**: 실기에서 대상 선택이 실제로 보이는지 · WARP · 다른 GPU·드라이버 · 인앱 완주.
