@@ -58,6 +58,16 @@
     font-family: inherit;
   }
   input:focus { border-color: var(--accent); }
+  /* Keyboard focus had no mark of its own: tabbing through the form moved an invisible caret and
+     the buttons showed nothing at all. `:focus-visible` leaves mouse clicks alone, so this only
+     appears for the people who need it. A screenshot cannot show this -- it is here because the
+     common rules ask for it, and it is listed as unphotographed rather than as evidence. */
+  input:focus-visible,
+  select:focus-visible,
+  button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
 
   button {
     width: 100%; margin-top: 20px; padding: 11px; font-size: 14px; font-weight: 600;
@@ -279,6 +289,11 @@
   const labelFps = () => { $('fpsLabel').textContent = $('fps').value + ' fps'; };
   $('bitrate').oninput = labelBitrate;
   $('fps').oninput = labelFps;
+  // Labelled from the start, not only once `restore` arrives. Opening settings before that
+  // message lands showed two sliders with no numbers beside them -- which is what the preview
+  // photographed, and it would be what a user saw if the restore were ever slow or absent.
+  labelBitrate();
+  labelFps();
 
   $('openSettings').onclick = () => { show($('hostsCard'), false); show($('settingsCard'), true); };
   $('closeSettings').onclick = () => { show($('settingsCard'), false); show($('hostsCard'), true); };

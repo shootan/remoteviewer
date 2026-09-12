@@ -292,7 +292,16 @@ int wmain() {
        }},
       {L"s3-settings.png", "S3 settings",
        [&] {
+         // Restored first, the way the client does it: the sliders take their values from this
+         // message, and a settings shot without it photographs a screen nobody reaches.
+         remote60::native_poc::ShellRuntimeSettings settings;
+         settings.bitrateKbps = 12000;
+         settings.fps = 60;
+         settings.monitorId = 0;
+         gWebView->PostWebMessageAsString(
+             widen(np::shell_restore_json("https://rem.shotan.net", "shotan", settings)).c_str());
          gWebView->PostWebMessageAsString(widen(hosts).c_str());
+         Sleep(200);
          eval(L"document.getElementById('openSettings').click()");
        }},
       {L"s4-update-offer.png", "S4 update offered",
