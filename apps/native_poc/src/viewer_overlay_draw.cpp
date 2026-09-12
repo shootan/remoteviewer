@@ -185,9 +185,31 @@ void draw_overlay(ViewerState& ctx, HDC hdc) {
                      ? std::string("공유할 수 있는 창이 없습니다. 전체 화면을 선택하세요.")
                      : "공유할 수 있는 창 " + std::to_string(windowItems.size()) + "개";
   }
+
+  // The tokens that mean something went wrong, said in Korean.
+  //
+  // Without this the three failure states -- the control channel dropping, the session being
+  // lost, the connect failing -- showed the ordinary list line instead, which told the user the
+  // picker was fine when it was not. Unknown tokens fall through to the list line rather than
+  // being printed, because a developer string on screen is what this whole split was about.
+  std::string tokenLine;
+  if (panelStatus == "control_disconnected") {
+    tokenLine = "호스트와의 연결이 끊겼습니다.";
+  } else if (panelStatus == "session_lost") {
+    tokenLine = "세션이 끊겼습니다. 다시 연결해 주세요.";
+  } else if (panelStatus == "control_connect_failed") {
+    tokenLine = "호스트에 연결하지 못했습니다.";
+  } else if (panelStatus == "waiting_control" || panelStatus == "window_list_request pending") {
+    tokenLine = "화면 목록을 불러오는 중…";
+  } else if (panelStatus == "waiting_first_frame") {
+    tokenLine = "첫 화면을 기다리는 중…";
+  }
+
   std::string statusLine = selectionLocked
                                ? std::string("호스트 설정으로 대상이 고정돼 있습니다")
-                               : (panelDisplayStatus.empty() ? listedLine : panelDisplayStatus);
+                               : (!panelDisplayStatus.empty()
+                                      ? panelDisplayStatus
+                                      : (!tokenLine.empty() ? tokenLine : listedLine));
   if (selectionPending) {
     statusLine = awaitingAck ? std::string("선택하는 중…")
                              : std::string("첫 화면을 기다리는 중…");

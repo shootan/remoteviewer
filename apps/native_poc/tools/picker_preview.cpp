@@ -22,6 +22,8 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -92,6 +94,58 @@ remote60::native_poc::ControlWindowEntry entry(uint64_t id, const char* title, u
   return e;
 }
 
+/**
+ * A picture whose shape is obvious at a glance.
+ *
+ * A flat colour would look correct at any aspect ratio -- stretched, squashed, cropped, all the
+ * same rectangle. This draws a border, diagonals and a centred block, so a circle-that-is-an-oval
+ * or a border with one edge missing says immediately what the layout did to it.
+ */
+std::shared_ptr<const remote60::native_poc::viewer::WindowThumb> test_thumb(uint32_t w, uint32_t h) {
+  auto thumb = std::make_shared<remote60::native_poc::viewer::WindowThumb>();
+  thumb->width = w;
+  thumb->height = h;
+  thumb->bgra.assign(static_cast<size_t>(w) * h * 4, 0);
+  const auto put = [&](uint32_t x, uint32_t y, uint8_t b, uint8_t g, uint8_t r) {
+    if (x >= w || y >= h) return;
+    const size_t i = (static_cast<size_t>(y) * w + x) * 4;
+    thumb->bgra[i + 0] = b;
+    thumb->bgra[i + 1] = g;
+    thumb->bgra[i + 2] = r;
+    thumb->bgra[i + 3] = 255;
+  };
+  for (uint32_t y = 0; y < h; ++y) {
+    for (uint32_t x = 0; x < w; ++x) put(x, y, 40, 46, 58);
+  }
+  // Border: a missing edge means the image was cropped rather than fitted.
+  for (uint32_t x = 0; x < w; ++x) {
+    for (uint32_t t = 0; t < 3; ++t) {
+      put(x, t, 240, 240, 240);
+      put(x, h - 1 - t, 240, 240, 240);
+    }
+  }
+  for (uint32_t y = 0; y < h; ++y) {
+    for (uint32_t t = 0; t < 3; ++t) {
+      put(t, y, 240, 240, 240);
+      put(w - 1 - t, y, 240, 240, 240);
+    }
+  }
+  // Diagonals: they meet the corners only while the aspect ratio is intact.
+  for (uint32_t x = 0; x < w; ++x) {
+    const uint32_t y = static_cast<uint32_t>(static_cast<uint64_t>(x) * h / (w ? w : 1));
+    put(x, y, 246, 130, 59);
+    put(x, h - 1 - (y < h ? y : h - 1), 246, 130, 59);
+  }
+  // A square block in the middle: it is only square when nothing was stretched.
+  const uint32_t side = (w < h ? w : h) / 4;
+  for (uint32_t y = 0; y < side; ++y) {
+    for (uint32_t x = 0; x < side; ++x) {
+      put(w / 2 - side / 2 + x, h / 2 - side / 2 + y, 246, 130, 59);
+    }
+  }
+  return thumb;
+}
+
 }  // namespace
 
 int wmain() {
@@ -137,14 +191,22 @@ int wmain() {
       {L"picker-list.png", "connected, four windows", 4, true, false, 0, ""},
       {L"picker-selected.png", "a window is the current target", 4, true, false, 2, ""},
       {L"picker-locked.png", "target fixed by host config", 4, true, true, 0, ""},
-      {L"picker-error.png", "the host refused the list", 0, true, false, 0,
-       "화면 목록을 가져오지 못했습니다."},
+      // The real failure tokens the product sets, not an invented sentence: these are what
+      // viewer_control_client / viewer_session_watchdog / viewer_startup actually write.
+      {L"picker-error-disconnected.png", "control channel dropped", 4, true, false, 0,
+       "control_disconnected"},
+      {L"picker-error-session-lost.png", "session lost", 4, true, false, 0, "session_lost"},
+      {L"picker-error-connect-failed.png", "control connect failed", 0, true, false, 0,
+       "control_connect_failed"},
+      {L"picker-loading.png", "list requested, not back yet", 0, true, false, 0,
+       "window_list_request pending"},
       // The boundaries the grid rule turns on: one card, a few, the point where growing stops,
       // and a list too long to fit at the preferred width.
       {L"picker-count-01.png", "one window", 1, true, false, 0, ""},
       {L"picker-count-04.png", "four windows", 4, true, false, 0, ""},
       {L"picker-count-12.png", "twelve windows", 12, true, false, 0, ""},
       {L"picker-count-30.png", "thirty windows (scrolls)", 30, true, false, 0, ""},
+      {L"picker-thumbs.png", "real thumbnails: wide, tall, square", 3, true, false, 0, ""},
   };
 
   for (const Shot& shot : shots) {
@@ -175,6 +237,16 @@ int wmain() {
       ctx.picker.windowPanel.ApplyWindowList(msg, 8);
     }
     if (shot.status && *shot.status) ctx.picker.windowPanel.SetStatus(shot.status);
+
+    // Only the thumbnail shot gets images. Everywhere else the cards stay in their "no preview
+    // yet" state, which is the one every other picture is about.
+    if (std::wstring(shot.file) == L"picker-thumbs.png") {
+      std::lock_guard<std::mutex> lk(ctx.picker.thumbMu);
+      ctx.picker.thumbs[0] = test_thumb(1920, 1080);   // wide
+      ctx.picker.thumbs[1] = test_thumb(1920, 1080);   // wide
+      ctx.picker.thumbs[2] = test_thumb(720, 1280);    // tall
+      ctx.picker.thumbs[3] = test_thumb(900, 900);     // square
+    }
 
     RECT client{};
     GetClientRect(hwnd, &client);
