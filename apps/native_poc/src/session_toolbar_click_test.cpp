@@ -175,6 +175,32 @@ int wmain() {
      "releasing off the button says the press was cancelled", last_line());
   ok(said("but pressed " + hitId), "and names the button that had been pressed", last_line());
 
+  // ------------------------------------------------------------------ what the bar says about the path
+  //
+  // `relay` is a bool and the bar printed `relay ? 릴레이 : 직접`, so before anything had answered
+  // it claimed a direct connection. A default is not a measurement. Asserted through the
+  // product's own composer rather than a copy of its rules.
+  auto line = [](bool connected, bool known, bool relay) {
+    remote60::native_poc::SessionToolbarState s;
+    s.connected = connected;
+    s.inputOn = true;
+    s.pathKnown = known;
+    s.relay = relay;
+    return remote60::native_poc::session_toolbar_status_text(s);
+  };
+
+  const std::wstring unknown = line(false, false, false);
+  const std::wstring direct = line(true, true, false);
+  const std::wstring relay = line(true, true, true);
+
+  ok(unknown.find(L"직접") == std::wstring::npos,
+     "an undecided path is NOT shown as a direct connection");
+  ok(unknown.find(L"확인 중") != std::wstring::npos, "and says it is still being worked out");
+  ok(relay.find(L"릴레이") != std::wstring::npos, "a relayed path says so");
+  ok(direct.find(L"직접") != std::wstring::npos, "and a direct one says so");
+  ok(unknown != direct && direct != relay && unknown != relay,
+     "the three readings differ from each other in text, not only in colour");
+
   // ------------------------------------------------------------------ the negative control
   //
   // If this ever passes while the assertions above also pass, the lines are being produced by

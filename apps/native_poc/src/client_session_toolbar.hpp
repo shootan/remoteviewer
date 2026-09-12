@@ -48,6 +48,13 @@ struct SessionToolbarState {
   bool inputOn = false;
   bool macroOpen = false;
   bool relay = false;  // the billed path, so it is worth saying out loud
+  /**
+   * False until something has decided `relay`.
+   *
+   * Kept separate rather than folded into `relay` because a bool cannot hold three answers, and
+   * the third one -- "nobody has said yet" -- is the one the user sees first.
+   */
+  bool pathKnown = false;
   uint32_t fps = 0;
   uint32_t selectedMonitorId = 0;
   std::vector<SessionToolbarMonitor> monitors;
@@ -70,6 +77,14 @@ void session_toolbar_set_visible(bool visible);
 void session_toolbar_notify_mouse(int x, int y, int clientWidth);
 
 void session_toolbar_update(const SessionToolbarState& state);
+
+/**
+ * The one line the bar draws for a given state.
+ *
+ * Pulled out so it can be asserted without a window, and so the assertion runs the function the
+ * product runs rather than a copy of its rules. The bar calls this with its own state.
+ */
+std::wstring session_toolbar_status_text(const SessionToolbarState& state);
 
 /** Re-anchors to the owner after it moved, resized, or changed show state. */
 void session_toolbar_follow_owner();

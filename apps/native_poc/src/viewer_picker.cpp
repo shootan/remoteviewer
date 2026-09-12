@@ -86,6 +86,7 @@ void push_session_toolbar_state(ViewerState& ctx) {
   state.inputOn = ctx.session.inputEnabled.load(std::memory_order_relaxed);
   state.macroOpen = remote60::native_poc::macro_window_visible();
   state.relay = ctx.session.relayPath.load(std::memory_order_relaxed);
+  state.pathKnown = ctx.session.relayPathKnown.load(std::memory_order_relaxed);
   state.fps = ctx.metrics.Snapshot().decodedFpsX100 / 100;
   state.selectedMonitorId = panel.selectedMonitorId;
   for (const auto& monitor : panel.monitors) {

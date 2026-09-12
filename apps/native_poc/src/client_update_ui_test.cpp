@@ -638,6 +638,40 @@ int wmain() {
 
   // ------------------------------------------------------------------ 나중에 defers, nothing more
   eval(L"document.getElementById('updateLater').click()");
+  // ------------------------------------------------------------------ keyboard focus is defined
+  //
+  // A screenshot cannot carry focus state, and neither can this window: it is off screen and never
+  // activated, so the engine does not treat a programmatic focus() as keyboard-driven and
+  // `:focus-visible` does not match. Measured, not assumed -- the first version of this asserted
+  // the ring was drawn and got ring=false with outline=none.
+  //
+  // So the claim is narrowed to what is actually checkable here: focus moves to the control, and
+  // the stylesheet defines a visible ring for `:focus-visible`. That the ring PAINTS for a real
+  // keyboard user is NOT shown by this and is listed as unverified.
+  const std::string focused = eval(
+      L"(function(){"
+      L"  var el=document.getElementById('server');"
+      L"  el.focus();"
+      L"  return document.activeElement ? document.activeElement.id : 'none';"
+      L"})()");
+  ok(focused == "\"server\"", "focus lands on the control that was asked for", focused);
+
+  const std::string ringRule = eval(
+      L"(function(){"
+      L"  for (var i=0;i<document.styleSheets.length;i++){"
+      L"    var rules=document.styleSheets[i].cssRules;"
+      L"    for (var j=0;j<rules.length;j++){"
+      L"      var sel=rules[j].selectorText||'';"
+      L"      if (sel.indexOf(':focus-visible')<0) continue;"
+      L"      var o=rules[j].style.outline||rules[j].style.outlineStyle||'';"
+      L"      if (o && o!=='none') return 'defined:'+o;"
+      L"    }"
+      L"  }"
+      L"  return 'missing';"
+      L"})()");
+  ok(ringRule.find("defined:") != std::string::npos,
+     "and the stylesheet defines a visible ring for keyboard focus", ringRule);
+
   const std::string afterLater = eval(visible_script());
   ok(afterLater == "\"hidden\"", "나중에 takes the offer down", afterLater);
   ok(eval(L"document.getElementById('signInCard').classList.contains('hidden')") == "false",

@@ -337,6 +337,8 @@ int open_media_socket(ViewerContext& ctx) {
     ctx.resolvedArgs.controlPort = 0;
     ctx.directoryPunchToken = session.punchToken;
     ctx.session.relayPath.store(session.relay, std::memory_order_relaxed);
+    // The directory answered, so this is a measurement now rather than a default.
+    ctx.session.relayPathKnown.store(true, std::memory_order_relaxed);
     push_session_toolbar_state(ctx);
     std::cout << "[native-video-client] directory chose " << session.chosen.ip << ":"
               << session.chosen.port << " ("
@@ -346,6 +348,10 @@ int open_media_socket(ViewerContext& ctx) {
     ctx.session.sock = socket(AF_INET,
                    (ctx.dec.transport == VideoTransport::Udp) ? SOCK_DGRAM : SOCK_STREAM,
                    (ctx.dec.transport == VideoTransport::Udp) ? IPPROTO_UDP : IPPROTO_TCP);
+    // An address given on the command line is dialled directly by construction -- there is no
+    // relay in this path -- so here "direct" is known rather than assumed.
+    ctx.session.relayPath.store(false, std::memory_order_relaxed);
+    ctx.session.relayPathKnown.store(true, std::memory_order_relaxed);
   }
   if (ctx.session.sock == INVALID_SOCKET) {
     std::cerr << "[native-video-client] socket create failed\n";

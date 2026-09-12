@@ -66,6 +66,14 @@ struct SessionState {
   // Which candidate won the race. The relay is billed per byte, so the session says which one it
   // is rather than leaving the user to guess from the bill.
   std::atomic<bool> relayPath{false};
+  /**
+   * Whether `relayPath` has been decided by anything.
+   *
+   * Without this the two states "direct" and "not yet known" share one value, and the toolbar
+   * showed the second as the first -- a claim about the connection made before the connection
+   * existed.
+   */
+  std::atomic<bool> relayPathKnown{false};
   // Which screen the shell asked for. Applied once the host has said it understands the monitor
   // messages, which it does in the window list.
   uint32_t requestedMonitorId = 0;

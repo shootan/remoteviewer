@@ -78,13 +78,27 @@ HBRUSH solid_brush(COLORREF color) {
   return values[0];
 }
 
-std::wstring status_text() {
-  std::wstring text = g.state.connected ? L"연결됨" : L"연결 중";
-  text += g.state.relay ? L" · 릴레이" : L" · 직접";
-  if (!g.state.inputOn) text += L" · 입력 꺼짐";
-  if (g.state.fps > 0) text += L" · " + std::to_wstring(g.state.fps) + L"fps";
+std::wstring status_text() { return session_toolbar_status_text(g.state); }
+
+}  // namespace
+
+std::wstring session_toolbar_status_text(const SessionToolbarState& state) {
+  std::wstring text = state.connected ? L"연결됨" : L"연결 중";
+  // Three answers, not two. The symbols are there so the three do not depend on colour to be
+  // told apart -- the bar is one line of text and has no colour to spare anyway.
+  if (!state.pathKnown) {
+    text += L" · ◌ 경로 확인 중";
+  } else if (state.relay) {
+    text += L" · ⇄ 릴레이";
+  } else {
+    text += L" · → 직접";
+  }
+  if (!state.inputOn) text += L" · 입력 꺼짐";
+  if (state.fps > 0) text += L" · " + std::to_wstring(state.fps) + L"fps";
   return text;
 }
+
+namespace {
 
 std::wstring monitor_label() {
   if (g.state.monitors.size() < 2) return std::wstring();
