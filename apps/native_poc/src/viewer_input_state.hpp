@@ -29,6 +29,12 @@ struct InputState {
   // the A as text on the way up, and the host holds A down forever.
   std::atomic<bool> forwardedKeyDown[256]{};
   std::atomic<uint64_t> suppressMouseUntilUs{0};
+  // How many mouse messages that window has swallowed, and which window has already been reported.
+  // The suppression used to return 0 in silence, which made a swallowed click and a dead button
+  // produce exactly the same log -- nothing -- and that is the pair this whole investigation has
+  // been trying to tell apart.
+  std::atomic<uint64_t> suppressReportedForUs{0};
+  std::atomic<uint32_t> suppressedMouseCount{0};
   std::atomic<uint32_t> activeTouchPointerId{0};
   std::atomic<bool> activeTouchDown{false};
   // P0 telemetry (input serialization diagnosis, history #351): every mouse-move that passes the

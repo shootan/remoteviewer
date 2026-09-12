@@ -46,6 +46,10 @@ struct Toolbar {
   SessionToolbarState state;
   std::vector<Button> buttons;
   int pressed = kButtonNone;
+  // Whether the pointer is still over the button being held. Kept apart from `hovered` on purpose:
+  // hovered is cleared by WM_MOUSELEAVE, which arrives whenever the pointer is reported outside
+  // the bar, and a press held through that lost its pressed look while the press was still live.
+  bool pressedOver = false;
   int hovered = kButtonNone;
   bool tracking = false;
   bool wanted = false;    // what the session asked for, before owner visibility is considered
@@ -200,7 +204,12 @@ void paint(HDC target) {
 
   int right = 0;
   for (const Button& button : g.buttons) {
-    const bool down = g.pressed == button.id && g.hovered == button.id;
+    // The pressed look follows the press, not the hover. It used to require both, so a press
+    // that arrived without a preceding WM_MOUSEMOVE -- the bar summons itself under a cursor that
+    // may be sitting still, and a still cursor generates no move -- drew nothing at all. A button
+    // that looks identical pressed and unpressed is indistinguishable from a dead one, which is
+    // the report this whole chain is about.
+    const bool down = g.pressed == button.id && g.pressedOver;
     COLORREF fill = RGB(31, 37, 47);
     if (button.active) fill = RGB(37, 72, 118);
     if (g.hovered == button.id) fill = button.active ? RGB(45, 87, 141) : RGB(43, 51, 64);
@@ -304,6 +313,16 @@ LRESULT CALLBACK toolbar_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g.hovered = hovered;
         InvalidateRect(hwnd, nullptr, FALSE);
       }
+      // While a button is held the mouse is captured, so drags off the bar arrive here too. The
+      // pressed look follows the pointer: off the button it lifts, back on it returns, which is
+      // what tells the user in advance that releasing there will do nothing.
+      if (g.pressed != kButtonNone) {
+        const bool over = hovered == g.pressed;
+        if (over != g.pressedOver) {
+          g.pressedOver = over;
+          InvalidateRect(hwnd, nullptr, FALSE);
+        }
+      }
       if (!g.tracking) {
         TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, hwnd, 0};
         g.tracking = TrackMouseEvent(&track) != FALSE;
@@ -330,6 +349,9 @@ LRESULT CALLBACK toolbar_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       break;
     case WM_LBUTTONDOWN:
       g.pressed = hit_test(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+      // The hit test just said the pointer is on it, so the press is over its button by
+      // definition -- no earlier mouse-move required.
+      g.pressedOver = g.pressed != kButtonNone;
       if (g.pressed != kButtonNone) SetCapture(hwnd);
       if (g.callbacks.onLog) {
         g.callbacks.onLog("[toolbar] down id=" + std::to_string(g.pressed) + " x=" +
@@ -341,6 +363,7 @@ LRESULT CALLBACK toolbar_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONUP: {
       const int pressed = g.pressed;
       g.pressed = kButtonNone;
+      g.pressedOver = false;
       if (GetCapture() == hwnd) ReleaseCapture();
       InvalidateRect(hwnd, nullptr, FALSE);
       if (pressed == kButtonNone) {

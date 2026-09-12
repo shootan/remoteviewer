@@ -1340,6 +1340,34 @@ add_executable(remote60_viewer_startup_failure_test
 target_link_libraries(remote60_viewer_startup_failure_test PRIVATE user32 ws2_32)
 add_dependencies(remote60_viewer_startup_failure_test remote60_native_video_client_poc)
 
+# Hypothesis 4: links the shipped window procedure on its own, with recording doubles standing in
+# for the features it does not drive, and sends real mouse messages through the gate.
+add_executable(remote60_viewer_window_proc_isolated_test
+  src/viewer_window_proc_isolated_test.cpp
+  src/viewer_window_proc.cpp
+  src/viewer_present.cpp
+  src/mf_h264_codec.cpp
+  src/client_session_toolbar.cpp
+  src/viewer_picker.cpp
+  src/viewer_picker_state.cpp
+  src/viewer_selection_gate.cpp
+  src/viewer_overlay_draw.cpp
+  src/viewer_gdi_util.cpp
+  src/viewer_layout.cpp
+  src/viewer_log.cpp
+  src/native_video_client_shared_core.cpp
+)
+target_include_directories(remote60_viewer_window_proc_isolated_test PRIVATE src)
+# The real present path comes with it: D3D11, the shader compiler and Media Foundation. Linking
+# them is what puts an actual flip-model swapchain in front of this window, which is the only way
+# the reveal ordering can be reproduced at all.
+target_link_libraries(remote60_viewer_window_proc_isolated_test PRIVATE
+  user32 gdi32 shell32 ole32 shlwapi version ws2_32
+  d3d11 dxgi d3dcompiler mfplat mf mfuuid wmcodecdspuuid)
+if(MSVC)
+  target_compile_options(remote60_viewer_window_proc_isolated_test PRIVATE /utf-8)
+endif()
+
 # Drives the whole target-selection chain with real mouse messages and the product's own picker
 # call, and decides between the hypotheses by comparing pixels rather than reading a log line.
 add_executable(remote60_picker_open_chain_test

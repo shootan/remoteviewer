@@ -96,8 +96,28 @@ void forward_physical(ViewerState& ctx, HWND hwnd, WPARAM wp, LPARAM lp, bool do
 
 // WM_RBUTTONDOWN / WM_RBUTTONUP / WM_MBUTTONDOWN / WM_MBUTTONUP: identical apart from the button bit
 // (2 = right, 4 = middle) and the virtual key the host receives.
+// Whether the touch path's mouse-suppression window is still open, said out loud the first time
+// it swallows something.
+//
+// Touch generates synthetic mouse messages after the pointer messages, and this 300ms window is
+// what stops them being handled twice. The cost is that during those 300ms a real mouse click is
+// dropped before it reaches the picker, in silence -- the branches below are plain `return 0`.
+// One line per window, not per message: a suppressed drag is hundreds of moves.
+bool mouse_suppressed(ViewerState& ctx, const char* what) {
+  const uint64_t until = ctx.input.suppressMouseUntilUs.load(std::memory_order_relaxed);
+  const uint64_t now = qpc_now_us();
+  if (now >= until) return false;
+  ctx.input.suppressedMouseCount.fetch_add(1, std::memory_order_relaxed);
+  if (ctx.input.suppressReportedForUs.exchange(until, std::memory_order_relaxed) != until) {
+    std::cout << "[native-video-client][picker] mouse " << what
+              << " ignored: touch suppresses the mouse for another " << ((until - now) / 1000)
+              << "ms\n";
+  }
+  return true;
+}
+
 LRESULT on_secondary_button(ViewerState& ctx, HWND hwnd, bool down, uint16_t buttonBit, uint32_t vk, int x, int y) {
-  if (qpc_now_us() < ctx.input.suppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+  if (mouse_suppressed(ctx, "secondary button")) return 0;
   if (point_in_toggle_button(ctx, hwnd, x, y)) return 0;
   if (point_in_macro_button(ctx, hwnd, x, y)) return 0;
   if (ctx.picker.visible.load(std::memory_order_relaxed)) return 0;
@@ -318,7 +338,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         remote60::native_poc::session_toolbar_notify_mouse(GET_X_LPARAM(lp), GET_Y_LPARAM(lp),
                                                            toolbarZone.right);
       }
-      if (qpc_now_us() < ctx.input.suppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (mouse_suppressed(ctx, "move")) return 0;
       if (point_in_toggle_button(ctx, hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (point_in_macro_button(ctx, hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (ctx.picker.visible.load(std::memory_order_relaxed)) return 0;
@@ -334,7 +354,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       }
       return 0;
     case WM_LBUTTONDOWN:
-      if (qpc_now_us() < ctx.input.suppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (mouse_suppressed(ctx, "down")) return 0;
       if (point_in_toggle_button(ctx, hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) {
         ctx.picker.toggleDown.store(true, std::memory_order_relaxed);
         return 0;
@@ -364,7 +384,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       }
       return 0;
     case WM_LBUTTONUP: {
-      if (qpc_now_us() < ctx.input.suppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (mouse_suppressed(ctx, "up")) return 0;
       const int x = GET_X_LPARAM(lp);
       const int y = GET_Y_LPARAM(lp);
       const ClientLayout layout = compute_client_layout(ctx, hwnd);
@@ -414,7 +434,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MBUTTONUP:
       return on_secondary_button(ctx, hwnd, false, 4, VK_MBUTTON, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
     case WM_MOUSEWHEEL: {
-      if (qpc_now_us() < ctx.input.suppressMouseUntilUs.load(std::memory_order_relaxed)) return 0;
+      if (mouse_suppressed(ctx, "wheel")) return 0;
       POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
       ScreenToClient(hwnd, &p);
       const ClientLayout layout = compute_client_layout(ctx, hwnd);

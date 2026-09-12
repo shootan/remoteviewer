@@ -11586,3 +11586,35 @@ auto-hide·목록/설정 디자인)은 다르다. 후자는 개선이 아니라 
 
 회귀: 전량 빌드 rc=0 · `picker_open_chain_test`·`session_toolbar_click_test`·`viewer_layout_test`·
 `viewer_picker_gesture_test`·`client_update_ui_test` rc=0(해시 pin 유지 — `shell.html` 무변경).
+
+### 530) 2026-09-12 대상 선택 — 1b·4 를 닫고 **5 를 재현했다**
+검증용 v2.2 지시(§26⑶ 후속). 격리 실행이 승인 범위임을 정정한 뒤 남은 셋을 쳤다.
+
+**1b — 닫았지만 그 안에 진짜 결함이 있었다.** 로그 세 갈래는 이미 덮여 있었고 **"무엇이 보이는가" 가
+비어 있었다.** 버튼을 찍어 보니 **누름이 화면에 전혀 나타나지 않았다** — 눌림 표시가
+`pressed && hovered` 인데 `TrackMouseEvent` 가 실제 커서를 보고 `WM_MOUSELEAVE` 로 `hovered` 를
+지운다. 툴바는 **정지한 커서 아래로 나타나고** 정지한 커서는 이동 메시지를 만들지 않는다.
+→ 눌림은 press 를 따라간다. `1F252F` → **`181D25`** → 밖으로 끌면 복귀. **누르고도 아무 표시가 없는
+버튼은 죽은 버튼과 구분되지 않는다** — 이번 조사 내내 쫓던 바로 그 쌍이다.
+
+**4 — 닫았다.** 제품 `WndProc` 을 격리로 링크해 진짜 마우스 메시지를 넣었다. 게이트가 서면 클릭이
+통째로 사라지지만 **300ms 창이고, 무장하는 곳은 터치 경로 한 곳뿐**이라 마우스만 쓰는 세션에서는
+원인이 될 수 없다. 삼킬 때 **로그가 한 줄도 없던 것**은 고쳤다.
+
+**5 — 재현했다. 그리고 순서 경합이 아니었다.**
+합성 NV12 한 장으로 swapchain 을 띄운 뒤 제품 호출로 picker 를 열었다.
+```
+창 자체 DC 0D0F14 (picker)      화면 00E600 (얼어붙은 프레임)
+ready=0, swapChain=null          repaint·SWP_FRAMECHANGED·리사이즈 전부 무효
+```
+**그려졌는데 보이지 않는다.** `release_swapchain()` 은 불렸고 실제로 null 인데도 DWM 이 마지막
+프레임을 계속 합성한다. 즉 F-21 의 *"놓으면 GDI 로 돌아온다"* 가 이 환경에서 성립하지 않는다.
+**경계: 프레임이 한 장도 없으면 picker 가 보이고, 한 장이라도 표시된 뒤에는 안 보인다.**
+증상이 세션 중간에만 나온 것과 맞고, **1·2·3 이 전부 깨끗했던 이유**도 이것이다 — 클릭도 전환도
+그리기도 정상이었고 합성만 아니었다.
+⚠️ 이 PC 1대·콘솔 세션 조건의 측정이다. 고치는 방법은 **present 경로 설계 결정**이라 손대지 않았다.
+
+회귀: 전량 빌드 rc=0 · `picker_empty_state_test`(19) · `viewer_window_proc_isolated_test`(14) ·
+`session_toolbar_click_test`(26) · `picker_open_chain_test`(11) · `viewer_layout_test` ·
+`viewer_picker_gesture_test` · `viewer_startup_failure_test`(4) · `update_effects_test`(219) ·
+`client_update_ui_test`(27) 전부 rc=0.

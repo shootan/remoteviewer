@@ -231,6 +231,103 @@ int wmain() {
   remote60::native_poc::session_toolbar_follow_owner();
   pump(300);
 
+  // ------------------------------------------------------------------ 1b, seen and not only logged
+  //
+  // The three log branches above are covered, but a log is not what the user gets. 1b is the
+  // hypothesis that the press was cancelled by releasing off the button: correct behaviour, and
+  // without a visible pressed state it is indistinguishable from a button that does nothing --
+  // which is exactly the report being chased.
+  //
+  // So the button is photographed rather than reasoned about. PrintWindow renders the bar into a
+  // DIB and one pixel at the button's centre is read back.
+  {
+    auto shot = [&](int x, int y) -> COLORREF {
+      RECT rc{};
+      GetClientRect(bar, &rc);
+      const int w = rc.right - rc.left;
+      const int h = rc.bottom - rc.top;
+      if (w <= 0 || h <= 0) return CLR_INVALID;
+      HDC screen = GetDC(nullptr);
+      HDC mem = CreateCompatibleDC(screen);
+      BITMAPINFO bi{};
+      bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+      bi.bmiHeader.biWidth = w;
+      bi.bmiHeader.biHeight = -h;  // top-down, so y is a row index
+      bi.bmiHeader.biPlanes = 1;
+      bi.bmiHeader.biBitCount = 32;
+      bi.bmiHeader.biCompression = BI_RGB;
+      void* bits = nullptr;
+      HBITMAP dib = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+      HGDIOBJ old = SelectObject(mem, dib);
+      const BOOL printed = PrintWindow(bar, mem, PW_RENDERFULLCONTENT);
+      COLORREF out = CLR_INVALID;
+      if (printed && bits && x >= 0 && x < w && y >= 0 && y < h) {
+        const unsigned char* p =
+            static_cast<const unsigned char*>(bits) + (static_cast<size_t>(y) * w + x) * 4;
+        out = RGB(p[2], p[1], p[0]);
+      }
+      SelectObject(mem, old);
+      DeleteObject(dib);
+      DeleteDC(mem);
+      ReleaseDC(nullptr, screen);
+      return out;
+    };
+    auto hex = [](COLORREF c) {
+      char buf[32];
+      if (c == CLR_INVALID) return std::string("(no capture)");
+      std::snprintf(buf, sizeof(buf), "%02X%02X%02X", GetRValue(c), GetGValue(c), GetBValue(c));
+      return std::string(buf);
+    };
+
+    pump(120);
+    const COLORREF idle = shot(hitX, midY);
+    ok(idle != CLR_INVALID, "the bar can be photographed at all", hex(idle));
+    std::printf("      probe visible=%d  bg=%s  edge=%s  btn=%s\n", IsWindowVisible(bar) ? 1 : 0,
+                hex(shot(1, 1)).c_str(), hex(shot(hitX, 1)).c_str(), hex(shot(hitX, midY)).c_str());
+
+    // (a) Pressed with the pointer never having moved over the bar. The bar summons itself under
+    // a cursor that may be sitting still, and a still cursor generates no WM_MOUSEMOVE, so this is
+    // a state a real user reaches. It used to draw nothing: the pressed look required a hover, and
+    // hover is cleared by WM_MOUSELEAVE the moment the pointer is reported off the bar.
+    SendMessageW(bar, WM_LBUTTONDOWN, 0, at(hitX, midY));
+    pump(120);
+    const COLORREF held = shot(hitX, midY);
+    ok(held != idle, "a press shows on screen even if the pointer never moved over the bar",
+       hex(idle) + " -> " + hex(held));
+
+    // (b) Still held, pointer dragged off the button. This is the moment 1b turns on: the press is
+    // about to be cancelled, and the question is whether the screen says so before the release.
+    SendMessageW(bar, WM_MOUSEMOVE, 0, at(bounds.right - 1, midY));
+    pump(120);
+    const COLORREF draggedOff = shot(hitX, midY);
+    ok(draggedOff == idle, "dragging off the button lifts the pressed look before the release",
+       hex(held) + " -> " + hex(draggedOff));
+
+    // (c) Dragged back on. The press is live again and looks it, so the two halves of the gesture
+    // are legible in both directions rather than only on the way out.
+    SendMessageW(bar, WM_MOUSEMOVE, 0, at(hitX, midY));
+    pump(120);
+    const COLORREF heldAgain = shot(hitX, midY);
+    ok(heldAgain == held, "and comes back when the pointer returns",
+       hex(draggedOff) + " -> " + hex(heldAgain));
+
+    // (d) Released off the button: nothing runs, and the button is back to resting. This is the
+    // whole of hypothesis 1b, end to end, with what the user sees at each step.
+    gLines.clear();
+    const int invokedBeforeCancel = gTargetsInvoked;
+    SendMessageW(bar, WM_MOUSEMOVE, 0, at(bounds.right - 1, midY));
+    SendMessageW(bar, WM_LBUTTONUP, 0, at(bounds.right - 1, midY));
+    pump(120);
+    ok(gTargetsInvoked == invokedBeforeCancel, "a press released off the button invokes nothing",
+       "invoked=" + std::to_string(gTargetsInvoked));
+    ok(shot(hitX, midY) == idle, "and the button returns to its resting look");
+
+    // The camera's own control: a sample taken off the buttons has to differ from one taken on
+    // them, or every comparison above is reading the same patch of background.
+    ok(shot(1, 1) != idle, "the samples come from the button and not from the bar behind it",
+       hex(shot(1, 1)) + " vs " + hex(idle));
+  }
+
   // ------------------------------------------------------------------ the negative control
   //
   // If this ever passes while the assertions above also pass, the lines are being produced by
