@@ -192,6 +192,8 @@ void draw_overlay(ViewerState& ctx, HDC hdc) {
   // lost, the connect failing -- showed the ordinary list line instead, which told the user the
   // picker was fine when it was not. Unknown tokens fall through to the list line rather than
   // being printed, because a developer string on screen is what this whole split was about.
+  const bool controlUp = ctx.control.connected.load(std::memory_order_relaxed);
+
   std::string tokenLine;
   if (panelStatus == "control_disconnected") {
     tokenLine = "호스트와의 연결이 끊겼습니다.";
@@ -200,7 +202,9 @@ void draw_overlay(ViewerState& ctx, HDC hdc) {
   } else if (panelStatus == "control_connect_failed") {
     tokenLine = "호스트에 연결하지 못했습니다.";
   } else if (panelStatus == "waiting_control" || panelStatus == "window_list_request pending") {
-    tokenLine = "화면 목록을 불러오는 중…";
+    // Before the control channel is up, the honest thing to say is that we are still connecting.
+    // Afterwards the same token means the list has been asked for and has not come back.
+    tokenLine = controlUp ? "화면 목록을 불러오는 중…" : "호스트에 연결하는 중…";
   } else if (panelStatus == "waiting_first_frame") {
     tokenLine = "첫 화면을 기다리는 중…";
   }
@@ -214,7 +218,12 @@ void draw_overlay(ViewerState& ctx, HDC hdc) {
     statusLine = awaitingAck ? std::string("선택하는 중…")
                              : std::string("첫 화면을 기다리는 중…");
   }
-  if (!ctx.control.connected.load(std::memory_order_relaxed)) {
+  // ⚠️ There used to be an unconditional "호스트에 연결하는 중…" here whenever the control channel
+  // was down, and it overwrote everything above it. Two things were wrong with that: it hid the
+  // specific failure the product had just recorded, and after a drop nothing IS connecting -- the
+  // channel went away. The connecting line now comes from the waiting token above, which is the
+  // only state where it is true.
+  if (!controlUp && statusLine.empty()) {
     statusLine = "호스트에 연결하는 중…";
   }
   draw_text_utf8(ctx, hdc, statusLine, &subRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -263,7 +272,11 @@ void draw_overlay(ViewerState& ctx, HDC hdc) {
 
   // Footer: connection and input state in one quiet line.
   std::ostringstream foot;
-  foot << (ctx.control.connected.load(std::memory_order_relaxed) ? "연결됨" : "연결 끊김")
+  // Says WHICH connection. `session_lost` leaves the control channel up on purpose
+  // (viewer_session_watchdog.cpp:88 does not touch it), so a header reading "세션이 끊겼습니다"
+  // beside a footer reading "연결됨" was two true statements that looked like a contradiction.
+  // Naming the thing it measures costs one word and invents nothing.
+  foot << (ctx.control.connected.load(std::memory_order_relaxed) ? "제어 연결됨" : "제어 끊김")
        << "   입력 "
        << (ctx.session.inputEnabled.load(std::memory_order_relaxed) ? "켜짐" : "꺼짐");
   const uint32_t decFpsX100 = ctx.metrics.Snapshot().decodedFpsX100;

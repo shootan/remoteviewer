@@ -193,10 +193,18 @@ int wmain() {
       {L"picker-locked.png", "target fixed by host config", 4, true, true, 0, ""},
       // The real failure tokens the product sets, not an invented sentence: these are what
       // viewer_control_client / viewer_session_watchdog / viewer_startup actually write.
-      {L"picker-error-disconnected.png", "control channel dropped", 4, true, false, 0,
+      // `connected` here matches what the product does at each site, because a screenshot of a
+      // state the product cannot produce is not evidence:
+      //   control_disconnected   viewer_control_client.cpp:425 clears connected, :440 sets it
+      //   control_connect_failed viewer_startup.cpp:674 clears connected, :676 sets it
+      //   session_lost           viewer_session_watchdog.cpp:88 sets it and does NOT touch
+      //                          connected -- the control channel really is still up, and only
+      //                          the media session has died. Both statements are true at once.
+      {L"picker-error-disconnected.png", "control channel dropped", 4, false, false, 0,
        "control_disconnected"},
-      {L"picker-error-session-lost.png", "session lost", 4, true, false, 0, "session_lost"},
-      {L"picker-error-connect-failed.png", "control connect failed", 0, true, false, 0,
+      {L"picker-error-session-lost.png", "session lost, control still up", 4, true, false, 0,
+       "session_lost"},
+      {L"picker-error-connect-failed.png", "control connect failed", 0, false, false, 0,
        "control_connect_failed"},
       {L"picker-loading.png", "list requested, not back yet", 0, true, false, 0,
        "window_list_request pending"},
