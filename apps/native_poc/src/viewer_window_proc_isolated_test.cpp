@@ -1,24 +1,37 @@
-// Hypothesis 4: the input gate.
+// The shipped window procedure, linked on its own, with a real swapchain in front of it.
 //
-// "대상 선택" was reported as doing nothing, and one of the surviving explanations was that the
-// viewer's mouse messages are being swallowed before they reach the picker at all. There is such a
-// gate -- five `if (qpc_now_us() < suppressMouseUntilUs) return 0;` lines at the top of the mouse
-// handlers in viewer_window_proc.cpp -- and until now nothing had exercised it. A gate that
-// swallows a click is indistinguishable from a dead button, and it leaves no trace either way.
+// Two of the surviving explanations for "대상 선택 does nothing" are decided here.
 //
-// So this drives the shipped WndProc with real messages on a real window and watches whether the
-// click reaches the picker.
+// HYPOTHESIS 4 -- the input gate. The viewer's mouse messages can be swallowed before they reach
+// the picker at all: five `if (qpc_now_us() < suppressMouseUntilUs) return 0;` lines at the top of
+// the mouse handlers in viewer_window_proc.cpp. Nothing had ever exercised them. A gate that
+// swallows a click is indistinguishable from a dead button, and it used to leave no trace either
+// way.
+//
+// HYPOTHESIS 5 -- the reveal. A flip-model swapchain composites OVER the GDI the picker is drawn
+// with, so the picker can be painted correctly and never be seen. Reproducing that needs an actual
+// swapchain, which is why this harness links the real present path (viewer_present.cpp,
+// mf_h264_codec.cpp, d3d11/dxgi/d3dcompiler/mfplat/mf/mfuuid) and puts a synthetic NV12 frame
+// through the shipped renderer. No host, no decoder, no protocol.
+//
+// ⚠️ An earlier version of this comment said the opposite -- that the harness could not speak to
+// hypothesis 5 because there was no swapchain here. That was true when it was written and stopped
+// being true in the same commit, and it sent a reviewer looking for a reproduction that was in
+// front of them. A stale label on evidence is worse than no label.
 //
 // WHAT IS SHIPPED HERE: viewer_window_proc.cpp (the gate, the mouse branches, the picker press /
-// release routing), viewer_picker.cpp, the layout arithmetic, the window class and creation.
+// release routing), viewer_picker.cpp, viewer_present.cpp, the NV12 renderer, the layout
+// arithmetic, the session toolbar, the window class and creation.
 //
-// WHAT IS NOT: nineteen functions that viewer_window_proc.cpp calls for features this test does
-// not exercise -- key forwarding, IME, the macro window, the unlock prompt, the cursor overlay,
-// the video present path and the liveness polls. They are defined at the bottom of this file as
-// recording doubles. None of them implements a rule being tested; the two that sit on the path
-// under test (enqueue_input_event, request_video_paint) are there to be counted, which is what
-// makes "the click was swallowed" measurable rather than asserted. The video present path being
-// absent is also why this harness cannot speak to hypothesis 5: there is no swapchain here.
+// WHAT IS NOT: sixteen functions that viewer_window_proc.cpp calls for features this test does not
+// exercise -- key forwarding, IME, the unlock prompt, the cursor overlay, the liveness polls -- and
+// the macro window, which is a WebView2 window. They are defined at the bottom of this file as
+// recording doubles. None of them implements a rule being tested; the one that sits on the path
+// under test (enqueue_input_event) is there to be counted, which is what makes "the click was
+// swallowed" measurable rather than asserted.
+//
+// ⚠️ This is one machine, one console session. Whether other GPUs and drivers behave the same way
+// is not known, and that is part of the conclusion rather than a footnote to it.
 //
 // Build: remote60_viewer_window_proc_isolated_test (CMake).
 

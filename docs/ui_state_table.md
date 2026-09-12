@@ -816,6 +816,20 @@ swapchain 을 한 번 쓴 HWND 는 해제 뒤에도 DWM 이 **마지막 프레�
 보이지 않는다.** 보고된 증상이 **세션 중간**에만 나온 것과 일치하며, 가설 1·2·3 이 모두 깨끗했던
 이유도 이것으로 설명된다 — **클릭도 전환도 그리기도 전부 정상이었다.**
 
+**재현 방법** — 일회성 실험이 아니다:
+```
+cmake --build <build> --target remote60_viewer_window_proc_isolated_test --config Release
+<build>/apps/native_poc/Release/remote60_viewer_window_proc_isolated_test.exe
+```
+`943672c` 의 CMake 가 `viewer_present.cpp`·`mf_h264_codec.cpp` 와
+`d3d11 dxgi d3dcompiler mfplat mf mfuuid` 를 이 타깃에 링크한다 — **가설 4 하네스를 키운 것이라
+새 파일로 보이지 않는다.** 14건 중 6건이 가설 5 이고, 단정은 **xfail 형태**(지금 제품이 하는 일을
+기록해 재현이 조용히 멈추는 것을 막는다. 고치면 `is_green` → `!is_green` 으로 뒤집는다).
+
+🔴 **그런데 그 파일 머리말이 *"이 하네스는 가설 5 를 말할 수 없다 — swapchain 이 없다"* 라고
+적혀 있었다.** present 를 실제로 링크하기 **전에** 쓴 문장을 갱신하지 않았고, 검증용이 재현을
+**눈앞에 두고 두 번 찾게** 만들었다. **증거에 붙은 낡은 표찰은 표찰이 없는 것보다 나쁘다.**
+
 ⚠️ **아직 확인되지 않은 것**: 다른 GPU·드라이버·세션에서도 같은지, 사용자 실기에서 같은 경로인지.
 이 PC 1대·콘솔 세션 1회 조건의 측정이다.
 🔴 **고치는 방법은 present 경로 설계 결정이라 여기서 손대지 않았다** — 후보(picker 를 swapchain 에

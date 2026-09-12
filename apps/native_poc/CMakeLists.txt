@@ -1340,8 +1340,10 @@ add_executable(remote60_viewer_startup_failure_test
 target_link_libraries(remote60_viewer_startup_failure_test PRIVATE user32 ws2_32)
 add_dependencies(remote60_viewer_startup_failure_test remote60_native_video_client_poc)
 
-# Hypothesis 4: links the shipped window procedure on its own, with recording doubles standing in
-# for the features it does not drive, and sends real mouse messages through the gate.
+# Hypotheses 4 and 5: links the shipped window procedure on its own, with recording doubles
+# standing in for the features it does not drive. Real mouse messages go through the gate (4), and
+# the real present path below puts an actual flip-model swapchain in front of the window so the
+# picker can be shown over a live frame (5).
 add_executable(remote60_viewer_window_proc_isolated_test
   src/viewer_window_proc_isolated_test.cpp
   src/viewer_window_proc.cpp
