@@ -31,7 +31,9 @@
 // swallowed" measurable rather than asserted.
 //
 // ⚠️ This is one machine, one console session. Whether other GPUs and drivers behave the same way
-// is not known, and that is part of the conclusion rather than a footnote to it.
+// is not known, and that is part of the conclusion rather than a footnote to it. It has been run
+// from two independent build trees, which rules out one tree's artefact and nothing else: same
+// machine, same GPU, same driver. Two builds is not two machines.
 //
 // Build: remote60_viewer_window_proc_isolated_test (CMake).
 
