@@ -756,18 +756,32 @@ void set_status(const std::wstring& text) {
 // ---------------------------------------------------------------- autostart
 
 const wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-const wchar_t kRunValue[] = L"remote60";
+/**
+ * The name Task Manager's Startup tab shows, which is why it matters what it says.
+ *
+ * `kLegacyRunValue` is what every machine installed before this has. Both are read and both are
+ * removed on the way out: renaming without that would leave the old entry launching the program
+ * at boot while the app believed autostart was off.
+ */
+const wchar_t kRunValue[] = L"GNLink";
+const wchar_t kLegacyRunValue[] = L"remote60";
+
+bool run_value_present(HKEY key, const wchar_t* name) {
+  wchar_t value[MAX_PATH * 2] = {};
+  DWORD size = sizeof(value);
+  return RegQueryValueExW(key, name, nullptr, nullptr, reinterpret_cast<LPBYTE>(value), &size) ==
+             ERROR_SUCCESS &&
+         value[0] != L'\0';
+}
 
 bool autostart_enabled() {
   HKEY key = nullptr;
   if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_READ, &key) != ERROR_SUCCESS) return false;
-  wchar_t value[MAX_PATH * 2] = {};
-  DWORD size = sizeof(value);
+  // Either name counts. A machine that was set up before the rename is still set to start.
   const bool present =
-      RegQueryValueExW(key, kRunValue, nullptr, nullptr, reinterpret_cast<LPBYTE>(value), &size) ==
-      ERROR_SUCCESS;
+      run_value_present(key, kRunValue) || run_value_present(key, kLegacyRunValue);
   RegCloseKey(key);
-  return present && value[0] != L'\0';
+  return present;
 }
 
 void set_autostart(bool enabled) {
@@ -783,8 +797,12 @@ void set_autostart(bool enabled) {
     RegSetValueExW(key, kRunValue, 0, REG_SZ,
                    reinterpret_cast<const BYTE*>(command.c_str()),
                    static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
+    // Migrate rather than accumulate: leaving the old name behind would start the program twice.
+    RegDeleteValueW(key, kLegacyRunValue);
   } else {
     RegDeleteValueW(key, kRunValue);
+    // Off has to mean off even on a machine that only ever had the old name.
+    RegDeleteValueW(key, kLegacyRunValue);
   }
   RegCloseKey(key);
 }
