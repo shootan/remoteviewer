@@ -47,6 +47,7 @@
 #include <vector>
 
 #include "client_session_toolbar.hpp"
+#include "viewer_overlay_draw.hpp"
 #include "viewer_cursor_overlay.hpp"
 #include "viewer_input_forward.hpp"
 #include "viewer_layout_math.hpp"
@@ -481,7 +482,69 @@ int main() {
        "picker presents during video=" +
            std::to_string(ctx.ui.nv12Renderer.pickerPresentCount - pickerBeforeVideoRun));
 
-    // (9) Nothing was torn down to achieve any of it.
+    // (9) The before half of the pair, runnable rather than remembered.
+    //
+    // The fix is only worth what the failure it removes was, so the failure is reproduced here on
+    // demand: the picker is drawn into the window's own DC and nothing is presented, which is
+    // exactly what the product used to do. If the screen changed anyway, the premise behind this
+    // whole change would be wrong and the fix unnecessary.
+    //
+    // ⚠️ Drawing straight into the window DC is this test reaching past the product, not something
+    // the product does any more.
+    set_picker_visible_and_sync_stream(ctx, false);
+    ok(show_video(), "video again, for the before/after pair");
+    ctx.picker.visible.store(true, std::memory_order_relaxed);
+    {
+      HDC wdc = GetDC(hwnd);
+      if (wdc) {
+        draw_overlay(ctx, wdc);
+        GdiFlush();
+        ReleaseDC(hwnd, wdc);
+      }
+    }
+    pump(350);
+    const COLORREF gdiOnlyScreen = screen_pixel();
+    const COLORREF gdiOnlyWindow = window_dc_pixel();
+    ok(is_green(gdiOnlyScreen),
+       "BEFORE: drawn with GDI and not presented, the screen still shows the video",
+       hex2(gdiOnlyScreen));
+    ok(is_picker(gdiOnlyWindow),
+       "...while the window's own DC holds a perfectly good picker -- the two disagree, which is "
+       "the defect",
+       hex2(gdiOnlyWindow));
+    ctx.picker.visible.store(false, std::memory_order_relaxed);
+    press_targets();
+    pump(200);
+    const COLORREF afterScreen = screen_pixel();
+    ok(is_picker(afterScreen), "AFTER: presented through the swapchain, the screen shows it",
+       hex2(gdiOnlyScreen) + " -> " + hex2(afterScreen));
+
+    // (10) Mid-session the picker must not stop the stream.
+    //
+    // Only the very first picker, before any selection has been revealed, holds the stream off;
+    // doing it mid-session made every peek tear the capture down and reconnect. Generation 0 is
+    // the initial case, so a revealed generation is set here to ask the mid-session question.
+    set_picker_visible_and_sync_stream(ctx, false);
+    ctx.sel.activeStreamGeneration.store(7, std::memory_order_release);
+    remote60::native_poc::PendingStreamStateRequest drained{};
+    while (ctx.control.streamState.ConsumePending(&drained)) {
+    }
+    press_targets();
+    pump(150);
+    bool askedToStop = false;
+    int requests = 0;
+    while (ctx.control.streamState.ConsumePending(&drained)) {
+      ++requests;
+      if (!drained.active) askedToStop = true;
+    }
+    ok(!askedToStop,
+       "opening the picker mid-session does not ask the host to stop the stream",
+       "requests=" + std::to_string(requests));
+    set_picker_visible_and_sync_stream(ctx, false);
+    ctx.sel.activeStreamGeneration.store(0, std::memory_order_release);
+    pump(100);
+
+    // (11) Nothing was torn down to achieve any of it.
     ok(ctx.control.connected.load(std::memory_order_relaxed),
        "the control channel was never dropped across the round trips");
     ok(ctx.ui.nv12Renderer.swapChain.Get() != nullptr,
