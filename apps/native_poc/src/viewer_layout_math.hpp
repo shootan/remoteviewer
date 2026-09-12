@@ -193,12 +193,19 @@ inline ClientLayout compute_client_layout_at(const RECT& clientRect, bool picker
   const int buttonH = scale_dpi(30, dpi);   // kPanelButtonHeight()
   const int buttonGap = scale_dpi(8, dpi);  // kPanelButtonGap()
 
-  layout.desktopButtonRect =
-      make_rect(clientW - margin - buttonW, margin / 2 + (headerH - buttonH) / 2,
-                buttonW, buttonH);
+  // Refresh sits at the right edge now. It used to be placed relative to a 전체 화면 button that
+  // selected exactly what the desktop card already selects -- two hit areas, one outcome, both in
+  // the accent colour. The card stays; the button is gone.
+  //
+  // `desktopButtonRect` is kept as an empty rect rather than removed from the struct, so the
+  // `point_in_rect` guards that still reference it can never match and nothing downstream has to
+  // learn a new shape.
   layout.refreshButtonRect =
-      make_rect(layout.desktopButtonRect.left - buttonGap - scale_dpi(96, dpi),
-                layout.desktopButtonRect.top, scale_dpi(96, dpi), buttonH);
+      make_rect(clientW - margin - scale_dpi(96, dpi), margin / 2 + (headerH - buttonH) / 2,
+                scale_dpi(96, dpi), buttonH);
+  layout.desktopButtonRect = make_rect(0, 0, 0, 0);
+  (void)buttonW;
+  (void)buttonGap;
   layout.selectedInfoRect = make_rect(margin, margin / 2,
                                       std::max<int>(1, layout.refreshButtonRect.left - margin * 2),
                                       headerH);

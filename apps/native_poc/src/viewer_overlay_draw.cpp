@@ -223,8 +223,9 @@ void draw_overlay(ViewerState& ctx, HDC hdc) {
       !ctx.control.connected.load(std::memory_order_relaxed) || selectionLocked || selectionPending;
   draw_panel_button(ctx, hdc, layout.refreshButtonRect, "새로 고침", false,
                     !ctx.control.connected.load(std::memory_order_relaxed) || selectionPending);
-  draw_panel_button(ctx, hdc, layout.desktopButtonRect, "전체 화면", selectedId == 0,
-                    actionsDisabled);
+  // No 전체 화면 button: the first card is the desktop and selecting it does the same thing. Two
+  // controls for one outcome, both accent-coloured, made "which one is selected" ambiguous.
+  (void)actionsDisabled;
 
   // Card grid: desktop preview first, then one card per shareable window.
   const CardGridMetrics grid = compute_card_grid(ctx, layout.listRect);

@@ -600,3 +600,26 @@ emote60_host_app.exe" --tray` 로,
 - 제품의 3줄 배선(`viewer_startup.cpp:196`)은 **재현했지 실행하지 않았다.**
 
 **즉 남은 후보는 1b · 4 · 5 로 좁혀졌다.** 1·2·3 을 다시 뒤지지 않는다.
+
+---
+
+## 23. Desktop 중복 제거 — 분리 가능해서 지금 했다 (v2.1 항목 3)
+
+**먼저 현재 동작을 기록했다** (`viewer_window_proc.cpp:129,152`):
+```
+헤더 버튼   → begin_pc_target_selection(ctx, 0, "desktop_select_requested")
+전체화면 카드 → try_hit_window_list_item → id 0 → begin_pc_target_selection(ctx, 0, "window_select_requested")
+```
+**같은 선택, 토큰만 다르다.** 게다가 강조색 통일 뒤에는 **둘 다 파랑**이라 *"어느 쪽이 선택인가"* 가
+화면에서 더 애매해졌다.
+
+**분리 가능 판단**: "대상 선택 무반응" 의 남은 후보는 **1b·4·5**(§22)로 좁혀졌고 **셋 다 이 rect 와
+무관**하다. 결합은 **새로 고침이 이 버튼 기준으로 배치된다는 한 줄**뿐이었다.
+→ 새로 고침을 **오른쪽 끝**에 직접 앵커하고 버튼을 없앴다. `desktopButtonRect` 는 **빈 rect 로 남겨**
+기존 `point_in_rect` 가드가 **절대 맞지 않게** 했다 — 구조체에서 빼면 그 가드들을 동시에 고쳐야 하고,
+그건 이번에 건드리지 않기로 한 자리다.
+
+**단정 갱신은 유도해서 적었다**: `desktopButtonRect` 는 이제 **비어 있고**, 새로 고침은
+`right == 1600-24`(오른쪽 여백), 폭 96·높이 30, 144dpi 에서 높이 60. 출력을 베껴 맞추지 않았다.
+`viewer_layout_test` rc=0 · `picker_open_chain_test` 11 PASS · `viewer_picker_gesture_test` rc=0.
+재촬영: `picker-count-04.png` — 우상단에 **`새로 고침` 하나**, 선택은 **카드의 ✓** 한 곳.

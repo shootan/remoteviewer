@@ -119,9 +119,11 @@ void test_client_layout() {
   CHECK(picker.panelRect.right == 1600 && picker.panelRect.bottom == 900);
   CHECK(empty(picker.toggleButtonRect) && empty(picker.macroButtonRect));   // the ghost buttons stay dead
   // header: Desktop button at the right margin, Refresh to its left, info band on the left
-  CHECK(picker.desktopButtonRect.right == 1600 - 24 && width(picker.desktopButtonRect) == 130 && height(picker.desktopButtonRect) == 30);
-  CHECK(picker.refreshButtonRect.right == picker.desktopButtonRect.left - 8 && width(picker.refreshButtonRect) == 96);
-  CHECK(picker.refreshButtonRect.top == picker.desktopButtonRect.top);
+  // The 전체 화면 button is gone -- the desktop card selects the same thing -- so refresh now
+  // anchors to the right edge and the rect is left empty rather than removed from the struct.
+  CHECK(empty(picker.desktopButtonRect));
+  CHECK(picker.refreshButtonRect.right == 1600 - 24 && width(picker.refreshButtonRect) == 96);
+  CHECK(height(picker.refreshButtonRect) == 30);
   // width = refresh.left - 2 * margin, placed at x = margin: it ends one margin short of the Refresh button
   CHECK(picker.selectedInfoRect.left == 24 && picker.selectedInfoRect.right == picker.refreshButtonRect.left - 24);
   // grid below the header, footer below the grid, both inside the window
@@ -133,7 +135,7 @@ void test_client_layout() {
   CHECK(height(tiny.listRect) == 120);
   // DPI scales the margins
   ClientLayout hi = compute_client_layout_at(client, true, 192);
-  CHECK(hi.listRect.left == 48 && height(hi.desktopButtonRect) == 60);
+  CHECK(hi.listRect.left == 48 && height(hi.refreshButtonRect) == 60);   // 30 at 96dpi, x1.5
 }
 
 void test_point_mapping() {
