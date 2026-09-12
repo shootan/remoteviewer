@@ -48,6 +48,9 @@ function cleanup() {
 }
 
 (async () => {
+  console.log('--- storage failure and authentication recovery ---');
+  const recovery = await runTest(['recovery_fault_test.js']);
+  if (recovery.code !== 0) { cleanup(); process.exit(recovery.code); }
   // First, and without a server: the version-comparison contract. It shares its vectors with the
   // C++ and Kotlin suites, so a drift between the three shows up here before anything else runs.
   console.log('--- version comparison contract ---');

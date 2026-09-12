@@ -494,10 +494,13 @@ let store = { accounts: {}, hosts: {} };
 function loadStore() {
   try {
     store = JSON.parse(fs.readFileSync(DATA_PATH, 'utf8'));
-    if (!store.accounts) store.accounts = {};
-    if (!store.hosts) store.hosts = {};
+    if (!store || typeof store !== 'object' || Array.isArray(store) ||
+        !store.accounts || typeof store.accounts !== 'object' || Array.isArray(store.accounts) ||
+        !store.hosts || typeof store.hosts !== 'object' || Array.isArray(store.hosts)) {
+      throw new Error('invalid directory store schema');
+    }
   } catch (err) {
-    if (err.code !== 'ENOENT') console.error('[directory] store read failed:', err.message);
+    if (err.code !== 'ENOENT') throw new Error('directory store unreadable; original preserved: ' + err.message);
     store = { accounts: {}, hosts: {} };
   }
   indexHostTokens();
@@ -543,6 +546,7 @@ function saveStoreNow() {
     fs.renameSync(tmp, DATA_PATH);
   } catch (err) {
     console.error('[directory] store write failed:', err.message);
+    throw Object.assign(new Error('directory storage unavailable'), { statusCode: 503 });
   }
 }
 
@@ -554,12 +558,45 @@ function hashPassword(password, saltHex) {
   return { salt: salt.toString('hex'), hash: derived.toString('hex') };
 }
 
-function verifyPassword(password, account) {
-  if (!account || !account.salt || !account.hash) return false;
-  const { hash } = hashPassword(password, account.salt);
-  const a = Buffer.from(hash, 'hex');
-  const b = Buffer.from(account.hash, 'hex');
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
+// The live request path never runs a synchronous KDF on the relay/heartbeat event loop.
+let passwordJobs = 0;
+const authInFlight = new Set();
+async function hashPasswordAsync(password, saltHex) {
+  if (passwordJobs >= 4) throw Object.assign(new Error('authentication busy; retry later'), { statusCode: 503 });
+  if (password.length > 1024) throw Object.assign(new Error('password too long'), { statusCode: 400 });
+  ++passwordJobs;
+  try {
+    const salt = saltHex ? Buffer.from(saltHex, 'hex') : crypto.randomBytes(16);
+    const derived = await new Promise((resolve, reject) =>
+      crypto.scrypt(password, salt, 32, (error, value) => error ? reject(error) : resolve(value)));
+    return { salt: salt.toString('hex'), hash: derived.toString('hex') };
+  } finally { --passwordJobs; }
+}
+
+async function authenticateAccount(id, password, res) {
+  if (id.length > 128) { sendJson(res, 400, { error: 'id too long' }); return null; }
+  const fail = loginFailures.get(id);
+  if ((fail && fail.nextAllowedAt > Date.now()) || authInFlight.has(id)) {
+    sendJson(res, 429, { error: 'too many attempts, retry later' }); return null;
+  }
+  authInFlight.add(id);
+  try {
+    const account = store.accounts[id];
+    let valid = false;
+    if (account && account.salt && account.hash) {
+      const { hash } = await hashPasswordAsync(password, account.salt);
+      const a = Buffer.from(hash, 'hex'), b = Buffer.from(account.hash, 'hex');
+      valid = a.length === b.length && crypto.timingSafeEqual(a, b);
+    }
+    if (!valid) {
+      const count = (fail ? fail.count : 0) + 1;
+      const delayMs = count <= 3 ? 0 : Math.min(30000, 500 * 2 ** Math.min(count - 3, 6));
+      loginFailures.set(id, { count, nextAllowedAt: Date.now() + delayMs });
+      sendJson(res, 401, { error: 'invalid id or password' }); return null;
+    }
+    loginFailures.delete(id);
+    return account;
+  } finally { authInFlight.delete(id); }
 }
 
 function randomToken() {
@@ -704,9 +741,11 @@ async function handleSignup(req, res) {
     return sendJson(res, 409, { error: 'that id is already taken' });
   }
 
-  const { salt, hash } = hashPassword(pw);
+  const { salt, hash } = await hashPasswordAsync(pw);
+  // Another signup may have finished while the KDF was in flight.
+  if (store.accounts[id]) return sendJson(res, 409, { error: 'that id is already taken' });
   store.accounts[id] = { id, salt, hash, createdAt: Date.now() };
-  saveStoreNow();
+  try { saveStoreNow(); } catch (error) { delete store.accounts[id]; throw error; }
   console.log(`[directory] account '${id}' created via signup`);
   sendJson(res, 200, { ok: true, id });
 }
@@ -717,27 +756,7 @@ async function handleLogin(req, res) {
   const pw = String(body.pw || '');
   if (!id || !pw) return sendJson(res, 400, { error: 'id and pw are required' });
 
-  const fail = loginFailures.get(id);
-  if (fail && fail.nextAllowedAt > Date.now()) {
-    const waitSec = Math.ceil((fail.nextAllowedAt - Date.now()) / 1000);
-    return sendJson(res, 429, { error: `too many attempts, retry in ${waitSec}s` });
-  }
-
-  const account = store.accounts[id];
-  // Deliberately identical response for "no such account" and "wrong password" so the API
-  // cannot be used to enumerate which accounts exist.
-  if (!account || !verifyPassword(pw, account)) {
-    // Let a few honest typos through before throttling; only sustained guessing gets delayed.
-    const count = (fail ? fail.count : 0) + 1;
-    const FREE_ATTEMPTS = 3;
-    const delayMs = count <= FREE_ATTEMPTS
-      ? 0
-      : Math.min(30000, 500 * 2 ** Math.min(count - FREE_ATTEMPTS, 6));
-    loginFailures.set(id, { count, nextAllowedAt: Date.now() + delayMs });
-    return sendJson(res, 401, { error: 'invalid id or password' });
-  }
-
-  loginFailures.delete(id);
+  if (!(await authenticateAccount(id, pw, res))) return;
   const token = randomToken();
   const expiresAt = Date.now() + SESSION_TTL_MS;
   sessions.set(token, { accountId: id, expiresAt });
@@ -753,10 +772,7 @@ async function handleHostRegister(req, res) {
   if (!id || !pw || !machineId) {
     return sendJson(res, 400, { error: 'id, pw and machineId are required' });
   }
-  const account = store.accounts[id];
-  if (!account || !verifyPassword(pw, account)) {
-    return sendJson(res, 401, { error: 'invalid id or password' });
-  }
+  if (!(await authenticateAccount(id, pw, res))) return;
 
   // Keyed by machine so reinstalling does not pile up duplicate entries.
   let hostId = Object.keys(store.hosts).find(
@@ -766,7 +782,6 @@ async function handleHostRegister(req, res) {
 
   // Re-registering issues a new token; the previous one must stop working.
   const previous = store.hosts[hostId];
-  if (previous && previous.tokenHash) hostTokens.delete(previous.tokenHash);
 
   const hostToken = randomToken();
   const tokenHash = hashToken(hostToken);
@@ -785,8 +800,14 @@ async function handleHostRegister(req, res) {
     localUdpPort: previous ? previous.localUdpPort || 0 : 0,
     alternateUdpPort: previous ? previous.alternateUdpPort || 0 : 0,
   };
+  try { saveStoreNow(); } catch (error) {
+    if (previous) store.hosts[hostId] = previous;
+    else delete store.hosts[hostId];
+    throw error;
+  }
+  // Durable state succeeded; only now revoke the old token and publish the new one.
+  if (previous && previous.tokenHash) hostTokens.delete(previous.tokenHash);
   hostTokens.set(tokenHash, hostId);
-  saveStoreNow();
   sendJson(res, 200, withObserve({ hostId, hostToken, hostName }));
 }
 
@@ -1423,7 +1444,7 @@ async function onRequest(req, res) {
   try {
     await handler(req, res);
   } catch (err) {
-    sendJson(res, 400, { error: err.message || 'bad request' });
+    sendJson(res, err.statusCode || 400, { error: err.message || 'bad request' });
   }
 }
 

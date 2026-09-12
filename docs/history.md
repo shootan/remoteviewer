@@ -1,4 +1,4 @@
-﻿# remote60 작업 히스토리 (NEW)
+# remote60 작업 히스토리 (NEW)
 
 업데이트: 2026-04-09
 
@@ -11741,3 +11741,25 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 
 → **주석·머리말·표는 코드와 같은 커밋에서 갱신한다.** 특히 *"여기서는 할 수 없다" · "이건 고쳐졌다"*
 처럼 **읽는 사람의 조사를 끝내는 문장**은, 쓸 때가 아니라 **틀려질 때**를 기준으로 관리한다.
+
+
+### 2026-09-12 Codex 직접 Host/PC 스레드·복구 전수 점검
+
+- 목표: 사용자 요청에 따라 소스의 스레드·복구 실패를 직접 조사하고 문제와 검증 경계를 문서로 보존.
+- 변경 파일: `docs/host_pc_thread_recovery_audit_2026-09-12.md`, `docs/host_pc_thread_recovery_inventory_2026-09-12.md`, `docs/host_pc_thread_recovery_probes_2026-09-12.md`, `docs/history.md`, `docs/구현계획.md`.
+- 범위: 364파일/97,904줄 목록·SHA-256·위험 패턴 검색, 66파일 관련 분기 심층 추적. Host13/PC13/공유10 항목은 코드 결함·정책 공백·조건부 위험을 구분한 것이며 모두 현장 재현 버그라는 뜻이 아님.
+- 사용자 추가 요청 반영: 36항목에 원인·수정 방향·검증 조건을 연결하고, 원장10.1에 파일/상태/분기 수준의 구체적인 수정안11묶음을 추가. DXGI 내부 원인 미확정과 반복 장애 복구 방안은 분리.
+- 검증: gnlink+remote60_deploy로 NAS 4스트림 읽기 전용 확보. 다른 Host의 DXGI wedge7회, Viewer13:16 dead-session 종료 확인. 고정 제품 liveness 헤더4입력과 Node VM 저장 실패2입력 프로브 모두 종료0. UI/GPU/UAC/실게임/장시간 soak 및 사건 바이너리 동일성은 미검증.
+- 제품 수정·빌드·설치·재시작·게시 없음. 병행 작업의 뷰어/버전/사건 문서 변경은 보존. 기준 HEAD8bc9d1c+워킹트리, 조사 중55c93c0 도착은 목록에 구분.
+- 다음: 원장 우선순위별 복구/대상/입력 경계 수정과 장애 주입 행동 검증. 현재 Git MCP 도구 부재로 규정된 커밋은 미실행; CLI 우회 및 push 없음.
+
+
+### 2026-09-12 직접 복구 구현 1 — 디렉터리 저장·인증 경계
+
+- 목표: B06/B07. 저장 실패가 성공 응답·토큰 소실로 이어지는 경로를 고치고 인증이 릴레이 event loop를 막지 않게 한다.
+- 변경: `apps/directory/server.js`, `apps/directory/test/recovery_fault_test.js`, `apps/directory/test/run.js`, `.gitattributes`; 기존 조사 원장·목록·프로브와 사건 참고 문서를 분리 브랜치에 함께 보존. Native 변경은 다음 검증 단위로 남긴다.
+- 구현: ENOENT만 신규 store로 처리하고 손상·스키마 오류는 원본 보존 후 시작 거부. host register/signup은 durable save 실패 시 메모리 변경을 되돌리고503, 이전 토큰은 저장 성공 후에만 폐기. 네트워크 인증은 최대4개 async scrypt와 계정별 동시 작업 제한, login/register 공용 backoff를 적용한다. CLI 계정 생성의 동기 KDF는 서버 listen 이전 별도 경로다.
+- 검증: 실제 HTTP 서버에 ENOSPC 주입 →503/원본 바이트/기존 토큰 유지, 실패 signup 후 저장 회복 재시도, login 제한 뒤 register429, 손상 store 부팅 거부 모두 PASS. 이를 기존 전체 서버 회귀에 추가해 `.claude/directory-final.log`가 `RESULT: ALL PASS`, 종료0. 테스트 파일/프로세스는 worktree 안에서 격리했다.
+- 시험 기반: 새 worktree의 CRLF 변환으로 서명 fixture가 깨진4건을 확인, Git 원본 바이트 복원 및 `.gitattributes` exact-byte 규칙 후 전량 통과. 검증 키·서명·프로토콜을 약화시키지 않았다.
+- Git: Git MCP 없는 작업 방식 설명 후 사용자가 신규 브랜치의 직접 전체 수정을 요청한 흐름에 따라 `audit/host-pc-recovery`에서 로컬 CLI를 사용한다. 기존 공유 정책 파일 변경·push·NAS 게시·서비스 재시작 없음.
+- 다음: Host/PC Native·UI/pipe/process 회귀 및 사용자 행동 검증, 고정 후보 검토. 이 커밋이 전체36건 완료나 배포 완료라는 뜻은 아니다.

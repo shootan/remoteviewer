@@ -1,0 +1,2 @@
+# Signatures and hashes cover exact bytes, including line endings, on every worktree.
+apps/shared/update_manifest/** -text
