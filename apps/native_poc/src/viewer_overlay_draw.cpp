@@ -57,8 +57,12 @@ void draw_target_card(ViewerState& ctx, HDC hdc, const RECT& card, const CardGri
     RECT ph = thumbRect;
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, RGB(110, 118, 130));
-    draw_text_utf8(ctx, hdc, windowId == 0 ? std::string("Desktop") : std::string("Loading preview..."),
-                   &ph, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    // The desktop card's caption already says what it is; repeating it inside the empty preview
+    // put the same two words twice in one card.
+    if (windowId != 0) {
+      draw_text_utf8(ctx, hdc, std::string("미리보기 준비 중…"), &ph,
+                     DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
   }
 
   SetBkMode(hdc, TRANSPARENT);
@@ -199,7 +203,7 @@ void draw_overlay(ViewerState& ctx, HDC hdc) {
     if (cardIndex >= totalCards) break;
     const RECT card = card_rect_for_slot(layout.listRect, grid, slot);
     if (cardIndex == 0) {
-      draw_target_card(ctx, hdc, card, grid, 0, "Desktop (full screen)", selectedId == 0,
+      draw_target_card(ctx, hdc, card, grid, 0, "전체 화면", selectedId == 0,
                        selectionLocked || selectionPending);
     } else {
       const auto& entry = windowItems[static_cast<size_t>(cardIndex - 1)];
@@ -213,21 +217,23 @@ void draw_overlay(ViewerState& ctx, HDC hdc) {
     emptyRect.top += grid.cardH + dpi_scale(ctx, 18);
     SetTextColor(hdc, RGB(150, 158, 170));
     draw_text_utf8(ctx, hdc,
-                   selectionLocked ? std::string("Window list hidden by host config")
-                                   : std::string("No shareable windows yet. Click Refresh."),
+                   selectionLocked
+                       ? std::string("호스트 설정으로 창 목록이 숨겨져 있습니다")
+                       : std::string("공유할 수 있는 창이 없습니다. 새로 고침을 눌러 보세요."),
                    &emptyRect, DT_CENTER | DT_SINGLELINE);
   }
 
   // Footer: connection and input state in one quiet line.
   std::ostringstream foot;
-  foot << (ctx.control.connected.load(std::memory_order_relaxed) ? "Connected" : "Disconnected")
-       << "   Input " << (ctx.session.inputEnabled.load(std::memory_order_relaxed) ? "on" : "off");
+  foot << (ctx.control.connected.load(std::memory_order_relaxed) ? "연결됨" : "연결 끊김")
+       << "   입력 "
+       << (ctx.session.inputEnabled.load(std::memory_order_relaxed) ? "켜짐" : "꺼짐");
   const uint32_t decFpsX100 = ctx.metrics.Snapshot().decodedFpsX100;
   if (decFpsX100 > 0) foot << "   " << (decFpsX100 / 100) << " fps";
   if (totalRows > grid.visibleRows) {
-    foot << "   Rows " << (scrollRow + 1) << "-"
-         << std::min(totalRows, scrollRow + grid.visibleRows) << " / " << totalRows
-         << " (wheel to scroll)";
+    foot << "   " << (scrollRow + 1) << "-"
+         << std::min(totalRows, scrollRow + grid.visibleRows) << " / " << totalRows << " 줄"
+         << " (휠로 스크롤)";
   }
   RECT footRect = layout.statsRect;
   SetTextColor(hdc, RGB(140, 148, 160));

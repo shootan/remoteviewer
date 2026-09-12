@@ -1187,6 +1187,25 @@ target_include_directories(remote60_viewer_picker_gesture_test PRIVATE src)
 target_link_libraries(remote60_viewer_picker_gesture_test PRIVATE common ws2_32)
 
 # Viewer split refactor T4: the viewer layout arithmetic (aspect fit, card grid, client layout, point mapping, hit test).
+# Draws the real picker into a bitmap without a host: the panel's model takes a plain struct, so
+# no part of the wire path is involved. A tool, not a test -- it produces pictures and judges
+# nothing.
+add_executable(remote60_picker_preview
+  tools/picker_preview.cpp
+  src/viewer_overlay_draw.cpp
+  src/viewer_gdi_util.cpp
+  src/viewer_layout.cpp
+  src/viewer_picker_state.cpp
+  src/viewer_log.cpp
+  src/native_video_client_shared_core.cpp
+  src/client_session_toolbar.cpp
+)
+target_include_directories(remote60_picker_preview PRIVATE src)
+target_link_libraries(remote60_picker_preview PRIVATE user32 gdi32 gdiplus shlwapi ws2_32)
+if(MSVC)
+  target_compile_options(remote60_picker_preview PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_viewer_layout_test
   src/viewer_layout_test.cpp
 )
