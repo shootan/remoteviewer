@@ -93,11 +93,13 @@ void draw_alpha_rect(ViewerState& ctx, HDC hdc, const RECT& rect, COLORREF color
 
 void draw_panel_button(ViewerState& ctx, HDC hdc, const RECT& rect, const char* label, bool active,
                        bool disabled) {
+  // The same blue the rest of the product uses (--accent #3b82f6 in ui/shell.html). This screen
+  // was the only one in green, so the two halves of one program disagreed about their own colour.
   COLORREF fill = RGB(60, 68, 80);
   if (disabled) {
     fill = RGB(42, 46, 54);
   } else if (active) {
-    fill = RGB(48, 96, 62);
+    fill = RGB(59, 130, 246);
   }
   FillRect(hdc, &rect, cached_brush(ctx, fill));
   SetBkMode(hdc, TRANSPARENT);

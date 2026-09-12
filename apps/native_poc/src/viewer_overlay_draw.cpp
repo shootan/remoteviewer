@@ -41,7 +41,9 @@ void draw_target_card(ViewerState& ctx, HDC hdc, const RECT& card, const CardGri
                                      card.bottom - card.top - grid.thumbH);
 
   FillRect(hdc, &thumbRect, cached_brush(ctx, RGB(24, 28, 36)));
-  FillRect(hdc, &captionRect, cached_brush(ctx, active ? RGB(38, 70, 52) : RGB(32, 37, 46)));
+  // Selected cards are tinted, not filled: a filled card and a filled button would read as the
+  // same kind of thing, and the button is an action while the card is a state.
+  FillRect(hdc, &captionRect, cached_brush(ctx, active ? RGB(26, 48, 84) : RGB(32, 37, 46)));
 
   // Snapshot under the lock, draw outside it: StretchDIBits under ctx.picker.thumbMu made the fetch
   // thread and the paint stall each other.
@@ -73,10 +75,23 @@ void draw_target_card(ViewerState& ctx, HDC hdc, const RECT& card, const CardGri
   draw_text_utf8(ctx, hdc, title, &text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
   RECT frame = card;
-  FrameRect(hdc, &frame, cached_brush(ctx, active ? RGB(88, 178, 122) : RGB(52, 58, 70)));
+  FrameRect(hdc, &frame, cached_brush(ctx, active ? RGB(59, 130, 246) : RGB(52, 58, 70)));
   if (active) {
     RECT inner{card.left + 1, card.top + 1, card.right - 1, card.bottom - 1};
-    FrameRect(hdc, &inner, cached_brush(ctx, RGB(88, 178, 122)));
+    FrameRect(hdc, &inner, cached_brush(ctx, RGB(59, 130, 246)));
+
+    // A mark, not just a colour. Which card is selected has to survive a screenshot in grey, a
+    // monitor with the colours wrong, and eyes that do not separate blue from grey-blue.
+    const int side = dpi_scale(ctx, 18);
+    const int pad = dpi_scale(ctx, 6);
+    const RECT badge{card.right - side - pad, card.top + pad, card.right - pad,
+                     card.top + side + pad};
+    FillRect(hdc, &badge, cached_brush(ctx, RGB(59, 130, 246)));
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, RGB(255, 255, 255));
+    RECT tick = badge;
+    draw_text_utf8(ctx, hdc, std::string("\u2713"), &tick,
+                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
   }
 }
 
