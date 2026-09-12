@@ -11496,3 +11496,18 @@ desktopButtonRect` 의 **레이아웃·히트테스트**를 고쳐야 하는데,
 **회귀**: `client_shell_bridge_test` 29 PASS · `client_update_flow_test` 23 PASS · 뷰어 쪽 3스위트
 `rc=0`(⚠️ 이 스위트들은 `^PASS` 를 찍지 않으므로 **개수가 아니라 종료 코드가 결과**다, #509·#520).
 `client_update_ui_test` 는 **pin 이 FAIL** 한다 — 페이지가 바뀌었고 아직 게시 전이라 **정상**이다.
+
+### 528) 2026-09-12 반복 중단 조사 — 후속 실행 누락과 GMux 턴/task 혼동
+
+목표: 사용자 지시에 따라 UI 작업을 재개하지 않고 반복 중단 원인을 수정.
+두 Claude 원문에서 미래형 진행 문장 뒤 도구 실행 없이 턴이 끝난 것을 확인했다.
+최초 작업용 task도 중복 금지 규칙을 오해해 생략했다. Codex의 인계 확인 누락도 포함한다.
+
+변경: AGENTS.md·CLAUDE.md의 최초 위임/후속 도구 실행/중지 보존 규칙,
+docs/a2a_stall_diagnosis_2026-09-12.md, 주간 이력, 구현계획 상태.
+별도 GMux d2c7fe0: 자동 허위 완료 제거, 이전 턴 binding 선분리, FIFO 단건 주입,
+busy/off-call 승인 문구 구분. 설치된 번들에도 기존 결함이 있음을 source map으로 확인.
+
+검증: GMux 신규 회귀 2건 수정 전 FAIL → 관련 32건 PASS, 타입 검사·격리 빌드 성공.
+문서 diff 정합 확인. 실제 Claude 전체 세션/재시작 검증은 미실행이며 실행 중 번들 미변경.
+다음: GMux 적용 시점 결정과 격리 세션 검증. GNLink UI 작업 중지 유지, push 없음.
