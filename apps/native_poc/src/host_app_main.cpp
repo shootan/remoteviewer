@@ -794,11 +794,20 @@ void set_autostart(bool enabled) {
     // Quoted: the install path routinely contains spaces, and an unquoted entry silently
     // launches the wrong thing.
     const std::wstring command = L"\"" + own_executable_path() + L"\" --tray";
-    RegSetValueExW(key, kRunValue, 0, REG_SZ,
-                   reinterpret_cast<const BYTE*>(command.c_str()),
-                   static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
-    // Migrate rather than accumulate: leaving the old name behind would start the program twice.
-    RegDeleteValueW(key, kLegacyRunValue);
+    const LSTATUS wrote =
+        RegSetValueExW(key, kRunValue, 0, REG_SZ,
+                       reinterpret_cast<const BYTE*>(command.c_str()),
+                       static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
+    // Only once the replacement is actually there. Deleting the old name unconditionally meant a
+    // failed write took away a working autostart and put nothing in its place -- the user would
+    // have ended up with the feature switched on in the UI and nothing starting at boot.
+    if (wrote == ERROR_SUCCESS) {
+      RegDeleteValueW(key, kLegacyRunValue);
+    } else {
+      append_host_app_log("[host-app] autostart: could not write the new Run value (" +
+                          std::to_string(static_cast<long>(wrote)) +
+                          "); leaving the existing entry alone");
+    }
   } else {
     RegDeleteValueW(key, kRunValue);
     // Off has to mean off even on a machine that only ever had the old name.

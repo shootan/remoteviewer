@@ -263,11 +263,29 @@ void draw_overlay(ViewerState& ctx, HDC hdc) {
     RECT emptyRect = layout.listRect;
     emptyRect.top += grid.cardH + dpi_scale(ctx, 18);
     SetTextColor(hdc, RGB(150, 158, 170));
-    draw_text_utf8(ctx, hdc,
-                   selectionLocked
-                       ? std::string("호스트 설정으로 창 목록이 숨겨져 있습니다")
-                       : std::string("공유할 수 있는 창이 없습니다. 새로 고침을 눌러 보세요."),
-                   &emptyRect, DT_CENTER | DT_SINGLELINE);
+
+    // "Empty" is three different situations and this line used to say the same thing in all of
+    // them. On a failed connect the screen read: header "호스트에 연결하지 못했습니다", middle
+    // "창이 없습니다. 새로 고침을 눌러 보세요.", and a 새로 고침 button that was disabled --
+    // two contradictory statements plus an instruction the user could not carry out.
+    //
+    // An empty list means nothing on its own; what it means is whatever the state says.
+    std::string emptyLine;
+    if (selectionLocked) {
+      emptyLine = "호스트 설정으로 창 목록이 숨겨져 있습니다";
+    } else if (!tokenLine.empty() && panelStatus != "window_list_received" &&
+               panelStatus.rfind("window_list_received", 0) != 0) {
+      // The header already explains this state. Repeating a different explanation underneath is
+      // how the two came to disagree; say nothing and let the header speak.
+      emptyLine.clear();
+    } else if (!controlUp) {
+      emptyLine.clear();
+    } else {
+      emptyLine = "공유할 수 있는 창이 없습니다. 새로 고침을 눌러 보세요.";
+    }
+    if (!emptyLine.empty()) {
+      draw_text_utf8(ctx, hdc, emptyLine, &emptyRect, DT_CENTER | DT_SINGLELINE);
+    }
   }
 
   // Footer: connection and input state in one quiet line.
