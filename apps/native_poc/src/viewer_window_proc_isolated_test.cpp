@@ -107,6 +107,8 @@ void give_the_picker_something_to_show(ViewerState& ctx) {
 
 std::vector<std::string> gToolbarLines;
 int gInputEvents = 0;
+uint16_t gLastInputKind = 0;
+uint32_t gLastInputKey = 0;
 int gVideoPaintRequests = 0;
 
 int main() {
@@ -117,6 +119,18 @@ int main() {
   }
   HWND hwnd = ctx.session.hwnd;
   pump(200);
+  // A DOWN already accepted by the remote session must be released even when its UP arrives
+  // outside the video/window. This drives the shipped WndProc; only the network sink is doubled.
+  for (const auto& button : std::vector<std::pair<UINT, uint32_t>>{{WM_LBUTTONUP, VK_LBUTTON},
+           {WM_RBUTTONUP, VK_RBUTTON}, {WM_MBUTTONUP, VK_MBUTTON}}) {
+    const uint16_t bit = button.second == VK_LBUTTON ? 1 : button.second == VK_RBUTTON ? 2 : 4;
+    ctx.input.mouseButtons.store(bit);
+    gLastInputKind = 0; gLastInputKey = 0;
+    SendMessageW(hwnd, button.first, 0, at(-40, -40));
+    ok(ctx.input.mouseButtons.load() == 0 && gLastInputKind == 3 && gLastInputKey == button.second,
+       "outside-video UP clears the pressed button and forwards its release", std::to_string(button.second));
+  }
+  gInputEvents = 0;
 
   // A picker that is up, connected, and has been up long enough that the press latch will accept
   // a gesture (PickerState::SelectAllowed ignores anything begun within 300ms of it appearing).
@@ -228,7 +242,11 @@ int main() {
   remote60::native_poc::session_toolbar_set_visible(true);
   remote60::native_poc::session_toolbar_follow_owner();
   pump(400);
-  HWND bar = FindWindowExW(nullptr, nullptr, L"Remote60SessionToolbar", nullptr);
+  HWND bar = nullptr;
+  while ((bar = FindWindowExW(nullptr, bar, L"Remote60SessionToolbar", nullptr)) != nullptr) {
+    DWORD pid = 0; GetWindowThreadProcessId(bar, &pid);
+    if (pid == GetCurrentProcessId() && GetWindow(bar, GW_OWNER) == hwnd) break;
+  }
   ok(bar != nullptr, "and can be found");
   RECT bounds{};
   int midY = 0;
@@ -571,8 +589,9 @@ int main() {
 // observed somewhere.
 namespace remote60::native_poc::viewer {
 
-void enqueue_input_event(ViewerState&, uint16_t, int32_t, int32_t, int32_t, uint32_t) {
+void enqueue_input_event(ViewerState&, uint16_t kind, int32_t, int32_t, int32_t, uint32_t key) {
   ++gInputEvents;
+  gLastInputKind = kind; gLastInputKey = key;
 }
 void update_cursor_overlay(ViewerState&, HWND) {}
 bool local_hotkey_modifiers_active() { return false; }
