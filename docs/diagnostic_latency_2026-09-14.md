@@ -22,10 +22,10 @@
 - 업데이트 효과 220 checks/0 failed: 실제 파일 lock을 걸어 rollback 실패 파일과 Win32=32가 기록되는지 단정.
 - 별도 host_diagnostic_log_test PASS: 파이프 없이 기록, 비대상 민감 로그 제외, 2개 파일 크기 상한.
 - 격리 loopback 합성 1080p60→실제 GNLinkViewer: 590 schema2 present records, fixture/viewer rc0. 이는 필드 게임/키보드 실기·GPU 부하 증거가 아니다. 숨긴 창만 실행한 첫 시도는 present 0건으로 분석기 exit2(정상 판정하지 않음); 이후 별도 창 표시 시 실제 로그 확인.
-- 0.2.125 설치기 Release 빌드 성공, embedded payload9/9 일치, 운영 manifest 서명과 제품 verifier Ok125/변조 SignatureInvalid 확인. r1 검증용 독립 검토 통과 후 보존상한/상세로그 기록량 보수. r2 고정 후보 재검토 중, 게시/설치/재시작 미실행.
+- 0.2.125 설치기 Release 빌드 성공, embedded payload9/9 일치, 운영 manifest 서명과 제품 verifier Ok125/변조 SignatureInvalid 확인. r1 검증용 독립 검토 통과 후 보존상한/상세로그 기록량 보수. r2 고정 후보 검증용 PACKAGE OK 후 기존 채널 게시 및 Codex 외부 확인 완료. 사용자 설치/재시작은 미실행.
 
 ## 다음 단계
-고정 후보 독립 검토 및 게시 검증 후 사용자 업데이트로 실제 사건을 재현한다. 현재 세션은 자동 종료하지 않는다. 단계별 지연은 계측으로 구분하되, 키가 화면에 반영되는 인과는 timestamp만으로 확정하지 않는다. main merge/push 없음.
+고정 후보 독립 검토 및 게시 검증 완료. 사용자 업데이트로 실제 사건을 재현한다. 현재 세션은 자동 종료하지 않는다. 단계별 지연은 계측으로 구분하되, 키가 화면에 반영되는 인과는 timestamp만으로 확정하지 않는다. main merge/push 없음.
 
 ## r2 보수 검증
 - mirror 동시5개(5번째 추가bank 금지)·30회 재시작·각segment8MiB 상한 PASS.
@@ -33,3 +33,13 @@
 - lastError 소비처는 updater_effects.cpp:157 로그/:599 복사, updater_main.cpp:325~326 empty 여부+로그. 오류 문자열 exact-match로 동작 분기하는 소비처 없음.
 - 롤백 .claude/rollback/0.2.124/ 확보: 인증된 현재 게시 pair와 동일, payload10개 size/hash 일치.
 - 최종 r2 manifest SHA256 58fc1b885ca2f8e3f2cc30ea5491f7f8a87435ceb5bee67adddd77d09d9844f2, sig869489c5fcd40f747d92ddaaa9e7ef18a5071ed9369dc145f9fdb69e05115e1f.
+
+## 게시 완료 — 2026-09-14
+- 상태: **배포 완료(마일스톤) · 사용자 업데이트/실기 대기**. 진단 계측이며 지연·게임정지 해결 선언이 아니다.
+- 코드 commit: `94e4d8d163b090e36fe704511fad6aed5f8abf9f` (최초계측582a9b6 포함). 검증용 rev7 FINAL_PACKAGE_VERDICT=기존채널 비상용시험 PACKAGE OK.
+- gnlink_deploy.sh rc0, NAS·공개 HTTPS payload10개 hash 일치, authenticated API HTTP200/version0.2.125. 수신 manifest/sig가 위 r2 고정값과 동일; 제품검증기 Ok125·1byte변조 SignatureInvalid.
+- 설치기: https://rem.shotan.net/updates/0.2.125/GNLinkSetup.exe — SHA256 `cd49ae1c9b5faea2217d4af55861c99d7f19b1de5ef63f46b1063c3a5c43616a`. 후보 worktree `dist/GNLinkSetup-0.2.125.exe` 동일.
+- 서버복구쌍: `/opt/gnlink/manifest-backups/0.2.124/`, 로컬전체복구본 `.claude/rollback/0.2.124/`. 채널복원은 이미 설치한125의 자동downgrade가 아니며 이전설치기 재설치가 별도로 필요.
+- 근거: `build-incident/release-0.2.125-publish.log`, `.claude/rel/0.2.125/published-https/`, `release-report.json`. 검증용 게시 후 독립외부대조 추가요청(seq2290); 여기 기록은 Codex 직접확인.
+- 사용자 다음행동: 회사클라이언트와 회사게임용호스트 모두125업데이트 완료버전 확인 후 타이핑/게임 재현시각 기록. 집호스트도 조사시125완전설치 확인. 설치실패/혼합버전이면 성공으로 간주하지 않는다.
+- 사용자프로세스 종료/설치/재시작, main merge, git push 모두 미실행.
