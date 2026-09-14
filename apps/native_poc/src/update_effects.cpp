@@ -699,6 +699,18 @@ bool WindowsUpdateEffects::Swap() {
 
 bool WindowsUpdateEffects::Rollback() {
   bool ok = true;
+  const auto trace = [this](const std::string& text) {
+    if (config_.trace) config_.trace("rollback-trace " + text);
+  };
+  trace("begin moved=" + std::to_string(movedAside_.size()) +
+        " placed=" + std::to_string(placed_.size()) + " trigger=" + lastError_);
+  const auto fileFailure = [&](const char* operation, const std::wstring& name, DWORD error) {
+    const std::string detail = std::string(operation) + " file=" + to_utf8(name) +
+                               " win32=" + std::to_string(error);
+    trace(detail);
+    lastError_ += "; rollback " + detail;
+    ok = false;
+  };
   // First, and before a single file moves. When the rollback is happening BECAUSE something this
   // attempt started is unhealthy, that something is running and holding the new files open --
   // and the restore would fail on precisely the files it exists to restore. Only what this
@@ -708,8 +720,10 @@ bool WindowsUpdateEffects::Rollback() {
     // placed files, the registration -- because a partial restore is worse than none and leaves
     // nothing to try again from. The caller reports this as a rollback that did not happen.
     lastError_ = "not rolling back: something this attempt started could not be stopped";
+    trace("release-before-rollback failed");
     return false;
   }
+  trace("release-before-rollback ok");
   // Remove whatever was placed, then put back exactly the files that were moved aside. Files that
   // were never moved are left alone -- restoring something that was not backed up would be
   // inventing state.
@@ -722,15 +736,19 @@ bool WindowsUpdateEffects::Rollback() {
       // Nothing was moved aside for this name, so if something is there now, this attempt put it
       // there and it did not exist before. Removing it is what restores the installation.
       const bool wasPlaced = std::find(placed_.begin(), placed_.end(), name) != placed_.end();
-      if (wasPlaced && file_exists(live) && !DeleteFileW(live.c_str())) ok = false;
+      if (wasPlaced && file_exists(live) && !DeleteFileW(live.c_str())) {
+        fileFailure("remove-new", name, GetLastError());
+      }
       continue;
     }
     if (file_exists(live) && !DeleteFileW(live.c_str())) {
-      ok = false;
+      fileFailure("remove-live", name, GetLastError());
       continue;
     }
     if (!MoveFileExW(backup.c_str(), live.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-      ok = false;
+      fileFailure("restore-backup", name, GetLastError());
+    } else {
+      trace("restored file=" + to_utf8(name));
     }
   }
   movedAside_.clear();
@@ -747,8 +765,10 @@ bool WindowsUpdateEffects::Rollback() {
   // The registration goes back to what was captured, not to the version being abandoned.
   if (!config_.restoreRegistration()) {
     ok = false;
-    lastError_ = "rollback could not restore the registration";
+    lastError_ += "; rollback could not restore the registration";
+    trace("restore-registration failed");
   }
+  trace(std::string("end ok=") + (ok ? "1" : "0"));
   if (!ok && lastError_.empty()) lastError_ = "rollback could not restore every file";
   return ok;
 }

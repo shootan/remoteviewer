@@ -978,6 +978,9 @@ int main(int argc, char** argv) {
     check("could hold the swapped-in file open", held != INVALID_HANDLE_VALUE);
     const bool rolled = e.Rollback();
     check("rollback reports failure when a file cannot be restored", !rolled, e.last_error());
+    check("rollback failure names the locked file and OS error instead of only health failure",
+          e.last_error().find("remove-live file=BetaPayload.bin win32=32") != std::string::npos,
+          e.last_error());
     if (held != INVALID_HANDLE_VALUE) CloseHandle(held);
     // Alpha was restorable and must have been restored even though Beta was not -- a rollback
     // that gives up entirely on the first problem would leave more of the new version in place.

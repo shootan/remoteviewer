@@ -409,6 +409,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
       ControlInputEventMessage input{};
       input.header = header;
       if (!link.Read(&input.seq, sizeof(input) - sizeof(MessageHeader))) break;
+      const uint64_t inputReceivedUs = qpc_now_us();
       std::string resolvedTarget;
       if (inputRouter.injectionEnabled) {
         const bool desktopMode =
@@ -625,7 +626,16 @@ void ControlSessionServer::Serve(ControlLink& link) {
           p0hLastEmitUs = p0NowUs;
         }
       }
-      if (!send_input_ack(input.seq)) break;
+      const uint64_t inputHandledUs = qpc_now_us();
+      const bool inputAckSent = send_input_ack(input.seq);
+      if (input.kind != 1 || inputHandledUs - inputReceivedUs >= 100000ULL) {
+        std::cout << "[native-video-host][input-timing] seq=" << input.seq
+                  << " eventKind=" << input.kind << " hostReceivedUs=" << inputReceivedUs
+                  << " hostHandledUs=" << inputHandledUs << " hostAckDoneUs=" << qpc_now_us()
+                  << " injectionEnabled=" << (inputRouter.injectionEnabled ? 1 : 0)
+                  << " ackSent=" << (inputAckSent ? 1 : 0) << " osInjectionConfirmed=0\n";
+      }
+      if (!inputAckSent) break;
       continue;
     }
 
@@ -633,6 +643,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
       ControlInputTextMessage text{};
       text.header = header;
       if (!link.Read(&text.seq, sizeof(text) - sizeof(MessageHeader))) break;
+      const uint64_t textReceivedUs = qpc_now_us();
       std::string resolvedTarget;
       if (inputRouter.injectionEnabled) {
         const bool desktopMode =
@@ -684,7 +695,14 @@ void ControlSessionServer::Serve(ControlLink& link) {
           }
         }
       }
-      if (!send_input_ack(text.seq)) break;
+      const uint64_t textHandledUs = qpc_now_us();
+      const bool textAckSent = send_input_ack(text.seq);
+      std::cout << "[native-video-host][input-timing] seq=" << text.seq
+                << " textEvent=1 hostReceivedUs=" << textReceivedUs
+                << " hostHandledUs=" << textHandledUs << " hostAckDoneUs=" << qpc_now_us()
+                << " injectionEnabled=" << (inputRouter.injectionEnabled ? 1 : 0)
+                << " ackSent=" << (textAckSent ? 1 : 0) << " osInjectionConfirmed=0\n";
+      if (!textAckSent) break;
       continue;
     }
 

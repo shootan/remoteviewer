@@ -1645,3 +1645,7 @@ add_executable(remote60_capture_final_update_test src/d3d_capture_readback.cpp s
 target_link_libraries(remote60_capture_final_update_test PRIVATE d3d11 dxgi)
 
 add_executable(remote60_windows_environment_snapshot_test src/windows_environment_snapshot_test.cpp)
+add_executable(remote60_host_diagnostic_log_test src/host_diagnostic_log_test.cpp)
+if(MSVC)
+  target_compile_options(remote60_host_diagnostic_log_test PRIVATE /utf-8)
+endif()

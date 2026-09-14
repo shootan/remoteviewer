@@ -896,6 +896,16 @@ void CaptureState::PublishFrame(CaptureResources& res, HostStats& stats,
   }
   capture.lastCallbackUs.store(meta.callbackUs, std::memory_order_release);
   capture.lastCaptureUsForInterval.store(meta.captureUs, std::memory_order_release);
+  // This is an actual readback publication, not a viewer's present interval. Join to the
+  // frame metadata by hostCaptureUs. A gap alone still does not prove changed pixels waited.
+  if (captureIntervalUs >= 100000ULL || callbackIntervalUs >= 100000ULL) {
+    std::cout << "[native-video-host][capture-timing] hostCaptureUs=" << meta.captureUs
+              << " hostCallbackUs=" << meta.callbackUs
+              << " hostPublishUs=" << queuePushUs
+              << " sourceIntervalUs=" << captureIntervalUs
+              << " callbackIntervalUs=" << callbackIntervalUs
+              << " attachment=" << meta.attachmentCookie << "\n";
+  }
   // Update the static-screen bootstrap cache from this real publish -- the ONLY writer. Copy the
   // payload shared_ptr (do NOT move: `frame` still takes ownership below). The buffer pool
   // recycles a payload only once its LAST holder releases, so holding this copy keeps the pixels

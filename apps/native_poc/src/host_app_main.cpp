@@ -1084,6 +1084,8 @@ std::atomic<bool> gDirectoryReported{false};
  */
 void note_child_log_line(const std::string& line) {
   if (line.find("directory online") == std::string::npos) return;
+  append_host_app_log("[host-app][lifecycle] directory-online observed pid=" +
+                      std::to_string(GetCurrentProcessId()));
   if (gDirectoryReported.exchange(true)) return;
   write_health_report("ok");
 }
@@ -1943,6 +1945,8 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
       return 0;
 
     case WM_DESTROY: {
+      append_host_app_log("[host-app][lifecycle] WM_DESTROY pid=" +
+                          std::to_string(GetCurrentProcessId()));
       KillTimer(window, kStatusTimer);
       // Ordinarily a no-op by now: the handoff path above already stopped it. Still reported,
       // because "already stopped, no child" and "a child is somehow still alive" are different
@@ -2065,5 +2069,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR commandLine, int) {
     }
   }
 
+  append_host_app_log("[host-app][lifecycle] message-loop ended pid=" +
+                      std::to_string(GetCurrentProcessId()) + " wParam=" +
+                      std::to_string(static_cast<uint64_t>(message.wParam)));
   return 0;  // uploaderShutdown -> uiScope -> wsaScope, in that order
 }
