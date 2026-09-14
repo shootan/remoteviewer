@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cerrno>
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -176,6 +177,34 @@ inline bool recv_discard(SocketHandle socketHandle, size_t len) {
     const size_t chunk = std::min(left, scratch.size());
     if (!recv_all(socketHandle, scratch.data(), chunk)) return false;
     left -= chunk;
+  }
+  return true;
+}
+
+// One deadline covers the entire framed message, not each successful partial read. recv without
+// MSG_WAITALL returns the currently available bytes after select; the next iteration rechecks time.
+inline bool recv_all_until(SocketHandle socketHandle, void* destination, size_t length,
+                           std::chrono::steady_clock::time_point deadline) {
+  auto* bytes = static_cast<char*>(destination);
+  size_t done = 0;
+  while (done < length) {
+    const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(
+        deadline - std::chrono::steady_clock::now()).count();
+    if (remaining <= 0) return false;
+    const auto slice = (std::min<int64_t>)(remaining, 200000);
+    timeval timeout{0, static_cast<long>(slice)};
+    fd_set readable; FD_ZERO(&readable); FD_SET(socketHandle, &readable);
+#if defined(_WIN32)
+    const int ready = select(0, &readable, nullptr, nullptr, &timeout);
+#else
+    const int ready = select(socketHandle + 1, &readable, nullptr, nullptr, &timeout);
+#endif
+    if (ready < 0) return false;
+    if (ready == 0) continue;
+    const int count = recv(socketHandle, bytes + done,
+                            static_cast<int>((std::min<size_t>)(length - done, 1024 * 1024)), 0);
+    if (count <= 0) return false;
+    done += static_cast<size_t>(count);
   }
   return true;
 }

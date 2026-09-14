@@ -64,12 +64,15 @@ int main(int argc, char** argv) {
     std::cout << "[native-video-client] retry requested by the user\n";
   }
   attach_control_tunnel_and_log(ctx);
-  connect_control(ctx);
-  start_receiver(ctx);
-
-  run_message_pump(ctx);
+  try {
+    connect_control(ctx);
+    start_receiver(ctx);
+    run_message_pump(ctx);
+  } catch (...) {
+    ctx.session.recoveryExitCode.store(43);
+  }
 
   shutdown_viewer(ctx);
   std::cout << "[native-video-client] done\n";
-  return 0;
+  return ctx.session.recoveryExitCode.load();
 }

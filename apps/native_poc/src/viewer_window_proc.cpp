@@ -257,6 +257,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   auto* state = reinterpret_cast<ViewerState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
   if (!state) return DefWindowProcW(hwnd, msg, wp, lp);
   ViewerState& ctx = *state;
+  ctx.session.uiHeartbeatUs.store(qpc_now_us(), std::memory_order_relaxed);
   switch (msg) {
     case WM_CLOSE:
       ctx.session.running = false;
@@ -652,6 +653,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       // Avoid background erase flicker between frames.
       return 1;
     case WM_TIMER:
+      if (wp == kRenderRetryTimerId) {
+        KillTimer(hwnd, kRenderRetryTimerId);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+      }
       if (wp == kPacedPresentTimerId) {
         // One-shot: the held frame's wait is over (F-11).
         KillTimer(hwnd, kPacedPresentTimerId);
@@ -674,6 +680,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     default:
       return DefWindowProcW(hwnd, msg, wp, lp);
   }
+  return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
 // UNICODE is not defined for this target, so the generic Win32 names resolve to the ANSI

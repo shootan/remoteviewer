@@ -46,6 +46,8 @@ struct ViewerContext : ViewerState {
   std::optional<VideoReceiver> receiver;
   std::thread controlThread;
   std::thread recvThread;
+  std::atomic<bool> uiWatchdogStop{false};
+  std::thread uiWatchdog;
 };
 
 }  // namespace remote60::native_poc::viewer
