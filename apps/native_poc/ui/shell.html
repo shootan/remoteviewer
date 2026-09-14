@@ -198,6 +198,7 @@
   </div>
   <div class="hosts" id="hostList"></div>
   <div class="msg" id="hostsMsg"></div>
+  <button class="link hidden" id="cancelReconnect">재연결 취소</button>
   <div class="row">
     <button class="link" id="refresh">새로 고침</button>
     <button class="link" id="openSettings">화질 설정</button>
@@ -280,6 +281,7 @@
     $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') $('signIn').click(); });
   });
 
+  $('cancelReconnect').onclick = () => send({ type: 'cancelReconnect' });
   $('signOut').onclick = () => send({ type: 'logout' });
   $('refresh').onclick = () => { message($('hostsMsg'), '새로 고침 중'); send({ type: 'hosts' }); };
   $('openLog').onclick = () => send({ type: 'openlog' });
@@ -407,6 +409,7 @@
       return;
     }
     if (msg.type === 'signedOut') {
+      show($('cancelReconnect'), false);
       setBusy(false);
       updateVersion = '';
       showUpdateBar(false);
@@ -438,6 +441,8 @@
       return;
     }
     if (msg.type === 'status') {
+      show($('cancelReconnect'), msg.state === 'reconnecting');
+      if (msg.state === 'reconnecting') setBusy(true);
       const failed = msg.state === 'error';
       if (failed || msg.state === 'idle') setBusy(false);
       if (!$('settingsCard').classList.contains('hidden')) {

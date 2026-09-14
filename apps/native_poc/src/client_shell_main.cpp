@@ -27,6 +27,7 @@
 #include <atomic>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -66,7 +67,10 @@ std::atomic<bool> gUpdateHandoffActive{false};
 constexpr UINT_PTR kUpdateRetryTimer = 88;
 uint32_t gUpdateRetryAttempts = 0;
 uint64_t gViewerOperation = 0;  // UI thread only: stale child exits cannot change a newer session
-
+uint32_t gReconnectAttempts = 0;
+std::optional<ShellConnectRequest> gReconnectRequest;
+uint64_t gReconnectOwnerEpoch = 0;
+constexpr UINT_PTR kReconnectTimer = 89;
 
 void post_ui(std::function<void()> action) {
   if (gClosing.load(std::memory_order_acquire)) return;
@@ -875,7 +879,10 @@ void begin_refresh_hosts() {
  * The session token is passed rather than the password: a command line can be read by any
  * process that cares to look, and a token expires where a password does not.
  */
-void begin_session(const ShellConnectRequest& request) {
+void begin_session(const ShellConnectRequest& request, bool automatic = false) {
+  KillTimer(gWindow, kReconnectTimer);
+  gReconnectRequest.reset();
+  if (!automatic) gReconnectAttempts = 0;
   const uint64_t operation = ++gViewerOperation;
   uint64_t ownerEpoch = 0;
   std::string server;
@@ -1058,9 +1065,17 @@ void begin_session(const ShellConnectRequest& request) {
     post_ui([request, operation, ownerEpoch, waited, exitCode, ranMs] {
       { std::lock_guard<std::mutex> lock(gStateMu); if (ownerEpoch != gOwnerEpoch) return; }
       if (operation != gViewerOperation) return;
-      if (waited == WAIT_OBJECT_0 && exitCode != 0) {
+      if (ranMs >= 60000) gReconnectAttempts = 0;
+      const bool recoverable = exitCode == 43 || exitCode == 44 || exitCode == 46;
+      if (waited == WAIT_OBJECT_0 && recoverable && gReconnectAttempts < 3) {
+        gReconnectRequest = request;
+        gReconnectOwnerEpoch = ownerEpoch;
+        SetTimer(gWindow, kReconnectTimer, 1000u << gReconnectAttempts++, nullptr);
+        post_status("reconnecting", "연결이 끊겨 다시 연결하는 중입니다.");
+      } else if (waited == WAIT_OBJECT_0 && exitCode != 0) {
         post_status("error", request.hostName + " 연결에 실패했습니다 (코드 " + std::to_string(exitCode) + ")");
       } else {
+        gReconnectAttempts = 0;
         post_status("idle", "");
       }
     });
@@ -1149,8 +1164,17 @@ void handle_page_message(const std::string& json) {
     begin_refresh_hosts();
     return;
   }
+  if (type == "cancelReconnect") {
+    KillTimer(gWindow, kReconnectTimer);
+    gReconnectRequest.reset(); ++gViewerOperation; gReconnectAttempts = 0;
+    post_status("idle", "자동 재연결을 취소했습니다.");
+    return;
+  }
   if (type == "logout") {
     ++gViewerOperation;
+    KillTimer(gWindow, kReconnectTimer);
+    gReconnectRequest.reset();
+    gReconnectAttempts = 0;
     {
       std::lock_guard<std::mutex> lock(gStateMu);
       gSessionToken.clear();
@@ -1210,6 +1234,14 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
     case WM_TIMER:
       if (wParam == kUpdateRetryTimer) { KillTimer(hwnd, kUpdateRetryTimer); start_update_check(); }
+      if (wParam == kReconnectTimer) {
+        KillTimer(hwnd, kReconnectTimer);
+        auto request = std::move(gReconnectRequest);
+        gReconnectRequest.reset();
+        uint64_t epoch = 0;
+        { std::lock_guard<std::mutex> lock(gStateMu); epoch = gOwnerEpoch; }
+        if (request && epoch == gReconnectOwnerEpoch) begin_session(*request, true);
+      }
       return 0;
     case WM_DESTROY:
       { std::lock_guard<std::mutex> lock(gStateMu); ++gOwnerEpoch; gSessionToken.clear(); }

@@ -11843,3 +11843,11 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 변경: async_worker_group.hpp, log_upload.cpp, log_upload.hpp, log_upload_test.cpp, update_check.cpp, host_app_main.cpp; 필요한 공유 파일 부분 변경과 CMake.
 - 검증: 해당 단계 소스에서 Release 빌드(remote60_host_app, remote60_client_shell, remote60_log_upload_test, remote60_log_upload_shutdown_test, remote60_client_update_flow_test) 및 관련 실행 3개 종료0. 증거 `.claude/split-10-results.json`. 기존 전체 실기 미검증과 release manifest pin 미완료는 유지.
 - 다음: 다음 의존 단계 구성·검증. 메인 머지·push·배포 없음.
+
+
+### 2026-09-14 Native 커밋 분리 11 — Client 같은 Host 재연결·취소 UI
+
+- 목표: 백업 `backup/host-pc-recovery-daacbb2`의 변경을 의존성 순서로 재구성. 새 기능 추가나 배포가 아니다.
+- 변경: ; 필요한 공유 파일 부분 변경과 CMake.
+- 검증: 해당 단계 소스에서 Release 빌드(remote60_client_shell, remote60_client_shell_bridge_test) 및 관련 실행 1개 종료0. 증거 `.claude/split-11-results.json`. 기존 전체 실기 미검증과 release manifest pin 미완료는 유지.
+- 다음: 다음 의존 단계 구성·검증. 메인 머지·push·배포 없음.
