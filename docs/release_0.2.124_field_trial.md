@@ -42,7 +42,9 @@
 - 인증된 `/api/update/manifest?platform=windows`: HTTP 200, version=0.2.124. 수신 manifest/sig가 위 고정 해시와 동일. 수신본을 제품 default_verifier로 확인: Ok124, 1바이트 변조 SignatureInvalid.
 - 설치기: https://rem.shotan.net/updates/0.2.124/GNLinkSetup.exe (SHA256 `756e0bc32691928d6f3df08e86558d95a01b87701fe650b0cb2ea8424e0b654b`). 기존 앱 업데이트 기능으로도 받을 수 있다.
 - 이전 pair NAS 백업: `/opt/gnlink/manifest-backups/0.2.123/`; 로컬 전체 복구본은 위 롤백 절 참조. 다운그레이드 실기는 미수행.
-- 실행 근거: `build-incident/release-0.2.124-publish.log`, `.claude/rel/0.2.124/published-https/`. 검증용의 게시 후 추가 대조는 요청했으며 본 게시 확인은 Codex 직접 실행 결과다.
+- 실행 근거: `build-incident/release-0.2.124-publish.log`, `.claude/rel/0.2.124/published-https/`. Codex 직접 확인에 더해 검증용도 공개 10개 size/hash, 인증 API의 version124/제품 서명 검증과 변조 거부, NAS 현재 pair 및 이전 pair 보존, 공개 설치기와 worktree dist의 바이트 일치를 독립 확인했다. 전문: `.claude/field-review-final.txt` 13절.
 - 사용자 행동: Host/Client를 0.2.124로 업데이트한 뒤 정적 타이핑·반복 드래그·게임 60fps/화질 회복을 확인한다. 실 GPU/드라이버·WAN·다중 세션·장시간은 아직 미검증.
 - 자동 설치·사용자 프로세스 재시작·main merge·git push 미실행.
 - 줄바꿈 정규화로 추적 HTML 2개와 signed test_manifest가 status M으로 보이나 Git 내용 diff는 0이다.
+
+- 설치기 위치 안내: 로컬 0.2.124는 후보 worktree의 dist에 있다. 주 저장소 dist는 변경하지 않았다. 기존 앱 업데이트 또는 위 공개 다운로드 URL을 이용한다.
