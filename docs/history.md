@@ -11819,3 +11819,11 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 변경: host_encoder_manager.cpp, host_encoder_manager.hpp, host_main_loop_mailbox.hpp, host_main_loop_mailbox_test.cpp, host_stage_encode_send_h264.cpp, host_stage_pop_frame.cpp, host_stage_runtime_tune.cpp, host_stage_selection.cpp, host_stage_stats_h264.cpp, host_stage_time_limit.cpp; 필요한 공유 파일 부분 변경과 CMake.
 - 검증: 해당 단계 소스에서 Release 빌드(remote60_native_video_host_poc, remote60_host_main_loop_mailbox_test, remote60_host_encode_epoch_test) 및 관련 실행 2개 종료0. 증거 `.claude/split-07-results.json`. 기존 전체 실기 미검증과 release manifest pin 미완료는 유지.
 - 다음: 다음 의존 단계 구성·검증. 메인 머지·push·배포 없음.
+
+
+### 2026-09-14 Native 커밋 분리 08 — Host 자식 Job·반복 DXGI fallback
+
+- 목표: 백업 `backup/host-pc-recovery-daacbb2`의 변경을 의존성 순서로 재구성. 새 기능 추가나 배포가 아니다.
+- 변경: child_environment.hpp, host_recovery_policy.hpp, recovery_process_test.cpp; 필요한 공유 파일 부분 변경과 CMake.
+- 검증: 해당 단계 소스에서 Release 빌드(remote60_host_app, remote60_recovery_process_test) 및 관련 실행 1개 종료0. 증거 `.claude/split-08-results.json`. 기존 전체 실기 미검증과 release manifest pin 미완료는 유지.
+- 다음: 다음 의존 단계 구성·검증. 메인 머지·push·배포 없음.

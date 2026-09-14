@@ -38,6 +38,9 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include "bounded_process_exit.hpp"
+#include "host_recovery_policy.hpp"
+#include "child_environment.hpp"
 #include <vector>
 
 #include "directory_client.hpp"
@@ -215,6 +218,10 @@ struct SignInResult {
  */
 class StreamingHostProcess {
  public:
+  ~StreamingHostProcess() {
+    Stop();
+    if (childJob_) CloseHandle(childJob_);
+  }
   void Configure(const std::wstring& directoryUrl, const std::wstring& accountId,
                  const std::wstring& hostName) {
     directoryUrl_ = directoryUrl;
@@ -224,6 +231,19 @@ class StreamingHostProcess {
 
   void Start() {
     if (running_.exchange(true)) return;
+    if (!childJob_) {
+      childJob_ = CreateJobObjectW(nullptr, nullptr);
+      JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+      limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+      if (!childJob_ || !SetInformationJobObject(childJob_, JobObjectExtendedLimitInformation,
+                                                &limits, sizeof(limits))) {
+        if (childJob_) CloseHandle(childJob_);
+        childJob_ = nullptr;
+        running_ = false;
+        AppendLogLineOnce("[host-app] could not create child lifetime job");
+        return;
+      }
+    }
     // Opt-in GPU surface encode via the shell's own environment, so a user can try it on a
     // contended GPU without a rebuild while it stays off for everyone else. A tray toggle is
     // the eventual home; the environment is the seam until then.
@@ -269,7 +289,14 @@ class StreamingHostProcess {
       return true;
     }
     TerminateChild();
-    if (supervisor_.joinable()) supervisor_.join();
+    if (supervisor_.joinable()) {
+      if (WaitForSingleObject(supervisor_.native_handle(), 10000) != WAIT_OBJECT_0) {
+        if (childJob_) TerminateJobObject(childJob_, 45);
+        const char message[] = "[host-app] shutdown deadline exceeded; closing owned child job\n";
+        remote60::native_poc::terminate_with_diagnostic(45, message, sizeof(message) - 1);
+      }
+      supervisor_.join();
+    }
     // The join is the real guarantee: Supervise() only returns once its wait on the child has
     // returned. Checked anyway, because this is the one place whose failure leaves a process
     // holding the ports the next one needs.
@@ -452,7 +479,14 @@ class StreamingHostProcess {
     constexpr DWORD kChildDxgiWorkerWatchdogExitCode = 44;
     uint32_t watchdogRecoveries = 0;
     uint64_t watchdogWindowStartMs = 0;
+    remote60::native_poc::HostRecoveryPolicy recoveryPolicy;
+    const std::wstring requestedBackend = [] {
+      wchar_t value[64]{};
+      const DWORD n = GetEnvironmentVariableW(L"REMOTE60_DESKTOP_CAPTURE_BACKEND", value, 64);
+      return n > 0 && n < 64 ? std::wstring(value) : std::wstring(L"dxgi");
+    }();
     while (running_.load(std::memory_order_relaxed)) {
+      const bool useRecoveryWgc = recoveryPolicy.UseWgc(GetTickCount64());
       const bool nv12SurfaceForcedOff = crashStreak >= 2;
       // The control port serves clients on the same network that dial this PC directly. One
       // arriving through the directory tunnels control over the media socket instead, but with
@@ -533,11 +567,14 @@ class StreamingHostProcess {
                             ? "[host-app] starting the streaming host (tune=low_latency, nv12-surface=on)"
                             : "[host-app] starting the streaming host (tune=low_latency)");
       const uint64_t spawnTickMs = GetTickCount64();
+      const auto childEnvironment = remote60::native_poc::child_environment_with(
+          L"REMOTE60_DESKTOP_CAPTURE_BACKEND", useRecoveryWgc ? L"wgc" : requestedBackend);
 
       // lpApplicationName names the exe by path, so the child is chosen outright instead of by
       // parsing the first token of the command line. (Ledger H-20.)
       if (!CreateProcessW(exe.c_str(), mutableCommand.data(), nullptr, nullptr, TRUE,
-                          CREATE_NO_WINDOW, nullptr, executable_dir().c_str(), &si, &pi)) {
+                          CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+                          const_cast<wchar_t*>(childEnvironment.data()), executable_dir().c_str(), &si, &pi)) {
         if (readEnd) CloseHandle(readEnd);
         if (writeEnd) CloseHandle(writeEnd);
         childAlive_.store(false, std::memory_order_relaxed);
@@ -552,6 +589,16 @@ class StreamingHostProcess {
         continue;
       }
 
+      if (!AssignProcessToJobObject(childJob_, pi.hProcess) || ResumeThread(pi.hThread) == DWORD(-1)) {
+        TerminateProcess(pi.hProcess, 45);
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        if (writeEnd) CloseHandle(writeEnd);
+        if (readEnd) CloseHandle(readEnd);
+        AppendLogLineOnce("[host-app] child lifetime assignment failed; launch refused");
+        for (int i = 0; i < 30 && running_.load(); ++i) Sleep(100);
+        continue;
+      }
+      if (useRecoveryWgc) AppendLogLineOnce("[host-app] repeated DXGI wedge: using WGC recovery backend");
       // Ours must close or the reader never sees end-of-file when the child exits.
       if (writeEnd) CloseHandle(writeEnd);
       std::thread reader;
@@ -574,6 +621,7 @@ class StreamingHostProcess {
       DWORD childExitCode = 0;
       GetExitCodeProcess(pi.hProcess, &childExitCode);
       const uint64_t ranMs = GetTickCount64() - spawnTickMs;
+      recoveryPolicy.OnExit(childExitCode, ranMs, GetTickCount64());
       if (reader.joinable()) reader.join();
       if (readEnd) CloseHandle(readEnd);
       // A nonzero exit within a few seconds is a crash, not a session that ran and ended.
@@ -642,6 +690,7 @@ class StreamingHostProcess {
   }
 
   std::wstring directoryUrl_;
+  HANDLE childJob_ = nullptr;
   std::wstring accountId_;
   std::wstring hostName_;
   std::mutex mu_;
