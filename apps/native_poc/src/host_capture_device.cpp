@@ -124,15 +124,14 @@ winrt::Windows::Graphics::Capture::GraphicsCaptureItem CreateItemForPrimaryMonit
 
   if (preferredWindow) {
     createForWindow(preferredWindow, preferredSource ? preferredSource : "CreateForWindow(preferred)");
-    if (item) return item;
+    return item;  // Explicit targets fail closed; never silently share a different source.
   }
 
   // A specific screen when one was chosen. Everything below is the primary-monitor path, which
   // stays the default: a client that never asks for a monitor sees exactly what it always did.
   if (preferredMonitor) {
     createForMonitor(preferredMonitor, "CreateForMonitor(selected)");
-    if (item) return item;
-    std::cerr << "[native-video-host] selected monitor unavailable; falling back to primary\n";
+    return item;
   }
 
   HMONITOR monitor = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);

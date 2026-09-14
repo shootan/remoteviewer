@@ -104,6 +104,26 @@ add_executable(remote60_native_video_host_poc
 )
 set_target_properties(remote60_native_video_host_poc PROPERTIES OUTPUT_NAME "GNLinkStream")
 
+# Reuse this worktree's compiled production objects for the entry/unwind fixture. The only
+# replacement TU is main; all shutdown/control/watchdog implementations are the product objects.
+# These object paths belong to the Visual Studio generator, so do not assume them on Ninja.
+if(CMAKE_GENERATOR MATCHES "Visual Studio")
+  get_target_property(_host_failure_sources remote60_native_video_host_poc SOURCES)
+  set(_host_failure_objects)
+  foreach(_source IN LISTS _host_failure_sources)
+    if(_source MATCHES "\\.cpp$" AND NOT _source MATCHES "native_video_host_main.cpp$")
+      get_filename_component(_object_name "${_source}" NAME_WE)
+      list(APPEND _host_failure_objects "${CMAKE_CURRENT_BINARY_DIR}/remote60_native_video_host_poc.dir/$<CONFIG>/${_object_name}.obj")
+    endif()
+  endforeach()
+  add_executable(remote60_host_runtime_failure_test src/host_runtime_failure_test.cpp)
+  target_include_directories(remote60_host_runtime_failure_test PRIVATE src "${CMAKE_SOURCE_DIR}/libs/capture/src")
+  target_link_libraries(remote60_host_runtime_failure_test PRIVATE ${_host_failure_objects})
+  target_link_libraries(remote60_host_runtime_failure_test PRIVATE $<TARGET_PROPERTY:remote60_native_video_host_poc,LINK_LIBRARIES>)
+  target_compile_definitions(remote60_host_runtime_failure_test PRIVATE $<TARGET_PROPERTY:remote60_native_video_host_poc,COMPILE_DEFINITIONS>)
+  add_dependencies(remote60_host_runtime_failure_test remote60_native_video_host_poc)
+endif()
+
 add_executable(remote60_gdi_capture_worker
   src/gdi_capture_worker_main.cpp
 )

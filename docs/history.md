@@ -11803,3 +11803,11 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 변경: native_socket.hpp, native_video_client_main.cpp, poc_protocol.hpp, udp_receive_pump.hpp, viewer_constants.hpp, viewer_context.hpp, viewer_control_client.cpp, viewer_control_state.hpp, viewer_liveness_test.cpp, viewer_present.cpp, viewer_present_stats.hpp, viewer_recv_liveness.hpp, viewer_session_state.hpp, viewer_session_watchdog.cpp, viewer_shutdown.cpp, viewer_startup.cpp, viewer_video_receiver.cpp, viewer_window_proc.cpp; 필요한 공유 파일 부분 변경과 CMake.
 - 검증: 해당 단계 소스에서 Release 빌드(remote60_native_video_client_poc, remote60_viewer_liveness_test, remote60_viewer_window_proc_isolated_test) 및 관련 실행 2개 종료0. 증거 `.claude/split-05-results.json`. 기존 전체 실기 미검증과 release manifest pin 미완료는 유지.
 - 다음: 다음 의존 단계 구성·검증. 메인 머지·push·배포 없음.
+
+
+### 2026-09-14 Native 커밋 분리 06 — Host 초기화·종료·캡처 수명/대상 보존
+
+- 목표: 백업 `backup/host-pc-recovery-daacbb2`의 변경을 의존성 순서로 재구성. 새 기능 추가나 배포가 아니다.
+- 변경: capture_callback_gate.hpp, host_capture_device.cpp, host_capture_session.cpp, host_capture_session.hpp, host_control_session.cpp, host_input_inject.cpp, host_input_inject.hpp, host_loop_helpers.cpp, host_session.hpp, host_shutdown.cpp, host_startup.hpp, host_startup_capture.cpp, host_startup_connect.cpp, host_startup_graphics.cpp, host_watchdog.hpp, native_video_host_main.cpp, host_runtime_failure_test.cpp; 필요한 공유 파일 부분 변경과 CMake.
+- 검증: 해당 단계 소스에서 Release 빌드(remote60_native_video_host_poc, remote60_host_runtime_failure_test) 및 관련 실행 1개 종료0. 증거 `.claude/split-06-results.json`. 기존 전체 실기 미검증과 release manifest pin 미완료는 유지.
+- 다음: 다음 의존 단계 구성·검증. 메인 머지·push·배포 없음.

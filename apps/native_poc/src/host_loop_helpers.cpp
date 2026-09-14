@@ -224,11 +224,21 @@ bool restart_capture_session(HostContext& hx) {
   auto& capture = hx.capture;
   auto& res = hx.res;
   watchdog.EnterMainPhase(MainLoopPhase::CaptureRestart);
+  const uint64_t attemptUs = qpc_now_us();
+  if (capture.restartPending && attemptUs < capture.restartRetryAtUs) return false;
   // A restarted session invalidates the held pointer sample even when the stream generation
   // survives (some size-changes keep it): a stale position against the new capture geometry
   // would misplace the remote cursor until the next real mouse update.
   capture.dxgiPointerUpdateUs.store(0, std::memory_order_release);
-  if (!capture.RestartCaptureSessionImpl(res, backend, clientSession, encoder, stop, useH264, item, token)) return false;
+  if (!capture.RestartCaptureSessionImpl(res, backend, clientSession, encoder, stop, useH264, item, token)) {
+    capture.restartPending = true;
+    capture.restartFailures = std::min<uint32_t>(capture.restartFailures + 1, 5);
+    capture.restartRetryAtUs = qpc_now_us() + (250000ULL << capture.restartFailures);
+    return false;
+  }
+  capture.restartPending = false;
+  capture.restartRetryAtUs = 0;
+  capture.restartFailures = 0;
   uint32_t finalW = 0, finalH = 0;
   {
     std::lock_guard<std::mutex> lk(capture.resourceMu);

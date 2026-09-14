@@ -112,6 +112,10 @@ Flow stage_selection(HostContext& hx, TickContext& tc) {
                   << requestedId << "\n";
       } else {
         item = nextItem;
+        MONITORINFOEXW selectedInfo{};
+        selectedInfo.cbSize = sizeof(selectedInfo);
+        if (!GetMonitorInfoW(target.handle, &selectedInfo)) return Flow::Continue;
+        capture.selectedMonitorDevice = selectedInfo.szDevice;
         capture.selectedMonitorId.store(requestedId, std::memory_order_release);
         // A monitor is a desktop target, so any window selection it replaces has to go.
         capture.windowModeActive = false;
@@ -191,14 +195,12 @@ Flow stage_selection(HostContext& hx, TickContext& tc) {
         }
       }
     } else if (reqMode == 2) {
-      HMONITOR primaryMon = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
+      HMONITOR primaryMon = capture.monitorInfo ? capture.monitorInfo->monitor : nullptr;
       MONITORINFO monInfo{};
       monInfo.cbSize = sizeof(monInfo);
       if (!GetMonitorInfo(primaryMon, &monInfo)) {
-        monInfo.rcMonitor.left = 0;
-        monInfo.rcMonitor.top = 0;
-        monInfo.rcMonitor.right = GetSystemMetrics(SM_CXSCREEN);
-        monInfo.rcMonitor.bottom = GetSystemMetrics(SM_CYSCREEN);
+        std::cerr << "[native-video-host] focus selection refused: captured monitor unavailable\n";
+        return Flow::Continue;
       }
       const int monW = std::max<int>(1, monInfo.rcMonitor.right - monInfo.rcMonitor.left);
       const int monH = std::max<int>(1, monInfo.rcMonitor.bottom - monInfo.rcMonitor.top);

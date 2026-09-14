@@ -25,6 +25,8 @@ enum class MainLoopPhase : uint32_t {
   Loop,            // between iterations / ordinary work -- 10s hang threshold
   CaptureRestart,  // restart_capture_session: legitimately slow (device/pool rebuild) -- 20s
   EncodeCall,      // MFT encode of a frame -- the prime suspect for a driver/MFT wedge -- 10s
+  Shutdown,       // stop/wake/join/COM teardown; independent of the worker stop flag
+  WaitingForClient,  // a listening host may legitimately have no client indefinitely
 };
 // Terminate exit code the watchdog uses; the supervisor treats it as "wedged, relaunch fast" and
 // keeps it out of the crash streak / nv12 auto-disable (it is a recovery, not a crash).
@@ -108,14 +110,13 @@ struct MainLoopWatchdogThread {
     }
     cv.notify_all();
   }
-  // Returns false when the watchdog should exit. `hostStop` is the loop's own stop flag; either
-  // one ends the wait.
-  bool WaitOrStop(std::chrono::milliseconds period, const std::atomic<bool>& hostStop) {
+  // Worker stop starts teardown; it must NOT disarm the watchdog during a blocking join.
+  bool WaitOrStop(std::chrono::milliseconds period) {
     std::unique_lock<std::mutex> lk(mu);
     cv.wait_for(lk, period, [&] {
-      return stopFlag.load(std::memory_order_acquire) || hostStop.load(std::memory_order_acquire);
+      return stopFlag.load(std::memory_order_acquire);
     });
-    return !stopFlag.load(std::memory_order_acquire) && !hostStop.load(std::memory_order_acquire);
+    return !stopFlag.load(std::memory_order_acquire);
   }
   ~MainLoopWatchdogThread() {
     RequestStop();

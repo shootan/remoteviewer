@@ -252,6 +252,8 @@ void ControlSessionServer::Serve(ControlLink& link) {
       pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagHostImeV1;
       // v2: this host understands the make-only (Hangul/Hanja) pulse flag and the ImeState handshake.
       pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagHostImePulseStateV2;
+      if (capture.frameHeartbeatEnabled.load())
+        pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagFrameHeartbeat;
       pong.captureRebindCount = target.rebindCount;
       pong.captureTargetHwnd = target.targetHwnd;
       std::snprintf(pong.captureTargetProcess, sizeof(pong.captureTargetProcess), "%s",
@@ -465,11 +467,17 @@ void ControlSessionServer::Serve(ControlLink& link) {
         } else {
           InputFailStage directFailStage = InputFailStage::None;
           DWORD directFailError = 0;
+          HMONITOR targetMonitor = nullptr;
+          {
+            std::lock_guard<std::mutex> lock(capture.inputTargetMu);
+            targetMonitor = reinterpret_cast<HMONITOR>(static_cast<uintptr_t>(capture.inputTarget.monitorHandle));
+          }
           injectResult =
+              desktopMode && !targetMonitor ? InputInjectResult::NoTarget :
               inject_background_input_event(input, inputRouter.targetCriteria, capture.targetHwnd,
                                             desktopMode, domainW, domainH,
                                             &inputRouter.desktopState, &resolvedTarget,
-                                            &directFailStage, &directFailError);
+                                            &directFailStage, &directFailError, targetMonitor);
           if (injectResult == InputInjectResult::Failed) {
             switch (directFailStage) {
               case InputFailStage::SetCursorPos:

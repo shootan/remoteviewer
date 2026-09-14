@@ -101,6 +101,10 @@ using remote60::host::DxgiDesktopCaptureSession;
 
 namespace remote60::native_poc {
 
+HostRunGuard::~HostRunGuard() {
+  if (active) shutdown_host(host);
+}
+
 void shutdown_host(HostContext& hx) {
   auto& useH264 = hx.useH264;
   auto& stop = hx.stop;
@@ -111,6 +115,7 @@ void shutdown_host(HostContext& hx) {
   auto& encoder = hx.encoder;
   auto& capture = hx.capture;
   auto& res = hx.res;
+  hx.watchdog.MarkMainProgress(MainLoopPhase::Shutdown);
   stop = true;
   res.frame.cv.notify_all();
   windowSelectionTxn.cv.notify_all();
@@ -130,12 +135,12 @@ void shutdown_host(HostContext& hx) {
   // (host_startup_control.cpp): closing it from this thread raced accept() on a plain SOCKET, and
   // Winsock does not allow a concurrent close. That thread polls `stop` on a 200ms select tick, so
   // joining is enough to end it. (Ledger H-24.)
-  if (clientSession.controlThread.joinable()) clientSession.controlThread.join();
   // Close before joining: the control session is parked in a blocking read, and the reader
   // thread is parked in recvfrom until its receive timeout expires. The dispatcher now outlives
   // any one session, so it also has to be woken from the wait it parks in between them.
   clientSession.udpControlChannel.Close(remote60::native_poc::ControlCloseReason::Shutdown);
   clientSession.epochCv.notify_all();
+  if (clientSession.controlThread.joinable()) clientSession.controlThread.join();
   if (clientSession.udpControlThread.joinable()) clientSession.udpControlThread.join();
   if (clientSession.udpReaderThread.joinable()) clientSession.udpReaderThread.join();
   capture.DetachCaptureSession(res, token);
@@ -146,6 +151,8 @@ void shutdown_host(HostContext& hx) {
   sender.stop.store(true, std::memory_order_release);
   sender.cv.notify_all();
   if (sender.thread.joinable()) sender.thread.join();
+  // The agent's send callback owns the media socket too. Stop it before any socket is closed.
+  clientSession.directoryAgent.Stop();
   if (clientSession.clientSock != INVALID_SOCKET) {
     closesocket(clientSession.clientSock);
     clientSession.clientSock = INVALID_SOCKET;
@@ -156,7 +163,7 @@ void shutdown_host(HostContext& hx) {
   }
   if (useH264) {
     encoder.codec.shutdown();
-    if (encoder.mfStarted) MFShutdown();
+    if (encoder.mfStarted) { MFShutdown(); encoder.mfStarted = false; }
   }
 }
 

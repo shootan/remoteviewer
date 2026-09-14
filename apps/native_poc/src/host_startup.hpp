@@ -24,6 +24,14 @@
 
 namespace remote60::native_poc {
 
+// Declared after HostContext and its referenced state. Every post-connect failure, including an
+// exception, unwinds through the same shutdown while the independent watchdog is still armed.
+struct HostRunGuard {
+  HostContext& host;
+  bool active = true;
+  ~HostRunGuard();
+};
+
 // Stops and joins the DXGI worker watchdog thread. Declared in main() right after the thread, so it
 // runs before res.dxgiCaptureSession (whose progress block the thread reads) is destroyed.
 struct DxgiWatchdogJoiner {

@@ -94,6 +94,15 @@ Flow stage_time_limit(HostContext& hx, TickContext& tc) {
   auto& nowUs = tc.nowUs;
   watchdog.MarkMainProgress(MainLoopPhase::Loop);
   nowUs = qpc_now_us();
+  // Attachment retries cannot depend on callbacks from the attachment that just failed.
+  if (capture.restartPending && clientSession.streamControlActive.load(std::memory_order_acquire) &&
+      nowUs >= capture.restartRetryAtUs && restart_capture_session(hx)) {
+    ++capture.restartCount;
+    encoder.ResetTimelineAnchors(capture);
+    encoder.forceKeyNext = true;
+    kick.Arm(nowUs, useH264);
+    std::cout << "[native-video-host] capture retry recovered\n";
+  }
  
   if (args.seconds > 0 && nowUs >= startUs + static_cast<uint64_t>(args.seconds) * 1000000ULL) {
     return Flow::Break;

@@ -88,6 +88,7 @@
 #include "host_control_session.hpp"
 #include "host_main_loop.hpp"
 #include "host_startup.hpp"
+#include "bounded_process_exit.hpp"
 
 #ifndef REMOTE60_NATIVE_ENCODED_EXPERIMENT
 #define REMOTE60_NATIVE_ENCODED_EXPERIMENT 0
@@ -115,13 +116,6 @@ void startup_start_dxgi_watchdog(HostContext& hx, std::atomic<bool>& dxgiWatchdo
     constexpr uint64_t kWorkerWarnUs = 3'000'000;   // structured warn; likely a transient
     constexpr uint64_t kWorkerKillUs = 5'000'000;   // ~50x the 100ms Acquire timeout -> genuine wedge
     uint64_t warnedGeneration = std::numeric_limits<uint64_t>::max();
-    HANDLE herr = GetStdHandle(STD_ERROR_HANDLE);
-    auto emit = [&](const char* rec, int n) {
-      if (herr && herr != INVALID_HANDLE_VALUE && n > 0) {
-        DWORD wrote = 0;
-        WriteFile(herr, rec, static_cast<DWORD>(n), &wrote, nullptr);
-      }
-    };
     while (!dxgiWatchdogStop.load(std::memory_order_acquire)) {
       std::this_thread::sleep_for(std::chrono::milliseconds(500));
       if (dxgiWatchdogStop.load(std::memory_order_acquire)) break;
@@ -145,8 +139,8 @@ void startup_start_dxgi_watchdog(HostContext& hx, std::atomic<bool>& dxgiWatchdo
             static_cast<unsigned long>(static_cast<uint32_t>(snap.lastAcquireHr)),
             static_cast<unsigned long>(static_cast<uint32_t>(snap.lastReleaseHr)),
             static_cast<unsigned>(snap.lastAccumulatedFrames));
-        emit(rec, n);
-        TerminateProcess(GetCurrentProcess(), kExitDxgiWorkerWedge);
+        terminate_with_diagnostic(kExitDxgiWorkerWedge, rec,
+            static_cast<DWORD>(std::clamp(n, 0, static_cast<int>(sizeof(rec) - 1))));
       } else if (snap.ageUs >= kWorkerWarnUs) {
         if (warnedGeneration != snap.generation) {
           warnedGeneration = snap.generation;  // warn once per worker episode
@@ -162,7 +156,7 @@ void startup_start_dxgi_watchdog(HostContext& hx, std::atomic<bool>& dxgiWatchdo
               static_cast<unsigned long long>(snap.loopCount),
               static_cast<unsigned long>(static_cast<uint32_t>(snap.lastAcquireHr)),
               static_cast<unsigned long>(static_cast<uint32_t>(snap.lastReleaseHr)));
-          emit(rec, n);
+          (void)n;  // No synchronous pipe write on the watchdog warning path.
         }
       } else {
         // Progress resumed within this generation; re-arm so a later stall in the same episode warns.
@@ -245,9 +239,6 @@ int startup_create_readback(HostContext& hx) {
 
   if (!capture.CreateStaging(res, encoder, useH264, capture.width, capture.height)) {
     std::cerr << "[native-video-host] capture readback pipeline create failed\n";
-    closesocket(clientSession.clientSock);
-    if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
-    if (encoder.mfStarted) MFShutdown();
     return 10;
   }
   return 0;
@@ -279,9 +270,6 @@ int startup_start_capture(HostContext& hx) {
   if (!restart_capture_session(hx)) {
     std::cerr << "[native-video-host] capture session start failed\n";
     res.captureReadback.Shutdown();
-    closesocket(clientSession.clientSock);
-    if (clientSession.listenSock != INVALID_SOCKET) closesocket(clientSession.listenSock);
-    if (encoder.mfStarted) MFShutdown();
     return 10;
   }
   powerKeepalive.SetStreaming(clientSession.streamControlActive.load(std::memory_order_acquire), true);
@@ -350,6 +338,7 @@ int startup_start_capture(HostContext& hx) {
   kick.staticRefreshIntervalUs =
       static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_STATIC_REFRESH_MS", 1000, 0, 10000)) *
       1000ULL;
+  capture.frameHeartbeatEnabled.store(useH264 && kick.staticRefreshIntervalUs > 0);
   // Validate the cache against the live capture identity and the CURRENT secure-desktop state, then
   // fill the loop's frame locals from it. Returns false (leaving the screen black) if anything is
   // stale, mismatched, or the desktop is locked/secure -- better black than a wrong picture.
@@ -357,7 +346,6 @@ int startup_start_capture(HostContext& hx) {
 }
 
 void startup_start_main_loop_watchdog(HostContext& hx, MainLoopWatchdogThread& mainLoopWatchdog) {
-  auto& stop = hx.stop;
   auto& watchdog = hx.watchdog;
   // Dedicated liveness watchdog. It shares no lock or GPU with the capture/encode/send threads, so
   // it stays responsive when they wedge inside a driver/MFT call (the failure seen in the field:
@@ -369,24 +357,22 @@ void startup_start_main_loop_watchdog(HostContext& hx, MainLoopWatchdogThread& m
   // avoided: they run DLL detach / join the hung threads and would re-hang.
   // Owned, not detached: the joiner in main() stops and joins it before the state below goes out
   // of scope (ledger H-06). &stop / &watchdog are main() locals that outlive this object.
-  mainLoopWatchdog.thread = std::thread([&mainLoopWatchdog, &stop, &watchdog]() {
+  mainLoopWatchdog.thread = std::thread([&mainLoopWatchdog, &watchdog]() {
     constexpr uint64_t kHangNormalUs = 10'000'000;   // Loop / EncodeCall
     constexpr uint64_t kHangSlowUs = 20'000'000;     // CaptureRestart / Startup (legit slow)
     constexpr uint64_t kStartupGraceUs = 30'000'000;  // device/encoder bring-up before arming
-    const uint64_t watchdogStartUs = qpc_now_us();
-    while (!stop.load(std::memory_order_acquire)) {
+    while (!mainLoopWatchdog.stopFlag.load(std::memory_order_acquire)) {
       // Same 1s cadence as the old sleep, but interruptible so shutdown does not wait it out.
-      if (!mainLoopWatchdog.WaitOrStop(std::chrono::milliseconds(1000), stop)) break;
+      if (!mainLoopWatchdog.WaitOrStop(std::chrono::milliseconds(1000))) break;
       const uint64_t now = qpc_now_us();
-      if (now - watchdogStartUs < kStartupGraceUs) continue;
       const uint32_t phase = watchdog.mainLoopPhase.load(std::memory_order_acquire);
+      if (phase == static_cast<uint32_t>(MainLoopPhase::WaitingForClient)) continue;
       const uint64_t progressUs = watchdog.mainLoopProgressUs.load(std::memory_order_acquire);
       const uint64_t ageUs = now > progressUs ? now - progressUs : 0;
-      const uint64_t threshold =
-          (phase == static_cast<uint32_t>(MainLoopPhase::CaptureRestart) ||
-           phase == static_cast<uint32_t>(MainLoopPhase::Startup))
-              ? kHangSlowUs
-              : kHangNormalUs;
+      const uint64_t threshold = phase == static_cast<uint32_t>(MainLoopPhase::Startup)
+          ? kStartupGraceUs
+          : phase == static_cast<uint32_t>(MainLoopPhase::CaptureRestart) ? kHangSlowUs
+          : kHangNormalUs;
       if (ageUs >= threshold) {
         char rec[192];
         const int n = std::snprintf(
@@ -395,12 +381,8 @@ void startup_start_main_loop_watchdog(HostContext& hx, MainLoopWatchdogThread& m
             "terminating (exit 43) for supervisor relaunch\n",
             phase, static_cast<unsigned long long>(ageUs),
             static_cast<unsigned long long>(watchdog.mainLoopLastSeq.load(std::memory_order_acquire)));
-        HANDLE herr = GetStdHandle(STD_ERROR_HANDLE);
-        if (herr && herr != INVALID_HANDLE_VALUE && n > 0) {
-          DWORD wrote = 0;
-          WriteFile(herr, rec, static_cast<DWORD>(n), &wrote, nullptr);
-        }
-        TerminateProcess(GetCurrentProcess(), kExitMainLoopWatchdog);
+        terminate_with_diagnostic(kExitMainLoopWatchdog, rec,
+            static_cast<DWORD>(std::clamp(n, 0, static_cast<int>(sizeof(rec) - 1))));
       }
     }
   });

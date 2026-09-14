@@ -136,22 +136,20 @@ int startup_connect_client(HostContext& hx) {
     local.sin_addr.s_addr = resolve_bind_address(args.bindAddress);
     if (bind(clientSession.listenSock, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0) {
       std::cerr << "[native-video-host] bind failed port=" << args.bindPort << "\n";
-      closesocket(clientSession.listenSock);
       return 3;
     }
     if (listen(clientSession.listenSock, 1) != 0) {
       std::cerr << "[native-video-host] listen failed\n";
-      closesocket(clientSession.listenSock);
       return 4;
     }
 
     sockaddr_in peer{};
     int peerLen = sizeof(peer);
+    hx.watchdog.EnterMainPhase(MainLoopPhase::WaitingForClient);
     clientSession.clientSock = accept(clientSession.listenSock, reinterpret_cast<sockaddr*>(&peer), &peerLen);
+    hx.watchdog.MarkMainProgress(MainLoopPhase::Startup);
     if (clientSession.clientSock == INVALID_SOCKET) {
       std::cerr << "[native-video-host] accept failed\n";
-      closesocket(clientSession.listenSock);
-      clientSession.listenSock = INVALID_SOCKET;
       return 5;
     }
 
@@ -182,7 +180,6 @@ int startup_connect_client(HostContext& hx) {
     }
     if (!udpBound) {
       std::cerr << "[native-video-host] udp bind failed on every candidate port\n";
-      closesocket(clientSession.clientSock);
       return 3;
     }
     std::cout << "[native-video-host] udp bound port=" << clientSession.mediaBindPort << "\n";
@@ -251,6 +248,7 @@ int startup_connect_client(HostContext& hx) {
     }
 
     for (;;) {
+      hx.watchdog.EnterMainPhase(MainLoopPhase::WaitingForClient);
       // Wait on the primary and, when present, the legacy direct-dial listener. Reading only the
       // primary would leave a LAN client's Hello sitting unanswered forever.
       SOCKET readySock = clientSession.clientSock;
@@ -266,8 +264,7 @@ int startup_connect_client(HostContext& hx) {
         if (ready == SOCKET_ERROR) {
           std::cerr << "[native-video-host] udp handshake select failed err=" << WSAGetLastError()
                     << "\n";
-          closesocket(clientSession.clientSock);
-          return 5;
+              return 5;
         }
         // The primary wins a tie: it is the one the directory published.
         readySock = FD_ISSET(clientSession.clientSock, &readSet) ? clientSession.clientSock : clientSession.lanSock;
@@ -287,9 +284,9 @@ int startup_connect_client(HostContext& hx) {
         const int err = WSAGetLastError();
         if (err == WSAEMSGSIZE || err == WSAECONNRESET) continue;
         std::cerr << "[native-video-host] udp handshake recv failed err=" << err << "\n";
-        closesocket(clientSession.clientSock);
-        return 5;
+          return 5;
       }
+      hx.watchdog.MarkMainProgress(MainLoopPhase::Startup);
       UdpHelloPacket hello{};
       bool isHello = n >= static_cast<int>(sizeof(UdpHelloPacket));
       if (isHello) {
