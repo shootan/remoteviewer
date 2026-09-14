@@ -1505,6 +1505,14 @@ if(GNLINK_HAVE_WEBVIEW2)
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/ui/shell.html"
             "$<TARGET_FILE_DIR:remote60_client_shell>/ui/shell.html")
   add_dependencies(remote60_client_shell remote60_client_ui_assets)
+  get_target_property(_recovery_shell_sources remote60_client_shell SOURCES)
+  list(FILTER _recovery_shell_sources EXCLUDE REGEX "client_shell_main.cpp$")
+  list(REMOVE_DUPLICATES _recovery_shell_sources)
+  add_executable(remote60_client_recovery_ui_test src/client_recovery_ui_test.cpp ${_recovery_shell_sources})
+  target_include_directories(remote60_client_recovery_ui_test PRIVATE src "${GNLINK_WEBVIEW2_DIR}/include")
+  get_target_property(_recovery_shell_links remote60_client_shell LINK_LIBRARIES)
+  target_link_libraries(remote60_client_recovery_ui_test PRIVATE ${_recovery_shell_links})
+  add_dependencies(remote60_client_recovery_ui_test remote60_client_shell)
 
   # The page is loaded from disk rather than compiled in, so it can be adjusted without a
   # rebuild; copied beside the executable so a build tree behaves like an install.

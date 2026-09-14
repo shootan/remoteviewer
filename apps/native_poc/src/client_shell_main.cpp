@@ -58,6 +58,7 @@ constexpr wchar_t kWindowClass[] = L"GNLinkClientShell";
 
 ComPtr<ICoreWebView2Controller> gController;
 ComPtr<ICoreWebView2> gWebView;
+HRESULT create_shell_webview();
 HWND gWindow = nullptr;
 std::atomic<bool> gClosing{false};
 void post_status(const std::string& state, const std::string& detail);
@@ -1100,6 +1101,7 @@ void handle_page_message(const std::string& json) {
     post_to_page(shell_restore_json(server, accountId, settings));
     // Anything the start-up check found while the page was still loading goes out now.
     flush_pending_update_notice();
+    begin_refresh_hosts();  // restore an authenticated page after a WebView process restart
     return;
   }
   if (type == "update") {
@@ -1232,6 +1234,25 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       if (action && !gClosing.load()) (*action)();
       return 0;
     }
+    case WM_APP + 3: {
+      static uint64_t windowStart = 0;
+      static uint32_t failures = 0;
+      const uint64_t now = GetTickCount64();
+      if (!windowStart || now - windowStart > 60000) { windowStart = now; failures = 0; }
+      if (++failures > 3) {
+        if (MessageBoxW(hwnd, L"화면을 다시 여는 데 실패했습니다. 다시 시도하시겠습니까?",
+                        L"GNLink", MB_RETRYCANCEL | MB_ICONERROR) != IDRETRY) {
+          DestroyWindow(hwnd); return 0;
+        }
+        failures = 0;
+      }
+      if (gController) gController->Close();
+      gWebView.Reset(); gController.Reset();
+      if (FAILED(create_shell_webview())) {
+        MessageBoxW(hwnd, L"화면을 시작하지 못했습니다. 프로그램을 다시 실행해 주세요.", L"GNLink", MB_ICONERROR);
+      }
+      return 0;
+    }
     case WM_TIMER:
       if (wParam == kUpdateRetryTimer) { KillTimer(hwnd, kUpdateRetryTimer); start_update_check(); }
       if (wParam == kReconnectTimer) {
@@ -1259,6 +1280,76 @@ std::wstring shell_page_uri() {
   if (GetFileAttributesW(local.c_str()) != INVALID_FILE_ATTRIBUTES) return L"file:///" + local;
   // Running from a build tree, where the source layout still has it.
   return L"file:///" + executable_dir() + L"\\..\\..\\..\\..\\apps\\native_poc\\ui\\shell.html";
+}
+
+HRESULT create_shell_webview() {
+  wchar_t userData[MAX_PATH]{};
+  GetTempPathW(MAX_PATH, userData);
+  wcscat_s(userData, L"GNLinkClient");
+
+  const HRESULT created = CreateCoreWebView2EnvironmentWithOptions(
+      nullptr, userData, nullptr,
+      Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
+          [](HRESULT result, ICoreWebView2Environment* env) -> HRESULT {
+            if (FAILED(result) || !env) {
+              // The runtime ships with Edge and is on any recent Windows, so its absence is worth
+              // naming rather than failing silently.
+              MessageBoxW(gWindow,
+                          L"WebView2 런타임을 찾을 수 없습니다.\n"
+                          L"Microsoft Edge WebView2 런타임을 설치한 뒤 다시 실행해 주세요.",
+                          L"GNLink", MB_ICONERROR);
+              PostQuitMessage(3);
+              return result;
+            }
+            env->CreateCoreWebView2Controller(
+                gWindow,
+                Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
+                    [](HRESULT hr, ICoreWebView2Controller* controller) -> HRESULT {
+                      if (FAILED(hr) || !controller) {
+                        PostQuitMessage(4);
+                        return hr;
+                      }
+                      gController = controller;
+                      gController->get_CoreWebView2(&gWebView);
+                      resize_webview();
+
+                      ComPtr<ICoreWebView2Settings> settings;
+                      if (SUCCEEDED(gWebView->get_Settings(&settings)) && settings) {
+                        // Nothing here is a browser: no dev tools, no context menu, no status
+                        // bar. They would only advertise that this is a web view.
+                        settings->put_AreDevToolsEnabled(FALSE);
+                        settings->put_AreDefaultContextMenusEnabled(FALSE);
+                        settings->put_IsStatusBarEnabled(FALSE);
+                      }
+
+                      EventRegistrationToken token{};
+                      gWebView->add_ProcessFailed(
+                          Callback<ICoreWebView2ProcessFailedEventHandler>(
+                            [](ICoreWebView2*, ICoreWebView2ProcessFailedEventArgs*) -> HRESULT {
+                              PostMessageW(gWindow, WM_APP + 3, 0, 0); return S_OK;
+                            }).Get(), &token);
+                      gWebView->add_WebMessageReceived(
+                          Callback<ICoreWebView2WebMessageReceivedEventHandler>(
+                              [](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* args)
+                                  -> HRESULT {
+                                LPWSTR raw = nullptr;
+                                if (SUCCEEDED(args->TryGetWebMessageAsString(&raw)) && raw) {
+                                  handle_page_message(narrow(raw));
+                                  CoTaskMemFree(raw);
+                                }
+                                return S_OK;
+                              })
+                              .Get(),
+                          &token);
+
+                      gWebView->Navigate(shell_page_uri().c_str());
+                      return S_OK;
+                    })
+                    .Get());
+            return S_OK;
+          })
+          .Get());
+  return created;
 }
 
 }  // namespace
@@ -1304,67 +1395,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
   // never answers costs nothing here.
   start_update_check();
 
-  wchar_t userData[MAX_PATH]{};
-  GetTempPathW(MAX_PATH, userData);
-  wcscat_s(userData, L"GNLinkClient");
-
-  const HRESULT created = CreateCoreWebView2EnvironmentWithOptions(
-      nullptr, userData, nullptr,
-      Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
-          [](HRESULT result, ICoreWebView2Environment* env) -> HRESULT {
-            if (FAILED(result) || !env) {
-              // The runtime ships with Edge and is on any recent Windows, so its absence is worth
-              // naming rather than failing silently.
-              MessageBoxW(gWindow,
-                          L"WebView2 런타임을 찾을 수 없습니다.\n"
-                          L"Microsoft Edge WebView2 런타임을 설치한 뒤 다시 실행해 주세요.",
-                          L"GNLink", MB_ICONERROR);
-              PostQuitMessage(3);
-              return result;
-            }
-            env->CreateCoreWebView2Controller(
-                gWindow,
-                Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
-                    [](HRESULT hr, ICoreWebView2Controller* controller) -> HRESULT {
-                      if (FAILED(hr) || !controller) {
-                        PostQuitMessage(4);
-                        return hr;
-                      }
-                      gController = controller;
-                      gController->get_CoreWebView2(&gWebView);
-                      resize_webview();
-
-                      ComPtr<ICoreWebView2Settings> settings;
-                      if (SUCCEEDED(gWebView->get_Settings(&settings)) && settings) {
-                        // Nothing here is a browser: no dev tools, no context menu, no status
-                        // bar. They would only advertise that this is a web view.
-                        settings->put_AreDevToolsEnabled(FALSE);
-                        settings->put_AreDefaultContextMenusEnabled(FALSE);
-                        settings->put_IsStatusBarEnabled(FALSE);
-                      }
-
-                      EventRegistrationToken token{};
-                      gWebView->add_WebMessageReceived(
-                          Callback<ICoreWebView2WebMessageReceivedEventHandler>(
-                              [](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* args)
-                                  -> HRESULT {
-                                LPWSTR raw = nullptr;
-                                if (SUCCEEDED(args->TryGetWebMessageAsString(&raw)) && raw) {
-                                  handle_page_message(narrow(raw));
-                                  CoTaskMemFree(raw);
-                                }
-                                return S_OK;
-                              })
-                              .Get(),
-                          &token);
-
-                      gWebView->Navigate(shell_page_uri().c_str());
-                      return S_OK;
-                    })
-                    .Get());
-            return S_OK;
-          })
-          .Get());
+  const HRESULT created = create_shell_webview();
   if (FAILED(created)) {
     MessageBoxW(gWindow, L"WebView2 를 시작하지 못했습니다.", L"GNLink", MB_ICONERROR);
     return 5;
