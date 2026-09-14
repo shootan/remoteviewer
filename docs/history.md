@@ -11764,6 +11764,16 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - Git: Git MCP 없는 작업 방식 설명 후 사용자가 신규 브랜치의 직접 전체 수정을 요청한 흐름에 따라 `audit/host-pc-recovery`에서 로컬 CLI를 사용한다. 기존 공유 정책 파일 변경·push·NAS 게시·서비스 재시작 없음.
 - 다음: Host/PC Native·UI/pipe/process 회귀 및 사용자 행동 검증, 고정 후보 검토. 이 커밋이 전체36건 완료나 배포 완료라는 뜻은 아니다.
 
+### 2026-09-12 직접 복구 구현 2 — Host/PC Native 후보
+
+- 목표: Host/PC 스레드 정체·실패 뒤 복구 누락을 분리 worktree에서 직접 수정하고 사용자에게 수정 목록과 검증 경계를 남긴다. 기준035c4a4, 브랜치 `audit/host-pc-recovery`; 서버 수정은27d9e74.
+- 변경 파일: `apps/native_poc/src`의 Host startup/shutdown/watchdog/capture/encoder/supervisor, Shell 인증·업데이트·worker, Viewer 수신·표시·입력·복구, 공용 pipe/HTTP/UDP/log 경계 및 관련 시험. CMake/UI staging, directory의 격리 UI/HTTP 시험 runner, `docs/host_pc_recovery_implementation_2026-09-12.md`, 이력·계획. 세부20묶음과 원장ID 매핑은 구현 문서가 정본이다.
+- 구현: 초기화/종료 감시와 단일 unwind, 반복 DXGI의 부모 소유 WGC fallback, capture callback 수명 gate 및 pending retry, encoder 오류/무출력의 유계 재초기화, 선택 모니터/창 보존, owner epoch·worker join·계정별 로그, 같은 Host 재연결/취소, UDP ACK와 decode 분리, 영상/UI/control liveness·표시 복구, mouse-up·큐 제한, pipe 취소 완료·막힌 로그와 독립된 종료, WebView 재생성.
+- 검증: Host/Stream/Viewer/Client x64 Release 성공. Native11실행 모두 exit0, 최신 recovery process17 assertion PASS, 실제 MFT/UDP loss/큐/인증·업데이트·로그 회귀 포함. 실제 Host main에 graphics 실패를 주입해 정상73 unwind, startup 정체43 약30.052초, shutdown 정체43 약10.068초; 실제 Stream의 정상 loopback 대기는33초 생존. 실제 제품 Shell+native+HTTP UI18 PASS, 전용 WebView browser crash 후 계정B 복구; Viewer WndProc41 PASS. WinHTTP 정상/잘린200/drip PASS(350ms 예산 실측408ms). UI 스크린샷 직접 열람. 콘솔session1 Active/단일 모니터 환경.
+- 검증 실패·한계: 업데이트 UI는26 PASS/1 FAIL. 이번 후보의 서명 manifest가 없어 release pin 검사가 실패했으며 전체 PASS라 하지 않는다. 실제 GPU 반복 장애·다중 모니터·원격 입력 종단·직전 선택 창 자동 복원·UAC/설치·soak는 남음. 같은 Host 자동 재연결은 picker를 다시 표시하며, 36항목 전체 현장 해결이나 성능 개선 실측 완료가 아님.
+- 다음: 고정 후보 독립 검사, 구현 문서의 미완료 항목 보완 및 병행 공유 브랜치와 통합 판단. NAS 배포/외부 검증은 독립 OK 뒤 릴리스 단계에서 진행해야 한다. 버전 인상·서명·게시·설치/재시작·push 미실행. 로컬 CLI 커밋은 앞선 사용자 직접 작업 지시 범위이며 정책 파일을 변경하지 않았다.
+- 2026-09-13 사용자 지시 반영: 준비된 Native 변경을 분리 브랜치에 로컬 커밋으로 보존한다. 머지·push·배포 및 후속 구현·검증은 재개하지 않고 추가 명령을 기다린다. 이번 커밋 시에는 staged diff 검사를 수행했으며 기존 빌드·시험 결과를 새 실행으로 표현하지 않는다.
+
 
 ### 2026-09-14 Native 커밋 분리 01 — QPC overflow와 MSVC 빌드 옵션
 
@@ -11859,3 +11869,11 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 변경: client_shell_main.cpp, client_macro_window.cpp, client_recovery_ui_test.cpp; 필요한 공유 파일 부분 변경과 CMake.
 - 검증: 해당 단계 소스에서 Release 빌드(remote60_client_shell, remote60_native_video_client_poc, remote60_client_recovery_ui_test) 및 관련 실행 1개 종료0. 증거 `.claude/split-12-results.json`. 실제 격리 WebView/HTTP recovery runner 포함. 기존 전체 실기 미검증과 release manifest pin 미완료는 유지.
 - 다음: 최종 제품 트리 동일성 검사와 원래 분리 브랜치 연결. 메인 머지·push·배포 없음.
+
+
+### 2026-09-14 Native 커밋 재구성 완료
+
+- 목표: daacbb2의 큰 Native 커밋을 의존성 순서의12개 수정 커밋으로 분리. 서버27d9e74 유지.
+- 변경: 기록 문서와 각 단계의 커밋 경계. 최종 제품/테스트/CMake blob은 기존 Native 커밋과 동일함.
+- 검증: 12단계 각각 Release 빌드와 관련 실행 통과, 최종 Git diff에서 기록 외 차이0. 대응표 `docs/host_pc_recovery_commit_split_2026-09-14.md`.
+- 다음: 사용자 추가 지시 대기. 기존 실기/릴리스 미검증 유지. 메인 머지·push·배포 없음.
