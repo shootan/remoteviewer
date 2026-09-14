@@ -4,7 +4,7 @@
 
 사용자 지시(2026-09-14): 아직 상용 운영 전이며, 롤백을 전제로 기존 업데이트 경로에서 편하게 설치해 시험한다. 따라서 별도 시험 링크만 제공하는 대신 **기존 Windows 업데이트 채널에 0.2.124를 게시**한다. 이 선택은 미측정 GPU 부하를 해결했다는 뜻이 아니며, GPU/게임/WAN/다중 세션/장시간 결과를 이 배포로 확인한다.
 
-현재 문서 상태: **패키지 준비·게시 전 독립 검증 대기**. 실제 게시 결과는 아래 게시 기록으로 갱신한다. 사용 중인 Host/Client의 설치·재시작·UAC 조작은 자동 수행하지 않는다. main merge와 git push도 하지 않는다.
+현재 문서 상태: **배포 완료(마일스톤) · 실기 테스트 대기**. 실제 게시 결과는 아래 게시 기록으로 갱신한다. 사용 중인 Host/Client의 설치·재시작·UAC 조작은 자동 수행하지 않는다. main merge와 git push도 하지 않는다.
 
 ## 후보
 
@@ -36,4 +36,13 @@
 
 ## 게시 기록
 
-게시 전. 공개 버전/URL/서버·외부 해시/검증용 판정/실기 잔여를 게시 완료 후 이 절에 기록한다.
+- 게시 버전: **0.2.124**, 기존 Windows 업데이트 채널. 소스 commit `fdd1c785955c043b0104fb37a574e83218f25a73` (Git MCP).
+- 검증용 `t-kw1maaaa` PACKAGE_VERDICT: 고정 패키지의 **비상용 실기 게시 OK**. 상용 준비/GPU 부하 해결 판정과 분리한다.
+- 게시: `automation/gnlink_deploy.sh`, gnlink 권한, exit 0. NAS와 공개 HTTPS의 payload 10개 hash 일치.
+- 인증된 `/api/update/manifest?platform=windows`: HTTP 200, version=0.2.124. 수신 manifest/sig가 위 고정 해시와 동일. 수신본을 제품 default_verifier로 확인: Ok124, 1바이트 변조 SignatureInvalid.
+- 설치기: https://rem.shotan.net/updates/0.2.124/GNLinkSetup.exe (SHA256 `756e0bc32691928d6f3df08e86558d95a01b87701fe650b0cb2ea8424e0b654b`). 기존 앱 업데이트 기능으로도 받을 수 있다.
+- 이전 pair NAS 백업: `/opt/gnlink/manifest-backups/0.2.123/`; 로컬 전체 복구본은 위 롤백 절 참조. 다운그레이드 실기는 미수행.
+- 실행 근거: `build-incident/release-0.2.124-publish.log`, `.claude/rel/0.2.124/published-https/`. 검증용의 게시 후 추가 대조는 요청했으며 본 게시 확인은 Codex 직접 실행 결과다.
+- 사용자 행동: Host/Client를 0.2.124로 업데이트한 뒤 정적 타이핑·반복 드래그·게임 60fps/화질 회복을 확인한다. 실 GPU/드라이버·WAN·다중 세션·장시간은 아직 미검증.
+- 자동 설치·사용자 프로세스 재시작·main merge·git push 미실행.
+- 줄바꿈 정규화로 추적 HTML 2개와 signed test_manifest가 status M으로 보이나 Git 내용 diff는 0이다.

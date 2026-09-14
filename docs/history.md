@@ -11795,3 +11795,8 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 복구 준비: NAS 0.2.123 manifest/sig/payload10을 보존·검증. 인증된 HTTPS API200/version123 및 서명 확인. 채널 복구 스크립트 준비; 이미 설치한 앱은 이전 Setup의 Reinstall 단계가 별도이며 실제 downgrade는 미실행.
 - 다음: 검증용 t-kw1maaaa에 고정 package manifest dfbcc4b3...와 sig73ef2827... 전달, 기존 채널 비상용 실기 게시 OK 대기. 확인 후 자동 NAS 게시와 외부 API/파일/서명 검증을 이어감. 현재 채널123, 게시·설치·main merge·push 없음. Git MCP 없어 commit미실행; build commit을 기준 commit으로 꾸미지 않음.
 - 0.2.124 SCM 보완: Git MCP bridge로 후보 worktree 커밋 가능함을 확인. Codex가 scoped commit하고 고정 패키지와 연결한다. dist/GNLinkSetup-0.2.124.exe는 검토 payload와 동일한 사본이다.
+
+### 2026-09-14 0.2.124 기존 채널 비상용 시험 게시 완료
+- 목표/변경: 사용자 요청대로 안정화 수정본을 기존 채널에 게시. 소스 commit fdd1c785955c043b0104fb37a574e83218f25a73; release_0.2.124_field_trial.md에 패키지/복구/실기 범위 기록.
+- 검증: 검증용 패키지 게시 OK, gnlink 배포 exit0, NAS/공개 파일10개 hash 일치, 인증 HTTPS 200/version124, 제품 서명 검증 Ok와 변조 거부 확인.
+- 다음: 사용자 업데이트 후 타이핑/드래그/게임 및 GPU/WAN/다중세션/장시간 실기. 0.2.123 복구본 보존. main merge/push/자동 설치 미실행.
