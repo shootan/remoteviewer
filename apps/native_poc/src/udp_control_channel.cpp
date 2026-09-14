@@ -20,6 +20,9 @@ constexpr size_t kBurstFragments = 24;
 // Nothing in the control protocol comes close to this; it only stops a malformed or hostile
 // header from making us allocate an arbitrary buffer.
 constexpr uint32_t kMaxMessageBytes = 8u * 1024u * 1024u;
+constexpr size_t kMaxQueuedMessages = 64;
+constexpr size_t kMaxQueuedBytes = 32u * 1024u * 1024u;
+constexpr uint64_t kIncompleteLifetimeUs = 30000000;
 
 uint64_t now_us() {
   return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
@@ -68,13 +71,19 @@ const char* to_string(ControlCloseReason reason) {
     case ControlCloseReason::PeerLost: return "peer-lost";
     case ControlCloseReason::SessionRollover: return "session-rollover";
     case ControlCloseReason::Shutdown: return "shutdown";
+    case ControlCloseReason::ResourceLimit: return "resource-limit";
+    case ControlCloseReason::MalformedMessage: return "malformed-message";
     default: return "none";
   }
 }
 
 UdpControlChannel::Stats UdpControlChannel::GetStats() const {
   std::lock_guard<std::mutex> lock(mu_);
-  return stats_;
+  Stats result = stats_;
+  result.pendingMessages = rxPending_.size();
+  for (const auto& entry : rxPending_) result.inboundBytes += entry.second.bytes.size();
+  for (const auto& bytes : rxReady_) result.inboundBytes += bytes.size();
+  return result;
 }
 
 void UdpControlChannel::SendFragments(const Outbound& msg, const std::vector<uint16_t>* only) {
@@ -130,6 +139,13 @@ bool UdpControlChannel::Send(const void* data, size_t len) {
   if (closed_.load(std::memory_order_relaxed) || len == 0) return false;
   std::unique_lock<std::mutex> lock(mu_);
   if (!send_) return false;
+  size_t queuedBytes = 0;
+  for (const auto& queued : txQueue_) queuedBytes += queued.payload.size();
+  if (len > kMaxMessageBytes || (len + fragBytes_ - 1) / fragBytes_ > UINT16_MAX ||
+      txQueue_.size() >= kMaxQueuedMessages || queuedBytes + len > kMaxQueuedBytes) {
+    Close(ControlCloseReason::ResourceLimit);
+    return false;
+  }
 
   Outbound msg;
   msg.seq = nextTxSeq_++;
@@ -170,6 +186,16 @@ void UdpControlChannel::HandleData(const UdpControlChunkHeader& head, const uint
   }
   if (head.fragCount == 0 || head.totalSize == 0 || head.totalSize > kMaxMessageBytes) return;
   if (head.fragOffset > head.totalSize || head.fragOffset + payloadLen > head.totalSize) return;
+  if (payloadLen == 0 || head.fragIndex >= head.fragCount) return;
+  if (rxPending_.find(head.messageSeq) == rxPending_.end()) {
+    size_t heldBytes = 0;
+    for (const auto& entry : rxPending_) heldBytes += entry.second.bytes.size();
+    for (const auto& bytes : rxReady_) heldBytes += bytes.size();
+    if (rxPending_.size() + rxReady_.size() >= kMaxQueuedMessages ||
+        heldBytes + head.totalSize > kMaxQueuedBytes) {
+      Close(ControlCloseReason::ResourceLimit); return;
+    }
+  }
 
   auto& slot = rxPending_[head.messageSeq];
   if (slot.fragCount == 0) {
@@ -177,17 +203,28 @@ void UdpControlChannel::HandleData(const UdpControlChunkHeader& head, const uint
     slot.totalSize = head.totalSize;
     slot.bytes.assign(head.totalSize, 0);
     slot.have.assign(head.fragCount, false);
+    slot.ranges.resize(head.fragCount);
     slot.lastProgressUs = now_us();
+    slot.createdUs = slot.lastProgressUs;
   }
   if (slot.fragCount != head.fragCount || slot.totalSize != head.totalSize) return;
   if (head.fragIndex >= slot.fragCount || slot.have[head.fragIndex]) return;
 
   std::memcpy(slot.bytes.data() + head.fragOffset, payload, payloadLen);
   slot.have[head.fragIndex] = true;
+  slot.ranges[head.fragIndex] = {head.fragOffset, static_cast<uint32_t>(payloadLen)};
   ++slot.haveCount;
   slot.lastProgressUs = now_us();
 
   if (slot.haveCount < slot.fragCount) return;
+  auto ranges = slot.ranges;
+  std::sort(ranges.begin(), ranges.end());
+  uint64_t covered = 0;
+  for (const auto& range : ranges) {
+    if (range.first != covered) { Close(ControlCloseReason::MalformedMessage); return; }
+    covered += range.second;
+  }
+  if (covered != slot.totalSize) { Close(ControlCloseReason::MalformedMessage); return; }
 
   rxDeliveredSeq_ = head.messageSeq;
   rxReady_.push_back(std::move(slot.bytes));
@@ -226,6 +263,7 @@ bool UdpControlChannel::OnPacket(const void* data, size_t len) {
   if (magic != kMagic) return false;
 
   std::lock_guard<std::mutex> lock(mu_);
+  if (closed_.load(std::memory_order_relaxed)) return true;
   if (kind == static_cast<uint16_t>(UdpPacketKind::ControlData)) {
     if (len < sizeof(UdpControlChunkHeader)) return true;
     UdpControlChunkHeader head{};
@@ -253,6 +291,10 @@ bool UdpControlChannel::OnPacket(const void* data, size_t len) {
 void UdpControlChannel::Tick() {
   std::lock_guard<std::mutex> lock(mu_);
   const uint64_t now = now_us();
+  for (auto it = rxPending_.begin(); it != rxPending_.end();) {
+    if (now - it->second.createdUs >= kIncompleteLifetimeUs) it = rxPending_.erase(it);
+    else ++it;
+  }
 
   if (!txQueue_.empty()) {
     Outbound& head = txQueue_.front();
