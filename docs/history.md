@@ -11771,3 +11771,11 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 변경: d3d_capture_readback.cpp; 필요한 공유 파일 부분 변경과 CMake.
 - 검증: 해당 단계 소스에서 Release 빌드(remote60_native_video_host_poc) 및 관련 실행 0개 종료0. 증거 `.claude/split-01-results.json`. 기존 전체 실기 미검증과 release manifest pin 미완료는 유지.
 - 다음: 다음 의존 단계 구성·검증. 메인 머지·push·배포 없음.
+
+
+### 2026-09-14 Native 커밋 분리 02 — pipe/진단 종료 및 HTTP 오류 경계
+
+- 목표: 백업 `backup/host-pc-recovery-daacbb2`의 변경을 의존성 순서로 재구성. 새 기능 추가나 배포가 아니다.
+- 변경: bounded_process_exit.hpp, bounded_pipe_io.hpp, secure_input_broker.cpp, update_credential_channel.cpp, winhttp_transport.cpp, winhttp_recovery_test.cpp; 필요한 공유 파일 부분 변경과 CMake.
+- 검증: 해당 단계 소스에서 Release 빌드(remote60_native_video_host_poc, remote60_update_credential_channel_test, remote60_winhttp_recovery_test) 및 관련 실행 2개 종료0. 증거 `.claude/split-02-results.json`. 기존 전체 실기 미검증과 release manifest pin 미완료는 유지.
+- 다음: 다음 의존 단계 구성·검증. 메인 머지·push·배포 없음.

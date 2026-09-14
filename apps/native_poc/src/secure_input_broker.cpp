@@ -1,4 +1,5 @@
 #include "secure_input_broker.hpp"
+#include "bounded_pipe_io.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -141,7 +142,7 @@ bool SecureInputBrokerClient::ConnectLocked() {
   do {
     (void)WaitNamedPipeW(kSecureInputPipeName, 100);
     pipe_ = CreateFileW(kSecureInputPipeName, GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
-                        FILE_ATTRIBUTE_NORMAL, nullptr);
+                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, nullptr);
     if (pipe_ != INVALID_HANDLE_VALUE) return true;
     std::this_thread::sleep_for(std::chrono::milliseconds(25));
   } while (std::chrono::steady_clock::now() < deadline);
@@ -150,17 +151,11 @@ bool SecureInputBrokerClient::ConnectLocked() {
 
 bool SecureInputBrokerClient::WriteLocked(const SecureInputMessage& message) {
   if (!ConnectLocked()) return false;
-  DWORD written = 0;
-  if (WriteFile(pipe_, &message, sizeof(message), &written, nullptr) &&
-      written == sizeof(message)) {
-    return true;
-  }
-  CloseHandle(pipe_);
-  pipe_ = INVALID_HANDLE_VALUE;
-  if (!ConnectLocked()) return false;
-  written = 0;
-  return WriteFile(pipe_, &message, sizeof(message), &written, nullptr) &&
-         written == sizeof(message);
+  if (remote60::native_poc::write_pipe_bounded(pipe_, &message, sizeof(message))) return true;
+  CloseHandle(pipe_); pipe_ = INVALID_HANDLE_VALUE;
+  // Do not replay an uncertain write: a key/button edge may already have reached the service.
+  // The next input reconnects with a fresh operation and its own deadline.
+  return false;
 }
 
 bool SecureInputBrokerClient::SendInputEvent(const ControlInputEventMessage& input,

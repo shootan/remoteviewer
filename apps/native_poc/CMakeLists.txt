@@ -1,4 +1,8 @@
 # The WebView2 SDK is a NuGet package of headers and a static loader, fetched into third_party
+add_executable(remote60_winhttp_recovery_test src/winhttp_recovery_test.cpp src/winhttp_transport.cpp)
+target_include_directories(remote60_winhttp_recovery_test PRIVATE src)
+target_link_libraries(remote60_winhttp_recovery_test PRIVATE winhttp)
+
 # rather than vendored: it is 45 MB of which the build uses two files. Detected up here because
 # both the client shell and the viewer's macro window depend on it.
 set(GNLINK_WEBVIEW2_DIR "${CMAKE_SOURCE_DIR}/third_party/webview2/build/native")

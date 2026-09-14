@@ -1,4 +1,5 @@
 #include "update_credential_channel.hpp"
+#include "bounded_process_exit.hpp"
 
 #include <sddl.h>
 
@@ -67,7 +68,10 @@ bool wait_overlapped(HANDLE pipe, OVERLAPPED* overlapped, uint32_t deadlineMs, D
     // Cancelled rather than abandoned: leaving it pending would let it complete after the caller
     // has decided the attempt failed, which is the "late arrival is served anyway" case.
     CancelIoEx(pipe, overlapped);
-    WaitForSingleObject(overlapped->hEvent, 1000);
+    if (WaitForSingleObject(overlapped->hEvent, 1000) != WAIT_OBJECT_0) {
+      const char message[] = "[credential] cancellation did not complete; terminating before releasing pending I/O storage\n";
+      remote60::native_poc::terminate_with_diagnostic(47, message, sizeof(message) - 1);
+    }
     set_error(error, waited == WAIT_TIMEOUT ? "timed out" : "wait failed");
     return false;
   }
