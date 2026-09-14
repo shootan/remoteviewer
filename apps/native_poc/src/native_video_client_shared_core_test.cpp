@@ -1344,6 +1344,23 @@ bool test_input_coalesce_and_generated_us() {
   if (!expect(act.inputGeneratedUs == 500, "action carries the local generatedUs")) return false;
   if (!expect(act.inputEvent.clientSendQpcUs != 500,
               "wire send time is stamped at send, not at generation")) return false;
+  remote60::native_poc::ClientControlMetricsSnapshot metrics{};
+  metrics.updatedQpcUs = 123;
+  for (int i = 0; i < 12; ++i) {
+    auto edge = mkMove(i, 200000);
+    edge.inputEvent.kind = 5; // non-coalescing key edge
+    q.Enqueue(edge);
+  }
+  bool sawInputBeforeMetrics = false, sawMetrics = false;
+  for (int i = 0; i < 12 && !sawMetrics; ++i) {
+    ControlOutboundAction a{};
+    if (!scheduler.NextAction(200000 + i, metrics, &windowPanel, &streamState,
+                             &captureMode, &keyframe, &runtimeTune, &q, &a)) continue;
+    if (a.kind == ControlOutboundActionKind::InputEvent) sawInputBeforeMetrics = true;
+    if (a.kind == ControlOutboundActionKind::Metrics) sawMetrics = true;
+  }
+  if (!expect(sawInputBeforeMetrics && sawMetrics,
+              "input precedes background metrics but cannot starve feedback")) return false;
   return true;
 }
 

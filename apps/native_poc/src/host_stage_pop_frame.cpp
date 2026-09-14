@@ -213,7 +213,7 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
       // Otherwise one-shot: a failed fill (locked/secure/identity mismatch) leaves the screen black
       // rather than painting a wrong or stale picture, and a satisfied trailing edge stays quiet.
       if (rearm) {
-        kick.Arm(nowUs, useH264);
+        kick.Arm(nowUs, useH264, hx.encoder.activeFps);
       } else {
         kick.Cancel();
       }
@@ -275,6 +275,8 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
     seq = res.frame.seq;
     w = res.frame.width;
     h = res.frame.height;
+    tc.contentWidth = res.frame.contentWidth;
+    tc.contentHeight = res.frame.contentHeight;
     stride = res.frame.stride;
     streamGeneration = res.frame.streamGeneration;
     captureUs = res.frame.captureUs;

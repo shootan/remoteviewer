@@ -9,7 +9,7 @@ namespace remote60::native_poc::viewer {
 
 void log_client_line(ViewerState& ctx, const std::string& line) {
   std::lock_guard<std::mutex> lk(ctx.session.logMu);
-  const std::string withNewline = line + "\n";
+  const std::string withNewline = line + " eventQpcUs=" + std::to_string(qpc_now_us()) + "\n";
   std::cout << withNewline;
 }
 

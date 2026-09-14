@@ -225,8 +225,13 @@ void CaptureState::PublishCapturedTexture(CaptureResources& res, ID3D11Texture2D
     capture.cadenceGate.SetEarlyTolerancePercent(capture.submitEarlyTolerancePercent);
     capture.cadenceGate.SetRequestedIntervalUs(
         std::max<uint64_t>(1, capture.submitMinIntervalUs.load(std::memory_order_acquire)));
-    if (!capture.cadenceGate.ShouldAccept(callbackUs, hasNewContent)) return;
+    const bool due = capture.cadenceGate.ShouldAccept(callbackUs, hasNewContent);
+    if (!hasNewContent && !due) return;
   }
+  // Desktop updates are change-driven: dropping an early content callback can lose the final
+  // typed character forever. Own every content snapshot, then pace latest-wins readback output.
+  captureReadback.SetPublishIntervalUs(capture.submitLimitEnabled ?
+      capture.submitMinIntervalUs.load(std::memory_order_acquire) : 0);
   uint32_t frameW = 0;
   uint32_t frameH = 0;
   {
@@ -928,6 +933,8 @@ void CaptureState::PublishFrame(CaptureResources& res, HostStats& stats,
     res.frame.payload = std::move(payload);
     res.frame.width = frameW;
     res.frame.height = frameH;
+    res.frame.contentWidth = meta.cropActive ? meta.cropW : meta.width;
+    res.frame.contentHeight = meta.cropActive ? meta.cropH : meta.height;
     res.frame.stride = stride;
     res.frame.streamGeneration = meta.streamGeneration;
     res.frame.captureUs = meta.captureUs;

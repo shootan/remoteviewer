@@ -43,7 +43,8 @@ if [ ! -f "$SOURCE_REL/windows.manifest" ]; then
   exit 1
 fi
 
-WORK="$(mktemp -d)"
+mkdir -p "$REPO/.claude"
+WORK="$(mktemp -d "$REPO/.claude/deploy-test.XXXXXX")"
 # Only ever the directory this test created, and only on the way out.
 cleanup() { rm -rf -- "$WORK"; }
 trap cleanup EXIT

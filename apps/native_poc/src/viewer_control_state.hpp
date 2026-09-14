@@ -6,9 +6,11 @@
 //          runtime tune, stream state, capture mode), the scheduler itself, the UDP control
 //          tunnel and whether it is in use, connection status, and the secure-desktop transition
 //          latch of the control loop.
-// Thread:  the control thread owns the scheduler/tunnel and writes connected / reportedSecure;
+// Thread:  the control thread owns the scheduler and writes connected / reportedSecure;
 //          UI, recv and main enqueue requests (each request state is atomic- or mutex-backed);
-//          recv ticks/feeds udpControl (one reader, one writer on the shared socket).
+//          UDP ingress alone reads the socket and feeds udpControl.OnPacket. Ingress, receiver
+//          maintenance and the control thread can Tick; UdpControlChannel serializes them with
+//          its mutex. ControlLink.Receive waits on the channel queue, not on the socket.
 // Input:   UI/recv requests, host replies.
 // Output:  outbound control actions.
 // Callers: main() (connect/setup), control thread, viewer_picker, viewer_input_forward, viewer_log,

@@ -46,6 +46,7 @@ struct FrameGateInputs {
   uint64_t packetNowUs = 0;
   uint64_t recvGapUs = 0;           // from note_packet()
   uint64_t presentedCapUs = 0;      // FrameBuffer::lastPresentedCaptureUs
+  uint64_t decodedCapUs = 0;        // last real decoder output, independent of UI paint progress
   // The host's send stamp (wire). With captureQpcUs -- both host clock -- it says how long the
   // host held this picture before sending it; 0 = unknown (older host / test). (P11)
   uint64_t sendQpcUs = 0;

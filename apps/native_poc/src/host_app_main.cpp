@@ -45,6 +45,7 @@
 #include "host_command_line.hpp"
 #include "product_version.hpp"
 #include "env_util.hpp"
+#include "windows_environment_snapshot.hpp"
 #include "update_check.hpp"
 #include "update_credential_channel.hpp"
 #include "update_handoff.hpp"
@@ -452,6 +453,8 @@ class StreamingHostProcess {
     constexpr DWORD kChildDxgiWorkerWatchdogExitCode = 44;
     uint32_t watchdogRecoveries = 0;
     uint64_t watchdogWindowStartMs = 0;
+    bool quarantineDxgi = false;
+    remote60::native_poc::WindowsEnvironmentSnapshot captureBackend(L"REMOTE60_DESKTOP_CAPTURE_BACKEND");
     while (running_.load(std::memory_order_relaxed)) {
       const bool nv12SurfaceForcedOff = crashStreak >= 2;
       // The control port serves clients on the same network that dial this PC directly. One
@@ -515,6 +518,11 @@ class StreamingHostProcess {
       // build without it refuses --codec h264 and exits immediately. The product has no other
       // path, so the switch is turned on for the child rather than left to how it was built.
       SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
+      // A fresh process/device is necessary after a wedged DXGI call, but repeatedly choosing
+      // that same backend only recreates the freeze. Quarantine it for this supervisor run.
+      if (!captureBackend.Set(quarantineDxgi ? L"wgc" : captureBackend.Original())) {
+        AppendLogLineOnce("[host-app] could not apply the capture backend environment override");
+      }
       // The product encoder preset, stated instead of inherited: whatever happens to be in
       // the parent environment must not silently change how every session encodes. Chosen by
       // A/B on 1080p30 scroll (2026-07-31): stable_text bought no decoded fps and doubled
@@ -580,6 +588,10 @@ class StreamingHostProcess {
       // Only those count toward the streak; a host that streamed for a while and then a
       // client left is a clean exit and resets it.
       const bool dxgiWorkerWatchdog = (childExitCode == kChildDxgiWorkerWatchdogExitCode);
+      if (dxgiWorkerWatchdog && !quarantineDxgi) {
+        quarantineDxgi = true;
+        AppendLogLineOnce("[host-app] DXGI worker wedged; next child uses WGC for this supervisor run");
+      }
       const bool watchdogRecovery =
           (childExitCode == kChildWatchdogExitCode) || dxgiWorkerWatchdog;
       const bool crashed = !watchdogRecovery && (childExitCode != 0) && (ranMs < 15000);

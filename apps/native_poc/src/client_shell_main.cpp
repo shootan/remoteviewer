@@ -76,6 +76,7 @@ std::string gSessionToken;
 // where the picture is worth more than the bytes. The relay is the exception, and the interface
 // says so where the number is set.
 ShellRuntimeSettings gSettings{12000, 60, 0};
+std::atomic<uint32_t> gActiveViewers{0};
 
 std::wstring widen(const std::string& text) {
   if (text.empty()) return {};
@@ -312,7 +313,7 @@ void viewer_log_write_line(const std::string& line) {
  * discarded -- exactly the client-side evidence a stutter investigation needed. Runs on its own
  * thread per session; ends when the child exits and the pipe hits EOF.
  */
-void pump_viewer_output_to_log(HANDLE readEnd) {
+void pump_viewer_output_to_log(HANDLE readEnd, const std::string context) {
   std::string pending;
   char buffer[1024];
   DWORD read = 0;
@@ -323,16 +324,16 @@ void pump_viewer_output_to_log(HANDLE readEnd) {
       std::string line = pending.substr(0, newline);
       pending.erase(0, newline + 1);
       if (!line.empty() && line.back() == '\r') line.pop_back();
-      viewer_log_write_line(line);
+      viewer_log_write_line(line + context + " collectedTickMs=" + std::to_string(GetTickCount64()));
     }
     if (pending.size() > 8192) {
       // An oversized fragment without a newline: flush rather than drop, so a wedged child's
       // final partial line still reaches the log.
-      viewer_log_write_line(pending);
+      viewer_log_write_line(pending + context + " collectedTickMs=" + std::to_string(GetTickCount64()));
       pending.clear();
     }
   }
-  if (!pending.empty()) viewer_log_write_line(pending);  // tail without a trailing newline
+  if (!pending.empty()) viewer_log_write_line(pending + context);  // tail without a trailing newline
   CloseHandle(readEnd);
 }
 
@@ -1000,10 +1001,14 @@ void begin_session(const ShellConnectRequest& request) {
     post_status("error", "세션을 시작하지 못했습니다");
     return;
   }
+  ++gActiveViewers;
   if (pipeOk) {
     // The parent's copy of the write end must close, or the reader never sees EOF after exit.
     CloseHandle(pipeWrite);
-    std::thread(pump_viewer_output_to_log, pipeRead).detach();
+    const std::string context = " viewerSession=" + std::to_string(pi.dwProcessId) + "-" +
+        std::to_string(GetTickCount64()) + " viewerPid=" + std::to_string(pi.dwProcessId) +
+        " hostId=" + request.hostId + " productVersion=" + narrow(remote60::native_poc::kProductVersion);
+    std::thread(pump_viewer_output_to_log, pipeRead, context).detach();
   }
   log_line("session started host=" + request.hostId + " kbps=" +
            std::to_string(settings.bitrateKbps) + " fps=" + std::to_string(settings.fps) +
@@ -1017,10 +1022,11 @@ void begin_session(const ShellConnectRequest& request) {
     DWORD exitCode = 0;
     GetExitCodeProcess(handle, &exitCode);
     CloseHandle(handle);
+    const uint32_t remaining = gActiveViewers.fetch_sub(1) - 1;
     if (waited == WAIT_OBJECT_0 && exitCode != 0) {
       post_status("error", name + " 연결에 실패했습니다 (코드 " + std::to_string(exitCode) + ")");
     } else {
-      post_status("idle", "");
+      post_status("idle", remaining > 0 ? std::to_string(remaining) + "개 연결이 계속 실행 중입니다." : "");
     }
   }).detach();
 

@@ -274,7 +274,7 @@ struct RateControlState {
         // up one rung after a short hold; motion still decides against the unchanged thresholds.
         // (history #337, item P4)
         const bool sparseHealthy =
-            !in.metricsFresh ||
+            in.metricsFresh &&
             (in.clAvgLatencyUs < moderateLatencyUs && in.clAvgDecodeTailUs < moderateTailUs &&
              in.clUdpDropPm < 20u);
         if (rate.abrProfile > 0 && sparseHealthy) {

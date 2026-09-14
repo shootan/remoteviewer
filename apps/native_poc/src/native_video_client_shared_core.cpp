@@ -91,6 +91,12 @@ void ClientInputQueue::Enqueue(const QueuedControlInputMessage& msg) {
     }
   }
   queue_.push_back(msg);
+  ready_.notify_one();
+}
+
+void ClientInputQueue::WaitForInput(uint32_t timeoutMs) {
+  std::unique_lock<std::mutex> lock(mu_);
+  ready_.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&] { return !queue_.empty(); });
 }
 
 bool ClientInputQueue::TryDequeue(QueuedControlInputMessage* out) {
@@ -416,6 +422,7 @@ bool RuntimeTuneState::ConsumePending(uint64_t nowUs, uint32_t observedRecvMbpsX
 }
 
 void ClientControlScheduler::Reset(uint32_t controlIntervalMs, uint64_t nowUs) {
+  inputBurstCount_ = 0;
   nextPingSeq_ = 0;
   nextMetricsSeq_ = 0;
   nextWindowListSeq_ = 0;
@@ -537,6 +544,34 @@ bool ClientControlScheduler::NextAction(uint64_t nowUs,
     return true;
   }
 
+  // Input precedes background work, with a bounded burst so ABR feedback cannot starve.
+  QueuedControlInputMessage outbound{};
+  if (inputBurstCount_ < 8 && inputQueue->TryDequeue(&outbound)) {
+    ++inputBurstCount_;
+    out->expectedResponseType = MessageType::ControlInputAck;
+    out->expectedResponseSize = expected_message_size(MessageType::ControlInputAck);
+    out->inputGeneratedUs = outbound.generatedUs;  // P0 (#351): carry local generation stamp for queue-age
+    if (outbound.type == MessageType::ControlInputEvent) {
+      out->kind = ControlOutboundActionKind::InputEvent;
+      out->inputEvent = outbound.inputEvent;
+      out->inputEvent.clientSendQpcUs = nowUs;
+      return true;
+    }
+    if (outbound.type == MessageType::ControlInputText) {
+      out->kind = ControlOutboundActionKind::InputText;
+      out->inputText = outbound.inputText;
+      out->inputText.clientSendQpcUs = nowUs;
+      return true;
+    }
+    if (outbound.type == MessageType::ControlPhysicalKey) {
+      out->kind = ControlOutboundActionKind::PhysicalKey;
+      out->physicalKey = outbound.physicalKey;
+      out->physicalKey.clientSendQpcUs = nowUs;
+      return true;
+    }
+  }
+
+  inputBurstCount_ = 0;
   if (metrics.updatedQpcUs > 0 && metrics.updatedQpcUs != lastMetricsSentUs_) {
     out->kind = ControlOutboundActionKind::Metrics;
     out->metrics = metrics.message;
@@ -581,30 +616,6 @@ bool ClientControlScheduler::NextAction(uint64_t nowUs,
     return true;
   }
 
-  QueuedControlInputMessage outbound{};
-  if (inputQueue->TryDequeue(&outbound)) {
-    out->expectedResponseType = MessageType::ControlInputAck;
-    out->expectedResponseSize = expected_message_size(MessageType::ControlInputAck);
-    out->inputGeneratedUs = outbound.generatedUs;  // P0 (#351): carry local generation stamp for queue-age
-    if (outbound.type == MessageType::ControlInputEvent) {
-      out->kind = ControlOutboundActionKind::InputEvent;
-      out->inputEvent = outbound.inputEvent;
-      out->inputEvent.clientSendQpcUs = nowUs;
-      return true;
-    }
-    if (outbound.type == MessageType::ControlInputText) {
-      out->kind = ControlOutboundActionKind::InputText;
-      out->inputText = outbound.inputText;
-      out->inputText.clientSendQpcUs = nowUs;
-      return true;
-    }
-    if (outbound.type == MessageType::ControlPhysicalKey) {
-      out->kind = ControlOutboundActionKind::PhysicalKey;
-      out->physicalKey = outbound.physicalKey;
-      out->physicalKey.clientSendQpcUs = nowUs;
-      return true;
-    }
-  }
 
   return false;
 }

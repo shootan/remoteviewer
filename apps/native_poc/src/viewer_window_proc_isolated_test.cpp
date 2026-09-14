@@ -107,6 +107,9 @@ void give_the_picker_something_to_show(ViewerState& ctx) {
 
 std::vector<std::string> gToolbarLines;
 int gInputEvents = 0;
+uint16_t gLastInputKind = 0;
+uint32_t gLastInputKey = 0;
+int32_t gLastInputX = 0, gLastInputY = 0;
 int gVideoPaintRequests = 0;
 
 int main() {
@@ -553,6 +556,39 @@ int main() {
     SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
   }
 
+  // Real WndProc DOWN/UP routing, with only the transport boundary recorded. Releasing outside
+  // the video used to return before clearing the button or producing any remote UP.
+  ctx.picker.visible.store(false);
+  ctx.input.suppressMouseUntilUs.store(0);
+  ctx.frameBuf.frame.width = 1280;
+  ctx.frameBuf.frame.height = 720;
+  RECT area{};
+  GetClientRect(hwnd, &area);
+  bool releases = true;
+  for (int i = 0; i < 100; ++i) {
+    SendMessageW(hwnd, WM_LBUTTONDOWN, 0, at(area.right / 2, area.bottom / 2));
+    const bool pressed = (ctx.input.mouseButtons.load() & 1) != 0;
+    const int beforeUp = gInputEvents;
+    const int32_t lastX = ctx.input.lastVideoX.load(), lastY = ctx.input.lastVideoY.load();
+    SendMessageW(hwnd, WM_LBUTTONUP, 0, at(-20, -20));
+    releases = releases && pressed && ctx.input.mouseButtons.load() == 0 &&
+               gInputEvents == beforeUp + 1 && gLastInputKind == 3 &&
+               gLastInputKey == VK_LBUTTON && gLastInputX == lastX && gLastInputY == lastY;
+  }
+  ok(releases, "100 real window drags release outside the video without stranding a button");
+  for (const auto key : {VK_RBUTTON, VK_MBUTTON}) {
+    ctx.input.mouseButtons.store(key == VK_RBUTTON ? 2 : 4);
+    ctx.input.suppressMouseUntilUs.store(UINT64_MAX);
+    const int beforeUp = gInputEvents;
+    SendMessageW(hwnd, key == VK_RBUTTON ? WM_RBUTTONUP : WM_MBUTTONUP, 0, at(-20, -20));
+    ok(ctx.input.mouseButtons.load() == 0 && gInputEvents == beforeUp + 1 &&
+       gLastInputKind == 3 && gLastInputKey == static_cast<uint32_t>(key),
+       "forwarded secondary button is released even during touch suppression");
+  }
+  ctx.input.suppressMouseUntilUs.store(0);
+  ReleaseCapture();
+  ok(SendMessageW(hwnd, WM_TIMER, 0x7fff, 0) == DefWindowProcW(hwnd, WM_TIMER, 0x7fff, 0),
+     "F-23: unknown timer follows the default window-procedure return path");
   remote60::native_poc::session_toolbar_destroy();
   DestroyWindow(hwnd);
   pump(50);
@@ -571,8 +607,9 @@ int main() {
 // observed somewhere.
 namespace remote60::native_poc::viewer {
 
-void enqueue_input_event(ViewerState&, uint16_t, int32_t, int32_t, int32_t, uint32_t) {
+void enqueue_input_event(ViewerState&, uint16_t kind, int32_t x, int32_t y, int32_t, uint32_t key) {
   ++gInputEvents;
+  gLastInputKind = kind; gLastInputKey = key; gLastInputX = x; gLastInputY = y;
 }
 void update_cursor_overlay(ViewerState&, HWND) {}
 bool local_hotkey_modifiers_active() { return false; }

@@ -243,7 +243,7 @@ uint64_t D3dCaptureReadbackPipeline::OldestGpuPendingAgeUs() {
   std::lock_guard<std::mutex> lk(slotMu_);
   uint64_t oldestSubmitUs = 0;
   for (const auto& s : slots_) {
-    if (s.state != SlotState::GpuPending || s.meta.submitUs == 0) continue;
+    if ((s.state != SlotState::GpuPending && s.state != SlotState::Reading) || s.meta.submitUs == 0) continue;
     if (oldestSubmitUs == 0 || s.meta.submitUs < oldestSubmitUs) oldestSubmitUs = s.meta.submitUs;
   }
   if (oldestSubmitUs == 0) return 0;
@@ -269,7 +269,7 @@ uint32_t D3dCaptureReadbackPipeline::GpuPendingCount() {
   std::lock_guard<std::mutex> lk(slotMu_);
   uint32_t pending = 0;
   for (const auto& s : slots_) {
-    if (s.state == SlotState::GpuPending) ++pending;
+    if (s.state == SlotState::GpuPending || s.state == SlotState::Reading) ++pending;
   }
   return pending;
 }
@@ -473,6 +473,19 @@ bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrame
       }
     }
     if (!slot) {
+      // GPU commands are ordered on the guarded immediate context. Replace the oldest pending
+      // copy rather than discard the last desktop change. Never overwrite a consumer's Map.
+      for (auto& candidate : slots_) {
+        if (candidate.state == SlotState::GpuPending &&
+            (!slot || candidate.submitSeq < slot->submitSeq)) slot = &candidate;
+      }
+      if (slot) {
+        ReleaseNv12SlotLocked(slot->meta.nv12Slot, slot->meta.nv12Generation);
+        slot->meta.nv12Slot = -1;
+        supersededDrops_.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+    if (!slot) {
       // The staging ring is full, so this frame is dropped -- but the NV12 lease reserved a
       // few lines up would stay busy forever. A busy drop is ordinary load-time behaviour, not
       // an exception path, so four of them exhausted the four-slot ring and the zero-copy
@@ -652,6 +665,8 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
   // Per-publish attribution (0.2.98): accumulated across the polls that lead to one publish.
   uint64_t workerCtxWaitAccUs = 0;
   uint64_t workerD3dCallAccUs = 0;
+  uint64_t nextPublishUs = 0;
+  uint64_t publishGeneration = 0;
   while (running_.load(std::memory_order_acquire)) {
     Slot slotCopy;
     Slot* slotRef = nullptr;
@@ -681,6 +696,15 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
         continue;  // slotMu_ released by scope exit
       }
 
+      if (publishGeneration != generation_) {
+        publishGeneration = generation_;
+        nextPublishUs = 0;
+      }
+      const uint64_t publishNowUs = qpc_us();
+      if (publishIntervalUs_.load() > 0 && publishNowUs < nextPublishUs) {
+        workerCv_.wait_for(lk, std::chrono::microseconds(nextPublishUs - publishNowUs));
+        continue; // clock driven: the last changed frame needs no subsequent callback
+      }
       // Which pending copies has the GPU finished? Checked outside the slot loop so the
       // latest-wins pick sees a consistent snapshot.
       std::vector<uint64_t> seq(slots_.size(), 0);
@@ -744,6 +768,7 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
       }
       if (superseded > 0) supersededDrops_.fetch_add(superseded, std::memory_order_relaxed);
       slotRef = &slots_[pick];
+      slotRef->state = SlotState::Reading;
       slotCopy.staging = slotRef->staging;
       slotCopy.meta = slotRef->meta;
       generationAtPick = generation_;
@@ -836,8 +861,10 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
       // Only free the slot if a reconfigure has not replaced it, and if a newer Submit has not
       // already taken it over -- the staging texture survives slot reuse, so submitSeq is the
       // identity here too. (Ledger H-23.)
-      if (slotRef && readback_slot_is_current(generation_, generationAtPick, slotRef->state,
-                                             SlotState::GpuPending, slotRef->submitSeq,
+      // Test the generation before dereferencing a pointer into the old slot vector.
+      if (generation_ == generationAtPick && slotRef &&
+          readback_slot_is_current(generation_, generationAtPick, slotRef->state,
+                                             SlotState::Reading, slotRef->submitSeq,
                                              submitSeqAtPick)) {
         slotRef->state = SlotState::Free;
         handOff = mapped && static_cast<bool>(publish_);
@@ -862,6 +889,10 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
       slotCopy.meta.workerCtxWaitUs = workerCtxWaitAccUs;  // `meta` aliases slotCopy.meta
       slotCopy.meta.workerD3dCallUs = workerD3dCallAccUs;
       publish_(std::move(payload), outW, outH, outStride, meta, gpuPendingUs, mapUs, memcpyUs);
+      const uint64_t intervalUs = publishIntervalUs_.load();
+      const uint64_t publishedUs = qpc_us();
+      nextPublishUs = nextPublishUs != 0 && publishedUs < nextPublishUs + 2 * intervalUs
+                          ? nextPublishUs + intervalUs : publishedUs + intervalUs;
     }
     workerCtxWaitAccUs = 0;
     workerD3dCallAccUs = 0;

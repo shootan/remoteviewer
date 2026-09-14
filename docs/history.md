@@ -11741,3 +11741,57 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 
 → **주석·머리말·표는 코드와 같은 커밋에서 갱신한다.** 특히 *"여기서는 할 수 없다" · "이건 고쳐졌다"*
 처럼 **읽는 사람의 조사를 끝내는 문장**은, 쓸 때가 아니라 **틀려질 때**를 기준으로 관리한다.
+
+
+### 2026-09-12 Codex 직접 Host/PC 스레드·복구 전수 점검
+
+- 목표: 사용자 요청에 따라 소스의 스레드·복구 실패를 직접 조사하고 문제와 검증 경계를 문서로 보존.
+- 변경 파일: `docs/host_pc_thread_recovery_audit_2026-09-12.md`, `docs/host_pc_thread_recovery_inventory_2026-09-12.md`, `docs/host_pc_thread_recovery_probes_2026-09-12.md`, `docs/history.md`, `docs/구현계획.md`.
+- 범위: 364파일/97,904줄 목록·SHA-256·위험 패턴 검색, 66파일 관련 분기 심층 추적. Host13/PC13/공유10 항목은 코드 결함·정책 공백·조건부 위험을 구분한 것이며 모두 현장 재현 버그라는 뜻이 아님.
+- 사용자 추가 요청 반영: 36항목에 원인·수정 방향·검증 조건을 연결하고, 원장10.1에 파일/상태/분기 수준의 구체적인 수정안11묶음을 추가. DXGI 내부 원인 미확정과 반복 장애 복구 방안은 분리.
+- 검증: gnlink+remote60_deploy로 NAS 4스트림 읽기 전용 확보. 다른 Host의 DXGI wedge7회, Viewer13:16 dead-session 종료 확인. 고정 제품 liveness 헤더4입력과 Node VM 저장 실패2입력 프로브 모두 종료0. UI/GPU/UAC/실게임/장시간 soak 및 사건 바이너리 동일성은 미검증.
+- 제품 수정·빌드·설치·재시작·게시 없음. 병행 작업의 뷰어/버전/사건 문서 변경은 보존. 기준 HEAD8bc9d1c+워킹트리, 조사 중55c93c0 도착은 목록에 구분.
+- 다음: 원장 우선순위별 복구/대상/입력 경계 수정과 장애 주입 행동 검증. 현재 Git MCP 도구 부재로 규정된 커밋은 미실행; CLI 우회 및 push 없음.
+
+### 2026-09-12 게임 원격 수정안·출시 준비 — Codex 직접 조사 완료
+
+- 목표: 사용자 지시에 따라 다른 GMux 작업 세션을 사용하지 않고 장애 수정 방향과 출시 전 필요한 작업을 직접 검토.
+- 변경: docs/release_readiness_2026-09-12.md, docs/incident_2026-09-12_code_review.md, docs/incident_2026-09-12_remote_game.md, docs/구현계획.md 및 본 이력.
+- 결과: R01~R12 수정안/보존 조건/검증 기준과 순서 정리. 반복 watchdog의 4회째 12초 backoff, 세션 로그 식별 부재, control alive와 영상 freshness 차이, 동시 viewer 전역 상태 위험을 추가 기록.
+- 검증: 기존 summarize_wan_capture.ps1을 합성 로그 2종으로 직접 실행. 표시 0+멈춤 필드 누락은 Gate A PASS=True, 멈춤 필드 3인 음성 대조는 False. 판정기 단위 재현이며 실제 게임 성능 시험 아님. 문서 diff 공백 검사 수행.
+- 다음: R10 계측/판정기 보강 → R01 최소 수정 → 입력/수신/표시 경계 개선 → 캡처/복구/품질 → 제품 동시 접속/장시간/출시 검증. 이 기록은 문서 작업 완료이며 제품 수정 완료가 아님.
+- 사용자 상대 선택 대기는 철회됨. 외부 에이전트 연락·제품 수정·설치·배포 없음. Git MCP 미제공으로 커밋 없음, push 미실행. 다른 세션이 편집 중인 파일은 보존.
+
+### 2026-09-12 격리 브랜치 게임 원격 안정화 수정 후보
+
+- 목표: 사용자 직접 수행 지시에 따라 멈춤·반복 드래그·정적 타이핑·프레임/화질 저하의 확인된 코드 경로 수정.
+- 위치: fix/remote-game-stability, .claude/worktrees/remote-game-stability, 전용 build-incident. 기준 035c4a44998bfae82049f5d1afe62d3b6b8fb299. 다른 작업 트리 제품 변경/배포 없음.
+- 변경: Viewer UP 우선 해제, 입력 wake/유한 우선 burst, 독립 UDP ingress, decode 진척 기반 혼잡 판단, 이벤트 기반 UI 대기. Host 최신 GPU 픽셀 보존/소비 pacing, 원본 geometry 전달, 2프레임 tail kick, DXGI wedge 후 WGC 격리, stale ABR 승급 차단. 세션 로그 식별/남은 연결 문구, decode wedge 종료 판정, WAN gate 근거 누락/표시 실패/stutter 거부. 상세 파일과 해시는 build-incident/candidate-manifest.json 및 docs/remote_game_stability_implementation_2026-09-12.md.
+- 검증: Host/Client/Stream/Viewer Release 빌드 성공. 자동 검증 10개 대상 exit 0, WndProc 41/0(100회 드래그), UDP 복구 통합 PASS, 1080p WARP 마지막 픽셀 PASS, WAN gate 5가지 양성/음성 대조 통과. 실제 Viewer 1080p60 loopback 화면 확인: 대부분 recv/decode/present 60, gap p95 33.610ms/p99 37.873ms/max 61.423ms, 100ms 초과 0(초기 제외 527표본). 약 10초 시험이며 게임/WAN/장시간 SLA 대체 아님.
+- 기존 S9의 UI 지연→decoder reset 기대는 새 요구와 반대여서 참조 체인 유지 검증으로 교체. 실제 loss/IDR 재시도 회귀 유지. 숨김 Viewer의 present 0 실행은 표시 검증 무효로 구분.
+- 다음: 실제 장애 GPU/게임·한글/영문·동시 세션·장시간/WAN, WGC 전환 실기 및 별도 후보 검토. 드라이버 내부 원인·무중단 broker 분리는 미해결. 현재는 코드 후보/격리검증 통과이며 모든 현장 장애 해결 아님.
+- 버전 문자열 0.2.123 유지, 서명/새 버전 배포/설치/merge/push 없음. Git MCP 미제공으로 새 커밋 없음. 사용자 설치본과 후보는 파일 해시로 구분.
+
+### 2026-09-13 안정화 후보 검증용 review 보수 (t-nbc17io0, revision 2)
+
+- 목표: 검증용 Claude 독립 검토의 A/B 문서 merge blocker 및 D/E/F/G 권고 보수. main merge/배포는 별도.
+- 변경: history/계획 두 쪽 추가분 보존, F-23 ledger 현행화. UDP WSAEINTR 재시도·짧은 소비 버퍼 drop 계측, 스레드 소유권 주석, Windows 환경 snapshot/복원 및 회귀. docs/remote_game_stability_review_2026-09-13.md에 항목별 결정 기록.
+- 검증: Viewer/Host 및 대상 테스트 빌드 성공. ingress/환경 snapshot exit 0, WndProc 42/0, gate 음성/양성 대조 기대 종료 코드 일치. 검증용에게 revision 2 재검토 예정이며 이 수치는 Codex 직접 실행 결과.
+- 후보 기준만 main의 문서 전용 1261ef5로 전진, working file 해시 보존. 주 작업 트리·main 포인터 무변경. 다른 감사 작업 이력 삭제 없음.
+- 다음: 같은 task의 최종 merge 판정. C(실 GPU 부하)는 배포 blocker 유지, H(정상 시간 후 자동 DXGI 재진입)는 원인 미확정으로 도입하지 않음. commit/merge/서명/배포/push 미실행.
+### 2026-09-13 안정화 후보 독립 검토 완료 — MERGE_OK, 배포 보류
+
+- 목표: 검증용 Claude를 통한 최종 main 머지 가능 여부 검토와 보수 조건 확인.
+- 결과: t-nbc17io0 검증용 revision 2 독립 빌드/실행 11개 타깃 모두 exit 0, WndProc 42/0, gate 음성 대조 확인. 최종 조건은 history UTF-8 BOM 3바이트 복원뿐이며 그 외 재검토 불필요.
+- Codex 확인: EF BB BF 복원·본문 바이트 동일·검토본 대비 소스45/제품exe4 해시 변화0·주 트리 무변경 확인. 검토 대상 manifest 25a48831...와 모든 파일을 build-incident/approved-review-r2에 불변 보존.
+- 변경: 이력/계획 판정 상태와 docs/remote_game_stability_merge_verdict_2026-09-13.md에 최종 근거 기록. 제품 코드/바이너리 추가 변경 없음.
+- 판정: clean main worktree 통합 기준 MERGE_OK. C(실 GPU 부하) 미측정으로 배포는 보류. 실제 commit/merge/설치/게시/push 없음, Git MCP 미제공으로 새 커밋 없음.
+- 다음: 사용자 병합 지시가 있으면 승인된 코드/해시와 main 이동 여부를 확인해 통합. 배포 전 GPU 부하 및 실기/WAN/다중 세션/장시간 검증은 별도.
+### 2026-09-14 0.2.124 기존 채널 비상용 실기 배포 준비
+
+- 사용자 지시: 아직 상용 전이며 롤백 전제로 기존 업데이트 경로에서 편하게 시험. 별도 시험 링크만 제공하는 방식 대신 Windows 채널 게시 준비. C(GPU 부하)는 해결이 아니라 이번 실기 확인 대상으로 유지.
+- 변경: 승인 안정화 소스45개는 hash delta 0, product_version.hpp 0.2.123→0.2.124. 배포 스크립트는 NAS lock 기록 이동/부분 교체 실패 문구/임시 파일 repo 내부 제한/dry-run lock 생략 보수. docs/release_0.2.124_field_trial.md 및 .claude/rel/0.2.124/release-report.json에 근거.
+- 빌드/검증: installer Release 빌드, payload10/10 및 embedded RCDATA9/9, 운영키 manifest selfVerify·제품 verifier Ok/변조 거부. manifest85/0·effects219/0·실제 업데이트 UI27/0. 지정 fixture109-r2 배포 스크립트 회귀 PASS. signed fixture의 CRLF 변환 최초 실패는 보존하고 Git LF 원문으로 맞춰 재검증.
+- 복구 준비: NAS 0.2.123 manifest/sig/payload10을 보존·검증. 인증된 HTTPS API200/version123 및 서명 확인. 채널 복구 스크립트 준비; 이미 설치한 앱은 이전 Setup의 Reinstall 단계가 별도이며 실제 downgrade는 미실행.
+- 다음: 검증용 t-kw1maaaa에 고정 package manifest dfbcc4b3...와 sig73ef2827... 전달, 기존 채널 비상용 실기 게시 OK 대기. 확인 후 자동 NAS 게시와 외부 API/파일/서명 검증을 이어감. 현재 채널123, 게시·설치·main merge·push 없음. Git MCP 없어 commit미실행; build commit을 기준 commit으로 꾸미지 않음.
+- 0.2.124 SCM 보완: Git MCP bridge로 후보 worktree 커밋 가능함을 확인. Codex가 scoped commit하고 고정 패키지와 연결한다. dist/GNLinkSetup-0.2.124.exe는 검토 payload와 동일한 사본이다.

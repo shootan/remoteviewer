@@ -180,6 +180,15 @@ int main() {
   }
 
   if (gFailures == 0) {
+    auto wedged = healthy(now);
+    wedged.stage = RecvStage::Decode;
+    wedged.stageEnterUs = now - 6 * kS;
+    wedged.lastPublishUs = now - 6 * kS;
+    CHECK(evaluate_session_liveness(wedged, cfg).sessionDead);
+    wedged.stage = RecvStage::Recv; // a normally idle source is not a decoder wedge
+    CHECK(!evaluate_session_liveness(wedged, cfg).sessionDead);
+  }
+  if (gFailures == 0) {
     std::printf("viewer_liveness_test: PASS\n");
     return 0;
   }

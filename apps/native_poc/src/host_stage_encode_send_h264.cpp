@@ -151,25 +151,23 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
   // EVERY frame of an interactive window drag, and apply_encoder_target tears the MFT
   // down, so two guards keep this from thrashing: the geometry must hold steady for a
   // settle period, and near-identical aspect (letterboxing under 2%) is left alone.
-  if (!servedBootstrap && w > 0 && h > 0 && (w != encoder.encodeSourceW || h != encoder.encodeSourceH)) {
+  // The readback payload may already be ABR-scaled. Never feed that reduced size back as
+  // the original source: doing so makes a later high profile permanently fit the 720p payload.
+  const uint32_t contentW = tc.contentWidth ? tc.contentWidth : w;
+  const uint32_t contentH = tc.contentHeight ? tc.contentHeight : h;
+  if (!servedBootstrap && contentW > 0 && contentH > 0 && (contentW != encoder.encodeSourceW || contentH != encoder.encodeSourceH)) {
     const uint64_t nowRefitUs = qpc_now_us();
-    if (w != encoder.pendingRefitW || h != encoder.pendingRefitH) {
-      encoder.pendingRefitW = w;
-      encoder.pendingRefitH = h;
+    if (contentW != encoder.pendingRefitW || contentH != encoder.pendingRefitH) {
+      encoder.pendingRefitW = contentW;
+      encoder.pendingRefitH = contentH;
       encoder.pendingRefitSinceUs = nowRefitUs;
     } else if (nowRefitUs - encoder.pendingRefitSinceUs >= kEncodeRefitSettleUs) {
       uint32_t refitW = encoder.activeEncodeW;
       uint32_t refitH = encoder.activeEncodeH;
-      fit_size_preserving_aspect(w, h, encoder.nominalEncodeW, encoder.nominalEncodeH, &refitW, &refitH);
-      const double activeAspect =
-          static_cast<double>(encoder.activeEncodeW) / static_cast<double>(std::max(1u, encoder.activeEncodeH));
-      const double refitAspect =
-          static_cast<double>(refitW) / static_cast<double>(std::max(1u, refitH));
-      const bool aspectClose =
-          std::abs(refitAspect - activeAspect) <= activeAspect * 0.02;
-      encoder.encodeSourceW = w;
-      encoder.encodeSourceH = h;
-      if ((refitW != encoder.activeEncodeW || refitH != encoder.activeEncodeH) && !aspectClose) {
+      fit_size_preserving_aspect(contentW, contentH, encoder.nominalEncodeW, encoder.nominalEncodeH, &refitW, &refitH);
+      encoder.encodeSourceW = contentW;
+      encoder.encodeSourceH = contentH;
+      if ((refitW != encoder.activeEncodeW || refitH != encoder.activeEncodeH)) {
         const uint32_t prevW = encoder.activeEncodeW;
         const uint32_t prevH = encoder.activeEncodeH;
         const uint32_t keepNominalW = encoder.nominalEncodeW;
@@ -177,13 +175,13 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
         if (encoder.ApplyTarget(capture, res, frameGating, inputRouter, sender, keepNominalW, keepNominalH, encoder.activeFps, encoder.activeBitrate,
                                  encoder.activeKeyint)) {
           encoder.forceKeyNext = true;
-          std::cout << "[native-video-host] encode-refit source=" << w << "x" << h
+          std::cout << "[native-video-host] encode-refit source=" << contentW << "x" << contentH
                     << " encode=" << prevW << "x" << prevH << " -> " << encoder.activeEncodeW << "x"
                     << encoder.activeEncodeH << "\n";
         } else {
           // apply_encoder_target already shut the encoder down; without a working encoder
           // every later frame fails silently, so treat this like the other callers do.
-          std::cerr << "[native-video-host] encode-refit failed source=" << w << "x" << h
+          std::cerr << "[native-video-host] encode-refit failed source=" << contentW << "x" << contentH
                     << "; stopping stream\n";
           return Flow::Break;
         }
@@ -386,7 +384,7 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     // deadline always trails the LAST real input -- continuous motion keeps pushing it out and
     // adds zero synthetic frames; only a genuine pause lets the kick fire to flush this frame.
     kick.lastRealInputCaptureUs = encodeInputUs;
-    kick.Arm(qpc_now_us(), useH264);
+    kick.Arm(qpc_now_us(), useH264, hx.encoder.activeFps);
   }
   while (!encoder.nv12PendingReleases.empty() &&
          encoder.nv12PendingReleases.front().requiredOutputs <= encoder.outputSamplesTotal) {

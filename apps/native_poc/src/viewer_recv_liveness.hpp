@@ -98,6 +98,7 @@ struct SessionLivenessConfig {
   uint64_t stallUs = 2000000;        // the recv thread inside one stage this long = stalled
   uint64_t silentLinkUs = 3000000;   // no datagram this long while control is up = silent link
   uint64_t deadSessionUs = 5000000;  // control gone AND no publish this long = dead; 0 = never
+  uint64_t processingWedgeUs = 5000000; // ingress may keep control alive while MFT/publish is wedged
 };
 
 struct SessionLivenessVerdict {
@@ -138,6 +139,9 @@ inline SessionLivenessVerdict evaluate_session_liveness(const SessionLivenessSam
                             (s.lastPublishUs == 0) || (v.publishAgeUs >= c.deadSessionUs);
   v.sessionDead = c.deadSessionUs > 0 && controlGone && v.controlGoneUs >= c.deadSessionUs &&
                   videoStopped;
+  const bool processing = s.stage == RecvStage::Decode || s.stage == RecvStage::Publish;
+  if (processing && c.processingWedgeUs > 0 && v.stageAgeUs >= c.processingWedgeUs &&
+      v.publishAgeUs >= c.processingWedgeUs) v.sessionDead = true;
   return v;
 }
 

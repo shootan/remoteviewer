@@ -38,6 +38,11 @@ void TestArmDueCancel() {
   expect(!k.pending && k.dueAtUs == 0 && !k.Due(100 * kSec), "kick: cancel disarms");
   KickState raw;
   raw.Arm(5 * kSec, false);
+  KickState typing;
+  typing.Arm(5 * kSec, true, 60);
+  expect(typing.dueAtUs == 5 * kSec + 33333, "typing: 60fps tail is released after two frames, not 150ms");
+  typing.Arm(5 * kSec, true, 30);
+  expect(typing.dueAtUs == 5 * kSec + 66666, "typing: 30fps tail leaves room for the next real frame");
   expect(!raw.pending, "kick: raw mode never arms");
 }
 

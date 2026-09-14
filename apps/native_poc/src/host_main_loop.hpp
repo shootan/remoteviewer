@@ -156,6 +156,8 @@ struct TickContext {
   std::shared_ptr<std::vector<uint8_t>> payload;
   uint32_t seq = 0;
   uint32_t w = 0;
+  uint32_t contentWidth = 0;
+  uint32_t contentHeight = 0;
   uint32_t h = 0;
   uint32_t stride = 0;
   uint64_t streamGeneration = 0;

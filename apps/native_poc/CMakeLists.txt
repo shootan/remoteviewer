@@ -1637,3 +1637,11 @@ target_include_directories(remote60_udp_control_channel_test PRIVATE
 target_link_libraries(remote60_udp_control_channel_test PRIVATE
   ws2_32
 )
+
+add_executable(remote60_viewer_udp_ingress_test src/viewer_udp_ingress_test.cpp)
+target_link_libraries(remote60_viewer_udp_ingress_test PRIVATE ws2_32)
+
+add_executable(remote60_capture_final_update_test src/d3d_capture_readback.cpp src/capture_final_update_test.cpp)
+target_link_libraries(remote60_capture_final_update_test PRIVATE d3d11 dxgi)
+
+add_executable(remote60_windows_environment_snapshot_test src/windows_environment_snapshot_test.cpp)

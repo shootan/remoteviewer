@@ -231,6 +231,11 @@ void TestAbrStaticRecoveryPromotesFromLow() {
   stillBad.clAvgLatencyUs = 200000;  // congested: sparseHealthy false, no recovery
   const int pb = RunAbr(bad, stillBad, kStartUs + 3 * kSec, 12);
   expect(pb == 2, "abr(P4): static screen with high latency does not recover");
+  RateControlState stale = MakeAbr(false);
+  stale.abrProfile = 2;
+  still.metricsFresh = false;
+  expect(RunAbr(stale, still, kStartUs + 3 * kSec, 20) == 2,
+         "abr: missing feedback is not evidence to increase traffic on a quiet link");
 }
 
 // P6: sustained client packet loss is congestion evidence on its own, even when latency and fps

@@ -420,7 +420,7 @@ void ControlClient::Run() {
       if (fetched < 0) break;
       didWork = (fetched > 0);
     }
-    if (!didWork) Sleep(2);
+    if (!didWork) ctx.control.inputQueue.WaitForInput(2);
   }
   ctx.control.connected.store(false, std::memory_order_relaxed);
   // Host-IME: control is gone, so restore the local IME and stop physical routing on the UI thread.
