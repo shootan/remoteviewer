@@ -14,6 +14,7 @@
 #include "viewer_picker.hpp"
 
 #include "viewer_unlock.hpp"
+#include "peer_version.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -200,6 +201,10 @@ void ControlClient::Run() {
   uint64_t p0LastEmitUs = 0;
   uint64_t p0LastMoveGen = 0;
   uint64_t p0LastCoalesced = 0;
+  bool versionReported = false;
+  bool versionExchangeFailed = false;
+  log_client_line(ctx, "[native-video-client][connection-version] localProcess=GNLinkViewer localVersion=" +
+                      local_product_version() + " peerProcess=GNLinkStream peerVersion=unknown-awaiting-pong");
 
   while (ctx.session.running.load()) {
     // Drives retransmission and gap recovery; cheap when there is nothing outstanding.
@@ -419,6 +424,15 @@ void ControlClient::Run() {
       switch (response.kind) {
         case TcpControlResponseKind::Pong: {
           handle_pong(action, response.pong);
+          if (!versionReported) {
+            versionReported = true;
+            std::string peer;
+            const bool supported = (response.pong.captureTargetFlags & kCaptureFlagPeerVersion) != 0;
+            versionExchangeFailed = !exchange_peer_version(*controlLink, supported, response.pong.seq, &peer);
+            log_client_line(ctx, "[native-video-client][connection-version] localProcess=GNLinkViewer localVersion=" +
+                                local_product_version() + " peerProcess=GNLinkStream peerVersion=" + peer +
+                                " peerVersionSource=" + (supported ? "peer-report" : "unsupported"));
+          }
           break;
         }
         case TcpControlResponseKind::WindowList: {
@@ -439,6 +453,7 @@ void ControlClient::Run() {
         default:
           break;
       }
+      if (versionExchangeFailed) break;  // A failed framed exchange cannot safely reuse the stream.
     }
 
     if (!didWork && ctx.picker.visible.load(std::memory_order_relaxed)) {

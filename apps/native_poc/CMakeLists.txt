@@ -1646,6 +1646,8 @@ target_link_libraries(remote60_capture_final_update_test PRIVATE d3d11 dxgi)
 
 add_executable(remote60_windows_environment_snapshot_test src/windows_environment_snapshot_test.cpp)
 add_executable(remote60_host_diagnostic_log_test src/host_diagnostic_log_test.cpp)
+add_executable(remote60_peer_version_test src/peer_version_test.cpp src/udp_control_channel.cpp)
+target_link_libraries(remote60_peer_version_test PRIVATE ws2_32)
 if(MSVC)
   target_compile_options(remote60_host_diagnostic_log_test PRIVATE /utf-8)
 endif()

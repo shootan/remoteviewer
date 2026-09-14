@@ -11812,3 +11812,8 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 목표/변경: 반복 타이핑지연·게임정지 원인분리 계측을 실제사용가능하게 게시. 코드94e4d8d, 상세 docs/diagnostic_latency_2026-09-14.md.
 - 검증: 검증용r2 코드/패키지OK, gnlink배포rc0, NAS·공개10개hash, 인증API200/version125, 제품서명OK·변조거부 확인. 124pair서버백업+로컬전체복구본 확보.
 - 다음: 양쪽PC125업데이트후 타이핑/게임 재현시각으로 단계별로그 조사. 배포마일스톤완료/실기미확인. 자동설치·재시작·mainmerge·push없음.
+
+### 2026-09-14 연결별 Viewer/Stream 버전 교환 — 0.2.126
+- 목표: 연결할 때 실제 양쪽 실행 버전을 서로 보내고 로그에 남긴다. peer_version.hpp·poc_protocol·host/viewer control 및 host 진단mirror·전용테스트 추가.
+- 검증: 구버전 무전송/기존패킷크기/seq·size 오류/로그주입차단/실제loopback TCP 버전교환 PASS. 독립검토·설치기빌드 진행.
+- 다음: 고정패키지 검증/기존채널 게시 후 양쪽126 업데이트. 회사11:30 health=124와 11:35실행버전 추정을 구분. docs/connection_version_logging.md. mainmerge/push/자동설치 없음.

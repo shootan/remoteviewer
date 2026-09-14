@@ -34,6 +34,7 @@ class HostDiagnosticLog {
   }
   static bool Accept(const std::string& line) {
     return line.rfind("[native-video-host] wire seq=", 0) == 0 ||
+           line.rfind("[native-video-host][connection-version]", 0) == 0 ||
            line.rfind("[native-video-host][capture-timing]", 0) == 0 ||
            line.rfind("[native-video-host][input-timing]", 0) == 0 ||
            line.rfind("[native-video-host] encodedFrames=", 0) == 0;

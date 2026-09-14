@@ -49,6 +49,9 @@ enum class MessageType : uint16_t {
   // kCaptureFlagHostImePulseStateV2 so an old v1 host never sees these (it would drop them silently).
   ControlImeStateRequest = 47,
   ControlImeStateResponse = 48,
+  // Sent only after kCaptureFlagPeerVersion is advertised in a regular Pong.
+  ControlVersionRequest = 49,
+  ControlVersionResponse = 50,
 };
 
 enum class UdpPacketKind : uint16_t {
@@ -187,6 +190,13 @@ constexpr uint32_t kCaptureFlagHostImeV1 = 0x10u;
 // features only when this is advertised; a v1-only host falls back to legacy client-side IME so the
 // new viewer never strands a make-only key or blocks on a state request an old host cannot answer.
 constexpr uint32_t kCaptureFlagHostImePulseStateV2 = 0x20u;
+constexpr uint32_t kCaptureFlagPeerVersion = 0x40u;
+
+struct ControlVersionMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  char productVersion[32] = {};
+};
 
 struct ControlPongMessage {
   MessageHeader header{};

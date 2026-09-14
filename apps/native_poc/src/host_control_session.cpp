@@ -34,6 +34,7 @@
 #include "host_string_util.hpp"
 #include "host_window_enum.hpp"
 #include "poc_protocol.hpp"
+#include "peer_version.hpp"
 #include "time_utils.hpp"
 
 namespace remote60::native_poc {
@@ -215,6 +216,10 @@ void ControlSessionServer::Serve(ControlLink& link) {
     }
     physicalDown.clear();
   };
+  std::cout << "[native-video-host][connection-version] localProcess=GNLinkStream"
+            << " localVersion=" << local_product_version()
+            << " localPid=" << GetCurrentProcessId()
+            << " peerProcess=GNLinkViewer peerVersion=unknown-awaiting-exchange\n";
   while (!stop.load()) {
     MessageHeader header{};
     if (!link.Read(&header, sizeof(header))) break;
@@ -223,6 +228,19 @@ void ControlSessionServer::Serve(ControlLink& link) {
     if (header.magic != remote60::native_poc::kMagic || header.size < sizeof(header)) break;
     const size_t bodySize = static_cast<size_t>(header.size - sizeof(header));
     const auto type = static_cast<MessageType>(header.type);
+
+    if (type == MessageType::ControlVersionRequest && header.size == sizeof(ControlVersionMessage)) {
+      ControlVersionMessage request{};
+      if (!link.Read(&request.seq, sizeof(request) - sizeof(MessageHeader))) break;
+      std::cout << "[native-video-host][connection-version] localProcess=GNLinkStream"
+                << " localVersion=" << local_product_version()
+                << " localPid=" << GetCurrentProcessId()
+                << " peerProcess=GNLinkViewer peerVersion=" << reported_peer_version(request.productVersion)
+                << " peerVersionSource=peer-report seq=" << request.seq << "\n";
+      const auto response = make_version_message(MessageType::ControlVersionResponse, request.seq);
+      if (!link.Write(&response, sizeof(response))) break;
+      continue;
+    }
 
     if (type == MessageType::ControlPing && header.size == sizeof(ControlPingMessage)) {
       ControlPingMessage ping{};
@@ -252,6 +270,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
       pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagHostImeV1;
       // v2: this host understands the make-only (Hangul/Hanja) pulse flag and the ImeState handshake.
       pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagHostImePulseStateV2;
+      pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPeerVersion;
       pong.captureRebindCount = target.rebindCount;
       pong.captureTargetHwnd = target.targetHwnd;
       std::snprintf(pong.captureTargetProcess, sizeof(pong.captureTargetProcess), "%s",
