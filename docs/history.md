@@ -11827,3 +11827,11 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 변경: child_environment.hpp, host_recovery_policy.hpp, recovery_process_test.cpp; 필요한 공유 파일 부분 변경과 CMake.
 - 검증: 해당 단계 소스에서 Release 빌드(remote60_host_app, remote60_recovery_process_test) 및 관련 실행 1개 종료0. 증거 `.claude/split-08-results.json`. 기존 전체 실기 미검증과 release manifest pin 미완료는 유지.
 - 다음: 다음 의존 단계 구성·검증. 메인 머지·push·배포 없음.
+
+
+### 2026-09-14 Native 커밋 분리 09 — observe 재시도·주소 snapshot·소켓 영구 오류
+
+- 목표: 백업 `backup/host-pc-recovery-daacbb2`의 변경을 의존성 순서로 재구성. 새 기능 추가나 배포가 아니다.
+- 변경: directory_client.cpp, host_startup_control.cpp; 필요한 공유 파일 부분 변경과 CMake.
+- 검증: 해당 단계 소스에서 Release 빌드(remote60_host_app, remote60_native_video_host_poc, remote60_directory_retry_test, remote60_directory_session_client_test) 및 관련 실행 2개 종료0. 증거 `.claude/split-09-results.json`. 기존 전체 실기 미검증과 release manifest pin 미완료는 유지.
+- 다음: 다음 의존 단계 구성·검증. 메인 머지·push·배포 없음.
