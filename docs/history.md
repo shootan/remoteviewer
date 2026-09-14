@@ -11763,3 +11763,11 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 시험 기반: 새 worktree의 CRLF 변환으로 서명 fixture가 깨진4건을 확인, Git 원본 바이트 복원 및 `.gitattributes` exact-byte 규칙 후 전량 통과. 검증 키·서명·프로토콜을 약화시키지 않았다.
 - Git: Git MCP 없는 작업 방식 설명 후 사용자가 신규 브랜치의 직접 전체 수정을 요청한 흐름에 따라 `audit/host-pc-recovery`에서 로컬 CLI를 사용한다. 기존 공유 정책 파일 변경·push·NAS 게시·서비스 재시작 없음.
 - 다음: Host/PC Native·UI/pipe/process 회귀 및 사용자 행동 검증, 고정 후보 검토. 이 커밋이 전체36건 완료나 배포 완료라는 뜻은 아니다.
+
+
+### 2026-09-14 Native 커밋 분리 01 — QPC overflow와 MSVC 빌드 옵션
+
+- 목표: 백업 `backup/host-pc-recovery-daacbb2`의 변경을 의존성 순서로 재구성. 새 기능 추가나 배포가 아니다.
+- 변경: d3d_capture_readback.cpp; 필요한 공유 파일 부분 변경과 CMake.
+- 검증: 해당 단계 소스에서 Release 빌드(remote60_native_video_host_poc) 및 관련 실행 0개 종료0. 증거 `.claude/split-01-results.json`. 기존 전체 실기 미검증과 release manifest pin 미완료는 유지.
+- 다음: 다음 의존 단계 구성·검증. 메인 머지·push·배포 없음.

@@ -12,6 +12,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # MSVCP140/VCRUNTIME140 and fails in the loader -- before reaching main, so it cannot even
 # report why. Every library in this tree is static, so there is no cross-module CRT to share.
 if(MSVC)
+  add_compile_options(/utf-8 /EHsc /MP2)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
