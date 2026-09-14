@@ -40,6 +40,7 @@
 #include <thread>
 #include "bounded_process_exit.hpp"
 #include "host_recovery_policy.hpp"
+#include "async_worker_group.hpp"
 #include "child_environment.hpp"
 #include <vector>
 
@@ -199,6 +200,7 @@ void append_host_app_log(const std::string& line) {
 // data: the worker must not reach into shared state, and the UI thread is the only writer of
 // g.cache. (Ledger H-07.)
 struct SignInResult {
+  uint64_t requestEpoch = 0;
   bool ok = false;
   std::string url;
   std::string account;
@@ -793,6 +795,10 @@ struct AppState {
 };
 
 AppState g;
+remote60::native_poc::AsyncWorkerGroup& host_workers() {
+  static remote60::native_poc::AsyncWorkerGroup workers([] { PostMessageW(g.window, WM_APP + 7, 0, 0); });
+  return workers;
+}
 
 void relayout();
 
@@ -1261,7 +1267,7 @@ void start_update_handoff(HWND window) {
   //
   // The process handle travels with it and is closed here, not before: the handle is what pins
   // the process id the channel's check compares against.
-  std::thread([window, readyEvent, ackEvent, bootstrap = pi.hProcess,
+  host_workers().Launch([window, readyEvent, ackEvent, bootstrap = pi.hProcess,
                readyName = spec.readyEventName, launchEndpoint, credentialServer,
                pipeName = spec.credentialPipeName]() {
     if (!pipeName.empty()) {
@@ -1315,7 +1321,7 @@ void start_update_handoff(HWND window) {
     PostMessageW(window, kUpdateHandoffDoneMessage,
                  static_cast<WPARAM>(step == upd::HandoffStep::ExitNow),
                  reinterpret_cast<LPARAM>(detail));
-  }).detach();
+  });
 }
 
 void start_streaming() {
@@ -1369,6 +1375,9 @@ void perform_sign_in() {
   // Remember where they were signing in to before knowing whether it worked; retyping the
   // server address after every failed attempt is needless. The token goes with the account it
   // was issued for, so it is dropped when either the account or the server changes.
+  uint64_t requestEpoch = 0;
+  {
+    std::lock_guard<std::mutex> lock(g.ownerMu);
   if (g.cache.accountId != account ||
       directory::directory_origin_key(g.cache.directoryUrl) !=
           directory::directory_origin_key(url)) {
@@ -1379,6 +1388,8 @@ void perform_sign_in() {
   g.cache.accountId = account;
   g.cache.hostName = hostName;
   g.cache.machineId = directory::machine_id();
+    requestEpoch = ++g.ownerEpoch;
+  }
   (void)directory::save_host_cache(g.cachePath, g.cache);
 
   set_status(creating ? L"Creating the account..." : L"Signing in...");
@@ -1392,15 +1403,16 @@ void perform_sign_in() {
   // That is a data race on std::string, not just a stale read, and it was not covered by the
   // "don't touch windows from a worker" rule the old comment stated. Now the UI thread performs
   // every g.cache write and the disk save, in the WM_APP+2 handler. (Ledger H-07.)
-  std::thread([url, account, password, hostName, creating, signupKey]() {
+  host_workers().Launch([url, account, password, hostName, creating, signupKey, requestEpoch]() {
     auto* result = new SignInResult{};
+    result->requestEpoch = requestEpoch;
     result->url = url;
     result->account = account;
     result->hostName = hostName;
     std::string error;
     if (creating && !directory::create_account(url, account, password, signupKey, &error)) {
       result->error = widen(error);
-      PostMessageW(g.window, WM_APP + 2, 0, reinterpret_cast<LPARAM>(result));
+      if (!PostMessageW(g.window, WM_APP + 2, 0, reinterpret_cast<LPARAM>(result))) delete result;
       return;
     }
     result->ok = directory::register_host(url, account, password, hostName,
@@ -1408,13 +1420,12 @@ void perform_sign_in() {
                                           &result->hostToken, &error);
     result->machineId = directory::machine_id();
     result->error = widen(error);
-    PostMessageW(g.window, WM_APP + 2, result->ok ? 1 : 0, reinterpret_cast<LPARAM>(result));
-  }).detach();
+    if (!PostMessageW(g.window, WM_APP + 2, result->ok ? 1 : 0, reinterpret_cast<LPARAM>(result))) delete result;
+  });
 }
 
 
 void sign_out(bool keepAccount) {
-  g.streaming.Stop();
   {
     std::lock_guard<std::mutex> lock(g.ownerMu);
     g.cache.hostToken.clear();
@@ -1424,6 +1435,9 @@ void sign_out(bool keepAccount) {
     // signed in would still be acknowledged -- after the user had signed out.
     ++g.ownerEpoch;
   }
+  g.signInBusy.store(false);
+  EnableWindow(g.signInButton, TRUE);
+  g.streaming.Stop();  // owner invalidation must precede this potentially slow stop
   (void)directory::save_host_cache(g.cachePath, g.cache);
   // The token is gone; so is the owner of whatever the uploader still holds.
   remote60::native_poc::log_upload_clear_credentials("signed out");
@@ -1920,18 +1934,19 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
       // value; every g.cache mutation and the disk save happen here, on the UI thread, so the
       // strings the status timer and the tray tip read have exactly one writer. (Ledger H-07.)
       std::unique_ptr<SignInResult> result(reinterpret_cast<SignInResult*>(lParam));
+      { std::lock_guard<std::mutex> lock(g.ownerMu);
+        if (result && result->requestEpoch != g.ownerEpoch) return 0; }
       g.signInBusy.store(false);
       EnableWindow(g.signInButton, TRUE);
       if (result && result->ok) {
+        {
+        std::lock_guard<std::mutex> lock(g.ownerMu);
         g.cache.directoryUrl = result->url;
         g.cache.accountId = result->account;
         g.cache.machineId = result->machineId;
         g.cache.hostName = result->hostName;
         g.cache.hostId = result->hostId;
-        {
-          std::lock_guard<std::mutex> lock(g.ownerMu);
-          g.cache.hostToken = result->hostToken;
-          ++g.ownerEpoch;
+        g.cache.hostToken = result->hostToken;
         }
         // A fresh sign-in changes the answer to "is a directory reachable", so the report is
         // renewed rather than left saying what was true before signing in.
@@ -1979,7 +1994,12 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
       ShowWindow(window, SW_HIDE);
       return 0;
 
+    case WM_APP + 7:
+      g.signInBusy.store(false); EnableWindow(g.signInButton, TRUE);
+      set_status(L"작업 중 오류가 발생했습니다. 다시 시도해 주세요.");
+      return 0;
     case WM_DESTROY: {
+      { std::lock_guard<std::mutex> lock(g.ownerMu); ++g.ownerEpoch; }
       KillTimer(window, kStatusTimer);
       // Ordinarily a no-op by now: the handoff path above already stopped it. Still reported,
       // because "already stopped, no child" and "a child is somehow still alive" are different
@@ -2102,5 +2122,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR commandLine, int) {
     }
   }
 
-  return 0;  // uploaderShutdown -> uiScope -> wsaScope, in that order
+  { std::lock_guard<std::mutex> lock(g.ownerMu); ++g.ownerEpoch; }
+  host_workers().Shutdown();
+  return 0;  // workers joined before uploaderShutdown -> uiScope -> wsaScope
 }

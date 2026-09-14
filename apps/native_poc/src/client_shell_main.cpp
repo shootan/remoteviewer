@@ -36,6 +36,7 @@
 #include "WebView2.h"
 #include "client_shell_bridge.hpp"
 #include "client_update_gate.hpp"
+#include "async_worker_group.hpp"
 #include "env_util.hpp"
 #include "update_check.hpp"
 #include "update_credential_channel.hpp"
@@ -57,6 +58,21 @@ constexpr wchar_t kWindowClass[] = L"GNLinkClientShell";
 ComPtr<ICoreWebView2Controller> gController;
 ComPtr<ICoreWebView2> gWebView;
 HWND gWindow = nullptr;
+std::atomic<bool> gClosing{false};
+void post_status(const std::string& state, const std::string& detail);
+void post_ui(std::function<void()> action);
+AsyncWorkerGroup gWorkers([] { post_ui([] { post_status("error", "작업 중 오류가 발생했습니다. 다시 시도해 주세요."); }); });
+std::atomic<bool> gUpdateHandoffActive{false};
+constexpr UINT_PTR kUpdateRetryTimer = 88;
+uint32_t gUpdateRetryAttempts = 0;
+uint64_t gViewerOperation = 0;  // UI thread only: stale child exits cannot change a newer session
+
+
+void post_ui(std::function<void()> action) {
+  if (gClosing.load(std::memory_order_acquire)) return;
+  auto* payload = new std::function<void()>(std::move(action));
+  if (!PostMessageW(gWindow, WM_APP + 2, 0, reinterpret_cast<LPARAM>(payload))) delete payload;
+}
 
 // Guards everything the worker threads write and the UI thread reads.
 std::mutex gStateMu;
@@ -70,7 +86,8 @@ std::string gAccountId;
  * actually handed to an updater -- is a different one. An attempt authorised under the old
  * session must not inherit the new token, and comparing urls cannot see that.
  */
-uint64_t gOwnerEpoch = 0;
+std::atomic<uint64_t> gOwnerEpoch{0};
+struct PostedJson { std::string body; uint64_t epoch; };
 std::string gSessionToken;
 // Defaults chosen for a desktop rather than a phone: this is usually wired or on home Wi-Fi,
 // where the picture is worth more than the bytes. The relay is the exception, and the interface
@@ -272,7 +289,7 @@ void log_line(const std::string& text) {
  * the size cap. Every write, size check, close, rotate and reopen serializes here, and the handle
  * is opened with FILE_SHARE_DELETE so our own sink never pins the rotation rename (an external reader opened without share-delete still can; the next line simply retries the rotate).
  */
-void viewer_log_write_line(const std::string& line) {
+void viewer_log_write_line(const std::string& line, const std::string& identity) {
   static std::mutex mu;
   static HANDLE sink = INVALID_HANDLE_VALUE;
   std::lock_guard<std::mutex> lock(mu);
@@ -297,7 +314,7 @@ void viewer_log_write_line(const std::string& line) {
   char stamp[40]{};
   std::snprintf(stamp, sizeof(stamp), "%02d-%02d %02d:%02d:%02d.%03d ", now.wMonth, now.wDay,
                 now.wHour, now.wMinute, now.wSecond, now.wMilliseconds);
-  remote60::native_poc::log_upload_enqueue("viewer", std::string(stamp) + line);
+  remote60::native_poc::log_upload_enqueue_for_identity("viewer", std::string(stamp) + line, identity);
   if (sink == INVALID_HANDLE_VALUE) return;
   std::string out = std::string(stamp) + line + "\n";
   DWORD wrote = 0;
@@ -312,37 +329,37 @@ void viewer_log_write_line(const std::string& line) {
  * discarded -- exactly the client-side evidence a stutter investigation needed. Runs on its own
  * thread per session; ends when the child exits and the pipe hits EOF.
  */
-void pump_viewer_output_to_log(HANDLE readEnd) {
+void pump_viewer_output_to_log(HANDLE readEnd, const std::string& identity) {
   std::string pending;
   char buffer[1024];
   DWORD read = 0;
-  while (ReadFile(readEnd, buffer, sizeof(buffer), &read, nullptr) && read > 0) {
+  while (!gWorkers.Stopping() && ReadFile(readEnd, buffer, sizeof(buffer), &read, nullptr) && read > 0) {
     pending.append(buffer, read);
     size_t newline;
     while ((newline = pending.find('\n')) != std::string::npos) {
       std::string line = pending.substr(0, newline);
       pending.erase(0, newline + 1);
       if (!line.empty() && line.back() == '\r') line.pop_back();
-      viewer_log_write_line(line);
+      viewer_log_write_line(line, identity);
     }
     if (pending.size() > 8192) {
       // An oversized fragment without a newline: flush rather than drop, so a wedged child's
       // final partial line still reaches the log.
-      viewer_log_write_line(pending);
+      viewer_log_write_line(pending, identity);
       pending.clear();
     }
   }
-  if (!pending.empty()) viewer_log_write_line(pending);  // tail without a trailing newline
+  if (!pending.empty()) viewer_log_write_line(pending, identity);  // tail without a trailing newline
   CloseHandle(readEnd);
 }
 
 /** Pushes one JSON message into the page. Safe to call from any thread. */
 void post_to_page(const std::string& json) {
-  if (!gWindow) return;
+  if (!gWindow || gClosing.load(std::memory_order_acquire)) return;
   // Marshalled onto the UI thread: WebView2 is apartment-threaded and calling it from a worker
   // fails in ways that look like the message was simply ignored.
-  auto* payload = new std::string(json);
-  PostMessageW(gWindow, WM_APP + 1, 0, reinterpret_cast<LPARAM>(payload));
+  auto* payload = new PostedJson{json, gOwnerEpoch.load()};
+  if (!PostMessageW(gWindow, WM_APP + 1, 0, reinterpret_cast<LPARAM>(payload))) delete payload;
 }
 
 void post_status(const std::string& state, const std::string& detail) {
@@ -545,8 +562,18 @@ void start_client_update(const std::string& availableVersion) {
     // check compares against, so it cannot be closed here.
     HANDLE elevated = info.hProcess;
     info.hProcess = nullptr;  // owned by the thread now
-    std::thread([elevated, credentialServer, launchEndpoint, readyEvent, ackEvent,
+    gUpdateHandoffActive.store(true);
+    gWorkers.Launch([elevated, credentialServer, launchEndpoint, readyEvent, ackEvent,
                  readyName = spec.readyEventName]() {
+      struct Completion {
+        ~Completion() {
+          gUpdateHandoffActive.store(false);
+          post_ui([] {
+            { std::lock_guard<std::mutex> lock(gUpdateNoticeMu); gUpdateStarting = false; }
+            post_to_page(shell_update_busy_json(false));
+          });
+        }
+      } completion;
       // Re-read rather than reused: the user may have signed out, signed back in, or changed
       // servers between deciding to update and answering the consent prompt.
       std::string nowSession;
@@ -637,7 +664,7 @@ void start_client_update(const std::string& availableVersion) {
       CloseHandle(elevated);
       if (readyEvent) CloseHandle(readyEvent);
       if (ackEvent) CloseHandle(ackEvent);
-    }).detach();
+    });
   }
 
   if (info.hProcess) CloseHandle(info.hProcess);
@@ -719,10 +746,19 @@ void start_update_check() {
   upd::check_for_update_async(
       config, upd::manifest_fetcher_for(config), upd::default_verifier(),
       [owner, epoch](upd::CheckResult result) {
+        post_ui([owner, epoch, result = std::move(result)] {
         const ShellUpdateNotice notice = shell_update_notice(
             upd::check_outcome_name(result.outcome), result.availableVersion, result.detail);
         log_line(notice.logLine);
-        if (!notice.show) return;
+        if (!notice.show) {
+          std::lock_guard<std::mutex> lock(gStateMu);
+          if (owner == gAccountId && epoch == gOwnerEpoch &&
+              result.outcome == upd::CheckOutcome::Unreachable && gUpdateRetryAttempts < 4) {
+            gUpdateGate.checked = false;
+            SetTimer(gWindow, kUpdateRetryTimer, 2500u << gUpdateRetryAttempts++, nullptr);
+          }
+          return;
+        }
         // The answer describes the session that asked. A sign-out or a sign-in as somebody else
         // while this was in flight makes it an answer about a session that no longer exists, and
         // publishing it would put one account's update notice on another's screen.
@@ -745,34 +781,32 @@ void start_update_check() {
         // sentence; what the page needs in order to put up a button is the version, and reading
         // it back out of Korean prose would break the first time the wording changed.
         deliver_update_notice(shell_update_available_json(result.availableVersion, notice.text));
+        });
       });
 }
 
-/** Signing in and listing hosts both talk to the network, so they never run on the UI thread. */
+/** Login and refresh results are adopted only on the UI thread and current operation epoch. */
 void begin_login(std::string server, std::string accountId, std::string password) {
+  uint64_t epoch = 0;
+  { std::lock_guard<std::mutex> lock(gStateMu); epoch = ++gOwnerEpoch; gSessionToken.clear(); }
+  log_upload_clear_credentials("new sign-in operation");
   log_line("login attempt server=" + server + " account=" + accountId);
-  std::thread([server, accountId, password]() {
-    std::string error;
-    std::string token;
-    if (!directory_login(server, accountId, password, &token, &error)) {
-      log_line("login failed: " + error);
-      post_status("error", error);
-      return;
-    }
-    log_line("login ok");
+  if (!gWorkers.Launch([server, accountId, password = std::move(password), epoch]() mutable {
+    std::string error, token;
     std::vector<DirectoryHostEntry> hosts;
-    if (!directory_list_hosts(server, token, &hosts, &error)) {
-      log_line("hosts failed: " + error);
-      post_status("error", error);
-      return;
-    }
+    const bool ok = directory_login(server, accountId, password, &token, &error) &&
+                    directory_list_hosts(server, token, &hosts, &error);
+    if (!password.empty()) SecureZeroMemory(password.data(), password.size());
+    post_ui([server, accountId, token, hosts = std::move(hosts), error, ok, epoch]() {
+      { std::lock_guard<std::mutex> lock(gStateMu); if (epoch != gOwnerEpoch) return; }
+      if (!ok) { log_line("login failed: " + error); post_status("error", error); return; }
+      log_line("login ok");
     log_line("hosts ok count=" + std::to_string(hosts.size()));
     {
       std::lock_guard<std::mutex> lock(gStateMu);
       gServerUrl = server;
       gAccountId = accountId;
       gSessionToken = token;
-      ++gOwnerEpoch;
     }
     {
       // Now that a token exists the shell can hand its logs to the directory, which is the only
@@ -801,6 +835,7 @@ void begin_login(std::string server, std::string accountId, std::string password
     // configured" -- correctly, and then nothing asked again, so signing in never produced an
     // update check at all. Signing in is exactly the moment both appear, so it is asked here.
     // Asynchronous, not waited on: a server that never answers must not hold up the host list.
+    gUpdateRetryAttempts = 0;
     start_update_check();
 
     std::string message = shell_hosts_json(hosts);
@@ -808,34 +843,30 @@ void begin_login(std::string server, std::string accountId, std::string password
     const std::string suffix = ",\"accountId\":\"" + accountId + "\"}";
     message = message.substr(0, message.size() - 1) + suffix;
     post_to_page(message);
-  }).detach();
+    });
+  })) post_status("error", "로그인 작업을 시작하지 못했습니다.");
 }
 
 void begin_refresh_hosts() {
-  std::string server;
-  std::string accountId;
-  std::string token;
+  std::string server, accountId, token;
+  uint64_t epoch = 0;
   {
     std::lock_guard<std::mutex> lock(gStateMu);
-    server = gServerUrl;
-    accountId = gAccountId;
-    token = gSessionToken;
+    server = gServerUrl; accountId = gAccountId; token = gSessionToken; epoch = gOwnerEpoch;
   }
   if (token.empty()) return;
-
-  std::thread([server, accountId, token]() {
+  gWorkers.Launch([server, accountId, token, epoch]() {
     std::string error;
     std::vector<DirectoryHostEntry> hosts;
-    if (!directory_list_hosts(server, token, &hosts, &error)) {
-      // A session that expired is the ordinary reason, and saying so beats an error the user
-      // cannot act on.
-      post_status("error", error + " — 다시 로그인해 주세요");
-      return;
-    }
-    std::string message = shell_hosts_json(hosts);
-    message = message.substr(0, message.size() - 1) + ",\"accountId\":\"" + accountId + "\"}";
-    post_to_page(message);
-  }).detach();
+    const bool ok = directory_list_hosts(server, token, &hosts, &error);
+    post_ui([accountId, epoch, ok, hosts = std::move(hosts), error]() {
+      { std::lock_guard<std::mutex> lock(gStateMu); if (epoch != gOwnerEpoch) return; }
+      if (!ok) { post_status("error", error + " — 다시 로그인해 주세요"); return; }
+      std::string message = shell_hosts_json(hosts);
+      message = message.substr(0, message.size() - 1) + ",\"accountId\":\"" + accountId + "\"}";
+      post_to_page(message);
+    });
+  });
 }
 
 /**
@@ -845,12 +876,16 @@ void begin_refresh_hosts() {
  * process that cares to look, and a token expires where a password does not.
  */
 void begin_session(const ShellConnectRequest& request) {
+  const uint64_t operation = ++gViewerOperation;
+  uint64_t ownerEpoch = 0;
   std::string server;
+  std::string account;
   std::string token;
   {
     std::lock_guard<std::mutex> lock(gStateMu);
-    server = gServerUrl;
+    server = gServerUrl; account = gAccountId;
     token = gSessionToken;
+    ownerEpoch = gOwnerEpoch;
   }
   if (token.empty()) {
     post_status("error", "로그인이 필요합니다");
@@ -1003,7 +1038,7 @@ void begin_session(const ShellConnectRequest& request) {
   if (pipeOk) {
     // The parent's copy of the write end must close, or the reader never sees EOF after exit.
     CloseHandle(pipeWrite);
-    std::thread(pump_viewer_output_to_log, pipeRead).detach();
+    gWorkers.Launch([pipeRead, identity = account + "@" + server] { pump_viewer_output_to_log(pipeRead, identity); });
   }
   log_line("session started host=" + request.hostId + " kbps=" +
            std::to_string(settings.bitrateKbps) + " fps=" + std::to_string(settings.fps) +
@@ -1012,17 +1047,24 @@ void begin_session(const ShellConnectRequest& request) {
 
   // Watched rather than forgotten: when the session window closes the list has to become usable
   // again, and if it exits immediately that is a failure the user should hear about.
-  std::thread([handle = pi.hProcess, name = request.hostName]() {
-    const DWORD waited = WaitForSingleObject(handle, INFINITE);
+  gWorkers.Launch([handle = pi.hProcess, request, operation, ownerEpoch, startedMs = GetTickCount64()]() {
+    DWORD waited = WAIT_TIMEOUT;
+    while (!gWorkers.Stopping() && (waited = WaitForSingleObject(handle, 250)) == WAIT_TIMEOUT) {}
+    if (gWorkers.Stopping()) { CloseHandle(handle); return; }
     DWORD exitCode = 0;
     GetExitCodeProcess(handle, &exitCode);
     CloseHandle(handle);
-    if (waited == WAIT_OBJECT_0 && exitCode != 0) {
-      post_status("error", name + " 연결에 실패했습니다 (코드 " + std::to_string(exitCode) + ")");
-    } else {
-      post_status("idle", "");
-    }
-  }).detach();
+    const uint64_t ranMs = GetTickCount64() - startedMs;
+    post_ui([request, operation, ownerEpoch, waited, exitCode, ranMs] {
+      { std::lock_guard<std::mutex> lock(gStateMu); if (ownerEpoch != gOwnerEpoch) return; }
+      if (operation != gViewerOperation) return;
+      if (waited == WAIT_OBJECT_0 && exitCode != 0) {
+        post_status("error", request.hostName + " 연결에 실패했습니다 (코드 " + std::to_string(exitCode) + ")");
+      } else {
+        post_status("idle", "");
+      }
+    });
+  });
 
   post_status("connecting", request.hostName + " 창을 여는 중");
 }
@@ -1068,6 +1110,7 @@ void handle_page_message(const std::string& json) {
     }
     post_to_page(shell_update_busy_json(true));
     start_client_update(version);
+    if (gUpdateHandoffActive.load()) return;
     // start_client_update reports its own outcome. Whatever it was, the request is over: leaving
     // the flag set would mean a failed attempt could never be retried.
     {
@@ -1107,6 +1150,7 @@ void handle_page_message(const std::string& json) {
     return;
   }
   if (type == "logout") {
+    ++gViewerOperation;
     {
       std::lock_guard<std::mutex> lock(gStateMu);
       gSessionToken.clear();
@@ -1154,11 +1198,22 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       return 0;
     case WM_APP + 1: {
       // One message pushed from a worker thread, now on the thread WebView2 requires.
-      std::unique_ptr<std::string> payload(reinterpret_cast<std::string*>(lParam));
-      if (gWebView && payload) gWebView->PostWebMessageAsJson(widen(*payload).c_str());
+      std::unique_ptr<PostedJson> payload(reinterpret_cast<PostedJson*>(lParam));
+      if (gWebView && payload && payload->epoch == gOwnerEpoch.load())
+        gWebView->PostWebMessageAsJson(widen(payload->body).c_str());
       return 0;
     }
+    case WM_APP + 2: {
+      std::unique_ptr<std::function<void()>> action(reinterpret_cast<std::function<void()>*>(lParam));
+      if (action && !gClosing.load()) (*action)();
+      return 0;
+    }
+    case WM_TIMER:
+      if (wParam == kUpdateRetryTimer) { KillTimer(hwnd, kUpdateRetryTimer); start_update_check(); }
+      return 0;
     case WM_DESTROY:
+      { std::lock_guard<std::mutex> lock(gStateMu); ++gOwnerEpoch; gSessionToken.clear(); }
+      gClosing.store(true, std::memory_order_release);
       PostQuitMessage(0);
       return 0;
     default:
@@ -1193,6 +1248,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
   // of the message loop. This thread holds no lock at that point, which matters: the auth
   // callback runs on the worker and posts to this window.
   const remote60::native_poc::LogUploadShutdown uploaderShutdown;
+  struct WorkerShutdown {
+    ~WorkerShutdown() { gClosing.store(true); gWorkers.Shutdown(); }
+  } workerShutdown;
 
   WNDCLASSEXW wc{};
   wc.cbSize = sizeof(wc);

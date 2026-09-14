@@ -92,6 +92,9 @@ void log_upload_clear_credentials(const char* reason);
 
 /** Queues one line under `stream` ("viewer", "client", "host"). Never blocks; may drop. */
 void log_upload_enqueue(const char* stream, const std::string& line);
+// Child processes can outlive a sign-out. Check their captured owner under the uploader lock,
+// not before it, so a late viewer line can never ride another account's new credential.
+void log_upload_enqueue_for_identity(const char* stream, const std::string& line, const std::string& identity);
 
 /**
  * Sends what it can once, stops the worker and resets the state. Safe when never started.

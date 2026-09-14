@@ -1,4 +1,5 @@
 #include "update_check.hpp"
+#include "async_worker_group.hpp"
 
 #include <thread>
 
@@ -79,10 +80,14 @@ void check_for_update_async(CheckConfig config, ManifestFetcher fetch, Signature
   if (!onResult) return;
   // Detached on purpose. Nothing in the UI should be able to wait on this, and there is no state
   // to join back into -- the whole answer is the CheckResult handed to the callback.
-  std::thread([config = std::move(config), fetch = std::move(fetch),
+  static remote60::native_poc::AsyncWorkerGroup checks;
+  checks.Launch([config = std::move(config), fetch = std::move(fetch),
                verifier = std::move(verifier), onResult = std::move(onResult)]() mutable {
-    onResult(check_for_update(config, fetch, verifier));
-  }).detach();
+    CheckResult result;
+    try { result = check_for_update(config, fetch, verifier); }
+    catch (...) { result.outcome = CheckOutcome::Unreachable; result.detail = "update check failed unexpectedly"; }
+    onResult(std::move(result));
+  });
 }
 
 namespace {

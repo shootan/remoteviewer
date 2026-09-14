@@ -1499,6 +1499,12 @@ if(GNLINK_HAVE_WEBVIEW2)
     ws2_32 iphlpapi user32 ole32 shell32 shlwapi version gdi32 bcrypt winhttp
   )
   set_target_properties(remote60_client_shell PROPERTIES OUTPUT_NAME "GNLinkClient")
+  # HTML-only fixes must be staged even when the executable does not need linking.
+  add_custom_target(remote60_client_ui_assets
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:remote60_client_shell>/ui"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/ui/shell.html"
+            "$<TARGET_FILE_DIR:remote60_client_shell>/ui/shell.html")
+  add_dependencies(remote60_client_shell remote60_client_ui_assets)
 
   # The page is loaded from disk rather than compiled in, so it can be adjusted without a
   # rebuild; copied beside the executable so a build tree behaves like an install.
