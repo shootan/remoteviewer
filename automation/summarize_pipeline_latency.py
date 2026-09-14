@@ -34,8 +34,11 @@ def distribution(values):
 
 def analyze(lines):
     frames, inputs, clocks = [], [], []
+    present_gaps = []
     for line in lines:
         f = fields(line)
+        if "[present]" in line and "frameGapUs" in f:
+            present_gaps.append(f["frameGapUs"])
         if "stage=clock" in line and all(k in f for k in ("clientRecvUs", "clockOffsetUs", "rttUs")):
             clocks.append(f)
         elif "[present]" in line and f.get("timingSchema") == 2:
@@ -83,11 +86,13 @@ def analyze(lines):
             row["capture_to_present_estimate_us"] = None
         rows.append(row)
     return {"schema": 2, "frame_samples": len(rows), "input_samples": len(inputs),
+            "present_gaps": distribution(present_gaps),
             "stages": {n: distribution(row[n + "_us"] for row in rows) for n in pairs},
             "input_queue": distribution(elapsed(f, "clientSendUs", "clientGeneratedUs") for f in inputs),
             "input_exchange": distribution(elapsed(f, "clientDoneUs", "clientSendUs") for f in inputs),
             "frames": rows, "input_timings": inputs,
             "limits": ["Input ACK does not prove OS injection or visible text.",
+                       "Detailed frames are sampled (1Hz baseline, at most 10Hz on slow frames); stage distributions are biased, not all-frame percentiles.",
                        "Present gaps do not measure source capture intervals.",
                        "Clock-aligned one-way times assume symmetric paths; RTT/2 is uncertainty.",
                        "Receive timestamp semantics follow viewer frame publication metadata.",

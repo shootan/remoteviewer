@@ -11805,3 +11805,5 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 목표: 반복적인 원인 미확정을 해소할 단계별 로그 추가. Viewer/Stream 입력·프레임 시각, 독립 로컬 숫자 로그, rollback 파일별 오류, Host 종료경로, 분석기를 구현.
 - 검증: 실제 Viewer 합성1080p60 590개 타이밍 기록, update_effects220/0, 분석기4 tests, mirror 상한·필터 PASS. 설치기125 빌드/내장9개/서명검증 통과.
 - 다음: 검증용 독립 검토·11:35 회사게임PC 로그 조사 취합 후 게시 및 사용자 실기. 현재 접속/설치/main/push 무접촉. 상세 docs/diagnostic_latency_2026-09-14.md.
+
+- 0.2.125 검토 보수: 로컬mirror 고정4bank(64MiB)로 재시작 누적 제한, 상세present 평시1Hz/지연최대10Hz로 제한. 독립 r1검증220/0·mirror·분석기 통과 후 r2 자체mirror동시/재시작 PASS, 실제Viewer595gap/10상세표본, 분석기5tests PASS. 0.2.124 현재pair와 동일한 전체복구본 확보. r2 독립승인·게시대기.

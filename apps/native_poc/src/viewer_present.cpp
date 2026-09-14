@@ -388,8 +388,15 @@ LRESULT paint_video_frame(ViewerState& ctx, HWND hwnd) {
     {
       std::ostringstream gapLine;
       gapLine << "[native-video-client][present] seq=" << seq
-              << " frameGapUs=" << presentGapUs
-              << " timingSchema=2 gen=" << frameStreamGeneration
+              << " frameGapUs=" << presentGapUs;
+      // Preserve all gap samples, but bound full detail to 1Hz normally / 10Hz on slow frames.
+      const bool slowFrame = presentGapUs >= 100000ULL ||
+          (recvUs > 0 && presentUs >= recvUs && presentUs - recvUs >= 100000ULL);
+      const uint64_t detailIntervalUs = slowFrame ? 100000ULL : 1000000ULL;
+      if (ctx.present.lastTimingDetailUs == 0 ||
+          presentUs - ctx.present.lastTimingDetailUs >= detailIntervalUs) {
+        ctx.present.lastTimingDetailUs = presentUs;
+        gapLine << " timingSchema=2 detailSampled=1 gen=" << frameStreamGeneration
               << " synthetic=" << (frameSynthetic ? 1 : 0)
               << " hostCaptureUs=" << captureUs
               << " hostEncodeStartUs=" << encodeStartUs
@@ -405,6 +412,7 @@ LRESULT paint_video_frame(ViewerState& ctx, HWND hwnd) {
               << " queueWaitUs=" << queueToPaintUs
               << " paintUs=" << queueToPresentUs
               << " crossClockValid=0";
+      }
       log_client_line(ctx, gapLine.str());
     }
     const int64_t totalUs = -1;  // Do not report invalid cross-clock subtraction as zero latency.

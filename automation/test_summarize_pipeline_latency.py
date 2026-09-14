@@ -11,6 +11,12 @@ class TimingTest(unittest.TestCase):
     def test_legacy_capture_gap_is_not_source_measurement(self):
         self.assertEqual(analyze(["[user-feedback] capGapUs=500000 totalUs=0"])["frame_samples"], 0)
 
+    def test_compact_gaps_are_kept_outside_detailed_sample(self):
+        r = analyze(["[present] seq=1 frameGapUs=16000",
+                     "[present] seq=2 frameGapUs=500000 timingSchema=2"])
+        self.assertEqual(r["present_gaps"]["samples"], 2)
+        self.assertEqual(r["frame_samples"], 1)
+
     def test_two_clocks_and_full_queue(self):
         result = analyze([
             "stage=clock clientRecvUs=1100 clockOffsetUs=10000 rttUs=20",

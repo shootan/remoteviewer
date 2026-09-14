@@ -3,6 +3,8 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <memory>
+#include <vector>
 
 int wmain(int argc, wchar_t** argv) {
   if (argc != 2) return 2;  // Explicit isolated directory; never touch the live app's diagnostics.
@@ -30,6 +32,27 @@ int wmain(int argc, wchar_t** argv) {
     if (!std::filesystem::exists(path) || std::filesystem::file_size(path) > 8ULL * 1024 * 1024)
       return 1;
   }
-  std::cout << "PASS: independent numeric log survives without a pipe; secrets excluded; two bounded segments\n";
+  const auto banks = dir / L"banks";
+  std::filesystem::create_directories(banks);
+  {
+    std::vector<std::unique_ptr<HostDiagnosticLog>> active;
+    for (int i = 0; i < 5; ++i) {
+      active.emplace_back(HostDiagnosticLog::Acquire(banks.wstring()));
+      active.back()->Write("stamp ", "[native-video-host] wire seq=19\n");
+    }
+    // Four occupied banks; the fifth must not truncate or allocate another bank.
+    size_t logs = 0;
+    for (const auto& e : std::filesystem::directory_iterator(banks))
+      if (e.path().extension() == L".log") ++logs;
+    if (logs != 4) return 1;
+  }
+  for (int run = 0; run < 30; ++run) {
+    std::unique_ptr<HostDiagnosticLog> sink(HostDiagnosticLog::Acquire(banks.wstring()));
+    sink->Write("stamp ", "[native-video-host] wire seq=20\n");
+  }
+  size_t files = 0;
+  for (const auto& e : std::filesystem::directory_iterator(banks)) { (void)e; ++files; }
+  if (files > 12) return 1;  // 4 locks + at most 8 log segments, independent of run count.
+  std::cout << "PASS: numeric sink, secrets excluded, segment cap, concurrent banks, restart bound\n";
   return 0;
 }
