@@ -11817,3 +11817,8 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 목표: 연결할 때 실제 양쪽 실행 버전을 서로 보내고 로그에 남긴다. peer_version.hpp·poc_protocol·host/viewer control 및 host 진단mirror·전용테스트 추가.
 - 검증: 구버전 무전송/기존패킷크기/seq·size 오류/로그주입차단/실제loopback TCP 버전교환 PASS. 독립검토·설치기빌드 진행.
 - 다음: 고정패키지 검증/기존채널 게시 후 양쪽126 업데이트. 회사11:30 health=124와 11:35실행버전 추정을 구분. docs/connection_version_logging.md. mainmerge/push/자동설치 없음.
+
+### 2026-09-14 0.2.126 연결별 버전로그 게시 완료
+- 변경: Viewer/Stream 상호버전교환·구버전unknown 로그. source e444db6, 상세 docs/connection_version_logging.md.
+- 검증: 독립코드/패키지OK, 게시rc0, NAS·공개10hash, 인증API200/version126, 제품서명OK/변조거부. rollback125서버pair·로컬전체복구본 확보.
+- 다음: 양쪽126업데이트후새연결에서자기/상대버전로그실기확인. 자동설치·재시작·mainmerge·push미실행.
