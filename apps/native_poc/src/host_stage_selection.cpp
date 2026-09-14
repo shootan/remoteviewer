@@ -182,7 +182,8 @@ Flow stage_selection(HostContext& hx, TickContext& tc) {
           if (!encoder.ApplyCaptureUiQualityMode(capture, res, frameGating, inputRouter, sender, rate, useH264, true, nowUs)) {
             std::cerr << "[native-video-host][control] capture-mode overview quality apply failed seq=" << reqSeq
                       << "\n";
-            return Flow::Break;
+            hx.mailbox.RetryCaptureMode(*modeReq);
+            return Flow::Continue;
           }
           std::cout << "[native-video-host][control] capture-mode applied seq=" << reqSeq
                     << " mode=overview"
@@ -251,7 +252,8 @@ Flow stage_selection(HostContext& hx, TickContext& tc) {
             if (!encoder.ApplyCaptureUiQualityMode(capture, res, frameGating, inputRouter, sender, rate, useH264, false, nowUs)) {
               std::cerr << "[native-video-host][control] capture-mode focus quality apply failed seq=" << reqSeq
                         << "\n";
-              return Flow::Break;
+              hx.mailbox.RetryCaptureMode(*modeReq);
+              return Flow::Continue;
             }
             std::cout << "[native-video-host][control] capture-mode applied seq=" << reqSeq
                       << " mode=focus-window"

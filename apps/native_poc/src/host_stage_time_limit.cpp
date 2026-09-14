@@ -108,6 +108,18 @@ Flow stage_time_limit(HostContext& hx, TickContext& tc) {
     return Flow::Break;
   }
   sender.PumpUdpHello(transport, encoder);
+  if (encoder.repairExhausted || encoder.targetFailures >= 5) {
+    hx.exitCode = 46;
+    return Flow::Return;
+  }
+  if (encoder.targetPending && nowUs >= encoder.targetRetryAtUs) {
+    const auto target = encoder.retryTarget;
+    if (encoder.ApplyTarget(capture, hx.res, hx.frameGating, hx.inputRouter, sender,
+                            target.w, target.h, target.fps, target.bitrate, target.keyint)) {
+      kick.Arm(nowUs, useH264);
+      std::cout << "[native-video-host] encoder target retry recovered\n";
+    }
+  }
   // A02/A06: a provenance rebuild that could not run yet (the epoch gate's budget was spent, or
   // initialize() failed) is retried here, on the tick -- not in the encode path, which a static
   // desktop never reaches. The gate stays closed and every AU stays epoch 0 until it succeeds.

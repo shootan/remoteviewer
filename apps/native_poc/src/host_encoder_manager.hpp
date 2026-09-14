@@ -48,6 +48,26 @@ struct Nv12PendingRelease {
 // land in the middle of it. (Ledger H-04.)
 struct EncoderState {
   H264Encoder codec;
+  struct PendingTarget { uint32_t w=0, h=0, fps=0, bitrate=0, keyint=0; } retryTarget;
+  bool targetPending = false;
+  bool codecNeedsInit = false;
+  uint64_t targetRetryAtUs = 0;
+  uint32_t targetFailures = 0;
+  uint64_t encodeErrorSinceUs = 0;
+  uint64_t repairWindowStartUs = 0;
+  uint32_t repairsInWindow = 0;
+  bool repairExhausted = false;
+
+  void RequestOutputRepair(uint64_t nowUs) {
+    if (targetPending) return;
+    if (!repairWindowStartUs || nowUs - repairWindowStartUs > 60000000ULL) {
+      repairWindowStartUs = nowUs; repairsInWindow = 0;
+    }
+    if (++repairsInWindow > 3) { repairExhausted = true; return; }
+    retryTarget = {nominalEncodeW, nominalEncodeH, activeFps, activeBitrate, activeKeyint};
+    codecNeedsInit = targetPending = true;
+    targetRetryAtUs = nowUs;
+  }
   bool mfStarted = false;
   bool experimentEnabled = false;   // REMOTE60_NATIVE_ENCODED_EXPERIMENT(_FORCE)
   std::string tuneMode;             // REMOTE60_NATIVE_ENCODER_TUNE_MODE (default low_latency)

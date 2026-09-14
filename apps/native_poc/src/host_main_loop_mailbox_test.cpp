@@ -179,6 +179,19 @@ void TestStaleEpochRequestIsDropped() {
 }
 
 int main() {
+  {
+    remote60::native_poc::MainLoopMailbox mailbox;
+    mailbox.PostTuneEncoder({7, 1, 1000000, 0, 30});
+    expect(!mailbox.TakeTuneEncoder(8), "stale tune carries its epoch and is rejected");
+    mailbox.PostTuneEncoder({7, 2, 1000000, 0, 30});
+    mailbox.PostTuneEncoder({8, 3, 2000000, 0, 0});
+    auto next = mailbox.TakeTuneEncoder(8);
+    expect(next && next->bitrate == 2000000 && next->fps == 0, "new session inherits no older tune fields");
+    mailbox.PostTuneEncoder({8, 4, 3000000, 0, 0});
+    mailbox.RetryTuneEncoder({8, 3, 2000000, 0, 24});
+    next = mailbox.TakeTuneEncoder(8);
+    expect(next && next->bitrate == 3000000 && next->fps == 24, "retry preserves independent fields and newer values");
+  }
   TestStaleEpochRequestIsDropped();
   test_empty();
   test_take_is_consume();

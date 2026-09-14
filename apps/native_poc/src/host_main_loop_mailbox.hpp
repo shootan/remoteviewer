@@ -78,6 +78,20 @@ enum KeyframeReason : uint32_t {
 
 class MainLoopMailbox {
  public:
+  // A deferred request must not overwrite a newer user request that arrived while applying it.
+  void RetryTuneEncoder(const TuneEncoderRequest& r) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!tuneEncoder_) tuneEncoder_ = r;
+    else if (tuneEncoder_->epoch == r.epoch) {
+      if (!tuneEncoder_->bitrate) tuneEncoder_->bitrate = r.bitrate;
+      if (!tuneEncoder_->keyint) tuneEncoder_->keyint = r.keyint;
+      if (!tuneEncoder_->fps) tuneEncoder_->fps = r.fps;
+    }
+  }
+  void RetryCaptureMode(const CaptureModeRequest& r) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!captureMode_) captureMode_ = r;
+  }
   // --- producers ---
   void PostSelectMonitor(const SelectMonitorRequest& r) {
     std::lock_guard<std::mutex> lk(mu_);
@@ -91,7 +105,8 @@ class MainLoopMailbox {
     std::lock_guard<std::mutex> lk(mu_);
     // Coalesced field-wise, not whole-record: a viewer may send bitrate and keyint in separate
     // messages and losing the earlier one would silently ignore half the request.
-    if (!tuneEncoder_) tuneEncoder_ = TuneEncoderRequest{};
+    if (!tuneEncoder_ || tuneEncoder_->epoch != r.epoch) tuneEncoder_ = TuneEncoderRequest{};
+    tuneEncoder_->epoch = r.epoch;
     tuneEncoder_->seq = r.seq;
     if (r.bitrate) tuneEncoder_->bitrate = r.bitrate;
     if (r.keyint) tuneEncoder_->keyint = r.keyint;

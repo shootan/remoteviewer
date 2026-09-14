@@ -166,7 +166,8 @@ Flow stage_runtime_tune(HostContext& hx, TickContext& tc) {
       // target switch.
       if (!encoder.ApplyTarget(capture, res, frameGating, inputRouter, sender, ladderW, ladderH, targetFps, targetBitrate, targetKeyint)) {
         std::cerr << "[native-video-host][control] runtime-config apply failed seq=" << reqSeq << "\n";
-        return Flow::Break;
+        hx.mailbox.RetryTuneEncoder(*tuneReq);
+        return Flow::Continue;
       }
       rate.encodeLadderReduced = ladderReducedNext;
       if (fpsExplicit) rate.userFpsCeiling = targetFps;
