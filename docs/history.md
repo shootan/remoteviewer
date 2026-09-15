@@ -12012,3 +12012,14 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 변경: `docs/incident_2026-09-15_1715_stream_dropout.md`, 이력·계획. 제품 수정 없음.
 - 확인:126 Viewer의3실패세션과1진행세션 구분, 동일seq로Host/Viewer시각대조. Viewer 영상/Pong 수신 공백 뒤에도Host 동일epoch wire기록 지속,udpTxFail0,Stream27860 재시작없음. ABR9→6.6Mbps/720p 하향과일부데이터재개대조. 동일frame재paint6.75초를UI새프레임지연으로잘못세지않음. 원본/hash는해당문서.
 - 다음/한계: Host송신API이후~Viewer ingress관측전 경계미확정. 4Mbps/30fps진단시험결과요청; 양단packet/수신worker 근거미확보. 이전GPU/썸네일차단과동일원인확정금지. 앱설정변경·재시작·설치·NIC캡처·push 없음.
+
+### 2026-09-15 응답 없는 창 썸네일 건너뛰기 — 격리·deadline·예산
+
+- 목표/승인: 사용자 "LDPlayer처럼 창이 응답 안 하면 아예 막힌다. 일정시간 반복하다 해당 창을 스킵하는 기능 추가". Codex 확정으로 **GNLinkCapture 별도 프로세스 격리** 채택(인프로세스 워커 불채택), **B1 포함**, bit2 미도입.
+- 호스트: 썸네일을 `GNLinkCapture --thumbnail` 1회성 모드로 옮기고 `WaitForMultipleObjects{done, helper}`+**1s deadline**. 초과·선신호 시 **helper 만 TerminateProcess → 종료 대기 → 그 다음 Unmap**(순서 역전은 UAF), Job `KILL_ON_JOB_CLOSE` 는 resume 전 assign. 실패는 (HWND, 소유PID, 생성시각) 키로 3회 → **60초 쿨다운**, 성공 1회로 회복. helper 가 쓴 헤더는 믿지 않고 width/height 로 재유도해 검증.
+- 클라이언트: 두 경로가 **성공 기록만** 있고 시도 기록이 없어, 못 받은 창을 갱신마다 재요청하고 있었다(`viewer_picker.cpp` · 공유 코어 동일). 정책을 헤더 하나로 뽑아 양쪽이 같은 술어를 쓰게 하고, 카드에 "미리보기 없음" 을 표시. 와이어 무변경(flags bit0=0 재사용).
+- **발견 1 — `PW_RENDERFULLCONTENT` 는 DWM 이 처리한다.** WM_PRINT 에 영영 응답하지 않는 창에서도 **~24ms 에 정상 썸네일**이 오고, fixture 의 **WM_PRINT 수신 카운터는 0** 이었다. 따라서 사건의 "LDPlayer 가 WM_PRINT 에 응답하지 않았다" 는 **약화**된다(창이 요청을 받지 않는다). 다만 "DWM/GPU 내부 대기가 원인" 도 **확정하지 않는다** — 둘 다 미확정 후보다. 확정과 무관하게 **user mode 에서 취소 불가한 지점을 회수하려면 프로세스 경계가 필요**하다는 결론만 유효하다.
+- **발견 2 — 제어 디스패처는 1개가 아니라 2개다.** `controlPort>0` 이면 TCP `controlThread` 와 UDP `udpControlThread` 가 **같은 ControlSessionServer** 에서 돈다. 예산을 비동기화 static 으로 넣은 커밋(`93deceb`)에 레이스가 있었고 `a41c295` 에서 mutex 로 닫았다. 동시 helper 상한도 1 이 아니라 **디스패처당 1 = 최대 2** 로 정정.
+- **B1(별도 커밋)**: 업데이터 `owner_of` 가 한 단계만 봐서 3단 구조의 GNLinkCapture 가 소유 자식으로 인정되지 못하고 **업데이트가 포기**됐다(GDI 폴백 중 재현 조건). 사슬을 따라가되 창 있는 검증된 stop 대상 도달 시에만 인정하도록 고치고, edge 조건·depth 상한·cycle 차단은 유지. 실제 3단 프로세스 fixture 와 합성 8건으로 고정했고, **한 단계 열거면 손자가 빠진다** 는 함정 자체도 검사로 남겼다.
+- 검증: deadline 실측 1920x1080 median 33ms/worst 41.6ms(표면 종류 무관, 픽셀 수 의존) → **1s = 최악의 약 25배**. 격리 오버헤드 median ~39ms(미리보기 1장당 약 2배). 응답 없는 helper 상대로 **12요청 → 3시도, 1222ms**(전부 물었다면 4800ms). **실제 GNLinkStream**(격리 포트 44720/44721, 응답 없는 helper)에서 **썸네일 1049ms 응답 → 직후 ping 0ms**, 반복 요청 최악 0ms. 전체 회귀 87개 중 **83개 exit 0**, 나머지 4개는 인자/라이브 호스트가 필요한 도구이며 이번 작업에서 **미변경**.
+- 다음/경계: **제품 picker 가 실제 호스트에서 건너뛴 창을 보여주는 것은 미확인**(⑵/⑶ 등급). UWP·실제 앱 창 비용은 미측정으로 남기고 sweep 은 불필요로 확정. 설치 제품 무접촉·게시/서명 미착수. 실증 중 내가 띄운 호스트 1개를 누수시켜(`--seconds` 는 accept 대기를 제한하지 않는다) 경로로 식별해 내 것만 종료했고, 시험은 job 종료 → 대기 → 삭제 순서로 고쳤다.
