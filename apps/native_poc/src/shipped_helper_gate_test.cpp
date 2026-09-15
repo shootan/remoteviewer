@@ -12,6 +12,20 @@
 // A scanner that finds nothing is indistinguishable from a scanner that is broken, so it also has
 // to find things that ARE there: the real switches. If those checks ever stop passing, the absence
 // results below mean nothing and the suite says so rather than reporting a clean bill.
+//
+// ⚠️ Two limits, because a green run here is weaker evidence than it looks.
+//
+// It matches a LIST OF PATTERNS, and a switch named something not on that list walks past it. The
+// list cannot be completed -- there is no enumeration of every name a hidden argument could take.
+// So this corroborates; it does not carry the argument. The argument is structural: the stall is
+// reached by swapping the file the host resolves as its helper, the product parses no such
+// argument at all, and that is checkable by reading gdi_capture_worker_main.cpp's parse_args
+// rather than by scanning bytes. This is the cheap check that would notice if that stopped being
+// true by accident.
+//
+// And it reads the two executables it knows about. GNLinkCapture because it is the helper, and
+// GNLinkStream because that is where the kill is linked and therefore the only place the fault
+// translation unit could land. Anything shipped that is neither is not covered here.
 
 #include <windows.h>
 
