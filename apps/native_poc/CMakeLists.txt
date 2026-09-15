@@ -609,6 +609,20 @@ if(MSVC)
   target_compile_options(remote60_observe_vectors_test PRIVATE /utf-8)
 endif()
 
+# Every source CMakeLists names exists. Five commits in this branch did not configure because a
+# target was registered while its source was left uncommitted -- it built for the author and for
+# nobody else. This is the check that would have caught that, and it costs a file read.
+add_executable(remote60_cmake_sources_exist_test
+  src/cmake_sources_exist_test.cpp
+)
+target_include_directories(remote60_cmake_sources_exist_test PRIVATE src)
+target_compile_definitions(remote60_cmake_sources_exist_test PRIVATE
+  "REMOTE60_NATIVE_POC_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}\""
+)
+if(MSVC)
+  target_compile_options(remote60_cmake_sources_exist_test PRIVATE /utf-8)
+endif()
+
 # The build gate for the fault seam -- or rather, the check that there is no seam to gate. The
 # stall used by the deadline tests is a different executable staged in a scratch directory, not a
 # switch on the shipped one, and this reads the built GNLinkCapture to say so.
