@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "host_bgra_scale.hpp"
+#include "host_thumbnail_budget.hpp"
 #include "host_thumbnail_helper.hpp"
 #include "time_utils.hpp"
 
@@ -144,6 +145,48 @@ bool run_probe_in(const std::wstring& dir, uint64_t deadlineUs, ProbeReport* out
 
 /** Count processes named GNLinkCapture.exe that were started from `dir`. */
 DWORD helpers_from(const std::wstring& dir);
+
+/**
+ * Ask for the same hopeless window over and over, the way a picker refreshing would.
+ *
+ * Writes "attempts totalUs" -- how many requests actually reached the helper, and what the whole
+ * sequence cost. The point is that both stay bounded while the requests do not.
+ */
+int run_budget_probe(const std::wstring& outFile, uint64_t deadlineUs, uint32_t requests) {
+  using remote60::native_poc::ThumbnailBudget;
+  using remote60::native_poc::ThumbnailBudgetConfig;
+  using remote60::native_poc::ThumbnailTargetKey;
+
+  ThumbnailBudgetConfig config;
+  config.maxAttempts = 3;
+  // Zero so the three attempts happen back to back: the interval is checked elsewhere, and
+  // waiting it out here would only make the test slow.
+  config.retryIntervalUs = 0;
+  config.cooldownUs = 30ull * 1000 * 1000;
+  ThumbnailBudget budget(config);
+
+  ThumbnailTargetKey key;
+  key.windowId = 0x1234;
+  key.ownerPid = 4242;
+  key.processCreatedUs = 1000;
+
+  uint32_t attempts = 0;
+  const uint64_t start = qpc_now_us();
+  for (uint32_t i = 0; i < requests; ++i) {
+    const uint64_t now = qpc_now_us();
+    if (!budget.Allow(key, now)) continue;  // skipped: the client is told "no preview" for free
+    ++attempts;
+    const ThumbnailCaptureResult one = capture_thumbnail_isolated(nullptr, 256, 160, deadlineUs);
+    budget.Record(key, one.outcome, qpc_now_us());
+  }
+  const uint64_t total = qpc_now_us() - start;
+
+  FILE* f = nullptr;
+  if (_wfopen_s(&f, outFile.c_str(), L"w") != 0 || !f) return 2;
+  std::fprintf(f, "%u %llu\n", attempts, static_cast<unsigned long long>(total));
+  std::fclose(f);
+  return 0;
+}
 
 Timing summarise(std::vector<uint64_t> samples) {
   Timing t;
@@ -272,6 +315,15 @@ int wmain(int argc, wchar_t** argv) {
   for (int i = 1; i + 1 < argc; ++i) {
     if (std::wstring(argv[i]) == L"--samples") samples = static_cast<uint32_t>(std::wcstoul(argv[i + 1], nullptr, 10));
   }
+  uint32_t budgetRequests = 0;
+  for (int i = 1; i + 1 < argc; ++i) {
+    if (std::wstring(argv[i]) == L"--budget-requests") {
+      budgetRequests = static_cast<uint32_t>(std::wcstoul(argv[i + 1], nullptr, 10));
+    }
+  }
+  if (!outFile.empty() && budgetRequests > 0) {
+    return run_budget_probe(outFile, deadlineUs, budgetRequests);
+  }
   if (!outFile.empty()) return run_probe(outFile, deadlineUs, samples);
 
   // --- orchestration -------------------------------------------------------
@@ -347,6 +399,51 @@ int wmain(int argc, wchar_t** argv) {
             std::to_string(r.survivors) + " still running");
       check("...so the whole call cost the caller seconds, not minutes", wall < 30ull * 1000 * 1000,
             std::to_string(wall / 1000) + "ms end to end");
+
+      // The two pieces together, which is the property the session actually needs.
+      {
+        const uint32_t requests = 12;
+        const std::wstring resultFile = dir + L"budget.txt";
+        DeleteFileW(resultFile.c_str());
+        std::wstring cmd = L"\"" + dir + L"probe.exe\" --probe-out \"" + resultFile +
+                           L"\" --deadline-us " + std::to_wstring(deadline) +
+                           L" --budget-requests " + std::to_wstring(requests);
+        std::vector<wchar_t> c(cmd.begin(), cmd.end());
+        c.push_back(L'\0');
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        bool ran = false;
+        unsigned attempts = 0;
+        unsigned long long total = 0;
+        if (CreateProcessW(nullptr, c.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                           nullptr, &si, &pi)) {
+          const DWORD w = WaitForSingleObject(pi.hProcess, 60000);
+          if (w != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 1);
+          CloseHandle(pi.hThread);
+          CloseHandle(pi.hProcess);
+          FILE* f = nullptr;
+          if (w == WAIT_OBJECT_0 && _wfopen_s(&f, resultFile.c_str(), L"r") == 0 && f) {
+            ran = std::fscanf(f, "%u %llu", &attempts, &total) == 2;
+            std::fclose(f);
+          }
+        }
+        DeleteFileW(resultFile.c_str());
+
+        check("a hopeless window is attempted only up to its budget, not once per request",
+              ran && attempts == 3,
+              std::to_string(attempts) + " attempts for " + std::to_string(requests) +
+                  " requests");
+        // Without the budget this would be 12 deadlines. With it, three -- and the rest are
+        // answered without touching a helper at all.
+        check("...so twelve requests cost three deadlines, not twelve",
+              ran && total < deadline * 6,
+              std::to_string(total / 1000) + "ms total, " +
+                  std::to_string(requests * deadline / 1000) + "ms if every request had paid");
+        check("...and the nine skipped ones were free",
+              ran && total > deadline * 2,
+              "sanity: the three that did run still paid a deadline each");
+      }
     }
     remove_dir(dir);
   }
