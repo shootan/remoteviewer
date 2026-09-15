@@ -601,6 +601,17 @@ if(MSVC)
   target_compile_options(remote60_observe_vectors_test PRIVATE /utf-8)
 endif()
 
+# The preview retry policy: how many times an unresponsive window is asked before the host stops
+# asking, and when it starts again. No window and no GDI -- time is a parameter, so the sixty
+# second cooldown is a number here rather than a minute of test runtime.
+add_executable(remote60_host_thumbnail_budget_test
+  src/host_thumbnail_budget_test.cpp
+)
+target_include_directories(remote60_host_thumbnail_budget_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_host_thumbnail_budget_test PRIVATE /utf-8)
+endif()
+
 # The version-comparison contract, checked against the vectors the JS and Kotlin suites also
 # read. The vectors path is baked in so the test can be run from any working directory.
 add_executable(remote60_version_compare_test
