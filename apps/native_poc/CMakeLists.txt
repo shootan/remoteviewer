@@ -1119,6 +1119,21 @@ add_executable(remote60_host_bgra_scale_test
 target_include_directories(remote60_host_bgra_scale_test PRIVATE src)
 target_link_libraries(remote60_host_bgra_scale_test PRIVATE common)
 
+# The negative control for the preview deadline: a window that pumps messages and never answers
+# WM_PRINT, and what today's capture does when it meets one. Spawns itself as fixture and probe so
+# the blocking call is always in a process this one can kill; a job object with KILL_ON_JOB_CLOSE
+# means nothing outlives the run.
+add_executable(remote60_thumbnail_deadline_test
+  src/thumbnail_deadline_test.cpp
+  src/host_bgra_scale.cpp
+  src/host_args.cpp
+)
+target_include_directories(remote60_thumbnail_deadline_test PRIVATE src)
+target_link_libraries(remote60_thumbnail_deadline_test PRIVATE common)
+if(MSVC)
+  target_compile_options(remote60_thumbnail_deadline_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_host_sender_queue_policy_test
   src/host_sender_queue_policy_test.cpp
 )
