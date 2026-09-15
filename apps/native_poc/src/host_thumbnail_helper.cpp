@@ -43,17 +43,20 @@ std::atomic<bool> gCaptureInFlight{false};
 /**
  * A helper that would not die, and the handles belonging to that attempt.
  *
- * ⚠️ Correcting what an earlier version of this comment claimed. It said that unmapping while the
- * helper might still be writing would hand that write a freed page. It would not. The helper
- * opened the section itself and holds its own view, so the section lives as long as it does, and
- * the parent's UnmapViewOfFile releases only the parent's mapping of it. Cross-process is exactly
- * where that hazard does not exist -- which is most of the reason the capture is in a process.
+ * How the memory is actually shared, since an earlier version of this comment got it wrong and the
+ * wrong version is the intuitive one. A file mapping is an object with its own lifetime. The helper
+ * called OpenFileMapping and MapViewOfFile itself, so it holds a handle and a view of its own, in
+ * its own address space, counted separately from ours. UnmapViewOfFile releases THIS process's
+ * view; the section stays alive while any process still maps it. There is no page for the helper to
+ * fall through, and no writer left holding a freed address -- that hazard belongs to threads
+ * sharing one address space, which is the thing a process boundary removes.
  *
- * So this is not a memory-safety requirement, and it is not presented as one. It is kept for a
- * smaller reason: a helper that survived TerminateProcess means something is wrong in a way we do
- * not understand, and the answer to that is not to start another one. Holding its handles keeps it
- * observable -- helper_still_lingering() can see when it finally goes -- and refusing further
- * captures bounds the situation at one stray process instead of one per request.
+ * So holding these handles is not a memory-safety requirement, and this comment no longer pretends
+ * otherwise. What it buys is bookkeeping: a process handle that is still open is a process whose
+ * exit can still be observed, so helper_still_lingering() can tell when the thing finally goes and
+ * release the rest then. The job handle stays open for the same reason -- it is what still ends
+ * that process if this one exits. And refusing captures meanwhile keeps a situation nobody
+ * understands from becoming one stray process per request.
  *
  * ⚠️ UNEXERCISED. Nothing in the suite reaches this, and not for want of trying: TerminateProcess
  * on a process this one started does not fail on this OS, so killConfirmed is always true and the

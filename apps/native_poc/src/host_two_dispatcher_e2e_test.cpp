@@ -207,7 +207,10 @@ int wmain(int argc, wchar_t** argv) {
     // h264 over UDP is gated behind this. Set on ourselves so the child inherits it; nothing else
     // in this process cares.
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
+    // Loopback, deliberately: the default is INADDR_ANY and a wildcard listener is what raises
+    // the firewall prompt. See the sibling test for the full note.
     std::wstring cmd = L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264" +
+                       L" --bind-address 127.0.0.1" +
                        L" --bind-port " + std::to_wstring(mediaPort) + L" --control-port " +
                        std::to_wstring(controlPort) + L" --seconds 90";
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());

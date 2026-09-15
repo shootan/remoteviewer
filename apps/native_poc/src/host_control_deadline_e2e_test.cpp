@@ -203,8 +203,14 @@ int wmain(int argc, wchar_t** argv) {
   limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
   SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
 
-  std::wstring cmd = L"\"" + dir + L"GNLinkStream.exe\" --bind-port " + std::to_wstring(mediaPort) +
-                     L" --control-port " + std::to_wstring(controlPort) + L" --seconds 120";
+  // --bind-address is not optional here even though it reads that way. It defaults to empty,
+  // which resolve_bind_address turns into INADDR_ANY (host_net_io.cpp:33), so every listener this
+  // host opens binds the wildcard -- and a wildcard listener on an executable Windows has never
+  // seen is what raises the firewall prompt that left Block rules on the user's machine. Loopback
+  // is all this test ever dials.
+  std::wstring cmd = L"\"" + dir + L"GNLinkStream.exe\" --bind-address 127.0.0.1 --bind-port " +
+                     std::to_wstring(mediaPort) + L" --control-port " +
+                     std::to_wstring(controlPort) + L" --seconds 120";
   std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
   mutableCmd.push_back(L'\0');
   STARTUPINFOW si{};

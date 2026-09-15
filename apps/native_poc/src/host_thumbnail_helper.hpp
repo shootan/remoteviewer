@@ -44,6 +44,18 @@ namespace remote60::native_poc {
 // median for the same capture called directly. Roughly 39ms of that is the isolation itself. Still
 // about a tenth of the deadline at its worst.
 //
+// ⚠️ This is NOT a bound on how long the call can take, and reading it as one would be wrong.
+// There are three budgets and they add:
+//
+//   this deadline                 how long the wait for a result may last        1s
+//   kKillConfirmMs (helper .cpp)  how long a kill may take to be confirmed       5s
+//   spawn + teardown              measured above                                 ~39ms typical
+//
+// So a call that times out AND then meets a helper that will not die can take about six seconds,
+// not one. That path has never been observed -- TerminateProcess does not fail for a process this
+// one started -- but the number to quote for the worst case is six, not one. What one second
+// bounds is the WAIT.
+//
 // Not measured, and worth stating rather than glossing: real application windows. UWP cannot be
 // created by the test at all, and pointing the probe at the user's running windows is out of
 // scope. A window backed by a large GPU surface could cost more than anything measured here --
