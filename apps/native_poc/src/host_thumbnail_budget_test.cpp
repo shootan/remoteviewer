@@ -226,6 +226,50 @@ void test_leaving_the_list_drops_the_state() {
   check("so a same-process reuse after a close is allowed", budget.Allow(gone, now));
 }
 
+void test_same_process_reuse_recovers_by_itself() {
+  // The worst case of the identity limit, walked all the way through.
+  //
+  // A window closes and its replacement lands on the same HWND inside the same live process, and
+  // nothing observed the close -- so RetainOnly never ran and the TTL has not expired. The new
+  // window inherits a cooldown it did not earn. What this checks is the size of that: it is one
+  // cooldown, and the window recovers on its own without anything having to notice the mix-up.
+  ThumbnailBudget budget;
+  const ThumbnailTargetKey k = key(0x1234, 100, 5000);
+  uint64_t now = 0;
+  fail_until_cooldown(budget, k, &now);
+
+  check("the replacement window is skipped at first", !budget.Allow(k, now));
+
+  const uint64_t afterCooldown = now + budget.config().cooldownUs;
+  check("...for one cooldown and no longer", budget.Allow(k, afterCooldown),
+        std::to_string(budget.config().cooldownUs / 1000000) + "s");
+
+  // The replacement is a healthy window, so the next attempt succeeds.
+  budget.Record(k, ThumbnailOutcome::Ok, afterCooldown);
+  check("...and one success returns it to normal", budget.Allow(k, afterCooldown + 1));
+  check("...with nothing held against it", budget.ConsecutiveFailures(k) == 0 &&
+                                               !budget.InCooldown(k, afterCooldown + 1));
+}
+
+void test_ttl_outlives_the_cooldown() {
+  // The mitigations only compose in one order. An entry that expired while its cooldown was still
+  // running would be forgotten mid-skip, and the window would go straight back to being asked --
+  // which is the behaviour the cooldown exists to prevent.
+  const ThumbnailBudgetConfig config;
+  check("the TTL outlives a cooldown", config.entryTtlUs > config.cooldownUs,
+        std::to_string(config.entryTtlUs / 1000000) + "s TTL vs " +
+            std::to_string(config.cooldownUs / 1000000) + "s cooldown");
+
+  ThumbnailBudget budget;
+  const ThumbnailTargetKey k = key(1);
+  uint64_t now = 0;
+  fail_until_cooldown(budget, k, &now);
+  // Sweep at a moment inside the cooldown. The entry has to survive it.
+  budget.Allow(key(2), now + config.cooldownUs / 2);
+  check("...so an entry survives a sweep taken mid-cooldown",
+        budget.InCooldown(k, now + config.cooldownUs / 2));
+}
+
 void test_entries_expire() {
   ThumbnailBudgetConfig config;
   config.entryTtlUs = 10 * kSec;
@@ -291,6 +335,8 @@ int main() {
   test_identity_separates_processes();
   test_identity_cannot_separate_same_process_reuse();
   test_leaving_the_list_drops_the_state();
+  test_same_process_reuse_recovers_by_itself();
+  test_ttl_outlives_the_cooldown();
   test_entries_expire();
   test_map_stays_bounded();
   test_config_guards_degenerate_values();

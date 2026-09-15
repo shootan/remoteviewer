@@ -1129,7 +1129,7 @@ add_executable(remote60_thumbnail_deadline_test
   src/host_args.cpp
 )
 target_include_directories(remote60_thumbnail_deadline_test PRIVATE src)
-target_link_libraries(remote60_thumbnail_deadline_test PRIVATE common)
+target_link_libraries(remote60_thumbnail_deadline_test PRIVATE common d3d11 dxgi)
 if(MSVC)
   target_compile_options(remote60_thumbnail_deadline_test PRIVATE /utf-8)
 endif()

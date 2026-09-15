@@ -46,6 +46,9 @@
 #include <string>
 #include <vector>
 
+#include <d3d11.h>
+#include <dxgi1_2.h>
+
 #include "host_bgra_scale.hpp"
 #include "time_utils.hpp"
 
@@ -74,6 +77,7 @@ constexpr uint64_t kCandidateDeadlineUs = 1000 * 1000;
 // machine unable to turn that into a false accusation.
 constexpr DWORD kNegativeControlWaitMs = 5000;
 
+enum class FixtureKind { Normal, Hang, Gpu, Layered };
 bool gHangOnPrint = false;
 volatile bool gStop = false;
 // How many WM_PRINT / WM_PRINTCLIENT the fixture window has been sent. The parent asks for this
@@ -123,10 +127,77 @@ LRESULT CALLBACK fixture_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
   return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+/**
+ * Attach a flip-model swapchain and draw one frame.
+ *
+ * Flip-model on purpose. It is what a real GPU application presents with, and it is the
+ * presentation mode that made the picker unreachable for GDI in this codebase before -- so if
+ * anything is going to make the capture behave differently from a FillRect window, it is this.
+ */
+struct GpuSurface {
+  ID3D11Device* device = nullptr;
+  ID3D11DeviceContext* context = nullptr;
+  IDXGISwapChain1* swapChain = nullptr;
+  ID3D11RenderTargetView* rtv = nullptr;
+
+  bool Create(HWND hwnd, int width, int height) {
+    D3D_FEATURE_LEVEL level{};
+    if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0,
+                                 D3D11_SDK_VERSION, &device, &level, &context))) {
+      return false;
+    }
+    IDXGIDevice* dxgiDevice = nullptr;
+    if (FAILED(device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgiDevice)))) {
+      return false;
+    }
+    IDXGIAdapter* adapter = nullptr;
+    IDXGIFactory2* factory = nullptr;
+    bool ok = SUCCEEDED(dxgiDevice->GetAdapter(&adapter)) &&
+              SUCCEEDED(adapter->GetParent(__uuidof(IDXGIFactory2), reinterpret_cast<void**>(&factory)));
+    if (ok) {
+      DXGI_SWAP_CHAIN_DESC1 desc{};
+      desc.Width = static_cast<UINT>(width);
+      desc.Height = static_cast<UINT>(height);
+      desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+      desc.SampleDesc.Count = 1;
+      desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+      desc.BufferCount = 2;
+      desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+      ok = SUCCEEDED(factory->CreateSwapChainForHwnd(device, hwnd, &desc, nullptr, nullptr,
+                                                    &swapChain));
+    }
+    if (ok) {
+      ID3D11Texture2D* back = nullptr;
+      ok = SUCCEEDED(swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D),
+                                          reinterpret_cast<void**>(&back))) &&
+           SUCCEEDED(device->CreateRenderTargetView(back, nullptr, &rtv));
+      if (back) back->Release();
+    }
+    if (factory) factory->Release();
+    if (adapter) adapter->Release();
+    if (dxgiDevice) dxgiDevice->Release();
+    return ok;
+  }
+
+  void Present() {
+    if (!swapChain || !rtv) return;
+    const float colour[4] = {0.12f, 0.35f, 0.65f, 1.0f};
+    context->ClearRenderTargetView(rtv, colour);
+    swapChain->Present(0, 0);
+  }
+
+  ~GpuSurface() {
+    if (rtv) rtv->Release();
+    if (swapChain) swapChain->Release();
+    if (context) context->Release();
+    if (device) device->Release();
+  }
+};
+
 /** Fixture mode: create the window, publish its handle, then pump until killed. */
-int run_fixture(bool hang, const std::wstring& readyEventName, const std::wstring& hwndFile,
+int run_fixture(FixtureKind kind, const std::wstring& readyEventName, const std::wstring& hwndFile,
                 int width, int height) {
-  gHangOnPrint = hang;
+  gHangOnPrint = kind == FixtureKind::Hang;
 
   WNDCLASSEXW wc{};
   wc.cbSize = sizeof(wc);
@@ -143,12 +214,20 @@ int run_fixture(bool hang, const std::wstring& readyEventName, const std::wstrin
   // without this flag returns a correct thumbnail in 24ms, having never dispatched WM_PRINT. A
   // window with no redirection surface leaves DWM nothing to copy, so the request goes to the
   // window, which is the path this suite is about.
-  HWND hwnd = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, wc.lpszClassName, L"remote60 thumbnail fixture",
+  // Layered windows are the other shape worth measuring: DWM composes them differently, and the
+  // capture path has a separate flag for them.
+  const DWORD exStyle = kind == FixtureKind::Layered ? WS_EX_LAYERED : 0;
+  HWND hwnd = CreateWindowExW(exStyle, wc.lpszClassName, L"remote60 thumbnail fixture",
                               WS_OVERLAPPEDWINDOW, -6000, -6000, width, height, nullptr, nullptr,
                               wc.hInstance, nullptr);
   if (!hwnd) return 2;
+  if (kind == FixtureKind::Layered) SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
   ShowWindow(hwnd, SW_SHOWNOACTIVATE);
   UpdateWindow(hwnd);
+
+  GpuSurface gpu;
+  if (kind == FixtureKind::Gpu && !gpu.Create(hwnd, width, height)) return 3;
+  if (kind == FixtureKind::Gpu) gpu.Present();
 
   FILE* f = nullptr;
   if (_wfopen_s(&f, hwndFile.c_str(), L"w") == 0 && f) {
@@ -163,6 +242,22 @@ int run_fixture(bool hang, const std::wstring& readyEventName, const std::wstrin
   if (ready) {
     SetEvent(ready);
     CloseHandle(ready);
+  }
+
+  if (kind == FixtureKind::Gpu) {
+    // Keep presenting. A window that presented once and stopped is not what the deadline has to
+    // survive -- a game mid-frame is.
+    MSG msg;
+    while (!gStop) {
+      while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        if (msg.message == WM_QUIT) return 0;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+      }
+      gpu.Present();
+      Sleep(8);
+    }
+    return 0;
   }
 
   MSG msg;
@@ -218,7 +313,7 @@ struct Child {
  * wrong: the ready event is manual-reset, so the second fixture of the same kind would sail past
  * a wait the FIRST one had already signalled, then read a stale handle out of the file.
  */
-Child start_fixture(HANDLE job, bool hang, int width, int height) {
+Child start_fixture(HANDLE job, FixtureKind kind, int width, int height) {
   static int nonce = 0;
   const std::wstring tag =
       std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(++nonce);
@@ -231,7 +326,11 @@ Child start_fixture(HANDLE job, bool hang, int width, int height) {
   HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, eventName.c_str());
   if (!ready) return child;
 
-  std::wstring cmd = L"\"" + self_path() + L"\" --fixture " + (hang ? L"hang" : L"normal") +
+  const wchar_t* kindName = kind == FixtureKind::Hang      ? L"hang"
+                            : kind == FixtureKind::Gpu     ? L"gpu"
+                            : kind == FixtureKind::Layered ? L"layered"
+                                                           : L"normal";
+  std::wstring cmd = L"\"" + self_path() + L"\" --fixture " + kindName +
                      L" --ready \"" + eventName + L"\" --hwnd-file \"" + hwndFile + L"\"" +
                      L" --size " + std::to_wstring(width) + L"x" + std::to_wstring(height);
   STARTUPINFOW si{};
@@ -313,7 +412,11 @@ int wmain(int argc, wchar_t** argv) {
         h = std::stoi(sizeArg.substr(x + 1));
       }
     }
-    return run_fixture(fixtureMode == L"hang", readyName, hwndFile, w, h);
+    const FixtureKind kind = fixtureMode == L"hang"      ? FixtureKind::Hang
+                             : fixtureMode == L"gpu"     ? FixtureKind::Gpu
+                             : fixtureMode == L"layered" ? FixtureKind::Layered
+                                                         : FixtureKind::Normal;
+    return run_fixture(kind, readyName, hwndFile, w, h);
   }
   if (probeTarget != nullptr) return run_probe(probeTarget);
 
@@ -329,12 +432,18 @@ int wmain(int argc, wchar_t** argv) {
   // a child would put process creation -- tens of milliseconds of it -- inside the number the
   // deadline is supposed to be derived from.
   std::cout << "--- baseline: windows that answer WM_PRINT ---\n";
-  const struct { int w; int h; const char* label; } sizes[] = {
-      {640, 480, "640x480"}, {1280, 800, "1280x800"}, {1920, 1080, "1920x1080"},
+  // Not just sizes any more: the kind of surface behind the window is the variable that matters
+  // once the copy is DWM's rather than the application's.
+  const struct { int w; int h; FixtureKind kind; const char* label; } sizes[] = {
+      {640, 480, FixtureKind::Normal, "gdi 640x480"},
+      {1280, 800, FixtureKind::Normal, "gdi 1280x800"},
+      {1920, 1080, FixtureKind::Normal, "gdi 1920x1080"},
+      {1280, 800, FixtureKind::Layered, "layered 1280x800"},
+      {1920, 1080, FixtureKind::Gpu, "d3d11 flip 1920x1080"},
   };
   uint64_t worstNormalUs = 0;
   for (const auto& size : sizes) {
-    Child fixture = start_fixture(job, false, size.w, size.h);
+    Child fixture = start_fixture(job, size.kind, size.w, size.h);
     if (!fixture.ok) {
       check(std::string("baseline fixture ") + size.label + " started", false);
       continue;
@@ -355,7 +464,7 @@ int wmain(int argc, wchar_t** argv) {
       const uint64_t median = samples[samples.size() / 2];
       const uint64_t worst = samples.back();
       worstNormalUs = std::max(worstNormalUs, worst);
-      std::printf("  %-10s n=%zu  min=%lluus  median=%lluus  max=%lluus\n", size.label,
+      std::printf("  %-22s n=%zu  min=%lluus  median=%lluus  max=%lluus\n", size.label,
                   samples.size(), static_cast<unsigned long long>(samples.front()),
                   static_cast<unsigned long long>(median),
                   static_cast<unsigned long long>(worst));
@@ -371,7 +480,7 @@ int wmain(int argc, wchar_t** argv) {
 
   // 2. The fixture has to be the right kind of broken.
   std::cout << "\n--- the hung window, as the host's existing guards see it ---\n";
-  Child hung = start_fixture(job, true, 1280, 800);
+  Child hung = start_fixture(job, FixtureKind::Hang, 1280, 800);
   check("the hung fixture started and published a window", hung.ok);
   if (!hung.ok) {
     std::cout << "\nRESULT: FAILED  (" << gChecks << " checks, " << gFailures << " failed)\n";
@@ -420,7 +529,7 @@ int wmain(int argc, wchar_t** argv) {
   close_child(&stuckProbe);
 
   // 5. A second window is unaffected: one bad window must not cost the others.
-  Child healthy = start_fixture(job, false, 1280, 800);
+  Child healthy = start_fixture(job, FixtureKind::Normal, 1280, 800);
   check("a healthy window still captures while the hung one is stuck", [&] {
     if (!healthy.ok) return false;
     std::vector<uint8_t> bgra;
