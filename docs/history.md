@@ -11981,3 +11981,11 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 관측: `[connection-version]` 에서 Stream localVersion=0.2.127, Viewer localVersion=0.2.127, 상호 peerVersion=0.2.127. 양쪽 exit0 로 완주. 0.2.126 의 REL-V01(게시 Stream 이 0.2.125 로 자기보고)이 이 릴리스에서는 **실행으로 부정**됐다. 근거 `.claude/verify-runtime/`.
 - 범위: 캡처가 유휴(acquires=0, 전송 프레임 0)라 **인코딩·전송·성능은 측정하지 않았다.** 설치본 기준 현장 확인은 그대로 남는다.
 - 함께 정정: `remote60_host_encode_epoch_test` 의 `CHECK(holdKick <= 150000)` 불충족은 미해결이며, 그 `holdUs` 는 입력 timestamp 상수 차이라 **wall-clock 지연이 아니다**. 같은 실패가 main 437c87c 에서도 관측되나 표본(main 2/16·merge 1/16)이 작아 병합 귀책 배제·회귀 아님·성능 무악화로 해석하지 않는다. 회차별 원시 로그는 미보존(각 1회차만 남음). 판정 정본은 `.claude/reviewer-findings.md`.
+
+### 2026-09-15 Codex 최종 배포 근거 대조
+
+- 목표: 검증용 완료 보고를 직접 대조하고 Windows 게시와 미해결/미배포 범위를 사용자에게 정확히 보고한다.
+- 변경: `docs/release_0.2.127_final_review.md`, 이력·계획. 제품 코드 변경 없음. 이전 게시 기록의 stale object 원인 확정 표현은 가설 수준으로만 취급하며, 당시 실행 버전 미관측은 위 후속 검증으로 해소됐다.
+- 직접 확인: HTTPS10개 파일 다운로드/size/hash, 제품 공개키 서명 검증·변조 거부, NAS live pair와126 rollback pair 일치. 검증용의 UI 화면 및 Stream/Viewer 격리 실행 원문에서 양방향127·exit0·전송0프레임 확인. 현재 실행 대상 hash도 manifest와 일치. 실행 주체는 검증용이고 Codex는 원문/파일을 대조했다.
+- 한계: HW 시험 기대 불충족 유지, A/B 회차별 원본 소실로 집계 독립 재계산 불가, 릴리스 빌드 전체 스위트 재실행 미수행. NAS server.js는 main437c87c와 같은 hash여서 서버 저장/인증 수정27d9e74는 미배포. 상세 정확한 hash/URL/검증 구분은 최종 문서 참조.
+- 판정/다음: **Windows 배포 완료(마일스톤)·실기 테스트 대기**. 사용자 업데이트 후 실제 연결 확인은 남음. main 역머지·push·자동 설치/재시작 없음. 모든 장애 해결이나 모든 시험 PASS로 보고하지 않는다.
