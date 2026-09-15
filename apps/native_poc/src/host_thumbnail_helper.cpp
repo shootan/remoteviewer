@@ -103,7 +103,10 @@ struct Attempt {
   void* view = nullptr;
   HANDLE done = nullptr;
   PROCESS_INFORMATION pi{};
-  bool killConfirmed = true;    // read by the caller after teardown
+  // Not read anywhere outside this struct. Kept because the branch below turns on it and a
+  // named flag says what that branch is about; an earlier comment claimed a caller read it, and
+  // no caller does.
+  bool killConfirmed = true;
   uint64_t* teardownOut = nullptr;  // where to report how long the teardown took
 
   ~Attempt() {
@@ -172,17 +175,32 @@ ThumbnailCaptureResult capture_thumbnail_attempt(HWND hwnd, uint32_t maxW, uint3
     result.elapsedUs = qpc_now_us() - start;
     return result;
   };
+  /**
+   * A refusal that is ours rather than the window's.
+   *
+   * Failed spends one of the window's three attempts, and these two have nothing to do with the
+   * window: one means another dispatcher got there first, the other means a previous helper will
+   * not die. Charging for them puts a healthy window into a sixty second cooldown for something it
+   * did not do -- three concurrent requests is all it takes. Canceled already means "nothing was
+   * asked of it" and the budget treats it as free.
+   */
+  const auto refuse = [&](const char* why) {
+    result.outcome = ThumbnailOutcome::Canceled;
+    result.detail = why;
+    result.elapsedUs = qpc_now_us() - start;
+    return result;
+  };
 
   // A helper that survived being killed is still out there. Starting another would make two, and
   // whatever is wrong with the first is not improved by company. Refused immediately -- the caller
   // gets a failure in microseconds rather than a deadline, and the window is charged a retry.
-  if (helper_still_lingering()) return fail("thumb_helper_lingering");
+  if (helper_still_lingering()) return refuse("thumb_helper_lingering");
 
   // One at a time, enforced rather than inferred. The control dispatcher is not one thread: TCP
   // and UDP both serve, so two requests really can arrive together.
   bool idle = false;
   if (!gCaptureInFlight.compare_exchange_strong(idle, true)) {
-    return fail("thumb_busy");
+    return refuse("thumb_busy");
   }
   struct InFlightGuard {
     ~InFlightGuard() { gCaptureInFlight.store(false); }

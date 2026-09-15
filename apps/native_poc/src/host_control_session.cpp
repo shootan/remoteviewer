@@ -155,9 +155,10 @@ void ControlSessionServer::Serve(ControlLink& link) {
   // host runs both. An earlier version of this comment said there was one, which would have left
   // two threads walking the same map.
   //
-  // That also sets the concurrency: at most one capture per dispatcher, so at most two helpers
-  // alive at once, and the bound is structural rather than enforced here. Each dispatcher serves
-  // one client at a time and holds nothing while the helper runs.
+  // Concurrency is no longer left to the caller's shape. Two dispatchers could each be in a
+  // capture, so capture_thumbnail_isolated enforces one at a time itself and refuses the second
+  // with thumb_busy -- which costs the window nothing, because the refusal is ours. Each
+  // dispatcher serves one client at a time and holds nothing while a helper runs.
   static ThumbnailBudget thumbnailBudget;
   static std::mutex thumbnailBudgetMu;
 

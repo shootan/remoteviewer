@@ -202,11 +202,20 @@ int run_race_probe(const std::wstring& outFile, uint64_t deadlineUs) {
   std::atomic<int> timedOut{0};
   std::atomic<int> ok{0};
 
+  // Counted separately: a refusal has to come back as Canceled, not Failed. Failed spends one of
+  // the window's three attempts, and "another dispatcher got there first" is not something the
+  // window did.
+  std::atomic<int> busyCharged{0};
   const auto once = [&]() {
     const ThumbnailCaptureResult r = capture_thumbnail_isolated(nullptr, 256, 160, deadlineUs);
-    if (r.outcome == ThumbnailOutcome::Ok) ++ok;
-    else if (r.detail == "thumb_busy") ++busy;
-    else if (r.outcome == ThumbnailOutcome::TimedOut) ++timedOut;
+    if (r.outcome == ThumbnailOutcome::Ok) {
+      ++ok;
+    } else if (r.detail == "thumb_busy") {
+      ++busy;
+      if (r.outcome != ThumbnailOutcome::Canceled) ++busyCharged;
+    } else if (r.outcome == ThumbnailOutcome::TimedOut) {
+      ++timedOut;
+    }
   };
 
   const uint64_t start = qpc_now_us();
@@ -218,8 +227,8 @@ int run_race_probe(const std::wstring& outFile, uint64_t deadlineUs) {
 
   FILE* f = nullptr;
   if (_wfopen_s(&f, outFile.c_str(), L"w") != 0 || !f) return 2;
-  std::fprintf(f, "%d %d %d %llu\n", ok.load(), busy.load(), timedOut.load(),
-               static_cast<unsigned long long>(total));
+  std::fprintf(f, "%d %d %d %llu %d\n", ok.load(), busy.load(), timedOut.load(),
+               static_cast<unsigned long long>(total), busyCharged.load());
   std::fclose(f);
   return 0;
 }
@@ -500,7 +509,7 @@ int wmain(int argc, wchar_t** argv) {
         si.cb = sizeof(si);
         PROCESS_INFORMATION pi{};
         bool ran = false;
-        int ok = 0, busy = 0, timedOut = 0;
+        int ok = 0, busy = 0, timedOut = 0, busyCharged = 0;
         unsigned long long total = 0;
         if (CreateProcessW(nullptr, c.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
                            nullptr, &si, &pi)) {
@@ -510,7 +519,8 @@ int wmain(int argc, wchar_t** argv) {
           CloseHandle(pi.hProcess);
           FILE* f = nullptr;
           if (w == WAIT_OBJECT_0 && _wfopen_s(&f, resultFile.c_str(), L"r") == 0 && f) {
-            ran = std::fscanf(f, "%d %d %d %llu", &ok, &busy, &timedOut, &total) == 4;
+            ran = std::fscanf(f, "%d %d %d %llu %d", &ok, &busy, &timedOut, &total,
+                              &busyCharged) == 5;
             std::fclose(f);
           }
         }
@@ -520,6 +530,9 @@ int wmain(int argc, wchar_t** argv) {
               std::to_string(busy) + " refused, " + std::to_string(timedOut) + " timed out");
         check("...the one that was refused failed at once rather than waiting",
               ran && (busy + timedOut) == 2, "both requests were answered");
+        check("...and the refused one was not charged to the window",
+              ran && busyCharged == 0,
+              std::to_string(busyCharged) + " charged; a refusal is ours, not the window's");
         check("...so the pair costs one deadline, not two", ran && total < deadline * 3,
               std::to_string(total / 1000) + "ms for two requests at a " +
                   std::to_string(deadline / 1000) + "ms deadline");
