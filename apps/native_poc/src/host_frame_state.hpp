@@ -30,6 +30,8 @@ struct FrameState {
   uint32_t seq = 0;
   uint32_t width = 0;
   uint32_t height = 0;
+  uint32_t contentWidth = 0;  // source pixels before readback downscaling
+  uint32_t contentHeight = 0;
   uint32_t stride = 0;
   uint64_t streamGeneration = 0;
   uint64_t captureUs = 0;

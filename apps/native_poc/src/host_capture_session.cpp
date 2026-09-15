@@ -226,8 +226,13 @@ void CaptureState::PublishCapturedTexture(CaptureResources& res, ID3D11Texture2D
     capture.cadenceGate.SetEarlyTolerancePercent(capture.submitEarlyTolerancePercent);
     capture.cadenceGate.SetRequestedIntervalUs(
         std::max<uint64_t>(1, capture.submitMinIntervalUs.load(std::memory_order_acquire)));
-    if (!capture.cadenceGate.ShouldAccept(callbackUs, hasNewContent)) return;
+    const bool due = capture.cadenceGate.ShouldAccept(callbackUs, hasNewContent);
+    if (!hasNewContent && !due) return;
   }
+  // Desktop updates are change-driven: dropping an early content callback can lose the final
+  // typed character forever. Own every content snapshot, then pace latest-wins readback output.
+  captureReadback.SetPublishIntervalUs(capture.submitLimitEnabled ?
+      capture.submitMinIntervalUs.load(std::memory_order_acquire) : 0);
   uint32_t frameW = 0;
   uint32_t frameH = 0;
   {
@@ -930,6 +935,16 @@ void CaptureState::PublishFrame(CaptureResources& res, HostStats& stats,
   }
   capture.lastCallbackUs.store(meta.callbackUs, std::memory_order_release);
   capture.lastCaptureUsForInterval.store(meta.captureUs, std::memory_order_release);
+  // This is an actual readback publication, not a viewer's present interval. Join to the
+  // frame metadata by hostCaptureUs. A gap alone still does not prove changed pixels waited.
+  if (captureIntervalUs >= 100000ULL || callbackIntervalUs >= 100000ULL) {
+    std::cout << "[native-video-host][capture-timing] hostCaptureUs=" << meta.captureUs
+              << " hostCallbackUs=" << meta.callbackUs
+              << " hostPublishUs=" << queuePushUs
+              << " sourceIntervalUs=" << captureIntervalUs
+              << " callbackIntervalUs=" << callbackIntervalUs
+              << " attachment=" << meta.attachmentCookie << "\n";
+  }
   // Update the static-screen bootstrap cache from this real publish -- the ONLY writer. Copy the
   // payload shared_ptr (do NOT move: `frame` still takes ownership below). The buffer pool
   // recycles a payload only once its LAST holder releases, so holding this copy keeps the pixels
@@ -967,6 +982,8 @@ void CaptureState::PublishFrame(CaptureResources& res, HostStats& stats,
     res.frame.payload = std::move(payload);
     res.frame.width = frameW;
     res.frame.height = frameH;
+    res.frame.contentWidth = meta.cropActive ? meta.cropW : meta.width;
+    res.frame.contentHeight = meta.cropActive ? meta.cropH : meta.height;
     res.frame.stride = stride;
     res.frame.streamGeneration = meta.streamGeneration;
     res.frame.captureUs = meta.captureUs;

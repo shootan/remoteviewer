@@ -206,7 +206,8 @@ FrameGateVerdict FrameGate::admit(const FrameGateInputs& in, FrameGateLag* lag) 
   const uint64_t entryFloorUs = gate.resumeAnchorPending ? std::max(gate.presentAnchorFloorUs, in.captureQpcUs)
                                                          : gate.presentAnchorFloorUs;
   const uint64_t effectivePresentedCapUs =
-      congestionHealthy ? std::max(in.presentedCapUs, entryFloorUs) : in.presentedCapUs;
+      congestionHealthy ? std::max(std::max(in.presentedCapUs, in.decodedCapUs), entryFloorUs)
+                        : std::max(in.presentedCapUs, in.decodedCapUs);
   const uint64_t decodeQueueLagEstimateUs =
       (effectivePresentedCapUs > 0 && in.captureQpcUs >= effectivePresentedCapUs)
           ? (in.captureQpcUs - effectivePresentedCapUs)

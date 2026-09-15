@@ -118,6 +118,23 @@ int main(int argc, char** argv) {
     recovery_check(recovery_dom(L"!document.getElementById('cancelReconnect').classList.contains('hidden')"), "reconnect cancel control is visible");
     recovery_eval(L"document.getElementById('cancelReconnect').click();true");
     recovery_check(recovery_wait([&] { return !gReconnectRequest; }), "DOM reconnect cancel reaches native cancellation");
+    gViewerOperation = 100;
+    const uint64_t currentOwner = gOwnerEpoch.load();
+    const ShellConnectRequest olderViewer{};
+    gActiveViewers = 1;
+    handle_viewer_exit(olderViewer, 99, currentOwner, WAIT_OBJECT_0, 0, 1000);
+    recovery_check(recovery_dom(L"document.getElementById('hostsMsg').textContent.includes('1개 연결')"),
+                   "older viewer exit still updates the live-session count");
+    gActiveViewers = 0;
+    handle_viewer_exit(olderViewer, 99, currentOwner, WAIT_OBJECT_0, 0, 1000);
+    recovery_check(recovery_dom(L"document.getElementById('hostsMsg').textContent === ''"),
+                   "last older viewer exit clears the remaining-session message");
+    gReconnectRequest = ShellConnectRequest{};
+    gReconnectAttempts = 2;
+    handle_viewer_exit(olderViewer, 99, currentOwner, WAIT_OBJECT_0, 43, 90000);
+    recovery_check(gReconnectRequest.has_value() && gReconnectAttempts == 2,
+                   "older viewer cannot replace or reset a newer reconnect");
+    gReconnectRequest.reset(); gReconnectAttempts = 0;
     recovery_eval(L"document.getElementById('openSettings').click();true");
     post_status("reconnecting", "fixture busy");
     recovery_check(recovery_dom(L"document.getElementById('signIn').disabled"), "busy state reaches UI while settings is open");

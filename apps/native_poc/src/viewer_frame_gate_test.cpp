@@ -1083,6 +1083,23 @@ void test_keyframe_wait_drops_do_not_enter_congested() {
 }
 
 int main() {
+  {
+    Rig r;
+    r.gate.waitForKeyFrame = false;
+    for (uint32_t i = 1; i <= 120; ++i) {
+      FrameGateInputs in{};
+      in.captureQpcUs = 1000000 + i * 16667ULL;
+      in.packetNowUs = in.captureQpcUs;
+      in.seq = i;
+      in.recvGapUs = r.fg.note_packet(in.packetNowUs);
+      in.presentedCapUs = 1000000; // UI deliberately frozen, decoder continues to progress.
+      in.decodedCapUs = in.captureQpcUs - 16667;
+      FrameGateLag lag;
+      CHECK(r.fg.admit(in, &lag) == FrameGateVerdict::Decode);
+    }
+    CHECK(r.sink.resets == 0);
+    CHECK(r.gate.congestionState == ClientCongestionState::Normal);
+  }
   test_keyframe_wait_drops_do_not_enter_congested();
   test_held_resume_frame_does_not_anchor();
   test_held_resume_decoded_nonkey_keeps_pending();

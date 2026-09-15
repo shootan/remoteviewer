@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -31,12 +32,15 @@ class ClientInputQueue {
   uint32_t NextSequence();
   void Enqueue(const QueuedControlInputMessage& msg);
   bool TryDequeue(QueuedControlInputMessage* out);
+  // Wake immediately on typing/mouse input; periodic control work still gets a bounded wait.
+  void WaitForInput(uint32_t timeoutMs);
   uint64_t dropped_count() const;
   uint64_t coalesced_move_count() const;  // P0 (#351): moves replaced by a newer one (latest-wins)
   void Reset();
 
  private:
   mutable std::mutex mu_;
+  std::condition_variable ready_;
   std::deque<QueuedControlInputMessage> queue_;
   bool backpressured_ = false;
   std::atomic<uint32_t> nextSeq_{0};
@@ -250,6 +254,7 @@ class ClientControlScheduler {
 
  private:
   uint32_t nextPingSeq_ = 0;
+  uint32_t inputBurstCount_ = 0;
   uint32_t nextMetricsSeq_ = 0;
   uint32_t nextWindowListSeq_ = 0;
   uint32_t nextWindowSelectSeq_ = 0;

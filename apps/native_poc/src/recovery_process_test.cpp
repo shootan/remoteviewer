@@ -6,7 +6,7 @@
 #include "bounded_process_exit.hpp"
 #include "host_recovery_policy.hpp"
 #include "host_watchdog.hpp"
-#include "udp_receive_pump.hpp"
+#include "viewer_udp_ingress.hpp"
 #include "udp_control_channel.hpp"
 #include "bounded_pipe_io.hpp"
 #include "capture_callback_gate.hpp"
@@ -36,6 +36,11 @@ int main(int argc, char**) {
       if (std::wstring(entry) == L"GNLINK_RECOVERY_ENV_TEST=child") found = true;
     wchar_t current[128]{}; GetEnvironmentVariableW(L"GNLINK_RECOVERY_ENV_TEST", current, 128);
     check(found && std::wstring(current) == L"parent", "recovery child environment cannot contaminate parent launches");
+    const auto inherited = child_environment_with(L"GNLINK_RECOVERY_ENV_TEST", L"wgc", false);
+    bool inheritedParent = false;
+    for (const wchar_t* entry = inherited.data(); *entry; entry += std::wcslen(entry) + 1)
+      if (std::wstring(entry) == L"GNLINK_RECOVERY_ENV_TEST=parent") inheritedParent = true;
+    check(inheritedParent, "normal launches inherit the requested backend unchanged");
     SetEnvironmentVariableW(L"GNLINK_RECOVERY_ENV_TEST", size > 0 && size < 128 ? previous : nullptr);
   }
   {
@@ -103,7 +108,7 @@ int main(int argc, char**) {
     UdpControlChannel channel;
     channel.Configure([](const void*, size_t) { return true; }, 2, 1, 1200);
     {
-      UdpReceivePump pump(receiver, [&](const void* data, size_t size) { return channel.OnPacket(data, size); },
+      viewer::UdpIngress pump(receiver, [&](const uint8_t* data, size_t size) { return channel.OnPacket(data, size); },
                           [&] { channel.Tick(); });
       std::vector<uint8_t> media(1000, 'v');
       // No consumer runs: simulate a decoder stalled with a full media backlog.
@@ -123,13 +128,13 @@ int main(int argc, char**) {
       std::vector<uint8_t> control;
       check(channel.Receive(&control, 1000) && control == std::vector<uint8_t>{'c'},
             "real control message bypasses stalled media consumer");
-      check(pump.Drops() > 0, "media backlog is bounded while control remains live");
+      check(pump.dropped() > 0, "media backlog is bounded while control remains live");
     }
     closesocket(receiver); closesocket(sender);
   }
-  policy.OnExit(44, 1000, 1000); check(!policy.UseWgc(1001), "one transient wedge retains backend");
-  policy.OnExit(44, 1000, 3000); check(policy.UseWgc(3001), "repeat wedge selects WGC");
-  check(!policy.UseWgc(303001), "backend quarantine expires");
+  policy.OnExit(44, 1000, 1000); check(policy.UseWgc(1001), "main policy: first DXGI wedge selects WGC");
+  policy.OnExit(0, 600000, 601000); check(policy.UseWgc(601001), "healthy child cannot erase supervisor quarantine");
+  check(!HostRecoveryPolicy{}.UseWgc(601001), "a new supervisor starts with the requested backend");
   {
     MainLoopWatchdogThread watchdog;
     std::atomic<bool> returned{false};

@@ -482,11 +482,6 @@ class StreamingHostProcess {
     uint32_t watchdogRecoveries = 0;
     uint64_t watchdogWindowStartMs = 0;
     remote60::native_poc::HostRecoveryPolicy recoveryPolicy;
-    const std::wstring requestedBackend = [] {
-      wchar_t value[64]{};
-      const DWORD n = GetEnvironmentVariableW(L"REMOTE60_DESKTOP_CAPTURE_BACKEND", value, 64);
-      return n > 0 && n < 64 ? std::wstring(value) : std::wstring(L"dxgi");
-    }();
     while (running_.load(std::memory_order_relaxed)) {
       const bool useRecoveryWgc = recoveryPolicy.UseWgc(GetTickCount64());
       const bool nv12SurfaceForcedOff = crashStreak >= 2;
@@ -570,7 +565,7 @@ class StreamingHostProcess {
                             : "[host-app] starting the streaming host (tune=low_latency)");
       const uint64_t spawnTickMs = GetTickCount64();
       const auto childEnvironment = remote60::native_poc::child_environment_with(
-          L"REMOTE60_DESKTOP_CAPTURE_BACKEND", useRecoveryWgc ? L"wgc" : requestedBackend);
+          L"REMOTE60_DESKTOP_CAPTURE_BACKEND", L"wgc", useRecoveryWgc);
 
       // lpApplicationName names the exe by path, so the child is chosen outright instead of by
       // parsing the first token of the command line. (Ledger H-20.)
@@ -1127,6 +1122,8 @@ std::atomic<bool> gDirectoryReported{false};
  */
 void note_child_log_line(const std::string& line) {
   if (line.find("directory online") == std::string::npos) return;
+  append_host_app_log("[host-app][lifecycle] directory-online observed pid=" +
+                      std::to_string(GetCurrentProcessId()));
   if (gDirectoryReported.exchange(true)) return;
   write_health_report("ok");
 }
@@ -2000,6 +1997,8 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
       return 0;
     case WM_DESTROY: {
       { std::lock_guard<std::mutex> lock(g.ownerMu); ++g.ownerEpoch; }
+      append_host_app_log("[host-app][lifecycle] WM_DESTROY pid=" +
+                          std::to_string(GetCurrentProcessId()));
       KillTimer(window, kStatusTimer);
       // Ordinarily a no-op by now: the handoff path above already stopped it. Still reported,
       // because "already stopped, no child" and "a child is somehow still alive" are different
@@ -2125,4 +2124,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR commandLine, int) {
   { std::lock_guard<std::mutex> lock(g.ownerMu); ++g.ownerEpoch; }
   host_workers().Shutdown();
   return 0;  // workers joined before uploaderShutdown -> uiScope -> wsaScope
+  append_host_app_log("[host-app][lifecycle] message-loop ended pid=" +
+                      std::to_string(GetCurrentProcessId()) + " wParam=" +
+                      std::to_string(static_cast<uint64_t>(message.wParam)));
+  return 0;  // uploaderShutdown -> uiScope -> wsaScope, in that order
 }

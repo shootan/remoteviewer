@@ -1,5 +1,7 @@
 # Host/PC 복구 수정 내역과 검증 상태 — 2026-09-12
 
+> 2026-09-15 main 통합 후의 현재 정책·파일 구성은 [통합 기록](main_recovery_integration_2026-09-15.md)을 따른다. 아래는 통합 전 구현 기록이다. 특히 DXGI 2회/5분 정책과 별도 UDP pump는 대체되었다.
+
 사용자 지시로 Codex가 직접 수정한 후보다. 위치 `D:/remote/remote-worktrees/host-pc-recovery`, 브랜치 `audit/host-pc-recovery`, 기준 `035c4a4`. 서버 커밋은 `27d9e74`, Native 수정은 이 문서와 함께 별도 커밋한다. 원래 폴더와 설치 제품은 변경하지 않았다.
 
 **현재 판정: 구현·자체 검증 후보. 전체 실기 완료나 배포 완료가 아니다.** 원장 36항목에는 정책 공백·조건부 위험도 포함된다. 아래의 구현 반영을 현장 36건 해결 확인으로 해석하지 않는다. 당시 근거와 파일 해시는 [조사 원장](host_pc_thread_recovery_audit_2026-09-12.md)·[파일 목록](host_pc_thread_recovery_inventory_2026-09-12.md)에 보존한다.

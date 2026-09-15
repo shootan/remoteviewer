@@ -83,6 +83,8 @@ bool process_identity_matches(void* handle, const ProcessTarget& target);
  * real one.
  */
 struct UpdateEffectsConfig {
+  // Optional diagnostics. Receives operation/file/error metadata, never credentials.
+  std::function<void(const std::string&)> trace;
   /** Where the product lives. Replaced in place, so its path must stay stable (design 3.1 S1). */
   std::wstring installDir;
   /** Where the download is staged. Must be OUTSIDE installDir -- see design 3.2. */

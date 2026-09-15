@@ -11,7 +11,7 @@
 # The order below is the whole point and is not negotiable:
 #
 #   preflight -> upload artifacts -> verify them ON THE SERVER -> back up the old pair
-#             -> swap manifest+sig atomically, LAST -> verify from outside over https
+#             -> replace manifest+sig with two renames, LAST -> verify outside over https
 #
 # The manifest is what makes a release public. Publishing it before its artifacts are in place
 # opens a window in which the update endpoint hands out a document pointing at files that 404,
@@ -289,17 +289,21 @@ preflight() {
 LOCK_DIR=""
 release_lock() {
   if [ -n "$LOCK_DIR" ]; then
-    # The owner file goes first. rmdir on a non-empty directory fails, and a lock that survives a
-    # SUCCESSFUL deploy is worse than one that survives a failure: nothing looks wrong until the
-    # next release, which then refuses to start for a reason that has nothing to do with it.
-    # LOCK_DIR is only ever set when this process created the lock, so this cannot clear another's.
-    remote_sh "rm -f -- '$LOCK_DIR/owner'; rmdir '$LOCK_DIR' 2>/dev/null || true"
+    # Only our own lock is archived. Moving it releases the active lock without deleting NAS
+    # files, and leaves its owner record available when diagnosing a failed or completed publish.
+    local archive="$GNLINK_REMOTE_ROOT/.gnlink-deploy-lock-history/$(date -u +%Y%m%dT%H%M%S)-$$-$RANDOM"
+    assert_inside_root "$archive"
+    remote_sh "mkdir -p '$GNLINK_REMOTE_ROOT/.gnlink-deploy-lock-history' && mv -- '$LOCK_DIR' '$archive'"
     LOCK_DIR=""
   fi
 }
 trap release_lock EXIT
 
 take_lock() {
+  if [ "$DRY_RUN" = "1" ]; then
+    log "dry run: no publish lock acquired"
+    return 0
+  fi
   LOCK_DIR="$GNLINK_REMOTE_ROOT/.gnlink-deploy.lock"
   assert_inside_root "$LOCK_DIR"
   if ! remote_sh "mkdir '$LOCK_DIR' 2>/dev/null"; then
@@ -438,11 +442,11 @@ publish_pair() {
   remote_put "$SIGNATURE" "$dst_sig.tmp"
   remote_sh "chmod 644 -- '$dst_manifest.tmp' '$dst_sig.tmp'"
   if ! remote_sh "mv -f -- '$dst_manifest.tmp' '$dst_manifest' && mv -f -- '$dst_sig.tmp' '$dst_sig'"; then
-    remote_sh "rm -f -- '$dst_manifest.tmp' '$dst_sig.tmp' || true"
-    die "the swap failed; the previous release is still published"
+    warn "temporary files retained for diagnosis; restore BOTH files from the recorded backup"
+    die "the swap failed; the published pair may be partially replaced"
   fi
   log "published $VERSION"
-  log "no restart: the manifest handler reads the file on every request (server.js:425). Only an env change would need one, and this changes no env."
+  log "no restart: only manifest files changed; server code and environment are unchanged"
 }
 
 # ---------------------------------------------------------------------------- outside verification
@@ -463,7 +467,8 @@ verify_from_outside() {
   command -v curl >/dev/null || { warn "curl unavailable: external verification NOT performed"; return 0; }
 
   local i url tmp actual bad=0
-  tmp="$(mktemp)"
+  mkdir -p "$REPO_ROOT/.claude/deploy-tmp"
+  tmp="$(mktemp "$REPO_ROOT/.claude/deploy-tmp/verify.XXXXXX")"
   for i in "${!ART_NAME[@]}"; do
     url="${ART_URL[$i]}"
     if ! curl -fsS --max-time 60 -o "$tmp" -- "$url"; then
@@ -534,5 +539,5 @@ log "signature      sha256=$(sha256_of "$SIGNATURE")"
 log "artifacts      ${#ART_NAME[@]} at $UPDATES_DIR/$VERSION"
 log "restart        not required"
 log "still open     the field test: a real host taking this update end to end"
-[ "$DRY_RUN" = "1" ] && log "DRY RUN -- nothing on the server was changed"
+[ "$DRY_RUN" = "1" ] && log "DRY RUN -- no artifacts or manifest were published"
 exit 0

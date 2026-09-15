@@ -49,6 +49,9 @@ enum class MessageType : uint16_t {
   // kCaptureFlagHostImePulseStateV2 so an old v1 host never sees these (it would drop them silently).
   ControlImeStateRequest = 47,
   ControlImeStateResponse = 48,
+  // Sent only after kCaptureFlagPeerVersion is advertised in a regular Pong.
+  ControlVersionRequest = 49,
+  ControlVersionResponse = 50,
 };
 
 enum class UdpPacketKind : uint16_t {
@@ -189,7 +192,16 @@ constexpr uint32_t kCaptureFlagHostImeV1 = 0x10u;
 constexpr uint32_t kCaptureFlagHostImePulseStateV2 = 0x20u;
 // Active H.264 streams periodically refresh even a static desktop. Without this capability a
 // legacy/change-driven host may legitimately send no pixels while its control remains alive.
-constexpr uint32_t kCaptureFlagFrameHeartbeat = 0x40u;
+constexpr uint32_t kCaptureFlagFrameHeartbeat = 0x80u;
+constexpr uint32_t kCaptureFlagPeerVersion = 0x40u;
+static_assert((kCaptureFlagFrameHeartbeat & kCaptureFlagPeerVersion) == 0,
+              "heartbeat and peer version capabilities must remain independent on the wire");
+
+struct ControlVersionMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  char productVersion[32] = {};
+};
 
 struct ControlPongMessage {
   MessageHeader header{};

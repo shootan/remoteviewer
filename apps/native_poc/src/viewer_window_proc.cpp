@@ -116,15 +116,21 @@ bool mouse_suppressed(ViewerState& ctx, const char* what) {
   return true;
 }
 
+// A press forwarded to the host owns its release even outside the video or over local UI.
+// Coordinate rejection must never strand the remote button. UI-only presses have no bit set.
+bool release_forwarded_button(ViewerState& ctx, HWND hwnd, uint16_t bit, uint32_t vk, int x, int y) {
+  if ((ctx.input.mouseButtons.load(std::memory_order_relaxed) & bit) == 0) return false;
+  int32_t vx = ctx.input.lastVideoX.load(std::memory_order_relaxed);
+  int32_t vy = ctx.input.lastVideoY.load(std::memory_order_relaxed);
+  (void)map_client_point_to_video_coords(ctx, hwnd, x, y, &vx, &vy);
+  ctx.input.mouseButtons.fetch_and(static_cast<uint16_t>(~bit));
+  enqueue_input_event(ctx, 3, vx, vy, 0, vk);
+  release_mouse_capture_if_idle(ctx, hwnd);
+  return true;
+}
+
 LRESULT on_secondary_button(ViewerState& ctx, HWND hwnd, bool down, uint16_t buttonBit, uint32_t vk, int x, int y) {
-  if (!down && (ctx.input.mouseButtons.load() & buttonBit)) {
-    int32_t vx = ctx.input.lastVideoX.load(), vy = ctx.input.lastVideoY.load();
-    map_client_point_to_video_coords(ctx, hwnd, x, y, &vx, &vy);
-    ctx.input.mouseButtons.fetch_and(static_cast<uint16_t>(~buttonBit));
-    enqueue_input_event(ctx, 3, vx, vy, 0, vk);
-    release_mouse_capture_if_idle(ctx, hwnd);
-    return 0;
-  }
+  if (!down && release_forwarded_button(ctx, hwnd, buttonBit, vk, x, y)) return 0;
   if (mouse_suppressed(ctx, "secondary button")) return 0;
   if (point_in_toggle_button(ctx, hwnd, x, y)) return 0;
   if (point_in_macro_button(ctx, hwnd, x, y)) return 0;
@@ -404,16 +410,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       }
       return 0;
     case WM_LBUTTONUP: {
-      // A remotely pressed button must be released even over chrome, letterboxing, outside the
-      // window, or during touch suppression. Picker-only presses do not set mouseButtons.
-      if (ctx.input.mouseButtons.load(std::memory_order_relaxed) & 1u) {
-        int32_t vx = ctx.input.lastVideoX.load(), vy = ctx.input.lastVideoY.load();
-        map_client_point_to_video_coords(ctx, hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &vx, &vy);
-        ctx.input.mouseButtons.fetch_and(static_cast<uint16_t>(~1u));
-        enqueue_input_event(ctx, 3, vx, vy, 0, VK_LBUTTON);
-        release_mouse_capture_if_idle(ctx, hwnd);
-        return 0;
-      }
+      if (release_forwarded_button(ctx, hwnd, 1, VK_LBUTTON, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (mouse_suppressed(ctx, "up")) return 0;
       const int x = GET_X_LPARAM(lp);
       const int y = GET_Y_LPARAM(lp);

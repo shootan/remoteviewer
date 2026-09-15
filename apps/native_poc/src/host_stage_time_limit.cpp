@@ -100,7 +100,7 @@ Flow stage_time_limit(HostContext& hx, TickContext& tc) {
     ++capture.restartCount;
     encoder.ResetTimelineAnchors(capture);
     encoder.forceKeyNext = true;
-    kick.Arm(nowUs, useH264);
+    kick.Arm(nowUs, useH264, hx.encoder.activeFps);
     std::cout << "[native-video-host] capture retry recovered\n";
   }
  
@@ -116,7 +116,7 @@ Flow stage_time_limit(HostContext& hx, TickContext& tc) {
     const auto target = encoder.retryTarget;
     if (encoder.ApplyTarget(capture, hx.res, hx.frameGating, hx.inputRouter, sender,
                             target.w, target.h, target.fps, target.bitrate, target.keyint)) {
-      kick.Arm(nowUs, useH264);
+      kick.Arm(nowUs, useH264, hx.encoder.activeFps);
       std::cout << "[native-video-host] encoder target retry recovered\n";
     }
   }
@@ -127,7 +127,7 @@ Flow stage_time_limit(HostContext& hx, TickContext& tc) {
     std::cout << "[native-video-host] encoder provenance resync ok (tick) resets=" << encoder.provenanceResyncCount
               << " curEpoch=" << capture.inputEpoch.load(std::memory_order_acquire)
               << " -> forcing a key\n";
-    kick.Arm(nowUs, useH264);  // a still screen needs the kick to carry the forced IDR out
+    kick.Arm(nowUs, useH264, hx.encoder.activeFps);  // a still screen needs the kick to carry the forced IDR out
   }
   pump_cursor_forward(hx, nowUs);
   // Arm the trailing-edge kick on a fresh viewer/decoder (bumped session epoch) and on a capture
@@ -138,12 +138,12 @@ Flow stage_time_limit(HostContext& hx, TickContext& tc) {
     const uint64_t curEpoch = clientSession.epoch.load(std::memory_order_acquire);
     if (curEpoch != kick.lastSeenBootstrapEpoch) {
       kick.lastSeenBootstrapEpoch = curEpoch;
-      kick.Arm(nowUs, useH264);
+      kick.Arm(nowUs, useH264, hx.encoder.activeFps);
     }
     const uint64_t curGen = capture.streamGenerationState.load(std::memory_order_acquire);
     if (curGen != kick.lastSeenStreamGeneration) {
       kick.lastSeenStreamGeneration = curGen;
-      kick.Arm(nowUs, useH264);
+      kick.Arm(nowUs, useH264, hx.encoder.activeFps);
     }
   }
   // Every keyframe request -- the viewer's, and the sender's after a dropped backlog or a
@@ -167,7 +167,7 @@ Flow stage_time_limit(HostContext& hx, TickContext& tc) {
     // mean the request completes without one: the kick resubmits the cached raw frame ~150ms
     // later and KickTryFill still re-validates identity/secure/size before it does.
     // (Ledger H-26b.)
-    kick.Arm(nowUs, useH264);
+    kick.Arm(nowUs, useH264, hx.encoder.activeFps);
   }
   return Flow::Next;
 }

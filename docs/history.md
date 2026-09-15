@@ -1,4 +1,4 @@
-# remote60 작업 히스토리 (NEW)
+﻿# remote60 작업 히스토리 (NEW)
 
 업데이트: 2026-04-09
 
@@ -11877,3 +11877,90 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 변경: 기록 문서와 각 단계의 커밋 경계. 최종 제품/테스트/CMake blob은 기존 Native 커밋과 동일함.
 - 검증: 12단계 각각 Release 빌드와 관련 실행 통과, 최종 Git diff에서 기록 외 차이0. 대응표 `docs/host_pc_recovery_commit_split_2026-09-14.md`.
 - 다음: 사용자 추가 지시 대기. 기존 실기/릴리스 미검증 유지. 메인 머지·push·배포 없음.
+### 2026-09-12 게임 원격 수정안·출시 준비 — Codex 직접 조사 완료
+
+- 목표: 사용자 지시에 따라 다른 GMux 작업 세션을 사용하지 않고 장애 수정 방향과 출시 전 필요한 작업을 직접 검토.
+- 변경: docs/release_readiness_2026-09-12.md, docs/incident_2026-09-12_code_review.md, docs/incident_2026-09-12_remote_game.md, docs/구현계획.md 및 본 이력.
+- 결과: R01~R12 수정안/보존 조건/검증 기준과 순서 정리. 반복 watchdog의 4회째 12초 backoff, 세션 로그 식별 부재, control alive와 영상 freshness 차이, 동시 viewer 전역 상태 위험을 추가 기록.
+- 검증: 기존 summarize_wan_capture.ps1을 합성 로그 2종으로 직접 실행. 표시 0+멈춤 필드 누락은 Gate A PASS=True, 멈춤 필드 3인 음성 대조는 False. 판정기 단위 재현이며 실제 게임 성능 시험 아님. 문서 diff 공백 검사 수행.
+- 다음: R10 계측/판정기 보강 → R01 최소 수정 → 입력/수신/표시 경계 개선 → 캡처/복구/품질 → 제품 동시 접속/장시간/출시 검증. 이 기록은 문서 작업 완료이며 제품 수정 완료가 아님.
+- 사용자 상대 선택 대기는 철회됨. 외부 에이전트 연락·제품 수정·설치·배포 없음. Git MCP 미제공으로 커밋 없음, push 미실행. 다른 세션이 편집 중인 파일은 보존.
+
+### 2026-09-12 격리 브랜치 게임 원격 안정화 수정 후보
+
+- 목표: 사용자 직접 수행 지시에 따라 멈춤·반복 드래그·정적 타이핑·프레임/화질 저하의 확인된 코드 경로 수정.
+- 위치: fix/remote-game-stability, .claude/worktrees/remote-game-stability, 전용 build-incident. 기준 035c4a44998bfae82049f5d1afe62d3b6b8fb299. 다른 작업 트리 제품 변경/배포 없음.
+- 변경: Viewer UP 우선 해제, 입력 wake/유한 우선 burst, 독립 UDP ingress, decode 진척 기반 혼잡 판단, 이벤트 기반 UI 대기. Host 최신 GPU 픽셀 보존/소비 pacing, 원본 geometry 전달, 2프레임 tail kick, DXGI wedge 후 WGC 격리, stale ABR 승급 차단. 세션 로그 식별/남은 연결 문구, decode wedge 종료 판정, WAN gate 근거 누락/표시 실패/stutter 거부. 상세 파일과 해시는 build-incident/candidate-manifest.json 및 docs/remote_game_stability_implementation_2026-09-12.md.
+- 검증: Host/Client/Stream/Viewer Release 빌드 성공. 자동 검증 10개 대상 exit 0, WndProc 41/0(100회 드래그), UDP 복구 통합 PASS, 1080p WARP 마지막 픽셀 PASS, WAN gate 5가지 양성/음성 대조 통과. 실제 Viewer 1080p60 loopback 화면 확인: 대부분 recv/decode/present 60, gap p95 33.610ms/p99 37.873ms/max 61.423ms, 100ms 초과 0(초기 제외 527표본). 약 10초 시험이며 게임/WAN/장시간 SLA 대체 아님.
+- 기존 S9의 UI 지연→decoder reset 기대는 새 요구와 반대여서 참조 체인 유지 검증으로 교체. 실제 loss/IDR 재시도 회귀 유지. 숨김 Viewer의 present 0 실행은 표시 검증 무효로 구분.
+- 다음: 실제 장애 GPU/게임·한글/영문·동시 세션·장시간/WAN, WGC 전환 실기 및 별도 후보 검토. 드라이버 내부 원인·무중단 broker 분리는 미해결. 현재는 코드 후보/격리검증 통과이며 모든 현장 장애 해결 아님.
+- 버전 문자열 0.2.123 유지, 서명/새 버전 배포/설치/merge/push 없음. Git MCP 미제공으로 새 커밋 없음. 사용자 설치본과 후보는 파일 해시로 구분.
+
+### 2026-09-13 안정화 후보 검증용 review 보수 (t-nbc17io0, revision 2)
+
+- 목표: 검증용 Claude 독립 검토의 A/B 문서 merge blocker 및 D/E/F/G 권고 보수. main merge/배포는 별도.
+- 변경: history/계획 두 쪽 추가분 보존, F-23 ledger 현행화. UDP WSAEINTR 재시도·짧은 소비 버퍼 drop 계측, 스레드 소유권 주석, Windows 환경 snapshot/복원 및 회귀. docs/remote_game_stability_review_2026-09-13.md에 항목별 결정 기록.
+- 검증: Viewer/Host 및 대상 테스트 빌드 성공. ingress/환경 snapshot exit 0, WndProc 42/0, gate 음성/양성 대조 기대 종료 코드 일치. 검증용에게 revision 2 재검토 예정이며 이 수치는 Codex 직접 실행 결과.
+- 후보 기준만 main의 문서 전용 1261ef5로 전진, working file 해시 보존. 주 작업 트리·main 포인터 무변경. 다른 감사 작업 이력 삭제 없음.
+- 다음: 같은 task의 최종 merge 판정. C(실 GPU 부하)는 배포 blocker 유지, H(정상 시간 후 자동 DXGI 재진입)는 원인 미확정으로 도입하지 않음. commit/merge/서명/배포/push 미실행.
+### 2026-09-13 안정화 후보 독립 검토 완료 — MERGE_OK, 배포 보류
+
+- 목표: 검증용 Claude를 통한 최종 main 머지 가능 여부 검토와 보수 조건 확인.
+- 결과: t-nbc17io0 검증용 revision 2 독립 빌드/실행 11개 타깃 모두 exit 0, WndProc 42/0, gate 음성 대조 확인. 최종 조건은 history UTF-8 BOM 3바이트 복원뿐이며 그 외 재검토 불필요.
+- Codex 확인: EF BB BF 복원·본문 바이트 동일·검토본 대비 소스45/제품exe4 해시 변화0·주 트리 무변경 확인. 검토 대상 manifest 25a48831...와 모든 파일을 build-incident/approved-review-r2에 불변 보존.
+- 변경: 이력/계획 판정 상태와 docs/remote_game_stability_merge_verdict_2026-09-13.md에 최종 근거 기록. 제품 코드/바이너리 추가 변경 없음.
+- 판정: clean main worktree 통합 기준 MERGE_OK. C(실 GPU 부하) 미측정으로 배포는 보류. 실제 commit/merge/설치/게시/push 없음, Git MCP 미제공으로 새 커밋 없음.
+- 다음: 사용자 병합 지시가 있으면 승인된 코드/해시와 main 이동 여부를 확인해 통합. 배포 전 GPU 부하 및 실기/WAN/다중 세션/장시간 검증은 별도.
+### 2026-09-14 0.2.124 기존 채널 비상용 실기 배포 준비
+
+- 사용자 지시: 아직 상용 전이며 롤백 전제로 기존 업데이트 경로에서 편하게 시험. 별도 시험 링크만 제공하는 방식 대신 Windows 채널 게시 준비. C(GPU 부하)는 해결이 아니라 이번 실기 확인 대상으로 유지.
+- 변경: 승인 안정화 소스45개는 hash delta 0, product_version.hpp 0.2.123→0.2.124. 배포 스크립트는 NAS lock 기록 이동/부분 교체 실패 문구/임시 파일 repo 내부 제한/dry-run lock 생략 보수. docs/release_0.2.124_field_trial.md 및 .claude/rel/0.2.124/release-report.json에 근거.
+- 빌드/검증: installer Release 빌드, payload10/10 및 embedded RCDATA9/9, 운영키 manifest selfVerify·제품 verifier Ok/변조 거부. manifest85/0·effects219/0·실제 업데이트 UI27/0. 지정 fixture109-r2 배포 스크립트 회귀 PASS. signed fixture의 CRLF 변환 최초 실패는 보존하고 Git LF 원문으로 맞춰 재검증.
+- 복구 준비: NAS 0.2.123 manifest/sig/payload10을 보존·검증. 인증된 HTTPS API200/version123 및 서명 확인. 채널 복구 스크립트 준비; 이미 설치한 앱은 이전 Setup의 Reinstall 단계가 별도이며 실제 downgrade는 미실행.
+- 다음: 검증용 t-kw1maaaa에 고정 package manifest dfbcc4b3...와 sig73ef2827... 전달, 기존 채널 비상용 실기 게시 OK 대기. 확인 후 자동 NAS 게시와 외부 API/파일/서명 검증을 이어감. 현재 채널123, 게시·설치·main merge·push 없음. Git MCP 없어 commit미실행; build commit을 기준 commit으로 꾸미지 않음.
+- 0.2.124 SCM 보완: Git MCP bridge로 후보 worktree 커밋 가능함을 확인. Codex가 scoped commit하고 고정 패키지와 연결한다. dist/GNLinkSetup-0.2.124.exe는 검토 payload와 동일한 사본이다.
+
+### 2026-09-14 0.2.124 기존 채널 비상용 시험 게시 완료
+- 목표/변경: 사용자 요청대로 안정화 수정본을 기존 채널에 게시. 소스 commit fdd1c785955c043b0104fb37a574e83218f25a73; release_0.2.124_field_trial.md에 패키지/복구/실기 범위 기록.
+- 검증: 검증용 패키지 게시 OK, gnlink 배포 exit0, NAS/공개 파일10개 hash 일치, 인증 HTTPS 200/version124, 제품 서명 검증 Ok와 변조 거부 확인.
+- 다음: 사용자 업데이트 후 타이핑/드래그/게임 및 GPU/WAN/다중세션/장시간 실기. 0.2.123 복구본 보존. main merge/push/자동 설치 미실행.
+
+### 2026-09-14 지연·정지 원인분리 계측 0.2.125 후보
+- 목표: 반복적인 원인 미확정을 해소할 단계별 로그 추가. Viewer/Stream 입력·프레임 시각, 독립 로컬 숫자 로그, rollback 파일별 오류, Host 종료경로, 분석기를 구현.
+- 검증: 실제 Viewer 합성1080p60 590개 타이밍 기록, update_effects220/0, 분석기4 tests, mirror 상한·필터 PASS. 설치기125 빌드/내장9개/서명검증 통과.
+- 다음: 검증용 독립 검토·11:35 회사게임PC 로그 조사 취합 후 게시 및 사용자 실기. 현재 접속/설치/main/push 무접촉. 상세 docs/diagnostic_latency_2026-09-14.md.
+
+- 0.2.125 검토 보수: 로컬mirror 고정4bank(64MiB)로 재시작 누적 제한, 상세present 평시1Hz/지연최대10Hz로 제한. 독립 r1검증220/0·mirror·분석기 통과 후 r2 자체mirror동시/재시작 PASS, 실제Viewer595gap/10상세표본, 분석기5tests PASS. 0.2.124 현재pair와 동일한 전체복구본 확보. r2 독립승인·게시대기.
+
+### 2026-09-14 0.2.125 진단 계측 기존채널 게시 완료
+- 목표/변경: 반복 타이핑지연·게임정지 원인분리 계측을 실제사용가능하게 게시. 코드94e4d8d, 상세 docs/diagnostic_latency_2026-09-14.md.
+- 검증: 검증용r2 코드/패키지OK, gnlink배포rc0, NAS·공개10개hash, 인증API200/version125, 제품서명OK·변조거부 확인. 124pair서버백업+로컬전체복구본 확보.
+- 다음: 양쪽PC125업데이트후 타이핑/게임 재현시각으로 단계별로그 조사. 배포마일스톤완료/실기미확인. 자동설치·재시작·mainmerge·push없음.
+
+### 2026-09-14 연결별 Viewer/Stream 버전 교환 — 0.2.126
+- 목표: 연결할 때 실제 양쪽 실행 버전을 서로 보내고 로그에 남긴다. peer_version.hpp·poc_protocol·host/viewer control 및 host 진단mirror·전용테스트 추가.
+- 검증: 구버전 무전송/기존패킷크기/seq·size 오류/로그주입차단/실제loopback TCP 버전교환 PASS. 독립검토·설치기빌드 진행.
+- 다음: 고정패키지 검증/기존채널 게시 후 양쪽126 업데이트. 회사11:30 health=124와 11:35실행버전 추정을 구분. docs/connection_version_logging.md. mainmerge/push/자동설치 없음.
+
+### 2026-09-14 0.2.126 연결별 버전로그 게시 완료
+- 변경: Viewer/Stream 상호버전교환·구버전unknown 로그. source e444db6, 상세 docs/connection_version_logging.md.
+- 검증: 독립코드/패키지OK, 게시rc0, NAS·공개10hash, 인증API200/version126, 제품서명OK/변조거부. rollback125서버pair·로컬전체복구본 확보.
+- 다음: 양쪽126업데이트후새연결에서자기/상대버전로그실기확인. 자동설치·재시작·mainmerge·push미실행.
+
+### 2026-09-14 17:55 실기 로그 확인
+- 목표:126 정적채팅 개선/게임 순간정지 조사. NAS원본3개 보존, 회사게임/집채팅 session분리해동일클록단계집계.
+- 결과:게임7422간격 p50 15.827ms,1초초과4회후복구;4프레임뷰어publish준비→paint대기1.09~1.13s로국소화. 채팅키663개응답p95 2.655ms. 상세 docs/field_test_1755_2026-09-14.md.
+- 별도 REL-V01:126게시Stream 바이너리내125버전표찰확인(Codex빌드검증누락). peer125만으로구버전설치단정금지. 다음:정확블로킹함수추적/깨끗한버전동결빌드·런타임gate. 검증용동일근거대조요청, 제품/설치/재시작무접촉.
+
+### 2026-09-14 안정화 브랜치 main 반영 및 원격 push
+- 목표/승인: 사용자 "main 에 반영해서 푸시까지 진행"에 따라 이번 main push를 명시 승인 범위로 수행. 기존 push 보류 기록은 당시 이력이며 이번 요청에는 적용하지 않음.
+- 반영: 별도 clean worktree에서 main 1261ef5 → fix/remote-game-stability 0755813 fast-forward(브랜치9커밋). 제품 코드 추가변경·충돌 없음. 주 작업폴더 refactor/viewer-split의 미커밋/미추적 문서 무접촉.
+- 검증/게시: fetch 후 origin/main 9f5d04c가 후보의 조상임을 확인. 병합 후 apps/automation이 후보와 동일. git push origin main:main 성공(9f5d04c→0755813); 기존 로컬main 누적579커밋도 함께 반영됨. 소스 변경 없는 병합이므로 기존 독립검증 근거 유지, 재빌드 미수행.
+- 다음: 이 통합기록도 Git MCP로 커밋해 origin/main에 반영하고 최종 원격SHA 대조. 남은 제품후속은 뷰어 순간대기 및 REL-V01 실행버전표찰/빌드gate이며 머지로 해결됐다고 주장하지 않음. NAS 재배포·사용자 앱 설치/재시작은 없음.
+
+### 2026-09-15 main을 Host/PC 복구 브랜치로 통합
+
+- 목표/승인: 사용자가 main을 현재 분리 브랜치로 반영하고 중복·충돌을 정리하도록 지시. `audit/host-pc-recovery` bb86e98에 main437c87c를 두 부모 merge로 연결한다. 기존12개 Native 커밋 유지. 백업 `backup/host-pc-recovery-before-main-20260915`.
+- 변경:14개 충돌 파일과 자동 병합 경계 검토. main의 마우스 해제·UDP ingress·DXGI1회 격리 정책을 기준으로 중복 제거. worker 종료/예외, 큐 admission/release, 인증 epoch, 캡처/encoder pending 복구를 결합. peer version0x40/heartbeat0x80 분리, 새 kick 경로 activeFps 적용, 다중 Viewer count·진단 문맥 및 최신 재연결 보호. 상세 파일/선택 근거는 `docs/main_recovery_integration_2026-09-15.md`.
+- 검증: 제품4종 및 관련 타깃 Release 빌드/최종 증분 재확인 성공. Native13종 중12종 첫 실행 exit0, HW encoder epoch 시험1종은 최초 실패 후 동일 실행 파일 재확인 exit0. 최초 실패는 보존하고 비결정성 원인 미확정으로 남김. 통합 제품 Shell/native/HTTP UI PASS(추가 Viewer 종료 결과 채택3항목 포함), 화면 캡처 직접 확인. 서버 전체 회귀 ALL PASS/exit0. 로그 `.claude/main-merge-*`. main history 본문 줄 누락0/BOM 보존 확인.
+- 다음/경계: 로컬 통합 후보를 사용자에게 보고. 독립 검토·실 GPU 반복 장애·다중 세션 종단·WAN/게임 soak·UAC/설치·릴리스 검증은 남음. main의 순간대기/REL-V01 해결로 주장하지 않는다. 이번에는 main 역머지·push·NAS 게시·사용자 앱 설치/재시작 없음. Git MCP 부재 상황의 로컬 CLI 사용은 앞선 사용자 직접 작업 승인 범위를 따른다.

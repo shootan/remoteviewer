@@ -34,6 +34,7 @@
 #include "host_string_util.hpp"
 #include "host_window_enum.hpp"
 #include "poc_protocol.hpp"
+#include "peer_version.hpp"
 #include "time_utils.hpp"
 
 namespace remote60::native_poc {
@@ -215,6 +216,10 @@ void ControlSessionServer::Serve(ControlLink& link) {
     }
     physicalDown.clear();
   };
+  std::cout << "[native-video-host][connection-version] localProcess=GNLinkStream"
+            << " localVersion=" << local_product_version()
+            << " localPid=" << GetCurrentProcessId()
+            << " peerProcess=GNLinkViewer peerVersion=unknown-awaiting-exchange\n";
   while (!stop.load()) {
     MessageHeader header{};
     if (!link.Read(&header, sizeof(header))) break;
@@ -223,6 +228,19 @@ void ControlSessionServer::Serve(ControlLink& link) {
     if (header.magic != remote60::native_poc::kMagic || header.size < sizeof(header)) break;
     const size_t bodySize = static_cast<size_t>(header.size - sizeof(header));
     const auto type = static_cast<MessageType>(header.type);
+
+    if (type == MessageType::ControlVersionRequest && header.size == sizeof(ControlVersionMessage)) {
+      ControlVersionMessage request{};
+      if (!link.Read(&request.seq, sizeof(request) - sizeof(MessageHeader))) break;
+      std::cout << "[native-video-host][connection-version] localProcess=GNLinkStream"
+                << " localVersion=" << local_product_version()
+                << " localPid=" << GetCurrentProcessId()
+                << " peerProcess=GNLinkViewer peerVersion=" << reported_peer_version(request.productVersion)
+                << " peerVersionSource=peer-report seq=" << request.seq << "\n";
+      const auto response = make_version_message(MessageType::ControlVersionResponse, request.seq);
+      if (!link.Write(&response, sizeof(response))) break;
+      continue;
+    }
 
     if (type == MessageType::ControlPing && header.size == sizeof(ControlPingMessage)) {
       ControlPingMessage ping{};
@@ -254,6 +272,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
       pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagHostImePulseStateV2;
       if (capture.frameHeartbeatEnabled.load())
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagFrameHeartbeat;
+      pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPeerVersion;
       pong.captureRebindCount = target.rebindCount;
       pong.captureTargetHwnd = target.targetHwnd;
       std::snprintf(pong.captureTargetProcess, sizeof(pong.captureTargetProcess), "%s",
@@ -411,6 +430,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
       ControlInputEventMessage input{};
       input.header = header;
       if (!link.Read(&input.seq, sizeof(input) - sizeof(MessageHeader))) break;
+      const uint64_t inputReceivedUs = qpc_now_us();
       std::string resolvedTarget;
       if (inputRouter.injectionEnabled) {
         const bool desktopMode =
@@ -633,7 +653,16 @@ void ControlSessionServer::Serve(ControlLink& link) {
           p0hLastEmitUs = p0NowUs;
         }
       }
-      if (!send_input_ack(input.seq)) break;
+      const uint64_t inputHandledUs = qpc_now_us();
+      const bool inputAckSent = send_input_ack(input.seq);
+      if (input.kind != 1 || inputHandledUs - inputReceivedUs >= 100000ULL) {
+        std::cout << "[native-video-host][input-timing] seq=" << input.seq
+                  << " eventKind=" << input.kind << " hostReceivedUs=" << inputReceivedUs
+                  << " hostHandledUs=" << inputHandledUs << " hostAckDoneUs=" << qpc_now_us()
+                  << " injectionEnabled=" << (inputRouter.injectionEnabled ? 1 : 0)
+                  << " ackSent=" << (inputAckSent ? 1 : 0) << " osInjectionConfirmed=0\n";
+      }
+      if (!inputAckSent) break;
       continue;
     }
 
@@ -641,6 +670,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
       ControlInputTextMessage text{};
       text.header = header;
       if (!link.Read(&text.seq, sizeof(text) - sizeof(MessageHeader))) break;
+      const uint64_t textReceivedUs = qpc_now_us();
       std::string resolvedTarget;
       if (inputRouter.injectionEnabled) {
         const bool desktopMode =
@@ -692,7 +722,14 @@ void ControlSessionServer::Serve(ControlLink& link) {
           }
         }
       }
-      if (!send_input_ack(text.seq)) break;
+      const uint64_t textHandledUs = qpc_now_us();
+      const bool textAckSent = send_input_ack(text.seq);
+      std::cout << "[native-video-host][input-timing] seq=" << text.seq
+                << " textEvent=1 hostReceivedUs=" << textReceivedUs
+                << " hostHandledUs=" << textHandledUs << " hostAckDoneUs=" << qpc_now_us()
+                << " injectionEnabled=" << (inputRouter.injectionEnabled ? 1 : 0)
+                << " ackSent=" << (textAckSent ? 1 : 0) << " osInjectionConfirmed=0\n";
+      if (!textAckSent) break;
       continue;
     }
 

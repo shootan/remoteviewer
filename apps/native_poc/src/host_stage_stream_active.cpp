@@ -167,7 +167,7 @@ Flow stage_stream_active(HostContext& hx, TickContext& tc) {
     // A returning viewer on a still desktop needs a picture too; arm the trailing-edge kick for
     // the current epoch (coalesces with any arm from the epoch/generation edges above). This also
     // covers the stream-inactive->active edge and a capture reattach, which both land here.
-    kick.Arm(qpc_now_us(), useH264);
+    kick.Arm(qpc_now_us(), useH264, hx.encoder.activeFps);
     powerKeepalive.SetStreaming(true, true);
     // A stream-inactive->active edge starts a fresh streaming episode; drop any no-output streak
     // left from before so the inactive gap is not mistaken for encoder starvation.

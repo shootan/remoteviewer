@@ -14,6 +14,7 @@
 #include "viewer_picker.hpp"
 
 #include "viewer_unlock.hpp"
+#include "peer_version.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -202,6 +203,10 @@ void ControlClient::Run() {
   uint64_t p0LastEmitUs = 0;
   uint64_t p0LastMoveGen = 0;
   uint64_t p0LastCoalesced = 0;
+  bool versionReported = false;
+  bool versionExchangeFailed = false;
+  log_client_line(ctx, "[native-video-client][connection-version] localProcess=GNLinkViewer localVersion=" +
+                      local_product_version() + " peerProcess=GNLinkStream peerVersion=unknown-awaiting-pong");
 
   while (ctx.session.running.load()) {
     // Drives retransmission and gap recovery; cheap when there is nothing outstanding.
@@ -318,7 +323,33 @@ void ControlClient::Run() {
       const bool actionOk = execute_control_action(*controlLink, action, &response);
       // One exchange that never gets its reply stalls every later one behind it,
       // including input. Naming the slow action is the only way to see which.
-      const uint64_t actionUs = qpc_now_us() - actionStartUs;
+      const uint64_t actionDoneUs = qpc_now_us();
+      const uint64_t actionUs = actionDoneUs - actionStartUs;
+      // No key code, character, coordinates or text. All input kinds share the ACK counter,
+      // so record kind and timestamps separately rather than calling that counter keyboard RTT.
+      const bool inputEventAction = action.kind == ControlOutboundActionKind::InputEvent;
+      const bool inputTextAction = action.kind == ControlOutboundActionKind::InputText;
+      const bool physicalKeyAction = action.kind == ControlOutboundActionKind::PhysicalKey;
+      if ((inputEventAction || inputTextAction || physicalKeyAction) &&
+          (!inputEventAction || action.inputEvent.kind != 1 || actionUs >= 100000ULL || !actionOk)) {
+        std::ostringstream timing;
+        timing << "[native-video-client][input-timing] timingSchema=2"
+               << " seq=" << (inputEventAction ? action.inputEvent.seq :
+                                inputTextAction ? action.inputText.seq : action.physicalKey.seq)
+               << " actionKind=" << static_cast<int>(action.kind)
+               << " eventKind=" << (inputEventAction ? action.inputEvent.kind : 0)
+               << " clientGeneratedUs=" << action.inputGeneratedUs
+               << " clientSendUs=" << actionStartUs
+               << " clientDoneUs=" << actionDoneUs
+               << " queueAgeUs="
+               << ((action.inputGeneratedUs > 0 && actionStartUs >= action.inputGeneratedUs)
+                       ? static_cast<int64_t>(actionStartUs - action.inputGeneratedUs) : -1)
+               << " exchangeUs=" << actionUs
+               << " ok=" << (actionOk ? 1 : 0)
+               << " ack=" << ((actionOk && response.kind == TcpControlResponseKind::InputAck) ? 1 : 0)
+               << " osInjectionConfirmed=0";
+        log_client_line(ctx, timing.str());
+      }
       if (actionUs > 1000000ULL) {
         std::cout << "[native-video-client][control] slow action kind="
                   << static_cast<int>(action.kind) << " tookUs=" << actionUs
@@ -395,6 +426,15 @@ void ControlClient::Run() {
       switch (response.kind) {
         case TcpControlResponseKind::Pong: {
           handle_pong(action, response.pong);
+          if (!versionReported) {
+            versionReported = true;
+            std::string peer;
+            const bool supported = (response.pong.captureTargetFlags & kCaptureFlagPeerVersion) != 0;
+            versionExchangeFailed = !exchange_peer_version(*controlLink, supported, response.pong.seq, &peer);
+            log_client_line(ctx, "[native-video-client][connection-version] localProcess=GNLinkViewer localVersion=" +
+                                local_product_version() + " peerProcess=GNLinkStream peerVersion=" + peer +
+                                " peerVersionSource=" + (supported ? "peer-report" : "unsupported"));
+          }
           break;
         }
         case TcpControlResponseKind::WindowList: {
@@ -415,6 +455,7 @@ void ControlClient::Run() {
         default:
           break;
       }
+      if (versionExchangeFailed) break;  // A failed framed exchange cannot safely reuse the stream.
     }
 
     if (!didWork && ctx.picker.visible.load(std::memory_order_relaxed)) {
@@ -422,7 +463,7 @@ void ControlClient::Run() {
       if (fetched < 0) break;
       didWork = (fetched > 0);
     }
-    if (!didWork) Sleep(2);
+    if (!didWork) ctx.control.inputQueue.WaitForInput(2);
   }
   ctx.control.connected.store(false, std::memory_order_relaxed);
   // Host-IME: control is gone, so restore the local IME and stop physical routing on the UI thread.

@@ -48,11 +48,13 @@ struct PresentStats {
   // one's "already painted" flag and feedback rate-limit. (F-14.)
   bool hasPresentedAtLeastOneFrame = false;
   uint64_t lastPresentUs = 0;
+  uint64_t lastTimingDetailUs = 0;
   uint64_t lastUserFeedbackUs = 0;
   uint64_t lastUserFeedbackOverwrite = 0;
   void ResetForNewEpisode() {
     hasPresentedAtLeastOneFrame = false;
     lastPresentUs = 0;
+    lastTimingDetailUs = 0;
     lastUserFeedbackUs = 0;
     lastUserFeedbackOverwrite = 0;
   }

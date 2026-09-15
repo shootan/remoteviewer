@@ -295,7 +295,7 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
             << " frameGatingChangeAvgPm=" << frameGatingChangeAvgPm
             << " captureOfferContent=" << cadence.offerContent
             << " captureOfferPointer=" << cadence.offerPointer
-            << " captureGateDropContent=" << cadence.gateDropContent
+            << " captureGateDeferredContent=" << cadence.gateDropContent
             << " captureGateDropPointer=" << cadence.gateDropPointer
             << " trailingKickCount=" << kick.count
             << " staticRefreshCount=" << kick.staticRefreshCount

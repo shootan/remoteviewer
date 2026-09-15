@@ -98,6 +98,7 @@ std::string gSessionToken;
 // where the picture is worth more than the bytes. The relay is the exception, and the interface
 // says so where the number is set.
 ShellRuntimeSettings gSettings{12000, 60, 0};
+std::atomic<uint32_t> gActiveViewers{0};
 
 std::wstring widen(const std::string& text) {
   if (text.empty()) return {};
@@ -334,7 +335,7 @@ void viewer_log_write_line(const std::string& line, const std::string& identity)
  * discarded -- exactly the client-side evidence a stutter investigation needed. Runs on its own
  * thread per session; ends when the child exits and the pipe hits EOF.
  */
-void pump_viewer_output_to_log(HANDLE readEnd, const std::string& identity) {
+void pump_viewer_output_to_log(HANDLE readEnd, const std::string& identity, const std::string& context) {
   std::string pending;
   char buffer[1024];
   DWORD read = 0;
@@ -345,16 +346,16 @@ void pump_viewer_output_to_log(HANDLE readEnd, const std::string& identity) {
       std::string line = pending.substr(0, newline);
       pending.erase(0, newline + 1);
       if (!line.empty() && line.back() == '\r') line.pop_back();
-      viewer_log_write_line(line, identity);
+      viewer_log_write_line(line + context + " collectedTickMs=" + std::to_string(GetTickCount64()), identity);
     }
     if (pending.size() > 8192) {
       // An oversized fragment without a newline: flush rather than drop, so a wedged child's
       // final partial line still reaches the log.
-      viewer_log_write_line(pending, identity);
+      viewer_log_write_line(pending + context + " collectedTickMs=" + std::to_string(GetTickCount64()), identity);
       pending.clear();
     }
   }
-  if (!pending.empty()) viewer_log_write_line(pending, identity);  // tail without a trailing newline
+  if (!pending.empty()) viewer_log_write_line(pending + context, identity);  // tail without a trailing newline
   CloseHandle(readEnd);
 }
 
@@ -874,6 +875,34 @@ void begin_refresh_hosts() {
   });
 }
 
+// UI-thread adoption of an owned viewer exit. Count all live viewers, but only the latest
+// selected operation may replace the pending automatic reconnect.
+void handle_viewer_exit(const ShellConnectRequest& request, uint64_t operation, uint64_t ownerEpoch,
+                        DWORD waited, DWORD exitCode, uint64_t ranMs) {
+  const uint32_t remaining = gActiveViewers.load();
+  { std::lock_guard<std::mutex> lock(gStateMu); if (ownerEpoch != gOwnerEpoch) return; }
+  if (operation != gViewerOperation) {
+    // Older viewers still contribute to main's live-session count, but cannot replace a
+    // newer viewer's reconnect request or reset its retry budget.
+    if (!gReconnectRequest)
+      post_status("idle", remaining > 0 ? std::to_string(remaining) + "개 연결이 계속 실행 중입니다." : "");
+    return;
+  }
+  if (ranMs >= 60000) gReconnectAttempts = 0;
+  const bool recoverable = exitCode == 43 || exitCode == 44 || exitCode == 46;
+  if (waited == WAIT_OBJECT_0 && recoverable && gReconnectAttempts < 3) {
+    gReconnectRequest = request;
+    gReconnectOwnerEpoch = ownerEpoch;
+    SetTimer(gWindow, kReconnectTimer, 1000u << gReconnectAttempts++, nullptr);
+    post_status("reconnecting", "연결이 끊겨 다시 연결하는 중입니다.");
+  } else if (waited == WAIT_OBJECT_0 && exitCode != 0) {
+    post_status("error", request.hostName + " 연결에 실패했습니다 (코드 " + std::to_string(exitCode) + ")");
+  } else {
+    gReconnectAttempts = 0;
+    post_status("idle", remaining > 0 ? std::to_string(remaining) + "개 연결이 계속 실행 중입니다." : "");
+  }
+}
+
 /**
  * Starts the session on the chosen PC.
  *
@@ -1043,10 +1072,14 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
     post_status("error", "세션을 시작하지 못했습니다");
     return;
   }
+  ++gActiveViewers;
   if (pipeOk) {
     // The parent's copy of the write end must close, or the reader never sees EOF after exit.
     CloseHandle(pipeWrite);
-    gWorkers.Launch([pipeRead, identity = account + "@" + server] { pump_viewer_output_to_log(pipeRead, identity); });
+    const std::string context = " viewerSession=" + std::to_string(pi.dwProcessId) + "-" +
+        std::to_string(GetTickCount64()) + " viewerPid=" + std::to_string(pi.dwProcessId) +
+        " hostId=" + request.hostId + " productVersion=" + narrow(remote60::native_poc::kProductVersion);
+    gWorkers.Launch([pipeRead, identity = account + "@" + server, context] { pump_viewer_output_to_log(pipeRead, identity, context); });
   }
   log_line("session started host=" + request.hostId + " kbps=" +
            std::to_string(settings.bitrateKbps) + " fps=" + std::to_string(settings.fps) +
@@ -1062,23 +1095,10 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
     DWORD exitCode = 0;
     GetExitCodeProcess(handle, &exitCode);
     CloseHandle(handle);
+    gActiveViewers.fetch_sub(1);
     const uint64_t ranMs = GetTickCount64() - startedMs;
     post_ui([request, operation, ownerEpoch, waited, exitCode, ranMs] {
-      { std::lock_guard<std::mutex> lock(gStateMu); if (ownerEpoch != gOwnerEpoch) return; }
-      if (operation != gViewerOperation) return;
-      if (ranMs >= 60000) gReconnectAttempts = 0;
-      const bool recoverable = exitCode == 43 || exitCode == 44 || exitCode == 46;
-      if (waited == WAIT_OBJECT_0 && recoverable && gReconnectAttempts < 3) {
-        gReconnectRequest = request;
-        gReconnectOwnerEpoch = ownerEpoch;
-        SetTimer(gWindow, kReconnectTimer, 1000u << gReconnectAttempts++, nullptr);
-        post_status("reconnecting", "연결이 끊겨 다시 연결하는 중입니다.");
-      } else if (waited == WAIT_OBJECT_0 && exitCode != 0) {
-        post_status("error", request.hostName + " 연결에 실패했습니다 (코드 " + std::to_string(exitCode) + ")");
-      } else {
-        gReconnectAttempts = 0;
-        post_status("idle", "");
-      }
+      handle_viewer_exit(request, operation, ownerEpoch, waited, exitCode, ranMs);
     });
   });
 

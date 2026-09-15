@@ -2,7 +2,6 @@
 // verbatim (viewer split refactor Phase 2-1).
 
 #include "viewer_video_receiver.hpp"
-#include "udp_receive_pump.hpp"
 
 #include "viewer_frame_gate.hpp"
 
@@ -19,6 +18,7 @@
 #include "viewer_overlay_draw.hpp"
 #include "viewer_picker.hpp"
 #include "viewer_present.hpp"
+#include "viewer_udp_ingress.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -49,11 +49,14 @@ bool wait_readable(SOCKET s, int timeoutMs) {
 }  // namespace
 
 void VideoReceiver::run_udp() {
-  UdpReceivePump socketPump(ctx.session.sock,
-      [&](const void* data, size_t size) {
+  UdpIngress ingress(ctx.session.sock,
+      [&](const uint8_t* bytes, size_t count) {
         ctx.recvLive.lastDatagramUs.store(qpc_now_us(), std::memory_order_relaxed);
-        return ctx.control.overUdp.load() && ctx.control.udpControl.OnPacket(data, size);
-      }, [&] { if (ctx.control.overUdp.load()) ctx.control.udpControl.Tick(); });
+        return ctx.control.overUdp.load(std::memory_order_acquire) &&
+               ctx.control.udpControl.OnPacket(bytes, count);
+      }, [&] {
+        if (ctx.control.overUdp.load(std::memory_order_acquire)) ctx.control.udpControl.Tick();
+      });
   std::array<uint8_t, 1600> datagram{};
   const uint32_t effectiveUdpSimDropSeed = (udpSimDropSeed > 0)
                                                ? udpSimDropSeed
@@ -101,6 +104,7 @@ void VideoReceiver::run_udp() {
     }
   };
   uint64_t assemblyDropped = 0;
+  uint64_t ingressDropsSeen = 0;
   uint64_t oversizePayloadDropCount = 0;
   uint64_t udpSimDroppedCount = 0;
   uint64_t udpSimAcceptedCount = 0;
@@ -324,9 +328,16 @@ void VideoReceiver::run_udp() {
       ctx.recvLive.lastLoopUs.store(loopUs, std::memory_order_relaxed);
       ctx.recvLive.Enter(RecvStage::Recv, loopUs);
     }
+    // An ingress overflow is a known local loss even if the discarded packet was the final
+    // desktop update and no later complete AU arrives to reveal a sequence gap.
+    const uint64_t ingressDropsNow = ingress.dropped();
+    if (ingressDropsNow != ingressDropsSeen) {
+      ingressDropsSeen = ingressDropsNow;
+      handle_udp_discontinuity();
+    }
     // Every path through the loop passes here first (see maintenance above).
     if (!maintenance(qpc_now_us(), false)) break;
-    const int n = socketPump.Read(datagram.data(), datagram.size());
+    const int n = ingress.Pop(datagram.data(), datagram.size());
     if (n <= 0) {
       // A read timeout is not a dead socket. It is also the tunnel's heartbeat: the control
       // thread spends most of its time blocked waiting for a reply, so if retransmission
@@ -334,7 +345,7 @@ void VideoReceiver::run_udp() {
       // host, hearing nothing, declares the client lost. This thread always runs. It is also
       // the clock of the in-order hold and of the NACK rounds on a quiet link: a lost chunk on
       // a static screen is noticed here, not by a next frame that may be seconds away.
-      if (remote60::native_poc::last_socket_error_is_retryable()) {
+      if (n == 0) {
         if (ctx.control.overUdp.load(std::memory_order_acquire)) ctx.control.udpControl.Tick();
         if (!maintenance(qpc_now_us(), true)) break;  // the clock work runs with or without frames
         continue;
@@ -343,7 +354,6 @@ void VideoReceiver::run_udp() {
     }
     {
       const uint64_t gotUs = qpc_now_us();
-      ctx.recvLive.lastDatagramUs.store(gotUs, std::memory_order_relaxed);
       ctx.recvLive.Enter(RecvStage::Control, gotUs);
     }
     if (ctx.control.overUdp.load(std::memory_order_acquire)) ctx.control.udpControl.Tick();
@@ -353,10 +363,7 @@ void VideoReceiver::run_udp() {
     // checking the video size first silently ate every small reply -- input acks and window
     // selections -- while the larger ones (pong, window lists) came through and made the
     // channel look healthy. OnPacket claims only its own kinds, so video cannot be stolen.
-    if (ctx.control.overUdp.load(std::memory_order_acquire) &&
-        ctx.control.udpControl.OnPacket(datagram.data(), static_cast<size_t>(n))) {
-      continue;
-    }
+    // The socket ingress has already dispatched control, independently of this decoder thread.
     // Remote hardware-cursor sample: smaller than the video header, so it must be claimed
     // before the size guard below silently eats it. Latest-wins into atomics; the UI timer
     // does the mapping and drawing.
@@ -484,7 +491,7 @@ void VideoReceiver::run_udp() {
           : 0;
       st.udpAssemblyDropPmLast = static_cast<uint32_t>(std::min<uint64_t>(dropPermille, 1000ULL));
       std::cout << "[native-video-client] udp-assembly chunks=" << chunksDelta
-                << " socketQueueDrops=" << socketPump.Drops()
+                << " ingressDroppedTotal=" << ingress.dropped()
                 << " completed=" << completedDelta
                 << " dropped=" << droppedDelta
                 << " dropPm=" << dropPermille

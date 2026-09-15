@@ -30,6 +30,7 @@ struct DecoderState {
   bool decoderReady = false;
   uint32_t decoderW = 0;
   uint32_t decoderH = 0;
+  uint64_t lastRealDecodedCaptureUs = 0;
   Microsoft::WRL::ComPtr<ID3D11Device> d3dDevice;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> d3dContext;
   // Which selection generation the recv loop has already reset the decoder for. A bump by

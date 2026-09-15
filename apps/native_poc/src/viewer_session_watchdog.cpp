@@ -90,6 +90,7 @@ void poll_session_liveness(ViewerState& ctx, HWND hwnd) {
     const bool exitSession = ctx.session.deadSessionExit;
     std::ostringstream os;
     os << "[native-video-client][liveness] session-dead action=" << (exitSession ? "close" : "notify");
+    os << " cause=" << (v.recvStalled ? "processing-stall" : "control-lost");
     describe(os);
     log_client_line(ctx, os.str());
     set_window_panel_status(ctx, "session_lost");

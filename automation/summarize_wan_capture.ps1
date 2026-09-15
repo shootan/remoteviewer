@@ -3,7 +3,9 @@ param(
   [string]$HostInput,
   [Parameter(Mandatory = $true)]
   [string]$ClientInput,
-  [int]$DecodedFpsGate = 20
+  [int]$DecodedFpsGate = 57,
+  [int]$MinStatsSamples = 10,
+  [int]$MaxFrameGapUs = 250000
 )
 
 Set-StrictMode -Version Latest
@@ -78,6 +80,8 @@ $clientLatencyMaxUs = New-Object System.Collections.Generic.List[double]
 $clientMbps = New-Object System.Collections.Generic.List[double]
 $clientDropPm = New-Object System.Collections.Generic.List[double]
 $clientPresentGapOver1s = New-Object System.Collections.Generic.List[double]
+$clientPresentedFrames = New-Object System.Collections.Generic.List[double]
+$clientFrameGapsUs = New-Object System.Collections.Generic.List[double]
 $clientCongestionTransitions = New-Object System.Collections.Generic.List[double]
 
 $m9Enabled = "unknown"
@@ -111,9 +115,16 @@ foreach ($line in $hostLines) {
 }
 
 foreach ($line in $clientLines) {
+  if ($line.Contains('[native-video-client][present]')) {
+    $presentKv = Parse-KeyValues -Line $line
+    if ($presentKv.ContainsKey('frameGapUs')) { Add-Double -List $clientFrameGapsUs -Value $presentKv['frameGapUs'] }
+  }
   if ($line.Contains("[native-video-client] recvFrames=")) {
     $kv = Parse-KeyValues -Line $line
     if ($kv.ContainsKey("decodedFrames")) { Add-Double -List $clientDecodedFrames -Value $kv["decodedFrames"] }
+    if ($kv.ContainsKey('d3dPresentSuccess') -and $kv.ContainsKey('gdiFallbackPresented')) {
+      $clientPresentedFrames.Add([double]$kv['d3dPresentSuccess'] + [double]$kv['gdiFallbackPresented'])
+    }
     if ($kv.ContainsKey("avgLatencyUs")) { Add-Double -List $clientLatencyAvgUs -Value $kv["avgLatencyUs"] }
     if ($kv.ContainsKey("maxLatencyUs")) { Add-Double -List $clientLatencyMaxUs -Value $kv["maxLatencyUs"] }
     if ($kv.ContainsKey("mbps")) { Add-Double -List $clientMbps -Value $kv["mbps"] }
@@ -146,9 +157,16 @@ if ($clientPresentGapOver1s.Count -gt 0) {
   $pgMax = Maximum -Values $clientPresentGapOver1s
   if ($pgMax -le 0.0) { $gatePresentGapOk = "True" } else { $gatePresentGapOk = "False" }
 }
-$gatePass = if ($gatePresentGapOk -eq "Unknown") { $gateDecodedOk } else {
-  if ($gateDecodedOk -eq "True" -and $gatePresentGapOk -eq "True") { "True" } else { "False" }
+if ($clientFrameGapsUs.Count -gt 0) {
+  $gatePresentGapOk = if ((Maximum -Values $clientFrameGapsUs) -le $MaxFrameGapUs -and $gatePresentGapOk -ne 'False') { 'True' } else { 'False' }
 }
+$presentedAvg = Average -Values $clientPresentedFrames
+$evidenceComplete = $hostEncodedFrames.Count -ge $MinStatsSamples -and
+  $clientDecodedFrames.Count -ge $MinStatsSamples -and
+  $clientPresentedFrames.Count -eq $clientDecodedFrames.Count -and
+  $clientFrameGapsUs.Count -ge $MinStatsSamples -and $gatePresentGapOk -ne 'Unknown'
+$gatePass = if ($evidenceComplete -and $gateDecodedOk -eq 'True' -and
+  $presentedAvg -ge $DecodedFpsGate -and $gatePresentGapOk -eq 'True') { 'True' } else { 'False' }
 
 Write-Output "HOST_LOG=$hostLog"
 Write-Output "CLIENT_LOG=$clientLog"
@@ -173,3 +191,7 @@ Write-Output "GATE_A_TARGET_DECODED_FPS=$DecodedFpsGate"
 Write-Output "GATE_A_DECODED_FPS_OK=$gateDecodedOk"
 Write-Output "GATE_A_PRESENT_GAP_OK=$gatePresentGapOk"
 Write-Output "GATE_A_PASS=$gatePass"
+Write-Output "GATE_A_EVIDENCE_COMPLETE=$evidenceComplete"
+Write-Output "CLIENT_PRESENTED_FPS_AVG=$presentedAvg"
+if (-not $evidenceComplete) { exit 2 }
+if ($gatePass -ne 'True') { exit 1 }

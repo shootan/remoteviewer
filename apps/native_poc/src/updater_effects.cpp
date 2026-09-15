@@ -419,6 +419,7 @@ UpdateOutcome UpdaterEffects::run(const std::string& platform) {
   auto stopped = std::make_shared<std::vector<ProcessTarget>>();
 
   UpdateEffectsConfig config = config_;
+  config.trace = deps_.log;
   const auto enumerate = config.enumerateTargets;
   config.enumerateTargets = [enumerate, stopped]() {
     const auto targets = enumerate();

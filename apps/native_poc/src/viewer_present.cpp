@@ -358,7 +358,7 @@ LRESULT paint_video_frame(ViewerState& ctx, HWND hwnd) {
         (traceMax == 0 || ctx.present.tracePresentPrinted.load() < traceMax)) {
       const auto nowPrinted = ctx.present.tracePresentPrinted.fetch_add(1) + 1;
       if (traceMax == 0 || nowPrinted <= traceMax) {
-        const uint64_t netUs = (recvUs >= sendUs) ? (recvUs - sendUs) : 0;
+        const int64_t netUs = -1;  // Different machines' QPC clocks; join stage=clock offline.
         const uint64_t c2eUs = (encodeStartUs >= captureUs) ? (encodeStartUs - captureUs) : 0;
         const uint64_t encUs = (encodeEndUs >= encodeStartUs) ? (encodeEndUs - encodeStartUs) : 0;
         const uint64_t e2sUs = (sendUs >= encodeEndUs) ? (sendUs - encodeEndUs) : 0;
@@ -368,7 +368,7 @@ LRESULT paint_video_frame(ViewerState& ctx, HWND hwnd) {
         const uint64_t renderUs = (presentUs >= recvUs) ? (presentUs - recvUs) : 0;
         const uint64_t queueWaitUs = (paintStartUs >= queueSetUs) ? (paintStartUs - queueSetUs) : 0;
         const uint64_t paintUs = (presentUs >= paintStartUs) ? (presentUs - paintStartUs) : 0;
-        const uint64_t totalUs = (presentUs >= captureUs) ? (presentUs - captureUs) : 0;
+        const int64_t totalUs = -1;  // Unknown without cross-machine clock alignment.
         std::ostringstream oss;
         oss << "[native-video-client][trace_present] seq=" << seq
             << " captureUs=" << captureUs
@@ -406,13 +406,39 @@ LRESULT paint_video_frame(ViewerState& ctx, HWND hwnd) {
     // reports as stutter. Gating this behind the warning thresholds left the aggregate
     // reading zero through visibly uneven playback, so there was nothing to optimise
     // against.
-    if (ctx.present.lastPresentUs > 0) {
+    {
       std::ostringstream gapLine;
       gapLine << "[native-video-client][present] seq=" << seq
               << " frameGapUs=" << presentGapUs;
+      // Preserve all gap samples, but bound full detail to 1Hz normally / 10Hz on slow frames.
+      const bool slowFrame = presentGapUs >= 100000ULL ||
+          (recvUs > 0 && presentUs >= recvUs && presentUs - recvUs >= 100000ULL);
+      const uint64_t detailIntervalUs = slowFrame ? 100000ULL : 1000000ULL;
+      if (ctx.present.lastTimingDetailUs == 0 ||
+          presentUs - ctx.present.lastTimingDetailUs >= detailIntervalUs) {
+        ctx.present.lastTimingDetailUs = presentUs;
+        gapLine << " timingSchema=2 detailSampled=1 gen=" << frameStreamGeneration
+              << " synthetic=" << (frameSynthetic ? 1 : 0)
+              << " hostCaptureUs=" << captureUs
+              << " hostEncodeStartUs=" << encodeStartUs
+              << " hostEncodeEndUs=" << encodeEndUs
+              << " hostSendUs=" << sendUs
+              << " clientRecvUs=" << recvUs
+              << " clientDecodeStartUs=" << decodeStartUs
+              << " clientDecodeEndUs=" << decodeEndUs
+              << " clientQueueSetUs=" << queueSetUs
+              << " clientPaintStartUs=" << paintStartUs
+              << " clientPresentUs=" << presentUs
+              << " frameVersion=" << frameVersion
+              << " queueWaitUs=" << queueToPaintUs
+              << " paintUs=" << queueToPresentUs
+              << " crossClockValid=0";
+      }
       log_client_line(ctx, gapLine.str());
     }
-    const uint64_t totalUs = (presentUs >= captureUs) ? (presentUs - captureUs) : 0;
+    const int64_t totalUs = -1;  // Do not report invalid cross-clock subtraction as zero latency.
+    const uint64_t recvToPresentUs =
+        (recvUs > 0 && presentUs >= recvUs) ? (presentUs - recvUs) : 0;
     // GNLink stream telemetry (diagnostics only): one line per presented keyframe, plus any
     // non-key frame whose present interval jumped past 1.5x the expected cadence -- the client
     // side of a periodic stutter. Joins the host 'wire seq=' log by seq+gen; steady play stays
@@ -441,7 +467,7 @@ LRESULT paint_video_frame(ViewerState& ctx, HWND hwnd) {
         log_client_line(ctx, telem.str());
       }
     }
-    if ((totalUs >= kUserFeedbackLagWarnUs || (presentGapUs >= kUserFeedbackGapWarnUs && ctx.present.lastPresentUs > 0)) &&
+    if ((recvToPresentUs >= kUserFeedbackLagWarnUs || (presentGapUs >= kUserFeedbackGapWarnUs && ctx.present.lastPresentUs > 0)) &&
         (presentUs >= ctx.present.lastUserFeedbackUs + kUserFeedbackMinIntervalUs || ctx.present.lastUserFeedbackUs == 0)) {
       const uint64_t overwriteCountNow = ctx.frameBuf.overwriteBeforePresentCount.load(std::memory_order_relaxed);
       const uint64_t overwriteDelta = (overwriteCountNow >= ctx.present.lastUserFeedbackOverwrite)
@@ -453,7 +479,7 @@ LRESULT paint_video_frame(ViewerState& ctx, HWND hwnd) {
       const uint64_t paintCoalesced = ctx.frameBuf.paintCoalescedCount.load(std::memory_order_relaxed);
       const uint64_t queueWaitUs = (paintStartUs >= queueSetUs) ? (paintStartUs - queueSetUs) : 0;
       const uint64_t paintUs = (presentUs >= paintStartUs) ? (presentUs - paintStartUs) : 0;
-      const uint64_t netUs = (recvUs >= sendUs) ? (recvUs - sendUs) : 0;
+      const int64_t netUs = -1;  // Host and client QPC epochs are unrelated.
       const uint64_t c2eUs = (encodeStartUs >= captureUs) ? (encodeStartUs - captureUs) : 0;
       const uint64_t encUs = (encodeEndUs >= encodeStartUs) ? (encodeEndUs - encodeStartUs) : 0;
       const uint64_t e2sUs = (sendUs >= encodeEndUs) ? (sendUs - encodeEndUs) : 0;
@@ -463,9 +489,11 @@ LRESULT paint_video_frame(ViewerState& ctx, HWND hwnd) {
       std::ostringstream oss;
       oss << "[native-video-client][user-feedback] seq=" << seq
           << " totalUs=" << totalUs
-          << " capGapUs=" << presentGapUs
+          << " timingSchema=2 crossClockValid=0"
+          << " presentGapUs=" << presentGapUs
+          << " recvToPresentUs=" << recvToPresentUs
           << " queueToPaintUs=" << queueToPaintUs
-          << " queueToPresentUs=" << queueToPresentUs
+          << " paintUsLegacy=" << queueToPresentUs
           << " d3dPresentSuccess=" << d3dSuccess
           << " d3dPresentFail=" << d3dFail
           << " gdiFallback=" << gdiFallback

@@ -7,6 +7,7 @@
 // Phase 2 turns it into the class that owns the matching main() lambdas.
 
 #include <cstdint>
+#include <algorithm>
 
 namespace remote60::native_poc {
 
@@ -51,10 +52,15 @@ struct KickState {
   static constexpr uint64_t kTrailingKickDelayUs = 150000;  // 150ms trailing edge
   // (Re)arm the trailing-edge kick to fire kTrailingKickDelayUs after atUs. Raw mode has no
   // encoder to flush, so it is a no-op there.
-  void Arm(uint64_t atUs, bool useH264) {
+  void Arm(uint64_t atUs, bool useH264, uint32_t fps = 0) {
     if (!useH264) return;
     pending = true;
-    dueAtUs = atUs + kTrailingKickDelayUs;
+    // Two frame periods distinguish an idle encoder from normal continuous input. A fixed
+    // 150ms debounce made every final typed character wait that long on asynchronous MFTs.
+    const uint64_t delayUs = fps > 0
+        ? std::clamp<uint64_t>(2000000ULL / fps, 15000, kTrailingKickDelayUs)
+        : kTrailingKickDelayUs;
+    dueAtUs = atUs + delayUs;
   }
   void Cancel() {
     pending = false;

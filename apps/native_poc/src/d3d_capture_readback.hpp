@@ -70,7 +70,7 @@ struct CaptureFrameMeta {
 
 // Free -> Submitting -> GpuPending -> Free. See the note on the publication barrier in
 // D3dCaptureReadbackPipeline. At namespace scope so the identity predicate below is testable.
-enum class ReadbackSlotState : uint8_t { Free, Submitting, GpuPending };
+enum class ReadbackSlotState : uint8_t { Free, Submitting, GpuPending, Reading };
 
 /**
  * Is the slot a thread reserved still the same reservation?
@@ -146,6 +146,8 @@ class D3dCaptureReadbackPipeline {
    * plain path at capture size and the consumer's refit logic runs as before. 0x0 disables.
    */
   void SetOutputSize(uint32_t width, uint32_t height);
+  // Throttle consumption after owning changed pixels, so the last update cannot disappear.
+  void SetPublishIntervalUs(uint64_t intervalUs) { publishIntervalUs_.store(intervalUs); }
 
   /** Enables the BGRA->NV12 GPU conversion that feeds the zero-copy encoder path. */
   void SetNv12Enabled(bool enabled);
@@ -220,6 +222,7 @@ class D3dCaptureReadbackPipeline {
   uint32_t width_ = 0;
   uint32_t height_ = 0;
   uint64_t generation_ = 0;
+  std::atomic<uint64_t> publishIntervalUs_{0};
   uint64_t submitSeq_ = 0;
 
   // GPU crop/scale front end (D3D11 video processor); guarded by slotMu_ for configuration

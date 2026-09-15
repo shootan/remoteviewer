@@ -77,8 +77,8 @@ int gFailures = 0;
 
 void sleep_ms(uint32_t ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
 
-constexpr uint32_t kWidth = 640;
-constexpr uint32_t kHeight = 360;
+uint32_t kWidth = 640;
+uint32_t kHeight = 360;
 constexpr uint32_t kMtu = 1200;
 constexpr uint64_t kFrameIntervalUs = 16667;
 
@@ -1160,36 +1160,25 @@ void scenario_keyframe_wait_retries_on_timer_when_source_stops() {
   (void)stopUs;
 }
 
-// S9: a frozen present anchor makes dense frames read as a decode backlog -> Congested + IDR
-// request; the first recovery IDR is lost entirely. The viewer must re-ask on the clock and come
-// back through the next IDR, instead of dropping every P frame until the host's next spontaneous
-// one (the probe's 60 s / 0 re-requests).
-void scenario_congested_first_idr_lost_recovers_by_timer() {
-  std::printf("[S9] Congested, first recovery IDR lost: timer re-request, recovery\n");
+// S9: UI presentation alone must not reset a decoder which is advancing normally.
+// Lost-frame/IDR retries remain covered by S3/S8 and the FrameGate timer tests.
+void scenario_slow_present_keeps_decoder_reference_chain() {
+  std::printf("[S9] slow present, healthy decode: no reset or unnecessary IDR request\n");
   FakeHost host;
   ViewerRig rig;
-  std::atomic<bool> armed{false};
-  std::atomic<uint32_t> lostIdr{0};
   LossPlan plan;
-  plan.dropFirstSend = [&](uint32_t seq, uint16_t, bool key, uint16_t) {
-    if (armed.load() && key && lostIdr.load() == 0) lostIdr = seq;
-    return seq == lostIdr.load();  // the whole IDR
-  };
   if (!start_session(host, rig, plan)) { ++gFailures; return; }
   const uint64_t requestsBefore = host.keyframe_requests();
-  rig.pinPresentAnchor = true;  // the renderer stops advancing the anchor: lag climbs 16.7 ms per frame
-  armed = true;
-  CHECK(pump_until(host, rig, 3000, [&]() { return rig.gate.congestionState == ClientCongestionState::Congested; }),
-        "entered Congested (state " + state_name(rig) + ")");
-  CHECK(pump_until(host, rig, 3000, [&]() { return lostIdr.load() != 0 && host.keyframe_requests() >= requestsBefore + 2; }),
-        "the lost IDR was followed by a second request on the clock (requests " + std::to_string(host.keyframe_requests() - requestsBefore) + ")");
+  const uint32_t seqBefore = rig.maxPublishedSeq.load();
+  rig.pinPresentAnchor = true;
+  CHECK(pump_until(host, rig, 4000, [&]() { return rig.maxPublishedSeq.load() > seqBefore + 100; }),
+        "decoder publishes over 100 frames while the presentation anchor is pinned");
+  CHECK(rig.gate.congestionState == ClientCongestionState::Normal, "healthy decoder stays normal");
+  CHECK(host.keyframe_requests() == requestsBefore, "UI delay does not request another IDR");
   rig.pinPresentAnchor = false;
-  CHECK(pump_until(host, rig, 5000, [&]() {
-          return rig.gate.congestionState == ClientCongestionState::Normal && !rig.gate.waitForKeyFrame;
-        }),
-        "back to Normal (state " + state_name(rig) + ")");
-  CHECK(host.keyframe_requests() <= requestsBefore + 6, "no IDR storm (" + std::to_string(host.keyframe_requests() - requestsBefore) + ")");
-  CHECK(rig.gate.recoveryRetryCount >= 1, "the gate's timer drove the re-ask");
+  const uint32_t after = rig.maxPublishedSeq.load();
+  CHECK(pump_until(host, rig, 2000, [&]() { return rig.maxPublishedSeq.load() > after + 5; }),
+        "the reference chain keeps advancing after presentation resumes");
 }
 
 // S10: a still screen -- the host re-encodes its cached picture as synthetic frames every 150 ms
@@ -1842,7 +1831,7 @@ void scenario_late_chunks_of_abandoned_au_do_not_reblock() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   std::cout.setf(std::ios::unitbuf);
   WinsockScope ws;
   if (!ws.ok) {
@@ -1853,6 +1842,36 @@ int main() {
     std::printf("MFStartup failed\n");
     return 2;
   }
+  const bool fullHdFixture = argc == 2 && std::string(argv[1]) == "--serve-viewer-fhd";
+  if (fullHdFixture || (argc == 2 && std::string(argv[1]) == "--serve-viewer")) {
+    // Test-only source for running the real GNLinkViewer UI against changing, encoded pixels.
+    // No directory account, capture of the user's desktop, or input injection is involved.
+    if (fullHdFixture) { kWidth = 1920; kHeight = 1080; }
+    FakeHost host;
+    LossPlan plan;
+    if (!host.Start(plan)) return 3;
+    std::printf("FIXTURE_PORT=%u\n", host.port());
+    std::fflush(stdout);
+    const uint64_t deadline = qpc_now_us() + 20000000;
+    while (!host.peer_known() && qpc_now_us() < deadline) Sleep(5);
+    if (!host.peer_known()) return 4;
+    HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0x2, TIMER_ALL_ACCESS);
+    if (!timer) timer = CreateWaitableTimerW(nullptr, FALSE, nullptr);
+    uint64_t due = qpc_now_us();
+    for (uint32_t i = 0; i < 720; ++i) {
+      host.SendFrame(i % 120 == 0, false, qpc_now_us(), !fullHdFixture);
+      due += 16667;
+      const uint64_t now = qpc_now_us();
+      if (timer && now < due) {
+        LARGE_INTEGER wait{}; wait.QuadPart = -static_cast<LONGLONG>((due - now) * 10);
+        if (SetWaitableTimer(timer, &wait, 0, nullptr, nullptr, FALSE)) WaitForSingleObject(timer, INFINITE);
+      }
+    }
+    if (timer) CloseHandle(timer);
+    host.Stop();
+    MFShutdown();
+    return 0;
+  }
   scenario_p_chunk_loss_repaired_by_nack();
   scenario_old_host_without_nack();
   scenario_recovery_idr_chunk_loss_repaired();
@@ -1861,7 +1880,7 @@ int main() {
   scenario_nack_unanswered_falls_back_to_idr();
   scenario_completed_idr_after_seq_gap_needs_no_request();
   scenario_keyframe_wait_retries_on_timer_when_source_stops();
-  scenario_congested_first_idr_lost_recovers_by_timer();
+  scenario_slow_present_keeps_decoder_reference_chain();
   scenario_synthetic_idle_then_real_burst_no_false_congestion();
   scenario_decoder_provenance_without_reset_across_gap();
   scenario_corrupted_idr_does_not_wedge_or_storm();

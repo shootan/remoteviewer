@@ -756,7 +756,9 @@ void run_message_pump(ViewerContext& ctx) {
     }
 
     if (!hadMessage) {
-      Sleep(5);
+      // A paint or keyboard message must wake a still desktop immediately, not wait for the
+      // next coarse Windows sleep tick. Keep a timeout for shutdown and periodic UI work.
+      MsgWaitForMultipleObjectsEx(0, nullptr, 50, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
     }
   }
 }

@@ -175,6 +175,7 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
     // resolving, keep the picker up and present nothing until the acknowledged generation's
     // first frame decodes.
     if (ctx.sel.EpochChanged(dec.recvSelectionEpoch)) {
+      dec.lastRealDecodedCaptureUs = 0;
       // A fresh pick: drop stale reference frames and hold for the new generation's keyframe.
       dec.decoder.reset();
       gate.waitForKeyFrame = true;
@@ -221,6 +222,7 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
     in.recvGapUs = recvGapUs;
     in.sendQpcUs = h.sendQpcUs;
     in.presentedCapUs = ctx.frameBuf.lastPresentedCaptureUs.load(std::memory_order_relaxed);
+    in.decodedCapUs = dec.lastRealDecodedCaptureUs;
     // The picker overlay pauses presents on purpose; lag measured against a frozen present
     // anchor is not congestion. Same for the short post-close grace until the anchor is fresh.
     in.catchupSuppressed =
@@ -290,6 +292,7 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
     const uint64_t decodedPayloadBytes = decoded.bytes.empty()
         ? (static_cast<uint64_t>(decoded.width) * decoded.height * 3 / 2)
         : static_cast<uint64_t>(decoded.bytes.size());
+    if (!decodedSynthetic) dec.lastRealDecodedCaptureUs = decodedCaptureUs;
     const uint64_t decodeEndUs = qpc_now_us();
     std::shared_ptr<std::vector<uint8_t>> frameNv12;
     if (!decoded.bytes.empty()) {

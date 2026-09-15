@@ -24,6 +24,7 @@
 #include <mutex>
 #include <streambuf>
 #include <string>
+#include "host_diagnostic_log.hpp"
 
 namespace remote60::native_poc {
 
@@ -77,6 +78,7 @@ class TimestampPrefixBuf : public std::streambuf {
   }
   void flush_line(std::string& line) {
     const std::string ts = timestamp_now();
+    mirror_host_diagnostic(ts, line);
     std::lock_guard<std::mutex> lk(mu_);
     dest_->sputn(ts.data(), static_cast<std::streamsize>(ts.size()));
     dest_->sputn(line.data(), static_cast<std::streamsize>(line.size()));

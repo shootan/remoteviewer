@@ -109,6 +109,7 @@ std::vector<std::string> gToolbarLines;
 int gInputEvents = 0;
 uint16_t gLastInputKind = 0;
 uint32_t gLastInputKey = 0;
+int32_t gLastInputX = 0, gLastInputY = 0;
 int gVideoPaintRequests = 0;
 
 int main() {
@@ -119,19 +120,6 @@ int main() {
   }
   HWND hwnd = ctx.session.hwnd;
   pump(200);
-  // A DOWN already accepted by the remote session must be released even when its UP arrives
-  // outside the video/window. This drives the shipped WndProc; only the network sink is doubled.
-  for (const auto& button : std::vector<std::pair<UINT, uint32_t>>{{WM_LBUTTONUP, VK_LBUTTON},
-           {WM_RBUTTONUP, VK_RBUTTON}, {WM_MBUTTONUP, VK_MBUTTON}}) {
-    const uint16_t bit = button.second == VK_LBUTTON ? 1 : button.second == VK_RBUTTON ? 2 : 4;
-    ctx.input.mouseButtons.store(bit);
-    gLastInputKind = 0; gLastInputKey = 0;
-    SendMessageW(hwnd, button.first, 0, at(-40, -40));
-    ok(ctx.input.mouseButtons.load() == 0 && gLastInputKind == 3 && gLastInputKey == button.second,
-       "outside-video UP clears the pressed button and forwards its release", std::to_string(button.second));
-  }
-  gInputEvents = 0;
-
   // A picker that is up, connected, and has been up long enough that the press latch will accept
   // a gesture (PickerState::SelectAllowed ignores anything begun within 300ms of it appearing).
   ctx.control.connected.store(true, std::memory_order_relaxed);
@@ -571,6 +559,39 @@ int main() {
     SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
   }
 
+  // Real WndProc DOWN/UP routing, with only the transport boundary recorded. Releasing outside
+  // the video used to return before clearing the button or producing any remote UP.
+  ctx.picker.visible.store(false);
+  ctx.input.suppressMouseUntilUs.store(0);
+  ctx.frameBuf.frame.width = 1280;
+  ctx.frameBuf.frame.height = 720;
+  RECT area{};
+  GetClientRect(hwnd, &area);
+  bool releases = true;
+  for (int i = 0; i < 100; ++i) {
+    SendMessageW(hwnd, WM_LBUTTONDOWN, 0, at(area.right / 2, area.bottom / 2));
+    const bool pressed = (ctx.input.mouseButtons.load() & 1) != 0;
+    const int beforeUp = gInputEvents;
+    const int32_t lastX = ctx.input.lastVideoX.load(), lastY = ctx.input.lastVideoY.load();
+    SendMessageW(hwnd, WM_LBUTTONUP, 0, at(-20, -20));
+    releases = releases && pressed && ctx.input.mouseButtons.load() == 0 &&
+               gInputEvents == beforeUp + 1 && gLastInputKind == 3 &&
+               gLastInputKey == VK_LBUTTON && gLastInputX == lastX && gLastInputY == lastY;
+  }
+  ok(releases, "100 real window drags release outside the video without stranding a button");
+  for (const auto key : {VK_RBUTTON, VK_MBUTTON}) {
+    ctx.input.mouseButtons.store(key == VK_RBUTTON ? 2 : 4);
+    ctx.input.suppressMouseUntilUs.store(UINT64_MAX);
+    const int beforeUp = gInputEvents;
+    SendMessageW(hwnd, key == VK_RBUTTON ? WM_RBUTTONUP : WM_MBUTTONUP, 0, at(-20, -20));
+    ok(ctx.input.mouseButtons.load() == 0 && gInputEvents == beforeUp + 1 &&
+       gLastInputKind == 3 && gLastInputKey == static_cast<uint32_t>(key),
+       "forwarded secondary button is released even during touch suppression");
+  }
+  ctx.input.suppressMouseUntilUs.store(0);
+  ReleaseCapture();
+  ok(SendMessageW(hwnd, WM_TIMER, 0x7fff, 0) == DefWindowProcW(hwnd, WM_TIMER, 0x7fff, 0),
+     "F-23: unknown timer follows the default window-procedure return path");
   remote60::native_poc::session_toolbar_destroy();
   DestroyWindow(hwnd);
   pump(50);
@@ -589,9 +610,9 @@ int main() {
 // observed somewhere.
 namespace remote60::native_poc::viewer {
 
-void enqueue_input_event(ViewerState&, uint16_t kind, int32_t, int32_t, int32_t, uint32_t key) {
+void enqueue_input_event(ViewerState&, uint16_t kind, int32_t x, int32_t y, int32_t, uint32_t key) {
   ++gInputEvents;
-  gLastInputKind = kind; gLastInputKey = key;
+  gLastInputKind = kind; gLastInputKey = key; gLastInputX = x; gLastInputY = y;
 }
 void update_cursor_overlay(ViewerState&, HWND) {}
 bool local_hotkey_modifiers_active() { return false; }
