@@ -69,6 +69,7 @@ add_executable(remote60_native_video_host_poc
   src/host_input_inject.cpp
   src/host_args.cpp
   src/host_control_session.cpp
+  src/host_thumbnail_helper.cpp
   src/host_unlock_relay.cpp
   src/host_encoded_sender.cpp
   src/host_capture_session.cpp
@@ -129,10 +130,16 @@ endif()
 
 add_executable(remote60_gdi_capture_worker
   src/gdi_capture_worker_main.cpp
+  # The one-shot --thumbnail mode calls the product's own capture_window_thumbnail rather than a
+  # second copy of it, which is what makes the helper's output the same picture the host used to
+  # produce in process.
+  src/host_bgra_scale.cpp
+  src/host_args.cpp
 )
 set_target_properties(remote60_gdi_capture_worker PROPERTIES OUTPUT_NAME "GNLinkCapture")
 target_include_directories(remote60_gdi_capture_worker PRIVATE src)
 target_link_libraries(remote60_gdi_capture_worker PRIVATE
+  common
   gdi32
   user32
 )
@@ -600,6 +607,20 @@ target_compile_definitions(remote60_observe_vectors_test PRIVATE
 if(MSVC)
   target_compile_options(remote60_observe_vectors_test PRIVATE /utf-8)
 endif()
+
+# The isolated preview path end to end. capture_thumbnail_isolated resolves its helper beside the
+# running executable, so staging a scratch directory with a chosen GNLinkCapture.exe next to a copy
+# of this test exercises the production path with no test hook in the product: once with the real
+# helper, once with one that never answers.
+add_executable(remote60_thumbnail_helper_e2e_test
+  src/thumbnail_helper_e2e_test.cpp
+  src/host_thumbnail_helper.cpp
+)
+target_include_directories(remote60_thumbnail_helper_e2e_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_thumbnail_helper_e2e_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_thumbnail_helper_e2e_test remote60_gdi_capture_worker)
 
 # The four ways an isolated capture can end. The one that matters: a worker that dies without a
 # result is seen the moment it dies, not after the deadline -- so an update stopping the helper, a

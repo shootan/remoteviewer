@@ -29,6 +29,9 @@
 #include "host_bgra_scale.hpp"
 #include "host_capture_device.hpp"
 #include "host_control_session.hpp"
+
+#include "host_thumbnail_budget.hpp"
+#include "host_thumbnail_helper.hpp"
 #include "host_input_inject.hpp"
 #include "host_net_io.hpp"
 #include "host_string_util.hpp"
@@ -140,6 +143,16 @@ void ControlSessionServer::Serve(ControlLink& link) {
               << " count=" << rsp.itemCount << " selectedId=" << rsp.selectedMonitorId << "\n";
     return link.Write(&rsp, sizeof(rsp));
   };
+  // Deliberately a function-local static, which is to say per process rather than per session.
+  //
+  // A window that stopped answering has not started answering because a client reconnected, and
+  // the 2026-09-15 host saw three sessions in a row walk into the same window. Per-session state
+  // would have reset the budget each time and paid the deadline again on every one.
+  //
+  // The control dispatcher is one per process and answers thumbnail requests synchronously, so
+  // this is only ever touched by one thread.
+  static ThumbnailBudget thumbnailBudget;
+
   auto send_window_thumbnail =
       [&](const ControlWindowThumbnailRequestMessage& req) -> bool {
     const uint32_t maxW = std::clamp<uint32_t>(
@@ -153,14 +166,57 @@ void ControlSessionServer::Serve(ControlLink& link) {
     uint32_t tw = 0;
     uint32_t th = 0;
     bool ok = false;
-    if (req.windowId == 0) {
-      ok = capture_window_thumbnail(nullptr, maxW, maxH, &bgra, &tw, &th);
-    } else {
-      HWND hwnd = window_id_to_hwnd(req.windowId);
-      if (should_include_window(hwnd)) {
-        ok = capture_window_thumbnail(hwnd, maxW, maxH, &bgra, &tw, &th);
+
+    HWND hwnd = req.windowId == 0 ? nullptr : window_id_to_hwnd(req.windowId);
+    const bool eligible = req.windowId == 0 || should_include_window(hwnd);
+
+    if (eligible) {
+      // The key identifies the window well enough that a recycled HWND does not inherit another
+      // window's cooldown. The desktop (id 0) has no owner, and its capture does not go through
+      // PrintWindow at all, so it is keyed on zeros and in practice never accumulates failures.
+      ThumbnailTargetKey key;
+      key.windowId = req.windowId;
+      if (hwnd != nullptr) {
+        DWORD ownerPid = 0;
+        GetWindowThreadProcessId(hwnd, &ownerPid);
+        key.ownerPid = static_cast<uint32_t>(ownerPid);
+        HANDLE owner = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, ownerPid);
+        if (owner) {
+          FILETIME created{}, exited{}, kernel{}, user{};
+          if (GetProcessTimes(owner, &created, &exited, &kernel, &user)) {
+            key.processCreatedUs = (static_cast<uint64_t>(created.dwHighDateTime) << 32) |
+                                   created.dwLowDateTime;
+          }
+          CloseHandle(owner);
+        }
+      }
+
+      const uint64_t nowUs = qpc_now_us();
+      if (!thumbnailBudget.Allow(key, nowUs)) {
+        // Skipped, not failed. Nothing is attempted, so nothing is charged, and the client is
+        // told there is no preview -- which is what it would have been told anyway, without the
+        // control thread spending a deadline to find out.
+        std::cout << "[native-video-host][control] thumbnail skipped windowId=" << req.windowId
+                  << " (cooldown)\n";
+      } else {
+        // The capture runs in a process this host can end. See host_thumbnail_helper.hpp for why
+        // a thread would not do.
+        ThumbnailCaptureResult captured =
+            capture_thumbnail_isolated(hwnd, maxW, maxH, kThumbnailDeadlineUs);
+        thumbnailBudget.Record(key, captured.outcome, qpc_now_us());
+        if (captured.outcome == ThumbnailOutcome::Ok) {
+          bgra = std::move(captured.bgra);
+          tw = captured.width;
+          th = captured.height;
+          ok = true;
+        } else {
+          std::cout << "[native-video-host][control] thumbnail windowId=" << req.windowId
+                    << " gave up after " << (captured.elapsedUs / 1000) << "ms: "
+                    << captured.detail << "\n";
+        }
       }
     }
+
     if (bgra.size() > remote60::native_poc::kWindowThumbnailMaxPayloadBytes) {
       ok = false;
     }

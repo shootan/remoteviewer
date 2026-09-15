@@ -8,11 +8,14 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <string>
 #include <vector>
 
 #include "gdi_capture_protocol.hpp"
+#include "host_bgra_scale.hpp"
+#include "thumbnail_ipc.hpp"
 #include "time_utils.hpp"
 
 namespace {
@@ -26,6 +29,12 @@ struct Args {
   std::wstring stopEvent;
   uint32_t fps = 60;
   bool captureLayeredWindows = false;
+  // One-shot preview mode. Shares --mapping with the streaming contract and nothing else.
+  bool thumbnail = false;
+  std::wstring doneEvent;
+  uint64_t hwndValue = 0;
+  uint32_t maxWidth = 256;
+  uint32_t maxHeight = 160;
 };
 
 bool parse_u32(const wchar_t* raw, uint32_t* out) {
@@ -46,6 +55,11 @@ Args parse_args(int argc, wchar_t** argv) {
     else if (key == L"--stop-event" && i + 1 < argc) args.stopEvent = argv[++i];
     else if (key == L"--fps" && i + 1 < argc) (void)parse_u32(argv[++i], &args.fps);
     else if (key == L"--capture-layered") args.captureLayeredWindows = true;
+    else if (key == L"--thumbnail") args.thumbnail = true;
+    else if (key == L"--done-event" && i + 1 < argc) args.doneEvent = argv[++i];
+    else if (key == L"--hwnd" && i + 1 < argc) args.hwndValue = std::wcstoull(argv[++i], nullptr, 10);
+    else if (key == L"--max-w" && i + 1 < argc) (void)parse_u32(argv[++i], &args.maxWidth);
+    else if (key == L"--max-h" && i + 1 < argc) (void)parse_u32(argv[++i], &args.maxHeight);
   }
   args.fps = std::clamp<uint32_t>(args.fps, 1, 120);
   return args;
@@ -70,10 +84,79 @@ void draw_cursor(HDC target, const RECT& monitorRect) {
   if (icon.hbmColor) DeleteObject(icon.hbmColor);
 }
 
+/**
+ * One preview, then exit.
+ *
+ * The whole point of being a separate process: capture_window_thumbnail can block indefinitely
+ * inside PrintWindow -- on this OS inside DWM rather than in the target application, which is
+ * worse, because a block there cannot be cancelled from user mode at all. The host gives this
+ * process a deadline and ends it if it misses; there is nothing to unwind because everything
+ * this function touches dies with it.
+ *
+ * Exit codes are diagnostic only. The host learns "no result" from the done event not being set,
+ * never from a code, so a helper that dies without exiting at all is the same case.
+ */
+int run_thumbnail_once(const Args& args) {
+  namespace ipc = remote60::native_poc::thumbnail_ipc;
+  if (args.mapping.empty() || args.doneEvent.empty()) return 2;
+
+  (void)SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+  HANDLE mapping = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, args.mapping.c_str());
+  HANDLE done = OpenEventW(EVENT_MODIFY_STATE, FALSE, args.doneEvent.c_str());
+  if (!mapping || !done) {
+    if (mapping) CloseHandle(mapping);
+    if (done) CloseHandle(done);
+    return 3;
+  }
+  void* view = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, ipc::kBlockBytes);
+  if (!view) {
+    CloseHandle(mapping);
+    CloseHandle(done);
+    return 4;
+  }
+
+  auto* header = static_cast<ipc::Header*>(view);
+  auto* pixels = reinterpret_cast<uint8_t*>(header + 1);
+  *header = ipc::Header{};
+  header->magic = ipc::kMagic;
+  header->version = ipc::kVersion;
+
+  // hwnd 0 means the whole virtual desktop, the same convention the control protocol uses.
+  HWND target = args.hwndValue == 0
+                    ? nullptr
+                    : reinterpret_cast<HWND>(static_cast<uintptr_t>(args.hwndValue));
+  std::vector<uint8_t> bgra;
+  uint32_t w = 0;
+  uint32_t h = 0;
+  const bool ok = remote60::native_poc::capture_window_thumbnail(target, args.maxWidth,
+                                                                 args.maxHeight, &bgra, &w, &h);
+  if (ok && !bgra.empty() && bgra.size() <= ipc::kMaxPixelBytes) {
+    std::memcpy(pixels, bgra.data(), bgra.size());
+    header->width = w;
+    header->height = h;
+    header->stride = w * 4u;
+    header->byteCount = static_cast<uint32_t>(bgra.size());
+    header->ok = 1;
+  }
+
+  // The event is set last and only after the bytes are in place. A host that sees it signalled
+  // has a complete block; a host that does not never reads one.
+  SetEvent(done);
+  UnmapViewOfFile(view);
+  CloseHandle(done);
+  CloseHandle(mapping);
+  return header->ok ? 0 : 1;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
   const Args args = parse_args(argc, argv);
+  // Checked before the streaming contract so that mode's required arguments are not demanded of
+  // this one. An older worker that does not know --thumbnail falls through to the check below and
+  // exits 2 instead of waiting for events nobody will signal.
+  if (args.thumbnail) return run_thumbnail_once(args);
   if (args.mapping.empty() || args.frameEvent.empty() || args.stopEvent.empty()) return 2;
 
   SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
