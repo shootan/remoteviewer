@@ -6,8 +6,13 @@
 // Role:    decide whether a window's preview may be attempted now (Allow), and record what came
 //          back (Record). Three consecutive failures put the window in a cooldown during which it
 //          is skipped; one success clears everything.
-// Thread:  not synchronised. Owned by the control thread, which is the only caller -- the control
-//          dispatcher is one per process and handles thumbnail requests synchronously.
+// Thread:  NOT synchronised. The caller must provide the lock.
+//
+//          An earlier version of this line said the control dispatcher is one per process and
+//          therefore only one thread ever calls in. That is wrong: with a control port configured
+//          the host runs a TCP dispatcher and a UDP one on the same ControlSessionServer
+//          (host_startup_control.cpp:127 and :397, both reaching Serve), and an operational host
+//          runs both. host_control_session.cpp holds a mutex across every call for that reason.
 // Input:   a target key, an outcome, and the caller's clock in microseconds.
 // Output:  a yes/no per attempt, plus the state needed to explain the no.
 // Callers: the host control session's thumbnail path.

@@ -1,5 +1,7 @@
 #include "host_thumbnail_helper.hpp"
 
+#include <atomic>
+#include <mutex>
 #include <sstream>
 #include <string>
 
@@ -31,13 +33,65 @@ std::wstring object_name(const wchar_t* kind, uint64_t nonce) {
   return oss.str();
 }
 
+// How long to wait for a killed helper to actually be gone. A process being terminated is not a
+// process that has terminated, and the difference decides whether its memory can be released.
+constexpr DWORD kKillConfirmMs = 5000;
+
+/** At most one capture in flight, process wide. Checked, not assumed from the caller's shape. */
+std::atomic<bool> gCaptureInFlight{false};
+
+/**
+ * A helper that would not die, and everything it might still be writing into.
+ *
+ * Deliberately never released. If TerminateProcess did not take, the helper may still write to the
+ * mapped view at any moment, and unmapping it would be handing that write a freed page. So the
+ * mapping is kept, the process handle is kept, and no further capture is attempted until it is
+ * confirmed gone -- which bounds the whole thing at one leaked block rather than one per request.
+ *
+ * ⚠️ UNEXERCISED. Nothing in the suite reaches this, and not for want of trying: TerminateProcess
+ * on a process this one started does not fail on this OS, so killConfirmed is always true and the
+ * branch never runs. Removing the guard breaks no test. It is here because "the kill always works"
+ * is an assumption rather than a guarantee, and the failure it would otherwise produce is a
+ * use-after-free rather than a missing preview -- but it is a guard, not a tested behaviour, and
+ * should be read as one.
+ */
+struct Lingering {
+  std::mutex mu;
+  HANDLE process = nullptr;
+  HANDLE mapping = nullptr;
+  void* view = nullptr;
+  HANDLE done = nullptr;
+  HANDLE job = nullptr;
+};
+Lingering gLingering;
+
+/** True while a previously killed helper has still not exited. Releases it once it has. */
+bool helper_still_lingering() {
+  std::lock_guard<std::mutex> lk(gLingering.mu);
+  if (!gLingering.process) return false;
+  if (WaitForSingleObject(gLingering.process, 0) != WAIT_OBJECT_0) return true;
+  // It finally went. Now -- and only now -- is its memory safe to release.
+  CloseHandle(gLingering.process);
+  gLingering.process = nullptr;
+  if (gLingering.view) UnmapViewOfFile(gLingering.view);
+  if (gLingering.mapping) CloseHandle(gLingering.mapping);
+  if (gLingering.done) CloseHandle(gLingering.done);
+  if (gLingering.job) CloseHandle(gLingering.job);
+  gLingering.view = nullptr;
+  gLingering.mapping = nullptr;
+  gLingering.done = nullptr;
+  gLingering.job = nullptr;
+  return false;
+}
+
 /**
  * Everything one attempt owns, torn down in an order that is not negotiable.
  *
  * The helper writes into the mapped view. Unmapping it while the helper might still be running is
- * releasing memory somebody else is writing to, so the process is ended and WAITED FOR first, and
- * only then is the view released. The job object is the backstop: if this host dies, the OS ends
- * the helper rather than leaving it holding a window handle.
+ * releasing memory somebody else is writing to, so the process is ended, CONFIRMED gone, and only
+ * then is the view released. If the confirmation does not come, nothing is released at all -- see
+ * Lingering. The job object is the backstop: if this host dies, the OS ends the helper rather than
+ * leaving it holding a window handle.
  */
 struct Attempt {
   HANDLE job = nullptr;
@@ -45,27 +99,58 @@ struct Attempt {
   void* view = nullptr;
   HANDLE done = nullptr;
   PROCESS_INFORMATION pi{};
+  bool killConfirmed = true;  // read by the caller after teardown
 
   ~Attempt() {
-    if (pi.hProcess) {
-      // Ordered on purpose: end it, confirm it is gone, and only then let go of the memory it was
-      // writing into.
-      TerminateProcess(pi.hProcess, 1);
-      WaitForSingleObject(pi.hProcess, 5000);
-      CloseHandle(pi.hProcess);
-    }
     if (pi.hThread) CloseHandle(pi.hThread);
-    if (view) UnmapViewOfFile(view);
-    if (mapping) CloseHandle(mapping);
-    if (done) CloseHandle(done);
-    if (job) CloseHandle(job);  // KILL_ON_JOB_CLOSE: nothing outlives this
+    if (!pi.hProcess) {
+      if (view) UnmapViewOfFile(view);
+      if (mapping) CloseHandle(mapping);
+      if (done) CloseHandle(done);
+      if (job) CloseHandle(job);
+      return;
+    }
+
+    // Already gone is the common case -- a helper that answered has exited by now.
+    if (WaitForSingleObject(pi.hProcess, 0) != WAIT_OBJECT_0) {
+      TerminateProcess(pi.hProcess, 1);
+      killConfirmed = WaitForSingleObject(pi.hProcess, kKillConfirmMs) == WAIT_OBJECT_0;
+    }
+
+    if (killConfirmed) {
+      CloseHandle(pi.hProcess);
+      if (view) UnmapViewOfFile(view);
+      if (mapping) CloseHandle(mapping);
+      if (done) CloseHandle(done);
+      if (job) CloseHandle(job);  // KILL_ON_JOB_CLOSE: nothing outlives this
+      return;
+    }
+
+    // It did not die. Hand everything to Lingering rather than releasing memory the helper may
+    // still write into, and leave the job open so the OS still ends it when this process goes.
+    std::lock_guard<std::mutex> lk(gLingering.mu);
+    gLingering.process = pi.hProcess;
+    gLingering.mapping = mapping;
+    gLingering.view = view;
+    gLingering.done = done;
+    gLingering.job = job;
   }
 };
 
 }  // namespace
 
-ThumbnailCaptureResult capture_thumbnail_isolated(HWND hwnd, uint32_t maxW, uint32_t maxH,
-                                                  uint64_t deadlineUs, HANDLE cancelEvent) {
+namespace {
+
+/**
+ * The attempt itself. Wrapped below so that `elapsedUs` can be stamped after Attempt is destroyed.
+ *
+ * That ordering is the whole reason for the split: ending a helper and confirming it is gone
+ * happens in the destructor, the caller is blocked for all of it, and a number that stopped at the
+ * wait would describe something nobody experiences. The deadline is a budget for the round trip,
+ * so the round trip is what gets measured.
+ */
+ThumbnailCaptureResult capture_thumbnail_attempt(HWND hwnd, uint32_t maxW, uint32_t maxH,
+                                                 uint64_t deadlineUs, HANDLE cancelEvent) {
   ThumbnailCaptureResult result;
   const uint64_t start = qpc_now_us();
   const auto fail = [&](const char* why) {
@@ -74,6 +159,20 @@ ThumbnailCaptureResult capture_thumbnail_isolated(HWND hwnd, uint32_t maxW, uint
     result.elapsedUs = qpc_now_us() - start;
     return result;
   };
+
+  // A helper we could not kill may still be writing into its block. Starting another would mean a
+  // second one, and the first one's memory can never be reclaimed while it runs.
+  if (helper_still_lingering()) return fail("thumb_helper_lingering");
+
+  // One at a time, enforced rather than inferred. The control dispatcher is not one thread: TCP
+  // and UDP both serve, so two requests really can arrive together.
+  bool idle = false;
+  if (!gCaptureInFlight.compare_exchange_strong(idle, true)) {
+    return fail("thumb_busy");
+  }
+  struct InFlightGuard {
+    ~InFlightGuard() { gCaptureInFlight.store(false); }
+  } inFlightGuard;
 
   Attempt attempt;
   attempt.job = CreateJobObjectW(nullptr, nullptr);
@@ -170,6 +269,19 @@ ThumbnailCaptureResult capture_thumbnail_isolated(HWND hwnd, uint32_t maxW, uint
   result.height = header->height;
   result.outcome = ThumbnailOutcome::Ok;
   result.detail = "ok";
+  return result;
+}
+
+}  // namespace
+
+ThumbnailCaptureResult capture_thumbnail_isolated(HWND hwnd, uint32_t maxW, uint32_t maxH,
+                                                  uint64_t deadlineUs, HANDLE cancelEvent) {
+  const uint64_t start = qpc_now_us();
+  ThumbnailCaptureResult result =
+      capture_thumbnail_attempt(hwnd, maxW, maxH, deadlineUs, cancelEvent);
+  // Re-stamped now that the helper has been ended and confirmed gone. This is what the caller
+  // actually waited for -- spawn, IPC, capture, and the kill confirmation when there was one.
+  result.elapsedUs = qpc_now_us() - start;
   return result;
 }
 

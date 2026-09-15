@@ -207,13 +207,17 @@ int run_fixture(FixtureKind kind, const std::wstring& readyEventName, const std:
   RegisterClassExW(&wc);
 
   // Off screen: nothing here should appear in front of whoever is using this machine.
-  // WS_EX_NOREDIRECTIONBITMAP is what makes this fixture able to fail at all.
+  // WS_EX_NOREDIRECTIONBITMAP was an attempt to force the request to the window, and it did not
+  // work.
   //
-  // The product asks for PW_RENDERFULLCONTENT, and for an ordinary window that is served from the
-  // DWM redirection surface without the window being asked anything -- measured: a "hung" fixture
-  // without this flag returns a correct thumbnail in 24ms, having never dispatched WM_PRINT. A
-  // window with no redirection surface leaves DWM nothing to copy, so the request goes to the
-  // window, which is the path this suite is about.
+  // The reasoning was that PW_RENDERFULLCONTENT is served from the DWM redirection surface, so a
+  // window without one would leave DWM nothing to copy. Measured: it made no difference. The
+  // capture still completed in ~24ms and the window's WM_PRINT counter was still zero, with the
+  // flag and without it.
+  //
+  // Kept because the fixture is the more adversarial shape and the checks below are written
+  // against what was actually observed. What it does NOT support is any claim about where the
+  // request went -- "the window is not asked" is measured; "DWM waits internally" is not.
   // Layered windows are the other shape worth measuring: DWM composes them differently, and the
   // capture path has a separate flag for them.
   const DWORD exStyle = kind == FixtureKind::Layered ? WS_EX_LAYERED : 0;

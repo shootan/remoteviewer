@@ -19,10 +19,12 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "host_bgra_scale.hpp"
@@ -188,6 +190,40 @@ int run_budget_probe(const std::wstring& outFile, uint64_t deadlineUs, uint32_t 
   return 0;
 }
 
+/**
+ * Two captures asked for at the same moment, against a helper that never answers.
+ *
+ * Writes "okCount busyCount timedOutCount totalUs". With the cap working, one request waits out
+ * the deadline and the other is refused immediately -- and the pair costs about one deadline
+ * rather than two, because they did not run side by side.
+ */
+int run_race_probe(const std::wstring& outFile, uint64_t deadlineUs) {
+  std::atomic<int> busy{0};
+  std::atomic<int> timedOut{0};
+  std::atomic<int> ok{0};
+
+  const auto once = [&]() {
+    const ThumbnailCaptureResult r = capture_thumbnail_isolated(nullptr, 256, 160, deadlineUs);
+    if (r.outcome == ThumbnailOutcome::Ok) ++ok;
+    else if (r.detail == "thumb_busy") ++busy;
+    else if (r.outcome == ThumbnailOutcome::TimedOut) ++timedOut;
+  };
+
+  const uint64_t start = qpc_now_us();
+  std::thread a(once);
+  std::thread b(once);
+  a.join();
+  b.join();
+  const uint64_t total = qpc_now_us() - start;
+
+  FILE* f = nullptr;
+  if (_wfopen_s(&f, outFile.c_str(), L"w") != 0 || !f) return 2;
+  std::fprintf(f, "%d %d %d %llu\n", ok.load(), busy.load(), timedOut.load(),
+               static_cast<unsigned long long>(total));
+  std::fclose(f);
+  return 0;
+}
+
 Timing summarise(std::vector<uint64_t> samples) {
   Timing t;
   if (samples.empty()) return t;
@@ -321,6 +357,11 @@ int wmain(int argc, wchar_t** argv) {
       budgetRequests = static_cast<uint32_t>(std::wcstoul(argv[i + 1], nullptr, 10));
     }
   }
+  bool race = false;
+  for (int i = 1; i < argc; ++i) {
+    if (std::wstring(argv[i]) == L"--race") race = true;
+  }
+  if (!outFile.empty() && race) return run_race_probe(outFile, deadlineUs);
   if (!outFile.empty() && budgetRequests > 0) {
     return run_budget_probe(outFile, deadlineUs, budgetRequests);
   }
@@ -444,6 +485,45 @@ int wmain(int argc, wchar_t** argv) {
               ran && total > deadline * 2,
               "sanity: the three that did run still paid a deadline each");
       }
+
+      // Two dispatchers means two threads can ask at once, so the cap is enforced rather than
+      // inferred from the caller's shape. This is the slow case, where an unguarded second request
+      // would genuinely overlap the first.
+      {
+        const std::wstring resultFile = dir + L"race.txt";
+        DeleteFileW(resultFile.c_str());
+        std::wstring cmd = L"\"" + dir + L"probe.exe\" --probe-out \"" + resultFile +
+                           L"\" --deadline-us " + std::to_wstring(deadline) + L" --race";
+        std::vector<wchar_t> c(cmd.begin(), cmd.end());
+        c.push_back(L'\0');
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        bool ran = false;
+        int ok = 0, busy = 0, timedOut = 0;
+        unsigned long long total = 0;
+        if (CreateProcessW(nullptr, c.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                           nullptr, &si, &pi)) {
+          const DWORD w = WaitForSingleObject(pi.hProcess, 60000);
+          if (w != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 1);
+          CloseHandle(pi.hThread);
+          CloseHandle(pi.hProcess);
+          FILE* f = nullptr;
+          if (w == WAIT_OBJECT_0 && _wfopen_s(&f, resultFile.c_str(), L"r") == 0 && f) {
+            ran = std::fscanf(f, "%d %d %d %llu", &ok, &busy, &timedOut, &total) == 4;
+            std::fclose(f);
+          }
+        }
+        DeleteFileW(resultFile.c_str());
+
+        check("two simultaneous captures do not both run", ran && busy == 1,
+              std::to_string(busy) + " refused, " + std::to_string(timedOut) + " timed out");
+        check("...the one that was refused failed at once rather than waiting",
+              ran && (busy + timedOut) == 2, "both requests were answered");
+        check("...so the pair costs one deadline, not two", ran && total < deadline * 3,
+              std::to_string(total / 1000) + "ms for two requests at a " +
+                  std::to_string(deadline / 1000) + "ms deadline");
+      }
     }
     remove_dir(dir);
   }
@@ -462,6 +542,21 @@ int wmain(int argc, wchar_t** argv) {
             std::to_string(r.elapsedUs / 1000) + "ms");
     }
     remove_dir(dir);
+  }
+
+  // The numbers the design settled on, asserted rather than assumed. Changing one of these is a
+  // decision, and a decision should have to edit a test.
+  {
+    const remote60::native_poc::ThumbnailBudgetConfig config;
+    check("the retry policy is three attempts", config.maxAttempts == 3,
+          std::to_string(config.maxAttempts));
+    check("...spaced two seconds apart", config.retryIntervalUs == 2ull * 1000 * 1000,
+          std::to_string(config.retryIntervalUs / 1000) + "ms");
+    check("...then a sixty second cooldown", config.cooldownUs == 60ull * 1000 * 1000,
+          std::to_string(config.cooldownUs / 1000000) + "s");
+    check("...and the host deadline is one second",
+          remote60::native_poc::kThumbnailDeadlineUs == 1000ull * 1000,
+          std::to_string(remote60::native_poc::kThumbnailDeadlineUs / 1000) + "ms");
   }
 
   std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED") << "  ("
