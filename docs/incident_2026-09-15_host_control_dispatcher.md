@@ -33,7 +33,8 @@
 - 코드: `Serve` → `ControlWindowThumbnailRequest` → `send_window_thumbnail` → `capture_window_thumbnail` → `PrintWindow`(동기 SendMessage, deadline 없음, 사전 가드 `IsHungAppWindow`뿐). `host_bgra_scale.cpp`는 0.2.127과 바이트 동일.
 
 **강한 추정** (직접 스택·HWND 요청 로그 없음)
-- 차단 지점 = LDPlayer 창 썸네일용 `PrintWindow`. `Close(SessionRollover)` 2회·10초 읽기 타임아웃이 1h50m 동안 통하지 않았고(→ `link.Read` 아님; 풀린 직후 Serve는 10.7초에 정상 타임아웃), 반환 시각이 LDPlayer 소멸과 맞물리며, SendMessage는 대상 창 파괴 시 반환한다.
+- 차단 지점 = LDPlayer 창 썸네일용 `PrintWindow`. `Close(SessionRollover)` 2회·10초 읽기 타임아웃이 1h50m 동안 통하지 않았고(→ `link.Read` 아님; 풀린 직후 Serve는 10.7초에 정상 타임아웃), 반환 시각이 LDPlayer 소멸과 맞물린다.
+- ⚠️ **막히는 곳은 창의 WM_PRINT 핸들러가 아니다**(구현 task ④, 검증용 재현 `d10ce4a`): 이 OS에서 `PW_RENDERFULLCONTENT`는 DWM 리다이렉션 표면에서 렌더되어 **창은 WM_PRINT를 받지 않는다**(fixture 수신 0건, 정체 창에서도 ~24ms에 완료). 따라서 "LDPlayer가 WM_PRINT에 응답하지 않았다"는 약화되고, 후보는 **DWM/GPU 측 표면 렌더의 정체**다 — 같은 시각 GPU 워치독·TDR(프로세스 문맥 GNLinkStream)과 정황상 연결된다. LDPlayer 소멸=회복은 연관으로 유지. 제품 수정 방향(별도 프로세스 격리+deadline)은 이로써 강화된다(user mode 취소 불가 지점).
 - WCT 조회(15:53:43)는 해소 74초 뒤라 장애 당시 근거로 쓰지 않는다.
 
 **미확정**
