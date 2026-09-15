@@ -601,6 +601,17 @@ if(MSVC)
   target_compile_options(remote60_observe_vectors_test PRIVATE /utf-8)
 endif()
 
+# When a client asks for a preview again. One predicate, two clients -- the Windows picker and the
+# session controller the Android client drives both had the same defect, and sharing the rule is
+# what stops it coming back on one side only.
+add_executable(remote60_thumbnail_fetch_policy_test
+  src/thumbnail_fetch_policy_test.cpp
+)
+target_include_directories(remote60_thumbnail_fetch_policy_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_thumbnail_fetch_policy_test PRIVATE /utf-8)
+endif()
+
 # The preview retry policy: how many times an unresponsive window is asked before the host stops
 # asking, and when it starts again. No window and no GDI -- time is a parameter, so the sixty
 # second cooldown is a number here rather than a minute of test runtime.

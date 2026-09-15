@@ -39,18 +39,34 @@ int ControlClient::fetch_one_thumbnail(remote60::native_poc::ControlLink& link) 
   if (!remote60::native_poc::fetch_window_thumbnail(link, id, 256, 160, qpc_now_us(), &reply)) {
     return -1;
   }
+  // Recorded whether or not pixels came back. flags bit0 clear is the host saying "not this
+  // window" -- a complete, successful exchange that yielded no preview -- and without noting it
+  // the queue cannot tell that window from one it has never asked about.
+  const uint64_t attemptUs = qpc_now_us();
   if (reply.present) {
     auto thumb = std::make_shared<WindowThumb>();
     thumb->width = reply.width;
     thumb->height = reply.height;
     thumb->bgra = std::move(reply.bgra);
-    thumb->fetchedUs = qpc_now_us();
+    thumb->fetchedUs = attemptUs;
     {
       std::lock_guard<std::mutex> lk(ctx.picker.thumbMu);
       ctx.picker.thumbs[id] = std::move(thumb);
+      auto& attempt = ctx.picker.thumbAttempts[id];
+      attempt.lastAttemptUs = attemptUs;
+      attempt.failed = false;
     }
     // Outside the lock: the paint handler takes ctx.picker.thumbMu, and invalidating while
     // holding it invited a stall on every received preview.
+    InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
+  } else {
+    {
+      std::lock_guard<std::mutex> lk(ctx.picker.thumbMu);
+      auto& attempt = ctx.picker.thumbAttempts[id];
+      attempt.lastAttemptUs = attemptUs;
+      attempt.failed = true;
+    }
+    // Repaint for this one too: the card has to stop saying the preview is on its way.
     InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
   }
   return 1;

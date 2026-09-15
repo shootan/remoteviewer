@@ -177,6 +177,14 @@ class ClientSessionController {
   void QueueThumbnailFetchesFromPanel();
   mutable std::mutex thumbMu_;
   std::unordered_map<uint64_t, WindowThumbnail> thumbs_;
+  // When each window was last asked about and whether that produced pixels. Separate from thumbs_
+  // for the reason given in thumbnail_fetch_policy.hpp: thumbs_ holds successes only, so it cannot
+  // throttle the window that never succeeds -- the one the host is skipping.
+  struct ThumbAttempt {
+    uint64_t lastAttemptUs = 0;
+    bool failed = false;
+  };
+  std::unordered_map<uint64_t, ThumbAttempt> thumbAttempts_;
   std::deque<uint64_t> thumbFetchQueue_;
   std::atomic<bool> hostSupportsThumbnails_{false};
   std::atomic<bool> hostSupportsNack_{false};  // host advertised kUdpFeatureVideoNack (video NACK.)

@@ -45,6 +45,16 @@ struct PickerState {
   // cross-thread: control fills, UI paints, both under thumbMu.
   std::mutex thumbMu;
   std::unordered_map<uint64_t, std::shared_ptr<const WindowThumb>> thumbs;
+  // What the last completed fetch did, whether or not it produced pixels.
+  //
+  // `thumbs` only holds successes, so it cannot say when a window that never answers was last
+  // asked -- and that is precisely the window the host is skipping. Keyed the same way; also
+  // under thumbMu. Paint reads it to tell "still coming" apart from "the host gave up".
+  struct ThumbAttempt {
+    uint64_t lastAttemptUs = 0;
+    bool failed = false;
+  };
+  std::unordered_map<uint64_t, ThumbAttempt> thumbAttempts;
   std::deque<uint64_t> thumbFetchQueue;
   std::atomic<bool> hostSupportsThumbnails{false};
 

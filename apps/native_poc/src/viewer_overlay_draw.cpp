@@ -50,10 +50,13 @@ void draw_target_card(ViewerState& ctx, HDC hdc, const RECT& card, const CardGri
   // Snapshot under the lock, draw outside it: StretchDIBits under ctx.picker.thumbMu made the fetch
   // thread and the paint stall each other.
   std::shared_ptr<const WindowThumb> thumb;
+  bool previewRefused = false;
   {
     std::lock_guard<std::mutex> lk(ctx.picker.thumbMu);
     const auto it = ctx.picker.thumbs.find(windowId);
     if (it != ctx.picker.thumbs.end()) thumb = it->second;
+    const auto attempt = ctx.picker.thumbAttempts.find(windowId);
+    previewRefused = attempt != ctx.picker.thumbAttempts.end() && attempt->second.failed;
   }
   if (thumb) {
     draw_thumbnail_into(hdc, thumbRect, *thumb);
@@ -63,9 +66,14 @@ void draw_target_card(ViewerState& ctx, HDC hdc, const RECT& card, const CardGri
     SetTextColor(hdc, RGB(110, 118, 130));
     // The desktop card's caption already says what it is; repeating it inside the empty preview
     // put the same two words twice in one card.
+    // "준비 중" and "없음" are different promises. A window the host has given up on kept
+    // saying its preview was coming, which is the card telling you to keep waiting for something
+    // that is not going to arrive. The card stays selectable either way -- no preview is not a
+    // reason to stop you capturing the window.
     if (windowId != 0) {
-      draw_text_utf8(ctx, hdc, std::string("미리보기 준비 중…"), &ph,
-                     DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+      draw_text_utf8(ctx, hdc,
+                     previewRefused ? std::string("미리보기 없음") : std::string("미리보기 준비 중…"),
+                     &ph, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
   }
 

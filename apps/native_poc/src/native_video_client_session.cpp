@@ -1,5 +1,7 @@
 #include "native_video_client_session.hpp"
 
+#include "thumbnail_fetch_policy.hpp"
+
 #include "native_video_client_tcp_control.hpp"
 #include "poc_protocol.hpp"
 #include "udp_video_nack.hpp"
@@ -443,8 +445,24 @@ void ClientSessionController::QueueThumbnailFetchesFromPanel() {
   if (!hostSupportsThumbnails_.load(std::memory_order_relaxed)) return;
   const WindowPanelSnapshot snap = windowPanel_.Snapshot();
   std::lock_guard<std::mutex> lk(thumbMu_);
+  const uint64_t nowUs = now_us();
   auto want = [&](uint64_t id) {
-    if (thumbs_.count(id) != 0) return;  // refreshed on the next list roundtrip instead
+    // Shared with the Windows viewer (thumbnail_fetch_policy.hpp). The old test -- "is it in
+    // thumbs_" -- only ever described successes, so a window whose preview never arrives was
+    // re-queued on every list roundtrip while the host was skipping it.
+    ThumbnailFetchState state;
+    const auto have = thumbs_.find(id);
+    state.havePreview = have != thumbs_.end() && !have->second.rgba.empty();
+    const auto attempt = thumbAttempts_.find(id);
+    if (attempt != thumbAttempts_.end()) {
+      state.attempted = true;
+      state.lastAttemptUs = attempt->second.lastAttemptUs;
+      state.lastAttemptFailed = attempt->second.failed;
+      // WindowThumbnail is handed to the Android side as-is, so the fetch time lives here rather
+      // than as a new field on it: an attempt that did not fail IS the moment the preview landed.
+      if (!attempt->second.failed) state.previewFetchedUs = attempt->second.lastAttemptUs;
+    }
+    if (!thumbnail_fetch_due(state, ThumbnailFetchPolicy{}, nowUs)) return;
     if (std::find(thumbFetchQueue_.begin(), thumbFetchQueue_.end(), id) !=
         thumbFetchQueue_.end()) {
       return;
@@ -470,12 +488,19 @@ int ClientSessionController::FetchOneThumbnailLocked(ControlLink& link) {
   // converts the pixels.
   WindowThumbnailReply reply;
   if (!fetch_window_thumbnail(link, id, 256, 160, now_us(), &reply)) return -1;
+  // Past this point the exchange completed. Whether it carried pixels is the host's answer, not a
+  // failure of the request, and both answers are recorded -- a preview that never arrives has to
+  // be distinguishable from a window nobody has asked about.
+  const uint64_t attemptUs = now_us();
+  std::lock_guard<std::mutex> lk(thumbMu_);
+  auto& attempt = thumbAttempts_[id];
+  attempt.lastAttemptUs = attemptUs;
+  attempt.failed = !reply.present;
   if (reply.present) {
     // Wire format is BGRA; Android Bitmap.copyPixelsFromBuffer wants RGBA byte order.
     for (size_t i = 0; i + 3 < reply.bgra.size(); i += 4) {
       std::swap(reply.bgra[i], reply.bgra[i + 2]);
     }
-    std::lock_guard<std::mutex> lk(thumbMu_);
     auto& t = thumbs_[id];
     t.width = reply.width;
     t.height = reply.height;

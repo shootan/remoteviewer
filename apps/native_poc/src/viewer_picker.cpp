@@ -2,6 +2,8 @@
 
 #include "viewer_picker.hpp"
 
+#include "thumbnail_fetch_policy.hpp"
+
 #include "viewer_common.hpp"
 #include "viewer_state.hpp"
 #include "viewer_input_forward.hpp"
@@ -42,8 +44,26 @@ void queue_thumbnail_fetches_from_panel(ViewerState& ctx) {
   const uint64_t nowUs = qpc_now_us();
   std::lock_guard<std::mutex> lk(ctx.picker.thumbMu);
   auto want = [&](uint64_t id) {
+    // The cache alone cannot decide this. A window whose preview never arrives is absent from
+    // `thumbs`, so keying the throttle off it re-queued that window on every refresh -- forever,
+    // while the host was deliberately skipping it. thumbnail_fetch_due weighs the last ATTEMPT
+    // too, and the two clients share it so the rule cannot drift apart again.
+    remote60::native_poc::ThumbnailFetchState state;
     const auto it = ctx.picker.thumbs.find(id);
-    if (it != ctx.picker.thumbs.end() && it->second && nowUs - it->second->fetchedUs < kThumbRefreshUs) return;
+    if (it != ctx.picker.thumbs.end() && it->second) {
+      state.havePreview = true;
+      state.previewFetchedUs = it->second->fetchedUs;
+    }
+    const auto attempt = ctx.picker.thumbAttempts.find(id);
+    if (attempt != ctx.picker.thumbAttempts.end()) {
+      state.attempted = true;
+      state.lastAttemptUs = attempt->second.lastAttemptUs;
+      state.lastAttemptFailed = attempt->second.failed;
+    }
+    remote60::native_poc::ThumbnailFetchPolicy policy;
+    policy.refreshUs = kThumbRefreshUs;
+    policy.retryAfterFailureUs = kThumbRetryAfterFailureUs;
+    if (!remote60::native_poc::thumbnail_fetch_due(state, policy, nowUs)) return;
     if (std::find(ctx.picker.thumbFetchQueue.begin(), ctx.picker.thumbFetchQueue.end(), id) != ctx.picker.thumbFetchQueue.end()) {
       return;
     }

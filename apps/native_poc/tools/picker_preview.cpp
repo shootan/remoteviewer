@@ -221,6 +221,11 @@ int wmain() {
       {L"picker-count-12.png", "twelve windows", 12, true, false, 0, ""},
       {L"picker-count-30.png", "thirty windows (scrolls)", 30, true, false, 0, ""},
       {L"picker-thumbs.png", "real thumbnails: wide, tall, square", 3, true, false, 0, ""},
+      // The window the host has given up on. Two of the four answered, the third did not, and the
+      // picture is here to show that the card says so instead of promising a preview that is not
+      // coming -- and that it still looks selectable, because it is.
+      {L"picker-thumb-refused.png", "one window's preview was refused by the host", 4, true, false,
+       0, ""},
   };
 
   for (const Shot& shot : shots) {
@@ -260,6 +265,17 @@ int wmain() {
       ctx.picker.thumbs[1] = test_thumb(1920, 1080);   // wide
       ctx.picker.thumbs[2] = test_thumb(720, 1280);    // tall
       ctx.picker.thumbs[3] = test_thumb(900, 900);     // square
+    }
+
+    // A mixed picker: some previews arrived, one window was refused, one is still on its way. The
+    // three states have to be distinguishable at a glance or the skip reads as a bug.
+    if (std::wstring(shot.file) == L"picker-thumb-refused.png") {
+      std::lock_guard<std::mutex> lk(ctx.picker.thumbMu);
+      ctx.picker.thumbs[0] = test_thumb(1920, 1080);  // desktop, fine
+      ctx.picker.thumbs[1] = test_thumb(1920, 1080);  // a window that answered
+      ctx.picker.thumbAttempts[2].failed = true;      // asked, refused -> "미리보기 없음"
+      ctx.picker.thumbAttempts[2].lastAttemptUs = 1;
+      // window 3 is left untouched: never asked yet -> "미리보기 준비 중…"
     }
 
     RECT client{};

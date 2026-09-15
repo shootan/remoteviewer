@@ -90,6 +90,10 @@ constexpr UINT kMsgHostImeActivate = WM_APP + 12;
 constexpr UINT kMsgHostImeDeactivate = WM_APP + 13;
 
 constexpr uint64_t kThumbRefreshUs = 5000000;  // refresh a preview after 5 s
+// How long to leave a window alone after its preview did not come back. Deliberately the host's
+// cooldown (host_thumbnail_budget.hpp): asking inside it can only be told no again, and the
+// re-ask cost a control-thread roundtrip on the host every time the panel refreshed.
+constexpr uint64_t kThumbRetryAfterFailureUs = 60000000;  // 60 s
 
 constexpr UINT_PTR kCursorOverlayTimerId = 0x711;
 constexpr UINT_PTR kPacedPresentTimerId = 0x712;  // one-shot: a held frame's remaining wait (F-11)
