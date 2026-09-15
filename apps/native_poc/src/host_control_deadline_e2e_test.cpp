@@ -123,8 +123,43 @@ bool ping(TcpControlLink& link, uint64_t* elapsedUs) {
 
 }  // namespace
 
+
+namespace {
+
+/**
+ * Whether this run may start a host that listens.
+ *
+ * Off by default, and that is the whole point. Starting GNLinkStream opens listening sockets, and
+ * on Windows that raises a firewall prompt for an executable the user has never seen -- a scratch
+ * copy under %TEMP% with a fresh path every run. Left unanswered the prompt becomes a Block rule,
+ * and a full regression sweep left eight rules behind on this machine before anyone noticed.
+ *
+ * So the default is to skip, loudly, with exit 0: a regression run should not quietly lose
+ * coverage, and it should not quietly reconfigure somebody's firewall either.
+ */
+bool host_e2e_allowed() {
+  wchar_t value[8]{};
+  const DWORD n = GetEnvironmentVariableW(L"REMOTE60_ALLOW_HOST_E2E", value, 8);
+  return n > 0 && value[0] == L'1';
+}
+
+void print_skip(const char* what) {
+  std::printf("SKIP  %s\n", what);
+  std::printf("      This test starts a real GNLinkStream, which listens, which makes Windows\n");
+  std::printf("      ask about the firewall -- and an unanswered prompt becomes a Block rule on\n");
+  std::printf("      the user's machine. Set REMOTE60_ALLOW_HOST_E2E=1 to run it.\n");
+  std::printf("\nRESULT: SKIPPED\n");
+}
+
+}  // namespace
+
 int wmain(int argc, wchar_t** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
+
+  if (!host_e2e_allowed()) {
+    print_skip("host_control_deadline_e2e_test (starts a listening host)");
+    return 0;
+  }
 
   // Helper mode: this executable is also the GNLinkCapture that never answers.
   for (int i = 1; i < argc; ++i) {
