@@ -149,9 +149,17 @@ void ControlSessionServer::Serve(ControlLink& link) {
   // the 2026-09-15 host saw three sessions in a row walk into the same window. Per-session state
   // would have reset the budget each time and paid the deadline again on every one.
   //
-  // The control dispatcher is one per process and answers thumbnail requests synchronously, so
-  // this is only ever touched by one thread.
+  // Guarded, because Serve is not single-threaded. With controlPort > 0 the host runs two
+  // dispatchers on the same server object -- the TCP controlThread (host_startup_control.cpp:127,
+  // serving at :163) and the UDP udpControlThread (:397, serving at :431) -- and an operational
+  // host runs both. An earlier version of this comment said there was one, which would have left
+  // two threads walking the same map.
+  //
+  // That also sets the concurrency: at most one capture per dispatcher, so at most two helpers
+  // alive at once, and the bound is structural rather than enforced here. Each dispatcher serves
+  // one client at a time and holds nothing while the helper runs.
   static ThumbnailBudget thumbnailBudget;
+  static std::mutex thumbnailBudgetMu;
 
   auto send_window_thumbnail =
       [&](const ControlWindowThumbnailRequestMessage& req) -> bool {
@@ -192,7 +200,12 @@ void ControlSessionServer::Serve(ControlLink& link) {
       }
 
       const uint64_t nowUs = qpc_now_us();
-      if (!thumbnailBudget.Allow(key, nowUs)) {
+      bool allowed = false;
+      {
+        std::lock_guard<std::mutex> lk(thumbnailBudgetMu);
+        allowed = thumbnailBudget.Allow(key, nowUs);
+      }
+      if (!allowed) {
         // Skipped, not failed. Nothing is attempted, so nothing is charged, and the client is
         // told there is no preview -- which is what it would have been told anyway, without the
         // control thread spending a deadline to find out.
@@ -201,9 +214,14 @@ void ControlSessionServer::Serve(ControlLink& link) {
       } else {
         // The capture runs in a process this host can end. See host_thumbnail_helper.hpp for why
         // a thread would not do.
+        // Deliberately outside the lock. The capture is up to a deadline long, and holding the
+        // budget for it would make the other dispatcher wait on this window's helper.
         ThumbnailCaptureResult captured =
             capture_thumbnail_isolated(hwnd, maxW, maxH, kThumbnailDeadlineUs);
-        thumbnailBudget.Record(key, captured.outcome, qpc_now_us());
+        {
+          std::lock_guard<std::mutex> lk(thumbnailBudgetMu);
+          thumbnailBudget.Record(key, captured.outcome, qpc_now_us());
+        }
         if (captured.outcome == ThumbnailOutcome::Ok) {
           bgra = std::move(captured.bgra);
           tw = captured.width;
