@@ -608,6 +608,21 @@ if(MSVC)
   target_compile_options(remote60_observe_vectors_test PRIVATE /utf-8)
 endif()
 
+# The dispatcher itself. Runs the real GNLinkStream on isolated ports with a GNLinkCapture that
+# never answers, connects to its real control port, and measures whether the channel still replies
+# while a preview is timing out -- which is the thing that failed on 2026-09-15.
+add_executable(remote60_host_control_deadline_e2e_test
+  src/host_control_deadline_e2e_test.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+)
+target_include_directories(remote60_host_control_deadline_e2e_test PRIVATE src)
+target_link_libraries(remote60_host_control_deadline_e2e_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_host_control_deadline_e2e_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_host_control_deadline_e2e_test remote60_native_video_host_poc)
+
 # The isolated preview path end to end. capture_thumbnail_isolated resolves its helper beside the
 # running executable, so staging a scratch directory with a chosen GNLinkCapture.exe next to a copy
 # of this test exercises the production path with no test hook in the product: once with the real
