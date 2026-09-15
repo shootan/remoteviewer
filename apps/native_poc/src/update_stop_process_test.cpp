@@ -182,6 +182,26 @@ int run_fixture_parent(const std::wstring& eventName, bool threeTier = false,
 
 // ---------------------------------------------------------------------------- helpers
 
+/** Small file helpers: the swap gate is about bytes on disk, so the test has to read them. */
+void write_text(const std::wstring& path, const std::string& text) {
+  FILE* f = nullptr;
+  if (_wfopen_s(&f, path.c_str(), L"wb") != 0 || !f) return;
+  std::fwrite(text.data(), 1, text.size(), f);
+  std::fclose(f);
+}
+
+std::string read_text(const std::wstring& path) {
+  FILE* f = nullptr;
+  if (_wfopen_s(&f, path.c_str(), L"rb") != 0 || !f) return {};
+  std::string out;
+  char buf[512];
+  size_t n = 0;
+  while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, n);
+  std::fclose(f);
+  return out;
+}
+
+
 bool wait_until(const std::function<bool()>& done, int budgetMs) {
   const DWORD deadline = GetTickCount() + static_cast<DWORD>(budgetMs);
   while (GetTickCount() < deadline) {
@@ -736,6 +756,12 @@ int main(int argc, char** argv) {
       CreateDirectoryW(instH.c_str(), nullptr);
       CreateDirectoryW(stgH.c_str(), nullptr);
 
+      // What the gate protects, written down before the attempt. Quiesce returning false is the
+      // mechanism; the files being untouched is the point, and only one of those was checked.
+      const std::wstring guarded = instH + L"\\AlphaPayload.bin";
+      write_text(guarded, "installed-bytes-that-must-not-change");
+      const std::string before = read_text(guarded);
+
       UpdateEffectsConfig c = config_for(instH, stgH, root);
       c.enumerateTargets = [root]() { return fixture_tree(root); };
       c.requestStop = [](const ProcessTarget& t) { return request_process_stop(t); };
@@ -751,6 +777,9 @@ int main(int argc, char** argv) {
             e.last_error().find("outlived") != std::string::npos ||
                 e.last_error().find("did not exit") != std::string::npos,
             e.last_error());
+      check("...and the installed file is byte for byte what it was",
+            read_text(guarded) == before,
+            "the refusal is only worth anything if the disk was not touched");
 
       SetEvent(hold);    // release the leaf that was left behind
       SetEvent(branch);  // and anything still waiting on the branch event
@@ -765,6 +794,101 @@ int main(int argc, char** argv) {
       check("hold fixture started", false);
       if (hold) CloseHandle(hold);
       if (branch) CloseHandle(branch);
+    }
+  }
+
+  // ------------------------------------------------- what moves between enumeration and the wait
+  //
+  // Quiesce waits for the list PrepareForSwap worked from, not a fresh one. That is deliberate --
+  // re-enumerating would wait for whatever started in the meantime, and would silently skip
+  // something already asked and on its way out. It has two consequences that nothing checked.
+  {
+    ResetEvent(quitEvent);
+    const std::wstring raceEvent = L"Local\\gnlink-stop-fixture-race-" +
+                                   std::to_wstring(GetCurrentProcessId());
+    HANDLE raceQuit = CreateEventW(nullptr, TRUE, FALSE, raceEvent.c_str());
+    const std::wstring cmdR = L"\"" + own_path() + L"\" --fixture-parent3 " + raceEvent;
+    std::vector<wchar_t> cR(cmdR.begin(), cmdR.end());
+    cR.push_back(L'\0');
+    STARTUPINFOW siR{};
+    siR.cb = sizeof(siR);
+    PROCESS_INFORMATION pR{};
+    if (raceQuit && CreateProcessW(nullptr, cR.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                                   nullptr, nullptr, &siR, &pR)) {
+      CloseHandle(pR.hThread);
+      const uint32_t root = pR.dwProcessId;
+      const bool upR = wait_until([root] { return fixture_tree(root).size() == 3; }, 20000);
+      check("race fixture is up", upR, std::to_string(fixture_tree(root).size()) + " process(es)");
+
+      wchar_t tempR[MAX_PATH]{};
+      GetTempPathW(MAX_PATH, tempR);
+      const std::wstring instR = std::wstring(tempR) + L"gnlink-race-install";
+      const std::wstring stgR = std::wstring(tempR) + L"gnlink-race-staging";
+      CreateDirectoryW(instR.c_str(), nullptr);
+      CreateDirectoryW(stgR.c_str(), nullptr);
+
+      // The list is taken here, and then the world moves.
+      const std::vector<ProcessTarget> snapshot = fixture_tree(root);
+      UpdateEffectsConfig c = config_for(instR, stgR, root);
+      c.enumerateTargets = [snapshot]() { return snapshot; };
+      c.requestStop = [](const ProcessTarget& t) { return request_process_stop(t); };
+      c.quiesceTimeoutMs = 20000;
+      WindowsUpdateEffects e(c);
+      const bool prepared = e.PrepareForSwap();
+      check("prepare succeeds on the snapshot", prepared, e.last_error());
+
+      // A child that leaves between the enumeration and the wait is not a failure -- leaving is
+      // what the wait was for.
+      SetEvent(raceQuit);
+      const bool quiesced = prepared && e.Quiesce();
+      check("a child that exits between enumeration and the wait is not a failure", quiesced,
+            e.last_error());
+
+      wait_until([root] { return fixture_tree(root).empty(); }, 20000);
+      WaitForSingleObject(pR.hProcess, 20000);
+      CloseHandle(pR.hProcess);
+
+      // And the other direction: something windowless appears AFTER the list was taken. It is not
+      // in preparedTargets_, so the wait must not block on it -- a helper started a moment too
+      // late would otherwise hold an update open for its whole lifetime.
+      ResetEvent(quitEvent);
+      PROCESS_INFORMATION pLate{};
+      std::wstring cmdL = L"\"" + own_path() + L"\" --fixture-child " + eventName;
+      std::vector<wchar_t> cL(cmdL.begin(), cmdL.end());
+      cL.push_back(L'\0');
+      STARTUPINFOW siL{};
+      siL.cb = sizeof(siL);
+      if (CreateProcessW(nullptr, cL.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                         nullptr, &siL, &pLate)) {
+        CloseHandle(pLate.hThread);
+        const uint32_t latePid = pLate.dwProcessId;
+        const bool lateUp = wait_until([latePid] {
+          for (const ProcessTarget& t : fixture_targets()) {
+            if (t.pid == latePid) return true;
+          }
+          return false;
+        }, 15000);
+        check("a late windowless process is running", lateUp);
+
+        const DWORD before = GetTickCount();
+        const bool stillQuiesces = e.Quiesce();
+        const DWORD took = GetTickCount() - before;
+        check("a process that appeared after the enumeration is not waited for", stillQuiesces,
+              e.last_error());
+        check("...and the wait did not stall on it", took < 5000,
+              std::to_string(took) + "ms with a 20s budget");
+
+        SetEvent(quitEvent);
+        WaitForSingleObject(pLate.hProcess, 15000);
+        CloseHandle(pLate.hProcess);
+      }
+
+      RemoveDirectoryW(stgR.c_str());
+      RemoveDirectoryW(instR.c_str());
+      CloseHandle(raceQuit);
+    } else {
+      check("race fixture started", false);
+      if (raceQuit) CloseHandle(raceQuit);
     }
   }
 
