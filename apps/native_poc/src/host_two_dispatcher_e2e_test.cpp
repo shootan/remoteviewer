@@ -48,7 +48,13 @@ namespace {
 using remote60::native_poc::ClientSessionConnectArgs;
 using remote60::native_poc::ClientSessionController;
 using remote60::native_poc::ClientSessionState;
+using remote60::native_poc::ControlOutboundAction;
+using remote60::native_poc::ControlOutboundActionKind;
+using remote60::native_poc::execute_control_action;
 using remote60::native_poc::fetch_window_thumbnail;
+using remote60::native_poc::kMagic;
+using remote60::native_poc::MessageType;
+using remote60::native_poc::TcpControlResponse;
 using remote60::native_poc::qpc_now_us;
 using remote60::native_poc::TcpControlLink;
 using remote60::native_poc::WindowThumbnailReply;
@@ -106,6 +112,24 @@ std::wstring self_path() {
 std::wstring directory_of(const std::wstring& path) {
   const size_t slash = path.find_last_of(L"\\/");
   return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash + 1);
+}
+
+/** One ping over the TCP control link, and how long the channel took to answer it. */
+bool ping_tcp(TcpControlLink& link, uint64_t* elapsedUs) {
+  ControlOutboundAction action;
+  action.kind = ControlOutboundActionKind::Ping;
+  action.ping.header.magic = kMagic;
+  action.ping.header.type = static_cast<uint16_t>(MessageType::ControlPing);
+  action.ping.header.size = static_cast<uint16_t>(sizeof(action.ping));
+  action.ping.clientSendQpcUs = qpc_now_us();
+  action.expectedResponseType = MessageType::ControlPong;
+  action.expectedResponseSize = static_cast<uint16_t>(sizeof(TcpControlResponse{}.pong));
+
+  TcpControlResponse response;
+  const uint64_t start = qpc_now_us();
+  const bool ok = execute_control_action(link, action, &response);
+  *elapsedUs = qpc_now_us() - start;
+  return ok;
 }
 
 SOCKET connect_local(uint16_t port, int attempts) {
@@ -336,6 +360,36 @@ int wmain(int argc, wchar_t** argv) {
           (tcpUs.load() + udpUs) < kHostDeadlineUs * 2,
           std::to_string((tcpUs.load() + udpUs) / 1000) + "ms for both, " +
               std::to_string(kHostDeadlineUs * 2 / 1000) + "ms if they had serialised");
+
+    // And the part that is the whole point: both links are still answering.
+    //
+    // On 2026-09-15 they were not. Sessions connected, listed windows, drew a picker and then went
+    // silent, because the dispatcher was inside a preview and never got back to reading. With two
+    // dispatchers there are two ways for that to happen and both are checked here.
+    //
+    // The TCP link is a strict request/response stream, so it cannot be pinged while its own
+    // thumbnail request is outstanding. It is pinged immediately after, and what matters is that
+    // the answer comes at once rather than after another deadline.
+    uint64_t tcpPingUs = 0;
+    const bool tcpAlive = ping_tcp(link, &tcpPingUs);
+    check("THE TCP LINK STILL ANSWERS after its preview timed out", tcpAlive,
+          "this is what failed on 2026-09-15");
+    check("...at once, not behind another deadline", tcpAlive && tcpPingUs < kHostDeadlineUs / 2,
+          std::to_string(tcpPingUs / 1000) + "ms");
+
+    // The UDP session runs its own control loop, so the evidence there is the round trip it
+    // completed WHILE the TCP request was outstanding, plus still being connected with the loop
+    // running once everything is over.
+    const auto snap = udpClient.Snapshot();
+    check("THE UDP LINK ANSWERED DURING that timeout", udpAnswered,
+          std::to_string(udpUs / 1000) + "ms round trip");
+    check("...and its control loop is still running", snap.controlLoopActive, snap.status);
+    check("...with the session alive, not dead", snap.state == ClientSessionState::Connected,
+          snap.status + " / " + snap.lastError);
+    check("...and nothing reported the session lost",
+          snap.lastError.find("session-dead") == std::string::npos &&
+              snap.lastError.find("control-lost") == std::string::npos,
+          snap.lastError.empty() ? "no error" : snap.lastError);
 
     // And the UDP session is still healthy afterwards -- the budget was written from two threads
     // by now, since both dispatchers have asked for previews.
