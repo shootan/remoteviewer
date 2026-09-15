@@ -41,19 +41,23 @@ constexpr DWORD kKillConfirmMs = 5000;
 std::atomic<bool> gCaptureInFlight{false};
 
 /**
- * A helper that would not die, and everything it might still be writing into.
+ * A helper that would not die, and the handles belonging to that attempt.
  *
- * Deliberately never released. If TerminateProcess did not take, the helper may still write to the
- * mapped view at any moment, and unmapping it would be handing that write a freed page. So the
- * mapping is kept, the process handle is kept, and no further capture is attempted until it is
- * confirmed gone -- which bounds the whole thing at one leaked block rather than one per request.
+ * ⚠️ Correcting what an earlier version of this comment claimed. It said that unmapping while the
+ * helper might still be writing would hand that write a freed page. It would not. The helper
+ * opened the section itself and holds its own view, so the section lives as long as it does, and
+ * the parent's UnmapViewOfFile releases only the parent's mapping of it. Cross-process is exactly
+ * where that hazard does not exist -- which is most of the reason the capture is in a process.
+ *
+ * So this is not a memory-safety requirement, and it is not presented as one. It is kept for a
+ * smaller reason: a helper that survived TerminateProcess means something is wrong in a way we do
+ * not understand, and the answer to that is not to start another one. Holding its handles keeps it
+ * observable -- helper_still_lingering() can see when it finally goes -- and refusing further
+ * captures bounds the situation at one stray process instead of one per request.
  *
  * ⚠️ UNEXERCISED. Nothing in the suite reaches this, and not for want of trying: TerminateProcess
  * on a process this one started does not fail on this OS, so killConfirmed is always true and the
- * branch never runs. Removing the guard breaks no test. It is here because "the kill always works"
- * is an assumption rather than a guarantee, and the failure it would otherwise produce is a
- * use-after-free rather than a missing preview -- but it is a guard, not a tested behaviour, and
- * should be read as one.
+ * branch never runs. Removing it breaks no test. Read it as a guard, not as tested behaviour.
  */
 struct Lingering {
   std::mutex mu;
@@ -169,8 +173,9 @@ ThumbnailCaptureResult capture_thumbnail_attempt(HWND hwnd, uint32_t maxW, uint3
     return result;
   };
 
-  // A helper we could not kill may still be writing into its block. Starting another would mean a
-  // second one, and the first one's memory can never be reclaimed while it runs.
+  // A helper that survived being killed is still out there. Starting another would make two, and
+  // whatever is wrong with the first is not improved by company. Refused immediately -- the caller
+  // gets a failure in microseconds rather than a deadline, and the window is charged a retry.
   if (helper_still_lingering()) return fail("thumb_helper_lingering");
 
   // One at a time, enforced rather than inferred. The control dispatcher is not one thread: TCP
