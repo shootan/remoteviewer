@@ -65,8 +65,27 @@ bool wait_until(Fn&& fn, int timeoutMs) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  const std::string host = argc > 1 ? argv[1] : "127.0.0.1";
-  const int videoPort = argc > 2 ? std::atoi(argv[2]) : 43000;
+  // Both required, deliberately, and this used to default to 127.0.0.1:43000.
+  //
+  // That is the port the installed GNLink listens on. A bare run -- which is exactly what a
+  // regression sweep does -- therefore sent a UDP hello to the user's own running host. It was
+  // rejected and nothing came of it, but a test that reaches into the live product unless told
+  // otherwise is wrong in the way that only shows up once.
+  //
+  // This needs a host to talk to, so it is a tool rather than a test: run it by hand against one
+  // you started, the way the other argument-taking programs here work.
+  if (argc < 3) {
+    std::puts("usage: udp_control_e2e_test <host> <video-port>");
+    std::puts("  Needs a GNLink host to connect to. There is no default on purpose: the old one");
+    std::puts("  was 127.0.0.1:43000, which is the installed product.");
+    return 2;
+  }
+  const std::string host = argv[1];
+  const int videoPort = std::atoi(argv[2]);
+  if (videoPort <= 0 || videoPort > 65535) {
+    std::puts("usage: udp_control_e2e_test <host> <video-port>  (port out of range)");
+    return 2;
+  }
 
   CountingSink sink;
   ClientSessionController controller;
