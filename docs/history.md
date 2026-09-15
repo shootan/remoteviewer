@@ -11974,10 +11974,10 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 검증(검증용): 제품 verifier genuine Ok/version=0.2.127/artifacts=10/rc0, body·sig 각 1바이트 변조는 SignatureInvalid rc1. 설치기 내장 RCDATA 200~208 독립 추출 **9/9 바이트 일치**(Setup 자신은 비내장이라 9/10 이 정상)이며 내장 확인의 정본 근거는 이쪽이다. 서명·배포 rc0, 라이브 manifest `aed57a2c…f3bd`·sig `85411ebb…a3a4f` 가 서명값과 동일, 공개 URL 10/10 일치, 롤백용 0.2.126 은 서버·로컬 모두 보존. 정본 `.claude/reviewer-findings.md` §7-1.
 - 다음/경계: **바이너리 실행 0회 — 런타임 버전은 관측되지 않았다.** 사용자 GNLink 가 UDP 43000 을 쓰고 있어 포트 경합 위험 때문에 양쪽 다 실행하지 않았고, 설치 후 현장 `[connection-version]` 로그로 확인할 항목으로 남긴다. 이 빌드 기준 Native/서버 스위트 재실행도 하지 않았다(기능 근거는 6b119af 검토 그대로). 실행버전 gate 는 상시 검사로 자리잡지 않았다 — 이번 것은 1회성 스캔이다. main 역머지·push·사용자 앱 설치/재시작 없음.
 
-### 2026-09-15 0.2.127 Host/PC 복구 통합 릴리스 게시·독립 검증
+### 2026-09-15 0.2.127 런타임 버전 실측 — 앞 기록의 미해결 항목 해소
 
-- 목표/승인: main 통합 후보(6b119af)를 기존 채널에 게시하고 검증용이 독립 빌드·검사·서명·배포·외부확인까지 수행. 소스 commit 9390211은 6b119af 대비 product_version.hpp 1파일 1줄.
-- 게시: manifest aed57a2c5976c751…3f3bd / sig 85411ebbc089da47…ed3a4f, 아티팩트 10종 https://rem.shotan.net/updates/0.2.127/ 공개 URL 10/10 해시 일치. 제품 verifier genuine Ok(version=0.2.127, artifacts=10) 및 body·sig 1바이트 변조 각각 SignatureInvalid. 설치기 내장 RCDATA 200~208 독립 추출 9/9 바이트 일치. 롤백 0.2.126 pair를 서버 manifest-backups와 로컬 전체복구본 양쪽에 보존.
-- 런타임 버전 실측: 0.2.126의 REL-V01(게시 Stream이 0.2.125로 자기보고)을 되풀이하지 않도록 문자열 검사에 그치지 않고 고정 릴리스 바이너리를 격리 실행. loopback 43900/43901·전용 LOCALAPPDATA·비승격(GNLinkStream은 asInvoker)으로 사용자 설치 앱과 제품 포트·진단 뱅크 무접촉. [connection-version]에서 Stream localVersion=0.2.127, Viewer localVersion=0.2.127, 상호 peerVersion=0.2.127 관측, 양쪽 exit0. 캡처는 유휴(acquires=0, 전송 프레임 0)라 이 실행은 성능·인코딩을 측정하지 않는다. 근거 .claude/verify-runtime/.
-- 남은 미충족: remote60_host_encode_epoch_test의 CHECK(holdKick <= 150000) 불충족이 미해결. 이 시험의 holdUs는 입력 timestamp 상수 차이라 wall-clock 지연이 아니며, 실제 경과시간·인코더 drain 원인은 미확정. 같은 실패가 기존 main 437c87c에서도 관측되나 표본(main 2/16·merge 1/16)이 작아 병합 귀책 배제·회귀 아님·성능 무악화로 해석하지 않는다. 회차별 원시 로그는 미보존(각 1회차만 남음).
-- 다음/경계: 설치 후 현장 세션의 연결 버전 로그 재확인, 뷰어 paint 대기 기전, HW 인코더 시험 비결정성. 이번에 main 역머지·push·사용자 앱 설치/종료/재시작·UAC 조작은 없음. 판정 정본은 .claude/reviewer-findings.md.
+- 앞 기록(게시 경위·패키지·서명)은 되풀이하지 않는다. 그 기록이 남긴 **"바이너리 실행 0회 — 런타임 버전 미관측"** 만 여기서 닫는다.
+- 실행: 고정 릴리스 바이너리(GNLinkStream `8dad83f3…ba02`, GNLinkViewer `fcd3f735…3013`, 실행 전후 해시 동일)를 loopback 43900/43901·전용 LOCALAPPDATA 로 격리 구동. GNLinkStream 은 asInvoker 라 UAC 없음(requireAdministrator 는 host_app·installer·updater 뿐). 사용자 설치 앱·제품 포트(UDP43000/TCP43001)·제품 진단 뱅크 무접촉이고, 실행 후 제품 GNLinkHost/GNLinkStream 의 시작 시각이 그대로임을 확인했다.
+- 관측: `[connection-version]` 에서 Stream localVersion=0.2.127, Viewer localVersion=0.2.127, 상호 peerVersion=0.2.127. 양쪽 exit0 로 완주. 0.2.126 의 REL-V01(게시 Stream 이 0.2.125 로 자기보고)이 이 릴리스에서는 **실행으로 부정**됐다. 근거 `.claude/verify-runtime/`.
+- 범위: 캡처가 유휴(acquires=0, 전송 프레임 0)라 **인코딩·전송·성능은 측정하지 않았다.** 설치본 기준 현장 확인은 그대로 남는다.
+- 함께 정정: `remote60_host_encode_epoch_test` 의 `CHECK(holdKick <= 150000)` 불충족은 미해결이며, 그 `holdUs` 는 입력 timestamp 상수 차이라 **wall-clock 지연이 아니다**. 같은 실패가 main 437c87c 에서도 관측되나 표본(main 2/16·merge 1/16)이 작아 병합 귀책 배제·회귀 아님·성능 무악화로 해석하지 않는다. 회차별 원시 로그는 미보존(각 1회차만 남음). 판정 정본은 `.claude/reviewer-findings.md`.
