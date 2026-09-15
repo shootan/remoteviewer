@@ -37,9 +37,9 @@
 - WCT 조회(15:53:43)는 해소 74초 뒤라 장애 당시 근거로 쓰지 않는다.
 
 **미확정**
-- 13:47 GPU 워치독의 원인(4K HDR·LDPlayer·캡처 동시 부하는 후보). **커널 미니덤프 분석(사용자 지시, 승격은 복사 1회)으로 TDR 책임 드라이버는 `amdkmdag.sys`(0x141 P2 = amdkmdag+0xFA6D0)로 모듈 단위 특정**됐다. 스택 메모리 영역의 주소 후보도 amdkmdag·dxgkrnl·dxgmms2·ntoskrnl 만이나 **unwind 한 프레임이 아니므로 호출 순서로 읽지 않는다.** 심볼 없음·unwind 없음이라 함수명은 없고, TDR 의 "책임" 은 드라이버 버그 확정이 아니며, **엔진을 멈추게 한 작업 주체(앱)는 현재 분석으로는 특정하지 못했다**(심볼/TDR 추가 데이터 미검사). 사본·산출물(재현 가능): `.claude/urgent-126-20260915/WATCHDOG-20260915-1347.dmp`(sha256 `912c5fde…8115`), `parse_watchdog_dump.py`, `dump-analysis.txt`, `dump-modules.txt`.
+- 13:47 GPU 워치독의 원인(4K HDR·LDPlayer·캡처 동시 부하는 후보). **커널 미니덤프 분석(사용자 지시, 승격은 복사 1회)으로 TDR 책임 드라이버는 `amdkmdag.sys`(0x141 P2 = amdkmdag+0xFA6D0)로 모듈 단위 특정**됐다. 스택 메모리 영역의 주소 후보도 amdkmdag·dxgkrnl·dxgmms2·ntoskrnl 만이나 **unwind 한 프레임이 아니므로 호출 순서로 읽지 않는다.** Codex 가 공식 WinDbg(CDB, Authenticode 확인)로 공개 심볼 unwind: `LKD_0x141_IMAGE_amdkmdag.sys`, `VidSchiWorkerThread→VidSchiCheckHwProgress→ResetEngines→TdrCollectDbgInfoStage1`(로그 `codex-windbg-symbol-analysis.log`). **TDR 추가 데이터의 PROCESS_OBJECT(P4=0xffffe68cad8f1080)가 파일 오프셋 0x40BF8 에 있고 바로 뒤 0x40C05 에 `GNLinkStream.e`** — 검증용이 사본 바이트를 독립 대조해 일치 확인. 즉 **타임아웃된 엔진 작업의 프로세스 문맥은 GNLinkStream**(연관). ⚠️ 연관 ≠ 원인: amdkmdag 내부·GPU 과부하(4K HDR·LDPlayer 동시)·GNLink 워크로드 중 근본은 **미확정**이며 GNLink 잘못 확정 금지. TDR 의 "책임 드라이버" 도 드라이버 버그 확정이 아님. 사본·산출물(재현 가능): `.claude/urgent-126-20260915/WATCHDOG-20260915-1347.dmp`(sha256 `912c5fde…8115`), `parse_watchdog_dump.py`, `dump-analysis.txt`, `dump-modules.txt`.
 - LDPlayer가 WM_PRINT에 응답하지 않은 이유. 13:47:47 창 7→8의 정체. LDPlayer의 정확한 종료 시각·사용자 조작 여부(답변 대기).
-- **GNLink가 GPU를 멈추게 했다는 증거는 없다**(무관 증명도 아님).
+- **GNLink가 GPU를 멈추게 했다는 원인 증거는 없다**(무관 증명도 아님). 단 TDR 기록의 프로세스 문맥은 GNLinkStream(연관, 위 참조).
 
 ## 재발 시 안전한 우회 (조건부)
 증상이 "연결됨 → 화면 선택 창 → 15초 내 끊김, 재시작해도 반복"이면 GNLink 재시작 대신 **호스트 PC의 응답 없는 창(GPU 렌더링 앱·오류 대화상자·이번엔 LDPlayer)을 닫는 것**을 시도한다.
