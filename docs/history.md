@@ -11964,3 +11964,12 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 변경:14개 충돌 파일과 자동 병합 경계 검토. main의 마우스 해제·UDP ingress·DXGI1회 격리 정책을 기준으로 중복 제거. worker 종료/예외, 큐 admission/release, 인증 epoch, 캡처/encoder pending 복구를 결합. peer version0x40/heartbeat0x80 분리, 새 kick 경로 activeFps 적용, 다중 Viewer count·진단 문맥 및 최신 재연결 보호. 상세 파일/선택 근거는 `docs/main_recovery_integration_2026-09-15.md`.
 - 검증: 제품4종 및 관련 타깃 Release 빌드/최종 증분 재확인 성공. Native13종 중12종 첫 실행 exit0, HW encoder epoch 시험1종은 최초 실패 후 동일 실행 파일 재확인 exit0. 최초 실패는 보존하고 비결정성 원인 미확정으로 남김. 통합 제품 Shell/native/HTTP UI PASS(추가 Viewer 종료 결과 채택3항목 포함), 화면 캡처 직접 확인. 서버 전체 회귀 ALL PASS/exit0. 로그 `.claude/main-merge-*`. main history 본문 줄 누락0/BOM 보존 확인.
 - 다음/경계: 로컬 통합 후보를 사용자에게 보고. 독립 검토·실 GPU 반복 장애·다중 세션 종단·WAN/게임 soak·UAC/설치·릴리스 검증은 남음. main의 순간대기/REL-V01 해결로 주장하지 않는다. 이번에는 main 역머지·push·NAS 게시·사용자 앱 설치/재시작 없음. Git MCP 부재 상황의 로컬 CLI 사용은 앞선 사용자 직접 작업 승인 범위를 따른다.
+
+### 2026-09-15 0.2.127 Host/PC 복구 통합 릴리스 게시
+
+- 목표/승인: 통합 후보 6b119af 의 독립 검토가 끝나 버전 bump·clean build·패키징(작업용)과 서명·게시·외부 확인(검증용)을 이어서 수행. 제품 보수는 범위 밖이고 코드 변경은 버전 상수 1줄뿐.
+- 변경: `product_version.hpp` 0.2.126→0.2.127 한 줄(UTF-8 BOM·CRLF 보존). 릴리스 source commit 은 `6b119af` 가 아니라 **`9390211`** 이며 6b119af 대비 1파일 1줄이다. 제품 버전 리터럴이 이 파일 한 곳뿐임을 확인했고, `peer_version_test.cpp` 의 "0.2.126" 은 잘못된 입력 파싱 픽스처라 제품이 아니어서 그대로 두었다.
+- 빌드: **새 디렉터리** `build-release-127` 을 워크트리 루트에서 configure(exit0) 후 Release 빌드(exit0, error·warning 0). `build-local`·`build-verify-hostpc` 미접촉. 증분 빌드를 금지한 이유는 REL-V01 이다 — 0.2.126 의 게시 Stream 이 stale object 때문에 0.2.125 표찰로 나갔고, 해시·서명·검증기 **어느 것도 버전 문자열을 읽지 않아** 전부 통과했었다.
+- 검증(작업용): payload 10개 조립·파일별 SHA256 고정(Setup `8339ab3c…fbd8`). 바이트 스캔에서 stale `0.2.124/125/126` **10개 전부 0건**, Host·Stream·Client·Viewer 4종 모두 `0.2.127` 보유, Updater·InputService·Capture 는 버전 리터럴 자체가 없음(정상). Setup 의 5건이 자체1+내장4 임을 부분문자열 오프셋으로 확인.
+- 검증(검증용): 제품 verifier genuine Ok/version=0.2.127/artifacts=10/rc0, body·sig 각 1바이트 변조는 SignatureInvalid rc1. 설치기 내장 RCDATA 200~208 독립 추출 **9/9 바이트 일치**(Setup 자신은 비내장이라 9/10 이 정상)이며 내장 확인의 정본 근거는 이쪽이다. 서명·배포 rc0, 라이브 manifest `aed57a2c…f3bd`·sig `85411ebb…a3a4f` 가 서명값과 동일, 공개 URL 10/10 일치, 롤백용 0.2.126 은 서버·로컬 모두 보존. 정본 `.claude/reviewer-findings.md` §7-1.
+- 다음/경계: **바이너리 실행 0회 — 런타임 버전은 관측되지 않았다.** 사용자 GNLink 가 UDP 43000 을 쓰고 있어 포트 경합 위험 때문에 양쪽 다 실행하지 않았고, 설치 후 현장 `[connection-version]` 로그로 확인할 항목으로 남긴다. 이 빌드 기준 Native/서버 스위트 재실행도 하지 않았다(기능 근거는 6b119af 검토 그대로). 실행버전 gate 는 상시 검사로 자리잡지 않았다 — 이번 것은 1회성 스캔이다. main 역머지·push·사용자 앱 설치/재시작 없음.
