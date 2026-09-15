@@ -23,6 +23,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <functional>
@@ -629,6 +630,34 @@ int main(int argc, char** argv) {
       check("...and the leaf's parent is the middle, not the root",
             leafT && midT && leafT->parentPid == midT->pid,
             leafT ? std::to_string(leafT->parentPid) : "no leaf");
+      // Each link older than the one it started. The walk refuses an edge without this, so a
+      // fixture that did not satisfy it would be testing the rejection path by accident.
+      check("...and each tier started before the one below it",
+            rootT && midT && leafT && rootT->creationTime != 0 && midT->creationTime != 0 &&
+                leafT->creationTime != 0 && rootT->creationTime <= midT->creationTime &&
+                midT->creationTime <= leafT->creationTime);
+
+      // The trap this section is built to avoid, stated as a check so it stays avoided.
+      //
+      // fixture_children filters on `t.parentPid == parentPid`, one level. The leaf's parent is
+      // the middle, so a three-tier test enumerating that way would hand PrepareForSwap a set
+      // that does not contain the process the test is about -- and would pass without ever
+      // exercising the chain. The enumeration has to follow parentage, which is what
+      // fixture_tree does.
+      {
+        const std::vector<ProcessTarget> oneLevel = fixture_children(root);
+        const bool leafInOneLevel =
+            leafT && std::find_if(oneLevel.begin(), oneLevel.end(),
+                                  [&](const ProcessTarget& t) { return t.pid == leafT->pid; }) !=
+                         oneLevel.end();
+        check("one-level enumeration MISSES the leaf -- which is why this uses the chain",
+              !leafInOneLevel, std::to_string(oneLevel.size()) + " of 3 found one level down");
+        const bool leafInTree =
+            leafT && std::find_if(tree.begin(), tree.end(), [&](const ProcessTarget& t) {
+                       return t.pid == leafT->pid;
+                     }) != tree.end();
+        check("...and following parentage finds it", leafInTree);
+      }
 
       // The failure, executed. The leaf has no window and its parent has none either.
       if (leafT) {
