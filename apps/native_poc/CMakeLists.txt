@@ -70,6 +70,7 @@ add_executable(remote60_native_video_host_poc
   src/host_args.cpp
   src/host_control_session.cpp
   src/host_thumbnail_helper.cpp
+  src/host_thumbnail_kill.cpp
   src/host_unlock_relay.cpp
   src/host_encoded_sender.cpp
   src/host_capture_session.cpp
@@ -618,7 +619,10 @@ target_include_directories(remote60_shipped_helper_gate_test PRIVATE src)
 if(MSVC)
   target_compile_options(remote60_shipped_helper_gate_test PRIVATE /utf-8)
 endif()
-add_dependencies(remote60_shipped_helper_gate_test remote60_gdi_capture_worker)
+add_dependencies(remote60_shipped_helper_gate_test
+  remote60_gdi_capture_worker
+  remote60_native_video_host_poc
+)
 
 # Both dispatchers at once. A UDP session (control tunnelled over the media socket) and a TCP
 # session (its own port) against one host, with a helper that never answers -- so one dispatcher is
@@ -660,6 +664,7 @@ add_dependencies(remote60_host_control_deadline_e2e_test remote60_native_video_h
 add_executable(remote60_thumbnail_helper_e2e_test
   src/thumbnail_helper_e2e_test.cpp
   src/host_thumbnail_helper.cpp
+  src/host_thumbnail_kill.cpp
   # Also calls capture_window_thumbnail directly, so the isolated path can be timed against the
   # in-process one it replaced in the same run rather than against another machine's numbers.
   src/host_bgra_scale.cpp

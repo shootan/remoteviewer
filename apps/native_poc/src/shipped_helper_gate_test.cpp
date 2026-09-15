@@ -100,9 +100,25 @@ int main() {
   const char* forbidden[] = {
       "--test-", "test-stall", "--stall", "stall-ms", "REMOTE60_TEST", "REMOTE60_STALL",
       "--fault", "--inject", "--hang",
+      // The fault-injection translation unit the lingering test links in place of the real kill.
+      // If this string is in a shipped binary, that file was linked into it.
+      "REMOTE60_KILL_FAULT_INJECTION_TU",
   };
   for (const char* token : forbidden) {
     check(std::string("the shipped helper has no ") + token, !contains(blob, token));
+  }
+
+  // GNLinkStream is where the kill is linked, so the fault TU could only ever end up there.
+  // Checked separately rather than assumed from the helper's result.
+  {
+    const std::vector<uint8_t> host = read_all(self_dir() + L"GNLinkStream.exe");
+    check("the built GNLinkStream could be read", !host.empty(),
+          std::to_string(host.size()) + " bytes");
+    if (!host.empty()) {
+      check("...and it does not link the kill fault-injection TU",
+            !contains(host, "REMOTE60_KILL_FAULT_INJECTION_TU"),
+            "that file belongs to the lingering test target only");
+    }
   }
 
   std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED") << "  ("

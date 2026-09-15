@@ -5,6 +5,7 @@
 #include <sstream>
 #include <string>
 
+#include "host_thumbnail_kill.hpp"
 #include "host_thumbnail_wait.hpp"
 #include "thumbnail_ipc.hpp"
 #include "time_utils.hpp"
@@ -129,11 +130,10 @@ struct Attempt {
       return;
     }
 
-    // Already gone is the common case -- a helper that answered has exited by now.
-    if (WaitForSingleObject(pi.hProcess, 0) != WAIT_OBJECT_0) {
-      TerminateProcess(pi.hProcess, 1);
-      killConfirmed = WaitForSingleObject(pi.hProcess, kKillConfirmMs) == WAIT_OBJECT_0;
-    }
+    // The one OS call in this teardown, and the only thing that can tell us the helper is really
+    // gone. It lives in its own translation unit so the lingering test can link a version that
+    // reports failure -- see host_thumbnail_kill.hpp for why that is link-time and not a flag.
+    killConfirmed = terminate_and_confirm(pi.hProcess, kKillConfirmMs);
 
     if (killConfirmed) {
       CloseHandle(pi.hProcess);
