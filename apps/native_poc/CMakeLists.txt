@@ -608,6 +608,36 @@ if(MSVC)
   target_compile_options(remote60_observe_vectors_test PRIVATE /utf-8)
 endif()
 
+# The build gate for the fault seam -- or rather, the check that there is no seam to gate. The
+# stall used by the deadline tests is a different executable staged in a scratch directory, not a
+# switch on the shipped one, and this reads the built GNLinkCapture to say so.
+add_executable(remote60_shipped_helper_gate_test
+  src/shipped_helper_gate_test.cpp
+)
+target_include_directories(remote60_shipped_helper_gate_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_shipped_helper_gate_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_shipped_helper_gate_test remote60_gdi_capture_worker)
+
+# Both dispatchers at once. A UDP session (control tunnelled over the media socket) and a TCP
+# session (its own port) against one host, with a helper that never answers -- so one dispatcher is
+# inside a doomed preview while the other is asked for a round trip. This is where the budget lock
+# and the helper cap of one meet two real Serve loops rather than two threads.
+add_executable(remote60_host_two_dispatcher_e2e_test
+  src/host_two_dispatcher_e2e_test.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+)
+target_include_directories(remote60_host_two_dispatcher_e2e_test PRIVATE src)
+target_link_libraries(remote60_host_two_dispatcher_e2e_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_host_two_dispatcher_e2e_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_host_two_dispatcher_e2e_test remote60_native_video_host_poc)
+
 # The dispatcher itself. Runs the real GNLinkStream on isolated ports with a GNLinkCapture that
 # never answers, connects to its real control port, and measures whether the channel still replies
 # while a preview is timing out -- which is the thing that failed on 2026-09-15.
