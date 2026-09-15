@@ -32,6 +32,7 @@
 #include <string>
 #include <vector>
 
+#include "host_thumbnail_budget.hpp"
 #include "host_thumbnail_helper.hpp"
 #include "time_utils.hpp"
 
@@ -41,8 +42,10 @@ namespace {
 
 using remote60::native_poc::capture_thumbnail_isolated;
 using remote60::native_poc::qpc_now_us;
+using remote60::native_poc::ThumbnailBudget;
 using remote60::native_poc::ThumbnailCaptureResult;
 using remote60::native_poc::ThumbnailOutcome;
+using remote60::native_poc::ThumbnailTargetKey;
 
 int gFailures = 0;
 int gChecks = 0;
@@ -213,6 +216,40 @@ int wmain(int argc, wchar_t** argv) {
           std::to_string(secondElapsed) + "us");
     check("...and without starting a second helper", aliveCount == 1,
           std::to_string(aliveCount) + " helper(s) alive after two requests");
+
+    // The whole chain, in one place. A refusal is ours, not the window's -- so recording it the
+    // way the control session does must leave the window eligible. Three in a row is the case
+    // that matters: with two dispatchers it takes no time at all to reach, and if each one cost an
+    // attempt the window would be silent for a minute over a resource conflict it had no part in.
+    //
+    // The outcome fed in is the one the product returned, parsed back from the probe, rather than
+    // a constant typed here. If the refusal ever goes back to Failed this check fails.
+    {
+      const ThumbnailOutcome refused = std::string(secondOutcome) == "Canceled"
+                                           ? ThumbnailOutcome::Canceled
+                                       : std::string(secondOutcome) == "TimedOut"
+                                           ? ThumbnailOutcome::TimedOut
+                                       : std::string(secondOutcome) == "Ok"
+                                           ? ThumbnailOutcome::Ok
+                                           : ThumbnailOutcome::Failed;
+      ThumbnailBudget budget;
+      ThumbnailTargetKey key;
+      key.windowId = 0x4242;
+      key.ownerPid = 1234;
+      key.processCreatedUs = 5678;
+      uint64_t now = 0;
+      bool allowedThroughout = true;
+      for (int i = 0; i < 3; ++i) {
+        if (!budget.Allow(key, now)) allowedThroughout = false;
+        budget.Record(key, refused, now);
+        now += 10 * 1000;  // faster than any retry interval, on purpose
+      }
+      check("three refusals in a row leave the window still allowed",
+            allowedThroughout && budget.Allow(key, now),
+            "a resource conflict must not cost the window its three attempts");
+      check("...and put it in no cooldown", !budget.InCooldown(key, now),
+            std::to_string(budget.ConsecutiveFailures(key)) + " failures recorded");
+    }
   }
 
   // Clean up the helper the fault injection refused to kill. By pid and by path.
