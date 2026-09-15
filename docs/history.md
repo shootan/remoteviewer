@@ -12005,3 +12005,10 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 직접 검증: Microsoft 공식 WinDbg 패키지에서 분석 파일만 작업 폴더에 추출, exe/dll105개 Authenticode Valid/Microsoft 확인. CDB10.0.29617.1000 + 공개 심볼로 !analyze/kv/!thread/!process/.enumtag 실행. AMD amdkmdag+FA6D0 및 System GPU 스케줄러→엔진리셋→TDR수집 스택 확인. 추가 TDR 데이터에서 Arg4/PROCESS_OBJECT와 같은 포인터 및 인접 GNLinkStream.e 이름을 원본offset으로 대조.
 - 한계: 원인 앱/명령 확정이 아니라 프로세스 관련 메타데이터 단서. 별도 EPROCESS 페이지 읽기는 실제 memory read error, 공개 심볼에 TDR_RECOVERY_CONTEXT 타입 없음. 최초 잘못된 심볼 경로 실행과 정정 후 성공 로그 모두 보존. GPU hardware/AMD 버그/GNLink 귀책 어느 것도 확정하지 않음.
 - 다음: 사용자에게 확인된 경로와 아직 필요한 정보를 보고. 최초 GPU 사건과 응답 없는 창으로 인한 제어 차단을 분리하고 후자는 기존 t-8tlz9aam 구현을 계속. OS설치·live attach·드라이버 변경·앱 종료·재부팅·push 없음.
+
+### 2026-09-15 17:15 이후 반복 영상 멈춤 로그 조사
+
+- 목표: 사용자 고화질 재생→멈춤→재접속 직후 다시 멈춤 관측과 Host 자동복구 가설을 직접 로그 대조.
+- 변경: `docs/incident_2026-09-15_1715_stream_dropout.md`, 이력·계획. 제품 수정 없음.
+- 확인:126 Viewer의3실패세션과1진행세션 구분, 동일seq로Host/Viewer시각대조. Viewer 영상/Pong 수신 공백 뒤에도Host 동일epoch wire기록 지속,udpTxFail0,Stream27860 재시작없음. ABR9→6.6Mbps/720p 하향과일부데이터재개대조. 동일frame재paint6.75초를UI새프레임지연으로잘못세지않음. 원본/hash는해당문서.
+- 다음/한계: Host송신API이후~Viewer ingress관측전 경계미확정. 4Mbps/30fps진단시험결과요청; 양단packet/수신worker 근거미확보. 이전GPU/썸네일차단과동일원인확정금지. 앱설정변경·재시작·설치·NIC캡처·push 없음.
