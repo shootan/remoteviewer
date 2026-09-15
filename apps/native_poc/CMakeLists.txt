@@ -601,6 +601,17 @@ if(MSVC)
   target_compile_options(remote60_observe_vectors_test PRIVATE /utf-8)
 endif()
 
+# The four ways an isolated capture can end. The one that matters: a worker that dies without a
+# result is seen the moment it dies, not after the deadline -- so an update stopping the helper, a
+# crash, and a kill from anywhere else all arrive on the same path and cost the same.
+add_executable(remote60_host_thumbnail_wait_test
+  src/host_thumbnail_wait_test.cpp
+)
+target_include_directories(remote60_host_thumbnail_wait_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_host_thumbnail_wait_test PRIVATE /utf-8)
+endif()
+
 # When a client asks for a preview again. One predicate, two clients -- the Windows picker and the
 # session controller the Android client drives both had the same defect, and sharing the rule is
 # what stops it coming back on one side only.
