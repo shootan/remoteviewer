@@ -76,6 +76,44 @@ int run_fixture_child(const std::wstring& eventName) {
   return 0;
 }
 
+// ------------------------------------------------------------------- the fixture middle tier
+
+/**
+ * Windowless, and a supervisor in its own right -- the shape of GNLinkStream.
+ *
+ * It starts a child and waits on the same quit event, so one SetEvent releases the whole branch.
+ * Nothing here has a window, which is the entire point: this tier is why a single-link ownership
+ * check could not reach the one below it.
+ */
+int run_fixture_middle(const std::wstring& eventName, bool leafOutlives = false) {
+  // leafOutlives models a helper that is still running when its branch is asked to go: the leaf
+  // waits on an event of its own, which the root's WM_CLOSE does not touch, and the middle leaves
+  // without it.
+  const std::wstring leafEvent = leafOutlives ? eventName + L"-leaf" : eventName;
+  std::wstring cmd = L"\"" + own_path() + L"\" --fixture-child " + leafEvent;
+  std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
+  mutableCmd.push_back(L'\0');
+  STARTUPINFOW si{};
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION pi{};
+  if (!CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                      nullptr, nullptr, &si, &pi)) {
+    return 93;
+  }
+  CloseHandle(pi.hThread);
+
+  HANDLE quit = OpenEventW(SYNCHRONIZE, FALSE, eventName.c_str());
+  if (quit) {
+    WaitForSingleObject(quit, 120000);
+    CloseHandle(quit);
+  }
+  // A supervisor waits for what it started before going. The leaf is on the same event, so this
+  // is a short wait rather than a second request -- unless this is the case where it is not.
+  if (!leafOutlives) WaitForSingleObject(pi.hProcess, 10000);
+  CloseHandle(pi.hProcess);
+  return 0;
+}
+
 // ---------------------------------------------------------------------------- the fixture parent
 
 HANDLE gParentChildProcess = nullptr;
@@ -97,7 +135,8 @@ LRESULT CALLBACK fixture_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
   return DefWindowProcW(hwnd, msg, w, l);
 }
 
-int run_fixture_parent(const std::wstring& eventName) {
+int run_fixture_parent(const std::wstring& eventName, bool threeTier = false,
+                       bool leafOutlives = false) {
   gParentEventName = eventName;
 
   const std::wstring cls = L"GNLinkStopFixture" + std::to_wstring(GetCurrentProcessId());
@@ -113,7 +152,10 @@ int run_fixture_parent(const std::wstring& eventName) {
                               nullptr, nullptr, wc.hInstance, nullptr);
   if (!hwnd) return 91;
 
-  std::wstring cmd = L"\"" + own_path() + L"\" --fixture-child " + eventName;
+  const wchar_t* childMode = !threeTier          ? L"--fixture-child "
+                             : leafOutlives     ? L"--fixture-middle-hold "
+                                                : L"--fixture-middle ";
+  std::wstring cmd = L"\"" + own_path() + L"\" " + childMode + eventName;
   std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
   mutableCmd.push_back(L'\0');
   STARTUPINFOW si{};
@@ -161,6 +203,33 @@ std::vector<ProcessTarget> fixture_children(uint32_t parentPid) {
   return mine;
 }
 
+/**
+ * The fixture's whole tree, not just its first generation.
+ *
+ * fixture_children only reaches direct children, which is enough for the two-tier cases above and
+ * misses precisely the tier this section exists for.
+ */
+std::vector<ProcessTarget> fixture_tree(uint32_t rootPid) {
+  const std::vector<ProcessTarget> all = fixture_targets();
+  std::vector<uint32_t> inTree{rootPid};
+  std::vector<ProcessTarget> mine;
+  // Two passes is enough for three tiers and does not assume enumeration order.
+  for (int pass = 0; pass < 3; ++pass) {
+    for (const ProcessTarget& t : all) {
+      const bool already = std::find_if(mine.begin(), mine.end(), [&](const ProcessTarget& m) {
+                             return m.pid == t.pid;
+                           }) != mine.end();
+      if (already) continue;
+      const bool linked = std::find(inTree.begin(), inTree.end(), t.pid) != inTree.end() ||
+                          std::find(inTree.begin(), inTree.end(), t.parentPid) != inTree.end();
+      if (!linked) continue;
+      inTree.push_back(t.pid);
+      mine.push_back(t);
+    }
+  }
+  return mine;
+}
+
 UpdateEffectsConfig config_for(const std::wstring& install, const std::wstring& staging,
                                uint32_t parentPid) {
   UpdateEffectsConfig c;
@@ -191,9 +260,25 @@ int main(int argc, char** argv) {
     const std::string name(argv[2]);
     return run_fixture_child(std::wstring(name.begin(), name.end()));
   }
+  if (argc >= 3 && std::string(argv[1]) == "--fixture-middle") {
+    const std::string name(argv[2]);
+    return run_fixture_middle(std::wstring(name.begin(), name.end()));
+  }
+  if (argc >= 3 && std::string(argv[1]) == "--fixture-middle-hold") {
+    const std::string name(argv[2]);
+    return run_fixture_middle(std::wstring(name.begin(), name.end()), true);
+  }
+  if (argc >= 3 && std::string(argv[1]) == "--fixture-parent3hold") {
+    const std::string name(argv[2]);
+    return run_fixture_parent(std::wstring(name.begin(), name.end()), true, true);
+  }
   if (argc >= 3 && std::string(argv[1]) == "--fixture-parent") {
     const std::string name(argv[2]);
     return run_fixture_parent(std::wstring(name.begin(), name.end()));
+  }
+  if (argc >= 3 && std::string(argv[1]) == "--fixture-parent3") {
+    const std::string name(argv[2]);
+    return run_fixture_parent(std::wstring(name.begin(), name.end()), true);
   }
 
   std::printf("update_stop_process_test\n");
@@ -502,6 +587,157 @@ int main(int argc, char** argv) {
 #else
   check("(static) the host exit contract is checked", false, "REMOTE60_HOST_APP_SRC not defined");
 #endif
+
+  // ------------------------------------------------- three real tiers (B1)
+  //
+  // The shape the product actually has, produced rather than described: a windowed root starts a
+  // windowless middle, which starts a windowless leaf. Before B1 the leaf could not be recognised
+  // as anybody's child -- its parent has no window -- so it fell through to a direct request that
+  // cannot succeed, and the update was abandoned. The synthetic matrix in update_effects_test
+  // covers the branches; this is the one that checks the OS reports parentage the way that walk
+  // assumes.
+  {
+    ResetEvent(quitEvent);
+    const std::wstring cmd3 = L"\"" + own_path() + L"\" --fixture-parent3 " + eventName;
+    std::vector<wchar_t> c3(cmd3.begin(), cmd3.end());
+    c3.push_back(L'\0');
+    STARTUPINFOW si3{};
+    si3.cb = sizeof(si3);
+    PROCESS_INFORMATION p3{};
+    if (!CreateProcessW(nullptr, c3.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                        nullptr, &si3, &p3)) {
+      check("three-tier fixture started", false);
+    } else {
+      CloseHandle(p3.hThread);
+      const uint32_t root = p3.dwProcessId;
+      const bool up3 = wait_until([root] { return fixture_tree(root).size() == 3; }, 20000);
+      std::vector<ProcessTarget> tree = fixture_tree(root);
+      check("a windowed root, a windowless middle and a windowless leaf are running",
+            up3 && tree.size() == 3, std::to_string(tree.size()) + " process(es)");
+
+      const ProcessTarget* rootT = nullptr;
+      const ProcessTarget* midT = nullptr;
+      const ProcessTarget* leafT = nullptr;
+      for (const ProcessTarget& t : tree) {
+        if (t.pid == root) rootT = &t;
+        else if (t.parentPid == root) midT = &t;
+        else leafT = &t;
+      }
+      check("the enumerator reports the root's window", rootT && rootT->hasWindow);
+      check("...the middle with none", midT && !midT->hasWindow);
+      check("...the leaf with none either", leafT && !leafT->hasWindow);
+      check("...and the leaf's parent is the middle, not the root",
+            leafT && midT && leafT->parentPid == midT->pid,
+            leafT ? std::to_string(leafT->parentPid) : "no leaf");
+
+      // The failure, executed. The leaf has no window and its parent has none either.
+      if (leafT) {
+        check("asking the leaf directly cannot work", !request_process_stop(*leafT));
+      }
+
+      wchar_t temp3[MAX_PATH]{};
+      GetTempPathW(MAX_PATH, temp3);
+      const std::wstring inst3 = std::wstring(temp3) + L"gnlink-3tier-install";
+      const std::wstring stg3 = std::wstring(temp3) + L"gnlink-3tier-staging";
+      CreateDirectoryW(inst3.c_str(), nullptr);
+      CreateDirectoryW(stg3.c_str(), nullptr);
+
+      auto asked = std::make_shared<std::vector<uint32_t>>();
+      UpdateEffectsConfig c = config_for(inst3, stg3, root);
+      c.enumerateTargets = [root]() { return fixture_tree(root); };
+      c.requestStop = [asked](const ProcessTarget& t) {
+        asked->push_back(t.pid);
+        return request_process_stop(t);
+      };
+      c.quiesceTimeoutMs = 20000;
+      WindowsUpdateEffects e(c);
+
+      const bool prepared = e.PrepareForSwap();
+      check("PrepareForSwap succeeds on a real three-tier tree", prepared, e.last_error());
+      check("...having asked exactly one process", asked->size() == 1,
+            std::to_string(asked->size()) + " asked");
+      check("...and that one is the root that owns a window",
+            asked->size() == 1 && asked->front() == root);
+
+      // The root's WM_CLOSE releases the branch, the middle waits for its leaf, and Quiesce is
+      // what confirms every one of the three actually went. Nothing is force-terminated.
+      const bool quiesced = prepared && e.Quiesce();
+      check("Quiesce waits for all three and sees them gone", quiesced, e.last_error());
+      const bool empty = wait_until([root] { return fixture_tree(root).empty(); }, 20000);
+      check("...and the tree really is empty", empty,
+            std::to_string(fixture_tree(root).size()) + " left");
+
+      WaitForSingleObject(p3.hProcess, 20000);
+      CloseHandle(p3.hProcess);
+      RemoveDirectoryW(stg3.c_str());
+      RemoveDirectoryW(inst3.c_str());
+    }
+  }
+
+  // ------------------------------------------------- a leaf that outlives its branch
+  //
+  // Quiesce is the gate the swap sits behind, so what matters is that a leftover child makes it
+  // say no. The leaf is held open here while the rest of the branch goes.
+  {
+    ResetEvent(quitEvent);
+    const std::wstring holdName = L"Local\\gnlink-stop-fixture-hold-" +
+                                  std::to_wstring(GetCurrentProcessId());
+    // Two events: one the root signals when it closes, and one only this test can set. The leaf
+    // waits on the second, so closing the branch leaves it behind -- which is the whole case.
+    HANDLE branch = CreateEventW(nullptr, TRUE, FALSE, holdName.c_str());
+    HANDLE hold = CreateEventW(nullptr, TRUE, FALSE, (holdName + L"-leaf").c_str());
+    const std::wstring cmdH = L"\"" + own_path() + L"\" --fixture-parent3hold " + holdName;
+    std::vector<wchar_t> cH(cmdH.begin(), cmdH.end());
+    cH.push_back(L'\0');
+    STARTUPINFOW siH{};
+    siH.cb = sizeof(siH);
+    PROCESS_INFORMATION pH{};
+    if (branch && hold &&
+        CreateProcessW(nullptr, cH.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                       nullptr, &siH, &pH)) {
+      CloseHandle(pH.hThread);
+      const uint32_t root = pH.dwProcessId;
+      const bool upH = wait_until([root] { return fixture_tree(root).size() == 3; }, 20000);
+      check("hold fixture is up", upH, std::to_string(fixture_tree(root).size()) + " process(es)");
+
+      wchar_t tempH[MAX_PATH]{};
+      GetTempPathW(MAX_PATH, tempH);
+      const std::wstring instH = std::wstring(tempH) + L"gnlink-hold-install";
+      const std::wstring stgH = std::wstring(tempH) + L"gnlink-hold-staging";
+      CreateDirectoryW(instH.c_str(), nullptr);
+      CreateDirectoryW(stgH.c_str(), nullptr);
+
+      UpdateEffectsConfig c = config_for(instH, stgH, root);
+      c.enumerateTargets = [root]() { return fixture_tree(root); };
+      c.requestStop = [](const ProcessTarget& t) { return request_process_stop(t); };
+      c.quiesceTimeoutMs = 3000;  // short: the leaf is not going to leave
+      WindowsUpdateEffects e(c);
+      const bool prepared = e.PrepareForSwap();
+      check("prepare still succeeds -- the leaf is owned, so nobody asks it", prepared,
+            e.last_error());
+      // The root closes, but the leaf is waiting on an event nobody has set.
+      const bool refused = prepared && !e.Quiesce();
+      check("Quiesce refuses while a child is still running", refused, e.last_error());
+      check("...and names it as a child that outlived its parent",
+            e.last_error().find("outlived") != std::string::npos ||
+                e.last_error().find("did not exit") != std::string::npos,
+            e.last_error());
+
+      SetEvent(hold);    // release the leaf that was left behind
+      SetEvent(branch);  // and anything still waiting on the branch event
+      WaitForSingleObject(pH.hProcess, 20000);
+      CloseHandle(pH.hProcess);
+      wait_until([root] { return fixture_tree(root).empty(); }, 20000);
+      CloseHandle(hold);
+      CloseHandle(branch);
+      RemoveDirectoryW(stgH.c_str());
+      RemoveDirectoryW(instH.c_str());
+    } else {
+      check("hold fixture started", false);
+      if (hold) CloseHandle(hold);
+      if (branch) CloseHandle(branch);
+    }
+  }
 
   // ---------------------------------------------------------------- cleanup
   SetEvent(quitEvent);

@@ -437,18 +437,54 @@ bool WindowsUpdateEffects::PrepareForSwap() {
   // So a windowless target that was started by a supervisor we are already asking is left to that
   // supervisor, the way closing an application leaves it to close its own children.
   //
-  // Ownership is verified, never assumed: the parent has to be one of these targets, have a
-  // window of its own, and have started before the child. Without all three a standalone console
-  // process would be quietly adopted by whichever GUI process happened to be in the list, and
-  // then nobody would ask it to stop at all.
+  // Ownership is verified, never assumed: every link has to be one of these targets and has to
+  // have started before the process it owns. Without that a standalone console process would be
+  // quietly adopted by whichever GUI process happened to be in the list, and then nobody would
+  // ask it to stop at all.
+  //
+  // The chain is followed, not just the first link. This used to stop at the immediate parent and
+  // require IT to have a window, which could only ever recognise a two-tier product. Ours has
+  // three: GNLinkHost owns a window and starts GNLinkStream, which has none and starts
+  // GNLinkCapture, which has none either. So GNLinkCapture failed the check, was not an orphan
+  // (its parent is alive), fell through to a direct request, and a windowless process cannot be
+  // asked -- which abandoned the update. GDI capture mode made that reachable already; a preview
+  // helper would make it common.
+  //
+  // What is NOT relaxed: each edge still needs a real parentPid match, a known creation time, and
+  // a parent older than its child, and the walk only ever looks inside preparedTargets_. An
+  // intermediate link that is missing, unknown, or a reused pid ends the walk at nullptr and the
+  // process goes back to the conservative path it took before. "Windowless with a parent" is not
+  // ownership; reaching a verified stop target that owns a window is.
   const auto owner_of = [this](const ProcessTarget& child) -> const ProcessTarget* {
-    if (child.parentPid == 0 || child.creationTime == 0) return nullptr;
-    for (const ProcessTarget& parent : preparedTargets_) {
-      if (parent.pid != child.parentPid) continue;
-      if (!parent.hasWindow) return nullptr;
+    // Deep enough for any supervisor tree this product has, shallow enough that a malformed one
+    // cannot turn into a long walk. Combined with `seen` below, termination does not depend on
+    // the process table being well formed.
+    constexpr size_t kMaxChainDepth = 8;
+    std::vector<uint32_t> seen{child.pid};
+    const ProcessTarget* current = &child;
+
+    for (size_t depth = 0; depth < kMaxChainDepth; ++depth) {
+      if (current->parentPid == 0 || current->creationTime == 0) return nullptr;
+
+      const ProcessTarget* parent = nullptr;
+      for (const ProcessTarget& candidate : preparedTargets_) {
+        if (candidate.pid != current->parentPid) continue;
+        parent = &candidate;
+        break;
+      }
+      // A parent outside this list is not something we are stopping, so there is nobody to leave
+      // this process to. Same answer as before.
+      if (!parent) return nullptr;
       // A parent that started after its child is not the parent: the pid was reused.
-      if (parent.creationTime == 0 || parent.creationTime >= child.creationTime) return nullptr;
-      return &parent;
+      if (parent->creationTime == 0 || parent->creationTime >= current->creationTime) return nullptr;
+      // A pid reached twice is a cycle in what should be a tree, which means the table is lying.
+      if (std::find(seen.begin(), seen.end(), parent->pid) != seen.end()) return nullptr;
+      seen.push_back(parent->pid);
+
+      // Somebody who can actually be asked. Everything below it is left to them.
+      if (parent->hasWindow) return parent;
+      // Windowless: it will be left to ITS owner, so keep climbing to find out whether one exists.
+      current = parent;
     }
     return nullptr;
   };

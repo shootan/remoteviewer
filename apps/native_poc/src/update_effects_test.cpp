@@ -711,6 +711,150 @@ int main(int argc, char** argv) {
     e.DiscardDownload();
   }
 
+  // ------------------------------------------------- ownership follows the chain (B1)
+  //
+  // The product is three tiers deep: GNLinkHost owns a window and starts GNLinkStream, which has
+  // none and starts GNLinkCapture, which has none either. Ownership used to be a single link with
+  // the parent required to have a window, so the third tier failed the check, was not an orphan
+  // either (its parent is alive), and fell through to a direct request -- which for a windowless
+  // process cannot succeed, and abandons the update.
+  //
+  // Every case below asks the same question: was this pid asked directly? PrepareForSwap only
+  // asks the ones it has NOT left to a supervisor.
+  {
+    DummyProcess host, stream, capture, stranger;
+    check("three-tier fixture: host started", host.start());
+    check("three-tier fixture: stream started", stream.start());
+    check("three-tier fixture: capture started", capture.start());
+    check("three-tier fixture: unrelated process started", stranger.start());
+
+    ProcessTarget tHost, tStream, tCapture, tStranger;
+    check("three-tier identities captured",
+          capture_process_identity(host.pid(), &tHost) &&
+              capture_process_identity(stream.pid(), &tStream) &&
+              capture_process_identity(capture.pid(), &tCapture) &&
+              capture_process_identity(stranger.pid(), &tStranger));
+
+    // The topology is described rather than inherited: these are four siblings started by this
+    // test, and what is under test is how the fields are interpreted.
+    tHost.hasWindow = true;
+    tStream.hasWindow = false;
+    tCapture.hasWindow = false;
+    tStranger.hasWindow = false;
+    tStream.parentPid = tHost.pid;
+    tCapture.parentPid = tStream.pid;
+    // Creation times have to be ordered parent-before-child for the walk to accept an edge, and
+    // the real ones are whatever the OS handed out.
+    tHost.creationTime = 1000;
+    tStream.creationTime = 2000;
+    tCapture.creationTime = 3000;
+    tStranger.creationTime = 2000;
+
+    // Returns the set of pids PrepareForSwap decided to ask directly.
+    const auto asked_pids = [&](std::vector<ProcessTarget> targets) {
+      auto shared = std::make_shared<std::vector<uint32_t>>();
+      UpdateEffectsConfig c = base_config(install, staging);
+      c.enumerateTargets = [targets]() { return targets; };
+      c.requestStop = [shared](const ProcessTarget& t) {
+        shared->push_back(t.pid);
+        return true;  // recorded, not performed: these processes stay alive for the next case
+      };
+      WindowsUpdateEffects e(c);
+      e.PrepareForSwap();
+      return *shared;
+    };
+    const auto was_asked = [](const std::vector<uint32_t>& asked, uint32_t pid) {
+      return std::find(asked.begin(), asked.end(), pid) != asked.end();
+    };
+
+    {
+      const std::vector<uint32_t> asked = asked_pids({tHost, tStream, tCapture});
+      check("a three-tier tree asks only the one with a window", asked.size() == 1,
+            std::to_string(asked.size()) + " asked");
+      check("...and that one is the host", was_asked(asked, tHost.pid));
+      check("...the middle tier is left to it", !was_asked(asked, tStream.pid));
+      check("...and so is the third tier -- this is the B1 fix",
+            !was_asked(asked, tCapture.pid));
+    }
+
+    {
+      // Enumeration order is not guaranteed, and a walk that depended on seeing the parent first
+      // would pass above and fail in the field.
+      const std::vector<uint32_t> asked = asked_pids({tCapture, tStream, tHost});
+      check("the answer does not depend on enumeration order",
+            asked.size() == 1 && was_asked(asked, tHost.pid),
+            std::to_string(asked.size()) + " asked");
+    }
+
+    {
+      // The two-tier shape has to keep working exactly as it did.
+      ProcessTarget directChild = tStream;
+      directChild.parentPid = tHost.pid;
+      const std::vector<uint32_t> asked = asked_pids({tHost, directChild});
+      check("a two-tier tree still asks only the parent",
+            asked.size() == 1 && was_asked(asked, tHost.pid),
+            std::to_string(asked.size()) + " asked");
+    }
+
+    {
+      // A live parent that is not one of our targets is not a supervisor we are stopping, so
+      // there is nobody to leave the child to. It gets asked, as before.
+      ProcessTarget adopted = tCapture;
+      adopted.parentPid = tStranger.pid;
+      const std::vector<uint32_t> asked = asked_pids({tHost, tStream, adopted});
+      check("a windowless process whose live parent is not a target is still asked directly",
+            was_asked(asked, adopted.pid));
+    }
+
+    {
+      // A chain that runs out before reaching a window is not ownership.
+      ProcessTarget orphanedMiddle = tStream;
+      orphanedMiddle.parentPid = tStranger.pid;  // alive, but not in the list
+      const std::vector<uint32_t> asked = asked_pids({orphanedMiddle, tCapture});
+      check("a chain that never reaches a window leaves both ends asked directly",
+            was_asked(asked, orphanedMiddle.pid) && was_asked(asked, tCapture.pid),
+            std::to_string(asked.size()) + " asked");
+    }
+
+    {
+      // A parent that started after its child is a reused pid, not a parent -- at any depth.
+      ProcessTarget youngerHost = tHost;
+      youngerHost.creationTime = 9000;  // after the stream it supposedly started
+      const std::vector<uint32_t> asked = asked_pids({youngerHost, tStream, tCapture});
+      check("a parent younger than its child breaks the chain",
+            was_asked(asked, tStream.pid) && was_asked(asked, tCapture.pid),
+            std::to_string(asked.size()) + " asked");
+    }
+
+    {
+      // An unknown creation time is not evidence of anything and must not be read as ownership.
+      ProcessTarget timelessMiddle = tStream;
+      timelessMiddle.creationTime = 0;
+      const std::vector<uint32_t> asked = asked_pids({tHost, timelessMiddle, tCapture});
+      check("an unknown creation time in the middle breaks the chain",
+            was_asked(asked, tCapture.pid));
+    }
+
+    {
+      // A cycle is a process table that is lying. The walk has to end, and end conservatively.
+      ProcessTarget loopA = tStream;
+      ProcessTarget loopB = tCapture;
+      loopA.parentPid = loopB.pid;
+      loopB.parentPid = loopA.pid;
+      loopA.creationTime = 5000;
+      loopB.creationTime = 4000;  // each is older than the other by its own account
+      const std::vector<uint32_t> asked = asked_pids({loopA, loopB});
+      check("a cycle terminates and is not treated as ownership",
+            was_asked(asked, loopA.pid) || was_asked(asked, loopB.pid),
+            std::to_string(asked.size()) + " asked");
+    }
+
+    host.kill();
+    stream.kill();
+    capture.kill();
+    stranger.kill();
+  }
+
   // ---------------------------------------------------------------- stopping processes
 
   {
