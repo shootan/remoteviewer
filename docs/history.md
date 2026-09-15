@@ -11997,3 +11997,11 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 강한 추정: 차단 지점은 창 썸네일 PrintWindow(동기 SendMessage, deadline 없음, 가드는 IsHungAppWindow뿐). Close 2회·10초 읽기 타임아웃이 통하지 않았고 반환이 LDPlayer 소멸과 맞물림. 직접 스택 없음. WCT 조회는 해소 74초 뒤라 근거로 쓰지 않음.
 - 미확정: GPU 워치독 원인(4K HDR·LDPlayer·캡처 부하 후보), LDPlayer 무응답 이유, 13:47:47 창 +1 정체, LDPlayer 종료 조작 여부. GNLink가 GPU를 멈추게 했다는 증거 없음.
 - 우회/다음: 재발 시 응답 없는 창을 닫으면 재시작 없이 복구(실측). 수정 방향은 deadline 있는 bounded 격리 썸네일 + 실패 건너뛰기 + 제어 디스패처 liveness(작업목록 0.0.19). 조사 중 철회 8건은 정본 기록. 덤프는 세션 정책이 막았고 회복 후 불필요. main/push/설치앱 조작 없음.
+
+### 2026-09-15 Codex 직접 GPU 커널 덤프 분석
+
+- 목표: 사용자 요청에 따라 최초 GPU 타임아웃의 추가 정보를 직접 분석하고 정보·접근 한계를 구분. 새 live dump는 만들지 않고 사용자가 검증용에게 복사를 승인한 기존499,618B 덤프 사본(912c5fde…8115)만 사용.
+- 변경: `docs/gpu_timeout_2026-09-15_codex_analysis.md`, 이력·계획. 썸네일 구현 작업의 제품 변경은 포함하지 않음.
+- 직접 검증: Microsoft 공식 WinDbg 패키지에서 분석 파일만 작업 폴더에 추출, exe/dll105개 Authenticode Valid/Microsoft 확인. CDB10.0.29617.1000 + 공개 심볼로 !analyze/kv/!thread/!process/.enumtag 실행. AMD amdkmdag+FA6D0 및 System GPU 스케줄러→엔진리셋→TDR수집 스택 확인. 추가 TDR 데이터에서 Arg4/PROCESS_OBJECT와 같은 포인터 및 인접 GNLinkStream.e 이름을 원본offset으로 대조.
+- 한계: 원인 앱/명령 확정이 아니라 프로세스 관련 메타데이터 단서. 별도 EPROCESS 페이지 읽기는 실제 memory read error, 공개 심볼에 TDR_RECOVERY_CONTEXT 타입 없음. 최초 잘못된 심볼 경로 실행과 정정 후 성공 로그 모두 보존. GPU hardware/AMD 버그/GNLink 귀책 어느 것도 확정하지 않음.
+- 다음: 사용자에게 확인된 경로와 아직 필요한 정보를 보고. 최초 GPU 사건과 응답 없는 창으로 인한 제어 차단을 분리하고 후자는 기존 t-8tlz9aam 구현을 계속. OS설치·live attach·드라이버 변경·앱 종료·재부팅·push 없음.
