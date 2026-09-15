@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -50,6 +51,26 @@ bool exists(const std::string& path) {
   return f.good();
 }
 
+/**
+ * Everything git has under `dir`, or an empty set when git could not be asked.
+ *
+ * Paths come back relative to `dir` with forward slashes, which is the same shape CMakeLists uses,
+ * so they compare directly.
+ */
+std::set<std::string> tracked_files(const std::string& dir) {
+  std::set<std::string> out;
+  const std::string cmd = "git -C \"" + dir + "\" ls-files 2>nul";
+  FILE* p = _popen(cmd.c_str(), "r");
+  if (!p) return out;
+  char line[1024];
+  while (std::fgets(line, sizeof(line), p)) {
+    std::string entry = trim(line);
+    if (!entry.empty()) out.insert(entry);
+  }
+  _pclose(p);
+  return out;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -64,7 +85,12 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  // Asked once. A file that is on disk but not in here builds for whoever has it and for nobody
+  // else, which is the whole point of checking.
+  const std::set<std::string> tracked = tracked_files(root);
+
   std::vector<std::string> missing;
+  std::vector<std::string> untracked;
   int examined = 0;
   std::string line;
   while (std::getline(in, line)) {
@@ -79,7 +105,11 @@ int main(int argc, char** argv) {
     while (!file.empty() && (file.back() == ')' || file.back() == '"')) file.pop_back();
     if (file.empty()) continue;
     ++examined;
-    if (!exists(root + "/" + file)) missing.push_back(file);
+    if (!exists(root + "/" + file)) {
+      missing.push_back(file);
+    } else if (!tracked.empty() && tracked.find(file) == tracked.end()) {
+      untracked.push_back(file);
+    }
   }
 
   // The scan has to have found something, or its silence proves nothing. This is the same trap the
@@ -91,6 +121,21 @@ int main(int argc, char** argv) {
         missing.empty() ? std::to_string(examined) + " checked"
                         : std::to_string(missing.size()) + " missing, first: " + missing.front());
   for (const std::string& m : missing) std::cout << "        missing: " << m << "\n";
+
+  // Present is not the same as committed, and the difference is invisible from here without
+  // asking. Skipped rather than passed when git is unavailable: a lookup that quietly answers
+  // "nothing untracked" because it found nothing at all is the failure this file is about.
+  if (tracked.empty()) {
+    std::cout << "SKIP  whether those sources are committed (git could not be asked)\n";
+  } else {
+    check("...and every one of them is committed", untracked.empty(),
+          untracked.empty()
+              ? std::to_string(tracked.size()) + " tracked paths consulted"
+              : std::to_string(untracked.size()) + " untracked, first: " + untracked.front());
+    for (const std::string& u : untracked) {
+      std::cout << "        on disk but not committed: " << u << "\n";
+    }
+  }
 
   std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED") << "  ("
             << gChecks << " checks, " << gFailures << " failed)\n";
