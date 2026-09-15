@@ -609,6 +609,20 @@ if(MSVC)
   target_compile_options(remote60_observe_vectors_test PRIVATE /utf-8)
 endif()
 
+# The lingering branch, executed. Links host_thumbnail_kill_fault.cpp INSTEAD of
+# host_thumbnail_kill.cpp: the one OS call at the teardown boundary reports failure and terminates
+# nothing, so the product's "the helper would not die" path runs for real. Everything else is the
+# product. shipped_helper_gate_test checks the fault TU is in neither shipped executable.
+add_executable(remote60_host_thumbnail_lingering_test
+  src/host_thumbnail_lingering_test.cpp
+  src/host_thumbnail_helper.cpp
+  src/host_thumbnail_kill_fault.cpp
+)
+target_include_directories(remote60_host_thumbnail_lingering_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_host_thumbnail_lingering_test PRIVATE /utf-8)
+endif()
+
 # Every source CMakeLists names exists. Five commits in this branch did not configure because a
 # target was registered while its source was left uncommitted -- it built for the author and for
 # nobody else. This is the check that would have caught that, and it costs a file read.
