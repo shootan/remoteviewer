@@ -27,14 +27,14 @@
 
 ## 판정
 **확정**
-- 제어 디스패처는 프로세스당 1개이며, 첫 세션 이후 `udp control session ended`가 세 프로세스 모두 0건 → 세션을 끝내지 못했다. 사고 전(12:01~13:46)과 2일치 회전본에서는 전부 짝이 맞았다 — 오늘 처음 생긴 상태.
+- **UDP 제어 경로의 디스패처(`udpControlThread`)는 1개**이며, 첫 세션 이후 `udp control session ended`가 세 프로세스 모두 0건 → 세션을 끝내지 못했다. 사고 전(12:01~13:46)과 2일치 회전본에서는 전부 짝이 맞았다 — 오늘 처음 생긴 상태. ⚠️ "프로세스당 디스패처 1개"는 **틀린 서술**이었다: `controlPort>0`이면 TCP `controlThread`가 별도로 존재하고(host_startup_control.cpp:127/:163 vs :397/:431) 운영 호스트는 둘 다 띄운다(`control waiting port=43001` + `udp bound port=43000`). 사건 세션은 전부 UDP 터널이라 관측된 차단은 UDP 디스패처의 것이며, 그 시간 TCP 경로의 가용 여부는 관측하지 않았다.
 - 감독자 재기동 트리거는 자식 종료뿐이라 막힌 디스패처는 감시되지 않는다(DXGI 워커 워치독은 있고 13:47에 동작했다).
 - `AwaitControlReady`가 1500ms 상한이라 디스패처가 막혀도 hello ack는 나간다 → 뷰어에는 "연결됨"으로 보인다.
 - 코드: `Serve` → `ControlWindowThumbnailRequest` → `send_window_thumbnail` → `capture_window_thumbnail` → `PrintWindow`(동기 SendMessage, deadline 없음, 사전 가드 `IsHungAppWindow`뿐). `host_bgra_scale.cpp`는 0.2.127과 바이트 동일.
 
 **강한 추정** (직접 스택·HWND 요청 로그 없음)
 - 차단 지점 = LDPlayer 창 썸네일용 `PrintWindow`. `Close(SessionRollover)` 2회·10초 읽기 타임아웃이 1h50m 동안 통하지 않았고(→ `link.Read` 아님; 풀린 직후 Serve는 10.7초에 정상 타임아웃), 반환 시각이 LDPlayer 소멸과 맞물린다.
-- ⚠️ **막히는 곳은 창의 WM_PRINT 핸들러가 아니다**(구현 task ④, 검증용 재현 `d10ce4a`): 이 OS에서 `PW_RENDERFULLCONTENT`는 DWM 리다이렉션 표면에서 렌더되어 **창은 WM_PRINT를 받지 않는다**(fixture 수신 0건, 정체 창에서도 ~24ms에 완료). 따라서 "LDPlayer가 WM_PRINT에 응답하지 않았다"는 약화되고, 후보는 **DWM/GPU 측 표면 렌더의 정체**다 — 같은 시각 GPU 워치독·TDR(프로세스 문맥 GNLinkStream)과 정황상 연결된다. LDPlayer 소멸=회복은 연관으로 유지. 제품 수정 방향(별도 프로세스 격리+deadline)은 이로써 강화된다(user mode 취소 불가 지점).
+- ⚠️ 구현 task ④(검증용 재현 `d10ce4a`): 이 OS에서 `PW_RENDERFULLCONTENT`는 DWM 리다이렉션 표면에서 렌더되어 **창은 WM_PRINT를 받지 않는다**(fixture 수신 0건, 정체 창에서도 ~24ms에 완료). 이것이 말하는 것은 **"이 fixture/OS/flags로는 기존 코드의 무한 대기를 재현하지 못했다"**까지다. "LDPlayer가 WM_PRINT에 응답하지 않았다"는 약화되지만 DWM/GPU 내부 대기가 사건 원인이라고 **확정하지도 못한다** — 두 설명 모두 미확정 후보. 같은 시각 GPU 워치독·TDR(프로세스 문맥 GNLinkStream)은 정황. LDPlayer 소멸 시각은 전후 열거 추론이며 "소멸=회복"은 연관으로만 유지. 제품 수정 방향(별도 프로세스 격리+deadline)은 원인 확정과 무관하게 유효하다(user mode에서 취소 불가한 지점을 회수하려면 프로세스 경계가 필요).
 - WCT 조회(15:53:43)는 해소 74초 뒤라 장애 당시 근거로 쓰지 않는다.
 
 **미확정**
