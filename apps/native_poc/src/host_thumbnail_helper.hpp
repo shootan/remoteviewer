@@ -56,7 +56,18 @@ struct ThumbnailCaptureResult {
   uint32_t width = 0;
   uint32_t height = 0;
   std::vector<uint8_t> bgra;
-  uint64_t elapsedUs = 0;
+  uint64_t elapsedUs = 0;  // the whole call, teardown included
+
+  // Where the time went. Reported rather than inferred, because the three have different causes:
+  // spawn is the OS and the disk, wait is the deadline, and teardown is how long the kill took to
+  // be confirmed -- which nothing guarantees is quick.
+  uint64_t spawnUs = 0;     // mapping, event, CreateProcessW, up to the resume
+  uint64_t waitUs = 0;      // the wait itself, bounded by the deadline
+  uint64_t teardownUs = 0;  // TerminateProcess and confirming the process is gone
+  // True when the helper did not exit within the confirmation window. Its memory is held rather
+  // than released, and the next request is refused until it is finally seen to go.
+  bool helperLingering = false;
+
   // Diagnostic only; never the basis of a decision. "no result" is the done event not being set.
   std::string detail;
 };

@@ -229,7 +229,11 @@ void ControlSessionServer::Serve(ControlLink& link) {
           ok = true;
         } else {
           std::cout << "[native-video-host][control] thumbnail windowId=" << req.windowId
-                    << " gave up after " << (captured.elapsedUs / 1000) << "ms: "
+                    << " gave up after " << (captured.elapsedUs / 1000) << "ms"
+                    << " (spawn " << (captured.spawnUs / 1000) << "ms, wait "
+                    << (captured.waitUs / 1000) << "ms, teardown "
+                    << (captured.teardownUs / 1000) << "ms"
+                    << (captured.helperLingering ? ", helper LINGERING" : "") << "): "
                     << captured.detail << "\n";
         }
       }

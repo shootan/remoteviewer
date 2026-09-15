@@ -99,9 +99,17 @@ struct Attempt {
   void* view = nullptr;
   HANDLE done = nullptr;
   PROCESS_INFORMATION pi{};
-  bool killConfirmed = true;  // read by the caller after teardown
+  bool killConfirmed = true;    // read by the caller after teardown
+  uint64_t* teardownOut = nullptr;  // where to report how long the teardown took
 
   ~Attempt() {
+    const uint64_t teardownStart = qpc_now_us();
+    struct Report {
+      uint64_t* out;
+      uint64_t start;
+      ~Report() { if (out) *out = qpc_now_us() - start; }
+    } report{teardownOut, teardownStart};
+
     if (pi.hThread) CloseHandle(pi.hThread);
     if (!pi.hProcess) {
       if (view) UnmapViewOfFile(view);
@@ -150,7 +158,8 @@ namespace {
  * so the round trip is what gets measured.
  */
 ThumbnailCaptureResult capture_thumbnail_attempt(HWND hwnd, uint32_t maxW, uint32_t maxH,
-                                                 uint64_t deadlineUs, HANDLE cancelEvent) {
+                                                 uint64_t deadlineUs, HANDLE cancelEvent,
+                                                 uint64_t* teardownUs) {
   ThumbnailCaptureResult result;
   const uint64_t start = qpc_now_us();
   const auto fail = [&](const char* why) {
@@ -227,6 +236,11 @@ ThumbnailCaptureResult capture_thumbnail_attempt(HWND hwnd, uint32_t maxW, uint3
   if (ResumeThread(attempt.pi.hThread) == static_cast<DWORD>(-1)) {
     return fail("thumb_worker_resume_failed");
   }
+  result.spawnUs = qpc_now_us() - start;
+  // The caller owns this, deliberately. Pointing it at a field of `result` would have the
+  // destructor write into an object the return has already moved from unless NRVO happens to
+  // apply, and "happens to" is not a guarantee.
+  attempt.teardownOut = teardownUs;
 
   ThumbnailWaitHandles handles;
   handles.done = attempt.done;
@@ -234,6 +248,7 @@ ThumbnailCaptureResult capture_thumbnail_attempt(HWND hwnd, uint32_t maxW, uint3
   handles.cancel = cancelEvent;
   uint64_t waited = 0;
   const ThumbnailWaitResult waitResult = wait_for_thumbnail(handles, deadlineUs, &waited);
+  result.waitUs = waited;
 
   result.outcome = outcome_for_wait(waitResult);
   result.elapsedUs = qpc_now_us() - start;
@@ -277,11 +292,15 @@ ThumbnailCaptureResult capture_thumbnail_attempt(HWND hwnd, uint32_t maxW, uint3
 ThumbnailCaptureResult capture_thumbnail_isolated(HWND hwnd, uint32_t maxW, uint32_t maxH,
                                                   uint64_t deadlineUs, HANDLE cancelEvent) {
   const uint64_t start = qpc_now_us();
+  uint64_t teardownUs = 0;
   ThumbnailCaptureResult result =
-      capture_thumbnail_attempt(hwnd, maxW, maxH, deadlineUs, cancelEvent);
+      capture_thumbnail_attempt(hwnd, maxW, maxH, deadlineUs, cancelEvent, &teardownUs);
+  result.teardownUs = teardownUs;
   // Re-stamped now that the helper has been ended and confirmed gone. This is what the caller
   // actually waited for -- spawn, IPC, capture, and the kill confirmation when there was one.
   result.elapsedUs = qpc_now_us() - start;
+  // Asked after the teardown, since that is when a helper that would not die becomes known.
+  result.helperLingering = helper_still_lingering();
   return result;
 }
 
