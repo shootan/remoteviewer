@@ -4,10 +4,15 @@
 // does not fail for a process this process started, so the confirmation always succeeds and the
 // branch never runs. Removing it would break no test, which is the same as saying it is untested.
 //
-// So the test links this instead. It does not terminate anything and reports failure, which drives
-// the real product code down the real path -- the helper genuinely stays alive, the handles are
-// genuinely held, and the next request is genuinely refused. Nothing is stubbed on the product
-// side; only the one OS call at the boundary is replaced.
+// So the test links this instead. Nothing is stubbed on the product side; only the one OS call at
+// the boundary is replaced, and the real teardown runs against a helper that is genuinely still
+// alive afterwards.
+//
+// It WAITS the full confirmation window before reporting failure, and that is the point rather
+// than an oversight. A kill that is never confirmed costs the caller the whole of kKillConfirmMs --
+// that is what "the worst case is about six seconds, not one" means, and an injection that
+// returned instantly would have left that number as arithmetic instead of a measurement. The first
+// version did return instantly and reported a 3us teardown, which measured nothing.
 
 #include "host_thumbnail_kill.hpp"
 
@@ -26,10 +31,11 @@ const char* volatile gKeepMarker = nullptr;
 }  // namespace
 
 bool terminate_and_confirm(HANDLE process, DWORD timeoutMs) {
-  (void)process;
-  (void)timeoutMs;
   gKeepMarker = kFaultMarker;
-  // Deliberately does not terminate: the point is a helper that is still running afterwards.
+  (void)process;
+  // Deliberately does not terminate: the point is a helper that is still running afterwards. The
+  // wait is what a real unconfirmed kill costs, so it is spent here rather than skipped.
+  Sleep(timeoutMs);
   return false;
 }
 

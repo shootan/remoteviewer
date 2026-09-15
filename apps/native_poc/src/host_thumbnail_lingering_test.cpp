@@ -206,7 +206,20 @@ int wmain(int argc, wchar_t** argv) {
     check("the first capture times out", std::string(firstOutcome) == "TimedOut", firstOutcome);
     check("...and the kill is reported as unconfirmed", lingering == 1,
           "this is the branch that cannot be reached without the fault TU");
-    std::printf("  stages: spawn %lluus  wait %lluus  teardown %lluus\n", spawn, wait, teardown);
+    std::printf("  stages: spawn %lluus  wait %lluus  teardown %lluus  total %lluus\n", spawn,
+                wait, teardown, spawn + wait + teardown);
+
+    // The worst case, measured rather than reasoned about. The deadline bounds the WAIT; a kill
+    // that is never confirmed costs the whole of kKillConfirmMs on top. Two budgets that add, and
+    // the header says six seconds because of this -- one second of wait plus five of confirmation.
+    // Here the wait is 400ms, so the same arithmetic lands near five and a half.
+    constexpr unsigned long long kKillConfirmUs = 5ull * 1000 * 1000;
+    check("an unconfirmed kill really does spend the confirmation window",
+          teardown >= kKillConfirmUs - 200 * 1000,
+          std::to_string(teardown / 1000) + "ms teardown, kKillConfirmMs is 5000ms");
+    check("...so the worst case is deadline PLUS that, not the deadline",
+          spawn + wait + teardown > kKillConfirmUs,
+          std::to_string((spawn + wait + teardown) / 1000) + "ms total for a 400ms deadline");
 
     check("the next request is refused as thumb_helper_lingering",
           std::string(secondDetail) == "thumb_helper_lingering", secondDetail);
