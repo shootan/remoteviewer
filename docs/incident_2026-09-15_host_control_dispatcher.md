@@ -37,7 +37,7 @@
 - WCT 조회(15:53:43)는 해소 74초 뒤라 장애 당시 근거로 쓰지 않는다.
 
 **미확정**
-- 13:47 GPU 워치독의 원인(4K HDR·LDPlayer·캡처 동시 부하는 후보). 드라이버 모듈은 커널 덤프 없이 특정 불가.
+- 13:47 GPU 워치독의 원인(4K HDR·LDPlayer·캡처 동시 부하는 후보). **커널 미니덤프 분석(사용자 지시, 승격은 복사 1회)으로 책임 드라이버는 `amdkmdag.sys`(P2=amdkmdag+0xFA6D0, 스택 dxgmms2→dxgkrnl→amdkmdag TDR 경로)로 특정**됐다. 단 심볼 없는 모듈 단위 귀속이고, TDR 의 "책임" 은 드라이버 버그 확정이 아니며, **엔진을 멈추게 한 작업 주체(앱)는 트리아지 덤프로 알 수 없다.** 사본·산출물: `.claude/urgent-126-20260915/WATCHDOG-20260915-1347.dmp`(sha256 `912C5FDE…`), `dump-analysis.txt`, `dump-modules.txt`.
 - LDPlayer가 WM_PRINT에 응답하지 않은 이유. 13:47:47 창 7→8의 정체. LDPlayer의 정확한 종료 시각·사용자 조작 여부(답변 대기).
 - **GNLink가 GPU를 멈추게 했다는 증거는 없다**(무관 증명도 아님).
 
