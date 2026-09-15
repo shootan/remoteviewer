@@ -18,12 +18,14 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <iostream>
 #include <string>
 #include <vector>
 
+#include "host_bgra_scale.hpp"
 #include "host_thumbnail_helper.hpp"
 #include "time_utils.hpp"
 
@@ -76,15 +78,31 @@ std::wstring scratch_dir(const wchar_t* tag) {
   return dir + L"\\";
 }
 
+struct Timing {
+  uint64_t min = 0;
+  uint64_t median = 0;
+  uint64_t max = 0;
+  uint32_t samples = 0;
+};
+
+struct ProbeReport {
+  std::string outcome;
+  uint64_t elapsedUs = 0;
+  uint32_t width = 0;
+  DWORD survivors = 0;
+  Timing isolated;   // the whole helper path: spawn, capture, wait, teardown
+  Timing inProcess;  // the same capture called directly, for the difference
+};
+
 /** Run `probe.exe --probe-out <file>` in `dir` and read back what it recorded. */
-bool run_probe_in(const std::wstring& dir, uint64_t deadlineUs, std::string* outcomeOut,
-                  uint64_t* elapsedOut, uint32_t* widthOut, DWORD* helperSurvivors) {
+bool run_probe_in(const std::wstring& dir, uint64_t deadlineUs, ProbeReport* out,
+                  uint32_t samples = 0) {
   const std::wstring probe = dir + L"probe.exe";
   const std::wstring resultFile = dir + L"result.txt";
   DeleteFileW(resultFile.c_str());
 
   std::wstring cmd = L"\"" + probe + L"\" --probe-out \"" + resultFile + L"\" --deadline-us " +
-                     std::to_wstring(deadlineUs);
+                     std::to_wstring(deadlineUs) + L" --samples " + std::to_wstring(samples);
   std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
   mutableCmd.push_back(L'\0');
   STARTUPINFOW si{};
@@ -108,21 +126,38 @@ bool run_probe_in(const std::wstring& dir, uint64_t deadlineUs, std::string* out
   unsigned long long elapsed = 0;
   unsigned width = 0;
   unsigned long survivors = 0;
-  const int read = std::fscanf(f, "%63s %llu %u %lu", outcome, &elapsed, &width, &survivors);
+  unsigned long long im = 0, imed = 0, imax = 0, pm = 0, pmed = 0, pmax = 0;
+  unsigned isoN = 0, inN = 0;
+  const int read = std::fscanf(f, "%63s %llu %u %lu %llu %llu %llu %u %llu %llu %llu %u", outcome,
+                               &elapsed, &width, &survivors, &im, &imed, &imax, &isoN, &pm, &pmed,
+                               &pmax, &inN);
   std::fclose(f);
-  if (read != 4) return false;
-  *outcomeOut = outcome;
-  *elapsedOut = elapsed;
-  *widthOut = width;
-  *helperSurvivors = survivors;
+  if (read != 12) return false;
+  out->outcome = outcome;
+  out->elapsedUs = elapsed;
+  out->width = width;
+  out->survivors = survivors;
+  out->isolated = {im, imed, imax, isoN};
+  out->inProcess = {pm, pmed, pmax, inN};
   return true;
 }
 
 /** Count processes named GNLinkCapture.exe that were started from `dir`. */
 DWORD helpers_from(const std::wstring& dir);
 
+Timing summarise(std::vector<uint64_t> samples) {
+  Timing t;
+  if (samples.empty()) return t;
+  std::sort(samples.begin(), samples.end());
+  t.min = samples.front();
+  t.median = samples[samples.size() / 2];
+  t.max = samples.back();
+  t.samples = static_cast<uint32_t>(samples.size());
+  return t;
+}
+
 /** Probe mode: one real capture through the production path, result written to a file. */
-int run_probe(const std::wstring& outFile, uint64_t deadlineUs) {
+int run_probe(const std::wstring& outFile, uint64_t deadlineUs, uint32_t samples) {
   // nullptr = the whole desktop. The real helper can always satisfy that; the stalling one never
   // satisfies anything, which is the difference the two directories are for.
   const ThumbnailCaptureResult result =
@@ -130,11 +165,38 @@ int run_probe(const std::wstring& outFile, uint64_t deadlineUs) {
   // Counted after the call returns: whatever the outcome, no helper may still be running.
   const DWORD survivors = helpers_from(directory_of(self_path()));
 
+  // The comparison. Isolated is the whole path -- CreateProcessW, the mapping, the wait, the
+  // teardown -- and in-process is the same capture called the way the host used to call it. Run
+  // back to back in one process so the difference is the isolation and not the machine.
+  std::vector<uint64_t> isolated;
+  std::vector<uint64_t> inProcess;
+  for (uint32_t i = 0; i < samples; ++i) {
+    const uint64_t a = qpc_now_us();
+    const ThumbnailCaptureResult one = capture_thumbnail_isolated(nullptr, 256, 160, deadlineUs);
+    const uint64_t isoUs = qpc_now_us() - a;
+    if (one.outcome == ThumbnailOutcome::Ok) isolated.push_back(isoUs);
+
+    std::vector<uint8_t> bgra;
+    uint32_t w = 0, h = 0;
+    const uint64_t b = qpc_now_us();
+    const bool ok = remote60::native_poc::capture_window_thumbnail(nullptr, 256, 160, &bgra, &w, &h);
+    const uint64_t inUs = qpc_now_us() - b;
+    if (ok) inProcess.push_back(inUs);
+  }
+  const Timing iso = summarise(isolated);
+  const Timing in = summarise(inProcess);
+
   FILE* f = nullptr;
   if (_wfopen_s(&f, outFile.c_str(), L"w") != 0 || !f) return 2;
-  std::fprintf(f, "%s %llu %u %lu\n", name_of(result.outcome),
+  std::fprintf(f, "%s %llu %u %lu %llu %llu %llu %u %llu %llu %llu %u\n", name_of(result.outcome),
                static_cast<unsigned long long>(result.elapsedUs), result.width,
-               static_cast<unsigned long>(survivors));
+               static_cast<unsigned long>(survivors),
+               static_cast<unsigned long long>(iso.min),
+               static_cast<unsigned long long>(iso.median),
+               static_cast<unsigned long long>(iso.max), iso.samples,
+               static_cast<unsigned long long>(in.min),
+               static_cast<unsigned long long>(in.median),
+               static_cast<unsigned long long>(in.max), in.samples);
   std::fclose(f);
   return 0;
 }
@@ -206,7 +268,11 @@ int wmain(int argc, wchar_t** argv) {
     if (std::wstring(argv[i]) == L"--probe-out") outFile = argv[i + 1];
     if (std::wstring(argv[i]) == L"--deadline-us") deadlineUs = std::wcstoull(argv[i + 1], nullptr, 10);
   }
-  if (!outFile.empty()) return run_probe(outFile, deadlineUs);
+  uint32_t samples = 0;
+  for (int i = 1; i + 1 < argc; ++i) {
+    if (std::wstring(argv[i]) == L"--samples") samples = static_cast<uint32_t>(std::wcstoul(argv[i + 1], nullptr, 10));
+  }
+  if (!outFile.empty()) return run_probe(outFile, deadlineUs, samples);
 
   // --- orchestration -------------------------------------------------------
   const std::wstring me = self_path();
@@ -221,18 +287,37 @@ int wmain(int argc, wchar_t** argv) {
     check("the real GNLinkCapture could be staged beside a probe", staged,
           staged ? std::string() : "is remote60_gdi_capture_worker built?");
     if (staged) {
-      std::string outcome;
-      uint64_t elapsed = 0;
-      uint32_t width = 0;
-      DWORD survivors = 0;
-      const bool ran = run_probe_in(dir, 1000 * 1000, &outcome, &elapsed, &width, &survivors);
-      check("a capture through the real helper completes", ran && outcome == "Ok",
-            ran ? outcome : "probe did not report");
-      check("...and brings back pixels", width > 0, std::to_string(width) + "px wide");
-      check("...well inside the deadline", ran && elapsed < 1000 * 1000,
-            std::to_string(elapsed / 1000) + "ms");
-      check("...leaving no helper behind", ran && survivors == 0,
-            std::to_string(survivors) + " still running");
+      ProbeReport r;
+      const bool ran = run_probe_in(dir, 1000 * 1000, &r, 10);
+      check("a capture through the real helper completes", ran && r.outcome == "Ok",
+            ran ? r.outcome : "probe did not report");
+      check("...and brings back pixels", r.width > 0, std::to_string(r.width) + "px wide");
+      check("...well inside the deadline", ran && r.elapsedUs < 1000 * 1000,
+            std::to_string(r.elapsedUs / 1000) + "ms");
+      check("...leaving no helper behind", ran && r.survivors == 0,
+            std::to_string(r.survivors) + " still running");
+
+      // What isolation costs, measured beside what it replaced.
+      if (ran && r.isolated.samples > 0 && r.inProcess.samples > 0) {
+        std::printf("  isolated    n=%u  min=%lluus  median=%lluus  max=%lluus\n",
+                    r.isolated.samples, (unsigned long long)r.isolated.min,
+                    (unsigned long long)r.isolated.median, (unsigned long long)r.isolated.max);
+        std::printf("  in-process  n=%u  min=%lluus  median=%lluus  max=%lluus\n",
+                    r.inProcess.samples, (unsigned long long)r.inProcess.min,
+                    (unsigned long long)r.inProcess.median, (unsigned long long)r.inProcess.max);
+        const uint64_t overhead = r.isolated.median > r.inProcess.median
+                                      ? r.isolated.median - r.inProcess.median
+                                      : 0;
+        std::printf("  isolation overhead (median): %lluus\n", (unsigned long long)overhead);
+        check("the isolated path stays far inside the one second deadline",
+              r.isolated.max < 1000 * 1000 / 2,
+              std::to_string(r.isolated.max / 1000) + "ms worst of " +
+                  std::to_string(r.isolated.samples));
+        check("...and isolation costs less than the deadline it buys", overhead < 1000 * 1000,
+              std::to_string(overhead / 1000) + "ms median overhead");
+      } else {
+        check("the timing comparison produced samples", false);
+      }
     }
     remove_dir(dir);
   }
@@ -245,24 +330,21 @@ int wmain(int argc, wchar_t** argv) {
                         copy_file(me, dir + L"GNLinkCapture.exe");
     check("a stalling helper could be staged", staged);
     if (staged) {
-      std::string outcome;
-      uint64_t elapsed = 0;
-      uint32_t width = 0;
-      DWORD survivors = 0;
+      ProbeReport r;
       const uint64_t deadline = 400 * 1000;
       const uint64_t before = qpc_now_us();
-      const bool ran = run_probe_in(dir, deadline, &outcome, &elapsed, &width, &survivors);
+      const bool ran = run_probe_in(dir, deadline, &r);
       const uint64_t wall = qpc_now_us() - before;
 
       check("a helper that never answers is reported as TimedOut",
-            ran && outcome == "TimedOut", ran ? outcome : "probe did not report");
+            ran && r.outcome == "TimedOut", ran ? r.outcome : "probe did not report");
       check("...at the deadline, not after the helper's two minute sleep",
-            ran && elapsed < deadline * 4,
-            std::to_string(elapsed / 1000) + "ms against a " + std::to_string(deadline / 1000) +
+            ran && r.elapsedUs < deadline * 4,
+            std::to_string(r.elapsedUs / 1000) + "ms against a " + std::to_string(deadline / 1000) +
                 "ms deadline");
-      check("...and no pixels are claimed", width == 0, std::to_string(width));
-      check("...and the stalled helper is gone afterwards", ran && survivors == 0,
-            std::to_string(survivors) + " still running");
+      check("...and no pixels are claimed", r.width == 0, std::to_string(r.width));
+      check("...and the stalled helper is gone afterwards", ran && r.survivors == 0,
+            std::to_string(r.survivors) + " still running");
       check("...so the whole call cost the caller seconds, not minutes", wall < 30ull * 1000 * 1000,
             std::to_string(wall / 1000) + "ms end to end");
     }
@@ -275,15 +357,12 @@ int wmain(int argc, wchar_t** argv) {
     const bool staged = copy_file(me, dir + L"probe.exe");
     check("a probe with no helper beside it could be staged", staged);
     if (staged) {
-      std::string outcome;
-      uint64_t elapsed = 0;
-      uint32_t width = 0;
-      DWORD survivors = 0;
-      const bool ran = run_probe_in(dir, 1000 * 1000, &outcome, &elapsed, &width, &survivors);
-      check("a missing helper is a failure, not a wait", ran && outcome == "Failed",
-            ran ? outcome : "probe did not report");
-      check("...reported immediately", ran && elapsed < 1000 * 1000,
-            std::to_string(elapsed / 1000) + "ms");
+      ProbeReport r;
+      const bool ran = run_probe_in(dir, 1000 * 1000, &r);
+      check("a missing helper is a failure, not a wait", ran && r.outcome == "Failed",
+            ran ? r.outcome : "probe did not report");
+      check("...reported immediately", ran && r.elapsedUs < 1000 * 1000,
+            std::to_string(r.elapsedUs / 1000) + "ms");
     }
     remove_dir(dir);
   }

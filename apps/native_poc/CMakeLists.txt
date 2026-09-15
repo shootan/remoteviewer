@@ -615,8 +615,13 @@ endif()
 add_executable(remote60_thumbnail_helper_e2e_test
   src/thumbnail_helper_e2e_test.cpp
   src/host_thumbnail_helper.cpp
+  # Also calls capture_window_thumbnail directly, so the isolated path can be timed against the
+  # in-process one it replaced in the same run rather than against another machine's numbers.
+  src/host_bgra_scale.cpp
+  src/host_args.cpp
 )
 target_include_directories(remote60_thumbnail_helper_e2e_test PRIVATE src)
+target_link_libraries(remote60_thumbnail_helper_e2e_test PRIVATE common)
 if(MSVC)
   target_compile_options(remote60_thumbnail_helper_e2e_test PRIVATE /utf-8)
 endif()

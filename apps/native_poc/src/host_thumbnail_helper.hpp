@@ -39,7 +39,16 @@ namespace remote60::native_poc {
 // have arrived, and on a machine under load a snug deadline would start skipping healthy windows.
 // The budget is what keeps a genuinely stuck window from charging this every time.
 //
-// Not measured: real application windows, which the isolation test is forbidden from probing.
+// The isolated path costs about twice the capture, measured the same way: 72ms median and 107ms
+// worst for the whole thing -- CreateProcessW, the mapping, the wait, the teardown -- against 34ms
+// median for the same capture called directly. Roughly 39ms of that is the isolation itself. Still
+// about a tenth of the deadline at its worst.
+//
+// Not measured, and worth stating rather than glossing: real application windows. UWP cannot be
+// created by the test at all, and pointing the probe at the user's running windows is out of
+// scope. A window backed by a large GPU surface could cost more than anything measured here --
+// what was tried tops out at a 1920x1080 flip-model swapchain, which cost the same as plain GDI
+// at that size.
 constexpr uint64_t kThumbnailDeadlineUs = 1000ull * 1000;
 
 struct ThumbnailCaptureResult {
