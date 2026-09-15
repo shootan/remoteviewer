@@ -93,6 +93,11 @@ struct ProbeReport {
   uint64_t elapsedUs = 0;
   uint32_t width = 0;
   DWORD survivors = 0;
+  // The three budgets, kept apart. Totals hide which one was spent.
+  uint64_t spawnUs = 0;
+  uint64_t waitUs = 0;
+  uint64_t teardownUs = 0;
+  int lingering = 0;
   Timing isolated;   // the whole helper path: spawn, capture, wait, teardown
   Timing inProcess;  // the same capture called directly, for the difference
 };
@@ -131,11 +136,18 @@ bool run_probe_in(const std::wstring& dir, uint64_t deadlineUs, ProbeReport* out
   unsigned long survivors = 0;
   unsigned long long im = 0, imed = 0, imax = 0, pm = 0, pmed = 0, pmax = 0;
   unsigned isoN = 0, inN = 0;
-  const int read = std::fscanf(f, "%63s %llu %u %lu %llu %llu %llu %u %llu %llu %llu %u", outcome,
-                               &elapsed, &width, &survivors, &im, &imed, &imax, &isoN, &pm, &pmed,
-                               &pmax, &inN);
+  unsigned long long spawn = 0, wait = 0, teardown = 0;
+  int lingering = 0;
+  const int read = std::fscanf(
+      f, "%63s %llu %u %lu %llu %llu %llu %u %llu %llu %llu %u %llu %llu %llu %d", outcome,
+      &elapsed, &width, &survivors, &im, &imed, &imax, &isoN, &pm, &pmed, &pmax, &inN, &spawn,
+      &wait, &teardown, &lingering);
   std::fclose(f);
-  if (read != 12) return false;
+  if (read != 16) return false;
+  out->spawnUs = spawn;
+  out->waitUs = wait;
+  out->teardownUs = teardown;
+  out->lingering = lingering;
   out->outcome = outcome;
   out->elapsedUs = elapsed;
   out->width = width;
@@ -276,7 +288,8 @@ int run_probe(const std::wstring& outFile, uint64_t deadlineUs, uint32_t samples
 
   FILE* f = nullptr;
   if (_wfopen_s(&f, outFile.c_str(), L"w") != 0 || !f) return 2;
-  std::fprintf(f, "%s %llu %u %lu %llu %llu %llu %u %llu %llu %llu %u\n", name_of(result.outcome),
+  std::fprintf(f, "%s %llu %u %lu %llu %llu %llu %u %llu %llu %llu %u %llu %llu %llu %d\n",
+               name_of(result.outcome),
                static_cast<unsigned long long>(result.elapsedUs), result.width,
                static_cast<unsigned long>(survivors),
                static_cast<unsigned long long>(iso.min),
@@ -284,7 +297,11 @@ int run_probe(const std::wstring& outFile, uint64_t deadlineUs, uint32_t samples
                static_cast<unsigned long long>(iso.max), iso.samples,
                static_cast<unsigned long long>(in.min),
                static_cast<unsigned long long>(in.median),
-               static_cast<unsigned long long>(in.max), in.samples);
+               static_cast<unsigned long long>(in.max), in.samples,
+               static_cast<unsigned long long>(result.spawnUs),
+               static_cast<unsigned long long>(result.waitUs),
+               static_cast<unsigned long long>(result.teardownUs),
+               result.helperLingering ? 1 : 0);
   std::fclose(f);
   return 0;
 }
@@ -407,6 +424,11 @@ int wmain(int argc, wchar_t** argv) {
         std::printf("  in-process  n=%u  min=%lluus  median=%lluus  max=%lluus\n",
                     r.inProcess.samples, (unsigned long long)r.inProcess.min,
                     (unsigned long long)r.inProcess.median, (unsigned long long)r.inProcess.max);
+        std::printf("  stages (one Ok call): spawn %lluus  wait %lluus  teardown %lluus"
+                    "  total %lluus%s\n",
+                    (unsigned long long)r.spawnUs, (unsigned long long)r.waitUs,
+                    (unsigned long long)r.teardownUs, (unsigned long long)r.elapsedUs,
+                    r.lingering ? "  [helper LINGERING]" : "");
         const uint64_t overhead = r.isolated.median > r.inProcess.median
                                       ? r.isolated.median - r.inProcess.median
                                       : 0;
@@ -447,6 +469,22 @@ int wmain(int argc, wchar_t** argv) {
       check("...and no pixels are claimed", r.width == 0, std::to_string(r.width));
       check("...and the stalled helper is gone afterwards", ran && r.survivors == 0,
             std::to_string(r.survivors) + " still running");
+
+      // The point of the split: on this path the deadline is the wait, and the teardown is a
+      // separate budget on top of it. A single total cannot tell those apart, and the worst case
+      // for the pair is not one second.
+      std::printf("  stages (one TimedOut call): spawn %lluus  wait %lluus  teardown %lluus"
+                  "  total %lluus%s\n",
+                  (unsigned long long)r.spawnUs, (unsigned long long)r.waitUs,
+                  (unsigned long long)r.teardownUs, (unsigned long long)r.elapsedUs,
+                  r.lingering ? "  [helper LINGERING]" : "");
+      check("the wait is what the deadline bounded, not the whole call",
+            ran && r.waitUs <= deadline + 100 * 1000,
+            std::to_string(r.waitUs / 1000) + "ms wait of a " + std::to_string(deadline / 1000) +
+                "ms deadline");
+      check("...and the teardown is a budget of its own, reported separately",
+            ran && r.teardownUs < 5ull * 1000 * 1000,
+            std::to_string(r.teardownUs / 1000) + "ms teardown, kKillConfirmMs is 5000ms");
       check("...so the whole call cost the caller seconds, not minutes", wall < 30ull * 1000 * 1000,
             std::to_string(wall / 1000) + "ms end to end");
 
