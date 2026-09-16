@@ -33,6 +33,11 @@
 
 namespace remote60::native_poc {
 
+// The host clipboard, owned by main() and shared with the control sessions (clipboard text sync,
+// K1). A pointer, and it may be null: when clipboard sync is disabled the server never advertises
+// the capability and never touches it.
+class HostClipboardHub;
+
 // Window-selection handshake between the control thread (which receives ControlWindowSelect) and
 // the main loop (which owns the capture item and performs the switch). The control thread posts
 // the request and waits on cv for the main loop to fill in the response fields.
@@ -56,7 +61,7 @@ class ControlSessionServer {
                        CaptureState& capture, ClientMetricsSnapshot& clientMetrics,
                        EncoderState& encoder, InputRouterState& inputRouter,
                        DesktopBackendState& backend, WindowSelectionTxn& windowSelectionTxn,
-                       MainLoopMailbox& mailbox);
+                       MainLoopMailbox& mailbox, HostClipboardHub* clipboard);
 
   // Serve one control conversation until the link dies or the host stops.
   void Serve(ControlLink& link);
@@ -73,6 +78,7 @@ class ControlSessionServer {
   DesktopBackendState& backend;
   WindowSelectionTxn& windowSelectionTxn;
   MainLoopMailbox& mailbox;
+  HostClipboardHub* clipboard;  // clipboard text sync (K1); null when disabled
 };
 
 }  // namespace remote60::native_poc

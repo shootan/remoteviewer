@@ -72,6 +72,61 @@ int ControlClient::fetch_one_thumbnail(remote60::native_poc::ControlLink& link) 
   return 1;
 }
 
+int ControlClient::pump_clipboard_sync(remote60::native_poc::ControlLink& link) {
+  auto& clip = ctx.control.clipboard;
+  if (!clip.enabled.load(std::memory_order_relaxed) ||
+      !clip.hostSupports.load(std::memory_order_relaxed)) {
+    return 0;
+  }
+  // (a) A local clipboard change the UI thread left pending goes first -- the user copying on the
+  // viewer expecting to paste on the host is the interactive case, so it should not wait behind the
+  // poll.
+  std::wstring outText;
+  uint64_t outHash = 0;
+  uint32_t seq = 0;
+  bool haveOutbound = false;
+  {
+    std::lock_guard<std::mutex> lock(clip.mu);
+    if (clip.hasPending) {
+      outText = std::move(clip.pendingText);
+      outHash = clip.pendingHash;
+      seq = ++clip.nextSeq;
+      clip.hasPending = false;
+      clip.pendingText.clear();
+      haveOutbound = true;
+    }
+  }
+  if (haveOutbound) {
+    if (!remote60::native_poc::send_clipboard_update(link, seq, outText, outHash, qpc_now_us())) {
+      return -1;
+    }
+    return 1;
+  }
+  // (b) Otherwise poll the host for a change, on an interval -- the host cannot push, so this is the
+  // only way host -> viewer text arrives.
+  const uint64_t nowUs = qpc_now_us();
+  if (clip.lastPollUs != 0 && nowUs - clip.lastPollUs < kClipboardPollIntervalUs) return 0;
+  clip.lastPollUs = nowUs;
+  remote60::native_poc::ClipboardPollReply reply;
+  if (!remote60::native_poc::poll_clipboard(link, clip.knownGeneration, nowUs, &reply)) return -1;
+  clip.knownGeneration = reply.generation;
+  if (reply.hasData) {
+    bool apply = false;
+    {
+      std::lock_guard<std::mutex> lock(clip.mu);
+      apply = clip.core.OnRemoteData(reply.text, reply.hash) ==
+              remote60::native_poc::ClipboardRemoteDecision::Apply;
+    }
+    // Apply on the UI thread, which owns the clipboard listener window. The core already recorded
+    // this as applied, so the change notification the write provokes is dropped as an echo.
+    if (apply && ctx.session.hwnd) {
+      PostMessageW(ctx.session.hwnd, kMsgApplyClipboard, 0,
+                   reinterpret_cast<LPARAM>(new std::wstring(std::move(reply.text))));
+    }
+  }
+  return 1;
+}
+
 void ControlClient::handle_pong(const ControlOutboundAction& action, const ControlPongMessage& pong) {
   const uint64_t doneUs = qpc_now_us();
   ctx.control.scheduler.OnPingCompleted(doneUs);
@@ -111,6 +166,11 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
                            : "  (picture resumes)")
                 << std::endl;
     }
+    // Clipboard text sync (K1): whether this host understands the clipboard messages. Set every
+    // pong (cheap, and a reconnect to a different host must not carry the old answer forward).
+    ctx.control.clipboard.hostSupports.store(
+        (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagClipboardTextV1) != 0,
+        std::memory_order_relaxed);
   }
   const uint64_t rttUs =
       (doneUs >= action.ping.clientSendQpcUs) ? (doneUs - action.ping.clientSendQpcUs) : 0;
@@ -474,6 +534,12 @@ void ControlClient::Run() {
       if (versionExchangeFailed) break;  // A failed framed exchange cannot safely reuse the stream.
     }
 
+    // Clipboard sync runs whether or not the picker is up (unlike previews), so it comes first.
+    if (!didWork) {
+      const int synced = pump_clipboard_sync(*controlLink);
+      if (synced < 0) break;
+      didWork = (synced > 0);
+    }
     if (!didWork && ctx.picker.visible.load(std::memory_order_relaxed)) {
       const int fetched = fetch_one_thumbnail(*controlLink);
       if (fetched < 0) break;

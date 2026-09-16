@@ -7,6 +7,7 @@
 
 #include <set>
 
+#include "clipboard_win32.hpp"
 #include "viewer_common.hpp"
 #include "viewer_cursor_overlay.hpp"
 #include "viewer_gdi_util.hpp"
@@ -271,12 +272,43 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       DestroyWindow(hwnd);
       return 0;
     case WM_DESTROY:
+      RemoveClipboardFormatListener(hwnd);  // stop hearing clipboard changes (K1)
       release_all_physical(ctx);  // nothing should stay held on the host
       restore_local_ime(hwnd);  // re-attach the IME we detached for host-side IME mode
       remote60::native_poc::session_toolbar_destroy();
       destroy_cached_gdi_objects(ctx);
       PostQuitMessage(0);
       return 0;
+    case WM_CLIPBOARDUPDATE: {
+      // Clipboard text sync (K1): the local clipboard changed. Read it and, if it is worth sending
+      // (not empty, not oversize, and not the echo of something we just applied from the host),
+      // leave it pending for the control thread to send. Reading and the core update stay on this
+      // thread; the network I/O does not.
+      auto& clip = ctx.control.clipboard;
+      if (clip.enabled.load(std::memory_order_relaxed) &&
+          clip.hostSupports.load(std::memory_order_relaxed)) {
+        std::wstring text;
+        if (remote60::native_poc::clipboard_read_unicode_text(hwnd, &text)) {
+          uint64_t hash = 0;
+          std::lock_guard<std::mutex> lock(clip.mu);
+          if (clip.core.OnLocalChange(text, &hash) ==
+              remote60::native_poc::ClipboardLocalDecision::Send) {
+            clip.pendingText = text;
+            clip.pendingHash = hash;
+            clip.hasPending = true;
+          }
+        }
+      }
+      return 0;
+    }
+    case kMsgApplyClipboard: {
+      // The control thread handed us the host's clipboard text (heap-allocated) to put on the OS
+      // clipboard. The core already recorded it as applied, so the WM_CLIPBOARDUPDATE this write
+      // provokes is recognised as an echo and not sent back.
+      std::unique_ptr<std::wstring> text(reinterpret_cast<std::wstring*>(lp));
+      if (text) (void)remote60::native_poc::clipboard_set_unicode_text(hwnd, *text);
+      return 0;
+    }
     case kMsgApplyWindowList: {
       // Ownership of the copy arrives with the message (F-07). A message still queued when the
       // window dies is one small leak at exit, which is cheaper than a drain protocol.
@@ -704,6 +736,10 @@ bool create_window(ViewerState& ctx) {
                           static_cast<int>(ctx.session.windowW), static_cast<int>(ctx.session.windowH),
                           nullptr, nullptr, inst, &ctx);  // lpParam: WndProc pins it at WM_NCCREATE
   if (!ctx.session.hwnd) return false;
+  // Clipboard text sync (K1): hear local clipboard changes on this window's message queue. Fires
+  // only on future changes, never on the current contents, so connecting does not sweep whatever is
+  // already on the clipboard to the host.
+  AddClipboardFormatListener(ctx.session.hwnd);
   ensure_ui_font(ctx, ctx.session.hwnd);
   // The process is per-monitor DPI aware, so the requested size is physical pixels; rescale
   // to keep the intended logical size on scaled displays.

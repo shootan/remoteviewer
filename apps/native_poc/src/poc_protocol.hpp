@@ -52,6 +52,13 @@ enum class MessageType : uint16_t {
   // Sent only after kCaptureFlagPeerVersion is advertised in a regular Pong.
   ControlVersionRequest = 49,
   ControlVersionResponse = 50,
+  // Clipboard text sync v1 (K1). Additive: a peer only sends these once the other advertised
+  // kCaptureFlagClipboardTextV1, so an old peer never receives one -- it would mis-drain the
+  // variable-length UTF-16 payload (its Serve loop discards only header.size - sizeof(header))
+  // and desync the stream. CF_UNICODETEXT only; images and files are a later feature (K2).
+  ControlClipboardUpdate = 51,   // client -> host: the client's clipboard changed (payload follows)
+  ControlClipboardRequest = 52,  // client -> host: poll for a clipboard newer than knownGeneration
+  ControlClipboardData = 53,     // host -> client: reply to Request (payload follows when bit0 set)
 };
 
 enum class UdpPacketKind : uint16_t {
@@ -91,6 +98,11 @@ enum class UdpCodec : uint16_t {
 
 constexpr uint32_t kControlWindowListMaxEntries = 64;
 constexpr uint32_t kControlInputTextMaxUtf16 = 64;
+// Clipboard text sync v1 (K1): the largest clipboard the sync carries, in UTF-16 code units.
+// 512Ki units = 1 MiB on the wire, well under the UDP control channel's 8 MiB message cap. A
+// larger local clipboard is skipped (and logged); it is not truncated, because half a paste is
+// worse than none. The host also bounds what it reads by this so a malformed count cannot allocate.
+constexpr uint32_t kClipboardTextMaxUtf16 = 512u * 1024u;
 
 // Window preview thumbnails. There is no version handshake on the control channel, so a peer
 // that predates these messages must never be sent one: unknown opcodes are drained without a
@@ -196,6 +208,10 @@ constexpr uint32_t kCaptureFlagFrameHeartbeat = 0x80u;
 constexpr uint32_t kCaptureFlagPeerVersion = 0x40u;
 static_assert((kCaptureFlagFrameHeartbeat & kCaptureFlagPeerVersion) == 0,
               "heartbeat and peer version capabilities must remain independent on the wire");
+// Clipboard text sync v1 (K1): the host understands ControlClipboardUpdate/Request/Data and runs a
+// clipboard monitor. A viewer only sends clipboard messages once it sees this bit, so an old host
+// that never advertises it is never sent one (its Serve loop would mis-drain the variable payload).
+constexpr uint32_t kCaptureFlagClipboardTextV1 = 0x100u;
 
 struct ControlVersionMessage {
   MessageHeader header{};
@@ -251,6 +267,45 @@ struct ControlInputTextMessage {
   uint16_t utf16[kControlInputTextMaxUtf16] = {};
   uint64_t clientSendQpcUs = 0;
 };
+
+// Clipboard text sync v1 (K1). Three variable-length messages; like the thumbnail family, the
+// header.size describes only this FIXED part and utf16Count UTF-16 code units follow it on the
+// wire (little-endian, matching the struct layout). The fixed part is small and constant, so
+// header.size stays valid for old peers even though the true message is longer -- which is exactly
+// why these are gated on kCaptureFlagClipboardTextV1 and never sent to a peer that lacks it.
+//
+// contentHash is the sync's echo guard: a peer never re-sends or re-applies content whose hash it
+// last set locally or last applied from the peer, so a change cannot bounce back and forth.
+struct ControlClipboardUpdateMessage {
+  MessageHeader header{};      // size = sizeof(*this); utf16Count units follow
+  uint32_t seq = 0;
+  uint32_t utf16Count = 0;     // UTF-16 code units of clipboard text that follow this struct
+  uint64_t contentHash = 0;    // FNV-1a of the text; echo/duplicate suppression
+  uint64_t clientSendQpcUs = 0;
+};
+
+struct ControlClipboardRequestMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t reserved = 0;
+  uint64_t knownGeneration = 0;  // the host clipboard generation the client already holds
+  uint64_t clientSendQpcUs = 0;
+};
+
+// Reply to ControlClipboardRequest. flags bit0 (has-data) set means utf16Count units follow this
+// struct; clear means the client is already current and nothing follows. generation is always the
+// host's current clipboard generation so the client can advance knownGeneration either way.
+struct ControlClipboardDataHeader {
+  MessageHeader header{};      // size = sizeof(*this); utf16Count units follow when bit0 set
+  uint32_t seq = 0;
+  uint32_t flags = 0;          // bit0: has data
+  uint64_t generation = 0;     // host clipboard generation this reply describes
+  uint32_t utf16Count = 0;     // UTF-16 code units following this struct (0 when bit0 clear)
+  uint32_t reserved = 0;
+  uint64_t contentHash = 0;    // FNV-1a of the text (0 when bit0 clear)
+  uint64_t hostSendQpcUs = 0;
+};
+constexpr uint32_t kClipboardDataFlagHasData = 0x1u;
 
 struct ControlStreamStateMessage {
   MessageHeader header{};

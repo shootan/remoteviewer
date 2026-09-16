@@ -45,6 +45,10 @@ class ControlClient {
   // the capability, because an older host would drain the request and never reply.
   // Returns: 1 fetched, 0 nothing to do, -1 socket failure (stream desynced).
   int fetch_one_thumbnail(remote60::native_poc::ControlLink& link);
+  // Clipboard text sync (K1): send a pending local clipboard change, else poll the host for one on
+  // an interval. Runs on the same idle turns as the thumbnail fetch, and only when the host
+  // advertised the capability. Returns: 1 did work, 0 nothing to do, -1 link failure (drop session).
+  int pump_clipboard_sync(remote60::native_poc::ControlLink& link);
   // the reply switch of Run(), one member per reply kind (verbatim case bodies)
   void handle_pong(const ControlOutboundAction& action, const ControlPongMessage& pong);
   void handle_window_list(const ControlWindowListMessage& windowList);

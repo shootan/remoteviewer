@@ -22,6 +22,7 @@ namespace remote60::native_poc {
 struct SessionToolbarCallbacks {
   std::function<void()> onTargets;  // back to the capture-target picker
   std::function<void()> onMacro;    // show/hide the macro window
+  std::function<void()> onClipboard;  // toggle clipboard text sync on/off (K1)
   std::function<void(uint32_t monitorId)> onMonitor;
   /**
    * Where this window says what it did with a click.
@@ -47,6 +48,7 @@ struct SessionToolbarState {
   bool connected = false;
   bool inputOn = false;
   bool macroOpen = false;
+  bool clipboardOn = false;  // clipboard text sync toggle (K1); the button shows it as active
   bool relay = false;  // the billed path, so it is worth saying out loud
   /**
    * False until something has decided `relay`.

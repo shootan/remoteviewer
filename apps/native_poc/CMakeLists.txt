@@ -69,6 +69,7 @@ add_executable(remote60_native_video_host_poc
   src/host_input_inject.cpp
   src/host_args.cpp
   src/host_control_session.cpp
+  src/clipboard_monitor.cpp
   src/host_thumbnail_helper.cpp
   src/host_thumbnail_kill.cpp
   src/host_unlock_relay.cpp
@@ -1584,6 +1585,43 @@ target_include_directories(remote60_session_toolbar_click_test PRIVATE src)
 target_link_libraries(remote60_session_toolbar_click_test PRIVATE user32 gdi32 shell32)
 if(MSVC)
   target_compile_options(remote60_session_toolbar_click_test PRIVATE /utf-8)
+endif()
+
+# Clipboard text sync core (K1): the wire codec and the echo-loop state machine, with no Win32,
+# no session and no sockets. /utf-8 because the round-trip cases include Korean and an emoji.
+add_executable(remote60_clipboard_sync_core_test
+  src/clipboard_sync_core_test.cpp
+)
+target_include_directories(remote60_clipboard_sync_core_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_clipboard_sync_core_test PRIVATE /utf-8)
+endif()
+
+# Clipboard monitor / hub against the REAL session clipboard (K1). SKIP by default -- it writes and
+# reads the actual clipboard -- and gated behind REMOTE60_ALLOW_CLIPBOARD_TEST=1, snapshotting and
+# restoring the text. It links the same clipboard_monitor.cpp the host does.
+add_executable(remote60_clipboard_monitor_test
+  src/clipboard_monitor_test.cpp
+  src/clipboard_monitor.cpp
+)
+target_include_directories(remote60_clipboard_monitor_test PRIVATE src)
+target_link_libraries(remote60_clipboard_monitor_test PRIVATE user32)
+if(MSVC)
+  target_compile_options(remote60_clipboard_monitor_test PRIVATE /utf-8)
+endif()
+
+# Clipboard wire round-trip (K1): the client send/poll helpers over a ControlLink, against a mock
+# host that parses and replies as the real Serve loop does. No sockets, no OS clipboard. It links
+# the real client wire helpers (native_video_client_tcp_control.cpp) and the ControlLink.
+add_executable(remote60_clipboard_wire_test
+  src/clipboard_wire_test.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+)
+target_include_directories(remote60_clipboard_wire_test PRIVATE src)
+target_link_libraries(remote60_clipboard_wire_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_clipboard_wire_test PRIVATE /utf-8)
 endif()
 
 add_executable(remote60_client_shell_bridge_test

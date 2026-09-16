@@ -88,6 +88,14 @@ constexpr UINT kMsgApplyWindowList = WM_APP + 11;
 // the host-authoritative open state for ACTIVATE (0 EN, 1 KR, 2 unknown/?). (Codex Edge 4.)
 constexpr UINT kMsgHostImeActivate = WM_APP + 12;
 constexpr UINT kMsgHostImeDeactivate = WM_APP + 13;
+// Clipboard text sync (K1): the control thread posts this so the host's clipboard text is written
+// to the OS clipboard on the window's own thread (all clipboard ops belong on the thread that owns
+// the listener window). lParam is a heap std::wstring the handler owns and frees.
+constexpr UINT kMsgApplyClipboard = WM_APP + 14;
+// How often the viewer polls the host for a clipboard change. The host cannot push -- control is
+// strict request/response -- so the viewer asks on this interval; 700ms is unnoticeable for a paste
+// and negligible traffic (a ~28-byte request and a ~48-byte reply).
+constexpr uint64_t kClipboardPollIntervalUs = 700000;
 
 constexpr uint64_t kThumbRefreshUs = 5000000;  // refresh a preview after 5 s
 // How long to leave a window alone after its preview did not come back. Deliberately the host's

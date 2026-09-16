@@ -30,6 +30,8 @@
 #include "host_capture_device.hpp"
 #include "host_control_session.hpp"
 
+#include "clipboard_monitor.hpp"
+#include "clipboard_sync.hpp"
 #include "host_thumbnail_budget.hpp"
 #include "host_thumbnail_helper.hpp"
 #include "host_input_inject.hpp"
@@ -59,7 +61,7 @@ ControlSessionServer::ControlSessionServer(const Args& args, std::atomic<bool>& 
                                            ClientMetricsSnapshot& clientMetrics, EncoderState& encoder,
                                            InputRouterState& inputRouter, DesktopBackendState& backend,
                                            WindowSelectionTxn& windowSelectionTxn,
-                                           MainLoopMailbox& mailbox)
+                                           MainLoopMailbox& mailbox, HostClipboardHub* clipboard)
     : args(args),
       stop(stop),
       clientSession(clientSession),
@@ -69,7 +71,8 @@ ControlSessionServer::ControlSessionServer(const Args& args, std::atomic<bool>& 
       inputRouter(inputRouter),
       backend(backend),
       windowSelectionTxn(windowSelectionTxn),
-      mailbox(mailbox) {}
+      mailbox(mailbox),
+      clipboard(clipboard) {}
 
 void ControlSessionServer::Serve(ControlLink& link) {
   // Which session this conversation belongs to. Checked again at the bottom before touching any
@@ -352,6 +355,10 @@ void ControlSessionServer::Serve(ControlLink& link) {
       if (capture.frameHeartbeatEnabled.load())
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagFrameHeartbeat;
       pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPeerVersion;
+      // Clipboard text sync (K1): advertised only when the hub is running, so a viewer never sends
+      // clipboard messages this host cannot handle. An old host never sets this and is never sent one.
+      if (clipboard && clipboard->enabled())
+        pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagClipboardTextV1;
       pong.captureRebindCount = target.rebindCount;
       pong.captureTargetHwnd = target.targetHwnd;
       std::snprintf(pong.captureTargetProcess, sizeof(pong.captureTargetProcess), "%s",
@@ -1059,6 +1066,52 @@ void ControlSessionServer::Serve(ControlLink& link) {
                   << " yPermille=" << req.yPermille
                   << "\n";
       }
+      continue;
+    }
+
+    // Clipboard text sync (K1). Only reached on a host that advertised kCaptureFlagClipboardTextV1,
+    // because that is the only thing that makes a viewer send these. The payload is variable length,
+    // so the fixed part is read first and the utf16Count units after -- bounded, so a bad count
+    // cannot allocate.
+    if (type == MessageType::ControlClipboardUpdate &&
+        header.size == sizeof(ControlClipboardUpdateMessage)) {
+      ControlClipboardUpdateMessage upd{};
+      upd.header = header;
+      if (!link.Read(&upd.seq, sizeof(upd) - sizeof(MessageHeader))) break;
+      const size_t payloadBytes = static_cast<size_t>(upd.utf16Count) * sizeof(uint16_t);
+      if (upd.utf16Count > remote60::native_poc::kClipboardTextMaxUtf16) {
+        // A legit viewer skips oversize itself; this is the defensive path. Drain and skip.
+        if (payloadBytes > 0 && !link.Discard(payloadBytes)) break;
+        std::cout << "[native-video-host][clipboard] update seq=" << upd.seq
+                  << " skipped utf16Count=" << upd.utf16Count << " (over cap)\n";
+        send_input_ack(upd.seq);
+        continue;
+      }
+      std::vector<uint8_t> payload(payloadBytes);
+      if (payloadBytes > 0 && !link.Read(payload.data(), payloadBytes)) break;
+      std::wstring text;
+      if (remote60::native_poc::clipboard_parse_payload(payload.data(), payload.size(),
+                                                        upd.utf16Count, &text) &&
+          clipboard) {
+        clipboard->ApplyRemote(text, upd.contentHash);
+      }
+      std::cout << "[native-video-host][clipboard] update applied seq=" << upd.seq
+                << " utf16Count=" << upd.utf16Count << "\n";
+      send_input_ack(upd.seq);
+      continue;
+    }
+
+    if (type == MessageType::ControlClipboardRequest &&
+        header.size == sizeof(ControlClipboardRequestMessage)) {
+      ControlClipboardRequestMessage req{};
+      req.header = header;
+      if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+      HostClipboardHub::Snapshot snap;
+      if (clipboard) snap = clipboard->Get();
+      const bool hasData = snap.generation > req.knownGeneration && !snap.text.empty();
+      const std::vector<uint8_t> reply = remote60::native_poc::build_clipboard_data(
+          req.seq, snap.generation, hasData, snap.text, snap.hash, qpc_now_us());
+      if (!link.Write(reply.data(), reply.size())) break;
       continue;
     }
 

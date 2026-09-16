@@ -24,8 +24,30 @@
 
 #include "viewer_common.hpp"
 #include "viewer_constants.hpp"
+#include "clipboard_sync.hpp"
 
 namespace remote60::native_poc::viewer {
+
+// Clipboard text sync (K1). The UI thread hears local clipboard changes (WM_CLIPBOARDUPDATE) and
+// leaves the ones worth sending as a pending outbound; the control thread drains that pending item,
+// sends it, and polls the host for changes the other way. `enabled` is the viewer's on/off toggle
+// (default on); `hostSupports` is set from the pong capability bit. The core and the pending item
+// are guarded by `mu` because the UI thread produces and the control thread consumes.
+struct ClipboardSyncState {
+  std::atomic<bool> enabled{true};        // the toolbar toggle; off means no send and no poll
+  std::atomic<bool> hostSupports{false};  // host advertised kCaptureFlagClipboardTextV1 (pong)
+
+  std::mutex mu;
+  remote60::native_poc::ClipboardSyncCore core;  // echo/duplicate suppression, both directions
+  bool hasPending = false;                // a local change waiting for the control thread to send
+  std::wstring pendingText;
+  uint64_t pendingHash = 0;
+  uint32_t nextSeq = 0;
+
+  // control thread only:
+  uint64_t knownGeneration = 0;  // the host clipboard generation last seen
+  uint64_t lastPollUs = 0;       // when the host was last polled
+};
 
 struct ControlChannelState {
   // control thread only.
@@ -61,6 +83,8 @@ struct ControlChannelState {
   std::atomic<bool> connected{false};
   // control thread only: say the secure-desktop transition once (was a function static). reset: never (F-14).
   std::atomic<bool> reportedSecure{false};
+  // Clipboard text sync (K1): UI thread produces local changes, control thread sends + polls.
+  ClipboardSyncState clipboard;
 };
 
 }  // namespace remote60::native_poc::viewer

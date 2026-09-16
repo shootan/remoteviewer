@@ -61,6 +61,26 @@ struct WindowThumbnailReply {
 bool fetch_window_thumbnail(ControlLink& link, uint64_t windowId, uint32_t maxWidth,
                             uint32_t maxHeight, uint64_t nowUs, WindowThumbnailReply* out);
 
+// Clipboard text sync (K1). Both ride the same strict request/response control link as the
+// thumbnail fetch, and like it they are only ever called against a host that advertised
+// kCaptureFlagClipboardTextV1 -- an older host would mis-drain the variable payload.
+//
+// send_clipboard_update pushes the viewer's clipboard to the host and waits for its input ack.
+// False means the link failed (the session must drop); true means the host received it.
+bool send_clipboard_update(ControlLink& link, uint32_t seq, const std::wstring& text, uint64_t hash,
+                           uint64_t nowUs);
+
+// poll_clipboard asks whether the host clipboard is newer than knownGeneration and reads the reply
+// (with its text when there is any). False on a link failure; true with `out` filled otherwise.
+struct ClipboardPollReply {
+  bool hasData = false;
+  uint64_t generation = 0;
+  uint64_t hash = 0;
+  std::wstring text;
+};
+bool poll_clipboard(ControlLink& link, uint64_t knownGeneration, uint64_t nowUs,
+                    ClipboardPollReply* out);
+
 // The UDP video handshake (F-09, same story): Hello until a valid HelloAck or the budget is spent.
 // Valid means the protocol version, the FEC feature and -- when a directory token was sent -- the
 // DirectoryAuth feature that says the host accepted it. The socket's receive timeout is left at the

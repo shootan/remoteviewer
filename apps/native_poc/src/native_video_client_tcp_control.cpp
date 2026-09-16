@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <thread>
 
+#include "clipboard_sync.hpp"
+
 namespace remote60::native_poc {
 
 bool send_control_action(ControlLink& link, const ControlOutboundAction& action) {
@@ -149,6 +151,49 @@ bool fetch_window_thumbnail(ControlLink& link, uint64_t windowId, uint32_t maxWi
     out->height = rsp.height;
     out->version = rsp.version;
     out->bgra = std::move(payload);
+  }
+  return true;
+}
+
+bool send_clipboard_update(ControlLink& link, uint32_t seq, const std::wstring& text, uint64_t hash,
+                           uint64_t nowUs) {
+  const std::vector<uint8_t> bytes = build_clipboard_update(seq, text, hash, nowUs);
+  // Fixed header then the UTF-16 payload, framed as one message (the boundary UDP needs).
+  if (!link.Write(bytes.data(), bytes.size()) || !link.EndMessage()) return false;
+  // The host answers with an input ack, exactly as it does for injected text.
+  ControlInputAckMessage ack{};
+  if (!link.Read(&ack, sizeof(ack))) return false;
+  return ack.header.magic == kMagic &&
+         ack.header.type == static_cast<uint16_t>(MessageType::ControlInputAck) &&
+         ack.header.size == sizeof(ack);
+}
+
+bool poll_clipboard(ControlLink& link, uint64_t knownGeneration, uint64_t nowUs,
+                    ClipboardPollReply* out) {
+  if (out) *out = ClipboardPollReply{};
+  const std::vector<uint8_t> req = build_clipboard_request(0, knownGeneration, nowUs);
+  if (!link.Write(req.data(), req.size()) || !link.EndMessage()) return false;
+  ControlClipboardDataHeader rsp{};
+  if (!link.Read(&rsp, sizeof(rsp))) return false;
+  if (rsp.header.magic != kMagic ||
+      rsp.header.type != static_cast<uint16_t>(MessageType::ControlClipboardData) ||
+      rsp.header.size != sizeof(rsp)) {
+    return false;
+  }
+  const bool hasData = (rsp.flags & kClipboardDataFlagHasData) != 0;
+  std::wstring text;
+  if (hasData) {
+    if (rsp.utf16Count > kClipboardTextMaxUtf16) return false;  // a bad count desyncs the stream
+    const size_t payloadBytes = static_cast<size_t>(rsp.utf16Count) * sizeof(uint16_t);
+    std::vector<uint8_t> payload(payloadBytes);
+    if (payloadBytes > 0 && !link.Read(payload.data(), payload.size())) return false;
+    if (!clipboard_parse_payload(payload.data(), payload.size(), rsp.utf16Count, &text)) return false;
+  }
+  if (out) {
+    out->hasData = hasData;
+    out->generation = rsp.generation;
+    out->hash = rsp.contentHash;
+    out->text = std::move(text);
   }
   return true;
 }

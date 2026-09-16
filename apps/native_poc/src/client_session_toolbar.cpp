@@ -30,6 +30,7 @@ enum ButtonId : int {
   kButtonTargets = 1,
   kButtonMacro = 2,
   kButtonMonitor = 3,
+  kButtonClipboard = 4,
 };
 
 struct Button {
@@ -151,6 +152,10 @@ SIZE rebuild_layout() {
   // on the callback so an embedding that did not wire one keeps the old two-button bar.
   if (g.callbacks.onTargets) add(kButtonTargets, L"대상 선택", false);
   add(kButtonMacro, L"매크로", g.state.macroOpen);
+  // Clipboard text sync (K1). Gated on the callback so an embedding that did not wire one keeps
+  // the bar it had. Active colour reflects whether sync is on, which is the toggle's whole point --
+  // a user copying a password wants to be able to see it is off before they copy.
+  if (g.callbacks.onClipboard) add(kButtonClipboard, L"클립보드", g.state.clipboardOn);
   const std::wstring monitors = monitor_label();
   if (!monitors.empty()) add(kButtonMonitor, monitors + L" ▾", false);
 
@@ -388,6 +393,8 @@ LRESULT CALLBACK toolbar_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (g.callbacks.onTargets) g.callbacks.onTargets();
       } else if (pressed == kButtonMacro) {
         if (g.callbacks.onMacro) g.callbacks.onMacro();
+      } else if (pressed == kButtonClipboard) {
+        if (g.callbacks.onClipboard) g.callbacks.onClipboard();
       } else if (pressed == kButtonMonitor) {
         for (const Button& button : g.buttons) {
           if (button.id == kButtonMonitor) {

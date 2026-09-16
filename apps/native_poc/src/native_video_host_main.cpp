@@ -79,6 +79,7 @@
 #include "host_encoder_manager.hpp"
 #include "host_stats.hpp"
 #include "host_capture_session.hpp"
+#include "clipboard_monitor.hpp"
 #include "host_control_session.hpp"
 #include "host_main_loop.hpp"
 #include "host_startup.hpp"
@@ -193,8 +194,18 @@ int main(int argc, char** argv) {
   // Control conversation handler (ControlSessionServer, Phase 2-2); one Serve() per connected viewer.
   // Requests the control / sender / reader threads post for the loop to act on (Phase 4).
   MainLoopMailbox mailbox;
+  // Clipboard text sync (K1). Default on; REMOTE60_CLIPBOARD_SYNC=0 turns the whole feature off
+  // (the host then never advertises the capability, so no viewer sends clipboard messages). The
+  // monitor thread is started below; the destructor stops it on every exit path.
+  remote60::native_poc::HostClipboardHub clipboardHub;
+  const bool clipboardSyncEnabled = []() {
+    const std::string v = remote60::native_poc::env_string_or_empty("REMOTE60_CLIPBOARD_SYNC");
+    return !(v == "0" || v == "false" || v == "off");
+  }();
+  if (clipboardSyncEnabled) clipboardHub.Start();
   ControlSessionServer controlServer(args, stop, clientSession, capture, clientMetrics, encoder,
-                                     inputRouter, backend, windowSelectionTxn, mailbox);
+                                     inputRouter, backend, windowSelectionTxn, mailbox,
+                                     clipboardSyncEnabled ? &clipboardHub : nullptr);
   // RAII / WinRT / D3D capture objects (CaptureResources, Phase 2-4); created below at the same points as before.
   CaptureResources res;
   winrt::Windows::Graphics::Capture::GraphicsCaptureItem item{nullptr};

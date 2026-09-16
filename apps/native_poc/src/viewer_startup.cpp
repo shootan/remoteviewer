@@ -211,6 +211,14 @@ int create_window_and_toolbar(ViewerContext& ctx) {
       toggle_macro_window(ctx, ctx.session.hwnd);
       push_session_toolbar_state(ctx);
     };
+    toolbarCallbacks.onClipboard = [&ctx] {
+      // Clipboard text sync (K1) on/off. Flip and repaint the bar so the button colour follows.
+      auto& clip = ctx.control.clipboard;
+      const bool now = !clip.enabled.load(std::memory_order_relaxed);
+      clip.enabled.store(now, std::memory_order_relaxed);
+      log_client_line(ctx, std::string("[clipboard] sync ") + (now ? "on" : "off"));
+      push_session_toolbar_state(ctx);
+    };
     toolbarCallbacks.onMonitor = [&ctx](uint32_t monitorId) {
       ctx.picker.windowPanel.RequestMonitorSelect(monitorId);
     };

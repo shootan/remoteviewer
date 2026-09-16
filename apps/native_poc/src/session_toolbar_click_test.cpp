@@ -37,6 +37,7 @@ void ok(bool cond, const std::string& what, const std::string& detail = {}) {
 
 std::vector<std::string> gLines;
 int gTargetsInvoked = 0;
+int gClipboardInvoked = 0;
 
 void pump(int ms) {
   const DWORD until = GetTickCount() + static_cast<DWORD>(ms);
@@ -90,6 +91,7 @@ int wmain() {
   remote60::native_poc::SessionToolbarCallbacks callbacks;
   callbacks.onLog = [](const std::string& line) { gLines.push_back(line); };
   callbacks.onTargets = [] { ++gTargetsInvoked; };
+  callbacks.onClipboard = [] { ++gClipboardInvoked; };  // clipboard text sync toggle (K1)
   ok(remote60::native_poc::session_toolbar_create(owner, std::move(callbacks)),
      "the toolbar window is created");
   // Shown, but at -4000,-4000: the bar only lays out its buttons when the owner is visible and
@@ -156,6 +158,34 @@ int wmain() {
     ok(said("targets clicked, callback present"), "the targets callback is reported as present");
     ok(gTargetsInvoked == invokedBefore + 1, "and it actually ran",
        "invoked=" + std::to_string(gTargetsInvoked));
+  }
+
+  // --------------------------------------------------------------- the clipboard toggle (K1)
+  //
+  // The button only exists because a callback was wired for it; find it by its id in the down log
+  // (swept, not assumed, so a layout change moves the test with it) and prove a real click reaches
+  // the toggle. This is the product's own button and its own click path, not a copy of the rules.
+  int clipX = -1;
+  for (int x = 4; x < bounds.right - 4 && clipX < 0; x += 4) {
+    gLines.clear();
+    SendMessageW(bar, WM_LBUTTONDOWN, 0, at(x, midY));
+    SendMessageW(bar, WM_LBUTTONUP, 0, at(x, midY));
+    if (said("[toolbar] down id=4")) clipX = x;  // kButtonClipboard
+  }
+  ok(clipX >= 0, "the clipboard toggle button is present and hit-testable",
+     "x=" + std::to_string(clipX));
+  if (clipX >= 0) {
+    const int before = gClipboardInvoked;
+    SendMessageW(bar, WM_LBUTTONDOWN, 0, at(clipX, midY));
+    SendMessageW(bar, WM_LBUTTONUP, 0, at(clipX, midY));
+    ok(gClipboardInvoked == before + 1, "clicking it runs the clipboard toggle callback",
+       "invoked=" + std::to_string(gClipboardInvoked));
+    // And the negative half: a press that starts on it but releases off it must NOT toggle.
+    const int afterClick = gClipboardInvoked;
+    SendMessageW(bar, WM_LBUTTONDOWN, 0, at(clipX, midY));
+    SendMessageW(bar, WM_LBUTTONUP, 0, at(bounds.right - 1, midY));
+    ok(gClipboardInvoked == afterClick, "a press released off the clipboard button does not toggle",
+       "invoked=" + std::to_string(gClipboardInvoked));
   }
 
   // ------------------------------------------------------------------ 1a: no press recorded
