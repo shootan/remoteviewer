@@ -11,7 +11,7 @@ namespace remote60::native_poc {
 
 namespace {
 constexpr wchar_t kClassName[] = L"Remote60ClipboardMonitor";
-// Marshals a SetText onto the monitor thread. lParam is a heap std::wstring the handler owns.
+// Marshals a SetText onto the monitor thread. lParam is a heap std::u16string the handler owns.
 constexpr UINT kMsgSetClipboard = WM_APP + 1;
 }  // namespace
 
@@ -26,14 +26,16 @@ LRESULT CALLBACK ClipboardMonitor::WndProc(HWND hwnd, UINT msg, WPARAM wParam, L
   switch (msg) {
     case WM_CLIPBOARDUPDATE: {
       if (self && self->onText_) {
-        std::wstring text;
-        if (clipboard_read_unicode_text(hwnd, &text)) self->onText_(text);
+        // Win32 hands back wchar_t; the core and the wire speak UTF-16 code units, which on
+        // Windows is the same 16 bits (clipboard_win32.hpp).
+        std::wstring wide;
+        if (clipboard_read_unicode_text(hwnd, &wide)) self->onText_(wide_to_u16(wide));
       }
       return 0;
     }
     case kMsgSetClipboard: {
-      std::unique_ptr<std::wstring> text(reinterpret_cast<std::wstring*>(lParam));
-      if (text) (void)clipboard_set_unicode_text(hwnd, *text);
+      std::unique_ptr<std::u16string> text(reinterpret_cast<std::u16string*>(lParam));
+      if (text) (void)clipboard_set_unicode_text(hwnd, u16_to_wide(*text));
       return 0;
     }
     case WM_DESTROY:
@@ -110,11 +112,11 @@ void ClipboardMonitor::Stop() {
   running_.store(false, std::memory_order_release);
 }
 
-bool ClipboardMonitor::SetText(const std::wstring& text) {
+bool ClipboardMonitor::SetText(const std::u16string& text) {
   HWND hwnd = hwnd_.load(std::memory_order_acquire);
   if (!hwnd || !running_.load(std::memory_order_acquire)) return false;
   // Ownership of the copy passes to the handler on the monitor thread.
-  auto* copy = new std::wstring(text);
+  auto* copy = new std::u16string(text);
   if (!PostMessageW(hwnd, kMsgSetClipboard, 0, reinterpret_cast<LPARAM>(copy))) {
     delete copy;
     return false;
@@ -125,7 +127,7 @@ bool ClipboardMonitor::SetText(const std::wstring& text) {
 // --- HostClipboardHub -------------------------------------------------------------------------
 
 bool HostClipboardHub::Start() {
-  const bool ok = monitor_.Start([this](const std::wstring& text) { OnLocalText(text); });
+  const bool ok = monitor_.Start([this](const std::u16string& text) { OnLocalText(text); });
   started_.store(ok, std::memory_order_release);
   if (ok) {
     std::cout << "[native-video-host][clipboard] monitor started\n";
@@ -140,7 +142,7 @@ void HostClipboardHub::Stop() {
   started_.store(false, std::memory_order_release);
 }
 
-void HostClipboardHub::OnLocalText(const std::wstring& text) {
+void HostClipboardHub::OnLocalText(const std::u16string& text) {
   uint64_t hash = 0;
   std::lock_guard<std::mutex> lock(mu_);
   // Send == a genuine new local clipboard worth publishing to clients. SkipEcho == the change our
@@ -157,7 +159,7 @@ HostClipboardHub::Snapshot HostClipboardHub::Get() {
   return Snapshot{generation_, hash_, text_};
 }
 
-void HostClipboardHub::ApplyRemote(const std::wstring& text, uint64_t hash) {
+void HostClipboardHub::ApplyRemote(const std::u16string& text, uint64_t hash) {
   {
     std::lock_guard<std::mutex> lock(mu_);
     // Record it as applied BEFORE writing the clipboard, so OnLocalText recognises the resulting

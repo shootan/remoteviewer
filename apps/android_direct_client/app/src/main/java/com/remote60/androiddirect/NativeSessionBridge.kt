@@ -77,6 +77,28 @@ object NativeSessionBridge {
         buttons: Int,
     ): Boolean
     external fun nativeQueueInputText(text: String): Boolean
+
+    // --- clipboard text sync (K1) --------------------------------------------------
+    //
+    // The app drives both directions, because Android only lets a foreground app read or write
+    // the clipboard. Native never touches it; it only carries the text over the control channel.
+
+    /**
+     * Offers the phone's clipboard text to the host. Returns false when it was not worth sending
+     * -- not connected, sync off, a host without the capability, or the sync core judging it an
+     * echo / duplicate / empty / oversize -- so false means "nothing happened", not "failed".
+     */
+    external fun nativeQueueClipboardText(text: String): Boolean
+
+    /** Clipboard text that arrived from the host, or null when none is waiting. Drains on read. */
+    external fun nativeTakeIncomingClipboardText(): String?
+
+    external fun nativeSetClipboardSyncEnabled(enabled: Boolean)
+    external fun nativeIsClipboardSyncEnabled(): Boolean
+
+    /** Whether the connected host advertised clipboard support. */
+    external fun nativeHostSupportsClipboard(): Boolean
+
     external fun nativeGetWindowPanelJson(): String
 
     /**

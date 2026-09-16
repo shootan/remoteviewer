@@ -603,6 +603,55 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeQueueInputText(
   return ok ? JNI_TRUE : JNI_FALSE;
 }
 
+// --- clipboard text sync (K1) -----------------------------------------------------------------
+//
+// Java strings are already UTF-16, which is exactly what the wire carries, so the jchar buffer
+// crosses with no transcoding. The app drives both directions because Android only lets a
+// foreground app touch the clipboard; nothing down here reads or writes it.
+
+/** The phone's clipboard changed: hand it over for the control thread to send. */
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeQueueClipboardText(
+    JNIEnv* env, jobject /* this */, jstring text) {
+  if (!text) return JNI_FALSE;
+  const jsize length = env->GetStringLength(text);
+  const jchar* chars = env->GetStringChars(text, nullptr);
+  if (!chars) return JNI_FALSE;
+  const bool ok = g_session_controller.QueueClipboardText(
+      reinterpret_cast<const uint16_t*>(chars), static_cast<size_t>(length));
+  env->ReleaseStringChars(text, chars);
+  return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+/** Clipboard text the host sent, or null when none is waiting. Drains as it returns. */
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeTakeIncomingClipboardText(
+    JNIEnv* env, jobject /* this */) {
+  std::u16string text;
+  if (!g_session_controller.TakeIncomingClipboardText(&text)) return nullptr;
+  return env->NewString(reinterpret_cast<const jchar*>(text.data()),
+                        static_cast<jsize>(text.size()));
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeSetClipboardSyncEnabled(
+    JNIEnv* /* env */, jobject /* this */, jboolean enabled) {
+  g_session_controller.SetClipboardSyncEnabled(enabled == JNI_TRUE);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeIsClipboardSyncEnabled(
+    JNIEnv* /* env */, jobject /* this */) {
+  return g_session_controller.ClipboardSyncEnabled() ? JNI_TRUE : JNI_FALSE;
+}
+
+/** Whether the connected host advertised clipboard support, so the UI can say so. */
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeHostSupportsClipboard(
+    JNIEnv* /* env */, jobject /* this */) {
+  return g_session_controller.HostSupportsClipboard() ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetWindowPanelJson(
     JNIEnv* env, jobject /* this */) {

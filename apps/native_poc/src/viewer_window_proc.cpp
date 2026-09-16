@@ -287,8 +287,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       auto& clip = ctx.control.clipboard;
       if (clip.enabled.load(std::memory_order_relaxed) &&
           clip.hostSupports.load(std::memory_order_relaxed)) {
-        std::wstring text;
-        if (remote60::native_poc::clipboard_read_unicode_text(hwnd, &text)) {
+        // Win32 gives wchar_t; the core and the wire carry UTF-16 code units, which is the same
+        // 16 bits here but not on Android, so the conversion is explicit (clipboard_win32.hpp).
+        std::wstring wide;
+        if (remote60::native_poc::clipboard_read_unicode_text(hwnd, &wide)) {
+          const std::u16string text = remote60::native_poc::wide_to_u16(wide);
           uint64_t hash = 0;
           std::lock_guard<std::mutex> lock(clip.mu);
           if (clip.core.OnLocalChange(text, &hash) ==
@@ -305,8 +308,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       // The control thread handed us the host's clipboard text (heap-allocated) to put on the OS
       // clipboard. The core already recorded it as applied, so the WM_CLIPBOARDUPDATE this write
       // provokes is recognised as an echo and not sent back.
-      std::unique_ptr<std::wstring> text(reinterpret_cast<std::wstring*>(lp));
-      if (text) (void)remote60::native_poc::clipboard_set_unicode_text(hwnd, *text);
+      std::unique_ptr<std::u16string> text(reinterpret_cast<std::u16string*>(lp));
+      if (text) {
+        (void)remote60::native_poc::clipboard_set_unicode_text(
+            hwnd, remote60::native_poc::u16_to_wide(*text));
+      }
       return 0;
     }
     case kMsgApplyWindowList: {

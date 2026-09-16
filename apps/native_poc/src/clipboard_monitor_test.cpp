@@ -69,6 +69,7 @@ int main() {
 
   using remote60::native_poc::HostClipboardHub;
   using remote60::native_poc::clipboard_fnv1a;
+  using remote60::native_poc::wide_to_u16;
   using remote60::native_poc::clipboard_read_unicode_text;
   using remote60::native_poc::clipboard_set_unicode_text;
 
@@ -88,12 +89,12 @@ int main() {
   const bool heard = wait_until([&] { return hub.Get().generation >= 1; }, 3000);
   ok(heard, "the monitor heard the local change", "generation=" +
                                                       std::to_string(hub.Get().generation));
-  ok(hub.Get().text == localOne, "and captured the text");
+  ok(hub.Get().text == wide_to_u16(localOne), "and captured the text");
   const uint64_t genAfterLocalOne = hub.Get().generation;
 
   // 2. Applying a peer's clipboard writes the OS clipboard but does NOT raise the generation.
   const std::wstring applied = L"applied from a peer";
-  hub.ApplyRemote(applied, clipboard_fnv1a(applied));
+  hub.ApplyRemote(wide_to_u16(applied), clipboard_fnv1a(wide_to_u16(applied)));
   // The write happens on the monitor thread; wait for the OS clipboard to show it.
   const bool wrote = wait_until(
       [&] {
@@ -116,7 +117,7 @@ int main() {
       wait_until([&] { return hub.Get().generation > genAfterLocalOne; }, 3000);
   ok(heardTwo, "the monitor heard the second local change",
      "generation=" + std::to_string(hub.Get().generation));
-  ok(hub.Get().text == localTwo, "and captured the second text");
+  ok(hub.Get().text == wide_to_u16(localTwo), "and captured the second text");
 
   hub.Stop();
 

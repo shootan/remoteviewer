@@ -81,7 +81,7 @@ int ControlClient::pump_clipboard_sync(remote60::native_poc::ControlLink& link) 
   // (a) A local clipboard change the UI thread left pending goes first -- the user copying on the
   // viewer expecting to paste on the host is the interactive case, so it should not wait behind the
   // poll.
-  std::wstring outText;
+  std::u16string outText;
   uint64_t outHash = 0;
   uint32_t seq = 0;
   bool haveOutbound = false;
@@ -121,7 +121,7 @@ int ControlClient::pump_clipboard_sync(remote60::native_poc::ControlLink& link) 
     // this as applied, so the change notification the write provokes is dropped as an echo.
     if (apply && ctx.session.hwnd) {
       PostMessageW(ctx.session.hwnd, kMsgApplyClipboard, 0,
-                   reinterpret_cast<LPARAM>(new std::wstring(std::move(reply.text))));
+                   reinterpret_cast<LPARAM>(new std::u16string(std::move(reply.text))));
     }
   }
   return 1;

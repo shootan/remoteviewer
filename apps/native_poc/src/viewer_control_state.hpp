@@ -40,7 +40,7 @@ struct ClipboardSyncState {
   std::mutex mu;
   remote60::native_poc::ClipboardSyncCore core;  // echo/duplicate suppression, both directions
   bool hasPending = false;                // a local change waiting for the control thread to send
-  std::wstring pendingText;
+  std::u16string pendingText;
   uint64_t pendingHash = 0;
   uint32_t nextSeq = 0;
 

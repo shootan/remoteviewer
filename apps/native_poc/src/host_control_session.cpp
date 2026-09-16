@@ -1089,7 +1089,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
       }
       std::vector<uint8_t> payload(payloadBytes);
       if (payloadBytes > 0 && !link.Read(payload.data(), payloadBytes)) break;
-      std::wstring text;
+      std::u16string text;
       if (remote60::native_poc::clipboard_parse_payload(payload.data(), payload.size(),
                                                         upd.utf16Count, &text) &&
           clipboard) {

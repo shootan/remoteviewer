@@ -34,7 +34,7 @@ namespace remote60::native_poc {
 // that owns the listener window.
 class ClipboardMonitor {
  public:
-  using OnTextFn = std::function<void(const std::wstring&)>;
+  using OnTextFn = std::function<void(const std::u16string&)>;
 
   ~ClipboardMonitor() { Stop(); }
 
@@ -45,7 +45,7 @@ class ClipboardMonitor {
 
   // Sets the clipboard to `text`. Safe to call from any thread; the work is marshalled to the
   // monitor thread. Returns false if the monitor is not running.
-  bool SetText(const std::wstring& text);
+  bool SetText(const std::u16string& text);
 
   bool running() const { return running_.load(std::memory_order_acquire); }
 
@@ -77,24 +77,24 @@ class HostClipboardHub {
   struct Snapshot {
     uint64_t generation = 0;
     uint64_t hash = 0;
-    std::wstring text;
+    std::u16string text;
   };
   Snapshot Get();
 
   // Put a client's clipboard text on the host clipboard. Does nothing for empty text or content
   // already present. Records the content as applied first, so the resulting change notification is
   // recognised as an echo and does not raise the generation.
-  void ApplyRemote(const std::wstring& text, uint64_t hash);
+  void ApplyRemote(const std::u16string& text, uint64_t hash);
 
  private:
-  void OnLocalText(const std::wstring& text);
+  void OnLocalText(const std::u16string& text);
 
   ClipboardMonitor monitor_;
   std::mutex mu_;
   ClipboardSyncCore core_;
   uint64_t generation_ = 0;
   uint64_t hash_ = 0;
-  std::wstring text_;
+  std::u16string text_;
   std::atomic<bool> started_{false};
 };
 

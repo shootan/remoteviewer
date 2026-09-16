@@ -12044,3 +12044,14 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - **안전장치**: 크기 상한 512Ki UTF-16(=1MiB, UDP 제어채널 8MiB 한참 아래) 초과 시 **자름 없이 스킵+로그**. 빈 클립보드는 동기화 안 함(피어 클립보드를 지우지 않음). 연결 시 기존 클립보드를 밀어 넣지 않음(리스너는 이후 변경에만 발화 + 호스트 generation 시드 안 함). 잠금/보안 데스크톱에서 `OpenClipboard` 실패 시 재시도 후 스킵. 호스트 킬스위치 env `REMOTE60_CLIPBOARD_SYNC=0`.
 - **검증(전부 격리)**: `clipboard_sync_core_test` **74/74**(코덱·에코·경계) · `clipboard_wire_test` **33/33**(ControlLink 프레이밍 양방향, ASCII·한글·이모지·4096자, in-memory loopback) · `clipboard_monitor_test` **11/11**(실 OS 클립보드 캡처·적용·에코차단, opt-in `REMOTE60_ALLOW_CLIPBOARD_TEST=1`, 클립보드 save/restore, 2회 안정) · `session_toolbar_click_test` **29/29**(토글 버튼 실제 창·실제 클릭·부정 대조). 호스트/뷰어/런타임 실패 fixture clean 빌드, `cmake_sources_exist_test` 통과, `shared_core_test` 회귀 없음.
 - **미검증(그대로 남긴다)**: **설치 제품 실세션 0** — 뷰어에서 실제 Ctrl+C → 호스트 창 Ctrl+V, 호스트 Ctrl+C → 뷰어 Ctrl+V의 두 방향 붙여넣기는 실기기 대기(테스트 후보). Android 클립보드(별도 API) 미구현. 다중 뷰어 fan-out 비범위(v1은 호스트↔단일 뷰어). 시험 exe 해시 ≠ 출하 exe 해시(테스트 빌드 허용 차이).
+
+### 2026-09-16 클립보드 K1 — Android(APK) 배선과 u16string 정정
+
+- **범위**: 폰↔호스트 클립보드 텍스트 동기화. 프로토콜·에코차단·상한은 0.2.129(`5a12cf6`)에서 만든 것을 그대로 쓴다 — 안드로이드는 이미 같은 `ClientSessionController`·같은 제어세션을 쓰므로 와이어는 새로 만들 것이 없었다.
+- 🔴 **타입 정정이 먼저였다**: 공유 코어가 `std::wstring` 이었는데 `wchar_t` 는 **Windows 16bit · Android 32bit** 다. 그대로 안드로이드에 붙였으면 같은 세션의 양단이 "코드 유닛"을 다르게 해석해 **비ASCII가 조용히 깨졌을** 것이다(ASCII만 우연히 맞는다). 공유 계층 전체를 **`std::u16string`** 으로 바꾸고, Win32 경계에서만 `wide_to_u16`/`u16_to_wide` 로 변환한다(`clipboard_win32.hpp`, `static_assert` 로 폭 동일성 고정). **Windows 동작은 무변경** — 전 테스트 재통과로 확인.
+  - ⚠️ 기계적 치환의 부작용 2건을 직접 잡았다: 무관한 **unlock 비밀번호 경로**가 u16string 으로 바뀌어 빌드가 깨졌고(되돌림), 테스트의 `"FAIL"` 문자열이 `L"` 치환에 걸려 **`"FAIu"`** 가 됐다. 둘 다 빌드/grep 으로 확인 후 수정.
+- **배선**: `ClientSessionController` 에 `QueueClipboardText`(폰→호스트) · `TakeIncomingClipboardText`(호스트→폰, 드레인) · `SetClipboardSyncEnabled` · `HostSupportsClipboard` · 제어루프 idle 의 `PumpClipboardSync`. pong 능력비트로 호스트 지원을 판정하고, **재접속 시 코어·generation·양방향 우편함을 리셋**한다(사용자 on/off 선택은 설정이므로 유지). JNI 5종 + `MainActivity` 의 `ClipboardManager` 배선 + 뷰어 레일 `CLIP` 토글.
+- ⚠️ **안드로이드 플랫폼 제약(우회 불가, 그대로 기록)**: Android 10+ 는 **포그라운드 앱만** 클립보드를 읽고 쓸 수 있다. Windows 뷰어처럼 상시 감시가 **불가능**하므로, **포커스를 얻는 순간**과 **포커스를 쥔 동안의 변경 리스너**에서만 읽어 보낸다. 다른 앱에서 복사한 것은 GNLink 로 돌아온 순간 반영된다. 이걸 "상시 동기화" 로 적지 않는다.
+- **검증**: `:app:assembleDebug` **BUILD SUCCESSFUL**(Kotlin + armeabi-v7a/arm64-v8a/x86/x86_64 네이티브, `app-debug.apk` 11.9MB), 패키징된 arm64 `.so` 에서 **클립보드 JNI 5종 심볼 확인**(전체 JNI export 53종 중). Windows 회귀 전량 재통과: core 74/74 · wire 33/33 · monitor 11/11(opt-in 실 OS) · toolbar 29/29 · shared_core PASS · cmake_sources 4/4.
+  - ⚠️ **초록색 두 번을 직접 부쉈다**: 첫 APK 빌드는 `JAVA_HOME` 미설정으로 **실행조차 안 됐는데** `| tail` 때문에 파이프 exit 0 이라 성공처럼 보였고, 심볼 확인의 첫 시도는 `strings` 가 **설치돼 있지 않아** 0건이 나온 것을 "심볼 없음" 으로 읽을 뻔했다. 둘 다 "무엇이 실제로 실행됐는가" 를 되물어 잡았다.
+- **미검증(그대로 남긴다)**: **실기기 0** — 폰 복사→PC 붙여넣기, PC 복사→폰 붙여넣기, `CLIP` 토글 실동작은 전부 실기 대기. 서명 APK 미생성(검증용 몫). 다중 뷰어 fan-out 비범위.

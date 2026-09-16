@@ -241,6 +241,96 @@ bool ClientSessionController::QueueInputText(const uint16_t* text, size_t count)
   return enqueue_control_input_text(inputQueue_, text, count, now_us()) > 0;
 }
 
+bool ClientSessionController::QueueClipboardText(const uint16_t* text, size_t count) {
+  if (!text && count > 0) return false;
+  if (!clipboardEnabled_.load(std::memory_order_relaxed)) return false;
+  // Never queue for a host that cannot parse it: the message is gated on the capability bit, and
+  // an old host would mis-drain the variable payload and desync the stream.
+  if (!hostSupportsClipboard_.load(std::memory_order_relaxed)) return false;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+  const std::u16string incoming(reinterpret_cast<const char16_t*>(text), count);
+  std::lock_guard<std::mutex> lock(clipMu_);
+  uint64_t hash = 0;
+  // Send == genuinely new. The other verdicts are empty / oversize / already sent / the echo of
+  // what the host just gave us, none of which belong on the wire.
+  if (clipCore_.OnLocalChange(incoming, &hash) != ClipboardLocalDecision::Send) return false;
+  clipPendingText_ = incoming;
+  clipPendingHash_ = hash;
+  clipHasPending_ = true;
+  return true;
+}
+
+bool ClientSessionController::TakeIncomingClipboardText(std::u16string* out) {
+  if (!out) return false;
+  std::lock_guard<std::mutex> lock(clipMu_);
+  if (!clipHasIncoming_) return false;
+  *out = std::move(clipIncomingText_);
+  clipIncomingText_.clear();
+  clipHasIncoming_ = false;
+  return true;
+}
+
+void ClientSessionController::SetClipboardSyncEnabled(bool enabled) {
+  clipboardEnabled_.store(enabled, std::memory_order_relaxed);
+  if (enabled) return;
+  // Turning it off drops anything queued in either direction. The point of the switch is that
+  // what was on the clipboard while it was off never travels, so a pending item must not survive.
+  std::lock_guard<std::mutex> lock(clipMu_);
+  clipHasPending_ = false;
+  clipPendingText_.clear();
+  clipHasIncoming_ = false;
+  clipIncomingText_.clear();
+}
+
+int ClientSessionController::PumpClipboardSync(ControlLink& link) {
+  if (!clipboardEnabled_.load(std::memory_order_relaxed) ||
+      !hostSupportsClipboard_.load(std::memory_order_relaxed)) {
+    return 0;
+  }
+  // (a) A clipboard the app queued goes first: the user copied on the phone meaning to paste on
+  // the host, which is the interactive direction and should not wait behind the poll.
+  std::u16string outText;
+  uint64_t outHash = 0;
+  uint32_t seq = 0;
+  bool haveOutbound = false;
+  {
+    std::lock_guard<std::mutex> lock(clipMu_);
+    if (clipHasPending_) {
+      outText = std::move(clipPendingText_);
+      outHash = clipPendingHash_;
+      seq = ++clipNextSeq_;
+      clipHasPending_ = false;
+      clipPendingText_.clear();
+      haveOutbound = true;
+    }
+  }
+  if (haveOutbound) {
+    if (!send_clipboard_update(link, seq, outText, outHash, now_us())) return -1;
+    return 1;
+  }
+  // (b) Otherwise ask the host whether its clipboard moved. The host cannot push -- control is
+  // strict request/response -- so this poll is the only way host -> phone text arrives.
+  const uint64_t nowUs = now_us();
+  if (clipLastPollUs_ != 0 && nowUs - clipLastPollUs_ < kClipboardPollIntervalUs) return 0;
+  clipLastPollUs_ = nowUs;
+  ClipboardPollReply reply;
+  if (!poll_clipboard(link, clipKnownGeneration_, nowUs, &reply)) return -1;
+  clipKnownGeneration_ = reply.generation;
+  if (reply.hasData) {
+    std::lock_guard<std::mutex> lock(clipMu_);
+    // Recording it as applied here is what stops it going back out: the app will put this on the
+    // Android clipboard, and the change it notices afterwards must be recognised as our own.
+    if (clipCore_.OnRemoteData(reply.text, reply.hash) == ClipboardRemoteDecision::Apply) {
+      clipIncomingText_ = std::move(reply.text);
+      clipHasIncoming_ = true;
+    }
+  }
+  return 1;
+}
+
 bool ClientSessionController::IsValidPort(int port) {
   return port > 0 && port <= 65535;
 }
@@ -379,6 +469,11 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
           hostSecureDesktopActive_.store(
               (response.pong.captureTargetFlags & kCaptureFlagSecureDesktopActive) != 0,
               std::memory_order_relaxed);
+          // Clipboard text sync (K1): whether this host understands the clipboard messages. Set
+          // every pong, so reconnecting to a different host cannot carry the old answer forward.
+          hostSupportsClipboard_.store(
+              (response.pong.captureTargetFlags & kCaptureFlagClipboardTextV1) != 0,
+              std::memory_order_relaxed);
           break;
         case TcpControlResponseKind::MonitorList: {
           windowPanel_.ApplyMonitorList(response.monitorList);
@@ -423,6 +518,17 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
       }
     }
 
+    // Clipboard sync runs whenever the session is up, unlike previews, so it comes first.
+    if (!didWork && controlLink->Alive()) {
+      const int synced = PumpClipboardSync(*controlLink);
+      if (synced < 0) {
+        if (!stopRequested_.load(std::memory_order_acquire)) {
+          SignalRuntimeFailure("clipboard sync failed");
+        }
+        break;
+      }
+      didWork = (synced > 0);
+    }
     if (!didWork && controlLink->Alive()) {
       const int fetched = FetchOneThumbnailLocked(*controlLink);
       if (fetched < 0) {
@@ -865,6 +971,21 @@ void ClientSessionController::ResetUnlocked() {
     thumbFetchQueue_.clear();
   }
   hostSupportsThumbnails_.store(false, std::memory_order_relaxed);
+  // Clipboard text sync (K1): a reconnect may be to a different host, so the echo state, the
+  // generation and both mailboxes start clean. The user's on/off choice is NOT reset -- that is a
+  // preference, not session state. (The capability is re-learned from the next pong.)
+  {
+    std::lock_guard<std::mutex> lk(clipMu_);
+    clipCore_.Reset();
+    clipHasPending_ = false;
+    clipPendingText_.clear();
+    clipPendingHash_ = 0;
+    clipHasIncoming_ = false;
+    clipIncomingText_.clear();
+    clipKnownGeneration_ = 0;
+    clipLastPollUs_ = 0;
+  }
+  hostSupportsClipboard_.store(false, std::memory_order_relaxed);
   sessionBytesReceived_.store(0, std::memory_order_relaxed);
   controlOverUdp_.store(false, std::memory_order_release);
   udpControl_.Reset();

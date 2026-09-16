@@ -67,7 +67,7 @@ bool fetch_window_thumbnail(ControlLink& link, uint64_t windowId, uint32_t maxWi
 //
 // send_clipboard_update pushes the viewer's clipboard to the host and waits for its input ack.
 // False means the link failed (the session must drop); true means the host received it.
-bool send_clipboard_update(ControlLink& link, uint32_t seq, const std::wstring& text, uint64_t hash,
+bool send_clipboard_update(ControlLink& link, uint32_t seq, const std::u16string& text, uint64_t hash,
                            uint64_t nowUs);
 
 // poll_clipboard asks whether the host clipboard is newer than knownGeneration and reads the reply
@@ -76,7 +76,7 @@ struct ClipboardPollReply {
   bool hasData = false;
   uint64_t generation = 0;
   uint64_t hash = 0;
-  std::wstring text;
+  std::u16string text;
 };
 bool poll_clipboard(ControlLink& link, uint64_t knownGeneration, uint64_t nowUs,
                     ClipboardPollReply* out);

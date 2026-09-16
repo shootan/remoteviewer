@@ -22,6 +22,21 @@
 
 namespace remote60::native_poc {
 
+// Win32 speaks wchar_t; the sync core and the wire speak std::u16string, because wchar_t is 32-bit
+// on Android and the protocol carries UTF-16 code units (clipboard_sync.hpp). On Windows the two
+// are the same 16 bits, so these convert by copying units -- no transcoding, and no chance of the
+// two ends of a session disagreeing about what a code unit is.
+static_assert(sizeof(wchar_t) == sizeof(char16_t),
+              "Windows wchar_t must be 16-bit for the clipboard conversions below");
+
+inline std::u16string wide_to_u16(const std::wstring& text) {
+  return std::u16string(reinterpret_cast<const char16_t*>(text.data()), text.size());
+}
+
+inline std::wstring u16_to_wide(const std::u16string& text) {
+  return std::wstring(reinterpret_cast<const wchar_t*>(text.data()), text.size());
+}
+
 // Number of OpenClipboard attempts and the pause between them. ~200ms total: long enough to ride
 // out another app holding the clipboard for a paint, short enough not to stall the caller.
 inline bool clipboard_open_with_retry(HWND owner) {

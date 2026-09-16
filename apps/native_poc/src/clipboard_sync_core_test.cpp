@@ -58,15 +58,15 @@ T front(const std::vector<uint8_t>& bytes) {
 }
 
 void test_hash() {
-  const std::wstring a = L"hello";
-  const std::wstring b = L"hello";
-  const std::wstring c = L"hellp";
+  const std::u16string a = u"hello";
+  const std::u16string b = u"hello";
+  const std::u16string c = u"hellp";
   ok(clipboard_fnv1a(a) == clipboard_fnv1a(b), "equal text hashes equal");
   ok(clipboard_fnv1a(a) != clipboard_fnv1a(c), "one-character difference changes the hash");
-  ok(clipboard_fnv1a(L"") == 1469598103934665603ULL, "empty text is the FNV offset basis");
+  ok(clipboard_fnv1a(u"") == 1469598103934665603ULL, "empty text is the FNV offset basis");
 }
 
-void round_trip(const std::wstring& text, const std::string& label) {
+void round_trip(const std::u16string& text, const std::string& label) {
   const uint64_t hash = clipboard_fnv1a(text);
   const std::vector<uint8_t> bytes = build_clipboard_update(7, text, hash, 123456);
   ok(bytes.size() == sizeof(ControlClipboardUpdateMessage) + text.size() * 2,
@@ -79,7 +79,7 @@ void round_trip(const std::wstring& text, const std::string& label) {
      label + ": header.size is the fixed part only");
   ok(hdr.utf16Count == text.size(), label + ": utf16Count matches");
   ok(hdr.contentHash == hash, label + ": content hash matches");
-  std::wstring parsed;
+  std::u16string parsed;
   const uint8_t* payload = bytes.data() + sizeof(ControlClipboardUpdateMessage);
   const size_t payloadBytes = bytes.size() - sizeof(ControlClipboardUpdateMessage);
   ok(clipboard_parse_payload(payload, payloadBytes, hdr.utf16Count, &parsed),
@@ -88,12 +88,12 @@ void round_trip(const std::wstring& text, const std::string& label) {
 }
 
 void test_codec() {
-  round_trip(L"", "empty");
-  round_trip(L"plain ascii clipboard", "ascii");
-  round_trip(L"한글 붙여넣기", "korean");            // "한글 붙여넣기"
-  round_trip(std::wstring(L"tab\tnewline\r\nend"), "control chars");
-  round_trip(std::wstring{L'\xD83D', L'\xDE00'}, "surrogate pair (emoji)");  // U+1F600
-  round_trip(std::wstring(kClipboardTextMaxUtf16, L'x'), "at the size cap");
+  round_trip(u"", "empty");
+  round_trip(u"plain ascii clipboard", "ascii");
+  round_trip(u"한글 붙여넣기", "korean");            // "한글 붙여넣기"
+  round_trip(std::u16string(u"tab\tnewline\r\nend"), "control chars");
+  round_trip(std::u16string{u'\xD83D', u'\xDE00'}, "surrogate pair (emoji)");  // U+1F600
+  round_trip(std::u16string(kClipboardTextMaxUtf16, u'x'), "at the size cap");
 
   // The request and data headers frame correctly too.
   const auto req = front<ControlClipboardRequestMessage>(build_clipboard_request(3, 42, 9));
@@ -101,20 +101,20 @@ void test_codec() {
          req.knownGeneration == 42,
      "request carries knownGeneration");
 
-  const std::wstring payload = L"from the host";
+  const std::u16string payload = u"from the host";
   const auto data = build_clipboard_data(5, 11, true, payload, clipboard_fnv1a(payload), 0);
   const auto dataHdr = front<ControlClipboardDataHeader>(data);
   ok((dataHdr.flags & kClipboardDataFlagHasData) != 0 && dataHdr.generation == 11 &&
          dataHdr.utf16Count == payload.size(),
      "data reply with content sets the has-data bit and generation");
-  std::wstring back;
+  std::u16string back;
   ok(clipboard_parse_payload(data.data() + sizeof(ControlClipboardDataHeader),
                              data.size() - sizeof(ControlClipboardDataHeader), dataHdr.utf16Count,
                              &back) &&
          back == payload,
      "data reply payload round-trips");
 
-  const auto empty = build_clipboard_data(6, 11, false, L"", 0, 0);
+  const auto empty = build_clipboard_data(6, 11, false, u"", 0, 0);
   const auto emptyHdr = front<ControlClipboardDataHeader>(empty);
   ok((emptyHdr.flags & kClipboardDataFlagHasData) == 0 && emptyHdr.utf16Count == 0 &&
          empty.size() == sizeof(ControlClipboardDataHeader),
@@ -124,7 +124,7 @@ void test_codec() {
 void test_codec_boundaries() {
   // A count over the cap is refused rather than allocated.
   std::vector<uint8_t> big(16, 0);
-  std::wstring out;
+  std::u16string out;
   ok(!clipboard_parse_payload(big.data(), big.size(), kClipboardTextMaxUtf16 + 1, &out),
      "a count over the cap is rejected");
   // A payload region too short for the stated count is a stream error, not a partial read.
@@ -139,25 +139,25 @@ void test_codec_boundaries() {
 void test_local_decisions() {
   ClipboardSyncCore core;
   uint64_t hash = 0;
-  ok(core.OnLocalChange(L"", &hash) == ClipboardLocalDecision::SkipEmpty,
+  ok(core.OnLocalChange(u"", &hash) == ClipboardLocalDecision::SkipEmpty,
      "an empty local clipboard is not synced");
-  ok(core.OnLocalChange(std::wstring(kClipboardTextMaxUtf16 + 1, L'x'), &hash) ==
+  ok(core.OnLocalChange(std::u16string(kClipboardTextMaxUtf16 + 1, u'x'), &hash) ==
          ClipboardLocalDecision::SkipTooLarge,
      "an oversize clipboard is skipped whole");
-  ok(core.OnLocalChange(L"first copy", &hash) == ClipboardLocalDecision::Send,
+  ok(core.OnLocalChange(u"first copy", &hash) == ClipboardLocalDecision::Send,
      "a genuine change is sent");
-  ok(hash == clipboard_fnv1a(L"first copy"), "and reports the hash to put on the wire");
-  ok(core.OnLocalChange(L"first copy", &hash) == ClipboardLocalDecision::SkipDuplicate,
+  ok(hash == clipboard_fnv1a(u"first copy"), "and reports the hash to put on the wire");
+  ok(core.OnLocalChange(u"first copy", &hash) == ClipboardLocalDecision::SkipDuplicate,
      "the same content is not sent twice");
-  ok(core.OnLocalChange(L"second copy", &hash) == ClipboardLocalDecision::Send,
+  ok(core.OnLocalChange(u"second copy", &hash) == ClipboardLocalDecision::Send,
      "a new change after a duplicate is sent");
 }
 
 void test_remote_decisions() {
   ClipboardSyncCore core;
-  ok(core.OnRemoteData(L"", 0) == ClipboardRemoteDecision::SkipEmpty,
+  ok(core.OnRemoteData(u"", 0) == ClipboardRemoteDecision::SkipEmpty,
      "an empty remote payload is not applied");
-  const std::wstring t = L"host clipboard";
+  const std::u16string t = u"host clipboard";
   const uint64_t h = clipboard_fnv1a(t);
   ok(core.OnRemoteData(t, h) == ClipboardRemoteDecision::Apply, "new remote content is applied");
   ok(core.OnRemoteData(t, h) == ClipboardRemoteDecision::SkipDuplicate,
@@ -177,7 +177,7 @@ void test_no_echo_loop() {
   ClipboardSyncCore b;  // the host
   uint64_t hashA = 0;
 
-  const std::wstring text = L"one trip only";
+  const std::u16string text = u"one trip only";
   ok(a.OnLocalChange(text, &hashA) == ClipboardLocalDecision::Send, "A sends its new clipboard");
 
   // B receives it and applies it to its own clipboard.
@@ -193,7 +193,7 @@ void test_no_echo_loop() {
      "A would refuse to re-apply the content it originated");
 
   // A genuinely new copy still flows.
-  const std::wstring next = L"a second, different copy";
+  const std::u16string next = u"a second, different copy";
   uint64_t hashA2 = 0;
   ok(a.OnLocalChange(next, &hashA2) == ClipboardLocalDecision::Send, "a later new copy still sends");
   ok(b.OnRemoteData(next, hashA2) == ClipboardRemoteDecision::Apply, "and B applies it");

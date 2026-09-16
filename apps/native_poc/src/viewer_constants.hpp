@@ -92,10 +92,9 @@ constexpr UINT kMsgHostImeDeactivate = WM_APP + 13;
 // to the OS clipboard on the window's own thread (all clipboard ops belong on the thread that owns
 // the listener window). lParam is a heap std::wstring the handler owns and frees.
 constexpr UINT kMsgApplyClipboard = WM_APP + 14;
-// How often the viewer polls the host for a clipboard change. The host cannot push -- control is
-// strict request/response -- so the viewer asks on this interval; 700ms is unnoticeable for a paste
-// and negligible traffic (a ~28-byte request and a ~48-byte reply).
-constexpr uint64_t kClipboardPollIntervalUs = 700000;
+// The poll interval itself is kClipboardPollIntervalUs in clipboard_sync.hpp, shared with the
+// Android session so both clients ask at the same cadence. Unqualified uses here resolve to it
+// through the enclosing namespace.
 
 constexpr uint64_t kThumbRefreshUs = 5000000;  // refresh a preview after 5 s
 // How long to leave a window alone after its preview did not come back. Deliberately the host's

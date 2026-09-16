@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "clipboard_sync.hpp"
 #include "native_socket.hpp"
 #include "native_video_client_shared_core.hpp"
 #include "udp_control_channel.hpp"
@@ -121,6 +122,33 @@ class ClientSessionController {
                        uint32_t keyCode, uint16_t buttons);
   bool QueueInputText(const uint16_t* text, size_t count);
 
+  // --- clipboard text sync (K1) ---------------------------------------------------------------
+  //
+  // Text is UTF-16 code units, which is what Java strings already are (jchar) and what the wire
+  // carries -- see clipboard_sync.hpp for why this is u16string and not wstring.
+  //
+  // The phone cannot watch its clipboard the way the Windows viewer does: from Android 10 an app
+  // may only read the clipboard while it holds focus. So the app calls QueueClipboardText when it
+  // is in the foreground and sees a change, and the control thread sends it. The echo guard still
+  // applies, so text that just arrived from the host is not sent straight back.
+  //
+  // Returns false when the session cannot take it (not connected, sync off, host without the
+  // capability) or when the core judged it not worth sending (empty, duplicate, echo, oversize).
+  bool QueueClipboardText(const uint16_t* text, size_t count);
+
+  // Drains clipboard text that arrived from the host, if any. The app polls this from the ticker
+  // it already runs, because the bridge has no native->Java callback, and applies it to the
+  // Android clipboard itself (which likewise requires the foreground).
+  bool TakeIncomingClipboardText(std::u16string* out);
+
+  void SetClipboardSyncEnabled(bool enabled);
+  bool ClipboardSyncEnabled() const { return clipboardEnabled_.load(std::memory_order_relaxed); }
+  // Whether the connected host advertised kCaptureFlagClipboardTextV1, so the UI can show the
+  // toggle as unavailable rather than appearing to work while doing nothing.
+  bool HostSupportsClipboard() const {
+    return hostSupportsClipboard_.load(std::memory_order_relaxed);
+  }
+
   struct WindowThumbnail {
     uint32_t width = 0;
     uint32_t height = 0;
@@ -174,6 +202,10 @@ class ClientSessionController {
   std::atomic<bool> controlOverUdp_{false};
 
   int FetchOneThumbnailLocked(ControlLink& link);
+  // Clipboard text sync (K1), run on the control thread's idle turns like the thumbnail fetch:
+  // sends a queued local clipboard, otherwise polls the host on an interval.
+  // Returns: 1 did work, 0 nothing to do, -1 link failure (the session must drop).
+  int PumpClipboardSync(ControlLink& link);
   void QueueThumbnailFetchesFromPanel();
   mutable std::mutex thumbMu_;
   std::unordered_map<uint64_t, WindowThumbnail> thumbs_;
@@ -192,6 +224,22 @@ class ClientSessionController {
   // that, so the picture stops; saying so beats a frozen rectangle nobody can explain.
   std::atomic<bool> hostSecureDesktopActive_{false};
   std::atomic<uint64_t> sessionBytesReceived_{0};
+
+  // Clipboard text sync (K1). clipMu_ guards the core and the two one-slot mailboxes: the app
+  // thread produces outgoing text and drains incoming, the control thread does the opposite.
+  // knownGeneration / lastPoll are control-thread only.
+  mutable std::mutex clipMu_;
+  ClipboardSyncCore clipCore_;
+  bool clipHasPending_ = false;
+  std::u16string clipPendingText_;
+  uint64_t clipPendingHash_ = 0;
+  uint32_t clipNextSeq_ = 0;
+  bool clipHasIncoming_ = false;
+  std::u16string clipIncomingText_;
+  uint64_t clipKnownGeneration_ = 0;
+  uint64_t clipLastPollUs_ = 0;
+  std::atomic<bool> clipboardEnabled_{true};
+  std::atomic<bool> hostSupportsClipboard_{false};
 };
 
 }  // namespace remote60::native_poc

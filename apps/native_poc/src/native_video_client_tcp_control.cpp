@@ -155,7 +155,7 @@ bool fetch_window_thumbnail(ControlLink& link, uint64_t windowId, uint32_t maxWi
   return true;
 }
 
-bool send_clipboard_update(ControlLink& link, uint32_t seq, const std::wstring& text, uint64_t hash,
+bool send_clipboard_update(ControlLink& link, uint32_t seq, const std::u16string& text, uint64_t hash,
                            uint64_t nowUs) {
   const std::vector<uint8_t> bytes = build_clipboard_update(seq, text, hash, nowUs);
   // Fixed header then the UTF-16 payload, framed as one message (the boundary UDP needs).
@@ -181,7 +181,7 @@ bool poll_clipboard(ControlLink& link, uint64_t knownGeneration, uint64_t nowUs,
     return false;
   }
   const bool hasData = (rsp.flags & kClipboardDataFlagHasData) != 0;
-  std::wstring text;
+  std::u16string text;
   if (hasData) {
     if (rsp.utf16Count > kClipboardTextMaxUtf16) return false;  // a bad count desyncs the stream
     const size_t payloadBytes = static_cast<size_t>(rsp.utf16Count) * sizeof(uint16_t);

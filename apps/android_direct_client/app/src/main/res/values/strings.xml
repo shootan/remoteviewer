@@ -83,6 +83,12 @@
     <string name="connect_path_relay">중계 서버 경유 — 데이터 사용량이 과금됩니다</string>
     <string name="key_panel_button">KEYS</string>
     <string name="key_panel_description">PC keys and shortcuts</string>
+    <string name="clipboard_button">CLIP</string>
+    <string name="clipboard_description">클립보드를 PC와 주고받습니다</string>
+    <string name="clipboard_sync_on">클립보드 동기화 켬</string>
+    <string name="clipboard_sync_off">클립보드 동기화 끔</string>
+    <string name="clipboard_unsupported">이 PC는 클립보드 동기화를 지원하지 않습니다</string>
+    <string name="clipboard_received">PC에서 클립보드를 받았습니다</string>
     <string name="key_panel_tab_shortcut">Shortcuts</string>
     <string name="key_panel_tab_keys">Keyboard</string>
     <string name="key_panel_close">Close</string>

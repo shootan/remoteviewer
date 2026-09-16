@@ -51,8 +51,8 @@ void ok(bool cond, const std::string& what, const std::string& detail = {}) {
 struct MockHost {
   uint64_t generation = 0;
   uint64_t hash = 0;
-  std::wstring text;
-  std::wstring lastApplied;  // the last text a client update pushed
+  std::u16string text;
+  std::u16string lastApplied;  // the last text a client update pushed
   int updatesApplied = 0;
 };
 
@@ -67,7 +67,7 @@ std::vector<uint8_t> host_process(MockHost& host, const std::vector<uint8_t>& ms
   if (type == MessageType::ControlClipboardUpdate) {
     ControlClipboardUpdateMessage upd{};
     std::memcpy(&upd, msg.data(), sizeof(upd));
-    std::wstring text;
+    std::u16string text;
     clipboard_parse_payload(msg.data() + sizeof(upd), msg.size() - sizeof(upd), upd.utf16Count,
                             &text);
     host.lastApplied = text;
@@ -122,7 +122,7 @@ class LoopbackLink : public ControlLink {
   size_t readPos_ = 0;
 };
 
-void test_poll(const std::wstring& hostText, const std::string& label) {
+void test_poll(const std::u16string& hostText, const std::string& label) {
   MockHost host;
   host.text = hostText;
   host.hash = clipboard_fnv1a(hostText);
@@ -143,7 +143,7 @@ void test_poll(const std::wstring& hostText, const std::string& label) {
   ok(current.generation == 5, label + ": still carrying the generation");
 }
 
-void test_update(const std::wstring& viewerText, const std::string& label) {
+void test_update(const std::u16string& viewerText, const std::string& label) {
   MockHost host;
   LoopbackLink link(&host);
   ok(send_clipboard_update(link, 1, viewerText, clipboard_fnv1a(viewerText), 0),
@@ -157,13 +157,13 @@ void test_update(const std::wstring& viewerText, const std::string& label) {
 int main() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
 
-  test_poll(L"host clipboard ascii", "poll-ascii");
-  test_poll(L"호스트 클립보드", "poll-korean");                 // "호스트 클립보드"
-  test_poll(std::wstring{L'x', L'\xD83D', L'\xDE00', L'y'}, "poll-emoji");  // x U+1F600 y
+  test_poll(u"host clipboard ascii", "poll-ascii");
+  test_poll(u"호스트 클립보드", "poll-korean");                 // "호스트 클립보드"
+  test_poll(std::u16string{u'x', u'\xD83D', u'\xDE00', u'y'}, "poll-emoji");  // x U+1F600 y
 
-  test_update(L"viewer clipboard ascii", "update-ascii");
-  test_update(L"뷰어에서 복사", "update-korean");                // "뷰어에서 복사"
-  test_update(std::wstring(4096, L'z'), "update-large");
+  test_update(u"viewer clipboard ascii", "update-ascii");
+  test_update(u"뷰어에서 복사", "update-korean");                // "뷰어에서 복사"
+  test_update(std::u16string(4096, u'z'), "update-large");
 
   std::printf("clipboard_wire_test: %s (%d passed, %d failed)\n", gFail == 0 ? "PASS" : "FAIL",
               gPass, gFail);

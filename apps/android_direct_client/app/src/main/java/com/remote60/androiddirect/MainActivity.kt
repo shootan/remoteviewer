@@ -2,6 +2,8 @@
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
@@ -586,6 +588,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var viewerSplit: LinearLayout
     private lateinit var viewerRotateButton: Button
     private lateinit var viewerKeysButton: Button
+    private lateinit var viewerClipboardButton: Button
     private var viewerKeyPanel: ViewerKeyPanel? = null
     private lateinit var viewerMenuButton: Button
     private lateinit var viewerDataUsageText: TextView
@@ -794,6 +797,90 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
+    // --- clipboard text sync (K1) ------------------------------------------------------
+    //
+    // Android is not Windows here, and the difference decides the design. From Android 10 an app
+    // may only read the clipboard while it holds focus, so there is no background watcher: the
+    // clipboard is read when this activity has focus and when the system reports a change while
+    // it does. Writing is likewise a foreground action. The native side never touches the
+    // clipboard -- it only carries text over the control channel -- and its echo guard means text
+    // that just arrived from the PC is not sent straight back.
+
+    private val clipboardManager by lazy {
+        getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    }
+
+    private val clipboardChangedListener = ClipboardManager.OnPrimaryClipChangedListener {
+        pushLocalClipboardToHost("clip_changed")
+    }
+    private var clipboardListenerRegistered = false
+
+    /** Reads the phone clipboard, if it can, and offers it to the host. */
+    private fun pushLocalClipboardToHost(reason: String) {
+        if (!NativeSessionBridge.nativeIsClipboardSyncEnabled()) return
+        if (!NativeSessionBridge.nativeHostSupportsClipboard()) return
+        // getPrimaryClip returns null without focus on Android 10+; that is expected, not an error.
+        val text = try {
+            clipboardManager.primaryClip?.takeIf { it.itemCount > 0 }
+                ?.getItemAt(0)?.coerceToText(this)?.toString()
+        } catch (t: Throwable) {
+            null
+        }
+        if (text.isNullOrEmpty()) return
+        // False covers "not worth sending" (echo, duplicate, empty, oversize, not connected), which
+        // is the common case -- the listener fires for our own writes too.
+        if (NativeSessionBridge.nativeQueueClipboardText(text)) {
+            diagnosticsLog.log("clipboard_sent", "reason=$reason units=${text.length}")
+        }
+    }
+
+    /** Applies clipboard text the host sent, if any is waiting. Polled from the status ticker. */
+    private fun drainIncomingClipboard() {
+        if (!NativeSessionBridge.nativeIsClipboardSyncEnabled()) return
+        val text = NativeSessionBridge.nativeTakeIncomingClipboardText() ?: return
+        if (text.isEmpty()) return
+        try {
+            clipboardManager.setPrimaryClip(ClipData.newPlainText("GNLink", text))
+            diagnosticsLog.log("clipboard_received", "units=${text.length}")
+            Toast.makeText(this, R.string.clipboard_received, Toast.LENGTH_SHORT).show()
+        } catch (t: Throwable) {
+            // Setting the clipboard also needs the foreground; losing one update is not fatal, and
+            // the next host change will offer it again.
+            diagnosticsLog.log("clipboard_apply_failed", "error=${t.javaClass.simpleName}")
+        }
+    }
+
+    private fun toggleClipboardSync() {
+        if (!NativeSessionBridge.nativeHostSupportsClipboard()) {
+            Toast.makeText(this, R.string.clipboard_unsupported, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val next = !NativeSessionBridge.nativeIsClipboardSyncEnabled()
+        NativeSessionBridge.nativeSetClipboardSyncEnabled(next)
+        diagnosticsLog.log("clipboard_toggle", "enabled=$next")
+        Toast.makeText(
+            this,
+            if (next) R.string.clipboard_sync_on else R.string.clipboard_sync_off,
+            Toast.LENGTH_SHORT,
+        ).show()
+        renderClipboardButton()
+        // Turning it on should not wait for the next copy to catch up with what is already there.
+        if (next) pushLocalClipboardToHost("toggle_on")
+    }
+
+    /** Dims the button when the connected host cannot do it, and marks it when sync is off. */
+    private fun renderClipboardButton() {
+        if (!::viewerClipboardButton.isInitialized) return
+        val supported = NativeSessionBridge.nativeHostSupportsClipboard()
+        val enabled = supported && NativeSessionBridge.nativeIsClipboardSyncEnabled()
+        viewerClipboardButton.alpha = if (supported) 1.0f else 0.45f
+        viewerClipboardButton.text = if (enabled) {
+            getString(R.string.clipboard_button)
+        } else {
+            getString(R.string.clipboard_button) + "✕"
+        }
+    }
+
     /**
      * Poll cadence follows the scene (A1). Anything time-critical -- selection timeout,
      * switching feedback, stall recovery -- stays at 250ms; idle screens have nothing that
@@ -930,6 +1017,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             showViewerControls(emphasized = true)
             viewerKeyPanel?.toggle()
         }
+        viewerClipboardButton = findViewById(R.id.viewerClipboardButton)
+        viewerClipboardButton.setOnClickListener {
+            showViewerControls(emphasized = true)
+            toggleClipboardSync()
+        }
+        renderClipboardButton()
         viewerLoadingPanel = findViewById(R.id.viewerLoadingPanel)
         viewerLoadingText = findViewById(R.id.viewerLoadingText)
         viewerImeCaptureView = findViewById(R.id.viewerImeCaptureView)
@@ -1170,10 +1263,20 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         statusHandler.post(statusPollRunnable)
         applyImmersiveMode()
         syncVideoSurface(forceRebind = false)
+        // Only listen while in the foreground: that is the only time the clipboard can be read
+        // anyway (Android 10+), and a listener left registered would fire uselessly.
+        if (!clipboardListenerRegistered) {
+            clipboardManager.addPrimaryClipChangedListener(clipboardChangedListener)
+            clipboardListenerRegistered = true
+        }
     }
 
     override fun onPause() {
         saveCurrentEndpoint()
+        if (clipboardListenerRegistered) {
+            clipboardManager.removePrimaryClipChangedListener(clipboardChangedListener)
+            clipboardListenerRegistered = false
+        }
         statusHandler.removeCallbacks(statusPollRunnable)
         dismissViewerLogDialog()
         releaseViewerModifiers()
@@ -1186,6 +1289,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
             applyImmersiveMode()
+            // Gaining focus is the moment the clipboard becomes readable (Android 10+), so a copy
+            // made in another app is picked up here rather than being missed entirely.
+            pushLocalClipboardToHost("focus_gained")
         }
     }
 
@@ -2900,6 +3006,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun renderStatus() {
         val nowMs = SystemClock.elapsedRealtime()
+        // Clipboard text sync (K1): the bridge has no native->Java callback, so the text the host
+        // sent is collected on the poll that is already running, and the button follows the host's
+        // advertised capability as soon as the first pong reports it.
+        drainIncomingClipboard()
+        renderClipboardButton()
         val statusValue = NativeSessionBridge.nativeGetStatus()
         val errorValue = NativeSessionBridge.nativeGetLastError()
         val panelSnapshot = parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson())
