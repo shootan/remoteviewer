@@ -13,6 +13,9 @@ namespace remote60::native_poc::update {
 namespace {
 
 constexpr wchar_t kBackupSuffix[] = L".gnlink-old";
+// How many set-aside copies of one backup name are tolerated before the swap gives up. Bounded so
+// a recurring failure becomes visible instead of becoming an ever-growing pile.
+constexpr int kMaxStaleBackups = 50;
 
 std::string to_utf8(const std::wstring& w) {
   if (w.empty()) return {};
@@ -240,7 +243,47 @@ bool WindowsUpdateEffects::AcquireLock() {
     return false;
   }
   lock_ = h;
+  // Litter from a previous attempt, cleared now that the lock says nobody else is mid-update.
+  //
+  // The swap already copes with a backup sitting on a name it needs -- it deletes it, or renames
+  // it to .gnlink-old.N and carries on -- so this is not what makes an update possible. What it
+  // does is stop the leavings accumulating: once the process that was holding a file has finally
+  // exited, nothing ever came back to remove it, so a directory that had one bad update kept the
+  // evidence forever and the .N pile only ever grew.
+  //
+  // Best effort in the literal sense: every failure here is ignored apart from being counted. A
+  // file that is still locked is still locked, and that is the swap's problem to report, not a
+  // reason to refuse an update that has not started.
+  SweepStaleBackups();
   return true;
+}
+
+void WindowsUpdateEffects::SweepStaleBackups() {
+  size_t removed = 0;
+  size_t stuck = 0;
+  for (const std::wstring& name : config_.payloadNames) {
+    const std::wstring backup = backup_path(name);
+    if (DeleteFileW(backup.c_str())) {
+      ++removed;
+    } else if (GetLastError() != ERROR_FILE_NOT_FOUND) {
+      ++stuck;
+    }
+    // The set-aside copies the swap makes when a backup will not delete. Nothing else removes
+    // these, so without this they are permanent.
+    for (int n = 1; n <= kMaxStaleBackups; ++n) {
+      const std::wstring aside = backup + L"." + std::to_wstring(n);
+      if (GetFileAttributesW(aside.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+      if (DeleteFileW(aside.c_str())) {
+        ++removed;
+      } else {
+        ++stuck;
+      }
+    }
+  }
+  if ((removed || stuck) && config_.trace) {
+    config_.trace("stale backups: removed " + std::to_string(removed) + ", still held " +
+                  std::to_string(stuck));
+  }
 }
 
 void WindowsUpdateEffects::ReleaseLock() {
@@ -513,6 +556,18 @@ bool WindowsUpdateEffects::PrepareForSwap() {
   };
 
   for (const ProcessTarget& target : preparedTargets_) {
+    // It is running and could not be identified, so it cannot be asked and cannot be waited for.
+    // Said here, where the reason is still known: without this the attempt still stops, but it
+    // stops reporting "could not ask pid N to stop", which describes the symptom and hides that
+    // the process was never something this updater could see in the first place.
+    if (!target.identityKnown) {
+      lastError_ = "cannot identify pid " + std::to_string(target.pid) + " (" +
+                   to_utf8(target.imagePath) +
+                   ") -- it is running and this updater cannot open it, so it can be neither asked "
+                   "to stop nor waited for";
+      if (config_.trace) config_.trace(lastError_);
+      return false;
+    }
     if (!target.hasWindow) {
       if (owner_of(target) != nullptr) {
         ownedChildPids_.push_back(target.pid);
@@ -568,6 +623,18 @@ bool WindowsUpdateEffects::Quiesce() {
   const std::vector<ProcessTarget>& targets =
       preparedTargets_.empty() ? fallback : preparedTargets_;
   for (const ProcessTarget& target : targets) {
+    // Running, and the enumerator could not identify it. There is nothing to wait on here -- that
+    // needs a handle we were refused -- and "cannot tell" must not become "it exited". One line,
+    // naming the pid and the image, because the alternative is this update going ahead over it and
+    // leaving behind a stale .gnlink-old that nobody can explain.
+    if (!target.identityKnown) {
+      lastError_ = "cannot identify pid " + std::to_string(target.pid) + " (" +
+                   to_utf8(target.imagePath) +
+                   ") -- it is running and this updater cannot open it, so whether it still holds "
+                   "the files this update replaces is unknown";
+      if (config_.trace) config_.trace(lastError_);
+      return false;
+    }
     SetLastError(0);
     HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, target.pid);
     if (!h) {
@@ -630,7 +697,6 @@ bool WindowsUpdateEffects::Quiesce() {
  * hide a repeating failure behind a growing directory. Reaching the limit is reported as its own
  * cause rather than as the move-aside failure it produces.
  */
-constexpr int kMaxStaleBackups = 50;
 
 bool WindowsUpdateEffects::Swap() {
   movedAside_.clear();

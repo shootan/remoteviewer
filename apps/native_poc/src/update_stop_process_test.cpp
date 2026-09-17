@@ -77,6 +77,36 @@ int run_fixture_child(const std::wstring& eventName) {
   return 0;
 }
 
+/**
+ * A process this test owns and has deliberately made unopenable. (item 9)
+ *
+ * An empty DACL -- present, and containing no ACE at all -- denies everyone everything, which is
+ * what makes OpenProcess fail with ERROR_ACCESS_DENIED. That is the only condition the enumerator's
+ * "running but unidentifiable" branch exists for, and it is otherwise produced only by processes
+ * this test has no business touching: a system service, or something running as another user.
+ * Borrowing one of those would make the result depend on how this machine happens to be configured
+ * and on whether the test is elevated. This depends on neither.
+ *
+ * The parent's handle from CreateProcess is unaffected. Access is checked when a handle is opened,
+ * not when it is used, so the fixture can still be waited on and cleaned up.
+ */
+int run_fixture_denied(const std::wstring& eventName) {
+  ACL empty{};
+  SECURITY_DESCRIPTOR sd{};
+  if (InitializeAcl(&empty, sizeof(empty), ACL_REVISION) &&
+      InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION) &&
+      SetSecurityDescriptorDacl(&sd, TRUE, &empty, FALSE)) {
+    // Failure is reported by the parent failing to see what it expects, not by a code here: this
+    // process cannot usefully complain to anyone.
+    SetKernelObjectSecurity(GetCurrentProcess(), DACL_SECURITY_INFORMATION, &sd);
+  }
+  HANDLE quit = OpenEventW(SYNCHRONIZE, FALSE, eventName.c_str());
+  if (!quit) return 90;
+  WaitForSingleObject(quit, 120000);
+  CloseHandle(quit);
+  return 0;
+}
+
 // ------------------------------------------------------------------- the fixture middle tier
 
 /**
@@ -280,6 +310,10 @@ int main(int argc, char** argv) {
   if (argc >= 3 && std::string(argv[1]) == "--fixture-child") {
     const std::string name(argv[2]);
     return run_fixture_child(std::wstring(name.begin(), name.end()));
+  }
+  if (argc >= 3 && std::string(argv[1]) == "--fixture-denied") {
+    const std::string name(argv[2]);
+    return run_fixture_denied(std::wstring(name.begin(), name.end()));
   }
   if (argc >= 3 && std::string(argv[1]) == "--fixture-middle") {
     const std::string name(argv[2]);
@@ -890,6 +924,148 @@ int main(int argc, char** argv) {
       check("race fixture started", false);
       if (raceQuit) CloseHandle(raceQuit);
     }
+  }
+
+  // ------------------------------------------- a running process this updater cannot identify
+  //
+  // The enumerator used to drop these where they were found. Nothing downstream could object,
+  // because nothing downstream ever saw them: the swap went ahead over a process that was still
+  // running and still holding its own files. This drives the real enumerate_product_processes
+  // against a process that genuinely refuses to be opened.
+  {
+    const std::wstring deniedEvent = eventName + L"-denied";
+    HANDLE deniedQuit = CreateEventW(nullptr, TRUE, FALSE, deniedEvent.c_str());
+    std::wstring cmdD = L"\"" + own_path() + L"\" --fixture-denied " + deniedEvent;
+    std::vector<wchar_t> mutableCmdD(cmdD.begin(), cmdD.end());
+    mutableCmdD.push_back(L'\0');
+    STARTUPINFOW siD{};
+    siD.cb = sizeof(siD);
+    PROCESS_INFORMATION pDenied{};
+    const bool startedD =
+        deniedQuit != nullptr &&
+        CreateProcessW(nullptr, mutableCmdD.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                       nullptr, nullptr, &siD, &pDenied) != FALSE;
+    // An ordinary fixture on the same event, so the sweep below contains both kinds at once.
+    // By this point every earlier fixture has been released, and a control that is not actually
+    // running at the same moment is no control at all -- it was the absence of one that made the
+    // first version of this check fail.
+    std::wstring cmdP = L"\"" + own_path() + L"\" --fixture-child " + deniedEvent;
+    std::vector<wchar_t> mutableCmdP(cmdP.begin(), cmdP.end());
+    mutableCmdP.push_back(L'\0');
+    STARTUPINFOW siP{};
+    siP.cb = sizeof(siP);
+    PROCESS_INFORMATION pPlain{};
+    const bool startedP =
+        deniedQuit != nullptr &&
+        CreateProcessW(nullptr, mutableCmdP.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                       nullptr, nullptr, &siP, &pPlain) != FALSE;
+    check("the ordinary control fixture started", startedP);
+    if (startedP) CloseHandle(pPlain.hThread);
+
+    check("the unopenable fixture started", startedD);
+    if (startedD) {
+      const uint32_t deniedPid = pDenied.dwProcessId;
+      CloseHandle(pDenied.hThread);
+
+      // It sets its own DACL after it starts, so wait for the denial to actually be in place
+      // rather than for the process to merely exist.
+      const bool denied = wait_until([deniedPid] {
+        SetLastError(0);
+        HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, deniedPid);
+        if (h) {
+          CloseHandle(h);
+          return false;
+        }
+        return GetLastError() == ERROR_ACCESS_DENIED;
+      }, 15000);
+      check("the fixture has made itself unopenable", denied,
+            "without this the rest of this section proves nothing");
+
+      if (denied) {
+        // The classifier, on a process that is demonstrably running.
+        ProcessTarget probe;
+        IdentityFailure why = IdentityFailure::None;
+        check("a denied process does not identify",
+              !capture_process_identity(deniedPid, &probe, &why));
+        check("...and is Unknowable, not Gone", why == IdentityFailure::Unknowable,
+              "why=" + std::to_string(static_cast<int>(why)));
+
+        // Both have to be in one snapshot for the comparison below to mean anything, and the
+        // control was started second.
+        const bool controlUp = wait_until([&pPlain] {
+          for (const ProcessTarget& t : fixture_targets()) {
+            if (t.pid == pPlain.dwProcessId) return true;
+          }
+          return false;
+        }, 15000);
+        check("the control fixture is enumerable", controlUp);
+
+        // The enumerator. This is the line the defect was on.
+        const std::vector<ProcessTarget> all = fixture_targets();
+        const ProcessTarget* found = nullptr;
+        for (const ProcessTarget& t : all) {
+          if (t.pid == deniedPid) found = &t;
+        }
+        check("the enumerator carries it forward instead of dropping it", found != nullptr,
+              std::to_string(all.size()) + " targets enumerated");
+        if (found) {
+          check("...marked as not identified", !found->identityKnown);
+          check("...carrying the image name the snapshot could read", !found->imagePath.empty(),
+                std::string(found->imagePath.begin(), found->imagePath.end()));
+          check("...and no creation time, because none could be read", found->creationTime == 0);
+        }
+
+        // The negative control that matters: everything else in the same enumeration is
+        // identified normally, so "not identified" is not simply what this build now says.
+        bool sawIdentified = false;
+        for (const ProcessTarget& t : all) {
+          if (t.pid == pPlain.dwProcessId && t.identityKnown && t.creationTime != 0) {
+            sawIdentified = true;
+          }
+        }
+        check("...while the ordinary fixture in the same sweep is identified", sawIdentified,
+              std::to_string(all.size()) + " targets enumerated");
+
+        // And the swap refuses, naming it -- the enumerator and the guard, end to end.
+        wchar_t tempD[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempD);
+        const std::wstring instD = std::wstring(tempD) + L"gnlink-denied-install";
+        const std::wstring stgD = std::wstring(tempD) + L"gnlink-denied-staging";
+        CreateDirectoryW(instD.c_str(), nullptr);
+        CreateDirectoryW(stgD.c_str(), nullptr);
+        // fixture_children(deniedPid) is exactly this one process: it matches on t.pid, and this
+        // fixture has no children of its own.
+        UpdateEffectsConfig cD = config_for(instD, stgD, deniedPid);
+        WindowsUpdateEffects eD(cD);
+        check("the swap is abandoned", !eD.PrepareForSwap());
+        check("...naming the pid",
+              eD.last_error().find(std::to_string(deniedPid)) != std::string::npos,
+              eD.last_error());
+        RemoveDirectoryW(stgD.c_str());
+        RemoveDirectoryW(instD.c_str());
+      }
+
+      SetEvent(deniedQuit);
+      const bool left = WaitForSingleObject(pDenied.hProcess, 15000) == WAIT_OBJECT_0;
+      if (startedP) {
+        WaitForSingleObject(pPlain.hProcess, 15000);
+        CloseHandle(pPlain.hProcess);
+      }
+      check("the unopenable fixture exits when asked", left);
+      CloseHandle(pDenied.hProcess);
+
+      // The other half of the classification, on the same pid: once it has really exited, the
+      // enumerator does not carry it at all. A pid that stopped being a process must not block an
+      // update -- which is what would happen if "cannot open" were read as one answer.
+      if (left) {
+        bool stillThere = false;
+        for (const ProcessTarget& t : fixture_targets()) {
+          if (t.pid == deniedPid) stillThere = true;
+        }
+        check("an exited pid is not carried forward", !stillThere);
+      }
+    }
+    if (deniedQuit) CloseHandle(deniedQuit);
   }
 
   // ---------------------------------------------------------------- cleanup

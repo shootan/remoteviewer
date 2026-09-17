@@ -129,11 +129,32 @@ std::vector<ProcessTarget> enumerate_product_processes(const std::vector<std::ws
         // The name is only how a candidate is found. What is carried forward is a full identity,
         // so that a PID reused between here and Quiesce cannot be mistaken for this process.
         ProcessTarget target;
-        if (capture_process_identity(static_cast<uint32_t>(entry.th32ProcessID), &target)) {
+        IdentityFailure why = IdentityFailure::None;
+        if (capture_process_identity(static_cast<uint32_t>(entry.th32ProcessID), &target, &why)) {
           target.parentPid = static_cast<uint32_t>(entry.th32ParentProcessID);
           target.hasWindow = process_has_top_level_window(target.pid);
           targets.push_back(std::move(target));
+        } else if (why == IdentityFailure::Unknowable) {
+          // Running, and this updater cannot identify it. This used to be dropped here, silently,
+          // which removed it from the list before anything downstream could object: nothing asked
+          // it to stop, nothing waited for it, and the swap went ahead over a process still
+          // holding its own files. Both places that would have refused -- request_process_stop and
+          // Quiesce, which each treat access-denied as "not knowing" rather than "gone" -- never
+          // saw it at all.
+          //
+          // So it is carried forward, marked, and the swap refuses with something it can name.
+          ProcessTarget unknown;
+          unknown.pid = static_cast<uint32_t>(entry.th32ProcessID);
+          unknown.imagePath = entry.szExeFile;  // the name is all that could be read
+          unknown.creationTime = 0;
+          unknown.parentPid = static_cast<uint32_t>(entry.th32ParentProcessID);
+          unknown.hasWindow = false;
+          unknown.identityKnown = false;
+          targets.push_back(std::move(unknown));
         }
+        // IdentityFailure::Gone falls through deliberately: the pid stopped being a process
+        // between the snapshot and the open, which is exactly what stopping it would achieve.
+        // Treating that as a blocker would let an ordinary exit cancel an update.
         break;
       }
     } while (Process32NextW(snapshot, &entry));

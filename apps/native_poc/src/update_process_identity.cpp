@@ -38,17 +38,35 @@ std::wstring image_path_of(HANDLE process) {
 
 }  // namespace
 
-bool capture_process_identity(uint32_t pid, ProcessTarget* out) {
+bool capture_process_identity(uint32_t pid, ProcessTarget* out, IdentityFailure* why) {
+  if (why) *why = IdentityFailure::None;
   if (!out) return false;
+  SetLastError(ERROR_SUCCESS);
   HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-  if (!h) return false;
+  if (!h) {
+    // The distinction the caller needs. Access denied means it is running and out of reach, and
+    // mistaking that for "the pid exited" is how an update proceeds over a process that is still
+    // holding the files it is about to replace. Anything else here -- typically
+    // ERROR_INVALID_PARAMETER -- is a pid that is no longer a process, which is the outcome
+    // stopping it was for.
+    if (why) {
+      *why = (GetLastError() == ERROR_ACCESS_DENIED) ? IdentityFailure::Unknowable
+                                                     : IdentityFailure::Gone;
+    }
+    return false;
+  }
   out->pid = pid;
   out->creationTime = creation_time_of(h);
   out->imagePath = image_path_of(h);
   CloseHandle(h);
   // A creation time of zero would make every later comparison vacuous, so it is treated as a
-  // failure to identify rather than as an identity.
-  return out->creationTime != 0;
+  // failure to identify rather than as an identity. The handle DID open, so the process is there:
+  // that is "cannot see it", not "gone".
+  if (out->creationTime == 0) {
+    if (why) *why = IdentityFailure::Unknowable;
+    return false;
+  }
+  return true;
 }
 
 bool process_identity_matches(void* handle, const ProcessTarget& target) {

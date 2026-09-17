@@ -53,6 +53,21 @@ struct ProcessTarget {
   uint32_t parentPid = 0;
   bool hasWindow = false;
 
+  /**
+   * False for a process that IS running and could not be identified.
+   *
+   * There are two ways to fail to identify a process and they are not the same answer. One is that
+   * the pid is no longer a process -- it exited between the snapshot and the open -- and that is
+   * exactly what an update wants. The other is that it is there and this updater cannot look at
+   * it, and treating that as "gone" is how an update proceeds over a process still holding the
+   * files it is about to replace.
+   *
+   * The enumerator used to drop both on the floor, so the second case never reached the two places
+   * that handle it correctly (request_process_stop and Quiesce both refuse on access-denied). A
+   * target carrying this flag is carried forward specifically so the swap can refuse.
+   */
+  bool identityKnown = true;
+
   // Identity only. parentPid and hasWindow describe the moment, not the process: the same process
   // is the same process whether or not it had opened a window yet.
   bool operator==(const ProcessTarget& other) const {
@@ -60,13 +75,25 @@ struct ProcessTarget {
   }
 };
 
+/** Why an identity could not be captured. The distinction decides whether an update may proceed. */
+enum class IdentityFailure {
+  None = 0,
+  /** The pid is not a process any more. It exited, which is what stopping it was for. */
+  Gone,
+  /** It is running and cannot be identified -- access denied, or its times could not be read. */
+  Unknowable,
+};
+
 /**
  * Reads a live process's identity. Returns false when it cannot be opened or has already exited.
  *
  * Used both by the production enumerator and by tests to describe the dummies they started, so
  * both sides agree on what "the same process" means.
+ *
+ * `why` (optional) says which kind of failure it was, because "it exited" and "it is there and I
+ * cannot see it" lead to opposite decisions about replacing files.
  */
-bool capture_process_identity(uint32_t pid, ProcessTarget* out);
+bool capture_process_identity(uint32_t pid, ProcessTarget* out, IdentityFailure* why = nullptr);
 
 /**
  * True when the process behind `handle` is still the one `target` described.
@@ -286,6 +313,15 @@ class WindowsUpdateEffects : public UpdateEffects {
   std::wstring staging_dir_for(const std::string& releaseId) const;
   std::wstring install_path(const std::wstring& name) const;
   std::wstring backup_path(const std::wstring& name) const;
+  /**
+   * Deletes backups a previous attempt left behind, and the copies the swap set aside when it
+   * could not delete one. Best effort: failures are counted and logged, never fatal.
+   *
+   * Run once the lock is held, because that is the moment nothing else is mid-update. The swap can
+   * already work around litter on a name it needs; what was missing was anything that ever cleared
+   * it once the process holding it had finally gone.
+   */
+  void SweepStaleBackups();
 
   UpdateEffectsConfig config_;
   void* lock_ = nullptr;  // HANDLE

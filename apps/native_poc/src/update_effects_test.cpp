@@ -1725,6 +1725,258 @@ int main(int argc, char** argv) {
     check("and the fetcher is not called", !fetcherRan);
   }
 
+  {
+    // ---------------------------------------------------------------------------------------
+    // A target the updater cannot identify. (item 9)
+    //
+    // Every case below is driven through the injected enumerateTargets/requestStop seams with
+    // synthetic targets. Nothing here starts or kills a process: the behaviour under test is a
+    // decision made from a target's fields, and running a real product process to produce those
+    // fields would test the OS rather than the decision -- and would be destructive on the
+    // machine that happens to be running the build.
+
+    // A pid that is genuinely not a process, established rather than assumed. Searching for one
+    // means the test cannot quietly become vacuous if some constant happened to be live.
+    const auto find_dead_pid = []() -> uint32_t {
+      for (uint32_t p = 0x7FFFFFF0; p > 0x7FFF0000; p -= 4) {
+        ProcessTarget t;
+        IdentityFailure why = IdentityFailure::None;
+        if (!capture_process_identity(p, &t, &why) && why == IdentityFailure::Gone) return p;
+      }
+      return 0;
+    };
+    const uint32_t deadPid = find_dead_pid();
+    check("a pid that is not a process was found", deadPid != 0);
+
+    // (b), at the level the refinement is actually implemented: a pid that has stopped being a
+    // process classifies as Gone, not as Unknowable. If this ever flipped, every process that
+    // exited normally between the snapshot and the open would start blocking updates.
+    {
+      ProcessTarget t;
+      IdentityFailure why = IdentityFailure::None;
+      const bool ok = capture_process_identity(deadPid, &t, &why);
+      check("an exited pid does not identify", !ok);
+      check("...and is classified Gone, not Unknowable", why == IdentityFailure::Gone,
+            "why=" + std::to_string(static_cast<int>(why)));
+    }
+    {
+      // The other side of the same classifier, so that "Gone" is not simply what it always says:
+      // a pid that IS a process identifies, with no failure reason at all.
+      ProcessTarget self;
+      IdentityFailure why = IdentityFailure::Unknowable;
+      check("a live pid identifies",
+            capture_process_identity(GetCurrentProcessId(), &self, &why));
+      check("...with no failure reason", why == IdentityFailure::None);
+      check("...and a non-zero creation time", self.creationTime != 0);
+    }
+
+    // The shape the enumerator now carries forward for an access-denied process: the pid and the
+    // image name it could read from the snapshot, and nothing else.
+    ProcessTarget unknowable;
+    unknowable.pid = 4242;
+    unknowable.imagePath = L"GNLinkHost.exe";
+    unknowable.creationTime = 0;
+    unknowable.hasWindow = false;
+    unknowable.identityKnown = false;
+
+    // (a) PrepareForSwap abandons, and says which pid and which image.
+    {
+      std::vector<std::string> traced;
+      UpdateEffectsConfig c = base_config(install, staging);
+      c.trace = [&traced](const std::string& line) { traced.push_back(line); };
+      c.enumerateTargets = [unknowable]() { return std::vector<ProcessTarget>{unknowable}; };
+      bool asked = false;
+      c.requestStop = [&asked](const ProcessTarget&) {
+        asked = true;
+        return true;
+      };
+      WindowsUpdateEffects e(c);
+      check("an unidentifiable target abandons the swap", !e.PrepareForSwap());
+      check("...naming the pid", e.last_error().find("4242") != std::string::npos,
+            e.last_error());
+      check("...naming the image", e.last_error().find("GNLinkHost.exe") != std::string::npos,
+            e.last_error());
+      check("...and saying it cannot be identified",
+            e.last_error().find("cannot identify") != std::string::npos, e.last_error());
+      check("...and it is never asked to stop, which would go to whatever holds that pid", !asked);
+      bool logged = false;
+      for (const std::string& line : traced) {
+        if (line.find("4242") != std::string::npos &&
+            line.find("GNLinkHost.exe") != std::string::npos) logged = true;
+      }
+      check("...and the reason reaches the log", logged,
+            std::to_string(traced.size()) + " trace lines");
+    }
+
+    // (a) Quiesce refuses the same target on its own, for the path where PrepareForSwap was not
+    // the caller. The two guards are separate code and a test that only drove one would leave the
+    // other free to regress.
+    {
+      UpdateEffectsConfig c = base_config(install, staging);
+      c.enumerateTargets = [unknowable]() { return std::vector<ProcessTarget>{unknowable}; };
+      WindowsUpdateEffects e(c);
+      check("quiesce refuses an unidentifiable target", !e.Quiesce());
+      check("...naming the pid and image",
+            e.last_error().find("4242") != std::string::npos &&
+                e.last_error().find("GNLinkHost.exe") != std::string::npos,
+            e.last_error());
+    }
+
+    // (b) The negative control the refinement exists for. The SAME target, same image, same
+    // absence of a live process -- only identityKnown differs -- and the update proceeds. Without
+    // this the guard above would be indistinguishable from refusing everything.
+    {
+      ProcessTarget exited;
+      exited.pid = deadPid;
+      exited.imagePath = L"GNLinkHost.exe";
+      exited.creationTime = 1234;  // it had one when it was enumerated
+      exited.hasWindow = true;
+      exited.identityKnown = true;
+
+      UpdateEffectsConfig c = base_config(install, staging);
+      c.enumerateTargets = [exited]() { return std::vector<ProcessTarget>{exited}; };
+      c.requestStop = [](const ProcessTarget&) { return true; };
+      WindowsUpdateEffects e(c);
+      check("a target that really exited does not abandon the swap", e.PrepareForSwap(),
+            e.last_error());
+      check("...and quiesce agrees there is nothing to wait for", e.Quiesce(), e.last_error());
+    }
+
+    // (c) Two pids of the same image. Both are looked at: the refusal cannot be something that
+    // only ever inspects the first entry, and the ask cannot stop after one.
+    {
+      ProcessTarget second = unknowable;
+      second.pid = 4246;
+
+      ProcessTarget knownGone;
+      knownGone.pid = deadPid;
+      knownGone.imagePath = L"GNLinkHost.exe";
+      knownGone.creationTime = 1234;
+      knownGone.hasWindow = true;
+      knownGone.identityKnown = true;
+
+      {
+        UpdateEffectsConfig c = base_config(install, staging);
+        c.enumerateTargets = [unknowable, second]() {
+          return std::vector<ProcessTarget>{unknowable, second};
+        };
+        WindowsUpdateEffects e(c);
+        check("two unidentifiable pids of one image still abandon", !e.PrepareForSwap());
+      }
+      {
+        // The identifiable one first, so reaching the second requires actually continuing.
+        UpdateEffectsConfig c = base_config(install, staging);
+        c.enumerateTargets = [knownGone, second]() {
+          return std::vector<ProcessTarget>{knownGone, second};
+        };
+        c.requestStop = [](const ProcessTarget&) { return true; };
+        WindowsUpdateEffects e(c);
+        check("an unidentifiable second pid is not skipped", !e.PrepareForSwap());
+        check("...and it is the second one that is named",
+              e.last_error().find("4246") != std::string::npos, e.last_error());
+      }
+      {
+        // And with both identifiable, both get asked -- one image, two processes, two requests.
+        ProcessTarget a = knownGone;
+        ProcessTarget b = knownGone;
+        b.pid = deadPid - 4;
+        b.creationTime = 5678;
+        auto pids = std::make_shared<std::vector<uint32_t>>();
+        UpdateEffectsConfig c = base_config(install, staging);
+        c.enumerateTargets = [a, b]() { return std::vector<ProcessTarget>{a, b}; };
+        c.requestStop = [pids](const ProcessTarget& t) {
+          pids->push_back(t.pid);
+          return true;
+        };
+        WindowsUpdateEffects e(c);
+        check("two identifiable pids of one image proceed", e.PrepareForSwap(), e.last_error());
+        check("...and both were asked", pids->size() == 2,
+              std::to_string(pids->size()) + " asked");
+      }
+    }
+
+    // (d) The .gnlink-old litter a previous attempt left behind is cleared when the lock is taken.
+    {
+      const std::wstring alpha = install + L"\\AlphaPayload.bin.gnlink-old";
+      const std::wstring beta = install + L"\\BetaPayload.bin.gnlink-old";
+      const std::wstring stranger = install + L"\\NotOurs.bin.gnlink-old";
+      write_text(alpha, "old alpha");
+      write_text(alpha + L".1", "older alpha");
+      write_text(alpha + L".2", "oldest alpha");
+      write_text(beta, "old beta");
+      write_text(stranger, "not in the payload set");
+      check("the stale backups are really on disk", exists(alpha) && exists(alpha + L".1") &&
+                                                        exists(alpha + L".2") && exists(beta),
+            "otherwise every removal check below passes vacuously");
+
+      std::vector<std::string> traced;
+      UpdateEffectsConfig c = base_config(install, staging);
+      c.lockName = c.lockName + L"-sweep";
+      c.trace = [&traced](const std::string& line) { traced.push_back(line); };
+      WindowsUpdateEffects e(c);
+      check("the lock is taken", e.AcquireLock(), e.last_error());
+      check("a stale backup is removed", !exists(alpha));
+      check("...and so are its set-aside copies",
+            !exists(alpha + L".1") && !exists(alpha + L".2"));
+      check("...for every payload name, not just the first", !exists(beta));
+      check("a backup outside the payload set is left alone", exists(stranger),
+            "the sweep is scoped to what this update replaces");
+      e.ReleaseLock();
+      DeleteFileW(stranger.c_str());
+    }
+
+    // (d) A backup that will not delete is reported and the update continues. A sweep that
+    // refused here would turn a tidy-up into a new way for updates to fail.
+    {
+      const std::wstring alpha = install + L"\\AlphaPayload.bin.gnlink-old";
+      write_text(alpha, "held open");
+      // No sharing at all, so DeleteFileW fails the way a file still mapped by a process does.
+      HANDLE held = CreateFileW(alpha.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL, nullptr);
+      check("the backup is held open", held != INVALID_HANDLE_VALUE);
+      check("...and exists before the sweep runs", exists(alpha));
+
+      std::vector<std::string> traced;
+      UpdateEffectsConfig c = base_config(install, staging);
+      c.lockName = c.lockName + L"-sweep-held";
+      c.trace = [&traced](const std::string& line) { traced.push_back(line); };
+      WindowsUpdateEffects e(c);
+      check("a held backup does not stop the lock being taken", e.AcquireLock(), e.last_error());
+      check("...and the file is still there", exists(alpha));
+      bool reported = false;
+      for (const std::string& line : traced) {
+        if (line.find("still held 1") != std::string::npos) reported = true;
+      }
+      check("...and the log says so", reported, std::to_string(traced.size()) + " trace lines");
+      e.ReleaseLock();
+      if (held != INVALID_HANDLE_VALUE) CloseHandle(held);
+      DeleteFileW(alpha.c_str());
+    }
+
+    // (e) The ordinary case, unchanged: a target that is asked and goes away. Driven through the
+    // same seams so that what is being checked is the decision, not the OS.
+    {
+      ProcessTarget graceful;
+      graceful.pid = deadPid;
+      graceful.imagePath = install + L"\\GNLinkClient.exe";
+      graceful.creationTime = 4321;
+      graceful.hasWindow = true;
+      graceful.identityKnown = true;
+
+      auto pids = std::make_shared<std::vector<uint32_t>>();
+      UpdateEffectsConfig c = base_config(install, staging);
+      c.enumerateTargets = [graceful]() { return std::vector<ProcessTarget>{graceful}; };
+      c.requestStop = [pids](const ProcessTarget& t) {
+        pids->push_back(t.pid);
+        return true;
+      };
+      WindowsUpdateEffects e(c);
+      check("a window-owning target is prepared", e.PrepareForSwap(), e.last_error());
+      check("...by being asked once", pids->size() == 1, std::to_string(pids->size()) + " asked");
+      check("...and quiesce completes", e.Quiesce(), e.last_error());
+    }
+  }
+
   remove_tree(install);
 
   std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED")
