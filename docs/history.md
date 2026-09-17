@@ -12119,3 +12119,12 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - **검증**: manifest↔디스크 **parity 11/11 전부 일치**(크기+sha256, `.claude/verify_release_130.py`), `gnlink_check_payload_set.py` **10/10 PASS**(0.2.109 처럼 Setup 이 빠진 매니페스트를 막는 게이트).
 - 🔴 **발견 — 출하 바이트가 체크아웃 설정에 좌우된다**: `ui/shell.html` 이 0.2.129 에서는 **19807B(CRLF)** 로 나갔는데 git blob 과 이 워크트리는 **19339B(LF)** 다(468줄 × CR). 즉 **어느 워크트리에서 빌드했느냐로 출하 해시가 달라진다.** `.gitattributes` 는 `apps/shared/update_manifest/**` 만 `-text` 로 고정하고 UI 자산은 autocrlf 에 맡겨져 있다. 이번엔 **git 내용 그대로(LF)** 로 담았고 바이트를 꾸미지 않았다. 고정이 필요하면 `.gitattributes` 에 UI 자산을 추가하는 것이 맞지만, **릴리스 중에 체크아웃 동작을 바꾸는 변경이라 손대지 않고 보고**한다.
 - **게시 안 함**: 사용자 지시 대기. `.sig`(운영키 서명)도 만들지 않았다 — 서명·게시는 검증용 절차다.
+
+### 2026-09-17 android 은 정식 경로로 게시된 적이 없었다 — payload-set 게이트가 platform 을 몰랐다
+
+- **막힌 지점**: `gnlink_deploy.sh --platform android` 가 payload-set 검사에서 거부됐다. 스크립트 자체는 platform 을 제대로 다루는데(`$PLATFORM.manifest/.sig`·백업·공개확인 전부), **`:238` 의 게이트 호출만 무조건**이고 `gnlink_check_payload_set.py` 는 `product_payload_names()`(**Windows exe/html 10개**)를 모든 매니페스트에 적용했다. `update_process_targets.cpp` 에 android/apk 인식은 **0줄**이다.
+- **실측으로 확정**: 이미 게시돼 있는 **0.2.19 android 매니페스트도 똑같이 exit=1** 로 거부된다. ⇒ `--platform android` 는 이 게이트를 **한 번도 통과한 적이 없고**, 서버에 android 매니페스트 백업이 0건인 것이 그것으로 설명된다. 기존 android 릴리스는 스크립트 밖 경로로 올라갔고, **그건 롤백 대상이 없는 게시**다.
+- **고친 방식 — 면제가 아니라 분기**: 매니페스트의 `platform=` 을 읽어 판단한다. `windows` 는 **현행 전량 대조 그대로**(약화 0, 출력도 동일). `android` 는 **아티팩트 정확히 1개 + `.apk` + `versionCode` 가 양의 정수**를 요구한다. APK 를 안 담았거나 둘을 담아 설치기에 고르게 하거나 versionCode 가 없는 매니페스트는, 0.2.109 의 Setup 누락이 swap 에서 그랬듯 **설치 시점에 똑같이 깨진다**. 모르는 platform·platform 줄 없음은 **fail-closed**(추측으로 엉뚱한 목록을 적용하는 게 애초 원인이라).
+  - `gnlink_deploy.sh` 는 **고칠 필요가 없었다** — 매니페스트 경로만 넘기므로, 게이트가 문서에서 직접 읽는 편이 CLI 플래그와 문서가 어긋날 여지도 없다.
+- **검증**: `automation/gnlink_check_payload_set_test.py` **12/12**. 요청된 6케이스 exit: windows 0.2.130=**0** · android 0.2.20=**0** · android 0개=**1** · android 2개=**1** · android versionCode 누락=**1** · windows exe 1개 누락=**1**. 추가로 non-numeric versionCode·apk 아님·미지 platform·platform 줄 없음도 전부 거부 확인. **거부 케이스가 실제로 exit≠0 인지**를 단언한다 — 통과만 하는 게이트는 장식이고, 0.2.109 는 있는 검사를 전부 통과했었다.
+- **산출물 무변경**: `rel/0.2.20` 의 APK 해시 `6040860c…` 그대로, `rel/0.2.130` parity 11/11 그대로. 게이트만 고쳤다.
