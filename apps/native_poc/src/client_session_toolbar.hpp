@@ -22,7 +22,14 @@ namespace remote60::native_poc {
 struct SessionToolbarCallbacks {
   std::function<void()> onTargets;  // back to the capture-target picker
   std::function<void()> onMacro;    // show/hide the macro window
-  std::function<void()> onClipboard;  // toggle clipboard text sync on/off (K1)
+  /**
+   * Chords the local OS would otherwise eat, sent to the HOST instead.
+   *
+   * Win+D and Alt+Tab never reach the remote machine by being typed: Windows acts on them here,
+   * on the viewer's own desktop. A button is the only way to aim them at the other end.
+   */
+  std::function<void()> onShowDesktop;   // Win+D on the host
+  std::function<void()> onSwitchWindow;  // Alt+Tab on the host
   std::function<void(uint32_t monitorId)> onMonitor;
   /**
    * Where this window says what it did with a click.
@@ -44,11 +51,54 @@ struct SessionToolbarMonitor {
   bool primary = false;
 };
 
+/**
+ * How the session is doing, as one dot.
+ *
+ * Three states because three is what a colour can carry at a glance, and because the useful
+ * question is not a number: is it fine, is it struggling, or has it stopped.
+ */
+enum class SessionHealth {
+  Good,    // green
+  Slow,    // amber: still moving, but late
+  Broken,  // red: nothing is arriving
+};
+
+/**
+ * What the dot is decided from. Every field is something the viewer already measures.
+ *
+ * Pure inputs rather than a pointer to session state so the rules can be tested without a session
+ * -- the thresholds are a judgement call and a judgement call that cannot be tested is a guess.
+ */
+struct SessionHealthInputs {
+  bool connected = false;         // the control channel is up
+  bool streaming = false;         // a picture is expected (not sitting in the picker)
+  bool haveRtt = false;           // a pong has measured one
+  uint64_t rttUs = 0;
+  uint64_t sinceLastFrameUs = 0;  // since the last frame reached the screen
+  bool congested = false;         // the receiver says it is recovering or congested
+};
+
+// A round trip past this is "late" rather than "fine"; measured sessions on this project sit well
+// under it, and interactive work starts to feel wrong above it.
+constexpr uint64_t kHealthSlowRttUs = 150000;  // 150 ms
+// No picture for this long, while a picture is expected, is a stop rather than a stutter. Chosen
+// at the low end of the 2-3 s the field logs show, so the dot turns red while the user is still
+// wondering, not after they have given up.
+constexpr uint64_t kHealthBrokenFrameGapUs = 2500000;  // 2.5 s
+
+/**
+ * The dot's colour, from what the viewer measured.
+ *
+ * Broken outranks Slow: a session with nothing arriving is not merely late, and saying "slow"
+ * about a dead link is the kind of reassurance that wastes somebody's afternoon.
+ */
+SessionHealth evaluate_session_health(const SessionHealthInputs& in);
+
 struct SessionToolbarState {
   bool connected = false;
   bool inputOn = false;
   bool macroOpen = false;
-  bool clipboardOn = false;  // clipboard text sync toggle (K1); the button shows it as active
+  SessionHealth health = SessionHealth::Good;  // the dot beside the frame rate
   bool relay = false;  // the billed path, so it is worth saying out loud
   /**
    * False until something has decided `relay`.

@@ -13,12 +13,22 @@
 // needs a live session, and it is the reason these lines exist.
 
 #include <windows.h>
+// windows.h defines min/max as macros, which turns any std::min call below into a syntax error.
+// The rest of this project undefines them the same way.
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
 #include <vector>
 
 #include "client_session_toolbar.hpp"
+#include "viewer_key_chord.hpp"
 
 namespace {
 
@@ -37,7 +47,8 @@ void ok(bool cond, const std::string& what, const std::string& detail = {}) {
 
 std::vector<std::string> gLines;
 int gTargetsInvoked = 0;
-int gClipboardInvoked = 0;
+int gShowDesktopInvoked = 0;
+int gSwitchWindowInvoked = 0;
 
 void pump(int ms) {
   const DWORD until = GetTickCount() + static_cast<DWORD>(ms);
@@ -91,7 +102,8 @@ int wmain() {
   remote60::native_poc::SessionToolbarCallbacks callbacks;
   callbacks.onLog = [](const std::string& line) { gLines.push_back(line); };
   callbacks.onTargets = [] { ++gTargetsInvoked; };
-  callbacks.onClipboard = [] { ++gClipboardInvoked; };  // clipboard text sync toggle (K1)
+  callbacks.onShowDesktop = [] { ++gShowDesktopInvoked; };
+  callbacks.onSwitchWindow = [] { ++gSwitchWindowInvoked; };
   ok(remote60::native_poc::session_toolbar_create(owner, std::move(callbacks)),
      "the toolbar window is created");
   // Shown, but at -4000,-4000: the bar only lays out its buttons when the owner is visible and
@@ -160,33 +172,50 @@ int wmain() {
        "invoked=" + std::to_string(gTargetsInvoked));
   }
 
-  // --------------------------------------------------------------- the clipboard toggle (K1)
+  // ------------------------------------------------- the two chords the local OS would swallow
   //
-  // The button only exists because a callback was wired for it; find it by its id in the down log
-  // (swept, not assumed, so a layout change moves the test with it) and prove a real click reaches
-  // the toggle. This is the product's own button and its own click path, not a copy of the rules.
-  int clipX = -1;
-  for (int x = 4; x < bounds.right - 4 && clipX < 0; x += 4) {
-    gLines.clear();
-    SendMessageW(bar, WM_LBUTTONDOWN, 0, at(x, midY));
-    SendMessageW(bar, WM_LBUTTONUP, 0, at(x, midY));
-    if (said("[toolbar] down id=4")) clipX = x;  // kButtonClipboard
-  }
-  ok(clipX >= 0, "the clipboard toggle button is present and hit-testable",
-     "x=" + std::to_string(clipX));
-  if (clipX >= 0) {
-    const int before = gClipboardInvoked;
-    SendMessageW(bar, WM_LBUTTONDOWN, 0, at(clipX, midY));
-    SendMessageW(bar, WM_LBUTTONUP, 0, at(clipX, midY));
-    ok(gClipboardInvoked == before + 1, "clicking it runs the clipboard toggle callback",
-       "invoked=" + std::to_string(gClipboardInvoked));
-    // And the negative half: a press that starts on it but releases off it must NOT toggle.
-    const int afterClick = gClipboardInvoked;
-    SendMessageW(bar, WM_LBUTTONDOWN, 0, at(clipX, midY));
+  // Win+D and Alt+Tab cannot be typed at the remote machine -- the viewer's own Windows acts on
+  // them first -- so these buttons are the only route. Each is found by its id in the down log
+  // (swept, not assumed, so a layout change moves the test with it) and clicked for real.
+  auto find_button = [&](const std::string& id) {
+    for (int x = 4; x < bounds.right - 4; x += 4) {
+      gLines.clear();
+      SendMessageW(bar, WM_LBUTTONDOWN, 0, at(x, midY));
+      SendMessageW(bar, WM_LBUTTONUP, 0, at(x, midY));
+      if (said("[toolbar] down id=" + id)) return x;
+    }
+    return -1;
+  };
+
+  const int desktopX = find_button("4");  // kButtonShowDesktop
+  ok(desktopX >= 0, "the 바탕화면 button is present and hit-testable",
+     "x=" + std::to_string(desktopX));
+  if (desktopX >= 0) {
+    const int before = gShowDesktopInvoked;
+    SendMessageW(bar, WM_LBUTTONDOWN, 0, at(desktopX, midY));
+    SendMessageW(bar, WM_LBUTTONUP, 0, at(desktopX, midY));
+    ok(gShowDesktopInvoked == before + 1, "clicking it runs the show-desktop callback",
+       "invoked=" + std::to_string(gShowDesktopInvoked));
+    // The negative half: a press that starts on it but releases elsewhere must send nothing. A
+    // chord fired by accident lands on someone else's desktop.
+    const int afterClick = gShowDesktopInvoked;
+    SendMessageW(bar, WM_LBUTTONDOWN, 0, at(desktopX, midY));
     SendMessageW(bar, WM_LBUTTONUP, 0, at(bounds.right - 1, midY));
-    ok(gClipboardInvoked == afterClick, "a press released off the clipboard button does not toggle",
-       "invoked=" + std::to_string(gClipboardInvoked));
+    ok(gShowDesktopInvoked == afterClick,
+       "a press released off it sends no chord", "invoked=" + std::to_string(gShowDesktopInvoked));
   }
+
+  const int switchX = find_button("5");  // kButtonSwitchWindow
+  ok(switchX >= 0, "the 화면전환 button is present and hit-testable",
+     "x=" + std::to_string(switchX));
+  if (switchX >= 0) {
+    const int before = gSwitchWindowInvoked;
+    SendMessageW(bar, WM_LBUTTONDOWN, 0, at(switchX, midY));
+    SendMessageW(bar, WM_LBUTTONUP, 0, at(switchX, midY));
+    ok(gSwitchWindowInvoked == before + 1, "clicking it runs the switch-window callback",
+       "invoked=" + std::to_string(gSwitchWindowInvoked));
+  }
+  ok(desktopX != switchX, "and they are two different buttons, not one found twice");
 
   // ------------------------------------------------------------------ 1a: no press recorded
   gLines.clear();
@@ -223,13 +252,105 @@ int wmain() {
   const std::wstring direct = line(true, true, false);
   const std::wstring relay = line(true, true, true);
 
+  // The bar was made sparse: it shows the frame rate and otherwise only what is WRONG. So a
+  // direct path and an undecided one both say nothing about the path -- which still keeps the
+  // promise that mattered, that a direct connection is never claimed before anything decided it.
   ok(unknown.find(L"직접") == std::wstring::npos,
      "an undecided path is NOT shown as a direct connection");
-  ok(unknown.find(L"확인 중") != std::wstring::npos, "and says it is still being worked out");
-  ok(relay.find(L"릴레이") != std::wstring::npos, "a relayed path says so");
-  ok(direct.find(L"직접") != std::wstring::npos, "and a direct one says so");
-  ok(unknown != direct && direct != relay && unknown != relay,
-     "the three readings differ from each other in text, not only in colour");
+  ok(direct.find(L"직접") == std::wstring::npos,
+     "and a decided-direct path does not spend a word saying so either");
+  ok(relay.find(L"릴레이") != std::wstring::npos,
+     "but a relayed path DOES say so -- it is the one that costs money");
+  ok(unknown.find(L"연결 중") != std::wstring::npos,
+     "a session that is not connected yet says that much");
+  ok(direct.find(L"연결 중") == std::wstring::npos, "and a connected one does not");
+
+  // ------------------------------------------------------------------ the health dot's rules
+  //
+  // The dot is the one thing on the bar that makes a claim about the network, so the thresholds
+  // are asserted rather than eyeballed. Tested through the product's own function.
+  {
+    using remote60::native_poc::SessionHealth;
+    using remote60::native_poc::SessionHealthInputs;
+    using remote60::native_poc::evaluate_session_health;
+    using remote60::native_poc::kHealthBrokenFrameGapUs;
+    using remote60::native_poc::kHealthSlowRttUs;
+
+    SessionHealthInputs good;
+    good.connected = true;
+    good.streaming = true;
+    good.haveRtt = true;
+    good.rttUs = 20000;            // 20 ms
+    good.sinceLastFrameUs = 30000; // a frame 30 ms ago
+    ok(evaluate_session_health(good) == SessionHealth::Good, "a fast, flowing session is green");
+
+    SessionHealthInputs slowRtt = good;
+    slowRtt.rttUs = kHealthSlowRttUs + 1;
+    ok(evaluate_session_health(slowRtt) == SessionHealth::Slow, "a high round trip is amber");
+
+    SessionHealthInputs congested = good;
+    congested.congested = true;
+    ok(evaluate_session_health(congested) == SessionHealth::Slow,
+       "a receiver that is repairing is amber even when the round trip is fine");
+
+    SessionHealthInputs stalled = good;
+    stalled.sinceLastFrameUs = kHealthBrokenFrameGapUs;
+    ok(evaluate_session_health(stalled) == SessionHealth::Broken,
+       "no picture for the stall window is red");
+
+    SessionHealthInputs disconnected = good;
+    disconnected.connected = false;
+    ok(evaluate_session_health(disconnected) == SessionHealth::Broken,
+       "a session with no control channel is red");
+
+    // Broken must outrank Slow: a dead session described as merely slow is the reassurance that
+    // wastes somebody's afternoon.
+    SessionHealthInputs both = good;
+    both.connected = false;
+    both.congested = true;
+    both.rttUs = kHealthSlowRttUs + 1;
+    ok(evaluate_session_health(both) == SessionHealth::Broken,
+       "and 'nothing is arriving' outranks 'this is slow'");
+
+    // The negative controls: neither of the two red conditions fires early, and the picker (where
+    // no picture is expected) is not a stall.
+    SessionHealthInputs justUnder = good;
+    justUnder.sinceLastFrameUs = kHealthBrokenFrameGapUs - 1;
+    ok(evaluate_session_health(justUnder) != SessionHealth::Broken,
+       "one microsecond under the stall window is NOT red");
+    SessionHealthInputs inPicker = good;
+    inPicker.streaming = false;
+    inPicker.sinceLastFrameUs = kHealthBrokenFrameGapUs * 10;
+    ok(evaluate_session_health(inPicker) != SessionHealth::Broken,
+       "and sitting in the picker is not a stalled stream");
+    SessionHealthInputs noRttYet = good;
+    noRttYet.haveRtt = false;
+    noRttYet.rttUs = kHealthSlowRttUs * 100;  // stale value, never measured
+    ok(evaluate_session_health(noRttYet) == SessionHealth::Good,
+       "an unmeasured round trip is not held against the session");
+  }
+
+  // ------------------------------------------------------------------ the chord order
+  //
+  // A chord whose modifier is released early is a bare keypress; one never released leaves Alt or
+  // Win stuck down on someone else's machine. Both are silent, so the order is pinned here.
+  {
+    using remote60::native_poc::viewer::host_key_chord;
+    using remote60::native_poc::viewer::kHostKeyDown;
+    using remote60::native_poc::viewer::kHostKeyUp;
+
+    const auto chord = host_key_chord(VK_LMENU, VK_TAB);
+    ok(chord.size() == 4, "a chord is four events");
+    ok(chord[0].kind == kHostKeyDown && chord[0].vk == VK_LMENU, "the modifier goes down first");
+    ok(chord[1].kind == kHostKeyDown && chord[1].vk == VK_TAB, "then the key");
+    ok(chord[2].kind == kHostKeyUp && chord[2].vk == VK_TAB, "the key comes up before the modifier");
+    ok(chord[3].kind == kHostKeyUp && chord[3].vk == VK_LMENU,
+       "and the modifier comes up LAST, so nothing is left held on the host");
+
+    const auto winD = host_key_chord(VK_LWIN, 'D');
+    ok(winD[0].vk == VK_LWIN && winD[1].vk == 'D' && winD[3].vk == VK_LWIN,
+       "Win+D is built the same way");
+  }
 
   // ------------------------------------------------------------------ auto-hide while pressed
   //
@@ -356,6 +477,107 @@ int wmain() {
     // them, or every comparison above is reading the same patch of background.
     ok(shot(1, 1) != idle, "the samples come from the button and not from the bar behind it",
        hex(shot(1, 1)) + " vs " + hex(idle));
+
+    // ---------------------------------------------------------- the dot, on screen, in colour
+    //
+    // The rules are asserted above; this is whether the user can SEE them. The dot's position is
+    // not computed -- the bar is photographed once per health state and the pixels are compared,
+    // so a layout change cannot quietly turn this into a test of empty background.
+    {
+      using remote60::native_poc::SessionHealth;
+      auto paint_with = [&](SessionHealth health) {
+        remote60::native_poc::SessionToolbarState s;
+        s.connected = true;
+        s.inputOn = true;
+        s.pathKnown = true;
+        s.fps = 30;
+        s.health = health;
+        remote60::native_poc::session_toolbar_update(s);
+        pump(150);
+      };
+      // ONE PrintWindow per state, not one per pixel. The first attempt sampled the row a pixel at
+      // a time and compared nonsense: the bar re-lays-out when state is pushed, so the width
+      // changed underneath the scan and the three rows were not even the same picture.
+      auto row = [&](SessionHealth health) {
+        paint_with(health);
+        std::vector<COLORREF> pixels;
+        RECT rc{};
+        GetClientRect(bar, &rc);
+        const int w = rc.right - rc.left;
+        const int h = rc.bottom - rc.top;
+        if (w <= 0 || h <= 0) return pixels;
+        HDC screen = GetDC(nullptr);
+        HDC mem = CreateCompatibleDC(screen);
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+        bi.bmiHeader.biWidth = w;
+        bi.bmiHeader.biHeight = -h;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        void* bits = nullptr;
+        HBITMAP dib = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        HGDIOBJ old = SelectObject(mem, dib);
+        if (PrintWindow(bar, mem, PW_RENDERFULLCONTENT) && bits) {
+          const int y = h / 2;
+          const auto* p = static_cast<const unsigned char*>(bits) + static_cast<size_t>(y) * w * 4;
+          for (int x = 0; x < w; ++x) {
+            pixels.push_back(RGB(p[x * 4 + 2], p[x * 4 + 1], p[x * 4]));
+          }
+        }
+        SelectObject(mem, old);
+        DeleteObject(dib);
+        DeleteDC(mem);
+        ReleaseDC(nullptr, screen);
+        return pixels;
+      };
+
+      const std::vector<COLORREF> green = row(SessionHealth::Good);
+      const std::vector<COLORREF> amber = row(SessionHealth::Slow);
+      const std::vector<COLORREF> red = row(SessionHealth::Broken);
+
+      {
+        RECT now{};
+        GetClientRect(bar, &now);
+        int greenAmber = 0, amberRed = 0, valid = 0;
+        for (size_t x = 0; x < green.size(); ++x) {
+          if (green[x] != CLR_INVALID) ++valid;
+          if (green[x] != amber[x]) ++greenAmber;
+          if (amber[x] != red[x]) ++amberRed;
+        }
+        std::printf("      dot probe: barNow=%ldx%ld scanned=%zu valid=%d g!=a:%d a!=r:%d\n",
+                    now.right - now.left, now.bottom - now.top, green.size(), valid, greenAmber,
+                    amberRed);
+      }
+      // Shortest of the three: the bar can re-lay-out between captures, and indexing all three by
+      // one of their lengths would read off the end of the others.
+      const size_t scan = std::min(green.size(), std::min(amber.size(), red.size()));
+      ok(scan > 0, "the bar was captured in all three health states",
+         "widths " + std::to_string(green.size()) + "/" + std::to_string(amber.size()) + "/" +
+             std::to_string(red.size()));
+      int dotX = -1;
+      for (size_t x = 0; x < scan; ++x) {
+        if (green[x] != amber[x] && amber[x] != red[x] && green[x] != red[x]) {
+          dotX = static_cast<int>(x);
+          break;
+        }
+      }
+      ok(dotX >= 0, "the health dot is drawn, and all three states differ on screen",
+         dotX < 0 ? std::string("no pixel changed with health")
+                  : "x=" + std::to_string(dotX) + " " + hex(green[dotX]) + " / " +
+                        hex(amber[dotX]) + " / " + hex(red[dotX]));
+      if (dotX >= 0) {
+        // Not merely different -- the right hues. Green is the greenest of the three, red the
+        // reddest; a swapped pair would pass a bare inequality check and mislead every user.
+        const COLORREF g = green[dotX], a = amber[dotX], r = red[dotX];
+        ok(GetGValue(g) > GetRValue(g), "the good dot is green (more green than red)", hex(g));
+        ok(GetRValue(r) > GetGValue(r), "the broken dot is red (more red than green)", hex(r));
+        ok(GetRValue(a) > GetGValue(a) / 2 && GetGValue(a) > GetBValue(a),
+           "and the slow dot is amber, between them", hex(a));
+      }
+      // Restore something ordinary for whatever runs after this.
+      paint_with(SessionHealth::Good);
+    }
   }
 
   // ------------------------------------------------------------------ the negative control

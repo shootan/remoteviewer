@@ -15,6 +15,7 @@
 #include "viewer_env_util.hpp"
 #include "viewer_state.hpp"
 #include "viewer_input_forward.hpp"
+#include "viewer_key_chord.hpp"
 #include "viewer_picker.hpp"
 #include "viewer_log.hpp"
 #include "viewer_window_proc.hpp"
@@ -184,6 +185,28 @@ void apply_initial_state(ViewerContext& ctx) {
   ctx.input.activeTouchDown.store(false, std::memory_order_relaxed);
 }
 
+/**
+ * Sends a modifier+key chord to the host as ordinary input events.
+ *
+ * The host turns these into real keystrokes when its target has focus, which is what makes Win+D
+ * and Alt+Tab act on the remote desktop. Queued through the same path as typing, so a chord cannot
+ * overtake the keys around it.
+ *
+ * Worth knowing where this does nothing: when the host is capturing a single WINDOW that does not
+ * hold focus, it posts the keys to that window instead of injecting them, and neither the shell nor
+ * the task switcher reads posted messages. These buttons are for desktop capture.
+ */
+void send_host_key_chord(ViewerState& ctx, uint32_t modifierVk, uint32_t keyVk, const char* what) {
+  if (!ctx.session.inputEnabled.load(std::memory_order_relaxed)) {
+    log_client_line(ctx, std::string("[toolbar] ") + what + " ignored: the input channel is off");
+    return;
+  }
+  for (const HostKeyStep& step : host_key_chord(modifierVk, keyVk)) {
+    enqueue_input_event(ctx, step.kind, 0, 0, 0, step.vk);
+  }
+  log_client_line(ctx, std::string("[toolbar] ") + what + " sent to the host");
+}
+
 int create_window_and_toolbar(ViewerContext& ctx) {
   if (!create_window(ctx)) {
     std::cerr << "[native-video-client] window create failed\n";
@@ -211,13 +234,14 @@ int create_window_and_toolbar(ViewerContext& ctx) {
       toggle_macro_window(ctx, ctx.session.hwnd);
       push_session_toolbar_state(ctx);
     };
-    toolbarCallbacks.onClipboard = [&ctx] {
-      // Clipboard text sync (K1) on/off. Flip and repaint the bar so the button colour follows.
-      auto& clip = ctx.control.clipboard;
-      const bool now = !clip.enabled.load(std::memory_order_relaxed);
-      clip.enabled.store(now, std::memory_order_relaxed);
-      log_client_line(ctx, std::string("[clipboard] sync ") + (now ? "on" : "off"));
-      push_session_toolbar_state(ctx);
+    // Win+D and Alt+Tab never survive being typed: the viewer's own Windows acts on them here, so
+    // the remote machine never hears about it. Sent as explicit key events instead, which is the
+    // only way to aim them at the other end.
+    toolbarCallbacks.onShowDesktop = [&ctx] {
+      send_host_key_chord(ctx, VK_LWIN, 'D', "show-desktop");
+    };
+    toolbarCallbacks.onSwitchWindow = [&ctx] {
+      send_host_key_chord(ctx, VK_LMENU, VK_TAB, "switch-window");
     };
     toolbarCallbacks.onMonitor = [&ctx](uint32_t monitorId) {
       ctx.picker.windowPanel.RequestMonitorSelect(monitorId);

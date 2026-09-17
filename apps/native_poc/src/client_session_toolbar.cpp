@@ -30,7 +30,9 @@ enum ButtonId : int {
   kButtonTargets = 1,
   kButtonMacro = 2,
   kButtonMonitor = 3,
-  kButtonClipboard = 4,
+  // Chords the local OS eats before they can be typed at the remote machine.
+  kButtonShowDesktop = 4,
+  kButtonSwitchWindow = 5,
 };
 
 struct Button {
@@ -66,20 +68,30 @@ SessionToolbarState gPendingState;  // written by the pusher, drained by the win
 
 int scaled(int value) { return MulDiv(value, g.dpi, 96); }
 
+// Bigger than the palette, and that headroom is not decoration.
+//
+// This was 8 while the bar already asked for nine brushes, so the ninth fell off the end and was
+// drawn in whatever colour happened to be cached first -- the background. A button border painted
+// in the background colour is invisible, and nothing said so: the overflow returns a valid brush,
+// so it renders happily in the wrong colour. Adding the health dot pushed it to twelve and the
+// three states came out identical on screen, which is how it was finally noticed.
+constexpr int kBrushCacheSize = 24;
+
 HBRUSH solid_brush(COLORREF color) {
-  // Small and fixed: three shades for the bar, and one per button state.
-  static COLORREF keys[8]{};
-  static HBRUSH values[8]{};
-  for (int i = 0; i < 8; ++i) {
+  static COLORREF keys[kBrushCacheSize]{};
+  static HBRUSH values[kBrushCacheSize]{};
+  for (int i = 0; i < kBrushCacheSize; ++i) {
     if (values[i] && keys[i] == color) return values[i];
   }
-  for (int i = 0; i < 8; ++i) {
+  for (int i = 0; i < kBrushCacheSize; ++i) {
     if (!values[i]) {
       keys[i] = color;
       values[i] = CreateSolidBrush(color);
       return values[i];
     }
   }
+  // Still the wrong colour if the palette ever outgrows the table -- but the table is now twice
+  // the palette, so reaching here means somebody added a lot of colours and should grow it again.
   return values[0];
 }
 
@@ -87,19 +99,35 @@ std::wstring status_text() { return session_toolbar_status_text(g.state); }
 
 }  // namespace
 
+SessionHealth evaluate_session_health(const SessionHealthInputs& in) {
+  // Nothing is arriving: the link is down, or a picture is expected and has stopped coming.
+  // Checked first, because calling a dead session "slow" is the reassurance that wastes an
+  // afternoon.
+  if (!in.connected) return SessionHealth::Broken;
+  if (in.streaming && in.sinceLastFrameUs >= kHealthBrokenFrameGapUs) return SessionHealth::Broken;
+  // Still moving, but late: the receiver is repairing loss, or the round trip has grown enough to
+  // be felt on every click.
+  if (in.congested) return SessionHealth::Slow;
+  if (in.haveRtt && in.rttUs > kHealthSlowRttUs) return SessionHealth::Slow;
+  return SessionHealth::Good;
+}
+
 std::wstring session_toolbar_status_text(const SessionToolbarState& state) {
-  std::wstring text = state.connected ? L"연결됨" : L"연결 중";
-  // Three answers, not two. The symbols are there so the three do not depend on colour to be
-  // told apart -- the bar is one line of text and has no colour to spare anyway.
-  if (!state.pathKnown) {
-    text += L" · ◌ 경로 확인 중";
-  } else if (state.relay) {
-    text += L" · ⇄ 릴레이";
-  } else {
-    text += L" · → 직접";
-  }
-  if (!state.inputOn) text += L" · 입력 꺼짐";
-  if (state.fps > 0) text += L" · " + std::to_wstring(state.fps) + L"fps";
+  // Deliberately sparse. This bar sits on top of the remote screen, so every word it adds is a
+  // word nobody asked for: it shows the frame rate, and otherwise only what is WRONG. The dot
+  // carries the health, so the text does not repeat it.
+  std::wstring text;
+  auto add = [&text](const std::wstring& part) {
+    if (!text.empty()) text += L" · ";
+    text += part;
+  };
+  if (!state.connected) add(L"연결 중");
+  // Only the relayed path is named: it is the one that costs money. A direct path and an
+  // undecided one both say nothing -- which keeps the older promise too, that a direct connection
+  // is never claimed before anything has decided it.
+  if (state.pathKnown && state.relay) add(L"릴레이");
+  if (!state.inputOn) add(L"입력 꺼짐");
+  if (state.fps > 0) add(std::to_wstring(state.fps) + L"fps");
   return text;
 }
 
@@ -152,16 +180,18 @@ SIZE rebuild_layout() {
   // on the callback so an embedding that did not wire one keeps the old two-button bar.
   if (g.callbacks.onTargets) add(kButtonTargets, L"대상 선택", false);
   add(kButtonMacro, L"매크로", g.state.macroOpen);
-  // Clipboard text sync (K1). Gated on the callback so an embedding that did not wire one keeps
-  // the bar it had. Active colour reflects whether sync is on, which is the toggle's whole point --
-  // a user copying a password wants to be able to see it is off before they copy.
-  if (g.callbacks.onClipboard) add(kButtonClipboard, L"클립보드", g.state.clipboardOn);
+  // The two chords the local OS swallows. Gated on their callbacks so an embedding that wired
+  // none keeps the bar it had.
+  if (g.callbacks.onShowDesktop) add(kButtonShowDesktop, L"바탕화면", false);
+  if (g.callbacks.onSwitchWindow) add(kButtonSwitchWindow, L"화면전환", false);
   const std::wstring monitors = monitor_label();
   if (!monitors.empty()) add(kButtonMonitor, monitors + L" ▾", false);
 
   const int statusWidth = text_width(status_text());
   SIZE size{};
-  size.cx = x + scaled(6) + statusWidth + pad;
+  // scaled(12) + dot + scaled(6) is what paint() puts between the last button and the text; the
+  // width has to include it or the status is drawn into a rectangle that is too small for it.
+  size.cx = x + scaled(12) + scaled(9) + scaled(6) + statusWidth + pad;
   size.cy = height + pad * 2;
   return size;
 }
@@ -228,7 +258,24 @@ void paint(HDC target) {
     right = std::max<int>(right, button.rect.right);
   }
 
-  RECT statusRect{right + scaled(10), 0, width - scaled(6), height};
+  // The health dot, left of the status text. A filled circle rather than a coloured word: it is
+  // read without being looked at, and it survives the bar being narrow.
+  const int dotSize = scaled(9);
+  const int dotLeft = right + scaled(12);
+  const int dotTop = (height - dotSize) / 2;
+  {
+    COLORREF dot = RGB(96, 200, 132);  // good
+    if (g.state.health == SessionHealth::Slow) dot = RGB(232, 168, 72);
+    if (g.state.health == SessionHealth::Broken) dot = RGB(226, 96, 96);
+    HGDIOBJ oldBrush = SelectObject(hdc, solid_brush(dot));
+    HGDIOBJ oldPen = SelectObject(hdc, GetStockObject(NULL_PEN));
+    // +1 because Ellipse excludes its right/bottom edge.
+    Ellipse(hdc, dotLeft, dotTop, dotLeft + dotSize + 1, dotTop + dotSize + 1);
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+  }
+
+  RECT statusRect{dotLeft + dotSize + scaled(6), 0, width - scaled(6), height};
   SetTextColor(hdc, g.state.relay ? RGB(242, 186, 106) : RGB(150, 158, 170));
   DrawTextW(hdc, status_text().c_str(), -1, &statusRect,
             DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
@@ -393,8 +440,12 @@ LRESULT CALLBACK toolbar_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (g.callbacks.onTargets) g.callbacks.onTargets();
       } else if (pressed == kButtonMacro) {
         if (g.callbacks.onMacro) g.callbacks.onMacro();
-      } else if (pressed == kButtonClipboard) {
-        if (g.callbacks.onClipboard) g.callbacks.onClipboard();
+      } else if (pressed == kButtonShowDesktop) {
+        if (g.callbacks.onLog) g.callbacks.onLog("[toolbar] show-desktop clicked");
+        if (g.callbacks.onShowDesktop) g.callbacks.onShowDesktop();
+      } else if (pressed == kButtonSwitchWindow) {
+        if (g.callbacks.onLog) g.callbacks.onLog("[toolbar] switch-window clicked");
+        if (g.callbacks.onSwitchWindow) g.callbacks.onSwitchWindow();
       } else if (pressed == kButtonMonitor) {
         for (const Button& button : g.buttons) {
           if (button.id == kButtonMonitor) {

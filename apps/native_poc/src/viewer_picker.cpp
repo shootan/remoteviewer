@@ -105,10 +105,26 @@ void push_session_toolbar_state(ViewerState& ctx) {
   state.connected = ctx.control.connected.load(std::memory_order_relaxed);
   state.inputOn = ctx.session.inputEnabled.load(std::memory_order_relaxed);
   state.macroOpen = remote60::native_poc::macro_window_visible();
-  state.clipboardOn = ctx.control.clipboard.enabled.load(std::memory_order_relaxed);  // K1 toggle
   state.relay = ctx.session.relayPath.load(std::memory_order_relaxed);
   state.pathKnown = ctx.session.relayPathKnown.load(std::memory_order_relaxed);
-  state.fps = ctx.metrics.Snapshot().decodedFpsX100 / 100;
+  const auto metricsSnapshot = ctx.metrics.Snapshot();
+  state.fps = metricsSnapshot.decodedFpsX100 / 100;
+  // The health dot, from what the session already measures. The picker is not a stall, so frame
+  // age only counts against the session while a picture is actually expected.
+  {
+    remote60::native_poc::SessionHealthInputs health;
+    const uint64_t nowUs = qpc_now_us();
+    health.connected = ctx.control.connected.load(std::memory_order_relaxed);
+    health.streaming = !ctx.picker.visible.load(std::memory_order_relaxed);
+    const uint64_t rttAtUs = ctx.control.lastRttAtUs.load(std::memory_order_relaxed);
+    health.haveRtt = rttAtUs != 0;
+    health.rttUs = ctx.control.lastRttUs.load(std::memory_order_relaxed);
+    const uint64_t lastFrameUs = ctx.recvLive.lastPublishUs.load(std::memory_order_relaxed);
+    health.sinceLastFrameUs = (lastFrameUs != 0 && nowUs > lastFrameUs) ? nowUs - lastFrameUs : 0;
+    // 0 is the receiver's "normal"; anything else is recovering or congested.
+    health.congested = metricsSnapshot.congestionState != 0;
+    state.health = remote60::native_poc::evaluate_session_health(health);
+  }
   state.selectedMonitorId = panel.selectedMonitorId;
   for (const auto& monitor : panel.monitors) {
     state.monitors.push_back({monitor.id, monitor.width, monitor.height, monitor.primary});
