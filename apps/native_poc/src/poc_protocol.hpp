@@ -83,6 +83,21 @@ enum class UdpPacketKind : uint16_t {
   // media socket; the host replays just those chunks from a small recent-AU cache. Negotiated via
   // kUdpFeatureVideoNack, so an old host that never advertised it is never sent one. (video NACK.)
   VideoNack = 308,
+  // Control-channel resume (item 8). A viewer whose control channel has stopped answering while
+  // video is still arriving asks to rebuild control on the SAME session rather than reconnecting:
+  // the media socket and its NAT mapping are demonstrably fine, so tearing the session down to
+  // recover a channel that rides it throws away the one thing that still works.
+  //
+  // It is its own packet kind rather than a control message because the thing being repaired is
+  // the message stream itself. UdpControlChannel::Reset() restarts the sequence numbers, so a
+  // message sent through the broken stream to ask for a reset cannot be relied on to arrive, and
+  // a reset performed by one side alone leaves the other answering acks while dropping the data
+  // (the channel says so itself, udp_control_channel.cpp:62-63).
+  //
+  // Negotiated via kUdpFeatureControlResume, so a host that never advertised it is never sent one
+  // -- and a host that does not know the kind ignores it, which is the same outcome.
+  ControlResume = 309,
+  ControlResumeAck = 310,
 };
 
 // Control messages are numbered per direction so a peer can tell a retransmission from a new
@@ -519,6 +534,11 @@ constexpr uint32_t kUdpFeatureVideoFecInterleaved = 0x8u;
 // chain breaks. RTT on this path is a few ms, so 1-2 retransmit rounds cost almost nothing. An old
 // peer that never sets this bit is never sent a NACK and behaves exactly as before. (video NACK.)
 constexpr uint32_t kUdpFeatureVideoNack = 0x10u;
+// Control-channel resume (item 8). Advertised by a host that can rebuild control on the same
+// session epoch; requested by a viewer that will ask. Both must be set for a resume to be sent,
+// which is what keeps a new viewer working against an old host: it simply never asks, and falls
+// back to the behaviour it had before.
+constexpr uint32_t kUdpFeatureControlResume = 0x20u;
 constexpr uint32_t kUdpProtocolVersion = 2u;
 
 // One NACK datagram asks for up to this many missing chunkIndex values of a single AU. A 1080p IDR
@@ -606,6 +626,26 @@ struct UdpControlAckPacket {
   uint16_t reserved = 0;
   uint16_t missing[kUdpControlMaxMissingPerNack] = {};
 };
+
+// Asks to rebuild the control stream on the current session (kind ControlResume), or answers that
+// request (kind ControlResumeAck). One shape for both, as with ack/nack above.
+//
+// resumeId is chosen by the asker and echoed back. It does not authenticate anything -- it pairs a
+// reply with the attempt that caused it, so a late answer to an abandoned attempt cannot be
+// mistaken for the current one. Session identity is the endpoint the host already bound at Hello;
+// anyone able to send this could already inject control data on the same path, so this does not
+// widen what a stranger can reach. What bounds it instead is WHEN the host will honour one: only
+// while its own control session is not being served, i.e. only when control is already broken.
+struct UdpControlResumePacket {
+  uint32_t magic = kMagic;
+  uint16_t kind = static_cast<uint16_t>(UdpPacketKind::ControlResume);
+  uint16_t size = static_cast<uint16_t>(sizeof(UdpControlResumePacket));
+  uint32_t streamId = 0;   // the sender's own tx stream, so a reply cannot look like a request
+  uint32_t resumeId = 0;   // chosen by the viewer, echoed by the host
+  uint32_t accepted = 0;   // ack only: 1 the stream was reset and is being served, 0 refused
+  uint32_t reserved = 0;
+};
+static_assert(sizeof(UdpControlResumePacket) == 24, "control resume wire layout must not drift");
 
 struct UdpVideoChunkHeader {
   uint32_t magic = kMagic;

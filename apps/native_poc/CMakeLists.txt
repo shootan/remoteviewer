@@ -1589,6 +1589,18 @@ endif()
 
 # Clipboard text sync core (K1): the wire codec and the echo-loop state machine, with no Win32,
 # no session and no sockets. /utf-8 because the round-trip cases include Korean and an emoji.
+# Control-channel resume decisions and the resume packet's wire shape (item 8, layer 1). Pure
+# logic -- no socket, no peer, no clock.
+add_executable(remote60_control_resume_test
+  src/control_resume_test.cpp
+  src/udp_control_channel.cpp
+)
+target_include_directories(remote60_control_resume_test PRIVATE src)
+target_link_libraries(remote60_control_resume_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_control_resume_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_clipboard_sync_core_test
   src/clipboard_sync_core_test.cpp
 )

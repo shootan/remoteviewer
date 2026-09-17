@@ -64,6 +64,17 @@ class UdpControlChannel {
 
   void Close(ControlCloseReason reason = ControlCloseReason::Shutdown);
   void Reset();
+  /**
+   * Reset onto a re-keyed pair of stream ids, as one step. (item 8)
+   *
+   * Reset() followed by a separate change of ids would leave a window in which the channel is
+   * cleared but still answering on the old ids, and that window is exactly what a datagram
+   * delayed across the break needs to be delivered as though it were new. Both peers call this
+   * with ids derived from the same resumeId, so each stops recognising the old stream at the
+   * same moment it starts listening for the new one.
+   */
+  void ResumeWith(uint32_t txStreamId, uint32_t rxStreamId);
+
   bool IsClosed() const { return closed_.load(std::memory_order_relaxed); }
   ControlCloseReason CloseReason() const {
     return closeReason_.load(std::memory_order_relaxed);

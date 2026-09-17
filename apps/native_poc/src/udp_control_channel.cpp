@@ -66,6 +66,19 @@ void UdpControlChannel::Reset() {
   closed_.store(false, std::memory_order_relaxed);
 }
 
+void UdpControlChannel::ResumeWith(uint32_t txStreamId, uint32_t rxStreamId) {
+  std::lock_guard<std::mutex> lock(mu_);
+  txStreamId_ = txStreamId;
+  rxStreamId_ = rxStreamId;
+  nextTxSeq_ = 1;
+  txQueue_.clear();
+  rxPending_.clear();
+  rxReady_.clear();
+  rxDeliveredSeq_ = 0;
+  closeReason_.store(ControlCloseReason::None, std::memory_order_relaxed);
+  closed_.store(false, std::memory_order_relaxed);
+}
+
 const char* to_string(ControlCloseReason reason) {
   switch (reason) {
     case ControlCloseReason::PeerLost: return "peer-lost";
