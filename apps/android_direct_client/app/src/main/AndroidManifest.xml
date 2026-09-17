@@ -29,6 +29,29 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            Lets the system's own install screen read the one APK this app downloaded.
+
+            Needed because some vendors (Samsung, observed on an SM-S948N) refuse to let a
+            sideloaded app install itself through PackageInstaller: the commit comes back
+            "Self update is blocked by unknown source package". The same APK installs fine when the
+            user is taken to the system screen, and that screen is a different process, so it needs
+            a content:// URI rather than a path into this app's private storage.
+
+            exported=false with grantUriPermissions: nothing can query this provider, and the only
+            access it ever gives is the read grant attached to the install intent, for the single
+            directory named in res/xml/file_paths.xml.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.updateprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 
 </manifest>

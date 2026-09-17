@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    What the update FileProvider is allowed to hand out, and nothing else.
+
+    Exactly one directory: the "update" folder inside this app's own cache, which is where
+    UpdateInstaller.downloadTarget puts the verified APK. Narrow on purpose: a provider that
+    exposed cache-path "." would offer every cached file this app has, and the only file that ever
+    needs to leave is the one the system installer is being asked to read.
+-->
+<paths>
+    <cache-path
+        name="update"
+        path="update/" />
+</paths>

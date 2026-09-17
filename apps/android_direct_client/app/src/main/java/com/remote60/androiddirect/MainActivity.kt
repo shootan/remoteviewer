@@ -1387,6 +1387,49 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }.apply { isDaemon = true; name = "gnlink-update-download"; start() }
     }
 
+    /**
+     * Opens the system's own install screen for the APK already downloaded and verified.
+     *
+     * Reached only when the device refused to let this app install itself (Samsung reports
+     * "Self update is blocked by unknown source package"). The file is not re-downloaded: it was
+     * verified before the session was opened and it is still in this app's cache, so what changes
+     * is only who is asked to install it.
+     */
+    private fun openSystemInstaller() {
+        val apk = UpdateInstaller.downloadTarget(this)
+        if (!apk.isFile) {
+            diagnosticsLog.log("update_install", "no downloaded apk to hand to the system installer")
+            Toast.makeText(this, "설치 파일을 찾지 못했습니다.", Toast.LENGTH_LONG).show()
+            return
+        }
+        // The system screen still needs this app to be an allowed install source.
+        if (!UpdateInstaller.canInstallPackages(this)) {
+            diagnosticsLog.log("update_install", "asking for install permission before the fallback")
+            try {
+                startActivity(UpdateInstaller.manageUnknownSourcesIntent(this))
+            } catch (_: Exception) {
+                Toast.makeText(this, "설치 권한 화면을 열지 못했습니다.", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+        val intent = UpdateInstaller.systemInstallerIntent(this, apk)
+        if (intent == null) {
+            diagnosticsLog.log("update_install", "could not build the system installer intent")
+            Toast.makeText(this, "설치 화면을 열지 못했습니다.", Toast.LENGTH_LONG).show()
+            return
+        }
+        try {
+            startActivity(intent)
+            diagnosticsLog.log("update_install", "handed the apk to the system installer")
+            // Said plainly, because from here the app cannot see what happens: the system screen
+            // reports nothing back, so the user needs to know the next tap is theirs.
+            Toast.makeText(this, "설치 화면에서 '설치'를 눌러 주세요.", Toast.LENGTH_LONG).show()
+        } catch (_: Exception) {
+            diagnosticsLog.log("update_install", "the system installer screen would not open")
+            Toast.makeText(this, "설치 화면을 열지 못했습니다.", Toast.LENGTH_LONG).show()
+        }
+    }
+
     private fun registerUpdateStatusReceiver() {
         if (updateStatusReceiver != null) return
         val receiver = UpdateInstaller.StatusReceiver(
@@ -1408,6 +1451,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 } catch (_: Exception) {
                     diagnosticsLog.log("update_install", "could not show the confirmation screen")
                 }
+            },
+            onSelfUpdateBlocked = { message ->
+                diagnosticsLog.log("update_install", "self-update blocked by the device: $message")
+                openSystemInstaller()
             })
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(receiver, receiver.filter(), Context.RECEIVER_NOT_EXPORTED)

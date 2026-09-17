@@ -181,4 +181,49 @@ class UpdateDecisionTest {
         }
         assertEquals(2, decisions)
     }
+
+    // --- the vendor self-update block, and the dismissal it must not be confused with ---------
+    //
+    // Both arrive as INSTALL_FAILED_ABORTED. Only one of them may re-open an install screen.
+
+    @Test
+    fun samsungSelfUpdateBlockIsRecognised() {
+        // The exact message from the SM-S948N log that produced this work.
+        assertTrue(UpdateDecision.isSelfUpdateBlocked(
+            3, "INSTALL_FAILED_ABORTED: Self update is blocked by unknown source package"))
+    }
+
+    @Test
+    fun theBlockIsRecognisedWhateverTheCasing() {
+        assertTrue(UpdateDecision.isSelfUpdateBlocked(
+            3, "Self Update Is Blocked By Unknown Source Package"))
+    }
+
+    @Test
+    fun aDismissedDialogIsNotAVendorBlock() {
+        // THE case this predicate exists for. A user who said no is reported as aborted with no
+        // message; treating that as a block would push an install screen at them straight after
+        // they declined, which is the behaviour the rest of this file refuses to have.
+        assertFalse(UpdateDecision.isSelfUpdateBlocked(3, ""))
+        assertFalse(UpdateDecision.isSelfUpdateBlocked(3, "   "))
+    }
+
+    @Test
+    fun anOrdinaryFailureIsNotAVendorBlock() {
+        assertFalse(UpdateDecision.isSelfUpdateBlocked(4, "INSTALL_FAILED_INSUFFICIENT_STORAGE"))
+        assertFalse(UpdateDecision.isSelfUpdateBlocked(4, "INSTALL_FAILED_INVALID_APK"))
+    }
+
+    @Test
+    fun successIsNeverABlock() {
+        // A fallback after a successful install would offer to install what is already installed.
+        assertFalse(UpdateDecision.isSelfUpdateBlocked(0, "Self update is blocked by unknown source"))
+    }
+
+    @Test
+    fun theOtherVendorWordingIsAlsoRecognised() {
+        // Not every vendor uses Samsung's sentence; "unknown source" plus a refusal is the shape.
+        assertTrue(UpdateDecision.isSelfUpdateBlocked(
+            3, "Install from unknown source blocked by policy"))
+    }
 }

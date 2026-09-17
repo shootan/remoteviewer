@@ -12055,3 +12055,13 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - **검증**: `:app:assembleDebug` **BUILD SUCCESSFUL**(Kotlin + armeabi-v7a/arm64-v8a/x86/x86_64 네이티브, `app-debug.apk` 11.9MB), 패키징된 arm64 `.so` 에서 **클립보드 JNI 5종 심볼 확인**(전체 JNI export 53종 중). Windows 회귀 전량 재통과: core 74/74 · wire 33/33 · monitor 11/11(opt-in 실 OS) · toolbar 29/29 · shared_core PASS · cmake_sources 4/4.
   - ⚠️ **초록색 두 번을 직접 부쉈다**: 첫 APK 빌드는 `JAVA_HOME` 미설정으로 **실행조차 안 됐는데** `| tail` 때문에 파이프 exit 0 이라 성공처럼 보였고, 심볼 확인의 첫 시도는 `strings` 가 **설치돼 있지 않아** 0건이 나온 것을 "심볼 없음" 으로 읽을 뻔했다. 둘 다 "무엇이 실제로 실행됐는가" 를 되물어 잡았다.
 - **미검증(그대로 남긴다)**: **실기기 0** — 폰 복사→PC 붙여넣기, PC 복사→폰 붙여넣기, `CLIP` 토글 실동작은 전부 실기 대기. 서명 APK 미생성(검증용 몫). 다중 뷰어 fan-out 비범위.
+
+### 2026-09-17 APK 자동 업데이트가 삼성 기기에서 막힌다 — 시스템 설치화면 폴백
+
+- **증상·진단(검증용 실기 로그, SM-S948N)**: arch 수정 뒤 `verdict=Install 0.2.17` 까지 **체크·다운로드·검증 전부 통과**했는데 마지막 commit 이 `INSTALL_FAILED_ABORTED: Self update is blocked by unknown source package`. 삼성이 **사이드로드 앱의 프로그래밍적 자기 설치**를 막는다. 같은 APK 를 사용자가 시스템 설치화면에서 누르면 설치된다.
+- **수정**: PackageInstaller 경로는 **그대로 두고**, 그 실패가 "기기가 자기설치를 거부한 것" 일 때만 **시스템 설치화면으로 폴백**한다. `FileProvider`(authority `${applicationId}.updateprovider`, `res/xml/file_paths.xml` 로 캐시 `update/` 한 폴더만 노출) + `ACTION_VIEW` + `application/vnd.android.package-archive` + `FLAG_GRANT_READ_URI_PERMISSION`. 권한(`canRequestPackageInstalls`) 없으면 기존처럼 설정화면 먼저. 다른 기기는 기존 경로 그대로.
+- 🔴 **가장 조심한 곳 — 취소와 차단은 둘 다 `INSTALL_FAILED_ABORTED` 다.** 사용자가 대화상자를 닫아도 aborted 로 온다. **모든 abort 에 폴백을 걸면 "방금 거절한 사람에게 설치화면을 다시 들이미는"** 앱이 되고, 이 파일들이 일관되게 거부해 온 동작이 바로 그것이다. 그래서 판정을 순수 함수 `UpdateDecision.isSelfUpdateBlocked(status, message)` 로 분리하고 **메시지가 비어 있으면 절대 차단으로 보지 않는다**(벤더 거부는 항상 문구가 붙고 단순 취소는 붙지 않는다).
+- **폴백의 대가를 문서에 남긴다**: 시스템 설치화면은 **아무것도 되돌려주지 않는다** — 끝난 뒤 취소와 실패가 구분되지 않는다. PackageInstaller 세션을 1순위로 둔 이유가 정확히 그것(상태코드를 돌려줌)이므로, 폴백은 **세션이 이미 거부당한 뒤에만** 쓴다. 사용자에게는 "설치 화면에서 '설치'를 눌러 주세요" 라고 명시한다.
+- **검증**: `:app:testDebugUnitTest` **74 tests / 0 failures / 0 skipped**(신규 6건 전부 실행 확인 — 삼성 문구·대소문자·다른 벤더 문구 인식, **빈 메시지=취소는 폴백 안 함**(부정 대조), 일반 실패·성공도 폴백 안 함). `:app:assembleDebug` BUILD SUCCESSFUL, **merged manifest 에 provider·authority `com.remote60.androiddirect.updateprovider`·FILE_PROVIDER_PATHS 존재 확인**, `file_paths.xml` 패키징 확인.
+  - ⚠️ 첫 빌드는 내가 XML 주석 안에 `--` 를 써서 리소스 컴파일이 깨졌다(`file_paths.xml:6`). 빌드가 잡아 줬고 고쳤다.
+- **미검증**: **실기기 0** — 실제 삼성 기기에서 폴백이 떠서 설치까지 가는 것은 확인 못 했다. 폴백 배선(수신→판정→인텐트)은 컴파일·단위테스트까지이고 런타임 경로는 실기 몫.

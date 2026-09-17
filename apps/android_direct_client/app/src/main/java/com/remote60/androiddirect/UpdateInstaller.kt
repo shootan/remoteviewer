@@ -9,6 +9,7 @@ import android.content.pm.PackageInstaller
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import androidx.core.content.FileProvider
 import java.io.File
 import java.security.MessageDigest
 
@@ -87,6 +88,34 @@ object UpdateInstaller {
         return File(dir, "pending.apk")
     }
 
+    /** The FileProvider authority declared in AndroidManifest.xml for the downloaded APK. */
+    private fun providerAuthority(context: Context): String =
+        "${context.packageName}.updateprovider"
+
+    /**
+     * An intent that opens the system's own install screen for the APK this app downloaded.
+     *
+     * The fallback for vendors that refuse a programmatic self-update (see
+     * UpdateDecision.isSelfUpdateBlocked). It is deliberately NOT the primary path: it grants
+     * another process read access to the file and it reports nothing back, so afterwards a
+     * dismissal and a failure look identical -- which is exactly what the PackageInstaller session
+     * was chosen to avoid. Those costs are only worth paying once the session has been refused.
+     *
+     * Null when the URI cannot be built, which means the provider is misdeclared: a build fault,
+     * so the caller says so rather than retrying.
+     */
+    fun systemInstallerIntent(context: Context, apk: File): Intent? = try {
+        val uri = FileProvider.getUriForFile(context, providerAuthority(context), apk)
+        Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            // The read grant rides on the intent and covers only this URI.
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+    } catch (_: Exception) {
+        null
+    }
+
     /**
      * Hands a verified APK to the system installer.
      *
@@ -139,7 +168,9 @@ object UpdateInstaller {
      * asked anything.
      */
     class StatusReceiver(private val onOutcome: (UpdateDecision.InstallOutcome, String) -> Unit,
-                         private val onUserActionRequired: (Intent) -> Unit) : BroadcastReceiver() {
+                         private val onUserActionRequired: (Intent) -> Unit,
+                         private val onSelfUpdateBlocked: (String) -> Unit = {}) :
+        BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS,
                                             PackageInstaller.STATUS_FAILURE)
@@ -148,6 +179,13 @@ object UpdateInstaller {
                 @Suppress("DEPRECATION")
                 val confirm = intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
                 if (confirm != null) onUserActionRequired(confirm)
+                return
+            }
+            // The device refused a programmatic self-update. Not the user's answer and not an
+            // ordinary fault, so it is neither reported as a failure nor silently swallowed: the
+            // caller is given the chance to offer the system's own install screen instead.
+            if (UpdateDecision.isSelfUpdateBlocked(status, message)) {
+                onSelfUpdateBlocked(message)
                 return
             }
             onOutcome(UpdateDecision.installOutcomeFromStatus(status), message)

@@ -146,4 +146,28 @@ object UpdateDecision {
         3 -> InstallOutcome.Cancelled        // STATUS_FAILURE_ABORTED
         else -> InstallOutcome.Failed
     }
+
+    /**
+     * Whether a failed install is the DEVICE refusing a programmatic self-update, rather than the
+     * user declining one.
+     *
+     * Samsung blocks a sideloaded app from installing itself through PackageInstaller, reporting
+     * INSTALL_FAILED_ABORTED with "Self update is blocked by unknown source package". Seen on an
+     * SM-S948N: the check, the download and the verification all passed and only the commit was
+     * refused. Handing the same APK to the system's own install screen works, so that is the
+     * fallback -- but only for this case.
+     *
+     * The distinction is the whole reason this is a function with tests. A user who dismisses the
+     * confirmation dialog is ALSO reported as aborted, with no message. Falling back on every abort
+     * would re-open an install screen for someone who just said no, which is arguing with a
+     * decision they made. So a blank message is never a block: the vendor refusal always carries
+     * text, and a dismissal does not.
+     */
+    fun isSelfUpdateBlocked(status: Int, message: String): Boolean {
+        if (status == 0) return false  // STATUS_SUCCESS is not something to fall back from
+        val text = message.lowercase()
+        if (text.isBlank()) return false
+        return text.contains("self update is blocked") ||
+            (text.contains("unknown source") && text.contains("block"))
+    }
 }
