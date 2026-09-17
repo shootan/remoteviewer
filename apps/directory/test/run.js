@@ -53,6 +53,15 @@ function cleanup() {
   if (recovery.code !== 0) { cleanup(); process.exit(recovery.code); }
   // First, and without a server: the version-comparison contract. It shares its vectors with the
   // C++ and Kotlin suites, so a drift between the three shows up here before anything else runs.
+  // Also without a server: where a wake is aimed. Pure, so it runs before anything is started --
+  // and it is the check that would have caught the wake going to the router.
+  console.log('--- wake aim ---');
+  const wakeAim = await runTest(['wake_target_test.js']);
+  if (wakeAim.code !== 0) {
+    cleanup();
+    console.log('\nRESULT: FAILED');
+    process.exit(wakeAim.code);
+  }
   console.log('--- version comparison contract ---');
   const versions = await runTest(['version_compare_test.js']);
   if (versions.code !== 0) {

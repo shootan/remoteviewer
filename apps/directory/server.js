@@ -55,6 +55,7 @@ const dgram = require('dgram');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { wakeTargetFor } = require('./wake_target');
 const os = require('os');
 
 const HTTP_PORT = Number(process.env.REMOTE60_DIR_PORT || 8080);
@@ -935,17 +936,21 @@ function sendWakePunch(sock, host, connectId) {
   wakeStats.sent++;
 
   const packet = buildPunchPacket();
-  console.log(`[wake] connect=${connectId} tx host=${host.wireIp || host.publicIp}:` +
-              `${host.wirePort || host.publicUdpPort}` +
-              ((host.wireIp || host.publicIp) !== host.publicIp
+  // Where this actually goes, which is not always the tuple the OBSERVE came from -- see
+  // wake_target.js. `via` is logged because "the wake was sent" and "the wake was sent somewhere
+  // the host can hear" looked identical in every log we had, for weeks.
+  const aim = wakeTargetFor(host, onServerLan);
+  console.log(`[wake] connect=${connectId} tx host=${aim.ip}:${aim.port} via=${aim.via}` +
+              (aim.ip !== host.publicIp
                  ? ` (advertised ${host.publicIp}:${host.publicUdpPort})` : ''));
-  const scheduledKey = endpointKey(host.wireIp || host.publicIp, host.wirePort || host.publicUdpPort);
+  const scheduledKey = endpointKey(aim.ip, aim.port);
   for (const delay of WAKE_PACKETS) {
     setTimeout(() => {
       // Read the address here rather than above: a heartbeat arriving between these three
       // datagrams moves the host's mapping, and the later ones should follow it.
-      const ip = host.wireIp || host.publicIp;
-      const port = host.wirePort || host.publicUdpPort;
+      const now = wakeTargetFor(host, onServerLan);
+      const ip = now.ip;
+      const port = now.port;
       if (endpointKey(ip, port) !== scheduledKey) {
         console.log(`[wake] connect=${connectId} tx moved to ${ip}:${port} (+${delay}ms)`);
       }
