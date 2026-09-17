@@ -12107,3 +12107,15 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - **검증**: `viewer_liveness_test` — **먼저 실패를 재현**([L13] 이 FAIL 하는 것을 확인) 후 수정. 신규 [L13]~[L16]: 제어끊김+영상도착=유지 · 31초면 종료(천장) · 제어끊김+영상정지=여전히 빠르게 종료 · 부정대조(한 번도 publish 없음=유지 아님, 출력 타임아웃은 그대로 작동). `shared-core` 에 keepalive 상수·양쪽 기본값·핑 간격 단언(+**조기 핑 안 함** 부정대조), **변이(500→1000)로 FAIL 확인**. 전 회귀 통과, Android `assembleDebug`+74 테스트 통과.
   - ⚠️ **내가 또 초록색에 속을 뻔한 것 2건**: ① 변이 검사 후 `mv` 로 헤더를 되돌렸더니 **mtime 이 과거라 빌드가 갱신을 안 했고**, 낡은 바이너리가 그대로 돌았다(`touch` 로 해결). ② 툴바 점 검사가 **간헐 실패**했다 — 바가 자동 숨김되면 `reposition()` 이 InvalidateRect 를 건너뛰어 PrintWindow 가 **이전 상태 픽셀**을 준다. 캡처 전에 강제 표시+동기 repaint 로 결정적으로 만들고 **5회 연속 동일 결과** 확인.
 - **미검증**: 실기 — 실제 폰/회사 환경에서 상향이 끊겼을 때 세션이 유지되는지. ⑤의 **제어 채널 재수립(끊긴 제어를 같은 세션 안에서 되살리기)은 구현하지 않았다** — 세션이 안 죽으니 epoch 는 안 오르고 마지막 화면은 그대로 남지만, 제어가 진짜 죽은 6~30초 구간에는 **입력이 안 먹는다**. 이건 별도 작업으로 다뤄야 한다.
+
+### 2026-09-17 0.2.130(PC) · 0.2.20(APK) 통합 빌드 — 게시 안 함
+
+- **동결**: bump 커밋 `df9b1ca`(버전 리터럴 3줄만, 로직 무변경). PC `kProductVersion` 0.2.129→**0.2.130**, APK versionName 0.2.19→**0.2.20** / versionCode 18→**19**. versionCode 가 핵심이다 — 게시본이 18 이라 18 이하는 폰에 **업데이트로 보이지도 않는다**.
+- **싣는 것**: 클립보드 텍스트 동기화 + 스테일 부활 수정(T1) · 툴바 재디자인/상태점/호스트 조합키(T2) · **튕김의 원인이던 세션 조기 종료 수정 + keepalive 500ms**(T3).
+- **PC 빌드**: `build-local` 을 쓰지 않고 **새 빌드 디렉터리에서 clean 빌드**했다(0.2.126 의 REL-V01 이 증분 stale object 산물이었다). 8 exe + ui 2개, 10 아티팩트.
+  - **버전 각인 스캔**: UTF-16 `0.2.130` — Host/Stream/Viewer/Client 각 1, Setup 5. **stale `0.2.129`/`0.2.128`/`0.2.127` 은 전 바이너리 0건.**
+  - ⚠️ Capture·InputService·**Updater 는 0건인데 정상**이다. 앞의 넷이 버전 캐리어이고(`host_app_main`·`client_shell_main`·`peer_version.hpp`), `updater_effects.cpp` 는 `product_version.hpp` 를 **include 만 하고 쓰지 않아** 상수가 방출되지 않는다(양쪽 인코딩 모두 0 확인). 미사용 include 이지 빌드 사고가 아니다.
+- **APK**: clean 후 `assembleDebug`(release 에 서명 설정이 없어 배포본이 debug 빌드다). versionName **0.2.20** / versionCode **19** 를 aapt2 로 확인, 서명 인증서 SHA-256 **dcc806ae…2990** 일치, 단위테스트 **74/0/0**. APK 는 4 ABI 유니버설이고 manifest 의 `arch=arm64` 는 갱신 매칭용 선언이다(0.2.19 와 동일한 방식).
+- **검증**: manifest↔디스크 **parity 11/11 전부 일치**(크기+sha256, `.claude/verify_release_130.py`), `gnlink_check_payload_set.py` **10/10 PASS**(0.2.109 처럼 Setup 이 빠진 매니페스트를 막는 게이트).
+- 🔴 **발견 — 출하 바이트가 체크아웃 설정에 좌우된다**: `ui/shell.html` 이 0.2.129 에서는 **19807B(CRLF)** 로 나갔는데 git blob 과 이 워크트리는 **19339B(LF)** 다(468줄 × CR). 즉 **어느 워크트리에서 빌드했느냐로 출하 해시가 달라진다.** `.gitattributes` 는 `apps/shared/update_manifest/**` 만 `-text` 로 고정하고 UI 자산은 autocrlf 에 맡겨져 있다. 이번엔 **git 내용 그대로(LF)** 로 담았고 바이트를 꾸미지 않았다. 고정이 필요하면 `.gitattributes` 에 UI 자산을 추가하는 것이 맞지만, **릴리스 중에 체크아웃 동작을 바꾸는 변경이라 손대지 않고 보고**한다.
+- **게시 안 함**: 사용자 지시 대기. `.sig`(운영키 서명)도 만들지 않았다 — 서명·게시는 검증용 절차다.
