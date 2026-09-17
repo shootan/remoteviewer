@@ -250,6 +250,36 @@ bool on_local_hotkey(ViewerState& ctx, HWND hwnd, WPARAM wp) {
   return false;
 }
 
+/**
+ * Reads this machine's clipboard and leaves it pending for the control thread to send.
+ *
+ * One implementation for the two moments it is wanted -- the clipboard changed, and a session just
+ * opened -- because they must decide identically. The core is what decides: empty, oversize,
+ * already sent, or the echo of something just applied from the host all mean "do not send". The
+ * network I/O is not done here; this runs on the UI thread, which is the one that owns the
+ * listener window and may therefore touch the clipboard at all.
+ */
+void capture_local_clipboard(ViewerState& ctx, HWND hwnd) {
+  auto& clip = ctx.control.clipboard;
+  if (!clip.enabled.load(std::memory_order_relaxed) ||
+      !clip.hostSupports.load(std::memory_order_relaxed)) {
+    return;
+  }
+  // Win32 gives wchar_t; the core and the wire carry UTF-16 code units, which is the same 16 bits
+  // here but not on Android, so the conversion is explicit (clipboard_win32.hpp).
+  std::wstring wide;
+  if (!remote60::native_poc::clipboard_read_unicode_text(hwnd, &wide)) return;
+  const std::u16string text = remote60::native_poc::wide_to_u16(wide);
+  uint64_t hash = 0;
+  std::lock_guard<std::mutex> lock(clip.mu);
+  if (clip.core.OnLocalChange(text, &hash) ==
+      remote60::native_poc::ClipboardLocalDecision::Send) {
+    clip.pendingText = text;
+    clip.pendingHash = hash;
+    clip.hasPending = true;
+  }
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   // The state arrives with the creation parameters and is pinned to the window for its lifetime
   // (F-17). It is stamped with the handle here, before CreateWindowExW returns, so the messages the
@@ -279,31 +309,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       destroy_cached_gdi_objects(ctx);
       PostQuitMessage(0);
       return 0;
-    case WM_CLIPBOARDUPDATE: {
-      // Clipboard text sync (K1): the local clipboard changed. Read it and, if it is worth sending
-      // (not empty, not oversize, and not the echo of something we just applied from the host),
-      // leave it pending for the control thread to send. Reading and the core update stay on this
-      // thread; the network I/O does not.
-      auto& clip = ctx.control.clipboard;
-      if (clip.enabled.load(std::memory_order_relaxed) &&
-          clip.hostSupports.load(std::memory_order_relaxed)) {
-        // Win32 gives wchar_t; the core and the wire carry UTF-16 code units, which is the same
-        // 16 bits here but not on Android, so the conversion is explicit (clipboard_win32.hpp).
-        std::wstring wide;
-        if (remote60::native_poc::clipboard_read_unicode_text(hwnd, &wide)) {
-          const std::u16string text = remote60::native_poc::wide_to_u16(wide);
-          uint64_t hash = 0;
-          std::lock_guard<std::mutex> lock(clip.mu);
-          if (clip.core.OnLocalChange(text, &hash) ==
-              remote60::native_poc::ClipboardLocalDecision::Send) {
-            clip.pendingText = text;
-            clip.pendingHash = hash;
-            clip.hasPending = true;
-          }
-        }
-      }
+    case WM_CLIPBOARDUPDATE:
+      // Clipboard text sync (K1): the local clipboard changed.
+      capture_local_clipboard(ctx, hwnd);
       return 0;
-    }
+    case kMsgPushClipboardNow:
+      // The control thread opened a session and wants this machine's current clipboard sent, so
+      // that what the user copied most recently wins over whatever the host was holding.
+      capture_local_clipboard(ctx, hwnd);
+      return 0;
     case kMsgApplyClipboard: {
       // The control thread handed us the host's clipboard text (heap-allocated) to put on the OS
       // clipboard. The core already recorded it as applied, so the WM_CLIPBOARDUPDATE this write

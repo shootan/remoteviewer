@@ -78,6 +78,12 @@ int ControlClient::pump_clipboard_sync(remote60::native_poc::ControlLink& link) 
       !clip.hostSupports.load(std::memory_order_relaxed)) {
     return 0;
   }
+  // Once per session, ask the UI thread for whatever is on the clipboard now and send it. This is
+  // what makes the machine the user just connected from the source of truth: the host's clipboard
+  // may be older, and silently pulling it over the top of a fresh copy is the bug this prevents.
+  if (clip.policy.TakeInitialPush() && ctx.session.hwnd) {
+    PostMessageW(ctx.session.hwnd, kMsgPushClipboardNow, 0, 0);
+  }
   // (a) A local clipboard change the UI thread left pending goes first -- the user copying on the
   // viewer expecting to paste on the host is the interactive case, so it should not wait behind the
   // poll.
@@ -105,12 +111,15 @@ int ControlClient::pump_clipboard_sync(remote60::native_poc::ControlLink& link) 
   // (b) Otherwise poll the host for a change, on an interval -- the host cannot push, so this is the
   // only way host -> viewer text arrives.
   const uint64_t nowUs = qpc_now_us();
-  if (clip.lastPollUs != 0 && nowUs - clip.lastPollUs < kClipboardPollIntervalUs) return 0;
-  clip.lastPollUs = nowUs;
+  if (!clip.policy.ShouldPoll(nowUs)) return 0;
+  clip.policy.NotePolled(nowUs);
   remote60::native_poc::ClipboardPollReply reply;
-  if (!remote60::native_poc::poll_clipboard(link, clip.knownGeneration, nowUs, &reply)) return -1;
-  clip.knownGeneration = reply.generation;
-  if (reply.hasData) {
+  if (!remote60::native_poc::poll_clipboard(link, clip.policy.knownGeneration(), nowUs, &reply)) {
+    return -1;
+  }
+  // The first reply of a session only sets the generation: its contents are from before this
+  // session and must not land on top of what the user copied since (the stale-revival bug).
+  if (clip.policy.OnPollReply(reply.generation, reply.hasData)) {
     bool apply = false;
     {
       std::lock_guard<std::mutex> lock(clip.mu);
@@ -168,9 +177,17 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
     }
     // Clipboard text sync (K1): whether this host understands the clipboard messages. Set every
     // pong (cheap, and a reconnect to a different host must not carry the old answer forward).
-    ctx.control.clipboard.hostSupports.store(
-        (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagClipboardTextV1) != 0,
-        std::memory_order_relaxed);
+    const bool clipboardHost =
+        (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagClipboardTextV1) != 0;
+    // The first pong that reports support opens a session as far as the clipboard is concerned:
+    // arm the baseline poll and the one-shot push. Done on the transition, so a reconnect re-arms
+    // and a host's previous-session clipboard is never inherited.
+    if (clipboardHost && !ctx.control.clipboard.hostSupports.load(std::memory_order_relaxed)) {
+      std::lock_guard<std::mutex> lock(ctx.control.clipboard.mu);
+      ctx.control.clipboard.core.Reset();
+      ctx.control.clipboard.policy.OnConnected();
+    }
+    ctx.control.clipboard.hostSupports.store(clipboardHost, std::memory_order_relaxed);
   }
   const uint64_t rttUs =
       (doneUs >= action.ping.clientSendQpcUs) ? (doneUs - action.ping.clientSendQpcUs) : 0;

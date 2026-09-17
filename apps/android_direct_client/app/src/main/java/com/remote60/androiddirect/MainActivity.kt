@@ -3057,6 +3057,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // sent is collected on the poll that is already running, and the button follows the host's
         // advertised capability as soon as the first pong reports it.
         drainIncomingClipboard()
+        // Once per session the session asks for this phone's clipboard, so a PC still holding an
+        // older copy does not pull it back over what the user copied since.
+        if (NativeSessionBridge.nativeTakeClipboardPushRequest()) {
+            pushLocalClipboardToHost("session_started")
+        }
         renderClipboardButton()
         val statusValue = NativeSessionBridge.nativeGetStatus()
         val errorValue = NativeSessionBridge.nativeGetLastError()

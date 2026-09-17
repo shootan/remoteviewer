@@ -92,6 +92,10 @@ constexpr UINT kMsgHostImeDeactivate = WM_APP + 13;
 // to the OS clipboard on the window's own thread (all clipboard ops belong on the thread that owns
 // the listener window). lParam is a heap std::wstring the handler owns and frees.
 constexpr UINT kMsgApplyClipboard = WM_APP + 14;
+// Posted once per session by the control thread: read whatever is on the clipboard now and leave
+// it pending to be sent. Reading belongs on the thread that owns the listener window, and the
+// control thread is not it.
+constexpr UINT kMsgPushClipboardNow = WM_APP + 15;
 // The poll interval itself is kClipboardPollIntervalUs in clipboard_sync.hpp, shared with the
 // Android session so both clients ask at the same cadence. Unqualified uses here resolve to it
 // through the enclosing namespace.

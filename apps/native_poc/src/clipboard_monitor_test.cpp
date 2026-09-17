@@ -77,11 +77,25 @@ int main() {
   std::wstring saved;
   const bool hadText = clipboard_read_unicode_text(nullptr, &saved) && !saved.empty();
 
+  // 0. The clipboard that already exists when the host starts must NOT be published.
+  //
+  // This is the stale-revival bug, and the earlier version of this test could not see it: it
+  // started the hub without putting anything on the clipboard first, so an empty clipboard made
+  // the assertion pass for the wrong reason. A non-empty value is placed here deliberately -- it
+  // stands for "what the user had copied before GNLink was launched".
+  const std::wstring preExisting = L"copied before GNLink was started";
+  ok(clipboard_set_unicode_text(nullptr, preExisting),
+     "a clipboard exists before the hub starts");
+
   HostClipboardHub hub;
   ok(hub.Start(), "the clipboard monitor starts");
   ok(hub.enabled(), "and reports enabled");
-  // Nothing has changed yet, so the hub has captured no generation.
-  ok(hub.Get().generation == 0, "no generation before any change");
+  // Long enough for an initial change notification to arrive, if the OS sends one. Asserting
+  // immediately would pass simply by being quicker than the message.
+  Sleep(400);
+  ok(hub.Get().generation == 0,
+     "the clipboard that existed BEFORE start is not published (no stale revival)",
+     "generation=" + std::to_string(hub.Get().generation));
 
   // 1. A genuine local change is heard.
   const std::wstring localOne = L"local host copy one";

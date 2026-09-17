@@ -93,6 +93,13 @@ object NativeSessionBridge {
     /** Clipboard text that arrived from the host, or null when none is waiting. Drains on read. */
     external fun nativeTakeIncomingClipboardText(): String?
 
+    /**
+     * True once per session: the session wants this phone's current clipboard pushed, so that the
+     * machine just connected from is the source rather than whatever the PC held from an earlier
+     * session. Consumed as it is read.
+     */
+    external fun nativeTakeClipboardPushRequest(): Boolean
+
     external fun nativeSetClipboardSyncEnabled(enabled: Boolean)
     external fun nativeIsClipboardSyncEnabled(): Boolean
 

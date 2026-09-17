@@ -44,9 +44,9 @@ struct ClipboardSyncState {
   uint64_t pendingHash = 0;
   uint32_t nextSeq = 0;
 
-  // control thread only:
-  uint64_t knownGeneration = 0;  // the host clipboard generation last seen
-  uint64_t lastPollUs = 0;       // when the host was last polled
+  // control thread only: the session-boundary rules (baseline poll, one-shot push, poll interval),
+  // shared with the Android session so both clients behave the same.
+  remote60::native_poc::ClipboardClientPolicy policy;
 };
 
 struct ControlChannelState {

@@ -127,6 +127,18 @@ bool ClipboardMonitor::SetText(const std::u16string& text) {
 // --- HostClipboardHub -------------------------------------------------------------------------
 
 bool HostClipboardHub::Start() {
+  // Whatever is on the clipboard right now belongs to before the host was running, so it is
+  // recorded as a baseline and never published. Done BEFORE the listener is registered, not after:
+  // if registering provokes an immediate change notification (it does not on this machine, but
+  // that is an OS detail and not a guarantee), the monitor thread could otherwise publish the old
+  // contents before this line ran.
+  {
+    std::wstring wide;
+    if (clipboard_read_unicode_text(nullptr, &wide) && !wide.empty()) {
+      std::lock_guard<std::mutex> lock(mu_);
+      core_.SeedBaseline(wide_to_u16(wide));
+    }
+  }
   const bool ok = monitor_.Start([this](const std::u16string& text) { OnLocalText(text); });
   started_.store(ok, std::memory_order_release);
   if (ok) {

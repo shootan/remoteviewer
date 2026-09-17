@@ -290,6 +290,13 @@ int ClientSessionController::PumpClipboardSync(ControlLink& link) {
       !hostSupportsClipboard_.load(std::memory_order_relaxed)) {
     return 0;
   }
+  // Once per session the app is asked for whatever is on the phone's clipboard now, so that the
+  // machine the user just connected from is the source rather than whatever the host was holding
+  // from an earlier session. The app has to do the reading: Android only allows it in the
+  // foreground, so this is a request, not a call.
+  if (clipPolicy_.TakeInitialPush()) {
+    clipInitialPushWanted_.store(true, std::memory_order_release);
+  }
   // (a) A clipboard the app queued goes first: the user copied on the phone meaning to paste on
   // the host, which is the interactive direction and should not wait behind the poll.
   std::u16string outText;
@@ -314,12 +321,13 @@ int ClientSessionController::PumpClipboardSync(ControlLink& link) {
   // (b) Otherwise ask the host whether its clipboard moved. The host cannot push -- control is
   // strict request/response -- so this poll is the only way host -> phone text arrives.
   const uint64_t nowUs = now_us();
-  if (clipLastPollUs_ != 0 && nowUs - clipLastPollUs_ < kClipboardPollIntervalUs) return 0;
-  clipLastPollUs_ = nowUs;
+  if (!clipPolicy_.ShouldPoll(nowUs)) return 0;
+  clipPolicy_.NotePolled(nowUs);
   ClipboardPollReply reply;
-  if (!poll_clipboard(link, clipKnownGeneration_, nowUs, &reply)) return -1;
-  clipKnownGeneration_ = reply.generation;
-  if (reply.hasData) {
+  if (!poll_clipboard(link, clipPolicy_.knownGeneration(), nowUs, &reply)) return -1;
+  // The first reply of a session only sets the generation: its contents predate this session and
+  // must not land on top of what the user copied since (the stale-revival bug).
+  if (clipPolicy_.OnPollReply(reply.generation, reply.hasData)) {
     std::lock_guard<std::mutex> lock(clipMu_);
     // Recording it as applied here is what stops it going back out: the app will put this on the
     // Android clipboard, and the change it notices afterwards must be recognised as our own.
@@ -471,9 +479,19 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
               std::memory_order_relaxed);
           // Clipboard text sync (K1): whether this host understands the clipboard messages. Set
           // every pong, so reconnecting to a different host cannot carry the old answer forward.
-          hostSupportsClipboard_.store(
-              (response.pong.captureTargetFlags & kCaptureFlagClipboardTextV1) != 0,
-              std::memory_order_relaxed);
+          {
+            const bool clipboardHost =
+                (response.pong.captureTargetFlags & kCaptureFlagClipboardTextV1) != 0;
+            // The first pong reporting support opens a clipboard session: arm the baseline poll
+            // and the one-shot push, so a host's previous-session clipboard is never inherited.
+            if (clipboardHost &&
+                !hostSupportsClipboard_.load(std::memory_order_relaxed)) {
+              std::lock_guard<std::mutex> lock(clipMu_);
+              clipCore_.Reset();
+              clipPolicy_.OnConnected();
+            }
+            hostSupportsClipboard_.store(clipboardHost, std::memory_order_relaxed);
+          }
           break;
         case TcpControlResponseKind::MonitorList: {
           windowPanel_.ApplyMonitorList(response.monitorList);
@@ -982,10 +1000,10 @@ void ClientSessionController::ResetUnlocked() {
     clipPendingHash_ = 0;
     clipHasIncoming_ = false;
     clipIncomingText_.clear();
-    clipKnownGeneration_ = 0;
-    clipLastPollUs_ = 0;
+    clipPolicy_ = ClipboardClientPolicy{};
   }
   hostSupportsClipboard_.store(false, std::memory_order_relaxed);
+  clipInitialPushWanted_.store(false, std::memory_order_relaxed);
   sessionBytesReceived_.store(0, std::memory_order_relaxed);
   controlOverUdp_.store(false, std::memory_order_release);
   udpControl_.Reset();

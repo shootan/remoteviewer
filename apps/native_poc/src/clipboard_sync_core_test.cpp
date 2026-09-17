@@ -21,6 +21,7 @@ namespace {
 
 using remote60::native_poc::ClipboardLocalDecision;
 using remote60::native_poc::ClipboardRemoteDecision;
+using remote60::native_poc::ClipboardClientPolicy;
 using remote60::native_poc::ClipboardSyncCore;
 using remote60::native_poc::ControlClipboardDataHeader;
 using remote60::native_poc::ControlClipboardRequestMessage;
@@ -33,6 +34,7 @@ using remote60::native_poc::build_clipboard_update;
 using remote60::native_poc::clipboard_fnv1a;
 using remote60::native_poc::clipboard_parse_payload;
 using remote60::native_poc::kClipboardDataFlagHasData;
+using remote60::native_poc::kClipboardPollIntervalUs;
 using remote60::native_poc::kClipboardTextMaxUtf16;
 using remote60::native_poc::kMagic;
 
@@ -199,6 +201,85 @@ void test_no_echo_loop() {
   ok(b.OnRemoteData(next, hashA2) == ClipboardRemoteDecision::Apply, "and B applies it");
 }
 
+// The clipboard that was already there when the sync started must not be published as news.
+void test_baseline_is_not_news() {
+  ClipboardSyncCore core;
+  uint64_t hash = 0;
+  core.SeedBaseline(u"copied before GNLink started");
+  ok(core.OnLocalChange(u"copied before GNLink started", &hash) ==
+         ClipboardLocalDecision::SkipDuplicate,
+     "the clipboard already present at startup is not sent");
+  // The baseline must not gag the session: a real copy afterwards still travels.
+  ok(core.OnLocalChange(u"copied during the session", &hash) == ClipboardLocalDecision::Send,
+     "a copy made during the session is still sent");
+  ClipboardSyncCore empty;
+  empty.SeedBaseline(u"");
+  ok(empty.OnLocalChange(u"anything", &hash) == ClipboardLocalDecision::Send,
+     "an empty startup clipboard seeds no baseline");
+}
+
+// The session-boundary rules: the first poll adopts the host's generation WITHOUT taking its
+// contents, and each session asks once for the local clipboard to be pushed.
+void test_client_policy() {
+  ClipboardClientPolicy policy;
+  policy.OnConnected();
+
+  ok(policy.TakeInitialPush(), "a new session asks for one initial push");
+  ok(!policy.TakeInitialPush(), "...and only once");
+
+  ok(policy.ShouldPoll(0), "the first poll is due immediately");
+  policy.NotePolled(1000);
+  ok(!policy.ShouldPoll(1000 + kClipboardPollIntervalUs - 1), "later polls wait for the interval");
+  ok(policy.ShouldPoll(1000 + kClipboardPollIntervalUs), "...and are due once it passes");
+
+  // The host is at generation 5 from a session that has ended, and offers its contents.
+  ok(!policy.OnPollReply(5, true),
+     "the FIRST reply is a baseline: the host's old clipboard is NOT applied");
+  ok(policy.knownGeneration() == 5, "but its generation is adopted, so later changes are noticed");
+
+  // From here the session is live and real changes do apply.
+  ok(policy.OnPollReply(6, true), "a change during the session IS applied");
+  ok(!policy.OnPollReply(6, false), "a reply with no data applies nothing");
+  ok(policy.knownGeneration() == 6, "the generation keeps up");
+
+  // Reconnecting re-arms both, so a second session cannot inherit the first one's host clipboard.
+  policy.OnConnected();
+  ok(policy.TakeInitialPush(), "reconnecting asks for the push again");
+  ok(!policy.OnPollReply(9, true), "and its first reply is a baseline too");
+  ok(policy.knownGeneration() == 9, "adopting the newer generation");
+}
+
+// The reported bug, start to finish, against the real core and the real policy.
+//
+// Copy 'a' on the PC during a session, close the viewer, copy 'b' on the client, reopen. The old
+// 'a' must not come back and win: what the user copied last is 'b', and 'b' is what should travel.
+void test_stale_host_clipboard_does_not_win() {
+  const std::u16string a = u"the PC's clipboard from the previous session";
+  const std::u16string b = u"what the user copied while GNLink was closed";
+
+  // The host still holds 'a' at generation 1: its state outlives any one viewer.
+  const uint64_t hostGeneration = 1;
+
+  // A fresh client connects -- a new process, so it starts at generation 0 knowing nothing.
+  ClipboardSyncCore client;
+  ClipboardClientPolicy policy;
+  policy.OnConnected();
+
+  ok(policy.TakeInitialPush(), "repro: the fresh session asks for its initial push");
+  uint64_t pushHash = 0;
+  ok(client.OnLocalChange(b, &pushHash) == ClipboardLocalDecision::Send,
+     "repro: the client's current clipboard 'b' is what gets sent to the host");
+
+  // The host's first answer still carries 'a', because generation 1 > 0.
+  ok(!policy.OnPollReply(hostGeneration, /*hasData=*/true),
+     "repro: the stale 'a' is NOT applied over 'b' -- this is the bug, fixed");
+
+  // Negative control: the reply really did carry applicable content, so the test above is not
+  // passing merely because there was nothing to apply. Had it been applied, 'a' would have won.
+  ok(client.OnRemoteData(a, clipboard_fnv1a(a)) == ClipboardRemoteDecision::Apply,
+     "repro (control): that content WAS applicable -- applying it would have overwritten 'b'");
+}
+
 }  // namespace
 
 int main() {
@@ -209,6 +290,9 @@ int main() {
   test_local_decisions();
   test_remote_decisions();
   test_no_echo_loop();
+  test_baseline_is_not_news();
+  test_client_policy();
+  test_stale_host_clipboard_does_not_win();
   std::printf("clipboard_sync_core_test: %s (%d passed, %d failed)\n", gFail == 0 ? "PASS" : "FAIL",
               gPass, gFail);
   return gFail == 0 ? 0 : 1;

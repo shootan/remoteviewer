@@ -153,6 +153,24 @@ class ClipboardSyncCore {
  public:
   explicit ClipboardSyncCore(uint32_t maxUtf16 = kClipboardTextMaxUtf16) : maxUtf16_(maxUtf16) {}
 
+  /**
+   * Records content that is ALREADY on this machine's clipboard and must not be treated as news.
+   *
+   * Used for what was on the clipboard before the sync started. Without it, whether that content
+   * gets published depends on an OS detail -- whether registering a clipboard listener provokes an
+   * immediate change notification, which differs between Windows builds. Measured on this machine
+   * it does not; seeding the baseline means the answer no longer matters.
+   *
+   * It counts as "last sent" rather than "last applied" because the effect wanted is the same in
+   * both directions: this machine already has it, so it is neither worth sending out nor worth
+   * writing back over the top of itself.
+   */
+  void SeedBaseline(const std::u16string& text) {
+    if (text.empty()) return;
+    lastSentHash_ = clipboard_fnv1a(text);
+    haveSent_ = true;
+  }
+
   // The local clipboard changed to `text`. On Send, `outHash` is the hash to put on the wire and
   // the core remembers it as last-sent. The other decisions leave the core unchanged.
   ClipboardLocalDecision OnLocalChange(const std::u16string& text, uint64_t* outHash) {
@@ -192,6 +210,73 @@ class ClipboardSyncCore {
   bool haveApplied_ = false;
   uint64_t lastSentHash_ = 0;
   uint64_t lastAppliedHash_ = 0;
+};
+
+/**
+ * The client half of the sync minus the I/O: when to poll, and what a reply means at the start of
+ * a session. Shared by the Windows viewer and the Android session so the two cannot drift, and
+ * pure so the session-boundary rules can be tested without a host.
+ *
+ * It exists because of a bug that only appears ACROSS sessions. The host's clipboard state lives
+ * as long as GNLinkStream, not as long as a viewer, so after "copy 'a' on the PC, close the
+ * viewer, copy 'b' on the phone, reopen", the host still held 'a' at some generation > 0 while the
+ * fresh client started at knownGeneration 0 -- and the first poll therefore dragged the previous
+ * session's 'a' over the user's new 'b'.
+ *
+ * The rule that fixes it: the first poll of a session is a BASELINE. It adopts the host's current
+ * generation and throws the contents away, so a session only ever receives changes that happen
+ * while it is connected. What the user copied most recently travels the other way instead, by the
+ * one-shot initial push -- which is what makes "the machine you just connected from wins" true,
+ * and that is the behaviour people expect.
+ */
+class ClipboardClientPolicy {
+ public:
+  /** A new session began (or reconnected): re-arm the baseline and the one-shot push. */
+  void OnConnected() {
+    baselineAdopted_ = false;
+    initialPushPending_ = true;
+    knownGeneration_ = 0;
+    lastPollUs_ = 0;
+  }
+
+  /** True exactly once per session, for the caller to push its current clipboard. */
+  bool TakeInitialPush() {
+    if (!initialPushPending_) return false;
+    initialPushPending_ = false;
+    return true;
+  }
+
+  /** The first poll is due immediately; later ones on the shared interval. */
+  bool ShouldPoll(uint64_t nowUs) const {
+    if (lastPollUs_ == 0) return true;
+    return nowUs - lastPollUs_ >= kClipboardPollIntervalUs;
+  }
+
+  void NotePolled(uint64_t nowUs) { lastPollUs_ = nowUs; }
+
+  /**
+   * Takes in a poll reply and answers one question: should this text be applied locally?
+   *
+   * The generation is adopted either way, so the client stays current. False on the baseline poll
+   * even when the host offered content -- that content predates this session.
+   */
+  bool OnPollReply(uint64_t generation, bool hasData) {
+    knownGeneration_ = generation;
+    if (!baselineAdopted_) {
+      baselineAdopted_ = true;
+      return false;  // whatever the host had belongs to a session that is over
+    }
+    return hasData;
+  }
+
+  uint64_t knownGeneration() const { return knownGeneration_; }
+  bool baseline_adopted() const { return baselineAdopted_; }
+
+ private:
+  bool baselineAdopted_ = false;
+  bool initialPushPending_ = false;
+  uint64_t knownGeneration_ = 0;
+  uint64_t lastPollUs_ = 0;
 };
 
 }  // namespace remote60::native_poc

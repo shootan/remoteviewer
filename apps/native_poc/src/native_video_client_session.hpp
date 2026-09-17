@@ -141,6 +141,16 @@ class ClientSessionController {
   // Android clipboard itself (which likewise requires the foreground).
   bool TakeIncomingClipboardText(std::u16string* out);
 
+  /**
+   * True once per session, when the session wants the app to push the phone's current clipboard.
+   *
+   * A request rather than a call because only the app can read the clipboard on Android, and only
+   * while it is in the foreground. Consumed as it is read.
+   */
+  bool TakeClipboardPushRequest() {
+    return clipInitialPushWanted_.exchange(false, std::memory_order_acq_rel);
+  }
+
   void SetClipboardSyncEnabled(bool enabled);
   bool ClipboardSyncEnabled() const { return clipboardEnabled_.load(std::memory_order_relaxed); }
   // Whether the connected host advertised kCaptureFlagClipboardTextV1, so the UI can show the
@@ -236,10 +246,12 @@ class ClientSessionController {
   uint32_t clipNextSeq_ = 0;
   bool clipHasIncoming_ = false;
   std::u16string clipIncomingText_;
-  uint64_t clipKnownGeneration_ = 0;
-  uint64_t clipLastPollUs_ = 0;
+  // The session-boundary rules (baseline poll, one-shot initial push, poll interval), shared with
+  // the Windows viewer so both clients behave the same. Control thread only.
+  ClipboardClientPolicy clipPolicy_;
   std::atomic<bool> clipboardEnabled_{true};
   std::atomic<bool> hostSupportsClipboard_{false};
+  std::atomic<bool> clipInitialPushWanted_{false};
 };
 
 }  // namespace remote60::native_poc

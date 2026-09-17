@@ -633,6 +633,16 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeTakeIncomingClipboardT
                         static_cast<jsize>(text.size()));
 }
 
+/**
+ * True once per session: the session is asking the app to push the phone's current clipboard, so
+ * the machine the user just connected from wins over whatever the host held from an earlier one.
+ */
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeTakeClipboardPushRequest(
+    JNIEnv* /* env */, jobject /* this */) {
+  return g_session_controller.TakeClipboardPushRequest() ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeSetClipboardSyncEnabled(
     JNIEnv* /* env */, jobject /* this */, jboolean enabled) {

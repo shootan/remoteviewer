@@ -12065,3 +12065,18 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - **검증**: `:app:testDebugUnitTest` **74 tests / 0 failures / 0 skipped**(신규 6건 전부 실행 확인 — 삼성 문구·대소문자·다른 벤더 문구 인식, **빈 메시지=취소는 폴백 안 함**(부정 대조), 일반 실패·성공도 폴백 안 함). `:app:assembleDebug` BUILD SUCCESSFUL, **merged manifest 에 provider·authority `com.remote60.androiddirect.updateprovider`·FILE_PROVIDER_PATHS 존재 확인**, `file_paths.xml` 패키징 확인.
   - ⚠️ 첫 빌드는 내가 XML 주석 안에 `--` 를 써서 리소스 컴파일이 깨졌다(`file_paths.xml:6`). 빌드가 잡아 줬고 고쳤다.
 - **미검증**: **실기기 0** — 실제 삼성 기기에서 폴백이 떠서 설치까지 가는 것은 확인 못 했다. 폴백 배선(수신→판정→인텐트)은 컴파일·단위테스트까지이고 런타임 경로는 실기 몫.
+
+### 2026-09-17 클립보드 스테일 부활 — 진짜 기전은 "시작 시드" 가 아니라 "세션 경계" 였다
+
+- **증상(사용자)**: ①GNLink 중 host 에서 Ctrl+C `a` ②GNLink 종료 ③클라에서 `b` 복사 ④GNLink 켬 → **옛 `a` 가 양쪽을 덮음**. 원하는 동작은 "켜면 클라의 `b` 가 host 로".
+- 🔴 **받은 진단은 틀렸고, 고치기 전에 재현부터 했다.** "`HostClipboardHub` 가 시작 시 클립보드를 읽어 generation=1 로 매긴다" → **재현 안 됨**. 비어있지 않은 값을 클립보드에 올려 둔 **뒤** `Start()` 하고 400ms 기다려도 **generation=0**. 이 OS 에서 `AddClipboardFormatListener` 는 최초 `WM_CLIPBOARDUPDATE` 를 쏘지 않는다. 그 가정대로 "시작 시드 금지" 만 넣었으면 **아무것도 안 고치는 no-op** 이 될 뻔했다.
+  - ⚠️ 다만 **기존 monitor 테스트가 이걸 못 봤던 것은 사실**이다 — 클립보드를 **비운 채** 시작해 `generation==0` assert 가 **엉뚱한 이유로** 통과하고 있었다. 이제 시작 전에 값을 올려 두고 확인한다.
+- **진짜 기전 = 세션 경계**: `HostClipboardHub` 는 **GNLinkStream 프로세스 수명 전체**로 살아 있고 뷰어 세션마다 리셋되지 않는다(main 에서 1회 Start, per-session reset 없음). 그래서 세션1 의 Ctrl+C 로 generation=1·text=`a` 가 **뷰어가 죽어도 남고**, 새 뷰어는 **새 프로세스라 knownGeneration=0** 으로 첫 poll → `snap.generation(1) > 0` (`host_control_session.cpp:1111`) → `a` 반환 → `b` 를 덮는다. **지목된 줄은 정확했고, generation 이 1 이 된 이유만 달랐다.**
+- **수정(지시의 의도 그대로, 지점만 교정)**:
+  - **세션의 첫 poll 은 baseline 전용** — host 의 현재 generation 만 채택하고 **내용은 버린다**. 세션은 **연결돼 있는 동안 생긴 변경만** 받는다. 재연결도 매번 재무장 → 스테일 재유입 없음.
+  - **연결 시 클라가 자기 현재 클립보드를 1회 push**(빈 값이면 안 함) → `b` 가 host 로. ⇒ **방금 연결한 기기가 소스**.
+  - 방어: host 시작 시 기존 내용을 **명시적 baseline 으로 기록한 뒤 리스너 등록**(순서 중요 — 반대면 초기 알림이 먼저 발행할 수 있다). 이 OS 엔 불필요하지만 동작이 OS 특성에 의존하지 않게.
+- **규칙 복사본을 만들지 않으려고** 클라측 세션 경계 규칙을 공유 순수 클래스 `ClipboardClientPolicy`(baseline·1회 push·poll 간격)로 빼서 **Windows 뷰어와 Android 세션이 같은 것**을 쓴다. 테스트는 그 제품 클래스를 그대로 시험한다.
+- **검증**: core **94/94**(신규: baseline 비발행·정책 세션경계·**재현 시나리오에서 옛 `a` 가 안 이김**, 부정 대조 포함) · wire 33/33 · **monitor 12/12**(실 OS, 시작 전 값 존재 상태) · toolbar 29/29 · shared_core · cmake_sources. Android `testDebugUnitTest` **74/0/0** + `assembleDebug` 성공, arm64 `.so` 에 `TakeClipboardPushRequest` 포함 확인.
+  - **변이 검사**: 첫 poll 이 내용을 적용하도록 되돌리니 **재현 테스트 포함 3건이 FAIL** → 이 시험들이 실제로 이 버그를 잡는다. 원복 후 전량 통과.
+- **미검증**: 실기 — 사용자의 ①~⑤ 절차에서 실제로 `b` 가 host 에 들어가는지는 실기 확인 몫.
