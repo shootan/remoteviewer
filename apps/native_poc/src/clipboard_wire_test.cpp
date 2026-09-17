@@ -20,7 +20,11 @@
 
 namespace {
 
+using remote60::native_poc::ClipboardClientPolicy;
+using remote60::native_poc::ClipboardLocalDecision;
 using remote60::native_poc::ClipboardPollReply;
+using remote60::native_poc::ClipboardRemoteDecision;
+using remote60::native_poc::ClipboardSyncCore;
 using remote60::native_poc::ControlClipboardRequestMessage;
 using remote60::native_poc::ControlClipboardUpdateMessage;
 using remote60::native_poc::ControlInputAckMessage;
@@ -152,6 +156,66 @@ void test_update(const std::u16string& viewerText, const std::string& label) {
   ok(host.lastApplied == viewerText, label + ": with the exact viewer text");
 }
 
+// The reported bug, over the wire, with the real policy and the real core against a host that
+// answers exactly as Serve does.
+//
+// The core test proves the client refuses the stale reply. This proves the two things that refusal
+// is FOR: that the host ends up holding what the client had, and that refusing the first reply does
+// not also deafen the session to later host copies.
+void test_stale_session_scenario() {
+  const std::u16string a = u"the PC's clipboard from a session that is over";
+  const std::u16string b = u"what the user copied while GNLink was closed";
+  const std::u16string c = u"what the user copies on the PC during THIS session";
+
+  MockHost host;
+  host.text = a;
+  host.hash = clipboard_fnv1a(a);
+  host.generation = 1;  // left over from the previous session; the hub outlives a viewer
+  LoopbackLink link(&host);
+
+  ClipboardSyncCore client;
+  ClipboardClientPolicy policy;
+  policy.OnConnected();
+
+  // (b)/(d) The connecting client is the source: its current clipboard goes out once, and the
+  // host really does end up holding it.
+  ok(policy.TakeInitialPush(), "scenario: the new session asks for its one initial push");
+  uint64_t pushHash = 0;
+  ok(client.OnLocalChange(b, &pushHash) == ClipboardLocalDecision::Send,
+     "scenario: 'b' is judged worth sending");
+  ok(send_clipboard_update(link, 1, b, pushHash, 0), "scenario: 'b' reaches the host");
+  ok(host.lastApplied == b, "scenario: THE HOST NOW HOLDS 'b' -- the connecting client won");
+
+  // (a) The host still offers its old 'a', because generation 1 is above the client's 0. The
+  // baseline is what stops it landing -- and the reply really did carry content, so this is not
+  // passing because there was nothing to refuse.
+  ClipboardPollReply first;
+  ok(poll_clipboard(link, policy.knownGeneration(), 0, &first), "scenario: the first poll answers");
+  ok(first.hasData && first.text == a,
+     "scenario (control): the host DID offer the stale 'a' on that first poll");
+  ok(!policy.OnPollReply(first.generation, first.hasData),
+     "scenario: the baseline refuses it, so 'a' never overwrites 'b'");
+  ok(host.lastApplied == b, "scenario: 'b' still stands on the host");
+
+  // (c) The session is live now, so a copy made on the PC while connected must still arrive. A
+  // baseline that silenced this would have traded one bug for another.
+  host.text = c;
+  host.hash = clipboard_fnv1a(c);
+  host.generation = 2;
+  ClipboardPollReply later;
+  ok(poll_clipboard(link, policy.knownGeneration(), 0, &later), "scenario: a later poll answers");
+  ok(policy.OnPollReply(later.generation, later.hasData),
+     "scenario: a host copy made DURING the session is applied");
+  ok(later.text == c, "scenario: and it is the text the host copied");
+
+  // (e) Applying it does not send it back: the loop stays broken across the session boundary too.
+  ok(client.OnRemoteData(later.text, later.hash) == ClipboardRemoteDecision::Apply,
+     "scenario: the client applies it");
+  uint64_t echoHash = 0;
+  ok(client.OnLocalChange(c, &echoHash) == ClipboardLocalDecision::SkipEcho,
+     "scenario: and does NOT send it straight back");
+}
+
 }  // namespace
 
 int main() {
@@ -164,6 +228,8 @@ int main() {
   test_update(u"viewer clipboard ascii", "update-ascii");
   test_update(u"뷰어에서 복사", "update-korean");                // "뷰어에서 복사"
   test_update(std::u16string(4096, u'z'), "update-large");
+
+  test_stale_session_scenario();
 
   std::printf("clipboard_wire_test: %s (%d passed, %d failed)\n", gFail == 0 ? "PASS" : "FAIL",
               gPass, gFail);
