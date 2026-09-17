@@ -486,6 +486,13 @@ int wmain() {
     {
       using remote60::native_poc::SessionHealth;
       auto paint_with = [&](SessionHealth health) {
+        // Keep the bar summoned. It auto-collapses on a timer, and a hidden bar takes the early
+        // exit in reposition() that skips InvalidateRect -- so PrintWindow would hand back the
+        // PREVIOUS state's pixels. That is what made this check flap: two states captured
+        // identically because neither had repainted.
+        remote60::native_poc::session_toolbar_notify_mouse(640, 4, 1280);
+        remote60::native_poc::session_toolbar_set_visible(true);
+        remote60::native_poc::session_toolbar_follow_owner();
         remote60::native_poc::SessionToolbarState s;
         s.connected = true;
         s.inputOn = true;
@@ -494,6 +501,9 @@ int wmain() {
         s.health = health;
         remote60::native_poc::session_toolbar_update(s);
         pump(150);
+        // And repaint synchronously, so the capture below cannot race the posted state push.
+        InvalidateRect(bar, nullptr, FALSE);
+        UpdateWindow(bar);
       };
       // ONE PrintWindow per state, not one per pixel. The first attempt sampled the row a pixel at
       // a time and compared nonsense: the bar re-lays-out when state is pushed, so the width

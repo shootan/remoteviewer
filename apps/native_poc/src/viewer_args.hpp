@@ -33,7 +33,8 @@ struct Args {
   // Empty means "the only host on the account", which is the common case and saves the caller
   // from having to look an id up first.
   std::string directoryHostName;
-  uint32_t controlIntervalMs = 1000;
+  // The uplink keepalive interval; see kClientControlIntervalMsDefault.
+  uint32_t controlIntervalMs = remote60::native_poc::kClientControlIntervalMsDefault;
   uint32_t tcpRecvBufKb = 0;
   uint32_t tcpSendBufKb = 0;
   uint32_t udpMtu = 1200;

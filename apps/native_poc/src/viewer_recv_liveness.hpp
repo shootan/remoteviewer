@@ -105,6 +105,15 @@ struct SessionLivenessConfig {
   uint64_t outputTimeoutUs = 15000000;
   uint64_t stuckThreadUs = 8000000;
   uint64_t processingWedgeUs = 5000000; // ingress may keep control alive while MFT/publish is wedged
+  // Control gone WHILE VIDEO IS STILL ARRIVING. Deliberately separate from deadSessionUs, and much
+  // longer, because the two are not the same situation: a session with no control and no picture is
+  // over, while one with a live picture is still showing the user their machine.
+  //
+  // A few seconds of uplink silence is enough for the control tunnel to run out of retransmits and
+  // report peer-lost, and ending the session on that alone is what threw people out of sessions
+  // that were working. Bounded rather than removed: with control gone the session answers no input
+  // at all, so a picture nobody can click on is not kept forever. 0 = keep it indefinitely.
+  uint64_t controlGoneWithVideoUs = 30000000;  // 30 s
 };
 
 struct SessionLivenessVerdict {
@@ -151,8 +160,21 @@ inline SessionLivenessVerdict evaluate_session_liveness(const SessionLivenessSam
                          liveness_age_us(s.nowUs, outputBase) >= c.outputTimeoutUs;
   const bool threadLost = v.recvStalled && v.stageAgeUs >= c.stuckThreadUs;
   if (c.deadSessionUs > 0 && (outputLost || threadLost)) v.sessionDead = true;
-  if (c.deadSessionUs > 0 && s.controlRequired && controlGone && v.controlGoneUs >= c.deadSessionUs)
-    v.sessionDead = true;
+  // A session that requires control and has lost it. This used to end the session on the control
+  // clock alone, with no look at the video at all -- so a few seconds of uplink silence, which is
+  // all it takes for the tunnel to give up and report peer-lost, tore down a session whose picture
+  // was arriving and decoding perfectly. That is the bounce people saw.
+  //
+  // Now the picture gets a say: gone control ends it quickly only when the video stopped too, and
+  // otherwise only after the much longer controlGoneWithVideoUs ceiling.
+  if (c.deadSessionUs > 0 && s.controlRequired && controlGone &&
+      v.controlGoneUs >= c.deadSessionUs) {
+    if (videoStopped) {
+      v.sessionDead = true;
+    } else if (c.controlGoneWithVideoUs > 0 && v.controlGoneUs >= c.controlGoneWithVideoUs) {
+      v.sessionDead = true;
+    }
+  }
   const bool processing = s.stage == RecvStage::Decode || s.stage == RecvStage::Publish;
   if (processing && c.processingWedgeUs > 0 && v.stageAgeUs >= c.processingWedgeUs &&
       v.publishAgeUs >= c.processingWedgeUs) v.sessionDead = true;

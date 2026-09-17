@@ -172,9 +172,16 @@ int main() {
     CHECK(evaluate_session_liveness(s, cfg).sessionDead);
     s.streamExpected = false;  // picker / secure desktop is not a missing output episode
     CHECK(!evaluate_session_liveness(s, cfg).sessionDead);
+    // This used to assert the opposite -- "video cannot hide dead input control" -- and end the
+    // session after deadSessionUs even with frames arriving. That rule is what threw people out of
+    // working sessions: a few seconds of uplink silence is all it takes for the control tunnel to
+    // report peer-lost. The intent survives with a deadline instead of an instant: video may hide
+    // dead control for a while, but not past controlGoneWithVideoUs.
     s.controlRequired = true; s.controlConnected = false;
     s.controlGoneSinceUs = now - 6 * kS; s.lastPublishUs = now - kMs;
-    CHECK(evaluate_session_liveness(s, cfg).sessionDead);  // video cannot hide dead input control
+    CHECK(!evaluate_session_liveness(s, cfg).sessionDead);
+    s.controlGoneSinceUs = now - 31 * kS;
+    CHECK(evaluate_session_liveness(s, cfg).sessionDead);
     s = healthy(now); s.stage = RecvStage::Decode; s.stageEnterUs = now - 9 * kS;
     CHECK(evaluate_session_liveness(s, cfg).sessionDead);
   }
@@ -201,6 +208,68 @@ int main() {
     wedged.stage = RecvStage::Recv; // a normally idle source is not a decoder wedge
     CHECK(!evaluate_session_liveness(wedged, cfg).sessionDead);
   }
+  // ---------------------------------------------------------------- the bounce, and its bound
+  //
+  // The field case: the uplink goes quiet for a few seconds, the control tunnel runs out of
+  // retransmits and reports peer-lost, and the host drops its end -- while video keeps arriving
+  // and decoding perfectly. Ending the session here is what the user experiences as being thrown
+  // out of something that was working.
+  std::printf("[L13] control lost while VIDEO KEEPS ARRIVING: the session is kept\n");
+  {
+    auto s = healthy(now);
+    s.controlConnected = false;
+    s.tunnelClosed = true;
+    s.controlRequired = true;            // true for every real session (udp tunnel or control port)
+    s.controlGoneSinceUs = now - 8 * kS; // well past deadSessionUs
+    s.lastPublishUs = now - 30 * kMs;    // ...but frames are still being published
+    const auto v = evaluate_session_liveness(s, cfg);
+    CHECK(!v.sessionDead);
+    CHECK(v.controlGoneUs == 8 * kS);
+  }
+
+  std::printf("[L14] ...but not forever: control gone far longer, with video, still ends it\n");
+  {
+    // The bound. A picture nobody can click on is not worth keeping indefinitely, so the
+    // relaxation has a ceiling rather than being "never notice a dead control channel".
+    auto s = healthy(now);
+    s.controlConnected = false;
+    s.tunnelClosed = true;
+    s.controlRequired = true;
+    s.controlGoneSinceUs = now - 31 * kS;
+    s.lastPublishUs = now - 30 * kMs;  // video still fine
+    CHECK(evaluate_session_liveness(s, cfg).sessionDead);
+  }
+
+  std::printf("[L15] real death: control gone AND video stopped is still caught quickly\n");
+  {
+    auto s = healthy(now);
+    s.controlConnected = false;
+    s.tunnelClosed = true;
+    s.controlRequired = true;
+    s.controlGoneSinceUs = now - 6 * kS;
+    s.lastPublishUs = now - 6 * kS;  // nothing arriving either
+    CHECK(evaluate_session_liveness(s, cfg).sessionDead);
+  }
+
+  std::printf("[L16] negative controls around the kept session\n");
+  {
+    // A session that never published anything is not "video still arriving".
+    auto never = healthy(now);
+    never.controlConnected = false;
+    never.tunnelClosed = true;
+    never.controlRequired = true;
+    never.controlGoneSinceUs = now - 6 * kS;
+    never.lastPublishUs = 0;
+    CHECK(evaluate_session_liveness(never, cfg).sessionDead);
+
+    // And the long output timeout still ends a session whose picture stopped, control or no.
+    auto stalledOutput = healthy(now);
+    stalledOutput.streamExpected = true;
+    stalledOutput.streamExpectedSinceUs = now - 20 * kS;
+    stalledOutput.lastPublishUs = now - 20 * kS;
+    CHECK(evaluate_session_liveness(stalledOutput, cfg).sessionDead);
+  }
+
   if (gFailures == 0) {
     std::printf("viewer_liveness_test: PASS\n");
     return 0;

@@ -220,6 +220,54 @@ struct FakeSessionServer {
   std::thread udpThread;
 };
 
+// The uplink keepalive cadence.
+//
+// The ping is what proves to a relay that the client is still there; when it stops for a few
+// seconds the relay calls the client silent and the session is dropped even though its video was
+// arriving fine. So the interval is pinned here rather than left as a number somebody can quietly
+// raise again.
+bool test_control_keepalive_interval() {
+  if (!expect(remote60::native_poc::kClientControlIntervalMsDefault == 500,
+              "the keepalive default should be 500ms")) return false;
+  // Both clients must take that default; two copies of the number is how they drift apart.
+  if (!expect(ClientSessionConnectArgs{}.controlIntervalMs ==
+                  remote60::native_poc::kClientControlIntervalMsDefault,
+              "the Android session should default to the shared keepalive interval")) return false;
+
+  ClientControlScheduler scheduler;
+  WindowPanelStateModel windowPanel;
+  StreamStateControl streamState;
+  CaptureModeRequestState captureMode;
+  KeyframeRequestState keyframe(120000, 300000, 3);
+  RuntimeTuneState runtimeTune(300000, 30000000, 250000, 1, 240);
+  ClientInputQueue inputQueue;
+  ControlOutboundAction action{};
+  ClientControlMetricsSnapshot metrics{};  // nothing else pending, so only pings can come out
+
+  const uint64_t t0 = 1000;
+  const uint64_t intervalUs =
+      static_cast<uint64_t>(remote60::native_poc::kClientControlIntervalMsDefault) * 1000ULL;
+  scheduler.Reset(remote60::native_poc::kClientControlIntervalMsDefault, t0);
+
+  if (!expect(scheduler.NextAction(t0, metrics, &windowPanel, &streamState, &captureMode, &keyframe,
+                                   &runtimeTune, &inputQueue, &action) &&
+                  action.kind == ControlOutboundActionKind::Ping,
+              "a session pings as soon as it starts")) return false;
+  scheduler.OnPingCompleted(t0);
+
+  // The negative control: it does NOT ping early. Without this the test would pass just as well on
+  // a scheduler that pinged every turn -- a flood, wearing the same green tick.
+  if (!expect(!scheduler.NextAction(t0 + intervalUs - 1, metrics, &windowPanel, &streamState,
+                                    &captureMode, &keyframe, &runtimeTune, &inputQueue, &action),
+              "and does not ping before the interval is up")) return false;
+
+  if (!expect(scheduler.NextAction(t0 + intervalUs, metrics, &windowPanel, &streamState,
+                                   &captureMode, &keyframe, &runtimeTune, &inputQueue, &action) &&
+                  action.kind == ControlOutboundActionKind::Ping,
+              "and pings again once it is")) return false;
+  return true;
+}
+
 bool test_ping_and_metrics_order() {
   ClientControlScheduler scheduler;
   WindowPanelStateModel windowPanel;
@@ -1413,6 +1461,7 @@ bool test_input_queue_preserves_key_edges_on_overflow() {
 }
 
 int main() {
+  if (!test_control_keepalive_interval()) return 1;
   if (!test_ping_and_metrics_order()) return 1;
   if (!test_window_and_input_actions()) return 1;
   if (!test_input_coalesce_and_generated_us()) return 1;

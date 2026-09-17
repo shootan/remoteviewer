@@ -236,6 +236,20 @@ struct ControlOutboundAction {
   uint64_t inputGeneratedUs = 0;  // P0 (#351): local diagnostic — when the UI generated this input
 };
 
+/**
+ * How often a client pings the host when it has nothing else to send.
+ *
+ * This is the uplink KEEPALIVE, not only a latency probe, and that is why it is short. A relay
+ * that sees no packets from a client for a few seconds calls it silent and drops the session, and
+ * the host then reports peer-lost -- which is how a healthy session got torn down while its video
+ * was still arriving perfectly. Halved from the old 1000 ms so an otherwise quiet session keeps
+ * proving it is there, for the price of one tiny message every half second.
+ *
+ * Shared by the Windows viewer (viewer_args) and the Android session (ClientSessionConnectArgs) so
+ * the two cannot drift apart. The scheduler clamps whatever it is handed to [20, 10000].
+ */
+constexpr uint32_t kClientControlIntervalMsDefault = 500;
+
 class ClientControlScheduler {
  public:
   void Reset(uint32_t controlIntervalMs, uint64_t nowUs);

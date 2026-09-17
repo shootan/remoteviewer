@@ -78,7 +78,8 @@ struct ClientSessionConnectArgs {
   // punch was performed with: a fresh one would sit behind a different NAT mapping and the
   // host's packets would be dropped. The session takes ownership.
   SocketHandle preparedUdpSocket = kInvalidSocket;
-  uint32_t controlIntervalMs = 1000;
+  // The uplink keepalive interval; see kClientControlIntervalMsDefault.
+  uint32_t controlIntervalMs = kClientControlIntervalMsDefault;
   uint32_t udpHandshakeTimeoutMs = 800;
   ClientEncodedFrameSink* encodedFrameSink = nullptr;
 };
