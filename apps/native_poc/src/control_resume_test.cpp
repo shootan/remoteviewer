@@ -276,6 +276,96 @@ int main() {
           closedChannel.CloseReason() == ControlCloseReason::None);
   }
 
+  // ------------------------------------------------------- the host dispatcher's two wake reasons
+  {
+    // Steady state: the dispatcher has served epoch 3 and resume 0, and nothing new has happened.
+    ControlDispatchInputs idle;
+    idle.epoch = 3;
+    idle.servedEpoch = 3;
+    idle.resumeSeq = 0;
+    idle.servedResumeSeq = 0;
+    check("nothing to do does not wake the dispatcher", !control_dispatch_decide(idle).wake);
+
+    // A resume for the session it is already serving.
+    ControlDispatchInputs resume = idle;
+    resume.resumeSeq = 1;
+    check("a resume wakes it", control_dispatch_decide(resume).wake);
+    check("...as a resume, not a new session", control_dispatch_decide(resume).resuming);
+
+    // A different client. This is the case that must NOT be treated as a resume -- the epoch moving
+    // is what says the client changed, and resuming here would hand the old client's request state
+    // to the new one's session.
+    ControlDispatchInputs rollover = idle;
+    rollover.epoch = 4;
+    check("a new epoch wakes it", control_dispatch_decide(rollover).wake);
+    check("...and is not a resume", !control_dispatch_decide(rollover).resuming);
+
+    // Both at once: a client left while its resume was in flight. The epoch still wins.
+    ControlDispatchInputs both = idle;
+    both.epoch = 4;
+    both.resumeSeq = 1;
+    check("a rollover racing a resume wakes it", control_dispatch_decide(both).wake);
+    check("...and the rollover wins", !control_dispatch_decide(both).resuming,
+          "a resume must never be served onto a different client's session");
+
+    // Shutdown wakes it and is not a resume, or the loop would re-key on its way out.
+    ControlDispatchInputs stopping = idle;
+    stopping.stop = true;
+    stopping.resumeSeq = 1;
+    check("stopping wakes it", control_dispatch_decide(stopping).wake);
+    check("...and is never a resume", !control_dispatch_decide(stopping).resuming);
+
+    // A resume already served does not wake it again; the client repeating its request while the
+    // answer is in flight must not start a second re-key.
+    ControlDispatchInputs served = idle;
+    served.resumeSeq = 2;
+    served.servedResumeSeq = 2;
+    check("an already-served resume does not wake it again", !control_dispatch_decide(served).wake);
+  }
+
+  // ------------------------------------------------------------- wire compatibility, host side
+  {
+    // (e) Two of the three rolling-update cases are decided here; the third is the viewer reading
+    // the ack, which is layer 3's.
+    const uint32_t oldViewerHello = kUdpFeatureVideoFec | kUdpFeatureVideoFecInterleaved;
+    const uint32_t newViewerHello = oldViewerHello | kUdpFeatureControlResume;
+
+    // old viewer -> new host: the host advertises the bit anyway (it does not know yet who is
+    // asking), but records that this client never asked, and then refuses any resume.
+    check("a new host records that an old viewer did not ask",
+          !host_resume_negotiated(oldViewerHello));
+    HostResumeInputs fromOldViewer;
+    fromOldViewer.negotiated = host_resume_negotiated(oldViewerHello);
+    fromOldViewer.sessionActive = true;
+    fromOldViewer.servingControl = false;
+    check("...and refuses a resume that claims to be from it",
+          !host_should_accept_resume(fromOldViewer),
+          "an old viewer cannot have sent one, so this is someone else");
+
+    // new viewer -> new host: negotiated, and a resume is honoured once control is not being served.
+    check("a new host records that a new viewer asked", host_resume_negotiated(newViewerHello));
+    HostResumeInputs fromNewViewer = fromOldViewer;
+    fromNewViewer.negotiated = host_resume_negotiated(newViewerHello);
+    check("...and honours its resume", host_should_accept_resume(fromNewViewer));
+
+    // new viewer -> old host: the old host never sets the bit in its ack, so the viewer's
+    // negotiated is false and control_resume_decide never says Send. Checked here as the ack the
+    // viewer would see, so the three cases sit together.
+    const uint32_t oldHostAck = kUdpFeatureVideoFec | kUdpFeatureVideoNack;
+    ControlResumeInputs againstOldHost = asking();
+    againstOldHost.negotiated = (oldHostAck & kUdpFeatureControlResume) != 0;
+    check("a new viewer against an old host never asks",
+          control_resume_decide(cfg, againstOldHost) == ControlResumeAction::Idle,
+          name_of(control_resume_decide(cfg, againstOldHost)));
+
+    const uint32_t newHostAck = oldHostAck | kUdpFeatureControlResume;
+    ControlResumeInputs againstNewHost = asking();
+    againstNewHost.negotiated = (newHostAck & kUdpFeatureControlResume) != 0;
+    check("...and against a new host it does",
+          control_resume_decide(cfg, againstNewHost) == ControlResumeAction::Send,
+          name_of(control_resume_decide(cfg, againstNewHost)));
+  }
+
   std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED")
             << "  (" << gChecks << " checks, " << gFailures << " failed)\n";
   return gFailures == 0 ? 0 : 1;

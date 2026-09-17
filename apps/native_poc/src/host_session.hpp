@@ -92,6 +92,27 @@ struct SessionState {
   std::mutex epochMu;
   std::condition_variable epochCv;
 
+  // --- control resume (item 8) ---
+  //
+  // A client whose control channel died but whose media socket is still carrying video asks to
+  // rebuild control on THIS session rather than starting a new one. The epoch cannot be used to
+  // hand that over: bumping it is what tells everything downstream that a different client
+  // arrived, and here it is the same one. So the resume gets its own counter, with the same
+  // shape as the epoch handover -- the reader raises it and waits, the dispatcher re-keys the
+  // channel and publishes that it is ready, and only then does the reader answer. The client
+  // repeats its request until it sees that answer, so nothing it sends can arrive before the
+  // re-key (the same discipline the Hello path already relies on).
+  std::atomic<uint64_t> controlResumeSeq{0};        // reader: a resume was accepted
+  std::atomic<uint64_t> controlResumeServedSeq{0};  // dispatcher: re-keyed and serving it
+  std::atomic<uint32_t> controlResumeId{0};         // the id both sides derive stream ids from
+  // Whether this client asked for resume in its Hello. A client that did not is never given one.
+  std::atomic<bool> controlResumeNegotiated{false};
+  // Whether the dispatcher is inside Serve() right now. A resume is honoured only when it is
+  // not: resetting a stream that is working is the one thing this must never do, and it is also
+  // what stops a stray packet from being able to disturb a healthy session.
+  std::atomic<bool> controlServing{false};
+
+
   // --- behaviour (Phase 2-3: former main() lambdas begin_session_epoch / await_control_ready) ---
   // Open a new session epoch for a just-connected client; returns the epoch to wait on.
   uint64_t BeginEpoch() {

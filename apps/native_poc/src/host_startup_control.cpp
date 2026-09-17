@@ -51,6 +51,7 @@
 #include "mf_h264_codec.hpp"
 #include "bind_port_candidates.hpp"
 #include "capture_cadence_gate.hpp"
+#include "control_resume.hpp"
 #include "d3d_capture_readback.hpp"
 #include "directory_client.hpp"
 #include "encode_resolution_ladder.hpp"
@@ -303,6 +304,14 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
             // Video NACK: the host supports selective retransmit; advertise it, and serve
             // retransmits only when this client asked for it. (video NACK.)
             ack.features |= remote60::native_poc::kUdpFeatureVideoNack;
+            // Control resume (item 8). Advertised unconditionally, like video NACK above, and
+            // acted on only for a client that asked -- a client that never asked does not know
+            // what a resume answer is, so sending it one would be noise it has to ignore.
+            ack.features |= remote60::native_poc::kUdpFeatureControlResume;
+            clientSession.controlResumeNegotiated.store(
+                remote60::native_poc::host_resume_negotiated(hello.features),
+                std::memory_order_release);
+
             sender.nackEnabled.store(
                 (hello.features & remote60::native_poc::kUdpFeatureVideoNack) != 0,
                 std::memory_order_relaxed);
@@ -382,6 +391,73 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
             continue;
           }
         }
+        // Control resume (item 8): rebuild the control stream on this session.
+        //
+        // Handled here, before OnPacket, because the channel it is about to re-key is the thing
+        // OnPacket feeds. The answer is sent from this thread on the raw socket for the same
+        // reason: the channel is the broken part, so the repair cannot be carried by it.
+        if (len >= sizeof(remote60::native_poc::UdpControlResumePacket)) {
+          remote60::native_poc::UdpControlResumePacket resume{};
+          std::memcpy(&resume, rx, sizeof(resume));
+          if (resume.magic == remote60::native_poc::kMagic &&
+              resume.kind == static_cast<uint16_t>(UdpPacketKind::ControlResume) &&
+              resume.size == sizeof(resume)) {
+            // The endpoint the session is bound to. A client whose mapping moved is not
+            // reachable by the video the host is still sending, so it could not be in the state
+            // this feature is for -- and treating a stranger's packet as this client would let
+            // it reset the stream.
+            const bool fromCurrentPeer =
+                sender.udpPeerIpNet.load(std::memory_order_acquire) == peer.sin_addr.s_addr &&
+                sender.udpPeerPortNet.load(std::memory_order_acquire) == peer.sin_port;
+            remote60::native_poc::HostResumeInputs decide;
+            decide.negotiated =
+                clientSession.controlResumeNegotiated.load(std::memory_order_acquire);
+            decide.sessionActive =
+                fromCurrentPeer &&
+                clientSession.controlReadyEpoch.load(std::memory_order_acquire) > 0;
+            decide.servingControl = clientSession.controlServing.load(std::memory_order_acquire);
+            const bool accept = remote60::native_poc::host_should_accept_resume(decide);
+
+            uint64_t waitFor = 0;
+            if (accept) {
+              {
+                std::lock_guard<std::mutex> lock(clientSession.epochMu);
+                clientSession.controlResumeId.store(resume.resumeId, std::memory_order_release);
+                waitFor =
+                    clientSession.controlResumeSeq.fetch_add(1, std::memory_order_acq_rel) + 1;
+              }
+              clientSession.epochCv.notify_all();
+              // Bounded, like AwaitControlReady: if the dispatcher cannot come back we simply
+              // do not answer, and the client keeps asking or gives up at its own ceiling.
+              std::unique_lock<std::mutex> lock(clientSession.epochMu);
+              clientSession.epochCv.wait_for(lock, std::chrono::milliseconds(1500), [&] {
+                return stop.load() ||
+                       clientSession.controlResumeServedSeq.load(std::memory_order_acquire) >=
+                           waitFor;
+              });
+            }
+            const bool served =
+                accept && clientSession.controlResumeServedSeq.load(std::memory_order_acquire) >=
+                              waitFor;
+
+            remote60::native_poc::UdpControlResumePacket answer{};
+            answer.kind = static_cast<uint16_t>(UdpPacketKind::ControlResumeAck);
+            answer.streamId = served ? remote60::native_poc::control_resume_stream_id(
+                                           remote60::native_poc::kUdpControlStreamHostToClient,
+                                           resume.resumeId)
+                                     : remote60::native_poc::kUdpControlStreamHostToClient;
+            answer.resumeId = resume.resumeId;
+            answer.accepted = served ? 1u : 0u;
+            (void)sendto(clientSession.clientSock, reinterpret_cast<const char*>(&answer),
+                         sizeof(answer), 0, reinterpret_cast<const sockaddr*>(&peer), peerLen);
+            std::cout << "[native-video-host][control] resume id=" << resume.resumeId
+                      << " accepted=" << (served ? 1 : 0)
+                      << " negotiated=" << (decide.negotiated ? 1 : 0)
+                      << " peer=" << (fromCurrentPeer ? "same" : "other")
+                      << " serving=" << (decide.servingControl ? 1 : 0) << "\n";
+            continue;
+          }
+        }
         if (clientSession.udpControlChannel.OnPacket(rx, len)) continue;
         (void)clientSession.directoryAgent.ConsumeUdpPacket(rx, len, peer);
       }
@@ -396,28 +472,69 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
     // Wi-Fi range was enough to leave the host answering handshakes and nothing else.
     clientSession.udpControlThread = std::thread([&]() {
       uint64_t servedEpoch = 0;
+      uint64_t servedResumeSeq = 0;
       for (;;) {
+        bool resuming = false;
         {
+          const auto look = [&]() {
+            remote60::native_poc::ControlDispatchInputs in;
+            in.stop = stop.load();
+            in.epoch = clientSession.epoch.load(std::memory_order_acquire);
+            in.servedEpoch = servedEpoch;
+            in.resumeSeq = clientSession.controlResumeSeq.load(std::memory_order_acquire);
+            in.servedResumeSeq = servedResumeSeq;
+            return remote60::native_poc::control_dispatch_decide(in);
+          };
           std::unique_lock<std::mutex> lock(clientSession.epochMu);
-          clientSession.epochCv.wait(lock, [&] {
-            return stop.load() || clientSession.epoch.load(std::memory_order_acquire) > servedEpoch;
-          });
+          clientSession.epochCv.wait(lock, [&] { return look().wake; });
+          resuming = look().resuming;
         }
         if (stop.load()) break;
         servedEpoch = clientSession.epoch.load(std::memory_order_acquire);
         // Reset belongs here rather than in the reader: this is the thread that owns the
         // channel's read side, so nothing is being consumed while the queues are cleared.
-        clientSession.udpControlChannel.Reset();
+        //
+        // A resume clears the same state but onto re-keyed stream ids (item 8). Clearing alone
+        // would restart the sequence numbers while the channel still answered on the old ids,
+        // and one datagram delayed across the break would then be delivered as new traffic and
+        // swallow every real message below it. The ids are derived from the resumeId the client
+        // sent, which it derives the same way, so each side stops recognising the old stream at
+        // the moment it starts listening for the new one.
+        if (resuming) {
+          const uint32_t resumeId = clientSession.controlResumeId.load(std::memory_order_acquire);
+          clientSession.udpControlChannel.ResumeWith(
+              remote60::native_poc::control_resume_stream_id(
+                  remote60::native_poc::kUdpControlStreamHostToClient, resumeId),
+              remote60::native_poc::control_resume_stream_id(
+                  remote60::native_poc::kUdpControlStreamClientToHost, resumeId));
+        } else {
+          clientSession.udpControlChannel.Reset();
+        }
         // Outstanding main-loop requests belong to the client that made them. This is the only
         // point where that is provably true for a UDP rollover: the previous Serve() has already
         // returned, so the old client can no longer post, and the new one cannot post until
         // controlReadyEpoch is published below. (Only the TCP reconnect path cleared before --
         // a UDP handover carried the old viewer's monitor / capture-mode / tune / backend /
         // keyframe requests into the new session. Ledger H-26c.)
-        hx.mailbox.Clear();
+        // Deliberately NOT done on a resume: the outstanding requests belong to the client that
+        // made them, and on a resume that is the same client. Clearing them here would drop the
+        // monitor list or capture-mode request a viewer had in flight when its uplink went, which
+        // is the opposite of continuing the session. The rollover case still clears, for exactly
+        // the reason the original comment gives.
+        if (!resuming) hx.mailbox.Clear();
         {
           std::lock_guard<std::mutex> lock(clientSession.epochMu);
-          clientSession.controlReadyEpoch.store(servedEpoch, std::memory_order_release);
+          if (resuming) {
+            // Releases the reader, which is holding the client's request unanswered until the
+            // re-key above is done. controlReadyEpoch is left alone: the epoch did not move, and
+            // republishing it would restart the reader's startup barrier for no reason.
+            servedResumeSeq = clientSession.controlResumeSeq.load(std::memory_order_acquire);
+            clientSession.controlResumeServedSeq.store(servedResumeSeq, std::memory_order_release);
+          } else {
+            clientSession.controlReadyEpoch.store(servedEpoch, std::memory_order_release);
+            // A rollover supersedes any resume that was pending for the client that just left.
+            servedResumeSeq = clientSession.controlResumeSeq.load(std::memory_order_acquire);
+          }
         }
         clientSession.epochCv.notify_all();
 
@@ -428,10 +545,16 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
         // and sending to nobody. The client pings about once a second, so ten silent seconds
         // is a client that is gone, not one that is slow.
         UdpControlLink link(&clientSession.udpControlChannel, 10000);
+        // Published around Serve() so a resume arriving while this session is healthy is
+        // refused. Inside here the channel is in use, and re-keying it would break a link that
+        // is working -- the reader reads this flag to decide (item 8).
+        clientSession.controlServing.store(true, std::memory_order_release);
         controlServer.Serve(link);
+        clientSession.controlServing.store(false, std::memory_order_release);
         // Closed is not finished. Retransmits running out means this client is gone, which is
         // the ordinary end of a session and the reason to wait for the next one.
         std::cout << "[native-video-host][control] udp control session ended epoch=" << servedEpoch
+                  << " resumed=" << (resuming ? 1 : 0)
                   << " reason=" << remote60::native_poc::to_string(clientSession.udpControlChannel.CloseReason())
                   << "\n";
       }

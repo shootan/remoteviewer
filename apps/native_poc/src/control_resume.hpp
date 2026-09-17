@@ -23,6 +23,10 @@
 
 #include <cstdint>
 
+// For kUdpFeatureControlResume: the negotiation helper below answers a question about the wire,
+// so the wire's own definition is where the answer has to come from.
+#include "poc_protocol.hpp"
+
 namespace remote60::native_poc {
 
 struct ControlResumeConfig {
@@ -112,6 +116,43 @@ inline bool host_should_accept_resume(const HostResumeInputs& in) {
   if (!in.sessionActive) return false;
   if (in.servingControl) return false;
   return true;
+}
+
+/**
+ * What the host's control dispatcher should do when something wakes it. (item 8)
+ *
+ * It used to have one reason to wake -- a new epoch -- and the loop read as such. With resume there
+ * are two, and they are not equal: a moving epoch means a DIFFERENT client arrived, and serving the
+ * previous client's resume then would hand it the new client's session. So the epoch wins, and the
+ * resume is dropped rather than queued behind it.
+ *
+ * Pulled out as a function because this is the whole of the new control flow, and the alternative
+ * is a predicate inside a lambda inside a thread inside a startup routine, where the only way to
+ * ask what it does with a stale resume is to run a host.
+ */
+struct ControlDispatchInputs {
+  bool stop = false;
+  uint64_t epoch = 0;
+  uint64_t servedEpoch = 0;
+  uint64_t resumeSeq = 0;
+  uint64_t servedResumeSeq = 0;
+};
+
+struct ControlDispatchDecision {
+  bool wake = false;      // there is something to do (or the host is stopping)
+  bool resuming = false;  // ...and it is a resume of the session already being served
+};
+
+inline ControlDispatchDecision control_dispatch_decide(const ControlDispatchInputs& in) {
+  ControlDispatchDecision out;
+  out.wake = in.stop || in.epoch > in.servedEpoch || in.resumeSeq > in.servedResumeSeq;
+  out.resuming = out.wake && !in.stop && in.epoch <= in.servedEpoch;
+  return out;
+}
+
+/** Whether a client's Hello asked for resume. The host advertises it either way. */
+inline bool host_resume_negotiated(uint32_t helloFeatures) {
+  return (helloFeatures & kUdpFeatureControlResume) != 0;
 }
 
 }  // namespace remote60::native_poc
