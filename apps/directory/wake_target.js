@@ -1,6 +1,6 @@
 'use strict';
 
-// Where a wake datagram should actually be sent.
+// Where our datagrams to a host should actually be sent -- the wake, and the relay binding.
 //
 // The wake exists because a host otherwise learns that a peer is waiting only from its next
 // heartbeat, up to 25 seconds away, while the client stops asking after about three seconds. It is
@@ -31,7 +31,7 @@
  * @param onServerLan predicate: is this IPv4 address on a subnet this server is attached to
  * @returns {{ip: string, port: number, via: string}} -- `via` is for the log, so the aim is legible
  */
-function wakeTargetFor(host, onServerLan) {
+function hostSendTargetFor(host, onServerLan) {
   const wireIp = host.wireIp || host.publicIp || '';
   const wirePort = host.wirePort || host.publicUdpPort || 0;
   const wire = { ip: wireIp, port: wirePort, via: 'wire' };
@@ -50,4 +50,10 @@ function wakeTargetFor(host, onServerLan) {
   return { ip: local, port: host.localUdpPort || wirePort, via: 'lan' };
 }
 
-module.exports = { wakeTargetFor };
+// wakeTargetFor is the name this started with, when the wake was the only caller. The relay binds
+// its sessions to the same answer -- it has to, since a session pointed at the router relays to
+// nobody -- so the question is really "where do our datagrams to this host go". Both names are
+// exported: the old one so a server.js and a wake_target.js that land out of step still run.
+const wakeTargetFor = hostSendTargetFor;
+
+module.exports = { hostSendTargetFor, wakeTargetFor };

@@ -106,6 +106,25 @@ function lanAddress() {
 const isPunch = (p) => p.msg.length === HELLO_BYTES && p.msg.readUInt32LE(0) === MAGIC &&
                        p.msg.readUInt16LE(4) === KIND_PUNCH;
 
+/**
+ * A LAN address the server will actually store.
+ *
+ * sanitizeIpv4List drops 169.254.x on purpose -- link-local means DHCP failed and can never
+ * reach a peer -- and this machine has one. lanAddress() returns whichever interface comes
+ * first, so it can hand back an address the fixture binds to happily while the server discards
+ * it, leaving localIps empty and the hairpin case below testing nothing at all. It did.
+ */
+function publishableLanAddress() {
+  for (const addrs of Object.values(os.networkInterfaces())) {
+    for (const a of addrs || []) {
+      if (a.family !== 'IPv4' || a.internal || !a.address) continue;
+      if (a.address.startsWith('169.254.') || a.address.startsWith('127.')) continue;
+      return a.address;
+    }
+  }
+  return null;
+}
+
 (async () => {
   const lan = lanAddress();
   if (!lan) {
@@ -228,6 +247,131 @@ const isPunch = (p) => p.msg.length === HELLO_BYTES && p.msg.readUInt32LE(0) ===
   check('a later wake goes to the moved tuple',
         host2.got.some(isPunch) && !host.got.some(isPunch),
         `old=${host.got.filter(isPunch).length} new=${host2.got.filter(isPunch).length}`);
+
+  // ------------------------------------ the wire tuple is on our lan but is NOT the host
+  //
+  // The field failure of 2026-09-18, reduced to one machine. A router doing hairpin NAT rewrites
+  // the source of the host's OBSERVE, so the wire tuple the server records is on our LAN and yet
+  // answers for nobody -- 192.168.0.1, the router, while the host is at 192.168.0.76. Everything
+  // above uses a host whose wire tuple IS the host, so it cannot tell the two apart.
+  //
+  // Here the rewrite is a port rather than an address. That is the only part that would otherwise
+  // need a second machine, and it changes nothing about the decision: the host listens where it
+  // publishes, not where its OBSERVE came from, and anything aimed at the wire tuple is lost.
+  {
+    r = await api('POST', '/api/host/register',
+                  { id: 'tester', pw: 'test-pass-1234', hostName: 'hairpin-host',
+                    machineId: 'machine-hairpin' });
+    const hpToken = r.body.hostToken;
+    const hpId = r.body.hostId;
+    check('the hairpin fixture registers', r.status === 200 && !!hpToken, `status=${r.status}`);
+
+    // Socket A -- where the OBSERVE comes from, and therefore what becomes the wire tuple. It
+    // stands in for the router.
+    const hpLan = publishableLanAddress();
+    check('the hairpin case has an address the server will store', !!hpLan,
+          hpLan || 'only link-local addresses on this machine');
+    const wireSock = recorder();
+    await bindOn(wireSock.sock, hpLan);
+    await observe(wireSock.sock, 'hairpin-observe', hpLan);
+    wireSock.got.length = 0;
+
+    // Socket B -- where the host actually is, which is what it publishes in its heartbeat.
+    const realSock = recorder();
+    await bindOn(realSock.sock, hpLan);
+    const realPort = realSock.sock.address().port;
+
+    const hb = await api('POST', '/api/host/heartbeat', {
+      hostToken: hpToken, hostName: 'hairpin-host', observeToken: 'hairpin-observe',
+      localUdpPort: realPort, localIps: [hpLan],
+    });
+    check('the hairpin heartbeat is accepted', hb.status === 200, `status=${hb.status}`);
+
+    await sleep(1100);  // past the per-host wake interval
+    wireSock.got.length = 0;
+    realSock.got.length = 0;
+    r = await api('POST', '/api/connect',
+                  { hostId: hpId, observeToken: 'lan-client-observe' }, session);
+    const hpPunchToken = r.body.punchToken;
+    check('the hairpin fixture accepts a connect', r.status === 200 && !!hpPunchToken,
+          `status=${r.status}`);
+
+    await sleep(500);
+    check('the wake goes where the host says it is, not where its observe came from',
+          realSock.got.some(isPunch) && !wireSock.got.some(isPunch),
+          `published=${realSock.got.filter(isPunch).length} wire=${wireSock.got.filter(isPunch).length}`);
+
+    // The relay leg has to make the same choice. Bound to the wire tuple it relays to nobody,
+    // which is what the field log showed: `bound host=192.168.0.1:43000` and then
+    // `closed reason=no HelloAck h2c=0/0B`.
+    client.sock.send(buildHello(KIND_PUNCH, '', 0), RELAY_PORT, '127.0.0.1');
+    await sleep(GRACE_MS + 400);
+    wireSock.got.length = 0;
+    realSock.got.length = 0;
+    client.got.length = 0;
+    client.sock.send(buildHello(KIND_HELLO, hpPunchToken, FEATURE_FEC), RELAY_PORT, '127.0.0.1');
+    await sleep(300);
+    const isHello = (p) => p.msg.length === HELLO_BYTES && p.msg.readUInt16LE(4) === KIND_HELLO;
+    check('the relayed Hello goes to the published tuple too',
+          realSock.got.some(isHello) && !wireSock.got.some(isHello),
+          `published=${realSock.got.filter(isHello).length} wire=${wireSock.got.filter(isHello).length}`);
+
+    const relayed = realSock.got.find(isHello);
+    if (relayed) {
+      realSock.sock.send(buildHello(KIND_HELLO_ACK, '', FEATURE_FEC | FEATURE_DIRECTORY_AUTH),
+                         relayed.rinfo.port, relayed.rinfo.address);
+      await sleep(250);
+      check('...so the HelloAck reaches the client instead of h2c staying at zero',
+            client.got.some((q) => q.msg.length === HELLO_BYTES &&
+                                   q.msg.readUInt16LE(4) === KIND_HELLO_ACK),
+            `clientReceived=${client.got.length}`);
+    }
+
+    // And the next heartbeat must not put it back on the wire tuple. The re-key reads the
+    // addresses the heartbeat has just stored, which is why it happens after they are stored.
+    await api('POST', '/api/host/heartbeat', {
+      hostToken: hpToken, hostName: 'hairpin-host', observeToken: 'hairpin-observe',
+      localUdpPort: realPort, localIps: [hpLan],
+    });
+    wireSock.got.length = 0;
+    realSock.got.length = 0;
+    const media = Buffer.from('client media after a heartbeat');
+    client.sock.send(media, RELAY_PORT, '127.0.0.1');
+    await sleep(250);
+    check('a heartbeat does not move the session back onto the wire tuple',
+          realSock.got.some((q) => q.msg.equals(media)) &&
+              !wireSock.got.some((q) => q.msg.equals(media)),
+          `published=${realSock.got.length} wire=${wireSock.got.length}`);
+
+    // And when the published port CHANGES, the re-key has to follow the new one. This is what
+    // pins the ordering rather than the choice: if the aim is taken before the heartbeat stores
+    // what the host just published, it is computed from the PREVIOUS port, matches where the
+    // session already is, and returns early -- so the session stays on an address the host has
+    // stopped listening on. The check above cannot see that, because there the two heartbeats
+    // publish the same port.
+    const movedSock = recorder();
+    await bindOn(movedSock.sock, hpLan);
+    const movedPort = movedSock.sock.address().port;
+    const hbMoved = await api('POST', '/api/host/heartbeat', {
+      hostToken: hpToken, hostName: 'hairpin-host', observeToken: 'hairpin-observe',
+      localUdpPort: movedPort, localIps: [hpLan],
+    });
+    check('the moved heartbeat is accepted', hbMoved.status === 200, `status=${hbMoved.status}`);
+
+    realSock.got.length = 0;
+    movedSock.got.length = 0;
+    const moved = Buffer.from('client media after the published port moved');
+    client.sock.send(moved, RELAY_PORT, '127.0.0.1');
+    await sleep(250);
+    check('a session follows the port the host has just published',
+          movedSock.got.some((q) => q.msg.equals(moved)) &&
+              !realSock.got.some((q) => q.msg.equals(moved)),
+          `moved=${movedSock.got.length} previous=${realSock.got.length}`);
+
+    movedSock.sock.close();
+    wireSock.sock.close();
+    realSock.sock.close();
+  }
 
   host.sock.close();
   host2.sock.close();

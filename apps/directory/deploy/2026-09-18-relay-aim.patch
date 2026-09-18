@@ -1,0 +1,111 @@
+# Surgical relay-aim fix for the DEPLOYED directory server. Follows 2026-09-18-wake-aim.
+#
+# Base: /opt/gnlink/remote60-directory/server.js AS DEPLOYED AFTER the wake fix,
+#       sha256 70a48d2a8e7e0e074ddb547f8b98e8a1211b02401f67311b9939b4e4967969d6
+#       (not the pre-wake sha e32510c3... that the earlier patch was cut against)
+#
+# The wake fix aimed sendWakePunch correctly and left the relay still binding sessions to
+# host.wireIp -- the router -- so a relayed client reached a host that never answered.
+# This points the relay binding and the heartbeat re-key at the same answer.
+#
+# ALSO upload apps/directory/wake_target.js again: it gains the hostSendTargetFor name this
+# patch calls, and keeps wakeTargetFor as an alias so the two files may land in either order.
+#
+# Apply:  patch -p0 server.js < 2026-09-18-relay-aim.patch
+#
+@@ -55,7 +55,7 @@
+ const fs = require('fs');
+ const path = require('path');
+ const crypto = require('crypto');
+-const { wakeTargetFor } = require('./wake_target');
++const { hostSendTargetFor } = require('./wake_target');
+ const os = require('os');
+ 
+ const HTTP_PORT = Number(process.env.REMOTE60_DIR_PORT || 8080);
+@@ -918,7 +918,7 @@
+   // Where this actually goes, which is not always the tuple the OBSERVE came from -- see
+   // wake_target.js. `via` is logged because "the wake was sent" and "the wake was sent somewhere
+   // the host can hear" looked identical in every log we had, for weeks.
+-  const aim = wakeTargetFor(host, onServerLan);
++  const aim = hostSendTargetFor(host, onServerLan);
+   console.log(`[wake] connect=${connectId} tx host=${aim.ip}:${aim.port} via=${aim.via}` +
+               (aim.ip !== host.publicIp
+                  ? ` (advertised ${host.publicIp}:${host.publicUdpPort})` : ''));
+@@ -927,7 +927,7 @@
+     setTimeout(() => {
+       // Read the address here rather than above: a heartbeat arriving between these three
+       // datagrams moves the host's mapping, and the later ones should follow it.
+-      const now = wakeTargetFor(host, onServerLan);
++      const now = hostSendTargetFor(host, onServerLan);
+       const ip = now.ip;
+       const port = now.port;
+       if (endpointKey(ip, port) !== scheduledKey) {
+@@ -1014,21 +1014,21 @@
+  * c2h kept flowing. The heartbeat is authenticated by the host's own token, which is what makes it
+  * safe to re-key the session on its word rather than on whatever packet shows up next.
+  */
+-function relayFollowHostWire(host, previousWire) {
++function relayFollowHostWire(host, previousWire, aim) {
+   const session = relayLeaseByHost.get(host.hostId);
+   if (!session || session.dropped) return;
+-  if (session.hostIp === host.wireIp && session.hostPort === host.wirePort) return;
+-  const newKey = endpointKey(host.wireIp, host.wirePort);
++  if (session.hostIp === aim.ip && session.hostPort === aim.port) return;
++  const newKey = endpointKey(aim.ip, aim.port);
+   const squatter = relaySessionByHost.get(newKey);
+   if (squatter && squatter !== session && !squatter.dropped) {
+     relayDropSession(squatter, 'host moved onto its endpoint');
+   }
+   relayUnindex(relaySessionByHost, endpointKey(session.hostIp, session.hostPort), session);
+   console.log(`[relay] connect=${session.connectId} host moved ${session.hostIp}:${session.hostPort}` +
+-              ` -> ${host.wireIp}:${host.wirePort}` +
++              ` -> ${aim.ip}:${aim.port} via=${aim.via}` +
+               (previousWire.ip ? '' : ' (first heartbeat)'));
+-  session.hostIp = host.wireIp;
+-  session.hostPort = host.wirePort;
++  session.hostIp = aim.ip;
++  session.hostPort = aim.port;
+   relaySessionByHost.set(newKey, session);
+ }
+ 
+@@ -1110,14 +1110,18 @@
+   if (existingClient && !existingClient.dropped) relayDropSession(existingClient, 'client moved');
+ 
+   const now = Date.now();
++  const relayBindAim = hostSendTargetFor(host, onServerLan);
+   const session = {
+     connectId: auth.connectId,
+     token: parsed.token,
+     hostId: auth.hostId,
+     clientIp: rinfo.address,
+     clientPort: rinfo.port,
+-    hostIp: host.wireIp || host.publicIp,
+-    hostPort: host.wirePort || host.publicUdpPort,
++    // The same answer the wake uses: for a host on our own LAN the wire tuple is the router's
++    // hairpin address, which relays to nobody. Bound here, the whole session inherits it --
++    // relaySessionByHost is keyed on it and observeSock.send reads it back.
++    hostIp: relayBindAim.ip,
++    hostPort: relayBindAim.port,
+     state: 'provisional',
+     createdAt: now,
+     lastClientAt: now,
+@@ -1269,7 +1273,6 @@
+   // in which case the advertised one is the router's WAN address and cannot be sent to from here.
+   host.wireIp = obs.wireIp || host.publicIp;
+   host.wirePort = obs.wirePort || host.publicUdpPort;
+-  relayFollowHostWire(host, previousWire);
+   host.hostName = String(body.hostName || host.hostName).slice(0, 64);
+   // Where else this host can be reached. The public address is ours to determine -- we see the
+   // mapping NAT actually made -- but a LAN address and a second listening port are only knowable
+@@ -1278,6 +1281,11 @@
+   host.localIps = sanitizeIpv4List(body.localIps);
+   host.alternateUdpPort = sanitizePort(body.alternateUdpPort);
+   host.localUdpPort = sanitizePort(body.localUdpPort);
++  // After the fields above, not before. The send target is chosen from what this host has just
++  // published, and re-keying first would decide on the previous heartbeat's addresses -- or, on the
++  // very first one, on no addresses at all, which is how a session lands on the router and stays
++  // there. relayFollowHostWire takes the aim as an argument so this order cannot be lost again.
++  relayFollowHostWire(host, previousWire, hostSendTargetFor(host, onServerLan));
+   host.lastSeen = Date.now();
+   saveStoreSoon();
+ 
