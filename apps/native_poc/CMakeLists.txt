@@ -794,6 +794,7 @@ endif()
 
 add_executable(remote60_update_stop_process_test
   src/update_effects.cpp
+  src/update_target_watch.cpp
   src/update_rollback_safety.cpp
   src/update_process_targets.cpp
   src/update_process_identity.cpp
@@ -936,6 +937,7 @@ endif()
 # cannot reach it even by mistake -- the symbols are not in the binary.
 add_executable(remote60_update_effects_test
   src/update_effects.cpp
+  src/update_target_watch.cpp
   src/update_rollback_safety.cpp
   src/update_process_identity.cpp
   src/payload_name.cpp
@@ -962,6 +964,7 @@ endif()
 # suite and the JavaScript and Kotlin manifest suites are reading the same bytes.
 add_executable(remote60_update_release_test
   src/update_effects.cpp
+  src/update_target_watch.cpp
   src/update_rollback_safety.cpp
   src/update_process_identity.cpp
   src/payload_name.cpp
@@ -1029,6 +1032,7 @@ add_executable(remote60_updater
   src/update_job_guard.cpp
   src/update_state_machine.cpp
   src/update_effects.cpp
+  src/update_target_watch.cpp
   src/update_rollback_safety.cpp
   src/update_process_identity.cpp
   src/update_manifest.cpp
@@ -1102,6 +1106,7 @@ add_executable(remote60_updater_scenarios_test
   src/updater_options.cpp
   src/update_state_machine.cpp
   src/update_effects.cpp
+  src/update_target_watch.cpp
   src/update_rollback_safety.cpp
   src/update_process_identity.cpp
   src/update_manifest.cpp
@@ -1153,6 +1158,7 @@ add_executable(remote60_updater_assembly_test
   src/updater_options.cpp
   src/update_state_machine.cpp
   src/update_effects.cpp
+  src/update_target_watch.cpp
   src/update_rollback_safety.cpp
   src/update_process_identity.cpp
   src/update_manifest.cpp
@@ -1609,10 +1615,33 @@ endif()
 add_executable(remote60_update_identity_match_test
   src/update_identity_match_test.cpp
   src/update_process_identity.cpp
+  src/update_target_watch.cpp
 )
 target_include_directories(remote60_update_identity_match_test PRIVATE src)
 if(MSVC)
   target_compile_options(remote60_update_identity_match_test PRIVATE /utf-8)
+endif()
+
+# The SCM half of the stop, against an ISOLATED fixture service (updater-abandon-race r4, G).
+# Part 1 runs anywhere; part 2 needs elevation to install a service and reports BLOCKED without it.
+add_executable(remote60_update_service_stop_test
+  src/update_service_stop_test.cpp
+  src/update_effects.cpp
+  src/update_target_watch.cpp
+  src/update_rollback_safety.cpp
+  src/update_process_targets.cpp
+  src/update_process_identity.cpp
+  src/update_relaunch_plan.cpp
+  src/update_state_machine.cpp
+  src/update_manifest.cpp
+  src/update_http.cpp
+  src/payload_name.cpp
+  src/update_signature.cpp
+)
+target_include_directories(remote60_update_service_stop_test PRIVATE src)
+target_link_libraries(remote60_update_service_stop_test PRIVATE bcrypt winhttp user32 advapi32)
+if(MSVC)
+  target_compile_options(remote60_update_service_stop_test PRIVATE /utf-8)
 endif()
 
 # Whether a rollback may start (updater-health-gate D2). Pure: no file, no process.

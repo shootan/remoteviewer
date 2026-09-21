@@ -488,11 +488,24 @@ int main() {
   // scenario here pass without ever touching the handshake.
   options.readyEventName = L"Local\\GNLinkScenarioTestReady";
 
+  // Described by hand, and therefore made COMPLETE by hand. These pids do not exist, which is
+  // the point -- the scenarios are about what the state machine does around the stop, not about
+  // the stop itself -- but a target still has to look like something the enumerator could have
+  // produced. capture_process_identity never yields a target without a creation time (it refuses
+  // a process whose creation time it could not read), and as of updater-abandon-race r4 the
+  // acquisition refuses one too, BEFORE anything is asked to stop: an identity nobody can confirm
+  // is not a thing to swap files underneath.
+  //
+  // With a creation time present, opening these pids fails with ERROR_INVALID_PARAMETER -- "not a
+  // process" -- which is the one open failure that is forgiven, so the scenarios reach the
+  // behaviour they are actually about.
   ProcessTarget hostTarget;
   hostTarget.pid = 1001;
+  hostTarget.creationTime = 1;
   hostTarget.imagePath = install + L"\\" + kHostName;
   ProcessTarget clientTarget;
   clientTarget.pid = 1002;
+  clientTarget.creationTime = 2;
   clientTarget.imagePath = install + L"\\" + kClientName;
 
   const auto seed = [&]() {

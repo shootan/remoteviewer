@@ -39,6 +39,21 @@ std::vector<ProcessTarget> enumerate_product_processes(const std::vector<std::ws
  */
 bool request_process_stop(const ProcessTarget& target);
 
+/**
+ * Asks the SCM to stop a service, by name.
+ *
+ * What the answer means, exactly: true when the SCM ACCEPTED the control (or when the service is
+ * not installed, or was not running -- both are already the state being asked for). It does NOT
+ * mean the service stopped. A service that accepts a STOP enters SERVICE_STOP_PENDING and may sit
+ * there; whether its process actually went is a separate question, and on the update path it is
+ * answered the same way it is for every other target -- by waiting on a handle to that process,
+ * not by asking the SCM again.
+ *
+ * Declared here so the service case can be exercised against an ISOLATED fixture service rather
+ * than against the product's. See update_service_stop_test.cpp.
+ */
+bool request_service_stop(const wchar_t* serviceName);
+
 /** The images an update replaces, in the order the installer's payload lists them. */
 const std::vector<std::wstring>& product_image_names();
 

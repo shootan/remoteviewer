@@ -317,6 +317,49 @@ struct UpdateEffectsConfig {
  * failure after the swap rolls the files AND the registration back to what was captured before
  * it started. Read any claim about "atomicity" in this code as scoped to the file swap.
  */
+/**
+ * One handle per stop target, opened and identity-checked BEFORE anything is asked to stop, held
+ * until the attempt is over.
+ *
+ * This exists so that no question about a target is ever asked by pid a second time. A pid is
+ * reused; re-opening one and finding it absent, or finding something there, says nothing reliable
+ * about the process that was enumerated. A handle opened while the process is still known, and
+ * held, cannot be recycled -- so every later question (did the request land, did it exit) is about
+ * one process and no other.
+ *
+ * Closing is the destructor's, not any particular return path's. An earlier version closed these
+ * at the end of a loop and leaked every handle opened before an early return.
+ *
+ * It sits at namespace scope, rather than inside WindowsUpdateEffects where it is used, for one
+ * reason: the move assignment below is hand-written, it has already been wrong once -- it dropped
+ * a flag -- and a hand-written move that cannot be constructed in a test cannot be checked for
+ * that. The counter-examples are in update_identity_match_test.cpp.
+ */
+struct TargetWatch {
+  ProcessTarget target;
+  void* handle = nullptr;         // SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, or null
+  bool gone = false;              // the pid was already not a process when we looked
+  bool requestDelivered = false;  // requestStop said yes
+  // requestStop was called AND said no. Distinct from "never asked": a windowless child routed to
+  // its supervisor, or an orphan routed to the quiesce wait, is not asked at all, and the settle
+  // must not wait for those -- they have their own handling, and waiting for them turned every
+  // orphan into an abandoned attempt.
+  bool requestFailed = false;
+  TargetWatch() = default;
+  TargetWatch(const TargetWatch&) = delete;
+  TargetWatch& operator=(const TargetWatch&) = delete;
+  TargetWatch(TargetWatch&& other) noexcept { *this = std::move(other); }
+  /**
+   * Moves every field, closes whatever this one was holding, and leaves the source holding
+   * nothing.
+   *
+   * Every flag has to travel. The one that did not -- requestFailed -- meant a watch that had been
+   * asked and refused would arrive at the settle looking as though it had never been asked.
+   */
+  TargetWatch& operator=(TargetWatch&& other) noexcept;
+  ~TargetWatch();
+};
+
 class WindowsUpdateEffects : public UpdateEffects {
  public:
   explicit WindowsUpdateEffects(UpdateEffectsConfig config);
@@ -413,36 +456,6 @@ class WindowsUpdateEffects : public UpdateEffects {
   std::vector<ProcessTarget> preparedTargets_;
   std::vector<uint32_t> ownedChildPids_;
 
-  /**
-   * One handle per target, opened and identity-checked BEFORE anything is asked to stop, held
-   * until the attempt is over.
-   *
-   * This exists so that no question about a target is ever asked by pid a second time. A pid is
-   * reused; re-opening one and finding it absent, or finding something there, says nothing
-   * reliable about the process that was enumerated. A handle opened while the process is still
-   * known, and held, cannot be recycled -- so every later question (did the request land, did it
-   * exit) is about one process and no other.
-   *
-   * Closing is the destructor's, not any particular return path's. The previous version closed
-   * these at the end of a loop and leaked every handle opened before an early return.
-   */
-  struct TargetWatch {
-    ProcessTarget target;
-    void* handle = nullptr;        // SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, or null
-    bool gone = false;             // the pid was already not a process when we looked
-    bool requestDelivered = false; // requestStop said yes
-    // requestStop was called AND said no. Distinct from "never asked": a windowless child
-    // routed to its supervisor, or an orphan routed to the quiesce wait, is not asked at all,
-    // and the settle below must not wait for those -- they have their own handling and waiting
-    // for them turned every orphan into an abandoned attempt.
-    bool requestFailed = false;
-    TargetWatch() = default;
-    TargetWatch(const TargetWatch&) = delete;
-    TargetWatch& operator=(const TargetWatch&) = delete;
-    TargetWatch(TargetWatch&& other) noexcept { *this = std::move(other); }
-    TargetWatch& operator=(TargetWatch&& other) noexcept;
-    ~TargetWatch();
-  };
   std::vector<TargetWatch> watches_;
 
   /**

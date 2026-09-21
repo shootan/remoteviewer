@@ -533,6 +533,26 @@ bool WindowsUpdateEffects::PrepareForSwap() {
     return nullptr;
   };
 
+  // Which pid opens remain, and why each is legitimate. r3 said "the pid path is gone", and that
+  // was too broad a claim -- three different questions get asked about a process, and only one of
+  // them may ever be answered by a number:
+  //
+  //   1. "Has this target exited?"  -- ONLY through the handle acquired below and held for the
+  //      whole attempt. Never by opening its pid again. This is the question whose wrong answer
+  //      lets files be swapped under a running process, so it gets the only identity that cannot
+  //      be recycled.
+  //   2. "Deliver a stop request to this target" -- request_process_stop opens the pid, because
+  //      delivery needs a fresh open anyway, and verifies the identity against the recorded one
+  //      before it posts anything, holding that handle across the post. A recycled pid fails the
+  //      check and nothing is sent.
+  //   3. "Is this target's PARENT still around?" -- the lambda below, and this one is about a
+  //      process that is NOT one of our targets: if the parent were a target, owner_of would have
+  //      claimed the child before this is reached, and no watch is ever taken for a non-target.
+  //      Its answer decides ROUTING only -- ask this child directly, or wait for it as an orphan
+  //      -- and both branches still end at question 1 for the child itself. A recycled parent pid
+  //      can therefore cost an unnecessary direct ask or an unnecessary wait; it cannot produce a
+  //      swap over something still running.
+  //
   // An orphan is a narrower thing than "its parent is not in this list", and getting that wrong
   // is how the first version of this broke every caller that describes its targets by hand: a
   // ProcessTarget with parentPid == 0 means "not known", and treating an unknown as a dead parent
@@ -564,20 +584,43 @@ bool WindowsUpdateEffects::PrepareForSwap() {
   // attempt. The previous version opened a handle only after a request had already failed, which
   // left every other question on the pid path.
   //
-  // The deadline starts here too, and covers both waits that follow: the settle for requests that
-  // could not be delivered, and the quiesce for the ones that could.
+  // The deadline starts HERE -- before the first OpenProcess, before the first request -- and is
+  // the single bound on everything that follows in the stop phase:
+  //
+  //   * acquiring the watches (this loop),
+  //   * the ownership walk and every requestStop call,
+  //   * the settle wait for requests that could not be delivered,
+  //   * the quiesce wait in Quiesce() for the ones that could.
+  //
+  // So stopSettleMs + quiesceTimeoutMs is a CEILING on the whole phase, not a pair of budgets that
+  // each stage gets in full: time spent asking is time the waits no longer have. That is the point.
+  // Per-stage deadlines meant the worst case grew with the number of targets and with how the
+  // failures happened to be distributed, and the updater's own health timeout does not grow with
+  // either. A stage that is starved because the asks took the entire budget abandons the attempt,
+  // which is the safe direction -- nothing has been swapped yet.
+  //
+  // GetTickCount64, not GetTickCount: the 32-bit counter wraps every 49 days and the comparison
+  // then reads backwards, which on a long-uptime host turns a bounded wait into an instant one.
   stopDeadlineMs_ = static_cast<uint64_t>(GetTickCount64()) +
                     static_cast<uint64_t>(config_.stopSettleMs) +
                     static_cast<uint64_t>(config_.quiesceTimeoutMs);
   watches_.clear();
   for (const ProcessTarget& target : preparedTargets_) {
     if (!target.identityKnown) continue;  // reported by the loop below, where the reason is known
-    // Nothing was recorded to check against, so there is nothing this pass can verify. The
-    // enumerator never produces this: capture_process_identity refuses a process whose creation
-    // time it could not read, so a target that reaches here identified always carries one. It is
-    // skipped rather than refused because "no recorded identity" is a different thing from "the
-    // identity could not be confirmed", and only the second is evidence of trouble.
-    if (target.creationTime == 0) continue;
+    // Nothing was recorded to check against, so nothing about this target can be confirmed -- and
+    // an unconfirmable target is refused BEFORE anything is asked to stop, like every other one.
+    //
+    // Skipping it was the softer choice and it was wrong twice over: it let a target reach the
+    // request and the quiesce with no watch behind it, and the quiesce then opened its pid again,
+    // which is the very path this round removed. The enumerator cannot produce this state --
+    // capture_process_identity refuses a process whose creation time it could not read -- so
+    // refusing here costs nothing real and keeps one rule instead of two.
+    if (target.creationTime == 0) {
+      lastError_ = "cannot confirm the identity of pid " + std::to_string(target.pid) + " (" +
+                   to_utf8(target.imagePath) + ") -- no creation time was recorded for it";
+      if (config_.trace) config_.trace(lastError_);
+      return false;
+    }
     TargetWatch watch;
     watch.target = target;
     SetLastError(0);
@@ -728,23 +771,6 @@ bool WindowsUpdateEffects::PrepareForSwap() {
     }
   }
   return true;
-}
-
-WindowsUpdateEffects::TargetWatch& WindowsUpdateEffects::TargetWatch::operator=(
-    TargetWatch&& other) noexcept {
-  if (this != &other) {
-    if (handle) CloseHandle(static_cast<HANDLE>(handle));
-    target = std::move(other.target);
-    handle = other.handle;
-    gone = other.gone;
-    requestDelivered = other.requestDelivered;
-    other.handle = nullptr;
-  }
-  return *this;
-}
-
-WindowsUpdateEffects::TargetWatch::~TargetWatch() {
-  if (handle) CloseHandle(static_cast<HANDLE>(handle));
 }
 
 bool WindowsUpdateEffects::Quiesce() {

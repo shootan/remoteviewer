@@ -44,14 +44,18 @@ bool capture_process_identity(uint32_t pid, ProcessTarget* out, IdentityFailure*
   SetLastError(ERROR_SUCCESS);
   HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
   if (!h) {
-    // The distinction the caller needs. Access denied means it is running and out of reach, and
-    // mistaking that for "the pid exited" is how an update proceeds over a process that is still
-    // holding the files it is about to replace. Anything else here -- typically
-    // ERROR_INVALID_PARAMETER -- is a pid that is no longer a process, which is the outcome
-    // stopping it was for.
+    // The distinction the caller needs, and only ONE error earns the benefit of the doubt.
+    //
+    // ERROR_INVALID_PARAMETER is a pid that is no longer a process -- nothing to identify, and
+    // the enumerator drops it, which is right because that is the outcome stopping it was for.
+    // Every other failure, access denied above all, is a question that did not get answered. This
+    // used to read "anything that is not access denied means gone", so an unfamiliar error
+    // silently removed a RUNNING process from the target list and the swap went ahead over it.
+    // The same rule as PrepareForSwap and Quiesce apply: one error means gone, the rest mean
+    // unknown.
     if (why) {
-      *why = (GetLastError() == ERROR_ACCESS_DENIED) ? IdentityFailure::Unknowable
-                                                     : IdentityFailure::Gone;
+      *why = (GetLastError() == ERROR_INVALID_PARAMETER) ? IdentityFailure::Gone
+                                                         : IdentityFailure::Unknowable;
     }
     return false;
   }

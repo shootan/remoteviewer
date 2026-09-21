@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <functional>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -196,42 +197,119 @@ UpdateEffectsConfig config_for(const std::wstring& install, const std::wstring& 
                                uint32_t parentPid);
 
 /**
- * Runs the REAL stop path against one pid, from a process with no console. (r3, item F)
+ * Runs a REAL update attempt against one pid, from a process with no console.
+ * (r3 item F, extended in r4)
  *
- * Nothing is injected: config_for supplies the production requestStop, and this drives
- * PrepareForSwap and then Quiesce exactly as the updater does. It has to run out of process
- * because the caller's console is what decides whether the ask can succeed, and this test binary
- * has one.
+ * Nothing about the stop is injected: config_for supplies the production request_process_stop, and
+ * this drives run_update -- the state machine, not two hand-picked methods -- so Prepare, Quiesce,
+ * Swap, Register, Relaunch and Health run in their real order and the real verdict comes out the
+ * end. It has to run out of process because the CALLER's console is what decides whether the ask
+ * can succeed, and this test binary has one.
  *
- * A sentinel file is written into the install directory before the run and checked by the parent
- * afterwards: if the path ever moved a file, the sentinel would not survive untouched.
+ * r4 note on what r3's version of this did not cover. It called PrepareForSwap and Quiesce
+ * directly, so the swap was never reached on any path and "nothing was swapped" was a claim about
+ * code that was never asked to swap. It also could not tell an abandon from an empty target list:
+ * if capture_process_identity had failed, the enumeration would have been empty, everything would
+ * have "succeeded", and the exit code would have said so. Both are now reported as facts rather
+ * than inferred: the result file below carries the target count and the number of stop requests
+ * that were actually made and actually refused.
  *
- * Exit code: 0 prepared and quiesced, 1 prepare abandoned, 2 quiesce failed, 90+ setup trouble.
+ * The manifest is injected and the signature is accepted, because what is under test here is the
+ * stop path and the swap that follows it -- signatures have their own suite. The install directory
+ * is REAL and is written to for real when the attempt gets that far.
+ *
+ * requestStop wraps the production function to count its answers. It does not replace it: the
+ * production function is called and its answer is returned unchanged.
+ *
+ * Exit: 0 the attempt updated, 1 abandoned before the swap, 2 any other verdict, 90+ setup.
  */
 int run_fixture_runstop(uint32_t pid, const std::wstring& installDir) {
   const std::wstring staging = installDir + L"-staging";
   CreateDirectoryW(installDir.c_str(), nullptr);
   CreateDirectoryW(staging.c_str(), nullptr);
 
+  static const char* kArtifact = "GNLINK-STOPFIXTURE-ARTIFACT-v105";
+
+  // The hash the manifest will claim, taken from the bytes fetchArtifact will actually write, so
+  // Verify is a real check rather than a pair of constants that happen to agree.
+  const std::wstring probe = staging + L"\\probe.bin";
+  {
+    std::ofstream out(probe, std::ios::binary);
+    out << kArtifact;
+  }
+  const std::string sha = sha256_file_hex(probe);
+  DeleteFileW(probe.c_str());
+  if (sha.size() != 64) return 92;
+
+  auto targetCount = std::make_shared<int>(-1);
+  auto askCalls = std::make_shared<int>(0);
+  auto askFailures = std::make_shared<int>(0);
+
   UpdateEffectsConfig c = config_for(installDir, staging, pid);
+  c.payloadNames = {L"AlphaPayload.bin"};
+  c.fetchArtifact = [](const ManifestArtifact&, const std::wstring& dest) {
+    std::ofstream out(dest, std::ios::binary);
+    out << kArtifact;
+    return out.good();
+  };
   // Exactly the one process this run is about. config_for enumerates by image name, which in this
   // binary also finds the other fixtures and this runner itself -- and asking those to stop
   // disturbed tests that had nothing to do with this one.
-  c.enumerateTargets = [pid]() {
+  c.enumerateTargets = [pid, targetCount]() {
     std::vector<ProcessTarget> only;
     ProcessTarget t;
     if (capture_process_identity(pid, &t)) {
       t.hasWindow = true;  // the stale view the updater carries from its own enumeration
       only.push_back(t);
     }
+    *targetCount = static_cast<int>(only.size());
     return only;
+  };
+  // The production function, called for real. The wrapper only counts what it answered, so that
+  // the parent can assert the ask FAILED rather than assume it.
+  c.requestStop = [askCalls, askFailures](const ProcessTarget& t) {
+    ++*askCalls;
+    const bool ok = request_process_stop(t);
+    if (!ok) ++*askFailures;
+    return ok;
   };
   c.stopSettleMs = 1500;
   c.quiesceTimeoutMs = 1500;
+  {
+    wchar_t self[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, self, MAX_PATH);
+    c.updaterImagePath = self;
+  }
+
+  std::string manifest = "schema=2\nreleaseId=r-0.2.105\nplatform=windows\narch=x64\nversion=0.2.105\n";
+  manifest += "artifact=AlphaPayload.bin|" + std::to_string(std::char_traits<char>::length(kArtifact)) +
+              "|" + sha + "|https://u.example/AlphaPayload.bin\n";
+
   WindowsUpdateEffects e(c);
-  if (!e.PrepareForSwap()) return 1;
-  if (!e.Quiesce()) return 2;
-  return 0;
+  e.set_installed_version("0.2.104");
+  e.set_manifest(manifest, std::string(128, '0'));
+  const auto accept = [](const std::string&, const std::vector<uint8_t>&) { return true; };
+  const UpdateOutcome out = run_update(e, accept, "windows");
+
+  // Everything the parent needs to judge the run, written where it can read it. An exit code alone
+  // cannot say how many targets there were or whether the ask was refused.
+  {
+    // Beside the install directory, never inside it: the parent asserts that directory is
+    // byte-for-byte what it seeded, and a report file dropped into it would be a change.
+    std::ofstream r(installDir + L"-run-result.txt", std::ios::binary);
+    r << "result=" << result_name(out.result) << "\n";
+    r << "targets=" << *targetCount << "\n";
+    r << "askCalls=" << *askCalls << "\n";
+    r << "askFailures=" << *askFailures << "\n";
+    r << "reachedSwap=" << (out.entered(UpdateState::Swap) ? 1 : 0) << "\n";
+    r << "reachedQuiesce=" << (out.entered(UpdateState::Quiesce) ? 1 : 0) << "\n";
+    r << "detail=" << out.detail << "\n";
+    r << "lastError=" << e.last_error() << "\n";
+  }
+
+  if (out.result == UpdateResult::Updated) return 0;
+  if (out.result == UpdateResult::AbandonedBeforeSwap) return 1;
+  return 2;
 }
 
 int run_fixture_askprobe(uint32_t pid) {
@@ -342,6 +420,31 @@ void write_text(const std::wstring& path, const std::string& text) {
   if (_wfopen_s(&f, path.c_str(), L"wb") != 0 || !f) return;
   std::fwrite(text.data(), 1, text.size(), f);
   std::fclose(f);
+}
+
+/**
+ * Removes a directory and everything under it.
+ *
+ * Only ever called on paths this test created under %TEMP%. Depth-first, and it does not follow
+ * anything it did not put there -- the fixtures never create links.
+ */
+void remove_dir_tree(const std::wstring& dir) {
+  WIN32_FIND_DATAW found{};
+  HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &found);
+  if (h != INVALID_HANDLE_VALUE) {
+    do {
+      const std::wstring name = found.cFileName;
+      if (name == L"." || name == L"..") continue;
+      const std::wstring child = dir + L"\\" + name;
+      if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        remove_dir_tree(child);
+      } else {
+        DeleteFileW(child.c_str());
+      }
+    } while (FindNextFileW(h, &found));
+    FindClose(h);
+  }
+  RemoveDirectoryW(dir.c_str());
 }
 
 std::string read_text(const std::wstring& path) {
@@ -698,6 +801,48 @@ int main(int argc, char** argv) {
     protectedTarget.creationTime = 1;
     check("a process we cannot even open does NOT count as asked",
           !request_process_stop(protectedTarget), "pid 4");
+
+    // The same conflation one level down, in the identity check rather than in the open.
+    // (updater-abandon-race r4, item C)
+    //
+    // request_process_stop used to ask process_identity_matches, which answers false both for
+    // "somebody else holds that pid" and for "the question could not be answered", and then
+    // inverted that false into "the process we meant has exited" -- so an unanswerable identity
+    // query reported a successful stop. Only Different is evidence of an exit.
+    ProcessTarget unanswerable;
+    unanswerable.pid = GetCurrentProcessId();
+    unanswerable.creationTime = 0;  // nothing recorded, so nothing can be confirmed
+    check("a target whose identity cannot be confirmed does NOT count as asked",
+          !request_process_stop(unanswerable),
+          "own pid with no recorded creation time");
+
+    ProcessTarget recycled;
+    check("...while a pid that now belongs to somebody else still does",
+          capture_process_identity(GetCurrentProcessId(), &recycled));
+    recycled.creationTime += 1;  // the same number, a different process
+    check("...because that one really has exited", request_process_stop(recycled),
+          "own pid with a creation time that cannot be ours");
+
+    // And the same rule where the identity is first captured. Both directions are producible:
+    // pid 4 exists and cannot be opened, and a pid that has exited is not a process at all.
+    // Sequenced deliberately: the reason has to be read AFTER the call that sets it. Arguments to
+    // one call are not ordered against each other, so folding these together would print the
+    // reason from before the call and say nothing.
+    IdentityFailure why = IdentityFailure::None;
+    ProcessTarget scratch;
+    const bool openedProtected = capture_process_identity(4, &scratch, &why);
+    check("capturing an identity we have no rights to read is Unknowable, not Gone",
+          !openedProtected && why == IdentityFailure::Unknowable,
+          "why=" + std::to_string(static_cast<int>(why)));
+    why = IdentityFailure::None;
+    const bool openedDeparted = capture_process_identity(departed.pid, &scratch, &why);
+    check("capturing an identity for a pid that is no longer a process is Gone",
+          !openedDeparted && why == IdentityFailure::Gone,
+          "why=" + std::to_string(static_cast<int>(why)));
+    // Not covered, and worth saying: the rule that every OTHER open error is Unknowable rather
+    // than Gone cannot be pinned here. Only these two errors can be produced on demand from an
+    // ordinary session, so a change that widened "gone" back out to "anything but access denied"
+    // would not fail either of the checks above.
   }
 
   // ---------------------------------------------------------------- the production path, for real
@@ -1466,62 +1611,136 @@ int main(int argc, char** argv) {
                 "code=" + std::to_string(code));
         }
 
-        // And now the whole path, out of process, with NOTHING injected: the production
-        // requestStop, PrepareForSwap and Quiesce, run by a caller with no console. A seam
-        // returning false proves the consequence of a failed ask; this proves the ask fails and
-        // that the consequence follows from it.
-        const std::wstring runDir = std::wstring(tempS) + L"gnlink-int2-run";
-        CreateDirectoryW(runDir.c_str(), nullptr);
-        const std::wstring sentinel = runDir + L"\\sentinel.txt";
-        {
-          HANDLE sf = CreateFileW(sentinel.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                                  FILE_ATTRIBUTE_NORMAL, nullptr);
-          if (sf != INVALID_HANDLE_VALUE) {
-            DWORD wrote = 0;
-            WriteFile(sf, "untouched", 9, &wrote, nullptr);
-            CloseHandle(sf);
+        // And now the whole attempt, out of process, with nothing about the STOP injected: the
+        // production request_process_stop, driven by run_update, run by a caller with no console.
+        // A seam returning false proves the consequence of a failed ask; this proves the ask fails
+        // and that the consequence follows from it -- all the way to whether files move.
+        //
+        // Twice, because one direction is not a test of a race. Same fixture, same runner, same
+        // detached path; the only difference is whether the process that was asked actually leaves
+        // during the settle.
+        const auto seed_run_dir = [&](const std::wstring& dir) {
+          CreateDirectoryW(dir.c_str(), nullptr);
+          write_text(dir + L"\\sentinel.txt", "untouched");
+          write_text(dir + L"\\AlphaPayload.bin", "OLD-PAYLOAD");
+        };
+        const auto run_detached = [&](const std::wstring& dir, HANDLE releaseAfterStart,
+                                      uint32_t releaseDelayMs, DWORD* code, uint64_t* elapsedMs) {
+          std::wstring cmdR = L"\"" + own_path() + L"\" --fixture-runstop " +
+                              std::to_wstring(pS.dwProcessId) + L" " + dir;
+          std::vector<wchar_t> mutableCmdR(cmdR.begin(), cmdR.end());
+          mutableCmdR.push_back(L'\0');
+          STARTUPINFOW siR{};
+          siR.cb = sizeof(siR);
+          PROCESS_INFORMATION pR{};
+          const uint64_t began = GetTickCount64();
+          if (!CreateProcessW(nullptr, mutableCmdR.data(), nullptr, nullptr, FALSE,
+                              DETACHED_PROCESS, nullptr, nullptr, &siR, &pR)) {
+            return false;
           }
-        }
-        std::string narrowDir(runDir.begin(), runDir.end());
-        std::wstring cmdR = L"\"" + own_path() + L"\" --fixture-runstop " +
-                            std::to_wstring(pS.dwProcessId) + L" " + runDir;
-        std::vector<wchar_t> mutableCmdR(cmdR.begin(), cmdR.end());
-        mutableCmdR.push_back(L'\0');
-        STARTUPINFOW siR{};
-        siR.cb = sizeof(siR);
-        PROCESS_INFORMATION pR{};
-        const uint64_t began = GetTickCount64();
-        const bool startedR = CreateProcessW(nullptr, mutableCmdR.data(), nullptr, nullptr, FALSE,
-                                             DETACHED_PROCESS, nullptr, nullptr, &siR, &pR) != FALSE;
-        check("integration: the console-less runner started", startedR);
-        if (startedR) {
           CloseHandle(pR.hThread);
-          const bool done = WaitForSingleObject(pR.hProcess, 30000) == WAIT_OBJECT_0;
-          DWORD code = 99;
-          GetExitCodeProcess(pR.hProcess, &code);
+          if (releaseAfterStart) {
+            // Let the attempt get as far as asking, then let the fixture go -- the field shape:
+            // the process was already standing down when the request arrived.
+            std::this_thread::sleep_for(std::chrono::milliseconds(releaseDelayMs));
+            SetEvent(releaseAfterStart);
+          }
+          const bool done = WaitForSingleObject(pR.hProcess, 60000) == WAIT_OBJECT_0;
+          *code = 99;
+          GetExitCodeProcess(pR.hProcess, code);
           CloseHandle(pR.hProcess);
-          check("integration: the runner finished", done, "code=" + std::to_string(code));
-          check("integration: the real path abandons on a process that stays", code == 1,
-                "exit=" + std::to_string(code) + " (1 = prepare abandoned)");
-          check("integration: ...after the budget, not before",
-                GetTickCount64() - began + 32 >= 1500,
-                std::to_string(GetTickCount64() - began) + "ms of a 1500ms budget");
-          // The sentinel proves the install directory was never rewritten -- a stronger claim than
-          // "the payload is absent", because it would also catch a path that wrote and cleaned up.
-          char readBack[32]{};
-          HANDLE sf = CreateFileW(sentinel.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-          DWORD got = 0;
-          const bool intact = sf != INVALID_HANDLE_VALUE &&
-                              ReadFile(sf, readBack, sizeof(readBack) - 1, &got, nullptr) &&
-                              std::string(readBack, got) == "untouched";
-          if (sf != INVALID_HANDLE_VALUE) CloseHandle(sf);
-          check("integration: the install directory is exactly as it was", intact,
-                std::string(readBack, got));
+          *elapsedMs = GetTickCount64() - began;
+          return done;
+        };
+        const auto result_field = [&](const std::wstring& dir, const std::string& key) {
+          std::ifstream in(dir + L"-run-result.txt", std::ios::binary);
+          std::string line;
+          while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.rfind(key + "=", 0) == 0) return line.substr(key.size() + 1);
+          }
+          return std::string();
+        };
+
+        // ---- run 1: the process stays. The attempt must abandon, and nothing may move.
+        const std::wstring runDir = std::wstring(tempS) + L"gnlink-int2-run";
+        seed_run_dir(runDir);
+        DWORD code = 99;
+        uint64_t elapsed = 0;
+        // Sequenced deliberately: the detail must be read AFTER the call that fills it, and
+        // arguments to one call are not ordered against each other.
+        const bool finished = run_detached(runDir, nullptr, 0, &code, &elapsed);
+        check("integration: the console-less runner finished", finished,
+              "code=" + std::to_string(code));
+        check("integration: the real attempt abandons on a process that stays", code == 1,
+              "exit=" + std::to_string(code) + " result=" + result_field(runDir, "result") +
+                  " detail=" + result_field(runDir, "detail"));
+        // The two ways this could have passed for the wrong reason, both closed.
+        check("integration: ...with exactly one target, not an empty list",
+              result_field(runDir, "targets") == "1", "targets=" + result_field(runDir, "targets"));
+        check("integration: ...and the production ask was made and REFUSED",
+              result_field(runDir, "askCalls") == "1" && result_field(runDir, "askFailures") == "1",
+              "calls=" + result_field(runDir, "askCalls") + " failures=" +
+                  result_field(runDir, "askFailures"));
+        check("integration: ...so the state machine never reached Swap",
+              result_field(runDir, "reachedSwap") == "0",
+              "reachedSwap=" + result_field(runDir, "reachedSwap"));
+        check("integration: ...after the budget, not before", elapsed + 32 >= 1500,
+              std::to_string(elapsed) + "ms of a 1500ms budget");
+        // The gate the product cares about: the file the swap exists to replace still holds the
+        // old bytes, and no backup was made. The sentinel adds what that alone cannot say --
+        // nothing ELSE named here was written either, including by a path that wrote and then
+        // cleaned up after itself. Neither claim is extended past the files named here.
+        check("integration: the payload the swap targets is untouched",
+              read_text(runDir + L"\\AlphaPayload.bin") == "OLD-PAYLOAD",
+              read_text(runDir + L"\\AlphaPayload.bin"));
+        check("integration: ...and no backup of it was made",
+              GetFileAttributesW((runDir + L"\\AlphaPayload.bin.gnlink-old").c_str()) ==
+                  INVALID_FILE_ATTRIBUTES);
+        check("integration: ...and the sentinel beside it is byte-for-byte what it was",
+              read_text(runDir + L"\\sentinel.txt") == "untouched",
+              read_text(runDir + L"\\sentinel.txt"));
+
+        // ---- run 2: the same failed ask, but the process leaves during the settle. This is the
+        // case the whole change exists for: a refused request is not a refusal to go.
+        const std::wstring runDir2 = std::wstring(tempS) + L"gnlink-int2-run-go";
+        seed_run_dir(runDir2);
+        DWORD code2 = 99;
+        uint64_t elapsed2 = 0;
+        const bool finished2 = run_detached(runDir2, quit, 300, &code2, &elapsed2);
+        check("integration: the runner finished for the leaving fixture", finished2,
+              "code=" + std::to_string(code2));
+        check("integration: a process that leaves during the settle lets the attempt through",
+              code2 == 0,
+              "exit=" + std::to_string(code2) + " result=" + result_field(runDir2, "result") +
+                  " detail=" + result_field(runDir2, "detail") + " lastError=" +
+                  result_field(runDir2, "lastError"));
+        check("integration: ...having asked, been refused, and waited anyway",
+              result_field(runDir2, "askCalls") == "1" &&
+                  result_field(runDir2, "askFailures") == "1",
+              "calls=" + result_field(runDir2, "askCalls") + " failures=" +
+                  result_field(runDir2, "askFailures"));
+        check("integration: ...and this time the state machine did reach Swap",
+              result_field(runDir2, "reachedSwap") == "1",
+              "reachedSwap=" + result_field(runDir2, "reachedSwap"));
+        check("integration: ...and the payload really was replaced",
+              read_text(runDir2 + L"\\AlphaPayload.bin") ==
+                  "GNLINK-STOPFIXTURE-ARTIFACT-v105",
+              read_text(runDir2 + L"\\AlphaPayload.bin"));
+        check("integration: ...with no backup left behind",
+              GetFileAttributesW((runDir2 + L"\\AlphaPayload.bin.gnlink-old").c_str()) ==
+                  INVALID_FILE_ATTRIBUTES);
+        check("integration: ...and the file the swap was not about is still untouched",
+              read_text(runDir2 + L"\\sentinel.txt") == "untouched",
+              read_text(runDir2 + L"\\sentinel.txt"));
+
+        // An abandoned attempt KEEPS its staged download on purpose -- the next attempt reuses
+        // it -- so the staging directory has a release folder in it and does not just go away.
+        for (const std::wstring& d : {runDir, runDir2}) {
+          DeleteFileW((d + L"-run-result.txt").c_str());
+          remove_dir_tree(d + L"-staging");
+          remove_dir_tree(d);
         }
-        DeleteFileW(sentinel.c_str());
-        RemoveDirectoryW(runDir.c_str());
-        RemoveDirectoryW((runDir + L"-staging").c_str());
 
         SetEvent(quit);
         WaitForSingleObject(pS.hProcess, 15000);

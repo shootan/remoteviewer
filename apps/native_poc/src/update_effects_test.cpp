@@ -36,6 +36,15 @@ namespace install = remote60::native_poc::install;
 int gFailures = 0;
 int gChecks = 0;
 
+int gSkips = 0;
+
+// A precondition this machine did not provide. Neither a pass nor a failure, and counted
+// apart from both, so a skipped case cannot quietly read as a covered one.
+void skip(const std::string& name, const std::string& why) {
+  ++gSkips;
+  std::cout << "SKIP  " << name << "  " << why << "\n";
+}
+
 void check(const std::string& name, bool ok, const std::string& detail = {}) {
   ++gChecks;
   if (!ok) ++gFailures;
@@ -827,12 +836,32 @@ int main(int argc, char** argv) {
     }
 
     {
-      // An unknown creation time is not evidence of anything and must not be read as ownership.
+      // An unknown creation time used to be checked here as an ownership question: does the walk
+      // read "no creation time" as a parent-child edge? It no longer gets that far. r4 moved the
+      // refusal ahead of the routing -- a target nobody can identify is refused before ANYTHING is
+      // asked to stop -- so the observable contract is now stronger and this case tests that
+      // instead: nobody is asked, and the attempt fails.
+      //
+      // The ordering guard inside the ownership walk is still there and is still correct; it is
+      // simply no longer reachable from the production path, so it is not separately covered.
       ProcessTarget timelessMiddle = tStream;
       timelessMiddle.creationTime = 0;
-      const std::vector<uint32_t> asked = asked_pids({tHost, timelessMiddle, tCapture});
-      check("an unknown creation time in the middle breaks the chain",
-            was_asked(asked, tCapture.pid));
+      auto shared = std::make_shared<std::vector<uint32_t>>();
+      UpdateEffectsConfig c = base_config(install, staging);
+      const std::vector<ProcessTarget> targets{tHost, timelessMiddle, tCapture};
+      c.enumerateTargets = [targets]() { return targets; };
+      c.requestStop = [shared](const ProcessTarget& t) {
+        shared->push_back(t.pid);
+        return true;
+      };
+      WindowsUpdateEffects e(c);
+      check("a target with no recorded creation time fails the attempt", !e.PrepareForSwap(),
+            e.last_error());
+      check("...before anything at all was asked to stop", shared->empty(),
+            std::to_string(shared->size()) + " asked");
+      check("...and the error names the pid that could not be identified",
+            e.last_error().find(std::to_string(timelessMiddle.pid)) != std::string::npos,
+            e.last_error());
     }
 
     {
@@ -2112,57 +2141,134 @@ int main(int argc, char** argv) {
   }
 
   {
-    // Handles are released on EVERY return, including the early ones. (updater-abandon-race r3, E)
+    // Handles are released on EVERY return, including the early ones.
+    // (updater-abandon-race r3 item E, corrected in r4)
     //
-    // The watches are acquired one target at a time, so an abandon triggered by the second target
-    // happens with the first one's handle already held. The version before this closed them at the
-    // end of a loop that the early return never reached, and every abandoned attempt leaked one
-    // handle per target it had got through.
+    // What the r3 version of this actually measured, since it is worth recording: its second
+    // target was a LIVE process carrying a deliberately wrong image path, and the identity check
+    // answers that Different -- "somebody else holds that pid now", i.e. the process we meant has
+    // gone -- so the acquisition forgave it, the ask succeeded, and PrepareForSwap returned true.
+    // The return value was discarded, so nothing noticed. It timed a hundred SUCCESSFUL attempts
+    // and never took the early return it was written for.
     //
-    // Measured rather than asserted about: this process's handle count, before and after a hundred
-    // abandoned attempts.
+    // Both cases below abandon at the SECOND target with the first target's handle already held,
+    // and both establish where the failure happened before anything is measured.
     DummyProcess first;
     check("a live target for the first slot started", first.start());
     ProcessTarget live;
     check("its identity is captured", capture_process_identity(first.pid(), &live));
     live.hasWindow = true;
 
-    // The second target is what causes the abandon: a live process whose recorded identity does
-    // not match, which the acquisition cannot confirm.
-    ProcessTarget unconfirmable;
+    auto asks = std::make_shared<int>(0);
+
+    // Case 1: refused BEFORE its handle is opened. A target carrying no creation time cannot be
+    // confirmed against anything, and r4 refuses it at the top of the acquisition instead of
+    // skipping it onward to a request and a quiesce with no watch behind it.
+    ProcessTarget unidentifiable;
     check("a second identity is captured",
-          capture_process_identity(GetCurrentProcessId(), &unconfirmable));
-    unconfirmable.hasWindow = true;
-    unconfirmable.imagePath = L"C:\Windows\System32\definitely-not-this.exe";
+          capture_process_identity(GetCurrentProcessId(), &unidentifiable));
+    unidentifiable.hasWindow = true;
+    unidentifiable.creationTime = 0;
 
     UpdateEffectsConfig cLeak = base_config(install, staging);
     cLeak.stopSettleMs = 0;
     cLeak.quiesceTimeoutMs = 0;
-    cLeak.enumerateTargets = [live, unconfirmable]() {
-      return std::vector<ProcessTarget>{live, unconfirmable};
+    cLeak.enumerateTargets = [live, unidentifiable]() {
+      return std::vector<ProcessTarget>{live, unidentifiable};
     };
-    cLeak.requestStop = [](const ProcessTarget&) { return true; };
+    cLeak.requestStop = [asks](const ProcessTarget&) {
+      ++*asks;
+      return true;
+    };
 
-    DWORD before = 0;
-    GetProcessHandleCount(GetCurrentProcess(), &before);
-    for (int i = 0; i < 100; ++i) {
+    {
       WindowsUpdateEffects e(cLeak);
-      (void)e.PrepareForSwap();
+      check("an unconfirmable second target abandons the attempt", !e.PrepareForSwap(),
+            e.last_error());
+      check("...and the error names that target, not the one before it",
+            e.last_error().find(std::to_string(unidentifiable.pid)) != std::string::npos &&
+                e.last_error().find(std::to_string(live.pid)) == std::string::npos,
+            e.last_error());
+      check("...and nothing was asked to stop, because the refusal precedes the asking",
+            *asks == 0, std::to_string(*asks) + " asked");
     }
-    DWORD after = 0;
-    GetProcessHandleCount(GetCurrentProcess(), &after);
 
-    // A hundred attempts that each acquired at least one handle. A leak shows as a hundred; the
-    // allowance is for whatever else the process does between the two measurements.
-    check("a hundred abandoned attempts do not accumulate handles",
-          after <= before + 20,
-          std::to_string(before) + " -> " + std::to_string(after));
+    {
+      bool everPrepared = false;
+      DWORD before = 0;
+      GetProcessHandleCount(GetCurrentProcess(), &before);
+      for (int i = 0; i < 100; ++i) {
+        WindowsUpdateEffects e(cLeak);
+        if (e.PrepareForSwap()) everPrepared = true;
+      }
+      DWORD after = 0;
+      GetProcessHandleCount(GetCurrentProcess(), &after);
+      check("every one of the hundred attempts abandoned", !everPrepared);
+      check("a hundred attempts abandoned before the second open do not accumulate handles",
+            after <= before + 20, std::to_string(before) + " -> " + std::to_string(after));
+    }
+
+    // Case 2: refused AT its handle open, which is the other early return and the one that leaves
+    // the acquisition holding a handle it opened moments before. The System process supplies the
+    // refusal for real rather than by injection -- its pid cannot be opened from an ordinary
+    // session. Whether that is true HERE is probed, not assumed: an elevated run can open it, and
+    // the case would then quietly test nothing.
+    {
+      SetLastError(0);
+      HANDLE probe = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, 4);
+      const DWORD probeErr = GetLastError();
+      if (probe) {
+        CloseHandle(probe);
+        skip("a target that cannot be opened abandons at the acquisition",
+             "pid 4 is openable from this session, so it cannot supply an open failure");
+      } else {
+        ProcessTarget unopenable;
+        unopenable.pid = 4;
+        // Non-zero, so the refusal has to come from the open rather than from the missing-identity
+        // gate above it. That distinction is the whole point of this case.
+        unopenable.creationTime = 1;
+        unopenable.imagePath = L"System";
+        unopenable.hasWindow = true;
+
+        UpdateEffectsConfig cOpen = cLeak;
+        cOpen.enumerateTargets = [live, unopenable]() {
+          return std::vector<ProcessTarget>{live, unopenable};
+        };
+
+        *asks = 0;
+        {
+          WindowsUpdateEffects e(cOpen);
+          check("a target that cannot be opened abandons at the acquisition", !e.PrepareForSwap(),
+                e.last_error());
+          check("...and says so about that pid, with the error it got",
+                e.last_error().find("cannot watch pid 4") != std::string::npos &&
+                    e.last_error().find(std::to_string(probeErr)) != std::string::npos,
+                e.last_error());
+          check("...and still nothing was asked to stop", *asks == 0,
+                std::to_string(*asks) + " asked");
+        }
+
+        bool everPrepared = false;
+        DWORD before = 0;
+        GetProcessHandleCount(GetCurrentProcess(), &before);
+        for (int i = 0; i < 100; ++i) {
+          WindowsUpdateEffects e(cOpen);
+          if (e.PrepareForSwap()) everPrepared = true;
+        }
+        DWORD after = 0;
+        GetProcessHandleCount(GetCurrentProcess(), &after);
+        check("every one of the hundred open-failure attempts abandoned", !everPrepared);
+        check("a hundred attempts abandoned at the second open do not accumulate handles",
+              after <= before + 20, std::to_string(before) + " -> " + std::to_string(after));
+      }
+    }
+
     first.kill();
   }
 
   remove_tree(install);
 
   std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED")
-            << "  (" << gChecks << " checks, " << gFailures << " failed)\n";
+            << "  (" << gChecks << " checks, " << gFailures << " failed, " << gSkips << " skipped)\n";
   return gFailures == 0 ? 0 : 1;
 }

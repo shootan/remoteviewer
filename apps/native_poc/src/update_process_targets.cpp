@@ -42,7 +42,8 @@ bool image_leaf_is(const std::wstring& imagePath, const wchar_t* name) {
  * to open or control it is NOT -- it is the case where we do not know, and an update that treats
  * it as success proceeds over a running service.
  */
-bool request_service_stop(const wchar_t* serviceName) {
+// Defined below, outside the anonymous namespace: the isolated fixture test calls it.
+bool request_service_stop_impl(const wchar_t* serviceName) {
   SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
   if (!manager) return false;
   SC_HANDLE service = OpenServiceW(manager, serviceName, SERVICE_STOP | SERVICE_QUERY_STATUS);
@@ -69,6 +70,11 @@ bool process_has_top_level_window(uint32_t pid) {
 }
 
 }  // namespace
+
+bool request_service_stop(const wchar_t* serviceName) {
+  return request_service_stop_impl(serviceName);
+}
+
 
 const std::vector<std::wstring>& product_image_names() {
   // The same six executables the installer's payload carries. GNLinkClient and GNLinkViewer are
@@ -175,15 +181,22 @@ bool request_process_stop(const ProcessTarget& target) {
   if (!held) {
     // "Could not open" was being read as "already gone", and the two are not the same answer.
     // ERROR_INVALID_PARAMETER is a pid that is no longer a process -- nothing to ask, so the ask
-    // succeeded vacuously. ERROR_ACCESS_DENIED is a process we cannot even look at, and calling
-    // that success means the swap proceeds over something that may still be holding the files it
-    // is about to replace. Access denied is not death; it is not knowing.
-    if (GetLastError() == ERROR_ACCESS_DENIED) return false;
+    // succeeded vacuously. EVERY other failure is a question that did not get answered: access
+    // denied is a process we cannot even look at, and calling that success means the swap proceeds
+    // over something that may still be holding the files it is about to replace. Access denied is
+    // not death; it is not knowing -- and neither is any other error, which is why the test is now
+    // "is it exactly INVALID_PARAMETER" rather than "is it anything but access denied".
+    if (GetLastError() != ERROR_INVALID_PARAMETER) return false;
     return true;
   }
-  if (!process_identity_matches(held, target)) {
+  // Three answers, not two. process_identity_matches folds "somebody else has this number" and
+  // "the question could not be answered" into one false, and this function used to invert that
+  // false into "the process we meant has exited" -- turning an unanswerable identity query into a
+  // successful stop. Only Different is evidence of an exit.
+  const IdentityMatch match = process_identity_check(held, target);
+  if (match != IdentityMatch::Same) {
     CloseHandle(held);
-    return true;  // the process we meant has exited
+    return match == IdentityMatch::Different;
   }
   struct HandleGuard {
     HANDLE h;
@@ -196,7 +209,7 @@ bool request_process_stop(const ProcessTarget& target) {
   // mechanisms below are inapplicable by construction -- and it does have a supervisor: the SCM.
   // Asking the SCM is the polite request for a service, exactly as WM_CLOSE is for a window.
   if (image_leaf_is(target.imagePath, L"GNLinkInputService.exe")) {
-    return request_service_stop(kSecureInputServiceName);
+    return request_service_stop_impl(kSecureInputServiceName);
   }
 
   // A GUI process gets WM_CLOSE on its top-level windows.
