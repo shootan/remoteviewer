@@ -2064,6 +2064,7 @@ int main(int argc, char** argv) {
     present.hasWindow = true;
     UpdateEffectsConfig c2 = base_config(install, staging);
     c2.stopSettleMs = 300;
+    c2.quiesceTimeoutMs = 0;  // the shared budget is the settle alone here
     c2.stopSettlePollMs = 50;
     c2.enumerateTargets = [present]() { return std::vector<ProcessTarget>{present}; };
     c2.requestStop = [](const ProcessTarget&) { return false; };
@@ -2098,6 +2099,7 @@ int main(int argc, char** argv) {
 
       UpdateEffectsConfig cLate = base_config(install, staging);
       cLate.stopSettleMs = 200;  // spent long before it goes
+    cLate.quiesceTimeoutMs = 200;  // the stop phase is one budget: settle + quiesce
       cLate.stopSettlePollMs = 50;
       cLate.enumerateTargets = [target]() { return std::vector<ProcessTarget>{target}; };
       cLate.requestStop = [](const ProcessTarget&) { return false; };
@@ -2107,6 +2109,55 @@ int main(int argc, char** argv) {
       check("...and the swap did not happen", !exists(install + L"\AlphaPayload.bin.gnlink-old"));
       leaveLate.join();
     }
+  }
+
+  {
+    // Handles are released on EVERY return, including the early ones. (updater-abandon-race r3, E)
+    //
+    // The watches are acquired one target at a time, so an abandon triggered by the second target
+    // happens with the first one's handle already held. The version before this closed them at the
+    // end of a loop that the early return never reached, and every abandoned attempt leaked one
+    // handle per target it had got through.
+    //
+    // Measured rather than asserted about: this process's handle count, before and after a hundred
+    // abandoned attempts.
+    DummyProcess first;
+    check("a live target for the first slot started", first.start());
+    ProcessTarget live;
+    check("its identity is captured", capture_process_identity(first.pid(), &live));
+    live.hasWindow = true;
+
+    // The second target is what causes the abandon: a live process whose recorded identity does
+    // not match, which the acquisition cannot confirm.
+    ProcessTarget unconfirmable;
+    check("a second identity is captured",
+          capture_process_identity(GetCurrentProcessId(), &unconfirmable));
+    unconfirmable.hasWindow = true;
+    unconfirmable.imagePath = L"C:\Windows\System32\definitely-not-this.exe";
+
+    UpdateEffectsConfig cLeak = base_config(install, staging);
+    cLeak.stopSettleMs = 0;
+    cLeak.quiesceTimeoutMs = 0;
+    cLeak.enumerateTargets = [live, unconfirmable]() {
+      return std::vector<ProcessTarget>{live, unconfirmable};
+    };
+    cLeak.requestStop = [](const ProcessTarget&) { return true; };
+
+    DWORD before = 0;
+    GetProcessHandleCount(GetCurrentProcess(), &before);
+    for (int i = 0; i < 100; ++i) {
+      WindowsUpdateEffects e(cLeak);
+      (void)e.PrepareForSwap();
+    }
+    DWORD after = 0;
+    GetProcessHandleCount(GetCurrentProcess(), &after);
+
+    // A hundred attempts that each acquired at least one handle. A leak shows as a hundred; the
+    // allowance is for whatever else the process does between the two measurements.
+    check("a hundred abandoned attempts do not accumulate handles",
+          after <= before + 20,
+          std::to_string(before) + " -> " + std::to_string(after));
+    first.kill();
   }
 
   remove_tree(install);

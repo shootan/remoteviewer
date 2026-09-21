@@ -556,6 +556,64 @@ bool WindowsUpdateEffects::PrepareForSwap() {
     return GetLastError() == ERROR_INVALID_PARAMETER;
   };
 
+  // Acquire the watches BEFORE anything is asked to stop.
+  //
+  // Every later question about a target -- did the request land, did it exit -- is answered
+  // through the handle taken here, never by opening its pid again. A pid is reused; a handle is
+  // not, and holding one is what keeps "this process" meaning the same thing for the rest of the
+  // attempt. The previous version opened a handle only after a request had already failed, which
+  // left every other question on the pid path.
+  //
+  // The deadline starts here too, and covers both waits that follow: the settle for requests that
+  // could not be delivered, and the quiesce for the ones that could.
+  stopDeadlineMs_ = static_cast<uint64_t>(GetTickCount64()) +
+                    static_cast<uint64_t>(config_.stopSettleMs) +
+                    static_cast<uint64_t>(config_.quiesceTimeoutMs);
+  watches_.clear();
+  for (const ProcessTarget& target : preparedTargets_) {
+    if (!target.identityKnown) continue;  // reported by the loop below, where the reason is known
+    // Nothing was recorded to check against, so there is nothing this pass can verify. The
+    // enumerator never produces this: capture_process_identity refuses a process whose creation
+    // time it could not read, so a target that reaches here identified always carries one. It is
+    // skipped rather than refused because "no recorded identity" is a different thing from "the
+    // identity could not be confirmed", and only the second is evidence of trouble.
+    if (target.creationTime == 0) continue;
+    TargetWatch watch;
+    watch.target = target;
+    SetLastError(0);
+    HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, target.pid);
+    if (!h) {
+      // Only one error means "gone": the pid is not a process. Everything else -- access denied
+      // above all -- is a question we could not ask, and an unanswered question is not an exit.
+      if (GetLastError() == ERROR_INVALID_PARAMETER) {
+        watch.gone = true;
+        watches_.push_back(std::move(watch));
+        continue;
+      }
+      lastError_ = "cannot watch pid " + std::to_string(target.pid) + " (" +
+                   to_utf8(target.imagePath) + ") -- OpenProcess failed with " +
+                   std::to_string(GetLastError()) +
+                   ", so whether it stops cannot be established";
+      if (config_.trace) config_.trace(lastError_);
+      return false;
+    }
+    const IdentityMatch match = process_identity_check(h, target);
+    watch.handle = h;  // owned from here; the destructor closes it on every path
+    if (match == IdentityMatch::Different) {
+      // Somebody else holds that number now, so the process we enumerated has gone.
+      watch.gone = true;
+    } else if (match == IdentityMatch::Unknown) {
+      // The question could not be answered. Proceeding would mean swapping files under a process
+      // we cannot account for.
+      lastError_ = "cannot confirm the identity of pid " + std::to_string(target.pid) + " (" +
+                   to_utf8(target.imagePath) + ") -- " + identity_match_name(match);
+      if (config_.trace) config_.trace(lastError_);
+      watches_.push_back(std::move(watch));
+      return false;
+    }
+    watches_.push_back(std::move(watch));
+  }
+
   for (const ProcessTarget& target : preparedTargets_) {
     // It is running and could not be identified, so it cannot be asked and cannot be waited for.
     // Said here, where the reason is still known: without this the attempt still stops, but it
@@ -589,7 +647,19 @@ bool WindowsUpdateEffects::PrepareForSwap() {
         continue;
       }
     }
-    if (!config_.requestStop(target)) {
+    // The watch for this target. `gone` is used for FORGIVENESS after a failed ask, not to decide
+    // whether to ask: which targets are asked is the ownership routing above, and skipping the ask
+    // for a process that has already left would change that routing rather than the forgiveness.
+    TargetWatch* watch = nullptr;
+    for (auto& w : watches_) {
+      if (w.target.pid == target.pid && w.target.creationTime == target.creationTime) {
+        watch = &w;
+        break;
+      }
+    }
+    if (config_.requestStop(target)) {
+      if (watch) watch->requestDelivered = true;
+    } else {
       // Asking can fail because the process is already leaving. That is the outcome this step
       // wants, not a reason to abandon the update.
       //
@@ -600,9 +670,11 @@ bool WindowsUpdateEffects::PrepareForSwap() {
       // been asked of it. The enumeration and the request are two moments and the target moved
       // between them.
       //
-      // Only a target that is genuinely gone is forgiven. A live process that refused is still a
-      // failure, and nothing here terminates anything.
-      if (parent_has_exited(target.pid)) continue;
+      // Only a target that is genuinely gone is forgiven, and "gone" is decided by the watch
+      // taken before any of this began -- never by opening the pid again. Nothing terminates
+      // anything here.
+      if (watch && watch->gone) continue;
+      if (watch) watch->requestFailed = true;
 
       // Gone is forgiven above. GOING is not, and going is what a handoff produces: a process that
       // has acknowledged, destroyed its window, and not yet finished leaving. Measured
@@ -619,59 +691,60 @@ bool WindowsUpdateEffects::PrepareForSwap() {
       // it absent, or finding something there, says nothing reliable about the process we meant.
       // A handle opened now and held cannot be recycled, so waiting on it answers exactly one
       // question about exactly one process. Nothing is terminated either way.
-      SetLastError(0);
-      HANDLE watch = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
-                                 target.pid);
-      if (watch && !process_identity_matches(watch, target)) {
-        // The pid is now somebody else's, which means the process we meant has gone.
-        CloseHandle(watch);
-        continue;
-      }
-      if (!watch) {
-        // ERROR_INVALID_PARAMETER is a pid that is no longer a process. Anything else -- access
-        // denied above all -- is a question we could not ask, and an unanswered question is not
-        // an exit.
-        if (GetLastError() == ERROR_INVALID_PARAMETER) continue;
-        lastError_ = "could not ask pid " + std::to_string(target.pid) +
-                     " to stop, and cannot watch it either";
-        return false;
-      }
-      undelivered_.push_back({target, watch});
+      // The watch for this target was opened before anything was asked, so the question of whether
+      // it leaves is answered below by that handle and not by its pid.
       continue;
     }
   }
 
-  // One wait for everything whose request could not be delivered, against ONE deadline.
+  // One wait for everything whose request could not be delivered, against the shared deadline.
   //
-  // Per-process budgets add up: ten targets would have meant ten times the wait, and the whole
-  // point of a bound is that it does not grow with the shape of the problem. Every handle here was
-  // opened and identity-checked above, so a signalled handle is this process having exited and
-  // nothing else.
-  if (!undelivered_.empty()) {
-    const uint64_t deadline = static_cast<uint64_t>(GetTickCount64()) + config_.stopSettleMs;
+  // Per-target budgets add up: ten targets meant ten times the wait, and a bound that grows with
+  // the shape of the problem is not a bound. Every handle here was opened and identity-checked
+  // before the first request went out, so a signalled handle is this process having exited.
+  {
     std::string stillThere;
-    for (auto& pending : undelivered_) {
+    for (auto& watch : watches_) {
+      if (!watch.requestFailed || watch.gone || !watch.handle) continue;
       const uint64_t now = static_cast<uint64_t>(GetTickCount64());
-      const DWORD remaining = now >= deadline ? 0 : static_cast<DWORD>(deadline - now);
-      const DWORD waited = WaitForSingleObject(pending.second, remaining);
+      const DWORD remaining =
+          now >= stopDeadlineMs_ ? 0 : static_cast<DWORD>(stopDeadlineMs_ - now);
+      const DWORD waited = WaitForSingleObject(static_cast<HANDLE>(watch.handle), remaining);
       // WAIT_OBJECT_0 is the only answer that means it exited. A timeout is still running, and a
       // failure is a question that did not get answered.
-      if (waited == WAIT_OBJECT_0) continue;
+      if (waited == WAIT_OBJECT_0) {
+        watch.gone = true;
+        continue;
+      }
       if (!stillThere.empty()) stillThere += ", ";
-      stillThere += std::to_string(pending.first.pid);
+      stillThere += std::to_string(watch.target.pid);
       stillThere += waited == WAIT_TIMEOUT ? "=still-running" : "=wait-failed";
     }
-    for (auto& pending : undelivered_) CloseHandle(pending.second);
-    undelivered_.clear();
     if (!stillThere.empty()) {
       lastError_ = "could not ask pid " + stillThere.substr(0, stillThere.find('=')) +
                    " to stop (" + stillThere + ")";
       if (config_.trace) config_.trace("stop-settle " + stillThere);
       return false;
     }
-    if (config_.trace) config_.trace("stop-settle every undelivered target exited");
   }
   return true;
+}
+
+WindowsUpdateEffects::TargetWatch& WindowsUpdateEffects::TargetWatch::operator=(
+    TargetWatch&& other) noexcept {
+  if (this != &other) {
+    if (handle) CloseHandle(static_cast<HANDLE>(handle));
+    target = std::move(other.target);
+    handle = other.handle;
+    gone = other.gone;
+    requestDelivered = other.requestDelivered;
+    other.handle = nullptr;
+  }
+  return *this;
+}
+
+WindowsUpdateEffects::TargetWatch::~TargetWatch() {
+  if (handle) CloseHandle(static_cast<HANDLE>(handle));
 }
 
 bool WindowsUpdateEffects::Quiesce() {
@@ -682,7 +755,12 @@ bool WindowsUpdateEffects::Quiesce() {
   // The list is the one PrepareForSwap worked from, not a fresh enumeration. Enumerating again
   // meant waiting for whatever had started in between -- and, worse, silently not waiting for
   // something that had already been asked and was on its way out.
-  const DWORD deadline = GetTickCount() + config_.quiesceTimeoutMs;
+  // The shared deadline, set when PrepareForSwap began. Falls back to its own budget only when
+  // Quiesce is reached without a Prepare -- the fallback enumeration path below.
+  const uint64_t deadline = stopDeadlineMs_ != 0
+                                ? stopDeadlineMs_
+                                : static_cast<uint64_t>(GetTickCount64()) +
+                                      static_cast<uint64_t>(config_.quiesceTimeoutMs);
   const std::vector<ProcessTarget> fallback =
       preparedTargets_.empty() ? config_.enumerateTargets() : std::vector<ProcessTarget>{};
   const std::vector<ProcessTarget>& targets =
@@ -700,31 +778,49 @@ bool WindowsUpdateEffects::Quiesce() {
       if (config_.trace) config_.trace(lastError_);
       return false;
     }
-    SetLastError(0);
-    HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, target.pid);
-    if (!h) {
-      // Gone is not the same as "cannot look". ERROR_ACCESS_DENIED means the answer is unknown,
-      // and an unknown treated as "it exited" is how an update proceeds over a process that is
-      // still holding the files it is about to replace.
-      if (GetLastError() == ERROR_ACCESS_DENIED) {
-        lastError_ = "cannot tell whether pid " + std::to_string(target.pid) +
-                     " exited (access denied)";
+    // The handle taken before anything was asked. No pid is opened again here: doing so was the
+    // remaining way a recycled number could be mistaken for the target, and it also meant this
+    // function applied a different rule to an open failure than PrepareForSwap did.
+    TargetWatch* watch = nullptr;
+    for (auto& w : watches_) {
+      if (w.target.pid == target.pid && w.target.creationTime == target.creationTime) {
+        watch = &w;
+        break;
+      }
+    }
+    TargetWatch owned;
+    if (!watch) {
+      // Quiesce reached without a Prepare -- the fallback enumeration path. A watch is taken here
+      // under exactly the rule Prepare uses, rather than a second policy: only a pid that is no
+      // longer a process is "gone", and an identity that cannot be confirmed is a refusal.
+      owned.target = target;
+      SetLastError(0);
+      HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, target.pid);
+      if (!h) {
+        if (GetLastError() == ERROR_INVALID_PARAMETER) continue;
+        lastError_ = "cannot tell whether pid " + std::to_string(target.pid) + " exited (error " +
+                     std::to_string(GetLastError()) + ")";
         return false;
       }
-      // Anything else here means the pid is not a process any more, which is what we wanted.
-      continue;
+      owned.handle = h;
+      const IdentityMatch match = process_identity_check(h, target);
+      if (match == IdentityMatch::Different) continue;  // ours has gone; this is a stranger
+      if (match == IdentityMatch::Unknown) {
+        lastError_ = "cannot confirm the identity of pid " + std::to_string(target.pid) +
+                     " while waiting for it to exit";
+        return false;
+      }
+      watch = &owned;
     }
-    // The PID may have been reused between enumeration and now. If what is behind it is not the
-    // process that was described, our target has already exited -- which is what we were waiting
-    // for -- and waiting on the stranger would be waiting for the wrong thing.
-    if (!process_identity_matches(h, target)) {
-      CloseHandle(h);
-      continue;
+    if (watch->gone) continue;
+    if (!watch->handle) {
+      lastError_ = "cannot tell whether pid " + std::to_string(target.pid) + " exited";
+      return false;
     }
-    const DWORD now = GetTickCount();
-    const DWORD remaining = (deadline > now) ? (deadline - now) : 0;
-    const DWORD waited = WaitForSingleObject(h, remaining);
-    CloseHandle(h);
+    const uint64_t now = static_cast<uint64_t>(GetTickCount64());
+    const DWORD remaining = now >= deadline ? 0 : static_cast<DWORD>(deadline - now);
+    const DWORD waited = WaitForSingleObject(static_cast<HANDLE>(watch->handle), remaining);
+    if (waited == WAIT_OBJECT_0) watch->gone = true;
     if (waited != WAIT_OBJECT_0) {
       // Two different failures, and they were one message. "Could not be asked" is a supervisor
       // that has no window; "outlived its parent" is a child whose supervisor was asked, went

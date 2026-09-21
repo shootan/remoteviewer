@@ -101,6 +101,26 @@ bool capture_process_identity(uint32_t pid, ProcessTarget* out, IdentityFailure*
  *
  * False means the PID was reused or the process is gone -- either way, not our target.
  */
+/**
+ * Whether the process behind a handle is the one that was described.
+ *
+ * Three answers, not two. A query that FAILS -- no creation time, no image path -- is not evidence
+ * that the handle belongs to somebody else, and the bool this replaced could not say so: it
+ * returned false for "different process" and for "could not tell" alike, and every caller read
+ * false as "our target has already exited". On a machine where the query fails, that turns an
+ * unanswered question into permission to proceed over a process that is still running.
+ */
+enum class IdentityMatch : uint8_t {
+  Same = 0,
+  Different,  // the handle is somebody else's -- ours has gone
+  Unknown,    // the question could not be answered; nothing may be concluded from it
+};
+
+const char* identity_match_name(IdentityMatch m);
+
+IdentityMatch process_identity_check(void* handle, const ProcessTarget& target);
+
+/** Same/Different only. Kept for callers that already treat Unknown as a refusal. */
 bool process_identity_matches(void* handle, const ProcessTarget& target);
 
 /**
@@ -392,14 +412,49 @@ class WindowsUpdateEffects : public UpdateEffects {
   // stopped being checked at all.
   std::vector<ProcessTarget> preparedTargets_;
   std::vector<uint32_t> ownedChildPids_;
+
   /**
-   * Targets whose stop request could not be delivered, with a handle held on each.
+   * One handle per target, opened and identity-checked BEFORE anything is asked to stop, held
+   * until the attempt is over.
    *
-   * The handle is the point: it is opened and identity-checked while the process is known, and
-   * holding it stops the pid being recycled, so the wait below answers one question about one
-   * process. Asking about a pid a second time cannot.
+   * This exists so that no question about a target is ever asked by pid a second time. A pid is
+   * reused; re-opening one and finding it absent, or finding something there, says nothing
+   * reliable about the process that was enumerated. A handle opened while the process is still
+   * known, and held, cannot be recycled -- so every later question (did the request land, did it
+   * exit) is about one process and no other.
+   *
+   * Closing is the destructor's, not any particular return path's. The previous version closed
+   * these at the end of a loop and leaked every handle opened before an early return.
    */
-  std::vector<std::pair<ProcessTarget, void*>> undelivered_;
+  struct TargetWatch {
+    ProcessTarget target;
+    void* handle = nullptr;        // SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, or null
+    bool gone = false;             // the pid was already not a process when we looked
+    bool requestDelivered = false; // requestStop said yes
+    // requestStop was called AND said no. Distinct from "never asked": a windowless child
+    // routed to its supervisor, or an orphan routed to the quiesce wait, is not asked at all,
+    // and the settle below must not wait for those -- they have their own handling and waiting
+    // for them turned every orphan into an abandoned attempt.
+    bool requestFailed = false;
+    TargetWatch() = default;
+    TargetWatch(const TargetWatch&) = delete;
+    TargetWatch& operator=(const TargetWatch&) = delete;
+    TargetWatch(TargetWatch&& other) noexcept { *this = std::move(other); }
+    TargetWatch& operator=(TargetWatch&& other) noexcept;
+    ~TargetWatch();
+  };
+  std::vector<TargetWatch> watches_;
+
+  /**
+   * One deadline for the whole stop phase, in 64-bit milliseconds.
+   *
+   * It starts when PrepareForSwap begins and covers both the settle wait for requests that could
+   * not be delivered and the Quiesce wait for the ones that could. Separate budgets meant the
+   * total grew with the number of targets and with how the failure was distributed between the two
+   * stages; a bound that moves is not a bound. 32-bit GetTickCount is not used anywhere on this
+   * path -- it wraps every 49 days and the comparison then reads backwards.
+   */
+  uint64_t stopDeadlineMs_ = 0;
   // Windowless targets with nobody to ask: their parent is not among the targets, which means it
   // has already exited. Waited for rather than asked, and told apart from the owned ones so the
   // log says which situation it was.

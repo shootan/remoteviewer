@@ -191,6 +191,49 @@ LRESULT CALLBACK fixture_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
  * Run DETACHED_PROCESS, this has no console and answers the production question. Reports through
  * the exit code because it has nowhere to print.
  */
+// Defined below, next to the other fixture configuration.
+UpdateEffectsConfig config_for(const std::wstring& install, const std::wstring& staging,
+                               uint32_t parentPid);
+
+/**
+ * Runs the REAL stop path against one pid, from a process with no console. (r3, item F)
+ *
+ * Nothing is injected: config_for supplies the production requestStop, and this drives
+ * PrepareForSwap and then Quiesce exactly as the updater does. It has to run out of process
+ * because the caller's console is what decides whether the ask can succeed, and this test binary
+ * has one.
+ *
+ * A sentinel file is written into the install directory before the run and checked by the parent
+ * afterwards: if the path ever moved a file, the sentinel would not survive untouched.
+ *
+ * Exit code: 0 prepared and quiesced, 1 prepare abandoned, 2 quiesce failed, 90+ setup trouble.
+ */
+int run_fixture_runstop(uint32_t pid, const std::wstring& installDir) {
+  const std::wstring staging = installDir + L"-staging";
+  CreateDirectoryW(installDir.c_str(), nullptr);
+  CreateDirectoryW(staging.c_str(), nullptr);
+
+  UpdateEffectsConfig c = config_for(installDir, staging, pid);
+  // Exactly the one process this run is about. config_for enumerates by image name, which in this
+  // binary also finds the other fixtures and this runner itself -- and asking those to stop
+  // disturbed tests that had nothing to do with this one.
+  c.enumerateTargets = [pid]() {
+    std::vector<ProcessTarget> only;
+    ProcessTarget t;
+    if (capture_process_identity(pid, &t)) {
+      t.hasWindow = true;  // the stale view the updater carries from its own enumeration
+      only.push_back(t);
+    }
+    return only;
+  };
+  c.stopSettleMs = 1500;
+  c.quiesceTimeoutMs = 1500;
+  WindowsUpdateEffects e(c);
+  if (!e.PrepareForSwap()) return 1;
+  if (!e.Quiesce()) return 2;
+  return 0;
+}
+
 int run_fixture_askprobe(uint32_t pid) {
   ProcessTarget target;
   if (!capture_process_identity(pid, &target)) return 90;
@@ -391,6 +434,11 @@ int main(int argc, char** argv) {
   if (argc >= 3 && std::string(argv[1]) == "--fixture-child") {
     const std::string name(argv[2]);
     return run_fixture_child(std::wstring(name.begin(), name.end()));
+  }
+  if (argc >= 4 && std::string(argv[1]) == "--fixture-runstop") {
+    const std::string dir(argv[3]);
+    return run_fixture_runstop(static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 10)),
+                               std::wstring(dir.begin(), dir.end()));
   }
   if (argc >= 3 && std::string(argv[1]) == "--fixture-askprobe") {
     return run_fixture_askprobe(static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 10)));
@@ -1418,25 +1466,62 @@ int main(int argc, char** argv) {
                 "code=" + std::to_string(code));
         }
 
-        // And with that answer, the attempt abandons and nothing is swapped.
-        cS.requestStop = [](const ProcessTarget&) { return false; };
-        WindowsUpdateEffects eS2(cS);
+        // And now the whole path, out of process, with NOTHING injected: the production
+        // requestStop, PrepareForSwap and Quiesce, run by a caller with no console. A seam
+        // returning false proves the consequence of a failed ask; this proves the ask fails and
+        // that the consequence follows from it.
+        const std::wstring runDir = std::wstring(tempS) + L"gnlink-int2-run";
+        CreateDirectoryW(runDir.c_str(), nullptr);
+        const std::wstring sentinel = runDir + L"\\sentinel.txt";
+        {
+          HANDLE sf = CreateFileW(sentinel.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                  FILE_ATTRIBUTE_NORMAL, nullptr);
+          if (sf != INVALID_HANDLE_VALUE) {
+            DWORD wrote = 0;
+            WriteFile(sf, "untouched", 9, &wrote, nullptr);
+            CloseHandle(sf);
+          }
+        }
+        std::string narrowDir(runDir.begin(), runDir.end());
+        std::wstring cmdR = L"\"" + own_path() + L"\" --fixture-runstop " +
+                            std::to_wstring(pS.dwProcessId) + L" " + runDir;
+        std::vector<wchar_t> mutableCmdR(cmdR.begin(), cmdR.end());
+        mutableCmdR.push_back(L'\0');
+        STARTUPINFOW siR{};
+        siR.cb = sizeof(siR);
+        PROCESS_INFORMATION pR{};
         const uint64_t began = GetTickCount64();
-        check("integration: a process that stays abandons the attempt", !eS2.PrepareForSwap(),
-              eS2.last_error());
-        // One tick of slack: GetTickCount64 moves in ~15.6ms steps.
-        check("integration: ...after the budget, not before",
-              GetTickCount64() - began + 32 >= 400,
-              std::to_string(GetTickCount64() - began) + "ms of a 400ms budget");
-        // A real check, not a shape: no payload and no backup may exist, because the attempt
-        // stopped before the swap. The first version compared against the wrong constant and ended
-        // in "|| true", which asserted nothing at all.
-        check("integration: ...and nothing was swapped",
-              GetFileAttributesW((instS + L"\\AlphaPayload.bin").c_str()) ==
-                      INVALID_FILE_ATTRIBUTES &&
-                  GetFileAttributesW((instS + L"\\AlphaPayload.bin.gnlink-old").c_str()) ==
-                      INVALID_FILE_ATTRIBUTES,
-              "the install dir was never written to");
+        const bool startedR = CreateProcessW(nullptr, mutableCmdR.data(), nullptr, nullptr, FALSE,
+                                             DETACHED_PROCESS, nullptr, nullptr, &siR, &pR) != FALSE;
+        check("integration: the console-less runner started", startedR);
+        if (startedR) {
+          CloseHandle(pR.hThread);
+          const bool done = WaitForSingleObject(pR.hProcess, 30000) == WAIT_OBJECT_0;
+          DWORD code = 99;
+          GetExitCodeProcess(pR.hProcess, &code);
+          CloseHandle(pR.hProcess);
+          check("integration: the runner finished", done, "code=" + std::to_string(code));
+          check("integration: the real path abandons on a process that stays", code == 1,
+                "exit=" + std::to_string(code) + " (1 = prepare abandoned)");
+          check("integration: ...after the budget, not before",
+                GetTickCount64() - began + 32 >= 1500,
+                std::to_string(GetTickCount64() - began) + "ms of a 1500ms budget");
+          // The sentinel proves the install directory was never rewritten -- a stronger claim than
+          // "the payload is absent", because it would also catch a path that wrote and cleaned up.
+          char readBack[32]{};
+          HANDLE sf = CreateFileW(sentinel.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+          DWORD got = 0;
+          const bool intact = sf != INVALID_HANDLE_VALUE &&
+                              ReadFile(sf, readBack, sizeof(readBack) - 1, &got, nullptr) &&
+                              std::string(readBack, got) == "untouched";
+          if (sf != INVALID_HANDLE_VALUE) CloseHandle(sf);
+          check("integration: the install directory is exactly as it was", intact,
+                std::string(readBack, got));
+        }
+        DeleteFileW(sentinel.c_str());
+        RemoveDirectoryW(runDir.c_str());
+        RemoveDirectoryW((runDir + L"-staging").c_str());
 
         SetEvent(quit);
         WaitForSingleObject(pS.hProcess, 15000);

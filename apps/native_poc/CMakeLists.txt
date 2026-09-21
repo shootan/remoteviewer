@@ -1605,6 +1605,16 @@ endif()
 # no session and no sockets. /utf-8 because the round-trip cases include Korean and an emoji.
 # Control-channel resume decisions and the resume packet's wire shape (item 8, layer 1). Pure
 # logic -- no socket, no peer, no clock.
+# Same / Different / Unknown, and never two of them collapsed (updater-abandon-race r3, item B).
+add_executable(remote60_update_identity_match_test
+  src/update_identity_match_test.cpp
+  src/update_process_identity.cpp
+)
+target_include_directories(remote60_update_identity_match_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_update_identity_match_test PRIVATE /utf-8)
+endif()
+
 # Whether a rollback may start (updater-health-gate D2). Pure: no file, no process.
 add_executable(remote60_update_rollback_safety_test
   src/update_rollback_safety_test.cpp

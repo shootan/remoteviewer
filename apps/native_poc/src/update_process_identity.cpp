@@ -69,15 +69,44 @@ bool capture_process_identity(uint32_t pid, ProcessTarget* out, IdentityFailure*
   return true;
 }
 
-bool process_identity_matches(void* handle, const ProcessTarget& target) {
+const char* identity_match_name(IdentityMatch m) {
+  switch (m) {
+    case IdentityMatch::Same: return "same";
+    case IdentityMatch::Different: return "different";
+    case IdentityMatch::Unknown: return "unknown";
+  }
+  return "?";
+}
+
+IdentityMatch process_identity_check(void* handle, const ProcessTarget& target) {
   HANDLE h = static_cast<HANDLE>(handle);
-  if (!h) return false;
-  if (target.creationTime == 0) return false;  // nothing to compare against
-  if (creation_time_of(h) != target.creationTime) return false;
-  // The creation time alone is already decisive in practice; the path is compared too because it
-  // costs nothing and makes a deliberately crafted collision harder.
-  if (!target.imagePath.empty() && image_path_of(h) != target.imagePath) return false;
-  return true;
+  if (!h) return IdentityMatch::Unknown;
+  // Nothing was recorded to compare against, so no comparison can be made. This used to read as
+  // "different", which a caller then read as "ours has exited".
+  if (target.creationTime == 0) return IdentityMatch::Unknown;
+
+  const uint64_t created = creation_time_of(h);
+  // A creation time of zero here is GetProcessTimes failing, not a process created at the epoch.
+  if (created == 0) return IdentityMatch::Unknown;
+  if (created != target.creationTime) return IdentityMatch::Different;
+
+  // The creation time has already matched, and that is decisive: it is unique per process for as
+  // long as anyone holds a handle. The path is compared on top because it costs nothing and makes
+  // a deliberately crafted collision harder -- but an UNREADABLE path does not undo the match.
+  //
+  // Reading it as Unknown was wrong in the dangerous direction: QueryFullProcessImageName fails
+  // for a process that has exited, so every legitimately departed target became "cannot tell" and
+  // blocked the update it should have allowed. A path is evidence against only when it can be read
+  // and differs.
+  if (!target.imagePath.empty()) {
+    const std::wstring path = image_path_of(h);
+    if (!path.empty() && path != target.imagePath) return IdentityMatch::Different;
+  }
+  return IdentityMatch::Same;
+}
+
+bool process_identity_matches(void* handle, const ProcessTarget& target) {
+  return process_identity_check(handle, target) == IdentityMatch::Same;
 }
 
 }  // namespace remote60::native_poc::update
