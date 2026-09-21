@@ -794,6 +794,7 @@ endif()
 
 add_executable(remote60_update_stop_process_test
   src/update_effects.cpp
+  src/update_rollback_safety.cpp
   src/update_process_targets.cpp
   src/update_process_identity.cpp
   src/update_relaunch_plan.cpp
@@ -935,6 +936,7 @@ endif()
 # cannot reach it even by mistake -- the symbols are not in the binary.
 add_executable(remote60_update_effects_test
   src/update_effects.cpp
+  src/update_rollback_safety.cpp
   src/update_process_identity.cpp
   src/payload_name.cpp
   src/update_registration_wiring.cpp
@@ -960,6 +962,7 @@ endif()
 # suite and the JavaScript and Kotlin manifest suites are reading the same bytes.
 add_executable(remote60_update_release_test
   src/update_effects.cpp
+  src/update_rollback_safety.cpp
   src/update_process_identity.cpp
   src/payload_name.cpp
   src/update_registration_wiring.cpp
@@ -1026,6 +1029,7 @@ add_executable(remote60_updater
   src/update_job_guard.cpp
   src/update_state_machine.cpp
   src/update_effects.cpp
+  src/update_rollback_safety.cpp
   src/update_process_identity.cpp
   src/update_manifest.cpp
   src/update_signature.cpp
@@ -1098,6 +1102,7 @@ add_executable(remote60_updater_scenarios_test
   src/updater_options.cpp
   src/update_state_machine.cpp
   src/update_effects.cpp
+  src/update_rollback_safety.cpp
   src/update_process_identity.cpp
   src/update_manifest.cpp
   src/update_signature.cpp
@@ -1148,6 +1153,7 @@ add_executable(remote60_updater_assembly_test
   src/updater_options.cpp
   src/update_state_machine.cpp
   src/update_effects.cpp
+  src/update_rollback_safety.cpp
   src/update_process_identity.cpp
   src/update_manifest.cpp
   src/update_signature.cpp
@@ -1599,6 +1605,16 @@ endif()
 # no session and no sockets. /utf-8 because the round-trip cases include Korean and an emoji.
 # Control-channel resume decisions and the resume packet's wire shape (item 8, layer 1). Pure
 # logic -- no socket, no peer, no clock.
+# Whether a rollback may start (updater-health-gate D2). Pure: no file, no process.
+add_executable(remote60_update_rollback_safety_test
+  src/update_rollback_safety_test.cpp
+  src/update_rollback_safety.cpp
+)
+target_include_directories(remote60_update_rollback_safety_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_update_rollback_safety_test PRIVATE /utf-8)
+endif()
+
 # What the updater will believe about a relaunched Host (updater-health-gate D1, item 2).
 # Pure: no file, no process, no clock.
 add_executable(remote60_update_readiness_test

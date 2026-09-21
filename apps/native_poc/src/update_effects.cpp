@@ -1,6 +1,7 @@
 #include "update_effects.hpp"
 
 #include <windows.h>
+#include <tlhelp32.h>
 #include <bcrypt.h>
 
 #include <algorithm>
@@ -799,6 +800,78 @@ bool WindowsUpdateEffects::Swap() {
   return true;
 }
 
+namespace {
+
+/**
+ * Whether any running process is THIS executable -- the file at this path, not merely one with
+ * the same name. Read-only: nothing is opened for write and no process is touched.
+ */
+bool image_is_running(const std::wstring& path) {
+  const size_t slash = path.find_last_of(L"\\/");
+  const std::wstring leaf = slash == std::wstring::npos ? path : path.substr(slash + 1);
+  if (leaf.empty()) return false;
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap == INVALID_HANDLE_VALUE) return false;
+  PROCESSENTRY32W entry{};
+  entry.dwSize = sizeof(entry);
+  bool found = false;
+  if (Process32FirstW(snap, &entry)) {
+    do {
+      if (_wcsicmp(entry.szExeFile, leaf.c_str()) != 0) continue;
+      // The name alone is not enough, and the release suite caught that: a fixture installation
+      // whose payload is called GNLinkHost.exe was refused a rollback because the real
+      // GNLinkHost.exe was running from %ProgramFiles%. In the field the same mistake blocks a
+      // legitimate rollback whenever a stale copy runs from somewhere else.
+      HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
+      if (!proc) { found = true; break; }  // cannot look; assume it is the one
+      wchar_t full[MAX_PATH * 2]{};
+      DWORD size = static_cast<DWORD>(std::size(full));
+      const bool readable = QueryFullProcessImageNameW(proc, 0, full, &size) != FALSE;
+      CloseHandle(proc);
+      // A matching name whose path cannot be read IS counted: the alternative is starting a
+      // destructive restore on a guess.
+      if (!readable || _wcsicmp(full, path.c_str()) == 0) { found = true; break; }
+    } while (Process32NextW(snap, &entry));
+  }
+  CloseHandle(snap);
+  return found;
+}
+
+/**
+ * What stands between this file and its removal, asked without removing anything. (D2)
+ *
+ * Two questions, because one answer covers two different failures. The DELETE-access open is
+ * refused by an ACL and granted by a running image -- measured, not assumed
+ * (remote60_rollback_denial_probe) -- so the open separates permission from everything else. What
+ * it cannot tell us is whether the unlink would then succeed, since a running image grants the
+ * open and refuses only the unlink. That question is answered by asking whether anything is
+ * running this executable, which is the condition the refusal actually means.
+ *
+ * Deliberately conservative: a name that matches a running process is reported as in the way even
+ * if that process is running a different copy of it. Waiting a little longer is the cheap mistake;
+ * starting a destructive restore is the expensive one.
+ */
+RemovalProbe probe_removal_for_real(const std::wstring& path) {
+  RemovalProbe probe;
+  probe.exists = GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+  if (!probe.exists) return probe;
+
+  SetLastError(0);
+  HANDLE h = CreateFileW(path.c_str(), DELETE,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  probe.openForDeleteOk = h != INVALID_HANDLE_VALUE;
+  if (h != INVALID_HANDLE_VALUE) {
+    CloseHandle(h);
+    probe.removeError = image_is_running(path) ? ERROR_ACCESS_DENIED : 0;
+  } else {
+    probe.removeError = GetLastError();
+  }
+  return probe;
+}
+
+}  // namespace
+
 bool WindowsUpdateEffects::Rollback() {
   bool ok = true;
   const auto trace = [this](const std::string& text) {
@@ -826,6 +899,55 @@ bool WindowsUpdateEffects::Rollback() {
     return false;
   }
   trace("release-before-rollback ok");
+
+  // Nothing is touched until everything that would be touched can be. (D2)
+  //
+  // The rollback used to delete and restore file by file, so a file held by something it had not
+  // started -- a Host's child, an installed service -- stopped it halfway and left an installation
+  // that was half one build and half the other. Neither half was wrong about its own file; the
+  // mistake was starting.
+  //
+  // Waiting is only for a running image, which goes when its process does. A permission failure is
+  // not waited on: it will not change, and every second spent on it is a second the product is
+  // down. When the budget is spent this returns having moved NOTHING, so the backups and the
+  // placed files are all still there to try again from -- which is the difference between a
+  // rollback that did not happen and a recovery that half happened.
+  if (!config_.probeRemoval) config_.probeRemoval = probe_removal_for_real;
+  {
+    const uint64_t startMs = static_cast<uint64_t>(GetTickCount64());
+    QuiesceDecision decision = QuiesceDecision::WaitMore;
+    std::string blocked;
+    for (;;) {
+      QuiesceInputs inputs;
+      inputs.waitedMs = static_cast<uint64_t>(GetTickCount64()) - startMs;
+      inputs.budgetMs = config_.rollbackQuiesceMs;
+      blocked.clear();
+      for (const std::wstring& name : config_.payloadNames) {
+        const bool hasBackup =
+            std::find(movedAside_.begin(), movedAside_.end(), name) != movedAside_.end();
+        const bool wasPlaced = std::find(placed_.begin(), placed_.end(), name) != placed_.end();
+        if (!hasBackup && !wasPlaced) continue;  // nothing here is this attempt's to undo
+        const RemovalObstacle obstacle = classify_removal(config_.probeRemoval(install_path(name)));
+        if (obstacle != RemovalObstacle::None) {
+          if (!blocked.empty()) blocked += ", ";
+          blocked += to_utf8(name) + "=" + removal_obstacle_name(obstacle);
+        }
+        inputs.obstacles.push_back(obstacle);
+      }
+      decision = quiesce_decide(inputs);
+      if (decision != QuiesceDecision::WaitMore) break;
+      Sleep(config_.rollbackQuiescePollMs);
+    }
+    trace(std::string("quiescence ") + quiesce_decision_name(decision) +
+          (blocked.empty() ? "" : " blocked=" + blocked));
+    if (decision != QuiesceDecision::Proceed) {
+      lastError_ = std::string("not rolling back: ") + quiesce_decision_name(decision) +
+                   (blocked.empty() ? "" : " (" + blocked + ")") +
+                   " -- the installation is left as it is, with every backup still in place";
+      trace("end ok=0 nothing-moved");
+      return false;
+    }
+  }
   // Remove whatever was placed, then put back exactly the files that were moved aside. Files that
   // were never moved are left alone -- restoring something that was not backed up would be
   // inventing state.

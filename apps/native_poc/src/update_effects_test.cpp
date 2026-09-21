@@ -1112,6 +1112,8 @@ int main(int argc, char** argv) {
     // no sharing makes that move genuinely fail at the OS level.
     seed_install();
     UpdateEffectsConfig c = base_config(install, staging);
+    c.rollbackQuiesceMs = 600;  // the field value is 10s; this test only needs the budget to end
+    c.rollbackQuiescePollMs = 50;
     WindowsUpdateEffects e(c);
     const ManifestFields f = artifact_fields();
     e.Download(f);
@@ -1122,15 +1124,32 @@ int main(int argc, char** argv) {
     check("could hold the swapped-in file open", held != INVALID_HANDLE_VALUE);
     const bool rolled = e.Rollback();
     check("rollback reports failure when a file cannot be restored", !rolled, e.last_error());
-    check("rollback failure names the locked file and OS error instead of only health failure",
-          e.last_error().find("remove-live file=BetaPayload.bin win32=32") != std::string::npos,
+
+    // REVERSED, deliberately (updater-health-gate D2). This used to assert that the rollback named
+    // the OS error for the file it had failed on, and -- below -- that it restored the files it
+    // could. That is the partial restore, and on 2026-09-21 it left an installation half one build
+    // and half the other while reporting RollbackFailed. The rollback now decides once, before
+    // touching anything: if any file it would have to remove is not free, it moves nothing.
+    //
+    // So the error names the obstacle rather than the operation that failed, because no operation
+    // was attempted.
+    check("rollback says what was in the way, before anything was moved",
+          e.last_error().find("not rolling back") != std::string::npos &&
+              e.last_error().find("BetaPayload.bin=") != std::string::npos,
+          e.last_error());
+    check("...and says the installation was left intact",
+          e.last_error().find("every backup still in place") != std::string::npos,
           e.last_error());
     if (held != INVALID_HANDLE_VALUE) CloseHandle(held);
-    // Alpha was restorable and must have been restored even though Beta was not -- a rollback
-    // that gives up entirely on the first problem would leave more of the new version in place.
-    check("the restorable file was still restored",
-          read_text(install + L"\\AlphaPayload.bin") == kOldAlpha,
+
+    // The other half of the reversal. Alpha is NOT restored now, and that is the point: a half
+    // restore is not a recovery, and leaving the installation as it was keeps every backup
+    // available for a second attempt once the file is free.
+    check("a file that could have been restored is left alone instead",
+          read_text(install + L"\\AlphaPayload.bin") == kArtifactBytes,
           read_text(install + L"\\AlphaPayload.bin"));
+    check("...and its backup is still there to restore from",
+          exists(install + L"\\AlphaPayload.bin.gnlink-old"));
     e.DiscardDownload();
   }
 

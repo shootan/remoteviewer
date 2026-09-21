@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "payload_name.hpp"
+#include "update_rollback_safety.hpp"
 #include "update_state_machine.hpp"
 
 namespace remote60::native_poc::update {
@@ -223,6 +224,18 @@ struct UpdateEffectsConfig {
    * before Relaunch.
    */
   std::function<bool()> releaseBeforeRollback;
+
+  /**
+   * Whether one file could be removed right now, and if not, what is in the way. (D2)
+   *
+   * A seam because the honest answer involves a running process and a file system, and a test that
+   * needed both would be testing Windows. Left empty, the real one is used.
+   */
+  std::function<RemovalProbe(const std::wstring& path)> probeRemoval;
+
+  /** How long a rollback may wait for what this attempt did not start to go quiet. */
+  uint32_t rollbackQuiesceMs = 10000;
+  uint32_t rollbackQuiescePollMs = 250;
 
   /**
    * The version the manifest claims. Checked against what the staged artifact carries.
