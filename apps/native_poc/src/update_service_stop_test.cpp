@@ -100,6 +100,14 @@ void check(const std::string& name, bool ok, const std::string& detail = {}) {
 
 // Not a pass. Counted apart so a run where the environment refused cannot be read as a run where
 // the behaviour was confirmed.
+int gSkips = 0;
+
+// A precondition this run did not provide. Neither a pass nor a failure.
+void skip(const std::string& name, const std::string& why) {
+  ++gSkips;
+  std::cout << "SKIP  " << name << "  " << why << "\n";
+}
+
 void blocked(const std::string& name, const std::string& why) {
   ++gBlocked;
   std::cout << "BLOCKED  " << name << "  " << why << "\n";
@@ -165,6 +173,21 @@ struct ServiceSnapshot {
   DWORD state = 0;
   DWORD pid = 0;
 };
+
+/**
+ * Milliseconds left until a deadline, from ONE reading of the clock.
+ *
+ * Its own function so the boundary can be checked without a service. Written inline it was
+ * `now < deadline ? deadline - now : 0` with GetTickCount64 called twice -- once for the
+ * comparison and once for the subtraction -- and the two calls can straddle the deadline. The
+ * subtraction is unsigned, so the answer becomes about 585 million years and a bounded wait
+ * becomes an unbounded one.
+ */
+DWORD remaining_ms(uint64_t now, uint64_t deadline) {
+  if (now >= deadline) return 0;
+  const uint64_t left = deadline - now;
+  return left > 0xfffffffeull ? 0xfffffffeu : static_cast<DWORD>(left);
+}
 
 ServiceSnapshot snapshot_service(SC_HANDLE service) {
   SERVICE_STATUS_PROCESS ssp{};
@@ -396,8 +419,20 @@ struct FixtureService {
   // deletion: it goes when it is stopped and the last handle to it closes, so a true there says
   // nothing about whether anything is left.
   DWORD ownedPid = 0;
+  // Acquired while the service is RUNNING and held for the whole lifetime. r6 opened the pid
+  // again inside destroy(), from a snapshot taken at that moment -- and for the fixture whose
+  // attempt stops it successfully, that moment is AFTER it stopped, so the snapshot's pid is 0,
+  // no handle is opened, and "its process was observed to exit" can never become true. Item G
+  // could not be met by a passing run. It is also the pid path this whole task removed from the
+  // product, reintroduced in the test that is supposed to demonstrate the product is right.
+  HANDLE process = nullptr;
+  ProcessTarget identity;
+  bool handleAcquired = false;
+  DWORD handleError = 0;
+  bool identityConfirmed = false;
+
   bool stopped = false;        // reached SERVICE_STOPPED, observed
-  bool processExited = false;  // the process object was signalled, observed
+  bool processExited = false;  // the held handle was signalled, observed
   bool deleted = false;        // DeleteService returned true
   bool absent = false;         // OpenService now says it does not exist
   bool queryFailed = false;    // a status query failed -- NOT the same as "it stopped"
@@ -424,22 +459,44 @@ struct FixtureService {
       if (!why.empty()) why += "; ";
       why += what;
     };
+    if (!handleAcquired) add("no handle to its process was acquired while it was running");
+    if (handleAcquired && !identityConfirmed) add("the process behind that handle was not confirmed");
     if (!stopped) add("never observed STOPPED");
-    if (ownedPid != 0 && !processExited) add("its process was not observed to exit");
+    if (handleAcquired && !processExited) add("its process was not observed to exit");
     if (!deleted) add("DeleteService failed");
     if (!absent) add("still present in the SCM afterwards");
     if (queryFailed) add("a status query failed, so some of the above is unverified");
     return why;
   }
 
+  /**
+   * Starts it, waits for RUNNING, and takes the handle to its process THERE.
+   *
+   * The handle is the identity for the rest of the fixture's life. Opening the pid again later is
+   * what the product stopped doing and what the test must stop doing too -- by the time a
+   * successful attempt is over, the service has stopped and its pid is no longer reported at all.
+   */
   bool start_and_wait(int tries = 100) {
     if (!handle) return false;
     if (!StartServiceW(handle, 0, nullptr) && GetLastError() != ERROR_SERVICE_ALREADY_RUNNING) {
       return false;
     }
     for (int i = 0; i < tries; ++i) {
-      if (snapshot_service(handle).state == SERVICE_RUNNING) return true;
-      Sleep(100);
+      const ServiceSnapshot now = snapshot_service(handle);
+      if (now.state != SERVICE_RUNNING) {
+        Sleep(100);
+        continue;
+      }
+      ownedPid = now.pid;
+      if (ownedPid == 0) return false;  // running with no process is not a state to proceed from
+      SetLastError(0);
+      process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, ownedPid);
+      handleError = process ? 0 : GetLastError();
+      handleAcquired = process != nullptr;
+      if (handleAcquired && capture_process_identity(ownedPid, &identity)) {
+        identityConfirmed = process_identity_check(process, identity) == IdentityMatch::Same;
+      }
+      return true;
     }
     return false;
   }
@@ -489,32 +546,33 @@ struct FixtureService {
   void destroy(DWORD waitMs = 60000) {
     if (!handle) return;
 
-    const ServiceSnapshot before = snapshot_service(handle);
-    ownedPid = before.pid;
-    // Taken while it is still running, and held: a pid re-opened later is not an identity.
-    HANDLE process =
-        ownedPid != 0 ? OpenProcess(SYNCHRONIZE, FALSE, ownedPid) : nullptr;
-
     SERVICE_STATUS st{};
     ControlService(handle, SERVICE_CONTROL_STOP, &st);
 
     const ULONGLONG deadline = GetTickCount64() + waitMs;
-    while (GetTickCount64() < deadline) {
-      const ServiceSnapshot now = snapshot_service(handle);
-      if (now.state == 0) {
+    for (;;) {
+      // ONE reading of the clock per iteration. Two calls -- one for the comparison and one for
+      // the subtraction -- can straddle the deadline, and the subtraction is unsigned, so the
+      // "remaining" time becomes about 585 million years.
+      const ULONGLONG now = GetTickCount64();
+      if (now >= deadline) break;
+      const ServiceSnapshot state = snapshot_service(handle);
+      if (state.state == 0) {
         // The query failed. Recorded, and the wait CONTINUES -- not knowing is not stopping.
         queryFailed = true;
-      } else if (now.state == SERVICE_STOPPED) {
+      } else if (state.state == SERVICE_STOPPED) {
         stopped = true;
         break;
       }
       Sleep(200);
     }
 
+    // The handle taken at RUNNING. Never a fresh open: see start_and_wait.
     if (process) {
-      const ULONGLONG left = GetTickCount64() < deadline ? deadline - GetTickCount64() : 0;
-      processExited = WaitForSingleObject(process, static_cast<DWORD>(left)) == WAIT_OBJECT_0;
+      processExited =
+          WaitForSingleObject(process, remaining_ms(GetTickCount64(), deadline)) == WAIT_OBJECT_0;
       CloseHandle(process);
+      process = nullptr;
       if (processExited) ++gProcessesExited;
     }
 
@@ -549,6 +607,10 @@ struct FixtureService {
 
   ~FixtureService() {
     if (handle) destroy();
+    if (process) {
+      CloseHandle(process);
+      process = nullptr;
+    }
   }
 };
 
@@ -642,6 +704,84 @@ int main(int argc, char** argv) {
     check("mock: ...without reaching Swap", !r.reachedSwap);
     assert_install_preserved("mock refused", dir);
     clean_attempt_dirs(dir);
+  }
+
+  // ------------------------------------------------- the two part-2 defects, checked without it
+  //
+  // Items 1 and 2 of the r7 review are in part 2, which does not run without elevation. Both are
+  // reproducible without a service, and are checked here rather than left until an elevated run
+  // discovers them -- which is what happened with the first version of both.
+  //
+  // This is mock evidence for the PATTERN. It does not execute part 2's code.
+  {
+    // Item 2: the arithmetic, at the boundary that broke it.
+    check("remaining time before the deadline is the difference", remaining_ms(1000, 1500) == 500);
+    check("remaining time at the deadline is zero", remaining_ms(1500, 1500) == 0);
+    check("remaining time PAST the deadline is zero, not four billion",
+          remaining_ms(1501, 1500) == 0, std::to_string(remaining_ms(1501, 1500)));
+    check("...and one millisecond further past it is still zero",
+          remaining_ms(2000, 1500) == 0, std::to_string(remaining_ms(2000, 1500)));
+    check("a deadline further out than a DWORD can hold does not wrap",
+          remaining_ms(0, 0x1'0000'0000ull) == 0xfffffffeu,
+          std::to_string(remaining_ms(0, 0x1'0000'0000ull)));
+  }
+
+  {
+    // Item 1: a handle taken while the process runs answers after it has gone; the pid does not.
+    // That is the whole reason the fixture must hold one from RUNNING rather than open it in
+    // destroy(), where for a service that stopped during its attempt the pid is no longer even
+    // reported.
+    Linger l;
+    check("a process for the held-handle case started", l.start(L"held"));
+    const uint32_t pid = l.pid();
+    ProcessTarget identity;
+    check("its identity is captured while it runs", capture_process_identity(pid, &identity));
+    HANDLE held = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    check("a handle to it is acquired while it runs", held != nullptr);
+    check("...and it is confirmed to be the process we identified",
+          held && process_identity_check(held, identity) == IdentityMatch::Same);
+
+    SetEvent(l.release);
+    WaitForSingleObject(l.pi.hProcess, 10000);
+
+    check("the held handle answers the exit afterwards",
+          held && WaitForSingleObject(held, 2000) == WAIT_OBJECT_0);
+
+    // A correction to my own first version of this check, which failed and was right to: while a
+    // handle is held the pid CANNOT be recycled, so re-opening it finds the same exited process
+    // and answers Same. Holding the handle is what makes that true. The number only stops meaning
+    // anything once nobody is holding it -- which is precisely the state destroy() would have been
+    // in, had it been the only thing interested in that process.
+    {
+      SetLastError(0);
+      HANDLE whileHeld = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+      check("while a handle is held, the pid still resolves to the same exited process",
+            whileHeld && process_identity_check(whileHeld, identity) == IdentityMatch::Same,
+            whileHeld ? "" : "err=" + std::to_string(GetLastError()));
+      if (whileHeld) CloseHandle(whileHeld);
+    }
+
+    if (held) CloseHandle(held);
+    CloseHandle(l.pi.hProcess);
+    l.pi.hProcess = nullptr;
+
+    SetLastError(0);
+    HANDLE reopened = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    const DWORD reopenErr = GetLastError();
+    if (reopened && process_identity_check(reopened, identity) == IdentityMatch::Same) {
+      // The kernel had not released it yet. Nothing to conclude from this run.
+      skip("with every handle released, the pid is no longer that process",
+           "the pid still resolved on this run -- the kernel had not freed it yet");
+    } else {
+      check("with every handle released, the pid is no longer that process", true,
+            reopened ? "it opened as somebody else" : "err=" + std::to_string(reopenErr));
+    }
+    if (reopened) CloseHandle(reopened);
+
+    // What this does NOT show, said rather than implied: the service-specific half of the defect.
+    // For a service that stopped during its attempt, QueryServiceStatusEx reports pid 0, so
+    // destroy()'s snapshot had no number to re-open in the first place -- there was nothing to
+    // recycle, and nothing to find. That needs a service, and a service needs elevation.
   }
 
   // ================================================================= PART 2 (real service, or not)
@@ -744,7 +884,7 @@ int main(int argc, char** argv) {
         }
         svc.destroy();
         check("real service: the fixture service is gone from the SCM, not merely deleted",
-              svc.stopped && svc.processExited && svc.deleted && svc.absent && !svc.queryFailed,
+              svc.handleAcquired && svc.identityConfirmed && svc.stopped && svc.processExited && svc.deleted && svc.absent && !svc.queryFailed,
               svc.cleanup_problem());
       }
 
@@ -786,7 +926,7 @@ int main(int argc, char** argv) {
         // reported success, which could not have been true.
         svc.destroy();
         check("real service (lingering): the fixture service is gone from the SCM",
-              svc.stopped && svc.processExited && svc.deleted && svc.absent && !svc.queryFailed,
+              svc.handleAcquired && svc.identityConfirmed && svc.stopped && svc.processExited && svc.deleted && svc.absent && !svc.queryFailed,
               svc.cleanup_problem());
       }
 
@@ -831,7 +971,7 @@ int main(int argc, char** argv) {
         // the ability to reclaim the fixture.
         svc.destroy();
         check("real service (denied): the narrowed fixture is still reclaimable and is gone",
-              svc.stopped && svc.processExited && svc.deleted && svc.absent && !svc.queryFailed,
+              svc.handleAcquired && svc.identityConfirmed && svc.stopped && svc.processExited && svc.deleted && svc.absent && !svc.queryFailed,
               svc.cleanup_problem());
       }
 
@@ -889,11 +1029,41 @@ int main(int argc, char** argv) {
   const bool cRc = gFailures == 0;
   const bool cBlocked = gBlocked == 0;
   const bool cAttempts = gRealAttempts == 3;
-  const bool cResidueSvc = gServiceCleanupProblems == 0 && gServicesCreated == gServicesAbsent &&
-                           gServicesCreated == gProcessesExited;
+  // Three of each, not "as many as we happened to create". Equality alone is met by a run that
+  // created nothing, which is exactly the shape a blocked run has.
+  const bool cResidueSvc = gServiceCleanupProblems == 0 && gServicesCreated == 3 &&
+                           gServicesAbsent == 3 && gProcessesExited == 3;
   const bool cResidueDir = gCleanupFailures == 0;
   const bool gMet = cRc && cBlocked && cAttempts && gOrderObserved && gTimeoutPreserved &&
                     gRefusalPreserved && cResidueSvc && cResidueDir;
+
+  // What an elevated operator needs in one place: what ran, what it may touch, how long it can
+  // take, and -- if the cleanup did not finish -- the exact commands to put things back. Printed
+  // whether or not part 2 ran, so a blocked run still records what it would have done.
+  std::cout << "\n-- elevated run guidance\n";
+  std::cout << "binary        : " << narrow(own_path()) << "\n";
+  std::cout << "sha256        : " << sha256_file_hex(own_path()) << "\n";
+  std::cout << "test root     : " << narrow(scratch_root()) << "\n";
+  std::cout << "services      : " << narrow(nameStops) << " (stops), " << narrow(nameLingers)
+            << " (lingers 20s), " << narrow(nameDenied) << " (stop denied)\n";
+  std::cout << "max wait      : 60s per service teardown, 8s quiesce in the crossing attempt; a"
+               " whole run is well under five minutes\n";
+  if (gServiceCleanupProblems != 0 || gCleanupFailures != 0) {
+    std::cout << "RECOVERY      : cleanup did not finish. Run these, and nothing else:\n";
+    for (const std::wstring& name : {nameStops, nameLingers, nameDenied}) {
+      std::cout << "                sc.exe stop " << narrow(name) << "  &  sc.exe delete "
+                << narrow(name) << "\n";
+    }
+    // The quote is spelled as its character code: this line has been mangled twice by editors
+    // turning one backslash into two, and a recovery command a person is meant to paste is not
+    // the place to be clever about escapes.
+    const char dq = static_cast<char>(34);
+    std::cout << "                rmdir /s /q " << dq << narrow(scratch_run_dir()) << dq << "\n";
+    std::cout << "                (do NOT touch " << narrow(kSecureInputServiceName)
+              << " -- that is the product's)\n";
+  } else {
+    std::cout << "recovery      : not needed -- every service and directory was reclaimed\n";
+  }
 
   const auto mark = [](bool ok) { return ok ? "[x]" : "[ ]"; };
   std::cout << "\n-- item G exit criteria\n";
@@ -908,7 +1078,9 @@ int main(int argc, char** argv) {
             << " a stop that never completes: no Swap, old bytes still on disk\n";
   std::cout << mark(gRefusalPreserved)
             << " a real refusal: no Swap, old bytes still on disk\n";
-  std::cout << mark(cResidueSvc) << " no service or fixture process left behind\n";
+  std::cout << mark(cResidueSvc) << " three services created, three confirmed absent, three "
+            << "processes observed to exit (" << gServicesCreated << "/" << gServicesAbsent << "/"
+            << gProcessesExited << ")\n";
   std::cout << mark(cResidueDir) << " no scratch directory left behind\n";
   std::cout << (gMet ? "G: MET by this run" : "G: NOT met by this run") << "\n";
 

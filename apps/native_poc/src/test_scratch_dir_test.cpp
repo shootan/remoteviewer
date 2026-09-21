@@ -281,6 +281,93 @@ int main() {
     }
   }
 
+  // ======================================= the root is validated BEFORE anything is created (r7)
+  //
+  // r6 created the directory chain and then looked at the ancestors, so an existing junction above
+  // the candidate root meant directories had already been made on the far side of it. The refusal
+  // arrived after the thing it was refusing to allow.
+  //
+  // Produced here: a junction in the build tree, a candidate root underneath it, and the question
+  // of whether anything appeared where the junction points.
+  {
+    const std::wstring repo = root + L"\\..";  // the build directory, which contains the root
+    const std::wstring linkTarget = root + L"-r7target-" + std::to_wstring(GetCurrentProcessId());
+    const std::wstring linkDir = root + L"-r7link-" + std::to_wstring(GetCurrentProcessId());
+    CreateDirectoryW(linkTarget.c_str(), nullptr);
+
+    if (!make_junction(linkDir, linkTarget)) {
+      skip("a link above the candidate root is refused before anything is created",
+           "this filesystem or session would not create a junction (err " +
+               std::to_string(GetLastError()) + ")");
+      RemoveDirectoryW(linkTarget.c_str());
+    } else {
+      const std::wstring candidate = linkDir + L"\\deep\\newroot";
+      std::string why;
+      const RootVerdict verdict = validate_and_create_root(repo, candidate, &why);
+      check("a link above the candidate root is refused before anything is created",
+            verdict == RootVerdict::AncestorIsLink,
+            std::string(root_verdict_name(verdict)) + ": " + why);
+      // The part that matters. Without the reordering these exist on the far side of the link.
+      check("...and nothing was created through it",
+            !exists(linkTarget + L"\\deep") && !exists(linkTarget + L"\\deep\\newroot"),
+            "checked at " + narrow(linkTarget));
+      check("...and the reason names the link", why.find("reparse point") != std::string::npos,
+            why);
+
+      // The root being the link itself is its own verdict.
+      std::string whyRoot;
+      const RootVerdict rootVerdict = validate_and_create_root(repo, linkDir, &whyRoot);
+      check("a candidate root that IS a link is refused", rootVerdict == RootVerdict::RootIsLink,
+            std::string(root_verdict_name(rootVerdict)) + ": " + whyRoot);
+
+      RemoveDirectoryW(linkDir.c_str());
+      RemoveDirectoryW(linkTarget.c_str());
+      check("the junction and its target are cleaned up by name",
+            !exists(linkDir) && !exists(linkTarget));
+    }
+
+    // And the boundary verdict, without needing a link at all.
+    std::string whyOut;
+    const RootVerdict outside =
+        validate_and_create_root(L"C:\\Windows", root + L"\\would-be", &whyOut);
+    check("a root outside the repository is refused", outside == RootVerdict::NotInRepository,
+          std::string(root_verdict_name(outside)) + ": " + whyOut);
+    check("...and it was not created", !exists(root + L"\\would-be"));
+  }
+
+  // ============================================ the run directory is made, never adopted (r7)
+  //
+  // r6 accepted ERROR_ALREADY_EXISTS as success, so whatever was sitting at that name became this
+  // run's directory -- and was deleted recursively at the end. The counter is shared across tags,
+  // so the next name is predictable from the last one, which is what makes this producible.
+  {
+    const std::wstring first = make_scratch_dir(L"adopt");
+    check("a scratch directory was made for the adoption case", !first.empty(), narrow(first));
+    const size_t dash = first.find_last_of(L'-');
+    check("...and its name carries the counter", dash != std::wstring::npos, narrow(first));
+    if (dash != std::wstring::npos) {
+      const int next = _wtoi(first.substr(dash + 1).c_str()) + 1;
+      const std::wstring squatted = run + L"\\adopt-" + std::to_wstring(next);
+      CreateDirectoryW(squatted.c_str(), nullptr);
+      write_text(squatted + L"\\somebody-elses.txt", "not yours");
+
+      const std::wstring second = make_scratch_dir(L"adopt");
+      check("the next scratch directory does not adopt the name that was taken", second != squatted,
+            narrow(second) + " vs " + narrow(squatted));
+      check("...and what was in it is untouched", exists(squatted + L"\\somebody-elses.txt"));
+
+      remove_scratch_tree(squatted);
+      remove_scratch_tree(second);
+    }
+    remove_scratch_tree(first);
+  }
+
+  {
+    // The run directory is this process's, is stable, and is not a link.
+    check("the run directory is the same on every call", scratch_run_dir() == run);
+    check("...and is not a reparse point", !is_reparse_point(run));
+  }
+
   const bool runGone = remove_scratch_run_dir();
   check("this run's directory is removed at the end", runGone, narrow(run));
 

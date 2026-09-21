@@ -11,25 +11,35 @@
  * start being destructive.
  *
  * ---------------------------------------------------------------------------------------------
- * WHAT r5 GOT WRONG, since the corrections are the whole substance of this file.
+ * THE CORRECTIONS, since they are the whole substance of this file.
  *
- *   * The boundary was a string comparison against a canonicalised path, and canonicalising with
- *     GetFullPathName resolves "." and ".." and nothing else. So root\junction\child passed the
- *     check -- it is textually under the root -- and `child` is an ordinary directory as far as
- *     its attributes are concerned, because the filesystem already followed the junction. The
- *     recursion then ran wherever the junction pointed. Refusing to call GetFinalPathName is not
- *     the same as being safe from links; every component between the root and the target has to
- *     be looked at, and now is.
+ * r5: the boundary was a string comparison against a canonicalised path, and canonicalising with
+ * GetFullPathName resolves "." and ".." and nothing else. root\junction\child passed -- it is
+ * textually under the root -- and `child` looks like an ordinary directory because the filesystem
+ * already followed the junction. Every component between the root and the target is examined now.
  *
- *   * The root was described as "inside the repository because it is fixed at compile time". It
- *     was fixed to CMAKE_BINARY_DIR, and nothing stops a build directory being anywhere at all.
- *     The claim is now CHECKED at runtime against the repository root, and a root that fails the
- *     check is refused rather than used.
+ * r5: "inside the repository" was a property of CMAKE_BINARY_DIR, which can be anywhere. It is
+ * checked at runtime against the repository root, and a root that fails is refused.
  *
- *   * Every run used the same directory names, so two runs at once -- or a run started while
- *     another was cleaning up -- shared and deleted each other's work. Each process now gets its
- *     own run directory.
+ * r5: every run used the same names, so two runs shared and deleted each other's work.
+ *
+ * r6: the root was CREATED before its ancestors were checked. An existing ancestor that is a
+ * junction meant directories were made outside the boundary and only then refused -- the refusal
+ * came after the damage. Nothing is created until every component that already exists has been
+ * checked, and the check is repeated afterwards.
+ *
+ * r6: the run directory accepted ERROR_ALREADY_EXISTS as success, so it could adopt a directory
+ * it did not make -- another run's, or a junction somebody left there. Only a directory this
+ * process creates is accepted.
+ *
+ * r6: the boundary was re-read from a cached root at delete time. The cache is still there for
+ * the path, but the root's own link status is re-checked on every top-level removal rather than
+ * trusted from start-up.
  * ---------------------------------------------------------------------------------------------
+ *
+ * The root and the run directory are fixed for the lifetime of the process. Nothing here supports
+ * changing them mid-run, and a test must not try: paths handed out earlier would then point
+ * outside the boundary that is being enforced.
  */
 
 #include <string>
@@ -37,39 +47,68 @@
 
 namespace remote60::native_poc::test_support {
 
-/** Why a scratch root was refused. Empty when it was accepted. */
+/** Why a candidate root was accepted or refused. */
+enum class RootVerdict : uint8_t {
+  Ok = 0,
+  /** One of the paths could not be turned into an absolute path at all. */
+  Unresolvable,
+  /** The build directory is not inside the repository, so the boundary claim would be false. */
+  NotInRepository,
+  /** A component above the root is a reparse point. Nothing is created in this case. */
+  AncestorIsLink,
+  /** The root itself is a reparse point. */
+  RootIsLink,
+  /** The directory could not be created. */
+  CannotCreate,
+};
+
+const char* root_verdict_name(RootVerdict v);
+
+/**
+ * Validates a candidate scratch root and creates it, in that order.
+ *
+ * Exposed with explicit arguments so the refusals can be produced in a test: the compile-time
+ * pair is what scratch_root() passes. The ordering is the point -- every component of `root` that
+ * ALREADY EXISTS is checked before a single directory is made, so a refusal never happens after
+ * something has been created outside the boundary.
+ *
+ * `why` (optional) receives a sentence naming the paths involved.
+ */
+RootVerdict validate_and_create_root(const std::wstring& repoRoot, const std::wstring& root,
+                                     std::string* why = nullptr);
+
+/** Why the scratch root was refused. Empty when it was accepted. */
 std::string scratch_root_problem();
 
 /**
  * The root every scratch path must live under, created and validated on first use.
  *
- * Empty when it could not be created, when it is not strictly inside the repository, or when any
- * component of its path is a reparse point. Callers must treat an empty root as a hard failure
- * and must not fall back to anywhere else -- that fallback is the thing this prevents.
+ * Empty when it was refused. Callers must treat that as a hard failure and must not fall back to
+ * anywhere else -- that fallback is the thing this prevents.
  */
 std::wstring scratch_root();
 
 /**
- * This process's own directory beneath the root: <root>\run-<pid>-<tick>, created on first use.
+ * This process's own directory beneath the root, created on first use.
  *
- * Two runs of the same test, or two different tests, no longer share a path. Before this they
- * did, which meant one run's cleanup could delete another run's fixture out from under it.
+ * Only a directory this process CREATES is accepted; a name that already exists is not adopted,
+ * it is retried under a new name. Adopting one would mean sharing with whatever made it, and
+ * "whatever made it" includes another run midway through its own cleanup.
  */
 std::wstring scratch_run_dir();
 
 /** A named path inside this run's directory. Nothing is created. */
 std::wstring scratch_path(const std::wstring& name);
 
-/** A unique directory inside this run's directory: <run>\<tag>-<counter>, created. */
+/** A unique directory inside this run's directory, created. */
 std::wstring make_scratch_dir(const std::wstring& tag);
 
 /**
- * Removes a directory and everything beneath it, refusing anything that is not provably inside
- * the root.
+ * Removes a directory and everything beneath it, refusing anything not provably inside the root.
  *
- * Refused when the path cannot be canonicalised, when it is not strictly beneath the root, or
- * when ANY component between the root and it is a reparse point. Reparse points at the target
- * itself are removed as links; the recursion never enters one.
+ * Refused when the root's own link status has changed since start-up, when the path is not
+ * strictly beneath the root, or when any component between the two is a reparse point. Reparse
+ * points at the target are removed as links; the recursion never enters one.
  *
  * Returns false on refusal and on anything left behind. A false is worth reporting rather than
  * ignoring: a directory that will not go usually means a fixture that has not stopped.
@@ -85,8 +124,8 @@ bool is_strictly_under(const std::wstring& root, const std::wstring& path);
 /**
  * True when a component strictly between `root` and `path` is a reparse point.
  *
- * `root` itself and `path` itself are not examined: the root is validated once when it is
- * accepted, and a target that is itself a link is removed as one.
+ * `root` itself and `path` itself are not examined: the root is checked separately, and a target
+ * that is itself a link is removed as one.
  */
 bool has_reparse_between(const std::wstring& root, const std::wstring& path);
 
