@@ -524,7 +524,36 @@ UpdateEffectsConfig config_for(const std::wstring& install, const std::wstring& 
 
 }  // namespace
 
+/**
+ * The end-of-run sweep, on its own, in a fresh process. (r8)
+ *
+ * The abort lived here, and a defect that shows in three runs out of five needs to be exercised
+ * far more often than a forty-second suite allows. This does exactly what the sweep does -- take
+ * the run directory, build a narrow copy of its path, remove it -- so twenty processes of this is
+ * twenty samples of the thing that was failing rather than twenty samples of everything.
+ *
+ * Exit: 0 swept, 1 something was left behind, 2 no scratch root.
+ */
+int run_fixture_sweepprobe() {
+  if (scratch_root().empty()) {
+    std::printf("sweepprobe: no scratch root (%s)\n", scratch_root_problem().c_str());
+    return 2;
+  }
+  const std::wstring& run = scratch_run_dir();
+  const std::wstring marker = run + L"\\sweepprobe.txt";
+  write_text(marker, "x");
+
+  const std::wstring runScratch = scratch_run_dir();
+  const bool gone = remove_scratch_run_dir();
+  const std::string shown(runScratch.begin(), runScratch.end());
+  std::printf("sweepprobe: %s removed=%d\n", shown.c_str(), gone ? 1 : 0);
+  return gone ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
+  if (argc >= 2 && std::string(argv[1]) == "--fixture-sweepprobe") {
+    return run_fixture_sweepprobe();
+  }
   if (argc >= 3 && std::string(argv[1]) == "--fixture-child") {
     const std::string name(argv[2]);
     return run_fixture_child(std::wstring(name.begin(), name.end()));
@@ -1740,8 +1769,18 @@ int main(int argc, char** argv) {
     //
     // A directory that will not go is reported as a failure, not tidied away: it means a fixture
     // this test started is still holding a file in it.
-    check("this run's scratch directory was removed whole", remove_scratch_run_dir(),
-          std::string(scratch_run_dir().begin(), scratch_run_dir().end()));
+    // ONE object, and the iterators come from it.
+    //
+    // This line used to read std::string(scratch_run_dir().begin(), scratch_run_dir().end()).
+    // scratch_run_dir() returns by value, so those are two DIFFERENT temporaries: the iterators
+    // are unrelated, the distance between them is whatever the addresses happen to be, and when
+    // it comes out large std::string throws length_error("string too long"). Nothing catches it,
+    // so terminate() calls abort(), which is the 0xC0000409 this suite was dying with in about
+    // three runs in five. Two calls that look interchangeable are not, when each makes a copy.
+    const std::wstring runScratch = scratch_run_dir();
+    const bool runScratchGone = remove_scratch_run_dir();
+    check("this run's scratch directory was removed whole", runScratchGone,
+          std::string(runScratch.begin(), runScratch.end()));
   }
 
   SetEvent(quitEvent);

@@ -200,7 +200,9 @@ std::string scratch_root_problem() {
   return gRootProblem;
 }
 
-std::wstring scratch_root() {
+const std::wstring& scratch_root() {
+  // One object for the lifetime of the process, handed out by reference: see the header for what
+  // returning a copy cost.
   static const std::wstring root = []() -> std::wstring {
     const std::wstring configured = widen(REMOTE60_TEST_SCRATCH_ROOT);
     const std::wstring repo = widen(REMOTE60_TEST_REPO_ROOT);
@@ -214,7 +216,7 @@ std::wstring scratch_root() {
   return root;
 }
 
-std::wstring scratch_run_dir() {
+const std::wstring& scratch_run_dir() {
   static const std::wstring run = []() -> std::wstring {
     const std::wstring root = scratch_root();
     if (root.empty()) return {};
@@ -240,12 +242,12 @@ std::wstring scratch_run_dir() {
 }
 
 std::wstring scratch_path(const std::wstring& name) {
-  const std::wstring run = scratch_run_dir();
+  const std::wstring& run = scratch_run_dir();
   return run.empty() ? std::wstring() : run + L"\\" + name;
 }
 
 std::wstring make_scratch_dir(const std::wstring& tag) {
-  const std::wstring run = scratch_run_dir();
+  const std::wstring& run = scratch_run_dir();
   if (run.empty()) return {};
   for (int attempt = 0; attempt < 64; ++attempt) {
     const std::wstring dir = run + L"\\" + tag + L"-" + std::to_wstring(++gCounter);
@@ -306,7 +308,7 @@ bool remove_tree_worker(const std::wstring& here, const std::wstring& root) {
 }  // namespace
 
 bool remove_scratch_tree(const std::wstring& dir) {
-  const std::wstring root = scratch_root();
+  const std::wstring& root = scratch_root();
   if (root.empty()) return false;
   // Re-checked here, not trusted from start-up. The root was validated once when the process
   // began; this runs much later, after fixtures have come and gone, and the question being asked
@@ -324,7 +326,7 @@ bool remove_scratch_tree(const std::wstring& dir) {
 }
 
 bool remove_scratch_run_dir() {
-  const std::wstring run = scratch_run_dir();
+  const std::wstring& run = scratch_run_dir();
   if (run.empty()) return false;
   return remove_scratch_tree(run);
 }

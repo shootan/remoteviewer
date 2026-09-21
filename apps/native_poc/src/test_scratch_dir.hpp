@@ -40,6 +40,17 @@
  * The root and the run directory are fixed for the lifetime of the process. Nothing here supports
  * changing them mid-run, and a test must not try: paths handed out earlier would then point
  * outside the boundary that is being enforced.
+ *
+ * Both are returned BY REFERENCE, and that is not a micro-optimisation. Returning by value made
+ * every call produce a separate temporary, so
+ *
+ *     std::string(scratch_run_dir().begin(), scratch_run_dir().end())
+ *
+ * took its two iterators from two DIFFERENT objects. The distance between them is whatever the
+ * addresses happen to be; when it comes out large, std::string throws length_error, nothing
+ * catches it, and the process aborts. That is the 0xC0000409 this suite was dying with in about
+ * three runs in five. A reference makes that same expression correct by construction rather than
+ * by everyone remembering not to write it.
  */
 
 #include <string>
@@ -86,7 +97,7 @@ std::string scratch_root_problem();
  * Empty when it was refused. Callers must treat that as a hard failure and must not fall back to
  * anywhere else -- that fallback is the thing this prevents.
  */
-std::wstring scratch_root();
+const std::wstring& scratch_root();
 
 /**
  * This process's own directory beneath the root, created on first use.
@@ -95,7 +106,7 @@ std::wstring scratch_root();
  * it is retried under a new name. Adopting one would mean sharing with whatever made it, and
  * "whatever made it" includes another run midway through its own cleanup.
  */
-std::wstring scratch_run_dir();
+const std::wstring& scratch_run_dir();
 
 /** A named path inside this run's directory. Nothing is created. */
 std::wstring scratch_path(const std::wstring& name);

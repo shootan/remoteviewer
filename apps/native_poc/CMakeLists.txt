@@ -792,6 +792,22 @@ if(MSVC)
   target_compile_options(remote60_update_registration_com_test PRIVATE /utf-8)
 endif()
 
+# Runs a program under a minimal debugger and reports the exception record and stack.
+#
+# 0xC0000409 is raised by __fastfail for several different reasons and the first exception
+# parameter is the one that says which -- a stack cookie failure and an ordinary abort() are the
+# same status code. __fastfail bypasses SEH, so only a debugger can read those parameters.
+add_executable(remote60_crash_probe src/crash_probe.cpp)
+target_link_libraries(remote60_crash_probe PRIVATE dbghelp)
+if(MSVC)
+  target_compile_options(remote60_crash_probe PRIVATE /utf-8)
+endif()
+
+# Debug info for the suite under investigation, so the probe's stacks carry names rather than
+# offsets. /Zi does not change code generation; it only emits a PDB beside the binary.
+set_property(TARGET remote60_crash_probe PROPERTY MSVC_DEBUG_INFORMATION_FORMAT
+  "$<$<CONFIG:Release>:ProgramDatabase>")
+
 add_executable(remote60_update_stop_process_test
   src/update_effects.cpp
   src/update_target_watch.cpp
@@ -806,6 +822,10 @@ add_executable(remote60_update_stop_process_test
   src/update_signature.cpp
   src/update_stop_process_test.cpp
 )
+# Symbols for this target, for the crash investigation. /Zi is debug information only -- the
+# optimiser settings are untouched -- and /DEBUG makes the linker emit the PDB.
+target_compile_options(remote60_update_stop_process_test PRIVATE $<$<CONFIG:Release>:/Zi>)
+target_link_options(remote60_update_stop_process_test PRIVATE $<$<CONFIG:Release>:/DEBUG>)
 target_include_directories(remote60_update_stop_process_test PRIVATE src)
 target_compile_definitions(remote60_update_stop_process_test PRIVATE
   "REMOTE60_HOST_APP_SRC=\"${CMAKE_CURRENT_SOURCE_DIR}/src/host_app_main.cpp\""

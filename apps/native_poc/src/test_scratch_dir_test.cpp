@@ -366,6 +366,26 @@ int main() {
     // The run directory is this process's, is stable, and is not a link.
     check("the run directory is the same on every call", scratch_run_dir() == run);
     check("...and is not a reparse point", !is_reparse_point(run));
+
+    // ---------------------------------------------------------------- the abort, pinned (r8)
+    //
+    // update_stop_process_test aborted in about three runs in five, with 0xC0000409, from
+    //
+    //     std::string(scratch_run_dir().begin(), scratch_run_dir().end())
+    //
+    // When these returned BY VALUE, those two calls made two separate temporaries and the
+    // iterators came from different objects. The distance between them is whatever the addresses
+    // happen to be; large enough, and std::string throws length_error, nothing catches it, and
+    // the process aborts. Repetition is not a test for that -- it passed two runs in five --
+    // so what is checked here is the property that makes the expression well-formed: two calls
+    // must denote ONE object.
+    check("two calls to scratch_run_dir() denote one object, not two copies",
+          scratch_run_dir().data() == scratch_run_dir().data());
+    check("...and the same holds for the root",
+          scratch_root().data() == scratch_root().data());
+    // The exact expression that used to be undefined, now merely correct.
+    check("...so iterators taken across two calls describe the path",
+          std::wstring(scratch_run_dir().begin(), scratch_run_dir().end()) == run);
   }
 
   const bool runGone = remove_scratch_run_dir();
