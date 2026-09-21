@@ -234,6 +234,16 @@ struct UpdateEffectsConfig {
   std::function<RemovalProbe(const std::wstring& path)> probeRemoval;
 
   /** How long a rollback may wait for what this attempt did not start to go quiet. */
+  /**
+   * How long PrepareForSwap waits for a target that could not be asked but may be leaving anyway.
+   *
+   * A process that has acknowledged a handoff destroys its window and then takes a moment to go.
+   * In that moment it cannot be asked and is not yet gone, and abandoning there is what ended 23
+   * attempts. Nothing is terminated; this only waits for what was already agreed.
+   */
+  uint32_t stopSettleMs = 3000;
+  uint32_t stopSettlePollMs = 100;
+
   uint32_t rollbackQuiesceMs = 10000;
   uint32_t rollbackQuiescePollMs = 250;
 

@@ -603,6 +603,39 @@ bool WindowsUpdateEffects::PrepareForSwap() {
       // Only a target that is genuinely gone is forgiven. A live process that refused is still a
       // failure, and nothing here terminates anything.
       if (parent_has_exited(target.pid)) continue;
+
+      // Gone is forgiven above. GOING is not, and going is what a handoff produces.
+      //
+      // Measured (remote60_update_stop_process_test): a process that has acknowledged and
+      // destroyed its window is, for the tens of milliseconds before it exits, neither askable nor
+      // gone. The ask falls through to GenerateConsoleCtrlEvent, which needs a console the updater
+      // does not have, and returns false. On 2026-09-21 that false ended the attempt 89 ms after
+      // the caller said it was standing down -- and the same shape has ended 23 attempts.
+      //
+      // So the question is asked again, briefly. Nothing is terminated and nothing new is
+      // attempted: it waits for the process to finish what it already agreed to do, and abandons
+      // only if it is still there afterwards. A process that genuinely refuses still fails, one
+      // poll interval later than before.
+      {
+        const uint64_t deadline =
+            static_cast<uint64_t>(GetTickCount64()) + config_.stopSettleMs;
+        bool left = false;
+        while (static_cast<uint64_t>(GetTickCount64()) < deadline) {
+          Sleep(config_.stopSettlePollMs);
+          if (parent_has_exited(target.pid)) { left = true; break; }
+        }
+        if (left) {
+          if (config_.trace) {
+            config_.trace("stop-settle pid=" + std::to_string(target.pid) +
+                          " left while we waited");
+          }
+          continue;
+        }
+        if (config_.trace) {
+          config_.trace("stop-settle pid=" + std::to_string(target.pid) +
+                        " still running after " + std::to_string(config_.stopSettleMs) + "ms");
+        }
+      }
       lastError_ = "could not ask pid " + std::to_string(target.pid) + " to stop";
       return false;
     }

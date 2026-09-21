@@ -1996,6 +1996,88 @@ int main(int argc, char** argv) {
     }
   }
 
+  {
+    // A target that could not be asked but is leaving anyway. (updater-abandon-race)
+    //
+    // This is the state a handoff produces: the window is gone, the process is not. Before the
+    // settle wait the attempt ended here, and it is the most frequent failure the updater has --
+    // 23 abandoned attempts since 09-10, all reporting "could not ask pid N to stop".
+    const uint32_t deadPid = [] {
+      for (uint32_t p = 0x7FFFFFF0; p > 0x7FFF0000; p -= 4) {
+        ProcessTarget t;
+        IdentityFailure why = IdentityFailure::None;
+        if (!capture_process_identity(p, &t, &why) && why == IdentityFailure::Gone) return p;
+      }
+      return 0u;
+    }();
+    check("a pid that is not a process was found", deadPid != 0);
+
+    ProcessTarget leaving;
+    leaving.pid = deadPid;
+    leaving.imagePath = L"GNLinkHost.exe";
+    leaving.creationTime = 4321;
+    leaving.hasWindow = true;
+    leaving.identityKnown = true;
+
+    UpdateEffectsConfig c = base_config(install, staging);
+    c.stopSettleMs = 400;
+    c.stopSettlePollMs = 50;
+    c.enumerateTargets = [leaving]() { return std::vector<ProcessTarget>{leaving}; };
+    c.requestStop = [](const ProcessTarget&) { return false; };  // what a console-less caller gets
+    WindowsUpdateEffects e(c);
+    check("an ask that fails on a process already gone does not abandon", e.PrepareForSwap(),
+          e.last_error());
+
+    // The case the settle exists for, and the one the check above cannot make: a target that is
+    // STILL THERE when the ask fails and leaves while we wait. Forgiveness before the wait cannot
+    // help here, because at that moment the process is alive.
+    {
+      DummyProcess going;
+      check("a dummy that will leave mid-wait started", going.start());
+      ProcessTarget target;
+      check("its identity is captured while it is alive",
+            capture_process_identity(going.pid(), &target));
+      target.hasWindow = true;
+      check("...and it really is alive before the ask", going.alive());
+
+      std::thread leaveSoon([&going] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        going.kill();
+      });
+
+      UpdateEffectsConfig cMid = base_config(install, staging);
+      cMid.stopSettleMs = 4000;
+      cMid.stopSettlePollMs = 50;
+      cMid.enumerateTargets = [target]() { return std::vector<ProcessTarget>{target}; };
+      cMid.requestStop = [](const ProcessTarget&) { return false; };
+      WindowsUpdateEffects eMid(cMid);
+      check("a target that leaves while we wait is forgiven", eMid.PrepareForSwap(),
+            eMid.last_error());
+      leaveSoon.join();
+    }
+
+    // The negative control: a process that is genuinely there and genuinely refuses still fails,
+    // one settle interval later. The settle must not become a way to swap over a live process.
+    ProcessTarget present;
+    check("this process can stand in for a live target",
+          capture_process_identity(GetCurrentProcessId(), &present));
+    present.hasWindow = true;
+    UpdateEffectsConfig c2 = base_config(install, staging);
+    c2.stopSettleMs = 300;
+    c2.stopSettlePollMs = 50;
+    c2.enumerateTargets = [present]() { return std::vector<ProcessTarget>{present}; };
+    c2.requestStop = [](const ProcessTarget&) { return false; };
+    WindowsUpdateEffects e2(c2);
+    const uint64_t began = GetTickCount64();
+    check("a live target that refuses still abandons the attempt", !e2.PrepareForSwap());
+    check("...naming the pid, as the field log does",
+          e2.last_error().find("could not ask pid") != std::string::npos &&
+              e2.last_error().find(std::to_string(present.pid)) != std::string::npos,
+          e2.last_error());
+    check("...after waiting, not instead of waiting", GetTickCount64() - began >= 300,
+          std::to_string(GetTickCount64() - began) + "ms");
+  }
+
   remove_tree(install);
 
   std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED")
