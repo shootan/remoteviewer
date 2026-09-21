@@ -1,4 +1,5 @@
 #include "directory_client.hpp"
+#include "host_diag_log.hpp"
 
 #include <windows.h>
 
@@ -503,9 +504,17 @@ bool HostAgent::ConsumeUdpPacket(const void* data, size_t len, const sockaddr_in
   if (len >= sizeof(UdpHelloPacket)) {
     const auto* hello = reinterpret_cast<const UdpHelloPacket*>(bytes);
     if (hello->magic == kMagic && hello->kind == static_cast<uint16_t>(UdpPacketKind::Punch)) {
-      if (!refreshRequested_.exchange(true, std::memory_order_acq_rel)) {
+      const bool wasSet = refreshRequested_.exchange(true, std::memory_order_acq_rel);
+      if (!wasSet) {
         std::cout << "[native-video-host] directory peer punch; refreshing capability\n";
       }
+      // pc2-connect-diag: every punch, including the ones the line above hides.
+      //
+      // That line fires only on false->true, so a punch arriving while a refresh was
+      // already pending left no trace -- and "the wake never arrived" and "the wake arrived
+      // while the flag was already up" were indistinguishable. They are different faults.
+      // The previous value of the flag is the whole point of this line.
+      LogPunchArrival(from, wasSet);
       return true;
     }
   }
@@ -1200,14 +1209,49 @@ void HostAgent::Punch(const std::vector<PunchTarget>& targets) {
   }
 }
 
-bool HostAgent::AuthorizePeer(const std::string& punchToken, const sockaddr_in& from) {
+/**
+ * One line per punch, up to a ceiling, with the suppressed ones accounted for.
+ *
+ * Bounded because this is driven by whatever arrives on a UDP port: at most
+ * kPunchLogPerSecond lines in any second, and the next line printed says how many were
+ * skipped. A running total means a burst is still countable after the fact.
+ */
+void HostAgent::LogPunchArrival(const sockaddr_in& from, bool refreshWasPending) {
+  const uint64_t nowUs = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count());
+  PunchLogDecision decided;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    decided = punch_log_decide(&punchLogWindow_, nowUs);
+  }
+  if (!decided.emit) return;
+  const uint64_t total = decided.total;
+  const uint64_t skipped = decided.skippedSince;
+  char text[INET_ADDRSTRLEN] = {};
+  inet_ntop(AF_INET, &from.sin_addr, text, sizeof(text));
+  std::cout << "[native-video-host][dir-punch] from=" << text << ":" << ntohs(from.sin_port)
+            << " refreshWasPending=" << (refreshWasPending ? 1 : 0)
+            << " total=" << total;
+  if (skipped) std::cout << " skippedSinceLast=" << skipped;
+  std::cout << "\n";
+}
+
+bool HostAgent::AuthorizePeer(const std::string& punchToken, const sockaddr_in& from,
+                              PeerAuthDiag* diag) {
+  if (diag) *diag = PeerAuthDiag{};
   if (punchToken.empty()) return false;
   std::lock_guard<std::mutex> lock(mu_);
   const auto now = std::chrono::steady_clock::now();
+  const size_t beforeSweep = authorizedPeers_.size();
   authorizedPeers_.erase(
       std::remove_if(authorizedPeers_.begin(), authorizedPeers_.end(),
                      [&](const AuthorizedPeer& peer) { return peer.expiresAt <= now; }),
       authorizedPeers_.end());
+  if (diag) {
+    diag->expiredNow = beforeSweep - authorizedPeers_.size();
+    diag->held = authorizedPeers_.size();
+  }
   // The directory's observed tuple is useful for opening the NAT path, but it is not an
   // authentication invariant. Hairpin and symmetric NATs may translate the same prepared
   // client socket differently when it changes destination from the directory to the host.
@@ -1218,8 +1262,10 @@ bool HostAgent::AuthorizePeer(const std::string& punchToken, const sockaddr_in& 
                                     return peer.target.punchToken == punchToken;
                                   });
   if (match == authorizedPeers_.end()) return false;
+  if (diag) diag->matched = true;
   if (match->target.ipv4NetworkOrder != from.sin_addr.s_addr ||
       htons(match->target.port) != from.sin_port) {
+    if (diag) diag->endpointMoved = true;
     in_addr expectedAddress{};
     expectedAddress.s_addr = match->target.ipv4NetworkOrder;
     in_addr actualAddress{};
@@ -1238,8 +1284,24 @@ bool HostAgent::AuthorizePeer(const std::string& punchToken, const sockaddr_in& 
 
 void HostAgent::Run() {
   bool announcedOnline = false;
+  // pc2-connect-diag: the cycle, step by step.
+  //
+  // A capability can only reach this host through this loop, and none of it was logged:
+  // not when a cycle began, not what woke it, not how long each of the three HTTP calls
+  // took, not how many capabilities came back. "The host learned about it 25 seconds
+  // later" was an inference from the punch timestamps, and a cycle stalled in an HTTP
+  // timeout looked exactly like one that had not started.
+  uint64_t cycleNo = 0;
+  const char* cycleCause = "first";
+  const auto stepMs = [](std::chrono::steady_clock::time_point from) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now() - from).count();
+  };
   while (running_.load()) {
     const auto cycleStart = std::chrono::steady_clock::now();
+    ++cycleNo;
+    std::cout << "[native-video-host][dir-cycle] n=" << cycleNo << " start cause="
+              << cycleCause << "\n";
 
     if (EnsureRegistered()) {
       // A host that started from a cached token never registered, so nothing has told it where
@@ -1250,18 +1312,32 @@ void HostAgent::Run() {
       // to aim and the symptom is obvious; on http the guess is httpPort + 1, which RESOLVES and
       // then goes nowhere if the server listens elsewhere -- a working-looking aim at the wrong
       // place. Asking covers both, and the answer is only used when the server gives one.
-      FetchObserveEndpointFromHealth();
+      {
+        const auto t0 = std::chrono::steady_clock::now();
+        const bool ok = FetchObserveEndpointFromHealth();
+        std::cout << "[native-video-host][dir-cycle] n=" << cycleNo << " step=health ok="
+                  << (ok ? 1 : 0) << " ms=" << stepMs(t0) << "\n";
+      }
 
       // The observation must precede the heartbeat: the heartbeat is what publishes the
       // address, and it publishes whatever the observation last recorded.
-      if (!RefreshObservedAddress()) {
+      const auto observeStart = std::chrono::steady_clock::now();
+      const bool observeOk = RefreshObservedAddress();
+      std::cout << "[native-video-host][dir-cycle] n=" << cycleNo << " step=observe ok="
+                << (observeOk ? 1 : 0) << " ms=" << stepMs(observeStart) << "\n";
+      if (!observeOk) {
         // Only when there is nothing better to say. The specific reason -- no advertisement, an
         // unusable host, a port that cannot be derived -- was already set by whoever found it,
         // and overwriting it with "timed out" turned every one of those into a network symptom.
         if (observeAddrReady_) SetStatus("address observation timed out");
       } else {
         std::vector<PunchTarget> punch;
-        if (Heartbeat(&punch)) {
+        const auto hbStart = std::chrono::steady_clock::now();
+        const bool hbOk = Heartbeat(&punch);
+        std::cout << "[native-video-host][dir-cycle] n=" << cycleNo << " step=heartbeat ok="
+                  << (hbOk ? 1 : 0) << " ms=" << stepMs(hbStart)
+                  << " capabilities=" << punch.size() << "\n";
+        if (hbOk) {
           SetStatus("online");
           if (!announcedOnline) {
             announcedOnline = true;
@@ -1278,13 +1354,26 @@ void HostAgent::Run() {
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - cycleStart);
     auto remaining = std::chrono::milliseconds(cfg_.heartbeatSeconds * 1000u) - elapsed;
+    // The work above is what a punch has to wait out: the flag is only read here, so a
+    // punch arriving during the HTTP calls is not acted on until this loop is reached.
+    std::cout << "[native-video-host][dir-cycle] n=" << cycleNo << " sleep planMs="
+              << remaining.count() << " workMs=" << elapsed.count() << "\n";
+    const auto sleepStart = std::chrono::steady_clock::now();
+    const char* wake = "elapsed";
     while (running_.load() && remaining.count() > 0) {
-      if (refreshRequested_.exchange(false, std::memory_order_acq_rel)) break;
+      if (refreshRequested_.exchange(false, std::memory_order_acq_rel)) {
+        wake = "refresh";
+        break;
+      }
       const auto slice = std::min<std::chrono::milliseconds>(remaining,
                                                              std::chrono::milliseconds(200));
       std::this_thread::sleep_for(slice);
       remaining -= slice;
     }
+    wake = cycle_wake_cause(std::string(wake) == "refresh", running_.load());
+    std::cout << "[native-video-host][dir-cycle] n=" << cycleNo << " wake cause=" << wake
+              << " sleptMs=" << stepMs(sleepStart) << "\n";
+    cycleCause = wake;
   }
 }
 

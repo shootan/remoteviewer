@@ -183,6 +183,24 @@ int startup_connect_client(HostContext& hx) {
       return 3;
     }
     std::cout << "[native-video-host] udp bound port=" << clientSession.mediaBindPort << "\n";
+    // pc2-connect-diag: which process holds this port, and on which address.
+    //
+    // One of the standing hypotheses for a wake that never arrives is that the tuple the
+    // directory aims at is owned, at that moment, by a different socket or a different
+    // process -- a previous run that has not exited, or a second instance. Said once at
+    // startup, this is what makes that checkable against the server's aim instead of
+    // argued about.
+    {
+      sockaddr_in bound{};
+      int boundLen = sizeof(bound);
+      char boundIp[INET_ADDRSTRLEN] = {};
+      if (getsockname(clientSession.clientSock, reinterpret_cast<sockaddr*>(&bound),
+                      &boundLen) == 0) {
+        inet_ntop(AF_INET, &bound.sin_addr, boundIp, sizeof(boundIp));
+      }
+      std::cout << "[native-video-host][dir-socket] media bind=" << boundIp << ":"
+                << ntohs(bound.sin_port) << " pid=" << GetCurrentProcessId() << "\n";
+    }
 
     // Keep the last candidate listening as well, so dialling this PC by address still works.
     //

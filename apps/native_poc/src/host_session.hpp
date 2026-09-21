@@ -139,7 +139,9 @@ struct SessionState {
 
   // --- directory Hello classification (Phase 2-12: former main() lambdas classify_directory_hello /
   // authorize_directory_session) ---
-  DirectoryHello ClassifyDirectoryHello(const std::string& token, const sockaddr_in& peer) {
+  DirectoryHello ClassifyDirectoryHello(
+      const std::string& token, const sockaddr_in& peer,
+      remote60::native_poc::directory::HostAgent::PeerAuthDiag* diag = nullptr) {
     SessionState& clientSession = *this;
     if (token.empty()) return DirectoryHello::Rejected;
     {
@@ -154,7 +156,9 @@ struct SessionState {
         return DirectoryHello::Retransmit;
       }
     }
-    if (!clientSession.directoryAgent.AuthorizePeer(token, peer)) return DirectoryHello::Rejected;
+    if (!clientSession.directoryAgent.AuthorizePeer(token, peer, diag)) {
+      return DirectoryHello::Rejected;
+    }
     {
       std::lock_guard<std::mutex> lock(clientSession.directoryAuthMu);
       clientSession.directoryToken = token;

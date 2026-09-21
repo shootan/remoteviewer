@@ -52,6 +52,7 @@
 #include "bind_port_candidates.hpp"
 #include "capture_cadence_gate.hpp"
 #include "control_resume.hpp"
+#include "host_diag_log.hpp"
 #include "d3d_capture_readback.hpp"
 #include "directory_client.hpp"
 #include "encode_resolution_ladder.hpp"
@@ -323,9 +324,38 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
             bool newSession = false;
             if (tokenLen > 0) {
               const std::string authToken(hello.authToken, hello.authToken + tokenLen);
-              const auto kind = clientSession.ClassifyDirectoryHello(authToken, peer);
+              remote60::native_poc::directory::HostAgent::PeerAuthDiag authDiag;
+              const auto kind = clientSession.ClassifyDirectoryHello(authToken, peer, &authDiag);
               if (kind == DirectoryHello::Rejected) {
                 std::cerr << "[native-video-host] rejected reconnect hello with invalid directory capability\n";
+                // pc2-connect-diag: which of the several refusals this was.
+                //
+                // The line above says the same thing whether this host holds no capability at
+                // all, holds ones that expired, or holds one that does not match -- and those
+                // have different causes. On 2026-09-21 it was always the first: the capability
+                // was correct and had not been collected yet. Nothing said so.
+                //
+                // Bounded: a client repeats its hello several times a second, so a run of the
+                // same reason prints once and then every 32nd, carrying the running total.
+                {
+                  remote60::native_poc::RejectFacts facts;
+                  facts.matched = authDiag.matched;
+                  facts.endpointMoved = authDiag.endpointMoved;
+                  facts.held = authDiag.held;
+                  facts.expiredNow = authDiag.expiredNow;
+                  const char* why = remote60::native_poc::reject_reason(facts);
+                  static std::string lastWhy;
+                  static uint64_t sameRun = 0;
+                  static uint64_t rejectTotal = 0;
+                  ++rejectTotal;
+                  if (lastWhy == why) ++sameRun; else { lastWhy = why; sameRun = 1; }
+                  if (remote60::native_poc::reject_should_emit(sameRun)) {
+                    std::cerr << "[native-video-host][dir-reject] reason=" << why
+                              << " held=" << authDiag.held
+                              << " expiredNow=" << authDiag.expiredNow
+                              << " run=" << sameRun << " total=" << rejectTotal << "\n";
+                  }
+                }
                 continue;
               }
               newSession = (kind == DirectoryHello::NewSession);

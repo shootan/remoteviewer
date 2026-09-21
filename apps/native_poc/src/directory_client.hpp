@@ -1,6 +1,7 @@
 #pragma once
 
 #include "directory_observe.hpp"
+#include "host_diag_log.hpp"
 #include "update_endpoint.hpp"
 
 // Directory-service client for the host.
@@ -222,7 +223,22 @@ class HostAgent {
   bool ConsumeUdpPacket(const void* data, size_t len, const sockaddr_in& from);
 
   /** Consumes a one-time /api/connect capability; the observed endpoint is advisory across NAT. */
-  bool AuthorizePeer(const std::string& punchToken, const sockaddr_in& from);
+  /**
+   * Why an authorisation failed, for the log. (pc2-connect-diag)
+   *
+   * The caller could only say "invalid directory capability", which covers a host holding
+   * none at all and a host holding two that do not match -- and those are different
+   * failures with different causes. On 2026-09-21 it was always the first, and nothing in
+   * any log said so.
+   */
+  struct PeerAuthDiag {
+    size_t held = 0;           // capabilities in hand after this call's expiry sweep
+    size_t expiredNow = 0;     // how many this call dropped because their 30s was up
+    bool matched = false;      // a capability with this value was found
+    bool endpointMoved = false;  // ...but it arrived from a different tuple than expected
+  };
+  bool AuthorizePeer(const std::string& punchToken, const sockaddr_in& from,
+                     PeerAuthDiag* diag = nullptr);
 
   /** Human-readable one-liner for status output; safe to call from any thread. */
   std::string StatusLine() const;
@@ -313,6 +329,10 @@ class HostAgent {
   // A peer punch means /api/connect has just queued a capability for this host. Wake the
   // heartbeat loop instead of making the controller wait for the ordinary 25-second poll.
   std::atomic<bool> refreshRequested_{false};
+
+  // pc2-connect-diag: one line per punch, bounded. Under mu_, like everything else here.
+  void LogPunchArrival(const sockaddr_in& from, bool refreshWasPending);
+  remote60::native_poc::PunchLogWindow punchLogWindow_{};
   bool portRewriteReported_ = false;  // guarded by mu_
   // The advertised-address line is printed once per run; the heartbeat that carries it repeats
   // every 25 seconds and would otherwise bury the log it was added to make readable.
