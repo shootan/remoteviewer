@@ -1592,6 +1592,17 @@ endif()
 # no session and no sockets. /utf-8 because the round-trip cases include Korean and an emoji.
 # Control-channel resume decisions and the resume packet's wire shape (item 8, layer 1). Pure
 # logic -- no socket, no peer, no clock.
+# What the updater will believe about a relaunched Host (updater-health-gate D1, item 2).
+# Pure: no file, no process, no clock.
+add_executable(remote60_update_readiness_test
+  src/update_readiness_test.cpp
+  src/update_readiness.cpp
+)
+target_include_directories(remote60_update_readiness_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_update_readiness_test PRIVATE /utf-8)
+endif()
+
 # The single writer for host_app.log (updater-health-gate D1, items 1 and 3): both writers keep
 # every line, across rotation, and a write that fails says so.
 add_executable(remote60_host_app_log_test
