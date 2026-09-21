@@ -1,5 +1,7 @@
 #include "directory_session_bootstrap.hpp"
 
+#include <chrono>
+#include <iostream>
 #include <random>
 #include <sstream>
 
@@ -124,10 +126,36 @@ bool directory_session_open(const DirectorySessionRequest& request, DirectorySes
     candidates.push_back(std::move(entry));
   }
 
+  // pc2-connect-diag: what this attempt was given, before anything is tried with it.
+  //
+  // connectId is the server's own label for this attempt, so these lines and the directory's
+  // join without guesswork. The capability is never printed -- only whether one arrived, which
+  // is the part that can be wrong.
+  {
+    std::string kinds;
+    for (const auto& candidate : target.candidates) {
+      if (!kinds.empty()) kinds += ",";
+      kinds += candidate_kind_name(candidate.kind);
+    }
+    std::cout << "[native-video-client][attempt] connect="
+              << (target.connectId.empty() ? "-" : target.connectId)
+              << " candidates=" << target.candidates.size() << " kinds=" << kinds
+              << " capability=" << (target.punchToken.empty() ? 0 : 1)
+              << " reobserved=" << (connectStatus == 409 ? 1 : 0) << "\n";
+  }
+
   RendezvousCandidate chosen{};
   std::string punchError;
+  const auto punchStart = std::chrono::steady_clock::now();
   const bool answered =
       rendezvous.PunchAny(candidates, request.punchBudgetMs, &chosen, &punchError);
+  std::cout << "[native-video-client][attempt] connect="
+            << (target.connectId.empty() ? "-" : target.connectId) << " punch answered="
+            << (answered ? 1 : 0) << " kind=" << (answered ? chosen.kind : std::string("-"))
+            << " ms="
+            << std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now() - punchStart).count()
+            << (answered ? "" : " why=" + punchError) << "\n";
   // Falling back to the first candidate rather than giving up: some NATs drop the punch and pass
   // the hello that follows, and refusing here would turn a slow connection into no connection.
   const ConnectCandidate& fallback = target.candidates.front();

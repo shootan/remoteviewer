@@ -1073,6 +1073,11 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
     return;
   }
   ++gActiveViewers;
+  // pc2-connect-diag: without the pipe the viewer's entire output is discarded -- no local
+  // viewer.log, nothing uploaded -- and that was silent. A session with no log at all and a
+  // session that produced none looked the same, which is exactly the ambiguity that made the
+  // missing 13:02-13:09 viewer.log unexplainable.
+  if (!pipeOk) log_line("session output not captured (no pipe); viewer log will be empty");
   if (pipeOk) {
     // The parent's copy of the write end must close, or the reader never sees EOF after exit.
     CloseHandle(pipeWrite);

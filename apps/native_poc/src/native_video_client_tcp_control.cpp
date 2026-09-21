@@ -200,7 +200,10 @@ bool poll_clipboard(ControlLink& link, uint64_t knownGeneration, uint64_t nowUs,
 
 bool udp_hello_handshake(SocketHandle sock, const UdpHelloOptions& options,
                          const std::atomic<bool>* stop, std::string* error,
-                         uint32_t* outAckFeatures) {
+                         uint32_t* outAckFeatures, UdpHelloStats* outStats) {
+  // pc2-connect-diag: counted here rather than inferred by the caller, which could only ever
+  // see "it failed" and not whether it had sent one hello or forty.
+  UdpHelloStats stats;
   UdpHelloPacket hello{};
   if (options.requestNack) hello.features |= kUdpFeatureVideoNack;  // video NACK.
   std::snprintf(hello.authToken, sizeof(hello.authToken), "%s", options.authToken.c_str());
@@ -210,12 +213,19 @@ bool udp_hello_handshake(SocketHandle sock, const UdpHelloOptions& options,
     return static_cast<uint64_t>(
         duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
   };
-  const uint64_t deadlineMs = now_ms() + std::max<uint32_t>(1, options.budgetMs);
+  const uint64_t startMs = now_ms();
+  const uint64_t deadlineMs = startMs + std::max<uint32_t>(1, options.budgetMs);
+  const auto publish = [&](bool spent) {
+    stats.budgetSpent = spent;
+    stats.elapsedMs = now_ms() - startMs;
+    if (outStats) *outStats = stats;
+  };
   while (!stopped() && now_ms() < deadlineMs) {
     const int sent = send(sock, reinterpret_cast<const char*>(&hello), sizeof(hello), 0);
     if (sent != static_cast<int>(sizeof(hello))) {
       if (options.retrySleepMs == 0) {
         if (error) *error = "udp hello send failed";
+        publish(false);
         return false;
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(options.retrySleepMs));
@@ -235,16 +245,20 @@ bool udp_hello_handshake(SocketHandle sock, const UdpHelloOptions& options,
         ack.version == kUdpProtocolVersion && (ack.features & kUdpFeatureVideoFec) != 0;
     const bool directoryAuthorized =
         options.authToken.empty() || (ack.features & kUdpFeatureDirectoryAuth) != 0;
+    ++stats.attempts;
     if (validAck && directoryAuthorized) {
       if (error) error->clear();
       if (outAckFeatures) *outAckFeatures = ack.features;
+      publish(false);
       return true;
     }
+    if (received > 0) ++stats.badAcks;
     if (options.retrySleepMs > 0) {
       std::this_thread::sleep_for(std::chrono::milliseconds(options.retrySleepMs));
     }
   }
   if (error) *error = "udp hello ack failed";
+  publish(now_ms() >= deadlineMs);
   return false;
 }
 

@@ -85,6 +85,14 @@ bool poll_clipboard(ControlLink& link, uint64_t knownGeneration, uint64_t nowUs,
 // Valid means the protocol version, the FEC feature and -- when a directory token was sent -- the
 // DirectoryAuth feature that says the host accepted it. The socket's receive timeout is left at the
 // last wait slice; the caller sets what it wants for the stream. `stop` (optional) aborts early.
+/** What the handshake did, for the log. Observation only; nothing reads it to decide. */
+struct UdpHelloStats {
+  uint32_t attempts = 0;     // hellos actually sent
+  uint32_t badAcks = 0;      // answers that came back and were not the ack we needed
+  uint64_t elapsedMs = 0;    // from the first send to the ack, or to the budget running out
+  bool budgetSpent = false;  // true when the deadline ended it rather than an ack or a stop
+};
+
 struct UdpHelloOptions {
   std::string authToken;      // capability from /api/connect; empty on the LAN
   uint32_t budgetMs = 800;    // how long to keep re-sending Hello
@@ -96,6 +104,7 @@ struct UdpHelloOptions {
 // learns whether the host supports NACK (kUdpFeatureVideoNack) etc.
 bool udp_hello_handshake(SocketHandle sock, const UdpHelloOptions& options,
                          const std::atomic<bool>* stop, std::string* error,
-                         uint32_t* outAckFeatures = nullptr);
+                         uint32_t* outAckFeatures = nullptr,
+                         UdpHelloStats* outStats = nullptr);
 
 }  // namespace remote60::native_poc

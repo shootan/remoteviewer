@@ -111,6 +111,8 @@ struct UploaderState {
   uint64_t retriedBatches = 0;
   uint64_t discardedBatches = 0;
   uint64_t droppedLines = 0;
+  // pc2-connect-diag: the same total, split by stream and reason, so a missing log has a name.
+  std::map<std::string, uint64_t> dropsByReason;
   uint64_t discardedLines = 0;
   uint32_t lastStatus = 0;
   uint64_t lastOkUs = 0;
@@ -555,14 +557,44 @@ void log_upload_clear_credentials(const char* reason) {
        std::to_string(lines) + " discardedBatches=" + std::to_string(batches));
 }
 
+/**
+ * Says, once and then sparsely, that lines of a stream are being thrown away and why.
+ *
+ * pc2-connect-diag. All four discard paths below bumped one lumped counter, reported only
+ * inside a once-a-minute "idle alive" line -- so a viewer session whose every line was
+ * discarded looked exactly like a viewer session that produced none. That is the state the
+ * 2026-09-21 investigation found and could not explain: client.log complete, viewer.log absent
+ * from the server, and nothing anywhere saying a line had been dropped, let alone why.
+ *
+ * Bounded by construction: the first of each (stream, reason) pair, then every 256th.
+ */
+static void note_drop_locked(UploaderState& s, const char* stream, const char* why) {
+  const std::string key = std::string(stream ? stream : "log") + "/" + why;
+  const uint64_t n = ++s.dropsByReason[key];
+  if (drop_should_report(n)) {
+    diag("dropping stream=" + std::string(stream ? stream : "log") + " reason=" + why +
+         " count=" + std::to_string(n) + " totalDropped=" + std::to_string(s.droppedLines + 1));
+  }
+}
+
 static void enqueue_for_owner(const char* stream, const std::string& line, const std::string* identity) {
   UploaderState& s = state();
   std::lock_guard<std::mutex> lk(s.mu);
-  if (!s.running || s.stopping || line.empty()) return;
-  if (identity && s.config.identity != *identity) { ++s.droppedLines; return; }
+  if (line.empty()) return;
+  if (!s.running || s.stopping) {
+    note_drop_locked(s, stream, s.running ? "stopping" : "not-running");
+    ++s.droppedLines;
+    return;
+  }
+  if (identity && s.config.identity != *identity) {
+    note_drop_locked(s, stream, "identity-mismatch");
+    ++s.droppedLines;
+    return;
+  }
   if (!s.credentials) {
     // Nobody to send it as: a line produced while signed out must not ride the next account's
     // token. The disk copy has it.
+    note_drop_locked(s, stream, "no-credentials");
     ++s.droppedLines;
     return;
   }
@@ -570,8 +602,10 @@ static void enqueue_for_owner(const char* stream, const std::string& line, const
   // batches count against the same cap so a long 401 stays bounded.
   while (s.queuedBytes + s.heldBytes + line.size() + 1 > s.config.queueCapBytes && !s.queue.empty()) {
     const size_t freed = s.queue.front().text.size() + 1;
+    const std::string evicted = s.queue.front().stream;
     s.queue.pop_front();
     s.queuedBytes = s.queuedBytes > freed ? s.queuedBytes - freed : 0;
+    note_drop_locked(s, evicted.c_str(), "queue-full");
     ++s.droppedLines;
   }
   s.queue.push_back(QueuedLine{stream ? stream : "log", line});
@@ -610,6 +644,7 @@ void log_upload_stop() {
   s.heldBytes = 0;
   s.sentBatches = s.failedSends = s.retriedBatches = s.discardedBatches = 0;
   s.droppedLines = s.discardedLines = 0;
+  s.dropsByReason.clear();
   s.foreignAnswersDiscarded = 0;
   s.ownerKey.clear();
   s.lastStatus = 0;

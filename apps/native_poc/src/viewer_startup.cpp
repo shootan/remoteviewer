@@ -575,8 +575,19 @@ int connect_media_socket(ViewerContext& ctx) {
         viewer_udp_hello_options(ctx.directoryPunchToken, ctx.videoNackEnabled);
     uint32_t ackFeatures = 0;
     std::string helloError;
+    // pc2-connect-diag: how many hellos went out and what ended it. "udp hello ack failed"
+    // was the whole of it, and it reads the same whether one hello was sent or forty, whether
+    // the budget ran out or a send failed on the first try.
+    remote60::native_poc::UdpHelloStats helloStats;
     const bool handshakeOk = remote60::native_poc::udp_hello_handshake(
-        ctx.session.sock, hello, nullptr, &helloError, &ackFeatures);
+        ctx.session.sock, hello, nullptr, &helloError, &ackFeatures, &helloStats);
+    std::cout << "[native-video-client][attempt] hello ok=" << (handshakeOk ? 1 : 0)
+              << " attempts=" << helloStats.attempts << " badAcks=" << helloStats.badAcks
+              << " ms=" << helloStats.elapsedMs
+              << " budgetMs=" << hello.budgetMs
+              << " budgetSpent=" << (helloStats.budgetSpent ? 1 : 0)
+              << " host=" << ctx.resolvedArgs.host << ":" << ctx.resolvedArgs.port
+              << (handshakeOk ? "" : " why=" + helloError) << "\n";
     // A short receive timeout from here on, on BOTH the direct and the tunnelled path. It is the
     // clock of everything the recv thread does on a quiet link -- NACK rounds, the in-order hold,
     // the keyframe recovery deadline, the control tunnel's retransmits -- and the direct path used

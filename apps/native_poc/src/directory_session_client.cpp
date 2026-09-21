@@ -321,6 +321,7 @@ bool directory_connect(const std::string& url, const std::string& sessionToken,
 
   *outTarget = DirectoryConnectTarget{};
   json_get_string(response, "punchToken", &outTarget->punchToken);
+  json_get_string(response, "connectId", &outTarget->connectId);  // pc2-connect-diag
   json_get_string(response, "hostPublicIp", &outTarget->hostPublicIp);
   uint32_t publicPort = 0;
   if (json_get_u32(response, "hostPublicUdpPort", &publicPort)) {

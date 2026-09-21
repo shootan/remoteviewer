@@ -53,6 +53,15 @@ struct LogUploadConfig {
   uint32_t retryMaxAgeMs = 60000;
 };
 
+/**
+ * Whether the n-th drop of one (stream, reason) pair is worth a diag line. (pc2-connect-diag)
+ *
+ * The first always, then every 256th. A stream whose every line is being discarded produces a
+ * line immediately -- which is the case this exists for -- and a flood cannot then set the size
+ * of the diag.
+ */
+inline bool drop_should_report(uint64_t n) { return n != 0 && (n == 1 || (n % 256) == 0); }
+
 /** A snapshot for status text and diagnostics. Counters are process lifetime. */
 struct LogUploadStatus {
   bool running = false;

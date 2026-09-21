@@ -598,6 +598,69 @@ void test_401_pause_with_full_queue_does_not_spin(FakeLogServer& server) {
   log_upload_stop();
 }
 
+/**
+ * A dropped line says which stream and why. (pc2-connect-diag)
+ *
+ * Before this, all four discard paths bumped one lumped counter that surfaced only inside a
+ * once-a-minute "idle alive" line. A viewer session whose every line was discarded and one
+ * that produced no lines at all were the same absence -- which is the state the 2026-09-21
+ * investigation found, with client.log complete and viewer.log missing from the server.
+ */
+void test_drop_reasons_are_named(FakeLogServer& server) {
+  std::printf("[12] a dropped line says which stream and why\n");
+  LogUploadConfig c = base_config(server, "alice/machine-drop");
+
+  c.sessionToken = "SESSION-DROP";
+  std::string reason;
+  CHECK(log_upload_configure(c, &reason));
+
+  const size_t before = read_diag().size();
+
+  // A line for an identity this uploader is not signed in as. This is the path a viewer line
+  // takes, and the one that leaves viewer.log missing while client.log is intact.
+  log_upload_enqueue_for_identity("viewer", "line for somebody else", "bob/machine-other");
+  std::string d = read_diag().substr(before);
+  CHECK(d.find("dropping stream=viewer reason=identity-mismatch") != std::string::npos);
+
+  // Bounded: the first, then every 256th. 300 more must add exactly one line.
+  const size_t afterFirst = read_diag().size();
+  for (int i = 0; i < 300; ++i) {
+    log_upload_enqueue_for_identity("viewer", "more for somebody else", "bob/machine-other");
+  }
+  d = read_diag().substr(afterFirst);
+  size_t lines = 0;
+  for (size_t at = d.find("reason=identity-mismatch"); at != std::string::npos;
+       at = d.find("reason=identity-mismatch", at + 1)) ++lines;
+  CHECK(lines == 1);
+
+  // A different reason is counted separately rather than folded into the first.
+  const size_t beforeNoCreds = read_diag().size();
+  log_upload_clear_credentials("drop reason test");
+  log_upload_enqueue("client", "line with nobody to send it as");
+  d = read_diag().substr(beforeNoCreds);
+  CHECK(d.find("dropping stream=client reason=no-credentials") != std::string::npos);
+
+  // And no line printed here carries what was being sent or who it was for.
+  const std::string all = read_diag();
+  CHECK(all.find("SESSION-DROP") == std::string::npos);
+  CHECK(all.find("line for somebody else") == std::string::npos);
+  CHECK(all.find("line with nobody to send it as") == std::string::npos);
+
+  // The bound itself, directly: a flood is one line per 256, not one per drop.
+  size_t reported = 0;
+  for (uint64_t n = 1; n <= 1000; ++n) if (drop_should_report(n)) ++reported;
+  CHECK(reported == 4);
+  CHECK(drop_should_report(1));
+  CHECK(!drop_should_report(2));
+  CHECK(drop_should_report(256));
+  CHECK(!drop_should_report(0));
+
+  // This test deliberately leaves the uploader without credentials, which is not a state the
+  // others end in. Put it back before returning, so what follows -- and process exit -- sees an
+  // uploader in the same shape every other test leaves behind.
+  log_upload_stop();
+}
+
 void test_diag_has_no_token() {
   std::printf("[8] diag holds no token\n");
   const std::string d = read_diag();
@@ -646,6 +709,7 @@ int main() {
   }
   test_diag_has_no_token();
   test_401_pause_with_full_queue_does_not_spin(server);
+  test_drop_reasons_are_named(server);
   server.Stop();
   server2.Stop();
 

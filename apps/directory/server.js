@@ -1518,6 +1518,10 @@ async function handleConnect(req, res) {
     hostPublicUdpPort: host.publicUdpPort,
     candidates: connectCandidatesFor(host, relayEligible),
     punchToken,
+    // pc2-connect-diag: the id that already ties the server's own lines together, handed to
+    // the caller so its logs join the same thread. Additive -- a client that does not know
+    // the field ignores it -- and it is a random 4-byte label, not a credential.
+    connectId,
   });
 }
 

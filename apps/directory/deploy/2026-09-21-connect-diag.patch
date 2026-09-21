@@ -1,15 +1,18 @@
-# Connect diagnostics for the DEPLOYED directory server (pc2-connect-diag r1, scope A).
+# Connect diagnostics for the DEPLOYED directory server (pc2-connect-diag r1, scopes A and C).
 #
 # Base: /opt/gnlink/remote60-directory/server.js as deployed,
 #       sha256 e627048c7c9c6e88e5cafa408b484f24258985d68dc887d1d7866cacc14623b2
 #
-# Observation only. Nothing here changes what the server does -- it records when things
-# happened, so the next intermittent failure can be settled from logs instead of a hypothesis.
+# Observation only, with one additive field. Nothing here changes what the server does.
 #
 # New lines, all bounded: [observe-rx] (per token, 20s, a moved tuple always prints),
 # [host-hb] (per host, same rule), [capability] minted/collected (per connect / per handover),
 # [wake] tx[N] sent|failed and skipped reason=... (per datagram / per refusal), and three
 # relay lines said once per session: first c2h, first h2c, host silent.
+#
+# The one field: /api/connect now returns connectId, the label the server already uses in its
+# own lines, so the viewer's log joins the same thread. Additive -- a client that does not know
+# it ignores it -- and it is a random 4-byte label, not a credential.
 #
 # No token, capability or authToken is printed. The observe token appears only as an 8-hex
 # digest, which is what joins an [observe-rx] line to the [host-hb] that follows it.
@@ -222,7 +225,18 @@
    const relayEligible = relayEligibleFor(session.accountId, clientIp);
  
    if (NAT_DIAG_ENABLED) {
-@@ -1464,6 +1574,19 @@
+@@ -1387,6 +1497,10 @@
+     hostPublicUdpPort: host.publicUdpPort,
+     candidates: connectCandidatesFor(host, relayEligible),
+     punchToken,
++    // pc2-connect-diag: the id that already ties the server's own lines together, handed to
++    // the caller so its logs join the same thread. Additive -- a client that does not know
++    // the field ignores it -- and it is a random 4-byte label, not a credential.
++    connectId,
+   });
+ }
+ 
+@@ -1464,6 +1578,19 @@
            wireIp: seen.wireIp, wirePort: seen.wirePort,
            at: Date.now(),
          });

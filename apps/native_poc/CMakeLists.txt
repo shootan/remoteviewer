@@ -1591,6 +1591,19 @@ endif()
 # no session and no sockets. /utf-8 because the round-trip cases include Korean and an emoji.
 # Control-channel resume decisions and the resume packet's wire shape (item 8, layer 1). Pure
 # logic -- no socket, no peer, no clock.
+# What the UDP hello handshake reports about itself (pc2-connect-diag r1, scope C-1). Uses a real
+# socket aimed at a loopback port nobody is listening on.
+add_executable(remote60_hello_stats_test
+  src/hello_stats_test.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+)
+target_include_directories(remote60_hello_stats_test PRIVATE src)
+target_link_libraries(remote60_hello_stats_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_hello_stats_test PRIVATE /utf-8)
+endif()
+
 # The decisions inside the host's connect diagnostics (pc2-connect-diag r1, scope B). Pure logic.
 add_executable(remote60_host_diag_log_test
   src/host_diag_log_test.cpp

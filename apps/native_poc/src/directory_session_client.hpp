@@ -31,6 +31,9 @@ struct DirectoryHostEntry {
 
 /** What /api/connect hands back: where to aim, and the one-time capability to prove it. */
 struct DirectoryConnectTarget {
+  // pc2-connect-diag: the server's label for this attempt, so the client, viewer and server
+  // logs can be read as one story. Empty against a server that predates it.
+  std::string connectId;
   std::vector<ConnectCandidate> candidates;
   std::string punchToken;
   // Kept for the ordering older clients used, and as the fallback when the candidate list is
