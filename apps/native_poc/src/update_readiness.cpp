@@ -1,5 +1,8 @@
 #include "update_readiness.hpp"
 
+#include <windows.h>
+#include <bcrypt.h>
+
 #include <cstdlib>
 #include <sstream>
 #include <string>
@@ -116,6 +119,115 @@ ReadinessClaim parse_readiness(const std::string& text) {
   claim.valid = sawEnd && fields == 5 && !claim.nonce.empty() && !claim.version.empty() &&
                 claim.pid != 0 && claim.createTimeQw != 0;
   return claim;
+}
+
+namespace {
+
+std::wstring dir_of(const std::wstring& path) {
+  const size_t slash = path.find_last_of(L"\\/");
+  return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
+}
+
+std::string read_file(const std::wstring& path) {
+  HANDLE h = CreateFileW(path.c_str(), GENERIC_READ,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (h == INVALID_HANDLE_VALUE) return {};
+  std::string out;
+  char buffer[4096];
+  DWORD read = 0;
+  while (ReadFile(h, buffer, sizeof(buffer), &read, nullptr) && read > 0) {
+    out.append(buffer, read);
+    if (out.size() > 64 * 1024) break;  // a claim is a few hundred bytes; this is not a log
+  }
+  CloseHandle(h);
+  return out;
+}
+
+bool write_file(const std::wstring& path, const std::string& text) {
+  HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
+                         FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (h == INVALID_HANDLE_VALUE) return false;
+  DWORD wrote = 0;
+  const bool ok = WriteFile(h, text.data(), static_cast<DWORD>(text.size()), &wrote, nullptr) &&
+                  wrote == text.size() && FlushFileBuffers(h);
+  CloseHandle(h);
+  return ok;
+}
+
+}  // namespace
+
+std::wstring readiness_dir_from_log(const std::wstring& healthLogPath) {
+  return dir_of(healthLogPath);
+}
+
+std::wstring attempt_ticket_path(const std::wstring& healthLogPath) {
+  const std::wstring dir = dir_of(healthLogPath);
+  return dir.empty() ? std::wstring() : dir + L"\\update_attempt";
+}
+
+std::wstring readiness_claim_path(const std::wstring& healthLogPath) {
+  const std::wstring dir = dir_of(healthLogPath);
+  return dir.empty() ? std::wstring() : dir + L"\\host_readiness";
+}
+
+bool write_attempt_ticket(const std::wstring& path, const AttemptTicket& ticket) {
+  if (path.empty() || ticket.nonce.empty()) return false;
+  return write_file(path, "nonce=" + ticket.nonce + "\nversion=" + ticket.version + "\nend\n");
+}
+
+AttemptTicket read_attempt_ticket(const std::wstring& path) {
+  AttemptTicket ticket;
+  if (path.empty()) return ticket;
+  const std::string text = read_file(path);
+  if (text.size() < 4 || text.compare(text.size() - 4, 4, "end\n") != 0) return ticket;
+  std::istringstream in(text);
+  std::string line;
+  while (std::getline(in, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (line.rfind("nonce=", 0) == 0) ticket.nonce = line.substr(6);
+    else if (line.rfind("version=", 0) == 0) ticket.version = line.substr(8);
+  }
+  ticket.valid = !ticket.nonce.empty();
+  return ticket;
+}
+
+bool write_claim_atomic(const std::wstring& path, const ReadinessClaim& claim) {
+  if (path.empty()) return false;
+  // Same directory, therefore the same volume, so the replace is a rename and not a copy. A reader
+  // sees the old file or the new one and never a half-written one.
+  const std::wstring temp = path + L".tmp";
+  if (!write_file(temp, serialize_readiness(claim))) return false;
+  if (!MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+    DeleteFileW(temp.c_str());
+    return false;
+  }
+  return true;
+}
+
+ReadinessClaim read_claim(const std::wstring& path) {
+  if (path.empty()) return ReadinessClaim{};
+  return parse_readiness(read_file(path));
+}
+
+void remove_claim(const std::wstring& path) {
+  if (!path.empty()) DeleteFileW(path.c_str());
+}
+
+std::string mint_attempt_nonce() {
+  unsigned char bytes[8]{};
+  if (BCryptGenRandom(nullptr, bytes, sizeof(bytes), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
+    // Not a reason to proceed with something guessable: an empty nonce is refused by the judge,
+    // which fails the attempt closed rather than accepting whatever is on disk.
+    return {};
+  }
+  static const char* kHex = "0123456789abcdef";
+  std::string out;
+  for (unsigned char b : bytes) {
+    out.push_back(kHex[b >> 4]);
+    out.push_back(kHex[b & 0xF]);
+  }
+  return out;
 }
 
 }  // namespace remote60::native_poc::update

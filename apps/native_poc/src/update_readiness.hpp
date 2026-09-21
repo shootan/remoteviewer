@@ -75,4 +75,35 @@ ReadinessVerdict readiness_judge(const ReadinessClaim& claim, const ReadinessExp
 std::string serialize_readiness(const ReadinessClaim& claim);
 ReadinessClaim parse_readiness(const std::string& text);
 
+/** The ticket the updater leaves for the Host it is about to start. */
+struct AttemptTicket {
+  std::string nonce;
+  std::string version;
+  bool valid = false;
+};
+
+/**
+ * Where the two files live: beside host_app.log.
+ *
+ * Derived from the health log path the updater was already given rather than from an environment
+ * variable, because the two processes do not share one. The Host runs as the user and the updater
+ * runs elevated from the same user's session, so this directory is writable by one and readable by
+ * the other; it is per-user, which is the trust boundary this rides on. Target validation is the
+ * claim's own nonce, pid and creation time -- the directory only decides who can reach the file.
+ */
+std::wstring readiness_dir_from_log(const std::wstring& healthLogPath);
+std::wstring attempt_ticket_path(const std::wstring& healthLogPath);
+std::wstring readiness_claim_path(const std::wstring& healthLogPath);
+
+bool write_attempt_ticket(const std::wstring& path, const AttemptTicket& ticket);
+AttemptTicket read_attempt_ticket(const std::wstring& path);
+
+/** Replaces the claim in one step, so a reader never sees a half-written one. */
+bool write_claim_atomic(const std::wstring& path, const ReadinessClaim& claim);
+ReadinessClaim read_claim(const std::wstring& path);
+void remove_claim(const std::wstring& path);
+
+/** A 16-hex attempt nonce from the system CSPRNG. Never logged. */
+std::string mint_attempt_nonce();
+
 }  // namespace remote60::native_poc::update

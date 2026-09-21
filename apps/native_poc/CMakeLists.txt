@@ -334,6 +334,7 @@ target_link_libraries(remote60_log_upload_shutdown_test PRIVATE common ws2_32 ip
 # The thing a user installs: sign-in window plus tray, supervising the streaming host.
 add_executable(remote60_host_app WIN32
   src/host_app_log.cpp
+  src/update_readiness.cpp
   src/host_app_main.cpp
   src/directory_client.cpp
   src/update_endpoint.cpp
@@ -862,6 +863,7 @@ endif()
 # symbols. The DECISIONS behind it (update_relaunch_plan.cpp, update_health.cpp) are separate and
 # are linked into remote60_update_relaunch_test.
 add_library(remote60_update_relaunch STATIC
+  src/update_readiness.cpp
   src/update_relaunch.cpp
   src/update_relaunch_plan.cpp
   src/update_health.cpp
@@ -986,6 +988,7 @@ add_executable(remote60_update_relaunch_test
   # processes had never executed, and "linked into nothing" was written up as isolation when it
   # was really an admission. Every path, name, service name and log it touches is an argument, so
   # this test points it at a temp directory full of dummies and runs the real OS path.
+  src/update_readiness.cpp
   src/update_relaunch.cpp
   src/update_relaunch_plan.cpp
   src/update_health.cpp
@@ -1000,6 +1003,7 @@ add_executable(remote60_update_relaunch_test
 target_compile_definitions(remote60_update_relaunch_test
   PRIVATE GNLINK_EXEC_ROOT=L"${CMAKE_SOURCE_DIR}/.claude/relaunch-runs")
 target_include_directories(remote60_update_relaunch_test PRIVATE src)
+target_link_libraries(remote60_update_relaunch_test PRIVATE bcrypt)
 target_link_libraries(remote60_update_relaunch_test PRIVATE advapi32 ole32 oleaut32 shell32)
 if(MSVC)
   target_compile_options(remote60_update_relaunch_test PRIVATE /utf-8)
@@ -1033,6 +1037,7 @@ add_executable(remote60_updater
   src/install_registration.cpp
   src/update_registration_wiring.cpp
   src/update_process_targets.cpp
+  src/update_readiness.cpp
   src/update_relaunch.cpp
   src/update_relaunch_plan.cpp
   src/update_health.cpp
@@ -1101,6 +1106,7 @@ add_executable(remote60_updater_scenarios_test
   src/install_registration.cpp
   src/update_registration_wiring.cpp
   src/update_process_targets.cpp
+  src/update_readiness.cpp
   src/update_relaunch.cpp
   src/update_relaunch_plan.cpp
   src/update_health.cpp
@@ -1150,6 +1156,7 @@ add_executable(remote60_updater_assembly_test
   src/install_registration.cpp
   src/update_registration_wiring.cpp
   src/update_process_targets.cpp
+  src/update_readiness.cpp
   src/update_relaunch.cpp
   src/update_relaunch_plan.cpp
   src/update_health.cpp
@@ -1599,6 +1606,7 @@ add_executable(remote60_update_readiness_test
   src/update_readiness.cpp
 )
 target_include_directories(remote60_update_readiness_test PRIVATE src)
+target_link_libraries(remote60_update_readiness_test PRIVATE bcrypt)
 if(MSVC)
   target_compile_options(remote60_update_readiness_test PRIVATE /utf-8)
 endif()

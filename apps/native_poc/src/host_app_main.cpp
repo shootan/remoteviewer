@@ -46,6 +46,7 @@
 
 #include "directory_client.hpp"
 #include "host_app_log.hpp"
+#include "update_readiness.hpp"
 #include "log_upload.hpp"
 #include "host_command_line.hpp"
 #include "product_version.hpp"
@@ -1107,12 +1108,50 @@ std::atomic<bool> gDirectoryReported{false};
  * The child's stdout already passes through this process. This reads the one line that answers
  * the question.
  */
+/**
+ * Says, to the updater that started this process, that the directory really is reachable.
+ *
+ * Written from the readiness state itself -- this is called on the transition that also writes
+ * the log report, not from anything that parses text. The claim carries the nonce this attempt's
+ * updater left in its ticket, this build's version, and this process's identity, so a file left
+ * behind by an earlier attempt cannot be mistaken for it.
+ *
+ * The log line is still written, and still first. An updater that is already installed reads that
+ * and nothing else, and it is the one doing the update that installs this build.
+ */
+void write_readiness_claim() {
+  namespace up = remote60::native_poc::update;
+  const std::wstring logPath = log_file_path();
+  const up::AttemptTicket ticket = up::read_attempt_ticket(up::attempt_ticket_path(logPath));
+  if (!ticket.valid) return;  // nobody is waiting on this run
+
+  FILETIME created{}, exited{}, kernel{}, user{};
+  if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return;
+  ULARGE_INTEGER createdQw{};
+  createdQw.LowPart = created.dwLowDateTime;
+  createdQw.HighPart = created.dwHighDateTime;
+
+  up::ReadinessClaim claim;
+  claim.nonce = ticket.nonce;
+  claim.version = narrow(kProductVersion);
+  claim.pid = GetCurrentProcessId();
+  claim.createTimeQw = createdQw.QuadPart;
+  claim.writtenAtMs = static_cast<uint64_t>(GetTickCount64());
+  claim.valid = true;
+  const bool ok = up::write_claim_atomic(up::readiness_claim_path(logPath), claim);
+  // The nonce is deliberately absent from this line.
+  append_host_app_log(std::string("[host-app][lifecycle] readiness claim ") +
+                      (ok ? "written" : "could NOT be written") + " pid=" +
+                      std::to_string(claim.pid));
+}
+
 void note_child_log_line(const std::string& line) {
   if (line.find("directory online") == std::string::npos) return;
   append_host_app_log("[host-app][lifecycle] directory-online observed pid=" +
                       std::to_string(GetCurrentProcessId()));
   if (gDirectoryReported.exchange(true)) return;
   write_health_report("ok");
+  write_readiness_claim();
 }
 
 /**

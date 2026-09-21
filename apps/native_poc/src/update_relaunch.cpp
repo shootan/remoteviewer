@@ -13,6 +13,7 @@
 
 #include "update_health.hpp"
 #include "update_health_log.hpp"
+#include "update_readiness.hpp"
 
 namespace remote60::native_poc::update {
 namespace {
@@ -366,6 +367,8 @@ RelaunchEffects make_relaunch_effects(RelaunchConfig config,
      */
     std::vector<std::pair<std::wstring, HANDLE>> ownedHandles;
     std::string healthDetail;
+    /** This attempt's readiness nonce. Never logged; an empty one refuses every claim. */
+    std::string attemptNonce;
 
     /**
      * Every handle this attempt kept is released when the attempt is over.
@@ -406,6 +409,21 @@ RelaunchEffects make_relaunch_effects(RelaunchConfig config,
       // health check has already been made against this one.
       shared->logMark = file_size_or_zero(shared->config.healthLogPath);
       shared->marked = true;
+      // The readiness channel is opened at the same moment and for the same reason: nothing
+      // a previous run left behind may be read as this attempt's evidence. The stale claim
+      // goes first, so a Host that never writes one cannot inherit an old file.
+      {
+        namespace up = remote60::native_poc::update;
+        up::remove_claim(up::readiness_claim_path(shared->config.healthLogPath));
+        shared->attemptNonce = up::mint_attempt_nonce();
+        up::AttemptTicket ticket;
+        ticket.nonce = shared->attemptNonce;
+        ticket.version = shared->config.expectedVersion;
+        ticket.valid = !ticket.nonce.empty();
+        if (ticket.valid) {
+          up::write_attempt_ticket(up::attempt_ticket_path(shared->config.healthLogPath), ticket);
+        }
+      }
     }
     // Cleared at the START of an attempt, which is the required phase, and appended to by the
     // optional one. So `lastOutcomes` means "everything this attempt tried", not "whatever ran
@@ -568,6 +586,43 @@ RelaunchEffects make_relaunch_effects(RelaunchConfig config,
   effects.relaunchOptional = [run_phase]() { return run_phase(false); };
 
   effects.healthCheck = [shared]() {
+    // The readiness channel, tried first. It answers the question the log line only implies: is
+    // THIS process, of THIS build, started by THIS attempt, ready now. A log line has nothing in
+    // it that says which attempt it belonged to.
+    //
+    // The log contract below is kept and is still what decides when the channel says nothing. An
+    // updater that predates the channel reads only the log, and that is the updater performing the
+    // upgrade that installs a Host which can write the channel -- so the log path has to keep
+    // working, not merely survive.
+    const auto claim_verdict = [shared](std::string* detail) {
+      namespace up = remote60::native_poc::update;
+      if (shared->attemptNonce.empty()) return false;
+      const up::ReadinessClaim claim =
+          up::read_claim(up::readiness_claim_path(shared->config.healthLogPath));
+      up::ReadinessExpectation expect;
+      expect.nonce = shared->attemptNonce;
+      expect.version = shared->config.expectedVersion;
+      expect.nowMs = static_cast<uint64_t>(GetTickCount64());
+      expect.maxAgeMs = shared->config.healthTimeoutMs;
+      expect.processAlive = false;
+      for (const auto& owned : shared->ownedHandles) {
+        if (!owned.second) continue;
+        FILETIME created{}, exited{}, kernel{}, user{};
+        if (!GetProcessTimes(owned.second, &created, &exited, &kernel, &user)) continue;
+        ULARGE_INTEGER qw{};
+        qw.LowPart = created.dwLowDateTime;
+        qw.HighPart = created.dwHighDateTime;
+        if (qw.QuadPart != claim.createTimeQw) continue;
+        expect.pid = claim.pid;
+        expect.createTimeQw = qw.QuadPart;
+        expect.processAlive = WaitForSingleObject(owned.second, 0) != WAIT_OBJECT_0;
+        break;
+      }
+      const up::ReadinessVerdict verdict = up::readiness_judge(claim, expect);
+      if (detail) *detail = up::readiness_verdict_name(verdict);
+      return verdict == up::ReadinessVerdict::Accept;
+    };
+
     // Nothing that reports was brought back, so there is nothing to wait for. This is not a
     // shortcut: waiting anyway would time out and roll back an update whose files are correct,
     // for the sole reason that the process which writes the report was not running beforehand.
@@ -592,13 +647,20 @@ RelaunchEffects make_relaunch_effects(RelaunchConfig config,
     }
     const DWORD deadline = GetTickCount() + shared->config.healthTimeoutMs;
     for (;;) {
+      std::string claimDetail;
+      if (claim_verdict(&claimDetail)) {
+        shared->healthDetail = "Healthy: readiness claim accepted for version " +
+                               shared->config.expectedVersion;
+        return true;
+      }
       const std::string fresh =
           read_from_offset(shared->config.healthLogPath, shared->logMark);
       const HealthSignals signals = scan_health_report(fresh);
       std::string detail;
       const HealthVerdict verdict =
           judge_health(signals, shared->config.expectedVersion, &detail);
-      shared->healthDetail = std::string(health_verdict_name(verdict)) + ": " + detail;
+      shared->healthDetail = std::string(health_verdict_name(verdict)) + ": " + detail +
+                             " (readiness channel: " + claimDetail + ")";
       if (verdict == HealthVerdict::Healthy) return true;
       // Waiting longer cannot turn the old version into the new one.
       if (verdict == HealthVerdict::WrongVersion) return false;

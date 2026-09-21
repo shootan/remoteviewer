@@ -4,6 +4,10 @@
 // starved, so each one is checked on its own -- a judge that accepted everything would pass a test
 // that only ever handed it good claims.
 
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
 #include <cstdint>
 #include <iostream>
 #include <string>
@@ -205,6 +209,79 @@ int main() {
       }
     }
     check("every verdict has its own word", distinct);
+  }
+
+  // ------------------------------------------------------------------ the files, end to end
+  {
+    // The channel as the two processes actually use it: the updater leaves a ticket, the Host
+    // writes a claim into the same directory, and the updater judges it. Both paths are derived
+    // from the health log path, which is the one thing the two already agree on.
+    wchar_t temp[MAX_PATH]{};
+    GetTempPathW(MAX_PATH, temp);
+    const std::wstring dir = std::wstring(temp) + L"gnlink-readiness-" +
+                             std::to_wstring(GetCurrentProcessId());
+    CreateDirectoryW(dir.c_str(), nullptr);
+    const std::wstring logPath = dir + L"\\host_app.log";
+    const std::wstring ticketPath = attempt_ticket_path(logPath);
+    const std::wstring claimPath = readiness_claim_path(logPath);
+
+    check("both paths land beside the log",
+          ticketPath.rfind(dir, 0) == 0 && claimPath.rfind(dir, 0) == 0);
+    check("...and they are not the same file", ticketPath != claimPath);
+
+    const std::string nonce = mint_attempt_nonce();
+    check("a nonce is minted", nonce.size() == 16, std::to_string(nonce.size()) + " chars");
+    check("...and a second one differs", mint_attempt_nonce() != nonce);
+
+    AttemptTicket ticket;
+    ticket.nonce = nonce;
+    ticket.version = "0.2.132";
+    ticket.valid = true;
+    check("the updater can leave its ticket", write_attempt_ticket(ticketPath, ticket));
+    const AttemptTicket back = read_attempt_ticket(ticketPath);
+    check("...and the Host reads it", back.valid && back.nonce == nonce && back.version == "0.2.132");
+
+    // No claim yet: the gate must not accept an absent file.
+    check("an absent claim is malformed, not accepted", !read_claim(claimPath).valid);
+
+    ReadinessClaim claim = good_claim();
+    claim.nonce = back.nonce;
+    claim.writtenAtMs = 5000;
+    check("the Host can write its claim", write_claim_atomic(claimPath, claim));
+    const ReadinessClaim readBack = read_claim(claimPath);
+    check("...and the updater reads it whole", readBack.valid);
+
+    ReadinessExpectation expect = matching();
+    expect.nonce = nonce;
+    expect.nowMs = 6000;
+    check("...and accepts it", readiness_judge(readBack, expect) == ReadinessVerdict::Accept,
+          name_of(readiness_judge(readBack, expect)));
+
+    // The next attempt mints a different nonce, and the file left over from this one is refused.
+    ReadinessExpectation nextAttempt = expect;
+    nextAttempt.nonce = mint_attempt_nonce();
+    check("a claim left by the previous attempt is refused by the next one",
+          readiness_judge(readBack, nextAttempt) == ReadinessVerdict::WrongNonce,
+          name_of(readiness_judge(readBack, nextAttempt)));
+
+    // Which is why the updater removes it before starting anything.
+    remove_claim(claimPath);
+    check("removing it leaves nothing to inherit", !read_claim(claimPath).valid);
+
+    // A replaced claim is never seen half written: the reader gets the old one or the new one.
+    claim.writtenAtMs = 7000;
+    check("a claim can be replaced in place", write_claim_atomic(claimPath, claim));
+    check("...and reads back as the new one", read_claim(claimPath).writtenAtMs == 7000);
+
+    // An unusable directory fails rather than pretending.
+    check("a claim that cannot be written says so",
+          !write_claim_atomic(dir + L"\\no-such\\host_readiness", claim));
+    check("an empty path is refused", !write_claim_atomic(L"", claim));
+    check("...and so is a ticket with no nonce", !write_attempt_ticket(ticketPath, AttemptTicket{}));
+
+    DeleteFileW(ticketPath.c_str());
+    DeleteFileW(claimPath.c_str());
+    RemoveDirectoryW(dir.c_str());
   }
 
   std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED")
