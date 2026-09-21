@@ -50,7 +50,11 @@ namespace {
 
 int gFailures = 0;
 
+int gChecks = 0;
+int gSkipped = 0;
+
 void check(const char* what, bool ok, const std::string& detail = {}) {
+  ++gChecks;
   std::printf("%s  %s%s%s\n", ok ? "PASS" : "FAIL", what, detail.empty() ? "" : "  ",
               detail.c_str());
   if (!ok) ++gFailures;
@@ -75,13 +79,78 @@ std::wstring child_event_name() {
 
 // ---------------------------------------------------------------------------- the fixture child
 
+/**
+ * A line saying why a fixture child stopped, left where the test that started it can read it.
+ *
+ * The two ways a child can be absent when it should be present are opposite: the event released
+ * it (something signalled a shared name) or it never waited at all (OpenEvent failed). A pid that
+ * is simply gone cannot tell them apart, and that ambiguity cost two capture rounds.
+ *
+ * Self-contained Win32 on purpose: this runs in the child, before the helpers further down this
+ * file are declared, and it must not depend on anything that could itself fail differently.
+ */
+std::wstring child_note_path(const std::wstring& ownerTag, uint32_t childPid) {
+  const std::wstring& root = scratch_root();
+  if (root.empty()) return {};
+  return root + L"\\childexit-" + ownerTag + L"-" + std::to_wstring(childPid) + L".txt";
+}
+
+/**
+ * The test's pid, taken from the event name it was started with.
+ *
+ * Every name begins "gnlink-stop-fixture-<pid>" and several have a suffix after that (-denied,
+ * -leaf and so on). Taking the last dash-separated field gives the SUFFIX for those, which left
+ * their notes out of the end-of-run sweep -- so this takes the digits that follow the prefix.
+ */
+std::wstring owner_tag_of(const std::wstring& eventName) {
+  const std::wstring marker = L"gnlink-stop-fixture-";
+  const size_t at = eventName.find(marker);
+  if (at == std::wstring::npos) return L"unknown";
+  size_t i = at + marker.size();
+  std::wstring digits;
+  while (i < eventName.size() && iswdigit(eventName[i])) digits.push_back(eventName[i++]);
+  return digits.empty() ? L"unknown" : digits;
+}
+
+void note_child_exit(const std::wstring& eventName, const std::string& text) {
+  const std::wstring path = child_note_path(owner_tag_of(eventName), GetCurrentProcessId());
+  if (path.empty()) return;
+  HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
+                         FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (h == INVALID_HANDLE_VALUE) return;
+  DWORD wrote = 0;
+  WriteFile(h, text.data(), static_cast<DWORD>(text.size()), &wrote, nullptr);
+  CloseHandle(h);
+}
+
+/** Reads back what a child left, or says that it left nothing. */
+std::string child_exit_note(uint32_t pid) {
+  const std::wstring path = child_note_path(std::to_wstring(GetCurrentProcessId()), pid);
+  if (path.empty()) return "(no scratch root)";
+  HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (h == INVALID_HANDLE_VALUE) return "(the child left no note)";
+  char buffer[512]{};
+  DWORD got = 0;
+  ReadFile(h, buffer, sizeof(buffer) - 1, &got, nullptr);
+  CloseHandle(h);
+  return std::string(buffer, got);
+}
+
 int run_fixture_child(const std::wstring& eventName) {
   // No window and no console: the shape the production supervisor starts its children in, and
   // the shape for which a console control event has no success case.
+  const DWORD began = GetTickCount();
+  SetLastError(0);
   HANDLE quit = OpenEventW(SYNCHRONIZE, FALSE, eventName.c_str());
-  if (!quit) return 90;
-  WaitForSingleObject(quit, 120000);
+  if (!quit) {
+    note_child_exit(eventName, "open=FAILED err=" + std::to_string(GetLastError()));
+    return 90;
+  }
+  const DWORD waited = WaitForSingleObject(quit, 120000);
   CloseHandle(quit);
+  note_child_exit(eventName, "open=ok wait=" + std::to_string(waited) + " after " +
+                                 std::to_string(GetTickCount() - began) + "ms");
   return 0;
 }
 
@@ -550,6 +619,59 @@ int run_fixture_sweepprobe() {
   return gone ? 0 : 1;
 }
 
+/**
+ * One event per block of this test, instead of one event reset between blocks.
+ *
+ * Every block used to start its fixtures on the SAME named event and call ResetEvent first. The
+ * children wait on that name, so a SetEvent meant for one block releases every child of every
+ * block at once -- and the signal does not have to be in program order to do it: a parent
+ * fixture's WM_CLOSE handler signals the name from its own message loop, whenever it happens to
+ * be scheduled. Under load that can land after the next block has reset the event and started its
+ * fixtures, and that block's child leaves immediately.
+ *
+ * That is not a hypothetical. Signalling the shared event by hand at the wrong moment reproduces
+ * the observed failure exactly -- the same block, the same three checks, "0 left", and the child
+ * reporting "open=ok wait=0 after 0ms". Giving each block its own name removes the mechanism
+ * rather than making it rarer.
+ *
+ * The handle is owned here and closed by the destructor. Non-copyable, so there is exactly one
+ * owner, which is the same discipline the product side of this task had to learn.
+ */
+struct FixtureRound {
+  std::wstring name;
+  HANDLE quit = nullptr;
+  std::wstring cmd;
+
+  FixtureRound() = default;
+  FixtureRound(const FixtureRound&) = delete;
+  FixtureRound& operator=(const FixtureRound&) = delete;
+  FixtureRound(FixtureRound&& other) noexcept { *this = std::move(other); }
+  FixtureRound& operator=(FixtureRound&& other) noexcept {
+    if (this != &other) {
+      if (quit) CloseHandle(quit);
+      name = std::move(other.name);
+      quit = other.quit;
+      cmd = std::move(other.cmd);
+      other.quit = nullptr;
+    }
+    return *this;
+  }
+  ~FixtureRound() {
+    if (quit) CloseHandle(quit);
+  }
+};
+
+int gRoundCounter = 0;
+
+/** A fresh event and the command line that starts a parent fixture on it. */
+FixtureRound next_round() {
+  FixtureRound round;
+  round.name = child_event_name() + L"-r" + std::to_wstring(++gRoundCounter);
+  round.quit = CreateEventW(nullptr, TRUE, FALSE, round.name.c_str());
+  round.cmd = L"\"" + own_path() + L"\" --fixture-parent " + round.name;
+  return round;
+}
+
 int main(int argc, char** argv) {
   if (argc >= 2 && std::string(argv[1]) == "--fixture-sweepprobe") {
     return run_fixture_sweepprobe();
@@ -595,7 +717,12 @@ int main(int argc, char** argv) {
     return run_fixture_parent(std::wstring(name.begin(), name.end()), true);
   }
 
-  std::printf("update_stop_process_test\n");
+  // Unbuffered, permanently. stdout is buffered when redirected, about sixty lines to a
+  // buffer, so a run that ends abnormally loses everything after the last flush -- which is
+  // what made the r8 abort look as though it happened four hundred lines before it did.
+  // A test whose output is only trustworthy when it exits cleanly is not much of a witness.
+  setvbuf(stdout, nullptr, _IONBF, 0);
+  std::printf("update_stop_process_test (pid %lu)\n", GetCurrentProcessId());
 
   const std::wstring eventName = child_event_name();
   // Owned by this process so both fixtures can find it by name and neither has to create it.
@@ -694,7 +821,11 @@ int main(int argc, char** argv) {
   // verified, and the child fell through to a direct request that cannot succeed for a process
   // with no window. "could not ask pid 13528 to stop", every time.
   {
-    ResetEvent(quitEvent);
+    // This block's own event, not the shared one. See FixtureRound.
+    const FixtureRound round = next_round();
+    const std::wstring& eventName = round.name;
+    HANDLE quitEvent = round.quit;
+    const std::wstring& cmd = round.cmd;
     PROCESS_INFORMATION po{};
     std::vector<wchar_t> cmdO(cmd.begin(), cmd.end());
     cmdO.push_back(L'\0');
@@ -702,7 +833,25 @@ int main(int argc, char** argv) {
                        nullptr, &si, &po)) {
       CloseHandle(po.hThread);
       const uint32_t op = po.dwProcessId;
+      // Measured, not just waited for. This check used to conflate three conditions into one
+      // boolean and report only "0 left", which says nothing about WHICH of them went wrong --
+      // the fixture never came up, or it came up and left again. Under load it failed once and
+      // the log could not tell the two apart.
+      const DWORD upBegan = GetTickCount();
       const bool upO = wait_until([op] { return fixture_children(op).size() == 2; }, 15000);
+      const DWORD upTook = GetTickCount() - upBegan;
+
+      // A handle to the child, taken while it is definitely there, so that if it is NOT there
+      // afterwards this can say why rather than only that. The child returns 0 when the event
+      // released it and 90 when it could not open the event at all, and those are opposite
+      // stories: one means something signalled it, the other means it never waited.
+      uint32_t childPid = 0;
+      for (const ProcessTarget& t : fixture_children(op)) {
+        if (t.pid != op) childPid = t.pid;
+      }
+      HANDLE childWatch =
+          childPid ? OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, childPid)
+                   : nullptr;
 
       // Make the child an orphan: end the parent WITHOUT letting it tidy up, so the child is
       // still running with a parent that no longer exists. TerminateProcess on a process this test
@@ -711,13 +860,34 @@ int main(int argc, char** argv) {
       WaitForSingleObject(po.hProcess, 10000);
       CloseHandle(po.hProcess);
 
+      const DWORD orphanBegan = GetTickCount();
       const bool orphaned = wait_until([op] {
         const std::vector<ProcessTarget> t = fixture_children(op);
         return t.size() == 1 && !t[0].hasWindow;
       }, 15000);
+      const DWORD orphanTook = GetTickCount() - orphanBegan;
       const std::vector<ProcessTarget> left = fixture_children(op);
+
+      const bool eventSignalled = WaitForSingleObject(quitEvent, 0) == WAIT_OBJECT_0;
+      std::string childState = std::string(", quitEvent=") +
+                               (eventSignalled ? "SIGNALLED (it should be clear here)" : "clear") +
+                               ", child pid=" + std::to_string(childPid);
+      if (!childWatch) {
+        childState += " (no handle)";
+      } else {
+        DWORD childCode = 0;
+        GetExitCodeProcess(childWatch, &childCode);
+        childState += (childCode == STILL_ACTIVE)
+                          ? " still running"
+                          : (" exited " + std::to_string(childCode) + " [" +
+                             child_exit_note(childPid) + "]");
+        CloseHandle(childWatch);
+      }
+
       check("a windowless child outlives its parent", upO && orphaned && left.size() == 1,
-            std::to_string(left.size()) + " left");
+            std::to_string(left.size()) + " left; fixture up=" + (upO ? "yes" : "NO") + " after " +
+                std::to_string(upTook) + "ms of 15000, orphaned=" + (orphaned ? "yes" : "NO") +
+                " after " + std::to_string(orphanTook) + "ms of 15000" + childState);
 
       if (left.size() == 1) {
         check("...and asking it directly still cannot work", !request_process_stop(left[0]));
@@ -738,6 +908,13 @@ int main(int argc, char** argv) {
         check("...and Quiesce waits for it to go", quiesced, e.last_error());
         RemoveDirectoryW(stg.c_str());
         RemoveDirectoryW(inst.c_str());
+      } else {
+        // Three checks live behind that guard, and when it is not taken they simply did not run.
+        // A total that quietly drops from 111 to 108 is not something to leave the reader to
+        // notice, so the gap is named here and counted below.
+        gSkipped += 3;
+        std::printf("SKIP  three orphan checks did not run: the fixture was not in the state they"
+                    " are about%s", "\n");
       }
       SetEvent(quitEvent);
       wait_until([op] { return fixture_children(op).empty(); }, 10000);
@@ -752,7 +929,11 @@ int main(int argc, char** argv) {
   // as it is today. What must be different is the REASON -- "nobody was left to ask" is a different
   // problem from "it refused", and they used to print the same sentence.
   {
-    ResetEvent(quitEvent);
+    // This block's own event, not the shared one. See FixtureRound.
+    const FixtureRound round = next_round();
+    const std::wstring& eventName = round.name;
+    HANDLE quitEvent = round.quit;
+    const std::wstring& cmd = round.cmd;
     PROCESS_INFORMATION pk{};
     std::vector<wchar_t> cmdK(cmd.begin(), cmd.end());
     cmdK.push_back(L'\0');
@@ -760,16 +941,67 @@ int main(int argc, char** argv) {
                        nullptr, &si, &pk)) {
       CloseHandle(pk.hThread);
       const uint32_t kp = pk.dwProcessId;
-      wait_until([kp] { return fixture_children(kp).size() == 2; }, 15000);
+      const DWORD upKBegan = GetTickCount();
+      const bool upK = wait_until([kp] { return fixture_children(kp).size() == 2; }, 15000);
+      const DWORD upKTook = GetTickCount() - upKBegan;
+
+      // The isolation, pinned. This is the mechanism that produced the intermittent failure:
+      // one named event shared by every block, so a signal intended for one released the children
+      // of another. Signalling a DIFFERENT block's event here must do nothing at all to this one.
+      //
+      // Deterministic, unlike the failure it replaces -- that one needed load and turned up about
+      // once in fourteen runs. Before the per-block events this check could not even be written:
+      // there was only one event, and signalling it released everything.
+      {
+        const FixtureRound other = next_round();
+        SetEvent(other.quit);
+        Sleep(200);  // long enough for a released child to have gone
+        const std::vector<ProcessTarget> stillHere = fixture_children(kp);
+        check("a signal on another block's event does not release this block's child",
+              stillHere.size() == 2,
+              std::to_string(stillHere.size()) + " of 2 still running");
+      }
+
+      // The same instrument as the block above: a handle to the child while it is certainly
+      // there, so its absence later can be explained rather than only counted.
+      uint32_t kChildPid = 0;
+      for (const ProcessTarget& t : fixture_children(kp)) {
+        if (t.pid != kp) kChildPid = t.pid;
+      }
+      HANDLE kChildWatch =
+          kChildPid ? OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, kChildPid)
+                    : nullptr;
+
       TerminateProcess(pk.hProcess, 0);
       WaitForSingleObject(pk.hProcess, 10000);
       CloseHandle(pk.hProcess);
+      const DWORD orphanKBegan = GetTickCount();
       const bool orphaned = wait_until([kp] {
         const std::vector<ProcessTarget> t = fixture_children(kp);
         return t.size() == 1 && !t[0].hasWindow;
       }, 15000);
+      const DWORD orphanKTook = GetTickCount() - orphanKBegan;
+
+      const bool kEventSignalled = WaitForSingleObject(quitEvent, 0) == WAIT_OBJECT_0;
+      std::string kState = std::string(", quitEvent=") +
+                           (kEventSignalled ? "SIGNALLED (it should be clear here)" : "clear") +
+                           ", child pid=" + std::to_string(kChildPid);
+      if (!kChildWatch) {
+        kState += " (no handle)";
+      } else {
+        DWORD kCode = 0;
+        GetExitCodeProcess(kChildWatch, &kCode);
+        kState += (kCode == STILL_ACTIVE) ? " still running"
+                                          : (" exited " + std::to_string(kCode) + " [" +
+                                             child_exit_note(kChildPid) + "]");
+        CloseHandle(kChildWatch);
+      }
+
       check("an orphan that keeps running is still there", orphaned,
-            std::to_string(fixture_children(kp).size()) + " left");
+            std::to_string(fixture_children(kp).size()) + " left; fixture up=" +
+                (upK ? "yes" : "NO") + " after " + std::to_string(upKTook) +
+                "ms of 15000, orphaned=" + (orphaned ? "yes" : "NO") + " after " +
+                std::to_string(orphanKTook) + "ms of 15000" + kState);
 
       const std::wstring inst = scratch(L"gnlink-orphan2-install");
       const std::wstring stg = scratch(L"gnlink-orphan2-staging");
@@ -862,6 +1094,9 @@ int main(int argc, char** argv) {
   }
 
   // ---------------------------------------------------------------- the production path, for real
+  // The one place that keeps the base event. This fixture lives for the rest of the test,
+  // and after the change above it is the ONLY user of that name: every later block has its
+  // own, so nothing it does can reach them and nothing they do can reach it.
   ResetEvent(quitEvent);
   PROCESS_INFORMATION pi2{};
   std::vector<wchar_t> cmd2(cmd.begin(), cmd.end());
@@ -947,7 +1182,11 @@ int main(int argc, char** argv) {
   // covers the branches; this is the one that checks the OS reports parentage the way that walk
   // assumes.
   {
-    ResetEvent(quitEvent);
+    // This block's own event, not the shared one. See FixtureRound.
+    const FixtureRound round = next_round();
+    const std::wstring& eventName = round.name;
+    HANDLE quitEvent = round.quit;
+    const std::wstring& cmd = round.cmd;
     const std::wstring cmd3 = L"\"" + own_path() + L"\" --fixture-parent3 " + eventName;
     std::vector<wchar_t> c3(cmd3.begin(), cmd3.end());
     c3.push_back(L'\0');
@@ -1055,7 +1294,11 @@ int main(int argc, char** argv) {
   // Quiesce is the gate the swap sits behind, so what matters is that a leftover child makes it
   // say no. The leaf is held open here while the rest of the branch goes.
   {
-    ResetEvent(quitEvent);
+    // This block's own event, not the shared one. See FixtureRound.
+    const FixtureRound round = next_round();
+    const std::wstring& eventName = round.name;
+    HANDLE quitEvent = round.quit;
+    const std::wstring& cmd = round.cmd;
     const std::wstring holdName = L"Local\\gnlink-stop-fixture-hold-" +
                                   std::to_wstring(GetCurrentProcessId());
     // Two events: one the root signals when it closes, and one only this test can set. The leaf
@@ -1128,7 +1371,11 @@ int main(int argc, char** argv) {
   // re-enumerating would wait for whatever started in the meantime, and would silently skip
   // something already asked and on its way out. It has two consequences that nothing checked.
   {
-    ResetEvent(quitEvent);
+    // This block's own event, not the shared one. See FixtureRound.
+    const FixtureRound round = next_round();
+    const std::wstring& eventName = round.name;
+    HANDLE quitEvent = round.quit;
+    const std::wstring& cmd = round.cmd;
     const std::wstring raceEvent = L"Local\\gnlink-stop-fixture-race-" +
                                    std::to_wstring(GetCurrentProcessId());
     HANDLE raceQuit = CreateEventW(nullptr, TRUE, FALSE, raceEvent.c_str());
@@ -1174,7 +1421,11 @@ int main(int argc, char** argv) {
       // And the other direction: something windowless appears AFTER the list was taken. It is not
       // in preparedTargets_, so the wait must not block on it -- a helper started a moment too
       // late would otherwise hold an update open for its whole lifetime.
-      ResetEvent(quitEvent);
+      // This block's own event, not the shared one. See FixtureRound.
+    const FixtureRound round = next_round();
+    const std::wstring& eventName = round.name;
+    HANDLE quitEvent = round.quit;
+    const std::wstring& cmd = round.cmd;
       PROCESS_INFORMATION pLate{};
       std::wstring cmdL = L"\"" + own_path() + L"\" --fixture-child " + eventName;
       std::vector<wchar_t> cL(cmdL.begin(), cmdL.end());
@@ -1788,9 +2039,33 @@ int main(int argc, char** argv) {
   CloseHandle(pi2.hProcess);
   CloseHandle(quitEvent);
 
-  if (gFailures == 0) {
+  // The children's notes, swept -- but only on a clean run. When something failed they are the
+  // evidence for why, and evidence is not tidied away.
+  if (gFailures == 0 && gSkipped == 0 && !scratch_root().empty()) {
+    const std::wstring pattern = scratch_root() + L"\\childexit-*.txt";
+    WIN32_FIND_DATAW found{};
+    HANDLE h = FindFirstFileW(pattern.c_str(), &found);
+    if (h != INVALID_HANDLE_VALUE) {
+      do {
+        DeleteFileW((scratch_root() + L"\\" + found.cFileName).c_str());
+      } while (FindNextFileW(h, &found));
+      FindClose(h);
+    }
+  }
+
+  // The totals, said out loud. A run that skips a guarded group reports fewer checks than
+  // a full one, and "111 checks" is only a meaningful gate criterion when a short run is
+  // visible as short rather than as a smaller number nobody compared.
+  std::printf("checks: %d run, %d skipped, %d failed\n", gChecks, gSkipped,
+              gFailures);
+  if (gFailures == 0 && gSkipped == 0) {
     std::printf("update_stop_process_test: PASS\n");
     return 0;
+  }
+  if (gFailures == 0) {
+    // Nothing failed, but not everything ran. That is not a pass either.
+    std::printf("update_stop_process_test: INCOMPLETE (%d skipped)\n", gSkipped);
+    return 2;
   }
   std::printf("update_stop_process_test: FAILED (%d)\n", gFailures);
   return 1;

@@ -110,13 +110,86 @@ suite **10×**, every run exit 0, every suite run reaching all 111 checks with n
 residue (no scratch directory, no stray fixture process). One failure fails the batch; the count
 does not restart without a cause and a change.
 
-## Still not confirmed
+## Still not confirmed (from the crash round)
 
-* One run in fourteen, after the fix, reported three failed checks — exit 1, 108 PASS / 3 FAIL, no
-  crash. It was not captured and is a different symptom from the abort. Recorded, not closed.
 * Whether other suites carry the same two-temporaries shape. A search of `apps/native_poc/src` for
   `X().begin(), X().end()` found exactly one occurrence, the one above. That search only catches
   this exact spelling.
+
+---
+
+# The 108/3, which was a second and separate defect
+
+The crash round left one thing open: a run in fourteen that reported "108 PASS / 3 FAIL" without
+crashing. It is now reproduced, explained and fixed, and it is **not** the same defect as the
+abort.
+
+## Verdict
+
+**Fixture, again, and nothing to do with the product.** Every captured occurrence recorded
+`residue=0`, `stray=0`, and its own scratch sweep passing — the shared boundary, the handle
+discipline and the cleanup were untouched in all of them. The two suites the elevated run actually
+depends on, `test_scratch_dir_test` and `update_service_stop_test`, ran 10/10 clean throughout,
+including while contending with the capture loop.
+
+## What it actually was
+
+Every block of `update_stop_process_test` started its fixtures on **the same named event** and
+called `ResetEvent` first. The children wait on that name, so a `SetEvent` meant for one block
+releases every child of every block. And the signal need not arrive in program order: a parent
+fixture's `WM_CLOSE` handler signals the name from its own message loop, whenever it is next
+scheduled. Under load that can land after the following block has reset the event and started its
+fixtures — and that block's child leaves at once, which is exactly "0 left" on a check whose whole
+premise is a child that stays.
+
+## Evidence
+
+| step | result |
+| --- | --- |
+| First capture, under load | `0 left; fixture up=yes after 47ms of 15000, orphaned=NO after 15047ms` — so not a slow start: the fixture came up in its usual 47 ms and the child then vanished |
+| Second capture | `pass=108 fail=3` in the second orphan block — the original symptom, reproduced |
+| Forced signal on the shared name | `pass=108 fail=3`, same block, same three checks, `quitEvent=SIGNALLED`, `child pid=24132 exited 0 [open=ok wait=0 after 0ms]` — identical to the captured failure |
+| Per-block events, then the shared name restored as a mutation | the isolation check fails deterministically: `1 of 2 still running`, cascading into `0 left` and `quitEvent=SIGNALLED` |
+
+The child's note is what separated the two candidate explanations. "Something signalled it"
+(`open=ok wait=0`) and "it never waited at all" (`open=FAILED err=…`) are opposite causes, and a
+pid that is simply absent cannot tell them apart. That ambiguity cost two capture rounds before
+the child was made to write down why it stopped.
+
+## The fix
+
+Each block takes its own event, its own name and its own command line (`FixtureRound`,
+`next_round()`), so a signal for one block cannot reach another's children. One fixture keeps the
+base name — the long-lived one that runs for the rest of the test — and after the change it is the
+only user of it.
+
+The mechanism is pinned by a deterministic regression rather than by repetition: with a fixture
+up, the test signals a *different* block's event and asserts that this block's child is still
+running. Before the change that check could not even be written, because there was only one event
+and signalling it released everything.
+
+## Two reporting defects found on the way, both mine
+
+* **"108/3" was never three failures.** It was 107 passed, 1 failed, and **3 checks that never
+  ran**, because the failing check guards three dependents. My harness reported the shortfall as
+  failures. The suite now prints `checks: N run, M skipped, K failed`, names a skipped group, and
+  returns `INCOMPLETE` rather than `PASS` when a run does less than a full one.
+* **Output was buffered.** `std::printf` to a redirected stdout buffers about sixty lines, so any
+  run that ended abnormally lost everything after its last flush. That is what made the r8 abort
+  appear four hundred lines before it happened. Unbuffered now, permanently.
+
+## Acceptance gate
+
+Same candidate, quiet runs **and** runs under restarted load — the failure only ever appeared
+under contention, so a quiet-only gate would prove nothing about what was fixed. Every run must
+exit 0 with all 112 checks run, none skipped, none failed, and no residue or stray process.
+
+## Still not confirmed
+
+* That the stray signal in the wild came from a `WM_CLOSE` handler specifically. The shared event
+  is the only mechanism that produces this symptom, and forcing a signal on it reproduces the
+  failure exactly, but no capture recorded the signaller itself. The fix removes the whole class
+  either way.
 
 ## Correction to the r7 report
 
