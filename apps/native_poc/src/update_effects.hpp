@@ -392,6 +392,14 @@ class WindowsUpdateEffects : public UpdateEffects {
   // stopped being checked at all.
   std::vector<ProcessTarget> preparedTargets_;
   std::vector<uint32_t> ownedChildPids_;
+  /**
+   * Targets whose stop request could not be delivered, with a handle held on each.
+   *
+   * The handle is the point: it is opened and identity-checked while the process is known, and
+   * holding it stops the pid being recycled, so the wait below answers one question about one
+   * process. Asking about a pid a second time cannot.
+   */
+  std::vector<std::pair<ProcessTarget, void*>> undelivered_;
   // Windowless targets with nobody to ask: their parent is not among the targets, which means it
   // has already exited. Waited for rather than asked, and told apart from the owned ones so the
   // log says which situation it was.

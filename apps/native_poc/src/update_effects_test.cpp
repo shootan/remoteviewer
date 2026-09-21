@@ -2074,8 +2074,39 @@ int main(int argc, char** argv) {
           e2.last_error().find("could not ask pid") != std::string::npos &&
               e2.last_error().find(std::to_string(present.pid)) != std::string::npos,
           e2.last_error());
-    check("...after waiting, not instead of waiting", GetTickCount64() - began >= 300,
-          std::to_string(GetTickCount64() - began) + "ms");
+    // GetTickCount64 advances in ~15.6ms steps, so a 300ms budget can measure as 297. The
+    // assertion allows one tick rather than asserting a number the clock cannot promise -- it
+    // failed intermittently at exactly that before.
+    check("...after waiting, not instead of waiting", GetTickCount64() - began + 32 >= 300,
+          std::to_string(GetTickCount64() - began) + "ms of a 300ms budget");
+
+    // A departure AFTER the budget does not retroactively forgive. The settle is a bounded wait,
+    // not a promise to keep waiting until something convenient happens -- and the distinction
+    // between "standing down" and "refusing" is drawn by what the process DOES within the budget,
+    // never by guessing at its intent.
+    {
+      DummyProcess late;
+      check("a dummy that leaves too late started", late.start());
+      ProcessTarget target;
+      check("its identity is captured", capture_process_identity(late.pid(), &target));
+      target.hasWindow = true;
+
+      std::thread leaveLate([&late] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(900));
+        late.kill();
+      });
+
+      UpdateEffectsConfig cLate = base_config(install, staging);
+      cLate.stopSettleMs = 200;  // spent long before it goes
+      cLate.stopSettlePollMs = 50;
+      cLate.enumerateTargets = [target]() { return std::vector<ProcessTarget>{target}; };
+      cLate.requestStop = [](const ProcessTarget&) { return false; };
+      WindowsUpdateEffects eLate(cLate);
+      check("a target still running when the budget ends abandons the attempt",
+            !eLate.PrepareForSwap(), eLate.last_error());
+      check("...and the swap did not happen", !exists(install + L"\AlphaPayload.bin.gnlink-old"));
+      leaveLate.join();
+    }
   }
 
   remove_tree(install);

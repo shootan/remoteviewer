@@ -604,41 +604,72 @@ bool WindowsUpdateEffects::PrepareForSwap() {
       // failure, and nothing here terminates anything.
       if (parent_has_exited(target.pid)) continue;
 
-      // Gone is forgiven above. GOING is not, and going is what a handoff produces.
+      // Gone is forgiven above. GOING is not, and going is what a handoff produces: a process that
+      // has acknowledged, destroyed its window, and not yet finished leaving. Measured
+      // (remote60_update_stop_process_test): in that state the ask falls through to
+      // GenerateConsoleCtrlEvent, which needs a console the updater does not have, and returns
+      // false. On 2026-09-21 that false ended the attempt 89 ms after the caller said it was
+      // standing down.
       //
-      // Measured (remote60_update_stop_process_test): a process that has acknowledged and
-      // destroyed its window is, for the tens of milliseconds before it exits, neither askable nor
-      // gone. The ask falls through to GenerateConsoleCtrlEvent, which needs a console the updater
-      // does not have, and returns false. On 2026-09-21 that false ended the attempt 89 ms after
-      // the caller said it was standing down -- and the same shape has ended 23 attempts.
+      // The failed ask is recorded as what it is -- a request that could not be delivered -- and
+      // the question of whether the process actually leaves is deferred to one wait below, where
+      // it is answered by a HANDLE rather than by asking about a pid again.
       //
-      // So the question is asked again, briefly. Nothing is terminated and nothing new is
-      // attempted: it waits for the process to finish what it already agreed to do, and abandons
-      // only if it is still there afterwards. A process that genuinely refuses still fails, one
-      // poll interval later than before.
-      {
-        const uint64_t deadline =
-            static_cast<uint64_t>(GetTickCount64()) + config_.stopSettleMs;
-        bool left = false;
-        while (static_cast<uint64_t>(GetTickCount64()) < deadline) {
-          Sleep(config_.stopSettlePollMs);
-          if (parent_has_exited(target.pid)) { left = true; break; }
-        }
-        if (left) {
-          if (config_.trace) {
-            config_.trace("stop-settle pid=" + std::to_string(target.pid) +
-                          " left while we waited");
-          }
-          continue;
-        }
-        if (config_.trace) {
-          config_.trace("stop-settle pid=" + std::to_string(target.pid) +
-                        " still running after " + std::to_string(config_.stopSettleMs) + "ms");
-        }
+      // That distinction is the whole safety of this. A pid is reused; re-opening one and finding
+      // it absent, or finding something there, says nothing reliable about the process we meant.
+      // A handle opened now and held cannot be recycled, so waiting on it answers exactly one
+      // question about exactly one process. Nothing is terminated either way.
+      SetLastError(0);
+      HANDLE watch = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                                 target.pid);
+      if (watch && !process_identity_matches(watch, target)) {
+        // The pid is now somebody else's, which means the process we meant has gone.
+        CloseHandle(watch);
+        continue;
       }
-      lastError_ = "could not ask pid " + std::to_string(target.pid) + " to stop";
+      if (!watch) {
+        // ERROR_INVALID_PARAMETER is a pid that is no longer a process. Anything else -- access
+        // denied above all -- is a question we could not ask, and an unanswered question is not
+        // an exit.
+        if (GetLastError() == ERROR_INVALID_PARAMETER) continue;
+        lastError_ = "could not ask pid " + std::to_string(target.pid) +
+                     " to stop, and cannot watch it either";
+        return false;
+      }
+      undelivered_.push_back({target, watch});
+      continue;
+    }
+  }
+
+  // One wait for everything whose request could not be delivered, against ONE deadline.
+  //
+  // Per-process budgets add up: ten targets would have meant ten times the wait, and the whole
+  // point of a bound is that it does not grow with the shape of the problem. Every handle here was
+  // opened and identity-checked above, so a signalled handle is this process having exited and
+  // nothing else.
+  if (!undelivered_.empty()) {
+    const uint64_t deadline = static_cast<uint64_t>(GetTickCount64()) + config_.stopSettleMs;
+    std::string stillThere;
+    for (auto& pending : undelivered_) {
+      const uint64_t now = static_cast<uint64_t>(GetTickCount64());
+      const DWORD remaining = now >= deadline ? 0 : static_cast<DWORD>(deadline - now);
+      const DWORD waited = WaitForSingleObject(pending.second, remaining);
+      // WAIT_OBJECT_0 is the only answer that means it exited. A timeout is still running, and a
+      // failure is a question that did not get answered.
+      if (waited == WAIT_OBJECT_0) continue;
+      if (!stillThere.empty()) stillThere += ", ";
+      stillThere += std::to_string(pending.first.pid);
+      stillThere += waited == WAIT_TIMEOUT ? "=still-running" : "=wait-failed";
+    }
+    for (auto& pending : undelivered_) CloseHandle(pending.second);
+    undelivered_.clear();
+    if (!stillThere.empty()) {
+      lastError_ = "could not ask pid " + stillThere.substr(0, stillThere.find('=')) +
+                   " to stop (" + stillThere + ")";
+      if (config_.trace) config_.trace("stop-settle " + stillThere);
       return false;
     }
+    if (config_.trace) config_.trace("stop-settle every undelivered target exited");
   }
   return true;
 }

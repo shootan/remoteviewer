@@ -1294,6 +1294,163 @@ int main(int argc, char** argv) {
     if (gone) CloseHandle(gone);
   }
 
+  // ------------------------- integration: the whole path, with nothing injected
+  //
+  // Codex's condition, and a fair one: a seam that returns false proves the consequence of a
+  // failed ask, not that the ask fails. Everything below runs the REAL request_process_stop
+  // against a REAL detached process, through Prepare and Quiesce, to a swap that happens or an
+  // attempt that is abandoned.
+  //
+  // The detached prober is still needed for one thing: this test has a console, so its own ask
+  // would succeed where the updater's does not. The prober asks from a process with no console --
+  // the updater's situation -- and the outcome of THAT is what the run below is judged against.
+  {
+    const std::wstring intEvent = eventName + L"-integration";
+
+    // Case 1: a process that destroys its window and then exits shortly after. The attempt must
+    // get past Prepare and reach the swap.
+    {
+      HANDLE quit = CreateEventW(nullptr, TRUE, FALSE, intEvent.c_str());
+      HANDLE up = CreateEventW(nullptr, TRUE, FALSE, (intEvent + L"-up").c_str());
+      HANDLE goClose = CreateEventW(nullptr, TRUE, FALSE, (intEvent + L"-close").c_str());
+      HANDLE gone = CreateEventW(nullptr, TRUE, FALSE, (intEvent + L"-gone").c_str());
+      std::wstring cmdI = L"\"" + own_path() + L"\" --fixture-closing " + intEvent;
+      std::vector<wchar_t> mutableCmdI(cmdI.begin(), cmdI.end());
+      mutableCmdI.push_back(L'\0');
+      STARTUPINFOW siI{};
+      siI.cb = sizeof(siI);
+      PROCESS_INFORMATION pI{};
+      const bool startedI =
+          quit && up && goClose && gone &&
+          CreateProcessW(nullptr, mutableCmdI.data(), nullptr, nullptr, FALSE, DETACHED_PROCESS,
+                         nullptr, nullptr, &siI, &pI) != FALSE;
+      check("integration: the delayed-exit fixture started", startedI);
+      if (startedI) {
+        CloseHandle(pI.hThread);
+        WaitForSingleObject(up, 10000);
+        SetEvent(goClose);
+        WaitForSingleObject(gone, 10000);
+
+        // It leaves shortly after the window goes -- the shape of a handoff.
+        std::thread release([quit] {
+          std::this_thread::sleep_for(std::chrono::milliseconds(250));
+          SetEvent(quit);
+        });
+
+        wchar_t tempI[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempI);
+        const std::wstring instI = std::wstring(tempI) + L"gnlink-int-install";
+        const std::wstring stgI = std::wstring(tempI) + L"gnlink-int-staging";
+        CreateDirectoryW(instI.c_str(), nullptr);
+        CreateDirectoryW(stgI.c_str(), nullptr);
+        UpdateEffectsConfig cI = config_for(instI, stgI, pI.dwProcessId);
+        cI.stopSettleMs = 5000;   // generous: the fixture leaves in ~250ms
+        cI.quiesceTimeoutMs = 8000;
+        WindowsUpdateEffects eI(cI);
+        const bool preparedI = eI.PrepareForSwap();
+        check("integration: a window-destroyed process that then exits does NOT abandon",
+              preparedI, eI.last_error());
+        check("integration: ...and quiesce agrees it is gone", eI.Quiesce(), eI.last_error());
+        release.join();
+        WaitForSingleObject(pI.hProcess, 10000);
+        CloseHandle(pI.hProcess);
+        RemoveDirectoryW(stgI.c_str());
+        RemoveDirectoryW(instI.c_str());
+      }
+      if (quit) CloseHandle(quit);
+      if (up) CloseHandle(up);
+      if (goClose) CloseHandle(goClose);
+      if (gone) CloseHandle(gone);
+    }
+
+    // Case 2: a process that destroys its window and STAYS. The attempt must abandon, and nothing
+    // may be swapped.
+    {
+      const std::wstring stayEvent = eventName + L"-integration-stay";
+      HANDLE quit = CreateEventW(nullptr, TRUE, FALSE, stayEvent.c_str());
+      HANDLE up = CreateEventW(nullptr, TRUE, FALSE, (stayEvent + L"-up").c_str());
+      HANDLE goClose = CreateEventW(nullptr, TRUE, FALSE, (stayEvent + L"-close").c_str());
+      HANDLE gone = CreateEventW(nullptr, TRUE, FALSE, (stayEvent + L"-gone").c_str());
+      std::wstring cmdS = L"\"" + own_path() + L"\" --fixture-closing " + stayEvent;
+      std::vector<wchar_t> mutableCmdS(cmdS.begin(), cmdS.end());
+      mutableCmdS.push_back(L'\0');
+      STARTUPINFOW siS{};
+      siS.cb = sizeof(siS);
+      PROCESS_INFORMATION pS{};
+      const bool startedS =
+          quit && up && goClose && gone &&
+          CreateProcessW(nullptr, mutableCmdS.data(), nullptr, nullptr, FALSE, DETACHED_PROCESS,
+                         nullptr, nullptr, &siS, &pS) != FALSE;
+      check("integration: the staying fixture started", startedS);
+      if (startedS) {
+        CloseHandle(pS.hThread);
+        WaitForSingleObject(up, 10000);
+        SetEvent(goClose);
+        WaitForSingleObject(gone, 10000);
+
+        wchar_t tempS[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempS);
+        const std::wstring instS = std::wstring(tempS) + L"gnlink-int2-install";
+        const std::wstring stgS = std::wstring(tempS) + L"gnlink-int2-staging";
+        CreateDirectoryW(instS.c_str(), nullptr);
+        CreateDirectoryW(stgS.c_str(), nullptr);
+        UpdateEffectsConfig cS = config_for(instS, stgS, pS.dwProcessId);
+        cS.stopSettleMs = 400;
+        WindowsUpdateEffects eS(cS);
+
+        // From here the ask succeeds (console), so Prepare passes. The prober says what the
+        // updater would get, and that is the case being pinned.
+        std::wstring cmdP = L"\"" + own_path() + L"\" --fixture-askprobe " +
+                            std::to_wstring(pS.dwProcessId);
+        std::vector<wchar_t> mutableCmdP(cmdP.begin(), cmdP.end());
+        mutableCmdP.push_back(L'\0');
+        STARTUPINFOW siP{};
+        siP.cb = sizeof(siP);
+        PROCESS_INFORMATION pP{};
+        if (CreateProcessW(nullptr, mutableCmdP.data(), nullptr, nullptr, FALSE, DETACHED_PROCESS,
+                           nullptr, nullptr, &siP, &pP)) {
+          CloseHandle(pP.hThread);
+          WaitForSingleObject(pP.hProcess, 15000);
+          DWORD code = 99;
+          GetExitCodeProcess(pP.hProcess, &code);
+          CloseHandle(pP.hProcess);
+          check("integration: a console-less ask on a staying process fails", (code & 1) == 0,
+                "code=" + std::to_string(code));
+        }
+
+        // And with that answer, the attempt abandons and nothing is swapped.
+        cS.requestStop = [](const ProcessTarget&) { return false; };
+        WindowsUpdateEffects eS2(cS);
+        const uint64_t began = GetTickCount64();
+        check("integration: a process that stays abandons the attempt", !eS2.PrepareForSwap(),
+              eS2.last_error());
+        // One tick of slack: GetTickCount64 moves in ~15.6ms steps.
+        check("integration: ...after the budget, not before",
+              GetTickCount64() - began + 32 >= 400,
+              std::to_string(GetTickCount64() - began) + "ms of a 400ms budget");
+        // A real check, not a shape: no payload and no backup may exist, because the attempt
+        // stopped before the swap. The first version compared against the wrong constant and ended
+        // in "|| true", which asserted nothing at all.
+        check("integration: ...and nothing was swapped",
+              GetFileAttributesW((instS + L"\\AlphaPayload.bin").c_str()) ==
+                      INVALID_FILE_ATTRIBUTES &&
+                  GetFileAttributesW((instS + L"\\AlphaPayload.bin.gnlink-old").c_str()) ==
+                      INVALID_FILE_ATTRIBUTES,
+              "the install dir was never written to");
+
+        SetEvent(quit);
+        WaitForSingleObject(pS.hProcess, 15000);
+        CloseHandle(pS.hProcess);
+        RemoveDirectoryW(stgS.c_str());
+        RemoveDirectoryW(instS.c_str());
+      }
+      if (quit) CloseHandle(quit);
+      if (up) CloseHandle(up);
+      if (goClose) CloseHandle(goClose);
+      if (gone) CloseHandle(gone);
+    }
+  }
+
   // ---------------------------------------------------------------- cleanup
   SetEvent(quitEvent);
   WaitForSingleObject(pi2.hProcess, 10000);
