@@ -76,6 +76,37 @@ struct ProcessTarget {
   }
 };
 
+/**
+ * What a failed OpenProcess means -- the ONE place that decides it.
+ *
+ * Five places used to answer this question and three of them answered it differently. The shape
+ * that kept coming back was "anything that is not access denied means the process is gone", which
+ * reads as a safe default and is the opposite: an unfamiliar error then removed a RUNNING process
+ * from the target list, or reported a stop that never happened, and the swap proceeded over
+ * something still holding its files.
+ *
+ * Exactly one error says the pid is not a process. Every other error -- including ones nobody has
+ * seen yet -- is a question that did not get answered, and an unanswered question is never an
+ * exit.
+ */
+enum class OpenFailure : uint8_t {
+  /** ERROR_INVALID_PARAMETER, and nothing else: there is no process with that id. */
+  NotAProcess = 0,
+  /** The question could not be asked. Access denied, and everything else. */
+  Unknown,
+};
+
+/**
+ * Classifies a Win32 error from OpenProcess.
+ *
+ * Deliberately a pure function of the error code, so the whole mapping can be checked as a table
+ * rather than only at the two codes an ordinary session can produce on demand (5 and 87).
+ */
+OpenFailure classify_open_error(uint32_t win32Error);
+
+/** Name for logs and test failure messages. */
+const char* open_failure_name(OpenFailure f);
+
 /** Why an identity could not be captured. The distinction decides whether an update may proceed. */
 enum class IdentityFailure {
   None = 0,
@@ -461,11 +492,17 @@ class WindowsUpdateEffects : public UpdateEffects {
   /**
    * One deadline for the whole stop phase, in 64-bit milliseconds.
    *
-   * It starts when PrepareForSwap begins and covers both the settle wait for requests that could
-   * not be delivered and the Quiesce wait for the ones that could. Separate budgets meant the
-   * total grew with the number of targets and with how the failure was distributed between the two
-   * stages; a bound that moves is not a bound. 32-bit GetTickCount is not used anywhere on this
-   * path -- it wraps every 49 days and the comparison then reads backwards.
+   * It starts when PrepareForSwap begins, and every wait after it -- the settle for requests that
+   * could not be delivered, the Quiesce wait for the ones that could -- is measured against it, so
+   * time already spent is subtracted from the time those waits have left. Separate budgets meant
+   * the total grew with the number of targets and with how the failure was distributed between the
+   * stages; a bound that moves is not a bound.
+   *
+   * It bounds the WAITING, not the phase. A synchronous call in progress is never interrupted by
+   * it -- an SCM round trip, an EnumWindows, an OpenProcess return when they return -- so the sum
+   * of the two budgets is not a wall-clock guarantee and nothing should be sized as though it
+   * were. 32-bit GetTickCount is not used anywhere on this path: it wraps every 49 days and the
+   * comparison then reads backwards.
    */
   uint64_t stopDeadlineMs_ = 0;
   // Windowless targets with nobody to ask: their parent is not among the targets, which means it

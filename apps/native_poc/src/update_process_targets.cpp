@@ -180,14 +180,11 @@ bool request_process_stop(const ProcessTarget& target) {
   HANDLE held = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, target.pid);
   if (!held) {
     // "Could not open" was being read as "already gone", and the two are not the same answer.
-    // ERROR_INVALID_PARAMETER is a pid that is no longer a process -- nothing to ask, so the ask
-    // succeeded vacuously. EVERY other failure is a question that did not get answered: access
-    // denied is a process we cannot even look at, and calling that success means the swap proceeds
-    // over something that may still be holding the files it is about to replace. Access denied is
-    // not death; it is not knowing -- and neither is any other error, which is why the test is now
-    // "is it exactly INVALID_PARAMETER" rather than "is it anything but access denied".
-    if (GetLastError() != ERROR_INVALID_PARAMETER) return false;
-    return true;
+    // A pid that is not a process has nothing to ask, so the ask succeeded vacuously; anything
+    // else is a question that did not get answered, and calling that success means the swap
+    // proceeds over something that may still hold the files it is about to replace. The rule
+    // itself lives in classify_open_error, once, for all five callers.
+    return classify_open_error(GetLastError()) == OpenFailure::NotAProcess;
   }
   // Three answers, not two. process_identity_matches folds "somebody else has this number" and
   // "the question could not be answered" into one false, and this function used to invert that

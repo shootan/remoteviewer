@@ -810,7 +810,8 @@ target_include_directories(remote60_update_stop_process_test PRIVATE src)
 target_compile_definitions(remote60_update_stop_process_test PRIVATE
   "REMOTE60_HOST_APP_SRC=\"${CMAKE_CURRENT_SOURCE_DIR}/src/host_app_main.cpp\""
 )
-target_link_libraries(remote60_update_stop_process_test PRIVATE bcrypt winhttp user32 advapi32)
+target_link_libraries(remote60_update_stop_process_test PRIVATE bcrypt winhttp user32 advapi32
+  remote60_test_scratch_dir)
 if(MSVC)
   target_compile_options(remote60_update_stop_process_test PRIVATE /utf-8)
 endif()
@@ -1622,6 +1623,29 @@ if(MSVC)
   target_compile_options(remote60_update_identity_match_test PRIVATE /utf-8)
 endif()
 
+# Where tests are allowed to make a mess (updater-abandon-race r5, item 3).
+#
+# Inside the build directory, which is inside the repository -- not %TEMP%, which is shared with
+# everything else on the machine. The recursive cleanup refuses anything outside this root, which
+# matters most for the fixtures meant to be run elevated.
+set(REMOTE60_TEST_SCRATCH_ROOT "${CMAKE_BINARY_DIR}/test-scratch")
+
+add_library(remote60_test_scratch_dir STATIC src/test_scratch_dir.cpp)
+target_include_directories(remote60_test_scratch_dir PUBLIC src)
+target_compile_definitions(remote60_test_scratch_dir PUBLIC
+  "REMOTE60_TEST_SCRATCH_ROOT=\"${REMOTE60_TEST_SCRATCH_ROOT}\""
+)
+if(MSVC)
+  target_compile_options(remote60_test_scratch_dir PRIVATE /utf-8)
+endif()
+
+# The boundary itself, checked: prefix traps, climbing paths, and a real junction.
+add_executable(remote60_test_scratch_dir_test src/test_scratch_dir_test.cpp)
+target_link_libraries(remote60_test_scratch_dir_test PRIVATE remote60_test_scratch_dir)
+if(MSVC)
+  target_compile_options(remote60_test_scratch_dir_test PRIVATE /utf-8)
+endif()
+
 # The SCM half of the stop, against an ISOLATED fixture service (updater-abandon-race r4, G).
 # Part 1 runs anywhere; part 2 needs elevation to install a service and reports BLOCKED without it.
 add_executable(remote60_update_service_stop_test
@@ -1639,7 +1663,8 @@ add_executable(remote60_update_service_stop_test
   src/update_signature.cpp
 )
 target_include_directories(remote60_update_service_stop_test PRIVATE src)
-target_link_libraries(remote60_update_service_stop_test PRIVATE bcrypt winhttp user32 advapi32)
+target_link_libraries(remote60_update_service_stop_test PRIVATE bcrypt winhttp user32 advapi32
+  remote60_test_scratch_dir)
 if(MSVC)
   target_compile_options(remote60_update_service_stop_test PRIVATE /utf-8)
 endif()

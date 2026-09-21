@@ -38,24 +38,44 @@ std::wstring image_path_of(HANDLE process) {
 
 }  // namespace
 
+OpenFailure classify_open_error(uint32_t win32Error) {
+  // ERROR_INVALID_PARAMETER is what OpenProcess returns for a pid that is not a process -- an id
+  // that never existed, or one whose process has exited and whose last handle has been released.
+  // That is the outcome stopping a process is FOR, so it is forgiven.
+  //
+  // Everything else is refused, and the list of what "everything else" contains is the reason this
+  // is written as one allowed value rather than as a set of denied ones:
+  //
+  //   ERROR_ACCESS_DENIED (5)      running, and out of this updater's reach
+  //   ERROR_NOT_ENOUGH_MEMORY (8)  the call failed for reasons that say nothing about the process
+  //   ERROR_INVALID_HANDLE (6)     a bug on our side, which is not evidence about theirs
+  //   anything at all               unseen, and therefore unknown
+  //
+  // A denied-set version of this ("not access denied means gone") passed every test that could be
+  // written against a real machine, because only 5 and 87 can be produced on demand from an
+  // ordinary session. It was wrong for every other value, and the table test is what says so.
+  return win32Error == ERROR_INVALID_PARAMETER ? OpenFailure::NotAProcess : OpenFailure::Unknown;
+}
+
+const char* open_failure_name(OpenFailure f) {
+  switch (f) {
+    case OpenFailure::NotAProcess: return "not-a-process";
+    case OpenFailure::Unknown: return "unknown";
+  }
+  return "?";
+}
+
 bool capture_process_identity(uint32_t pid, ProcessTarget* out, IdentityFailure* why) {
   if (why) *why = IdentityFailure::None;
   if (!out) return false;
   SetLastError(ERROR_SUCCESS);
   HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
   if (!h) {
-    // The distinction the caller needs, and only ONE error earns the benefit of the doubt.
-    //
-    // ERROR_INVALID_PARAMETER is a pid that is no longer a process -- nothing to identify, and
-    // the enumerator drops it, which is right because that is the outcome stopping it was for.
-    // Every other failure, access denied above all, is a question that did not get answered. This
-    // used to read "anything that is not access denied means gone", so an unfamiliar error
-    // silently removed a RUNNING process from the target list and the swap went ahead over it.
-    // The same rule as PrepareForSwap and Quiesce apply: one error means gone, the rest mean
-    // unknown.
+    // One shared rule, not a fourth copy of it. See classify_open_error.
     if (why) {
-      *why = (GetLastError() == ERROR_INVALID_PARAMETER) ? IdentityFailure::Gone
-                                                         : IdentityFailure::Unknowable;
+      *why = (classify_open_error(GetLastError()) == OpenFailure::NotAProcess)
+                 ? IdentityFailure::Gone
+                 : IdentityFailure::Unknowable;
     }
     return false;
   }

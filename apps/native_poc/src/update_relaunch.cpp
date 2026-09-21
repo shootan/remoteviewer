@@ -116,11 +116,13 @@ bool required_kind(RelaunchKind kind) {
 RelaunchConfig::Liveness real_liveness(const ProcessTarget& target) {
   HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, target.pid);
   if (!h) {
-    // ERROR_INVALID_PARAMETER is what a pid that no longer exists gives; anything else means the
-    // question could not be asked, which is a different answer.
-    const DWORD err = GetLastError();
-    return (err == ERROR_INVALID_PARAMETER) ? RelaunchConfig::Liveness::Exited
-                                            : RelaunchConfig::Liveness::Unknown;
+    // The same rule as the stop side, from the same function: one error means the pid is not a
+    // process, every other one means the question could not be asked. Liveness::Unknown is not a
+    // synonym for Exited here either -- a relaunch decision made on an unanswered question starts
+    // a second copy of something already running.
+    return (classify_open_error(GetLastError()) == OpenFailure::NotAProcess)
+               ? RelaunchConfig::Liveness::Exited
+               : RelaunchConfig::Liveness::Unknown;
   }
   const bool signalled = WaitForSingleObject(h, 0) == WAIT_OBJECT_0;
   if (signalled) {

@@ -181,6 +181,118 @@ int main(int argc, char** argv) {
             std::string(nm(IdentityMatch::Different)) != nm(IdentityMatch::Unknown) &&
             std::string(nm(IdentityMatch::Same)) != nm(IdentityMatch::Unknown));
 
+  // ------------------------------------------------- every open error, not just the two producible
+  //
+  // The gap r4 reported and could not close: only ERROR_ACCESS_DENIED and ERROR_INVALID_PARAMETER
+  // can be produced on demand from an ordinary session, so a rule written as "anything that is not
+  // access denied means the process is gone" passed every test that touched a real machine. It is
+  // wrong for every other value, and nothing said so.
+  //
+  // classify_open_error is now the single place that decides, for all seven callers, and being a
+  // pure function of the error code it can be checked exhaustively instead of at two points.
+  {
+    struct Case {
+      DWORD err;
+      OpenFailure expect;
+      const char* what;
+    };
+    // Chosen for what they are, not to fill a table: the one that means "no such process", the one
+    // the field actually produces, two that a failing machine produces, and values nobody has seen.
+    const Case cases[] = {
+        {ERROR_INVALID_PARAMETER, OpenFailure::NotAProcess, "87 no such process"},
+        {ERROR_ACCESS_DENIED, OpenFailure::Unknown, "5 access denied"},
+        {ERROR_NOT_ENOUGH_MEMORY, OpenFailure::Unknown, "8 out of memory"},
+        {ERROR_INVALID_HANDLE, OpenFailure::Unknown, "6 invalid handle"},
+        {ERROR_SUCCESS, OpenFailure::Unknown, "0 no error recorded"},
+        {ERROR_INVALID_FUNCTION, OpenFailure::Unknown, "1 invalid function"},
+        {ERROR_NOT_ALL_ASSIGNED, OpenFailure::Unknown, "1300 privilege not held"},
+        {ERROR_INTERNAL_ERROR, OpenFailure::Unknown, "1359 internal error"},
+        {static_cast<DWORD>(-1), OpenFailure::Unknown, "0xffffffff nothing at all"},
+    };
+    for (const Case& c : cases) {
+      const OpenFailure got = classify_open_error(c.err);
+      check(std::string("open error ") + c.what + " is " + open_failure_name(c.expect),
+            got == c.expect, open_failure_name(got));
+    }
+
+    // And the property behind the table, which is what a denied-set version of this rule breaks:
+    // ONE error means the pid is not a process, and it is 87. Swept rather than argued.
+    DWORD wrongly_forgiven = 0;
+    DWORD firstWrong = 0;
+    for (DWORD err = 0; err <= 2000; ++err) {
+      if (err == ERROR_INVALID_PARAMETER) continue;
+      if (classify_open_error(err) == OpenFailure::NotAProcess) {
+        if (wrongly_forgiven == 0) firstWrong = err;
+        ++wrongly_forgiven;
+      }
+    }
+    check("no error but 87 is read as \"the pid is not a process\"", wrongly_forgiven == 0,
+          std::to_string(wrongly_forgiven) + " others forgiven, first " +
+              std::to_string(firstWrong));
+    check("...and 87 itself still is",
+          classify_open_error(ERROR_INVALID_PARAMETER) == OpenFailure::NotAProcess);
+    check("the two names are distinct",
+          std::string(open_failure_name(OpenFailure::NotAProcess)) !=
+              open_failure_name(OpenFailure::Unknown));
+  }
+
+  // The table is only worth what its anchors are worth, so both ends are tied to the real API:
+  // the two codes this machine can actually produce are checked through OpenProcess itself.
+  {
+    SetLastError(0);
+    HANDLE denied = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, 4);
+    const DWORD deniedErr = GetLastError();
+    if (denied) {
+      CloseHandle(denied);
+      skip("the real API still answers 5 for a process out of reach",
+           "pid 4 is openable from this session, so this run cannot produce that error");
+    } else {
+      check("the real API still answers 5 for a process out of reach",
+            deniedErr == ERROR_ACCESS_DENIED, "err=" + std::to_string(deniedErr));
+      check("...which the classifier calls unknown",
+            classify_open_error(deniedErr) == OpenFailure::Unknown);
+    }
+
+    // A pid that is not a process. An odd number, which Windows never allocates -- process ids are
+    // multiples of four -- so this anchor does not depend on when the kernel gets round to freeing
+    // anything.
+    {
+      SetLastError(0);
+      HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, 0xFFFFFFFBu);
+      const DWORD goneErr = GetLastError();
+      if (h) CloseHandle(h);
+      check("the real API still answers 87 for a pid that is not a process",
+            !h && goneErr == ERROR_INVALID_PARAMETER, "err=" + std::to_string(goneErr));
+      check("...which the classifier calls not-a-process",
+            classify_open_error(goneErr) == OpenFailure::NotAProcess);
+    }
+
+    // The same thing from the other direction, and this one is allowed to skip: a child this test
+    // started, let go of, and released every handle to. Whether its pid is free by the time we
+    // look is the kernel's business and not something to assert.
+    {
+      Child c;
+      check("a child for the freed-pid case started", c.start(L"freed"));
+      const uint32_t freedPid = c.pid();
+      c.let_go();
+      CloseHandle(c.pi.hProcess);
+      CloseHandle(c.pi.hThread);
+      c.pi.hProcess = nullptr;
+      c.pi.hThread = nullptr;
+      SetLastError(0);
+      HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, freedPid);
+      const DWORD freedErr = GetLastError();
+      if (h) {
+        CloseHandle(h);
+        skip("a pid whose process has exited and been released answers 87",
+             "the pid was still openable on this run -- the kernel had not freed it yet");
+      } else {
+        check("a pid whose process has exited and been released answers 87",
+              freedErr == ERROR_INVALID_PARAMETER, "err=" + std::to_string(freedErr));
+      }
+    }
+  }
+
   // ---------------------------------------------------------------- a handle that cannot answer
   //
   // Produced, not simulated: a handle opened with SYNCHRONIZE only. It is a perfectly valid handle

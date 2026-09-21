@@ -571,9 +571,9 @@ bool WindowsUpdateEffects::PrepareForSwap() {
       CloseHandle(h);
       return signalled;
     }
-    // ERROR_INVALID_PARAMETER is a pid that is no longer a process. Anything else (access denied)
-    // means the question could not be asked, and an unanswered question is not a yes.
-    return GetLastError() == ERROR_INVALID_PARAMETER;
+    // Same rule as everywhere else: one error means "not a process", the rest mean "could not
+    // ask", and an unanswered question is not a yes.
+    return classify_open_error(GetLastError()) == OpenFailure::NotAProcess;
   };
 
   // Acquire the watches BEFORE anything is asked to stop.
@@ -584,20 +584,24 @@ bool WindowsUpdateEffects::PrepareForSwap() {
   // attempt. The previous version opened a handle only after a request had already failed, which
   // left every other question on the pid path.
   //
-  // The deadline starts HERE -- before the first OpenProcess, before the first request -- and is
-  // the single bound on everything that follows in the stop phase:
+  // The deadline starts HERE -- before the first OpenProcess, before the first request.
   //
-  //   * acquiring the watches (this loop),
-  //   * the ownership walk and every requestStop call,
-  //   * the settle wait for requests that could not be delivered,
-  //   * the quiesce wait in Quiesce() for the ones that could.
+  // WHAT IT DOES: every WAIT in the stop phase is computed against it, so time already spent is
+  // subtracted from the time the waits have left. The settle for requests that could not be
+  // delivered and the quiesce for the ones that could share one deadline rather than getting a
+  // budget each. Per-stage budgets meant the worst case grew with the number of targets and with
+  // how failures happened to be distributed between the stages, and the updater's own health
+  // timeout does not grow with either. A wait that is starved because the acquisition and the
+  // asks used the budget abandons the attempt, which is the safe direction: nothing has been
+  // swapped yet.
   //
-  // So stopSettleMs + quiesceTimeoutMs is a CEILING on the whole phase, not a pair of budgets that
-  // each stage gets in full: time spent asking is time the waits no longer have. That is the point.
-  // Per-stage deadlines meant the worst case grew with the number of targets and with how the
-  // failures happened to be distributed, and the updater's own health timeout does not grow with
-  // either. A stage that is starved because the asks took the entire budget abandons the attempt,
-  // which is the safe direction -- nothing has been swapped yet.
+  // WHAT IT DOES NOT DO, and must not be described as doing: it is not a wall-clock guarantee on
+  // the phase. Nothing here interrupts a synchronous call that is already running. OpenProcess,
+  // EnumWindows and PostMessage, and above all the SCM round trip inside request_process_stop for
+  // a service, return when they return; the deadline is consulted BETWEEN them, never during one.
+  // A single call that blocks for a minute overruns stopSettleMs + quiesceTimeoutMs by a minute
+  // and no code in this file will notice. Treating the sum as a hard upper bound -- sizing a
+  // watchdog to it, say -- would be relying on something this does not provide.
   //
   // GetTickCount64, not GetTickCount: the 32-bit counter wraps every 49 days and the comparison
   // then reads backwards, which on a long-uptime host turns a bounded wait into an instant one.
@@ -628,15 +632,15 @@ bool WindowsUpdateEffects::PrepareForSwap() {
     if (!h) {
       // Only one error means "gone": the pid is not a process. Everything else -- access denied
       // above all -- is a question we could not ask, and an unanswered question is not an exit.
-      if (GetLastError() == ERROR_INVALID_PARAMETER) {
+      const DWORD openErr = GetLastError();
+      if (classify_open_error(openErr) == OpenFailure::NotAProcess) {
         watch.gone = true;
         watches_.push_back(std::move(watch));
         continue;
       }
       lastError_ = "cannot watch pid " + std::to_string(target.pid) + " (" +
                    to_utf8(target.imagePath) + ") -- OpenProcess failed with " +
-                   std::to_string(GetLastError()) +
-                   ", so whether it stops cannot be established";
+                   std::to_string(openErr) + ", so whether it stops cannot be established";
       if (config_.trace) config_.trace(lastError_);
       return false;
     }
@@ -823,9 +827,10 @@ bool WindowsUpdateEffects::Quiesce() {
       SetLastError(0);
       HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, target.pid);
       if (!h) {
-        if (GetLastError() == ERROR_INVALID_PARAMETER) continue;
+        const DWORD openErr = GetLastError();
+        if (classify_open_error(openErr) == OpenFailure::NotAProcess) continue;
         lastError_ = "cannot tell whether pid " + std::to_string(target.pid) + " exited (error " +
-                     std::to_string(GetLastError()) + ")";
+                     std::to_string(openErr) + ")";
         return false;
       }
       owned.handle = h;

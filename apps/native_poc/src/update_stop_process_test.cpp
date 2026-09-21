@@ -34,10 +34,14 @@
 #include <thread>
 #include <vector>
 
+#include "test_scratch_dir.hpp"
 #include "update_effects.hpp"
 #include "update_process_targets.hpp"
 
 using namespace remote60::native_poc::update;
+using remote60::native_poc::test_support::make_scratch_dir;
+using remote60::native_poc::test_support::remove_scratch_tree;
+using remote60::native_poc::test_support::scratch_root;
 
 namespace {
 
@@ -423,28 +427,16 @@ void write_text(const std::wstring& path, const std::string& text) {
 }
 
 /**
- * Removes a directory and everything under it.
+ * A scratch path for this test, under the build tree.
  *
- * Only ever called on paths this test created under %TEMP%. Depth-first, and it does not follow
- * anything it did not put there -- the fixtures never create links.
+ * Not %TEMP%. This test starts real processes and swaps real files, and it cleans up recursively
+ * afterwards; doing that in a directory shared with the rest of the machine means one wrong string
+ * concatenation names somebody else's work. The root is fixed at compile time and
+ * remove_scratch_tree refuses anything outside it. See test_scratch_dir.hpp.
  */
-void remove_dir_tree(const std::wstring& dir) {
-  WIN32_FIND_DATAW found{};
-  HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &found);
-  if (h != INVALID_HANDLE_VALUE) {
-    do {
-      const std::wstring name = found.cFileName;
-      if (name == L"." || name == L"..") continue;
-      const std::wstring child = dir + L"\\" + name;
-      if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-        remove_dir_tree(child);
-      } else {
-        DeleteFileW(child.c_str());
-      }
-    } while (FindNextFileW(h, &found));
-    FindClose(h);
-  }
-  RemoveDirectoryW(dir.c_str());
+std::wstring scratch(const std::wstring& name) {
+  const std::wstring root = scratch_root();
+  return root.empty() ? std::wstring() : root + L"\\" + name;
 }
 
 std::string read_text(const std::wstring& path) {
@@ -702,10 +694,8 @@ int main(int argc, char** argv) {
       if (left.size() == 1) {
         check("...and asking it directly still cannot work", !request_process_stop(left[0]));
 
-        wchar_t temp[MAX_PATH]{};
-        GetTempPathW(MAX_PATH, temp);
-        const std::wstring inst = std::wstring(temp) + L"gnlink-orphan-install";
-        const std::wstring stg = std::wstring(temp) + L"gnlink-orphan-staging";
+        const std::wstring inst = scratch(L"gnlink-orphan-install");
+        const std::wstring stg = scratch(L"gnlink-orphan-staging");
         CreateDirectoryW(inst.c_str(), nullptr);
         CreateDirectoryW(stg.c_str(), nullptr);
         UpdateEffectsConfig c = config_for(inst, stg, op);
@@ -753,10 +743,8 @@ int main(int argc, char** argv) {
       check("an orphan that keeps running is still there", orphaned,
             std::to_string(fixture_children(kp).size()) + " left");
 
-      wchar_t temp[MAX_PATH]{};
-      GetTempPathW(MAX_PATH, temp);
-      const std::wstring inst = std::wstring(temp) + L"gnlink-orphan2-install";
-      const std::wstring stg = std::wstring(temp) + L"gnlink-orphan2-staging";
+      const std::wstring inst = scratch(L"gnlink-orphan2-install");
+      const std::wstring stg = scratch(L"gnlink-orphan2-staging");
       CreateDirectoryW(inst.c_str(), nullptr);
       CreateDirectoryW(stg.c_str(), nullptr);
       UpdateEffectsConfig c = config_for(inst, stg, kp);
@@ -864,10 +852,8 @@ int main(int argc, char** argv) {
   check("the fixture is up again", up2, std::to_string(fixture_children(parentPid2).size()));
 
   {
-    wchar_t temp[MAX_PATH]{};
-    GetTempPathW(MAX_PATH, temp);
-    const std::wstring install = std::wstring(temp) + L"gnlink-stop-install";
-    const std::wstring staging = std::wstring(temp) + L"gnlink-stop-staging";
+    const std::wstring install = scratch(L"gnlink-stop-install");
+    const std::wstring staging = scratch(L"gnlink-stop-staging");
     CreateDirectoryW(install.c_str(), nullptr);
     CreateDirectoryW(staging.c_str(), nullptr);
 
@@ -999,10 +985,8 @@ int main(int argc, char** argv) {
         check("asking the leaf directly cannot work", !request_process_stop(*leafT));
       }
 
-      wchar_t temp3[MAX_PATH]{};
-      GetTempPathW(MAX_PATH, temp3);
-      const std::wstring inst3 = std::wstring(temp3) + L"gnlink-3tier-install";
-      const std::wstring stg3 = std::wstring(temp3) + L"gnlink-3tier-staging";
+      const std::wstring inst3 = scratch(L"gnlink-3tier-install");
+      const std::wstring stg3 = scratch(L"gnlink-3tier-staging");
       CreateDirectoryW(inst3.c_str(), nullptr);
       CreateDirectoryW(stg3.c_str(), nullptr);
 
@@ -1064,10 +1048,8 @@ int main(int argc, char** argv) {
       const bool upH = wait_until([root] { return fixture_tree(root).size() == 3; }, 20000);
       check("hold fixture is up", upH, std::to_string(fixture_tree(root).size()) + " process(es)");
 
-      wchar_t tempH[MAX_PATH]{};
-      GetTempPathW(MAX_PATH, tempH);
-      const std::wstring instH = std::wstring(tempH) + L"gnlink-hold-install";
-      const std::wstring stgH = std::wstring(tempH) + L"gnlink-hold-staging";
+      const std::wstring instH = scratch(L"gnlink-hold-install");
+      const std::wstring stgH = scratch(L"gnlink-hold-staging");
       CreateDirectoryW(instH.c_str(), nullptr);
       CreateDirectoryW(stgH.c_str(), nullptr);
 
@@ -1135,10 +1117,8 @@ int main(int argc, char** argv) {
       const bool upR = wait_until([root] { return fixture_tree(root).size() == 3; }, 20000);
       check("race fixture is up", upR, std::to_string(fixture_tree(root).size()) + " process(es)");
 
-      wchar_t tempR[MAX_PATH]{};
-      GetTempPathW(MAX_PATH, tempR);
-      const std::wstring instR = std::wstring(tempR) + L"gnlink-race-install";
-      const std::wstring stgR = std::wstring(tempR) + L"gnlink-race-staging";
+      const std::wstring instR = scratch(L"gnlink-race-install");
+      const std::wstring stgR = scratch(L"gnlink-race-staging");
       CreateDirectoryW(instR.c_str(), nullptr);
       CreateDirectoryW(stgR.c_str(), nullptr);
 
@@ -1308,10 +1288,8 @@ int main(int argc, char** argv) {
               std::to_string(all.size()) + " targets enumerated");
 
         // And the swap refuses, naming it -- the enumerator and the guard, end to end.
-        wchar_t tempD[MAX_PATH]{};
-        GetTempPathW(MAX_PATH, tempD);
-        const std::wstring instD = std::wstring(tempD) + L"gnlink-denied-install";
-        const std::wstring stgD = std::wstring(tempD) + L"gnlink-denied-staging";
+        const std::wstring instD = scratch(L"gnlink-denied-install");
+        const std::wstring stgD = scratch(L"gnlink-denied-staging");
         CreateDirectoryW(instD.c_str(), nullptr);
         CreateDirectoryW(stgD.c_str(), nullptr);
         // fixture_children(deniedPid) is exactly this one process: it matches on t.pid, and this
@@ -1441,10 +1419,8 @@ int main(int argc, char** argv) {
         }
       }
 
-      wchar_t tempC[MAX_PATH]{};
-      GetTempPathW(MAX_PATH, tempC);
-      const std::wstring instC = std::wstring(tempC) + L"gnlink-closing-install";
-      const std::wstring stgC = std::wstring(tempC) + L"gnlink-closing-staging";
+      const std::wstring instC = scratch(L"gnlink-closing-install");
+      const std::wstring stgC = scratch(L"gnlink-closing-staging");
       CreateDirectoryW(instC.c_str(), nullptr);
       CreateDirectoryW(stgC.c_str(), nullptr);
       // The link from that false to the abandoned attempt. This test is a console program, so its
@@ -1530,10 +1506,8 @@ int main(int argc, char** argv) {
           SetEvent(quit);
         });
 
-        wchar_t tempI[MAX_PATH]{};
-        GetTempPathW(MAX_PATH, tempI);
-        const std::wstring instI = std::wstring(tempI) + L"gnlink-int-install";
-        const std::wstring stgI = std::wstring(tempI) + L"gnlink-int-staging";
+        const std::wstring instI = scratch(L"gnlink-int-install");
+        const std::wstring stgI = scratch(L"gnlink-int-staging");
         CreateDirectoryW(instI.c_str(), nullptr);
         CreateDirectoryW(stgI.c_str(), nullptr);
         UpdateEffectsConfig cI = config_for(instI, stgI, pI.dwProcessId);
@@ -1581,10 +1555,8 @@ int main(int argc, char** argv) {
         SetEvent(goClose);
         WaitForSingleObject(gone, 10000);
 
-        wchar_t tempS[MAX_PATH]{};
-        GetTempPathW(MAX_PATH, tempS);
-        const std::wstring instS = std::wstring(tempS) + L"gnlink-int2-install";
-        const std::wstring stgS = std::wstring(tempS) + L"gnlink-int2-staging";
+        const std::wstring instS = scratch(L"gnlink-int2-install");
+        const std::wstring stgS = scratch(L"gnlink-int2-staging");
         CreateDirectoryW(instS.c_str(), nullptr);
         CreateDirectoryW(stgS.c_str(), nullptr);
         UpdateEffectsConfig cS = config_for(instS, stgS, pS.dwProcessId);
@@ -1663,7 +1635,7 @@ int main(int argc, char** argv) {
         };
 
         // ---- run 1: the process stays. The attempt must abandon, and nothing may move.
-        const std::wstring runDir = std::wstring(tempS) + L"gnlink-int2-run";
+        const std::wstring runDir = scratch(L"gnlink-int2-run");
         seed_run_dir(runDir);
         DWORD code = 99;
         uint64_t elapsed = 0;
@@ -1703,7 +1675,7 @@ int main(int argc, char** argv) {
 
         // ---- run 2: the same failed ask, but the process leaves during the settle. This is the
         // case the whole change exists for: a refused request is not a refusal to go.
-        const std::wstring runDir2 = std::wstring(tempS) + L"gnlink-int2-run-go";
+        const std::wstring runDir2 = scratch(L"gnlink-int2-run-go");
         seed_run_dir(runDir2);
         DWORD code2 = 99;
         uint64_t elapsed2 = 0;
@@ -1738,8 +1710,8 @@ int main(int argc, char** argv) {
         // it -- so the staging directory has a release folder in it and does not just go away.
         for (const std::wstring& d : {runDir, runDir2}) {
           DeleteFileW((d + L"-run-result.txt").c_str());
-          remove_dir_tree(d + L"-staging");
-          remove_dir_tree(d);
+          remove_scratch_tree(d + L"-staging");
+          remove_scratch_tree(d);
         }
 
         SetEvent(quit);
@@ -1756,6 +1728,35 @@ int main(int argc, char** argv) {
   }
 
   // ---------------------------------------------------------------- cleanup
+  //
+  // Every scratch directory this test names, swept at the end and REPORTED. Individual cases
+  // remove what they made, but one of them (the hold case) never did, and while these lived in
+  // %TEMP% nobody noticed -- a stray directory there looks like every other stray directory. In
+  // the build tree it is visible, and a directory that will not go means a fixture this test
+  // started is still holding a file in it, which is worth failing over rather than tidying away.
+  {
+    const wchar_t* names[] = {
+        L"gnlink-orphan-install",  L"gnlink-orphan-staging",  L"gnlink-orphan2-install",
+        L"gnlink-orphan2-staging", L"gnlink-stop-install",    L"gnlink-stop-staging",
+        L"gnlink-3tier-install",   L"gnlink-3tier-staging",   L"gnlink-hold-install",
+        L"gnlink-hold-staging",    L"gnlink-race-install",    L"gnlink-race-staging",
+        L"gnlink-denied-install",  L"gnlink-denied-staging",  L"gnlink-closing-install",
+        L"gnlink-closing-staging", L"gnlink-int-install",     L"gnlink-int-staging",
+        L"gnlink-int2-install",    L"gnlink-int2-staging",    L"gnlink-int2-run",
+        L"gnlink-int2-run-staging", L"gnlink-int2-run-go",    L"gnlink-int2-run-go-staging",
+    };
+    std::string left;
+    for (const wchar_t* name : names) {
+      const std::wstring dir = scratch(name);
+      if (GetFileAttributesW(dir.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+      if (!remove_scratch_tree(dir)) {
+        if (!left.empty()) left += ", ";
+        left += std::string(std::wstring(name).begin(), std::wstring(name).end());
+      }
+    }
+    check("every scratch directory this test made was removed", left.empty(), left);
+  }
+
   SetEvent(quitEvent);
   WaitForSingleObject(pi2.hProcess, 10000);
   CloseHandle(pi2.hProcess);
