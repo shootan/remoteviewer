@@ -96,17 +96,27 @@ std::wstring child_note_path(const std::wstring& ownerTag, uint32_t childPid) {
 }
 
 /**
- * The test's pid, taken from the event name it was started with.
+ * The test's pid, taken from the event name a fixture was started with.
  *
- * Every name begins "gnlink-stop-fixture-<pid>" and several have a suffix after that (-denied,
- * -leaf and so on). Taking the last dash-separated field gives the SUFFIX for those, which left
- * their notes out of the end-of-run sweep -- so this takes the digits that follow the prefix.
+ * Two earlier versions of this got it wrong, and the notes they mis-tagged are how it was found.
+ * The last dash-separated field is the SUFFIX for names like "...-denied" and "...-leaf". The
+ * digits immediately after the prefix are absent for names like
+ *
+ *     Local\\gnlink-stop-fixture-hold-19120
+ *     Local\\gnlink-stop-fixture-race-19120-leaf
+ *
+ * which two blocks build with a word between the prefix and the pid. So this takes the FIRST run
+ * of digits anywhere after the prefix, which is the pid in every shape the fixtures use -- the
+ * trailing -r<n> that FixtureRound appends comes later and cannot be mistaken for it.
+ *
+ * Getting this right is what keeps the end-of-run sweep to a run's own notes.
  */
 std::wstring owner_tag_of(const std::wstring& eventName) {
   const std::wstring marker = L"gnlink-stop-fixture-";
   const size_t at = eventName.find(marker);
   if (at == std::wstring::npos) return L"unknown";
   size_t i = at + marker.size();
+  while (i < eventName.size() && !iswdigit(eventName[i])) ++i;
   std::wstring digits;
   while (i < eventName.size() && iswdigit(eventName[i])) digits.push_back(eventName[i++]);
   return digits.empty() ? L"unknown" : digits;
@@ -144,13 +154,15 @@ int run_fixture_child(const std::wstring& eventName) {
   SetLastError(0);
   HANDLE quit = OpenEventW(SYNCHRONIZE, FALSE, eventName.c_str());
   if (!quit) {
-    note_child_exit(eventName, "open=FAILED err=" + std::to_string(GetLastError()));
+    note_child_exit(eventName, "open=FAILED err=" + std::to_string(GetLastError()) +
+                                   " event=" + std::string(eventName.begin(), eventName.end()));
     return 90;
   }
   const DWORD waited = WaitForSingleObject(quit, 120000);
   CloseHandle(quit);
   note_child_exit(eventName, "open=ok wait=" + std::to_string(waited) + " after " +
-                                 std::to_string(GetTickCount() - began) + "ms");
+                                 std::to_string(GetTickCount() - began) + "ms event=" +
+                                 std::string(eventName.begin(), eventName.end()));
   return 0;
 }
 
@@ -2039,10 +2051,24 @@ int main(int argc, char** argv) {
   CloseHandle(pi2.hProcess);
   CloseHandle(quitEvent);
 
-  // The children's notes, swept -- but only on a clean run. When something failed they are the
-  // evidence for why, and evidence is not tidied away.
+  // A note belonging to somebody else, planted here so the sweep below has something it must
+  // NOT take. Another test process running at the same time, or a previous run that failed and
+  // left its evidence, both look exactly like this.
+  const std::wstring foreignNote =
+      scratch_root().empty()
+          ? std::wstring()
+          : scratch_root() + L"\\childexit-999999-1.txt";
+  if (!foreignNote.empty()) write_text(foreignNote, "another run's evidence");
+
+  // The children's notes, swept -- but only on a clean run, and only THIS run's.
+  //
+  // It used to take childexit-*.txt, every one of them. That deletes a concurrent run's notes
+  // while it is still using them, and a previous failing run's notes are exactly the evidence
+  // somebody is about to read. Every note is named after the test that owns it, so the pattern
+  // can say so.
   if (gFailures == 0 && gSkipped == 0 && !scratch_root().empty()) {
-    const std::wstring pattern = scratch_root() + L"\\childexit-*.txt";
+    const std::wstring pattern =
+        scratch_root() + L"\\childexit-" + std::to_wstring(GetCurrentProcessId()) + L"-*.txt";
     WIN32_FIND_DATAW found{};
     HANDLE h = FindFirstFileW(pattern.c_str(), &found);
     if (h != INVALID_HANDLE_VALUE) {
@@ -2051,6 +2077,16 @@ int main(int argc, char** argv) {
       } while (FindNextFileW(h, &found));
       FindClose(h);
     }
+  }
+
+  if (!foreignNote.empty()) {
+    // On a run that failed, nothing is swept at all, so this says so rather than passing quietly
+    // for a reason that has nothing to do with the scoping.
+    const bool survived = GetFileAttributesW(foreignNote.c_str()) != INVALID_FILE_ATTRIBUTES;
+    check("another owner's note is left alone by the sweep", survived,
+          (gFailures == 0 && gSkipped == 0) ? "the sweep ran and skipped it"
+                                            : "the run was not clean, so nothing was swept");
+    DeleteFileW(foreignNote.c_str());
   }
 
   // The totals, said out loud. A run that skips a guarded group reports fewer checks than
