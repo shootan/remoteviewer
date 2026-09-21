@@ -45,6 +45,7 @@
 #include <vector>
 
 #include "directory_client.hpp"
+#include "host_app_log.hpp"
 #include "log_upload.hpp"
 #include "host_command_line.hpp"
 #include "product_version.hpp"
@@ -183,17 +184,19 @@ std::wstring log_file_path() {
   return dir + L"\\host_app.log";
 }
 
-/** One stamped line into host_app.log. Free function because the supervisor's own is a member. */
-void append_host_app_log(const std::string& line) {
-  const std::wstring path = log_file_path();
-  if (path.empty()) return;
-  std::FILE* file = nullptr;
-  if (_wfopen_s(&file, path.c_str(), L"a") != 0 || !file) return;
-  SYSTEMTIME now{};
-  GetLocalTime(&now);
-  std::fprintf(file, "%02d-%02d %02d:%02d:%02d %s\n", now.wMonth, now.wDay, now.wHour,
-               now.wMinute, now.wSecond, line.c_str());
-  std::fclose(file);
+/**
+ * One stamped line into host_app.log, through the single writer.
+ *
+ * This used to open its own handle with _wfopen_s(path, "a") and return in silence when the open
+ * failed -- which it did for the whole life of a streaming child, because the child-output reader
+ * held the file and the CRT's fopen family asks for no sharing. The health report the updater's
+ * gate reads goes through here, so the gate could not see a host that was demonstrably online.
+ *
+ * Returns whether the line reached the file. Callers that must not lose their line check it;
+ * everything else is still fire-and-forget, but the failure is counted rather than discarded.
+ */
+bool append_host_app_log(const std::string& line) {
+  return remote60::native_poc::host_app_log().WriteStamped(line);
 }
 
 // Everything the sign-in worker produces, handed to the UI thread by value. Deliberately plain
@@ -372,34 +375,26 @@ class StreamingHostProcess {
     }
   }
 
-  void AppendLogLine(FILE* log, const std::string& line) {
-    if (!log) return;
-    std::fputs(line.c_str(), log);
-    std::fputc('\n', log);
-    std::fflush(log);
+  /**
+   * The child's own output, verbatim -- it carries its own timestamp.
+   *
+   * Through the shared writer now. This used to be a handle this class held for the child's
+   * lifetime, which is what locked append_host_app_log out of the file, and which could also
+   * overwrite it when both happened to seek to the same end.
+   */
+  void AppendLogLine(const std::string& line) {
+    remote60::native_poc::host_app_log().WriteRaw(line);
   }
 
-  FILE* OpenLog() {
-    const std::wstring path = log_file_path();
-    if (path.empty()) return nullptr;
-    // Shared open: the whole point of this file is reading it while the host runs, and the
-    // Open log button (or a curious tail) must not be locked out by our writer handle.
-    return _wfsopen(path.c_str(), L"ab", _SH_DENYNO);
-  }
-
-  /** One-off lines open their own handle; only the child-output reader keeps one. */
+  /** A supervisor line, stamped. Same writer, same lock, same rotation. */
   void AppendLogLineOnce(const std::string& line) {
-    FILE* log = OpenLog();
-    if (!log) return;
-    AppendLogLine(log, line);
-    std::fclose(log);
+    remote60::native_poc::host_app_log().WriteStamped(line);
   }
 
-  // Owns the log handle for the child's lifetime. Ownership lives here and nowhere else
-  // because rotation replaces the handle mid-run: a copy held by another thread would keep
-  // writing through a closed FILE after the swap.
+  // No longer owns a handle. The shared writer owns the only one, and rotation happens inside
+  // it under the same lock as the write -- so there is nothing here that another thread could
+  // still be writing through after a swap.
   void ReadChildOutput(HANDLE readEnd) {
-    FILE* log = OpenLog();
     std::string pending;
     char buffer[512];
     DWORD read = 0;
@@ -410,17 +405,9 @@ class StreamingHostProcess {
         std::string line = pending.substr(0, newline);
         pending.erase(0, newline + 1);
         if (!line.empty() && line.back() == '\r') line.pop_back();
-        // Rotation used to run only at Start(), which bounded nothing: a host that stays up
-        // for weeks passes the cap once and then grows for the rest of its uptime. The size
-        // check is a position query on our own append handle, cheap enough per line. When a
-        // log viewer holds the file open the rename fails and the file runs past the cap
-        // until the viewer closes; the next line's check picks it up again.
-        if (log && _ftelli64(log) > 2LL * 1024 * 1024) {
-          std::fclose(log);
-          RotateLog();
-          log = OpenLog();
-        }
-        AppendLogLine(log, line);
+        // Rotation moved into the writer, where it is under the same lock as the append. Doing
+        // it here meant the other writer could be mid-append into a file being renamed.
+        AppendLogLine(line);
         note_child_log_line(line);
         remote60::native_poc::log_upload_enqueue("host", line);
         const size_t marker = line.find("directory ");
@@ -431,7 +418,7 @@ class StreamingHostProcess {
       }
       if (pending.size() > 4096) pending.clear();
     }
-    if (log) std::fclose(log);
+    // Nothing to close: the writer owns the only handle and outlives every child.
   }
 
   // Kill the child, but do NOT close its handles: the supervisor is parked in

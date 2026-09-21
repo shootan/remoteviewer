@@ -333,6 +333,7 @@ target_link_libraries(remote60_log_upload_shutdown_test PRIVATE common ws2_32 ip
 
 # The thing a user installs: sign-in window plus tray, supervising the streaming host.
 add_executable(remote60_host_app WIN32
+  src/host_app_log.cpp
   src/host_app_main.cpp
   src/directory_client.cpp
   src/update_endpoint.cpp
@@ -1591,6 +1592,17 @@ endif()
 # no session and no sockets. /utf-8 because the round-trip cases include Korean and an emoji.
 # Control-channel resume decisions and the resume packet's wire shape (item 8, layer 1). Pure
 # logic -- no socket, no peer, no clock.
+# The single writer for host_app.log (updater-health-gate D1, items 1 and 3): both writers keep
+# every line, across rotation, and a write that fails says so.
+add_executable(remote60_host_app_log_test
+  src/host_app_log_test.cpp
+  src/host_app_log.cpp
+)
+target_include_directories(remote60_host_app_log_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_host_app_log_test PRIVATE /utf-8)
+endif()
+
 # Phase 1 measurement for updater-health-gate D2: is the rollback's ACCESS_DENIED a running
 # image or an ACL? Opens handles and closes them; deletes nothing.
 add_executable(remote60_rollback_denial_probe
