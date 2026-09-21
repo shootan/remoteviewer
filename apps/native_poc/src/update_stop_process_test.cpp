@@ -166,6 +166,87 @@ LRESULT CALLBACK fixture_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
   return DefWindowProcW(hwnd, msg, w, l);
 }
 
+/**
+ * A process that is standing down: its window is gone, and it has not exited yet.
+ *
+ * This is the state the field log records and nothing tested. The host acknowledges the handoff,
+ * destroys its window, and takes a few tens of milliseconds to finish leaving. In that window it
+ * still owns its pid, so it is neither askable nor gone.
+ *
+ * Creates a window, waits to be told, destroys it, and then stays alive until released.
+ *
+ * Started DETACHED_PROCESS, which is what makes this a stand-in for a production child. The
+ * first version used CREATE_NO_WINDOW and inherited this test's console, so the console-control
+ * fallback in request_process_stop SUCCEEDED and the reproduction measured nothing. The
+ * product's children are started by a GUI supervisor that has no console to inherit.
+ */
+/**
+ * Asks request_process_stop about one pid, from a process with no console of its own.
+ *
+ * The caller's console is what decides this, not the target's. request_process_stop falls back to
+ * GenerateConsoleCtrlEvent for a windowless process, and that call succeeds when the caller has a
+ * console the target belongs to -- which this test, a console program, does. The updater is not a
+ * console program, so in the field the fallback has nothing to work with and the ask fails.
+ *
+ * Run DETACHED_PROCESS, this has no console and answers the production question. Reports through
+ * the exit code because it has nowhere to print.
+ */
+int run_fixture_askprobe(uint32_t pid) {
+  ProcessTarget target;
+  if (!capture_process_identity(pid, &target)) return 90;
+  target.hasWindow = true;  // the stale view PrepareForSwap carries from its own enumeration
+  const bool asked = request_process_stop(target);
+  SetLastError(0);
+  const bool console = GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) != FALSE;
+  // 2 bits: asked, console fallback.
+  return (asked ? 1 : 0) + (console ? 2 : 0);
+}
+
+int run_fixture_closing(const std::wstring& eventName) {
+  const std::wstring cls = L"GNLinkClosingFixture" + std::to_wstring(GetCurrentProcessId());
+  WNDCLASSEXW wc{};
+  wc.cbSize = sizeof(wc);
+  wc.lpfnWndProc = DefWindowProcW;
+  wc.hInstance = GetModuleHandleW(nullptr);
+  wc.lpszClassName = cls.c_str();
+  RegisterClassExW(&wc);
+  HWND hwnd = CreateWindowExW(0, cls.c_str(), L"closing", WS_OVERLAPPEDWINDOW, 0, 0, 10, 10,
+                              nullptr, nullptr, wc.hInstance, nullptr);
+  if (!hwnd) return 91;
+
+  // "the window is up" -- the test waits for this before it looks.
+  HANDLE up = CreateEventW(nullptr, TRUE, FALSE, (eventName + L"-up").c_str());
+  if (up) SetEvent(up);
+
+  // Held until the test says to start standing down.
+  HANDLE close = OpenEventW(SYNCHRONIZE, FALSE, (eventName + L"-close").c_str());
+  if (close) {
+    WaitForSingleObject(close, 30000);
+    CloseHandle(close);
+  }
+  DestroyWindow(hwnd);
+  UnregisterClassW(cls.c_str(), wc.hInstance);
+  // Pump briefly so the destroy is actually processed before we report it gone.
+  MSG msg{};
+  const DWORD until = GetTickCount() + 300;
+  while (GetTickCount() < until) {
+    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
+    Sleep(10);
+  }
+  HANDLE gone = CreateEventW(nullptr, TRUE, FALSE, (eventName + L"-gone").c_str());
+  if (gone) SetEvent(gone);
+
+  // Still alive, still holding its pid. This is the whole point.
+  HANDLE quit = OpenEventW(SYNCHRONIZE, FALSE, eventName.c_str());
+  if (quit) {
+    WaitForSingleObject(quit, 120000);
+    CloseHandle(quit);
+  }
+  if (up) CloseHandle(up);
+  if (gone) CloseHandle(gone);
+  return 0;
+}
+
 int run_fixture_parent(const std::wstring& eventName, bool threeTier = false,
                        bool leafOutlives = false) {
   gParentEventName = eventName;
@@ -310,6 +391,13 @@ int main(int argc, char** argv) {
   if (argc >= 3 && std::string(argv[1]) == "--fixture-child") {
     const std::string name(argv[2]);
     return run_fixture_child(std::wstring(name.begin(), name.end()));
+  }
+  if (argc >= 3 && std::string(argv[1]) == "--fixture-askprobe") {
+    return run_fixture_askprobe(static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 10)));
+  }
+  if (argc >= 3 && std::string(argv[1]) == "--fixture-closing") {
+    const std::string name(argv[2]);
+    return run_fixture_closing(std::wstring(name.begin(), name.end()));
   }
   if (argc >= 3 && std::string(argv[1]) == "--fixture-denied") {
     const std::string name(argv[2]);
@@ -1066,6 +1154,144 @@ int main(int argc, char** argv) {
       }
     }
     if (deniedQuit) CloseHandle(deniedQuit);
+  }
+
+  // --------------------------------------- a process that is standing down, but has not gone
+  //
+  // The most frequent failure in the field: 23 abandoned updates since 09-10, every one of them
+  // "could not ask pid N to stop". The log of 2026-09-21 17:15 shows why -- the caller acknowledged
+  // the handoff at .423 and the attempt was abandoned at .512, 89 ms later. In between the process
+  // destroyed its window and had not yet exited.
+  //
+  // PrepareForSwap already forgives a target that is GONE. This measures the state in between,
+  // which it does not forgive, and which is what the handoff itself produces.
+  {
+    const std::wstring closingEvent = eventName + L"-closing";
+    HANDLE quit = CreateEventW(nullptr, TRUE, FALSE, closingEvent.c_str());
+    HANDLE up = CreateEventW(nullptr, TRUE, FALSE, (closingEvent + L"-up").c_str());
+    HANDLE goClose = CreateEventW(nullptr, TRUE, FALSE, (closingEvent + L"-close").c_str());
+    HANDLE gone = CreateEventW(nullptr, TRUE, FALSE, (closingEvent + L"-gone").c_str());
+
+    std::wstring cmdC = L"\"" + own_path() + L"\" --fixture-closing " + closingEvent;
+    std::vector<wchar_t> mutableCmdC(cmdC.begin(), cmdC.end());
+    mutableCmdC.push_back(L'\0');
+    STARTUPINFOW siC{};
+    siC.cb = sizeof(siC);
+    PROCESS_INFORMATION pC{};
+    const bool startedC =
+        quit && up && goClose && gone &&
+        CreateProcessW(nullptr, mutableCmdC.data(), nullptr, nullptr, FALSE, DETACHED_PROCESS,
+                       nullptr, nullptr, &siC, &pC) != FALSE;
+    check("the standing-down fixture started", startedC);
+    if (startedC) {
+      CloseHandle(pC.hThread);
+      check("...and its window is up", WaitForSingleObject(up, 10000) == WAIT_OBJECT_0);
+
+      // While the window exists it can be asked, which is the ordinary case.
+      std::vector<ProcessTarget> before = fixture_children(pC.dwProcessId);
+      check("with a window it is a target with one", before.size() == 1 && before[0].hasWindow,
+            std::to_string(before.size()) + " targets");
+
+      // Now it stands down: window destroyed, process still alive.
+      SetEvent(goClose);
+      check("...and it reports the window gone", WaitForSingleObject(gone, 10000) == WAIT_OBJECT_0);
+      check("...while still running", WaitForSingleObject(pC.hProcess, 0) == WAIT_TIMEOUT);
+
+      ProcessTarget closing;
+      check("its identity is still readable", capture_process_identity(pC.dwProcessId, &closing));
+      // hasWindow as the enumeration saw it a moment ago -- which is exactly the stale view the
+      // updater carries from PrepareForSwap's own enumeration.
+      closing.hasWindow = true;
+
+      // The window really is gone.
+      {
+        std::vector<ProcessTarget> now;
+        for (const ProcessTarget& t : fixture_targets()) {
+          if (t.pid == pC.dwProcessId) now.push_back(t);
+        }
+        check("the destroyed window is gone from enumeration",
+              now.size() == 1 && !now[0].hasWindow,
+              now.empty() ? "not enumerated" : (now[0].hasWindow ? "still has a window"
+                                                                 : "no window"));
+      }
+
+      // From HERE -- a console program -- the ask succeeds, because the console-control fallback
+      // has a console to work with. That is not the updater's situation and it is why the first
+      // version of this measurement found nothing.
+      check("from a console caller the ask still succeeds", request_process_stop(closing),
+            "the fallback finds a console");
+
+      // From a caller with no console, which is what the updater is.
+      {
+        std::wstring cmdP = L"\"" + own_path() + L"\" --fixture-askprobe " +
+                            std::to_wstring(pC.dwProcessId);
+        std::vector<wchar_t> mutableCmdP(cmdP.begin(), cmdP.end());
+        mutableCmdP.push_back(L'\0');
+        STARTUPINFOW siP{};
+        siP.cb = sizeof(siP);
+        PROCESS_INFORMATION pP{};
+        const bool startedP = CreateProcessW(nullptr, mutableCmdP.data(), nullptr, nullptr, FALSE,
+                                             DETACHED_PROCESS, nullptr, nullptr, &siP, &pP) != FALSE;
+        check("the console-less prober started", startedP);
+        if (startedP) {
+          CloseHandle(pP.hThread);
+          const bool done = WaitForSingleObject(pP.hProcess, 15000) == WAIT_OBJECT_0;
+          DWORD code = 99;
+          GetExitCodeProcess(pP.hProcess, &code);
+          CloseHandle(pP.hProcess);
+          check("the prober answered", done && code <= 3, "code=" + std::to_string(code));
+          check("MEASURED: with no console the fallback has nothing to use", (code & 2) == 0,
+                "console fallback " + std::string((code & 2) ? "SUCCEEDED" : "failed"));
+          check("MEASURED: and the ask therefore fails on a process that is standing down",
+                (code & 1) == 0,
+                std::string("request_process_stop returned ") + ((code & 1) ? "true" : "false"));
+        }
+      }
+
+      wchar_t tempC[MAX_PATH]{};
+      GetTempPathW(MAX_PATH, tempC);
+      const std::wstring instC = std::wstring(tempC) + L"gnlink-closing-install";
+      const std::wstring stgC = std::wstring(tempC) + L"gnlink-closing-staging";
+      CreateDirectoryW(instC.c_str(), nullptr);
+      CreateDirectoryW(stgC.c_str(), nullptr);
+      // The link from that false to the abandoned attempt. This test is a console program, so its
+      // own ask would succeed; the seam supplies the answer the updater actually gets, which is the
+      // one measured above.
+      UpdateEffectsConfig cC = config_for(instC, stgC, pC.dwProcessId);
+      cC.requestStop = [](const ProcessTarget&) { return false; };
+      WindowsUpdateEffects eC(cC);
+      const bool prepared = eC.PrepareForSwap();
+      check("a failed ask on a process still running abandons the attempt", !prepared,
+            eC.last_error());
+      check("...with the exact error the field log shows",
+            eC.last_error().find("could not ask pid") != std::string::npos &&
+                eC.last_error().find(std::to_string(pC.dwProcessId)) != std::string::npos,
+            eC.last_error());
+      RemoveDirectoryW(stgC.c_str());
+      RemoveDirectoryW(instC.c_str());
+
+      // The negative control, and the reason this is a race rather than a refusal: once it has
+      // actually gone, the very same target is forgiven and the attempt proceeds.
+      SetEvent(quit);
+      const bool left = WaitForSingleObject(pC.hProcess, 15000) == WAIT_OBJECT_0;
+      check("the fixture exits when released", left);
+      if (left) {
+        CreateDirectoryW(instC.c_str(), nullptr);
+        CreateDirectoryW(stgC.c_str(), nullptr);
+        UpdateEffectsConfig cG = config_for(instC, stgC, pC.dwProcessId);
+        cG.enumerateTargets = [closing]() { return std::vector<ProcessTarget>{closing}; };
+        WindowsUpdateEffects eG(cG);
+        check("once it has gone, the same target is forgiven", eG.PrepareForSwap(),
+              eG.last_error());
+        RemoveDirectoryW(stgC.c_str());
+        RemoveDirectoryW(instC.c_str());
+      }
+      CloseHandle(pC.hProcess);
+    }
+    if (quit) CloseHandle(quit);
+    if (up) CloseHandle(up);
+    if (goClose) CloseHandle(goClose);
+    if (gone) CloseHandle(gone);
   }
 
   // ---------------------------------------------------------------- cleanup
