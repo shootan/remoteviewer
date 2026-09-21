@@ -279,7 +279,15 @@ function cleanup() {
   });
 
   await stopServer(server);
+
+  // The connect diagnostics. This one starts and stops its own server on its own ports,
+  // because it asserts on what the server prints and the ones above are spawned with stdout
+  // discarded. Run last: it waits out a relay sweep, so it is the slow one.
+  console.log('\n--- connect diagnostics ---');
+  const connectDiag = await runTest(['connect_diag_test.js']);
+
   cleanup();
-  console.log(sameLan === 0 ? '\nRESULT: ALL PASS' : '\nRESULT: FAILED');
-  process.exit(sameLan);
+  const ok = sameLan === 0 && connectDiag.code === 0;
+  console.log(ok ? '\nRESULT: ALL PASS' : '\nRESULT: FAILED');
+  process.exit(ok ? 0 : 1);
 })();

@@ -129,6 +129,46 @@ const WAKE_HOST_FRESH_MS = 90 * 1000;
 const wakeLastSentByHost = new Map();
 const wakeStats = { sent: 0, suppressed: 0, skippedStale: 0, failed: 0 };
 
+// ---------------------------------------------------------------- CONNECT-DIAG
+//
+// Observation only. Nothing below changes what the server does; it records when things happened,
+// so the next intermittent failure can be settled from the logs instead of from a hypothesis.
+//
+// What was missing when PC1 could not reach PC2 on 2026-09-21: the server logged `[observe]` only
+// for a host on its own LAN, never logged a heartbeat at all, never said whether a wake datagram
+// actually left the socket, and never said when a host finally collected the capability that had
+// been waiting for it. The host's reject line said "invalid directory capability" for a capability
+// that was correct and simply had not arrived yet -- and there was no way to measure that delay.
+//
+// Every line here is bounded: per host, per token, or once per session.
+const DIAG_HOST_LINE_MIN_MS = 20000;   // under the 25 s heartbeat, so a normal cadence is not thinned
+const DIAG_RELAY_SILENT_MS = 3000;     // how long a bound session may go unanswered before saying so
+const diagHostLineAt = new Map();      // hostId  -> last heartbeat line
+const diagObserveLineAt = new Map();   // tokenId -> last observe line
+const diagObserveTuple = new Map();    // tokenId -> last tuple seen, so a move is never thinned away
+
+/** A short, stable id for a token that must not appear in a log. Never reversible to the token. */
+function diagTokenId(token) {
+  return crypto.createHash('sha256').update(String(token)).digest('hex').slice(0, 8);
+}
+
+/**
+ * True at most once per `minMs` for this key -- except that `force` always passes.
+ *
+ * The exception is the point: a rate limit that also hid the moment a host's tuple moved would
+ * throw away the one line worth having. `force` is a parameter rather than a short-circuit at the
+ * call site because the timestamp has to move whenever a line is printed, by either route. Written
+ * as `force || shouldLog(...)` it did not, so the first line -- always a forced one, since a host's
+ * previous tuple is empty until it has heartbeated once -- left the limiter unprimed and the very
+ * next heartbeat printed again.
+ */
+function diagShouldLog(map, key, now, minMs, force) {
+  const last = map.get(key) || 0;
+  if (!force && now - last < minMs) return false;
+  map.set(key, now);
+  return true;
+}
+
 // Correlates a probe packet back to the connect that provoked it. Keyed by source IP rather than
 // ip:port on purpose: a mapping whose port differs from the one seen on the observe socket is
 // itself a finding (endpoint-dependent NAT), and keying on the port would hide exactly that.
@@ -924,12 +964,18 @@ function sendWakePunch(sock, host, connectId) {
   // Aim only at an address a heartbeat confirmed recently.
   if (Date.now() - host.lastSeen > WAKE_HOST_FRESH_MS) {
     wakeStats.skippedStale++;
+    // CONNECT-DIAG: a wake that never goes has to say so against the connect that wanted it.
+    // Counting it in wakeStats alone made a stale host and a healthy one look identical.
+    console.log(`[wake] connect=${connectId} skipped reason=stale-host ` +
+                `lastSeenMs=${Date.now() - host.lastSeen} limitMs=${WAKE_HOST_FRESH_MS}`);
     return false;
   }
   // A client that retries three times in a second means one host to wake, not three bursts at it.
   const last = wakeLastSentByHost.get(host.hostId) || 0;
   if (Date.now() - last < WAKE_MIN_INTERVAL_MS) {
     wakeStats.suppressed++;
+    console.log(`[wake] connect=${connectId} skipped reason=rate ` +
+                `sinceLastMs=${Date.now() - last} limitMs=${WAKE_MIN_INTERVAL_MS}`);
     return false;
   }
   wakeLastSentByHost.set(host.hostId, Date.now());
@@ -954,11 +1000,18 @@ function sendWakePunch(sock, host, connectId) {
       if (endpointKey(ip, port) !== scheduledKey) {
         console.log(`[wake] connect=${connectId} tx moved to ${ip}:${port} (+${delay}ms)`);
       }
+      // CONNECT-DIAG: per datagram, and on the way out rather than on the way in. "The wake was
+      // sent" was one line covering three datagrams, so a partial send and a complete one read the
+      // same -- and a send that failed silently read the same as one that left.
+      const txAt = Date.now();
       sock.send(packet, port, ip, (err) => {
         if (err) {
           wakeStats.failed++;
-          console.error(`[wake] connect=${connectId} tx failed: ${err.message}`);
+          console.error(`[wake] connect=${connectId} tx[${delay}] failed to ${ip}:${port}: ${err.message}`);
+          return;
         }
+        console.log(`[wake] connect=${connectId} tx[${delay}] sent ${ip}:${port} via=${now.via} ` +
+                    `queuedMs=${Date.now() - txAt}`);
       });
     }, delay).unref();
   }
@@ -1064,6 +1117,14 @@ function relaySweep() {
     if (now > rec.expiresAt) relayEligibleByIp.delete(ip);
   }
   for (const session of [...relaySessions]) {
+    // CONNECT-DIAG: said once, while the session is still open, so the silence is visible before
+    // the close line rather than only in the post-mortem it produces.
+    if (!session.dropped && !session.silentReported && session.pktH2C === 0 &&
+        now - session.createdAt > DIAG_RELAY_SILENT_MS) {
+      session.silentReported = true;
+      console.log(`[relay] connect=${session.connectId} host silent h2c=0 c2h=${session.pktC2H} ` +
+                  `host=${session.hostIp}:${session.hostPort} afterBindMs=${now - session.createdAt}`);
+    }
     if (session.state === 'provisional' && now - session.createdAt > RELAY_HANDSHAKE_TTL_MS) {
       relayDropSession(session, 'no HelloAck');
     } else if (now - session.lastClientAt > RELAY_IDLE_TTL_MS) {
@@ -1150,6 +1211,9 @@ function relayBindSession(rinfo, parsed) {
     ackMs: null,
     pktC2H: 0, pktH2C: 0, bytesC2H: 0, bytesH2C: 0,
     dropped: false,
+    // CONNECT-DIAG: one line each, the first time they happen. `closed reason=no HelloAck
+    // h2c=0/0B` said the host never answered and nothing said whether it was ever reached.
+    firstC2HAt: 0, firstH2CAt: 0, silentReported: false,
   };
   relaySessions.add(session);
   relaySessionByClient.set(clientKey, session);
@@ -1165,6 +1229,14 @@ function relayForwardToHost(session, msg) {
   session.lastClientAt = Date.now();
   session.pktC2H++;
   session.bytesC2H += msg.length;
+  // CONNECT-DIAG: the first hop towards the host, once per session.
+  if (!session.firstC2HAt) {
+    session.firstC2HAt = Date.now();
+    const packet = parseHandshakePacket(msg);
+    console.log(`[relay] connect=${session.connectId} first c2h -> ${session.hostIp}:` +
+                `${session.hostPort} kind=${packet ? packet.kind : 'media'} ` +
+                `afterBindMs=${session.firstC2HAt - session.createdAt}`);
+  }
   if (observeSock) observeSock.send(msg, session.hostPort, session.hostIp);
 }
 
@@ -1254,6 +1326,14 @@ function relayHandleHostPacket(msg, rinfo) {
   session.lastHostAt = Date.now();
   session.pktH2C++;
   session.bytesH2C += msg.length;
+  // CONNECT-DIAG: the first sign of life from the host, once per session. The gap from the first
+  // c2h is what separates "the host never heard us" from "the host heard us and refused".
+  if (!session.firstH2CAt) {
+    session.firstH2CAt = Date.now();
+    console.log(`[relay] connect=${session.connectId} first h2c <- ${rinfo.address}:${rinfo.port} ` +
+                `afterBindMs=${session.firstH2CAt - session.createdAt} ` +
+                `afterFirstC2HMs=${session.firstC2HAt ? session.firstH2CAt - session.firstC2HAt : -1}`);
+  }
   if (session.state === 'provisional') {
     const ack = parseHandshakePacket(msg);
     // The host sets this bit only after authorising the capability, and the client refuses an Ack
@@ -1307,11 +1387,35 @@ async function handleHostHeartbeat(req, res) {
   // very first one, on no addresses at all, which is how a session lands on the router and stays
   // there. relayFollowHostWire takes the aim as an argument so this order cannot be lost again.
   relayFollowHostWire(host, previousWire, hostSendTargetFor(host, onServerLan));
+  // CONNECT-DIAG: that a host is heartbeating at all, and from where. The server logged this
+  // for a host on its own LAN and for nobody else, so an off-LAN host's arrival -- the one case
+  // the 2026-09-21 failure turned on -- left no trace whatever. Rate limited per host, except
+  // that a moved tuple and a heartbeat carrying capabilities always print.
+  {
+    const nowMs = Date.now();
+    const moved = previousWire.ip !== host.wireIp || previousWire.port !== host.wirePort;
+    if (diagShouldLog(diagHostLineAt, hostId, nowMs, DIAG_HOST_LINE_MIN_MS, moved)) {
+      const aim = hostSendTargetFor(host, onServerLan);
+      console.log(`[host-hb] host=${hostId.slice(0, 8)} wire=${host.wireIp}:${host.wirePort} ` +
+                  `public=${host.publicIp}:${host.publicUdpPort} aim=${aim.ip}:${aim.port} ` +
+                  `via=${aim.via} localIps=${(host.localIps || []).length} ` +
+                  `sinceLastMs=${host.lastSeen ? nowMs - host.lastSeen : -1}` +
+                  (moved ? ` moved-from=${previousWire.ip || '-'}:${previousWire.port || 0}` : ''));
+    }
+  }
   host.lastSeen = Date.now();
   saveStoreSoon();
 
   const punches = pendingPunch.get(hostId) || [];
   pendingPunch.delete(hostId);
+  // CONNECT-DIAG: the moment the host takes what was waiting for it, and how long each one waited.
+  // This is the number the whole investigation was missing -- "the capability was correct and had
+  // not arrived yet" was a guess until mint-to-collect could be read off one line.
+  if (punches.length) {
+    const waited = punches.map((p) => `${p.connectId || '?'}:${Date.now() - (p.mintedAt || Date.now())}ms`);
+    console.log(`[capability] collected host=${hostId.slice(0, 8)} count=${punches.length} ` +
+                `waited=${waited.join(',')}`);
+  }
   sendJson(res, 200, {
     ok: true,
     observedIp: host.publicIp,
@@ -1359,14 +1463,20 @@ async function handleConnect(req, res) {
   const clientPort = observation.obs.port;
   if (!clientPort) return sendJson(res, 400, { error: 'client udp port unknown' });
 
-  const punchToken = crypto.randomBytes(16).toString('hex');
-  const list = pendingPunch.get(host.hostId) || [];
-  list.push({ ip: clientIp, port: clientPort, punchToken, expiresAt: Date.now() + PUNCH_TTL_MS });
-  pendingPunch.set(host.hostId, list);
-
   // One short id ties together the places this attempt shows up: here, the listener, the relay,
   // and the host log. Without it, concurrent attempts are indistinguishable.
   const connectId = crypto.randomBytes(4).toString('hex');
+
+  const punchToken = crypto.randomBytes(16).toString('hex');
+  const list = pendingPunch.get(host.hostId) || [];
+  // CONNECT-DIAG: connectId and mintedAt ride along so the heartbeat that finally collects this
+  // capability can say which attempt it belonged to and how long it waited. Neither is sent to
+  // the host; the response below still maps only ip/port/punchToken.
+  list.push({ ip: clientIp, port: clientPort, punchToken, expiresAt: Date.now() + PUNCH_TTL_MS,
+              connectId, mintedAt: Date.now() });
+  pendingPunch.set(host.hostId, list);
+  console.log(`[capability] connect=${connectId} minted host=${host.hostId.slice(0, 8)} ` +
+              `queued=${list.length} ttlMs=${PUNCH_TTL_MS}`);
   const relayEligible = relayEligibleFor(session.accountId, clientIp);
 
   if (NAT_DIAG_ENABLED) {
@@ -1485,6 +1595,19 @@ function startUdp() {
           wireIp: seen.wireIp, wirePort: seen.wirePort,
           at: Date.now(),
         });
+        // CONNECT-DIAG: an OBSERVE arriving, for every peer rather than only one on our own LAN.
+        // The token is never printed -- it is a lookup key a stranger could reuse -- but a short
+        // digest of it is, because that is what ties this line to the heartbeat that follows it.
+        {
+          const tokenId = diagTokenId(token);
+          const tuple = `${rinfo.address}:${rinfo.port}`;
+          const moved = diagObserveTuple.get(tokenId) !== tuple;
+          diagObserveTuple.set(tokenId, tuple);
+          if (diagShouldLog(diagObserveLineAt, tokenId, Date.now(), DIAG_HOST_LINE_MIN_MS, moved)) {
+            console.log(`[observe-rx] token=${tokenId} from=${tuple} ` +
+                        `advertised=${seen.ip}:${seen.port}` + (moved ? ' moved' : ''));
+          }
+        }
         // The reply goes back to where the packet actually came from; only its contents are
         // corrected, because that is what the peer will advertise about itself.
         const reply = Buffer.from(JSON.stringify({ ip: seen.ip, port: seen.port }));
