@@ -1591,6 +1591,16 @@ endif()
 # no session and no sockets. /utf-8 because the round-trip cases include Korean and an emoji.
 # Control-channel resume decisions and the resume packet's wire shape (item 8, layer 1). Pure
 # logic -- no socket, no peer, no clock.
+# Phase 1 measurement for updater-health-gate D2: is the rollback's ACCESS_DENIED a running
+# image or an ACL? Opens handles and closes them; deletes nothing.
+add_executable(remote60_rollback_denial_probe
+  src/rollback_denial_probe.cpp
+)
+target_include_directories(remote60_rollback_denial_probe PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_rollback_denial_probe PRIVATE /utf-8)
+endif()
+
 # Phase 1 measurement for updater-health-gate: do host_app.log's two writers lose lines when
 # they overlap? Prints a measurement; asserts nothing.
 add_executable(remote60_host_log_writers_probe
