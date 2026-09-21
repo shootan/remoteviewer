@@ -1591,6 +1591,16 @@ endif()
 # no session and no sockets. /utf-8 because the round-trip cases include Korean and an emoji.
 # Control-channel resume decisions and the resume packet's wire shape (item 8, layer 1). Pure
 # logic -- no socket, no peer, no clock.
+# Phase 1 measurement for updater-health-gate: do host_app.log's two writers lose lines when
+# they overlap? Prints a measurement; asserts nothing.
+add_executable(remote60_host_log_writers_probe
+  src/host_log_writers_probe.cpp
+)
+target_include_directories(remote60_host_log_writers_probe PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_host_log_writers_probe PRIVATE /utf-8)
+endif()
+
 # What the UDP hello handshake reports about itself (pc2-connect-diag r1, scope C-1). Uses a real
 # socket aimed at a loopback port nobody is listening on.
 add_executable(remote60_hello_stats_test
