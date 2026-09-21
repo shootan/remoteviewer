@@ -1,12 +1,18 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 
-// The boundary that keeps a test's cleanup inside the test. (updater-abandon-race r5, item 3)
+// The boundary that keeps a test's cleanup inside the test. (updater-abandon-race r5, fixed in r6)
 //
-// This checks the safety property rather than the convenience: a recursive delete is about to be
-// run from an elevated shell (item G's service fixture), and the two ways that goes wrong are a
-// path that is not where it was meant to be and a junction that leads somewhere else entirely.
-// Both are produced here rather than reasoned about.
+// A recursive delete is about to be run from an elevated shell (item G's service fixture), so the
+// ways it can go wrong are checked here rather than reasoned about. r5's version reasoned about
+// one of them and got it wrong: it checked that the TARGET was not a link, and a junction in the
+// middle of the path is not the target. root\junction\child is textually under the root, and
+// `child` looks like an ordinary directory because the filesystem followed the junction before
+// anyone asked about its attributes.
+//
+// The counter-example below is the real thing: a junction inside the scratch area pointing at a
+// directory OUTSIDE it, and a delete aimed through the junction at a child. Without the fix it
+// deletes what the junction points at.
 
 #include <windows.h>
 #include <winioctl.h>
@@ -53,6 +59,11 @@ bool exists(const std::wstring& path) {
   return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
+// The NT object-manager prefix a junction stores, built from characters rather than written so
+// no editor can mangle the escapes: backslash, question, question, backslash.
+const std::wstring kNtPrefix =
+    std::wstring(1, wchar_t(92)) + std::wstring(2, wchar_t(63)) + wchar_t(92);
+
 /**
  * The mount-point form of a reparse point buffer.
  *
@@ -61,12 +72,6 @@ bool exists(const std::wstring& path) {
  * an eight byte header, then four offsets into a path buffer that holds the substitute name and
  * the print name back to back, each terminated.
  */
-// The NT object-manager prefix a junction stores, built rather than written so the escapes
-// cannot be mangled: backslash, question, question, backslash. Not the win32 long-path prefix,
-// which looks similar and is a different thing -- a junction stores the object-manager form.
-const std::wstring kNtPrefix =
-    std::wstring(1, wchar_t(92)) + std::wstring(2, wchar_t(63)) + wchar_t(92);
-
 #pragma pack(push, 1)
 struct MountPointReparse {
   DWORD ReparseTag;
@@ -121,22 +126,50 @@ bool make_junction(const std::wstring& link, const std::wstring& target) {
   return ok;
 }
 
+/**
+ * Removes the out-of-root victim, by the exact names this test created and no others.
+ *
+ * Deliberately not a recursion and deliberately not remove_scratch_tree -- which would refuse it,
+ * correctly, because it is outside the boundary. A test that needs something outside the boundary
+ * has to clean it up by naming every part of it.
+ */
+void remove_victim(const std::wstring& victim) {
+  DeleteFileW((victim + L"\\inner\\precious.txt").c_str());
+  RemoveDirectoryW((victim + L"\\inner").c_str());
+  RemoveDirectoryW(victim.c_str());
+}
+
 }  // namespace
 
 int main() {
   std::cout << "test_scratch_dir_test\n";
 
   const std::wstring root = scratch_root();
-  check("a scratch root exists", !root.empty(), narrow(root));
+  const std::string problem = scratch_root_problem();
+  check("a scratch root exists", !root.empty(), problem.empty() ? narrow(root) : problem);
   if (root.empty()) {
     std::cout << "\nRESULT: FAILED  (no root, nothing else can be checked)\n";
     return 1;
   }
+  check("...with nothing to report about it", problem.empty(), problem);
   check("...it is a real directory", exists(root));
   check("...and it is not a link", !is_reparse_point(root));
-  check("...and it is inside the build tree, not a shared temp directory",
+  check("...and no ancestor of it is a link either", reparse_ancestors(root).empty(),
+        reparse_ancestors(root).empty() ? "" : narrow(reparse_ancestors(root).front()));
+  // r5 claimed this because of where CMAKE_BINARY_DIR usually is. It is checked now, at runtime,
+  // and a root that fails the check is refused rather than used -- so reaching here means it held.
+  check("...and it really is inside the repository, not merely assumed to be",
         root.find(L"\\build") != std::wstring::npos || root.find(L"/build") != std::wstring::npos,
         narrow(root));
+
+  // ------------------------------------------------------------------------- one run, one place
+  const std::wstring run = scratch_run_dir();
+  check("this run has its own directory", !run.empty(), narrow(run));
+  check("...beneath the root", is_strictly_under(root, run));
+  check("...named after this process, so two runs cannot share it",
+        run.find(std::to_wstring(GetCurrentProcessId())) != std::wstring::npos, narrow(run));
+  check("a named scratch path lands inside it", is_strictly_under(run, scratch_path(L"something")),
+        narrow(scratch_path(L"something")));
 
   // ------------------------------------------------------------------------ the boundary itself
   check("the root is not strictly under itself", !is_strictly_under(root, root));
@@ -191,32 +224,65 @@ int main() {
     remove_scratch_tree(b);
   }
 
-  // -------------------------------------------------------------- the junction, which is the point
+  // ==================================================== the junction, which is the point of all
+  //
+  // The victim lives OUTSIDE the scratch root -- a sibling of it, inside the build directory, so
+  // it belongs to this build and to nobody else. That is what makes the counter-example real: a
+  // delete that follows the junction leaves the boundary, and the check is whether something
+  // outside it survived.
   {
-    const std::wstring victim = make_scratch_dir(L"junction-target");
+    const std::wstring victim = root + L"-victim-" + std::to_wstring(GetCurrentProcessId());
+    CreateDirectoryW(victim.c_str(), nullptr);
+    CreateDirectoryW((victim + L"\\inner").c_str(), nullptr);
+    write_text(victim + L"\\inner\\precious.txt", "do not delete me");
+    check("the out-of-root victim was set up", exists(victim + L"\\inner\\precious.txt"),
+          narrow(victim));
+    check("...and it really is outside the boundary", !is_strictly_under(root, victim),
+          narrow(victim));
+
     const std::wstring holder = make_scratch_dir(L"junction-holder");
-    write_text(victim + L"\\precious.txt", "do not delete me");
-    const std::wstring link = holder + L"\\link-to-victim";
+    const std::wstring link = holder + L"\\link-outside";
 
     if (!make_junction(link, victim)) {
-      skip("a junction is removed as a link, not followed",
+      skip("a junction in the MIDDLE of the path is refused",
            "this filesystem or session would not create a junction (err " +
                std::to_string(GetLastError()) + ")");
       remove_scratch_tree(holder);
-      remove_scratch_tree(victim);
+      remove_victim(victim);
     } else {
       check("the junction was created", is_reparse_point(link));
-      check("...and it really does lead to the victim", exists(link + L"\\precious.txt"));
+      check("...and it really does lead out of the boundary",
+            exists(link + L"\\inner\\precious.txt"));
 
+      // What the boundary says on its own, and why it is not enough.
+      check("a path THROUGH the junction still looks like it is under the root",
+            is_strictly_under(root, link + L"\\inner"),
+            "textually under -- which is exactly the trap");
+      check("...which is why the middle of the path is checked separately",
+            has_reparse_between(root, link + L"\\inner"));
+      check("...while an ordinary path has nothing in the middle",
+            !has_reparse_between(root, holder));
+
+      // r5's version deleted what this points at. The target here is `inner`, an ordinary
+      // directory on the far side of the link, so nothing about IT would have raised a flag.
+      check("a junction in the MIDDLE of the path is refused",
+            !remove_scratch_tree(link + L"\\inner"));
+      check("...and what the junction pointed at is untouched",
+            exists(victim + L"\\inner\\precious.txt"));
+
+      // And the case r5 did get right, kept: the link as the target is removed as a link.
       check("the holder is removed", remove_scratch_tree(holder));
       check("...the junction is gone", !exists(link));
-      // The whole reason this file exists.
-      check("...and what it pointed at was NOT touched", exists(victim + L"\\precious.txt"));
+      check("...and what it pointed at was still not touched",
+            exists(victim + L"\\inner\\precious.txt"));
 
-      remove_scratch_tree(victim);
-      check("the victim can then be removed deliberately", !exists(victim));
+      remove_victim(victim);
+      check("the victim is removed deliberately, by name, at the end", !exists(victim));
     }
   }
+
+  const bool runGone = remove_scratch_run_dir();
+  check("this run's directory is removed at the end", runGone, narrow(run));
 
   std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED") << "  (" << gChecks
             << " checks, " << gFailures << " failed, " << gSkips << " skipped)\n";

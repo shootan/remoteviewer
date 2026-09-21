@@ -39,9 +39,12 @@
 #include "update_process_targets.hpp"
 
 using namespace remote60::native_poc::update;
-using remote60::native_poc::test_support::make_scratch_dir;
+using remote60::native_poc::test_support::remove_scratch_run_dir;
 using remote60::native_poc::test_support::remove_scratch_tree;
+using remote60::native_poc::test_support::scratch_path;
 using remote60::native_poc::test_support::scratch_root;
+using remote60::native_poc::test_support::scratch_root_problem;
+using remote60::native_poc::test_support::scratch_run_dir;
 
 namespace {
 
@@ -427,17 +430,13 @@ void write_text(const std::wstring& path, const std::string& text) {
 }
 
 /**
- * A scratch path for this test, under the build tree.
+ * A scratch path for this test, inside THIS RUN's directory under the build tree.
  *
- * Not %TEMP%. This test starts real processes and swaps real files, and it cleans up recursively
- * afterwards; doing that in a directory shared with the rest of the machine means one wrong string
- * concatenation names somebody else's work. The root is fixed at compile time and
- * remove_scratch_tree refuses anything outside it. See test_scratch_dir.hpp.
+ * Not %TEMP%, and not a shared name. This test starts real processes and swaps real files, and it
+ * cleans up recursively afterwards; doing that under a path other runs also use means one run's
+ * cleanup deletes another run's fixture. See test_scratch_dir.hpp.
  */
-std::wstring scratch(const std::wstring& name) {
-  const std::wstring root = scratch_root();
-  return root.empty() ? std::wstring() : root + L"\\" + name;
-}
+std::wstring scratch(const std::wstring& name) { return scratch_path(name); }
 
 std::string read_text(const std::wstring& path) {
   FILE* f = nullptr;
@@ -1735,26 +1734,14 @@ int main(int argc, char** argv) {
   // the build tree it is visible, and a directory that will not go means a fixture this test
   // started is still holding a file in it, which is worth failing over rather than tidying away.
   {
-    const wchar_t* names[] = {
-        L"gnlink-orphan-install",  L"gnlink-orphan-staging",  L"gnlink-orphan2-install",
-        L"gnlink-orphan2-staging", L"gnlink-stop-install",    L"gnlink-stop-staging",
-        L"gnlink-3tier-install",   L"gnlink-3tier-staging",   L"gnlink-hold-install",
-        L"gnlink-hold-staging",    L"gnlink-race-install",    L"gnlink-race-staging",
-        L"gnlink-denied-install",  L"gnlink-denied-staging",  L"gnlink-closing-install",
-        L"gnlink-closing-staging", L"gnlink-int-install",     L"gnlink-int-staging",
-        L"gnlink-int2-install",    L"gnlink-int2-staging",    L"gnlink-int2-run",
-        L"gnlink-int2-run-staging", L"gnlink-int2-run-go",    L"gnlink-int2-run-go-staging",
-    };
-    std::string left;
-    for (const wchar_t* name : names) {
-      const std::wstring dir = scratch(name);
-      if (GetFileAttributesW(dir.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
-      if (!remove_scratch_tree(dir)) {
-        if (!left.empty()) left += ", ";
-        left += std::string(std::wstring(name).begin(), std::wstring(name).end());
-      }
-    }
-    check("every scratch directory this test made was removed", left.empty(), left);
+    // Everything this run made lives under one directory, so the sweep is that directory. Named
+    // lists went stale -- one case was missing from the r5 list and nobody noticed, because in
+    // %TEMP% a stray directory looks like every other stray directory.
+    //
+    // A directory that will not go is reported as a failure, not tidied away: it means a fixture
+    // this test started is still holding a file in it.
+    check("this run's scratch directory was removed whole", remove_scratch_run_dir(),
+          std::string(scratch_run_dir().begin(), scratch_run_dir().end()));
   }
 
   SetEvent(quitEvent);

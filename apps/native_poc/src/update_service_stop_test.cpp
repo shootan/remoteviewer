@@ -62,8 +62,12 @@
 
 using namespace remote60::native_poc::update;
 using remote60::native_poc::kSecureInputServiceName;
+using remote60::native_poc::test_support::remove_scratch_run_dir;
 using remote60::native_poc::test_support::remove_scratch_tree;
+using remote60::native_poc::test_support::scratch_path;
 using remote60::native_poc::test_support::scratch_root;
+using remote60::native_poc::test_support::scratch_root_problem;
+using remote60::native_poc::test_support::scratch_run_dir;
 
 namespace {
 
@@ -73,6 +77,18 @@ int gBlocked = 0;
 int gAttempts = 0;
 int gCleanupFailures = 0;
 std::vector<std::string> gCleanupLeft;
+
+// The exit criteria for item G, tracked as they happen rather than inferred from a pass count.
+// A run that ends with three green lines is not the same as a run that observed the ordering.
+int gRealAttempts = 0;
+bool gOrderObserved = false;     // RUNNING -> request -> STOP_PENDING -> real exit -> Swap
+bool gTimeoutPreserved = false;  // a stop that never completes: no Swap, files as they were
+bool gRefusalPreserved = false;  // a real refusal: no Swap, files as they were
+int gServicesCreated = 0;
+int gServicesAbsent = 0;         // confirmed gone from the SCM, not merely DeleteService()==true
+int gProcessesExited = 0;        // fixture service processes observed to end
+int gServiceCleanupProblems = 0;
+std::vector<std::string> gServiceCleanupNotes;
 
 void check(const std::string& name, bool ok, const std::string& detail = {}) {
   ++gChecks;
@@ -116,10 +132,7 @@ std::string read_text(const std::wstring& path) {
  * does not canonicalise to somewhere strictly beneath the compile-time root, and removes reparse
  * points as links rather than descending into them. See test_scratch_dir.hpp.
  */
-std::wstring scratch(const std::wstring& name) {
-  const std::wstring root = scratch_root();
-  return root.empty() ? std::wstring() : root + L"\\" + name;
-}
+std::wstring scratch(const std::wstring& name) { return scratch_path(name); }
 
 /** Cleans one attempt's directories and records, rather than ignores, anything left behind. */
 void clean_attempt_dirs(const std::wstring& dir) {
@@ -374,12 +387,23 @@ struct Linger {
  * against and refused before anything is opened.
  */
 struct FixtureService {
+  SC_HANDLE manager = nullptr;
   SC_HANDLE handle = nullptr;
   std::wstring name;
   bool created = false;
-  bool deleted = false;
+  // Every part of the teardown, recorded separately. r5 recorded one bool -- whether DeleteService
+  // returned true -- and reported "residue: none" from it. DeleteService only MARKS a service for
+  // deletion: it goes when it is stopped and the last handle to it closes, so a true there says
+  // nothing about whether anything is left.
+  DWORD ownedPid = 0;
+  bool stopped = false;        // reached SERVICE_STOPPED, observed
+  bool processExited = false;  // the process object was signalled, observed
+  bool deleted = false;        // DeleteService returned true
+  bool absent = false;         // OpenService now says it does not exist
+  bool queryFailed = false;    // a status query failed -- NOT the same as "it stopped"
 
-  bool create(SC_HANDLE manager, const std::wstring& serviceName, DWORD lingerMs) {
+  bool create(SC_HANDLE mgr, const std::wstring& serviceName, DWORD lingerMs) {
+    manager = mgr;
     name = serviceName;
     if (name == kSecureInputServiceName) return false;  // never, under any circumstances
     const std::wstring binPath =
@@ -389,7 +413,23 @@ struct FixtureService {
                             SERVICE_ERROR_NORMAL, binPath.c_str(), nullptr, nullptr, nullptr,
                             nullptr, nullptr);
     created = handle != nullptr;
+    if (created) ++gServicesCreated;
     return created;
+  }
+
+  /** Everything that went wrong during teardown, for the report. Empty when nothing did. */
+  std::string cleanup_problem() const {
+    std::string why;
+    const auto add = [&why](const char* what) {
+      if (!why.empty()) why += "; ";
+      why += what;
+    };
+    if (!stopped) add("never observed STOPPED");
+    if (ownedPid != 0 && !processExited) add("its process was not observed to exit");
+    if (!deleted) add("DeleteService failed");
+    if (!absent) add("still present in the SCM afterwards");
+    if (queryFailed) add("a status query failed, so some of the above is unverified");
+    return why;
   }
 
   bool start_and_wait(int tries = 100) {
@@ -428,19 +468,83 @@ struct FixtureService {
     return ok;
   }
 
-  /** Stops if it can, waits for STOPPED if it can, and deletes. Reports what it managed. */
-  void destroy() {
+  /**
+   * Stops it, waits for the PROCESS to end, deletes it, and then confirms it is gone.
+   *
+   * Four separate things, because r5 conflated them and got all three consequences wrong:
+   *
+   *   * it waited fifteen seconds, and fixture B sits in STOP_PENDING for twenty, so the wait
+   *     expired before the service could possibly have stopped;
+   *   * a status query that FAILED was treated as "state 0, near enough to stopped" and broke
+   *     the loop early -- an unanswered question read as the answer it wanted, which is the same
+   *     mistake this whole task has been about;
+   *   * DeleteService returning true was reported as "nothing left behind". It marks the service
+   *     for deletion; the service goes when it is stopped and the last handle closes.
+   *
+   * The service handle was opened at CreateService with SERVICE_ALL_ACCESS, and access is checked
+   * when a handle is opened rather than when it is used -- so this still works on the fixture
+   * whose DACL was narrowed afterwards. That is deliberate: narrowing the DACL must not cost us
+   * the ability to clean up.
+   */
+  void destroy(DWORD waitMs = 60000) {
     if (!handle) return;
+
+    const ServiceSnapshot before = snapshot_service(handle);
+    ownedPid = before.pid;
+    // Taken while it is still running, and held: a pid re-opened later is not an identity.
+    HANDLE process =
+        ownedPid != 0 ? OpenProcess(SYNCHRONIZE, FALSE, ownedPid) : nullptr;
+
     SERVICE_STATUS st{};
     ControlService(handle, SERVICE_CONTROL_STOP, &st);
-    for (int i = 0; i < 150; ++i) {
-      const DWORD state = snapshot_service(handle).state;
-      if (state == SERVICE_STOPPED || state == 0) break;
-      Sleep(100);
+
+    const ULONGLONG deadline = GetTickCount64() + waitMs;
+    while (GetTickCount64() < deadline) {
+      const ServiceSnapshot now = snapshot_service(handle);
+      if (now.state == 0) {
+        // The query failed. Recorded, and the wait CONTINUES -- not knowing is not stopping.
+        queryFailed = true;
+      } else if (now.state == SERVICE_STOPPED) {
+        stopped = true;
+        break;
+      }
+      Sleep(200);
     }
+
+    if (process) {
+      const ULONGLONG left = GetTickCount64() < deadline ? deadline - GetTickCount64() : 0;
+      processExited = WaitForSingleObject(process, static_cast<DWORD>(left)) == WAIT_OBJECT_0;
+      CloseHandle(process);
+      if (processExited) ++gProcessesExited;
+    }
+
     deleted = DeleteService(handle) != FALSE;
     CloseServiceHandle(handle);
     handle = nullptr;
+
+    // And now the part DeleteService does not promise. The service is removed once it is stopped
+    // and every handle is closed; until then it is merely marked.
+    if (manager) {
+      const ULONGLONG until = GetTickCount64() + 10000;
+      while (GetTickCount64() < until) {
+        SetLastError(0);
+        SC_HANDLE probe = OpenServiceW(manager, name.c_str(), SERVICE_QUERY_STATUS);
+        if (!probe) {
+          absent = GetLastError() == ERROR_SERVICE_DOES_NOT_EXIST;
+          if (absent) break;
+        } else {
+          CloseServiceHandle(probe);
+        }
+        Sleep(200);
+      }
+    }
+    if (absent) ++gServicesAbsent;
+
+    const std::string problem = cleanup_problem();
+    if (!problem.empty()) {
+      ++gServiceCleanupProblems;
+      gServiceCleanupNotes.push_back(narrow(name) + ": " + problem);
+    }
   }
 
   ~FixtureService() {
@@ -553,6 +657,16 @@ int main(int argc, char** argv) {
   } else {
     std::cout << "\n-- part 2: the same three questions, against a real isolated service\n";
 
+    // Printed BEFORE anything is installed, so an elevated operator can see what this is about
+    // to create and where it is allowed to write, and stop if either looks wrong. The same facts
+    // appear again at the end, with their outcomes.
+    std::cout << "   boundary root : " << narrow(scratch_root()) << "\n";
+    std::cout << "   run directory : " << narrow(scratch_run_dir()) << "\n";
+    std::cout << "   will create   : " << narrow(nameStops) << ", " << narrow(nameLingers) << ", "
+              << narrow(nameDenied) << "\n";
+    std::cout << "   will not touch: " << narrow(kSecureInputServiceName)
+              << ", and any process this test did not start" << "\n";
+
     check("the fixture services are not the product's",
           nameStops != kSecureInputServiceName && nameLingers != kSecureInputServiceName &&
               nameDenied != kSecureInputServiceName,
@@ -607,6 +721,13 @@ int main(int argc, char** argv) {
                 r.stopCalls == 1 && r.stopAnswer, "calls=" + std::to_string(r.stopCalls));
           check("real service: ...and right afterwards it was STOP_PENDING, not STOPPED",
                 r.stateAfterStop == SERVICE_STOP_PENDING, service_state_name(r.stateAfterStop));
+          // The criterion, as one expression: captured while RUNNING, one real stop request,
+          // STOP_PENDING immediately afterwards, and the same attempt then swapped.
+          gOrderObserved = r.stateAtEnumerate == SERVICE_RUNNING && r.targets == 1 &&
+                           r.stopCalls == 1 && r.stopAnswer &&
+                           r.stateAfterStop == SERVICE_STOP_PENDING &&
+                           r.result == UpdateResult::Updated && r.reachedSwap;
+          ++gRealAttempts;
           check("real service: STOP_PENDING is crossed inside one attempt and then the swap "
                 "happens",
                 r.result == UpdateResult::Updated && r.reachedSwap,
@@ -622,8 +743,9 @@ int main(int argc, char** argv) {
           clean_attempt_dirs(dir);
         }
         svc.destroy();
-        check("real service: the fixture service was removed", svc.deleted,
-              "err=" + std::to_string(GetLastError()));
+        check("real service: the fixture service is gone from the SCM, not merely deleted",
+              svc.stopped && svc.processExited && svc.deleted && svc.absent && !svc.queryFailed,
+              svc.cleanup_problem());
       }
 
       // ---- 2. the same wiring, but the service never finishes leaving.
@@ -648,6 +770,10 @@ int main(int argc, char** argv) {
           check("real service (lingering): the stop was accepted", r.stopAnswer);
           check("real service (lingering): ...and the service sat in STOP_PENDING",
                 r.stateAfterStop == SERVICE_STOP_PENDING, service_state_name(r.stateAfterStop));
+          gTimeoutPreserved = r.stopAnswer && r.targets == 1 && !r.reachedSwap &&
+                              r.result == UpdateResult::AbandonedBeforeSwap &&
+                              read_text(dir + L"\\AlphaPayload.bin") == "OLD-PAYLOAD";
+          ++gRealAttempts;
           check("real service: a stop that never completes times out with the install preserved",
                 r.result == UpdateResult::AbandonedBeforeSwap && !r.reachedSwap,
                 std::string(result_name(r.result)) + " / " + r.detail);
@@ -656,8 +782,12 @@ int main(int argc, char** argv) {
           assert_install_preserved("real service lingering", dir);
           clean_attempt_dirs(dir);
         }
+        // Sixty seconds, against a twenty second STOP_PENDING. r5 waited fifteen and then
+        // reported success, which could not have been true.
         svc.destroy();
-        check("real service (lingering): the fixture service was removed", svc.deleted);
+        check("real service (lingering): the fixture service is gone from the SCM",
+              svc.stopped && svc.processExited && svc.deleted && svc.absent && !svc.queryFailed,
+              svc.cleanup_problem());
       }
 
       // ---- 3. a refusal the SCM really produces.
@@ -683,6 +813,10 @@ int main(int argc, char** argv) {
 
           check("real service (denied): the production stop really was refused",
                 r.stopCalls == 1 && !r.stopAnswer, "calls=" + std::to_string(r.stopCalls));
+          gRefusalPreserved = r.stopCalls == 1 && !r.stopAnswer && !r.reachedSwap &&
+                              r.result == UpdateResult::AbandonedBeforeSwap &&
+                              read_text(dir + L"\\AlphaPayload.bin") == "OLD-PAYLOAD";
+          ++gRealAttempts;
           check("real service: a real refusal leaves the install untouched",
                 r.result == UpdateResult::AbandonedBeforeSwap && !r.reachedSwap,
                 std::string(result_name(r.result)) + " / " + r.detail);
@@ -692,9 +826,13 @@ int main(int argc, char** argv) {
           assert_install_preserved("real service denied", dir);
           clean_attempt_dirs(dir);
         }
+        // The DACL no longer grants the stop right, and this still works: access was checked
+        // when the handle was opened at CreateService, not now. Narrowing the DACL must not cost
+        // the ability to reclaim the fixture.
         svc.destroy();
-        check("real service (denied): the fixture service was removed", svc.deleted,
-              "err=" + std::to_string(GetLastError()));
+        check("real service (denied): the narrowed fixture is still reclaimable and is gone",
+              svc.stopped && svc.processExited && svc.deleted && svc.absent && !svc.queryFailed,
+              svc.cleanup_problem());
       }
 
       CloseServiceHandle(manager);
@@ -702,24 +840,99 @@ int main(int argc, char** argv) {
   }
 
   // ------------------------------------------------------------------------------- the accounting
-  std::cout << "\nattempts run: " << gAttempts << "\n";
-  std::cout << "scratch directories left behind: " << gCleanupFailures;
-  for (const std::string& left : gCleanupLeft) std::cout << "\n  " << left;
-  std::cout << "\n";
+  const bool runDirGone = remove_scratch_run_dir();
+  if (!runDirGone) {
+    ++gCleanupFailures;
+    gCleanupLeft.push_back(narrow(scratch_run_dir()));
+  }
   if (gCleanupFailures != 0) {
-    // Reported as a failure, not a note: a directory that will not go means something this test
-    // started is still holding it.
+    // A failure, not a note: a directory that will not go means something this test started is
+    // still holding a file in it.
     check("every scratch directory was cleaned up", false,
           std::to_string(gCleanupFailures) + " left");
   }
+  if (gServiceCleanupProblems != 0) {
+    check("every fixture service was fully reclaimed", false,
+          std::to_string(gServiceCleanupProblems) + " with problems");
+  }
+
+  // --------------------------------------------------------------------------------- provenance
+  //
+  // So that an elevated run is a record rather than a memory. What ran, from where, what it was
+  // allowed to touch, and what it named.
+  std::cout << "\n-- provenance\n";
+  std::cout << "binary        : " << narrow(own_path()) << "\n";
+  std::cout << "sha256        : " << sha256_file_hex(own_path()) << "\n";
+  std::cout << "built         : " << __DATE__ << " " << __TIME__ << "\n";
+  std::cout << "boundary root : " << narrow(scratch_root()) << "\n";
+  std::cout << "run directory : " << narrow(scratch_run_dir())
+            << (runDirGone ? "  (removed)" : "  (LEFT BEHIND)") << "\n";
+  std::cout << "fixture svcs  : " << narrow(nameStops) << ", " << narrow(nameLingers) << ", "
+            << narrow(nameDenied) << "\n";
+  std::cout << "never touched : " << narrow(kSecureInputServiceName)
+            << " (the product's service), and any process this test did not start\n";
+  std::cout << "attempts      : " << gAttempts << " total, " << gRealAttempts
+            << " against the real service\n";
+  std::cout << "services      : " << gServicesCreated << " created, " << gServicesAbsent
+            << " confirmed absent, " << gProcessesExited << " processes observed to exit\n";
+  std::cout << "scratch left  : " << gCleanupFailures;
+  for (const std::string& left : gCleanupLeft) std::cout << "\n                " << left;
+  std::cout << "\n";
+  for (const std::string& note : gServiceCleanupNotes) {
+    std::cout << "service issue : " << note << "\n";
+  }
+
+  // ------------------------------------------------------------------- item G's exit criteria
+  //
+  // Written down here rather than left to whoever reads the output, because "three green lines"
+  // is not the condition. Each one is evaluated from what was observed, not from a pass count.
+  const bool cRc = gFailures == 0;
+  const bool cBlocked = gBlocked == 0;
+  const bool cAttempts = gRealAttempts == 3;
+  const bool cResidueSvc = gServiceCleanupProblems == 0 && gServicesCreated == gServicesAbsent &&
+                           gServicesCreated == gProcessesExited;
+  const bool cResidueDir = gCleanupFailures == 0;
+  const bool gMet = cRc && cBlocked && cAttempts && gOrderObserved && gTimeoutPreserved &&
+                    gRefusalPreserved && cResidueSvc && cResidueDir;
+
+  const auto mark = [](bool ok) { return ok ? "[x]" : "[ ]"; };
+  std::cout << "\n-- item G exit criteria\n";
+  std::cout << mark(cRc) << " no failed checks\n";
+  std::cout << mark(cBlocked) << " no blocked checks (" << gBlocked << ")\n";
+  std::cout << mark(cAttempts) << " three real-service attempts actually executed ("
+            << gRealAttempts << ")\n";
+  std::cout << mark(gOrderObserved)
+            << " RUNNING at capture -> one real stop request -> STOP_PENDING -> real process exit"
+               " -> Swap, in ONE attempt\n";
+  std::cout << mark(gTimeoutPreserved)
+            << " a stop that never completes: no Swap, old bytes still on disk\n";
+  std::cout << mark(gRefusalPreserved)
+            << " a real refusal: no Swap, old bytes still on disk\n";
+  std::cout << mark(cResidueSvc) << " no service or fixture process left behind\n";
+  std::cout << mark(cResidueDir) << " no scratch directory left behind\n";
+  std::cout << (gMet ? "G: MET by this run" : "G: NOT met by this run") << "\n";
+
+  // What is real here and what is a seam, said plainly so the mock half is not over-read. In BOTH
+  // parts the manifest, its signature check, the registration, the relaunch and the health check
+  // are injected. What is real is the stop request, the identity and handle behind it, the wait,
+  // the swap, and the bytes on disk afterwards. Item G is about the stop; the signature and
+  // relaunch paths have their own suites.
+  std::cout << "seam scope    : manifest/signature, registration, relaunch and health are\n"
+               "                injected in both parts. Real: the stop request, the held handle,\n"
+               "                the wait, the swap, and the file state afterwards.\n";
 
   const bool blockedFatal = requireReal && gBlocked > 0;
   if (blockedFatal) {
     std::cout << "\n--require-real was given and " << gBlocked
               << " check(s) were blocked. That is a failure of this run, not a pass.\n";
   }
-  std::cout << "\n" << ((gFailures == 0 && !blockedFatal) ? "RESULT: ALL PASS" : "RESULT: FAILED")
-            << "  (" << gChecks << " checks, " << gFailures << " failed, " << gBlocked
-            << " blocked, " << gAttempts << " attempts)\n";
-  return (gFailures == 0 && !blockedFatal) ? 0 : 1;
+  const bool criteriaFatal = requireReal && !gMet;
+  if (criteriaFatal && !blockedFatal) {
+    std::cout << "\n--require-real was given and the exit criteria above are not all met.\n";
+  }
+  const bool ok = gFailures == 0 && !blockedFatal && !criteriaFatal;
+  std::cout << "\n" << (ok ? "RESULT: ALL PASS" : "RESULT: FAILED") << "  (" << gChecks
+            << " checks, " << gFailures << " failed, " << gBlocked << " blocked, " << gAttempts
+            << " attempts)\n";
+  return ok ? 0 : 1;
 }

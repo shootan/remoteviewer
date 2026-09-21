@@ -1628,12 +1628,17 @@ endif()
 # Inside the build directory, which is inside the repository -- not %TEMP%, which is shared with
 # everything else on the machine. The recursive cleanup refuses anything outside this root, which
 # matters most for the fixtures meant to be run elevated.
+# Both roots are passed in, and the relationship between them is CHECKED at runtime rather than
+# asserted here: CMAKE_BINARY_DIR is wherever the build was configured, which need not be inside
+# the repository at all. A scratch root that fails that check is refused, not relocated.
 set(REMOTE60_TEST_SCRATCH_ROOT "${CMAKE_BINARY_DIR}/test-scratch")
+set(REMOTE60_TEST_REPO_ROOT "${CMAKE_SOURCE_DIR}")
 
 add_library(remote60_test_scratch_dir STATIC src/test_scratch_dir.cpp)
 target_include_directories(remote60_test_scratch_dir PUBLIC src)
 target_compile_definitions(remote60_test_scratch_dir PUBLIC
   "REMOTE60_TEST_SCRATCH_ROOT=\"${REMOTE60_TEST_SCRATCH_ROOT}\""
+  "REMOTE60_TEST_REPO_ROOT=\"${REMOTE60_TEST_REPO_ROOT}\""
 )
 if(MSVC)
   target_compile_options(remote60_test_scratch_dir PRIVATE /utf-8)
