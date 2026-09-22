@@ -286,8 +286,13 @@ function cleanup() {
   console.log('\n--- connect diagnostics ---');
   const connectDiag = await runTest(['connect_diag_test.js']);
 
+  // The wake resend. Same reason for its own server, and it is the other slow one: it waits out
+  // a whole ten-second allowance to count what actually reached the wire.
+  console.log('\n--- wake resend ---');
+  const wakeResend = await runTest(['wake_resend_test.js']);
+
   cleanup();
-  const ok = sameLan === 0 && connectDiag.code === 0;
+  const ok = sameLan === 0 && connectDiag.code === 0 && wakeResend.code === 0;
   console.log(ok ? '\nRESULT: ALL PASS' : '\nRESULT: FAILED');
   process.exit(ok ? 0 : 1);
 })();

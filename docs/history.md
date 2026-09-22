@@ -12180,7 +12180,7 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - **내 가정이 틀렸던 것**: 3번 케이스의 첫 실행은 창이 만료됐는데도 private 이 452ms 에 이겼다. 호스트 로그를 보니 **펀치가 도착하면 호스트가 디렉터리를 refresh** 하고, 같은 capability 를 또 내주는 가짜 디렉터리가 150ms 뒤 창을 다시 열고 있었다. 제품이 옳고 **"잊지 않는 디렉터리" 를 모델링한 fake 가 틀렸다** — 실제 서버는 pendingPunch 를 건네면서 지운다. fake 를 1회 제공으로 고쳤다.
 - 변이 2건 각각 그 가드가 잡는다: `AuthorizePeer` 의 토큰 매칭에 **발급 IP 일치를 추가**(=번역 제거) → 9 FAIL(세션·번역 로그·제어 왕복·릴레이 경유 전부) · **펀치 응답 송신 제거** → 8 FAIL(선택이 relay at 2510ms 로 뒤집히고 그 아래가 전부). 두 변이 모두 되돌린 뒤 재빌드·재실행으로 40/0 복귀를 확인했다(예전에 되돌리고 재빌드를 안 해 가짜 FAIL 을 본 적이 있다).
 - 결과: `remote60_host_punch_reply_e2e_test` **40 PASS / 0 FAIL, exit 0, 3회 연속** · `punch_reply_test` 45 · `directory_retry_test` 98 · `udp_control_channel` 12 · `control_resume` 48 · 전량 빌드 오류 0.
-- **커버하지 않는 것**: 펀치 **손실** 주입. 루프백에서는 패킷 필터 없이 떨어뜨릴 수단이 없고, 손실에 대한 제품의 답은 중복 케이스가 태우는 그 재전송이다. 덮인 척하지 않고 그대로 적는다.
+- **커버하지 않는 것**: 펀치 **손실** 주입 — **이번 회차 미포함**이고 C2 전송경계 drop 시험에서 보완한다. ⚠️ 여기 처음 적었던 "루프백이라 떨어뜨릴 수단이 없다" 는 **픽스처의 성질을 문제의 성질로 옮겨 적은 것**이라 정정한다(전송경계에서는 주입할 수 있다). 이번 회차가 태운 것은 중복과 재전송까지다.
 - 부수: `directory_retry_test.cpp` 의 `FakeDirectory`/`Reply` 를 `apps/native_poc/src/directory_fake_server.hpp` 로 옮겨 두 테스트가 공유한다(동작 동일, 98 PASS 유지). 제품 코드는 **한 줄도 바뀌지 않았다**.
 - 미검증(실기): 여전히 PC1→PC2 실제 접속에서 그 connectId 의 `[relay] bound` 가 사라지는지.
 
@@ -12230,3 +12230,18 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 검증: `automation/gnlink_release_test.sh` **78 PASS / 0 FAIL, exit 0**(이전 66). 8조합 중 7개가 rc0 으로 9단계를 통과하고, 나머지 1개(`--deploy` 단독)는 인자 단계에서 거부된다.
 - **실행하지 않은 것**: 실서명·실게시 0회. 실경로는 다음 승인 릴리스에서 remote_claude 가 본다.
 - 제품/테스트/문서: 제품 **무변경** / 자동화(`gnlink_release.sh`, `gnlink_release_test.sh`) / 문서(이 항목, `구현계획.md` 배포 자동화 절).
+
+### 2026-09-22 C2 F3 — 세 발 놓치면 다시는 없었다
+
+- wake 는 0/100/300ms 세 발이 전부다. 잠든 호스트나 하트비트가 25초 뒤인 호스트가 셋 다 놓치면 **그것으로 끝**이고, capability 는 `pendingPunch` 에서 30초 뒤 만료된다. 첫 클릭 실패·두 번째 성공이라는 모양이 여기서 나온다. ⚠️ 09-21 실패의 원인이 이것이라고 **확정하지 않는다** — 확정된 것은 코드가 그렇게 생겼다는 것까지다.
+- 고침: burst 뒤 **1초마다 1발, 최대 10발**. connect 당 최악 13발, 10초, capability 가 살아 있는 30초 창 안. 기존 3발 함수는 **재호출하지 않는다**(그쪽 rate limiter 가 리셋돼 재송신이 또 다른 burst 가 된다).
+- 유계: 호스트당 timer 1개(두 번째 connect 는 교체) · 전역 64 · `WAKE_MIN_INTERVAL_MS` 유지 · 해제 = 전달/없음(만료)/호스트 없음/stale/예산. 세대·capability 생존·신선도·**목적지 주소**를 매 tick 다시 본다.
+- 로그 한 줄 정정: `[capability] collected` 뒤에 **`meaning=handed-to-response`**. 그 줄은 "호스트가 받았다" 로 읽혀 왔지만 호스트는 capability 에 아무 응답도 하지 않는다. 덧붙이기만 했다.
+- **내 결함 1건, 게으르지 않게 적는다**: 호스트를 `hosts.has(...)` 로 찾았는데 실제로는 `store.hosts` 평범한 객체다. `setTimeout` 안이라 ReferenceError 가 **서버 프로세스를 죽였고**, 세 테스트 뒤 `relay_test` 가 "observe timeout" 으로 잡았다. 고친 뒤 tick 전체를 `try/catch` 로 감쌌다 — 요청과 분리돼 도는 콜백은 잡아 줄 것이 없다.
+- 검사는 **의도가 아니라 wire 를 센다**(`apps/directory/test/wake_resend_test.js`, 신규): 미수집 **13발/상한 13** · 간격 1초(뭉침 0) · 수집 뒤 3초간 **0발** · connect 3회에 arm 3·stop 1(타이머가 세 개가 아니다) · 호스트 펀치 12발 → wake **0줄**(C1 과 상호 촉발 없음) · 재무장 시 `timers=1`. 전체 `node test/run.js` **ALL PASS**.
+- 변이 3건 각각 FAIL: 재송신 제거 → 8(13→3발) · 수집 해제 제거 → 1 · 예산 상한 제거 → 6(15발).
+  ⚠️ **세대 fence 는 잡히지 않고, 그 이유를 적는다**: 교체 때 옛 timer 를 지우고, 맵이 호스트당 하나이며, 1초 floor 가 있어 **stale tick 이 돌아도 더 보낼 수 있는 것이 없다.** 증명 실패가 아니라 증명할 대상이 없는 것이라, 이중 안전장치로 남기고 그렇게 표시했다.
+- 게시물: `apps/directory/deploy/2026-09-22-wake-resend.patch` — 배포본 base `27b730e7…`(내가 `gnlink` 로 직접 읽어 확인) → 적용 후 `69451c90…`. 신선한 배포본 사본에 `patch -p0` 로 적용해 그 해시가 재현되는 것과 `node --check` 를 확인했다. **적용·재시작은 하지 않았다.**
+- C1 표현 정정 2건(Codex 지적, 이 커밋에 함께): `punch_reply.hpp` 의 디렉터리 주소 일치를 **"authenticated" 라 부르지 않는다** — 서명도 비밀도 없는 **출처 tuple 필터**이고, 그 주소를 위조할 수 있는 쪽은 같은 대우를 받는다. 그리고 펀치 손실은 **"루프백이라 불가"가 아니라 "이번 회차 미포함, C2 전송경계 drop 시험에서 보완"** 이다 — 픽스처의 성질을 문제의 성질로 옮겨 적었던 것을 정정한다.
+- 제품/테스트/문서: 제품(`apps/directory/server.js`) / 테스트(`test/wake_resend_test.js` 신규, `test/run.js` 등록) / 문서(이 항목, `구현계획.md` C2 절, 배포 patch, C1 표현 정정 2곳).
+- 미착수: **F1(뷰어)** — 지시서 전제(기존 세대 필드 재사용)가 코드와 달라 확정 대기(seq 2827).

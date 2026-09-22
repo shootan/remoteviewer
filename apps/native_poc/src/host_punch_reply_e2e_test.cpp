@@ -688,9 +688,11 @@ int wmain(int argc, wchar_t** argv) {
     host.Stop();
   }
 
-  // Punch LOSS is not injected here. On loopback there is nothing to drop it with short of a
-  // packet filter, and the product's answer to loss is the same re-send that the duplicate
-  // check above exercises. Said plainly rather than left looking covered.
+  // Punch LOSS is not covered in this round. Not "cannot be covered" -- the earlier note said
+  // loopback leaves nothing to drop a datagram with, which reads as a property of the problem
+  // when it is a property of this fixture. A drop can be injected at the transport boundary,
+  // and C2 is where that is being built. Until then this file exercises duplicates and
+  // re-sends, and says so rather than letting the gap look closed.
 
   std::printf("\n%s  (%d checks, %d failed)\n",
               gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED", gChecks, gFailures);

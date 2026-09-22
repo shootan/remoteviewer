@@ -122,12 +122,32 @@ const NAT_DIAG_TTL_MS = 2 * 60 * 1000;
 const WAKE_ENABLED = process.env.REMOTE60_WAKE_DISABLED !== '1';
 const WAKE_PACKETS = [0, 100, 300];        // one datagram is one chance
 const WAKE_MIN_INTERVAL_MS = 1000;         // per host; a retrying client must not become a flood
+
+// The burst above is over in 300ms. A host that was asleep, or whose heartbeat has just gone out
+// and will not return for 25 seconds, can miss all three and then nothing else ever arrives --
+// the capability sits in pendingPunch until it expires and the client's first click fails.
+//
+// So the burst is followed by a resend: one datagram a second, at most ten, and it stops the
+// moment the capability is handed over. Thirteen datagrams per connect in the worst case, ten
+// seconds of them, inside the thirty-second window the capability lives in anyway.
+const WAKE_RESEND_INTERVAL_MS = 1000;
+const WAKE_RESEND_MAX = 10;
+// A ceiling on how many hosts can have one of these at once. Each is one timer and one datagram
+// a second; the cap is what keeps a burst of connects to many hosts from becoming a burst of
+// timers. One per host, not one per connect -- several connects to the same host share it.
+const WAKE_RESEND_MAX_TIMERS = 64;
 // Only ever aimed at an address a heartbeat confirmed recently. An older one is a mapping that
 // has probably closed, and firing at it is at best noise to a stranger who now holds that port.
 const WAKE_HOST_FRESH_MS = 90 * 1000;
 // hostId -> last send, so repeated connects for one host collapse into a single burst.
 const wakeLastSentByHost = new Map();
-const wakeStats = { sent: 0, suppressed: 0, skippedStale: 0, failed: 0 };
+// hostId -> { connectId, generation, sent, timer }. One entry per HOST: a second connect to the
+// same host replaces the entry rather than adding a timer, and the replacement takes a new
+// generation so the old timer's next tick finds a number that is not its own and does nothing.
+const wakeResendByHost = new Map();
+let wakeResendGeneration = 0;
+const wakeStats = { sent: 0, suppressed: 0, skippedStale: 0, failed: 0,
+                    resent: 0, resendStopped: 0, resendCapped: 0 };
 
 // ---------------------------------------------------------------- CONNECT-DIAG
 //
@@ -1018,11 +1038,159 @@ function sendWakePunch(sock, host, connectId) {
   return true;
 }
 
+/**
+ * Stops the resend for a host, if one is running, and says why.
+ *
+ * Idempotent: called from the heartbeat that collects the capability, from a replacement, and
+ * from the tick itself when it finds nothing left to wake anyone about.
+ */
+function stopWakeResend(hostId, reason) {
+  const record = wakeResendByHost.get(hostId);
+  if (!record) return false;
+  clearTimeout(record.timer);
+  wakeResendByHost.delete(hostId);
+  wakeStats.resendStopped++;
+  console.log(`[wake] connect=${record.connectId} resend stopped after ${record.sent} ` +
+              `reason=${reason}`);
+  return true;
+}
+
+/** Whether this host still has a capability waiting to be collected. */
+function hasLiveCapability(hostId) {
+  const list = pendingPunch.get(hostId);
+  if (!list || !list.length) return false;
+  const now = Date.now();
+  return list.some((p) => p.expiresAt > now);
+}
+
+/**
+ * Keeps waking the host, once a second, until it takes the capability.
+ *
+ * The three-packet burst is a separate thing and is not re-entered from here -- calling it again
+ * would restart its own rate limiter and turn one resend into another burst. This sends single
+ * datagrams, and everything that could make sending wrong is re-checked on every tick rather
+ * than captured when the timer was armed:
+ *
+ *   - the generation, so a timer belonging to a replaced connect does nothing
+ *   - whether a capability is still waiting, which covers collected, expired and never-there
+ *   - the host's freshness, so a host that stopped heartbeating stops being poked
+ *   - the target address, recomputed each time, because a heartbeat in between moves it and the
+ *     old tuple is then somewhere the host cannot hear
+ *
+ * Nothing here is triggered by anything the host sends: the server does not receive the host's
+ * punches at all, so the host answering a punch (which it now does) cannot feed back into this.
+ */
+function startWakeResend(sock, host, connectId) {
+  if (!WAKE_ENABLED || !sock) return false;
+  const existing = wakeResendByHost.get(host.hostId);
+  if (!existing && wakeResendByHost.size >= WAKE_RESEND_MAX_TIMERS) {
+    wakeStats.resendCapped++;
+    console.log(`[wake] connect=${connectId} resend skipped reason=timer-cap ` +
+                `timers=${wakeResendByHost.size} limit=${WAKE_RESEND_MAX_TIMERS}`);
+    return false;
+  }
+  // The replaced timer is cancelled, and that -- not the generation below -- is what actually
+  // stops a stale tick: clearTimeout on a timer that has not run yet prevents it, and one that
+  // is mid-flight finds its record already replaced.
+  //
+  // The generation is kept as a second answer for a tick that slips through anyway. Worth being
+  // straight about what it is worth: with the replaced timer cancelled, the record single per
+  // host, and WAKE_MIN_INTERVAL_MS refusing a second datagram inside a second, a stale tick that
+  // did run could not send anything extra. So removing this line changes nothing observable, and
+  // no test here catches it -- it is not proven, it is structurally unnecessary, and it stays
+  // because the alternative is relying on three separate things all continuing to be true.
+  if (existing) clearTimeout(existing.timer);
+
+  const generation = ++wakeResendGeneration;
+  // A newer connect gets its own allowance of ten. It is a new request from a real user, and the
+  // rate is bounded by the interval and by WAKE_MIN_INTERVAL_MS regardless of how the count is
+  // carried; what must not happen is two timers for one host, and there is still only one.
+  const record = { connectId, generation, sent: 0, timer: null };
+  wakeResendByHost.set(host.hostId, record);
+
+  const tick = () => {
+    // Wrapped, because this runs detached from any request: an exception here has nothing to
+    // catch it and takes the process with it. One connect must not be able to do that.
+    try {
+      tickOnce();
+    } catch (err) {
+      console.error(`[wake] connect=${connectId} resend tick failed: ${err && err.message}`);
+      stopWakeResend(host.hostId, 'tick-error');
+    }
+  };
+
+  const tickOnce = () => {
+    const current = wakeResendByHost.get(host.hostId);
+    // A timer from a replaced connect, or from one that was stopped and whose timeout had
+    // already fired. Either way this is not the live resend and it does nothing.
+    if (!current || current.generation !== generation) return;
+    // store.hosts is a plain object, not a Map. Written as `hosts.has(...)` first, which is a
+    // ReferenceError -- inside a setTimeout, so it took the whole server down rather than
+    // failing this one tick. relay_test found it as "observe timeout" three tests later.
+    if (!store.hosts || !store.hosts[host.hostId]) {
+      stopWakeResend(host.hostId, 'host-gone');
+      return;
+    }
+    if (!hasLiveCapability(host.hostId)) {
+      // Collected or expired. The heartbeat path says "collected" itself and gets here first;
+      // this covers expiry, and a connect whose capability was never queued.
+      stopWakeResend(host.hostId, 'no-capability');
+      return;
+    }
+    if (Date.now() - host.lastSeen > WAKE_HOST_FRESH_MS) {
+      stopWakeResend(host.hostId, 'stale-host');
+      return;
+    }
+    if (current.sent >= WAKE_RESEND_MAX) {
+      stopWakeResend(host.hostId, 'budget');
+      return;
+    }
+    const since = Date.now() - (wakeLastSentByHost.get(host.hostId) || 0);
+    if (since < WAKE_MIN_INTERVAL_MS) {
+      // Not a failure: the burst, or another connect, has just sent one. Wait out the floor and
+      // try again rather than sending a second datagram inside the same interval.
+      current.timer = setTimeout(tick, WAKE_MIN_INTERVAL_MS - since);
+      current.timer.unref();
+      return;
+    }
+
+    const aim = hostSendTargetFor(host, onServerLan);
+    wakeLastSentByHost.set(host.hostId, Date.now());
+    current.sent++;
+    wakeStats.resent++;
+    const packet = buildPunchPacket();
+    const n = current.sent;
+    const txAt = Date.now();
+    sock.send(packet, aim.port, aim.ip, (err) => {
+      if (err) {
+        wakeStats.failed++;
+        console.error(`[wake] connect=${current.connectId} resend[${n}/${WAKE_RESEND_MAX}] ` +
+                      `failed to ${aim.ip}:${aim.port}: ${err.message}`);
+        return;
+      }
+      console.log(`[wake] connect=${current.connectId} resend[${n}/${WAKE_RESEND_MAX}] sent ` +
+                  `${aim.ip}:${aim.port} via=${aim.via} queuedMs=${Date.now() - txAt}`);
+    });
+    current.timer = setTimeout(tick, WAKE_RESEND_INTERVAL_MS);
+    current.timer.unref();
+  };
+
+  // The first resend is one interval after the burst, not immediately: the burst's last datagram
+  // has just gone out and WAKE_MIN_INTERVAL_MS would refuse this one anyway.
+  record.timer = setTimeout(tick, WAKE_RESEND_INTERVAL_MS);
+  record.timer.unref();
+  console.log(`[wake] connect=${connectId} resend armed every ${WAKE_RESEND_INTERVAL_MS}ms ` +
+              `max=${WAKE_RESEND_MAX} timers=${wakeResendByHost.size}`);
+  return true;
+}
+
 // Cheap enough to keep forever, and the only way to notice the wake quietly stopping. Silence
 // here is how one afternoon's mobile connections were lost without a single error line.
 function logWakeStats() {
   if (!WAKE_ENABLED || wakeStats.sent === 0) return;
-  console.log(`[wake] sent=${wakeStats.sent} suppressed=${wakeStats.suppressed} ` +
+  console.log(`[wake] sent=${wakeStats.sent} resent=${wakeStats.resent} ` +
+              `resendStopped=${wakeStats.resendStopped} resendCapped=${wakeStats.resendCapped} ` +
+              `suppressed=${wakeStats.suppressed} ` +
               `skippedStale=${wakeStats.skippedStale} failed=${wakeStats.failed}`);
 }
 
@@ -1413,8 +1581,15 @@ async function handleHostHeartbeat(req, res) {
   // not arrived yet" was a guess until mint-to-collect could be read off one line.
   if (punches.length) {
     const waited = punches.map((p) => `${p.connectId || '?'}:${Date.now() - (p.mintedAt || Date.now())}ms`);
+    // `collected` means it is going out in THIS response. It is not an acknowledgement from the
+    // host that the capability arrived or was applied -- the host sends nothing back for it, and
+    // this line has been read as if it did. The qualifier is appended so the existing fields and
+    // their order are untouched.
     console.log(`[capability] collected host=${hostId.slice(0, 8)} count=${punches.length} ` +
-                `waited=${waited.join(',')}`);
+                `waited=${waited.join(',')} meaning=handed-to-response`);
+    // Nothing left to wake anyone about. The tick would notice on its own within a second; this
+    // stops it at the moment the reason disappears, and gives the log one line saying why.
+    stopWakeResend(hostId, 'collected');
   }
   sendJson(res, 200, {
     ok: true,
@@ -1511,6 +1686,9 @@ async function handleConnect(req, res) {
   // that anyone was waiting -- the relay answers punches rather than forwarding them -- and on the
   // direct path the peer's own punch is dropped by exactly the restrictive NATs where it matters.
   sendWakePunch(observeSock, host, connectId);
+  // And keep going until the host takes it. Separate from the burst on purpose: see the note on
+  // startWakeResend about why the burst is not simply repeated.
+  startWakeResend(observeSock, host, connectId);
 
   sendJson(res, 200, {
     // Kept for clients that predate candidates; they dial this one and behave as before.

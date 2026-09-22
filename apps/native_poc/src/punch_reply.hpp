@@ -54,8 +54,15 @@ constexpr uint32_t kPunchReplyPerWindow = 200;
  * steady HTTP, once per consume, for as long as it continued. Showing that a burst of 200 in one
  * cycle causes no extra heartbeat does not answer that: the burst lands inside a single cycle.
  *
- * A wake from the DIRECTORY itself is not throttled. It is rare, it is authenticated by being
- * the address the directory answers from, and it is the case the interrupt exists for.
+ * A wake from the DIRECTORY itself is not throttled: it is rare, and it is the case the
+ * interrupt exists for.
+ *
+ * What distinguishes it is a SOURCE TUPLE FILTER -- the datagram arrived from the address the
+ * host observes through -- and that is not authentication. Nothing in the packet is signed or
+ * checked against a secret, and a sender that can forge that source address gets the same
+ * treatment. Calling it authenticated would claim a property the code does not have; what it
+ * actually buys is that an ORDINARY client, which does not know or cannot spoof that tuple,
+ * cannot reach the unthrottled path.
  */
 constexpr uint64_t kPunchRefreshCooldownMs = 2000;
 
