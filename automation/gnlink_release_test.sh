@@ -638,6 +638,9 @@ if [ "$MODE" = "build" ]; then
   emit GNLinkCapture 0
   emit GNLinkInputService 0
   emit GNLinkUpdater 0
+  # The verifier is a payload-stage target now, so the stub has to produce it or stage 8
+  # fails on a file the real cmake would have made.
+  printf 'MZ stub verifier\n' > "$OUT/remote60_verify_release.exe"
 fi
 exit 0
 STUBCMAKE
@@ -848,6 +851,64 @@ wait $RACE_A; wait $RACE_B
 BLOCKED=$(cat "$TMP/race-a.log" "$TMP/race-b.log" | grep -ci 'another release is running\|already exists')
 [ "$BLOCKED" -ge 1 ]
 check $? "two runs in one worktree: at least one is turned away" "$BLOCKED turned away"
+
+printf '\n=== backslashes and globs are refused, not interpreted\n'
+# Two characters the fold step used to mishandle, both measured on the previous version:
+#
+#   <wt>/new\..\..\escape   folded to nothing -- a backslash was not a separator here, so the
+#                           path stayed "inside" as a string and walked out the moment CMake or
+#                           Windows read it
+#   <wt>/build-*            the fold loop splits with an unquoted expansion, so this was globbed
+#                           against the filesystem: with two matches it came out as
+#                           build-aaa/build-bbb, a path nobody named
+#
+# Refused rather than translated now. A release directory is not a place to guess.
+GLOBWT="$TMP/globwt"
+mkdir -p "$GLOBWT/wt"
+touch "$GLOBWT/wt/build-aaa" "$GLOBWT/wt/build-bbb"
+
+# The REASON matters here, not just the exit code. Without the string-level rejection this path
+# is still refused -- by the downstream real-path check, which happens to resolve it outside the
+# worktree. That is an accident of this fixture, not the guard doing its job, and a check that
+# accepted any non-zero exit passed with the rejection removed. So it asserts which refusal.
+OUT="$(bash "$RMDRIVE" "$GLOBWT/wt/new\\..\\..\\escape" "$GLOBWT/wt" 2>&1 || true)"
+printf '%s' "$OUT" | grep -q 'error:backslash'
+check $? "a backslash is refused at the string stage, by name" "$(printf '%s' "$OUT" | tail -1)"
+OUT="$(bash "$RMDRIVE" "$GLOBWT/wt/build-*" "$GLOBWT/wt" 2>&1 || true)"
+printf '%s' "$OUT" | grep -q 'error:glob'
+check $? "a * is refused at the string stage, by name" "$(printf '%s' "$OUT" | tail -1)"
+expect_nonzero "a [ ] in the path is refused" \
+  bash "$RMDRIVE" "$GLOBWT/wt/build-[a]" "$GLOBWT/wt"
+expect_nonzero "a ? in the path is refused" \
+  bash "$RMDRIVE" "$GLOBWT/wt/build-?" "$GLOBWT/wt"
+
+[ ! -e "$GLOBWT/wt/build-aaa/build-bbb" ] && [ ! -e "$GLOBWT/escape" ]
+check $? "...and none of them created anything"
+
+bash "$RMDRIVE" "$GLOBWT/wt/ordinary/path" "$GLOBWT/wt" >/dev/null 2>&1
+check $? "an ordinary path still folds and passes"
+
+# The whole run, not just the helper: the refusal has to happen before anything is built.
+GLOBRUN="$TMP/globrun"
+make_worktree "$GLOBRUN" "0.2.134"
+mkdir -p "$GLOBRUN/third_party/webview2/build/native"
+printf 'stub\n' > "$GLOBRUN/third_party/webview2/build/native/WebView2Loader.dll"
+OUT="$(GNLINK_CMAKE=/usr/bin/true bash "$RELEASE_SH" --worktree "$GLOBRUN" --version 0.2.134 \
+        --build-dir "$GLOBRUN/build-*" 2>&1 || true)"
+! printf '%s' "$OUT" | grep -q '2. configure'
+check $? "a globbed --build-dir never reaches the build"
+[ ! -e "$GLOBRUN/build-aaa" ]
+check $? "...and created nothing"
+
+printf '\n=== the verifier is built with the payload, not after the drift check\n'
+# Built at stage 8 it would be compiled AFTER the stage 7 drift check -- the one binary whose job
+# is to say "this candidate is what it claims" would itself come from a tree nothing had checked
+# since. It is a payload-stage target now.
+grep -q 'remote60_verify_release' <<< "$(grep '^TARGETS=' "$RELEASE_SH")"
+check $? "remote60_verify_release is one of the payload targets"
+
+! grep -q -- '--target remote60_verify_release' "$RELEASE_SH"
+check $? "...and stage 8 does not build it, only runs it"
 
 printf '\n=== a refusal inside a substitution still stops the run\n'
 # `die` called inside $( ) kills the SUBSHELL. The caller carries on with an empty string, and

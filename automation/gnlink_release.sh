@@ -92,7 +92,14 @@ DRY_RUN=0
 
 # The eight payload targets. Setup and Updater are in this list, not extra steps: the installer
 # embeds the other six, so it must link after them, and the build system already knows that.
-TARGETS="remote60_host_app remote60_native_video_host_poc remote60_gdi_capture_worker remote60_secure_input_service remote60_client_shell remote60_native_video_client_poc remote60_installer remote60_updater"
+# The eight payload targets, and the verifier.
+#
+# remote60_verify_release is built HERE, with the payload, rather than at stage 8 where it is
+# used. Built at stage 8 it would be compiled AFTER the drift check at stage 7 -- so the one
+# binary whose whole job is to say "this candidate is what it claims" would itself come from a
+# tree nothing had checked since. Now it is inside the same window as everything else, and a
+# dry run produces it too, which is what lets a reviewer see it was built at all.
+TARGETS="remote60_host_app remote60_native_video_host_poc remote60_gdi_capture_worker remote60_secure_input_service remote60_client_shell remote60_native_video_client_poc remote60_installer remote60_updater remote60_verify_release"
 EXES="GNLinkHost GNLinkStream GNLinkCapture GNLinkInputService GNLinkClient GNLinkViewer GNLinkSetup GNLinkUpdater"
 
 say()  { printf '%s\n' "$*"; }
@@ -132,6 +139,22 @@ PATH_PROBE="$SCRIPT_DIR/gnlink_path_probe.ps1"
 # worktree. Measured before fixing, not deduced.
 normalise_path() {
   local p="$1"
+  # Two characters this must not try to be clever about.
+  #
+  # A backslash is a separator to Windows and to CMake, and was not one here -- so
+  # `<worktree>/new\\..\\..\\escape` folded to nothing, stayed inside the worktree as a
+  # string, and walked out of it the moment anything on the Windows side read it.
+  #
+  # A glob metacharacter is worse than it looks. The fold loop splits on / with an unquoted
+  # expansion, so `build-*` was expanded against the filesystem: with build-aaa and build-bbb
+  # present it came out as `build-aaa/build-bbb`, a path nobody named. Measured, not feared.
+  #
+  # Both are refused rather than translated. A release directory is not a place to guess what
+  # somebody meant.
+  case "$p" in
+    *\\*) printf 'error:backslash'; return 1 ;;
+    *'*'*|*'?'*|*'['*) printf 'error:glob'; return 1 ;;
+  esac
   # Windows-isms this script has no business accepting: a UNC share, or a drive-relative path
   # (`C:foo`) whose meaning depends on a per-drive current directory.
   case "$p" in
@@ -146,17 +169,22 @@ normalise_path() {
   esac
   local out="" seg
   local IFS=/
+  # The expansion below is unquoted on purpose -- that is what splits on / -- which also
+  # makes it a glob. The guard above refuses those characters, and this turns expansion off
+  # as well, so the splitting does not depend on the guard being the only line of defence.
+  set -f
   for seg in $rest; do
     case "$seg" in
       ""|.) ;;
       ..)
         # Below the root is not a place. Refusing beats silently clamping at /.
-        if [ -z "$out" ]; then printf 'error:above-root'; return 1; fi
+        if [ -z "$out" ]; then set +f; printf 'error:above-root'; return 1; fi
         out="${out%/*}"
         ;;
       *) out="$out/$seg" ;;
     esac
   done
+  set +f
   printf '%s%s' "$prefix" "${out:-/}"
   return 0
 }
@@ -441,8 +469,14 @@ trap cleanup EXIT
 
 # Both directories are checked here, before a compiler runs, so a bad path fails in a second
 # rather than twenty minutes in.
-check_inside_worktree "$BUILD_DIR" "build dir" >/dev/null
-check_inside_worktree "$REL_DIR" "release dir" >/dev/null
+# The normalised form is KEPT, not checked and thrown away. It used to be discarded here, so
+# the path that was checked and the path handed to CMake at stage 2 were different strings --
+# which is most of what made the backslash case reachable.
+BUILD_DIR="$(check_inside_worktree "$BUILD_DIR" "build dir")" \
+  || die "refusing to use the build dir"
+REL_DIR="$(check_inside_worktree "$REL_DIR" "release dir")" \
+  || die "refusing to use the release dir"
+PAYLOAD="$REL_DIR/payload"
 check_inside_worktree "$REL_FINAL" "release directory" >/dev/null
 
 
@@ -695,11 +729,9 @@ if [ "$DO_SIGN" = "1" ]; then
     # compiled-in key as the update client, and it does both halves in one run: it accepts the
     # real document and refuses the same document with one byte flipped. Acceptance alone is
     # equally true of a verifier that never looks at the signature.
+    # Built at stage 3 with the payload, inside the drift window. Only run here.
     VERIFIER="$BUILD_DIR/apps/native_poc/Release/remote60_verify_release.exe"
-    "$CMAKE" --build "$BUILD_DIR" --config Release --target remote60_verify_release \
-      >"$BUILD_DIR.verifier.log" 2>&1 \
-      || { tail -20 "$BUILD_DIR.verifier.log"; die "could not build the shipped verifier (log: $BUILD_DIR.verifier.log)"; }
-    [ -f "$VERIFIER" ] || die "the verifier did not build at $VERIFIER"
+    [ -f "$VERIFIER" ] || die "the verifier is not at $VERIFIER -- it should have been built with the payload"
     "$VERIFIER" "$REL_DIR/windows.manifest" "$REL_DIR/windows.sig" windows \
       || die "the verifier built from this candidate rejects this release -- do not publish"
     say "verified by remote60_verify_release, built from this candidate (accepts, and refuses a tampered copy)"

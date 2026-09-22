@@ -12337,3 +12337,18 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 검증: `client_recovery_ui_test` **ALL PASS**(+4 단언) · 변이(헬퍼가 언제나 보관) → **2 FAIL** · 전량 빌드 0 에러 · `viewer_cancel_e2e` 30/0 · `gnlink_release_test` 119/0.
 - 제품/테스트/문서: 제품(`viewer_cancel_channel.hpp`, `client_shell_main.cpp`) / 테스트(`client_recovery_ui_test.cpp`) / 문서(이 항목).
 - 실서명·실게시 0회.
+
+### 2026-09-23 release-script r6 — 검사한 경로와 쓰는 경로가 달랐다
+
+- Codex FINAL(r5) NEEDS_CHANGES 2건. 둘 다 **먼저 실측**했다.
+- **NC-A 정규화의 마지막 경계**. 두 가지가 겹쳐 있었다:
+  · `\` 를 구분자로 보지 않아 `<wt>/new\..\..\escape` 가 **한 세그먼트로 남아** 접히지 않고 prefix 검사를 통과했다. Windows·CMake 는 그걸 구분자로 읽는다.
+  · 접기 루프의 `for seg in $rest` 는 **unquoted 확장**이라 glob 이다. `build-*` 를 넣자 build-aaa·build-bbb 두 개에 매치돼 **`build-aaa/build-bbb`** 가 나왔다 — 아무도 지명하지 않은 경로다. 이건 지적보다 나빴고, 실측해서 알았다.
+  · 게다가 `:444` 가 정규화 결과를 `>/dev/null` 로 버려서 **검사한 경로와 CMake 에 간 경로가 다른 문자열**이었다.
+  고침: `\` 와 `*?[` 는 **거부**(해석하지 않는다), 루프에 `set -f`, 그리고 정규화 결과를 `BUILD_DIR`/`REL_DIR`/`REL_FINAL`/`LOCK_DIR` 에 **대입해 그 하나만** 생성·검사·로그·CMake 에 쓴다.
+- **NC-B 입력 고정 순서**. `remote60_verify_release` 가 8단계에서, 즉 7단계 drift 검사 **뒤에** 빌드되고 있었다. "이 후보가 주장대로인가" 를 말하는 바로 그 바이너리가 아무도 확인하지 않은 트리에서 나오는 셈이다. 3단계 `TARGETS` 에 넣어 payload 와 같은 창 안에서 빌드하고, 8단계는 실행만 한다. dry-run 에서도 빌드된다.
+- 검증(Codex 지시대로 **변경 영향 반례만**, 실빌드 전량 반복 없음): `automation/gnlink_release_test.sh` **129 PASS / 0 FAIL, exit 0**(이전 119). 신규: 백슬래시·`*`·`[ ]`·`?` 각각 거부 + **아무것도 생성되지 않음** · 평범한 경로는 그대로 통과 · globbed `--build-dir` 은 **빌드에 도달하지 않음** · 검증기가 `TARGETS` 에 있고 8단계가 그것을 빌드하지 않음.
+- 변이 2건: 백슬래시 거부 제거 → **1 FAIL** · 검증기를 8단계 빌드로 되돌림 → **2 FAIL**.
+  ⚠️ 첫 시도에서 백슬래시 변이가 **통과했다**. 내 반례가 종료코드만 봤기 때문인데, 문자열 거부를 빼도 그 경로는 **뒷단 실경로 검사**가 "outside the worktree" 로 막는다 — 이 픽스처의 우연이지 가드가 일한 게 아니다. **어느 거부가 발동했는지**(`error:backslash`)를 단언하도록 고친 뒤에야 잡힌다. 지적자가 미리 경고한 바로 그 지점이다.
+- 제품/테스트/문서: 제품 **무변경** / 자동화(`gnlink_release.sh`, `gnlink_release_test.sh`) / 문서(이 항목, `구현계획.md` 배포 자동화 절).
+- 실서명·실게시 0회.
