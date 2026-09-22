@@ -368,6 +368,28 @@ int main(int argc, char** argv) {
     recovery_check(recovery_wait([&] { return captured->load(); }), "capture rendered production page");
     std::puts("client_recovery_ui_test: ALL PASS (real UI/native/HTTP; no updater installation)");
   } catch (const std::exception& error) { std::printf("client_recovery_ui_test: FAIL %s\n", error.what()); result=1; }
+  // Whatever is still in the registry goes, pass or fail.
+  //
+  // The per-case cleanup only runs if that case got to the end of itself -- so a run that
+  // FAILED partway (a mutation run, most often) left the viewer it had started alive, holding
+  // GNLinkViewer.exe open and failing the next link with LNK1104. Found because one was still
+  // running after a mutation round and somebody else noticed it before the next build did.
+  for (auto& entry : gViewerByHost) {
+    if (entry.second.cancelEvent) {
+      remote60::native_poc::viewer::viewer_request_cancel(entry.second.cancelEvent);
+      CloseHandle(entry.second.cancelEvent);
+      entry.second.cancelEvent = nullptr;
+    }
+    HANDLE killable = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, entry.second.pid);
+    if (killable) {
+      if (WaitForSingleObject(killable, 2000) != WAIT_OBJECT_0) TerminateProcess(killable, 0);
+      WaitForSingleObject(killable, 3000);
+      CloseHandle(killable);
+    }
+    if (entry.second.process) { CloseHandle(entry.second.process); entry.second.process = nullptr; }
+  }
+  gViewerByHost.clear();
+
   if (gWindow && IsWindow(gWindow)) DestroyWindow(gWindow);
   gClosing=true; gWorkers.Shutdown();
   if (gController) gController->Close();

@@ -12379,3 +12379,10 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 검증: `client_recovery_ui_test` **10회 연속 ALL PASS (0 fail)** · 전량 빌드 0 에러 · `viewer_cancel_e2e` 30/0 · `directory_retry` 122/0 · `picker_empty_state` 24/0 · 남은 GNLinkViewer **0**.
 - 제품/테스트/문서: 제품(`client_shell_main.cpp`) / 테스트(`client_recovery_ui_test.cpp`) / 문서(이 항목, `구현계획.md` C2 F1 절).
 - 설치본·게시 없음.
+
+### 2026-09-23 C2 F1 — 실패한 테스트가 프로세스를 두고 갔다
+
+- 검수자가 알려 줬다: 내 빌드의 `GNLinkViewer.exe` 한 개(pid 44808)가 아직 떠 있었다. 커맨드라인이 `--directory-host-id "fence-host"` + 루프백 가짜 디렉터리라 **내 테스트가 띄운 것**이 분명했고(라이브 제품 아님), 정리했다.
+- 원인: 케이스별 정리는 **그 케이스가 끝까지 갔을 때만** 돈다. 중간에서 실패한 실행 — 대개 **변이 실행** — 은 자기가 띄운 뷰어를 살려 둔 채 끝났고, 그 프로세스가 `GNLinkViewer.exe` 를 붙잡아 다음 링크를 `LNK1104` 로 떨어뜨린다. 앞서 한 번 실제로 그렇게 실패했는데도 나는 그때 눈앞의 프로세스만 죽이고 **원인을 고치지 않았다**.
+- 고침: teardown 에서 `gViewerByHost` 에 남은 것을 **성공·실패 무관하게** 쓸어 담는다(취소 먼저, 안 죽으면 종료). 검증은 **일부러 실패시킨 실행**으로 했다 — 변이를 넣어 2 FAIL 을 낸 뒤 남은 뷰어 **0**. 성공 실행도 0, ALL PASS 유지.
+- 제품/테스트/문서: 제품 무변경 / 테스트(`client_recovery_ui_test.cpp`) / 문서(이 항목).
