@@ -12183,3 +12183,21 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - **커버하지 않는 것**: 펀치 **손실** 주입. 루프백에서는 패킷 필터 없이 떨어뜨릴 수단이 없고, 손실에 대한 제품의 답은 중복 케이스가 태우는 그 재전송이다. 덮인 척하지 않고 그대로 적는다.
 - 부수: `directory_retry_test.cpp` 의 `FakeDirectory`/`Reply` 를 `apps/native_poc/src/directory_fake_server.hpp` 로 옮겨 두 테스트가 공유한다(동작 동일, 98 PASS 유지). 제품 코드는 **한 줄도 바뀌지 않았다**.
 - 미검증(실기): 여전히 PC1→PC2 실제 접속에서 그 connectId 의 `[relay] bound` 가 사라지는지.
+
+### 2026-09-22 release-script r2 — 지우지 않고, 모순되지 않고, 검증한 뒤에 쓴다
+
+- Codex FINAL 이 NEEDS_CHANGES 3건을 냈다(9b00ca3 기준 줄번호). 전부 코드로 확인하고 고쳤다.
+- **NC1 `rm -rf` 무경계**(`:137` BUILD_DIR, `:164` REL_DIR): 인자 경로를 경계·reparse 검사 없이 지웠고, `--dry-run` 도 기존 릴리스 산출물을 지웠다. 고침은 "안전하게 지운다" 가 아니라 **지우지 않는다**: 두 경로 모두 정규화 뒤 `--worktree` 하위여야 하고(절대 외부·`..`·드라이브 루트·조상 junction 거부, reparse 는 OS 에 물어 못 물으면 실행 거부), 이미 있으면 멈추고, 이번 실행은 `<버전>.<run-id>` 에 만들어 **게이트 통과 뒤에만** `mv -T` 로 이름을 가져간다. 워크트리 lock 으로 동시 실행도 막는다.
+- **NC2 옵션 계약 모순**(`:215`→`:232`): `--sign --deploy --dry-run` 이 서명을 건너뛴 뒤 그 서명을 요구해 실패했다. 8조합 상태표를 스크립트 머리와 `구현계획.md` 에 적고 그대로 동작하게 했다 — 규칙은 **dry-run 은 서명을 만들 수 없으니 요구해서도 안 된다**, 거부는 "서명 없는 실게시" 한 칸뿐이고 그것도 **인자 단계**에서 멈춘다. 더해서 입력 drift 감지(commit·`git status`·SDK 해시를 종료 시 재확인), `--sign` 뒤 **제품 검증기**(`gnlink_verify_manifest.js`, 공개키는 `update_manifest.cpp` 에서) 통과 강제, 그리고 **installer RCDATA 9/9 ↔ payload 바이트 대조** 게이트 신설(`automation/gnlink_check_installer_payload.ps1`).
+- **NC3 서명 원자성·해제**(`:51`, `:62`/`:66`): 검증 **전에** `.sig` 를 썼고, 호출자는 그 파일의 존재만으로 게시를 결정했다. 이제 서명 → 디스크 공개키 검증 → `.sig.tmp` → 원자 교체이고, 실패한 실행은 `.sig` 를 아예 남기지 않으며 기존 서명도 건드리지 않는다. `-TrustedKeyHex` 가 필수가 되어 **제품이 신뢰하는 키와 다르면 키를 쓰기 전에** 멈춘다. `signer`/`key`/`verifier` 는 전부 `finally` 로 옮겼다.
+- **내가 만든 결함 2건(테스트가 잡음)**: `[System.IO.File]::Move($a,$b,$true)` 는 .NET Framework 에 없는 3인자 오버로드라 **서명하는 그 기계에서 throw 했을 것**이다(런타임에 물어 확인 → `File.Replace`/2인자 `Move` 분기). SDK 해시 기록을 WebView2 단계 **앞**에 넣어, SDK 가 없을 때 원래의 친절한 오류 대신 엉뚱한 오류가 났다(뒤로 옮김).
+- **내 테스트 결함 3건**(모두 변이 검사가 드러냄):
+  ① 거부가 preflight **전에** 일어나는데 preflight 배너가 *있는지*를 검사해, 제대로 거부하는 스크립트를 FAIL 시켰다(부정으로 정정).
+  ② 서명 재실행 시 서명값이 다른지 본 검사는 ECDSA 가 매번 다른 서명을 내므로 의미가 없었다 — **manifest 를 고치면 서명이 검증에 실패한다**는 검사로 바꿨다.
+  ③ 가장 중요한 것: "검증 실패" 케이스를 만들 때 `public_xy.hex` 의 **두 글자를 바꿨는데**, 그건 곡선 위의 점이 아니라 `ECDsa::Create` 가 서명 전에 throw 했다. 즉 그 테스트는 **검증 경로에 도달한 적이 없었고**, 쓰기-먼저 변이를 통과시켰다. 두 번째 정상 키를 만들어 그 공개 절반을 쓰도록 고치자 변이가 바로 잡혔다.
+- 검증: `automation/gnlink_release_test.sh` **66 PASS / 0 FAIL, exit 0**(이전 20). 변이 4건, 각각 그 가드가 잡는다:
+  · 서명 스크립트를 r1 원본으로 → **8 FAIL** · **검증을 쓰기 뒤로만 옮기면** → 1 FAIL("writes no .sig at all") · 경계 검사 제거 + 지우고-다시-만들기 → **7 FAIL**(픽스처가 실제로 삭제된다) · r1 처럼 게시 후보를 지우고 그 이름에 바로 빌드 → 2 FAIL.
+  넷 다 원복 후 **재빌드·재실행**으로 66/0 복귀 확인.
+- RCDATA 게이트는 실제 0.2.134 빌드에 대해 **9/9 일치**(`ui\shell.html` 7da6106a…로 독립 검수 기록과 대조), payload 1개 변조·1개 제거 시 각각 DIFFERS/MISSING 으로 exit 1.
+- **실행하지 않은 것**: 실서명·실게시. 다음 승인 릴리스에서 remote_claude 가 실경로로 확인한다.
+- 제품/테스트/문서: 제품 **무변경** / 자동화(`gnlink_release.sh`, `gnlink_release_sign.ps1`, `gnlink_check_installer_payload.ps1` 신규, `gnlink_release_test.sh`) / 문서(이 항목, `구현계획.md` 배포 자동화 절).

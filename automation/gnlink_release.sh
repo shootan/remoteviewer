@@ -17,8 +17,26 @@
 #   --rel-root   default <worktree>/.claude/rel. The release lands in <rel-root>/<version>.
 #   --sign       sign the manifest with the operational key on this machine.
 #   --deploy     publish through automation/gnlink_deploy.sh (which this does not modify).
-#   --dry-run    do everything up to and including the gates; describe signing, and pass
-#                --dry-run to the deploy script rather than publishing.
+#   --dry-run    build, package and gate for real; do not use the key and do not publish.
+#
+# What the three of them do together, all eight of them, because two of these used to contradict
+# each other: --sign --deploy --dry-run described the signing it was skipping and then failed
+# because the signature it had not written was missing.
+#
+#   sign deploy dry-run | stage 8 signing          | stage 9 deploy
+#   ----------------------------------------------------------------------------------------
+#    no   no     no     | skipped                  | skipped
+#    no   no     yes    | skipped                  | skipped
+#    no   yes    no     | skipped                  | REFUSED up front: nothing to publish
+#    no   yes    yes    | skipped                  | preflight only, unsigned, says so
+#    yes  no     no     | signs                    | skipped
+#    yes  no     yes    | described, key untouched | skipped
+#    yes  yes    no     | signs                    | publishes
+#    yes  yes    yes    | described, key untouched | preflight only, unsigned, says so
+#
+# The rule behind the table: --dry-run never uses the key and never publishes, so a dry run can
+# never produce a signature, so a dry run must not require one. The one refusal is the one case
+# that cannot be made to mean anything -- a real publish of something nobody signed.
 #
 # It does NOT bump the version. A release script that edits the source is a release script that
 # can publish something nobody reviewed.
@@ -47,6 +65,126 @@ TARGETS="remote60_host_app remote60_native_video_host_poc remote60_gdi_capture_w
 EXES="GNLinkHost GNLinkStream GNLinkCapture GNLinkInputService GNLinkClient GNLinkViewer GNLinkSetup GNLinkUpdater"
 
 say()  { printf '%s\n' "$*"; }
+
+# ------------------------------------------------------- paths: checked, created, never cleared
+#
+# Two directories are made from arguments, and an earlier version of this script removed each one
+# first with a bare `rm -rf`. That is wrong twice over. An empty or mistyped variable makes it a
+# command that deletes whatever it lands on; and the release directory holds the exact bytes a
+# published manifest is signed over, so clearing it silently destroys a candidate somebody may
+# still be checking -- which --dry-run did too.
+#
+# So nothing here deletes. A directory that already exists is a reason to stop and say so. New
+# work goes in a new directory, and the release is moved into its final name only after every
+# gate has passed, by a rename that fails if the name is taken.
+#
+# The boundary rules, checked before anything is created and again afterwards:
+#   - absolute, and strictly below --worktree after resolution, so `..` and an absolute path
+#     somewhere else are both refused
+#   - no reparse point anywhere between the worktree and the target, because a junction means the
+#     thing written is not the thing named
+
+# Windows junctions are reparse points, and a junction is not a symlink as far as `test -L` is
+# concerned. This asks the OS. No powershell, no answer, no run: fail closed.
+#   0 = found one, and its path is printed   1 = none   2 = could not tell
+path_reparse_between() {
+  local root="$1" target="$2"
+  local out
+  out="$(powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "
+    \$root  = [System.IO.Path]::GetFullPath('$(cygpath -w "$root")')
+    \$p     = [System.IO.Path]::GetFullPath('$(cygpath -w "$target")')
+    \$found = 'no'
+    while (\$p -and \$p.Length -ge \$root.Length) {
+      \$item = Get-Item -LiteralPath \$p -Force -ErrorAction SilentlyContinue
+      if (\$item -and (\$item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        \$found = \$p
+        break
+      }
+      \$parent = [System.IO.Path]::GetDirectoryName(\$p)
+      if (\$parent -eq \$p) { break }
+      \$p = \$parent
+    }
+    Write-Output \$found" 2>/dev/null)" || return 2
+  out="$(printf '%s' "$out" | tr -d '\r' | tail -1)"
+  [ -n "$out" ] || return 2
+  [ "$out" = "no" ] && return 1
+  printf '%s' "$out"
+  return 0
+}
+
+# The nearest ancestor of a path that exists. What the boundary checks can actually look at
+# before the path itself is created.
+nearest_existing() {
+  local p="${1%/}"
+  while [ -n "$p" ] && [ ! -e "$p" ]; do
+    local parent
+    parent="$(dirname "$p")"
+    [ "$parent" = "$p" ] && break
+    p="$parent"
+  done
+  printf '%s' "$p"
+}
+
+# check_inside_worktree <path> <label>
+#   Refuses unless <path> resolves to somewhere strictly below $WORKTREE, reached without
+#   crossing a reparse point. Works whether or not <path> exists yet.
+check_inside_worktree() {
+  local target="${1%/}" label="$2"
+
+  [ -n "$target" ] || die "refusing to use the $label: the path is empty"
+  case "$target" in
+    /|[A-Za-z]:|[A-Za-z]:/) die "refusing to use the $label: $1 is a filesystem root" ;;
+    /*|[A-Za-z]:/*) ;;
+    *) die "refusing to use the $label: $target is not an absolute path" ;;
+  esac
+
+  local anchor realAnchor rest
+  anchor="$(nearest_existing "$target")"
+  [ -d "$anchor" ] || die "refusing to use the $label: $anchor is not a directory"
+  realAnchor="$(cd "$anchor" && pwd -P)" || die "cannot resolve $anchor"
+  if [ "$anchor" != "$target" ]; then
+    rest="${target#"$anchor"}"
+  else
+    rest=""
+  fi
+  local resolved="$realAnchor$rest"
+
+  case "$resolved" in
+    "$WORKTREE_REAL") die "refusing to use the $label: $1 IS the worktree" ;;
+    "$WORKTREE_REAL"/?*) ;;
+    *) die "refusing to use the $label: $resolved is outside the worktree $WORKTREE_REAL" ;;
+  esac
+
+  # A path that reads one way and resolves another has a link in it. Said separately from the
+  # reparse walk because it catches the case even where powershell cannot be reached.
+  local logicalAnchor
+  logicalAnchor="$(cd "$anchor" && pwd)" || die "cannot resolve $anchor"
+  [ "$logicalAnchor" = "$realAnchor" ] \
+    || die "refusing to use the $label: $anchor resolves to $realAnchor"
+
+  local reparse rc
+  reparse="$(path_reparse_between "$WORKTREE_REAL" "$realAnchor")"; rc=$?
+  case "$rc" in
+    0) die "refusing to use the $label: reparse point at $reparse" ;;
+    1) ;;
+    *) die "refusing to use the $label: could not check $target for reparse points" ;;
+  esac
+
+  printf '%s' "$resolved"
+}
+
+# make_fresh_dir <path> <label>
+#   Creates it. Refuses if anything is already there -- "fresh" means a new directory, not a
+#   cleared one. Re-checks the boundary afterwards, because the check and the creation are two
+#   moments and something can arrive between them.
+make_fresh_dir() {
+  local target="$1" label="$2"
+  check_inside_worktree "$target" "$label" >/dev/null
+  [ -e "$target" ] && die "the $label already exists: $target -- move or remove it yourself; this script does not delete"
+  mkdir -p "$target" || die "could not create the $label at $target"
+  check_inside_worktree "$target" "$label" >/dev/null
+  say "$label: created $target"
+}
 step() { printf '\n=== %s\n' "$*"; }
 die()  { printf 'FAIL  %s\n' "$*" >&2; exit 1; }
 
@@ -69,6 +207,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# The one combination in the table with no sensible reading, refused here rather than nine
+# stages later with a missing file as the explanation.
+if [ "$DO_DEPLOY" = "1" ] && [ "$DO_SIGN" = "0" ] && [ "$DRY_RUN" = "0" ]; then
+  die "--deploy without --sign would publish a release nobody signed; add --sign, or add --dry-run to rehearse"
+fi
+
 [ -n "$WORKTREE" ] || die "--worktree is required"
 [ -n "$VERSION" ]  || die "--version is required"
 [ -d "$WORKTREE" ] || die "no such worktree: $WORKTREE"
@@ -79,13 +223,20 @@ esac
 WORKTREE="$(cd "$WORKTREE" && pwd)"
 [ -n "$BUILD_DIR" ] || BUILD_DIR="$WORKTREE/build-$VERSION"
 [ -n "$REL_ROOT" ]  || REL_ROOT="$WORKTREE/.claude/rel"
-REL_DIR="$REL_ROOT/$VERSION"
+# Where the release ends up, and where this run assembles it. They are not the same directory:
+# the run builds into its own, and the final name is taken by a rename after the gates pass. A
+# run that fails therefore cannot leave a half-release sitting where the deploy script looks.
+RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
+REL_FINAL="$REL_ROOT/$VERSION"
+REL_DIR="$REL_ROOT/$VERSION.$RUN_ID"
 PAYLOAD="$REL_DIR/payload"
+
 
 # ------------------------------------------------------------------- 1. preflight
 step "1. preflight"
 
 cd "$WORKTREE" || die "cannot enter $WORKTREE"
+WORKTREE_REAL="$(pwd -P)"
 git rev-parse --git-dir >/dev/null 2>&1 || die "$WORKTREE is not a git checkout"
 
 HEAD_SHA="$(git rev-parse HEAD)"
@@ -109,6 +260,35 @@ if [ "$SOURCE_VERSION" != "$VERSION" ]; then
 fi
 say "version  : $VERSION (source and argument agree)"
 
+# One release at a time per worktree. mkdir is the atomic part: two runs cannot both create it.
+LOCK_DIR="$WORKTREE/.claude/gnlink_release.lock"
+mkdir -p "$WORKTREE/.claude" || die "cannot create $WORKTREE/.claude"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  say "held by: $(cat "$LOCK_DIR/owner" 2>/dev/null || echo 'unknown')"
+  die "another release is running in this worktree ($LOCK_DIR) -- remove it if that is stale"
+fi
+printf 'pid=%s run=%s version=%s started=%s\n' "$$" "$RUN_ID" "$VERSION" "$(date -Is)" \
+  > "$LOCK_DIR/owner"
+cleanup() {
+  rmdir "$LOCK_DIR" 2>/dev/null || { rm -f "$LOCK_DIR/owner" 2>/dev/null; rmdir "$LOCK_DIR" 2>/dev/null; }
+}
+trap cleanup EXIT
+
+# Both directories are checked here, before a compiler runs, so a bad path fails in a second
+# rather than twenty minutes in.
+check_inside_worktree "$BUILD_DIR" "build dir" >/dev/null
+check_inside_worktree "$REL_DIR" "release dir" >/dev/null
+check_inside_worktree "$REL_FINAL" "release directory" >/dev/null
+
+# The published candidate is not this run's to clear. Even --dry-run used to remove it.
+if [ -e "$REL_FINAL" ]; then
+  if [ -n "$(ls -A "$REL_FINAL" 2>/dev/null)" ]; then
+    die "$REL_FINAL already exists and is not empty -- that is a release somebody may still be checking; move it aside yourself"
+  fi
+  die "$REL_FINAL already exists -- remove it yourself if it is nothing"
+fi
+say "release  : will be assembled in $REL_DIR and renamed to $REL_FINAL"
+
 # 0.2.134 lost half an hour to this: third_party/webview2 is gitignored and per-worktree, so a
 # fresh worktree has none. Without it remote60_client_shell is never created as a target and the
 # installer's payload command dies on a missing $<TARGET_FILE:...> -- an error that names neither
@@ -127,6 +307,29 @@ if [ ! -d "$WORKTREE/third_party/webview2/build/native" ]; then
 else
   say "webview2 : present"
 fi
+# What went in, recorded now and checked again at the end. A release names a commit, and the
+# WebView2 SDK is not in the commit -- it is a per-worktree directory this script may have copied
+# in. Both can change while a twenty-minute build runs, and a release built across such a change
+# is not the release its commit describes.
+sdk_hash() {
+  local dll
+  dll="$(find "$WORKTREE/third_party/webview2" -iname 'WebView2Loader.dll' -print 2>/dev/null | sort | head -1)"
+  if [ -n "$dll" ] && [ -f "$dll" ]; then
+    sha256sum "$dll" | cut -d' ' -f1
+    return 0
+  fi
+  local nuspec
+  nuspec="$(find "$WORKTREE/third_party/webview2" -iname '*.nuspec' -print 2>/dev/null | sort | head -1)"
+  if [ -n "$nuspec" ] && [ -f "$nuspec" ]; then
+    sha256sum "$nuspec" | cut -d' ' -f1
+    return 0
+  fi
+  printf 'unknown'
+}
+SDK_HASH_BEFORE="$(sdk_hash)"
+[ "$SDK_HASH_BEFORE" != "unknown" ] || die "could not hash the WebView2 SDK; refusing to build a release whose inputs cannot be named"
+say "sdk      : $SDK_HASH_BEFORE"
+
 
 [ -x "$CMAKE" ] || die "cmake not found at $CMAKE"
 
@@ -134,7 +337,9 @@ fi
 step "2. fresh configure -> $BUILD_DIR"
 
 # Fresh every time: a release built on top of a stale cache is a release nobody can reproduce.
-rm -rf "$BUILD_DIR" || die "could not remove $BUILD_DIR"
+# Fresh by creating a new directory, not by deleting an old one -- if the build dir is already
+# there, this run stops and says so rather than removing somebody's work.
+make_fresh_dir "$BUILD_DIR" "build dir"
 # No -DCMAKE_BUILD_TYPE. The Visual Studio generator is multi-config and setting it makes the
 # generator expressions in the installer's payload rules fail to evaluate.
 "$CMAKE" -S "$WORKTREE" -B "$BUILD_DIR" >"$BUILD_DIR.configure.log" 2>&1 \
@@ -161,7 +366,7 @@ say "all 8 executables present"
 # ------------------------------------------------------------------- 4. package
 step "4. package -> $REL_DIR"
 
-rm -rf "$REL_DIR" || die "could not clear $REL_DIR"
+make_fresh_dir "$REL_DIR" "release dir"
 mkdir -p "$PAYLOAD/ui" || die "could not create $PAYLOAD/ui"
 for exe in $EXES; do
   cp "$BIN/$exe.exe" "$PAYLOAD/$exe.exe" || die "could not package $exe.exe"
@@ -208,18 +413,74 @@ say ""
 say "-- checksums"
 ( cd "$REL_DIR" && sha256sum -c SHA256SUMS.txt ) || die "SHA256SUMS verification failed"
 
+say ""
+say "-- installer payload: does GNLinkSetup carry what this release ships"
+# The installer embeds the other nine as RT_RCDATA and the update replaces the same nine. Those
+# two sets can disagree without either half looking wrong, and then the thing installed is not
+# the thing gated. 0.2.133 was checked this way by hand.
+powershell.exe -NoProfile -ExecutionPolicy Bypass \
+  -File "$(cygpath -w "$SCRIPT_DIR/gnlink_check_installer_payload.ps1")" \
+  -Setup "$(cygpath -w "$PAYLOAD/GNLinkSetup.exe")" \
+  -Payload "$(cygpath -w "$PAYLOAD")" || die "installer payload gate failed"
+
+say ""
+say "-- inputs: did anything move while this was building"
+DIRTY_AFTER="$(git -C "$WORKTREE" status --porcelain --untracked-files=no)"
+[ -z "$DIRTY_AFTER" ] || { say "$DIRTY_AFTER"; die "the worktree changed during the build; this release does not describe commit $HEAD_SHA"; }
+HEAD_AFTER="$(git -C "$WORKTREE" rev-parse HEAD)"
+[ "$HEAD_AFTER" = "$HEAD_SHA" ] || die "HEAD moved from $HEAD_SHA to $HEAD_AFTER during the build"
+SDK_HASH_AFTER="$(sdk_hash)"
+[ "$SDK_HASH_AFTER" = "$SDK_HASH_BEFORE" ] || die "the WebView2 SDK changed during the build ($SDK_HASH_BEFORE -> $SDK_HASH_AFTER)"
+say "commit and SDK unchanged since preflight"
+
+# ----------------------------------------------------------- 7b. the release takes its name
+step "7b. name the release -> $REL_FINAL"
+
+# Only now, and only by a move that fails if the name is taken. Everything before this ran in a
+# directory named after this run, so a failed release cannot leave something at the name the
+# deploy script reads. The check is not the protection -- `mv` refusing to clobber is; the check
+# is there to say why in words rather than by an errno.
+[ -e "$REL_FINAL" ] && die "$REL_FINAL appeared while this run was building; refusing to replace it"
+# -T, always: without it a `mv` onto an existing directory moves INTO it, and the release ends
+# up one level down with the right name on the wrong thing.
+mv -T "$REL_DIR" "$REL_FINAL" || die "could not move $REL_DIR to $REL_FINAL"
+[ -d "$REL_FINAL" ] || die "the release is not at $REL_FINAL after the move"
+REL_DIR="$REL_FINAL"
+PAYLOAD="$REL_DIR/payload"
+say "release: $REL_FINAL"
+
 # ------------------------------------------------------------------- 8. sign
 step "8. sign"
 
+SIGNED=0
 if [ "$DO_SIGN" = "1" ]; then
   if [ "$DRY_RUN" = "1" ]; then
     say "dry run: would sign $REL_DIR/windows.manifest with the operational key"
+    say "         the key is not read and no signature is produced -- see the table at the top"
   else
+    # The key the product trusts, read out of the candidate's own source rather than kept in a
+    # second place. gnlink_verify_manifest.js reads the same literal the same way.
+    TRUSTED_KEY="$(sed -n 's/.*return[[:space:]]*"\([0-9a-f]\{128\}\)"[[:space:]]*;.*/\1/p' \
+      "$WORKTREE/apps/native_poc/src/update_manifest.cpp" | head -1)"
+    [ -n "$TRUSTED_KEY" ] || die "could not read the trusted public key from update_manifest.cpp"
     powershell.exe -NoProfile -ExecutionPolicy Bypass \
       -File "$(cygpath -w "$SCRIPT_DIR/gnlink_release_sign.ps1")" \
-      -ReleaseDir "$(cygpath -w "$REL_DIR")" || die "signing failed"
+      -ReleaseDir "$(cygpath -w "$REL_DIR")" \
+      -TrustedKeyHex "$TRUSTED_KEY" || die "signing failed"
     [ -f "$REL_DIR/windows.sig" ] || die "no windows.sig after signing"
-    say "signed and self-verified"
+    SIGNED=1
+    say "signed"
+
+    # And verified by the PRODUCT's verifier, which reads the key compiled into the update client
+    # rather than the one next to the signing key. The signing script checking its own work says
+    # the maths is right; this says the thing that will actually install the update accepts it.
+    if command -v node >/dev/null 2>&1; then
+      node "$SCRIPT_DIR/gnlink_verify_manifest.js" "$REL_DIR/windows.manifest" "$REL_DIR/windows.sig" windows \
+        || die "the product verifier rejects this signature -- do not publish"
+      say "verified against the key compiled into the product"
+    else
+      die "node is not on PATH; the product verifier is not optional before publishing"
+    fi
   fi
 else
   say "not requested (--sign)"
@@ -228,12 +489,27 @@ fi
 # ------------------------------------------------------------------- 9. deploy
 step "9. deploy"
 
+DEPLOY_LOG="$REL_DIR/deploy.log"
 if [ "$DO_DEPLOY" = "1" ]; then
-  [ -f "$REL_DIR/windows.sig" ] || die "--deploy without a signature; sign first"
   if [ "$DRY_RUN" = "1" ]; then
-    "$SCRIPT_DIR/gnlink_deploy.sh" --release-dir "$REL_DIR" --dry-run || die "deploy dry run failed"
+    # A dry run never signs, so requiring a signature here is requiring something this mode
+    # cannot produce. What it checks instead is everything that does not need one.
+    if [ -f "$REL_DIR/windows.sig" ]; then
+      say "rehearsing publication of a release that is already signed"
+      "$SCRIPT_DIR/gnlink_deploy.sh" --release-dir "$REL_DIR" --dry-run 2>&1 | tee "$DEPLOY_LOG"
+      [ "${PIPESTATUS[0]}" = "0" ] || die "deploy dry run failed (log: $DEPLOY_LOG)"
+    else
+      say "no signature, because --dry-run does not use the key"
+      say "checking the server the release would go to, and nothing else:"
+      "$SCRIPT_DIR/gnlink_deploy.sh" --release-dir "$REL_DIR" --verify-only 2>&1 | tee "$DEPLOY_LOG"
+      [ "${PIPESTATUS[0]}" = "0" ] || die "the deploy preflight failed (log: $DEPLOY_LOG)"
+      say "publication NOT rehearsed end to end: an unsigned release cannot be, and this run says"
+      say "so rather than failing on a file it was never going to write"
+    fi
   else
-    "$SCRIPT_DIR/gnlink_deploy.sh" --release-dir "$REL_DIR" || die "deploy failed"
+    [ -f "$REL_DIR/windows.sig" ] || die "--deploy without a signature; sign first"
+    "$SCRIPT_DIR/gnlink_deploy.sh" --release-dir "$REL_DIR" 2>&1 | tee "$DEPLOY_LOG"
+    [ "${PIPESTATUS[0]}" = "0" ] || die "deploy failed (log: $DEPLOY_LOG)"
   fi
 else
   say "not requested (--deploy)"
@@ -247,11 +523,25 @@ say "branch    : $BRANCH"
 say "commit    : $HEAD_SHA"
 say "build dir : $BUILD_DIR"
 say "release   : $REL_DIR"
-say "signed    : $([ -f "$REL_DIR/windows.sig" ] && echo yes || echo no)"
+say "run id    : $RUN_ID"
+say "sdk       : $SDK_HASH_BEFORE"
+say "signed    : $([ "$SIGNED" = "1" ] && echo yes || { [ -f "$REL_DIR/windows.sig" ] && echo 'yes (from an earlier run)' || echo no; })"
 say "deployed  : $([ "$DO_DEPLOY" = "1" ] && { [ "$DRY_RUN" = "1" ] && echo 'dry run only' || echo yes; } || echo no)"
 say ""
 say "artifact sha256:"
 sed 's/^/  /' "$REL_DIR/SHA256SUMS.txt"
 say ""
-say "gates: parity PASS, payload-set PASS, checksums PASS"
+say "gates: parity PASS, payload-set PASS, checksums PASS, installer payload 9/9 PASS,"
+say "       inputs unchanged (commit $HEAD_SHA, sdk $SDK_HASH_BEFORE)"
+if [ "$SIGNED" = "1" ]; then
+  say "       signature verified by the product's own verifier"
+fi
+# The deploy script's own external check is the last word on whether what is published is what
+# was built, so its answer belongs in this summary rather than only in its output.
+if [ -f "$DEPLOY_LOG" ]; then
+  say ""
+  say "external check, from $DEPLOY_LOG:"
+  grep -iE "https|sha256|published|manifest|sig" "$DEPLOY_LOG" | tail -12 | sed 's/^/  /' \
+    || say "  (nothing matched in the deploy log)"
+fi
 exit 0

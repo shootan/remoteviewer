@@ -251,6 +251,314 @@ printf 'tampered\n' > "$SUMDIR/thing.bin"
 expect_nonzero "checksums refuse a file that changed after packaging" \
   bash -c "cd '$SUMDIR' && sha256sum -c SHA256SUMS.txt"
 
+printf '\n=== deleting a tree: the boundary checks\n'
+# The path functions are lifted out of the release script and driven directly. Sourcing the whole
+# script would run a release; this runs those functions and nothing else. $2 stands in for the
+# worktree, which is the only root they allow anything under.
+RMDRIVE="$TMP/rmdrive.sh"
+{
+  printf 'set -u\n'
+  printf 'die() { printf "FAIL  %%s\\n" "$*" >&2; exit 1; }\n'
+  printf 'say() { printf "%%s\\n" "$*"; }\n'
+  sed -n '/^path_reparse_between()/,/^}$/p;/^nearest_existing()/,/^}$/p;/^check_inside_worktree()/,/^}$/p;/^make_fresh_dir()/,/^}$/p' "$RELEASE_SH"
+  printf 'WORKTREE_REAL="$(cd "$2" && pwd -P)"\n'
+  printf 'check_inside_worktree "$1" "target"\n'
+} > "$RMDRIVE"
+
+RMROOT="$TMP/rmroot"
+mkdir -p "$RMROOT/root/victim" "$RMROOT/outside"
+printf 'do not delete me\n' > "$RMROOT/outside/precious.txt"
+
+expect_nonzero "an empty path is refused"               bash "$RMDRIVE" "" "$RMROOT/root"
+expect_nonzero "a relative path is refused"             bash "$RMDRIVE" "root/victim" "$RMROOT/root"
+expect_nonzero "a filesystem root is refused"           bash "$RMDRIVE" "/" "$RMROOT/root"
+expect_nonzero "the worktree itself is refused"         bash "$RMDRIVE" "$RMROOT/root" "$RMROOT/root"
+expect_nonzero "a path outside the worktree is refused" bash "$RMDRIVE" "$RMROOT/outside" "$RMROOT/root"
+expect_nonzero "an escape through .. is refused"        bash "$RMDRIVE" "$RMROOT/root/../outside" "$RMROOT/root"
+
+[ -f "$RMROOT/outside/precious.txt" ]
+check $? "...and nothing outside the worktree was touched by any of that"
+
+# A path that does not exist yet is the normal case: these directories are about to be created.
+# The check has to reach through to the nearest ancestor that does exist.
+bash "$RMDRIVE" "$RMROOT/root/not/here/yet" "$RMROOT/root" >/dev/null 2>&1
+check $? "a path that does not exist yet is allowed, if its ancestor is inside"
+
+bash "$RMDRIVE" "$RMROOT/root/victim" "$RMROOT/root" >/dev/null 2>&1
+rc=$?
+[ "$rc" = "0" ] && [ -d "$RMROOT/root/victim" ]
+check $? "a real directory inside the worktree is allowed, and still there afterwards"
+
+# A junction is not a symlink as far as `test -L` goes, which is the whole reason the check asks
+# the OS. Skipped rather than faked where one cannot be made.
+JUNCTION_MADE=0
+if powershell.exe -NoProfile -NonInteractive -Command \
+     "New-Item -ItemType Junction -Path '$(cygpath -w "$RMROOT/root")\link' -Target '$(cygpath -w "$RMROOT/outside")' | Out-Null" >/dev/null 2>&1; then
+  JUNCTION_MADE=1
+fi
+if [ "$JUNCTION_MADE" = "1" ]; then
+  expect_nonzero "a junction pointing out of the worktree is refused" \
+    bash "$RMDRIVE" "$RMROOT/root/link" "$RMROOT/root"
+  [ -f "$RMROOT/outside/precious.txt" ]
+  check $? "...and what it pointed at is still there"
+  powershell.exe -NoProfile -NonInteractive -Command \
+    "Remove-Item -LiteralPath '$(cygpath -w "$RMROOT/root")\link' -Force" >/dev/null 2>&1
+else
+  printf 'SKIP  junction check (could not create a junction here)\n'
+fi
+
+printf '\n=== signing: verify first, write once, dispose always\n'
+# Against a THROWAWAY key generated for this run, in a directory of its own. The operational key
+# is never read here, and nothing below prints key material of either kind.
+SIGNDIR="$TMP/signing"
+KEYDIR="$TMP/testkey"
+mkdir -p "$SIGNDIR" "$KEYDIR"
+printf 'version=0.2.134\nartifact=GNLinkHost.exe\n' > "$SIGNDIR/windows.manifest"
+
+# CngKey::Create with an export policy is refused for an ephemeral key on this machine, so the
+# key is made by the ordinary ECDsa API and the CNG private blob assembled from its parameters:
+# BCRYPT_ECDSA_PRIVATE_P256_MAGIC, the key size, then X, Y and D. That is exactly the shape the
+# signing script imports.
+make_test_key() {
+  local dir="$1"
+  mkdir -p "$dir"
+  powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "
+  \$ErrorActionPreference = 'Stop'
+  Add-Type -AssemblyName System.Security
+  \$e = [System.Security.Cryptography.ECDsa]::Create(
+    [System.Security.Cryptography.ECCurve]::CreateFromFriendlyName('nistP256'))
+  \$k = \$e.ExportParameters(\$true)
+  \$ms = New-Object System.IO.MemoryStream
+  \$bw = New-Object System.IO.BinaryWriter(\$ms)
+  \$bw.Write([int]0x32534345); \$bw.Write([int]32)
+  \$bw.Write(\$k.Q.X); \$bw.Write(\$k.Q.Y); \$bw.Write(\$k.D)
+  \$bw.Flush()
+  \$prot = [System.Security.Cryptography.ProtectedData]::Protect(
+    \$ms.ToArray(), \$null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+  [System.IO.File]::WriteAllBytes((Join-Path '$(cygpath -w "$dir")' 'private.ecc.dpapi'), \$prot)
+  \$hex = ([System.BitConverter]::ToString(\$k.Q.X + \$k.Q.Y) -replace '-','').ToLowerInvariant()
+  [System.IO.File]::WriteAllText((Join-Path '$(cygpath -w "$dir")' 'public_xy.hex'), \$hex)
+  \$bw.Dispose(); \$e.Dispose()" >/dev/null 2>&1
+  [ -f "$dir/private.ecc.dpapi" ] && [ -f "$dir/public_xy.hex" ]
+}
+
+make_test_key "$KEYDIR"
+KEY_MADE=0
+[ $? = 0 ] && KEY_MADE=1
+
+# A second, unrelated key. Its public half is a valid point on the curve, which the earlier
+# "corrupt two characters of the hex" trick was not -- that made ECDsa::Create throw before any
+# signing happened, so the test passed without ever reaching the code it was aiming at. A mutant
+# that wrote the .sig before verifying went undetected until this was fixed.
+OTHERKEY="$TMP/otherkey"
+make_test_key "$OTHERKEY" || KEY_MADE=0
+
+# Every call pins the key the product trusts. For this test that is the throwaway key itself --
+# which is the point: the pin is not optional, so a test that wants signing to succeed has to
+# name the key doing the signing.
+sign_run() {
+  powershell.exe -NoProfile -ExecutionPolicy Bypass \
+    -File "$(cygpath -w "$SCRIPT_DIR/gnlink_release_sign.ps1")" \
+    -ReleaseDir "$(cygpath -w "$SIGNDIR")" -KeyDir "$(cygpath -w "$KEYDIR")" \
+    -TrustedKeyHex "$1" >/dev/null 2>&1
+}
+
+if [ "$KEY_MADE" = "1" ]; then
+  sign_run "$(cat "$KEYDIR/public_xy.hex")"
+  rc=$?
+  [ "$rc" = "0" ] && [ -f "$SIGNDIR/windows.sig" ]
+  check $? "a good key signs the manifest"
+
+  [ "$(tr -d ' \r\n' < "$SIGNDIR/windows.sig" | wc -c)" = "128" ]
+  check $? "...to 128 hex characters, a P-256 r||s"
+
+  [ ! -f "$SIGNDIR/windows.sig.tmp" ]
+  check $? "...and leaves no temporary behind"
+
+  GOOD_SIG="$(cat "$SIGNDIR/windows.sig")"
+
+  # The failure this reordering exists for. A public key that is perfectly valid but belongs to
+  # a different key makes the verification return false; the old order had already written the
+  # .sig by then, and the caller decides whether to publish by asking whether that file exists.
+  cp "$KEYDIR/public_xy.hex" "$KEYDIR/public_xy.hex.bak"
+  cp "$OTHERKEY/public_xy.hex" "$KEYDIR/public_xy.hex"
+  rm -f "$SIGNDIR/windows.sig"
+  sign_run "$(cat "$KEYDIR/public_xy.hex")"
+  rc=$?
+  [ "$rc" != "0" ]
+  check $? "a signature that does not verify fails the run"
+
+  [ ! -f "$SIGNDIR/windows.sig" ]
+  check $? "...and writes no .sig at all, so --deploy cannot pick one up"
+
+  [ ! -f "$SIGNDIR/windows.sig.tmp" ]
+  check $? "...and leaves no temporary either"
+
+  # An existing signature must survive a failed re-sign rather than being half-replaced.
+  printf '%s' "$GOOD_SIG" > "$SIGNDIR/windows.sig"
+  sign_run "$(cat "$KEYDIR/public_xy.hex")"
+  [ "$(cat "$SIGNDIR/windows.sig")" = "$GOOD_SIG" ]
+  check $? "a failed re-sign leaves the previous signature untouched"
+
+  mv -f "$KEYDIR/public_xy.hex.bak" "$KEYDIR/public_xy.hex"
+
+  # A key the product does not trust. The release would sign, self-verify and publish, and fail
+  # on every machine that tried to install it -- so this has to stop before the key is used.
+  rm -f "$SIGNDIR/windows.sig"
+  sign_run "$(printf 'a%.0s' $(seq 128))"
+  rc=$?
+  [ "$rc" != "0" ]
+  check $? "a signing key the product does not trust is refused"
+  [ ! -f "$SIGNDIR/windows.sig" ]
+  check $? "...and nothing is written"
+
+  expect_nonzero "a trusted key of the wrong length is refused" \
+    powershell.exe -NoProfile -ExecutionPolicy Bypass \
+      -File "$(cygpath -w "$SCRIPT_DIR/gnlink_release_sign.ps1")" \
+      -ReleaseDir "$(cygpath -w "$SIGNDIR")" -KeyDir "$(cygpath -w "$KEYDIR")" \
+      -TrustedKeyHex "deadbeef"
+
+  # The signature is over the manifest's BYTES. A manifest edited after signing must stop
+  # verifying -- that is the whole guarantee, and it is worth pinning rather than assuming.
+  rm -f "$SIGNDIR/windows.sig"
+  printf 'version=0.2.134\nartifact=GNLinkHost.exe\n' > "$SIGNDIR/windows.manifest"
+  sign_run "$(cat "$KEYDIR/public_xy.hex")"
+  [ -f "$SIGNDIR/windows.sig" ]
+  check $? "the manifest on disk is what gets signed"
+
+  verify_sig() {
+    # Independent of the signing script: the public key from the file, the manifest from disk.
+    powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "
+      \$hex = ([System.IO.File]::ReadAllText('$(cygpath -w "$KEYDIR")\public_xy.hex')).Trim()
+      \$xy = New-Object byte[] 64
+      for (\$i = 0; \$i -lt 64; \$i++) { \$xy[\$i] = [Convert]::ToByte(\$hex.Substring(\$i*2,2),16) }
+      \$pr = New-Object System.Security.Cryptography.ECParameters
+      \$pr.Curve = [System.Security.Cryptography.ECCurve]::CreateFromFriendlyName('nistP256')
+      \$pt = New-Object System.Security.Cryptography.ECPoint
+      \$pt.X = \$xy[0..31]; \$pt.Y = \$xy[32..63]
+      \$pr.Q = \$pt
+      \$v = [System.Security.Cryptography.ECDsa]::Create(\$pr)
+      \$doc = [System.IO.File]::ReadAllBytes('$(cygpath -w "$SIGNDIR")\windows.manifest')
+      \$sh = ([System.IO.File]::ReadAllText('$(cygpath -w "$SIGNDIR")\windows.sig')).Trim()
+      \$sg = New-Object byte[] 64
+      for (\$i = 0; \$i -lt 64; \$i++) { \$sg[\$i] = [Convert]::ToByte(\$sh.Substring(\$i*2,2),16) }
+      \$ok = \$v.VerifyData(\$doc, \$sg, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+      \$v.Dispose()
+      if (\$ok) { exit 0 } else { exit 1 }" >/dev/null 2>&1
+  }
+
+  verify_sig
+  check $? "...and the signature it wrote verifies against it"
+
+  printf 'version=0.2.134\nartifact=GNLinkHost.exe.tampered\n' > "$SIGNDIR/windows.manifest"
+  expect_nonzero "...and stops verifying the moment the manifest is edited" verify_sig
+
+  # The trusted key the release script will actually pass: read from the product source the same
+  # way gnlink_verify_manifest.js reads it. If that stops matching, signing stops working.
+  PRODUCT_KEY="$(sed -n 's/.*return[[:space:]]*"\([0-9a-f]\{128\}\)"[[:space:]]*;.*/\1/p' \
+    "$SCRIPT_DIR/../apps/native_poc/src/update_manifest.cpp" | head -1)"
+  [ "${#PRODUCT_KEY}" = "128" ]
+  check $? "the trusted key reads out of update_manifest.cpp as 128 hex characters" \
+    "got ${#PRODUCT_KEY}"
+else
+  printf 'SKIP  signing checks (could not create a throwaway key here)\n'
+fi
+
+# The three objects that hold a CNG handle have to be released in finally, or a throw on the way
+# -- a short signature, a key the product does not trust, a verification that failed -- skips it.
+# Named individually rather than matching every Dispose: a local hash disposed on its own error
+# path is not this defect.
+FINALLY_LINE="$(grep -n '^finally {' "$SCRIPT_DIR/gnlink_release_sign.ps1" | head -1 | cut -d: -f1)"
+EARLY="$(grep -nE '\$(signer|key|verifier)\.Dispose\(\)' "$SCRIPT_DIR/gnlink_release_sign.ps1" \
+         | cut -d: -f1 | awk -v f="$FINALLY_LINE" '$1 < f')"
+[ -z "$EARLY" ]
+check $? "signer, key and verifier are disposed in finally, not on the success path" \
+  "${EARLY:+lines $(printf '%s' "$EARLY" | tr '\n' ' ')}"
+
+for obj in signer key verifier; do
+  awk -v f="$FINALLY_LINE" -v o="$obj" 'NR > f && $0 ~ ("\\$" o "\\.Dispose\\(\\)") { found=1 }
+                                        END { exit found ? 0 : 1 }' \
+    "$SCRIPT_DIR/gnlink_release_sign.ps1"
+  check $? "...and \$$obj is actually disposed there"
+done
+
+printf '\n=== the option table: eight combinations, no contradictions\n'
+# Only one of the eight is refused, and it is refused at argument time rather than nine stages
+# later. The rest are driven far enough to see that the arguments are accepted -- a real run
+# needs a compiler, which this test does not have and does not want.
+OPTWT="$TMP/optwt"
+make_worktree "$OPTWT" "0.2.134"
+
+opt_reaches_preflight() {
+  # Accepted arguments get as far as the preflight and stop there on something else (no
+  # WebView2, no compiler). Refused arguments never print the preflight banner.
+  local out
+  out="$(GNLINK_WEBVIEW2_SOURCE="$TMP/no-such-sdk" bash "$RELEASE_SH" \
+           --worktree "$OPTWT" --version 0.2.134 "$@" 2>&1)"
+  printf '%s' "$out" | grep -q '1. preflight'
+}
+
+opt_reaches_preflight                             ; check $? "sign=no  deploy=no  dry=no   is accepted"
+opt_reaches_preflight --dry-run                   ; check $? "sign=no  deploy=no  dry=yes  is accepted"
+opt_reaches_preflight --deploy --dry-run          ; check $? "sign=no  deploy=yes dry=yes  is accepted"
+opt_reaches_preflight --sign                      ; check $? "sign=yes deploy=no  dry=no   is accepted"
+opt_reaches_preflight --sign --dry-run            ; check $? "sign=yes deploy=no  dry=yes  is accepted"
+opt_reaches_preflight --sign --deploy             ; check $? "sign=yes deploy=yes dry=no   is accepted"
+opt_reaches_preflight --sign --deploy --dry-run   ; check $? "sign=yes deploy=yes dry=yes  is accepted (it used to self-contradict)"
+
+expect_nonzero "sign=no  deploy=yes dry=no   is refused, publishing something unsigned" \
+  bash "$RELEASE_SH" --worktree "$OPTWT" --version 0.2.134 --deploy
+
+OUT="$(bash "$RELEASE_SH" --worktree "$OPTWT" --version 0.2.134 --deploy 2>&1 || true)"
+printf '%s' "$OUT" | grep -q 'nobody signed'
+check $? "...and says why, in those words"
+
+# At argument time, which is before the preflight banner is printed -- so the ABSENCE of that
+# banner is the evidence. The first version of this check asserted the opposite and failed a
+# script that was refusing exactly when it should.
+printf '%s' "$OUT" | grep -qv '1. preflight'
+check $? "...at argument time, before the preflight even starts"
+
+printf '\n=== nothing is deleted, in any mode\n'
+# The release directory holds the bytes a published manifest is signed over. An earlier version
+# cleared it with rm -rf -- in --dry-run too.
+DELWT="$TMP/delwt"
+make_worktree "$DELWT" "0.2.134"
+mkdir -p "$DELWT/.claude/rel/0.2.134/payload"
+printf 'the published candidate\n' > "$DELWT/.claude/rel/0.2.134/payload/GNLinkHost.exe"
+mkdir -p "$DELWT/build-0.2.134"
+printf 'an earlier build\n' > "$DELWT/build-0.2.134/CMakeCache.txt"
+
+for mode in "" "--dry-run" "--sign --dry-run" "--deploy --dry-run"; do
+  # shellcheck disable=SC2086
+  GNLINK_WEBVIEW2_SOURCE="$TMP/no-such-sdk" bash "$RELEASE_SH" \
+    --worktree "$DELWT" --version 0.2.134 $mode >/dev/null 2>&1
+done
+[ -f "$DELWT/.claude/rel/0.2.134/payload/GNLinkHost.exe" ] \
+  && [ -f "$DELWT/build-0.2.134/CMakeCache.txt" ]
+check $? "an existing release and an existing build survive every mode"
+
+OUT="$(GNLINK_WEBVIEW2_SOURCE="$TMP/no-such-sdk" bash "$RELEASE_SH" \
+        --worktree "$DELWT" --version 0.2.134 2>&1 || true)"
+printf '%s' "$OUT" | grep -qi 'already exists'
+check $? "...and the run says the release directory is already there"
+
+expect_nonzero "a build dir outside the worktree is refused" \
+  bash "$RELEASE_SH" --worktree "$DELWT" --version 0.2.134 --build-dir "$TMP/elsewhere-build"
+expect_nonzero "a build dir reached through .. is refused" \
+  bash "$RELEASE_SH" --worktree "$DELWT" --version 0.2.134 --build-dir "$DELWT/../escaped"
+expect_nonzero "a rel-root outside the worktree is refused" \
+  bash "$RELEASE_SH" --worktree "$DELWT" --version 0.2.134 --rel-root "$TMP/elsewhere-rel"
+[ ! -e "$TMP/elsewhere-build" ] && [ ! -e "$TMP/elsewhere-rel" ]
+check $? "...and none of those created anything outside the worktree"
+
+# Two at once. The second has to stop rather than build into the first one's directory.
+mkdir -p "$DELWT/.claude/gnlink_release.lock"
+printf 'pid=1 run=fixture\n' > "$DELWT/.claude/gnlink_release.lock/owner"
+expect_nonzero "a second release in the same worktree is refused while one holds the lock" \
+  bash "$RELEASE_SH" --worktree "$DELWT" --version 0.2.134
+rm -rf "$DELWT/.claude/gnlink_release.lock"
+
 printf '\n=== the script does not bump versions\n'
 # Reading the header is exactly what the preflight does, so the pattern has to name WRITING:
 # an in-place edit, or a redirect into the file. The first version of this check matched the
