@@ -1828,6 +1828,17 @@ if(MSVC)
   target_compile_options(remote60_control_resume_test PRIVATE /utf-8)
 endif()
 
+# The viewer's half of item 8: the resume state machine, over a real control channel.
+add_executable(remote60_viewer_control_resume_test
+  src/viewer_control_resume_test.cpp
+  src/udp_control_channel.cpp
+)
+target_include_directories(remote60_viewer_control_resume_test PRIVATE src)
+target_link_libraries(remote60_viewer_control_resume_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_viewer_control_resume_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_clipboard_sync_core_test
   src/clipboard_sync_core_test.cpp
 )

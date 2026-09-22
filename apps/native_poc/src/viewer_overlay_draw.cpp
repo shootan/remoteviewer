@@ -209,6 +209,11 @@ void draw_overlay(ViewerState& ctx, HDC hdc) {
     tokenLine = "호스트와의 연결이 끊겼습니다.";
   } else if (panelStatus == "session_lost") {
     tokenLine = "세션이 끊겼습니다. 다시 연결해 주세요.";
+  } else if (panelStatus == "control_resuming") {
+    // Not "connection lost": the picture is still arriving and the session is the same
+    // one. Saying it is lost would be wrong, and saying nothing would leave the user
+    // clicking at a window that cannot answer yet. (item 8, C3)
+    tokenLine = "제어 연결을 복구하는 중…";
   } else if (panelStatus == "control_connect_failed") {
     tokenLine = "호스트에 연결하지 못했습니다.";
   } else if (panelStatus == "waiting_control" || panelStatus == "window_list_request pending") {

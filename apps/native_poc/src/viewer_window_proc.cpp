@@ -351,6 +351,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 << " (0=EN 1=KR 2=?)\n";
       return 0;
     }
+    case kMsgControlResumed: {
+      // The control channel is back on the same session. Nothing about the local key
+      // state can be trusted across that gap: a key-up sent while the tunnel was dead is
+      // simply gone, and the host is still holding whatever was down when it broke. So
+      // the same release-all the window runs when focus leaves, for the same reason --
+      // and NOT a replay of anything, which would turn one keystroke into two.
+      if (!kInputPolicyForceBlock) {
+        enqueue_release_for_pressed_keys(ctx);
+        release_all_physical(ctx);
+      }
+      ctx.picker.CancelPress();
+      std::cout << "[native-video-client][control-resume] released held keys and buttons\n";
+      return 0;
+    }
     case kMsgHostImeDeactivate: {
       // Leaving host-IME (capability lost / reconnect / shutdown): stop physical routing first, send
       // ups for anything still held on the host, then restore the local IME for the legacy path.

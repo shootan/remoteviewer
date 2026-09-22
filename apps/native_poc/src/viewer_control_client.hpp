@@ -18,6 +18,8 @@
 // Bodies are the lambda bodies of native_video_client_main.cpp, verbatim (viewer split refactor
 // Phase 2-4); the captured state (args, startInPicker, controlSock) are members with the same names.
 
+#include <memory>
+
 #include "viewer_args.hpp"
 #include "viewer_common.hpp"
 #include "viewer_state.hpp"
@@ -49,6 +51,19 @@ class ControlClient {
   // an interval. Runs on the same idle turns as the thumbnail fetch, and only when the host
   // advertised the capability. Returns: 1 did work, 0 nothing to do, -1 link failure (drop session).
   int pump_clipboard_sync(remote60::native_poc::ControlLink& link);
+  // --- control resume (item 8, C3) ---
+  // The worker's three moves. Kept here rather than in the loop because the loop already
+  // has one job, and because "is the picture still arriving" has to be answered with the
+  // SAME definition the session watchdog uses or the two clocks drift apart.
+  bool video_alive(uint64_t nowUs) const;
+  // Control just failed. True when a recovery has begun and the loop should enter Resuming.
+  bool begin_control_resume(uint64_t nowUs);
+  // One turn of Resuming. False means the session is over (ceiling passed, or called off).
+  bool pump_control_resume(std::unique_ptr<remote60::native_poc::ControlLink>& link,
+                           remote60::native_poc::ControlWorkerState& state);
+  // A real exchange on the re-keyed channel. An Ack is the host's claim; this is the proof.
+  bool control_round_trip(remote60::native_poc::ControlLink& link);
+
   // the reply switch of Run(), one member per reply kind (verbatim case bodies)
   void handle_pong(const ControlOutboundAction& action, const ControlPongMessage& pong);
   void handle_window_list(const ControlWindowListMessage& windowList);

@@ -64,6 +64,10 @@ inline remote60::native_poc::UdpHelloOptions viewer_udp_hello_options(const std:
   hello.sliceMaxMs = 200;
   hello.retrySleepMs = 50;
   hello.requestNack = videoNackEnabled;
+  // Control resume (item 8, C3). Asked for unconditionally: it costs one bit, the host
+  // answers old viewers exactly as before, and a viewer that did not ask could not be
+  // helped by the feature at all.
+  hello.requestControlResume = true;
   return hello;
 }
 
@@ -74,6 +78,8 @@ inline void viewer_apply_udp_hello_ack(uint32_t ackFeatures, bool videoNackEnabl
   session.udpHelloAckFeatures = ackFeatures;
   session.hostSupportsNack =
       videoNackEnabled && (ackFeatures & remote60::native_poc::kUdpFeatureVideoNack) != 0;
+  session.hostSupportsControlResume =
+      (ackFeatures & remote60::native_poc::kUdpFeatureControlResume) != 0;
 }
 
 // The receive timeout every UDP session runs with (direct and tunnelled alike): the clock of the

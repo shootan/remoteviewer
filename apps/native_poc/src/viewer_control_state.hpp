@@ -25,6 +25,7 @@
 #include "viewer_common.hpp"
 #include "viewer_constants.hpp"
 #include "clipboard_sync.hpp"
+#include "viewer_control_resume.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -75,6 +76,12 @@ struct ControlChannelState {
   // cross-thread: control writes, recv ticks + OnPacket, main configures/closes.
   remote60::native_poc::UdpControlChannel udpControl;
   std::atomic<bool> overUdp{false};
+  // Control resume (item 8, C3): the recovery that rebuilds the tunnel after peer-lost
+  // without a reconnect. The control worker drives it; UDP ingress hands it verified
+  // answers and nothing else. Idle -- and never asked -- against a host that did not
+  // advertise kUdpFeatureControlResume.
+  // cross-thread: worker decides and re-keys, ingress validates, main configures.
+  remote60::native_poc::ViewerControlResume resume;
   // cross-thread: control writes after every pong, recv reads (the A04 give-up's reply allowance
   // is 2 x this RTT, when fresh). 0 = no pong yet.
   std::atomic<uint64_t> lastRttUs{0};

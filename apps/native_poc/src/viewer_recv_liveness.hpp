@@ -130,6 +130,21 @@ inline uint64_t liveness_age_us(uint64_t nowUs, uint64_t thenUs) {
   return (thenUs > 0 && nowUs >= thenUs) ? (nowUs - thenUs) : 0;
 }
 
+/**
+ * Whether the picture has stopped. (item 8, C3)
+ *
+ * Pulled out of the verdict below because a second caller now needs the SAME answer, not a
+ * similar one: control resume asks to be let back in exactly while the picture is the reason
+ * the session is still here, and if its idea of "video is alive" drifted from the one that
+ * keeps the session alive, the viewer would either ask after the session had been written off
+ * or stop asking while it was still being kept. One definition, two readers.
+ */
+inline bool liveness_video_stopped(const SessionLivenessSample& s,
+                                   const SessionLivenessConfig& c) {
+  return (s.stage == RecvStage::Exited) || (s.lastPublishUs == 0) ||
+         (liveness_age_us(s.nowUs, s.lastPublishUs) >= c.deadSessionUs);
+}
+
 inline SessionLivenessVerdict evaluate_session_liveness(const SessionLivenessSample& s,
                                                         const SessionLivenessConfig& c) {
   SessionLivenessVerdict v;
@@ -150,8 +165,7 @@ inline SessionLivenessVerdict evaluate_session_liveness(const SessionLivenessSam
   // recv loop itself ended). Such a session answers nothing and never will; keeping its last
   // picture up is the field's "had to restart the client".
   const bool controlGone = s.controlGoneSinceUs > 0 && (!s.controlConnected || s.tunnelClosed);
-  const bool videoStopped = (s.stage == RecvStage::Exited) ||
-                            (s.lastPublishUs == 0) || (v.publishAgeUs >= c.deadSessionUs);
+  const bool videoStopped = liveness_video_stopped(s, c);
   v.sessionDead = c.deadSessionUs > 0 && controlGone && v.controlGoneUs >= c.deadSessionUs &&
                   videoStopped;
   const uint64_t outputBase = s.lastPublishUs > s.streamExpectedSinceUs

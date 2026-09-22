@@ -12,6 +12,7 @@
 #include "viewer_input_forward.hpp"
 #include "viewer_log.hpp"
 #include "viewer_picker.hpp"
+#include "viewer_recv_liveness.hpp"
 
 #include "viewer_unlock.hpp"
 #include "peer_version.hpp"
@@ -275,6 +276,138 @@ void ControlClient::handle_input_ack(const ControlInputAckMessage& inputAck) {
 }
 
 
+
+// ---------------------------------------------------------------- control resume (item 8, C3)
+
+bool ControlClient::video_alive(uint64_t nowUs) const {
+  // Deliberately the watchdog's own definition, called rather than restated. A resume is
+  // asked for exactly while the picture is the reason the session is still here; if this
+  // drifted from liveness_video_stopped the viewer would either keep asking after the session
+  // had been written off, or stop asking while it was still being kept alive.
+  SessionLivenessSample sample;
+  sample.nowUs = nowUs;
+  sample.stage = ctx.recvLive.current_stage();
+  sample.lastPublishUs = ctx.recvLive.lastPublishUs.load(std::memory_order_relaxed);
+  SessionLivenessConfig cfg;
+  cfg.deadSessionUs = static_cast<uint64_t>(ctx.session.deadSessionUs);
+  return !liveness_video_stopped(sample, cfg);
+}
+
+bool ControlClient::control_round_trip(remote60::native_poc::ControlLink& link) {
+  // A ping of this worker's own, not one taken from the scheduler: the scheduler's pings are
+  // paced and carry telemetry, and what is wanted here is one exchange, now, whose only
+  // meaning is that both ends agree about the stream ids they just changed.
+  remote60::native_poc::ControlOutboundAction action;
+  action.kind = remote60::native_poc::ControlOutboundActionKind::Ping;
+  action.ping.header.magic = remote60::native_poc::kMagic;
+  action.ping.header.type = static_cast<uint16_t>(remote60::native_poc::MessageType::ControlPing);
+  action.ping.header.size = static_cast<uint16_t>(sizeof(action.ping));
+  action.ping.clientSendQpcUs = remote60::native_poc::qpc_now_us();
+  action.expectedResponseType = remote60::native_poc::MessageType::ControlPong;
+  action.expectedResponseSize =
+      static_cast<uint16_t>(sizeof(remote60::native_poc::TcpControlResponse{}.pong));
+  remote60::native_poc::TcpControlResponse response;
+  return remote60::native_poc::execute_control_action(link, action, &response) &&
+         response.kind == remote60::native_poc::TcpControlResponseKind::Pong;
+}
+
+bool ControlClient::begin_control_resume(uint64_t nowUs) {
+  // Only the tunnelled path. A direct TCP control socket that dies is a different failure with
+  // a different repair, and this one would be re-keying a stream that is not there.
+  if (!ctx.control.overUdp.load(std::memory_order_acquire)) return false;
+  if (!ctx.control.resume.negotiated()) return false;  // an old host is never asked
+  if (!ctx.session.running.load()) return false;
+  // No picture means this is a session that is ending, not one that is broken. Asking into it
+  // would spin and would blur the one signal the liveness verdict still has.
+  if (!video_alive(nowUs)) return false;
+  ctx.control.resume.BeginBreak(nowUs);
+  if (!ctx.control.resume.attempt_in_flight()) return false;
+  // Control IS down, and saying otherwise would leave the toolbar claiming a link that answers
+  // nothing. It also starts the watchdog's own clock, which is what keeps the 30 s ceiling a
+  // single budget rather than two that can be spent one after the other.
+  ctx.control.connected.store(false, std::memory_order_relaxed);
+  set_window_panel_status(ctx, "control_resuming");
+  if (ctx.session.hwnd) InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
+  return true;
+}
+
+bool ControlClient::pump_control_resume(
+    std::unique_ptr<remote60::native_poc::ControlLink>& link,
+    remote60::native_poc::ControlWorkerState& state) {
+  // Cancellation and session end win, every turn, before anything else is considered. A
+  // recovery that outlives the session it is recovering is the r9-class defect this design
+  // exists to avoid.
+  if (!ctx.session.running.load()) {
+    ctx.control.resume.Finish(false);
+    state = remote60::native_poc::ControlWorkerState::Closed;
+    return false;
+  }
+  ctx.control.udpControl.Tick();
+  const uint64_t nowUs = remote60::native_poc::qpc_now_us();
+
+  if (ctx.control.resume.ApplyPendingRekey()) {
+    // The link is holding a half-read message from the stream that just died. The ordinary
+    // loop builds it once precisely so that partial message is not lost -- here losing it is
+    // the point, because it belongs to a stream neither end is listening on any more.
+    link = std::make_unique<remote60::native_poc::UdpControlLink>(&ctx.control.udpControl,
+                                                                 kUdpControlReadTimeoutMs);
+    if (control_round_trip(*link)) {
+      const uint64_t doneUs = remote60::native_poc::qpc_now_us();
+      const uint64_t beganUs = ctx.control.resume.began_us();
+      const uint64_t firstSendUs = ctx.control.resume.first_send_us();
+      std::ostringstream os;
+      os << "[native-video-client][control-resume] resumed resumeId="
+         << ctx.control.resume.resume_id()
+         << " attempts=" << ctx.control.resume.attempts()
+         // Two numbers, because one hides the other: how long until the first ask went out,
+         // and how long the whole recovery took. A single "recovered in Nms" cannot say
+         // which half was slow.
+         << " breakToFirstSendUs=" << (firstSendUs > beganUs ? firstSendUs - beganUs : 0)
+         << " breakToRunningUs=" << (doneUs > beganUs ? doneUs - beganUs : 0);
+      log_client_line(ctx, os.str());
+      ctx.control.resume.Finish(true);
+      // Anything queued while the channel was dead is dropped rather than delivered late. The
+      // user was clicking at a picture that could not answer; replaying thirty seconds of that
+      // into the host the moment it can hear again is worse than losing it. Drained rather
+      // than Reset() so the sequence numbers keep counting -- the host is the same session and
+      // has not forgotten where they were.
+      remote60::native_poc::QueuedControlInputMessage stale;
+      uint32_t dropped = 0;
+      while (ctx.control.inputQueue.TryDequeue(&stale)) ++dropped;
+      std::cout << "[native-video-client][control-resume] dropped " << dropped
+                << " input events queued during the break\n";
+      ctx.control.connected.store(true, std::memory_order_relaxed);
+      set_window_panel_status(ctx, std::string());
+      if (ctx.session.hwnd) {
+        // The existing release-all contract, on the thread that owns the key state. A key-up
+        // sent while the tunnel was dead is gone, and the host is still holding whatever was
+        // down when it broke.
+        PostMessageW(ctx.session.hwnd, kMsgControlResumed, 0, 0);
+        InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
+      }
+      state = remote60::native_poc::ControlWorkerState::Running;
+      return true;
+    }
+    // The host said it re-keyed and the channel still does not answer. The id cannot be used
+    // again -- the host has cached that answer and would repeat it forever -- so the recovery
+    // carries on under a new one, with the ceiling still running from the original break.
+    ctx.control.resume.RetryWithNewId(remote60::native_poc::qpc_now_us());
+  }
+
+  const remote60::native_poc::ControlResumeAction action =
+      ctx.control.resume.Poll(video_alive(nowUs), nowUs);
+  if (action == remote60::native_poc::ControlResumeAction::GiveUp) {
+    ctx.control.resume.Finish(false);
+    state = remote60::native_poc::ControlWorkerState::Closed;
+    return false;
+  }
+  // Idle can also mean the video stopped too, in which case this waits and asks nothing while
+  // the session watchdog decides -- it declares the session dead after deadSessionUs and closes
+  // the window, which ends this loop through ctx.session.running above.
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  return true;
+}
+
 void ControlClient::Run() {
   // Built once, not per action: the tunnelled link carries the partially-read inbound
   // message between calls, and a fresh one each time would drop whatever it held.
@@ -301,7 +434,17 @@ void ControlClient::Run() {
   log_client_line(ctx, "[native-video-client][connection-version] localProcess=GNLinkViewer localVersion=" +
                       local_product_version() + " peerProcess=GNLinkStream peerVersion=unknown-awaiting-pong");
 
+  // The worker's state. Resuming is this same thread and this same loop with the request
+  // side switched off -- not a second worker, and not this one exiting and being started
+  // again, either of which would race the session teardown for nothing. (item 8, C3)
+  remote60::native_poc::ControlWorkerState workerState =
+      remote60::native_poc::ControlWorkerState::Running;
+
   while (ctx.session.running.load()) {
+    if (workerState == remote60::native_poc::ControlWorkerState::Resuming) {
+      if (!pump_control_resume(controlLink, workerState)) break;
+      continue;
+    }
     // Drives retransmission and gap recovery; cheap when there is nothing outstanding.
     if (ctx.control.overUdp.load(std::memory_order_acquire)) ctx.control.udpControl.Tick();
     bool didWork = false;
@@ -468,6 +611,15 @@ void ControlClient::Run() {
                     << " nacks=" << stats.nacksSent;
         }
         std::cout << "\n";
+        // The request that just failed is NOT resent. It may not be idempotent -- a
+        // capture-mode change, a window selection -- and the host's mailbox keeping it is
+        // not the same as its reply being redelivered. It fails here; the UI asks again if
+        // it still wants the answer. A reply that turns up later is dropped by the re-key,
+        // which gives the resumed channel stream ids the old reply does not carry.
+        if (begin_control_resume(qpc_now_us())) {
+          workerState = remote60::native_poc::ControlWorkerState::Resuming;
+          continue;
+        }
         break;
       }
       if (action.kind == ControlOutboundActionKind::InputEvent) {
@@ -548,18 +700,35 @@ void ControlClient::Run() {
         default:
           break;
       }
-      if (versionExchangeFailed) break;  // A failed framed exchange cannot safely reuse the stream.
+      // A failed framed exchange cannot safely reuse the stream. Deliberately NOT a resume: the
+      // stream is desynced rather than gone, and re-keying it would carry that desync into the
+      // new stream ids with nothing having been resynchronised.
+      if (versionExchangeFailed) break;
     }
 
     // Clipboard sync runs whether or not the picker is up (unlike previews), so it comes first.
     if (!didWork) {
       const int synced = pump_clipboard_sync(*controlLink);
-      if (synced < 0) break;
+      if (synced < 0) {
+        // The same door as a failed action: on the tunnel a clipboard poll that cannot complete
+        // is the link having gone, not the clipboard having a problem.
+        if (begin_control_resume(qpc_now_us())) {
+          workerState = remote60::native_poc::ControlWorkerState::Resuming;
+          continue;
+        }
+        break;
+      }
       didWork = (synced > 0);
     }
     if (!didWork && ctx.picker.visible.load(std::memory_order_relaxed)) {
       const int fetched = fetch_one_thumbnail(*controlLink);
-      if (fetched < 0) break;
+      if (fetched < 0) {
+        if (begin_control_resume(qpc_now_us())) {
+          workerState = remote60::native_poc::ControlWorkerState::Resuming;
+          continue;
+        }
+        break;
+      }
       didWork = (fetched > 0);
     }
     if (!didWork) ctx.control.inputQueue.WaitForInput(2);

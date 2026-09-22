@@ -12,6 +12,7 @@
 #include "viewer_udp_session.hpp"
 
 #include <iostream>
+#include <random>
 #include <vector>
 
 #include "viewer_env_util.hpp"
@@ -711,6 +712,43 @@ void attach_control_tunnel_and_log(ViewerContext& ctx) {
         remote60::native_poc::kUdpControlStreamClientToHost,
         remote60::native_poc::kUdpControlStreamHostToClient, ctx.args.udpMtu);
     ctx.control.overUdp.store(true, std::memory_order_release);
+    // Control resume (item 8, C3). Configured here because this is where the thing it
+    // repairs comes into existence: the tunnel over the media socket. The peer is read
+    // from the socket rather than from the arguments -- the socket is what the punch
+    // actually landed on, and an answer from anywhere else is not this session's.
+    {
+      sockaddr_in peer{};
+      int peerLen = sizeof(peer);
+      const bool havePeer =
+          getpeername(ctx.session.sock, reinterpret_cast<sockaddr*>(&peer), &peerLen) == 0;
+      remote60::native_poc::ViewerControlResume::Config cfg;
+      // The ceiling is T3's, read from the session rather than restated, so the two
+      // cannot drift apart into a resume that outlives the session it is repairing.
+      cfg.decide.giveUpAfterUs =
+          SessionLivenessConfig{}.controlGoneWithVideoUs;
+      std::mt19937 rng(static_cast<uint32_t>(remote60::native_poc::qpc_now_us()) ^
+                       static_cast<uint32_t>(GetCurrentProcessId()));
+      ctx.control.resume.Configure(
+          &ctx.control.udpControl,
+          [&ctx](const void* data, size_t len) -> bool {
+            return send(ctx.session.sock, static_cast<const char*>(data),
+                        static_cast<int>(len), 0) > 0;
+          },
+          [&ctx](const std::string& line) { log_client_line(ctx, line); },
+          [rng]() mutable -> uint32_t {
+            const uint32_t id = rng();
+            return id == 0 ? 1u : id;  // 0 is the "no attempt" value
+          },
+          [&ctx]() -> uint64_t {
+            return ctx.connectGeneration.load(std::memory_order_acquire);
+          },
+          cfg, ctx.session.hostSupportsControlResume,
+          havePeer ? peer.sin_addr.s_addr : 0u, havePeer ? peer.sin_port : uint16_t{0});
+      std::cout << "[native-video-client][control-resume] negotiated="
+                << (ctx.session.hostSupportsControlResume ? 1 : 0)
+                << " peer=" << (havePeer ? 1 : 0)
+                << " ceilingUs=" << cfg.decide.giveUpAfterUs << "\n";
+    }
     // The receive timeout that lets the tick above run on a quiet link is set once for every UDP
     // session in connect_media_socket (it used to be set here, for the tunnel only).
     std::cout << "[native-video-client] control tunnelled over the media socket\n";

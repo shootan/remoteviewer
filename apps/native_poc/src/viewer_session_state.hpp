@@ -61,6 +61,9 @@ struct SessionState {
   // used to discard the ack bits, so the 0.2.95/96 NACK path never ran in GNLinkViewer.)
   uint32_t udpHelloAckFeatures = 0;
   bool hostSupportsNack = false;
+  // Whether the host acknowledged kUdpFeatureControlResume (item 8, C3). False against a
+  // host that predates it, and then the viewer never sends a resume at all.
+  bool hostSupportsControlResume = false;
   // Session watchdog (viewer_session_watchdog.cpp): a session whose control channel is gone for
   // good and whose video has not progressed for deadSessionUs is declared dead; deadSessionExit
   // then ends the viewer so the shell offers a reconnect (REMOTE60_NATIVE_DEAD_SESSION_EXIT=0 only

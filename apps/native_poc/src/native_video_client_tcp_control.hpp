@@ -99,6 +99,10 @@ struct UdpHelloOptions {
   uint32_t sliceMaxMs = 250;  // longest single wait for an ack
   uint32_t retrySleepMs = 0;  // pause after a failed send or a bad ack; 0 = a failed send is fatal
   bool requestNack = false;   // advertise kUdpFeatureVideoNack in the Hello (video NACK.)
+  // Advertise kUdpFeatureControlResume (item 8). The host offers it to everyone and acts on
+  // it only for a client that asked, so a client that does not set this is never sent a
+  // resume answer -- and, until C3, no client set it at all.
+  bool requestControlResume = false;
 };
 // `outAckFeatures` (optional) receives the host's HelloAck feature bits on success, so the caller
 // learns whether the host supports NACK (kUdpFeatureVideoNack) etc.

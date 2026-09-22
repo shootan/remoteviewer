@@ -96,6 +96,11 @@ constexpr UINT kMsgApplyClipboard = WM_APP + 14;
 // it pending to be sent. Reading belongs on the thread that owns the listener window, and the
 // control thread is not it.
 constexpr UINT kMsgPushClipboardNow = WM_APP + 15;
+// Control came back without a reconnect (item 8, C3). Posted by the control worker; the UI
+// thread answers it by running the EXISTING release-all contract, because the break may
+// have swallowed a key-up and left a modifier held on the host. Deliberately not a new
+// input path: the same two calls WM_KILLFOCUS makes, for the same reason.
+constexpr UINT kMsgControlResumed = WM_APP + 16;
 // The poll interval itself is kClipboardPollIntervalUs in clipboard_sync.hpp, shared with the
 // Android session so both clients ask at the same cadence. Unqualified uses here resolve to it
 // through the enclosing namespace.
