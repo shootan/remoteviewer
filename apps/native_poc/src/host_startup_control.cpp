@@ -228,6 +228,19 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
         remote60::native_poc::kUdpControlStreamClientToHost, args.udpMtu);
 
     clientSession.udpReaderThread = std::thread([&]() {
+      // Control resume bookkeeping (item 8, C3). Reader-thread locals on purpose: this thread
+      // is the only one that builds or sends a resume answer, so there is nothing to lock and
+      // exactly one of each per session -- which is also what makes "bounded per session" true
+      // by construction rather than by a sweep.
+      remote60::native_poc::HostResumeAck resumeAck;
+      remote60::native_poc::ResumeAckBudget resumeReplayBudget(
+          remote60::native_poc::kResumeAckReplayPerSecond,
+          remote60::native_poc::kResumeAckReplayBurst);
+      remote60::native_poc::ResumeAckBudget resumeGlobalBudget(
+          remote60::native_poc::kResumeAckGlobalPerSecond,
+          remote60::native_poc::kResumeAckGlobalBurst);
+      uint64_t resumeStrangerLogUs = 0;
+      uint64_t resumeThrottleLogUs = 0;
       // Startup barrier. The dispatcher's first Reset races this thread: if the client's first
       // ControlData lands here first, OnPacket ACKs it into rxReady_, then the dispatcher's
       // Reset wipes rxReady_ -- and the client, holding an ACK, never retransmits. The serve
@@ -439,13 +452,93 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
             const bool fromCurrentPeer =
                 sender.udpPeerIpNet.load(std::memory_order_acquire) == peer.sin_addr.s_addr &&
                 sender.udpPeerPortNet.load(std::memory_order_acquire) == peer.sin_port;
+            const uint64_t readyEpoch =
+                clientSession.controlReadyEpoch.load(std::memory_order_acquire);
             remote60::native_poc::HostResumeInputs decide;
             decide.negotiated =
                 clientSession.controlResumeNegotiated.load(std::memory_order_acquire);
-            decide.sessionActive =
-                fromCurrentPeer &&
-                clientSession.controlReadyEpoch.load(std::memory_order_acquire) > 0;
+            decide.sessionActive = fromCurrentPeer && readyEpoch > 0;
             decide.servingControl = clientSession.controlServing.load(std::memory_order_acquire);
+
+            // A source with no session here gets nothing: no reply, and -- more to the point --
+            // no state. Everything below this line either reads or writes something kept per
+            // session, and the way an unauthenticated flood turns into a resource is by being
+            // allowed past a check like this one first. It used to be answered with accepted=0,
+            // which told a stranger the host was listening and cost a send per packet; a client
+            // whose mapping really had moved could not have been helped by that answer anyway,
+            // because the video it is still being sent goes to the endpoint it left. (C3)
+            if (!decide.negotiated || !decide.sessionActive) {
+              const uint64_t nowUs = remote60::native_poc::qpc_now_us();
+              if (nowUs - resumeStrangerLogUs >= 5000000ull) {
+                resumeStrangerLogUs = nowUs;
+                std::cout << "[native-video-host][control] resume ignored id=" << resume.resumeId
+                          << " negotiated=" << (decide.negotiated ? 1 : 0)
+                          << " peer=" << (fromCurrentPeer ? "same" : "other")
+                          << " session=" << (readyEpoch > 0 ? 1 : 0)
+                          << " (no reply, no state)\n";
+              }
+              continue;
+            }
+
+            const uint64_t nowUs = remote60::native_poc::qpc_now_us();
+            const auto channelIds = clientSession.udpControlChannel.StreamIds();
+            remote60::native_poc::HostResumeReplayInputs replay;
+            replay.negotiated = decide.negotiated;
+            replay.sessionActive = decide.sessionActive;
+            replay.epoch = readyEpoch;
+            replay.peerIpNet = peer.sin_addr.s_addr;
+            replay.peerPortNet = peer.sin_port;
+            replay.resumeId = resume.resumeId;
+            replay.requestStreamId = resume.streamId;
+            replay.channelTxStreamId = channelIds.tx;
+            replay.channelRxStreamId = channelIds.rx;
+
+            // The same ask, answered the same way -- even while serving, because repeating an
+            // answer changes nothing. This is the whole of the Ack-loss fix: without it the
+            // host serves the resume, its answer is lost, and every retry is then refused
+            // because the dispatcher went straight back into Serve(). (C3, Codex seq 2796.)
+            if (remote60::native_poc::host_should_replay_resume_ack(resumeAck, replay)) {
+              if (!resumeReplayBudget.Take(nowUs) || !resumeGlobalBudget.Take(nowUs)) {
+                if (nowUs - resumeThrottleLogUs >= 1000000ull) {
+                  resumeThrottleLogUs = nowUs;
+                  std::cout << "[native-video-host][control] resume replay throttled id="
+                            << resume.resumeId << "\n";
+                }
+                continue;
+              }
+              remote60::native_poc::UdpControlResumePacket again{};
+              again.kind = static_cast<uint16_t>(UdpPacketKind::ControlResumeAck);
+              again.streamId = resumeAck.ackStreamId;
+              again.resumeId = resumeAck.resumeId;
+              again.accepted = 1u;
+              (void)sendto(clientSession.clientSock, reinterpret_cast<const char*>(&again),
+                           sizeof(again), 0, reinterpret_cast<const sockaddr*>(&peer), peerLen);
+              std::cout << "[native-video-host][control] resume replay id=" << resume.resumeId
+                        << " streamId=" << again.streamId
+                        << " serving=" << (decide.servingControl ? 1 : 0)
+                        << " rekeyed=0\n";
+              continue;
+            }
+
+            // A different ask ends the previous one: the viewer only changes the id when it has
+            // started a new recovery, and the answer kept for the old one describes a repair it
+            // has stopped waiting for. Its budget goes with it.
+            if (!resumeAck.valid || resumeAck.resumeId != resume.resumeId) {
+              resumeAck = remote60::native_poc::HostResumeAck{};
+              resumeReplayBudget.Restart(nowUs);
+            }
+
+            // Taken before anything is woken. A budget checked after the dispatcher has been
+            // signalled and waited on would bound the sends and not the work, which is the
+            // half that matters when the asks are invented rather than real.
+            if (!resumeGlobalBudget.Take(nowUs)) {
+              if (nowUs - resumeThrottleLogUs >= 1000000ull) {
+                resumeThrottleLogUs = nowUs;
+                std::cout << "[native-video-host][control] resume throttled id=" << resume.resumeId
+                          << " (host budget)\n";
+              }
+              continue;
+            }
             const bool accept = remote60::native_poc::host_should_accept_resume(decide);
 
             uint64_t waitFor = 0;
@@ -478,6 +571,21 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
                                      : remote60::native_poc::kUdpControlStreamHostToClient;
             answer.resumeId = resume.resumeId;
             answer.accepted = served ? 1u : 0u;
+            // Kept only when it is true. A refusal is not an answer worth repeating -- it is a
+            // state, and the state changes -- so served=0 leaves the cache empty and the next
+            // ask goes through the ordinary path again.
+            if (served) {
+              const auto servedIds = clientSession.udpControlChannel.StreamIds();
+              resumeAck.valid = true;
+              resumeAck.epoch = readyEpoch;
+              resumeAck.peerIpNet = peer.sin_addr.s_addr;
+              resumeAck.peerPortNet = peer.sin_port;
+              resumeAck.resumeId = resume.resumeId;
+              resumeAck.requestStreamId = resume.streamId;
+              resumeAck.txStreamId = servedIds.tx;
+              resumeAck.rxStreamId = servedIds.rx;
+              resumeAck.ackStreamId = answer.streamId;
+            }
             (void)sendto(clientSession.clientSock, reinterpret_cast<const char*>(&answer),
                          sizeof(answer), 0, reinterpret_cast<const sockaddr*>(&peer), peerLen);
             std::cout << "[native-video-host][control] resume id=" << resume.resumeId

@@ -119,6 +119,130 @@ inline bool host_should_accept_resume(const HostResumeInputs& in) {
 }
 
 /**
+ * Answering the same ask twice, on purpose. (item 8, C3)
+ *
+ * host_should_accept_resume above refuses while the dispatcher is inside Serve(), and that is
+ * right for a NEW request: re-keying a channel that is working is the one thing this must never
+ * do. But it leaves a hole that only shows up when the answer is the thing that gets lost. The
+ * host serves the resume, sends its Ack, and goes straight back into Serve(); the Ack does not
+ * arrive; the viewer asks again -- and now the dispatcher IS serving, so every retry is refused
+ * for the rest of the 30 s ceiling. The repair works and the viewer never hears about it.
+ *
+ * So the host keeps the answer it gave and, for the same ask, gives it again. Not a second
+ * resume: no re-key, no mailbox, no deadline moved, nothing in the session touched. The bytes
+ * that were already true are simply repeated, which is what makes it safe to do while serving.
+ *
+ * "The same ask" is checked in full rather than by resumeId alone, because a resumeId is a
+ * correlator and not a credential: it is chosen by the client, echoed in the clear, and anyone
+ * who can see one can repeat it. What actually bounds this is that every other field has to
+ * match too -- the bound endpoint, the session generation, and the request content -- AND that
+ * the channel must still be carrying the result the cached answer describes. Once the session
+ * has moved on, the cached answer describes something that no longer exists and is refused by
+ * the stream ids alone.
+ */
+struct HostResumeAck {
+  bool valid = false;
+  uint64_t epoch = 0;            // the control-ready epoch that was being served
+  uint32_t peerIpNet = 0;        // the endpoint the session is bound to (network order)
+  uint16_t peerPortNet = 0;
+  uint32_t resumeId = 0;         // the ask this answers
+  uint32_t requestStreamId = 0;  // ...and the rest of that ask: its own tx stream
+  uint32_t txStreamId = 0;       // what the channel was re-keyed to, host->client
+  uint32_t rxStreamId = 0;       // ...and client->host
+  uint32_t ackStreamId = 0;      // the answer's own streamId field, resent unchanged
+};
+
+struct HostResumeReplayInputs {
+  bool negotiated = false;
+  bool sessionActive = false;  // from the bound peer, and a session exists to resume onto
+  uint64_t epoch = 0;
+  uint32_t peerIpNet = 0;
+  uint16_t peerPortNet = 0;
+  uint32_t resumeId = 0;
+  uint32_t requestStreamId = 0;
+  // What the channel holds RIGHT NOW. Not what it was told to hold: the question is whether the
+  // result the cached answer promised is still the one in force.
+  uint32_t channelTxStreamId = 0;
+  uint32_t channelRxStreamId = 0;
+};
+
+inline bool host_should_replay_resume_ack(const HostResumeAck& cached,
+                                          const HostResumeReplayInputs& in) {
+  if (!cached.valid) return false;
+  if (!in.negotiated) return false;
+  if (!in.sessionActive) return false;
+  if (cached.epoch != in.epoch) return false;
+  if (cached.peerIpNet != in.peerIpNet) return false;
+  if (cached.peerPortNet != in.peerPortNet) return false;
+  if (cached.resumeId != in.resumeId) return false;
+  if (cached.requestStreamId != in.requestStreamId) return false;
+  if (cached.txStreamId != in.channelTxStreamId) return false;
+  if (cached.rxStreamId != in.channelRxStreamId) return false;
+  return true;
+}
+
+/**
+ * How often the same answer may be repeated. (item 8, C3)
+ *
+ * A token bucket in thousandths, so a rate of four per second is exact rather than a division
+ * that rounds to nothing at small intervals. The burst is what makes a real recovery work --
+ * two answers can leave back to back, which covers the ordinary case of one being lost -- and
+ * the rate is what stops a repeated request from turning into a repeated send.
+ *
+ * There are two of these on the host and they answer different questions. The per-session one
+ * bounds how hard one client can make the host repeat itself. The global one bounds the host: a
+ * client that invents a new resumeId every time never touches the per-session bucket, because
+ * that bucket belongs to the cached id, so the only thing standing between "new id each time"
+ * and an unbounded send rate is a budget that does not care which id it was.
+ */
+class ResumeAckBudget {
+ public:
+  ResumeAckBudget() = default;
+  ResumeAckBudget(uint32_t perSecond, uint32_t burst)
+      : perSecond_(perSecond), burst_(burst), tokensMilli_(static_cast<uint64_t>(burst) * 1000) {}
+
+  /** True when one send is allowed now, and takes it. */
+  bool Take(uint64_t nowUs) {
+    if (!started_) {
+      started_ = true;
+      lastUs_ = nowUs;
+    } else if (nowUs > lastUs_) {
+      // us * per-second / 1e6 tokens, expressed in thousandths -- hence / 1000.
+      tokensMilli_ += (nowUs - lastUs_) * perSecond_ / 1000;
+      const uint64_t cap = static_cast<uint64_t>(burst_) * 1000;
+      if (tokensMilli_ > cap) tokensMilli_ = cap;
+      lastUs_ = nowUs;
+    }
+    if (tokensMilli_ < 1000) return false;
+    tokensMilli_ -= 1000;
+    return true;
+  }
+
+  /** A different ask: the budget belongs to the id, so it starts again with the id. */
+  void Restart(uint64_t nowUs) {
+    started_ = true;
+    lastUs_ = nowUs;
+    tokensMilli_ = static_cast<uint64_t>(burst_) * 1000;
+  }
+
+ private:
+  uint32_t perSecond_ = 4;
+  uint32_t burst_ = 2;
+  uint64_t tokensMilli_ = 2000;
+  uint64_t lastUs_ = 0;
+  bool started_ = false;
+};
+
+// Per session and resumeId: the initial values Codex set for the repeat.
+constexpr uint32_t kResumeAckReplayPerSecond = 4;
+constexpr uint32_t kResumeAckReplayBurst = 2;
+// Per host, across every resume answer it sends for any id. Wide enough that an ordinary
+// recovery never reaches it and narrow enough that a flood of invented ids cannot turn the host
+// into a generator.
+constexpr uint32_t kResumeAckGlobalPerSecond = 32;
+constexpr uint32_t kResumeAckGlobalBurst = 16;
+
+/**
  * What the host's control dispatcher should do when something wakes it. (item 8)
  *
  * It used to have one reason to wake -- a new epoch -- and the loop read as such. With resume there

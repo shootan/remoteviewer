@@ -75,6 +75,22 @@ class UdpControlChannel {
    */
   void ResumeWith(uint32_t txStreamId, uint32_t rxStreamId);
 
+  /**
+   * The stream ids in force right now. (item 8, C3)
+   *
+   * Asked by the host when it is deciding whether to repeat an answer it already gave: that
+   * answer described a re-key, and repeating it is only honest while the re-key it described is
+   * still the one the channel is carrying.
+   */
+  struct StreamPair {
+    uint32_t tx = 0;
+    uint32_t rx = 0;
+  };
+  StreamPair StreamIds() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return StreamPair{txStreamId_, rxStreamId_};
+  }
+
   bool IsClosed() const { return closed_.load(std::memory_order_relaxed); }
   ControlCloseReason CloseReason() const {
     return closeReason_.load(std::memory_order_relaxed);

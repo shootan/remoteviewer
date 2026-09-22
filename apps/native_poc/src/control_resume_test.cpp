@@ -366,6 +366,171 @@ int main() {
           name_of(control_resume_decide(cfg, againstNewHost)));
   }
 
+  // ------------------------------------------------ host: answering the same ask twice (C3)
+  //
+  // The loop this closes: the host serves a resume, answers it, and goes straight back into
+  // Serve(). If that one answer is lost, every retry arrives while servingControl is true and
+  // host_should_accept_resume refuses it -- for the whole 30 s ceiling. The channel is repaired
+  // and the viewer never finds out. So the answer is kept and repeated, and the point of these
+  // checks is that "the same ask" is the whole ask and not just the id.
+  {
+    const uint32_t kPeerIp = 0x0100007fu;   // 127.0.0.1, network order
+    const uint16_t kPeerPort = 0x3412u;
+    const uint32_t kResumeId = 0xA5A50001u;
+    const uint32_t kRequestStream = kUdpControlStreamClientToHost;
+
+    HostResumeAck cached;
+    cached.valid = true;
+    cached.epoch = 7;
+    cached.peerIpNet = kPeerIp;
+    cached.peerPortNet = kPeerPort;
+    cached.resumeId = kResumeId;
+    cached.requestStreamId = kRequestStream;
+    cached.txStreamId = control_resume_stream_id(kUdpControlStreamHostToClient, kResumeId);
+    cached.rxStreamId = control_resume_stream_id(kUdpControlStreamClientToHost, kResumeId);
+    cached.ackStreamId = cached.txStreamId;
+
+    // The retry, exactly as the viewer sends it again: same id, same content, same endpoint.
+    HostResumeReplayInputs retry;
+    retry.negotiated = true;
+    retry.sessionActive = true;
+    retry.epoch = 7;
+    retry.peerIpNet = kPeerIp;
+    retry.peerPortNet = kPeerPort;
+    retry.resumeId = kResumeId;
+    retry.requestStreamId = kRequestStream;
+    retry.channelTxStreamId = cached.txStreamId;
+    retry.channelRxStreamId = cached.rxStreamId;
+
+    check("the first answer was lost, so the same ask is answered again",
+          host_should_replay_resume_ack(cached, retry),
+          "without this the retry is refused for the rest of the ceiling");
+
+    // And the reason it is safe to do that while serving: the ordinary path would say no.
+    HostResumeInputs serving;
+    serving.negotiated = true;
+    serving.sessionActive = true;
+    serving.servingControl = true;
+    check("...while the ordinary path still refuses to re-key a channel in use",
+          !host_should_accept_resume(serving),
+          "the repeat is the answer only, not a second resume");
+
+    // Every field is separately load-bearing. A replay that matched on the id alone would be a
+    // way to make the host repeat an answer into a session that has moved on.
+    {
+      HostResumeReplayInputs older = retry;
+      older.epoch = 6;
+      check("an older generation is not the session that answer belongs to",
+            !host_should_replay_resume_ack(cached, older));
+      HostResumeReplayInputs newer = retry;
+      newer.epoch = 8;
+      check("...and neither is a newer one", !host_should_replay_resume_ack(cached, newer));
+    }
+    {
+      HostResumeReplayInputs elsewhere = retry;
+      elsewhere.peerIpNet = 0x0200007fu;
+      check("a different address does not get the answer",
+            !host_should_replay_resume_ack(cached, elsewhere));
+      HostResumeReplayInputs otherPort = retry;
+      otherPort.peerPortNet = static_cast<uint16_t>(kPeerPort + 1);
+      check("...nor a different port on the same address",
+            !host_should_replay_resume_ack(cached, otherPort));
+    }
+    {
+      HostResumeReplayInputs otherId = retry;
+      otherId.resumeId = kResumeId + 1;
+      check("a different id is a different recovery, not a retry",
+            !host_should_replay_resume_ack(cached, otherId));
+      HostResumeReplayInputs otherContent = retry;
+      otherContent.requestStreamId = kUdpControlStreamHostToClient;
+      check("the same id with different content is not the same ask",
+            !host_should_replay_resume_ack(cached, otherContent),
+            "an id is a correlator, not a credential");
+    }
+    {
+      // Expiry, in the only form that means anything here: the channel has been re-keyed or
+      // reset since, so the answer describes a repair that is no longer in force.
+      HostResumeReplayInputs moved = retry;
+      moved.channelTxStreamId = kUdpControlStreamHostToClient;
+      moved.channelRxStreamId = kUdpControlStreamClientToHost;
+      check("an answer the channel no longer holds is not repeated",
+            !host_should_replay_resume_ack(cached, moved),
+            "Reset() put the base ids back: the cached repair expired");
+      // One direction each, because a case that moves both is held up by either check alone:
+      // removing the tx comparison left the rx one catching it and the mutation escaped.
+      HostResumeReplayInputs rxMoved = retry;
+      rxMoved.channelRxStreamId = kUdpControlStreamClientToHost;
+      check("...one direction having moved is enough to refuse (client->host)",
+            !host_should_replay_resume_ack(cached, rxMoved));
+      HostResumeReplayInputs txMoved = retry;
+      txMoved.channelTxStreamId = kUdpControlStreamHostToClient;
+      check("...and the other direction on its own too (host->client)",
+            !host_should_replay_resume_ack(cached, txMoved));
+    }
+    {
+      HostResumeAck ended;  // what the session leaves behind: nothing
+      check("after the session ended there is nothing to replay",
+            !host_should_replay_resume_ack(ended, retry),
+            "a replay of an ended session is the thing the cache must not survive into");
+      // ...and the flag alone has to be enough. A zeroed cache is refused by the generation
+      // check as well, so testing only that proved nothing about the flag: this one still
+      // holds a perfectly matching answer and has simply been marked spent.
+      HostResumeAck spent = cached;
+      spent.valid = false;
+      check("...even when every other field still matches",
+            !host_should_replay_resume_ack(spent, retry),
+            "clearing the flag is how the cache is retired; it must be sufficient");
+      HostResumeReplayInputs notNegotiated = retry;
+      notNegotiated.negotiated = false;
+      check("a client that never asked for resume is not answered one",
+            !host_should_replay_resume_ack(cached, notNegotiated));
+      HostResumeReplayInputs noSession = retry;
+      noSession.sessionActive = false;
+      check("...and neither is a source with no session here",
+            !host_should_replay_resume_ack(cached, noSession));
+    }
+
+    // The rate. Four a second with a burst of two, on a clock this test owns.
+    {
+      ResumeAckBudget budget(kResumeAckReplayPerSecond, kResumeAckReplayBurst);
+      uint64_t t = 1000000;
+      check("the burst lets two answers leave back to back",
+            budget.Take(t) && budget.Take(t));
+      check("...and the third at the same instant does not",  !budget.Take(t),
+            "over the limit means no answer, not a queue");
+      t += 249000;
+      check("...still not a quarter second later, by a hair", !budget.Take(t));
+      t += 2000;
+      check("...and one more is allowed once a quarter second has passed", budget.Take(t),
+            "four per second");
+      t += 10000000;
+      check("a long quiet spell refills to the burst and no further",
+            budget.Take(t) && budget.Take(t) && !budget.Take(t));
+    }
+
+    // The global budget is what a client inventing a new id every time runs into: the
+    // per-session bucket belongs to the cached id and is restarted with it, so it alone would
+    // never say no.
+    {
+      ResumeAckBudget perId(kResumeAckReplayPerSecond, kResumeAckReplayBurst);
+      ResumeAckBudget global(kResumeAckGlobalPerSecond, kResumeAckGlobalBurst);
+      const uint64_t t = 5000000;
+      int sent = 0;
+      for (int i = 0; i < 200; ++i) {
+        perId.Restart(t);  // a new id every time, exactly as the flood would
+        if (perId.Take(t) && global.Take(t)) ++sent;
+      }
+      check("a flood of invented ids is bounded by the host budget, not the per-id one",
+            sent == static_cast<int>(kResumeAckGlobalBurst),
+            std::to_string(sent) + " answers out of 200 asks");
+    }
+
+    // And the rule for a genuinely new recovery while the host is serving is unchanged: it is
+    // refused, which is what tells the viewer to keep asking rather than to believe it is back.
+    check("a new id arriving while the dispatcher serves is still refused",
+          !host_should_accept_resume(serving));
+  }
+
   std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED")
             << "  (" << gChecks << " checks, " << gFailures << " failed)\n";
   return gFailures == 0 ? 0 : 1;
