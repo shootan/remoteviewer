@@ -28,15 +28,23 @@
 #    no   no     no     | skipped                  | skipped
 #    no   no     yes    | skipped                  | skipped
 #    no   yes    no     | skipped                  | REFUSED up front: nothing to publish
-#    no   yes    yes    | skipped                  | preflight only, unsigned, says so
+#    no   yes    yes    | skipped                  | described only; deploy script not called
 #    yes  no     no     | signs                    | skipped
 #    yes  no     yes    | described, key untouched | skipped
 #    yes  yes    no     | signs                    | publishes
-#    yes  yes    yes    | described, key untouched | preflight only, unsigned, says so
+#    yes  yes    yes    | described, key untouched | described only; deploy script not called
 #
 # The rule behind the table: --dry-run never uses the key and never publishes, so a dry run can
 # never produce a signature, so a dry run must not require one. The one refusal is the one case
 # that cannot be made to mean anything -- a real publish of something nobody signed.
+#
+# "Described only" is literal, and it is the second correction this table has needed. The first
+# version signed nothing at stage 8 and then demanded a signature at stage 9. The second called
+# gnlink_deploy.sh --verify-only instead -- which reads better but does the same thing, because
+# that script's own preflight requires the signature before it looks at any flag
+# (gnlink_deploy.sh:111). A dry run that cannot produce a signature therefore cannot call it at
+# all, so it does not: it says what it would have published and stops. A dry run of a release
+# that IS already signed is a different case and does rehearse, end to end.
 #
 # It does NOT bump the version. A release script that edits the source is a release script that
 # can publish something nobody reviewed.
@@ -46,10 +54,23 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Overridable so the test can point it at a directory that does not exist and watch the
-# preflight refuse, rather than having the copy succeed and a real build start.
+
+# Four things this script reaches outside itself: a compiler, a signing key, a check that reads a
+# real PE, and the server. Each is overridable, and each override is ANNOUNCED -- see
+# say_if_substituted below. They exist so the regression can drive all nine stages without a
+# twenty-minute build, the operational key, or the network; the option table at the top is about
+# what happens at stage 9, and a table nothing executes is a comment.
+#
+# A release run sets none of these and says so in its own output, which is the thing to check if
+# a release ever looks too easy.
 MAIN_CHECKOUT_WEBVIEW2="${GNLINK_WEBVIEW2_SOURCE:-D:/remote/remote/third_party/webview2}"
-CMAKE="/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe"
+CMAKE_DEFAULT="/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe"
+CMAKE="${GNLINK_CMAKE:-$CMAKE_DEFAULT}"
+INSTALLER_CHECK_DEFAULT="$SCRIPT_DIR/gnlink_check_installer_payload.ps1"
+INSTALLER_CHECK="${GNLINK_INSTALLER_PAYLOAD_CHECK:-$INSTALLER_CHECK_DEFAULT}"
+DEPLOY_SCRIPT_DEFAULT="$SCRIPT_DIR/gnlink_deploy.sh"
+DEPLOY_SCRIPT="${GNLINK_DEPLOY_SCRIPT:-$DEPLOY_SCRIPT_DEFAULT}"
+SIGN_KEYDIR="${GNLINK_SIGN_KEYDIR:-}"
 
 WORKTREE=""
 VERSION=""
@@ -188,6 +209,17 @@ make_fresh_dir() {
 step() { printf '\n=== %s\n' "$*"; }
 die()  { printf 'FAIL  %s\n' "$*" >&2; exit 1; }
 
+# A substituted seam is printed, every time, next to the thing it replaced. Silence here would
+# mean a release could be assembled by tools nobody named.
+say_if_substituted() {
+  local what="$1" actual="$2" expected="$3"
+  [ "$actual" = "$expected" ] && return 0
+  say "SUBSTITUTED  $what: $actual"
+  say "             (the release path is $expected)"
+  SUBSTITUTIONS=$((SUBSTITUTIONS + 1))
+}
+SUBSTITUTIONS=0
+
 usage() {
   sed -n '3,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit 2
@@ -234,6 +266,14 @@ PAYLOAD="$REL_DIR/payload"
 
 # ------------------------------------------------------------------- 1. preflight
 step "1. preflight"
+
+say_if_substituted "cmake" "$CMAKE" "$CMAKE_DEFAULT"
+say_if_substituted "installer payload check" "$INSTALLER_CHECK" "$INSTALLER_CHECK_DEFAULT"
+say_if_substituted "deploy script" "$DEPLOY_SCRIPT" "$DEPLOY_SCRIPT_DEFAULT"
+[ -z "$SIGN_KEYDIR" ] || say_if_substituted "signing key directory" "$SIGN_KEYDIR" ""
+# Not this script's variable, but it changes what the product verifier at stage 8 trusts, so a
+# run where it is set is not a release either. gnlink_verify_manifest.js reads it.
+[ -z "${GNLINK_PUBLIC_KEY_HEX:-}" ] || say_if_substituted "trusted public key (verifier)" "set" ""
 
 cd "$WORKTREE" || die "cannot enter $WORKTREE"
 WORKTREE_REAL="$(pwd -P)"
@@ -419,7 +459,7 @@ say "-- installer payload: does GNLinkSetup carry what this release ships"
 # two sets can disagree without either half looking wrong, and then the thing installed is not
 # the thing gated. 0.2.133 was checked this way by hand.
 powershell.exe -NoProfile -ExecutionPolicy Bypass \
-  -File "$(cygpath -w "$SCRIPT_DIR/gnlink_check_installer_payload.ps1")" \
+  -File "$(cygpath -w "$INSTALLER_CHECK")" \
   -Setup "$(cygpath -w "$PAYLOAD/GNLinkSetup.exe")" \
   -Payload "$(cygpath -w "$PAYLOAD")" || die "installer payload gate failed"
 
@@ -466,7 +506,8 @@ if [ "$DO_SIGN" = "1" ]; then
     powershell.exe -NoProfile -ExecutionPolicy Bypass \
       -File "$(cygpath -w "$SCRIPT_DIR/gnlink_release_sign.ps1")" \
       -ReleaseDir "$(cygpath -w "$REL_DIR")" \
-      -TrustedKeyHex "$TRUSTED_KEY" || die "signing failed"
+      -TrustedKeyHex "$TRUSTED_KEY" \
+      ${SIGN_KEYDIR:+-KeyDir "$(cygpath -w "$SIGN_KEYDIR")"} || die "signing failed"
     [ -f "$REL_DIR/windows.sig" ] || die "no windows.sig after signing"
     SIGNED=1
     say "signed"
@@ -496,19 +537,24 @@ if [ "$DO_DEPLOY" = "1" ]; then
     # cannot produce. What it checks instead is everything that does not need one.
     if [ -f "$REL_DIR/windows.sig" ]; then
       say "rehearsing publication of a release that is already signed"
-      "$SCRIPT_DIR/gnlink_deploy.sh" --release-dir "$REL_DIR" --dry-run 2>&1 | tee "$DEPLOY_LOG"
+      "$DEPLOY_SCRIPT" --release-dir "$REL_DIR" --dry-run 2>&1 | tee "$DEPLOY_LOG"
       [ "${PIPESTATUS[0]}" = "0" ] || die "deploy dry run failed (log: $DEPLOY_LOG)"
     else
-      say "no signature, because --dry-run does not use the key"
-      say "checking the server the release would go to, and nothing else:"
-      "$SCRIPT_DIR/gnlink_deploy.sh" --release-dir "$REL_DIR" --verify-only 2>&1 | tee "$DEPLOY_LOG"
-      [ "${PIPESTATUS[0]}" = "0" ] || die "the deploy preflight failed (log: $DEPLOY_LOG)"
-      say "publication NOT rehearsed end to end: an unsigned release cannot be, and this run says"
-      say "so rather than failing on a file it was never going to write"
+      # Not even --verify-only. That script refuses before it reads its flags when there is no
+      # signature, so calling it here would fail on a file this mode was never going to write --
+      # which is the contradiction this whole table exists to remove, moved one layer down.
+      {
+        say "would deploy $REL_DIR"
+        say "no signature, because --dry-run does not use the key, so the deploy script is not"
+        say "called at all -- its preflight requires one before it reads any flag."
+        say "to rehearse publication end to end, sign first and then dry-run:"
+        say "  $0 --worktree $WORKTREE --version $VERSION --sign"
+        say "  $0 --worktree $WORKTREE --version $VERSION --deploy --dry-run"
+      } 2>&1 | tee "$DEPLOY_LOG"
     fi
   else
     [ -f "$REL_DIR/windows.sig" ] || die "--deploy without a signature; sign first"
-    "$SCRIPT_DIR/gnlink_deploy.sh" --release-dir "$REL_DIR" 2>&1 | tee "$DEPLOY_LOG"
+    "$DEPLOY_SCRIPT" --release-dir "$REL_DIR" 2>&1 | tee "$DEPLOY_LOG"
     [ "${PIPESTATUS[0]}" = "0" ] || die "deploy failed (log: $DEPLOY_LOG)"
   fi
 else
@@ -531,6 +577,10 @@ say ""
 say "artifact sha256:"
 sed 's/^/  /' "$REL_DIR/SHA256SUMS.txt"
 say ""
+if [ "$SUBSTITUTIONS" != "0" ]; then
+  say ""
+  say "NOT A RELEASE: $SUBSTITUTIONS tool(s) were substituted, listed at the top of this run."
+fi
 say "gates: parity PASS, payload-set PASS, checksums PASS, installer payload 9/9 PASS,"
 say "       inputs unchanged (commit $HEAD_SHA, sdk $SDK_HASH_BEFORE)"
 if [ "$SIGNED" = "1" ]; then

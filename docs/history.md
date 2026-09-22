@@ -12216,3 +12216,17 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - **내 테스트 결함 3건(변이가 드러냄)**: ① 홍수를 63발만 보내 맵을 채우기만 하고 **퇴출을 일으키지 않아**, 퇴출 변이를 절반만 잡았다(70발로). ② 두 refresh 케이스를 capability 있는 하네스로 돌려, 주기가 5초(펀치 송신 단계)라 **측정이 주기 길이에 지배**됐다 — 검사 게이트를 제거해도 통과했다(capability 없는 하네스로). ③ 디렉터리 wake 케이스가 **앞선 클라 refresh 가 아직 소비되지 않은 상태**에서 wake 를 보내 `refreshWasPending=1` 로 아무 변화도 만들지 못했다(먼저 착지를 기다리도록).
 - 검증: `punch_reply_test` **55/0** · `directory_retry_test` **111/0** · `host_punch_reply_e2e_test` **40/0 ×3**(늦은 capability 5526~5529ms 로 **cooldown 전과 동일**, TTL 안 성립 유지) · `udp_control_channel` 12/0 · `control_resume` 48/0 · 전량 빌드 오류 0.
 - 제품/테스트/문서: 제품(`punch_reply.hpp`, `directory_client.{hpp,cpp}`) / 테스트(`punch_reply_test.cpp`, `directory_retry_test.cpp`, `directory_fake_server.hpp` 에 `SendFromUdp` 추가) / 문서(이 항목, `구현계획.md` C1).
+
+### 2026-09-22 release-script r3 — 표와 동작이 어긋난 두 번째 자리
+
+- remote_claude 독립 검수(clean 워크트리, c690617): NC1·NC3 통과 — 회귀 66/0 rc0, 경계 반례(rel-root 외부 거부·마커 무손상 / 기존 build-dir 거부·무삭제 / `..` 탈출 거부·미생성), 전체 dry-run 게이트 통과, 7b 원자 rename 확인. **NC2 잔여 1건**.
+- **잔여 결함**: `--sign --deploy --dry-run` 이 여전히 rc=1. r2 는 그 칸에서 `gnlink_deploy.sh --verify-only` 를 불렀는데, **그 스크립트는 플래그를 읽기 전에 서명을 요구한다**(`gnlink_deploy.sh:111`) — 그래서 "dry-run 은 서명을 요구하지 않는다" 는 표와 달리 `no signature at …/windows.sig` 로 죽었다. r1 의 모순을 한 겹 아래로 옮겨 놓았을 뿐이다.
+- 고침: 그 칸에서는 **배포 스크립트를 부르지 않는다.** `would deploy <rel>` 과 "왜 부르지 않는지", 그리고 끝까지 예행하려면 먼저 서명하라는 두 줄짜리 실행 예를 적고 끝낸다. 표(스크립트 머리·`구현계획.md`)도 "설명만 — 배포 스크립트를 부르지 않음" 으로 고쳤다. **이미 서명된** 릴리스의 dry-run 은 다른 칸이고 그때는 실제로 끝까지 예행한다.
+- **회귀가 9단계까지 간다**: 인자만 받아들여지는지 보는 것으로는 이 표를 검사할 수 없었다 — 두 번의 모순이 **둘 다 9단계**, 즉 빌드 뒤에 있었기 때문이다. 이제 8조합 전부를 끝까지 돌려 종료코드와 **배포 스크립트 호출 여부**를 단언한다.
+- 그러려면 컴파일러·운영키·실제 PE·서버가 필요하므로 **명시된 seam 네 개**를 뒀다: `GNLINK_CMAKE`(컴파일 대신 파일을 놓는 stub) · `GNLINK_INSTALLER_PAYLOAD_CHECK` · `GNLINK_DEPLOY_SCRIPT`(인자만 기록) · `GNLINK_SIGN_KEYDIR`(일회용 키), 그리고 검증기가 원래 갖고 있던 `GNLINK_PUBLIC_KEY_HEX`. 🔴 **하나라도 대체되면** 실행 머리에 `SUBSTITUTED`, 끝에 `NOT A RELEASE: N tool(s) were substituted` 를 찍는다 — 릴리스 실행에 그 줄이 보이면 그건 릴리스가 아니다.
+- ⚠️ **이 회귀가 증명하지 않는 것**을 그대로 적는다: 실제 빌드가 그 파일들을 만든다는 것, 설치기가 정말 payload 를 품는다는 것(그건 실빌드 대상 진짜 게이트가 9/9 로 본다), 게시가 된다는 것. 증명하는 것은 **8조합이 9단계에 도달해 표대로 끝난다**는 것뿐이다.
+- **내 stub 결함 2건(게이트가 잡음)**: ① UTF-16 버전 문자열을 `0.2.1 34` 로 써서 parity 가 여덟 개 전부를 거부했다 — 게이트가 옳았다. ② parity 는 **존재가 아니라 횟수**를 본다(`CARRIERS`: Host/Client/Viewer/Stream 1회, Setup 5회, Capture/InputService/Updater **0회**). 같은 파일 여덟 개를 놓은 첫 stub 은 그래서 거부됐다.
+- 변이: 그 칸에서 `--verify-only` 호출을 되살리면 **4 FAIL**(rc=1 · 배포 스크립트가 불렸음 · "would deploy" 없음 · 미서명 dry-run 도 rc=1) — Codex 가 본 그 증상 그대로 재현된다. 원복 후 78/0 복귀.
+- 검증: `automation/gnlink_release_test.sh` **78 PASS / 0 FAIL, exit 0**(이전 66). 8조합 중 7개가 rc0 으로 9단계를 통과하고, 나머지 1개(`--deploy` 단독)는 인자 단계에서 거부된다.
+- **실행하지 않은 것**: 실서명·실게시 0회. 실경로는 다음 승인 릴리스에서 remote_claude 가 본다.
+- 제품/테스트/문서: 제품 **무변경** / 자동화(`gnlink_release.sh`, `gnlink_release_test.sh`) / 문서(이 항목, `구현계획.md` 배포 자동화 절).

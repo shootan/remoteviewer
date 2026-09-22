@@ -559,6 +559,207 @@ expect_nonzero "a second release in the same worktree is refused while one holds
   bash "$RELEASE_SH" --worktree "$DELWT" --version 0.2.134
 rm -rf "$DELWT/.claude/gnlink_release.lock"
 
+printf '\n=== all nine stages, every option combination\n'
+# The option table at the top of the release script says what stage 8 and stage 9 do for each of
+# the eight combinations. Checking that the ARGUMENTS are accepted -- which is all the block
+# above does -- does not check the table: the two contradictions this table has now had were both
+# at stage 9, reached only after a build. So this runs the whole thing.
+#
+# Four tools are substituted to make that possible, through the seams the release script provides
+# and announces: a cmake that stages files instead of compiling, an installer-payload check that
+# returns 0 instead of reading a PE, a deploy script that records its arguments instead of
+# reaching the network, and a throwaway signing key instead of the operational one.
+#
+# WHAT THIS DOES NOT SHOW, and is not claimed: that the real build produces those files, that the
+# installer really carries the payload (the real check does that, against a real build -- see the
+# release-script r2 notes), or that publication works. What it does show is that every one of the
+# eight combinations reaches stage 9 and ends the way the table says.
+NINE="$TMP/nine"
+mkdir -p "$NINE/bin"
+
+# The stub cmake. Two invocations matter: `-S <src> -B <build>` and `--build <build> ...`. The
+# first makes the directory, the second stages eight executables carrying the version string the
+# parity gate looks for, plus the two ui files the packager copies from the worktree.
+cat > "$NINE/bin/cmake" <<'STUBCMAKE'
+#!/usr/bin/env bash
+set -u
+BUILD=""
+MODE="configure"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --build) MODE="build"; BUILD="${2:-}"; shift 2 ;;
+    -B) BUILD="${2:-}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$BUILD" ] || exit 1
+mkdir -p "$BUILD"
+if [ "$MODE" = "build" ]; then
+  OUT="$BUILD/apps/native_poc/Release"
+  mkdir -p "$OUT"
+  # The parity gate does not just look for the version: it counts occurrences, and the count
+  # differs per binary (CARRIERS in gnlink_release_manifest.py). Three carry none at all and
+  # are failed if they do. A stub that ignored that produced eight identical files and a gate
+  # that refused them -- correctly, which is how the first version of this fixture found out.
+  emit() {
+    # $1 name, $2 how many times the version should appear.
+    local out="$OUT/$1.exe" n="$2" i=0
+    printf 'MZ stub %s\n' "$1" > "$out"
+    while [ "$i" -lt "$n" ]; do
+      # UTF-16LE, at whatever offset it lands on, which is how it sits in a real binary.
+      printf '0\x00.\x002\x00.\x001\x003\x004\x00' >> "$out"
+      printf ' padding\n' >> "$out"
+      i=$((i + 1))
+    done
+  }
+  emit GNLinkHost 1
+  emit GNLinkClient 1
+  emit GNLinkViewer 1
+  emit GNLinkStream 1
+  emit GNLinkSetup 5
+  emit GNLinkCapture 0
+  emit GNLinkInputService 0
+  emit GNLinkUpdater 0
+fi
+exit 0
+STUBCMAKE
+chmod +x "$NINE/bin/cmake"
+
+# The installer-payload check, which in a release reads nine RCDATA resources out of a real PE.
+cat > "$NINE/bin/installer_check.ps1" <<'STUBCHECK'
+param([string]$Setup, [string]$Payload)
+Write-Output "STUB: not reading resources from $Setup"
+Write-Output "9/9 embedded payloads match the release payload"
+exit 0
+STUBCHECK
+
+# The deploy script, which in a release reaches the NAS. This records what it was asked and
+# answers the way the real one would, so the release script's handling of it is what is tested.
+cat > "$NINE/bin/deploy.sh" <<'STUBDEPLOY'
+#!/usr/bin/env bash
+set -u
+REL=""
+MODE="publish"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --release-dir) REL="${2:-}"; shift 2 ;;
+    --dry-run) MODE="dry-run"; shift ;;
+    --verify-only) MODE="verify-only"; shift ;;
+    *) shift ;;
+  esac
+done
+printf '%s %s\n' "$MODE" "$REL" >> "$GNLINK_STUB_DEPLOY_LOG"
+# The real script refuses before it reads a flag when there is no signature. Kept, because that
+# is the behaviour the release script has to be correct about.
+[ -f "$REL/windows.sig" ] || { printf 'no signature at %s/windows.sig\n' "$REL"; exit 1; }
+printf 'published %s https://example.invalid/%s sha256 deadbeef\n' "$MODE" "$(basename "$REL")"
+exit 0
+STUBDEPLOY
+chmod +x "$NINE/bin/deploy.sh"
+
+# A throwaway signing key, and a worktree whose update_manifest.cpp names its public half -- the
+# release script reads the trusted key from there and the signing script refuses a mismatch.
+NINEKEY="$TMP/ninekey"
+NINE_KEY_MADE=0
+if make_test_key "$NINEKEY"; then NINE_KEY_MADE=1; fi
+
+NINEWT="$NINE/wt"
+make_worktree "$NINEWT" "0.2.134"
+mkdir -p "$NINEWT/apps/native_poc/ui" "$NINEWT/third_party/webview2/build/native"
+printf '<html>shell</html>\n' > "$NINEWT/apps/native_poc/ui/shell.html"
+printf '<html>macro</html>\n' > "$NINEWT/apps/native_poc/ui/macro.html"
+printf 'WebView2Loader stub\n' > "$NINEWT/third_party/webview2/build/native/WebView2Loader.dll"
+if [ "$NINE_KEY_MADE" = "1" ]; then
+  printf 'const char* trusted_key_hex() {\n  return "%s";\n}\n' \
+    "$(cat "$NINEKEY/public_xy.hex")" > "$NINEWT/apps/native_poc/src/update_manifest.cpp"
+  ( cd "$NINEWT" && git add -A >/dev/null 2>&1 && \
+    git -c user.email=t@t -c user.name=t commit -q -m "fixture" >/dev/null 2>&1 )
+fi
+
+run_nine() {
+  # $1 label, rest: release-script arguments. Echoes the exit code.
+  local label="$1"; shift
+  rm -rf "$NINE/build-$label" "$NINE/rel-$label"
+  GNLINK_STUB_DEPLOY_LOG="$NINE/deploy-$label.log" \
+  GNLINK_CMAKE="$NINE/bin/cmake" \
+  GNLINK_INSTALLER_PAYLOAD_CHECK="$NINE/bin/installer_check.ps1" \
+  GNLINK_DEPLOY_SCRIPT="$NINE/bin/deploy.sh" \
+  GNLINK_SIGN_KEYDIR="$NINEKEY" \
+  GNLINK_PUBLIC_KEY_HEX="$(cat "$NINEKEY/public_xy.hex")" \
+    bash "$RELEASE_SH" --worktree "$NINEWT" --version 0.2.134 \
+      --build-dir "$NINEWT/build-$label" --rel-root "$NINEWT/rel-$label" "$@" \
+      > "$NINE/out-$label.log" 2>&1
+  printf '%s' "$?"
+}
+
+if [ "$NINE_KEY_MADE" = "1" ]; then
+  rc="$(run_nine plain)"
+  [ "$rc" = "0" ]
+  check $? "sign=no  deploy=no  dry=no   runs all nine stages" "exit $rc"
+
+  grep -q 'SUBSTITUTED' "$NINE/out-plain.log" && grep -q 'NOT A RELEASE' "$NINE/out-plain.log"
+  check $? "...and says loudly that its tools were substituted"
+
+  rc="$(run_nine dry --dry-run)"
+  [ "$rc" = "0" ]
+  check $? "sign=no  deploy=no  dry=yes  runs all nine stages" "exit $rc"
+
+  rc="$(run_nine sign --sign)"
+  [ "$rc" = "0" ] && [ -f "$NINEWT/rel-sign/0.2.134/windows.sig" ]
+  check $? "sign=yes deploy=no  dry=no   signs" "exit $rc"
+
+  rc="$(run_nine signdry --sign --dry-run)"
+  [ "$rc" = "0" ] && [ ! -f "$NINEWT/rel-signdry/0.2.134/windows.sig" ]
+  check $? "sign=yes deploy=no  dry=yes  describes signing and writes no signature" "exit $rc"
+
+  # THE case. It signed nothing, so it must not require a signature -- and it must not call the
+  # deploy script either, because that script refuses before it reads a flag when there is none.
+  rc="$(run_nine signdeploydry --sign --deploy --dry-run)"
+  [ "$rc" = "0" ]
+  check $? "sign=yes deploy=yes dry=yes  exits 0" "exit $rc"
+
+  [ ! -s "$NINE/deploy-signdeploydry.log" ]
+  check $? "...without calling the deploy script at all" \
+    "$(cat "$NINE/deploy-signdeploydry.log" 2>/dev/null | tr '\n' ' ')"
+
+  grep -q 'would deploy' "$NINE/out-signdeploydry.log"
+  check $? "...and says what it would have published"
+
+  rc="$(run_nine deploydry --deploy --dry-run)"
+  [ "$rc" = "0" ] && [ ! -s "$NINE/deploy-deploydry.log" ]
+  check $? "sign=no  deploy=yes dry=yes  exits 0, deploy script not called" "exit $rc"
+
+  rc="$(run_nine signdeploy --sign --deploy)"
+  [ "$rc" = "0" ] && grep -q '^publish ' "$NINE/deploy-signdeploy.log"
+  check $? "sign=yes deploy=yes dry=no   signs and publishes" "exit $rc"
+
+  # A signed release rehearsed end to end: the deploy script IS called, with --dry-run, because
+  # this time there is a signature for its preflight to find.
+  cp -r "$NINEWT/rel-sign/0.2.134" "$NINEWT/rel-signed-rehearse-0.2.134" 2>/dev/null
+  mkdir -p "$NINEWT/rel-rehearse"
+  cp -r "$NINEWT/rel-signed-rehearse-0.2.134" "$NINEWT/rel-rehearse/0.2.134"
+  GNLINK_STUB_DEPLOY_LOG="$NINE/deploy-rehearse.log" \
+  GNLINK_CMAKE="$NINE/bin/cmake" \
+  GNLINK_INSTALLER_PAYLOAD_CHECK="$NINE/bin/installer_check.ps1" \
+  GNLINK_DEPLOY_SCRIPT="$NINE/bin/deploy.sh" \
+  GNLINK_SIGN_KEYDIR="$NINEKEY" \
+  GNLINK_PUBLIC_KEY_HEX="$(cat "$NINEKEY/public_xy.hex")" \
+    bash "$RELEASE_SH" --worktree "$NINEWT" --version 0.2.134 \
+      --build-dir "$NINEWT/build-rehearse" --rel-root "$NINEWT/rel-rehearse" \
+      --deploy --dry-run > "$NINE/out-rehearse.log" 2>&1
+  # It refuses, because rel-rehearse/0.2.134 already exists -- which is the r2 rule, working.
+  grep -qi 'already exists' "$NINE/out-rehearse.log"
+  check $? "an existing release directory still stops a run, even in this mode"
+
+  # The eighth combination is the refusal, checked at argument time above; assert it here too so
+  # the table is covered in one place.
+  rc="$(run_nine deployonly --deploy)"
+  [ "$rc" != "0" ]
+  check $? "sign=no  deploy=yes dry=no   is refused" "exit $rc"
+else
+  printf 'SKIP  nine-stage combinations (could not create a throwaway key here)\n'
+fi
+
 printf '\n=== the script does not bump versions\n'
 # Reading the header is exactly what the preflight does, so the pattern has to name WRITING:
 # an in-place edit, or a redirect into the file. The first version of this check matched the
