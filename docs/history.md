@@ -12152,3 +12152,18 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - ✅ **PC2 실기 성공(2026-09-22 17:07)**: 인앱 0.2.130→0.2.134 완주. `result: Updated -- 0.2.134` · `health: healthy: version 0.2.134, directory reached`. NAS host.log `localVersion=0.2.134` 확인. **Defender staging 격리 재발 0** — 새 해시 우회가 실제로 통했다.
 - ⚠️ 단 **첫 시도(17:06:32)는 abandon-race 로 실패**(`could not ask pid 67080 to stop`), 재시도(17:07:02) 성공. 이유: PC2 의 **실행 주체가 아직 구 0.2.130 업데이터**였다(abandon 수정은 0.2.133+ 업데이터 안에 있어 설치돼야 실행된다). 집 호스트 0.2.132→0.2.133 때와 같은 형태. **이제 PC2 도 0.2.134 업데이터라 다음 업데이트부터는 이 레이스가 안 난다** — 순환이 풀렸다.
 - 남은 미검증: abandon-race 수정이 실행 주체로서 첫 시도부터 통과하는지(0.2.134 업데이터가 다음 버전을 받을 때 확인 가능). 코드 서명 미도입이라 다른 기기·미래 버전의 Defender 재오탐 가능성.
+
+### 2026-09-22 C1 — 같은 LAN 인데 릴레이로 붙던 문제: 호스트가 펀치에 답한다(유계)
+
+- 증상: 회사 PC1→PC2 가 같은 /24 인데도 릴레이로 붙는다. 연결마다 2.5s 가 그냥 붙고, 미디어가 서버를 한 번 더 거친다.
+- **확정 근거**(NAS 로그 connect=58ea9790, 17:08:53): 서버는 private 후보를 맨 앞에 준다 · PC1 의 LAN 펀치가 PC2 에 **20회 도착**한다 · PC2 는 **아무 답도 보내지 않는다**(`ConsumeUdpPacket` 이 refresh 플래그와 로그만 남기고 송신 없음) · 뷰어 `PunchAny` 는 **후보 주소에서 온 아무 datagram** 을 첫 응답으로 보고 고른다 · 릴레이는 `RELAY_GRACE_MS` 2500ms 뒤 답한다 → private 후보는 영영 "무응답", 릴레이가 이긴다.
+- ⚠️ **가설로만 적는 것**: "회사망은 hairpin 이 없고 집은 hairpin 덕에 직결된다". 확정된 것은 위의 "private source 펀치가 도착했고 호스트가 답하지 않았다" 까지다.
+- 수정(호스트 전용, 프로토콜·서버·뷰어·인증 규칙 무변경): `ConsumeUdpPacket` 의 Punch 분기가 **같은 크기 Punch 1개**를 `from` 으로 되돌려 보낸다. 송신은 기존 `send_` 라 응답이 후보 tuple(=primary 43000 소켓)에서 나간다.
+- **유계인 이유와 방법**: 1:1 동일 크기라 증폭은 0 이지만 "묻는 사람 아무에게나 답한다" 는 그 자체로 reflector 다. 그래서 ① **디렉터리 이벤트만** 여는 10s 창(wake 펀치 또는 heartbeat capability 수집) — **클라의 펀치는 창을 열지도 연장하지도 못한다** ② 창 안 예산 source 25 / 창 200 / 초당 50 ③ source 맵 64 상한, 창이 닫히면 비움. 판정은 순수 함수(`apps/native_poc/src/punch_reply.hpp`)라 소켓 없이 검사된다.
+- 로그: 기존 `[dir-punch]` 줄 **끝에** `replied=0|1 reason=ok|closed|budget|src|self|bad` 추가(기존 키·순서 불변). 창 열림 1줄.
+- 검증: 순수 45 PASS · 호스트 경로(제품 `ConsumeUdpPacket`+`send_`) 98 PASS, 둘 다 exit 0. **e2e**: 제품 `DirectoryRendezvous::PunchAny` 에 [private=호스트 소켓, relay=2500ms 뒤 응답] 을 주면 **private at 0ms**, 호스트를 무장 해제하면 **relay at 2558ms** — 현장 증상과 그 반대가 같은 배선에서 재현된다.
+- 변이 3건 각각 그 가드가 잡는다: 응답 제거 → "0 datagrams" · 창 제거 → 순수 7 + 호스트 2(그중 "receiving punches does not arm it") · source 예산 제거 → 순수 4 + 호스트 1(두 responder 맞물림이 50 → 100 왕복).
+- `AuthorizePeer` 는 **규칙을 바꾸지 않았고**, 공인 tuple 로 발급된 capability 가 private source 에서 제시돼도 수락되며 `endpointMoved=true` 로 보고된다는 것을 테스트로 고정했다(단일 사용·미발급 토큰 거부 포함).
+- 내 결함 2건(테스트가 잡음): 창 열림을 `windowOpenedMs == 0` **센티널**로 표현해 시각 0 에 열린 창이 닫힌 것과 구분되지 않았다(→ 별도 플래그) · 첫 하네스가 소켓 없이 send 를 기록만 해서 observe 프로브가 아무 데도 가지 않았고, 사이클이 heartbeat 까지 못 가 capability 가 수집되지 않았다(→ 실제 소켓+펌프).
+- 미검증(실기): PC1→PC2 실제 접속에서 `[relay] bound` 가 사라지는지. 릴리스 뒤 관찰 항목.
+- 제품/테스트/문서: 제품(`punch_reply.hpp` 신규, `directory_client.{hpp,cpp}`) / 테스트(`punch_reply_test.cpp` 신규, `directory_retry_test.cpp` 확장) / 문서(이 항목, `구현계획.md` C1).

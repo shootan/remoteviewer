@@ -508,13 +508,73 @@ bool HostAgent::ConsumeUdpPacket(const void* data, size_t len, const sockaddr_in
       if (!wasSet) {
         std::cout << "[native-video-host] directory peer punch; refreshing capability\n";
       }
+
+      // c1-lan-relay: answer the punch, when it is safe to.
+      //
+      // Until now this branch sent nothing, which is why a viewer on the same LAN never saw a
+      // datagram from the host's private address and the relay's 2500 ms answer won every time.
+      // One punch of the same size goes back to the source -- not an amplifier, and it carries
+      // nothing -- but only inside a window a DIRECTORY event opened, and only within a budget.
+      // The judgement itself is in punch_reply.hpp, where it can be tested without a socket.
+      const uint64_t nowMs = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now().time_since_epoch()).count());
+      const bool packetOk = remote60::native_poc::punch_reply_packet_ok(
+          len, sizeof(UdpHelloPacket), hello->magic, kMagic, hello->kind,
+          static_cast<uint16_t>(UdpPacketKind::Punch), hello->version, kUdpProtocolVersion);
+      remote60::native_poc::PunchReplySource source{from.sin_addr.s_addr, from.sin_port};
+
+      remote60::native_poc::PunchReplyDecision decision;
+      bool windowOpenedNow = false;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        remote60::native_poc::PunchReplySource directory{observeAddr_.sin_addr.s_addr,
+                                                         observeAddr_.sin_port};
+        // Our own public tuple, as the directory last observed it. A hairpinning router can send
+        // our own punch back to us; answering that is a conversation with ourselves.
+        remote60::native_poc::PunchReplySource self{};
+        if (observedReady_ && !observedIp_.empty() && observedPort_ != 0) {
+          in_addr parsed{};
+          if (inet_pton(AF_INET, observedIp_.c_str(), &parsed) == 1) {
+            self.ipNetworkOrder = parsed.s_addr;
+            self.portNetworkOrder = htons(observedPort_);
+          }
+        }
+        // A wake from the directory is one of the two things that may open the window. A punch
+        // from anyone else must not -- that is what stops an endless stream from rearming us.
+        const bool fromDirectory = directory.ipNetworkOrder != 0 &&
+                                   remote60::native_poc::punch_reply_same(source, directory);
+        if (fromDirectory && packetOk) {
+          windowOpenedNow =
+              remote60::native_poc::punch_reply_note_directory_event(&punchReplyState_, nowMs);
+        }
+        decision = remote60::native_poc::punch_reply_decide(punchReplyState_, source, directory,
+                                                            self, packetOk, nowMs);
+        if (decision.reply) {
+          remote60::native_poc::punch_reply_note_reply(&punchReplyState_, source, nowMs);
+        } else {
+          remote60::native_poc::punch_reply_note_refusal(&punchReplyState_);
+        }
+      }
+
+      if (windowOpenedNow) {
+        std::cout << "[native-video-host][punch-reply] window open for "
+                  << remote60::native_poc::kPunchReplyWindowMs << "ms (directory wake)\n";
+      }
+      // Sent outside the lock: send_ reaches a socket, and nothing below needs mu_.
+      if (decision.reply && send_) {
+        UdpHelloPacket reply{};
+        reply.kind = static_cast<uint16_t>(UdpPacketKind::Punch);
+        send_(&reply, sizeof(reply), from);
+      }
+
       // pc2-connect-diag: every punch, including the ones the line above hides.
       //
       // That line fires only on false->true, so a punch arriving while a refresh was
       // already pending left no trace -- and "the wake never arrived" and "the wake arrived
       // while the flag was already up" were indistinguishable. They are different faults.
       // The previous value of the flag is the whole point of this line.
-      LogPunchArrival(from, wasSet);
+      LogPunchArrival(from, wasSet, decision);
       return true;
     }
   }
@@ -1182,6 +1242,7 @@ void HostAgent::Punch(const std::vector<PunchTarget>& targets) {
   }
   SetStatus("punching");
 
+  bool openedReplyWindow = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
     const auto now = std::chrono::steady_clock::now();
@@ -1193,6 +1254,19 @@ void HostAgent::Punch(const std::vector<PunchTarget>& targets) {
       authorizedPeers_.push_back(
           AuthorizedPeer{target, now + std::chrono::seconds(30)});
     }
+    // The second of the two directory events that may open the reply window. A heartbeat that
+    // came back with a capability means a peer asked the directory to connect to us within the
+    // last cycle, which is exactly when answering a punch is worth doing.
+    const uint64_t nowMs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    if (remote60::native_poc::punch_reply_note_directory_event(&punchReplyState_, nowMs)) {
+      openedReplyWindow = true;
+    }
+  }
+  if (openedReplyWindow) {
+    std::cout << "[native-video-host][punch-reply] window open for "
+              << remote60::native_poc::kPunchReplyWindowMs << "ms (capability collected)\n";
   }
 
   UdpHelloPacket packet{};
@@ -1216,7 +1290,8 @@ void HostAgent::Punch(const std::vector<PunchTarget>& targets) {
  * kPunchLogPerSecond lines in any second, and the next line printed says how many were
  * skipped. A running total means a burst is still countable after the fact.
  */
-void HostAgent::LogPunchArrival(const sockaddr_in& from, bool refreshWasPending) {
+void HostAgent::LogPunchArrival(const sockaddr_in& from, bool refreshWasPending,
+                                const remote60::native_poc::PunchReplyDecision& replyDecision) {
   const uint64_t nowUs = static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::microseconds>(
           std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -1234,6 +1309,11 @@ void HostAgent::LogPunchArrival(const sockaddr_in& from, bool refreshWasPending)
             << " refreshWasPending=" << (refreshWasPending ? 1 : 0)
             << " total=" << total;
   if (skipped) std::cout << " skippedSinceLast=" << skipped;
+  // Appended, never inserted: the existing keys and their order are what the field logs from
+  // 0.2.13x are read with, and a reader comparing two releases should not have to notice a
+  // reshuffle. replied answers "did we send anything", reason answers "and why not".
+  std::cout << " replied=" << (replyDecision.reply ? 1 : 0) << " reason="
+            << remote60::native_poc::punch_reply_reason_name(replyDecision.reason);
   std::cout << "\n";
 }
 

@@ -1761,6 +1761,15 @@ if(MSVC)
 endif()
 
 # The decisions inside the host's connect diagnostics (pc2-connect-diag r1, scope B). Pure logic.
+# c1-lan-relay: whether the host answers a punch, and where it stops. Pure logic.
+add_executable(remote60_punch_reply_test
+  src/punch_reply_test.cpp
+)
+target_include_directories(remote60_punch_reply_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_punch_reply_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_host_diag_log_test
   src/host_diag_log_test.cpp
 )

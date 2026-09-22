@@ -43,6 +43,8 @@
 #include <vector>
 
 #include "directory_client.hpp"
+#include "poc_protocol.hpp"
+#include "directory_rendezvous.hpp"
 #include "directory_session_bootstrap.hpp"
 #include "directory_session_client.hpp"
 
@@ -391,6 +393,232 @@ std::string RunHost(FakeDirectory& dir, const char* label, int wantHeartbeats,
   return status;
 }
 
+/**
+ * A running HostAgent whose sends are recorded instead of reaching a socket.
+ *
+ * c1-lan-relay needs the real ConsumeUdpPacket and the real send_ seam -- the punch reply goes out
+ * through the same function the outbound punches use, because it has to leave from the candidate
+ * tuple the client is watching. Everything the agent does with the directory is real; only the
+ * datagram's destination is a vector.
+ */
+struct RecordedSend {
+  std::vector<uint8_t> bytes;
+  sockaddr_in to{};
+};
+
+struct PunchHarness {
+  remote60::native_poc::directory::HostAgent agent;
+  std::mutex mu;
+  std::vector<RecordedSend> sent;
+  std::string cachePath;
+
+  // A real socket, and a thread feeding what arrives back in. The recorder alone was not enough:
+  // the agent's OBSERVE probe goes through the same seam, and with nowhere to go the observation
+  // never came back, the cycle never reached the heartbeat, and no capability was ever collected.
+  // Every punch then read reason=closed -- correctly, which is how the harness's own gap showed.
+  SOCKET media = INVALID_SOCKET;
+  uint16_t mediaPort = 0;  // what the client will use as the "private" candidate
+  std::thread pump;
+  std::atomic<bool> pumping{false};
+
+  std::vector<RecordedSend> take() {
+    std::lock_guard<std::mutex> lock(mu);
+    std::vector<RecordedSend> out;
+    out.swap(sent);
+    return out;
+  }
+  size_t count() {
+    std::lock_guard<std::mutex> lock(mu);
+    return sent.size();
+  }
+  void Stop() {
+    agent.Stop();
+    pumping = false;
+    if (media != INVALID_SOCKET) {
+      closesocket(media);
+      media = INVALID_SOCKET;
+    }
+    if (pump.joinable()) pump.join();
+  }
+  ~PunchHarness() {
+    Stop();
+    if (!cachePath.empty()) DeleteFileA(cachePath.c_str());
+  }
+};
+
+
+/**
+ * A stand-in for the relay: it answers, but only after the grace period.
+ *
+ * The server waits RELAY_GRACE_MS (2500) before answering a punch, which is what made it lose to
+ * a host that answers immediately -- and win against one that never answers at all. That timing
+ * is the whole contest, so the fake keeps it.
+ */
+struct LateRelay {
+  SOCKET sock = INVALID_SOCKET;
+  uint16_t port = 0;
+  std::thread thread;
+  std::atomic<bool> running{false};
+  std::atomic<int> answered{0};
+
+  bool Start(uint32_t graceMs) {
+    sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock == INVALID_SOCKET) return false;
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) return false;
+    sockaddr_in bound{};
+    int boundLen = sizeof(bound);
+    if (getsockname(sock, reinterpret_cast<sockaddr*>(&bound), &boundLen) != 0) return false;
+    port = ntohs(bound.sin_port);
+    DWORD timeout = 200;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout),
+               sizeof(timeout));
+    running = true;
+    thread = std::thread([this, graceMs] {
+      char buf[2048];
+      bool scheduled = false;
+      std::chrono::steady_clock::time_point answerAt;
+      sockaddr_in peer{};
+      while (running.load()) {
+        sockaddr_in from{};
+        int fromLen = sizeof(from);
+        const int n = recvfrom(sock, buf, sizeof(buf), 0, reinterpret_cast<sockaddr*>(&from),
+                               &fromLen);
+        if (n > 0 && !scheduled) {
+          scheduled = true;
+          peer = from;
+          answerAt = std::chrono::steady_clock::now() + std::chrono::milliseconds(graceMs);
+        }
+        if (scheduled && std::chrono::steady_clock::now() >= answerAt) {
+          remote60::native_poc::UdpHelloPacket reply{};
+          reply.kind = static_cast<uint16_t>(remote60::native_poc::UdpPacketKind::Punch);
+          sendto(sock, reinterpret_cast<const char*>(&reply), sizeof(reply), 0,
+                 reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
+          ++answered;
+          scheduled = false;
+        }
+      }
+    });
+    return true;
+  }
+  void Stop() {
+    running = false;
+    if (sock != INVALID_SOCKET) {
+      closesocket(sock);
+      sock = INVALID_SOCKET;
+    }
+    if (thread.joinable()) thread.join();
+  }
+  ~LateRelay() { Stop(); }
+};
+
+/** A heartbeat body that hands the host one capability for a PUBLIC tuple. */
+std::string heartbeatWithCapability(const std::string& token, const char* ip, uint16_t port) {
+  return "{\"ok\":true,\"pendingPunch\":[{\"ip\":\"" + std::string(ip) + "\",\"port\":" +
+         std::to_string(port) + ",\"punchToken\":\"" + token + "\"}]}";
+}
+
+sockaddr_in addrOf(const char* ip, uint16_t port) {
+  sockaddr_in out{};
+  out.sin_family = AF_INET;
+  out.sin_port = htons(port);
+  inet_pton(AF_INET, ip, &out.sin_addr);
+  return out;
+}
+
+remote60::native_poc::UdpHelloPacket punchPacket() {
+  remote60::native_poc::UdpHelloPacket packet{};
+  packet.kind = static_cast<uint16_t>(remote60::native_poc::UdpPacketKind::Punch);
+  return packet;
+}
+
+/** Did anything get sent to this address? The outbound punch is the only thing that would. */
+bool SentTo(PunchHarness* harness, const sockaddr_in& want) {
+  std::lock_guard<std::mutex> lock(harness->mu);
+  for (const RecordedSend& record : harness->sent) {
+    if (record.to.sin_addr.s_addr == want.sin_addr.s_addr &&
+        record.to.sin_port == want.sin_port) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Starts an agent against `dir` and waits for the state the case needs.
+ *
+ * `capabilityTarget`, when set, is the tuple the heartbeat hands out: the wait ends when a
+ * datagram has actually gone there, which is the only thing that proves Punch() ran and so that
+ * the reply window is open. Waiting for "any datagram" is not enough -- the observe probe goes
+ * through the same seam, and waiting on it let the first version of this test run its punches
+ * against a host that had collected nothing.
+ */
+bool StartPunchHarness(FakeDirectory& dir, PunchHarness* harness, const char* label,
+                       const sockaddr_in* capabilityTarget) {
+  harness->cachePath = exe_directory() + "\\punch-fixture-" + std::string(label) + ".json";
+
+  harness->media = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  sockaddr_in bindAddr{};
+  bindAddr.sin_family = AF_INET;
+  bindAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  bind(harness->media, reinterpret_cast<sockaddr*>(&bindAddr), sizeof(bindAddr));
+  sockaddr_in bound{};
+  int boundLen = sizeof(bound);
+  if (getsockname(harness->media, reinterpret_cast<sockaddr*>(&bound), &boundLen) == 0) {
+    harness->mediaPort = ntohs(bound.sin_port);
+  }
+  DWORD timeout = 200;
+  setsockopt(harness->media, SOL_SOCKET, SO_RCVTIMEO,
+             reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+  harness->pumping = true;
+  harness->pump = std::thread([harness] {
+    char buf[2048];
+    while (harness->pumping.load()) {
+      sockaddr_in from{};
+      int fromLen = sizeof(from);
+      const int n = recvfrom(harness->media, buf, sizeof(buf), 0,
+                             reinterpret_cast<sockaddr*>(&from), &fromLen);
+      if (n > 0) harness->agent.ConsumeUdpPacket(buf, static_cast<size_t>(n), from);
+    }
+  });
+  remote60::native_poc::directory::HostAgentConfig cfg;
+  cfg.url = dir.url();
+  cfg.accountId = "tester";
+  cfg.password = "test-pass-1234";
+  cfg.hostName = "Punch PC";
+  cfg.cachePath = harness->cachePath;
+  cfg.heartbeatSeconds = 5;
+
+  std::string error;
+  if (!harness->agent.Start(cfg, [harness](const void* data, size_t len, const sockaddr_in& to) {
+        RecordedSend record;
+        record.bytes.assign(static_cast<const uint8_t*>(data),
+                            static_cast<const uint8_t*>(data) + len);
+        record.to = to;
+        {
+          std::lock_guard<std::mutex> lock(harness->mu);
+          harness->sent.push_back(record);
+        }
+        // Recorded AND sent: the directory has to see the observe probe for the cycle to get as
+        // far as a heartbeat, and the reply has to leave from this socket for the same reason the
+        // product needs it to -- the candidate tuple is this socket's address.
+        sendto(harness->media, static_cast<const char*>(data), static_cast<int>(len), 0,
+               reinterpret_cast<const sockaddr*>(&to), sizeof(to));
+      }, &error)) {
+    return false;
+  }
+  for (int i = 0; i < 300; ++i) {
+    const bool ready = capabilityTarget ? SentTo(harness, *capabilityTarget)
+                                        : dir.Count("/api/host/heartbeat") >= 1;
+    if (ready) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  return capabilityTarget ? SentTo(harness, *capabilityTarget)
+                          : dir.Count("/api/host/heartbeat") >= 1;
+}
+
 }  // namespace
 
 int main() {
@@ -401,6 +629,220 @@ int main() {
   }
 
   using namespace remote60::native_poc;
+
+
+  // ============================================ c1-lan-relay: the host answers a punch, bounded
+  //
+  // The field defect: a viewer on the same LAN punched the host's private address twenty times,
+  // every punch arrived, and the host sent nothing back -- so the viewer's PunchAny never saw the
+  // private candidate answer and the relay's 2500 ms grace won. These run the REAL path:
+  // ConsumeUdpPacket deciding, and the real send_ seam carrying the reply out of the same socket
+  // the candidate tuple names.
+  {
+    FakeDirectory dir;
+    check("the fake directory starts (punch reply)", dir.Start());
+    // The observe endpoint has to come from somewhere or the cycle never reaches a heartbeat:
+    // step=health ok=0 then step=observe ok=0, forever, and no capability is ever collected.
+    dir.Script("/healthz", {Reply{200, "{\"ok\":true,\"observe\":{\"port\":" +
+                                        std::to_string(dir.udpPort()) + "}}"}});
+    const std::string token(32, 'c');
+    dir.Script("/api/host/register", {Reply{200, "{\"ok\":true,\"hostId\":\"h-1\",\"hostToken\":\"" +
+                                             std::string(32, 'e') + "\"}"}});
+    // Script's last reply repeats, so every heartbeat keeps handing out the capability.
+    dir.Script("/api/host/heartbeat",
+               {Reply{200, heartbeatWithCapability(token, "211.218.222.1", 60420)}});
+
+    PunchHarness harness;
+    const sockaddr_in capabilityTarget = addrOf("211.218.222.1", 60420);
+    check("the host agent starts and collects a capability",
+          StartPunchHarness(dir, &harness, "reply", &capabilityTarget));
+
+    // Everything sent while starting up is the outbound punch to the public tuple. The reply is
+    // what happens next, so the record starts clean here.
+    harness.take();
+
+    const sockaddr_in client = addrOf("192.168.20.16", 60420);
+    const remote60::native_poc::UdpHelloPacket punch = punchPacket();
+    harness.agent.ConsumeUdpPacket(&punch, sizeof(punch), client);
+
+    std::vector<RecordedSend> replies = harness.take();
+    check("a punch from a LAN client is answered", replies.size() == 1,
+          std::to_string(replies.size()) + " datagrams");
+    if (replies.size() == 1) {
+      check("...with one datagram of exactly the same size",
+            replies[0].bytes.size() == sizeof(remote60::native_poc::UdpHelloPacket),
+            std::to_string(replies[0].bytes.size()) + " bytes");
+      check("...addressed back to the source that punched",
+            replies[0].to.sin_addr.s_addr == client.sin_addr.s_addr &&
+                replies[0].to.sin_port == client.sin_port);
+      const auto* asHello =
+          reinterpret_cast<const remote60::native_poc::UdpHelloPacket*>(replies[0].bytes.data());
+      check("...and it is a punch, carrying nothing",
+            asHello->kind == static_cast<uint16_t>(remote60::native_poc::UdpPacketKind::Punch) &&
+                asHello->authToken[0] == '\0');
+    }
+
+    // The budget, through the product path. A client sends 25 punches in an attempt; the 26th
+    // and everything after it gets nothing, and the host does not start a conversation.
+    for (int i = 0; i < 40; ++i) harness.agent.ConsumeUdpPacket(&punch, sizeof(punch), client);
+    const size_t afterFlood = harness.take().size();
+    check("one source is answered at most its allowance",
+          afterFlood + 1 <= remote60::native_poc::kPunchReplyPerSource,
+          std::to_string(afterFlood + 1) + " of " +
+              std::to_string(remote60::native_poc::kPunchReplyPerSource));
+
+    // A flood must not turn into a flood of HTTP either: the refresh flag is one per cycle and
+    // punches do not get to re-arm it while it is up.
+    const int heartbeatsBefore = dir.Count("/api/host/heartbeat");
+    for (int i = 0; i < 200; ++i) harness.agent.ConsumeUdpPacket(&punch, sizeof(punch), client);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const int heartbeatsAfter = dir.Count("/api/host/heartbeat");
+    check("two hundred punches do not become two hundred heartbeats",
+          heartbeatsAfter - heartbeatsBefore <= 2,
+          std::to_string(heartbeatsAfter - heartbeatsBefore) + " heartbeats");
+
+    // AuthorizePeer, unchanged: the capability was issued against the PUBLIC tuple and the Hello
+    // arrives from the PRIVATE one, which is exactly what a direct LAN connection looks like.
+    // The rule is not being modified here -- it is being pinned, because the whole fix depends
+    // on it staying true.
+    remote60::native_poc::directory::HostAgent::PeerAuthDiag diag;
+    const bool authorized = harness.agent.AuthorizePeer(token, client, &diag);
+    check("a capability issued for the public tuple is accepted from the private one", authorized);
+    check("...and is reported as an endpoint that moved", diag.endpointMoved);
+    check("...and the capability is single use", !harness.agent.AuthorizePeer(token, client, &diag));
+    check("...and a token nobody issued is refused",
+          !harness.agent.AuthorizePeer(std::string(32, 'z'), client, &diag));
+  }
+
+  {
+    // No capability, no window. A host nobody has asked about answers nothing at all -- which is
+    // what keeps this from being an open reflector for anyone who finds the port.
+    FakeDirectory dir;
+    check("the fake directory starts (no window)", dir.Start());
+    dir.Script("/api/host/register", {Reply{200, "{\"ok\":true,\"hostId\":\"h-2\",\"hostToken\":\"" +
+                                             std::string(32, 'e') + "\"}"}});
+    dir.Script("/healthz", {Reply{200, "{\"ok\":true,\"observe\":{\"port\":" +
+                                        std::to_string(dir.udpPort()) + "}}"}});
+    dir.Script("/api/host/heartbeat", {Reply{200, "{\"ok\":true,\"pendingPunch\":[]}"}});
+
+    PunchHarness harness;
+    check("the host agent starts without a capability",
+          StartPunchHarness(dir, &harness, "nowindow", nullptr));
+    harness.take();
+
+    const sockaddr_in client = addrOf("192.168.20.16", 60420);
+    const remote60::native_poc::UdpHelloPacket punch = punchPacket();
+    for (int i = 0; i < 20; ++i) harness.agent.ConsumeUdpPacket(&punch, sizeof(punch), client);
+    check("a host with no connection in progress answers nothing", harness.take().empty());
+
+    // And the punches themselves must not open the window. Twenty arrived above; if receiving
+    // one were enough to arm the host, the twenty-first would be answered.
+    harness.agent.ConsumeUdpPacket(&punch, sizeof(punch), client);
+    check("...and receiving punches does not arm it", harness.take().empty());
+  }
+
+
+  // ================= c1-lan-relay, end to end: which candidate the real client actually picks
+  //
+  // The two halves joined. The host side is the product path -- ConsumeUdpPacket deciding and
+  // send_ carrying the reply out of the very socket the private candidate names. The client side
+  // is the product's own DirectoryRendezvous::PunchAny, given the same shape of candidate list
+  // the directory hands out: private first, then a relay that answers on the 2500 ms grace.
+  //
+  // What this does NOT cover, and is not claimed: the Hello/HelloAck that follows. AuthorizePeer
+  // accepting a private-source Hello against a public-tuple capability is pinned above, at unit
+  // level, but the session handshake itself is not driven here.
+  {
+    FakeDirectory dir;
+    check("the fake directory starts (e2e)", dir.Start());
+    const std::string token(32, 'd');
+    dir.Script("/healthz", {Reply{200, "{\"ok\":true,\"observe\":{\"port\":" +
+                                        std::to_string(dir.udpPort()) + "}}"}});
+    dir.Script("/api/host/register", {Reply{200, "{\"ok\":true,\"hostId\":\"h-e2e\",\"hostToken\":\"" +
+                                             std::string(32, 'e') + "\"}"}});
+    dir.Script("/api/host/heartbeat",
+               {Reply{200, heartbeatWithCapability(token, "211.218.222.1", 60420)}});
+
+    PunchHarness harness;
+    const sockaddr_in capabilityTarget = addrOf("211.218.222.1", 60420);
+    check("the host is up with a capability (e2e)",
+          StartPunchHarness(dir, &harness, "e2e", &capabilityTarget));
+    check("...and the host socket has a port for the client to punch", harness.mediaPort != 0);
+
+    LateRelay relay;
+    check("the late-answering relay starts", relay.Start(2500));
+
+    remote60::native_poc::DirectoryRendezvous rv;
+    std::string observed, error;
+    check("the client observes itself through the directory",
+          rv.Observe("127.0.0.1", dir.udpPort(), "e2e-token", &observed, &error), error);
+
+    std::vector<remote60::native_poc::RendezvousCandidate> candidates;
+    candidates.push_back({"127.0.0.1", harness.mediaPort, "private"});
+    candidates.push_back({"127.0.0.1", relay.port, "relay"});
+
+    remote60::native_poc::RendezvousCandidate chosen;
+    const auto began = std::chrono::steady_clock::now();
+    const bool picked = rv.PunchAny(candidates, 4000, &chosen, &error);
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - began).count();
+
+    check("the client picks a candidate", picked, error);
+    check("...and it is the private one, not the relay", chosen.kind == "private",
+          chosen.kind + " at " + std::to_string(elapsedMs) + "ms");
+    // The number that matters: the relay answers at 2500ms, so anything under that means the
+    // host's own reply is what was seen. Recorded rather than asserted tightly -- the claim is
+    // the ORDER, not a latency figure from a loopback test.
+    check("...well before the relay's grace period", elapsedMs < 2500,
+          std::to_string(elapsedMs) + "ms of the relay's 2500ms");
+    rv.Close();
+    harness.Stop();
+    relay.Stop();
+  }
+
+  {
+    // The same wiring with the host NOT armed -- no capability, so no window, so no reply. This
+    // is the state the field was in, and the relay wins exactly as it did there. It is also the
+    // control for the case above: without it, "private won" could be an artefact of the harness.
+    FakeDirectory dir;
+    check("the fake directory starts (e2e control)", dir.Start());
+    dir.Script("/healthz", {Reply{200, "{\"ok\":true,\"observe\":{\"port\":" +
+                                        std::to_string(dir.udpPort()) + "}}"}});
+    dir.Script("/api/host/register", {Reply{200, "{\"ok\":true,\"hostId\":\"h-e2e2\",\"hostToken\":\"" +
+                                             std::string(32, 'e') + "\"}"}});
+    dir.Script("/api/host/heartbeat", {Reply{200, "{\"ok\":true,\"pendingPunch\":[]}"}});
+
+    PunchHarness harness;
+    check("the host is up without a capability (e2e control)",
+          StartPunchHarness(dir, &harness, "e2e-silent", nullptr));
+    check("...and its socket has a port", harness.mediaPort != 0);
+
+    LateRelay relay;
+    check("the late-answering relay starts (control)", relay.Start(2500));
+
+    remote60::native_poc::DirectoryRendezvous rv;
+    std::string observed, error;
+    check("the client observes itself (control)",
+          rv.Observe("127.0.0.1", dir.udpPort(), "e2e-token-2", &observed, &error), error);
+
+    std::vector<remote60::native_poc::RendezvousCandidate> candidates;
+    candidates.push_back({"127.0.0.1", harness.mediaPort, "private"});
+    candidates.push_back({"127.0.0.1", relay.port, "relay"});
+
+    remote60::native_poc::RendezvousCandidate chosen;
+    const auto began = std::chrono::steady_clock::now();
+    const bool picked = rv.PunchAny(candidates, 5000, &chosen, &error);
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - began).count();
+
+    check("a silent host loses to the relay", picked && chosen.kind == "relay",
+          chosen.kind + " at " + std::to_string(elapsedMs) + "ms");
+    check("...and it takes the relay's grace period to get there", elapsedMs >= 2400,
+          std::to_string(elapsedMs) + "ms");
+    rv.Close();
+    harness.Stop();
+    relay.Stop();
+  }
 
   // ------------------------------------------------- directory_observe_from_health(), untested
   //

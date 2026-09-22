@@ -2,6 +2,7 @@
 
 #include "directory_observe.hpp"
 #include "host_diag_log.hpp"
+#include "punch_reply.hpp"
 #include "update_endpoint.hpp"
 
 // Directory-service client for the host.
@@ -331,8 +332,17 @@ class HostAgent {
   std::atomic<bool> refreshRequested_{false};
 
   // pc2-connect-diag: one line per punch, bounded. Under mu_, like everything else here.
-  void LogPunchArrival(const sockaddr_in& from, bool refreshWasPending);
+  void LogPunchArrival(const sockaddr_in& from, bool refreshWasPending,
+                       const remote60::native_poc::PunchReplyDecision& replyDecision);
   remote60::native_poc::PunchLogWindow punchLogWindow_{};
+  /**
+   * Whether this host is currently willing to answer a punch, and how much of its budget is left.
+   *
+   * Guarded by mu_. The window it holds is opened only by a directory event -- a wake punch from
+   * the observe endpoint, or a heartbeat that collected a capability -- so a client's punches can
+   * never keep the host answering indefinitely. See punch_reply.hpp for why each bound exists.
+   */
+  remote60::native_poc::PunchReplyState punchReplyState_{};
   bool portRewriteReported_ = false;  // guarded by mu_
   // The advertised-address line is printed once per run; the heartbeat that carries it repeats
   // every 25 seconds and would otherwise bury the log it was added to make readable.
