@@ -115,36 +115,88 @@ say()  { printf '%s\n' "$*"; }
 #   - no reparse point anywhere between the worktree and the target, because a junction means the
 #     thing written is not the thing named
 
-# Windows junctions are reparse points, and a junction is not a symlink as far as `test -L` is
-# concerned. This asks the OS. No powershell, no answer, no run: fail closed.
-#   0 = found one, and its path is printed   1 = none   2 = could not tell
-path_reparse_between() {
-  local root="$1" target="$2"
-  local out
-  out="$(powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "
-    \$root  = [System.IO.Path]::GetFullPath('$(cygpath -w "$root")')
-    \$p     = [System.IO.Path]::GetFullPath('$(cygpath -w "$target")')
-    \$found = 'no'
-    while (\$p -and \$p.Length -ge \$root.Length) {
-      \$item = Get-Item -LiteralPath \$p -Force -ErrorAction SilentlyContinue
-      if (\$item -and (\$item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
-        \$found = \$p
-        break
-      }
-      \$parent = [System.IO.Path]::GetDirectoryName(\$p)
-      if (\$parent -eq \$p) { break }
-      \$p = \$parent
-    }
-    Write-Output \$found" 2>/dev/null)" || return 2
-  out="$(printf '%s' "$out" | tr -d '\r' | tail -1)"
-  [ -n "$out" ] || return 2
-  [ "$out" = "no" ] && return 1
-  printf '%s' "$out"
+# The path questions that need the OS go to a script, with the path as an ARGUMENT.
+#
+# They used to go to `powershell -Command "...'$(cygpath -w "$p")'..."`, which puts the path
+# inside a script as text. A path with a quote or a dollar sign in it stops being data at that
+# point. These are the paths a release creates everything under, so this is not hypothetical
+# enough to leave alone.
+PATH_PROBE="$SCRIPT_DIR/gnlink_path_probe.ps1"
+
+# Folds `.` and `..` textually, without touching the disk.
+#
+# This is the check that was missing, and it is the one that mattered. The old version resolved
+# only as far as the deepest EXISTING ancestor and then appended the rest of the string, so
+# `<worktree>/new/../../outside/evil` -- whose ancestors do not exist yet -- was compared as a
+# string beginning with `<worktree>/` and passed. It would then have been created outside the
+# worktree. Measured before fixing, not deduced.
+normalise_path() {
+  local p="$1"
+  # Windows-isms this script has no business accepting: a UNC share, or a drive-relative path
+  # (`C:foo`) whose meaning depends on a per-drive current directory.
+  case "$p" in
+    //*|\\\\*) printf 'error:unc'; return 1 ;;
+    [A-Za-z]:[!/]*) printf 'error:drive-relative'; return 1 ;;
+  esac
+  local prefix="" rest="$p"
+  case "$p" in
+    [A-Za-z]:/*) prefix="${p%%:*}:"; rest="${p#[A-Za-z]:}" ;;
+    /*) ;;
+    *) printf 'error:relative'; return 1 ;;
+  esac
+  local out="" seg
+  local IFS=/
+  for seg in $rest; do
+    case "$seg" in
+      ""|.) ;;
+      ..)
+        # Below the root is not a place. Refusing beats silently clamping at /.
+        if [ -z "$out" ]; then printf 'error:above-root'; return 1; fi
+        out="${out%/*}"
+        ;;
+      *) out="$out/$seg" ;;
+    esac
+  done
+  printf '%s%s' "$prefix" "${out:-/}"
   return 0
 }
 
-# The nearest ancestor of a path that exists. What the boundary checks can actually look at
-# before the path itself is created.
+# none | reparse:<path> | error:<why>, straight from the probe. An error is a refusal.
+path_reparse_between() {
+  local root="$1" target="$2" out
+  out="$(powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+           -File "$(cygpath -w "$PATH_PROBE")" \
+           -Mode reparse -Root "$(cygpath -w "$root")" -Path "$(cygpath -w "$target")" 2>/dev/null)" \
+    || { printf 'error:probe-failed'; return 2; }
+  out="$(printf '%s' "$out" | tr -d '\r' | tail -1)"
+  case "$out" in
+    none) return 1 ;;
+    reparse:*) printf '%s' "${out#reparse:}"; return 0 ;;
+    *) printf '%s' "$out"; return 2 ;;
+  esac
+}
+
+# Where a path really is, once every link on the way has been followed.
+path_real() {
+  local target="$1" out
+  out="$(powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+           -File "$(cygpath -w "$PATH_PROBE")" \
+           -Mode real -Path "$(cygpath -w "$target")" 2>/dev/null)" || return 1
+  out="$(printf '%s' "$out" | tr -d '\r' | tail -1)"
+  case "$out" in
+    error:*) return 1 ;;
+    "") return 1 ;;
+  esac
+  # Back to the form the rest of this script compares in. The probe speaks Windows paths
+  # because it is Windows that knows where a junction goes; everything here is POSIX, and a
+  # comparison between the two forms never matches -- which reads as "outside the worktree"
+  # for every legitimate path. Caught the moment the probe was first wired in.
+  cygpath -u "$out" 2>/dev/null || return 1
+  return 0
+}
+
+# The nearest ancestor of a path that exists, computed on an ALREADY NORMALISED path so that a
+# `..` cannot walk the search somewhere the caller did not name.
 nearest_existing() {
   local p="${1%/}"
   while [ -n "$p" ] && [ ! -e "$p" ]; do
@@ -157,51 +209,53 @@ nearest_existing() {
 }
 
 # check_inside_worktree <path> <label>
-#   Refuses unless <path> resolves to somewhere strictly below $WORKTREE, reached without
-#   crossing a reparse point. Works whether or not <path> exists yet.
+#   Refuses unless <path> is, after folding `.` and `..`, strictly below $WORKTREE, and is
+#   reached without crossing a reparse point. Works whether or not <path> exists yet, and prints
+#   the normalised path on success.
 check_inside_worktree() {
-  local target="${1%/}" label="$2"
+  local given="$1" label="$2"
+  [ -n "$given" ] || die "refusing to use the $label: the path is empty"
 
-  [ -n "$target" ] || die "refusing to use the $label: the path is empty"
+  local target
+  target="$(normalise_path "${given%/}")" \
+    || die "refusing to use the $label: $given is not a usable absolute path ($target)"
   case "$target" in
-    /|[A-Za-z]:|[A-Za-z]:/) die "refusing to use the $label: $1 is a filesystem root" ;;
-    /*|[A-Za-z]:/*) ;;
-    *) die "refusing to use the $label: $target is not an absolute path" ;;
+    /|[A-Za-z]:|[A-Za-z]:/) die "refusing to use the $label: $given is a filesystem root" ;;
   esac
 
-  local anchor realAnchor rest
+  # Compared after normalisation, both sides. This is the check the string-append version could
+  # not make, because it never had the whole path in normal form.
+  case "$target" in
+    "$WORKTREE_REAL") die "refusing to use the $label: $given IS the worktree" ;;
+    "$WORKTREE_REAL"/?*) ;;
+    *) die "refusing to use the $label: $target is outside the worktree $WORKTREE_REAL" ;;
+  esac
+
+  local anchor
   anchor="$(nearest_existing "$target")"
   [ -d "$anchor" ] || die "refusing to use the $label: $anchor is not a directory"
-  realAnchor="$(cd "$anchor" && pwd -P)" || die "cannot resolve $anchor"
-  if [ "$anchor" != "$target" ]; then
-    rest="${target#"$anchor"}"
-  else
-    rest=""
-  fi
-  local resolved="$realAnchor$rest"
 
-  case "$resolved" in
-    "$WORKTREE_REAL") die "refusing to use the $label: $1 IS the worktree" ;;
-    "$WORKTREE_REAL"/?*) ;;
-    *) die "refusing to use the $label: $resolved is outside the worktree $WORKTREE_REAL" ;;
+  # Where the existing part of the path actually is. A junction here means the rest would be
+  # created somewhere other than where it reads.
+  local realAnchor
+  realAnchor="$(path_real "$anchor")" \
+    || die "refusing to use the $label: cannot resolve $anchor -- an unreadable path is not a safe one"
+  local logicalAnchor
+  logicalAnchor="$(cd "$anchor" && pwd -P)" || die "cannot resolve $anchor"
+  case "$realAnchor" in
+    "$WORKTREE_REAL"|"$WORKTREE_REAL"/*) ;;
+    *) die "refusing to use the $label: $anchor resolves to $realAnchor, outside the worktree" ;;
   esac
 
-  # A path that reads one way and resolves another has a link in it. Said separately from the
-  # reparse walk because it catches the case even where powershell cannot be reached.
-  local logicalAnchor
-  logicalAnchor="$(cd "$anchor" && pwd)" || die "cannot resolve $anchor"
-  [ "$logicalAnchor" = "$realAnchor" ] \
-    || die "refusing to use the $label: $anchor resolves to $realAnchor"
-
   local reparse rc
-  reparse="$(path_reparse_between "$WORKTREE_REAL" "$realAnchor")"; rc=$?
+  reparse="$(path_reparse_between "$WORKTREE_REAL" "$anchor")"; rc=$?
   case "$rc" in
     0) die "refusing to use the $label: reparse point at $reparse" ;;
     1) ;;
-    *) die "refusing to use the $label: could not check $target for reparse points" ;;
+    *) die "refusing to use the $label: could not check $given for reparse points ($reparse)" ;;
   esac
 
-  printf '%s' "$resolved"
+  printf '%s' "$target"
 }
 
 # make_fresh_dir <path> <label>
@@ -210,11 +264,27 @@ check_inside_worktree() {
 #   moments and something can arrive between them.
 make_fresh_dir() {
   local target="$1" label="$2"
-  check_inside_worktree "$target" "$label" >/dev/null
-  [ -e "$target" ] && die "the $label already exists: $target -- move or remove it yourself; this script does not delete"
-  mkdir -p "$target" || die "could not create the $label at $target"
-  check_inside_worktree "$target" "$label" >/dev/null
-  say "$label: created $target"
+  local normalised
+  # The `|| die` is not decoration. `die` inside $( ) kills the SUBSHELL and the caller keeps
+  # going with an empty string -- which became `mkdir ""` and a complaint about a lock held
+  # at "()" . A refusal has to stop the run, not hand back nothing.
+  normalised="$(check_inside_worktree "$target" "$label")" \
+    || die "refusing to create the $label"
+  [ -e "$normalised" ] && die "the $label already exists: $normalised -- move or remove it yourself; this script does not delete"
+  mkdir -p "$normalised" || die "could not create the $label at $normalised"
+  # Again, now that it exists: the check before could only look at an ancestor, and between the
+  # two moments the path is a thing anyone with write access to the parent can replace.
+  local after
+  after="$(path_real "$normalised")" \
+    || die "refusing the $label: cannot resolve $normalised after creating it"
+  case "$after" in
+    "$WORKTREE_REAL"/?*) ;;
+    *) die "the $label was created at $after, outside the worktree -- something replaced it" ;;
+  esac
+  local reparse rc
+  reparse="$(path_reparse_between "$WORKTREE_REAL" "$normalised")"; rc=$?
+  [ "$rc" = "1" ] || die "the $label at $normalised is or is under a reparse point after creation ($reparse)"
+  say "$label: created $normalised"
 }
 step() { printf '\n=== %s\n' "$*"; }
 die()  { printf 'FAIL  %s\n' "$*" >&2; exit 1; }
@@ -230,6 +300,7 @@ say_if_substituted() {
   SUBSTITUTED_LIST="${SUBSTITUTED_LIST:+$SUBSTITUTED_LIST, }$what"
 }
 SUBSTITUTIONS=0
+RESERVED_FINAL=0
 SUBSTITUTED_LIST=""
 
 usage() {
@@ -330,16 +401,41 @@ fi
 say "version  : $VERSION (source and argument agree)"
 
 # One release at a time per worktree. mkdir is the atomic part: two runs cannot both create it.
-LOCK_DIR="$WORKTREE/.claude/gnlink_release.lock"
+#
+# The lock is a directory this script creates and removes, so it goes through the same boundary
+# check as everything else it creates -- it was the one path that did not, which is exactly the
+# sort of exception that is fine until --rel-root or --worktree points somewhere odd.
 mkdir -p "$WORKTREE/.claude" || die "cannot create $WORKTREE/.claude"
+LOCK_DIR="$(check_inside_worktree "$WORKTREE/.claude/gnlink_release.lock" "lock")" \
+  || die "refusing to take the lock"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   say "held by: $(cat "$LOCK_DIR/owner" 2>/dev/null || echo 'unknown')"
   die "another release is running in this worktree ($LOCK_DIR) -- remove it if that is stale"
 fi
-printf 'pid=%s run=%s version=%s started=%s\n' "$$" "$RUN_ID" "$VERSION" "$(date -Is)" \
-  > "$LOCK_DIR/owner"
+# Who holds it, in a form the cleanup can check. A run that crashed leaves this behind, and the
+# next run should be able to read whose it was rather than guess.
+LOCK_OWNER="pid=$$ run=$RUN_ID"
+printf '%s version=%s started=%s\n' "$LOCK_OWNER" "$VERSION" "$(date -Is)" > "$LOCK_DIR/owner"
+
 cleanup() {
-  rmdir "$LOCK_DIR" 2>/dev/null || { rm -f "$LOCK_DIR/owner" 2>/dev/null; rmdir "$LOCK_DIR" 2>/dev/null; }
+  # Only this run's lock. Without the check, a run that found a stale lock, was told to remove it,
+  # and was then started again alongside a real one would delete the live holder's lock on its way
+  # out -- turning one mistake into two runs in the same worktree.
+  local held
+  held="$(head -1 "$LOCK_DIR/owner" 2>/dev/null || true)"
+  case "$held" in
+    "$LOCK_OWNER"*) ;;
+    *) return 0 ;;
+  esac
+  rm -f "$LOCK_DIR/owner" 2>/dev/null
+  rmdir "$LOCK_DIR" 2>/dev/null
+
+  # A reservation this run made and never filled is given back. Only if it is EMPTY: anything in
+  # it is either this run's release, which is finished and staying, or somebody else's, which was
+  # never ours to remove.
+  if [ "$RESERVED_FINAL" = "1" ] && [ "$REL_DIR" != "$REL_FINAL" ] && [ -d "$REL_FINAL" ]; then
+    rmdir "$REL_FINAL" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT
 
@@ -349,13 +445,7 @@ check_inside_worktree "$BUILD_DIR" "build dir" >/dev/null
 check_inside_worktree "$REL_DIR" "release dir" >/dev/null
 check_inside_worktree "$REL_FINAL" "release directory" >/dev/null
 
-# The published candidate is not this run's to clear. Even --dry-run used to remove it.
-if [ -e "$REL_FINAL" ]; then
-  if [ -n "$(ls -A "$REL_FINAL" 2>/dev/null)" ]; then
-    die "$REL_FINAL already exists and is not empty -- that is a release somebody may still be checking; move it aside yourself"
-  fi
-  die "$REL_FINAL already exists -- remove it yourself if it is nothing"
-fi
+
 say "release  : will be assembled in $REL_DIR and renamed to $REL_FINAL"
 
 # 0.2.134 lost half an hour to this: third_party/webview2 is gitignored and per-worktree, so a
@@ -380,20 +470,30 @@ fi
 # WebView2 SDK is not in the commit -- it is a per-worktree directory this script may have copied
 # in. Both can change while a twenty-minute build runs, and a release built across such a change
 # is not the release its commit describes.
+# The SDK inputs the build actually consumes, hashed as a set.
+#
+# The first version hashed whichever WebView2Loader.dll `find` happened to return first, which
+# says nothing about the headers the code compiles against or the import library it links. A
+# release "pinned" by one arbitrary file out of a package is not pinned.
+sdk_inputs() {
+  local root="$WORKTREE/third_party/webview2"
+  [ -d "$root" ] || return 1
+  # Headers compiled against, the import library linked, the loader shipped beside the binaries,
+  # and the package's own manifest. Sorted, so the list is the same on every machine.
+  find "$root" \( -iname '*.h' -o -iname '*.nuspec' \
+                  -o -iname 'WebView2Loader.dll' -o -iname 'WebView2LoaderStatic.lib' \
+                  -o -iname 'WebView2Loader.dll.lib' \) -type f -print 2>/dev/null | sort
+}
+
 sdk_hash() {
-  local dll
-  dll="$(find "$WORKTREE/third_party/webview2" -iname 'WebView2Loader.dll' -print 2>/dev/null | sort | head -1)"
-  if [ -n "$dll" ] && [ -f "$dll" ]; then
-    sha256sum "$dll" | cut -d' ' -f1
-    return 0
-  fi
-  local nuspec
-  nuspec="$(find "$WORKTREE/third_party/webview2" -iname '*.nuspec' -print 2>/dev/null | sort | head -1)"
-  if [ -n "$nuspec" ] && [ -f "$nuspec" ]; then
-    sha256sum "$nuspec" | cut -d' ' -f1
-    return 0
-  fi
-  printf 'unknown'
+  local files
+  files="$(sdk_inputs)" || { printf 'unknown'; return 0; }
+  [ -n "$files" ] || { printf 'unknown'; return 0; }
+  # One hash over the list of (hash, relative name) pairs: a file appearing or disappearing
+  # changes it, not just a file changing.
+  printf '%s\n' "$files" | while IFS= read -r f; do
+    printf '%s  %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "${f#"$WORKTREE"/}"
+  done | sha256sum | cut -d' ' -f1
 }
 SDK_HASH_BEFORE="$(sdk_hash)"
 [ "$SDK_HASH_BEFORE" != "unknown" ] || die "could not hash the WebView2 SDK; refusing to build a release whose inputs cannot be named"
@@ -401,6 +501,30 @@ say "sdk      : $SDK_HASH_BEFORE"
 
 
 [ -x "$CMAKE" ] || die "cmake not found at $CMAKE"
+
+# The published name is RESERVED here, by creating it, rather than checked here and taken later.
+#
+# `mv -T` was doing the taking, on the stated belief that it fails if the name exists. It does not:
+# it replaces an existing EMPTY directory without a word. Measured, not assumed -- an empty
+# directory at the target was silently swallowed. And a check at this point followed by a move
+# nine stages later is a gap wide enough for a second run to walk through anyway.
+#
+# mkdir is the atomic part, the same reason the lock uses it: exactly one of two concurrent runs
+# can create this name, and the other is told so here rather than at the end of a build.
+REL_FINAL="$(check_inside_worktree "$REL_FINAL" "release directory")" \
+  || die "refusing to reserve the release directory"
+if ! mkdir -p "$(dirname "$REL_FINAL")" 2>/dev/null; then
+  die "cannot create $(dirname "$REL_FINAL")"
+fi
+if ! mkdir "$REL_FINAL" 2>/dev/null; then
+  if [ -n "$(ls -A "$REL_FINAL" 2>/dev/null)" ]; then
+    die "$REL_FINAL already exists and is not empty -- that is a release somebody may still be checking; move it aside yourself"
+  fi
+  die "$REL_FINAL already exists -- another run may hold it, or it is left over; remove it yourself if it is nothing"
+fi
+# Reserved, not finished. A run that dies before stage 7b leaves an empty directory here, which
+# the next run reports rather than silently reusing.
+RESERVED_FINAL=1
 
 # ------------------------------------------------------------------- 2. configure
 step "2. fresh configure -> $BUILD_DIR"
@@ -494,6 +618,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass \
 
 say ""
 say "-- inputs: did anything move while this was building"
+# What "unchanged" covers, said exactly: the TRACKED files of this commit, the WebView2 inputs
+# listed by sdk_inputs, and the commit itself. It does not cover untracked files -- `git status
+# --untracked-files=no` does not look at them, and the earlier note claiming this pinned every
+# input was wrong about its own check.
 DIRTY_AFTER="$(git -C "$WORKTREE" status --porcelain --untracked-files=no)"
 [ -z "$DIRTY_AFTER" ] || { say "$DIRTY_AFTER"; die "the worktree changed during the build; this release does not describe commit $HEAD_SHA"; }
 HEAD_AFTER="$(git -C "$WORKTREE" rev-parse HEAD)"
@@ -509,14 +637,28 @@ step "7b. name the release -> $REL_FINAL"
 # directory named after this run, so a failed release cannot leave something at the name the
 # deploy script reads. The check is not the protection -- `mv` refusing to clobber is; the check
 # is there to say why in words rather than by an errno.
-[ -e "$REL_FINAL" ] && die "$REL_FINAL appeared while this run was building; refusing to replace it"
-# -T, always: without it a `mv` onto an existing directory moves INTO it, and the release ends
-# up one level down with the right name on the wrong thing.
-mv -T "$REL_DIR" "$REL_FINAL" || die "could not move $REL_DIR to $REL_FINAL"
-[ -d "$REL_FINAL" ] || die "the release is not at $REL_FINAL after the move"
+# The name was reserved at preflight, so what happens here is filling it, not taking it.
+[ "$RESERVED_FINAL" = "1" ] || die "the release name was never reserved; refusing to publish into it"
+[ -d "$REL_FINAL" ] || die "$REL_FINAL disappeared while this run was building"
+[ -z "$(ls -A "$REL_FINAL" 2>/dev/null)" ] \
+  || die "$REL_FINAL has contents that are not this run's; refusing to mix them"
+
+# Contents, not the directory: the directory is the reservation. `mv -T` would have replaced it,
+# which is the behaviour this whole arrangement exists to avoid.
+( shopt -s dotglob nullglob; mv "$REL_DIR"/* "$REL_FINAL"/ ) \
+  || die "could not move the release from $REL_DIR into $REL_FINAL"
+[ -z "$(ls -A "$REL_DIR" 2>/dev/null)" ] \
+  || die "$REL_DIR still has contents after the move; the release is in two places"
+rmdir "$REL_DIR" 2>/dev/null || true
+
 REL_DIR="$REL_FINAL"
 PAYLOAD="$REL_DIR/payload"
-say "release: $REL_FINAL"
+
+# And the bytes are what they were before the move. A move that half-succeeded, or a payload
+# that changed underneath it, is not something the earlier checksum run can speak for.
+( cd "$REL_DIR" && sha256sum -c SHA256SUMS.txt ) >/dev/null \
+  || die "the release does not match its own SHA256SUMS after being moved into $REL_FINAL"
+say "release: $REL_FINAL (verified after the move)"
 
 # ------------------------------------------------------------------- 8. sign
 step "8. sign"
@@ -541,15 +683,35 @@ if [ "$DO_SIGN" = "1" ]; then
     SIGNED=1
     say "signed"
 
-    # And verified by the PRODUCT's verifier, which reads the key compiled into the update client
-    # rather than the one next to the signing key. The signing script checking its own work says
-    # the maths is right; this says the thing that will actually install the update accepts it.
+    # Verified by the binary that was BUILT FROM THIS CANDIDATE, using the key compiled into it.
+    #
+    # The previous version called gnlink_verify_manifest.js and described it as "the product
+    # verifier". It is not: it is the SERVER's implementation in JavaScript, reading the key out
+    # of update_manifest.cpp as text. A useful second opinion, and the wrong thing to claim as the
+    # product accepting the document -- the product is C++, and "two implementations agree" is a
+    # different sentence from "the shipped one accepts it".
+    #
+    # remote60_verify_release links the same load_manifest, the same default_verifier and the same
+    # compiled-in key as the update client, and it does both halves in one run: it accepts the
+    # real document and refuses the same document with one byte flipped. Acceptance alone is
+    # equally true of a verifier that never looks at the signature.
+    VERIFIER="$BUILD_DIR/apps/native_poc/Release/remote60_verify_release.exe"
+    "$CMAKE" --build "$BUILD_DIR" --config Release --target remote60_verify_release \
+      >"$BUILD_DIR.verifier.log" 2>&1 \
+      || { tail -20 "$BUILD_DIR.verifier.log"; die "could not build the shipped verifier (log: $BUILD_DIR.verifier.log)"; }
+    [ -f "$VERIFIER" ] || die "the verifier did not build at $VERIFIER"
+    "$VERIFIER" "$REL_DIR/windows.manifest" "$REL_DIR/windows.sig" windows \
+      || die "the verifier built from this candidate rejects this release -- do not publish"
+    say "verified by remote60_verify_release, built from this candidate (accepts, and refuses a tampered copy)"
+
+    # The server's implementation as well, said as what it is. If these two ever disagree, one of
+    # the two places the key lives has drifted.
     if command -v node >/dev/null 2>&1; then
       node "$SCRIPT_DIR/gnlink_verify_manifest.js" "$REL_DIR/windows.manifest" "$REL_DIR/windows.sig" windows \
-        || die "the product verifier rejects this signature -- do not publish"
-      say "verified against the key compiled into the product"
+        || die "the server-side verifier rejects this signature -- do not publish"
+      say "...and by the server-side implementation (gnlink_verify_manifest.js)"
     else
-      die "node is not on PATH; the product verifier is not optional before publishing"
+      say "server-side verifier skipped: node is not on PATH (the compiled one above is the gate)"
     fi
   fi
 else
@@ -576,9 +738,13 @@ if [ "$DO_DEPLOY" = "1" ]; then
         say "would deploy $REL_DIR"
         say "no signature, because --dry-run does not use the key, so the deploy script is not"
         say "called at all -- its preflight requires one before it reads any flag."
-        say "to rehearse publication end to end, sign first and then dry-run:"
-        say "  $0 --worktree $WORKTREE --version $VERSION --sign"
-        say "  $0 --worktree $WORKTREE --version $VERSION --deploy --dry-run"
+        # NOT "run this script again with --deploy --dry-run". By then the release directory
+        # exists, and refusing to reuse an existing one is the rule two stages up -- so the
+        # advice contradicted the guard and could not be followed. The deploy script takes a
+        # release directory directly, which is what this case actually needs.
+        say "to rehearse publication of a release that IS signed, point the deploy"
+        say "script at it directly:"
+        say "  automation/gnlink_deploy.sh --release-dir <signed release dir> --dry-run"
       } 2>&1 | tee "$DEPLOY_LOG"
     fi
   else
@@ -611,7 +777,14 @@ if [ "$SUBSTITUTIONS" != "0" ]; then
   say "NOT A RELEASE: $SUBSTITUTIONS tool(s) were substituted, listed at the top of this run."
 fi
 say "gates: parity PASS, payload-set PASS, checksums PASS, installer payload 9/9 PASS,"
-say "       inputs unchanged (commit $HEAD_SHA, sdk $SDK_HASH_BEFORE)"
+say "       tracked files, the listed SDK inputs and the commit unchanged since preflight"
+say "       (untracked files are NOT covered by that check)"
+say "commit    : $HEAD_SHA"
+say "sdk set   : $SDK_HASH_BEFORE  ($(sdk_inputs 2>/dev/null | wc -l | tr -d ' ') files)"
+say "scripts   : $(cd "$SCRIPT_DIR" && sha256sum gnlink_release.sh gnlink_release_sign.ps1 \
+  gnlink_path_probe.ps1 gnlink_release_manifest.py gnlink_check_installer_payload.ps1 2>/dev/null \
+  | sha256sum | cut -d' ' -f1)"
+say "           (this script and the tools it calls, so a run can be traced to what ran it)"
 if [ "$SIGNED" = "1" ]; then
   say "       signature verified by the product's own verifier"
 fi

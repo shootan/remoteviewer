@@ -12290,3 +12290,21 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 검증: `viewer_cancel_e2e_test` **23/0**(+3), 취소 지연 **69ms / 61ms** 로 named 시절(81~102 / 59~95)과 동등 — 보안 수정이 속도를 바꾸지 않았다. 변이(이름 복원) → **1 FAIL**. 전량 빌드 0 에러 · `directory_retry` 122/0 · `picker_empty_state` 24/0 · `punch_reply` 55/0 · `control_resume` 48/0 · `host_punch_reply_e2e` 40/0.
 - 스크린샷 3장 재촬영(`.claude/ui-shots-c2/`, 커밋에는 PNG 없이 스크립트만): 상속 핸들 경로로 취소했고 뷰어 로그에 `connect cancelled by the shell` 이 찍혔다.
 - 제품/테스트/문서: 제품(`viewer_cancel_channel.hpp`, `client_shell_main.cpp`, `native_video_client_main.cpp`, `viewer_args.{hpp,cpp}`) / 테스트(`viewer_cancel_e2e_test.cpp`) / 자동화(`gnlink_viewer_connect_shots.ps1`) / 문서(이 항목, `구현계획.md` C2 F1 절).
+
+### 2026-09-23 release-script r5 — 검사한 것과 검사했다고 적은 것
+
+- Codex FINAL(r4) NEEDS_CHANGES 3건. **둘은 내가 먼저 실측으로 재현했다** — 지적이 맞는지 코드를 읽어 동의하는 것과, 그 입력을 실제로 넣어 보는 것은 다르다.
+- **NC1 경계 검사가 미존재 suffix 를 정규화하지 않았다.** 존재하는 조상까지만 해석하고 나머지를 문자열로 이어 붙였기 때문에 `<worktree>/new/../../outside/evil` 이 **통과했다**(실측: 통과). 조상이 아직 없으니 검사는 `<worktree>/` 로 시작하는 문자열만 보고 있었고, 생성은 바깥에 됐을 것이다. 고침: **문자열 정규화(`.`/`..` 접기) → 경계 → 조상 reparse → 생성 → 생성 후 실경로 재검사**. UNC·드라이브 상대 형식 거부. **reparse 를 못 읽으면 "안전" 이 아니라 거부**(예전 `-ErrorAction SilentlyContinue` 는 읽을 수 없는 것을 안전하다고 답했다).
+- 경로를 PowerShell `-Command` 문자열에 따옴표로 끼워 넣던 것도 없앴다(`gnlink_path_probe.ps1` 신규, `-File` + 인자). 따옴표나 `$` 가 든 경로는 그 순간 데이터가 아니라 스크립트가 된다 — 릴리스가 **모든 것을 그 아래에 만드는** 경로들이라 이론적인 반대가 아니다.
+- **NC3 `mv -T` 는 no-clobber 가 아니다.** 기존 **빈** 디렉터리를 조용히 교체한다(실측: 교체됨). "이름이 이미 있으면 반드시 실패" 라고 적어 두었는데 사실이 아니었고, 사전 검사와 9단계 뒤의 mv 사이 경합도 있었다. 고침: 게시 이름을 **preflight 뒤 `mkdir` 로 예약**(동시 실행 중 하나만 성공), 조립은 run-id 디렉터리, 완료 시 **내용을 옮기고 SHA256SUMS 로 재검증**. 채우지 못한 예약은 종료 시 돌려준다 — 그러지 않으면 실패할 때마다 다음 실행이 거부하는 쓰레기가 쌓인다.
+- **NC2 "제품 검증기" 는 틀린 이름이었다.** 8단계가 부르던 `gnlink_verify_manifest.js` 는 **서버측 JS 동등 구현**이다. 이제 게이트는 **후보 commit 으로 빌드한 `remote60_verify_release`**(제품과 같은 `load_manifest`·`default_verifier`·컴파일된 키)이고, 실문서 수락 + **1바이트 변조 거부**를 한 번에 본다. JS 쪽은 보조로 남기고 이름을 바로잡았다.
+- 같이 고친 것: SDK 해시가 **`find` 가 처음 준 DLL 하나**였다 — 헤더도 import lib 도 말하지 않는다. 실제 입력 목록(헤더·loader·lib·nuspec)의 해시로 바꿨다. 그리고 "clean 전후 확인 = 미추적 입력까지 고정" 문구를 **삭제**했다 — `--untracked-files=no` 는 미추적 파일을 보지 않는다. 요약에 commit·SDK 입력 집합·**실행 스크립트 자신들의 해시**를 적는다.
+- 안내 문구도 정정: "`--sign` 뒤 같은 버전으로 `--deploy --dry-run`" 은 **기존 디렉터리 가드에 막혀 실행될 수 없었다**. 서명된 산출물은 `gnlink_deploy.sh --release-dir <rel> --dry-run` 을 직접 부르라고 바꿨다.
+- 검증: `automation/gnlink_release_test.sh` **116 PASS / 0 FAIL, exit 0**(이전 102). 신규 반례: 미존재 suffix 의 `..`·UNC·드라이브 상대 거부 · 공백/`$` 포함 경로 통과 · **`mv -T` 가 빈 디렉터리를 교체한다는 것 자체를 mv 로 실증** · 빈 기존 dir 거부·보존 · 동시 실행 중 하나 거부 · 남의 lock 을 지우지 않음.
+- **변이 4건 중 2건이 잡히고 2건은 잡히지 않는다. 왜 그런지까지 적는다**:
+  · `normalise_path` 제거(미존재 suffix 를 문자열로 이어 붙이던 예전 방식) → **2 FAIL**(`..` 탈출 2종이 다시 통과한다).
+  · 예약 제거(`mkdir` 선점을 `mkdir -p` 로) → **3 FAIL**(기존 dir·빈 기존 dir 가 그대로 쓰인다).
+  · ⚠️ `mv -T` 로 복귀 → **0 FAIL**. 예약이 이미 이름을 잡고 있어서 `mv -T` 든 내용 이동이든 결과가 같기 때문이다. 즉 **이 위험을 막는 것은 예약이고**(위 변이가 그걸 잡는다) `mv -T` 를 안 쓰는 것은 그 위에 얹은 이중 안전장치다. 이름을 선점하지 않던 시절이라면 이 변이가 치명적이었을 것이다.
+  · ⚠️ lock owner 검사 제거 → **0 FAIL**. 남의 lock 에 막힌 실행은 `trap cleanup EXIT` 를 **설치하기 전에** 죽으므로 cleanup 이 아예 돌지 않는다 — 그 가드가 문제가 되는 상황을 이 하네스로는 만들 수 없다. 증명 실패가 아니라 **도달 경로가 없는 이중 안전장치**라고 적는다.
+- **실행하지 않은 것**: 실서명·실게시 0회.
+- 제품/테스트/문서: 제품 **무변경**(`remote60_verify_release` 는 기존 타깃) / 자동화(`gnlink_release.sh`, `gnlink_path_probe.ps1` 신규, `gnlink_release_test.sh`) / 문서(이 항목, `구현계획.md` 배포 자동화 절).

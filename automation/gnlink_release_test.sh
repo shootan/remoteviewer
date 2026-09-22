@@ -260,7 +260,8 @@ RMDRIVE="$TMP/rmdrive.sh"
   printf 'set -u\n'
   printf 'die() { printf "FAIL  %%s\\n" "$*" >&2; exit 1; }\n'
   printf 'say() { printf "%%s\\n" "$*"; }\n'
-  sed -n '/^path_reparse_between()/,/^}$/p;/^nearest_existing()/,/^}$/p;/^check_inside_worktree()/,/^}$/p;/^make_fresh_dir()/,/^}$/p' "$RELEASE_SH"
+  printf 'SCRIPT_DIR="%s"\n' "$SCRIPT_DIR"
+  sed -n '/^PATH_PROBE=/p;/^normalise_path()/,/^}$/p;/^path_reparse_between()/,/^}$/p;/^path_real()/,/^}$/p;/^nearest_existing()/,/^}$/p;/^check_inside_worktree()/,/^}$/p;/^make_fresh_dir()/,/^}$/p' "$RELEASE_SH"
   printf 'WORKTREE_REAL="$(cd "$2" && pwd -P)"\n'
   printf 'check_inside_worktree "$1" "target"\n'
 } > "$RMDRIVE"
@@ -538,10 +539,27 @@ done
   && [ -f "$DELWT/build-0.2.134/CMakeCache.txt" ]
 check $? "an existing release and an existing build survive every mode"
 
-OUT="$(GNLINK_WEBVIEW2_SOURCE="$TMP/no-such-sdk" bash "$RELEASE_SH" \
+# The name is reserved AFTER the preflight, so this needs a worktree whose preflight passes --
+# otherwise the run stops at the missing WebView2 SDK and never reaches the reservation. The
+# loop above deliberately does the opposite: it fails early, which is what makes it a test that
+# nothing is deleted before a build even starts.
+mkdir -p "$DELWT/third_party/webview2/build/native"
+printf 'stub
+' > "$DELWT/third_party/webview2/build/native/WebView2Loader.dll"
+OUT="$(GNLINK_CMAKE=/usr/bin/true bash "$RELEASE_SH" \
         --worktree "$DELWT" --version 0.2.134 2>&1 || true)"
 printf '%s' "$OUT" | grep -qi 'already exists'
 check $? "...and the run says the release directory is already there"
+
+# The reservation is a directory, and a run that fails before filling it gives it back. Without
+# that, every failed attempt would leave debris the next one refuses to build into.
+rm -rf "$DELWT/.claude/rel/0.2.134" "$DELWT/build-0.2.134"
+GNLINK_CMAKE=/usr/bin/true bash "$RELEASE_SH" \
+  --worktree "$DELWT" --version 0.2.134 >/dev/null 2>&1
+[ ! -e "$DELWT/.claude/rel/0.2.134" ]
+check $? "a run that fails after reserving the name gives the name back" \
+  "$(ls -A "$DELWT/.claude/rel/0.2.134" 2>/dev/null | tr '
+' ' ')"
 
 expect_nonzero "a build dir outside the worktree is refused" \
   bash "$RELEASE_SH" --worktree "$DELWT" --version 0.2.134 --build-dir "$TMP/elsewhere-build"
@@ -764,6 +782,85 @@ if [ "$NINE_KEY_MADE" = "1" ]; then
 else
   printf 'SKIP  nine-stage combinations (could not create a throwaway key here)\n'
 fi
+
+printf '\n=== a path that does not exist yet is still normalised\n'
+# The escape this closes: the old check resolved only as far as the deepest EXISTING ancestor and
+# then appended the rest of the path as text. `<worktree>/new/../../outside/evil` has no existing
+# ancestor past the worktree, so it was compared as a string starting with `<worktree>/` and
+# ACCEPTED -- and would then have been created outside. Measured before it was fixed.
+NORMWT="$TMP/normwt"
+mkdir -p "$NORMWT/wt" "$NORMWT/outside"
+
+expect_nonzero "a .. in a not-yet-existing suffix cannot escape" \
+  bash "$RMDRIVE" "$NORMWT/wt/new/../../outside/evil" "$NORMWT/wt"
+expect_nonzero "...nor one whose whole path is invented" \
+  bash "$RMDRIVE" "$NORMWT/wt/a/b/../../../outside" "$NORMWT/wt"
+[ ! -e "$NORMWT/outside/evil" ]
+check $? "...and nothing was created out there while refusing"
+
+expect_nonzero "a UNC path is refused" bash "$RMDRIVE" "//server/share/x" "$NORMWT/wt"
+expect_nonzero "a drive-relative path is refused" bash "$RMDRIVE" "C:relative" "$NORMWT/wt"
+
+bash "$RMDRIVE" "$NORMWT/wt/./sub/../ok" "$NORMWT/wt" >/dev/null 2>&1
+check $? "a . and a .. that stay inside are folded and allowed"
+
+# Paths a -Command string would have broken on. The probe takes them as arguments now.
+mkdir -p "$NORMWT/wt/with space" "$NORMWT/wt/with\$dollar"
+bash "$RMDRIVE" "$NORMWT/wt/with space/x" "$NORMWT/wt" >/dev/null 2>&1
+check $? "a path with a space is handled"
+bash "$RMDRIVE" "$NORMWT/wt/with\$dollar/x" "$NORMWT/wt" >/dev/null 2>&1
+check $? "a path with a dollar sign is handled"
+
+printf '\n=== the published name is reserved, not checked and hoped for\n'
+# `mv -T` was doing the taking, on the belief that it fails when the target exists. It does not:
+# an existing EMPTY directory is replaced without a word. Shown here against mv itself, so the
+# claim is about the tool rather than about the script's opinion of the tool.
+MVT="$TMP/mvt"
+mkdir -p "$MVT/src" "$MVT/dstEmpty"
+printf 'payload\n' > "$MVT/src/file.txt"
+mv -T "$MVT/src" "$MVT/dstEmpty" 2>/dev/null
+[ -f "$MVT/dstEmpty/file.txt" ]
+check $? "mv -T does replace an existing empty directory -- which is why reserving is needed"
+
+RESWT="$TMP/reswt"
+make_worktree "$RESWT" "0.2.134"
+mkdir -p "$RESWT/third_party/webview2/build/native"
+printf 'stub\n' > "$RESWT/third_party/webview2/build/native/WebView2Loader.dll"
+# An EMPTY release directory: the case mv -T would have swallowed.
+mkdir -p "$RESWT/.claude/rel/0.2.134"
+OUT="$(GNLINK_CMAKE=/usr/bin/true bash "$RELEASE_SH" \
+        --worktree "$RESWT" --version 0.2.134 2>&1 || true)"
+printf '%s' "$OUT" | grep -qi 'already exists'
+check $? "an EMPTY release directory stops the run rather than being replaced"
+[ -d "$RESWT/.claude/rel/0.2.134" ]
+check $? "...and is still there afterwards"
+rmdir "$RESWT/.claude/rel/0.2.134"
+
+# Two runs at once: exactly one may hold the name. Run in the background against the same
+# worktree, which is what a second person on the same machine would do.
+GNLINK_CMAKE=/usr/bin/true bash "$RELEASE_SH" --worktree "$RESWT" --version 0.2.134 \
+  > "$TMP/race-a.log" 2>&1 &
+RACE_A=$!
+GNLINK_CMAKE=/usr/bin/true bash "$RELEASE_SH" --worktree "$RESWT" --version 0.2.134 \
+  > "$TMP/race-b.log" 2>&1 &
+RACE_B=$!
+wait $RACE_A; wait $RACE_B
+BLOCKED=$(cat "$TMP/race-a.log" "$TMP/race-b.log" | grep -ci 'another release is running\|already exists')
+[ "$BLOCKED" -ge 1 ]
+check $? "two runs in one worktree: at least one is turned away" "$BLOCKED turned away"
+
+printf '\n=== the lock belongs to whoever took it\n'
+LOCKWT="$TMP/lockwt"
+make_worktree "$LOCKWT" "0.2.134"
+mkdir -p "$LOCKWT/.claude/gnlink_release.lock"
+printf 'pid=999999 run=someone-else version=0.2.134\n' > "$LOCKWT/.claude/gnlink_release.lock/owner"
+OUT="$(GNLINK_WEBVIEW2_SOURCE="$TMP/no-such-sdk" bash "$RELEASE_SH" \
+        --worktree "$LOCKWT" --version 0.2.134 2>&1 || true)"
+printf '%s' "$OUT" | grep -qi 'another release is running'
+check $? "a lock somebody else holds turns a run away"
+[ -d "$LOCKWT/.claude/gnlink_release.lock" ] && \
+  grep -q 'someone-else' "$LOCKWT/.claude/gnlink_release.lock/owner"
+check $? "...and the run it turned away did not delete their lock on its way out"
 
 printf '\n=== substituted tools cannot reach the key or the server\n'
 # Announcing a substitution is not a gate. The first version of the seams printed "NOT A RELEASE"
