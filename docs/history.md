@@ -12308,3 +12308,20 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
   · ⚠️ lock owner 검사 제거 → **0 FAIL**. 남의 lock 에 막힌 실행은 `trap cleanup EXIT` 를 **설치하기 전에** 죽으므로 cleanup 이 아예 돌지 않는다 — 그 가드가 문제가 되는 상황을 이 하네스로는 만들 수 없다. 증명 실패가 아니라 **도달 경로가 없는 이중 안전장치**라고 적는다.
 - **실행하지 않은 것**: 실서명·실게시 0회.
 - 제품/테스트/문서: 제품 **무변경**(`remote60_verify_release` 는 기존 타깃) / 자동화(`gnlink_release.sh`, `gnlink_path_probe.ps1` 신규, `gnlink_release_test.sh`) / 문서(이 항목, `구현계획.md` 배포 자동화 절).
+
+### 2026-09-23 C2 F1 r3 / release-script r6 — 통과하는 검사가 검사하는 것
+
+#### C2 F1 r3 (뷰어·셸)
+- 검수 조건 2건을 넣었다.
+- **취소 채널이 없어도 정상 접속한다**: `--cancel-event` 가 없거나, 값이 숫자가 아니거나, **이 프로세스가 가진 핸들이 아니면**(`GetHandleInformation` 으로 확인) 취소 채널 없이 그대로 연결한다. 로그 한 줄만 남기고 거부하지 않는다 — 구 셸과 수동 실행이 그 경우다. 커맨드라인의 숫자는 그냥 숫자라 아무나 12345 를 넘길 수 있고, 남의 핸들에 대고 기다리면 엉뚱한 것에 막히거나 엉뚱한 신호로 취소된다.
+- **핸들 누수 없음을 센다**: 교체 50회 + 종료 1회를 돌리고 `GetProcessHandleCount` 로 전후를 비교한다. ⚠️ 동등이 아니라 여유(+8)로 본다 — 이 프로세스 안에 WebView2 가 제 스레드로 돌고 있어 숫자가 이유 없이 움직인다. 50개가 새면 50으로 보이고, 두어 개 차이는 프로그램이 숨쉬는 것이다.
+- **방어하지 않는 것**을 코드에 적었다: 같은 사용자로 도는 프로세스가 셸에 대해 `PROCESS_DUP_HANDLE` 을 가지면 이 핸들을 복제해 신호할 수 있다. 그건 **위협 모델 밖**이다 — 같은 권한이면 `TerminateProcess` 로 뷰어를 죽일 수 있고 그게 더 나쁘며 핸들도 필요 없다. 예전 결함은 종류가 달랐다: **이름 있는 객체 + 기본 보안**은 아무 권한도 필요 없고 **공개된 pid 하나면** 됐다.
+- `viewer_cancel_e2e_test` **30/0**(+7).
+
+#### release-script r6 (회귀)
+- r5 에서 찾은 `$( ) 안의 die` 결함에 반례를 붙였다: `.claude` 를 junction 으로 만들어 lock 경로가 워크트리 밖으로 풀리게 하고, 그 실행이 **실제로 중단되는지**를 본다. 변이(`|| die` 제거) → **1 FAIL**(`...rather than continuing with an empty path`).
+- ⚠️ **그 반례를 붙이다가 내 검사 5개가 헛것이었다는 걸 찾았다.** `grep -qv PATTERN` 은 *"PATTERN 이 아닌 줄이 하나라도 있다"* 라서 거의 모든 출력에 대해 참이다. 내가 쓰려던 것은 *"PATTERN 인 줄이 없다"* = `! grep -q PATTERN` 이다. r4 에 2개, 이번에 3개 — 전부 **통과하지만 아무것도 묻지 않는 검사**였고, 잡혀야 할 변이가 통과해서 드러났다. 다섯 개 다 고쳤고, 그러고 나서야 변이가 잡힌다.
+- `automation/gnlink_release_test.sh` **119 PASS / 0 FAIL, exit 0**(이전 116).
+
+- 제품/테스트/문서: 제품(`viewer_cancel_channel.hpp`, `native_video_client_main.cpp`) / 테스트(`viewer_cancel_e2e_test.cpp`, `client_recovery_ui_test.cpp`, `automation/gnlink_release_test.sh`) / 문서(이 항목).
+- 실서명·실게시 0회.

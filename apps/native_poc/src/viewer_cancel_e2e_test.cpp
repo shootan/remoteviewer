@@ -103,8 +103,18 @@ struct SpawnedViewer {
   ~SpawnedViewer() { Stop(); }
 };
 
-bool StartViewer(SpawnedViewer* viewer, const std::string& directoryUrl,
-                 HANDLE cancel) {
+/** The launch, with whatever cancel argument the caller wants -- including none. */
+bool StartViewerRaw(SpawnedViewer* viewer, const std::string& directoryUrl,
+                    const std::wstring& cancelArg);
+
+bool StartViewer(SpawnedViewer* viewer, const std::string& directoryUrl, HANDLE cancel) {
+  return StartViewerRaw(viewer, directoryUrl,
+                        cancel ? L" --cancel-event " + viewer_cancel_handle_arg(cancel)
+                               : std::wstring());
+}
+
+bool StartViewerRaw(SpawnedViewer* viewer, const std::string& directoryUrl,
+                    const std::wstring& cancelArg) {
   const std::wstring exe = directory_of(self_path()) + L"GNLinkViewer.exe";
   if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
 
@@ -126,9 +136,9 @@ bool StartViewer(SpawnedViewer* viewer, const std::string& directoryUrl,
                      L" --directory-url " + url +
                      L" --directory-session test-session-token" +
                      L" --directory-host-id h-cancel";
-  // The handle by value, the way the shell passes it. bInheritHandles at the launch below is
-  // what makes the number mean anything in the child.
-  if (cancel) cmd += L" --cancel-event " + viewer_cancel_handle_arg(cancel);
+  // Whatever the caller asked for. bInheritHandles at the launch below is what makes a real
+  // handle value mean anything in the child.
+  cmd += cancelArg;
   std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
   mutableCmd.push_back(L'\0');
 
@@ -309,6 +319,40 @@ int main() {
     if (helloCancel) CloseHandle(helloCancel);
   }
 
+
+  // ============ a viewer with no usable cancel handle connects anyway, which is the old behaviour
+  //
+  // Three ways to get here and all of them ordinary: an older shell that does not pass the flag,
+  // a viewer started by hand, and a value that is not a handle this process holds. The digits on
+  // the command line are just digits -- nothing stops a caller passing 12345 -- so the viewer
+  // checks whether the handle is its own before waiting on it. What must NOT happen is a refusal
+  // to connect: that would turn a missing convenience into a broken session.
+  {
+    // A number that is a plausible handle and is not one of ours. Handles are multiples of four;
+    // this one is deliberately large enough to be unallocated.
+    SpawnedViewer bogus;
+    check("a viewer starts with a handle it does not own",
+          StartViewerRaw(&bogus, dir.url(), L" --cancel-event 4294967292"));
+    const bool reached = bogus.WaitFor("[native-video-client][attempt]", 20000);
+    check("...and still reaches the connect path", reached,
+          bogus.log().size() > 300 ? bogus.log().substr(bogus.log().size() - 300) : bogus.log());
+    check("...saying once that it cannot be called off",
+          bogus.log().find("cannot be called off") != std::string::npos);
+    check("...and not dying over it",
+          WaitForSingleObject(bogus.pi.hProcess, 200) == WAIT_TIMEOUT);
+    bogus.Stop();
+  }
+
+  {
+    // No flag at all: the older shell, and every hand-run.
+    SpawnedViewer plain;
+    check("a viewer starts with no cancel flag", StartViewerRaw(&plain, dir.url(), L""));
+    const bool reached = plain.WaitFor("[native-video-client][attempt]", 20000);
+    check("...and reaches the connect path just the same", reached);
+    check("...without complaining about a flag nobody passed",
+          plain.log().find("cannot be called off") == std::string::npos);
+    plain.Stop();
+  }
 
   std::printf("\n%s  (%d checks, %d failed)\n",
               gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED", gChecks, gFailures);

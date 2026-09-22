@@ -23,6 +23,13 @@
 // unnamed object has no name to open. The only way to it is a handle, and the only process given
 // one is the child the shell launched.
 //
+// What this does NOT defend against, said plainly so nobody reads more into it than is there:
+// a process running as the SAME USER that holds PROCESS_DUP_HANDLE on the shell can duplicate
+// this handle out and signal it. That is outside the threat model because the same right lets
+// it call TerminateProcess on the viewer, which is strictly worse and needs no handle at all.
+// The thing that was wrong before was different in kind: a NAMED object with default security
+// needs no rights over anybody -- only a pid, which is public.
+//
 // The handle travels as a number on the command line. That is not a secret and does not need to
 // be: a handle value means nothing in another process, and duplicating it out of this one
 // already requires the right to open the process.
@@ -54,12 +61,29 @@ inline std::wstring viewer_cancel_handle_arg(HANDLE event) {
   return std::to_wstring(reinterpret_cast<unsigned long long>(event));
 }
 
+/**
+ * The handle named on the command line, if it is one this process actually holds.
+ *
+ * Three ways this can be nothing, and all three are ordinary rather than exceptional:
+ * the flag is absent (an older shell, or the viewer started by hand), the value is not a
+ * number, or the number is not a handle in this process. The last one matters because the
+ * digits are just digits -- nothing stops a caller passing 12345 -- and waiting on a random
+ * handle value is how a viewer would block on something that is not its business, or be
+ * cancelled by whatever happened to be at that slot.
+ *
+ * GetHandleInformation is the cheap way to ask "is this mine". A viewer with no usable
+ * handle connects exactly as it did before any of this existed; it simply cannot be called
+ * off.
+ */
 inline HANDLE viewer_cancel_handle_from_arg(const std::wstring& text) {
   if (text.empty()) return nullptr;
   wchar_t* end = nullptr;
   const unsigned long long value = std::wcstoull(text.c_str(), &end, 10);
   if (!end || *end != L'\0' || value == 0) return nullptr;
-  return reinterpret_cast<HANDLE>(static_cast<uintptr_t>(value));
+  HANDLE handle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(value));
+  DWORD flags = 0;
+  if (!GetHandleInformation(handle, &flags)) return nullptr;
+  return handle;
 }
 
 /**

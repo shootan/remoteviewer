@@ -58,8 +58,11 @@ int main(int argc, char** argv) {
     cancelEvent = viewer_cancel_handle_from_arg(
         std::wstring(ctx.args.cancelEventHandle.begin(), ctx.args.cancelEventHandle.end()));
     if (!cancelEvent) {
-      std::cerr << "[native-video-client] the --cancel-event value is not a usable handle; "
-                << "this session cannot be called off" << std::endl;
+      // One line, and then on with the connection. A viewer that cannot be called off is
+      // the viewer this product shipped until now; refusing to connect over it would turn a
+      // missing convenience into a broken session.
+      std::cerr << "[native-video-client] --cancel-event is not a handle this process holds;"
+                << " connecting anyway, this session cannot be called off" << std::endl;
     }
   }
   (void)viewer_start_cancel_watcher(cancelEvent, &ctx.connectCancelled,

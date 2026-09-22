@@ -517,7 +517,7 @@ check $? "...and says why, in those words"
 # At argument time, which is before the preflight banner is printed -- so the ABSENCE of that
 # banner is the evidence. The first version of this check asserted the opposite and failed a
 # script that was refusing exactly when it should.
-printf '%s' "$OUT" | grep -qv '1. preflight'
+! printf '%s' "$OUT" | grep -q '1. preflight'
 check $? "...at argument time, before the preflight even starts"
 
 printf '\n=== nothing is deleted, in any mode\n'
@@ -849,6 +849,47 @@ BLOCKED=$(cat "$TMP/race-a.log" "$TMP/race-b.log" | grep -ci 'another release is
 [ "$BLOCKED" -ge 1 ]
 check $? "two runs in one worktree: at least one is turned away" "$BLOCKED turned away"
 
+printf '\n=== a refusal inside a substitution still stops the run\n'
+# `die` called inside $( ) kills the SUBSHELL. The caller carries on with an empty string, and
+# the empty string becomes `mkdir ""` -- which failed, and reported a lock held at "()" . Found
+# because four different mutations produced identical results, which is a harness telling you it
+# is not measuring anything.
+#
+# The lock path is where it showed, so that is where it is pinned: a lock directory the boundary
+# check refuses must stop the run, not hand back nothing and continue.
+SUBWT2="$TMP/subshellwt"
+make_worktree "$SUBWT2" "0.2.134"
+mkdir -p "$SUBWT2/third_party/webview2/build/native"
+printf 'stub\n' > "$SUBWT2/third_party/webview2/build/native/WebView2Loader.dll"
+
+# A junction at .claude, so the lock path resolves outside the worktree and the check refuses it.
+mkdir -p "$TMP/elsewhere-claude"
+JUNCTION_OK=0
+if powershell.exe -NoProfile -NonInteractive -Command \
+     "New-Item -ItemType Junction -Path '$(cygpath -w "$SUBWT2")\.claude' -Target '$(cygpath -w "$TMP/elsewhere-claude")' | Out-Null" >/dev/null 2>&1; then
+  JUNCTION_OK=1
+fi
+
+if [ "$JUNCTION_OK" = "1" ]; then
+  OUT="$(GNLINK_CMAKE=/usr/bin/true bash "$RELEASE_SH" \
+          --worktree "$SUBWT2" --version 0.2.134 2>&1 || true)"
+  printf '%s' "$OUT" | grep -qi 'refusing to take the lock\|refusing to use the lock'
+  check $? "a lock path the boundary check refuses stops the run" \
+    "$(printf '%s' "$OUT" | tail -1)"
+
+  # The symptom of the bug, which must not come back: an empty path reported as a held lock.
+  ! printf '%s' "$OUT" | grep -q 'another release is running in this worktree ()'
+  check $? "...rather than continuing with an empty path"
+
+  ! printf '%s' "$OUT" | grep -q '2. configure'
+  check $? "...and never reaches the build"
+
+  powershell.exe -NoProfile -NonInteractive -Command \
+    "Remove-Item -LiteralPath '$(cygpath -w "$SUBWT2")\.claude' -Force" >/dev/null 2>&1
+else
+  printf 'SKIP  subshell refusal check (could not create a junction here)\n'
+fi
+
 printf '\n=== the lock belongs to whoever took it\n'
 LOCKWT="$TMP/lockwt"
 make_worktree "$LOCKWT" "0.2.134"
@@ -898,7 +939,7 @@ for seam in "${SEAMS[@]}"; do
   check $? "...saying which gate refused it"
 
   # Before the preflight banner: nothing was read, nothing was entered, no key was looked for.
-  printf '%s' "$out" | grep -qv '1. preflight'
+  ! printf '%s' "$out" | grep -q '1. preflight'
   check $? "...at argument time, before anything is read"
 
   out="$(sub_run "$seam" --sign --deploy)"; rc=$?
@@ -920,7 +961,7 @@ check $? "...and is still told, loudly, what it is running with"
 # The operational key is never consulted on the refused path. Pointed at a directory that does
 # not exist: if the run had reached stage 8 it would say so in its own words, and it does not.
 out="$(sub_run "GNLINK_SIGN_KEYDIR=$TMP/definitely-not-a-keydir" --sign)"
-printf '%s' "$out" | grep -qv 'no signing key at'
+! printf '%s' "$out" | grep -q 'no signing key at'
 check $? "a refused --sign never gets as far as looking for a key"
 
 printf '\n=== the script does not bump versions\n'

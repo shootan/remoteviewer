@@ -118,6 +118,47 @@ int main(int argc, char** argv) {
     recovery_check(recovery_dom(L"!document.getElementById('cancelReconnect').classList.contains('hidden')"), "reconnect cancel control is visible");
     recovery_eval(L"document.getElementById('cancelReconnect').click();true");
     recovery_check(recovery_wait([&] { return !gReconnectRequest; }), "DOM reconnect cancel reaches native cancellation");
+    // ---------------------------------------------- the cancel handles do not pile up
+    //
+    // The shell holds one event handle per host and closes it on two paths: when the viewer is
+    // replaced, and when it exits. Two paths means two chances to forget, and a handle leak is
+    // invisible until a long-running shell runs out -- so this counts them rather than trusting
+    // the reading.
+    //
+    // Replacement is the interesting one: it happens whenever the user picks the same PC again,
+    // which for a flaky connection is a thing they do repeatedly.
+    {
+      DWORD before = 0;
+      GetProcessHandleCount(GetCurrentProcess(), &before);
+
+      ShellConnectRequest host{};
+      host.hostId = "leak-host";
+      for (int i = 0; i < 50; ++i) {
+        // What begin_session does: create the event, record it, and on the next round replace
+        // the record -- which has to close the one it displaces.
+        HANDLE event = remote60::native_poc::viewer::viewer_create_cancel_event();
+        const auto previous = gViewerByHost.find(host.hostId);
+        if (previous != gViewerByHost.end()) {
+          if (previous->second.cancelEvent) CloseHandle(previous->second.cancelEvent);
+          gViewerByHost.erase(previous);
+        }
+        gViewerByHost[host.hostId] = ViewerCancelSlot{static_cast<DWORD>(1000 + i), event};
+      }
+      // And the last one leaves by the exit path instead.
+      handle_viewer_exit(host, gViewerOperation, gOwnerEpoch.load(), WAIT_OBJECT_0, 0, 1000,
+                         static_cast<DWORD>(1000 + 49));
+
+      DWORD after = 0;
+      GetProcessHandleCount(GetCurrentProcess(), &after);
+      recovery_check(gViewerByHost.find(host.hostId) == gViewerByHost.end(),
+                     "the viewer's exit forgets its cancel handle");
+      // Not equality: this process has a WebView2 in it, doing its own work on its own threads,
+      // so the count moves for reasons that have nothing to do with this. Fifty replacements
+      // leaking would show as fifty; a few either way is the rest of the program breathing.
+      recovery_check(after <= before + 8,
+                     "fifty replacements do not pile up handles");
+    }
+
     gViewerOperation = 100;
     const uint64_t currentOwner = gOwnerEpoch.load();
     const ShellConnectRequest olderViewer{};
