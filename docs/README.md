@@ -8,6 +8,7 @@
 
 ## Layout
 - Active docs live directly under `docs/`:
+  - `performance_review_2026-09-22.md` — 0.2.134 main 기준 Host/PC/Android/서버 성능 후보 24개와 검증 계획; `performance_inventory_2026-09-22.csv`는 조사 범위·파일 해시.
   - `작업목록.md` — the remaining work, priority-ordered (verification waits / code / deploy decisions / record debt / backlog).
   - `구현계획.md` — per-item detail and checkboxes. Large; read the section you need.
   - `history.md` — running work log (append only).
