@@ -12367,3 +12367,15 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 검증: `client_recovery_ui_test` **ALL PASS**(+8 단언) · 전량 빌드 0 에러 · `viewer_cancel_e2e` 30/0 · `directory_retry` 122/0 · `picker_empty_state` 24/0.
 - 제품/테스트/문서: 제품(`client_shell_main.cpp`, `viewer_cancel_channel.hpp`, `native_video_client_main.cpp`) / 테스트(`client_recovery_ui_test.cpp`) / 문서(이 항목, `구현계획.md` C2 F1 절).
 - 설치본·게시 없음.
+
+### 2026-09-23 C2 F1 r4b — 답이 없으면 아니오, 그리고 시작한 일은 끝내고 넘어간다
+
+- **fail-open 2경로**: r4 의 조건을 "**살아 있음이 확인될 때만** 거부" 로 적었다. 그래서 `asked=0` 이면서 ① 핸들 복제가 실패해 `process == nullptr` 이거나 ② `WaitForSingleObject` 가 `WAIT_FAILED` 를 돌려주면 **그냥 교체**했다 — Codex 가 금지한 "asked=0 인데 로그만 남기고 교체" 가 정확히 그 두 경로에 남아 있었다.
+  고침: 진행 조건을 **"죽었음이 확인됐을 때"**(`WAIT_OBJECT_0`)로 뒤집었다. 로그 사유도 `uncancellable`(확실히 살아 있음)과 `liveness-unknown`(물을 수 없음)으로 나눈다 — 읽는 사람에게 다른 이야기다. 핸들 복제 실패 로그도 "그 뷰어가 끝날 때까지 교체는 거부된다" 로 맞췄다.
+  케이스 추가: 슬롯에 liveness 핸들이 없는 채로 `asked=0` → **거부·기동 0·슬롯 유지**. 변이(조건을 r4 로 되돌림) → **2 FAIL**.
+- **간헐 실패, 내 테스트 격리 결함**: `older viewer exit still updates the live-session count` 가 **8회 중 4회** 깨졌다(검수자 측정). 원인은 제품이 아니라 케이스 ③ 이었다 — 거기서 띄운 **실제 뷰어**의 종료를 셸 worker 가 비동기로 UI 에 올리는데, 테스트는 map 만 손으로 지우고 다음 섹션으로 가 버렸다. 그 adoption 이 legacy 섹션 한가운데 도착해 `post_status` 가 hostsMsg 를 덮었다.
+  고침: 손으로 지우지 않는다. **셸이 그 종료를 adoption 할 때까지**(map 에서 사라지고 `gActiveViewers` 가 되돌아올 때까지) 메시지 펌프를 돌리며 ≤5s 유계 대기한다. 덤으로 "실제 배선을 끝까지 몬다" 는 주장도 이제 **종료 경로까지** 참이다 — 진짜 `handle_viewer_exit` 가 지운다.
+  ⚠️ 내가 만든 flakiness 였고, 남이 8회를 돌려서 찾아 줬다. 1회 통과로 닫으면 안 되는 종류다.
+- 검증: `client_recovery_ui_test` **10회 연속 ALL PASS (0 fail)** · 전량 빌드 0 에러 · `viewer_cancel_e2e` 30/0 · `directory_retry` 122/0 · `picker_empty_state` 24/0 · 남은 GNLinkViewer **0**.
+- 제품/테스트/문서: 제품(`client_shell_main.cpp`) / 테스트(`client_recovery_ui_test.cpp`) / 문서(이 항목, `구현계획.md` C2 F1 절).
+- 설치본·게시 없음.

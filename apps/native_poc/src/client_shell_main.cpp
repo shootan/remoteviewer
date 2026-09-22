@@ -980,10 +980,21 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
       //
       // NOT TerminateProcess. That right is not needed here and killing a viewer that may have a
       // established session is a worse outcome than declining to start a second one.
-      if (!asked && previous->second.process &&
-          WaitForSingleObject(previous->second.process, 0) == WAIT_TIMEOUT) {
+      // The test is "has it been confirmed DEAD", not "has it been confirmed alive". Written
+      // the other way round it fails open twice: a slot whose process handle could not be
+      // duplicated has process == nullptr, and a wait that returns WAIT_FAILED says nothing
+      // either -- and both of those went on to replace an uncancellable viewer, which is the
+      // case this whole branch exists to prevent.
+      const DWORD liveness = previous->second.process
+                                 ? WaitForSingleObject(previous->second.process, 0)
+                                 : WAIT_FAILED;
+      const bool confirmedDead = liveness == WAIT_OBJECT_0;
+      if (!asked && !confirmedDead) {
+        // Told apart because they mean different things to whoever reads the log: one viewer
+        // is definitely still there, the other cannot be asked about at all.
+        const char* why = (liveness == WAIT_TIMEOUT) ? "uncancellable" : "liveness-unknown";
         log_line(std::string("replacement refused pid=") +
-                 std::to_string(previous->second.pid) + " reason=uncancellable");
+                 std::to_string(previous->second.pid) + " reason=" + why);
         post_status("error",
                     "이 PC 에 이미 연결 중인 세션이 있어 새로 시작할 수 없습니다. "
                     "기존 창을 닫아 주세요.");
@@ -1213,8 +1224,8 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
   if (!DuplicateHandle(GetCurrentProcess(), pi.hProcess, GetCurrentProcess(), &liveness,
                        SYNCHRONIZE, FALSE, 0)) {
     liveness = nullptr;
-    log_line("could not duplicate the viewer process handle; a replacement will not be able "
-             "to tell whether this one is still running");
+    log_line("could not duplicate the viewer process handle; whether this viewer is still "
+             "running cannot be asked, so replacing it will be refused until it ends");
   }
   gViewerByHost[request.hostId] = ViewerCancelSlot{pi.dwProcessId, cancelEvent, liveness};
   cancelEvent = nullptr;  // the map owns it now

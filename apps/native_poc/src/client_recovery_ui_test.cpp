@@ -262,6 +262,27 @@ int main(int argc, char** argv) {
       // ...but once that process is gone, the same uncancellable slot must not block forever.
       TerminateProcess(older.hProcess, 0);           // the stand-in, not a product process
       WaitForSingleObject(older.hProcess, 5000);
+      // (2b) Liveness that cannot be established at all. DuplicateHandle can fail at launch,
+      // and then the slot has no process handle -- so "is it still running" has no answer.
+      // With the test written as "refuse if confirmed alive" that fell through to replacing,
+      // which is the same fail-open the whole branch exists to close. No answer must mean no.
+      {
+        PROCESS_INFORMATION ghost{};
+        recovery_check(liveProcess(&ghost), "another stand-in is running");
+        const uint32_t before = gActiveViewers.load();
+        gViewerByHost[req.hostId] = ViewerCancelSlot{ghost.dwProcessId, nullptr, nullptr};
+        begin_session(req);
+        recovery_check(gActiveViewers.load() == before,
+                       "a slot with no liveness handle refuses the replacement too");
+        recovery_check(gViewerByHost.find(req.hostId) != gViewerByHost.end(),
+                       "...and keeps its slot");
+        gViewerByHost.erase(req.hostId);
+        TerminateProcess(ghost.hProcess, 0);
+        WaitForSingleObject(ghost.hProcess, 5000);
+        CloseHandle(ghost.hProcess);
+        CloseHandle(ghost.hThread);
+      }
+
       // (3) The other half of the same rule, and the one that matters for not wedging the UI: an
       // uncancellable slot whose process has ALREADY GONE must not block the next session
       // forever. begin_session has to look, find it dead, and carry on.
@@ -297,14 +318,20 @@ int main(int argc, char** argv) {
         }
       }
 
-      // Clean up what this case put in the map by hand.
-      {
-        const auto leftover = gViewerByHost.find(req.hostId);
-        if (leftover != gViewerByHost.end()) {
-          if (leftover->second.process) CloseHandle(leftover->second.process);
-          gViewerByHost.erase(leftover);
-        }
-      }
+      // Wait for the shell to ADOPT that exit rather than tidying the map by hand.
+      //
+      // Two reasons. The exit path is part of the wiring this case claims to drive, and
+      // erasing the entry ourselves skips the real handle_viewer_exit. And it was leaking
+      // into the next section: the worker thread notices the viewer has gone and posts to
+      // the UI thread, which calls post_status and overwrites hostsMsg -- landing in the
+      // middle of the legacy checks below and breaking "older viewer exit still updates the
+      // live-session count" in four runs out of eight. The product was fine; this case was
+      // walking away from an event it had started.
+      const bool adopted = recovery_wait([&] {
+        return gViewerByHost.find(req.hostId) == gViewerByHost.end() &&
+               gActiveViewers.load() == beforeDead;
+      }, 5000);
+      recovery_check(adopted, "the shell adopts the viewer's exit on its own");
     }
 
     gViewerOperation = 100;
