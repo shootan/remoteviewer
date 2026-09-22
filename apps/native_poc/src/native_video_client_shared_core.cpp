@@ -1283,6 +1283,11 @@ void WindowPanelStateModel::SetStatus(const std::string& status) {
   state_.status = status;
 }
 
+void WindowPanelStateModel::SetDisplayStatus(const std::string& displayStatus) {
+  std::lock_guard<std::mutex> lk(mu_);
+  state_.displayStatus = displayStatus;
+}
+
 WindowListApplyResult WindowPanelStateModel::ApplyWindowList(const ControlWindowListMessage& msg, int visibleCount) {
   WindowListApplyResult result{};
   std::lock_guard<std::mutex> lk(mu_);

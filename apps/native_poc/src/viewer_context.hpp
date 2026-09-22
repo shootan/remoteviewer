@@ -48,6 +48,32 @@ struct ViewerContext : ViewerState {
   std::thread recvThread;
   std::atomic<bool> uiWatchdogStop{false};
   std::thread uiWatchdog;
+
+  /**
+   * Which connect attempt this is, and whether it has been called off.
+   *
+   * Neither existed. Every other generation counter in this viewer fences something INSIDE an
+   * established session -- IME responses, selection frames, cursor samples -- and none of them
+   * says anything about a connect. Cancellation did not reach the connect path either: the
+   * hello handshake takes a stop pointer and this viewer passed nullptr, and Observe/PunchAny
+   * had no such parameter at all.
+   *
+   * What that cost: the shell starts a NEW GNLinkViewer when the user picks another PC, and
+   * never closes the old one. The old process kept punching for four seconds and saying hello
+   * for ten, and could still establish a session afterwards -- against a host that had moved
+   * on to the new one.
+   *
+   * `connectCancelled` is what the handshake, Observe and PunchAny are given as their stop.
+   * `connectGeneration` fences a result that arrives after a cancel: the attempt records the
+   * generation it started under and drops anything it is handed under a different one.
+   */
+  std::atomic<uint32_t> connectGeneration{0};
+  std::atomic<bool> connectCancelled{false};
+  // Set when the cancel came from outside (the shell replacing this viewer), so the failure
+  // path can say that rather than "the host did not answer", which is what it looked like.
+  std::atomic<bool> connectCancelledByOwner{false};
+  std::thread cancelWatcher;
+  std::atomic<bool> cancelWatcherStop{false};
 };
 
 }  // namespace remote60::native_poc::viewer

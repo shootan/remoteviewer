@@ -572,6 +572,14 @@ class WindowPanelStateModel {
   bool TakeMonitorSelectRequest(uint32_t* outMonitorId);
   void ApplyMonitorList(const ControlMonitorListMessage& msg);
   void SetStatus(const std::string& status);
+  /**
+   * The line the user reads, as opposed to the token a test matches.
+   *
+   * The field has existed since the panel was written and nothing ever wrote it -- the drawing
+   * code falls back to the token when it is empty, which is why nobody noticed. The connect
+   * path needs it: "호스트 응답 대기 중" is not a state anything else can infer.
+   */
+  void SetDisplayStatus(const std::string& displayStatus);
   WindowListApplyResult ApplyWindowList(const ControlWindowListMessage& msg, int visibleCount);
   WindowSelectApplyResult ApplyWindowSelected(const ControlWindowSelectedMessage& msg);
   void Scroll(int deltaSteps, int visibleCount);

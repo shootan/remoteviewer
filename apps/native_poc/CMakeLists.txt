@@ -693,6 +693,19 @@ if(MSVC)
 endif()
 add_dependencies(remote60_host_punch_reply_e2e_test remote60_native_video_host_poc)
 
+# Calling off a viewer that is already connecting, the way the shell does it. A real
+# GNLinkViewer against a scripted fake directory, cancelled with the same function the shell
+# calls, measured on how long it takes to stop and checked on why it says it stopped.
+add_executable(remote60_viewer_cancel_e2e_test
+  src/viewer_cancel_e2e_test.cpp
+)
+target_include_directories(remote60_viewer_cancel_e2e_test PRIVATE src)
+target_link_libraries(remote60_viewer_cancel_e2e_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_viewer_cancel_e2e_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_viewer_cancel_e2e_test remote60_native_video_client_poc)
+
 # The dispatcher itself. Runs the real GNLinkStream on isolated ports with a GNLinkCapture that
 # never answers, connects to its real control port, and measures whether the channel still replies
 # while a preview is timing out -- which is the thing that failed on 2026-09-15.
@@ -1449,10 +1462,17 @@ endif()
 
 # The picker's empty-state decision, tested as a table with a negative control. Header-only logic:
 # no window, no GDI, and no /utf-8 needed because it holds no Korean.
+# The panel model comes along now: the connect status line is part of what this file pins, and
+# a field with no writer was how it went unnoticed that nothing ever set it.
 add_executable(remote60_picker_empty_state_test
   src/picker_empty_state_test.cpp
+  src/native_video_client_shared_core.cpp
 )
 target_include_directories(remote60_picker_empty_state_test PRIVATE src)
+target_link_libraries(remote60_picker_empty_state_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_picker_empty_state_test PRIVATE /utf-8)
+endif()
 
 add_executable(remote60_viewer_layout_test
   src/viewer_layout_test.cpp

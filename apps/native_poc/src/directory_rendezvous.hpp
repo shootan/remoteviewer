@@ -11,6 +11,7 @@
 // The HTTP half of the exchange lives in the app: only these two steps need the socket.
 
 #include <cstdint>
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -36,8 +37,16 @@ class DirectoryRendezvous {
    * Opens the media socket and asks the directory what address it presents to the outside.
    * outObserved receives "ip:port" on success. Any previously opened socket is discarded.
    */
+  /**
+   * `stop` is checked between attempts. Optional and defaulted, so existing callers are
+   * unchanged: the two that matter are the viewer, which now has something to cancel with,
+   * and the tests, which do not. Without it these loops run their full budget -- six waits of
+   * 300ms here, four seconds in PunchAny -- and a viewer the user has already replaced spends
+   * all of it before it can notice.
+   */
   bool Observe(const std::string& directoryHost, int directoryUdpPort,
-               const std::string& observeToken, std::string* outObserved, std::string* outError);
+               const std::string& observeToken, std::string* outObserved,
+               std::string* outError, const std::atomic<bool>* stop = nullptr);
 
   /**
    * Sends punch packets at the host until it answers or the budget runs out.
@@ -62,7 +71,8 @@ class DirectoryRendezvous {
    * for the full budget.
    */
   bool PunchAny(const std::vector<RendezvousCandidate>& candidates, uint32_t budgetMs,
-                RendezvousCandidate* outChosen, std::string* outError);
+                RendezvousCandidate* outChosen, std::string* outError,
+                const std::atomic<bool>* stop = nullptr);
 
   /** Hands the socket to the caller, which becomes responsible for closing it. */
   SocketHandle Release();

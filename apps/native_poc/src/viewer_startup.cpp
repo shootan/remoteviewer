@@ -6,6 +6,8 @@
 #include <windowsx.h>
 #include "viewer_gdi_util.hpp"
 #include "viewer_startup.hpp"
+
+#include "viewer_cancel_channel.hpp"
 #include "bounded_process_exit.hpp"
 #include "viewer_udp_session.hpp"
 
@@ -357,9 +359,23 @@ int open_media_socket(ViewerContext& ctx) {
     request.sessionToken = sessionToken;
     request.hostId = hostId;
     request.advertised = advertised;
+    // Six seconds of this call is spent waiting -- observe attempts and then the punch --
+    // and until this it could not be called off at all.
+    request.stop = &ctx.connectCancelled;
     remote60::native_poc::DirectorySessionResult session{};
     if (!remote60::native_poc::directory_session_open(request, &session, &directoryError)) {
+      // A cancel ends the attempt here now too -- a punch that was called off no longer
+      // falls through to "trying anyway" -- so this is one of the places that has to say
+      // which of the two happened. "directory connect failed" on its own reads as the
+      // directory being at fault, and it was not.
+      if (ctx.connectCancelled.load(std::memory_order_acquire)) {
+        std::cerr << "[native-video-client] connect cancelled"
+                  << (ctx.connectCancelledByOwner.load(std::memory_order_acquire)
+                          ? " by the shell (a newer session started)" : "")
+                  << " during the directory step\n";
+      } else {
       std::cerr << "[native-video-client] directory connect failed: " << directoryError << "\n";
+      }
       if (ctx.dec.mfStarted) MFShutdown();
       return 3;
     }
@@ -520,6 +536,40 @@ bool show_startup_failure(ViewerContext& ctx, const std::string& reason) {
   return retry;
 }
 
+namespace {
+
+/**
+ * Draws one line into the session window while connect is still running.
+ *
+ * Straight to a device context, the way show_startup_failure does, because there is no message
+ * pump yet -- run_message_pump starts after all of this. A WM_PAINT posted here would be handled
+ * some time after the thing it was meant to describe had finished.
+ *
+ * Deliberately one line and no layout: this is a status, not a screen. Empty text clears it.
+ */
+void paint_connect_status(ViewerContext& ctx, const std::string& text) {
+  HWND hwnd = ctx.session.hwnd;
+  if (!hwnd) return;
+  HDC hdc = GetDC(hwnd);
+  if (!hdc) return;
+  RECT client{};
+  GetClientRect(hwnd, &client);
+  HBRUSH back = CreateSolidBrush(RGB(15, 19, 25));
+  FillRect(hdc, &client, back);
+  DeleteObject(back);
+  if (!text.empty()) {
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, RGB(232, 234, 237));
+    RECT line = client;
+    line.top = client.top + (client.bottom - client.top) / 2 - 16;
+    line.bottom = line.top + 32;
+    draw_text_utf8(ctx, hdc, text, &line, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+  }
+  ReleaseDC(hwnd, hdc);
+}
+
+}  // namespace
+
 int connect_media_socket(ViewerContext& ctx) {
   if (ctx.dec.transport == VideoTransport::Tcp) {
     int noDelay = 1;
@@ -575,12 +625,24 @@ int connect_media_socket(ViewerContext& ctx) {
         viewer_udp_hello_options(ctx.directoryPunchToken, ctx.videoNackEnabled);
     uint32_t ackFeatures = 0;
     std::string helloError;
+
+    // The attempt this is. Anything that comes back under a different one is somebody else's.
+    const uint32_t attemptGeneration = ctx.connectGeneration.load(std::memory_order_acquire);
+
+    // Thirty seconds is a long time to show nothing. The token is the contract string a test
+    // matches; the display line is what the user reads.
+    ctx.picker.windowPanel.SetStatus("host_wait");
+    ctx.picker.windowPanel.SetDisplayStatus("호스트 응답 대기 중…");
+    paint_connect_status(ctx, "호스트 응답 대기 중…");
     // pc2-connect-diag: how many hellos went out and what ended it. "udp hello ack failed"
     // was the whole of it, and it reads the same whether one hello was sent or forty, whether
     // the budget ran out or a send failed on the first try.
     remote60::native_poc::UdpHelloStats helloStats;
+    // The stop this viewer never passed. Without it the handshake ran its whole budget --
+    // now thirty seconds -- after the shell had already started a different session.
     const bool handshakeOk = remote60::native_poc::udp_hello_handshake(
-        ctx.session.sock, hello, nullptr, &helloError, &ackFeatures, &helloStats);
+        ctx.session.sock, hello, &ctx.connectCancelled, &helloError, &ackFeatures,
+        &helloStats);
     std::cout << "[native-video-client][attempt] hello ok=" << (handshakeOk ? 1 : 0)
               << " attempts=" << helloStats.attempts << " badAcks=" << helloStats.badAcks
               << " ms=" << helloStats.elapsedMs
@@ -593,6 +655,32 @@ int connect_media_socket(ViewerContext& ctx) {
     // the keyframe recovery deadline, the control tunnel's retransmits -- and the direct path used
     // to block forever, which left a lost chunk on a static screen unrepaired until the next frame.
     (void)viewer_arm_udp_recv_timeout(ctx.session.sock, ctx.udpRecvTimeoutMs);
+
+    // Cleared on every way out of the wait -- success, cancel, failure -- so the line never
+    // outlives the thing it describes.
+    ctx.picker.windowPanel.SetDisplayStatus(std::string());
+    paint_connect_status(ctx, std::string());
+
+    // A result from a superseded attempt. The generation moves when this viewer is called off
+    // and told to start again; a HelloAck that lands after that belongs to a capability the
+    // host has already replaced, and acting on it would bind a session nobody asked for.
+    if (ctx.connectGeneration.load(std::memory_order_acquire) != attemptGeneration) {
+      std::cerr << "[native-video-client] discarding a hello result from a superseded attempt\n";
+      closesocket(ctx.session.sock);
+      ctx.session.sock = INVALID_SOCKET;
+      return 7;
+    }
+    if (ctx.connectCancelled.load(std::memory_order_acquire)) {
+      // Said as itself. It used to read as "udp hello ack failed", which is what a host that
+      // never answered looks like, and the two are not the same fault.
+      std::cerr << "[native-video-client] connect cancelled"
+                << (ctx.connectCancelledByOwner.load(std::memory_order_acquire)
+                        ? " by the shell (a newer session started)" : "")
+                << "\n";
+      closesocket(ctx.session.sock);
+      ctx.session.sock = INVALID_SOCKET;
+      return 7;
+    }
     if (!handshakeOk) {
       std::cerr << "[native-video-client] udp handshake failed " << ctx.resolvedArgs.host << ":"
                 << ctx.resolvedArgs.port << " (" << helloError << ")\n";

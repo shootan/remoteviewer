@@ -12257,3 +12257,22 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 검증: `automation/gnlink_release_test.sh` **101 PASS / 0 FAIL, exit 0**(이전 78).
 - 제품/테스트/문서: 제품 **무변경** / 자동화(`gnlink_release.sh`, `gnlink_release_test.sh`) / 문서(이 항목, `구현계획.md` 배포 자동화 절).
 - 실서명·실게시 0회.
+
+### 2026-09-22 C2 F1 — 서른 초를 기다리게 하려면 먼저 그만둘 수 있어야 했다
+
+- Hello 예산을 10s→30s 로 올리는 것이 이 일의 표면이고, **UX 상한이지 원인 수정이 아니다**. 30 은 편한 숫자가 아니라 capability 의 수명이다 — 서버 `PUNCH_TTL_MS` 30s, 호스트 `authorizedPeers_` 30s. 그 너머로 기다리면 **거부될 것만 재전송**하게 된다.
+- 그래서 오래 기다리려면 **그만둘 수 있어야** 했다. 그런데 없었다: 뷰어에 connect 세대 필드가 없었고(있는 세대는 전부 성립한 세션 내부용), `udp_hello_handshake` 의 stop 에 뷰어는 `nullptr` 을 넘겼으며, `Observe`/`PunchAny` 는 stop 인자 자체가 없었다. **connect 의 5.8초가 통째로 중단 불가**였다. 지시서의 "기존 세대 필드 재사용" 전제는 그래서 성립하지 않았고, 발주자가 철회했다.
+- **셸은 구 뷰어를 종료하지 않는다**(추측 아님: `begin_session` 은 카운터만 올리고 spawn 하며, 프로세스 핸들은 종료 감시 람다 안에만 있고, 파일 전체에 `TerminateProcess`·`WM_CLOSE` 가 0건이다). 그래서 사용자가 다른 PC 를 고르면 **옛 뷰어가 계속 펀치하고 hello 를 보내다가 뒤늦게 세션을 성립시킬 수 있었다** — 호스트는 이미 새 capability 를 받은 뒤인데.
+- 취소 경로는 **프로세스별 named event** 로 만들었다. ⚠️ **WM_CLOSE 가 아닌 이유**: connect 중에는 메시지 펌프가 없어서 WM_CLOSE 가 **차단하려는 바로 그 시간만큼 큐에 앉아 있는다.** 이벤트는 돌고 있는 스레드가 읽는다.
+- 실측: 펀치 중 취소 **81~102ms**, hello 중 취소 **59~95ms**, 세션 미성립. 예전이라면 최악 **34초**. Observe 취소 **0ms**, PunchAny 취소 **455ms**, **stop 을 안 넘기는 기존 호출자는 예산을 그대로 다 쓴다**(754ms/700ms = 기본 동작 불변).
+- **내 결함 5건, 전부 무언가가 잡아냈다**:
+  ① 취소 이벤트를 종료할 때 `SetEvent` 로 깨웠더니 **신호된 이벤트가 남았고**, 이름이 PID 기반이라 PID 가 재사용되면 다음 뷰어가 시작하자마자 자기를 취소했다(신호하지 않도록 고치고, 기존 이름을 열었으면 `ResetEvent`).
+  ② 취소된 PunchAny 뒤에도 부트스트랩이 "trying anyway" 로 폴백해 **없어진 시도를 대신해 hello 를 보냈다**. 그 폴백의 근거(NAT 이 펀치를 버리고 hello 는 통과시킨다)는 취소에는 해당하지 않는다.
+  ③ 취소에 **hello 실패와 같은 종료 코드 6** 을 썼다. 취소와 실패가 코드로 구별되지 않으면 안 된다 → 취소는 7.
+  ④ e2e 가 처음엔 **펀치 구간에서만** 취소해서, hello 의 stop 을 `nullptr` 로 되돌리는 변이가 통과했다. 펀치가 끝난 것을 로그로 확인한 뒤 취소하는 2단계를 넣고서야 잡힌다.
+  ⑤ 캡처 하네스 2건: `$args` 는 PowerShell **자동 변수**라 인자가 전달되지 않았고, `PrintWindow` 는 창에 **메시지를 보내는** 방식이라 펌프 없는 connect 중에는 블록됐다가 **끝난 뒤 화면을 찍었다**(창 DC 직접 복사로 교체).
+- 변이 2건 각각 잡힘: hello 의 stop 제거 → e2e **4 FAIL**("still running after 5s") · `Observe`/`PunchAny` 가 stop 을 무시 → `directory_retry_test` **3 FAIL**(4072ms/4000ms).
+- 제품 창 스크린샷 3장(`.claude/ui-shots-c2/`). ⚠️ `3-cancelled.png` 은 **취소가 새 화면을 그리지 않기** 때문에 대기 문구가 그대로 보이는 마지막 프레임이다 — 취소의 증거는 그림이 아니라 **창이 100ms 안에 사라진다는 것**이고 그건 e2e 가 잰다. 그렇게 적는다.
+- 검증: 전량 빌드 0 에러 · `viewer_cancel_e2e` **20/0** · `directory_retry` **122/0** · `picker_empty_state` **24/0** · `punch_reply` 55/0 · `host_punch_reply_e2e` 40/0 · `control_resume` 48/0 · `udp_control_channel` 12/0 · `node apps/directory/test/run.js` ALL PASS.
+- `.gitattributes` 에 `apps/directory/deploy/*.patch text eol=lf` — 검수에서 나온 결함으로, autocrlf 체크아웃이 CRLF 로 만들어 서버에서 `patch` 가 **4/4 hunk 실패**한다. 기존 patch 3건 포함해 정규화했고, LF 상태에서 배포본 base 에 재적용해 `69451c90…` 이 재현되는 것을 확인했다.
+- 제품/테스트/문서: 제품(`viewer_cancel_channel.hpp` 신규, `viewer_context.hpp`, `viewer_udp_session.hpp`, `viewer_startup.cpp`, `native_video_client_main.cpp`, `directory_rendezvous.{hpp,cpp}`, `directory_session_bootstrap.{hpp,cpp}`, `native_video_client_shared_core.{hpp,cpp}`, `client_shell_main.cpp`) / 테스트(`viewer_cancel_e2e_test.cpp` 신규, `directory_retry_test.cpp`, `picker_empty_state_test.cpp`, `client_recovery_ui_test.cpp`, CMakeLists) / 자동화(`gnlink_viewer_connect_shots.ps1`, `gnlink_fake_directory.js` 신규) / 문서(이 항목, `구현계획.md` C2 F1 절, `.gitattributes`).

@@ -1,2 +1,7 @@
 # Signatures and hashes cover exact bytes, including line endings, on every worktree.
 apps/shared/update_manifest/** -text
+# Deploy patches are applied on the Linux server with `patch -p0`, against files that are LF
+# there. Checked out on Windows under autocrlf they become CRLF, and then every hunk fails --
+# 4 of 4 on the wake-resend patch, found in review before it reached the server. The bytes in
+# these files ARE the payload, so they are pinned rather than translated.
+apps/directory/deploy/*.patch text eol=lf

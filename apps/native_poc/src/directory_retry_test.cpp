@@ -812,6 +812,90 @@ int main() {
     harness.Stop();
   }
 
+  // ================== the connect loops can be called off, which they could not be before
+  //
+  // Observe waits six times for 300ms and PunchAny punches for four seconds, and neither took a
+  // stop -- so a viewer the shell had already replaced spent all of it before it could notice.
+  // Nearly six seconds of a connect was uninterruptible.
+  {
+    std::atomic<bool> cancelled{true};
+
+    remote60::native_poc::DirectoryRendezvous rv;
+    std::string observed, error;
+    const auto began = std::chrono::steady_clock::now();
+    // Nothing is listening on that port. Without the stop this is six attempts of 300ms; with it
+    // the first check turns it round before any of them.
+    const bool observeOk = rv.Observe("127.0.0.1", 9, "cancel-token", &observed, &error,
+                                      &cancelled);
+    const auto observeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - began).count();
+    check("an already-cancelled Observe gives up", !observeOk, error);
+    check("...saying it was cancelled rather than that it timed out", error == "cancelled", error);
+    check("...without spending its attempts", observeMs < 900,
+          std::to_string(observeMs) + "ms of the ~1800ms it would otherwise take");
+    rv.Close();
+  }
+
+  {
+    // The same for the punch, which is the longer of the two.
+    FakeDirectory dir;
+    check("the fake directory starts (cancel)", dir.Start());
+    dir.Script("/healthz", {Reply{200, "{\"ok\":true,\"observe\":{\"port\":" +
+                                        std::to_string(dir.udpPort()) + "}}"}});
+
+    remote60::native_poc::DirectoryRendezvous rv;
+    std::string observed, error;
+    check("the client observes itself (cancel)",
+          rv.Observe("127.0.0.1", dir.udpPort(), "cancel-token-2", &observed, &error), error);
+
+    std::vector<remote60::native_poc::RendezvousCandidate> candidates;
+    // A port nothing answers on, so only the budget or the stop can end this.
+    candidates.push_back({"127.0.0.1", 9, "private"});
+
+    std::atomic<bool> cancelled{false};
+    // Set from another thread while the punch is running, which is how it actually arrives.
+    std::thread canceller([&cancelled] {
+      std::this_thread::sleep_for(std::chrono::milliseconds(400));
+      cancelled.store(true, std::memory_order_release);
+    });
+
+    remote60::native_poc::RendezvousCandidate chosen;
+    const auto began = std::chrono::steady_clock::now();
+    const bool picked = rv.PunchAny(candidates, 4000, &chosen, &error, &cancelled);
+    const auto punchMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - began).count();
+    canceller.join();
+
+    check("a punch in flight stops when it is cancelled", !picked, error);
+    check("...saying so", error == "cancelled", error);
+    // It checks once per 150ms pass, so the wait after the flag is set is that, not the budget.
+    check("...within a pass of being told, not at the end of the budget", punchMs < 1200,
+          std::to_string(punchMs) + "ms of a 4000ms budget");
+    rv.Close();
+  }
+
+  {
+    // And the default is the old behaviour exactly: no stop, no early exit.
+    FakeDirectory dir;
+    check("the fake directory starts (no stop)", dir.Start());
+    dir.Script("/healthz", {Reply{200, "{\"ok\":true,\"observe\":{\"port\":" +
+                                        std::to_string(dir.udpPort()) + "}}"}});
+    remote60::native_poc::DirectoryRendezvous rv;
+    std::string observed, error;
+    check("the client observes itself (no stop)",
+          rv.Observe("127.0.0.1", dir.udpPort(), "no-stop-token", &observed, &error), error);
+    std::vector<remote60::native_poc::RendezvousCandidate> candidates;
+    candidates.push_back({"127.0.0.1", 9, "private"});
+    remote60::native_poc::RendezvousCandidate chosen;
+    const auto began = std::chrono::steady_clock::now();
+    rv.PunchAny(candidates, 700, &chosen, &error);
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - began).count();
+    check("a caller that passes no stop still runs its whole budget", ms >= 650,
+          std::to_string(ms) + "ms of 700ms");
+    rv.Close();
+  }
+
   // ------------------------------------------------- directory_observe_from_health(), untested
   //
   // The route a viewer takes when it resumed from a stored session: it never saw a login

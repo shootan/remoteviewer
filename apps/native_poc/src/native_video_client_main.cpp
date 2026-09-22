@@ -7,6 +7,7 @@
 #include "viewer_common.hpp"
 #include "viewer_context.hpp"
 #include "viewer_shutdown.hpp"
+#include "viewer_cancel_channel.hpp"
 #include "viewer_startup.hpp"
 
 #include <iostream>
@@ -39,10 +40,32 @@ int main(int argc, char** argv) {
   //
   // Success is untouched: a connection that works leaves this loop on the first pass with the
   // same calls in the same order as before.
+  // The shell starts another GNLinkViewer when the user picks a different PC, and does not close
+  // this one. Until this existed, this process carried on punching and saying hello -- now for up
+  // to thirty seconds -- and could still establish a session afterwards, against a host that had
+  // moved on. The watcher is what turns that into a stop the connect path can read.
+  //
+  // Started before the first attempt and stopped after the last, so a cancel that arrives between
+  // attempts is still seen.
+  HANDLE cancelEvent = viewer_start_cancel_watcher(&ctx.connectCancelled,
+                                                   &ctx.connectCancelledByOwner,
+                                                   &ctx.cancelWatcherStop, &ctx.cancelWatcher);
+
   for (;;) {
+    // A new attempt. The generation moves first, so anything still in flight from the previous
+    // one is already superseded when it comes back.
+    ctx.connectGeneration.fetch_add(1, std::memory_order_acq_rel);
     const int opened = open_media_socket(ctx);
     const int rc = opened != 0 ? opened : connect_media_socket(ctx);
     if (rc == 0) break;
+
+    // Called off rather than failed. Showing "try again" here would be asking about a session
+    // the user has already replaced.
+    if (ctx.connectCancelled.load(std::memory_order_acquire)) {
+      viewer_stop_cancel_watcher(cancelEvent, &ctx.cancelWatcherStop, &ctx.cancelWatcher);
+      if (ctx.dec.mfStarted) MFShutdown();
+      return 0;
+    }
 
     // Only what the code actually knows. No guess about firewalls or accounts.
     std::string reason;
@@ -53,16 +76,29 @@ int main(int argc, char** argv) {
     } else if (rc == 5) {
       reason = ctx.resolvedArgs.host + ":" + std::to_string(ctx.resolvedArgs.port) +
                " 에 연결하지 못했습니다.\n그 PC 에서 GNLink 가 실행 중인지 확인해 주세요.";
+    } else if (rc == 7) {
+      // Not a failure, and the user must not be asked to retry something they replaced. This
+      // is unreachable in practice -- the cancel check above returns first -- and it is here
+      // so that a future path which returns 7 without going through that check cannot end up
+      // telling the user their connection failed.
+      reason = "연결이 취소되었습니다.";
     } else {
       reason = "연결하지 못했습니다.";
     }
     reason += "\n(코드 " + std::to_string(rc) + ")";
 
-    if (!show_startup_failure(ctx, reason)) return rc;
+    if (!show_startup_failure(ctx, reason)) {
+      viewer_stop_cancel_watcher(cancelEvent, &ctx.cancelWatcherStop, &ctx.cancelWatcher);
+      return rc;
+    }
     // Asked for, never automatic: an automatic retry would overwrite the log line that says what
     // went wrong.
     std::cout << "[native-video-client] retry requested by the user\n";
   }
+  // Connect is over, one way or the other. The watcher has nothing left to interrupt, and the
+  // session that follows is torn down through the ordinary path.
+  viewer_stop_cancel_watcher(cancelEvent, &ctx.cancelWatcherStop, &ctx.cancelWatcher);
+
   attach_control_tunnel_and_log(ctx);
   try {
     connect_control(ctx);

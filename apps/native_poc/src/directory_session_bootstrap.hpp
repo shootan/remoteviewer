@@ -18,6 +18,7 @@
 // so a working direct path always wins -- which matters because relay traffic is billed.
 
 #include <cstdint>
+#include <atomic>
 #include <string>
 
 #include "connect_candidates.hpp"
@@ -45,6 +46,14 @@ struct DirectorySessionRequest {
   directory::ObserveEndpoint advertised;
   // The client gives up on the handshake soon after this, so a longer budget buys nothing.
   uint32_t punchBudgetMs = 4000;
+  /**
+   * Checked by the observe and punch loops inside. Optional; null means what it always did.
+   *
+   * Nearly six seconds of this function is spent waiting -- 1.8s of observe attempts and 4s
+   * of punching -- and until now none of it could be called off. A viewer the shell had
+   * already replaced spent all of it before it could notice.
+   */
+  const std::atomic<bool>* stop = nullptr;
 };
 
 struct DirectorySessionResult {

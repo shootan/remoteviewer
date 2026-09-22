@@ -1,5 +1,7 @@
 #include "directory_rendezvous.hpp"
 
+#include <atomic>
+
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -82,7 +84,8 @@ SocketHandle DirectoryRendezvous::Release() {
 
 bool DirectoryRendezvous::Observe(const std::string& directoryHost, int directoryUdpPort,
                                   const std::string& observeToken, std::string* outObserved,
-                                  std::string* outError) {
+                                  std::string* outError,
+                                  const std::atomic<bool>* stop) {
   Close();
   if (!initialize_sockets(outError)) return false;
 
@@ -117,7 +120,14 @@ bool DirectoryRendezvous::Observe(const std::string& directoryHost, int director
 
   const std::string probe = "OBSERVE " + observeToken;
   char reply[256];
+  const auto stopped = [stop]() { return stop && stop->load(std::memory_order_acquire); };
   for (uint32_t attempt = 0; attempt < kObserveAttempts; ++attempt) {
+    // Between attempts, not inside the wait: the wait is one 300ms recv timeout, so the
+    // worst a cancel waits here is that, not the whole 1.8 seconds.
+    if (stopped()) {
+      if (outError) *outError = "cancelled";
+      return false;
+    }
     (void)sendto(sock, probe.data(), static_cast<int>(probe.size()), 0,
                  reinterpret_cast<const sockaddr*>(&directory), sizeof(directory));
 
@@ -188,7 +198,8 @@ bool DirectoryRendezvous::Punch(const std::string& hostIp, int hostPort, uint32_
 
 bool DirectoryRendezvous::PunchAny(const std::vector<RendezvousCandidate>& candidates,
                                    uint32_t budgetMs, RendezvousCandidate* outChosen,
-                                   std::string* outError) {
+                                   std::string* outError,
+                                   const std::atomic<bool>* stop) {
   if (socket_ == kInvalidSocket) {
     if (outError) *outError = "no prepared socket; observe first";
     return false;
@@ -219,7 +230,14 @@ bool DirectoryRendezvous::PunchAny(const std::vector<RendezvousCandidate>& candi
 
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
   char scratch[512];
+  const auto stopped = [stop]() { return stop && stop->load(std::memory_order_acquire); };
   while (std::chrono::steady_clock::now() < deadline) {
+    // Every pass, which is every 150ms. Four seconds of punching is a long time to keep
+    // going after the user has started a different session.
+    if (stopped()) {
+      if (outError) *outError = "cancelled";
+      return false;
+    }
     // One round hits every candidate before waiting, so a reply from any of them is caught by
     // the same recvfrom rather than after the others have had their turn.
     for (const sockaddr_in& target : targets) {

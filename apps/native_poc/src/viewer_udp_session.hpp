@@ -25,15 +25,42 @@ namespace remote60::native_poc::viewer {
 // changed default is visible on the fake host's wire (the Hello's feature bits) in that test.
 constexpr bool kVideoNackEnabledDefault = true;
 
-// The Hello the Windows viewer sends: the same exchange the Android session performs (F-09), at
-// this viewer's cadence (up to ten seconds of Hello, 200 ms per wait, 50 ms between tries), the
-// directory capability riding along, and -- since the Windows NACK wiring -- the request for
-// selective retransmit whenever the env policy allows it.
+/**
+ * How long the viewer keeps saying hello.
+ *
+ * Thirty seconds, and it is a UX CEILING rather than a fix. It does not make a host answer;
+ * it stops the viewer giving up while the answer is still coming. What actually makes the
+ * host answer is the server waking it until it collects the capability (C2 F3).
+ *
+ * Thirty is not a round number picked for comfort. It is the capability's own life:
+ *
+ *   server  PUNCH_TTL_MS      30s   a pendingPunch expires unless a heartbeat collects it
+ *   host    authorizedPeers_  30s   from the moment it collects one
+ *
+ * So the whole connect budget lines up like this, and the total is what the ceiling is set
+ * against:
+ *
+ *   observe      6 x 300ms   1.8s   DirectoryRendezvous::Observe
+ *   /api/connect 8s max             directory_session_client, one 409 re-observe possible
+ *   PunchAny     4s                 all candidates at once, the relay answers at 2.5s
+ *   hello        <= 30s             this, bounded by the capability TTL above
+ *
+ * Past thirty seconds there is nothing left to say hello WITH -- the capability the hello
+ * carries has expired at both ends -- so a longer budget would spend the time re-sending
+ * something that can only be refused. What has to happen instead is a fresh /api/connect,
+ * which is the shell's retry, and the fence above is what stops the old attempt racing it.
+ */
+constexpr uint32_t kViewerHelloBudgetMs = 30000;
+
+// The Hello the Windows viewer sends: the same exchange the Android session performs (F-09),
+// 200 ms per wait, 50 ms between tries, the directory capability riding along, and -- since
+// the Windows NACK wiring -- the request for selective retransmit whenever the env policy
+// allows it.
 inline remote60::native_poc::UdpHelloOptions viewer_udp_hello_options(const std::string& authToken,
                                                                        bool videoNackEnabled) {
   remote60::native_poc::UdpHelloOptions hello;
   hello.authToken = authToken;
-  hello.budgetMs = 10000;
+  hello.budgetMs = kViewerHelloBudgetMs;
   hello.sliceMaxMs = 200;
   hello.retrySleepMs = 50;
   hello.requestNack = videoNackEnabled;

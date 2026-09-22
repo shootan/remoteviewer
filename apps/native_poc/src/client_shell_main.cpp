@@ -30,12 +30,14 @@
 #include <optional>
 #include <mutex>
 #include <sstream>
+#include <map>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "WebView2.h"
 #include "client_shell_bridge.hpp"
+#include "viewer_cancel_channel.hpp"
 #include "client_update_gate.hpp"
 #include "async_worker_group.hpp"
 #include "env_util.hpp"
@@ -68,6 +70,19 @@ std::atomic<bool> gUpdateHandoffActive{false};
 constexpr UINT_PTR kUpdateRetryTimer = 88;
 uint32_t gUpdateRetryAttempts = 0;
 uint64_t gViewerOperation = 0;  // UI thread only: stale child exits cannot change a newer session
+
+/**
+ * The viewer currently open for each host, so a replacement can call the old one off.
+ *
+ * This shell starts another GNLinkViewer when the user picks a PC and never closes the one that
+ * was already there. For two different PCs that is right -- two sessions is an ordinary thing.
+ * For the SAME PC it is not: the old process keeps punching and saying hello, and can still
+ * establish a session afterwards, against a host that has already been handed a newer
+ * capability.
+ *
+ * UI thread only, like gViewerOperation: begin_session writes it, handle_viewer_exit clears it.
+ */
+std::map<std::string, DWORD> gViewerPidByHost;
 uint32_t gReconnectAttempts = 0;
 std::optional<ShellConnectRequest> gReconnectRequest;
 uint64_t gReconnectOwnerEpoch = 0;
@@ -878,7 +893,13 @@ void begin_refresh_hosts() {
 // UI-thread adoption of an owned viewer exit. Count all live viewers, but only the latest
 // selected operation may replace the pending automatic reconnect.
 void handle_viewer_exit(const ShellConnectRequest& request, uint64_t operation, uint64_t ownerEpoch,
-                        DWORD waited, DWORD exitCode, uint64_t ranMs) {
+                        DWORD waited, DWORD exitCode, uint64_t ranMs, DWORD exitedPid) {
+  // Forgotten only if it is still the one recorded. A replacement has already overwritten this
+  // entry, and erasing it here would forget the viewer that is actually open.
+  {
+    const auto it = gViewerPidByHost.find(request.hostId);
+    if (it != gViewerPidByHost.end() && it->second == exitedPid) gViewerPidByHost.erase(it);
+  }
   const uint32_t remaining = gActiveViewers.load();
   { std::lock_guard<std::mutex> lock(gStateMu); if (ownerEpoch != gOwnerEpoch) return; }
   if (operation != gViewerOperation) {
@@ -914,6 +935,20 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
   gReconnectRequest.reset();
   if (!automatic) gReconnectAttempts = 0;
   const uint64_t operation = ++gViewerOperation;
+
+  // Call off the viewer already open on this PC, if there is one. It may be mid-connect --
+  // up to thirty seconds of hello -- and if it finishes it will bind a session the user has
+  // just replaced. Best effort by design: false means the process is gone, or is an older
+  // build with no cancel event, and in both cases this is no worse than before.
+  {
+    const auto previous = gViewerPidByHost.find(request.hostId);
+    if (previous != gViewerPidByHost.end()) {
+      const bool asked = remote60::native_poc::viewer::viewer_request_cancel(previous->second);
+      log_line(std::string("cancelling the viewer already open on this PC pid=") +
+               std::to_string(previous->second) + " asked=" + (asked ? "1" : "0"));
+      gViewerPidByHost.erase(previous);
+    }
+  }
   uint64_t ownerEpoch = 0;
   std::string server;
   std::string account;
@@ -1090,10 +1125,12 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
            std::to_string(settings.bitrateKbps) + " fps=" + std::to_string(settings.fps) +
            " monitor=" + std::to_string(settings.monitorId));
   CloseHandle(pi.hThread);
+  gViewerPidByHost[request.hostId] = pi.dwProcessId;
 
   // Watched rather than forgotten: when the session window closes the list has to become usable
   // again, and if it exits immediately that is a failure the user should hear about.
-  gWorkers.Launch([handle = pi.hProcess, request, operation, ownerEpoch, startedMs = GetTickCount64()]() {
+  gWorkers.Launch([handle = pi.hProcess, request, operation, ownerEpoch,
+                   pid = pi.dwProcessId, startedMs = GetTickCount64()]() {
     DWORD waited = WAIT_TIMEOUT;
     while (!gWorkers.Stopping() && (waited = WaitForSingleObject(handle, 250)) == WAIT_TIMEOUT) {}
     if (gWorkers.Stopping()) { CloseHandle(handle); return; }
@@ -1102,8 +1139,8 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
     CloseHandle(handle);
     gActiveViewers.fetch_sub(1);
     const uint64_t ranMs = GetTickCount64() - startedMs;
-    post_ui([request, operation, ownerEpoch, waited, exitCode, ranMs] {
-      handle_viewer_exit(request, operation, ownerEpoch, waited, exitCode, ranMs);
+    post_ui([request, operation, ownerEpoch, waited, exitCode, ranMs, pid] {
+      handle_viewer_exit(request, operation, ownerEpoch, waited, exitCode, ranMs, pid);
     });
   });
 

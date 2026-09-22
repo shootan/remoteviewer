@@ -13,6 +13,7 @@
 
 #include <cstdio>
 
+#include "native_video_client_shared_core.hpp"
 #include "viewer_picker_empty_line.hpp"
 
 using namespace remote60::native_poc;
@@ -141,7 +142,34 @@ void test_no_constant_answer_works() {
 
 }  // namespace
 
+/**
+ * The line the user reads during connect, and that it goes away again.
+ *
+ * `displayStatus` had a declaration, a reader, and nothing that ever wrote it -- the drawing code
+ * falls back to the machine token when it is empty, which is why an unwritten field looked fine
+ * for so long. The connect path is the first thing that needs it, and the thing that matters as
+ * much as setting it is clearing it: a "waiting for the host" line still on screen after the
+ * session is up would be worse than no line at all.
+ */
+void test_connect_status_line() {
+  remote60::native_poc::WindowPanelStateModel panel;
+
+  check(panel.Snapshot().displayStatus.empty(), "a fresh panel shows no display line");
+
+  panel.SetStatus("host_wait");
+  panel.SetDisplayStatus("í¸ì¤í¸ ìëµ ëê¸° ì¤â¦");
+  check(panel.Snapshot().status == "host_wait", "the connect wait sets a machine token");
+  check(!panel.Snapshot().displayStatus.empty(), "...and a line for the user");
+
+  panel.SetDisplayStatus(std::string());
+  check(panel.Snapshot().displayStatus.empty(),
+        "...and clearing it leaves nothing behind");
+  check(panel.Snapshot().status == "host_wait",
+        "...without disturbing the token, which is a separate contract");
+}
+
 int main() {
+  test_connect_status_line();
   test_table();
   test_negative_control();
   test_no_constant_answer_works();

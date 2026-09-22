@@ -122,16 +122,16 @@ int main(int argc, char** argv) {
     const uint64_t currentOwner = gOwnerEpoch.load();
     const ShellConnectRequest olderViewer{};
     gActiveViewers = 1;
-    handle_viewer_exit(olderViewer, 99, currentOwner, WAIT_OBJECT_0, 0, 1000);
+    handle_viewer_exit(olderViewer, 99, currentOwner, WAIT_OBJECT_0, 0, 1000, 0);
     recovery_check(recovery_dom(L"document.getElementById('hostsMsg').textContent.includes('1개 연결')"),
                    "older viewer exit still updates the live-session count");
     gActiveViewers = 0;
-    handle_viewer_exit(olderViewer, 99, currentOwner, WAIT_OBJECT_0, 0, 1000);
+    handle_viewer_exit(olderViewer, 99, currentOwner, WAIT_OBJECT_0, 0, 1000, 0);
     recovery_check(recovery_dom(L"document.getElementById('hostsMsg').textContent === ''"),
                    "last older viewer exit clears the remaining-session message");
     gReconnectRequest = ShellConnectRequest{};
     gReconnectAttempts = 2;
-    handle_viewer_exit(olderViewer, 99, currentOwner, WAIT_OBJECT_0, 43, 90000);
+    handle_viewer_exit(olderViewer, 99, currentOwner, WAIT_OBJECT_0, 43, 90000, 0);
     recovery_check(gReconnectRequest.has_value() && gReconnectAttempts == 2,
                    "older viewer cannot replace or reset a newer reconnect");
     gReconnectRequest.reset(); gReconnectAttempts = 0;

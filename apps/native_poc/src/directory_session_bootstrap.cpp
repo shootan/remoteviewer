@@ -83,7 +83,8 @@ bool directory_session_open(const DirectorySessionRequest& request, DirectorySes
   DirectoryRendezvous rendezvous;
   const std::string observeToken = make_observe_token();
   std::string observed;
-  if (!rendezvous.Observe(observeHost, observePort, observeToken, &observed, outError)) {
+  if (!rendezvous.Observe(observeHost, observePort, observeToken, &observed, outError,
+                          request.stop)) {
     return false;
   }
 
@@ -99,7 +100,8 @@ bool directory_session_open(const DirectorySessionRequest& request, DirectorySes
     // viewer cannot fix, and the user is waiting on this call.
     if (connectStatus != 409) return false;
     std::string reobserveError;
-    if (!rendezvous.Observe(observeHost, observePort, observeToken, &observed, &reobserveError)) {
+    if (!rendezvous.Observe(observeHost, observePort, observeToken, &observed, &reobserveError,
+                            request.stop)) {
       if (outError) *outError = reobserveError;
       return false;
     }
@@ -148,7 +150,8 @@ bool directory_session_open(const DirectorySessionRequest& request, DirectorySes
   std::string punchError;
   const auto punchStart = std::chrono::steady_clock::now();
   const bool answered =
-      rendezvous.PunchAny(candidates, request.punchBudgetMs, &chosen, &punchError);
+      rendezvous.PunchAny(candidates, request.punchBudgetMs, &chosen, &punchError,
+                          request.stop);
   std::cout << "[native-video-client][attempt] connect="
             << (target.connectId.empty() ? "-" : target.connectId) << " punch answered="
             << (answered ? 1 : 0) << " kind=" << (answered ? chosen.kind : std::string("-"))
@@ -156,6 +159,16 @@ bool directory_session_open(const DirectorySessionRequest& request, DirectorySes
             << std::chrono::duration_cast<std::chrono::milliseconds>(
                    std::chrono::steady_clock::now() - punchStart).count()
             << (answered ? "" : " why=" + punchError) << "\n";
+  // A cancelled punch is not a punch that failed. The fallback below exists because some NATs
+  // drop the punch and pass the hello -- that reasoning does not apply when the caller has
+  // asked to stop, and carrying on would open a socket and say hello on behalf of an attempt
+  // that no longer exists. Seen in the cancel e2e: "punch answered=0 why=cancelled" was
+  // immediately followed by "directory chose ... trying anyway".
+  if (request.stop && request.stop->load(std::memory_order_acquire)) {
+    if (outError) *outError = "cancelled";
+    return false;
+  }
+
   // Falling back to the first candidate rather than giving up: some NATs drop the punch and pass
   // the hello that follows, and refusing here would turn a slow connection into no connection.
   const ConnectCandidate& fallback = target.candidates.front();
