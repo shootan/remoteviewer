@@ -190,6 +190,15 @@ class ControlProxy {
                   reinterpret_cast<const sockaddr*>(&viewer_), viewerLen_) > 0;
   }
 
+  /** Sends the viewer's last resume ask to the host again, as a delayed copy would arrive. */
+  bool ReplayLastResumeAsk() {
+    std::lock_guard<std::mutex> lock(capturedMu);
+    if (lastResumeAsk_.empty()) return false;
+    return sendto(sock_, reinterpret_cast<const char*>(lastResumeAsk_.data()),
+                  static_cast<int>(lastResumeAsk_.size()), 0,
+                  reinterpret_cast<const sockaddr*>(&host_), sizeof(host_)) > 0;
+  }
+
   /** Replays control datagrams captured before a break, as a delayed delivery would. */
   void ReplayCapturedDown(SOCKET viewerSock) {
     std::vector<std::vector<uint8_t>> copy;
@@ -259,6 +268,10 @@ class ControlProxy {
         if (remaining > 0) continue;  // the answer is lost, exactly as it would be on the wire
         resumeAcksPassed.fetch_add(1);
       } else if (what == Kindness::Resume) {
+        {
+          std::lock_guard<std::mutex> lock(capturedMu);
+          lastResumeAsk_.assign(buf.begin(), buf.begin() + n);
+        }
         resumeAsksPassed.fetch_add(1);
       } else {
         mediaPassed.fetch_add(1);
@@ -281,6 +294,7 @@ class ControlProxy {
   sockaddr_in viewer_{};
   int viewerLen_ = sizeof(sockaddr_in);
   std::vector<uint8_t> lastResumeAck_;  // guarded by capturedMu
+  std::vector<uint8_t> lastResumeAsk_;  // guarded by capturedMu
   bool haveViewer_ = false;
   std::atomic<bool> stop_{false};
   std::thread worker_;
@@ -450,6 +464,13 @@ struct RecoveryResult {
   uint64_t breakToFirstSendUs = 0;
   uint64_t breakToRunningUs = 0;
   uint32_t attempts = 0;
+  // The picture, while the repair is going on. The host used to turn the stream off the
+  // moment its control session ended, which is also the moment a resume became acceptable --
+  // so "did video keep arriving" is not a nicety here, it is the condition the viewer uses to
+  // decide the session is worth repairing at all.
+  uint64_t mediaDuring = 0;
+  bool videoWentQuiet = false;
+  uint64_t longestVideoGapUs = 0;
 };
 
 RecoveryResult run_recovery(ViewerSide& v, int budgetMs,
@@ -469,9 +490,16 @@ RecoveryResult run_recovery(ViewerSide& v, int budgetMs,
   };
   hooks.idle = [] { std::this_thread::sleep_for(std::chrono::milliseconds(50)); };
 
+  const uint64_t mediaAtStart = v.videoDatagrams.load();
   const DWORD deadline = GetTickCount() + static_cast<DWORD>(budgetMs);
   DWORD nextReport = GetTickCount();
   while (GetTickCount() < deadline) {
+    {
+      const uint64_t last = v.lastVideoUs.load();
+      const uint64_t gap = last ? (qpc_now_us() - last) : 0;
+      if (gap > out.longestVideoGapUs) out.longestVideoGapUs = gap;
+      if (!v.video_alive()) out.videoWentQuiet = true;
+    }
     if (GetTickCount() >= nextReport) {
       // Printed while it runs, because a recovery that stalls and one that is merely slow
       // look identical in a final verdict. videoAge is the one that decides whether it asks
@@ -503,6 +531,7 @@ RecoveryResult run_recovery(ViewerSide& v, int budgetMs,
     }
   }
   out.attempts = v.resume.attempts();
+  out.mediaDuring = v.videoDatagrams.load() - mediaAtStart;
   return out;
 }
 
@@ -748,7 +777,14 @@ int wmain(int argc, wchar_t** argv) {
           std::to_string(r.breakToRunningUs / 1000) + "ms of 30000ms");
     check("...and the first ask went out long before the repair finished",
           r.resumed && r.breakToFirstSendUs <= r.breakToRunningUs,
-          "the host is inside Serve() until its own read timeout, so the wait is the host's");
+          "the ask is immediate; whatever follows is the host deciding");
+    // The condition the whole feature stands on, now that a resume can interrupt a serve:
+    // the picture does not blink while control is being rebuilt.
+    check("THE PICTURE KEPT ARRIVING THROUGHOUT THE REPAIR", r.resumed && !r.videoWentQuiet,
+          std::to_string(r.mediaDuring) + " media datagrams during it, longest gap " +
+              std::to_string(r.longestVideoGapUs / 1000) + "ms");
+    check("...and there were frames, not merely no complaint", r.mediaDuring > 0,
+          std::to_string(r.mediaDuring) + " media datagrams");
 
     if (r.resumed) {
       // Three real round trips, on the channel that was just re-keyed.
@@ -786,6 +822,51 @@ int wmain(int argc, wchar_t** argv) {
             "the re-key gave it stream ids those datagrams do not carry");
     }
     proxy.capturing.store(false);
+  }
+
+  // ------------------------------------- a resume that arrives at a channel which is FINE
+  //
+  // Now that an ask can interrupt a serve, the question "on what evidence" has teeth. These
+  // two send asks at a healthy session -- one invented, one an old one replayed -- and the
+  // requirement is that nothing happens to it. This is the case a silence test would fail.
+  if (connected && repaired) {
+    std::cout << "\n--- counter-examples: asks at a healthy channel ---\n";
+    uint64_t before = 0;
+    check("the channel is healthy to begin with", ping(*viewer.link, &before));
+    const uint64_t mediaBefore = viewer.videoDatagrams.load();
+
+    // ⑴ An ask with an id nobody has used, from the bound endpoint, while the host serves.
+    UdpControlResumePacket forged{};
+    forged.kind = static_cast<uint16_t>(UdpPacketKind::ControlResume);
+    forged.streamId = kUdpControlStreamClientToHost;
+    forged.resumeId = 0xC0FFEEu;
+    for (int i = 0; i < 8; ++i) {
+      (void)send(viewer.sock, reinterpret_cast<const char*>(&forged), sizeof(forged), 0);
+      std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
+    int ok = 0;
+    for (int i = 0; i < 3; ++i) {
+      if (ping(*viewer.link)) ++ok;
+    }
+    check("[counter-example 1] A HEALTHY CHANNEL SURVIVES EIGHT UNINVITED ASKS", ok == 3,
+          std::to_string(ok) + "/3 round trips after them");
+    check("...and the viewer re-keyed nothing", !viewer.resume.rekeyed());
+    check("...and video never stopped", viewer.videoDatagrams.load() > mediaBefore,
+          std::to_string(viewer.videoDatagrams.load() - mediaBefore) + " media datagrams");
+
+    // ⑵ The real ask from the previous break, replayed. Its id is one the host has answered.
+    if (proxy.ReplayLastResumeAsk()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      int again = 0;
+      for (int i = 0; i < 3; ++i) {
+        if (ping(*viewer.link)) ++again;
+      }
+      check("[counter-example 2] A REPLAYED OLD ASK DOES NOT DISTURB THE CHANNEL", again == 3,
+            std::to_string(again) + "/3 round trips after it");
+    } else {
+      check("[counter-example 2] an old ask was available to replay", false,
+            "the proxy saw no resume ask to keep");
+    }
   }
 
   // ------------------------------------------------------------------ the answer itself is lost

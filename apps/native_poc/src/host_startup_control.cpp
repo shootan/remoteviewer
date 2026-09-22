@@ -240,6 +240,16 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
           remote60::native_poc::kResumeAckGlobalPerSecond,
           remote60::native_poc::kResumeAckGlobalBurst);
       uint64_t resumeStrangerLogUs = 0;
+      // Which ask the current probe result belongs to. A verdict about one attempt says
+      // nothing about the next, and an Alive left over from a refused ask would refuse a
+      // genuine break for the rest of the session. (item 8, C3 r2)
+      uint32_t resumeProbeId = 0;
+      // The attempt the dispatcher is currently being woken for, and the sequence number that
+      // attempt is waiting on. A retry of the SAME ask joins that wake instead of starting a
+      // second one -- the viewer repeats every 500 ms and the dispatcher may take longer than
+      // one wait, so without this one logical recovery could re-key the channel twice.
+      uint32_t resumeWakeId = 0;
+      uint64_t resumeWakeWaitFor = 0;
       uint64_t resumeThrottleLogUs = 0;
       // Startup barrier. The dispatcher's first Reset races this thread: if the client's first
       // ControlData lands here first, OnPacket ACKs it into rxReady_, then the dispatcher's
@@ -297,6 +307,9 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
           Sleep(50);
           continue;
         }
+        // Every turn, not only on a timeout: the resume probe has a quarter-second budget and
+        // a session carrying video never sits idle long enough for the timeout path to run.
+        clientSession.udpControlChannel.Tick();
         const size_t len = static_cast<size_t>(n);
 
         UdpHelloPacket hello{};
@@ -539,17 +552,70 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
               }
               continue;
             }
-            const bool accept = remote60::native_poc::host_should_accept_resume(decide);
+            // Whether this ask may interrupt a serve, and on what evidence. (item 8, C3 r2)
+            if (resumeProbeId != resume.resumeId) {
+              clientSession.udpControlChannel.ClearProbe();
+              resumeProbeId = resume.resumeId;
+            }
+            remote60::native_poc::HostResumeEligibility elig;
+            elig.negotiated = decide.negotiated;
+            elig.sessionActive = decide.sessionActive;
+            elig.servingControl = decide.servingControl;
+            elig.cacheMatches = false;  // the replay path above already took those
+            elig.sameIdAsCache = resumeAck.valid && resumeAck.resumeId == resume.resumeId;
+            elig.channelPeerLost =
+                clientSession.udpControlChannel.IsClosed() &&
+                clientSession.udpControlChannel.CloseReason() ==
+                    remote60::native_poc::ControlCloseReason::PeerLost;
+            elig.probe = clientSession.udpControlChannel.ProbeStatus();
+            const remote60::native_poc::HostResumeVerdict verdict =
+                remote60::native_poc::host_resume_verdict(elig);
+            if (verdict == remote60::native_poc::HostResumeVerdict::Probe) {
+              // Ask the channel whether it is still there. Answering served=0 meanwhile is what
+              // keeps the viewer asking, which is how the answer gets collected.
+              clientSession.udpControlChannel.StartProbe(
+                  remote60::native_poc::kResumeProbeMaxAttempts,
+                  remote60::native_poc::kResumeProbeIntervalUs);
+            }
+            const bool accept = verdict == remote60::native_poc::HostResumeVerdict::Serve;
+            // Woken only when there is something to wake. A resume that arrives between
+            // sessions is served by the dispatcher's ordinary wait.
+            const bool wake = accept && decide.servingControl;
 
-            uint64_t waitFor = 0;
-            if (accept) {
+            // A retry of the ask already being served joins it rather than raising a second
+            // one. Both would be honoured, and the second would re-key a channel the first had
+            // just repaired.
+            const bool wakePending =
+                clientSession.controlResumePending.load(std::memory_order_acquire);
+            const bool alreadyPending = wakePending && resumeWakeId == resume.resumeId;
+            const bool raiseWake = remote60::native_poc::host_resume_should_raise_wake(
+                accept, wakePending, resumeWakeId == resume.resumeId);
+            uint64_t waitFor = alreadyPending ? resumeWakeWaitFor : 0;
+            if (raiseWake) {
               {
                 std::lock_guard<std::mutex> lock(clientSession.epochMu);
                 clientSession.controlResumeId.store(resume.resumeId, std::memory_order_release);
                 waitFor =
                     clientSession.controlResumeSeq.fetch_add(1, std::memory_order_acq_rel) + 1;
               }
+              resumeWakeId = resume.resumeId;
+              resumeWakeWaitFor = waitFor;
+              if (wake) {
+                // Published BEFORE the wake, because the thing being woken reads it on its way
+                // out: this is a repair, not the end of a session, and the video stream stays.
+                clientSession.controlResumePending.store(true, std::memory_order_release);
+                // The dispatcher is inside Serve(), blocked on a read that will not return for
+                // its full timeout. Closing the channel is how a rollover already wakes it
+                // (SessionState::BeginEpoch); ResumeWith re-opens it a moment later, on the
+                // re-keyed stream ids. No new thread and no new lock -- the dispatcher is the
+                // only thing that touches the channel's read side, and by the time it reaches
+                // the resume branch its Serve() has already returned.
+                clientSession.udpControlChannel.Close(
+                    remote60::native_poc::ControlCloseReason::PeerLost);
+              }
               clientSession.epochCv.notify_all();
+            }
+            if (accept) {
               // Bounded, like AwaitControlReady: if the dispatcher cannot come back we simply
               // do not answer, and the client keeps asking or gives up at its own ceiling.
               std::unique_lock<std::mutex> lock(clientSession.epochMu);
@@ -562,6 +628,14 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
             const bool served =
                 accept && clientSession.controlResumeServedSeq.load(std::memory_order_acquire) >=
                               waitFor;
+            // Cleared only once the repair is done. Leaving it set while the dispatcher is
+            // still working is what lets the next retry recognise its own wake and join it,
+            // and it is also what keeps the video stream on across the hand-over.
+            if (served) {
+              clientSession.controlResumePending.store(false, std::memory_order_release);
+              resumeWakeId = 0;
+              resumeWakeWaitFor = 0;
+            }
 
             remote60::native_poc::UdpControlResumePacket answer{};
             answer.kind = static_cast<uint16_t>(UdpPacketKind::ControlResumeAck);
@@ -590,6 +664,15 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
                          sizeof(answer), 0, reinterpret_cast<const sockaddr*>(&peer), peerLen);
             std::cout << "[native-video-host][control] resume id=" << resume.resumeId
                       << " accepted=" << (served ? 1 : 0)
+                      << " verdict=" << remote60::native_poc::to_string(verdict)
+                      << " evidence="
+                      << (elig.channelPeerLost
+                              ? "peer-lost"
+                              : (elig.probe == remote60::native_poc::ControlProbeState::Dead
+                                     ? "probe-failed"
+                                     : remote60::native_poc::to_string(elig.probe)))
+                      << " probeAttempts=" << clientSession.udpControlChannel.ProbeAttempts()
+                      << " wake=" << (wake ? 1 : 0)
                       << " negotiated=" << (decide.negotiated ? 1 : 0)
                       << " peer=" << (fromCurrentPeer ? "same" : "other")
                       << " serving=" << (decide.servingControl ? 1 : 0) << "\n";
@@ -668,10 +751,16 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
             // republishing it would restart the reader's startup barrier for no reason.
             servedResumeSeq = clientSession.controlResumeSeq.load(std::memory_order_acquire);
             clientSession.controlResumeServedSeq.store(servedResumeSeq, std::memory_order_release);
+            // The repair is done, so the flag that held the video stream through it comes down
+            // here rather than only on the reader's path. The reader's wait is bounded: if it
+            // times out it never clears this, and a flag left set would keep a departed client's
+            // stream alive through the next genuine session end.
+            clientSession.controlResumePending.store(false, std::memory_order_release);
           } else {
             clientSession.controlReadyEpoch.store(servedEpoch, std::memory_order_release);
             // A rollover supersedes any resume that was pending for the client that just left.
             servedResumeSeq = clientSession.controlResumeSeq.load(std::memory_order_acquire);
+            clientSession.controlResumePending.store(false, std::memory_order_release);
           }
         }
         clientSession.epochCv.notify_all();

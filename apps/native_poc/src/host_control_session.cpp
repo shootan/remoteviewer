@@ -1122,7 +1122,13 @@ void ControlSessionServer::Serve(ControlLink& link) {
   // alive at the same time, and this unconditional store meant whichever finished last switched
   // the OTHER one's video off -- the viewer would sit on a frozen picture with a healthy link.
   // (Ledger H-28.)
-  if (clientSession.epoch.load(std::memory_order_acquire) == servedEpoch) {
+  // ...and not when this session is being REPAIRED rather than ending (item 8, C3 r2). A
+  // resume wakes this loop out of its read so the control channel can be re-keyed on the same
+  // session; turning the stream off on the way out would blink the picture and, worse, take
+  // away the one thing that tells the viewer the session is worth repairing at all. The
+  // dispatcher re-enters Serve() immediately afterwards.
+  if (clientSession.epoch.load(std::memory_order_acquire) == servedEpoch &&
+      !clientSession.controlResumePending.load(std::memory_order_acquire)) {
     clientSession.streamControlActive.store(false, std::memory_order_release);
   }
 }

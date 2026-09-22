@@ -6,10 +6,12 @@
 // video has also stopped, and the T3 ceiling -- because a decision function that says Send for
 // everything would pass a test that only ever asked it to send.
 
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "control_resume.hpp"
@@ -37,6 +39,106 @@ const char* name_of(ControlResumeAction a) {
     case ControlResumeAction::GiveUp: return "GiveUp";
     default: return "Idle";
   }
+}
+
+const char* name_of(HostResumeVerdict v) { return to_string(v); }
+
+/**
+ * Two real channels with a switch on each direction.
+ *
+ * Delivery is deferred rather than immediate: a send happens with the sending channel's mutex
+ * held, and handing it straight to the peer brings the peer's ack back into a lock this thread
+ * already holds.
+ */
+struct Link {
+  UdpControlChannel host;
+  UdpControlChannel viewer;
+  bool dropToViewer = false;
+  bool dropToHost = false;
+  uint64_t droppedToHost = 0;
+  uint64_t droppedToViewer = 0;
+  std::vector<std::vector<uint8_t>> toViewer;
+  std::vector<std::vector<uint8_t>> toHost;
+
+  void Wire() {
+    host.Configure(
+        [this](const void* d, size_t n) {
+          toViewer.emplace_back(static_cast<const uint8_t*>(d),
+                                static_cast<const uint8_t*>(d) + n);
+          return true;
+        },
+        kUdpControlStreamHostToClient, kUdpControlStreamClientToHost, 1200);
+    viewer.Configure(
+        [this](const void* d, size_t n) {
+          toHost.emplace_back(static_cast<const uint8_t*>(d),
+                              static_cast<const uint8_t*>(d) + n);
+          return true;
+        },
+        kUdpControlStreamClientToHost, kUdpControlStreamHostToClient, 1200);
+  }
+
+  void Pump(int rounds = 8) {
+    for (int i = 0; i < rounds && !(toViewer.empty() && toHost.empty()); ++i) {
+      std::vector<std::vector<uint8_t>> v;
+      std::vector<std::vector<uint8_t>> h;
+      v.swap(toViewer);
+      h.swap(toHost);
+      for (const auto& d : v) {
+        if (dropToViewer) { ++droppedToViewer; continue; }
+        viewer.OnPacket(d.data(), d.size());
+      }
+      for (const auto& d : h) {
+        if (dropToHost) { ++droppedToHost; continue; }
+        host.OnPacket(d.data(), d.size());
+      }
+    }
+  }
+
+  /** Carries everything, except the peer's acknowledgement of one particular message. */
+  void PumpDroppingAck(uint32_t seq, int rounds = 8) {
+    for (int i = 0; i < rounds && !(toViewer.empty() && toHost.empty()); ++i) {
+      std::vector<std::vector<uint8_t>> v;
+      std::vector<std::vector<uint8_t>> h;
+      v.swap(toViewer);
+      h.swap(toHost);
+      for (const auto& d : v) viewer.OnPacket(d.data(), d.size());
+      for (const auto& d : h) {
+        if (d.size() >= sizeof(UdpControlAckPacket)) {
+          UdpControlAckPacket ack{};
+          std::memcpy(&ack, d.data(), sizeof(ack));
+          if (ack.kind == static_cast<uint16_t>(UdpPacketKind::ControlAck) &&
+              ack.messageSeq == seq) {
+            continue;
+          }
+        }
+        host.OnPacket(d.data(), d.size());
+      }
+    }
+  }
+
+  /** Runs the clock until the host's probe resolves, or the budget runs out. */
+  ControlProbeState SettleProbe(int budgetMs) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
+    for (;;) {
+      Pump();
+      host.Tick();
+      viewer.Tick();
+      const ControlProbeState state = host.ProbeStatus();
+      if (state == ControlProbeState::Alive || state == ControlProbeState::Dead) return state;
+      if (std::chrono::steady_clock::now() >= deadline) return state;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
+};
+
+/** One host->viewer message, carried and delivered, so the probe has an acked seq to name. */
+bool carry_one_message(Link& link, const std::string& body) {
+  if (!link.host.Send(body.data(), body.size())) return false;
+  link.Pump();
+  std::vector<uint8_t> got;
+  if (!link.viewer.Receive(&got, 100)) return false;
+  link.Pump();  // carry the ack back, so the host knows the seq was delivered
+  return std::string(got.begin(), got.end()) == body;
 }
 
 /** The state item 8 exists for: control dead, video still arriving, due for another attempt. */
@@ -529,6 +631,205 @@ int main() {
     // refused, which is what tells the viewer to keep asking rather than to believe it is back.
     check("a new id arriving while the dispatcher serves is still refused",
           !host_should_accept_resume(serving));
+  }
+
+  // ----------------------------------- interrupting a serve, and what makes that allowed (C3 r2)
+  //
+  // The measured defect: while the dispatcher is inside Serve() every resume was refused, the
+  // dispatcher only leaves after its ten second read timeout, and leaving is what turns the
+  // video off -- by which time the viewer has stopped asking, because it is told not to repair
+  // a session with no picture. Three correct rules closing the window between them.
+  //
+  // A resume may now interrupt a serve, but only on POSITIVE evidence that the channel has
+  // stopped. Not on silence: an idle session is silent and healthy.
+  {
+    HostResumeEligibility base;
+    base.negotiated = true;
+    base.sessionActive = true;
+    base.servingControl = true;
+
+    check("a source with no session is ignored, serving or not",
+          host_resume_verdict([&] { auto e = base; e.sessionActive = false; return e; }()) ==
+              HostResumeVerdict::Ignore);
+    check("...and so is one that never negotiated",
+          host_resume_verdict([&] { auto e = base; e.negotiated = false; return e; }()) ==
+              HostResumeVerdict::Ignore);
+    check("an ask already answered is answered again, even mid-serve",
+          host_resume_verdict([&] { auto e = base; e.cacheMatches = true; return e; }()) ==
+              HostResumeVerdict::ReplayAck);
+    check("with nobody serving, the original rule is unchanged",
+          host_resume_verdict([&] { auto e = base; e.servingControl = false; return e; }()) ==
+              HostResumeVerdict::Serve);
+
+    // ⑴ A healthy, idle session. The ask is new and valid; the channel answers; refused.
+    {
+      HostResumeEligibility e = base;
+      check("[counter-example 1] a new ask on a healthy serve asks the channel first",
+            host_resume_verdict(e) == HostResumeVerdict::Probe,
+            name_of(host_resume_verdict(e)));
+      e.probe = ControlProbeState::Pending;
+      check("...and keeps waiting while the question is open",
+            host_resume_verdict(e) == HostResumeVerdict::Probe);
+      e.probe = ControlProbeState::Alive;
+      check("[counter-example 1] A CHANNEL THAT ANSWERS KEEPS ITS SESSION",
+            host_resume_verdict(e) == HostResumeVerdict::Refuse,
+            "silence is not evidence, and an answer is");
+    }
+
+    // ⑵ A delayed or replayed ask from an earlier break. Its id is one this host answered, so
+    //   it is not a new attempt -- and the cached answer no longer matches, so it is not a
+    //   repeat either.
+    {
+      HostResumeEligibility e = base;
+      e.sameIdAsCache = true;
+      check("[counter-example 2] a stale ask carrying an id already answered is refused",
+            host_resume_verdict(e) == HostResumeVerdict::Refuse,
+            "not a new attempt, and not a valid repeat");
+      e.probe = ControlProbeState::Dead;
+      check("...even if the channel has since stopped answering",
+            host_resume_verdict(e) == HostResumeVerdict::Refuse,
+            "evidence does not make an old id into a new attempt");
+    }
+
+    // ⑶⑷ The failures this exists for.
+    {
+      HostResumeEligibility e = base;
+      e.probe = ControlProbeState::Dead;
+      check("[counter-examples 3 and 4] AN UNANSWERED PROBE LETS THE REPAIR IN",
+            host_resume_verdict(e) == HostResumeVerdict::Serve);
+      HostResumeEligibility lost = base;
+      lost.channelPeerLost = true;
+      check("...and so does the channel having given up on its own",
+            host_resume_verdict(lost) == HostResumeVerdict::Serve);
+    }
+  }
+
+  // --------------------------------- what a closed control channel is allowed to swallow (C3 r2)
+  {
+    // The other half of the stall, and the half I had blamed on the host. A closed channel
+    // used to answer "mine" to every datagram carrying the magic -- so the moment control
+    // died, the viewer stopped seeing VIDEO, and a viewer that sees no video is told not to
+    // repair its session. The break destroyed the evidence that the session was worth saving.
+    Link link;
+    link.Wire();
+    check("a message crosses the link", carry_one_message(link, "before"));
+    link.viewer.Close(ControlCloseReason::PeerLost);
+
+    UdpVideoChunkHeader video{};
+    video.seq = 7;
+    uint8_t datagram[sizeof(UdpVideoChunkHeader) + 16]{};
+    std::memcpy(datagram, &video, sizeof(video));
+    check("A CLOSED CONTROL CHANNEL DOES NOT SWALLOW VIDEO",
+          !link.viewer.OnPacket(datagram, sizeof(datagram)),
+          "it carries the same magic as everything else on this socket");
+
+    UdpControlResumePacket ask{};
+    ask.kind = static_cast<uint16_t>(UdpPacketKind::ControlResume);
+    check("...nor a resume ask", !link.viewer.OnPacket(&ask, sizeof(ask)));
+    UdpHelloPacket hello{};
+    check("...nor a hello", !link.viewer.OnPacket(&hello, sizeof(hello)));
+
+    // ...but it does still claim its own, which is what stops a dead channel's traffic from
+    // being mistaken for something else.
+    UdpControlAckPacket ack{};
+    ack.kind = static_cast<uint16_t>(UdpPacketKind::ControlAck);
+    ack.streamId = kUdpControlStreamHostToClient;
+    check("...and it does claim control traffic", link.viewer.OnPacket(&ack, sizeof(ack)));
+  }
+
+  // ------------------------------------------------- one recovery raises one wake (C3 r2)
+  {
+    check("an accepted ask with nothing pending raises its own wake",
+          host_resume_should_raise_wake(true, false, false));
+    check("A REPEAT OF THE ASK ALREADY BEING SERVED JOINS IT",
+          !host_resume_should_raise_wake(true, true, true),
+          "two wakes would re-key the channel the first one had just repaired");
+    check("a DIFFERENT ask arriving while one is pending still raises its own",
+          host_resume_should_raise_wake(true, true, false),
+          "it is a different recovery, not a repeat");
+    check("and an ask that was not accepted wakes nothing",
+          !host_resume_should_raise_wake(false, false, false));
+  }
+
+  // ------------------------------------------- the probe itself, over two real channels (C3 r2)
+  {
+    // ⑴ healthy: the peer answers, and its application is handed NOTHING.
+    Link link;
+    link.Wire();
+    check("a message crosses the link before the probe", carry_one_message(link, "hello"));
+    link.host.StartProbe(kResumeProbeMaxAttempts, kResumeProbeIntervalUs);
+    const ControlProbeState healthy = link.SettleProbe(4000);
+    check("[counter-example 1] A HEALTHY CHANNEL ANSWERS THE PROBE",
+          healthy == ControlProbeState::Alive, to_string(healthy));
+    std::vector<uint8_t> leaked;
+    check("...and the peer's application was handed nothing by it",
+          !link.viewer.Receive(&leaked, 50),
+          "an unsolicited message would be read as the answer to the peer's next request");
+    check("...and the link still carries messages afterwards",
+          carry_one_message(link, "still here"),
+          "counter-example 2: probing a healthy channel must not disturb it");
+    std::printf("  probe on a healthy channel: %u attempt(s)\n", link.host.ProbeAttempts());
+
+    // ⑶ one direction only: the peer hears everything and nothing it says gets back. A silence
+    //   test at the host would see traffic arriving and call the channel healthy; the round
+    //   trip is what tells the truth.
+    Link oneWay;
+    oneWay.Wire();
+    check("a message crosses the one-way link first", carry_one_message(oneWay, "hello"));
+    oneWay.dropToHost = true;
+    oneWay.host.ClearProbe();
+    oneWay.host.StartProbe(kResumeProbeMaxAttempts, kResumeProbeIntervalUs);
+    const ControlProbeState oneWayState = oneWay.SettleProbe(6000);
+    check("[counter-example 3] A ONE-WAY FAILURE IS FOUND BY THE ROUND TRIP",
+          oneWayState == ControlProbeState::Dead, to_string(oneWayState));
+    check("...and the peer did receive every one of them",
+          oneWay.droppedToHost >= kResumeProbeMaxAttempts,
+          std::to_string(oneWay.droppedToHost) + " answers dropped on the way back");
+
+    // ⑷ both directions.
+    Link both;
+    both.Wire();
+    check("a message crosses the link first", carry_one_message(both, "hello"));
+    both.dropToViewer = true;
+    both.dropToHost = true;
+    both.host.ClearProbe();
+    both.host.StartProbe(kResumeProbeMaxAttempts, kResumeProbeIntervalUs);
+    const ControlProbeState bothState = both.SettleProbe(6000);
+    check("[counter-example 4] a two-way failure is found too",
+          bothState == ControlProbeState::Dead, to_string(bothState));
+
+    // The safety property of the mechanism, and the reason the probe names a seq of its own:
+    // it must never be satisfied by, or swallow, the acknowledgement of a REAL message. If it
+    // did, the message in flight would never be acknowledged and would retransmit until the
+    // channel declared the peer lost -- the probe would have caused the failure it reports.
+    Link mix;
+    mix.Wire();
+    check("a first message is delivered and acknowledged", carry_one_message(mix, "first"));
+    mix.host.StartProbe(kResumeProbeMaxAttempts, kResumeProbeIntervalUs);
+    check("a real message goes out while the probe is waiting", mix.host.Send("second", 6));
+    mix.PumpDroppingAck(1);  // the probe names seq 1; its answer is the one that goes missing
+    check("THE PROBE IS NOT SATISFIED BY ANOTHER MESSAGE'S ACK",
+          mix.host.ProbeStatus() == ControlProbeState::Pending,
+          to_string(mix.host.ProbeStatus()));
+    std::vector<uint8_t> second;
+    check("...and the real message was still delivered", mix.viewer.Receive(&second, 100) &&
+                                                             std::string(second.begin(),
+                                                                         second.end()) == "second");
+    // ...and its own acknowledgement was not swallowed either: only the head of the queue is
+    // in flight, so a third message arriving proves the second one left the queue.
+    mix.Pump();
+    check("a third message follows it", mix.host.Send("third", 5));
+    mix.Pump();
+    std::vector<uint8_t> third;
+    check("...AND ARRIVES, so the queue moved on", mix.viewer.Receive(&third, 100) &&
+                                                       std::string(third.begin(), third.end()) ==
+                                                           "third",
+          "a swallowed ack would have left the second message at the head forever");
+
+    std::printf("  probe budget: %u attempts x %llu us = %llu ms before a channel is called "
+                "stopped\n",
+                kResumeProbeMaxAttempts, (unsigned long long)kResumeProbeIntervalUs,
+                (unsigned long long)(kResumeProbeMaxAttempts * kResumeProbeIntervalUs / 1000));
   }
 
   std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED")

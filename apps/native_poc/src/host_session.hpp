@@ -111,6 +111,14 @@ struct SessionState {
   // not: resetting a stream that is working is the one thing this must never do, and it is also
   // what stops a stray packet from being able to disturb a healthy session.
   std::atomic<bool> controlServing{false};
+  // A resume has been accepted and the dispatcher is being woken out of Serve() for it.
+  // (item 8, C3 r2)
+  //
+  // Read by serve_control_session on its way out: the ordinary end of a control session turns
+  // the video stream off, and this one is not the end of anything -- the same session is being
+  // repaired and the picture must not blink. Set by the reader before it wakes the dispatcher,
+  // cleared once the answer has gone out.
+  std::atomic<bool> controlResumePending{false};
 
 
   // --- behaviour (Phase 2-3: former main() lambdas begin_session_epoch / await_control_ready) ---

@@ -12397,3 +12397,15 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 내 쪽 실수 3건도 적는다. 두 채널을 직결한 첫 테스트는 send 가 상대의 ack 를 제 락 안으로 불러들여 프로세스가 한 줄도 못 찍고 죽었다(지연 전달로 고침). 변이 드라이버는 cmd 에 슬래시 경로를 넘겨 12건이 똑같이 "안 잡힘" 으로 보였다(NO-RUN 판정을 추가). 그리고 escape 4건 중 3건은 테스트가 닿을 수 없는 guard 였는데, 그중 2건은 **제품을 고쳐** 닿게 만들었다 — 테스트가 붙잡을 수 없는 guard 는 조용히 죽는다.
 - 제품/테스트/문서: 제품(`control_resume.hpp`, `host_startup_control.cpp`, `host_startup_connect.cpp`, `udp_control_channel.hpp`, `viewer_control_resume.hpp` 외 뷰어 12개) / 테스트(`control_resume_test.cpp`, `viewer_control_resume_test.cpp`, `control_resume_e2e_test.cpp`) / 문서(이 항목, `구현계획.md` C3 절).
 - 설치본·게시 없음.
+
+### 2026-09-23 C3 r2 — 정체의 원인은 둘이었고, 내가 하나를 잘못 지목했다
+
+- **정정**: r1 에서 나는 e2e 정체를 "호스트가 제어 세션이 끝나는 순간 영상을 끈다" 로 보고했다. 호스트도 10초 뒤 실제로 끄지만 **먼저 일어나는 것은 뷰어측**이었다 — `UdpControlChannel::OnPacket` 이 **닫힌 상태에서 kMagic 을 단 모든 datagram 에 "내 것" 이라고** 답해서(닫힘 검사가 kind 검사보다 위) 제어가 peer-lost 로 닫히는 순간부터 **영상까지 거기서 사라졌다.** 뷰어는 프레임이 끊긴 줄 알고 5초 뒤 복구를 포기한다 — **단절이 복구의 근거를 지운다.** 프록시 양쪽을 세어 보고서야 드러났다: 21발 전달 / 0발 수신, 고친 뒤 56발. 호스트 로그만 보고 순서를 단정한 것이 틀렸다.
+- **호스트**: `Serve()` 안에서는 10초 동안 모든 resume 을 거부하던 것을, **자격을 갖춘 ask 에 한해 serving 중에도 수락**하도록 바꿨다(Codex seq 2871 조건부 승인). 자격 = 기존 검증 + **캐시와 다른 resumeId** + **정지 근거**. 정지 근거는 무수신 시간이 아니라 채널의 peer-lost 판정이거나 **왕복 probe 실패**다 — idle 세션은 조용하고 건강하며, 단방향 장애에서는 호스트가 상대를 계속 듣는다.
+- **probe 는 뷰어를 한 줄도 건드리지 않는다**: `HandleData` 의 "이미 전달한 seq 는 ack 만 하고 버린다" 분기를 그대로 쓴다. 마지막으로 ack 받은 seq 를 한 chunk 다시 보내면 상대 채널이 ack 를 돌려주고 애플리케이션에는 아무것도 올리지 않는다. 초대받지 않은 **메시지**를 보냈다면 상대가 다음 요청의 응답으로 읽고 타입 검사에서 실패했을 것이다 — 건강함을 확인하려다 그 링크를 깨는 probe 는 probe 가 아니다.
+- **임계값은 반례로 정했다**: 6회 × 250ms = 1.5초. 하한은 건강한 쪽이 정한다(idle 은 **첫 probe** 에 답해야 하고 실측 1회), 상한은 호스트의 10초 읽기 타임아웃이 정한다. ⚠️ "1초 무수신으로 막았다" 가 아니다 — **답 없는 왕복 6회**이고 그 구분이 규칙의 전부다.
+- **깨우기**: reader 는 요청만 게시하고, dispatcher 를 깨우는 방법은 rollover 가 쓰던 채널 Close 그대로다(새 스레드·새 락 없음). 같은 ask 의 재시도는 같은 wake 에 합류한다 — 없으면 한 복구가 채널을 두 번 재키잉한다. 퇴장 시 `controlResumePending` 이면 `streamControlActive` 를 내리지 않아 **영상이 끊기지 않는다**.
+- **결과(측정치만)**: e2e **10회 연속 ALL PASS, 정체 0**. `breakToRunning` 20표본 최소 1570ms · 최대 2078ms. r1 은 성공 시 4.6초·5회 중 2회 미완주였다. 회복 구간 영상 56발 수신(이전 0발), 최장 공백 1994ms. 복구 뒤 입력이 테스트 프로세스 창에 실제 도달. **≤1s 는 주장하지 않는다.**
+- 순수 105/0, 변이 **6/6**(정지 근거 제거 / 새 시도 제거 / wake 합치기 제거 / probe 가 아무 ack 나 받아들임 / probe 예산 무한 / probe 가 전달되지 않은 seq 를 지목). 변이 1건은 처음에 헛다리였다 — `HandleAck` 에 도달한 패킷은 그 자체로 왕복을 증명하므로, 겨눌 값어치가 있는 성질은 **probe 가 진짜 메시지의 ack 를 삼키지 않는 것**이었고 그쪽으로 다시 겨눴다.
+- 제품/테스트/문서: 제품(`udp_control_channel.{hpp,cpp}`, `control_resume.hpp`, `host_startup_control.cpp`, `host_control_session.cpp`, `host_session.hpp`) / 테스트(`control_resume_test.cpp`, `control_resume_e2e_test.cpp`) / 문서(이 항목, `구현계획.md` C3 절).
+- 설치본·게시 없음.

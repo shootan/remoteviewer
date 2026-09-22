@@ -39,6 +39,22 @@ enum class ControlCloseReason : uint8_t {
 
 const char* to_string(ControlCloseReason reason);
 
+/**
+ * Whether the peer's channel is still answering. (item 8, C3 r2)
+ *
+ * Not the same question as "has anything arrived lately". A session can be idle for seconds
+ * and be perfectly healthy, and a one-way failure leaves the peer hearing everything while
+ * nothing it says gets back -- so silence is not evidence and this asks instead.
+ */
+enum class ControlProbeState : uint8_t {
+  Idle = 0,  // not asked
+  Pending,   // asked, waiting
+  Alive,     // the peer's channel answered
+  Dead,      // it did not, within the budget
+};
+
+const char* to_string(ControlProbeState state);
+
 class UdpControlChannel {
  public:
   // Transmits one datagram to the peer. Called from whichever thread is sending; must be safe
@@ -91,6 +107,38 @@ class UdpControlChannel {
     return StreamPair{txStreamId_, rxStreamId_};
   }
 
+  /**
+   * Ask the peer's channel to answer, without handing its application anything. (item 8, C3 r2)
+   *
+   * The trick is already in HandleData: a chunk whose messageSeq the peer has ALREADY
+   * delivered is acknowledged and dropped ("the peer did not see our ack, so repeat it and
+   * drop the data", :193). So re-sending one chunk of the last message this side had
+   * acknowledged produces a real round trip through the peer's channel and nothing at all
+   * above it -- no delivery, no new state, and not one line of change at the other end.
+   *
+   * That last part is why it is done this way. The control protocol is strict
+   * request/response: an unsolicited message would be read as the answer to whatever the peer
+   * asks next, fail its type check, and break the very link this is trying to establish is
+   * healthy. A probe that can do that is not a probe.
+   *
+   * Budget in attempts and interval, because "no answer for N ms" on its own would call an
+   * idle session dead. Retransmits are driven by Tick(), like everything else here.
+   */
+  void StartProbe(uint32_t maxAttempts, uint64_t intervalUs);
+  ControlProbeState ProbeStatus() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return probeState_;
+  }
+  uint32_t ProbeAttempts() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return probeAttempts_;
+  }
+  void ClearProbe() {
+    std::lock_guard<std::mutex> lock(mu_);
+    probeState_ = ControlProbeState::Idle;
+    probeAttempts_ = 0;
+  }
+
   bool IsClosed() const { return closed_.load(std::memory_order_relaxed); }
   ControlCloseReason CloseReason() const {
     return closeReason_.load(std::memory_order_relaxed);
@@ -129,6 +177,7 @@ class UdpControlChannel {
   };
 
   void SendFragments(const Outbound& msg, const std::vector<uint16_t>* only);
+  void SendProbeChunk();  // caller holds mu_
   void SendAckOrNack(uint16_t kind, uint32_t seq, const std::vector<uint16_t>& missing);
   void HandleData(const UdpControlChunkHeader& head, const uint8_t* payload, size_t payloadLen);
   void HandleAck(const UdpControlAckPacket& packet);
@@ -145,6 +194,15 @@ class UdpControlChannel {
 
   uint32_t nextTxSeq_ = 1;
   std::deque<Outbound> txQueue_;  // front is the message awaiting acknowledgement
+  // The highest message this side has had acknowledged -- which is therefore one the peer has
+  // delivered, and so one it will acknowledge again without delivering. That is the probe.
+  uint32_t lastAckedTxSeq_ = 0;
+  ControlProbeState probeState_ = ControlProbeState::Idle;
+  uint32_t probeSeq_ = 0;
+  uint32_t probeAttempts_ = 0;
+  uint32_t probeMaxAttempts_ = 0;
+  uint64_t probeIntervalUs_ = 0;
+  uint64_t probeLastSendUs_ = 0;
 
   std::map<uint32_t, Inbound> rxPending_;
   uint32_t rxDeliveredSeq_ = 0;

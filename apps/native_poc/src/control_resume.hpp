@@ -26,6 +26,7 @@
 // For kUdpFeatureControlResume: the negotiation helper below answers a question about the wire,
 // so the wire's own definition is where the answer has to come from.
 #include "poc_protocol.hpp"
+#include "udp_control_channel.hpp"
 
 namespace remote60::native_poc {
 
@@ -232,6 +233,111 @@ class ResumeAckBudget {
   uint64_t lastUs_ = 0;
   bool started_ = false;
 };
+
+/**
+ * What to do with a resume that arrives while the dispatcher is serving. (item 8, C3 r2)
+ *
+ * host_should_accept_resume refuses every one of them, and that was right as far as it went:
+ * re-keying a channel that is in use is the one thing this must never do. What it could not
+ * see is that the dispatcher stays inside Serve() until its own ten second read timeout, and
+ * the moment it leaves is the moment the host stops sending video -- so by the time a resume
+ * could be accepted, the viewer has usually stopped asking, because a session with no picture
+ * is one it is told not to repair. Three rules that are each correct, closing the window
+ * between them. Measured: three repairs in five runs, and the other two never happened.
+ *
+ * So a resume may now interrupt a serve, on three conditions together -- and the third is the
+ * one that matters:
+ *
+ *   verified   -- everything the old path already required (negotiated, this session, the
+ *                 bound endpoint, the request content, the stream ids in force).
+ *   new        -- a resumeId this host has not already answered. A repeat of an answered ask
+ *                 is the idempotent replay and changes nothing.
+ *   stopped    -- POSITIVE evidence that the existing channel has stopped: either it declared
+ *                 peer-lost on its own, or a round-trip probe over it went unanswered.
+ *
+ * "Stopped" is deliberately not "nothing has arrived for a while". An idle session is silent
+ * and healthy, and a one-way failure leaves the host hearing the client perfectly while
+ * nothing it sends gets back -- so a silence test would both kill healthy sessions and miss
+ * the failure it exists to catch. The probe asks instead, and a channel that answers is a
+ * channel that keeps its session: the ask is refused and nothing is remembered.
+ */
+enum class HostResumeVerdict : uint8_t {
+  Ignore = 0,  // not this session's: no reply, and nothing kept
+  ReplayAck,   // an ask already answered: send that answer again, change nothing
+  Serve,       // accept -- re-key and answer
+  Probe,       // serving, new ask, no evidence yet: ask the channel; answer served=0 meanwhile
+  Refuse,      // serving and the channel answered: served=0, nothing kept
+};
+
+inline const char* to_string(HostResumeVerdict v) {
+  switch (v) {
+    case HostResumeVerdict::ReplayAck: return "replay";
+    case HostResumeVerdict::Serve: return "serve";
+    case HostResumeVerdict::Probe: return "probe";
+    case HostResumeVerdict::Refuse: return "refuse";
+    default: return "ignore";
+  }
+}
+
+struct HostResumeEligibility {
+  bool negotiated = false;
+  bool sessionActive = false;    // from the bound peer, with a session to resume onto
+  bool servingControl = false;   // the dispatcher is inside Serve() right now
+  bool cacheMatches = false;     // host_should_replay_resume_ack said yes for this ask
+  bool sameIdAsCache = false;    // an answer is remembered, and it is for THIS resumeId
+  bool channelPeerLost = false;  // the host's own channel gave up on the peer
+  ControlProbeState probe = ControlProbeState::Idle;
+};
+
+inline HostResumeVerdict host_resume_verdict(const HostResumeEligibility& in) {
+  if (!in.negotiated || !in.sessionActive) return HostResumeVerdict::Ignore;
+  // An ask already answered is answered the same way, whatever else is going on.
+  if (in.cacheMatches) return HostResumeVerdict::ReplayAck;
+  // Nobody is serving: the original rule, unchanged. There is nothing to interrupt.
+  if (!in.servingControl) return HostResumeVerdict::Serve;
+  // The id is one this host has answered, but the ask no longer matches that answer (the
+  // session moved, or the content differs). That is not a new attempt and it is not a repeat.
+  if (in.sameIdAsCache) return HostResumeVerdict::Refuse;
+  if (in.channelPeerLost) return HostResumeVerdict::Serve;
+  if (in.probe == ControlProbeState::Alive) return HostResumeVerdict::Refuse;
+  if (in.probe == ControlProbeState::Dead) return HostResumeVerdict::Serve;
+  return HostResumeVerdict::Probe;
+}
+
+/**
+ * Whether an accepted ask should raise its own wake, or join one already in flight.
+ * (item 8, C3 r2)
+ *
+ * The viewer repeats an ask every 500 ms and the dispatcher can take longer than one
+ * wait to come back, so the same recovery arrives more than once while it is already
+ * being served. Both copies would be honoured and the second would re-key a channel the
+ * first had just repaired -- one logical recovery, two repairs, and whatever the first
+ * one had started to carry thrown away between them.
+ *
+ * Written out as a function because "the second copy joins the first" is a rule, and a
+ * rule buried in a condition inside a reader loop is one nothing can hold.
+ */
+inline bool host_resume_should_raise_wake(bool accepted, bool wakePending,
+                                          bool pendingIsSameAsk) {
+  if (!accepted) return false;
+  if (wakePending && pendingIsSameAsk) return false;
+  return true;
+}
+
+/**
+ * The probe budget, fixed by the counter-examples rather than by taste. (item 8, C3 r2)
+ *
+ * Six asks, a quarter second apart: about a second and a half before a channel is called
+ * stopped. The floor is set by the healthy cases -- an idle session must answer the FIRST
+ * probe, so the interval has to exceed a real round trip with room to spare, and 250 ms does
+ * on any link this product is usable on. The ceiling is set by the host's own ten second read
+ * timeout, which is what this exists to get ahead of.
+ *
+ * Not to be described as "one second of silence". It is six unanswered round trips; silence on
+ * its own is not evidence here and the distinction is the whole point of the rule.
+ */
+constexpr uint32_t kResumeProbeMaxAttempts = 6;
+constexpr uint64_t kResumeProbeIntervalUs = 250000;
 
 // Per session and resumeId: the initial values Codex set for the repeat.
 constexpr uint32_t kResumeAckReplayPerSecond = 4;

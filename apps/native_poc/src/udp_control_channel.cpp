@@ -55,6 +55,9 @@ void UdpControlChannel::Close(ControlCloseReason reason) {
 
 void UdpControlChannel::Reset() {
   std::lock_guard<std::mutex> lock(mu_);
+  probeState_ = ControlProbeState::Idle;
+  probeAttempts_ = 0;
+  lastAckedTxSeq_ = 0;
   nextTxSeq_ = 1;
   txQueue_.clear();
   rxPending_.clear();
@@ -68,6 +71,11 @@ void UdpControlChannel::Reset() {
 
 void UdpControlChannel::ResumeWith(uint32_t txStreamId, uint32_t rxStreamId) {
   std::lock_guard<std::mutex> lock(mu_);
+  // The repair answers the question the probe was asking, and the seq it named belongs to a
+  // stream neither side listens on any more.
+  probeState_ = ControlProbeState::Idle;
+  probeAttempts_ = 0;
+  lastAckedTxSeq_ = 0;
   txStreamId_ = txStreamId;
   rxStreamId_ = rxStreamId;
   nextTxSeq_ = 1;
@@ -77,6 +85,48 @@ void UdpControlChannel::ResumeWith(uint32_t txStreamId, uint32_t rxStreamId) {
   rxDeliveredSeq_ = 0;
   closeReason_.store(ControlCloseReason::None, std::memory_order_relaxed);
   closed_.store(false, std::memory_order_relaxed);
+}
+
+const char* to_string(ControlProbeState state) {
+  switch (state) {
+    case ControlProbeState::Pending: return "pending";
+    case ControlProbeState::Alive: return "alive";
+    case ControlProbeState::Dead: return "dead";
+    default: return "idle";
+  }
+}
+
+void UdpControlChannel::SendProbeChunk() {
+  if (!send_) return;
+  // One chunk, naming a message the peer has already delivered. It never gets past the first
+  // branch of HandleData, so the payload is irrelevant -- but it has to be non-empty, because
+  // a zero-length fragment is discarded before the ack.
+  UdpControlChunkHeader head{};
+  head.kind = static_cast<uint16_t>(UdpPacketKind::ControlData);
+  head.size = static_cast<uint16_t>(sizeof(head));
+  head.streamId = txStreamId_;
+  head.messageSeq = probeSeq_;
+  head.fragIndex = 0;
+  head.fragCount = 1;
+  head.fragOffset = 0;
+  head.totalSize = 1;
+  uint8_t datagram[sizeof(UdpControlChunkHeader) + 1]{};
+  std::memcpy(datagram, &head, sizeof(head));
+  datagram[sizeof(head)] = 0;
+  (void)send_(datagram, sizeof(datagram));
+}
+
+void UdpControlChannel::StartProbe(uint32_t maxAttempts, uint64_t intervalUs) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (closed_.load(std::memory_order_relaxed)) return;
+  if (probeState_ == ControlProbeState::Pending) return;  // one in flight is enough
+  probeState_ = ControlProbeState::Pending;
+  probeSeq_ = lastAckedTxSeq_;
+  probeMaxAttempts_ = maxAttempts == 0 ? 1 : maxAttempts;
+  probeIntervalUs_ = intervalUs;
+  probeAttempts_ = 1;
+  probeLastSendUs_ = now_us();
+  SendProbeChunk();
 }
 
 const char* to_string(ControlCloseReason reason) {
@@ -249,6 +299,13 @@ void UdpControlChannel::HandleData(const UdpControlChunkHeader& head, const uint
 }
 
 void UdpControlChannel::HandleAck(const UdpControlAckPacket& packet) {
+  // The probe first, and before the queue check, because the seq it names is one that has
+  // already left the queue -- that is exactly what makes it safe to send.
+  if (probeState_ == ControlProbeState::Pending && packet.messageSeq == probeSeq_ &&
+      packet.kind == static_cast<uint16_t>(UdpPacketKind::ControlAck)) {
+    probeState_ = ControlProbeState::Alive;
+    return;
+  }
   if (txQueue_.empty() || txQueue_.front().seq != packet.messageSeq) return;
 
   if (packet.kind == static_cast<uint16_t>(UdpPacketKind::ControlNack)) {
@@ -258,6 +315,7 @@ void UdpControlChannel::HandleAck(const UdpControlAckPacket& packet) {
     return;
   }
 
+  lastAckedTxSeq_ = packet.messageSeq;
   txQueue_.pop_front();
   if (!txQueue_.empty()) {
     txQueue_.front().lastSendUs = now_us();
@@ -274,6 +332,22 @@ bool UdpControlChannel::OnPacket(const void* data, size_t len) {
   std::memcpy(&magic, bytes, sizeof(magic));
   std::memcpy(&kind, bytes + sizeof(magic), sizeof(kind));
   if (magic != kMagic) return false;
+
+  // Which datagrams are this channel's AT ALL, decided before anything else. (item 8, C3 r2)
+  //
+  // The closed check used to come first and answered true for every datagram carrying the
+  // magic -- which is all of them. A closed control channel therefore swallowed the video,
+  // and on the host the directory agent's traffic with it. That is not a detail: it is why a
+  // viewer whose control channel had just died stopped seeing frames, and a viewer that sees
+  // no frames is told not to repair its session. The repair could not begin because the
+  // break had eaten the evidence that the session was worth repairing.
+  //
+  // Measured rather than reasoned about: through a proxy, 21 video datagrams were forwarded
+  // and 0 arrived, in the two seconds after the channel closed.
+  const bool mine = kind == static_cast<uint16_t>(UdpPacketKind::ControlData) ||
+                    kind == static_cast<uint16_t>(UdpPacketKind::ControlAck) ||
+                    kind == static_cast<uint16_t>(UdpPacketKind::ControlNack);
+  if (!mine) return false;
 
   std::lock_guard<std::mutex> lock(mu_);
   if (closed_.load(std::memory_order_relaxed)) return true;
@@ -304,6 +378,17 @@ bool UdpControlChannel::OnPacket(const void* data, size_t len) {
 void UdpControlChannel::Tick() {
   std::lock_guard<std::mutex> lock(mu_);
   const uint64_t now = now_us();
+  // The probe has its own budget, deliberately shorter than the message retransmit budget:
+  // it is answering "is the peer there NOW" for a decision that cannot wait six seconds, and
+  // it is a round trip rather than a silence, so a shorter budget is still evidence.
+  if (probeState_ == ControlProbeState::Pending && now - probeLastSendUs_ >= probeIntervalUs_) {
+    if (++probeAttempts_ > probeMaxAttempts_) {
+      probeState_ = ControlProbeState::Dead;
+    } else {
+      probeLastSendUs_ = now;
+      SendProbeChunk();
+    }
+  }
   for (auto it = rxPending_.begin(); it != rxPending_.end();) {
     if (now - it->second.createdUs >= kIncompleteLifetimeUs) it = rxPending_.erase(it);
     else ++it;
