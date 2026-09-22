@@ -244,6 +244,8 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
       // nothing about the next, and an Alive left over from a refused ask would refuse a
       // genuine break for the rest of the session. (item 8, C3 r2)
       uint32_t resumeProbeId = 0;
+      uint64_t resumeProbeEpoch = 0;   // the session that id belonged to
+      uint32_t resumeProbeCount = 0;   // probes spent on this recovery, as a hard ceiling
       // The attempt the dispatcher is currently being woken for, and the sequence number that
       // attempt is waiting on. A retry of the SAME ask joins that wake instead of starting a
       // second one -- the viewer repeats every 500 ms and the dispatcher may take longer than
@@ -552,10 +554,15 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
               }
               continue;
             }
-            // Whether this ask may interrupt a serve, and on what evidence. (item 8, C3 r2)
-            if (resumeProbeId != resume.resumeId) {
+            // Whether this ask may interrupt a serve, and on what evidence. (item 8, C3 r2/r3)
+            //
+            // The bookkeeping is keyed to (session, resumeId): a verdict reached for one
+            // recovery says nothing about the next, and a session rollover ends both.
+            if (resumeProbeId != resume.resumeId || resumeProbeEpoch != readyEpoch) {
               clientSession.udpControlChannel.ClearProbe();
               resumeProbeId = resume.resumeId;
+              resumeProbeEpoch = readyEpoch;
+              resumeProbeCount = 0;
             }
             remote60::native_poc::HostResumeEligibility elig;
             elig.negotiated = decide.negotiated;
@@ -567,12 +574,28 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
                 clientSession.udpControlChannel.IsClosed() &&
                 clientSession.udpControlChannel.CloseReason() ==
                     remote60::native_poc::ControlCloseReason::PeerLost;
-            elig.probe = clientSession.udpControlChannel.ProbeStatus();
+            // A verdict is about the instant it was reached. Re-reading one Alive for every
+            // retry of the same recovery is what r2 did, and it refused a genuine break for the
+            // whole ceiling whenever the channel happened to answer the first ask. The viewer
+            // cannot route around it -- one break is one resumeId, deliberately -- so the
+            // staleness has to be handled here. (item 8, C3 r3)
+            remote60::native_poc::ResumeProbeFreshness fresh;
+            fresh.state = clientSession.udpControlChannel.ProbeStatus();
+            fresh.ageUs = clientSession.udpControlChannel.ProbeAgeUs();
+            fresh.probesThisRecovery = resumeProbeCount;
+            if (remote60::native_poc::resume_probe_action(fresh) ==
+                remote60::native_poc::ResumeProbeAction::Restart) {
+              clientSession.udpControlChannel.ClearProbe();
+              fresh.state = remote60::native_poc::ControlProbeState::Idle;
+            }
+            elig.probe = fresh.state;
             const remote60::native_poc::HostResumeVerdict verdict =
                 remote60::native_poc::host_resume_verdict(elig);
-            if (verdict == remote60::native_poc::HostResumeVerdict::Probe) {
+            if (verdict == remote60::native_poc::HostResumeVerdict::Probe &&
+                fresh.state == remote60::native_poc::ControlProbeState::Idle) {
               // Ask the channel whether it is still there. Answering served=0 meanwhile is what
               // keeps the viewer asking, which is how the answer gets collected.
+              ++resumeProbeCount;
               clientSession.udpControlChannel.StartProbe(
                   remote60::native_poc::kResumeProbeMaxAttempts,
                   remote60::native_poc::kResumeProbeIntervalUs);
@@ -672,6 +695,7 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
                                      ? "probe-failed"
                                      : remote60::native_poc::to_string(elig.probe)))
                       << " probeAttempts=" << clientSession.udpControlChannel.ProbeAttempts()
+                      << " probes=" << resumeProbeCount
                       << " wake=" << (wake ? 1 : 0)
                       << " negotiated=" << (decide.negotiated ? 1 : 0)
                       << " peer=" << (fromCurrentPeer ? "same" : "other")

@@ -57,6 +57,7 @@ void UdpControlChannel::Reset() {
   std::lock_guard<std::mutex> lock(mu_);
   probeState_ = ControlProbeState::Idle;
   probeAttempts_ = 0;
+  probeDecidedUs_ = 0;
   lastAckedTxSeq_ = 0;
   nextTxSeq_ = 1;
   txQueue_.clear();
@@ -75,6 +76,7 @@ void UdpControlChannel::ResumeWith(uint32_t txStreamId, uint32_t rxStreamId) {
   // stream neither side listens on any more.
   probeState_ = ControlProbeState::Idle;
   probeAttempts_ = 0;
+  probeDecidedUs_ = 0;
   lastAckedTxSeq_ = 0;
   txStreamId_ = txStreamId;
   rxStreamId_ = rxStreamId;
@@ -95,6 +97,8 @@ const char* to_string(ControlProbeState state) {
     default: return "idle";
   }
 }
+
+uint64_t UdpControlChannel::ProbeClockUs() { return now_us(); }
 
 void UdpControlChannel::SendProbeChunk() {
   if (!send_) return;
@@ -121,6 +125,7 @@ void UdpControlChannel::StartProbe(uint32_t maxAttempts, uint64_t intervalUs) {
   if (closed_.load(std::memory_order_relaxed)) return;
   if (probeState_ == ControlProbeState::Pending) return;  // one in flight is enough
   probeState_ = ControlProbeState::Pending;
+  probeDecidedUs_ = 0;
   probeSeq_ = lastAckedTxSeq_;
   probeMaxAttempts_ = maxAttempts == 0 ? 1 : maxAttempts;
   probeIntervalUs_ = intervalUs;
@@ -304,6 +309,7 @@ void UdpControlChannel::HandleAck(const UdpControlAckPacket& packet) {
   if (probeState_ == ControlProbeState::Pending && packet.messageSeq == probeSeq_ &&
       packet.kind == static_cast<uint16_t>(UdpPacketKind::ControlAck)) {
     probeState_ = ControlProbeState::Alive;
+    probeDecidedUs_ = now_us();
     return;
   }
   if (txQueue_.empty() || txQueue_.front().seq != packet.messageSeq) return;
@@ -384,6 +390,7 @@ void UdpControlChannel::Tick() {
   if (probeState_ == ControlProbeState::Pending && now - probeLastSendUs_ >= probeIntervalUs_) {
     if (++probeAttempts_ > probeMaxAttempts_) {
       probeState_ = ControlProbeState::Dead;
+      probeDecidedUs_ = now;
     } else {
       probeLastSendUs_ = now;
       SendProbeChunk();

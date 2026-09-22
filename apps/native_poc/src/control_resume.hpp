@@ -339,6 +339,57 @@ inline bool host_resume_should_raise_wake(bool accepted, bool wakePending,
 constexpr uint32_t kResumeProbeMaxAttempts = 6;
 constexpr uint64_t kResumeProbeIntervalUs = 250000;
 
+/**
+ * How long a probe verdict may be believed. (item 8, C3 r3)
+ *
+ * A probe answers about the instant it ran. r2 asked once per resumeId and re-read that answer
+ * for every retry -- so a channel that was alive when the first ask arrived and died a moment
+ * later was refused for the entire thirty second ceiling, which is the exact stall this
+ * feature exists to remove, reintroduced one layer up. The viewer cannot work around it
+ * either: one break is one resumeId, by design.
+ *
+ * Chosen against the viewer's retry cadence, which is 500 ms. Longer than that, so an
+ * ordinary retry reuses the verdict instead of making the host ask again -- the first value
+ * tried here was shorter, and the effect was that every single retry started a new probe and
+ * the reuse path was never taken at all. Short enough that a channel which has died is
+ * re-examined within about a second, and settled within that plus the probe budget: call it
+ * two and a half seconds against the ten this replaced.
+ */
+constexpr uint64_t kResumeProbeFreshUs = 750000;
+
+/** A hard ceiling on probes per recovery, independent of the rate the asks arrive at. */
+constexpr uint32_t kResumeProbeMaxPerRecovery = 64;
+
+/** What to do with the probe state in hand when another ask for the SAME recovery arrives. */
+enum class ResumeProbeAction : uint8_t {
+  Use = 0,  // the verdict stands: act on it
+  Restart,  // it is stale (or there is none): ask again
+};
+
+struct ResumeProbeFreshness {
+  ControlProbeState state = ControlProbeState::Idle;
+  // How old the verdict is, asked of whatever holds it. Not a pair of timestamps to subtract:
+  // the channel stamps with steady_clock and its callers keep time with QPC, and those have
+  // different origins -- a difference that reads as a plausible number on this machine and as
+  // nonsense elsewhere.
+  uint64_t ageUs = 0;
+  uint32_t probesThisRecovery = 0;
+  uint64_t freshUs = kResumeProbeFreshUs;
+  uint32_t maxProbes = kResumeProbeMaxPerRecovery;
+};
+
+inline ResumeProbeAction resume_probe_action(const ResumeProbeFreshness& in) {
+  // A question still in flight is not re-asked; that is what the attempt budget is for.
+  if (in.state == ControlProbeState::Pending) return ResumeProbeAction::Use;
+  // Dead is acted on immediately -- the ask that reads it is served -- so its age never
+  // matters, and re-asking would only delay a repair that has already been justified.
+  if (in.state == ControlProbeState::Dead) return ResumeProbeAction::Use;
+  if (in.probesThisRecovery >= in.maxProbes) return ResumeProbeAction::Use;
+  if (in.state == ControlProbeState::Idle) return ResumeProbeAction::Restart;
+  // Alive, and the only question worth asking about it is how long ago.
+  return in.ageUs >= in.freshUs ? ResumeProbeAction::Restart : ResumeProbeAction::Use;
+}
+
 // Per session and resumeId: the initial values Codex set for the repeat.
 constexpr uint32_t kResumeAckReplayPerSecond = 4;
 constexpr uint32_t kResumeAckReplayBurst = 2;

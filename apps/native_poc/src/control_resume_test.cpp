@@ -737,6 +737,102 @@ int main() {
     check("...and it does claim control traffic", link.viewer.OnPacket(&ack, sizeof(ack)));
   }
 
+  // ------------------------------- a probe answers about an instant, not a recovery (C3 r3)
+  //
+  // r2 asked once per resumeId and re-read the answer for every retry. A channel that
+  // happened to answer the first ask and died a moment later was therefore refused for the
+  // whole thirty second ceiling -- the stall this feature exists to remove, put back one
+  // layer up. The viewer cannot work around it: one break is one resumeId, by design.
+  {
+    // ⑴ alive, then the link really goes. The retry must bring a fresh question.
+    ResumeProbeFreshness alive;
+    alive.state = ControlProbeState::Alive;
+    alive.ageUs = kResumeProbeFreshUs - 1;
+    check("[counter-example 1] a fresh Alive is believed", 
+          resume_probe_action(alive) == ResumeProbeAction::Use);
+    alive.ageUs = kResumeProbeFreshUs;
+    check("[counter-example 1] A STALE Alive IS ASKED AGAIN, NOT RE-READ",
+          resume_probe_action(alive) == ResumeProbeAction::Restart,
+          "otherwise one lucky answer refuses the repair for the whole ceiling");
+
+    // ⑵ the same thing arrived at by a late old Ack rather than by a healthy link: the
+    //   rule cannot tell the difference and must not need to. Age is the whole test.
+    ResumeProbeFreshness late = alive;
+    late.ageUs = 5 * kResumeProbeFreshUs;
+    check("[counter-example 2] ...however it came to be Alive", 
+          resume_probe_action(late) == ResumeProbeAction::Restart);
+
+    // ⑶ after a re-key or a rollover there is no verdict at all, and Idle asks.
+    ResumeProbeFreshness cleared;
+    cleared.state = ControlProbeState::Idle;
+    check("[counter-example 3] no verdict means ask", 
+          resume_probe_action(cleared) == ResumeProbeAction::Restart);
+
+    // ⑷ a retry inside the freshness window costs nothing extra.
+    ResumeProbeFreshness pending;
+    pending.state = ControlProbeState::Pending;
+    pending.ageUs = 10 * kResumeProbeFreshUs;
+    check("[counter-example 4] a question still in flight is not re-asked",
+          resume_probe_action(pending) == ResumeProbeAction::Use,
+          "the attempt budget is what bounds that one");
+    ResumeProbeFreshness dead;
+    dead.state = ControlProbeState::Dead;
+    dead.ageUs = 100 * kResumeProbeFreshUs;
+    check("...and Dead is acted on whatever its age", 
+          resume_probe_action(dead) == ResumeProbeAction::Use,
+          "the ask that reads it is served, so re-asking would only delay the repair");
+
+    // The hard ceiling, on top of the rate the send budgets already impose.
+    ResumeProbeFreshness spent = alive;
+    spent.ageUs = 1000 * kResumeProbeFreshUs;
+    spent.probesThisRecovery = kResumeProbeMaxPerRecovery;
+    check("a recovery cannot probe without limit", 
+          resume_probe_action(spent) == ResumeProbeAction::Use,
+          std::to_string(kResumeProbeMaxPerRecovery) + " probes is the ceiling");
+  }
+
+  // --------------------------------- a re-key or a close leaves no verdict behind (C3 r3)
+  {
+    Link link;
+    link.Wire();
+    check("a message crosses the link", carry_one_message(link, "hello"));
+    link.host.StartProbe(kResumeProbeMaxAttempts, kResumeProbeIntervalUs);
+    check("the probe is answered", link.SettleProbe(4000) == ControlProbeState::Alive);
+    check("...and the verdict is stamped", link.host.ProbeDecidedUs() > 0);
+    check("...and its age is measured by the clock that stamped it",
+          link.host.ProbeAgeUs() < 4000000,
+          std::to_string(link.host.ProbeAgeUs()) + "us -- a cross-clock subtraction would not "
+          "land in this range");
+    // ...and it ADVANCES. An age that is always zero reads as permanently fresh, which is the
+    // r2 defect wearing a different hat: one verdict believed for the whole recovery.
+    const uint64_t ageBefore = link.host.ProbeAgeUs();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const uint64_t ageAfter = link.host.ProbeAgeUs();
+    check("AND IT GETS OLDER", ageAfter >= ageBefore + 250000 && ageAfter < 4000000,
+          std::to_string(ageBefore) + "us then " + std::to_string(ageAfter) + "us");
+
+    link.host.ResumeWith(control_resume_stream_id(kUdpControlStreamHostToClient, 0x99),
+                         control_resume_stream_id(kUdpControlStreamClientToHost, 0x99));
+    check("[counter-example 3] A RE-KEY LEAVES NO VERDICT BEHIND",
+          link.host.ProbeStatus() == ControlProbeState::Idle,
+          to_string(link.host.ProbeStatus()));
+    check("...and no timestamp either", link.host.ProbeDecidedUs() == 0);
+
+    Link second;
+    second.Wire();
+    check("a message crosses the second link", carry_one_message(second, "hello"));
+    second.host.StartProbe(kResumeProbeMaxAttempts, kResumeProbeIntervalUs);
+    check("its probe is answered too",
+          second.SettleProbe(4000) == ControlProbeState::Alive);
+    second.host.Close(ControlCloseReason::PeerLost);
+    check("a closed channel reports no verdict",
+          second.host.ProbeStatus() == ControlProbeState::Idle,
+          "whoever closed it, and for whatever reason");
+    check("...nor a timestamp", second.host.ProbeDecidedUs() == 0);
+    second.host.Reset();
+    check("...and a reset leaves none", second.host.ProbeStatus() == ControlProbeState::Idle);
+  }
+
   // ------------------------------------------------- one recovery raises one wake (C3 r2)
   {
     check("an accepted ask with nothing pending raises its own wake",

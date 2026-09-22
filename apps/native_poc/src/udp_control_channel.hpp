@@ -127,7 +127,40 @@ class UdpControlChannel {
   void StartProbe(uint32_t maxAttempts, uint64_t intervalUs);
   ControlProbeState ProbeStatus() const {
     std::lock_guard<std::mutex> lock(mu_);
+    // A closed channel has no verdict worth reading, whoever closed it and for whatever
+    // reason. Answered here rather than cleared in Close(), which is called both with and
+    // without this lock held and so cannot touch the fields safely.
+    if (closed_.load(std::memory_order_relaxed)) return ControlProbeState::Idle;
     return probeState_;
+  }
+  /**
+   * When the current verdict was reached, so a caller can ask how old it is.
+   *
+   * A probe answers about the instant it ran, and a channel that was alive a moment ago can be
+   * gone now -- which is the ordinary shape of the failure this feature repairs. Without this,
+   * a single Alive would be re-read for every retry of the same recovery and the repair would
+   * be refused for the whole ceiling. 0 while Idle or Pending.
+   */
+  /**
+   * How long ago the current verdict was reached, measured by the clock that stamped it.
+   *
+   * The age is computed HERE rather than handed out as a timestamp for a caller to subtract
+   * from its own clock. This channel stamps with steady_clock and its callers keep time with
+   * QueryPerformanceCounter; those two have different origins, so that subtraction produces a
+   * number with no meaning -- one that happens to look right on this machine, which is the
+   * worst kind. 0 when there is no verdict.
+   */
+  uint64_t ProbeAgeUs() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (closed_.load(std::memory_order_relaxed)) return 0;
+    if (probeDecidedUs_ == 0) return 0;
+    const uint64_t now = ProbeClockUs();
+    return now >= probeDecidedUs_ ? now - probeDecidedUs_ : 0;
+  }
+  uint64_t ProbeDecidedUs() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (closed_.load(std::memory_order_relaxed)) return 0;
+    return probeDecidedUs_;
   }
   uint32_t ProbeAttempts() const {
     std::lock_guard<std::mutex> lock(mu_);
@@ -137,6 +170,7 @@ class UdpControlChannel {
     std::lock_guard<std::mutex> lock(mu_);
     probeState_ = ControlProbeState::Idle;
     probeAttempts_ = 0;
+    probeDecidedUs_ = 0;
   }
 
   bool IsClosed() const { return closed_.load(std::memory_order_relaxed); }
@@ -178,6 +212,7 @@ class UdpControlChannel {
 
   void SendFragments(const Outbound& msg, const std::vector<uint16_t>* only);
   void SendProbeChunk();  // caller holds mu_
+  static uint64_t ProbeClockUs();  // the same clock the verdict is stamped with
   void SendAckOrNack(uint16_t kind, uint32_t seq, const std::vector<uint16_t>& missing);
   void HandleData(const UdpControlChunkHeader& head, const uint8_t* payload, size_t payloadLen);
   void HandleAck(const UdpControlAckPacket& packet);
@@ -203,6 +238,7 @@ class UdpControlChannel {
   uint32_t probeMaxAttempts_ = 0;
   uint64_t probeIntervalUs_ = 0;
   uint64_t probeLastSendUs_ = 0;
+  uint64_t probeDecidedUs_ = 0;
 
   std::map<uint32_t, Inbound> rxPending_;
   uint32_t rxDeliveredSeq_ = 0;

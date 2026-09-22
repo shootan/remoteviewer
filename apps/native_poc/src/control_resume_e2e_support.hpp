@@ -1,0 +1,357 @@
+#pragma once
+
+// Shared scaffolding for the host end-to-end tests. (item 8, C3 r3)
+//
+// None of this is specific to the resume decision: a check counter, the switch that drops
+// control datagrams between a viewer and a real host, and a window of this process for the
+// host to inject into. A second test needs exactly these, and copying them would be the worse
+// option twice -- two copies to keep honest, and a harness free to drift away from the one
+// whose numbers were reported.
+//
+// Isolation, as in the sibling host e2e tests: a scratch directory, ports nobody else is on, a
+// GNLinkCapture.exe of the test's choosing, a job object that takes the host when the test
+// process goes, and off entirely unless REMOTE60_ALLOW_HOST_E2E=1.
+
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+#include <windows.h>
+
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <functional>
+#include <iostream>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "poc_protocol.hpp"
+
+namespace remote60::native_poc::e2e {
+
+using remote60::native_poc::kMagic;
+using remote60::native_poc::UdpPacketKind;
+
+int gChecks = 0;
+int gFailures = 0;
+
+void check(const std::string& name, bool ok, const std::string& detail = {}) {
+  ++gChecks;
+  if (!ok) ++gFailures;
+  std::cout << (ok ? "PASS  " : "FAIL  ") << name;
+  if (!detail.empty()) std::cout << "  " << detail;
+  std::cout << "\n";
+}
+
+bool host_e2e_allowed() {
+  wchar_t value[8]{};
+  const DWORD n = GetEnvironmentVariableW(L"REMOTE60_ALLOW_HOST_E2E", value, 8);
+  return n > 0 && value[0] == L'1';
+}
+
+bool wait_until(const std::function<bool()>& done, int budgetMs) {
+  const DWORD deadline = GetTickCount() + static_cast<DWORD>(budgetMs);
+  while (GetTickCount() < deadline) {
+    if (done()) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  return done();
+}
+
+std::wstring self_path() {
+  std::wstring path(32768, L'\0');
+  const DWORD n = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+  path.resize(n);
+  return path;
+}
+
+std::wstring directory_of(const std::wstring& path) {
+  const size_t slash = path.find_last_of(L"\\/");
+  return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash + 1);
+}
+
+// ---------------------------------------------------------------------------- the transport seam
+
+/** Which way a datagram was going. The two directions are dropped independently. */
+enum class Dir { ViewerToHost, HostToViewer };
+
+/** What a datagram is, as far as this proxy cares. */
+enum class Kindness { Control, Resume, ResumeAck, Other };
+
+Kindness classify(const uint8_t* bytes, size_t len) {
+  if (len < sizeof(uint32_t) + sizeof(uint16_t)) return Kindness::Other;
+  uint32_t magic = 0;
+  uint16_t kind = 0;
+  std::memcpy(&magic, bytes, sizeof(magic));
+  std::memcpy(&kind, bytes + sizeof(magic), sizeof(kind));
+  if (magic != kMagic) return Kindness::Other;
+  switch (static_cast<UdpPacketKind>(kind)) {
+    case UdpPacketKind::ControlData:
+    case UdpPacketKind::ControlAck:
+    case UdpPacketKind::ControlNack:
+      return Kindness::Control;
+    case UdpPacketKind::ControlResume:
+      return Kindness::Resume;
+    case UdpPacketKind::ControlResumeAck:
+      return Kindness::ResumeAck;
+    default:
+      return Kindness::Other;
+  }
+}
+
+/**
+ * A UDP relay with a switch on the control traffic.
+ *
+ * One socket, because the host answers whatever address it heard from: the viewer's datagrams
+ * arrive from the viewer and everything else is the host. That also means the host binds its
+ * session to THIS proxy's endpoint, which is stable for the whole run -- exactly what the resume
+ * path requires of a peer.
+ */
+class ControlProxy {
+ public:
+  std::atomic<bool> dropControlUp{false};    // viewer -> host
+  std::atomic<bool> dropControlDown{false};  // host -> viewer
+  std::atomic<int> dropNextResumeAcks{0};    // swallow the host's answer N times
+  std::atomic<int> duplicateResumeAcks{0};   // ...or send it twice
+  std::atomic<uint64_t> controlDropped{0};
+  std::atomic<uint64_t> mediaPassed{0};
+  std::atomic<uint64_t> resumeAsksPassed{0};
+  std::atomic<uint64_t> resumeAcksPassed{0};
+  std::atomic<uint64_t> otherHostPorts{0};  // host datagrams from a socket other than bind-port
+  // Every control datagram seen going down, kept so a pre-break one can be replayed afterwards.
+  std::mutex capturedMu;
+  std::vector<std::vector<uint8_t>> capturedDown;
+  std::atomic<bool> capturing{false};
+
+  bool Start(uint16_t listenPort, uint16_t hostPort) {
+    sock_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock_ == INVALID_SOCKET) return false;
+    sockaddr_in bind_{};
+    bind_.sin_family = AF_INET;
+    bind_.sin_port = htons(listenPort);
+    InetPtonW(AF_INET, L"127.0.0.1", &bind_.sin_addr);
+    if (bind(sock_, reinterpret_cast<const sockaddr*>(&bind_), sizeof(bind_)) != 0) return false;
+    DWORD timeout = 50;
+    setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout),
+               sizeof(timeout));
+    int buf = 1 << 20;
+    setsockopt(sock_, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&buf), sizeof(buf));
+    host_.sin_family = AF_INET;
+    host_.sin_port = htons(hostPort);
+    InetPtonW(AF_INET, L"127.0.0.1", &host_.sin_addr);
+    worker_ = std::thread([this] { Run(); });
+    return true;
+  }
+
+  void Stop() {
+    stop_.store(true);
+    if (worker_.joinable()) worker_.join();
+    if (sock_ != INVALID_SOCKET) closesocket(sock_);
+    sock_ = INVALID_SOCKET;
+  }
+
+  /**
+   * Delivers the host's last resume answer a second time, late.
+   *
+   * Duplicating it inline does not reach the case worth checking: both copies arrive before
+   * the worker has applied either, so the second is just another valid answer. The one that
+   * matters is a copy that turns up AFTER the re-key -- which is what the host does when it
+   * thinks its answer was lost, and what must cost nothing.
+   */
+  bool ReplayLastResumeAck() {
+    std::lock_guard<std::mutex> lock(capturedMu);
+    if (lastResumeAck_.empty()) return false;
+    return sendto(sock_, reinterpret_cast<const char*>(lastResumeAck_.data()),
+                  static_cast<int>(lastResumeAck_.size()), 0,
+                  reinterpret_cast<const sockaddr*>(&viewer_), viewerLen_) > 0;
+  }
+
+  /** Sends the viewer's last resume ask to the host again, as a delayed copy would arrive. */
+  bool ReplayLastResumeAsk() {
+    std::lock_guard<std::mutex> lock(capturedMu);
+    if (lastResumeAsk_.empty()) return false;
+    return sendto(sock_, reinterpret_cast<const char*>(lastResumeAsk_.data()),
+                  static_cast<int>(lastResumeAsk_.size()), 0,
+                  reinterpret_cast<const sockaddr*>(&host_), sizeof(host_)) > 0;
+  }
+
+  /** Replays control datagrams captured before a break, as a delayed delivery would. */
+  void ReplayCapturedDown(SOCKET viewerSock) {
+    std::vector<std::vector<uint8_t>> copy;
+    {
+      std::lock_guard<std::mutex> lock(capturedMu);
+      copy = capturedDown;
+    }
+    for (const auto& d : copy) {
+      (void)sendto(sock_, reinterpret_cast<const char*>(d.data()), static_cast<int>(d.size()), 0,
+                   reinterpret_cast<const sockaddr*>(&viewer_), viewerLen_);
+    }
+    (void)viewerSock;
+  }
+
+ private:
+  void Run() {
+    std::vector<uint8_t> buf(2048);
+    while (!stop_.load()) {
+      sockaddr_in from{};
+      int fromLen = sizeof(from);
+      const int n = recvfrom(sock_, reinterpret_cast<char*>(buf.data()),
+                             static_cast<int>(buf.size()), 0,
+                             reinterpret_cast<sockaddr*>(&from), &fromLen);
+      if (n <= 0) continue;
+      // The viewer is whoever spoke first, and stays that address.
+      //
+      // It used to be decided the other way round -- anything not from the host's bind port
+      // was taken for the viewer, and viewer_ was reassigned to it. The host owns more than
+      // one socket, so that was a way for a frame to be sent back where it came from while
+      // this proxy counted it as forwarded. The counter below says it has not happened in the
+      // runs since, so it is NOT offered as the explanation for the earlier stall; it is
+      // simply the correct rule, and now there is a number that would show it if it did.
+      if (!haveViewer_) {
+        viewer_ = from;
+        viewerLen_ = fromLen;
+        haveViewer_ = true;
+      }
+      const bool fromViewer = from.sin_addr.s_addr == viewer_.sin_addr.s_addr &&
+                              from.sin_port == viewer_.sin_port;
+      if (!fromViewer && from.sin_port != host_.sin_port) {
+        otherHostPorts.fetch_add(1);  // counted, forwarded as the host: worth knowing about
+      }
+      const Dir dir = fromViewer ? Dir::ViewerToHost : Dir::HostToViewer;
+
+      const Kindness what = classify(buf.data(), static_cast<size_t>(n));
+      if (what == Kindness::Control) {
+        if (dir == Dir::HostToViewer && capturing.load()) {
+          std::lock_guard<std::mutex> lock(capturedMu);
+          if (capturedDown.size() < 64) {
+            capturedDown.emplace_back(buf.begin(), buf.begin() + n);
+          }
+        }
+        const bool drop = (dir == Dir::ViewerToHost) ? dropControlUp.load() : dropControlDown.load();
+        if (drop) {
+          controlDropped.fetch_add(1);
+          continue;
+        }
+      } else if (what == Kindness::ResumeAck) {
+        {
+          std::lock_guard<std::mutex> lock(capturedMu);
+          lastResumeAck_.assign(buf.begin(), buf.begin() + n);
+        }
+        int remaining = dropNextResumeAcks.load();
+        while (remaining > 0 &&
+               !dropNextResumeAcks.compare_exchange_weak(remaining, remaining - 1)) {
+        }
+        if (remaining > 0) continue;  // the answer is lost, exactly as it would be on the wire
+        resumeAcksPassed.fetch_add(1);
+      } else if (what == Kindness::Resume) {
+        {
+          std::lock_guard<std::mutex> lock(capturedMu);
+          lastResumeAsk_.assign(buf.begin(), buf.begin() + n);
+        }
+        resumeAsksPassed.fetch_add(1);
+      } else {
+        mediaPassed.fetch_add(1);
+      }
+
+      const sockaddr_in& to = (dir == Dir::ViewerToHost) ? host_ : viewer_;
+      const int toLen = (dir == Dir::ViewerToHost) ? static_cast<int>(sizeof(host_)) : viewerLen_;
+      (void)sendto(sock_, reinterpret_cast<const char*>(buf.data()), n, 0,
+                   reinterpret_cast<const sockaddr*>(&to), toLen);
+      if (what == Kindness::ResumeAck && duplicateResumeAcks.load() > 0) {
+        duplicateResumeAcks.fetch_sub(1);
+        (void)sendto(sock_, reinterpret_cast<const char*>(buf.data()), n, 0,
+                     reinterpret_cast<const sockaddr*>(&to), toLen);
+      }
+    }
+  }
+
+  SOCKET sock_ = INVALID_SOCKET;
+  sockaddr_in host_{};
+  sockaddr_in viewer_{};
+  int viewerLen_ = sizeof(sockaddr_in);
+  std::vector<uint8_t> lastResumeAck_;  // guarded by capturedMu
+  std::vector<uint8_t> lastResumeAsk_;  // guarded by capturedMu
+  bool haveViewer_ = false;
+  std::atomic<bool> stop_{false};
+  std::thread worker_;
+};
+
+// ------------------------------------------------------------------------ the injection observer
+
+/**
+ * A window this process owns, for the host to inject into.
+ *
+ * Off screen and never activated, so nothing appears and nothing takes focus -- but a real
+ * top-level window, because that is what the host's target resolver looks for. Every input the
+ * host injects lands here as an ordinary message, which is the only evidence in this test that an
+ * input actually reached the remote side.
+ */
+class InjectTarget {
+ public:
+  std::atomic<uint64_t> mouseMoves{0};
+  std::atomic<uint64_t> keyDowns{0};
+  std::atomic<uint64_t> keyUps{0};
+
+  bool Start() {
+    thread_ = std::thread([this] { Run(); });
+    return wait_until([this] { return ready_.load(); }, 5000);
+  }
+  void Stop() {
+    if (hwnd_) PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+    if (thread_.joinable()) thread_.join();
+  }
+
+ private:
+  static LRESULT CALLBACK Proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    auto* self = reinterpret_cast<InjectTarget*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (self) {
+      if (msg == WM_MOUSEMOVE) self->mouseMoves.fetch_add(1);
+      if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) self->keyDowns.fetch_add(1);
+      if (msg == WM_KEYUP || msg == WM_SYSKEYUP) self->keyUps.fetch_add(1);
+    }
+    if (msg == WM_CLOSE) {
+      DestroyWindow(hwnd);
+      return 0;
+    }
+    if (msg == WM_DESTROY) {
+      PostQuitMessage(0);
+      return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+  }
+
+  void Run() {
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = Proc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"Remote60C3InjectTarget";
+    RegisterClassExW(&wc);
+    hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName,
+                            L"remote60 c3 inject target", WS_OVERLAPPEDWINDOW, -4000, -4000, 320,
+                            240, nullptr, nullptr, wc.hInstance, nullptr);
+    if (hwnd_) {
+      SetWindowLongPtrW(hwnd_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+      ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
+    }
+    ready_.store(true);
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+      TranslateMessage(&msg);
+      DispatchMessageW(&msg);
+    }
+    hwnd_ = nullptr;
+  }
+
+  HWND hwnd_ = nullptr;
+  std::atomic<bool> ready_{false};
+  std::thread thread_;
+};
+
+}  // namespace remote60::native_poc::e2e

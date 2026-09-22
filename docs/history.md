@@ -12409,3 +12409,16 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 순수 105/0, 변이 **6/6**(정지 근거 제거 / 새 시도 제거 / wake 합치기 제거 / probe 가 아무 ack 나 받아들임 / probe 예산 무한 / probe 가 전달되지 않은 seq 를 지목). 변이 1건은 처음에 헛다리였다 — `HandleAck` 에 도달한 패킷은 그 자체로 왕복을 증명하므로, 겨눌 값어치가 있는 성질은 **probe 가 진짜 메시지의 ack 를 삼키지 않는 것**이었고 그쪽으로 다시 겨눴다.
 - 제품/테스트/문서: 제품(`udp_control_channel.{hpp,cpp}`, `control_resume.hpp`, `host_startup_control.cpp`, `host_control_session.cpp`, `host_session.hpp`) / 테스트(`control_resume_test.cpp`, `control_resume_e2e_test.cpp`) / 문서(이 항목, `구현계획.md` C3 절).
 - 설치본·게시 없음.
+
+### 2026-09-23 C3 r3 — 한 번 물어보고 30초를 믿었다
+
+- 🔴 **probe 수명 결함(Codex 가 코드에서 찾음)**: `ClearProbe()` 가 **다른 resumeId** 에서만 돌아서, 같은 ID 의 재시도가 이전 판정을 계속 다시 읽었다. 첫 ask 때 채널이 우연히 답하면 그 단절의 모든 재시도가 **30초 내내 Refuse 로 고정**된다 — 없애려던 정체를 한 층 위에 다시 만든 셈이다. 뷰어는 피할 수 없다(한 단절 한 ID 가 설계).
+  고침: 판정에 시각을 찍고 신선도 밖이면 재probe. **신선도 750ms** 는 뷰어 재시도(500ms)보다 길게 잡았다 — 처음 250ms 로 두었더니 모든 재시도가 새 probe 를 시작해 **재사용 경로가 한 번도 실행되지 않았다**(호스트 로그로 확인). 재키잉·Reset·Close·세대 변경 시 판정 소멸, 복구당 상한 64.
+  그리고 그것을 배선하다 **나이를 두 시계로 재고 있는 것**을 찾았다 — 채널은 `steady_clock`, 호출자는 QPC. 원점이 달라 뺄셈이 무의미한데 이 PC 에서는 그럴듯해 보였다. 채널이 자기 시계로 나이를 답하게 바꾸고, **나이가 실제로 늘어나는지**를 테스트로 잡는다(항상 0이면 영원히 신선 = 같은 결함의 변장).
+- **release-all 실제 트리거**(신규 `viewer_release_all_e2e_test`): 제품 WndProc + 제품 ControlClient + 실제 호스트로 사슬을 끝까지 몬다. WM_KEYDOWN 을 넣고 → 호스트가 이 프로세스 창에 주입(WM_KEYDOWN 1) → 제어 절단(up 은 생성조차 안 됨) → 복구 → `kMsgControlResumed` → **아무도 보내지 않았는데 WM_KEYUP 이 도착**(1) → 절단 이후 추가 down **0**. 테스트가 직접 쓴 것은 첫 PostMessage 와 절단뿐이다.
+  ⚠️ **한계**: 재개 해제 경로는 둘인데 `release_all_physical`(물리 스캔코드) 쪽은 이 환경에서 **관측 불가**다 — 호스트가 `SendInput` 으로 주입하고 게이트가 캡처 대상 창의 포커스를 요구한다. 그래서 그 변이는 **통과(생존)**하고, 그 사실을 숨기지 않고 적는다. 실기 대기.
+- **`viewer_udp_recovery_test` 1/17 을 추측하지 않고 재현했다**: 부하를 걸고 40회 돌려 **8회 실패**(약 20%), 출력 전량 보관. 지점 셋 — `:1812`(S24, 6회: `waitForKeyFrame` 를 기다리지 않고 읽는데 뷰어 recv 스레드는 조금 다른 순간에 세운다), `:1435`(S15, 1회: sender 를 2초 기다리는 픽스처 예산), `:965`(1회: recv 스레드 stage 의 순간 표본). **셋 다 하네스가 다른 스레드를 한 순간에 읽거나 고정 예산만큼 기다리는 부류**이고, 이 테스트는 C3 가 건드린 채널을 한 번도 참조하지 않는다. 조건별로는 **포화 40회 중 8회 · e2e 병행 5회 중 2회 · 유휴 19회 연속 0회** — 재현 조건은 부하다. ⚠️ 중간에 "무부하 11회 통과" 만으로 결론을 적으려 했는데 바로 뒤 5회 중 2회가 깨졌다. 그때 기계는 e2e 스위트를 돌리는 중이라 **유휴가 아니었다** — 유휴 8회를 따로 재고 나서야 숫자가 맞았다. **기존 결함이라고 단정하지 않는다**; 확인된 것은 그 세 줄까지다. 게시 gate 로 "무부하 ×5 연속" 을 남겼다.
+- 검증: `control_resume_test` **122/0**(반례 4종 추가), 변이 **4/4** · 신규 `viewer_release_all_e2e_test` **19/0**, 변이 2건 예상대로 · `control_resume_e2e_test` **56/0**(케이스 5 추가) · 10회 연속 정체 0 · 전량 빌드 rc0.
+- 표기: 영상 "연속" 은 **최대 공백 포함 측정치**로만 쓴다 — 회복 구간 media 56발, 최장 공백 1994ms.
+- 제품/테스트/문서: 제품(`udp_control_channel.{hpp,cpp}`, `control_resume.hpp`, `host_startup_control.cpp`) / 테스트(`control_resume_test.cpp`, `control_resume_e2e_test.cpp`, `viewer_release_all_e2e_test.cpp` 신규, `control_resume_e2e_support.hpp` 신규) / 문서(이 항목, `구현계획.md` C3 절).
+- 설치본·게시 없음.
