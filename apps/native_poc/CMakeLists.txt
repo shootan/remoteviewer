@@ -673,6 +673,26 @@ if(MSVC)
 endif()
 add_dependencies(remote60_host_two_dispatcher_e2e_test remote60_native_video_host_poc)
 
+# The punch reply, end to end: a real GNLinkStream against a scripted fake directory, the
+# product's DirectoryRendezvous picking a candidate, and the product's udp_hello_handshake
+# opening a session on the socket that won the race -- with a capability issued against the
+# host's PUBLIC tuple and presented from a private one. C1's earlier coverage stopped at the
+# choice; this is whether the choice is worth anything.
+add_executable(remote60_host_punch_reply_e2e_test
+  src/host_punch_reply_e2e_test.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_session.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/directory_rendezvous.cpp
+)
+target_include_directories(remote60_host_punch_reply_e2e_test PRIVATE src)
+target_link_libraries(remote60_host_punch_reply_e2e_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_host_punch_reply_e2e_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_host_punch_reply_e2e_test remote60_native_video_host_poc)
+
 # The dispatcher itself. Runs the real GNLinkStream on isolated ports with a GNLinkCapture that
 # never answers, connects to its real control port, and measures whether the channel still replies
 # while a preview is timing out -- which is the thing that failed on 2026-09-15.

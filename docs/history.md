@@ -12167,3 +12167,19 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 내 결함 2건(테스트가 잡음): 창 열림을 `windowOpenedMs == 0` **센티널**로 표현해 시각 0 에 열린 창이 닫힌 것과 구분되지 않았다(→ 별도 플래그) · 첫 하네스가 소켓 없이 send 를 기록만 해서 observe 프로브가 아무 데도 가지 않았고, 사이클이 heartbeat 까지 못 가 capability 가 수집되지 않았다(→ 실제 소켓+펌프).
 - 미검증(실기): PC1→PC2 실제 접속에서 `[relay] bound` 가 사라지는지. 릴리스 뒤 관찰 항목.
 - 제품/테스트/문서: 제품(`punch_reply.hpp` 신규, `directory_client.{hpp,cpp}`) / 테스트(`punch_reply_test.cpp` 신규, `directory_retry_test.cpp` 확장) / 문서(이 항목, `구현계획.md` C1).
+
+### 2026-09-22 C1 r2 — 후보를 고른 뒤가 없었다: 실제 세션 성립까지 몬다
+
+- r1 이 남긴 구멍(Codex Q4, 내가 테스트·문서·보고에 스스로 적어 둔 것): e2e 가 `PunchAny` 의 **후보 선택까지만** 갔고 그 뒤의 Hello/HelloAck 를 몰지 않았다. 즉 "고른 주소가 쓸모 있는가" 는 검사되지 않았다.
+- 닫은 방법(`apps/native_poc/src/host_punch_reply_e2e_test.cpp` 신규, 격리 e2e`REMOTE60_ALLOW_HOST_E2E=1` — 없으면 큰 소리로 SKIP·exit 0): **실제 `GNLinkStream.exe`** 를 스폰(`--bind-address 127.0.0.1 --bind-port m --control-port c --directory-url <fake>`)하고 스크립트된 가짜 디렉터리가 **공인 tuple 211.218.222.1:60420 으로 발급한 capability** 를 heartbeat 로 준다 → 클라는 제품 `Observe` → `PunchAny`[private, relay 2500ms] → 고른 소켓을 제품 `ClientSessionController`(`preparedUdpSocket`)에 **그대로 넘겨** 제품 hello 를 태운다.
+- 케이스 4개, 각각 자기 호스트를 스폰한다(capability 는 단일 사용, 창은 실시간이라 공유하면 케이스가 앞 케이스에 의존한다):
+  1. **무장**: private at 0ms → 세션 Connected → 호스트 stdout `capability endpoint translated expected=211.218.222.1:60420` + `client connected` → 제어 왕복 1회(`RequestDesktopMode` → `window_selected`) → 중복 펀치는 예산(25) 안에서 모두 응답 → **릴레이의 2.5s 늦은 답이 이미 선 세션의 endpoint 를 바꾸지 않는다**.
+  2. **미발급 토큰**: 호스트는 펀치에 답하지만 세션은 열리지 않고 `client connected` 도 없다 — **펀치에 답하는 것은 인증이 아니다**.
+  3. **창 만료(10s) → 릴레이 경유 성립**: 창이 닫히면 호스트는 다시 침묵(`reason=closed` 17건) 하고 릴레이가 2505ms 에 이긴다. 그 뒤 **같은 capability** 가 릴레이 주소에서 제시돼도 `actual=127.0.0.1:<relay>` 로 번역되어 세션이 열린다 — 인증 경로는 하나다.
+  4. **늦게 온 capability**: 클라가 먼저 물으면 hello 가 거절되다가, 다음 heartbeat 가 capability 를 물어온 뒤(실측 5.3~5.5s) TTL 안에서 재시도가 성립한다.
+- **내 가정이 틀렸던 것**: 3번 케이스의 첫 실행은 창이 만료됐는데도 private 이 452ms 에 이겼다. 호스트 로그를 보니 **펀치가 도착하면 호스트가 디렉터리를 refresh** 하고, 같은 capability 를 또 내주는 가짜 디렉터리가 150ms 뒤 창을 다시 열고 있었다. 제품이 옳고 **"잊지 않는 디렉터리" 를 모델링한 fake 가 틀렸다** — 실제 서버는 pendingPunch 를 건네면서 지운다. fake 를 1회 제공으로 고쳤다.
+- 변이 2건 각각 그 가드가 잡는다: `AuthorizePeer` 의 토큰 매칭에 **발급 IP 일치를 추가**(=번역 제거) → 9 FAIL(세션·번역 로그·제어 왕복·릴레이 경유 전부) · **펀치 응답 송신 제거** → 8 FAIL(선택이 relay at 2510ms 로 뒤집히고 그 아래가 전부). 두 변이 모두 되돌린 뒤 재빌드·재실행으로 40/0 복귀를 확인했다(예전에 되돌리고 재빌드를 안 해 가짜 FAIL 을 본 적이 있다).
+- 결과: `remote60_host_punch_reply_e2e_test` **40 PASS / 0 FAIL, exit 0, 3회 연속** · `punch_reply_test` 45 · `directory_retry_test` 98 · `udp_control_channel` 12 · `control_resume` 48 · 전량 빌드 오류 0.
+- **커버하지 않는 것**: 펀치 **손실** 주입. 루프백에서는 패킷 필터 없이 떨어뜨릴 수단이 없고, 손실에 대한 제품의 답은 중복 케이스가 태우는 그 재전송이다. 덮인 척하지 않고 그대로 적는다.
+- 부수: `directory_retry_test.cpp` 의 `FakeDirectory`/`Reply` 를 `apps/native_poc/src/directory_fake_server.hpp` 로 옮겨 두 테스트가 공유한다(동작 동일, 98 PASS 유지). 제품 코드는 **한 줄도 바뀌지 않았다**.
+- 미검증(실기): 여전히 PC1→PC2 실제 접속에서 그 connectId 의 `[relay] bound` 가 사라지는지.
