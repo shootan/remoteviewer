@@ -32,6 +32,35 @@ using System.Runtime.InteropServices;
 using System.Text;
 
 public static class GnlinkShot {
+  // The viewer's cancel event is UNNAMED now: the only way in is an inherited handle, so this
+  // script has to launch the viewer itself rather than through Start-Process, which gives no
+  // control over handle inheritance.
+  [DllImport("kernel32.dll", SetLastError = true)]
+  public static extern IntPtr CreateEventW(ref SECURITY_ATTRIBUTES sa, bool manual, bool initial,
+                                           IntPtr name);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  public static extern bool SetEvent(IntPtr h);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  public static extern bool CloseHandle(IntPtr h);
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  // StringBuilder, not string: CreateProcessW WRITES to lpCommandLine, and a marshalled string
+  // is read-only memory. Passing one fails the call -- which it did, with "could not start the
+  // viewer" and nothing else to go on.
+  public static extern bool CreateProcessW(string app, StringBuilder cmd, IntPtr pa, IntPtr ta,
+                                           bool inherit, uint flags, IntPtr env, string dir,
+                                           ref STARTUPINFO si, out PROCESS_INFORMATION pi);
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct SECURITY_ATTRIBUTES { public int nLength; public IntPtr sd; public bool inherit; }
+  [StructLayout(LayoutKind.Sequential)]
+  public struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public uint pid, tid; }
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  public struct STARTUPINFO {
+    public int cb; public string res1, desktop, title;
+    public int x, y, xs, ys, xc, yc, fill, flags;
+    public short show, res2; public IntPtr res3, stdIn, stdOut, stdErr;
+  }
+
   [DllImport("user32.dll")] public static extern IntPtr GetWindowDC(IntPtr h);
   [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr h, IntPtr dc);
   [DllImport("gdi32.dll")] public static extern bool BitBlt(IntPtr d, int x, int y, int w,
@@ -116,7 +145,29 @@ $viewerArgs = @('--transport', 'udp', '--codec', 'h264',
           '--directory-session', 'test-session-token',
           '--directory-host-id', 'h-cancel')
 $env:REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE = '1'
-$p = Start-Process -FilePath $Viewer -ArgumentList $viewerArgs -PassThru
+# An inheritable unnamed event, and a launch that actually inherits it.
+$sa = New-Object GnlinkShot+SECURITY_ATTRIBUTES
+$sa.nLength = [System.Runtime.InteropServices.Marshal]::SizeOf($sa)
+$sa.sd = [IntPtr]::Zero
+$sa.inherit = $true
+$cancelEvent = [GnlinkShot]::CreateEventW([ref]$sa, $true, $false, [IntPtr]::Zero)
+if ($cancelEvent -eq [IntPtr]::Zero) { Write-Output 'could not create the cancel event'; exit 1 }
+
+$si = New-Object GnlinkShot+STARTUPINFO
+$si.cb = [System.Runtime.InteropServices.Marshal]::SizeOf($si)
+$pi = New-Object GnlinkShot+PROCESS_INFORMATION
+$line = New-Object System.Text.StringBuilder
+[void]$line.Append('"' + $Viewer + '" ' + ($viewerArgs -join ' ') + ' --cancel-event ' + ([int64]$cancelEvent))
+# [NullString]::Value, not $null: PowerShell turns $null into an EMPTY STRING for a string
+# parameter, and an empty lpCurrentDirectory is ERROR_INVALID_NAME (123) -- which is all the
+# failure said before this was worked out.
+if (-not [GnlinkShot]::CreateProcessW([NullString]::Value, $line, [IntPtr]::Zero, [IntPtr]::Zero,
+                                      $true, 0, [IntPtr]::Zero, [NullString]::Value,
+                                      [ref]$si, [ref]$pi)) {
+  Write-Output "could not start the viewer"
+  exit 1
+}
+$p = Get-Process -Id $pi.pid
 $hwnd = Wait-Window -ProcessId $p.Id -BudgetMs 20000
 if ($hwnd -eq [IntPtr]::Zero) {
   Write-Output "no window appeared for pid $($p.Id)"
@@ -132,10 +183,10 @@ Write-Output "1-waiting: captured"
 # ----------------------------------------------------------------- 3. cancelled (same process)
 # Taken before the refusal shot because it needs this process alive and mid-wait. The event is
 # the one the shell signals; nothing here reaches into the viewer any other way.
-$cancelName = "Local\GNLinkViewerCancel-$($p.Id)"
-$evt = [System.Threading.EventWaitHandle]::OpenExisting($cancelName)
-$evt.Set() | Out-Null
-$evt.Dispose()
+# Through the handle this script holds. There is no name to open -- that was the point of the
+# change: a named event with default security let any process in the session cancel a user's
+# connection knowing only a pid.
+[void][GnlinkShot]::SetEvent($cancelEvent)
 # The window goes in well under a tenth of a second once cancelled -- measured at 59-102ms in
 # viewer_cancel_e2e_test -- so this is a race against the thing being photographed. Captured on
 # a short poll rather than a fixed sleep: the first frame where the process has been told and
@@ -154,11 +205,15 @@ if ($shot) {
 }
 try { $p.WaitForExit(5000) } catch { }
 try { if (-not $p.HasExited) { $p.Kill() } } catch { }
+[void][GnlinkShot]::CloseHandle($pi.hThread)
+[void][GnlinkShot]::CloseHandle($pi.hProcess)
+[void][GnlinkShot]::CloseHandle($cancelEvent)
 
 # ----------------------------------------------------------------- 2. the host refused
 # No shortcut: the hello budget is thirty seconds and this waits it out. An env override would
 # have meant adding a way to shorten a security-relevant budget to the SHIPPED binary, purely
 # so a screenshot script could finish sooner. Not worth it -- so this takes about 40 seconds.
+# The refusal shot needs no cancel, so this one is launched the ordinary way.
 $p2 = Start-Process -FilePath $Viewer -ArgumentList $viewerArgs -PassThru
 $hwnd2 = Wait-Window -ProcessId $p2.Id -BudgetMs 20000
 if ($hwnd2 -ne [IntPtr]::Zero) {

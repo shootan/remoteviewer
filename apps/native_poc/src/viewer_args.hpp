@@ -52,6 +52,10 @@ struct Args {
   // Which screen to open on a host with more than one. Zero is the primary, which is what the
   // client always asked for implicitly.
   uint32_t monitorId = 0;
+  // --cancel-event: the value of an UNNAMED event handle the shell created and let this
+  // process inherit. Empty when the viewer was started by hand, which simply means it cannot
+  // be called off -- the behaviour it had before the shell could do that at all.
+  std::string cancelEventHandle;
   // How the session opens. "targets" starts on the capture-target picker and streams only after
   // the user selects one (the product flow, mirroring the Android client); "stream" goes straight
   // to the host's default desktop. Empty falls back to the REMOTE60_NATIVE_START_STREAM_VIEW env

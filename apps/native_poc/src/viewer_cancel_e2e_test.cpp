@@ -36,7 +36,8 @@
 
 using remote60::native_poc::test_support::FakeDirectory;
 using remote60::native_poc::test_support::Reply;
-using remote60::native_poc::viewer::viewer_cancel_event_name;
+using remote60::native_poc::viewer::viewer_cancel_handle_arg;
+using remote60::native_poc::viewer::viewer_create_cancel_event;
 using remote60::native_poc::viewer::viewer_request_cancel;
 
 namespace {
@@ -102,7 +103,8 @@ struct SpawnedViewer {
   ~SpawnedViewer() { Stop(); }
 };
 
-bool StartViewer(SpawnedViewer* viewer, const std::string& directoryUrl) {
+bool StartViewer(SpawnedViewer* viewer, const std::string& directoryUrl,
+                 HANDLE cancel) {
   const std::wstring exe = directory_of(self_path()) + L"GNLinkViewer.exe";
   if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
 
@@ -124,6 +126,9 @@ bool StartViewer(SpawnedViewer* viewer, const std::string& directoryUrl) {
                      L" --directory-url " + url +
                      L" --directory-session test-session-token" +
                      L" --directory-host-id h-cancel";
+  // The handle by value, the way the shell passes it. bInheritHandles at the launch below is
+  // what makes the number mean anything in the child.
+  if (cancel) cmd += L" --cancel-event " + viewer_cancel_handle_arg(cancel);
   std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
   mutableCmd.push_back(L'\0');
 
@@ -172,13 +177,32 @@ int main() {
     return 1;
   }
 
-  // The event name is a contract between two processes that never exchange it. If these two ever
-  // disagree the cancel silently does nothing, which is the failure this whole file is about.
-  check("both sides derive the same event name",
-        viewer_cancel_event_name(1234) == L"Local\\GNLinkViewerCancel-1234");
-  check("a process with no viewer in it cannot be cancelled", !viewer_request_cancel(0xFFFFFFFCu),
-        "there is nothing there to signal, and that is not an error");
-
+  // The event is UNNAMED now, and this is the check that says so.
+  //
+  // The first version named it Local\\GNLinkViewerCancel-<pid> with default security, which any
+  // process in the session could open with EVENT_MODIFY_STATE knowing only a pid -- and then
+  // cancel somebody's connection whenever it liked. A secret in the name would not have helped:
+  // a viewer's command line is readable by those same processes.
+  //
+  // ORDER MATTERS, and the first version of this check got it wrong: it tried to open the name
+  // BEFORE creating anything, so of course nothing was there, and a mutant that went back to
+  // naming the event passed. The event has to exist first -- then the question "can it be
+  // reached by name" means something.
+  HANDLE probe = viewer_create_cancel_event();
+  check("an unnamed event is created and can be signalled by whoever holds it",
+        probe != nullptr && viewer_request_cancel(probe));
+  {
+    const std::wstring oldName = L"Local\\GNLinkViewerCancel-" +
+                                std::to_wstring(GetCurrentProcessId());
+    HANDLE byName = OpenEventW(EVENT_MODIFY_STATE, FALSE, oldName.c_str());
+    check("...and it cannot be reached by the old pid-derived name", byName == nullptr,
+          byName ? "it opened -- the event is named, and anyone in this session can signal it"
+                 : "ERROR_FILE_NOT_FOUND");
+    if (byName) CloseHandle(byName);
+  }
+  if (probe) CloseHandle(probe);
+  check("...and signalling nothing is refused rather than pretended",
+        !viewer_request_cancel(nullptr));
   FakeDirectory dir;
   check("the fake directory starts", dir.Start());
   // Enough for the viewer to get through login and into the connect steps, and no further: the
@@ -195,7 +219,9 @@ int main() {
                          "\"punchToken\":\"" + std::string(32, 'c') + "\"}"}});
 
   SpawnedViewer viewer;
-  check("a real GNLinkViewer starts", StartViewer(&viewer, dir.url()));
+  HANDLE cancelEvent = viewer_create_cancel_event();
+  check("the cancel event is created", cancelEvent != nullptr);
+  check("a real GNLinkViewer starts", StartViewer(&viewer, dir.url(), cancelEvent));
 
   // It has to actually be in the connect path before cancelling proves anything: cancelling a
   // process that has not got there yet would pass for the wrong reason.
@@ -207,8 +233,8 @@ int main() {
   std::this_thread::sleep_for(std::chrono::milliseconds(600));
 
   const auto askedAt = std::chrono::steady_clock::now();
-  check("the cancel is delivered", viewer_request_cancel(viewer.pi.dwProcessId),
-        "pid " + std::to_string(viewer.pi.dwProcessId));
+  check("the cancel is delivered", viewer_request_cancel(cancelEvent),
+        "through the handle, not a name");
 
   const DWORD waited = WaitForSingleObject(viewer.pi.hProcess, 5000);
   const auto stoppedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -232,6 +258,7 @@ int main() {
             log.find("hello ok=1") == std::string::npos);
 
   viewer.Stop();
+  if (cancelEvent) CloseHandle(cancelEvent);
 
   // ======================================== and again, but cancelled while it is saying hello
   //
@@ -241,7 +268,9 @@ int main() {
   // seconds of it now, and it is the one that most needs interrupting.
   {
     SpawnedViewer inHello;
-    check("a second GNLinkViewer starts", StartViewer(&inHello, dir.url()));
+    HANDLE helloCancel = viewer_create_cancel_event();
+    check("a second cancel event is created", helloCancel != nullptr);
+    check("a second GNLinkViewer starts", StartViewer(&inHello, dir.url(), helloCancel));
 
     // Waiting for the punch to have finished is what puts the cancel inside the hello rather
     // than before it. A fixed sleep would drift with the punch budget.
@@ -256,8 +285,8 @@ int main() {
           inHelloNow ? "" : "the hello had already ended");
 
     const auto askedAt = std::chrono::steady_clock::now();
-    check("the cancel is delivered (hello)", viewer_request_cancel(inHello.pi.dwProcessId),
-          "pid " + std::to_string(inHello.pi.dwProcessId));
+    check("the cancel is delivered (hello)", viewer_request_cancel(helloCancel),
+          "through the handle, not a name");
     const DWORD waited = WaitForSingleObject(inHello.pi.hProcess, 5000);
     const auto stoppedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - askedAt).count();
@@ -277,6 +306,7 @@ int main() {
           log.find("client connected") == std::string::npos &&
               log.find("hello ok=1") == std::string::npos);
     inHello.Stop();
+    if (helloCancel) CloseHandle(helloCancel);
   }
 
 

@@ -12276,3 +12276,17 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 검증: 전량 빌드 0 에러 · `viewer_cancel_e2e` **20/0** · `directory_retry` **122/0** · `picker_empty_state` **24/0** · `punch_reply` 55/0 · `host_punch_reply_e2e` 40/0 · `control_resume` 48/0 · `udp_control_channel` 12/0 · `node apps/directory/test/run.js` ALL PASS.
 - `.gitattributes` 에 `apps/directory/deploy/*.patch text eol=lf` — 검수에서 나온 결함으로, autocrlf 체크아웃이 CRLF 로 만들어 서버에서 `patch` 가 **4/4 hunk 실패**한다. 기존 patch 3건 포함해 정규화했고, LF 상태에서 배포본 base 에 재적용해 `69451c90…` 이 재현되는 것을 확인했다.
 - 제품/테스트/문서: 제품(`viewer_cancel_channel.hpp` 신규, `viewer_context.hpp`, `viewer_udp_session.hpp`, `viewer_startup.cpp`, `native_video_client_main.cpp`, `directory_rendezvous.{hpp,cpp}`, `directory_session_bootstrap.{hpp,cpp}`, `native_video_client_shared_core.{hpp,cpp}`, `client_shell_main.cpp`) / 테스트(`viewer_cancel_e2e_test.cpp` 신규, `directory_retry_test.cpp`, `picker_empty_state_test.cpp`, `client_recovery_ui_test.cpp`, CMakeLists) / 자동화(`gnlink_viewer_connect_shots.ps1`, `gnlink_fake_directory.js` 신규) / 문서(이 항목, `구현계획.md` C2 F1 절, `.gitattributes`).
+
+### 2026-09-23 C2 F1 r2 — 이름이 있으면 누구나 부를 수 있다
+
+- 검수 지적: 내가 만든 취소 채널이 `Local\\GNLinkViewerCancel-<pid>` **이름 있는 이벤트 + 기본 SA** 였다. 같은 세션의 아무 프로세스나 **pid 만 알면** `OpenEventW(EVENT_MODIFY_STATE)` 로 남의 뷰어 connect 를 취소할 수 있다 — 호스트에는 영향이 없지만 로컬 DoS 다. 맞는 지적이고 내 결함이다.
+- 이름에 비밀을 넣는 것은 답이 아니다: 뷰어의 **커맨드라인은 같은 프로세스들이 읽는다**.
+- 고침: 셸이 **이름 없는** 이벤트를 상속 가능 SA 로 만들고, 이미 stdout 파이프용으로 쓰던 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 화이트리스트에 얹어 **그 자식에게만** 상속시킨다. 핸들 값은 `--cancel-event` 로 넘기고 뷰어는 **열지 않고** 그 핸들로 대기한다. 이름이 없으니 **열 수 있는 이름이 없다**. 핸들 값 자체는 비밀이 아니어도 된다 — 다른 프로세스에서 핸들 번호는 의미가 없고, 복제하려면 이 프로세스를 여는 권한이 따로 필요하다.
+- 셸은 호스트별로 pid 대신 **핸들**을 들고 있다가 교체 시 `SetEvent`, 뷰어가 끝나면 `CloseHandle`(자기 pid 일 때만 — 교체본을 지우지 않게).
+- **변이가 두 번 통과했고, 두 번 다 내 잘못이었다**:
+  ① 검사가 **이벤트를 만들기 전에** 옛 이름을 열어봤다. 아무것도 없으니 당연히 실패했고, 이름 있는 이벤트로 되돌리는 변이가 그대로 통과했다. 만든 **뒤에** 물어야 질문이 성립한다.
+  ② 변이 자체가 `L"Local\GNLink..."` (백슬래시 하나)로 쓰여 **실제 옛 이름과 다른 이름**을 만들고 있었다. 컴파일러가 `warning C4129: 'G' 인식할 수 없는 이스케이프` 로 말해 주고 있었는데 내가 빌드 출력을 `/dev/null` 로 버리고 있었다. 둘 다 고치니 변이가 잡힌다 — *"it opened -- the event is named, and anyone in this session can signal it"*.
+- 캡처 스크립트도 이름으로 신호하던 것을 P/Invoke `CreateProcessW` 로 직접 띄워 상속 핸들을 넘기도록 바꿨다. 여기서도 두 번 막혔다: `CreateProcessW` 는 `lpCommandLine` 에 **쓰기** 때문에 `string` 이 아니라 `StringBuilder` 여야 하고, PowerShell 은 `$null` 을 **빈 문자열**로 넘겨 `lpCurrentDirectory=""` 가 `ERROR_INVALID_NAME(123)` 이 된다(`[NullString]::Value`).
+- 검증: `viewer_cancel_e2e_test` **23/0**(+3), 취소 지연 **69ms / 61ms** 로 named 시절(81~102 / 59~95)과 동등 — 보안 수정이 속도를 바꾸지 않았다. 변이(이름 복원) → **1 FAIL**. 전량 빌드 0 에러 · `directory_retry` 122/0 · `picker_empty_state` 24/0 · `punch_reply` 55/0 · `control_resume` 48/0 · `host_punch_reply_e2e` 40/0.
+- 스크린샷 3장 재촬영(`.claude/ui-shots-c2/`, 커밋에는 PNG 없이 스크립트만): 상속 핸들 경로로 취소했고 뷰어 로그에 `connect cancelled by the shell` 이 찍혔다.
+- 제품/테스트/문서: 제품(`viewer_cancel_channel.hpp`, `client_shell_main.cpp`, `native_video_client_main.cpp`, `viewer_args.{hpp,cpp}`) / 테스트(`viewer_cancel_e2e_test.cpp`) / 자동화(`gnlink_viewer_connect_shots.ps1`) / 문서(이 항목, `구현계획.md` C2 F1 절).

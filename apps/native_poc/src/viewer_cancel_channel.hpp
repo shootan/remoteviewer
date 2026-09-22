@@ -2,24 +2,30 @@
 
 // How the shell calls off a connect that is still running in an older viewer.
 //
-// Role:    one named event per viewer process. The shell signals it when the user picks another
-//          PC; the viewer's watcher sets connectCancelled, which Observe, PunchAny and the hello
-//          handshake all read as their stop.
+// Role:    an UNNAMED event, created by the shell and inherited by the viewer it launches. The
+//          shell signals it when the user picks the same PC again; the viewer's watcher sets
+//          connectCancelled, which Observe, PunchAny and the hello handshake all read as stop.
 // Thread:  the watcher is its own thread, started before connect and joined after.
-// Input:   the event, signalled by another process.
+// Input:   the inherited handle, named on the command line by value.
 // Output:  ViewerContext::connectCancelled / connectCancelledByOwner.
-// Callers: viewer_startup.cpp (start/stop), client_shell_main.cpp (signal).
+// Callers: viewer_startup.cpp / native_video_client_main.cpp (wait), client_shell_main.cpp
+//          (create, pass, signal).
 //
 // Why an event and not a window message. During connect the viewer has a window but NO message
 // pump -- run_message_pump does not start until the session is up -- so a WM_CLOSE would sit in
 // the queue for exactly as long as the thing it was meant to interrupt. The event is read by a
 // thread that is running, which is the whole requirement.
 //
-// The name carries the process id, so it is per viewer rather than per machine: two viewers
-// connecting to two different PCs are an ordinary thing and cancelling both would be wrong.
+// Why UNNAMED. The first version used `Local\GNLinkViewerCancel-<pid>` with default security,
+// and that is a name any process in the session can open with EVENT_MODIFY_STATE knowing only a
+// pid -- so any of them could cancel a user's connection, over and over. Putting a secret in the
+// name does not help either: a viewer's command line is readable by the same processes. An
+// unnamed object has no name to open. The only way to it is a handle, and the only process given
+// one is the child the shell launched.
 //
-// Local\ rather than Global\: same session, same user, no privilege needed, and nothing outside
-// this desktop session can reach it.
+// The handle travels as a number on the command line. That is not a secret and does not need to
+// be: a handle value means nothing in another process, and duplicating it out of this one
+// already requires the right to open the process.
 
 #include <windows.h>
 
@@ -29,32 +35,46 @@
 
 namespace remote60::native_poc::viewer {
 
-/** `Local\GNLinkViewerCancel-<pid>`. Both sides derive it the same way; neither stores it. */
-inline std::wstring viewer_cancel_event_name(DWORD processId) {
-  return L"Local\\GNLinkViewerCancel-" + std::to_wstring(processId);
+/**
+ * Creates the event the shell keeps and the viewer waits on.
+ *
+ * Manual reset, unsignalled, inheritable, and unnamed. The caller owns the handle: it signals it
+ * to cancel that viewer, and closes it when the viewer is gone.
+ */
+inline HANDLE viewer_create_cancel_event() {
+  SECURITY_ATTRIBUTES sa{};
+  sa.nLength = sizeof(sa);
+  sa.bInheritHandle = TRUE;   // the child is given this one handle, by the whitelist at launch
+  sa.lpSecurityDescriptor = nullptr;
+  return CreateEventW(&sa, TRUE, FALSE, nullptr);
+}
+
+/** The handle value as it is written on the child's command line, and read back off it. */
+inline std::wstring viewer_cancel_handle_arg(HANDLE event) {
+  return std::to_wstring(reinterpret_cast<unsigned long long>(event));
+}
+
+inline HANDLE viewer_cancel_handle_from_arg(const std::wstring& text) {
+  if (text.empty()) return nullptr;
+  wchar_t* end = nullptr;
+  const unsigned long long value = std::wcstoull(text.c_str(), &end, 10);
+  if (!end || *end != L'\0' || value == 0) return nullptr;
+  return reinterpret_cast<HANDLE>(static_cast<uintptr_t>(value));
 }
 
 /**
- * Opens (or creates) this process's cancel event and watches it.
+ * Watches the inherited event.
  *
- * Manual reset: once cancelled, cancelled. The watcher exits when the event is signalled or when
- * `stopFlag` is set and the wait times out, so the ordinary path costs one 200ms wakeup.
+ * `event` is the handle the shell passed; this does NOT create or open anything. A viewer started
+ * by hand has no such handle and simply cannot be cancelled, which is the behaviour it had before
+ * any of this existed.
  *
- * Returns the event handle, which the caller closes after joining. On failure the handle is null
- * and nothing is watched -- a viewer that cannot create its event still works, it just cannot be
- * called off, and that is the behaviour it had before this existed.
+ * Returns true when a watcher was started.
  */
-inline HANDLE viewer_start_cancel_watcher(std::atomic<bool>* cancelled,
-                                          std::atomic<bool>* cancelledByOwner,
-                                          std::atomic<bool>* stopFlag, std::thread* thread) {
-  if (!cancelled || !stopFlag || !thread) return nullptr;
-  const std::wstring name = viewer_cancel_event_name(GetCurrentProcessId());
-  HANDLE event = CreateEventW(nullptr, TRUE, FALSE, name.c_str());
-  if (!event) return nullptr;
-  // An existing object under this name is somebody else's leftover -- a process id that has
-  // come round again. Its state is not this viewer's business, so it starts from not-cancelled.
-  // CreateEventW does not reset an object it merely opened, which is the whole hazard.
-  if (GetLastError() == ERROR_ALREADY_EXISTS) ResetEvent(event);
+inline bool viewer_start_cancel_watcher(HANDLE event, std::atomic<bool>* cancelled,
+                                        std::atomic<bool>* cancelledByOwner,
+                                        std::atomic<bool>* stopFlag, std::thread* thread) {
+  if (!event || !cancelled || !stopFlag || !thread) return false;
   *thread = std::thread([event, cancelled, cancelledByOwner, stopFlag]() {
     while (!stopFlag->load(std::memory_order_acquire)) {
       const DWORD waited = WaitForSingleObject(event, 200);
@@ -66,37 +86,27 @@ inline HANDLE viewer_start_cancel_watcher(std::atomic<bool>* cancelled,
       if (waited != WAIT_TIMEOUT) return;  // the handle went bad; nothing to watch any more
     }
   });
-  return event;
-}
-
-/** Stops the watcher and closes the event. Safe with a null handle or an unstarted thread. */
-inline void viewer_stop_cancel_watcher(HANDLE event, std::atomic<bool>* stopFlag,
-                                       std::thread* thread) {
-  if (stopFlag) stopFlag->store(true, std::memory_order_release);
-  // NOT signalled to wake it. The first version did, to save the last 200ms slice, and left a
-  // SIGNALLED event behind under a name derived from the process id -- so the next viewer that
-  // opened that name cancelled itself the moment it started. Windows reuses process ids, and
-  // CreateEventW on an existing name opens the existing object rather than making a fresh one.
-  // It cost three identical screenshots of a failure screen before the cause was read out of
-  // the log. The watcher checks stopFlag every slice, so stopping costs 200ms and no more.
-  if (thread && thread->joinable()) thread->join();
-  if (event) CloseHandle(event);
+  return true;
 }
 
 /**
- * Signals another viewer's cancel event. Used by the shell.
+ * Stops the watcher. The event is NOT signalled to wake it.
  *
- * False means there was nothing to signal -- the process is gone, or never created its event,
- * which is what an older build does. The caller carries on either way: this is an improvement on
- * the old behaviour, not a precondition for the new session.
+ * An earlier version did signal, to save the last 200ms slice. With a named event that left a
+ * SIGNALLED object behind under a pid-derived name, and the next viewer to take that pid
+ * cancelled itself on startup. The name is gone now, but the habit is still wrong: signalling
+ * something to mean "stop watching" makes "cancelled" and "finished" the same event. The watcher
+ * checks stopFlag every slice, so stopping costs 200ms and no more.
  */
-inline bool viewer_request_cancel(DWORD processId) {
-  const std::wstring name = viewer_cancel_event_name(processId);
-  HANDLE event = OpenEventW(EVENT_MODIFY_STATE, FALSE, name.c_str());
+inline void viewer_stop_cancel_watcher(std::atomic<bool>* stopFlag, std::thread* thread) {
+  if (stopFlag) stopFlag->store(true, std::memory_order_release);
+  if (thread && thread->joinable()) thread->join();
+}
+
+/** Signals a viewer's cancel event. The shell holds the handle; nobody else can obtain one. */
+inline bool viewer_request_cancel(HANDLE event) {
   if (!event) return false;
-  const BOOL ok = SetEvent(event);
-  CloseHandle(event);
-  return ok != FALSE;
+  return SetEvent(event) != FALSE;
 }
 
 }  // namespace remote60::native_poc::viewer

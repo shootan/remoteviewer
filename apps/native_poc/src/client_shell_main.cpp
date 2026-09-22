@@ -80,9 +80,22 @@ uint64_t gViewerOperation = 0;  // UI thread only: stale child exits cannot chan
  * establish a session afterwards, against a host that has already been handed a newer
  * capability.
  *
+ * What is kept is the HANDLE to that viewer's cancel event, not a name.
+ *
+ * The first version used a named event, `Local\GNLinkViewerCancel-<pid>`, with default security.
+ * Any process in the session could open that with EVENT_MODIFY_STATE knowing only a pid, and
+ * cancel somebody's connection as often as it liked. A secret in the name would not have helped:
+ * a viewer's command line is readable by the same processes. The event is unnamed now, so there
+ * is no name to open -- the only way to it is this handle, and the only other process that has
+ * one is the child it was given to.
+ *
  * UI thread only, like gViewerOperation: begin_session writes it, handle_viewer_exit clears it.
  */
-std::map<std::string, DWORD> gViewerPidByHost;
+struct ViewerCancelSlot {
+  DWORD pid = 0;
+  HANDLE cancelEvent = nullptr;   // owned here; closed when the viewer is forgotten
+};
+std::map<std::string, ViewerCancelSlot> gViewerByHost;
 uint32_t gReconnectAttempts = 0;
 std::optional<ShellConnectRequest> gReconnectRequest;
 uint64_t gReconnectOwnerEpoch = 0;
@@ -897,8 +910,11 @@ void handle_viewer_exit(const ShellConnectRequest& request, uint64_t operation, 
   // Forgotten only if it is still the one recorded. A replacement has already overwritten this
   // entry, and erasing it here would forget the viewer that is actually open.
   {
-    const auto it = gViewerPidByHost.find(request.hostId);
-    if (it != gViewerPidByHost.end() && it->second == exitedPid) gViewerPidByHost.erase(it);
+    const auto it = gViewerByHost.find(request.hostId);
+    if (it != gViewerByHost.end() && it->second.pid == exitedPid) {
+      if (it->second.cancelEvent) CloseHandle(it->second.cancelEvent);
+      gViewerByHost.erase(it);
+    }
   }
   const uint32_t remaining = gActiveViewers.load();
   { std::lock_guard<std::mutex> lock(gStateMu); if (ownerEpoch != gOwnerEpoch) return; }
@@ -936,17 +952,18 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
   if (!automatic) gReconnectAttempts = 0;
   const uint64_t operation = ++gViewerOperation;
 
-  // Call off the viewer already open on this PC, if there is one. It may be mid-connect --
-  // up to thirty seconds of hello -- and if it finishes it will bind a session the user has
-  // just replaced. Best effort by design: false means the process is gone, or is an older
-  // build with no cancel event, and in both cases this is no worse than before.
+  // Call off the viewer already open on this PC, if there is one. It may be mid-connect -- up to
+  // thirty seconds of hello -- and if it finishes it will bind a session the user has just
+  // replaced. Signalled through the handle this shell has held since it launched that viewer.
   {
-    const auto previous = gViewerPidByHost.find(request.hostId);
-    if (previous != gViewerPidByHost.end()) {
-      const bool asked = remote60::native_poc::viewer::viewer_request_cancel(previous->second);
+    const auto previous = gViewerByHost.find(request.hostId);
+    if (previous != gViewerByHost.end()) {
+      const bool asked =
+          remote60::native_poc::viewer::viewer_request_cancel(previous->second.cancelEvent);
       log_line(std::string("cancelling the viewer already open on this PC pid=") +
-               std::to_string(previous->second) + " asked=" + (asked ? "1" : "0"));
-      gViewerPidByHost.erase(previous);
+               std::to_string(previous->second.pid) + " asked=" + (asked ? "1" : "0"));
+      if (previous->second.cancelEvent) CloseHandle(previous->second.cancelEvent);
+      gViewerByHost.erase(previous);
     }
   }
   uint64_t ownerEpoch = 0;
@@ -975,6 +992,12 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
     std::lock_guard<std::mutex> lock(gStateMu);
     settings = gSettings;
   }
+
+  // Unnamed, so nothing can open it; inheritable, so this one child can be given it. Created
+  // before the command line because the handle value goes ON that command line, and it rides
+  // the same inherit whitelist as the pipe -- bInheritHandles alone would hand the child every
+  // inheritable handle this process has.
+  HANDLE cancelEvent = remote60::native_poc::viewer::viewer_create_cancel_event();
 
   std::wstringstream command;
   command << L"\"" << exe << L"\""
@@ -1007,6 +1030,7 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
   HANDLE pipeRead = nullptr;
   HANDLE pipeWrite = nullptr;
   HANDLE nulIn = INVALID_HANDLE_VALUE;
+
   bool pipeOk = CreatePipe(&pipeRead, &pipeWrite, &sa, 0) != 0;
   if (pipeOk) {
     SetHandleInformation(pipeRead, HANDLE_FLAG_INHERIT, 0);
@@ -1021,7 +1045,7 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
 
   STARTUPINFOEXW six{};
   PROCESS_INFORMATION pi{};
-  HANDLE inheritList[2] = {nullptr, nullptr};
+  HANDLE inheritList[3] = {nullptr, nullptr, nullptr};
   if (pipeOk) {
     // Microsoft's documented dance: the sizing probe FAILS with ERROR_INSUFFICIENT_BUFFER and
     // returns the byte count -- anything else means the API is unusable here, so fall back to a
@@ -1038,9 +1062,14 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
         listInitialized = true;
         inheritList[0] = pipeWrite;
         inheritList[1] = nulIn;
+        inheritList[2] = cancelEvent;
+        // The size is the USED bytes, not the array's: a null third entry would be passed as a
+        // handle to inherit and the launch fails with ERROR_INVALID_PARAMETER.
+        const SIZE_T inheritBytes =
+            sizeof(HANDLE) * (cancelEvent ? 3u : 2u);
         if (!UpdateProcThreadAttribute(six.lpAttributeList, 0,
                                        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inheritList,
-                                       sizeof(inheritList), nullptr, nullptr)) {
+                                       inheritBytes, nullptr, nullptr)) {
           // Delete BEFORE dropping the pointer, or the initialized list's resources leak.
           DeleteProcThreadAttributeList(six.lpAttributeList);
           listInitialized = false;
@@ -1066,6 +1095,14 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
     six.StartupInfo.hStdError = pipeWrite;
     six.StartupInfo.hStdInput = nulIn;
   }
+  // The handle, by value, and only once it is known that the child will actually inherit it --
+  // pipeOk is what decides whether the whitelist and bInheritHandles are in play at all. A flag
+  // naming a handle the child does not have would make it wait on nothing.
+  if (cancelEvent && pipeOk) {
+    command << L" --cancel-event "
+            << remote60::native_poc::viewer::viewer_cancel_handle_arg(cancelEvent);
+  }
+
   std::wstring mutableCommand = command.str();
 
   // H.264 is still behind a build-time experiment switch in the viewer, and a build without it
@@ -1125,7 +1162,10 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
            std::to_string(settings.bitrateKbps) + " fps=" + std::to_string(settings.fps) +
            " monitor=" + std::to_string(settings.monitorId));
   CloseHandle(pi.hThread);
-  gViewerPidByHost[request.hostId] = pi.dwProcessId;
+  // Kept so a later begin_session for this host can signal it. Ownership sits here until the
+  // viewer exits or is replaced.
+  gViewerByHost[request.hostId] = ViewerCancelSlot{pi.dwProcessId, cancelEvent};
+  cancelEvent = nullptr;  // the map owns it now
 
   // Watched rather than forgotten: when the session window closes the list has to become usable
   // again, and if it exits immediately that is a failure the user should hear about.

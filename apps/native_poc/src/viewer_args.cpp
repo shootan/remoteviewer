@@ -135,6 +135,8 @@ Args parse_args(int argc, char** argv) {
     } else if (k == "--monitor" && i + 1 < argc) {
       uint32_t v = 0;
       if (parse_u32(argv[++i], &v)) a.monitorId = v;
+    } else if (k == "--cancel-event" && i + 1 < argc) {
+      a.cancelEventHandle = trim_ascii(argv[++i]);
     } else if (k == "--initial-view" && i + 1 < argc) {
       a.initialView = ascii_lower(trim_ascii(argv[++i]));
     } else if (k == "--start-in-picker") {

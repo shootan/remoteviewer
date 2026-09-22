@@ -47,10 +47,24 @@ int main(int argc, char** argv) {
   //
   // Started before the first attempt and stopped after the last, so a cancel that arrives between
   // attempts is still seen.
-  HANDLE cancelEvent = viewer_start_cancel_watcher(&ctx.connectCancelled,
-                                                   &ctx.connectCancelledByOwner,
-                                                   &ctx.cancelWatcherStop, &ctx.cancelWatcher);
-
+  // The handle the shell created and let this process inherit, named on the command line by
+  // value. Nothing is opened here: an unnamed event has no name to open, which is the point --
+  // the earlier named one could be signalled by any process in the session that knew a pid.
+  //
+  // The value is ASCII digits, so it converts without needing the viewer's wide-string
+  // helpers, which live in the shell rather than here.
+  HANDLE cancelEvent = nullptr;
+  if (!ctx.args.cancelEventHandle.empty()) {
+    cancelEvent = viewer_cancel_handle_from_arg(
+        std::wstring(ctx.args.cancelEventHandle.begin(), ctx.args.cancelEventHandle.end()));
+    if (!cancelEvent) {
+      std::cerr << "[native-video-client] the --cancel-event value is not a usable handle; "
+                << "this session cannot be called off" << std::endl;
+    }
+  }
+  (void)viewer_start_cancel_watcher(cancelEvent, &ctx.connectCancelled,
+                                    &ctx.connectCancelledByOwner, &ctx.cancelWatcherStop,
+                                    &ctx.cancelWatcher);
   for (;;) {
     // A new attempt. The generation moves first, so anything still in flight from the previous
     // one is already superseded when it comes back.
@@ -62,7 +76,7 @@ int main(int argc, char** argv) {
     // Called off rather than failed. Showing "try again" here would be asking about a session
     // the user has already replaced.
     if (ctx.connectCancelled.load(std::memory_order_acquire)) {
-      viewer_stop_cancel_watcher(cancelEvent, &ctx.cancelWatcherStop, &ctx.cancelWatcher);
+      viewer_stop_cancel_watcher(&ctx.cancelWatcherStop, &ctx.cancelWatcher);
       if (ctx.dec.mfStarted) MFShutdown();
       return 0;
     }
@@ -88,7 +102,7 @@ int main(int argc, char** argv) {
     reason += "\n(코드 " + std::to_string(rc) + ")";
 
     if (!show_startup_failure(ctx, reason)) {
-      viewer_stop_cancel_watcher(cancelEvent, &ctx.cancelWatcherStop, &ctx.cancelWatcher);
+      viewer_stop_cancel_watcher(&ctx.cancelWatcherStop, &ctx.cancelWatcher);
       return rc;
     }
     // Asked for, never automatic: an automatic retry would overwrite the log line that says what
@@ -97,7 +111,7 @@ int main(int argc, char** argv) {
   }
   // Connect is over, one way or the other. The watcher has nothing left to interrupt, and the
   // session that follows is torn down through the ordinary path.
-  viewer_stop_cancel_watcher(cancelEvent, &ctx.cancelWatcherStop, &ctx.cancelWatcher);
+  viewer_stop_cancel_watcher(&ctx.cancelWatcherStop, &ctx.cancelWatcher);
 
   attach_control_tunnel_and_log(ctx);
   try {
