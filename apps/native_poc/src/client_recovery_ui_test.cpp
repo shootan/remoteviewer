@@ -195,6 +195,118 @@ int main(int argc, char** argv) {
                      "fifty replacements and fifty failed launches do not pile up handles");
     }
 
+    // ------------------------- a viewer that cannot be cancelled is not replaced behind its back
+    //
+    // The hole this closes: when the old viewer had no cancel event (the pipe-less fallback) or
+    // the signal failed, begin_session logged asked=0, dropped the slot, and started another one
+    // anyway. Two viewers then raced for the same host with no fence between them -- exactly the
+    // situation the cancel channel exists to prevent, reappearing on the path where the channel
+    // is missing.
+    //
+    // Driven through the real begin_session, not a copy of its logic. The predecessor is a real
+    // live process with a real SYNCHRONIZE handle, which is what the decision actually reads.
+    {
+      const auto liveProcess = [](PROCESS_INFORMATION* out) {
+        // Something that stays up and needs nothing: a viewer with no arguments exits at once,
+        // so this is a plain wait.
+        std::wstring cmd = L"cmd.exe /c ping -n 60 127.0.0.1 > nul";
+        std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
+        mutableCmd.push_back(L'\0');
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        return CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, FALSE,
+                              CREATE_NO_WINDOW, nullptr, nullptr, &si, out) != 0;
+      };
+      const auto syncHandle = [](HANDLE process) {
+        HANDLE dup = nullptr;
+        DuplicateHandle(GetCurrentProcess(), process, GetCurrentProcess(), &dup, SYNCHRONIZE,
+                        FALSE, 0);
+        return dup;
+      };
+      const auto liveViewersFor = [](const std::string& hostId) {
+        const auto it = gViewerByHost.find(hostId);
+        if (it == gViewerByHost.end()) return 0;
+        if (!it->second.process) return 1;   // recorded, liveness unknown
+        return WaitForSingleObject(it->second.process, 0) == WAIT_TIMEOUT ? 1 : 0;
+      };
+
+      ShellConnectRequest req{};
+      req.hostId = "fence-host";
+      req.hostName = "fence-pc";
+
+      // (1) No event at all -- the pipe-less fallback. The predecessor is alive, so the
+      // replacement must be refused and nothing new started.
+      PROCESS_INFORMATION older{};
+      recovery_check(liveProcess(&older), "a stand-in for an older viewer is running");
+      gViewerByHost[req.hostId] = ViewerCancelSlot{older.dwProcessId, nullptr,
+                                                   syncHandle(older.hProcess)};
+      const uint32_t viewersBefore = gActiveViewers.load();
+      begin_session(req);
+      recovery_check(gActiveViewers.load() == viewersBefore,
+                     "an uncancellable live viewer is not replaced -- nothing was started");
+      recovery_check(gViewerByHost.find(req.hostId) != gViewerByHost.end(),
+                     "...and its slot is kept, not dropped");
+      recovery_check(liveViewersFor(req.hostId) <= 1,
+                     "...leaving at most one live viewer for that host");
+
+      // (2) An event that cannot be signalled -- closed underneath us, so SetEvent fails. Same
+      // rule: alive means refused.
+      HANDLE doomed = remote60::native_poc::viewer::viewer_create_cancel_event();
+      CloseHandle(doomed);   // the handle is now invalid; SetEvent on it fails
+      gViewerByHost[req.hostId] = ViewerCancelSlot{older.dwProcessId, doomed,
+                                                   syncHandle(older.hProcess)};
+      begin_session(req);
+      recovery_check(gActiveViewers.load() == viewersBefore,
+                     "a failed signal is treated as not-asked, and the replacement is refused");
+
+      // ...but once that process is gone, the same uncancellable slot must not block forever.
+      TerminateProcess(older.hProcess, 0);           // the stand-in, not a product process
+      WaitForSingleObject(older.hProcess, 5000);
+      // (3) The other half of the same rule, and the one that matters for not wedging the UI: an
+      // uncancellable slot whose process has ALREADY GONE must not block the next session
+      // forever. begin_session has to look, find it dead, and carry on.
+      //
+      // The first version of this checked that the test's own WaitForSingleObject said "dead",
+      // which is a statement about the test rather than about begin_session -- and a mutant that
+      // never looked at liveness passed it. What follows calls begin_session and watches what it
+      // does.
+      const uint32_t beforeDead = gActiveViewers.load();
+      begin_session(req);
+      const auto after = gViewerByHost.find(req.hostId);
+      recovery_check(after != gViewerByHost.end() && after->second.pid != older.dwProcessId,
+                     "a dead predecessor does not block the next session");
+      recovery_check(gActiveViewers.load() == beforeDead + 1,
+                     "...and a new viewer really was started");
+      CloseHandle(older.hProcess);
+      CloseHandle(older.hThread);
+
+      // Stop the viewer this case started. The cancel is tried first because that is what the
+      // shell does -- but the watcher stops once connect is over, so a viewer that got as far
+      // as a session will not answer it. This is the TEST cleaning up its own process, and
+      // leaving it running holds GNLinkViewer.exe open and fails the next link.
+      if (after != gViewerByHost.end()) {
+        remote60::native_poc::viewer::viewer_request_cancel(after->second.cancelEvent);
+        if (after->second.process &&
+            WaitForSingleObject(after->second.process, 5000) != WAIT_OBJECT_0) {
+          HANDLE killable = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, after->second.pid);
+          if (killable) {
+            TerminateProcess(killable, 0);
+            WaitForSingleObject(killable, 5000);
+            CloseHandle(killable);
+          }
+        }
+      }
+
+      // Clean up what this case put in the map by hand.
+      {
+        const auto leftover = gViewerByHost.find(req.hostId);
+        if (leftover != gViewerByHost.end()) {
+          if (leftover->second.process) CloseHandle(leftover->second.process);
+          gViewerByHost.erase(leftover);
+        }
+      }
+    }
+
     gViewerOperation = 100;
     const uint64_t currentOwner = gOwnerEpoch.load();
     const ShellConnectRequest olderViewer{};

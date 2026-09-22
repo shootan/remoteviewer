@@ -94,6 +94,10 @@ uint64_t gViewerOperation = 0;  // UI thread only: stale child exits cannot chan
 struct ViewerCancelSlot {
   DWORD pid = 0;
   HANDLE cancelEvent = nullptr;   // owned here; closed when the viewer is forgotten
+  // A SYNCHRONIZE duplicate of the viewer's process handle, so "is it still running" can be
+  // answered without reopening by pid -- a pid that has been reused would answer about
+  // somebody else. SYNCHRONIZE and nothing more: this is for waiting, never for killing.
+  HANDLE process = nullptr;
 };
 std::map<std::string, ViewerCancelSlot> gViewerByHost;
 uint32_t gReconnectAttempts = 0;
@@ -913,6 +917,7 @@ void handle_viewer_exit(const ShellConnectRequest& request, uint64_t operation, 
     const auto it = gViewerByHost.find(request.hostId);
     if (it != gViewerByHost.end() && it->second.pid == exitedPid) {
       if (it->second.cancelEvent) CloseHandle(it->second.cancelEvent);
+      if (it->second.process) CloseHandle(it->second.process);
       gViewerByHost.erase(it);
     }
   }
@@ -958,13 +963,35 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
   {
     const auto previous = gViewerByHost.find(request.hostId);
     if (previous != gViewerByHost.end()) {
-      // asked=0 when there was no event to signal, which is the pipe-less case above. It has
-      // to read as "not asked" rather than "asked and fine".
+      // asked=0 when there was no event to signal, which is the pipe-less case, or when the
+      // signal itself failed. It has to read as "not asked" rather than "asked and fine".
       const bool asked =
           remote60::native_poc::viewer::viewer_request_cancel(previous->second.cancelEvent);
       log_line(std::string("cancelling the viewer already open on this PC pid=") +
                std::to_string(previous->second.pid) + " asked=" + (asked ? "1" : "0"));
+
+      // If it could not be asked, the old viewer is still connecting -- and starting another one
+      // would leave two of them racing for the same host, which is the thing the cancel channel
+      // exists to prevent. So the replacement is refused instead, unless the old process has
+      // already gone on its own.
+      //
+      // Asked through the duplicated handle, not by reopening the pid: a pid that has come round
+      // again would answer about a stranger.
+      //
+      // NOT TerminateProcess. That right is not needed here and killing a viewer that may have a
+      // established session is a worse outcome than declining to start a second one.
+      if (!asked && previous->second.process &&
+          WaitForSingleObject(previous->second.process, 0) == WAIT_TIMEOUT) {
+        log_line(std::string("replacement refused pid=") +
+                 std::to_string(previous->second.pid) + " reason=uncancellable");
+        post_status("error",
+                    "이 PC 에 이미 연결 중인 세션이 있어 새로 시작할 수 없습니다. "
+                    "기존 창을 닫아 주세요.");
+        return;   // the slot stays; handle_viewer_exit clears it when that viewer ends
+      }
+
       if (previous->second.cancelEvent) CloseHandle(previous->second.cancelEvent);
+      if (previous->second.process) CloseHandle(previous->second.process);
       gViewerByHost.erase(previous);
     }
   }
@@ -1181,7 +1208,15 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
              "it cannot be called off when replaced");
   }
   cancelEvent = remote60::native_poc::viewer::viewer_cancel_slot_handle(pipeOk, cancelEvent);
-  gViewerByHost[request.hostId] = ViewerCancelSlot{pi.dwProcessId, cancelEvent};
+  // SYNCHRONIZE only: enough to ask whether it is still running, not enough to end it.
+  HANDLE liveness = nullptr;
+  if (!DuplicateHandle(GetCurrentProcess(), pi.hProcess, GetCurrentProcess(), &liveness,
+                       SYNCHRONIZE, FALSE, 0)) {
+    liveness = nullptr;
+    log_line("could not duplicate the viewer process handle; a replacement will not be able "
+             "to tell whether this one is still running");
+  }
+  gViewerByHost[request.hostId] = ViewerCancelSlot{pi.dwProcessId, cancelEvent, liveness};
   cancelEvent = nullptr;  // the map owns it now
 
   // Watched rather than forgotten: when the session window closes the list has to become usable

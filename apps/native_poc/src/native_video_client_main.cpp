@@ -51,6 +51,10 @@ int main(int argc, char** argv) {
   // value. Nothing is opened here: an unnamed event has no name to open, which is the point --
   // the earlier named one could be signalled by any process in the session that knew a pid.
   //
+  // The check that follows asks only whether the number is a valid handle in this process. It
+  // does not prove the handle is an event, nor that it came from the shell -- it rules out
+  // waiting on a number that is nothing, which is the case that actually turns up.
+  //
   // The value is ASCII digits, so it converts without needing the viewer's wide-string
   // helpers, which live in the shell rather than here.
   HANDLE cancelEvent = nullptr;

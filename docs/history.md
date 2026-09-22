@@ -12352,3 +12352,18 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
   ⚠️ 첫 시도에서 백슬래시 변이가 **통과했다**. 내 반례가 종료코드만 봤기 때문인데, 문자열 거부를 빼도 그 경로는 **뒷단 실경로 검사**가 "outside the worktree" 로 막는다 — 이 픽스처의 우연이지 가드가 일한 게 아니다. **어느 거부가 발동했는지**(`error:backslash`)를 단언하도록 고친 뒤에야 잡힌다. 지적자가 미리 경고한 바로 그 지점이다.
 - 제품/테스트/문서: 제품 **무변경** / 자동화(`gnlink_release.sh`, `gnlink_release_test.sh`) / 문서(이 항목, `구현계획.md` 배포 자동화 절).
 - 실서명·실게시 0회.
+
+### 2026-09-23 C2 F1 r4 — 취소하지 못한 채로 갈아치우고 있었다
+
+- Codex FINAL 지적: `begin_session` 이 `asked=0`(이벤트 없음 또는 `SetEvent` 실패)이어도 **로그만 남기고 슬롯을 지운 뒤 새 뷰어를 띄웠다**. 구 뷰어는 계속 connect 를 돌려 늦은 HelloAck 를 받아들일 수 있으니, **fence 가 없는 상태로 두 뷰어가 같은 호스트를 두고 경쟁**한다 — 취소 채널이 없는 바로 그 경로에서 F1 의 요구가 무효가 됐다.
+- 고침: 슬롯에 **`SYNCHRONIZE` 복제 핸들**을 보관하고(pid 로 다시 여는 것은 재사용된 pid 에 대해 남의 이야기를 한다), `asked=0` 이면 **살아 있는지 물어** 죽었으면 진행하고 **살아 있으면 교체를 거부**한다 — 기동 0, error 문구, 슬롯 유지(뷰어가 끝나면 `handle_viewer_exit` 가 지운다). **`TerminateProcess` 는 쓰지 않는다**: 확립된 세션을 죽이는 편이 두 번째를 안 띄우는 것보다 나쁘다.
+- 검증은 **복제 루프가 아니라 실제 `begin_session`** 을 부른다. 선행 뷰어는 진짜 살아 있는 프로세스이고 진짜 `SYNCHRONIZE` 핸들이다 — 그게 판정이 실제로 읽는 것이다. 3케이스: 이벤트 없음 → **거부·기동 0·슬롯 유지** / `SetEvent` 실패(핸들을 미리 닫아 무효화) → **거부** / 선행이 **이미 죽었으면 → 진행하고 새 뷰어가 실제로 뜬다**. 각 케이스에서 **같은 호스트 살아 있는 뷰어 ≤1**.
+- ⚠️ **변이가 또 한 번 통과했고 또 내 테스트 탓이었다**: "죽은 선행은 죽은 것으로 읽힌다" 를 **내 쪽 `WaitForSingleObject` 로** 확인하고 있었다 — 그건 테스트에 대한 진술이지 `begin_session` 에 대한 진술이 아니다. liveness 확인을 없앤 변이가 그대로 통과했다. `begin_session` 을 부르고 **새 뷰어가 실제로 떴는지**를 보도록 바꾼 뒤에 잡힌다.
+- 변이 2건: 거부 분기 제거 → **2 FAIL** · liveness 확인 제거 → **2 FAIL**.
+- 표현 정정 2건(둘 다 내가 과하게 적었던 것):
+  · `GetHandleInformation` 은 **이 프로세스의 유효 핸들인지**만 말한다. 이벤트라는 증명도, 상속 출처의 증명도 아니다. 걸러내는 것은 "아무것도 아닌 숫자" 뿐이다.
+  · `PROCESS_DUP_HANDLE` 과 `PROCESS_TERMINATE` 는 **다른 권한**이다. "같은 권한이면 TerminateProcess 가 된다" 고 적었는데 틀렸다. 맞는 말은 "같은 사용자 컨텍스트에서 둘 다 얻을 수 있고, DUP_HANDLE 로 취소할 위치에 있는 쪽은 대개 TERMINATE 도 얻는다" 이다.
+- 부수: 이 테스트가 띄운 뷰어를 스스로 정리하게 했다. 취소 신호는 connect 가 끝나면 감시자가 멈춰 닿지 않으므로(설계대로), **테스트가 자기 프로세스를** 끝낸다 — 안 그러면 `GNLinkViewer.exe` 를 붙잡고 있어 다음 링크가 실패한다(실제로 한 번 실패했다).
+- 검증: `client_recovery_ui_test` **ALL PASS**(+8 단언) · 전량 빌드 0 에러 · `viewer_cancel_e2e` 30/0 · `directory_retry` 122/0 · `picker_empty_state` 24/0.
+- 제품/테스트/문서: 제품(`client_shell_main.cpp`, `viewer_cancel_channel.hpp`, `native_video_client_main.cpp`) / 테스트(`client_recovery_ui_test.cpp`) / 문서(이 항목, `구현계획.md` C2 F1 절).
+- 설치본·게시 없음.

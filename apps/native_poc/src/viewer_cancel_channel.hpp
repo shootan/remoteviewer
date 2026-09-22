@@ -25,8 +25,14 @@
 //
 // What this does NOT defend against, said plainly so nobody reads more into it than is there:
 // a process running as the SAME USER that holds PROCESS_DUP_HANDLE on the shell can duplicate
-// this handle out and signal it. That is outside the threat model because the same right lets
-// it call TerminateProcess on the viewer, which is strictly worse and needs no handle at all.
+// this handle out and signal it.
+//
+// That is outside the threat model, but not for the reason first written here. PROCESS_DUP_HANDLE
+// and PROCESS_TERMINATE are DIFFERENT rights -- having one does not grant the other, and saying
+// "the same right lets it call TerminateProcess" was wrong. What is true: both are obtainable in
+// the same user context, and something positioned to open the shell with DUP_HANDLE can
+// generally obtain TERMINATE as well. So this buys an attacker nothing they could not get more
+// directly.
 // The thing that was wrong before was different in kind: a NAMED object with default security
 // needs no rights over anybody -- only a pid, which is public.
 //
@@ -71,7 +77,11 @@ inline std::wstring viewer_cancel_handle_arg(HANDLE event) {
  * handle value is how a viewer would block on something that is not its business, or be
  * cancelled by whatever happened to be at that slot.
  *
- * GetHandleInformation is the cheap way to ask "is this mine". A viewer with no usable
+ * GetHandleInformation answers one question and only one: is this a valid handle in this
+ * process. It does NOT say the handle is an event, and it does NOT say it came from the shell
+ * by inheritance -- a viewer handed the number of some other handle it happens to own would
+ * pass this check. What it rules out is waiting on a number that is nothing at all, which is
+ * the case that actually arrives. A viewer with no usable
  * handle connects exactly as it did before any of this existed; it simply cannot be called
  * off.
  */
